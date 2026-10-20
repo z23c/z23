@@ -44,6 +44,19 @@ static const char *tgs_wrap_command(const char *command, char *buf,
 }
 #endif
 
+/* These fixtures need real executables; Darwin keeps them under /usr/bin. */
+static const char *tgs_fixture_executable(const char *usr, const char *bin)
+{
+#if defined(_WIN32)
+    /* Commands run through MSYS sh; native access cannot resolve its paths. */
+    (void)usr;
+    return bin;
+#else
+    if (access(usr, X_OK) == 0) return usr;
+    return access(bin, X_OK) == 0 ? bin : NULL;
+#endif
+}
+
 static int capture_command(const char *command, char *out, size_t cap)
 {
     if (!command || !out || cap == 0)
@@ -1366,6 +1379,8 @@ static int test_runner_exact_selection(void)
 {
     int failures = 0;
     TEST("test group selector: runner exact mode executes exactly one id") {
+        const char *true_bin = tgs_fixture_executable("/usr/bin/true", "/bin/true");
+        ASSERT(true_bin != NULL);
         /* The make -n dry run below prints the full out-of-date recipe
          * chain, and that chain's SIZE is a property of the CHECKOUT's build
          * state, not of the seam under test: invoked from a parent make that
@@ -1578,10 +1593,10 @@ static int test_runner_exact_selection(void)
         n = snprintf(command, sizeof(command),
                      "make -n t-fast-exact ONLY=api "
                      "TEST_PARALLEL_ARGS= "
-                     "TEST_PARALLEL_FAST_CANDIDATE=/bin/true "
-                     "TEST_PARALLEL_FAST_ACTIVE=/bin/true "
+                     "TEST_PARALLEL_FAST_CANDIDATE=%s "
+                     "TEST_PARALLEL_FAST_ACTIVE=%s "
                      "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
-                     zcl_build_source_id_sha256(),
+                     true_bin, true_bin, zcl_build_source_id_sha256(),
                      zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         rc = capture_command_ends(command, head, sizeof(head), tail,
@@ -1595,10 +1610,10 @@ static int test_runner_exact_selection(void)
         n = snprintf(command, sizeof(command),
                      "make -n t-fast-exact ONLY=api_missing "
                      "TEST_PARALLEL_ARGS= "
-                     "TEST_PARALLEL_FAST_CANDIDATE=/bin/true "
-                     "TEST_PARALLEL_FAST_ACTIVE=/bin/true "
+                     "TEST_PARALLEL_FAST_CANDIDATE=%s "
+                     "TEST_PARALLEL_FAST_ACTIVE=%s "
                      "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
-                     zcl_build_source_id_sha256(),
+                     true_bin, true_bin, zcl_build_source_id_sha256(),
                      zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         /* The refusal is a parse-time $(error): make stops before printing
@@ -1640,25 +1655,27 @@ static int test_exact_default_parallel_jobs(void)
 {
     int failures = 0;
     TEST("t-fast-exact recursion defaults to -j only when make got no -j") {
+        const char *true_bin = tgs_fixture_executable("/usr/bin/true", "/bin/true");
+        ASSERT(true_bin != NULL);
         char command[1024], line[512];
         int n = snprintf(command, sizeof(command),
             "env -u MAKEFLAGS -u MFLAGS make -n t-fast-exact ONLY=api "
-            "TEST_PARALLEL_ARGS= TEST_PARALLEL_FAST_CANDIDATE=/bin/true "
-            "TEST_PARALLEL_FAST_ACTIVE=/bin/true "
+            "TEST_PARALLEL_ARGS= TEST_PARALLEL_FAST_CANDIDATE=%s "
+            "TEST_PARALLEL_FAST_ACTIVE=%s "
             "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1 | "
             "grep 'make --no-print-directory.*t-fast-exact-locked'",
-            zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+            true_bin, true_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, line, sizeof(line)) == 0);
         ASSERT(strstr(line, "--no-print-directory -j") != NULL);
 
         n = snprintf(command, sizeof(command),
             "env -u MAKEFLAGS -u MFLAGS make -n -j3 t-fast-exact ONLY=api "
-            "TEST_PARALLEL_ARGS= TEST_PARALLEL_FAST_CANDIDATE=/bin/true "
-            "TEST_PARALLEL_FAST_ACTIVE=/bin/true "
+            "TEST_PARALLEL_ARGS= TEST_PARALLEL_FAST_CANDIDATE=%s "
+            "TEST_PARALLEL_FAST_ACTIVE=%s "
             "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1 | "
             "grep 'make --no-print-directory.*t-fast-exact-locked'",
-            zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+            true_bin, true_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, line, sizeof(line)) == 0);
         ASSERT(strstr(line, "t-fast-exact-locked") != NULL);
@@ -1672,6 +1689,9 @@ static int test_exact_verifier_prerequisites(void)
 {
     int failures = 0;
     TEST("exact storage selection avoids verifier; consumer ensure honors platform support") {
+        const char *true_bin = tgs_fixture_executable("/usr/bin/true", "/bin/true");
+        const char *false_bin = tgs_fixture_executable("/usr/bin/false", "/bin/false");
+        ASSERT(true_bin != NULL && false_bin != NULL);
         char command[4096], out[4096], root[256], stamp[320], fresh[160];
 #if defined(_WIN32)
         /* No qualified package verifier: Make deliberately does no work. */
@@ -1687,10 +1707,10 @@ static int test_exact_verifier_prerequisites(void)
         int n = snprintf(command, sizeof(command),
             "env -u ZCL_CHECKOUT_LOCK_HELD make --no-print-directory -qp help "
             "EXACT_ONLY_MATCHED=test_zcode_store "
-            "TEST_PARALLEL_FAST_CANDIDATE=/bin/true "
+            "TEST_PARALLEL_FAST_CANDIDATE=%s "
             "BUILD_SOURCE_RECORD='%s 1 %s' 2>/dev/null | "
             "sed -n '/^t-fast-exact-locked: /p'",
-            zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+            true_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, out, sizeof(out)) == 0);
         ASSERT(strstr(out, "t-fast-exact-locked:") != NULL);
@@ -1705,9 +1725,9 @@ static int test_exact_verifier_prerequisites(void)
         ASSERT(tgs_write_file(stamp, fresh));
         n = snprintf(command, sizeof(command),
             "make --no-print-directory dev-package-verifier-ensure "
-            "DEV_PACKAGE_VERIFY_BIN=/bin/true DEV_PACKAGE_VERIFY_ENSURE_STAMP='%s' "
-            "MAKE=/bin/false BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
-            stamp, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+            "DEV_PACKAGE_VERIFY_BIN=%s DEV_PACKAGE_VERIFY_ENSURE_STAMP='%s' "
+            "MAKE=%s BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
+            true_bin, stamp, false_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, out, sizeof(out)) == 0);
         ASSERT(tgs_write_file(stamp, "stale source identity\n"));
@@ -1716,8 +1736,8 @@ static int test_exact_verifier_prerequisites(void)
         n = snprintf(command, sizeof(command),
             "make --no-print-directory dev-package-verifier-ensure "
             "DEV_PACKAGE_VERIFY_BIN='%s/missing' DEV_PACKAGE_VERIFY_ENSURE_STAMP='%s' "
-            "MAKE=/bin/false BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
-            root, stamp, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+            "MAKE=%s BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
+            root, stamp, false_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, out, sizeof(out)) == rebuild_rc);
         ASSERT(test_rm_rf_recursive(root) == 0);
@@ -2151,6 +2171,100 @@ static int tgs_state_probe(void)
     return ok ? 0 : 1;
 }
 
+static bool tgs_retry_first_retained(const char *root, const char *out)
+{
+    const char *at = strstr(out, "first_log=");
+    char relative[256], path[PATH_MAX + 256], text[8192];
+    if (!at || sscanf(at, "first_log=%255s", relative) != 1) return false;
+    int n = snprintf(path, sizeof(path), "%s/%s", root, relative);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    size_t used = fread(text, 1, sizeof(text) - 1, f);
+    bool ok = !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    text[used] = 0;
+    return ok && strstr(text, "RETRY-EVIDENCE-FIRST") != NULL;
+}
+
+static int tgs_retry_assertions(const char *out, int rc, unsigned count,
+                                bool read_ok, bool rename_failure, bool retained)
+{
+    int failures = 0;
+    TEST("runner: both retry captures remain observable") {
+        ASSERT_EQ(rc, 1);
+        ASSERT(read_ok);
+        ASSERT_EQ(count, 2u);
+        ASSERT(strstr(out, "RETRY-EVIDENCE-RETRY") != NULL);
+        ASSERT(strstr(out, "RETRY-EVIDENCE-FIRST") != NULL);
+        ASSERT(strstr(out, rename_failure ? "RETRY-FIRST-PRESERVE-FAILED"
+                                         : "RETRY-FIRST-PRESERVED") != NULL);
+        ASSERT(rename_failure || retained);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int tgs_retry_case(const char *mode, bool rename_failure)
+{
+    int failures = 0;
+    TEST("runner: retry retains both attempt diagnostics") {
+        static char out[1024 * 1024];
+        char root[PATH_MAX], exe[PATH_MAX], command[3 * PATH_MAX];
+        char count_path[PATH_MAX + 32];
+        test_make_tmpdir(root, sizeof(root), "tgs_retry", "evidence");
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        int n = snprintf(command, sizeof(command),
+            "cd '%s' && '%s' --jobs=2 --verbose --no-cache "
+            "%s --exact=test_hex_codec 2>&1", root, exe, mode);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        int rc = capture_command(command, out, sizeof(out));
+        n = snprintf(count_path, sizeof(count_path), "%s/retry-evidence-count", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(count_path));
+        FILE *f = fopen(count_path, "r");
+        unsigned count = 0;
+        bool read_ok = f && fscanf(f, "%u", &count) == 1;
+        if (f && fclose(f) != 0) read_ok = false;
+        bool retained = tgs_retry_first_retained(root, out);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        failures += tgs_retry_assertions(out, rc, count, read_ok, rename_failure, retained);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_runner_retry_evidence(void)
+{
+    return tgs_retry_case("--retry-evidence-probe", false) +
+           tgs_retry_case("--retry-evidence-unobserved", false) +
+           tgs_retry_case("--retry-evidence-rename-failure", true);
+}
+
+static int test_runner_retry_probe_bounds(void)
+{
+    int failures = 0;
+    TEST("runner: synthetic retry fixture refuses qualifying modes") {
+        char exe[PATH_MAX], command[3 * PATH_MAX], out[8192];
+        const char *options[] = {
+            "--exact=test_hex_codec",
+            "--no-cache --exact=test_hex_codec,test_codec_cursor",
+            "--no-cache --exact=test_hex_codec --list",
+            "--no-cache --exact=test_hex_codec --cache-probe-only",
+            "--no-cache --exact=test_hex_codec --cache"
+        };
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        for (size_t i = 0; i < sizeof(options) / sizeof(options[0]); i++) {
+            int n = snprintf(command, sizeof(command),
+                "'%s' --retry-evidence-probe %s 2>&1", exe, options[i]);
+            ASSERT(n > 0 && (size_t)n < sizeof(command));
+            ASSERT_EQ(capture_command(command, out, sizeof(out)), 2);
+            ASSERT(strstr(out, "fixture requires --no-cache") != NULL);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_runner_private_state(void)
 {
     int failures = 0;
@@ -2249,6 +2363,8 @@ int test_test_group_selector(void)
     if (g_tgs_state_probe) return tgs_state_probe();
     int failures = 0;
     failures += test_runner_private_state();
+    failures += test_runner_retry_evidence();
+    failures += test_runner_retry_probe_bounds();
     failures += test_runner_state_setup_refuses();
     failures += test_exact_default_parallel_jobs();
     failures += test_exact_verifier_prerequisites();

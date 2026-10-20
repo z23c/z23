@@ -2762,10 +2762,11 @@ static int tc_load_flaky_excerpt(void)
                                                     "", 5, 10) : 1;
     if (out) fclose(out);
     TC_CHECK("a missing first-attempt log prints nothing", none == 0);
-    TC_CHECK("the runner prints the excerpt on every LOAD-FLAKY line",
+    TC_CHECK("the runner preserves an excerpt before every alone retry",
              file_contains("tests/harness/src/test_parallel.c",
-                           "print_load_flaky_first_excerpt(g_groups[i].name, "
-                           "preserved_log);"));
+                           "print_load_flaky_first_excerpt(name, first);") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "preserve_retry_first(g_groups[i].name, first_log, preserved_log);"));
     (void)unlink(log);
     (void)unlink(cap);
     return failures;
@@ -2823,6 +2824,35 @@ static int tc_observation_store_key_invariance(void)
         }
     }
     tc_env_restore(&saved, "ZCL_DEV_OBSERVATION_STORE");
+    return failures;
+}
+
+static int testcache_retry_result_contracts(void)
+{
+    int failures = 0;
+    TC_CHECK("fail-then-fail: a group that fails again alone stays FAIL and "
+             "both attempt logs remain available",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "run_group_exclusive(i, parent_pid, results, timeout_secs, verbose,") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "RETRY-FIRST-PRESERVED %s first_log=%s") &&
+             !file_contains("tests/harness/src/test_parallel.c",
+                            "unlink(preserved_log);"));
+    TC_CHECK("fail-then-fail records flaky_first_wedged too, so the "
+             "failed-groups report can still say a deadline kill was "
+             "retried alone instead of reading like a plain FAIL/signal",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "results[i].flaky_first_wedged = first_wedged;\n"
+                           "        }\n"));
+    TC_CHECK("still-UNOBSERVED or failed alone: the alone attempt's own "
+             "result stands, the existing FAIL/UNOBSERVED accounting applies",
+             file_contains("tests/harness/src/test_parallel.c",
+                           "if (alone_pass && alone_unobserved == 0) {") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "results[i].load_unobserved = 1;") &&
+             file_contains("tests/harness/src/test_parallel.c",
+                           "            }\n            continue;\n        }\n\n"
+                           "        if (alone_pass) {"));
     return failures;
 }
 
@@ -3549,19 +3579,7 @@ int test_testcache(void)
              file_contains("tests/harness/src/test_parallel.c",
                            "printf(\"LOAD-FLAKY %s first=%s alone=PASS "
                            "first_log=%s \""));
-    TC_CHECK("fail-then-fail: a group that fails again alone stays FAIL and "
-             "its preserved first-attempt log is discarded, not the new one",
-             file_contains("tests/harness/src/test_parallel.c",
-                           "/* Still FAIL: the alone log is the one that "
-                           "matters now. */") &&
-             file_contains("tests/harness/src/test_parallel.c",
-                           "unlink(preserved_log);"));
-    TC_CHECK("fail-then-fail records flaky_first_wedged too, so the "
-             "failed-groups report can still say a deadline kill was "
-             "retried alone instead of reading like a plain FAIL/signal",
-             file_contains("tests/harness/src/test_parallel.c",
-                           "results[i].flaky_first_wedged = first_wedged;\n"
-                           "            if (preserved_log[0]) {"));
+    failures += testcache_retry_result_contracts();
     {
         static const char *const deadline_report_pins[] = {
             "print_failed_group_prefix(const char *name,",
@@ -3632,13 +3650,6 @@ int test_testcache(void)
              file_contains("tests/harness/src/test_parallel.c",
                            "printf(\"LOAD-UNOBSERVED %s first=UNOBSERVED "
                            "alone=OBSERVED \""));
-    TC_CHECK("still-UNOBSERVED or failed alone: the alone attempt's own "
-             "result stands, the existing FAIL/UNOBSERVED accounting applies",
-             file_contains("tests/harness/src/test_parallel.c",
-                           "/* Still can't observe it (or it failed "
-                           "outright) alone: the\n"
-                           "                 * alone attempt's own result "
-                           "is the honest one — keep it. */"));
     TC_CHECK("a load-unobserved PASS is never handed to the verdict store, "
              "unlike an ordinary load-flaky PASS",
              file_contains("tests/harness/src/test_parallel.c",

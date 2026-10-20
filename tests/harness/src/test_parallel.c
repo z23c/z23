@@ -803,7 +803,89 @@ static bool activate_proof_contract(size_t idx)
 }
 
 static bool g_state_isolation_probe;
+static unsigned g_retry_evidence_probe;
 extern void zcl_test_group_selector_state_probe(bool enabled);
+
+static bool retry_probe_parse(const char *arg)
+{
+    static const char *const flags[] = {
+        "--retry-evidence-probe", "--retry-evidence-unobserved",
+        "--retry-evidence-rename-failure"
+    };
+    for (unsigned i = 0; i < 3; i++) {
+        if (strcmp(arg, flags[i]) == 0) {
+            g_retry_evidence_probe = i + 1;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool retry_probe_options(int argc, char **argv)
+{
+    static const char *const allowed[] = {
+        "--jobs=2", "--verbose", "--no-cache", "--exact=test_hex_codec",
+        "--retry-evidence-probe", "--retry-evidence-unobserved",
+        "--retry-evidence-rename-failure"
+    };
+    unsigned seen[7] = {0};
+    for (int i = 1; i < argc; i++) {
+        size_t j = 0;
+        while (j < 7 && strcmp(argv[i], allowed[j]) != 0) j++;
+        if (j == 7 || seen[j]++) return false;
+    }
+    return seen[2] == 1 && seen[3] == 1 &&
+        seen[4] + seen[5] + seen[6] == 1 && !getenv("ZCL_TEST_CACHE_DUMP");
+}
+
+static bool retry_probe_admit(int argc, char **argv)
+{
+    if (!g_retry_evidence_probe) return true;
+    if (!retry_probe_options(argc, argv)) {
+        fprintf(stderr, "retry evidence fixture requires --no-cache and exact test_hex_codec only\n");
+        return false;
+    }
+    printf("SYNTHETIC RETRY EVIDENCE FIXTURE: forced failure, no verdict reuse\n");
+    return true;
+}
+
+static int retry_probe_exit(size_t failed, int diverged, int refused)
+{
+    return (!g_retry_evidence_probe && failed == 0 && diverged == 0 &&
+            refused == 0) ? 0 : 1;
+}
+
+static bool retry_probe_block_rename(const char *out_path)
+{
+    char blocked[PATH_MAX];
+    int n = snprintf(blocked, sizeof(blocked), "%s.first", out_path);
+    return n >= 0 && (size_t)n < sizeof(blocked) &&
+           platform_directory_create(blocked, 0700) == 0;
+}
+
+static int retry_evidence_probe(const char *out_path)
+{
+    FILE *f = fopen("retry-evidence-count", "r");
+    unsigned count = 0;
+    if (f) {
+        bool read_ok = fscanf(f, "%u", &count) == 1;
+        if (fclose(f) != 0) read_ok = false;
+        if (!read_ok || count >= 2) return 2;
+    }
+    f = fopen("retry-evidence-count", "w");
+    if (!f) return 2;
+    bool ok = fprintf(f, "%u\n", count + 1) > 0;
+    if (fclose(f) != 0) ok = false;
+    printf("RETRY-EVIDENCE-%s\n", count == 0 ? "FIRST" : "RETRY");
+    if (g_retry_evidence_probe == 3 && count == 0) {
+        if (!retry_probe_block_rename(out_path)) return 2;
+    }
+    if (g_retry_evidence_probe == 2 && ok) {
+        printf("UNOBSERVED (synthetic retry evidence fixture)\n");
+        return 0;
+    }
+    return ok ? 1 : 2;
+}
 
 static void child_run(size_t idx, const char *out_path, const char *state_path,
                       bool activate_proof_contracts)
@@ -862,7 +944,9 @@ static void child_run(size_t idx, const char *out_path, const char *state_path,
     ecc_verify_init();
     event_log_init();
 
-    int failures = g_groups[idx].fn();
+    int failures = g_retry_evidence_probe &&
+        strcmp(g_groups[idx].name, "test_hex_codec") == 0
+        ? retry_evidence_probe(out_path) : g_groups[idx].fn();
 
     ecc_verify_destroy();
     ecc_stop();
@@ -890,6 +974,12 @@ static bool child_dispatch(int argc, char **argv)
             proof = true;
         else if (strcmp(argv[i], "--state-isolation-probe") == 0)
             g_state_isolation_probe = true;
+        else if (strcmp(argv[i], "--retry-evidence-probe") == 0)
+            g_retry_evidence_probe = 1;
+        else if (strcmp(argv[i], "--retry-evidence-unobserved") == 0)
+            g_retry_evidence_probe = 2;
+        else if (strcmp(argv[i], "--retry-evidence-rename-failure") == 0)
+            g_retry_evidence_probe = 3;
     }
     if (idx < 0) return false;
     if (!out || !state || (unsigned long)idx >= (unsigned long)g_num_groups) {
@@ -957,10 +1047,13 @@ static int child_spawn(size_t idx, const char *out_path,
     char cmd[3 * PATH_MAX + 320];
     int len = snprintf(cmd, sizeof(cmd),
                        "\"%s\" --child-run=%zu \"--child-out=%s\" "
-                       "\"--child-state=%s\"%s%s",
+                       "\"--child-state=%s\"%s%s%s",
                        exe, idx, out_path, state_path,
                        activate_proof_contracts ? " --child-proof" : "",
-                       g_state_isolation_probe ? " --state-isolation-probe" : "");
+                       g_state_isolation_probe ? " --state-isolation-probe" : "",
+                       g_retry_evidence_probe == 1 ? " --retry-evidence-probe" :
+                       g_retry_evidence_probe == 2 ? " --retry-evidence-unobserved" :
+                       g_retry_evidence_probe == 3 ? " --retry-evidence-rename-failure" : "");
     if (len < 0 || (size_t)len >= sizeof(cmd)) {
         fprintf(stderr, "test_parallel: child command line too long\n");
         return -1;
@@ -1595,6 +1688,22 @@ static void print_load_flaky_first_excerpt(const char *name,
     if (shown == 0) printf("  first| (empty or unreadable)\n");
 }
 
+static void preserve_retry_first(const char *name, const char *first,
+                                  char preserved[144])
+{
+    if (!first[0]) return;
+    print_load_flaky_first_excerpt(name, first);
+    snprintf(preserved, 144, "%s.first", first);
+    if (rename(first, preserved) != 0) {
+        printf("RETRY-FIRST-PRESERVE-FAILED %s path=%s error=%s; "
+               "first attempt excerpt retained above\n", name, first, strerror(errno));
+        preserved[0] = '\0';
+    } else {
+        printf("RETRY-FIRST-PRESERVED %s first_log=%s\n", name, preserved);
+    }
+    fflush(stdout);
+}
+
 static void rerun_load_flaky_groups(struct group_result *results,
                                     pid_t parent_pid, int timeout_secs,
                                     bool verbose, bool activate_proof_contracts)
@@ -1615,12 +1724,7 @@ static void rerun_load_flaky_groups(struct group_result *results,
         char first_log[128];
         snprintf(first_log, sizeof(first_log), "%s", results[i].out_path);
         char preserved_log[144] = "";
-        if (first_log[0]) {
-            snprintf(preserved_log, sizeof(preserved_log), "%s.first",
-                     first_log);
-            if (rename(first_log, preserved_log) != 0)
-                preserved_log[0] = '\0'; /* best effort: keep going without it */
-        }
+        preserve_retry_first(g_groups[i].name, first_log, preserved_log);
 
         printf("[rerun-alone] [%zu] %s — first attempt %s under the shared "
                "pool; retrying alone with the pool idle (at most once)\n",
@@ -1651,10 +1755,6 @@ static void rerun_load_flaky_groups(struct group_result *results,
                       g_groups[i].name, results[i].flaky_first_log,
                       results[i].out_path[0] ? results[i].out_path : "(none)");
                 fflush(stdout);
-            } else if (preserved_log[0]) {
-                /* Still can't observe it (or it failed outright) alone: the
-                 * alone attempt's own result is the honest one — keep it. */
-                unlink(preserved_log);
             }
             continue;
         }
@@ -1670,17 +1770,12 @@ static void rerun_load_flaky_groups(struct group_result *results,
                   g_groups[i].name, first_wedged ? "WEDGED" : "FAIL",
                   results[i].flaky_first_log,
                   results[i].out_path[0] ? results[i].out_path : "(none)");
-            print_load_flaky_first_excerpt(g_groups[i].name, preserved_log);
             fflush(stdout);
         } else {
             /* Still a hard failure alone too: record whether the first
              * attempt was a deadline kill so the failed-groups report can
              * say "timed out ... retried alone" instead of a plain FAIL. */
             results[i].flaky_first_wedged = first_wedged;
-            if (preserved_log[0]) {
-                /* Still FAIL: the alone log is the one that matters now. */
-                unlink(preserved_log);
-            }
         }
     }
 }
@@ -2528,6 +2623,8 @@ int main(int argc, char **argv)
             verbose = true;
         } else if (strcmp(argv[i], "--state-isolation-probe") == 0) {
             g_state_isolation_probe = true;
+        } else if (retry_probe_parse(argv[i])) {
+            /* Internal fixture flags are validated together after parsing. */
         } else if (strcmp(argv[i], "--list") == 0) {
             list_only = true;
         } else if (strcmp(argv[i], "--list-build-needs") == 0) {
@@ -2592,6 +2689,7 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    if (!retry_probe_admit(argc, argv)) return 2;
     if (list_build_needs) return build_needs_list(only, only_exact);
     if (!cache_snapshot_selection_valid(cache_snapshot, changed_source_count,
                                         cli_cache)) {
@@ -3167,8 +3265,7 @@ int main(int argc, char **argv)
 
     free(slots);
     free(results);
-    return (failed_groups == 0 && audit_diverged == 0 &&
-            observation_refused == 0) ? 0 : 1;
+    return retry_probe_exit(failed_groups, audit_diverged, observation_refused);
 }
 
 /* The exact external-input denylist refuses cache reuse before any key or
