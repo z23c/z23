@@ -306,6 +306,11 @@ static enum plugin_dist_status pd_sign_release(
                   "--release-key is required: a hosting node serves only a signed release");
         return PLUGIN_DIST_ERR_RELEASE;
     }
+    /* A CLI process has no node boot to start the signing context. */
+    if (!ecc_start_once()) {
+        pd_detail(out->detail, sizeof(out->detail), "%s", "the signing context could not start");
+        return PLUGIN_DIST_ERR_RELEASE;
+    }
     uint8_t seed[PLUGIN_KEY_FILE_BYTES];
     enum plugin_status ks = plugin_key_load(rq->release_key, seed);
     if (ks != PLUGIN_OK) {

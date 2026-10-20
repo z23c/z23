@@ -375,6 +375,29 @@ z23 plugin call upper --stdin=abc          # run.stdout is "ABC"
 - Linux only: other hosts refuse with `PLUGIN_RUN_PLATFORM`; a host without
   Landlock and seccomp refuses with `PLUGIN_RUN_SANDBOX`.
 
+## Distributing a plugin over the package swarm
+
+`plugin publish` files an installed or packed generation in the datadir's
+package store as a signed content.v2 root; a hosting node serves it; on the
+receiver `plugin fetch` checks the delivered root out of the receiver's store
+and installs it as a new generation. Neither command switches `current` or runs
+anything, and both are never accepted from a mesh peer. See
+[PLUGIN_P2P_DIST_2026-10-20.md](../experiments/PLUGIN_P2P_DIST_2026-10-20.md).
+
+```sh
+z23 plugin publish upper --license-file=./LICENSE --spdx=MIT --release-key=./package.key --sequence=1
+z23 plugin fetch --root=<64hex> --name=upper [--allow-downgrade]
+```
+
+`fetch` refuses, each with its own code: `PLUGIN_DIST_NOT_FETCHED` (root not in
+the datadir yet; a resumable download is recorded), `PLUGIN_DIST_ROOT_MISMATCH`,
+`PLUGIN_DIST_TRUNCATED`, `PLUGIN_DIST_SHAPE`, `PLUGIN_DIST_PUBLISHER_UNPINNED`
+(the signing key is not already in your `publisher_keys`),
+`PLUGIN_DIST_IMAGE_HASH` and `PLUGIN_DIST_DOWNGRADE` (a version lower than the
+installed current one, or one that cannot be compared; only the owner flag
+`--allow-downgrade` permits it). `publish` refuses `PLUGIN_DIST_SOURCE`,
+`PLUGIN_DIST_LICENSE`, `PLUGIN_DIST_RELEASE` and `PLUGIN_DIST_STORE`.
+
 ## Showing installed plugins in mesh status
 
 Off by default. With `-meshstatusplugins`, the signed capsule that `z23 ops
