@@ -138,6 +138,11 @@ enum { P11_BOOTSTRAP_PROBLEM = 1u, P11_NETWORK_DISABLED = 2u,
        P11_PERMISSION = 4u, P11_ADDRESS_IN_USE = 8u };
 struct p11_notice {
     bool readable, io_error, windowed, overlong, partial_tail;
+    bool publication, upload_http_refusal, upload_deferred;
+    off_t tail_start;
+    size_t tail_bytes;
+    const char *read_stage;
+    int read_errno;
     int percent;
     char stage[33];
     unsigned warnings, errors, categories;
@@ -167,9 +172,21 @@ static bool p11_stage_char(char c)
     return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_';
 }
 
+static void p11_rend_line(const char *line, struct p11_notice *notice)
+{
+    notice->publication |= strstr(line, "Uploaded hidden service descriptor (status 200") != NULL ||
+        strstr(line, "Uploading hidden service descriptor: finished with status 200") != NULL ||
+        strstr(line, "HS_DESC UPLOADED") != NULL;
+    notice->upload_http_refusal |= strstr(line,
+        "Uploading hidden service descriptor: http status ") != NULL;
+    notice->upload_deferred |= strstr(line, "can't upload its current descriptor:") != NULL ||
+        strstr(line, "can't upload its next descriptor:") != NULL;
+}
+
 static void p11_notice_line(const char *line, struct p11_notice *notice)
 {
     p11_notice_warning(line, notice);
+    p11_rend_line(line, notice);
     static const char marker[] = "[notice] Bootstrapped ";
     const char *p = strstr(line, marker);
     if (!p) return;
@@ -221,33 +238,54 @@ static struct p11_notice p11_notice_scan(FILE *file, size_t limit, bool windowed
     return notice;
 }
 
-static struct p11_notice p11_notice_read_window(const char *path, bool fresh,
-                                               bool head)
+static bool p11_notice_stat(int fd, struct stat *st, struct p11_notice *notice)
 {
-    struct p11_notice notice = {.percent = -1};
-    if (!fresh) return notice; /* Never mistake an earlier boot's log for this one. */
+    notice->read_stage = "stat";
+    if (fstat(fd, st) != 0) { notice->read_errno = errno; return false; }
+    notice->read_stage = "type";
+    if (!S_ISREG(st->st_mode) || st->st_size < 0) {
+        notice->read_errno = EINVAL; return false;
+    }
+    return true;
+}
+
+static struct p11_notice p11_notice_read_window(const char *path, bool fresh, bool head)
+{
+    struct p11_notice notice = {.percent = -1, .read_stage = "stale"};
+    if (!fresh) return notice;
+    notice.read_stage = "open";
     int fd = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
-    if (fd < 0) return notice;
+    if (fd < 0) { notice.read_errno = errno; return notice; }
     struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
+    if (!p11_notice_stat(fd, &st, &notice)) {
         close(fd); return notice;
     }
     off_t start = !head && st.st_size > (off_t)P11_NOTICE_BYTES
                      ? st.st_size - (off_t)P11_NOTICE_BYTES : 0;
     notice.windowed = start != 0;
-    if (lseek(fd, start, SEEK_SET) != start) { close(fd); return notice; }
+    notice.read_stage = "seek";
+    if (lseek(fd, start, SEEK_SET) != start) {
+        notice.read_errno = errno; close(fd); return notice;
+    }
     size_t limit = (size_t)(st.st_size - start);
     if (limit > P11_NOTICE_BYTES) limit = P11_NOTICE_BYTES;
+    notice.read_stage = "stream";
     FILE *file = fdopen(fd, "rb");
-    if (!file) { close(fd); return notice; }
+    if (!file) { notice.read_errno = errno; close(fd); return notice; }
     notice = p11_notice_scan(file, limit, notice.windowed);
-    if (fclose(file) != 0) notice.io_error = true;
+    notice.tail_start = start;
+    notice.tail_bytes = limit;
+    notice.read_stage = notice.io_error ? "scan" : "complete";
+    if (notice.io_error) notice.read_errno = EIO;
+    if (fclose(file) != 0) {
+        notice.io_error = true; notice.read_stage = "close";
+        notice.read_errno = errno;
+    }
     if (notice.io_error || notice.overlong) {
         notice.percent = -1; notice.stage[0] = '\0';
     }
     return notice;
 }
-
 static struct p11_notice p11_notice_read(const char *path, bool fresh)
 {
     return p11_notice_read_window(path, fresh, false);
@@ -274,6 +312,18 @@ static void p11_notice_report(const char *path, bool fresh)
     if (tail.windowed)
         p11_notice_emit(p11_notice_read_window(path, fresh, true), fresh, "head");
     p11_notice_emit(tail, fresh, "tail");
+}
+
+static void p11_rend_report(const char *path, bool fresh)
+{
+    struct p11_notice n = p11_notice_read(path, fresh);
+    printf("  publication diagnostic: fresh_log=%d fresh_offset=0 readable=%d "
+           "read_stage=%s read_errno=%d io_error=%d tail_start=%lld tail_bytes=%zu "
+           "windowed=%d overlong=%d partial_tail=%d publication_marker=%d "
+           "warning_marker=%d error_marker=%d upload_http_refusal=%d upload_deferred=%d\n",
+           fresh, n.readable, n.read_stage ? n.read_stage : "not-read", n.read_errno, n.io_error,
+           (long long)n.tail_start, n.tail_bytes, n.windowed, n.overlong,
+           n.partial_tail, n.publication, n.warnings != 0, n.errors != 0, n.upload_http_refusal, n.upload_deferred);
 }
 
 static int p11_notice_cases(const char *path)
@@ -332,6 +382,14 @@ static int p11_notice_tail_cases(const char *path)
     return failures;
 }
 
+static bool p11_notice_windows_valid(struct p11_notice head, struct p11_notice tail)
+{
+    return head.tail_start == 0 && head.tail_bytes == P11_NOTICE_BYTES &&
+        tail.tail_start > 0 && tail.tail_bytes == P11_NOTICE_BYTES &&
+        strcmp(head.read_stage, "complete") == 0 &&
+        strcmp(tail.read_stage, "complete") == 0;
+}
+
 static int p11_notice_head_case(const char *path)
 {
     FILE *file = fopen(path, "wb");
@@ -346,10 +404,72 @@ static int p11_notice_head_case(const char *path)
     struct p11_notice tail = p11_notice_read(path, true);
     int failures = !wrote || head.percent != 5 || tail.percent != -1 ||
         !tail.windowed || tail.warnings != 1 || tail.categories != 0;
+    if (!p11_notice_windows_valid(head, tail)) failures++;
     struct p11_notice known = {.percent = -1};
     p11_notice_line("[warn] Problem bootstrapping: private-endpoint.example", &known);
     if (known.warnings != 1 || known.categories != P11_BOOTSTRAP_PROBLEM)
         failures++;
+    return failures;
+}
+
+static bool p11_rend_case(const char *path, const char *text,
+                           bool publication, bool warning, bool error)
+{
+    if (!p11_notice_long_write(path, 0, text)) return false;
+    struct p11_notice n = p11_notice_read(path, true);
+    return n.readable && !n.io_error && n.publication == publication &&
+        (n.warnings != 0) == warning && (n.errors != 0) == error && n.tail_start == 0 &&
+        n.tail_bytes == strlen(text) && !p11_notice_read(path, false).readable;
+}
+
+static int p11_rend_tail_case(const char *path)
+{
+    if (!p11_notice_long_write(path, P11_NOTICE_BYTES + 1,
+                              "\n[warn] Upload failed\n")) return 1;
+    struct p11_notice n = p11_notice_read(path, true);
+    int failures = !n.windowed || n.tail_start <= 0 ||
+        n.tail_bytes != P11_NOTICE_BYTES || !n.warnings || n.publication || n.io_error;
+    if (unlink(path) != 0) return failures + 1;
+    n = p11_notice_read(path, true);
+    if (n.readable || n.read_errno != ENOENT) failures++;
+    return failures;
+}
+
+static int p11_rend_cases(const char *path)
+{
+    int failures = 0;
+    static const struct {
+        const char *text;
+        bool publication, warning, error;
+    } cases[] = {
+        {"[info] HS_DESC UPLOADED private.onion endpoint\n", true, false, false},
+        {"[warn] Upload failed private.onion endpoint\n", false, true, false},
+        {"[err] Upload failed\n", false, false, true},
+        {"[info] HS_DESC UPLOADED", false, false, false}
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        if (!p11_rend_case(path, cases[i].text, cases[i].publication,
+                           cases[i].warning, cases[i].error)) failures++;
+    return failures + p11_rend_tail_case(path);
+}
+
+static int p11_rend_error_cases(const char *path, const char *dir)
+{
+    int failures = 0;
+    struct p11_notice n;
+#if !defined(_WIN32)
+    n = p11_notice_read(dir, true);
+    if (n.readable || n.read_errno != EINVAL || strcmp(n.read_stage, "type")) failures++;
+#else
+    (void)dir;
+#endif
+    if (!p11_notice_long_write(path, 0,
+        "[warn] Uploading hidden service descriptor: http status 400 (rejected)\n"
+        "[info] Service hidden can't upload its current descriptor: deferred\n"
+        "[info] unrelated request finished with status 200\n")) return failures + 1;
+    n = p11_notice_read(path, true);
+    if (!n.readable || !n.upload_http_refusal || !n.upload_deferred ||
+        n.publication || strcmp(n.read_stage, "complete")) failures++;
     return failures;
 }
 
@@ -367,6 +487,8 @@ int test_onion_bootstrap_diagnostics(void)
     failures += p11_notice_cases(path);
     failures += p11_notice_tail_cases(path);
     failures += p11_notice_head_case(path);
+    failures += p11_rend_cases(path);
+    failures += p11_rend_error_cases(path, dir);
     bool wrote = p11_notice_long_write(path, 1024,
                                      "\n[notice] Bootstrapped 80% (ap_conn): Recent\n");
     struct p11_notice n = p11_notice_read(path, true);
@@ -746,6 +868,9 @@ int test_onion_bootstrap(void)
 
     char datadir[256];
     test_make_tmpdir(datadir, sizeof(datadir), "p11", "onion_bootstrap");
+    char rend_path[1024] = {0};
+    bool rend_fresh = tor_rend_log_path(datadir, rend_path, sizeof(rend_path)) &&
+                      p11_notice_fresh(rend_path);
     char notice_path[1024] = {0};
     bool notice_fresh = tor_log_path(datadir, notice_path, sizeof(notice_path)) &&
                         p11_notice_fresh(notice_path);
@@ -788,6 +913,7 @@ int test_onion_bootstrap(void)
 
     if (!ready) {
         failures += onion_finish_unobserved(notice_path, notice_fresh, addr, loadavg);
+        p11_rend_report(rend_path, rend_fresh);
         tor_integration_stop();
         p11_remove_tree(datadir);
         return failures;
