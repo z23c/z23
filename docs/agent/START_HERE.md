@@ -36,7 +36,8 @@ them:
    outside the unseal ritual in [`core/UNSEAL.md`](../../core/UNSEAL.md).
 3. Canonical datadirs: deleting, reindexing or hand-editing a live datadir.
 4. Unreviewed production code: deploying or promoting a build that is not
-   reviewed and landed. Restarts and reviewed upgrades are routine.
+   reviewed and landed, or running two deploys at once. Restarts and reviewed
+   upgrades are routine, one host at a time.
 
 Use private fixtures and isolated datadirs for tests. Stop and ask only at
 one of these boundaries; otherwise decide, record it and continue. The full
