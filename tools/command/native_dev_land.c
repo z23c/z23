@@ -2872,6 +2872,16 @@ static enum dl_proof dl_proof_stub_read(const char *stub, const char *wt,
                        "elapsed_ms_215489_idle_ms_213923");
         return DL_PROOF_FAILED;
     }
+#if defined(ZCL_TESTING)
+    /* A queued, never-claimed request of the given age, judged by the same
+     * idle-bound helper dl_proof_read applies to a real status. */
+    if (strcmp(stub, "idle_unclaimed") == 0 || strcmp(stub, "idle_fresh") == 0) {
+        (void)snprintf(detail, cap, "%s", "resident_proof_request_queued");
+        dl_proof_idle_note_append(strcmp(stub, "idle_fresh") == 0 ? 5 : 3219,
+                                  detail, cap);
+        return DL_PROOF_PENDING;
+    }
+#endif
     if (strcmp(stub, "watcher_absent") == 0)
         (void)snprintf(detail, cap, "%s", "resident_proof_watcher_absent");
     else if (strcmp(stub, "manual") == 0)
@@ -8716,6 +8726,28 @@ static void dl_resume_pending_watcher_kick(const struct dl_dirs *d,
 }
 #endif
 
+/* A queued proof request that no worker has claimed past the idle bound
+ * (the same documented bound the status note uses: ZCL_LAND_PROOF_IDLE_SEC,
+ * default 900 s) is not waiting for anyone: nothing runs `dev proof step`.
+ * Step only observes by design (it holds the exclusive step lock and must
+ * stay short; a proof builds a producer from the candidate and runs for
+ * minutes), so it does not run the proof. It names the exact command that
+ * does: PROOF_UNCLAIMED with next = `dev land drive {"prove":true}`, which
+ * is the one prove path. A worker that holds the request (running) or a
+ * fresh request carries no idle note, so this never starts a second proof. */
+static void dl_step_proof_unclaimed(const char *detail, struct zcl_command_reply *reply)
+{
+    static const char key[] = "proof_request_idle_age_s=";
+    const char *at = detail ? strstr(detail, key) : NULL;
+    if (!at) return;
+    (void)json_push_kv_str(&reply->data, "code", "PROOF_UNCLAIMED");
+    (void)json_push_kv_bool(&reply->data, "human_action_required", false);
+    (void)json_push_kv_int(&reply->data, "proof_request_idle_age_s",
+                           strtoll(at + sizeof(key) - 1, NULL, 10));
+    (void)zcl_command_reply_add_next(reply, "dev land drive", "{\"prove\":true}",
+                                     "no worker claimed the queued proof request; drive runs it");
+}
+
 /* Read the proof's own state for the in-flight request and act once.
  * Windows refuses step before entering this POSIX-only call graph. */
 [[maybe_unused]] static void dl_step_resume(const struct dl_dirs *d, struct dl_row *row,
@@ -8773,8 +8805,10 @@ static void dl_resume_pending_watcher_kick(const struct dl_dirs *d,
         dl_resume_pending_watcher_kick(d, row);
 #endif
         dl_window_tick(d, row);
-        if (dl_commit_or_report(d, row, false, reply, "proving"))
+        if (dl_commit_or_report(d, row, false, reply, "proving")) {
             dl_step_reply(reply, row, "proving");
+            dl_step_proof_unclaimed(detail, reply);
+        }
         return;
     }
     if (p != DL_PROOF_PASSED) {
@@ -10144,8 +10178,36 @@ static void dl_fence_send(const struct dl_dirs *d, const struct dl_dirs *next_di
 }
 #endif
 
-/* Caller holds step.lock. Definitive answers for both heads precede settlement. */
 #if !defined(_WIN32)
+/* One ancestry probe's verdict: git answers 0 (ancestor) or 1 (not); any
+ * other result is an error, e.g. an object missing from the checkout. */
+static const char *dl_fence_probe_word(int rc, char buf[24])
+{
+    if (rc == 0) return "ancestor";
+    if (rc == 1) return "not_ancestor";
+    (void)snprintf(buf, 24, "error_rc_%d", rc);
+    return buf;
+}
+
+/* FENCE_OBSERVATION_INCONSISTENT with the evidence naming which probe
+ * errored or disagreed, not only the observed sha. */
+static void dl_fence_inconsistent(const struct dl_dirs *next_dirs, const struct dl_fence *f,
+                                   const char *observed, int old_contains, int new_contains,
+                                   struct zcl_command_reply *reply)
+{
+    char a[24], b[24], c[24], evidence[256];
+    int chain = dl_fence_ancestor(next_dirs, f->observed, observed);
+    dl_fence_blocked(reply, "FENCE_OBSERVATION_INCONSISTENT", f);
+    (void)snprintf(evidence, sizeof(evidence),
+                   "observed=%.12s old_head=%.12s probe=%s new_tip=%.12s probe=%s "
+                   "prior_observed=%.12s probe=%s",
+                   observed, f->anchor.local, dl_fence_probe_word(old_contains, a),
+                   f->next.local, dl_fence_probe_word(new_contains, b),
+                   f->observed, dl_fence_probe_word(chain, c));
+    (void)snprintf(reply->error.evidence, sizeof(reply->error.evidence), "%s", evidence);
+}
+
+/* Caller holds step.lock. Definitive answers for both heads precede settlement. */
 static void dl_fence_drive(const struct dl_dirs *d, struct dl_fence *f,
                             struct zcl_command_reply *reply)
 {
@@ -10161,7 +10223,8 @@ static void dl_fence_drive(const struct dl_dirs *d, struct dl_fence *f,
     int old_contains = dl_fence_ancestor(&next_dirs, f->anchor.local, observed);
     int new_contains = dl_fence_ancestor(&next_dirs, f->next.local, observed);
     if (!dl_fence_observation_ok(&next_dirs, f, observed, old_contains, new_contains)) {
-        dl_fence_blocked(reply, "FENCE_OBSERVATION_INCONSISTENT", f); return;
+        dl_fence_inconsistent(&next_dirs, f, observed, old_contains, new_contains, reply);
+        return;
     }
     if (f->stage == 1) {
         dl_fence_replay(d, f, old_contains, new_contains, reply); return;
@@ -12061,6 +12124,51 @@ static bool dl_fence_old_load(const struct dl_dirs *d, struct dl_row *rows, size
     return true;
 }
 
+/* The ancestry probes that drive every beat run in the replacement checkout,
+ * so the old head and the base must exist there as commits. A head that
+ * lives only in the landing worktree arms a fence no beat can ever settle
+ * (the probe errors, FENCE_OBSERVATION_INCONSISTENT forever). Fetch what is
+ * missing from the landing worktree, verify again, else refuse by name. */
+static bool dl_fence_have_commit(const struct dl_dirs *next_dirs, const char *sha)
+{
+    char spec[96], out[256];
+    if (snprintf(spec, sizeof(spec), "%s^{commit}", sha) >= (int)sizeof(spec)) return false;
+    const char *args[] = { "--no-replace-objects", "rev-parse", "--verify", "--quiet", spec, NULL };
+    return dl_git(next_dirs->wt, args, out, sizeof(out), DL_GIT_TIMEOUT_MS) == 0;
+}
+
+static bool dl_fence_reachable(const struct dl_dirs *d, const struct dl_dirs *next_dirs,
+                                const char *head, const char *base, struct zcl_command_reply *reply)
+{
+    const char *need[] = { head, base };
+    for (size_t i = 0; i < 2; ++i) {
+        if (dl_fence_have_commit(next_dirs, need[i])) continue;
+        char sink[512];
+        const char *fetch[] = { "-c", "uploadpack.allowAnySHA1InWant=true", "fetch", "--quiet",
+                                "--no-tags", "--no-write-fetch-head", d->wt, need[i], NULL };
+        (void)dl_git(next_dirs->wt, fetch, sink, sizeof(sink), DL_GIT_TIMEOUT_MS);
+        if (dl_fence_have_commit(next_dirs, need[i])) continue;
+        dl_fail(reply, "FENCE_OLD_HEAD_UNREACHABLE", "fence_replace",
+                 i == 0 ? "the old head is not a commit in the replacement checkout and "
+                          "could not be fetched from the landing worktree"
+                        : "the base is not a commit in the replacement checkout and "
+                          "could not be fetched from the landing worktree",
+                 need[i]);
+        (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                       "make %.40s a commit in the replacement checkout (git fetch from the repo that has it), then retry fence_replace",
+                       need[i]);
+        return false;
+    }
+    return true;
+}
+
+/* The old row, then proof that its head can be probed in the replacement. */
+static bool dl_fence_old_ready(const struct dl_dirs *d, const struct dl_dirs *next_dirs, struct dl_row *rows, size_t count, long long seq, const char *base, const char *head, struct dl_row **found, struct zcl_command_reply *reply)
+{
+    return dl_fence_old_load(d, rows, count, seq, base, head, found, reply) &&
+        dl_fence_reachable(d, next_dirs, head, base, reply);
+}
+
 static bool dl_fence_new_qualify(const struct dl_dirs *next_dirs, struct dl_row *next, const struct dl_row *old, const char *base, const char *tip, struct zcl_command_reply *reply)
 {
     if (!dl_proof_intent_bind(next_dirs, next) || strcmp(next->tree, old->tree) ||
@@ -12191,7 +12299,7 @@ static void dl_fence_replace(const struct zcl_command_request *req,
     if (!dl_fence_workspace(&d, &next_dirs, worktree, tip, reply)) goto done;
     if (!dl_fence_locked_queue(&d, qpath, &lock, &rows, &count)) goto unavailable;
     struct dl_row *old = NULL;
-    if (!dl_fence_old_load(&d, rows, count, seq, base, head, &old, reply)) goto done;
+    if (!dl_fence_old_ready(&d, &next_dirs, rows, count, seq, base, head, &old, reply)) goto done;
     if (!dl_fence_initialize(&d, &next_dirs, f, old, rows, count, base, tip)) goto unavailable;
     struct dl_row *next = &f->next;
     if (!dl_fence_new_qualify(&next_dirs, next, old, base, tip, reply)) goto done;

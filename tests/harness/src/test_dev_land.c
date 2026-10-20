@@ -10889,11 +10889,71 @@ static int dlx_fence_checkout_drift(bool dirty)
     return failures;
 }
 
+/* The replacement is a separate repository (as live): a no-local clone of
+ * the fenced successor branch, so the old head object exists only in the
+ * landing worktree's store. Signing identity is copied from the landing repo. */
+static bool dlx_fence_foreign_checkout(const struct dlx_rig *rig, char path[600])
+{
+    static const char *keys[] = { "gpg.format", "user.signingkey", "commit.gpgsign",
+                                  "gpg.ssh.allowedSignersFile", "user.name", "user.email" };
+    (void)snprintf(path, 600, "%s.foreign", rig->clone);
+    const char *clone[] = { "clone", "--quiet", "--no-local", "--single-branch",
+                            "--branch", "fence-successor", rig->clone, path, NULL };
+    const char *origin[] = { "remote", "set-url", "origin", rig->bare, NULL };
+    const char *hooks[] = { "config", "--worktree", "core.hooksPath", g_dlx_hooks_ok, NULL };
+    if (dlx_git(NULL, clone) != 0 || dlx_git(path, origin) != 0) return false;
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i) {
+        char value[1400];
+        const char *get[] = { "config", "--get", keys[i], NULL };
+        if (dlx_git_out(rig->clone, get, value, sizeof(value)) != 0) return false;
+        const char *set[] = { "config", keys[i], value, NULL };
+        if (dlx_git(path, set) != 0) return false;
+    }
+    return dlx_git(path, hooks) == 0;
+}
+
+static int dlx_fence_missing_old_head(void)
+{
+    int failures = 0; struct dlx_fence_case t = {0};
+    (void)snprintf(t.tag, sizeof(t.tag), "fence_old_head_missing");
+    dlx_isolate(t.tag);
+    TEST("land: a replacement checkout lacking the old head is never armed unless it can drive") {
+        char foreign[600];
+        ASSERT(dlx_fence_prepare(&t.rig, t.tag, t.base, t.wt, t.successor));
+        ASSERT(dlx_fence_foreign_checkout(&t.rig, foreign));
+        const char *have[] = { "cat-file", "-e", NULL, NULL };
+        char spec[96]; (void)snprintf(spec, sizeof(spec), "%s^{commit}", t.rig.tip);
+        have[2] = spec;
+        ASSERT(dlx_git(foreign, have) != 0); /* the old head is absent there */
+        ASSERT(dlx_git(t.rig.clone, have) == 0);
+        struct dlx_rig other = t.rig;
+        (void)snprintf(other.clone, sizeof(other.clone), "%s", foreign);
+        dlx_fence_call(&t.c, &other, t.base, t.rig.tip, t.successor);
+        ASSERT(dlx_run(&t.c));
+        if (dlx_ok(&t.c)) {
+            /* Armed: it must drive, not answer an ancestry error forever. */
+            dlx_end(&t.c);
+            ASSERT(dlx_git(foreign, have) == 0);
+            dlx_begin(&t.c, "step");
+            ASSERT(dlx_run(&t.c));
+            ASSERT(dlx_ok(&t.c) || strcmp(dlx_err_code(&t.c), "FENCE_OBSERVATION_INCONSISTENT") != 0);
+            dlx_end(&t.c);
+        } else {
+            ASSERT_STR_EQ(dlx_err_code(&t.c), "FENCE_OLD_HEAD_UNREACHABLE");
+            dlx_end(&t.c);
+        }
+        PASS();
+    } _test_next:;
+    unsetenv("ZCL_LAND_TEST_FENCE_POLICY"); unsetenv("ZCL_DEVLOOP_TEST_PROCESS"); dlx_restore();
+    return failures;
+}
+
 static int dlx_fence_negative_cases(void)
 {
     int failures = dlx_fence_negative_admission(0) + dlx_fence_negative_admission(1) + dlx_fence_negative_admission(2) +
         dlx_fence_negative_replay() + dlx_fence_observer_rewrite() + dlx_fence_dispatch_receiver_race() +
-        dlx_fence_checkout_drift(false) + dlx_fence_checkout_drift(true);
+        dlx_fence_checkout_drift(false) + dlx_fence_checkout_drift(true) +
+        dlx_fence_missing_old_head();
     for (unsigned kind = 1; kind <= 6; ++kind) {
         failures += dlx_fence_negative_receiver(kind, false);
         failures += dlx_fence_negative_receiver(kind, true);
@@ -13860,6 +13920,52 @@ _test_next:;
     return failures;
 }
 
+static int dlx_case_unclaimed_proof(void)
+{
+    int failures = 0;
+    TEST("land: step on a prove row whose request sat unclaimed past the idle "
+        "bound answers PROOF_UNCLAIMED with the exact drive command; a fresh "
+        "request is left untouched") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        dlx_isolate("proof_unclaimed");
+        ASSERT(dlx_rig_make(&rig, "proof_unclaimed_rig"));
+        unsetenv("ZCL_LAND_PROOF_IDLE_SEC");
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+        dlx_end(&c);
+        /* Fresh request: an ordinary proving state, no verdict to act on. */
+        setenv("ZCL_LAND_PROOF_STUB", "idle_fresh", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "proving");
+        ASSERT(json_get(&c.reply.data, "code") == NULL);
+        ASSERT(c.reply.next_count == 0);
+        dlx_end(&c);
+        /* Idle past the bound: typed, non-human, with the exact next command. */
+        setenv("ZCL_LAND_PROOF_STUB", "idle_unclaimed", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "proving");
+        ASSERT_STR_EQ(dlx_str(&c, "code"), "PROOF_UNCLAIMED");
+        ASSERT(!json_get_bool(json_get(&c.reply.data, "human_action_required")));
+        ASSERT(c.reply.next_count == 1);
+        ASSERT_STR_EQ(c.reply.next[0].command, "dev land drive");
+        ASSERT_STR_EQ(c.reply.next[0].input_json, "{\"prove\":true}");
+        dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int dlx_case_missing_hook_binary(void)
 {
     int failures = 0;
@@ -15136,6 +15242,7 @@ int test_dev_land(void)
     failures += dlx_case_hook_drift();
 
     failures += dlx_case_idle_proof();
+    failures += dlx_case_unclaimed_proof();
 
     failures += dlx_case_missing_hook_binary();
 
