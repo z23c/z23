@@ -32,6 +32,9 @@
  *      NOT_IN_BATCH; and batch inclusion is reported SEPARATELY from
  *      signature validity (a doc can be correctly signed and not in the
  *      batch, and both facts stay visible).
+ *   9. The committed fleet pins (platform/packaging/release/
+ *      z23-release-pins*.txt) load through release_pin_collect as two
+ *      distinct ZRS1 pairs, and the threshold-2 file pins the same pairs.
  *
  * Hermetic: per-pid ./test-tmp datadirs, no network, no wallet, no live
  * node. node_rpc_call is stubbed for the whole group so the anchor
@@ -1583,6 +1586,82 @@ static int test_zr_hybrid(void)
     return zy.failures;
 }
 
+/* ── 9. the committed fleet release pins ───────────────────────────── */
+
+#define ZR_FLEET_PINS "platform/packaging/release/z23-release-pins.txt"
+#define ZR_FLEET_PINS_T2 "platform/packaging/release/z23-release-pins.threshold2.txt"
+
+/* Read the `zrs1` lines of a pin file into out (one per row) and count its
+ * `threshold` lines. Returns the number of pair lines, or -1 if unreadable. */
+static int zr_fleet_pair_lines(const char *path, char out[4][160],
+                               int *thresholds, bool *threshold_two)
+{
+    FILE *fp = fopen(path, "r");
+    if (!fp)
+        return -1;
+    char line[256];
+    int n = 0;
+    *thresholds = 0;
+    *threshold_two = false;
+    while (fgets(line, sizeof(line), fp)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (strncmp(line, "threshold", 9) == 0) {
+            (*thresholds)++;
+            *threshold_two = strcmp(line, "threshold 2") == 0;
+        } else if (strncmp(line, "zrs1 ", 5) == 0 && n < 4) {
+            snprintf(out[n++], 160, "%s", line);
+        }
+    }
+    fclose(fp);
+    return n;
+}
+
+/* The install-now pin file loads through the receivers' own parser as two
+ * distinct hybrid pairs with require-pq and no Ed25519-only key, and the
+ * threshold-2 file pins exactly the same two pairs plus `threshold 2`. */
+static int test_zr_fleet_pins(void)
+{
+    int failures = 0;
+    static struct release_pin_set set;
+    struct json_value in;
+    struct zcl_command_reply reply;
+    json_init(&in);
+    json_set_object(&in);
+    (void)json_push_kv_str(&in, "pin_file", ZR_FLEET_PINS);
+    zcl_command_reply_init(&reply, "zcl.zcode_release_test.v1");
+    memset(&set, 0, sizeof(set));
+    bool ok = release_pin_collect(&in, &set, &reply, "test_zr_fleet_pins");
+    zr_hy_check("the fleet pin file loads through release_pin_collect", ok,
+                &failures);
+    zr_hy_check("the fleet pin file holds two pairs, require-pq, no bare key",
+                ok && set.pair_count == 2 && set.count == 0 && set.require_pq,
+                &failures);
+    zr_hy_check("the two fleet pairs share neither key",
+                ok && set.pair_count == 2 &&
+                    memcmp(set.pairs[0].ed, set.pairs[1].ed, 32) != 0 &&
+                    memcmp(set.pairs[0].pq, set.pairs[1].pq,
+                           sizeof(set.pairs[0].pq)) != 0,
+                &failures);
+    zcl_command_reply_free(&reply);
+    json_free(&in);
+
+    char now_lines[4][160], t2_lines[4][160];
+    int now_th = 0, t2_th = 0;
+    bool now_two = false, t2_two = false;
+    int now_n = zr_fleet_pair_lines(ZR_FLEET_PINS, now_lines, &now_th, &now_two);
+    int t2_n = zr_fleet_pair_lines(ZR_FLEET_PINS_T2, t2_lines, &t2_th, &t2_two);
+    zr_hy_check("the install-now pin file has no threshold line",
+                now_n == 2 && now_th == 0, &failures);
+    zr_hy_check("the threshold-2 file has one `threshold 2` line",
+                t2_n == 2 && t2_th == 1 && t2_two, &failures);
+    zr_hy_check("both pin files pin the same two pairs in the same order",
+                now_n == 2 && t2_n == 2 &&
+                    strcmp(now_lines[0], t2_lines[0]) == 0 &&
+                    strcmp(now_lines[1], t2_lines[1]) == 0,
+                &failures);
+    return failures;
+}
+
 int test_zcode_release(void)
 {
     int failures = 0;
@@ -1599,6 +1678,7 @@ int test_zcode_release(void)
     failures += test_zr_prove_verify();
     failures += test_zr_mined_anchor();
     failures += test_zr_hybrid();
+    failures += test_zr_fleet_pins();
 
     node_rpc_client_set_test_hook(NULL);
 

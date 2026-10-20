@@ -1,0 +1,21 @@
+# Z23 release owner pins: the pin_file for `ops slot install` on receivers.
+# Format: tools/command/release_pin.h; design: docs/work/PQ_HYBRID_RELEASE_SIGNATURE.md
+#
+# INSTALL NOW. Two ZRS1 hybrid pairs (Ed25519 + SLH-DSA-SHAKE-128s), no
+# threshold line, so a release signed by EITHER pair installs (1 of 2). A
+# literal `threshold 1` line would be refused as PIN_FILE_INVALID by a
+# receiver built before the k-of-n gate, so the line is left out.
+# `require-pq` refuses every Ed25519-only (v1) release doc.
+#
+# Replace with z23-release-pins.threshold2.txt (2 of 2) only when every
+# receiver runs the k-of-n gate AND the owner-offline key signs from offline
+# media; after that an r1-only signature no longer installs.
+#
+# Fingerprint = first 16 hex of SHA-256 over the raw 32-byte key.
+require-pq
+# r1-fleet: the dedicated r1 fleet release key; signs landed main only
+# (ops release sign). ed25519 fp 4bf700a0897f2d54, slh-dsa fp 1a4d2bd296c3ad0e
+zrs1 0e4c79cc11c6959c2a302d39aaf66f48dc0d822b9de1e318f12de2ebb565228e 0 19a3f047a12cbfc06bff585593d046b472fd35f3a6fec2867d3472a31655d6ab
+# owner-offline: the owner's offline release key, kept off every host.
+# ed25519 fp 5fba90eddf4e6eb6, slh-dsa fp 74947662c76ad165
+zrs1 81fac4cc413782d9dfb7f157d6ec31d3658c233dd5c5d6c3ebd3f42de2078811 0 abd437128286d0740a869089657dd0b18c4fd83cbc680eac783245df41d072ae

@@ -310,6 +310,26 @@ adopts the new pin file it keeps accepting a single signer.
 Existing v1 docs keep verifying; no re-sign is forced. Rollback before phase 3
 is leaving out the PQ seed file.
 
+The Z23 fleet pins. Two ZRS1 pairs exist: `r1-fleet`, the dedicated r1
+release key that signs landed main only, and `owner-offline`, the owner's
+second key, to be held on offline media. Their public halves are committed in
+`platform/packaging/release/`:
+
+- `z23-release-pins.txt` is the receivers' `pin_file` now: both pairs and
+  `require-pq`, no `threshold` line, so either pair installs a release (1 of
+  2). A receiver without the k-of-n gate refuses any `threshold` line as
+  `PIN_FILE_INVALID`, so the line is left out rather than written as
+  `threshold 1`.
+- `z23-release-pins.threshold2.txt` adds `threshold 2`. It replaces the first
+  file only after every receiver has the k-of-n gate (section 6.2) and the
+  owner-offline key signs from offline media; from then on an r1-only
+  signature no longer installs.
+
+Group `test_zcode_release` loads the first file through `release_pin_collect`
+and checks that both files pin the same two pairs. The seeds never enter the
+repository. The conveyor signs each landed release with r1-fleet through
+the fleet signer (ops release sign), with a datadir that is not the node's.
+
 ## 8. Decisions
 
 The owner delegated the open decisions on 2026-10-19 ("you have authority,

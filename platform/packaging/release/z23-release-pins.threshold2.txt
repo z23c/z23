@@ -1,0 +1,21 @@
+# Z23 release owner pins, 2 of 2: the pin_file for `ops slot install` on
+# receivers once the k-of-n gate ships.
+# Format: tools/command/release_pin.h; design: docs/work/PQ_HYBRID_RELEASE_SIGNATURE.md 6.2
+#
+# DO NOT INSTALL YET. Install only when (a) every receiver runs a z23 that
+# has the k-of-n gate (a receiver without it refuses the `threshold` line as
+# PIN_FILE_INVALID and then installs nothing), and (b) the owner-offline key
+# has moved to offline media and signs releases from there. Until then use
+# z23-release-pins.txt.
+#
+# A release then installs only with BOTH docs: the r1-fleet doc as `release`
+# and the owner-offline doc as `cosigs`, over the same name, version and
+# manifest root. One doc alone is THRESHOLD_SINGLE_DOC; a cosig from any
+# other pair is THRESHOLD_NOT_MET. A threshold implies require-pq.
+#
+# Fingerprint = first 16 hex of SHA-256 over the raw 32-byte key.
+threshold 2
+# r1-fleet: ed25519 fp 4bf700a0897f2d54, slh-dsa fp 1a4d2bd296c3ad0e
+zrs1 0e4c79cc11c6959c2a302d39aaf66f48dc0d822b9de1e318f12de2ebb565228e 0 19a3f047a12cbfc06bff585593d046b472fd35f3a6fec2867d3472a31655d6ab
+# owner-offline: ed25519 fp 5fba90eddf4e6eb6, slh-dsa fp 74947662c76ad165
+zrs1 81fac4cc413782d9dfb7f157d6ec31d3658c233dd5c5d6c3ebd3f42de2078811 0 abd437128286d0740a869089657dd0b18c4fd83cbc680eac783245df41d072ae
