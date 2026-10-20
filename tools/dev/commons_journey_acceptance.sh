@@ -85,6 +85,8 @@ CJ_MULTIHOST="${ZCL_COMMONS_MULTIHOST:-0}"
 # Two physical hosts keep the latecomer on the requester's host. This proves
 # remote worker execution and process disappearance, not host disappearance.
 CJ_TWOHOST=0
+CJ_BOOT_A=""; CJ_BOOT_B=""; CJ_BOOT_C=""
+CJ_TOPOLOGY_BASIS=same_host_processes
 CJ_HOST_B="${CJ_HOST_B:-}"   # ssh destination of the reproducer/onward provider
 CJ_HOST_C="${CJ_HOST_C:-}"   # ssh destination of the latecomer
 # The P2P addresses nodes dial. Local runs keep loopback; in multi-host mode
@@ -244,6 +246,54 @@ cj_require_compatible_binary_host() {
         { cj_die "HOST_BINARY_INCOMPATIBLE: $host is $remote_os/$remote_arch; local binaries are $local_os/$local_arch"; return 1; }
 }
 
+# A boot-session UUID rejects aliases for one running kernel. Distinct UUIDs
+# do not establish physical hardware independence (VMs can share hardware).
+cj_boot_identity() {
+    local host="$1" platform="$2" identity command digest
+    case "$platform" in
+        Linux) command='cat /proc/sys/kernel/random/boot_id' ;;
+        Darwin) command='/usr/sbin/sysctl -n kern.bootsessionuuid' ;;
+        *) cj_die "HOST_IDENTITY_UNAVAILABLE: unsupported platform"; return 1 ;;
+    esac
+    if [ -z "$host" ]; then
+        case "$platform" in
+            Linux) identity="$(cat /proc/sys/kernel/random/boot_id)" ;;
+            Darwin) identity="$(/usr/sbin/sysctl -n kern.bootsessionuuid)" ;;
+        esac
+    else
+        identity="$("$DHT_SSH" -o BatchMode=yes -o ConnectTimeout=5 "$host" -- "$command")"
+    fi || { cj_die "HOST_IDENTITY_UNAVAILABLE: cannot read boot identity"; return 1; }
+    [[ "$identity" =~ ^[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12}$ ]] ||
+        { cj_die "HOST_IDENTITY_UNAVAILABLE: malformed boot identity"; return 1; }
+    [ "$identity" != 00000000-0000-0000-0000-000000000000 ] ||
+        { cj_die "HOST_IDENTITY_UNAVAILABLE: zero boot identity"; return 1; }
+    digest="$(printf '%s' "$identity" | LC_ALL=C tr '[:upper:]' '[:lower:]' |
+        openssl dgst -sha3-256 | awk '{print $NF}')" ||
+        { cj_die "HOST_IDENTITY_UNAVAILABLE: cannot hash boot identity"; return 1; }
+    [[ "$digest" =~ ^[0-9a-f]{64}$ ]] ||
+        { cj_die "HOST_IDENTITY_UNAVAILABLE: malformed boot digest"; return 1; }
+    printf '%s' "$digest"
+}
+
+cj_require_distinct_boots() {
+    local platform
+    CJ_BOOT_A=""; CJ_BOOT_B=""; CJ_BOOT_C=""
+    CJ_TOPOLOGY_BASIS=plumbing_only_host_topology_unvalidated
+    # The local plumbing shim deliberately runs every peer on this kernel.
+    [ "$DHT_SSH" = ssh ] || return 0
+    platform="$(uname -s)"
+    CJ_BOOT_A="$(cj_boot_identity '' "$platform")" || return 1
+    CJ_BOOT_B="$(cj_boot_identity "$CJ_HOST_B" "$platform")" || return 1
+    [ "$CJ_BOOT_A" != "$CJ_BOOT_B" ] ||
+        { cj_die "HOST_IDENTITY_DUPLICATE: A and B share a boot identity"; return 1; }
+    if [ "$CJ_MULTIHOST" = 1 ]; then
+        CJ_BOOT_C="$(cj_boot_identity "$CJ_HOST_C" "$platform")" || return 1
+        [ "$CJ_BOOT_A" != "$CJ_BOOT_C" ] && [ "$CJ_BOOT_B" != "$CJ_BOOT_C" ] ||
+            { cj_die "HOST_IDENTITY_DUPLICATE: C shares a boot identity"; return 1; }
+    fi
+    CJ_TOPOLOGY_BASIS=distinct_observed_boot_sessions_not_physical_hardware
+}
+
 cj_multihost_setup() {
     if [ "$CJ_MULTIHOST" != 1 ] && [ "$CJ_TWOHOST" != 1 ]; then
         CJ_PEER_ADDR_A=127.0.0.1; CJ_PEER_ADDR_B=127.0.0.1; CJ_PEER_ADDR_C=127.0.0.1
@@ -268,6 +318,8 @@ cj_multihost_setup() {
             cj_die "multi-host hosts must not be loopback; that is make commons-demo" ;;
     esac
     if [ "$DHT_SSH" = ssh ]; then
+        [ "$(uname -s)" = Linux ] ||
+            { cj_die "HOST_PLATFORM_UNAVAILABLE: remote scheduler mapped-image qualification requires Linux"; return 1; }
         [ "$CJ_PEER_ADDR_A" != 127.0.0.1 ] ||
             cj_die "multi-host needs CJ_PEER_ADDR_A — the LAN address B and C dial to reach this host's node A"
     else
@@ -282,6 +334,7 @@ cj_multihost_setup() {
             cj_die "cannot reach $host (BatchMode ssh); multi-host acceptance fails closed"
         cj_require_compatible_binary_host "$host"
     done
+    cj_require_distinct_boots || return 1
     CJ_RDIR_B="$("$DHT_SSH" -o BatchMode=yes "$CJ_HOST_B" -- 'mktemp -d /tmp/z23-mh-XXXXXXXX')" ||
         cj_die "no scratch dir on $CJ_HOST_B"
     local destinations=("$CJ_HOST_B:$CJ_RDIR_B")
@@ -391,6 +444,13 @@ cj_boot() {
         cj_die "missing fixture packages under $CJ_FIXTURES"
 
     dht_make_work zcl23-journey
+    if [ -n "${CJ_BOOT_A:-}" ]; then
+        printf 'identity_basis=boot_session_uuid_sha3_not_physical_hardware\nnode_a_boot_sha3=%s\nnode_b_boot_sha3=%s\n' \
+            "$CJ_BOOT_A" "$CJ_BOOT_B" >"$DHT_WORK/host-identities.sha3"
+        if [ "$CJ_MULTIHOST" = 1 ]; then
+            printf 'node_c_boot_sha3=%s\n' "$CJ_BOOT_C" >>"$DHT_WORK/host-identities.sha3"
+        fi
+    fi
     # This journey never proves a shielded transaction; keep its boot cost and
     # outcome independent of operator-installed proving parameters.
     if [ -z "$DHT_PARAMS_DIR" ]; then
@@ -680,41 +740,73 @@ cj_publish_package() {
 # remote test host they run between scheduled node lifetimes, so they neither
 # bypass its limits nor wait forever on the node's project lock. These are
 # recorded fixture interventions, separate from the native remote work proof.
+cj_remote_admission() {
+    [ "$CJ_MULTIHOST" = 1 ] || [ "$CJ_TWOHOST" = 1 ] || return 1
+    case "$1" in b) return 0 ;; c) [ "$CJ_MULTIHOST" = 1 ] ;; *) return 1 ;; esac
+}
+
 cj_pause_remote_for_local_build() {
+    [ "${CJ_REMOTE_BUILD_PAUSED:-0}" = 0 ] ||
+        { cj_die "another remote local build is already phased"; return 1; }
     CJ_REMOTE_BUILD_PAUSED=0
-    [ "$CJ_TWOHOST" = 1 ] && [ "$1" = b ] || return 0
-    [ -n "$DHT_PGID_B" ] || cj_die "remote build phase has no owned worker"
-    dht_kill_group "$DHT_PGID_B" || cj_die "remote worker did not stop for local admission"
-    DHT_PGID_B=""
-    if b_rpc getblockcount >/dev/null 2>&1; then
+    CJ_REMOTE_BUILD_NODE=""
+    cj_remote_admission "$1" || return 0
+    local node="$1" pid_var pid
+    case "$node" in b) pid_var=DHT_PGID_B ;; c) pid_var=DHT_PGID_C ;; esac
+    pid="${!pid_var}"
+    [ -n "$pid" ] || { cj_die "remote build phase has no owned worker"; return 1; }
+    dht_kill_group "$pid" || { cj_die "remote worker did not stop for local admission"; return 1; }
+    printf -v "$pid_var" '%s' ''
+    if "${node}_rpc" getblockcount >/dev/null 2>&1; then
         cj_die "remote worker still answers during offline build phase"
+        return 1
     fi
     CJ_REMOTE_BUILD_PAUSED=1
-    printf 'utc=%s intervention=stop-remote-node-for-scheduled-local-build\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$DHT_WORK/developer-interventions.txt"
+    CJ_REMOTE_BUILD_NODE="$node"
+    printf 'utc=%s intervention=stop-remote-node-for-scheduled-local-build node=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$node" >>"$DHT_WORK/developer-interventions.txt"
 }
 
 cj_resume_remote_after_local_build() {
     [ "$CJ_REMOTE_BUILD_PAUSED" = 1 ] || return 0
-    local peer="$CJ_PEER_ADDR_A:$A_PORT"
-    [ -n "$DHT_PGID_A" ] || peer="$CJ_PEER_ADDR_C:$C_PORT"
-    DHT_BUILDWORKERS=1
-    dht_spawn DHT_PGID_B "$DHT_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "$peer"
-    cj_wait_rpc_or_die "$DHT_DD_B" "$B_RPC" "$DHT_PGID_B" "remote worker after local admission"
-    dht_wait_connected "$DHT_DD_B" "$B_RPC" || cj_die "remote worker did not reconnect"
-    printf 'utc=%s intervention=restart-remote-node pid=%s\n' \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$DHT_PGID_B" >>"$DHT_WORK/developer-interventions.txt"
+    local peer node="$CJ_REMOTE_BUILD_NODE" dd rpc pid_var pid
+    case "$node" in
+        b)
+            dd="$DHT_DD_B"; rpc="$B_RPC"; pid_var=DHT_PGID_B
+            if [ -n "$DHT_PGID_A" ]; then peer="$CJ_PEER_ADDR_A:$A_PORT"
+            elif [ -n "$DHT_PGID_C" ]; then peer="$CJ_PEER_ADDR_C:$C_PORT"
+            else cj_die "remote B has no live peer to resume toward"; return 1; fi
+            DHT_BUILDWORKERS=1
+            dht_spawn DHT_PGID_B "$dd" "$B_PORT" "$rpc" "$B_FS" "$B_HTTPS" "$peer" || return 1 ;;
+        c)
+            dd="$DHT_DD_C"; rpc="$C_RPC"; pid_var=DHT_PGID_C
+            [ -n "$DHT_PGID_B" ] || { cj_die "remote C has no live survivor to resume toward"; return 1; }
+            peer="$CJ_PEER_ADDR_B:$B_PORT"
+            DHT_BUILDWORKERS=1
+            dht_spawn DHT_PGID_C "$dd" "$C_PORT" "$rpc" "$C_FS" "$C_HTTPS" "$peer" || return 1 ;;
+        *) cj_die "remote local build has no phased node"; return 1 ;;
+    esac
+    pid="${!pid_var}"
+    cj_wait_rpc_or_die "$dd" "$rpc" "$pid" "remote worker after local admission" || return 1
+    dht_wait_connected "$dd" "$rpc" || { cj_die "remote worker did not reconnect"; return 1; }
+    printf 'utc=%s intervention=restart-remote-node pid=%s node=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$pid" "$node" >>"$DHT_WORK/developer-interventions.txt"
     CJ_REMOTE_BUILD_PAUSED=0
+    CJ_REMOTE_BUILD_NODE=""
 }
 
 cj_local_build_native() {
     local node="$1"; shift
-    if [ "$CJ_TWOHOST" = 1 ] && [ "$node" = b ]; then
-        [ "$CJ_REMOTE_BUILD_PAUSED" = 1 ] || cj_die "remote local build was not phased"
-        dht_node_exec "$B_RPC" bash -c \
+    if cj_remote_admission "$node"; then
+        [ "$CJ_REMOTE_BUILD_PAUSED" = 1 ] && [ "$CJ_REMOTE_BUILD_NODE" = "$node" ] ||
+            { cj_die "remote local build was not phased for this node"; return 1; }
+        local dir rpc dd
+        dir="$(cj_node_dir "$node")"; rpc="$(cj_node_rpc "$node")"
+        case "$node" in b) dd="$DHT_DD_B" ;; c) dd="$DHT_DD_C" ;; esac
+        dht_node_exec "$rpc" bash -c \
             'set -e; mkdir -p "$1/local-build-workspace"; cd "$1/local-build-workspace"; shift; exec "$HOME/.local/bin/devbuild" --wait --project z23 "$@"' \
-            scheduled-package-cli "$CJ_RDIR_B" "${CJ_RDIR_B}/bin/zclassic23" \
-            "-datadir=$DHT_DD_B" "-rpcport=$B_RPC" -regtest "$@" | tail -1
+            scheduled-package-cli "$dir" "$dir/bin/zclassic23" \
+            "-datadir=$dd" "-rpcport=$rpc" -regtest "$@" | tail -1
     else
         "cj_$node" "$@"
     fi
@@ -722,11 +814,12 @@ cj_local_build_native() {
 
 cj_scheduled_on() {
     local node="$1"; shift
-    if [ "$CJ_TWOHOST" = 1 ] && [ "$node" = b ]; then
-        [ "$CJ_REMOTE_BUILD_PAUSED" = 1 ] || cj_die "remote test was not phased"
-        dht_node_exec "$B_RPC" bash -c \
+    if cj_remote_admission "$node"; then
+        [ "$CJ_REMOTE_BUILD_PAUSED" = 1 ] && [ "$CJ_REMOTE_BUILD_NODE" = "$node" ] ||
+            { cj_die "remote test was not phased for this node"; return 1; }
+        dht_node_exec "$(cj_node_rpc "$node")" bash -c \
             'set -e; mkdir -p "$1/local-build-workspace"; cd "$1/local-build-workspace"; shift; exec "$HOME/.local/bin/devbuild" --wait --project z23 "$@"' \
-            scheduled-fixture-test "$CJ_RDIR_B" "$@"
+            scheduled-fixture-test "$(cj_node_dir "$node")" "$@"
     else
         cj_on "$node" "$@"
     fi
@@ -2002,9 +2095,11 @@ cj_journey_object_set_carrier() {
     # the cache; nothing is reused yet.
     cache_b="$(cj_node_dir b)/fastobj-cache"
     cj_on b rm -rf "$cache_b"
-    cold="$("cj_b" zcode package reproduce \
+    cj_pause_remote_for_local_build b
+    cold="$(cj_local_build_native b zcode package reproduce \
         --input="{\"name_or_root\":\"$CJ_TEXTSTAT_ROOT\",\"datadir\":\"$DHT_DD_B\",\"fast_cache\":\"$cache_b\"}")"
     cj_require_ok "node B cached reproduce (cold)" "$cold"
+    cj_resume_remote_after_local_build
     printf '%s\n' "$cold" >"$DHT_WORK/carrier-reproduce-cold.json"
     [ "$(cj_field data.reproduced "$cold" False)" = True ] ||
         cj_die "node B's cached reproduce did not match its install build: $cold"
@@ -2078,7 +2173,7 @@ cj_fetch_fastobj_carrier() {
 # `zcode work toolchain` on the node's own host.
 cj_toolchain_capsule() {
     local out
-    out="$("cj_$1" zcode work toolchain)"
+    out="$(cj_local_build_native "$1" zcode work toolchain)"
     cj_require_ok "node $1 toolchain capsule" "$out"
     cj_field data.capsule_root "$out" ''
 }
@@ -2893,11 +2988,15 @@ cj_journey_publisher_disappears() {
     # node B filed in step 10. Under a different capsule every carried
     # object must be refused (cj_carrier_rebuild_verdict).
     local cap_b cap_c
+    cj_pause_remote_for_local_build b
     cap_b="$(cj_toolchain_capsule b)"
+    cj_resume_remote_after_local_build
+    cj_pause_remote_for_local_build c
     cap_c="$(cj_toolchain_capsule c)"
-    warm="$("cj_c" zcode package reproduce \
+    warm="$(cj_local_build_native c zcode package reproduce \
         --input="{\"name_or_root\":\"$CJ_TEXTSTAT_ROOT\",\"datadir\":\"$DHT_DD_C\",\"fast_cache\":\"$cache_c\"}")"
     cj_require_ok "node C cached reproduce (warm, publisher gone)" "$warm"
+    cj_resume_remote_after_local_build
     printf '%s\n' "$warm" >"$DHT_WORK/carrier-reproduce-warm.json"
     warm_misses="$(cj_field data.fast_cache.misses "$warm" -1)"
     warm_hits="$(cj_field data.fast_cache.hits "$warm" -1)"
@@ -2932,7 +3031,9 @@ cj_journey_publisher_disappears() {
     bin_c="$(cj_program_path "$CJ_USE_COMMIT" wordcount)"
     [ -n "$bin_c" ] && cj_on c test -x "$bin_c" ||
         cj_die "node C admitted apps/wordcount but installed no executable program"
-    out_c="$(cj_on c "$bin_c" "$sample_c")"
+    cj_pause_remote_for_local_build c
+    out_c="$(cj_scheduled_on c "$bin_c" "$sample_c")"
+    cj_resume_remote_after_local_build
     [ "$out_c" = "$CJ_APP_OUTPUT" ] ||
         cj_die "node C ran the application but answered '$out_c' instead of '$CJ_APP_OUTPUT'"
 
@@ -2969,9 +3070,11 @@ cj_journey_publisher_disappears() {
         "$src_zc/include/zdogfight/zdogfight.h" ||
         cj_die "node C reconstructed source without the accepted change"
     bin_zc="$(cj_node_dir c)/turnrate-after-c"
+    cj_pause_remote_for_local_build c
     cj_build_zdog_probe c "$src_zc" "$DHT_DD_C" "$bin_zc" ||
         cj_die "the accepted change did not build on node C"
     rate_c="$(cj_zdog_turn_rate c "$bin_zc")"
+    cj_resume_remote_after_local_build
     [ "$rate_c" = "$CJ_TURN_AFTER" ] ||
         cj_die "node C measured $rate_c deg/s where node B measured $CJ_TURN_AFTER"
     [ "$rate_c" -gt "$CJ_TURN_BEFORE" ] ||
@@ -3210,7 +3313,10 @@ cj_write_facts() {
         printf 'source_git_commit     = %s (dirty: %s)\n' "$commit" "$dirty"
         printf 'z23_binary_sha3       = %s\n' "$(cj_sha3 "$NODE_BIN")"
         printf 'journey_script_sha3   = %s\n' "$(cj_sha3 "$SCRIPT_DIR/commons_journey_acceptance.sh")"
-        if [ "$CJ_TWOHOST" = 1 ]; then
+        printf 'topology_basis        = %s\n' "$CJ_TOPOLOGY_BASIS"
+        if [ "$CJ_TOPOLOGY_BASIS" = plumbing_only_host_topology_unvalidated ]; then
+            printf 'conditions            = three fresh isolated regtest datadirs, custom SSH plumbing only; host topology unvalidated, A process killed, C learned from B\n'
+        elif [ "$CJ_TWOHOST" = 1 ]; then
             printf 'conditions            = three fresh isolated regtest datadirs, requester and latecomer on one host, native worker on a second host, A process killed, C learned from B\n'
         elif [ "$CJ_MULTIHOST" = 1 ]; then
             printf 'conditions            = three fresh isolated regtest datadirs on separately addressed hosts, A process killed, C learned from B\n'
@@ -3255,7 +3361,9 @@ cj_write_facts() {
         printf 'turn_funnel_rows      = %s\n' "$(( $(wc -l <"$DHT_WORK/turn-funnel.tsv") - 1 ))"
         printf 'named_refusals        = %s\n' "$(wc -l <"$DHT_WORK/named-refusals.tsv")"
         if [ "${CJ_PUBLISHER_SURVIVAL:-0}" = 1 ]; then
-            if [ "$CJ_MULTIHOST" = 1 ]; then
+            if [ "$CJ_TOPOLOGY_BASIS" = plumbing_only_host_topology_unvalidated ]; then
+                printf 'publisher_survival    = node A process killed; node C reproduced and ran from B through custom SSH plumbing; host topology unvalidated\n'
+            elif [ "$CJ_MULTIHOST" = 1 ]; then
                 printf 'publisher_survival    = node A process killed; node C on another addressed host reproduced and ran the exact accepted bytes from node B\n'
             else
                 printf 'publisher_survival    = node A killed; node C reproduced and ran the exact accepted bytes from node B\n'
@@ -3289,6 +3397,8 @@ case "${1:-}" in
     *) cj_die "unknown argument '$1' (accepted: --strip-labels, --topology, --two-host)" ;;
 esac
 
+if [ "$CJ_MULTIHOST" = 1 ]; then DHT_REMOTE_DEVBUILD=1; fi
+
 cj_step "bring-up: three fresh isolated datadirs"
 cj_boot
 cj_build_peer_helper
@@ -3307,8 +3417,8 @@ cj_journey_turn_faster_stage
 cj_overlay
 if [ "$CJ_TWOHOST" = 1 ]; then
     expected_binary="$(cj_sha3 "$NODE_BIN")"
-    requester_boot="$(cj_sha3_on a /proc/sys/kernel/random/boot_id)"
-    worker_boot="$(cj_sha3_on b /proc/sys/kernel/random/boot_id)"
+    requester_boot="${CJ_BOOT_A:-$(cj_sha3_on a /proc/sys/kernel/random/boot_id)}"
+    worker_boot="${CJ_BOOT_B:-$(cj_sha3_on b /proc/sys/kernel/random/boot_id)}"
     [ -n "$requester_boot" ] && [ -n "$worker_boot" ] &&
         [ "$requester_boot" != "$worker_boot" ] ||
         cj_die "two-host acceptance requires two distinct running Linux kernels"
@@ -3385,6 +3495,7 @@ case "$CJ_CARRIER_TOOLCHAIN" in
     *) cj_die "the carrier rebuild never recorded its toolchain verdict" ;;
 esac
 CJ_VERDICT="{\"schema\":\"$CJ_VERDICT_SCHEMA\",\"verdict\":\"$CJ_VERDICT_TOKEN\",\"steps_proven\":$CJ_STEPS_PROVEN,\"steps_total\":$CJ_STEPS_TOTAL,\"complete\":true,\"reuse_before_creation\":true,\"no_false_reuse_claim\":true,\"peer_to_peer_fetch\":true,\"fetched_source_inert\":true,\"explicit_local_admission\":true,\"independent_remote_build\":true,\"approved_signer_required\":true,\"explicit_human_acceptance\":true,\"accepted_work_published\":true,\"remote_source_reproduced\":true,\"signed_source_reproduction_receipts_consumed\":$CJ_SIGNED_RECEIPTS_CONSUMED,\"ask_to_running_program_seconds\":$CJ_SECS_RUNNING,\"reuse_ratio\":{\"basis\":\"exact_c23_source_closure_bytes\",\"reused_bytes\":$CJ_REUSED_C23_BYTES,\"closure_bytes\":$CJ_C23_CLOSURE_BYTES,\"basis_points\":$CJ_REUSE_RATIO_BPS,\"nodes\":2},\"byte_identical_artifacts\":true,\"tamper_refused_by_name\":[\"source\",\"dependency\",\"receipt\",\"artifact\"],\"application_ran\":true,\"compile_cache_carried_as_package\":true,\"zero_compiler_rebuild\":$CJ_ZERO_COMPILER_REBUILD,\"carrier_receipt_identical\":$CJ_ZERO_COMPILER_REBUILD,\"carrier_toolchain\":\"$CJ_CARRIER_TOOLCHAIN\",\"cross_capsule_objects_reused\":0,\"existing_package_changed\":true,\"behavior_change_measured_before_and_after\":true,\"changed_version_is_its_own_root\":true,\"central_services_contacted\":0,\"human_first_terminal_output\":true}"
+CJ_VERDICT="${CJ_VERDICT%\}},\"topology_basis\":\"$CJ_TOPOLOGY_BASIS\"}"
 # The multi-host leg adds its fact only when it actually ran: the publisher
 # disappeared and node C still reproduced and ran the exact accepted bytes.
 if [ "$CJ_PUBLISHER_SURVIVAL" = 1 ]; then

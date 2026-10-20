@@ -64,7 +64,7 @@ esac
 # through the same fail-closed ownership rules. Argument quoting goes
 # through printf %q so JSON --input payloads survive ssh re-joining.
 DHT_SSH="${DHT_SSH:-ssh}"
-# Enabled only by the Linux two-host acceptance. Remote native workers must
+# Enabled by the Linux two-host and three-host acceptance. Remote native workers must
 # inherit the receiving host's scheduler admission and resource scope.
 DHT_REMOTE_DEVBUILD=0
 # Queue admission is separate from the RPC readiness budget of an admitted node.
@@ -169,6 +169,14 @@ dht_note() { echo "zcode-dht-acceptance: $*"; }
 
 dht_start_token() {
     "$PROCESS_START_TOKEN" "$1" 2>/dev/null
+}
+
+dht_require_start_token() {
+    local start
+    [ -f "$PROCESS_START_TOKEN" ] && [ -x "$PROCESS_START_TOKEN" ] ||
+        { dht_die "PROCESS_START_TOKEN_UNAVAILABLE: helper must be a regular executable file"; return 1; }
+    start="$(dht_start_token "$$")" && [ -n "$start" ] ||
+        { dht_die "PROCESS_START_TOKEN_UNAVAILABLE: helper cannot identify this driver"; return 1; }
 }
 
 dht_process_group_exec() {
@@ -507,7 +515,7 @@ dht_remote_scheduled_pid() {
 }
 
 dht_record_started_arguments() {
-    # /proc observations belong to the opt-in Linux two-host lane.
+    # /proc observations belong to the opt-in Linux admitted remote lanes.
     [ "$DHT_REMOTE_DEVBUILD" = 1 ] || return 0
     local dd="$1" rpc="$2" pid="$3" expected
     expected="$(sha256sum "$NODE_BIN" | awk '{print $1}')"
@@ -534,6 +542,7 @@ dht_record_started_arguments() {
 dht_spawn() {
     local out_name="$1" dd="$2" p2p="$3" rpc="$4" fs="$5" https="$6"
     shift 6
+    dht_require_start_token || return 1
     local args=() connect pid
     for connect in "$@"; do args+=("-connect=$connect"); done
     [ "${#args[@]}" -gt 0 ] || args+=("-connect=127.0.0.1:$DEAD_SINK")
@@ -628,6 +637,7 @@ dht_spawn() {
 dht_spawn_owned_command() {
     local out_name="$1" log="$2" pid
     shift 2
+    dht_require_start_token || return 1
     dht_process_group_exec "$@" >>"$log" 2>&1 &
     pid="$!"
     dht_register_owned_group "$pid"

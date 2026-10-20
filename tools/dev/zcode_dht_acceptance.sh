@@ -64,6 +64,46 @@ dht_lifecycle_selftest() {
     local long_dir peer_status
     dht_make_work zcl23-dhtprobe
 
+    # Invalid ownership helpers must refuse before launching any command.
+    # The launcher fixture exits immediately even if this guard regresses;
+    # waiting for that finite child makes the no-launch marker decisive.
+    local token_case spawn_kind token_status helper="$DHT_WORK/token-helper"
+    local token_work="$DHT_WORK"
+    printf '#!/bin/sh\nexit 0\n' >"$helper-empty"
+    printf '#!/bin/sh\nprintf "plausible-token\\n"\nexit 1\n' >"$helper-failing"
+    printf '#!/bin/sh\nexit 0\n' >"$helper-nonexec"
+    chmod 700 "$helper-empty" "$helper-failing"
+    for spawn_kind in node command; do
+        for token_case in missing nonexec empty failing valid; do
+            token_status=0
+            (
+                # Expected refusals belong to this fixture's log, not the
+                # enclosing successful selftest's FAILURE artifact.
+                DHT_WORK=""
+                PROCESS_START_TOKEN="$helper-$token_case"
+                [ "$token_case" != valid ] || PROCESS_START_TOKEN="$SCRIPT_DIR/process-start-token.sh"
+                dht_process_group_exec() { printf 'launched\n' >"$token_work/token-launched"; }
+                dht_register_owned_group() { wait "$1"; }
+                dht_record_started_arguments() { :; }
+                if [ "$spawn_kind" = node ]; then
+                    dht_spawn fixture_pid "$token_work" 1 2 3 4
+                else
+                    dht_spawn_owned_command fixture_pid "$token_work/token-child.log" true
+                fi
+            ) >"$DHT_WORK/token-$spawn_kind-$token_case.log" 2>&1 || token_status=$?
+            if [ "$token_case" = valid ]; then
+                [ "$token_status" -eq 0 ] && [ -f "$DHT_WORK/token-launched" ] ||
+                    dht_die "$spawn_kind refused a valid ownership helper"
+                rm "$DHT_WORK/token-launched"
+            else
+                [ "$token_status" -eq 2 ] && [ ! -e "$DHT_WORK/token-launched" ] &&
+                    grep -q PROCESS_START_TOKEN_UNAVAILABLE "$DHT_WORK/token-$spawn_kind-$token_case.log" ||
+                    dht_die "$spawn_kind did not refuse $token_case ownership helper before launch"
+            fi
+        done
+    done
+    dht_note "PASS ownership helper preflight: missing, nonexecutable, empty, failing, valid; both spawn paths"
+
     # Peer argument hardening: an identity-datadir long enough to truncate
     # the v2_identity.key path must be refused by name (exit 2), not split
     # before read_exact_0600 can open the chopped path. The online-key and

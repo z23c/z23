@@ -159,6 +159,54 @@ else
     pass "matching remote platform passes preflight"
 fi
 
+# Fixture only: boot-session equality rejects aliases, not shared hardware.
+identity_fn="$(awk '/^cj_boot_identity\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$JOURNEY")"
+distinct_fn="$(awk '/^cj_require_distinct_boots\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$JOURNEY")"
+[ -n "$identity_fn" ] && [ -n "$distinct_fn" ] || exit 2
+eval "$identity_fn"
+ssh() { printf '%s\n' "$identity_fixture"; return "$identity_status"; }
+identity_fixture=ABCDEF01-2345-6789-ABCD-EF0123456789
+identity_status=0
+upper="$(cj_boot_identity alias Linux)"
+identity_fixture=abcdef01-2345-6789-abcd-ef0123456789
+[ "$upper" = "$(cj_boot_identity alias Darwin)" ] || fail "boot UUID case normalization differs"
+for identity_fixture in '' invalid 00000000-0000-0000-0000-000000000000; do
+    if cj_boot_identity alias Linux >/dev/null 2>&1; then fail "invalid boot UUID accepted"; fi
+done
+identity_fixture=abcdef01-2345-6789-abcd-ef0123456789
+identity_status=1
+if cj_boot_identity alias Darwin >/dev/null 2>&1; then fail "failed identity producer accepted plausible stdout"; fi
+if cj_boot_identity alias Unknown >/dev/null 2>&1; then fail "unknown identity platform accepted"; fi
+# Substitute only observations to exercise every equality pair with no SSH.
+eval "$distinct_fn"
+cj_boot_identity() {
+    case "$1" in '') printf '%s' "$fixture_a";; b) printf '%s' "$fixture_b";; c) printf '%s' "$fixture_c";; esac
+}
+CJ_TWOHOST=0 CJ_MULTIHOST=1 CJ_HOST_B=b CJ_HOST_C=c DHT_SSH=ssh
+fixture_a=a fixture_b=b fixture_c=c
+DHT_WORK="$(mktemp -d "${TMPDIR:-/tmp}/commons-host-identity.XXXXXX")"
+if ! cj_require_distinct_boots; then fail "distinct boot sessions refused"; fi
+for collision in ab ac bc; do
+    fixture_a=a fixture_b=b fixture_c=c
+    case "$collision" in ab) fixture_b=a;; ac) fixture_c=a;; bc) fixture_c=b;; esac
+    if cj_require_distinct_boots >/dev/null 2>&1; then fail "equal boot pair $collision accepted"; fi
+done
+# Append to proposed identity regression before its temporary-directory cleanup.
+CJ_BOOT_A=inherited CJ_BOOT_B=inherited CJ_BOOT_C=inherited DHT_SSH=fixture-shim
+if ! cj_require_distinct_boots; then fail "local shim refused plumbing preflight"; fi
+[ -z "$CJ_BOOT_A$CJ_BOOT_B$CJ_BOOT_C" ] || fail "shim preserved inherited boot identities"
+[ "$CJ_TOPOLOGY_BASIS" = plumbing_only_host_topology_unvalidated ] || fail "shim topology not downgraded"
+# These assertions bind both output owners to the same preflight qualifier.
+facts_fn="$(awk '/^cj_write_facts\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$JOURNEY")"
+grep -qF 'topology_basis        = %s' <<<"$facts_fn" || fail "facts omit topology qualifier"
+grep -qF 'custom SSH plumbing only; host topology unvalidated' <<<"$facts_fn" || fail "facts omit shim limitation"
+grep -qF '\"topology_basis\":\"$CJ_TOPOLOGY_BASIS\"' "$JOURNEY" || fail "JSON omits topology qualifier"
+rm -r "$DHT_WORK"
+identity_at="$(printf '%s\n' "$setup" | grep -nF 'cj_require_distinct_boots || return 1' | head -1 | cut -d: -f1 || true)"
+if [ -z "$identity_at" ] || [ "$identity_at" -ge "$scratch_at" ] || [ "$identity_at" -ge "$ship_at" ]; then
+    fail "boot identity check must precede remote scratch and shipment"
+fi
+
 # The carried-cache rebuild on host C is judged by the toolchain capsule each
 # node reports, never by the cc banner. A physical three-host run had host B
 # and host C print the same `cc --version` and `as --version` banners while
@@ -240,6 +288,14 @@ fi
 LIFECYCLE="$SELF_DIR/node_lifecycle.sh"
 [ -r "$LIFECYCLE" ] || { fail "cannot read $LIFECYCLE"; exit 2; }
 
+REPO_ROOT_SELFTEST="$(cd "$SELF_DIR/../.." && pwd)"
+# Lint builds these helpers before gates run; never race sibling gates by
+# launching a nested build from this fixture.
+for ORPH_NEED in process-group-exec arena_product_journey_c23; do
+    [ -x "$REPO_ROOT_SELFTEST/build/bin/$ORPH_NEED" ] ||
+        { fail "missing build/bin/$ORPH_NEED (LINT_BUILT_PREREQS did not build it); the runtime scenarios cannot run"; exit 2; }
+done
+
 # stop_case NAME CHILD_SCRIPT SIG GRACE -> sets STOP_OUT and STOP_SECS.
 # CHILD_SCRIPT creates the file named by its first argument once its traps are
 # installed. A signal sent earlier is lost if the process group does not exist
@@ -253,7 +309,7 @@ stop_case() {
         # shellcheck source=/dev/null
         source "$LIFECYCLE"
         DHT_STOP_GRACE_S="$grace"; DHT_STOP_POLL_S=0.1
-        setsid bash -c "$child" stop-case "$dir/ready" >/dev/null 2>&1 &
+        "$REPO_ROOT_SELFTEST/build/bin/process-group-exec" bash -c "$child" stop-case "$dir/ready" >/dev/null 2>&1 &
         pgid=$!
         DHT_OWNED_PGIDS[$pgid]=1
         for ((i = 0; i < 300; i++)); do
@@ -331,16 +387,6 @@ fi
 # This drives the real dht_spawn incantation over a local ssh shim; the
 # stand-in daemon is the shipped listen-report helper holding a real
 # ephemeral port. It proves harness supervision, not node behaviour.
-REPO_ROOT_SELFTEST="$(cd "$SELF_DIR/../.." && pwd)"
-# The runtime scenario execs and copies two binaries. The lint umbrellas
-# build them through LINT_BUILT_PREREQS before any gate script runs — a
-# nested make here would be the unlink/write race that destabilizes sibling
-# gates sharing the proof generation worktree — so their absence is a
-# wiring bug to refuse, not something this script repairs.
-for ORPH_NEED in process-group-exec arena_product_journey_c23; do
-    [ -x "$REPO_ROOT_SELFTEST/build/bin/$ORPH_NEED" ] ||
-        { fail "missing build/bin/$ORPH_NEED (LINT_BUILT_PREREQS did not build it); the runtime orphan scenario cannot run"; exit 2; }
-done
 SPAWN_FN="$(awk '/^dht_spawn\(\) \{/{f=1} f{print} f&&/^\}/{exit}' "$LIFECYCLE")"
 [ -n "$SPAWN_FN" ] || { fail "dht_spawn() not found in $LIFECYCLE"; exit 2; }
 grep -qF -- '--die-with-lease' <<<"$SPAWN_FN" ||
@@ -501,7 +547,9 @@ done
 # Capture the actual transport command construction; start no scheduler or node.
 # The source functions remain the authority for argv and lease/PID phases.
 SCHEDULING="$(mktemp -d "${TMPDIR:-/tmp}/z23-journey-scheduling.XXXXXX")"
-for function_name in cj_local_build_native cj_scheduled_on; do
+for function_name in cj_remote_admission cj_node_rpc cj_node_dir \
+                     cj_pause_remote_for_local_build cj_resume_remote_after_local_build \
+                     cj_local_build_native cj_scheduled_on; do
     awk -v name="$function_name" '$0 == name "() {" {f=1} f {print} f && /^}/ {exit}' \
         "$JOURNEY" >>"$SCHEDULING/functions.sh"
 done
@@ -520,27 +568,103 @@ if (
     grep -qF -- '"$HOME/.local/bin/devbuild" --wait --project z23' "$SCHEDULING/command" || exit 1
     printf '%s\n' '/fixture path' 5 fixture-command 'literal argument' >"$SCHEDULING/expected"
     cmp "$SCHEDULING/expected" "$SCHEDULING/arguments" || exit 1
-    CJ_TWOHOST=1 CJ_REMOTE_BUILD_PAUSED=1 B_RPC=29999
+    CJ_TWOHOST=1 CJ_MULTIHOST=0 CJ_REMOTE_BUILD_PAUSED=1 B_RPC=29999 C_RPC=29998
     CJ_RDIR_B='/fixture path' DHT_DD_B='/fixture datadir'
-    for route in cj_local_build_native cj_scheduled_on; do
-        "$route" b fixture-command 'literal argument' >/dev/null || exit 1
+    CJ_RDIR_C='/fixture C path' DHT_DD_C='/fixture C datadir'
+    for topology_node in two:b multi:b multi:c; do
+      CJ_TWOHOST=0 CJ_MULTIHOST=1
+      [ "$topology_node" != two:b ] || { CJ_TWOHOST=1; CJ_MULTIHOST=0; }
+      node="${topology_node#*:}"
+      CJ_REMOTE_BUILD_NODE="$node"
+      dir="$(cj_node_dir "$node")"; rpc="$(cj_node_rpc "$node")"
+      case "$node" in b) dd="$DHT_DD_B" ;; c) dd="$DHT_DD_C" ;; esac
+      for route in cj_local_build_native cj_scheduled_on; do
+        "$route" "$node" fixture-command 'literal argument' >/dev/null || exit 1
         ! grep -Eq -- '--exclusive|systemd-run|CPUQuota|MemoryMax|taskset' "$SCHEDULING/command" || exit 1
         grep -qF -- '"$HOME/.local/bin/devbuild" --wait --project z23 "$@"' "$SCHEDULING/command" || exit 1
         if [ "$route" = cj_local_build_native ]; then
-            printf '%s\n' '/fixture path' '/fixture path/bin/zclassic23' \
-                '-datadir=/fixture datadir' '-rpcport=29999' -regtest \
+            printf '%s\n' "$dir" "$dir/bin/zclassic23" \
+                "-datadir=$dd" "-rpcport=$rpc" -regtest \
                 fixture-command 'literal argument' >"$SCHEDULING/expected"
         else
-            printf '%s\n' '/fixture path' fixture-command 'literal argument' \
+            printf '%s\n' "$dir" fixture-command 'literal argument' \
                 >"$SCHEDULING/expected"
         fi
         cmp "$SCHEDULING/expected" "$SCHEDULING/arguments" || exit 1
+      done
     done
 ); then
     pass "actual node, package and test commands reuse ordinary host admission"
 else
     fail "journey command construction reserves exclusive or nested resources"
 fi
+
+# Exercise phase state and restart routes with mocks, never a node or scheduler.
+if (
+    . "$SCHEDULING/functions.sh"
+    CJ_TWOHOST=0 CJ_MULTIHOST=1 CJ_REMOTE_BUILD_PAUSED=0
+    DHT_WORK="$SCHEDULING" DHT_PGID_A=101 DHT_PGID_B=102 DHT_PGID_C=103
+    CJ_PEER_ADDR_A=a CJ_PEER_ADDR_B=b CJ_PEER_ADDR_C=c
+    A_PORT=1 B_PORT=2 C_PORT=3 B_RPC=4 C_RPC=5 B_FS=6 C_FS=7 B_HTTPS=8 C_HTTPS=9
+    DHT_DD_B=/b DHT_DD_C=/c
+    cj_die() { printf '%s\n' "$*" >&2; return 1; }
+    b_rpc() { return 1; }; c_rpc() { return 1; }
+    dht_kill_group() { printf '%s\n' "$1" >"$SCHEDULING/stopped"; }
+    dht_spawn() { printf -v "$1" '%s' 201; printf '%s\n' "${@:2}" >"$SCHEDULING/restart"; }
+    cj_wait_rpc_or_die() { :; }; dht_wait_connected() { :; }
+    cj_pause_remote_for_local_build b || exit 1
+    [ -z "$DHT_PGID_B" ] && [ "$CJ_REMOTE_BUILD_NODE" = b ] || exit 1
+    cj_resume_remote_after_local_build || exit 1
+    [ "$(tail -1 "$SCHEDULING/restart")" = a:1 ] || exit 1
+    DHT_PGID_A=""
+    cj_pause_remote_for_local_build c || exit 1
+    [ -z "$DHT_PGID_C" ] && [ "$CJ_REMOTE_BUILD_NODE" = c ] || exit 1
+    cj_resume_remote_after_local_build || exit 1
+    [ "$(tail -1 "$SCHEDULING/restart")" = b:2 ] || exit 1
+    cj_pause_remote_for_local_build b || exit 1
+    cj_resume_remote_after_local_build || exit 1
+    [ "$(tail -1 "$SCHEDULING/restart")" = c:3 ] || exit 1
+    dht_node_exec() { return 75; }
+    cj_pause_remote_for_local_build c || exit 1
+    if cj_scheduled_on b true; then exit 1; fi
+    if cj_scheduled_on c true; then exit 1; fi
+    if cj_local_build_native c true; then exit 1; fi
+    if cj_pause_remote_for_local_build b; then exit 1; fi
+    CJ_REMOTE_BUILD_PAUSED=0
+    dht_kill_group() { return 1; }
+    if cj_pause_remote_for_local_build b; then exit 1; fi
+    [ -n "$DHT_PGID_B" ] && [ "$CJ_REMOTE_BUILD_PAUSED" = 0 ] || exit 1
+    dht_kill_group() { printf '%s\n' "$1" >"$SCHEDULING/stopped"; }
+    c_rpc() { printf 'observed\n' >"$SCHEDULING/rpc-observed"; return 0; }
+    DHT_PGID_C=103
+    if cj_pause_remote_for_local_build c 2>"$SCHEDULING/live-rpc-refusal"; then exit 1; fi
+    grep -qxF 'remote worker still answers during offline build phase' "$SCHEDULING/live-rpc-refusal" || exit 1
+    [ -f "$SCHEDULING/rpc-observed" ] && [ "$(cat "$SCHEDULING/stopped")" = 103 ] || exit 1
+    [ -z "$DHT_PGID_C" ] && [ "$CJ_REMOTE_BUILD_PAUSED" = 0 ] || exit 1
+    dht_node_exec() { printf 'unexpected\n' >"$SCHEDULING/unpaused-transport"; return 75; }
+    for route in cj_local_build_native cj_scheduled_on; do
+        if "$route" b true 2>"$SCHEDULING/unpaused-refusal"; then exit 1; fi
+        grep -qF 'was not phased for this node' "$SCHEDULING/unpaused-refusal" || exit 1
+        [ ! -e "$SCHEDULING/unpaused-transport" ] || exit 1
+    done
+    c_rpc() { return 1; }; DHT_PGID_C=103
+    cj_pause_remote_for_local_build c || exit 1
+    DHT_PGID_B=""
+    if cj_resume_remote_after_local_build; then exit 1; fi
+    CJ_REMOTE_BUILD_PAUSED=0 CJ_TWOHOST=0 CJ_MULTIHOST=0
+    cj_pause_remote_for_local_build a || exit 1
+    [ "$CJ_REMOTE_BUILD_PAUSED" = 0 ] || exit 1
+    cj_a() { printf 'local\n'; }
+    [ "$(cj_local_build_native a true)" = local ] || exit 1
+); then
+    pass "both remote nodes phase admission and restart toward live peers; refusals propagate"
+else
+    fail "remote receiver admission phase or failure handling regressed"
+fi
+grep -qF 'if [ "$CJ_MULTIHOST" = 1 ]; then DHT_REMOTE_DEVBUILD=1; fi' "$JOURNEY" ||
+    fail "three-host nodes bypass receiving-host scheduler admission"
+grep -qF 'remote scheduler mapped-image qualification requires Linux' <<<"$setup" ||
+    fail "real non-Linux topology lacks an early named refusal"
 rm -rf "$SCHEDULING"
 
 [ "$FAIL" -eq 0 ] || exit 1
