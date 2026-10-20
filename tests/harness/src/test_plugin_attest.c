@@ -16,6 +16,7 @@
 #include "plugin/plugin_store.h"
 
 #include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -383,6 +384,25 @@ static int pat_case_malformed_file(void)
     return failures;
 }
 
+static int pat_case_readdir_error(void)
+{
+    int failures = 0;
+    struct pat_fx fx;
+    struct plugin_attest_report rep;
+    char dir[PATH_MAX];
+    TEST_CASE("a directory read error is PLUGIN_ATTEST_IO, not a shorter directory") {
+        ASSERT(pat_open(&fx) && pat_pin(&fx, 2) && pat_dir(&fx, dir));
+        ASSERT_EQ(pat_make(&fx, 0, fx.exe, "hello", PAT_ROOT_A, "gcc-14", dir), PLUGIN_ATTEST_OK);
+        ASSERT_EQ(pat_make(&fx, 1, fx.exe, "hello", PAT_ROOT_A, "clang-19", dir), PLUGIN_ATTEST_OK);
+        plugin_attest_test_fail_readdir(3);
+        ASSERT_EQ(pat_verify(&fx, dir, 1, NULL, &rep), PLUGIN_ATTEST_IO);
+        plugin_attest_test_fail_readdir(UINT32_MAX);
+        ASSERT_EQ(pat_verify(&fx, dir, 2, NULL, &rep), PLUGIN_ATTEST_OK);
+        pat_close(&fx);
+    } TEST_END
+    return failures;
+}
+
 static int pat_case_pins(void)
 {
     int failures = 0;
@@ -559,6 +579,7 @@ int test_plugin_attest(void)
     failures += pat_case_other_refusals();
     failures += pat_case_bad_signature();
     failures += pat_case_malformed_file();
+    failures += pat_case_readdir_error();
     failures += pat_case_pins();
     failures += pat_case_parser();
     failures += pat_case_deterministic();

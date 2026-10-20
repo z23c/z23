@@ -539,7 +539,8 @@ sorted file order; the first bad one refuses the whole directory:
 | --- | --- |
 | `PLUGIN_ATTEST_THRESHOLD_INVALID` | The threshold is below 1. |
 | `PLUGIN_ATTEST_THRESHOLD_EXCEEDS_PINS` | The threshold is above the distinct pinned builders. |
-| `PLUGIN_ATTEST_MALFORMED` | A record is not the canonical encoding. |
+| `PLUGIN_ATTEST_MALFORMED` | A record is not the canonical encoding, or a `*.attest.json` file name is 256 bytes or more (refused, never skipped). |
+| `PLUGIN_ATTEST_IO` | The attestation directory could not be read completely; a read error partway never counts as a shorter directory. |
 | `PLUGIN_ATTEST_SIG_BAD` | A record's signature does not verify under its builder key. |
 | `PLUGIN_ATTEST_SUBJECT_MISMATCH` | A record names another plugin name or version. |
 | `PLUGIN_ATTEST_BUILDER_UNPINNED` | A record's builder key is not in the pin file. |

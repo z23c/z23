@@ -132,4 +132,9 @@ enum plugin_attest_status plugin_attest_verify_dir(
     const char *builders_path, int64_t threshold, const char *expected_root,
     struct plugin_attest_report *report);
 
+#ifdef ZCL_TESTING
+/* Test seam: after `after` directory entries the scan fails with EIO once. */
+void plugin_attest_test_fail_readdir(unsigned after);
+#endif
+
 #endif

@@ -14,6 +14,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -223,14 +224,55 @@ static int pav_cmp(const void *a, const void *b)
 
 typedef char pav_leaf[256];
 
-static bool pav_is_attestation(const char *name)
+/* 0 not an attestation, 1 an attestation, 2 a suffixed name too long to keep:
+ * refused as a stray record, never skipped. */
+static int pav_classify(const char *name)
 {
     size_t n = strlen(name), sfx = strlen(PLUGIN_ATTEST_SUFFIX);
-    return n > sfx && n < sizeof(pav_leaf) &&
-           strcmp(name + n - sfx, PLUGIN_ATTEST_SUFFIX) == 0;
+    if (n <= sfx || strcmp(name + n - sfx, PLUGIN_ATTEST_SUFFIX) != 0)
+        return 0;
+    return n < sizeof(pav_leaf) ? 1 : 2;
 }
 
-/* Sorted leaf names, so a refusal and a count do not depend on readdir order. */
+#ifdef ZCL_TESTING
+static unsigned pav_fail_after = UINT32_MAX;
+void plugin_attest_test_fail_readdir(unsigned after)
+{
+    pav_fail_after = after;
+}
+#endif
+
+/* NULL with errno set is a read error; NULL with errno 0 is the end. */
+static struct dirent *pav_next(DIR *d)
+{
+    errno = 0;
+#ifdef ZCL_TESTING
+    if (pav_fail_after != UINT32_MAX) {
+        if (pav_fail_after-- == 0) {
+            pav_fail_after = UINT32_MAX;
+            errno = EIO;
+            return NULL;
+        }
+    }
+#endif
+    return readdir(d);
+}
+
+static enum plugin_attest_status pav_take(pav_leaf *leaves, size_t *count, const char *name)
+{
+    int kind = pav_classify(name);
+    if (kind == 0)
+        return PLUGIN_ATTEST_OK;
+    if (kind == 2)
+        return PLUGIN_ATTEST_MALFORMED;
+    if (*count >= PLUGIN_ATTEST_FILES_MAX)
+        return PLUGIN_ATTEST_TOO_MANY_FILES;
+    snprintf(leaves[(*count)++], sizeof(pav_leaf), "%s", name);
+    return PLUGIN_ATTEST_OK;
+}
+
+/* Sorted leaf names, so a refusal and a count do not depend on readdir order.
+ * A read error partway is PLUGIN_ATTEST_IO, never a shorter directory. */
 static enum plugin_attest_status pav_list(const char *dir, pav_leaf *leaves, size_t *count)
 {
     DIR *d = opendir(dir);
@@ -239,14 +281,10 @@ static enum plugin_attest_status pav_list(const char *dir, pav_leaf *leaves, siz
     enum plugin_attest_status st = PLUGIN_ATTEST_OK;
     struct dirent *e;
     *count = 0;
-    while (st == PLUGIN_ATTEST_OK && (e = readdir(d)) != NULL) {
-        if (!pav_is_attestation(e->d_name))
-            continue;
-        if (*count >= PLUGIN_ATTEST_FILES_MAX)
-            st = PLUGIN_ATTEST_TOO_MANY_FILES;
-        else
-            snprintf(leaves[(*count)++], sizeof(pav_leaf), "%s", e->d_name);
-    }
+    while (st == PLUGIN_ATTEST_OK && (e = pav_next(d)) != NULL)
+        st = pav_take(leaves, count, e->d_name);
+    if (st == PLUGIN_ATTEST_OK && errno != 0)
+        st = PLUGIN_ATTEST_IO;
     closedir(d);
     if (st == PLUGIN_ATTEST_OK && *count > 1)
         qsort(leaves, *count, sizeof(pav_leaf), pav_cmp);
