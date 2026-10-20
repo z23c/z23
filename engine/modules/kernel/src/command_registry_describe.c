@@ -167,6 +167,8 @@ static bool describe_push_head(struct json_value *root,
     if (spec->availability_reason && spec->availability_reason[0])
         ok = ok && json_push_kv_str(root, "availability_reason",
                                     spec->availability_reason);
+    if (spec->compat_target && spec->compat_target[0])
+        ok = ok && json_push_kv_str(root, "compat_target", spec->compat_target);
     return ok && json_push_kv_str(root, "registry_digest", digest);
 }
 

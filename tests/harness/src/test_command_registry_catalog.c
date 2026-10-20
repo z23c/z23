@@ -5630,6 +5630,45 @@ static int test_leaf_semantics_and_budget(void)
     return failures;
 }
 
+static int test_dev_compat_guidance(void)
+{
+    int failures = 0;
+    const struct zcl_command_registry *reg = zcl_command_catalog();
+    char out[16384];
+    TEST("landing status names its developer binary without public execution") {
+        const struct zcl_command_spec *spec = find_spec(reg, "dev.land.status");
+        ASSERT(spec != NULL);
+        ASSERT_STR_EQ(spec->example, "z23-dev dev land status");
+        size_t n = zcl_command_registry_describe_json(reg, spec->path, out, sizeof(out));
+        struct json_value description;
+        json_init(&description);
+        ASSERT(n > 0 && json_read(&description, out, n));
+        ASSERT_STR_EQ(json_get_str(json_get(&description, "example")),
+                      "z23-dev dev land status");
+        if (spec->availability == ZCL_COMMAND_COMPAT) {
+            ASSERT(spec->handler == NULL);
+            ASSERT_STR_EQ(json_get_str(json_get(&description, "compat_target")),
+                          "z23-dev dev land status");
+            enum zcl_command_exit code;
+            ASSERT(exec_leaf(reg, spec, out, sizeof(out), &code));
+            ASSERT_EQ(code, ZCL_COMMAND_EXIT_BLOCKED);
+            struct json_value refusal;
+            json_init(&refusal);
+            ASSERT(json_read(&refusal, out, strlen(out)));
+            ASSERT_STR_EQ(json_get_str(json_get(json_get(&refusal, "error"), "code")),
+                          "COMMAND_COMPAT_ONLY");
+            json_free(&refusal);
+        } else {
+            ASSERT_EQ(spec->availability, ZCL_COMMAND_READY);
+            ASSERT(spec->handler != NULL);
+            ASSERT(json_get(&description, "compat_target") == NULL);
+        }
+        json_free(&description);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* OS-B1: describe surfaces the semantics contract and effective budget. */
 static int test_describe_emits_semantics(void)
 {
@@ -6787,6 +6826,7 @@ int test_command_registry_catalog(void)
     failures += test_leaf_parent_refused();
     failures += test_leaf_semantics_and_budget();
     failures += test_describe_emits_semantics();
+    failures += test_dev_compat_guidance();
     failures += test_every_describe_document_fits();
     failures += test_latency_budget_mapping();
     failures += test_envelope_carries_latency_contract();

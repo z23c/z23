@@ -2109,13 +2109,13 @@ ZCL_COMMAND_DEV_READ(
     "mutated.", 65536,
     "land,status,queue,proof,hold",
     "zcl.land_status_input.v1", "zcl.land.v1", "json", "",
-    "z23 dev land status",
+    "z23-dev dev land status",
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_MODERATE,
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
     ZCL_COMMAND_TRAIT_DEV_ONLY, zcl_native_handle_dev_land,
     "the landing queue is a development-lane coordination surface",
-    "z23 dev land status")
+    "z23-dev dev land status")
 
 ZCL_COMMAND_DEV_COMMAND(
     "dev.land.step", "dev.land", "",
@@ -2652,28 +2652,28 @@ ZCL_COMMAND_BRANCH("dev.app.machine", "dev.app",
 ZCL_COMMAND_DEV_COMMAND(
     "dev.app.machine.boot", "dev.app.machine", "dev.machine.boot",
     "Boot a RISC-V kernel in the built-in machine and report the run",
-    "Boot RV64 ELF/flat; disk optional. Report stop, work, console, "
+    "Boot RV64 ELF/flat; optional disk. Report stop/work/console/"
     "script/overlay/inputs. max_instr bounds retired+firmware+device "
-    "work, including started 4096-byte disk/entropy rounds. Ordinary runs use "
-    "no host clock. type_after sends [marker,text] on console suffixes; until "
-    "stops after its last step. Goals, faults, limits, input changes and "
-    "transcript errors fail with evidence. Transcripts need fresh paths. "
+    "work, including started 4096-byte disk/entropy rounds. Ordinary runs "
+    "use no host clock. type_after sends [marker,text] on console suffixes; "
+    "until stops after its last step. Goals/faults/limits/input changes/"
+    "transcript errors fail with evidence; transcripts require fresh paths. "
     "No chain/network access. test_entropy_seed is repeatable, NOT secure; "
-    "early_seed test requires that seed and ELF, supplies 2048 insecure bytes "
-    "and reports clearing. entropy host uses OS RNG, excludes test seeds and "
-    "permits early_seed host; failure refuses. No source means no "
-    "entropy device. OS delivery proves neither guest RNG readiness nor key safety. "
+    "early_seed test requires it and ELF, supplies 2048 insecure bytes "
+    "and reports clearing. entropy host uses OS RNG; no test seeds; "
+    "early_seed host allowed; RNG failure refuses. No source, no entropy "
+    "device. OS delivery proves no guest RNG readiness or key safety. "
     "accepted_kernel checks installed output byte limits before/after; "
     "guest recipes remain unqualified. public_kernel reads bounded fixed PUBLIC "
-    "copied CAS observations. protected_kernel selects separate "
-    "fixed protected image/evidence. Neither observation installs software or "
-    "proves licensing. public_unlock accepts only the PUBLIC literal fixture; "
-    "no arbitrary credential, private identity, transcript or SSH readiness. "
-    "protected_unlock requires current invocation authority and either native "
+    "copied CAS observations; protected_kernel selects separate fixed "
+    "protected image/evidence. Neither installs software or "
+    "proves licensing. public_unlock: PUBLIC literal fixture only; "
+    "no arbitrary credential/private identity/transcript/SSH readiness. "
+    "protected_unlock needs current invocation authority plus native "
     "OS-RNG INITIAL creation or an existing locked credential. "
-    "Autostart configuration is separate. ports allows one/two test-only "
-    "regular input/expect pairs, 65536 total bytes: exact replies and consumption "
-    "within the work budget, no host transport or secrets. docs/commons/RISCV_MACHINE.md.", 8192,
+    "Autostart is configured separately. ports allows one/two test-only "
+    "regular input/expect pairs, 65536 bytes total: exact replies/consumption "
+    "within work budget; no host transport/secrets. docs/commons/RISCV_MACHINE.md.", 8192,
     "machine,riscv,rv64,boot,kernel,emulator,freebsd,console,transcript,deterministic",
     "zcl.dev_machine_boot_input.v1", "zcl.dev_machine_boot.v1",
     "kernel,accepted_kernel,public_kernel,protected_kernel,builtin_kernel,disk,ram_mib,bootargs,max_instr,until,type_after,transcript,"
