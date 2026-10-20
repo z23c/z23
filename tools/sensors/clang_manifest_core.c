@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 static const char *const k_cm_env[] = {VCS_SEMANTIC_ENV_V1_ALLOWLIST};
@@ -114,6 +115,16 @@ bool cm_core_init(struct cm_core *c, const char *root)
                                     : home[0] != '/' ? "not absolute"
                                                      : "does not resolve");
     c->home_len = strlen(c->home);
+    c->host_resource_root_len = 0;
+#if defined(CM_HOST_RESOURCE_DIR)
+    struct stat resource_stat;
+    if (realpath(CM_HOST_RESOURCE_DIR, c->host_resource_root) == NULL ||
+        strcmp(c->host_resource_root, "/") == 0 ||
+        stat(c->host_resource_root, &resource_stat) != 0 ||
+        !S_ISDIR(resource_stat.st_mode))
+        return cm_fail(c, "build-selected compiler resource directory does not resolve");
+    c->host_resource_root_len = strlen(c->host_resource_root);
+#endif
     c->b = vcs_semantic_builder_v1_new();
     return c->b != NULL || cm_fail(c, "cannot create the manifest builder");
 }

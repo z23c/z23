@@ -132,19 +132,26 @@ macro_rows() {  # TOK ARGN FILE... ; ZCL_JOIN_LAST=1 to concatenate trailing lit
 #    documented CLI example, and its bound handler symbol. ────────────────
 # Emits: macro <TAB> leaf <TAB> example <TAB> handler_symbol
 CATALOG_AWK='
-{ buf = buf $0 "\n" }
+{
+    lines[NR] = $0 "\n"
+    if (substr($0, 1, 12) == "ZCL_COMMAND_")
+        starts[++count] = NR
+}
 END {
-    n = length(buf)
-    i = 1
-    while (i <= n) {
-        if (substr(buf, i, 12) != "ZCL_COMMAND_" || (i > 1 && substr(buf, i - 1, 1) != "\n")) {
-            i++; continue
-        }
+    consumed = 0
+    for (candidate = 1; candidate <= count; candidate++) {
+        line = starts[candidate]
+        if (line <= consumed) continue
+        buf = lines[line]; n = length(buf); i = 1
         j = i; name = ""
         while (j <= n && substr(buf, j, 1) ~ /[A-Za-z0-9_]/) { name = name substr(buf, j, 1); j++ }
-        if (substr(buf, j, 1) != "(") { i = j; continue }
+        if (substr(buf, j, 1) != "(") { consumed = line; continue }
         j++; depth = 1; in_str = 0; esc = 0; spec = ""
-        while (j <= n && depth > 0) {
+        while (line <= NR && depth > 0) {
+            if (j > n) {
+                buf = lines[++line]; n = length(buf); j = 1
+                continue
+            }
             c = substr(buf, j, 1)
             if (in_str) {
                 if (esc) { esc = 0 }
@@ -173,7 +180,7 @@ END {
             h = substr(spec, RSTART, RLENGTH); gsub(/[ \t\n]/, "", h)
         }
         if (leaf != "") print name "\t" leaf "\t" ex "\t" h
-        i = j
+        consumed = line
     }
 }'
 

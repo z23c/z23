@@ -1113,24 +1113,40 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     # must still be readable through /proc/<pid>/exe even though the
     # original on-disk pathname is now gone. Reproduces the exact failure
     # mode confirmed live on node1 2026-09-07 by copying a real long-running
-    # binary, deleting it out from under the running copy, no compiler
-    # required. Darwin only offers the pathname fallback: test that path
+    # binary and deleting it out from under the running copy. The fixture
+    # signals readiness from main: ps can expose its pathname before startup
+    # finishes, so pathname visibility alone does not authorize unlink.
+    # Darwin only offers the pathname fallback: test that path
     # while it exists and its loss after unlink, without claiming a procfs
     # handle survived. Linux must still prove the stronger deleted-inode rail.
     exe_root="$test_tmp/exe"
     mkdir -p "$exe_root"
     exe_root="$(cd "$exe_root" && pwd -P)"
-    sleep_src="$(command -v sleep)"
+    cat > "$exe_root/source.c" <<'EXE_FIXTURE'
+#include <fcntl.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    int ready = open(argv[1], O_WRONLY | O_CREAT | O_EXCL, 0600);
+    if (ready < 0) return 3;
+    if (write(ready, "1", 1) != 1) { close(ready); return 4; }
+    if (close(ready) != 0) return 5;
+    for (;;) pause();
+}
+EXE_FIXTURE
+    sleep_src="$exe_root/source-exe"
+    cc -std=c23 "$exe_root/source.c" -o "$sleep_src"
     cp "$sleep_src" "$exe_root/z23-selftest-exe"
-    "$exe_root/z23-selftest-exe" 20 &
+    "$exe_root/z23-selftest-exe" "$exe_root/ready" &
     exe_pid=$!
     trap 'kill "$exe_pid" 2>/dev/null || true; wait "$exe_pid" 2>/dev/null || true; find "$test_tmp" -depth -delete' EXIT HUP INT TERM
-    # Wait for the copy to actually be running before deleting it out from
-    # under itself — a race here would delete before exec ever opened it.
+    # Wait for the owned copy to enter main before deleting its pathname.
     for _ in 1 2 3 4 5 6 7 8 9 10; do
-        [ "$(ship_exe_of "$exe_pid")" = "$exe_root/z23-selftest-exe" ] && break
+        [ -s "$exe_root/ready" ] && kill -0 "$exe_pid" 2>/dev/null && break
         sleep 0.2
     done
+    [ "$(cat "$exe_root/ready")" = 1 ]
+    kill -0 "$exe_pid"
     [ "$(ship_exe_of "$exe_pid")" = "$exe_root/z23-selftest-exe" ]
     src_sha="$(ship_sha256_stream < "$sleep_src")"
     live_sha="$(ship_sha256_stream < "$(ship_exe_live_of "$exe_pid")")"

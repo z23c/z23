@@ -121,6 +121,10 @@ struct node_rpc_test_script {
     int alloc_adv_ms, grown_at, iseq, nw, nr, ww[8], wr[8];
 };
 void node_rpc_test_set_script(struct node_rpc_test_script *script);
+/* Force the connect report to pending and replace only its writable wait.
+ * The clock and deadline loop remain real; NULL restores ordinary transport. */
+typedef int (*node_rpc_test_connect_wait_fn)(int wait_ms, void *ctx);
+void node_rpc_test_set_connect_wait(node_rpc_test_connect_wait_fn wait, void *ctx);
 #endif
 
 #endif

@@ -739,7 +739,31 @@ enum platform_directory_result platform_directory_child_open_result(
     return valid_leaf(l)?PLATFORM_DIRECTORY_IO:PLATFORM_DIRECTORY_INVALID;
 }
 void platform_directory_child_close(struct platform_directory_child *f){if(f&&f->native!=UINTPTR_MAX){close(ff(f));platform_directory_child_init(f);}}
-bool platform_directory_child_info(struct platform_directory_child *f,struct platform_directory_child_info *o){struct stat s;if(!f||!o||fstat(ff(f),&s)||!S_ISREG(s.st_mode)||s.st_size<0)return false;*o=(struct platform_directory_child_info){.size=(uint64_t)s.st_size,.volume=(uint64_t)s.st_dev,.file_low=(uint64_t)s.st_ino,.file_high=0,.link_count=(uint64_t)s.st_nlink,.modified_seconds=(int64_t)s.st_mtime,.changed_seconds=(int64_t)s.st_ctime,.modified_nanoseconds=(uint32_t)s.st_mtim.tv_nsec,.changed_nanoseconds=(uint32_t)s.st_ctim.tv_nsec,.current_user_only=s.st_uid==geteuid()&&(s.st_mode&077)==0};return true;}
+bool platform_directory_child_info(struct platform_directory_child *f,
+                                   struct platform_directory_child_info *o)
+{
+    struct stat s;
+    if (!f || !o || fstat(ff(f), &s) || !S_ISREG(s.st_mode) || s.st_size < 0)
+        return false;
+    *o = (struct platform_directory_child_info){
+        .size = (uint64_t)s.st_size,
+        .volume = (uint64_t)s.st_dev,
+        .file_low = (uint64_t)s.st_ino,
+        .file_high = 0,
+        .link_count = (uint64_t)s.st_nlink,
+        .modified_seconds = (int64_t)s.st_mtime,
+        .changed_seconds = (int64_t)s.st_ctime,
+#if defined(__APPLE__)
+        .modified_nanoseconds = (uint32_t)s.st_mtimespec.tv_nsec,
+        .changed_nanoseconds = (uint32_t)s.st_ctimespec.tv_nsec,
+#else
+        .modified_nanoseconds = (uint32_t)s.st_mtim.tv_nsec,
+        .changed_nanoseconds = (uint32_t)s.st_ctim.tv_nsec,
+#endif
+        .current_user_only = s.st_uid == geteuid() && (s.st_mode & 077) == 0,
+    };
+    return true;
+}
 int64_t platform_directory_child_read(struct platform_directory_child *f,void*d,size_t s,uint64_t o){ssize_t n;do{n=pread(ff(f),d,s,(off_t)o);}while(n<0&&errno==EINTR);return n;}
 bool platform_directory_child_write(struct platform_directory_child *f,const void*d,size_t s,uint64_t o){const unsigned char*b=d;size_t done=0;while(done<s){ssize_t n=pwrite(ff(f),b+done,s-done,(off_t)(o+done));if(n<0&&errno==EINTR)continue;if(n<=0)return false;done+=(size_t)n;}return true;}
 bool platform_directory_child_truncate(struct platform_directory_child *f,uint64_t s){return ftruncate(ff(f),(off_t)s)==0;}

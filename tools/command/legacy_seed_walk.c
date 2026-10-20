@@ -129,8 +129,13 @@ static enum lseed_refusal lseed_take_entry(struct lseed_tree *t, int dirfd,
     }
     (void)snprintf(ent.rel, sizeof(ent.rel), "%s", rel);
     ent.size = S_ISREG(st->st_mode) ? (uint64_t)st->st_size : 0;
+#if defined(__APPLE__)
+    ent.mtime_s = st->st_mtimespec.tv_sec;
+    ent.mtime_ns = st->st_mtimespec.tv_nsec;
+#else
     ent.mtime_s = st->st_mtim.tv_sec;
     ent.mtime_ns = st->st_mtim.tv_nsec;
+#endif
     ent.mode = st->st_mode & 0777;
     ent.dir = S_ISDIR(st->st_mode);
     t->bytes += ent.size;

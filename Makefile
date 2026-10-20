@@ -8189,14 +8189,20 @@ $(BIN_DIR)/arena_view: tools/arena_view.c \
 # libclang 18 with pinned source headers or /usr's libclang 22 C API. An
 # explicit LLVM prefix wins.
 .PHONY: clang-manifest
+# Discover only when a tool recipe needs the default, once per Make process.
+ZCL_CHECKED_LLVM_DIR = $(eval ZCL_CHECKED_LLVM_DIR := $(shell ~/.local/bin/z23-clang check 2>/dev/null))$(ZCL_CHECKED_LLVM_DIR)
+ifeq ($(ZCL_HOST_OS),Darwin)
+CLANG_MANIFEST_LLVM_DIR ?= $(if $(and $(wildcard $(ZCL_CHECKED_LLVM_DIR)/include/clang-c/Index.h),$(wildcard $(ZCL_CHECKED_LLVM_DIR)/lib/libclang.dylib)),$(ZCL_CHECKED_LLVM_DIR))
+else
 CLANG_MANIFEST_LLVM_DIR ?= $(patsubst %/include/clang-c/Index.h,%,$(firstword \
 	$(wildcard /usr/lib/llvm-20/include/clang-c/Index.h \
 	           /usr/lib/llvm-21/include/clang-c/Index.h \
 	           /usr/lib/llvm-19/include/clang-c/Index.h \
 	           /usr/lib/llvm-18/include/clang-c/Index.h)))
+endif
 CLANG_MANIFEST_VENDOR_HDRS := $(wildcard vendor/clang-c-18/include/clang-c/*.h)
-ifeq ($(CLANG_MANIFEST_LLVM_DIR),)
 ifeq ($(ZCL_HOST_OS),Linux)
+ifeq ($(CLANG_MANIFEST_LLVM_DIR),)
 ifeq ($(shell uname -m),x86_64)
 ifneq ($(wildcard /lib/x86_64-linux-gnu/libclang-18.so.18),)
 CLANG_MANIFEST_LLVM_DIR := vendor/clang-c-18
@@ -8220,8 +8226,14 @@ else
 CLANG_MANIFEST_LIB_ARG = -L$(CLANG_MANIFEST_LLVM_DIR)/lib -lclang
 CLANG_MANIFEST_RPATH_ARG = -Wl,-rpath,$(CLANG_MANIFEST_LLVM_DIR)/lib
 endif
+ifeq ($(ZCL_HOST_OS),Linux)
 ifeq ($(CLANG_MANIFEST_LLVM_DIR):$(CLANG_MANIFEST_SYSTEM_LIB),/usr:/usr/lib/libclang.so.22.1)
 CLANG_MANIFEST_RESOURCE_CPPFLAG := -DCM_HOST_RESOURCE_DIR='"/usr/lib/clang/22"'
+endif
+endif
+ifeq ($(ZCL_HOST_OS),Darwin)
+CLANG_MANIFEST_RESOURCE_DIR ?= $(eval CLANG_MANIFEST_RESOURCE_DIR := $(shell "$(CLANG_MANIFEST_LLVM_DIR)/bin/clang" -print-resource-dir 2>/dev/null))$(CLANG_MANIFEST_RESOURCE_DIR)
+CLANG_MANIFEST_RESOURCE_CPPFLAG ?= -DCM_HOST_RESOURCE_DIR='"$(CLANG_MANIFEST_RESOURCE_DIR)"'
 endif
 CLANG_MANIFEST_CORE_SRCS := tools/sensors/clang_manifest_core.c \
 	tools/sensors/clang_manifest_cc.c \
@@ -8323,6 +8335,11 @@ $(BIN_DIR)/z23-clang-manifest-root-fixture $(BIN_DIR)/z23-clang-manifest: $(CLAN
 	    [ ! -f "$(CLANG_MANIFEST_LLVM_DIR)/include/clang-c/Index.h" ]; then \
 	    echo "clang-manifest: libclang C API not found."; \
 	    echo "  install it (e.g. apt install libclang-20-dev) or set CLANG_MANIFEST_LLVM_DIR=/usr/lib/llvm-NN"; \
+	    exit 1; fi
+	@if [ "$(ZCL_HOST_OS)" = Darwin ] && \
+	    [ ! -f "$(CLANG_MANIFEST_RESOURCE_DIR)/include/stddef.h" ]; then \
+	    echo "clang-manifest: selected LLVM builtin resource headers not found."; \
+	    echo "  set CLANG_MANIFEST_RESOURCE_DIR to the matching clang resource directory"; \
 	    exit 1; fi
 	@probe=$@.probe; \
 	printf '#include <clang-c/Index.h>\nint main(void) { CXType t = {0}; clang_disposeString(clang_getTypePrettyPrinted(t, 0)); return 0; }\n' > $$probe.c; \
@@ -11278,10 +11295,10 @@ PARITY_ORACLE_BIN = $(BIN_DIR)/run-parity-oracle
 PARITY_ORACLE_SELFTEST_BIN = $(BIN_DIR)/run-parity-oracle-selftest
 $(PARITY_ORACLE_BIN): $(PARITY_ORACLE_DIR)/run_parity_oracle.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -Wall -Wextra -Werror -pedantic -DPARITY_DIR=\"$(PARITY_ORACLE_DIR)\" -o $@ $<
+	$(CC) -std=c23 -Wall -Wextra -Werror -pedantic $(ZCL_PLATFORM_CPPFLAGS) -DPARITY_DIR=\"$(PARITY_ORACLE_DIR)\" -o $@ $<
 $(PARITY_ORACLE_SELFTEST_BIN): $(PARITY_ORACLE_DIR)/run_parity_oracle_selftest.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -Wall -Wextra -Werror -pedantic -o $@ $<
+	$(CC) -std=c23 -Wall -Wextra -Werror -pedantic $(ZCL_PLATFORM_CPPFLAGS) -o $@ $<
 
 .PHONY: run-parity-oracle-selftest
 run-parity-oracle-selftest: $(PARITY_ORACLE_BIN) $(PARITY_ORACLE_SELFTEST_BIN)
@@ -16537,17 +16554,22 @@ endif
 ff-test-lint: lint-fast
 
 # Optional freestanding C23 kernel; no node or default-build dependency.
-Z23KERNEL_CC ?= clang
+Z23KERNEL_CC ?= $(if $(ZCL_CHECKED_LLVM_DIR),$(ZCL_CHECKED_LLVM_DIR)/bin/clang,clang)
 Z23KERNEL_LD ?= $(REPRO_GATE_XLD)
-Z23KERNEL_OBJCOPY ?= $(shell command -v llvm-objcopy 2>/dev/null || command -v llvm-objcopy-18 2>/dev/null)
+Z23KERNEL_OBJCOPY ?= $(if $(ZCL_CHECKED_LLVM_DIR),$(ZCL_CHECKED_LLVM_DIR)/bin/llvm-objcopy,$(shell command -v llvm-objcopy 2>/dev/null || command -v llvm-objcopy-18 2>/dev/null))
+Z23KERNEL_READELF ?= $(if $(ZCL_CHECKED_LLVM_DIR),$(ZCL_CHECKED_LLVM_DIR)/bin/llvm-readelf,readelf)
+Z23KERNEL_NM ?= $(if $(ZCL_CHECKED_LLVM_DIR),$(ZCL_CHECKED_LLVM_DIR)/bin/llvm-nm,nm)
 Z23KERNEL_DIR := $(BUILD_DIR)/z23kernel
 $(BIN_DIR)/z23kernel.bin: apps/z23kernel/main.c apps/z23kernel/entry.S apps/z23kernel/build.sh tools/dev/build-epoch-lock-wait.sh Makefile | $(BIN_DIR)
 	Z23KERNEL_CC="$(Z23KERNEL_CC)" Z23KERNEL_LD="$(Z23KERNEL_LD)" Z23KERNEL_OBJCOPY="$(Z23KERNEL_OBJCOPY)" \
+	Z23KERNEL_READELF="$(Z23KERNEL_READELF)" Z23KERNEL_NM="$(Z23KERNEL_NM)" \
 		apps/z23kernel/build.sh apps/z23kernel "$(Z23KERNEL_DIR)" "$(BIN_DIR)"
 .PHONY: z23kernel
 z23kernel: $(BIN_DIR)/z23kernel.bin $(BIN_DIR)/z23kernel.identity
 $(BIN_DIR)/z23kernel.identity: $(BIN_DIR)/z23kernel.bin
-	Z23KERNEL_CC="$(Z23KERNEL_CC)" Z23KERNEL_LD="$(Z23KERNEL_LD)" Z23KERNEL_OBJCOPY="$(Z23KERNEL_OBJCOPY)" apps/z23kernel/build.sh apps/z23kernel "$(Z23KERNEL_DIR)" "$(BIN_DIR)"
+	Z23KERNEL_CC="$(Z23KERNEL_CC)" Z23KERNEL_LD="$(Z23KERNEL_LD)" Z23KERNEL_OBJCOPY="$(Z23KERNEL_OBJCOPY)" \
+	Z23KERNEL_READELF="$(Z23KERNEL_READELF)" Z23KERNEL_NM="$(Z23KERNEL_NM)" \
+		apps/z23kernel/build.sh apps/z23kernel "$(Z23KERNEL_DIR)" "$(BIN_DIR)"
 .PHONY: z23kernel-identity
 z23kernel-identity: $(BIN_DIR)/z23kernel.identity
 
@@ -16560,7 +16582,12 @@ NATIVE_TUNNEL_FLAGS = -std=c23 -O1 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=20080
 $(BIN_DIR)/tunnel: tools/native_tunnel.c tools/native_tunnel_sources.def $(NATIVE_TUNNEL_SRCS) $(NATIVE_TUNNEL_HEADERS) Makefile | $(BIN_DIR)
 	$(CC) $(NATIVE_TUNNEL_FLAGS) tools/native_tunnel.c $(NATIVE_TUNNEL_SRCS) -o $@
 $(BIN_DIR)/tunnel-static: tools/native_tunnel.c tools/native_tunnel_sources.def $(NATIVE_TUNNEL_SRCS) $(NATIVE_TUNNEL_HEADERS) Makefile | $(BIN_DIR)
+ifeq ($(ZCL_HOST_OS),Linux)
 	$(CC) $(NATIVE_TUNNEL_FLAGS) -static-pie tools/native_tunnel.c $(NATIVE_TUNNEL_SRCS) -o $@
+else
+	@echo 'tunnel-static requires Linux ELF static-PIE; use native-tunnel on this host' >&2
+	@exit 2
+endif
 .PHONY: native-tunnel native-tunnel-static export-native-tunnel
 native-tunnel: $(BIN_DIR)/tunnel
 native-tunnel-static: $(BIN_DIR)/tunnel-static

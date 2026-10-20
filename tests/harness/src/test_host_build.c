@@ -15,6 +15,7 @@
 
 #include "command/build_admit.h"
 #include "base/safe_alloc.h"
+#include "command/native_command.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "config/command_catalog.h"
@@ -36,6 +37,7 @@
 
 enum { HBT_PATH = 512, HBT_TEXT = 8192 };
 
+#ifdef __linux__
 static void hbt_nap(long ms)
 {
     struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
@@ -183,6 +185,8 @@ static bool hbt_first_job(const char *scratch_root, char *out, size_t cap)
     return false;
 }
 
+#endif
+
 static int hbt_cpu_plan_tests(void)
 {
     int failures = 0;
@@ -203,6 +207,7 @@ _test_next:;
     return failures;
 }
 
+#ifdef __linux__
 static int hbt_scope_tests(const struct ba_config *cfg, const char *tmp)
 {
     int failures = 0;
@@ -598,6 +603,41 @@ _test_next:;
     return failures;
 }
 #endif
+#endif /* Linux queue fixtures */
+
+#if !defined(__linux__) && !defined(_WIN32)
+static int hbt_platform_refusal_tests(void)
+{
+    int failures = 0;
+    TEST("host build: non-Linux refuses admission and unobserved queue status") {
+        struct json_value out = {0};
+        json_set_object(&out);
+        ASSERT(!ba_status("/unused/host-build-state", &out));
+        ASSERT(!ba_status_as("/unused/host-build-state", geteuid(), &out));
+        ASSERT_EQ(json_size(&out), 0u);
+        json_free(&out);
+        const char *const words[] = { "/unused/host-build-command" };
+        int rc = 0;
+        ASSERT(zcl_native_ops_host_build_try_run(words, 1, 0, &rc));
+        ASSERT_EQ(rc, BA_EXIT_DEFERRED);
+        struct zcl_command_request request = {0};
+        struct zcl_command_reply reply;
+        zcl_command_reply_init(&reply, "zcl.host_build.v1");
+        zcl_native_handle_ops_host_build(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(reply.error.code, "HOST_BUILD_PLATFORM_UNAVAILABLE");
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.host_jobs.v1");
+        zcl_native_handle_ops_host_jobs(&request, &reply);
+        ASSERT_EQ(reply.status, ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(reply.error.code, "HOST_BUILD_PLATFORM_UNAVAILABLE");
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+#endif
 
 static int hbt_reserve_env_tests(void)
 {
@@ -841,10 +881,10 @@ _test_next:;
 int test_host_build(void)
 {
     int failures = 0;
+    failures += hbt_cpu_plan_tests();
+#ifdef __linux__
     char tmp[HBT_PATH] = "";
     struct ba_config cfg;
-
-    failures += hbt_cpu_plan_tests();
     if (!test_mkdtemp(tmp, sizeof(tmp), "host_build") ||
         !hbt_config(&cfg, tmp, 1)) {
         printf("test_host_build: fixture failed\n");
@@ -859,12 +899,15 @@ int test_host_build(void)
 #ifdef __linux__
     failures += hbt_owner_tests(tmp);
 #endif
-    failures += hbt_reserve_env_tests();
 #ifdef __linux__
     failures += hbt_broker_tests(tmp);
     failures += hbt_broker_display_tests(tmp);
 #endif
     (void)test_rm_rf_recursive(tmp);
+#elif !defined(_WIN32)
+    failures += hbt_platform_refusal_tests();
+#endif
+    failures += hbt_reserve_env_tests();
     if (failures == 0)
         printf("test_host_build: all passed\n");
     else

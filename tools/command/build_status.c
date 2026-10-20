@@ -9,8 +9,9 @@
 
 #include "command/build_admit.h"
 #include "base/safe_alloc.h"
+#include "platform/device_compat.h"
 
-#ifndef _WIN32
+#ifdef __linux__
 
 #include <dirent.h>
 #include <errno.h>
@@ -20,7 +21,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/sysmacros.h>
 #include <unistd.h>
 
 enum { BS_LOCKS_MAX = 512, BS_TEXT_MAX = 240 };
@@ -414,8 +414,8 @@ static size_t bs_holders(struct bs_view *v, const char *path, int *pids,
         return 0;
     for (size_t i = 0; i < v->count; i++) {
         if (v->locks[i].inode != (unsigned long)sb.st_ino ||
-            v->locks[i].dev_major != major(sb.st_dev) ||
-            v->locks[i].dev_minor != minor(sb.st_dev))
+            v->locks[i].dev_major != platform_device_major(sb.st_dev) ||
+            v->locks[i].dev_minor != platform_device_minor(sb.st_dev))
             continue;
         if (n < max) {
             if (!bs_pid_visible(v->locks[i].pid) && !v->scanned)
@@ -523,8 +523,12 @@ static size_t bs_push_waiters(struct json_value *out, const char *key,
     return live;
 }
 
+#endif /* __linux__ */
+
+#ifndef _WIN32
 bool ba_status_as(const char *state_dir, uid_t uid, struct json_value *out)
 {
+#ifdef __linux__
     struct bs_view view;
     char dir[BA_PATH_MAX], heavy[BA_PATH_MAX];
     int pids[4];
@@ -548,11 +552,23 @@ bool ba_status_as(const char *state_dir, uid_t uid, struct json_value *out)
         broker = dir;
     }
     return ba_status_broker(broker, uid, NULL, NULL, out);
+#else
+    /* No procfs observation means unavailable, never an empty queue. */
+    (void)state_dir;
+    (void)uid;
+    (void)out;
+    return false;
+#endif
 }
 
 bool ba_status(const char *state_dir, struct json_value *out)
 {
+#ifdef __linux__
     return ba_status_as(state_dir, geteuid(), out);
+#else
+    (void)state_dir;
+    (void)out;
+    return false;
+#endif
 }
-
-#endif /* _WIN32 */
+#endif

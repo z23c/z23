@@ -3721,7 +3721,10 @@ static void lock_order_sleep_ms(int ms)
 
 static bool lock_order_wait(atomic_int *flag, int limit_ms)
 {
-    for (int waited = 0; waited < limit_ms; waited++) {
+    const int64_t deadline = platform_time_monotonic_ms() + limit_ms;
+    /* A background-thread sleep may be coalesced well beyond one millisecond.
+     * Bound elapsed time, not the number of sleeps, under the child alarm. */
+    while (platform_time_monotonic_ms() < deadline) {
         if (atomic_load(flag))
             return true;
         lock_order_sleep_ms(1);
@@ -3792,10 +3795,14 @@ static int lock_order_child(int which)
     }
     /* Where the writer takes state_mutex first it reaches the hook now; where
      * it takes the connection mutex first it queues behind this thread. */
-    lock_order_wait(&c.arrived, 500);
+    const int64_t arrival_start = platform_time_monotonic_ms();
+    bool arrived = lock_order_wait(&c.arrived, 500);
+    fprintf(stderr, "lock_order: kind=%d arrival=%d elapsed_ms=%lld; probing state\n",
+            which, arrived, (long long)(platform_time_monotonic_ms() - arrival_start));
     uint8_t buf[8];
     size_t len = 0;
     (void)node_db_state_get(&c.ndb, "lock_order_probe", buf, sizeof(buf), &len);
+    fprintf(stderr, "lock_order: kind=%d state probe completed\n", which);
     atomic_store(&c.release, 1);
     sqlite3_mutex_leave(conn);
     pthread_join(writer, NULL);

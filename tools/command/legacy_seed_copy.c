@@ -11,18 +11,17 @@
 #include "command/legacy_seed_priv.h"
 
 #include "base/safe_alloc.h"
+#include "platform/file_clone.h"
 #include "sha3/sha3.h"
 
 #include <errno.h>
 #include <fcntl.h>
-#include <linux/fs.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -34,7 +33,7 @@ struct pool {
     struct lseed_tree *tree;
     lseed_want_fn want;
     bool recopy_forced;
-    atomic_int no_clone; /* latched by the first refused FICLONE of this phase */
+    atomic_int no_clone; /* latched when cloning is unavailable this phase */
     atomic_size_t next;
     atomic_int failed;
     atomic_uint_fast64_t copied, resumed, cloned, bytes, done;
@@ -65,6 +64,7 @@ static bool lseed_rw_copy(int in, int out, uint64_t size)
 
 static bool lseed_cfr_copy(int in, int out, uint64_t size)
 {
+#if defined(__linux__)
     uint64_t left = size;
     while (left > 0) {
         ssize_t n = copy_file_range(in, NULL, out, NULL, left, 0);
@@ -78,22 +78,24 @@ static bool lseed_cfr_copy(int in, int out, uint64_t size)
         left -= (uint64_t)n;
     }
     return true;
+#else
+    return lseed_rw_copy(in, out, size);
+#endif
 }
 
 /* Returns 0 copied, 1 cloned, <0 failure. */
-/* A filesystem that refuses FICLONE once refuses it for every file, so the
- * refusal is latched in no_clone and later files skip the ioctl. */
+/* Unavailable cloning is latched for this phase. Hard clone failures refuse
+ * the copy rather than masking an invalid descriptor or I/O error. */
 static int lseed_copy_data(int in, int out, uint64_t size, int mode,
                            atomic_int *no_clone)
 {
     if (size == 0)
         return 0;
     if (mode == 0 && !atomic_load(no_clone)) {
-        if (ioctl(out, FICLONE, in) == 0)
-            return 1;
-        if (errno == EOPNOTSUPP || errno == EXDEV || errno == EINVAL ||
-            errno == ENOTTY)
-            atomic_store(no_clone, 1);
+        enum platform_file_clone_result cloned = platform_file_clone_fd(in, out);
+        if (cloned == PLATFORM_FILE_CLONE_CLONED) return 1;
+        if (cloned == PLATFORM_FILE_CLONE_REFUSED) return -1;
+        atomic_store(no_clone, 1);
     }
     if (mode == 1)
         return lseed_rw_copy(in, out, size) ? 0 : -1;
@@ -103,9 +105,14 @@ static int lseed_copy_data(int in, int out, uint64_t size, int mode,
 static bool lseed_matches(int dstroot, const struct lseed_ent *e)
 {
     struct stat st;
-    return fstatat(dstroot, e->rel, &st, AT_SYMLINK_NOFOLLOW) == 0 &&
-           S_ISREG(st.st_mode) && (uint64_t)st.st_size == e->size &&
-           st.st_mtim.tv_sec == e->mtime_s && st.st_mtim.tv_nsec == e->mtime_ns;
+    if (fstatat(dstroot, e->rel, &st, AT_SYMLINK_NOFOLLOW) != 0 ||
+        !S_ISREG(st.st_mode) || (uint64_t)st.st_size != e->size) return false;
+#if defined(__APPLE__)
+    struct timespec modified = st.st_mtimespec;
+#else
+    struct timespec modified = st.st_mtim;
+#endif
+    return modified.tv_sec == e->mtime_s && modified.tv_nsec == e->mtime_ns;
 }
 
 static bool lseed_finish_file(int out, const struct lseed_ent *e)

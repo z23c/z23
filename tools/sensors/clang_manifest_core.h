@@ -131,6 +131,9 @@ struct cm_core {
     size_t root_len;
     char home[PATH_MAX];
     size_t home_len;
+    /* Build-selected builtin headers only; runtime argv grants no trust. */
+    char host_resource_root[PATH_MAX];
+    size_t host_resource_root_len;
     struct cm_file *files;
     size_t nfiles, capfiles;
     size_t file_hint;

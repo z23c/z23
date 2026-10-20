@@ -122,6 +122,7 @@ declare -A EXEMPT=(
 # facility. Reason is mandatory and names the missing primitive. On every
 # other host the tool keeps being built exactly as before.
 declare -A DARWIN_EXEMPT=(
+    [tunnel-static]="Linux ELF static-PIE artifact; native Mach-O tunnel remains required"
     [zcl-portfwd]="event loop sits on sys/epoll.h (Linux kernel API)"
     [z23-headless-run.exe]="Win32 PE launcher; #include <windows.h> + -municode, and its rule is inside ifeq (\$(ZCL_HOST_WINDOWS),1) so it does not exist on this host"
     [native_ui_driver]="X11 UI transport; links -Wl,-l:libX11.so.6"
@@ -495,27 +496,19 @@ tl_jobs="${ZCL_TOOLS_LINK_JOBS:-$(( tl_nproc / 2 ))}"
 if [ "$tl_jobs" -lt 4 ];  then tl_jobs=4;  fi
 if [ "$tl_jobs" -gt 16 ]; then tl_jobs=16; fi
 
-if ! make -j"$tl_jobs" --no-print-directory "${targets[@]}" >"$build_log" 2>&1; then
-    # Re-probe serially so the report names every broken tool, not just the
-    # one that happened to lose the race to fail first.
-    for t in "${targets[@]}"; do
-        probe_out="$(MAKEFLAGS= make --no-print-directory "$t" 2>&1)" && continue
-        # A Makefile parse failure is not this tool's fault. source-identity
-        # capture refuses while the tree is being written, and the $(error ...)
-        # it raises kills EVERY make invocation regardless of target, so the
-        # serial re-probe below would blame whichever tools the write window
-        # happened to span. That misreported 12 innocent tools once. Stop and
-        # say the gate could not run, rather than name rules that are fine.
-        if [[ "$probe_out" == *"exact source capture failed"* ]]; then
-            echo "[check_standalone_tools_link] tree changed while the gate" \
-                 "ran (at $t): source-identity capture refused, so make could" \
-                 "not parse. This is NOT a broken tool rule." >&2
-            echo "[check_standalone_tools_link] re-run on a settled tree." >&2
-            exit 2
-        fi
-        failed+=("$t")
-        violations=$((violations + 1))
-    done
+if ! make -k -j"$tl_jobs" --no-print-directory "${targets[@]}" >"$build_log" 2>&1; then
+    # Keep going through independent targets in one parse. Make names failed
+    # targets in its diagnostics; serial re-probes repeat source capture for
+    # every tool and discard the original failure context.
+    if grep -Fq "exact source capture failed" "$build_log"; then
+        sed 's/^/    /' "$build_log" >&2
+        echo "[check_standalone_tools_link] source-identity capture refused, so make could" \
+             "not parse. This is NOT a broken tool rule." >&2
+        echo "[check_standalone_tools_link] re-run on a settled tree." >&2
+        exit 2
+    fi
+    failed+=("standalone tool build batch (see build output)")
+    violations=$((violations + 1))
 fi
 
 # --build-only stops here. A tool that would not link is still a hard failure —
@@ -523,10 +516,10 @@ fi
 # own verdict belong to the run inside `make lint`, not to a pre-build.
 if [ "$BUILD_ONLY" -eq 1 ]; then
     if (( violations > 0 )); then
-        echo "[check_standalone_tools_link] build-only: BUILD OUTPUT (first failure):" >&2
-        tail -n 30 "$build_log" | sed 's/^/    /' >&2
+        echo "[check_standalone_tools_link] build-only: BUILD OUTPUT:" >&2
+        sed 's/^/    /' "$build_log" >&2
         for t in "${failed[@]}"; do echo "    $t" >&2; done
-        echo "check-standalone-tools-link --build-only: ${violations} tool(s) do not build" >&2
+        echo "check-standalone-tools-link --build-only: ${violations} check(s) failed" >&2
         exit 1
     fi
     echo "[check_standalone_tools_link] build-only: ${#targets[@]} tool target(s) built"
@@ -534,9 +527,9 @@ if [ "$BUILD_ONLY" -eq 1 ]; then
 fi
 
 if (( violations > 0 )); then
-    echo "[check_standalone_tools_link] BUILD OUTPUT (first failure):"
-    tail -n 30 "$build_log" | sed 's/^/    /'
-    echo "[check_standalone_tools_link] tool target(s) that do not build:"
+    echo "[check_standalone_tools_link] BUILD OUTPUT:"
+    sed 's/^/    /' "$build_log"
+    echo "[check_standalone_tools_link] failed check(s):"
     for t in "${failed[@]}"; do echo "    $t"; done
 fi
 

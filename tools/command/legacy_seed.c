@@ -11,13 +11,13 @@
 
 #include "json/json.h"
 #include "platform/time_compat.h"
+#include "platform/rename_compat.h"
 #include "sha3/sha3.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
-#include <linux/fs.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
@@ -145,10 +145,22 @@ static int lseed_open_lock(const char *datadir)
     return open(path, O_RDWR | O_NOFOLLOW | O_CLOEXEC);
 }
 
-/* Takes the lock for the caller to hold (fd out) or just probes (fd NULL). */
+/* Takes the lock for the caller to hold (fd out) or just probes (fd NULL).
+ * Darwin's flock and record locks share conflict detection: acquiring flock
+ * and then an OFD lock self-conflicts. A single OFD lock detects both kinds
+ * of external holder and remains held until the returned descriptor closes.
+ * Linux keeps both locks because its flock and record namespaces differ. */
 static bool lseed_lock_taken(int fd, int *hold)
 {
     struct flock fl = { .l_type = F_WRLCK, .l_whence = SEEK_SET };
+#if defined(__APPLE__)
+    if (hold) {
+        if (fcntl(fd, F_OFD_SETLK, &fl) != 0)
+            return true;
+        *hold = fd;
+        return false;
+    }
+#else
     if (flock(fd, LOCK_EX | LOCK_NB) != 0)
         return true;
     if (hold) {
@@ -160,6 +172,7 @@ static bool lseed_lock_taken(int fd, int *hold)
         return false;
     }
     flock(fd, LOCK_UN);
+#endif
     fl.l_pid = 0;
     return fcntl(fd, F_OFD_GETLK, &fl) != 0 || fl.l_type != F_UNLCK;
 }
@@ -482,8 +495,7 @@ static enum lseed_refusal lseed_publish(const struct lseed_request *req,
     char parent[LSEED_PATH_MAX];
     (void)unlinkat(dst, LSEED_MARKER_NAME, 0);
     if (fsync(dst) != 0 ||
-        renameat2(AT_FDCWD, tmp, AT_FDCWD, req->target,
-                RENAME_NOREPLACE) != 0)
+        platform_renameat_noreplace(AT_FDCWD, tmp, AT_FDCWD, req->target) != 0)
         return lseed_refuse(why, cap, LSEED_COPY_FAILED,
                       "atomic rename to target failed; target.tmp kept");
     lseed_parent_of(req->target, parent, sizeof(parent));
@@ -542,7 +554,7 @@ enum lseed_refusal lseed_finish(const struct lseed_request *req,
              : lseed_refuse(why, why_cap, LSEED_COPY_FAILED, "cannot open finish dirs");
     res->phase_b_ms = (uint64_t)(platform_time_monotonic_ms() - t0);
     if (hold >= 0)
-        close(hold); /* releases flock and the OFD lock */
+        close(hold); /* releases the held source lock(s) */
     if (rc == LSEED_OK) {
         int64_t h0 = platform_time_monotonic_ms();
         res->files = plan.files;

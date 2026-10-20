@@ -73,6 +73,14 @@ static long rpc_clamp_ms(long v, long lo, long hi)
  * drive the production connect/send/receive code. Every socket call and any
  * wait past the script is real. See struct node_rpc_test_script. */
 static struct node_rpc_test_script *g_script;
+static node_rpc_test_connect_wait_fn g_connect_wait;
+static void *g_connect_wait_ctx;
+
+void node_rpc_test_set_connect_wait(node_rpc_test_connect_wait_fn wait, void *ctx)
+{
+    g_connect_wait = wait;
+    g_connect_wait_ctx = ctx;
+}
 
 void node_rpc_test_set_script(struct node_rpc_test_script *script)
 {
@@ -145,7 +153,7 @@ static int rpc_connect_start(platform_socket_t sock,
     int rc = platform_socket_connect(sock, (const struct sockaddr *)addr,
                                      sizeof(*addr));
 #ifdef ZCL_TESTING
-    if (g_script && g_script->pending) {
+    if (g_connect_wait || (g_script && g_script->pending)) {
         errno = EINPROGRESS; /* the connect did run: only the report changes */
         return -1; /* raw-return-ok:test-seam-pending-connect */
     }
@@ -201,7 +209,13 @@ static int rpc_connect_until(platform_socket_t sock,
         int wait_ms = rpc_deadline_remaining_ms(rpc_now_ms(), until_ms);
         if (wait_ms == 0)
             return -2; /* connect timed out */
-        int pr = rpc_wait_writable(sock, wait_ms);
+        int pr;
+#ifdef ZCL_TESTING
+        if (g_connect_wait)
+            pr = g_connect_wait(wait_ms, g_connect_wait_ctx);
+        else
+#endif
+            pr = rpc_wait_writable(sock, wait_ms);
         if (pr > 0) {
             if (rpc_deadline_remaining_ms(rpc_now_ms(), until_ms) == 0)
                 return -2;

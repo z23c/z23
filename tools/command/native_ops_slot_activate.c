@@ -31,6 +31,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/time_compat.h"
+#include "platform/socket_compat.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -585,7 +586,7 @@ static bool osa_port_open(int port)
 {
     struct sockaddr_in sa;
     bool open_now;
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
     if (fd < 0)
         return false;
     memset(&sa, 0, sizeof(sa));

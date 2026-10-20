@@ -30,6 +30,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef __linux__
 enum { OHB_MIN_CPUS = 8, OHB_LSCPU_MAX = 65536, OHB_MAX_ZCC_MB = 8192,
        OHB_MEM_KIB = 24u * 1024u * 1024u };
 
@@ -98,8 +99,6 @@ static void ohb_defaults(struct ba_config *cfg)
     cfg->priority = getenv("DEVBUILD_PRIORITY") &&
                     strcmp(getenv("DEVBUILD_PRIORITY"), "land") == 0;
 }
-
-#ifndef _WIN32
 
 /* Reserve at least eight online CPUs, then take every logical CPU after the
  * first two physical cores as the build set. */
@@ -264,34 +263,59 @@ static int ohb_run(const char *const *w, size_t count, size_t consumed)
     return ba_run(&cfg, w + a.first, argc);
 }
 
+#endif /* __linux__ */
+
+#ifndef _WIN32
 bool zcl_native_ops_host_build_try_run(const char *const *words, size_t count,
                                        size_t consumed, int *rc)
 {
+#ifdef __linux__
     *rc = ohb_run(words, count, consumed);
+#else
+    (void)words;
+    (void)count;
+    (void)consumed;
+    (void)fprintf(stderr, "HOST_BUILD_PLATFORM_UNAVAILABLE: native host build "
+                  "admission requires Linux; use the installed host admission rail\n");
+    *rc = BA_EXIT_DEFERRED;
+#endif
     return true;
 }
-#endif /* _WIN32 */
+#endif
 
 void zcl_native_handle_ops_host_build(const struct zcl_command_request *request,
                                       struct zcl_command_reply *reply)
 {
     (void)request;
+#ifndef __linux__
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+        ZCL_COMMAND_EXIT_BLOCKED, "HOST_BUILD_PLATFORM_UNAVAILABLE", "platform",
+        false, false, "Native host build admission requires Linux; use the "
+        "installed host admission rail.", "ops.host.build");
+#else
     zcl_command_reply_fail(
         reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
         "BUILD_CLI_ONLY", "dispatch", false, false,
         "a build streams its command's output and returns the command's own "
         "exit status; run it as z23 ops host build -- COMMAND [ARGS...]",
         "ops.host.build");
+#endif
 }
 
 void zcl_native_handle_ops_host_jobs(const struct zcl_command_request *request,
                                      struct zcl_command_reply *reply)
 {
-    struct ba_config cfg;
     (void)request;
-    ohb_defaults(&cfg);
     if (!reply)
         return;
+#ifndef __linux__
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+        ZCL_COMMAND_EXIT_BLOCKED, "HOST_BUILD_PLATFORM_UNAVAILABLE", "platform",
+        false, false, "Native host job observation requires Linux procfs; "
+        "no queue observation is available on this platform.", "ops.host.jobs");
+#else
+    struct ba_config cfg;
+    ohb_defaults(&cfg);
     if (!ohb_locations(&cfg) || !ba_status(cfg.state_dir, &reply->data)) {
         zcl_command_reply_fail(
             reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
@@ -303,4 +327,5 @@ void zcl_native_handle_ops_host_jobs(const struct zcl_command_request *request,
         return;
     }
     reply->status = ZCL_COMMAND_STATUS_PASSED;
+#endif
 }

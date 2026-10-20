@@ -46,6 +46,9 @@ fi
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/zcl-zcc-gate.XXXXXX")"
 trap 'rm -rf -- "$WORK"' EXIT
 trap 'exit 2' HUP INT TERM
+# Prefix maps must name the physical cwd used by the compiler and zcc.
+# Darwin's /var TMPDIR may resolve beneath /private/var.
+WORK="$(cd "$WORK" && pwd -P)"
 
 export ZCC_DIR="$WORK/cache"
 LOG="$WORK/zcc.log"

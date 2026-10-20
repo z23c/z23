@@ -33,6 +33,7 @@
 #include "kernel/command_registry.h"
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <sys/stat.h>
@@ -1277,49 +1278,119 @@ static void rt_case_real(const char *dir, const char *nodir)
     zcl_native_fleet_board_test_set_bootstrap(NULL);
 }
 static void rt_noop_signal(int sig) { (void)sig; }
-/* Ten SIGUSR1s, 20ms apart, aimed at the thread that is connecting. */
+struct rt_signal_sender {
+    pthread_t target;
+    atomic_bool ready;
+    atomic_bool start;
+};
+
+/* Ten SIGUSR1s at real 20ms intervals. Sleep coalescing on background Mac
+ * threads can exceed the entire 40ms verdict window, so yield against a
+ * monotonic schedule for this bounded 200ms stimulus instead. */
 static void *rt_signal_loop(void *target)
 {
-    for (int i = 0; i < 10; i++) { /* real-clock: signal cadence, not a verdict deadline */
-        platform_sleep_ms(20); /* real-clock: signal cadence, not a verdict deadline */
-        pthread_kill(*(pthread_t *)target, SIGUSR1);
+    struct rt_signal_sender *sender = target;
+    atomic_store(&sender->ready, true);
+    while (!atomic_load(&sender->start)) sched_yield();
+    const int64_t start = rt_now();
+    for (int i = 1; i <= 10; i++) {
+        while (rt_now() < start + i * 20) sched_yield();
+        pthread_kill(sender->target, SIGUSR1);
     }
     return NULL;
 }
 
-/* Ten real SIGUSR1s during a backlog-full connect must not restart the 40ms allowance. */
+struct rt_connect_wait {
+    platform_socket_t fd;
+    int interrupted;
+};
+
+static int rt_connect_wait_real(int wait_ms, void *ctx)
+{
+    struct rt_connect_wait *wait = ctx;
+    int result = platform_socket_wait_writable(wait->fd, wait_ms);
+    if (result < 0 && platform_socket_error_interrupted(platform_socket_last_error()))
+        wait->interrupted++;
+    return result;
+}
+
+static bool rt_connect_eintr_pass(const char *dir, uint16_t port,
+                                  platform_socket_t fd, int pass)
+{
+    pthread_t signaler;
+    struct rt_signal_sender sender = { .target = pthread_self() };
+    struct rt_connect_wait wait = { .fd = fd };
+    if (pthread_create(&signaler, NULL, rt_signal_loop, &sender) != 0) {
+        rt_expect(false, "real-signal sender setup", 0, 0);
+        return false;
+    }
+    const int64_t ready_until = rt_now() + 1000;
+    while (!atomic_load(&sender.ready) && rt_now() < ready_until)
+        sched_yield();
+    if (!atomic_load(&sender.ready)) {
+        atomic_store(&sender.start, true);
+        pthread_join(signaler, NULL);
+        rt_expect(false, "real-signal sender ready before deadline measurement", 0, 0);
+        return false;
+    }
+    node_rpc_test_set_connect_wait(rt_connect_wait_real, &wait);
+    int64_t t0 = rt_now();
+    atomic_store(&sender.start, true);
+    char *b = pass ? rt_relative40(dir, port, 0) : rt_until(dir, port, 40);
+    int64_t ms = rt_now() - t0;
+    node_rpc_test_set_connect_wait(NULL, NULL);
+    pthread_join(signaler, NULL);
+    printf("  real-signal connect-phase: interrupted=%d\n", wait.interrupted);
+    rt_expect(wait.interrupted > 0 && rt_has(b, "connect timed out") && ms >= 35 && ms < 150,
+              pass ? "same for the relative-deadline entry"
+                   : "40ms + real signals: connect phase keeps original deadline", ms, 0);
+    free(b);
+    return true;
+}
+
+/* A full local stream supplies a real nonwritable descriptor to the production
+ * connect-phase loop. TCP backlog saturation is not portable: a kernel may
+ * complete handshakes despite the requested accept queue limit. The clock,
+ * poll and SIGUSR1 interruptions here are real; only connect readiness is
+ * controlled. Healthy TCP connections are exercised by rt_case_real. */
 static void rt_case_connect_eintr(const char *dir)
 {
-    platform_socket_t listener, fill[16];
+    platform_socket_t listener = PLATFORM_SOCKET_INVALID;
+    platform_socket_t pair[2] = { PLATFORM_SOCKET_INVALID, PLATFORM_SOCKET_INVALID };
     uint16_t port = 0;
-    size_t filled = 0;
-    bool pending = false;
-    if (!rt_listen(&listener, &port, 1)) { rt_expect(false, "eintr setup", 0, 0); return; }
-    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
-    while (filled < 16 && !pending) { /* fill the accept backlog until a connect stays pending */
-        platform_socket_t c = fill[filled++] = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, true);
-        if (c == PLATFORM_SOCKET_INVALID) break;
-        (void)platform_socket_connect(c, (struct sockaddr *)&a, sizeof(a));
-        pending = platform_socket_wait_writable(c, 30) == 0;
+    bool full = false;
+    if (!rt_listen(&listener, &port, 4) || !platform_socket_pair(pair) ||
+        !platform_socket_set_nonblocking(pair[0], true)) {
+        rt_expect(false, "real-signal connect-phase fixture setup", 0, 0);
+        goto cleanup;
     }
-    if (!pending) printf("  connect EINTR: SKIP (loopback backlog did not fill; no verdict)\n");
+    const char bytes[4096] = {0};
+    for (int i = 0; i < 1024; i++) {
+        ssize_t sent = send(pair[0], bytes, sizeof(bytes), MSG_NOSIGNAL);
+        if (sent < 0) {
+            full = platform_socket_error_would_block(platform_socket_last_error());
+            break;
+        }
+    }
+    if (!full || platform_socket_wait_writable(pair[0], 0) != 0) {
+        rt_expect(false, "real-signal connect-phase descriptor remains nonwritable", 0, 0);
+        goto cleanup;
+    }
     struct sigaction act = { .sa_handler = rt_noop_signal }, old;
     sigemptyset(&act.sa_mask);
-    sigaction(SIGUSR1, &act, &old);
-    for (int pass = 0; pass < 2 && pending; pass++) {
-        pthread_t self = pthread_self(), signaler;
-        int64_t t0 = rt_now();
-        pthread_create(&signaler, NULL, rt_signal_loop, &self);
-        char *b = pass ? rt_relative40(dir, port, 0) : rt_until(dir, port, 40);
-        int64_t ms = rt_now() - t0;
-        pthread_join(signaler, NULL);
-        rt_expect(rt_has(b, "connect timed out") && ms >= 35 && ms < 150,
-                  pass ? "same for the relative-deadline entry"
-                       : "40ms + 10 signals*20ms: connect keeps original deadline", ms, 0);
-        free(b);
+    if (sigaction(SIGUSR1, &act, &old) != 0) {
+        rt_expect(false, "real-signal handler setup", 0, 0);
+        goto cleanup;
+    }
+    for (int pass = 0; pass < 2; pass++) {
+        if (!rt_connect_eintr_pass(dir, port, pair[0], pass))
+            break;
     }
     sigaction(SIGUSR1, &old, NULL);
-    for (size_t i = 0; i < filled; i++) platform_socket_close(fill[i]);
+cleanup:
+    node_rpc_test_set_connect_wait(NULL, NULL);
+    platform_socket_close(pair[0]);
+    platform_socket_close(pair[1]);
     platform_socket_close(listener);
 }
 

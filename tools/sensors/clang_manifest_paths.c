@@ -69,6 +69,16 @@ static bool cm_under(const char *p, const char *dir, size_t dir_len)
            (p[dir_len] == '\0' || p[dir_len] == '/');
 }
 
+static bool cm_host_resource_path(const struct cm_core *c, const char *abs)
+{
+    if (!cm_under(abs, c->host_resource_root, c->host_resource_root_len))
+        return false;
+    const char *rest = abs + c->host_resource_root_len;
+    return rest[0] == '\0' ||
+        (strncmp(rest, "/include", 8) == 0 &&
+         (rest[8] == '\0' || rest[8] == '/'));
+}
+
 /* Canonical spelling of an absolute path: repo-relative, "." for the root,
  * or "@sys/..." for the system. A host path under $HOME but outside the
  * checkout has no host-independent spelling and is refused. */
@@ -82,9 +92,22 @@ static bool cm_spell(struct cm_core *c, const char *abs, const char *root_tok,
             (void)snprintf(buf, sizeof(buf), "%s%s", root_tok, rest);
         else
             (void)snprintf(buf, sizeof(buf), "%s", *rest ? rest + 1 : ".");
+    } else if (cm_host_resource_path(c, abs)) {
+        /* abs has already passed realpath normalization. A symlink out of
+         * the selected include tree cannot acquire this virtual spelling.
+         * FILES still hashes the exact bytes and IDENTITY binds the compiler. */
+        int n = snprintf(buf, sizeof(buf), "@sys/clang-resource%s",
+                         abs + c->host_resource_root_len);
+        if (n < 0 || (size_t)n >= sizeof(buf))
+            return cm_fail(c, "compiler resource path too long");
     } else if (cm_under(abs, c->home, c->home_len)) {
         return cm_fail(c, "refusing host path outside the checkout: %s", abs);
     } else {
+        /* Reserve the virtual resource namespace: an ordinary host path
+         * must not alias the build-selected headers in FILES or IDENTITY. */
+        if (c->host_resource_root_len &&
+            cm_under(abs, "/clang-resource", sizeof("/clang-resource") - 1))
+            return cm_fail(c, "host path collides with compiler resource namespace: %s", abs);
         (void)snprintf(buf, sizeof(buf), "@sys%s", strcmp(abs, "/") ? abs : "");
     }
     *out = cm_strdup(buf);
