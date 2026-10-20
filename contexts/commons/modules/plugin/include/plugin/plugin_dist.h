@@ -49,7 +49,8 @@ enum plugin_dist_status {
     PLUGIN_DIST_ERR_IMAGE_HASH,
     PLUGIN_DIST_ERR_DOWNGRADE,
     PLUGIN_DIST_ERR_PLUGIN,       /* the plugin store refused; see plugin_status */
-    PLUGIN_DIST_ERR_IO
+    PLUGIN_DIST_ERR_IO,
+    PLUGIN_DIST_ERR_TOO_LARGE     /* image over the 48 MiB plugin image cap */
 };
 
 const char *plugin_dist_status_code(enum plugin_dist_status status);
@@ -121,6 +122,8 @@ enum plugin_dist_status plugin_dist_receive(
 #ifdef ZCL_TESTING
 /* Lets a test play a publisher that does not check its own image. */
 void plugin_dist_test_skip_source_check(bool skip);
+/* Lowers the image cap (0 restores the default) so a small fixture can be "too large". */
+void plugin_dist_test_set_image_max(uint64_t bytes);
 #endif
 
 #endif

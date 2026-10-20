@@ -493,6 +493,34 @@ static int pd_refuse_publish(void)
     return failures;
 }
 
+/* ---- 8. over-cap image ----------------------------- */
+static int pd_refuse_big(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    TEST("plugin dist: an image over the cap is refused before checkout") {
+        struct plugin_pack_result packed;
+        struct plugin_dist_published pub;
+        struct plugin_dist_received got;
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &packed));
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_OK);
+        ASSERT(pd_transfer(&f, pub.root, 0, true));
+        ASSERT(pd_keys(f.plugins, packed.public_key));
+        plugin_dist_test_set_image_max(8);
+        enum plugin_dist_status st = pd_receive(&f, pub.root, NULL, false, &got);
+        plugin_dist_test_set_image_max(0);
+        ASSERT_EQ(st, PLUGIN_DIST_ERR_TOO_LARGE);
+        ASSERT(!pd_generation_stored(&f, packed.generation));
+        ASSERT(pd_scratch_empty(&f));
+        ASSERT_EQ(pd_receive(&f, pub.root, NULL, false, &got), PLUGIN_DIST_OK);
+        PASS();
+    } _test_next:;
+    plugin_dist_test_set_image_max(0);
+    pd_close(&f);
+    return failures;
+}
+
 int test_plugin_dist(void)
 {
     int failures = 0;
@@ -505,5 +533,6 @@ int test_plugin_dist(void)
     failures += pd_refuse_truncated();
     failures += pd_refuse_downgrade();
     failures += pd_refuse_publish();
+    failures += pd_refuse_big();
     return failures;
 }

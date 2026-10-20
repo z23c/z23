@@ -25,7 +25,7 @@
 #include <unistd.h>
 
 #define PD_LICENSE_MAX VCS_PACKAGE_RELEASE_LICENSE_TEXT_MAX_BYTES
-#define PD_IMAGE_MAX (48u * 1024u * 1024u)
+#define PD_IMAGE_MAX_DEFAULT (48u * 1024u * 1024u)
 
 static const struct {
     const char *code;
@@ -58,6 +58,8 @@ static const struct {
         "this version is lower than the installed current one; only the owner may allow that, with --allow-downgrade"},
     [PLUGIN_DIST_ERR_PLUGIN] = {"PLUGIN_DIST_PLUGIN",
         "the plugin store refused the generation; the evidence names its PLUGIN_* code"},
+    [PLUGIN_DIST_ERR_TOO_LARGE] = {"PLUGIN_DIST_TOO_LARGE",
+        "the plugin image is over the 48 MiB cap; do not install it, ask the publisher for a smaller build"},
     [PLUGIN_DIST_ERR_IO] = {"PLUGIN_DIST_IO",
         "a file operation failed; check permissions and free space"},
 };
@@ -122,9 +124,13 @@ int plugin_dist_version_compare(const char *a, const char *b, bool *comparable)
 #ifdef ZCL_TESTING
 static bool g_skip_source_check;
 void plugin_dist_test_skip_source_check(bool skip) { g_skip_source_check = skip; }
+static uint64_t g_image_max;
+void plugin_dist_test_set_image_max(uint64_t bytes) { g_image_max = bytes; }
+#define PD_IMAGE_MAX (g_image_max ? g_image_max : PD_IMAGE_MAX_DEFAULT)
 #define PD_SKIP_SOURCE_CHECK g_skip_source_check
 #else
 #define PD_SKIP_SOURCE_CHECK false
+#define PD_IMAGE_MAX PD_IMAGE_MAX_DEFAULT
 #endif
 
 #if !defined(_WIN32)
@@ -724,6 +730,15 @@ static enum plugin_dist_status pd_precheck(const struct plugin_dist_receive_requ
                  "the package members are not exactly LICENSE, %s, %s.plugin.json, %s.plugin.sig",
                  rq->name, rq->name, rq->name);
         ds = PLUGIN_DIST_ERR_SHAPE;
+    } else {
+        for (size_t i = 0; i < pm.count; i++)
+            if (strcmp(pm.files[i].path, rq->name) == 0 && pm.files[i].size > PD_IMAGE_MAX) {
+                snprintf(out->detail, sizeof(out->detail),
+                         "the image is %llu bytes, over the %llu byte cap",
+                         (unsigned long long)pm.files[i].size,
+                         (unsigned long long)PD_IMAGE_MAX);
+                ds = PLUGIN_DIST_ERR_TOO_LARGE;
+            }
     }
     vcs_package_manifest_free(&pm);
     return ds;
