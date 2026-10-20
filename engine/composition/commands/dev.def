@@ -1003,21 +1003,6 @@ ZCL_COMMAND_PLANNED_READ(
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_APP_SIMULATE,
     "generic seed replay registry is not implemented")
 
-ZCL_COMMAND_BRANCH("dev.test.background", "dev.test", "Background proof freshness",
-                   ZCL_COMMAND_LAYER_DEV)
-ZCL_COMMAND_PLANNED_READ(
-    "dev.test.background.status", "dev.test.background", "",
-    "Read lint, sanitizer, replay, and reproducibility freshness",
-    "Will report lint/sanitizer/replay/reproducibility freshness ages; "
-    "today the handler is NULL and every call fails closed with exit 3.", 0,
-    "test,background,quality,freshness", "zcl.command.empty_input.v1",
-    "zcl.dev_background_quality.v1", "", "",
-    "z23 dev test background status", ZCL_COMMAND_LAYER_DEV,
-    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_LATENCY_INSTANT, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
-    "native background-quality projection is not implemented")
-
 ZCL_COMMAND_DEV_READ(
     "dev.generation.current", "dev.generation", "", "Show current and last-good generations",
     "The current, last-good, and staged generation symlink targets read "

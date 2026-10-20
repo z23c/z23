@@ -307,7 +307,7 @@ REMOTE_COMMAND_CLASS("status", REMOTE_CLASS_NEVER, "")
  *
  *   Raw chain and database content rather than a posture projection —
  *   core.chain.block.get, core.chain.transaction.get, core.chain.mempool.list,
- *   core.storage.query, core.storage.query.offline, core.storage.integrity,
+ *   core.storage.query, core.storage.query.offline,
  *   core.storage.schema.offline. The P2P protocol already serves blocks to
  *   anyone who asks, with its own bounds; core.storage.query is arbitrary
  *   query authority over the node database, which is the general-purpose
@@ -341,8 +341,6 @@ REMOTE_COMMAND_CLASS("core.chain.block.get", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.chain.transaction.get", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.chain.mempool.list", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.chain.wait.height", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("core.chain.wait.blocker", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("core.chain.wait.halt", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.sync.frontier.offline", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.anchor.compose", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.anchor.inspect", REMOTE_CLASS_NEVER, "")
@@ -387,7 +385,6 @@ REMOTE_COMMAND_CLASS("core.wallet.rescan-witnesses", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.wallet.audit", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.wallet.rescan", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.wallet.replay", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("core.storage.integrity", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.storage.query", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.storage.query.offline", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("core.storage.schema.offline", REMOTE_CLASS_NEVER, "")
@@ -639,7 +636,6 @@ REMOTE_COMMAND_CLASS("dev.test.run", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.test.story", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.test.sim", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.test.replay", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("dev.test.background.status", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.generation.current", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.generation.history", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("dev.generation.activate", REMOTE_CLASS_NEVER, "")
@@ -742,19 +738,17 @@ REMOTE_COMMAND_CLASS("dev.index.search", REMOTE_CLASS_NEVER, "")
  *   ops.telemetry.metaverse.* and ops.telemetry.zcode.* are P4 economics, not
  *   "what is this machine doing".
  *
- *   Mutation and long-lived state. ops.config.reload and
+ *   Mutation and long-lived state.
  *   ops.debug.rom_seed.enable / .disable / .publish and
  *   ops.debug.rom_fetch.bundle change node configuration or publish on the
  *   node's behalf; ops.telemetry.watch opens a subscription rather than
- *   answering once. ops.config.show is refused with them: node configuration
- *   quotes datadir paths and operator layout.
+ *   answering once.
  *
- *   Not yet real. ops.jobs.list, ops.postmortem.replay,
+ *   Not yet real. ops.postmortem.replay,
  *   ops.telemetry.alerts.history and ops.telemetry.storage.cache are PLANNED
  *   leaves that fail closed today. Classifying a PLANNED leaf by what its name
  *   suggests it will do is how a permission gets granted to code nobody has
  *   read; they stay NEVER until they exist and someone reclassifies them. */
-REMOTE_COMMAND_CLASS("ops.jobs.list", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.state", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.selftest", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.host.gc", REMOTE_CLASS_NEVER, "")
@@ -804,8 +798,6 @@ REMOTE_COMMAND_CLASS("ops.mesh.pair.list", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.pair.revoke", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.mesh.join", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.postmortem.replay", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("ops.config.show", REMOTE_CLASS_NEVER, "")
-REMOTE_COMMAND_CLASS("ops.config.reload", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.recovery.rebuild", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.telemetry.agents.sessions", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("ops.telemetry.agents.grants", REMOTE_CLASS_NEVER, "")

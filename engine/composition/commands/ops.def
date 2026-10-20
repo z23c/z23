@@ -40,21 +40,6 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
 
-ZCL_COMMAND_BRANCH("ops.jobs", "ops", "Job lifecycle",
-                   ZCL_COMMAND_LAYER_OPS)
-ZCL_COMMAND_PLANNED_READ(
-    "ops.jobs.list", "ops.jobs", "", "List asynchronous jobs",
-    "Will list every asynchronous job with its state and progress from the "
-    "native job registry; that registry is not built yet, so the leaf fails "
-    "closed today.", ZCL_COMMAND_LIST_BUDGET,
-    "jobs,list,async", "zcl.command.empty_input.v1", "zcl.jobs.v1", "", "",
-    "z23 ops jobs list",
-    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_DEV_STATE_READ,
-    "the native job registry is a Wave 2.2 deliverable")
-
 ZCL_COMMAND_READY_READ(
     "ops.logs", "ops", "", "Log regex tail",
     "The most recent node.log lines matching the pattern within the window, "
@@ -881,34 +866,6 @@ ZCL_COMMAND_PLANNED_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_DEV_STATE_READ,
     "postmortem replay argument mapping is a Wave 2.2 deliverable")
-
-ZCL_COMMAND_BRANCH("ops.config", "ops", "Runtime config",
-                   ZCL_COMMAND_LAYER_OPS)
-ZCL_COMMAND_PLANNED_READ(
-    "ops.config.show", "ops.config", "", "Show effective runtime configuration",
-    "Will report the effective runtime configuration after flags, defaults, and "
-    "overrides are merged; a distinct effective-config reader is not built, so "
-    "the leaf fails closed today.", 0,
-    "config,show,settings", "zcl.command.empty_input.v1", "zcl.ops_config.v1",
-    "", "", "z23 ops config show",
-    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_CHAIN_READ,
-    "an effective-config reader is a Wave 2.2 deliverable")
-ZCL_COMMAND_PLANNED_COMMAND(
-    "ops.config.reload", "ops.config", "", "Reload runtime configuration",
-    "Will reload runtime configuration and report which keys changed; the "
-    "reload binding is not wired, so the leaf fails closed today.", 0,
-    "config,reload", "zcl.command.empty_input.v1", "zcl.ops_config_reload.v1",
-    "", "", "z23 ops config reload",
-    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
-    ZCL_COMMAND_RISK_CORE_RECOVERY, ZCL_COMMAND_SCOPE_NODE,
-    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST,
-    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
-    "config-reload binding is a Wave 2.2 deliverable")
 
 ZCL_COMMAND_BRANCH("ops.recovery", "ops", "Recovery ops",
                    ZCL_COMMAND_LAYER_OPS)

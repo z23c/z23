@@ -943,8 +943,8 @@ rather than trusting a hand-maintained gap list here, which goes stale the
 moment a leaf ships.
 
 Genuinely still open, cross-checked against the live `planned` rows: native
-job/stream infrastructure (`dev.loop.events`, `core.chain.wait.*`,
-`ops.jobs.list`), the confirmation/plan-commit handshake for owner-gated
+job/stream infrastructure (`dev.loop.events`, `core.chain.wait.*`),
+the confirmation/plan-commit handshake for owner-gated
 mutations (`core.wallet.transaction.send`, `core.consensus.block.invalidate`,
 and siblings), and wiring App generation loading to the public App ABI
 (`dev.app.publish`, `dev.app.inspect`). Automatic runtime generation

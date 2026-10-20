@@ -202,34 +202,6 @@ ZCL_COMMAND_PLANNED_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_CHAIN_READ,
     "blocking wait proxy is deferred to the Wave 2.2 job protocol")
-ZCL_COMMAND_PLANNED_READ(
-    "core.chain.wait.blocker", "core.chain.wait", "",
-    "Wait until a named blocker is raised or cleared",
-    "Will report the raised/cleared transition of the named sync "
-    "blocker once wired; today the handler is unbound and fails "
-    "closed with exit 3.", 0,
-    "wait,blocker,stall",
-    "zcl.core_wait_blocker.input.v1", "zcl.wait_result.v1", "blocker,timeout_ms",
-    "blocker", "z23 core chain wait blocker",
-    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_CHAIN_READ,
-    "blocking wait proxy is deferred to the Wave 2.2 job protocol")
-ZCL_COMMAND_PLANNED_READ(
-    "core.chain.wait.halt", "core.chain.wait", "",
-    "Wait until the node halts on a named blocker",
-    "Will report the blocker name that caused the node to halt once "
-    "wired; today the handler is unbound and fails closed with "
-    "exit 3.", 0,
-    "wait,halt,blocker",
-    "zcl.core_wait_halt.input.v1", "zcl.wait_result.v1", "timeout_ms", "",
-    "z23 core chain wait halt",
-    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_LOW,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_CHAIN_READ,
-    "blocking wait proxy is deferred to the Wave 2.2 job protocol")
 
 /* ── sync ──────────────────────────────────────────────────────────── */
 ZCL_COMMAND_BRANCH("core.sync", "core", "Sync phase and validation progress",
@@ -1453,20 +1425,6 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
     ZCL_COMMAND_CAP_CHAIN_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_bridge_command)
-ZCL_COMMAND_PLANNED_READ(
-    "core.storage.integrity", "core.storage", "",
-    "Verify raw storage integrity",
-    "Will report raw SQLite/storage integrity check results once a "
-    "distinct handler is wired; today the handler is unbound and "
-    "fails closed with exit 3.", 0,
-    "storage,integrity,check",
-    "zcl.command.empty_input.v1", "zcl.storage_integrity.v1", "", "",
-    "z23 core storage integrity",
-    ZCL_COMMAND_LAYER_CORE, ZCL_COMMAND_SCOPE_NODE, ZCL_COMMAND_AUTH_OPERATOR,
-    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
-    ZCL_COMMAND_LANE_LOCAL | ZCL_COMMAND_LANE_ALL_NODE,
-    ZCL_COMMAND_CAP_CHAIN_READ,
-    "a distinct storage-integrity handler is a Wave 2.2 deliverable")
 ZCL_COMMAND_READY_READ(
     "core.storage.query", "core.storage", "",
     "Run one SELECT-only query over node.db",
