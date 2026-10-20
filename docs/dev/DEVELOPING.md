@@ -569,6 +569,21 @@ to admit unsigned verdicts or bypass a gate. Capsules, distributed ThinLTO,
 and QEDC-native emission are experiments until their exact receiving contracts
 and real behavior qualify.
 
+### Release your own file claims
+
+When the owned work is preserved for handoff, run this from its checkout:
+
+```bash
+build/bin/z23-dev dev agent claim --input='{"story":"Release completed file scope after preserving the handoff","files":[],"release":true}'
+```
+
+Release requires a nonempty `story` and a `files` array. It removes all
+claims belonging to the current worktree; the empty array does not select
+individual files or release another worktree's claims.
+
+<!-- claim: symbol-present dvc_validate tools/command/native_devagent_claim.c # release input validation -->
+<!-- claim: symbol-present dvc_release tools/command/native_devagent_claim.c # current-worktree claim release -->
+
 ### Recover a verified orphaned file claim
 
 Use `dev agent claim` to acquire or renew a bounded file scope. A silent
