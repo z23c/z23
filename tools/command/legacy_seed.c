@@ -495,7 +495,11 @@ static enum lseed_refusal lseed_publish(const struct lseed_request *req,
     char parent[LSEED_PATH_MAX];
     (void)unlinkat(dst, LSEED_MARKER_NAME, 0);
     if (fsync(dst) != 0 ||
+#if defined(__linux__)
+        renameat2(AT_FDCWD, tmp, AT_FDCWD, req->target, RENAME_NOREPLACE) != 0)
+#else
         platform_renameat_noreplace(AT_FDCWD, tmp, AT_FDCWD, req->target) != 0)
+#endif
         return lseed_refuse(why, cap, LSEED_COPY_FAILED,
                       "atomic rename to target failed; target.tmp kept");
     lseed_parent_of(req->target, parent, sizeof(parent));
