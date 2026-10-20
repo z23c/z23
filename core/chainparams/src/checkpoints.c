@@ -229,3 +229,146 @@ void checkpoints_reset_rom_state_override_for_test(void)
 {
     g_rom_state_checkpoint_test_override = NULL;
 }
+
+/* ── Baked ladder rungs above the keystone ─────────────────────────────
+ * The keystone above is the ONE rung the compiled sovereign anchor logic
+ * (state-offer exemption, fresh-node replay-from-H, header seed, refold)
+ * is keyed to. This table adds further BAKED rungs strictly above it: each is
+ * a complete-state commitment (same fields, same rom_state_root fold) plus the
+ * cumulative chainwork at its height, so a bundle installed at that height is
+ * bound to a sovereign compiled commitment instead of passing on its own
+ * receipt alone. A rung here adds trust in a newer state root ONLY: it does
+ * not move the keystone, the SHA3 UTXO checkpoint, or any block, transaction,
+ * header or difficulty predicate (it is deliberately NOT in the header
+ * checkpoint map).
+ *
+ * Rung h=3200000 provenance: two independent from-genesis FULL-validation
+ * folds (builders r1 and r2, one source commit ff3f68a9d) each exported a
+ * consensus-state bundle at h=3200000; tools/rom_two_builder_compare reported
+ * "TWO-BUILDER: PASS - chain content byte-identical; every digest re-derived
+ * from raw rows equals its manifest", and `--rom-root` on both bundles printed
+ * the identical rom_state_root 6b73cbe3d3c228f95f7213aa44db2f9e369fd5c8241e454d6750580b50866a21.
+ * Block hash 00000170f44ce8b3db63c39087d3ee681124fb8adc002dc1a55f7bd441004afd
+ * equals the legacy zclassicd oracle's getblockhash 3200000; chainwork
+ * (big-endian) is the oracle's getblockheader chainwork. The rung artifact
+ * (tools/checkpoint_rung_export) self_digest is
+ * 66746f2c8fb173bc071f45fc11057bb965a504f08d16d4aae7fd49165058d56c.
+ *
+ * ADMISSIBILITY: SATISFIED 2026-10-19 (owner-approved bake). Hex comments are
+ * in INTERNAL byte order (as the keystone's); block_hash shows its display form. */
+static const struct rom_state_rung g_rom_state_rungs[] = {
+    {
+        .cp = {
+            .height = 3200000,
+            .block_hash = {
+                /* 00000170f44ce8b3db63c39087d3ee681124fb8adc002dc1a55f7bd441004afd */
+                0xfd, 0x4a, 0x00, 0x41, 0xd4, 0x7b, 0x5f, 0xa5,
+                0xc1, 0x2d, 0x00, 0xdc, 0x8a, 0xfb, 0x24, 0x11,
+                0x68, 0xee, 0xd3, 0x87, 0x90, 0xc3, 0x63, 0xdb,
+                0xb3, 0xe8, 0x4c, 0xf4, 0x70, 0x01, 0x00, 0x00,
+            },
+            .utxo_root = {
+                /* 13ee0d2cc21459c48b5679a657151bec629bb76ec1f29aa33d881ce1d178d619 */
+                0x13, 0xee, 0x0d, 0x2c, 0xc2, 0x14, 0x59, 0xc4,
+                0x8b, 0x56, 0x79, 0xa6, 0x57, 0x15, 0x1b, 0xec,
+                0x62, 0x9b, 0xb7, 0x6e, 0xc1, 0xf2, 0x9a, 0xa3,
+                0x3d, 0x88, 0x1c, 0xe1, 0xd1, 0x78, 0xd6, 0x19,
+            },
+            .utxo_count = 1345608,
+            .total_supply = 1041151456122215LL,
+            .anchor_digest = {
+                /* a67b07cc89a45377a141d4f6ebfbdda747da00c344030d2be0264a22e1202bbe */
+                0xa6, 0x7b, 0x07, 0xcc, 0x89, 0xa4, 0x53, 0x77,
+                0xa1, 0x41, 0xd4, 0xf6, 0xeb, 0xfb, 0xdd, 0xa7,
+                0x47, 0xda, 0x00, 0xc3, 0x44, 0x03, 0x0d, 0x2b,
+                0xe0, 0x26, 0x4a, 0x22, 0xe1, 0x20, 0x2b, 0xbe,
+            },
+            .anchor_count = 639969,
+            .sprout_frontier_root = {
+                /* fcc3621e37d169757a6e1763dbdbf5adeb9b01c824ae2f7200e980c0fe8a77f6 */
+                0xfc, 0xc3, 0x62, 0x1e, 0x37, 0xd1, 0x69, 0x75,
+                0x7a, 0x6e, 0x17, 0x63, 0xdb, 0xdb, 0xf5, 0xad,
+                0xeb, 0x9b, 0x01, 0xc8, 0x24, 0xae, 0x2f, 0x72,
+                0x00, 0xe9, 0x80, 0xc0, 0xfe, 0x8a, 0x77, 0xf6,
+            },
+            .sprout_frontier_height = 2124937,
+            .sapling_frontier_root = {
+                /* afabee0e5d6704ce4d549c796afb1476b9d54a4294e0ca1b37e67a81b09f7a21 */
+                0xaf, 0xab, 0xee, 0x0e, 0x5d, 0x67, 0x04, 0xce,
+                0x4d, 0x54, 0x9c, 0x79, 0x6a, 0xfb, 0x14, 0x76,
+                0xb9, 0xd5, 0x4a, 0x42, 0x94, 0xe0, 0xca, 0x1b,
+                0x37, 0xe6, 0x7a, 0x81, 0xb0, 0x9f, 0x7a, 0x21,
+            },
+            .sapling_frontier_height = 3199983,
+            .nullifier_digest = {
+                /* 901eed6709930926db789ec806c3294158a43894a31516fecbe35f65da21d0b3 */
+                0x90, 0x1e, 0xed, 0x67, 0x09, 0x93, 0x09, 0x26,
+                0xdb, 0x78, 0x9e, 0xc8, 0x06, 0xc3, 0x29, 0x41,
+                0x58, 0xa4, 0x38, 0x94, 0xa3, 0x15, 0x16, 0xfe,
+                0xcb, 0xe3, 0x5f, 0x65, 0xda, 0x21, 0xd0, 0xb3,
+            },
+            .nullifier_count = 1501851,
+            .rom_state_root = {
+                /* 6b73cbe3d3c228f95f7213aa44db2f9e369fd5c8241e454d6750580b50866a21 */
+                0x6b, 0x73, 0xcb, 0xe3, 0xd3, 0xc2, 0x28, 0xf9,
+                0x5f, 0x72, 0x13, 0xaa, 0x44, 0xdb, 0x2f, 0x9e,
+                0x36, 0x9f, 0xd5, 0xc8, 0x24, 0x1e, 0x45, 0x4d,
+                0x67, 0x50, 0x58, 0x0b, 0x50, 0x86, 0x6a, 0x21,
+            },
+        },
+        .chainwork = {
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x0b, 0x33, 0xf2, 0x1b, 0x07, 0x4f, 0x27,
+        },
+    },
+};
+
+/* Test-only override of the whole table (NULL in production). */
+static const struct rom_state_rung *g_rom_state_rungs_test_override = NULL;
+static size_t g_rom_state_rungs_test_override_n = 0;
+
+size_t get_rom_state_rung_count(void)
+{
+    if (g_rom_state_rungs_test_override)
+        return g_rom_state_rungs_test_override_n;
+    return sizeof(g_rom_state_rungs) / sizeof(g_rom_state_rungs[0]);
+}
+
+const struct rom_state_rung *get_rom_state_rung_at(size_t index)
+{
+    if (index >= get_rom_state_rung_count())
+        return NULL;
+    if (g_rom_state_rungs_test_override)
+        return &g_rom_state_rungs_test_override[index];
+    return &g_rom_state_rungs[index];
+}
+
+const struct rom_state_checkpoint *
+get_baked_rom_state_checkpoint_at_height(int32_t height)
+{
+    const struct rom_state_checkpoint *keystone = get_rom_state_checkpoint();
+    if (keystone && keystone->height == height)
+        return keystone;
+    size_t n = get_rom_state_rung_count();
+    for (size_t i = 0; i < n; i++) {
+        const struct rom_state_rung *r = get_rom_state_rung_at(i);
+        if (r && r->cp.height == height)
+            return &r->cp;
+    }
+    return NULL;
+}
+
+void checkpoints_set_rom_state_rungs_override_for_test(
+    const struct rom_state_rung *rungs, size_t count)
+{
+    g_rom_state_rungs_test_override = rungs;
+    g_rom_state_rungs_test_override_n = rungs ? count : 0;
+}
+
+void checkpoints_reset_rom_state_rungs_override_for_test(void)
+{
+    g_rom_state_rungs_test_override = NULL;
+    g_rom_state_rungs_test_override_n = 0;
+}

@@ -48,6 +48,49 @@ static bool keystone_is_placeholder(const struct rom_state_checkpoint *cp)
            !zcl_bytes_any_set(cp->rom_state_root, 32);
 }
 
+/* A rung at a baked LADDER rung height must also carry that rung's compiled
+ * chainwork (the keystone carries none, so it has no chainwork to pin). */
+static bool ladder_chainwork_matches_baked(const struct checkpoint_rung *r)
+{
+    size_t n = get_rom_state_rung_count();
+    for (size_t i = 0; i < n; i++) {
+        const struct rom_state_rung *b = get_rom_state_rung_at(i);
+        if (b && b->cp.height == r->height)
+            return memcmp(b->chainwork, r->chainwork, 32) == 0;
+    }
+    return true;
+}
+
+/* Baked binding: a rung at a compiled baked height (the keystone, or a baked
+ * ladder rung) must reproduce it byte-for-byte (rom_state_root covers all
+ * folded fields; a baked ladder rung also pins its chainwork). Returns
+ * VERIFIED and sets res->bound on a match, MISMATCH (detail filled) on a
+ * divergent artifact, UNVERIFIABLE when no baked commitment sits at the height
+ * (the caller keeps its own verdict then). */
+static enum checkpoint_rung_verdict
+ladder_bind_baked(const struct checkpoint_rung *r,
+                  struct checkpoint_ladder_result *res)
+{
+    const struct rom_state_checkpoint *bk =
+        get_baked_rom_state_checkpoint_at_height(r->height);
+    if (!bk || keystone_is_placeholder(bk))
+        return CHECKPOINT_RUNG_UNVERIFIABLE;
+    if (memcmp(r->rom_state_root, bk->rom_state_root, 32) == 0 &&
+        ladder_chainwork_matches_baked(r)) {
+        res->bound = true;
+        res->candidate_unbaked = false;
+        snprintf(res->detail, sizeof(res->detail),
+                 "bound: reproduces the compiled baked commitment "
+                 "byte-for-byte");
+        return CHECKPOINT_RUNG_VERIFIED;
+    }
+    snprintf(res->detail, sizeof(res->detail),
+             "divergent artifact: conflicts the compiled baked commitment "
+             "at its own height %d",
+             bk->height);
+    return CHECKPOINT_RUNG_MISMATCH;
+}
+
 size_t checkpoint_ladder_verify(const struct checkpoint_rung *rungs, size_t n,
                                 const struct checkpoint_ladder_hooks *hooks,
                                 struct checkpoint_ladder_result *out,
@@ -57,8 +100,6 @@ size_t checkpoint_ladder_verify(const struct checkpoint_rung *rungs, size_t n,
         *any_mismatch = false;
     if (!rungs || !out)
         return 0; // raw-return-ok:pure-verifier-null-guard-no-side-effects
-    const struct rom_state_checkpoint *cp = get_rom_state_checkpoint();
-    bool have_baked = !keystone_is_placeholder(cp);
 
     bool have_prev = false;
     int32_t prev_height = 0;
@@ -99,25 +140,13 @@ size_t checkpoint_ladder_verify(const struct checkpoint_rung *rungs, size_t n,
             }
         }
 
-        /* Baked binding: a rung at the compiled keystone height must reproduce
-         * it byte-for-byte (rom_state_root covers all folded fields). */
-        if (have_baked && r->height == cp->height) {
-            if (memcmp(r->rom_state_root, cp->rom_state_root, 32) == 0) {
-                res->bound = true;
-                res->candidate_unbaked = false;
-                verdict = CHECKPOINT_RUNG_VERIFIED;
-                snprintf(res->detail, sizeof(res->detail),
-                         "bound: reproduces the compiled sovereign keystone "
-                         "byte-for-byte");
-            } else {
-                verdict = CHECKPOINT_RUNG_MISMATCH;
-                snprintf(res->detail, sizeof(res->detail),
-                         "divergent artifact: conflicts the compiled keystone "
-                         "at its own height %d",
-                         cp->height);
-                goto record;
-            }
+        /* Baked binding (see ladder_bind_baked). */
+        if (ladder_bind_baked(r, res) == CHECKPOINT_RUNG_MISMATCH) {
+            verdict = CHECKPOINT_RUNG_MISMATCH;
+            goto record;
         }
+        if (res->bound)
+            verdict = CHECKPOINT_RUNG_VERIFIED;
 
         /* Header-chain binding. */
         if (hooks && hooks->block_hash_at) {
@@ -243,6 +272,43 @@ size_t checkpoint_ladder_load_candidates(const char *dir,
     return count;
 }
 
+/* Collect the compiled baked rungs (the keystone, then the sealed ladder
+ * table) into `rungs` in ascending order; returns the count. */
+static size_t ladder_collect_baked(struct checkpoint_rung *rungs, size_t cap)
+{
+    size_t n = 0;
+    const struct rom_state_checkpoint *cp = get_rom_state_checkpoint();
+    struct checkpoint_rung baked;
+    if (cp && !keystone_is_placeholder(cp) &&
+        checkpoint_rung_from_rom_checkpoint(cp, NULL, &baked))
+        ladder_insert_sorted(rungs, &n, cap, &baked);
+    for (size_t i = 0; i < get_rom_state_rung_count(); i++) {
+        const struct rom_state_rung *br = get_rom_state_rung_at(i);
+        if (br && !keystone_is_placeholder(&br->cp) &&
+            checkpoint_rung_from_rom_checkpoint(&br->cp, br->chainwork, &baked))
+            ladder_insert_sorted(rungs, &n, cap, &baked);
+    }
+    return n;
+}
+
+/* A candidate artifact byte-identical to a compiled baked rung is that rung,
+ * not a second rung at the same height: compact the candidates at rungs[n..]
+ * dropping such duplicates; returns the number kept. A same-height DIVERGENT
+ * artifact is kept (and flagged by the verifier). */
+static size_t ladder_drop_baked_dups(struct checkpoint_rung *rungs, size_t n,
+                                     size_t candidates)
+{
+    size_t kept = 0;
+    for (size_t i = 0; i < candidates; i++) {
+        bool dup = false;
+        for (size_t j = 0; j < n && !dup; j++)
+            dup = memcmp(&rungs[j], &rungs[n + i], sizeof(rungs[0])) == 0;
+        if (!dup)
+            rungs[n + kept++] = rungs[n + i];
+    }
+    return kept;
+}
+
 static void ladder_raise_blocker(int32_t height, const char *detail)
 {
     struct blocker_record b;
@@ -270,11 +336,7 @@ bool checkpoint_ladder_dump_state_json(struct json_value *out, const char *key)
 
     const struct rom_state_checkpoint *cp = get_rom_state_checkpoint();
     bool baked_placeholder = keystone_is_placeholder(cp);
-    if (cp && !baked_placeholder) {
-        struct checkpoint_rung baked;
-        if (checkpoint_rung_from_rom_checkpoint(cp, NULL, &baked))
-            ladder_insert_sorted(rungs, &n, LADDER_MAX_RUNGS, &baked);
-    }
+    n = ladder_collect_baked(rungs, LADDER_MAX_RUNGS);
 
     char datadir[1024] = {0};
     GetDataDir(false, datadir, sizeof(datadir));
@@ -284,6 +346,10 @@ bool checkpoint_ladder_dump_state_json(struct json_value *out, const char *key)
     size_t candidates =
         checkpoint_ladder_load_candidates(artifact_dir, rungs + n,
                                           LADDER_MAX_RUNGS - n);
+    /* A candidate artifact byte-identical to a compiled baked rung is that
+     * rung, not a second rung at the same height: drop it so the baked rung
+     * is listed once. A same-height DIVERGENT artifact is kept and flagged. */
+    candidates = ladder_drop_baked_dups(rungs, n, candidates);
     /* The compiled keystone was inserted first at index 0; candidates were
      * appended past it. Re-sort the whole set so verify() sees ascending
      * heights (candidates may sit below/above the keystone). */

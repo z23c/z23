@@ -8,12 +8,15 @@
  *       rtb_rom_state_root in tools/rom_two_builder_compare.c) and asserts
  *       equality with the baked constant;
  *   (2) asserts the coins fields match g_sha3_checkpoint;
- *   (3) asserts the test-override seam works.
+ *   (3) asserts the test-override seam works;
+ *   (4) pins the baked ladder rung at height 3,200,000 (g_rom_state_rungs).
  */
 
 #include "test/test_core.h"
 #include "chain/checkpoints.h"
+#include "base/hex.h"
 #include "crypto/sha3.h"
+#include "storage/checkpoint_rung.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -56,6 +59,96 @@ static void rom_test_rederive_root(const struct rom_state_checkpoint *cp,
     rom_test_u64le(&c, cp->nullifier_count);
     sha3_256_finalize(&c, out);
 }
+
+#define RUNG_CHECK(desc, cond)                                            \
+    do {                                                                  \
+        printf("rom-state-checkpoint: %s... ", (desc));                   \
+        if (cond) printf("OK\n");                                         \
+        else { printf("FAIL\n"); failures++; }                            \
+    } while (0)
+
+/* Baked ladder rung h=3200000 (two-builder r1/r2 byte-identical). Pins the
+ * rung to the independently derived sheet; the h=3056758 keystone assertions
+ * stay in test_rom_state_checkpoint, untouched. */
+static int rom_test_rung_table_and_root(void)
+{
+    int failures = 0;
+    static const char want_root[] =
+        "6b73cbe3d3c228f95f7213aa44db2f9e369fd5c8241e454d6750580b50866a21";
+    static const char want_cw[] =
+        "000000000000000000000000000000000000000000000000000b33f21b074f27";
+    uint8_t w[32], re[32];
+    const struct rom_state_rung *rg = get_rom_state_rung_at(0);
+    RUNG_CHECK("rung table holds exactly the 3200000 rung",
+               get_rom_state_rung_count() == 1 && rg != NULL &&
+               get_rom_state_rung_at(1) == NULL && rg->cp.height == 3200000);
+    if (!rg)
+        return failures + 1;
+    rom_test_rederive_root(&rg->cp, re);
+    RUNG_CHECK("rung rom_state_root re-derives from its fields",
+               memcmp(re, rg->cp.rom_state_root, 32) == 0);
+    RUNG_CHECK("rung rom_state_root == two-builder sheet",
+               zcl_hex_decode(want_root, w, 32) &&
+               memcmp(w, rg->cp.rom_state_root, 32) == 0);
+    RUNG_CHECK("rung chainwork == oracle header chainwork",
+               zcl_hex_decode(want_cw, w, 32) &&
+               memcmp(w, rg->chainwork, 32) == 0);
+    return failures;
+}
+
+static int rom_test_rung_scalars_and_digest(void)
+{
+    int failures = 0;
+    static const char want_self[] =
+        "66746f2c8fb173bc071f45fc11057bb965a504f08d16d4aae7fd49165058d56c";
+    uint8_t w[32];
+    struct checkpoint_rung cr;
+    const struct rom_state_rung *rg = get_rom_state_rung_at(0);
+    if (!rg)
+        return 1;
+    RUNG_CHECK("rung counts and supply pin the sheet",
+               rg->cp.utxo_count == 1345608 &&
+               rg->cp.total_supply == 1041151456122215LL &&
+               rg->cp.anchor_count == 639969 &&
+               rg->cp.nullifier_count == 1501851);
+    RUNG_CHECK("rung frontier heights pin the sheet",
+               rg->cp.sprout_frontier_height == 2124937 &&
+               rg->cp.sapling_frontier_height == 3199983);
+    bool derived =
+        checkpoint_rung_from_rom_checkpoint(&rg->cp, rg->chainwork, &cr);
+    RUNG_CHECK("rung self_digest == exported artifact digest",
+               derived && checkpoint_rung_self_consistent(&cr) &&
+               zcl_hex_decode(want_self, w, 32) &&
+               memcmp(w, cr.self_digest, 32) == 0);
+    return failures;
+}
+
+static int rom_test_rung_lookup(void)
+{
+    int failures = 0;
+    const struct rom_state_rung *rg = get_rom_state_rung_at(0);
+    RUNG_CHECK("rung is strictly above the keystone",
+               rg && rg->cp.height > get_rom_state_checkpoint()->height);
+    RUNG_CHECK("lookup: keystone height -> keystone",
+               get_baked_rom_state_checkpoint_at_height(3056758) ==
+                   get_rom_state_checkpoint());
+    RUNG_CHECK("lookup: 3200000 -> the baked rung",
+               rg && get_baked_rom_state_checkpoint_at_height(3200000) ==
+                         &rg->cp);
+    RUNG_CHECK("lookup: any other height -> NULL",
+               get_baked_rom_state_checkpoint_at_height(3100000) == NULL &&
+               get_baked_rom_state_checkpoint_at_height(0) == NULL);
+    RUNG_CHECK("keystone is unchanged by the rung bake",
+               get_rom_state_checkpoint()->height == 3056758);
+    return failures;
+}
+
+static int rom_test_ladder_rung(void)
+{
+    return rom_test_rung_table_and_root() + rom_test_rung_scalars_and_digest() +
+           rom_test_rung_lookup();
+}
+#undef RUNG_CHECK
 
 int test_rom_state_checkpoint(void)
 {
@@ -124,6 +217,8 @@ int test_rom_state_checkpoint(void)
               get_rom_state_checkpoint() != NULL &&
               get_rom_state_checkpoint()->height == 3056758);
     }
+
+    failures += rom_test_ladder_rung();
 
 #undef CHECK
 

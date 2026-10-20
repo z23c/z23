@@ -324,3 +324,48 @@ H/hash, Sapling height/root/block hash, served H*/hash, header tip/hash/chainwor
 and descriptive lane tag. Publication remains unavailable and must recapture/
 CAS from the same target store while boot-quiesced. A standalone freshness
 boolean is intentionally not an activation interface.
+
+## Baked ladder rungs (compiled trust above the keystone)
+
+The sealed ROM table (`core/chainparams/src/checkpoints.c`) holds the
+keystone at h=3056758 and a table of further baked rungs strictly above it
+(`g_rom_state_rungs`). The keystone is still the one rung that the sovereign
+anchor logic (state-offer exemption, fresh-node replay-from-H, header seed,
+refold, the SHA3 UTXO checkpoint) is keyed to; it did not move. A baked rung
+adds trust in a newer state root only: a bundle whose manifest height equals a
+baked rung height must reproduce that rung's transparent and shielded
+commitments field by field or admission is REFUSED
+(`validate_rom_keystone_binding`, via
+`get_baked_rom_state_checkpoint_at_height`). No block, transaction, header or
+difficulty predicate reads the table, and it is deliberately not in the header
+checkpoint map. A datadir installed from the h=3056758 bundle is unaffected: the
+keystone binding is byte-for-byte what it was, and a bundle at any height that
+is neither the keystone nor a baked rung is untouched.
+
+### Receipt: rung h=3200000 (baked 2026-10-19, owner-approved)
+
+Two independent from-genesis full-validation folds (builders r1 and r2, one
+source commit `ff3f68a9d`) exported a bundle at h=3200000. The compare tool
+reported `TWO-BUILDER: PASS - chain content byte-identical; every digest
+re-derived from raw rows equals its manifest`, and `--rom-root` printed the same
+value for both bundles. Digests, in internal byte order unless noted:
+
+| field | value |
+|---|---|
+| height | 3200000 |
+| block_hash (display) | 00000170f44ce8b3db63c39087d3ee681124fb8adc002dc1a55f7bd441004afd (equals the legacy zclassicd oracle `getblockhash 3200000`) |
+| chainwork (big-endian, oracle header) | 000000000000000000000000000000000000000000000000000b33f21b074f27 |
+| utxo_root | 13ee0d2cc21459c48b5679a657151bec629bb76ec1f29aa33d881ce1d178d619 |
+| utxo_count / total_supply | 1345608 / 1041151456122215 |
+| anchor_digest / anchor_count | a67b07cc89a45377a141d4f6ebfbdda747da00c344030d2be0264a22e1202bbe / 639969 |
+| sprout_frontier_root / height | fcc3621e37d169757a6e1763dbdbf5adeb9b01c824ae2f7200e980c0fe8a77f6 / 2124937 |
+| sapling_frontier_root / height | afabee0e5d6704ce4d549c796afb1476b9d54a4294e0ca1b37e67a81b09f7a21 / 3199983 |
+| nullifier_digest / nullifier_count | 901eed6709930926db789ec806c3294158a43894a31516fecbe35f65da21d0b3 / 1501851 |
+| rom_state_root | 6b73cbe3d3c228f95f7213aa44db2f9e369fd5c8241e454d6750580b50866a21 |
+| rung self_digest | 66746f2c8fb173bc071f45fc11057bb965a504f08d16d4aae7fd49165058d56c |
+
+Pinned by `test_rom_state_checkpoint` (fold, sheet, chainwork, self_digest),
+`test_consensus_state_snapshot_install` (`rom_rung_binding_tests`: matching
+rung admits, every single-field tamper refuses, the old keystone height binds as
+before) and `test_consensus_state_snapshot_export` (ladder verify binds the
+baked rung).

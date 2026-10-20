@@ -1497,7 +1497,7 @@ engine/composition/src/bundle_exporter.c:bundle_exporter_start#2:21
 engine/composition/src/bundle_exporter.c:bx_recover_session:18
 engine/composition/src/bundle_exporter.c:bx_try_export_once:20
 engine/composition/src/consensus_state_bundle_validate.c:validate_nullifiers:20
-engine/composition/src/consensus_state_bundle_validate.c:validate_rom_keystone_binding:16
+engine/composition/src/consensus_state_bundle_validate.c:validate_rom_keystone_binding:15
 engine/composition/src/consensus_state_bundle_validate_schema.c:consensus_state_bundle_validate_canonical_schema:26
 engine/composition/src/consensus_state_install_runtime.c:consensus_state_install_from_bundle#2:80
 engine/composition/src/consensus_state_install_runtime.c:icb_datadir_open_classify:17
@@ -1956,7 +1956,7 @@ engine/modules/storage/src/chain_segment.c:atomic_write_ro:24
 engine/modules/storage/src/chain_segment.c:chain_segment_open:19
 engine/modules/storage/src/chain_segment.c:load_manifest:25
 engine/modules/storage/src/chainstate_legacy_reader.c:iter_anchor_keyspace:17
-engine/modules/storage/src/checkpoint_ladder.c:checkpoint_ladder_verify:26
+engine/modules/storage/src/checkpoint_ladder.c:checkpoint_ladder_verify:25
 engine/modules/storage/src/checkpoint_rung.c:rung_derive_anchors:18
 engine/modules/storage/src/checkpoint_rung.c:rung_derive_coins:20
 engine/modules/storage/src/coins_kv.c:coins_kv_add_many_sqlite:22

@@ -244,3 +244,7 @@ later lane flips it HARD.
 - 2026-10-19T11:03:57Z — REASON: repin zclassic23/sha3 package root after a byte-identical Keccak/Wrap speedup (lanes state + unrolled rounds); proven by unchanged KATs, a 1000-case differential against the old implementation, and consensus parity
   old ROOT: 3a3baaab8b5652ad665b1476c79d778f50583daaf6371004f7a5b604e9279ec8
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-20T01:02:33Z — REASON: bake checkpoint ladder rung @3200000 (owner-approved 2026-10-19; two-builder byte-identical; adds bundle trust in a newer state root, no validation predicate change)
+  old ROOT: fa84ef23b919ecd72edde14eb4c9dfb8a87a8258c587464494dbf4a828c6a4b6
+  by: owner unseal ritual (make core-unseal)

@@ -630,6 +630,68 @@ static bool cse_write_rung_file(const char *dir, struct checkpoint_rung *r)
     return ok;
 }
 
+/* (4b) A baked LADDER rung above the keystone binds like the keystone: the
+ * compiled 3200000 rung reproduces -> bound + VERIFIED, alone and after the
+ * keystone. The keystone assertions in cse_run_rung_ladder_tests are
+ * unchanged. */
+static int cse_baked_rung_binds(const struct checkpoint_rung *baked,
+                                const struct checkpoint_rung *up)
+{
+    int failures = 0;
+    struct checkpoint_ladder_result res[8];
+    bool any_mm = false;
+    size_t n = checkpoint_ladder_verify(up, 1, NULL, res, 8, &any_mm);
+    CSE_CHECK("verify: baked ladder rung is bound + VERIFIED",
+              n == 1 && !any_mm && res[0].bound &&
+                  !res[0].candidate_unbaked &&
+                  res[0].verdict == CHECKPOINT_RUNG_VERIFIED);
+    struct checkpoint_rung two[2] = { *baked, *up };
+    any_mm = false;
+    n = checkpoint_ladder_verify(two, 2, NULL, res, 8, &any_mm);
+    CSE_CHECK("verify: keystone then baked rung: both bound, no mismatch",
+              n == 2 && !any_mm && res[0].bound && res[1].bound);
+    return failures;
+}
+
+/* A divergent artifact at the baked rung height, or one with the wrong
+ * chainwork, is a MISMATCH and never bound. */
+static int cse_baked_rung_divergence(const struct checkpoint_rung *up)
+{
+    int failures = 0;
+    struct checkpoint_ladder_result res[8];
+    bool any_mm = false;
+    struct checkpoint_rung bad_root = *up;
+    bad_root.nullifier_digest[0] ^= 0xff;
+    checkpoint_rung_finalize(&bad_root);
+    size_t n = checkpoint_ladder_verify(&bad_root, 1, NULL, res, 8, &any_mm);
+    CSE_CHECK("verify: divergent ladder-rung-height artifact -> MISMATCH",
+              n == 1 && any_mm && res[0].verdict == CHECKPOINT_RUNG_MISMATCH &&
+                  !res[0].bound);
+    struct checkpoint_rung bad_cw = *up;
+    bad_cw.chainwork[31] ^= 0x01;
+    checkpoint_rung_finalize(&bad_cw);
+    any_mm = false;
+    n = checkpoint_ladder_verify(&bad_cw, 1, NULL, res, 8, &any_mm);
+    CSE_CHECK("verify: ladder rung with wrong chainwork -> MISMATCH",
+              n == 1 && any_mm && res[0].verdict == CHECKPOINT_RUNG_MISMATCH &&
+                  !res[0].bound);
+    return failures;
+}
+
+static int cse_run_baked_ladder_rung_tests(const struct checkpoint_rung *baked)
+{
+    int failures = 0;
+    const struct rom_state_rung *br = get_rom_state_rung_at(0);
+    struct checkpoint_rung up;
+    bool have = br && checkpoint_rung_from_rom_checkpoint(&br->cp, br->chainwork,
+                                                          &up);
+    CSE_CHECK("verify: baked ladder rung present", have);
+    if (!have)
+        return failures;
+    return failures + cse_baked_rung_binds(baked, &up) +
+           cse_baked_rung_divergence(&up);
+}
+
 static void cse_run_rung_ladder_tests(int *failures_ptr)
 {
     int failures = *failures_ptr;
@@ -728,6 +790,8 @@ static void cse_run_rung_ladder_tests(int *failures_ptr)
     CSE_CHECK("verify: divergent keystone-height rung -> MISMATCH",
               n == 1 && any_mm && res[0].verdict == CHECKPOINT_RUNG_MISMATCH &&
                   !res[0].bound);
+
+    failures += cse_run_baked_ladder_rung_tests(&baked);
 
     /* (5) self-inconsistent artifact (root not refolded) -> MISMATCH. */
     struct checkpoint_rung broken = baked;

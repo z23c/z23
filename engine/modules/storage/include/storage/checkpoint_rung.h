@@ -27,7 +27,8 @@
  * state is SELF-ATTESTATION. It is a `candidate_unbaked` rung until the owner
  * re-derives and bakes it into the sealed table under the two-builder ritual.
  * Nothing in this module elevates a candidate rung to a trust root — only the
- * compiled `g_rom_state_checkpoint` is `bound`.
+ * compiled `g_rom_state_checkpoint` and the sealed `g_rom_state_rungs` rungs are
+ * `bound`.
  */
 
 #ifndef ZCL_STORAGE_CHECKPOINT_RUNG_H

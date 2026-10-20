@@ -2,7 +2,8 @@
  *
  * Checkpoint LADDER verifier — mutual + baked consistency over N rungs.
  *
- * Given the compiled sealed keystone (the ONE baked rung) plus zero or more
+ * Given the compiled sealed keystone plus the compiled baked ladder rungs
+ * above it (get_rom_state_rung_at) plus zero or more
  * candidate rung artifacts, the verifier checks, per rung:
  *   - self-consistency  (rom_state_root + self_digest recompute from fields);
  *   - monotonicity      (strictly-increasing height, non-decreasing chainwork
@@ -16,7 +17,8 @@
  *                        height, re-derive the roots and compare).
  *
  * Each rung gets a verdict: VERIFIED, UNVERIFIABLE, or MISMATCH. Only the
- * compiled keystone is `bound` (a trust root); every other rung is
+ * compiled baked rungs (the keystone and the sealed ladder table) are `bound`
+ * (trust roots); every other rung is
  * `candidate_unbaked` — self-attestation that this module NEVER elevates to
  * trusted, even when it verifies clean. A MISMATCH is a
  * divergence the caller escalates to a typed blocker.

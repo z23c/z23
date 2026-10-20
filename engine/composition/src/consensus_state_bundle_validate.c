@@ -1053,15 +1053,19 @@ static bool rom_keystone_is_placeholder(const struct rom_state_checkpoint *rom)
  * compiled constant transitively binds the installed shielded state to the
  * sovereign keystone. LOCAL trust anchoring only: this tightens what THIS binary
  * accepts as an install source — no block/tx/header validity rule changes, and a
- * bundle at any OTHER height is untouched. Fires only at the exact checkpoint
+ * bundle at any OTHER height is untouched. Fires only at the exact checkpoint (or
+ * baked ladder rung, get_baked_rom_state_checkpoint_at_height)
  * height; same refusal shape as the other validators (loud CONSENSUS_INSTALL_REFUSED). */
 static bool validate_rom_keystone_binding(
     const struct consensus_state_bundle_manifest *m,
     struct consensus_state_install_result *r)
 {
-    const struct rom_state_checkpoint *rom = get_rom_state_checkpoint();
-    if (!rom || m->height != rom->height)
-        return true; /* not the checkpoint-height bundle: nothing to bind */
+    /* The keystone height OR any baked ladder rung height binds; the lookup
+     * returns NULL for every other height. */
+    const struct rom_state_checkpoint *rom =
+        get_baked_rom_state_checkpoint_at_height(m->height);
+    if (!rom)
+        return true; /* not a baked-height bundle: nothing to bind */
 
     if (rom_keystone_is_placeholder(rom))
         return validation_fail(

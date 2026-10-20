@@ -9,6 +9,7 @@
 #include "chain/chain.h"
 #include "core/uint256.h"
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 struct checkpoint_entry {
@@ -182,4 +183,33 @@ void checkpoints_set_rom_state_override_for_test(
     const struct rom_state_checkpoint *cp);
 void checkpoints_reset_rom_state_override_for_test(void);
 
+
+/* Baked ladder rungs strictly above the keystone. The keystone
+ * (get_rom_state_checkpoint) stays the ONE rung the sovereign anchor logic is
+ * keyed to; each rung here is a further compiled complete-state commitment
+ * (same fields, same rom_state_root fold) plus the cumulative chainwork at its
+ * height, used to bind a bundle installed at that height. It adds trust in a
+ * newer state root only: no block/tx/header/difficulty predicate reads it.
+ * `chainwork` is the 256-bit cumulative chainwork, BIG-endian (block-header
+ * convention) and is not part of the rom_state_root fold. */
+struct rom_state_rung {
+    struct rom_state_checkpoint cp;
+    uint8_t chainwork[32];
+};
+
+size_t get_rom_state_rung_count(void);
+/* NULL when index >= count. */
+const struct rom_state_rung *get_rom_state_rung_at(size_t index);
+
+/* The baked complete-state commitment at exactly `height`: the keystone when
+ * height equals its height, else the matching ladder rung, else NULL (no baked
+ * commitment at that height). */
+const struct rom_state_checkpoint *
+get_baked_rom_state_checkpoint_at_height(int32_t height);
+
+/* Test-only seam: replace the whole rung table (borrowed pointer; NULL/0 in
+ * production = the compiled table). */
+void checkpoints_set_rom_state_rungs_override_for_test(
+    const struct rom_state_rung *rungs, size_t count);
+void checkpoints_reset_rom_state_rungs_override_for_test(void);
 #endif

@@ -1987,6 +1987,100 @@ static int rom_keystone_binding_tests(const char *dir)
     return failures;
 }
 
+/* Baked ladder rung binding. A bundle installed at a baked LADDER rung height
+ * (above the keystone) must reproduce that rung's complete state exactly, the
+ * same way a keystone-height bundle must; the keystone height binds exactly as
+ * before (non-regression: an old-keystone-height bundle still admits and its
+ * tamper still refuses). A rung at a height other than the bundle's leaves it
+ * untouched. Both tables are installed through their override seams at scaled
+ * fixture heights. */
+static int rom_rung_binding_tests(const char *dir)
+{
+    int failures = 0;
+    struct csi_fixture ka, kb;
+    if (!fixture_init(&ka, dir, "rungold", 0x30, 120, true) ||
+        !fixture_init(&kb, dir, "rungnew", 0x38, 130, true)) {
+        CSI_CHECK("rung: fixtures build", false);
+        return failures;
+    }
+    CSI_CHECK("rung: old-height bundle writes", write_bundle(&ka, CSI_VALID));
+    CSI_CHECK("rung: new-height bundle writes", write_bundle(&kb, CSI_VALID));
+
+    struct rom_state_checkpoint keystone;
+    rom_keystone_from_fixture(&ka, &keystone);
+    struct rom_state_rung rung;
+    memset(&rung, 0, sizeof(rung));
+    rom_keystone_from_fixture(&kb, &rung.cp);
+    rung.chainwork[31] = 7;
+
+    enum consensus_state_install_status status;
+    checkpoints_set_rom_state_override_for_test(&keystone);
+    checkpoints_set_rom_state_rungs_override_for_test(&rung, 1);
+
+    /* Old keystone height: unchanged behavior (guard, green before and after). */
+    CSI_CHECK("rung: old keystone-height bundle still admits",
+              validate_bundle_file(ka.path, &status));
+    {
+        struct rom_state_checkpoint bad = keystone;
+        bad.anchor_digest[0] ^= 0xff;
+        checkpoints_set_rom_state_override_for_test(&bad);
+        CSI_CHECK("rung: old keystone-height tamper still refuses (REFUSED)",
+                  !validate_bundle_file(ka.path, &status) &&
+                  status == CONSENSUS_INSTALL_REFUSED);
+        checkpoints_set_rom_state_override_for_test(&keystone);
+    }
+
+    /* New rung height: matching admits, each single-field tamper refuses. */
+    CSI_CHECK("rung: matching baked rung admits the new-height bundle",
+              validate_bundle_file(kb.path, &status));
+#define RUNG_TAMPER(label, stmt)                                             \
+    do {                                                                     \
+        struct rom_state_rung bad = rung;                                    \
+        stmt;                                                                \
+        checkpoints_set_rom_state_rungs_override_for_test(&bad, 1);          \
+        CSI_CHECK("rung: tampered " label " refuses (REFUSED)",              \
+                  !validate_bundle_file(kb.path, &status) &&                 \
+                  status == CONSENSUS_INSTALL_REFUSED);                      \
+    } while (0)
+    RUNG_TAMPER("block_hash", bad.cp.block_hash[0] ^= 0xff);
+    RUNG_TAMPER("utxo_root", bad.cp.utxo_root[0] ^= 0xff);
+    RUNG_TAMPER("utxo_count", bad.cp.utxo_count += 1);
+    RUNG_TAMPER("total_supply", bad.cp.total_supply += 1);
+    RUNG_TAMPER("anchor_digest", bad.cp.anchor_digest[0] ^= 0xff);
+    RUNG_TAMPER("anchor_count", bad.cp.anchor_count += 1);
+    RUNG_TAMPER("sprout_frontier_root", bad.cp.sprout_frontier_root[0] ^= 0xff);
+    RUNG_TAMPER("sapling_frontier_root", bad.cp.sapling_frontier_root[0] ^= 0xff);
+    RUNG_TAMPER("sapling_frontier_height", bad.cp.sapling_frontier_height ^= 1);
+    RUNG_TAMPER("nullifier_digest", bad.cp.nullifier_digest[0] ^= 0xff);
+    RUNG_TAMPER("nullifier_count", bad.cp.nullifier_count += 1);
+#undef RUNG_TAMPER
+
+    /* Unbaked (placeholder) rung at the bundle height refuses, never admits. */
+    {
+        struct rom_state_rung ph = rung;
+        memset(ph.cp.anchor_digest, 0, 32);
+        checkpoints_set_rom_state_rungs_override_for_test(&ph, 1);
+        CSI_CHECK("rung: placeholder rung refuses (REFUSED)",
+                  !validate_bundle_file(kb.path, &status) &&
+                  status == CONSENSUS_INSTALL_REFUSED);
+    }
+    /* A rung at some other height does not bind the bundle. */
+    {
+        struct rom_state_rung other = rung;
+        other.cp.height = kb.height + 1;
+        other.cp.anchor_digest[0] ^= 0xff;
+        checkpoints_set_rom_state_rungs_override_for_test(&other, 1);
+        CSI_CHECK("rung: rung at a different height does not bind (admits)",
+                  validate_bundle_file(kb.path, &status));
+    }
+
+    checkpoints_reset_rom_state_rungs_override_for_test();
+    checkpoints_reset_rom_state_override_for_test();
+    fixture_free(&ka);
+    fixture_free(&kb);
+    return failures;
+}
+
 /* Every generation activation in this file backs the prior consensus.db
  * kernel up via a real VACUUM (see the "A4" comment above) — a full-file
  * copy plus fsync of both the source and the backup. On a journaled disk
@@ -4300,6 +4394,7 @@ static int test_consensus_state_snapshot_install_platform_arm(void)
 
     failures += install_verify_receipt_tests(dir);
     failures += rom_keystone_binding_tests(dir);
+    failures += rom_rung_binding_tests(dir);
 
     fixture_free(&a); fixture_free(&b); fixture_free(&inc);
     if (db)
