@@ -26,10 +26,11 @@
  *   - coins_applied_height, utxo_sha3, and trusted stage cursors are clamped
  *     to the snapshot height through the shared reindex epilogue.
  *
- * On pre-commit failure: the UTXO write is rolled back atomically and the
- * prior coins_best_block (if any) is restored. On post-commit authority
- * epilogue failure the function returns false after paging/logging; boot must
- * not treat the snapshot as a complete fast rebuild.
+ * Pre-commit failure rolls back the mirror and pending record together.
+ * A co-committed snapshot_import_pending.v1 record binds post-commit recovery
+ * to the exact mirror commitment and authority generation, independently of
+ * the source file. Boot resumes that operation before ordinary restoration;
+ * conflicting or advanced state stops boot with preservation guidance.
  */
 
 #ifndef ZCL_BOOT_SNAPSHOT_IMPORT_H
@@ -50,7 +51,12 @@ enum boot_snapshot_first_outcome {
     BOOT_SNAPSHOT_FIRST_IMPORT_FAILED,
 };
 
-/* Shared boot ordering before coins-view restoration. A closed progress store
+/* These import/preparation entry points are boot-only: callers must keep
+ * reducer, replay and other coin writers quiescent until they return.
+ * Recovery serializes shared progress-store SQL with its recursive mutex;
+ * that mutex does not replace the boot ordering requirement for node.db.
+ *
+ * Shared boot ordering before coins-view restoration. A closed progress store
  * defers successfully; committed-install recovery refusals stop boot. Snapshot
  * absence and import failures retain the existing nonfatal IBD fallback. */
 struct zcl_result boot_prepare_snapshot_first(struct node_db *ndb,
@@ -61,5 +67,9 @@ bool boot_import_snapshot_db(struct node_db *ndb,
                               int64_t *out_utxo_count,
                               int64_t *out_snap_height,
                               uint8_t out_best_hash[32]);
+
+/* True also on malformed/unreadable pending evidence: callers must stop boot
+ * rather than continue IBD over a committed, incomplete snapshot import. */
+bool boot_snapshot_import_pending_or_error(struct node_db *ndb);
 
 #endif

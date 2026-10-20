@@ -1443,7 +1443,7 @@ engine/composition/src/boot_refold_staged.c:boot_snapshot_apply_to_coins_kv:19
 engine/composition/src/boot_refold_staged.c:boot_snapshot_drop_bodiless_have_data_above_seed:28
 engine/composition/src/boot_seniority.c:boot_seniority_weigh_address:17
 engine/composition/src/boot_seniority.c:bsen_build_table:18
-engine/composition/src/boot_services.c:app_init_services:111
+engine/composition/src/boot_services.c:app_init_services:110
 engine/composition/src/boot_services_shutdown.c:shutdown_persist_runtime_state:18
 engine/composition/src/boot_shielded_seed.c:boot_capture_shielded:23
 engine/composition/src/boot_shielded_seed.c:seed_shielded_from_snapshot:18
@@ -2239,7 +2239,7 @@ engine/services/src/property_catalog_service.c:property_catalog_list_with_source
 engine/services/src/property_grant_commit.c:commit_attempt:35
 engine/services/src/quorum_oracle_service.c:quorum_oracle_probe:25
 engine/services/src/recovery_policy.c:policy_load_from_env:16
-engine/services/src/reindex_epilogue.c:derive_authority_from_node_db_utxos:36
+engine/services/src/reindex_epilogue.c:derive_authority_from_node_db_utxos:35
 engine/services/src/rolling_anchor_service.c:ra_load_locked:23
 engine/services/src/rolling_anchor_service.c:rolling_anchor_extend_if_due:19
 engine/services/src/seal_service.c:seal_ratify_tick:23

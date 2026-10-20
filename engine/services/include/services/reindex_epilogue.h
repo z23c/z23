@@ -52,4 +52,10 @@ bool reindex_epilogue_derive_imported_snapshot(struct node_db *ndb,
                                                int height,
                                                const uint8_t hash[32]);
 
+/* Recovery caller has matched a committed pending record, mirror commitment
+ * and the exact authority generation. A completed reset is never repeated. */
+bool reindex_epilogue_resume_imported_snapshot(struct node_db *ndb,
+    const char *node_db_path, int height, const uint8_t hash[32],
+    uint64_t expected_generation, bool reset_required);
+
 #endif /* ZCL_SERVICES_REINDEX_EPILOGUE_H */

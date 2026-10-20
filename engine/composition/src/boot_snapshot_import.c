@@ -7,6 +7,7 @@
  */
 
 #include "config/boot_snapshot_import.h"
+#include "boot_snapshot_import_internal.h"
 #include "config/consensus_state_install_runtime.h"
 #include "config/boot_consensus_bundle_marker.h"
 #include "base/serialize_le.h"
@@ -18,6 +19,7 @@
 #include "chain/checkpoints.h"
 #include "coins/utxo_commitment.h"
 #include "models/database.h"
+#include "platform/directory_transaction.h"
 #include "services/reindex_epilogue.h"
 #include "services/chain_restore_boot_snapshot.h"
 #include "services/nullifier_backfill_service.h"
@@ -29,6 +31,7 @@
 #include "util/log_macros.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -36,6 +39,10 @@
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
+
+#if defined(_WIN32)
+#include <io.h>
+#endif
 
 #include <sqlite3.h>
 
@@ -53,7 +60,7 @@ static void snapshot_preserve(struct snapshot_bootstrap_state *state, const char
 }
 
 /* Absence is distinct from an unreadable schema or an unexpected view. */
-static bool snapshot_table_exists(sqlite3 *db, const char *name, bool *exists)
+bool snapshot_table_exists(sqlite3 *db, const char *name, bool *exists)
 {
     *exists = false;
     sqlite3_stmt *st = NULL;
@@ -291,7 +298,7 @@ static bool snapshot_nullifier_state(sqlite3 *db, bool have_meta,
     return true;
 }
 
-static bool snapshot_node_blob(struct node_db *ndb, const char *key,
+bool snapshot_node_blob(struct node_db *ndb, const char *key,
                                 void *out, size_t cap, size_t *len, bool *found)
 {
     *found = false;
@@ -408,6 +415,18 @@ static bool snapshot_probe_cache(struct snapshot_bootstrap_state *s)
 static bool snapshot_probe_pending(struct snapshot_bootstrap_state *s)
 { return !s->have_meta || snapshot_pending_markers(s->db, s); }
 
+bool snapshot_import_shielded_pristine(struct node_db *ndb)
+{
+    struct snapshot_bootstrap_state state = {.db = progress_store_db(), .ndb = ndb};
+    return snapshot_table_exists(state.db, "progress_meta", &state.have_meta) &&
+        snapshot_probe_anchors(&state) && snapshot_probe_nullifiers(&state) &&
+        snapshot_probe_cache(&state) && snapshot_probe_pending(&state) &&
+        (!state.have_meta ||
+         (snapshot_boolean_stamp(state.db, REFOLD_IN_PROGRESS_KEY, &state) &&
+          snapshot_boolean_stamp(state.db, REFOLD_FROM_ANCHOR_KEY, &state))) &&
+        !state.preserve_reason;
+}
+
 static struct zcl_result snapshot_bootstrap_eligibility(struct node_db *ndb,
     struct snapshot_bootstrap_state *state)
 {
@@ -453,8 +472,10 @@ static enum boot_snapshot_first_outcome snapshot_first_import(
                (long long)count, (long long)height);
     else
         fprintf(stderr,  // obs-ok:helper-context-logged
-                "[boot] snapshot-first import failed for %s — falling through "
-                "to block-by-block IBD path\n", path);
+                "[boot] snapshot-first import failed for %s — %s\n", path,
+                boot_snapshot_import_pending_or_error(ndb) ?
+                    "committed or unreadable pending import; stopping boot for recovery" :
+                    "no pending import; falling through to block-by-block IBD path");
     return ok ? BOOT_SNAPSHOT_FIRST_IMPORTED : BOOT_SNAPSHOT_FIRST_IMPORT_FAILED;
 }
 
@@ -493,11 +514,20 @@ struct zcl_result boot_prepare_snapshot_first(struct node_db *ndb,
         return ZCL_OK;
     if (!ndb || !datadir)
         return ZCL_ERR(-1, "snapshot-first: node store or datadir missing");
+    bool recovered = false;
+    struct zcl_result resumed = snapshot_import_recover(ndb, datadir, &recovered);
+    if (!resumed.ok)
+        return resumed;
+    if (recovered) {
+        if (outcome)
+            *outcome = BOOT_SNAPSHOT_FIRST_IMPORTED;
+        return ZCL_OK;
+    }
 #if !defined(_WIN32)
-    struct zcl_result recovered =
+    struct zcl_result installed_recovery =
         consensus_state_install_recover_committed(ndb, datadir, NULL);
-    if (!recovered.ok)
-        return recovered;
+    if (!installed_recovery.ok)
+        return installed_recovery;
 #endif
     if (boot_consensus_bundle_marker_exists(datadir)) {
         printf("[boot] snapshot-first: preserving installed bundle; skipping automatic snapshot import\n");
@@ -507,6 +537,9 @@ struct zcl_result boot_prepare_snapshot_first(struct node_db *ndb,
     }
     enum boot_snapshot_first_outcome selected;
     struct zcl_result selection = snapshot_first_select(ndb, datadir, &selected);
+    if (selection.ok && selected == BOOT_SNAPSHOT_FIRST_IMPORT_FAILED &&
+        boot_snapshot_import_pending_or_error(ndb))
+        return ZCL_ERR(-1, "committed snapshot import needs recovery; preserve this datadir and restart");
     if (outcome)
         *outcome = selected;
     return selection;
@@ -523,6 +556,111 @@ static int snapshot_import_progress(void *unused)
     return 0;
 }
 
+/* Inspect the kernel belonging to this node, never an unrelated singleton.
+ * The comparison uses the store's retained directory identity, not matching
+ * path spellings. This does not authorize importing into an established set. */
+bool snapshot_import_directory_bound(const char *directory)
+{
+    sqlite3 *db = progress_store_db();
+    if (!db || !directory || !directory[0])
+        return false;
+#if defined(_WIN32)
+    struct platform_directory_transaction parent;
+    platform_directory_transaction_init(&parent);
+    if (!platform_directory_transaction_open(&parent, directory))
+        return false;
+    int fd = platform_directory_child_duplicate_fd(parent.native, _O_RDONLY);
+    platform_directory_transaction_close(&parent);
+    bool bound = fd >= 0 && progress_store_directory_matches_fd(db, fd);
+    if (fd >= 0)
+        (void)_close(fd);
+#else
+    int fd = open(directory, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    bool bound = fd >= 0 && progress_store_directory_matches_fd(db, fd);
+    if (fd >= 0)
+        (void)close(fd);
+#endif
+    return bound;
+}
+
+bool snapshot_import_store_bound(struct node_db *ndb)
+{
+    const char *path = sqlite3_db_filename(ndb->db, "main");
+    if (!path || !path[0])
+        return false;
+    const char *leaf = strrchr(path, '/');
+#if defined(_WIN32)
+    const char *back = strrchr(path, '\\');
+    if (!leaf || (back && back > leaf))
+        leaf = back;
+#endif
+    if (!leaf || (size_t)(leaf - path) >= PATH_MAX)
+        return false;
+    char directory[PATH_MAX];
+    size_t len = leaf == path ? 1u : (size_t)(leaf - path);
+#if defined(_WIN32)
+    if (len == 2 && path[1] == ':')
+        len++;
+#endif
+    memcpy(directory, path, len);
+    directory[len] = '\0';
+    return snapshot_import_directory_bound(directory);
+}
+
+static bool snapshot_import_target_eligible(struct node_db *ndb)
+{
+    if (!sqlite3_get_autocommit(ndb->db) || !progress_store_db() ||
+        !sqlite3_get_autocommit(progress_store_db()))
+        LOG_RETURN(false, "boot_snapshot_import", "snapshot import requires idle node and consensus stores");
+    struct snapshot_import_pending pending;
+    bool found = false;
+    if (!snapshot_import_pending_load(ndb, &pending, &found) || found)
+        LOG_RETURN(false, "boot_snapshot_import",
+                   "pending or unreadable snapshot import; preserve this datadir and restart for recovery");
+    if (!snapshot_import_store_bound(ndb) || !snapshot_import_no_installed_state(ndb))
+        LOG_RETURN(false, "boot_snapshot_import",
+                   "consensus store is closed or belongs to another datadir; "
+                   "preserve this datadir and diagnose a copy; snapshot import refused");
+    struct snapshot_bootstrap_state state = {0};
+    struct zcl_result eligible = snapshot_bootstrap_eligibility(ndb, &state);
+    if (!eligible.ok)
+        LOG_RETURN(false, "boot_snapshot_import", "%s", eligible.message);
+    if (state.preserve_reason)
+        LOG_RETURN(false, "boot_snapshot_import",
+                   "preserving %s; preserve this datadir and diagnose a copy; "
+                   "snapshot import refused", state.preserve_reason);
+    return true;
+}
+
+static bool snapshot_import_prepare_record(int64_t height, const uint8_t hash[32],
+    struct snapshot_import_pending *pending)
+{
+    memset(pending, 0, sizeof(*pending));
+    if (height >= INT32_MAX ||
+        !coins_kv_get_authority_generation(progress_store_db(), &pending->generation) ||
+        pending->generation != 0)
+        LOG_RETURN(false, "boot_snapshot_import", "invalid snapshot height or authority generation");
+    pending->height = (int32_t)height;
+    memcpy(pending->hash, hash, sizeof(pending->hash));
+    return true;
+}
+
+static bool snapshot_import_record_mirror(struct node_db *ndb,
+    struct snapshot_import_pending *pending, int64_t expected_count)
+{
+    utxo_commitment_sha3_compute(ndb->db, pending->root, &pending->count);
+    return pending->count == (uint64_t)expected_count && snapshot_import_pending_save(ndb, pending);
+}
+
+static bool snapshot_import_complete(struct node_db *ndb)
+{
+    bool completed = false;
+    struct zcl_result completion = snapshot_import_recover(ndb, NULL, &completed);
+    if (!completion.ok || !completed)
+        LOG_RETURN(false, "boot_snapshot_import", "committed import needs recovery: %s", completion.message);
+    return true;
+}
+
 bool boot_import_snapshot_db(struct node_db *ndb,
                               const char *snapshot_path,
                               int64_t *out_utxo_count,
@@ -531,6 +669,8 @@ bool boot_import_snapshot_db(struct node_db *ndb,
 {
     if (!ndb || !ndb->open || !ndb->db || !snapshot_path)
         LOG_FAIL("boot_snapshot_import", "null inputs");
+    if (!snapshot_import_target_eligible(ndb))
+        return false;
 
     struct stat st;
     if (stat(snapshot_path, &st) != 0)
@@ -656,13 +796,9 @@ bool boot_import_snapshot_db(struct node_db *ndb,
         LOG_FAIL("boot_snapshot_import",
                  "implausible utxo count %lld", (long long)snap_utxos);
 
-    /* Stash prior coins_best_block so we can restore on failure
-     * after the bulk-copy has committed. */
-    uint8_t prior_cb[32] = {0};
-    size_t prior_cb_len = 0;
-    bool prior_cb_present = node_db_state_get(ndb, "coins_best_block",
-                                              prior_cb, sizeof(prior_cb),
-                                              &prior_cb_len);
+    struct snapshot_import_pending pending;
+    if (!snapshot_import_prepare_record(snap_height, best_hash, &pending))
+        return false;
 
     char attach_sql[640];
     snprintf(attach_sql, sizeof(attach_sql),
@@ -733,6 +869,9 @@ bool boot_import_snapshot_db(struct node_db *ndb,
         }
     }
     if (ok) {
+        ok = snapshot_import_record_mirror(ndb, &pending, snap_utxos);
+    }
+    if (ok) {
         /* A failed COMMIT (SQLITE_FULL / IO error) leaves the bulk-copy txn
          * uncommitted — we must NOT then stamp coins_best_block at the
          * snapshot tip (that is the snapshot-path coin-tear class). Capture
@@ -757,31 +896,8 @@ bool boot_import_snapshot_db(struct node_db *ndb,
         return false;
     }
 
-    /* CACHE-REFRESH (wave 2): 'coins_best_block' is a projection key —
-     * authority = reducer_frontier_derive_coins_best over coins_kv. */
-    if (!node_db_state_set(ndb, "coins_best_block",
-                           best_hash, sizeof(best_hash))) {
-        /* utxos already committed; restore prior anchor so the next
-         * boot doesn't try to CSR-commit to a snapshot we lost. */
-        if (prior_cb_present && prior_cb_len == 32)
-            node_db_state_set(ndb, "coins_best_block",
-                              prior_cb, prior_cb_len);
-        LOG_FAIL("boot_snapshot_import", "set coins_best_block failed");
-    }
-
-    /* Verified-install epilogue: a snapshot import is only a fast rebuild if
-     * it seeds the same durable authority surface as a full reindex. Reuse the
-     * reindex epilogue so both paths derive coins_kv, coins_applied_height,
-     * utxo_sha3, trusted cursors, and H* with one implementation. */
-    const char *main_db_path = sqlite3_db_filename(ndb->db, "main");
-    if (!reindex_epilogue_derive_imported_snapshot(
-            ndb, main_db_path, (int)snap_height, best_hash)) {
-        LOG_WARN("boot_snapshot_import",
-                 "snapshot imported into node.db but authority epilogue failed "
-                 "at h=%lld; refusing fast-rebuild success",
-                 (long long)snap_height);
+    if (!snapshot_import_complete(ndb))
         return false;
-    }
 
     if (out_utxo_count)  *out_utxo_count  = snap_utxos;
     if (out_snap_height) *out_snap_height = snap_height;

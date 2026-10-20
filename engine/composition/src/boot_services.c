@@ -564,6 +564,36 @@ bool boot_wallet_rebuild_probe(sqlite3 *db, bool *has_utxos, bool *has_keys)
     return false;
 }
 
+/* A rollback permits ordinary IBD. A committed pending import must finish
+ * recovery before the service boot can proceed. */
+static bool boot_receive_utxo_snapshot(struct node_db *ndb, const char *path,
+    off_t source_size, bool *has_snapshot)
+{
+    int64_t existing_utxos = node_db_utxo_count(ndb);
+    if (existing_utxos > 1000) {
+        printf("=== UTXO snapshot already imported (%lld UTXOs, %.0f MB on disk) ===\n",
+            (long long)existing_utxos, (double)source_size / (1024.0 * 1024.0));
+        *has_snapshot = true;
+        return true;
+    }
+    int64_t imported = 0, snap_h = 0;
+    uint8_t snap_hash[32];
+    if (boot_import_snapshot_db(ndb, path, &imported, &snap_h, snap_hash)) {
+        printf("=== UTXO snapshot imported: %lld UTXOs at h=%lld (%.0f MB) ===\n",
+            (long long)imported, (long long)snap_h, (double)source_size / (1024.0 * 1024.0));
+        *has_snapshot = true;
+        return true;
+    }
+    if (boot_snapshot_import_pending_or_error(ndb)) {
+        LOG_WARN("boot_snapshot_import", "committed snapshot import is pending or unreadable; "
+            "preserve this datadir and restart for recovery");
+        return false;
+    }
+    printf("=== consensus_snapshot.db (%.0f MB) import failed — falling back to IBD ===\n",
+        (double)source_size / (1024.0 * 1024.0));
+    return true;
+}
+
 #if defined(_WIN32) && defined(__clang__)
     __attribute__((optnone)) /* Bound the Windows startup coordinator frame. */
 #elif defined(_WIN32) && defined(__GNUC__)
@@ -989,41 +1019,9 @@ bool app_init_services(struct app_context *ctx,
                     struct stat db_st;
                     if (stat(db_check, &db_st) == 0 &&
                         db_st.st_size > 10000000) {
-                        /* Re-boot case: utxos already imported on a prior
-                         * boot. node.db is authoritative; do not re-import. */
-                        int64_t existing_utxos =
-                            node_db_utxo_count(svc->node_db);
-                        if (existing_utxos > 1000) {
-                            printf("=== UTXO snapshot already imported "
-                                   "(%lld UTXOs, %.0f MB on disk) ===\n",
-                                   (long long)existing_utxos,
-                                   (double)db_st.st_size /
-                                       (1024.0 * 1024.0));
-                            has_utxo_snapshot = true;
-                        } else {
-                            int64_t imported = 0, snap_h = 0;
-                            uint8_t snap_hash[32];
-                            if (boot_import_snapshot_db(svc->node_db,
-                                                        db_check,
-                                                        &imported,
-                                                        &snap_h,
-                                                        snap_hash)) {
-                                printf("=== UTXO snapshot imported: "
-                                       "%lld UTXOs at h=%lld "
-                                       "(%.0f MB) ===\n",
-                                       (long long)imported,
-                                       (long long)snap_h,
-                                       (double)db_st.st_size /
-                                           (1024.0 * 1024.0));
-                                has_utxo_snapshot = true;
-                            } else {
-                                printf("=== consensus_snapshot.db "
-                                       "(%.0f MB) import failed — "
-                                       "falling back to IBD ===\n",
-                                       (double)db_st.st_size /
-                                           (1024.0 * 1024.0));
-                            }
-                        }
+                        if (!boot_receive_utxo_snapshot(svc->node_db, db_check,
+                            db_st.st_size, &has_utxo_snapshot))
+                            return boot_step_fail("snapshot_import_pending");
                     }
                 }
 

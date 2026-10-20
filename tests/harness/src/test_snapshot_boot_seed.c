@@ -34,6 +34,8 @@
 #include "test/test_core.h"
 #include "test/snapshot_boot_fixture.h"
 
+#include "base/serialize_le.h"
+#include "config/boot_consensus_bundle_marker.h"
 #include "config/boot_snapshot_import.h"
 #include "coins/utxo_commitment.h"
 #include "core/serialize.h"
@@ -413,12 +415,58 @@ static bool sb_shared_genesis(sqlite3 *db, struct node_db *ndb, int mode)
     if (!mode)
         return true;
     const uint8_t next_height[8] = {1};
+    char header_progress[512];
+    snprintf(header_progress, sizeof(header_progress),
+        "CREATE TABLE IF NOT EXISTS header_admit_log(height INTEGER PRIMARY KEY,hash BLOB); "
+        "INSERT INTO header_admit_log(height,hash) VALUES(%d,zeroblob(32)); "
+        "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) VALUES('header_admit',%d,0); "
+        "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) VALUES('validate_headers',%d,0);",
+        SB_SNAP_HEIGHT + 100, SB_SNAP_HEIGHT + 101, SB_SNAP_HEIGHT + 101);
     return progress_meta_set(db, COINS_APPLIED_HEIGHT_KEY, next_height, sizeof(next_height)) &&
-        sb_sql(db, "CREATE TABLE IF NOT EXISTS header_admit_log(height INTEGER PRIMARY KEY,hash BLOB); "
-            "INSERT INTO header_admit_log(height,hash) VALUES(5000,zeroblob(32)); "
-            "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) VALUES('header_admit',5001,0); "
-            "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) VALUES('validate_headers',5001,0);") &&
+        sb_sql(db, header_progress) &&
         sb_cache_pair(ndb, mode == 2 ? 1 : 0);
+}
+
+static int sb_deny_import_write(void *table, int action, const char *name,
+    const char *unused, const char *database, const char *trigger)
+{
+    (void)unused;
+    (void)database;
+    (void)trigger;
+    return action == SQLITE_INSERT && name && strcmp(name, table) == 0 ?
+        SQLITE_DENY : SQLITE_OK;
+}
+
+static int sb_shared_import_failure(struct node_db *ndb, const char *dir, bool committed)
+{
+    int failures = 0;
+    sqlite3 *fault_db = committed ? progress_store_db() : ndb->db;
+    char *table = committed ? "coins" : "utxos";
+    int64_t kernel_before = coins_kv_count_sqlite(progress_store_db());
+    sqlite3_int64 kernel_writes = sqlite3_total_changes64(progress_store_db());
+    SB_CHECK("import write failure injection installed",
+        sqlite3_set_authorizer(fault_db, sb_deny_import_write, table) == SQLITE_OK);
+    enum boot_snapshot_first_outcome outcome;
+    struct zcl_result result = boot_prepare_snapshot_first(ndb, dir, &outcome);
+    SB_CHECK("import write failure injection removed",
+        sqlite3_set_authorizer(fault_db, NULL, NULL) == SQLITE_OK);
+    if (committed) {
+        SB_CHECK("post-commit failure stops early boot with pending recovery",
+            !result.ok && boot_snapshot_import_pending_or_error(ndb) &&
+            node_db_utxo_count(ndb) == SB_UTXO_COUNT);
+    } else {
+        printf("  snapshot_boot_seed: rollback diagnostic: kernel_before=%lld "
+               "kernel_after=%lld kernel_writes=%lld\n",
+               (long long)kernel_before,
+               (long long)coins_kv_count_sqlite(progress_store_db()),
+               (long long)(sqlite3_total_changes64(progress_store_db()) - kernel_writes));
+        SB_CHECK("precommit failure rolls back mirror and pending operation",
+            result.ok && outcome == BOOT_SNAPSHOT_FIRST_IMPORT_FAILED &&
+            !boot_snapshot_import_pending_or_error(ndb) && node_db_utxo_count(ndb) == 0 &&
+            coins_kv_count_sqlite(progress_store_db()) == kernel_before &&
+            sqlite3_total_changes64(progress_store_db()) == kernel_writes);
+    }
+    return failures;
 }
 
 static int sb_shared_import_case(const char *root, int mode)
@@ -440,13 +488,19 @@ static int sb_shared_import_case(const char *root, int mode)
         main_state_init(&ms);
         seed_integrity_gate_set_node_db_for_testing(&ndb);
         bool initialized = tip_finalize_stage_init(&ms) &&
-            sb_shared_genesis(progress_store_db(), &ndb, mode);
+            sb_shared_genesis(progress_store_db(), &ndb, mode < 3 ? mode : 0);
         SB_CHECK("shared pristine/genesis/header-only fixture initializes", initialized);
+        if (initialized && mode >= 3)
+            failures += sb_shared_import_failure(&ndb, dir, mode == 3);
         enum boot_snapshot_first_outcome outcome;
         struct zcl_result selected = boot_prepare_snapshot_first(&ndb, dir, &outcome);
         SB_CHECK("shared fresh selection really imports the eligible source",
                  selected.ok && outcome == BOOT_SNAPSHOT_FIRST_IMPORTED &&
                  coins_kv_count_sqlite(progress_store_db()) == SB_UTXO_COUNT);
+        if (mode == 1 || mode == 2)
+            SB_CHECK("import preserves header progress above the imported anchor",
+                sb_cursor(progress_store_db(), "header_admit") == SB_SNAP_HEIGHT + 101 &&
+                sb_cursor(progress_store_db(), "validate_headers") == SB_SNAP_HEIGHT + 101);
         tip_finalize_stage_shutdown();
         main_state_free(&ms);
         seed_integrity_gate_reset_for_testing();
@@ -476,7 +530,7 @@ static int sb_shared_bootstrap_tests(const char *dir)
         progress_store_db() == NULL && boot_prepare_snapshot_first(NULL, NULL, &deferred).ok &&
         deferred == BOOT_SNAPSHOT_FIRST_DEFERRED);
     failures += sb_shared_guard_tests(dir);
-    for (int mode = 0; mode < 3; mode++)
+    for (int mode = 0; mode < 5; mode++)
         failures += sb_shared_import_case(dir, mode);
     return failures;
 }
@@ -488,6 +542,8 @@ struct sb_crash_cut {
     uint64_t count;
     int pipe_fd;
     sqlite3 *db;
+    int mode;
+    bool saw_reset;
 };
 
 static bool sb_file_digest(const char *path, uint8_t out[32])
@@ -514,22 +570,49 @@ static bool sb_file_digest(const char *path, uint8_t out[32])
     return true;
 }
 
+static bool sb_trace_cut_matches(const struct sb_crash_cut *cut,
+    unsigned event, sqlite3_stmt *statement, const char *sql)
+{
+    switch (cut->mode) {
+    case 0:
+        return event == SQLITE_TRACE_STMT && strcmp(sql, "DETACH DATABASE snapsrc") == 0;
+    case 1:
+        return cut->saw_reset && event == SQLITE_TRACE_PROFILE && strcmp(sql, "COMMIT") == 0;
+    case 2:
+        return event == SQLITE_TRACE_STMT && strcmp(sql, "DETACH DATABASE coinssrc") == 0;
+    case 3: {
+        if (event != SQLITE_TRACE_STMT || strstr(sql, "DELETE FROM node_state") == NULL)
+            return false;
+        char *expanded = sqlite3_expanded_sql(statement);
+        bool stop = expanded && strstr(expanded, "snapshot_import_pending.v1") != NULL;
+        sqlite3_free(expanded);
+        return stop;
+    }
+    default:
+        return false;
+    }
+}
+
 static int sb_detach_trace(unsigned event, void *opaque, void *statement, void *unused)
 {
     (void)unused;
     struct sb_crash_cut *cut = opaque;
     const char *sql = sqlite3_sql(statement);
-    if (event != SQLITE_TRACE_STMT || !sql ||
-        strcmp(sql, "DETACH DATABASE snapsrc") != 0 || !sqlite3_get_autocommit(cut->db))
+    if (!sql)
         return 0;
-    /* No SQL in this callback: COMMIT has returned, cache/epilogue have not run. */
+    if (event == SQLITE_TRACE_STMT && strcmp(sql, "DELETE FROM coins") == 0)
+        cut->saw_reset = true;
+    if (!sb_trace_cut_matches(cut, event, statement, sql) ||
+        !sqlite3_get_autocommit(sqlite3_db_handle(statement)))
+        return 0;
+    /* Only inspect trace arguments here; never execute nested SQL. */
     if (write(cut->pipe_fd, cut, sizeof(*cut)) != (ssize_t)sizeof(*cut))
         _exit(5);
     for (;;)
         pause();
 }
 
-static void sb_crash_import_child(const char *dir, int pipe_fd)
+static void sb_crash_import_child(const char *dir, int pipe_fd, int mode)
 {
     if (signal(SIGALRM, SIG_DFL) == SIG_ERR)
         _exit(2);
@@ -540,7 +623,7 @@ static void sb_crash_import_child(const char *dir, int pipe_fd)
     uint8_t hash[32];
     sb_tip_hash(hash);
     struct node_db ndb = {0};
-    struct sb_crash_cut cut = {.pipe_fd = pipe_fd};
+    struct sb_crash_cut cut = {.pipe_fd = pipe_fd, .mode = mode};
     sqlite3 *source = NULL;
     if (!sb_build_fixture(snapshot, hash) || !sb_file_digest(snapshot, cut.source_digest) ||
         sqlite3_open_v2(snapshot, &source, SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
@@ -551,7 +634,14 @@ static void sb_crash_import_child(const char *dir, int pipe_fd)
         !progress_store_open(dir) || !coins_kv_ensure_schema(progress_store_db()))
         _exit(4);
     cut.db = ndb.db;
-    if (sqlite3_trace_v2(ndb.db, SQLITE_TRACE_STMT, sb_detach_trace, &cut) != SQLITE_OK)
+    struct main_state ms = {0};
+    main_state_init(&ms);
+    seed_integrity_gate_set_node_db_for_testing(&ndb);
+    if (!tip_finalize_stage_init(&ms))
+        _exit(8);
+    if (sqlite3_trace_v2(ndb.db, SQLITE_TRACE_STMT, sb_detach_trace, &cut) != SQLITE_OK ||
+        sqlite3_trace_v2(progress_store_db(), SQLITE_TRACE_STMT | SQLITE_TRACE_PROFILE,
+                         sb_detach_trace, &cut) != SQLITE_OK)
         _exit(6);
     int64_t count = 0, height = 0;
     (void)boot_import_snapshot_db(&ndb, snapshot, &count, &height, hash);
@@ -595,13 +685,21 @@ static int sb_crash_cut_facts(struct node_db *ndb, const char *dir,
     SB_CHECK("SIGKILL cut: exact durable mirror commitment and 1200 rows",
         node_db_utxo_count_checked(ndb, &mirror_count) && mirror_count == SB_UTXO_COUNT &&
         count == cut->count && memcmp(root, cut->root, 32) == 0);
-    SB_CHECK("SIGKILL cut: best-block cache has not been written", sb_cache_absent(ndb->db));
+    if (cut->mode == 0)
+        SB_CHECK("SIGKILL cut: best-block cache has not been written", sb_cache_absent(ndb->db));
     int32_t applied = -1;
     bool found = true;
-    SB_CHECK("SIGKILL cut: kernel empty, unproven, applied frontier absent",
-        coins_kv_count_sqlite(progress_store_db()) == 0 &&
-        !coins_kv_is_proven_authority(progress_store_db(), NULL) &&
-        coins_kv_get_applied_height(progress_store_db(), &applied, &found) && !found);
+    if (cut->mode <= 1) {
+        SB_CHECK("SIGKILL cut: kernel empty, unproven, applied frontier absent",
+            coins_kv_count_sqlite(progress_store_db()) == 0 &&
+            !coins_kv_is_proven_authority(progress_store_db(), NULL) &&
+            coins_kv_get_applied_height(progress_store_db(), &applied, &found) && !found);
+    } else {
+        SB_CHECK("SIGKILL cut: kernel already has exact seeded coins",
+            coins_kv_count_sqlite(progress_store_db()) == SB_UTXO_COUNT &&
+            coins_kv_commitment(progress_store_db(), root) == 0 &&
+            memcmp(root, cut->root, 32) == 0);
+    }
     char snapshot[600];
     snprintf(snapshot, sizeof(snapshot), "%s/consensus_snapshot.db", dir);
     SB_CHECK("SIGKILL cut: source snapshot bytes unchanged",
@@ -710,27 +808,154 @@ static int sb_crash_uninterrupted_control(const char *root, const uint8_t expect
     return failures;
 }
 
-static int sb_mirror_commit_sigkill_test(void)
+static int sb_pending_refusal(struct node_db *ndb, const char *dir)
+{
+    int failures = 0;
+    sqlite3_int64 node_writes = sqlite3_total_changes64(ndb->db);
+    sqlite3_int64 kernel_writes = sqlite3_total_changes64(progress_store_db());
+    enum boot_snapshot_first_outcome outcome;
+    struct zcl_result result = boot_prepare_snapshot_first(ndb, dir, &outcome);
+    SB_CHECK("contradictory pending import refuses recovery", !result.ok);
+    SB_CHECK("refused recovery performs no writes in either store",
+        sqlite3_total_changes64(ndb->db) == node_writes &&
+        sqlite3_total_changes64(progress_store_db()) == kernel_writes);
+    return failures;
+}
+
+static int sb_pending_authority_conflicts(struct node_db *ndb, const char *dir)
+{
+    int failures = 0;
+    uint8_t digest[32];
+    sb_tip_hash(digest);
+    SB_CHECK("conflicting installed marker fixture",
+        boot_consensus_bundle_marker_write(dir, SB_SNAP_HEIGHT, digest));
+    failures += sb_pending_refusal(ndb, dir);
+    char marker[600];
+    snprintf(marker, sizeof(marker), "%s/%s", dir, BOOT_CONSENSUS_BUNDLE_MARKER_NAME);
+    SB_CHECK("conflicting fixture marker removed", unlink(marker) == 0);
+    if (coins_kv_count_sqlite(progress_store_db()) > 0) {
+        SB_CHECK("pending seeded kernel mismatch fixture",
+            sb_sql(progress_store_db(), "UPDATE coins SET value=value+1"));
+        failures += sb_pending_refusal(ndb, dir);
+        SB_CHECK("pending seeded kernel restored",
+            sb_sql(progress_store_db(), "UPDATE coins SET value=value-1"));
+    }
+    return failures;
+}
+
+static int sb_pending_corruption_tests(struct node_db *ndb, const char *dir)
+{
+    int failures = 0;
+    static const char key[] = "snapshot_import_pending.v1";
+    uint8_t record[97];
+    size_t length = 0;
+    bool saved = node_db_state_get(ndb, key, record, sizeof(record), &length) && length == 96;
+    SB_CHECK("mirror commit also durably stores complete pending operation", saved);
+    if (!saved)
+        return failures;
+    failures += sb_pending_authority_conflicts(ndb, dir);
+    SB_CHECK("pending record truncation fixture",
+        node_db_state_set(ndb, key, record, length - 1));
+    failures += sb_pending_refusal(ndb, dir);
+    SB_CHECK("pending record restored", node_db_state_set(ndb, key, record, length));
+    record[0] ^= 1;
+    SB_CHECK("pending record unknown version fixture",
+        node_db_state_set(ndb, key, record, length));
+    failures += sb_pending_refusal(ndb, dir);
+    record[0] ^= 1;
+    SB_CHECK("pending record version restored", node_db_state_set(ndb, key, record, length));
+    record[16] ^= 1;
+    SB_CHECK("pending record wrong generation fixture",
+        node_db_state_set(ndb, key, record, length));
+    failures += sb_pending_refusal(ndb, dir);
+    record[16] ^= 1;
+    SB_CHECK("pending record generation restored", node_db_state_set(ndb, key, record, length));
+    SB_CHECK("pending mirror mismatch fixture",
+        sqlite3_exec(ndb->db, "UPDATE utxos SET value=value+1", NULL, NULL, NULL) == SQLITE_OK);
+    failures += sb_pending_refusal(ndb, dir);
+    SB_CHECK("pending mirror restored",
+        sqlite3_exec(ndb->db, "UPDATE utxos SET value=value-1", NULL, NULL, NULL) == SQLITE_OK);
+    uint8_t old_applied[8], advanced[8];
+    size_t applied_size = 0;
+    bool applied_found = false;
+    bool applied_saved = progress_meta_get_blob_exact(progress_store_db(),
+        COINS_APPLIED_HEIGHT_KEY, old_applied, sizeof(old_applied),
+        &applied_size, &applied_found) && (!applied_found || applied_size == sizeof(old_applied));
+    SB_CHECK("pending applied frontier captured", applied_saved);
+    if (applied_saved) {
+        zcl_write_u64_le(advanced, SB_SNAP_HEIGHT + 2);
+        SB_CHECK("pending advanced frontier fixture", progress_meta_set(progress_store_db(),
+            COINS_APPLIED_HEIGHT_KEY, advanced, sizeof(advanced)));
+        failures += sb_pending_refusal(ndb, dir);
+        SB_CHECK("pending applied frontier restored",
+            applied_found ? progress_meta_set(progress_store_db(), COINS_APPLIED_HEIGHT_KEY,
+                old_applied, applied_size) :
+                progress_meta_delete(progress_store_db(), COINS_APPLIED_HEIGHT_KEY));
+    }
+    char wrong_dir[600];
+    snprintf(wrong_dir, sizeof(wrong_dir), "%s/unrelated-datadir", dir);
+    SB_CHECK("unrelated recovery datadir fixture", sb_mkdir(wrong_dir) == 0);
+    failures += sb_pending_refusal(ndb, wrong_dir);
+    return failures;
+}
+
+static int sb_crashed_store_recover(struct node_db *ndb, const char *dir,
+    const struct sb_crash_cut *cut)
+{
+    int failures = sb_crash_cut_facts(ndb, dir, cut);
+    failures += sb_pending_corruption_tests(ndb, dir);
+    char snapshot[600], retained[600];
+    snprintf(snapshot, sizeof(snapshot), "%s/consensus_snapshot.db", dir);
+    snprintf(retained, sizeof(retained), "%s/source-retained.db", dir);
+    SB_CHECK("recovery source removed from discovery path", rename(snapshot, retained) == 0);
+    uint64_t generation_before = UINT64_MAX, generation_after = UINT64_MAX;
+    SB_CHECK("pre-recovery generation readable",
+        coins_kv_get_authority_generation(progress_store_db(), &generation_before));
+    failures += sb_restart_terminal(ndb, dir, cut->root);
+    SB_CHECK("recovery resets authority exactly once",
+        coins_kv_get_authority_generation(progress_store_db(), &generation_after) &&
+        generation_before != UINT64_MAX &&
+        generation_after == generation_before + (cut->mode == 0 ? 1u : 0u) &&
+        generation_after == 1);
+    sqlite3_int64 writes_before = sqlite3_total_changes64(progress_store_db());
+    enum boot_snapshot_first_outcome repeated;
+    SB_CHECK("repeated snapshot preparation succeeds",
+        boot_prepare_snapshot_first(ndb, dir, &repeated).ok);
+    failures += sb_terminal_authority(cut->root);
+    failures += sb_terminal_caches(ndb, cut->root);
+    failures += sb_terminal_frontier();
+    uint64_t generation_repeated = UINT64_MAX;
+    SB_CHECK("repeated recovery retains generation and kernel without writes",
+        coins_kv_get_authority_generation(progress_store_db(), &generation_repeated) &&
+        generation_repeated == generation_after &&
+        sqlite3_total_changes64(progress_store_db()) == writes_before);
+    return failures;
+}
+
+static int sb_import_sigkill_case(int mode)
 {
     int failures = 0;
     SB_CHECK("SIGKILL fixture begins before any progress store opens", progress_store_db() == NULL);
     if (failures)
         return failures;
     char dir[256], node_path[600];
-    test_fmt_tmpdir(dir, sizeof(dir), "snapshot_boot_seed", "mirror-commit-sigkill");
+    char label[48];
+    snprintf(label, sizeof(label), "import-sigkill-%d", mode);
+    test_fmt_tmpdir(dir, sizeof(dir), "snapshot_boot_seed", label);
     int channel[2];
     if (sb_mkdir("./test-tmp") != 0 || sb_mkdir(dir) != 0 || pipe(channel) != 0)
         return 1;
     pid_t child = fork();
     if (child == 0) {
         close(channel[0]);
-        sb_crash_import_child(dir, channel[1]);
+        sb_crash_import_child(dir, channel[1], mode);
     }
     close(channel[1]);
     struct sb_crash_cut cut = {0};
     bool killed = child > 0 && sb_wait_and_kill(child, channel[0], &cut);
     close(channel[0]);
-    SB_CHECK("worker really SIGKILLed after mirror COMMIT before cache/epilogue", killed);
+    printf("  snapshot_boot_seed: crash cut mode=%d (mirror, reset, seed, retire)\n", mode);
+    SB_CHECK("worker really SIGKILLed at requested import boundary", killed);
     /* All module initialization follows fork/reap; the worker inherits no fixture locks. */
     blocker_module_init();
     blocker_reset_for_testing();
@@ -739,16 +964,24 @@ static int sb_mirror_commit_sigkill_test(void)
     struct node_db ndb = {0};
     bool opened = killed && node_db_open(&ndb, node_path) && progress_store_open(dir);
     SB_CHECK("crashed stores reopen only after child is reaped", opened);
-    if (opened) {
-        failures += sb_crash_cut_facts(&ndb, dir, &cut);
-        failures += sb_restart_terminal(&ndb, dir, cut.root);
-    }
+    if (opened)
+        failures += sb_crashed_store_recover(&ndb, dir, &cut);
     progress_store_close();
     if (ndb.open)
         node_db_close(&ndb);
     if (killed)
         failures += sb_crash_uninterrupted_control(dir, cut.root);
     return sb_finish_fixture(dir, failures);
+}
+
+static int sb_mirror_commit_sigkill_test(void)
+{
+    int failures = 0;
+    for (int mode = 0; mode < 4; mode++) {
+        failures += sb_import_sigkill_case(mode);
+        test_reset_shared_globals();
+    }
+    return failures;
 }
 #else
 static int sb_mirror_commit_sigkill_test(void) { return 0; }

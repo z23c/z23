@@ -2741,6 +2741,85 @@ static int rung_snapshot_contradiction_test(struct rung_act_ctx *c, struct node_
     return failures;
 }
 
+static bool rung_snapshot_cache_digest(sqlite3 *db, uint8_t out[32])
+{
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT key,value FROM node_state ORDER BY key",
+                         -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    struct sha3_256_ctx digest;
+    sha3_256_init(&digest);
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {
+        for (int column = 0; column < 2; column++) {
+            int type = sqlite3_column_type(stmt, column);
+            int size = sqlite3_column_bytes(stmt, column);
+            const void *bytes = sqlite3_column_blob(stmt, column);
+            if (size > 0 && !bytes) {
+                sqlite3_finalize(stmt);
+                return false;
+            }
+            sha3_256_write(&digest, (const uint8_t *)&type, sizeof(type));
+            sha3_256_write(&digest, (const uint8_t *)&size, sizeof(size));
+            if (size > 0)
+                sha3_256_write(&digest, bytes, (size_t)size);
+        }
+    }
+    sqlite3_finalize(stmt);
+    if (rc != SQLITE_DONE)
+        return false;
+    sha3_256_finalize(&digest, out);
+    return true;
+}
+
+/* Last operation on this installed fixture: a buggy direct importer can replace
+ * it before reporting an epilogue failure. Only diagnostic reads and teardown
+ * follow, so that mutation cannot contaminate another acceptance case. */
+static int rung_snapshot_direct_import_refusal(struct rung_act_ctx *c,
+    struct node_db *ndb, const char *snapshot, uint64_t generation)
+{
+    int failures = 0;
+    uint8_t mirror_before[32], mirror_after[32], cache_before[32], cache_after[32];
+    uint64_t count_before = 0, count_after = 0;
+    /* Committed-install recovery invalidates the derived mirror. Rebuild it
+     * synchronously from the retained authority before capturing this case. */
+    struct utxo_mirror_sync_service mirror;
+    utxo_mirror_sync_init(&mirror, ndb);
+    int64_t mirrored = utxo_mirror_sync_run_once(&mirror);
+    pthread_mutex_destroy(&mirror.ready_mutex);
+    pthread_cond_destroy(&mirror.ready_cond);
+    pthread_mutex_destroy(&mirror.job_mutex);
+    CSI_CHECK("direct snapshot: installed mirror rebuilt", mirrored == 2);
+    if (mirrored != 2)
+        return failures;
+    utxo_commitment_sha3_compute(ndb->db, mirror_before, &count_before);
+    bool captured = rung_snapshot_cache_digest(ndb->db, cache_before);
+    CSI_CHECK("direct snapshot: installed two-coin mirror and caches captured",
+        captured && count_before == 2 && memcmp(mirror_before, c->kb.utxo_root, 32) == 0 &&
+        rung_snapshot_state_matches(c, generation) && rung_snapshot_cursors_match(c));
+    sqlite3_int64 kernel_changes = sqlite3_total_changes64(c->pdb);
+    sqlite3_int64 derived_changes = sqlite3_total_changes64(ndb->db);
+    int64_t imported_count = -1, imported_height = -1;
+    uint8_t imported_hash[32] = {0};
+    bool imported = boot_import_snapshot_db(ndb, snapshot, &imported_count,
+                                            &imported_height, imported_hash);
+    CSI_CHECK("direct snapshot: importer refuses an existing small installed authority", !imported);
+    utxo_commitment_sha3_compute(ndb->db, mirror_after, &count_after);
+    printf("consensus_state_install: direct snapshot diagnostic: returned=%d "
+           "mirror_before=%llu mirror_after=%llu kernel_writes=%lld derived_writes=%lld\n",
+           imported, (unsigned long long)count_before, (unsigned long long)count_after,
+           (long long)(sqlite3_total_changes64(c->pdb) - kernel_changes),
+           (long long)(sqlite3_total_changes64(ndb->db) - derived_changes));
+    CSI_CHECK("direct snapshot: exact installed kernel, generation and cursors survive",
+        sqlite3_total_changes64(c->pdb) == kernel_changes &&
+        rung_snapshot_state_matches(c, generation) && rung_snapshot_cursors_match(c));
+    CSI_CHECK("direct snapshot: exact mirror and complete node-state cache survive without writes",
+        sqlite3_total_changes64(ndb->db) == derived_changes && count_after == count_before &&
+        memcmp(mirror_after, mirror_before, 32) == 0 && captured &&
+        rung_snapshot_cache_digest(ndb->db, cache_after) && memcmp(cache_after, cache_before, 32) == 0);
+    return failures;
+}
+
 static int rung_snapshot_first_preservation_tests(struct rung_act_ctx *c)
 {
     int failures = 0;
@@ -2764,6 +2843,7 @@ static int rung_snapshot_first_preservation_tests(struct rung_act_ctx *c)
         failures += rung_snapshot_contradiction_test(c, &ndb);
         failures += rung_snapshot_preservation_round(c, &ndb, generation, false);
         failures += rung_snapshot_preservation_round(c, &ndb, generation, true);
+        failures += rung_snapshot_direct_import_refusal(c, &ndb, snapshot, generation);
         node_db_close(&ndb);
     }
     return failures;

@@ -55,11 +55,43 @@ static void reindex_epi_page(int tip_h, const char *reason)
                 "check=reindex_epilogue tip_h=%d reason=%s", tip_h, reason);
 }
 
+/* One authority transition: optional destructive reset, exactly one new
+ * generation, then an idempotent copy into that generation. */
+static bool reindex_epilogue_seed_coins(sqlite3 *pdb, const char *node_db_path,
+    int tip_h, bool reset_required, const uint64_t *expected_generation)
+{
+    uint64_t generation = 0;
+    if (expected_generation &&
+        (!coins_kv_get_authority_generation(pdb, &generation) ||
+         generation != *expected_generation)) {
+        reindex_epi_page(tip_h, "snapshot_generation_changed");
+        LOG_RETURN(false, "reindex_epi", "snapshot authority generation changed");
+    }
+    if (reset_required && !coins_kv_reset_for_reseed(pdb)) {
+        reindex_epi_page(tip_h, "coins_kv_reset_failed");
+        LOG_RETURN(false, "reindex_epi", "coins_kv reset for reseed failed");
+    }
+    if (expected_generation &&
+        (!coins_kv_get_authority_generation(pdb, &generation) ||
+         generation != *expected_generation + (reset_required ? 1u : 0u))) {
+        reindex_epi_page(tip_h, "snapshot_reset_generation_mismatch");
+        LOG_RETURN(false, "reindex_epi", "snapshot reset did not advance exactly one generation");
+    }
+    if (!coins_kv_seed_from_node_db(pdb, node_db_path)) {
+        reindex_epi_page(tip_h, "coins_kv_reseed_failed");
+        LOG_RETURN(false, "reindex_epi",
+                   "coins_kv reseed from node.db failed path=%s", node_db_path);
+    }
+    return true;
+}
+
 static bool derive_authority_from_node_db_utxos(struct node_db *ndb,
                                                 const char *node_db_path,
                                                 int tip_h,
                                                 const uint8_t tip_hash[32],
-                                                const char *source)
+                                                const char *source,
+                                                bool reset_required,
+                                                const uint64_t *expected_generation)
 {
     if (!ndb || !ndb->open || !ndb->db || !node_db_path ||
         !node_db_path[0] || tip_h < 0 || !tip_hash) {
@@ -87,16 +119,8 @@ static bool derive_authority_from_node_db_utxos(struct node_db *ndb,
      * rows the replay legitimately deleted. Snapshot import uses the same
      * derivation body after atomically copying the verified snapshot into
      * node.db.utxos. */
-    if (!coins_kv_reset_for_reseed(pdb)) {
-        reindex_epi_page(tip_h, "coins_kv_reset_failed");
-        LOG_RETURN(false, "reindex_epi", "coins_kv reset for reseed failed");
-    }
-    if (!coins_kv_seed_from_node_db(pdb, node_db_path)) {
-        reindex_epi_page(tip_h, "coins_kv_reseed_failed");
-        LOG_RETURN(false, "reindex_epi",
-                   "coins_kv reseed from node.db failed path=%s",
-                   node_db_path);
-    }
+    if (!reindex_epilogue_seed_coins(pdb, node_db_path, tip_h, reset_required, expected_generation))
+        return false;
 
     /* ── (2) Recompute the SHA3 commitment over the replayed `utxos` mirror and
      * stamp it (utxo_sha3) + the coins_best_block cache. The caller already
@@ -259,7 +283,7 @@ bool reindex_epilogue_derive(struct main_state *ms, struct node_db *ndb,
 
     return derive_authority_from_node_db_utxos(ndb, ndb_path, tip_h,
                                                tip->phashBlock->data,
-                                               "reindex");
+                                               "reindex", true, NULL);
 }
 
 bool reindex_epilogue_derive_imported_snapshot(struct node_db *ndb,
@@ -268,5 +292,13 @@ bool reindex_epilogue_derive_imported_snapshot(struct node_db *ndb,
                                                const uint8_t hash[32])
 {
     return derive_authority_from_node_db_utxos(ndb, node_db_path, height, hash,
-                                               "snapshot_import");
+                                               "snapshot_import", true, NULL);
+}
+
+bool reindex_epilogue_resume_imported_snapshot(struct node_db *ndb,
+    const char *node_db_path, int height, const uint8_t hash[32],
+    uint64_t expected_generation, bool reset_required)
+{
+    return derive_authority_from_node_db_utxos(ndb, node_db_path, height, hash,
+        "snapshot_import", reset_required, &expected_generation);
 }
