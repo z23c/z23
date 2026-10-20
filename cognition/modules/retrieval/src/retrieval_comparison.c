@@ -557,20 +557,3 @@ enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe_v2(
     return ZCL_RETRIEVAL_COMPARISON_OK;
 }
 
-const char *zcl_retrieval_comparison_error_string(
-    enum zcl_retrieval_comparison_error error)
-{
-    switch (error) {
-    case ZCL_RETRIEVAL_COMPARISON_OK: return "ok";
-    case ZCL_RETRIEVAL_COMPARISON_NULL: return "null argument";
-    case ZCL_RETRIEVAL_COMPARISON_ALIAS: return "output aliases input";
-    case ZCL_RETRIEVAL_COMPARISON_VERSION: return "unsupported version";
-    case ZCL_RETRIEVAL_COMPARISON_RESERVED: return "reserved field is nonzero";
-    case ZCL_RETRIEVAL_COMPARISON_PARAMETER: return "invalid comparison policy";
-    case ZCL_RETRIEVAL_COMPARISON_ROOT: return "required root is zero";
-    case ZCL_RETRIEVAL_COMPARISON_WIRE: return "invalid policy wire";
-    case ZCL_RETRIEVAL_COMPARISON_RESULT: return "invalid evaluation result";
-    case ZCL_RETRIEVAL_COMPARISON_BINDING: return "comparison binding mismatch";
-    }
-    return "unknown";
-}

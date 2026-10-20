@@ -325,20 +325,6 @@ bool ci_source_universe_observe(
     return ci_source_universe_reconcile(&input, out);
 }
 
-const char *ci_source_universe_component_name(
-    enum ci_source_universe_component_id component)
-{
-    switch (component) {
-    case CI_SOURCE_COMPONENT_VCS_MANIFEST: return "vcs_manifest";
-    case CI_SOURCE_COMPONENT_CODE_MERKLE: return "code_merkle";
-    case CI_SOURCE_COMPONENT_CAPABILITY_INVENTORY:
-        return "capability_inventory";
-    case CI_SOURCE_COMPONENT_SCIENCE_CENSUS: return "science_census";
-    case CI_SOURCE_COMPONENT_COUNT: break;
-    }
-    return "unknown";
-}
-
 const char *ci_source_universe_component_scope_name(
     enum ci_source_universe_component_id component)
 {
@@ -352,20 +338,6 @@ const char *ci_source_universe_component_scope_name(
     case CI_SOURCE_COMPONENT_SCIENCE_CENSUS:
         return "science_c_h_census.candidate.v1";
     case CI_SOURCE_COMPONENT_COUNT: break;
-    }
-    return "unknown";
-}
-
-const char *ci_source_universe_root_domain_name(
-    enum ci_source_universe_root_domain domain)
-{
-    switch (domain) {
-    case CI_SOURCE_ROOT_NONE: return "unavailable";
-    case CI_SOURCE_ROOT_VCS_MANIFEST_V1: return "vcs_manifest_tree_hash";
-    case CI_SOURCE_ROOT_CODE_MERKLE_V1:
-        return "zcl.codeindex.merkle.node.v1";
-    case CI_SOURCE_ROOT_CAPABILITY_INVENTORY_V1:
-        return "zcl.code_capability_inventory.source.v1";
     }
     return "unknown";
 }
@@ -384,20 +356,3 @@ const char *ci_source_universe_projection_name(uint32_t projection_bit)
     }
 }
 
-const char *ci_source_universe_refusal_name(
-    enum ci_source_universe_refusal refusal)
-{
-    switch (refusal) {
-    case CI_SOURCE_UNIVERSE_REFUSAL_NONE: return "none";
-    case CI_SOURCE_UNIVERSE_REFUSAL_CAPTURE_FAILED: return "capture_failed";
-    case CI_SOURCE_UNIVERSE_REFUSAL_EVIDENCE_DISAGREES:
-        return "evidence_disagrees";
-    case CI_SOURCE_UNIVERSE_REFUSAL_INVENTORY_STALE:
-        return "inventory_stale_or_unproved";
-    case CI_SOURCE_UNIVERSE_REFUSAL_PROJECTIONS_UNPROVEN:
-        return "projections_unproven";
-    case CI_SOURCE_UNIVERSE_REFUSAL_PROJECTIONS_MISSING:
-        return "projections_missing";
-    }
-    return "unknown";
-}

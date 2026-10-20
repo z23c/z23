@@ -687,38 +687,3 @@ zcode_retrieval_profile_pair_measure(
     return PM_ERR(OK);
 }
 
-const char *zcode_retrieval_profile_pair_measure_error_string(
-    enum zcode_retrieval_profile_pair_measure_error error)
-{
-    switch (error) {
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_OK: return "ok";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_NULL: return "null argument";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_ALIAS:
-        return "output aliases reachable input";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_PARAMETER:
-        return "invalid bounded input";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_ROOT:
-        return "required root is zero";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_PROFILE:
-        return "profile projection refused";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_SNAPSHOT:
-        return "feature snapshot refused";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_INCOMPLETE:
-        return "required feature evidence is incomplete";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_HEURISTIC:
-        return "heuristic refused";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_LINEAGE:
-        return "immediate specialization lineage refused";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_POLICY:
-        return "derived comparison policy refused";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_WORKLOAD:
-        return "evaluation workload refused";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_BINDING:
-        return "exact input binding mismatch";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_EVALUATION:
-        return "derived paired evaluation refused";
-    case ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_COMPARISON:
-        return "derived comparison refused";
-    }
-    return "unknown retrieval profile pair measurement error";
-}

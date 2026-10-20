@@ -254,25 +254,3 @@ zcode_retrieval_profile_evolution_propose(
     return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_OK;
 }
 
-const char *zcode_retrieval_profile_evolution_error_string(
-    enum zcode_retrieval_profile_evolution_error error)
-{
-    switch (error) {
-    case ZCODE_RETRIEVAL_PROFILE_EVOLUTION_OK: return "ok";
-    case ZCODE_RETRIEVAL_PROFILE_EVOLUTION_NULL: return "null argument";
-    case ZCODE_RETRIEVAL_PROFILE_EVOLUTION_ALIAS: return "output aliases input";
-    case ZCODE_RETRIEVAL_PROFILE_EVOLUTION_PARAMETER:
-        return "candidate parameter is invalid";
-    case ZCODE_RETRIEVAL_PROFILE_EVOLUTION_INCOMPLETE:
-        return "required retrieval feature evidence is incomplete";
-    case ZCODE_RETRIEVAL_PROFILE_EVOLUTION_RETRIEVAL:
-        return "retrieval projection refused";
-    case ZCODE_RETRIEVAL_PROFILE_EVOLUTION_HEURISTIC:
-        return "heuristic lineage refused";
-    case ZCODE_RETRIEVAL_PROFILE_EVOLUTION_BINDING:
-        return "exact input binding mismatch";
-    case ZCODE_RETRIEVAL_PROFILE_EVOLUTION_NO_EFFECT:
-        return "candidate ranking is unchanged";
-    }
-    return "unknown retrieval profile evolution error";
-}

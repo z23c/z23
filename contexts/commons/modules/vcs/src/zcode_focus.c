@@ -40,25 +40,6 @@ static void focus_derived_root(const char *domain,
     focus_hash(domain, bytes, bytes_len, out);
 }
 
-const char *vcs_zcode_focus_error_string(enum vcs_zcode_focus_error error)
-{
-    switch (error) {
-    case VCS_ZCODE_FOCUS_OK: return "ok";
-    case VCS_ZCODE_FOCUS_NULL: return "null-argument";
-    case VCS_ZCODE_FOCUS_VERSION_ERROR: return "focus-version-invalid";
-    case VCS_ZCODE_FOCUS_SHAPE: return "focus-shape-invalid";
-    case VCS_ZCODE_FOCUS_ROOT_ZERO: return "focus-root-zero";
-    case VCS_ZCODE_FOCUS_LIMIT: return "focus-limit-invalid";
-    case VCS_ZCODE_FOCUS_ORDER: return "focus-order-invalid";
-    case VCS_ZCODE_FOCUS_DUPLICATE: return "focus-duplicate-root";
-    case VCS_ZCODE_FOCUS_BINDING: return "focus-binding-mismatch";
-    case VCS_ZCODE_FOCUS_INCOMPLETE: return "focus-context-incomplete";
-    case VCS_ZCODE_FOCUS_EXPIRED: return "focus-claim-expired";
-    case VCS_ZCODE_FOCUS_ALLOC: return "focus-allocation-failed";
-    }
-    return "unknown-focus-error";
-}
-
 enum vcs_zcode_focus_error vcs_zcode_focus_validate(
     const struct vcs_zcode_focus_v1 *focus)
 {

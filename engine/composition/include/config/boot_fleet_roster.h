@@ -102,8 +102,6 @@ enum boot_fleet_roster_verdict {
     BOOT_FLEET_ROSTER_UNVERIFIABLE,
 };
 
-const char *boot_fleet_roster_verdict_name(enum boot_fleet_roster_verdict v);
-
 /* THE OPT-IN. -fleetrostergate[=1] turns the manager's publishing ON and
  * enforces; -fleetrostergate=0 is the member-side escape hatch: enforcement
  * is off on this box, it is logged, and fleet-scope carriage is exactly

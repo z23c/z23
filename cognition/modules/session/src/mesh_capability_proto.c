@@ -43,27 +43,6 @@ static_assert(MESH_CAPABILITY_CANCEL_V1_WIRE_BYTES == 272u);
 static_assert(MESH_CAPABILITY_ACK_V1_WIRE_BYTES == 284u);
 static_assert(MESH_CAPABILITY_FRAME_V1_MAX < 4096u);
 
-const char *mesh_capability_proto_error_string(
-    enum mesh_capability_proto_error error)
-{
-    switch (error) {
-    case MESH_CAPABILITY_PROTO_OK: return "ok";
-    case MESH_CAPABILITY_PROTO_NULL: return "null";
-    case MESH_CAPABILITY_PROTO_SIZE: return "size";
-    case MESH_CAPABILITY_PROTO_MAGIC: return "magic";
-    case MESH_CAPABILITY_PROTO_VERSION_INVALID: return "version";
-    case MESH_CAPABILITY_PROTO_FLAGS: return "flags";
-    case MESH_CAPABILITY_PROTO_KIND_INVALID: return "kind";
-    case MESH_CAPABILITY_PROTO_FIELD: return "field";
-    case MESH_CAPABILITY_PROTO_LIMIT: return "limit";
-    case MESH_CAPABILITY_PROTO_TIME: return "time";
-    case MESH_CAPABILITY_PROTO_STATUS: return "status";
-    case MESH_CAPABILITY_PROTO_KEY_MISMATCH: return "key-mismatch";
-    case MESH_CAPABILITY_PROTO_SIGNATURE: return "signature";
-    }
-    return "unknown";
-}
-
 static bool fields_nonzero(const uint8_t *const *fields, size_t count)
 {
     for (size_t i = 0; i < count; i++)

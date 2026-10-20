@@ -142,25 +142,3 @@ zcode_retrieval_profile_comparison_observe(
     return ZCODE_RETRIEVAL_PROFILE_COMPARISON_OK;
 }
 
-const char *zcode_retrieval_profile_comparison_error_string(
-    enum zcode_retrieval_profile_comparison_error error)
-{
-    switch (error) {
-    case ZCODE_RETRIEVAL_PROFILE_COMPARISON_OK: return "ok";
-    case ZCODE_RETRIEVAL_PROFILE_COMPARISON_NULL: return "null argument";
-    case ZCODE_RETRIEVAL_PROFILE_COMPARISON_ALIAS:
-        return "output aliases input";
-    case ZCODE_RETRIEVAL_PROFILE_COMPARISON_ROOT: return "required root is zero";
-    case ZCODE_RETRIEVAL_PROFILE_COMPARISON_HEURISTIC:
-        return "invalid heuristic";
-    case ZCODE_RETRIEVAL_PROFILE_COMPARISON_LINEAGE:
-        return "invalid specialization lineage";
-    case ZCODE_RETRIEVAL_PROFILE_COMPARISON_POLICY:
-        return "invalid comparison policy";
-    case ZCODE_RETRIEVAL_PROFILE_COMPARISON_BINDING:
-        return "comparison binding mismatch";
-    case ZCODE_RETRIEVAL_PROFILE_COMPARISON_OBSERVATION:
-        return "retrieval observation refused";
-    }
-    return "unknown";
-}

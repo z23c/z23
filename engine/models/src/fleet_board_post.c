@@ -1404,22 +1404,3 @@ bool db_fleet_board_chain_verify(struct node_db *ndb, int64_t *checked_out)
     return ok;
 }
 
-bool fleet_board_dump_state_json(struct json_value *out, const char *key)
-{
-    (void)key;
-    struct node_db *ndb = app_runtime_node_db();
-    json_push_kv_bool(out, "db_open", ndb && ndb->open);
-    if (!ndb || !ndb->open)
-        return true;
-    struct fleet_board_status status;
-    int64_t now = (int64_t)platform_time_wall_time_t();
-    if (!db_fleet_board_status(ndb, now, &status))
-        return true;
-    json_push_kv_int(out, "posts", status.posts);
-    json_push_kv_int(out, "bytes", status.bytes);
-    json_push_kv_int(out, "open_questions", status.open_questions);
-    json_push_kv_int(out, "wiki_pages", status.wiki_pages);
-    json_push_kv_int(out, "oldest_created_at", status.oldest_created_at);
-    json_push_kv_int(out, "newest_created_at", status.newest_created_at);
-    return true;
-}

@@ -547,12 +547,6 @@ void qb_value_int(struct qb *q, enum qb_column c, int64_t v)
         qb_value_push(q, (struct qb_bind){ .kind = QB_BIND_INT, .i = v });
 }
 
-void qb_value_double(struct qb *q, enum qb_column c, double v)
-{
-    if (qb_value_slot(q, c))
-        qb_value_push(q, (struct qb_bind){ .kind = QB_BIND_DOUBLE, .d = v });
-}
-
 void qb_value_text(struct qb *q, enum qb_column c, const char *v)
 {
     if (!qb_value_slot(q, c))

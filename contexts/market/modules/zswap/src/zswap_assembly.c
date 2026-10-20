@@ -27,28 +27,6 @@
  * is rejected at structural validation before decode_destination runs. */
 #define ZSWAP_ADDRESS_MIN_CHARS 26u
 
-const char *zswap_assembly_error_string(enum zswap_assembly_error error)
-{
-    switch (error) {
-    case ZSWAP_ASSEMBLY_OK: return "ok";
-    case ZSWAP_ASSEMBLY_ERR_NULL: return "null-argument";
-    case ZSWAP_ASSEMBLY_ERR_AD: return "ad-invalid";
-    case ZSWAP_ASSEMBLY_ERR_DEADLINE: return "deadline-mismatch";
-    case ZSWAP_ASSEMBLY_ERR_BUYER_INPUT_COUNT: return "buyer-input-count";
-    case ZSWAP_ASSEMBLY_ERR_INPUT_VALUE: return "input-value-invalid";
-    case ZSWAP_ASSEMBLY_ERR_INPUT_SCRIPT: return "input-script-invalid";
-    case ZSWAP_ASSEMBLY_ERR_INPUT_ORDER: return "duplicate-input";
-    case ZSWAP_ASSEMBLY_ERR_SELLER_DUST: return "seller-input-under-dust";
-    case ZSWAP_ASSEMBLY_ERR_ADDRESS: return "address-invalid";
-    case ZSWAP_ASSEMBLY_ERR_FEE: return "fee-zero";
-    case ZSWAP_ASSEMBLY_ERR_INSUFFICIENT: return "buyer-inputs-insufficient";
-    case ZSWAP_ASSEMBLY_ERR_OVERFLOW: return "value-overflow";
-    case ZSWAP_ASSEMBLY_ERR_SLP_SCRIPT: return "slp-script-build-failed";
-    case ZSWAP_ASSEMBLY_ERR_ALLOC: return "allocation-failed";
-    }
-    return "unknown";
-}
-
 /* ── structural validation ─────────────────────────────────────────── */
 
 static enum zswap_assembly_error input_validate(

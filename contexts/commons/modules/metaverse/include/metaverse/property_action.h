@@ -431,11 +431,6 @@ bool metaverse_operation_from_wire(uint32_t wire, uint32_t version,
  * a refusal for a legal verb. */
 uint32_t metaverse_operation_wire(const struct metaverse_operation *op);
 
-/* Name <-> operation, across BOTH vocabularies. */
-bool metaverse_operation_from_name(const char *name,
-                                   struct metaverse_operation *out);
-const char *metaverse_operation_name(const struct metaverse_operation *op);
-
 /* Direct action <-> broker wire, for callers that already know which
  * vocabulary they hold. 0 / METAVERSE_ACTION_NONE on no match. */
 uint32_t metaverse_action_wire(enum metaverse_action a);

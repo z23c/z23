@@ -109,41 +109,6 @@ static bool binding_zcl_pubkey_valid(const uint8_t pubkey[33])
            secp256k1_ec_pubkey_parse(binding_ctx_get(), &parsed, pubkey, 33) == 1;
 }
 
-const char *vcs_zcode_binding_error_string(enum vcs_zcode_binding_error error)
-{
-    switch (error) {
-    case VCS_ZCODE_BINDING_OK: return "ok";
-    case VCS_ZCODE_BINDING_ERR_NULL: return "null-argument";
-    case VCS_ZCODE_BINDING_ERR_VERSION: return "schema-version";
-    case VCS_ZCODE_BINDING_ERR_WIRE_SIZE: return "wire-size";
-    case VCS_ZCODE_BINDING_ERR_WIRE_MAGIC: return "wire-magic";
-    case VCS_ZCODE_BINDING_ERR_ROOT_ZERO: return "root-zero";
-    case VCS_ZCODE_BINDING_ERR_PUBKEY_ZERO: return "pubkey-zero";
-    case VCS_ZCODE_BINDING_ERR_PUBKEY_INVALID: return "pubkey-invalid";
-    case VCS_ZCODE_BINDING_ERR_KEY_ID_MISMATCH: return "key-id-mismatch";
-    case VCS_ZCODE_BINDING_ERR_PREDECESSOR: return "predecessor-invalid";
-    case VCS_ZCODE_BINDING_ERR_SEQUENCE: return "sequence-invalid";
-    case VCS_ZCODE_BINDING_ERR_OPERATION: return "operation-invalid";
-    case VCS_ZCODE_BINDING_ERR_TIME_ORDER: return "time-order-invalid";
-    case VCS_ZCODE_BINDING_ERR_SIGNATURE: return "signature-invalid";
-    case VCS_ZCODE_BINDING_ERR_KEY_MISMATCH: return "key-mismatch";
-    case VCS_ZCODE_BINDING_ERR_NETWORK_MISMATCH:
-        return "network-genesis-mismatch";
-    case VCS_ZCODE_BINDING_ERR_IDENTITY_MISMATCH:
-        return "identity-root-mismatch";
-    case VCS_ZCODE_BINDING_ERR_EXPIRED: return "object-expired";
-    case VCS_ZCODE_BINDING_ERR_REVOKED: return "binding-revoked-terminal";
-    case VCS_ZCODE_BINDING_ERR_LINKAGE: return "successor-linkage-invalid";
-    case VCS_ZCODE_BINDING_ERR_NOT_YET_VALID: return "not-yet-valid";
-    case VCS_ZCODE_BINDING_ERR_RECOVERY_DELAY: return "recovery-delay";
-    case VCS_ZCODE_BINDING_ERR_RECOVERY_PENDING: return "recovery-pending";
-    case VCS_ZCODE_BINDING_ERR_RETIRED_KEY_REUSE:
-        return "retired-key-reuse";
-    case VCS_ZCODE_BINDING_ERR_SIG_SLOT: return "signature-slot-invalid";
-    }
-    return "unknown";
-}
-
 static enum vcs_zcode_binding_error binding_fields(
     const struct vcs_zcode_contributor_binding_v1 *binding,
     bool require_signatures)

@@ -109,8 +109,6 @@ struct mesh_private_object_offer_expectation_v1 {
     uint64_t required_deny_mask;
 };
 
-const char *mesh_private_object_proto_error_string(
-    enum mesh_private_object_proto_error error);
 /* Derive the request id from the target-local grant nonce and every unsigned
  * offer field except request_id itself. The sender must do this before sign;
  * the receiver re-derives it from its durable grant before claim. */

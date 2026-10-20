@@ -15,51 +15,6 @@ static const uint8_t policy_magic[8] = {'Z','C','P','O','L','Y','\r','\n'};
 static const uint8_t review_magic[8] = {'Z','C','R','E','V','W','\r','\n'};
 static const uint8_t receipt_magic[8] = {'Z','C','W','R','C','P','\r','\n'};
 
-/* First half of the error family: null/wire/schema-shape failures. */
-static const char *dev_error_string_wire(enum vcs_zcode_dev_error error)
-{
-    switch (error) {
-    case VCS_ZCODE_DEV_OK: return "ok";
-    case VCS_ZCODE_DEV_ERR_NULL: return "null-argument";
-    case VCS_ZCODE_DEV_ERR_VERSION: return "schema-version";
-    case VCS_ZCODE_DEV_ERR_WIRE_SIZE: return "wire-size";
-    case VCS_ZCODE_DEV_ERR_WIRE_MAGIC: return "wire-magic";
-    case VCS_ZCODE_DEV_ERR_ROOT_ZERO: return "root-zero";
-    case VCS_ZCODE_DEV_ERR_PUBKEY_ZERO: return "pubkey-zero";
-    case VCS_ZCODE_DEV_ERR_SIGNATURE: return "signature-invalid";
-    case VCS_ZCODE_DEV_ERR_CAPABILITY: return "capability-invalid";
-    case VCS_ZCODE_DEV_ERR_LIMIT: return "limit-invalid";
-    case VCS_ZCODE_DEV_ERR_EXPIRY: return "task-expired";
-    default: return NULL;
-    }
-}
-
-/* Second half of the error family: cross-object semantic failures. */
-static const char *dev_error_string_semantic(enum vcs_zcode_dev_error error)
-{
-    switch (error) {
-    case VCS_ZCODE_DEV_ERR_POLICY: return "proof-policy-invalid";
-    case VCS_ZCODE_DEV_ERR_VERDICT: return "review-verdict-invalid";
-    case VCS_ZCODE_DEV_ERR_WORK_KIND: return "work-kind-invalid";
-    case VCS_ZCODE_DEV_ERR_WORK_STATUS: return "work-status-invalid";
-    case VCS_ZCODE_DEV_ERR_TIME_ORDER: return "time-order-invalid";
-    case VCS_ZCODE_DEV_ERR_TASK_MISMATCH: return "task-root-mismatch";
-    case VCS_ZCODE_DEV_ERR_SOURCE_STALE: return "source-root-stale";
-    case VCS_ZCODE_DEV_ERR_POLICY_MISMATCH: return "proof-policy-mismatch";
-    case VCS_ZCODE_DEV_ERR_TOOLCHAIN_STALE: return "toolchain-capsule-stale";
-    case VCS_ZCODE_DEV_ERR_OUTPUT_MISMATCH: return "output-root-mismatch";
-    default: return NULL;
-    }
-}
-
-const char *vcs_zcode_dev_error_string(enum vcs_zcode_dev_error error)
-{
-    const char *s = dev_error_string_wire(error);
-    if (s) return s;
-    s = dev_error_string_semantic(error);
-    return s ? s : "unknown";
-}
-
 static enum vcs_zcode_dev_error task_validate_roots(
     const struct vcs_zcode_task_v1 *task)
 {

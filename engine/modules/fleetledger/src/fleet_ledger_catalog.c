@@ -279,17 +279,6 @@ static const uint8_t k_pair_merge[ZCL_FLEET_PAIR_KEY_MAX + 1] = {
     ZCL_FLEET_MERGE_LWW,         /* executor */
 };
 
-const char *zcl_fleet_merge_name(enum zcl_fleet_merge merge)
-{
-    switch (merge) {
-    case ZCL_FLEET_MERGE_IMMUTABLE:  return "immutable";
-    case ZCL_FLEET_MERGE_COUNTER:    return "counter";
-    case ZCL_FLEET_MERGE_LWW:        return "lww";
-    case ZCL_FLEET_MERGE_OWNER_ONLY: return "owner_only";
-    }
-    return "owner_only";
-}
-
 enum zcl_fleet_merge zcl_fleet_pair_merge(uint8_t kind, uint16_t subject,
                                           uint8_t key)
 {
@@ -310,19 +299,6 @@ const char *zcl_fleet_pair_name(uint8_t key)
 {
     return key >= 1 && key <= ZCL_FLEET_PAIR_KEY_MAX ? k_pair_names[key]
                                                      : NULL;
-}
-
-bool zcl_fleet_pair_from_name(const char *name, uint8_t *key_out)
-{
-    if (!name || !key_out)
-        return false;
-    for (uint8_t k = 1; k <= ZCL_FLEET_PAIR_KEY_MAX; k++) {
-        if (strcmp(k_pair_names[k], name) == 0) {
-            *key_out = k;
-            return true;
-        }
-    }
-    return false;
 }
 
 /* ── experiment enums ────────────────────────────────────────────────── */

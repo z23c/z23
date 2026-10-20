@@ -73,9 +73,6 @@ struct mesh_private_object_frame_view_v1 {
     } body;
 };
 
-const char *mesh_private_object_frame_error_string(
-    enum mesh_private_object_frame_error error);
-
 enum mesh_private_object_frame_error mesh_private_object_frame_offer_v1_encode(
     const struct mesh_private_object_offer_v1 *offer, uint8_t *out,
     size_t out_cap, size_t *out_len);

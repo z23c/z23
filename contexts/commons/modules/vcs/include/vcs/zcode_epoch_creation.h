@@ -86,8 +86,6 @@ void vcs_zcode_epoch_creation_init(
     struct vcs_zcode_epoch_creation_set_v1 *set);
 void vcs_zcode_epoch_creation_free(
     struct vcs_zcode_epoch_creation_set_v1 *set);
-const char *vcs_zcode_epoch_creation_error_string(
-    enum vcs_zcode_epoch_creation_error error);
 enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_validate(
     const struct vcs_zcode_epoch_creation_set_v1 *set);
 enum vcs_zcode_epoch_creation_error vcs_zcode_epoch_creation_serialize(

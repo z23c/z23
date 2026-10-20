@@ -73,8 +73,6 @@ struct zcl_det_vector {
     bool started;
 };
 
-const char *zcl_det_outcome_name(enum zcl_det_outcome outcome);
-
 void zcl_det_vector_begin(struct zcl_det_vector *v);
 bool zcl_det_vector_add(struct zcl_det_vector *v,
                         const struct zcl_det_check *check);

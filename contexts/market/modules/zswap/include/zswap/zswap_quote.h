@@ -85,8 +85,6 @@ enum zswap_quote_error {
     ZSWAP_QUOTE_ERR_NOT_YET_VALID,
 };
 
-const char *zswap_quote_error_string(enum zswap_quote_error error);
-
 struct zswap_quote_v1 {
     uint16_t schema_version;
     uint8_t network_genesis_root[32];

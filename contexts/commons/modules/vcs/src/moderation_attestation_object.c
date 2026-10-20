@@ -23,26 +23,6 @@ static const uint8_t attest_magic[8] = {'Z', 'M', 'A', 'T', 'T', '1', 0, 0};
 static const char attest_signature_domain[] =
     ZCL_MODERATION_ATTESTATION_SIGNATURE_DOMAIN;
 
-const char *zcl_moderation_error_string(enum zcl_moderation_error error)
-{
-    switch (error) {
-    case ZCL_MODERATION_OK: return "ok";
-    case ZCL_MODERATION_NULL: return "null-argument";
-    case ZCL_MODERATION_SIZE: return "wire-size";
-    case ZCL_MODERATION_MAGIC: return "wire-magic";
-    case ZCL_MODERATION_VERSION: return "schema-version";
-    case ZCL_MODERATION_FLAGS: return "flags";
-    case ZCL_MODERATION_ENUM: return "closed-enum";
-    case ZCL_MODERATION_ROOT: return "root";
-    case ZCL_MODERATION_TIME: return "validity-window";
-    case ZCL_MODERATION_SIGNATURE: return "signature";
-    case ZCL_MODERATION_CHAIN: return "supersession-chain";
-    case ZCL_MODERATION_LIMIT: return "capacity";
-    case ZCL_MODERATION_NOMEM: return "allocation";
-    }
-    return "unknown-moderation-error";
-}
-
 const char *zcl_moderation_verdict_string(
     enum zcl_moderation_verdict_v1 verdict)
 {

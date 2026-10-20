@@ -21,9 +21,6 @@ enum mesh_private_object_chunk_error {
     MESH_PRIVATE_OBJECT_CHUNK_AUTH,
 };
 
-const char *mesh_private_object_chunk_error_string(
-    enum mesh_private_object_chunk_error error);
-
 /* Return the exact plaintext and sealed lengths for one canonical chunk. */
 enum mesh_private_object_chunk_error mesh_private_object_chunk_shape_v1(
     const struct mesh_private_object_offer_v1 *offer, uint32_t chunk_index,

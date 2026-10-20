@@ -606,11 +606,6 @@ static const char *const k_fr_artifact_names[ZCL_FR_ARTIFACT_COUNT] = {
     "object.o", "deps.d", "stderr.bin", "preprocessed.i"
 };
 
-const char *zcl_fr_artifact_name(size_t index)
-{
-    return index < ZCL_FR_ARTIFACT_COUNT ? k_fr_artifact_names[index] : NULL;
-}
-
 static bool fr_known_artifact(const char *name)
 {
     for (size_t i = 0; i < ZCL_FR_ARTIFACT_COUNT; i++)

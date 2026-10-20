@@ -610,21 +610,6 @@ bool vcs_badge_plan_build(const struct vcs_badge_store *store,
 
 /* ── issue ──────────────────────────────────────────────────────────── */
 
-const char *vcs_badge_issue_error_string(enum vcs_badge_issue_error err)
-{
-    switch (err) {
-    case VCS_BADGE_ISSUE_OK: return "ok";
-    case VCS_BADGE_ISSUE_UNKNOWN_PLAN: return "unknown-plan";
-    case VCS_BADGE_ISSUE_ALREADY_ISSUED: return "already-issued";
-    case VCS_BADGE_ISSUE_PLAN_CORRUPT: return "plan-corrupt";
-    case VCS_BADGE_ISSUE_POLICY_MISMATCH: return "policy-mismatch";
-    case VCS_BADGE_ISSUE_STALE: return "stale-plan";
-    case VCS_BADGE_ISSUE_SIGN: return "sign-failure";
-    case VCS_BADGE_ISSUE_IO: return "io-failure";
-    }
-    return "unknown-error";
-}
-
 enum vcs_badge_issue_error vcs_badge_issue(
     struct vcs_badge_store *store, const struct vcs_badge_policy *policy,
     const uint8_t plan_id[32], const struct vcs_package_index *index,

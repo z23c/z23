@@ -23,33 +23,6 @@ static bool shadow_zero(const uint8_t bytes[32])
     return !zcl_bytes_any_set(bytes, 32);
 }
 
-const char *vcs_zcode_shadow_error_string(enum vcs_zcode_shadow_error error)
-{
-    switch (error) {
-    case VCS_ZCODE_SHADOW_OK: return "ok";
-    case VCS_ZCODE_SHADOW_NULL: return "null-argument";
-    case VCS_ZCODE_SHADOW_WIRE_SIZE: return "wire-size";
-    case VCS_ZCODE_SHADOW_MAGIC: return "wire-magic";
-    case VCS_ZCODE_SHADOW_VERSION: return "schema-version";
-    case VCS_ZCODE_SHADOW_FLAGS: return "simulation-flags";
-    case VCS_ZCODE_SHADOW_RESERVED: return "reserved-bytes";
-    case VCS_ZCODE_SHADOW_ROOT: return "root";
-    case VCS_ZCODE_SHADOW_ORDER: return "entry-order";
-    case VCS_ZCODE_SHADOW_DUPLICATE: return "duplicate-entry";
-    case VCS_ZCODE_SHADOW_LIMIT: return "entry-limit";
-    case VCS_ZCODE_SHADOW_TIME: return "time-window";
-    case VCS_ZCODE_SHADOW_EPOCH: return "epoch-window";
-    case VCS_ZCODE_SHADOW_ACTION: return "reproduction-action";
-    case VCS_ZCODE_SHADOW_NOT_FOUND: return "signer-not-approved";
-    case VCS_ZCODE_SHADOW_NETWORK: return "network-mismatch";
-    case VCS_ZCODE_SHADOW_POLICY: return "policy-mismatch";
-    case VCS_ZCODE_SHADOW_CATEGORY: return "creation-category";
-    case VCS_ZCODE_SHADOW_AMOUNT: return "shadow-award";
-    case VCS_ZCODE_SHADOW_OVERFLOW: return "arithmetic-overflow";
-    }
-    return "unknown-shadow-policy-error";
-}
-
 static enum vcs_zcode_shadow_error reproducer_entry_validate(
     const struct vcs_zcode_approved_reproducer_entry_v1 *entry)
 {

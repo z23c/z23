@@ -33,35 +33,6 @@ void vcs_zcode_epoch_creation_free(
     memset(set, 0, sizeof(*set));
 }
 
-const char *vcs_zcode_epoch_creation_error_string(
-    enum vcs_zcode_epoch_creation_error error)
-{
-    switch (error) {
-    case VCS_ZCODE_EPOCH_CREATION_OK: return "ok";
-    case VCS_ZCODE_EPOCH_CREATION_NULL: return "null-argument";
-    case VCS_ZCODE_EPOCH_CREATION_ALLOC: return "allocation-failed";
-    case VCS_ZCODE_EPOCH_CREATION_WIRE_SIZE: return "wire-size";
-    case VCS_ZCODE_EPOCH_CREATION_MAGIC: return "wire-magic";
-    case VCS_ZCODE_EPOCH_CREATION_SCHEMA: return "schema-version";
-    case VCS_ZCODE_EPOCH_CREATION_RESERVED: return "reserved-field";
-    case VCS_ZCODE_EPOCH_CREATION_ROOT: return "authority-root";
-    case VCS_ZCODE_EPOCH_CREATION_ORDER: return "attribution-order";
-    case VCS_ZCODE_EPOCH_CREATION_PREDECESSOR: return "epoch-predecessor";
-    case VCS_ZCODE_EPOCH_CREATION_CAP: return "epoch-cap";
-    case VCS_ZCODE_EPOCH_CREATION_SUM: return "epoch-sum";
-    case VCS_ZCODE_EPOCH_CREATION_TIME: return "anchor-time";
-    case VCS_ZCODE_EPOCH_CREATION_OVERFLOW: return "checked-overflow";
-    case VCS_ZCODE_EPOCH_CREATION_CONTEXT: return "validation-context";
-    case VCS_ZCODE_EPOCH_CREATION_CAS: return "cas-object";
-    case VCS_ZCODE_EPOCH_CREATION_ATTRIBUTION: return "creation-attribution";
-    case VCS_ZCODE_EPOCH_CREATION_DUPLICATE: return "duplicate-contribution";
-    case VCS_ZCODE_EPOCH_CREATION_MINT: return "observed-mint-mismatch";
-    case VCS_ZCODE_EPOCH_CREATION_IMMATURE: return "epoch-immature";
-    case VCS_ZCODE_EPOCH_CREATION_REORG: return "epoch-anchor-reorged";
-    }
-    return "unknown-epoch-creation-error";
-}
-
 enum vcs_zcode_epoch_creation_error vcs_zc23_policy_epoch_cap_atoms(
     uint64_t epoch, uint64_t *out_atoms)
 {

@@ -17,16 +17,6 @@
 
 static const uint8_t k_magic[4] = { 'Z', 'D', 'R', '1' };
 
-const char *zcl_det_corroboration_name(enum zcl_det_corroboration c)
-{
-    switch (c) {
-    case ZCL_DET_INDETERMINATE: return "UNKNOWN";
-    case ZCL_DET_CORROBORATED: return "CORROBORATED";
-    case ZCL_DET_REFUTED: return "REFUTED";
-    }
-    return "INVALID";
-}
-
 void zcl_det_receipt_label_digest(const char *label,
                                   uint8_t out[ZCL_DET_DIGEST_LEN])
 {

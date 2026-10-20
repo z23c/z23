@@ -993,29 +993,3 @@ enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_root(
     return ZCL_CODE_VECTOR_HINT_OK;
 }
 
-const char *zcl_code_vector_hint_error_string(
-    enum zcl_code_vector_hint_error error)
-{
-    switch (error) {
-    case ZCL_CODE_VECTOR_HINT_OK: return "ok";
-    case ZCL_CODE_VECTOR_HINT_ERR_NULL: return "null";
-    case ZCL_CODE_VECTOR_HINT_ERR_VERSION: return "version";
-    case ZCL_CODE_VECTOR_HINT_ERR_ENUM: return "enum";
-    case ZCL_CODE_VECTOR_HINT_ERR_FLAGS: return "flags";
-    case ZCL_CODE_VECTOR_HINT_ERR_ROOT_ZERO: return "root_zero";
-    case ZCL_CODE_VECTOR_HINT_ERR_WIRE_SIZE: return "wire_size";
-    case ZCL_CODE_VECTOR_HINT_ERR_WIRE_MAGIC: return "wire_magic";
-    case ZCL_CODE_VECTOR_HINT_ERR_LIMIT: return "limit";
-    case ZCL_CODE_VECTOR_HINT_ERR_OVERFLOW: return "overflow";
-    case ZCL_CODE_VECTOR_HINT_ERR_ORDER: return "order";
-    case ZCL_CODE_VECTOR_HINT_ERR_PAYLOAD_ROOT: return "payload_root";
-    case ZCL_CODE_VECTOR_HINT_ERR_CAPACITY: return "capacity";
-    case ZCL_CODE_VECTOR_HINT_ERR_OVERLAP: return "overlap";
-    case ZCL_CODE_VECTOR_HINT_ERR_PROFILE_BINDING:
-        return "profile_binding";
-    case ZCL_CODE_VECTOR_HINT_ERR_CARD_BINDING: return "card_binding";
-    case ZCL_CODE_VECTOR_HINT_ERR_CARD_SET_ROOT: return "card_set_root";
-    case ZCL_CODE_VECTOR_HINT_ERR_SCRATCH: return "scratch";
-    }
-    return "unknown";
-}

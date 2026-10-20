@@ -97,14 +97,8 @@ bool ci_source_universe_observe(
     const char *root, const char *inventory_path,
     struct ci_source_universe_observation *out);
 
-const char *ci_source_universe_component_name(
-    enum ci_source_universe_component_id component);
 const char *ci_source_universe_component_scope_name(
     enum ci_source_universe_component_id component);
-const char *ci_source_universe_root_domain_name(
-    enum ci_source_universe_root_domain domain);
 const char *ci_source_universe_projection_name(uint32_t projection_bit);
-const char *ci_source_universe_refusal_name(
-    enum ci_source_universe_refusal refusal);
 
 #endif /* ZCL_CODEINDEX_SOURCE_UNIVERSE_H */

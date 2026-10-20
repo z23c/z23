@@ -778,11 +778,6 @@ bool api_market_list_profile(const char *profile_override,
     return market_list_json(profile_override, result);
 }
 
-bool api_market_list(struct json_value *result)
-{
-    return market_list_json(NULL, result);
-}
-
 /* ── Registration ───────────────────────────────────────────────── */
 
 void register_market_rpc_commands(struct rpc_table *t)

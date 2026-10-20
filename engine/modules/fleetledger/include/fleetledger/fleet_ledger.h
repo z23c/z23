@@ -353,8 +353,6 @@ enum zcl_fleet_merge {
     ZCL_FLEET_MERGE_OWNER_ONLY = 3  /* only the writer box may state it */
 };
 
-const char *zcl_fleet_merge_name(enum zcl_fleet_merge merge);
-
 /* The class of one pair key, in the context of the row that carries it. A
  * `vitals` row's `value` takes its class from the catalog's own aggregation
  * — a `sum` metric is a COUNTER and a `gauge` is LWW — because the catalog
@@ -373,7 +371,6 @@ const char *zcl_fleet_subject_name(uint8_t kind, uint16_t subject);
 bool zcl_fleet_subject_from_name(uint8_t kind, const char *name,
                                  uint16_t *subject_out);
 const char *zcl_fleet_pair_name(uint8_t key);
-bool zcl_fleet_pair_from_name(const char *name, uint8_t *key_out);
 
 /* Experiment closed vocabularies. `unknown` is a named member so a
  * refusal can say the word; it is never stored. A name that is not in

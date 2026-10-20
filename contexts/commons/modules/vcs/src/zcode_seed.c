@@ -61,32 +61,6 @@ static bool seed_signature_low_s(const uint8_t signature[64])
                   sizeof(seed_half_order)) <= 0;
 }
 
-const char *vcs_c23_seed_error_string(enum vcs_c23_seed_error error)
-{
-    switch (error) {
-    case VCS_C23_SEED_OK: return "ok";
-    case VCS_C23_SEED_ERR_NULL: return "null";
-    case VCS_C23_SEED_ERR_VERSION: return "version";
-    case VCS_C23_SEED_ERR_FLAGS: return "flags";
-    case VCS_C23_SEED_ERR_SOURCE_CLASSIFICATION:
-        return "source_classification";
-    case VCS_C23_SEED_ERR_ROOT: return "root";
-    case VCS_C23_SEED_ERR_PUBKEY: return "pubkey";
-    case VCS_C23_SEED_ERR_ORDER: return "order";
-    case VCS_C23_SEED_ERR_TIME: return "time";
-    case VCS_C23_SEED_ERR_SEQUENCE: return "sequence";
-    case VCS_C23_SEED_ERR_WIRE_SIZE: return "wire_size";
-    case VCS_C23_SEED_ERR_MAGIC: return "magic";
-    case VCS_C23_SEED_ERR_RESERVED: return "reserved";
-    case VCS_C23_SEED_ERR_SIGNATURE: return "signature";
-    case VCS_C23_SEED_ERR_KEY_MISMATCH: return "key_mismatch";
-    case VCS_C23_SEED_ERR_OVERFLOW: return "overflow";
-    case VCS_C23_SEED_ERR_IMMATURE: return "immature";
-    case VCS_C23_SEED_ERR_REORG: return "reorg";
-    }
-    return "unknown";
-}
-
 static enum vcs_c23_seed_error seed_fields(
     const struct vcs_c23_seed_v1 *seed, bool require_signatures)
 {

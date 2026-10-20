@@ -192,7 +192,4 @@ enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe_v2(
     const struct zcl_retrieval_comparison_arm_binding *child_binding,
     struct zcl_retrieval_comparison_report_v2 *report);
 
-const char *zcl_retrieval_comparison_error_string(
-    enum zcl_retrieval_comparison_error error);
-
 #endif /* ZCL_RETRIEVAL_COMPARISON_H */

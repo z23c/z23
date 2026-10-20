@@ -129,8 +129,6 @@ enum vcs_zcode_dev_error {
     VCS_ZCODE_DEV_ERR_OUTPUT_MISMATCH,
 };
 
-const char *vcs_zcode_dev_error_string(enum vcs_zcode_dev_error error);
-
 struct vcs_zcode_task_v1 {
     uint16_t schema_version;
     uint8_t source_root[32];

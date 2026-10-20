@@ -36,9 +36,6 @@ struct mesh_private_object_root_v1 {
     uint8_t state;
 };
 
-const char *mesh_private_object_root_error_string(
-    enum mesh_private_object_root_error error);
-
 /* The two sizes and chunk count must have canonical 65520-byte plaintext and
  * 16-byte tag geometry. Each update accepts exactly one complete chunk. */
 enum mesh_private_object_root_error mesh_private_object_root_v1_init(

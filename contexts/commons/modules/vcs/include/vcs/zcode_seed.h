@@ -86,7 +86,6 @@ struct vcs_c23_seed_v1 {
 typedef bool (*vcs_c23_seed_anchor_active_fn)(
     void *opaque, uint64_t height, const uint8_t hash[32]);
 
-const char *vcs_c23_seed_error_string(enum vcs_c23_seed_error error);
 enum vcs_c23_seed_error vcs_c23_seed_validate(
     const struct vcs_c23_seed_v1 *seed);
 enum vcs_c23_seed_error vcs_c23_seed_serialize(

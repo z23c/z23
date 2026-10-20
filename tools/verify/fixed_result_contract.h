@@ -200,10 +200,6 @@ bool zcl_fr_request_parse(const uint8_t *bytes, size_t len,
 
 /* ── Worker result packet v2 (worker to launcher, four FDs) ───────────── */
 
-/* FD order and canonical artifact names: object.o, deps.d, stderr.bin,
- * preprocessed.i. The worker's private scratch spellings (result.o,
- * deps.d, stderr.bin, result.i) never leave the worker. */
-const char *zcl_fr_artifact_name(size_t index);
 const char *zcl_fr_artifact_names_check(const char *const *names,
                                         size_t count);
 

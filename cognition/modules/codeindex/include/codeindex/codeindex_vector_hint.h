@@ -213,7 +213,4 @@ enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_parse(
 enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_root(
     const struct zcl_code_embedding_segment_v1 *segment, uint8_t out[32]);
 
-const char *zcl_code_vector_hint_error_string(
-    enum zcl_code_vector_hint_error error);
-
 #endif /* ZCL_CODEINDEX_VECTOR_HINT_H */

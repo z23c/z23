@@ -475,46 +475,6 @@ uint32_t metaverse_operation_wire(const struct metaverse_operation *op)
     return 0u;
 }
 
-bool metaverse_operation_from_name(const char *name,
-                                   struct metaverse_operation *out)
-{
-    enum metaverse_query q;
-    uint32_t bit;
-
-    if (!out)
-        return false;
-    out->kind = METAVERSE_OP_UNKNOWN;
-    out->query = METAVERSE_QUERY_NONE;
-    out->action = METAVERSE_ACTION_NONE;
-    if (!name || !*name)
-        return false;
-
-    q = metaverse_query_from_name(name);
-    if (q != METAVERSE_QUERY_NONE) {
-        out->kind = METAVERSE_OP_QUERY;
-        out->query = q;
-        return true;
-    }
-    bit = metaverse_action_from_name(name);
-    if (bit != 0u) {
-        out->kind = METAVERSE_OP_ACTION;
-        out->action = (enum metaverse_action)bit;
-        return true;
-    }
-    return false;
-}
-
-const char *metaverse_operation_name(const struct metaverse_operation *op)
-{
-    if (!op)
-        return "unknown";
-    if (op->kind == METAVERSE_OP_QUERY)
-        return metaverse_query_name(op->query);
-    if (op->kind == METAVERSE_OP_ACTION)
-        return metaverse_action_token(op->action);
-    return "unknown";
-}
-
 size_t metaverse_wire_golden_count(void)
 {
     return sizeof(k_golden) / sizeof(k_golden[0]);

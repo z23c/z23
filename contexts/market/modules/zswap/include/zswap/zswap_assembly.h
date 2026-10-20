@@ -145,8 +145,6 @@ enum zswap_assembly_error {
     ZSWAP_ASSEMBLY_ERR_ALLOC,           /* transaction allocation failed */
 };
 
-const char *zswap_assembly_error_string(enum zswap_assembly_error error);
-
 /* Structural validation of accept data: sizes, counts, nonzero fields,
  * NUL-terminated-and-zero-padded address strings of plausible length. Does
  * NOT decode the addresses (zswap_assemble does) and does not compare the

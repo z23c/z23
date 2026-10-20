@@ -400,26 +400,3 @@ zcl_retrieval_pair_observation_verify(
     return ZCL_RETRIEVAL_PAIR_OBSERVATION_OK;
 }
 
-const char *zcl_retrieval_pair_observation_error_string(
-    enum zcl_retrieval_pair_observation_error error)
-{
-    switch (error) {
-    case ZCL_RETRIEVAL_PAIR_OBSERVATION_OK: return "ok";
-    case ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_NULL: return "null argument";
-    case ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_ALIAS:
-        return "output aliases input";
-    case ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_VERSION:
-        return "unsupported version";
-    case ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_PARAMETER:
-        return "invalid observation parameter";
-    case ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_ROOT:
-        return "required root is zero";
-    case ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_WIRE:
-        return "invalid observation wire";
-    case ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_RESULT:
-        return "invalid evaluation result";
-    case ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_BINDING:
-        return "observation binding mismatch";
-    }
-    return "unknown";
-}

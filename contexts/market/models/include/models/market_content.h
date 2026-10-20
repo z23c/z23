@@ -57,9 +57,6 @@ bool db_market_content_save(struct node_db *ndb,
 bool db_market_content_find_chunk(
     struct node_db *ndb, const uint8_t offer_id[32], uint32_t chunk_index,
     struct market_content_chunk_record *out);
-int db_market_content_list(struct node_db *ndb,
-                           struct market_content_public_record *out,
-                           size_t max);
 /* One statement returns the bounded rows and uncapped total from the same
  * SQLite snapshot. Errors are distinct from an empty registry. */
 int db_market_content_list_snapshot(

@@ -105,7 +105,4 @@ zcode_retrieval_science_reproduction_compose(
     const struct zcode_retrieval_science_reproduction_request *request,
     struct zcode_retrieval_science_reproduction_bundle *out);
 
-const char *zcode_retrieval_science_adapter_error_string(
-    enum zcode_retrieval_science_adapter_error error);
-
 #endif /* ZCL_SERVICES_ZCODE_RETRIEVAL_SCIENCE_ADAPTER_SERVICE_H */

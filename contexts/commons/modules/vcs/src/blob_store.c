@@ -344,11 +344,3 @@ size_t vcs_blob_announce_via(struct vcs_swarm_engine *engine)
     return queued;
 }
 
-size_t vcs_blob_announce(void)
-{
-    struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
-    if (!engine)
-        LOG_RETURN(0, BLOB_LOG, "blob announce: %s",
-                   vcs_blob_result_string(VCS_BLOB_ERR_NO_ENGINE));
-    return vcs_blob_announce_via(engine);
-}

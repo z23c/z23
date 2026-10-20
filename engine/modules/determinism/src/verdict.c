@@ -22,18 +22,6 @@
  * in the tree that happens to hash the same bytes for another purpose. */
 static const char k_domain[] = "zcl.determinism.verdict_vector.v1";
 
-const char *zcl_det_outcome_name(enum zcl_det_outcome outcome)
-{
-    switch (outcome) {
-    case ZCL_DET_OUTCOME_NONE: return "none";
-    case ZCL_DET_OUTCOME_PASS: return "PASS";
-    case ZCL_DET_OUTCOME_FAIL: return "FAIL";
-    case ZCL_DET_OUTCOME_SKIP: return "SKIP";
-    case ZCL_DET_OUTCOME_UNOBSERVED: return "UNOBSERVED";
-    }
-    return "unknown";
-}
-
 static void write_u32(struct sha3_256_ctx *ctx, uint32_t v)
 {
     unsigned char buf[4];

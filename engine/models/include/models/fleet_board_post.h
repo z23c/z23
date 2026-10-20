@@ -374,7 +374,6 @@ int db_fleet_board_room_list(struct node_db *ndb,
 bool db_fleet_board_chain_verify(struct node_db *ndb, int64_t *checked_out);
 
 struct json_value;
-bool fleet_board_dump_state_json(struct json_value *out, const char *key);
 
 #ifdef ZCL_TESTING
 /* Narrow capacity seam for adversarial store tests. Production always uses

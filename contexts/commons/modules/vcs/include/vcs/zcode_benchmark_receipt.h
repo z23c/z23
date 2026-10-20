@@ -87,8 +87,6 @@ enum vcs_zcode_receipt_error {
     VCS_ZCODE_RECEIPT_ERR_RESERVED,       /* a reserved field is nonzero */
 };
 
-const char *vcs_zcode_receipt_error_string(enum vcs_zcode_receipt_error error);
-
 /* ── workload bundle v1 (the bytes the fixed kernel observes) ──────────
  * Wire: [8 magic "ZCWRK1\r\n"][2 version][8 payload_len][payload bytes].
  * The parse view BORROWS the payload pointer into the caller's wire — no

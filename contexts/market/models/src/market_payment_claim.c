@@ -154,26 +154,6 @@ bool db_market_payment_claim_find(
         });
 }
 
-int db_market_payment_claim_list_for_buyer(
-    struct node_db *ndb, const uint8_t offer_id[32],
-    const uint8_t buyer_pubkey[32],
-    struct market_payment_claim_record *out, size_t max)
-{
-    if (!ndb || !ndb->open || !offer_id || !buyer_pubkey ||
-        (!out && max > 0))
-        LOG_RETURN(0, "market", "payment claim list: invalid arguments");
-    sqlite3_stmt *s = NULL;
-    AR_QUERY_LIST(ndb, s,
-        "SELECT claim_wire,offer_wire,status,status_reason,output_index,"
-        "block_height,confirmations,observed_at,reconciled_at "
-        "FROM market_payment_claims WHERE offer_id=? AND buyer_pubkey=? "
-        "ORDER BY chunk_start",
-        out, max,
-        AR_BIND_BLOB(s, 1, offer_id, 32);
-        AR_BIND_BLOB(s, 2, buyer_pubkey, 32),
-        if (!market_payment_claim_read_row(s, &out[count])) continue);
-}
-
 int db_market_payment_claim_list_for_chunk(
     struct node_db *ndb, const uint8_t offer_id[32],
     const uint8_t buyer_pubkey[32], uint32_t chunk_index,

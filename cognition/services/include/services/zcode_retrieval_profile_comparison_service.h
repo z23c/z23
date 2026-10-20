@@ -48,7 +48,4 @@ zcode_retrieval_profile_comparison_observe(
     const struct zcode_retrieval_profile_comparison_request *request,
     struct zcode_retrieval_profile_comparison_report *report);
 
-const char *zcode_retrieval_profile_comparison_error_string(
-    enum zcode_retrieval_profile_comparison_error error);
-
 #endif /* ZCL_SERVICES_ZCODE_RETRIEVAL_PROFILE_COMPARISON_SERVICE_H */

@@ -120,17 +120,6 @@ static void build_unlock(void)
     zcl_mutex_unlock(&g_build_lock);
 }
 
-const char *boot_fleet_roster_verdict_name(enum boot_fleet_roster_verdict v)
-{
-    switch (v) {
-    case BOOT_FLEET_ROSTER_UNARMED: return "unarmed";
-    case BOOT_FLEET_ROSTER_MEMBER: return "member";
-    case BOOT_FLEET_ROSTER_NOT_MEMBER: return "not_member";
-    case BOOT_FLEET_ROSTER_UNVERIFIABLE: return "unverifiable";
-    }
-    return "unverifiable";
-}
-
 void boot_fleet_roster_set_gate(enum boot_fleet_roster_gate gate)
 {
     atomic_store_explicit(&g_gate, (int)gate, memory_order_relaxed);

@@ -88,7 +88,4 @@ zcl_retrieval_pair_observation_verify(
     const struct zcl_retrieval_experiment_eval_result_v1 *parent,
     const struct zcl_retrieval_experiment_eval_result_v1 *child);
 
-const char *zcl_retrieval_pair_observation_error_string(
-    enum zcl_retrieval_pair_observation_error error);
-
 #endif /* ZCL_RETRIEVAL_PAIR_OBSERVATION_H */

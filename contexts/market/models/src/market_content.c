@@ -132,21 +132,6 @@ bool db_market_content_find_chunk(
         });
 }
 
-int db_market_content_list(struct node_db *ndb,
-                           struct market_content_public_record *out,
-                           size_t max)
-{
-    if (!ndb || !ndb->open || (!out && max > 0))
-        LOG_RETURN(0, "market", "market content list: invalid arguments");
-    sqlite3_stmt *s = NULL;
-    AR_QUERY_LIST(ndb, s,
-        "SELECT offer_id,root_hash,size_bytes,num_chunks,registered_at "
-        "FROM market_contents ORDER BY registered_at DESC LIMIT ?",
-        out, max,
-        AR_BIND_INT(s, 1, (int64_t)max),
-        if (!market_content_read_public(s, 0, &out[count])) continue);
-}
-
 int db_market_content_list_snapshot(
     struct node_db *ndb, struct market_content_public_record *out, size_t max,
     int *total_out)

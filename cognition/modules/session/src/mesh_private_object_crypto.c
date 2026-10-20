@@ -17,23 +17,6 @@ static const uint8_t chunk_key_domain[] =
 static const uint8_t chunk_aad_domain[] =
     "zcl.mesh.private-object.chunk.aad.v1";
 
-const char *mesh_private_object_chunk_error_string(
-    enum mesh_private_object_chunk_error error)
-{
-    switch (error) {
-    case MESH_PRIVATE_OBJECT_CHUNK_OK: return "ok";
-    case MESH_PRIVATE_OBJECT_CHUNK_NULL: return "null";
-    case MESH_PRIVATE_OBJECT_CHUNK_OFFER: return "offer";
-    case MESH_PRIVATE_OBJECT_CHUNK_INDEX: return "index";
-    case MESH_PRIVATE_OBJECT_CHUNK_SIZE: return "size";
-    case MESH_PRIVATE_OBJECT_CHUNK_KEY_MISMATCH: return "key-mismatch";
-    case MESH_PRIVATE_OBJECT_CHUNK_DH: return "dh";
-    case MESH_PRIVATE_OBJECT_CHUNK_KDF: return "kdf";
-    case MESH_PRIVATE_OBJECT_CHUNK_AUTH: return "auth";
-    }
-    return "unknown";
-}
-
 enum mesh_private_object_chunk_error mesh_private_object_chunk_shape_v1(
     const struct mesh_private_object_offer_v1 *offer, uint32_t chunk_index,
     uint32_t *plaintext_bytes, uint32_t *sealed_bytes)

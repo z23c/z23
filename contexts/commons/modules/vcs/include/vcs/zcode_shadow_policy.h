@@ -115,8 +115,6 @@ struct vcs_zcode_policy_candidate_v1 {
     uint64_t award_atoms[6];
 };
 
-const char *vcs_zcode_shadow_error_string(enum vcs_zcode_shadow_error error);
-
 void vcs_zcode_approved_reproducer_set_init(
     struct vcs_zcode_approved_reproducer_set_v1 *set);
 enum vcs_zcode_shadow_error vcs_zcode_approved_reproducer_set_add(

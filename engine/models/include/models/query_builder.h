@@ -231,7 +231,6 @@ void qb_self_alias(struct qb *q, bool on);
 /* ── INSERT values ───────────────────────────────────────────────────── */
 
 void qb_value_int(struct qb *q, enum qb_column c, int64_t v);
-void qb_value_double(struct qb *q, enum qb_column c, double v);
 void qb_value_text(struct qb *q, enum qb_column c, const char *v);
 void qb_value_blob(struct qb *q, enum qb_column c, const void *p, size_t n);
 void qb_value_null(struct qb *q, enum qb_column c);

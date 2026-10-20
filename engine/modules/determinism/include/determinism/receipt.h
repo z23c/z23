@@ -104,8 +104,6 @@ enum zcl_det_corroboration {
     ZCL_DET_REFUTED = 2,
 };
 
-const char *zcl_det_corroboration_name(enum zcl_det_corroboration c);
-
 enum zcl_det_corroboration zcl_det_receipt_check(
     const struct zcl_det_receipt *claim, const struct zcl_det_receipt *fresh,
     char *why, size_t why_cap);

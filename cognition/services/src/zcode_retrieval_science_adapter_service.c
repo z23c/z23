@@ -552,37 +552,3 @@ zcode_retrieval_science_reproduction_compose(
     return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK;
 }
 
-const char *zcode_retrieval_science_adapter_error_string(
-    enum zcode_retrieval_science_adapter_error error)
-{
-    switch (error) {
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK: return "ok";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_NULL: return "null argument";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ALIAS:
-        return "output aliases reachable input";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_PARAMETER:
-        return "invalid run parameter";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_MEASUREMENT:
-        return "retrieval pair measurement refused";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_STUDY: return "invalid study";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_TASK: return "invalid task";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_CANDIDATE:
-        return "invalid candidate";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_POLICY: return "invalid policy";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ENVIRONMENT:
-        return "environment policy refused profile";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ACTION:
-        return "fixed benchmark action derivation failed";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OBSERVATION:
-        return "retrieval observation composition failed";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_RESULT:
-        return "science result composition failed";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ANCHOR_INELIGIBLE:
-        return "original result is not an observed anchor";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_BINDING:
-        return "scientific boundary mismatch";
-    case ZCODE_RETRIEVAL_SCIENCE_ADAPTER_REPRODUCTION:
-        return "reproduction composition failed";
-    }
-    return "unknown retrieval science adapter error";
-}

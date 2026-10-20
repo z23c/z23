@@ -121,6 +121,5 @@ bool vcs_blob_fetch(const uint8_t root[32], int64_t day, uint64_t now);
  * blob included) to every registered swarm peer. Returns the frame
  * count queued; the transport glue drains them as usual. */
 size_t vcs_blob_announce_via(struct vcs_swarm_engine *engine);
-size_t vcs_blob_announce(void);
 
 #endif /* ZCL_VCS_BLOB_STORE_H */

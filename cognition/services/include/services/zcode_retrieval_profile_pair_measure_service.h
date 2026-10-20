@@ -84,7 +84,4 @@ zcode_retrieval_profile_pair_measure(
     const struct zcode_retrieval_profile_pair_measure_request *request,
     struct zcode_retrieval_profile_pair_measure_report *report);
 
-const char *zcode_retrieval_profile_pair_measure_error_string(
-    enum zcode_retrieval_profile_pair_measure_error error);
-
 #endif /* ZCL_SERVICES_ZCODE_RETRIEVAL_PROFILE_PAIR_MEASURE_SERVICE_H */

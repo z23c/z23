@@ -68,30 +68,6 @@ static void quote_root_hash(const char *domain, size_t domain_len,
     sha3_256_finalize(&sha, out);
 }
 
-const char *zswap_quote_error_string(enum zswap_quote_error error)
-{
-    switch (error) {
-    case ZSWAP_QUOTE_OK: return "ok";
-    case ZSWAP_QUOTE_ERR_NULL: return "null-argument";
-    case ZSWAP_QUOTE_ERR_VERSION: return "schema-version";
-    case ZSWAP_QUOTE_ERR_WIRE_SIZE: return "wire-size";
-    case ZSWAP_QUOTE_ERR_WIRE_MAGIC: return "wire-magic";
-    case ZSWAP_QUOTE_ERR_ROOT_ZERO: return "root-zero";
-    case ZSWAP_QUOTE_ERR_PUBKEY_ZERO: return "pubkey-zero";
-    case ZSWAP_QUOTE_ERR_TOKEN_ID_ZERO: return "token-id-zero";
-    case ZSWAP_QUOTE_ERR_NONCE: return "nonce-zero";
-    case ZSWAP_QUOTE_ERR_AMOUNT: return "amount-zero";
-    case ZSWAP_QUOTE_ERR_TIME_ORDER: return "time-order-invalid";
-    case ZSWAP_QUOTE_ERR_LIFETIME: return "lifetime-too-long";
-    case ZSWAP_QUOTE_ERR_SIGNATURE: return "signature-invalid";
-    case ZSWAP_QUOTE_ERR_KEY_MISMATCH: return "key-mismatch";
-    case ZSWAP_QUOTE_ERR_NETWORK_MISMATCH: return "network-genesis-mismatch";
-    case ZSWAP_QUOTE_ERR_EXPIRED: return "object-expired";
-    case ZSWAP_QUOTE_ERR_NOT_YET_VALID: return "not-yet-valid";
-    }
-    return "unknown";
-}
-
 static enum zswap_quote_error quote_fields(const struct zswap_quote_v1 *quote,
                                            bool require_signature)
 {

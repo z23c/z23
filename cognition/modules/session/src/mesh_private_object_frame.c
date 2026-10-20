@@ -13,23 +13,6 @@ static const uint8_t frame_magic[4] = {'Z', 'M', 'P', 'O'};
 static_assert(MESH_PRIVATE_OBJECT_FRAME_MAX == 65624u);
 static_assert(MESH_PRIVATE_OBJECT_FRAME_MAX < 2u * 1024u * 1024u);
 
-const char *mesh_private_object_frame_error_string(
-    enum mesh_private_object_frame_error error)
-{
-    switch (error) {
-    case MESH_PRIVATE_OBJECT_FRAME_OK: return "ok";
-    case MESH_PRIVATE_OBJECT_FRAME_NULL: return "null";
-    case MESH_PRIVATE_OBJECT_FRAME_SIZE: return "size";
-    case MESH_PRIVATE_OBJECT_FRAME_MAGIC: return "magic";
-    case MESH_PRIVATE_OBJECT_FRAME_VERSION_INVALID: return "version";
-    case MESH_PRIVATE_OBJECT_FRAME_FLAGS: return "flags";
-    case MESH_PRIVATE_OBJECT_FRAME_KIND_INVALID: return "kind";
-    case MESH_PRIVATE_OBJECT_FRAME_FIELD: return "field";
-    case MESH_PRIVATE_OBJECT_FRAME_PAYLOAD: return "payload";
-    }
-    return "unknown";
-}
-
 static bool ids_valid(const uint8_t transfer_id[32],
                       const uint8_t offer_request_id[32])
 {

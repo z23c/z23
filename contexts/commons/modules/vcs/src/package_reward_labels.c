@@ -89,32 +89,3 @@ const char *vcs_reward_disposition_string(enum vcs_reward_disposition d)
     return "unknown";
 }
 
-const char *vcs_reward_enqueue_error_string(
-    enum vcs_reward_enqueue_error err)
-{
-    switch (err) {
-    case VCS_REWARD_ENQUEUE_OK: return "ok";
-    case VCS_REWARD_ENQUEUE_DUPLICATE: return "duplicate";
-    case VCS_REWARD_ENQUEUE_BAD_CATEGORY: return "bad-category";
-    case VCS_REWARD_ENQUEUE_BAND: return "points-outside-band";
-    case VCS_REWARD_ENQUEUE_ZERO_POINTS: return "zero-points";
-    case VCS_REWARD_ENQUEUE_EVIDENCE: return "missing-evidence-root";
-    case VCS_REWARD_ENQUEUE_BAD_INPUT: return "bad-input";
-    case VCS_REWARD_ENQUEUE_FULL: return "queue-full";
-    case VCS_REWARD_ENQUEUE_IO: return "io-error";
-    }
-    return "unknown";
-}
-
-const char *vcs_reward_commit_error_string(enum vcs_reward_commit_error e)
-{
-    switch (e) {
-    case VCS_REWARD_COMMIT_OK: return "ok";
-    case VCS_REWARD_COMMIT_UNKNOWN_PLAN: return "unknown-plan";
-    case VCS_REWARD_COMMIT_ALREADY_SETTLED: return "already-settled";
-    case VCS_REWARD_COMMIT_STALE: return "stale-plan";
-    case VCS_REWARD_COMMIT_CAPS_CHANGED: return "caps-changed";
-    case VCS_REWARD_COMMIT_IO: return "io-error";
-    }
-    return "unknown";
-}

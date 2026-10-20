@@ -47,7 +47,6 @@ void market_review_set_precommit_hook_for_test(
 #endif
 
 #include "json/json.h"
-bool api_market_list(struct json_value *result);
 /* The listing view with an explicit per-request profile override
  * ("open"/"open-view"/"general"/"general-audience.v1", NULL = the node's
  * active profile). Backs zmarket_list, app market list, and /api/market. */

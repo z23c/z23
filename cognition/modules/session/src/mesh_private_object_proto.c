@@ -46,28 +46,6 @@ static bool x25519_public_key_usable(const uint8_t point[32])
     return usable;
 }
 
-const char *mesh_private_object_proto_error_string(
-    enum mesh_private_object_proto_error error)
-{
-    switch (error) {
-    case MESH_PRIVATE_OBJECT_PROTO_OK: return "ok";
-    case MESH_PRIVATE_OBJECT_PROTO_NULL: return "null";
-    case MESH_PRIVATE_OBJECT_PROTO_SIZE: return "size";
-    case MESH_PRIVATE_OBJECT_PROTO_MAGIC: return "magic";
-    case MESH_PRIVATE_OBJECT_PROTO_VERSION_INVALID: return "version";
-    case MESH_PRIVATE_OBJECT_PROTO_FLAGS: return "flags";
-    case MESH_PRIVATE_OBJECT_PROTO_FIELD: return "field";
-    case MESH_PRIVATE_OBJECT_PROTO_TIME: return "time";
-    case MESH_PRIVATE_OBJECT_PROTO_LIMIT: return "limit";
-    case MESH_PRIVATE_OBJECT_PROTO_CHUNKS: return "chunks";
-    case MESH_PRIVATE_OBJECT_PROTO_DENY: return "deny";
-    case MESH_PRIVATE_OBJECT_PROTO_KEY_MISMATCH: return "key-mismatch";
-    case MESH_PRIVATE_OBJECT_PROTO_SIGNATURE: return "signature";
-    case MESH_PRIVATE_OBJECT_PROTO_EXPECTATION: return "expectation";
-    }
-    return "unknown";
-}
-
 static enum mesh_private_object_proto_error offer_shape(
     const struct mesh_private_object_offer_v1 *offer, bool require_grant_id,
     bool require_request_id, bool require_ciphertext_root,

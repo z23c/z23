@@ -51,10 +51,6 @@ bool db_market_payment_claim_save(
 bool db_market_payment_claim_find(
     struct node_db *ndb, const uint8_t claim_id[32],
     struct market_payment_claim_record *out);
-int db_market_payment_claim_list_for_buyer(
-    struct node_db *ndb, const uint8_t offer_id[32],
-    const uint8_t buyer_pubkey[32],
-    struct market_payment_claim_record *out, size_t max);
 int db_market_payment_claim_list_for_chunk(
     struct node_db *ndb, const uint8_t offer_id[32],
     const uint8_t buyer_pubkey[32], uint32_t chunk_index,

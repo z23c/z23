@@ -144,7 +144,6 @@ enum zcl_moderation_error {
     ZCL_MODERATION_NOMEM,
 };
 
-const char *zcl_moderation_error_string(enum zcl_moderation_error error);
 const char *zcl_moderation_verdict_string(
     enum zcl_moderation_verdict_v1 verdict);
 

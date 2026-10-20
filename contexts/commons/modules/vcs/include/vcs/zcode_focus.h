@@ -130,8 +130,6 @@ struct vcs_zcode_focus_handoff_v1 {
     uint8_t continuation_root[32];
 };
 
-const char *vcs_zcode_focus_error_string(enum vcs_zcode_focus_error error);
-
 enum vcs_zcode_focus_error vcs_zcode_focus_compose(
     const struct vcs_zcode_task_v1 *task, const uint8_t task_root[32],
     const uint8_t context_root[32], const uint8_t story_graph_root[32],

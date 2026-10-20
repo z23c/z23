@@ -236,8 +236,6 @@ struct mesh_capability_frame_view_v1 {
     } body;
 };
 
-const char *mesh_capability_proto_error_string(
-    enum mesh_capability_proto_error error);
 enum mesh_capability_proto_error mesh_capability_frame_v1_validate(
     const struct mesh_capability_frame_view_v1 *frame);
 enum mesh_capability_proto_error mesh_capability_frame_v1_sign(

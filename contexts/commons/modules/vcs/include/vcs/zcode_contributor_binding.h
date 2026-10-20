@@ -149,8 +149,6 @@ enum vcs_zcode_binding_error {
     VCS_ZCODE_BINDING_ERR_SIG_SLOT,
 };
 
-const char *vcs_zcode_binding_error_string(enum vcs_zcode_binding_error error);
-
 struct vcs_zcode_contributor_binding_v1 {
     uint16_t schema_version;
     uint8_t network_genesis_root[32];

@@ -190,8 +190,6 @@ enum vcs_badge_issue_error {
     VCS_BADGE_ISSUE_IO,             /* durable write failed (logged) */
 };
 
-const char *vcs_badge_issue_error_string(enum vcs_badge_issue_error err);
-
 /* The signer callback: receives the fully-formed badge (signature
  * zeroed) and the badge id; must fill badge->signature with the 64-byte
  * compact low-S secp256k1 signature over the id. Private keys stay with

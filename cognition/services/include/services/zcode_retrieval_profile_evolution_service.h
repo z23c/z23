@@ -74,7 +74,4 @@ zcode_retrieval_profile_evolution_propose(
     const struct zcode_retrieval_profile_evolution_request *request,
     struct zcode_retrieval_profile_evolution_report *report);
 
-const char *zcode_retrieval_profile_evolution_error_string(
-    enum zcode_retrieval_profile_evolution_error error);
-
 #endif /* ZCL_SERVICES_ZCODE_RETRIEVAL_PROFILE_EVOLUTION_SERVICE_H */

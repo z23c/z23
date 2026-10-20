@@ -72,26 +72,6 @@ static uint64_t get_u64(const uint8_t *wire, size_t *off)
     return value;
 }
 
-const char *vcs_zcode_receipt_error_string(enum vcs_zcode_receipt_error error)
-{
-    switch (error) {
-    case VCS_ZCODE_RECEIPT_OK: return "ok";
-    case VCS_ZCODE_RECEIPT_ERR_NULL: return "null-argument";
-    case VCS_ZCODE_RECEIPT_ERR_VERSION: return "schema-version";
-    case VCS_ZCODE_RECEIPT_ERR_WIRE_SIZE: return "wire-size";
-    case VCS_ZCODE_RECEIPT_ERR_WIRE_MAGIC: return "wire-magic";
-    case VCS_ZCODE_RECEIPT_ERR_ROOT_ZERO: return "root-zero";
-    case VCS_ZCODE_RECEIPT_ERR_LIMIT: return "limit-invalid";
-    case VCS_ZCODE_RECEIPT_ERR_STATUS: return "benchmark-status-invalid";
-    case VCS_ZCODE_RECEIPT_ERR_ISOLATION: return "isolation-invalid";
-    case VCS_ZCODE_RECEIPT_ERR_ORDER: return "sample-order-invalid";
-    case VCS_ZCODE_RECEIPT_ERR_ISA: return "isa-bits-unknown";
-    case VCS_ZCODE_RECEIPT_ERR_PADDING: return "padding-invalid";
-    case VCS_ZCODE_RECEIPT_ERR_RESERVED: return "reserved-nonzero";
-    }
-    return "unknown";
-}
-
 /* ── workload bundle v1 ─────────────────────────────────────────────── */
 
 enum vcs_zcode_receipt_error vcs_zcode_benchmark_workload_v1_parse(

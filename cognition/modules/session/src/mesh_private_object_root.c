@@ -21,22 +21,6 @@ static const uint8_t plaintext_domain[] =
 static const uint8_t ciphertext_domain[] =
     "zcl.mesh.private-object.ciphertext-root.v1";
 
-const char *mesh_private_object_root_error_string(
-    enum mesh_private_object_root_error error)
-{
-    switch (error) {
-    case MESH_PRIVATE_OBJECT_ROOT_OK: return "ok";
-    case MESH_PRIVATE_OBJECT_ROOT_NULL: return "null";
-    case MESH_PRIVATE_OBJECT_ROOT_PARAMETER: return "parameter";
-    case MESH_PRIVATE_OBJECT_ROOT_STATE: return "state";
-    case MESH_PRIVATE_OBJECT_ROOT_INDEX: return "index";
-    case MESH_PRIVATE_OBJECT_ROOT_LENGTH: return "length";
-    case MESH_PRIVATE_OBJECT_ROOT_OVERFLOW: return "overflow";
-    case MESH_PRIVATE_OBJECT_ROOT_INCOMPLETE: return "incomplete";
-    }
-    return "unknown";
-}
-
 static enum mesh_private_object_root_error root_fail(
     struct mesh_private_object_root_v1 *root,
     enum mesh_private_object_root_error error)

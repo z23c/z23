@@ -213,9 +213,6 @@ enum vcs_reward_enqueue_error {
     VCS_REWARD_ENQUEUE_IO,          /* durable write failed (logged) */
 };
 
-const char *vcs_reward_enqueue_error_string(
-    enum vcs_reward_enqueue_error err);
-
 /* Queue an auto-derived reward (kind AUTO) binding the slice-7 score:
  * `category` must be automatic (new-package / package-update /
  * test-contribution), `points` the score total (>0, at most
@@ -308,8 +305,6 @@ enum vcs_reward_commit_error {
                                         re-plan the window */
     VCS_REWARD_COMMIT_IO,            /* durable write failed (logged) */
 };
-
-const char *vcs_reward_commit_error_string(enum vcs_reward_commit_error e);
 
 struct vcs_reward_commit_result {
     uint32_t settled_count;   /* entries settled (incl. replayed) */
