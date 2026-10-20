@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
 # Compose the established seven-daemon DHT/Noise acceptance with the
@@ -7,7 +7,7 @@
 # ZCLATT attestation between them over the frozen package swarm codec; the
 # remaining five keep the sparse Kademlia topology nontrivial.
 
-set -euo pipefail
+set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
