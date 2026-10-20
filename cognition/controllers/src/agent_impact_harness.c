@@ -543,20 +543,33 @@ static bool aih_referrer_hits(const char *text, const char *path,
     return agent_impact_string_literal_contains_whole_token(text, path);
 }
 
+/* Byte order, not locale order: the scan result must not depend on the
+ * process locale or on the filesystem's directory order. */
+static int aih_dirent_name_cmp(const struct dirent **a, const struct dirent **b)
+{
+    return strcmp((*a)->d_name, (*b)->d_name);
+}
+
+static int aih_dirent_is_c_source(const struct dirent *ent)
+{
+    size_t nlen = strlen(ent->d_name);
+    return nlen >= 3 && strcmp(ent->d_name + nlen - 2, ".c") == 0;
+}
+
+/* Visits the directory's .c files in sorted name order. `code tests` caps the
+ * groups it prints, so a readdir() (filesystem) order made WHICH groups
+ * survived the cap differ between a lived-in tree and a clean checkout. */
 static void aih_scan_dir_for_reference(const char *dir, const char *path,
                                        const char *stem, const char *alt,
                                        bool has_alt, bool compound,
                                        struct agent_impact_acc *acc,
                                        bool *matched)
 {
-    DIR *dh = opendir(dir);
-    if (!dh) return;
-    struct dirent *ent;
-    while ((ent = readdir(dh)) != NULL) {
-        const char *name = ent->d_name;
-        size_t nlen = strlen(name);
-        if (nlen < 3 || strcmp(name + nlen - 2, ".c") != 0)
-            continue;
+    struct dirent **names = NULL;
+    int count = scandir(dir, &names, aih_dirent_is_c_source, aih_dirent_name_cmp);
+    if (count < 0) return;
+    for (int i = 0; i < count; i++) {
+        const char *name = names[i]->d_name;
         char relp[512];
         (void)snprintf(relp, sizeof(relp), "%s/%s", dir, name);
         if (strcmp(relp, path) == 0)
@@ -573,7 +586,9 @@ static void aih_scan_dir_for_reference(const char *dir, const char *path,
         if (hit)
             aih_merge_referrer_hit(relp, acc, matched);
     }
-    closedir(dh);
+    for (int i = 0; i < count; i++)
+        free(names[i]);
+    free(names);
 }
 
 /* Scanning every tests/harness/src/ and tools/lint/lintc/ file's content is

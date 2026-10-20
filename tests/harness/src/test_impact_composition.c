@@ -11663,6 +11663,30 @@ static bool ic_code_tests_has_group(const char *path, const char *group,
     return seen;
 }
 
+/* Index of `group` in `code tests <path>`'s test_groups, or -1. */
+static int ic_code_tests_group_index(const char *path, const char *group)
+{
+    struct zcl_command_reply reply;
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    (void)json_push_kv_str(&input, "path", path);
+    struct zcl_command_request request = {
+        .input = &input, .view = "normal", .invoked_name = "code.tests",
+    };
+    zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+    zcl_native_handle_code_tests(&request, &reply);
+    const struct json_value *groups = json_get(&reply.data, "test_groups");
+    int found = -1;
+    for (size_t i = 0; groups && i < groups->num_children && found < 0; i++) {
+        const char *g = json_get_str(&groups->children[i]);
+        if (g && strcmp(g, group) == 0)
+            found = (int)i;
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return found;
+}
+
 static int test_ic_data_file_routes_to_reading_test_group(void)
 {
     int failures = 0;
@@ -11681,6 +11705,20 @@ static int test_ic_data_file_routes_to_reading_test_group(void)
         /* a full-path literal reference in several groups. */
         ASSERT(ic_code_tests_has_group(
             "tools/dev/test_group_" "catalog.def", "dev_land", &n));
+        /* The name-reference scan visits referrers in sorted file-name order,
+         * not readdir order: `code tests` caps the groups it prints, so the
+         * directory order of a lived-in tree versus a clean checkout used to
+         * decide whether dev_land survived the cap. code_ontology <
+         * dev_app_scaffold < dev_land by test file name. */
+        {
+            int i_co = ic_code_tests_group_index(
+                "tools/dev/test_group_" "catalog.def", "code_ontology");
+            int i_da = ic_code_tests_group_index(
+                "tools/dev/test_group_" "catalog.def", "dev_app_scaffold");
+            int i_dl = ic_code_tests_group_index(
+                "tools/dev/test_group_" "catalog.def", "dev_land");
+            ASSERT(i_co >= 0 && i_da > i_co && i_dl > i_da);
+        }
         /* a data path no test names adds no group beyond the lint floor
          * (pieces split so this file is no referrer of it). */
         ASSERT(!ic_code_tests_has_group(
