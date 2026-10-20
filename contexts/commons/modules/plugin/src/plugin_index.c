@@ -32,21 +32,21 @@
 
 const char *plugin_index_status_code(enum plugin_index_status status)
 {
-    static const char *const names[] = {
-        [PLUGIN_INDEX_OK] = "PLUGIN_INDEX_OK",
-        [PLUGIN_INDEX_ARGUMENT] = "PLUGIN_INDEX_ARGUMENT",
-        [PLUGIN_INDEX_MALFORMED] = "PLUGIN_INDEX_MALFORMED",
-        [PLUGIN_INDEX_BAD_SIGNATURE] = "PLUGIN_INDEX_BAD_SIGNATURE",
-        [PLUGIN_INDEX_ROLLBACK] = "PLUGIN_INDEX_ROLLBACK",
-        [PLUGIN_INDEX_EQUIVOCATION] = "PLUGIN_INDEX_EQUIVOCATION",
-        [PLUGIN_INDEX_SOURCE] = "PLUGIN_INDEX_SOURCE",
-        [PLUGIN_INDEX_PINS] = "PLUGIN_INDEX_PINS",
-        [PLUGIN_INDEX_TOO_MANY] = "PLUGIN_INDEX_TOO_MANY",
-        [PLUGIN_INDEX_IO] = "PLUGIN_INDEX_IO"
-    };
-    size_t n = sizeof(names) / sizeof(names[0]);
-    return (size_t)status < n && names[status] ? names[status] : "PLUGIN_INDEX_UNKNOWN";
+    switch (status) {
+    case PLUGIN_INDEX_OK: return "PLUGIN_INDEX_OK";
+    case PLUGIN_INDEX_ARGUMENT: return "PLUGIN_INDEX_ARGUMENT";
+    case PLUGIN_INDEX_MALFORMED: return "PLUGIN_INDEX_MALFORMED";
+    case PLUGIN_INDEX_BAD_SIGNATURE: return "PLUGIN_INDEX_BAD_SIGNATURE";
+    case PLUGIN_INDEX_ROLLBACK: return "PLUGIN_INDEX_ROLLBACK";
+    case PLUGIN_INDEX_EQUIVOCATION: return "PLUGIN_INDEX_EQUIVOCATION";
+    case PLUGIN_INDEX_SOURCE: return "PLUGIN_INDEX_SOURCE";
+    case PLUGIN_INDEX_PINS: return "PLUGIN_INDEX_PINS";
+    case PLUGIN_INDEX_TOO_MANY: return "PLUGIN_INDEX_TOO_MANY";
+    case PLUGIN_INDEX_IO: return "PLUGIN_INDEX_IO";
+    }
+    return "PLUGIN_INDEX_UNKNOWN";
 }
+
 static bool pi_digit(char c)
 {
     return c >= '0' && c <= '9';
@@ -135,6 +135,7 @@ static void pi_signing_digest(const char *body, size_t len,
     memcpy(msg + sizeof(PI_SCHEMA), body, len);
     zcl_sha3_512(msg, sizeof(PI_SCHEMA) + len, digest);
 }
+
 static void pi_entry_digest(const char *bytes, size_t len,
                             char hex[PLUGIN_HEX_SHA3_512 + 1])
 {
@@ -142,6 +143,7 @@ static void pi_entry_digest(const char *bytes, size_t len,
     zcl_sha3_512((const unsigned char *)bytes, len, d);
     zcl_hex_encode(d, sizeof(d), hex);
 }
+
 static bool pi_fields_valid(const struct plugin_index_entry *e)
 {
     unsigned all = 0;
@@ -195,6 +197,7 @@ static bool pi_field(const struct json_value *obj, const char *key,
     memcpy(dst, s, strlen(s) + 1);
     return true;
 }
+
 static bool pi_int(const struct json_value *obj, const char *key, int64_t *out)
 {
     const struct json_value *v = json_get(obj, key);
@@ -350,6 +353,34 @@ static bool pi_set_push(struct pi_set *set, const struct plugin_index_entry *e)
     return true;
 }
 
+#ifdef ZCL_TESTING
+static bool g_pi_fail_armed;
+static unsigned g_pi_fail_after;
+
+void plugin_index_test_fail_readdir(bool armed, unsigned after)
+{
+    g_pi_fail_armed = armed;
+    g_pi_fail_after = after;
+}
+#endif
+
+/* readdir that tells the end of the directory (NULL, errno 0) from a failed
+ * read (NULL, errno set). */
+static struct dirent *pi_readdir(DIR *d)
+{
+#ifdef ZCL_TESTING
+    if (g_pi_fail_armed) {
+        if (g_pi_fail_after == 0) {
+            errno = EIO;
+            return NULL;
+        }
+        g_pi_fail_after--;
+    }
+#endif
+    errno = 0;
+    return readdir(d);
+}
+
 /* Reads each entry file of dir into set (and failures into rep, when given). */
 static enum plugin_index_status pi_scan(const char *dir, struct pi_set *set,
                                         struct plugin_index_report *rep)
@@ -360,7 +391,7 @@ static enum plugin_index_status pi_scan(const char *dir, struct pi_set *set,
     enum plugin_index_status result = PLUGIN_INDEX_OK;
     size_t files = 0;
     struct dirent *de;
-    while (result == PLUGIN_INDEX_OK && (de = readdir(d)) != NULL) {
+    while (result == PLUGIN_INDEX_OK && (de = pi_readdir(d)) != NULL) {
         struct plugin_index_entry e;
         if (!pi_suffix(de->d_name))
             continue;
@@ -376,7 +407,12 @@ static enum plugin_index_status pi_scan(const char *dir, struct pi_set *set,
         else if (rep && !pi_refuse(rep, de->d_name, st))
             result = PLUGIN_INDEX_IO;
     }
+    /* A failed read ends the loop like the end of the directory does; only
+     * errno tells them apart, and a partial set must never look complete. */
+    int read_error = de == NULL ? errno : 0;
     closedir(d);
+    if (result == PLUGIN_INDEX_OK && read_error != 0)
+        result = PLUGIN_INDEX_IO;
     return result;
 }
 

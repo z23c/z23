@@ -310,6 +310,36 @@ static int pix_case_dedupe(void)
     return failures;
 }
 
+static int pix_case_readdir_error(void)
+{
+    int failures = 0;
+    struct pix p;
+    bool ready = pix_open(&p);
+    TEST_CASE("plugin index: a failed directory read is an error, never a short listing") {
+        char v2[PLUGIN_INDEX_ENTRY_MAX + 1], v1[PLUGIN_INDEX_ENTRY_MAX + 1];
+        size_t l2 = 0, l1 = 0;
+        struct plugin_index_report rep;
+        ASSERT(ready);
+        ASSERT(pix_entry(p.seed_a, "hello", "2.0.0", ROOT_A, 200, 0, v2, &l2, NULL));
+        ASSERT(pix_entry(p.seed_a, "hello", "1.0.0", ROOT_A, 300, 0, v1, &l1, NULL));
+        ASSERT_EQ(plugin_index_add(p.index, v2, l2, NULL, NULL), PLUGIN_INDEX_OK);
+        /* The read fails before any entry: without the errno check the set is
+         * empty, the rollback goes unseen and the lower version is written. */
+        plugin_index_test_fail_readdir(true, 0);
+        ASSERT_EQ(plugin_index_add(p.index, v1, l1, NULL, NULL), PLUGIN_INDEX_IO);
+        ASSERT_EQ(plugin_index_search(p.index, p.pins, NULL, &rep), PLUGIN_INDEX_IO);
+        plugin_index_test_fail_readdir(false, 0);
+        ASSERT_EQ(plugin_index_search(p.index, p.pins, NULL, &rep), PLUGIN_INDEX_OK);
+        ASSERT_EQ(rep.row_count, 1);
+        ASSERT_EQ(rep.refusal_count, 0);
+        plugin_index_report_free(&rep);
+        ASSERT_EQ(plugin_index_add(p.index, v1, l1, NULL, NULL), PLUGIN_INDEX_ROLLBACK);
+    } TEST_END
+    plugin_index_test_fail_readdir(false, 0);
+    pix_close(&p);
+    return failures;
+}
+
 static bool pix_call(zcl_command_handler_fn fn, const char *input_json,
                      struct zcl_command_reply *reply)
 {
@@ -397,6 +427,7 @@ int test_plugin_index(void)
     failures += pix_case_rollback();
     failures += pix_case_malformed();
     failures += pix_case_dedupe();
+    failures += pix_case_readdir_error();
     failures += pix_case_commands();
     return failures;
 }

@@ -74,17 +74,17 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 1004 |
+| Registry entries (branches + leaves) | 1006 |
 | Top-level roots | 17 |
 | Branches | 214 |
-| Leaves (dispatchable command paths) | 790 |
-| … `ready` (live handler in this build) | 694 |
+| Leaves (dispatchable command paths) | 792 |
+| … `ready` (live handler in this build) | 696 |
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 23 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
-| Leaves with `effect=mutate` | 311 |
+| Leaves with `effect=mutate` | 312 |
 | Leaves with `effect=destructive` | 6 |
-| Leaves requiring **owner** authority | 157 |
+| Leaves requiring **owner** authority | 158 |
 
 Per source file:
 
@@ -105,7 +105,7 @@ Per source file:
 | `engine/composition/commands/metaverse.def` | 30 | 7 | 23 |
 | `engine/composition/commands/yardsale.def` | 7 | 2 | 5 |
 | `engine/composition/commands/zses.def` | 4 | 2 | 2 |
-| `engine/composition/commands/plugin.def` | 11 | 1 | 10 |
+| `engine/composition/commands/plugin.def` | 13 | 1 | 12 |
 | `engine/composition/commands/story.def` | 5 | 1 | 4 |
 | `engine/composition/commands/work.def` | 3 | 1 | 2 |
 | `engine/composition/commands/lab.def` | 5 | 1 | 4 |
@@ -1906,6 +1906,8 @@ represented by its children's sections.
 | `plugin rollback` | ready | mutate / app-write / **owner** · fast/low | **`name`** | `zcl.plugin_rollback.v1` | `z23 plugin rollback hello` | Restore the last-good plugin generation as current |
 | `plugin run` | ready | mutate / app-write / **owner** · persistent/low | **`name`**, **`seconds`** | `zcl.plugin_run.v1` | `z23 plugin run hello` | Run an installed plugin confined, health-checked and restarted on failure |
 | `plugin call` | ready | mutate / app-write / **owner** · foreground/low | **`name`**, `stdin`, `args`, `timeout_ms` | `zcl.plugin_call.v1` | `z23 plugin call upper --stdin=abc` | Run an installed one-shot plugin once and return its output |
+| `plugin index_add` | ready | mutate / app-write / **owner** · fast/low | `root`, **`manifest`**, `key`, `index` | `zcl.plugin_index_add.v1` | `z23 plugin index_add --root=<64-hex-package-root> --manifest=./dist/hello.plugin.json --key=./publisher.key --index=./plugin-index` | Sign a plugin index entry and add it to a local index directory |
+| `plugin search` | ready | read / read / operator · fast/low | `name`, `cap`, `index`, `publishers` | `zcl.plugin_search.v1` | `z23 plugin search --name=hello --index=./plugin-index --publishers=$HOME/.z23/plugins/publisher_keys` | List verified plugin index entries and mark each publisher pinned or not |
 
 ### `story` — Rooted causal views of development work
 

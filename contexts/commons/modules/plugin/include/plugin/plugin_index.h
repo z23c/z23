@@ -143,4 +143,10 @@ enum plugin_index_status plugin_index_search(
 
 void plugin_index_report_free(struct plugin_index_report *report);
 
+#ifdef ZCL_TESTING
+/* Test seam: when armed, the directory read fails with EIO after `after`
+ * successful entries. plugin_index_test_fail_readdir(false, 0) clears it. */
+void plugin_index_test_fail_readdir(bool armed, unsigned after);
+#endif
+
 #endif
