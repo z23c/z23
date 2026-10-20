@@ -35,6 +35,33 @@ fixture_reply="{\"result\":\"$tip_hash\",\"error\":null}"
 fixture_reply='{"result":"abc","error":null}'
 if tn_blockhash "$fixture" 39071 15 >/dev/null; then fail 'short hash accepted'; fi
 
+# Durable NEXT C must agree with its exact LE counter and last applied row.
+interior=$'3\t0300000000000000\t2\t1\t01\t2'
+tn_sync_interior "$interior" 10 || fail 'consistent interior frontier refused'
+for bad in \
+    $'NULL\tNULL\tNULL\tNULL\tNULL\t0' \
+    $'3\t03\t2\t1\t01\t2' \
+    $'3\t0400000000000000\t2\t1\t01\t2' \
+    $'3\t0300000000000000\t1\t1\t01\t2' \
+    $'3\t0300000000000000\t2\t0\t01\t2' \
+    $'3\t0300000000000000\t2\t1\t00\t2' \
+    $'3\t0300000000000000\t2\t1\t01\t0' \
+    $'03\t0300000000000000\t2\t1\t01\t2' \
+    $'11\t0B00000000000000\t10\t1\t01\t10'; do
+    if tn_sync_interior "$bad" 10; then fail 'invalid/completed frozen frontier accepted'; fi
+done
+printf '42 T\n42 Tl\n' | tn_group_stopped 42 || fail 'stopped group refused'
+if printf '42 T\n42 S\n' | tn_group_stopped 42; then fail 'unstopped group member accepted'; fi
+if printf '43 T\n' | tn_group_stopped 42; then fail 'absent owned group accepted'; fi
+tn_sync_startup $'NULL\tNULL\tNULL\tNULL\tNULL\t0' || fail 'empty startup refused'
+if tn_sync_startup $'1\t0200000000000000\t0\t1\t01\t2'; then fail 'inconsistent startup accepted'; fi
+fixture_reply="{\"result\":{\"height\":15,\"utxo_count\":9,\"sha3_hash\":\"$tip_hash\"},\"error\":null}"
+tn_commitment "$fixture" 39071 15 >/dev/null || fail 'typed coin commitment refused'
+fixture_reply="{\"result\":{\"height\":\"15\",\"utxo_count\":9,\"sha3_hash\":\"$tip_hash\"},\"error\":null}"
+if tn_commitment "$fixture" 39071 15 >/dev/null; then fail 'string commitment height accepted'; fi
+fixture_reply="{\"result\":{\"height\":15,\"utxo_count\":\"9\",\"sha3_hash\":\"$tip_hash\"},\"error\":null}"
+if tn_commitment "$fixture" 39071 15 >/dev/null; then fail 'string coin count accepted'; fi
+
 TN_TMP="$fixture/"
 mkdir "$fixture/zcl23-2node-cleanup"
 tn_rm_datadir "$fixture/zcl23-2node-cleanup"
@@ -112,4 +139,40 @@ printf '100\n' > "$fixture/clock"
 if tn_wait_height "$fixture" 39071 '' 15 102 "$tip_hash" >/dev/null; then
     fail 'late tip accepted'
 fi
+# Exercise the actual freeze orchestration with a deterministic process/SQL seam.
+# STOP success alone cannot witness a completed frontier or an unstopped member.
+freeze_case() (
+    local mode="$1"
+    REPO_ROOT="$fixture"; mkdir -p "$fixture/build"
+    TN_DD_B="$fixture/follower"; TN_PID_B=42; TN_PGID_B=42
+    A_TIP=10; A_HASH="$tip_hash"; SYNC_END=102; RESYNC_DEADLINE=120
+    printf '100\n' > "$fixture/clock"
+    printf '0\n' > "$fixture/reads"
+    printf 'boot -> db_open\n' > "$(tn_node_log "$TN_DD_B")"
+    kill() { return 0; }
+    ps() { if [ "$mode" = unstopped ]; then printf '42 S\n'; else printf '42 T\n'; fi; }
+    tn_sync_tuple() {
+        local n; n=$(cat "$fixture/reads"); printf '%s\n' "$((n + 1))" > "$fixture/reads"
+        if [ "$mode" = late ]; then printf '102\n' > "$fixture/clock"; fi
+        if [ "$mode" = completed ] && [ "$n" -gt 0 ]; then
+            printf '11\t0B00000000000000\t10\t1\t01\t10\n'
+        else printf '%s\n' "$interior"; fi
+    }
+    tn_freeze_sync
+    [ "$TN_FROZEN_SYNC" = "$interior" ] || fail 'freeze did not retain exact tuple'
+)
+freeze_case valid > "$fixture/freeze-valid.log" 2>&1 || fail 'valid frozen interior refused'
+for mode in completed unstopped late; do
+    if freeze_case "$mode" > "$fixture/freeze-$mode.log" 2>&1; then fail "invalid $mode freeze accepted"; fi
+done
+printf '100\n' > "$fixture/clock"
+TN_DD_A=a; TN_DD_B=b
+tn_commitment() { printf '15\t9\t%s\n' "$tip_hash"; }
+tn_commitments_match 102 15 >/dev/null || fail 'matching coin commitments refused'
+tn_commitment() { printf '15\t%s\t%s\n' "$([ "$1" = a ] && echo 9 || echo 8)" "$tip_hash"; }
+if tn_commitments_match 102 15 >/dev/null; then fail 'coin count mismatch accepted'; fi
+tn_commitment() { printf '15\t9\t%s\n' "$1"; }
+if tn_commitments_match 102 15 >/dev/null; then fail 'coin hash mismatch accepted'; fi
+printf '102\n' > "$fixture/clock"
+if tn_commitments_match 102 15 >/dev/null; then fail 'expired commitment deadline accepted'; fi
 printf 'peer-tip selftest: PASS (typed RPC, exact hash, shared deadline, late replies, cleanup containment, applicable SIGKILL witness)\n'

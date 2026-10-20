@@ -9679,6 +9679,8 @@ test-reindex-killmid: zclassic23 zcl-rpc sqlq
 # over NATIVE P2P, then terminate B mid-life, mine more on A, restart B, and
 # assert B re-catches up to A's exact PEER-tip height and hash within 120s.
 # ZCL_PEER_TIP_REQUIRE_SIGKILL=1 requires a Linux SIGKILL/wait137 witness;
+# ZCL_PEER_TIP_KILL_DURING_SYNC=1 additionally freezes an interior durable
+# reducer/coins frontier before killing B, then compares recovered commitments.
 # default portable mode terminates the process tree. Neither observes a
 # mid-block interruption. This is the complement to
 # test-crash-bootstrap (which only proves SINGLE-node boot recovery).
@@ -9689,7 +9691,7 @@ test-reindex-killmid: zclassic23 zcl-rpc sqlq
 .PHONY: test-two-node-peer-tip
 # Runs under bash for `set -o pipefail` parity with the other spawn
 # harnesses; the script itself sets -euo pipefail.
-test-two-node-peer-tip: zclassic23 zcl-rpc jsonq process-group-exec
+test-two-node-peer-tip: zclassic23 zcl-rpc jsonq sqlq process-group-exec
 	@bash tools/scripts/two_node_peer_tip.sh
 
 # Noise transport two-node/three-node interop acceptance: the evidence

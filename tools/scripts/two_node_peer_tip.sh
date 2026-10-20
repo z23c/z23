@@ -4,6 +4,8 @@
 # Portable mode terminates the process tree before restart. Linux-only
 # ZCL_PEER_TIP_REQUIRE_SIGKILL=1 instead requires a witnessed SIGKILL exit.
 # Both modes prove peer catchup after restart; neither observes mid-block work.
+# ZCL_PEER_TIP_KILL_DURING_SYNC=1 witnesses an unfinished durable sync frontier
+# instead of waiting for B's initial full sync. This is not a mid-block witness.
 #
 # Topology (two disjoint isolated nodes, sharing NO datadir):
 #
@@ -42,6 +44,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 NODE_BIN="${ZCL_NODE_BIN:-$REPO_ROOT/build/bin/zclassic23}"
 RPC_BIN="${ZCL_RPC_BIN:-$REPO_ROOT/build/bin/zcl-rpc}"
 JSONQ_BIN="$REPO_ROOT/build/bin/jsonq"
+SQLQ_BIN="$REPO_ROOT/build/bin/sqlq"
 PROCESS_GROUP_EXEC="${ZCL_PROCESS_GROUP_EXEC:-$REPO_ROOT/build/bin/process-group-exec}"
 tn_resolve_bin() {
     local p="$1"
@@ -72,6 +75,7 @@ SYNC_DEADLINE="${SYNC_DEADLINE:-120}"   # step 2 budget (s)
 RESYNC_DEADLINE="${RESYNC_DEADLINE:-120}" # step 3 re-sync budget (s)
 RPC_WARMUP="${RPC_WARMUP:-60}"       # per-node RPC warmup budget (s)
 REQUIRE_SIGKILL="${ZCL_PEER_TIP_REQUIRE_SIGKILL:-0}"
+KILL_DURING_SYNC="${ZCL_PEER_TIP_KILL_DURING_SYNC:-0}"
 
 # Two disjoint 39xxx quads (A: 39090.., B: 39080..), each env-overridable by
 # its base. 39070.. is NOT free on an operator host: the dedicated
@@ -207,6 +211,107 @@ tn_blockhash() {
     printf '%s\n' "$out"
 }
 
+# One read transaction binds the reducer NEXT cursor to its durable coin state.
+tn_sync_tuple() {
+    "$SQLQ_BIN" "$1/consensus.db" "SELECT
+      (SELECT cursor FROM stage_cursor WHERE name='utxo_apply'),
+      (SELECT hex(value) FROM progress_meta WHERE key='coins_applied_height'),
+      (SELECT height FROM utxo_apply_log WHERE height=(SELECT cursor-1 FROM stage_cursor WHERE name='utxo_apply')),
+      (SELECT ok FROM utxo_apply_log WHERE height=(SELECT cursor-1 FROM stage_cursor WHERE name='utxo_apply')),
+      (SELECT hex(value) FROM progress_meta WHERE key='coins_kv_migration_complete'),
+      (SELECT count(*) FROM coins)"
+}
+
+tn_sync_interior() {
+    local c applied h ok migration count extra expected
+    IFS=$'\t' read -r c applied h ok migration count extra <<< "$1"
+    [[ "$c" =~ ^(0|[1-9][0-9]{0,8})$ && "$h" =~ ^(0|[1-9][0-9]{0,8})$ &&
+       "$count" =~ ^[1-9][0-9]*$ ]] || return 1
+    [ -z "$extra" ] && [ "$c" -ge 2 ] && [ "$c" -le "$2" ] &&
+        [ "$h" -eq "$((c - 1))" ] && [ "$ok" = 1 ] && [ "$migration" = 01 ] || return 1
+    printf -v expected '%02X%02X%02X%02X00000000' "$((c & 255))" \
+        "$(((c >> 8) & 255))" "$(((c >> 16) & 255))" "$(((c >> 24) & 255))"
+    [ "$applied" = "$expected" ]
+}
+
+tn_group_stopped() {
+    awk -v g="$1" '$1==g {n++; if ($2 !~ /^T/) bad=1} END {exit !(n && !bad)}'
+}
+
+tn_sync_startup() {
+    local c applied h ok migration count extra
+    IFS=$'\t' read -r c applied h ok migration count extra <<< "$1"
+    [ -z "$extra" ] && [ "$count" = 0 ] || return 1
+    case "$migration" in NULL|01) ;; *) return 1 ;; esac
+    case "$c:$applied:$h:$ok" in
+        NULL:NULL:NULL:NULL|0:NULL:NULL:NULL|0:0000000000000000:NULL:NULL|\
+        1:NULL:NULL:NULL|1:0100000000000000:NULL:NULL|1:0100000000000000:0:1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+tn_before_deadline() { [ "$(date +%s)" -lt "$1" ]; }
+
+tn_freeze_sync() {
+    local pair='' state
+    while tn_before_deadline "$SYNC_END"; do
+        kill -0 "$TN_PID_B" 2>/dev/null || tn_die 'follower exited before db_open'
+        grep -aqF ' -> db_open' "$(tn_node_log "$TN_DD_B")" && break
+        sleep 0.01
+    done
+    grep -aqF ' -> db_open' "$(tn_node_log "$TN_DD_B")" || tn_die 'follower never reached db_open'
+    while tn_before_deadline "$SYNC_END"; do
+        kill -0 "$TN_PID_B" 2>/dev/null || tn_die 'follower exited before interior sync'
+        if ! pair=$(tn_sync_tuple "$TN_DD_B"); then
+            # DB_OPEN precedes schema initialization; a failed read is never evidence.
+            sleep 0.01
+            continue
+        fi
+        tn_before_deadline "$SYNC_END" || tn_die 'sync frontier SQL exceeded observation deadline'
+        if tn_sync_interior "$pair" "$A_TIP"; then break; fi
+        # Startup has no cursor, or only genesis. Neither is crash evidence.
+        tn_sync_startup "$pair" || tn_die "missing, malformed, inconsistent or completed sync frontier: $pair"
+        sleep 0.01
+    done
+    tn_sync_interior "$pair" "$A_TIP" || tn_die 'no unfinished sync frontier observed'
+    RECOVERY_BEGAN=$(date +%s)
+    RECOVERY_END=$((RECOVERY_BEGAN + RESYNC_DEADLINE))
+    CRASH_ARTIFACT=$(mktemp -d "$REPO_ROOT/build/peer-tip-sync.XXXXXX") || tn_die 'cannot retain sync witness'
+    echo "pid=$TN_PID_B pgid=$TN_PGID_B target=$A_TIP target_hash=$A_HASH observed=$pair" | tee "$CRASH_ARTIFACT/state"
+    kill -STOP "-$TN_PGID_B" || tn_die 'cannot stop owned follower group'
+    state=no
+    while tn_before_deadline "$RECOVERY_END"; do
+        if ps -eo pgid=,stat= | tn_group_stopped "$TN_PGID_B"; then state=yes; break; fi
+        sleep 0.01
+    done
+    [ "$state" = yes ] || tn_die 'not every follower group member stopped'
+    TN_FROZEN_SYNC=$(tn_sync_tuple "$TN_DD_B") || tn_die 'frozen sync SQL failed'
+    tn_sync_interior "$TN_FROZEN_SYNC" "$A_TIP" || tn_die "frozen frontier not interior: $TN_FROZEN_SYNC"
+    tn_before_deadline "$RECOVERY_END" || tn_die 'sync freeze exceeded recovery deadline'
+    echo "frozen=$TN_FROZEN_SYNC all_members_stopped=yes" | tee -a "$CRASH_ARTIFACT/state"
+}
+
+tn_commitment() {
+    local result height count hash
+    result=$(tn_result "$1" "$2" getutxocommitment) || return 1
+    height=$(printf '%s' "$result" | "$JSONQ_BIN" raw height) || return 1
+    count=$(printf '%s' "$result" | "$JSONQ_BIN" raw utxo_count) || return 1
+    hash=$(printf '%s' "$result" | "$JSONQ_BIN" raw sha3_hash) || return 1
+    [[ "$height" =~ ^(0|[1-9][0-9]*)$ && "$count" =~ ^[1-9][0-9]*$ &&
+       "$hash" =~ ^\"[0-9a-f]{64}\"$ ]] || return 1
+    [ "$height" = "$3" ] || return 1
+    printf '%s\t%s\t%s\n' "$height" "$count" "$hash"
+}
+
+tn_commitments_match() {
+    local a b
+    tn_before_deadline "$1" || return 1
+    a=$(tn_commitment "$TN_DD_A" "$A_RPC" "$2") || return 1
+    b=$(tn_commitment "$TN_DD_B" "$B_RPC" "$2") || return 1
+    [ "$a" = "$b" ] && tn_before_deadline "$1" || return 1
+    echo "two-node-peer-tip: matching coin commitments=$a"
+}
+
 # ── Spawn a node in its OWN process group ──────────────────────────
 # $1=datadir $2=p2p $3=rpc $4=fs $5=https $6=connect-target
 tn_node_log() { printf '%s.node.log' "$1"; }
@@ -284,6 +389,11 @@ tn_wait_height() {
 # Sourcing exposes the same pollers to local refusal/deadline fixtures.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 case "$REQUIRE_SIGKILL" in 0|1) ;; *) tn_die 'ZCL_PEER_TIP_REQUIRE_SIGKILL must be 0 or 1' ;; esac
+case "$KILL_DURING_SYNC" in 0|1) ;; *) tn_die 'ZCL_PEER_TIP_KILL_DURING_SYNC must be 0 or 1' ;; esac
+if [ "$KILL_DURING_SYNC" = 1 ]; then
+    [ "$REQUIRE_SIGKILL" = 1 ] && [ "$(uname -s)" = Linux ] || tn_die 'active-sync witness requires Linux and REQUIRE_SIGKILL=1'
+    [ -x "$SQLQ_BIN" ] || tn_die 'active-sync witness requires sqlq'
+fi
 if [ "$REQUIRE_SIGKILL" = 1 ] && [ "$(uname -s)" != Linux ]; then
     tn_die 'SIGKILL exit witness is supported only on Linux'
 fi
@@ -359,11 +469,17 @@ SYNC_END=$(( $(date +%s) + SYNC_DEADLINE ))
 tn_spawn "$TN_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT"
 TN_PID_B="$TN_SPAWN_PID"
 TN_PGID_B="$TN_PID_B"
-tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$SYNC_END" \
-    || tn_die "follower B RPC never came up (see $(tn_node_log "$TN_DD_B"))"
-
 STEP2_PASS=no
-if B_FINAL="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$A_TIP" "$SYNC_END" "$A_HASH")"; then
+if [ "$KILL_DURING_SYNC" = 1 ]; then
+    tn_freeze_sync
+    STEP2_PASS=interrupted
+else
+    tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$SYNC_END" \
+        || tn_die "follower B RPC never came up (see $(tn_node_log "$TN_DD_B"))"
+fi
+if [ "$STEP2_PASS" = interrupted ]; then
+    echo 'two-node-peer-tip: unfinished-sync-witness frozen; full initial sync not claimed'
+elif B_FINAL="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$A_TIP" "$SYNC_END" "$A_HASH")"; then
     STEP2_PASS=yes
     echo "two-node-peer-tip:     B synced to A tip $A_TIP over native P2P."
 else
@@ -374,13 +490,22 @@ fi
 
 # ── Step 3: terminate B, mine more on A, restart B, assert re-sync ──
 STEP3_PASS=no
-if [ "$STEP2_PASS" = "yes" ]; then
+if [ "$STEP2_PASS" != no ]; then
     echo "two-node-peer-tip: [3] terminate B mid-life (require_sigkill=$REQUIRE_SIGKILL); A mines +$EXTRA_BLOCKS while B is down..."
-    RECOVERY_BEGAN=$(date +%s)
-    RECOVERY_END=$((RECOVERY_BEGAN + RESYNC_DEADLINE))
+    if [ "$KILL_DURING_SYNC" = 0 ]; then
+        RECOVERY_BEGAN=$(date +%s)
+        RECOVERY_END=$((RECOVERY_BEGAN + RESYNC_DEADLINE))
+        CRASH_ARTIFACT="$(mktemp -d "$REPO_ROOT/build/peer-tip-restart.XXXXXX")" || tn_die 'cannot create follower log artifact'
+    fi
+    if [ "$KILL_DURING_SYNC" = 1 ]; then
+        tn_before_deadline "$RECOVERY_END" || tn_die 'recovery deadline expired before SIGKILL'
+    fi
     tn_stop_follower
-    CRASH_ARTIFACT="$(mktemp -d "$REPO_ROOT/build/peer-tip-restart.XXXXXX")" \
-        || tn_die 'cannot create follower log artifact'
+    if [ "$KILL_DURING_SYNC" = 1 ]; then
+        POST_SYNC=$(tn_sync_tuple "$TN_DD_B") || tn_die 'post-reap sync SQL failed'
+        [ "$POST_SYNC" = "$TN_FROZEN_SYNC" ] || tn_die 'post-reap frontier differs from frozen tuple'
+        echo "post_reap=$POST_SYNC" | tee -a "$CRASH_ARTIFACT/state"
+    fi
     cp "$(tn_node_log "$TN_DD_B")" "$CRASH_ARTIFACT/follower-before-restart.node.log" \
         || tn_die 'cannot preserve follower log before restart'
     echo "two-node-peer-tip: retained follower pre-restart log at $CRASH_ARTIFACT"
@@ -402,6 +527,9 @@ if [ "$STEP2_PASS" = "yes" ]; then
     if ! tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$RECOVERY_END"; then
         echo "two-node-peer-tip:     B RPC never came back after restart (see $(tn_node_log "$TN_DD_B"))"
     elif B_FINAL2="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$NEW_TIP" "$RECOVERY_END" "$NEW_HASH")"; then
+        if [ "$KILL_DURING_SYNC" = 1 ]; then
+            tn_commitments_match "$RECOVERY_END" "$NEW_TIP" || tn_die 'recovered coin commitment mismatch or deadline exceeded'
+        fi
         RECOVERY_SECONDS=$(( $(date +%s) - RECOVERY_BEGAN ))
         [ "$RECOVERY_SECONDS" -ge 0 ] && [ "$RECOVERY_SECONDS" -lt "$RESYNC_DEADLINE" ] ||
             tn_die 'recovery observation exceeded its shared deadline'
@@ -417,8 +545,8 @@ else
 fi
 
 # ── Verdict ────────────────────────────────────────────────────────
-echo "two-node-peer-tip: results: initial-sync=$STEP2_PASS restart-resync=$STEP3_PASS require_sigkill=$REQUIRE_SIGKILL"
-if [ "$STEP2_PASS" = "yes" ] && [ "$STEP3_PASS" = "yes" ]; then
+echo "two-node-peer-tip: results: initial-sync=$STEP2_PASS restart-resync=$STEP3_PASS require_sigkill=$REQUIRE_SIGKILL unfinished-sync-witness=$KILL_DURING_SYNC"
+if [ "$STEP2_PASS" != no ] && [ "$STEP3_PASS" = "yes" ]; then
     echo "two-node-peer-tip: PASS"
     exit 0
 else
