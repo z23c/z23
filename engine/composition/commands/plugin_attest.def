@@ -1,0 +1,56 @@
+/* plugin attest: independent-builder attestations for plugin images. A
+ * publisher signature proves who published; an attestation proves a second
+ * builder got the same bytes from the same source package root. Consumer
+ * defines ZCL_COMMAND_*. Both leaves are owner-only and never remote.
+ * docs/dev/PLUGINS.md describes the record and the refusal codes. */
+
+ZCL_COMMAND_READY_COMMAND(
+    "plugin.attest", "plugin", "",
+    "Sign an attestation that a built image came from a source package root",
+    "Hashes the image you built (SHA3-512), then signs one canonical record "
+    "binding the plugin name, version, source package root (source-root, 64 "
+    "lowercase hex), the build recipe or toolchain id (toolchain) and that "
+    "image hash with your builder key (key, a 32-byte Ed25519 seed file you "
+    "own at mode 0600) and writes dir/NAME-<builder key prefix>.attest.json "
+    "(default dir is the current directory). Equal inputs give byte-identical "
+    "files. The record says what you observed; it does not install or trust "
+    "anything.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,attest,attestation,builder,reproduce,reproducible,sign,sha3,source_root",
+    "zcl.plugin_attest.input.v1", "zcl.plugin_attest.v1",
+    "image,key,name,version,source-root,toolchain,dir", "image",
+    "z23 plugin attest ./build/hello --name=hello --version=1.0.0 --source-root=<64 hex> --toolchain=gcc-14-linux-x86_64 --key=./builder.key --dir=./attest",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_plugin_attest)
+
+ZCL_COMMAND_READY_COMMAND(
+    "plugin.attest_verify", "plugin", "",
+    "Accept a manifest only when K pinned independent builders attest it",
+    "Reads the manifest, the builder pin file (builders: one 64-hex public "
+    "key per line, owner-only, # comments) and every *.attest.json in "
+    "attestations. Accepts only when at least threshold DISTINCT pinned "
+    "builder keys attest the manifest's sha3_512 for one source root "
+    "(source-root, when given, names it). Refused with a PLUGIN_ATTEST_* "
+    "code: a duplicate builder, an unpinned builder, a hash that differs "
+    "from the manifest, a source root that differs between records or from "
+    "source-root, a threshold below 1 or above the pinned builders, a bad "
+    "signature, a malformed record or a name/version that is not the "
+    "manifest's. It checks attestations, not the publisher signature; "
+    "plugin.install still does that. Changes nothing.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,attest,verify,threshold,builder,pin,reproduce,independent,quorum",
+    "zcl.plugin_attest_verify.input.v1", "zcl.plugin_attest_verify.v1",
+    "manifest,attestations,builders,threshold,source-root", "manifest",
+    "z23 plugin attest_verify ./hello.plugin.json --attestations=./attest --builders=./builders.pin --threshold=2",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_plugin_attest_verify)

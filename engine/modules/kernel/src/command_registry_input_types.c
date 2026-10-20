@@ -684,6 +684,10 @@ static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
         static const struct cr_int_bound ttl = { "ttl_hours", 1, 168 };
         return &ttl;
     }
+    if (strcmp(path, "plugin.attest_verify") == 0 && strcmp(key, "threshold") == 0) {
+        static const struct cr_int_bound threshold = { "threshold", 1, 256 };
+        return &threshold;
+    }
     const struct cr_int_bound *lab = cr_lab_bound(path, key);
     if (lab) return lab;
     const struct cr_int_bound *docs = cr_docs_read_bound(path, key);

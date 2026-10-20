@@ -492,10 +492,72 @@ Every refusal carries `error.code` and `error.next_action`.
 | `PLUGIN_RUN_SANDBOX` | The kernel lacks Landlock ABI 3 or seccomp; plugins are not started unconfined. |
 | `PLUGIN_RUN_FAILED` | Supervision ended; the evidence line says why. |
 
+
+## Builder attestations
+
+A publisher signature proves who published an executable. An attestation
+proves an independent builder compiled the same source package root and got
+the same bytes. `plugin attest` and `plugin attest_verify` are owner-only,
+never remote, read and write files only, and are not wired into `install`,
+`switch` or any fetch: they decide nothing until a caller asks.
+
+```sh
+z23 plugin attest ./build/hello --name=hello --version=1.0.0 \
+    --source-root=<64 hex source package root> --toolchain=gcc-14-linux-x86_64 \
+    --key=./builder.key --dir=./attest
+z23 plugin attest_verify ./dist/hello.plugin.json --attestations=./attest \
+    --builders=./builders.pin --threshold=2
+```
+
+`attest` hashes the image you built (SHA3-512) and writes
+`NAME-<first 16 hex of the builder key>.attest.json`: one canonical line
+
+```json
+{"schema":"z23.plugin.attest.v1","name":"hello","version":"1.0.0","source_root":"<64 hex>","toolchain":"gcc-14-linux-x86_64","image_sha3_512":"<128 hex>","builder_key":"<64 hex>","signature":"<128 hex>"}
+```
+
+The builder key file is the same 32-byte Ed25519 seed as a publisher key. The
+signature covers SHA3-512 of the domain tag `z23.plugin.attest.v1`, a NUL and
+every record byte before `,"signature"`. There is no timestamp, so equal
+inputs give byte-identical files. The parser accepts exactly the bytes the
+encoder writes and refuses everything else (`PLUGIN_ATTEST_MALFORMED`).
+Toolchains are not compared across builders; `toolchains` in the reply counts
+the distinct ones, because the same bytes from different toolchains is the
+stronger claim. The record is Ed25519 only: the ZRS1 hybrid container signs a
+release document, not an arbitrary prefix, and does not compose here.
+
+`builders.pin` is a trust root, read like `publisher_keys`: owner-only, one
+64-character lowercase hex public key per line, `#` comments, a repeated key
+counts once. `attest_verify` accepts only when at least `threshold` distinct
+pinned builder keys attest the manifest's `sha3_512` for one source root
+(`--source-root` names it; otherwise the first record does). Use one
+attestation directory per plugin version. It checks attestations, not the
+publisher signature; `install` still does that. Every record is checked in
+sorted file order; the first bad one refuses the whole directory:
+
+| Code | Meaning |
+| --- | --- |
+| `PLUGIN_ATTEST_THRESHOLD_INVALID` | The threshold is below 1. |
+| `PLUGIN_ATTEST_THRESHOLD_EXCEEDS_PINS` | The threshold is above the distinct pinned builders. |
+| `PLUGIN_ATTEST_MALFORMED` | A record is not the canonical encoding. |
+| `PLUGIN_ATTEST_SIG_BAD` | A record's signature does not verify under its builder key. |
+| `PLUGIN_ATTEST_SUBJECT_MISMATCH` | A record names another plugin name or version. |
+| `PLUGIN_ATTEST_BUILDER_UNPINNED` | A record's builder key is not in the pin file. |
+| `PLUGIN_ATTEST_DUPLICATE_BUILDER` | Two records carry the same builder key. |
+| `PLUGIN_ATTEST_HASH_MISMATCH` | A record's image hash is not the manifest's `sha3_512`. |
+| `PLUGIN_ATTEST_SOURCE_ROOT_MISMATCH` | Records, or `--source-root`, name different source roots. |
+| `PLUGIN_ATTEST_BELOW_THRESHOLD` | Fewer distinct pinned builders attest than the threshold. |
+| `PLUGIN_ATTEST_PINS_MALFORMED` | The pin file has a line that is not a 64 hex key, or over 256 keys. |
+
+A missing or group-writable pin file, an unreadable manifest or key and the
+like keep the store's own `PLUGIN_*` code. The library entry is
+`plugin_attest_verify_dir` in `plugin/plugin_attest.h`.
+
 ## Tests
 
 ```sh
 make CC=gcc-14 t-fast-exact ONLY=plugin_store
 make CC=gcc-14 t-fast-exact ONLY=plugin_run
 make CC=gcc-14 t-fast-exact ONLY=plugin_call
+make CC=gcc-14 t-fast-exact ONLY=plugin_attest
 ```

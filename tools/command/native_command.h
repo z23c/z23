@@ -352,6 +352,12 @@ void zcl_native_handle_plugin_rollback(
 void zcl_native_handle_plugin_run(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+void zcl_native_handle_plugin_attest(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
+void zcl_native_handle_plugin_attest_verify(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 void zcl_native_handle_plugin_call(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);

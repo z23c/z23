@@ -16,6 +16,7 @@
 #include "yardsale.def"
 #include "zses.def"
 #include "plugin.def"
+#include "plugin_attest.def"
 #include "story.def"
 #include "work.def"
 #include "lab.def"

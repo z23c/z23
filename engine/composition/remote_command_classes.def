@@ -1174,6 +1174,8 @@ REMOTE_COMMAND_CLASS("plugin.index_add", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("plugin.search", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("plugin.run", REMOTE_CLASS_NEVER, "")
 REMOTE_COMMAND_CLASS("plugin.call", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("plugin.attest", REMOTE_CLASS_NEVER, "")
+REMOTE_COMMAND_CLASS("plugin.attest_verify", REMOTE_CLASS_NEVER, "")
 
 /* STORY — 4 never_remote leaves.
  *
