@@ -6,6 +6,7 @@
 #define _DEFAULT_SOURCE
 
 #include "test/test_core.h"
+#include "test/snapshot_boot_fixture.h"
 
 #include "coins/utxo_commitment.h"
 #include "chain/checkpoints.h"
@@ -14,6 +15,7 @@
 #include "config/boot_consensus_bundle_marker.h"
 #include "config/consensus_state_install_runtime.h"
 #include "config/boot_snapshot_install.h"
+#include "config/boot_snapshot_import.h"
 #include "config/consensus_state_bundle_validate.h"
 #include "config/consensus_state_install_verify_receipt.h"
 #include "config/consensus_state_producer_receipt.h"
@@ -2671,6 +2673,102 @@ static int rung_act_commit_tests(struct rung_act_ctx *c)
  * field tampered (admission refuses) or the rung unbaked at that height
  * (containment holds) NOTHING is written. The keystone is installed at a lower
  * height throughout, so only the rung can authorise. */
+static bool rung_snapshot_state_matches(struct rung_act_ctx *c, uint64_t generation)
+{
+    uint64_t after = 0;
+    int height = -1;
+    uint8_t hash[32];
+    return coins_kv_get_authority_generation(c->pdb, &after) && after == generation &&
+        active_is(c->pdb, &c->kb) &&
+        tip_finalize_stage_resolve_durable_tip(c->pdb, &height, hash) &&
+        height == c->kb.height && memcmp(hash, c->kb.block_hash, 32) == 0;
+}
+
+static bool rung_snapshot_cursors_match(struct rung_act_ctx *c)
+{
+    char sql[256];
+    snprintf(sql, sizeof(sql),
+        "SELECT count(*) FROM stage_cursor WHERE "
+        "(name='tip_finalize' AND cursor=%d) OR "
+        "(name!='tip_finalize' AND cursor=%d)", c->kb.height, c->kb.height + 1);
+    int64_t correct = -1, total = -1;
+    int32_t applied = -1;
+    bool found = false;
+    return candidate_query_i64(c->pdb, sql, &correct) && correct == 8 &&
+        candidate_query_i64(c->pdb, "SELECT count(*) FROM stage_cursor", &total) &&
+        total == 8 && coins_kv_get_applied_height(c->pdb, &applied, &found) &&
+        found && applied == c->kb.height + 1;
+}
+
+static int rung_snapshot_preservation_round(struct rung_act_ctx *c,
+    struct node_db *ndb, uint64_t generation, bool repeat)
+{
+    int failures = 0;
+    sqlite3_int64 kernel_changes = sqlite3_total_changes64(c->pdb);
+    sqlite3_int64 derived_changes = sqlite3_total_changes64(ndb->db);
+    enum boot_snapshot_first_outcome outcome = BOOT_SNAPSHOT_FIRST_DEFERRED;
+    struct zcl_result prepared = boot_prepare_snapshot_first(ndb, c->rdir, &outcome);
+    CSI_CHECK("snapshot-first: shared boot preserves the exact small installed state",
+              prepared.ok && outcome == BOOT_SNAPSHOT_FIRST_INSTALLED_PRESERVED &&
+              rung_snapshot_state_matches(c, generation) &&
+              rung_snapshot_cursors_match(c) &&
+              boot_consensus_bundle_marker_matches(c->rdir, c->kb.height, c->kb.artifact));
+    CSI_CHECK("snapshot-first: selecting a snapshot never rewrites installed kernel",
+              sqlite3_total_changes64(c->pdb) == kernel_changes);
+    if (repeat)
+        CSI_CHECK("snapshot-first: repeated preserved selection is a derived no-op",
+                  sqlite3_total_changes64(ndb->db) == derived_changes);
+    return failures;
+}
+
+static int rung_snapshot_contradiction_test(struct rung_act_ctx *c, struct node_db *ndb)
+{
+    int failures = 0;
+    uint8_t wrong[32];
+    memcpy(wrong, c->kb.artifact, sizeof(wrong));
+    wrong[0] ^= 1;
+    CSI_CHECK("snapshot-first: contradictory marker fixture writes",
+        boot_consensus_bundle_marker_write(c->rdir, c->kb.height, wrong));
+    sqlite3_int64 kernel = sqlite3_total_changes64(c->pdb), derived = sqlite3_total_changes64(ndb->db);
+    struct zcl_result result = boot_prepare_snapshot_first(ndb, c->rdir, NULL);
+    CSI_CHECK("snapshot-first: recovery refuses contradictory marker before import",
+        !result.ok && sqlite3_total_changes64(c->pdb) == kernel &&
+        sqlite3_total_changes64(ndb->db) == derived && active_is(c->pdb, &c->kb) &&
+        boot_consensus_bundle_marker_matches(c->rdir, c->kb.height, wrong));
+    char marker[512];
+    snprintf(marker, sizeof(marker), "%s/%s", c->rdir, BOOT_CONSENSUS_BUNDLE_MARKER_NAME);
+    CSI_CHECK("snapshot-first: contradictory marker fixture removes", unlink(marker) == 0);
+    return failures;
+}
+
+static int rung_snapshot_first_preservation_tests(struct rung_act_ctx *c)
+{
+    int failures = 0;
+    char snapshot[512], node_path[512];
+    snprintf(snapshot, sizeof(snapshot), "%s/consensus_snapshot.db", c->rdir);
+    snprintf(node_path, sizeof(node_path), "%s/node.db", c->rdir);
+    uint8_t snapshot_hash[32];
+    memset(snapshot_hash, 0x5d, sizeof(snapshot_hash));
+    uint64_t generation = 0;
+    struct stat st;
+    CSI_CHECK("snapshot-first: two-coin install and eligible real snapshot fixture",
+              !boot_consensus_bundle_marker_exists(c->rdir) &&
+              coins_kv_count(c->pdb) == 2 &&
+              coins_kv_get_authority_generation(c->pdb, &generation) &&
+              test_snapshot_boot_fixture_build(snapshot, snapshot_hash) &&
+              stat(snapshot, &st) == 0 && st.st_size > (off_t)(10 * 1024 * 1024));
+    struct node_db ndb = {0};
+    bool opened = node_db_open(&ndb, node_path);
+    CSI_CHECK("snapshot-first: isolated derived store opens", opened);
+    if (opened) {
+        failures += rung_snapshot_contradiction_test(c, &ndb);
+        failures += rung_snapshot_preservation_round(c, &ndb, generation, false);
+        failures += rung_snapshot_preservation_round(c, &ndb, generation, true);
+        node_db_close(&ndb);
+    }
+    return failures;
+}
+
 static int rom_rung_activate_tests(const char *dir)
 {
     int failures = 0;
@@ -2680,6 +2778,7 @@ static int rom_rung_activate_tests(const char *dir)
     if (built) {
         failures += rung_act_tamper_tests(&c);
         failures += rung_act_commit_tests(&c);
+        failures += rung_snapshot_first_preservation_tests(&c);
         rung_act_teardown(&c);
     }
     return failures;

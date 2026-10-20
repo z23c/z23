@@ -37,8 +37,24 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "base/result.h"
 
 struct node_db;
+
+enum boot_snapshot_first_outcome {
+    BOOT_SNAPSHOT_FIRST_DEFERRED,
+    BOOT_SNAPSHOT_FIRST_NO_SOURCE,
+    BOOT_SNAPSHOT_FIRST_INSTALLED_PRESERVED,
+    BOOT_SNAPSHOT_FIRST_STATE_PRESERVED,
+    BOOT_SNAPSHOT_FIRST_IMPORTED,
+    BOOT_SNAPSHOT_FIRST_IMPORT_FAILED,
+};
+
+/* Shared boot ordering before coins-view restoration. A closed progress store
+ * defers successfully; committed-install recovery refusals stop boot. Snapshot
+ * absence and import failures retain the existing nonfatal IBD fallback. */
+struct zcl_result boot_prepare_snapshot_first(struct node_db *ndb,
+    const char *datadir, enum boot_snapshot_first_outcome *outcome);
 
 bool boot_import_snapshot_db(struct node_db *ndb,
                               const char *snapshot_path,

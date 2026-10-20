@@ -3436,3 +3436,5 @@ AGENT_IMPACT_RULE("tools/command/lab.h|tools/command/lab_exec.h|tools/command/la
  * own contract group plus the lab and wiki leaves that resolve paths through
  * them. */
 AGENT_IMPACT_RULE("platform/modules/util/src/path_util.c|platform/modules/util/include/util/path_util.h|tests/harness/src/test_path_util.c", "path_util lab wiki_tree")
+AGENT_IMPACT_RULE("tests/harness/include/test/snapshot_boot_fixture.h", "consensus_state_snapshot_install snapshot_boot_seed")
+AGENT_IMPACT_RULE("engine/composition/src/boot_snapshot_import.c|engine/composition/include/config/boot_snapshot_import.h|tests/harness/src/test_snapshot_boot_seed.c", "consensus_state_snapshot_install")

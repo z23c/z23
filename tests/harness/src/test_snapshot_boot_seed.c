@@ -32,9 +32,12 @@
  * covered imported base instead. */
 
 #include "test/test_core.h"
+#include "test/snapshot_boot_fixture.h"
 
 #include "config/boot_snapshot_import.h"
 #include "coins/utxo_commitment.h"
+#include "core/serialize.h"
+#include "sapling/incremental_merkle_tree.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/tip_finalize_stage.h"
 #include "models/database.h"
@@ -177,6 +180,11 @@ static bool sb_build_fixture(const char *path, const uint8_t tip_hash[32])
     return ok;
 }
 
+bool test_snapshot_boot_fixture_build(const char *path, const uint8_t tip_hash[32])
+{
+    return sb_build_fixture(path, tip_hash);
+}
+
 static int32_t sb_trusted_base(sqlite3 *db)
 {
     uint8_t blob[8] = {0}; size_t n = 0; bool found = false;
@@ -203,6 +211,265 @@ static int64_t sb_cursor(sqlite3 *db, const char *name)
 }
 
 int test_snapshot_boot_seed(void);
+
+static bool sb_sql(sqlite3 *db, const char *sql)
+{
+    if (!sql)
+        return true;
+    char *error = NULL;
+    bool ok = sqlite3_exec(db, sql, NULL, NULL, &error) == SQLITE_OK;
+    if (!ok)
+        fprintf(stderr, "snapshot fixture SQL failed: %s\n", error ? error : sqlite3_errmsg(db));
+    sqlite3_free(error);
+    return ok;
+}
+
+static bool sb_cache_pair(struct node_db *ndb, int mode)
+{
+    if (!mode)
+        return true;
+    struct incremental_merkle_tree tree;
+    sapling_tree_init(&tree);
+    if (mode == 3) {
+        struct uint256 leaf = {{1}};
+        incremental_tree_append(&tree, &leaf);
+    }
+    struct byte_stream stream;
+    stream_init(&stream, 128);
+    bool ok = incremental_tree_serialize(&tree, &stream) &&
+        node_db_state_set(ndb, "sapling_tree", stream.data, stream.size) &&
+        node_db_state_set_int(ndb, "sapling_tree_rebuild_height", mode == 2 ? 1 : 0);
+    stream_free(&stream);
+    return ok;
+}
+
+struct sb_guard_case {
+    const char *name, *kernel_sql, *node_sql;
+    bool readable;
+    int cache_mode;
+};
+
+#define SB_META(key, value) "INSERT OR REPLACE INTO progress_meta(key,value) VALUES('" key "'," value ");"
+static const struct sb_guard_case sb_guard_cases[] = {
+    {"one unstamped kernel coin", "CREATE TABLE coins(value); INSERT INTO coins VALUES(7);", NULL, true, 0},
+    {"exactly 1000 kernel coins", "CREATE TABLE coins(value); WITH RECURSIVE n(x) AS "
+        "(VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000) INSERT INTO coins SELECT x FROM n;", NULL, true, 0},
+    {"small legacy mirror", NULL, "INSERT INTO utxos(txid,vout,value,script,height) "
+        "VALUES(zeroblob(32),0,7,X'51',1);", true, 0},
+    {"zero coins with proven migration", SB_META("coins_applied_height", "X'0100000000000000'")
+        SB_META("coins_kv_migration_complete", "X'01'"), NULL, true, 0},
+    {"zero coins with self-fold stamp", SB_META("coins_kv_self_folded", "X'01'"), NULL, true, 0},
+    {"zero coins with generation", SB_META("coins_kv_authority_generation.v1", "X'0100000000000000'"), NULL, true, 0},
+    {"explicit applied zero", SB_META("coins_applied_height", "X'0000000000000000'"), NULL, true, 0},
+    {"positive applied progress", SB_META("coins_applied_height", "X'0200000000000000'"), NULL, true, 0},
+    {"negative applied height", SB_META("coins_applied_height", "X'FFFFFFFFFFFFFFFF'"), NULL, false, 0},
+    {"truncated applied height", SB_META("coins_applied_height", "X'01'"), NULL, false, 0},
+    {"text provenance stamp", SB_META("coins_kv_migration_complete", "'1'"), NULL, false, 0},
+    {"malformed provenance stamp", SB_META("coins_kv_self_folded", "X'02'"), NULL, false, 0},
+    {"malformed generation", SB_META("coins_kv_authority_generation.v1", "X'01'"), NULL, false, 0},
+    {"unreadable optional coin view", "CREATE VIEW coins AS SELECT 1 AS value;", NULL, false, 0},
+    {"missing mirror is unreadable", NULL, "DROP TABLE utxos;", false, 0},
+    {"failed non-genesis apply row", "CREATE TABLE utxo_apply_log(height,ok); "
+        "INSERT INTO utxo_apply_log VALUES(2,0);", NULL, true, 0},
+    {"non-genesis row after duplicate genesis", "CREATE TABLE utxo_apply_log(height); "
+        "INSERT INTO utxo_apply_log VALUES(0),(0),(2);", NULL, true, 0},
+    {"malformed row after duplicate genesis", "CREATE TABLE tip_finalize_log(height); "
+        "INSERT INTO tip_finalize_log VALUES(0),(0),('bad');", NULL, false, 0},
+    {"non-genesis durable row", "CREATE TABLE tip_finalize_log(height,ok); "
+        "INSERT INTO tip_finalize_log VALUES(2,0);", NULL, true, 0},
+    {"malformed durable row", "CREATE TABLE tip_finalize_log(height); "
+        "INSERT INTO tip_finalize_log VALUES('bad');", NULL, false, 0},
+    {"negative durable row", "CREATE TABLE tip_finalize_log(height); "
+        "INSERT INTO tip_finalize_log VALUES(-1);", NULL, false, 0},
+    {"non-genesis apply cursor", "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) "
+        "VALUES('utxo_apply',2,0);", NULL, true, 0},
+    {"non-genesis finalize cursor", "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) "
+        "VALUES('tip_finalize',1,0);", NULL, true, 0},
+    {"negative reducer cursor", "DROP TABLE stage_cursor; CREATE TABLE stage_cursor(name,cursor); "
+        "INSERT INTO stage_cursor VALUES('utxo_apply',-1);", NULL, false, 0},
+    {"positive cursor after duplicate genesis", "DROP TABLE stage_cursor; CREATE TABLE stage_cursor(name,cursor); "
+        "INSERT INTO stage_cursor VALUES('utxo_apply',1),('utxo_apply',1),('utxo_apply',2);", NULL, true, 0},
+    {"malformed cursor after duplicate genesis", "DROP TABLE stage_cursor; CREATE TABLE stage_cursor(name,cursor); "
+        "INSERT INTO stage_cursor VALUES('tip_finalize',0),('tip_finalize',0),('tip_finalize','bad');", NULL, false, 0},
+    {"shielded anchor only", "CREATE TABLE sapling_anchors(anchor BLOB,height INTEGER,tree BLOB); "
+        "INSERT INTO sapling_anchors VALUES(zeroblob(32),0,X'00');", NULL, true, 0},
+    {"shielded adoption only", "CREATE TABLE anchor_state(pool INTEGER,activation_cursor INTEGER); "
+        "INSERT INTO anchor_state VALUES(1,2);", NULL, true, 0},
+    {"malformed shielded adoption", "CREATE TABLE anchor_state(pool INTEGER,activation_cursor); "
+        "INSERT INTO anchor_state VALUES(1,'bad');", NULL, false, 0},
+    {"unknown shielded adoption pool", "CREATE TABLE anchor_state(pool,activation_cursor); "
+        "INSERT INTO anchor_state VALUES(2,0);", NULL, false, 0},
+    {"wrongly typed shielded pool", "CREATE TABLE anchor_state(pool,activation_cursor); "
+        "INSERT INTO anchor_state VALUES('sapling',0);", NULL, false, 0},
+    {"adoption after duplicate genesis", "CREATE TABLE anchor_state(pool,activation_cursor); "
+        "INSERT INTO anchor_state VALUES(1,0),(1,0),(1,2);", NULL, true, 0},
+    {"nullifier only", "CREATE TABLE nullifiers(nf BLOB,pool INTEGER,height INTEGER); "
+        "INSERT INTO nullifiers VALUES(zeroblob(32),1,0);", NULL, true, 0},
+    {"nullifier with unknown pool", "CREATE TABLE nullifiers(nf BLOB,pool,height INTEGER); "
+        "INSERT INTO nullifiers VALUES(zeroblob(32),2,0);", NULL, true, 0},
+    {"nullifier with wrongly typed pool", "CREATE TABLE nullifiers(nf BLOB,pool,height INTEGER); "
+        "INSERT INTO nullifiers VALUES(zeroblob(32),'sapling',0);", NULL, true, 0},
+    {"nullifier adoption only", SB_META("nullifier_kv.activation_cursor", "X'32'"), NULL, true, 0},
+    {"text nullifier adoption", SB_META("nullifier_kv.activation_cursor", "'2'"), NULL, false, 0},
+    {"interrupted shielded replay", SB_META("shielded_history.full_replay.target", "X'31'"), NULL, true, 0},
+    {"interrupted refold", SB_META("refold_in_progress", "X'01'"), NULL, true, 0},
+    {"malformed replay target", SB_META("shielded_history.full_replay.target", "X'FF'"), NULL, false, 0},
+    {"positive cached Sapling height", NULL, NULL, true, 2},
+    {"nonempty cached Sapling genesis", NULL, NULL, true, 3},
+    {"half cached pair", NULL, "INSERT INTO node_state VALUES('sapling_tree',X'00');", false, 0},
+    {"malformed cached pair", NULL, "INSERT INTO node_state VALUES('sapling_tree',X'00'); "
+        "INSERT INTO node_state VALUES('sapling_tree_rebuild_height',zeroblob(8));", false, 0},
+    {"negative cached height", NULL, "INSERT INTO node_state VALUES('sapling_tree',X'00'); "
+        "INSERT INTO node_state VALUES('sapling_tree_rebuild_height',X'FFFFFFFFFFFFFFFF');", false, 0},
+    {"oversized cached tree", NULL, "INSERT INTO node_state VALUES('sapling_tree',zeroblob(8193)); "
+        "INSERT INTO node_state VALUES('sapling_tree_rebuild_height',zeroblob(8));", false, 0},
+};
+#undef SB_META
+
+static int sb_guard_one(sqlite3 *db, struct node_db *ndb, const char *dir,
+                         const struct sb_guard_case *c)
+{
+    int failures = 0;
+    printf("snapshot bootstrap case: %s\n", c->name);
+    bool seeded = sb_sql(db, "BEGIN IMMEDIATE") && sb_sql(ndb->db, "BEGIN IMMEDIATE") &&
+        sb_sql(db, c->kernel_sql) && sb_sql(ndb->db, c->node_sql) && sb_cache_pair(ndb, c->cache_mode);
+    SB_CHECK("shared guard fixture seeds", seeded);
+    sqlite3_int64 kernel = sqlite3_total_changes64(db), derived = sqlite3_total_changes64(ndb->db);
+    enum boot_snapshot_first_outcome outcome;
+    struct zcl_result result = boot_prepare_snapshot_first(ndb, dir, &outcome);
+    bool verdict = c->readable ? result.ok && outcome == BOOT_SNAPSHOT_FIRST_STATE_PRESERVED
+        : !result.ok && strstr(result.message, "preserve this datadir") != NULL;
+    SB_CHECK("shared guard preserves or refuses without either database write",
+             seeded && verdict && sqlite3_total_changes64(db) == kernel &&
+             sqlite3_total_changes64(ndb->db) == derived);
+    SB_CHECK("shared guard isolated fixture rolls back",
+             sb_sql(ndb->db, "ROLLBACK") && sb_sql(db, "ROLLBACK"));
+    return failures;
+}
+
+static int sb_shared_no_source(struct node_db *ndb, const char *dir)
+{
+    int failures = 0;
+    char source[600], hidden[620];
+    snprintf(source, sizeof(source), "%s/consensus_snapshot.db", dir);
+    snprintf(hidden, sizeof(hidden), "%s/consensus_snapshot.hidden", dir);
+    bool seeded = rename(source, hidden) == 0 && sb_sql(ndb->db, "BEGIN IMMEDIATE") &&
+        sb_sql(ndb->db, "INSERT INTO node_state VALUES('sapling_tree',X'00');");
+    SB_CHECK("ordinary no-source fixture seeds unrelated incomplete cache", seeded);
+    sqlite3 *db = progress_store_db();
+    sqlite3_int64 kernel = sqlite3_total_changes64(db), derived = sqlite3_total_changes64(ndb->db);
+    enum boot_snapshot_first_outcome outcome;
+    struct zcl_result prepared = boot_prepare_snapshot_first(ndb, dir, &outcome);
+    SB_CHECK("ordinary no-source boot avoids irrelevant deep eligibility checks",
+        seeded && prepared.ok && outcome == BOOT_SNAPSHOT_FIRST_NO_SOURCE &&
+        sqlite3_total_changes64(db) == kernel && sqlite3_total_changes64(ndb->db) == derived);
+    SB_CHECK("no-source fixture restores source and derived store",
+        sb_sql(ndb->db, "ROLLBACK") && rename(hidden, source) == 0);
+    return failures;
+}
+
+static int sb_shared_guard_tests(const char *root)
+{
+    int failures = 0;
+    char dir[512], snapshot[600], node_path[600];
+    snprintf(dir, sizeof(dir), "%s/shared-guard", root);
+    snprintf(snapshot, sizeof(snapshot), "%s/consensus_snapshot.db", dir);
+    snprintf(node_path, sizeof(node_path), "%s/node.db", dir);
+    uint8_t hash[32];
+    sb_tip_hash(hash);
+    struct node_db ndb = {0};
+    bool ready = sb_mkdir(dir) == 0 && sb_build_fixture(snapshot, hash) &&
+        node_db_open(&ndb, node_path) && progress_store_open(dir);
+    SB_CHECK("shared guard real source and empty target open", ready);
+    if (ready) {
+        SB_CHECK("shared guard optional fixture tables start absent",
+            sb_sql(progress_store_db(), "DROP TABLE IF EXISTS coins; DROP TABLE IF EXISTS utxo_apply_log; "
+                "DROP TABLE IF EXISTS tip_finalize_log; DROP TABLE IF EXISTS sapling_anchors; "
+                "DROP TABLE IF EXISTS sprout_anchors; DROP TABLE IF EXISTS anchor_state; "
+                "DROP TABLE IF EXISTS nullifiers;"));
+        for (size_t i = 0; i < sizeof(sb_guard_cases) / sizeof(sb_guard_cases[0]); i++)
+            failures += sb_guard_one(progress_store_db(), &ndb, dir, &sb_guard_cases[i]);
+        failures += sb_shared_no_source(&ndb, dir);
+    }
+    progress_store_close();
+    if (ndb.open)
+        node_db_close(&ndb);
+    return failures;
+}
+
+static bool sb_shared_genesis(sqlite3 *db, struct node_db *ndb, int mode)
+{
+    if (!mode)
+        return true;
+    const uint8_t next_height[8] = {1};
+    return progress_meta_set(db, COINS_APPLIED_HEIGHT_KEY, next_height, sizeof(next_height)) &&
+        sb_sql(db, "CREATE TABLE IF NOT EXISTS header_admit_log(height INTEGER PRIMARY KEY,hash BLOB); "
+            "INSERT INTO header_admit_log(height,hash) VALUES(5000,zeroblob(32)); "
+            "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) VALUES('header_admit',5001,0); "
+            "INSERT OR REPLACE INTO stage_cursor(name,cursor,updated_at) VALUES('validate_headers',5001,0);") &&
+        sb_cache_pair(ndb, mode == 2 ? 1 : 0);
+}
+
+static int sb_shared_import_case(const char *root, int mode)
+{
+    int failures = 0;
+    char dir[512], snapshot[600], node_path[600];
+    snprintf(dir, sizeof(dir), "%s/shared-fresh-%d", root, mode);
+    snprintf(snapshot, sizeof(snapshot), "%s/consensus_snapshot.db", dir);
+    snprintf(node_path, sizeof(node_path), "%s/node.db", dir);
+    uint8_t hash[32];
+    sb_tip_hash(hash);
+    struct node_db ndb = {0};
+    bool ready = sb_mkdir(dir) == 0 && sb_build_fixture(snapshot, hash) &&
+        node_db_open(&ndb, node_path) && progress_store_open(dir);
+    SB_CHECK("shared fresh import fixture opens", ready);
+    if (ready) {
+        struct main_state ms;
+        memset(&ms, 0, sizeof(ms));
+        main_state_init(&ms);
+        seed_integrity_gate_set_node_db_for_testing(&ndb);
+        bool initialized = tip_finalize_stage_init(&ms) &&
+            sb_shared_genesis(progress_store_db(), &ndb, mode);
+        SB_CHECK("shared pristine/genesis/header-only fixture initializes", initialized);
+        enum boot_snapshot_first_outcome outcome;
+        struct zcl_result selected = boot_prepare_snapshot_first(&ndb, dir, &outcome);
+        SB_CHECK("shared fresh selection really imports the eligible source",
+                 selected.ok && outcome == BOOT_SNAPSHOT_FIRST_IMPORTED &&
+                 coins_kv_count_sqlite(progress_store_db()) == SB_UTXO_COUNT);
+        tip_finalize_stage_shutdown();
+        main_state_free(&ms);
+        seed_integrity_gate_reset_for_testing();
+    }
+    progress_store_close();
+    if (ndb.open)
+        node_db_close(&ndb);
+    return failures;
+}
+
+static int sb_finish_fixture(const char *dir, int failures)
+{
+    /* This PID-scoped fixture root owns the nested shared-* directories too.
+     * Keep every failed-run artifact; remove successful output recursively. */
+    if (!failures)
+        SB_CHECK("successful owned fixture root is fully removed", test_rm_rf_recursive(dir) == 0);
+    else
+        printf("snapshot_boot_seed: retained failed fixture=%s\n", dir);
+    return failures;
+}
+
+static int sb_shared_bootstrap_tests(const char *dir)
+{
+    int failures = 0;
+    enum boot_snapshot_first_outcome deferred;
+    SB_CHECK("closed progress store defers snapshot preparation",
+        progress_store_db() == NULL && boot_prepare_snapshot_first(NULL, NULL, &deferred).ok &&
+        deferred == BOOT_SNAPSHOT_FIRST_DEFERRED);
+    failures += sb_shared_guard_tests(dir);
+    for (int mode = 0; mode < 3; mode++)
+        failures += sb_shared_import_case(dir, mode);
+    return failures;
+}
+
 int test_snapshot_boot_seed(void)
 {
     test_reset_shared_globals();
@@ -217,13 +484,14 @@ int test_snapshot_boot_seed(void)
     test_fmt_tmpdir(dir, sizeof(dir), "snapshot_boot_seed", "main");
     sb_mkdir("./test-tmp");
     sb_mkdir(dir);
+    failures += sb_shared_bootstrap_tests(dir);
 
     /* ── Build the on-disk fixture snapshot. */
     char snap_path[600];
     snprintf(snap_path, sizeof(snap_path), "%s/consensus_snapshot.db", dir);
     uint8_t tip_hash[32];
     sb_tip_hash(tip_hash);
-    SB_CHECK("fixture: snapshot.db built", sb_build_fixture(snap_path, tip_hash));
+    SB_CHECK("fixture: snapshot.db built", test_snapshot_boot_fixture_build(snap_path, tip_hash));
     {
         struct stat st;
         SB_CHECK("fixture: snapshot > 10 MiB size floor",
@@ -237,7 +505,7 @@ int test_snapshot_boot_seed(void)
     struct node_db ndb;
     bool db_ok = node_db_open(&ndb, ndb_path);
     SB_CHECK("fixture: node.db opens", db_ok);
-    if (!db_ok) { blocker_reset_for_testing(); return failures; }
+    if (!db_ok) { blocker_reset_for_testing(); return sb_finish_fixture(dir, failures); }
     seed_integrity_gate_set_node_db_for_testing(&ndb);
 
     /* progress store + tip_finalize stage (the seed anchor writes cursors here). */
@@ -353,7 +621,7 @@ int test_snapshot_boot_seed(void)
     progress_store_close();
     seed_integrity_gate_reset_for_testing();
     node_db_close(&ndb);
-    test_cleanup_tmpdir(dir);
+    failures = sb_finish_fixture(dir, failures);
 
     blocker_reset_for_testing();
     return failures;

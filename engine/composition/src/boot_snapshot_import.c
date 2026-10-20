@@ -7,15 +7,29 @@
  */
 
 #include "config/boot_snapshot_import.h"
+#include "config/consensus_state_install_runtime.h"
+#include "config/boot_consensus_bundle_marker.h"
+#include "base/serialize_le.h"
+#include "core/serialize.h"
+#include "jobs/refold_progress.h"
+#include "sapling/incremental_merkle_tree.h"
+#include "storage/anchor_kv.h"
+#include "storage/nullifier_kv.h"
 #include "chain/checkpoints.h"
 #include "coins/utxo_commitment.h"
 #include "models/database.h"
 #include "services/reindex_epilogue.h"
+#include "services/chain_restore_boot_snapshot.h"
+#include "services/nullifier_backfill_service.h"
+#include "storage/coins_kv.h"
+#include "storage/progress_store.h"
+#include "event/event.h"
 #include "util/ar_step_readonly.h"
 #include "util/boot_progress.h"
 #include "util/log_macros.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,6 +38,479 @@
 #include <unistd.h>
 
 #include <sqlite3.h>
+
+struct snapshot_bootstrap_state {
+    const char *preserve_reason;
+    sqlite3 *db;
+    struct node_db *ndb;
+    bool have_meta;
+};
+
+static void snapshot_preserve(struct snapshot_bootstrap_state *state, const char *reason)
+{
+    if (!state->preserve_reason)
+        state->preserve_reason = reason;
+}
+
+/* Absence is distinct from an unreadable schema or an unexpected view. */
+static bool snapshot_table_exists(sqlite3 *db, const char *name, bool *exists)
+{
+    *exists = false;
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db,
+        "SELECT type FROM sqlite_schema WHERE name=?", -1, &st, NULL) == SQLITE_OK;
+    if (ok)
+        ok = sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC) == SQLITE_OK;
+    int rc = ok ? sqlite3_step(st) : SQLITE_ERROR; // raw-sql-ok:read-only-introspection
+    if (rc == SQLITE_ROW) {
+        const unsigned char *type = sqlite3_column_text(st, 0);
+        ok = sqlite3_column_type(st, 0) == SQLITE_TEXT && type &&
+             strcmp((const char *)type, "table") == 0;
+        *exists = ok;
+        rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    }
+    sqlite3_finalize(st);
+    return ok && rc == SQLITE_DONE;
+}
+
+static bool snapshot_coin_state(sqlite3 *db, struct node_db *ndb,
+                                 struct snapshot_bootstrap_state *state)
+{
+    bool exists = false;
+    if (!snapshot_table_exists(db, "coins", &exists))
+        return false;
+    int64_t count = exists ? coins_kv_count_sqlite(db) : 0;
+    if (count < 0)
+        return false;
+    if (count > 0) {
+        snapshot_preserve(state, "existing kernel coins");
+        return true;
+    }
+    if (!snapshot_table_exists(ndb->db, "utxos", &exists) || !exists)
+        return false;
+    int64_t mirror = -1;
+    if (!node_db_utxo_count_checked(ndb, &mirror) || mirror < 0)
+        return false;
+    if (mirror > 0)
+        snapshot_preserve(state, "existing legacy coin mirror");
+    return true;
+}
+
+static bool snapshot_meta_u64(sqlite3 *db, const char *key, uint64_t *value, bool *found)
+{
+    uint8_t bytes[8];
+    size_t len = 0;
+    *value = 0;
+    if (!progress_meta_get_blob_exact(db, key, bytes, sizeof(bytes), &len, found))
+        return false;
+    if (!*found)
+        return true;
+    if (len != sizeof(bytes))
+        return false;
+    *value = zcl_read_u64_le(bytes);
+    return true;
+}
+
+static bool snapshot_boolean_stamp(sqlite3 *db, const char *key,
+                                    struct snapshot_bootstrap_state *state)
+{
+    uint8_t byte = 0;
+    size_t len = 0;
+    bool found = false;
+    if (!progress_meta_get_blob_exact(db, key, &byte, 1, &len, &found))
+        return false;
+    if (!found)
+        return true;
+    if (len != 1 || byte != 1)
+        return false;
+    snapshot_preserve(state, "existing coin or refold provenance");
+    return true;
+}
+
+static bool snapshot_coin_metadata(sqlite3 *db, struct snapshot_bootstrap_state *state)
+{
+    bool found = false;
+    uint64_t value = 0;
+    if (!snapshot_meta_u64(db, COINS_APPLIED_HEIGHT_KEY, &value, &found))
+        return false;
+    if (found) {
+        if (value > INT32_MAX)
+            return false;
+        if (value != 1) {
+            snapshot_preserve(state, "existing applied coin progress");
+            return true;
+        }
+    }
+    if (!snapshot_meta_u64(db, COINS_KV_AUTHORITY_GENERATION_KEY, &value, &found))
+        return false;
+    if (found && value > 0) {
+        snapshot_preserve(state, "existing coin authority generation");
+        return true;
+    }
+    static const char *const keys[] = {COINS_KV_MIGRATION_COMPLETE_KEY,
+        COINS_KV_SELF_FOLDED_KEY, REFOLD_IN_PROGRESS_KEY, REFOLD_FROM_ANCHOR_KEY};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        if (!snapshot_boolean_stamp(db, keys[i], state))
+            return false;
+        if (state->preserve_reason)
+            return true;
+    }
+    return true;
+}
+
+static bool snapshot_integer_rows(sqlite3 *db, const char *sql, int64_t fresh_max,
+                                   struct snapshot_bootstrap_state *state)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    bool ok = true;
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:read-only-introspection
+        if (sqlite3_column_type(st, 0) != SQLITE_INTEGER || sqlite3_column_int64(st, 0) < 0) {
+            ok = false;
+            break;
+        }
+        if (sqlite3_column_int64(st, 0) > fresh_max) {
+            snapshot_preserve(state, "existing reducer progress");
+            sqlite3_finalize(st);
+            return true;
+        }
+    }
+    sqlite3_finalize(st);
+    return ok && rc == SQLITE_DONE;
+}
+
+static bool snapshot_progress_rows(sqlite3 *db, struct snapshot_bootstrap_state *state)
+{
+    static const struct { const char *table, *sql; int64_t fresh_max; } probes[] = {
+        {"utxo_apply_log", "SELECT height FROM utxo_apply_log WHERE "
+            "typeof(height)!='integer' OR height!=0 LIMIT 1", 0},
+        {"tip_finalize_log", "SELECT height FROM tip_finalize_log WHERE "
+            "typeof(height)!='integer' OR height!=0 LIMIT 1", 0},
+        {"stage_cursor", "SELECT cursor FROM stage_cursor WHERE name='utxo_apply' AND "
+            "(typeof(cursor)!='integer' OR cursor<0 OR cursor>1) LIMIT 1", 1},
+        {"stage_cursor", "SELECT cursor FROM stage_cursor WHERE name='tip_finalize' AND "
+            "(typeof(cursor)!='integer' OR cursor!=0) LIMIT 1", 0},
+    };
+    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        bool exists = false;
+        if (!snapshot_table_exists(db, probes[i].table, &exists))
+            return false;
+        if (exists && !snapshot_integer_rows(db, probes[i].sql, probes[i].fresh_max, state))
+            return false;
+        if (state->preserve_reason)
+            return true;
+    }
+    return true;
+}
+
+static bool snapshot_anchor_adoption(sqlite3 *db, struct snapshot_bootstrap_state *state)
+{
+    sqlite3_stmt *st = NULL;
+    const char *sql = "SELECT pool,activation_cursor FROM anchor_state WHERE "
+        "typeof(pool)!='integer' OR pool NOT IN(0,1) OR "
+        "typeof(activation_cursor)!='integer' OR activation_cursor!=0 LIMIT 1";
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
+        return false;
+    int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    bool ok = rc == SQLITE_DONE;
+    if (rc == SQLITE_ROW) {
+        int64_t pool = sqlite3_column_int64(st, 0);
+        int64_t cursor = sqlite3_column_int64(st, 1);
+        ok = sqlite3_column_type(st, 0) == SQLITE_INTEGER && pool >= 0 && pool <= 1 &&
+            sqlite3_column_type(st, 1) == SQLITE_INTEGER && cursor >= 0;
+        if (ok)
+            snapshot_preserve(state, "existing shielded adoption");
+    }
+    sqlite3_finalize(st);
+    return ok;
+}
+
+static bool snapshot_anchor_state(sqlite3 *db, struct snapshot_bootstrap_state *state)
+{
+    static const char *const tables[] = {"sprout_anchors", "sapling_anchors"};
+    for (int pool = 0; pool < 2; pool++) {
+        bool exists = false, empty = false;
+        if (!snapshot_table_exists(db, tables[pool], &exists))
+            return false;
+        if (exists) {
+            if (!anchor_kv_table_is_empty(db, pool, &empty))
+                return false;
+            if (!empty) {
+                snapshot_preserve(state, "existing shielded anchors");
+                return true;
+            }
+        }
+    }
+    bool exists = false;
+    if (!snapshot_table_exists(db, "anchor_state", &exists))
+        return false;
+    return !exists || snapshot_anchor_adoption(db, state);
+}
+
+static bool snapshot_any_nullifiers(sqlite3 *db, bool *found)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM nullifiers LIMIT 1", -1, &st, NULL) != SQLITE_OK)
+        return false;
+    int rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    *found = rc == SQLITE_ROW;
+    sqlite3_finalize(st);
+    return rc == SQLITE_ROW || rc == SQLITE_DONE;
+}
+
+static bool snapshot_nullifier_state(sqlite3 *db, bool have_meta,
+                                      struct snapshot_bootstrap_state *state)
+{
+    bool exists = false;
+    if (!snapshot_table_exists(db, "nullifiers", &exists))
+        return false;
+    if (exists) {
+        bool any = false;
+        if (!snapshot_any_nullifiers(db, &any))
+            return false;
+        if (any) {
+            snapshot_preserve(state, "existing shielded nullifiers");
+            return true;
+        }
+    }
+    if (!have_meta)
+        return true;
+    uint8_t bytes[24];
+    size_t len = 0;
+    bool found = false;
+    if (!progress_meta_get_blob_exact(db, "nullifier_kv.activation_cursor",
+                                      bytes, sizeof(bytes), &len, &found))
+        return false;
+    int64_t cursor = -1;
+    if (found && !nullifier_kv_activation_cursor(db, &cursor, &found))
+        return false;
+    if (found && cursor > 0)
+        snapshot_preserve(state, "existing nullifier adoption");
+    return true;
+}
+
+static bool snapshot_node_blob(struct node_db *ndb, const char *key,
+                                void *out, size_t cap, size_t *len, bool *found)
+{
+    *found = false;
+    *len = 0;
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(ndb->db,
+        "SELECT value FROM node_state WHERE key=?", -1, &st, NULL) == SQLITE_OK;
+    if (ok)
+        ok = sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC) == SQLITE_OK;
+    int rc = ok ? sqlite3_step(st) : SQLITE_ERROR; // raw-sql-ok:read-only-introspection
+    if (rc == SQLITE_ROW) {
+        int n = sqlite3_column_bytes(st, 0);
+        const void *bytes = sqlite3_column_blob(st, 0);
+        ok = sqlite3_column_type(st, 0) == SQLITE_BLOB && n > 0 &&
+             (size_t)n <= cap && bytes;
+        if (ok) {
+            memcpy(out, bytes, (size_t)n);
+            *len = (size_t)n;
+            *found = true;
+        }
+        rc = sqlite3_step(st); // raw-sql-ok:read-only-introspection
+    }
+    sqlite3_finalize(st);
+    return ok && rc == SQLITE_DONE;
+}
+
+static bool snapshot_cached_sapling(struct node_db *ndb,
+                                     struct snapshot_bootstrap_state *state)
+{
+    uint8_t bytes[8192];
+    size_t len = 0, height_len = 0;
+    bool have_tree = false, have_height = false;
+    int64_t height = -1;
+    if (!snapshot_node_blob(ndb, "sapling_tree", bytes, sizeof(bytes), &len, &have_tree) ||
+        !snapshot_node_blob(ndb, "sapling_tree_rebuild_height", &height, sizeof(height),
+                            &height_len, &have_height) || have_tree != have_height)
+        return false;
+    if (!have_tree)
+        return true;
+    if (height_len != sizeof(height) || height < 0)
+        return false;
+    struct incremental_merkle_tree tree;
+    sapling_tree_init(&tree);
+    struct byte_stream stream;
+    stream_init_from_data(&stream, bytes, len);
+    if (!incremental_tree_deserialize(&tree, &stream) || stream.error || stream.read_pos != stream.size)
+        return false;
+    if (height > 0 || incremental_tree_size(&tree) > 0)
+        snapshot_preserve(state, "existing cached Sapling state");
+    return true;
+}
+
+static bool snapshot_decimal_marker(const uint8_t *bytes, size_t len)
+{
+    if (len == 0 || len > 19 || (len > 1 && bytes[0] == '0'))
+        return false;
+    int64_t value = 0;
+    for (size_t i = 0; i < len; i++) {
+        if (bytes[i] < '0' || bytes[i] > '9')
+            return false;
+        int digit = bytes[i] - '0';
+        if (value > (INT64_MAX - digit) / 10)
+            return false;
+        value = value * 10 + digit;
+    }
+    return true;
+}
+
+static bool snapshot_pending_encoding(const char *key, const uint8_t *bytes, size_t len)
+{
+    if (strcmp(key, REFOLD_FROM_ANCHOR_TARGET_KEY) == 0)
+        return len == 4 && zcl_read_u32_le(bytes) <= INT32_MAX;
+    if (strcmp(key, NULLIFIER_BACKFILL_CHAIN_KEY) == 0)
+        return len == 32;
+    return snapshot_decimal_marker(bytes, len);
+}
+
+static bool snapshot_pending_markers(sqlite3 *db, struct snapshot_bootstrap_state *state)
+{
+    static const char *const keys[] = {
+        SHIELDED_REPLAY_TARGET_KEY, SHIELDED_REPLAY_NEXT_KEY,
+        SHIELDED_REPLAY_SPROUT_STARTED_KEY, SHIELDED_REPLAY_SAPLING_STARTED_KEY,
+        REFOLD_FROM_ANCHOR_TARGET_KEY, NULLIFIER_BACKFILL_RESUME_KEY,
+        NULLIFIER_BACKFILL_CHAIN_KEY,
+    };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        uint8_t bytes[32];
+        size_t len = 0;
+        bool found = false;
+        if (!progress_meta_get_blob_exact(db, keys[i], bytes, sizeof(bytes), &len, &found))
+            return false;
+        if (found) {
+            if (!snapshot_pending_encoding(keys[i], bytes, len))
+                return false;
+            snapshot_preserve(state, "interrupted shielded replay or refold");
+            return true;
+        }
+    }
+    return true;
+}
+
+static bool snapshot_probe_coins(struct snapshot_bootstrap_state *s)
+{ return snapshot_coin_state(s->db, s->ndb, s); }
+static bool snapshot_probe_metadata(struct snapshot_bootstrap_state *s)
+{ return !s->have_meta || snapshot_coin_metadata(s->db, s); }
+static bool snapshot_probe_progress(struct snapshot_bootstrap_state *s)
+{ return snapshot_progress_rows(s->db, s); }
+static bool snapshot_probe_anchors(struct snapshot_bootstrap_state *s)
+{ return snapshot_anchor_state(s->db, s); }
+static bool snapshot_probe_nullifiers(struct snapshot_bootstrap_state *s)
+{ return snapshot_nullifier_state(s->db, s->have_meta, s); }
+static bool snapshot_probe_cache(struct snapshot_bootstrap_state *s)
+{ return snapshot_cached_sapling(s->ndb, s); }
+static bool snapshot_probe_pending(struct snapshot_bootstrap_state *s)
+{ return !s->have_meta || snapshot_pending_markers(s->db, s); }
+
+static struct zcl_result snapshot_bootstrap_eligibility(struct node_db *ndb,
+    struct snapshot_bootstrap_state *state)
+{
+    state->db = progress_store_db();
+    state->ndb = ndb;
+    if (!snapshot_table_exists(state->db, "progress_meta", &state->have_meta))
+        return ZCL_ERR(-1, "snapshot-first: unreadable kernel metadata schema; preserve this datadir");
+    static const struct {
+        bool (*read)(struct snapshot_bootstrap_state *);
+        const char *name;
+    } probes[] = {
+        {snapshot_probe_coins, "kernel or legacy coin count"},
+        {snapshot_probe_metadata, "coin progress or provenance metadata"},
+        {snapshot_probe_progress, "reducer progress"},
+        {snapshot_probe_anchors, "shielded anchors or adoption"},
+        {snapshot_probe_nullifiers, "shielded nullifiers or adoption"},
+        {snapshot_probe_cache, "cached Sapling tree/height pair"},
+        {snapshot_probe_pending, "interrupted replay metadata"},
+    };
+    for (size_t i = 0; i < sizeof(probes) / sizeof(probes[0]); i++) {
+        if (!probes[i].read(state))
+            return ZCL_ERR(-1, "snapshot-first: unreadable %s; preserve this datadir "
+                          "and diagnose a copy; automatic snapshot import refused", probes[i].name);
+        if (state->preserve_reason)
+            return ZCL_OK;
+    }
+    return ZCL_OK;
+}
+
+static enum boot_snapshot_first_outcome snapshot_first_import(
+    struct node_db *ndb, const char *path)
+{
+    int64_t count = 0, height = 0;
+    uint8_t best[32] = {0};
+    bool ok = boot_import_snapshot_db(ndb, path, &count, &height, best);
+    chain_restore_record_snapshot_import(ok, count, height);
+    event_emitf(EV_BOOT_UTXO_IMPORT, 0,
+                "phase=pre-restore ok=%d utxos=%lld height=%lld",
+                ok ? 1 : 0, (long long)count, (long long)height);
+    if (ok)
+        printf("[boot] snapshot-first import OK: %lld UTXOs at h=%lld — "
+               "chain restore will observe snapshot anchor\n",
+               (long long)count, (long long)height);
+    else
+        fprintf(stderr,  // obs-ok:helper-context-logged
+                "[boot] snapshot-first import failed for %s — falling through "
+                "to block-by-block IBD path\n", path);
+    return ok ? BOOT_SNAPSHOT_FIRST_IMPORTED : BOOT_SNAPSHOT_FIRST_IMPORT_FAILED;
+}
+
+static struct zcl_result snapshot_first_select(struct node_db *ndb,
+    const char *datadir, enum boot_snapshot_first_outcome *outcome)
+{
+    *outcome = BOOT_SNAPSHOT_FIRST_NO_SOURCE;
+    if (!ndb->open)
+        return ZCL_OK;
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/consensus_snapshot.db", datadir);
+    struct stat st;
+    if (n <= 0 || (size_t)n >= sizeof(path) || stat(path, &st) != 0 ||
+        st.st_size <= (off_t)(10 * 1024 * 1024))
+        return ZCL_OK;
+    struct snapshot_bootstrap_state state = {0};
+    struct zcl_result eligible = snapshot_bootstrap_eligibility(ndb, &state);
+    if (!eligible.ok)
+        return eligible;
+    if (state.preserve_reason) {
+        printf("[boot] snapshot-first: preserving %s; skipping automatic snapshot import\n",
+               state.preserve_reason);
+        *outcome = BOOT_SNAPSHOT_FIRST_STATE_PRESERVED;
+        return ZCL_OK;
+    }
+    *outcome = snapshot_first_import(ndb, path);
+    return ZCL_OK;
+}
+
+struct zcl_result boot_prepare_snapshot_first(struct node_db *ndb,
+    const char *datadir, enum boot_snapshot_first_outcome *outcome)
+{
+    if (outcome)
+        *outcome = BOOT_SNAPSHOT_FIRST_DEFERRED;
+    if (!progress_store_db())
+        return ZCL_OK;
+    if (!ndb || !datadir)
+        return ZCL_ERR(-1, "snapshot-first: node store or datadir missing");
+#if !defined(_WIN32)
+    struct zcl_result recovered =
+        consensus_state_install_recover_committed(ndb, datadir, NULL);
+    if (!recovered.ok)
+        return recovered;
+#endif
+    if (boot_consensus_bundle_marker_exists(datadir)) {
+        printf("[boot] snapshot-first: preserving installed bundle; skipping automatic snapshot import\n");
+        if (outcome)
+            *outcome = BOOT_SNAPSHOT_FIRST_INSTALLED_PRESERVED;
+        return ZCL_OK;
+    }
+    enum boot_snapshot_first_outcome selected;
+    struct zcl_result selection = snapshot_first_select(ndb, datadir, &selected);
+    if (outcome)
+        *outcome = selected;
+    return selection;
+}
 
 /* SQLite calls this only after executing more virtual-machine instructions.
  * Unlike a timer thread, it cannot claim progress while a disk operation is

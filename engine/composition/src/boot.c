@@ -1590,66 +1590,6 @@ static bool boot_step_open_progress_store(struct app_context *ctx)
     return true;
 }
 
-/* Snapshot-first: import a downloaded consensus_snapshot.db before any
- * chain-tip restoration runs. */
-static void boot_step_import_snapshot_first(struct app_context *ctx)
-{
-    /* Import before coins-view restoration; the count guard below skips
-     * a populated store rather than letting an older index set its tip. */
-    if (g_node_db.open) {
-        char snap_path[PATH_MAX];
-        int sp_n = snprintf(snap_path, sizeof(snap_path),
-                            "%s/consensus_snapshot.db", ctx->datadir);
-        if (sp_n > 0 && (size_t)sp_n < sizeof(snap_path)) {
-            struct stat sp_st;
-            if (stat(snap_path, &sp_st) == 0 &&
-                sp_st.st_size > (off_t)(10 * 1024 * 1024)) {
-                /* Wave 2: the canonical coin count lives in coins_kv;
-                 * the node.db mirror count is the legacy fallback. */
-                int64_t existing = coins_kv_count(progress_store_db());
-                if (existing <= 0)
-                    existing = node_db_utxo_count(&g_node_db);
-                if (existing > 1000) {
-                    printf("[boot] consensus_snapshot.db present "
-                           "(%.0f MB) — node.db already has %lld UTXOs, "
-                           "skipping pre-restore import\n",
-                           (double)sp_st.st_size / (1024.0 * 1024.0),
-                           (long long)existing);
-                    chain_restore_record_snapshot_import(
-                        true, existing, -1);
-                } else {
-                    int64_t imp_utxos = 0, imp_height = 0;
-                    uint8_t imp_best[32] = {0};
-                    bool ok = boot_import_snapshot_db(&g_node_db,
-                                                     snap_path,
-                                                     &imp_utxos,
-                                                     &imp_height,
-                                                     imp_best);
-                    chain_restore_record_snapshot_import(
-                        ok, imp_utxos, imp_height);
-                    event_emitf(EV_BOOT_UTXO_IMPORT, 0,
-                                "phase=pre-restore ok=%d utxos=%lld "
-                                "height=%lld",
-                                ok ? 1 : 0,
-                                (long long)imp_utxos,
-                                (long long)imp_height);
-                    if (ok)
-                        printf("[boot] snapshot-first import OK: "
-                               "%lld UTXOs at h=%lld — chain restore "
-                               "will observe snapshot anchor\n",
-                               (long long)imp_utxos,
-                               (long long)imp_height);
-                    else
-                        fprintf(stderr,  // obs-ok:helper-context-logged
-                                "[boot] snapshot-first import failed "
-                                "for %s — falling through to block-by-block "
-                                "IBD path\n", snap_path);
-                }
-            }
-        }
-    }
-}
-
 /* -snapshot: create a snapshot of a legacy datadir and import it. */
 static bool boot_step_create_legacy_snapshot(struct app_context *ctx)
 {
@@ -1981,20 +1921,13 @@ static bool boot_seq_open_coins_state(struct app_context *ctx)
 {
     if (!boot_step_open_progress_store(ctx))
         return false;
-#if !defined(_WIN32)
-    /* A failed store open retains the existing bounded retry/park path in
-     * boot_step_bind_coins_read_view; it is not an interrupted install. */
-    if (progress_store_db()) {
-        struct zcl_result recovered = consensus_state_install_recover_committed(
-            &g_node_db, ctx->datadir, NULL);
-        if (!recovered.ok) {
-            LOG_ERROR("boot", "%s", recovered.message);
-            return false;
-        }
-    }
-#endif
     int64_t t_sub = boot_clock_ms();
-    boot_step_import_snapshot_first(ctx);
+    struct zcl_result prepared =
+        boot_prepare_snapshot_first(&g_node_db, ctx->datadir, NULL);
+    if (!prepared.ok) {
+        LOG_ERROR("boot", "%s", prepared.message);
+        return false;
+    }
     t_sub = boot_submark("coins.snapshot_first", t_sub);
     if (!boot_step_create_legacy_snapshot(ctx))
         return false;
