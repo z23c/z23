@@ -11,7 +11,7 @@
 #include "config/command_catalog.h"
 #if defined(_WIN32)
 /* Renewal composes POSIX descriptor-relative file semantics; fail closed elsewhere. */
-void zcl_native_handle_ops_mesh_device_pair_renew(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static void pr_handle(const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     (void)request;
     if (reply)
@@ -434,7 +434,7 @@ static bool pr_confirm_checks(const struct pr_cfg *cfg, const struct pr_state *s
     return false;
 }
 
-void zcl_native_handle_ops_mesh_device_pair_renew(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static void pr_handle(const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     struct pr_cfg cfg;
     struct pr_state st;
@@ -451,3 +451,8 @@ void zcl_native_handle_ops_mesh_device_pair_renew(const struct zcl_command_reque
     pr_state_free(&st);
 }
 #endif
+
+void zcl_native_handle_ops_mesh_device_pair_renew(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    pr_handle(request, reply);
+}
