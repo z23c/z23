@@ -761,6 +761,93 @@ static int prt_case_reload_refused(void)
     return failures;
 }
 
+static bool prt_two_crashes_waiting(const struct plugin_run_info *info,
+                                    const void *ctx)
+{
+    (void)ctx;
+    return info->state == PLUGIN_RUN_STATE_BACKOFF && info->crashes == 2;
+}
+
+static int prt_case_generation_crashes(void)
+{
+    int failures = 0;
+    struct prt_env e;
+    struct plugin_run *run = NULL;
+    bool ready = prt_env_open(&e);
+    TEST_CASE("automatic restart starts a newly selected generation with its own crash count") {
+        char a[PRT_HEX], b[PRT_HEX], current[PRT_HEX];
+        struct plugin_run_info info;
+        ASSERT(ready);
+        ASSERT(prt_install(&e, "changing", "crash", "a1", PRT_FS, a));
+        ASSERT(prt_publish(&e, "changing", "normal", "b1", PRT_FS, b));
+        struct plugin_run_options o = prt_options(&e, "changing");
+        o.backoff_initial_ms = 1000;
+        o.backoff_max_ms = 2000;
+        ASSERT_EQ(plugin_run_open(&o, &run, NULL), PLUGIN_RUN_OK);
+        ASSERT(prt_wait(&run, 1, 0, prt_two_crashes_waiting, NULL, 10000));
+        ASSERT_EQ(plugin_store_switch(e.root, "changing", b), PLUGIN_OK);
+        ASSERT(prt_wait(&run, 1, 0, prt_healthy, NULL, 10000));
+        plugin_run_info_get(run, &info);
+        ASSERT_STR_EQ(info.generation, b);
+        ASSERT_EQ(info.crashes, 0u);
+        ASSERT_EQ(info.backoff_ms, o.backoff_initial_ms);
+        ASSERT_EQ(info.restarts, 2u);
+        ASSERT(!info.fell_back);
+        ASSERT_EQ(kill((pid_t)info.pid, SIGKILL), 0);
+        ASSERT(prt_wait(&run, 1, 0, prt_waiting, NULL, 5000));
+        plugin_run_info_get(run, &info);
+        ASSERT_EQ(info.crashes, 1u);
+        ASSERT_EQ(info.restarts, 2u);
+        ASSERT(!info.fell_back);
+        prt_link(&e, "changing", "current", current);
+        ASSERT_STR_EQ(current, b);
+    } TEST_END
+    plugin_run_close(run);
+    prt_env_close(&e);
+    return failures;
+}
+
+static int prt_case_fallback_selection(void)
+{
+    int failures = 0;
+    struct prt_env e;
+    struct plugin_run *run = NULL;
+    bool ready = prt_env_open(&e);
+    TEST_CASE("an old child's third crash preserves a newer selected generation") {
+        char a[PRT_HEX], b[PRT_HEX], c[PRT_HEX], current[PRT_HEX];
+        struct plugin_run_info info;
+        ASSERT(ready);
+        ASSERT(prt_install(&e, "selection", "normal", "a1", PRT_FS, a));
+        ASSERT(prt_publish(&e, "selection", "normal", "b1", PRT_FS, b));
+        ASSERT(prt_publish(&e, "selection", "normal", "c1", PRT_FS, c));
+        run = prt_open(&e, "selection");
+        ASSERT(run != NULL);
+        ASSERT(prt_wait(&run, 1, 0, prt_healthy, NULL, 5000));
+        ASSERT(prt_restart_once(&run));
+        ASSERT(prt_restart_once(&run));
+        plugin_run_info_get(run, &info);
+        ASSERT_EQ(info.crashes, 2u);
+        ASSERT_STR_EQ(info.generation, a);
+        ASSERT_EQ(plugin_store_switch(e.root, "selection", b), PLUGIN_OK);
+        ASSERT_EQ(plugin_store_switch(e.root, "selection", c), PLUGIN_OK);
+        ASSERT_EQ(kill((pid_t)info.pid, SIGKILL), 0);
+        ASSERT(prt_wait(&run, 1, 0, prt_waiting, NULL, 5000));
+        plugin_run_info_get(run, &info);
+        ASSERT_EQ(info.crashes, 3u);
+        ASSERT(!info.fell_back);
+        prt_link(&e, "selection", "current", current);
+        ASSERT_STR_EQ(current, c);
+        ASSERT(prt_wait(&run, 1, 0, prt_healthy, NULL, 5000));
+        plugin_run_info_get(run, &info);
+        ASSERT_STR_EQ(info.generation, c);
+        ASSERT_EQ(info.crashes, 0u);
+        ASSERT(!info.fell_back);
+    } TEST_END
+    plugin_run_close(run);
+    prt_env_close(&e);
+    return failures;
+}
+
 static int prt_case_crash_loop(void)
 {
     int failures = 0;
@@ -1416,7 +1503,9 @@ int test_plugin_run(void)
     failures += prt_case_hung_ping();
     failures += prt_case_reload();
     failures += prt_case_reload_refused();
+    failures += prt_case_generation_crashes();
     failures += prt_case_crash_loop();
+    failures += prt_case_fallback_selection();
     failures += prt_case_crash_no_fallback();
     failures += prt_case_refusals();
     failures += prt_case_first_start_refused();

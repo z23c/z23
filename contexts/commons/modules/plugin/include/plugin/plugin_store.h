@@ -12,6 +12,7 @@
 #define ZCL_PLUGIN_STORE_H
 
 #include <stddef.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 enum {
@@ -121,6 +122,14 @@ enum plugin_status plugin_store_current(const char *root, const char *name,
 /* Make the last-good generation current. restored receives its id. */
 enum plugin_status plugin_store_rollback(const char *root, const char *name,
                                          char restored[PLUGIN_HEX_SHA3_512 + 1]);
+
+/* Automatic fallback: compare current under the mutation lock before restoring.
+ * A different current or identical last-good is a successful no-op; changed is
+ * false and restored is empty. Explicit rollback above remains unconditional. */
+enum plugin_status plugin_store_rollback_if_current(const char *root, const char *name,
+                                                    const char *expected,
+                                                    char restored[PLUGIN_HEX_SHA3_512 + 1],
+                                                    bool *changed);
 
 /* What reading one part of a plugin's stored state found. Absent is not the
  * same as unreadable: only PLUGIN_SLOT_MISSING means the part is not there.

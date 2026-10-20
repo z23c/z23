@@ -118,12 +118,13 @@ enum plugin_run_status plugin_run_open(const struct plugin_run_options *options,
 /* After a crash loop, restore last-good once; otherwise keep retrying. */
 static void prr_fallback(struct plugin_run *run, uint64_t now)
 {
-    char last_good[PLUGIN_HEX_SHA3_512 + 1], restored[PLUGIN_HEX_SHA3_512 + 1];
-    if (run->info.fell_back ||
-        !plugin_link_generation(run->plugdir, "last-good", last_good) ||
-        strcmp(last_good, run->info.generation) == 0)
+    char restored[PLUGIN_HEX_SHA3_512 + 1];
+    bool changed = false;
+    if (run->info.fell_back)
         return;
-    if (plugin_store_rollback(run->opt.root, run->opt.name, restored) != PLUGIN_OK)
+    if (plugin_store_rollback_if_current(run->opt.root, run->opt.name,
+                                         run->info.generation, restored, &changed) != PLUGIN_OK ||
+        !changed)
         return;
     run->info.fell_back = true;
     prr_reset_backoff(run);
@@ -179,9 +180,15 @@ static enum plugin_run_status prr_launch(struct plugin_run *run, uint64_t now)
 
 static enum plugin_run_status prr_start(struct plugin_run *run, uint64_t now)
 {
+    char previous[PLUGIN_HEX_SHA3_512 + 1];
+    memcpy(previous, run->info.generation, sizeof(previous));
     enum plugin_run_status st = prs_resolve(run);
-    if (st == PLUGIN_RUN_OK)
+    if (st == PLUGIN_RUN_OK) {
+        /* Consecutive failures belong to the selected generation. */
+        if (strcmp(previous, run->info.generation) != 0)
+            prr_reset_backoff(run);
         return prr_launch(run, now);
+    }
     run->info.state = PLUGIN_RUN_STATE_FAILED;
     return st;
 }

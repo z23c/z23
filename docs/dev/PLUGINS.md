@@ -330,9 +330,14 @@ missed; 2 consecutive misses kill the child.
 **Restart.** An exit or a kill after missed pings restarts the child after 250
 ms, doubling per consecutive crash up to 30 s. A child that stays healthy for
 10 s clears the crash count and the delay. Three consecutive crashes of one
-generation restore the `last-good` generation once, as `rollback` does, and
-`current` then names it; if there is no `last-good` generation, or it also
+generation restore the `last-good` generation once, provided `current` still
+names that failing generation. The comparison and restoration share the store's
+mutation lock, so a newer selection is preserved. Explicit `rollback` remains
+unconditional. After automatic restoration, `current` names the restored
+generation; if there is no `last-good` generation, or it also
 crashes, the supervisor keeps retrying at the capped delay and changes no link.
+
+<!-- claim: symbol-present plugin_store_rollback_if_current contexts/commons/modules/plugin/src/plugin_store.c # automatic fallback compares selection under lock -->
 
 **Result.** The command reports `generation`, `restarts`, `pings_ok`,
 `fell_back` and the last `detail`. `PLUGIN_RUN_*` refusals carry a next action;

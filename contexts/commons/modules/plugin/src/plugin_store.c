@@ -562,8 +562,9 @@ enum plugin_status plugin_store_current(const char *root, const char *name,
     return st;
 }
 
-enum plugin_status plugin_store_rollback(const char *root, const char *name,
-                                         char restored[PLUGIN_HEX_SHA3_512 + 1])
+static enum plugin_status ps_rollback(const char *root, const char *name,
+                                      const char *expected,
+                                      char restored[PLUGIN_HEX_SHA3_512 + 1], bool *changed)
 {
     char plugdir[PLUGIN_PATH_MAX];
     enum plugin_status st = ps_plugin_dir(root, name, plugdir, sizeof(plugdir));
@@ -575,14 +576,52 @@ enum plugin_status plugin_store_rollback(const char *root, const char *name,
     st = plugin_lock_acquire(plugdir, &lock);
     if (st != PLUGIN_OK)
         return st;
+    if (expected) {
+        char current[PLUGIN_HEX_SHA3_512 + 1];
+        if (!plugin_link_generation(plugdir, "current", current))
+            st = PLUGIN_ERR_NO_GENERATION;
+        else if (strcmp(current, expected) != 0) {
+            plugin_lock_release(&lock);
+            return PLUGIN_OK;
+        }
+        if (st != PLUGIN_OK) {
+            plugin_lock_release(&lock);
+            return st;
+        }
+    }
     if (!plugin_link_generation(plugdir, "last-good", restored))
         st = PLUGIN_ERR_NO_LAST_GOOD;
-    else
+    else if (expected && strcmp(restored, expected) == 0) {
+        restored[0] = '\0';
+        plugin_lock_release(&lock);
+        return PLUGIN_OK;
+    } else
         st = plugin_verify_generation(root, name, restored);
     if (st == PLUGIN_OK)
         st = ps_point(plugdir, "current", restored);
+    if (st == PLUGIN_OK && changed)
+        *changed = true;
     plugin_lock_release(&lock);
     return st;
+}
+
+enum plugin_status plugin_store_rollback(const char *root, const char *name,
+                                         char restored[PLUGIN_HEX_SHA3_512 + 1])
+{
+    return ps_rollback(root, name, NULL, restored, NULL);
+}
+
+enum plugin_status plugin_store_rollback_if_current(const char *root, const char *name,
+                                                    const char *expected,
+                                                    char restored[PLUGIN_HEX_SHA3_512 + 1],
+                                                    bool *changed)
+{
+    if (changed) *changed = false;
+    if (restored) restored[0] = '\0';
+    if (!changed || !restored || !expected ||
+        !plugin_hex_valid(expected, PLUGIN_HEX_SHA3_512))
+        return PLUGIN_ERR_ARGUMENT;
+    return ps_rollback(root, name, expected, restored, changed);
 }
 
 static int ps_cmp_info(const void *a, const void *b)

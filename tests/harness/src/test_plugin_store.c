@@ -339,6 +339,47 @@ static int pst_case_manifest_vocabulary(void)
     return failures;
 }
 
+static int pst_case_conditional_rollback(void)
+{
+    int failures = 0;
+    struct pst_fx fx;
+    bool ready = pst_fx_open(&fx, true);
+    TEST_CASE("conditional rollback compares current and reports no-op accurately") {
+        struct pst_opts o = {0};
+        char a[PST_HEX], b[PST_HEX], c[PST_HEX], back[PST_HEX], current[PST_HEX];
+        bool changed = true;
+        ASSERT(ready);
+        ASSERT_EQ(pst_install(&fx, "hello", "version one", &o), PLUGIN_OK);
+        memcpy(a, fx.generation, PST_HEX);
+        ASSERT_EQ(pst_install(&fx, "hello", "version two", &o), PLUGIN_OK);
+        memcpy(b, fx.generation, PST_HEX);
+        ASSERT_EQ(pst_install(&fx, "hello", "version three", &o), PLUGIN_OK);
+        memcpy(c, fx.generation, PST_HEX);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", a), PLUGIN_OK);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", b), PLUGIN_OK);
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", c), PLUGIN_OK);
+        ASSERT_EQ(plugin_store_rollback_if_current(fx.root, "hello", a, back, &changed), PLUGIN_OK);
+        ASSERT(!changed);
+        ASSERT_EQ(back[0], '\0');
+        pst_link(&fx, "hello", "current", current);
+        ASSERT_STR_EQ(current, c);
+        ASSERT_EQ(plugin_store_rollback_if_current(fx.root, "hello", c, back, &changed), PLUGIN_OK);
+        ASSERT(changed);
+        ASSERT_STR_EQ(back, b);
+        pst_link(&fx, "hello", "current", current);
+        ASSERT_STR_EQ(current, b);
+        ASSERT_EQ(plugin_store_rollback_if_current(fx.root, "hello", b, back, &changed), PLUGIN_OK);
+        ASSERT(!changed);
+        ASSERT_EQ(back[0], '\0');
+        ASSERT_EQ(plugin_store_rollback_if_current(fx.root, "hello", "invalid", back, &changed),
+                  PLUGIN_ERR_ARGUMENT);
+        ASSERT(!changed);
+        ASSERT_EQ(back[0], '\0');
+    } TEST_END
+    pst_fx_close(&fx);
+    return failures;
+}
+
 static int pst_case_switch_rollback(void)
 {
     int failures = 0;
@@ -1667,6 +1708,7 @@ int test_plugin_store(void)
     failures += pst_case_strict_format();
     failures += pst_case_manifest_vocabulary();
     failures += pst_case_switch_rollback();
+    failures += pst_case_conditional_rollback();
     failures += pst_case_interrupted_swap();
     failures += pst_case_atomic_link_failure();
     failures += pst_case_rollback_refusals();
