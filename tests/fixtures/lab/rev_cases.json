@@ -1,5 +1,7 @@
 [
   {"name": "reverses a line", "stdin": "abc\n", "expect_stdout": "cba\n"},
   {"name": "reverses each line", "stdin": "ab\ncd\n", "expect_stdout": "ba\ndc\n"},
-  {"name": "keeps an empty line", "stdin": "\nx\n", "expect_stdout": "\nx\n"}
+  {"name": "keeps an empty line", "stdin": "\nx\n", "expect_stdout": "\nx\n"},
+  {"name": "keeps empty input empty", "stdin": "", "expect_stdout": ""},
+  {"name": "reverses unterminated final line and emits newline", "stdin": "abc", "expect_stdout": "cba\n"}
 ]

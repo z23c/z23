@@ -427,6 +427,32 @@ static int test_lab_test_cases(void)
     return failures;
 }
 
+static int test_lab_reverse_cases(void)
+{
+    int failures = 0;
+    TEST("lab test: reverse fixture passes all five cases") {
+        struct zcl_command_reply r;
+        ASSERT(lt_call(zcl_native_handle_lab_test,
+                       "{\"file\":\"" LT_FIX "rev.c\",\"cases\":\"" LT_FIX
+                       "rev_cases.json\"}", "zcl.lab_test.v1", &r));
+        if (!lab_confinement_available()) {
+            ASSERT(lt_failed_with(&r, "LAB_UNCONFINED"));
+        } else {
+            ASSERT_EQ(r.status, ZCL_COMMAND_STATUS_PASSED);
+            ASSERT(lt_flag(&r.data, "compile", "ok"));
+            ASSERT_EQ(lt_int(&r.data, "passed", NULL), 5);
+            ASSERT_EQ(lt_int(&r.data, "failed", NULL), 0);
+            ASSERT(lt_flag(&r.data, "confinement", "landlock"));
+            ASSERT(lt_flag(&r.data, "confinement", "seccomp"));
+            ASSERT(lt_flag(&r.data, "sanitizer", "enabled"));
+            ASSERT_EQ(lt_int(&r.data, "sanitizer", "findings"), 0);
+        }
+        zcl_command_reply_free(&r);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_lab_test_inline_and_cache(void)
 {
     int failures = 0;
@@ -781,6 +807,7 @@ int test_lab(void)
     failures += test_lab_stdin_args();
     failures += test_lab_cache();
     failures += test_lab_test_cases();
+    failures += test_lab_reverse_cases();
     failures += test_lab_test_inline_and_cache();
     failures += test_lab_test_stderr();
     failures += test_lab_refusals();

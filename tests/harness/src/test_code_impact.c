@@ -784,6 +784,8 @@ static int test_code_impact_rule_predicate(void)
             size_t group_count;
             const char *groups[4];
         } cases[] = {
+            {"tests/fixtures/lab/rev_cases.json", 1, 4,
+             {"lab", "lab_promote", "command_registry_catalog", "native_api_contract"}},
             {"platform/adapters/outbound/persistence/src/hodl_history_sqlite.c", 1, 2,
              {"hodl_history_port", "make_lint_gates"}},
             {"tests/harness/src/test_zcode_policy.c", 1, 1,
