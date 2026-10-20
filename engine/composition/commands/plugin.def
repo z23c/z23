@@ -228,3 +228,56 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
     ZCL_COMMAND_CAP_PROCESS_EXEC, ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_plugin_call)
+
+ZCL_COMMAND_READY_COMMAND(
+    "plugin.index_add", "plugin", "",
+    "Sign a plugin index entry and add it to a local index directory",
+    "Verifies NAME.plugin.json and its detached NAME.plugin.sig under the "
+    "signing key (key), then writes one signed entry into the index directory "
+    "(index): plugin name, version, interface version, capabilities, package "
+    "root (root, 64 lowercase hex), the publisher public key and a timestamp, "
+    "signed with Ed25519 over a domain-separated SHA3-512 digest. The file is "
+    "named by the SHA3-512 of its bytes, so adding the same entry twice "
+    "writes nothing. An entry whose version is lower than one already in the "
+    "directory from the same publisher and plugin is refused "
+    "(PLUGIN_INDEX_ROLLBACK); the same version with a different root, "
+    "interface or capabilities is refused (PLUGIN_INDEX_EQUIVOCATION). It "
+    "fetches, installs and publishes nothing.",
+    ZCL_COMMAND_RESULT_BUDGET,
+    "plugin,index,discovery,publish,sign,entry,root,ed25519",
+    "zcl.plugin_index_add.input.v1", "zcl.plugin_index_add.v1",
+    "root,manifest,key,index", "manifest",
+    "z23 plugin index_add --root=<64-hex-package-root> --manifest=./dist/hello.plugin.json --key=./publisher.key --index=./plugin-index",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OWNER, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_plugin_index_add)
+
+ZCL_COMMAND_READY_COMMAND(
+    "plugin.search", "plugin", "",
+    "List verified plugin index entries and mark each publisher pinned or not",
+    "Reads every entry file in the index directory (index), verifies each "
+    "signature against the entry's own publisher key, folds to the latest "
+    "version per publisher and plugin, and lists the result, filtered by "
+    "exact name and by required capabilities (cap). Each row is marked "
+    "publisher_status pinned when its publisher key is in the key file "
+    "(publishers, one 64-hex key per line like ~/.z23/plugins/publisher_keys) "
+    "and unpinned otherwise. Malformed, badly signed, rolled-back and "
+    "conflicting entries are reported under refused, never listed. A listing "
+    "is a claim about where to look: it fetches nothing, installs nothing and "
+    "changes nothing.",
+    ZCL_COMMAND_LIST_BUDGET,
+    "plugin,search,index,discovery,pinned,publisher,capabilities",
+    "zcl.plugin_search.input.v1", "zcl.plugin_search.v1",
+    "name,cap,index,publishers", "",
+    "z23 plugin search --name=hello --index=./plugin-index --publishers=$HOME/.z23/plugins/publisher_keys",
+    ZCL_COMMAND_LAYER_APP, ZCL_COMMAND_EFFECT_READ,
+    ZCL_COMMAND_RISK_READ, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_plugin_search)

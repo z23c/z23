@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the plugin index command handlers. */
+ZCL_MODULE_CAPABILITY("tools/command/native_plugin_index_command.c", CAP_CLOCK, "index_add stamps the entry with the wall clock; the files are read and written by plugin_index.c")

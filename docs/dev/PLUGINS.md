@@ -386,6 +386,75 @@ in the background (before the first read the block says `available=false`,
 sends a status request receives those names and prefixes, and may store them
 in its `node.db`. Nothing can be installed, switched or run through it.
 
+## Finding plugins: the signed index
+
+No central registry says which plugins exist. A publisher signs a small index
+entry for each plugin generation; anyone can collect entries into a directory
+and search it. The index is a claim about where to look, never an install:
+`z23 plugin search` fetches, installs and runs nothing, and a `pinned` mark
+only says the publisher key is in a key file you chose.
+
+```sh
+z23 plugin index_add --root=<64-hex package root> \
+    --manifest=./dist/hello.plugin.json --key=./publisher.key --index=./plugin-index
+z23 plugin search --name=hello --cap=clock --index=./plugin-index \
+    --publishers=$HOME/.z23/plugins/publisher_keys
+```
+
+`index_add` first verifies `hello.plugin.json` and `hello.plugin.sig` under the
+signing key itself, so an entry never vouches for a plugin its own key did not
+sign. `--root` is the package root of the published plugin (a root carrying
+`NAME`, `NAME.plugin.json`, `NAME.plugin.sig` and `LICENSE`).
+
+### Entry
+
+One file per entry, named `<SHA3-512 of its bytes>.plugin-index.json`, at most
+2048 bytes, canonical and byte-exact (one line, LF-terminated):
+
+```json
+{"schema":"z23.plugin.index.v1","name":"hello","version":"1.0.0","interface_version":2,"capabilities":["clock"],"root":"<64 hex>","publisher":"<64 hex>","timestamp":1760000000,"signature":"<128 hex>"}
+```
+
+The signature is Ed25519 by the publisher key over the 64-byte SHA3-512 of the
+bytes `z23.plugin.index.v1`, one NUL byte, and the entry text up to and
+including the timestamp value. The parser accepts an entry only if encoding the
+parsed fields reproduces the input bytes, so unknown, repeated or reordered
+keys, whitespace, escapes and upper-case hex are all malformed.
+
+### Search rules
+
+- Every entry is verified against its own publisher key; a failure is listed
+  under `refused` with `PLUGIN_INDEX_MALFORMED` or `PLUGIN_INDEX_BAD_SIGNATURE`,
+  never as a result.
+- Byte-identical copies are folded (`duplicates`).
+- Per (publisher, plugin name) the highest version wins; versions compare
+  numerically per digit run, not as full SemVer. Entries are read in timestamp
+  order. A lower version after a higher one is refused as
+  `PLUGIN_INDEX_ROLLBACK`; the same version with a different root, interface or
+  capabilities is refused as `PLUGIN_INDEX_EQUIVOCATION` and the first one seen
+  stays. `index_add` applies the same two refusals against the directory.
+- `publisher_status` is `pinned` when the publisher key is listed in the
+  `--publishers` file (same format and permissions as `publisher_keys`; an
+  empty file pins nothing), otherwise `unpinned`. An unreadable, insecure or
+  malformed key file is refused (`PLUGIN_INDEX_PINS`), not read as empty.
+
+### Carrying the index over the fleet
+
+The index directory is a flat set of small, content-named, individually signed
+files plus (for a package root) a `LICENSE`, so it needs no new transport: it
+is an ordinary package root. A node that wants to share an index builds that
+directory into a package with the existing `zcode` flow (see
+[C23_COMMONS_QUICKSTART.md](../commons/C23_COMMONS_QUICKSTART.md): `zcode
+create`, then `zcode network publish` of a `zclassic23.package` POINTER and a
+PROVIDER record), and a peer fetches that root with `zcode package fetch` and
+points `--index` at the checkout. Peers can merge several fetched directories
+by copying files, because duplicates fold and every entry verifies itself.
+Not done here: the POINTER publish gate asks for local reproduction evidence,
+so whether a data-only root passes it, and a well-known index name so a node can
+find other nodes' indexes, are separate steps. Local `index_add` and `search`
+need none of them.
+Both leaves are never-remote.
+
 ## Refusal codes
 
 Every refusal carries `error.code` and `error.next_action`.
