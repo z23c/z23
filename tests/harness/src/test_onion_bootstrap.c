@@ -134,11 +134,33 @@ static int p11_remove_tree_link_case(bool slash)
  * token grammar prevents exporting log text, endpoints or onion addresses.
  * Inspect a bounded tail of the captured file size; stdio can read ahead. */
 #define P11_NOTICE_BYTES 65536u
+enum { P11_BOOTSTRAP_PROBLEM = 1u, P11_NETWORK_DISABLED = 2u,
+       P11_PERMISSION = 4u, P11_ADDRESS_IN_USE = 8u };
 struct p11_notice {
     bool readable, io_error, windowed, overlong, partial_tail;
     int percent;
     char stage[33];
+    unsigned warnings, errors, categories;
 };
+
+/* Fixed diagnostic tokens only: never copy warning text, addresses or paths
+ * into retained test output. A warning without a known category stays unknown. */
+static void p11_notice_warning(const char *line, struct p11_notice *notice)
+{
+    bool warning = strstr(line, "[warn]") != NULL;
+    bool error = strstr(line, "[err]") != NULL;
+    if (!warning && !error) return;
+    notice->warnings += warning;
+    notice->errors += error;
+    static const struct { const char *marker; unsigned bit; } known[] = {
+        {"Problem bootstrapping", P11_BOOTSTRAP_PROBLEM},
+        {"Network is disabled", P11_NETWORK_DISABLED},
+        {"Permission denied", P11_PERMISSION},
+        {"Address already in use", P11_ADDRESS_IN_USE},
+    };
+    for (size_t i = 0; i < sizeof(known) / sizeof(known[0]); i++)
+        if (strstr(line, known[i].marker)) notice->categories |= known[i].bit;
+}
 
 static bool p11_stage_char(char c)
 {
@@ -147,6 +169,7 @@ static bool p11_stage_char(char c)
 
 static void p11_notice_line(const char *line, struct p11_notice *notice)
 {
+    p11_notice_warning(line, notice);
     static const char marker[] = "[notice] Bootstrapped ";
     const char *p = strstr(line, marker);
     if (!p) return;
@@ -198,7 +221,8 @@ static struct p11_notice p11_notice_scan(FILE *file, size_t limit, bool windowed
     return notice;
 }
 
-static struct p11_notice p11_notice_read(const char *path, bool fresh)
+static struct p11_notice p11_notice_read_window(const char *path, bool fresh,
+                                               bool head)
 {
     struct p11_notice notice = {.percent = -1};
     if (!fresh) return notice; /* Never mistake an earlier boot's log for this one. */
@@ -208,11 +232,12 @@ static struct p11_notice p11_notice_read(const char *path, bool fresh)
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 0) {
         close(fd); return notice;
     }
-    off_t start = st.st_size > (off_t)P11_NOTICE_BYTES
+    off_t start = !head && st.st_size > (off_t)P11_NOTICE_BYTES
                      ? st.st_size - (off_t)P11_NOTICE_BYTES : 0;
     notice.windowed = start != 0;
     if (lseek(fd, start, SEEK_SET) != start) { close(fd); return notice; }
     size_t limit = (size_t)(st.st_size - start);
+    if (limit > P11_NOTICE_BYTES) limit = P11_NOTICE_BYTES;
     FILE *file = fdopen(fd, "rb");
     if (!file) { close(fd); return notice; }
     notice = p11_notice_scan(file, limit, notice.windowed);
@@ -223,13 +248,32 @@ static struct p11_notice p11_notice_read(const char *path, bool fresh)
     return notice;
 }
 
+static struct p11_notice p11_notice_read(const char *path, bool fresh)
+{
+    return p11_notice_read_window(path, fresh, false);
+}
+
+static void p11_notice_emit(struct p11_notice n, bool fresh, const char *window)
+{
+    printf("  bootstrap diagnostic private-local-evidence window=%s: "
+           "fresh_log=%d readable=%d io_error=%d "
+           "windowed=%d overlong=%d partial_tail=%d last_complete_percent=%d stage=%s\n",
+           window, fresh, n.readable, n.io_error, n.windowed, n.overlong, n.partial_tail,
+           n.percent, n.percent >= 0 ? n.stage : "UNKNOWN");
+    printf("  observed warning_lines=%u error_lines=%u categories: "
+           "bootstrap_problem=%d network_disabled=%d permission_denied=%d "
+           "address_in_use=%d; other warning/error causes remain unknown\n",
+           n.warnings, n.errors, !!(n.categories & P11_BOOTSTRAP_PROBLEM),
+           !!(n.categories & P11_NETWORK_DISABLED), !!(n.categories & P11_PERMISSION),
+           !!(n.categories & P11_ADDRESS_IN_USE));
+}
+
 static void p11_notice_report(const char *path, bool fresh)
 {
-    struct p11_notice n = p11_notice_read(path, fresh);
-    printf("  bootstrap diagnostic: fresh_log=%d readable=%d io_error=%d "
-           "windowed=%d overlong=%d partial_tail=%d last_complete_percent=%d stage=%s\n",
-           fresh, n.readable, n.io_error, n.windowed, n.overlong, n.partial_tail,
-           n.percent, n.percent >= 0 ? n.stage : "UNKNOWN");
+    struct p11_notice tail = p11_notice_read(path, fresh);
+    if (tail.windowed)
+        p11_notice_emit(p11_notice_read_window(path, fresh, true), fresh, "head");
+    p11_notice_emit(tail, fresh, "tail");
 }
 
 static int p11_notice_cases(const char *path)
@@ -288,6 +332,27 @@ static int p11_notice_tail_cases(const char *path)
     return failures;
 }
 
+static int p11_notice_head_case(const char *path)
+{
+    FILE *file = fopen(path, "wb");
+    if (!file) return 1;
+    bool wrote = fputs("[notice] Bootstrapped 5% (conn): early\n", file) >= 0;
+    for (size_t i = 0; i < P11_NOTICE_BYTES / 4u; i++)
+        if (fputs("[info] inert\n", file) < 0) wrote = false;
+    if (fputs("[warn] unknown fixture warning private-endpoint.example\n", file) < 0)
+        wrote = false;
+    if (fclose(file) != 0) wrote = false;
+    struct p11_notice head = p11_notice_read_window(path, true, true);
+    struct p11_notice tail = p11_notice_read(path, true);
+    int failures = !wrote || head.percent != 5 || tail.percent != -1 ||
+        !tail.windowed || tail.warnings != 1 || tail.categories != 0;
+    struct p11_notice known = {.percent = -1};
+    p11_notice_line("[warn] Problem bootstrapping: private-endpoint.example", &known);
+    if (known.warnings != 1 || known.categories != P11_BOOTSTRAP_PROBLEM)
+        failures++;
+    return failures;
+}
+
 /* Called by the existing hermetic slice; exercises the real diagnostic reader
  * without starting Tor, changing readiness, or contacting a network. */
 int test_onion_bootstrap_diagnostics(void);
@@ -301,6 +366,7 @@ int test_onion_bootstrap_diagnostics(void)
     if (missing.readable || missing.percent != -1 || !p11_notice_fresh(path)) failures++;
     failures += p11_notice_cases(path);
     failures += p11_notice_tail_cases(path);
+    failures += p11_notice_head_case(path);
     bool wrote = p11_notice_long_write(path, 1024,
                                      "\n[notice] Bootstrapped 80% (ap_conn): Recent\n");
     struct p11_notice n = p11_notice_read(path, true);
