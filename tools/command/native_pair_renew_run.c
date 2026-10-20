@@ -246,7 +246,7 @@ static bool prr_make_dirs(struct prr *run)
     return true;
 }
 
-static bool prr_init_side(struct prr *run, const char *profile, uint8_t key[32])
+static bool prr_init_side(const char *profile, uint8_t key[32])
 {
     struct json_value in = {0};
     struct zcl_command_reply reply;
@@ -351,7 +351,7 @@ static bool prr_inspect(const char *profile, const uint8_t peer[32], uint8_t roo
 static bool prr_pair(struct prr *run)
 {
     if (!prr_make_dirs(run)) return false;
-    if (!prr_init_side(run, run->cprof, run->c_pk) || !prr_init_side(run, run->hprof, run->h_pk)) {
+    if (!prr_init_side(run->cprof, run->c_pk) || !prr_init_side(run->hprof, run->h_pk)) {
         prr_fail(run, "RENEW_PAIR_FAILED", "init", "a fresh epoch identity could not be created durably on a side");
         return false;
     }
