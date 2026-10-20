@@ -9674,10 +9674,13 @@ test-reindex-killmid: zclassic23 zcl-rpc sqlq
 	    SEED_BLOCKS=50 KILL_MID=1 \
 	    bash tools/scripts/reindex_smoke.sh
 
-# C7 PEER-tip kill-9 (the FULL #7 claim): two isolated regtest nodes on
+# PEER-tip restart/catchup: two isolated regtest nodes on
 # disjoint 39xxx quads, B connect-only to A. A mines; assert B syncs to A
-# over NATIVE P2P, then kill-9 B mid-life, mine more on A, restart B, and
-# assert B re-catches up to A's PEER-tip. This is the complement to
+# over NATIVE P2P, then terminate B mid-life, mine more on A, restart B, and
+# assert B re-catches up to A's exact PEER-tip height and hash within 120s.
+# ZCL_PEER_TIP_REQUIRE_SIGKILL=1 requires a Linux SIGKILL/wait137 witness;
+# default portable mode terminates the process tree. Neither observes a
+# mid-block interruption. This is the complement to
 # test-crash-bootstrap (which only proves SINGLE-node boot recovery).
 # DELIBERATELY opt-in (NOT in `make ci`) — it spawns two real nodes. The
 # harness owns its own /tmp datadirs + 39xxx port refuse/LISTEN preflight
@@ -14837,7 +14840,7 @@ check-pipefail-status-pipe:
 # Cross-host shell debt must only shrink.  The shared port helper is exercised
 # here too, so a fallback or fail-closed regression cannot hide behind an
 # unchanged spelling baseline.
-check-shell-host-assumptions: $(LINTC_TOOL) $(JSONQ_BIN) $(DEV_PACKAGE_VERIFY_BIN)
+check-shell-host-assumptions: $(LINTC_TOOL) $(JSONQ_BIN) $(DEV_PACKAGE_VERIFY_BIN) process-group-exec
 	@echo "══ LINT: Linux/GNU shell assumptions only shrink ══"
 	@./build/bin/z23-lint check-shell-host-assumptions --selftest
 	@./tools/scripts/port_probe.sh --selftest

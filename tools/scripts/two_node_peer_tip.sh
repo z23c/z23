@@ -1,11 +1,9 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 #
-# two_node_peer_tip.sh — MVP criterion #7 (full claim) harness:
-#   "kill -9 mid-block, restart, caught up to PEER-tip within 2 min".
-#
-# The existing `make test-crash-bootstrap` proves SINGLE-node kill-9 boot
-# recovery (no peer). This harness proves the OTHER half of #7's literal
-# claim: a node catches up to a REAL PEER over native P2P after a kill-9.
+# two_node_peer_tip.sh — isolated native P2P restart/catchup acceptance.
+# Portable mode terminates the process tree before restart. Linux-only
+# ZCL_PEER_TIP_REQUIRE_SIGKILL=1 instead requires a witnessed SIGKILL exit.
+# Both modes prove peer catchup after restart; neither observes mid-block work.
 #
 # Topology (two disjoint isolated nodes, sharing NO datadir):
 #
@@ -19,7 +17,7 @@
 #   2. Spawn B (connect-only to A). Assert B SYNCS to A's tip  (≤ $SYNC_DEADLINE s).
 #      → proves native P2P peer block sync works at all.
 #   3. While B is down, mine $EXTRA_BLOCKS MORE on A (so "catch up to
-#      peer-tip" is meaningful). kill -9 B's whole process group, restart B
+#      peer-tip" is meaningful). Terminate B's owned process group, restart B
 #      (SAME datadir). Assert B RECOVERS and re-syncs to A's NEW tip
 #      (≤ $RESYNC_DEADLINE s).
 #   3. Print a single clean verdict: `two-node-peer-tip: PASS` | `FAIL`.
@@ -73,6 +71,7 @@ EXTRA_BLOCKS="${EXTRA_BLOCKS:-5}"    # blocks A mines while B is killed
 SYNC_DEADLINE="${SYNC_DEADLINE:-120}"   # step 2 budget (s)
 RESYNC_DEADLINE="${RESYNC_DEADLINE:-120}" # step 3 re-sync budget (s)
 RPC_WARMUP="${RPC_WARMUP:-60}"       # per-node RPC warmup budget (s)
+REQUIRE_SIGKILL="${ZCL_PEER_TIP_REQUIRE_SIGKILL:-0}"
 
 # Two disjoint 39xxx quads (A: 39090.., B: 39080..), each env-overridable by
 # its base. 39070.. is NOT free on an operator host: the dedicated
@@ -89,6 +88,7 @@ DEAD_SINK=39999
 TN_DD_A=""; TN_DD_B=""
 TN_PGID_A=""; TN_PGID_B=""
 TN_PID_A=""; TN_PID_B=""
+TN_SPAWN_PID=""
 TN_CLEANED=0
 
 tn_die() { echo "two-node-peer-tip: FATAL: $*" >&2; exit 2; }
@@ -219,7 +219,24 @@ tn_spawn() {
         -connect="$conn" \
         -nobgvalidation -nolegacyimport -showmetrics=0 \
         >"$(tn_node_log "$dd")" 2>&1 &
-    echo "$!"   # PID == PGID (setsid leader / Windows job owner)
+    TN_SPAWN_PID=$!   # Retain a direct child of the owning shell for wait.
+}
+
+tn_stop_follower() {
+    if [ "$REQUIRE_SIGKILL" = 1 ]; then
+        [ -n "$TN_PID_B" ] && [ "$TN_PGID_B" = "$TN_PID_B" ] \
+            || tn_die 'missing owned follower process group before SIGKILL'
+        kill -KILL "-$TN_PGID_B" || tn_die "cannot SIGKILL owned follower group $TN_PGID_B"
+    else
+        tn_kill_group "$TN_PGID_B"
+    fi
+    local stop_status=0
+    if wait "$TN_PID_B"; then stop_status=0; else stop_status=$?; fi
+    echo "two-node-peer-tip: waited follower pid=$TN_PID_B pgid=$TN_PGID_B status=$stop_status require_sigkill=$REQUIRE_SIGKILL"
+    if [ "$REQUIRE_SIGKILL" = 1 ]; then
+        [ "$stop_status" -eq 137 ] || tn_die "follower did not exit from SIGKILL (status=$stop_status)"
+    fi
+    TN_PID_B=""; TN_PGID_B=""
 }
 
 # Poll against an absolute deadline shared with the subsequent tip check.
@@ -266,6 +283,10 @@ tn_wait_height() {
 # ── Preflight + setup ──────────────────────────────────────────────
 # Sourcing exposes the same pollers to local refusal/deadline fixtures.
 [ "${BASH_SOURCE[0]}" = "$0" ] || return 0
+case "$REQUIRE_SIGKILL" in 0|1) ;; *) tn_die 'ZCL_PEER_TIP_REQUIRE_SIGKILL must be 0 or 1' ;; esac
+if [ "$REQUIRE_SIGKILL" = 1 ] && [ "$(uname -s)" != Linux ]; then
+    tn_die 'SIGKILL exit witness is supported only on Linux'
+fi
 command -v mktemp >/dev/null 2>&1 || tn_die "mktemp not found"
 [ -x "$NODE_BIN" ] || tn_die "$NODE_BIN not built — run make first"
 [ -x "$RPC_BIN" ]  || tn_die "$RPC_BIN not built — run make zcl-rpc"
@@ -320,7 +341,8 @@ echo "two-node-peer-tip: A{dd=$TN_DD_A p2p=$A_PORT rpc=$A_RPC} B{dd=$TN_DD_B p2p
 
 # ── Step 1: spawn A (miner), seed the chain ────────────────────────
 echo "two-node-peer-tip: [1] spawning miner A + seeding $SEED_BLOCKS blocks..."
-TN_PID_A="$(tn_spawn "$TN_DD_A" "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" "127.0.0.1:$DEAD_SINK")"
+tn_spawn "$TN_DD_A" "$A_PORT" "$A_RPC" "$A_FS" "$A_HTTPS" "127.0.0.1:$DEAD_SINK"
+TN_PID_A="$TN_SPAWN_PID"
 TN_PGID_A="$TN_PID_A"
 tn_wait_rpc "$TN_DD_A" "$A_RPC" "$TN_PID_A" "$(( $(date +%s) + RPC_WARMUP ))" \
     || tn_die "miner A RPC never came up (see $(tn_node_log "$TN_DD_A"))"
@@ -334,7 +356,8 @@ A_HASH="$(tn_blockhash "$TN_DD_A" "$A_RPC" "$A_TIP")" || tn_die 'miner tip hash 
 # ── Step 2: spawn B (connect-only to A), assert it syncs ───────────
 echo "two-node-peer-tip: [2] spawning follower B (connect-only → A); waiting ≤ ${SYNC_DEADLINE}s for B == $A_TIP..."
 SYNC_END=$(( $(date +%s) + SYNC_DEADLINE ))
-TN_PID_B="$(tn_spawn "$TN_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT")"
+tn_spawn "$TN_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT"
+TN_PID_B="$TN_SPAWN_PID"
 TN_PGID_B="$TN_PID_B"
 tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$SYNC_END" \
     || tn_die "follower B RPC never came up (see $(tn_node_log "$TN_DD_B"))"
@@ -349,16 +372,18 @@ else
     echo "two-node-peer-tip:     B log tail:"; tail -8 "$(tn_node_log "$TN_DD_B")" 2>/dev/null || true
 fi
 
-# ── Step 3: kill-9 B, mine more on A, restart B, assert re-sync ────
+# ── Step 3: terminate B, mine more on A, restart B, assert re-sync ──
 STEP3_PASS=no
 if [ "$STEP2_PASS" = "yes" ]; then
-    echo "two-node-peer-tip: [3] kill-9 B mid-life; A mines +$EXTRA_BLOCKS while B is down..."
+    echo "two-node-peer-tip: [3] terminate B mid-life (require_sigkill=$REQUIRE_SIGKILL); A mines +$EXTRA_BLOCKS while B is down..."
     RECOVERY_BEGAN=$(date +%s)
     RECOVERY_END=$((RECOVERY_BEGAN + RESYNC_DEADLINE))
-    # SIGKILL B's whole process group (mid-block: no graceful shutdown).
-    tn_kill_group "$TN_PGID_B"
-    wait "$TN_PID_B" 2>/dev/null || true
-    TN_PID_B=""; # group dead; restart below sets a fresh one
+    tn_stop_follower
+    CRASH_ARTIFACT="$(mktemp -d "$REPO_ROOT/build/peer-tip-restart.XXXXXX")" \
+        || tn_die 'cannot create follower log artifact'
+    cp "$(tn_node_log "$TN_DD_B")" "$CRASH_ARTIFACT/follower-before-restart.node.log" \
+        || tn_die 'cannot preserve follower log before restart'
+    echo "two-node-peer-tip: retained follower pre-restart log at $CRASH_ARTIFACT"
     # Windows pid-lock (ERROR_SHARING_VIOLATION=32) can outlive the process
     # by a beat; wait until a new node can take zclassic23.pid.
     sleep 1
@@ -371,16 +396,17 @@ if [ "$STEP2_PASS" = "yes" ]; then
     NEW_HASH="$(tn_blockhash "$TN_DD_A" "$A_RPC" "$NEW_TIP")" || tn_die 'new miner tip hash unavailable'
 
     echo "two-node-peer-tip:     restarting B (same datadir); waiting ≤ ${RESYNC_DEADLINE}s for B == $NEW_TIP..."
-    TN_PID_B="$(tn_spawn "$TN_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT")"
+    tn_spawn "$TN_DD_B" "$B_PORT" "$B_RPC" "$B_FS" "$B_HTTPS" "127.0.0.1:$A_PORT"
+    TN_PID_B="$TN_SPAWN_PID"
     TN_PGID_B="$TN_PID_B"
     if ! tn_wait_rpc "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$RECOVERY_END"; then
-        echo "two-node-peer-tip:     B RPC never came back after kill-9 restart (see $(tn_node_log "$TN_DD_B"))"
+        echo "two-node-peer-tip:     B RPC never came back after restart (see $(tn_node_log "$TN_DD_B"))"
     elif B_FINAL2="$(tn_wait_height "$TN_DD_B" "$B_RPC" "$TN_PID_B" "$NEW_TIP" "$RECOVERY_END" "$NEW_HASH")"; then
         RECOVERY_SECONDS=$(( $(date +%s) - RECOVERY_BEGAN ))
         [ "$RECOVERY_SECONDS" -ge 0 ] && [ "$RECOVERY_SECONDS" -lt "$RESYNC_DEADLINE" ] ||
             tn_die 'recovery observation exceeded its shared deadline'
         STEP3_PASS=yes
-        echo "two-node-peer-tip:     B recovered + caught up to peer-tip $NEW_TIP after kill-9."
+        echo "two-node-peer-tip:     B recovered + caught up to peer-tip $NEW_TIP after restart (require_sigkill=$REQUIRE_SIGKILL)."
         echo "two-node-peer-tip: recovery_seconds=$RECOVERY_SECONDS tip_hash=$NEW_HASH"
     else
         echo "two-node-peer-tip:     B did NOT re-reach peer-tip $NEW_TIP within ${RESYNC_DEADLINE}s (stuck at ${B_FINAL2:-?})."
@@ -391,7 +417,7 @@ else
 fi
 
 # ── Verdict ────────────────────────────────────────────────────────
-echo "two-node-peer-tip: results: initial-sync=$STEP2_PASS  kill9-resync=$STEP3_PASS"
+echo "two-node-peer-tip: results: initial-sync=$STEP2_PASS restart-resync=$STEP3_PASS require_sigkill=$REQUIRE_SIGKILL"
 if [ "$STEP2_PASS" = "yes" ] && [ "$STEP3_PASS" = "yes" ]; then
     echo "two-node-peer-tip: PASS"
     exit 0

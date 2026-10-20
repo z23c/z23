@@ -5,7 +5,7 @@ set -euo pipefail
 SELF_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)"
 source "$SELF_DIR/two_node_peer_tip.sh"
 fixture="$(mktemp -d "${TMPDIR:-/tmp}/z23-peer-tip-contract.XXXXXX")"
-trap 'rm -rf -- "$fixture"' EXIT
+trap 'if [ -n "${TN_PID_B:-}" ]; then tn_kill_group "$TN_PGID_B"; wait "$TN_PID_B" 2>/dev/null || true; fi; rm -rf -- "$fixture"' EXIT
 fail() { printf 'peer-tip selftest: FAIL: %s\n' "$*" >&2; exit 1; }
 RPC_BIN="$fixture/rpc"
 cat > "$RPC_BIN" <<'RPC'
@@ -46,6 +46,48 @@ tn_rm_datadir "$TN_TMP"
 tn_rm_datadir "$fixture/zcl23-2node-outside"
 [ -d "$fixture/zcl23-2node-outside" ] || fail 'outside scratch root removed'
 
+# A real owned group proves immediate SIGKILL, without a preceding TERM.
+if [ "$(uname -s)" = Linux ]; then
+    export fixture_ready="$fixture/ready" fixture_term="$fixture/term"
+    cat > "$fixture/child" <<'CHILD'
+#!/bin/sh
+trap 'printf TERM > "$fixture_term"; exit 0' TERM
+printf ready > "$fixture_ready"
+while :; do sleep 1; done
+CHILD
+    chmod 700 "$fixture/child"
+    NODE_BIN="$fixture/child"
+    REQUIRE_SIGKILL=1
+    tn_spawn "$fixture" 0 0 0 0 unused
+    TN_PID_B="$TN_SPAWN_PID"; TN_PGID_B="$TN_PID_B"
+    for i in $(seq 1 100); do
+        [ -f "$fixture_ready" ] && break
+        sleep 0.01
+    done
+    [ -f "$fixture_ready" ] || fail 'owned child never armed TERM trap'
+    tn_stop_follower > "$fixture/stop.log"
+    grep -q 'status=137 require_sigkill=1' "$fixture/stop.log" || fail 'SIGKILL wait witness absent'
+    [ ! -f "$fixture_term" ] || fail 'SIGKILL path delivered TERM first'
+    [ -z "$TN_PID_B$TN_PGID_B" ] || fail 'reaped follower ownership not cleared'
+    # Suppress the signal to prove a natural exit cannot masquerade as KILL.
+    if (
+        kill() { return 0; }
+        NODE_BIN=/bin/true
+        tn_spawn "$fixture" 0 0 0 0 unused
+        TN_PID_B="$TN_SPAWN_PID"; TN_PGID_B="$TN_PID_B"
+        tn_stop_follower
+    ) > "$fixture/natural.log" 2>&1; then fail 'natural exit accepted as SIGKILL'; fi
+    grep -q 'status=0 require_sigkill=1' "$fixture/natural.log" || fail 'natural-exit control did not run'
+    if (
+        kill() { return 0; }
+        TN_PID_B=$$; TN_PGID_B=$$
+        tn_stop_follower
+    ) > "$fixture/not-child.log" 2>&1; then fail 'invalid wait accepted as SIGKILL'; fi
+    grep -q 'status=127 require_sigkill=1' "$fixture/not-child.log" || fail 'invalid-wait control did not run'
+else
+    printf 'peer-tip selftest: Linux SIGKILL witness not applicable\n'
+fi
+
 # A deterministic clock exposes budget resets and late RPC answers.
 printf '100\n' > "$fixture/clock"
 touch "$fixture/.cookie"
@@ -70,4 +112,4 @@ printf '100\n' > "$fixture/clock"
 if tn_wait_height "$fixture" 39071 '' 15 102 "$tip_hash" >/dev/null; then
     fail 'late tip accepted'
 fi
-printf 'peer-tip selftest: PASS (typed RPC, exact hash, shared deadline, late replies, cleanup containment)\n'
+printf 'peer-tip selftest: PASS (typed RPC, exact hash, shared deadline, late replies, cleanup containment, applicable SIGKILL witness)\n'
