@@ -15,9 +15,9 @@ procedure remains in [DEVELOPING.md](../dev/DEVELOPING.md).
    path contract and a concrete acceptance. Commands, Makefile, impact rules,
    and generated catalogs each need one primary writer.
 3. Reuse an owned lane. When isolation is required, prepare a separate lane
-   through the native `dev lane new` route under `devbuild --wait`, with an
-   exact base and receiver-approved path. Do not replace a refusal with raw
-   worktree creation or copied build outputs.
+   through the native `dev lane new` route under `devbuild --wait`, or with
+   `git worktree add` at an exact fetched base under the development scratch
+   root. Do not replace a refusal with copied build outputs.
 4. Establish native file claims before editing. Renew them before expiry and
    release them when a clean checkpoint is ready. A claim controls source
    writers; it does not authorize proof acceptance, deployment, or publication.

@@ -231,13 +231,14 @@ source of operational truth.
 | INVARIANTS | Unknown is not zero; an acknowledgment is not acceptance; uncertain effects are reconciled; no authority comes from a projection. |
 | ACCEPTANCE | Accounting conservation, production-caller crash tests, paired accuracy qualification, complete workflow efficiency and twenty three-host lifecycle cycles. |
 | CONTINUATION QUEUE | Passive accounting; reconciliation and shadow routing; executor fixtures; budgeted model and cache qualification; granted publication. |
-| ESCALATE ONLY IF | Required host admission or receiver authority is unavailable, a human budget/product decision is missing, or a repository escalation boundary is reached. |
+| ESCALATE ONLY IF | Required host admission or receiver authority is unavailable, a spend budget is missing, or a repository escalation boundary is reached. |
 
 Initial operation observes explicitly mapped, already-authorized Codex sessions.
 It does not set goals, send turns, launch sessions, purchase credits or publish.
 No dollar cap, model entitlement, server readiness or savings is assumed.
 Automatic execution requires finite budget and deadline policies and completed
-qualification. Publication additionally requires an explicit scoped owner grant.
+qualification. Publication uses the receipt-gated landing route after one
+non-author review.
 
 ## Source baseline and ownership
 
@@ -465,7 +466,7 @@ validating → accepted | repair | refused | failed | canceled
 | Observe | Persist raw evidence; terminal, quiescent and accepted remain independent facts. |
 | Validate | Run existing acceptance on the exact candidate; provider completion cannot mark PASS. |
 | Settle | Release only demonstrably unspent allocation; retain unresolved possible expenditure across crashes and expired leases. |
-| Publish | Require scoped owner grant, independent reproduction, expected-base publication and exact remote receipt. |
+| Publish | Require one non-author review, independent reproduction, expected-base publication and exact remote receipt. |
 
 Each budget has one authoritative issuer. Its nonoverlapping allocations bind
 amount, units, task, recipient, permitted stages, expiry and freshness policy.
@@ -706,7 +707,7 @@ fixtures. More efficient paired methods require their own reviewed contract.
 | D | Codex executor callbacks and durable budget/intent transitions | Production-caller crash matrix, stale-owner fencing and uncertain-send reconciliation pass without model calls. |
 | E | Frozen quality/cache experiments and account-aware admission | Budgeted paired workflows meet the accuracy bound, measured cost improvement and deadlines for each admitted class. |
 | F | One-host canary, then five-host route/platform expansion | No duplicate dispatch; revocation/partition/restart tests; twenty three-host lifecycle cycles and independent Mac evidence. |
-| G | Scoped publication under existing owner grant | Exact candidate reproduction, expected-base publication and remote readback; uncertain publication reconciled before retry. |
+| G | Receipt-gated publication after non-author review | Exact candidate reproduction, expected-base publication and remote readback; uncertain publication reconciled before retry. |
 
 Each slice hands off source/base, native scope claim, configuration/evidence
 roots, focused checks, limits and next action. Rollback disables new admission
@@ -726,7 +727,7 @@ All rows below remain unqualified until exact candidate evidence is recorded.
 | Codex executor | Deterministic provider fixtures verify identity, confinement, scope, limits and usage capture through the worker caller. | NOTRUN |
 | Recovery | Inject crashes before/after reservation, intent, dispatch, observation, settlement, candidate and publication persistence. Cover lost acknowledgments, stale owners, restart epochs, revocation, partitions and malformed/conflicting records; prove no unauthorized duplicate effect or budget reallocation. | NOTRUN |
 | Accuracy and efficiency | Explicitly budgeted held-out paired workflows satisfy the per-class confidence gate; every attempt and reviewer contributes to cost; cold/warm metrics include coverage. | NOTRUN |
-| Fleet and publication | Twenty three-host lifecycle cycles including worker/publisher crashes, independent Linux/arm64 Mac verification, expected-base publication and exact remote readback under an owner grant. | NOTRUN |
+| Fleet and publication | Twenty three-host lifecycle cycles including worker/publisher crashes, independent Linux/arm64 Mac verification, expected-base publication and exact remote readback after non-author review. | NOTRUN |
 | Latency | Warm local query p95 below 100 ms and telemetry acknowledgment p95 within one second under declared healthy-link conditions. | NOTRUN |
 
 Extend registered groups `json`, `engine`, `devagent_outcomes`,

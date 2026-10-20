@@ -139,7 +139,7 @@ pow,equihash,subsidy}.c`, `core/params/src/{params,upgrades}.c`,
 
 **Every byte is sealed.** `core/MANIFEST.sha3` pins the tree and the
 `check-core-seal` gate fails `make lint` on any drift — *after* you have
-already written the edit. The unlock is an owner ritual:
+already written the edit. The unlock is the explicit unseal ritual:
 
 ```bash
 make core-unseal REASON="why this consensus change is parity-safe"   # mints .core-unseal-token, one commit

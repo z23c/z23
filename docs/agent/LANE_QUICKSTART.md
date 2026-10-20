@@ -11,10 +11,11 @@ Dispatch: [LANE_LAUNCH.md](LANE_LAUNCH.md). Report:
    ownership, dirty files, leases, and exact `origin/main` (on a managed host,
    read its policy and inspect the assigned lane first). Resume owned work
    in place; never manufacture a replacement queue or overwrite another lane.
-2. If independent work needs another checkout, use the existing native
-   `dev lane new` route from a qualified dev binary, under `devbuild --wait`.
-   Use its receiver-approved path and exact base. Preserve its refusal and
-   any partial lane; do not substitute raw worktree or dependency copying.
+2. If independent work needs another checkout, use the native `dev lane new`
+   route under `devbuild --wait`, or `git worktree add -b lane/NAME` at the
+   fetched `origin/main` under the host's development scratch root. Preserve
+   a refusal and any partial lane; never bypass a refusal by copying
+   dependencies or build outputs.
 3. Claim the concrete source paths with `dev agent claim`. Record and renew
    `expires_unix`; stop writing after expiry until the claim is renewed.
 4. Ask the built code navigator for source ownership and registered tests.

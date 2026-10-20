@@ -63,7 +63,8 @@ Control and development machinery advance public-node reliability and C23
 Commons acceptance. Telemetry, indexing, builds, transfers and application
 operations may not delay chain advancement, synchronization or peer health.
 Consensus predicates and byte-sealed core remain unchanged without the explicit
-owner ritual. Custody and canonical node deployment retain separate authority.
+unseal ritual. Custody retains separate authority; reviewed, landed builds may
+be deployed and restarted.
 
 Use existing signed objects, CAS, task, candidate, action, lease, receipt and
 receiver-policy authorities. Databases and views are rebuildable projections.
@@ -310,8 +311,8 @@ refusal on either platform.
 
 1. Complete the chain stopwatch's production wiring through verified
    installation, readiness and durable catch-up. Report bootstrap readiness and
-   complete sovereign validation separately. Actual canonical installation or
-   node restart still requires its separate owner grant.
+   complete sovereign validation separately. Canonical installation and node
+   restart use a reviewed, landed build.
 2. Measure download, installation and validation stage costs; optimize scheduling
    without changing consensus predicates or mandatory verification.
 3. Reuse CAS accounting, resumable downloads and proof caches. Warm identical

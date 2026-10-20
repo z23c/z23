@@ -67,9 +67,9 @@ Current status:
 - Forward-secrecy design (proposal, not implemented):
   [`TUNNEL_PQ_FORWARD_SECRECY.md`](../spec/TUNNEL_PQ_FORWARD_SECRECY.md).
 
-Install and run each host from an owner-selected immutable release directory
-after an explicit owner GO naming the host, source, image hash, peer, target
-and lifetime. Keep the existing pinned SSH route available for rollback.
+Install and run each host from an immutable release directory of a reviewed,
+landed build; record the host, source, image hash, peer, target and lifetime
+in the task receipt. Keep the existing pinned SSH route available for rollback.
 
 Pairing uses a separate owner-private profile, never a canonical node datadir:
 

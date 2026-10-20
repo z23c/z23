@@ -44,7 +44,7 @@ always preserving the newest verdict (`ZCL_QUALITY_LOG_KEEP` and
 `ZCL_QUALITY_LOG_MAX_BYTES` override those limits). A failed mint-state query
 also skips rather than guessing that the host is idle.
 
-The timer is an owner-gated installation, not a default checkout step:
+The timer is an opt-in operator installation, not a default checkout step:
 
 1. Have the operator install the unit files from
    `platform/deploy/z23-simnet-nightly.timer` and

@@ -69,7 +69,7 @@ historical fixture passes, then deploy/restart intentionally.
   `tools/scripts/public_explorer_smoke.sh`; it checks both `/api/v1/hodl` and
   `/explorer/hodl` without `jq` and fails on "refresh", "not processed",
   "retry", or "waiting" user-visible states.
-- **Runtime-generation publication has one owner-gated native authority.**
+- **Runtime-generation publication has one plan/commit native authority.**
   `z23-dev dev generation activate
   --input='{"idempotency_key":"<key>"}'` stages and
   preflights an immutable dev generation, then returns the exact
@@ -86,7 +86,7 @@ historical fixture passes, then deploy/restart intentionally.
   datadir, or service mutation. A source ID, environment switch, or direct
   script call does not bypass containment. Use build, simulation, read-only
   plans and verify/check watch. The two live dev runtime surfaces are that
-  explicit owner plan/commit and the gated swappable-leaf hot-swap
+  explicit plan/commit and the gated swappable-leaf hot-swap
   (`make hotswap-try` / `make hotswap-apply`) on the armed `zcl23-dev` lane.
 - **Dev recovery is plan-only during containment.** `make agent-dev-recover`
   is read-only. `ARGS=--apply`, direct `recover-dev-lane.sh --apply`, and test
@@ -354,7 +354,7 @@ recorded here rather than rediscovered:
   usage-line placeholders (`--dev-datadir=ABSOLUTE_DIR`), and systemd `%h`
   specifiers. A gate whose entire yield is a hand-curated exemption list is
   noise, not a rail.
-- **A runtime refusal is an owner decision, not a lane decision.** Refusing a
+- **A runtime refusal is a reviewed design change, not a drive-by fix.** Refusing a
   relative `-datadir` at startup changes node semantics, and `test_cli_render.c`
   asserts the CLI's own guidance text renders a relative datadir. The choice
   between "canonicalize the datadir at boot" and "refuse it loudly" also has to

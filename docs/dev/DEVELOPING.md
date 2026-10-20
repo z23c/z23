@@ -90,10 +90,10 @@ New to a fleet: [`agent/START_HERE.md`](../agent/START_HERE.md).
 
 Reuse a sanctioned worktree and preserve owned dirty work. Route heavy builds,
 proofs, benchmarks and matrices through `devbuild --wait`, preserving job
-counts and native locks; the managed Mac takes one focused build, normally two
-jobs. Do not launch services, watchers or workers automatically. Apply the
-installed host job limit to the generic `-j"$(getconf _NPROCESSORS_ONLN)"`
-examples:
+counts and native locks; the installed scheduler sets each host's job and
+concurrency limits. Do not launch services, watchers or workers
+automatically. Apply the installed host job limit to the generic
+`-j"$(getconf _NPROCESSORS_ONLN)"` examples:
 
 ```bash
 devbuild --wait make -j"$(getconf _NPROCESSORS_ONLN)" z23
@@ -246,8 +246,8 @@ active work.
 Source baseline: the one-time history baseline of 2026-10-12 grants no future
 rewrite authority (see [Managed source baseline](#managed-source-baseline)).
 Start from current main and recover old work as bounded reviewed patches.
-Recovery is copy-first under [TENACITY.md](../TENACITY.md); deployment and custody
-remain owner-gated, and explicit scoped owner authorization persists.
+Recovery is copy-first under [TENACITY.md](../TENACITY.md); custody remains
+owner-gated, while reviewed, landed builds may be deployed and restarted.
 
 ## The normal loop
 
@@ -745,7 +745,7 @@ suffix (`zcode_commons`, never a numbered sibling) — extract shared helpers
 instead of spawning a numbered copy. See the naming law in
 [`DEFENSIVE_CODING.md`](../DEFENSIVE_CODING.md#naming--role-based-not-birth-order).
 
-Recovery changes are copy-proven on isolated datadirs before any owner-gated
+Recovery changes are copy-proven on isolated datadirs before any
 production action. A successful boot is not liveness evidence; recovery
 acceptance observes H* climb and parity. See [`TENACITY.md`](../TENACITY.md).
 
@@ -1909,7 +1909,8 @@ their specific token. This retry lives inside the capture itself, so both the
 pre-test identity seal and the mid-proof checkpoint capture benefit from it
 without ever re-running the tests those captures gate.
 
-Canonical deployment remains owner-gated. Development generation activation is
+Canonical deployment takes a reviewed, landed build through `make deploy`
+with `ZCL_DEPLOY_ALLOW_CANONICAL=1`. Development generation activation is
 an explicit plan/commit transaction with source, resident-CAS, process, probe,
 and rollback verification. A source identity or environment variable alone
 grants no activation authority. See [`RUNBOOK.md`](../RUNBOOK.md) and the current

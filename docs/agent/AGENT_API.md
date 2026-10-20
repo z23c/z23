@@ -1398,7 +1398,7 @@ The implementation is intentionally observe-only:
   install, or service-control effects.
 - `make remote-node-update` and `make remote-node-update-json` are retained as
   explicit containment probes and always refuse. Canonical deployment remains
-  the separate owner-gated `make deploy` transaction.
+  the separate `make deploy` transaction for a reviewed, landed build.
 
 Common commands:
 

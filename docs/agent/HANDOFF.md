@@ -82,7 +82,7 @@ cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the ma
   file list; the cyclomatic baseline gains no pin; `git merge-tree
   --write-tree --name-only origin/main HEAD` prints only a tree hash.
 - Rollout is one ship per node from the ship-source box, slowest disk first,
-  never two ships at once, never a restart outside the ship. The 2026-09-11
+  never two ships at once; a plain restart is routine. The 2026-09-11
   landings move a spinning-disk node's post-crash integrity scan of the
   projection store off the boot thread; witness it on the next ship as
   `bg_quick_check scanning target=progress.kv` in the node log with RPC
@@ -92,7 +92,7 @@ cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the ma
   with the `.anchor` sidecar beside it; `z23 dev beta6 verify --source_dir=`
   runs the real arming preflight without touching a running node. The
   maintainer host is minting that tree; arming, quota, and posture policy are
-  owner decisions recorded in the host handoff notes.
+  recorded in the host handoff notes.
 - Host follow-ups (ship, arming the beta6 serve tree, the fresh-datadir
   anchor test) live in the host handoff notes above. Product ordering lives
   only in [`work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md). The hot-fork
@@ -141,7 +141,7 @@ swap that does not restart the process.
 
 | Lane | Datadir | Deploy | Purpose |
 |---|---|---|---|
-| **live** | `$HOME/.zclassic-c23` | `make deploy` (owner-gated) | Public daily-driver node; restart only for a vetted live deploy. |
+| **live** | `$HOME/.zclassic-c23` | `make deploy` (reviewed, landed builds) | Public daily-driver node; restarts and reviewed upgrades are routine; never delete or reindex its datadir. |
 | **dev** | `$HOME/.zclassic-c23-dev` | verify/probe only | Isolated build/test lane; public tooling cannot restart or publish to it. |
 | **soak** | `$HOME/.zclassic-c23-soak` | deliberate re-baseline | Long-uptime / weekly evidence lane; do not churn during development. |
 
