@@ -395,9 +395,10 @@ static int pht_case_mutation(void)
             size_t pl = pht_next(&seed) % sizeof payload;
             for (size_t i = 0; i < pl; i++)
                 payload[i] = (uint8_t)pht_next(&seed);
-            struct plugin_hostcall_frame fr = {
-                (uint8_t)(1 + pht_next(&seed) % 2), (uint32_t)pht_next(&seed),
-                (uint16_t)(1 + pht_next(&seed) % 7), payload, pl };
+            uint8_t kind = (uint8_t)(1 + pht_next(&seed) % 2);
+            uint32_t id = (uint32_t)pht_next(&seed);
+            uint16_t method = (uint16_t)(1 + pht_next(&seed) % 7);
+            struct plugin_hostcall_frame fr = { kind, id, method, payload, pl };
             uint8_t wire[64];
             size_t w = 0;
             ASSERT_EQ(plugin_hostcall_encode(&fr, wire, sizeof wire, &w), PLUGIN_HOSTCALL_OK);
@@ -419,8 +420,11 @@ static int pht_case_mutation(void)
                 size_t u = 0;
                 if (plugin_hostcall_decode(m, w, &d, &u) == PLUGIN_HOSTCALL_OK)
                     decoded++;
-                for (int k = 0; k < 3; k++)
-                    m[pht_next(&seed) % w] ^= (uint8_t)(1u << (pht_next(&seed) % 8));
+                for (int k = 0; k < 3; k++) {
+                    size_t at = pht_next(&seed) % w;
+                    unsigned shift = (unsigned)(pht_next(&seed) % 8);
+                    m[at] ^= (uint8_t)(1u << shift);
+                }
                 ASSERT(pht_check_frame(m, w));
                 checked++;
             }

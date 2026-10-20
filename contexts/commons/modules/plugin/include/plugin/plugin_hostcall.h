@@ -70,9 +70,16 @@ const char *plugin_hostcall_status_code(enum plugin_hostcall_status status);
 /* The action that resolves the refusal. */
 const char *plugin_hostcall_status_next_action(enum plugin_hostcall_status status);
 
-/* Capabilities the host-call layer gates on. Their manifest names follow the
- * zcl_app_capability vocabulary in engine/modules/framework/include/
- * zclassic23/app.h; plugin_manifest.c does not list them yet. */
+/* Capabilities the host-call layer gates on. The manifest names are dotted,
+ * like fs.read and clock in plugin_manifest.c, which does not list these yet.
+ * Each maps to one ZCL_APP_CAP_* constant in engine/modules/framework/include/
+ * zclassic23/app.h:
+ *   "chain.read"     ZCL_APP_CAP_CHAIN_READ
+ *   "state"          ZCL_APP_CAP_RESIDENT_STATE
+ *   "events.append"  ZCL_APP_CAP_SIGNED_EVENTS
+ *   "wallet.request" ZCL_APP_CAP_WALLET_REQUESTS
+ * The zcl_app_host_v1 calls p2p_publish, lease_acquire, lease_release and
+ * state_open have no wire method yet. */
 enum plugin_hostcall_cap {
     PLUGIN_HOSTCALL_CAP_NONE = 0,
     PLUGIN_HOSTCALL_CAP_CHAIN_READ = 1u << 0, /* manifest "chain.read" */
