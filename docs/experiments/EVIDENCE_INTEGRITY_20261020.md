@@ -163,7 +163,7 @@ It overrides inherited Make parallel settings, including a lower setting;
 it does not enlarge the enclosing CPU quota. Unset behavior is preserved.
 Per-case real Make recipe traces recorded `-j4` in all seven phases for cap4
 and `-j2` for cap2. The unset control retained inherited `-j2` except for the
-existing automatic dev-bin `-j28` allocation. The seventh phase is the early
+existing automatic dev-bin `-j28` allocation. The seven phases include the early
 complexity gate. These traces demonstrate dispatch, not peak concurrency or
 performance improvement.
 
