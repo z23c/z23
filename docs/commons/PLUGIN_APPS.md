@@ -58,4 +58,3 @@ This page is linked from [`docs/README.md`](../README.md) and from [`docs/work/F
 <!-- claim: file-present contexts/commons/apps/yardsale/app.def # declarative app -->
 <!-- claim: file-present apps/zcl-ledger/README.md # separate custody-adjacent host -->
 <!-- claim: symbol-present ZCL_SERVICE_ENFORCEMENT_SHADOW engine/composition/services/catalog.def # still shadow-only -->
-<!-- claim: symbol-absent plugin.publish engine/composition/commands/plugin.def # not yet a command -->
