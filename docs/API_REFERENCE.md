@@ -74,15 +74,15 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 1014 |
+| Registry entries (branches + leaves) | 1004 |
 | Top-level roots | 17 |
-| Branches | 217 |
-| Leaves (dispatchable command paths) | 797 |
+| Branches | 214 |
+| Leaves (dispatchable command paths) | 790 |
 | … `ready` (live handler in this build) | 694 |
 | … `compat` (metadata only, names a fallback) | 73 |
-| … `planned` (fail-closed BLOCKED, exit 3) | 30 |
+| … `planned` (fail-closed BLOCKED, exit 3) | 23 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
-| Leaves with `effect=mutate` | 312 |
+| Leaves with `effect=mutate` | 311 |
 | Leaves with `effect=destructive` | 6 |
 | Leaves requiring **owner** authority | 157 |
 
@@ -91,12 +91,12 @@ Per source file:
 | `.def` file | Entries | Branches | Leaves |
 |---|---|---|---|
 | `engine/composition/commands/root.def` | 12 | 5 | 7 |
-| `engine/composition/commands/core.def` | 126 | 29 | 97 |
+| `engine/composition/commands/core.def` | 123 | 29 | 94 |
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 95 | 19 | 76 |
-| `engine/composition/commands/dev.def` | 139 | 24 | 115 |
+| `engine/composition/commands/ops.def` | 90 | 17 | 73 |
+| `engine/composition/commands/dev.def` | 137 | 23 | 114 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
 | `engine/composition/commands/vault.def` | 24 | 4 | 20 |
@@ -245,8 +245,6 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `core chain wait height` | planned | read / read / operator · persistent/low | **`height`**, `timeout_ms` | `zcl.wait_result.v1` | `z23 core chain wait height --height=3200000` | Wait until the tip reaches a target height — *blocking wait proxy is deferred to the Wave 2.2 job protocol* |
-| `core chain wait blocker` | planned | read / read / operator · persistent/low | **`blocker`**, `timeout_ms` | `zcl.wait_result.v1` | `z23 core chain wait blocker` | Wait until a named blocker is raised or cleared — *blocking wait proxy is deferred to the Wave 2.2 job protocol* |
-| `core chain wait halt` | planned | read / read / operator · persistent/low | `timeout_ms` | `zcl.wait_result.v1` | `z23 core chain wait halt` | Wait until the node halts on a named blocker — *blocking wait proxy is deferred to the Wave 2.2 job protocol* |
 
 #### `core.sync` — Sync phase and validation progress
 
@@ -406,7 +404,6 @@ represented by its children's sections.
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
 |---|---|---|---|---|---|---|
 | `core storage stats` | ready | read / read / operator · fast/low | none | `zcl.db_stats.v1` | `z23 core storage stats` | Database size and table stats |
-| `core storage integrity` | planned | read / read / operator · foreground/moderate | none | `zcl.storage_integrity.v1` | `z23 core storage integrity` | Verify raw storage integrity — *a distinct storage-integrity handler is a Wave 2.2 deliverable* |
 | `core storage query` | ready | read / read / operator · fast/moderate | **`sql`**, `limit` | `zcl.storage_query.v1` | `z23 core storage query --sql='SELECT ...'` | Run one SELECT-only query over node.db |
 | `core storage query offline` | ready | read / read / operator · fast/moderate | `datadir`, `sql`, `limit` | `zcl.storage_query.v1` | `z23 core storage query offline --input='{"datadir":"/home/you/.zclassic-c23","sql":"SELECT ..."}'` | Run one SELECT-only query over a STOPPED/COPIED datadir's node.db |
 | `core storage schema offline` | ready | read / read / operator · fast/low | `datadir` | `zcl.storage_schema.v1` | `z23 core storage schema offline --input='{"datadir":"/home/you/.zclassic-c23"}'` | Rolling-upgrade schema verdict for a datadir's node.db |
@@ -813,12 +810,6 @@ represented by its children's sections.
 | `dev hotswap apply` | compat 🔧 → `z23-dev dev hotswap apply --input='{"so_path":"...","probe_leaf":"..."}'` | mutate / dev-mutation / **owner** · fast/moderate | **`so_path`**, `probe_leaf` | `zcl.dev_hotswap.v1` | `z23-dev dev hotswap apply --input='{"so_path":"/tmp/gen.so","probe_leaf":"core.status"}'` | Live module hot-swap: forwards to the resident dev node; verify-only unless -hotswap-activate + ZCL_HOTSWAP_ACTIVATE=1 on the dev datadir (canonical refused) — *in-process hot-swap requires a dev build* |
 | `dev hotswap probe` | compat 🔧 → `z23-dev dev hotswap probe --input='{"so_path":"...","probe_leaf":"..."}'` | read / read / **owner** · fast/low | `so_path`, `probe_leaf`, `source_tu` | `zcl.dev_hotswap.v1` | `z23-dev dev hotswap probe --input='{"source_tu":"contexts/commons/services/src/zcode_passport_view_service.c"}'` | Verify-only in-process: dlopen + ABI-validate + self_test of a module .so, or of one source built first; never commits — *resident hot-swap probing requires a dev build* |
 
-#### `dev.test.background` — Background proof freshness
-
-| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
-|---|---|---|---|---|---|---|
-| `dev test background status` | planned | read / read / operator · instant/low | none | `zcl.dev_background_quality.v1` | `z23 dev test background status` | Read lint, sanitizer, replay, and reproducibility freshness — *native background-quality projection is not implemented* |
-
 #### `dev.fleet` — Fleet truth and the opening packet
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
@@ -945,12 +936,6 @@ represented by its children's sections.
 | `ops statecatalog` | ready | read / read / operator · fast/low | `subsystem`, `limit`, `page` | `zcl.ops_statecatalog.v1` | `z23 ops statecatalog` | State subsystem catalog |
 | `ops selftest` | ready | read / read / operator · fast/low | none | `zcl.ops_selftest.v1` | `z23 ops selftest` | Self-test |
 
-#### `ops.jobs` — Job lifecycle
-
-| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
-|---|---|---|---|---|---|---|
-| `ops jobs list` | planned | read / read / operator · fast/low | none | `zcl.jobs.v1` | `z23 ops jobs list` | List asynchronous jobs — *the native job registry is a Wave 2.2 deliverable* |
-
 #### `ops.debug` — Diagnostics
 
 | Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
@@ -1026,13 +1011,6 @@ represented by its children's sections.
 |---|---|---|---|---|---|---|
 | `ops postmortem list` | ready | read / read / operator · fast/low | none | `zcl.postmortem_list.v1` | `z23 ops postmortem list` | List captured postmortems |
 | `ops postmortem replay` | planned | read / read / operator · foreground/moderate | **`id`** | `zcl.postmortem_replay.v1` | `z23 ops postmortem replay <id>` | Replay one captured postmortem — *postmortem replay argument mapping is a Wave 2.2 deliverable* |
-
-#### `ops.config` — Runtime config
-
-| Command | Avail | Policy | Input keys (**required**) | Output schema | Example | Summary |
-|---|---|---|---|---|---|---|
-| `ops config show` | planned | read / read / operator · fast/low | none | `zcl.ops_config.v1` | `z23 ops config show` | Show effective runtime configuration — *an effective-config reader is a Wave 2.2 deliverable* |
-| `ops config reload` | planned | mutate / core-recovery / operator · fast/low | none | `zcl.ops_config_reload.v1` | `z23 ops config reload` | Reload runtime configuration — *config-reload binding is a Wave 2.2 deliverable* |
 
 #### `ops.recovery` — Recovery ops
 
@@ -2150,7 +2128,6 @@ promise the same document shape.
 | Output schema | Leaves |
 |---|---|
 | `zcl.wallet_security.v1` | `core.wallet.security.status`, `core.wallet.security.encrypt`, `core.wallet.security.unlock`, `core.wallet.security.lock` |
-| `zcl.wait_result.v1` | `core.chain.wait.height`, `core.chain.wait.blocker`, `core.chain.wait.halt` |
 | `zcl.block_mutation.v1` | `core.consensus.block.invalidate`, `core.consensus.block.reconsider` |
 | `zcl.wallet_address.v1` | `core.wallet.address.new`, `core.wallet.address.import` |
 | `zcl.wallet_send.v1` | `core.wallet.transaction.send`, `vault.send` |
