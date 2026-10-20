@@ -371,6 +371,19 @@ static bool dlq_lint(struct dlq *q)
                   : dlq_refuse(q, ZCL_LAND_QUALIFY_LINT_FAILED, "lint", NULL);
 }
 
+static bool dlq_complexity(struct dlq *q)
+{
+    const char *goals[] = { "check-cyclomatic-complexity", NULL };
+    char *text = NULL;
+    int rc = dlq_make(q, "complexity", goals, false, &text);
+    if (rc != 0 && text)
+        dlq_first_fail(text, q->out->detail, sizeof(q->out->detail));
+    free(text);
+    return rc == 0 ? true
+                   : dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED,
+                                 "check-cyclomatic-complexity", NULL);
+}
+
 static bool dlq_group_add(struct dlq_groups *g, const char *name)
 {
     for (size_t i = 0; i < g->count; i++) {
@@ -700,6 +713,6 @@ bool zcl_dev_land_qualify(const char *wt, bool signing_exempt,
     struct dlq q = { .wt = wt, .exempt = signing_exempt, .out = out };
     memset(out, 0, sizeof(*out));
     return dlq_clean(&q) && dlq_fetch(&q) && dlq_rebase(&q) &&
-           dlq_signed(&q) && dlq_prepare(&q) && dlq_lint(&q) &&
+           dlq_signed(&q) && dlq_prepare(&q) && dlq_complexity(&q) && dlq_lint(&q) &&
            dlq_groups_run(&q) && dlq_fold(&q) && dlq_finish(&q);
 }

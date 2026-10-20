@@ -14,6 +14,8 @@
 #include "base/safe_alloc.h"
 #include "services/stopwatch_skip_watch.h"
 
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +25,20 @@
 #define SW_SLO_TAIL_LINES 500
 #define SW_FIELD_MAX 512
 #define SW_SHA_HEX 64
+
+static uint64_t sw_timestamp_distance(int64_t a, int64_t b)
+{
+    return a >= b ? (uint64_t)a - (uint64_t)b : (uint64_t)b - (uint64_t)a;
+}
+
+static bool sw_row_age(int64_t now, int64_t then, int64_t *age)
+{
+    if ((then > 0 && now < INT64_MIN + then) ||
+        (then < 0 && now > INT64_MAX + then))
+        return false;
+    *age = now - then;
+    return true;
+}
 
 static void sw_emit(struct zcl_judge_result *out, int code, const char *verdict,
                     const char *reason, const char *extra, const char *artifact)
@@ -89,8 +105,9 @@ static bool sw_oracle(const struct zcl_stopwatch_judge_opts *o, int64_t now,
         oh = ej_field_num(start, "oracle_height", false);
         ts = ej_field_num(start, "ts", false);
         if (oh.kind == EJ_NUM && ts.kind == EJ_NUM) {
-            int64_t age = now > ts.n ? now - ts.n : ts.n - now;
-            found = age < o->oracle_max_age_secs;
+            uint64_t age = sw_timestamp_distance(now, ts.n);
+            found = o->oracle_max_age_secs > 0 &&
+                    age < (uint64_t)o->oracle_max_age_secs;
             *height = oh.n;
             break;
         }
@@ -236,7 +253,10 @@ static void sw_judge_row(const struct zcl_stopwatch_judge_opts *o, int64_t now,
         sw_emit(out, 2, "STALE", "malformed_last_line_no_ts", "", artifact);
         return;
     }
-    age = now - ts.n;
+    if (!sw_row_age(now, ts.n, &age)) {
+        sw_emit(out, 2, "STALE", "last_sample_age_unrepresentable", "", artifact);
+        return;
+    }
     if (age > o->max_age_secs) {
         (void)snprintf(reason, sizeof(reason), "last_sample_age_%llds_gt_%llds",
                        (long long)age, (long long)o->max_age_secs);

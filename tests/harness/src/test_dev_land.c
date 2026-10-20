@@ -7054,13 +7054,22 @@ static const char dlx_qualify_makefile[] =
     "t-fast-exact\n"
     "docs-capability-inventory dev-bin install-hooks lint-ready:\n"
     "\t@true\n"
+    "ifneq ($(QFX),missing-complexity)\n"
+    ".PHONY: check-cyclomatic-complexity\n"
+    "check-cyclomatic-complexity:\n"
+    "\t@echo complexity >> build/scratch/qualify-stages\n"
+    "\t@if [ \"$(QFX)\" = complexity ]; then echo \"FAIL complexity\"; exit 1; fi\n"
+    "\t@if [ \"$(QFX)\" = complexity-tree ]; then echo changed >> tracked.txt; fi\n"
+    "endif\n"
     "lint:\n"
+    "\t@echo lint >> build/scratch/qualify-stages\n"
     "\t@if [ \"$(QFX)\" = lint ]; then echo \"FAIL gate-x\"; exit 1; fi\n"
     "\t@if [ \"$(QFX)\" = fold ]; then echo regenerated >> "
     "docs/dev/CODEBASE_MAP.md; fi\n"
     "\t@if [ \"$(QFX)\" = tree ]; then echo changed >> tracked.txt; fi\n"
     "\t@echo \"== LINT: all checks passed ==\"\n"
     "t-fast-exact:\n"
+    "\t@echo tests >> build/scratch/qualify-stages\n"
     "\t@for g in `echo \"$(ONLY)\" | tr , ' '`; do \\\n"
     "\t  [ \"$$g\" = \"$(QCRASH)\" ] && continue; \\\n"
     "\t  v=PASS; [ \"$$g\" = \"$(QFAIL)\" ] && v=FAIL; \\\n"
@@ -7146,7 +7155,7 @@ static int test_dev_land_qualify_passes(void)
     TEST("land: submit --qualify folds regenerated files and queues the tip") {
         struct dlx_rig rig;
         struct dlx_call c;
-        char head[64];
+        char head[64], path[1300], stages[128] = {0};
         const char *rev[] = { "rev-parse", "HEAD", NULL };
         dlx_isolate("qualify_passes");
         ASSERT(dlx_qualify_rig(&rig, "qualify_passes", "fold", "",
@@ -7156,7 +7165,46 @@ static int test_dev_land_qualify_passes(void)
         ASSERT(dlx_git_out(rig.clone, rev, head, sizeof(head)) == 0);
         ASSERT_STR_EQ(dlx_str(&c, "tip"), head);
         ASSERT(dlx_queue_has_one());
+        (void)snprintf(path, sizeof(path), "%s/build/scratch/qualify-stages", rig.clone);
+        ASSERT(dlx_slurp(path, stages, sizeof(stages) - 1, NULL));
+        ASSERT_STR_EQ(stages, "complexity\nlint\ntests\n");
         dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_qualify_restore();
+    return failures;
+}
+
+static int test_dev_land_qualify_complexity(void)
+{
+    int failures = 0;
+    TEST("land: complexity refuses early, missing targets refuse, and source "
+         "mutation cannot queue") {
+        const char *modes[] = { "complexity", "missing-complexity", "complexity-tree" };
+        for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+            struct dlx_rig rig;
+            struct dlx_call c;
+            char path[1300], stages[128] = {0};
+            dlx_isolate(modes[i]);
+            ASSERT(dlx_qualify_rig(&rig, modes[i], modes[i], "", DLX_Q_LEAF_SMOKE));
+            ASSERT(dlx_qualify_submit(&c, &rig));
+            ASSERT(dlx_qualify_refused(&c, i == 2 ? "QUALIFY_TREE_CHANGED"
+                                                : "QUALIFY_STEP_FAILED"));
+            (void)snprintf(path, sizeof(path), "%s/build/scratch/qualify-stages", rig.clone);
+            if (i == 1) {
+                ASSERT(!dlx_file_exists(path));
+            } else {
+                ASSERT(dlx_slurp(path, stages, sizeof(stages) - 1, NULL));
+                ASSERT_STR_EQ(stages, i == 0 ? "complexity\n"
+                                             : "complexity\nlint\ntests\n");
+            }
+            if (i != 2) {
+                ASSERT(strstr(dlx_str(&c, "log"), "qualify-complexity.log"));
+                ASSERT(dlx_file_exists(dlx_str(&c, "log")));
+            }
+            dlx_end(&c);
+        }
         PASS();
     }
 _test_next:;
@@ -15332,6 +15380,7 @@ int test_dev_land(void)
     failures += test_dev_land_prove_drive5();
     failures += test_dev_land_prove_drive6();
     failures += test_dev_land_qualify_passes();
+    failures += test_dev_land_qualify_complexity();
     failures += test_dev_land_qualify_verdict_rule();
     failures += test_dev_land_qualify_refusals();
     failures += test_dev_land_qualify_dirty_tree();

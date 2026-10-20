@@ -13,6 +13,7 @@
 #include "test/test_core.h"
 
 #include "command/native_evidence_judge.h"
+#include "command/native_evidence_judge_util.h"
 
 #include "util/spawn.h"
 
@@ -588,6 +589,125 @@ static int ejt_case_soak_parity(void)
     return failures;
 }
 
+static int ejt_case_integer_parser_boundaries(void)
+{
+    int failures = 0;
+    struct ej_num n;
+    TEST("evidence judge: integer reader preserves valid JSON delimiters and "
+         "refuses malformed or out-of-range integer tokens") {
+        n = ej_field_num("{\"n\":-9223372036854775808}", "n", false);
+        ASSERT(n.kind == EJ_NUM && n.n == INT64_MIN);
+        n = ej_field_num("{\"n\":9223372036854775807,\"next\":0}", "n", false);
+        ASSERT(n.kind == EJ_NUM && n.n == INT64_MAX);
+        n = ej_field_num("{\"n\":0 }", "n", false);
+        ASSERT(n.kind == EJ_NUM && n.n == 0);
+        n = ej_field_num("{\"n\":-1\r\n}", "n", false);
+        ASSERT(n.kind == EJ_NUM && n.n == -1);
+        n = ej_field_num("{\"n\":null}", "n", true);
+        ASSERT(n.kind == EJ_NULL);
+        ASSERT(ej_field_num("{\"n\":9223372036854775808}", "n", false).kind == EJ_MISSING);
+        ASSERT(ej_field_num("{\"n\":-9223372036854775809}", "n", false).kind == EJ_MISSING);
+        ASSERT(ej_field_num("{\"n\":2000000000x}", "n", false).kind == EJ_MISSING);
+        ASSERT(ej_field_num("{\"n\":2000000000.5}", "n", false).kind == EJ_MISSING);
+        ASSERT(ej_field_num("{\"n\":2000000000e0}", "n", false).kind == EJ_MISSING);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ejt_case_sw_age_overflow(void)
+{
+    char led[600], row[900];
+    int failures = 0;
+    ejt_path(led, sizeof(led), "sw_age_overflow.jsonl");
+    TEST("stopwatch: an unrepresentable signed row age refuses before "
+         "arithmetic can overflow") {
+        ejt_row(row, sizeof(row),
+                "{\"ts\":-9223372036854775808,\"verdict\":\"pass\"}\n");
+        ASSERT(ejt_write(led, row, "wb"));
+        ASSERT(ejt_sw(led, NULL, NULL) && ejt_is("STALE", 2));
+        ASSERT(strcmp(g_res.reason, "last_sample_age_unrepresentable") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ejt_case_sw_integer_boundaries(void)
+{
+    char led[600];
+    int failures = 0;
+    ejt_path(led, sizeof(led), "sw_integer_bounds.jsonl");
+    TEST("stopwatch: malformed integer timestamp tokens remain stale") {
+        ASSERT(ejt_write(led, "{\"ts\":9223372036854775808,\"verdict\":\"pass\"}\n", "wb"));
+        ASSERT(ejt_sw(led, NULL, NULL) && ejt_is("STALE", 2));
+        ASSERT(strcmp(g_res.reason, "malformed_last_line_no_ts") == 0);
+        ASSERT(ejt_write(led, "{\"ts\":-9223372036854775809,\"verdict\":\"pass\"}\n", "wb"));
+        ASSERT(ejt_sw(led, NULL, NULL) && ejt_is("STALE", 2));
+        ASSERT(strcmp(g_res.reason, "malformed_last_line_no_ts") == 0);
+        ASSERT(ejt_write(led, "{\"ts\":2000000000x,\"verdict\":\"pass\"}\n", "wb"));
+        ASSERT(ejt_sw(led, NULL, NULL) && ejt_is("STALE", 2));
+        ASSERT(strcmp(g_res.reason, "malformed_last_line_no_ts") == 0);
+        ASSERT(ejt_write(led, "{\"ts\":2000000000.5,\"verdict\":\"pass\"}\n", "wb"));
+        ASSERT(ejt_sw(led, NULL, NULL) && ejt_is("STALE", 2));
+        ASSERT(strcmp(g_res.reason, "malformed_last_line_no_ts") == 0);
+        ASSERT(ejt_write(led, "{\"ts\":2000000000e0,\"verdict\":\"pass\"}\n", "wb"));
+        ASSERT(ejt_sw(led, NULL, NULL) && ejt_is("STALE", 2));
+        ASSERT(strcmp(g_res.reason, "malformed_last_line_no_ts") == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ejt_case_sw_signed_age_boundaries(void)
+{
+    char led[600], row[900];
+    int failures = 0;
+    ejt_path(led, sizeof(led), "sw_integer_bounds.jsonl");
+    TEST("stopwatch: signed timestamp ages preserve their boundary contracts") {
+        ejt_row(row, sizeof(row), "{\"ts\":1999000000,\"verdict\":\"pass\"}\n");
+        ASSERT(ejt_write(led, row, "wb") && ejt_sw(led, NULL, NULL) && ejt_is("PASS", 0));
+        ejt_row(row, sizeof(row), "{\"ts\":1998999999,\"verdict\":\"pass\"}\n");
+        ASSERT(ejt_write(led, row, "wb") && ejt_sw(led, NULL, NULL) && ejt_is("STALE", 2));
+        ejt_row(row, sizeof(row), "{\"ts\":2001000001,\"verdict\":\"pass\"}\n");
+        ASSERT(ejt_write(led, row, "wb") && ejt_sw(led, NULL, NULL) && ejt_is("PASS", 0));
+        ASSERT(ejt_has("age_-1000001s"));
+        ejt_row(row, sizeof(row), "{\"ts\":2000000001,\"verdict\":\"pass\"}\n");
+        ASSERT(ejt_write(led, row, "wb") && ejt_sw(led, NULL, NULL) && ejt_is("PASS", 0));
+        ASSERT(ejt_has("age_-1s"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ejt_case_sw_oracle_distance_boundaries(void)
+{
+    char led[600], slo[600], row[900];
+    int failures = 0;
+    ejt_path(led, sizeof(led), "sw_integer_bounds.jsonl");
+    ejt_path(slo, sizeof(slo), "sw_oracle_bounds.jsonl");
+    TEST("stopwatch: oracle timestamp distances preserve their boundary contracts") {
+        ejt_row(row, sizeof(row), "{\"ts\":2000000000,\"verdict\":\"pass\"}\n");
+        ASSERT(ejt_write(led, row, "wb"));
+        ejt_row(row, sizeof(row), "{\"ts\":-9223372036854775808,\"oracle_height\":3200000}\n");
+        ASSERT(ejt_write(slo, row, "wb") && ejt_sw(led, slo, NULL) && ejt_is("PASS", 0));
+        ASSERT(ejt_has("ledger_available=false"));
+        ejt_row(row, sizeof(row), "{\"ts\":1999996401,\"oracle_height\":3100000}\n");
+        ASSERT(ejt_write(slo, row, "wb") && ejt_sw(led, slo, NULL) && ejt_is("PASS", 0));
+        ASSERT(ejt_has("ledger_available=true"));
+        ejt_row(row, sizeof(row), "{\"ts\":2000003599,\"oracle_height\":3100000}\n");
+        ASSERT(ejt_write(slo, row, "wb") && ejt_sw(led, slo, NULL) && ejt_is("PASS", 0));
+        ASSERT(ejt_has("ledger_available=true"));
+        ejt_row(row, sizeof(row), "{\"ts\":1999996400,\"oracle_height\":3100000}\n");
+        ASSERT(ejt_write(slo, row, "wb") && ejt_sw(led, slo, NULL) && ejt_is("PASS", 0));
+        ASSERT(ejt_has("ledger_available=false"));
+        ejt_row(row, sizeof(row), "{\"ts\":2000003600,\"oracle_height\":3100000}\n");
+        ASSERT(ejt_write(slo, row, "wb") && ejt_sw(led, slo, NULL) && ejt_is("PASS", 0));
+        ASSERT(ejt_has("ledger_available=false"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_evidence_judge(void);
 int test_evidence_judge(void)
 {
@@ -597,6 +717,11 @@ int test_evidence_judge(void)
     failures += ejt_case_sw_fixture_gates();
     failures += ejt_case_sw_qualify();
     failures += ejt_case_sw_stale();
+    failures += ejt_case_integer_parser_boundaries();
+    failures += ejt_case_sw_age_overflow();
+    failures += ejt_case_sw_integer_boundaries();
+    failures += ejt_case_sw_signed_age_boundaries();
+    failures += ejt_case_sw_oracle_distance_boundaries();
     failures += ejt_case_sw_streaks();
     failures += ejt_case_sw_skip_classes();
     failures += ejt_case_soak_verdicts();

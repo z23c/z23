@@ -1080,7 +1080,8 @@ static bool uniform_write(const char *path, const char *text)
 
 struct uniform_dir {
     char dir[PATH_MAX], file[PATH_MAX], link[PATH_MAX], opt[PATH_MAX + 16];
-    char wire[ZCL_COMMAND_LIST_BUDGET + 8192];
+    /* Maximum JSON document, newline, overflow sentinel and NUL. */
+    char wire[65536 + 3];
     int rc;
 };
 
@@ -1157,8 +1158,11 @@ static int test_leaf_json_contract(void)
             ASSERT(u->wire[0] == '{');
             ASSERT(strstr(u->wire, path) != NULL);
             ASSERT(strstr(u->wire, "zcl.command_schema.v1") != NULL);
-            ASSERT(uniform_cli_in(path, datadir, NULL, 0, u->wire,
-                                  sizeof(u->wire), &u->rc));
+            bool captured = uniform_cli_in(path, datadir, NULL, 0, u->wire,
+                                           sizeof(u->wire), &u->rc);
+            if (!captured)
+                printf("  no-node run of %s exceeded capture or failed I/O\n", path);
+            ASSERT(captured);
             if (!native_contract_single_result(u->wire))
                 printf("  no-node run of %s is not one zcl.result.v1 document\n", path);
             ASSERT(native_contract_single_result(u->wire));

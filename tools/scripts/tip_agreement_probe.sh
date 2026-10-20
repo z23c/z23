@@ -168,28 +168,40 @@
 #                         counts of every rival cluster, or null. A host that
 #                         reported two different hashes at one height inside
 #                         the window is counted once per cluster, which can
-#                         only OVERSTATE disagreement, never hide it
+#                         only OVERSTATE disagreement, never hide it; null
+#                         when the raw cluster census is truncated
 #   contested_peers       the subset of disagreeing_peers coming from rival
 #                         clusters that themselves meet min_distinct_peers.
 #                         This is the number a judge may grade on: one peer
 #                         is an anecdote in BOTH directions, so a single
 #                         remote host must not be able to mint agreement OR
 #                         to hold the verdict red on its own
-#   disagreeing_hashes    array of {"height":h,"hash":..,"peers":n}
+#   disagreeing_hashes    array of {"height":h,"hash":..,"peers":n}; null
+#                         when the raw cluster census is truncated
 #   rival_heights_unresolved
 #                         heights at or below our own tip that carried a
 #                         cluster we could NOT check, because our node would
-#                         not answer getblockhash there. Never folded into
-#                         "no rivals" — an unchecked height is unknown
+#                         not answer getblockhash there. On a truncated raw
+#                         census this covers qualifying clusters only; the
+#                         sentinel proves lower rows cannot affect the
+#                         witness-threshold verdict. Never folded into "no
+#                         rivals" — an unchecked relevant height is unknown
 #   heights_above_tip     clusters at heights above our own tip. Being behind
-#                         is not disagreement; it is recorded, not counted
+#                         is not disagreement; it is recorded, not counted;
+#                         null when the raw cluster census is truncated
 #   peers_total           connected peers in the node's current fold, null
 #                         when dumpstate did not answer
 #   peers_with_height     peers advertising a height in that fold, or null
 #   peers_usable          distinct remote hosts that contributed ANY tip
 #                         hash inside the window — the real denominator for
 #                         a hash comparison, null when unmeasured
-#   clusters_seen         distinct (height,hash) clusters in the window
+#   clusters_seen         distinct cluster rows returned by the bounded query;
+#                         a lower bound when cluster_census_complete is false
+#   cluster_census_complete
+#                         whether the bounded query covered every cluster
+#   qualifying_cluster_census_complete
+#                         whether every cluster meeting the witness threshold
+#                         was examined (a below-threshold sentinel proves this)
 #   excluded_hosts        how many hosts ZCL_PARITY_EXCLUDE_HOSTS removed
 #                         from consideration for this sample (0 when unset)
 #   outcome               agrees | disagrees | could-not-ask
@@ -478,6 +490,9 @@ sample_instance() {
     local outcome="could-not-ask" reason="" detail=""
     local our_height="" height="" our_hash="" modal_hash="" modal_peers=""
     local modal_groups="" disagree_peers="" disagree_json="[]"
+    local cluster_census_complete=false qualifying_cluster_census_complete=false
+    local cluster_query_limit=12 cluster_query_sentinel
+    cluster_query_sentinel=$((cluster_query_limit + 1))
     # Left empty (-> JSON null) on every early return: a sample that never
     # reached the rival scan has UNKNOWN rival counts, not zero ones.
     local contested_peers="" rival_unresolved="" heights_above=""
@@ -507,7 +522,7 @@ sample_instance() {
 COUNT(DISTINCT $HOSTKEY) AS n \
 FROM peer_chain_observations \
 WHERE observed_at >= $t0 AND tip_hash <> ''$EXCLUDE_SQL \
-GROUP BY h, t ORDER BY n DESC, h DESC LIMIT 12")"
+GROUP BY h, t ORDER BY n DESC, h DESC LIMIT $cluster_query_sentinel")"
     if [ $? -ne 0 ]; then
         reason="remote_observations_unavailable"
         detail="$(sql_fail_reason "$clusters_env")"
@@ -524,6 +539,71 @@ GROUP BY h, t ORDER BY n DESC, h DESC LIMIT 12")"
     # trailing newline, and `wc -l` counts newlines — so the plain form
     # reports N-1 clusters and calls a single cluster zero.
     clusters_seen="$(printf '%s\n' "$rows" | awk 'NF' | wc -l | tr -d ' ')"
+
+    # Ask for one sentinel row beyond the bounded census. Since rows are
+    # ordered by distinct-host count descending, a qualifying sentinel means
+    # an omitted qualifying cluster may exist and the observation is unknown.
+    # A below-threshold sentinel proves every omitted cluster is also below
+    # threshold: the qualifying census is complete, while raw cluster totals
+    # remain incomplete and must not be reported as exact.
+    if [ "$clusters_seen" -ge "$cluster_query_sentinel" ]; then
+        local sentinel_line sentinel_fields sentinel_h sentinel_t sentinel_n
+        local sentinel_valid=true sentinel_below_threshold=false
+        sentinel_line="$(printf '%s\n' "$rows" | sed -n "${cluster_query_sentinel}p")"
+        sentinel_fields="$(printf '%s\n' "$sentinel_line" |
+            awk -F"$SEP" 'NF { print NF; exit }')"
+        sentinel_h="$(f1 "$sentinel_line")"
+        sentinel_t="$(f2 "$sentinel_line")"
+        sentinel_n="$(f3 "$sentinel_line")"
+        [ "$sentinel_fields" = 3 ] || sentinel_valid=false
+        case "$sentinel_h" in '' | *[!0-9]*) sentinel_valid=false ;; esac
+        [ -n "$sentinel_t" ] || sentinel_valid=false
+        case "$sentinel_n" in
+            '' | *[!0-9]*) sentinel_valid=false ;;
+            0[0-9]*) sentinel_valid=false ;;
+            *)
+                if [ "${#sentinel_n}" -gt 19 ] ||
+                   { [ "${#sentinel_n}" -eq 19 ] &&
+                     [[ "$sentinel_n" > 9223372036854775807 ]]; }; then
+                    sentinel_valid=false
+                fi
+                ;;
+        esac
+        # Only a successful, representable below-threshold comparison proves
+        # that all omitted rows are nonqualifying. A malformed row, arithmetic
+        # range overflow, or comparison failure remains unknown.
+        if [ "$sentinel_valid" = true ] &&
+           [ "$sentinel_n" -lt "$MIN_DISTINCT_PEERS" ] 2>/dev/null; then
+            sentinel_below_threshold=true
+        fi
+        if [ "$sentinel_below_threshold" != true ]; then
+            reason="remote_observations_cluster_limit_reached"
+            if [ "$sentinel_valid" != true ]; then
+                detail="sentinel row shape or count invalid; qualifying rival census unknown"
+            elif [ "$sentinel_n" -ge "$MIN_DISTINCT_PEERS" ] 2>/dev/null; then
+                detail="at least $cluster_query_sentinel clusters returned; qualifying rival census incomplete"
+            else
+                detail="sentinel threshold comparison failed; qualifying rival census unknown"
+            fi
+            disagree_json="null"
+            emit_sample "$name" "$ts" "$outcome" "$reason" "$detail" \
+                "$our_height" "$height" "$our_hash" "$modal_hash" "$modal_peers" \
+                "$modal_groups" "" "$disagree_json" \
+                "$peers_total" "$peers_with_height" "$peers_usable" "$clusters_seen" \
+                "" "" ""
+            return $?
+        fi
+        qualifying_cluster_census_complete=true
+        # The returned prefix is enough to decide the witness-threshold policy.
+        # It is not enough to publish exact all-cluster disagreement or above-tip
+        # totals, so those fields are made null after the decision is computed.
+        disagree_peers=""
+        disagree_json="null"
+        heights_above=""
+    else
+        cluster_census_complete=true
+        qualifying_cluster_census_complete=true
+    fi
 
     # (c) how many distinct remote hosts contributed ANY hash in the window
     # — the denominator. Optional: null when unmeasured, never 0.
@@ -620,8 +700,10 @@ AND lower(tip_hash) = '$modal_hash'$EXCLUDE_SQL LIMIT 24")"
     # as zero rivals, and the judge passed a window of them. An unexamined
     # height must read as UNKNOWN, never as no-disagreement.
     #
-    # So: resolve OUR hash at every distinct height that carries a cluster,
-    # and classify each one.
+    # So: resolve OUR hash at every distinct relevant height and classify each
+    # one. Under a truncated census with a below-threshold sentinel, only
+    # qualifying clusters affect the one-witness verdict policy; the sentinel
+    # proves no omitted cluster can qualify.
     #   * height above our own tip     -> heights_above_tip. Being behind the
     #                                     network is neither agreement nor
     #                                     disagreement; it is recorded.
@@ -650,7 +732,10 @@ AND lower(tip_hash) = '$modal_hash'$EXCLUDE_SQL LIMIT 24")"
         if [ -z "$oh" ]; then unresolved=$((unresolved + 1)); continue; fi
         OUR_AT["$hh"]="$oh"
     done < <(printf '%s\n' "$rows" |
-             awk -F"$SEP" 'NF && $1 ~ /^[0-9]+$/ {print $1}' | sort -rn -u)
+             awk -F"$SEP" -v min="$MIN_DISTINCT_PEERS" \
+                 -v complete="$cluster_census_complete" \
+                 'NF && $1 ~ /^[0-9]+$/ && (complete == "true" || $3+0 >= min) {print $1}' |
+             sort -rn -u)
 
     while IFS= read -r line; do
         [ -n "$line" ] || continue
@@ -658,6 +743,11 @@ AND lower(tip_hash) = '$modal_hash'$EXCLUDE_SQL LIMIT 24")"
         h="$(f1 "$line")"; t="$(f2 "$line")"; n="$(f3 "$line")"
         case "$h$n" in '' | *[!0-9]*) continue ;; esac
         [ -n "$t" ] || continue
+        if [ "$qualifying_cluster_census_complete" = true ] &&
+           [ "$cluster_census_complete" = false ] &&
+           [ "$n" -lt "$MIN_DISTINCT_PEERS" ]; then
+            continue
+        fi
         t="$(printf '%s' "$t" | tr 'A-F' 'a-f')"
         oh="${OUR_AT[$h]:-}"
         # No hash of ours at this height: already counted as above-tip or
@@ -673,6 +763,13 @@ AND lower(tip_hash) = '$modal_hash'$EXCLUDE_SQL LIMIT 24")"
     rival_unresolved="$unresolved"
     heights_above="$above"
     disagree_json="[${parts#,}]"
+    if [ "$cluster_census_complete" = false ]; then
+        # These raw all-cluster values can grow in the omitted tail. The
+        # threshold-qualified rival and unresolved counts above remain complete.
+        disagree_peers=""
+        disagree_json="null"
+        heights_above=""
+    fi
 
     if [ "$our_hash" = "$modal_hash" ]; then
         outcome="agrees"
@@ -719,7 +816,7 @@ emit_sample() {
     [ -n "$reason" ] || reason="unspecified"
 
     local line
-    line="$(printf '{"ts":%s,"instance":%s,"rpcport":%s,"datadir":%s,"window_secs":%s,"min_distinct_peers":%s,"our_height":%s,"height":%s,"our_tip_hash":%s,"modal_remote_hash":%s,"modal_remote_peers":%s,"modal_remote_groups":%s,"disagreeing_peers":%s,"contested_peers":%s,"rival_heights_unresolved":%s,"heights_above_tip":%s,"disagreeing_hashes":%s,"peers_total":%s,"peers_with_height":%s,"peers_usable":%s,"clusters_seen":%s,"excluded_hosts":%s,"outcome":%s,"reason":%s,"error_detail":%s}' \
+    line="$(printf '{"ts":%s,"instance":%s,"rpcport":%s,"datadir":%s,"window_secs":%s,"min_distinct_peers":%s,"our_height":%s,"height":%s,"our_tip_hash":%s,"modal_remote_hash":%s,"modal_remote_peers":%s,"modal_remote_groups":%s,"disagreeing_peers":%s,"contested_peers":%s,"rival_heights_unresolved":%s,"heights_above_tip":%s,"disagreeing_hashes":%s,"peers_total":%s,"peers_with_height":%s,"peers_usable":%s,"clusters_seen":%s,"cluster_census_complete":%s,"qualifying_cluster_census_complete":%s,"excluded_hosts":%s,"outcome":%s,"reason":%s,"error_detail":%s}' \
         "$ts" "$(jstr "$name")" "$SAMPLE_RPCPORT" "$(jstr "$SAMPLE_DATADIR")" \
         "$WINDOW_SECS" "$MIN_DISTINCT_PEERS" \
         "$(jnum "$our_height")" "$(jnum "$height")" \
@@ -730,6 +827,7 @@ emit_sample() {
         "${disagree_json:-[]}" \
         "$(jnum "$peers_total")" "$(jnum "$peers_with_height")" \
         "$(jnum "$peers_usable")" "$(jnum "$clusters_seen")" \
+        "$cluster_census_complete" "$qualifying_cluster_census_complete" \
         "$(jnum "$EXCLUDED_HOSTS")" \
         "$(jstr "$outcome")" "$(jstr "$reason")" "$(jstr "$detail")")"
 

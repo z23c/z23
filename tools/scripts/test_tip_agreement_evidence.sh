@@ -103,6 +103,79 @@ STUB
     chmod +x "$f"
 }
 
+# query_aware_cluster_stub <file> <source-tsv>
+# The fixture returns rows in the production ORDER BY and applies the LIMIT
+# parsed from the actual SQL statement, so a cap regression cannot be hidden
+# by an arbitrary pre-truncated response.
+query_aware_cluster_stub() {
+    local f="$1" fixture="$2" malformed="${3:-none}"
+    cat >"$f" <<STUB
+#!/usr/bin/env bash
+s="\${ZCL_PARITY_SQL:-}"
+malformed='$malformed'
+case "\$s" in
+  *"GROUP BY"*)
+    case "\$s" in
+      *"ORDER BY n DESC, h DESC LIMIT "*) ;;
+      *) echo "stub: production cluster ordering/limit missing: \$s" >&2; exit 1 ;;
+    esac
+    limit=\${s##*LIMIT }
+    case "\$limit" in ''|*[!0-9]*) echo "stub: invalid LIMIT: \$limit" >&2; exit 1 ;; esac
+    rows=\$(sort -t '|' -k3,3nr -k1,1nr "$fixture" | head -n "\$limit" |
+      awk -F '|' 'BEGIN { printf "[" } { if (NR > 1) printf ","; printf "[%s,\"%s\",%s]", \$1, \$2, \$3 } END { printf "]" }')
+    n=\$(sort -t '|' -k3,3nr -k1,1nr "$fixture" | head -n "\$limit" | wc -l | tr -d ' ')
+    case "\$malformed" in
+      missing-count) rows="\${rows%]},[1]]"; n=\$((n + 1)) ;;
+      oversized-count) rows="\${rows%]},[$((HEIGHT - 13)),\"$HASH_THEM\",9223372036854775808]]"; n=\$((n + 1)) ;;
+    esac
+    printf '{"schema":"zcl.result.v1","command":"core.storage.query","ok":true,"data":{"columns":["h","t","n"],"rows":%s,"row_count":%s,"truncated":false,"interrupted":false}}' "\$rows" "\$n" ;;
+  *"SELECT DISTINCT"*)
+    printf '%s' '{"schema":"zcl.result.v1","ok":true,"data":{"columns":["host"],"rows":[["203.0.113.7"],["198.51.100.9"]],"row_count":2,"truncated":false,"interrupted":false}}' ;;
+  *) printf '%s' '{"schema":"zcl.result.v1","ok":true,"data":{"columns":["n"],"rows":[[40]],"row_count":1,"truncated":false,"interrupted":false}}' ;;
+esac
+STUB
+    chmod +x "$f"
+}
+
+# Twelve successively lower-ranked clusters match the local chain. The
+# optional thirteenth row is a qualifying rival at/below our tip.
+make_ranked_clusters() {
+    local f="$1" include_rival="$2" i h hash
+    : >"$f"
+    for ((i = 1; i <= 12; i++)); do
+        h=$((HEIGHT - i + 1))
+        printf -v hash '%064x' "$i"
+        printf '%s|%s|%s\n' "$h" "$hash" "$((16 - i))" >>"$f"
+    done
+    if [ "$include_rival" = yes ]; then
+        printf '%s|%s|2\n' "$((HEIGHT - 1))" "$HASH_THEM" >>"$f"
+    fi
+}
+
+# Twelve rows remain within the query cap. Rank 1 is the local-chain modal
+# cluster; rank 12 is a qualifying conflicting cluster with four witnesses.
+# The valid one-witness row at rank 13 is the below-threshold sentinel.
+make_ranked_clusters_retained_rival() {
+    local f="$1" i h hash
+    : >"$f"
+    for ((i = 1; i <= 12; i++)); do
+        h=$((HEIGHT - i + 1))
+        printf -v hash '%064x' "$i"
+        if [ "$i" -eq 12 ]; then hash="$HASH_THEM"; fi
+        printf '%s|%s|%s\n' "$h" "$hash" "$((16 - i))" >>"$f"
+    done
+    printf '%s|%s|1\n' "$((HEIGHT - 12))" "$HASH_THEM" >>"$f"
+}
+
+append_one_witness_tails() {
+    local f="$1" tails="$2" i h hash
+    for ((i = 1; i <= tails; i++)); do
+        h=$((HEIGHT - i))
+        printf -v hash '%064x' "$((100 + i))"
+        printf '%s|%s|1\n' "$h" "$hash" >>"$f"
+    done
+}
+
 state_stub() {
     printf '{"subsystem":"network_monitor","state":{"ready":true,"num_peers":21,"peers_with_height":20,"our_height":%s,"tip_clusters":[]}}' "$1"
 }
@@ -428,6 +501,127 @@ STUB
         cat "$L" 2>/dev/null >&2; bad "R16 host key shape wrong (one machine could count as two witnesses)"
     fi
 
+    # R17 — the query-aware LIMIT+1 sentinel. The thirteenth qualifying
+    # cluster is a rival below our tip, ordered after twelve higher-ranked
+    # local-chain clusters. A sentinel row must make this observation unknown.
+    d="$TMP/r17"
+    make_ranked_clusters "$TMP/r17.tsv" yes
+    query_aware_cluster_stub "$TMP/r17.sh" "$TMP/r17.tsv"
+    local hash_by_height='printf -v h "%064x" "$((3197949 - ZCL_PARITY_HEIGHT + 1))"; printf "{\"result\":\"%s\"}" "$h"'
+    run_probe "$d" "$TMP/r17.sh" "$hash_by_height"
+    L="$(ledger_of "$d")"
+    if grep -q '"outcome":"could-not-ask"' "$L" &&
+       grep -q '"reason":"remote_observations_cluster_limit_reached"' "$L" &&
+       grep -q '"clusters_seen":13,' "$L" &&
+       grep -q '"cluster_census_complete":false,"qualifying_cluster_census_complete":false' "$L" &&
+       grep -q '"disagreeing_peers":null' "$L" &&
+       grep -q '"disagreeing_hashes":null' "$L" &&
+       grep -q '"contested_peers":null,"rival_heights_unresolved":null,' "$L"; then
+        ok "a thirteenth qualifying cluster makes the capped observation unknown"
+    else
+        cat "$L" >&2; bad "R17 capped cluster query was treated as complete"
+    fi
+
+    # R18 — exactly twelve clusters are still a complete census: the
+    # sentinel query returns twelve rows, so the clean observation remains valid.
+    d="$TMP/r18"
+    make_ranked_clusters "$TMP/r18.tsv" no
+    query_aware_cluster_stub "$TMP/r18.sh" "$TMP/r18.tsv"
+    run_probe "$d" "$TMP/r18.sh" "$hash_by_height"
+    L="$(ledger_of "$d")"
+    if grep -q '"outcome":"agrees"' "$L" &&
+       grep -q '"clusters_seen":12,' "$L" &&
+       grep -q '"contested_peers":0,"rival_heights_unresolved":0,' "$L"; then
+        ok "an exactly-at-cap complete agreeing census remains valid"
+    else
+        cat "$L" >&2; bad "R18 exactly-at-cap census was not preserved"
+    fi
+
+    # R19 — a one-witness sentinel cannot contest the verdict. The reviewed
+    # candidate incorrectly refuses solely because row 13 exists.
+    d="$TMP/r19"
+    make_ranked_clusters "$TMP/r19.tsv" no
+    append_one_witness_tails "$TMP/r19.tsv" 1
+    query_aware_cluster_stub "$TMP/r19.sh" "$TMP/r19.tsv"
+    run_probe "$d" "$TMP/r19.sh" "$hash_by_height"
+    L="$(ledger_of "$d")"
+    if grep -q '"outcome":"agrees"' "$L" &&
+       grep -q '"contested_peers":0,"rival_heights_unresolved":0,' "$L" &&
+       grep -q '"clusters_seen":13,"cluster_census_complete":false,"qualifying_cluster_census_complete":true' "$L" &&
+       grep -q '"disagreeing_peers":null' "$L" &&
+       grep -q '"disagreeing_hashes":null' "$L" &&
+       grep -q '"heights_above_tip":null' "$L"; then
+        ok "a one-witness sentinel preserves valid agreement"
+    else
+        cat "$L" >&2; bad "R19 one-witness sentinel changed the agreement policy"
+    fi
+
+    # R20 — two more one-witness rows beyond the returned sentinel must not
+    # move the same cap regression to row 15.
+    d="$TMP/r20"
+    make_ranked_clusters "$TMP/r20.tsv" no
+    append_one_witness_tails "$TMP/r20.tsv" 3
+    query_aware_cluster_stub "$TMP/r20.sh" "$TMP/r20.tsv"
+    run_probe "$d" "$TMP/r20.sh" "$hash_by_height"
+    L="$(ledger_of "$d")"
+    if grep -q '"outcome":"agrees"' "$L" &&
+       grep -q '"contested_peers":0,"rival_heights_unresolved":0,' "$L" &&
+       grep -q '"clusters_seen":13,"cluster_census_complete":false,"qualifying_cluster_census_complete":true' "$L" &&
+       grep -q '"disagreeing_peers":null' "$L" &&
+       grep -q '"disagreeing_hashes":null' "$L" &&
+       grep -q '"heights_above_tip":null' "$L"; then
+        ok "additional below-threshold tail rows preserve valid agreement"
+    else
+        cat "$L" >&2; bad "R20 additional below-threshold tail changed agreement policy"
+    fi
+
+    # R21 — an actually malformed sentinel row with no count column must not
+    # be accepted through cut's behavior for a missing delimiter.
+    d="$TMP/r21"
+    make_ranked_clusters "$TMP/r21.tsv" no
+    query_aware_cluster_stub "$TMP/r21.sh" "$TMP/r21.tsv" missing-count
+    run_probe "$d" "$TMP/r21.sh" "$hash_by_height"
+    L="$(ledger_of "$d")"
+    if grep -q '"outcome":"could-not-ask"' "$L" &&
+       grep -q '"cluster_census_complete":false,"qualifying_cluster_census_complete":false' "$L" &&
+       grep -q '"disagreeing_peers":null,"contested_peers":null,"rival_heights_unresolved":null' "$L"; then
+        ok "a sentinel row missing its count field remains unknown"
+    else
+        cat "$L" >&2; bad "R21 missing sentinel count was trusted"
+    fi
+
+    # R22 — an integer outside Bash's signed arithmetic range must not turn
+    # a failed numeric comparison into a complete qualifying census.
+    d="$TMP/r22"
+    make_ranked_clusters "$TMP/r22.tsv" no
+    query_aware_cluster_stub "$TMP/r22.sh" "$TMP/r22.tsv" oversized-count
+    run_probe "$d" "$TMP/r22.sh" "$hash_by_height"
+    L="$(ledger_of "$d")"
+    if grep -q '"outcome":"could-not-ask"' "$L" &&
+       grep -q '"cluster_census_complete":false,"qualifying_cluster_census_complete":false' "$L" &&
+       grep -q '"disagreeing_peers":null,"contested_peers":null,"rival_heights_unresolved":null' "$L"; then
+        ok "an out-of-range sentinel count remains unknown"
+    else
+        cat "$L" >&2; bad "R22 out-of-range sentinel count was trusted"
+    fi
+
+    # R23 — a valid subthreshold sentinel completes the qualifying census,
+    # but a qualifying conflicting cluster retained at rank 12 still counts.
+    # The raw census remains incomplete because rank 13 is outside the cap.
+    d="$TMP/r23"
+    make_ranked_clusters_retained_rival "$TMP/r23.tsv"
+    query_aware_cluster_stub "$TMP/r23.sh" "$TMP/r23.tsv"
+    run_probe "$d" "$TMP/r23.sh" "$hash_by_height"
+    L="$(ledger_of "$d")"
+    if grep -q '"outcome":"agrees"' "$L" &&
+       grep -q '"modal_remote_hash":"0000000000000000000000000000000000000000000000000000000000000001"' "$L" &&
+       grep -q '"clusters_seen":13,"cluster_census_complete":false,"qualifying_cluster_census_complete":true' "$L" &&
+       grep -q '"disagreeing_peers":null,"contested_peers":4,' "$L"; then
+        ok "the matching modal remains agrees while the retained rival records four contested peers"
+    else
+        cat "$L" >&2; bad "R23 retained qualifying rival was not counted exactly"
+    fi
+
     # R9 — the ledger is append-only across runs and every line is one
     # complete JSON object (the judge reads it line by line).
     d="$TMP/r9"; sql_stub "$TMP/r9.sh" "[[$HEIGHT,\"$HASH_OURS\",2]]" 1 false
@@ -629,6 +823,81 @@ judge_cases() {
     f="$TMP/j_unres.jsonl"; : >"$f"
     for i in $(seq 1 10); do jrow "$((NOW - i * 600))" agrees 2 2 0 1 >>"$f"; done
     jcase "a window of unverifiable agreements is NO_EVIDENCE" "$f" NO_EVIDENCE 1
+
+    # J21 — eight real recorder observations span the accrual interval and
+    # are graded by the real judge. The parent LIMIT 12 omits a thirteenth
+    # qualifying rival and incorrectly accrues PASS; the candidate must refuse.
+    d="$TMP/j_e2e_cluster_cap"
+    make_ranked_clusters "$TMP/j_cluster_cap.tsv" yes
+    query_aware_cluster_stub "$TMP/j_cluster_cap.sh" "$TMP/j_cluster_cap.tsv"
+    local hash_by_height='printf -v h "%064x" "$((3197949 - ZCL_PARITY_HEIGHT + 1))"; printf "{\"result\":\"%s\"}" "$h"'
+    for ((i = 1; i <= 8; i++)); do
+        run_probe "$d" "$TMP/j_cluster_cap.sh" "$hash_by_height" "$((NOW - i * 600))"
+    done
+    jcase "thirteen qualifying clusters with omitted rival cannot accrue PASS" \
+        "$(ledger_of "$d")" NO_EVIDENCE 1
+
+    # J22 — retain agreement for a single subthreshold sentinel.
+    d="$TMP/j_e2e_one_witness"
+    make_ranked_clusters "$TMP/j_one_witness.tsv" no
+    append_one_witness_tails "$TMP/j_one_witness.tsv" 1
+    query_aware_cluster_stub "$TMP/j_one_witness.sh" "$TMP/j_one_witness.tsv"
+    for ((i = 1; i <= 8; i++)); do
+        run_probe "$d" "$TMP/j_one_witness.sh" "$hash_by_height" "$((NOW - i * 600))"
+    done
+    jcase "one-witness sentinel does not prevent valid agreement accrual" \
+        "$(ledger_of "$d")" PASS 0
+
+    # J23 — more rows beyond the sentinel remain below the threshold too.
+    d="$TMP/j_e2e_one_witness_tail"
+    make_ranked_clusters "$TMP/j_one_witness_tail.tsv" no
+    append_one_witness_tails "$TMP/j_one_witness_tail.tsv" 3
+    query_aware_cluster_stub "$TMP/j_one_witness_tail.sh" "$TMP/j_one_witness_tail.tsv"
+    for ((i = 1; i <= 8; i++)); do
+        run_probe "$d" "$TMP/j_one_witness_tail.sh" "$hash_by_height" "$((NOW - i * 600))"
+    done
+    jcase "additional below-threshold rows do not move the cap boundary" \
+        "$(ledger_of "$d")" PASS 0
+
+    # J24 — a missing sentinel count cannot accrue an otherwise sufficient
+    # window of clean observations.
+    d="$TMP/j_e2e_missing_sentinel_count"
+    make_ranked_clusters "$TMP/j_missing_count.tsv" no
+    query_aware_cluster_stub "$TMP/j_missing_count.sh" "$TMP/j_missing_count.tsv" missing-count
+    for ((i = 1; i <= 8; i++)); do
+        run_probe "$d" "$TMP/j_missing_count.sh" "$hash_by_height" "$((NOW - i * 600))"
+    done
+    jcase "missing sentinel count cannot accrue PASS" \
+        "$(ledger_of "$d")" NO_EVIDENCE 1
+
+    # J25 — an unrepresentable count is treated as unknown, not a clean window.
+    d="$TMP/j_e2e_oversized_sentinel_count"
+    make_ranked_clusters "$TMP/j_oversized_count.tsv" no
+    query_aware_cluster_stub "$TMP/j_oversized_count.sh" "$TMP/j_oversized_count.tsv" oversized-count
+    for ((i = 1; i <= 8; i++)); do
+        run_probe "$d" "$TMP/j_oversized_count.sh" "$hash_by_height" "$((NOW - i * 600))"
+    done
+    jcase "out-of-range sentinel count cannot accrue PASS" \
+        "$(ledger_of "$d")" NO_EVIDENCE 1
+
+    # J26 — the valid one-witness sentinel permits grading, while the
+    # qualifying conflict retained at rank 12 makes real recorder samples
+    # disagree; this must not be hidden by the sentinel.
+    d="$TMP/j_e2e_retained_rival"
+    make_ranked_clusters_retained_rival "$TMP/j_retained_rival.tsv"
+    query_aware_cluster_stub "$TMP/j_retained_rival.sh" "$TMP/j_retained_rival.tsv"
+    for ((i = 1; i <= 8; i++)); do
+        run_probe "$d" "$TMP/j_retained_rival.sh" "$hash_by_height" "$((NOW - i * 600))"
+    done
+    L="$(ledger_of "$d")"
+    if [ "$(grep -c '"outcome":"agrees"' "$L")" -eq 8 ] &&
+       [ "$(grep -c '"contested_peers":4' "$L")" -eq 8 ]; then
+        ok "eight real recorder samples retain the rank-12 four-witness conflict"
+    else
+        cat "$L" >&2; bad "J26 retained-rival recorder samples lost contest evidence"
+    fi
+    jcase "retained rank-12 rival is DISAGREE through real recorder and judge" \
+        "$L" DISAGREE 1
 
     # J14 — the same end-to-end path with an unusable source: the prober
     # writes could-not-ask, the judge refuses. This is the pair the whole

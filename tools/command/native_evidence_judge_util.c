@@ -7,6 +7,7 @@
 #include "base/safe_alloc.h"
 #include "platform/time_compat.h"
 
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,12 @@ static bool ej_needle(const char *key, char *needle, size_t cap)
     return snprintf(needle, cap, "\"%s\":", key) < (int)cap;
 }
 
+static bool ej_integer_end(char c)
+{
+    return c == 0 || c == ',' || c == '}' || c == ']' ||
+           c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
 /* Parses `-?[0-9]+` at p. */
 static bool ej_parse_int(const char *p, int64_t *n)
 {
@@ -26,7 +33,12 @@ static bool ej_parse_int(const char *p, int64_t *n)
     char *end;
     if (digits[0] < '0' || digits[0] > '9')
         return false;
-    *n = (int64_t)strtoll(p, &end, 10);
+    errno = 0;
+    long long value = strtoll(p, &end, 10);
+    if (errno == ERANGE || value < INT64_MIN || value > INT64_MAX || end == p ||
+        !ej_integer_end(*end))
+        return false;
+    *n = (int64_t)value;
     return true;
 }
 

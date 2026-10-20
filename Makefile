@@ -1928,6 +1928,7 @@ NODE_C23_PACKAGE_VERIFY_LINK_RSP = $(NODE_C23_OBJ_DIR)/package-verify-link-input
 # The qualifier shares the public node graph; only its standalone main is distinct.
 NODE_C23_WIKI_RUNTIME_OBJ = $(NODE_C23_OBJ_DIR)/tools/dev/wiki_runtime_main.o
 NODE_C23_WIKI_RUNTIME_LINK_RSP = $(NODE_C23_OBJ_DIR)/wiki-runtime-link-inputs.$(BUILD_INVOCATION_ID).rsp
+NODE_C23_WIKI_RUNTIME_ARCHIVE_ENABLED = $(and $(filter Linux,$(ZCL_HOST_OS)),$(if $(ZCL_CC_IS_CLANG),,1))
 NODE_C23_PROFILE = node-c23-v1
 NODE_C23_SESSION = $(NODE_C23_OBJ_DIR)/.build-session
 NODE_C23_LEASE = $(NODE_C23_OBJ_DIR)/.leases/$(BUILD_INVOCATION_ID)
@@ -16612,6 +16613,7 @@ export-native-tunnel: $(BIN_DIR)/native-tunnel-export
 	$(BIN_DIR)/native-tunnel-export --root "$(CURDIR)" --out "$(TUNNEL_EXPORT_DIR)" \
 	 --source-head "$(shell git rev-parse HEAD)"
 
+# Keep trace.o explicit: its constructor preserves opt-in log initialization.
 # Finite native wiki propagation qualifier; no operator command registry leaf.
 .PHONY: z23-wiki-runtime
 z23-wiki-runtime: $(BIN_DIR)/z23-wiki-runtime
@@ -16619,12 +16621,22 @@ $(BIN_DIR)/z23-wiki-runtime: $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
 		$(NODE_C23_WIKI_RUNTIME_OBJ) $(NODE_C23_PACKAGE_VERIFY_NODE_OBJS) \
 		$(COMMAND_CATALOG_DEFS) $(C23_PORTABLE_RELINK) | $(NODE_VENDOR_LIBS)
 	@mkdir -p $(dir $@)
-	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$(NODE_C23_WIKI_RUNTIME_LINK_RSP),$(NODE_C23_WIKI_RUNTIME_OBJ) $(NODE_C23_PACKAGE_VERIFY_NODE_OBJS))) set -eu; \
-	tmp="$$(mktemp "$@.link.XXXXXX")"; \
+	@$(if $(ZCL_MAKE_NO_EXEC),,$(file >$(NODE_C23_WIKI_RUNTIME_LINK_RSP),$(if $(NODE_C23_WIKI_RUNTIME_ARCHIVE_ENABLED),,$(NODE_C23_WIKI_RUNTIME_OBJ)) $(NODE_C23_PACKAGE_VERIFY_NODE_OBJS))) set -eu; \
+	tmp="$$(mktemp "$@.link.XXXXXX")"; archive_dir=""; \
 	test -s "$(NODE_C23_WIKI_RUNTIME_LINK_RSP)"; \
-	trap 'rm -f "$$tmp" "$(NODE_C23_WIKI_RUNTIME_LINK_RSP)"' EXIT HUP INT TERM; \
-	$(CC) $(NODE_C23_CFLAGS) -Wno-deprecated-declarations $(LDFLAGS) \
-		-o "$$tmp" "@$(NODE_C23_WIKI_RUNTIME_LINK_RSP)" $(NODE_C23_TOR_LIBS) $(NODE_C23_LIBS); \
+	trap 'rm -f "$$tmp" "$(NODE_C23_WIKI_RUNTIME_LINK_RSP)"; if test -n "$$archive_dir"; then rm -f "$$archive_dir/node.a"; rmdir "$$archive_dir"; fi' EXIT HUP INT TERM; \
+	if test '$(NODE_C23_WIKI_RUNTIME_ARCHIVE_ENABLED)' = 1; then \
+	  archive_dir="$$(mktemp -d "$@.archive.XXXXXX")"; \
+	  archive_tool="$$($(CC) -print-prog-name=gcc-ar)"; \
+	  "$$archive_tool" qcsD "$$archive_dir/node.a" "@$(NODE_C23_WIKI_RUNTIME_LINK_RSP)"; \
+	  $(CC) $(NODE_C23_CFLAGS) -Wno-deprecated-declarations $(LDFLAGS) \
+	    -o "$$tmp" $(NODE_C23_WIKI_RUNTIME_OBJ) \
+	    $(NODE_C23_OBJ_DIR)/platform/modules/util/src/trace.o \
+	    "$$archive_dir/node.a" $(NODE_C23_TOR_LIBS) $(NODE_C23_LIBS); \
+	else \
+	  $(CC) $(NODE_C23_CFLAGS) -Wno-deprecated-declarations $(LDFLAGS) \
+	    -o "$$tmp" "@$(NODE_C23_WIKI_RUNTIME_LINK_RSP)" $(NODE_C23_TOR_LIBS) $(NODE_C23_LIBS); \
+	fi; \
 	$(BUILD_EPOCH_SESSION_TOOL) verify "$(NODE_C23_SESSION)" "$(NODE_C23_LEASE)" \
 	  "$(NODE_C23_OBJ_ROOT)" - "$(BUILD_EPOCH_KEEP)" "$(BUILD_SOURCE_ID)" \
 	  "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" "$(BUILD_COMPILER_ID)" \
@@ -16634,6 +16646,7 @@ $(BIN_DIR)/z23-wiki-runtime: $(VIEW_GEN_HEADERS) $(BUILD_IDENTITY_STAMP) \
 	tools/dev/source-identity.sh verify-record "$(BUILD_SOURCE_ID)" "$(BUILD_CLEAN)" "$(BUILD_MUTATION)" >/dev/null; \
 	mv -f -- "$$tmp" "$@"; \
 	rm -f -- "$(NODE_C23_WIKI_RUNTIME_LINK_RSP)"; \
+	if test -n "$$archive_dir"; then rm -f "$$archive_dir/node.a"; rmdir "$$archive_dir"; fi; \
 	trap - EXIT HUP INT TERM
 
 # Cheap declaration/syntax screen only; registered tests and tool link remain mandatory.
