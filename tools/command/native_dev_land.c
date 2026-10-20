@@ -3523,6 +3523,37 @@ static int dl_cancel_acquire(const struct dl_dirs *d, const char *qpath,
     return lock;
 }
 
+/* Drop `seq` from the live rows into `hit`, compacting the rest in place
+ * (`*nrows` becomes the kept count). A durable push checkpoint means the
+ * remote may already have moved even if this process has not heard back:
+ * preserve the row for reconciliation unless the same pair was just
+ * observed settled as refused. Returns 1 taken, 0 absent, -1 refused (the
+ * reply names why). */
+static int dl_cancel_take(struct dl_row *rows, size_t *nrows, long long seq,
+                          bool push_settled, const struct dl_row *settled,
+                          struct dl_row *hit, struct zcl_command_reply *reply)
+{
+    size_t kept = 0;
+    bool found = false;
+    for (size_t i = 0; i < *nrows; i++) {
+        if (rows[i].seq == seq && !found) {
+            if (strcmp(rows[i].phase, "push") == 0 &&
+                !(push_settled && dl_push_pair_same(&rows[i], settled))) {
+                dl_fail(reply, "PUSH_OUTCOME_UNKNOWN", "cancel",
+                        "a push checkpoint must be reconciled before cancellation",
+                        "run dev land step to observe the exact remote");
+                return -1;
+            }
+            found = true;
+            *hit = rows[i];
+            continue;               /* dropped from the live queue */
+        }
+        rows[kept++] = rows[i];
+    }
+    *nrows = kept;
+    return found ? 1 : 0;
+}
+
 static void dl_cancel(const struct zcl_command_request *req,
                       struct zcl_command_reply *reply)
 {
@@ -3531,7 +3562,6 @@ static void dl_cancel(const struct zcl_command_request *req,
     size_t nrows = 0, kept = 0;
     char qpath[4096 + 32];
     long long seq = 0;
-    bool found = false;
     struct dl_row hit;
     int lock;
     if (!dl_seq_in(req, &seq)) {
@@ -3567,33 +3597,16 @@ static void dl_cancel(const struct zcl_command_request *req,
         return;
     }
     memset(&hit, 0, sizeof(hit));
-    for (size_t i = 0; i < nrows; i++) {
-        if (rows[i].seq == seq && !found) {
-            /* The durable push checkpoint means the remote may already
-             * have moved even if this process has not heard back. Preserve
-             * the row for reconciliation unless the same pair was just
-             * observed settled as refused. */
-            if (strcmp(rows[i].phase, "push") == 0 &&
-                !(push_settled && dl_push_pair_same(&rows[i], &settled))) {
-                free(rows);
-                dl_unlock(lock);
-                dl_fail(reply, "PUSH_OUTCOME_UNKNOWN", "cancel",
-                        "a push checkpoint must be reconciled before cancellation",
-                        "run dev land step to observe the exact remote");
-                return;
-            }
-            found = true;
-            hit = rows[i];
-            continue;               /* dropped from the live queue */
-        }
-        rows[kept++] = rows[i];
-    }
-    if (!found) {
+    kept = nrows;
+    int taken = dl_cancel_take(rows, &kept, seq, push_settled, &settled,
+                               &hit, reply);
+    if (taken <= 0) {
         free(rows);
         dl_unlock(lock);
-        dl_fail(reply, "SEQ_UNKNOWN", "cancel",
-                "no live request carries that sequence number",
-                "run `dev land status` for the live sequence numbers");
+        if (taken == 0)
+            dl_fail(reply, "SEQ_UNKNOWN", "cancel",
+                    "no live request carries that sequence number",
+                    "run `dev land status` for the live sequence numbers");
         return;
     }
     (void)snprintf(hit.state, sizeof(hit.state), "cancelled");
