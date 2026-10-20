@@ -74,11 +74,12 @@ sandbox grants `ui.panel` and the game can reach a GPU from inside it; today
 the sandbox refuses `ui.panel`, so the signed package can be installed and
 verified but not run. Running the game still uses `./build/bin/z23-skycombat`.
 
-**Static linking.** `plugin run` needs a static ELF (`docs/dev/PLUGINS.md`).
-`plugin pack` does not check that, so packing succeeds for a dynamic binary,
-and such a package would be refused at run time. This host cannot link the game
-statically: it has no static libGL, libXrandr, libXi or libXcursor, and no
-Xrandr, XInput2 or Xcursor headers, so `make game` stops at the platform probe.
+**Static linking.** `plugin run` expects a static ELF (`docs/dev/PLUGINS.md`).
+`plugin pack` does not check that, so a dynamically linked game still packs.
+A static link of the game needs static GL and X11 libraries (libGL, libXrandr,
+libXi, libXcursor) plus the Xrandr, XInput2 and Xcursor headers, which most
+distributions do not ship; check the binary with `readelf -l` before you
+distribute it.
 
 ## Pinned data-only HUD
 
