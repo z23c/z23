@@ -621,15 +621,34 @@ static bool dlq_judge_groups(struct dlq *q, const struct dlq_groups *g,
     return all;
 }
 
+static bool dlq_test_args(struct dlq *q, char *out, size_t cap)
+{
+    const char *jobs = q->make_jobs;
+    const char *inherited = getenv("T_FAST_EXACT_ARGS");
+    if (!inherited)
+        inherited = "";
+    int n = snprintf(out, cap, "T_FAST_EXACT_ARGS=%s%s--jobs=%s",
+                     inherited, inherited[0] ? " " : "", jobs + 2);
+    if (n < 0 || (size_t)n >= cap)
+        return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED,
+                          "T_FAST_EXACT_ARGS", "test arguments exceed limit");
+    return true;
+}
+
 /* All affected groups in one harness invocation: its workers run the groups
  * in parallel and each reports its own verdict. */
 static bool dlq_run_groups(struct dlq *q, const struct dlq_groups *g)
 {
+    char test_args[4096];
+    bool capped = q->make_jobs[0] != 0;
+    if (capped && !dlq_test_args(q, test_args, sizeof(test_args)))
+        return false;
     struct dlq_section *sections = (struct dlq_section *)zcl_malloc(
         g->count * sizeof(*sections), "dev.land.qualify.sections");
     char *only = (char *)zcl_malloc(g->count * (ZCL_AGENT_IMPACT_GROUP_MAX + 1) + 8,
                                     "dev.land.qualify.only");
-    const char *goals[] = { "t-fast-exact", only, NULL };
+    const char *goals[] = { "t-fast-exact", only,
+                             capped ? test_args : NULL, NULL };
     char *text = NULL;
     size_t used = 0;
     int rc = -1;

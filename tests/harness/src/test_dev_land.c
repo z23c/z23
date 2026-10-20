@@ -7050,12 +7050,13 @@ _test_next:;
 /* A stand-in worktree Makefile: every goal the gates run, steered by QFX
  * (the failure to play) and QFAIL (the group that reports FAIL). */
 static const char dlx_qualify_makefile[] =
+    "T_FAST_EXACT_ARGS := fixture-default\n"
     ".PHONY: docs-capability-inventory dev-bin install-hooks lint-ready lint "
     "t-fast-exact\n"
     "docs-capability-inventory dev-bin install-hooks lint-ready:\n"
     "\t@printf '%s|%s|%s\\n' '$@' '$(filter -j%,$(MAKEFLAGS))' "
     "'$(ONLY)' >> qualify-jobs.txt\n"
-    "\t@true\n"
+    "\t@printf '%s\\n' '$(T_FAST_EXACT_ARGS)' > qualify-default-args.txt\n"
     "ifneq ($(QFX),missing-complexity)\n"
     ".PHONY: check-cyclomatic-complexity\n"
     "check-cyclomatic-complexity:\n"
@@ -7075,6 +7076,7 @@ static const char dlx_qualify_makefile[] =
     "\t@if [ \"$(QFX)\" = tree ]; then echo changed >> tracked.txt; fi\n"
     "\t@echo \"== LINT: all checks passed ==\"\n"
     "t-fast-exact:\n"
+    "\t@printf 'ONLY=%s\\nARGS=%s\\n' '$(ONLY)' '$(T_FAST_EXACT_ARGS)' > qualify-args.txt\n"
     "\t@printf '%s\\n' '$(ONLY)' > qualify-only.txt\n"
     "\t@printf '%s|%s|%s\\n' '$@' '$(filter -j%,$(MAKEFLAGS))' "
     "'$(ONLY)' >> qualify-jobs.txt\n"
@@ -7373,6 +7375,126 @@ _test_next:;
     if (called) dlx_end(&c);
     dlx_qualify_restore();
     return failures;
+}
+
+static bool dlx_qualify_same_tail(FILE *actual, FILE *baseline)
+{
+    int want;
+    while ((want = fgetc(baseline)) != EOF)
+        if (fgetc(actual) != want) return false;
+    return fgetc(actual) == EOF && !ferror(actual) && !ferror(baseline);
+}
+
+static bool dlx_qualify_args_tail(FILE *f, const struct dlx_rig *rig,
+                                  const char *jobs)
+{
+    if (jobs) {
+        const char *inherited = getenv("T_FAST_EXACT_ARGS");
+        if (inherited && inherited[0] &&
+            !dlx_qualify_make_field(f, inherited, ' ')) return false;
+        return dlx_qualify_make_field(f, "--jobs", '=') &&
+            dlx_qualify_make_field(f, jobs + 2, '\n') &&
+            fgetc(f) == EOF && !ferror(f);
+    }
+    char path[1400];
+    if (snprintf(path, sizeof(path), "%s/qualify-default-args.txt", rig->clone)
+        >= (int)sizeof(path)) return false;
+    FILE *baseline = fopen(path, "r");
+    if (!baseline) return false;
+    bool ok = dlx_qualify_same_tail(f, baseline);
+    if (fclose(baseline) != 0) ok = false;
+    return ok;
+}
+
+static bool dlx_qualify_job_args(const struct dlx_rig *rig, const char *jobs)
+{
+    char path[1400];
+    if (snprintf(path, sizeof(path), "%s/qualify-args.txt", rig->clone)
+        >= (int)sizeof(path)) return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    bool ok = dlx_qualify_make_field(f, "ONLY=test_leaf_smoke", '\n') &&
+        dlx_qualify_make_field(f, "ARGS", '=') &&
+        dlx_qualify_args_tail(f, rig, jobs);
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static int dlx_qualify_job_cap_case(const char *cap, const char *refusal_step)
+{
+    int failures = 0;
+    char saved[4096] = {0};
+    const char *prior = getenv("ZCL_BUILD_MAX_JOBS");
+    bool had = prior != NULL;
+    bool saved_ok = !had || strlen(prior) < sizeof(saved);
+    if (saved_ok && had) (void)snprintf(saved, sizeof(saved), "%s", prior);
+    struct dlx_call c;
+    bool called = false;
+    TEST("land: selected tests preserve the explicit job cap and uncapped default") {
+        struct dlx_rig rig;
+        char jobs[16];
+        ASSERT(saved_ok);
+        ASSERT(cap ? setenv("ZCL_BUILD_MAX_JOBS", cap, 1) == 0 :
+                     unsetenv("ZCL_BUILD_MAX_JOBS") == 0);
+        bool valid = !refusal_step;
+        ASSERT(!valid || !cap || platform_build_jobs_arg(jobs));
+        dlx_isolate("qualify_job_cap");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_job_cap", "", "", DLX_Q_LEAF_SMOKE));
+        called = true;
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        if (valid) {
+            ASSERT(dlx_ok(&c));
+            ASSERT(dlx_qualify_job_args(&rig, cap ? jobs : NULL));
+            ASSERT(dlx_queue_has_one());
+        } else {
+            ASSERT(dlx_qualify_refused(&c, "QUALIFY_STEP_FAILED"));
+            ASSERT_STR_EQ(dlx_str(&c, "step"), refusal_step);
+        }
+        PASS();
+    }
+_test_next:;
+    if (called) dlx_end(&c);
+    dlx_qualify_restore();
+    if (saved_ok) {
+        if (had) (void)setenv("ZCL_BUILD_MAX_JOBS", saved, 1);
+        else (void)unsetenv("ZCL_BUILD_MAX_JOBS");
+    }
+    return failures;
+}
+
+static int dlx_qualify_job_args_size(bool overflow)
+{
+    int failures = 0;
+    char inherited[4096];
+    const char *prior = getenv("T_FAST_EXACT_ARGS");
+    bool had = prior != NULL;
+    char *saved = prior ? strdup(prior) : NULL;
+    TEST("land: selected test arguments preserve long valid input and refuse overflow") {
+        ASSERT(!had || saved);
+        size_t len = overflow ? sizeof(inherited) - 1 : 3900;
+        memset(inherited, ' ', len);
+        memcpy(inherited, "--no-cache --jobs=28", strlen("--no-cache --jobs=28"));
+        inherited[len] = '\0';
+        ASSERT(setenv("T_FAST_EXACT_ARGS", inherited, 1) == 0);
+        failures += dlx_qualify_job_cap_case("4", overflow ? "T_FAST_EXACT_ARGS" : NULL);
+        PASS();
+    }
+_test_next:;
+    dlx_qualify_env_restore("T_FAST_EXACT_ARGS", saved, had);
+    return failures;
+}
+
+static int test_dev_land_qualify_job_caps(void)
+{
+    return dlx_qualify_job_cap_case("4", NULL) +
+           dlx_qualify_job_cap_case("2", NULL) +
+           dlx_qualify_job_cap_case(NULL, NULL) +
+           dlx_qualify_job_cap_case("0", "ZCL_BUILD_MAX_JOBS") +
+           dlx_qualify_job_cap_case("bad", "ZCL_BUILD_MAX_JOBS") +
+           dlx_qualify_job_cap_case("4294967296", "ZCL_BUILD_MAX_JOBS") +
+           dlx_qualify_job_cap_case("", "ZCL_BUILD_MAX_JOBS") +
+           dlx_qualify_job_args_size(false) +
+           dlx_qualify_job_args_size(true);
 }
 
 static int test_dev_land_qualify_passes(void)
@@ -15869,6 +15991,7 @@ int test_dev_land(void)
     failures += test_dev_land_qualify_canonical_aliases();
     failures += test_dev_land_qualify_unregistered_group();
     failures += test_dev_land_qualify_passes();
+    failures += test_dev_land_qualify_job_caps();
     failures += test_dev_land_qualify_complexity();
     failures += test_dev_land_qualify_verdict_rule();
     failures += test_dev_land_qualify_refusals();
