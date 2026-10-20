@@ -127,3 +127,55 @@ bound, newline, overflow sentinel and NUL, and reports a failing leaf by name.
 The peer's cold native API contract test passed. This packet did not repeat
 that test before the required combined qualification. The peer branch and its
 experiment document were not imported. Production result bounds are unchanged.
+
+## Canonical qualifier selection and admitted Make jobs
+
+Measured on 2026-10-20 with GCC 14.2.0 and an AMD Ryzen 9 7950X3D.
+The original selection baseline was
+`d30ab4d26849f286286cbd8179ff84e5e60e11d4`. The focused candidate included
+`55c7abadea22173532515851dc988a551ff55b99`, preserving its early complexity
+stage. Integration onto `7d98d18be20b9b3f45eb67bf91f7f8df26b4da49` changed
+neither qualifier source, fixture source nor Makefile relative to that tested
+candidate's base.
+
+Two routed names, `test_group_selector` and `test_test_group_selector`, refer
+to the same registered full ID. The original qualifier counted them separately
+and assigned the canonical PASS header to the earlier alias, leaving another
+expected section unseen. The repair uses the existing exact catalog resolver
+before bounded deduplication and matches canonical headers exactly. Unknown,
+ambiguous or oversized IDs are refused. A registered prefix-named group remains
+`test_test_fdt`; it is not confused with the selector group.
+
+The alias RED retained duplicate selection names and their emitted PASS
+headers. Its registered group failed in both the initial attempt and the
+runner's automatic isolated retry. Updated canonical fixture expectations also
+produced collateral failures; those are not independent defect evidence.
+A separate RED retained canonical selection but removed Make-cap propagation.
+Its four empty, zero, malformed and overflowing cap cases failed the required
+pre-dispatch refusal assertions. Three additional trace failures exposed a
+fixture assumption: earlier phases inherit the caller's `ONLY` value. The
+fixture now copies that value before environment mutation and compares it
+exactly; the final phase still requires `test_leaf_smoke`.
+
+An explicit `ZCL_BUILD_MAX_JOBS` is validated by the existing CPU/memory-aware
+helper before qualifier subprocesses and supplied to every owned Make phase.
+It overrides inherited Make parallel settings, including a lower setting;
+it does not enlarge the enclosing CPU quota. Unset behavior is preserved.
+Per-case real Make recipe traces recorded `-j4` in all seven phases for cap4
+and `-j2` for cap2. The unset control retained inherited `-j2` except for the
+existing automatic dev-bin `-j28` allocation. The seventh phase is the early
+complexity gate. These traces demonstrate dispatch, not peak concurrency or
+performance improvement.
+
+A cheap preflight caught fixture complexity M=18 against the unchanged cap15.
+Extracting environment cleanup preserved assertion-path restoration and
+allocation-failure behavior. The corrected canonical gate passed, followed by
+one cold registered `dev_land` group: zero failures, cached groups, skips,
+unobserved conditions, flaky results or retries; tests took 131.9 seconds.
+The complete admitted command, including compilation, took 537.91 seconds
+under a three-CPU, 2 GiB limit. Its cache-inclusive memory peak was
+1,806,639,104 bytes with zero memory-limit or OOM events. The GREEN log SHA256 is
+`2efa0eb0a39423a5b6f594e88f3dd09f3dc219e03346f748eebc2c86fa913c0c`.
+The retained trace manifest is verified from the worktree root and has SHA256
+`f37e2e07ccd16a0671e0fe61bb1d04415102b18ad174ab4ae4eaad2d1a7826ca`.
+Full candidate qualification and publication remain separate evidence.

@@ -28,6 +28,7 @@
 #include "platform/logical_cpu.h"
 #include "platform/private_directory.h"
 #include "util/spawn.h"
+#include "test_group_catalog.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -43,6 +44,7 @@
 struct dlq {
     const char *wt;
     bool exempt;
+    char make_jobs[16];
     struct zcl_land_qualify *out;
 };
 
@@ -156,6 +158,8 @@ static int dlq_make(struct dlq *q, const char *log_name,
     argv[n++] = "make";
     argv[n++] = "-C";
     argv[n++] = q->wt;
+    if (q->make_jobs[0])
+        argv[n++] = q->make_jobs;
     for (size_t i = 0; goals[i] && n + 1 < sizeof(argv) / sizeof(argv[0]); i++)
         argv[n++] = goals[i];
     argv[n] = NULL;
@@ -341,10 +345,12 @@ static bool dlq_prepare(struct dlq *q)
     const char *hooks[] = { "install-hooks", NULL };
     const char *ready[] = { "lint-ready", NULL };
     const struct { const char *name; const char *const *goals; } steps[] = {
-        { "docs-capability-inventory", regen }, { "dev-bin", build },
+        { "docs-capability-inventory", regen },
+        { "dev-bin", q->make_jobs[0] ? build + 1 : build },
         { "install-hooks", hooks }, { "lint-ready", ready },
     };
-    (void)platform_build_jobs_arg(jobs);
+    if (!q->make_jobs[0])
+        (void)platform_build_jobs_arg(jobs);
     for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
         char *text = NULL;
         int rc = dlq_make(q, steps[i].name, steps[i].goals, false, &text);
@@ -386,13 +392,17 @@ static bool dlq_complexity(struct dlq *q)
 
 static bool dlq_group_add(struct dlq_groups *g, const char *name)
 {
+    char full[ZCL_TEST_GROUP_FULL_MAX];
+    if (!zcl_test_group_resolve_exact(name, full) ||
+        strlen(full) >= sizeof(g->name[0]))
+        return false;
     for (size_t i = 0; i < g->count; i++) {
-        if (strcmp(g->name[i], name) == 0)
+        if (strcmp(g->name[i], full) == 0)
             return true;
     }
     if (g->count >= DLQ_GROUPS_MAX)
         return false;
-    (void)snprintf(g->name[g->count++], sizeof(g->name[0]), "%s", name);
+    (void)snprintf(g->name[g->count++], sizeof(g->name[0]), "%s", full);
     return true;
 }
 
@@ -532,21 +542,11 @@ static bool dlq_header(const char *line, size_t len, char *name, size_t cap,
     return true;
 }
 
-/* A selected group is the header's group, with or without its test_/spec_
- * prefix. */
-static bool dlq_header_matches(const char *header, const char *group)
-{
-    return strcmp(header, group) == 0 ||
-           ((strncmp(header, "test_", 5) == 0 ||
-             strncmp(header, "spec_", 5) == 0) &&
-            strcmp(header + 5, group) == 0);
-}
-
 static struct dlq_section *dlq_section_for(struct dlq_section *sections,
                                            size_t count, const char *header)
 {
     for (size_t i = 0; i < count; i++) {
-        if (dlq_header_matches(header, sections[i].name))
+        if (strcmp(header, sections[i].name) == 0)
             return &sections[i];
     }
     return NULL;
@@ -712,6 +712,11 @@ bool zcl_dev_land_qualify(const char *wt, bool signing_exempt,
 {
     struct dlq q = { .wt = wt, .exempt = signing_exempt, .out = out };
     memset(out, 0, sizeof(*out));
+    /* An explicit admitted cap controls every Make phase, not only dev-bin. */
+    if (getenv("ZCL_BUILD_MAX_JOBS") &&
+        !platform_build_jobs_arg(q.make_jobs))
+        return dlq_refuse(&q, ZCL_LAND_QUALIFY_STEP_FAILED,
+                          "ZCL_BUILD_MAX_JOBS", NULL);
     return dlq_clean(&q) && dlq_fetch(&q) && dlq_rebase(&q) &&
            dlq_signed(&q) && dlq_prepare(&q) && dlq_complexity(&q) && dlq_lint(&q) &&
            dlq_groups_run(&q) && dlq_fold(&q) && dlq_finish(&q);

@@ -7053,15 +7053,21 @@ static const char dlx_qualify_makefile[] =
     ".PHONY: docs-capability-inventory dev-bin install-hooks lint-ready lint "
     "t-fast-exact\n"
     "docs-capability-inventory dev-bin install-hooks lint-ready:\n"
+    "\t@printf '%s|%s|%s\\n' '$@' '$(filter -j%,$(MAKEFLAGS))' "
+    "'$(ONLY)' >> qualify-jobs.txt\n"
     "\t@true\n"
     "ifneq ($(QFX),missing-complexity)\n"
     ".PHONY: check-cyclomatic-complexity\n"
     "check-cyclomatic-complexity:\n"
+    "\t@printf '%s|%s|%s\\n' '$@' '$(filter -j%,$(MAKEFLAGS))' "
+    "'$(ONLY)' >> qualify-jobs.txt\n"
     "\t@echo complexity >> build/scratch/qualify-stages\n"
     "\t@if [ \"$(QFX)\" = complexity ]; then echo \"FAIL complexity\"; exit 1; fi\n"
     "\t@if [ \"$(QFX)\" = complexity-tree ]; then echo changed >> tracked.txt; fi\n"
     "endif\n"
     "lint:\n"
+    "\t@printf '%s|%s|%s\\n' '$@' '$(filter -j%,$(MAKEFLAGS))' "
+    "'$(ONLY)' >> qualify-jobs.txt\n"
     "\t@echo lint >> build/scratch/qualify-stages\n"
     "\t@if [ \"$(QFX)\" = lint ]; then echo \"FAIL gate-x\"; exit 1; fi\n"
     "\t@if [ \"$(QFX)\" = fold ]; then echo regenerated >> "
@@ -7069,15 +7075,18 @@ static const char dlx_qualify_makefile[] =
     "\t@if [ \"$(QFX)\" = tree ]; then echo changed >> tracked.txt; fi\n"
     "\t@echo \"== LINT: all checks passed ==\"\n"
     "t-fast-exact:\n"
+    "\t@printf '%s\\n' '$(ONLY)' > qualify-only.txt\n"
+    "\t@printf '%s|%s|%s\\n' '$@' '$(filter -j%,$(MAKEFLAGS))' "
+    "'$(ONLY)' >> qualify-jobs.txt\n"
     "\t@echo tests >> build/scratch/qualify-stages\n"
     "\t@for g in `echo \"$(ONLY)\" | tr , ' '`; do \\\n"
-    "\t  [ \"$$g\" = \"$(QCRASH)\" ] && continue; \\\n"
-    "\t  v=PASS; [ \"$$g\" = \"$(QFAIL)\" ] && v=FAIL; \\\n"
-    "\t  echo \"==================== test_$$g ($$v, 1s) "
+    "\t  [ \"$$g\" = \"test_$(QCRASH)\" ] && continue; \\\n"
+    "\t  v=PASS; [ \"$$g\" = \"test_$(QFAIL)\" ] && v=FAIL; \\\n"
+    "\t  echo \"==================== $$g ($$v, 1s) "
     "====================\"; \\\n"
     "\t  [ \"$(QFX)\" = parse ] && echo \"PARSE FAIL at x.c:1 expected\"; \\\n"
     "\t  [ \"$(QFX)\" = linestart ] && echo \"FAIL at y.c:3 (bad)\"; \\\n"
-    "\t  [ \"$$g\" = \"$(QFAIL)\" ] && echo \"FAIL at x.c:2 (bad)\"; \\\n"
+    "\t  [ \"$$g\" = \"test_$(QFAIL)\" ] && echo \"FAIL at x.c:2 (bad)\"; \\\n"
     "\t  true; done\n"
     "\t@[ -n \"$(QFAIL)\" ] && { echo \"SOME TESTS FAILED\"; exit 2; }; "
     "echo \"ALL TESTS PASSED - fixture\"\n";
@@ -7147,6 +7156,185 @@ static bool dlx_qualify_refused(const struct dlx_call *c, const char *code)
 {
     return c->reply.status == ZCL_COMMAND_STATUS_FAILED &&
            strcmp(dlx_err_code(c), code) == 0 && !dlx_queue_has_one();
+}
+
+/* The real Make recipes record normalized job flags after argv processing. */
+static bool dlx_qualify_make_trace(const struct dlx_rig *rig,
+                                  const char *jobs, const char *prepare,
+                                  const char *inherited_only)
+{
+    static const char *const goals[] = { "docs-capability-inventory", "dev-bin",
+        "install-hooks", "lint-ready", "check-cyclomatic-complexity",
+        "lint", "t-fast-exact" };
+    char path[1400], line[256], expected[256];
+    if (snprintf(path, sizeof(path), "%s/qualify-jobs.txt", rig->clone) >=
+        (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    bool ok = true;
+    for (size_t i = 0; ok && i < sizeof(goals) / sizeof(goals[0]); i++) {
+        int n = snprintf(expected, sizeof(expected), "%s|%s|%s\n", goals[i],
+                          i == 1 ? prepare : jobs, i == 6 ? "test_leaf_smoke" : inherited_only);
+        ok = n > 0 && n < (int)sizeof(expected) &&
+             fgets(line, sizeof(line), f) && strcmp(line, expected) == 0;
+    }
+    ok = ok && fgetc(f) == EOF && !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static void dlx_qualify_env_restore(const char *name, char *saved, bool present)
+{
+    if (saved) (void)setenv(name, saved, 1);
+    else if (!present) (void)unsetenv(name);
+    free(saved);
+}
+
+static int dlx_qualify_make_cap_case(const char *cap, bool valid,
+                                      const char *tag)
+{
+    int failures = 0;
+    const char *old_cap = getenv("ZCL_BUILD_MAX_JOBS");
+    const char *old_flags = getenv("MAKEFLAGS");
+    const char *old_only = getenv("ONLY");
+    bool had_cap = old_cap != NULL, had_flags = old_flags != NULL;
+    char *saved_cap = old_cap ? strdup(old_cap) : NULL;
+    char *saved_flags = old_flags ? strdup(old_flags) : NULL;
+    char *saved_only = old_only ? strdup(old_only) : NULL;
+    struct dlx_call c;
+    bool called = false;
+    TEST("land: explicit Make cap controls every phase before queue admission") {
+        struct dlx_rig rig;
+        char jobs[16], path[1400];
+        struct stat st;
+        ASSERT(!old_cap || saved_cap);
+        ASSERT(!old_flags || saved_flags);
+        ASSERT(!old_only || saved_only);
+        ASSERT(setenv("MAKEFLAGS", "-j2", 1) == 0);
+        ASSERT(cap ? setenv("ZCL_BUILD_MAX_JOBS", cap, 1) == 0 :
+                     unsetenv("ZCL_BUILD_MAX_JOBS") == 0);
+        ASSERT(!valid || platform_build_jobs_arg(jobs));
+        dlx_isolate(tag);
+        ASSERT(dlx_qualify_rig(&rig, tag, "", "",
+                               DLX_Q_LEAF_SMOKE));
+        called = true;
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        if (valid) {
+            ASSERT(dlx_ok(&c));
+            ASSERT(dlx_queue_has_one());
+            ASSERT(dlx_qualify_make_trace(&rig, cap ? jobs : "-j2", jobs,
+                saved_only ? saved_only : ""));
+        } else {
+            ASSERT(dlx_qualify_refused(&c, "QUALIFY_STEP_FAILED"));
+            ASSERT_STR_EQ(dlx_str(&c, "step"), "ZCL_BUILD_MAX_JOBS");
+            ASSERT(snprintf(path, sizeof(path), "%s/qualify-jobs.txt", rig.clone)
+                   < (int)sizeof(path));
+            ASSERT(stat(path, &st) != 0 && errno == ENOENT);
+        }
+        PASS();
+    }
+_test_next:;
+    if (called) dlx_end(&c);
+    dlx_qualify_restore();
+    dlx_qualify_env_restore("ZCL_BUILD_MAX_JOBS", saved_cap, had_cap);
+    dlx_qualify_env_restore("MAKEFLAGS", saved_flags, had_flags);
+    free(saved_only);
+    return failures;
+}
+
+static int test_dev_land_qualify_make_caps(void)
+{
+    return dlx_qualify_make_cap_case(NULL, true, "qualify_make_cap_unset") +
+           dlx_qualify_make_cap_case("4", true, "qualify_make_cap_four") +
+           dlx_qualify_make_cap_case("2", true, "qualify_make_cap_two") +
+           dlx_qualify_make_cap_case("", false, "qualify_make_cap_empty") +
+           dlx_qualify_make_cap_case("0", false, "qualify_make_cap_zero") +
+           dlx_qualify_make_cap_case("4x", false, "qualify_make_cap_malformed") +
+           dlx_qualify_make_cap_case("4294967296", false, "qualify_make_cap_overflow");
+}
+
+/* These are real registry aliases, including a group with a test_ basename. */
+static void dlx_route_canonical_aliases(const char *path,
+                                       struct agent_impact_acc *acc)
+{
+    (void)path;
+    agent_impact_add_group_list(acc,
+        "test_group_selector test_test_group_selector test_fdt");
+}
+
+static void dlx_route_unregistered(const char *path,
+                                    struct agent_impact_acc *acc)
+{
+    (void)path;
+    agent_impact_add_group(acc, "qualifier_unregistered_fixture_group");
+}
+
+static bool dlx_qualify_only_is(const struct dlx_rig *rig, const char *expected)
+{
+    char path[1400], line[256];
+    if (snprintf(path, sizeof(path), "%s/qualify-only.txt", rig->clone) >=
+        (int)sizeof(path))
+        return false;
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    bool ok = fgets(line, sizeof(line), f) && strcmp(line, expected) == 0 &&
+              fgetc(f) == EOF && !ferror(f);
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+static int test_dev_land_qualify_canonical_aliases(void)
+{
+    int failures = 0;
+    struct dlx_call c;
+    bool called = false;
+    TEST("land: qualify deduplicates exact registry aliases before verdicts") {
+        struct dlx_rig rig;
+        const struct json_value *groups;
+        dlx_isolate("qualify_aliases");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_aliases", "", "",
+                               DLX_Q_LEAF_SMOKE));
+        zcl_dev_land_qualify_test_limits(dlx_route_canonical_aliases, 0);
+        called = true;
+        ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
+        groups = dlx_arr(&c, "groups");
+        ASSERT(groups != NULL && groups->num_children == 2);
+        ASSERT(dlx_qualify_only_is(&rig,
+            "test_test_fdt,test_test_group_selector\n"));
+        ASSERT(dlx_queue_has_one());
+        PASS();
+    }
+_test_next:;
+    if (called) dlx_end(&c);
+    dlx_qualify_restore();
+    return failures;
+}
+
+static int test_dev_land_qualify_unregistered_group(void)
+{
+    int failures = 0;
+    struct dlx_call c;
+    bool called = false;
+    TEST("land: qualify refuses an unresolved registry group before tests") {
+        struct dlx_rig rig;
+        char path[1400];
+        dlx_isolate("qualify_unregistered");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_unregistered", "", "",
+                               DLX_Q_LEAF_SMOKE));
+        zcl_dev_land_qualify_test_limits(dlx_route_unregistered, 0);
+        called = true;
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_SELECTION"));
+        ASSERT(snprintf(path, sizeof(path), "%s/qualify-only.txt", rig.clone)
+               < (int)sizeof(path));
+        ASSERT(!dlx_file_exists(path));
+        PASS();
+    }
+_test_next:;
+    if (called) dlx_end(&c);
+    dlx_qualify_restore();
+    return failures;
 }
 
 static int test_dev_land_qualify_passes(void)
@@ -7252,8 +7440,8 @@ static int test_dev_land_qualify_refusals(void)
         ASSERT(dlx_qualify_rig(&rig, "qualify_group", "", "leaf_smoke", DLX_Q_LEAF_SMOKE));
         ASSERT(dlx_qualify_submit(&c, &rig));
         ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_FAILED"));
-        ASSERT_STR_EQ(dlx_str(&c, "group"), "leaf_smoke");
-        ASSERT(strstr(dlx_str(&c, "log"), "qualify-group-leaf_smoke.log"));
+        ASSERT_STR_EQ(dlx_str(&c, "group"), "test_leaf_smoke");
+        ASSERT(strstr(dlx_str(&c, "log"), "qualify-group-test_leaf_smoke.log"));
         ASSERT(dlx_file_exists(dlx_str(&c, "log")));
         dlx_end(&c);
         dlx_isolate("qualify_tree");
@@ -7330,15 +7518,15 @@ static int test_dev_land_qualify_group_verdicts(void)
                                DLX_Q_LEAF_SMOKE | DLX_Q_LAND_WINDOW));
         ASSERT(dlx_qualify_submit(&c, &rig));
         ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_FAILED"));
-        ASSERT_STR_EQ(dlx_str(&c, "group"), "leaf_smoke");
-        ASSERT_STR_EQ(dlx_str(&c, "paths"), "leaf_smoke");
+        ASSERT_STR_EQ(dlx_str(&c, "group"), "test_leaf_smoke");
+        ASSERT_STR_EQ(dlx_str(&c, "paths"), "test_leaf_smoke");
         dlx_end(&c);
         dlx_isolate("qualify_crash");
         ASSERT(dlx_qualify_rig(&rig, "qualify_crash", "", "", DLX_Q_LEAF_SMOKE));
         setenv("QCRASH", "leaf_smoke", 1);
         ASSERT(dlx_qualify_submit(&c, &rig));
         ASSERT(dlx_qualify_refused(&c, "QUALIFY_GROUP_FAILED"));
-        ASSERT_STR_EQ(dlx_str(&c, "group"), "leaf_smoke");
+        ASSERT_STR_EQ(dlx_str(&c, "group"), "test_leaf_smoke");
         ASSERT(strstr(dlx_str(&c, "detail"), "no verdict") != NULL);
         dlx_end(&c);
         PASS();
@@ -15639,6 +15827,9 @@ int test_dev_land(void)
     failures += test_dev_land_prove_drive4();
     failures += test_dev_land_prove_drive5();
     failures += test_dev_land_prove_drive6();
+    failures += test_dev_land_qualify_make_caps();
+    failures += test_dev_land_qualify_canonical_aliases();
+    failures += test_dev_land_qualify_unregistered_group();
     failures += test_dev_land_qualify_passes();
     failures += test_dev_land_qualify_complexity();
     failures += test_dev_land_qualify_verdict_rule();
