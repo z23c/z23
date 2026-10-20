@@ -6,6 +6,7 @@
  * N. Any failure revokes N+1, restores the environment and leaves N in force.
  * No PSK byte is read, held, printed or logged here: both commits import the
  * one owner-private source file the client mint wrote, which is then removed. */
+#if !defined(_WIN32)
 #include "command/native_pair_renew.h"
 #include "config/command_catalog.h"
 #include "base/hex.h"
@@ -471,3 +472,6 @@ void pair_renew_execute(const struct pr_cfg *cfg, const struct pr_state *state, 
     if (!retired && run.reply->status == ZCL_COMMAND_STATUS_PASSED)
         pr_fail(run.reply, "RENEW_RETIRE_INCOMPLETE", "retire", "epoch N+1 is in force and smoked, but epoch N could not be revoked on every side; revoke it with ops mesh device revoke", true);
 }
+#else
+typedef int native_pair_renew_run_unsupported_on_windows;
+#endif

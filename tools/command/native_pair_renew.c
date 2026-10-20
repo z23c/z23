@@ -4,13 +4,27 @@
  * bound to), reports renew_due against a documented threshold and returns the
  * exact steps plus a plan_id over everything the execution depends on. The
  * planner mutates nothing; confirm re-derives the plan and refuses any drift. */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "command/native_pair_renew.h"
 #include "config/command_catalog.h"
+#if defined(_WIN32)
+/* Renewal composes POSIX descriptor-relative file semantics; fail closed elsewhere. */
+void zcl_native_handle_ops_mesh_device_pair_renew(const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    (void)request;
+    if (reply)
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED, "UNSUPPORTED_PLATFORM", "normalize",
+                               false, false, "pairing renewal needs POSIX file semantics", "ops.mesh.device.pair.renew");
+}
+#else
 #include "crypto/sha256.h"
 #include "sha3/sha3.h"
 #include "base/hex.h"
 #include "services/device_identity.h"
 #include "util/authority_receipt.h"
+#include "platform/os_proc.h"
 #include "util/log_macros.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -177,7 +191,9 @@ static bool pr_slot_name_ok(const char *name)
 
 static bool pr_slot_binary(const struct pr_cfg *cfg, char out[PATH_MAX])
 {
-    return realpath(cfg->slot_bin[0] ? cfg->slot_bin : "/proc/self/exe", out) != NULL;
+    char exe[PATH_MAX];
+    if (cfg->slot_bin[0]) return realpath(cfg->slot_bin, out) != NULL;
+    return os_proc_exe_path(exe, sizeof(exe)) && realpath(exe, out) != NULL;
 }
 
 /* The evidence is current when the slot its slot.env names is the slot binary this plan
@@ -434,3 +450,4 @@ void zcl_native_handle_ops_mesh_device_pair_renew(const struct zcl_command_reque
     }
     pr_state_free(&st);
 }
+#endif

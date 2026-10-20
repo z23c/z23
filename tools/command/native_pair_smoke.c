@@ -3,6 +3,7 @@
  * and client runtimes, each holding its own grant, are run on loopback and the
  * target's first bytes must come back through the authenticated tunnel. This
  * is the native equivalent of the rollout's 40-smoke; it mutates nothing. */
+#if !defined(_WIN32)
 #include "command/native_pair_common.h"
 #include "services/device_host_runtime.h"
 #include "services/device_identity.h"
@@ -230,3 +231,6 @@ void pair_smoke_run(const struct pair_smoke_in *in, struct pair_smoke_out *out)
     if (run.input[1] >= 0) close(run.input[1]);
     smoke_run_close(&run);
 }
+#else
+typedef int native_pair_smoke_unsupported_on_windows;
+#endif
