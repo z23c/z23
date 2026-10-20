@@ -733,8 +733,8 @@ static int test_core_refusal_envelope(void)
         ASSERT(strcmp(json_get_str(json_get(&root, "reason")),
                       "sealed_consensus_core") == 0);
         ASSERT(strcmp(json_get_str(json_get(&root, "why_not_live")),
-                      "sealed consensus core requires the owner-gated "
-                      "unseal and elevated proof procedure") == 0);
+                      "sealed consensus core requires the unseal ritual "
+                      "and elevated proof procedure") == 0);
         ASSERT(strcmp(json_get_str(json_get(&root, "manifest")),
                       "core/MANIFEST.sha3") == 0);
         ASSERT(strcmp(json_get_str(json_get(&root, "law")),

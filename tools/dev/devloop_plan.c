@@ -1748,13 +1748,13 @@ size_t zcl_devloop_refusal_json(const char *const *files, size_t file_count,
                  "],\"manifest\":\"core/MANIFEST.sha3\","
                  "\"law\":\"docs/CONSENSUS_PARITY_DOCTRINE.md\","
                  "\"unseal\":\"make core-unseal REASON=... "
-                 "(owner-gated; see core/UNSEAL.md)\","
+                 "(see core/UNSEAL.md)\","
                  "\"elevated_procedure\":\"full make ci + copy-prove + "
-                 "owner-gated deploy\","
+                 "non-author review + make deploy\","
                  "\"why_not_live\":\"sealed consensus core requires the "
-                 "owner-gated unseal and elevated proof procedure\","
+                 "unseal ritual and elevated proof procedure\","
                  "\"agent_next_action\":\"edit outside core/, or run the "
-                 "owner-gated unseal ritual (make core-unseal) for a "
+                 "unseal ritual (make core-unseal) for a "
                  "consensus-parity fix\"}"))
         return 0;
     return pos;

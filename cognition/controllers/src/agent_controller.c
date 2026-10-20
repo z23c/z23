@@ -848,7 +848,7 @@ bool rpc_agent_build(const struct json_value *params, bool help,
     json_push_kv_str(&remote, "publication_blocker",
                      "immutable source epoch, exact proof receipts, resident CAS, and rollback transaction incomplete");
     json_push_kv_str(&remote, "canonical_deploy",
-                     "owner-gated make deploy only");
+                     "reviewed, landed build through make deploy only");
     json_push_kv(result, "remote_node_update", &remote);
     json_free(&remote);
 

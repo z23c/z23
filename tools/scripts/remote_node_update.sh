@@ -7,7 +7,7 @@
 # of fetch, merge, build, install, and restart implementations.  It observes
 # origin/main with `git ls-remote` (which does not update the checkout) and
 # reports what a future, proof-bound release transaction would need to do.
-# Canonical deployment remains the separate owner-gated `make deploy` path.
+# Canonical deployment remains the separate `make deploy` path for a reviewed, landed build.
 
 set -euo pipefail
 
@@ -42,7 +42,7 @@ publication_refused() {
         printf '"reason":"%s","runtime_publication":false,' \
             "$(json_escape "$reason")"
         printf '"mutation_contained":true,'
-        printf '"safe_next_action":"use remote-node-plan; canonical deployment remains owner-gated make deploy"}\n'
+        printf '"safe_next_action":"use remote-node-plan; canonical deployment of a reviewed, landed build uses make deploy"}\n'
     fi
     printf 'remote_node_update: REFUSE: runtime publication is contained: %s\n' \
         "$reason" >&2
@@ -84,7 +84,7 @@ Contained requests (all refuse before SSH or local/remote file mutation):
   ZCL_DEPLOY_ALLOW_CANONICAL=1
 
 No Python or jq is required. Canonical deployment is available only through
-the separate owner-gated `make deploy` transaction.
+the separate `make deploy` transaction for a reviewed, landed build.
 USAGE
 }
 
@@ -195,7 +195,7 @@ emit_json_summary() {
     json="${json},\"remote_observation\":\"git_ls_remote_no_fetch\""
     json="${json},\"runtime_publication\":false"
     json="${json},\"mutation_contained\":true"
-    json="${json},\"safe_next_action\":\"review the plan; use owner-gated make deploy only for canonical deployment\"}"
+    json="${json},\"safe_next_action\":\"review the plan; use make deploy with a reviewed, landed build for canonical deployment\"}"
     printf '%s\n' "$json"
 }
 

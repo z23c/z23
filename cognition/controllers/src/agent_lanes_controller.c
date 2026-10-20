@@ -93,7 +93,7 @@ bool rpc_agent_lanes(const struct json_value *params, bool help,
     json_init(&rules);
     json_set_array(&rules);
     agent_lanes_push_str(&rules,
-        "never deploy or restart canonical from automation without an operator-approved window");
+        "deploy or restart canonical only with a reviewed, landed build through make deploy");
     agent_lanes_push_str(&rules,
         "never consume the soak lane for frequent development restarts");
     agent_lanes_push_str(&rules,
