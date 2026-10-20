@@ -1806,6 +1806,8 @@ Z23_FLAG("ZCL_PEERLESS_OK", "env_runtime", "-", "-",
           "undocumented; first use engine/conditions/src/peer_floor_violated.c:auto")
 Z23_FLAG("ZCL_PEER_SCORE_DECAY_PER_MIN", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_peer_scoring.c:auto")
+Z23_FLAG("ZCL_PEER_TIP_REQUIRE_SIGKILL", "env_build", "0", "-",
+          "two_node_peer_tip.sh: 0 uses portable process-tree termination; 1 requires Linux owned-group SIGKILL and wait status 137 before restart; does not identify a mid-block boundary")
 Z23_FLAG("ZCL_PEER_TIP_TMP", "env_build", "-", "-",
           "undocumented; first use tools/scripts/two_node_peer_tip.sh:auto")
 Z23_FLAG("ZCL_PERF_REPORT_UNDER_TEST", "env_build", "-", "-",
