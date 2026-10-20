@@ -215,11 +215,23 @@ static bool fetch_poll(const struct json_value *params, bool help, struct json_v
     return true;
 }
 
+/* True when no job is FETCHING or INSTALLING, so a tick has nothing to move. */
+static bool fetch_idle(void)
+{
+    struct plugin_fetch_view rows[PLUGIN_FETCH_TABLE_MAX];
+    size_t n = plugin_fetch_list(g_table, rows, PLUGIN_FETCH_TABLE_MAX);
+    for (size_t i = 0; i < n; i++)
+        if (rows[i].state == PLUGIN_FETCH_FETCHING || rows[i].state == PLUGIN_FETCH_INSTALLING)
+            return false;
+    return true;
+}
+
 void boot_plugin_fetch_tick(void)
 {
     char plugins[PATH_MAX], scratch[PATH_MAX];
     struct plugin_fetch_ctx ctx;
-    if (g_table && fetch_ctx(&ctx, plugins, scratch))
+    /* An idle table skips the per-tick directory work; a new job requests a tick. */
+    if (g_table && !fetch_idle() && fetch_ctx(&ctx, plugins, scratch))
         plugin_fetch_advance(g_table, &ctx, (uint64_t)platform_time_wall_time_t());
 }
 
