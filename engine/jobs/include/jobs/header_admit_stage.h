@@ -55,6 +55,16 @@ struct main_state;
 struct block_index;
 struct uint256;
 struct json_value;
+struct chain_params;
+struct block_header;
+struct validation_state;
+
+/* Caller owns progress-store lock, then ms->cs_main. Applies the existing
+ * contextual predicate and sparse/IBD policy to the exact named parent.
+ * Unknown parent returns true with parent_known=false: defer, never invalidate. */
+bool header_admit_check_contextual_locked(struct main_state *ms,
+    const struct chain_params *params, const struct block_header *header,
+    struct validation_state *state, bool *parent_known);
 
 /* Max steps drained per supervisor tick. Bounded to keep contention
  * on progress.kv low and to avoid starving other supervisor children. */

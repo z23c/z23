@@ -197,6 +197,17 @@ struct rfp_ingest_ctx {
     const char *datadir;
 };
 
+static bool rfp_mine_on_indexed_parent(struct main_state *ms,
+    struct block *blk, int height, const struct chain_params *cp)
+{
+    struct block_index *parent = block_map_find(&ms->map_block_index,
+                                                &blk->header.hashPrevBlock);
+    if (!parent)
+        return false;
+    blk->header.nBits = GetNextWorkRequired(parent, &blk->header, &cp->consensus);
+    return mine_block_pow(blk, height, cp, 0);
+}
+
 /* Mine a regtest block at `height` on `prev_hash`, admit its header (creating
  * the block_index + linking pprev), write its body to disk, and mark the index
  * BLOCK_HAVE_DATA ("headers + bodies synced but not connected"). Fills the
@@ -212,7 +223,7 @@ static bool rfp_mine_admit_persist(struct rfp_ingest_ctx *c, int height,
     if (!rfp_build_regtest_block(out_blk, height, prev_hash, c->cp,
                                  0 /*canonical chain salt*/, out_cb_value))
         return false;
-    if (!mine_block_pow(out_blk, height, c->cp, 0))
+    if (!rfp_mine_on_indexed_parent(c->ms, out_blk, height, c->cp))
         return false;
 
     block_get_hash(out_blk, out_hash);
@@ -356,9 +367,6 @@ int test_reducer_forward_progress_gate(void)
         ms.pindex_best_header = genesis;
     }
 
-    RFP_CHECK("tip_finalize anchor seed at genesis",
-              tip_finalize_stage_seed_anchor(0, genesis_hash.data, false));
-
     bool stages_ok =
         header_admit_stage_init(&ms) &&
         validate_headers_stage_init(&ms) &&
@@ -373,6 +381,9 @@ int test_reducer_forward_progress_gate(void)
     if (stages_ok)
         RFP_CHECK("seed genesis utxo_apply_log row",
                   rfp_seed_genesis_utxo_apply_row(progress_store_db()));
+
+    RFP_CHECK("tip_finalize anchor seed at genesis",
+              tip_finalize_stage_seed_anchor(0, genesis_hash.data, false));
 
     struct chain_activation_controller ctl;
     activation_controller_init(&ctl, &ms, NULL, cp, netdir);
@@ -573,7 +584,7 @@ int test_reducer_forward_progress_gate(void)
                 w_mined = false; break;
             }
             wblk[i].header.nTime += 7777u;  /* diverge from L at this height */
-            if (!mine_block_pow(&wblk[i], h, cp, 0)) { w_mined = false; break; }
+            if (!rfp_mine_on_indexed_parent(&ms, &wblk[i], h, cp)) { w_mined = false; break; }
             block_get_hash(&wblk[i], &whash[i]);
             wcbid[i] = wblk[i].vtx[0].hash;
 

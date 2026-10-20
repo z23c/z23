@@ -375,6 +375,34 @@ static bool reducer_push_header_admit(struct block *pblock,
 
 static _Atomic uint64_t g_catchup_known_header_bypass_total;
 
+/* Context is read under progress-store then cs_main, before ctl->mutex/drain.
+ * Missing parents keep the existing staging/drain path and are rechecked there. */
+static bool reducer_gate_header_context(struct chain_activation_controller *ctl,
+    struct block *block, struct validation_state *out)
+{
+    bool parent_known = false;
+    progress_store_tx_lock();
+    zcl_mutex_lock(&ctl->ms->cs_main);
+    bool ok = header_admit_check_contextual_locked(ctl->ms, ctl->params,
+        &block->header, out, &parent_known);
+    zcl_mutex_unlock(&ctl->ms->cs_main);
+    progress_store_tx_unlock();
+    return ok;
+}
+
+static bool reducer_block_preflight(struct chain_activation_controller *ctl,
+    struct block *block, struct validation_state *out, bool full)
+{
+    if (!ctl->ms || !ctl->params)
+        return validation_state_error(out, "reducer-main-state-unwired");
+    if (!check_block(block, out, ctl->params, full, full, true)) {
+        LOG_WARN("reducer", "%s: %s", full ? "check_block failed" : "catchup body preflight failed",
+                 out->reject_reason[0] ? out->reject_reason : "unknown");
+        return false;
+    }
+    return reducer_gate_header_context(ctl, block, out);
+}
+
 uint64_t reducer_ingest_catchup_known_header_bypass_total(void)
 {
     return atomic_load(&g_catchup_known_header_bypass_total);
@@ -395,19 +423,13 @@ bool reducer_stage_p2p_block_for_catchup(
     validation_state_init(out);
     if (!ctl || !pblock)
         return validation_state_error(out, "reducer-null-arg");
-    if (!ctl->ms)
-        return validation_state_error(out, "reducer-main-state-unwired");
 
     /* Catch-up body intake is not the consensus verdict. It is a pre-staging
      * body-shape gate: keep size/coinbase/tx-structural/sigops checks here,
      * but leave header PoW/Equihash to validate_headers and merkle
      * reconstruction to body_persist. That avoids doing the expensive header
      * proof work twice for every post-snapshot block. */
-    if (!check_block(pblock, out, ctl->params, false, false, true)) {
-        LOG_FAIL("reducer", "catchup body preflight failed: %s",
-                 out->reject_reason[0] ? out->reject_reason : "unknown");
-        return false;
-    }
+    if (!reducer_block_preflight(ctl, pblock, out, false)) return false;
 
     struct uint256 block_hash;
     block_get_hash(pblock, &block_hash);
@@ -516,11 +538,7 @@ bool reducer_ingest_block(struct chain_activation_controller *ctl,
      * admitted to the inbox. The `force`/requested flag does not relax the
      * stateless checks; it gates the relay pre-filters inside the admit
      * producer path, not this gate. */
-    if (!check_block(pblock, out, ctl->params, true, true, true)) {
-        LOG_FAIL("reducer", "check_block failed: %s",
-                 out->reject_reason[0] ? out->reject_reason : "unknown");
-        return false;
-    }
+    if (!reducer_block_preflight(ctl, pblock, out, true)) return false;
 
     /* (2) Push the header + raw bytes into the header_admit_inbox so the
      * producer path (step 2) can CREATE the block_index entry

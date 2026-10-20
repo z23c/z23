@@ -66,6 +66,8 @@
 #include "util/util.h"
 #include "validation/chainstate.h"
 #include "validation/check_block.h"
+#include "validation/process_block.h"
+#include "validation/accept_block_header.h"
 #include "validation/main_state.h"
 
 #include <errno.h>
@@ -246,6 +248,91 @@ static bool rbi_mine_admit_persist(struct rbi_ingest_ctx *c, int height,
 }
 
 int test_reducer_block_ingest_gate(void);
+static int rbi_context_valid_twin(struct chain_activation_controller *ctl,
+    struct block *candidate, const struct block_index *parent)
+{
+    int failures = 0;
+    candidate->header.nTime++;
+    candidate->header.nBits = GetNextWorkRequired(parent, &candidate->header, &ctl->params->consensus);
+    bool mined = mine_block_pow(candidate, 29, ctl->params, 0);
+    RBI_CHECK("context: MTP+1 twin has real valid PoW", mined);
+    struct block_index *twin = mined ? add_to_block_index(ctl->ms, &candidate->header) : NULL;
+    struct validation_state verdict;
+    bool accepted = twin && reducer_stage_p2p_block_for_catchup(ctl, candidate, &verdict);
+    RBI_CHECK("context: known-header MTP+1 twin reaches ordinary catchup body staging",
+        twin && !accepted && strcmp(verdict.reject_reason, "p2p-block-staged-for-reducer") == 0 &&
+        (twin->nStatus & BLOCK_HAVE_DATA));
+    return failures;
+}
+
+static int rbi_context_intake_case(void)
+{
+    int failures = 0;
+    char dir[256], netdir[512], blocks[640];
+    test_make_tmpdir(dir, sizeof(dir), "reducer_block_ingest_gate", "context");
+    SetDataDir(dir);
+    GetDataDir(true, netdir, sizeof(netdir));
+    rbi_mkdir_p(netdir);
+    snprintf(blocks, sizeof(blocks), "%s/blocks", netdir);
+    rbi_mkdir_p(blocks);
+    RBI_CHECK("context: isolated store opens", progress_store_open(dir));
+    struct main_state ms;
+    main_state_init(&ms);
+    const struct chain_params *cp = chain_params_get();
+    struct block_index parents[29];
+    struct arith_uint256 limit;
+    uint256_to_arith(&limit, &cp->consensus.powLimit);
+    for (int h = 0; h < 29; h++) {
+        block_index_init(&parents[h]);
+        parents[h].hashBlock.data[0] = (uint8_t)(h + 1);
+        parents[h].phashBlock = &parents[h].hashBlock;
+        parents[h].nHeight = h; parents[h].nTime = 1600000000u + (uint32_t)h;
+        parents[h].nBits = arith_uint256_get_compact(&limit, false);
+        parents[h].nStatus = BLOCK_VALID_TREE;
+        parents[h].pprev = h ? &parents[h - 1] : NULL;
+        block_map_insert(&ms.map_block_index, parents[h].phashBlock, &parents[h]);
+    }
+    active_chain_move_window_tip(&ms.chain_active, &parents[28]);
+    ms.pindex_best_header = &parents[28];
+    RBI_CHECK("context: header stage binds", header_admit_stage_init(&ms));
+    struct chain_activation_controller ctl;
+    activation_controller_init(&ctl, &ms, NULL, cp, netdir);
+    struct block candidate;
+    bool built = rbi_build_regtest_block(&candidate, 29, parents[28].phashBlock, cp, NULL);
+    if (built) {
+        candidate.header.nTime = (uint32_t)block_index_get_median_time_past(&parents[28]);
+        candidate.header.nBits = GetNextWorkRequired(&parents[28], &candidate.header, &cp->consensus);
+        built = mine_block_pow(&candidate, 29, cp, 0);
+    }
+    RBI_CHECK("context: equal-MTP full block has real valid PoW", built);
+    if (built) {
+        RBI_CHECK("context: complete ancestry does not use sparse/IBD bypass",
+            !process_block_should_skip_contextual_header(&ms, &parents[28], &cp->consensus));
+        for (int route = 0; route < 3; route++) {
+            struct validation_state verdict;
+            int writes = sqlite3_total_changes(progress_store_db());
+            size_t entries = ms.map_block_index.size;
+            uint64_t cursor = header_admit_stage_cursor();
+            bool accepted = route == 2 ? reducer_stage_p2p_block_for_catchup(&ctl, &candidate, &verdict) :
+                reducer_ingest_block(&ctl, &candidate, route ? REDUCER_SRC_SUBMIT : REDUCER_SRC_MINED, true, &verdict);
+            RBI_CHECK("context: all intake routes reject equal MTP before mutation",
+                !accepted && strcmp(verdict.reject_reason, "time-too-old") == 0 &&
+                sqlite3_total_changes(progress_store_db()) == writes && ms.map_block_index.size == entries &&
+                header_admit_stage_cursor() == cursor && active_chain_height(&ms.chain_active) == 28 &&
+                mailbox_header_admit_drain(rbi_discard_header) == 0);
+        }
+        failures += rbi_context_valid_twin(&ctl, &candidate, &parents[28]);
+    }
+    block_free(&candidate);
+    header_admit_stage_shutdown();
+    activation_controller_destroy(&ctl);
+    main_state_free(&ms);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    SetDataDir(""); ClearDataDirCache();
+    return failures;
+}
+
 int test_reducer_block_ingest_gate(void)
 {
     printf("\n=== reducer block-ingest gate "
@@ -271,6 +358,7 @@ int test_reducer_block_ingest_gate(void)
      * forks per group, so it is naturally isolated). */
     chain_params_select(CHAIN_REGTEST);
     const struct chain_params *cp = chain_params_get();
+    failures += rbi_context_intake_case();
 
     /* Sanity: regtest really is the small (48,5) parameter set the miner can
      * solve in-process. */

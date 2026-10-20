@@ -14,6 +14,10 @@
 #include "json/json.h"
 
 #include "chain/chain.h"
+#include "chain/chainparams.h"
+#include "chain/pow.h"
+#include "core/arith_uint256.h"
+#include "mining/miner.h"
 #include "core/uint256.h"
 #include "primitives/block.h"
 #include "jobs/header_admit_stage.h"
@@ -27,6 +31,8 @@
 #include "validation/chainstate.h"
 #include "validation/main_logic.h"
 #include "validation/main_state.h"
+#include "validation/process_block.h"
+#include "validation/check_block.h"
 
 #include "../../../engine/jobs/src/header_admit_forward_rewind.h"
 
@@ -199,12 +205,147 @@ static bool auth_observer(struct main_state *ms,
     return true;
 }
 
+static int ha_context_policy_controls(struct main_state *ms,
+    struct block_index *parent, const struct block_header *header)
+{
+    int failures = 0;
+    const struct chain_params *cp = chain_params_get();
+    HA_CHECK("context: complete parent does not skip contextual validation",
+        !process_block_should_skip_contextual_header(ms, parent, &cp->consensus));
+    struct validation_state state;
+    bool known = false;
+    validation_state_init(&state);
+    progress_store_tx_lock();
+    zcl_mutex_lock(&ms->cs_main);
+    bool allowed = header_admit_check_contextual_locked(ms, cp, header, &state, &known);
+    zcl_mutex_unlock(&ms->cs_main);
+    progress_store_tx_unlock();
+    HA_CHECK("context: adapter reports exact known-parent time-too-old verdict",
+        !allowed && known && strcmp(state.reject_reason, "time-too-old") == 0);
+    struct block_index *saved = parent->pprev;
+    parent->pprev = NULL;
+    validation_state_init(&state);
+    progress_store_tx_lock();
+    zcl_mutex_lock(&ms->cs_main);
+    allowed = header_admit_check_contextual_locked(ms, cp, header, &state, &known);
+    zcl_mutex_unlock(&ms->cs_main);
+    progress_store_tx_unlock();
+    HA_CHECK("context: sparse-window policy remains allowed", allowed && known);
+    parent->pprev = saved;
+    atomic_store(&ms->chain_active.height, 200000);
+    validation_state_init(&state);
+    progress_store_tx_lock();
+    zcl_mutex_lock(&ms->cs_main);
+    allowed = header_admit_check_contextual_locked(ms, cp, header, &state, &known);
+    zcl_mutex_unlock(&ms->cs_main);
+    progress_store_tx_unlock();
+    HA_CHECK("context: existing old-IBD policy remains allowed", allowed && known);
+    atomic_store(&ms->chain_active.height, 28);
+    validation_state_init(&state);
+    HA_CHECK("context: unwired adapter fails with runtime error",
+        !header_admit_check_contextual_locked(NULL, cp, header, &state, &known) && !known);
+    return failures;
+}
+
+static int ha_genesis_identity_controls(struct main_state *ms,
+    const struct block_header *header)
+{
+    int failures = 0;
+    struct chain_params supplied = *chain_params_get();
+    /* Supplied-identity contract fixture, not canonical header reproduction. */
+    block_header_get_hash(header, &supplied.consensus.hashGenesisBlock);
+    struct validation_state state;
+    validation_state_init(&state);
+    bool known = false;
+    progress_store_tx_lock();
+    zcl_mutex_lock(&ms->cs_main);
+    bool allowed = header_admit_check_contextual_locked(ms, &supplied, header, &state, &known);
+    zcl_mutex_unlock(&ms->cs_main);
+    progress_store_tx_unlock();
+    HA_CHECK("context: supplied canonical genesis identity needs no parent", allowed && known);
+    struct header_admit_msg msg = {0};
+    msg.height = 0; msg.has_header = true; msg.header = *header;
+    block_header_get_hash(header, &msg.hash);
+    HA_CHECK("context: fixture differs from selected genesis",
+        !uint256_eq(&msg.hash, &chain_params_get()->consensus.hashGenesisBlock));
+    HA_CHECK("context: empty genesis-stage initializes", header_admit_stage_init(ms));
+    HA_CHECK("context: noncanonical H0 unknown parent queued", mailbox_header_admit_push(&msg));
+    HA_CHECK("context: noncanonical H0 cannot bypass missing parent",
+        header_admit_stage_step_once() == JOB_IDLE && header_admit_stage_cursor() == 0 &&
+        block_map_find(&ms->map_block_index, &msg.hash) == NULL && log_row_count(progress_store_db()) == 0);
+    header_admit_stage_shutdown();
+    return failures;
+}
+
+static int ha_deferred_context_case(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_fmt_tmpdir(dir, sizeof(dir), "header_admit", "deferred-context");
+    mkdir_p_ha(dir);
+    HA_CHECK("context: isolated store opens", progress_store_open(dir));
+    chain_params_select(CHAIN_REGTEST);
+    struct main_state ms;
+    main_state_init(&ms);
+    struct synth_chain sc;
+    bool ready = synth_chain_build(&sc, 29);
+    HA_CHECK("context: complete parent metadata fixture", ready);
+    if (!ready) { main_state_free(&ms); progress_store_close(); test_cleanup_tmpdir(dir); return failures; }
+    const struct chain_params *cp = chain_params_get();
+    struct arith_uint256 limit;
+    uint256_to_arith(&limit, &cp->consensus.powLimit);
+    for (int h = 0; h < sc.n; h++) {
+        sc.blocks[h].nTime = 1600000000u + (uint32_t)h;
+        sc.blocks[h].nBits = arith_uint256_get_compact(&limit, false);
+        sc.blocks[h].nStatus = BLOCK_VALID_TREE;
+    }
+    struct block candidate;
+    block_init(&candidate);
+    candidate.header.hashPrevBlock = sc.hashes[28];
+    candidate.header.nTime = (uint32_t)block_index_get_median_time_past(&sc.blocks[28]);
+    candidate.header.nBits = GetNextWorkRequired(&sc.blocks[28], &candidate.header, &cp->consensus);
+    HA_CHECK("context: equal-MTP header has real PoW", mine_block_pow(&candidate, 29, cp, 0));
+    struct uint256 invalid_hash;
+    block_get_hash(&candidate, &invalid_hash);
+    failures += ha_genesis_identity_controls(&ms, &candidate.header);
+    HA_CHECK("context: start at child height", stage_set_named_cursor_if_behind(progress_store_db(), "header_admit", 29));
+    HA_CHECK("context: stage initializes", header_admit_stage_init(&ms));
+    struct header_admit_msg msg = {0};
+    msg.height = -1; msg.has_header = true; msg.header = candidate.header; msg.hash = invalid_hash;
+    HA_CHECK("context: unknown-parent candidate queued", mailbox_header_admit_push(&msg));
+    HA_CHECK("context: missing parent remains pending", header_admit_stage_step_once() == JOB_IDLE && header_admit_stage_cursor() == 29);
+    for (int h = 0; h < sc.n; h++) block_map_insert(&ms.map_block_index, &sc.hashes[h], &sc.blocks[h]);
+    active_chain_move_window_tip(&ms.chain_active, &sc.blocks[28]);
+    ms.pindex_best_header = &sc.blocks[28];
+    failures += ha_context_policy_controls(&ms, &sc.blocks[28], &candidate.header);
+    HA_CHECK("context: deferred equal-MTP header refused without cursor advance",
+        header_admit_stage_step_once() == JOB_IDLE && header_admit_stage_cursor() == 29 &&
+        block_map_find(&ms.map_block_index, &invalid_hash) == NULL && log_row_count(progress_store_db()) == 0);
+    candidate.header.nTime++;
+    candidate.header.nBits = GetNextWorkRequired(&sc.blocks[28], &candidate.header, &cp->consensus);
+    HA_CHECK("context: MTP+1 sibling has real PoW", mine_block_pow(&candidate, 29, cp, 0));
+    block_get_hash(&candidate, &msg.hash); msg.header = candidate.header;
+    HA_CHECK("context: valid sibling queued", mailbox_header_admit_push(&msg));
+    HA_CHECK("context: valid sibling advances after invalid candidate",
+        header_admit_stage_step_once() == JOB_ADVANCED && header_admit_stage_cursor() == 30 &&
+        block_map_find(&ms.map_block_index, &msg.hash) != NULL);
+    block_free(&candidate);
+    header_admit_stage_shutdown();
+    main_state_free(&ms);
+    synth_chain_free(&sc);
+    progress_store_close();
+    chain_params_select(CHAIN_MAIN);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_header_admit_stage(void)
 {
     printf("\n=== header_admit_stage tests ===\n");
     int failures = 0;
 
     blocker_module_init();
+    failures += ha_deferred_context_case();
 
     /* ── happy path: drain a 5-block synthetic chain ───────────────── */
     {

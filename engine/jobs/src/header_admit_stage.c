@@ -2,14 +2,13 @@
  *
  * header_admit_stage — implementation. See jobs/header_admit_stage.h.
  *
- * Single-process singleton. The F-2 stage primitive does all the
- * cursor / replay heavy lifting; this module is just the step body and
- * the schema-bootstrap glue for the `header_admit_log` table that lives
- * in progress.kv alongside `stage_cursor`. */
+ * Single-process singleton; the stage primitive owns cursor/replay and the
+ * atomic header_admit_log + stage_cursor commit in progress.kv. */
 
 #include "jobs/header_admit_stage.h"
 
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "core/arith_uint256.h"
 #include "event/event.h"
@@ -33,6 +32,8 @@
 #include "validation/accept_block_header.h"
 #include "validation/chainstate.h"
 #include "validation/main_state.h"
+#include "validation/check_block.h"
+#include "validation/process_block.h"
 #include "primitives/block.h"
 
 #include <pthread.h>
@@ -76,17 +77,8 @@ static void *g_authoritative_hook_user = NULL;
 MAILBOX_DEFINE(header_admit, struct header_admit_msg,
                HEADER_ADMIT_INBOX_CAPACITY)
 
-/* ── Pending raw-header staging (reducer producer path) ──────────────
- *
- * The inbox drain copies any message carrying raw header bytes
- * (m->has_header) into this small bounded ring, keyed by hash. step_admit
- * consults it when the active chain has no block at the height it needs
- * and then CREATES the block_index entry via add_to_block_index — letting
- * the reducer extend the chain without the legacy accept_block_header.
- *
- * Touched only on the stage's single step thread (drain + step both run
- * inside header_admit_stage_step_once), so no lock is needed. Hash-hint
- * pushers never set has_header, so they do not enter the producer path. */
+/* Raw headers are staged by hash for the producer. Only the single stage
+ * thread touches this ring (drain + step inside step_once); hash hints do not. */
 #define HEADER_ADMIT_PENDING_CAP 64
 
 struct pending_header {
@@ -97,8 +89,29 @@ struct pending_header {
 
 static struct pending_header g_pending[HEADER_ADMIT_PENDING_CAP];
 
-/* Stage a raw header for later production. Overwrites the oldest slot on
- * collision (simple ring); idempotent on identical hash. */
+bool header_admit_check_contextual_locked(struct main_state *ms,
+    const struct chain_params *params, const struct block_header *header,
+    struct validation_state *state, bool *parent_known)
+{
+    if (parent_known) *parent_known = false;
+    if (!ms || !params || !header || !state || !parent_known) {
+        LOG_WARN("header_admit", "contextual header check has incomplete runtime wiring");
+        return state ? validation_state_error(state, "header-context-unwired") : false;
+    }
+    struct uint256 hash;
+    block_header_get_hash(header, &hash);
+    if (uint256_eq(&hash, &params->consensus.hashGenesisBlock)) {
+        *parent_known = true;
+        return true;
+    }
+    struct block_index *parent = block_map_find(&ms->map_block_index, &header->hashPrevBlock);
+    if (!parent) return true;
+    *parent_known = true;
+    return process_block_should_skip_contextual_header(ms, parent, &params->consensus) ||
+        contextual_check_block_header(header, state, params, parent, ms->fCheckpointsEnabled);
+}
+
+/* Idempotent by hash; a full ring replaces its next slot. */
 static void pending_header_stage(const struct block_header *h)
 {
     struct uint256 hash;
@@ -121,9 +134,7 @@ static void pending_header_stage(const struct block_header *h)
     g_pending[slot].occupied = true;
 }
 
-/* Find a staged raw header whose parent is already in the block_index and
- * would land at `want_height`. Returns the slot's header pointer, or NULL.
- * Consumes (frees) the slot on a hit. */
+/* Consume a staged header landing at want_height; unresolved parents stay. */
 static const struct block_header *pending_header_take(struct main_state *ms,
                                                       int want_height)
 {
@@ -132,8 +143,9 @@ static const struct block_header *pending_header_take(struct main_state *ms,
             continue;
         const struct block_header *h = &g_pending[i].header;
         int produced_height;
-        if (want_height == 0) {
-            produced_height = 0;  /* genesis: no parent */
+        if (want_height == 0 && chain_params_get() &&
+            uint256_eq(&g_pending[i].hash, &chain_params_get()->consensus.hashGenesisBlock)) {
+            produced_height = 0;
         } else {
             struct block_index *pprev = block_map_find(&ms->map_block_index,
                                                        &h->hashPrevBlock);
@@ -149,11 +161,7 @@ static const struct block_header *pending_header_take(struct main_state *ms,
     return NULL;
 }
 
-/* ── Step body ─────────────────────────────────────────────────────── */
-
-/* Write one header_admit_log row through the AR lifecycle (Law 2: the
- * HeaderAdmitLog model is the only writer of its table). `db` is the
- * progress.kv handle. */
+/* HeaderAdmitLog owns writes through the AR lifecycle on progress.kv. */
 static bool log_insert(sqlite3 *db, int height,
                         const struct uint256 *hash,
                         const struct uint256 *parent_hash)
@@ -180,12 +188,8 @@ static void handle_header_admit_msg(const struct header_admit_msg *m)
 
     atomic_fetch_add(&g_inbox_drained_total, 1);
 
-    /* L1: stage carried header BEFORE the height<0 guard. Self-mined /
-     * submitblock / rebuild pushes carry height=-1 (no peer height hint);
-     * dropping them here starved the producer path so a regtest-mined block
-     * never created a block_index. Network-safe: step_admit only produces when
-     * active_chain_at(next_h) is NULL, never true for an existing network
-     * block. */
+    /* Raw local headers use height=-1; stage them before the hint guard.
+     * Production occurs only where the active chain has no block. */
     if (m->has_header)
         pending_header_stage(&m->header);
 
@@ -442,20 +446,28 @@ static bool rewind_cursor_if_active_chain_reorged(sqlite3 *db)
     return true;
 }
 
-/* Reducer producer: CREATE the block_index entry for `want_height` from a
- * staged raw header (add_to_block_index). Returns the
- * created (or already-mapped) entry, or NULL when no staged header lands
- * at this height (caller IDLEs).
- * Does not touch coins.db, disk, or the active-chain tip — it only adds
- * to ms->map_block_index, exactly as legacy accept_block_header would. */
+/* Produce a mapped index from staged bytes at want_height, or let the caller
+ * idle. This touches neither coins, disk nor the active-chain tip. */
 static struct block_index *produce_block_index(struct main_state *ms,
                                                int want_height)
 {
+    /* step_once owns progress-store; cs_main is the inner index lock. */
+    zcl_mutex_lock(&ms->cs_main);
     const struct block_header *h = pending_header_take(ms, want_height);
-    if (!h)
+    if (!h) {
+        zcl_mutex_unlock(&ms->cs_main);
         return NULL;
-
-    struct block_index *bi = add_to_block_index(ms, h);
+    }
+    struct validation_state state;
+    validation_state_init(&state);
+    bool parent_known = false;
+    bool allowed = header_admit_check_contextual_locked(ms, chain_params_get(), h, &state, &parent_known);
+    struct block_index *bi = allowed && parent_known ? add_to_block_index(ms, h) : NULL;
+    zcl_mutex_unlock(&ms->cs_main);
+    if (!allowed) {
+        LOG_WARN("header_admit", "pending header rejected height=%d reason=%s", want_height, state.reject_reason);
+        return NULL;
+    }
     if (!bi || !bi->phashBlock) {
         LOG_WARN("header_admit", "[header_admit] produce add_to_block_index failed height=%d", want_height);
         return NULL;
@@ -477,21 +489,14 @@ static job_result_t step_admit(struct stage_step_ctx *c)
     int next_h = (int)c->cursor_in;
     if (next_h < 0) return JOB_FATAL;
 
-    /* ANCHOR-SET MINT bound: the `-mint-anchor` driver caps the fold at the
-     * SHA3 checkpoint anchor so the resulting coins_kv set IS the anchor set.
-     * Default ceiling is MINT_FOLD_NO_CEILING (INT32_MAX) → never fires on a
-     * normal boot (no clamp applied). Refusing to admit above the ceiling makes
-     * the whole pipeline converge AT it (every downstream stage gates on this
-     * cursor). */
+    /* The mint driver's ceiling bounds every downstream stage; the normal
+     * INT32_MAX ceiling does not clamp admission. */
     if (next_h > mint_fold_ceiling_get())
         return JOB_IDLE;
 
     struct block_index *bi = ha_resolve_bi(db, ms, next_h);
     if (!bi || !bi->phashBlock) {
-        /* Reducer producer path: the active chain has no block here yet.
-         * If a raw header for this height was staged via the inbox, CREATE
-         * the block_index entry so the reducer can extend the chain without
-         * the legacy accept_block_header. */
+        /* No active entry: try the staged raw-header producer. */
         bi = produce_block_index(ms, next_h);
         if (!bi || !bi->phashBlock) return JOB_IDLE;
     }
@@ -516,17 +521,13 @@ static job_result_t step_admit(struct stage_step_ctx *c)
         return JOB_FATAL;
     }
 
-    /* L2.5: the reducer producer path must advance the best-header frontier,
-     * but the comparison and assignment belong to the CSR's single-writer
-     * lock.  A stale stage observation can therefore never overwrite a newer
-     * network header. */
+    /* CSR's single-writer lock prevents stale promotion over a newer header. */
     bool promoted = false;
     enum csr_result promote_rc = csr_promote_header_tip(
         csr_instance(), &ms->chain_active, &ms->pindex_best_header, bi,
         "header_admit", &promoted);
 #ifdef ZCL_TESTING
-    /* Isolated stage fixtures intentionally do not boot the process-wide CSR.
-     * Keep that seam explicit and test-only; production has no raw writer. */
+    /* Isolated fixtures omit CSR; production has no raw writer. */
     if (promote_rc == CSR_REJECTED_NOT_INITIALIZED) {
         struct block_index *current = ms->pindex_best_header;
         bool advance = current == NULL;
@@ -552,9 +553,7 @@ static job_result_t step_admit(struct stage_step_ctx *c)
         return JOB_FATAL;
     }
 
-    /* Idempotent block-index projection update; best-effort, never fatal.
-     * Emit after the VALID_TREE promotion so the persisted nStatus reflects
-     * it. */
+    /* Best-effort projection emit follows VALID_TREE promotion. */
     block_index_emit_header_event(bi, "header_admit",
                                   &g_header_event_emit_total,
                                   &g_header_event_emit_fail_total);
