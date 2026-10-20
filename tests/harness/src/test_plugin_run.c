@@ -16,6 +16,7 @@
 #include "platform/os_sandbox.h"
 #include "platform/positioned_file.h"
 #include "platform/resident_launch.h"
+#include "test/plugin_run_env.h"
 #include "util/path_util.h"
 #include "plugin/plugin_run.h"
 #include "plugin/plugin_store.h"
@@ -36,7 +37,6 @@
 #include <unistd.h>
 
 #define PRT_FIXTURE "build/fixtures/plugin_run_child"
-#define PRT_HEX (PLUGIN_HEX_SHA3_512 + 1)
 #define PRT_MARKER "PRC-VARIANT:"
 #define PRT_FIELD 16
 
@@ -54,10 +54,6 @@ int test_plugin_run(void)
 }
 #else
 
-struct prt_env {
-    char base[PATH_MAX], home[PATH_MAX], root[PATH_MAX], src[PATH_MAX];
-    uint8_t pk[32], sk[32];
-};
 
 static void prt_hex(const uint8_t *in, size_t n, char *out)
 {
@@ -89,7 +85,7 @@ static bool prt_slurp(const char *path, char *out, size_t cap)
     return true;
 }
 
-static bool prt_env_open(struct prt_env *e)
+bool prt_env_open(struct prt_env *e)
 {
     char dot[PATH_MAX], keys[PATH_MAX], hex[65], line[80];
     uint8_t seed[32];
@@ -108,7 +104,7 @@ static bool prt_env_open(struct prt_env *e)
     return ok && prt_write(keys, line, strlen(line)) && chmod(keys, 0600) == 0;
 }
 
-static void prt_env_close(struct prt_env *e)
+void prt_env_close(struct prt_env *e)
 {
     if (e->base[0])
         (void)test_rm_rf_recursive(e->base);
@@ -125,9 +121,10 @@ static unsigned char *prt_find(unsigned char *img, size_t size, const char *mark
 
 /* The fixture image with its behaviour field set to mode and its last two
  * characters to tag, so each (mode, tag) pair is a distinct generation. */
-static unsigned char *prt_image(const char *mode, const char *tag, size_t *len)
+unsigned char *prt_image_of(const char *fixture, const char *marker, const char *mode,
+                            const char *tag, size_t *len)
 {
-    FILE *f = fopen(PRT_FIXTURE, "rb");
+    FILE *f = fopen(fixture, "rb");
     if (!f)
         return NULL;
     fseek(f, 0, SEEK_END);
@@ -140,17 +137,22 @@ static unsigned char *prt_image(const char *mode, const char *tag, size_t *len)
         return NULL;
     }
     fclose(f);
-    unsigned char *at = prt_find(img, (size_t)size, PRT_MARKER);
+    unsigned char *at = prt_find(img, (size_t)size, marker);
     if (!at) {
         free(img);
         return NULL;
     }
-    at += strlen(PRT_MARKER);
+    at += strlen(marker);
     memset(at, ' ', PRT_FIELD);
     memcpy(at, mode, strlen(mode));
     memcpy(at + PRT_FIELD - 2, tag, 2);
     *len = (size_t)size;
     return img;
+}
+
+static unsigned char *prt_image(const char *mode, const char *tag, size_t *len)
+{
+    return prt_image_of(PRT_FIXTURE, PRT_MARKER, mode, tag, len);
 }
 
 static void prt_digest(const char *manifest, unsigned char digest[64])
@@ -174,7 +176,7 @@ static void prt_sign(const struct prt_env *e, const char *manifest, char sig_hex
 
 /* Sign and install an image as one generation; gen receives its id. Does not
  * switch. */
-static bool prt_publish_bytes(struct prt_env *e, const char *name, const unsigned char *img,
+bool prt_publish_bytes(struct prt_env *e, const char *name, const unsigned char *img,
                               size_t len, const char *caps, char gen[PRT_HEX])
 {
     unsigned char digest[64];

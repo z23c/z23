@@ -3298,6 +3298,7 @@ ifneq ($(filter Linux,$(ZCL_HOST_OS)),)
 RESIDENT_CONTRACT_FIXTURE_BINS += $(BUILD_DIR)/fixtures/plugin_run_child$(ZCL_HOST_EXEEXT)
 RESIDENT_CONTRACT_FIXTURE_BINS += $(BUILD_DIR)/fixtures/plugin_call_upper$(ZCL_HOST_EXEEXT)
 RESIDENT_CONTRACT_FIXTURE_BINS += $(PLUGIN_BUILTIN_BINS)
+RESIDENT_CONTRACT_FIXTURE_BINS += $(BUILD_DIR)/fixtures/plugin_hostcall_child$(ZCL_HOST_EXEEXT)
 endif
 
 $(BUILD_DIR)/fixtures/rlc_child_v1$(ZCL_HOST_EXEEXT): $(RESIDENT_CONTRACT_FIXTURE_SRC)
@@ -3333,6 +3334,14 @@ $(BUILD_DIR)/fixtures/plugin_run_child$(ZCL_HOST_EXEEXT): $(PLUGIN_RUN_FIXTURE_S
 	@mkdir -p $(dir $@)
 	$(CC) -std=gnu2x -O2 -Wall -Wextra $(RESIDENT_CONFINED_STATIC) $(LIB_INCLUDES) \
 	  -o $@ $(PLUGIN_RUN_FIXTURE_SRC)
+
+# Fixture plugin for the plugin_run_hostcall group: a resident static image that
+# makes host calls over its control socket. Linux only, like the other fixtures.
+PLUGIN_HOSTCALL_FIXTURE_SRC = tests/harness/fixtures/plugin_hostcall_child.c
+$(BUILD_DIR)/fixtures/plugin_hostcall_child$(ZCL_HOST_EXEEXT): $(PLUGIN_HOSTCALL_FIXTURE_SRC)
+	@mkdir -p $(dir $@)
+	$(CC) -std=gnu2x -O2 -Wall -Wextra $(RESIDENT_CONFINED_STATIC) $(LIB_INCLUDES) \
+	  -o $@ $(PLUGIN_HOSTCALL_FIXTURE_SRC)
 
 # One-shot fixture plugin (interface 2) for the plugin_call group: a static
 # image that upper-cases standard input. Built on Linux only, like the

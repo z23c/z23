@@ -119,8 +119,12 @@ static int pht_case_table(void)
         ASSERT_EQ(plugin_hostcall_cap_from_name("chain.read"), PLUGIN_HOSTCALL_CAP_CHAIN_READ);
         ASSERT_EQ(plugin_hostcall_cap_from_name("fs.read"), 0u);
         ASSERT_EQ(plugin_hostcall_cap_from_name(NULL), 0u);
-        /* No current manifest capability maps to a host-call capability. */
-        ASSERT_EQ(plugin_hostcall_grants_from_manifest(~0u), 0u);
+        /* Every host-call capability the manifest vocabulary names is in the mask. */
+        ASSERT_EQ(plugin_hostcall_grants_from_manifest(~0u),
+                  (uint32_t)(PLUGIN_HOSTCALL_CAP_CHAIN_READ | PLUGIN_HOSTCALL_CAP_STATE |
+                             PLUGIN_HOSTCALL_CAP_EVENTS | PLUGIN_HOSTCALL_CAP_WALLET));
+        ASSERT_EQ(plugin_hostcall_grants_from_manifest(1u << 7), PLUGIN_HOSTCALL_CAP_CHAIN_READ);
+        ASSERT_EQ(plugin_hostcall_grants_from_manifest(0x7fu), 0u); /* the old vocabulary */
         ASSERT_STR_EQ(plugin_hostcall_status_code(PLUGIN_HOSTCALL_DENIED), "PLUGIN_HOSTCALL_DENIED");
         ASSERT_STR_EQ(plugin_hostcall_status_code((enum plugin_hostcall_status)999), "PLUGIN_HOSTCALL_UNKNOWN");
     } TEST_END

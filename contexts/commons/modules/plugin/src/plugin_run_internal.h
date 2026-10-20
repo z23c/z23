@@ -23,7 +23,8 @@ struct prs_frame {
     char value[PRS_TOKEN_HEX + 1]; /* ping: fresh token; stop: launch nonce */
 };
 
-enum prs_ping { PRS_PING_NONE, PRS_PING_OK, PRS_PING_BAD };
+/* MISS: the control stream broke the host-call framing and was closed. */
+enum prs_ping { PRS_PING_NONE, PRS_PING_OK, PRS_PING_BAD, PRS_PING_MISS };
 
 struct plugin_run {
     struct plugin_run_options opt;
@@ -47,6 +48,16 @@ struct plugin_run {
     char ping_token[PRS_TOKEN_HEX + 1];
     uint32_t misses;
     uint32_t run_pings;     /* answered pings of the current child */
+    /* Control stream of the current child: bytes received and not yet consumed,
+     * the reply scratch, the host-call grant mask computed once from the verified
+     * manifest, and the rate window. Heap buffers, so the by-value copy in
+     * prs_check_target stays small. */
+    uint8_t *ctl_rx;
+    size_t ctl_rx_len;
+    uint8_t *ctl_reply;
+    uint32_t grants;
+    uint64_t window_start_ns;
+    uint32_t window_calls;
     /* Last generation that passed signature verification here, the digest of the
      * publisher_keys bytes it passed under, and its signed manifest. One entry,
      * memory only: a changed key list or generation misses and re-verifies. */
@@ -69,8 +80,14 @@ enum plugin_run_status prs_child_start(struct plugin_run *run);
 void prs_child_stop(struct plugin_run *run);
 /* True when the child exited on its own; fills last_exit_* and detail. */
 bool prs_child_reaped(struct plugin_run *run);
+/* Serve the control stream: read what is pending, answer host calls, and report
+ * whether a ping reply arrived. Runs every supervise tick. */
+enum prs_ping prs_control_pump(struct plugin_run *run, uint64_t now);
+/* Allocate or release the per-child control buffers; start also computes the
+ * grant mask from run->capabilities. */
+bool prs_control_start(struct plugin_run *run);
+void prs_control_stop(struct plugin_run *run);
 void prs_ping_send(struct plugin_run *run, uint64_t now);
-enum prs_ping prs_ping_collect(struct plugin_run *run);
 /* Read pending log bytes; final also emits an unterminated last line. */
 void prs_log_drain(struct plugin_run *run, bool final);
 #else
@@ -98,11 +115,15 @@ static inline void prs_child_stop(struct plugin_run *run) { (void)run; }
 static inline bool prs_child_reaped(struct plugin_run *run) { (void)run; return false; }
 static inline void prs_ping_send(struct plugin_run *run, uint64_t now) { (void)run; (void)now; }
 
-static inline enum prs_ping prs_ping_collect(struct plugin_run *run)
+static inline enum prs_ping prs_control_pump(struct plugin_run *run, uint64_t now)
 {
     (void)run;
+    (void)now;
     return PRS_PING_NONE;
 }
+
+static inline bool prs_control_start(struct plugin_run *run) { (void)run; return true; }
+static inline void prs_control_stop(struct plugin_run *run) { (void)run; }
 
 static inline void prs_log_drain(struct plugin_run *run, bool final)
 {

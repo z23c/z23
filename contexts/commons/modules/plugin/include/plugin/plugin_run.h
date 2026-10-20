@@ -11,6 +11,7 @@
 #ifndef ZCL_PLUGIN_RUN_H
 #define ZCL_PLUGIN_RUN_H
 
+#include "plugin/plugin_hostcall.h"
 #include "plugin/plugin_store.h"
 
 #include <signal.h>
@@ -45,6 +46,16 @@ struct plugin_run_options {
     uint32_t stable_ms;          /* healthy time that clears the crash count (10000) */
     uint32_t crash_limit;        /* crashes of one generation before fallback (3) */
     bool log_to_stderr;          /* forward the plugin's log lines to stderr */
+    /* Host-call handlers, or NULL to answer every call UNAVAILABLE. The table
+     * and its context are owned by the caller and must outlive the run. They
+     * are invoked only from the thread that calls plugin_run_poll or
+     * plugin_run_loop, one call at a time, so that thread must be the one that
+     * owns whatever the handlers touch. node_db is not thread-safe: give the
+     * handlers a read-only connection that belongs to the polling thread, or poll
+     * from the thread that owns the shared node_db. plugin_run never touches a
+     * database itself. */
+    const struct plugin_hostcall_handlers *hostcall;
+    uint32_t hostcall_per_second; /* host calls served per child per second (200) */
 };
 
 enum plugin_run_state {

@@ -343,6 +343,40 @@ crashes, the supervisor keeps retrying at the capped delay and changes no link.
 `fell_back` and the last `detail`. `PLUGIN_RUN_*` refusals carry a next action;
 a store refusal (for example `PLUGIN_EXE_HASH`) is reported under its own code.
 
+## Host calls
+
+A resident plugin may call the node over its control socket. A host-call
+frame is told apart from a ping by its leading byte, which is `0x00`; the
+frame carries a protocol version, a kind (request or reply), a method id and a
+bounded payload (`plugin_hostcall.h`). The node answers each request on the
+same socket, and a broken frame ends the stream, so the child is restarted.
+Calls are rate bounded per child; a call past the bound is deferred to the
+next one-second window.
+
+**Capabilities.** The manifest declares what the plugin may call, and the
+grants are taken from the verified manifest at each start:
+
+- `chain.read` allows `chain.tip` and `chain.header_by_height`.
+- `state` allows `state.get` and `state.put`.
+- `events.append` allows `event.append`.
+
+`log.write` needs no capability. `wallet.request` is never granted, whatever
+the manifest declares: the method is listed but not built, so it is refused.
+
+**Refusal codes.** A reply carries one of these codes instead of a result:
+
+- `DENIED`: the manifest did not grant the capability. It is checked before
+  any handler runs.
+- `PLANNED`: the method is listed but not built (`wallet.request`).
+- `UNAVAILABLE`: the node supplied no handler for the method.
+- `HANDLER`: the handler failed or broke its contract.
+- `ARGUMENT`, `TRUNCATED`, `OVERSIZE`, `UNDERSIZE`, `VERSION`, `KIND`,
+  `METHOD`, `PAYLOAD`, `BUFFER`: the frame or the reply buffer is malformed
+  or out of bounds.
+
+Proof: `make t-fast-exact ONLY=plugin_run_hostcall` runs a signed fixture
+plugin under `plugin run` against a small fixture chain.
+
 ## One-shot plugins (interface 2)
 
 A plugin whose manifest has `interface_version` 2 is a plain program, not a

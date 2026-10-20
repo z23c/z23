@@ -36,7 +36,6 @@ uint64_t prs_now_ns(void)
 #include <unistd.h>
 
 #define PRS_HIGH_FD 16
-#define PRS_PING_READ_MS 200u
 #define PRS_STOP_GRACE_MS 300u
 
 #ifdef ZCL_TESTING
@@ -403,7 +402,9 @@ enum plugin_run_status prs_child_start(struct plugin_run *run)
         prs_start_release(&s, false);
         return PLUGIN_RUN_ERR_SPAWN;
     }
-    bool ok = prs_launch(run, &s);
+    bool ok = prs_control_start(run) && prs_launch(run, &s);
+    if (!ok)
+        prs_control_stop(run);
     prs_start_release(&s, ok);
     if (!ok)
         return PLUGIN_RUN_ERR_SPAWN;
@@ -420,6 +421,7 @@ void prs_child_stop(struct plugin_run *run)
         resident_launch_cancel(&run->launch, PRS_STOP_GRACE_MS, error, sizeof(error));
     prs_log_drain(run, true);
     resident_launch_close(&run->launch);
+    prs_control_stop(run);
     prs_close(&run->log_fd);
     run->info.pid = 0;
     run->ping_pending = false;
@@ -444,6 +446,7 @@ bool prs_child_reaped(struct plugin_run *run)
     }
     prs_log_drain(run, true);
     resident_launch_close(&run->launch);
+    prs_control_stop(run);
     prs_close(&run->log_fd);
     return true;
 }
@@ -462,25 +465,6 @@ void prs_ping_send(struct plugin_run *run, uint64_t now)
     run->ping_sent_ns = now;
     (void)send((int)run->launch.ipc_native, &frame, sizeof(frame),
                MSG_DONTWAIT | MSG_NOSIGNAL);
-}
-
-/* One reply, accepted only under this launch's nonce and the pending token.
- * An older ping's late answer is consumed and ignored. */
-enum prs_ping prs_ping_collect(struct plugin_run *run)
-{
-    struct pollfd waiter = {.fd = (int)run->launch.ipc_native, .events = POLLIN};
-    struct resident_result_header header;
-    char payload[PRS_TOKEN_HEX + 1];
-    char error[RESIDENT_LAUNCH_ERROR_MAX];
-    if (poll(&waiter, 1, 0) <= 0 || !(waiter.revents & POLLIN))
-        return PRS_PING_NONE;
-    if (!resident_result_read(&run->launch, &header, payload, PRS_TOKEN_HEX,
-                              PRS_PING_READ_MS, error, sizeof(error)))
-        return errno == ECONNRESET || errno == ETIMEDOUT ? PRS_PING_NONE : PRS_PING_BAD;
-    if (header.payload_len != PRS_TOKEN_HEX)
-        return PRS_PING_BAD;
-    return memcmp(payload, run->ping_token, PRS_TOKEN_HEX) == 0 ? PRS_PING_OK
-                                                                : PRS_PING_NONE;
 }
 
 static void prs_log_flush(struct plugin_run *run)

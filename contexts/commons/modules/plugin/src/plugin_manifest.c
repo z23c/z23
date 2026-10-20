@@ -20,7 +20,9 @@
 
 static const char *const pm_capabilities[] = {
     "fs.read", "fs.write", "net.client", "net.server",
-    "process.spawn", "clock", "ui.panel"
+    "process.spawn", "clock", "ui.panel",
+    /* host-call capabilities (bits 7 to 10): append only, bit positions are stable */
+    "chain.read", "state", "events.append", "wallet.request"
 };
 enum { PM_CAPABILITY_COUNT = sizeof(pm_capabilities) / sizeof(pm_capabilities[0]) };
 

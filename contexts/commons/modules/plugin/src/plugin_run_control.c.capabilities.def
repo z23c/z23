@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the plugin control-socket server. */
+ZCL_MODULE_CAPABILITY("contexts/commons/modules/plugin/src/plugin_run_control.c", CAP_NETWORK, "reads host-call frames from and writes replies to the confined plugin's inherited control socket and closes it on a framing violation")

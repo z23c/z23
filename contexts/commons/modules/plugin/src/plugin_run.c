@@ -221,20 +221,28 @@ static void prr_ping_miss(struct plugin_run *run, uint64_t now)
 
 static void prr_ping(struct plugin_run *run, uint64_t now)
 {
+    /* The control stream is served every tick: host calls are answered even when
+     * no ping is outstanding. */
+    enum prs_ping got = prs_control_pump(run, now);
+    if (got == PRS_PING_BAD) {
+        prr_kill(run, now, "invalid reply on the control descriptor");
+        return;
+    }
+    if (got == PRS_PING_MISS) {
+        prr_ping_miss(run, now);
+        return;
+    }
     if (!run->ping_pending) {
         if (now >= run->next_ping_ns)
             prs_ping_send(run, now);
         return;
     }
-    enum prs_ping got = prs_ping_collect(run);
     if (got == PRS_PING_OK) {
         run->ping_pending = false;
         run->misses = 0;
         run->run_pings++;
         run->info.pings_ok++;
         run->next_ping_ns = now + (uint64_t)run->opt.ping_interval_ms * PRR_NS_PER_MS;
-    } else if (got == PRS_PING_BAD) {
-        prr_kill(run, now, "invalid reply on the control descriptor");
     } else if (now - run->ping_sent_ns >=
                (uint64_t)run->opt.ping_deadline_ms * PRR_NS_PER_MS) {
         prr_ping_miss(run, now);
