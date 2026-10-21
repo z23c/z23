@@ -28,7 +28,6 @@ static const char *const k_zpkg_defs[] = {
 static const char k_zpkg_defs_join[] =
     "engine/composition/zcode_package_registry.def "
     "engine/composition/zcode_c23_commons_app.def";
-static const char k_zpr_checker[] = "build/bin/zcode-package-registry-check";
 static const char k_zps_profile[] = "engine/composition/include/config/c23_commons_build_profile.h";
 static const char k_zps_toolchain[] = "platform/modules/platform/src/toolchain.c";
 static const char *const k_zpr_groups[] = {
@@ -208,17 +207,6 @@ static int zpr_run_rederive(char *cap, size_t capn)
         || zpr_replay(cap))
         return 2;
     if (code != 0) return 1;
-    char mk[256];
-    if (ovf(snprintf(mk, sizeof mk, "make -s --no-print-directory %s >/dev/null 2>&1",
-                     k_zpr_checker), sizeof mk)
-        || capture_cmd(mk, cap, capn, &code))
-        return 2;
-    if (code != 0)
-        return fprintf(stderr, ZPRF "could not build %s\n", k_zpr_checker) < 0
-                   ? die("z23-lint: write failed\n", "") : 1;
-    if (access(k_zpr_checker, X_OK) != 0)
-        return fprintf(stderr, ZPRF "missing %s\n", k_zpr_checker) < 0
-                   ? die("z23-lint: write failed\n", "") : 1;
     if (capture_cmd("tools/scripts/zcode_registry_rederive.sh --check", cap, capn, &code)
         || zpr_replay(cap))
         return 2;
