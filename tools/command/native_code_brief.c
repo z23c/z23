@@ -38,7 +38,7 @@
 #define CB_MAX_LESSONS 5
 #define CB_MAX_QUERIES 4
 #define CB_QUERY_CAP 129
-#define CB_MAX_NEXT 3
+#define CB_MAX_NEXT 4
 #define CB_NEXT_CAP 160
 #define CB_HEAD_CAP 4096
 #define CB_WIKI_DEADLINE_MS 1000
@@ -563,6 +563,8 @@ static void cb_build_next(struct cb_brief *b)
     cb_push_next(b, "%s", "make lint-fast");
     if (cb_needs_preflight(b))
         cb_push_next(b, "%s", "make lint-preflight");
+    if (b->ntests == 1 && strcmp(b->tests[0], "make_lint_gates") == 0)
+        cb_push_next(b, "%s", "tools/lint/run_lint.sh --list");
 }
 
 /* ── render ───────────────────────────────────────────────────────────── */

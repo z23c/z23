@@ -670,6 +670,72 @@ static int test_code_guide_brief_budget(void)
     return failures;
 }
 
+static int test_code_guide_lint_catalog(void)
+{
+    int failures = 0;
+    char root[PATH_MAX], why[192];
+    struct zcl_command_reply reply;
+    TEST("code.guide exposes the lint catalog after sole-fallback proof commands") {
+        ASSERT(brief_fixture(root, sizeof(root)));
+        ASSERT(brief_run(root, "{\"paths\":[\"tools/zcc.c\"]}",
+                         &reply, why, sizeof(why)));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        const struct json_value *next = json_get(&reply.data, "next");
+        ASSERT_EQ(json_size(next), 3u);
+        ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make t-fast ONLY=make_lint_gates");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make lint-fast");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "tools/lint/run_lint.sh --list");
+        zcl_command_reply_free(&reply);
+        ASSERT(brief_run(root,
+                         "{\"paths\":[\"tools/guide_catalog_fixture.def\"],\"budget\":8192}",
+                         &reply, why, sizeof(why)));
+        next = json_get(&reply.data, "next");
+        ASSERT_EQ(json_size(next), 4u);
+        ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make t-fast ONLY=make_lint_gates");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make lint-fast");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "make lint-preflight");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 3)), "tools/lint/run_lint.sh --list");
+        zcl_command_reply_free(&reply);
+        ASSERT(brief_run(root,
+                         "{\"paths\":[\"tools/guide_catalog_fixture.def\"],\"budget\":256}",
+                         &reply, why, sizeof(why)));
+        ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+        ASSERT(json_write(&reply.data, NULL, 0) <= 256);
+        ASSERT(json_get_bool(json_get(&reply.data, "truncated")));
+        ASSERT(brief_array_has(json_get(&reply.data, "cut"), "next"));
+        ASSERT(!brief_array_has(json_get(&reply.data, "next"), "tools/lint/run_lint.sh --list"));
+        zcl_command_reply_free(&reply);
+        test_rm_rf_recursive(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_guide_lint_catalog_exclusions(void)
+{
+    int failures = 0;
+    char root[PATH_MAX], why[192];
+    struct zcl_command_reply reply;
+    const char *inputs[] = {
+        "{\"paths\":[\"tools/command/native_command.c\"]}",
+        "{\"paths\":[\"tools/zcc.c\",\"tools/command/native_command.c\"]}",
+        "{\"paths\":[\"tools/zcc.c\",\"tools/command/native_command.c\"],\"budget\":256}",
+        "{\"paths\":[\"does/not/exist.xyz\"]}"
+    };
+    TEST("code.guide does not infer lint catalog eligibility from reduced or unmapped groups") {
+        ASSERT(brief_fixture(root, sizeof(root)));
+        for (size_t i = 0; i < sizeof(inputs) / sizeof(inputs[0]); i++) {
+            ASSERT(brief_run(root, inputs[i], &reply, why, sizeof(why)));
+            ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+            ASSERT(!brief_array_has(json_get(&reply.data, "next"), "tools/lint/run_lint.sh --list"));
+            zcl_command_reply_free(&reply);
+        }
+        test_rm_rf_recursive(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide_brief_edges(void)
 {
     int failures = 0;
@@ -6838,6 +6904,8 @@ int test_command_registry_catalog(void)
     failures += test_code_guide_leaf();
     failures += test_code_guide_brief();
     failures += test_code_guide_brief_budget();
+    failures += test_code_guide_lint_catalog();
+    failures += test_code_guide_lint_catalog_exclusions();
     failures += test_code_guide_brief_edges();
     failures += test_root_menu_budget();
     failures += test_branch_menus_shallow();
