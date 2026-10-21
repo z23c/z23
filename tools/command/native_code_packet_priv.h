@@ -97,6 +97,11 @@ void pk_excerpt_free(struct pk_excerpt *ex);
  * of lines kept on each side; `max_lines` bounds the rendered line count. */
 void pk_excerpt_symbol(struct pk_ctx *ctx, const struct ci_symbol *s,
                        int context, int max_lines, struct pk_excerpt *ex);
+/* One bounded same-file window containing all requested body spans. The
+ * caller guarantees last-first+1 <= max_lines; no symbol binding is inferred. */
+void pk_excerpt_neighborhood(struct pk_ctx *ctx, const struct ci_symbol *s,
+                             int first, int last, int max_lines,
+                             struct pk_excerpt *ex);
 /* Fill `ex` for lines [site-context, site+context] around one reference. */
 void pk_excerpt_site(struct pk_ctx *ctx, const char *file, int line,
                      int context, struct pk_excerpt *ex);

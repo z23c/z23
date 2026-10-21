@@ -30,6 +30,13 @@
 #include <string.h>
 
 #define PK_REPLY_BUDGET ((size_t)65536u)
+#define PK_LOOKUP_CAP 64
+
+struct pk_choice {
+    struct ci_symbol symbol;
+    const char *status;
+    int body_end;
+};
 
 /* One assembly of the packet; rebuilt (cache kept) when the reply must shrink. */
 struct pk_run {
@@ -40,6 +47,8 @@ struct pk_run {
     bool touch_from_input[PK_TOUCH_MAX];
     int ntouch;
     unsigned traps;
+    struct pk_choice choice[PK_SYMBOLS_MAX];
+    bool neighborhoods;
     struct json_value excerpts, files, tests, pattern, impact, caps, auth,
         claims;
     struct pk_sb map, exc, pat, keep, authority, notes;
@@ -289,7 +298,8 @@ static void pk_md_excerpt(struct pk_sb *sb, const struct pk_excerpt *ex,
 }
 
 static void pk_json_excerpt(struct json_value *arr, const struct pk_excerpt *ex,
-                            const struct ci_symbol *s)
+                            const struct ci_symbol *s, bool neighborhood,
+                            const char *shared_with)
 {
     struct json_value o;
     pk_obj(&o);
@@ -315,6 +325,8 @@ static void pk_json_excerpt(struct json_value *arr, const struct pk_excerpt *ex,
         (void)json_push_kv_int(&o, "elided_from", ex->elide_from);
         (void)json_push_kv_int(&o, "elided_to", ex->elide_to);
     }
+    if (neighborhood) (void)json_push_kv_str(&o, "context", "same_file_neighborhood");
+    if (shared_with) (void)json_push_kv_str(&o, "shared_with", shared_with);
     pk_push(arr, &o);
 }
 
@@ -343,32 +355,167 @@ static void pk_claim_defined_once(struct pk_run *run, const char *name,
     pk_claim(run, defs == 1, at, "symbol %s is defined once", name);
 }
 
-static void pk_do_symbol(struct pk_run *run, const char *name)
+struct pk_match {
+    struct ci_symbol symbol;
+    int count;
+    bool definition;
+};
+
+static void pk_match_add(struct pk_match *match, const struct ci_symbol *symbol)
 {
-    struct ci_symbol s;
-    bool found = false;
+    bool definition = symbol->def_path[0] != '\0';
+    if (match->definition && !definition) return;
+    if (definition && !match->definition) match->count = 0;
+    match->definition = definition;
+    if (!match->count) {
+        match->symbol = *symbol;
+        match->count = 1;
+        return;
+    }
+    const struct ci_symbol *old = &match->symbol;
+    if (!strcmp(old->def_path, symbol->def_path) && old->def_line == symbol->def_line &&
+        !strcmp(old->decl_path, symbol->decl_path) && old->decl_line == symbol->decl_line) return;
+    match->count++;
+}
+
+static const char *pk_scoped_matches(struct pk_run *run, const char *name, struct pk_match *match)
+{
+    static struct ci_symbol hits[PK_LOOKUP_CAP];
+    for (int f = 0; f < run->in.nfile; f++) {
+        int n = codeindex_symbols_in_file(run->ctx.ci, run->in.files[f], hits, PK_LOOKUP_CAP);
+        if (n < 0) return "lookup_failed";
+        if (n == PK_LOOKUP_CAP) return "lookup_capped";
+        for (int i = 0; i < n; i++) {
+            const struct ci_symbol *s = &hits[i];
+            const char *site = s->def_path[0] ? s->def_path : s->decl_path;
+            if (!strcmp(s->name, name) && !strcmp(site, run->in.files[f])) pk_match_add(match, s);
+        }
+    }
+    return NULL;
+}
+
+static bool pk_file_supplied(const struct pk_run *run, const char *file);
+
+static const char *pk_match_result(const struct pk_match *match, struct ci_symbol *symbol,
+                                  const char *empty)
+{
+    if (!match->count) return empty;
+    if (match->count != 1) return "ambiguous";
+    *symbol = match->symbol;
+    return "ok";
+}
+
+/* A complete name result already proves which exact candidates can occur in
+ * supplied files. Independent large impact files must not cap this lookup. */
+static const char *pk_complete_matches(struct pk_run *run, const char *name,
+    const struct ci_symbol *hits, int count, struct ci_symbol *symbol)
+{
+    struct pk_match global = {0}, scoped = {0};
+    for (int i = 0; i < count; i++) {
+        const struct ci_symbol *s = &hits[i];
+        if (strcmp(s->name, name)) continue;
+        pk_match_add(&global, s);
+        const char *site = s->def_path[0] ? s->def_path : s->decl_path;
+        if (pk_file_supplied(run, site)) pk_match_add(&scoped, s);
+    }
+    return pk_match_result(scoped.count ? &scoped : &global, symbol, "not_found");
+}
+
+static const char *pk_resolve_symbol(struct pk_run *run, const char *name, struct ci_symbol *symbol)
+{
+    static struct ci_symbol hits[PK_LOOKUP_CAP];
+    int n = codeindex_find(run->ctx.ci, name, hits, PK_LOOKUP_CAP);
+    if (n < 0) return "lookup_failed";
+    if (n < PK_LOOKUP_CAP) return pk_complete_matches(run, name, hits, n, symbol);
+    struct pk_match match = {0};
+    const char *status = pk_scoped_matches(run, name, &match);
+    if (status) return status;
+    return pk_match_result(&match, symbol, "lookup_capped");
+}
+
+static void pk_prepare_symbols(struct pk_run *run)
+{
+    for (int i = 0; i < run->in.nsym; i++) {
+        struct pk_choice *choice = &run->choice[i];
+        choice->body_end = 0;
+        choice->status = pk_resolve_symbol(run, run->in.symbols[i], &choice->symbol);
+        if (strcmp(choice->status, "ok")) continue;
+        struct pk_excerpt ex;
+        pk_excerpt_symbol(&run->ctx, &choice->symbol, 0, run->ctx.max_lines, &ex);
+        if (ex.text.len) choice->body_end = ex.end_line;
+        pk_excerpt_free(&ex);
+    }
+}
+
+static bool pk_file_supplied(const struct pk_run *run, const char *file)
+{
+    for (int i = 0; i < run->in.nfile; i++)
+        if (!strcmp(run->in.files[i], file)) return true;
+    return false;
+}
+
+static void pk_file_span(const struct pk_run *run, int index, int *first, int *last, int *shared)
+{
+    const char *file = run->choice[index].symbol.def_path;
+    *first = run->choice[index].symbol.def_line;
+    *last = run->choice[index].body_end;
+    *shared = -1;
+    for (int i = 0; i < run->in.nsym; i++) {
+        const struct pk_choice *other = &run->choice[i];
+        if (strcmp(other->status, "ok") || strcmp(file, other->symbol.def_path)) continue;
+        if (other->symbol.def_line < *first) *first = other->symbol.def_line;
+        if (other->body_end > *last) *last = other->body_end;
+        if (i < index && *shared < 0) *shared = i;
+    }
+}
+
+static bool pk_symbol_excerpt(struct pk_run *run, int index, struct pk_excerpt *ex, int *shared)
+{
+    const struct pk_choice *choice = &run->choice[index];
+    const struct ci_symbol *s = &choice->symbol;
+    *shared = -1;
+    bool supplied = s->def_path[0] && pk_file_supplied(run, s->def_path);
+    int first = 0, last = 0;
+    if (supplied) pk_file_span(run, index, &first, &last, shared);
+    bool neighborhood = run->neighborhoods && supplied && choice->body_end >= s->def_line &&
+        last - first + 1 <= run->ctx.max_lines;
+    if (neighborhood) pk_excerpt_neighborhood(&run->ctx, s, first, last, run->ctx.max_lines, ex);
+    else {
+        *shared = -1;
+        pk_excerpt_symbol(&run->ctx, s, supplied ? 0 : PK_CONTEXT_LINES, run->ctx.max_lines, ex);
+    }
+    return neighborhood;
+}
+
+static void pk_do_symbol(struct pk_run *run, int index)
+{
+    const char *name = run->in.symbols[index];
+    const struct pk_choice *choice = &run->choice[index];
+    struct ci_symbol s = choice->symbol;
+    bool found = !strcmp(choice->status, "ok");
     struct pk_excerpt ex;
-    (void)codeindex_symbol(run->ctx.ci, name, &s, &found);
+    int shared = -1;
+    bool neighborhood = false;
     if (found) {
-        pk_excerpt_symbol(&run->ctx, &s, PK_CONTEXT_LINES, run->ctx.max_lines,
-                          &ex);
+        neighborhood = pk_symbol_excerpt(run, index, &ex, &shared);
     } else {
         memset(&ex, 0, sizeof(ex));
         (void)snprintf(ex.symbol, sizeof(ex.symbol), "%s", name);
-        ex.status = "not_found";
+        ex.status = choice->status;
     }
-    pk_json_excerpt(&run->excerpts, &ex, found ? &s : NULL);
+    pk_json_excerpt(&run->excerpts, &ex, found ? &s : NULL, neighborhood,
+                    shared >= 0 ? run->in.symbols[shared] : NULL);
     if (found)
         pk_touch_add(run, s.def_path[0] ? s.def_path : s.decl_path, false);
-    if (ex.text.len > 0) {
+    if (ex.text.len > 0 && shared < 0) {
         char label[200];
         (void)snprintf(label, sizeof(label), "%s (%s)", name,
-                       pk_kind_name(ex.kind));
+                       neighborhood ? "same-file context; no binding inferred" : pk_kind_name(ex.kind));
         pk_md_excerpt(&run->exc, &ex, label);
         run->f.excerpt_lines += ex.shown;
         if (ex.text.p && strstr(ex.text.p, "#if"))
             run->traps |= PK_TRAP_ARM;
-    } else {
+    } else if (!ex.text.len) {
         pk_sb_add(&run->exc, "### %s  NOT AVAILABLE: %s (try `code find %s`)\n\n",
                   name, ex.status, name);
     }
@@ -702,10 +849,14 @@ static void pk_pattern_none(struct pk_run *run, const char *name, int nr)
               nr, nr >= PK_REFS_SCAN ? " (scan capped: not proof of absence)" : "");
 }
 
-static void pk_do_pattern(struct pk_run *run, const char *name)
+static void pk_do_pattern(struct pk_run *run, int index)
 {
+    const char *name = run->in.symbols[index];
+    const struct pk_choice *choice = &run->choice[index];
     static struct ci_ref refs[PK_REFS_SCAN];
-    int nr = codeindex_refs(run->ctx.ci, name, refs, PK_REFS_SCAN);
+    int nr = 0;
+    if (!strcmp(choice->status, "ok"))
+        nr = codeindex_callers_for_symbol(run->ctx.ci, &choice->symbol, refs, PK_REFS_SCAN);
     if (nr < 0) nr = 0;
     int best = pk_pick_test_ref(run, refs, nr);
     if (best < 0) {
@@ -780,26 +931,25 @@ static void pk_keep_signatures(struct pk_run *run)
 {
     pk_sb_add(&run->keep, "  - Files and symbols outside this packet; core/ is sealed.\n");
     for (int i = 0; i < run->in.nsym; i++) {
-        struct ci_symbol s;
-        bool found = false;
-        (void)codeindex_symbol(run->ctx.ci, run->in.symbols[i], &s, &found);
-        if (!found)
-            continue;
+        const struct pk_choice *choice = &run->choice[i];
+        if (strcmp(choice->status, "ok")) continue;
+        const struct ci_symbol *s = &choice->symbol;
         char sig[260];
-        code_trunc(sig, sizeof(sig), s.signature, 240);
+        code_trunc(sig, sizeof(sig), s->signature, 240);
         pk_sb_add(&run->keep, "  - Signature of %s unless CHANGE says otherwise: "
-                  "%s\n", s.name, sig);
+                  "%s\n", s->name, sig);
     }
 }
 
 static void pk_assemble(struct pk_run *run, int max_lines)
 {
     pk_run_reset(run, max_lines);
+    pk_prepare_symbols(run);
     pk_claim(run, run->f.head[0] != '\0',
              run->f.head[0] ? ".git" : "no readable .git",
              "HEAD was read from the checkout");
     for (int i = 0; i < run->in.nsym; i++)
-        pk_do_symbol(run, run->in.symbols[i]);
+        pk_do_symbol(run, i);
     for (int i = 0; i < run->in.nfile; i++)
         pk_touch_add(run, run->in.files[i], true);
     for (int i = 0; i < run->ntouch; i++)
@@ -812,7 +962,7 @@ static void pk_assemble(struct pk_run *run, int max_lines)
              "all %d covering group(s) are registered in the catalog",
              run->f.ngroup);
     for (int i = 0; i < run->in.nsym; i++)
-        pk_do_pattern(run, run->in.symbols[i]);
+        pk_do_pattern(run, i);
     pk_keep_signatures(run);
     pk_claim(run, !run->ctx.budget_hit, "4 MiB per request",
              "every governed read stayed within the read budget");
@@ -907,6 +1057,7 @@ static size_t pk_reply_cap(const struct zcl_command_request *request)
 static bool pk_fit(struct pk_run *run, size_t cap, struct json_value *out)
 {
     int lines = run->in.max_lines;
+    run->neighborhoods = true;
     for (;;) {
         pk_assemble(run, lines);
         bool ok = pk_render(run, out);
@@ -914,6 +1065,10 @@ static bool pk_fit(struct pk_run *run, size_t cap, struct json_value *out)
             return true;
         if (ok)
             json_free(out);
+        if (run->neighborhoods) {
+            run->neighborhoods = false;
+            continue;
+        }
         if (lines <= PK_LINES_MIN)
             return false;
         lines = lines * 2 / 3 < PK_LINES_MIN ? PK_LINES_MIN : lines * 2 / 3;

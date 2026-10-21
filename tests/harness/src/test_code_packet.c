@@ -19,6 +19,7 @@
 
 #include "test/test_core.h"
 #include "base/hex.h"
+#include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
 #include "command/native_command.h"
 #include "kernel/command_registry.h"
@@ -59,6 +60,16 @@ static bool pkt_write(const char *rel, const char *content)
     "\n" \
     "int pk_small_other(void) { return 2; }\n"
 
+#define PKT_SERVICE \
+    "/* A service with intentionally ordinary static names. */\n" \
+    "static int packet_rank(int x)\n{\n    return x + 17;\n}\n" \
+    "static int packet_status(void)\n{\n    return 23;\n}\n" \
+    "struct packet_ops { int (*rank)(int); int (*status)(void); };\n" \
+    "static const struct packet_ops packet_table = {\n" \
+    "    .rank = packet_rank,\n    .status = packet_status,\n};\n" \
+    "static int pk_aux(void) { return 31; }\n" \
+    "const struct packet_ops *packet_getter(void)\n{\n    return &packet_table;\n}\n"
+
 /* A function of `body` padded lines, long enough to force elision. */
 static bool pkt_write_long(const char *rel, const char *name, int body)
 {
@@ -76,6 +87,19 @@ static bool pkt_write_long(const char *rel, const char *name, int body)
     return ok;
 }
 
+static bool pkt_write_many(void)
+{
+    char text[8192];
+    size_t used = 0;
+    for (int i = 0; i < 70; i++) {
+        int n = snprintf(text + used, sizeof(text) - used,
+                         "static int pk_aux_%d(void) { return %d; }\n", i, i);
+        if (n < 0 || (size_t)n >= sizeof(text) - used) return false;
+        used += (size_t)n;
+    }
+    return pkt_write("core/modules/net/src/pk_many.c", text);
+}
+
 static bool pkt_fixture(void)
 {
     char rel[160];
@@ -84,6 +108,12 @@ static bool pkt_fixture(void)
                          "#ifndef PK_SMALL_H\n#define PK_SMALL_H\n"
                          "int pk_small_add(int x);\n#endif\n");
     ok = ok && pkt_write_long("core/modules/net/src/pk_long.c", "pk_long", 150);
+    ok = ok && pkt_write_many();
+    ok = ok && pkt_write("core/modules/net/src/pk_service.c", PKT_SERVICE);
+    ok = ok && pkt_write("core/modules/net/src/pk_duplicate.c",
+                         "static int packet_rank(long x) { return x - 99; }\n");
+    ok = ok && pkt_write("tests/harness/src/test_packet_wrong.c",
+                         "static int wrong_packet_case(void)\n{\n    return packet_rank(1);\n}\n");
     for (int i = 0; i < 8; i++) {
         char name[32];
         snprintf(name, sizeof(name), "pk_wide_%d", i);
@@ -116,16 +146,23 @@ static bool pkt_index_build(void)
     return true;
 }
 
-static void pkt_run(const char *root, struct json_value *input,
-                    struct zcl_command_reply *reply)
+static void pkt_run_budget(const char *root, struct json_value *input,
+                           size_t budget, struct zcl_command_reply *reply)
 {
     struct zcl_command_context ctx = { .source_root = root };
     struct zcl_command_request request = {
         .input = input, .context = &ctx, .view = "normal",
         .invoked_name = "code.packet",
+        .budget_bytes = budget,
     };
     zcl_command_reply_init(reply, "zcl.code_packet.v1");
     zcl_native_handle_code_packet(&request, reply);
+}
+
+static void pkt_run(const char *root, struct json_value *input,
+                    struct zcl_command_reply *reply)
+{
+    pkt_run_budget(root, input, 0, reply);
 }
 
 static void pkt_push_str(struct json_value *arr, const char *s)
@@ -257,6 +294,181 @@ static int test_code_packet_long_function_elided(void)
         ASSERT(strstr(got, "int pk_long(int x)\n") != NULL);
         ASSERT(strstr(got, "lines elided (L") != NULL);
         ASSERT(strstr(got, "    return x;\n}\n") != NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_packet_file_context(void)
+{
+    int failures = 0;
+    TEST("code_packet: explicit file expands an EOF getter without name inference") {
+        struct zcl_command_reply reply;
+        const char *syms[] = {"packet_getter"};
+        const char *files[] = {"core/modules/net/src/pk_service.c"};
+        pkt_call("Explain the actual service", syms, 1, files, 1, 120, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *ex = pkt_first(&reply, "excerpts");
+        ASSERT_EQ(json_get_int(json_get(ex, "first_line")), 1);
+        ASSERT(strstr(pkt_md(&reply), ".rank = packet_rank") != NULL);
+        ASSERT(strstr(pkt_md(&reply), "return x + 17;") != NULL);
+        ASSERT(strstr(pkt_md(&reply), "return 23;") != NULL);
+        ASSERT(strstr(pkt_md(&reply), "return x - 99;") == NULL);
+        ASSERT(strstr(pkt_md(&reply), "static int packet_rank(long x)") == NULL);
+        ASSERT(strstr(pkt_md(&reply), "wrong_packet_case") == NULL);
+        ASSERT(strstr(pkt_md(&reply), "static int packet_rank(int x)") != NULL);
+        ASSERT(json_get_int(json_get(ex, "shown_lines")) <= 120);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_packet_shared_context(void)
+{
+    int failures = 0;
+    TEST("code_packet: same-file requests share one context and added context yields before bodies") {
+        const char *syms[] = {"packet_getter", "packet_rank"};
+        const char *files[] = {"core/modules/net/src/pk_service.c"};
+        struct zcl_command_reply reply;
+        pkt_call("Read once", syms, 2, files, 1, 120, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const char *body = strstr(pkt_md(&reply), "return x + 17;");
+        ASSERT(body != NULL);
+        ASSERT(strstr(body + 1, "return x + 17;") == NULL);
+        const struct json_value *rows = json_get(&reply.data, "excerpts");
+        const struct json_value *second = json_at(rows, 1);
+        ASSERT_STR_EQ(json_get_str(json_get(second, "shared_with")), "packet_getter");
+        zcl_command_reply_free(&reply);
+
+        pkt_call("Budget", syms, 1, files, 1, 120, &reply);
+        size_t full_bytes = json_write(&reply.data, NULL, 0);
+        ASSERT(full_bytes > 4096);
+        zcl_command_reply_free(&reply);
+        struct json_value in, arr;
+        json_init(&in); json_set_object(&in);
+        (void)json_push_kv_str(&in, "goal", "Budget");
+        json_init(&arr); json_set_array(&arr); pkt_push_str(&arr, syms[0]);
+        (void)json_push_kv(&in, "symbols", &arr); json_free(&arr);
+        json_init(&arr); json_set_array(&arr); pkt_push_str(&arr, files[0]);
+        (void)json_push_kv(&in, "files", &arr); json_free(&arr);
+        (void)json_push_kv_int(&in, "max_lines", 120);
+        pkt_run_budget(PKT_FIX, &in, full_bytes + 2048 - 200, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "max_lines_effective")), 120);
+        ASSERT(json_get(pkt_first(&reply, "excerpts"), "context") == NULL);
+        ASSERT(strstr(pkt_md(&reply), "return &packet_table;") != NULL);
+        ASSERT(strstr(pkt_md(&reply), "return x + 17;") == NULL);
+        json_free(&in);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_packet_unrelated_large_file(void)
+{
+    int failures = 0;
+    TEST("code_packet: unrelated large impact files do not cap complete name lookup") {
+        struct zcl_command_reply reply;
+        const char *syms[] = {"packet_getter"};
+        const char *files[] = {"core/modules/net/src/pk_service.c", "core/modules/net/src/pk_many.c"};
+        pkt_call("Inspect service and unrelated impact", syms, 1, files, 2, 120, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "status")), "ok");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "file")), files[0]);
+        ASSERT(strstr(pkt_md(&reply), "return &packet_table;") != NULL);
+        ASSERT_EQ(json_get(&reply.data, "files")->num_children, 2);
+        zcl_command_reply_free(&reply);
+        pkt_call("Unique global symbol plus unrelated impact", syms, 1, &files[1], 1, 120, &reply);
+        ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "status")), "ok");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "file")), files[0]);
+        zcl_command_reply_free(&reply);
+        const char *capped[] = {"pk_aux"};
+        pkt_call("A capped name query can use a complete supplied file", capped, 1, files, 1, 120, &reply);
+        ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "status")), "ok");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "file")), files[0]);
+        zcl_command_reply_free(&reply);
+        pkt_call("Capped global results never prove uniqueness", capped, 1, NULL, 0, 120, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "lookup_capped");
+        zcl_command_reply_free(&reply);
+        pkt_call("Capped supplied results never prove uniqueness", capped, 1, files, 2, 120, &reply);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "excerpts"), "status")), "lookup_capped");
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_packet_excerpt_append_failure(void)
+{
+    int failures = 0;
+    TEST("code_packet: failed first or later excerpt append never annotates a different row") {
+        struct json_value input;
+        json_init(&input);
+        const char *text = "{\"goal\":\"Allocation safety\",\"symbols\":[\"packet_getter\",\"packet_rank\"],"
+            "\"files\":[\"core/modules/net/src/pk_service.c\"],\"max_lines\":120}";
+        ASSERT(json_read(&input, text, strlen(text)));
+        size_t before = json_test_live_blocks();
+        /* Copy #1 is the HEAD claim. #2 and #4 are respectively the first
+         * excerpt and the later excerpt, with its definition claim between. */
+        for (unsigned nth = 2; nth <= 4; nth += 2) {
+            struct zcl_command_reply reply;
+            zcl_alloc_fault_fail_nth("json_copy_children", nth);
+            pkt_run(PKT_FIX, &input, &reply);
+            bool consumed = zcl_alloc_fault_armed_label() == NULL;
+            zcl_alloc_fault_clear();
+            ASSERT(consumed);
+            ASSERT(json_write(&reply.data, NULL, 0) > 0);
+            const struct json_value *rows = json_get(&reply.data, "excerpts");
+            ASSERT(rows != NULL && rows->type == JSON_ARR);
+            ASSERT_EQ(rows->num_children, 1);
+            const struct json_value *row = json_at(rows, 0);
+            ASSERT_STR_EQ(json_get_str(json_get(row, "symbol")), nth == 2 ? "packet_rank" : "packet_getter");
+            const struct json_value *shared = json_get(row, "shared_with");
+            if (nth == 2) ASSERT_STR_EQ(json_get_str(shared), "packet_getter");
+            else ASSERT(shared == NULL);
+            zcl_command_reply_free(&reply);
+            ASSERT_EQ(json_test_live_blocks(), before);
+        }
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    return failures;
+}
+
+static int test_code_packet_static_scope(void)
+{
+    int failures = 0;
+    TEST("code_packet: supplied files disambiguate static names and unresolved names never guess") {
+        struct zcl_command_reply reply;
+        const char *syms[] = {"packet_rank"};
+        const char *files[] = {"core/modules/net/src/pk_service.c"};
+        pkt_call("Inspect the supplied implementation", syms, 1, files, 1, 120, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "file")), files[0]);
+        ASSERT(strstr(pkt_md(&reply), "return x + 17;") != NULL);
+        ASSERT(strstr(pkt_md(&reply), "return x - 99;") == NULL);
+        ASSERT(strstr(pkt_md(&reply), "Signature of packet_rank unless CHANGE says otherwise: static int packet_rank(int x)") != NULL);
+        ASSERT(strstr(pkt_md(&reply), "static int packet_rank(long x)") == NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(pkt_first(&reply, "pattern"), "status")), "none_in_index_refs");
+        ASSERT(strstr(pkt_md(&reply), "wrong_packet_case") == NULL);
+        zcl_command_reply_free(&reply);
+        pkt_call("Do not guess global statics", syms, 1, NULL, 0, 120, &reply);
+        ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "status")), "ambiguous");
+        ASSERT(strstr(pkt_md(&reply), "return x - 99;") == NULL);
+        zcl_command_reply_free(&reply);
+        const char *both[] = {files[0], "core/modules/net/src/pk_duplicate.c"};
+        pkt_call("Do not guess between supplied files", syms, 1, both, 2, 120, &reply);
+        ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "status")), "ambiguous");
         zcl_command_reply_free(&reply);
         PASS();
     } _test_next:;
@@ -552,6 +764,11 @@ int test_code_packet(void)
     int failures = 0;
     failures += test_code_packet_excerpt_verbatim();
     failures += test_code_packet_long_function_elided();
+    failures += test_code_packet_file_context();
+    failures += test_code_packet_static_scope();
+    failures += test_code_packet_unrelated_large_file();
+    failures += test_code_packet_excerpt_append_failure();
+    failures += test_code_packet_shared_context();
     failures += test_code_packet_unknown_symbol();
     failures += test_code_packet_tests_match_code_tests();
     failures += test_code_packet_bounds_refused();

@@ -308,6 +308,29 @@ void pk_excerpt_symbol(struct pk_ctx *ctx, const struct ci_symbol *s,
     pk_window_fill(ex, src, max_lines);
 }
 
+void pk_excerpt_neighborhood(struct pk_ctx *ctx, const struct ci_symbol *s,
+                             int first, int last, int max_lines,
+                             struct pk_excerpt *ex)
+{
+    pk_excerpt_symbol(ctx, s, 0, max_lines, ex);
+    if (!ex->text.len) return;
+    const struct pk_src *src = pk_load(ctx, ex->file, NULL);
+    if (!src) return;
+    int total = pk_line_count(src->text, src->len);
+    int spare = max_lines - (last - first + 1);
+    ex->first = first - spare / 2;
+    if (ex->first < 1) ex->first = 1;
+    ex->last = ex->first + max_lines - 1;
+    if (ex->last > total) {
+        ex->last = total;
+        ex->first = total - max_lines + 1;
+        if (ex->first < 1) ex->first = 1;
+    }
+    pk_sb_free(&ex->text);
+    ex->shown = ex->elide_from = ex->elide_to = 0;
+    pk_window_fill(ex, src, max_lines);
+}
+
 void pk_excerpt_site(struct pk_ctx *ctx, const char *file, int line,
                      int context, struct pk_excerpt *ex)
 {
