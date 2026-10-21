@@ -215,8 +215,20 @@ static bool fw_child_is_dir(const char *dir, const struct dirent *e, char *out,
     return lstat(out, &st) == 0 && S_ISDIR(st.st_mode);
 }
 
+static bool fw_selector(struct ci_fresh_watch *w, const char *dir)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/.current-epoch", dir);
+    if (n <= 0 || (size_t)n >= sizeof(path)) {
+        errno = ENAMETOOLONG;
+        return false;
+    }
+    return fw_add(w, path) >= 0;
+}
+
 /* Watch `path` and every real subdirectory. `source` applies the source
- * walk's prune rules; the build tree is watched whole. */
+ * walk's prune rules; the build tree also watches selector inodes because a
+ * write through an outside hardlink produces no event in this directory. */
 static bool fw_tree(struct ci_fresh_watch *w, const char *path, bool source)
 {
     if (fw_add(w, path) < 0) return false;
@@ -228,6 +240,10 @@ static bool fw_tree(struct ci_fresh_watch *w, const char *path, bool source)
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
             continue;
         if (source && fw_prune_source(e->d_name)) continue;
+        if (!source && strcmp(e->d_name, ".current-epoch") == 0) {
+            ok = fw_selector(w, path);
+            continue;
+        }
         if (e->d_type != DT_DIR && e->d_type != DT_UNKNOWN) continue;
         char child[PATH_MAX];
         if (fw_child_is_dir(path, e, child, sizeof(child)))
