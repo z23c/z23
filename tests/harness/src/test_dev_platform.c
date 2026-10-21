@@ -5135,6 +5135,10 @@ static bool dp_zcc_env_compile(const char *zcc, const char *cache,
         (void)setenv("CLAUDE_PID", value, 1);
         (void)setenv("INVOCATION_ID", value, 1);
         (void)setenv("DEVBUILD_ACTIVE", value, 1);
+        if (salt == 1)
+            (void)unsetenv("DEVBUILD_CLASS");
+        else
+            (void)setenv("DEVBUILD_CLASS", "normal", 1);
         (void)setenv("SSH_CONNECTION", value, 1);
         (void)setenv("XDG_SESSION_ID", value, 1);
         (void)setenv("SHLVL", value, 1);
@@ -5282,6 +5286,73 @@ static bool dp_zcc_pwd_scenario(const char *zcc, const char *root,
     return same;
 }
 
+/* The fixture driver checks the actual child environment, then executes
+ * the real compiler. Prefix lookalikes remain compiler-visible and keyed. */
+static bool dp_zcc_class_compile(const char *zcc, const char *root,
+                                  bool normal, const char *prefix)
+{
+    pid_t child = fork();
+    if (child < 0)
+        return false;
+    if (child == 0) {
+        if (chdir(root) != 0)
+            _exit(126);
+        (void)setenv("ZCC_DIR", "cache", 1);
+        (void)setenv("ZCC_LOG", "class.log", 1);
+        (void)unsetenv("ZCC_DISABLE");
+        (void)unsetenv("ZCC_VERIFIED");
+        (void)unsetenv("ZCC_STRICT");
+        (void)unsetenv("ZCC_AUDIT");
+        if (normal)
+            (void)setenv("DEVBUILD_CLASS", "normal", 1);
+        else
+            (void)unsetenv("DEVBUILD_CLASS");
+        (void)setenv("DEVBUILD_CLASS_EXTRA", prefix, 1);
+        execl(zcc, zcc, "./cc", "-std=c23", "-O1", "-MMD", "-MF",
+              "class.d", "-MT", "class.o", "-c", "t.c", "-o", "class.o",
+              (char *)NULL);
+        _exit(127);
+    }
+    int status = 0;
+    while (waitpid(child, &status, 0) < 0)
+        if (errno != EINTR)
+            return false;
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+static bool dp_zcc_class_paths(const char *root, char paths[6][PATH_MAX])
+{
+    static const char *const names[] = {
+        "cc", "class.log", "class.o", "class.d", "saved.o", "saved.d"
+    };
+    for (size_t i = 0; i < 6; i++)
+        if (snprintf(paths[i], PATH_MAX, "%s/%s", root, names[i]) >= PATH_MAX)
+            return false;
+    return dp_mk_write(root, "cc",
+        "#!/bin/sh\n"
+        "test \"${DEVBUILD_CLASS+x}\" != x || exit 91\n"
+        "case $DEVBUILD_CLASS_EXTRA in first|second) ;; *) exit 92 ;; esac\n"
+        "exec cc \"$@\"\n") && chmod(paths[0], 0700) == 0;
+}
+
+static bool dp_zcc_class_scenario(const char *zcc, const char *root)
+{
+    char p[6][PATH_MAX];
+    bool ok = dp_zcc_class_paths(root, p) &&
+        dp_zcc_class_compile(zcc, root, false, "first") &&
+        dp_hf_copy_file(p[2], p[4]) && dp_hf_copy_file(p[3], p[5]) &&
+        dp_zcc_class_compile(zcc, root, true, "first");
+    int hits = ok ? dp_zcc_log_hits(p[1]) : -1;
+    bool same = ok && dp_zcc_same_bytes(p[2], p[4]) &&
+                dp_zcc_same_bytes(p[3], p[5]);
+    bool prefix_miss = same &&
+        dp_zcc_class_compile(zcc, root, true, "second") &&
+        dp_zcc_log_hits(p[1]) == hits;
+    printf("    zcc class: absent->normal hits=%d equal_object_dep=%d "
+           "prefix_miss=%d (want 1 1 1)\n", hits, same, prefix_miss);
+    return hits == 1 && same && prefix_miss;
+}
+
 static bool dp_zcc_env_paths(char zcc[PATH_MAX], char root[PATH_MAX],
                              char src[PATH_MAX])
 {
@@ -5324,7 +5395,8 @@ static bool run_zcc_session_env_hit_fixture(void)
     int cpath = dp_zcc_env_scenario(zcc, root, "cpath", false,
                                     "/nonexistent-zcc-include");
     bool ok = plain == 1 && desc == 1 && cpath == 0 &&
-              dp_zcc_pwd_scenario(zcc, root, src);
+              dp_zcc_pwd_scenario(zcc, root, src) &&
+              dp_zcc_class_scenario(zcc, root);
     printf("    zcc env: repeat compile hits plain=%d descriptor=%d "
            "compiler-visible-change=%d (want 1 1 0) -> %s\n",
            plain, desc, cpath, ok ? "PASS" : "FAIL");

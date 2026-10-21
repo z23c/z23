@@ -388,7 +388,8 @@ static bool orchestration_env(const char *entry)
          * two otherwise identical compiles (measured: 17,780 compiles in an
          * hour, 21 hits, because every agent session carried its own ids), and
          * no compiler driver reads any of them. */
-        "ONLY=", "MAKEOVERRIDES=", "DEVBUILD_ACTIVE=", "INVOCATION_ID=",
+        "ONLY=", "MAKEOVERRIDES=", "DEVBUILD_ACTIVE=", "DEVBUILD_CLASS=",
+        "INVOCATION_ID=",
         "JOURNAL_STREAM=", "SHLVL=", "OLDPWD=", "_=",
         "SSH_CONNECTION=", "SSH_CLIENT=", "SSH_TTY=", "XDG_SESSION_ID=",
         "CLAUDE_", "CLAUDECODE=", "AI_AGENT="
