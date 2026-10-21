@@ -17,6 +17,7 @@
 #include "command/host_gc_priv.h"
 
 #include "platform/time_compat.h"
+#include "platform/os_proc.h"
 #include "platform/file_metadata.h"
 #include "util/file_tree_ops.h"
 #include "util/path_util.h"
@@ -60,6 +61,7 @@ struct hg_scan {
     size_t n;
     size_t cap;
     bool truncated;
+    bool process_inventory_complete;
 };
 
 static int hg_git(const char *dir, const char *const args[], char *out,
@@ -294,67 +296,85 @@ static void hg_mark_target(struct hg_scan *scan, const char *target)
 }
 #endif /* !defined(_WIN32) */
 
-static void hg_mark_link(struct hg_scan *scan, const char *link)
+static bool hg_mark_link(struct hg_scan *scan, const char *link, bool fd)
 {
 #if defined(_WIN32)
-    (void)scan;
-    (void)link;
+    (void)scan; (void)link; (void)fd;
+    return false;
 #else
     char target[PATH_MAX];
-    ssize_t n = readlink(link, target, sizeof(target) - 1);
-    if (n <= 0)
-        return;
+    ssize_t n = readlink(link, target, sizeof(target));
+    if (n < 0) return fd && errno == ENOENT;
+    if (n == 0 || (size_t)n >= sizeof(target)) return false;
     target[n] = '\0';
     hg_mark_target(scan, target);
+    return true;
 #endif
 }
 
-static void hg_mark_fds(struct hg_scan *scan, const char *procdir)
+static bool hg_mark_fds(struct hg_scan *scan, const char *procdir)
 {
     char fddir[HOST_GC_PATH_CAP];
-    DIR *d;
-    struct dirent *e;
-    if (!zcl_path_join(fddir, sizeof(fddir), procdir, "fd"))
-        return;
-    d = opendir(fddir);
-    if (!d)
-        return;
-    while ((e = readdir(d)) != NULL) {
+    if (!zcl_path_join(fddir, sizeof(fddir), procdir, "fd")) return false;
+    DIR *d = opendir(fddir);
+    if (!d) return false;
+    bool complete = true;
+    for (;;) {
+        errno = 0;
+        struct dirent *e = readdir(d);
+        if (!e) { if (errno) complete = false; break; }
+        if (e->d_name[0] == '.') continue;
         char link[HOST_GC_PATH_CAP * 2];
-        if (e->d_name[0] == '.')
-            continue;
-        if (zcl_path_join(link, sizeof(link), fddir, e->d_name))
-            hg_mark_link(scan, link);
+        if (!zcl_path_join(link, sizeof(link), fddir, e->d_name) ||
+            !hg_mark_link(scan, link, true)) complete = false;
     }
-    (void)closedir(d);
+    if (closedir(d) != 0) complete = false;
+    return complete;
 }
 
-/* ONE pass over /proc marks every candidate a live process is sitting in or
- * holding open — cwd and open descriptors both, because a proof runs make
- * from the generation root while its children sit in subdirectories and its
- * log fd may be the only thing left. Unreadable entries (another user, an
- * exiting process) are simply absent, which UNDER-estimates occupancy: this
- * test can only ever add a keep, never remove one. */
+static bool hg_mark_process(struct hg_scan *scan, const char *procdir)
+{
+    char cwd[HOST_GC_PATH_CAP * 2];
+    bool complete = zcl_path_join(cwd, sizeof(cwd), procdir, "cwd") &&
+                    hg_mark_link(scan, cwd, false);
+    if (!hg_mark_fds(scan, procdir)) complete = false;
+    struct stat st;
+    /* A vanished process cannot retain a live cwd/fd; all other failures
+     * remain unknown, including permissions and partial inventories. */
+    if (!complete && lstat(procdir, &st) != 0 && errno == ENOENT) return true;
+    return complete;
+}
+
+#if defined(__APPLE__)
+static void hg_native_path(const char *path, void *opaque)
+{
+    hg_mark_target(opaque, path);
+}
+#endif
+
 static void hg_mark_occupied(const struct host_gc_request *req,
                              struct hg_scan *scan)
 {
+#if defined(__APPLE__)
+    if (!req->proc_root[0]) {
+        scan->process_inventory_complete = os_proc_visit_paths(hg_native_path, scan);
+        return;
+    }
+#endif
     const char *root = req->proc_root[0] ? req->proc_root : "/proc";
     DIR *d = opendir(root);
-    struct dirent *e;
-    if (!d)
-        return;
-    while ((e = readdir(d)) != NULL) {
+    scan->process_inventory_complete = d != NULL;
+    if (!d) return;
+    for (;;) {
+        errno = 0;
+        struct dirent *e = readdir(d);
+        if (!e) { if (errno) scan->process_inventory_complete = false; break; }
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
         char procdir[HOST_GC_PATH_CAP];
-        char cwdlink[HOST_GC_PATH_CAP * 2];
-        if (e->d_name[0] < '0' || e->d_name[0] > '9')
-            continue;
-        if (!zcl_path_join(procdir, sizeof(procdir), root, e->d_name))
-            continue;
-        if (zcl_path_join(cwdlink, sizeof(cwdlink), procdir, "cwd"))
-            hg_mark_link(scan, cwdlink);
-        hg_mark_fds(scan, procdir);
+        if (!zcl_path_join(procdir, sizeof(procdir), root, e->d_name) ||
+            !hg_mark_process(scan, procdir)) scan->process_inventory_complete = false;
     }
-    (void)closedir(d);
+    if (closedir(d) != 0) scan->process_inventory_complete = false;
 }
 
 /* ------------------------------------------------------------ warm donors */
@@ -998,6 +1018,10 @@ static void hg_settle(const struct host_gc_request *req,
             continue;
         }
         v = hg_classify(req, c, now);
+        if (!scan->process_inventory_complete && v >= HG_ARCHIVE_UNIQUE) {
+            hg_refuse(report, c->path, "process_inventory_incomplete");
+            v = HG_KEEP_NEEDS_REVIEW;
+        }
         hg_count(cls, v);
         if (v == HG_KEEP_NEEDS_REVIEW && c->dirty != 0)
             hg_note_review(report, c, now);
@@ -1022,7 +1046,7 @@ static void hg_seed_classes(const struct host_gc_request *req,
 bool host_gc_run(const struct host_gc_request *req,
                  struct host_gc_report *report)
 {
-    struct hg_scan scan = { NULL, 0, HOST_GC_MAX_CANDIDATES, false };
+    struct hg_scan scan = {.cap = HOST_GC_MAX_CANDIDATES};
     char *buf;
     int64_t now;
 

@@ -28,8 +28,10 @@
 #include "command/host_gc_sweep.h"
 #include "command/native_command.h"
 #include "util/spawn.h"
+#include "platform/os_proc.h"
 
 #include <fcntl.h>
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -141,15 +143,41 @@ static bool hgt_backdate(const char *path, int hours)
 
 /* A live process sitting in `dir`. It never returns into harness code: the
  * child chdirs and parks until the parent kills it by its exact pid. */
+static bool hgt_child_ready(int fd)
+{
+    char byte = 0;
+    ssize_t n;
+    do { n = read(fd, &byte, 1); } while (n < 0 && errno == EINTR);
+    close(fd);
+    return n == 1 && byte == 'R';
+}
+
+static pid_t hgt_occupy_mode(const char *dir, bool fd_only)
+{
+    int ready[2];
+    if (pipe(ready) != 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(ready[0]);
+        if (fd_only) {
+            char file[HGT_PATH];
+            (void)snprintf(file, sizeof(file), "%s/out/held", dir);
+            if (chdir("/") != 0 || open(file, O_RDONLY) < 0) _exit(2);
+        } else if (chdir(dir) != 0) _exit(2);
+        if (write(ready[1], "R", 1) != 1) _exit(3);
+        close(ready[1]);
+        for (;;) pause();
+    }
+    close(ready[1]);
+    bool ready_child = hgt_child_ready(ready[0]);
+    if (pid > 0 && ready_child) return pid;
+    if (pid > 0) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); }
+    return -1;
+}
+
 static pid_t hgt_occupy(const char *dir)
 {
-    pid_t pid = fork();
-    if (pid != 0)
-        return pid;
-    if (chdir(dir) != 0)
-        _exit(2);
-    for (;;)
-        pause();
+    return hgt_occupy_mode(dir, false);
 }
 
 /* A generation shaped like a finished dev proof: a build-complete marker
@@ -200,6 +228,22 @@ static void hgt_seed_request(struct host_gc_request *req, const char *pool)
     (void)snprintf(req->pools[0].name, sizeof(req->pools[0].name), "z23p");
     (void)snprintf(req->pools[0].path, sizeof(req->pools[0].path), "%s", pool);
     req->npools = 1;
+    /* Inventory completeness is deterministic here; actual native cwd/fd
+     * protection is qualified separately with acknowledged child processes. */
+    (void)snprintf(req->proc_root, sizeof(req->proc_root), "%s/.hgt-proc", pool);
+    (void)mkdir(req->proc_root, 0700);
+    char occupied[HGT_PATH], procdir[HGT_PATH], fddir[HGT_PATH], cwd[HGT_PATH];
+    (void)snprintf(occupied, sizeof(occupied), "%s/gen-inuse", pool);
+    if (hgt_exists(occupied)) {
+        (void)snprintf(procdir, sizeof(procdir), "%s/1", req->proc_root);
+        (void)mkdir(procdir, 0700);
+        (void)snprintf(fddir, sizeof(fddir), "%s/fd", procdir);
+        (void)mkdir(fddir, 0700);
+        (void)snprintf(cwd, sizeof(cwd), "%s/cwd", procdir);
+        (void)unlink(cwd);
+        (void)symlink(occupied, cwd);
+    }
+
 }
 
 /* Exercise the advertised command boundary; every request is an explicit dry run. */
@@ -279,6 +323,128 @@ static bool hgt_invalid_roots(const char *text)
     zcl_command_reply_free(&reply);
     json_free(&roots);
     return ok;
+}
+
+#if defined(__APPLE__)
+static void hgt_count_path(const char *path, void *opaque)
+{
+    (void)path;
+    (*(unsigned *)opaque)++;
+}
+
+static int hgt_vnode_error_tests(const char *pool, const char *orphan)
+{
+    int failures = 0;
+    int fd = -1;
+    TEST("host gc: live vnode ENOENT is incomplete and cannot authorize apply") {
+        char path[HGT_PATH];
+        (void)snprintf(path, sizeof(path), "%s/out/held", orphan);
+        fd = open(path, O_RDONLY);
+        ASSERT(fd >= 0);
+        uint64_t pid = os_proc_current_pid();
+        unsigned observations = 0;
+        /* A complete own-process baseline makes this targeted refusal
+         * independent of ambient permission failures on other processes. */
+        ASSERT(os_proc_test_visit_pid_paths(pid, hgt_count_path, &observations));
+        ASSERT(observations > 0);
+        os_proc_test_path_vnode_error(pid, fd, ENOENT);
+        bool complete = os_proc_test_visit_pid_paths(pid, hgt_count_path, &observations);
+        ASSERT(os_proc_test_path_vnode_error_seen());
+        ASSERT(!complete && fcntl(fd, F_GETFD) >= 0);
+        struct host_gc_request req;
+        struct host_gc_report report;
+        hgt_seed_request(&req, pool);
+        req.proc_root[0] = '\0';
+        req.apply = true;
+        os_proc_test_path_vnode_error(pid, fd, ENOENT);
+        ASSERT(host_gc_run(&req, &report));
+        ASSERT(os_proc_test_path_vnode_error_seen());
+        const struct host_gc_class *cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL && cls->bytes_reclaimed == 0);
+        const char *reason = hgt_refusal(&report, orphan);
+        ASSERT(reason != NULL && strcmp(reason, "process_inventory_incomplete") == 0);
+        ASSERT(hgt_exists(orphan));
+        PASS();
+    }
+_test_next:
+    os_proc_test_path_vnode_error(0, -1, 0);
+    if (fd >= 0) close(fd);
+    return failures;
+}
+
+static bool hgt_native_truncation_refused(void)
+{
+    unsigned observations = 0;
+    os_proc_test_path_capacity(1);
+    bool complete = os_proc_visit_paths(hgt_count_path, &observations);
+    os_proc_test_path_capacity(0);
+    return !complete;
+}
+#endif
+
+static int hgt_inventory_tests(const char *pool, const char *inuse,
+                                const char *locked, const char *orphan)
+{
+    int failures = 0;
+    pid_t fd_child = -1;
+    TEST("host gc: native cwd/fd observations and incomplete inventory retain work") {
+        struct host_gc_request req;
+        struct host_gc_report report;
+        hgt_seed_request(&req, pool);
+        req.proc_root[0] = '\0';
+        ASSERT(host_gc_run(&req, &report));
+        const struct host_gc_class *cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL && cls->in_use == 1);
+        ASSERT(hgt_exists(inuse));
+        char out[HGT_PATH], held[HGT_PATH];
+        (void)snprintf(out, sizeof(out), "%s/out", orphan);
+        (void)snprintf(held, sizeof(held), "%s/held", out);
+        ASSERT(mkdir(out, 0700) == 0);
+        ASSERT(hgt_write(held, "held\n"));
+        ASSERT(hgt_backdate(orphan, 48));
+        fd_child = hgt_occupy_mode(orphan, true);
+        ASSERT(fd_child > 0);
+        req.apply = true;
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL && cls->in_use == 2);
+        ASSERT(cls->bytes_reclaimed == 0);
+        ASSERT(hgt_exists(inuse) && hgt_exists(orphan) && hgt_exists(locked));
+        ASSERT(kill(fd_child, SIGKILL) == 0);
+        ASSERT(waitpid(fd_child, NULL, 0) == fd_child);
+        fd_child = -1;
+        req.apply = false;
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL && cls->in_use == 1);
+        hgt_seed_request(&req, pool);
+        char synthetic[HGT_PATH];
+        (void)snprintf(synthetic, sizeof(synthetic), "%s/1/cwd", req.proc_root);
+        ASSERT(unlink(synthetic) == 0);
+        char sibling[HGT_PATH];
+        (void)snprintf(sibling, sizeof(sibling), "%s-other", inuse);
+        ASSERT(symlink(sibling, synthetic) == 0);
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL && cls->in_use == 0);
+        /* Missing explicit inventory is deterministic even for privileged
+         * test runners; no chmod-based permission assumption. */
+        (void)snprintf(req.proc_root, sizeof(req.proc_root), "%s/no-inventory", pool);
+        req.apply = true;
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL && cls->need_review == 1 && cls->bytes_reclaimed == 0);
+        const char *reason = hgt_refusal(&report, orphan);
+        ASSERT(reason != NULL && strcmp(reason, "process_inventory_incomplete") == 0);
+        ASSERT(hgt_exists(orphan));
+#if defined(__APPLE__)
+        ASSERT(hgt_native_truncation_refused());
+#endif
+        PASS();
+    }
+_test_next:
+    if (fd_child > 0) { kill(fd_child, SIGKILL); waitpid(fd_child, NULL, 0); }
+    return failures;
 }
 
 static int hgt_handler_tests(const char *pool, const char *inuse,
@@ -631,6 +797,10 @@ int test_host_gc(void)
         PASS();
     }
 
+    failures += hgt_inventory_tests(pool, inuse, locked, orphan);
+#if defined(__APPLE__)
+    failures += hgt_vnode_error_tests(pool, orphan);
+#endif
     failures += hgt_handler_tests(pool, inuse, locked, orphan);
 
     TEST("host gc: dry run labels in_use, locked and reapable, and moves nothing") {
@@ -638,19 +808,9 @@ int test_host_gc(void)
         struct host_gc_report report;
         const struct host_gc_class *cls;
         hgt_seed_request(&req, pool);
-        /* Let the forked occupant reach its chdir before the /proc pass
-         * reads its cwd (fixture ordering wait). */
-        for (int i = 0; i < 200; i++) {
-            ASSERT(host_gc_run(&req, &report));
-            cls = hgt_class(&report, "z23p");
-            ASSERT(cls != NULL);
-            if (cls->in_use == 1)
-                break;
-            {
-                struct timespec nap = { 0, 10000000 };
-                (void)nanosleep(&nap, NULL); /* real-clock: fixture ordering wait for the forked occupant's chdir, not a timing assumption in the code under test */
-            }
-        }
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "z23p");
+        ASSERT(cls != NULL);
         ASSERT_EQ(cls->registered, 3);
         ASSERT_EQ(cls->in_use, 1);
         ASSERT_EQ(cls->locked, 1);
@@ -779,8 +939,12 @@ int test_host_gc(void)
         ASSERT(hgt_add_gen(repo, stuck_pool, "gen-stuck", stuck_gen,
                            sizeof(stuck_gen)));
         ASSERT(hgt_backdate(stuck_gen, 48));
-        ASSERT(chmod(stuck_pool, 0500) == 0);
+        /* Establish the complete synthetic inventory before making its
+         * parent read-only; otherwise this tests inventory refusal instead
+         * of the intended final-rmdir failure. */
         hgt_seed_request(&req, stuck_pool);
+        ASSERT(hgt_exists(req.proc_root));
+        ASSERT(chmod(stuck_pool, 0500) == 0);
         req.apply = true;
         ASSERT(host_gc_run(&req, &report));
         ASSERT(chmod(stuck_pool, 0700) == 0);

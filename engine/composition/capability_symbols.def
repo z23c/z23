@@ -1387,6 +1387,8 @@ ZCL_CAPABILITY_SYMBOL("arc4random_buf", CAP_RANDOM, "Darwin kernel-backed random
 ZCL_CAPABILITY_SYMBOL("CFBundleCopyResourcesDirectoryURL", CAP_FS_READ, "Resolves the running bundle resource directory.")
 ZCL_CAPABILITY_SYMBOL("_NSGetExecutablePath", CAP_FS_READ, "Returns the running Mach-O filesystem path.")
 ZCL_CAPABILITY_SYMBOL("proc_pidinfo", CAP_FS_READ, "Reads Darwin process metadata.")
+ZCL_CAPABILITY_SYMBOL("proc_listpids", CAP_FS_READ, "Enumerates Darwin process identifiers.")
+ZCL_CAPABILITY_SYMBOL("proc_pidfdinfo", CAP_FS_READ, "Reads Darwin process file descriptor metadata.")
 ZCL_CAPABILITY_SYMBOL("proc_pidpath", CAP_FS_READ, "Reads a Darwin process executable path.")
 ZCL_CAPABILITY_SYMBOL("task_threads", CAP_FS_READ, "Enumerates threads belonging to a Mach task.")
 ZCL_CAPABILITY_SYMBOL("dprintf", CAP_FS_WRITE, "Writes to an arbitrary descriptor.")

@@ -118,7 +118,7 @@ struct host_gc_request {
     struct host_gc_pool pools[HOST_GC_MAX_POOLS];
     size_t npools;
     char home[HOST_GC_PATH_CAP];      /* protection root; "" = $HOME */
-    char proc_root[HOST_GC_PATH_CAP]; /* "" = /proc */
+    char proc_root[HOST_GC_PATH_CAP]; /* "" = native host inventory; explicit = procfs fixture */
     int64_t now;                      /* 0 = ask the wall clock */
 };
 
@@ -132,7 +132,7 @@ struct host_gc_report {
     bool truncated;                   /* more candidates than the cap */
 };
 
-/* Fill `req` with the production defaults: $HOME, /proc, the 6h floor, and
+/* Fill `req` with the production defaults: $HOME, native inventory, the 6h floor, and
  * the two dev-proof generation pools (disk and RAM). Returns false only when
  * $HOME is absent or too long to hold a pool path, in which case the caller
  * must refuse rather than sweep an unanchored tree. */

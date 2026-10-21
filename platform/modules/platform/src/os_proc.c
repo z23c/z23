@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <stdatomic.h>
 #if defined(_WIN32)
 #include <windows.h>
 #include <shellapi.h>
@@ -1202,5 +1203,140 @@ char *os_proc_self_maps_read(size_t max, size_t *len_out)
     if (len_out)
         *len_out = 0;
     return NULL; // raw-return-ok:platform-cannot-answer
+#endif
+}
+
+#if defined(__APPLE__)
+enum { OS_PROC_PATH_PID_CAP = 65536, OS_PROC_PATH_FD_CAP = 65536 };
+#ifdef ZCL_TESTING
+static _Atomic unsigned g_path_capacity;
+static _Atomic uint64_t g_path_error_pid;
+static _Atomic int g_path_error_fd;
+static _Atomic int g_path_error;
+static _Atomic bool g_path_error_seen;
+void os_proc_test_path_vnode_error(uint64_t pid, int fd, int error)
+{
+    atomic_store(&g_path_error_pid, pid);
+    atomic_store(&g_path_error_fd, fd);
+    atomic_store(&g_path_error, error);
+    atomic_store(&g_path_error_seen, false);
+}
+bool os_proc_test_path_vnode_error_seen(void)
+{
+    return atomic_load(&g_path_error_seen);
+}
+void os_proc_test_path_capacity(unsigned capacity)
+{
+    atomic_store(&g_path_capacity, capacity);
+}
+#endif
+
+static unsigned os_proc_path_capacity(unsigned normal)
+{
+#ifdef ZCL_TESTING
+    unsigned cap = atomic_load(&g_path_capacity);
+    if (cap > 0 && cap < normal) return cap;
+#endif
+    return normal;
+}
+
+static bool os_proc_visit_path(const char *path, size_t cap,
+                               os_proc_path_visitor visitor, void *opaque)
+{
+    if (!memchr(path, '\0', cap) || path[0] != '/') return false;
+    visitor(path, opaque);
+    return true;
+}
+
+static int os_proc_path_vnode_info(int pid, int fd,
+                                   struct vnode_fdinfowithpath *info)
+{
+#ifdef ZCL_TESTING
+    int error = atomic_load(&g_path_error);
+    if (error && atomic_load(&g_path_error_pid) == (uint64_t)pid &&
+        atomic_load(&g_path_error_fd) == fd) {
+        atomic_store(&g_path_error_seen, true);
+        errno = error;
+        return -1;
+    }
+#endif
+    return proc_pidfdinfo(pid, fd, PROC_PIDFDVNODEPATHINFO, info, sizeof(*info));
+}
+
+static bool os_proc_visit_vnode(int pid, int fd,
+                                os_proc_path_visitor visitor, void *opaque)
+{
+    struct vnode_fdinfowithpath info;
+    memset(&info, 0, sizeof(info));
+    errno = 0;
+    int n = os_proc_path_vnode_info(pid, fd, &info);
+    if (n != (int)sizeof(info)) return n <= 0 && errno == EBADF;
+    return os_proc_visit_path(info.pvip.vip_path, sizeof(info.pvip.vip_path),
+                              visitor, opaque);
+}
+
+static bool os_proc_visit_fds(int pid, os_proc_path_visitor visitor, void *opaque)
+{
+    size_t bytes = os_proc_path_capacity(OS_PROC_PATH_FD_CAP) * sizeof(struct proc_fdinfo);
+    struct proc_fdinfo *fds = malloc(bytes); // raw-alloc-ok:standalone-platform-package
+    if (!fds) return false;
+    errno = 0;
+    int n = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, (int)bytes);
+    bool complete = n >= 0 && (n != 0 || errno == 0) && (size_t)n < bytes &&
+                    n % (int)sizeof(*fds) == 0;
+    size_t count = n > 0 && (size_t)n <= bytes ? (size_t)n / sizeof(*fds) : 0;
+    for (size_t i = 0; i < count; i++) {
+        if (fds[i].proc_fdtype == PROX_FDTYPE_VNODE &&
+            !os_proc_visit_vnode(pid, fds[i].proc_fd, visitor, opaque))
+            complete = false;
+    }
+    free(fds);
+    return complete;
+}
+
+static bool os_proc_visit_one(int pid, os_proc_path_visitor visitor, void *opaque)
+{
+    uint64_t before, after;
+    if (!os_proc_pid_start_token((uint64_t)pid, &before))
+        return os_proc_pid_liveness((uint64_t)pid) == OS_PROC_LIVENESS_DEAD;
+    struct proc_vnodepathinfo info;
+    memset(&info, 0, sizeof(info));
+    int n = proc_pidinfo(pid, PROC_PIDVNODEPATHINFO, 0, &info, sizeof(info));
+    bool complete = n == (int)sizeof(info) &&
+        os_proc_visit_path(info.pvi_cdir.vip_path, sizeof(info.pvi_cdir.vip_path),
+                           visitor, opaque);
+    if (!os_proc_visit_fds(pid, visitor, opaque)) complete = false;
+    if (!os_proc_pid_start_token((uint64_t)pid, &after))
+        return os_proc_pid_liveness((uint64_t)pid) == OS_PROC_LIVENESS_DEAD;
+    return complete && before == after;
+}
+#ifdef ZCL_TESTING
+bool os_proc_test_visit_pid_paths(uint64_t pid, os_proc_path_visitor visitor,
+                                  void *opaque)
+{
+    return visitor && pid > 0 && pid <= INT_MAX &&
+           os_proc_visit_one((int)pid, visitor, opaque);
+}
+#endif
+#endif
+
+bool os_proc_visit_paths(os_proc_path_visitor visitor, void *opaque)
+{
+#if defined(__APPLE__)
+    if (!visitor) return false;
+    size_t bytes = os_proc_path_capacity(OS_PROC_PATH_PID_CAP) * sizeof(pid_t);
+    pid_t *pids = malloc(bytes); // raw-alloc-ok:standalone-platform-package
+    if (!pids) return false;
+    int n = proc_listpids(PROC_ALL_PIDS, 0, pids, (int)bytes);
+    bool complete = n > 0 && (size_t)n < bytes && n % (int)sizeof(*pids) == 0;
+    size_t count = n > 0 && (size_t)n <= bytes ? (size_t)n / sizeof(*pids) : 0;
+    for (size_t i = 0; i < count; i++)
+        if (pids[i] <= 0 || !os_proc_visit_one(pids[i], visitor, opaque)) complete = false;
+    free(pids);
+    return complete;
+#else
+    (void)visitor;
+    (void)opaque;
+    return false;
 #endif
 }

@@ -351,6 +351,19 @@ enum os_proc_liveness {
  * error is UNKNOWN, never proof that a process is dead. */
 enum os_proc_liveness os_proc_pid_liveness(uint64_t pid);
 uint64_t os_proc_current_pid(void);
+/* Native host cwd/vnode-fd inventory. Positive absolute paths are delivered
+ * even when the return value is false (incomplete/denied/truncated inventory).
+ * No UID filtering; unsupported backends return false. Not a deletion lease. */
+typedef void (*os_proc_path_visitor)(const char *path, void *opaque);
+bool os_proc_visit_paths(os_proc_path_visitor visitor, void *opaque);
+#if defined(ZCL_TESTING) && defined(__APPLE__)
+/* Smaller native PID/FD buffer cap for deterministic truncation refusal. */
+void os_proc_test_path_capacity(unsigned capacity);
+void os_proc_test_path_vnode_error(uint64_t pid, int fd, int error);
+bool os_proc_test_path_vnode_error_seen(void);
+bool os_proc_test_visit_pid_paths(uint64_t pid, os_proc_path_visitor visitor,
+                                  void *opaque);
+#endif
 /* Stable kernel process-birth token. Pair with PID to reject PID reuse.
  * Darwin encodes proc_bsdinfo's kernel start timeval as microseconds. */
 bool os_proc_pid_start_token(uint64_t pid, uint64_t *token);
