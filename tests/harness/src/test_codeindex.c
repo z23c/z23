@@ -53,7 +53,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 #include <sys/resource.h>
 #endif
 #if !defined(_WIN32)
@@ -2344,7 +2344,7 @@ static bool ci_measure_baseline(const char *workspace, const char *request_file,
 
 /* Explicit one-shot test fixture. No watcher, service, fake plan or compiler.
  * Its source-build CAS and the frozen indexed workspace are distinct roots. */
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 static bool ci_restart_hash(const char *path, char hex[65])
 {
     FILE *file = fopen(path, "rb");
@@ -2371,7 +2371,7 @@ static bool ci_restart_env_override(const char *entry)
     static const char *const prefixes[] = {
         "ZCL_CODEINDEX_BASELINE_", "ZCL_CODEINDEX_RESTART_", "ZCL_TEST_FORK_",
         "ZCL_TEST_CACHE", "ZCL_HOTSWAP_TEST_", "ZCL_DEVLOOP_TEST_",
-        "ONLY=", "LD_PRELOAD=", "LD_LIBRARY_PATH="
+        "ONLY=", "LD_PRELOAD=", "LD_LIBRARY_PATH=", "DYLD_"
     };
     for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
         if (!strncmp(entry, prefixes[i], strlen(prefixes[i]))) return true;
@@ -2409,14 +2409,15 @@ static int ci_restart_environment_tests(void)
         "ZCL_SOURCE_IDENTITY_SESSION=fixture-session", "DEVBUILD_LANE=fixture-lane",
         "TEST_FAST_CFLAGS=fixture-build", "ZCL_VENDOR_OFFLINE=fixture-policy",
         "ZCL_CODEINDEX_RESTART_WORKSPACE=fixture", "ZCL_CODEINDEX_BASELINE_REQUESTS=fixture",
-        "ZCL_TEST_CACHE=1", "ZCL_TEST_FORK_ROLE=fixture", "ZCL_DEVLOOP_TEST_PROCESS=0", NULL};
+        "ZCL_TEST_CACHE=1", "ZCL_TEST_FORK_ROLE=fixture", "ZCL_DEVLOOP_TEST_PROCESS=0",
+        "DYLD_INSERT_LIBRARIES=fixture", "DYLD_LIBRARY_PATH=fixture", NULL};
     char **clean = ci_restart_environment(fixture, true);
     CI_CHECK("restart environment filter allocates", clean != NULL);
     if (!clean) return failures;
     for (size_t i = 0; i < 5; i++)
         CI_CHECK("restart environment retains exact inherited ownership/build/admission",
                   ci_restart_env_contains(clean, fixture[i]));
-    for (size_t i = 5; i < 10; i++)
+    for (size_t i = 5; i < 12; i++)
         CI_CHECK("restart environment removes only fixture recursion/test overrides",
                   !ci_restart_env_contains(clean, fixture[i]));
     CI_CHECK("restart environment explicitly opts into test subprocesses",
@@ -2461,22 +2462,25 @@ static int ci_restart_child_environment_tests(void)
         "ZCL_CODEINDEX_CHILD_ENV_WITNESS=retained",
         "ZCL_DEVLOOP_TEST_PROCESS_EXTRA=retained", NULL};
     const char *argv[] = {"/usr/bin/env", NULL};
-    struct zcl_devloop_process_result process = {0};
+    struct zcl_devloop_process_result *process = calloc(1, sizeof(*process));
+    CI_CHECK("test child environment process allocation", process != NULL);
+    if (!process) return failures;
     environ = fixture;
-    bool ran = zcl_devloop_process_run_test(".", argv, 5000, &process);
+    bool ran = zcl_devloop_process_run_test(".", argv, 5000, process);
     bool parent_unchanged = environ == fixture &&
         !strcmp(getenv("ZCL_DEVLOOP_TEST_PROCESS"), "1");
     environ = original;
-    failures += ci_restart_child_output_tests(ran, &process);
+    failures += ci_restart_child_output_tests(ran, process);
     CI_CHECK("test process leaves parent environment and opt-in unchanged",
         parent_unchanged && environ == original);
     char *unowned[] = {"PATH=/usr/bin:/bin", NULL};
     environ = unowned;
-    bool refused = !zcl_devloop_process_run_test(".", argv, 5000, &process);
+    bool refused = !zcl_devloop_process_run_test(".", argv, 5000, process);
     bool unowned_unchanged = environ == unowned && !getenv("ZCL_DEVLOOP_TEST_PROCESS");
     environ = original;
     CI_CHECK("test process without parent opt-in still refuses and restores environment",
         refused && unowned_unchanged && environ == original);
+    free(process);
     return failures;
 }
 
@@ -2522,39 +2526,45 @@ static bool ci_restart_native_proof_ok(bool native_succeeded,
 static int ci_restart_diagnostic_tail_tests(void)
 {
     int failures = 0;
-    struct zcl_devloop_restart_build_receipt build = {
-        .candidate_probe_passed = true, .source_identity_overlay = true,
-        .source_cas_sha3 = "fixture-same-source"};
-    struct zcl_devloop_restart_proof_receipt proof = {
-        .source_identity_overlay = true, .proof_complete = true,
-        .group_count = 2, .groups_selected = 2, .groups_ran = 2,
-        .source_cas_sha3 = "fixture-same-source"};
-    struct zcl_devloop_process_result process = {.output_truncated = true};
+    struct ci_tail_state {
+        struct zcl_devloop_restart_build_receipt build;
+        struct zcl_devloop_restart_proof_receipt proof;
+        struct zcl_devloop_process_result process;
+    } *state = calloc(1, sizeof(*state));
+    if (!state) { fprintf(stderr, "restart tail fixture allocation failed\n"); return 1; }
+    state->build.candidate_probe_passed = true;
+    state->build.source_identity_overlay = true;
+    snprintf(state->build.source_cas_sha3, sizeof(state->build.source_cas_sha3), "%s", "fixture-same-source");
+    state->proof.source_identity_overlay = true; state->proof.proof_complete = true;
+    state->proof.group_count = 2; state->proof.groups_selected = 2; state->proof.groups_ran = 2;
+    snprintf(state->proof.source_cas_sha3, sizeof(state->proof.source_cas_sha3), "%s", "fixture-same-source");
+    state->process.output_truncated = true;
     CI_CHECK("native successful complete typed proof accepts bounded diagnostic tail",
-        ci_restart_native_proof_ok(true, &build, &proof, &process));
+        ci_restart_native_proof_ok(true, &state->build, &state->proof, &state->process));
     CI_CHECK("bounded diagnostic tail cannot turn native refusal into success",
-        !ci_restart_native_proof_ok(false, &build, &proof, &process));
-    proof.proof_complete = false;
+        !ci_restart_native_proof_ok(false, &state->build, &state->proof, &state->process));
+    state->proof.proof_complete = false;
     CI_CHECK("bounded diagnostic tail cannot hide incomplete typed proof",
-        !ci_restart_native_proof_ok(true, &build, &proof, &process));
-    proof.proof_complete = true; proof.groups_failed = 1;
+        !ci_restart_native_proof_ok(true, &state->build, &state->proof, &state->process));
+    state->proof.proof_complete = true; state->proof.groups_failed = 1;
     CI_CHECK("bounded diagnostic tail cannot hide a failed group",
-        !ci_restart_native_proof_ok(true, &build, &proof, &process));
-    proof.groups_failed = 0; proof.groups_ran = 1;
+        !ci_restart_native_proof_ok(true, &state->build, &state->proof, &state->process));
+    state->proof.groups_failed = 0; state->proof.groups_ran = 1;
     CI_CHECK("bounded diagnostic tail cannot hide missing group accounting",
-        !ci_restart_native_proof_ok(true, &build, &proof, &process));
-    proof.groups_ran = 2; build.source_cas_sha3[0] = 'x';
+        !ci_restart_native_proof_ok(true, &state->build, &state->proof, &state->process));
+    state->proof.groups_ran = 2; state->build.source_cas_sha3[0] = 'x';
     CI_CHECK("bounded diagnostic tail cannot hide mismatched source identity",
-        !ci_restart_native_proof_ok(true, &build, &proof, &process));
-    build.source_cas_sha3[0] = 'f'; process.exit_code = 1;
+        !ci_restart_native_proof_ok(true, &state->build, &state->proof, &state->process));
+    state->build.source_cas_sha3[0] = 'f'; state->process.exit_code = 1;
     CI_CHECK("bounded diagnostic tail cannot hide failed execution",
-        !ci_restart_native_proof_ok(true, &build, &proof, &process));
-    process.exit_code = 0;
+        !ci_restart_native_proof_ok(true, &state->build, &state->proof, &state->process));
+    state->process.exit_code = 0;
     CI_CHECK("cold structured data still refuses truncated capture",
-        !ci_restart_process_ok(&process));
-    process.output_truncated = false;
+        !ci_restart_process_ok(&state->process));
+    state->process.output_truncated = false;
     CI_CHECK("complete successful structured capture remains eligible",
-        ci_restart_process_ok(&process));
+        ci_restart_process_ok(&state->process));
+    free(state);
     return failures;
 }
 
@@ -2653,19 +2663,24 @@ static bool ci_restart_cold(const char *repo, const char *workspace,
     while (env[used]) used++;
     for (size_t i = 0; i < 3; i++) env[used++] = vars[i];
     const char *argv[] = {proof->artifact_path, "--exact=test_codeindex", "--no-cache", NULL};
-    struct zcl_devloop_process_result process = {0};
-    bool ok = zcl_devloop_process_run_env(repo, argv, (const char *const *)env, 300000, &process) &&
-        ci_restart_process_ok(&process);
+    struct zcl_devloop_process_result *process = calloc(1, sizeof(*process));
+    if (!process) {
+        fprintf(stderr, "restart cold process allocation failed\n");
+        free(env); return false;
+    }
+    bool ok = zcl_devloop_process_run_env(repo, argv, (const char *const *)env, 300000, process) &&
+        ci_restart_process_ok(process);
     free(env);
     /* Retain the actual child transcript even on refusal. */
-    if (process.output_len) fwrite(process.output, 1, process.output_len, stdout);
-    bool complete = ok && ci_restart_cold_summary(process.output) &&
-        ci_restart_observation(process.output, root, requests, observation);
-    if (!complete)
+    if (process->output_len) fwrite(process->output, 1, process->output_len, stdout);
+    ok = ok && ci_restart_cold_summary(process->output) &&
+        ci_restart_observation(process->output, root, requests, observation);
+    if (!ok)
         fprintf(stderr, "codeindex cold data refused: exit=%d signal=%d timeout=%d cancelled=%d output_len=%zu truncated=%d\n",
-            process.exit_code, process.term_signal, process.timed_out,
-            process.cancelled, process.output_len, process.output_truncated);
-    return complete;
+            process->exit_code, process->term_signal, process->timed_out,
+            process->cancelled, process->output_len, process->output_truncated);
+    free(process);
+    return ok;
 }
 
 static bool ci_restart_emit_identities(struct json_value *out,
@@ -2690,7 +2705,8 @@ static bool ci_restart_artifacts_match(const struct zcl_devloop_restart_build_re
         ci_restart_hash(p->artifact_path, proof) && !strcmp(proof, p->artifact_sha256) &&
         !stat(p->artifact_path, &st) && (uint64_t)st.st_dev == p->artifact_dev &&
         (uint64_t)st.st_ino == p->artifact_ino && (uint64_t)st.st_size == p->artifact_size &&
-        (int64_t)st.st_ctime == p->artifact_ctime_sec;
+        (int64_t)st.st_ctime == p->artifact_ctime_sec &&
+        (int64_t)st.st_ctim.tv_nsec == p->artifact_ctime_nsec;
 }
 
 static bool ci_restart_generation(struct json_value *out, const char *repo,
@@ -2733,11 +2749,22 @@ static bool ci_restart_emit(const char *repo,
 static bool ci_restart_stack_ready(void)
 {
     struct rlimit stack;
-    if (getrlimit(RLIMIT_STACK, &stack) || stack.rlim_cur != RLIM_INFINITY) {
+    if (getrlimit(RLIMIT_STACK, &stack)) return false;
+#if defined(__APPLE__)
+    /* Match the native process executor's permitted hard limit; Darwin
+     * need not support infinity. Large fixture state is heap-owned. */
+    if (stack.rlim_cur != stack.rlim_max) {
+        stack.rlim_cur = stack.rlim_max;
+        if (setrlimit(RLIMIT_STACK, &stack)) return false;
+    }
+    return stack.rlim_cur > 0;
+#else
+    if (stack.rlim_cur != RLIM_INFINITY) {
         fprintf(stderr, "codeindex DEV_RESTART requires explicit unlimited test stack (ulimit -s unlimited)\n");
         return false;
     }
     return true;
+#endif
 }
 
 static void ci_restart_refusal(const char *stage, const char *why,
@@ -2754,57 +2781,69 @@ static void ci_restart_refusal(const char *stage, const char *why,
         why[0] ? why : "incomplete proof, changed identity or missing cold observation", process->output);
 }
 
+struct ci_restart_state {
+    struct zcl_devloop_plan plan;
+    struct zcl_devloop_restart_build_receipt build;
+    struct zcl_devloop_restart_proof_receipt proof;
+    struct zcl_devloop_process_result process;
+    char why[512];
+    const char *stage;
+};
+
+static bool ci_restart_build_proof(const char *repo, struct ci_restart_state *s)
+{
+    /* Rebuild the genuine baseline with repaired infrastructure and this
+     * fixture first. Only the selector is the experimental delta; this does
+     * not qualify infrastructure changes or reduce their separate closure. */
+    const char *sources[] = {"cognition/services/src/zcode_goal_context_service.c"};
+    s->stage = "plan_or_build";
+    if (!zcl_devloop_plan_files(sources, 1, &s->plan) ||
+        !zcl_devloop_plan_add_closure(repo, sources, 1, &s->plan) ||
+        !zcl_devloop_plan_proof_admissible(&s->plan, NULL)) return false;
+    if (!zcl_devloop_restart_build(repo, sources, 1, &s->build, &s->process,
+                                    s->why, sizeof(s->why))) return false;
+    s->stage = "probe_or_native_proof";
+    if (!ci_restart_process_ok(&s->process)) return false;
+    bool native_ok = zcl_devloop_restart_prove(repo, sources, 1, &s->plan, &s->proof,
+                                               &s->process, s->why, sizeof(s->why));
+    s->stage = "typed_proof_and_artifact_identity";
+    return ci_restart_native_proof_ok(native_ok, &s->build, &s->proof, &s->process) &&
+        ci_restart_artifacts_match(&s->build, &s->proof);
+}
+
 static bool ci_measure_restart(const char *repo, const char *workspace,
                                 const char *requests, const char *root)
 {
-    /* Prerequisite: genuinely rebuild the baseline with the repaired process,
-     * restart deadline and this fixture before applying the selector change.
-     * This phase overlays/proves only that selector delta. The infrastructure
-     * changes retain their separate complete native derived proof obligation;
-     * this narrower source list does not qualify those changes. */
-    const char *sources[] = {"cognition/services/src/zcode_goal_context_service.c"};
     if (!ci_restart_stack_ready()) return false;
-    struct zcl_devloop_plan plan = {0};
-    struct zcl_devloop_restart_build_receipt build = {0};
-    struct zcl_devloop_restart_proof_receipt proof = {0};
-    struct zcl_devloop_process_result process = {0};
-    char why[512] = {0};
+    struct ci_restart_state *state = calloc(1, sizeof(*state));
+    if (!state) {
+        fprintf(stderr, "restart fixture state allocation failed\n"); return false;
+    }
     struct json_value observation = {0};
     extern char **environ;
     char **original = environ, **clean = ci_restart_environment(original, true);
-    if (!clean) return false;
+    if (!clean) { free(state); return false; }
     environ = clean;
-    const char *stage = "plan_or_build";
-    bool ok = zcl_devloop_plan_files(sources, 1, &plan) &&
-        zcl_devloop_plan_add_closure(repo, sources, 1, &plan) &&
-        zcl_devloop_plan_proof_admissible(&plan, NULL) &&
-        zcl_devloop_restart_build(repo, sources, 1, &build, &process, why, sizeof(why));
+    bool ok = ci_restart_build_proof(repo, state);
     if (ok) {
-        stage = "probe_or_native_proof";
-        ok = ci_restart_process_ok(&process) &&
-            zcl_devloop_restart_prove(repo, sources, 1, &plan, &proof, &process, why, sizeof(why));
-    }
-    if (ok) {
-        stage = "typed_proof_and_artifact_identity";
-        ok = ci_restart_native_proof_ok(ok, &build, &proof, &process) &&
-            ci_restart_artifacts_match(&build, &proof);
-    }
-    if (ok) {
-        stage = "cold_observation_and_final_bindings";
-        ok = ci_restart_cold(repo, workspace, requests, root, &proof, &observation) &&
-            ci_restart_artifacts_match(&build, &proof) && ci_restart_emit(repo, &build, &proof, &observation);
+        state->stage = "cold_measurement";
+        ok = ci_restart_cold(repo, workspace, requests, root, &state->proof, &observation) &&
+            ci_restart_artifacts_match(&state->build, &state->proof) &&
+            ci_restart_emit(repo, &state->build, &state->proof, &observation);
     }
     environ = original;
     free(clean); json_free(&observation);
-    if (!ok) ci_restart_refusal(stage, why, &process, &proof);
+    if (!ok) ci_restart_refusal(state->stage, state->why, &state->process, &state->proof);
+    free(state);
     return ok;
 }
+
 #else
 static bool ci_measure_restart(const char *repo, const char *workspace,
                                 const char *requests, const char *root)
 {
     (void)repo; (void)workspace; (void)requests; (void)root;
-    fprintf(stderr, "codeindex explicit restart observation is supported only by the Linux test fixture\n");
+    fprintf(stderr, "codeindex explicit restart observation is supported only by the Linux/Darwin test fixture\n");
     return false;
 }
 #endif
@@ -2819,7 +2858,7 @@ static bool ci_restart_inputs(const char *repo, const char *workspace,
 int test_codeindex(void)
 {
     int failures = test_codeindex_platform_arm();
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     failures += ci_restart_environment_tests();
     failures += ci_restart_child_environment_tests();
     failures += ci_restart_diagnostic_tail_tests();

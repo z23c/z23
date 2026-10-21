@@ -60,7 +60,15 @@
  * seconds (vcs_devloop) and over a hundred groups; 300 seconds can reject a
  * valid closure before that group's expected duration. Preserve full selection
  * and accounting; the weight is not an observed completed runtime. */
+#if defined(__APPLE__)
+/* On the admitted 16 GiB Darwin host, a cold scale group took 966 seconds
+ * and a 57-group proof with one cache hit took 991 seconds. Their sum is a
+ * cold-path estimate, not a completed cold proof. Allow finite headroom for
+ * that closure; the runner's silence watchdog and full accounting still apply. */
+#define RR_PROOF_TIMEOUT_MS 3600000
+#else
 #define RR_PROOF_TIMEOUT_MS 900000
+#endif
 #define RR_IMMEDIATE_GROUP_MAX 32
 #define RR_DEP_MAX 256
 #define RR_DEP_PATH 512
@@ -1351,8 +1359,16 @@ static bool rr_write_overlay_response_scan(FILE *in, FILE *dst,
         bool overlay =
             strncmp(token, "build/dev-loop/restart-objects/", 31) == 0 ||
             strncmp(token, "build/dev-loop/restart-test-objects/", 36) == 0;
-        if (!overlay)
+        if (!overlay) {
+#if defined(__APPLE__)
+            /* Darwin links the complete substituted graph, without the
+             * aggregate base. Ordinary canonical objects may own initializers;
+             * overlay safety remains mandatory for every changed object. */
+            ok = rr_join_root(root, token, full) && rr_regular(full, NULL) &&
+                 fprintf(dst, "%s\n", token) > 0;
+#endif
             continue;
+        }
         ok = rr_join_root(root, token, full) && rr_regular(full, NULL) &&
              rr_overlay_object_safe(full) && fprintf(dst, "%s\n", token) > 0;
         if (ok)
@@ -1418,6 +1434,65 @@ static bool rr_compile_one_prepare(const char *root,
     return true;
 }
 
+/* Decode Make's trusted shell-word encoding without invoking a shell or
+ * expanding variables, substitutions or globs. Output never exceeds input. */
+static bool rr_argument_escape(char **read, char **write, char quote)
+{
+    char c = **read;
+    if (!c) return false;
+    if (quote == '"' && !strchr("$`\"\\\n", c)) *(*write)++ = '\\';
+    if (c != '\n') *(*write)++ = c;
+    ++*read;
+    return true;
+}
+
+static bool rr_argument_word(char **read, char **write)
+{
+    char quote = 0;
+    while (**read) {
+        char c = **read;
+        if (!quote && isspace((unsigned char)c)) break;
+        ++*read;
+        if (c == '\\' && quote != '\'') {
+            if (!rr_argument_escape(read, write, quote)) return false;
+        } else if (c == quote) quote = 0;
+        else if (!quote && (c == '\'' || c == '"')) quote = c;
+        else *(*write)++ = c;
+    }
+    return quote == 0;
+}
+
+static bool rr_arguments(char *text, const char **argv, size_t capacity,
+                          size_t *count)
+{
+    *count = 0;
+    if (!capacity) return false;
+    argv[0] = NULL;
+    char *read = text, *write = text;
+    while (*read) {
+        while (isspace((unsigned char)*read)) ++read;
+        if (!*read) break;
+        if (*count >= capacity - 1) return false;
+        argv[(*count)++] = write;
+        if (!rr_argument_word(&read, &write)) return false;
+        /* Save the next input before its delimiter can be overwritten. */
+        while (isspace((unsigned char)*read)) ++read;
+        *write++ = '\0';
+    }
+    argv[*count] = NULL;
+    return true;
+}
+
+#ifdef ZCL_TESTING
+bool zcl_devloop_restart_arguments_test(char *text, const char **argv,
+                                       size_t capacity, size_t *count);
+bool zcl_devloop_restart_arguments_test(char *text, const char **argv,
+                                       size_t capacity, size_t *count)
+{
+    return rr_arguments(text, argv, capacity, count);
+}
+#endif
+
 struct rr_compile_argv_buf {
     char cc[512], flags[RR_TEXT_MAX];
     const char *argv[RR_ARG_MAX], *flagv[RR_ARG_MAX];
@@ -1434,8 +1509,12 @@ static bool rr_compile_one_build_argv(const struct rr_plan *plan,
 {
     (void)snprintf(b->cc, sizeof(b->cc), "%s", plan->cc);
     (void)snprintf(b->flags, sizeof(b->flags), "%s", plan->cflags);
-    b->argc = zcl_argv_split(b->cc, b->argv, RR_ARG_MAX);
-    size_t flagc = zcl_argv_split(b->flags, b->flagv, RR_ARG_MAX);
+    size_t flagc = 0;
+    if (!rr_arguments(b->cc, b->argv, RR_ARG_MAX, &b->argc) ||
+        !rr_arguments(b->flags, b->flagv, RR_ARG_MAX, &flagc)) {
+        rr_why(why, why_len, "restart compile action has malformed or excessive arguments");
+        return false;
+    }
     if (!b->argc || b->argc + flagc + extra_flag_count + 9 >= RR_ARG_MAX) {
         rr_why(why, why_len, "restart compile action exceeds argv bound");
         return false;
@@ -2065,10 +2144,14 @@ static bool rr_link_build_argv(const struct rr_plan *plan, const char *temp,
     (void)snprintf(b->flags, sizeof(b->flags), "%s", plan->ldflags);
     (void)snprintf(b->libs, sizeof(b->libs), "%s", plan->libs);
     (void)snprintf(b->rsp_arg, sizeof(b->rsp_arg), "@%s", overlay_rsp);
-    b->argc = zcl_argv_split(b->cc, b->argv, RR_ARG_MAX);
-    size_t cflagc = zcl_argv_split(b->cflags, b->cflagv, RR_ARG_MAX);
-    size_t flagc = zcl_argv_split(b->flags, b->flagv, RR_ARG_MAX);
-    size_t libc = zcl_argv_split(b->libs, b->libv, RR_ARG_MAX);
+    size_t cflagc = 0, flagc = 0, libc = 0;
+    if (!rr_arguments(b->cc, b->argv, RR_ARG_MAX, &b->argc) ||
+        !rr_arguments(b->cflags, b->cflagv, RR_ARG_MAX, &cflagc) ||
+        !rr_arguments(b->flags, b->flagv, RR_ARG_MAX, &flagc) ||
+        !rr_arguments(b->libs, b->libv, RR_ARG_MAX, &libc)) {
+        rr_why(why, why_len, "restart link action has malformed or excessive arguments");
+        return false;
+    }
     if (!b->argc || b->argc + cflagc + flagc + libc + 6 >= RR_ARG_MAX) {
         rr_why(why, why_len, "restart link action exceeds argv bound");
         return false;
@@ -2077,8 +2160,12 @@ static bool rr_link_build_argv(const struct rr_plan *plan, const char *temp,
     for (size_t i = 0; i < flagc; i++) b->argv[b->argc++] = b->flagv[i];
     b->argv[b->argc++] = "-o"; b->argv[b->argc++] = temp;
     b->argv[b->argc++] = b->rsp_arg;
+#if !defined(__APPLE__)
     b->argv[b->argc++] = plan->base_reloc;
     b->argv[b->argc++] = "-Wl,--allow-multiple-definition";
+#endif
+    /* Darwin consumes the complete substituted object response exactly once;
+     * adding the aggregate base duplicates symbols and needs GNU-only flags. */
     for (size_t i = 0; i < libc; i++) b->argv[b->argc++] = b->libv[i];
     b->argv[b->argc] = NULL;
     return true;
@@ -2089,12 +2176,18 @@ static bool rr_link_run_and_publish(const char *root, const char *candidate_dir,
                                     char binary[PATH_MAX],
                                     const char **argv,
                                     uint32_t *linker_processes,
+                                    uint32_t *complete_graph_linker_processes,
                                     struct zcl_devloop_process_result *process,
                                     int64_t *elapsed_us, int64_t *startup_us,
                                     int64_t *body_us, char *why,
                                     size_t why_len)
 {
     (*linker_processes)++;
+#if defined(__APPLE__)
+    (*complete_graph_linker_processes)++;
+#else
+    (void)complete_graph_linker_processes;
+#endif
     int64_t started = platform_time_monotonic_us();
     bool ran = zcl_devloop_process_run(root, argv, 30000, process);
     *elapsed_us = platform_time_monotonic_us() - started;
@@ -2122,6 +2215,7 @@ static bool rr_link(const struct rr_plan *plan, const char *root,
                     const char *rsp, const char *candidate_dir,
                     char binary[PATH_MAX],
                     uint32_t *linker_processes,
+                    uint32_t *complete_graph_linker_processes,
                     struct zcl_devloop_process_result *process,
                     int64_t *elapsed_us, int64_t *startup_us,
                     int64_t *body_us, char *why, size_t why_len)
@@ -2145,6 +2239,7 @@ static bool rr_link(const struct rr_plan *plan, const char *root,
     }
     return rr_link_run_and_publish(root, candidate_dir, temp, overlay_rsp,
                                    binary, buf.argv, linker_processes,
+                                   complete_graph_linker_processes,
                                    process, elapsed_us, startup_us, body_us,
                                    why, why_len);
 }
@@ -2153,6 +2248,7 @@ static bool rr_link_cached(const struct rr_plan *plan, const char *root,
                            const char *rsp, const char *candidate_dir,
                            char binary[PATH_MAX], char cache_key[65],
                            bool *cache_hit, uint32_t *linker_processes,
+                           uint32_t *complete_graph_linker_processes,
                            struct zcl_devloop_process_result *process,
                            int64_t *elapsed_us, int64_t *startup_us,
                            int64_t *body_us, char *why, size_t why_len)
@@ -2187,7 +2283,7 @@ static bool rr_link_cached(const struct rr_plan *plan, const char *root,
         (void)unlink(cache_hash);
     }
     bool ok = rr_link(plan, root, rsp, candidate_dir, binary,
-                      linker_processes, process,
+                      linker_processes, complete_graph_linker_processes, process,
                       elapsed_us, startup_us, body_us, why, why_len);
     if (ok && cache_locked) {
         char hash[65];
@@ -2440,7 +2536,8 @@ static bool rr_restart_build_compile_and_link(struct rr_restart_build_ctx *ctx)
                             ctx->receipt->artifact_path,
                             ctx->receipt->artifact_cache_key,
                             &ctx->receipt->artifact_cache_hit,
-                            &ctx->receipt->linker_processes, ctx->process,
+                            &ctx->receipt->linker_processes,
+                            &ctx->receipt->complete_graph_linker_processes, ctx->process,
                             &ctx->receipt->link_us,
                             &ctx->receipt->link_startup_us,
                             &ctx->receipt->link_body_us, ctx->why,
@@ -3004,7 +3101,8 @@ static bool rr_prove_compile_and_link(struct rr_prove_ctx *ctx)
                             ctx->receipt->artifact_path,
                             ctx->receipt->artifact_cache_key,
                             &ctx->receipt->artifact_cache_hit,
-                            &ctx->receipt->linker_processes, ctx->process,
+                            &ctx->receipt->linker_processes,
+                            &ctx->receipt->complete_graph_linker_processes, ctx->process,
                             &ctx->receipt->link_us,
                             &ctx->receipt->link_startup_us,
                             &ctx->receipt->link_body_us, ctx->why,

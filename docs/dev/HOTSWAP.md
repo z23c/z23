@@ -18,11 +18,17 @@ Z23 has three development layers:
 
 None is publication authority for the canonical node or a release build.
 
-Resident native-image activation is currently a Linux DEV-build capability.
-macOS retains the pure admission and status surfaces but reports activation
-unavailable until validated Mach-O imports and immutable executable-image
-staging are proved. Native Windows does the same pending its PE loading and
-sandbox path. WSL2 uses the proved Linux lane.
+Native service-image probing and activation are currently Linux DEV-build
+capabilities. The separate command-module path includes Darwin Mach-O admission
+and immutable-image staging; it does not supply a Darwin service-image loader.
+On macOS, probing a known service source reports that platform limitation after
+building the candidate and directs the caller to `DEV_RESTART`. It does not
+claim that the service's frozen vectors ran or that its code was activated.
+Native Windows retains admission and status surfaces pending its PE loading
+and sandbox path. WSL2 uses the Linux lane.
+
+<!-- claim: symbol-present zcl_hotswap_service_activate_so_any engine/modules/hotswap/src/hotswap_service.c # service image loader has a separate platform boundary -->
+<!-- claim: symbol-present zcl_native_hotswap_probe_source_at tools/command/native_dev_hotswap.c # known service source probe reports platform refusal -->
 
 The build profiles are explicit: resident modules use `DEV_LIVE`, an isolated
 incremental process replacement uses `DEV_RESTART`, static combined proof uses
@@ -334,7 +340,7 @@ rechecks the source CAS, and runs `discover help` as a five-second
 command-runtime probe. The resident owner starts only compiler, linker, and
 candidate children: it starts no Make process or shell.
 
-The save link never enumerates the complete object graph. Make performs one
+On Linux, the save link never enumerates the complete object graph. Make performs one
 epoch-owned `-r` prelink when it establishes the dev environment; the action
 plan binds that regular file, and the artifact key hashes it. Each save then
 links only the current overlay response plus that frozen base, with overlay
@@ -342,7 +348,12 @@ definitions ordered first. An overlay containing `.preinit_array`,
 `.init_array`, or `.fini_array` ownership fails closed before the linker so a
 translation unit cannot execute both its frozen and replacement initializer.
 Receipts count all linker processes separately from
-`complete_graph_linker_processes`; the latter stays zero on this path.
+`complete_graph_linker_processes`. Linux overlay-plus-base linking keeps the
+latter zero. Darwin links the complete substituted object graph, so each
+attempted native link increments both counters, even when that attempt fails.
+Cache hits and refusals before a link attempt increment neither counter.
+
+<!-- claim: symbol-present rr_link_run_and_publish tools/dev/devloop_restart_build.c # platform-specific attempted link accounting -->
 
 The cycle also exposes the exact source-CAS I/O it paid:
 `source_guard_bytes_read`, `source_bytes_total`, `changed_source_bytes`, and

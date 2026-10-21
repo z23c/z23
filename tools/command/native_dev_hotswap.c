@@ -885,6 +885,23 @@ static void probe_module_path(const char *so_path,
     probe_rendered_clear();
 }
 
+#if defined(__APPLE__)
+static bool probe_source_service_unavailable(const char *source,
+                                              struct zcl_command_reply *reply)
+{
+    const char *owner = zcl_hotswap_service_source_for_path(source);
+    if (!owner || strcmp(owner, source) != 0) return false;
+    /* Service-image admission is distinct from supported command-module
+     * Mach-O probing. Do not route an unrecognized service through that path. */
+    if (reply->data.type != JSON_OBJ) json_set_object(&reply->data);
+    zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+        ZCL_COMMAND_EXIT_BLOCKED, "HOTSWAP_SERVICE_UNAVAILABLE", "platform",
+        false, false, "Darwin service-image probing is unavailable; use DEV_RESTART",
+        source);
+    return true;
+}
+#endif
+
 /* Build one source under `root`, then probe the module it produced through
  * exactly the path the so_path form runs.  Nothing is published or activated;
  * the build's cost and identity ride along in the reply. */
@@ -894,7 +911,10 @@ void zcl_native_hotswap_probe_source_at(const char *root, const char *source_tu,
     struct zcl_devloop_hotswap_build_receipt receipt;
     if (!zcl_native_hotswap_build_source(root, source_tu, &receipt, reply))
         return;
-    probe_module_path(receipt.artifact_path, reply);
+#if defined(__APPLE__)
+    if (!probe_source_service_unavailable(receipt.source_tu, reply))
+#endif
+        probe_module_path(receipt.artifact_path, reply);
     if (reply->data.type != JSON_OBJ)
         return;
     json_push_kv_str(&reply->data, "built_from", source_tu);

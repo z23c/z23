@@ -4279,9 +4279,37 @@ static const char *dp_probe_e2e_refused_check(const struct json_value *reply)
 
 /* The first failing check for the case, exit status first; NULL when the
  * reply is what the case requires. */
+#if defined(__APPLE__)
+static const char *dp_probe_e2e_service_unavailable(int rc,
+                                                   const struct json_value *reply)
+{
+    if (rc != ZCL_COMMAND_EXIT_BLOCKED) return "Darwin service refusal exit";
+    const struct json_value *error = json_get(reply, "error");
+    if (json_get_bool(json_get(reply, "ok")) || !error) return "Darwin service refusal envelope";
+    const char *code = json_get_str(json_get(error, "code"));
+    const char *phase = json_get_str(json_get(error, "phase"));
+    const char *message = json_get_str(json_get(error, "message"));
+    if (!code || strcmp(code, "HOTSWAP_SERVICE_UNAVAILABLE") != 0)
+        return "Darwin service refusal code";
+    if (!phase || strcmp(phase, "platform") != 0) return "Darwin service refusal phase";
+    if (!message || strcmp(message,
+            "Darwin service-image probing is unavailable; use DEV_RESTART") != 0)
+        return "Darwin service refusal action";
+    const struct json_value *mutated = json_get(error, "mutated");
+    if (!mutated || mutated->type != JSON_BOOL || mutated->val.b)
+        return "Darwin service refusal mutation";
+    return NULL;
+}
+#endif
 static const char *dp_probe_e2e_first_failure(bool tamper, int rc,
                                               const struct json_value *reply)
 {
+#if defined(__APPLE__)
+    /* Both source variants must refuse before a service image is mapped;
+     * this is not a successful or failed Passport known-answer probe. */
+    (void)tamper;
+    return dp_probe_e2e_service_unavailable(rc, reply);
+#endif
     if (tamper ? rc == 0 : rc != 0)
         return "exit status";
     return tamper ? dp_probe_e2e_refused_check(reply)
@@ -4318,7 +4346,7 @@ static bool dp_probe_e2e_case(const char *cwd, const char *tag, bool tamper)
     if (failed)
         fprintf(stderr,
                 "dev_platform: e2e %s case check '%s' failed: exit %d, "
-                "reply %.300s\n", tag, failed, rc, text);
+                "reply %s\n", tag, failed, rc, text);
     bool ok = !failed;
     json_free(&reply);
     bool root_gone = dp_rm_gone(root);
@@ -5461,6 +5489,16 @@ static bool dp_expected_proof_groups(
     return *now <= 32;
 }
 
+static uint32_t dp_restart_complete_links(uint32_t attempted)
+{
+#if defined(__APPLE__)
+    return attempted;
+#else
+    (void)attempted;
+    return 0;
+#endif
+}
+
 static bool dp_restart_first_receipt_ok(
     const struct zcl_devloop_restart_build_receipt *receipt)
 {
@@ -5469,7 +5507,7 @@ static bool dp_restart_first_receipt_ok(
            !receipt->artifact_cache_hit &&
            receipt->compiler_processes == 2 &&
            receipt->linker_processes == 1 &&
-           receipt->complete_graph_linker_processes == 0 &&
+           receipt->complete_graph_linker_processes == dp_restart_complete_links(receipt->linker_processes) &&
            receipt->probe_processes == 1 &&
            receipt->source_guard_captures == 2;
 }
@@ -6469,12 +6507,79 @@ static bool dp_restart_write_unit(const char *root, const char *source,
     return dp_mk_write(root, source, body) && dp_mk_write(root, header, "v1\n");
 }
 
+static bool dp_restart_failed_link_accounting(const char *root, const char *const *changed,
+    struct zcl_devloop_restart_build_receipt *receipt,
+    struct zcl_devloop_process_result *process, char *why, size_t why_len)
+{
+    if (!dp_env_replace_line(root, "DEV_LDFLAGS=", "-pthread -DZCL_RESTART_FAIL_LINK") ||
+        zcl_devloop_restart_build(root, changed, 1, receipt, process, why, why_len) ||
+        receipt->linker_processes != 1 ||
+        receipt->complete_graph_linker_processes != dp_restart_complete_links(1) ||
+        strcmp(why, "restart candidate link failed") != 0 ||
+        !dp_env_replace_line(root, "DEV_LDFLAGS=", "-pthread")) return false;
+    return true;
+}
+
+static bool dp_restart_cache_copy_distinct(const char *cache,
+    const struct zcl_devloop_restart_build_receipt *receipt)
+{
+    char cache_artifact[PATH_MAX];
+    struct stat cache_st = {0}, published_st = {0};
+    int cache_n = snprintf(cache_artifact, sizeof(cache_artifact),
+                           "%s/restart-v1/%s.bin", cache,
+                           receipt->artifact_cache_key);
+    if (cache_n <= 0 || cache_n >= (int)sizeof(cache_artifact) ||
+        stat(cache_artifact, &cache_st) != 0 ||
+        stat(receipt->artifact_path, &published_st) != 0 ||
+        (cache_st.st_dev == published_st.st_dev &&
+         cache_st.st_ino == published_st.st_ino)) {
+        fprintf(stderr, "resident cache copy: artifact=%s cache=%s errno=%d "
+                "cache_ino=%llu published_ino=%llu\n",
+                receipt->artifact_path, cache_artifact, errno,
+                (unsigned long long)cache_st.st_ino,
+                (unsigned long long)published_st.st_ino);
+        return false;
+    }
+
+    return true;
+}
+
+static bool dp_restart_mixed_source_build(const char *root,
+    struct zcl_devloop_restart_build_receipt *receipt,
+    struct zcl_devloop_process_result *process, char *why, size_t why_len)
+{
+    const char *runtime_and_test_changed[] = {
+        "tools/dev/restart_fixture.c",
+        "tests/harness/src/restart_test_only.c",
+    };
+    memset(receipt, 0, sizeof(*receipt));
+    memset(process, 0, sizeof(*process));
+    bool mixed_build_ok = zcl_devloop_restart_build(
+        root, runtime_and_test_changed, 2, receipt, process, why, why_len);
+    if (!mixed_build_ok ||
+        !receipt->candidate_probe_passed || receipt->changed_sources != 2 ||
+        receipt->compiler_processes != 2 || !receipt->artifact_cache_hit ||
+        receipt->linker_processes != 0 || receipt->complete_graph_linker_processes != 0 || receipt->probe_processes != 1) {
+        fprintf(stderr, "resident mixed build: ok=%d probe=%d changed=%u "
+                "compile=%u hit=%d link=%u probe_process=%u\n",
+                mixed_build_ok, receipt->candidate_probe_passed,
+                receipt->changed_sources, receipt->compiler_processes,
+                receipt->artifact_cache_hit, receipt->linker_processes,
+                receipt->probe_processes);
+        return false;
+    }
+    return true;
+}
+
 static bool run_resident_restart_fixture(void)
 {
     char root[PATH_MAX], cache_rel[PATH_MAX], compiler_rel[PATH_MAX];
     static const char fake_compiler[] =
         "#!/usr/bin/env bash\n"
         "set -eu\n"
+        "original_argv=(\"$@\")\n"
+        "trap 'status=$?; printf \"restart fake compiler failed status=%s command=%s\\n\" \"$status\" \"$BASH_COMMAND\" >&2; printf \"argv: \" >&2; printf \"%q \" \"${original_argv[@]}\" >&2; printf \"\\n\" >&2; if [ -n \"${rsp:-}\" ] && [ -f \"$rsp\" ]; then printf \"response %s:\\n\" \"$rsp\" >&2; cat \"$rsp\" >&2; fi; exit \"$status\"' ERR\n"
+        "fail_link=0\n"
         "out= dep= compile=0 rsp= source= base= allow=0 overlay_first=0 identity=0\n"
         "while [ \"$#\" -gt 0 ]; do\n"
         "  case \"$1\" in\n"
@@ -6484,6 +6589,7 @@ static bool run_resident_restart_fixture(void)
         "    @*) rsp=${1#@}; overlay_first=1; shift ;;\n"
         "    *restart-base.o) [ \"$overlay_first\" -eq 1 ]; base=$1; shift ;;\n"
         "    -Wl,--allow-multiple-definition) allow=1; shift ;;\n"
+        "    -DZCL_RESTART_FAIL_LINK) fail_link=1; shift ;;\n"
         "    -DZCL_BUILD_SOURCE_ID=*) identity=$((identity+1)); shift ;;\n"
         "    -DZCL_BUILD_SOURCE_MUTATION=*) identity=$((identity+1)); shift ;;\n"
         "    -DZCL_BUILD_SOURCE_CAS_SHA3=*) identity=$((identity+1)); shift ;;\n"
@@ -6501,12 +6607,23 @@ static bool run_resident_restart_fixture(void)
         "  printf '%s: %s %s\\n' \"$out\" \"$source\" \"$hdr\" >\"$dep\"\n"
         "else\n"
         "  [ -n \"$rsp\" ]\n"
+        "  if [ \"$fail_link\" -eq 1 ]; then exit 7; fi\n"
+#if defined(__APPLE__)
+        "  [ -z \"$base\" ]\n"
+        "  [ \"$allow\" -eq 0 ]\n"
+        "  ! grep -q 'restart-base.o' \"$rsp\"\n"
+#else
         "  [ -n \"$base\" ]\n"
         "  [ \"$allow\" -eq 1 ]\n"
+#endif
         "  mkdir -p build/dev-loop\n"
         "  cp \"$rsp\" build/dev-loop/last-link.rsp\n"
         "  if grep -q 'restart-test-objects' \"$rsp\"; then\n"
+#if defined(__APPLE__)
+        "    grep -q '^build/test-obj/fixture/platform/modules/base/src/other.o$' \"$rsp\"\n"
+#else
         "    case \"$base\" in *test-obj/fixture/restart-base.o) :;; *) exit 9;; esac\n"
+#endif
         "    if [ \"${ZCL_DEVLOOP_TEST_EXPECT_OVERLAY_DROPPED:-0}\" = 1 ]; then\n"
         "      if grep -q 'build/dev-loop/restart-test-objects/tools/dev/restart_fixture.o' \"$rsp\"; then echo 'stale overlay linked:' >&2; cat \"$rsp\" >&2; exit 1; fi\n"
         "    else\n"
@@ -6517,12 +6634,20 @@ static bool run_resident_restart_fixture(void)
         "    ! grep -q 'build/test-obj/fixture/platform/modules/util/src/clientversion.o' \"$rsp\"\n"
         "    printf '#!/usr/bin/env bash\\nset -eu\\ngroups= cache=0 snapshot=0 changed=\\nfor arg in \"$@\"; do case \"$arg\" in --exact=*) groups=${arg#--exact=};; --cache) cache=1;; --cache-snapshot) snapshot=1;; --changed-source=*) changed=${arg#--changed-source=};; esac; done\\n[ -n \"$groups\" ]\\n[ \"$cache\" -eq 1 ]\\n[ \"$snapshot\" -eq 1 ]\\ncase \"$changed\" in tools/dev/restart_fixture.c|tools/command/native_code_command.c) : ;; *) exit 9 ;; esac\\n[ -z \"${ZCL_DEVLOOP_TEST_PROBE_HOOK:-}\" ] || \"$ZCL_DEVLOOP_TEST_PROBE_HOOK\"\\ncount=1\\nrest=$groups\\nwhile [ \"${rest#*,}\" != \"$rest\" ]; do count=$((count+1)); rest=${rest#*,}; done\\nran=$((count-1))\\nfailed=$ZCL_DEVLOOP_TEST_FAIL_GROUPS\\nprintf \"SUITE VERDICT mode=cached groups_total=921 groups_ran=%%s groups_cached=1 groups_gated=0 groups_failed=%%s self_skips=0\\\\n\" \"$ran\" \"$failed\"\\n[ \"$failed\" -eq 0 ]\\n' >\"$out\"\n"
         "  else\n"
+#if defined(__APPLE__)
+        "    grep -q '^build/dev-obj/fixture/platform/modules/base/src/other.o$' \"$rsp\"\n"
+        "    grep -q 'tools/dev/restart_second.o$' \"$rsp\"\n"
+        "    grep -q 'tools/command/native_code_command.o$' \"$rsp\"\n"
+#else
         "    case \"$base\" in *dev-obj/fixture/restart-base.o) :;; *) exit 9;; esac\n"
+#endif
         "    grep -q 'build/dev-loop/restart-objects/tools/dev/restart_fixture.o' \"$rsp\"\n"
         "    grep -q 'build/dev-loop/restart-objects/platform/modules/util/src/clientversion.o' \"$rsp\"\n"
         "    ! grep -q 'build/dev-obj/fixture/tools/dev/restart_fixture.o' \"$rsp\"\n"
         "    ! grep -q 'build/dev-obj/fixture/platform/modules/util/src/clientversion.o' \"$rsp\"\n"
+#if !defined(__APPLE__)
         "    ! grep -q 'build/dev-obj/fixture/platform/modules/base/src/other.o' \"$rsp\"\n"
+#endif
         "    printf '#!/usr/bin/env bash\\nexit 0\\n' >\"$out\"\n"
         "  fi\n"
         "  chmod 0700 \"$out\"\n"
@@ -6648,10 +6773,16 @@ static bool run_resident_restart_fixture(void)
     const char *changed[] = { "tools/dev/restart_fixture.c" };
     struct zcl_devloop_restart_build_receipt receipt = {0};
     struct zcl_devloop_process_result process = {0};
+    stage = "attempted failed link accounting";
+    if (!dp_restart_failed_link_accounting(root, changed, &receipt, &process, why, sizeof(why))) goto out;
+    memset(&receipt, 0, sizeof(receipt)); memset(&process, 0, sizeof(process));
+    stage = "first candidate build";
     bool first_build_ok = zcl_devloop_restart_build(
         root, changed, 1, &receipt, &process, why, sizeof(why));
     if (!first_build_ok || !dp_restart_first_receipt_ok(&receipt) ||
         !dp_restart_first_identity_ok(&receipt)) {
+        fprintf(stderr, "resident first build process output (%zu bytes):\n%s\n",
+                process.output_len, process.output);
         fprintf(stderr, "resident first build: ok=%d probe=%d changed=%u hit=%d "
                 "compile=%u link=%u full_link=%u probe_process=%u guard=%u "
                 "timing=%lld/%lld/%lld/%lld/%lld/%lld probe=%s overlay=%d "
@@ -6674,49 +6805,14 @@ static bool run_resident_restart_fixture(void)
         goto out;
     }
     stage = "first cache copy";
-    char cache_artifact[PATH_MAX];
-    struct stat cache_st = {0}, published_st = {0};
-    int cache_n = snprintf(cache_artifact, sizeof(cache_artifact),
-                           "%s/restart-v1/%s.bin", cache,
-                           receipt.artifact_cache_key);
-    if (cache_n <= 0 || cache_n >= (int)sizeof(cache_artifact) ||
-        stat(cache_artifact, &cache_st) != 0 ||
-        stat(receipt.artifact_path, &published_st) != 0 ||
-        (cache_st.st_dev == published_st.st_dev &&
-         cache_st.st_ino == published_st.st_ino)) {
-        fprintf(stderr, "resident cache copy: artifact=%s cache=%s errno=%d "
-                "cache_ino=%llu published_ino=%llu\n",
-                receipt.artifact_path, cache_artifact, errno,
-                (unsigned long long)cache_st.st_ino,
-                (unsigned long long)published_st.st_ino);
-        goto out;
-    }
+    if (!dp_restart_cache_copy_distinct(cache, &receipt)) goto out;
 
     /* A test edit following a resident service publication carries both TUs
      * into the proof epoch. The runtime candidate compiles and links only the
      * service TU; the exact test candidate later compiles and links both with
      * TEST_CFLAGS, including APIs that exist only under ZCL_TESTING. */
     stage = "runtime and test changed";
-    const char *runtime_and_test_changed[] = {
-        "tools/dev/restart_fixture.c",
-        "tests/harness/src/restart_test_only.c",
-    };
-    memset(&receipt, 0, sizeof(receipt));
-    memset(&process, 0, sizeof(process));
-    bool mixed_build_ok = zcl_devloop_restart_build(
-        root, runtime_and_test_changed, 2, &receipt, &process, why, sizeof(why));
-    if (!mixed_build_ok ||
-        !receipt.candidate_probe_passed || receipt.changed_sources != 2 ||
-        receipt.compiler_processes != 2 || !receipt.artifact_cache_hit ||
-        receipt.linker_processes != 0 || receipt.probe_processes != 1) {
-        fprintf(stderr, "resident mixed build: ok=%d probe=%d changed=%u "
-                "compile=%u hit=%d link=%u probe_process=%u\n",
-                mixed_build_ok, receipt.candidate_probe_passed,
-                receipt.changed_sources, receipt.compiler_processes,
-                receipt.artifact_cache_hit, receipt.linker_processes,
-                receipt.probe_processes);
-        goto out;
-    }
+    if (!dp_restart_mixed_source_build(root, &receipt, &process, why, sizeof(why))) goto out;
     if (dp_environment_unset("ZCL_DEVLOOP_TEST_FORCE_CACHE_COPY") != 0)
         goto out;
     char first_build_key[65], first_build_hash[65];
@@ -6751,7 +6847,7 @@ static bool run_resident_restart_fixture(void)
         !dp_has_heavy_groups(proof.groups) ||
         proof.artifact_cache_hit || proof.compiler_processes != 2 ||
         proof.linker_processes != 1 ||
-        proof.complete_graph_linker_processes != 0 ||
+        proof.complete_graph_linker_processes != dp_restart_complete_links(proof.linker_processes) ||
         proof.test_processes != 2 || proof.source_guard_captures != 2 ||
         strcmp(proof.priority_group, "test_make_lint_gates") != 0 ||
         strcmp(proof.priority_reason, "direct_owner_invariant") != 0 ||
@@ -6833,7 +6929,7 @@ static bool run_resident_restart_fixture(void)
         proof.groups_cached != 1 ||
         proof.self_skips != 0 ||
         !proof.artifact_cache_hit || proof.compiler_processes != 2 ||
-        proof.linker_processes != 0 ||
+        proof.linker_processes != 0 || proof.complete_graph_linker_processes != 0 ||
         strstr(proof.groups, "test_make_lint_gates") ||
         !dp_has_heavy_groups(proof.deferred_groups) ||
         strlen(proof.deferred_groups_sha256) != 64)
@@ -6846,7 +6942,7 @@ static bool run_resident_restart_fixture(void)
     if (!zcl_devloop_restart_build(root, changed, 1, &receipt, &process,
                                    why, sizeof(why)) ||
         !receipt.artifact_cache_hit || receipt.compiler_processes != 2 ||
-        receipt.linker_processes != 0 ||
+        receipt.linker_processes != 0 || receipt.complete_graph_linker_processes != 0 ||
         strcmp(receipt.artifact_cache_key, first_build_key) != 0 ||
         strcmp(receipt.artifact_sha256, first_build_hash) != 0) {
         fprintf(stderr,
@@ -6866,7 +6962,7 @@ static bool run_resident_restart_fixture(void)
                                    why, sizeof(why)) ||
         receipt.artifact_cache_hit || receipt.compiler_processes != 2 ||
         receipt.linker_processes != 1 ||
-        receipt.complete_graph_linker_processes != 0 ||
+        receipt.complete_graph_linker_processes != dp_restart_complete_links(receipt.linker_processes) ||
         strcmp(receipt.artifact_cache_key, first_build_key) == 0)
         goto out;
     if (!dp_mk_write(root, "tools/dev/restart_fixture.c",
@@ -6876,7 +6972,7 @@ static bool run_resident_restart_fixture(void)
     if (!zcl_devloop_restart_build(root, changed, 1, &receipt, &process,
                                    why, sizeof(why)) ||
         !receipt.artifact_cache_hit || receipt.compiler_processes != 2 ||
-        receipt.linker_processes != 0 ||
+        receipt.linker_processes != 0 || receipt.complete_graph_linker_processes != 0 ||
         strcmp(receipt.artifact_cache_key, first_build_key) != 0 ||
         strcmp(receipt.artifact_sha256, first_build_hash) != 0)
         goto out;
@@ -6900,7 +6996,7 @@ static bool run_resident_restart_fixture(void)
         strstr(proof.groups, "test_wallet") || strstr(proof.groups, "test_net") ||
         !strstr(proof.deferred_groups, "test_wallet") ||
         !strstr(proof.deferred_groups, "test_net") ||
-        proof.compiler_processes != 2 || proof.linker_processes != 0 ||
+        proof.compiler_processes != 2 || proof.linker_processes != 0 || proof.complete_graph_linker_processes != 0 ||
         proof.test_processes != 1)
         goto out;
 
@@ -6913,7 +7009,7 @@ static bool run_resident_restart_fixture(void)
                                   &process, why, sizeof(why)) ||
         strcmp(why,
                "affected proof plan does not match the changed source set") != 0 ||
-        proof.compiler_processes != 0 || proof.linker_processes != 0 ||
+        proof.compiler_processes != 0 || proof.linker_processes != 0 || proof.complete_graph_linker_processes != 0 ||
         proof.test_processes != 0)
         goto out;
 
@@ -6926,7 +7022,7 @@ static bool run_resident_restart_fixture(void)
                                    why, sizeof(why)) ||
         !receipt.candidate_probe_passed || receipt.compiler_processes != 2 ||
         receipt.linker_processes != 1 ||
-        receipt.complete_graph_linker_processes != 0 ||
+        receipt.complete_graph_linker_processes != dp_restart_complete_links(receipt.linker_processes) ||
         receipt.probe_processes != 1)
         goto out;
 
@@ -6938,8 +7034,8 @@ static bool run_resident_restart_fixture(void)
                                   why, sizeof(why)) ||
         strcmp(why,
                "overlay link input is missing, unreadable, or owns process initialization") != 0 ||
-        receipt.compiler_processes != 2 || receipt.linker_processes != 0 ||
-        receipt.complete_graph_linker_processes != 0 ||
+        receipt.compiler_processes != 2 || receipt.linker_processes != 0 || receipt.complete_graph_linker_processes != 0 ||
+        receipt.complete_graph_linker_processes != dp_restart_complete_links(receipt.linker_processes) ||
         receipt.probe_processes != 0)
         goto out;
 
@@ -6948,7 +7044,7 @@ static bool run_resident_restart_fixture(void)
     if (zcl_devloop_restart_build(root, forbidden, 1, &receipt, &process,
                                   why, sizeof(why)) ||
         strcmp(why, "consensus-risk input is excluded from fast restart") != 0 ||
-        receipt.compiler_processes != 0 || receipt.linker_processes != 0 ||
+        receipt.compiler_processes != 0 || receipt.linker_processes != 0 || receipt.complete_graph_linker_processes != 0 ||
         receipt.probe_processes != 0)
         goto out;
 
@@ -7069,6 +7165,67 @@ static int test_restart_plan_hidden_suffix(void)
         } _test_next:;
         if (root[0] && test_rm_rf_recursive(root) != 0) failures++;
     }
+    return failures;
+}
+
+extern bool zcl_devloop_restart_arguments_test(char *text, const char **argv,
+                                               size_t capacity, size_t *count);
+
+static bool dp_restart_argument_refusals(void)
+{
+    const char *const malformed[] = {"cc 'unterminated", "cc \"unterminated", "cc trailing\\"};
+    for (size_t i = 0; i < sizeof(malformed) / sizeof(malformed[0]); i++) {
+        char text[128]; const char *argv[8]; size_t count = 0;
+        snprintf(text, sizeof(text), "%s", malformed[i]);
+        if (zcl_devloop_restart_arguments_test(text, argv, 8, &count)) return false;
+    }
+    char overflow[] = "cc one two"; const char *argv[3]; size_t count = 0;
+    if (zcl_devloop_restart_arguments_test(overflow, argv, 3, &count)) return false;
+    char literal[] = "cc '' '$HOME' \"a\\q\""; const char *words[8];
+    return zcl_devloop_restart_arguments_test(literal, words, 8, &count) && count == 4 &&
+        !strcmp(words[1], "") && !strcmp(words[2], "$HOME") && !strcmp(words[3], "a\\q");
+}
+
+static bool dp_restart_arguments_compile(const char *root)
+{
+    static const char source[] =
+        "#include <string.h>\n#include \"quoted.h\"\n#include \"escaped.h\"\n"
+        "int main(void) { return strcmp(ZCL_RESTART_STRING, \"14.0\") || "
+        "strcmp(ZCL_RESTART_SPACE, \"quoted value\") || QUOTED != 7 || ESCAPED != 9; }\n";
+    if (!dp_mk_write(root, "quoted space/quoted.h", "#define QUOTED 7\n") ||
+        !dp_mk_write(root, "escaped space/escaped.h", "#define ESCAPED 9\n") ||
+        !dp_mk_write(root, "probe.c", source)) return false;
+    char command[PATH_MAX * 6], binary[PATH_MAX], output[4096];
+    int n = snprintf(binary, sizeof(binary), "%s/probe", root);
+    if (n < 0 || (size_t)n >= sizeof(binary)) return false;
+    n = snprintf(command, sizeof(command),
+        "cc -std=c23 -Wall -Wextra -Werror -pedantic "
+        "-DZCL_RESTART_STRING=\\\"14.0\\\" -DZCL_RESTART_SPACE='\"quoted value\"' "
+        "-I'%s/quoted space' -I%s/escaped\\ space '%s/probe.c' -o '%s'",
+        root, root, root, binary);
+    if (n < 0 || (size_t)n >= sizeof(command)) return false;
+    const char *argv[32]; size_t count = 0; bool timed_out = false;
+    if (!zcl_devloop_restart_arguments_test(command, argv, 32, &count) || !count)
+        return false;
+    int result = zcl_spawn_capture_observed(argv, output, sizeof(output), 30000, &timed_out);
+    if (result != 0 || timed_out) {
+        fprintf(stderr, "restart argument compiler result=%d timeout=%d output=%s\n",
+                result, timed_out, output); return false;
+    }
+    const char *run[] = {binary, NULL};
+    return zcl_spawn_capture_observed(run, output, sizeof(output), 30000, &timed_out) == 0 && !timed_out;
+}
+
+static int test_restart_argument_encoding(void)
+{
+    int failures = 0; char root[PATH_MAX] = {0};
+    TEST("dev platform: native restart decodes quoted flags for the real compiler and refuses malformed argv") {
+        ASSERT(dp_restart_argument_refusals());
+        ASSERT(test_mkdtemp(root, sizeof(root), "restart_arguments") != NULL);
+        ASSERT(dp_restart_arguments_compile(root));
+        PASS();
+    } _test_next:;
+    if (root[0] && test_rm_rf_recursive(root) != 0) failures++;
     return failures;
 }
 
@@ -11700,6 +11857,7 @@ static const struct dp_shard_case g_dp_cases[] = {
     DP_CASE(test_hotfork_shape_built_extent, 5),
     DP_CASE(test_hotfork_resident_model_closure, 5),
     DP_CASE(test_resident_restart_builder, 4),
+    DP_CASE(test_restart_argument_encoding, 4),
     DP_CASE(test_restart_plan_hidden_suffix, 3),
     DP_CASE(test_shell_compiled_epoch_scope, 5),
     DP_CASE(test_shell_compiled_epoch_scope_header_invalidation, 5),
@@ -11870,7 +12028,7 @@ static int test_dev_platform_platform_arm(void)
         owned += counts[i];
         nonempty &= counts[i] > 0;
     }
-    if (DP_CASE_COUNT != 71u + (unsigned)(
+    if (DP_CASE_COUNT != 72u + (unsigned)(
 #if defined(__APPLE__)
             1
 #else
