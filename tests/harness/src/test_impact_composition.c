@@ -2033,6 +2033,122 @@ static int test_ic_generated_inventory_stays_focused(void)
     return failures;
 }
 
+extern size_t zcl_devloop_test_owner_evaluations;
+extern size_t zcl_devloop_test_owner_memo_capacity;
+extern bool zcl_devloop_test_owner_memo_unavailable;
+extern void zcl_devloop_test_owner_sequence(const char *const *paths,
+                                           size_t count, bool *results);
+
+static int test_ic_proof_owner_memo(void)
+{
+    int failures = 0;
+    TEST("proof owner memo: exact positive and negative paths reset per walk") {
+        const char *paths[] = {
+            "tools/command/native_code_capsule.c",
+            "core/modules/memo/src/unowned.c",
+            "tools/command/native_code_capsule.c",
+            "core/modules/memo/src/unowned.c"
+        };
+        bool results[4];
+        zcl_devloop_test_owner_evaluations = 0;
+        zcl_devloop_test_owner_sequence(paths, 4, results);
+        ASSERT(results[0] && !results[1] && results[2] && !results[3]);
+        ASSERT(zcl_devloop_test_owner_evaluations == 2);
+        zcl_devloop_test_owner_sequence(paths, 4, results);
+        ASSERT(zcl_devloop_test_owner_evaluations == 4);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_owner_memo_fallback(void)
+{
+    int failures = 0;
+    TEST("proof owner memo: capacity and unavailable storage keep exact answers") {
+        const char *paths[] = {
+            "tools/command/native_code_capsule.c",
+            "core/modules/memo/src/unowned.c",
+            "tools/command/native_code_capsule.c",
+            "core/modules/memo/src/unowned.c"
+        };
+        bool results[4];
+        zcl_devloop_test_owner_memo_capacity = 1;
+        zcl_devloop_test_owner_evaluations = 0;
+        zcl_devloop_test_owner_sequence(paths, 4, results);
+        zcl_devloop_test_owner_memo_capacity = 0;
+        ASSERT(results[0] && !results[1] && results[2] && !results[3]);
+        ASSERT(zcl_devloop_test_owner_evaluations == 3);
+        zcl_devloop_test_owner_memo_unavailable = true;
+        zcl_devloop_test_owner_evaluations = 0;
+        zcl_devloop_test_owner_sequence(paths, 4, results);
+        zcl_devloop_test_owner_memo_unavailable = false;
+        ASSERT(results[0] && !results[1] && results[2] && !results[3]);
+        ASSERT(zcl_devloop_test_owner_evaluations == 4);
+        PASS();
+    } _test_next:;
+    zcl_devloop_test_owner_memo_capacity = 0;
+    zcl_devloop_test_owner_memo_unavailable = false;
+    return failures;
+}
+
+static int test_ic_proof_owner_memo_long_paths(void)
+{
+    int failures = 0;
+    TEST("proof owner memo: overlong exact paths are never truncated into keys") {
+        char a[ZCL_DEVLOOP_PATH_MAX + 2];
+        char b[sizeof(a)];
+        memset(a, 'x', sizeof(a) - 1);
+        a[sizeof(a) - 1] = '\0';
+        memcpy(b, a, sizeof(b));
+        b[sizeof(b) - 2] = 'y';
+        const char *paths[] = {a, b, a, b};
+        bool results[4];
+        zcl_devloop_test_owner_evaluations = 0;
+        zcl_devloop_test_owner_sequence(paths, 4, results);
+        ASSERT(!results[0] && !results[1] && !results[2] && !results[3]);
+        ASSERT(zcl_devloop_test_owner_evaluations == 4);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+#define IC_FIX_OWNER_MEMO IC_FIX_ROOT "/owner_memo"
+static bool ic_write_owner_memo(void)
+{
+    return ic_write(IC_FIX_OWNER_MEMO, "core/modules/memo/src/seed.c",
+                    "int memo_a(void){return 1;}\nint memo_b(void){return 2;}\n") &&
+           ic_write(IC_FIX_OWNER_MEMO, "core/modules/memo/src/bridge.c",
+                    "int bridge_a(void){return memo_a();}\n"
+                    "int bridge_b(void){return memo_b();}\n") &&
+           ic_write(IC_FIX_OWNER_MEMO, "tools/command/native_code_capsule.c",
+                    "int leaf_a(void){return memo_a();}\n"
+                    "int leaf_b(void){return memo_b();}\n") &&
+           ic_write(IC_FIX_OWNER_MEMO, "core/modules/net/src/tor_integration.c",
+                    "int memo_top(void){return bridge_a()+bridge_b();}\n") &&
+           ic_write(IC_FIX_OWNER_MEMO, "core/modules/net/src/download.c",
+                    "int memo_past_leaf(void){return leaf_a()+leaf_b();}\n");
+}
+
+static int test_ic_proof_owner_memo_traversal(void)
+{
+    int failures = 0;
+    TEST("proof owner memo: real walk retains leaves and traverses unowned files") {
+ TEST_DISCARD(system("rm -rf " IC_FIX_OWNER_MEMO));
+        ASSERT(ic_write_owner_memo());
+        const char *files[] = {"core/modules/memo/src/seed.c"};
+        struct zcl_devloop_plan plan;
+        ASSERT(zcl_devloop_plan_files(files, 1, &plan));
+        ASSERT(zcl_devloop_plan_add_closure(IC_FIX_OWNER_MEMO, files, 1, &plan));
+        ASSERT(plan.dims[ZCL_DEVLOOP_DIM_SEMANTIC].status == ZCL_DEVLOOP_DIM_COMPLETE);
+        ASSERT(ic_selection(&plan, "code_capsule") != NULL);
+        ASSERT(ic_selection(&plan, "test_tor") != NULL);
+        ASSERT(ic_selection(&plan, "download") == NULL);
+ TEST_DISCARD(system("rm -rf " IC_FIX_OWNER_MEMO));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_fleet_task_projection_keeps_proof_owner(void)
 {
     int failures = 0;
@@ -12703,6 +12819,10 @@ int test_impact_composition(void)
     failures += test_ic_utxo_snapshot_proof_mapping();
     failures += test_ic_code_capsule_stays_with_code_owner();
     failures += test_ic_generated_inventory_stays_focused();
+    failures += test_ic_proof_owner_memo();
+    failures += test_ic_proof_owner_memo_fallback();
+    failures += test_ic_proof_owner_memo_long_paths();
+    failures += test_ic_proof_owner_memo_traversal();
     failures += test_ic_fleet_task_projection_keeps_proof_owner();
     failures += test_ic_dev_proof_contract_is_direct();
     failures += test_ic_lint_helpers_exclude_onion_stress();

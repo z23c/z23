@@ -951,13 +951,78 @@ static bool plan_include_verdict(struct zcl_devloop_plan *plan,
     return true;
 }
 
-static bool plan_reached_proof_owner(const char *path, void *user)
+#if defined(ZCL_TESTING)
+size_t zcl_devloop_test_owner_evaluations;
+size_t zcl_devloop_test_owner_memo_capacity;
+bool zcl_devloop_test_owner_memo_unavailable;
+#endif
+
+/* This is a performance bound only: uncached paths still get the full rule
+ * predicate. Never use memo capacity as a closure/evidence limit. */
+#define PLAN_OWNER_MEMO_CAP 256
+struct plan_owner_entry {
+    char path[ZCL_DEVLOOP_PATH_MAX];
+    bool owned;
+};
+struct plan_owner_memo {
+    struct plan_owner_entry *entries;
+    size_t count;
+    size_t capacity;
+};
+
+static void plan_owner_memo_init(struct plan_owner_memo *memo)
 {
-    (void)user;
+    memo->capacity = PLAN_OWNER_MEMO_CAP;
+#if defined(ZCL_TESTING)
+    if (zcl_devloop_test_owner_memo_capacity > 0 &&
+        zcl_devloop_test_owner_memo_capacity < memo->capacity)
+        memo->capacity = zcl_devloop_test_owner_memo_capacity;
+    if (zcl_devloop_test_owner_memo_unavailable)
+        return;
+#endif
+    memo->entries = zcl_calloc(memo->capacity, sizeof(*memo->entries),
+                               "plan proof owner memo");
+}
+
+static bool plan_uncached_proof_owner(const char *path)
+{
+#if defined(ZCL_TESTING)
+    zcl_devloop_test_owner_evaluations++;
+#endif
     if (zcl_test_group_source_is_semantic_leaf(path))
         return true;
     return agent_impact_apply_shared_rules(path, NULL);
 }
+
+static bool plan_reached_proof_owner(const char *path, void *user)
+{
+    struct plan_owner_memo *memo = user;
+    if (!memo || !memo->entries || !path ||
+        strlen(path) >= sizeof(memo->entries[0].path))
+        return plan_uncached_proof_owner(path);
+    for (size_t i = 0; i < memo->count; i++)
+        if (strcmp(memo->entries[i].path, path) == 0)
+            return memo->entries[i].owned;
+    bool owned = plan_uncached_proof_owner(path);
+    if (memo->count < memo->capacity) {
+        struct plan_owner_entry *entry = &memo->entries[memo->count++];
+        snprintf(entry->path, sizeof(entry->path), "%s", path);
+        entry->owned = owned;
+    }
+    return owned;
+}
+
+#if defined(ZCL_TESTING)
+void zcl_devloop_test_owner_sequence(const char *const *paths, size_t count,
+                                    bool *results)
+{
+    struct plan_owner_memo memo = {0};
+    plan_owner_memo_init(&memo);
+    for (size_t i = 0; i < count; i++)
+        results[i] = plan_reached_proof_owner(paths[i], &memo);
+    free(memo.entries);
+}
+#endif
 
 bool zcl_devloop_plan_fold_file(struct zcl_devloop_plan *plan,
                                 const char *reached, enum zcl_devloop_dim dim)
@@ -989,11 +1054,14 @@ static bool plan_semantic_walk(struct zcl_devloop_plan *plan,
      * evidence layer. Record it below, but do not walk back through its
      * generic caller/dispatcher and select unrelated proof families. An
      * unowned caller is never a boundary and the graph keeps climbing. */
+    struct plan_owner_memo memo = {0};
+    plan_owner_memo_init(&memo);
     int n = codeindex_impact_closure_bounded(
         ci, plan->closure_snapshot ? root : NULL,
         changed, (int)semantic_count, 0,
-        plan_reached_proof_owner, NULL, impacted,
+        plan_reached_proof_owner, &memo, impacted,
         closure_file_cap, &truncated, true);
+    free(memo.entries);
     if (n < 0) {
         plan_dim_set(plan, ZCL_DEVLOOP_DIM_SEMANTIC,
                      ZCL_DEVLOOP_DIM_UNAVAILABLE, "closure-query-error");
