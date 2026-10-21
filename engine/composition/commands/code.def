@@ -381,11 +381,13 @@ ZCL_COMMAND_READY_READ(
     "the index-backed code.* readers; bound to the exact index generation "
     "(source_root_sha3, dep_root_sha3) and the checkout HEAD. Refuses a stale "
     "or absent index, an unsafe path, or an input past its bounds; never "
-    "rebuilds, writes, locks or spawns.", 65536,
+    "rebuilds, writes, locks or spawns. symbols and files are JSON arrays "
+    "of strings supplied inside --input=JSON. max_lines is an integer from "
+    "20 to 120 (default 60).", 65536,
     "code,packet,brief,scout,excerpt,tests,impact,gates",
     "zcl.code_packet.input.v1", "zcl.code_packet.v1",
     "goal,symbols,files,max_lines,change", "goal",
-    "z23 code packet \"Harden download hold\" --input '{\"symbols\":[\"dl_hold\"]}'",
+    "z23 code packet --input='{\"goal\":\"Inspect landing hold\",\"symbols\":[\"dl_hold\"],\"files\":[\"tools/command/native_dev_land.c\"],\"max_lines\":120}'",
     ZCL_COMMAND_LAYER_CODE, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_PUBLIC, ZCL_COMMAND_LATENCY_FAST,
     ZCL_COMMAND_COST_LOW,

@@ -23,6 +23,7 @@
 #include "chain/chainparams.h"
 #include "core/core_io.h"
 #include "config/command_catalog.h"
+#include "codeindex/codeindex.h"
 #include "controllers/transaction_controller.h"
 #include "dev_failure_store.h"
 #include "kernel/command_registry.h"
@@ -37,6 +38,7 @@
 #include "sim/simnet.h"
 #include "support/cleanse.h"
 #include "util/safe_alloc.h"
+#include "util/spawn.h"
 #include "wallet/keystore.h"
 #include "wallet/sapling_keys.h"
 #include "zanc/zanc.h"
@@ -1163,6 +1165,109 @@ struct uniform_dir {
     char wire[65536 + 3];
     int rc;
 };
+
+/* Let the shell tokenize the trusted built-in example, then execute its
+ * argv through the linked CLI, never through a possibly stale binary. */
+static bool packet_advertised_cli(char *wire, size_t cap, int *rc)
+{
+    const struct zcl_command_spec *spec = find_spec(zcl_command_catalog(), "code.packet");
+    char command[4096], words[4096];
+    const char *argv[24];
+    if (!spec || snprintf(command, sizeof(command), "set -- %s; printf '%%s\\n' \"$@\"",
+                          spec->example) >= (int)sizeof(command)) return false;
+    const char *shell[] = {"sh", "-c", command, NULL};
+    if (zcl_spawn_capture(shell, words, sizeof(words), 5000) != 0) return false;
+    int n = 0;
+    char *save = NULL;
+    for (char *p = strtok_r(words, "\n", &save); p && n < 24; p = strtok_r(NULL, "\n", &save))
+        argv[n++] = p;
+    return n >= 3 && !strcmp(argv[0], "z23") && !strcmp(argv[1], "code") &&
+           uniform_cli("code", argv + 2, n - 2, wire, cap, rc);
+}
+
+struct packet_help_fixture {
+    char root[PATH_MAX];
+    char *saved_root;
+    bool rebound;
+};
+
+static bool packet_help_open(struct packet_help_fixture *f)
+{
+    const char *old = getenv("ZCL_DEV_SOURCE_ROOT");
+    f->saved_root = old ? strdup(old) : NULL;
+    if (old && !f->saved_root) return false;
+    test_make_tmpdir(f->root, sizeof(f->root), "native_api", "packet_help");
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/tools", f->root);
+    if (mkdir(path, 0700) != 0) return false;
+    snprintf(path, sizeof(path), "%s/tools/command", f->root);
+    if (mkdir(path, 0700) != 0) return false;
+    snprintf(path, sizeof(path), "%s/tools/command/native_dev_land.c", f->root);
+    if (!uniform_write(path, "int dl_hold(void)\n{\n    return 1;\n}\n")) return false;
+    struct codeindex *ci = codeindex_open(f->root);
+    if (!ci) return false;
+    codeindex_close(ci);
+    f->rebound = setenv("ZCL_DEV_SOURCE_ROOT", f->root, 1) == 0;
+    return f->rebound;
+}
+
+static void packet_help_close(struct packet_help_fixture *f)
+{
+    if (f->rebound) {
+        if (f->saved_root) TEST_DISCARD(setenv("ZCL_DEV_SOURCE_ROOT", f->saved_root, 1));
+        else TEST_DISCARD(unsetenv("ZCL_DEV_SOURCE_ROOT"));
+    }
+    free(f->saved_root);
+    if (f->root[0]) test_rm_rf_recursive(f->root);
+}
+
+static int test_packet_advertised_example(void)
+{
+    int failures = 0, rc = 0;
+    char wire[32768];
+    struct packet_help_fixture fixture = {0};
+    TEST_CASE("packet advertised example executes through linked CLI on an isolated index") {
+        ASSERT(packet_help_open(&fixture));
+        ASSERT(packet_advertised_cli(wire, sizeof(wire), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(wire, "fn:external:dl_hold") != NULL);
+        const struct zcl_command_spec *spec = find_spec(zcl_command_catalog(), "code.packet");
+        ASSERT(strstr(spec->semantics, "20 to 120") != NULL);
+    } TEST_END
+    packet_help_close(&fixture);
+    return failures;
+}
+
+static int test_packet_input_recovery(void)
+{
+    int failures = 0, rc = 0;
+    char wire[32768];
+    struct packet_help_fixture fixture = {0};
+    TEST_CASE("packet array and input-spelling errors guide recovery without coercing input") {
+        ASSERT(packet_help_open(&fixture));
+        const char *csv[] = {"packet", "Inspect", "--files=tools/command/native_dev_land.c"};
+        const char *string_array[] = {"packet", "Inspect", "--files=[\"tools/command/native_dev_land.c\"]"};
+        const char *const *bad[] = {csv, string_array};
+        for (size_t i = 0; i < 2; i++) {
+            ASSERT(uniform_cli("code", bad[i], 3, wire, sizeof(wire), &rc));
+            ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
+            ASSERT(strstr(wire, "JSON array of strings") != NULL);
+            ASSERT(strstr(wire, "--input=JSON") != NULL);
+        }
+        const char *separate[] = {"packet", "--input", "{\"goal\":\"Inspect\",\"symbols\":[\"dl_hold\"]}"};
+        ASSERT(uniform_cli("code", separate, 3, wire, sizeof(wire), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(strstr(wire, "--input=JSON") != NULL);
+        const char *large[] = {"packet", "--input={\"goal\":\"Inspect\",\"symbols\":[\"dl_hold\"],\"max_lines\":420}"};
+        ASSERT(uniform_cli("code", large, 2, wire, sizeof(wire), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(strstr(wire, "20 to 120") != NULL);
+        ASSERT(packet_advertised_cli(wire, sizeof(wire), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+    } TEST_END
+    packet_help_close(&fixture);
+    return failures;
+}
 
 static void uniform_open(struct uniform_dir *u)
 {
@@ -3833,6 +3938,8 @@ int test_native_api_contract(void)
     failures += test_wallet_security_refusal_flags();
     failures += test_uniform_help();
     failures += test_guide_positional_paths();
+    failures += test_packet_advertised_example();
+    failures += test_packet_input_recovery();
     failures += test_leaf_json_contract();
     failures += test_uniform_input_file();
     failures += test_uniform_input_file_refusals();

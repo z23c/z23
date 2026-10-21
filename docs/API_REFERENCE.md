@@ -1192,7 +1192,7 @@ represented by its children's sections.
 | `code body` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_body.v1` | `z23 code body code_limit` | Print one function's source |
 | `code capsule` | ready | read / read / public · fast/tiny | **`name`** | `zcl.code_capsule.v1` | `z23 code capsule sovereignty_guard_allow` | Join one symbol's code and proof surface |
 | `code change-plan` | ready | read / read / public · fast/tiny | **`name`**, `symbol`, `intent`, `patch` | `zcl.code_change_plan.v1` | `z23 code change-plan codeindex_open` | Plan evidence-backed edits and tests |
-| `code packet` | ready | read / read / public · fast/low | **`goal`**, `symbols`, `files`, `max_lines`, `change` | `zcl.code_packet.v1` | `z23 code packet "Harden download hold" --input '{"symbols":["dl_hold"]}'` | Assemble a builder's work packet in one call |
+| `code packet` | ready | read / read / public · fast/low | **`goal`**, `symbols`, `files`, `max_lines`, `change` | `zcl.code_packet.v1` | `z23 code packet --input='{"goal":"Inspect landing hold","symbols":["dl_hold"],"files":["tools/command/native_dev_land.c"],"max_lines":120}'` | Assemble a builder's work packet in one call |
 | `code refs` | ready | read / read / public · fast/tiny | **`name`**, `limit` | `zcl.code_refs.v1` | `z23 code refs zcl_malloc` | List references to one symbol |
 | `code impact` | ready | read / read / public · fast/tiny | **`path`** | `zcl.code_impact.v1` | `z23 code impact platform/modules/util/include/util/safe_alloc.h` | Measure one file's reverse dependencies |
 | `code find` | ready | read / read / public · fast/tiny | **`text`**, `limit` | `zcl.code_find.v1` | `z23 code find hotswap` | Rank symbols by name |

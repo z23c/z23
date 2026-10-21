@@ -4063,7 +4063,7 @@ static enum nc_main_flag_result nc_main_apply_flag_group1(
     if (strcmp(flag_key, "input") == 0) {
         if (nc_main_flag_input_bad(st->seen_input || st->seen_input_file, value)) {
             (void)snprintf(why, why_cap,
-                           "--input requires one non-empty value and may appear once");
+                           "--input=JSON requires one non-empty value and may appear once");
             return NC_FLAG_BAD;
         }
         st->seen_input = true;

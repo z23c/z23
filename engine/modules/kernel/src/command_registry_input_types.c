@@ -67,6 +67,15 @@ static bool cr_match_files(const char *key, const struct json_value *value,
     return true;
 }
 
+/* Ask the existing shape rule, including its accepted paths string form;
+ * diagnostics must not invent another list of array-only input keys. */
+static bool cr_files_requires_array(const char *key)
+{
+    const struct json_value probe = { .type = JSON_STR, .val.s = (char *)"x" };
+    bool accepts_string = false;
+    return cr_match_files(key, &probe, &accepts_string) && !accepts_string;
+}
+
 static bool cr_match_bool(const char *key, const struct json_value *value,
                           bool *type_ok)
 {
@@ -834,6 +843,10 @@ bool command_registry_input_type_why(const char *key,
         snprintf(why, why_size,
                  "input key '%s' is %zu characters, over its %zu limit",
                  key, strlen(text), str_max);
+    else if (why && cr_files_requires_array(key))
+        snprintf(why, why_size,
+                 "invalid type or range for input key '%s': expected a JSON array of strings; use --input=JSON",
+                 key);
     else if (why && cr_blocker_key_rule(key))
         snprintf(why, why_size,
                  "invalid type or range for input key '%s': expected %s", key,
