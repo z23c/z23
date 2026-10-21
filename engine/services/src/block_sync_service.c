@@ -454,9 +454,13 @@ static bool stall_recovery_scan_is_waste(const struct main_state *ms,
      * recovery): while HEADER_CORROBORATION_HOLD withholds promotion of a
      * strictly-better un-corroborated switch, the held branch sits above
      * the tip exactly like a deficit and stall recovery must keep firing
-     * for it as before. Holds are transient — they clear the moment a
-     * second distinct group corroborates the branch or it is abandoned —
-     * so the steady-state burn stays gone. No tracking
+     * for it as before. Holds clear when a second distinct group
+     * corroborates the branch or it is abandoned; a lone peer
+     * persistently re-asserting an un-corroborated strictly-better fork
+     * can keep one alive indefinitely, and during that window the scan is
+     * doing real recovery work for a branch that genuinely sits above the
+     * tip — legacy behavior, not the steady-state burn this guard exists
+     * to end. No tracking
      * (pindex_best_header == NULL) keeps the legacy scan so recovery is
      * never more conservative than before where tracking is absent. */
     const struct block_index *best_header = ms->pindex_best_header;
