@@ -1774,7 +1774,7 @@ static int test_exact_verifier_prerequisites(void)
         const char *true_bin = tgs_fixture_executable("/usr/bin/true", "/bin/true");
         const char *false_bin = tgs_fixture_executable("/usr/bin/false", "/bin/false");
         ASSERT(true_bin != NULL && false_bin != NULL);
-        char command[4096], out[4096], root[256], stamp[320], fresh[160];
+        char command[4096], out[4096], root[256], stamp[320], fresh[160], child[320];
 #if defined(_WIN32)
         /* No qualified package verifier: Make deliberately does no work. */
         const int rebuild_rc = 0;
@@ -1790,13 +1790,17 @@ static int test_exact_verifier_prerequisites(void)
             "env -u ZCL_CHECKOUT_LOCK_HELD make --no-print-directory -qp help "
             "EXACT_ONLY_MATCHED=test_zcode_store "
             "TEST_PARALLEL_FAST_CANDIDATE=%s "
+            "BUILD_EPOCH_KEY_TOOL=%s "
             "BUILD_SOURCE_RECORD='%s 1 %s' 2>/dev/null | "
-            "sed -n '/^t-fast-exact-locked: /p'",
-            true_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+            "sed -n '/^t-fast-exact-locked: /p;"
+            "/^ZCL_EPOCH_PROFILES :=/p;/^ZCL_FROZEN_TOOLCHAIN_ARGS :=/p'",
+            true_bin, false_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, out, sizeof(out)) == 0);
         ASSERT(strstr(out, "t-fast-exact-locked:") != NULL);
         ASSERT(strstr(out, "dev-package-verifier-ensure") == NULL);
+        ASSERT(strstr(out, "ZCL_EPOCH_PROFILES := \n") != NULL);
+        ASSERT(strstr(out, "ZCL_FROZEN_TOOLCHAIN_ARGS := \n") != NULL);
 
         test_make_tmpdir(root, sizeof(root), "test_group_selector", "verifier_ensure");
         n = snprintf(stamp, sizeof(stamp), "%s/ready", root);
@@ -1805,24 +1809,57 @@ static int test_exact_verifier_prerequisites(void)
             zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(fresh));
         ASSERT(tgs_write_file(stamp, fresh));
+        n = snprintf(child, sizeof(child), "%s/child-make.sh", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(child));
+        ASSERT(tgs_write_file(child,
+            "#!/bin/sh\nprintf 'TGS_CHILD_ARGS=%s\\n' \"$*\"\nexit 1\n"));
         n = snprintf(command, sizeof(command),
             "make --no-print-directory dev-package-verifier-ensure "
             "DEV_PACKAGE_VERIFY_BIN=%s DEV_PACKAGE_VERIFY_ENSURE_STAMP='%s' "
-            "MAKE=%s BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
-            true_bin, stamp, false_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+            "MAKE='sh %s' BUILD_EPOCH_KEY_TOOL=%s BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
+            true_bin, stamp, child, false_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, out, sizeof(out)) == 0);
         ASSERT(tgs_write_file(stamp, "stale source identity\n"));
         ASSERT(capture_command(command, out, sizeof(out)) == rebuild_rc);
+#if !defined(_WIN32)
+        ASSERT(strstr(out, "TGS_CHILD_ARGS=--no-print-directory dev-package-verifier\n") != NULL);
+#endif
         ASSERT(tgs_write_file(stamp, fresh));
         n = snprintf(command, sizeof(command),
             "make --no-print-directory dev-package-verifier-ensure "
             "DEV_PACKAGE_VERIFY_BIN='%s/missing' DEV_PACKAGE_VERIFY_ENSURE_STAMP='%s' "
-            "MAKE=%s BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
-            root, stamp, false_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+            "MAKE='sh %s' BUILD_EPOCH_KEY_TOOL=%s BUILD_SOURCE_RECORD='%s 1 %s' 2>&1",
+            root, stamp, child, false_bin, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
         ASSERT(n > 0 && (size_t)n < sizeof(command));
         ASSERT(capture_command(command, out, sizeof(out)) == rebuild_rc);
+#if !defined(_WIN32)
+        ASSERT(strstr(out, "TGS_CHILD_ARGS=--no-print-directory dev-package-verifier\n") != NULL);
+#endif
         ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_epoch_query_fallback(void)
+{
+    int failures = 0;
+    TEST("epoch admission: mixed, unknown and compiling goals still require the epoch tool") {
+        const char *fail = tgs_fixture_executable("/usr/bin/false", "/bin/false");
+        ASSERT(fail != NULL);
+        const char *goals[] = {"help dev-package-verifier-ensure",
+                                "tgs_unknown_epoch_goal", "dev-package-verifier"};
+        for (size_t i = 0; i < sizeof(goals) / sizeof(goals[0]); i++) {
+            char command[4096], out[4096];
+            int n = snprintf(command, sizeof(command),
+                "env -u MAKEFLAGS -u MFLAGS make --no-print-directory -n %s BUILD_EPOCH_KEY_TOOL=%s "
+                "BUILD_SOURCE_RECORD='%s 1 %s' 2>&1", goals[i], fail,
+                zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+            ASSERT(n > 0 && (size_t)n < sizeof(command));
+            ASSERT(capture_command(command, out, sizeof(out)) != 0);
+            ASSERT(strstr(out, "compiler/toolchain fingerprint failed") != NULL);
+        }
         PASS();
     } _test_next:;
     return failures;
@@ -2450,6 +2487,7 @@ int test_test_group_selector(void)
     failures += test_runner_state_setup_refuses();
     failures += test_exact_default_parallel_jobs();
     failures += test_exact_verifier_prerequisites();
+    failures += test_epoch_query_fallback();
     failures += test_compile_scope_proof();
     failures += test_runner_build_needs_selection();
     failures += test_tmpdir_recursive_cleanup();

@@ -500,7 +500,11 @@ else ifeq ($(ZCL_WORKTREE_PRIME_ONLY),1)
 ZCL_EPOCH_PROFILES :=
 else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_EPOCH_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
-ifneq ($(filter build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
+ifneq ($(filter help dev-package-verifier-ensure,$(ZCL_EPOCH_SINGLE_GOAL)),)
+# Neither goal compiles. Ensure still captures source and its nested verifier
+# make selects the dev profile; do not freeze zero toolchain IDs into it.
+ZCL_EPOCH_PROFILES :=
+else ifneq ($(filter build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify z23-wiki-runtime,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := node-c23
