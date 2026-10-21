@@ -3654,12 +3654,24 @@ static bool run_hotswap_artifact_cache_fixture(void)
     const char *owner = "engine/controllers/src/status_native_handlers.c";
 
     stage = "cold-first-publish";
-    if (!zcl_devloop_hotswap_build(root_a, owner, &built, &process,
-                                   why, sizeof(why)) ||
+    bool cold_build_ok = zcl_devloop_hotswap_build(root_a, owner, &built, &process,
+                                                  why, sizeof(why));
+    if (!cold_build_ok ||
         built.artifact_cache_hit || built.compiler_processes != 2 ||
         built.linker_processes != 1 || strlen(built.artifact_cache_key) != 64 ||
-        strlen(built.candidate_object_sha256) != 64)
+        strlen(built.candidate_object_sha256) != 64) {
+        fprintf(stderr, "hotswap cold publish: build_ok=%d hit=%d cc=%u ld=%u key_len=%zu object_hash_len=%zu cache_miss=%.39s cache_action_root=%.64s action_cause=%.23s action_miss=%.39s action_detail=%.191s\n",
+            cold_build_ok, built.artifact_cache_hit, built.compiler_processes,
+            built.linker_processes, strlen(built.artifact_cache_key),
+            strlen(built.candidate_object_sha256), built.cache_key_miss,
+            built.cache_key_action_root, built.action_root_cause,
+            built.action_root_miss, built.action_root_miss_detail);
+        fprintf(stderr, "hotswap cold process: exit=%d signal=%d timeout=%d cancelled=%d output_len=%zu truncated=%d output=%.4096s\n",
+            process.exit_code, process.term_signal, process.timed_out,
+            process.cancelled, process.output_len, process.output_truncated,
+            process.output);
         goto out;
+    }
     stage = "cross-device-inode-proof";
     char cache_artifact[PATH_MAX];
     struct stat cache_st = {0}, published_st = {0};
