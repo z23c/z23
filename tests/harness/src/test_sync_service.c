@@ -1972,6 +1972,100 @@ static int test_sync_service_recovery_ignores_map_order(void)
     return failures;
 }
 
+static int test_sync_service_at_tip_recovery_skips_scan(void)
+{
+    int failures = 0;
+
+    TEST("stall recovery refuses to scan when best header is at the validated tip") {
+        /* Production regression, canonical rhett2 node 2026-10-21: a peer's
+         * starting_height is handshake-static, so a peer that connected while
+         * ahead keeps the starting_height trigger armed forever after this
+         * node catches up. With an empty queue, empty in-flight and
+         * pindex_best_header AT the validated tip, the block-map scan can
+         * find nothing above the tip — yet the node ran one full ~3.3M-entry
+         * scan per 10 s throttle window for 20 h straight (~6.5% of a core,
+         * 622 STALL log lines in 2 h) while synced at tip with gap 0. The
+         * scan is not merely wasted: it holds the map rwlock against live
+         * block intake every window. */
+        struct main_state ms;
+        struct p2p_node node;
+        struct sync_stall_recovery recovery;
+        struct block_index tip;
+        struct uint256 tip_hash = {0};
+
+        memset(&node, 0, sizeof(node));
+        memset(&tip, 0, sizeof(tip));
+        main_state_init(&ms);
+        block_index_init(&tip);
+        tip_hash.data[31] = 250;
+        tip.phashBlock = &tip_hash;
+        tip.nHeight = 100;
+        ASSERT(active_chain_move_window_tip(&ms.chain_active, &tip));
+        ASSERT(block_map_insert(&ms.map_block_index, &tip_hash, &tip));
+        ms.pindex_best_header = &tip; /* tracking exists; nothing above tip */
+
+        node.state = PEER_SYNCING_BLOCKS;
+        node.starting_height = 3292042; /* far ahead, handshake-static */
+        bool fired = syncsvc_build_stall_recovery(&recovery, &ms, &node,
+                                                  0, 0, 20000);
+        if (fired)
+            syncsvc_free_stall_recovery(&recovery);
+        ASSERT(!fired);
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
+static int test_sync_service_recovery_fires_for_real_deficit(void)
+{
+    int failures = 0;
+
+    TEST("stall recovery still fires for a real deficit under best-header tracking") {
+        /* The at-tip guard must not over-suppress: with best-header tracking
+         * pointing above the validated tip, an empty queue and empty
+         * in-flight is a genuine stall and the recovery plan (and its scan)
+         * still has to fire. This is the same fixture shape as the at-tip
+         * regression but one header ahead of the tip. */
+        struct main_state ms;
+        struct p2p_node node;
+        struct sync_stall_recovery recovery;
+        struct block_index tip, ahead;
+        struct uint256 tip_hash = {0}, ahead_hash = {0};
+
+        memset(&node, 0, sizeof(node));
+        memset(&tip, 0, sizeof(tip));
+        memset(&ahead, 0, sizeof(ahead));
+        main_state_init(&ms);
+        block_index_init(&tip);
+        block_index_init(&ahead);
+        tip_hash.data[31] = 250;
+        ahead_hash.data[31] = 251;
+        tip.phashBlock = &tip_hash; tip.nHeight = 100;
+        ahead.phashBlock = &ahead_hash; ahead.nHeight = 101;
+        ahead.pprev = &tip;
+        ASSERT(active_chain_move_window_tip(&ms.chain_active, &tip));
+        ASSERT(block_map_insert(&ms.map_block_index, &tip_hash, &tip));
+        ASSERT(block_map_insert(&ms.map_block_index, &ahead_hash, &ahead));
+        ms.pindex_best_header = &ahead; /* a known header above the tip */
+
+        node.state = PEER_SYNCING_BLOCKS;
+        node.starting_height = 1000;
+        ASSERT(syncsvc_build_stall_recovery(&recovery, &ms, &node,
+                                            0, 0, 40000));
+        ASSERT(recovery.should_recover);
+        ASSERT(recovery.next_height == 101);
+        ASSERT(recovery.alt_count == 1);
+        ASSERT(recovery.alt_heights[0] == 101);
+        syncsvc_free_stall_recovery(&recovery);
+        main_state_free(&ms);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 static int test_sync_service_requests_reset_when_no_alts(void)
 {
     int failures = 0;
@@ -2426,6 +2520,8 @@ int test_sync_service(void)
     failures += test_sync_service_builds_alt_recovery_plan();
     failures += test_sync_service_requests_reset_when_no_alts();
     failures += test_sync_service_recovery_ignores_map_order();
+    failures += test_sync_service_at_tip_recovery_skips_scan();
+    failures += test_sync_service_recovery_fires_for_real_deficit();
     failures += test_sync_service_applies_alt_recovery();
     failures += test_sync_service_applies_reset_recovery();
     failures += test_sync_service_recovery_header_anchor();

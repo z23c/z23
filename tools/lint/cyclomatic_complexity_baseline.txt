@@ -2088,7 +2088,7 @@ engine/services/src/block_source_policy_persist.c:bsp_persist_decision:17
 engine/services/src/block_source_policy_persist.c:bsp_restore_decision:24
 engine/services/src/block_source_policy_persist.c:persist_source_snapshot:16
 engine/services/src/block_source_policy_runtime.c:bsp_build_runtime_input:56
-engine/services/src/block_sync_service.c:syncsvc_build_stall_recovery:45
+engine/services/src/block_sync_service.c:syncsvc_build_stall_recovery:42
 engine/services/src/block_sync_service.c:syncsvc_note_valid_block:20
 engine/services/src/block_sync_service.c:syncsvc_plan_periodic_tip_state:21
 engine/services/src/blocker_history.c:bh_parse_payload:18

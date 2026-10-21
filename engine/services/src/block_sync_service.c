@@ -423,6 +423,41 @@ void syncsvc_sync_benchmark_reset_for_testing(void)
                           memory_order_relaxed);
 }
 
+/* Early-exit reasons that make the recovery scan pure waste, split out of
+ * syncsvc_build_stall_recovery so its complexity ratchet pin holds. Each
+ * clause names the state in which the scan below provably cannot produce
+ * a recovery. */
+static bool stall_recovery_scan_is_waste(const struct main_state *ms,
+                                         const struct p2p_node *node,
+                                         uint64_t queued, uint64_t in_flight,
+                                         int our_h)
+{
+    if (queued != 0 || in_flight != 0) return true;
+    if (node->starting_height <= our_h + 10) return true;
+    if (node->state < PEER_HANDSHAKE_COMPLETE) return true;
+    /* At-tip guard (2026-10-21, canonical rhett2 evidence): a peer's
+     * starting_height is handshake-static, so a peer that connected while
+     * ahead keeps the trigger above armed forever after this node catches
+     * up. When best-header tracking says no known header sits above the
+     * validated tip, the map scan provably cannot find anything (every
+     * candidate lives at dh >= 1) — yet it still walked all ~3.3M entries
+     * under the map rwlock once per 10 s throttle window (~6.5% of a core
+     * plus a STALL log line, contending live block intake) for 20 h
+     * straight on a node synced at tip with gap 0. Less-work forks above
+     * the tip are excluded deliberately: they never reach the descendant
+     * pool (pprev must walk to OUR tip) and their bodies cannot advance
+     * the active chain; a fork whose work crosses ours is promoted to the
+     * best header on acceptance and this guard opens again — except while
+     * HEADER_CORROBORATION_HOLD deliberately withholds promotion, a
+     * transient window in which stall recovery also skips the held header
+     * (the normal header-plan path still queues its body). No tracking
+     * (pindex_best_header == NULL) keeps the legacy scan so recovery is
+     * never more conservative than before where tracking is absent. */
+    const struct block_index *best_header = ms->pindex_best_header;
+    if (best_header && best_header->nHeight <= our_h) return true;
+    return false;
+}
+
 bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
                                   const struct main_state *ms,
                                   const struct p2p_node *node,
@@ -437,9 +472,8 @@ bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
     if (!ms || !node) LOG_FAIL("block_sync", "build_stall_recovery: null ms=%d node=%d", !ms, !node);
 
     int our_h = active_chain_height(&ms->chain_active);
-    if (queued != 0 || in_flight != 0) return false;
-    if (node->starting_height <= our_h + 10) return false;
-    if (node->state < PEER_HANDSHAKE_COMPLETE) return false;
+    if (stall_recovery_scan_is_waste(ms, node, queued, in_flight, our_h))
+        return false;
     if (now_seconds - g_last_stall_log <= 10) return false;
 
     g_last_stall_log = now_seconds;
