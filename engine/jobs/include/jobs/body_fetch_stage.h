@@ -85,12 +85,15 @@ enum body_fetch_exact_authority_state {
     BODY_FETCH_EXACT_PARENT_ABSENT,
     BODY_FETCH_EXACT_PARENT_MISMATCH,
     BODY_FETCH_EXACT_AUTHORITY_FAILED,
+    BODY_FETCH_EXACT_BUSY,
 };
 
 const char *body_fetch_exact_authority_state_name(
     enum body_fetch_exact_authority_state state);
 
-/* Resolve one exact validated target.  Owns cs_main internally.  On the
+/* Resolve one exact validated target. Tries cs_main internally; BUSY means
+ * transient contention and must be retried without advancing or repairing.
+ * On the
  * healthy path it uses the active parent.  Only when that slot is absent does
  * it release cs_main, read the durable finalized/trusted-base parent under the
  * progress-store lock, then re-lock and repeat the entire identity proof.
@@ -100,6 +103,11 @@ struct block_index *body_fetch_exact_authority_resolve(
     struct sqlite3 *db, struct main_state *ms, int height,
     const struct uint256 *expected_hash,
     enum body_fetch_exact_authority_state *out_state);
+
+#ifdef ZCL_TESTING
+/* Deterministic contention after the durable-parent read, before re-lock. */
+void body_fetch_test_set_before_authority_relock(void (*hook)(void));
+#endif
 
 /* Max steps drained per supervisor tick. Each step is one in-memory
  * flag check + one small SQL insert; 500 keeps churn modest while

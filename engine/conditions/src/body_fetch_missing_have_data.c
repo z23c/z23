@@ -91,23 +91,32 @@ static struct block_index *active_target_for_hash_locked(
     return bi;
 }
 
+static bool best_target_has_data(sqlite3 *db, struct main_state *ms,
+    int target, const struct uint256 *hash, struct block_index **resolved,
+    bool *busy)
+{
+    enum body_fetch_exact_authority_state state = BODY_FETCH_EXACT_BEST_ABSENT;
+    *resolved = body_fetch_exact_authority_resolve(db, ms, target, hash, &state);
+    *busy = state == BODY_FETCH_EXACT_BUSY;
+    return *resolved && state == BODY_FETCH_EXACT_HAVE_DATA;
+}
+
 static bool target_has_readable_data(
     sqlite3 *db, struct main_state *ms, int target,
     enum bfmhd_target_route route,
-    const struct uint256 *expected_hash)
+    const struct uint256 *expected_hash, bool *busy)
 {
+    *busy = false;
     struct block_index *resolved = NULL;
-    if (route == BFMHD_TARGET_BEST_HEADER) {
-        enum body_fetch_exact_authority_state state =
-            BODY_FETCH_EXACT_BEST_ABSENT;
-        resolved = body_fetch_exact_authority_resolve(
-            db, ms, target, expected_hash, &state);
-        if (!resolved || state != BODY_FETCH_EXACT_HAVE_DATA)
-            return false;
-    }
+    if (route == BFMHD_TARGET_BEST_HEADER &&
+        !best_target_has_data(db, ms, target, expected_hash, &resolved, busy))
+        return false;
 
     bool readable = false;
-    zcl_mutex_lock(&ms->cs_main);
+    if (!zcl_mutex_trylock(&ms->cs_main)) {
+        *busy = true;
+        return false;
+    }
     struct block_index *bi = NULL;
     if (route == BFMHD_TARGET_BEST_HEADER) {
         if (ms->pindex_best_header &&
@@ -145,6 +154,36 @@ static bool active_target_missing_data(struct main_state *ms, int target,
     return missing;
 }
 
+enum bfmhd_frontier_result {
+    BFMHD_FRONTIER_NONE = -1,
+    BFMHD_FRONTIER_BUSY = -2,
+};
+
+/* A negative result distinguishes no candidate from contended authority. */
+static int frontier_missing_target(sqlite3 *db, struct main_state *ms,
+                                    struct uint256 *target_hash)
+{
+    struct stage_repair_body_fetch_gap gap;
+    if (!stage_repair_body_fetch_missing_have_data_frontier_candidate(db, &gap) ||
+        gap.body_observed) return BFMHD_FRONTIER_NONE;
+    enum body_fetch_exact_authority_state state = BODY_FETCH_EXACT_BEST_ABSENT;
+    if (gap.has_target_hash) {
+        struct block_index *bi = body_fetch_exact_authority_resolve(
+            db, ms, gap.target_height, &gap.target_hash, &state);
+        if (bi && state == BODY_FETCH_EXACT_READY) {
+            *target_hash = gap.target_hash;
+            return gap.target_height;
+        }
+    }
+    atomic_store(&g_last_skip_state, state);
+    if (state == BODY_FETCH_EXACT_BUSY) return BFMHD_FRONTIER_BUSY;
+    LOG_WARN("condition",
+        "[condition:body_fetch_missing_have_data] canonical validated target "
+        "h=%d skip_reason=%s", gap.target_height,
+        body_fetch_exact_authority_state_name(state));
+    return BFMHD_FRONTIER_NONE;
+}
+
 static bool detect_body_fetch_missing_have_data(void)
 {
     int64_t tip_age = sync_monitor_tip_advance_age();
@@ -163,32 +202,10 @@ static bool detect_body_fetch_missing_have_data(void)
     /* Candidate 1: the body_fetch stage's own frontier cursor — the class
      * this Condition originally healed (validate_headers led body_fetch with
      * no observed body). */
-    struct stage_repair_body_fetch_gap gap;
-    if (!tip_recent &&
-        stage_repair_body_fetch_missing_have_data_frontier_candidate(
-            db, &gap) && !gap.body_observed) {
-        bool missing = false;
-        enum body_fetch_exact_authority_state exact_state =
-            BODY_FETCH_EXACT_BEST_ABSENT;
-        if (gap.has_target_hash) {
-            struct block_index *bi = body_fetch_exact_authority_resolve(
-                db, ms, gap.target_height, &gap.target_hash, &exact_state);
-            if (bi && exact_state == BODY_FETCH_EXACT_READY) {
-                missing = true;
-                target_hash = gap.target_hash;
-            }
-        }
-        if (missing) {
-            target = gap.target_height;
-            route = BFMHD_TARGET_BEST_HEADER;
-        } else {
-            atomic_store(&g_last_skip_state, exact_state);
-            LOG_WARN("condition",
-                     "[condition:body_fetch_missing_have_data] canonical "
-                     "validated target h=%d skip_reason=%s",
-                     gap.target_height,
-                     body_fetch_exact_authority_state_name(exact_state));
-        }
+    if (!tip_recent) {
+        target = frontier_missing_target(db, ms, &target_hash);
+        if (target == BFMHD_FRONTIER_BUSY) return false;
+        if (target >= 0) route = BFMHD_TARGET_BEST_HEADER;
     }
 
     /* Candidate 2: an ARBITRARY mid-chain height the reducer is stuck
@@ -235,6 +252,16 @@ static bool detect_body_fetch_missing_have_data(void)
     return true;
 }
 
+static bool target_converged_or_busy(sqlite3 *db, struct main_state *ms,
+    int target, enum bfmhd_target_route route, const struct uint256 *hash)
+{
+    bool busy = false;
+    bool converged = (route == BFMHD_TARGET_BEST_HEADER && db &&
+        stage_repair_body_fetch_observed_hash(db, target, hash)) ||
+        target_has_readable_data(db, ms, target, route, hash, &busy);
+    return converged || busy;
+}
+
 static enum condition_remedy_result remedy_body_fetch_missing_have_data(void)
 {
     int target = atomic_load(&g_target_at_detect);
@@ -276,13 +303,7 @@ static enum condition_remedy_result remedy_body_fetch_missing_have_data(void)
         g_before_remedy_recheck_fn();
 #endif
     sqlite3 *db = progress_store_db();
-    bool already_converged =
-        (route == BFMHD_TARGET_BEST_HEADER && db &&
-         stage_repair_body_fetch_observed_hash(
-             db, target, &g_target_hash)) ||
-        target_has_readable_data(
-            db, ms, target, route, &g_target_hash);
-    if (already_converged)
+    if (target_converged_or_busy(db, ms, target, route, &g_target_hash))
         return COND_REMEDY_SKIP;
 
 #ifdef ZCL_TESTING
@@ -327,8 +348,9 @@ static bool witness_body_fetch_missing_have_data(int64_t target_at_detect)
     struct main_state *ms = sync_monitor_main_state();
     if (!ms || target < 0)
         return false;
+    bool busy = false;
     return atomic_load(&g_target_hash_valid) &&
-        target_has_readable_data(db, ms, target, route, &g_target_hash);
+        target_has_readable_data(db, ms, target, route, &g_target_hash, &busy);
 }
 
 static struct condition c_body_fetch_missing_have_data = {

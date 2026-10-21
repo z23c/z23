@@ -45,6 +45,7 @@
 #include <sys/stat.h>
 #if !defined(_WIN32)
 #include <sys/wait.h>
+#include <pthread.h>
 #endif
 #include <time.h>
 #include <unistd.h>
@@ -336,6 +337,113 @@ static void bf_teardown(const char *dir, struct main_state *ms,
     test_cleanup_tmpdir(dir);
 }
 
+/* A timed holder makes the old blocking implementation fail boundedly. The
+ * success assertion is ownership at return, not a machine-speed threshold. */
+struct bf_busy_holder {
+    struct main_state *ms;
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+    pthread_t thread;
+    bool ready, release, timed_out, progress_released;
+};
+static struct bf_busy_holder *g_bf_busy_holder;
+
+static void *bf_busy_hold(void *opaque)
+{
+    struct bf_busy_holder *h = opaque;
+    zcl_mutex_lock(&h->ms->cs_main);
+    pthread_mutex_lock(&h->lock);
+    h->ready = true;
+    pthread_cond_signal(&h->changed);
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += 2;
+    while (!h->release) {
+        if (pthread_cond_timedwait(&h->changed, &h->lock, &until) == ETIMEDOUT) {
+            h->timed_out = true;
+            break;
+        }
+    }
+    h->progress_released = progress_store_tx_trylock();
+    if (h->progress_released) progress_store_tx_unlock();
+    pthread_mutex_unlock(&h->lock);
+    zcl_mutex_unlock(&h->ms->cs_main);
+    return NULL;
+}
+
+static bool bf_busy_start(struct bf_busy_holder *h, struct main_state *ms)
+{
+    memset(h, 0, sizeof(*h));
+    h->ms = ms;
+    pthread_mutex_init(&h->lock, NULL);
+    pthread_cond_init(&h->changed, NULL);
+    /* raw-pthread-ok: bounded fixture holder joined by bf_busy_finish */
+    if (pthread_create(&h->thread, NULL, bf_busy_hold, h) != 0) {
+        pthread_cond_destroy(&h->changed);
+        pthread_mutex_destroy(&h->lock);
+        return false;
+    }
+    pthread_mutex_lock(&h->lock);
+    while (!h->ready) pthread_cond_wait(&h->changed, &h->lock);
+    pthread_mutex_unlock(&h->lock);
+    return true;
+}
+
+static void bf_busy_relock_hook(void)
+{
+    struct main_state *ms = g_bf_busy_holder->ms;
+    (void)bf_busy_start(g_bf_busy_holder, ms);
+}
+
+static bool bf_busy_finish(struct bf_busy_holder *h)
+{
+    pthread_mutex_lock(&h->lock);
+    h->release = true;
+    pthread_cond_signal(&h->changed);
+    pthread_mutex_unlock(&h->lock);
+    pthread_join(h->thread, NULL);
+    bool ok = !h->timed_out && h->progress_released;
+    pthread_cond_destroy(&h->changed);
+    pthread_mutex_destroy(&h->lock);
+    return ok;
+}
+
+static int test_body_fetch_busy(bool second_pass)
+{
+    int failures = 0;
+    char dir[256]; struct main_state ms; struct synth_chain_bf sc;
+    if (bf_setup(second_pass ? "busy_relock" : "busy_first", 3,
+                 dir, sizeof(dir), &ms, &sc) != 0) return 1;
+    header_admit_stage_drain(100);
+    validate_headers_stage_drain(100);
+    BF_CHECK("busy: prefix advances exactly twice", body_fetch_stage_drain(2) == 2);
+    struct bf_busy_holder holder = {.ms = &ms};
+    bool started = false;
+    if (second_pass) {
+        BF_CHECK("busy: durable parent schema", ensure_tip_finalize_fixture_schema_bf(progress_store_db()));
+        BF_CHECK("busy: durable parent witness", seed_trusted_parent_bf(progress_store_db(), 1, &sc.hashes[1]));
+        active_chain_free(&ms.chain_active);
+        active_chain_init(&ms.chain_active);
+        g_bf_busy_holder = &holder;
+        body_fetch_test_set_before_authority_relock(bf_busy_relock_hook);
+    } else {
+        started = bf_busy_start(&holder, &ms);
+        BF_CHECK("busy: holder started", started);
+    }
+    int advanced = body_fetch_stage_drain(1);
+    body_fetch_test_set_before_authority_relock(NULL);
+    if (second_pass) started = holder.ready;
+    BF_CHECK("busy: no advance, cursor or log row", advanced == 0 &&
+        body_fetch_stage_cursor() == 2 && log_row_count(progress_store_db()) == 2);
+    BF_CHECK("busy: named idle", dump_has_idle_reason("authority.busy"));
+    BF_CHECK("busy: progress unlocked before cs_main release", started && bf_busy_finish(&holder));
+    BF_CHECK("busy: retry advances once", body_fetch_stage_drain(2) == 1 &&
+        body_fetch_stage_cursor() == 3 && log_row_count(progress_store_db()) == 3);
+    g_bf_busy_holder = NULL;
+    bf_teardown(dir, &ms, &sc);
+    return failures;
+}
+
 static int test_body_fetch_malformed_verdict(void)
 {
     char dir[256]; struct main_state ms; struct synth_chain_bf sc;
@@ -403,6 +511,8 @@ static int test_body_fetch_stage_platform_arm(void)
     int failures = 0;
 
     blocker_module_init();
+    failures += test_body_fetch_busy(false);
+    failures += test_body_fetch_busy(true);
 
     /* ── happy: 5 blocks all HAVE_DATA → 5 disk rows ─────────────────── */
     {

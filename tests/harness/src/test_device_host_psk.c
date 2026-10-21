@@ -744,7 +744,7 @@ static int psk_large_case_1(void)
 static int psk_large_case_2(void)
 {
     int failures = 0; struct psk_fixture f = {0}; struct device_host_psk_session c = {0}, s = {0};
-    static uint8_t plaintext[DEVICE_HOST_PSK_RECORD_MAX + 1], wire[DEVICE_HOST_PSK_WIRE_MAX];
+    static uint8_t plaintext[DEVICE_HOST_PSK_RECORD_MAX + 1];
     psk_fill(plaintext, sizeof(plaintext));
     TEST_CASE("host PSK: the sender refuses one byte over the large maximum") {
         ASSERT(psk_fixture_open(&f)); ASSERT(psk_live_handshake(&f, &c, &s, 0));

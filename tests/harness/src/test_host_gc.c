@@ -308,8 +308,8 @@ static int hgt_handler_tests(const char *pool, const char *inuse,
             "[{\"path\":\"/unused\",\"class\":1}]",
             "[{\"path\":\"/unused\",\"class\":[]}]",
             "[{\"path\":\"/unused\",\"class\":{}}]",
-            "[\"/unused\",\"/unused\",\"/unused\",\"/unused\","
-            "\"/unused\",\"/unused\",\"/unused\",\"/unused\",\"/unused\"]",
+            ("[\"/unused\",\"/unused\",\"/unused\",\"/unused\","
+             "\"/unused\",\"/unused\",\"/unused\",\"/unused\",\"/unused\"]"),
         };
         for (size_t i = 0; i < sizeof(invalid)/sizeof(invalid[0]); i++) {
             bool refused = hgt_invalid_roots(invalid[i]);

@@ -19,6 +19,11 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#if !defined(_WIN32)
+#include <pthread.h>
+#include <errno.h>
+#include <time.h>
+#endif
 
 #define BFMHD_CHECK(name, expr) do { \
     printf("body_fetch_missing_have_data: %s... ", (name)); \
@@ -301,10 +306,146 @@ static bool queue_has_target(struct bfmhd_fixture *fx)
            uint256_eq(&fx->dm.queue[0], fx->child->phashBlock);
 }
 
+#if !defined(_WIN32)
+struct bfmhd_busy_holder {
+    struct main_state *ms;
+    pthread_mutex_t lock;
+    pthread_cond_t changed;
+    bool ready, release, timed_out;
+};
+
+static void *bfmhd_hold_main(void *opaque)
+{
+    struct bfmhd_busy_holder *h = opaque;
+    zcl_mutex_lock(&h->ms->cs_main);
+    pthread_mutex_lock(&h->lock);
+    h->ready = true;
+    pthread_cond_signal(&h->changed);
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += 2;
+    while (!h->release) {
+        if (pthread_cond_timedwait(&h->changed, &h->lock, &until) == ETIMEDOUT) {
+            h->timed_out = true;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&h->lock);
+    zcl_mutex_unlock(&h->ms->cs_main);
+    return NULL;
+}
+
+static struct bfmhd_busy_holder *g_bfmhd_remedy_holder;
+static pthread_t g_bfmhd_remedy_thread;
+static bool g_bfmhd_remedy_started;
+
+static void bfmhd_busy_during_remedy(void)
+{
+    struct bfmhd_busy_holder *h = g_bfmhd_remedy_holder;
+    /* raw-pthread-ok: bounded remedy fixture joined by its test */
+    g_bfmhd_remedy_started =
+        pthread_create(&g_bfmhd_remedy_thread, NULL, bfmhd_hold_main, h) == 0;
+    if (!g_bfmhd_remedy_started) return;
+    pthread_mutex_lock(&h->lock);
+    while (!h->ready) pthread_cond_wait(&h->changed, &h->lock);
+    pthread_mutex_unlock(&h->lock);
+}
+
+static bool bfmhd_finish_remedy_holder(struct bfmhd_busy_holder *h)
+{
+    if (!g_bfmhd_remedy_started) return false;
+    pthread_mutex_lock(&h->lock);
+    bool prompt = !h->timed_out;
+    h->release = true;
+    pthread_cond_signal(&h->changed);
+    pthread_mutex_unlock(&h->lock);
+    pthread_join(g_bfmhd_remedy_thread, NULL);
+    return prompt;
+}
+
+static int bfmhd_remedy_busy_no_action(void)
+{
+    int failures = 0;
+    struct bfmhd_fixture fx;
+    if (!setup_fixture(&fx, "remedy_authority_busy")) return 1;
+    struct bfmhd_busy_holder h = {.ms = &fx.ms};
+    pthread_mutex_init(&h.lock, NULL);
+    pthread_cond_init(&h.changed, NULL);
+    g_bfmhd_remedy_holder = &h;
+    g_bfmhd_remedy_started = false;
+    body_fetch_missing_have_data_test_set_before_remedy_recheck(
+        bfmhd_busy_during_remedy);
+    condition_engine_tick();
+    struct condition_runtime_snapshot snap;
+    bool got = condition_engine_get_registered_snapshot(
+        "body_fetch_missing_have_data", &snap);
+    bool prompt = bfmhd_finish_remedy_holder(&h);
+    body_fetch_missing_have_data_test_set_before_remedy_recheck(NULL);
+    BFMHD_CHECK("remedy contention is a prompt SKIP", prompt && got &&
+        snap.last_outcome == COND_REMEDY_SKIP);
+    BFMHD_CHECK("remedy contention queues no action",
+        body_fetch_missing_have_data_test_remedy_calls() == 0 &&
+        fx.dm.queue_len == 0);
+    /* The condition-local reset does not clear last_poll/last_remedy clocks.
+     * Re-register through the existing engine test seam to reset cadence,
+     * retaining this exact database/chain/queue fixture for the retry. */
+    condition_engine_reset_for_testing();
+    body_fetch_missing_have_data_test_reset();
+    register_body_fetch_missing_have_data();
+    condition_engine_tick();
+    BFMHD_CHECK("released remedy authority permits one exact retry",
+        body_fetch_missing_have_data_test_remedy_calls() == 1 &&
+        queue_has_target(&fx));
+    g_bfmhd_remedy_holder = NULL;
+    g_bfmhd_remedy_started = false;
+    pthread_cond_destroy(&h.changed);
+    pthread_mutex_destroy(&h.lock);
+    teardown_fixture(&fx);
+    return failures;
+}
+
+static int bfmhd_busy_no_action(void)
+{
+    int failures = 0;
+    struct bfmhd_fixture fx;
+    if (!setup_fixture(&fx, "authority_busy")) return 1;
+    struct bfmhd_busy_holder h = {.ms = &fx.ms};
+    pthread_mutex_init(&h.lock, NULL);
+    pthread_cond_init(&h.changed, NULL);
+    pthread_t thread;
+    /* raw-pthread-ok: bounded contention fixture joined below */
+    int rc = pthread_create(&thread, NULL, bfmhd_hold_main, &h);
+    bool ok = rc == 0;
+    if (ok) {
+        pthread_mutex_lock(&h.lock);
+        while (!h.ready) pthread_cond_wait(&h.changed, &h.lock);
+        pthread_mutex_unlock(&h.lock);
+        condition_engine_tick();
+        pthread_mutex_lock(&h.lock);
+        ok = !h.timed_out;
+        h.release = true;
+        pthread_cond_signal(&h.changed);
+        pthread_mutex_unlock(&h.lock);
+        pthread_join(thread, NULL);
+    }
+    ok = ok && strcmp(body_fetch_missing_have_data_test_last_skip_reason(), "busy") == 0;
+    ok = ok && body_fetch_missing_have_data_test_remedy_calls() == 0 && fx.dm.queue_len == 0;
+    BFMHD_CHECK("busy authority queues no recovery action", ok);
+    pthread_cond_destroy(&h.changed);
+    pthread_mutex_destroy(&h.lock);
+    teardown_fixture(&fx);
+    return failures;
+}
+#endif
+
 int test_body_fetch_missing_have_data_condition(void)
 {
     printf("\n=== body_fetch_missing_have_data condition tests ===\n");
     int failures = 0;
+#if !defined(_WIN32)
+    failures += bfmhd_busy_no_action();
+    failures += bfmhd_remedy_busy_no_action();
+#endif
 
     {
         struct bfmhd_fixture fx;

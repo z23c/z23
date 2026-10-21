@@ -54,6 +54,7 @@ enum body_fetch_idle_reason {
     BF_IDLE_VISIBLE_PARENT_MISMATCH,
     BF_IDLE_AUTHORITY_FAILED,
     BF_IDLE_BODY_MISSING,
+    BF_IDLE_AUTHORITY_BUSY,
     BF_IDLE_REASON_COUNT,
 };
 
@@ -71,6 +72,7 @@ static const char *body_fetch_idle_reason_name(enum body_fetch_idle_reason r)
         "authority.visible_parent_mismatch",
         "authority.failed",
         "body.missing",
+        "authority.busy",
     };
     return r >= 0 && r < BF_IDLE_REASON_COUNT ? names[r] : "unknown";
 }
@@ -103,6 +105,8 @@ static enum body_fetch_idle_reason body_fetch_idle_reason_from_exact(
         return BF_IDLE_VISIBLE_PARENT_MISMATCH;
     case BODY_FETCH_EXACT_AUTHORITY_FAILED:
         return BF_IDLE_AUTHORITY_FAILED;
+    case BODY_FETCH_EXACT_BUSY:
+        return BF_IDLE_AUTHORITY_BUSY;
     }
     return BF_IDLE_AUTHORITY_FAILED;
 }
@@ -119,9 +123,10 @@ const char *body_fetch_exact_authority_state_name(
         "visible_parent_absent",
         "visible_parent_mismatch",
         "authority_failed",
+        "busy",
     };
     return state >= BODY_FETCH_EXACT_READY &&
-                   state <= BODY_FETCH_EXACT_AUTHORITY_FAILED
+                   state <= BODY_FETCH_EXACT_BUSY
         ? names[state] : "unknown";
 }
 
@@ -225,6 +230,22 @@ static bool body_fetch_durable_parent_hash_at(sqlite3 *db, int height,
     return true;
 }
 
+#ifdef ZCL_TESTING
+static void (*g_before_authority_relock)(void);
+void body_fetch_test_set_before_authority_relock(void (*hook)(void))
+{
+    g_before_authority_relock = hook;
+}
+#endif
+
+static bool body_fetch_authority_trylock(
+    struct main_state *ms, enum body_fetch_exact_authority_state *state)
+{
+    if (zcl_mutex_trylock(&ms->cs_main)) return true;
+    *state = BODY_FETCH_EXACT_BUSY;
+    return false;
+}
+
 struct block_index *body_fetch_exact_authority_resolve(
     sqlite3 *db, struct main_state *ms, int height,
     const struct uint256 *expected_hash,
@@ -236,7 +257,7 @@ struct block_index *body_fetch_exact_authority_resolve(
     if (!db || !ms || height < 0 || !expected_hash)
         return NULL;
 
-    zcl_mutex_lock(&ms->cs_main);
+    if (!body_fetch_authority_trylock(ms, out_state)) return NULL;
     struct block_index *bi = body_fetch_exact_authority_locked(
         ms, height, expected_hash, NULL, out_state);
     zcl_mutex_unlock(&ms->cs_main);
@@ -255,14 +276,10 @@ struct block_index *body_fetch_exact_authority_resolve(
      * progress store from under it would add the reverse edge on the
      * hottest path in the node.
      *
-     * The tree genuinely contains BOTH orders and no single global order
-     * can be declared: before the height authority is registered,
-     * active_chain_height()/active_chain_tip() read the progress store
-     * internally, so early cs_main holders nest cs_main -> progress; after
-     * registration that edge vanishes and only this one remains. The
-     * self-heal repair that needs both resolves it by never blocking on
-     * the second lock (see reconcile_block_index_flags in
-     * engine/reducer/jobs/src/stage_repair_reducer_frontier.c).
+     * Mempool anchor reads retain cs_main -> progress even after height
+     * authority registration. Both acquisitions here must therefore refuse
+     * contention without blocking while the reducer holds progress. The
+     * idle drain releases progress so that its owner can finish and retry.
      *
      * The split also serves correctness and latency: no pointer or verdict
      * from the first pass may cross the lock gap. */
@@ -273,7 +290,10 @@ struct block_index *body_fetch_exact_authority_resolve(
 
     /* Re-resolve every identity after re-locking.  No pointer or verdict from
      * the first pass crosses the lock gap. */
-    zcl_mutex_lock(&ms->cs_main);
+#ifdef ZCL_TESTING
+    if (g_before_authority_relock) g_before_authority_relock();
+#endif
+    if (!body_fetch_authority_trylock(ms, out_state)) return NULL;
     bi = body_fetch_exact_authority_locked(
         ms, height, expected_hash, &durable_parent_hash, out_state);
     zcl_mutex_unlock(&ms->cs_main);
@@ -522,6 +542,9 @@ bool body_fetch_stage_dump_state_json(struct json_value *out,
     json_push_kv_int(out, "body_missing_total",
                      (int64_t)atomic_load(
                          &g_idle_reason_total[BF_IDLE_BODY_MISSING]));
+    json_push_kv_int(out, "authority_busy_total",
+                     (int64_t)atomic_load(
+                         &g_idle_reason_total[BF_IDLE_AUTHORITY_BUSY]));
     stage_dump_counters(out, g_stage);
     stage_dump_health(out, STAGE_NAME, g_stage);
     return true;
