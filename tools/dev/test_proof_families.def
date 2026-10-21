@@ -21,4 +21,5 @@ ZCL_TEST_PROOF_FAMILY("fleet_gateway", "test_fleet_gateway*")
 /* Umbrellas (test_group_umbrellas.def): the token reaches every shard, and
  * the umbrella it names is subsumed by them rather than run a second time. */
 ZCL_TEST_PROOF_FAMILY("zcode_swarm_net", "test_zcode_swarm_net_shard_*")
+ZCL_TEST_PROOF_FAMILY("dev_land", "test_dev_land_shard_*")
 ZCL_TEST_PROOF_FAMILY("zcode_package_dev", "test_zcode_package_dev_shard_*")

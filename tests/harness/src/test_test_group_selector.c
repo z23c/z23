@@ -924,7 +924,8 @@ static bool umbrella_every_shard(const char *full_id, void *ctx)
 
 /* One umbrella's selection contract, asked through every expansion the
  * proof, the plan builder and the runner use. */
-static int umbrella_contract(const char *umbrella, const char *token)
+static int umbrella_contract(const char *umbrella, const char *token,
+                             const char *plan_extra)
 {
     int failures = 0;
     TEST("test group selector: an umbrella runs whole only when named "
@@ -969,9 +970,19 @@ static int umbrella_contract(const char *umbrella, const char *token)
         size_t n = zcl_test_group_expand_plan(legacy, 1, out,
                                               FAMILY_EXPAND_MAX, &truncated);
         ASSERT(!truncated);
-        ASSERT(n == shards);
-        for (size_t i = 0; i < n; i++)
-            ASSERT(zcl_test_group_is_umbrella_shard(umbrella, out[i]));
+        ASSERT(n == shards + (plan_extra ? 1u : 0u));
+        size_t extras = 0;
+        for (size_t i = 0; i < n; i++) {
+            if (plan_extra && strcmp(out[i], plan_extra) == 0)
+                extras++;
+            else
+                ASSERT(zcl_test_group_is_umbrella_shard(umbrella, out[i]));
+            for (size_t j = 0; j < i; j++)
+                ASSERT(strcmp(out[i], out[j]) != 0);
+        }
+        ASSERT(extras == (plan_extra ? 1u : 0u));
+        /* Exact count, unique members and the one named extra require every
+         * registered shard once, without absorbing an independent group. */
         const char *exact[] = {umbrella};
         n = zcl_test_group_expand_plan(exact, 1, out, FAMILY_EXPAND_MAX,
                                        &truncated);
@@ -997,9 +1008,13 @@ static int test_umbrella_groups(void)
         ASSERT(zcl_test_group_umbrella_shard_count("test_api") == 0);
         PASS();
     } _test_next:;
-    failures += umbrella_contract("test_zcode_swarm_net", "zcode_swarm_net");
+    failures += umbrella_contract("test_zcode_swarm_net", "zcode_swarm_net",
+                                  NULL);
     failures += umbrella_contract("test_zcode_package_dev",
-                                  "zcode_package_dev");
+                                  "zcode_package_dev", NULL);
+    /* Legacy plan tokens also retain their historical substring matches. */
+    failures += umbrella_contract("test_dev_land", "dev_land",
+                                  "test_dev_land_window");
     return failures;
 }
 
@@ -1038,6 +1053,47 @@ static int test_umbrella_runner_fold(void)
         ASSERT(capture_command(command, out, sizeof(out)) == 0);
         ASSERT(strstr(out, "runs as its") == NULL);
         ASSERT(tgs_selection_output(out, true));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_dev_land_runner_fold(void)
+{
+    int failures = 0;
+    TEST("dev_land selection: expanded family runs four shards once; "
+         "exact historical id stays whole") {
+        static char out[256 * 1024];
+        char exe[PATH_MAX], command[PATH_MAX + 160];
+        ASSERT(os_proc_exe_path(exe, sizeof(exe)));
+        int n = snprintf(command, sizeof(command),
+            "\"%s\" --jobs=1 --only=dev_land --no-cache "
+            "--selection-only 2>&1", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "SELECTED test_dev_land\n") == NULL);
+        for (unsigned s = 1; s <= 4; s++) {
+            char line[80];
+            snprintf(line, sizeof(line),
+                     "SELECTED test_dev_land_shard_%02u\n", s);
+            const char *found = strstr(out, line);
+            ASSERT(found != NULL);
+            ASSERT(strstr(found + strlen(line), line) == NULL);
+        }
+        /* --only also matches the independent dev_land_window group;
+         * shard ownership never absorbs or suppresses that group. */
+        ASSERT(strstr(out, "SELECTED test_dev_land_window\n") != NULL);
+        ASSERT(strstr(out, "executed=0 cache_probes=0") != NULL);
+        n = snprintf(command, sizeof(command),
+            "\"%s\" --jobs=1 --exact=test_dev_land --no-cache "
+            "--selection-only 2>&1", exe);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "SELECTED test_dev_land\n") != NULL);
+        ASSERT(strstr(out, "SELECTED test_dev_land_shard_") == NULL);
+        ASSERT(strstr(out, "SELECTED test_dev_land_window\n") == NULL);
+        ASSERT(strstr(out, "SELECTION-ONLY groups=1 ") != NULL);
+        ASSERT(strstr(out, "executed=0 cache_probes=0") != NULL);
         PASS();
     } _test_next:;
     return failures;
@@ -2536,6 +2592,7 @@ int test_test_group_selector(void)
     failures += test_declared_family_expansion();
     failures += test_umbrella_groups();
     failures += test_umbrella_runner_fold();
+    failures += test_dev_land_runner_fold();
     failures += test_selection_only_invalid();
     failures += test_selection_only_no_acquisition();
     failures += test_selection_only_conflicts();

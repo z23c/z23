@@ -1078,6 +1078,10 @@ ZCL_TEST_GROUP(land_queue)
  * a log path, and that a base which moved mid-proof re-rebases instead of
  * landing evidence about a base nobody is on. */
 ZCL_TEST_GROUP(dev_land)
+ZCL_TEST_GROUP(dev_land_shard_01)
+ZCL_TEST_GROUP(dev_land_shard_02)
+ZCL_TEST_GROUP(dev_land_shard_03)
+ZCL_TEST_GROUP(dev_land_shard_04)
 ZCL_TEST_GROUP(dev_land_window)
 /* dev.ci: the one read-only screen over this host's CI and landing state.
  * The group exists for one property -- absent evidence never reads as a
