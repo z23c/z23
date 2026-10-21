@@ -345,7 +345,7 @@ static int case_lab_run(const char *home)
                  "{\"file\":\"%s\",\"idempotency_key\":\"probe-1\"}}", src);
         ASSERT(ms_tool(&m, 3, "z23_run", req));
         if (has(&m, "LAB_UNCONFINED") || has(&m, "LAB_UNSUPPORTED")) {
-            printf("mcp_serve: lab.run unavailable on this host - SKIP run half\n");
+            printf("mcp_serve: SKIP (lab.run execution unavailable on this host)\n");
         } else {
             ASSERT(has(&m, "\"isError\":false"));
             ASSERT(has(&m, "lab-probe-ok"));
@@ -1270,7 +1270,7 @@ int test_mcp_serve(void)
 {
     int failures = 0;
 #if defined(_WIN32)
-    printf("mcp_serve: POSIX only - SKIP\n");
+    printf("mcp_serve: SKIP (POSIX only)\n");
 #else
     char home[PATH_MAX], checkout[PATH_MAX + 16], head[128];
     failures += case_units();
@@ -1280,7 +1280,7 @@ int test_mcp_serve(void)
     failures += case_policy_idempotency();
     failures += case_policy_plan_stage();
     if (!ms_file_exists(MS_BIN)) {
-        printf("mcp_serve: %s missing - SKIP server half (make dev-bin)\n",
+        printf("mcp_serve: SKIP (server half: %s missing; make dev-bin)\n",
                MS_BIN);
         return failures;
     }
