@@ -12778,11 +12778,7 @@ static int test_ic_sensor_bound_clang_reader(void)
         {.name = "FIFO at the sensor path: present, unbound, returns",
          .str = "\0", .strn = 1, .fifo = true, .want_bound = false},
     };
-#if defined(__linux__) && defined(__x86_64__)
-    TEST_CASE("sensor reader: crafted ELF images bind or refuse") {
-#else
-    TEST_CASE("sensor reader: unsupported hosts refuse crafted ELF images") {
-#endif
+    TEST_CASE("sensor reader: crafted ELF images follow the platform binding contract") {
         static const char path[] = IC_FIX_ROOT "/sensor-img.elf";
         uint8_t w[704];
         bool present = false;
