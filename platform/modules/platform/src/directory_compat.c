@@ -663,7 +663,7 @@ static bool platform_directory_list_children_sorted_impl(
     bool ok = true;
     int fd = dirfd(dir);
     struct dirent *entry;
-    while ((entry = readdir(dir)) != NULL) {
+    while (ok && (entry = readdir(dir)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 ||
             strcmp(entry->d_name, "..") == 0)
             continue;

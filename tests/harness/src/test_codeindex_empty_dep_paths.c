@@ -5,16 +5,18 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include "platform/directory_compat.h"
+#include "base/safe_alloc.h"
 
 /* Remove a child directory between its parent's listing and its own scan,
  * the way a concurrent build rewrites build/. The listing of vanish_parent
  * runs for real, then the child is deleted before the scanner opens it. */
 static char vanish_parent[512], vanish_child[512];
 static bool vanish_armed, vanish_removed;
-static bool vanish_list_real_sorted(const char *path,
-                                    struct platform_directory_list *out)
+static bool vanish_list_children_sorted(const char *path,
+                                        struct platform_directory_list *dirs,
+                                        struct platform_directory_list *files)
 {
-    bool ok = platform_directory_list_real_sorted(path, out);
+    bool ok = platform_directory_list_children_sorted(path, dirs, files);
     if (ok && vanish_armed && strcmp(path, vanish_parent) == 0) {
         vanish_armed = false;
         vanish_removed = test_rm_rf_recursive(vanish_child) == 0;
@@ -45,9 +47,9 @@ static void empty_dep_sort(void *base, size_t count, size_t width,
 #define ci_deps_stat_keys empty_dep_stat_keys
 #define ci_deps_keys_free empty_dep_keys_free
 #define qsort empty_dep_sort
-#define platform_directory_list_real_sorted vanish_list_real_sorted
+#define platform_directory_list_children_sorted vanish_list_children_sorted
 #include "../../../cognition/modules/codeindex/src/codeindex_deps.c"
-#undef platform_directory_list_real_sorted
+#undef platform_directory_list_children_sorted
 #undef qsort
 #undef ci_deps_stat_root_sha3
 #undef ci_deps_stat_keys
@@ -61,6 +63,7 @@ static void empty_dep_sort(void *base, size_t count, size_t width,
 
 static int test_dep_vanished_child(void);
 static int test_dep_missing_root(void);
+static int test_dep_children_alloc(const char *label, bool regular);
 
 int test_codeindex_empty_dep_paths(void)
 {
@@ -84,6 +87,10 @@ int test_codeindex_empty_dep_paths(void)
     if (dir[0] && test_rm_rf_recursive(dir) != 0) failures++;
     failures += test_dep_vanished_child();
     failures += test_dep_missing_root();
+    failures += test_dep_children_alloc("platform_directory_entries", true);
+    failures += test_dep_children_alloc("platform_directory_entry_name", true);
+    failures += test_dep_children_alloc("platform_directory_entries", false);
+    failures += test_dep_children_alloc("platform_directory_entry_name", false);
     return failures;
 }
 
@@ -144,5 +151,58 @@ static int test_dep_missing_root(void)
         PASS();
     } _test_next:;
     if (missing[0] && test_rm_rf_recursive(missing) != 0) failures++;
+    return failures;
+}
+
+static bool dep_make_listing_children(const char *root, bool regular)
+{
+    for (int i = 0; i < 3; i++) {
+        char path[512];
+        int n = snprintf(path, sizeof(path), "%s/%c", root, 'c' - i);
+        if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+        if (!regular) {
+            if (mkdir(path, 0700) != 0) return false;
+        } else {
+            FILE *f = fopen(path, "wb");
+            if (!f) return false;
+            if (fclose(f) != 0) return false;
+        }
+    }
+    return true;
+}
+
+static int test_dep_children_alloc(const char *label, bool regular)
+{
+    int failures = 0;
+    char root[256] = {0};
+    struct platform_directory_list dirs = {0}, files = {0};
+    TEST("combined directory listing fails closed after a middle allocation failure") {
+        printf("fault label=%s kind=%s\n", label, regular ? "files" : "directories");
+        test_make_tmpdir(root, sizeof(root), "dep_paths", "listing_oom");
+        ASSERT(root[0]);
+        ASSERT(dep_make_listing_children(root, regular));
+        zcl_alloc_fault_fail_nth(label, 2);
+        bool ok = platform_directory_list_children_sorted(root, &dirs, &files);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        ASSERT(!ok);
+        ASSERT(dirs.entries == NULL && dirs.count == 0);
+        ASSERT(files.entries == NULL && files.count == 0);
+        ASSERT(platform_directory_list_children_sorted(root, &dirs, &files));
+        struct platform_directory_list *listed = regular ? &files : &dirs;
+        ASSERT_EQ(listed->count, 3);
+        ASSERT(strcmp(listed->entries[0].name, "a") == 0);
+        ASSERT(strcmp(listed->entries[1].name, "b") == 0);
+        ASSERT(strcmp(listed->entries[2].name, "c") == 0);
+        ASSERT_EQ(files.count, regular ? 3 : 0);
+        ASSERT_EQ(dirs.count, regular ? 0 : 3);
+        if (regular) ASSERT(files.entries[0].snapshot_valid);
+        PASS();
+    } _test_next:;
+    zcl_alloc_fault_clear();
+    platform_directory_list_free(&dirs);
+    platform_directory_list_free(&files);
+    if (root[0] && test_rm_rf_recursive(root) != 0) failures++;
     return failures;
 }

@@ -428,12 +428,13 @@ static bool dep_child_ignored(const char *reldir, const char *name)
 
 /* Directory listings report failure through errno. A refusal that sets none
  * (a non-directory, say) has no OS cause to report, so it is EIO. */
-static bool dep_list_dir(bool (*list)(const char *,
-                                      struct platform_directory_list *),
-                         const char *path, struct platform_directory_list *out)
+static bool dep_list_children(const char *path,
+                               struct platform_directory_list *directories,
+                               struct platform_directory_list *files)
 {
     errno = 0;
-    if (list(path, out)) return true;
+    if (platform_directory_list_children_sorted(path, directories, files))
+        return true;
     if (!errno) errno = EIO;
     return false;
 }
@@ -516,8 +517,7 @@ static bool collect_dep_paths(const char *root, const char *reldir,
     }
     struct platform_directory_list directories = {0}, files = {0};
     bool ok =
-        dep_list_dir(platform_directory_list_real_sorted, full, &directories) &&
-        dep_list_dir(platform_directory_list_regular_sorted, full, &files) &&
+        dep_list_children(full, &directories, &files) &&
         collect_dep_subdirs(root, reldir, &directories, paths) &&
         collect_dep_files(reldir, &files, paths);
     platform_directory_list_free(&directories);
