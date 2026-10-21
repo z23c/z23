@@ -299,9 +299,19 @@ static void mvp_receipt_evidence_read(struct mvp_evidence *ev)
     mvp_c7_apply(ev, &crash);
 }
 
-/* C2 verdict: FAIL is UNMET (onion.too_slow when the recorded time reached the
- * budget, else onion.failed). PASS is MET only under the budget. A PASS with no
- * measured time, or a SKIP, stays UNKNOWN with the recorded reason. */
+/* Legacy timing receipts establish an observed run, not qualification of the
+ * current release. Neither producer binds source and artifact; the recovery
+ * receipt also lacks the literal mid-block plus peer-tip acceptance scope. */
+static struct mvp_verdict mvp_legacy_pass(bool onion)
+{
+    return (struct mvp_verdict){MVP_UNKNOWN, NULL, onion
+        ? "observed onion bootstrap receipt PASS within the 60s budget; "
+          "current source/artifact qualification unavailable"
+        : "observed kill-9 recovery drill PASS within the 2min budget; "
+          "current source/artifact and mid-block peer-tip qualification unavailable"};
+}
+
+/* Timing failures remain UNMET. Legacy PASS under budget remains UNKNOWN. */
 static struct mvp_verdict mvp_c2_verdict(const struct mvp_evidence *ev)
 {
     struct mvp_verdict v = {MVP_UNKNOWN, NULL,
@@ -314,8 +324,7 @@ static struct mvp_verdict mvp_c2_verdict(const struct mvp_evidence *ev)
     } else if (ev->c2_verdict == MVP_RECEIPT_PASS &&
                ev->c2_bootstrap_ms >= 0) {
         if (ev->c2_bootstrap_ms < MVP_ONION_BOOTSTRAP_MS_MAX) {
-            v.met = MVP_MET;
-            v.reason = "onion bootstrap receipt PASS within the 60s budget";
+            v = mvp_legacy_pass(true);
         } else {
             v.met = MVP_UNMET;
             v.blocker = "onion.too_slow";
@@ -325,8 +334,7 @@ static struct mvp_verdict mvp_c2_verdict(const struct mvp_evidence *ev)
     return v;
 }
 
-/* C7 verdict: FAIL is UNMET (recovery.failed). An unmeasured or SKIP receipt
- * stays UNKNOWN with its reason. A measured PASS is MET strictly under 120 s. */
+/* A drill flag alone cannot establish even an observed PASS verdict. */
 static struct mvp_verdict mvp_c7_verdict(const struct mvp_evidence *ev)
 {
     struct mvp_verdict v = {MVP_UNKNOWN, NULL,
@@ -335,12 +343,12 @@ static struct mvp_verdict mvp_c7_verdict(const struct mvp_evidence *ev)
         v.met = MVP_UNMET;
         v.blocker = "recovery.failed";
         v.reason = "kill-9 recovery drill verdict FAIL";
-    } else if (!ev->c7_recovery_drill_present) {
+    } else if (ev->c7_verdict != MVP_RECEIPT_PASS ||
+               !ev->c7_recovery_drill_present) {
         return v;
     } else if (ev->c7_recovery_secs >= 0 &&
                ev->c7_recovery_secs < MVP_RECOVERY_SECS_MAX) {
-        v.met = MVP_MET;
-        v.reason = "kill-9 recovery drill within the 2min budget";
+        v = mvp_legacy_pass(false);
     } else {
         v.met = MVP_UNMET;
         v.blocker = "recovery.too_slow";

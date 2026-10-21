@@ -358,14 +358,14 @@ enum mvp_receipt_verdict {
  * mvp_build_status_json() is the SINGLE place met/unmet/unknown is decided. */
 struct mvp_evidence {
     /* C2 — onion bootstrap: last valid zcl.onion_bootstrap_receipt.v1 row. */
-    int       c2_verdict;                          /* enum mvp_receipt_verdict */
+    int       c2_verdict;                          /* observed enum mvp_receipt_verdict; legacy PASS is not release qualification */
     long long c2_bootstrap_ms;                     /* -1 when not measured */
     char      c2_source[MVP_RECEIPT_PATH_MAX];     /* ledger path of that row */
     char      c2_utc[MVP_RECEIPT_UTC_MAX];
     char      c2_reason[MVP_RECEIPT_REASON_MAX];   /* SKIP or unmeasured PASS */
 
     /* C7 — kill-9 recovery: last valid zcl.crash_recovery_receipt.v1 row. */
-    int       c7_verdict;                          /* enum mvp_receipt_verdict */
+    int       c7_verdict;                          /* observed enum mvp_receipt_verdict; drill flag alone proves no verdict */
     char      c7_source[MVP_RECEIPT_PATH_MAX];
     char      c7_utc[MVP_RECEIPT_UTC_MAX];
     char      c7_reason[MVP_RECEIPT_REASON_MAX];   /* SKIP or unmeasured PASS */

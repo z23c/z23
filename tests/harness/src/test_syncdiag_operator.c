@@ -299,15 +299,84 @@ static int test_mvp_receipts_absent_unknown(void)
     return ok ? 0 : 1;
 }
 
-static int test_mvp_receipts_pass_met(void)
+static int test_mvp_receipts_pass_observed(void)
 {
     static const struct mvp_rcpt_expect want[] = {
-        {"C2", "met", NULL, "within the 60s budget", "2026-10-18T10:00:00Z"},
-        {"C7", "met", NULL, "within the 2min budget", "2026-10-18T10:00:00Z"},
+        {"C2", "unknown", NULL, "PASS within the 60s budget", "2026-10-18T10:00:00Z"},
+        {"C7", "unknown", NULL, "PASS within the 2min budget", "2026-10-18T10:00:00Z"},
     };
     bool ok = mvp_rcpt_run(RCPT_ONION("PASS", "42000"),
                            RCPT_CRASH("PASS", "119999", ""), want, 2);
-    printf("mvp receipts: PASS rows within budget are MET with source and utc... %s\n",
+    struct mvp_rcpt_fixture fx = {0};
+    bool setup = mvp_rcpt_setup(&fx, RCPT_ONION("PASS", "42000"),
+                              RCPT_CRASH("PASS", "119999", ""));
+    struct json_value out = {0};
+    bool dumped = setup && mvp_dump_state_json(&out, NULL);
+    const struct json_value *arr = json_get(&out, "criteria");
+    const struct json_value *c2 = mvp_find_criterion(arr, "C2");
+    const struct json_value *c7 = mvp_find_criterion(arr, "C7");
+    ok = ok && dumped && c2 && c7 &&
+         json_get_int(json_get(json_get(c2, "evidence"), "bootstrap_ms")) == 42000 &&
+         json_get_int(json_get(json_get(c7, "evidence"), "recovery_secs")) == 119 &&
+         strstr(json_get_str(json_get(c2, "reason")), "qualification unavailable") &&
+         strstr(json_get_str(json_get(c7, "reason")), "mid-block peer-tip");
+    json_free(&out);
+    mvp_rcpt_teardown(&fx);
+    printf("mvp receipts: PASS rows retain timing, source and utc without current qualification... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static int test_mvp_receipts_timing_only_not_qualified(void)
+{
+    /* These legacy rows name real receipt schemas and meet the timing bars,
+     * but neither identifies the source or artifact being qualified. An old
+     * successful run cannot establish the current full operator claim. */
+    static const struct {
+        const char *id;
+        const char *onion;
+        const char *crash;
+        const char *scope;
+    } cases[] = {
+        {"C2", "{\"schema\":\"zcl.onion_bootstrap_receipt.v1\","
+         "\"utc\":\"2000-01-01T00:00:00Z\",\"verdict\":\"PASS\","
+         "\"bootstrap_ms\":1}\n", NULL, "ancient UTC"},
+        {"C7", NULL, "{\"schema\":\"zcl.crash_recovery_receipt.v1\","
+         "\"utc\":\"2000-01-01T00:00:00Z\",\"verdict\":\"PASS\","
+         "\"recover_ms\":1}\n", "ancient UTC"},
+        {"C2", "{\"schema\":\"zcl.onion_bootstrap_receipt.v1\","
+         "\"verdict\":\"PASS\",\"bootstrap_ms\":1}\n", NULL,
+         "missing timestamp and identity"},
+        {"C7", NULL, "{\"schema\":\"zcl.crash_recovery_receipt.v1\","
+         "\"verdict\":\"PASS\",\"recover_ms\":1}\n",
+         "missing timestamp and identity"},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const struct mvp_rcpt_expect want = {
+            cases[i].id, "unknown", NULL, "", NULL
+        };
+        bool ok = mvp_rcpt_run(cases[i].onion, cases[i].crash, &want, 1);
+        printf("mvp receipts: %s timing-only PASS (%s) is not qualified... %s\n",
+               cases[i].id, cases[i].scope, ok ? "OK" : "FAIL");
+        if (!ok) failures++;
+    }
+    return failures;
+}
+
+static int test_mvp_drill_flag_without_verdict_unknown(void)
+{
+    struct mvp_evidence ev = {0};
+    ev.c7_recovery_drill_present = true;
+    ev.c7_recovery_secs = 1;
+    struct json_value out = {0};
+    bool ok = mvp_build_status_json(&ev, &out);
+    const struct json_value *c = mvp_find_criterion(
+        json_get(&out, "criteria"), "C7");
+    ok = ok && c && mvp_rcpt_met_ok(c, "unknown") &&
+         strcmp(json_get_str(json_get(c, "met_state")), "unknown") == 0;
+    json_free(&out);
+    printf("mvp receipts: C7 drill flag without a verdict cannot earn MET... %s\n",
            ok ? "OK" : "FAIL");
     return ok ? 0 : 1;
 }
@@ -367,10 +436,10 @@ static int test_mvp_receipts_skip_unmeasured_unknown(void)
 static int test_mvp_receipts_torn_tail_uses_previous(void)
 {
     static const struct mvp_rcpt_expect onion[] = {
-        {"C2", "met", NULL, "within the 60s budget", NULL},
+        {"C2", "unknown", NULL, "PASS within the 60s budget", NULL},
     };
     static const struct mvp_rcpt_expect crash[] = {
-        {"C7", "met", NULL, "within the 2min budget", NULL},
+        {"C7", "unknown", NULL, "PASS within the 2min budget", NULL},
     };
     bool ok = mvp_rcpt_run(
         RCPT_ONION("PASS", "42000")
@@ -388,10 +457,10 @@ static int test_mvp_receipts_torn_tail_uses_previous(void)
 static int test_mvp_receipts_onion_just_under_budget(void)
 {
     static const struct mvp_rcpt_expect want[] = {
-        {"C2", "met", NULL, "within the 60s budget", NULL},
+        {"C2", "unknown", NULL, "PASS within the 60s budget", NULL},
     };
     bool ok = mvp_rcpt_run(RCPT_ONION("PASS", "59999"), NULL, want, 1);
-    printf("mvp receipts: a PASS at 59999 ms is MET, strictly under 60 s... %s\n",
+    printf("mvp receipts: a PASS at 59999 ms is observed, not release-qualified... %s\n",
            ok ? "OK" : "FAIL");
     return ok ? 0 : 1;
 }
@@ -433,7 +502,8 @@ static int test_mvp_receipts_long_dir_path(void)
         json_get(&out, "criteria"), "C2");
     const char *state = json_get_str(json_get(c, "met_state"));
     const char *src = mvp_rcpt_ev(c, "evidence_source");
-    ok = ok && state && strcmp(state, "met") == 0 &&
+    ok = ok && state && strcmp(state, "unknown") == 0 &&
+         json_is_null(json_get(c, "met")) &&
          strcmp(src, file) == 0 && strlen(file) > 512;
     json_free(&out);
 
@@ -445,7 +515,7 @@ static int test_mvp_receipts_long_dir_path(void)
     unsetenv("ZCL_ONION_RECEIPT_DIR");
     unsetenv("ZCL_CRASH_RECEIPT_DIR");
     test_cleanup_tmpdir(base);
-    printf("mvp receipts: a receipt dir path longer than 512 bytes still reads MET... %s\n",
+    printf("mvp receipts: a receipt dir path longer than 512 bytes retains observed PASS without qualification... %s\n",
            ok ? "OK" : "FAIL");
     return ok ? 0 : 1;
 }
@@ -1235,8 +1305,8 @@ int syncdiag_cases_operator(void)
             json_free(&out);
         }
 
-        /* (2) The four runtime-derivable criteria all MET; the four offline
-         * operator-proof criteria stay unknown → met_count == 4. */
+        /* (2) The three fully supplied criteria are MET; the five other
+         * operator-proof criteria stay unknown → met_count == 3. */
         {
             struct mvp_evidence ev;
             memset(&ev, 0, sizeof(ev));
@@ -1262,12 +1332,12 @@ int syncdiag_cases_operator(void)
 
             struct json_value out = {0};
             ok = ok && mvp_build_status_json(&ev, &out);
-            ok = ok && json_get_int(json_get(&out, "met_count")) == 4;
+            ok = ok && json_get_int(json_get(&out, "met_count")) == 3;
             ok = ok && json_get_bool(json_get(&out, "ready_for_v1")) == false;
 
             const struct json_value *arr = json_get(&out, "criteria");
-            const char *met_ids[4] = {"C3","C6","C7","C8"};
-            for (size_t i = 0; i < 4 && ok; i++) {
+            const char *met_ids[3] = {"C3","C6","C8"};
+            for (size_t i = 0; i < 3 && ok; i++) {
                 const struct json_value *c = MVP_FIND(arr, met_ids[i]);
                 ok = ok && c != NULL;
                 /* met encodes as JSON true. */
@@ -1278,8 +1348,8 @@ int syncdiag_cases_operator(void)
                 ok = ok && json_is_null(json_get(c, "blocker"));
             }
             /* The offline-proof criteria remain unknown (never silently met). */
-            const char *unk_ids[4] = {"C1","C2","C4","C5"};
-            for (size_t i = 0; i < 4 && ok; i++) {
+            const char *unk_ids[5] = {"C1","C2","C4","C5","C7"};
+            for (size_t i = 0; i < 5 && ok; i++) {
                 const struct json_value *c = MVP_FIND(arr, unk_ids[i]);
                 ok = ok && c != NULL && json_is_null(json_get(c, "met")) &&
                      strcmp(json_get_str(json_get(c, "met_state")),
@@ -1301,6 +1371,7 @@ int syncdiag_cases_operator(void)
             ev.c6_soak_window_hours = 10;
             ev.c6_slo_success_rate = -1.0;
             /* C7: a recovery drill over the 2min budget. */
+            ev.c7_verdict = MVP_RECEIPT_PASS;
             ev.c7_recovery_drill_present = true;
             ev.c7_recovery_secs = 200;
             /* C8: canary latched FAIL. */
@@ -1364,7 +1435,9 @@ int syncdiag_cases_operator(void)
     failures += test_mvp_c8_negative_precedence();
     failures += test_mvp_c8_live_evidence_gap();
     failures += test_mvp_receipts_absent_unknown();
-    failures += test_mvp_receipts_pass_met();
+    failures += test_mvp_receipts_pass_observed();
+    failures += test_mvp_receipts_timing_only_not_qualified();
+    failures += test_mvp_drill_flag_without_verdict_unknown();
     failures += test_mvp_receipts_fail_unmet();
     failures += test_mvp_receipts_skip_unmeasured_unknown();
     failures += test_mvp_receipts_torn_tail_uses_previous();
