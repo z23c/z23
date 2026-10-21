@@ -46,6 +46,9 @@ struct inv_include {
     char token[256];
     int file_index;
     int line;
+    /* Set once by inv_count_uses against this analysis's capability table:
+     * -2 not computed, -1 unresolved/ambiguous, otherwise capability index. */
+    int resolved_cap;
 };
 
 struct inv_body {
@@ -103,6 +106,9 @@ struct inv_scan {
 };
 
 bool inv_collect_paths(struct inv_scan *scan);
+#if defined(ZCL_TESTING)
+void inv_include_work_reset(void);
+#endif
 bool inv_scan_all(struct inv_scan *scan, uint8_t source_root[32]);
 void inv_scan_release(struct inv_scan *scan);
 

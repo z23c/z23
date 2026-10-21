@@ -8,6 +8,20 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(ZCL_TESTING)
+static _Thread_local struct ci_inventory_include_work g_include_work;
+
+void inv_include_work_reset(void)
+{
+    memset(&g_include_work, 0, sizeof(g_include_work));
+}
+
+struct ci_inventory_include_work codeindex_inventory_test_include_work(void)
+{
+    return g_include_work;
+}
+#endif
+
 struct inv_ev_symbol_order { int index; const char *name; };
 struct inv_ev_cap_order {
     int index;
@@ -123,6 +137,9 @@ static int inv_ev_resolve_include(const struct inv_scan *scan,
                                   int cap_count, int file_index,
                                   const char *token)
 {
+#if defined(ZCL_TESTING)
+    g_include_work.resolver_calls++;
+#endif
     int exact = inv_ev_cap_exact(order, cap_count, token);
     if (exact >= 0) return exact;
     char relative[512];
@@ -194,6 +211,9 @@ bool inv_count_uses(struct inv_scan *scan,
                     struct ci_inventory_report *report,
                     const int *cap_for_symbol)
 {
+#if defined(ZCL_TESTING)
+    g_include_work.include_sites = (uint64_t)scan->include_count;
+#endif
     int nc = report->capability_count;
     struct inv_ev_symbol_order *symbols = zcl_malloc(
         (size_t)report->symbol_count * sizeof(*symbols),
@@ -225,6 +245,7 @@ bool inv_count_uses(struct inv_scan *scan,
         const struct inv_include *inc = &scan->includes[i];
         int cap = inv_ev_resolve_include(scan, caps, nc, inc->file_index,
                                          inc->token);
+        scan->includes[i].resolved_cap = cap;
         if (cap < 0) { report->unresolved_include_sites++; continue; }
         if (!scan->files[inc->file_index].is_example)
             inv_ev_bit_set(cap_files, stride, cap, inc->file_index);
@@ -407,6 +428,20 @@ static bool inv_ev_root_gap_push(struct ci_inventory_report *report,
     return true;
 }
 
+static bool inv_ev_resolved_include_files(const struct inv_scan *scan,
+                                           int cap_count, uint8_t *cap_files,
+                                           size_t stride)
+{
+    for (int i = 0; i < scan->include_count; i++) {
+        const struct inv_include *inc = &scan->includes[i];
+        if (inc->resolved_cap < -1 || inc->resolved_cap >= cap_count)
+            return false;
+        if (inc->resolved_cap >= 0)
+            inv_ev_bit_set(cap_files, stride, inc->resolved_cap, inc->file_index);
+    }
+    return true;
+}
+
 bool inv_registered_reachability(const struct inv_scan *scan,
                                  struct ci_inventory_report *report)
 {
@@ -414,30 +449,21 @@ bool inv_registered_reachability(const struct inv_scan *scan,
         (size_t)scan->body_count * sizeof(*order), "ci_inventory_body_evidence");
     struct inv_ev_body_mark *marks = zcl_calloc(
         (size_t)scan->body_count, sizeof(*marks), "ci_inventory_body_marks");
-    struct inv_ev_cap_order *caps = zcl_malloc(
-        (size_t)report->capability_count * sizeof(*caps),
-        "ci_inventory_test_caps");
     size_t stride = ((size_t)scan->file_count + 7u) / 8u;
     uint8_t *cap_files = zcl_calloc((size_t)report->capability_count, stride,
                                     "ci_inventory_test_cap_files");
     if ((scan->body_count && (!order || !marks)) ||
-        (report->capability_count && (!caps || (stride && !cap_files)))) {
-        free(order); free(marks); free(caps); free(cap_files); return false;
+        (report->capability_count && stride && !cap_files)) {
+        free(order); free(marks); free(cap_files); return false;
     }
     for (int i = 0; i < scan->body_count; i++) {
         order[i].index = i; order[i].body = &scan->bodies[i];
     }
-    for (int i = 0; i < report->capability_count; i++) {
-        caps[i].index = i; caps[i].token = report->capabilities[i].include_token;
-        caps[i].header = report->capabilities[i].header;
-    }
     inv_ev_bodies_sort(order, scan->body_count);
-    inv_ev_caps_sort(caps, report->capability_count);
-    for (int i = 0; i < scan->include_count; i++) {
-        int cap = inv_ev_resolve_include(scan, caps, report->capability_count,
-            scan->includes[i].file_index, scan->includes[i].token);
-        if (cap >= 0) inv_ev_bit_set(cap_files, stride, cap,
-                                    scan->includes[i].file_index);
+    if (!inv_ev_resolved_include_files(scan, report->capability_count,
+                                       cap_files, stride)) {
+        free(order); free(marks); free(cap_files);
+        return false;
     }
     for (int i = 0; i < scan->group_count; i++) {
         int begin = inv_ev_body_lower(order, scan->body_count,
@@ -456,7 +482,7 @@ bool inv_registered_reachability(const struct inv_scan *scan,
             if (!inv_ev_root_gap_push(report, &scan->groups[i],
                     "body_not_found_or_macro_generated",
                     "preprocess the registered test translation unit with its exact build defines and bind the emitted root body")) {
-                free(order); free(marks); free(caps); free(cap_files);
+                free(order); free(marks); free(cap_files);
                 return false;
             }
             report->registered_test_roots_missing++;
@@ -464,7 +490,7 @@ bool inv_registered_reachability(const struct inv_scan *scan,
             if (!inv_ev_root_gap_push(report, &scan->groups[i],
                     "multiple_conditional_or_duplicate_bodies",
                     "preprocess the registered test translation unit for the selected platform and bind exactly one emitted root body")) {
-                free(order); free(marks); free(caps); free(cap_files);
+                free(order); free(marks); free(cap_files);
                 return false;
             }
             report->ambiguous_registered_test_roots++;
@@ -473,7 +499,7 @@ bool inv_registered_reachability(const struct inv_scan *scan,
     struct inv_ev_resolved_ref *edges = inv_ev_resolve_refs(scan, report,
         order, cap_files, stride);
     if (scan->ref_count && !edges) {
-        free(order); free(marks); free(caps); free(cap_files);
+        free(order); free(marks); free(cap_files);
         return false;
     }
     bool changed;
@@ -522,6 +548,6 @@ bool inv_registered_reachability(const struct inv_scan *scan,
                       CI_INVENTORY_TEST_REGISTERED_REACHABLE)
             cap->registered_test_symbols++;
     }
-    free(order); free(marks); free(caps); free(cap_files); free(edges);
+    free(order); free(marks); free(cap_files); free(edges);
     return true;
 }

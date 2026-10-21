@@ -162,6 +162,17 @@ struct ci_inventory_report {
 struct ci_inventory_report *codeindex_inventory_analyze(const char *root);
 void codeindex_inventory_free(struct ci_inventory_report *report);
 
+#if defined(ZCL_TESTING)
+/* Per-thread work observation for the latest analysis, reset even when that
+ * analysis fails before scanning. Counts actual resolver entries; never wire
+ * evidence, a cache, or a production report field. */
+struct ci_inventory_include_work {
+    uint64_t include_sites;
+    uint64_t resolver_calls;
+};
+struct ci_inventory_include_work codeindex_inventory_test_include_work(void);
+#endif
+
 /* Exact stat-bound freshness root over the same file universe.  This reads no
  * source bytes and exists only as a process-local memo key; report identity is
  * always source_root_sha3 above. */

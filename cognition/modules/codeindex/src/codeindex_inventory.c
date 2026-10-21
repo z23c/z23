@@ -878,6 +878,9 @@ static bool inv_derive_definition_arms(const struct inv_scan *scan,
 
 struct ci_inventory_report *codeindex_inventory_analyze(const char *root)
 {
+#if defined(ZCL_TESTING)
+    inv_include_work_reset();
+#endif
     if (!root || !root[0]) LOG_NULL("codeindex.inventory", "empty source root");
     struct inv_scan scan = { .root = root };
     struct ci_inventory_report *report = zcl_calloc(1, sizeof(*report),

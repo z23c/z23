@@ -19,6 +19,11 @@
 #include <sys/types.h>
 
 #define CI_FIX "test-tmp/code-inventory-fixture"
+#define CI_INCLUDE_FIX "test-tmp/code-inventory-include-fixture"
+#define CI_INCLUDE_A CI_INCLUDE_FIX "/platform/modules/demo/include/a/shared.h"
+#define CI_INCLUDE_B CI_INCLUDE_FIX "/platform/modules/demo/include/b/shared.h"
+#define CI_INCLUDE_U CI_INCLUDE_FIX "/platform/modules/demo/include/demo/unique.h"
+#define CI_INCLUDE_B_TEXT "int include_probe_b(void);\n"
 
 _Static_assert(ZCL_CODE_SEMANTIC_MIN_DISTINCT == FP_REPORT_MIN_DISTINCT,
                "semantic candidate and fingerprint sample floors drifted");
@@ -907,6 +912,124 @@ static void ci_test_room_uses(const struct ci_inventory_report *report,
     CI_ASSERT(stub->registered_test_group[0] == '\0');
 }
 
+static void ci_include_work_once(void)
+{
+    struct ci_inventory_include_work work = codeindex_inventory_test_include_work();
+    printf("  inventory include work: sites=%llu resolver_calls=%llu\n",
+           (unsigned long long)work.include_sites,
+           (unsigned long long)work.resolver_calls);
+    CI_ASSERT(work.include_sites > 0);
+    CI_ASSERT(work.resolver_calls == work.include_sites);
+}
+
+static bool ci_include_fixture(void)
+{
+    if (system("rm -rf " CI_INCLUDE_FIX " && mkdir -p "
+        CI_INCLUDE_FIX "/platform/modules/demo/include/a "
+        CI_INCLUDE_FIX "/platform/modules/demo/include/b "
+        CI_INCLUDE_FIX "/platform/modules/demo/include/demo "
+        CI_INCLUDE_FIX "/platform/modules/demo/src "
+        CI_INCLUDE_FIX "/tests/harness/src "
+        CI_INCLUDE_FIX "/tools/dev " CI_INCLUDE_FIX "/tools/lint") != 0)
+        return false;
+    return ci_write(CI_INCLUDE_A, "int include_probe_a(void);\n") &&
+        ci_write(CI_INCLUDE_B, CI_INCLUDE_B_TEXT) &&
+        ci_write(CI_INCLUDE_U, "int include_unique(void);\n") &&
+        ci_write(CI_INCLUDE_FIX "/platform/modules/demo/include/a/relative.c",
+            "#include \"shared.h\"\n#include \"shared.h\"\n"
+            "int include_probe_a(void) { return 1; }\n") &&
+        ci_write(CI_INCLUDE_FIX "/platform/modules/demo/include/b/relative.c",
+            "#include \"shared.h\"\n"
+            "int include_probe_b(void) { return 2; }\n") &&
+        ci_write(CI_INCLUDE_FIX "/platform/modules/demo/src/ambiguous.c",
+            "#include \"shared.h\"\n#include \"shared.h\"\n"
+            "#include \"missing_inventory.h\"\n#include \"missing_inventory.h\"\n"
+            "int include_ambiguous(void) { return 3; }\n") &&
+        ci_write(CI_INCLUDE_FIX "/platform/modules/demo/src/unique.c",
+            "#include \"unique.h\"\n#include \"unique.h\"\n"
+            "int include_unique(void) { return 4; }\n") &&
+        ci_write(CI_INCLUDE_FIX "/platform/modules/demo/src/exact.c",
+            "#include \"a/shared.h\"\n#include \"a/shared.h\"\n"
+            "int include_exact(void) { return include_probe_a(); }\n") &&
+        ci_write(CI_INCLUDE_FIX "/tests/harness/src/test_include_reuse.c",
+            "#include \"a/shared.h\"\n#include \"a/shared.h\"\n"
+            "#include \"shared.h\"\n#include \"missing_inventory.h\"\n"
+            "int test_include_reuse(void) { return include_probe_a(); }\n") &&
+        ci_write(CI_INCLUDE_FIX "/tools/dev/test_group_catalog.def",
+            "ZCL_TEST_GROUP(include_reuse)\n") &&
+        ci_write(CI_INCLUDE_FIX "/tools/lint/arm_symbol_single_baseline.txt",
+            "# z23-generated-artifact: zcl.generated_artifact.v1\n"
+            "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
+            "# asserts: multi_arm_definition(path,symbol)\n"
+            "# generated-by: tools/lint/check_arm_symbol_single.sh\n"
+            "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh\n");
+}
+
+static void ci_include_semantics(const struct ci_inventory_report *report,
+                                  bool ambiguous)
+{
+    CI_ASSERT(report != NULL);
+    if (!report)
+        return;
+    const struct ci_inventory_capability *a = ci_cap(report,
+        "platform/modules/demo/include/a/shared.h");
+    const struct ci_inventory_capability *b = ci_cap(report,
+        "platform/modules/demo/include/b/shared.h");
+    const struct ci_inventory_capability *u = ci_cap(report,
+        "platform/modules/demo/include/demo/unique.h");
+    CI_ASSERT(a != NULL);
+    CI_ASSERT(u != NULL);
+    if (!a || !u)
+        return;
+    CI_ASSERT(a->production_use_files == (ambiguous ? 2 : 4));
+    CI_ASSERT(a->test_use_files == 1);
+    CI_ASSERT(a->registered_test_symbols == 1);
+    CI_ASSERT(u->production_use_files == 1);
+    CI_ASSERT(report->unresolved_include_sites == (ambiguous ? 6 : 3));
+    if (ambiguous) {
+        CI_ASSERT(b != NULL);
+        CI_ASSERT(b && b->production_use_files == 1);
+    } else {
+        CI_ASSERT(b == NULL);
+    }
+}
+
+static void ci_include_resolution_lifetime(void)
+{
+    CI_ASSERT(ci_include_fixture());
+    struct ci_inventory_report *first = codeindex_inventory_analyze(CI_INCLUDE_FIX);
+    ci_include_work_once();
+    ci_include_semantics(first, true);
+    char *before = first ? ci_render(first) : NULL;
+    CI_ASSERT(before != NULL);
+    codeindex_inventory_free(first);
+
+    struct ci_inventory_report *invalid = codeindex_inventory_analyze("");
+    CI_ASSERT(invalid == NULL);
+    codeindex_inventory_free(invalid);
+    struct ci_inventory_include_work work = codeindex_inventory_test_include_work();
+    CI_ASSERT(work.include_sites == 0);
+    CI_ASSERT(work.resolver_calls == 0);
+
+    CI_ASSERT(remove(CI_INCLUDE_B) == 0);
+    struct ci_inventory_report *changed = codeindex_inventory_analyze(CI_INCLUDE_FIX);
+    ci_include_work_once();
+    ci_include_semantics(changed, false);
+    codeindex_inventory_free(changed);
+    CI_ASSERT(ci_write(CI_INCLUDE_B, CI_INCLUDE_B_TEXT));
+    struct ci_inventory_report *restored = codeindex_inventory_analyze(CI_INCLUDE_FIX);
+    ci_include_work_once();
+    ci_include_semantics(restored, true);
+    char *after = restored ? ci_render(restored) : NULL;
+    CI_ASSERT(after != NULL);
+    CI_ASSERT(before && after && strcmp(before, after) == 0);
+    free(before);
+    free(after);
+    codeindex_inventory_free(restored);
+    if (!ci_failures)
+        TEST_DISCARD(system("rm -rf " CI_INCLUDE_FIX));
+}
+
 int test_code_inventory(void)
 {
     ci_failures = 0;
@@ -915,6 +1038,7 @@ int test_code_inventory(void)
     struct ci_inventory_report *first = codeindex_inventory_analyze(CI_FIX);
     CI_ASSERT(first != NULL);
     if (!first) return 1;
+    ci_include_work_once();
     CI_ASSERT(first->registered_test_groups == 2);
     CI_ASSERT(first->registered_test_roots_found == 1);
     CI_ASSERT(first->registered_test_roots_missing == 1);
@@ -1046,6 +1170,7 @@ int test_code_inventory(void)
                                 changed->source_root_sha3, 32) != 0);
     codeindex_inventory_free(changed);
     codeindex_inventory_free(first);
+    ci_include_resolution_lifetime();
     if (!ci_failures)  TEST_DISCARD(system("rm -rf " CI_FIX));
     printf("  code_inventory: %s\n", ci_failures ? "FAIL" : "PASS");
     return ci_failures ? 1 : 0;

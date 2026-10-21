@@ -41,6 +41,7 @@ static bool inv_include_push(struct inv_scan *s, int file_index, int line,
     row->token[len] = '\0';
     row->file_index = file_index;
     row->line = line;
+    row->resolved_cap = -2;
     return true;
 }
 
