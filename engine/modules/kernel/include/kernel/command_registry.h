@@ -464,9 +464,10 @@ static inline size_t zcl_command_registry_input_reject_detail(
  * function — so a caller sizing a buffer or a frame can never disagree with
  * the validator. Unknown/NULL keys get the conservative default. */
 size_t zcl_command_registry_input_str_max(const char *key);
-/* Narrow shared descriptors for path/query/side and after/after_epoch/
- * timeout_ms/heartbeat_ms. Strings are nonempty; max_bytes counts UTF-8
- * bytes, not JSON Schema characters. side also requires input or output.
+/* Shared transport descriptors for represented scalar and files-like shapes.
+ * Strings and string-array items are nonempty; byte limits count UTF-8 bytes,
+ * not JSON Schema characters. enum_values is a static CSV, or NULL.
+ * required means required BY TRANSPORT only, never handler optionality.
  * This is not a complete schema or permission to dispatch a command.
  * Unknown, undeclared and path-special keys return false, with *out zeroed.
  * NULL spec/path/key/out returns false (a non-NULL out is zeroed). */
@@ -476,6 +477,10 @@ struct zcl_command_input_descriptor {
     int64_t maximum;
     size_t max_bytes;
     bool required;
+    size_t max_items;
+    size_t item_max_bytes;
+    bool allows_string;
+    const char *enum_values;
 };
 bool zcl_command_registry_input_descriptor(
     const struct zcl_command_spec *spec, const char *key,

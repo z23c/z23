@@ -1402,10 +1402,145 @@ static int t_offline_compare_limit_isolation(void)
     return failures;
 }
 
+static bool cib_json_shape(const char *path, const char *text)
+{
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), path, NULL);
+    struct json_value input;
+    json_init(&input);
+    bool ok = spec && json_read(&input, text, strlen(text)) &&
+              zcl_command_registry_input_validate(spec, &input, NULL, 0);
+    json_free(&input);
+    return ok;
+}
+
+static int t_discovery_transport_shapes(void)
+{
+    int failures = 0;
+    struct zcl_command_input_descriptor d;
+    const struct zcl_command_spec *claim = zcl_command_registry_find(
+        zcl_command_catalog(), "dev.agent.claim", NULL);
+    const struct zcl_command_spec *drive = zcl_command_registry_find(
+        zcl_command_catalog(), "dev.land.drive", NULL);
+    CIB_CHECK("claim files descriptor comes from array validator",
+        zcl_command_registry_input_descriptor(claim, "files", &d) && d.type == JSON_ARR);
+    CIB_CHECK("claim release descriptor comes from boolean validator",
+        zcl_command_registry_input_descriptor(claim, "release", &d) && d.type == JSON_BOOL);
+    CIB_CHECK("drive seq descriptor preserves transport bounds",
+        zcl_command_registry_input_descriptor(drive, "seq", &d) &&
+        d.type == JSON_INT && d.minimum == 1 && d.maximum == 1000000000);
+    CIB_CHECK("drive max_rows descriptor states transport not handler range",
+        zcl_command_registry_input_descriptor(drive, "max_rows", &d) &&
+        d.type == JSON_INT && d.minimum == 1 && d.maximum == 1000000);
+    CIB_CHECK("claim array and boolean accepted without dispatch",
+        cib_json_shape("dev.agent.claim", "{\"files\":[\"a.c\"],\"release\":false}"));
+    CIB_CHECK("claim comma string rejected without dispatch",
+        !cib_json_shape("dev.agent.claim", "{\"files\":\"a.c,b.c\"}"));
+    CIB_CHECK("claim wrong array item rejected without dispatch",
+        !cib_json_shape("dev.agent.claim", "{\"files\":[3]}"));
+    CIB_CHECK("claim string boolean rejected without dispatch",
+        !cib_json_shape("dev.agent.claim", "{\"release\":\"false\"}"));
+    CIB_CHECK("status undeclared seq remains rejected",
+        !cib_json_shape("dev.land.status", "{\"seq\":704}"));
+    CIB_CHECK("drive handler constraints remain outside transport",
+        cib_json_shape("dev.land.drive", "{\"seq\":704,\"prove\":true}") &&
+        cib_json_shape("dev.land.drive", "{\"max_rows\":17}"));
+    return failures;
+}
+
+static bool cib_files_shape(size_t count, size_t bytes)
+{
+    char *text = cib_fill(bytes);
+    struct json_value input, array, item;
+    json_init(&input);
+    json_init(&array);
+    json_init(&item);
+    json_set_object(&input);
+    json_set_array(&array);
+    if (text)
+        json_set_str(&item, text);
+    bool built = text != NULL;
+    for (size_t i = 0; built && i < count; i++)
+        built = json_push_back(&array, &item);
+    const struct zcl_command_spec *spec = zcl_command_registry_find(
+        zcl_command_catalog(), "dev.agent.claim", NULL);
+    bool ok = built && spec && json_push_kv(&input, "files", &array) &&
+        zcl_command_registry_input_validate(spec, &input, NULL, 0);
+    json_free(&item);
+    json_free(&array);
+    json_free(&input);
+    free(text);
+    return ok;
+}
+
+static bool cib_paths_descriptor(const struct zcl_command_spec *guide)
+{
+    struct zcl_command_input_descriptor d;
+    return zcl_command_registry_input_descriptor(guide, "paths", &d) &&
+           d.type == JSON_ARR && d.allows_string && d.max_items == 256 &&
+           d.item_max_bytes == 1024 && d.max_bytes == 4096;
+}
+
+static int t_discovery_descriptor_contract(void)
+{
+    int failures = 0;
+    struct zcl_command_input_descriptor d;
+    const unsigned char zero[sizeof(d)] = {0};
+    const struct zcl_command_spec *guide = zcl_command_registry_find(
+        zcl_command_catalog(), "code.guide", NULL);
+    const struct zcl_command_spec *schema = zcl_command_registry_find(
+        zcl_command_catalog(), "discover.schema", NULL);
+    CIB_CHECK("paths dual-shape descriptor preserves both limits",
+        cib_paths_descriptor(guide));
+    CIB_CHECK("paths string form remains admitted",
+        cib_json_shape("code.guide", "{\"paths\":\"tools/zcc.c\"}"));
+    CIB_CHECK("paths array form remains admitted",
+        cib_json_shape("code.guide", "{\"paths\":[\"tools/zcc.c\"]}"));
+    CIB_CHECK("side enum shares validator values",
+        zcl_command_registry_input_descriptor(schema, "side", &d) &&
+        d.enum_values && strcmp(d.enum_values, "input,output") == 0 &&
+        !cib_json_shape("discover.schema", "{\"path\":\"code.guide\",\"side\":\"other\"}"));
+    CIB_CHECK("discovery path is required by transport",
+        zcl_command_registry_input_descriptor(schema, "path", &d) && d.required);
+    memset(&d, 127, sizeof(d));
+    CIB_CHECK("undeclared field resets complete descriptor",
+        !zcl_command_registry_input_descriptor(schema, "not_declared", &d) &&
+        memcmp(&d, zero, sizeof(d)) == 0);
+    memset(&d, 127, sizeof(d));
+    CIB_CHECK("null spec resets complete descriptor",
+        !zcl_command_registry_input_descriptor(NULL, "path", &d) &&
+        memcmp(&d, zero, sizeof(d)) == 0);
+    CIB_CHECK("null output is rejected",
+        !zcl_command_registry_input_descriptor(schema, "path", NULL));
+    return failures;
+}
+
+static int t_discovery_transport_edges(void)
+{
+    int failures = 0;
+    CIB_CHECK("files empty array stays transport-valid", cib_files_shape(0, 1));
+    CIB_CHECK("files maximum count and bytes accepted", cib_files_shape(256, 1024));
+    CIB_CHECK("files excessive count rejected", !cib_files_shape(257, 1));
+    CIB_CHECK("files excessive bytes rejected", !cib_files_shape(1, 1025));
+    CIB_CHECK("files empty item rejected", !cib_files_shape(1, 0));
+    CIB_CHECK("seq lower endpoint accepted", cib_accepts_int("dev.land.drive", "seq", 1));
+    CIB_CHECK("seq upper endpoint accepted", cib_accepts_int("dev.land.drive", "seq", 1000000000));
+    CIB_CHECK("seq outside endpoint rejected", !cib_accepts_int("dev.land.drive", "seq", 1000000001));
+    CIB_CHECK("max_rows transport upper endpoint accepted", cib_accepts_int("dev.land.drive", "max_rows", 1000000));
+    CIB_CHECK("max_rows outside transport endpoint rejected", !cib_accepts_int("dev.land.drive", "max_rows", 1000001));
+    CIB_CHECK("drive wrong scalar types rejected",
+        !cib_json_shape("dev.land.drive", "{\"seq\":\"704\"}") &&
+        !cib_json_shape("dev.land.drive", "{\"prove\":\"true\"}"));
+    return failures;
+}
+
 int test_command_input_bounds(void)
 {
     printf("\n=== command_input_bounds: per-key input length rules ===\n");
     int failures = 0;
+    failures += t_discovery_transport_shapes();
+    failures += t_discovery_transport_edges();
+    failures += t_discovery_descriptor_contract();
     failures += t_key_edges();
     failures += t_machine_protected_object_types();
     failures += t_machine_protected_wrong_types();

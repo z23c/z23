@@ -89,8 +89,11 @@ ZCL_COMMAND_READY_READ(
 ZCL_COMMAND_READY_READ(
     "discover.schema", "discover", "",
     "Return the compact input or output schema contract for one leaf",
-    "The requested-side schema id and its allowed/positional key list for one "
-    "leaf, from the static registry; deterministic and node-free.", 0,
+    "The requested-side schema id and legacy allowed key list for one leaf. "
+    "Input adds represented transport types and bounds from the shared validator; "
+    "unrepresented fields and handler constraints remain incomplete. Transport "
+    "requiredness is not handler optionality or permission to invoke. Output "
+    "keeps the legacy shape. Deterministic and node-free.", 0,
     "schema,input,output,contract", "zcl.discover.schema_input.v1",
     "zcl.command_schema.v1", "path,side", "path",
     "z23 discover schema dev.app.simulate --side=input",

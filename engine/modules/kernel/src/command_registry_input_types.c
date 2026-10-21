@@ -52,18 +52,30 @@ static bool cr_str_array(const struct json_value *value, size_t max_items,
     return true;
 }
 
-static bool cr_match_files(const char *key, const struct json_value *value,
-                           bool *type_ok)
+static bool cr_files_descriptor(const char *key,
+                                 struct zcl_command_input_descriptor *out)
 {
-    if (strcmp(key, "paths") == 0 && value->type == JSON_STR) {
-        *type_ok = cr_nonempty_str(value, ZCL_COMMAND_INPUT_FILES_PATH_MAX * 4u);
-        return true;
-    }
     if (strcmp(key, "files") != 0 && strcmp(key, "symbols") != 0 &&
         strcmp(key, "paths") != 0)
         return false;
-    *type_ok = cr_str_array(value, ZCL_COMMAND_INPUT_FILES_MAX_ITEMS,
-                            ZCL_COMMAND_INPUT_FILES_PATH_MAX);
+    out->type = JSON_ARR;
+    out->max_items = ZCL_COMMAND_INPUT_FILES_MAX_ITEMS;
+    out->item_max_bytes = ZCL_COMMAND_INPUT_FILES_PATH_MAX;
+    out->allows_string = strcmp(key, "paths") == 0;
+    if (out->allows_string)
+        out->max_bytes = ZCL_COMMAND_INPUT_FILES_PATH_MAX * 4u;
+    return true;
+}
+
+static bool cr_match_files(const char *key, const struct json_value *value,
+                           bool *type_ok)
+{
+    struct zcl_command_input_descriptor d = {0};
+    if (!cr_files_descriptor(key, &d))
+        return false;
+    *type_ok = value->type == JSON_STR && d.allows_string
+        ? cr_nonempty_str(value, d.max_bytes)
+        : cr_str_array(value, d.max_items, d.item_max_bytes);
     return true;
 }
 
@@ -76,8 +88,7 @@ static bool cr_files_requires_array(const char *key)
     return cr_match_files(key, &probe, &accepts_string) && !accepts_string;
 }
 
-static bool cr_match_bool(const char *key, const struct json_value *value,
-                          bool *type_ok)
+static bool cr_bool_key(const char *key)
 {
     static const char *const keys[] = {
         "verbose",           "details",           "confirm",
@@ -86,8 +97,14 @@ static bool cr_match_bool(const char *key, const struct json_value *value,
         "restore",           "release",           "once",
         "dry_run",           "require_existing_watcher", "allow_external",
     };
-    if (!cr_key_in(key, keys, sizeof(keys) / sizeof(keys[0])) &&
-        !command_registry_devagent_input_extra_bool_key(key))
+    return cr_key_in(key, keys, sizeof(keys) / sizeof(keys[0])) ||
+           command_registry_devagent_input_extra_bool_key(key);
+}
+
+static bool cr_match_bool(const char *key, const struct json_value *value,
+                          bool *type_ok)
+{
+    if (!cr_bool_key(key))
         return false;
     *type_ok = value->type == JSON_BOOL;
     return true;
@@ -773,15 +790,24 @@ static bool cr_match_chunks_and_lines(const struct zcl_command_spec *spec,
     return false;
 }
 
+static bool cr_csv_has(const char *csv, const char *value);
+
+static const char *cr_string_enums(const char *key)
+{
+    if (strcmp(key, "side") == 0)
+        return "input,output";
+    if (strcmp(key, "view") == 0)
+        return "summary,normal,full";
+    return NULL;
+}
+
 static bool cr_default_string(const char *key, const struct json_value *value)
 {
     const char *text = json_get_str(value);
     bool type_ok = cr_nonempty_str(value, zcl_command_registry_input_str_max(key));
-    if (type_ok && strcmp(key, "side") == 0)
-        type_ok = strcmp(text, "input") == 0 || strcmp(text, "output") == 0;
-    if (type_ok && strcmp(key, "view") == 0)
-        type_ok = strcmp(text, "summary") == 0 || strcmp(text, "normal") == 0 ||
-                  strcmp(text, "full") == 0;
+    const char *values = cr_string_enums(key);
+    if (type_ok && values)
+        type_ok = cr_csv_has(values, text);
     return type_ok;
 }
 
@@ -867,6 +893,23 @@ static const char *cr_required_discovery_key(const char *path)
     return NULL;
 }
 
+static bool cr_shape_descriptor(const char *key,
+                                 struct zcl_command_input_descriptor *out)
+{
+    if (cr_files_descriptor(key, out))
+        return true;
+    if (!cr_bool_key(key))
+        return false;
+    out->type = JSON_BOOL;
+    return true;
+}
+
+static bool cr_descriptor_declared(const struct zcl_command_spec *spec,
+                                    const char *key)
+{
+    return spec && spec->path && key && cr_csv_has(spec->input_keys, key);
+}
+
 bool zcl_command_registry_input_descriptor(
     const struct zcl_command_spec *spec, const char *key,
     struct zcl_command_input_descriptor *out)
@@ -878,7 +921,7 @@ bool zcl_command_registry_input_descriptor(
     if (!out)
         return false;
     memset(out, 0, sizeof(*out));
-    if (!spec || !spec->path || !key || !cr_csv_has(spec->input_keys, key))
+    if (!cr_descriptor_declared(spec, key))
         return false;
     const struct cr_int_bound *host_bound = cr_leaf_int_bound(spec->path, key);
     if (host_bound) {
@@ -889,6 +932,7 @@ bool zcl_command_registry_input_descriptor(
                cr_docs_path_key(spec->path, key)) {
         out->type = JSON_STR;
         out->max_bytes = zcl_command_registry_input_str_max(key);
+        out->enum_values = cr_string_enums(key);
     } else if (cr_key_in(key, integers, sizeof(integers) / sizeof(integers[0]))) {
         const struct cr_int_bound *bound = cr_find_int_bound(key);
         if (!bound)
@@ -896,7 +940,8 @@ bool zcl_command_registry_input_descriptor(
         out->type = JSON_INT;
         out->minimum = bound->lo;
         out->maximum = bound->hi;
-    } else {
+    } else if (!cr_shape_descriptor(key, out) &&
+               !command_registry_devagent_integer_descriptor(key, out)) {
         return false;
     }
     const char *required = cr_required_discovery_key(spec->path);
@@ -937,6 +982,21 @@ static bool cr_match_shaped(const struct zcl_command_spec *spec,
     return cr_match_blocker_items(spec ? spec->path : "", key, value, type_ok);
 }
 
+static bool cr_descriptor_value_ok(const char *key,
+                                    const struct json_value *value,
+                                    const struct zcl_command_input_descriptor *d)
+{
+    if (d->type == JSON_INT)
+        return cr_int_range(value, d->minimum, d->maximum);
+    if (d->type == JSON_BOOL)
+        return value->type == JSON_BOOL;
+    if (d->type == JSON_ARR) {
+        bool ok = false;
+        return cr_match_files(key, value, &ok) && ok;
+    }
+    return cr_default_string(key, value);
+}
+
 bool command_registry_input_value_type_ok(const struct zcl_command_spec *spec,
                                           const char *key,
                                           const struct json_value *value,
@@ -947,9 +1007,7 @@ bool command_registry_input_value_type_ok(const struct zcl_command_spec *spec,
     *type_ok = false;
     struct zcl_command_input_descriptor descriptor;
     if (zcl_command_registry_input_descriptor(spec, key, &descriptor)) {
-        *type_ok = descriptor.type == JSON_INT
-            ? cr_int_range(value, descriptor.minimum, descriptor.maximum)
-            : cr_default_string(key, value);
+        *type_ok = cr_descriptor_value_ok(key, value, &descriptor);
         return true;
     }
     if (cr_match_shaped(spec, key, value, type_ok))

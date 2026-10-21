@@ -3919,9 +3919,156 @@ static int test_logs_local_serialization_failure(void)
     return failures;
 }
 
+static bool api_schema_projection(const char *path, const char *field,
+                                    const char *expected)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.command_schema.v1");
+    struct zcl_command_request request = { .input = &input };
+    bool ok = json_push_kv_str(&input, "path", path);
+    if (ok)
+        zcl_native_handle_discover_schema(&request, &reply);
+    const struct json_value *transport = json_get(&reply.data, "input_transport");
+    const struct json_value *fields = json_get(transport, "fields");
+    const struct json_value *shape = json_get(fields, field);
+    const char *type = json_get_str(json_get(shape, "type"));
+    ok = ok && reply.exit_code == ZCL_COMMAND_EXIT_OK && type &&
+         strcmp(type, expected) == 0 &&
+         !json_get(shape, "required") &&
+         json_get(transport, "complete") &&
+         !json_get(transport, "complete")->val.b &&
+         json_get(transport, "handler_constraints_included") &&
+         !json_get(transport, "handler_constraints_included")->val.b;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static bool api_schema_int_is(const struct json_value *v, const char *key,
+                               int64_t expected)
+{
+    const struct json_value *field = json_get(v, key);
+    return field && field->type == JSON_INT && json_get_int(field) == expected;
+}
+
+static bool api_schema_array_bounds(const struct json_value *shape, bool dual)
+{
+    const struct json_value *item = json_get(shape, "items");
+    bool ok = api_schema_int_is(shape, "min_items", 0) &&
+        api_schema_int_is(shape, "max_items", 256) &&
+        api_schema_int_is(item, "min_bytes", 1) &&
+        api_schema_int_is(item, "max_bytes", 1024);
+    const struct json_value *also = json_get(shape, "also_accepts");
+    if (!dual)
+        return ok && !also;
+    const char *type = json_get_str(json_get(also, "type"));
+    return ok && type && strcmp(type, "string") == 0 &&
+        api_schema_int_is(also, "min_bytes", 1) &&
+        api_schema_int_is(also, "max_bytes", 4096);
+}
+
+static bool api_schema_array_details(bool dual)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.command_schema.v1");
+    struct zcl_command_request request = { .input = &input };
+    bool ok = json_push_kv_str(&input, "path", dual ? "code.guide" : "dev.agent.claim");
+    if (ok)
+        zcl_native_handle_discover_schema(&request, &reply);
+    const struct json_value *transport = json_get(&reply.data, "input_transport");
+    const char *scope = json_get_str(json_get(transport, "scope"));
+    const struct json_value *fields = json_get(transport, "fields");
+    ok = ok && reply.exit_code == ZCL_COMMAND_EXIT_OK && scope &&
+        strcmp(scope, "transport") == 0 &&
+        api_schema_array_bounds(json_get(fields, dual ? "paths" : "files"), dual);
+    if (ok && !dual) {
+        const struct json_value *story = json_get(fields, "story");
+        const struct json_value *represented = json_get(story, "represented");
+        ok = fields->num_children == 5 && represented &&
+            represented->type == JSON_BOOL && !represented->val.b &&
+            story->num_children == 1 && !json_get(fields, "seq");
+    }
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static bool api_schema_failure(const char *label, unsigned nth)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.command_schema.v1");
+    struct zcl_command_request request = { .input = &input };
+    bool built = json_push_kv_str(&input, "path", "dev.agent.claim");
+    zcl_alloc_fault_fail_nth(label, nth);
+    if (built)
+        zcl_native_handle_discover_schema(&request, &reply);
+    bool reached = zcl_alloc_fault_armed_label() == NULL;
+    zcl_alloc_fault_clear();
+    bool ok = built && reached && reply.exit_code == ZCL_COMMAND_EXIT_INTERNAL &&
+        strcmp(reply.error.code, "SCHEMA_RENDER_FAILED") == 0 &&
+        reply.data.num_children == 0;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static bool api_schema_legacy_output(void)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.command_schema.v1");
+    struct zcl_command_request request = { .input = &input };
+    bool ok = json_push_kv_str(&input, "path", "dev.agent.claim") &&
+              json_push_kv_str(&input, "side", "output");
+    if (ok)
+        zcl_native_handle_discover_schema(&request, &reply);
+    const char *id = json_get_str(json_get(&reply.data, "id"));
+    const char *keys = json_get_str(json_get(&reply.data, "allowed_keys"));
+    ok = ok && reply.exit_code == ZCL_COMMAND_EXIT_OK && id && keys &&
+        strcmp(id, "zcl.agent_claim.v1") == 0 &&
+        strcmp(keys, "cwd,story,files,release,retire_worktree") == 0 &&
+        reply.data.num_children == 4 && !json_get(&reply.data, "input_transport");
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    return ok;
+}
+
+static int test_discover_transport_projection(void)
+{
+    int failures = 0;
+    TEST("schema: claim files exposes validator array without handler acceptance") {
+        ASSERT(api_schema_projection("dev.agent.claim", "files", "array"));
+        ASSERT(api_schema_projection("dev.agent.claim", "release", "boolean"));
+        ASSERT(api_schema_projection("dev.land.drive", "seq", "integer"));
+        ASSERT(api_schema_projection("dev.land.drive", "max_rows", "integer"));
+        ASSERT(api_schema_projection("dev.land.drive", "prove", "boolean"));
+        ASSERT(api_schema_array_details(false));
+        ASSERT(api_schema_array_details(true));
+        ASSERT(api_schema_legacy_output());
+        ASSERT(api_schema_failure("json_push_kv_key", 1));
+        ASSERT(api_schema_failure("json_push_kv_key", 20));
+        ASSERT(api_schema_failure("json_copy_children", 1));
+        ASSERT(api_schema_failure("json_copy_children", 2));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_native_api_contract(void)
 {
     int failures = 0;
+    failures += test_discover_transport_projection();
     failures += test_cli_error_recovery_next();
     failures += test_logs_local_serialization_failure();
     failures += test_board_unavailable_guides_instance_selection();

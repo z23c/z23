@@ -82,17 +82,31 @@ static bool devagent_queue_priority(const char *path, const char *key,
  * shell while raw JSON worked. The handler owns the default (1) and the
  * requeue ceiling (3); the transport only admits the positive integer
  * shape, up to a generous round bound shared with the next arm. */
-static bool devagent_bounded_positive_int(const char *key,
-                                          const struct json_value *value,
-                                          bool *type_ok)
+bool command_registry_devagent_integer_descriptor(
+    const char *key, struct zcl_command_input_descriptor *out)
 {
     static const char *const keys[] = {
         "attempt", "max_age_days", "ceiling_lines", "max_rows",
     };
-    if (!devagent_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
+    bool seq = strcmp(key, "seq") == 0;
+    if (!seq && !devagent_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
         return false;
-    *type_ok = value->type == JSON_INT && json_get_int(value) >= 1 &&
-              json_get_int(value) <= 1000000;
+    out->type = JSON_INT;
+    out->minimum = 1;
+    out->maximum = seq ? 1000000000 : 1000000;
+    return true;
+}
+
+static bool devagent_bounded_positive_int(const char *key,
+                                          const struct json_value *value,
+                                          bool *type_ok)
+{
+    struct zcl_command_input_descriptor d = {0};
+    if (strcmp(key, "seq") == 0 ||
+        !command_registry_devagent_integer_descriptor(key, &d))
+        return false;
+    *type_ok = value->type == JSON_INT && json_get_int(value) >= d.minimum &&
+              json_get_int(value) <= d.maximum;
     return true;
 }
 
@@ -465,6 +479,8 @@ bool command_registry_devagent_input_extra_bool_key(const char *key)
  * the semantics; the transport only admits the positive integer shape. */
 bool command_registry_devagent_input_seq_ok(const struct json_value *value)
 {
-    return value->type == JSON_INT && json_get_int(value) >= 1 &&
-           json_get_int(value) <= 1000000000;
+    struct zcl_command_input_descriptor d = {0};
+    (void)command_registry_devagent_integer_descriptor("seq", &d);
+    return value->type == JSON_INT && json_get_int(value) >= d.minimum &&
+           json_get_int(value) <= d.maximum;
 }

@@ -441,6 +441,125 @@ void zcl_native_handle_discover_search(
                             query ? query : "");
 }
 
+static bool schema_string_shape(struct json_value *shape, size_t max_bytes)
+{
+    return json_push_kv_str(shape, "type", "string") &&
+           json_push_kv_int(shape, "min_bytes", 1) &&
+           json_push_kv_int(shape, "max_bytes", (int64_t)max_bytes);
+}
+
+static bool schema_array_shape(struct json_value *shape,
+                                const struct zcl_command_input_descriptor *d)
+{
+    struct json_value item;
+    json_init(&item);
+    json_set_object(&item);
+    bool ok = json_push_kv_str(shape, "type", "array") &&
+        json_push_kv_int(shape, "min_items", 0) &&
+        json_push_kv_int(shape, "max_items", (int64_t)d->max_items) &&
+        schema_string_shape(&item, d->item_max_bytes) &&
+        json_push_kv(shape, "items", &item);
+    json_free(&item);
+    if (!ok || !d->allows_string)
+        return ok;
+    json_init(&item);
+    json_set_object(&item);
+    ok = schema_string_shape(&item, d->max_bytes) &&
+         json_push_kv(shape, "also_accepts", &item);
+    json_free(&item);
+    return ok;
+}
+
+static bool schema_known_shape(struct json_value *shape,
+                                const struct zcl_command_input_descriptor *d)
+{
+    switch (d->type) {
+    case JSON_INT:
+        return json_push_kv_str(shape, "type", "integer") &&
+               json_push_kv_int(shape, "minimum", d->minimum) &&
+               json_push_kv_int(shape, "maximum", d->maximum);
+    case JSON_BOOL:
+        return json_push_kv_str(shape, "type", "boolean");
+    case JSON_ARR:
+        return schema_array_shape(shape, d);
+    case JSON_STR:
+        return schema_string_shape(shape, d->max_bytes) &&
+               (!d->enum_values || json_push_kv_str(shape, "enum_values_csv",
+                                                    d->enum_values));
+    default:
+        return false;
+    }
+}
+
+static bool schema_field(struct json_value *fields,
+                          const struct zcl_command_spec *spec, const char *key)
+{
+    struct zcl_command_input_descriptor d;
+    bool represented = zcl_command_registry_input_descriptor(spec, key, &d);
+    struct json_value shape;
+    json_init(&shape);
+    json_set_object(&shape);
+    bool ok = json_push_kv_bool(&shape, "represented", represented);
+    if (ok && represented)
+        ok = schema_known_shape(&shape, &d);
+    if (ok && represented && d.required)
+        ok = json_push_kv_bool(&shape, "required_by_transport", true);
+    if (ok)
+        ok = json_push_kv(fields, key, &shape);
+    json_free(&shape);
+    return ok;
+}
+
+static bool schema_fields(struct json_value *fields,
+                           const struct zcl_command_spec *spec)
+{
+    const char *at = spec->input_keys ? spec->input_keys : "";
+    while (*at) {
+        size_t len = strcspn(at, ",");
+        char key[128];
+        if (!len || len >= sizeof(key))
+            return false;
+        memcpy(key, at, len);
+        key[len] = 0;
+        if (!schema_field(fields, spec, key))
+            return false;
+        at += len;
+        if (*at)
+            at++;
+    }
+    return true;
+}
+
+static bool schema_input_transport(struct json_value *doc,
+                                    const struct zcl_command_spec *spec)
+{
+    struct json_value transport, fields;
+    json_init(&transport);
+    json_init(&fields);
+    json_set_object(&transport);
+    json_set_object(&fields);
+    bool ok = schema_fields(&fields, spec) &&
+        json_push_kv_str(&transport, "scope", "transport") &&
+        json_push_kv_bool(&transport, "complete", false) &&
+        json_push_kv_bool(&transport, "handler_constraints_included", false) &&
+        json_push_kv(&transport, "fields", &fields) &&
+        json_push_kv(doc, "input_transport", &transport);
+    json_free(&fields);
+    json_free(&transport);
+    return ok;
+}
+
+static bool schema_document(struct json_value *doc,
+                              const struct zcl_command_spec *spec,
+                              bool output)
+{
+    return json_push_kv_str(doc, "path", spec->path) &&
+        json_push_kv_str(doc, "side", output ? "output" : "input") &&
+        json_push_kv_str(doc, "id", output ? spec->output_schema : spec->input_schema) &&
+        json_push_kv_str(doc, "allowed_keys", spec->input_keys ? spec->input_keys : "") &&
+        (output || schema_input_transport(doc, spec));
+}
+
 void zcl_native_handle_discover_schema(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -457,14 +576,18 @@ void zcl_native_handle_discover_schema(
         return;
     }
     bool want_output = side && strcmp(side, "output") == 0;
-    (void)json_push_kv_str(&reply->data, "path", spec->path);
-    (void)json_push_kv_str(&reply->data, "side",
-                           want_output ? "output" : "input");
-    (void)json_push_kv_str(&reply->data, "id",
-                           want_output ? spec->output_schema
-                                       : spec->input_schema);
-    (void)json_push_kv_str(&reply->data, "allowed_keys",
-                           spec->input_keys ? spec->input_keys : "");
+    struct json_value doc;
+    json_init(&doc);
+    json_set_object(&doc);
+    if (!schema_document(&doc, spec, want_output)) {
+        json_free(&doc);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+            ZCL_COMMAND_EXIT_INTERNAL, "SCHEMA_RENDER_FAILED", "render", false,
+            false, "could not render the complete transport projection", spec->path);
+        return;
+    }
+    json_free(&reply->data);
+    reply->data = doc;
 }
 
 void zcl_native_handle_app_list(const struct zcl_command_request *request,
