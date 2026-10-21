@@ -68,6 +68,7 @@ static bool is_reserved_name(const char *s)
         "return", "goto", "sizeof", "restrict", "_Bool", "bool",
         "_Atomic", "_Noreturn", "_Thread_local", "else", "do", "if",
         "for", "while", "switch", "case", "default", "break", "continue",
+        "static_assert", "_Static_assert",
         NULL,
     };
     for (size_t i = 0; rk[i]; i++)

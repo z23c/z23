@@ -50,8 +50,9 @@
  * "ret4" keeps a depfile prerequisite the checkout no longer holds; a ret3
  * generation dropped that edge while its depfile bytes were unchanged.
  * "ret5" stores include_narrow_cause beside include_narrow_unsafe, so a
- * refused narrow include answer names the rule and file behind it. */
-#define CI_SCHEMA_VERSION "ret5"
+ * refused narrow include answer names the rule and file behind it.
+ * "ret6" excludes assertion keywords from derived declared-symbol names. */
+#define CI_SCHEMA_VERSION "ret6"
 #define CI_STORE_FORMAT "zcl.codeindex.store.v5"
 #define CI_RETRIEVAL_PROJECTION_META "retrieval_projection_root_sha3"
 

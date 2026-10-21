@@ -129,7 +129,13 @@ static const char *FOO_C =
     "{\n"
     "    helper_add(1, 2);\n"
     "}\n"
-    "#endif\n";
+    "#endif\n"
+    "static_assert(sizeof(int) >= 2, \"integer size\");\n"
+    "_Static_assert(\n(sizeof(int) >= 2), \"nested\");\n"
+    "int assertion_neighbor(void) { return 1; }\n"
+    "int static_assert_helper(void) { return 2; }\n"
+    "int _Static_assertion(void) { return 3; }\n"
+    "PROJECT_DECLARE(ordinary_partial);\n";
 
 static const char *FOO_H =
     "/* net/foo.h — fixture header. */\n"
@@ -511,6 +517,41 @@ static bool delete_meta_key(const char *index_path, const char *key)
     return rc == SQLITE_OK;
 }
 
+/* Simulate an unchanged source index from the pre-keyword-filter generation. */
+static bool stamp_prior_scan_epoch(const char *index_path)
+{
+    sqlite3 *db = NULL;
+    if (sqlite3_open(index_path, &db) != SQLITE_OK) {
+        if (db) sqlite3_close(db);
+        return false;
+    }
+    int rc = sqlite3_exec(db,
+        "UPDATE meta SET v='ret5' WHERE k='ci_schema_version'", NULL, NULL, NULL);
+    sqlite3_close(db);
+    return rc == SQLITE_OK;
+}
+
+static int check_assertion_symbols(struct codeindex *ci)
+{
+    int failures = 0;
+    struct ci_symbol s;
+    bool found = false;
+    bool ok = codeindex_symbol(ci, "static_assert", &s, &found);
+    CI_CHECK("C23 assertion keyword is not a declaration", ok && !found);
+    ok = codeindex_symbol(ci, "_Static_assert", &s, &found);
+    CI_CHECK("legacy assertion keyword is not a declaration", ok && !found);
+    ok = codeindex_symbol(ci, "assertion_neighbor", &s, &found);
+    CI_CHECK("function beside assertions survives", ok && found && s.kind == 'T');
+    ok = codeindex_symbol(ci, "static_assert_helper", &s, &found);
+    CI_CHECK("C23 keyword lookalike survives", ok && found && s.kind == 'T');
+    ok = codeindex_symbol(ci, "_Static_assertion", &s, &found);
+    CI_CHECK("legacy keyword lookalike survives", ok && found && s.kind == 'T');
+    ok = codeindex_symbol(ci, "PROJECT_DECLARE", &s, &found);
+    CI_CHECK("ordinary macro invocation remains a partial declaration",
+             ok && found && s.kind == 'D' && s.partial);
+    return failures;
+}
+
 /* Read a meta key directly from the published index (no lazy rebuild). Copies
  * the value text into buf and returns true when the key exists. */
 static bool published_meta_get(const char *index_path, const char *key,
@@ -717,6 +758,26 @@ static int check_existing_full_freshness_stale(const char *root,
     struct codeindex *ci = codeindex_open_existing(root);
     int failures = check_full_freshness_stale(ci, label);
     if (ci) codeindex_close(ci);
+    return failures;
+}
+
+static int check_prior_scan_epoch(const char *root, const char *stamped)
+{
+    int failures = 0;
+    char index_path[4096];
+    char meta_val[64];
+    snprintf(index_path, sizeof(index_path), "%s/.codeindex/index.kv", root);
+    CI_CHECK("stamp pre-keyword-filter scan epoch",
+             stamp_prior_scan_epoch(index_path));
+    failures += check_existing_full_freshness_stale(
+        root, "full freshness rejects pre-keyword-filter scan epoch");
+    struct codeindex *migr = codeindex_open(root);
+    CI_CHECK("open rebuilds pre-keyword-filter scan epoch", migr != NULL);
+    CI_CHECK("rebuild replaces old scan epoch with current stamp",
+             published_meta_get(index_path, "ci_schema_version", meta_val,
+                                sizeof(meta_val)) &&
+             strcmp(meta_val, "ret5") != 0 && strcmp(meta_val, stamped) == 0);
+    if (migr) codeindex_close(migr);
     return failures;
 }
 
@@ -965,6 +1026,8 @@ static int test_codeindex_platform_arm(void)
     struct codeindex *ci = codeindex_open(FIX);
     CI_CHECK("open builds index", ci != NULL);
     if (!ci) return failures + 1;
+
+    failures += check_assertion_symbols(ci);
 
     {
         int total = codeindex_file_count(ci);
@@ -1907,6 +1970,7 @@ static int test_codeindex_platform_arm(void)
             CI_CHECK("call graph intact after migration rebuild", ne == 2);
             codeindex_close(migr);
         }
+        failures += check_prior_scan_epoch(CG_FIX, stamped);
  TEST_DISCARD(system("rm -rf " CG_FIX));
     }
 
