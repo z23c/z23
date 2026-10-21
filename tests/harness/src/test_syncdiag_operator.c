@@ -5,9 +5,8 @@
 
 #include "test/syncdiag_rpc_fixture.h"
 
-/* The RPC score is reported history; it names current qualification as
- * unevaluated rather than claiming it. */
-static void milestone_names_unevaluated_qualification(
+/* RPC acceptance must agree with the shared typed MVP decision. */
+static void milestone_agrees_with_current_qualification(
     bool *ok, const struct json_value *result,
     const struct json_value *cold_start)
 {
@@ -16,13 +15,36 @@ static void milestone_names_unevaluated_qualification(
         json_get(result, "current_qualification"), "status"));
     const char *evidence = cold_start
         ? json_get_str(json_get(cold_start, "evidence")) : NULL;
+    struct json_value native = {0};
+    bool classified = mvp_dump_state_json(&native, NULL);
+    const struct json_value *rows = json_get(&native, "criteria");
+    const struct json_value *proofs = json_get(result, "operator_proofs");
+    const struct json_value *items = json_get(proofs, "items");
+    int count = (int)json_get_int(json_get(&native, "met_count"));
     *ok = *ok && basis &&
-        strcmp(basis, "historical_reported_demonstrations") == 0 &&
-        status && strcmp(status, "not_evaluated_here") == 0 &&
-        evidence && strcmp(evidence, "historical_report") == 0;
+        strcmp(basis, "current_typed_mvp_decision") == 0 &&
+        status && strcmp(status, "evaluated") == 0 &&
+        evidence && strcmp(evidence, "historical_report") == 0 &&
+        classified && rows && json_size(rows) == 8 &&
+        items && json_size(items) == 8 &&
+        json_get_int(json_get(result, "mvp_readiness_score")) == count &&
+        json_get_int(json_get(proofs, "accepted_count")) == count &&
+        json_get_int(json_get(proofs, "pending_count")) == 8 - count &&
+        json_get_bool(json_get(result, "complete")) == (count == 8) &&
+        json_get_int(json_get(json_get(json_get(result, "bars"), "goals"), "done")) == count;
+    for (size_t i = 0; *ok && i < 8; i++) {
+        const struct json_value *met = json_get(json_at(rows, i), "met");
+        bool accepted = met && met->type == JSON_BOOL && json_get_bool(met);
+        const char *current = accepted ? "pass" : met && met->type == JSON_BOOL ? "fail" : "unknown";
+        const struct json_value *item = json_at(items, i);
+        *ok = json_get_bool(json_get(item, "strict_pass")) == accepted &&
+              strcmp(json_get_str(json_get(item, "status")), current) == 0 &&
+              strcmp(json_get_str(json_get(item, "proof_state")), accepted ? "accepted" : "pending") == 0;
+    }
+    json_free(&native);
 }
 
-/* Earned C5 row, found by key so the assertion survives reorderings. */
+/* Historical C5 demonstration retains its proof command without acceptance. */
 static bool syncdiag_store_flow_pass(bool ok_in,
                                      const struct json_value *proof_items)
 {
@@ -30,7 +52,8 @@ static bool syncdiag_store_flow_pass(bool ok_in,
     if (!ok_in || !proof_items)
         return false;
     sf = find_object_with_str(proof_items, "key", "store_flow");
-    if (!sf || strcmp(json_get_str(json_get(sf, "status")), "pass") != 0)
+    if (!sf || strcmp(json_get_str(json_get(sf, "historical_status")), "pass") != 0 ||
+        json_get_bool(json_get(sf, "strict_pass")))
         return false;
     return strcmp(json_get_str(json_get(sf, "proof_command")),
                   "tools/dev/store_onion_acceptance.sh") == 0;
@@ -576,20 +599,16 @@ int syncdiag_cases_operator(void)
         ok = ok && strcmp(json_get_str(json_get(&result, "schema")),
                           "zcl.milestone_status.v2") == 0;
         ok = ok && json_get_int(json_get(&result,
-                          "mvp_readiness_score")) == 6;
+                          "historical_pass_count")) == 6;
         ok = ok && ascii && strstr(json_get_str(json_get(ascii, "goals")),
-                                   "goals [########--] 6/8") != NULL;
-        milestone_names_unevaluated_qualification(&ok, &result, cold_start);
+                                   "current qualified criteria") != NULL;
+        milestone_agrees_with_current_qualification(&ok, &result, cold_start);
         ok = ok && bars && strcmp(json_get_str(json_get(json_get(bars,
                           "subgoals"), "bar")), "[#########-]") == 0;
         ok = ok && criteria && json_size(criteria) == 8;
         ok = ok && operator_proofs &&
             strcmp(json_get_str(json_get(operator_proofs, "schema")),
                    "zcl.mvp_operator_proofs.v1") == 0;
-        ok = ok && json_get_int(json_get(operator_proofs,
-                                         "accepted_count")) == 6;
-        ok = ok && json_get_int(json_get(operator_proofs,
-                                         "pending_count")) == 2;
         ok = ok && json_get_int(json_get(operator_proofs,
                                          "target_count")) == 8;
         ok = ok && strcmp(json_get_str(json_get(operator_proofs,

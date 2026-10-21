@@ -11,6 +11,7 @@
 #include "controllers/agent_resources.h"
 #include "controllers/agent_security_posture.h"
 #include "controllers/api_controller.h"
+#include "controllers/diagnostics_internal.h"
 #include "controllers/download_stats_json.h"
 #include "controllers/node_binary_identity_json.h"
 #include "controllers/operator_needed_policy.h"
@@ -223,17 +224,68 @@ static void api_milestone_require_field(bool *complete, bool present)
         *complete = false;
 }
 
-/* The criteria table records what was reported, not what the running
- * candidate has earned: a "pass" row is a historically demonstrated full
- * operator run. Current qualification needs fresh receipts bound to the
- * exact running executable, which only `make mvp` evaluates. */
+/* Keep historical demonstrations separate from the shared current decision. */
 static const char *api_mvp_evidence(const struct milestone_criterion *c)
 {
     return c->strict_pass ? "historical_report" : "slice_or_pending";
 }
 
+struct milestone_qualification {
+    bool available;
+    int met_count;
+    int state[8]; /* -1 unknown, 0 unmet, 1 met */
+};
+
+static bool api_mvp_read_qualification(struct milestone_qualification *q,
+                                       const struct json_value *status)
+{
+    const struct json_value *rows = json_get(status, "criteria");
+    const struct json_value *count = json_get(status, "met_count");
+    if (strcmp(api_json_str_field(status, "schema", ""), "zcl.mvp_status.v1") ||
+        !rows || rows->type != JSON_ARR || json_size(rows) != 8 ||
+        !count || count->type != JSON_INT)
+        return false;
+    for (int i = 0; i < 8; i++) {
+        const struct json_value *row = json_at(rows, (size_t)i);
+        const struct json_value *met = json_get(row, "met");
+        const char *state = api_json_str_field(row, "met_state", "");
+        char id[4];
+        snprintf(id, sizeof(id), "C%d", i + 1);
+        if (strcmp(api_json_str_field(row, "id", ""), id)) return false;
+        if (met && met->type == JSON_BOOL) {
+            q->state[i] = json_get_bool(met) ? 1 : 0;
+            if (strcmp(state, q->state[i] ? "met" : "unmet")) return false;
+        } else {
+            if (!met || met->type != JSON_NULL || strcmp(state, "unknown")) return false;
+            q->state[i] = -1;
+        }
+        if (q->state[i] == 1) q->met_count++;
+    }
+    return json_get_int(count) == q->met_count;
+}
+
+static struct milestone_qualification api_mvp_qualification(void)
+{
+    struct milestone_qualification q = {0};
+    struct json_value status = {0};
+    q.available = mvp_dump_state_json(&status, NULL) &&
+                  api_mvp_read_qualification(&q, &status);
+    json_free(&status);
+    if (!q.available) {
+        q.met_count = 0;
+        for (int i = 0; i < 8; i++) q.state[i] = -1;
+    }
+    return q;
+}
+
+static const char *api_mvp_current_status(int state)
+{
+    return state == 1 ? "pass" : state == 0 ? "fail" : "unknown";
+}
+
 static void api_push_mvp_proof_item(struct json_value *arr,
-                                    const struct milestone_criterion *c)
+                                    const struct milestone_criterion *c,
+                                    int state)
 {
     if (!arr || !c)
         return;
@@ -243,10 +295,11 @@ static void api_push_mvp_proof_item(struct json_value *arr,
     json_set_object(&item);
     json_push_kv_int(&item, "criterion", c->id);
     json_push_kv_str(&item, "key", c->key);
-    json_push_kv_str(&item, "status", c->status);
-    json_push_kv_bool(&item, "strict_pass", c->strict_pass);
+    json_push_kv_str(&item, "status", api_mvp_current_status(state));
+    json_push_kv_bool(&item, "strict_pass", state == 1);
     json_push_kv_str(&item, "proof_state",
-                     c->strict_pass ? "accepted" : "pending");
+                     state == 1 ? "accepted" : "pending");
+    json_push_kv_str(&item, "historical_status", c->status);
     json_push_kv_str(&item, "evidence", api_mvp_evidence(c));
     json_push_kv_str(&item, "proof_scope", c->proof_scope);
     json_push_kv_str(&item, "proof_command", c->proof_command);
@@ -265,20 +318,17 @@ static void api_push_mvp_operator_proofs(
     struct json_value *result,
     const struct milestone_criterion *criteria,
     size_t criteria_count,
-    int strict_pass,
+    const struct milestone_qualification *qualification,
     int partial_units,
     int max_units)
 {
     if (!result || !criteria)
         return;
 
-    int pending = 0;
     int live_window = 0;
     int ci_protected = 0;
     int local_dependencies = 0;
     for (size_t i = 0; i < criteria_count; i++) {
-        if (!criteria[i].strict_pass)
-            pending++;
         if (criteria[i].proof_scope &&
             strcmp(criteria[i].proof_scope, "live_window") == 0)
             live_window++;
@@ -300,10 +350,10 @@ static void api_push_mvp_operator_proofs(
     json_push_kv_str(&proofs, "source", "docs/quality/MVP.md");
     json_push_kv_str(&proofs, "native_command", "z23 milestone");
     json_push_kv_str(&proofs, "alias_command", "z23 mvpstatus");
-    json_push_kv_int(&proofs, "accepted_count", strict_pass);
-    json_push_kv_str(&proofs, "qualification_command", "make mvp");
+    json_push_kv_int(&proofs, "accepted_count", qualification->met_count);
+    json_push_kv_str(&proofs, "qualification_command", "z23 ops state --subsystem=mvp");
     json_push_kv_int(&proofs, "target_count", (int64_t)criteria_count);
-    json_push_kv_int(&proofs, "pending_count", pending);
+    json_push_kv_int(&proofs, "pending_count", (int)criteria_count - qualification->met_count);
     json_push_kv_int(&proofs, "live_window_count", live_window);
     json_push_kv_int(&proofs, "ci_protected_count", ci_protected);
     json_push_kv_int(&proofs, "local_dependency_count",
@@ -311,11 +361,11 @@ static void api_push_mvp_operator_proofs(
     json_push_kv_int(&proofs, "partial_progress_units", partial_units);
     json_push_kv_int(&proofs, "partial_progress_units_total", max_units);
     json_push_kv_str(&proofs, "rule",
-                     "MRS increments only when a full operator proof run-passes; slice and judge gates are regression floors.");
+                     "Acceptance follows current typed MVP decisions; historical runs are observations.");
     json_push_kv_str(&proofs, "next_command", "make mvp-verify");
 
     for (size_t i = 0; i < criteria_count; i++)
-        api_push_mvp_proof_item(&items, &criteria[i]);
+        api_push_mvp_proof_item(&items, &criteria[i], qualification->state[i]);
     json_push_kv(&proofs, "items", &items);
     json_free(&items);
 
@@ -460,13 +510,15 @@ void api_milestone_status_json(struct json_value *result)
     if (onion_ok)
         systems_done++;
 
-    int strict_pass = 0;
+    struct milestone_qualification qualified = api_mvp_qualification();
+    int strict_pass = qualified.met_count;
+    int historical_pass = 0;
     int partial_units = 0;
     int max_units = 0;
     size_t criteria_count = sizeof(k_mvp_criteria) / sizeof(k_mvp_criteria[0]);
     for (size_t i = 0; i < criteria_count; i++) {
         if (k_mvp_criteria[i].strict_pass)
-            strict_pass++;
+            historical_pass++;
         partial_units += k_mvp_criteria[i].units;
         max_units += 2;
     }
@@ -482,15 +534,14 @@ void api_milestone_status_json(struct json_value *result)
                       strict_pass == (int)criteria_count);
     json_push_kv_int(result, "mvp_readiness_score", strict_pass);
     json_push_kv_str(result, "score_basis",
-                     "historical_reported_demonstrations");
+                     "current_typed_mvp_decision");
+    json_push_kv_int(result, "historical_pass_count", historical_pass);
 
     struct json_value qualification;
     json_init(&qualification);
     json_set_object(&qualification);
-    json_push_kv_str(&qualification, "status", "not_evaluated_here");
-    json_push_kv_str(&qualification, "command", "make mvp");
-    json_push_kv_str(&qualification, "rule",
-                     "needs a fresh receipt bound to the running executable; this response is not acceptance");
+    json_push_kv_str(&qualification, "status", qualified.available ? "evaluated" : "unavailable");
+    json_push_kv_str(&qualification, "command", "z23 ops state --subsystem=mvp");
     json_push_kv(result, "current_qualification", &qualification);
     json_free(&qualification);
     json_push_kv_int(result, "target_score", (int64_t)criteria_count);
@@ -544,9 +595,9 @@ void api_milestone_status_json(struct json_value *result)
     api_push_progress_bar(&bars, &ascii, "systems", systems_done,
                           systems_total, "live node runtime checks");
     api_push_progress_bar(&bars, &ascii, "goals", strict_pass,
-                          (int)criteria_count, "reported runs, not qualified");
+                          (int)criteria_count, "current qualified criteria");
     api_push_progress_bar(&bars, &ascii, "subgoals", partial_units,
-                          max_units, "full plus partial proof units");
+                          max_units, "historical full plus partial proof units");
     json_push_kv(result, "bars", &bars);
     json_push_kv(result, "ascii", &ascii);
     json_free(&bars);
@@ -563,8 +614,8 @@ void api_milestone_status_json(struct json_value *result)
         json_push_kv_int(&item, "id", c->id);
         json_push_kv_str(&item, "key", c->key);
         json_push_kv_str(&item, "title", c->title);
-        json_push_kv_str(&item, "status", c->status);
-        json_push_kv_bool(&item, "strict_pass", c->strict_pass);
+        json_push_kv_str(&item, "status", api_mvp_current_status(qualified.state[i]));
+        json_push_kv_bool(&item, "strict_pass", qualified.state[i] == 1);
         json_push_kv_int(&item, "progress_units", c->units);
         json_push_kv_int(&item, "progress_units_total", 2);
         json_push_kv_str(&item, "next", c->next);
@@ -575,13 +626,13 @@ void api_milestone_status_json(struct json_value *result)
     json_free(&criteria);
 
     api_push_mvp_operator_proofs(result, k_mvp_criteria, criteria_count,
-                                 strict_pass, partial_units, max_units);
+                                 &qualified, partial_units, max_units);
 
     struct json_value next;
     json_init(&next);
     json_set_array(&next);
     for (size_t i = 0; i < criteria_count; i++) {
-        if (k_mvp_criteria[i].strict_pass)
+        if (qualified.state[i] == 1)
             continue;
         struct json_value s;
         json_init(&s);
