@@ -23,6 +23,10 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <errno.h>
+#include <sys/wait.h>
+#endif
 #endif
 
 static bool stop_now(void *opaque) { (void)opaque; return true; }
@@ -118,6 +122,58 @@ static int directory_watcher_access_replace(const char *root)
 #endif
 
 #if defined(__APPLE__)
+/* The first watcher descriptor is its kqueue. Reserve its lowest-free number
+ * and verify it vanished in the child before reusing it, without private ABI. */
+static int directory_watcher_child_reused_fd(
+    struct platform_directory_watcher *watcher, int expected_kq)
+{
+    errno = 0;
+    if (fcntl(expected_kq, F_GETFD) != -1 || errno != EBADF) return 2;
+    int fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 3;
+    if (fd != expected_kq) {
+        if (dup2(fd, expected_kq) != expected_kq) return 4;
+        close(fd);
+    }
+    if (platform_directory_watcher_wait(watcher, 0, NULL, NULL) !=
+        PLATFORM_DIRECTORY_WATCH_ERROR) return 5;
+    platform_directory_watcher_close(watcher);
+    bool preserved = fcntl(expected_kq, F_GETFD) >= 0;
+    close(expected_kq);
+    return preserved ? 0 : 6;
+}
+
+static int directory_watcher_fork_reused_fd(const char *root)
+{
+    struct platform_directory_watcher watcher;
+    platform_directory_watcher_init(&watcher);
+    int expected_kq = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (expected_kq < 0) return 1;
+    if (close(expected_kq) != 0) return 1;
+    if (!platform_directory_watcher_open(&watcher, root)) return 1;
+    pid_t child = fork();
+    if (child == 0)
+        _exit(directory_watcher_child_reused_fd(&watcher, expected_kq));
+    int status = 0;
+    pid_t waited = -1;
+    if (child > 0) {
+        do { waited = waitpid(child, &status, 0); }
+        while (waited < 0 && errno == EINTR);
+    }
+    bool ok = child > 0 && waited == child && WIFEXITED(status) &&
+        WEXITSTATUS(status) == 0 &&
+        platform_directory_watcher_wait(&watcher, 0, NULL, NULL) ==
+            PLATFORM_DIRECTORY_WATCH_TIMEOUT;
+    char document[1200];
+    (void)snprintf(document, sizeof(document), "%s/after-fork", root);
+    ok = ok && watcher_write(document) &&
+        platform_directory_watcher_wait(&watcher, 2000, NULL, NULL) ==
+            PLATFORM_DIRECTORY_WATCH_CHANGED;
+    platform_directory_watcher_close(&watcher);
+    watcher_observation("fork cleanup preserves reused fd and parent watch", ok);
+    return ok ? 0 : 1;
+}
+
 static int directory_watcher_filtered_probe(const char *root)
 {
     char ignored[1200], hidden[1200], excluded[1200], visible[1200], swap[1200];
@@ -198,6 +254,9 @@ int test_directory_watcher(void)
     (void)test_rm_rf_recursive(dir);
 #endif
 #if defined(__APPLE__)
+    test_make_tmpdir(dir, sizeof(dir), "directory_watcher", "fork");
+    failures += directory_watcher_fork_reused_fd(dir);
+    (void)test_rm_rf_recursive(dir);
     test_make_tmpdir(dir, sizeof(dir), "directory_watcher", "filtered");
     printf("directory_watcher: filtered kqueue recursion ignores generated "
            "subtrees/files but observes source-root creates and writes... ");

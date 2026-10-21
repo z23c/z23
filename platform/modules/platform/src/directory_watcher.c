@@ -86,6 +86,7 @@ bool platform_directory_watcher_open(struct platform_directory_watcher *w,
     w->native = (uintptr_t)s; return true;
 }
 
+
 enum platform_directory_watch_result platform_directory_watcher_wait(
     struct platform_directory_watcher *w, uint32_t timeout,
     platform_directory_watcher_stop stop, void *opaque)
@@ -240,6 +241,7 @@ void platform_directory_watcher_close(struct platform_directory_watcher *w)
 struct watch_item { int fd; char *path; bool directory; };
 struct watcher_state {
     int kq;
+    pid_t creator_pid;
     struct watch_item *items;
     size_t count;
     platform_directory_watcher_descend descend;
@@ -443,6 +445,7 @@ bool platform_directory_watcher_open_filtered(
     s->descend = descend;
     s->include_file = include_file;
     s->filter_opaque = opaque;
+    s->creator_pid = getpid();
     s->kq = kqueue();
     if (s->kq < 0 || !add_tree(s, canonical)) {
         struct platform_directory_watcher temp = {.native = (uintptr_t)s};
@@ -451,12 +454,22 @@ bool platform_directory_watcher_open_filtered(
     w->native = (uintptr_t)s; return true;
 }
 
+static struct watcher_state *darwin_watcher_live(
+    const struct platform_directory_watcher *w)
+{
+    if (!w || w->native == UINTPTR_MAX) return NULL;
+    struct watcher_state *s = (struct watcher_state *)w->native;
+    /* kqueue is not inherited by fork; its copied number may already name
+     * an unrelated descriptor in the child. Never poll that number. */
+    return s->creator_pid == getpid() ? s : NULL;
+}
+
 enum platform_directory_watch_result platform_directory_watcher_wait(
     struct platform_directory_watcher *w, uint32_t timeout,
     platform_directory_watcher_stop stop, void *opaque)
 {
-    if (!w || w->native == UINTPTR_MAX) return PLATFORM_DIRECTORY_WATCH_ERROR;
-    struct watcher_state *s = (struct watcher_state *)w->native;
+    struct watcher_state *s = darwin_watcher_live(w);
+    if (!s) return PLATFORM_DIRECTORY_WATCH_ERROR;
     uint32_t elapsed = 0;
     bool changed = false;
     for (;;) {
@@ -494,7 +507,7 @@ void platform_directory_watcher_close(struct platform_directory_watcher *w)
 {
     if (!w || w->native == UINTPTR_MAX) return;
     struct watcher_state *s = (struct watcher_state *)w->native;
-    if (s->kq >= 0) close(s->kq);
+    if (s->creator_pid == getpid() && s->kq >= 0) close(s->kq);
     for (size_t i = 0; i < s->count; i++) {
         if (s->items[i].fd >= 0) close(s->items[i].fd);
         free(s->items[i].path);

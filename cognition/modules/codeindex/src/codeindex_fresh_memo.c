@@ -2,7 +2,7 @@
  * purpose: Process-held, change-watched freshness verdict so a warm
  * codeindex_open skips the whole-checkout walk.
  *
- * A full walk that proves the store fresh is paired with an inotify watch
+ * A full walk that proves the store fresh is paired with a native watch
  * that was armed BEFORE that walk began over every directory the walk and the
  * depfile scan can read. A later open in the same process trusts the verdict
  * only while the watch has reported nothing, the watch is healthy, and the
@@ -18,6 +18,9 @@
 #include "codeindex_merkle_internal.h"
 
 #include "platform/file_watch_compat.h"
+#if defined(__APPLE__)
+#include "platform/directory_watcher.h"
+#endif
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -31,6 +34,16 @@
 #ifdef ZCL_TESTING
 static _Atomic uint64_t g_fw_walks;
 static _Atomic bool g_fw_force_fail;
+static _Atomic uint64_t g_fw_seals;
+static void (*g_fw_hit_hook)(const char *);
+uint64_t codeindex_test_freshness_seals(void)
+{
+    return atomic_load_explicit(&g_fw_seals, memory_order_relaxed);
+}
+void codeindex_test_set_hit_hook(void (*hook)(const char *root))
+{
+    g_fw_hit_hook = hook;
+}
 uint64_t codeindex_test_freshness_walks(void)
 {
     return atomic_load_explicit(&g_fw_walks, memory_order_relaxed);
@@ -88,6 +101,24 @@ enum {
                  IN_DELETE_SELF | IN_MOVE_SELF)
 
 struct ci_fresh_watch {
+#if defined(__APPLE__)
+    struct platform_directory_watcher watches[2
+#define SOURCE_ROOT(name_) + 1
+#include "codeindex/source_roots.def"
+#undef SOURCE_ROOT
+    ];
+    size_t watch_count;
+    bool admission_failed;
+    struct fw_filter {
+        struct ci_fresh_watch *owner;
+        bool source;
+        bool root_only;
+    } filters[2
+#define SOURCE_ROOT(name_) + 1
+#include "codeindex/source_roots.def"
+#undef SOURCE_ROOT
+    ];
+#endif
     int fd;
     int root_wd;
     int dirs;
@@ -132,6 +163,10 @@ static size_t fw_dep_cap(void)
 static void fw_free(struct ci_fresh_watch *w)
 {
     if (!w) return;
+#if defined(__APPLE__)
+    for (size_t i = 0; i < w->watch_count; i++)
+        platform_directory_watcher_close(&w->watches[i]);
+#endif
     if (w->fd >= 0) close(w->fd);
     ci_deps_keys_free(&w->deps);
     free(w);
@@ -150,6 +185,16 @@ static bool fw_prune_source(const char *name)
     return strncmp(name, "test-tmp", 8) == 0;
 }
 
+/* ENOENT from stat can mean a dangling top-level symlink. Its external
+ * target may appear without an event in this checkout, so only a missing
+ * directory entry is safe to omit from the watch set. */
+static bool fw_entry_absent(const char *path)
+{
+    struct stat st;
+    return lstat(path, &st) != 0 && errno == ENOENT;
+}
+
+#if !defined(__APPLE__)
 static int fw_add(struct ci_fresh_watch *w, const char *path)
 {
     if (w->dirs >= FW_MAX_DIRS || fw_forced_failure()) {
@@ -200,7 +245,7 @@ static bool fw_top(struct ci_fresh_watch *w, const char *root, const char *name,
     int n = snprintf(path, sizeof(path), "%s/%s", root, name);
     if (n <= 0 || (size_t)n >= sizeof(path)) return false;
     struct stat st;
-    if (stat(path, &st) != 0) return errno == ENOENT;
+    if (stat(path, &st) != 0) return errno == ENOENT && fw_entry_absent(path);
     if (!S_ISDIR(st.st_mode)) return false;
     return fw_tree(w, path, source);
 }
@@ -267,6 +312,78 @@ static bool fw_quiet(struct ci_fresh_watch *w)
         if (n == 0 || !fw_buffer_quiet(w, buf, (size_t)n)) return false;
     }
 }
+#else
+/* Callback contexts live with the watchers: kqueue retains them for rescans. */
+static bool fw_admit(struct ci_fresh_watch *w)
+{
+    if (w->dirs >= FW_MAX_DIRS || fw_forced_failure()) {
+        w->admission_failed = true;
+        errno = ENOSPC;
+        return false;
+    }
+    w->dirs++;
+    return true;
+}
+
+static bool fw_descend(const char *name, void *opaque)
+{
+    struct fw_filter *f = opaque;
+    if (f->root_only || (f->source && fw_prune_source(name))) return false;
+    return fw_admit(f->owner);
+}
+
+static bool fw_include_selector(const char *path, void *opaque)
+{
+    struct fw_filter *f = opaque;
+    const char *name = strrchr(path, '/');
+    if (f->source || f->root_only ||
+        strcmp(name ? name + 1 : path, ".current-epoch") != 0)
+        return false;
+    return fw_admit(f->owner);
+}
+
+static bool fw_native_tree(struct ci_fresh_watch *w, const char *path,
+                            bool source, bool root_only)
+{
+    if (w->watch_count >= sizeof(w->watches) / sizeof(w->watches[0]) ||
+        !fw_admit(w)) return false;
+    size_t i = w->watch_count++;
+    platform_directory_watcher_init(&w->watches[i]);
+    w->filters[i] = (struct fw_filter){w, source, root_only};
+    return platform_directory_watcher_open_filtered(&w->watches[i], path,
+        fw_descend, fw_include_selector, &w->filters[i]) &&
+        !w->admission_failed;
+}
+
+static bool fw_native_top(struct ci_fresh_watch *w, const char *root,
+                           const char *name, bool source)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", root, name);
+    if (n <= 0 || (size_t)n >= sizeof(path)) return false;
+    struct stat st;
+    if (stat(path, &st) != 0) return errno == ENOENT && fw_entry_absent(path);
+    return S_ISDIR(st.st_mode) && fw_native_tree(w, path, source, false);
+}
+
+static bool fw_arm_all(struct ci_fresh_watch *w, const char *root)
+{
+    if (!fw_native_tree(w, root, false, true)) return false;
+#define SOURCE_ROOT(name_) if (!fw_native_top(w, root, name_, true)) return false;
+#include "codeindex/source_roots.def"
+#undef SOURCE_ROOT
+    return fw_native_top(w, root, "build", false);
+}
+
+static bool fw_quiet(struct ci_fresh_watch *w)
+{
+    if (w->admission_failed) return false;
+    for (size_t i = 0; i < w->watch_count; i++)
+        if (platform_directory_watcher_wait(&w->watches[i], 0, NULL, NULL) !=
+            PLATFORM_DIRECTORY_WATCH_TIMEOUT) return false;
+    return !w->admission_failed;
+}
+#endif
 
 /* ── table ─────────────────────────────────────────────────────────────── */
 
@@ -506,9 +623,14 @@ bool ci_fresh_memo_hit(struct codeindex *ci)
             !fw_files_current(key, &s->files) ||
             !fw_deps_current(key, &s->watch->deps))
             fw_clear(s);
-        else
+        else {
+#ifdef ZCL_TESTING
+            if (g_fw_hit_hook) g_fw_hit_hook(key);
+#endif
             hit = memcmp(s->merkle, merkle, 32) == 0 &&
-                  memcmp(s->dep, dep, 32) == 0;
+                  memcmp(s->dep, dep, 32) == 0 && fw_quiet(s->watch);
+            if (!hit) fw_clear(s);
+        }
     }
     pthread_mutex_unlock(&g_fw_lock);
     return hit;
@@ -541,9 +663,16 @@ struct ci_fresh_watch *ci_fresh_arm(const char *root)
     struct ci_fresh_watch *w = zcl_calloc(1, sizeof(*w), "ci_fresh_watch");
     if (!w) return NULL;
     snprintf(w->key, sizeof(w->key), "%s", key);
+    w->fd = -1;
+#if !defined(__APPLE__)
     w->fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+#endif
     w->root_wd = -1;
-    if (w->fd >= 0 && fw_arm_all(w, root) &&
+    if (
+#if !defined(__APPLE__)
+        w->fd >= 0 &&
+#endif
+        fw_arm_all(w, root) &&
         ci_deps_stat_keys(root, &w->deps, fw_dep_cap()))
         return w;
     LOG_WARN("codeindex", "freshness watch unavailable (%s): walking every open",
@@ -564,7 +693,8 @@ static bool fw_capture_all(struct ci_fresh_watch *w, const struct codeindex *ci,
 #ifdef ZCL_TESTING
     if (g_fw_bracket_hook) g_fw_bracket_hook(w->key);
 #endif
-    if (fw_deps_current(w->key, &w->deps) && fw_quiet(w)) return true;
+    if (fw_files_current(w->key, files) &&
+        fw_deps_current(w->key, &w->deps) && fw_quiet(w)) return true;
     merkle_snapshot_free(files);
     return false;
 }
@@ -584,6 +714,9 @@ void ci_fresh_finish(struct ci_fresh_watch *w, struct codeindex *ci, bool fresh)
         memcpy(s->dep, ci->fresh_dep, 32);
         snprintf(s->key, sizeof(s->key), "%s", w->key);
         s->watch = w;
+#ifdef ZCL_TESTING
+        (void)atomic_fetch_add_explicit(&g_fw_seals, 1, memory_order_relaxed);
+#endif
         w = NULL;
     }
     pthread_mutex_unlock(&g_fw_lock);

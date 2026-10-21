@@ -12,10 +12,14 @@
 #include "codeindex/codeindex_build.h"
 
 #include <errno.h>
-#if defined(__linux__)
+#if defined(__APPLE__)
+#include <dirent.h>
+#endif
+#if defined(__linux__) || defined(__APPLE__)
 #include <fcntl.h>
 #include <stdlib.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #endif
 #include <stdio.h>
 #include <string.h>
@@ -293,7 +297,7 @@ static int test_cis_memo_watch_failure_walks_every_time(void)
     return failures;
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 /* Keep the alias outside every directory watched for this index. Each test
  * owns its unique parent; even an assertion failure reaches the cleanup. */
 static int test_cis_memo_external_hardlink(void)
@@ -458,6 +462,219 @@ static int test_cis_memo_depfile_write_in_seal_bracket(void)
     return failures;
 }
 
+/* A source mutation after snapshot capture must reject the seal itself, not
+ * merely become visible to the next hit's leaf restat. */
+static void cis_source_seal_hook(const char *root)
+{
+    g_cis_hook_fired = cis_write(root, "core/modules/net/src/foo.c",
+                                "int foo(void) { return 22; }\n");
+}
+
+static int test_cis_memo_source_write_in_seal_bracket(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: a source write in the seal bracket publishes no memo") {
+        test_make_tmpdir(dir, sizeof(dir), "cistale", "sourceseal");
+        ASSERT(cis_seed(dir));
+        ci = codeindex_open(dir);
+        ASSERT(ci != NULL);
+        uint64_t seals = codeindex_test_freshness_seals();
+        g_cis_hook_fired = false;
+        codeindex_test_set_bracket_hook(cis_source_seal_hook);
+        ASSERT(cis_verdict(ci, false));
+        codeindex_test_set_bracket_hook(NULL);
+        ASSERT(g_cis_hook_fired);
+        ASSERT(codeindex_test_freshness_seals() == seals);
+        ASSERT(cis_verdict(ci, true));
+        PASS();
+    } _test_next:;
+    codeindex_test_set_bracket_hook(NULL);
+    codeindex_close(ci);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static void cis_hit_create_hook(const char *root)
+{
+    g_cis_hook_fired = cis_write(root, "core/modules/net/src/new.c",
+                                "int added(void) { return 1; }\n");
+}
+
+static int test_cis_memo_create_in_hit_bracket(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: a create after hit restats walks in that same call") {
+        test_make_tmpdir(dir, sizeof(dir), "cistale", "hitbracket");
+        ASSERT(cis_ready(dir, &ci));
+        uint64_t walks = codeindex_test_freshness_walks();
+        g_cis_hook_fired = false;
+        codeindex_test_set_hit_hook(cis_hit_create_hook);
+        ASSERT(cis_verdict(ci, true));
+        codeindex_test_set_hit_hook(NULL);
+        ASSERT(g_cis_hook_fired);
+        ASSERT(codeindex_test_freshness_walks() == walks + 1);
+        PASS();
+    } _test_next:;
+    codeindex_test_set_hit_hook(NULL);
+    codeindex_close(ci);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_cis_memo_missing_roots_created(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: creation of missing source and build roots invalidates") {
+        test_make_tmpdir(dir, sizeof(dir), "cistale", "missingroots");
+        ASSERT(cis_ready(dir, &ci));
+        ASSERT(cis_write(dir, "app/new.c", "int app(void) { return 1; }\n"));
+        ASSERT(cis_verdict(ci, true));
+        ASSERT(codeindex_rebuild(ci));
+        ASSERT(cis_verdict(ci, false));
+        uint64_t walks = codeindex_test_freshness_walks();
+        ASSERT(cis_write(dir, "build/foo.d", CIS_DEP_TEXT));
+        ASSERT(cis_verdict(ci, true));
+        ASSERT(codeindex_test_freshness_walks() == walks + 1);
+        PASS();
+    } _test_next:;
+    codeindex_close(ci);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+#if defined(__APPLE__)
+static int cis_fd_count(void)
+{
+    DIR *d = opendir("/dev/fd");
+    if (!d) return -1;
+    int count = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        char *end;
+        long fd = strtol(e->d_name, &end, 10);
+        if (end != e->d_name && *end == '\0' && fd >= 0 &&
+            fd != dirfd(d) && fcntl((int)fd, F_GETFD) >= 0)
+            count++;
+    }
+    if (closedir(d) != 0) return -1;
+    return count;
+}
+
+/* First arming opens root/core watchers before rejecting dangling src.
+ * Isolate the census so parent activity cannot hide or manufacture leaks. */
+static int cis_partial_arm_child(struct codeindex *ci)
+{
+    int before = cis_fd_count();
+    int probe = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (probe < 0) return 2;
+    int with_probe = cis_fd_count();
+    if (close(probe) != 0) return 3;
+    int restored = cis_fd_count();
+    /* Prove the census observes both descriptor admission and release;
+     * a parser returning a constant zero must not validate cleanup. */
+    if (before < 0 || with_probe != before + 1 || restored != before)
+        return 4;
+    bool stale = true;
+    bool fresh = codeindex_is_stale(ci, &stale) && !stale;
+    int after = cis_fd_count();
+    return before >= 0 && before == after && fresh ? 0 : 1;
+}
+
+static bool cis_partial_arm_cleanup(struct codeindex *ci)
+{
+    pid_t child = fork();
+    if (child == 0) _exit(cis_partial_arm_child(ci));
+    if (child < 0) return false;
+    int status;
+    pid_t waited;
+    do { waited = waitpid(child, &status, 0); }
+    while (waited < 0 && errno == EINTR);
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+#endif
+
+static int test_cis_memo_dangling_source_root(void)
+{
+    int failures = 0;
+    char parent[] = "test-tmp/cistale-dangling-XXXXXX";
+    char root[512], linkpath[512];
+    bool owned = false;
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: a dangling source-root target cannot become a false hit") {
+        ASSERT(mkdtemp(parent) != NULL);
+        owned = true;
+        ASSERT((size_t)snprintf(root, sizeof(root), "%s/tree", parent) < sizeof(root));
+        ASSERT(cis_seed(root));
+        ASSERT((size_t)snprintf(linkpath, sizeof(linkpath), "%s/src", root) < sizeof(linkpath));
+        ASSERT(symlink("../future-src", linkpath) == 0);
+        ci = codeindex_open(root);
+        ASSERT(ci != NULL);
+#if defined(__APPLE__)
+        ASSERT(cis_partial_arm_cleanup(ci));
+#endif
+        ASSERT(cis_verdict(ci, false));
+        uint64_t walks = codeindex_test_freshness_walks();
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(codeindex_test_freshness_walks() == walks + 1);
+        /* Neither creating nor populating the target changes tree/. The
+         * canonical beneath-root file reader refuses the external symlink,
+         * so this must return unavailable with stale=true, never fresh. */
+        ASSERT(cis_write(parent, "future-src/new.c", "int arrived(void) { return 1; }\n"));
+        bool stale = false;
+        ASSERT(!codeindex_is_stale(ci, &stale));
+        ASSERT(stale);
+        ASSERT(codeindex_test_freshness_walks() == walks + 2);
+        /* A real in-tree root is enumerable and reports the new source as
+         * stale. Preserve that valid stale verdict rather than weakening it. */
+        ASSERT(unlink(linkpath) == 0);
+        ASSERT(cis_write(root, "src/new.c", "int arrived(void) { return 1; }\n"));
+        ASSERT(cis_verdict(ci, true));
+        PASS();
+    } _test_next:;
+    codeindex_close(ci);
+    if (owned) test_rm_rf_recursive(parent);
+    return failures;
+}
+
+static int test_cis_memo_fork_rearms(void)
+{
+    int failures = 0;
+    char dir[256] = {0};
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: a single-threaded fork walks and rearms only the child") {
+        test_make_tmpdir(dir, sizeof(dir), "cistale", "fork");
+        ASSERT(cis_ready(dir, &ci));
+        uint64_t walks = codeindex_test_freshness_walks();
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            bool ok = cis_verdict(ci, false) &&
+                codeindex_test_freshness_walks() == walks + 1 &&
+                cis_verdict(ci, false) &&
+                codeindex_test_freshness_walks() == walks + 1;
+            codeindex_close(ci);
+            _exit(ok ? 0 : 1);
+        }
+        int status;
+        pid_t waited;
+        do { waited = waitpid(child, &status, 0); }
+        while (waited < 0 && errno == EINTR);
+        ASSERT(waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(codeindex_test_freshness_walks() == walks);
+        PASS();
+    } _test_next:;
+    codeindex_close(ci);
+    if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
 static int test_cis_memo_new_depfile_in_new_build_dir(void)
 {
     int failures = 0;
@@ -507,6 +724,52 @@ static int test_cis_memo_epoch_retarget_walks(void)
     } _test_next:;
     codeindex_close(ci);
     if (dir[0]) test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int test_cis_memo_epoch_alias_and_replacement(void)
+{
+    int failures = 0;
+    char parent[] = "test-tmp/cistale-selector-XXXXXX";
+    char root[512], selector[512], alias[512], replacement[512];
+    bool owned = false;
+    struct codeindex *ci = NULL;
+    TEST("codeindex stale: outside selector writes and selector replacement invalidate") {
+        ASSERT(mkdtemp(parent) != NULL);
+        owned = true;
+        ASSERT((size_t)snprintf(root, sizeof(root), "%s/tree", parent) < sizeof(root));
+        ASSERT(cis_seed(root));
+        ASSERT(cis_write(root, "build/epochs/" CIS_EPOCH_A "/foo.d", CIS_DEP_TEXT));
+        ASSERT(cis_write(root, "build/epochs/" CIS_EPOCH_B "/bar.d", CIS_DEP_TEXT));
+        ASSERT(cis_write(root, "build/.current-epoch", CIS_EPOCH_A "\n"));
+        ASSERT((size_t)snprintf(selector, sizeof(selector), "%s/build/.current-epoch", root) < sizeof(selector));
+        ASSERT((size_t)snprintf(alias, sizeof(alias), "%s/selector-alias", parent) < sizeof(alias));
+        ASSERT(link(selector, alias) == 0);
+        ci = codeindex_open(root);
+        ASSERT(ci != NULL);
+        ASSERT(cis_verdict(ci, false));
+        uint64_t walks = codeindex_test_freshness_walks();
+        int fd = open(alias, O_WRONLY | O_TRUNC | O_CLOEXEC);
+        ASSERT(fd >= 0);
+        ssize_t wrote = write(fd, CIS_EPOCH_B "\n", sizeof(CIS_EPOCH_B "\n") - 1);
+        int closed = close(fd);
+        ASSERT(wrote == (ssize_t)(sizeof(CIS_EPOCH_B "\n") - 1) && closed == 0);
+        ASSERT(cis_verdict(ci, true));
+        ASSERT(codeindex_test_freshness_walks() == walks + 1);
+        ASSERT(codeindex_rebuild(ci));
+        ASSERT(cis_verdict(ci, false));
+        ASSERT(cis_write(root, "build/next-selector", CIS_EPOCH_A "\n"));
+        /* Prime after creating the replacement so only rename is under test. */
+        ASSERT(cis_verdict(ci, false));
+        walks = codeindex_test_freshness_walks();
+        ASSERT((size_t)snprintf(replacement, sizeof(replacement), "%s/build/next-selector", root) < sizeof(replacement));
+        ASSERT(rename(replacement, selector) == 0);
+        ASSERT(cis_verdict(ci, true));
+        ASSERT(codeindex_test_freshness_walks() == walks + 1);
+        PASS();
+    } _test_next:;
+    codeindex_close(ci);
+    if (owned) test_rm_rf_recursive(parent);
     return failures;
 }
 
@@ -687,12 +950,18 @@ int test_codeindex_stale(void)
     failures += test_cis_memo_new_nested_dir_walks();
     failures += test_cis_memo_rename_and_delete_walk();
     failures += test_cis_memo_watch_failure_walks_every_time();
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
     failures += test_cis_memo_external_hardlink();
     failures += test_cis_memo_external_depfile_hardlink();
     failures += test_cis_memo_depfile_write_in_seal_bracket();
+    failures += test_cis_memo_source_write_in_seal_bracket();
+    failures += test_cis_memo_create_in_hit_bracket();
+    failures += test_cis_memo_missing_roots_created();
+    failures += test_cis_memo_dangling_source_root();
+    failures += test_cis_memo_fork_rearms();
     failures += test_cis_memo_new_depfile_in_new_build_dir();
     failures += test_cis_memo_epoch_retarget_walks();
+    failures += test_cis_memo_epoch_alias_and_replacement();
     failures += test_cis_memo_depfile_cap_overflow_walks();
     failures += test_cis_memo_parallel_depfile_slices();
     failures += test_cis_memo_existing_shared_mapping();

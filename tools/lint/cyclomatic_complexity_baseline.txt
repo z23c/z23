@@ -2311,7 +2311,7 @@ platform/modules/platform/src/directory_transaction.c:platform_directory_transac
 platform/modules/platform/src/directory_transaction.c:platform_directory_transaction_open_child#2:19
 platform/modules/platform/src/directory_transaction.c:valid_leaf:24
 platform/modules/platform/src/directory_watcher.c:platform_directory_watcher_wait#2:27
-platform/modules/platform/src/directory_watcher.c:platform_directory_watcher_wait#3:20
+platform/modules/platform/src/directory_watcher.c:platform_directory_watcher_wait#3:19
 platform/modules/platform/src/directory_watcher.c:rescan_children:19
 platform/modules/platform/src/file_clone.c:platform_file_clone_fd:28
 platform/modules/platform/src/os_binary_slots.c:os_binary_slots_prepare_launch#2:25

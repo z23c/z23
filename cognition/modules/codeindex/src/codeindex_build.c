@@ -154,10 +154,25 @@ static bool collect_dir(const char *root, const char *reldir,
     return ok;
 }
 
+/* Report completed callback work only. This is a source pass, not a
+ * published index; a blocked callback emits nothing and remains subject to
+ * the caller's silence watchdog. Each invocation owns its cadence. */
+static void source_pass_progress(size_t completed, size_t total,
+                                  int64_t started_ms, int64_t *reported_ms)
+{
+    int64_t now = platform_time_monotonic_ms();
+    if (now - *reported_ms < 30000) return;
+    LOG_INFO("codeindex", "source pass: completed=%zu total=%zu elapsed_ms=%lld",
+             completed, total, (long long)(now - started_ms));
+    *reported_ms = now;
+}
+
 bool ci_enumerate_sources(const char *root, ci_enum_cb cb, void *user)
 {
     if (!root || !cb) LOG_FAIL("codeindex", "null arg to enumerate");
 
+    int64_t started_ms = platform_time_monotonic_ms();
+    int64_t reported_ms = started_ms;
     struct strvec vec = {0};
 
     static const char *const roots[] = {
@@ -170,6 +185,9 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb cb, void *user)
 
     if (vec.n > 1) qsort(vec.v, vec.n, sizeof(vec.v[0]), sv_cmp);
 
+    size_t total = vec.n, completed = 0;
+    for (size_t i = 1; i < vec.n; i++)
+        if (strcmp(vec.v[i], vec.v[i - 1]) == 0) total--;
     bool ok = true;
     for (size_t i = 0; i < vec.n && ok; i++) {
         /* de-dup exact repeats (a dir listed twice can't happen here, but be safe) */
@@ -183,6 +201,8 @@ bool ci_enumerate_sources(const char *root, ci_enum_cb cb, void *user)
         }
         if (!cb(vec.v[i], &st, user))
             ok = false;
+        else
+            source_pass_progress(++completed, total, started_ms, &reported_ms);
     }
     sv_free(&vec);
     return ok;

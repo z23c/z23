@@ -67,6 +67,8 @@ uint64_t codeindex_test_exact_bytes_read(void);
  * codeindex_is_stale has run in this process, and a switch that makes arming
  * the change watch fail so the memo must fall back to walking every open. */
 uint64_t codeindex_test_freshness_walks(void);
+uint64_t codeindex_test_freshness_seals(void);
+void codeindex_test_set_hit_hook(void (*hook)(const char *root));
 void codeindex_test_force_watch_failure(bool fail);
 /* Test seams: a callback run after the verifying walk and before the memo is
  * sealed (mutate a depfile there), and a smaller depfile-key cap (0: default). */
