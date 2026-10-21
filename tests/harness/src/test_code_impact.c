@@ -774,6 +774,100 @@ static int test_code_guide(void)
     return failures;
 }
 
+static int test_code_route_completeness(void)
+{
+    int failures = 0;
+    TEST("code.tests distinguishes capped groups from a complete small or empty route") {
+        const char *paths[] = {"tools/command/native_devagent.c",
+                              "tests/harness/src/test_zcode_policy.c",
+                              "zz_no_impact_rule_fixture.c"};
+        for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+            struct agent_impact_acc acc = {0};
+            bool consensus = false;
+            const char *route = zcl_native_code_route_for_path(paths[i], &acc, &consensus);
+            struct json_value input;
+            json_init(&input);
+            json_set_object(&input);
+            ASSERT(json_push_kv_str(&input, "path", paths[i]));
+            struct zcl_command_request request = {0};
+            request.input = &input;
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+            zcl_native_handle_code_tests(&request, &reply);
+            ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
+            const struct json_value *count = json_get(&reply.data, "test_groups_retained_count");
+            const struct json_value *lost = json_get(&reply.data, "test_groups_lost");
+            const struct json_value *truncated = json_get(&reply.data, "test_groups_truncated");
+            ASSERT(count && count->type == JSON_INT);
+            ASSERT(lost && lost->type == JSON_BOOL);
+            ASSERT(truncated && truncated->type == JSON_BOOL);
+            ASSERT_EQ(json_get_int(count), (int64_t)acc.groups_len);
+            ASSERT_EQ(json_get_bool(lost), acc.groups_lost);
+            const struct json_value *groups = json_get(&reply.data, "test_groups");
+            ASSERT_EQ(json_size(groups), acc.groups_len < 12 ? acc.groups_len : 12);
+            ASSERT_EQ(json_get_bool(truncated), acc.groups_len > 12 || acc.groups_lost);
+            ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "route")), route);
+            ASSERT_EQ(json_get_bool(json_get(&reply.data, "consensus_risk")), consensus);
+            for (size_t g = 0; g < json_size(groups); g++)
+                ASSERT_STR_EQ(json_get_str(json_at(groups, g)), acc.groups[g]);
+            ASSERT(json_write(&reply.data, NULL, 0) <= ZCL_COMMAND_RESULT_BUDGET);
+            if (i == 0)
+                ASSERT(acc.groups_len > 12);
+            if (i == 2)
+                ASSERT_EQ(acc.groups_len, 0u);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_route_consumer_bounds(void)
+{
+    int failures = 0;
+    TEST("all five shared route consumers retain completeness metadata within reply bounds") {
+        TEST_DISCARD(system("rm -rf " CI_IMPACT_FIX));
+        ASSERT(write_ci_impact_fixture());
+        const struct {
+            void (*handle)(const struct zcl_command_request *, struct zcl_command_reply *);
+            const char *key, *value;
+        } cases[] = {
+            {zcl_native_handle_code_tests, "path", "core/modules/net/src/ci_hub.c"},
+            {zcl_native_handle_code_file, "path", "core/modules/net/src/ci_hub.c"},
+            {zcl_native_handle_code_impact, "path", "core/modules/net/src/ci_hub.c"},
+            {zcl_native_handle_code_room, "path", "core/modules/net/src/ci_hub.c"},
+            {zcl_native_handle_code_capsule, "name", "ci_hub_fn"}
+        };
+        struct zcl_command_context context = {.source_root = CI_IMPACT_FIX};
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            struct json_value input;
+            json_init(&input); json_set_object(&input);
+            ASSERT(json_push_kv_str(&input, cases[i].key, cases[i].value));
+            struct zcl_command_request request = {.input = &input, .context = &context, .view = "normal"};
+            struct zcl_command_reply reply;
+            zcl_command_reply_init(&reply, "zcl.test.route.v1");
+            cases[i].handle(&request, &reply);
+            ASSERT(reply.status != ZCL_COMMAND_STATUS_FAILED);
+            const struct json_value *count = json_get(&reply.data, "test_groups_retained_count");
+            const struct json_value *lost = json_get(&reply.data, "test_groups_lost");
+            const struct json_value *truncated = json_get(&reply.data, "test_groups_truncated");
+            ASSERT(count && count->type == JSON_INT);
+            ASSERT(lost && lost->type == JSON_BOOL);
+            ASSERT(truncated && truncated->type == JSON_BOOL);
+            ASSERT(!json_get_bool(lost));
+            ASSERT(!json_get_bool(truncated));
+            ASSERT_EQ(json_get_int(count), (int64_t)json_size(json_get(&reply.data, "test_groups")));
+            ASSERT(json_write(&reply.data, NULL, 0) <= ZCL_COMMAND_RESULT_BUDGET);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+        }
+        TEST_DISCARD(system("rm -rf " CI_IMPACT_FIX));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static bool impact_has_group(const struct agent_impact_acc *acc, const char *group)
 {
     for (size_t i = 0; i < acc->groups_len; i++)
@@ -1605,6 +1699,8 @@ int test_code_impact(void)
     int failures = 0;
     failures += test_code_impact_rule_predicate();
     failures += test_code_devagent_routes();
+    failures += test_code_route_completeness();
+    failures += test_code_route_consumer_bounds();
     failures += test_code_impact_unsafe_narrow();
     failures += test_code_impact_unsafe_cause();
     failures += test_code_impact_hotfork_cache_scope();

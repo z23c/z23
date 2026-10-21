@@ -318,6 +318,13 @@ const char *code_emit_route(
         code_push_line(&arr, acc.groups[i]);
 
     (void)json_push_kv(&reply->data, "test_groups", &arr);
+    /* Count only retained accumulator entries, never an unknown full total.
+     * Either presentation capping or upstream loss makes the list incomplete. */
+    (void)json_push_kv_int(&reply->data, "test_groups_retained_count",
+                            (int64_t)acc.groups_len);
+    (void)json_push_kv_bool(&reply->data, "test_groups_lost", acc.groups_lost);
+    (void)json_push_kv_bool(&reply->data, "test_groups_truncated",
+                             shown < acc.groups_len || acc.groups_lost);
     (void)json_push_kv_str(&reply->data, "route", route);
     (void)json_push_kv_bool(&reply->data, "consensus_risk", crisk);
     (void)json_push_kv_bool(&reply->data, "matched", acc.shared_rule_hits > 0);
