@@ -108,6 +108,7 @@ static int hcs_cov_case(int want, const char *msg, const char *const *assigns)
     if (code != want) {
         fprintf(stderr, "%s: SELFTEST FAILED — %s (wanted exit %d, got %d)\n",
                 k_hcs_gate, msg, want, code);
+        fprintf(stderr, "%s\n", sink);
         return 2;
     }
     return 0;
