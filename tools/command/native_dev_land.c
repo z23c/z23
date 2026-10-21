@@ -3070,6 +3070,133 @@ static void dl_submit_loaded(const struct dl_dirs *d, struct dl_row *r,
     reply->exit_code = 0;
 }
 
+static const char *const DL_SUBMIT_MARKS[] = { "rebase-merge", "rebase-apply",
+    "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer" };
+enum { DL_SUBMIT_MARK_COUNT = sizeof(DL_SUBMIT_MARKS) / sizeof(DL_SUBMIT_MARKS[0]),
+       DL_MARKER_PATH_CAP = 4096,
+       DL_MARKER_BATCH_CAP = DL_SUBMIT_MARK_COUNT * DL_MARKER_PATH_CAP + 1 };
+
+#if defined(ZCL_TESTING)
+static _Thread_local const char *dl_test_marker_batch_text;
+static _Thread_local int dl_test_marker_batch_rc;
+void zcl_native_dev_land_test_marker_batch(const char *text, int rc);
+void zcl_native_dev_land_test_marker_batch(const char *text, int rc)
+{
+    dl_test_marker_batch_text = text;
+    dl_test_marker_batch_rc = rc;
+}
+#endif
+
+static int dl_marker_batch_capture(const char *root, char *buf, size_t cap)
+{
+#if defined(ZCL_TESTING)
+    if (dl_test_marker_batch_text) {
+        (void)snprintf(buf, cap, "%s", dl_test_marker_batch_text);
+        return dl_test_marker_batch_rc;
+    }
+#endif
+    const char *args[2 * DL_SUBMIT_MARK_COUNT + 2];
+    args[0] = "rev-parse";
+    for (size_t i = 0; i < DL_SUBMIT_MARK_COUNT; i++) {
+        args[2 * i + 1] = "--git-path";
+        args[2 * i + 2] = DL_SUBMIT_MARKS[i];
+    }
+    args[2 * DL_SUBMIT_MARK_COUNT + 1] = NULL;
+    return dl_git(root, args, buf, cap, DL_GIT_TIMEOUT_MS);
+}
+
+/* Ambiguous framing never supplies a prefix of the marker set. Preserve the
+ * original per-path resolver for unsupported Git and unusual path bytes. */
+static bool dl_marker_batch_parse(char *buf, size_t cap, char **paths)
+{
+    size_t len = strlen(buf);
+    if (len + 1 >= cap) return false;
+    char *row = buf;
+    for (size_t i = 0; i < DL_SUBMIT_MARK_COUNT; i++) {
+        char *end = strchr(row, '\n');
+        if (!end || end == row || (size_t)(end - row) >= DL_MARKER_PATH_CAP)
+            return false;
+        for (char *p = row; p < end; p++)
+            if ((unsigned char)*p < 32 || (unsigned char)*p == 127) return false;
+        /* dl_trim used to strip trailing spaces: retain its interpretation
+         * through the original resolver rather than guessing here. */
+        if (end[-1] == ' ') return false;
+        *end = '\0';
+        paths[i] = row;
+        row = end + 1;
+    }
+    return *row == '\0';
+}
+
+static char *dl_marker_batch(const char *root, char **paths)
+{
+    char *buf = zcl_malloc(DL_MARKER_BATCH_CAP, "land_marker_paths");
+    if (!buf) return NULL;
+    if (dl_marker_batch_capture(root, buf, DL_MARKER_BATCH_CAP) == 0 &&
+        dl_marker_batch_parse(buf, DL_MARKER_BATCH_CAP, paths)) return buf;
+    free(buf);
+    return NULL;
+}
+
+static bool dl_submit_marker_check(const char *root, const char *mark,
+    const char *rel, struct zcl_command_reply *reply)
+{
+    char path[8192];
+    int n = platform_path_is_absolute(rel) ? snprintf(path, sizeof(path), "%s", rel)
+                         : snprintf(path, sizeof(path), "%s/%s", root, rel);
+    if (!rel[0] || n < 0 || (size_t)n >= sizeof(path)) {
+        dl_fail(reply, "WORKTREE_STATE_UNAVAILABLE", "submit",
+                "Git operation state path is empty or exceeds its bound", mark);
+        return false;
+    }
+    bool marker_present, marker_unreadable;
+#if defined(_WIN32)
+    enum platform_file_shape shape = platform_file_shape_read(path);
+    marker_present = shape != PLATFORM_FILE_SHAPE_MISSING && shape != PLATFORM_FILE_SHAPE_UNREADABLE;
+    marker_unreadable = shape == PLATFORM_FILE_SHAPE_UNREADABLE;
+#else
+    struct stat st;
+    marker_present = lstat(path, &st) == 0;
+    marker_unreadable = !marker_present && errno != ENOENT;
+#endif
+    if (marker_present) {
+        dl_fail(reply, "WORKTREE_BUSY", "submit",
+                "finish or abort the unfinished Git operation, then resubmit", mark);
+        return false;
+    }
+    if (marker_unreadable) {
+        dl_fail(reply, "WORKTREE_STATE_UNAVAILABLE", "submit",
+                "cannot inspect the submitting worktree's Git state", mark);
+        return false;
+    }
+    return true;
+}
+
+static bool dl_submit_markers_check(const char *root, struct zcl_command_reply *reply)
+{
+    char *paths[DL_SUBMIT_MARK_COUNT];
+    char *batch = dl_marker_batch(root, paths);
+    bool ok = true;
+    for (size_t i = 0; i < DL_SUBMIT_MARK_COUNT; i++) {
+        char rel[DL_MARKER_PATH_CAP];
+        const char *path = batch ? paths[i] : rel;
+        const char *args[] = { "rev-parse", "--git-path", DL_SUBMIT_MARKS[i], NULL };
+        if (!batch && dl_git(root, args, rel, sizeof(rel), DL_GIT_TIMEOUT_MS) != 0) {
+            dl_fail(reply, "WORKTREE_STATE_UNAVAILABLE", "submit",
+                    "cannot inspect the submitting worktree's Git state", DL_SUBMIT_MARKS[i]);
+            ok = false;
+            break;
+        }
+        if (!batch) dl_trim(rel);
+        if (!dl_submit_marker_check(root, DL_SUBMIT_MARKS[i], path, reply)) {
+            ok = false;
+            break;
+        }
+    }
+    free(batch);
+    return ok;
+}
+
 /* Admit the candidate only after verifying this worktree has no unfinished
  * Git operation. Worktrees share objects, but --git-path resolves each marker
  * in the submitting worktree's own Git directory. Unreadable state refuses. */
@@ -3077,57 +3204,13 @@ static bool dl_submit_tip_resolve(const char *root, const char *tip,
                                   char full[80],
                                   struct zcl_command_reply *reply)
 {
-    static const char *const marks[] = { "rebase-merge", "rebase-apply",
-        "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer" };
     if (!dl_rev_parse(root, tip, full)) {
         dl_fail(reply, "TIP_UNKNOWN", "submit",
                 "that commit does not exist in the checkout",
                 "git rev-parse --verify refused the tip");
         return false;
     }
-    for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++) {
-        char rel[4096], path[8192];
-        const char *args[] = { "rev-parse", "--git-path", marks[i], NULL };
-        if (dl_git(root, args, rel, sizeof(rel), DL_GIT_TIMEOUT_MS) != 0) {
-            dl_fail(reply, "WORKTREE_STATE_UNAVAILABLE", "submit",
-                    "cannot inspect the submitting worktree's Git state",
-                    marks[i]);
-            return false;
-        }
-        dl_trim(rel);
-        int n = platform_path_is_absolute(rel) ? snprintf(path, sizeof(path), "%s", rel)
-                             : snprintf(path, sizeof(path), "%s/%s", root, rel);
-        if (!rel[0] || n < 0 || (size_t)n >= sizeof(path)) {
-            dl_fail(reply, "WORKTREE_STATE_UNAVAILABLE", "submit",
-                    "Git operation state path is empty or exceeds its bound",
-                    marks[i]);
-            return false;
-        }
-        bool marker_present, marker_unreadable;
-#if defined(_WIN32)
-        enum platform_file_shape shape = platform_file_shape_read(path);
-        marker_present = shape != PLATFORM_FILE_SHAPE_MISSING &&
-                         shape != PLATFORM_FILE_SHAPE_UNREADABLE;
-        marker_unreadable = shape == PLATFORM_FILE_SHAPE_UNREADABLE;
-#else
-        struct stat st;
-        marker_present = lstat(path, &st) == 0;
-        marker_unreadable = !marker_present && errno != ENOENT;
-#endif
-        if (marker_present) {
-            dl_fail(reply, "WORKTREE_BUSY", "submit",
-                    "finish or abort the unfinished Git operation, then resubmit",
-                    marks[i]);
-            return false;
-        }
-        if (marker_unreadable) {
-            dl_fail(reply, "WORKTREE_STATE_UNAVAILABLE", "submit",
-                    "cannot inspect the submitting worktree's Git state",
-                    marks[i]);
-            return false;
-        }
-    }
-    return true;
+    return dl_submit_markers_check(root, reply);
 }
 
 /* A qualify refusal as a typed error: QUALIFY_<REFUSAL>, with the step or

@@ -40,6 +40,7 @@
 #include "dev/dev_proof_budget.h"
 #include "dev/devloop.h"
 #include "base/bytes.h"
+#include "base/safe_alloc.h"
 #include "base/hex.h"
 #include "crypto/ed25519.h"
 #include "sha3/sha3.h"
@@ -89,6 +90,7 @@ int zcl_native_dev_land_test_range_adds_source(const char *wt,
                                                const char *base,
                                                const char *local);
 void zcl_native_dev_land_test_judged_hook(void (*hook)(void));
+void zcl_native_dev_land_test_marker_batch(const char *text, int rc);
 int zcl_native_dev_land_test_producer_reproof(const char *root,
                                               const char *local,
                                               const char *base,
@@ -877,7 +879,8 @@ static bool dlx_submit_marker_refused(struct dlx_rig *rig, const char *mark)
     struct dlx_call c;
     dlx_submit(&c, rig, rig->tip);
     bool ok = dlx_run(&c) && !dlx_ok(&c) && c.reply.error.code[0] != '\0' &&
-        strcmp(c.reply.error.code, "WORKTREE_BUSY") == 0;
+        strcmp(c.reply.error.code, "WORKTREE_BUSY") == 0 &&
+        strcmp(c.reply.error.evidence, mark) == 0;
     dlx_end(&c);
     if (unlink(path) != 0)
         return false;
@@ -910,6 +913,81 @@ static bool dlx_submit_operation_markers_refused(void)
         }
     }
 done:
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_marker_batch_clean(void)
+{
+    struct dlx_rig rig;
+    bool ok = false;
+    dlx_isolate("marker_batch_clean");
+    if (!dlx_rig_make(&rig, "marker_batch_clean_rig")) goto done;
+    setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+    setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    struct dlx_call c;
+    dlx_submit(&c, &rig, rig.tip);
+    uint64_t before = zcl_spawn_thread_launch_count();
+    bool ran = dlx_run(&c);
+    uint64_t launched = zcl_spawn_thread_launch_count() - before;
+    ok = ran && dlx_ok(&c) && launched == 4;
+    printf("marker batch clean: launches=%llu expected=4\n", (unsigned long long)launched);
+    dlx_end(&c);
+    ok = ok && dlx_queue_has_one();
+done:
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_marker_batch_bad_cases(struct dlx_rig *rig)
+{
+    static const struct { const char *text; int rc; } cases[] = {
+        {"unsupported", 129}, {"", 0}, {"one\ntwo\nthree\nfour\nfive\n", 0},
+        {"one\n\nthree\nfour\nfive\nsix\n", 0},
+        {"one\ntwo\nthree\nfour\nfive\nsix\nextra\n", 0},
+        {"one\ntwo\nthree\nfour\nfive\nsix", 0},
+        {"one\ntwo\nthree\nfour\nfive\nsix \n", 0},
+        {"one\ntwo\nthree\nfour\nfive\nsix\t\n", 0},
+        {"one\ntwo\nthree\nfour\nfive\nsix\r\n", 0},
+        {"one\ntwo\nthree\nfour\nfive\nsi\177x\n", 0},
+    };
+    for (size_t i = 0; i < sizeof(cases)/sizeof(cases[0]); i++) {
+        zcl_native_dev_land_test_marker_batch(cases[i].text, cases[i].rc);
+        bool ok = dlx_submit_marker_refused(rig, "sequencer");
+        zcl_native_dev_land_test_marker_batch(NULL, 0);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool dlx_marker_batch_long_cases(struct dlx_rig *rig)
+{
+    char *text = zcl_malloc(6 * 4096 + 1, "land_marker_batch_fixture");
+    if (!text) return false;
+    memset(text, 'x', 4096);
+    (void)snprintf(text + 4096, 6 * 4096 + 1 - 4096, "\ntwo\nthree\nfour\nfive\nsix\n");
+    zcl_native_dev_land_test_marker_batch(text, 0);
+    bool ok = dlx_submit_marker_refused(rig, "sequencer");
+    memset(text, 'x', 6 * 4096);
+    text[6 * 4096] = '\0';
+    zcl_native_dev_land_test_marker_batch(text, 0);
+    ok = dlx_submit_marker_refused(rig, "sequencer") && ok;
+    zcl_native_dev_land_test_marker_batch(NULL, 0);
+    free(text);
+    return ok;
+}
+
+static bool dlx_marker_batch_fallback(void)
+{
+    struct dlx_rig rig;
+    bool ok = false;
+    dlx_isolate("marker_batch_fallback");
+    if (!dlx_rig_make(&rig, "marker_batch_fallback_rig")) goto done;
+    setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+    setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    ok = dlx_marker_batch_bad_cases(&rig) && dlx_marker_batch_long_cases(&rig);
+done:
+    zcl_native_dev_land_test_marker_batch(NULL, 0);
     dlx_restore();
     return ok;
 }
@@ -12981,6 +13059,8 @@ static int dlx_case_duplicate_submit(void)
         ASSERT(dlx_exact_submit_retry());
         ASSERT(dlx_exact_submit_mid_rebase_refused());
         ASSERT(dlx_submit_operation_markers_refused());
+        ASSERT(dlx_marker_batch_clean());
+        ASSERT(dlx_marker_batch_fallback());
         PASS();
     }
 _test_next:;
