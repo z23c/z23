@@ -469,6 +469,7 @@ struct plan {
     int argc;
     int out_idx;      /* index of the -o VALUE, or -1 */
     const char *out_path;
+    const char *diagnostic_out_path; /* borrowed canonical native target; log only */
     const char *dep_path;
     /* -MD/-MMD was asked for, so the compiler WILL write dep_path and a
      * complete cache entry owes one back. dep_path alone is not the same
@@ -1982,6 +1983,26 @@ static bool entry_dir(const struct cache *c, const char *kind,
     return mkdir_p(out);
 }
 
+static bool log_escape_path(const char *path, char *out, size_t capacity)
+{
+    size_t used = 0;
+    for (const unsigned char *p = (const unsigned char *)path; *p; ++p) {
+        size_t need = *p == '\\' ? 2u : (*p < 32u || *p == 127u) ? 4u : 1u;
+        if (need >= capacity - used)
+            return false;
+        if (need == 4u) {
+            out[used++] = '\\'; out[used++] = 'x';
+            zcl_hex_encode(p, 1u, out + used);
+            used += 2u;
+        } else {
+            if (need == 2u) out[used++] = '\\';
+            out[used++] = (char)*p;
+        }
+    }
+    out[used] = '\0';
+    return true;
+}
+
 static void logline(const char *disposition, const char *detail,
                     const struct plan *pl);
 
@@ -3132,17 +3153,24 @@ static void logline(const char *disposition, const char *detail,
     const char *path = getenv("ZCC_LOG");
     if (!path || !path[0])
         return;
+    char escaped[4u * PATH_MAX + 1u];
+    const char *output = pl->out_path ? pl->out_path : "<none>";
+    if (pl->diagnostic_out_path) {
+        if (!log_escape_path(pl->diagnostic_out_path, escaped, sizeof escaped))
+            return;
+        output = escaped;
+    }
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
     if (fd < 0)
         return;
-    char line[1024];
+    char line[4u * PATH_MAX + 256u];
     int n = snprintf(line, sizeof line, "%-8s %-28s %s%s\n", disposition,
                      detail ? detail : "-",
                      strcmp(disposition, "HIT") == 0
                          ? "NON-AUTHORITATIVE DEV " : "",
-                     pl->out_path ? pl->out_path : "<none>");
-    if (n > 0)
-        (void)!write(fd, line, (size_t)n > sizeof line ? sizeof line : (size_t)n);
+                     output);
+    if (n > 0 && (size_t)n < sizeof line)
+        (void)!write(fd, line, (size_t)n);
     close(fd);
 }
 
@@ -3989,7 +4017,8 @@ static void epoch_retract(bool coverage,
         (void)unlinkat(artifacts->parent_fd, artifacts->record_name, 0);
 }
 
-static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass);
+static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass,
+                        const char *diagnostic_output);
 
 /* ── Admitted verifier object (proof mode only) ─────────────────────────
  * A landing proof's driver -- the lander's pinned z23-dev, never this
@@ -4010,18 +4039,8 @@ static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass);
 static void admitted_log(const char *disposition, const char *detail,
                          const char *output)
 {
-    const char *path = getenv("ZCC_LOG");
-    if (!path || !path[0])
-        return;
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0600);
-    if (fd < 0)
-        return;
-    char line[1024];
-    int n = snprintf(line, sizeof line, "%-8s %-28s %s\n", disposition,
-                     detail, output);
-    if (n > 0 && (size_t)n < sizeof line)
-        (void)!write(fd, line, (size_t)n);
-    close(fd);
+    const struct plan diagnostic = { .diagnostic_out_path = output };
+    logline(disposition, detail, &diagnostic);
 }
 
 #if defined(__linux__)
@@ -4181,7 +4200,7 @@ static int epoch_compile_or_serve(int argc, char **argv, const char *mode,
         (void)snprintf(detail, sizeof detail, "admitted:%s", why);
         admitted_log("MISS", detail, output);
     }
-    return zcc_dispatch(compiler_argc, cc, false);
+    return zcc_dispatch(compiler_argc, cc, false, output);
 }
 
 static int epoch_compile_publish(int argc, char **argv, const char *mode,
@@ -4397,7 +4416,8 @@ static int zcc_command_dispatch(int argc, char **argv)
     return 2;
 }
 
-static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass)
+static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass,
+                        const char *diagnostic_output)
 {
     if (argc < 2) {
         fprintf(stderr,
@@ -4420,6 +4440,7 @@ static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass)
 
     struct plan pl = { 0 };
     plan_build(&pl, cc_argc, cc_argv);
+    pl.diagnostic_out_path = diagnostic_output;
     bool disabled = getenv("ZCC_DISABLE") != NULL;
 
     /* A proof may not consume this account's cache, even through the stat
@@ -4557,5 +4578,5 @@ static int zcc_dispatch(int argc, char **argv, bool replace_on_bypass)
 
 int main(int argc, char **argv)
 {
-    return zcc_dispatch(argc, argv, true);
+    return zcc_dispatch(argc, argv, true, NULL);
 }

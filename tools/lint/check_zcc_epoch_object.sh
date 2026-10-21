@@ -37,6 +37,16 @@ fail()
     exit 1
 }
 
+expect_log_output()
+{
+    local line
+    line="$(tail -1 "$ZCC_LOG")"
+    case "$line" in
+        *" $1") ;;
+        *) fail "cache diagnostic did not name expected output: $1" ;;
+    esac
+}
+
 sha_label()
 {
     if command -v sha256sum >/dev/null 2>&1; then
@@ -420,6 +430,7 @@ compile dep "$OBJECT" "$COUNTING_COMPILER" \
     -std=c23 -O2 -Wall -Wextra -Werror "-frandom-seed=$SOURCE"
 [ "$(tail -1 "$ZCC_LOG" | awk '{print $1}')" = MISS ] ||
     fail 'verified epoch compile served a same-account cache entry'
+expect_log_output "$OBJECT"
 [ "$(wc -l < "$COMPILER_LAUNCHES")" = "$((VERIFIED_LAUNCHES + 1))" ] ||
     fail 'verified epoch compile skipped the real compiler'
 [ -s "$OBJECT" ] && [ -s "${OBJECT%.o}.d" ] ||
@@ -438,6 +449,7 @@ compile dep "$MAKE_STYLE" "$ZCC" "$COUNTING_COMPILER" \
 [ "$(cache_outcome_count)" = "$((LOG_BEFORE + 1))" ] &&
 [ "$(tail -1 "$ZCC_LOG" | awk '{print $1}')" = MISS ] ||
     fail 'Make-style cold compile used more than one zcc coordinator'
+expect_log_output "$MAKE_STYLE"
 MAKE_COLD_LAUNCHES="$(wc -l < "$COMPILER_LAUNCHES")"
 [ "$MAKE_COLD_LAUNCHES" -gt "$LAUNCHES_BEFORE" ] ||
     fail 'Make-style cold compile launched no compiler child'
@@ -451,10 +463,53 @@ compile dep "$MAKE_STYLE" "$ZCC" "$COUNTING_COMPILER" \
 [ "$(cache_outcome_count)" = "$((LOG_BEFORE + 2))" ] &&
 [ "$(tail -1 "$ZCC_LOG" | awk '{print $1}')" = HIT ] ||
     fail 'Make-style warm compile used more than one zcc coordinator'
+expect_log_output "$MAKE_STYLE"
 [ "$(launch_count preprocess)" = "$((MAKE_COLD_PREPROCESS + 1))" ] ||
     fail 'Make-style warm hit did not recheck includes'
 [ "$(launch_count compile)" = "$MAKE_COLD_COMPILE" ] ||
     fail 'Make-style warm hit launched an object compiler'
+
+# Distinct canonical paths must survive reused descriptor numbers/basenames.
+for leaf in first second; do
+    compile dep "$OBJECT_ROOT/$leaf/same.o" cc -std=c23 -O2 -Wall
+    expect_log_output "$OBJECT_ROOT/$leaf/same.o"
+done
+# A valid real path on Darwin (PATH_MAX=1024) can render beyond the old
+# diagnostic buffer once literal backslashes are escaped. Test both lengths.
+LONG_OUTPUT="$OBJECT_ROOT"
+LONG_EXPECTED="$OBJECT_ROOT"
+LONG_PART="$(awk 'BEGIN { for (i=0; i<160; i++) printf "%c", 92 }')"
+LONG_ESCAPED_PART="$(awk 'BEGIN { for (i=0; i<320; i++) printf "%c", 92 }')"
+for part in 1 2 3 4; do
+    LONG_OUTPUT="$LONG_OUTPUT/$LONG_PART"
+    LONG_EXPECTED="$LONG_EXPECTED/$LONG_ESCAPED_PART"
+done
+LONG_OUTPUT="$LONG_OUTPUT/long.o"
+LONG_EXPECTED="$LONG_EXPECTED/long.o"
+[ "${#LONG_OUTPUT}" -lt 1024 ] || fail 'long diagnostic fixture real path exceeds Darwin bound'
+[ "${#LONG_EXPECTED}" -gt 1024 ] || fail 'long diagnostic fixture did not exceed old log bound'
+printf 'check_zcc_epoch_object: long diagnostic real=%s rendered=%s bytes\n' \
+    "${#LONG_OUTPUT}" "${#LONG_EXPECTED}"
+LONG_COMPILES_BEFORE="$(launch_count compile)"
+COMPILER_LAUNCHES="$COMPILER_LAUNCHES" \
+compile dep "$LONG_OUTPUT" "$COUNTING_COMPILER" -std=c23 -O2 -Wall -DZCL_LONG_DIAGNOSTIC=1
+[ "$(launch_count compile)" = "$((LONG_COMPILES_BEFORE + 1))" ] ||
+    fail 'long diagnostic fixture did not execute an object compiler'
+expect_log_output "$LONG_EXPECTED"
+
+# Backslash and controls have one unambiguous textual representation; the
+# compiler still receives the original path, not its diagnostic spelling.
+CONTROL_OUTPUT="$(printf '%s/diagnostic\\tab\tline\nreturn\r.o' "$OBJECT_ROOT")"
+CONTROL_EXPECTED="$OBJECT_ROOT/diagnostic\\\\tab\\x09line\\x0areturn\\x0d.o"
+CONTROL_BEFORE="$(wc -l < "$ZCC_LOG")"
+compile dep "$CONTROL_OUTPUT" cc -std=c23 -O2 -Wall
+expect_log_output "$CONTROL_EXPECTED"
+[ "$(wc -l < "$ZCC_LOG")" -gt "$CONTROL_BEFORE" ] || fail 'control-path log missing'
+! grep -q '^return' "$ZCC_LOG" || fail 'control path injected a log row'
+
+# A following ordinary compile retains its actual standalone output spelling.
+"$ZCC" cc -std=c23 -O2 -c "$SOURCE" -o "$WORK/standalone.o"
+expect_log_output "$WORK/standalone.o"
 
 # A separate BUILD_DIR publishes a byte-identical zcc at a different inode.
 # It must unwrap exactly like the same-file wrapper above, without issuing
@@ -866,4 +921,6 @@ cc -o "$WORK/shadow-program" "$SHADOW_OBJECT"
 [ "$("$WORK/shadow-program")" = native-epoch-shadow ] ||
     fail 'new local header did not change executed behavior'
 
+! grep -E '/proc/self/fd/[0-9]+/|/dev/fd/[0-9]+' "$ZCC_LOG" ||
+    fail 'native diagnostic exposed an ephemeral descriptor output'
 printf 'check_zcc_epoch_object: PASS cache=content_hit fresh_preprocess=observed object_compile_avoided=observed shadow_behavior=executed mmd_dep_parity=exact system_authority=closed path_swap=closed admission_lock=serialized unverified=durable coverage_record=last\n'
