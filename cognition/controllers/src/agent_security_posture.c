@@ -389,12 +389,33 @@ void agent_security_posture_collect(struct agent_security_posture *out,
     if (ndb_locked)
         posture_ndb_unlock(resolved_ndb);
     progress_reader = progress_store_open_reader();
+    /* Reader creation takes the lifecycle lock; do not invert its order with
+     * the transaction lock. Metadata helpers recursively take the latter even
+     * on an independent reader, so reserve it non-blocking before reading. */
+    bool progress_busy = progress_reader && !progress_store_tx_trylock();
+    if (progress_busy) {
+        sqlite3_close(progress_reader);
+        progress_reader = NULL;
+    }
     out->progress_store_available = progress_reader != NULL;
     posture_collect_anchors(out, progress_reader);
     posture_collect_nullifiers(out, progress_reader);
-    if (progress_reader)
+    if (progress_reader) {
+        progress_store_tx_unlock();
         sqlite3_close(progress_reader);
+    }
     posture_finalize(out);
+    if (progress_busy) {
+        /* Keep fresh bootstrap evidence; an older cached posture could erase
+         * a new review gate. Unknown progress already finalizes fail-closed. */
+        posture_str(out->anchor_history_state, sizeof(out->anchor_history_state),
+                    "unknown_progress_busy");
+        posture_str(out->nullifier_history_state,
+                    sizeof(out->nullifier_history_state), "unknown_progress_busy");
+        posture_str(out->status, sizeof(out->status),
+                    "review_required_progress_store_busy");
+        posture_str(out->next_action, sizeof(out->next_action), "retry_status_query");
+    }
     posture_cache_store(out);
 #ifdef ZCL_TESTING
     int override = atomic_load(&g_test_review_required);

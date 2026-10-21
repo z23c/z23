@@ -27,11 +27,17 @@
 
 #include "controllers/agent_security_posture.h"
 #include "models/database.h"
+#include "platform/clock.h"
+#include "storage/progress_store.h"
+#include "storage/anchor_kv.h"
+#include "storage/nullifier_kv.h"
+#include "services/chain_evidence_authority_service.h"
 
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define AP_CHECK(name, expr) do {                                 \
     printf("agent_posture_trylock: %s... ", (name));              \
@@ -373,6 +379,157 @@ static int case_collect_never_repairs_cec_state(void)
     return failures;
 }
 
+/* libc's transaction mutex cannot be driven by the injectable clock. The
+ * condition deadline only bounds cleanup of a defective blocking collector;
+ * the observation is completion while the real transaction lock is held.
+ * The injectable clock below also avoids real cache-age timing inputs. */
+static bool ap_collect_under_progress_lock(struct ap_collector *c)
+{
+    struct timespec deadline;
+    bool completed = false;
+    pthread_t collector;
+    ap_done = false;
+    if (timespec_get(&deadline, TIME_UTC) != TIME_UTC) {
+        progress_store_tx_unlock();
+        return false;
+    }
+    deadline.tv_sec += 30;
+    if (pthread_create(&collector, NULL, ap_collect, c) != 0) {
+        progress_store_tx_unlock();
+        return false;
+    }
+    pthread_mutex_lock(&ap_control);
+    int rc = 0;
+    while (!ap_done && rc == 0)
+        rc = pthread_cond_timedwait(&ap_changed, &ap_control, &deadline);
+    completed = ap_done;
+    pthread_mutex_unlock(&ap_control);
+    /* Always release before joining: the baseline's blocked read recovers. */
+    progress_store_tx_unlock();
+    pthread_join(collector, NULL);
+    return completed;
+}
+
+static int64_t ap_virtual_mono(void *self)
+{
+    return *(int64_t *)self;
+}
+
+static int64_t ap_virtual_wall(void *self)
+{
+    return *(int64_t *)self / 1000000;
+}
+
+static int ap_check_progress_partial(const struct agent_security_posture *posture)
+{
+    int failures = 0;
+    const struct ap_collector c = { .posture = *posture };
+    AP_CHECK("progress busy: fresh partial is not labeled as cached",
+             !c.posture.served_from_cache && c.posture.cache_age_ms == 0);
+    AP_CHECK("progress busy: fresh bootstrap evidence survives old cached evidence",
+             c.posture.background_validation_height == 888 &&
+             !c.posture.full_history_validation_complete);
+    AP_CHECK("progress busy: unknown progress requires review and refuses public serving",
+             c.posture.review_required &&
+             !agent_security_posture_allows_public_serving(&c.posture));
+    AP_CHECK("progress busy: progress availability and cursor knowledge are unknown",
+             !c.posture.progress_store_available &&
+             !c.posture.anchor_cursor_known && !c.posture.nullifier_cursor_known);
+    AP_CHECK("progress busy: unknown cursor sentinels survive",
+             c.posture.sprout_anchor_activation_cursor == -1 &&
+             c.posture.sapling_anchor_activation_cursor == -1 &&
+             c.posture.nullifier_activation_cursor == -1);
+    AP_CHECK("progress busy: explicit progress contention status",
+             strcmp(c.posture.status, "review_required_progress_store_busy") == 0 &&
+             strcmp(c.posture.next_action, "retry_status_query") == 0);
+    AP_CHECK("progress busy: explicit unknown progress labels",
+             strcmp(c.posture.anchor_history_state, "unknown_progress_busy") == 0 &&
+             strcmp(c.posture.nullifier_history_state, "unknown_progress_busy") == 0);
+
+    return failures;
+}
+
+static bool ap_seed_complete_history(struct node_db *ndb)
+{
+    sqlite3 *db = progress_store_db();
+    return anchor_kv_ensure_schema(db) &&
+           anchor_kv_initialize_history(db, 0) &&
+           nullifier_kv_ensure_schema(db) &&
+           nullifier_kv_initialize_history(db, 0) &&
+           node_db_state_set(ndb, "cec.sync_state", "fully_validated",
+                             sizeof "fully_validated") &&
+           node_db_state_set_int(ndb, "cec.full_validation_origin",
+                                 CEC_FULL_VALIDATION_GENESIS_HISTORY);
+}
+
+static int case_progress_contention_preserves_bootstrap(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof dir, "agent_posture_trylock", "progress");
+    progress_store_close();
+    bool opened = progress_store_open(dir);
+    AP_CHECK("progress busy: isolated progress store opens", opened);
+    if (!opened) {
+        test_cleanup_tmpdir(dir);
+        return failures;
+    }
+    struct node_db ndb;
+    opened = node_db_open(&ndb, ":memory:");
+    AP_CHECK("progress busy: isolated node database opens", opened);
+    if (!opened) {
+        progress_store_close();
+        test_cleanup_tmpdir(dir);
+        return failures;
+    }
+    int64_t now = 1000000000;
+    const clock_iface_t *previous_clock = clock_default();
+    const clock_iface_t clock = {
+        .now_monotonic_ns = ap_virtual_mono,
+        .now_wall_ms = ap_virtual_wall, .self = &now,
+    };
+    clock_set_default(&clock);
+    AP_CHECK("progress busy: seed persisted complete genesis history",
+             ap_seed_complete_history(&ndb));
+    AP_CHECK("progress busy: seed cached evidence height",
+             node_db_state_set_int(&ndb, "cec.background_validation_height", 777));
+    struct agent_security_posture live;
+    agent_security_posture_collect(&live, &ndb);
+    AP_CHECK("progress busy: real progress reader was available",
+             live.progress_store_available && !live.served_from_cache);
+    AP_CHECK("progress busy: cached real history is complete and permits serving",
+             live.full_history_validation_complete && live.anchor_history_complete &&
+             live.nullifier_history_complete && !live.review_required &&
+             agent_security_posture_allows_public_serving(&live));
+    AP_CHECK("progress busy: persisted bootstrap now requires review",
+             node_db_state_set(&ndb, "cec.sync_state", "empty", sizeof "empty"));
+    AP_CHECK("progress busy: change only live bootstrap evidence",
+             node_db_state_set_int(&ndb, "cec.background_validation_height", 888));
+    now = 2000000000;
+    progress_store_tx_lock();
+    struct ap_collector c = { .ndb = &ndb };
+    bool completed = ap_collect_under_progress_lock(&c);
+    AP_CHECK("progress busy: collection completes before transaction lock release",
+             completed);
+    failures += ap_check_progress_partial(&c.posture);
+    struct agent_security_posture recovered;
+    agent_security_posture_collect(&recovered, &ndb);
+    AP_CHECK("progress free: fresh collection resumes with changed evidence",
+             !recovered.served_from_cache &&
+             recovered.background_validation_height == 888);
+    AP_CHECK("progress free: progress and zero cursor histories are restored",
+             recovered.progress_store_available && recovered.anchor_cursor_known &&
+             recovered.nullifier_cursor_known && recovered.anchor_history_complete &&
+             recovered.nullifier_history_complete);
+    AP_CHECK("progress free: status is no longer progress busy",
+             strcmp(recovered.status, "review_required_progress_store_busy") != 0);
+    clock_set_default(previous_clock);
+    node_db_close(&ndb);
+    progress_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_agent_posture_trylock(void)
 {
     int failures = 0;
@@ -385,6 +542,7 @@ int test_agent_posture_trylock(void)
     failures += case_collect_nonblocking_scenario();
     failures += case_background_validation_height_populates();
     failures += case_collect_never_repairs_cec_state();
+    failures += case_progress_contention_preserves_bootstrap();
     AP_CHECK("SQLite contention probes restored", ap_restore_probes());
     if (failures == 0)
         printf("test_agent_posture_trylock: ALL PASSED\n");
