@@ -7686,13 +7686,57 @@ static bool dl_single_origin_url(const char *wt, bool push, char *out, size_t ca
         dl_single_url_line(out, o.output_len);
 }
 
+static bool dl_origin_config_rows(const char *bytes, size_t length)
+{
+    unsigned fetch = 0, push = 0;
+    size_t at = 0;
+    while (at < length) {
+        const char *end = memchr(bytes + at, '\0', length - at);
+        if (!end) return false;
+        size_t row = (size_t)(end - (bytes + at));
+        const char *value = memchr(bytes + at, '\n', row);
+        if (!value || value + 1 == end) return false;
+        size_t key = (size_t)(value - (bytes + at));
+        if (key == 17 && memcmp(bytes + at, "remote.origin.url", key) == 0)
+            ++fetch;
+        else if (key == 21 && memcmp(bytes + at, "remote.origin.pushurl", key) == 0)
+            ++push;
+        else return false;
+        for (++value; value < end; ++value)
+            if ((unsigned char)*value < 32 || (unsigned char)*value == 127) return false;
+        if (fetch > 1 || push > 1) return false;
+        at += row + 1;
+    }
+    return fetch == 1;
+}
+
+#if defined(ZCL_TESTING)
+bool zcl_native_dev_land_test_origin_config(const char *bytes, size_t length)
+{
+    return bytes && dl_origin_config_rows(bytes, length);
+}
+#endif
+
+static bool dl_origin_configured(const char *wt)
+{
+    char raw[8448];
+    const char *args[] = {"git", "-C", wt, "config", "--null", "--get-regexp",
+        "^remote\\.origin\\.(url|pushurl)$", NULL};
+    struct zcl_spawn_binary_observation o = {0};
+    struct zcl_result captured = zcl_spawn_capture_binary(args, raw, sizeof(raw),
+                                                         DL_GIT_TIMEOUT_MS, &o);
+    return captured.ok && o.exit_observed && o.exit_code == 0 && !o.overflow && o.eof &&
+        !o.timed_out && dl_origin_config_rows(raw, o.output_len);
+}
+
 static bool dl_publication_target(const struct dl_dirs *d, char out[65])
 {
     char fetch[4096], push[4096];
     static const char domain[] = "zcl.dev_land.git_target.v1\nrefs/heads/main\n";
     struct sha256_ctx hash;
     uint8_t digest[32];
-    if (!dl_single_origin_url(d->wt, false, fetch, sizeof(fetch)) ||
+    if (!dl_origin_configured(d->wt) ||
+        !dl_single_origin_url(d->wt, false, fetch, sizeof(fetch)) ||
         !dl_single_origin_url(d->wt, true, push, sizeof(push)))
         return false;
     if (!fetch[0] || strcmp(fetch, push) != 0 ||

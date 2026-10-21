@@ -31,6 +31,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/time_compat.h"
+#include "platform/os_proc.h"
 #include "platform/directory_compat.h"
 #include "platform/temp_directory.h"
 #include "util/spawn.h"
@@ -91,6 +92,7 @@ int zcl_native_dev_land_test_range_adds_source(const char *wt,
                                                const char *local);
 void zcl_native_dev_land_test_judged_hook(void (*hook)(void));
 void zcl_native_dev_land_test_marker_batch(const char *text, int rc);
+bool zcl_native_dev_land_test_origin_config(const char *bytes, size_t length);
 int zcl_native_dev_land_test_producer_reproof(const char *root,
                                               const char *local,
                                               const char *base,
@@ -11611,6 +11613,38 @@ static int dlx_fence_concurrent(void)
 }
 #endif
 
+static int dlx_origin_config_cases(void)
+{
+    int failures = 0;
+    static const struct { const char *wire; size_t length; bool valid; } cases[] = {
+#define DLX_CONFIG_CASE(s, ok) {s, sizeof(s) - 1, ok}
+        DLX_CONFIG_CASE("remote.origin.url\nfixture\0", true),
+        DLX_CONFIG_CASE("remote.origin.pushurl\nfixture\0remote.origin.url\nfixture\0", true),
+        DLX_CONFIG_CASE("remote.origin.url\nfixture\0remote.origin.pushurl\nfixture\0", true),
+        DLX_CONFIG_CASE("remote.origin.url\nfixture\0remote.origin.pushurl\n\0", false),
+        DLX_CONFIG_CASE("remote.origin.pushurl\n\0remote.origin.url\nfixture\0", false),
+        DLX_CONFIG_CASE("remote.origin.url\n\0", false),
+        DLX_CONFIG_CASE("remote.origin.url\nfixture\0remote.origin.url\nfixture\0", false),
+        DLX_CONFIG_CASE("remote.origin.url\nfixture\0remote.origin.pushurl\na\0remote.origin.pushurl\nb\0", false),
+        DLX_CONFIG_CASE("remote.origin.pushurl\nfixture\0", false),
+        DLX_CONFIG_CASE("remote.origin.url\nfixture", false),
+        DLX_CONFIG_CASE("remote.origin.url fixture\0", false),
+        DLX_CONFIG_CASE("remote.origin.url\nfi\nxture\0", false),
+        DLX_CONFIG_CASE("remote.origin.urls\nfixture\0", false),
+        DLX_CONFIG_CASE("remote.origin.url\nfixture\0\0", false),
+        DLX_CONFIG_CASE("", false),
+#undef DLX_CONFIG_CASE
+    };
+    TEST("land receiver: raw configured URL framing preserves empty and duplicate entries") {
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+            ASSERT_EQ(zcl_native_dev_land_test_origin_config(cases[i].wire, cases[i].length), cases[i].valid);
+        ASSERT(!zcl_native_dev_land_test_origin_config(NULL, 1));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int dlx_attest_only_cases(void)
 {
     int failures = 0;
@@ -11618,7 +11652,7 @@ static int dlx_attest_only_cases(void)
     size_t before_len = 0, after_len = 0;
     struct dlx_call c;
     const char *row = "{\"seq\":410,\"tip\":\"db648476e77c14308d77501ad85655e2444043b3\",\"state\":\"inflight\",\"attempt\":2,\"phase\":\"prove\",\"base\":\"3a93e60ebf922af3d119b9facc1d95803f42844b\",\"local\":\"db648476e77c14308d77501ad85655e2444043b3\",\"tree\":\"4514cfd63acc408be3d37023656a8e88bc1be2c6\"}\n";
-    TEST("land attest-only: self capture roundtrip four BOOL cases and no mutation") {
+    TEST("land attest-only: self capture honors image identity in four BOOL cases without mutation") {
         dlx_isolate("attest-only");
         dlx_landdir(land, sizeof(land));
         ASSERT(dlx_mkdir_p(land));
@@ -11631,29 +11665,34 @@ static int dlx_attest_only_cases(void)
             ASSERT(setenv("ZCL_LAND_PROOF_STUB", (i & 2) ? "PRIVATE-FIXTURE-VALUE-NOT-OUTPUT" : "", 1) == 0);
             dlx_begin(&c, "attest_only");
             ASSERT(dlx_run(&c));
-            ASSERT(dlx_ok(&c));
-            ASSERT_STR_EQ(dlx_str(&c, "service_origin"), "UNKNOWN");
-            ASSERT_EQ(json_get(&c.reply.data, "allow_unsigned_is_one")->val.b, !!(i & 1));
-            ASSERT_EQ(json_get(&c.reply.data, "proof_stub_nonempty")->val.b, !!(i & 2));
-            size_t n = json_write(&c.reply.data, wire, sizeof(wire));
-            ASSERT(n > 0 && n < sizeof(wire));
-            ASSERT(strstr(wire, "PRIVATE-FIXTURE") == NULL);
-            bool enabled = true;
-            const char *image = dlx_str(&c, "executable_sha256");
-            const char *source = dlx_str(&c, "compiled_source_sha256");
-            int64_t clock = dlx_int(&c, "observed_at_ms");
-            ASSERT(zcl_dev_land_attestation_decode(wire, n, image, source, clock, &enabled));
-            ASSERT_EQ(enabled, i == 3);
-            ASSERT(!zcl_dev_land_attestation_decode(wire, n, image, source, clock + 5001, &enabled));
-            ASSERT(!enabled);
-            ASSERT(!zcl_dev_land_attestation_decode(wire, n, image, source, 0, &enabled));
-            ASSERT(!zcl_dev_land_attestation_decode(wire, n, source, "bad-source", clock, &enabled));
-            ASSERT(!zcl_dev_land_attestation_decode(wire, n, source, image, clock, &enabled));
-            ASSERT(!zcl_dev_land_attestation_decode(wire, n, NULL, source, clock, &enabled));
-            ASSERT(!zcl_dev_land_attestation_decode(wire, n - 1, image, source, clock, &enabled));
-            ASSERT(json_push_kv_str(&c.reply.data, "service_origin", "timer"));
-            n = json_write(&c.reply.data, wire, sizeof(wire));
-            ASSERT(!zcl_dev_land_attestation_decode(wire, n, image, source, clock, &enabled));
+            if (os_proc_self_exe_identity() == OS_PROC_IMAGE_IDENTITY_RUNNING_IMAGE) {
+                ASSERT(dlx_ok(&c));
+                ASSERT_STR_EQ(dlx_str(&c, "service_origin"), "UNKNOWN");
+                ASSERT_EQ(json_get(&c.reply.data, "allow_unsigned_is_one")->val.b, !!(i & 1));
+                ASSERT_EQ(json_get(&c.reply.data, "proof_stub_nonempty")->val.b, !!(i & 2));
+                size_t n = json_write(&c.reply.data, wire, sizeof(wire));
+                ASSERT(n > 0 && n < sizeof(wire));
+                ASSERT(strstr(wire, "PRIVATE-FIXTURE") == NULL);
+                bool enabled = true;
+                const char *image = dlx_str(&c, "executable_sha256");
+                const char *source = dlx_str(&c, "compiled_source_sha256");
+                int64_t clock = dlx_int(&c, "observed_at_ms");
+                ASSERT(zcl_dev_land_attestation_decode(wire, n, image, source, clock, &enabled));
+                ASSERT_EQ(enabled, i == 3);
+                ASSERT(!zcl_dev_land_attestation_decode(wire, n, image, source, clock + 5001, &enabled));
+                ASSERT(!enabled);
+                ASSERT(!zcl_dev_land_attestation_decode(wire, n, image, source, 0, &enabled));
+                ASSERT(!zcl_dev_land_attestation_decode(wire, n, source, "bad-source", clock, &enabled));
+                ASSERT(!zcl_dev_land_attestation_decode(wire, n, source, image, clock, &enabled));
+                ASSERT(!zcl_dev_land_attestation_decode(wire, n, NULL, source, clock, &enabled));
+                ASSERT(!zcl_dev_land_attestation_decode(wire, n - 1, image, source, clock, &enabled));
+                ASSERT(json_push_kv_str(&c.reply.data, "service_origin", "timer"));
+                n = json_write(&c.reply.data, wire, sizeof(wire));
+                ASSERT(!zcl_dev_land_attestation_decode(wire, n, image, source, clock, &enabled));
+            } else {
+                ASSERT(!dlx_ok(&c));
+                ASSERT_STR_EQ(dlx_err_code(&c), "ATTESTATION_UNKNOWN");
+            }
             dlx_end(&c);
             ASSERT(dlx_slurp(path, after, sizeof(after), &after_len));
             ASSERT_EQ(before_len, after_len);
@@ -15965,6 +16004,7 @@ int test_dev_land(void)
     failures += dlx_hold_admissible_during_step();
     failures += dlx_hold_survives_step_rewrite();
     failures += dlx_launcher_join_cases();
+    failures += dlx_origin_config_cases();
     failures += dlx_attest_only_cases();
     failures += dlx_attest_bounded_wire_cases();
     failures += dlx_attest_refusal_cases();
