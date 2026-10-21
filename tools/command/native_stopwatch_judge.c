@@ -12,6 +12,7 @@
 #include "native_evidence_judge_util.h"
 
 #include "base/safe_alloc.h"
+#include "json/json.h"
 #include "services/stopwatch_skip_watch.h"
 
 #include <limits.h>
@@ -119,29 +120,31 @@ static bool sw_oracle(const struct zcl_stopwatch_judge_opts *o, int64_t now,
     return found;
 }
 
-/* `"verdict": "pass"` anywhere on one line of the proof file. */
+static bool sw_proof_root_pass(const struct json_value *proof)
+{
+    if (proof->type != JSON_OBJ) return false;
+    size_t verdicts = 0;
+    for (size_t i = 0; i < proof->num_children; i++)
+        if (strcmp(proof->keys[i], "verdict") == 0) verdicts++;
+    const struct json_value *verdict = json_get(proof, "verdict");
+    return verdicts == 1 && verdict && verdict->type == JSON_STR &&
+           strcmp(json_get_str(verdict), "pass") == 0;
+}
+
+/* A complete JSON object with exactly one root string verdict of "pass". */
 static bool sw_proof_says_pass(const char *artifact)
 {
     char path[SW_FIELD_MAX + 16];
     size_t len = 0;
     char *buf;
-    const char *p;
     bool pass = false;
-    (void)snprintf(path, sizeof(path), "%s/proof.json", artifact);
+    int n = snprintf(path, sizeof(path), "%s/proof.json", artifact);
+    if (n < 0 || (size_t)n >= sizeof(path)) return false;
     buf = ej_slurp(path, (size_t)16 << 20, &len);
-    for (p = buf; p && (p = strstr(p, "\"verdict\"")) != NULL; p++) {
-        const char *q = p + strlen("\"verdict\"");
-        while (*q == ' ' || *q == '\t' || *q == '\r')
-            q++;
-        if (*q++ != ':')
-            continue;
-        while (*q == ' ' || *q == '\t' || *q == '\r')
-            q++;
-        if (strncmp(q, "\"pass\"", 6) == 0) {
-            pass = true;
-            break;
-        }
-    }
+    struct json_value proof = {0};
+    if (buf && json_read(&proof, buf, len))
+        pass = sw_proof_root_pass(&proof);
+    json_free(&proof);
     free(buf);
     return pass;
 }

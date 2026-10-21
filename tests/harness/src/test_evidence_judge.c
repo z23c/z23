@@ -206,6 +206,54 @@ static int ejt_case_sw_qualify(void)
     return failures;
 }
 
+static int ejt_sw_proof_rejected(const char *label, const char *body)
+{
+    int failures = 0;
+    char led[600], art[600], proof[700], row[1400];
+    ejt_path(led, sizeof(led), "sw_proof_shape.jsonl");
+    ejt_path(art, sizeof(art), "proof_shape_art");
+    (void)snprintf(proof, sizeof(proof), "%s/proof.json", art);
+    TEST(label) {
+        ASSERT(mkdir(art, 0700) == 0 || access(art, F_OK) == 0);
+        ejt_row(row, sizeof(row),
+                "{\"ts\":2000000000,\"verdict\":\"pass\",\"final_network_tip\":"
+                "3100000,\"node_bin_sha256\":\"%s\",\"artifact_dir\":\"%s\"}\n",
+                EJT_SHA_A, art);
+        ASSERT(ejt_write(led, row, "wb"));
+        ASSERT(ejt_write(proof, "{\"verdict\":\"pass\"}\n", "wb"));
+        ASSERT(ejt_sw(led, NULL, EJT_SHA_A) && ejt_is("PASS", 0));
+        /* Only proof bytes change: the ledger, clock, tip and pin remain bound. */
+        ASSERT(ejt_write(proof, body, "wb"));
+        ASSERT(ejt_sw(led, NULL, EJT_SHA_A) && ejt_is("INCOMPLETE", 1));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ejt_case_sw_proof_shapes(void)
+{
+    static const struct { const char *label; const char *body; } cases[] = {
+        {"stopwatch: root FAIL cannot borrow a nested PASS",
+         "{\"verdict\":\"fail\",\"nested\":{\"verdict\":\"pass\"}}\n"},
+        {"stopwatch: malformed proof with a PASS token is incomplete",
+         "{\"verdict\":\"pass\",broken}\n"},
+        {"stopwatch: truncated proof with a PASS token is incomplete",
+         "{\"verdict\":\"pass\","},
+        {"stopwatch: duplicate PASS then FAIL verdict is incomplete",
+         "{\"verdict\":\"pass\",\"verdict\":\"fail\"}\n"},
+        {"stopwatch: duplicate FAIL then PASS verdict is incomplete",
+         "{\"verdict\":\"fail\",\"verdict\":\"pass\"}\n"},
+        {"stopwatch: array-root PASS is not a proof verdict",
+         "[{\"verdict\":\"pass\"}]\n"},
+        {"stopwatch: nested-only PASS is not a root verdict",
+         "{\"nested\":{\"verdict\":\"pass\"}}\n"},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        failures += ejt_sw_proof_rejected(cases[i].label, cases[i].body);
+    return failures;
+}
+
 static int ejt_case_sw_stale(void)
 {
     int failures = 0;
@@ -716,6 +764,7 @@ int test_evidence_judge(void)
     failures += ejt_case_sw_passes();
     failures += ejt_case_sw_fixture_gates();
     failures += ejt_case_sw_qualify();
+    failures += ejt_case_sw_proof_shapes();
     failures += ejt_case_sw_stale();
     failures += ejt_case_integer_parser_boundaries();
     failures += ejt_case_sw_age_overflow();
