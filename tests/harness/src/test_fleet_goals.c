@@ -750,21 +750,23 @@ static int fgl_case_wiki(void)
     int failures = 0;
     struct json_value fresh, own_only, stale, edge;
     struct zcl_goal_result r;
-    TEST("wiki: a fresh row from another host passes; own-only rows, a stale "
+    TEST("wiki: a fresh foreign row is partial without all-host propagation "
+         "and pin evidence; own-only rows, a stale "
          "foreign row or an unknown own host stay partial, unmeasured or fail "
          "as the bar says") {
         ASSERT(fgl_wiki_data(&fresh,
             "{\"posts\":[{\"host\":\"" FGL_WIKI_FOREIGN "\",\"created_at\":1799996400},"
             "{\"host\":\"" FGL_WIKI_OWN "\",\"created_at\":1799999990}]}"));
         r = zcl_goals_wiki_grade(true, "", &fresh, FGL_WIKI_OWN, FGL_NOW, 120);
-        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
         ASSERT(fgl_has(r.evidence, "answered in 120 ms"));
         ASSERT(fgl_has(r.evidence, "1 row(s) from other hosts, newest 3600 s old"));
         ASSERT(fgl_has(r.evidence, "pinned expiry not probed"));
+        ASSERT(fgl_has(r.evidence, "all-host propagation"));
         ASSERT(fgl_wiki_data(&edge,
             "{\"posts\":[{\"host\":\"" FGL_WIKI_FOREIGN "\",\"created_at\":1799913600}]}"));
         r = zcl_goals_wiki_grade(true, "", &edge, FGL_WIKI_OWN, FGL_NOW, 120);
-        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
         ASSERT(fgl_wiki_data(&own_only,
             "{\"posts\":[{\"host\":\"" FGL_WIKI_OWN "\",\"created_at\":1799999940}]}"));
         r = zcl_goals_wiki_grade(true, "", &own_only, FGL_WIKI_OWN, FGL_NOW, 120);

@@ -426,7 +426,7 @@ struct zcl_goal_result zcl_goals_wiki_grade(bool answered, const char *why,
 {
     const char *next = "card: write a probe page and read it back from "
                        "every admitted host";
-    const char *tail = "; pinned expiry not probed";
+    const char *tail = "; all-host propagation and pinned expiry not probed";
     size_t foreign = 0;
     int64_t newest = 0, age = 0;
     char newest_txt[32] = "none";
@@ -450,7 +450,7 @@ struct zcl_goal_result zcl_goals_wiki_grade(bool answered, const char *why,
                              (long long)latency_ms, ZCL_GOALS_WIKI_MS_MAX,
                              foreign, newest_txt, tail);
     if (foreign > 0 && age >= 0 && age <= ZCL_GOALS_WIKI_FRESH_S)
-        return zcl_goal_make(ZCL_GOAL_PASS, next,
+        return zcl_goal_make(ZCL_GOAL_PARTIAL, next,
                              "fleet.wiki.list answered in %lld ms on this "
                              "node (bar %d ms); %zu row(s) from other hosts, "
                              "newest %s; a row from another host is newer "
