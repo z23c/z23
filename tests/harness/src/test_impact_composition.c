@@ -12778,7 +12778,11 @@ static int test_ic_sensor_bound_clang_reader(void)
         {.name = "FIFO at the sensor path: present, unbound, returns",
          .str = "\0", .strn = 1, .fifo = true, .want_bound = false},
     };
+#if defined(__linux__) && defined(__x86_64__)
     TEST_CASE("sensor reader: crafted ELF images bind or refuse") {
+#else
+    TEST_CASE("sensor reader: unsupported hosts refuse crafted ELF images") {
+#endif
         static const char path[] = IC_FIX_ROOT "/sensor-img.elf";
         uint8_t w[704];
         bool present = false;
@@ -12807,14 +12811,19 @@ static int test_ic_sensor_bound_clang_reader(void)
                 ASSERT(ic_elf_write(path, w, n));
             }
             out[0] = '\0';
+            present = true;
             bool got = zcl_c23_fuzz_sensor_bound_clang_for_test(
                 path, out, sizeof(out), &present);
+#if defined(__linux__) && defined(__x86_64__)
             bool ok = present && got == rows[i].want_bound &&
                       (!rows[i].want_path ||
                        strcmp(out, rows[i].want_path) == 0);
+#else
+            bool ok = !got && !present;
+#endif
             if (!ok)
-                fprintf(stderr, "sensor row failed: %s (got %d '%s')\n",
-                        rows[i].name, (int)got, out);
+                fprintf(stderr, "sensor row failed: %s (got %d present %d '%s')\n",
+                        rows[i].name, (int)got, (int)present, out);
             ASSERT(ok);
         }
         present = true;
