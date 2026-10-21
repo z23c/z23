@@ -4395,8 +4395,49 @@ static void record_compilation(const struct cache *c, const struct plan *pl,
     maybe_trim(c, pl);
 }
 
+static bool bootstrap_time_before(struct timespec input, struct timespec built)
+{
+    return input.tv_sec < built.tv_sec ||
+           (input.tv_sec == built.tv_sec && input.tv_nsec < built.tv_nsec);
+}
+
+/* A stricter version of bootstrap's existing timestamp heuristic, not a
+ * content or compiler-action receipt. Future-dated binary timestamps, concurrent
+ * edits and compiler selector changes retain their existing limitations. */
+static bool bootstrap_input_before(const struct stat *input,
+                                    const struct stat *binary)
+{
+#if defined(__APPLE__)
+    struct timespec mtime = input->st_mtimespec, ctime = input->st_ctimespec;
+    struct timespec built = binary->st_mtimespec;
+#else
+    struct timespec mtime = input->st_mtim, ctime = input->st_ctim;
+    struct timespec built = binary->st_mtim;
+#endif
+    return bootstrap_time_before(mtime, built) && bootstrap_time_before(ctime, built);
+}
+
+static int cmd_bootstrap_fresh(int argc, char **argv)
+{
+    if (argc < 4)
+        return 2;
+    struct stat binary;
+    if (stat(argv[2], &binary) != 0 || !S_ISREG(binary.st_mode))
+        return 1;
+    for (int i = 3; i < argc; ++i) {
+        struct stat input;
+        if (stat(argv[i], &input) != 0 || !S_ISREG(input.st_mode) ||
+            !bootstrap_input_before(&input, &binary))
+            return 1;
+    }
+    return 0;
+}
+
 static int zcc_command_dispatch(int argc, char **argv)
 {
+    /* This bootstrap probe must not create cache state or launch a compiler. */
+    if (strcmp(argv[1], "--zcc-bootstrap-fresh") == 0)
+        return cmd_bootstrap_fresh(argc, argv);
     struct cache c;
     if (!cache_open(&c)) {
         fprintf(stderr, "zcc: no usable cache directory\n");

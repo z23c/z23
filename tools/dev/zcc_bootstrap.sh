@@ -46,7 +46,11 @@ for input in "${BOOTSTRAP_INPUTS[@]}"; do
         fresh=0
     fi
 done
-if [ "$fresh" = 1 ]; then
+# Retain every old mtime predicate, then also reject inputs whose ctime moved
+# after the executable was built (cp -p can restore mtime after an edit).
+# Legacy binaries do not know this read-only probe: rebuild them normally.
+if [ "$fresh" = 1 ] &&
+   "$BIN" --zcc-bootstrap-fresh "$BIN" "${BOOTSTRAP_INPUTS[@]}" >/dev/null 2>&1; then
     printf '%s\n' "$BIN"
     exit 0
 fi

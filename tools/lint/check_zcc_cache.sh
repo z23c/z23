@@ -1249,6 +1249,7 @@ fi
 
 # A source edit must invalidate freshness and alter actual behavior; restoring
 # exactly the original source must restore exactly the original executable.
+cp -p "$bootstrap_one/tools/zcc.c" "$WORK/bootstrap-source-original"
 sed 's/usage: zcc <compiler>/usage: zcc-fixture <compiler>/' \
     "$bootstrap_one/tools/zcc.c" > "$WORK/bootstrap-source"
 mv "$WORK/bootstrap-source" "$bootstrap_one/tools/zcc.c"
@@ -1258,10 +1259,47 @@ grep -Fq 'usage: zcc-fixture <compiler>' "$WORK/bootstrap-usage" ||
     fail 'bootstrap source edit did not change the published behavior'
 [ "$(sha256sum < "$bootstrap_bin" | awk '{print $1}')" != "$bootstrap_hash" ] ||
     fail 'bootstrap source edit did not change compiler bytes'
-cp "$ROOT/tools/zcc.c" "$bootstrap_one/tools/zcc.c"
+cp -p "$WORK/bootstrap-source-original" "$bootstrap_one/tools/zcc.c"
 bootstrap_run "$bootstrap_one" "$WORK/bootstrap-out-one" || exit 1
 [ "$(sha256sum < "$bootstrap_bin" | awk '{print $1}')" = "$bootstrap_hash" ] ||
     fail 'restoring bootstrap source did not restore compiler bytes'
+"$bootstrap_bin" > "$WORK/bootstrap-restored-usage" 2>&1 || true
+grep -Fq 'usage: zcc <compiler>' "$WORK/bootstrap-restored-usage" ||
+    fail 'restoring bootstrap source mtime retained mutated compiler behavior'
+
+# The new timestamp probe is read-only and rejects incomplete or non-file
+# inputs. Its caller owns the complete catalog; this is not a source receipt.
+probe_cache="$WORK/bootstrap-probe-cache"
+ZCC_DIR="$probe_cache" "$bootstrap_bin" --zcc-bootstrap-fresh \
+    "$bootstrap_bin" "$bootstrap_one/tools/zcc.c" ||
+    fail 'restored bootstrap inputs were not timestamp-fresh'
+for bad_input in "$WORK/bootstrap-missing" "$bootstrap_one/tools"; do
+    if ZCC_DIR="$probe_cache" "$bootstrap_bin" --zcc-bootstrap-fresh \
+            "$bootstrap_bin" "$bad_input"; then
+        fail 'bootstrap probe accepted a missing or non-regular input'
+    fi
+done
+if ZCC_DIR="$probe_cache" "$bootstrap_bin" --zcc-bootstrap-fresh "$bootstrap_bin"; then
+    fail 'bootstrap probe accepted no inputs'
+fi
+if ZCC_DIR="$probe_cache" "$bootstrap_bin" --zcc-bootstrap-fresh \
+        "$bootstrap_one/tools" "$bootstrap_one/tools/zcc.c"; then
+    fail 'bootstrap probe accepted a non-regular binary'
+fi
+[ ! -e "$probe_cache" ] || fail 'bootstrap probe created cache state'
+
+cat > "$WORK/bootstrap-compiler" <<'BOOTSTRAP_COMPILER'
+#!/bin/sh
+printf 'compile\n' >> "$BOOTSTRAP_TEST_COUNT"
+exec cc "$@"
+BOOTSTRAP_COMPILER
+chmod +x "$WORK/bootstrap-compiler"
+: > "$WORK/bootstrap-compiler.calls"
+BOOTSTRAP_TEST_COUNT="$WORK/bootstrap-compiler.calls" \
+ZCL_BOOTSTRAP_CC="$WORK/bootstrap-compiler" \
+bootstrap_run "$bootstrap_one" "$WORK/bootstrap-out-one" || exit 1
+[ ! -s "$WORK/bootstrap-compiler.calls" ] ||
+    fail 'unchanged bootstrap launched a compiler'
 
 # Build flags live in the bootstrap script, which the input catalog includes.
 # Its optimization change must invalidate a previously published executable.
