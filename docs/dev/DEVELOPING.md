@@ -574,12 +574,14 @@ and real behavior qualify.
 When the owned work is preserved for handoff, run this from its checkout:
 
 ```bash
-build/bin/z23-dev dev agent claim --input='{"story":"Release completed file scope after preserving the handoff","files":[],"release":true}'
+build/bin/z23-dev dev agent claim --input='{"release":true}'
 ```
 
-Release requires a nonempty `story` and a `files` array. It removes all
-claims belonging to the current worktree; the empty array does not select
-individual files or release another worktree's claims.
+For release, `story` and `files` may each be omitted. If supplied, `story`
+must be a nonempty string and `files` must be an array. The legacy form with
+both fields remains accepted. Release removes all claims belonging to the
+current worktree; `files` does not select individual claims or release another
+worktree's claims.
 
 <!-- claim: symbol-present dvc_validate tools/command/native_devagent_claim.c # release input validation -->
 <!-- claim: symbol-present dvc_release tools/command/native_devagent_claim.c # current-worktree claim release -->
@@ -1611,6 +1613,21 @@ Before committing:
    outcome support replacement workers; no permanent lead approval is needed.
    Do not create a GitHub Issue or pull request for coordination.
 9. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
+
+When closing a receiver whose owned patch is already in the verified landed
+commit, preserve the patch and explicit owned-path list first. Stop writers
+and builds in that checkout, inspect status, and require no staged changes;
+do not unstage unexplained work. Verify that HEAD is an ancestor of the exact
+landed commit and that every selected tracked file has the same content and
+Git mode as that commit. Stage only those verified owned paths with an
+explicit path list, then fast-forward to that exact commit with
+`git merge --ff-only`. This avoids reversing and reapplying already-matching
+files. Record and compare their inode and modification time before and after
+the operation; preserved timestamps alone do not establish a compile-time gain.
+On any mismatch or refusal, preserve the state for inspection. Do not reset,
+clean, force checkout, stage unrelated paths, or retry automatically.
+Verify HEAD, status and the owned files afterwards, preserve the evidence,
+then [release this worktree's claims](#release-your-own-file-claims).
 
 A resident loop lands the same way through the native async queue
 (`z23 dev land submit|status|step|drive|cancel`, nested leaves under the `dev land` branch;
