@@ -1611,6 +1611,85 @@ static int test_ic_block_log_source_plan(void)
 
 /* ── T7: query only graph dimensions that can contain an edge ─────────── */
 
+static bool ic_json_integer_equals(const struct json_value *root,
+                                   const char *key, size_t expected)
+{
+    const struct json_value *value = json_get(root, key);
+    return value && value->type == JSON_INT &&
+           json_get_int(value) == (int64_t)expected;
+}
+
+static bool ic_json_boolean_equals(const struct json_value *root,
+                                   const char *key, bool expected)
+{
+    const struct json_value *value = json_get(root, key);
+    return value && value->type == JSON_BOOL && json_get_bool(value) == expected;
+}
+
+static bool ic_render_tier_counts(const struct zcl_devloop_plan *plan,
+                                  size_t total, size_t immediate,
+                                  size_t path_immediate, bool valid,
+                                  bool abridged)
+{
+    char body[ZCL_DEVLOOP_PLAN_WIRE_MAX + 1];
+    size_t n = zcl_devloop_plan_json_render(plan, NULL, 0, body, sizeof(body));
+    struct json_value root = {0};
+    if (!n || !json_read(&root, body, n))
+        return false;
+    bool match =
+        ic_json_integer_equals(&root, "execution_groups_total", total) &&
+        ic_json_integer_equals(&root, "execution_immediate_total", immediate) &&
+        ic_json_integer_equals(&root, "execution_path_immediate_total", path_immediate) &&
+        ic_json_boolean_equals(&root, "execution_set_valid", valid) &&
+        ic_json_boolean_equals(&root, "execution_groups_abridged", abridged);
+    json_free(&root);
+    return match;
+}
+
+static int test_ic_render_exact_tiers(void)
+{
+    int failures = 0;
+    TEST("plan rendering: complete tiers separate path, closure and integration") {
+        struct zcl_devloop_plan plan;
+        ASSERT(zcl_devloop_plan_files(NULL, 0, &plan));
+        ASSERT(ic_render_tier_counts(&plan, 0, 0, 0, true, false));
+        snprintf(plan.path_groups[0], sizeof(plan.path_groups[0]), "test_hex_codec");
+        plan.path_groups_len = 1;
+        ASSERT(ic_render_tier_counts(&plan, 1, 1, 1, true, false));
+        snprintf(plan.closure_groups[0], sizeof(plan.closure_groups[0]), "test_event_log");
+        snprintf(plan.closure_groups[1], sizeof(plan.closure_groups[1]), "test_store_e2e_gate");
+        snprintf(plan.closure_groups[2], sizeof(plan.closure_groups[2]), "test_hex_codec");
+        plan.closure_groups_len = 3;
+        ASSERT(ic_render_tier_counts(&plan, 3, 2, 1, true, false));
+        snprintf(plan.closure_groups[0], sizeof(plan.closure_groups[0]), "unknown_tier_group");
+        ASSERT(ic_render_tier_counts(&plan, 0, 0, 0, false, false));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_render_universal_tiers(void)
+{
+    int failures = 0;
+    TEST("plan rendering: universal abridgement keeps complete tier counts") {
+        struct zcl_devloop_plan plan;
+        ASSERT(zcl_devloop_plan_files(NULL, 0, &plan));
+        snprintf(plan.path_groups[0], sizeof(plan.path_groups[0]), "test_hex_codec");
+        plan.path_groups_len = 1;
+        plan.closure_universal = true;
+        size_t immediate = 0;
+        for (size_t i = 0; i < zcl_test_group_catalog_count(); i++)
+            if (!zcl_test_group_is_integration_only(zcl_test_group_catalog_at(i)))
+                immediate++;
+        ASSERT(ic_render_tier_counts(&plan, zcl_test_group_catalog_count(),
+                                     immediate, 1, true, true));
+        char tiny[16];
+        ASSERT(zcl_devloop_plan_json_render(&plan, NULL, 0, tiny, sizeof(tiny)) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_dimension_applicability_and_exact_execution(void)
 {
     int failures = 0;
@@ -12808,6 +12887,8 @@ int test_impact_composition(void)
     failures += test_ic_every_selection_has_a_reason();
     failures += test_ic_union_never_loses_a_rule_group();
     failures += test_ic_dimension_applicability_and_exact_execution();
+    failures += test_ic_render_exact_tiers();
+    failures += test_ic_render_universal_tiers();
     failures += test_ic_block_log_source_plan();
     failures += test_ic_lint_token_selects_every_shard();
     failures += test_ic_snapshot_overlays_current_symbols();
