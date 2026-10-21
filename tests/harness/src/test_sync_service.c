@@ -1977,7 +1977,7 @@ static int test_sync_service_at_tip_recovery_skips_scan(void)
 {
     int failures = 0;
 
-    TEST("stall recovery refuses to scan when best header is at the validated tip") {
+    TEST("stall recovery nudges without scanning when best header is at the validated tip") {
         /* Production regression, canonical rhett2 node 2026-10-21: a peer's
          * starting_height is handshake-static, so a peer that connected while
          * ahead keeps the starting_height trigger armed forever after this
@@ -1987,31 +1987,54 @@ static int test_sync_service_at_tip_recovery_skips_scan(void)
          * scan per 10 s throttle window for 20 h straight (~6.5% of a core,
          * 622 STALL log lines in 2 h) while synced at tip with gap 0. The
          * scan is not merely wasted: it holds the map rwlock against live
-         * block intake every window. */
+         * block intake every window. The scan is dropped; the bounded
+         * TIP_PARENT re-ask survives as an O(1) nudge: a stale connect-time
+         * height (common) answers nothing, genuinely missing headers (rare)
+         * arrive at throttle latency instead of waiting for the periodic
+         * request. */
         struct main_state ms;
         struct p2p_node node;
         struct sync_stall_recovery recovery;
-        struct block_index tip;
-        struct uint256 tip_hash = {0};
+        struct block_index parent, tip;
+        struct uint256 parent_hash = {0}, tip_hash = {0};
 
         memset(&node, 0, sizeof(node));
+        memset(&parent, 0, sizeof(parent));
         memset(&tip, 0, sizeof(tip));
         main_state_init(&ms);
+        block_index_init(&parent);
         block_index_init(&tip);
+        parent_hash.data[31] = 249;
         tip_hash.data[31] = 250;
+        parent.phashBlock = &parent_hash;
+        parent.nHeight = 99;
         tip.phashBlock = &tip_hash;
         tip.nHeight = 100;
+        tip.pprev = &parent;
         ASSERT(active_chain_move_window_tip(&ms.chain_active, &tip));
+        ASSERT(block_map_insert(&ms.map_block_index, &parent_hash, &parent));
         ASSERT(block_map_insert(&ms.map_block_index, &tip_hash, &tip));
         ms.pindex_best_header = &tip; /* tracking exists; nothing above tip */
 
         node.state = PEER_SYNCING_BLOCKS;
         node.starting_height = 3292042; /* far ahead, handshake-static */
-        bool fired = syncsvc_build_stall_recovery(&recovery, &ms, &node,
-                                                  0, 0, 20000);
-        if (fired)
-            syncsvc_free_stall_recovery(&recovery);
-        ASSERT(!fired);
+        ASSERT(syncsvc_build_stall_recovery(&recovery, &ms, &node,
+                                            0, 0, 80000));
+        /* The nudge, not the scan: no map-derived counters, no STALL log
+         * line, but the bounded tip-parent re-ask is armed. should_log ==
+         * false is what discriminates this from the legacy zero-candidate
+         * scan (which set it true and paid the walk). */
+        ASSERT(recovery.should_recover);
+        ASSERT(!recovery.should_log);
+        ASSERT(recovery.next_height == 101);
+        ASSERT(recovery.entries_at_next == 0);
+        ASSERT(recovery.alt_count == 0);
+        ASSERT(recovery.should_request_tip_parent);
+        syncsvc_free_stall_recovery(&recovery);
+
+        /* Bounded: inside the throttle window nothing fires at all. */
+        ASSERT(!syncsvc_build_stall_recovery(&recovery, &ms, &node,
+                                             0, 0, 80005));
         main_state_free(&ms);
         PASS();
     } _test_next:;
@@ -2054,7 +2077,7 @@ static int test_sync_service_recovery_fires_for_real_deficit(void)
         node.state = PEER_SYNCING_BLOCKS;
         node.starting_height = 1000;
         ASSERT(syncsvc_build_stall_recovery(&recovery, &ms, &node,
-                                            0, 0, 40000));
+                                            0, 0, 90000));
         ASSERT(recovery.should_recover);
         ASSERT(recovery.next_height == 101);
         ASSERT(recovery.alt_count == 1);
@@ -2131,7 +2154,7 @@ static int test_sync_service_at_tip_recovery_fires_under_corroboration_hold(void
         node.state = PEER_SYNCING_BLOCKS;
         node.starting_height = 2000;
         ASSERT(syncsvc_build_stall_recovery(&recovery, &ms, &node,
-                                            0, 0, 60000));
+                                            0, 0, 100000));
         ASSERT(recovery.should_recover);
         /* The held branch's h=101 entry is visible to the probe window and
          * the bounded tip-parent getheaders request survives — the exact

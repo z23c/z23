@@ -424,23 +424,41 @@ void syncsvc_sync_benchmark_reset_for_testing(void)
                           memory_order_relaxed);
 }
 
-/* Early-exit reasons that make the recovery scan pure waste, split out of
- * syncsvc_build_stall_recovery so its complexity ratchet pin holds. Each
- * clause names the state in which the scan below provably cannot produce
- * a recovery. */
-static bool stall_recovery_scan_is_waste(const struct main_state *ms,
-                                         const struct p2p_node *node,
-                                         uint64_t queued, uint64_t in_flight,
-                                         int our_h)
+/* Early-exit decision for syncsvc_build_stall_recovery, split out so its
+ * complexity ratchet pin holds. SKIP names a state where the scan provably
+ * cannot produce a recovery; PROCEED falls through to the legacy scan;
+ * AT_TIP_NUDGE fills `recovery` with an O(1) header re-ask that replaces
+ * the scan in the at-tip state (see the comment at the nudge). */
+enum stall_recovery_early {
+    STALL_RECOVERY_PROCEED,
+    STALL_RECOVERY_SKIP,
+    STALL_RECOVERY_AT_TIP_NUDGE,
+};
+
+static enum stall_recovery_early stall_recovery_early_exit(
+    const struct main_state *ms, const struct p2p_node *node,
+    uint64_t queued, uint64_t in_flight, int our_h, int64_t now_seconds,
+    struct sync_stall_recovery *recovery)
 {
-    if (queued != 0 || in_flight != 0) return true;
-    if (node->starting_height <= our_h + 10) return true;
-    if (node->state < PEER_HANDSHAKE_COMPLETE) return true;
-    /* At-tip guard (2026-10-21, canonical rhett2 evidence): a peer's
+    if (queued != 0 || in_flight != 0) return STALL_RECOVERY_SKIP;
+    if (node->starting_height <= our_h + 10) return STALL_RECOVERY_SKIP;
+    if (node->state < PEER_HANDSHAKE_COMPLETE) return STALL_RECOVERY_SKIP;
+    const struct block_index *best_header = ms->pindex_best_header;
+    if (!best_header || best_header->nHeight > our_h ||
+        header_corroboration_hold_active()) {
+        /* Deficit or hold: the legacy scan path. It shares the same 10 s
+         * budget as the nudge below — consume it here so both paths are
+         * bounded by ONE throttle. */
+        if (now_seconds - g_last_stall_log <= 10)
+            return STALL_RECOVERY_SKIP;
+        g_last_stall_log = now_seconds;
+        return STALL_RECOVERY_PROCEED;
+    }
+    /* At-tip state (2026-10-21, canonical rhett2 evidence): a peer's
      * starting_height is handshake-static, so a peer that connected while
      * ahead keeps the trigger above armed forever after this node catches
-     * up. When best-header tracking says no known header sits above the
-     * validated tip, the map scan provably cannot find anything (every
+     * up, and when best-header tracking says no known header sits above
+     * the validated tip the map scan provably cannot find anything (every
      * candidate lives at dh >= 1) — yet it still walked all ~3.3M entries
      * under the map rwlock once per 10 s throttle window (~6.5% of a core
      * plus a STALL log line, contending live block intake) for 20 h
@@ -448,26 +466,30 @@ static bool stall_recovery_scan_is_waste(const struct main_state *ms,
      * the tip are excluded deliberately: they never reach the descendant
      * pool (pprev must walk to OUR tip) and their bodies cannot advance
      * the active chain; a fork whose work crosses ours is promoted to the
-     * best header on acceptance and this guard opens again. ONE deliberate
-     * exception, opened on independent review (the closed form drew a
-     * source-reviewed REJECT for suppressing the bounded tip-parent
-     * recovery): while HEADER_CORROBORATION_HOLD withholds promotion of a
-     * strictly-better un-corroborated switch, the held branch sits above
-     * the tip exactly like a deficit and stall recovery must keep firing
-     * for it as before. Holds clear when a second distinct group
-     * corroborates the branch or it is abandoned; a lone peer
-     * persistently re-asserting an un-corroborated strictly-better fork
-     * can keep one alive indefinitely, and during that window the scan is
-     * doing real recovery work for a branch that genuinely sits above the
-     * tip — legacy behavior, not the steady-state burn this guard exists
-     * to end. No tracking
+     * best header on acceptance and the legacy scan resumes. A
+     * HEADER_CORROBORATION_HOLD (the branch above) also falls through to
+     * the legacy scan — held branches genuinely sit above the tip.
+     *
+     * The scan is dropped, NOT the re-ask (third independent review,
+     * 2026-10-21): a handshake-complete peer claiming 11+ headers ahead
+     * with nothing queued is locally indistinguishable between a stale
+     * connect-time height (common; the probe's reply is a no-op) and
+     * genuinely missing/delayed headers (rare; without this probe they
+     * wait for the ≤600 s periodic request). The old zero-candidate
+     * recovery answered exactly this with a bounded TIP_PARENT getheaders
+     * after the 10 s throttle — keep emitting it, without the O(map) walk
+     * and without the STALL log line. No tracking
      * (pindex_best_header == NULL) keeps the legacy scan so recovery is
      * never more conservative than before where tracking is absent. */
-    const struct block_index *best_header = ms->pindex_best_header;
-    if (best_header && best_header->nHeight <= our_h &&
-        !header_corroboration_hold_active())
-        return true;
-    return false;
+    if (now_seconds - g_last_stall_log <= 10) return STALL_RECOVERY_SKIP;
+    g_last_stall_log = now_seconds;
+    recovery->should_recover = true;
+    recovery->should_log = false;
+    recovery->chain_height = our_h;
+    recovery->next_height = our_h + 1;
+    struct block_index *tip = active_chain_tip(&ms->chain_active);
+    recovery->should_request_tip_parent = (tip && tip->pprev != NULL);
+    return STALL_RECOVERY_AT_TIP_NUDGE;
 }
 
 bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
@@ -484,11 +506,13 @@ bool syncsvc_build_stall_recovery(struct sync_stall_recovery *recovery,
     if (!ms || !node) LOG_FAIL("block_sync", "build_stall_recovery: null ms=%d node=%d", !ms, !node);
 
     int our_h = active_chain_height(&ms->chain_active);
-    if (stall_recovery_scan_is_waste(ms, node, queued, in_flight, our_h))
-        return false;
-    if (now_seconds - g_last_stall_log <= 10) return false;
+    /* SKIP leaves `recovery` zeroed (false); the at-tip nudge fills it and
+     * returns true; only PROCEED reaches the legacy scan below. */
+    if (stall_recovery_early_exit(ms, node, queued, in_flight, our_h,
+                                  now_seconds, recovery) !=
+        STALL_RECOVERY_PROCEED)
+        return recovery->should_recover;
 
-    g_last_stall_log = now_seconds;
     recovery->should_recover = true;
     recovery->should_log = true;
     recovery->chain_height = our_h;
