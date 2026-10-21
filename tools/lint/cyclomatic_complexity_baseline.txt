@@ -1585,7 +1585,7 @@ engine/controllers/src/api_controller_routes.c:api_dynamic_route_dispatch:42
 engine/controllers/src/api_controller_routes.c:api_dynamic_route_match:20
 engine/controllers/src/api_controller_service_operations.c:api_service_operation_json:17
 engine/controllers/src/api_controller_service_operations_index.c:api_service_operation_counts_add:18
-engine/controllers/src/api_controller_status.c:api_milestone_status_json:44
+engine/controllers/src/api_controller_status.c:api_milestone_status_json:43
 engine/controllers/src/api_controller_status.c:api_refold_status_json:21
 engine/controllers/src/api_controller_status.c:api_serve_node_summary:30
 engine/controllers/src/app_native_handlers.c:native_inbox_index_valid:21
@@ -3133,7 +3133,7 @@ tests/harness/src/test_syncdiag_agent_status.c:syncdiag_cases_agent_status:396
 tests/harness/src/test_syncdiag_anchorstatus.c:syncdiag_cases_anchorstatus:213
 tests/harness/src/test_syncdiag_api_catalog.c:syncdiag_cases_api_catalog:163
 tests/harness/src/test_syncdiag_health.c:syncdiag_cases_health:314
-tests/harness/src/test_syncdiag_operator.c:syncdiag_cases_operator:369
+tests/harness/src/test_syncdiag_operator.c:syncdiag_cases_operator:367
 tests/harness/src/test_telemetry_agents.c:check_node_down_is_unknown_not_unhealthy:17
 tests/harness/src/test_telemetry_network.c:check_fill_completeness:18
 tests/harness/src/test_telemetry_network.c:check_meaning_rows:23

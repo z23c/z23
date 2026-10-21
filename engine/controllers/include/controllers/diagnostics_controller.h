@@ -33,6 +33,10 @@ struct json_value;
 bool machine_identity_dump_state_json(struct json_value *out,
                                       const char *key);
 
+/* Shared current MVP acceptance projection, also consumed by milestone.
+ * Historical demonstrations do not replace this typed decision. */
+bool mvp_dump_state_json(struct json_value *out, const char *key);
+
 /* Wire main_state for subsystems that look up chain state (block_index
  * dumps, lastboot, etc). Call once after main_state is initialized. */
 void diagnostics_controller_set_state(struct main_state *ms,

@@ -4,7 +4,7 @@
  */
 
 #include "test/api_test_fixtures.h"
-#include "controllers/diagnostics_internal.h"
+#include "controllers/diagnostics_controller.h"
 
 /* Current acceptance follows the native classifier; history stays visible. */
 static void milestone_requires_history_basis(bool *ok,
@@ -25,6 +25,29 @@ static void milestone_requires_history_basis(bool *ok,
         goals && strstr(goals, "current qualified criteria") != NULL;
 }
 
+static bool milestone_item_agrees(const struct json_value *met,
+                                  const struct json_value *item,
+                                  const struct json_value *criterion)
+{
+    bool accepted = met && met->type == JSON_BOOL && json_get_bool(met);
+    const char *status = accepted ? "pass" : met && met->type == JSON_BOOL ? "fail" : "unknown";
+    return json_get_bool(json_get(item, "strict_pass")) == accepted &&
+           json_get_bool(json_get(criterion, "strict_pass")) == accepted &&
+           strcmp(json_get_str(json_get(item, "status")), status) == 0 &&
+           strcmp(json_get_str(json_get(criterion, "status")), status) == 0 &&
+           strcmp(json_get_str(json_get(item, "proof_state")), accepted ? "accepted" : "pending") == 0;
+}
+
+static bool milestone_summary_agrees(const struct json_value *root,
+                                     const struct json_value *proofs, int count)
+{
+    return json_get_int(json_get(root, "mvp_readiness_score")) == count &&
+           json_get_int(json_get(proofs, "accepted_count")) == count &&
+           json_get_int(json_get(proofs, "pending_count")) == 8 - count &&
+           json_get_bool(json_get(root, "complete")) == (count == 8) &&
+           json_get_int(json_get(json_get(json_get(root, "bars"), "goals"), "done")) == count;
+}
+
 static bool milestone_agrees_with_mvp(const struct json_value *root)
 {
     struct json_value native = {0};
@@ -37,21 +60,11 @@ static bool milestone_agrees_with_mvp(const struct json_value *root)
     ok = ok && rows && json_size(rows) == 8 && items && json_size(items) == 8;
     for (size_t i = 0; ok && i < 8; i++) {
         const struct json_value *met = json_get(json_at(rows, i), "met");
-        bool accepted = met && met->type == JSON_BOOL && json_get_bool(met);
-        const char *status = accepted ? "pass" : met && met->type == JSON_BOOL ? "fail" : "unknown";
         const struct json_value *item = json_at(items, i);
         const struct json_value *criterion = json_at(criteria, i);
-        ok = json_get_bool(json_get(item, "strict_pass")) == accepted &&
-             json_get_bool(json_get(criterion, "strict_pass")) == accepted &&
-             strcmp(json_get_str(json_get(item, "status")), status) == 0 &&
-             strcmp(json_get_str(json_get(criterion, "status")), status) == 0 &&
-             strcmp(json_get_str(json_get(item, "proof_state")), accepted ? "accepted" : "pending") == 0;
+        ok = milestone_item_agrees(met, item, criterion);
     }
-    ok = ok && json_get_int(json_get(root, "mvp_readiness_score")) == count &&
-         json_get_int(json_get(proofs, "accepted_count")) == count &&
-         json_get_int(json_get(proofs, "pending_count")) == 8 - count &&
-         json_get_bool(json_get(root, "complete")) == (count == 8) &&
-         json_get_int(json_get(json_get(json_get(root, "bars"), "goals"), "done")) == count;
+    ok = ok && milestone_summary_agrees(root, proofs, count);
     json_free(&native);
     return ok;
 }
@@ -72,6 +85,28 @@ static bool api_store_flow_pass(bool ok_in,
         return false;
     return strcmp(json_get_str(json_get(sf, "proof_command")),
                   "tools/dev/store_onion_acceptance.sh") == 0;
+}
+
+static bool milestone_legacy_response_not_accepted(void)
+{
+    struct json_value root = {0};
+    uint8_t response[8192];
+    size_t n = api_handle_request("GET", "/api/v1/milestone", NULL, 0,
+                                  response, sizeof(response));
+    const char *body = api_test_body(response, n, sizeof(response));
+    bool ok = n > 0 && body && json_read(&root, body, strlen(body)) &&
+              milestone_agrees_with_mvp(&root);
+    const struct json_value *items = json_get(json_get(&root, "operator_proofs"), "items");
+    const size_t ids[] = {1, 6};
+    for (size_t i = 0; ok && i < 2; i++) {
+        const struct json_value *item = json_at(items, ids[i]);
+        ok = item && !json_get_bool(json_get(item, "strict_pass")) &&
+             strcmp(json_get_str(json_get(item, "status")), "unknown") == 0 &&
+             strcmp(json_get_str(json_get(item, "proof_state")), "pending") == 0 &&
+             strcmp(json_get_str(json_get(item, "historical_status")), "pass") == 0;
+    }
+    json_free(&root);
+    return ok;
 }
 
 static bool milestone_legacy_receipts_not_accepted(void)
@@ -101,25 +136,7 @@ static bool milestone_legacy_receipts_not_accepted(void)
     }
     for (size_t i = 0; ok && i < 2; i++)
         ok = setenv(names[i], dir, 1) == 0;
-    struct json_value root = {0};
-    if (ok) {
-        uint8_t response[8192];
-        size_t n = api_handle_request("GET", "/api/v1/milestone", NULL, 0,
-                                      response, sizeof(response));
-        const char *body = api_test_body(response, n, sizeof(response));
-        ok = n > 0 && body && json_read(&root, body, strlen(body)) &&
-             milestone_agrees_with_mvp(&root);
-        const struct json_value *items = json_get(json_get(&root, "operator_proofs"), "items");
-        const size_t ids[] = {1, 6};
-        for (size_t i = 0; ok && i < 2; i++) {
-            const struct json_value *item = json_at(items, ids[i]);
-            ok = item && !json_get_bool(json_get(item, "strict_pass")) &&
-                 strcmp(json_get_str(json_get(item, "status")), "unknown") == 0 &&
-                 strcmp(json_get_str(json_get(item, "proof_state")), "pending") == 0 &&
-                 strcmp(json_get_str(json_get(item, "historical_status")), "pass") == 0;
-        }
-    }
-    json_free(&root);
+    ok = ok && milestone_legacy_response_not_accepted();
     for (size_t i = 0; i < 2; i++) {
         int rc = had[i] ? setenv(names[i], saved[i], 1) : unsetenv(names[i]);
         if (rc != 0) ok = false;
@@ -127,6 +144,14 @@ static bool milestone_legacy_receipts_not_accepted(void)
     if (path[0]) unlink(path);
     if (dir[0]) test_cleanup_tmpdir(dir);
     return ok;
+}
+
+static int milestone_legacy_receipt_test(void)
+{
+    bool ok = milestone_legacy_receipts_not_accepted();
+    printf("api: milestone retains legacy PASS history without current acceptance... %s\n",
+           ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
 }
 
 int api_route_table_focused_tests(void)
@@ -264,9 +289,7 @@ int api_route_table_focused_tests(void)
         else { printf("FAIL\n"); failures++; }
     }
 
-    printf("api: milestone retains legacy PASS history without current acceptance... ");
-    if (milestone_legacy_receipts_not_accepted()) printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
+    failures += milestone_legacy_receipt_test();
 
     printf("api: refold endpoint reports anchor readiness... ");
     {

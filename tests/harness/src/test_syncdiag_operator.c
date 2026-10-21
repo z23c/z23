@@ -5,41 +5,59 @@
 
 #include "test/syncdiag_rpc_fixture.h"
 
-/* RPC acceptance must agree with the shared typed MVP decision. */
-static void milestone_agrees_with_current_qualification(
-    bool *ok, const struct json_value *result,
-    const struct json_value *cold_start)
+static bool milestone_current_basis(const struct json_value *result,
+                                     const struct json_value *cold_start)
 {
     const char *basis = json_get_str(json_get(result, "score_basis"));
     const char *status = json_get_str(json_get(
         json_get(result, "current_qualification"), "status"));
     const char *evidence = cold_start
         ? json_get_str(json_get(cold_start, "evidence")) : NULL;
+    return basis &&
+        strcmp(basis, "current_typed_mvp_decision") == 0 &&
+        status && strcmp(status, "evaluated") == 0 &&
+        evidence && strcmp(evidence, "historical_report") == 0;
+}
+
+static bool milestone_current_counts(const struct json_value *result,
+                                     const struct json_value *proofs, int count)
+{
+    return json_get_int(json_get(result, "mvp_readiness_score")) == count &&
+        json_get_int(json_get(proofs, "accepted_count")) == count &&
+        json_get_int(json_get(proofs, "pending_count")) == 8 - count &&
+        json_get_bool(json_get(result, "complete")) == (count == 8) &&
+        json_get_int(json_get(json_get(json_get(result, "bars"), "goals"), "done")) == count;
+}
+
+static bool milestone_current_item(const struct json_value *met,
+                                    const struct json_value *item)
+{
+    bool accepted = met && met->type == JSON_BOOL && json_get_bool(met);
+    const char *current = accepted ? "pass" : met && met->type == JSON_BOOL ? "fail" : "unknown";
+    return json_get_bool(json_get(item, "strict_pass")) == accepted &&
+           strcmp(json_get_str(json_get(item, "status")), current) == 0 &&
+           strcmp(json_get_str(json_get(item, "proof_state")), accepted ? "accepted" : "pending") == 0;
+}
+
+/* RPC acceptance must agree with the shared typed MVP decision. */
+static void milestone_agrees_with_current_qualification(
+    bool *ok, const struct json_value *result,
+    const struct json_value *cold_start)
+{
     struct json_value native = {0};
     bool classified = mvp_dump_state_json(&native, NULL);
     const struct json_value *rows = json_get(&native, "criteria");
     const struct json_value *proofs = json_get(result, "operator_proofs");
     const struct json_value *items = json_get(proofs, "items");
     int count = (int)json_get_int(json_get(&native, "met_count"));
-    *ok = *ok && basis &&
-        strcmp(basis, "current_typed_mvp_decision") == 0 &&
-        status && strcmp(status, "evaluated") == 0 &&
-        evidence && strcmp(evidence, "historical_report") == 0 &&
-        classified && rows && json_size(rows) == 8 &&
-        items && json_size(items) == 8 &&
-        json_get_int(json_get(result, "mvp_readiness_score")) == count &&
-        json_get_int(json_get(proofs, "accepted_count")) == count &&
-        json_get_int(json_get(proofs, "pending_count")) == 8 - count &&
-        json_get_bool(json_get(result, "complete")) == (count == 8) &&
-        json_get_int(json_get(json_get(json_get(result, "bars"), "goals"), "done")) == count;
+    *ok = *ok && milestone_current_basis(result, cold_start) &&
+          classified && rows && json_size(rows) == 8 &&
+          items && json_size(items) == 8 &&
+          milestone_current_counts(result, proofs, count);
     for (size_t i = 0; *ok && i < 8; i++) {
         const struct json_value *met = json_get(json_at(rows, i), "met");
-        bool accepted = met && met->type == JSON_BOOL && json_get_bool(met);
-        const char *current = accepted ? "pass" : met && met->type == JSON_BOOL ? "fail" : "unknown";
         const struct json_value *item = json_at(items, i);
-        *ok = json_get_bool(json_get(item, "strict_pass")) == accepted &&
-              strcmp(json_get_str(json_get(item, "status")), current) == 0 &&
-              strcmp(json_get_str(json_get(item, "proof_state")), accepted ? "accepted" : "pending") == 0;
+        *ok = milestone_current_item(met, item);
     }
     json_free(&native);
 }

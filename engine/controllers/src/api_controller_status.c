@@ -11,7 +11,7 @@
 #include "controllers/agent_resources.h"
 #include "controllers/agent_security_posture.h"
 #include "controllers/api_controller.h"
-#include "controllers/diagnostics_internal.h"
+#include "controllers/diagnostics_controller.h"
 #include "controllers/download_stats_json.h"
 #include "controllers/node_binary_identity_json.h"
 #include "controllers/operator_needed_policy.h"
@@ -236,6 +236,21 @@ struct milestone_qualification {
     int state[8]; /* -1 unknown, 0 unmet, 1 met */
 };
 
+static bool api_mvp_read_state(const struct json_value *row, int index, int *out)
+{
+    const struct json_value *met = json_get(row, "met");
+    const char *state = api_json_str_field(row, "met_state", "");
+    char id[4];
+    snprintf(id, sizeof(id), "C%d", index + 1);
+    if (strcmp(api_json_str_field(row, "id", ""), id)) return false;
+    if (met && met->type == JSON_BOOL) {
+        *out = json_get_bool(met) ? 1 : 0;
+        return strcmp(state, *out ? "met" : "unmet") == 0;
+    }
+    *out = -1;
+    return met && met->type == JSON_NULL && strcmp(state, "unknown") == 0;
+}
+
 static bool api_mvp_read_qualification(struct milestone_qualification *q,
                                        const struct json_value *status)
 {
@@ -246,22 +261,20 @@ static bool api_mvp_read_qualification(struct milestone_qualification *q,
         !count || count->type != JSON_INT)
         return false;
     for (int i = 0; i < 8; i++) {
-        const struct json_value *row = json_at(rows, (size_t)i);
-        const struct json_value *met = json_get(row, "met");
-        const char *state = api_json_str_field(row, "met_state", "");
-        char id[4];
-        snprintf(id, sizeof(id), "C%d", i + 1);
-        if (strcmp(api_json_str_field(row, "id", ""), id)) return false;
-        if (met && met->type == JSON_BOOL) {
-            q->state[i] = json_get_bool(met) ? 1 : 0;
-            if (strcmp(state, q->state[i] ? "met" : "unmet")) return false;
-        } else {
-            if (!met || met->type != JSON_NULL || strcmp(state, "unknown")) return false;
-            q->state[i] = -1;
-        }
+        if (!api_mvp_read_state(json_at(rows, (size_t)i), i, &q->state[i])) return false;
         if (q->state[i] == 1) q->met_count++;
     }
     return json_get_int(count) == q->met_count;
+}
+
+static void api_mvp_historical_progress(int *passes, int *units, int *total)
+{
+    *passes = 0; *units = 0; *total = 0;
+    for (size_t i = 0; i < sizeof(k_mvp_criteria) / sizeof(k_mvp_criteria[0]); i++) {
+        if (k_mvp_criteria[i].strict_pass) (*passes)++;
+        *units += k_mvp_criteria[i].units;
+        *total += 2;
+    }
 }
 
 static struct milestone_qualification api_mvp_qualification(void)
@@ -516,12 +529,7 @@ void api_milestone_status_json(struct json_value *result)
     int partial_units = 0;
     int max_units = 0;
     size_t criteria_count = sizeof(k_mvp_criteria) / sizeof(k_mvp_criteria[0]);
-    for (size_t i = 0; i < criteria_count; i++) {
-        if (k_mvp_criteria[i].strict_pass)
-            historical_pass++;
-        partial_units += k_mvp_criteria[i].units;
-        max_units += 2;
-    }
+    api_mvp_historical_progress(&historical_pass, &partial_units, &max_units);
 
     json_set_object(result);
     json_push_kv_str(result, "schema", ZCL_MILESTONE_STATUS_SCHEMA);
