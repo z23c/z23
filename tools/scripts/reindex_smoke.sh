@@ -32,6 +32,8 @@
 #       REINDEX_WITNESS=1 instead freezes an interior durable replay cursor,
 #       verifies it again after SIGKILL, and requires completed replay plus
 #       retired replay keys and complete shielded activation markers.
+#   ZCL_REINDEX_REFUSE_MISSING_BODY=1 (clean 50-block mode) damages only H25's
+#   isolated payload, proves refusal preserves authority, then restores/replays.
 #
 # Required env (set by the Makefile target before sourcing isolated_node_env.sh):
 #   ISO_KIND=reindex, ISO_PORT_BASE=390xx, SEED_BLOCKS=N, KILL_MID=0|1.
@@ -44,6 +46,7 @@ REINDEX_WITNESS="${REINDEX_WITNESS:-0}"
 RPC_READY_TIMEOUT="${RPC_READY_TIMEOUT:-90}"
 MAX_REBOOTS="${MAX_REBOOTS:-3}"
 REINDEX_KILL_DELAY_MS="${REINDEX_KILL_DELAY_MS:-}"
+REFUSE_MISSING_BODY="${ZCL_REINDEX_REFUSE_MISSING_BODY:-0}"
 
 # shellcheck source=tools/scripts/isolated_node_env.sh
 . tools/scripts/isolated_node_env.sh
@@ -69,6 +72,10 @@ SEED_BLOCKS=$((10#$SEED_BLOCKS))
 [ "$SEED_BLOCKS" -ge 3 ] && [ "$SEED_BLOCKS" -le 5000 ] || fail "REINDEX_SEED_BLOCKS must be 3..5000"
 case "$REINDEX_WITNESS" in 0|1) ;; *) fail "REINDEX_WITNESS must be 0 or 1" ;; esac
 [ "$REINDEX_WITNESS" = 0 ] || [ "$KILL_MID" = 1 ] || fail "REINDEX_WITNESS requires KILL_MID=1"
+case "$REFUSE_MISSING_BODY" in 0|1) ;; *) fail 'ZCL_REINDEX_REFUSE_MISSING_BODY must be 0 or 1' ;; esac
+if [ "$REFUSE_MISSING_BODY" = 1 ]; then
+    [ "$KILL_MID" = 0 ] && [ "$SEED_BLOCKS" = 50 ] || fail 'missing-body refusal requires clean mode with 50 seed blocks'
+fi
 
 if [ -n "$REINDEX_KILL_DELAY_MS" ]; then
     case "$REINDEX_KILL_DELAY_MS" in
@@ -195,6 +202,85 @@ known_blocked() {
     exit 0
 }
 
+# Strict RPC state for the refusal mode; JSON raw values retain their types.
+missing_rpc_result() {
+    local reply
+    reply=$(iso_rpc "$@") || return 1
+    [ "$(printf '%s' "$reply" | "$ISO_JSONQ_BIN" raw error)" = null ] || return 1
+    printf '%s' "$reply" | "$ISO_JSONQ_BIN" raw result
+}
+missing_rpc_state() {
+    local h hash commitment ch count sha
+    h=$(missing_rpc_result getblockcount) || return 1
+    hash=$(missing_rpc_result getblockhash "$base_height") || return 1
+    commitment=$(missing_rpc_result getutxocommitment) || return 1
+    ch=$(printf '%s' "$commitment" | "$ISO_JSONQ_BIN" raw height) || return 1
+    count=$(printf '%s' "$commitment" | "$ISO_JSONQ_BIN" raw utxo_count) || return 1
+    sha=$(printf '%s' "$commitment" | "$ISO_JSONQ_BIN" raw sha3_hash) || return 1
+    [[ "$h" =~ ^[0-9]+$ && "$count" =~ ^[1-9][0-9]*$ && "$hash" =~ ^\"[0-9a-f]{64}\"$ && "$sha" =~ ^\"[0-9a-f]{64}\"$ ]] || return 1
+    [ "$h" = "$base_height" ] && [ "$ch" = "$base_height" ] || return 1
+    printf '%s\t%s\t%s\t%s\n' "$h" "$hash" "$count" "$sha"
+}
+missing_snapshot() {
+    local output="$1" sql
+    : > "$output"
+    for sql in \
+        'SELECT hex(txid),vout,value,height,is_coinbase,hex(script) FROM coins ORDER BY txid,vout' \
+        'SELECT name,cursor FROM stage_cursor ORDER BY name' \
+        "SELECT key,hex(value) FROM progress_meta WHERE key IN ('coins_applied_height','coins_kv_authority_generation.v1','coins_kv_migration_complete','coins_kv_self_folded','nullifier_kv.activation_cursor') OR key GLOB 'shielded_history.full_replay.*' ORDER BY key" \
+        'SELECT pool,activation_cursor FROM anchor_state ORDER BY pool'; do
+        printf '%s\n' "$sql" >> "$output"
+        build/bin/sqlq "$ISO_DD/consensus.db" "$sql" >> "$output" || fail 'cannot snapshot stopped recovery authority'
+    done
+}
+missing_wait_rpc() {
+    local remaining=$((missing_deadline - $(date +%s)))
+    [ "$remaining" -gt 0 ] && iso_wait_rpc_ready "$remaining" &&
+        [ "$(date +%s)" -lt "$missing_deadline" ] || fail 'missing-body run exceeded deadline or exited before RPC'
+}
+missing_body_roundtrip() {
+    local row hash file offset path after
+    witness_dir=$(mktemp -d "$PWD/build/reindex-missing-body.XXXXXX") || fail 'cannot retain missing-body evidence'
+    missing_baseline=$(missing_rpc_state) || fail 'typed baseline state unavailable'
+    printf '%s\n' "$missing_baseline" > "$witness_dir/baseline.rpc"
+    row=$(missing_rpc_result chainview 25 1) || fail 'cannot locate H25 body'
+    hash=$(missing_rpc_result getblockhash 25) || fail 'cannot identify H25 block'
+    printf '%s\n' "$row" > "$witness_dir/h25-position.json"
+    [ "$(printf '%s' "$row" | "$ISO_JSONQ_BIN" count .)" = 1 ] &&
+        [ "$(printf '%s' "$row" | "$ISO_JSONQ_BIN" raw '[0].height')" = 25 ] &&
+        [ "$(printf '%s' "$row" | "$ISO_JSONQ_BIN" raw '[0].hash')" = "$hash" ] &&
+        [[ "$hash" =~ ^\"[0-9a-f]{64}\"$ ]] || fail 'H25 body witness does not identify the active block'
+    file=$(printf '%s' "$row" | "$ISO_JSONQ_BIN" raw '[0].file') || fail 'H25 body file unavailable'
+    offset=$(printf '%s' "$row" | "$ISO_JSONQ_BIN" raw '[0].datapos') || fail 'H25 body offset unavailable'
+    [[ "$file" =~ ^[0-9]+$ && "$offset" =~ ^[0-9]+$ ]] && [ "$offset" -gt 0 ] || fail 'invalid H25 body position'
+    iso_stop_node
+    missing_snapshot "$witness_dir/before.state"
+    if [ "$file" = 255 ]; then path="$ISO_DD/regtest/blocks/blk_sync.dat";
+    else printf -v path '%s/regtest/blocks/blk%05d.dat' "$ISO_DD" "$file"; fi
+    [ -f "$path" ] && [ ! -L "$path" ] || fail 'H25 body path is not a regular non-symlink file'
+    cp "$path" "$witness_dir/retained-block.dat" || fail 'cannot retain indexed block file'
+    [ "$(od -An -tx1 -j "$offset" -N 1 "$path" | tr -d ' \n')" = 04 ] || fail 'H25 indexed payload does not begin with version4'
+    printf '\000' | dd of="$path" bs=1 seek="$offset" count=1 conv=notrunc 2>/dev/null || fail 'cannot damage isolated H25 payload'
+    missing_deadline=$(( $(date +%s) + 120 ))
+    iso_spawn_node '-reindex-chainstate'
+    missing_wait_rpc
+    after=$(missing_rpc_state) || fail 'refused boot did not preserve typed serving state'
+    [ "$after" = "$missing_baseline" ] || fail 'refused boot changed height/hash/coins'
+    iso_stop_node
+    cp "$ISO_DD/node.log" "$witness_dir/refused.node.log" || fail 'cannot retain refusal log'
+    grep -aqF 'input at height 25 is unavailable or noncanonical' "$ISO_DD/node.log" &&
+        grep -aqF 'Restore the missing block data' "$ISO_DD/node.log" || fail 'missing H25 refusal/action absent'
+    if grep -aqE 'wiped SQLite UTXO set|reindex start blocks=|reindex-chainstate: rebuilding UTXO|reindex-chainstate: complete in|source=reindex' "$ISO_DD/node.log"; then fail 'refused reindex began mutation/replay'; fi
+    missing_snapshot "$witness_dir/after.state"
+    cmp -s "$witness_dir/before.state" "$witness_dir/after.state" || fail 'refused reindex changed durable recovery authority'
+    cp "$witness_dir/retained-block.dat" "$path" && cmp -s "$witness_dir/retained-block.dat" "$path" || fail 'block file restoration differs'
+    [ "$(date +%s)" -lt "$missing_deadline" ] || fail 'missing-body restoration exceeded deadline'
+    iso_spawn_node '-reindex-chainstate'
+    missing_wait_rpc
+    serving=1; boot=1
+    echo "reindex-smoke: missing H25 refused without authority loss; restored replay running; evidence=$witness_dir"
+}
+
 # ── 1. Spawn fresh, seed SEED_BLOCKS regtest blocks. ────────────────
 echo "reindex-smoke: spawn + seed $SEED_BLOCKS blocks (datadir=$ISO_DD)"
 iso_spawn_node
@@ -215,7 +301,8 @@ echo "reindex-smoke: baseline height=$base_height txouts=$base_txouts commit=${b
 # ── 2. Restart with -reindex-chainstate (clean, or kill after startup). ──
 boot=0
 serving=0
-while [ "$boot" -lt "$MAX_REBOOTS" ]; do
+if [ "$REFUSE_MISSING_BODY" = 1 ]; then missing_body_roundtrip; fi
+while [ "$serving" = 0 ] && [ "$boot" -lt "$MAX_REBOOTS" ]; do
     boot=$((boot + 1))
     if [ "$KILL_MID" = "1" ] && [ "$boot" -eq 1 ]; then
         echo "reindex-smoke: boot $boot — spawn with -reindex-chainstate then kill -9 after startup"
@@ -328,5 +415,12 @@ if grep -aqE 'coins_applied=[0-9]+ > utxo_apply_frontier' "$ISO_DD/node.log"; th
     fail "TOOTH 4 NO-TEAR: node.log shows coins_applied > utxo_apply_frontier"
 fi
 echo "reindex-smoke: TOOTH 4 SERVING + NO tear PASS (no coins_applied>frontier in node.log)"
+
+if [ "$REFUSE_MISSING_BODY" = 1 ]; then
+    final=$(missing_rpc_state) || fail 'typed restored-replay state unavailable'
+    [ "$final" = "$missing_baseline" ] && [ "$(date +%s)" -lt "$missing_deadline" ] || fail 'restored replay changed state or exceeded deadline'
+    cp "$ISO_DD/node.log" "$witness_dir/restored.node.log" || fail 'cannot retain restored replay log'
+    echo 'reindex-smoke: missing-body refusal and restored full replay PASS'
+fi
 
 echo "reindex-smoke: PASS"

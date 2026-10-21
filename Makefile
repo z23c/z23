@@ -9657,7 +9657,7 @@ test-crash-bootstrap: crash_recovery_test zclassic23 zcl-rpc jsonq process-group
 # Opt-in (NOT in hermetic `make ci`): it SPAWNS a real regtest node. All
 # isolation is delegated to tools/scripts/isolated_node_env.sh.
 .PHONY: test-reindex-smoke
-test-reindex-smoke: zclassic23 zcl-rpc
+test-reindex-smoke: zclassic23 zcl-rpc sqlq
 	@ISO_KIND=reindex ISO_PORT_BASE=$${ISO_PORT_BASE:-39050} \
 	    SEED_BLOCKS=50 KILL_MID=0 \
 	    bash tools/scripts/reindex_smoke.sh

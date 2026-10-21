@@ -314,7 +314,7 @@ static int nw_canonical_replay_case(int target)
 }
 
 /* Admit real H2/H3 indexes and bodies, then hide only the middle body. */
-static bool nw_pending_missing_middle(struct nw_replay *f)
+static bool nw_pending_missing_middle(struct nw_replay *f, bool begin_pending)
 {
     const struct chain_params *cp = chain_params_get();
     struct block_index *prev = active_chain_at(&f->ms.chain_active, 1);
@@ -340,12 +340,58 @@ static bool nw_pending_missing_middle(struct nw_replay *f)
         prev = pi;
     }
     active_chain_move_window_tip(&f->ms.chain_active, prev);
-    if (!shielded_history_begin_full_replay(progress_store_db(), 3)) return false;
+    if (begin_pending && !shielded_history_begin_full_replay(progress_store_db(), 3)) return false;
     disk_block_io_close_cache();
     middle->nDataPos = UINT32_MAX; /* only the indexed H2 body becomes unreadable */
-    bool refused = nw_replay_refuses_state(f, false);
+    bool fixture = active_chain_height(&f->ms.chain_active) == 3 &&
+        active_chain_at(&f->ms.chain_active, 2) == middle &&
+        (middle->nStatus & BLOCK_HAVE_DATA) && (prev->nStatus & BLOCK_HAVE_DATA) &&
+        !block_index_have_data_readable(middle, f->dir) &&
+        block_index_have_data_readable(prev, f->dir);
+    bool refused = fixture && nw_replay_refuses_state(f, false);
     middle->nDataPos = middle_pos.nPos;
     return refused;
+}
+
+static int nw_fresh_missing_middle_case(void)
+{
+    int failures = 0;
+    struct nw_replay f = {0};
+    bool ready = nw_replay_open(&f) && nw_replay_chain(&f, 1);
+    NW_CHECK("fresh replay missing-middle fixture ready", ready);
+    if (!ready) { nw_replay_close(&f); return failures; }
+    struct shielded_replay_session session;
+    bool pending = true;
+    progress_store_tx_lock();
+    bool absent = shielded_history_read_full_replay(progress_store_db(), &session, &pending) && !pending;
+    progress_store_tx_unlock();
+    NW_CHECK("fresh replay has no pending session", absent);
+    struct block_index *one = block_map_find(&f.ms.map_block_index, &f.hash);
+    disk_block_io_close_cache();
+    NW_CHECK("fresh replay real indexed H1 is readable", one && block_index_have_data_readable(one, f.dir));
+    NW_CHECK("fresh replay populated H3 chain with missing H2 refuses without state loss",
+        nw_pending_missing_middle(&f, false));
+    pending = true;
+    progress_store_tx_lock();
+    absent = shielded_history_read_full_replay(progress_store_db(), &session, &pending) && !pending;
+    progress_store_tx_unlock();
+    NW_CHECK("fresh replay refusal creates no replay session", absent);
+    uint64_t generation = UINT64_MAX;
+    NW_CHECK("fresh replay restored H2 body is readable",
+        block_index_have_data_readable(active_chain_at(&f.ms.chain_active, 2), f.dir));
+    NW_CHECK("fresh replay prior generation readable",
+        coins_kv_get_authority_generation(progress_store_db(), &generation));
+    /* Capture the independent expected tip before replay can modify the chain. */
+    struct block_index *expected_tip = active_chain_at(&f.ms.chain_active, 3);
+    NW_CHECK("fresh replay expected H3 hash exists", expected_tip && expected_tip->phashBlock);
+    if (!expected_tip || !expected_tip->phashBlock) { nw_replay_close(&f); return failures; }
+    f.hash = *expected_tip->phashBlock;
+    seed_integrity_gate_set_node_db_for_testing(&f.ndb);
+    NW_CHECK("fresh replay restored full span succeeds through H3",
+        reindex_chainstate(&f.ms, &f.view, &f.cache, &f.ndb, f.root, f.dir));
+    failures += nw_replay_terminal(&f, 3, generation);
+    nw_replay_close(&f);
+    return failures;
 }
 
 static int nw_pending_replay_case(void)
@@ -375,7 +421,7 @@ static int nw_pending_replay_case(void)
         shielded_history_begin_full_replay(db, 2) && nw_replay_refuses_state(&f, false));
     NW_CHECK("pending replay malformed session refuses without state loss",
         progress_meta_set(db, SHIELDED_REPLAY_NEXT_KEY, "00", 2) && nw_replay_refuses_state(&f, false));
-    NW_CHECK("pending replay missing middle body refuses without state loss", nw_pending_missing_middle(&f));
+    NW_CHECK("pending replay missing middle body refuses without state loss", nw_pending_missing_middle(&f, true));
     active_chain_move_window_tip(&f.ms.chain_active, one);
     NW_CHECK("pending endpoint session is restored",
         shielded_history_begin_full_replay(db, 1) && progress_meta_set(db, SHIELDED_REPLAY_NEXT_KEY, "2", 1));
@@ -454,6 +500,7 @@ int test_recovery_no_worse(void)
     failures += nw_canonical_replay_case(1);
     failures += nw_canonical_replay_case(0);
     failures += nw_pending_replay_case();
+    failures += nw_fresh_missing_middle_case();
     failures += nw_pending_migration_case();
 
     /* ════════════════════════════════════════════════════════════════

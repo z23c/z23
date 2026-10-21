@@ -280,29 +280,38 @@ static bool boot_index_pending_body(struct block_index *pi, int height,
     return linked;
 }
 
+static bool boot_index_replay_span_available(struct block_index *tip,
+    int target, const char *body_datadir, int *unavailable_height)
+{
+    *unavailable_height = target;
+    if (!tip || !body_datadir || !body_datadir[0] || target < 0 ||
+        target >= INT_MAX || tip->nHeight != target)
+        return false;
+    struct block_index *pi = tip;
+    for (int h = target; h >= 0; h--) {
+        *unavailable_height = h;
+        bool available = h == 0 ? boot_index_reindex_input_available(pi, h, body_datadir)
+                                : boot_index_pending_body(pi, h, body_datadir);
+        if (!available) return false;
+        if (h == 0) {
+            if (pi->pprev) return false;
+        } else pi = pi->pprev;
+    }
+    return true;
+}
+
 bool boot_index_pending_replay_preflight(struct block_index *tip,
     const struct shielded_replay_session *session, const char *body_datadir)
 {
-    if (!tip || !session || !body_datadir || !body_datadir[0] ||
-        session->target < 0 || session->target >= INT_MAX ||
+    if (!tip || !session || session->target < 0 || session->target >= INT_MAX ||
         tip->nHeight != session->target) {
         LOG_WARN("reindex-chainstate", "pending replay target differs from selected chain");
         return false;
     }
-    struct block_index *pi = tip;
-    for (int h = tip->nHeight; h >= 0; h--) {
-        bool available = h == 0 ? boot_index_reindex_input_available(pi, h, body_datadir)
-                                : boot_index_pending_body(pi, h, body_datadir);
-        if (!available) {
-            LOG_WARN("reindex-chainstate", "pending replay input unavailable height=%d", h);
-            return false;
-        }
-        if (h == 0) {
-            if (pi->pprev) {
-                LOG_WARN("reindex-chainstate", "pending canonical genesis has a parent");
-                return false;
-            }
-        } else pi = pi->pprev;
+    int missing;
+    if (!boot_index_replay_span_available(tip, (int)session->target, body_datadir, &missing)) {
+        LOG_WARN("reindex-chainstate", "pending replay input unavailable height=%d", missing);
+        return false;
     }
     return true;
 }
@@ -449,29 +458,30 @@ static bool boot_index_admit_replay(struct main_state *ms, int tip_height,
         LOG_WARN("reindex-chainstate", "invalid durable replay session; preserving state");
         return false;
     }
+    struct block_index *tip = active_chain_at(&ms->chain_active, tip_height);
     if (*pending) {
-        struct block_index *tip = active_chain_at(&ms->chain_active, tip_height);
         if (!boot_index_pending_replay_preflight(tip, session, body_datadir)) return false;
-        for (int h = tip_height; h >= 0; h--) {
-            if (active_chain_at(&ms->chain_active, h) != tip) {
-                LOG_WARN("reindex-chainstate", "pending replay active-chain gap height=%d", h);
-                return false;
-            }
-            tip = tip->pprev;
+    } else {
+        /* Keep the cheap early probe, then prove every body before any flush. */
+        int missing = boot_index_reindex_missing_input(ms, body_datadir);
+        if (missing >= 0 || !boot_index_replay_span_available(tip, tip_height, body_datadir, &missing)) {
+            fprintf(stderr,
+                "reindex-chainstate: input at height %d is unavailable or noncanonical — "
+                "replay-from-blocks/ is not executable on this datadir; REFUSING before "
+                "wiping the UTXO set. Restore the missing block data or use a cold-import re-seed.\n", missing);
+            event_emitf(EV_BOOT_ACTIVATE, 0, "reindex_refused_unexecutable probe_h=%d tip=%d", missing, tip_height);
+            boot_auto_reindex_clear(datadir);
+            return false;
         }
-        return true;
     }
-    /* Preserve the ordinary early probe: bodyless canonical genesis is empty,
-     * but an unexecutable explicit/sentinel request must not wipe the seed. */
-    int missing = boot_index_reindex_missing_input(ms, body_datadir);
-    if (missing < 0) return true;
-    fprintf(stderr,
-        "reindex-chainstate: input at height %d is unavailable or noncanonical — "
-        "replay-from-blocks/ is not executable on this datadir; REFUSING before "
-        "wiping the UTXO set. Restore the missing block data or use a cold-import re-seed.\n", missing);
-    event_emitf(EV_BOOT_ACTIVATE, 0, "reindex_refused_unexecutable probe_h=%d tip=%d", missing, tip_height);
-    boot_auto_reindex_clear(datadir);
-    return false;
+    for (int h = tip_height; h >= 0; h--) {
+        if (active_chain_at(&ms->chain_active, h) != tip) {
+            LOG_WARN("reindex-chainstate", "replay active-chain gap height=%d", h);
+            return false;
+        }
+        tip = tip->pprev;
+    }
+    return true;
 }
 
 static bool boot_index_flush_admitted_replay(struct coins_view_sqlite *cvs,
