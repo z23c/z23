@@ -302,7 +302,7 @@ static bool runtime_running(enum device_host_bridge_result result)
 {
     return result == DEVICE_HOST_BRIDGE_READY || result == DEVICE_HOST_BRIDGE_WAIT || result == DEVICE_HOST_BRIDGE_PROGRESS;
 }
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 /* Session-cap reservation at PSK success, before any target connect. */
 static bool runtime_reserve_target(void *context)
 {
@@ -429,11 +429,16 @@ static enum device_host_bridge_result device_host_runtime_client_run_state(
     runtime_collect(out, &slot.bridge.observation); return out->result;
 }
 
-#if defined(__linux__)
+#if defined(__linux__) || defined(__APPLE__)
 static bool runtime_receiver_valid(const struct device_host_runtime_receiver_spec *spec)
 {
     if (!spec || !runtime_common_valid(&spec->common) || !runtime_address_valid(spec->listen_address_be)) return false;
     if ((ntohl(spec->listen_address_be) >> 24) != 127 && !spec->allow_external) return false;
+#if defined(__APPLE__)
+    /* macOS receivers are loopback-only: allow_external refuses here as well,
+     * so direct runtime callers cannot bypass the entry's named refusal. */
+    if (spec->allow_external) return false;
+#endif
     return spec->lifetime_ms > 0 && spec->lifetime_ms <= DEVICE_HOST_RUNTIME_LIFETIME_MS_MAX &&
         spec->max_sessions > 0 && spec->max_sessions <= DEVICE_HOST_RUNTIME_ACCEPT_MAX &&
         spec->max_active > 0 && spec->max_active <= DEVICE_HOST_RUNTIME_ACTIVE_MAX;
@@ -599,14 +604,6 @@ static enum device_host_bridge_result device_host_runtime_receiver_run_state(
     out->result = runtime_receiver_loop(spec, &authority, slots, &listener, deadline, out);
     if (listener >= 0) platform_socket_close(listener);
     runtime_stop_slots(slots, spec->max_active, out->result, out); return out->result;
-}
-#else
-static enum device_host_bridge_result device_host_runtime_receiver_run_state(
-    const struct device_host_runtime_receiver_spec *spec, struct device_host_runtime_observation *out)
-{
-    (void)spec;
-    if (out) { memset(out, 0, sizeof(*out)); out->result = DEVICE_HOST_BRIDGE_UNSUPPORTED; out->cleanup_complete = true; }
-    return DEVICE_HOST_BRIDGE_UNSUPPORTED;
 }
 #endif
 #else

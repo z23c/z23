@@ -258,11 +258,21 @@ static void raw_runtime_run(struct raw_runtime *runtime, bool receiver,
     }
     if (!result.ok) fprintf(stderr, "error=HOST_RUNTIME_FAILURE %s\n", result.message);
 }
+#if defined(__APPLE__)
+/* macOS receivers stay loopback-only: allow_external=true refuses by name
+ * before input validation, preserving the pre-lift ordering in which the
+ * platform refusal preceded every other check. */
+static bool raw_apple_external_refused(const struct json_value *input, bool receiver)
+{
+    const struct json_value *external = receiver ? json_get(input, "allow_external") : NULL;
+    return external && external->type == JSON_BOOL && json_get_bool(external);
+}
+#endif
 static enum device_host_runtime_entry_exit device_host_runtime_entry_run_state(const struct json_value *input, bool receiver)
 {
 #if defined(__APPLE__)
-    if (receiver) {
-        fprintf(stderr, "error=HOST_RUNTIME_UNSUPPORTED role=receiver platform=unqualified\n");
+    if (raw_apple_external_refused(input, receiver)) {
+        fprintf(stderr, "error=HOST_RUNTIME_UNSUPPORTED role=receiver allow_external=unsupported platform=darwin_loopback_only\n");
         return DEVICE_HOST_ENTRY_UNSUPPORTED;
     }
 #endif

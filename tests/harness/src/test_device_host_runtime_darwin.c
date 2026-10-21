@@ -31,6 +31,10 @@ struct mac_host_fixture {
     int listener, target_listener, target, app[2], diagnostics[2], output[2];
     uint16_t port, target_port;
     pid_t child; int status; bool custody_lost;
+    struct { pid_t pid; int status; bool custody_lost; } receiver;
+    int receiver_diagnostics[2];
+    uint16_t receiver_port;
+    char receiver_text[4096]; size_t receiver_used;
     struct device_host_psk_bridge hub;
     char diagnostic_text[4096]; size_t diagnostic_used;
 };
@@ -97,6 +101,8 @@ static bool mac_host_open(struct mac_host_fixture *f, bool wrong)
 {
     memset(f, 0, sizeof(*f));
     f->listener = f->target_listener = f->child = -1;
+    f->receiver.pid = -1;
+    f->receiver_diagnostics[0] = f->receiver_diagnostics[1] = -1;
     f->target = MAC_HOST_TARGET_UNOPENED;
     f->app[0] = f->app[1] = f->diagnostics[0] = f->diagnostics[1] = f->output[0] = f->output[1] = -1;
     device_host_psk_bridge_init(&f->hub);
@@ -107,7 +113,8 @@ static bool mac_host_open(struct mac_host_fixture *f, bool wrong)
     return f->listener >= 0 && f->target_listener >= 0 && platform_socket_pair(f->app) &&
         platform_socket_set_nonblocking(f->app[0], true) &&
         platform_pipe_cloexec_nonblock(f->diagnostics) == 0 &&
-        platform_pipe_cloexec_nonblock(f->output) == 0 && mac_host_pairs(f, wrong);
+        platform_pipe_cloexec_nonblock(f->output) == 0 &&
+        platform_pipe_cloexec_nonblock(f->receiver_diagnostics) == 0 && mac_host_pairs(f, wrong);
 }
 static bool mac_host_input(struct mac_host_fixture *f, struct json_value *input, unsigned mode)
 {
@@ -267,6 +274,7 @@ static void mac_host_child(struct mac_host_fixture *f, struct json_value *input,
     mac_host_close(&f->listener); mac_host_close(&f->target_listener);
     if (output != f->output[1]) close(output);
     mac_host_close(&f->output[0]); mac_host_close(&f->output[1]);
+    mac_host_close(&f->receiver_diagnostics[0]); mac_host_close(&f->receiver_diagnostics[1]);
     if (native || mode == 6) mac_host_native_entry(f, input, mode == 0, mode == 6);
     mac_host_shared_entry(input);
 }
@@ -293,6 +301,29 @@ static bool mac_host_reap(struct mac_host_fixture *f)
     }
     fprintf(stderr, "mac HOST fixture cleanup retained child=%ld\n", (long)f->child); return false;
 }
+static bool mac_receiver_poll(struct mac_host_fixture *f)
+{
+    if (f->receiver.pid <= 0) return !f->receiver.custody_lost;
+    pid_t seen = waitpid(f->receiver.pid, &f->receiver.status, WNOHANG);
+    if (seen == f->receiver.pid) { f->receiver.pid = -1; return true; }
+    if (seen < 0 && errno == ECHILD) {
+        fprintf(stderr, "mac HOST receiver lost custody pid=%ld\n", (long)f->receiver.pid);
+        f->receiver.custody_lost = true; f->receiver.pid = -1;
+    }
+    return false;
+}
+static bool mac_receiver_reap(struct mac_host_fixture *f)
+{
+    if (mac_receiver_poll(f)) return true;
+    if (f->receiver.custody_lost) return false;
+    if (kill(f->receiver.pid, SIGKILL) < 0 && errno != ESRCH) return false;
+    int64_t end = clock_now_monotonic_ns() + INT64_C(2000000000);
+    for (unsigned attempt = 0; attempt < 400 && clock_now_monotonic_ns() < end; attempt++) {
+        if (mac_receiver_poll(f)) return true;
+        (void)poll(NULL, 0, 5);
+    }
+    return false;
+}
 static bool mac_host_cleanup(struct mac_host_fixture *f)
 {
     bool reaped = mac_host_reap(f);
@@ -300,12 +331,18 @@ static bool mac_host_cleanup(struct mac_host_fixture *f)
         mac_host_cleanup_incomplete = true;
         fprintf(stderr, "mac HOST fixture retains home=%s child=%ld cleanup_incomplete\n", f->home, (long)f->child);
     }
+    bool receiver_reaped = mac_receiver_reap(f);
+    if (!receiver_reaped) {
+        mac_host_cleanup_incomplete = true;
+        fprintf(stderr, "mac HOST fixture retains home=%s receiver cleanup_incomplete\n", f->home);
+    }
     device_host_psk_bridge_close(&f->hub, DEVICE_HOST_BRIDGE_CANCELLED);
     int *fds[] = {&f->listener,&f->target_listener,&f->target,&f->app[0],&f->app[1],
-        &f->diagnostics[0],&f->diagnostics[1],&f->output[0],&f->output[1]};
+        &f->diagnostics[0],&f->diagnostics[1],&f->output[0],&f->output[1],
+        &f->receiver_diagnostics[0],&f->receiver_diagnostics[1]};
     for (size_t i = 0; i < sizeof(fds)/sizeof(fds[0]); i++) mac_host_close(fds[i]);
-    if (reaped && f->home[0]) test_rm_rf(f->home);
-    return reaped;
+    if (reaped && receiver_reaped && f->home[0]) test_rm_rf(f->home);
+    return reaped && receiver_reaped;
 }
 static bool mac_host_hub_open(struct mac_host_fixture *f, int carrier)
 {
@@ -415,43 +452,672 @@ static int mac_host_case(unsigned mode, bool native)
     } TEST_END
     json_free(&input); if (!mac_host_cleanup(&f)) failures++; return failures;
 }
+static bool mac_receiver_input(struct mac_host_fixture *f, struct json_value *input,
+    const char *listen_address, bool allow_external);
+static void mac_receiver_spec(struct mac_host_fixture *f,
+    struct device_host_runtime_receiver_spec *spec, const char *listen_address, bool allow_external);
 static int mac_host_refusals(void)
 {
-    int failures = 0;
-    TEST_CASE("Darwin receiver remains unsupported without changing stdio flags") {
+    int failures = 0; struct mac_host_fixture f; struct json_value input = {0};
+    bool opened = mac_host_open(&f, false);
+    TEST_CASE("Darwin receiver refusals: allow_external and nonloopback refuse; empty input is invalid") {
         struct device_host_runtime_observation out;
         struct zcl_result result = device_host_runtime_receiver_run(NULL, &out);
-        ASSERT(!result.ok); ASSERT_EQ(out.result, DEVICE_HOST_BRIDGE_UNSUPPORTED); ASSERT(out.cleanup_complete);
-        struct json_value input = {0}; enum device_host_runtime_entry_exit status;
+        ASSERT(!result.ok); ASSERT_EQ(out.result, DEVICE_HOST_BRIDGE_REFUSED); ASSERT(out.cleanup_complete);
+        enum device_host_runtime_entry_exit status;
         int input_flags = fcntl(0, F_GETFL), output_flags = fcntl(1, F_GETFL);
+        result = device_host_runtime_entry_run(&input, true, &status);
+        ASSERT(!result.ok); ASSERT_EQ(status, DEVICE_HOST_ENTRY_INVALID);
+        ASSERT_EQ(fcntl(0, F_GETFL), input_flags); ASSERT_EQ(fcntl(1, F_GETFL), output_flags);
+        ASSERT(opened);
+        ASSERT(mac_receiver_input(&f, &input, "127.0.0.1", true));
         result = device_host_runtime_entry_run(&input, true, &status);
         ASSERT(!result.ok); ASSERT_EQ(status, DEVICE_HOST_ENTRY_UNSUPPORTED);
         ASSERT_EQ(fcntl(0, F_GETFL), input_flags); ASSERT_EQ(fcntl(1, F_GETFL), output_flags);
         json_free(&input);
+        struct device_host_runtime_receiver_spec spec;
+        mac_receiver_spec(&f, &spec, "127.0.0.1", true);
+        result = device_host_runtime_receiver_run(&spec, &out);
+        ASSERT(!result.ok); ASSERT_EQ(out.result, DEVICE_HOST_BRIDGE_REFUSED); ASSERT(out.cleanup_complete);
+        mac_receiver_spec(&f, &spec, "10.0.0.1", false);
+        result = device_host_runtime_receiver_run(&spec, &out);
+        ASSERT(!result.ok); ASSERT_EQ(out.result, DEVICE_HOST_BRIDGE_REFUSED); ASSERT(out.cleanup_complete);
+        ASSERT(mac_receiver_input(&f, &input, "10.0.0.1", false));
+        result = device_host_runtime_entry_run(&input, true, &status);
+        ASSERT(!result.ok); ASSERT_EQ(status, DEVICE_HOST_ENTRY_FAILED);
+        json_free(&input);
+    } TEST_END
+    if (!mac_host_cleanup(&f)) failures++;
+    return failures;
+}
+static int mac_host_unsupported_roles(void);
+static bool mac_target_absent(const struct mac_host_fixture *f)
+{
+    struct pollfd interest = {.fd = f->target_listener, .events = POLLIN};
+    return poll(&interest, 1, 0) == 0;
+}
+static bool mac_receiver_input(struct mac_host_fixture *f, struct json_value *input,
+    const char *listen_address, bool allow_external)
+{
+    char peer[65], root[65];
+    zcl_hex_encode(f->row[1].peer_key, 32, peer); zcl_hex_encode(f->root[1], 32, root);
+    json_set_object(input);
+    return json_push_kv_str(input, "directory", f->directory[1]) &&
+        json_push_kv_str(input, "peer_key", peer) && json_push_kv_str(input, "expected_root", root) &&
+        json_push_kv_int(input, "target_port", f->target_port) &&
+        json_push_kv_str(input, "route_id", "Darwin-isolated-receiver") &&
+        json_push_kv_int(input, "handshake_ms", 3000) && json_push_kv_int(input, "session_ms", 10000) &&
+        json_push_kv_int(input, "idle_ms", 5000) && json_push_kv_bool(input, "confirm", true) &&
+        json_push_kv_str(input, "listen_address", listen_address) &&
+        json_push_kv_int(input, "listen_port", 0) && json_push_kv_bool(input, "allow_external", allow_external) &&
+        json_push_kv_int(input, "lifetime_ms", 30000) && json_push_kv_int(input, "max_sessions", 1) &&
+        json_push_kv_int(input, "max_active", 2);
+}
+static void mac_receiver_spec(struct mac_host_fixture *f,
+    struct device_host_runtime_receiver_spec *spec, const char *listen_address, bool allow_external)
+{
+    struct in_addr address;
+    memset(spec, 0, sizeof(*spec));
+    spec->common.store = &f->store[1];
+    memcpy(spec->common.peer, f->row[1].peer_key, 32);
+    memcpy(spec->common.approved_root, f->root[1], 32);
+    spec->common.target_port = f->target_port;
+    spec->common.handshake_ms = 3000; spec->common.session_ms = 10000; spec->common.idle_ms = 5000;
+    if (inet_pton(AF_INET, listen_address, &address) == 1) spec->listen_address_be = address.s_addr;
+    spec->allow_external = allow_external;
+    spec->lifetime_ms = 30000; spec->max_sessions = 1; spec->max_active = 2;
+}
+static bool mac_input_number(struct json_value *input, const char *key, int64_t value)
+{
+    struct json_value *field = (struct json_value *)json_get(input, key);
+    if (!field) return false;
+    json_set_int(field, value);
+    return true;
+}
+/* Drain one bounded read of a nonblocking capture pipe into text. */
+static ssize_t mac_capture_read(int fd, char *text, size_t capacity, size_t *used)
+{
+    ssize_t seen = read(fd, text + *used, capacity - 1 - *used);
+    if (seen > 0) { *used += (size_t)seen; text[*used] = 0; }
+    return seen;
+}
+static bool mac_capture_wait(pid_t pid, int fd, char *text, size_t capacity, int *exit_code)
+{
+    size_t used = 0;
+    int64_t end = clock_now_monotonic_ns() + INT64_C(8000000000);
+    while (clock_now_monotonic_ns() < end) {
+        ssize_t seen = mac_capture_read(fd, text, capacity, &used);
+        if (seen > 0) continue;
+        if (seen == 0) {
+            int status = 0;
+            if (waitpid(pid, &status, 0) == pid)
+                *exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            return true;
+        }
+        if (errno != EAGAIN && errno != EINTR) break;
+        int status = 0;
+        pid_t done = waitpid(pid, &status, WNOHANG);
+        if (done == pid) {
+            *exit_code = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            while (mac_capture_read(fd, text, capacity, &used) > 0) {}
+            return true;
+        }
+        if (done < 0) break;
+        (void)poll(NULL, 0, 5);
+    }
+    return false;
+}
+/* Fork, capture the raw dispatch's stderr and report its exit code. */
+static bool mac_dispatch_capture(char **argv, int argc, char *text, size_t capacity, int *exit_code)
+{
+    int capture[2];
+    if (platform_pipe_cloexec_nonblock(capture) != 0) return false;
+    text[0] = 0; *exit_code = -1;
+    pid_t pid = fork();
+    if (pid < 0) { close(capture[0]); close(capture[1]); return false; }
+    if (pid == 0) {
+        close(capture[0]);
+        if (dup2(capture[1], 2) < 0) _exit(122);
+        zcl_native_device_host_runtime_exit_if_requested(argc, argv);
+        _exit(123);
+    }
+    close(capture[1]);
+    bool waited = mac_capture_wait(pid, capture[0], text, capacity, exit_code);
+    close(capture[0]);
+    if (waited && *exit_code >= 0) return true;
+    (void)kill(pid, SIGKILL); (void)waitpid(pid, NULL, 0);
+    return false;
+}
+/* Ported from the Linux refusal matrix; the dispatch refusals now name
+ * their reason, and the installed package runner stays platform-blocked. */
+static int mac_host_unsupported_roles(void)
+{
+    int failures = 0; struct mac_host_fixture f; struct json_value input = {0};
+    char wire[4097], argument[4200], text[4096];
+    bool opened = mac_host_open(&f, false);
+    TEST_CASE("Darwin native dispatch: receiver refusals name their reason; package.run stays blocked") {
+        int code = -1;
+        ASSERT(opened);
+        ASSERT(mac_receiver_input(&f, &input, "127.0.0.1", true));
+        ASSERT(json_write(&input, wire, sizeof(wire)) > 0);
+        snprintf(argument, sizeof(argument), "--input=%s", wire);
+        char *argv_external[] = {"z23", "ops.mesh.device.host.receiver", argument, NULL};
+        ASSERT(mac_dispatch_capture(argv_external, 3, text, sizeof(text), &code));
+        ASSERT_EQ(code, DEVICE_HOST_ENTRY_UNSUPPORTED);
+        ASSERT(strstr(text, "error=HOST_RUNTIME_UNSUPPORTED role=receiver allow_external=unsupported platform=darwin_loopback_only") != NULL);
+        ASSERT(strstr(text, "event=HOST_RUNTIME_TERMINAL") == NULL);
+        json_free(&input);
+        ASSERT(mac_receiver_input(&f, &input, "10.0.0.1", false));
+        ASSERT(json_write(&input, wire, sizeof(wire)) > 0);
+        snprintf(argument, sizeof(argument), "--input=%s", wire);
+        char *argv_nonloop[] = {"z23", "ops.mesh.device.host.receiver", argument, NULL};
+        ASSERT(mac_dispatch_capture(argv_nonloop, 3, text, sizeof(text), &code));
+        ASSERT_EQ(code, DEVICE_HOST_ENTRY_FAILED);
+        ASSERT(strstr(text, "result=refused") != NULL);
+        ASSERT(strstr(text, "cleanup_complete=1") != NULL);
+        char *argv_flag[] = {"z23", "ops.mesh.device.host.receiver", argument, "--format=json", NULL};
+        ASSERT(mac_dispatch_capture(argv_flag, 4, text, sizeof(text), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(strstr(text, "error=HOST_RUNTIME_INPUT_REFUSED") != NULL);
+        char *argv_empty[] = {"z23", "ops.mesh.device.host.receiver", "--input={}", NULL};
+        ASSERT(mac_dispatch_capture(argv_empty, 3, text, sizeof(text), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT(strstr(text, "error=HOST_RUNTIME_INPUT_REFUSED") != NULL);
+        char *argv_package[] = {"z23", "ops.mesh.device.host.package.run", "--input={}", NULL};
+        ASSERT(mac_dispatch_capture(argv_package, 3, text, sizeof(text), &code));
+        ASSERT_EQ(code, ZCL_COMMAND_EXIT_BLOCKED);
+        ASSERT(strstr(text, "error=HOST_RUNTIME_UNSUPPORTED platform=unqualified") != NULL);
+    } TEST_END
+    json_free(&input); if (!mac_host_cleanup(&f)) failures++;
+    return failures;
+}
+static int mac_client_authority_refusal(unsigned field)
+{
+    int failures = 0; struct mac_host_fixture f; struct json_value input = {0};
+    TEST_CASE("Darwin raw HOST client: wrong exact root, peer or port refuses before target effects") {
+        ASSERT(mac_host_open(&f, false));
+        if (field == 0) f.root[0][0] ^= 1;
+        if (field == 1) f.row[0].peer_key[0] ^= 1;
+        uint16_t original_port = f.target_port;
+        if (field == 2) f.target_port = original_port == UINT16_MAX ? 1 : original_port + 1;
+        ASSERT(mac_host_input(&f, &input, 0));
+        f.target_port = original_port;
+        ASSERT_EQ(fflush(NULL), 0);
+        f.child = fork(); ASSERT(f.child >= 0);
+        if (f.child == 0) mac_host_child(&f, &input, false, 0);
+        mac_host_close(&f.app[1]); mac_host_close(&f.diagnostics[1]); mac_host_close(&f.output[1]);
+        int64_t end = clock_now_monotonic_ns() + INT64_C(5000000000);
+        while (clock_now_monotonic_ns() < end && !mac_host_poll_child(&f)) {
+            mac_host_diagnostics(&f);
+            (void)poll(NULL, 0, 5);
+        }
+        mac_host_diagnostics(&f);
+        ASSERT(f.child < 0); ASSERT(WIFEXITED(f.status));
+        ASSERT_EQ(WEXITSTATUS(f.status), DEVICE_HOST_ENTRY_FAILED);
+        ASSERT(strstr(f.diagnostic_text, "result=refused") != NULL);
+        ASSERT(strstr(f.diagnostic_text, "cleanup_complete=1") != NULL);
+        ASSERT(mac_target_absent(&f));
+        uint8_t byte; ASSERT_EQ(read(f.output[0], &byte, 1), 0);
+    } TEST_END
+    json_free(&input); if (!mac_host_cleanup(&f)) failures++;
+    return failures;
+}
+static bool mac_limit_wire(bool receiver, const char *key, int64_t value, char wire[8192])
+{
+    struct mac_host_fixture f; struct json_value input = {0};
+    bool ok = mac_host_open(&f, false) &&
+        (receiver ? mac_receiver_input(&f, &input, "127.0.0.1", false) : mac_host_input(&f, &input, 0)) &&
+        mac_input_number(&input, key, value) && json_write(&input, wire, 8192) > 0;
+    json_free(&input);
+    return mac_host_cleanup(&f) && ok;
+}
+static bool mac_limit_accepted(bool receiver, const char *key, int64_t value)
+{
+    char wire[8192]; struct json_value parsed = {0};
+    if (!mac_limit_wire(receiver, key, value, wire)) return false;
+    bool ok = device_host_runtime_entry_parse(&parsed, wire, strlen(wire), receiver).ok;
+    json_free(&parsed);
+    return ok;
+}
+static int mac_parse_limits(void)
+{
+    int failures = 0;
+    TEST_CASE("Darwin shared entry: supervised-hub maxima accepted, maxima plus one refuse") {
+        for (int role = 0; role < 2; ++role) {
+            bool receiver = role != 0;
+            ASSERT(mac_limit_accepted(receiver, "session_ms", 600000));
+            ASSERT(mac_limit_accepted(receiver, "idle_ms", 60000));
+            ASSERT(mac_limit_accepted(receiver, "session_ms", 28800000));
+            ASSERT(!mac_limit_accepted(receiver, "session_ms", 28800001));
+            ASSERT(mac_limit_accepted(receiver, "idle_ms", 1800000));
+            ASSERT(!mac_limit_accepted(receiver, "idle_ms", 1800001));
+        }
+        ASSERT(mac_limit_accepted(true, "lifetime_ms", 600000));
+        ASSERT(mac_limit_accepted(true, "lifetime_ms", 86400000));
+        ASSERT(!mac_limit_accepted(true, "lifetime_ms", 86400001));
+        ASSERT(mac_limit_accepted(true, "max_sessions", 64));
+        ASSERT(!mac_limit_accepted(true, "max_sessions", 65));
+        ASSERT(mac_limit_accepted(true, "max_active", 4));
+        ASSERT(!mac_limit_accepted(true, "max_active", 5));
     } TEST_END
     return failures;
 }
-static int mac_host_unsupported_roles(void)
+static void mac_receiver_diagnostics(struct mac_host_fixture *f)
 {
-    int failures = 0;
-    const char *roles[] = {"ops.mesh.device.host.receiver", "ops.mesh.device.host.package.run"};
-    TEST_CASE("Darwin native receiver/package retain unsupported dispatch") {
-        for (size_t i = 0; i < sizeof(roles)/sizeof(roles[0]); i++) {
-            struct mac_host_fixture f = {.child = -1};
-            ASSERT_EQ(fflush(NULL), 0);
-            f.child = fork(); ASSERT(f.child >= 0);
-            if (f.child == 0) {
-                char *argv[] = {"z23", (char *)roles[i], "--input={}", NULL};
-                zcl_native_device_host_runtime_exit_if_requested(3, argv); _exit(123);
-            }
-            int64_t end = clock_now_monotonic_ns() + INT64_C(2000000000);
-            for (unsigned attempt = 0; attempt < 400 && !mac_host_poll_child(&f) && clock_now_monotonic_ns() < end; attempt++)
-                (void)poll(NULL, 0, 5);
-            bool exited = f.child <= 0;
-            bool cleaned = mac_host_reap(&f);
-            ASSERT(exited && cleaned); ASSERT(WIFEXITED(f.status)); ASSERT_EQ(WEXITSTATUS(f.status), ZCL_COMMAND_EXIT_BLOCKED);
+    size_t left = sizeof(f->receiver_text) - f->receiver_used - 1;
+    ssize_t seen = read(f->receiver_diagnostics[0], f->receiver_text + f->receiver_used, left);
+    if (seen > 0) f->receiver_used += (size_t)seen;
+    f->receiver_text[f->receiver_used] = 0;
+}
+static bool mac_receiver_listening(struct mac_host_fixture *f)
+{
+    if (f->receiver_port) return true;
+    const char *port = strstr(f->receiver_text, "event=HOST_RECEIVER_LISTENING");
+    if (!port) return false;
+    port = strstr(port, "listen_port=");
+    if (!port) return false;
+    char *end; unsigned long value = strtoul(port + strlen("listen_port="), &end, 10);
+    if (end == port + strlen("listen_port=") || value == 0 || value > UINT16_MAX) return false;
+    f->receiver_port = (uint16_t)value;
+    return true;
+}
+static bool mac_receiver_wait(struct mac_host_fixture *f)
+{
+    int64_t end = clock_now_monotonic_ns() + INT64_C(5000000000);
+    while (clock_now_monotonic_ns() < end) {
+        mac_receiver_diagnostics(f);
+        if (mac_receiver_listening(f)) return true;
+        if (mac_receiver_poll(f)) return false;
+        (void)poll(NULL, 0, 5);
+    }
+    return false;
+}
+static bool mac_receiver_finished(struct mac_host_fixture *f, int64_t budget_ns)
+{
+    int64_t end = clock_now_monotonic_ns() + budget_ns;
+    while (clock_now_monotonic_ns() < end) {
+        mac_receiver_diagnostics(f);
+        if (mac_receiver_poll(f)) {
+            mac_receiver_diagnostics(f);
+            return true;
         }
+        (void)poll(NULL, 0, 5);
+    }
+    if (!mac_receiver_poll(f)) return false;
+    mac_receiver_diagnostics(f);
+    return true;
+}
+/* Kernel fd inventory of a CHILD process: presence plus typed fd kinds. */
+static bool mac_host_fd_types(pid_t process, bool present[256], unsigned types[256])
+{
+    struct proc_fdinfo descriptors[256];
+    int bytes = proc_pidinfo(process, PROC_PIDLISTFDS, 0, descriptors, sizeof(descriptors));
+    if (bytes <= 0 || bytes >= (int)sizeof(descriptors) || bytes % (int)sizeof(descriptors[0]) != 0)
+        return false;
+    for (int fd = 0; fd < 256; fd++) { present[fd] = false; types[fd] = 0; }
+    size_t count = (size_t)bytes / sizeof(descriptors[0]);
+    for (size_t i = 0; i < count; i++) {
+        int fd = descriptors[i].proc_fd;
+        if (fd < 0 || fd >= 256) return false;
+        present[fd] = true; types[fd] = (unsigned)descriptors[i].proc_fdtype;
+    }
+    return true;
+}
+static bool mac_baseline_parse(const char *text, bool present[256])
+{
+    const char *line = strstr(text, "event=MAC_HOST_FD_BASELINE fds=");
+    if (!line) return false;
+    line += strlen("event=MAC_HOST_FD_BASELINE fds=");
+    for (int fd = 0; fd < 256; fd++) present[fd] = false;
+    while (*line >= '0' && *line <= '9') {
+        char *end; long value = strtol(line, &end, 10);
+        if (value < 0 || value >= 256 || end == line) return false;
+        present[value] = true;
+        line = end;
+        if (*line == ',') ++line;
+        else break;
+    }
+    return true;
+}
+/* The receiver owns only sockets: every descriptor beyond its recorded
+ * baseline must be a socket, proving the descendant-cleanup contract is
+ * vacuous here rather than merely unobserved. */
+static bool mac_receiver_delta_sockets(const struct mac_host_fixture *f, const bool baseline[256])
+{
+    bool present[256]; unsigned types[256];
+    if (!mac_host_fd_types(f->receiver.pid, present, types)) return false;
+    for (int fd = 0; fd < 256; fd++)
+        if (present[fd] && !baseline[fd] && types[fd] != PROX_FDTYPE_SOCKET) {
+            fprintf(stderr, "mac HOST receiver non-socket fd=%d type=%u\n", fd, types[fd]);
+            return false;
+        }
+    return true;
+}
+static void mac_receiver_prepare_descriptors(struct mac_host_fixture *f)
+{
+    struct sigaction action = {.sa_handler = SIG_DFL}; sigemptyset(&action.sa_mask);
+    if (sigaction(SIGPIPE, &action, NULL) != 0) _exit(120);
+    int null_fd = open("/dev/null", O_RDWR);
+    if (null_fd < 0) _exit(121);
+    if (dup2(null_fd, 0) < 0 || dup2(null_fd, 1) < 0 || dup2(f->receiver_diagnostics[1], 2) < 0) _exit(121);
+    if (null_fd > 2) close(null_fd);
+    mac_host_close(&f->app[0]); mac_host_close(&f->app[1]);
+    mac_host_close(&f->diagnostics[0]); mac_host_close(&f->diagnostics[1]);
+    mac_host_close(&f->listener); mac_host_close(&f->target_listener);
+    mac_host_close(&f->output[0]); mac_host_close(&f->output[1]);
+    mac_host_close(&f->receiver_diagnostics[0]); mac_host_close(&f->receiver_diagnostics[1]);
+}
+/* In-process receiver entry: proves the strict descendant contract is vacuous
+ * (no child ever exists) and that terminal cleanup closes every descriptor. */
+static void mac_receiver_shared_child(struct mac_host_fixture *f, struct json_value *input)
+{
+    mac_receiver_prepare_descriptors(f);
+    int before[256];
+    if (!mac_host_fd_snapshot(before)) _exit(125);
+    fprintf(stderr, "event=MAC_HOST_FD_BASELINE fds=");
+    bool first = true;
+    for (int fd = 0; fd < 256; fd++) if (before[fd] >= 0) {
+        fprintf(stderr, "%s%d", first ? "" : ",", fd);
+        first = false;
+    }
+    fprintf(stderr, "\n");
+    if (fflush(NULL) != 0) _exit(125);
+    enum device_host_runtime_entry_exit status = DEVICE_HOST_ENTRY_INVALID;
+    (void)device_host_runtime_entry_run(input, true, &status);
+    int child_status = 0;
+    if (!(waitpid(-1, &child_status, WNOHANG) == -1 && errno == ECHILD)) _exit(124);
+    int after[256];
+    if (!mac_host_fd_snapshot(after)) _exit(125);
+    for (int fd = 0; fd < 256; fd++) if (before[fd] != after[fd]) _exit(123);
+    _exit((int)status);
+}
+static void mac_receiver_binary_child(struct mac_host_fixture *f, struct json_value *input, bool standalone)
+{
+    mac_receiver_prepare_descriptors(f);
+    char wire[4097], argument[4200], home[1200];
+    size_t length = json_write(input, wire, sizeof(wire));
+    if (length == 0 || length >= sizeof(wire)) _exit(122);
+    if (snprintf(home, sizeof(home), "HOME=%s", f->home) >= (int)sizeof(home)) _exit(122);
+    char *env[] = {home, "PATH=/usr/bin:/bin", "ZCL_OPERATOR_LANE=INVALID-PUBLIC-RAW-SENTINEL", NULL};
+    if (standalone) {
+        if (snprintf(argument, sizeof(argument), "--input=%s", wire) >= (int)sizeof(argument)) _exit(122);
+        char *argv[] = {"build/bin/tunnel", "receiver", argument, NULL};
+        execve(argv[0], argv, env);
+    } else {
+        char path[1200];
+        if (snprintf(path, sizeof(path), "%s/receiver-input", f->home) >= (int)sizeof(path)) _exit(122);
+        int fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0600);
+        if (fd < 0 || write(fd, wire, length) != (ssize_t)length || close(fd) != 0) _exit(122);
+        if (snprintf(argument, sizeof(argument), "--input-file=%s", path) >= (int)sizeof(argument)) _exit(122);
+        char *argv[] = {"build/bin/z23", "ops.mesh.device.host.receiver", argument, NULL};
+        execve(argv[0], argv, env);
+    }
+    _exit(127);
+}
+static bool mac_session_pump(struct mac_host_fixture *f, char reply[4])
+{
+    bool echoed = false; size_t got = 0;
+    int64_t end = clock_now_monotonic_ns() + INT64_C(15000000000);
+    while (clock_now_monotonic_ns() < end) {
+        if (!mac_host_target_tick(f, &echoed)) return false;
+        if (got < 3) {
+            ssize_t seen = read(f->output[0], reply + got, 3 - got);
+            if (seen > 0) got += (size_t)seen;
+        }
+        mac_host_diagnostics(f);
+        mac_receiver_diagnostics(f);
+        if (mac_host_poll_child(f)) return echoed && got == 3 && memcmp(reply, "xyz", 3) == 0;
+        (void)poll(NULL, 0, 1);
+    }
+    return false;
+}
+static bool mac_listener_refused(uint16_t port)
+{
+    int probe = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+    if (probe < 0) return false;
+    struct sockaddr_in address = {.sin_family = AF_INET,
+        .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = htons(port)};
+    int connected = connect(probe, (struct sockaddr *)&address, sizeof(address));
+    bool refused = connected != 0 && errno == ECONNREFUSED;
+    platform_socket_close(probe);
+    return refused;
+}
+static int mac_host_receiver_session(bool in_process)
+{
+    int failures = 0; struct mac_host_fixture f; struct json_value input = {0}; char reply[4] = {0};
+    bool opened = mac_host_open(&f, false);
+    TEST_CASE(in_process
+        ? "Darwin raw HOST receiver: loopback listen and authenticated echo with no descendants and exact cleanup"
+        : "Darwin native receiver dispatch: loopback listen through the real binary and one echoed session") {
+        ASSERT(opened);
+        ASSERT(mac_receiver_input(&f, &input, "127.0.0.1", false));
+        ASSERT_EQ(fflush(NULL), 0);
+        f.receiver.pid = fork(); ASSERT(f.receiver.pid >= 0);
+        if (f.receiver.pid == 0) {
+            if (in_process) mac_receiver_shared_child(&f, &input);
+            else mac_receiver_binary_child(&f, &input, false);
+        }
+        ASSERT(mac_receiver_wait(&f));
+        ASSERT(f.receiver_port != 0);
+        ASSERT(strstr(f.receiver_text, "event=HOST_RECEIVER_LISTENING route=Darwin-isolated-receiver listen_port=") != NULL);
+        if (in_process) {
+            bool baseline[256];
+            ASSERT(mac_baseline_parse(f.receiver_text, baseline));
+            ASSERT(mac_receiver_delta_sockets(&f, baseline));
+        }
+        json_free(&input);
+        f.port = f.receiver_port;
+        ASSERT(mac_host_input(&f, &input, 0));
+        /* Darwin exposes the historical FWASWRITTEN bit through F_GETFL.
+         * Prime the output pipe before fork so the client's exact stdio flag
+         * restoration check retains every bit across its first real write. */
+        char primed = 0;
+        ASSERT_EQ(write(f.output[1], "p", 1), 1);
+        ASSERT_EQ(read(f.output[0], &primed, 1), 1);
+        ASSERT_EQ(primed, 'p');
+        ASSERT_EQ(fflush(NULL), 0);
+        f.child = fork(); ASSERT(f.child >= 0);
+        if (f.child == 0) mac_host_child(&f, &input, !in_process, 0);
+        mac_host_close(&f.app[1]); mac_host_close(&f.diagnostics[1]); mac_host_close(&f.output[1]);
+        ASSERT_EQ(send(f.app[0], "abc", 3, MSG_NOSIGNAL), 3);
+        ASSERT_EQ(shutdown(f.app[0], SHUT_WR), 0);
+        ASSERT(mac_session_pump(&f, reply));
+        ASSERT(WIFEXITED(f.status));
+        if (WEXITSTATUS(f.status) == 125) fprintf(stderr, "mac HOST session client diagnostic: %s\n", f.diagnostic_text);
+        ASSERT_EQ(WEXITSTATUS(f.status), DEVICE_HOST_ENTRY_OK);
+        ASSERT(mac_receiver_finished(&f, INT64_C(8000000000)));
+        ASSERT(WIFEXITED(f.receiver.status)); ASSERT_EQ(WEXITSTATUS(f.receiver.status), 0);
+        ASSERT(strstr(f.receiver_text, "result=eof") != NULL);
+        ASSERT(strstr(f.receiver_text, "cleanup_complete=1") != NULL);
+        ASSERT(strstr(f.receiver_text, "accepted=1 completed=1 refused=0") != NULL);
     } TEST_END
+    json_free(&input); if (!mac_host_cleanup(&f)) failures++;
+    return failures;
+}
+static int mac_host_receiver_cancel(int signal_number, bool in_process)
+{
+    int failures = 0; struct mac_host_fixture f; struct json_value input = {0};
+    bool opened = mac_host_open(&f, false);
+    TEST_CASE("Darwin raw HOST receiver: signal cancels normally and closes the selected listener") {
+        ASSERT(opened);
+        ASSERT(mac_receiver_input(&f, &input, "127.0.0.1", false));
+        ASSERT_EQ(fflush(NULL), 0);
+        f.receiver.pid = fork(); ASSERT(f.receiver.pid >= 0);
+        if (f.receiver.pid == 0) {
+            if (in_process) mac_receiver_shared_child(&f, &input);
+            else mac_receiver_binary_child(&f, &input, true);
+        }
+        ASSERT(mac_receiver_wait(&f));
+        if (in_process) {
+            bool baseline[256];
+            ASSERT(mac_baseline_parse(f.receiver_text, baseline));
+            ASSERT(mac_receiver_delta_sockets(&f, baseline));
+        }
+        ASSERT(f.receiver.pid > 0);
+        ASSERT_EQ(kill(f.receiver.pid, signal_number), 0);
+        ASSERT(mac_receiver_finished(&f, INT64_C(5000000000)));
+        ASSERT(WIFEXITED(f.receiver.status)); ASSERT(WEXITSTATUS(f.receiver.status) != 0);
+        ASSERT(strstr(f.receiver_text, "result=cancelled") != NULL);
+        ASSERT(strstr(f.receiver_text, "cleanup_complete=1") != NULL);
+        ASSERT(mac_listener_refused(f.receiver_port));
+        ASSERT(mac_target_absent(&f));
+    } TEST_END
+    json_free(&input); if (!mac_host_cleanup(&f)) failures++;
+    return failures;
+}
+/* Unlike the completed-session pump, retain both write sides until cancel. */
+enum mac_active_progress { MAC_ACTIVE_FAILED, MAC_ACTIVE_PENDING, MAC_ACTIVE_READY };
+static bool mac_active_retry(int error)
+{
+    return error == EAGAIN || error == EWOULDBLOCK || error == EINTR;
+}
+static enum mac_active_progress mac_active_target_progress(struct mac_host_fixture *f)
+{
+    if (f->target < 0) {
+        f->target = accept(f->target_listener, NULL, NULL);
+        if (f->target < 0) return mac_active_retry(errno) ? MAC_ACTIVE_PENDING : MAC_ACTIVE_FAILED;
+        if (!platform_socket_set_nonblocking(f->target, true)) return MAC_ACTIVE_FAILED;
+    }
+    char bytes[3]; ssize_t seen = recv(f->target, bytes, sizeof(bytes), MSG_PEEK | MSG_DONTWAIT);
+    if (seen < 0) return mac_active_retry(errno) ? MAC_ACTIVE_PENDING : MAC_ACTIVE_FAILED;
+    if (seen == 0) return MAC_ACTIVE_FAILED;
+    if (seen != 3) return MAC_ACTIVE_PENDING;
+    if (recv(f->target, bytes, 3, MSG_DONTWAIT) != 3) return MAC_ACTIVE_FAILED;
+    if (memcmp(bytes, "abc", 3) != 0) return MAC_ACTIVE_FAILED;
+    if (send(f->target, "xyz", 3, MSG_NOSIGNAL) != 3) return MAC_ACTIVE_FAILED;
+    return MAC_ACTIVE_READY;
+}
+static enum mac_active_progress mac_active_output_progress(struct mac_host_fixture *f,
+    char reply[3], size_t *got)
+{
+    if (*got == 3) return MAC_ACTIVE_READY;
+    ssize_t seen = read(f->output[0], reply + *got, 3 - *got);
+    if (seen < 0) return mac_active_retry(errno) ? MAC_ACTIVE_PENDING : MAC_ACTIVE_FAILED;
+    if (seen == 0) return MAC_ACTIVE_FAILED;
+    *got += (size_t)seen;
+    return *got == 3 ? MAC_ACTIVE_READY : MAC_ACTIVE_PENDING;
+}
+static bool mac_active_receiver_payload(struct mac_host_fixture *f)
+{
+    enum mac_active_progress target = MAC_ACTIVE_PENDING, output = MAC_ACTIVE_PENDING;
+    size_t got = 0; char reply[3];
+    int64_t end = clock_now_monotonic_ns() + INT64_C(5000000000);
+    while (clock_now_monotonic_ns() < end) {
+        if (target != MAC_ACTIVE_READY) target = mac_active_target_progress(f);
+        output = mac_active_output_progress(f, reply, &got);
+        if (target == MAC_ACTIVE_FAILED || output == MAC_ACTIVE_FAILED) return false;
+        mac_host_diagnostics(f); mac_receiver_diagnostics(f);
+        if (mac_host_poll_child(f) || mac_receiver_poll(f)) return false;
+        if (target == MAC_ACTIVE_READY && output == MAC_ACTIVE_READY)
+            return memcmp(reply, "xyz", sizeof(reply)) == 0;
+        (void)poll(NULL, 0, 1);
+    }
+    return false;
+}
+static bool mac_active_target_eof(struct mac_host_fixture *f)
+{
+    int64_t end = clock_now_monotonic_ns() + INT64_C(5000000000);
+    while (clock_now_monotonic_ns() < end) {
+        char byte; ssize_t seen = recv(f->target, &byte, 1, MSG_DONTWAIT);
+        if (seen == 0) return true;
+        if (seen > 0 || (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR)) return false;
+        (void)poll(NULL, 0, 5);
+    }
+    return false;
+}
+static bool mac_active_client_finished(struct mac_host_fixture *f)
+{
+    int64_t end = clock_now_monotonic_ns() + INT64_C(5000000000);
+    while (clock_now_monotonic_ns() < end) {
+        mac_host_diagnostics(f);
+        if (mac_host_poll_child(f)) {
+            mac_host_diagnostics(f);
+            return WIFEXITED(f->status);
+        }
+        (void)poll(NULL, 0, 5);
+    }
+    return false;
+}
+static int mac_host_receiver_active_cancel(int signal_number, bool in_process)
+{
+    int failures = 0; struct mac_host_fixture f; struct json_value input = {0};
+    bool opened = mac_host_open(&f, false);
+    TEST_CASE("Darwin authenticated active receiver: cancellation closes target and reaps normally") {
+        ASSERT(opened);
+        ASSERT(mac_receiver_input(&f, &input, "127.0.0.1", false));
+        /* Keep listener admitted after the first authenticated session. */
+        ASSERT(mac_input_number(&input, "max_sessions", 2));
+        ASSERT_EQ(fflush(NULL), 0);
+        f.receiver.pid = fork(); ASSERT(f.receiver.pid >= 0);
+        if (f.receiver.pid == 0) {
+            if (in_process) mac_receiver_shared_child(&f, &input);
+            else mac_receiver_binary_child(&f, &input, true);
+        }
+        ASSERT(mac_receiver_wait(&f));
+        json_free(&input); f.port = f.receiver_port;
+        ASSERT(mac_host_input(&f, &input, 0));
+        char primed = 0;
+        ASSERT_EQ(write(f.output[1], "p", 1), 1);
+        ASSERT_EQ(read(f.output[0], &primed, 1), 1); ASSERT_EQ(primed, 'p');
+        ASSERT_EQ(fflush(NULL), 0);
+        f.child = fork(); ASSERT(f.child >= 0);
+        if (f.child == 0) mac_host_child(&f, &input, false, 0);
+        mac_host_close(&f.app[1]); mac_host_close(&f.diagnostics[1]); mac_host_close(&f.output[1]);
+        ASSERT_EQ(send(f.app[0], "abc", 3, MSG_NOSIGNAL), 3);
+        /* No shutdown: bidirectional payload proves mutual auth and target IO. */
+        ASSERT(mac_active_receiver_payload(&f));
+        ASSERT(f.target >= 0); ASSERT(f.child > 0); ASSERT(f.receiver.pid > 0);
+        pid_t receiver_pid = f.receiver.pid, client_pid = f.child;
+        ASSERT_EQ(kill(receiver_pid, signal_number), 0);
+        ASSERT(mac_receiver_finished(&f, INT64_C(5000000000)));
+        ASSERT(WIFEXITED(f.receiver.status)); ASSERT(WEXITSTATUS(f.receiver.status) != 0);
+        ASSERT(strstr(f.receiver_text, "result=cancelled") != NULL);
+        ASSERT(strstr(f.receiver_text, "cleanup_complete=1") != NULL);
+        ASSERT(strstr(f.receiver_text, "accepted=1 completed=0 refused=1") != NULL);
+        ASSERT(mac_listener_refused(f.receiver_port));
+        ASSERT(mac_active_target_eof(&f));
+        ASSERT(mac_active_client_finished(&f));
+        ASSERT(strstr(f.diagnostic_text, "cleanup_complete=1") != NULL);
+        int status = 0;
+        ASSERT_EQ(waitpid(client_pid, &status, WNOHANG), -1); ASSERT_EQ(errno, ECHILD);
+        ASSERT_EQ(waitpid(receiver_pid, &status, WNOHANG), -1); ASSERT_EQ(errno, ECHILD);
+    } TEST_END
+    json_free(&input); if (!mac_host_cleanup(&f)) failures++;
+    return failures;
+}
+
+static int mac_receiver_truncated(void)
+{
+    int failures = 0; struct mac_host_fixture f; struct json_value input = {0};
+    bool opened = mac_host_open(&f, false); int carrier = -1;
+    TEST_CASE("Darwin raw HOST receiver: truncated unauthenticated carrier closes without target connection") {
+        ASSERT(opened);
+        ASSERT(mac_receiver_input(&f, &input, "127.0.0.1", false));
+        ASSERT_EQ(fflush(NULL), 0);
+        f.receiver.pid = fork(); ASSERT(f.receiver.pid >= 0);
+        if (f.receiver.pid == 0) mac_receiver_shared_child(&f, &input);
+        ASSERT(mac_receiver_wait(&f));
+        carrier = platform_socket_open(AF_INET, SOCK_STREAM, 0, true, false);
+        ASSERT(carrier >= 0);
+        struct sockaddr_in address = {.sin_family = AF_INET,
+            .sin_addr.s_addr = htonl(INADDR_LOOPBACK), .sin_port = htons(f.receiver_port)};
+        ASSERT_EQ(connect(carrier, (struct sockaddr *)&address, sizeof(address)), 0);
+        uint8_t fragment = 1;
+        ASSERT_EQ(send(carrier, &fragment, 1, MSG_NOSIGNAL), 1);
+        ASSERT_EQ(shutdown(carrier, SHUT_WR), 0);
+        struct pollfd interest = {.fd = carrier, .events = POLLIN};
+        ASSERT(poll(&interest, 1, 5000) > 0);
+        ASSERT_EQ(recv(carrier, &fragment, 1, MSG_DONTWAIT), 0);
+        ASSERT_EQ(kill(f.receiver.pid, SIGTERM), 0);
+        ASSERT(mac_receiver_finished(&f, INT64_C(5000000000)));
+        ASSERT(WIFEXITED(f.receiver.status));
+        ASSERT(strstr(f.receiver_text, "result=cancelled") != NULL);
+        ASSERT(strstr(f.receiver_text, "accepted=0 completed=0 refused=1") != NULL);
+        ASSERT(strstr(f.receiver_text, "preauth_refused=1") != NULL);
+        ASSERT(mac_target_absent(&f));
+    } TEST_END
+    if (carrier >= 0) close(carrier);
+    json_free(&input); if (!mac_host_cleanup(&f)) failures++;
     return failures;
 }
 static void mac_host_mutate_input(const char *path)
@@ -609,6 +1275,12 @@ static int mac_shell_case(unsigned mode)
 int host_runtime_darwin_cases(void)
 {
     int failures = mac_host_refusals() + mac_host_unsupported_roles() + mac_host_named_input();
+    for (unsigned field = 0; field < 3; ++field) failures += mac_client_authority_refusal(field);
+    failures += mac_parse_limits();
+    failures += mac_host_receiver_session(true) + mac_host_receiver_session(false);
+    failures += mac_host_receiver_cancel(SIGTERM, true) + mac_host_receiver_cancel(SIGHUP, false);
+    failures += mac_host_receiver_active_cancel(SIGTERM, true) + mac_host_receiver_active_cancel(SIGHUP, false);
+    failures += mac_receiver_truncated();
     for (unsigned mode = 0; mode < 5; mode++) failures += mac_host_case(mode, mode % 2 == 0);
     failures += mac_host_case(0, false) + mac_host_case(5, false) + mac_host_case(6, false);
     for (unsigned mode = 0; mode < 5; mode++) failures += mac_shell_case(mode);

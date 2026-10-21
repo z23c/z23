@@ -493,10 +493,11 @@ void zcl_native_device_host_runtime_exit_if_requested(int argc, char **argv)
     if (!strcmp(path, "ops.mesh.device.host.shell")) {
         if (valid) result = zcl_native_device_host_shell_run(&input);
         else fprintf(stderr, "error=HOST_RUNTIME_INPUT_REFUSED detail=one_bounded_registered_input_object_required\n");
-    } else if (!strcmp(path, "ops.mesh.device.host.client")) {
+    } else if (!strcmp(path, "ops.mesh.device.host.client") || !strcmp(path, "ops.mesh.device.host.receiver")) {
         if (valid) {
             enum device_host_runtime_entry_exit status = DEVICE_HOST_ENTRY_INVALID;
-            struct zcl_result ran = device_host_runtime_entry_run(&input, false, &status);
+            struct zcl_result ran = device_host_runtime_entry_run(&input,
+                !strcmp(path, "ops.mesh.device.host.receiver"), &status);
             result = (int)status;
             if (!ran.ok && result == DEVICE_HOST_ENTRY_OK) result = DEVICE_HOST_ENTRY_FAILED;
         } else fprintf(stderr, "error=HOST_RUNTIME_INPUT_REFUSED detail=one_bounded_registered_input_object_required\n");
