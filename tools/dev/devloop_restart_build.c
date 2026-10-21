@@ -55,6 +55,12 @@
 #define RR_SOURCE_MAX 32
 #define RR_OVERLAY_MAX (RR_SOURCE_MAX + 1)
 #define RR_EXACT_GROUP_MAX 128
+/* Finite aggregate proof budget, distinct from the runner's per-group
+ * silence watchdog. A valid closure can include a group weighted at 312
+ * seconds (vcs_devloop) and over a hundred groups; 300 seconds can reject a
+ * valid closure before that group's expected duration. Preserve full selection
+ * and accounting; the weight is not an observed completed runtime. */
+#define RR_PROOF_TIMEOUT_MS 900000
 #define RR_IMMEDIATE_GROUP_MAX 32
 #define RR_DEP_MAX 256
 #define RR_DEP_PATH 512
@@ -3150,7 +3156,7 @@ static bool rr_prove_priority_run_and_parse(
     uint32_t *ran_count, uint32_t *cached, uint32_t *failed, uint32_t *skips)
 {
     bool priority_ran = zcl_devloop_process_run_test(
-        root, priority_argv, 300000, priority_process);
+        root, priority_argv, RR_PROOF_TIMEOUT_MS, priority_process);
     bool priority_summary = priority_ran &&
         rr_summary_value(priority_process->output, "groups_ran=",
                          ran_count) &&
@@ -3255,7 +3261,7 @@ static void rr_prove_run_main_test(struct rr_prove_ctx *ctx,
 {
     ctx->receipt->test_processes++;
     int64_t test_started = platform_time_monotonic_us();
-    bool ran = zcl_devloop_process_run_test(ctx->root, ta->argv, 300000,
+    bool ran = zcl_devloop_process_run_test(ctx->root, ta->argv, RR_PROOF_TIMEOUT_MS,
                                             ctx->process);
     ctx->receipt->test_us += platform_time_monotonic_us() - test_started;
     ctx->receipt->test_startup_us += ctx->process->startup_us;
@@ -3300,8 +3306,10 @@ static void rr_prove_report_failure(struct rr_prove_ctx *ctx, bool ran,
         rr_why(ctx->why, ctx->why_len,
                "affected proof runner could not be executed");
     } else if (ctx->process->timed_out) {
-        rr_why(ctx->why, ctx->why_len,
-               "affected proof runner exceeded the 300000 ms bound");
+        (void)snprintf(detail, sizeof(detail),
+                       "affected proof runner exceeded the %d ms bound",
+                       RR_PROOF_TIMEOUT_MS);
+        rr_why(ctx->why, ctx->why_len, detail);
     } else if (ctx->process->term_signal) {
         (void)snprintf(detail, sizeof(detail),
                        "affected proof runner terminated by signal %d",

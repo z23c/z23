@@ -364,6 +364,12 @@ Z23_FLAG("ZCL_CLI_TEST_NO_SERVICE_LOOKUP", "env_runtime", "-", "-",
           "undocumented; first use engine/composition/include/config/cli_lane_defaults.h:auto")
 Z23_FLAG("ZCL_CLOCK_SKEW_TOLERANCE_SECS", "env_runtime", "-", "-",
           "undocumented; first use engine/conditions/src/clock_skew_reconcile.c:auto")
+Z23_FLAG("ZCL_CODEINDEX_BASELINE_REQUESTS", "env_test", "-", "-",
+          "fixed request corpus for the explicit codeindex selector observation fixture; requires its workspace and source root")
+Z23_FLAG("ZCL_CODEINDEX_BASELINE_SOURCE_ROOT", "env_test", "-", "-",
+          "expected immutable source manifest root for the explicit codeindex selector observation fixture")
+Z23_FLAG("ZCL_CODEINDEX_BASELINE_WORKSPACE", "env_test", "-", "-",
+          "isolated captured source workspace for the explicit codeindex selector observation fixture")
 Z23_FLAG("ZCL_CODEINDEX_COVERAGE_BASELINE", "env_build", "tools/lint/codeindex_coverage_baseline.txt", "-",
           "which baseline the codeindex coverage gate ratchets against; a test "
           "rail so the selftest can pin a fixture instead of the tree baseline")
@@ -373,6 +379,8 @@ Z23_FLAG("ZCL_CODEINDEX_COVERAGE_BIN", "env_build", "-", "-",
 Z23_FLAG("ZCL_CODEINDEX_COVERAGE_ROOT", "env_build", "-", "-",
           "which source root the codeindex coverage gate measures; a test rail so "
           "the selftest can measure a planted fixture instead of the checkout")
+Z23_FLAG("ZCL_CODEINDEX_RESTART_WORKSPACE", "env_test", "-", "-",
+          "owned development checkout for the explicit isolated codeindex restart proof; requires all selector observation inputs")
 Z23_FLAG("ZCL_COIN_BACKFILL_ROOT_FOR_TEST", "env_runtime", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_tree_walk.c:auto")
 Z23_FLAG("ZCL_COIN_MATRIX_RUNS", "env_build", "10", "-",

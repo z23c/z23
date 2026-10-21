@@ -36,6 +36,12 @@
 #include "command/native_command.h"
 #include "devloop.h"
 #include "services/zcode_goal_context_service.h"
+#include "base/hex.h"
+#include "json/json.h"
+#include "sha3/sha3.h"
+#include "crypto/sha256.h"
+#include "util/file_io.h"
+#include "vcs/vcs_manifest.h"
 
 #include <sqlite3.h>
 
@@ -47,6 +53,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__linux__)
+#include <sys/resource.h>
+#endif
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
@@ -829,6 +838,71 @@ static int receipt_extent_tests(void)
     return failures;
 }
 
+/* These goals reach the real resident selector over the ordinary fixture.
+ * Twenty-two prose atoms precede the explicit target, beyond the calculator's
+ * sixteen-token window. Expected names/paths are assertions, never overrides. */
+static const char CI_SELECTOR_LATE_PROSE[] =
+    "saturation amber birch cedar denim elm frost grove hazel indigo juniper "
+    "kelp lemon maple nectar olive pine quartz river stone violet willow ";
+
+static int ci_selector_late_targets(struct codeindex *index)
+{
+    int failures = 0;
+    char query[1024];
+    struct zcode_goal_selection selected = {0};
+    int n = snprintf(query, sizeof(query), "%sfoo_main", CI_SELECTOR_LATE_PROSE);
+    CI_CHECK("late explicit whole C symbol survives the prose token cap",
+        n > 0 && (size_t)n < sizeof(query) &&
+        zcode_goal_context_select_indexed(index, query, NULL, &selected).ok &&
+        !strcmp(selected.selected.name, "foo_main"));
+    n = snprintf(query, sizeof(query), "%sfoo.c", CI_SELECTOR_LATE_PROSE);
+    CI_CHECK("late explicit source filename survives the prose token cap",
+        n > 0 && (size_t)n < sizeof(query) &&
+        zcode_goal_context_select_indexed(index, query, NULL, &selected).ok &&
+        !strcmp(selected.selected.def_path, "core/modules/net/src/foo.c"));
+    return failures;
+}
+
+static int ci_selector_identifier_boundaries(struct codeindex *index)
+{
+    int failures = 0;
+    struct zcode_goal_selection baseline = {0}, selected = {0};
+    bool baseline_ok = zcode_goal_context_select_indexed(index,
+        "Repair the data frame checksum length", NULL, &baseline).ok &&
+        !strcmp(baseline.selected.name, "foo_checksum");
+    CI_CHECK("identifier boundary control retains the legitimate full-query selection", baseline_ok);
+    const char *unknown[] = {"unrelated_nonexistent_identifier", "foo.cpp", "foo_main_extended"};
+    const char *labels[] = {
+        "unknown identifier does not displace legitimate full-query selection",
+        "foo.cpp does not falsely qualify the foo.c filename component",
+        "a longer unknown C identifier does not qualify its foo_main prefix"
+    };
+    for (size_t i = 0; i < sizeof(unknown) / sizeof(unknown[0]); i++) {
+        char query[256];
+        int n = snprintf(query, sizeof(query), "Repair the data frame checksum length %s", unknown[i]);
+        CI_CHECK(labels[i], baseline_ok && n > 0 && (size_t)n < sizeof(query) &&
+            zcode_goal_context_select_indexed(index, query, NULL, &selected).ok &&
+            !strcmp(selected.selected_symbol_id, baseline.selected_symbol_id));
+    }
+    return failures;
+}
+
+static int ci_selector_multiple_targets(struct codeindex *index)
+{
+    int failures = 0;
+    struct zcode_goal_selection first = {0}, again = {0};
+    const char *query = "Repair foo_main and foo_checksum";
+    bool selected = zcode_goal_context_select_indexed(index, query, NULL, &first).ok;
+    CI_CHECK("multiple explicit known symbols select an actual named target",
+        selected && (!strcmp(first.selected.name, "foo_main") ||
+                     !strcmp(first.selected.name, "foo_checksum")));
+    CI_CHECK("multiple explicit target selection is deterministic",
+        selected && zcode_goal_context_select_indexed(index, query, NULL, &again).ok &&
+        !strcmp(first.selected_symbol_id, again.selected_symbol_id) &&
+        first.candidate_count == again.candidate_count);
+    return failures;
+}
+
 static int test_codeindex_platform_arm(void)
 {
     int failures = 0;
@@ -1049,6 +1123,10 @@ static int test_codeindex_platform_arm(void)
              selected_indexed.candidate_count == ZCODE_GOAL_MAX_CANDIDATES &&
              selected_indexed.budget_exhausted &&
              selected_indexed.retrieval_corpus_files == 0);
+
+    failures += ci_selector_late_targets(ci);
+    failures += ci_selector_identifier_boundaries(ci);
+    failures += ci_selector_multiple_targets(ci);
 
     /* refs */
     struct ci_ref refs[32];
@@ -1994,11 +2072,774 @@ static int test_codeindex_platform_arm(void)
 }
 #endif
 
+/* Explicit observational mode, not a relevance evaluator or candidate author.
+ * The corpus contains requests only: expected paths never enter the selector. */
+static const struct json_value *ci_measure_unique(const struct json_value *v,
+                                                 const char *key)
+{
+    if (!v || v->type != JSON_OBJ) return NULL;
+    const struct json_value *found = NULL;
+    for (size_t i = 0; i < v->num_children; i++) {
+        if (strcmp(v->keys[i], key)) continue;
+        if (found) return NULL;
+        found = &v->children[i];
+    }
+    return found;
+}
+
+static bool ci_measure_manifest(const char *workspace, const uint8_t expected[32],
+                                 size_t *files)
+{
+    struct vcs_manifest manifest = {0};
+    uint8_t root[32];
+    bool ok = vcs_manifest_build(workspace, NULL, &manifest) &&
+        vcs_manifest_tree_hash(&manifest, root) && !memcmp(root, expected, 32);
+    *files = manifest.count;
+    vcs_manifest_free(&manifest);
+    return ok;
+}
+
+static bool ci_measure_symbol(const struct ci_symbol *s, struct json_value *out)
+{
+    char kind[2] = {s->kind, 0};
+    return json_push_kv_str(out, "name", s->name) &&
+        json_push_kv_str(out, "kind", kind) &&
+        json_push_kv_str(out, "def_path", s->def_path) &&
+        json_push_kv_int(out, "def_line", s->def_line) &&
+        json_push_kv_str(out, "decl_path", s->decl_path) &&
+        json_push_kv_int(out, "decl_line", s->decl_line) &&
+        json_push_kv_str(out, "signature", s->signature) &&
+        json_push_kv_str(out, "documentation", s->doc) &&
+        json_push_kv_str(out, "guard", s->guard) &&
+        json_push_kv_str(out, "group", s->group) &&
+        json_push_kv_bool(out, "partial", s->partial);
+}
+
+static bool ci_measure_candidate(const struct zcode_goal_candidate *candidate,
+                                  struct json_value *out)
+{
+    json_set_object(out);
+    return json_push_kv_str(out, "symbol_id", candidate->symbol_id) &&
+        ci_measure_symbol(&candidate->symbol, out) &&
+        json_push_kv_int(out, "score", candidate->score) &&
+        json_push_kv_int(out, "match_mask", candidate->match_mask) &&
+        json_push_kv_str(out, "matched_token", candidate->matched_token) &&
+        json_push_kv_str(out, "why", candidate->why);
+}
+
+static bool ci_measure_request_valid(const struct json_value *id,
+                                      const struct json_value *query)
+{
+    return id && id->type == JSON_STR && id->val.s[0] && strlen(id->val.s) <= 128 &&
+        query && query->type == JSON_STR && query->val.s[0] && strlen(query->val.s) <= 4096;
+}
+
+static bool ci_measure_selection_arrays(const struct zcode_goal_selection *selected,
+                                          struct json_value *tokens,
+                                          struct json_value *candidates)
+{
+    json_set_array(tokens); json_set_array(candidates);
+    bool ok = true;
+    for (size_t i = 0; ok && i < selected->token_count; i++) {
+        struct json_value token = {0};
+        json_set_str(&token, selected->tokens[i]);
+        ok = json_push_back(tokens, &token);
+        json_free(&token);
+    }
+    for (size_t i = 0; ok && i < selected->candidate_count; i++) {
+        struct json_value candidate = {0};
+        ok = ci_measure_candidate(&selected->candidates[i], &candidate) &&
+            json_push_back(candidates, &candidate);
+        json_free(&candidate);
+    }
+    return ok;
+}
+
+static bool ci_measure_selection_identity(struct json_value *out,
+                                            const struct zcode_goal_selection *s)
+{
+    return json_push_kv_str(out, "selected_symbol_id", s->selected_symbol_id) &&
+        json_push_kv_str(out, "selected_name", s->selected.name) &&
+        json_push_kv_str(out, "selected_def_path", s->selected.def_path) &&
+        json_push_kv_str(out, "selected_decl_path", s->selected.decl_path) &&
+        json_push_kv_str(out, "why", s->why);
+}
+
+static bool ci_measure_selection_metrics(struct json_value *out,
+                                           const struct zcode_goal_selection *s)
+{
+    return json_push_kv_int(out, "token_count", (int64_t)s->token_count) &&
+        json_push_kv_int(out, "candidate_count", (int64_t)s->candidate_count) &&
+        json_push_kv_int(out, "total_matches", (int64_t)s->total_matches) &&
+        json_push_kv_int(out, "dropped_candidates", (int64_t)s->dropped_candidates) &&
+        json_push_kv_bool(out, "budget_exhausted", s->budget_exhausted) &&
+        json_push_kv_int(out, "generation_us", (int64_t)s->generation_us) &&
+        json_push_kv_int(out, "retrieval_us", (int64_t)s->retrieval_us) &&
+        json_push_kv_int(out, "retrieval_corpus_files", (int64_t)s->retrieval_corpus_files) &&
+        json_push_kv_int(out, "retrieval_ranked_files", (int64_t)s->retrieval_ranked_files) &&
+        json_push_kv_bool(out, "retrieval_truncated", s->retrieval_truncated) &&
+        json_push_kv_int(out, "service_generation", s->service_generation);
+}
+
+static bool ci_measure_request(struct codeindex *index,
+                                const struct json_value *request,
+                                struct json_value *out)
+{
+    const struct json_value *id = ci_measure_unique(request, "id");
+    const struct json_value *query = ci_measure_unique(request, "query");
+    if (!ci_measure_request_valid(id, query)) return false;
+    struct zcode_goal_selection selected = {0};
+    struct zcl_result result = zcode_goal_context_select_indexed(
+        index, query->val.s, NULL, &selected);
+    if (!result.ok) {
+        fprintf(stderr, "codeindex baseline request %s failed: %s\n", id->val.s, result.message);
+        return false;
+    }
+    struct json_value tokens = {0}, candidates = {0};
+    json_set_object(out);
+    bool ok = ci_measure_selection_arrays(&selected, &tokens, &candidates) &&
+        json_push_kv_str(out, "request_id", id->val.s) &&
+        json_push_kv_str(out, "query", query->val.s) &&
+        json_push_kv_int(out, "query_bytes", (int64_t)strlen(query->val.s)) &&
+        json_push_kv(out, "tokens", &tokens) && json_push_kv(out, "candidates", &candidates) &&
+        ci_measure_selection_identity(out, &selected) && ci_measure_selection_metrics(out, &selected);
+    json_free(&candidates); json_free(&tokens);
+    return ok;
+}
+
+struct ci_measure_snapshot {
+    uint8_t expected[32], index_root[32], projection[32];
+    size_t source_files;
+    int64_t indexed_files;
+};
+
+static bool ci_measure_corpus(const char *request_file, char **text, size_t *bytes,
+                                struct json_value *corpus)
+{
+    if (!zcl_read_whole_file_text(request_file, 1024u * 1024u, text, bytes,
+                                  "codeindex baseline corpus") ||
+        memchr(*text, 0, *bytes) || !json_read(corpus, *text, *bytes)) return false;
+    const struct json_value *schema = ci_measure_unique(corpus, "schema");
+    const struct json_value *requests = ci_measure_unique(corpus, "requests");
+    return schema && schema->type == JSON_STR &&
+        !strcmp(schema->val.s, "experiment_request_evidence.v1") &&
+        requests && requests->type == JSON_ARR && requests->num_children > 0 &&
+        requests->num_children <= 64;
+}
+
+static bool ci_measure_capture_index(struct codeindex *index,
+                                       struct ci_measure_snapshot *snapshot)
+{
+    int64_t symbols = 0, refs = 0, groups = 0;
+    bool current = false;
+    return index && codeindex_source_root_sha3(index, snapshot->index_root) &&
+        codeindex_retrieval_projection_root_sha3(index, snapshot->projection) &&
+        codeindex_source_view_is_current(index, &current) && current &&
+        codeindex_table_counts(index, &snapshot->indexed_files, &symbols, &refs, &groups);
+}
+
+static bool ci_measure_rows(struct codeindex *index, const struct json_value *requests,
+                              struct json_value *rows)
+{
+    json_set_array(rows);
+    bool ok = true;
+    for (size_t i = 0; ok && i < requests->num_children; i++) {
+        struct json_value row = {0};
+        ok = ci_measure_request(index, json_at(requests, i), &row) &&
+            json_push_back(rows, &row);
+        json_free(&row);
+    }
+    return ok;
+}
+
+static bool ci_measure_recheck_index(const char *workspace, struct codeindex *index,
+                                       const struct ci_measure_snapshot *snapshot)
+{
+    size_t post_files = 0;
+    uint8_t post_index[32], post_projection[32];
+    bool current = false;
+    return ci_measure_manifest(workspace, snapshot->expected, &post_files) &&
+        post_files == snapshot->source_files &&
+        codeindex_source_root_sha3(index, post_index) &&
+        !memcmp(snapshot->index_root, post_index, 32) &&
+        codeindex_retrieval_projection_root_sha3(index, post_projection) &&
+        !memcmp(snapshot->projection, post_projection, 32) &&
+        codeindex_source_view_is_current(index, &current) && current &&
+        codeindex_retrieval_projection_is_current(index, &current) && current;
+}
+
+static bool ci_measure_recheck_corpus(const char *request_file,
+                                        const char *text, size_t bytes)
+{
+    char *post_text = NULL;
+    size_t post_bytes = 0;
+    bool ok = zcl_read_whole_file_text(request_file, 1024u * 1024u, &post_text,
+        &post_bytes, "codeindex baseline corpus recheck") &&
+        bytes == post_bytes && !memcmp(text, post_text, bytes);
+    free(post_text);
+    return ok;
+}
+
+static bool ci_measure_render(struct json_value *output, const struct json_value *rows,
+                                const struct ci_measure_snapshot *snapshot,
+                                const char *expected_hex, const char *text, size_t bytes)
+{
+    uint8_t corpus_root[32];
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha); sha3_256_write(&sha, (const uint8_t *)text, bytes);
+    sha3_256_finalize(&sha, corpus_root);
+    char index_hex[65], projection_hex[65], corpus_hex[65];
+    zcl_hex_encode(snapshot->index_root, 32, index_hex);
+    zcl_hex_encode(snapshot->projection, 32, projection_hex);
+    zcl_hex_encode(corpus_root, 32, corpus_hex);
+    json_set_object(output);
+    return json_push_kv_str(output, "schema", "zcl.goal_context_selector_observation.v1") &&
+        json_push_kv_str(output, "phase", "isolated_selector_observation_no_service_activation") &&
+        json_push_kv_str(output, "selector", "zcode_goal_context_select_indexed") &&
+        json_push_kv_str(output, "source_manifest_root_sha3", expected_hex) &&
+        json_push_kv_int(output, "source_manifest_files", (int64_t)snapshot->source_files) &&
+        json_push_kv_str(output, "index_source_root_sha3", index_hex) &&
+        json_push_kv_str(output, "index_projection_root_sha3", projection_hex) &&
+        json_push_kv_int(output, "indexed_files", snapshot->indexed_files) &&
+        json_push_kv_str(output, "request_file_sha3_256", corpus_hex) &&
+        json_push_kv_int(output, "request_file_bytes", (int64_t)bytes) &&
+        json_push_kv_bool(output, "pre_post_bindings_unchanged", true) &&
+        json_push_kv(output, "requests", rows);
+}
+
+static bool ci_measure_write(const struct json_value *output)
+{
+    size_t length = json_write(output, NULL, 0);
+    char *serialized = length ? malloc(length + 1) : NULL;
+    bool ok = serialized && json_write(output, serialized, length + 1) == length;
+    if (ok) ok = fwrite(serialized, 1, length, stdout) == length && putchar('\n') != EOF;
+    free(serialized);
+    return ok;
+}
+
+static bool ci_measure_baseline(const char *workspace, const char *request_file,
+                                 const char *expected_hex)
+{
+    struct ci_measure_snapshot snapshot = {0};
+    char *text = NULL;
+    size_t bytes = 0;
+    struct json_value corpus = {0}, output = {0}, rows = {0};
+    struct codeindex *index = NULL;
+    bool ok = zcl_hex_decode_lower(expected_hex, snapshot.expected, 32) &&
+        ci_measure_manifest(workspace, snapshot.expected, &snapshot.source_files) &&
+        ci_measure_corpus(request_file, &text, &bytes, &corpus);
+    if (ok) index = codeindex_open(workspace);
+    const struct json_value *requests = ci_measure_unique(&corpus, "requests");
+    ok = ok && ci_measure_capture_index(index, &snapshot) &&
+        ci_measure_rows(index, requests, &rows) &&
+        ci_measure_recheck_index(workspace, index, &snapshot) &&
+        ci_measure_recheck_corpus(request_file, text, bytes) &&
+        ci_measure_render(&output, &rows, &snapshot, expected_hex, text, bytes) &&
+        ci_measure_write(&output);
+    if (index) codeindex_close(index);
+    free(text);
+    json_free(&rows); json_free(&output); json_free(&corpus);
+    return ok;
+}
+
+/* Explicit one-shot test fixture. No watcher, service, fake plan or compiler.
+ * Its source-build CAS and the frozen indexed workspace are distinct roots. */
+#if defined(__linux__)
+static bool ci_restart_hash(const char *path, char hex[65])
+{
+    FILE *file = fopen(path, "rb");
+    if (!file) return false;
+    struct sha256_ctx sha;
+    unsigned char bytes[16384], digest[32];
+    sha256_init(&sha);
+    size_t n;
+    while ((n = fread(bytes, 1, sizeof(bytes), file))) sha256_write(&sha, bytes, n);
+    bool ok = !ferror(file);
+    if (fclose(file)) ok = false;
+    sha256_finalize(&sha, digest);
+    zcl_hex_encode(digest, 32, hex);
+    return ok;
+}
+
+/* Save the entire environment by pointer, never overwrite its strings. Native
+ * process calls are synchronous; no fixture opt-in reaches a recursive child.
+ * Keep the EXACT inherited lock/session/build/admission entries: deleting the
+ * checkout marker while inheriting its lock fd makes nested Make self-deadlock.
+ * Never synthesize ownership. Only known fixture override namespaces disappear. */
+static bool ci_restart_env_override(const char *entry)
+{
+    static const char *const prefixes[] = {
+        "ZCL_CODEINDEX_BASELINE_", "ZCL_CODEINDEX_RESTART_", "ZCL_TEST_FORK_",
+        "ZCL_TEST_CACHE", "ZCL_HOTSWAP_TEST_", "ZCL_DEVLOOP_TEST_",
+        "ONLY=", "LD_PRELOAD=", "LD_LIBRARY_PATH="
+    };
+    for (size_t i = 0; i < sizeof(prefixes) / sizeof(prefixes[0]); i++)
+        if (!strncmp(entry, prefixes[i], strlen(prefixes[i]))) return true;
+    return false;
+}
+
+static char **ci_restart_environment(char **original, bool process_optin)
+{
+    size_t count = 0;
+    while (original[count]) count++;
+    /* Three measurement entries and the optional process opt-in fit even
+     * when no input entry was filtered. Strings remain caller-owned. */
+    char **clean = calloc(count + 5, sizeof(*clean));
+    if (!clean) return NULL;
+    size_t used = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (ci_restart_env_override(original[i])) continue;
+        clean[used++] = original[i];
+    }
+    if (process_optin) clean[used] = "ZCL_DEVLOOP_TEST_PROCESS=1";
+    return clean;
+}
+
+static bool ci_restart_env_contains(char **env, const char *entry)
+{
+    for (size_t i = 0; env[i]; i++)
+        if (!strcmp(env[i], entry)) return true;
+    return false;
+}
+
+static int ci_restart_environment_tests(void)
+{
+    int failures = 0;
+    char *fixture[] = {"ZCL_CHECKOUT_LOCK_HELD=fixture-marker-not-authority",
+        "ZCL_SOURCE_IDENTITY_SESSION=fixture-session", "DEVBUILD_LANE=fixture-lane",
+        "TEST_FAST_CFLAGS=fixture-build", "ZCL_VENDOR_OFFLINE=fixture-policy",
+        "ZCL_CODEINDEX_RESTART_WORKSPACE=fixture", "ZCL_CODEINDEX_BASELINE_REQUESTS=fixture",
+        "ZCL_TEST_CACHE=1", "ZCL_TEST_FORK_ROLE=fixture", "ZCL_DEVLOOP_TEST_PROCESS=0", NULL};
+    char **clean = ci_restart_environment(fixture, true);
+    CI_CHECK("restart environment filter allocates", clean != NULL);
+    if (!clean) return failures;
+    for (size_t i = 0; i < 5; i++)
+        CI_CHECK("restart environment retains exact inherited ownership/build/admission",
+                  ci_restart_env_contains(clean, fixture[i]));
+    for (size_t i = 5; i < 10; i++)
+        CI_CHECK("restart environment removes only fixture recursion/test overrides",
+                  !ci_restart_env_contains(clean, fixture[i]));
+    CI_CHECK("restart environment explicitly opts into test subprocesses",
+              ci_restart_env_contains(clean, "ZCL_DEVLOOP_TEST_PROCESS=1"));
+    extern char **environ;
+    char **original = environ;
+    environ = clean;
+    bool installed = environ == clean;
+    environ = original;
+    CI_CHECK("restart temporary environment restores exact original pointer",
+              installed && environ == original);
+    free(clean);
+    char *unowned[] = {"PATH=/usr/bin:/bin", NULL};
+    clean = ci_restart_environment(unowned, false);
+    CI_CHECK("cold child never invents ownership or subprocess opt-in",
+              clean && !clean[1] && clean[0] == unowned[0]);
+    free(clean);
+    return failures;
+}
+
+static int ci_restart_child_output_tests(bool ran,
+                                          const struct zcl_devloop_process_result *process)
+{
+    int failures = 0;
+    CI_CHECK("test process parent opt-in admits a real bounded child",
+        ran && process->exit_code == 0 && !process->term_signal &&
+        !process->timed_out && !process->cancelled && !process->output_truncated);
+    CI_CHECK("test process child does not inherit its parent's execution opt-in",
+        ran && !strstr(process->output, "ZCL_DEVLOOP_TEST_PROCESS="));
+    CI_CHECK("test process child retains unrelated and similarly prefixed entries",
+        ran && strstr(process->output, "ZCL_CODEINDEX_CHILD_ENV_WITNESS=retained\n") &&
+        strstr(process->output, "ZCL_DEVLOOP_TEST_PROCESS_EXTRA=retained\n"));
+    return failures;
+}
+
+static int ci_restart_child_environment_tests(void)
+{
+    int failures = 0;
+    extern char **environ;
+    char **original = environ;
+    char *fixture[] = {"PATH=/usr/bin:/bin", "ZCL_DEVLOOP_TEST_PROCESS=1",
+        "ZCL_CODEINDEX_CHILD_ENV_WITNESS=retained",
+        "ZCL_DEVLOOP_TEST_PROCESS_EXTRA=retained", NULL};
+    const char *argv[] = {"/usr/bin/env", NULL};
+    struct zcl_devloop_process_result process = {0};
+    environ = fixture;
+    bool ran = zcl_devloop_process_run_test(".", argv, 5000, &process);
+    bool parent_unchanged = environ == fixture &&
+        !strcmp(getenv("ZCL_DEVLOOP_TEST_PROCESS"), "1");
+    environ = original;
+    failures += ci_restart_child_output_tests(ran, &process);
+    CI_CHECK("test process leaves parent environment and opt-in unchanged",
+        parent_unchanged && environ == original);
+    char *unowned[] = {"PATH=/usr/bin:/bin", NULL};
+    environ = unowned;
+    bool refused = !zcl_devloop_process_run_test(".", argv, 5000, &process);
+    bool unowned_unchanged = environ == unowned && !getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    environ = original;
+    CI_CHECK("test process without parent opt-in still refuses and restores environment",
+        refused && unowned_unchanged && environ == original);
+    return failures;
+}
+
+static bool ci_restart_execution_ok(const struct zcl_devloop_process_result *p)
+{
+    return !p->exit_code && !p->term_signal && !p->timed_out && !p->cancelled;
+}
+
+static bool ci_restart_process_ok(const struct zcl_devloop_process_result *p)
+{
+    return ci_restart_execution_ok(p) && !p->output_truncated;
+}
+
+static bool ci_restart_accounted(const struct zcl_devloop_restart_proof_receipt *p)
+{
+    return p->proof_complete && !p->groups_failed && !p->self_skips &&
+        p->group_count > 0 && p->groups_selected == p->group_count &&
+        p->groups_ran + p->groups_cached == p->group_count &&
+        !p->deferred_group_count && !p->bounded_proof_deferred &&
+        !p->integration_proof_deferred;
+}
+
+static bool ci_restart_proof_ok(const struct zcl_devloop_restart_build_receipt *b,
+                                const struct zcl_devloop_restart_proof_receipt *p)
+{
+    return b->candidate_probe_passed && b->source_identity_overlay &&
+        p->source_identity_overlay && !p->source_overlay_unresolved &&
+        ci_restart_accounted(p) && b->source_cas_sha3[0] &&
+        !strcmp(b->source_cas_sha3, p->source_cas_sha3);
+}
+
+/* The native API has already checked the canonical summary and exact groups.
+ * Its diagnostic tail need not contain the whole transcript; structured cold
+ * measurement and probe output retain the stricter completeness requirement. */
+static bool ci_restart_native_proof_ok(bool native_succeeded,
+                                        const struct zcl_devloop_restart_build_receipt *b,
+                                        const struct zcl_devloop_restart_proof_receipt *p,
+                                        const struct zcl_devloop_process_result *process)
+{
+    return native_succeeded && ci_restart_execution_ok(process) && ci_restart_proof_ok(b, p);
+}
+
+static int ci_restart_diagnostic_tail_tests(void)
+{
+    int failures = 0;
+    struct zcl_devloop_restart_build_receipt build = {
+        .candidate_probe_passed = true, .source_identity_overlay = true,
+        .source_cas_sha3 = "fixture-same-source"};
+    struct zcl_devloop_restart_proof_receipt proof = {
+        .source_identity_overlay = true, .proof_complete = true,
+        .group_count = 2, .groups_selected = 2, .groups_ran = 2,
+        .source_cas_sha3 = "fixture-same-source"};
+    struct zcl_devloop_process_result process = {.output_truncated = true};
+    CI_CHECK("native successful complete typed proof accepts bounded diagnostic tail",
+        ci_restart_native_proof_ok(true, &build, &proof, &process));
+    CI_CHECK("bounded diagnostic tail cannot turn native refusal into success",
+        !ci_restart_native_proof_ok(false, &build, &proof, &process));
+    proof.proof_complete = false;
+    CI_CHECK("bounded diagnostic tail cannot hide incomplete typed proof",
+        !ci_restart_native_proof_ok(true, &build, &proof, &process));
+    proof.proof_complete = true; proof.groups_failed = 1;
+    CI_CHECK("bounded diagnostic tail cannot hide a failed group",
+        !ci_restart_native_proof_ok(true, &build, &proof, &process));
+    proof.groups_failed = 0; proof.groups_ran = 1;
+    CI_CHECK("bounded diagnostic tail cannot hide missing group accounting",
+        !ci_restart_native_proof_ok(true, &build, &proof, &process));
+    proof.groups_ran = 2; build.source_cas_sha3[0] = 'x';
+    CI_CHECK("bounded diagnostic tail cannot hide mismatched source identity",
+        !ci_restart_native_proof_ok(true, &build, &proof, &process));
+    build.source_cas_sha3[0] = 'f'; process.exit_code = 1;
+    CI_CHECK("bounded diagnostic tail cannot hide failed execution",
+        !ci_restart_native_proof_ok(true, &build, &proof, &process));
+    process.exit_code = 0;
+    CI_CHECK("cold structured data still refuses truncated capture",
+        !ci_restart_process_ok(&process));
+    process.output_truncated = false;
+    CI_CHECK("complete successful structured capture remains eligible",
+        ci_restart_process_ok(&process));
+    return failures;
+}
+
+static bool ci_restart_json_string(const struct json_value *v, const char *key,
+                                    const char *expected)
+{
+    const struct json_value *field = ci_measure_unique(v, key);
+    return field && field->type == JSON_STR && !strcmp(field->val.s, expected);
+}
+
+static bool ci_restart_is_observation(const struct json_value *row)
+{
+    return ci_restart_json_string(row, "schema", "zcl.goal_context_selector_observation.v1") &&
+        ci_restart_json_string(row, "phase", "isolated_selector_observation_no_service_activation") &&
+        ci_restart_json_string(row, "selector", "zcode_goal_context_select_indexed");
+}
+
+/* Only a full JSON observation line is accepted, never a probe or PASS text.
+ * Truncated runner output refuses rather than losing evidence silently. */
+static bool ci_restart_find_observation(char *text, struct json_value *out)
+{
+    char *cursor = text;
+    bool found = false;
+    while (*cursor) {
+        char *end = strchr(cursor, '\n');
+        size_t length = end ? (size_t)(end - cursor) : strlen(cursor);
+        if (length && cursor[0] == '{') {
+            struct json_value row = {0};
+            bool parsed = json_read(&row, cursor, length);
+            if (parsed && ci_restart_is_observation(&row)) {
+                if (found) { json_free(&row); return false; }
+                *out = row; found = true;
+            } else json_free(&row);
+        }
+        if (!end) break;
+        cursor = end + 1;
+    }
+    return found;
+}
+
+static bool ci_restart_observation(char *text, const char *root,
+                                    const char *request_file, struct json_value *out)
+{
+    char *requests = NULL;
+    size_t bytes = 0;
+    uint8_t digest[32];
+    bool ok = ci_restart_find_observation(text, out) &&
+        zcl_read_whole_file_text(request_file, 1024u * 1024u,
+        &requests, &bytes, "restart request binding");
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    if (ok) sha3_256_write(&sha, (const uint8_t *)requests, bytes);
+    sha3_256_finalize(&sha, digest);
+    free(requests);
+    char hex[65]; zcl_hex_encode(digest, 32, hex);
+    const struct json_value *rows = ci_measure_unique(out, "requests");
+    const struct json_value *bound = ci_measure_unique(out, "pre_post_bindings_unchanged");
+    return ok && ci_restart_json_string(out, "source_manifest_root_sha3", root) &&
+        ci_restart_json_string(out, "request_file_sha3_256", hex) &&
+        rows && rows->type == JSON_ARR && rows->num_children == 2 &&
+        bound && bound->type == JSON_BOOL && bound->val.b;
+}
+
+static bool ci_restart_cold_summary(const char *text)
+{
+    const char *line = strstr(text, "\nSUITE VERDICT mode=cold ");
+    if (!line) return false;
+    size_t total, ran, cached, gated;
+    int failed, skips, unobserved, flaky;
+    int fields = sscanf(line,
+        "\nSUITE VERDICT mode=cold groups_total=%zu groups_ran=%zu groups_cached=%zu "
+        "groups_gated=%zu groups_failed=%d self_skips=%d env_unobserved=%d load_flaky=%d",
+        &total, &ran, &cached, &gated, &failed, &skips, &unobserved, &flaky);
+    return fields == 8 && ran == 1 && !cached && total >= gated &&
+        total - gated == ran &&
+        !failed && !skips && !unobserved && !flaky;
+}
+
+static bool ci_restart_cold(const char *repo, const char *workspace,
+                             const char *requests, const char *root,
+                             const struct zcl_devloop_restart_proof_receipt *proof,
+                             struct json_value *observation)
+{
+    char vars[3][8192];
+    const char *keys[] = {"ZCL_CODEINDEX_BASELINE_WORKSPACE", "ZCL_CODEINDEX_BASELINE_REQUESTS",
+                          "ZCL_CODEINDEX_BASELINE_SOURCE_ROOT"};
+    const char *values[] = {workspace, requests, root};
+    for (size_t i = 0; i < 3; i++) {
+        int n = snprintf(vars[i], sizeof(vars[i]), "%s=%s", keys[i], values[i]);
+        if (n < 0 || (size_t)n >= sizeof(vars[i])) return false;
+    }
+    extern char **environ;
+    char **env = ci_restart_environment(environ, false);
+    if (!env) return false;
+    size_t used = 0;
+    while (env[used]) used++;
+    for (size_t i = 0; i < 3; i++) env[used++] = vars[i];
+    const char *argv[] = {proof->artifact_path, "--exact=test_codeindex", "--no-cache", NULL};
+    struct zcl_devloop_process_result process = {0};
+    bool ok = zcl_devloop_process_run_env(repo, argv, (const char *const *)env, 300000, &process) &&
+        ci_restart_process_ok(&process);
+    free(env);
+    /* Retain the actual child transcript even on refusal. */
+    if (process.output_len) fwrite(process.output, 1, process.output_len, stdout);
+    bool complete = ok && ci_restart_cold_summary(process.output) &&
+        ci_restart_observation(process.output, root, requests, observation);
+    if (!complete)
+        fprintf(stderr, "codeindex cold data refused: exit=%d signal=%d timeout=%d cancelled=%d output_len=%zu truncated=%d\n",
+            process.exit_code, process.term_signal, process.timed_out,
+            process.cancelled, process.output_len, process.output_truncated);
+    return complete;
+}
+
+static bool ci_restart_emit_identities(struct json_value *out,
+                                        const struct zcl_devloop_restart_build_receipt *b,
+                                        const struct zcl_devloop_restart_proof_receipt *p)
+{
+    return json_push_kv_str(out, "build_source_cas_sha3", b->source_cas_sha3) &&
+        json_push_kv_str(out, "runtime_artifact", b->artifact_path) &&
+        json_push_kv_str(out, "runtime_artifact_sha256", b->artifact_sha256) &&
+        json_push_kv_str(out, "runtime_cache_key", b->artifact_cache_key) &&
+        json_push_kv_str(out, "proof_artifact", p->artifact_path) &&
+        json_push_kv_str(out, "proof_artifact_sha256", p->artifact_sha256) &&
+        json_push_kv_str(out, "proof_cache_key", p->artifact_cache_key);
+}
+
+static bool ci_restart_artifacts_match(const struct zcl_devloop_restart_build_receipt *b,
+                                        const struct zcl_devloop_restart_proof_receipt *p)
+{
+    char runtime[65], proof[65];
+    struct stat st;
+    return ci_restart_hash(b->artifact_path, runtime) && !strcmp(runtime, b->artifact_sha256) &&
+        ci_restart_hash(p->artifact_path, proof) && !strcmp(proof, p->artifact_sha256) &&
+        !stat(p->artifact_path, &st) && (uint64_t)st.st_dev == p->artifact_dev &&
+        (uint64_t)st.st_ino == p->artifact_ino && (uint64_t)st.st_size == p->artifact_size &&
+        (int64_t)st.st_ctime == p->artifact_ctime_sec;
+}
+
+static bool ci_restart_generation(struct json_value *out, const char *repo,
+                                    const char *expected_source)
+{
+    struct dev_source_record after = {0};
+    char path[8192], hash[65];
+    int n = snprintf(path, sizeof(path), "%s/build/dev-loop/restart.env", repo);
+    return n > 0 && (size_t)n < sizeof(path) && ci_restart_hash(path, hash) &&
+        zcl_dev_source_cas_capture(repo, &after) && after.cas_present &&
+        !strcmp(after.cas_root_sha3, expected_source) &&
+        json_push_kv_str(out, "native_restart_plan_sha256", hash) &&
+        json_push_kv_bool(out, "build_source_unchanged_after_cold_run", true);
+}
+
+static bool ci_restart_emit(const char *repo,
+                             const struct zcl_devloop_restart_build_receipt *build,
+                             const struct zcl_devloop_restart_proof_receipt *proof,
+                             const struct json_value *observation)
+{
+    struct json_value out = {0};
+    json_set_object(&out);
+    bool ok = json_push_kv_str(&out, "schema", "zcl.goal_context_restart_observation.v1") &&
+        json_push_kv_str(&out, "scope", "isolated_DEV_RESTART_no_service_activation") &&
+        ci_restart_emit_identities(&out, build, proof) &&
+        ci_restart_generation(&out, repo, build->source_cas_sha3) &&
+        json_push_kv_str(&out, "proof_groups", proof->groups) &&
+        json_push_kv_str(&out, "proof_groups_sha256", proof->groups_sha256) &&
+        json_push_kv_int(&out, "proof_groups_ran", proof->groups_ran) &&
+        json_push_kv_int(&out, "proof_groups_cached", proof->groups_cached) &&
+        json_push_kv(&out, "cold_selector_observation", observation);
+    size_t n = ok ? json_write(&out, NULL, 0) : 0;
+    char *text = n ? malloc(n + 1) : NULL;
+    ok = text && json_write(&out, text, n + 1) == n;
+    if (ok) ok = fwrite(text, 1, n, stdout) == n && putchar('\n') != EOF;
+    free(text); json_free(&out);
+    return ok;
+}
+
+static bool ci_restart_stack_ready(void)
+{
+    struct rlimit stack;
+    if (getrlimit(RLIMIT_STACK, &stack) || stack.rlim_cur != RLIM_INFINITY) {
+        fprintf(stderr, "codeindex DEV_RESTART requires explicit unlimited test stack (ulimit -s unlimited)\n");
+        return false;
+    }
+    return true;
+}
+
+static void ci_restart_refusal(const char *stage, const char *why,
+                                 const struct zcl_devloop_process_result *process,
+                                 const struct zcl_devloop_restart_proof_receipt *proof)
+{
+    fprintf(stderr, "codeindex DEV_RESTART diagnostic: stage=%s exit=%d signal=%d timeout=%d cancelled=%d output_len=%zu truncated=%d selected=%u ran=%u cached=%u failed=%u skips=%u complete=%d unresolved_overlay=%d\n",
+        stage, process->exit_code, process->term_signal, process->timed_out,
+        process->cancelled, process->output_len, process->output_truncated,
+        proof->groups_selected, proof->groups_ran, proof->groups_cached,
+        proof->groups_failed, proof->self_skips, proof->proof_complete,
+        proof->source_overlay_unresolved);
+    fprintf(stderr, "codeindex explicit DEV_RESTART refused: %s\n%s\n",
+        why[0] ? why : "incomplete proof, changed identity or missing cold observation", process->output);
+}
+
+static bool ci_measure_restart(const char *repo, const char *workspace,
+                                const char *requests, const char *root)
+{
+    /* Prerequisite: genuinely rebuild the baseline with the repaired process,
+     * restart deadline and this fixture before applying the selector change.
+     * This phase overlays/proves only that selector delta. The infrastructure
+     * changes retain their separate complete native derived proof obligation;
+     * this narrower source list does not qualify those changes. */
+    const char *sources[] = {"cognition/services/src/zcode_goal_context_service.c"};
+    if (!ci_restart_stack_ready()) return false;
+    struct zcl_devloop_plan plan = {0};
+    struct zcl_devloop_restart_build_receipt build = {0};
+    struct zcl_devloop_restart_proof_receipt proof = {0};
+    struct zcl_devloop_process_result process = {0};
+    char why[512] = {0};
+    struct json_value observation = {0};
+    extern char **environ;
+    char **original = environ, **clean = ci_restart_environment(original, true);
+    if (!clean) return false;
+    environ = clean;
+    const char *stage = "plan_or_build";
+    bool ok = zcl_devloop_plan_files(sources, 1, &plan) &&
+        zcl_devloop_plan_add_closure(repo, sources, 1, &plan) &&
+        zcl_devloop_plan_proof_admissible(&plan, NULL) &&
+        zcl_devloop_restart_build(repo, sources, 1, &build, &process, why, sizeof(why));
+    if (ok) {
+        stage = "probe_or_native_proof";
+        ok = ci_restart_process_ok(&process) &&
+            zcl_devloop_restart_prove(repo, sources, 1, &plan, &proof, &process, why, sizeof(why));
+    }
+    if (ok) {
+        stage = "typed_proof_and_artifact_identity";
+        ok = ci_restart_native_proof_ok(ok, &build, &proof, &process) &&
+            ci_restart_artifacts_match(&build, &proof);
+    }
+    if (ok) {
+        stage = "cold_observation_and_final_bindings";
+        ok = ci_restart_cold(repo, workspace, requests, root, &proof, &observation) &&
+            ci_restart_artifacts_match(&build, &proof) && ci_restart_emit(repo, &build, &proof, &observation);
+    }
+    environ = original;
+    free(clean); json_free(&observation);
+    if (!ok) ci_restart_refusal(stage, why, &process, &proof);
+    return ok;
+}
+#else
+static bool ci_measure_restart(const char *repo, const char *workspace,
+                                const char *requests, const char *root)
+{
+    (void)repo; (void)workspace; (void)requests; (void)root;
+    fprintf(stderr, "codeindex explicit restart observation is supported only by the Linux test fixture\n");
+    return false;
+}
+#endif
+
+static bool ci_restart_inputs(const char *repo, const char *workspace,
+                               const char *requests, const char *root)
+{
+    return repo[0] && workspace && workspace[0] && requests && requests[0] &&
+        root && root[0] && ci_measure_restart(repo, workspace, requests, root);
+}
+
 int test_codeindex(void)
 {
     int failures = test_codeindex_platform_arm();
+#if defined(__linux__)
+    failures += ci_restart_environment_tests();
+    failures += ci_restart_child_environment_tests();
+    failures += ci_restart_diagnostic_tail_tests();
+#endif
 #if !defined(_WIN32)
     failures += receipt_extent_tests();
 #endif
+    const char *workspace = getenv("ZCL_CODEINDEX_BASELINE_WORKSPACE");
+    const char *requests = getenv("ZCL_CODEINDEX_BASELINE_REQUESTS");
+    const char *root = getenv("ZCL_CODEINDEX_BASELINE_SOURCE_ROOT");
+    const char *restart = getenv("ZCL_CODEINDEX_RESTART_WORKSPACE");
+    if (restart) {
+        if (!ci_restart_inputs(restart, workspace, requests, root)) failures++;
+    } else if (workspace || requests || root) {
+        bool complete = workspace && workspace[0] && requests && requests[0] &&
+            root && root[0] && ci_measure_baseline(workspace, requests, root);
+        if (!complete) {
+            fprintf(stderr, "codeindex baseline measurement FAILED: all three explicit inputs and unchanged source/corpus/index bindings required\n");
+            failures++;
+        }
+    } else printf("codeindex baseline measurement not requested; no observation produced\n");
     return failures;
 }

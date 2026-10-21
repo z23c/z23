@@ -2,6 +2,7 @@
 
 #define _GNU_SOURCE
 #include "devloop.h"
+#include "base/safe_alloc.h"
 
 #include "platform/time_compat.h"
 #include "platform/process_compat.h"
@@ -1110,8 +1111,31 @@ bool zcl_devloop_process_run_test(const char *cwd,
                                   const char *const argv[], int timeout_ms,
                                   struct zcl_devloop_process_result *out)
 {
+#ifdef ZCL_TESTING
+    /* The opt-in authorizes this parent, not an unrelated test in its child.
+     * Preserve every other inherited entry, including checkout lock/session
+     * ownership. Admission still reads the parent's unchanged environment. */
+    const char *const *inherited = process_inherited_env();
+    size_t count = 0;
+    while (inherited[count]) count++;
+    const char **child = zcl_calloc(count + 1, sizeof(*child),
+                                    "devloop test child environment");
+    if (!child) {
+        fprintf(stderr, "[devloop] process: test child environment allocation failed\n");
+        return false;
+    }
+    size_t used = 0;
+    static const char marker[] = "ZCL_DEVLOOP_TEST_PROCESS=";
+    for (size_t i = 0; i < count; i++)
+        if (strncmp(inherited[i], marker, sizeof(marker) - 1) != 0)
+            child[used++] = inherited[i];
+    bool ok = process_run_impl(cwd, -1, argv, child, timeout_ms, true, out);
+    free(child);
+    return ok;
+#else
     return process_run_impl(cwd, -1, argv, process_inherited_env(),
                             timeout_ms, true, out);
+#endif
 }
 
 bool zcl_devloop_process_run_fd(const char *cwd, int exec_fd,
