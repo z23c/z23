@@ -108,7 +108,7 @@ static const char *const k_body_fetch[] = {
     "authority_active_hash_mismatch_total",
     "authority_visible_parent_absent_total",
     "authority_visible_parent_mismatch_total", "authority_failed_total",
-    "body_missing_total", "_health", NULL
+    "body_missing_total", "authority_busy_total", "_health", NULL
 };
 
 static const char *const k_body_persist[] = {
