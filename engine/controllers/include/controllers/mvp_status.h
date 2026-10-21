@@ -1,4 +1,5 @@
-/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0 */
+/* Copyright 2026 Rhett Creighton. SPDX-License-Identifier: Apache-2.0
+ * purpose: Shared MVP evidence classification and qualification snapshot validation. */
 #ifndef ZCL_MVP_STATUS_H
 #define ZCL_MVP_STATUS_H
 #include <stdbool.h>
