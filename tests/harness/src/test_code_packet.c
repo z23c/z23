@@ -100,6 +100,27 @@ static bool pkt_write_many(void)
     return pkt_write("core/modules/net/src/pk_many.c", text);
 }
 
+static bool pkt_declaration_fixture(void)
+{
+    char rel[160];
+    bool ok = pkt_write("core/modules/net/src/pk_decl_service.c",
+                         "int packet_decl_getter(void)\n{\n    return 17;\n}\n");
+    ok = ok && pkt_write("core/modules/net/include/net/pk_service.h",
+                         "int packet_decl_getter(void);\n");
+    ok = ok && pkt_write("core/modules/net/include/net/pk_service_alt.h",
+                         "int packet_decl_getter(void);\n"
+                         "static int packet_rank(long x);\n");
+    ok = ok && pkt_write("core/modules/net/include/net/pk_same_tag.h",
+                         "struct packet_decl_getter { int value; };\n");
+    ok = ok && pkt_write("core/modules/net/src/pk_decl_many.c",
+                         "int pk_decl_many(void) { return 7; }\n");
+    for (int i = 0; i < 6; i++) {
+        snprintf(rel, sizeof(rel), "core/modules/net/include/net/pk_decl_%d.h", i);
+        ok = ok && pkt_write(rel, "int pk_decl_many(void);\n");
+    }
+    return ok;
+}
+
 static bool pkt_fixture(void)
 {
     char rel[160];
@@ -110,6 +131,7 @@ static bool pkt_fixture(void)
     ok = ok && pkt_write_long("core/modules/net/src/pk_long.c", "pk_long", 150);
     ok = ok && pkt_write_many();
     ok = ok && pkt_write("core/modules/net/src/pk_service.c", PKT_SERVICE);
+    ok = ok && pkt_declaration_fixture();
     ok = ok && pkt_write("core/modules/net/src/pk_duplicate.c",
                          "static int packet_rank(long x) { return x - 99; }\n");
     ok = ok && pkt_write("tests/harness/src/test_packet_wrong.c",
@@ -492,6 +514,92 @@ static int test_code_packet_unknown_symbol(void)
     return failures;
 }
 
+static int test_code_packet_declaration_candidates(void)
+{
+    int failures = 0;
+    TEST("code_packet: separate same-name declaration candidates never assert linkage") {
+        struct zcl_command_reply reply;
+        const char *syms[] = {"packet_decl_getter"};
+        const char *files[] = {"core/modules/net/src/pk_decl_service.c"};
+        pkt_call("Locate declaration candidates", syms, 1, files, 1, 120, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "id")), "fn:external:packet_decl_getter");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "file")), files[0]);
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "declaration_candidates_status")), "complete");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "declaration_candidates_basis")), "same_name_only; linkage_not_proven");
+        const struct json_value *rows = json_get(ex, "declaration_candidates");
+        ASSERT_EQ(json_size(rows), 2);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 0), "file")),
+                      "core/modules/net/include/net/pk_service.h");
+        ASSERT_EQ(json_get_int(json_get(json_at(rows, 0), "line")), 1);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(rows, 1), "file")),
+                      "core/modules/net/include/net/pk_service_alt.h");
+        ASSERT(strstr(pkt_md(&reply), "same-name declaration candidates; linkage not proven") != NULL);
+        ASSERT(strstr(pkt_md(&reply), "pk_service.h:1") != NULL);
+        ASSERT_EQ(json_get_int(json_get(ex, "shown_lines")), 4);
+        zcl_command_reply_free(&reply);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_packet_declaration_limits(void)
+{
+    int failures = 0;
+    TEST("code_packet: declaration caps, absent declarations and static scopes stay explicit") {
+        struct zcl_command_reply reply;
+        const char *names[] = {"pk_decl_many", "pk_long", "packet_rank", "pk_aux"};
+        const char *states[] = {"candidate_cap", "complete", "not_applicable_static", "lookup_capped"};
+        const size_t counts[] = {4, 0, 0, 0};
+        const char *files[] = {"core/modules/net/src/pk_service.c"};
+        for (int i = 0; i < 4; i++) {
+            pkt_call("Preserve bounded evidence", &names[i], 1, files, 1, 120, &reply);
+            ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+            const struct json_value *ex = pkt_first(&reply, "excerpts");
+            ASSERT_STR_EQ(json_get_str(json_get(ex, "declaration_candidates_status")), states[i]);
+            ASSERT_EQ(json_size(json_get(ex, "declaration_candidates")), counts[i]);
+            zcl_command_reply_free(&reply);
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_packet_declaration_reply_budget(void)
+{
+    int failures = 0;
+    TEST("code_packet: reply fitting drops candidate metadata before shrinking the requested body") {
+        struct json_value input;
+        struct zcl_command_reply reply;
+        const char *wire = "{\"goal\":\"Budget declaration context\",\"symbols\":[\"packet_decl_getter\"],\"files\":[\"core/modules/net/src/pk_decl_service.c\"],\"max_lines\":120}";
+        json_init(&input);
+        ASSERT(json_read(&input, wire, strlen(wire)));
+        pkt_run(PKT_FIX, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_size(json_get(pkt_first(&reply, "excerpts"), "declaration_candidates")), 2);
+        size_t full = json_write(&reply.data, NULL, 0);
+        ASSERT(full > 200);
+        zcl_command_reply_free(&reply);
+        /* The handler adds its summary after fitting; reserve its overhead. */
+        size_t cap = full - 200;
+        size_t budget = cap > 2048 ? cap + 2048 : cap * 2;
+        pkt_run_budget(PKT_FIX, &input, budget, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *ex = pkt_first(&reply, "excerpts");
+        ASSERT_STR_EQ(json_get_str(json_get(ex, "declaration_candidates_status")), "omitted_reply_budget");
+        ASSERT_EQ(json_size(json_get(ex, "declaration_candidates")), 0);
+        ASSERT_EQ(json_get_int(json_get(&reply.data, "max_lines_effective")), 120);
+        ASSERT(strstr(pkt_md(&reply), "return 17;") != NULL);
+        ASSERT(strstr(pkt_md(&reply), "pk_service.h:1") == NULL);
+        ASSERT(json_write(&reply.data, NULL, 0) <= full - 200);
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static bool pkt_same_array(const struct json_value *a, const struct json_value *b)
 {
     if (!a || !b || a->num_children != b->num_children) return false;
@@ -770,6 +878,9 @@ int test_code_packet(void)
     failures += test_code_packet_excerpt_append_failure();
     failures += test_code_packet_shared_context();
     failures += test_code_packet_unknown_symbol();
+    failures += test_code_packet_declaration_candidates();
+    failures += test_code_packet_declaration_limits();
+    failures += test_code_packet_declaration_reply_budget();
     failures += test_code_packet_tests_match_code_tests();
     failures += test_code_packet_bounds_refused();
     failures += test_code_packet_markdown_fields();

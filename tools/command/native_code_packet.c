@@ -31,11 +31,20 @@
 
 #define PK_REPLY_BUDGET ((size_t)65536u)
 #define PK_LOOKUP_CAP 64
+#define PK_DECL_CAP 4
+
+struct pk_declaration {
+    char file[256];
+    int line;
+};
 
 struct pk_choice {
     struct ci_symbol symbol;
     const char *status;
     int body_end;
+    struct pk_declaration declarations[PK_DECL_CAP];
+    int ndecl;
+    const char *declaration_status;
 };
 
 /* One assembly of the packet; rebuilt (cache kept) when the reply must shrink. */
@@ -49,6 +58,8 @@ struct pk_run {
     unsigned traps;
     struct pk_choice choice[PK_SYMBOLS_MAX];
     bool neighborhoods;
+    bool declarations;
+    bool declaration_output_failed;
     struct json_value excerpts, files, tests, pattern, impact, caps, auth,
         claims;
     struct pk_sb map, exc, pat, keep, authority, notes;
@@ -297,9 +308,34 @@ static void pk_md_excerpt(struct pk_sb *sb, const struct pk_excerpt *ex,
     pk_sb_add(sb, "%s\n\n", fence);
 }
 
-static void pk_json_excerpt(struct json_value *arr, const struct pk_excerpt *ex,
+static bool pk_json_declarations(struct json_value *out, const struct pk_choice *choice,
+                                  bool show)
+{
+    struct json_value rows;
+    json_init(&rows);
+    json_set_array(&rows);
+    const char *status = choice->declaration_status;
+    if (!show && choice->ndecl) status = "omitted_reply_budget";
+    bool ok = true;
+    for (int i = 0; ok && show && i < choice->ndecl; i++) {
+        struct json_value row;
+        pk_obj(&row);
+        ok = json_push_kv_str(&row, "file", choice->declarations[i].file) &&
+             json_push_kv_int(&row, "line", choice->declarations[i].line) &&
+             json_push_back(&rows, &row);
+        json_free(&row);
+    }
+    ok = ok && json_push_kv_str(out, "declaration_candidates_status", status) &&
+         json_push_kv_str(out, "declaration_candidates_basis", "same_name_only; linkage_not_proven") &&
+         json_push_kv(out, "declaration_candidates", &rows);
+    json_free(&rows);
+    return ok;
+}
+
+static bool pk_json_excerpt(struct json_value *arr, const struct pk_excerpt *ex,
                             const struct ci_symbol *s, bool neighborhood,
-                            const char *shared_with)
+                            const char *shared_with, const struct pk_choice *choice,
+                            bool declarations)
 {
     struct json_value o;
     pk_obj(&o);
@@ -327,7 +363,12 @@ static void pk_json_excerpt(struct json_value *arr, const struct pk_excerpt *ex,
     }
     if (neighborhood) (void)json_push_kv_str(&o, "context", "same_file_neighborhood");
     if (shared_with) (void)json_push_kv_str(&o, "shared_with", shared_with);
+    if (!pk_json_declarations(&o, choice, declarations)) {
+        json_free(&o);
+        return false;
+    }
     pk_push(arr, &o);
+    return true;
 }
 
 /* "symbol X is defined once": every exact-name definition the index holds. */
@@ -421,24 +462,73 @@ static const char *pk_complete_matches(struct pk_run *run, const char *name,
     return pk_match_result(scoped.count ? &scoped : &global, symbol, "not_found");
 }
 
-static const char *pk_resolve_symbol(struct pk_run *run, const char *name, struct ci_symbol *symbol)
+/* Keep the first four distinct sites in byte-stable path/line order. These
+ * are name matches, never an assertion that C linkage joins the records. */
+static void pk_declaration_add(struct pk_choice *choice, const struct ci_symbol *s)
+{
+    int at = 0;
+    while (at < choice->ndecl) {
+        const struct pk_declaration *d = &choice->declarations[at];
+        int cmp = strcmp(d->file, s->decl_path);
+        if (!cmp && d->line == s->decl_line) return;
+        if (cmp > 0 || (!cmp && d->line > s->decl_line)) break;
+        at++;
+    }
+    if (choice->ndecl == PK_DECL_CAP) choice->declaration_status = "candidate_cap";
+    else choice->ndecl++;
+    for (int i = choice->ndecl - 1; i > at; i--)
+        choice->declarations[i] = choice->declarations[i - 1];
+    if (at < PK_DECL_CAP) {
+        struct pk_declaration *d = &choice->declarations[at];
+        (void)snprintf(d->file, sizeof(d->file), "%s", s->decl_path);
+        d->line = s->decl_line;
+    }
+}
+
+static void pk_declarations_collect(struct pk_choice *choice, const char *name,
+                                     const struct ci_symbol *hits, int count)
+{
+    choice->declaration_status = "complete";
+    if (strcmp(choice->status, "ok")) {
+        choice->declaration_status = "unresolved";
+        return;
+    }
+    if (choice->symbol.kind == 't') {
+        choice->declaration_status = "not_applicable_static";
+        return;
+    }
+    for (int i = 0; i < count; i++) {
+        const struct ci_symbol *s = &hits[i];
+        if (!strcmp(s->name, name) && s->kind == choice->symbol.kind &&
+            s->decl_path[0] && s->decl_line > 0)
+            pk_declaration_add(choice, s);
+    }
+}
+
+static const char *pk_resolve_symbol(struct pk_run *run, const char *name, struct pk_choice *choice)
 {
     static struct ci_symbol hits[PK_LOOKUP_CAP];
     int n = codeindex_find(run->ctx.ci, name, hits, PK_LOOKUP_CAP);
+    choice->declaration_status = "lookup_failed";
     if (n < 0) return "lookup_failed";
-    if (n < PK_LOOKUP_CAP) return pk_complete_matches(run, name, hits, n, symbol);
+    if (n < PK_LOOKUP_CAP) {
+        choice->status = pk_complete_matches(run, name, hits, n, &choice->symbol);
+        pk_declarations_collect(choice, name, hits, n);
+        return choice->status;
+    }
+    choice->declaration_status = "lookup_capped";
     struct pk_match match = {0};
     const char *status = pk_scoped_matches(run, name, &match);
     if (status) return status;
-    return pk_match_result(&match, symbol, "lookup_capped");
+    return pk_match_result(&match, &choice->symbol, "lookup_capped");
 }
 
 static void pk_prepare_symbols(struct pk_run *run)
 {
     for (int i = 0; i < run->in.nsym; i++) {
         struct pk_choice *choice = &run->choice[i];
-        choice->body_end = 0;
-        choice->status = pk_resolve_symbol(run, run->in.symbols[i], &choice->symbol);
+        memset(choice, 0, sizeof(*choice));
+        choice->status = pk_resolve_symbol(run, run->in.symbols[i], choice);
         if (strcmp(choice->status, "ok")) continue;
         struct pk_excerpt ex;
         pk_excerpt_symbol(&run->ctx, &choice->symbol, 0, run->ctx.max_lines, &ex);
@@ -487,6 +577,17 @@ static bool pk_symbol_excerpt(struct pk_run *run, int index, struct pk_excerpt *
     return neighborhood;
 }
 
+static void pk_md_declarations(struct pk_run *run, const char *name,
+                                 const struct pk_choice *choice)
+{
+    if (!run->declarations || !choice->ndecl) return;
+    pk_sb_add(&run->exc, "  - %s same-name declaration candidates; linkage not proven (%s):\n",
+              name, choice->declaration_status);
+    for (int i = 0; i < choice->ndecl; i++)
+        pk_sb_add(&run->exc, "    - %s:%d\n", choice->declarations[i].file,
+                  choice->declarations[i].line);
+}
+
 static void pk_do_symbol(struct pk_run *run, int index)
 {
     const char *name = run->in.symbols[index];
@@ -503,8 +604,10 @@ static void pk_do_symbol(struct pk_run *run, int index)
         (void)snprintf(ex.symbol, sizeof(ex.symbol), "%s", name);
         ex.status = choice->status;
     }
-    pk_json_excerpt(&run->excerpts, &ex, found ? &s : NULL, neighborhood,
-                    shared >= 0 ? run->in.symbols[shared] : NULL);
+    if (!pk_json_excerpt(&run->excerpts, &ex, found ? &s : NULL, neighborhood,
+                    shared >= 0 ? run->in.symbols[shared] : NULL, choice, run->declarations))
+        run->declaration_output_failed = true;
+    pk_md_declarations(run, name, choice);
     if (found)
         pk_touch_add(run, s.def_path[0] ? s.def_path : s.decl_path, false);
     if (ex.text.len > 0 && shared < 0) {
@@ -923,6 +1026,7 @@ static void pk_run_reset(struct pk_run *run, int max_lines)
     (void)snprintf(run->f.dep_hex, sizeof(run->f.dep_hex), "%s", dep);
     (void)snprintf(run->f.name, sizeof(run->f.name), "%s", name);
     run->ntouch = 0;
+    run->declaration_output_failed = false;
     run->traps = 0;
     run->ctx.max_lines = max_lines;
 }
@@ -944,7 +1048,6 @@ static void pk_keep_signatures(struct pk_run *run)
 static void pk_assemble(struct pk_run *run, int max_lines)
 {
     pk_run_reset(run, max_lines);
-    pk_prepare_symbols(run);
     pk_claim(run, run->f.head[0] != '\0',
              run->f.head[0] ? ".git" : "no readable .git",
              "HEAD was read from the checkout");
@@ -1027,7 +1130,7 @@ static bool pk_render(struct pk_run *run, struct json_value *out)
     pk_sb_raw(&files, run->pat.p ? run->pat.p : "", run->pat.len);
     pk_md_document(&doc, &run->in, &run->f, &files, &run->keep,
                    &run->authority, &run->notes);
-    bool ok = !files.over && !doc.over && !run->map.over && !run->exc.over &&
+    bool ok = !run->declaration_output_failed && !files.over && !doc.over && !run->map.over && !run->exc.over &&
               !run->pat.over && !run->keep.over && !run->authority.over &&
               !run->notes.over;
     if (ok) {
@@ -1057,7 +1160,12 @@ static size_t pk_reply_cap(const struct zcl_command_request *request)
 static bool pk_fit(struct pk_run *run, size_t cap, struct json_value *out)
 {
     int lines = run->in.max_lines;
+    /* One immutable index generation and source cache serve every retry.
+     * body_end is the full source extent, independent of excerpt elision. */
+    run->ctx.max_lines = lines;
+    pk_prepare_symbols(run);
     run->neighborhoods = true;
+    run->declarations = true;
     for (;;) {
         pk_assemble(run, lines);
         bool ok = pk_render(run, out);
@@ -1067,6 +1175,10 @@ static bool pk_fit(struct pk_run *run, size_t cap, struct json_value *out)
             json_free(out);
         if (run->neighborhoods) {
             run->neighborhoods = false;
+            continue;
+        }
+        if (run->declarations) {
+            run->declarations = false;
             continue;
         }
         if (lines <= PK_LINES_MIN)
