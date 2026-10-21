@@ -504,6 +504,10 @@ ifneq ($(filter help dev-package-verifier-ensure,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # Neither goal compiles. Ensure still captures source and its nested verifier
 # make selects the dev profile; do not freeze zero toolchain IDs into it.
 ZCL_EPOCH_PROFILES :=
+else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),docs-capability-inventory)
+# This standalone tool uses its direct CC recipe and declared source/header
+# prerequisites, not node object epochs. Keep source/view/vendor preparation.
+ZCL_EPOCH_PROFILES :=
 else ifneq ($(filter build-only,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify z23-wiki-runtime,$(ZCL_EPOCH_SINGLE_GOAL)),)
@@ -2012,7 +2016,10 @@ else ifeq ($(strip $(MAKECMDGOALS)),)
 ZCL_DEPFILE_PROFILES := node-c23
 else ifeq ($(words $(MAKECMDGOALS)),1)
 ZCL_DEPFILE_SINGLE_GOAL := $(firstword $(MAKECMDGOALS))
-ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+ifeq ($(ZCL_DEPFILE_SINGLE_GOAL),docs-capability-inventory)
+# The generator is compiled directly; no profile %.o depfile graph is consumed.
+ZCL_DEPFILE_PROFILES :=
+else ifneq ($(filter build-only,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := build-only
 else ifneq ($(filter zclassic23 z23 z23-package-verify zclassic23-package-verify z23-wiki-runtime,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := node-c23

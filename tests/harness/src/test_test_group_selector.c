@@ -1842,6 +1842,33 @@ static int test_exact_verifier_prerequisites(void)
     return failures;
 }
 
+static int test_inventory_standalone_admission(void)
+{
+    int failures = 0;
+    TEST("inventory generation skips node epochs and depfiles without skipping preparation") {
+        const char *fail = tgs_fixture_executable("/usr/bin/false", "/bin/false");
+        ASSERT(fail != NULL);
+        char command[4096], out[4096];
+        int n = snprintf(command, sizeof(command),
+            "env -u MAKEFLAGS -u MFLAGS make --no-print-directory -qp docs-capability-inventory "
+            "BUILD_EPOCH_KEY_TOOL=%s BUILD_SOURCE_RECORD='%s 1 %s' 2>/dev/null | "
+            "sed -n '/^ZCL_EPOCH_PROFILES :=/p;/^ZCL_DEPFILE_PROFILES :=/p;"
+            "/^ZCL_FROZEN_TOOLCHAIN_ARGS :=/p;/^ZCL_INVENTORY_LINT_ONLY :=/p;"
+            "/^ZCL_BOOTSTRAP_HELPER_ONLY :=/p;/^docs-capability-inventory: /p'",
+            fail, zcl_build_source_id_sha256(), zcl_build_source_mutation_sha256());
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT(capture_command(command, out, sizeof(out)) == 0);
+        ASSERT(strstr(out, "ZCL_EPOCH_PROFILES := \n") != NULL);
+        ASSERT(strstr(out, "ZCL_DEPFILE_PROFILES := \n") != NULL);
+        ASSERT(strstr(out, "ZCL_FROZEN_TOOLCHAIN_ARGS := \n") != NULL);
+        ASSERT(strstr(out, "ZCL_INVENTORY_LINT_ONLY := 1") == NULL);
+        ASSERT(strstr(out, "ZCL_BOOTSTRAP_HELPER_ONLY := 1") == NULL);
+        ASSERT(strstr(out, "docs-capability-inventory: build/bin/gen_capability_inventory") != NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_epoch_query_fallback(void)
 {
     int failures = 0;
@@ -1849,7 +1876,9 @@ static int test_epoch_query_fallback(void)
         const char *fail = tgs_fixture_executable("/usr/bin/false", "/bin/false");
         ASSERT(fail != NULL);
         const char *goals[] = {"help dev-package-verifier-ensure",
-                                "tgs_unknown_epoch_goal", "dev-package-verifier"};
+                                "tgs_unknown_epoch_goal", "dev-package-verifier",
+                                "docs-capability-inventory help", "docs-capability-inventory build-only",
+                                "docs-capability-inventory-unknown"};
         for (size_t i = 0; i < sizeof(goals) / sizeof(goals[0]); i++) {
             char command[4096], out[4096];
             int n = snprintf(command, sizeof(command),
@@ -2487,6 +2516,7 @@ int test_test_group_selector(void)
     failures += test_runner_state_setup_refuses();
     failures += test_exact_default_parallel_jobs();
     failures += test_exact_verifier_prerequisites();
+    failures += test_inventory_standalone_admission();
     failures += test_epoch_query_fallback();
     failures += test_compile_scope_proof();
     failures += test_runner_build_needs_selection();
