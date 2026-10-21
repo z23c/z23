@@ -366,6 +366,7 @@ bool mvp_build_status_json(const struct mvp_evidence *ev, struct json_value *out
 
     json_set_object(out);
     json_push_kv_str(out, "schema", "zcl.mvp_status.v1");
+    json_push_kv_str(out, "qualification_policy", MVP_QUALIFICATION_POLICY);
     json_push_kv_str(out, "doc", "docs/quality/MVP.md");
     json_push_kv_bool(out, "reporter_only", true);
 

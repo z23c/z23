@@ -4,6 +4,122 @@
  */
 
 #include "test/syncdiag_rpc_fixture.h"
+#include "controllers/mvp_status.h"
+
+static struct json_value *mvp_test_field(struct json_value *obj, const char *key)
+{
+    for (size_t i = 0; i < obj->num_children; i++)
+        if (strcmp(obj->keys[i], key) == 0) return &obj->children[i];
+    return NULL;
+}
+
+static bool mvp_test_bad_projection(struct json_value *status, int mode)
+{
+    struct json_value *rows = mvp_test_field(status, "criteria");
+    struct json_value *row = &rows->children[1];
+    switch (mode) {
+    case 0: {
+        struct json_value legacy = {0};
+        json_set_object(&legacy);
+        for (size_t i = 0; i < status->num_children; i++)
+            if (strcmp(status->keys[i], "qualification_policy") != 0 &&
+                !json_push_kv(&legacy, status->keys[i], &status->children[i])) {
+                json_free(&legacy);
+                return false;
+            }
+        json_free(status);
+        *status = legacy;
+        break;
+    }
+    case 1: json_set_str(mvp_test_field(status, "qualification_policy"), "unknown"); break;
+    case 2: json_set_str(mvp_test_field(row, "id"), "C1"); break;
+    case 3: json_set_null(mvp_test_field(row, "id")); break;
+    case 4: json_set_int(mvp_test_field(row, "met"), 1); break;
+    case 5: json_set_str(mvp_test_field(row, "met_state"), "met"); break;
+    case 6: json_set_int(mvp_test_field(status, "met_count"), 8); break;
+    default: return false;
+    }
+    return true;
+}
+
+static bool mvp_test_projection_case(int mode)
+{
+    struct mvp_evidence ev = {.c3_sync_benchmark_receipt_present = true,
+                              .c3_cold_sync_secs = 1};
+    struct json_value status = {0};
+    struct mvp_qualification q;
+    bool ok = mvp_build_status_json(&ev, &status) &&
+              mvp_status_read_qualification(&status, &q) && q.available &&
+              q.met_count == 1 && q.state[2] == 1;
+    ok = ok && mvp_test_bad_projection(&status, mode) &&
+         !mvp_status_read_qualification(&status, &q) &&
+         !q.available && q.met_count == 0;
+    for (int i = 0; ok && i < MVP_CRITERIA_TOTAL; i++) ok = q.state[i] == -1;
+    json_free(&status);
+    return ok;
+}
+
+static bool mvp_test_duplicate_projection(const char *duplicate, bool row_field)
+{
+    struct mvp_evidence ev = {.c3_sync_benchmark_receipt_present = true,
+                              .c3_cold_sync_secs = 1};
+    struct json_value status = {0}, extra = {0};
+    struct mvp_qualification q;
+    bool ok = mvp_build_status_json(&ev, &status) &&
+              mvp_status_read_qualification(&status, &q) && q.available &&
+              q.met_count == 1 && q.state[2] == 1;
+    struct json_value *rows = mvp_test_field(&status, "criteria");
+    struct json_value *target = row_field ? &rows->children[2] : &status;
+    ok = ok && json_read(&extra, duplicate, strlen(duplicate)) &&
+         extra.type == JSON_OBJ && extra.num_children == 1 &&
+         json_push_kv(target, extra.keys[0], &extra.children[0]) &&
+         !mvp_status_read_qualification(&status, &q) &&
+         !q.available && q.met_count == 0;
+    for (int i = 0; ok && i < MVP_CRITERIA_TOTAL; i++) ok = q.state[i] == -1;
+    json_free(&extra);
+    json_free(&status);
+    return ok;
+}
+
+static int test_mvp_projection_duplicates(void)
+{
+    static const struct { const char *json; bool row; } cases[] = {
+        {"{\"schema\":\"other\"}", false},
+        {"{\"sch\\u0065ma\":\"other\"}", false},
+        {"{\"qualification_policy\":\"other\"}", false},
+        {"{\"qualification_\\u0070olicy\":\"other\"}", false},
+        {"{\"criteria\":[]}", false},
+        {"{\"criter\\u0069a\":[]}", false},
+        {"{\"met_count\":8}", false},
+        {"{\"met_\\u0063ount\":8}", false},
+        {"{\"id\":\"C2\"}", true},
+        {"{\"\\u0069d\":\"C2\"}", true},
+        {"{\"met\":false}", true},
+        {"{\"m\\u0065t\":false}", true},
+        {"{\"met_state\":\"unknown\"}", true},
+        {"{\"met_\\u0073tate\":\"unknown\"}", true},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bool ok = mvp_test_duplicate_projection(cases[i].json, cases[i].row);
+        printf("mvp projection: duplicate required key case %zu resets qualification... %s\n",
+               i, ok ? "OK" : "FAIL");
+        if (!ok) failures++;
+    }
+    return failures;
+}
+
+static int test_mvp_projection_policy(void)
+{
+    int failures = 0;
+    for (int i = 0; i < 7; i++) {
+        bool ok = mvp_test_projection_case(i);
+        printf("mvp projection: malformed or unsupported case %d resets qualification... %s\n",
+               i, ok ? "OK" : "FAIL");
+        if (!ok) failures++;
+    }
+    return failures;
+}
 
 static bool milestone_current_basis(const struct json_value *result,
                                      const struct json_value *cold_start)
@@ -1468,6 +1584,8 @@ int syncdiag_cases_operator(void)
     }
 
     failures += test_mvp_c6_requires_full_judge();
+    failures += test_mvp_projection_policy();
+    failures += test_mvp_projection_duplicates();
     failures += test_mvp_c8_requires_exact_window();
     failures += test_mvp_c8_negative_precedence();
     failures += test_mvp_c8_live_evidence_gap();
