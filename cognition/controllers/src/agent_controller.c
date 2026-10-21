@@ -737,8 +737,8 @@ bool rpc_agent_build(const struct json_value *params, bool help,
     agent_push_build_command(&commands, "dev_loop_benchmark",
                              "make dev-loop-bench",
                              "write honest p50/p95 developer-loop evidence without activation by default");
-    agent_push_build_command(&commands, "dev_node_binary", "make dev-bin",
-                             "incremental non-LTO node executable for local agent/API iteration");
+    agent_push_build_command(&commands, "dev_node_binary", "make dev",
+                             "build/bin/z23.dev for direct CLI iteration; make dev-bin for watch-loop, proof and landing extras");
     agent_push_build_command(&commands, "focused_fast_test",
                              "make t-fast ONLY=<group>",
                              "cached non-LTO per-file test harness");

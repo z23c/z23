@@ -247,6 +247,19 @@ static bool sd_build_immutable_history_canaries(const struct json_value *build)
     return ok;
 }
 
+static bool sd_build_direct_cli_command(const struct json_value *commands)
+{
+    const struct json_value *direct_cli =
+        find_object_with_str(commands, "name", "dev_node_binary");
+    if (!direct_cli)
+        return false;
+    const char *purpose = json_get_str(json_get(direct_cli, "purpose"));
+    return strcmp(json_get_str(json_get(direct_cli, "command")), "make dev") == 0 &&
+           strstr(purpose, "build/bin/z23.dev") != NULL &&
+           strstr(purpose, "direct CLI") != NULL &&
+           strstr(purpose, "make dev-bin") != NULL;
+}
+
 static bool sd_build_command_catalog(const struct json_value *build)
 {
     bool ok = true;
@@ -269,8 +282,7 @@ static bool sd_build_command_catalog(const struct json_value *build)
                                     "compile_check") != NULL;
     ok = ok && find_object_with_str(commands, "name",
                                     "fast_rebuild") != NULL;
-    ok = ok && find_object_with_str(commands, "name",
-                                    "dev_node_binary") != NULL;
+    ok = ok && sd_build_direct_cli_command(commands);
     ok = ok && find_object_with_str(commands, "name",
                                     "immutable_history_canaries") != NULL;
     ok = ok && find_object_with_str(commands, "name",
