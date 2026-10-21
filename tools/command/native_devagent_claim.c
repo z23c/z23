@@ -13,7 +13,8 @@
  * INPUT (zcl.agent_claim_input.v1)
  *   cwd      optional string. Directory to run Git in. Default: the process
  *            working directory.
- *   story    string, non-empty. What the claim is FOR.
+ *   story    string, non-empty. What the claim is FOR. May be omitted only
+ *            when release is true.
  *   files    array of path strings, non-empty unless release is true. Each
  *            path is relative to the worktree root and is normalized
  *            lexically (empty and "." segments collapse, ".." resolves)
@@ -21,6 +22,8 @@
  *            name `x`. A path that is empty, absolute, not a string, or
  *            climbs above the root is refused: ok=false, status
  *            "CLAIM_PATH_REFUSED", with a message naming the path.
+ *            May be omitted only when release is true; supplied files must
+ *            still be an array, but release ignores its contents.
  *   release  optional bool, default false.
  *   retire_worktree optional exact ASCII absolute path. Archive one legacy
  *            row only after its owner is missing and unregistered. Files must
@@ -1225,34 +1228,36 @@ static void dvc_run(const char *cwd, const char *story, bool release,
     platform_private_file_close(&lock);
 }
 
-/* The story is required; files must be an array, non-empty unless this is
- * a release. Returns the files array, or NULL after refusing by name. */
-static const struct json_value *
-dvc_validate(const struct json_value *input, bool release, const char **story,
+/* Acquisition/retirement require story and files. Release may omit them,
+ * but supplied fields retain their validation before any ledger write. */
+static bool
+dvc_validate(const struct json_value *input, bool allow_empty, bool release,
+             const char **story, const struct json_value **files,
              struct zcl_command_reply *reply)
 {
     const struct json_value *storyv = json_get(input, "story");
     *story = storyv && storyv->type == JSON_STR ? json_get_str(storyv) : NULL;
-    if (!*story || !(*story)[0]) {
+    if ((!storyv && !release) || (storyv && (!*story || !(*story)[0]))) {
         dvc_fail(reply, "BAD_INPUT", "validate",
                  "story is required and must be non-empty",
                  "input.story missing or empty");
-        return NULL;
+        return false;
     }
     const struct json_value *filesv = json_get(input, "files");
-    if (!filesv || filesv->type != JSON_ARR) {
+    if ((!filesv && !release) || (filesv && filesv->type != JSON_ARR)) {
         dvc_fail(reply, "BAD_INPUT", "validate",
                  "files is required and must be an array",
                  "input.files missing or wrong type");
-        return NULL;
+        return false;
     }
-    if (!release && filesv->num_children == 0) {
+    if (!allow_empty && filesv->num_children == 0) {
         dvc_fail(reply, "BAD_INPUT", "validate",
                  "files must be non-empty unless release is true",
                  "input.files was empty");
-        return NULL;
+        return false;
     }
-    return filesv;
+    *files = filesv;
+    return true;
 }
 
 static bool dvc_retire_input(const struct json_value *input, bool release,
@@ -1288,9 +1293,9 @@ void zcl_native_handle_dev_agent_claim(
     if (!dvc_retire_input(request->input, release, &retire, reply))
         return;
     const char *story = NULL;
-    const struct json_value *filesv =
-        dvc_validate(request->input, release || retire, &story, reply);
-    if (!filesv)
+    const struct json_value *filesv = NULL;
+    if (!dvc_validate(request->input, release || retire, release, &story,
+                      &filesv, reply))
         return;
     if (retire && filesv->num_children != 0) {
         dvc_fail(reply, "BAD_INPUT", "validate",

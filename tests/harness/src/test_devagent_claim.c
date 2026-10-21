@@ -536,11 +536,59 @@ _test_next:;
     return failures;
 }
 
+static int dvx_release_input_tests(void)
+{
+    int failures = 0;
+    TEST("claim: malformed optional release fields preserve the ledger") {
+        char repo[512], ledger[1024];
+        test_make_tmpdir(repo, sizeof(repo), "devagent_claim", "release-input");
+        ASSERT(dvx_fixture(repo));
+        const char *const files[] = {"engine/a.c", NULL};
+        struct dvx_call own;
+        dvx_claim(&own, repo, "valid owner", files, false);
+        ASSERT(dvx_run(&own));
+        ASSERT(dvx_ok(&own));
+        dvx_end(&own);
+        (void)snprintf(ledger, sizeof(ledger), "%s/.git/z23-agent-claims.jsonl", repo);
+        char *before = NULL;
+        size_t before_len = 0;
+        ASSERT(zcl_read_whole_file_text(ledger, 8192, &before, &before_len, "release_before"));
+        const char *bad[] = {"{\"story\":\"\"}", "{\"story\":42}",
+                             "{\"story\":null}", "{\"files\":\"a.c\"}", "{\"files\":null}"};
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            struct dvx_call c;
+            dvx_begin(&c);
+            ASSERT(json_read(&c.input, bad[i], strlen(bad[i])));
+            ASSERT(json_push_kv_str(&c.input, "cwd", repo));
+            ASSERT(json_push_kv_bool(&c.input, "release", true));
+            if (dvx_run(&c)) {
+                ASSERT(!dvx_ok(&c));
+                ASSERT_STR_EQ(c.reply.error.code, "BAD_INPUT");
+            } else {
+                /* dvx_run returns false only for shared registry rejection. */
+                ASSERT(c.request.spec != NULL);
+            }
+            dvx_end(&c);
+            char *after = NULL;
+            size_t len = 0;
+            ASSERT(zcl_read_whole_file_text(ledger, 8192, &after, &len, "release_input"));
+            ASSERT_EQ(len, before_len);
+            ASSERT_STR_EQ(after, before);
+            free(after);
+        }
+        free(before);
+        ASSERT_EQ(test_rm_rf_recursive(repo), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_devagent_claim(void);
 int test_devagent_claim(void)
 {
     int failures = dvx_lease_tests() + dvx_metadata_tests() + dvx_unreadable_tests() +
-                   dvx_write_failure_tests() + dvx_interleaved_tests();
+                   dvx_write_failure_tests() + dvx_interleaved_tests() +
+                   dvx_release_input_tests();
     char one[512], two[600];
     test_make_tmpdir(one, sizeof(one), "devagent_claim", "repo");
     (void)snprintf(two, sizeof(two), "%s-lane", one);
@@ -658,10 +706,35 @@ int test_devagent_claim(void)
 
     TEST("claim: release frees this worktree's files for everyone else") {
         struct dvx_call c;
-        dvx_claim(&c, one, "hex-codec", files_none, true);
+        dvx_claim(&c, one, NULL, NULL, true);
         ASSERT(dvx_run(&c));
         ASSERT(dvx_ok(&c));
         ASSERT_EQ(dvx_int(&c, "released"), 1);
+        ASSERT_EQ(dvx_int(&c, "live"), 1);
+        dvx_end(&c);
+
+        dvx_claim(&c, one, NULL, NULL, true);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "released"), 0);
+        ASSERT_EQ(dvx_int(&c, "live"), 1);
+        dvx_end(&c);
+        dvx_claim(&c, one, "legacy release", files_none, true);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "released"), 0);
+        ASSERT_EQ(dvx_int(&c, "live"), 1);
+        dvx_end(&c);
+        dvx_claim(&c, one, "story only release", NULL, true);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "released"), 0);
+        ASSERT_EQ(dvx_int(&c, "live"), 1);
+        dvx_end(&c);
+        dvx_claim(&c, one, NULL, files_none, true);
+        ASSERT(dvx_run(&c));
+        ASSERT(dvx_ok(&c));
+        ASSERT_EQ(dvx_int(&c, "released"), 0);
         ASSERT_EQ(dvx_int(&c, "live"), 1);
         dvx_end(&c);
 
