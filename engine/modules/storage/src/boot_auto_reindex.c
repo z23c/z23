@@ -198,6 +198,19 @@ int boot_auto_reindex_request(const char *datadir, int32_t anchor, int reason)
 
     if (!ar_write(datadir, path, new_anchor, new_count, new_reason))
         return 0;
+    /* Attribution: a cross-boot sentinel armed with no trace in any log left
+     * the canonical rhett2 node's 2026-10-20 09:09 arming (anchor=0 count=1
+     * reason=unspecified) unattributable — no subsystem logged, no driver was
+     * active, and the file's own staged-replace name (which embeds the pid)
+     * is unlinked on success. One line here names the writing process for
+     * every arming site, present and future, in the stream that process
+     * actually owns (service journal, CLI stderr, test output). */
+    fprintf(stderr,  // obs-ok:storage-primitive-error
+            "[boot] boot_auto_reindex: armed request anchor=%d count=%d "
+            "reason=%s pid=%lld\n",
+            (int)new_anchor, new_count,
+            boot_auto_reindex_reason_name(new_reason),
+            (long long)os_proc_current_pid());
     return new_count;
 }
 
@@ -214,7 +227,14 @@ bool boot_auto_reindex_mark_terminal(const char *datadir, int32_t anchor)
     int c = 0;
     int r = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
     ar_read(path, &a, &c, &r);
-    return ar_write(datadir, path, anchor, BOOT_AUTO_REINDEX_TERMINAL, r);
+    bool marked = ar_write(datadir, path, anchor, BOOT_AUTO_REINDEX_TERMINAL, r);
+    if (marked)
+        fprintf(stderr,  // obs-ok:storage-primitive-error
+                "[boot] boot_auto_reindex: terminal marker written anchor=%d "
+                "reason=%s pid=%lld\n",
+                (int)anchor, boot_auto_reindex_reason_name(r),
+                (long long)os_proc_current_pid());
+    return marked;
 }
 
 bool boot_auto_reindex_is_terminal(const char *datadir)
