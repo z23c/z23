@@ -157,6 +157,30 @@ int ci_store_find_symbols(struct ci_store *s, const char *q,
     return n;
 }
 
+int ci_store_find_symbols_exact(struct ci_store *s, const char *name,
+                                struct ci_symbol *out, int cap)
+{
+    if (!s || !name || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to find_symbols_exact");
+    pthread_mutex_lock(&s->lock);
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(s->db,
+        "SELECT " CI_SYM_COLS " FROM symbols WHERE name=?"
+        " ORDER BY (def_path='') ASC, def_path ASC, def_line ASC",
+        -1, &stmt, NULL) != SQLITE_OK) {
+        pthread_mutex_unlock(&s->lock);
+        LOG_ERR("codeindex", "prepare find_symbols_exact");
+    }
+    sqlite3_bind_text(stmt, 1, name, -1, SQLITE_TRANSIENT);
+    int n = 0;
+    while (n < cap && sqlite3_step(stmt) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
+        if (ci_store_fill_symbol(stmt, &out[n])) n++;
+    }
+    sqlite3_finalize(stmt);
+    pthread_mutex_unlock(&s->lock);
+    return n;
+}
+
 int ci_store_refs_by_callee(struct ci_store *s, const char *callee,
                             struct ci_ref *out, int cap)
 {

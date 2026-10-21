@@ -176,6 +176,8 @@ bool ci_store_symbol_by_name_path(struct ci_store *s, const char *name,
                                   struct ci_symbol *out, bool *found);
 int  ci_store_defs_by_name(struct ci_store *s, const char *name,
                            struct ci_symbol *out, int cap);
+int ci_store_find_symbols_exact(struct ci_store *s, const char *name,
+                                struct ci_symbol *out, int cap);
 int  ci_store_find_symbols(struct ci_store *s, const char *q,
                            struct ci_symbol *out, int cap);
 int  ci_store_search_text(struct ci_store *s, const char *q,

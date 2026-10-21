@@ -283,6 +283,11 @@ bool codeindex_symbol_by_id(struct codeindex *ci, const char *id,
 int codeindex_find(struct codeindex *ci, const char *query,
                    struct ci_symbol *out, int cap);
 
+/* Case-sensitive exact-name enumeration; definitions first, then def_path and
+ * def_line ascending. Validated rows only, up to cap; no LIKE wildcards. */
+int codeindex_find_exact(struct codeindex *ci, const char *name,
+                          struct ci_symbol *out, int cap);
+
 /* Ranked literal substring search over names, signatures, definition/
  * declaration paths, and indexed documentation. Exact/prefix/name matches
  * precede signature, path, and doc matches; ties are byte-stable. */

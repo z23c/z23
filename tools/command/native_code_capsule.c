@@ -38,7 +38,7 @@ static int code_capsule_other_defs(struct codeindex *ci,
                                    struct json_value *others)
 {
     static struct ci_symbol hits[CODE_OTHER_DEF_CAP + 4];
-    int nh = codeindex_find(ci, s->name, hits,
+    int nh = codeindex_find_exact(ci, s->name, hits,
                             (int)(sizeof(hits) / sizeof(hits[0])));
     if (nh < 0) nh = 0;
     int nother = 0;

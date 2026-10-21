@@ -747,6 +747,95 @@ static int test_code_capsule_generation(void)
     return failures;
 }
 
+#define CAP_EXACT_FIX "test-tmp/cap_exact_fix"
+
+static bool write_cap_exact_fixture(void)
+{
+    for (int i = 0; i < 8; i++) {
+        char path[128], source[128];
+        snprintf(path, sizeof path, "core/modules/net/src/exact_%02d.c", i);
+        snprintf(source, sizeof source,
+                 "static int cap_exact(void) { return %d; }\n", i);
+        if (!cap_budget_mk_write(CAP_EXACT_FIX, path, source)) return false;
+    }
+    return cap_budget_mk_write(CAP_EXACT_FIX,
+               "core/modules/net/include/exact.h", "int cap_exact(void);\n") &&
+           cap_budget_mk_write(CAP_EXACT_FIX,
+               "core/modules/net/src/distractors.c",
+               "int cap_exact_tail(void) { return 1; }\n"
+               "int prefix_cap_exact(void) { return 2; }\n"
+               "int Cap_exact(void) { return 3; }\n"
+               "int capXexact(void) { return 4; }\n");
+}
+
+static int test_code_capsule_exact_enumeration(void)
+{
+    int failures = 0;
+    struct codeindex *ci = NULL;
+    TEST("code_capsule: exact enumeration preserves duplicates, order and cap") {
+        test_rm_rf_recursive(CAP_EXACT_FIX);
+        ASSERT(write_cap_exact_fixture());
+        ci = codeindex_open(CAP_EXACT_FIX);
+        ASSERT(ci != NULL);
+        struct ci_symbol hits[16], capped[3];
+        int n = codeindex_find_exact(ci, "cap_exact", hits, 16);
+        ASSERT(n >= 8);
+        ASSERT(codeindex_find_exact(ci, "cap_exact", capped, 3) == 3);
+        for (int i = 0; i < n; i++) ASSERT_STR_EQ(hits[i].name, "cap_exact");
+        for (int i = 0; i < 8; i++) {
+            char path[128];
+            snprintf(path, sizeof path, "core/modules/net/src/exact_%02d.c", i);
+            ASSERT_STR_EQ(hits[i].def_path, path);
+        }
+        for (int i = 0; i < 3; i++)
+            ASSERT_STR_EQ(capped[i].def_path, hits[i].def_path);
+        ASSERT(codeindex_find_exact(ci, "cap_exact%", hits, 16) == 0);
+        ASSERT(codeindex_find_exact(ci, "cap_exact_", hits, 16) == 0);
+        ASSERT(codeindex_find_exact(ci, "CAP_EXACT", hits, 16) == 0);
+        ASSERT(codeindex_find(ci, "cap_exact", hits, 16) > n);
+        PASS();
+    } _test_next:;
+    if (ci) codeindex_close(ci);
+    test_rm_rf_recursive(CAP_EXACT_FIX);
+    return failures;
+}
+
+static int test_code_capsule_exact_other_defs(void)
+{
+    int failures = 0;
+    struct json_value input;
+    json_init(&input); json_set_object(&input);
+    struct zcl_command_reply reply;
+    zcl_command_reply_init(&reply, "zcl.code_capsule.v1");
+    TEST("code_capsule: exact other definitions exclude primary and cap at five") {
+        test_rm_rf_recursive(CAP_EXACT_FIX);
+        ASSERT(write_cap_exact_fixture());
+        (void)json_push_kv_str(&input, "name",
+            "fn:static:core/modules/net/src/exact_00.c:cap_exact");
+        struct zcl_command_context ctx = { .source_root = CAP_EXACT_FIX };
+        struct zcl_command_request request = {
+            .input = &input, .context = &ctx, .view = "normal",
+            .invoked_name = "code.capsule",
+        };
+        zcl_native_handle_code_capsule(&request, &reply);
+        ASSERT(json_get_bool(json_get(&reply.data, "found")));
+        const struct json_value *others = json_get(&reply.data, "other_defs");
+        ASSERT(others && others->type == JSON_ARR && others->num_children == 5);
+        for (size_t i = 0; i < others->num_children; i++) {
+            char path[128];
+            snprintf(path, sizeof path, "core/modules/net/src/exact_%02d.c",
+                     (int)i + 1);
+            ASSERT_STR_EQ(json_get_str(json_get(&others->children[i], "def_path")),
+                          path);
+        }
+        PASS();
+    } _test_next:;
+    zcl_command_reply_free(&reply);
+    json_free(&input);
+    test_rm_rf_recursive(CAP_EXACT_FIX);
+    return failures;
+}
+
 int test_code_capsule(void)
 {
     int failures = 0;
@@ -760,6 +849,8 @@ int test_code_capsule(void)
     failures += test_code_change_plan_patch();
     failures += test_code_capsule_budget_shrink();
     failures += test_code_capsule_generation();
+    failures += test_code_capsule_exact_enumeration();
+    failures += test_code_capsule_exact_other_defs();
     failures += test_code_relations_command_locus();
     failures += test_code_relations_refuses_false_absence();
     failures += test_code_relations_static_not_command_handler();

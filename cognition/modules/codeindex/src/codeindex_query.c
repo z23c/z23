@@ -68,6 +68,14 @@ int codeindex_find(struct codeindex *ci, const char *query,
     return ci_store_find_symbols(ci->store, query, out, cap);
 }
 
+int codeindex_find_exact(struct codeindex *ci, const char *name,
+                          struct ci_symbol *out, int cap)
+{
+    if (!ci || !ci->store || !name || !out || cap <= 0)
+        LOG_ERR("codeindex", "bad arg to codeindex_find_exact");
+    return ci_store_find_symbols_exact(ci->store, name, out, cap);
+}
+
 int codeindex_search_text(struct codeindex *ci, const char *query,
                           struct ci_search_hit *out, int cap)
 {
