@@ -330,11 +330,30 @@ static void posture_finalize(struct agent_security_posture *out)
     }
 }
 
+/* Acquire the reader before reserving the transaction lock: reader creation
+ * takes the lifecycle lock, while metadata reads recurse into the tx lock. */
+static bool posture_collect_progress(struct agent_security_posture *out)
+{
+    sqlite3 *reader = progress_store_open_reader();
+    bool busy = reader && !progress_store_tx_trylock();
+    if (busy) {
+        sqlite3_close(reader);
+        reader = NULL;
+    }
+    out->progress_store_available = reader != NULL;
+    posture_collect_anchors(out, reader);
+    posture_collect_nullifiers(out, reader);
+    if (reader) {
+        progress_store_tx_unlock();
+        sqlite3_close(reader);
+    }
+    return busy;
+}
+
 void agent_security_posture_collect(struct agent_security_posture *out,
                                     struct node_db *ndb)
 {
     struct agent_security_posture empty = {0};
-    sqlite3 *progress_reader = NULL;
     struct node_db *resolved_ndb;
     bool ndb_locked;
 
@@ -388,22 +407,7 @@ void agent_security_posture_collect(struct agent_security_posture *out,
     posture_collect_bootstrap(out, resolved_ndb);
     if (ndb_locked)
         posture_ndb_unlock(resolved_ndb);
-    progress_reader = progress_store_open_reader();
-    /* Reader creation takes the lifecycle lock; do not invert its order with
-     * the transaction lock. Metadata helpers recursively take the latter even
-     * on an independent reader, so reserve it non-blocking before reading. */
-    bool progress_busy = progress_reader && !progress_store_tx_trylock();
-    if (progress_busy) {
-        sqlite3_close(progress_reader);
-        progress_reader = NULL;
-    }
-    out->progress_store_available = progress_reader != NULL;
-    posture_collect_anchors(out, progress_reader);
-    posture_collect_nullifiers(out, progress_reader);
-    if (progress_reader) {
-        progress_store_tx_unlock();
-        sqlite3_close(progress_reader);
-    }
+    bool progress_busy = posture_collect_progress(out);
     posture_finalize(out);
     if (progress_busy) {
         /* Keep fresh bootstrap evidence; an older cached posture could erase
