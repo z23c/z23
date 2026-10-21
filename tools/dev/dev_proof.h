@@ -680,6 +680,10 @@ bool zcl_dev_proof_test_generation_checkout(const char *repo_root,
  * qualified. Does not accept that donor or install a verifier. */
 const char *zcl_dev_proof_test_donor_trust_name(const char *path);
 /* Canonical submitting-checkout preparation, without a proof lease or receipt. */
+bool zcl_dev_proof_test_preflight_prepare(const char *root, const char *local,
+                                         const char *producer_source,
+                                         const char *log_path,
+                                         char *why, size_t why_len);
 bool zcl_dev_proof_test_original_plan_prepare(const char *root,
                                               const char *local,
                                               const char *log_path,

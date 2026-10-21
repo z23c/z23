@@ -10485,7 +10485,35 @@ static bool proof_original_plan_prepare(const struct proof_paths *paths,
     return true;
 }
 
+static bool proof_preflight_prepare(const struct proof_paths *paths,
+                                    const char *root, const char *local,
+                                    const char *producer_source,
+                                    const char *log_path,
+                                    char *why, size_t why_len)
+{
+    /* Qualify the loaded policy producer before Make or generation copying.
+     * Git equality cannot substitute for the complete generated/vendor inputs.
+     * The sealed-generation check remains necessary after preparation. */
+    int64_t started = platform_time_monotonic_us();
+    struct dev_source_record source = {0};
+    if (!zcl_dev_source_identity_capture(root, &source, why, why_len) ||
+        !zcl_dev_proof_producer_source_qualified(source.source_id,
+                                                producer_source, why, why_len))
+        return false;
+    dp_stage_timing_note(paths, "original_source_preflight_ms", started);
+    return proof_original_plan_prepare(paths, root, local, log_path, why, why_len);
+}
+
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+bool zcl_dev_proof_test_preflight_prepare(const char *root, const char *local,
+                                         const char *producer_source,
+                                         const char *log_path,
+                                         char *why, size_t why_len)
+{
+    return proof_preflight_prepare(NULL, root, local, producer_source, log_path,
+                                   why, why_len);
+}
+
 bool zcl_dev_proof_test_original_plan_prepare(const char *root,
                                               const char *local,
                                               const char *log_path,
@@ -10839,8 +10867,9 @@ static bool proof_worker(const struct proof_paths *paths,
         proof_why(why, why_len, "proof_original_plan_log_path_invalid");
         return false;
     }
-    if (!proof_original_plan_prepare(paths, paths->root, local, prepare_log,
-                                      why, why_len))
+    if (!proof_preflight_prepare(paths, paths->root, local,
+                                  zcl_build_source_id_sha256(), prepare_log,
+                                  why, why_len))
         return false;
     proof_phase_mark(&phases, "original_plan_prepare");
     char generation[PATH_MAX];

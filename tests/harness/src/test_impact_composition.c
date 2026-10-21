@@ -6903,6 +6903,93 @@ static bool ic_original_plan_fixture(const char *root, char local[65])
     return true;
 }
 
+static bool ic_preflight_commit(const char *root, char local[65])
+{
+    const char *commit[] = {"git", "commit", "-qam", "preflight",
+                            "--allow-empty", NULL};
+    const char *head[] = {"git", "rev-parse", "HEAD", NULL};
+    struct zcl_devloop_process_result result = {0};
+    if (!zcl_devloop_process_run(root, commit, 30000, &result) || result.exit_code)
+        return false;
+    if (!zcl_devloop_process_run(root, head, 30000, &result) || result.exit_code ||
+        result.output_truncated) return false;
+    size_t len = strcspn(result.output, "\r\n");
+    if (len != 40 && len != 64) return false;
+    memcpy(local, result.output, len);
+    local[len] = 0;
+    return true;
+}
+
+static bool ic_preflight_timed(const char *root, const char *local,
+                                const char *producer, const char *log,
+                                char *why, size_t why_len)
+{
+    int64_t start = platform_time_monotonic_us();
+    bool ok = zcl_dev_proof_test_preflight_prepare(root, local, producer, log,
+                                                   why, why_len);
+    fprintf(stderr, "[preflight-fixture] ok=%d elapsed_us=%lld reason=%s\n",
+            ok, (long long)(platform_time_monotonic_us() - start), ok ? "ok" : why);
+    return ok;
+}
+
+static int ic_preflight_bad_capture(const char *root, const char *local,
+                                    const char *producer, const char *log)
+{
+    int failures = 0;
+    TEST("proof preflight: missing and malformed capture cannot reach Make") {
+        char tool[4096], saved[4096], why[256] = {0};
+        ASSERT(snprintf(tool, sizeof(tool), "%s/tools/dev/source-identity.sh", root) < (int)sizeof(tool));
+        ASSERT(snprintf(saved, sizeof(saved), "%s/build/saved-identity.sh", root) < (int)sizeof(saved));
+        ASSERT(rename(tool, saved) == 0);
+        ASSERT(!ic_preflight_timed(root, local, producer, log, why, sizeof(why)));
+        ASSERT(strncmp(why, "source_identity_", 16) == 0);
+        ASSERT(access(log, F_OK) != 0);
+        ASSERT(ic_write(root, "tools/dev/source-identity.sh",
+                        "#!/bin/sh\nprintf 'malformed capture fixture\\n'\n"));
+        ASSERT(chmod(tool, 0700) == 0);
+        ASSERT(!ic_preflight_timed(root, local, producer, log, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "malformed capture fixture\n");
+        ASSERT(access(log, F_OK) != 0);
+        ASSERT(unlink(tool) == 0);
+        ASSERT(rename(saved, tool) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int ic_preflight_cases(const char *root, char local[65], const char *log)
+{
+    int failures = 0;
+    TEST("proof preflight: captured stale producer refuses before Make; history alone is equivalent") {
+        char why[256] = {0};
+        struct dev_source_record old = {0}, current = {0}, history = {0};
+        ASSERT(zcl_dev_source_identity_capture(root, &old, why, sizeof(why)));
+        ASSERT(ic_write(root, "sample.c", "int value = 3;\n"));
+        ASSERT(ic_preflight_commit(root, local));
+        ASSERT(zcl_dev_source_identity_capture(root, &current, why, sizeof(why)));
+        ASSERT(strcmp(old.source_id, current.source_id) != 0);
+        ASSERT(!ic_preflight_timed(root, local, old.source_id, log, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_producer_source_mismatch");
+        ASSERT(access(log, F_OK) != 0); /* run_step must not even open its log. */
+        ASSERT(!ic_preflight_timed(root, local, NULL, log, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_producer_source_id_unavailable");
+        ASSERT(access(log, F_OK) != 0);
+        ASSERT(ic_preflight_timed(root, local, current.source_id, log, why, sizeof(why)));
+        ASSERT(unlink(log) == 0);
+        ASSERT(ic_preflight_commit(root, local));
+        ASSERT(zcl_dev_source_identity_capture(root, &history, why, sizeof(why)));
+        ASSERT_STR_EQ(current.source_id, history.source_id);
+        ASSERT(ic_preflight_timed(root, local, current.source_id, log, why, sizeof(why)));
+        ASSERT(unlink(log) == 0);
+        ASSERT(ic_preflight_bad_capture(root, local, current.source_id, log) == 0);
+        /* Leave a prior-source plan for the original preparation regression. */
+        ASSERT(ic_write(root, "sample.c", "int value = 4;\n"));
+        ASSERT(ic_preflight_commit(root, local));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 #if defined(__linux__)
 static bool ic_original_plan_recovers_fixtures(
     const char *root, const char *local, const char *log)
@@ -6956,6 +7043,7 @@ static int test_pw_original_plan_refreshes_before_sealing(void)
         ASSERT(ic_original_plan_fixture(root, local));
         ASSERT(snprintf(log, sizeof(log), "%s/build/prepare.log", root) <
                (int)sizeof(log));
+        ASSERT(ic_preflight_cases(root, local, log) == 0);
         /* A successful no-op cannot claim that the old commit's plan is
          * current. The actual source-identity verifier must reject it. */
         ASSERT(ic_write(root, "build/no-op", "1\n"));
