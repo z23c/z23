@@ -341,7 +341,7 @@ static bool aih_span_has_bounded_needle(const char *s, size_t slen,
 /* Walks every string literal in `text` (honoring backslash escapes) and
  * reports whether any one of them contains `needle` — bounded to a whole
  * token when `bounded` is set, an unbounded substring scan otherwise. */
-static bool aih_scan_literals(const char *text, const char *needle, bool bounded)
+static bool aih_scan_literal_spans(const char *text, const char *needle, bool bounded)
 {
     if (!text || !needle || !needle[0])
         return false;
@@ -374,6 +374,15 @@ static bool aih_scan_literals(const char *text, const char *needle, bool bounded
             in_str = false;
         }
     }
+}
+
+static bool aih_scan_literals(const char *text, const char *needle, bool bounded)
+{
+    /* Literal matching uses contiguous raw bytes; absence anywhere in the
+     * input rules out a hit without repeatedly parsing quotes and escapes. */
+    if (!text || !needle || !needle[0] || !strstr(text, needle))
+        return false;
+    return aih_scan_literal_spans(text, needle, bounded);
 }
 
 bool agent_impact_string_literal_contains(const char *text, const char *needle)

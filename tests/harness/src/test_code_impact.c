@@ -1717,10 +1717,36 @@ static int test_code_literal_candidate_scan(void)
     return failures;
 }
 
+static int test_code_literal_raw_rejection_contract(void)
+{
+    int failures = 0;
+    TEST("code impact: raw rejection preserves the existing literal scanner") {
+        const char escaped_quote[] = {'"', '\\', '"', 'n', 'e', 'e', 'd', 'l', 'e', '"', 0};
+        const char escaped_slash[] = {'"', '\\', '\\', '"', 'n', 'e', 'e', 'd', 'l', 'e', 0};
+        ASSERT(!agent_impact_string_literal_contains(NULL, "needle"));
+        ASSERT(!agent_impact_string_literal_contains("\"needle\"", NULL));
+        ASSERT(!agent_impact_string_literal_contains("needle; \"other\"", "needle"));
+        ASSERT(agent_impact_string_literal_contains("/* \"needle\" */", "needle"));
+        ASSERT(agent_impact_string_literal_contains(escaped_quote, "needle"));
+        ASSERT(!agent_impact_string_literal_contains(escaped_slash, "needle"));
+        ASSERT(!agent_impact_string_literal_contains("\"nee\" \"dle\"", "needle"));
+        ASSERT(agent_impact_string_literal_contains("\"needle", "needle"));
+        ASSERT(agent_impact_string_literal_contains("\"needle\\", "needle"));
+        ASSERT(!agent_impact_string_literal_contains("\"other\"\0\"needle\"", "needle"));
+        ASSERT(agent_impact_string_literal_contains_whole_token(
+            "\"main.cpp domain_main.c /main.c\"", "main.c"));
+        ASSERT(!agent_impact_string_literal_contains_whole_token(
+            "main.c; \"main.cpp\"", "main.c"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_code_impact(void)
 {
     int failures = 0;
     failures += test_code_literal_candidate_scan();
+    failures += test_code_literal_raw_rejection_contract();
     failures += test_code_impact_rule_predicate();
     failures += test_code_devagent_routes();
     failures += test_code_route_completeness();
