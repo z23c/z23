@@ -774,6 +774,65 @@ static int test_code_guide(void)
     return failures;
 }
 
+static bool impact_has_group(const struct agent_impact_acc *acc, const char *group)
+{
+    for (size_t i = 0; i < acc->groups_len; i++)
+        if (strcmp(acc->groups[i], group) == 0)
+            return true;
+    return false;
+}
+
+static int test_code_devagent_routes(void)
+{
+    int failures = 0;
+    TEST("code routes prioritize devagent leaf proofs while retaining the complete shared-rule union") {
+        static const struct { const char *file, *group, *extra; } cases[] = {
+            {"native_devagent.c", "devagent_surface", "command_input_bounds"},
+            {"native_devagent_situation.c", "devagent_situation", "command_input_bounds"},
+            {"native_devagent_usage.c", "devagent_outcomes", ""},
+            {"native_devagent_reviewscore.c", "devagent_reviewscore", ""},
+            {"native_devagent_rules.c", "devagent_rules", "command_input_bounds"},
+            {"native_devagent_start.c", "devagent_start", "command_input_bounds"},
+            {"native_devagent_claim.c", "devagent_claim", "command_input_bounds"},
+            {"native_devagent_done.c", "devagent_done", "command_input_bounds"},
+            {"native_devagent_triage.c", "devagent_triage", "command_input_bounds"},
+            {"native_devagent_ceiling.c", "devagent_ceiling", "command_input_bounds"},
+            {"native_devagent_pace.c", "devagent_pace", "command_input_bounds"},
+            {"native_devagent_ticketkey.c", "devagent_ticketkey", "command_input_bounds"}
+        };
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            char path[160];
+            snprintf(path, sizeof(path), "tools/command/%s", cases[i].file);
+            struct agent_impact_acc actual = {0}, shared = {0}, expected = {0};
+            bool consensus = false;
+            const char *route = zcl_native_code_route_for_path(path, &actual, &consensus);
+            ASSERT(!consensus);
+            ASSERT_STR_EQ(route, cases[i].group);
+            agent_impact_add_group_list(&expected, "make_lint_gates command_registry_catalog native_api_contract command_handler_snapshot hotswap_module dev_platform");
+            agent_impact_add_group(&expected, cases[i].group);
+            agent_impact_add_group_list(&expected, cases[i].extra);
+            ASSERT(agent_impact_apply_shared_rules(path, &shared));
+            ASSERT_EQ(shared.groups_len, expected.groups_len);
+            ASSERT(!shared.groups_lost);
+            ASSERT(!actual.groups_lost);
+            /* Name-reference routes may add groups; the authoritative shared
+             * rule union is exact and every member must survive routing. */
+            for (size_t g = 0; g < expected.groups_len; g++) {
+                ASSERT(impact_has_group(&shared, expected.groups[g]));
+                ASSERT(impact_has_group(&actual, expected.groups[g]));
+            }
+        }
+        struct agent_impact_acc acc;
+        bool consensus = false;
+        ASSERT_STR_EQ(zcl_native_code_route_for_path("tests/harness/src/test_devagent_claim.c", &acc, &consensus), "devagent_claim");
+        ASSERT_STR_EQ(zcl_native_code_route_for_path("tools/command/native_command.c", &acc, &consensus), "make_lint_gates");
+        ASSERT_STR_EQ(zcl_native_code_route_for_path("core/modules/crypto/src/sha256.c", &acc, &consensus), "consensus_parity");
+        ASSERT(consensus);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_impact_rule_predicate(void)
 {
     int failures = 0;
@@ -1545,6 +1604,7 @@ int test_code_impact(void)
 {
     int failures = 0;
     failures += test_code_impact_rule_predicate();
+    failures += test_code_devagent_routes();
     failures += test_code_impact_unsafe_narrow();
     failures += test_code_impact_unsafe_cause();
     failures += test_code_impact_hotfork_cache_scope();

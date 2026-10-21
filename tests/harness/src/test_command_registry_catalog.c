@@ -636,6 +636,37 @@ static int test_code_guide_brief(void)
     return failures;
 }
 
+static int test_code_guide_devagent_focus(void)
+{
+    int failures = 0;
+    char root[PATH_MAX], why[192];
+    struct zcl_command_reply reply;
+    const char *leaves[] = {"claim", "start", "done"};
+    TEST("code.guide recommends the devagent behavioral proof before generic catalog checks") {
+        ASSERT(brief_fixture(root, sizeof(root)));
+        for (size_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i++) {
+            char input[192], proof[96], group[64];
+            snprintf(input, sizeof(input), "{\"paths\":[\"tools/command/native_devagent_%s.c\"]}", leaves[i]);
+            snprintf(proof, sizeof(proof), "make t-fast ONLY=devagent_%s", leaves[i]);
+            snprintf(group, sizeof(group), "devagent_%s", leaves[i]);
+            ASSERT(brief_run(root, input, &reply, why, sizeof(why)));
+            ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
+            const struct json_value *next = json_get(&reply.data, "next");
+            ASSERT_STR_EQ(json_get_str(json_at(next, 0)), proof);
+            ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make lint-fast");
+            ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "make lint-preflight");
+            ASSERT(brief_array_has(json_get(&reply.data, "tests"), group));
+            ASSERT(brief_array_has(json_get(&reply.data, "tests"), "command_registry_catalog"));
+            ASSERT(brief_array_has(json_get(&reply.data, "tests"), "make_lint_gates"));
+            ASSERT(json_write(&reply.data, NULL, 0) <= 2048);
+            zcl_command_reply_free(&reply);
+        }
+        test_rm_rf_recursive(root);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_guide_brief_budget(void)
 {
     int failures = 0;
@@ -6904,6 +6935,7 @@ int test_command_registry_catalog(void)
     failures += test_code_guide_leaf();
     failures += test_code_guide_brief();
     failures += test_code_guide_brief_budget();
+    failures += test_code_guide_devagent_focus();
     failures += test_code_guide_lint_catalog();
     failures += test_code_guide_lint_catalog_exclusions();
     failures += test_code_guide_brief_edges();

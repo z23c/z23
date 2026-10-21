@@ -40,6 +40,29 @@ AGENT_IMPACT_RULE("engine/composition/capability_classes.def|engine/composition/
  * claim against them, not only the shell gate that derives it in-tree. */
 AGENT_IMPACT_RULE("contexts/commons/modules/vcs/include/vcs/package_verify_capabilities.h|contexts/commons/modules/vcs/src/package_verify_capabilities.c|tests/harness/src/test_package_capability_claim.c", "package_capability_claim vcs_core make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_dev_train_command.c|tests/harness/src/test_dev_train.c", "dev_train make_lint_gates")
+/* The dev.agent.* command surface: the pure primitives, both handlers, and
+ * the group that proves the primitives. The handlers spawn `make` and
+ * build/bin/test_parallel, and they are READY in the release catalog, so a
+ * change here must also re-prove the catalog and native-API contracts that
+ * decide what the release binary advertises. */
+AGENT_IMPACT_RULE("tools/command/native_devagent.c|tools/command/native_devagent.h|tools/command/native_devagent_command.c|tools/command/native_devagent_mutate_command.c|tests/harness/src/test_devagent_surface.c", "devagent_surface command_registry_catalog native_api_contract command_input_bounds make_lint_gates")
+/* The eight dev.agent lane-discipline leaves. Each is one handler file with
+ * one registered group, so an edit to one leaf proves that leaf and nothing
+ * else; the shared rule table and the catalog rows they all sit in are the
+ * only reason the whole family is named on those two rows. */
+AGENT_IMPACT_RULE("tools/command/native_devagent_situation.c|tests/harness/src/test_devagent_situation.c", "devagent_situation command_registry_catalog native_api_contract command_input_bounds")
+AGENT_IMPACT_RULE("tools/command/native_devagent_usage.c|tools/command/native_devagent_usage_internal.h|tools/command/native_devagent_outcomes.c|tests/harness/src/test_devagent_outcomes.c", "devagent_outcomes make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_devagent_reviewscore.c|engine/modules/engine/src/engine_review_score.c|engine/modules/engine/include/engine/engine_review_score.h|engine/modules/engine/src/engine_findings.c|engine/modules/engine/include/engine/engine_findings.h|tests/harness/src/test_devagent_reviewscore.c", "devagent_reviewscore make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_devagent_rules.c|tests/harness/src/test_devagent_rules.c", "devagent_rules command_registry_catalog native_api_contract command_input_bounds")
+AGENT_IMPACT_RULE("tools/command/native_devagent_start.c|tests/harness/src/test_devagent_start.c", "devagent_start command_registry_catalog native_api_contract command_input_bounds")
+AGENT_IMPACT_RULE("tools/command/native_devagent_claim.c|tests/harness/src/test_devagent_claim.c", "devagent_claim command_registry_catalog native_api_contract command_input_bounds")
+AGENT_IMPACT_RULE("tools/command/native_devagent_done.c|tests/harness/src/test_devagent_done.c", "devagent_done command_registry_catalog native_api_contract command_input_bounds")
+AGENT_IMPACT_RULE("tools/command/native_devagent_triage.c|tests/harness/src/test_devagent_triage.c", "devagent_triage command_registry_catalog native_api_contract command_input_bounds")
+AGENT_IMPACT_RULE("tools/command/native_devagent_ceiling.c|tests/harness/src/test_devagent_ceiling.c", "devagent_ceiling command_registry_catalog native_api_contract command_input_bounds")
+AGENT_IMPACT_RULE("tools/command/native_devagent_pace.c|tests/harness/src/test_devagent_pace.c", "devagent_pace command_registry_catalog native_api_contract command_input_bounds")
+/* The commuting-ticket key leaf: one handler file with one registered group,
+ * like the lane-discipline leaves above. */
+AGENT_IMPACT_RULE("tools/command/native_devagent_ticketkey.c|tests/harness/src/test_devagent_ticketkey.c", "devagent_ticketkey command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("Makefile|README.md|.github/CONTRIBUTING.md|engine/entry/main.c|tools/*|tools/scripts/*|tools/githooks/*|deploy/*.service|deploy/*.timer|deploy/examples/*.service|deploy/examples/*.timer|engine/composition/launchd/*|docs/agent/AGENT_API.md|docs/dev/BUILD.md|docs/dev/CODEBASE_MAP.md|docs/node/HOW_THE_NODE_WORKS.md|docs/node/GETTING_STARTED.md|docs/dev/fast-path.md|docs/RUNBOOK.md|tests/harness/src/test_make_lint_gates.c|tests/harness/src/lint_gate_*.c|tests/harness/src/lint_gate_selftests.h", "make_lint_gates")
 /* The host janitor: the sweep engine, the leaf over it, the hourly script
  * and its fixture regression all answer to one acceptance bar, so a change
@@ -3064,31 +3087,8 @@ AGENT_IMPACT_RULE("platform/modules/util/include/util/telemetry_ontology.def|pla
 /* The ZENDP group's own test source. */
 AGENT_IMPACT_RULE("tests/harness/src/test_zendp.c", "zendp zendp_records make_lint_gates")
 
-/* The dev.agent.* command surface: the pure primitives, both handlers, and
- * the group that proves the primitives. The handlers spawn `make` and
- * build/bin/test_parallel, and they are READY in the release catalog, so a
- * change here must also re-prove the catalog and native-API contracts that
- * decide what the release binary advertises. */
-AGENT_IMPACT_RULE("tools/command/native_devagent.c|tools/command/native_devagent.h|tools/command/native_devagent_command.c|tools/command/native_devagent_mutate_command.c|tests/harness/src/test_devagent_surface.c", "devagent_surface command_registry_catalog native_api_contract command_input_bounds make_lint_gates")
-/* The eight dev.agent lane-discipline leaves. Each is one handler file with
- * one registered group, so an edit to one leaf proves that leaf and nothing
- * else; the shared rule table and the catalog rows they all sit in are the
- * only reason the whole family is named on those two rows. */
-AGENT_IMPACT_RULE("tools/command/native_devagent_situation.c|tests/harness/src/test_devagent_situation.c", "devagent_situation command_registry_catalog native_api_contract command_input_bounds")
-AGENT_IMPACT_RULE("tools/command/native_devagent_usage.c|tools/command/native_devagent_usage_internal.h|tools/command/native_devagent_outcomes.c|tests/harness/src/test_devagent_outcomes.c", "devagent_outcomes make_lint_gates")
-AGENT_IMPACT_RULE("tools/command/native_devagent_reviewscore.c|engine/modules/engine/src/engine_review_score.c|engine/modules/engine/include/engine/engine_review_score.h|engine/modules/engine/src/engine_findings.c|engine/modules/engine/include/engine/engine_findings.h|tests/harness/src/test_devagent_reviewscore.c", "devagent_reviewscore make_lint_gates")
-AGENT_IMPACT_RULE("tools/command/native_devagent_rules.c|tests/harness/src/test_devagent_rules.c", "devagent_rules command_registry_catalog native_api_contract command_input_bounds")
-AGENT_IMPACT_RULE("tools/command/native_devagent_start.c|tests/harness/src/test_devagent_start.c", "devagent_start command_registry_catalog native_api_contract command_input_bounds")
-AGENT_IMPACT_RULE("tools/command/native_devagent_claim.c|tests/harness/src/test_devagent_claim.c", "devagent_claim command_registry_catalog native_api_contract command_input_bounds")
 AGENT_IMPACT_RULE("tools/dev/devagent_claim_lease_selftest.sh", "devagent_claim make_lint_gates")
 AGENT_IMPACT_RULE("tools/dev/test_group_host_needs.def", "test_group_selector test_test_group_selector impact_composition make_lint_gates")
-AGENT_IMPACT_RULE("tools/command/native_devagent_done.c|tests/harness/src/test_devagent_done.c", "devagent_done command_registry_catalog native_api_contract command_input_bounds")
-AGENT_IMPACT_RULE("tools/command/native_devagent_triage.c|tests/harness/src/test_devagent_triage.c", "devagent_triage command_registry_catalog native_api_contract command_input_bounds")
-AGENT_IMPACT_RULE("tools/command/native_devagent_ceiling.c|tests/harness/src/test_devagent_ceiling.c", "devagent_ceiling command_registry_catalog native_api_contract command_input_bounds")
-AGENT_IMPACT_RULE("tools/command/native_devagent_pace.c|tests/harness/src/test_devagent_pace.c", "devagent_pace command_registry_catalog native_api_contract command_input_bounds")
-/* The commuting-ticket key leaf: one handler file with one registered group,
- * like the lane-discipline leaves above. */
-AGENT_IMPACT_RULE("tools/command/native_devagent_ticketkey.c|tests/harness/src/test_devagent_ticketkey.c", "devagent_ticketkey command_registry_catalog native_api_contract command_input_bounds")
 /* The rule table every one of them reads, and the catalog rows they declare. */
 AGENT_IMPACT_RULE("engine/composition/agent_rules.def", "devagent_rules devagent_start devagent_situation command_registry_catalog make_lint_gates")
 /* Fleet truth is a release-visible native command. Its three-worktree
