@@ -21,6 +21,7 @@
 #include "sync/sync_planner.h"
 #include "util/pprev_walk.h"
 #include "net/download.h"
+#include "net/header_corroboration.h"
 #include "net/net.h"
 #include "services/sync_benchmark_service.h"
 #include "validation/main_state.h"
@@ -447,14 +448,21 @@ static bool stall_recovery_scan_is_waste(const struct main_state *ms,
      * the tip are excluded deliberately: they never reach the descendant
      * pool (pprev must walk to OUR tip) and their bodies cannot advance
      * the active chain; a fork whose work crosses ours is promoted to the
-     * best header on acceptance and this guard opens again — except while
-     * HEADER_CORROBORATION_HOLD deliberately withholds promotion, a
-     * transient window in which stall recovery also skips the held header
-     * (the normal header-plan path still queues its body). No tracking
+     * best header on acceptance and this guard opens again. ONE deliberate
+     * exception, opened on independent review (the closed form drew a
+     * source-reviewed REJECT for suppressing the bounded tip-parent
+     * recovery): while HEADER_CORROBORATION_HOLD withholds promotion of a
+     * strictly-better un-corroborated switch, the held branch sits above
+     * the tip exactly like a deficit and stall recovery must keep firing
+     * for it as before. Holds are transient — they clear the moment a
+     * second distinct group corroborates the branch or it is abandoned —
+     * so the steady-state burn stays gone. No tracking
      * (pindex_best_header == NULL) keeps the legacy scan so recovery is
      * never more conservative than before where tracking is absent. */
     const struct block_index *best_header = ms->pindex_best_header;
-    if (best_header && best_header->nHeight <= our_h) return true;
+    if (best_header && best_header->nHeight <= our_h &&
+        !header_corroboration_hold_active())
+        return true;
     return false;
 }
 

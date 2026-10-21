@@ -4,6 +4,7 @@
 #include "platform/time_compat.h"
 #include "test/test_core.h"
 #include "net/net.h"
+#include "net/header_corroboration.h"
 #include "controllers/diagnostics_controller.h"
 #include "controllers/diagnostics_internal.h"
 #include "json/json.h"
@@ -2066,6 +2067,91 @@ static int test_sync_service_recovery_fires_for_real_deficit(void)
     return failures;
 }
 
+static int test_sync_service_at_tip_recovery_fires_under_corroboration_hold(void)
+{
+    int failures = 0;
+
+    TEST("at-tip stall recovery still fires while a corroboration hold withholds a better branch") {
+        /* The at-tip guard's one deliberate exception (independent review
+         * REJECTed the closed form): HEADER_CORROBORATION_HOLD keeps a
+         * strictly-better un-corroborated switch out of pindex_best_header,
+         * so best-header tracking shows "nothing above tip" while a real
+         * candidate branch sits at dh >= 1. The bounded tip-parent recovery
+         * must keep firing for it exactly as before the guard. Fixture: a
+         * 101-block main chain (tip h=100, our active tip) and a fork
+         * branch forking at h=93 (switch depth 7 > MIN_SWITCH_DEPTH 6)
+         * whose tip h=105 carries more chain work. */
+        enum { MAIN = 101, FORK_BASE = 94, FORK_COUNT = 12 }; /* h94..h105 */
+        struct main_state ms;
+        struct p2p_node node;
+        struct sync_stall_recovery recovery;
+        struct block_index *main = zcl_calloc(MAIN, sizeof(*main), "hold main");
+        struct uint256 *hashes = zcl_calloc(MAIN + FORK_COUNT,
+                                            sizeof(*hashes), "hold hashes");
+        struct block_index *fork = zcl_calloc(FORK_COUNT, sizeof(*fork),
+                                              "hold fork");
+        ASSERT(main && hashes && fork);
+        memset(&node, 0, sizeof(node));
+        main_state_init(&ms);
+        header_corroboration_test_reset();
+
+        for (int i = 0; i < MAIN; i++) {
+            uint64_t key = (uint64_t)i + 1;
+            memcpy(hashes[i].data, &key, sizeof(key));
+            block_index_init(&main[i]);
+            main[i].phashBlock = &hashes[i];
+            main[i].nHeight = i;
+            main[i].pprev = i ? &main[i - 1] : NULL;
+            ASSERT(block_map_insert(&ms.map_block_index, &hashes[i],
+                                    &main[i]));
+        }
+        for (int i = 0; i < FORK_COUNT; i++) {
+            uint64_t key = (uint64_t)(MAIN + i + 1);
+            memcpy(hashes[MAIN + i].data, &key, sizeof(key));
+            block_index_init(&fork[i]);
+            fork[i].phashBlock = &hashes[MAIN + i];
+            fork[i].nHeight = FORK_BASE + i;
+            fork[i].pprev = i ? &fork[i - 1] : &main[FORK_BASE - 1];
+            ASSERT(block_map_insert(&ms.map_block_index,
+                                    &hashes[MAIN + i], &fork[i]));
+        }
+        ASSERT(active_chain_move_window_tip(&ms.chain_active,
+                                            &main[MAIN - 1]));
+        arith_uint256_set_u64(&main[MAIN - 1].nChainWork, 10);   /* nonzero */
+        arith_uint256_set_u64(&fork[FORK_COUNT - 1].nChainWork, 20); /* better */
+        ms.pindex_best_header = &main[MAIN - 1];  /* promotion WITHHELD */
+
+        enum header_corroboration_gate g = header_corroboration_gate_switch(
+            &main[MAIN - 1], &fork[FORK_COUNT - 1],
+            /*checkpoint_last_height=*/0,
+            /*peer_group=*/(const unsigned char *)"\x01", 1, "hold-test");
+        ASSERT(g == HEADER_CORROBORATION_HOLD);
+        ASSERT(header_corroboration_hold_active());
+
+        node.state = PEER_SYNCING_BLOCKS;
+        node.starting_height = 2000;
+        ASSERT(syncsvc_build_stall_recovery(&recovery, &ms, &node,
+                                            0, 0, 60000));
+        ASSERT(recovery.should_recover);
+        /* The held branch's h=101 entry is visible to the probe window and
+         * the bounded tip-parent getheaders request survives — the exact
+         * behavior the closed guard suppressed. */
+        ASSERT(recovery.next_height == 101);
+        ASSERT(recovery.entries_at_next >= 1);
+        ASSERT(recovery.should_request_tip_parent);
+        syncsvc_free_stall_recovery(&recovery);
+
+        header_corroboration_test_reset();
+        main_state_free(&ms);
+        free(main);
+        free(fork);
+        free(hashes);
+        PASS();
+    } _test_next:;
+
+    return failures;
+}
+
 static int test_sync_service_requests_reset_when_no_alts(void)
 {
     int failures = 0;
@@ -2522,6 +2608,7 @@ int test_sync_service(void)
     failures += test_sync_service_recovery_ignores_map_order();
     failures += test_sync_service_at_tip_recovery_skips_scan();
     failures += test_sync_service_recovery_fires_for_real_deficit();
+    failures += test_sync_service_at_tip_recovery_fires_under_corroboration_hold();
     failures += test_sync_service_applies_alt_recovery();
     failures += test_sync_service_applies_reset_recovery();
     failures += test_sync_service_recovery_header_anchor();
