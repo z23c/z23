@@ -5135,6 +5135,7 @@ static bool dp_zcc_env_compile(const char *zcc, const char *cache,
         (void)setenv("CLAUDE_PID", value, 1);
         (void)setenv("INVOCATION_ID", value, 1);
         (void)setenv("DEVBUILD_ACTIVE", value, 1);
+        (void)setenv("CODEX_TOOL_CALL_ID", value, 1);
         if (salt == 1)
             (void)unsetenv("DEVBUILD_CLASS");
         else
@@ -5288,8 +5289,19 @@ static bool dp_zcc_pwd_scenario(const char *zcc, const char *root,
 
 /* The fixture driver checks the actual child environment, then executes
  * the real compiler. Prefix lookalikes remain compiler-visible and keyed. */
+static void dp_zcc_call_env(bool normal, int control)
+{
+    (void)setenv("CODEX_TOOL_CALL_ID", normal ? "call-two" : "call-one", 1);
+    (void)setenv("CODEX_TOOL_CALL_ID_EXTRA",
+                 control == 1 ? "second" : "first", 1);
+    (void)setenv("CODEX_SESSION_ID",
+                 control == 2 ? "session-two" : "session-one", 1);
+    (void)setenv("CODEX_THREAD_ID",
+                 control == 3 ? "thread-two" : "thread-one", 1);
+}
+
 static bool dp_zcc_class_compile(const char *zcc, const char *root,
-                                  bool normal, const char *prefix)
+                                  bool normal, const char *prefix, int control)
 {
     pid_t child = fork();
     if (child < 0)
@@ -5308,6 +5320,7 @@ static bool dp_zcc_class_compile(const char *zcc, const char *root,
         else
             (void)unsetenv("DEVBUILD_CLASS");
         (void)setenv("DEVBUILD_CLASS_EXTRA", prefix, 1);
+        dp_zcc_call_env(normal, control);
         execl(zcc, zcc, "./cc", "-std=c23", "-O1", "-MMD", "-MF",
               "class.d", "-MT", "class.o", "-c", "t.c", "-o", "class.o",
               (char *)NULL);
@@ -5331,23 +5344,47 @@ static bool dp_zcc_class_paths(const char *root, char paths[6][PATH_MAX])
     return dp_mk_write(root, "cc",
         "#!/bin/sh\n"
         "test \"${DEVBUILD_CLASS+x}\" != x || exit 91\n"
+        "if test \"${CODEX_TOOL_CALL_ID+x}\" = x; then\n"
+        "  echo 'zcc fixture: CODEX_TOOL_CALL_ID leaked to compiler' >&2\n"
+        "  exit 93\n"
+        "fi\n"
         "case $DEVBUILD_CLASS_EXTRA in first|second) ;; *) exit 92 ;; esac\n"
+        "case $CODEX_TOOL_CALL_ID_EXTRA in first|second) ;; *) exit 94 ;; esac\n"
+        "case $CODEX_SESSION_ID in session-one|session-two) ;; *) exit 95 ;; esac\n"
+        "case $CODEX_THREAD_ID in thread-one|thread-two) ;; *) exit 96 ;; esac\n"
         "exec cc \"$@\"\n") && chmod(paths[0], 0700) == 0;
+}
+
+static bool dp_zcc_bound_controls(const char *zcc, const char *root,
+                                   const char *log, int hits)
+{
+    static const char *const labels[] = {
+        "DEVBUILD_CLASS_EXTRA", "CODEX_TOOL_CALL_ID_EXTRA",
+        "CODEX_SESSION_ID", "CODEX_THREAD_ID"
+    };
+    for (int i = 0; i < 4; i++) {
+        bool miss = dp_zcc_class_compile(zcc, root, true,
+                                         i == 0 ? "second" : "first", i) &&
+                    dp_zcc_log_hits(log) == hits;
+        printf("    zcc env: %s visible and key-bound -> %s\n",
+               labels[i], miss ? "PASS" : "FAIL");
+        if (!miss)
+            return false;
+    }
+    return true;
 }
 
 static bool dp_zcc_class_scenario(const char *zcc, const char *root)
 {
     char p[6][PATH_MAX];
     bool ok = dp_zcc_class_paths(root, p) &&
-        dp_zcc_class_compile(zcc, root, false, "first") &&
+        dp_zcc_class_compile(zcc, root, false, "first", 0) &&
         dp_hf_copy_file(p[2], p[4]) && dp_hf_copy_file(p[3], p[5]) &&
-        dp_zcc_class_compile(zcc, root, true, "first");
+        dp_zcc_class_compile(zcc, root, true, "first", 0);
     int hits = ok ? dp_zcc_log_hits(p[1]) : -1;
     bool same = ok && dp_zcc_same_bytes(p[2], p[4]) &&
                 dp_zcc_same_bytes(p[3], p[5]);
-    bool prefix_miss = same &&
-        dp_zcc_class_compile(zcc, root, true, "second") &&
-        dp_zcc_log_hits(p[1]) == hits;
+    bool prefix_miss = same && dp_zcc_bound_controls(zcc, root, p[1], hits);
     printf("    zcc class: absent->normal hits=%d equal_object_dep=%d "
            "prefix_miss=%d (want 1 1 1)\n", hits, same, prefix_miss);
     return hits == 1 && same && prefix_miss;
@@ -5394,9 +5431,9 @@ static bool run_zcc_session_env_hit_fixture(void)
     int desc = dp_zcc_env_scenario(zcc, root, "fd", true, NULL);
     int cpath = dp_zcc_env_scenario(zcc, root, "cpath", false,
                                     "/nonexistent-zcc-include");
+    bool child_ok = dp_zcc_class_scenario(zcc, root);
     bool ok = plain == 1 && desc == 1 && cpath == 0 &&
-              dp_zcc_pwd_scenario(zcc, root, src) &&
-              dp_zcc_class_scenario(zcc, root);
+              dp_zcc_pwd_scenario(zcc, root, src) && child_ok;
     printf("    zcc env: repeat compile hits plain=%d descriptor=%d "
            "compiler-visible-change=%d (want 1 1 0) -> %s\n",
            plain, desc, cpath, ok ? "PASS" : "FAIL");
