@@ -40,6 +40,8 @@
 /* Two-level fanout: ~5000 files per m-dir, ~50 per s-dir. */
 #define SCALE_FILES_PER_M 5000L
 #define SCALE_FILES_PER_S 50L
+static_assert(SCALE_FILES_PER_M % SCALE_FILES_PER_S == 0,
+              "each m directory must contain complete s directories");
 /* Warm questions must stay interactive: 50 ms each, query time only. */
 #define WARM_QUESTION_BUDGET_US UINT64_C(50000)
 /* 10x the files may cost at most 30x the cold-build time. */
@@ -54,13 +56,16 @@ static uint64_t scale_monotonic_us(void)
 /* Write content to <root>/<rel>, creating parent dirs (the mk_write pattern
  * from test_codeindex.c). */
 static bool scale_write(const char *root, const char *rel,
-                        const char *content, size_t content_len)
+                        const char *content, size_t content_len,
+                        bool ensure_parents)
 {
     char full[4096];
     int n = snprintf(full, sizeof(full), "%s/%s", root, rel);
     if (n <= 0 || (size_t)n >= sizeof(full)) return false;
-    for (char *p = full + 1; *p; p++) {
-        if (*p == '/') { *p = '\0'; mkdir(full, 0755); *p = '/'; }
+    if (ensure_parents) {
+        for (char *p = full + 1; *p; p++) {
+            if (*p == '/') { *p = '\0'; mkdir(full, 0755); *p = '/'; }
+        }
     }
     FILE *f = fopen(full, "wb");
     if (!f) return false;
@@ -85,7 +90,9 @@ static bool scale_generate(const char *root, long files)
         if (rn <= 0 || (size_t)rn >= sizeof(rel) ||
             cn <= 0 || (size_t)cn >= sizeof(content))
             return false;
-        if (!scale_write(root, rel, content, (size_t)cn))
+        /* All files in this subgroup share parents created by its first file. */
+        if (!scale_write(root, rel, content, (size_t)cn,
+                         i % SCALE_FILES_PER_S == 0))
             return false;
     }
     return true;
@@ -100,7 +107,7 @@ static int scale_check_incremental_edit(struct codeindex **index,
     static const char edit[] = "int scale_edit_00000(void) { return 1; }\n";
     SCALE_CHECK("edit one indexed file",
                 scale_write(FIX_50K, "src/m000/s00/f00000.c",
-                            edit, sizeof(edit) - 1));
+                            edit, sizeof(edit) - 1, true));
     codeindex_close(*index);
     *index = codeindex_open(FIX_50K);
     long long receipt_after_ms = 0, receipt_after_files = 0;
