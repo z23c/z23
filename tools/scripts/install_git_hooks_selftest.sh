@@ -339,7 +339,16 @@ sleep 1
     printf 'held-ready\n' >> "$QUIET/seed"
     g -C "$QUIET" add seed
     g -C "$QUIET" commit -q -m held-ready || exit 1
-    sleep 1
+    # Git has returned, but the detached receiver need not have run yet.
+    # Keep the ready lock held until its complete argv is observed. Retain
+    # append semantics: duplicate notifications must still fail exact equality.
+    notify_deadline=$((SECONDS + 10))
+    while [[ ! -f "$QUIET/proof-notify-marker" ]] ||
+          [[ "$(cat "$QUIET/proof-notify-marker")" != \
+             'dev proof ensure --input={"require_existing_watcher":true}' ]]; do
+        (( SECONDS < notify_deadline )) || exit 1
+        sleep 0.1
+    done
 ) || fail "held candidate fixture failed"
 [[ -f "$QUIET/proof-notify-marker" ]] || fail "held candidate did not notify fixture receiver"
 if [[ -f "$QUIET/proof-notify-marker" ]]; then
