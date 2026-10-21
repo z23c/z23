@@ -12,6 +12,8 @@
 #include "controllers/agent_impact_harness.h"
 
 #include "test_group_catalog.h"
+#include "base/safe_alloc.h"
+#include "sha3/sha3.h"
 #include "util/file_io.h"
 
 #include <ctype.h>
@@ -19,6 +21,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <errno.h>
 
 enum {
     AIH_LINE_MAX = 4096,
@@ -37,6 +41,97 @@ static const char AIH_WINDOWS_ACCEPTANCE_TABLE[] =
 static const char *const AIH_REFERRER_DIRS[] = {
     "tests/harness/src", "tools/lint/lintc",
 };
+
+enum { AIH_SNAPSHOT_ROWS = 4096, AIH_SNAPSHOT_BYTES = 64u << 20 };
+struct aih_snapshot_row { char path[512]; char *text; size_t len; };
+struct agent_impact_snapshot {
+    struct aih_snapshot_row *rows;
+    size_t count, bytes;
+    char *table;
+    unsigned char digest[32];
+};
+
+void agent_impact_snapshot_free(struct agent_impact_snapshot *s)
+{
+    if (!s) return;
+    for (size_t i = 0; i < s->count; i++) free(s->rows[i].text);
+    free(s->rows);
+    free(s->table);
+    free(s);
+}
+
+static void aih_hash_frame(struct sha3_256_ctx *ctx, const char *bytes, size_t len)
+{
+    char size[32];
+    int n = snprintf(size, sizeof(size), "%zu:", len);
+    sha3_256_write(ctx, (const unsigned char *)size, (size_t)n);
+    sha3_256_write(ctx, (const unsigned char *)bytes, len);
+}
+
+static bool aih_snapshot_row(struct agent_impact_snapshot *s, const char *dir,
+                              const char *name, struct sha3_256_ctx *ctx)
+{
+    size_t n = strlen(name);
+    if (n < 3 || strcmp(name + n - 2, ".c") != 0) return true;
+    if (s->count == AIH_SNAPSHOT_ROWS) return false;
+    struct aih_snapshot_row *row = &s->rows[s->count++];
+    int written = snprintf(row->path, sizeof(row->path), "%s/%s", dir, name);
+    if (written < 0 || (size_t)written >= sizeof(row->path)) return false;
+    if (!zcl_read_whole_file_text(row->path, AIH_REFERRER_MAX, &row->text,
+                                  &row->len, "agent_impact_snapshot"))
+        return false; // raw-return-ok:read-helper-logs-context-and-path-before-live-fallback
+    if (row->len > AIH_SNAPSHOT_BYTES - s->bytes) return false;
+    s->bytes += row->len;
+    aih_hash_frame(ctx, row->path, strlen(row->path));
+    aih_hash_frame(ctx, row->text, row->len);
+    return true;
+}
+
+static bool aih_snapshot_dir(struct agent_impact_snapshot *s, const char *dir,
+                              struct sha3_256_ctx *ctx)
+{
+    DIR *dh = opendir(dir);
+    if (!dh) return false;
+    bool ok = true;
+    struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(dh)) != NULL) {
+        if (!aih_snapshot_row(s, dir, entry->d_name, ctx)) { ok = false; break; }
+        errno = 0;
+    }
+    if (errno) ok = false;
+    if (closedir(dh) != 0) ok = false;
+    return ok;
+}
+
+struct agent_impact_snapshot *agent_impact_snapshot_create(void)
+{
+    struct agent_impact_snapshot *s = zcl_calloc(1, sizeof(*s), "agent_impact_snapshot");
+    if (!s) return NULL;
+    s->rows = zcl_calloc(AIH_SNAPSHOT_ROWS, sizeof(*s->rows), "agent_impact_snapshot");
+    char *cwd = getcwd(NULL, 0);
+    size_t len = 0;
+    bool ok = s->rows && cwd && zcl_read_whole_file_text(AIH_WINDOWS_ACCEPTANCE_TABLE,
+        AIH_TABLE_MAX, &s->table, &len, "agent_impact_snapshot");
+    struct sha3_256_ctx ctx;
+    sha3_256_init(&ctx);
+    if (ok) {
+        aih_hash_frame(&ctx, cwd, strlen(cwd));
+        aih_hash_frame(&ctx, s->table, len);
+        s->bytes = len;
+        for (size_t d = 0; d < sizeof(AIH_REFERRER_DIRS)/sizeof(AIH_REFERRER_DIRS[0]); d++)
+            if (!aih_snapshot_dir(s, AIH_REFERRER_DIRS[d], &ctx)) { ok = false; break; }
+    }
+    free(cwd);
+    if (!ok) { agent_impact_snapshot_free(s); return NULL; }
+    sha3_256_finalize(&ctx, s->digest);
+    return s;
+}
+
+const unsigned char *agent_impact_snapshot_digest(const struct agent_impact_snapshot *s)
+{
+    return s ? s->digest : NULL;
+}
 
 bool agent_impact_harness_test_group_name(
     const char *path, char out[static ZCL_AGENT_IMPACT_GROUP_MAX])
@@ -156,8 +251,8 @@ static bool aih_path_in_windows_acceptance_table(const char *rel_path)
     return hit;
 }
 
-bool agent_impact_apply_harness_routes(const char *path,
-                                       struct agent_impact_acc *acc)
+bool agent_impact_harness_routes_snapshot(const char *path,
+    struct agent_impact_acc *acc, const struct agent_impact_snapshot *snapshot)
 {
     if (!path || !acc)
         return false;
@@ -170,7 +265,8 @@ bool agent_impact_apply_harness_routes(const char *path,
         acc->shared_rule_hits++;
         return true;
     }
-    if (aih_path_in_windows_acceptance_table(path)) {
+    if (snapshot ? agent_impact_windows_acceptance_table_lists(snapshot->table, path)
+                 : aih_path_in_windows_acceptance_table(path)) {
         agent_impact_add_group(acc, "make_lint_gates");
         acc->shared_rule_hits++;
         return true;
@@ -178,14 +274,27 @@ bool agent_impact_apply_harness_routes(const char *path,
     return false;
 }
 
+bool agent_impact_apply_harness_routes(const char *path, struct agent_impact_acc *acc)
+{
+    return agent_impact_harness_routes_snapshot(path, acc, NULL);
+}
+
 static bool aih_span_has_needle(const char *s, size_t slen, const char *needle,
                                 size_t needle_len)
 {
     if (needle_len == 0 || needle_len > slen)
         return false;
-    for (size_t i = 0; i + needle_len <= slen; i++)
-        if (memcmp(s + i, needle, needle_len) == 0)
+    size_t starts = slen - needle_len + 1;
+    const char *p = s;
+    while (starts) {
+        const char *hit = memchr(p, (unsigned char)needle[0], starts);
+        if (!hit)
+            return false;
+        if (memcmp(hit, needle, needle_len) == 0)
             return true;
+        starts -= (size_t)(hit - p) + 1;
+        p = hit + 1;
+    }
     return false;
 }
 
@@ -209,8 +318,16 @@ static bool aih_span_has_bounded_needle(const char *s, size_t slen,
 {
     if (needle_len == 0 || needle_len > slen)
         return false;
-    for (size_t i = 0; i + needle_len <= slen; i++) {
-        if (memcmp(s + i, needle, needle_len) != 0)
+    size_t starts = slen - needle_len + 1;
+    const char *p = s;
+    while (starts) {
+        const char *hit = memchr(p, (unsigned char)needle[0], starts);
+        if (!hit)
+            return false;
+        starts -= (size_t)(hit - p) + 1;
+        p = hit + 1;
+        size_t i = (size_t)(hit - s);
+        if (memcmp(hit, needle, needle_len) != 0)
             continue;
         bool left_ok = i == 0 || aih_is_token_boundary(s[i - 1]);
         bool right_ok = i + needle_len == slen ||
@@ -417,8 +534,8 @@ static bool aih_path_can_be_name_referenced(const char *path)
     return strncmp(path, prefix, sizeof(prefix) - 1) == 0;
 }
 
-bool agent_impact_apply_name_reference_routes(const char *path,
-                                              struct agent_impact_acc *acc)
+bool agent_impact_name_routes_snapshot(const char *path,
+    struct agent_impact_acc *acc, const struct agent_impact_snapshot *snapshot)
 {
     if (!path || !acc || !aih_path_can_be_name_referenced(path))
         return false;
@@ -430,8 +547,26 @@ bool agent_impact_apply_name_reference_routes(const char *path,
     bool compound = aih_stem_is_compound(stem);
 
     bool matched = false;
+    if (snapshot) {
+        for (size_t i = 0; i < snapshot->count; i++) {
+            const struct aih_snapshot_row *row = &snapshot->rows[i];
+            if (strcmp(row->path, path) == 0 ||
+                !aih_referrer_hits(row->text, path, stem, alt, has_alt, compound)) continue;
+            struct agent_impact_acc found = {0};
+            if (!agent_impact_harness_routes_snapshot(row->path, &found, snapshot))
+                (void)agent_impact_apply_shared_rules(row->path, &found);
+            for (size_t g = 0; g < found.groups_len; g++) agent_impact_add_group(acc, found.groups[g]);
+            if (found.groups_len) { acc->shared_rule_hits++; matched = true; }
+        }
+        return matched;
+    }
     for (size_t d = 0; d < sizeof(AIH_REFERRER_DIRS) / sizeof(AIH_REFERRER_DIRS[0]); d++)
         aih_scan_dir_for_reference(AIH_REFERRER_DIRS[d], path, stem, alt, has_alt,
                                    compound, acc, &matched);
     return matched;
+}
+
+bool agent_impact_apply_name_reference_routes(const char *path, struct agent_impact_acc *acc)
+{
+    return agent_impact_name_routes_snapshot(path, acc, NULL);
 }

@@ -242,9 +242,10 @@ bool code_path_is_consensus_risk(const char *path)
     return false;
 }
 
-const char *zcl_native_code_route_for_path(const char *path,
+const char *zcl_native_code_route_snapshot(const char *path,
                                            struct agent_impact_acc *acc,
-                                           bool *consensus_risk)
+                                           bool *consensus_risk,
+                                           const struct agent_impact_snapshot *snapshot)
 {
     struct agent_impact_acc local = {0};
     struct agent_impact_acc *a = acc ? acc : &local;
@@ -257,13 +258,13 @@ const char *zcl_native_code_route_for_path(const char *path,
      * them. See agent_impact_harness.h for the two structural conventions
      * this resolves — test_<group>.c naming and the Windows-acceptance
      * sources table — ahead of any shared-rule match. */
-    (void)agent_impact_apply_harness_routes(path, a);
+    (void)agent_impact_harness_routes_snapshot(path, a, snapshot);
     (void)agent_impact_apply_shared_rules(path, a);
     /* Secondary candidates: a harness/lint-gate file that names this path
      * inside a string literal (a binary name, a bare path) with no
      * #include edge. Appended last so it can only ADD to test_groups, never
      * change which group is picked as the route below. */
-    (void)agent_impact_apply_name_reference_routes(path, a);
+    (void)agent_impact_name_routes_snapshot(path, a, snapshot);
     bool crisk = code_path_is_consensus_risk(path);
     if (consensus_risk) *consensus_risk = crisk;
     /* devloop_plan.c:171-185: a consensus/sealed surface always routes to the
@@ -288,6 +289,12 @@ const char *zcl_native_code_route_for_path(const char *path,
         }
     }
     return "make_lint_gates";
+}
+
+const char *zcl_native_code_route_for_path(const char *path,
+    struct agent_impact_acc *acc, bool *consensus_risk)
+{
+    return zcl_native_code_route_snapshot(path, acc, consensus_risk, NULL);
 }
 
 /* Emit the routing block for a changed source `path` into reply->data:

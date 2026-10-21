@@ -77,6 +77,7 @@
 #include "json/json.h"
 #include "platform/clock.h"
 #include "sha3/sha3.h"
+#include "controllers/agent_impact_harness.h"
 #include "util/log_macros.h"
 #include "util/spawn.h"
 
@@ -348,8 +349,9 @@ static const struct dvt_blob *dvt_tree_find(const struct dvt_blob *blobs,
     return NULL;
 }
 
-/* The router below is a pure function of its path argument (the shared
- * rules are compiled in), but at ~10 ms a path it dominates this leaf: one
+/* The router reads current referrers and the Windows source table. An
+ * invocation capture binds this memo to those exact bytes and cwd. At
+ * ~10 ms a path it dominates this leaf: one
  * full-tree pass costs about a minute. This memo keeps the leaf exact while
  * making repeated calls in one process — the test suite, a proof worker
  * keying many groups — pay one pass. Thread-local, so concurrent dispatches
@@ -368,6 +370,28 @@ struct dvt_memo_entry {
 
 static _Thread_local struct dvt_memo_entry *dvt_memo[DVT_MEMO_BUCKETS];
 static _Thread_local size_t dvt_memo_count;
+static _Thread_local unsigned char dvt_memo_digest[32];
+static _Thread_local bool dvt_memo_valid;
+
+static bool dvt_memo_bind(const struct agent_impact_snapshot *snapshot)
+{
+    const unsigned char *digest = agent_impact_snapshot_digest(snapshot);
+    if (digest && dvt_memo_valid && memcmp(digest, dvt_memo_digest, 32) == 0)
+        return true;
+    for (size_t i = 0; i < DVT_MEMO_BUCKETS; i++) {
+        struct dvt_memo_entry *entry = dvt_memo[i];
+        while (entry) {
+            struct dvt_memo_entry *next = entry->next;
+            free(entry->path); free(entry->groups); free(entry);
+            entry = next;
+        }
+        dvt_memo[i] = NULL;
+    }
+    dvt_memo_count = 0;
+    dvt_memo_valid = digest != NULL;
+    if (digest) memcpy(dvt_memo_digest, digest, 32);
+    return dvt_memo_valid;
+}
 
 static unsigned long dvt_hash_path(const char *s)
 {
@@ -462,9 +486,10 @@ static bool dvt_list_names_group(const char *joined, const char *group)
  * matched shared-rule group names G. The memo above makes repeat lookups
  * free; every distinct path is still decided by the shared-rule resolver,
  * never by a copy of its logic. */
-static bool dvt_owned_by_group(const char *path, const char *group)
+static bool dvt_owned_by_group(const char *path, const char *group,
+    const struct agent_impact_snapshot *snapshot)
 {
-    const char *cached = dvt_memo_get(path);
+    const char *cached = snapshot ? dvt_memo_get(path) : NULL;
     struct agent_impact_acc acc;
     bool crisk = false;
     const char *routed;
@@ -474,7 +499,7 @@ static bool dvt_owned_by_group(const char *path, const char *group)
     if (cached)
         return dvt_list_names_group(cached, group);
     memset(&acc, 0, sizeof(acc));
-    routed = zcl_native_code_route_for_path(path, &acc, &crisk);
+    routed = zcl_native_code_route_snapshot(path, &acc, &crisk, snapshot);
     joined[0] = '\0';
     if (routed && routed[0]) {
         (void)snprintf(joined + pos, sizeof(joined) - pos, "%s", routed);
@@ -489,7 +514,7 @@ static bool dvt_owned_by_group(const char *path, const char *group)
             pos = strlen(joined);
         }
     }
-    dvt_memo_put(path, joined);
+    if (snapshot) dvt_memo_put(path, joined);
     return dvt_list_names_group(joined, group);
 }
 
@@ -898,10 +923,11 @@ static bool dvt_load_tree(struct zcl_command_reply *reply,
 static bool dvt_seed_set(struct zcl_command_reply *reply,
                          const struct dvt_request *req,
                          const struct dvt_blob *blobs, size_t nblobs,
-                         struct dvt_set *set)
+                         struct dvt_set *set,
+                         const struct agent_impact_snapshot *snapshot)
 {
     for (size_t i = 0; i < nblobs; i++) {
-        if (dvt_owned_by_group(blobs[i].path, req->group) &&
+        if (dvt_owned_by_group(blobs[i].path, req->group, snapshot) &&
             !dvt_set_add(set, blobs[i].path, false)) {
             dvt_fail(reply, ZCL_COMMAND_EXIT_FAILED, "GIT_FAILED", "execute",
                      "out of memory building the closure",
@@ -1106,7 +1132,9 @@ void zcl_native_handle_dev_agent_ticketkey(
     if (!dvt_resolve_request(reply, request->input, &req) ||
         !dvt_load_tree(reply, &req, &blobs, &nblobs))
         return;
-    if (dvt_seed_set(reply, &req, blobs, nblobs, &set) &&
+    struct agent_impact_snapshot *snapshot = agent_impact_snapshot_create();
+    (void)dvt_memo_bind(snapshot);
+    if (dvt_seed_set(reply, &req, blobs, nblobs, &set, snapshot) &&
         dvt_close_headers(reply, &req, blobs, nblobs, &set) &&
         dvt_compute_key(reply, &req, blobs, nblobs, &set, epoch_hex,
                         key_hex) &&
@@ -1122,5 +1150,6 @@ void zcl_native_handle_dev_agent_ticketkey(
         reply->status = ZCL_COMMAND_STATUS_PASSED;
         reply->exit_code = ZCL_COMMAND_EXIT_OK;
     }
+    agent_impact_snapshot_free(snapshot);
     dvt_release(blobs, nblobs, &set);
 }

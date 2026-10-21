@@ -714,8 +714,14 @@ void zcl_native_handle_code_emitter(
  * (caller may enumerate acc->groups[0..groups_len]) and `consensus_risk`
  * reports whether the path is a consensus / sealed-core surface. Returns a
  * static string owned by the registry ("consensus_parity" / a shared-rule
- * group / "make_lint_gates") — pure, no node contact, no allocation. */
+ * group / "make_lint_gates"). The live wrapper reads current referrer files
+ * and the Windows source table (and may allocate); no node contact. The
+ * snapshot overload uses one invocation-owned capture of those same inputs. */
 struct agent_impact_acc;
+struct agent_impact_snapshot;
+const char *zcl_native_code_route_snapshot(const char *path,
+    struct agent_impact_acc *acc, bool *consensus_risk,
+    const struct agent_impact_snapshot *snapshot);
 const char *zcl_native_code_route_for_path(const char *path,
                                            struct agent_impact_acc *acc,
                                            bool *consensus_risk);

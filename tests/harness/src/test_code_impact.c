@@ -38,6 +38,7 @@
 #include "base/safe_alloc.h"
 #include "codeindex/codeindex.h"
 #include "controllers/agent_impact_rules.h"
+#include "controllers/agent_impact_harness.h"
 #include "command/native_command.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
@@ -1694,9 +1695,32 @@ static int test_boot_services_rule_capacity(void)
     return failures;
 }
 
+static int test_code_literal_candidate_scan(void)
+{
+    int failures = 0;
+    TEST("code impact: literal candidate scan preserves overlap and boundaries") {
+        ASSERT(agent_impact_string_literal_contains("\"aaab\"", "aab"));
+        ASSERT(agent_impact_string_literal_contains("\"needle tail\"", "needle"));
+        ASSERT(agent_impact_string_literal_contains("\"tail needle\"", "needle"));
+        ASSERT(agent_impact_string_literal_contains("\"\x80z\"", "\x80z"));
+        ASSERT(!agent_impact_string_literal_contains("\"abc\"", ""));
+        ASSERT(!agent_impact_string_literal_contains("\"abc\"", "abcd"));
+        ASSERT(!agent_impact_string_literal_contains("\"aaaa\"", "aaab"));
+        ASSERT(agent_impact_string_literal_contains_whole_token(
+            "\"domain_main.cpp main.cpp main.c\"", "main.c"));
+        ASSERT(agent_impact_string_literal_contains_whole_token("\"main.c\"", "main.c"));
+        ASSERT(!agent_impact_string_literal_contains_whole_token("\"main.cpp\"", "main.c"));
+        ASSERT(!agent_impact_string_literal_contains_whole_token("\"main.c\"", ""));
+        ASSERT(!agent_impact_string_literal_contains_whole_token("\"main.c\"", "main.cpp"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_code_impact(void)
 {
     int failures = 0;
+    failures += test_code_literal_candidate_scan();
     failures += test_code_impact_rule_predicate();
     failures += test_code_devagent_routes();
     failures += test_code_route_completeness();

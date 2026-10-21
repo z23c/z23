@@ -34,6 +34,18 @@
 
 #include "controllers/agent_impact_rules.h"
 
+/* Invocation-owned capture of current referrers and the Windows source table.
+ * NULL means use the original live resolver. Capture failure/caps never yield
+ * a partial snapshot. The digest binds cwd, ordered names and framed bytes. */
+struct agent_impact_snapshot;
+struct agent_impact_snapshot *agent_impact_snapshot_create(void);
+void agent_impact_snapshot_free(struct agent_impact_snapshot *snapshot);
+const unsigned char *agent_impact_snapshot_digest(const struct agent_impact_snapshot *snapshot);
+bool agent_impact_harness_routes_snapshot(const char *path, struct agent_impact_acc *acc,
+    const struct agent_impact_snapshot *snapshot);
+bool agent_impact_name_routes_snapshot(const char *path, struct agent_impact_acc *acc,
+    const struct agent_impact_snapshot *snapshot);
+
 /* Rule 1: true and fills `out` with the bare group name when `path` is
  * tests/harness/src/test_<group>.c or spec_<group>.c AND that exact ID is
  * registered in the test group catalog. False (out untouched) otherwise —

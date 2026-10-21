@@ -16,6 +16,8 @@
  */
 
 #include "test/test_core.h"
+#include "controllers/agent_impact_harness.h"
+#include "base/safe_alloc.h"
 
 #include "command/native_command.h"
 #include "config/command_catalog.h"
@@ -156,10 +158,199 @@ static bool dvt_files_sorted(const struct dvt_call *c)
     return true;
 }
 
+static bool dvt_fixture_write(const char *path, const char *text)
+{
+    FILE *file = fopen(path, "wb");
+    if (!file) return false;
+    bool ok = fwrite(text, 1, strlen(text), file) == strlen(text);
+    return fclose(file) == 0 && ok;
+}
+
+static bool dvt_snapshot_dirs(void)
+{
+    const char *dirs[] = {"tools", "tests", "tests/harness", "tests/harness/src",
+        "tools/lint", "tools/lint/lintc", "platform", "platform/modules",
+        "platform/modules/platform", "platform/modules/platform/tests"};
+    for (size_t i = 0; i < sizeof(dirs)/sizeof(dirs[0]); i++)
+        if (mkdir(dirs[i], 0700)) return false;
+    return true;
+}
+
+static bool dvt_snapshot_fixture(void)
+{
+    if (!dvt_snapshot_dirs()) return false;
+    if (!dvt_fixture_write("tools/ticket_snapshot_probe.c", "int probe(void){return 1;}\n") ||
+        !dvt_fixture_write(DVT_TEST_FILE, "const char *probe = \"ticket_snapshot_probe\";\n") ||
+        !dvt_fixture_write("platform/modules/platform/tests/windows_acceptance.mk", "# fixture\n"))
+        return false;
+    char output[2048];
+    const char *init[] = {"git", "init", "-q", NULL};
+    const char *add[] = {"git", "add", ".", NULL};
+    const char *commit[] = {"git", "-c", "user.name=Fixture", "-c",
+        "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+        "-c", "core.hooksPath=/dev/null", "commit", "-qm", "fixture", NULL};
+    return zcl_spawn_capture(init, output, sizeof(output), 30000) == 0 &&
+           zcl_spawn_capture(add, output, sizeof(output), 30000) == 0 &&
+           zcl_spawn_capture(commit, output, sizeof(output), 30000) == 0;
+}
+
+static bool dvt_probe_membership(bool expected)
+{
+    struct dvt_call c;
+    dvt_begin(&c);
+    (void)json_push_kv_str(&c.input, "group", DVT_GROUP);
+    bool ran = dvt_run(&c);
+    bool actual = dvt_files_contains(&c, "tools/ticket_snapshot_probe.c");
+    printf("[snapshot fixture expected=%d actual=%d handler_ok=%d] ",
+           expected, actual, ran && dvt_ok(&c));
+    bool ok = ran && dvt_ok(&c) && actual == expected;
+    dvt_end(&c);
+    return ok;
+}
+
+static bool dvt_snapshot_parity(const struct agent_impact_snapshot *snapshot)
+{
+    const char *paths[] = {DVT_TEST_FILE, "tools/ticket_snapshot_probe.c",
+        "tools/plain.c", "tools/unknown.c", "core/unknown.c"};
+    for (size_t i = 0; i < sizeof(paths)/sizeof(paths[0]); i++) {
+        struct agent_impact_acc live = {0}, captured = {0};
+        bool live_risk = false, captured_risk = false;
+        const char *a = zcl_native_code_route_for_path(paths[i], &live, &live_risk);
+        const char *b = zcl_native_code_route_snapshot(paths[i], &captured,
+            &captured_risk, snapshot);
+        if (strcmp(a, b) || live_risk != captured_risk ||
+            live.groups_len != captured.groups_len ||
+            live.shared_rule_hits != captured.shared_rule_hits ||
+            live.groups_lost != captured.groups_lost) return false;
+        for (size_t g = 0; g < live.groups_len; g++)
+            if (strcmp(live.groups[g], captured.groups[g])) return false;
+    }
+    return true;
+}
+
+static bool dvt_snapshot_loss(const struct agent_impact_snapshot *snapshot)
+{
+    struct agent_impact_acc live = {0}, captured = {0};
+    char group[32];
+    for (size_t i = 0; i < ZCL_AGENT_IMPACT_MAX_GROUPS; i++) {
+        (void)snprintf(group, sizeof(group), "fixture_%zu", i);
+        agent_impact_add_group(&live, group);
+        agent_impact_add_group(&captured, group);
+    }
+    bool a = agent_impact_apply_name_reference_routes("tools/ticket_snapshot_probe.c", &live);
+    bool b = agent_impact_name_routes_snapshot("tools/ticket_snapshot_probe.c", &captured, snapshot);
+    return a && b && live.groups_lost && captured.groups_lost &&
+        live.groups_len == captured.groups_len &&
+        live.shared_rule_hits == captured.shared_rule_hits;
+}
+
+static bool dvt_snapshot_row_cap(void)
+{
+    char path[128];
+    bool ok = true;
+    for (size_t i = 0; i < 4095; i++) {
+        (void)snprintf(path, sizeof(path), "tools/lint/lintc/snapshot_%zu.c", i);
+        if (!dvt_fixture_write(path, "")) { ok = false; break; }
+    }
+    struct agent_impact_snapshot *full = agent_impact_snapshot_create();
+    ok = ok && full != NULL;
+    agent_impact_snapshot_free(full);
+    ok = ok && dvt_fixture_write("tools/lint/lintc/snapshot_extra.c", "");
+    struct agent_impact_snapshot *over = agent_impact_snapshot_create();
+    ok = ok && over == NULL;
+    agent_impact_snapshot_free(over);
+    for (size_t i = 0; i < 4095; i++) {
+        (void)snprintf(path, sizeof(path), "tools/lint/lintc/snapshot_%zu.c", i);
+        if (unlink(path)) ok = false;
+    }
+    if (unlink("tools/lint/lintc/snapshot_extra.c")) ok = false;
+    return ok;
+}
+
+static bool dvt_snapshot_table_test(void)
+{
+    const char *table = "platform/modules/platform/tests/windows_acceptance.mk";
+    const char *path = "tests/harness/src/fixture_snapshot_bridge.c";
+    if (!dvt_fixture_write(table, "ZCL_WINDOWS_ACCEPTANCE_FIX_SOURCES := tests/harness/src/fixture_snapshot_bridge.c\n")) return false;
+    struct agent_impact_snapshot *old = agent_impact_snapshot_create();
+    if (!old) return false;
+    bool ok = dvt_snapshot_parity(old) && dvt_fixture_write(table, "# changed\n");
+    struct agent_impact_snapshot *fresh = agent_impact_snapshot_create();
+    struct agent_impact_acc a = {0}, b = {0};
+    ok = ok && fresh && memcmp(agent_impact_snapshot_digest(old),
+        agent_impact_snapshot_digest(fresh), 32) != 0;
+    ok = ok && agent_impact_harness_routes_snapshot(path, &a, old) &&
+        !agent_impact_harness_routes_snapshot(path, &b, fresh);
+    agent_impact_snapshot_free(old);
+    agent_impact_snapshot_free(fresh);
+    return ok;
+}
+
+static bool dvt_snapshot_fallback_test(void)
+{
+    zcl_alloc_fault_fail_next("agent_impact_snapshot");
+    struct agent_impact_snapshot *failed = agent_impact_snapshot_create();
+    bool ok = failed == NULL;
+    agent_impact_snapshot_free(failed);
+    const char *table = "platform/modules/platform/tests/windows_acceptance.mk";
+    ok = ok && unlink(table) == 0;
+    failed = agent_impact_snapshot_create();
+    ok = ok && failed == NULL && dvt_probe_membership(false);
+    agent_impact_snapshot_free(failed);
+    return ok && dvt_fixture_write(table, "# restored\n");
+}
+
+static bool dvt_snapshot_root_test(void)
+{
+    char first[PATH_MAX], second[PATH_MAX];
+    if (!getcwd(first, sizeof(first))) return false;
+    test_make_tmpdir(second, sizeof(second), "ticket_snapshot", "other");
+    struct agent_impact_snapshot *old = agent_impact_snapshot_create();
+    bool ok = old && chdir(second) == 0 && dvt_snapshot_fixture();
+    struct agent_impact_snapshot *fresh = agent_impact_snapshot_create();
+    ok = ok && fresh && memcmp(agent_impact_snapshot_digest(old),
+        agent_impact_snapshot_digest(fresh), 32) != 0 && dvt_probe_membership(true);
+    bool restored = chdir(first) == 0;
+    agent_impact_snapshot_free(old);
+    agent_impact_snapshot_free(fresh);
+    return restored && test_rm_rf_recursive(second) == 0 && ok &&
+        dvt_probe_membership(false);
+}
+
+static int dvt_referrer_mutation_test(void)
+{
+    int failures = 0;
+    TEST("ticketkey: referrer edits between calls invalidate ownership memo") {
+        char saved[PATH_MAX], root[PATH_MAX];
+        ASSERT(getcwd(saved, sizeof(saved)) != NULL);
+        test_make_tmpdir(root, sizeof(root), "ticket_snapshot", "mutation");
+        bool ok = chdir(root) == 0;
+        ok = ok && dvt_snapshot_fixture();
+        struct agent_impact_snapshot *captured = agent_impact_snapshot_create();
+        ok = ok && captured != NULL;
+        ok = ok && dvt_snapshot_parity(captured);
+        ok = ok && dvt_snapshot_loss(captured);
+        ok = ok && dvt_snapshot_row_cap();
+        ok = ok && dvt_probe_membership(true);
+        ok = ok && dvt_fixture_write(DVT_TEST_FILE, "const char *probe = \"different_name\";\n");
+        ok = ok && dvt_probe_membership(false);
+        agent_impact_snapshot_free(captured);
+        ok = ok && dvt_snapshot_table_test();
+        ok = ok && dvt_snapshot_fallback_test();
+        ok = ok && dvt_snapshot_root_test();
+        bool restored = chdir(saved) == 0;
+        ASSERT(restored);
+        ASSERT_EQ(test_rm_rf_recursive(root), 0);
+        ASSERT(ok);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_devagent_ticketkey(void);
 int test_devagent_ticketkey(void)
 {
-    int failures = 0;
+    int failures = dvt_referrer_mutation_test();
 
     TEST("ticketkey: the leaf is registered with group,cwd,tip keys") {
         const struct zcl_command_spec *spec =
