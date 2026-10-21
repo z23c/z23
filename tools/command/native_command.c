@@ -4565,6 +4565,33 @@ static bool nc_main_build_input(struct nc_main_state *st, int *rc)
     return true;
 }
 
+/* code.guide already accepts a bounded paths array. Multiple bare paths
+ * compose that input; other leaves retain their declared positional arity.
+ * Push rather than replace so the common validator still rejects conflicts. */
+static bool nc_main_guide_paths(struct nc_main_state *st, int *rc)
+{
+    struct json_value paths, item;
+    json_init(&paths);
+    json_init(&item);
+    json_set_array(&paths);
+    bool ok = true;
+    for (size_t i = 0; ok && i < st->npos; i++) {
+        json_set_str(&item, st->positional[i]);
+        ok = item.type == JSON_STR && json_push_back(&paths, &item);
+        json_free(&item);
+        json_init(&item);
+    }
+    ok = ok && json_push_kv(&st->input, "paths", &paths);
+    json_free(&paths);
+    if (!ok) {
+        json_free(&st->input);
+        nc_print_error(st->spec->path, "BAD_INPUT", "normalize",
+                       "could not set positional paths", "paths", "", "", "");
+        *rc = ZCL_COMMAND_EXIT_INTERNAL;
+    }
+    return ok;
+}
+
 /* Map positionals onto positional_keys in order. */
 static bool nc_main_map_positionals(struct nc_main_state *st, int *rc)
 {
@@ -4572,6 +4599,9 @@ static bool nc_main_map_positionals(struct nc_main_state *st, int *rc)
         return true;
     const char *pk = st->spec->positional_keys ? st->spec->positional_keys
                                                 : "";
+    if (st->npos > 1 && strcmp(st->spec->path, "code.guide") == 0 &&
+        strcmp(pk, "paths") == 0)
+        return nc_main_guide_paths(st, rc);
     size_t used = 0;
     const char *at = pk;
     for (size_t i = 0; i < st->npos; i++) {

@@ -1078,6 +1078,85 @@ static bool uniform_write(const char *path, const char *text)
     return ok && chmod(path, 0600) == 0;
 }
 
+static bool guide_cli_data(const char *const *args, int count,
+                           char *data, size_t cap, int *rc)
+{
+    char wire[16384];
+    struct json_value reply;
+    json_init(&reply);
+    bool ok = uniform_cli("code", args, count, wire, sizeof(wire), rc) &&
+              json_read(&reply, wire, strlen(wire));
+    const struct json_value *value = json_get(&reply, "data");
+    if (ok && *rc == ZCL_COMMAND_EXIT_OK)
+        ok = value && json_write(value, data, cap) > 0;
+    json_free(&reply);
+    return ok;
+}
+
+static int test_guide_positional_paths(void)
+{
+    int failures = 0, rc = 0;
+    char dir[PATH_MAX], path[PATH_MAX], sub[PATH_MAX], rules[PATH_MAX];
+    char actual[16384], expected[16384];
+    const char *old = getenv("ZCL_DEV_SOURCE_ROOT");
+    char *saved = old ? strdup(old) : NULL;
+    test_make_tmpdir(dir, sizeof(dir), "native_api", "guide_paths");
+    snprintf(path, sizeof(path), "%s/AGENTS.md", dir);
+    snprintf(sub, sizeof(sub), "%s/sub", dir);
+    snprintf(rules, sizeof(rules), "%s/sub/AGENTS.md", dir);
+    TEST_CASE("guide multiple positional paths equal structured paths without changing arity") {
+        ASSERT(!old || saved);
+        ASSERT(uniform_write(path, "# Local rules\n\n- Preserve this fixture.\n"));
+        ASSERT_EQ(mkdir(sub, 0700), 0);
+        ASSERT(uniform_write(rules, "# Nested rules\n\n- Preserve the second path.\n"));
+        ASSERT_EQ(setenv("ZCL_DEV_SOURCE_ROOT", dir, 1), 0);
+        const char *structured[] = {"guide", "--input={\"paths\":[\"a.c\",\"sub/b.c\"]}"};
+        const char *multiple[] = {"guide", "a.c", "sub/b.c"};
+        const char *csv[] = {"guide", "a.c,sub/b.c"};
+        const char *single[] = {"guide", "a.c"};
+        const char *one[] = {"guide", "--input={\"paths\":[\"a.c\"]}"};
+        ASSERT(guide_cli_data(structured, 2, expected, sizeof(expected), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strstr(expected, "Preserve the second path.") != NULL);
+        ASSERT(guide_cli_data(multiple, 3, actual, sizeof(actual), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strcmp(actual, expected) == 0);
+        ASSERT(guide_cli_data(csv, 2, actual, sizeof(actual), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strcmp(actual, expected) == 0);
+        ASSERT(guide_cli_data(one, 2, expected, sizeof(expected), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(guide_cli_data(single, 2, actual, sizeof(actual), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_OK);
+        ASSERT(strcmp(actual, expected) == 0);
+        const char *unsafe[] = {"guide", "a.c", "../outside.c"};
+        const char *conflict[] = {"guide", "--paths=a.c", "a.c", "b.c"};
+        const char *input_conflict[] = {"guide", "--input={\"paths\":[\"a.c\"]}", "a.c", "b.c"};
+        const char *other[] = {"owner", "a.c", "b.c"};
+        const char *const *bad[] = {unsafe, conflict, input_conflict, other};
+        const int counts[] = {3, 4, 4, 3};
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            ASSERT(guide_cli_data(bad[i], counts[i], actual, sizeof(actual), &rc));
+            ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
+        }
+        const char *many[] = {"guide", "a", "b", "c", "d", "e", "f", "g", "h",
+                              "i", "j", "k", "l", "m", "n", "o", "p", "q"};
+        ASSERT(guide_cli_data(many, 18, actual, sizeof(actual), &rc));
+        ASSERT_EQ(rc, ZCL_COMMAND_EXIT_INVALID);
+    } TEST_END
+    if (saved) {
+        TEST_DISCARD(setenv("ZCL_DEV_SOURCE_ROOT", saved, 1));
+        free(saved);
+    } else {
+        TEST_DISCARD(unsetenv("ZCL_DEV_SOURCE_ROOT"));
+    }
+    TEST_DISCARD(unlink(path));
+    TEST_DISCARD(unlink(rules));
+    TEST_DISCARD(rmdir(sub));
+    TEST_DISCARD(rmdir(dir));
+    return failures;
+}
+
 struct uniform_dir {
     char dir[PATH_MAX], file[PATH_MAX], link[PATH_MAX], opt[PATH_MAX + 16];
     /* Maximum JSON document, newline, overflow sentinel and NUL. */
@@ -3753,6 +3832,7 @@ int test_native_api_contract(void)
     failures += test_wallet_mutating_native_e2e();
     failures += test_wallet_security_refusal_flags();
     failures += test_uniform_help();
+    failures += test_guide_positional_paths();
     failures += test_leaf_json_contract();
     failures += test_uniform_input_file();
     failures += test_uniform_input_file_refusals();
