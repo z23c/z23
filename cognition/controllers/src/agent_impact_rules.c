@@ -45,6 +45,14 @@ static bool agent_impact_match_one_pattern(const char *path,
     char buf[256];
     if (len >= sizeof(buf))
         return false;
+    /* A glob cannot recover a mismatch before its first metacharacter.
+     * Stop at escapes too: the existing matcher owns their semantics. */
+    for (size_t i = 0; i < len; i++) {
+        if (strchr("*?[\\", pattern[i]))
+            break;
+        if (path[i] != pattern[i])
+            return false;
+    }
     memcpy(buf, pattern, len);
     buf[len] = 0;
     if (!strpbrk(buf, "*?[\\"))

@@ -39,6 +39,7 @@
 #include "codeindex/codeindex.h"
 #include "controllers/agent_impact_rules.h"
 #include "controllers/agent_impact_harness.h"
+#include "platform/glob_match.h"
 #include "command/native_command.h"
 #include "kernel/command_registry.h"
 #include "json/json.h"
@@ -928,6 +929,87 @@ static int test_code_devagent_routes(void)
     return failures;
 }
 
+/* Independent original predicate: every bounded slice goes directly through
+ * the platform glob authority, with no caller prefix rejection. */
+static bool ci_reference_pattern(const char *path, const char *patterns)
+{
+    if (!path || !path[0]) return false;
+    for (const char *p = patterns; *p;) {
+        const char *bar = strchr(p, '|');
+        size_t len = bar ? (size_t)(bar - p) : strlen(p);
+        char pattern[256];
+        if (len && len < sizeof(pattern)) {
+            memcpy(pattern, p, len);
+            pattern[len] = 0;
+            if (platform_glob_match(pattern, path, false)) return true;
+        }
+        if (!bar) break;
+        p = bar + 1;
+    }
+    return false;
+}
+
+static bool ci_reference_rules(const char *path, struct agent_impact_acc *acc)
+{
+    bool matched = false;
+#define AGENT_IMPACT_RULE(patterns, groups) \
+    do { \
+        if (ci_reference_pattern(path, (patterns))) { \
+            if (!acc) return true; \
+            agent_impact_add_group_list(acc, (groups)); \
+            acc->shared_rule_hits++; \
+            matched = true; \
+        } \
+    } while (0);
+#include "controllers/agent_impact_rules.def"
+#undef AGENT_IMPACT_RULE
+    return matched;
+}
+
+static bool ci_rule_fold_parity(const char *path, bool fill)
+{
+    struct agent_impact_acc expected = {0}, actual = {0};
+    if (fill) {
+        char group[32];
+        for (size_t i = 0; i < ZCL_AGENT_IMPACT_MAX_GROUPS; i++) {
+            (void)snprintf(group, sizeof(group), "parity_%zu", i);
+            agent_impact_add_group(&expected, group);
+            agent_impact_add_group(&actual, group);
+        }
+    }
+    bool a = ci_reference_rules(path, &expected);
+    bool b = agent_impact_apply_shared_rules(path, &actual);
+    if (a != b || ci_reference_rules(path, NULL) !=
+        agent_impact_apply_shared_rules(path, NULL) ||
+        actual.shared_rule_hits != expected.shared_rule_hits ||
+        actual.groups_len != expected.groups_len ||
+        actual.groups_lost != expected.groups_lost) return false;
+    for (size_t i = 0; i < actual.groups_len; i++)
+        if (strcmp(actual.groups[i], expected.groups[i])) return false;
+    return true;
+}
+
+static int test_code_rule_prefix_parity(void)
+{
+    int failures = 0;
+    TEST("code impact: literal prefix rejection preserves full reference fold") {
+        const char *paths[] = {NULL, "", "t", "tools", "tools/", "Tools/command/native_devagent_claim.c",
+            "zz_no_rule.c", "tools/command/native_devagent_claim.c",
+            "tools/command/native_devagent_claim.c.extra", "tools/command/native_code_command.c",
+            "tests/harness/src/test_devagent_claim.c", "tests/harness/src/test_zcode_policy.c",
+            "engine/composition/src/boot_services.c", "engine/modules/chainlog/src/nested/fixture.c",
+            "cognition/controllers/src/agent_impact_rules.c", "platform/modules/fdt/nested/file.c",
+            "tests/fixtures/lab/rev_cases.json", "core/modules/validation/src/fixture.c",
+            "docs/README.md", "tools/command/native_fleet_triggers_extra.c"};
+        for (size_t i = 0; i < sizeof(paths)/sizeof(paths[0]); i++) {
+            ASSERT(ci_rule_fold_parity(paths[i], false));
+            ASSERT(ci_rule_fold_parity(paths[i], true));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_code_impact_rule_predicate(void)
 {
     int failures = 0;
@@ -1748,6 +1830,7 @@ int test_code_impact(void)
     failures += test_code_literal_candidate_scan();
     failures += test_code_literal_raw_rejection_contract();
     failures += test_code_impact_rule_predicate();
+    failures += test_code_rule_prefix_parity();
     failures += test_code_devagent_routes();
     failures += test_code_route_completeness();
     failures += test_code_route_consumer_bounds();
