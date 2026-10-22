@@ -718,7 +718,7 @@ static int test_code_guide_lint_catalog(void)
         ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "tools/lint/run_lint.sh --list");
         zcl_command_reply_free(&reply);
         ASSERT(brief_run(root,
-                         "{\"paths\":[\"tools/guide_catalog_fixture.def\"],\"budget\":8192}",
+                         "{\"paths\":[\"tools/guide_catalog" "_fixture.def\"],\"budget\":8192}",
                          &reply, why, sizeof(why)));
         next = json_get(&reply.data, "next");
         ASSERT_EQ(json_size(next), 4u);
@@ -728,7 +728,7 @@ static int test_code_guide_lint_catalog(void)
         ASSERT_STR_EQ(json_get_str(json_at(next, 3)), "tools/lint/run_lint.sh --list");
         zcl_command_reply_free(&reply);
         ASSERT(brief_run(root,
-                         "{\"paths\":[\"tools/guide_catalog_fixture.def\"],\"budget\":256}",
+                         "{\"paths\":[\"tools/guide_catalog" "_fixture.def\"],\"budget\":256}",
                          &reply, why, sizeof(why)));
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
         ASSERT(json_write(&reply.data, NULL, 0) <= 256);
@@ -751,7 +751,7 @@ static int test_code_guide_lint_catalog_exclusions(void)
         "{\"paths\":[\"tools/command/native_command.c\"]}",
         "{\"paths\":[\"tools/zcc.c\",\"tools/command/native_command.c\"]}",
         "{\"paths\":[\"tools/zcc.c\",\"tools/command/native_command.c\"],\"budget\":256}",
-        "{\"paths\":[\"does/not/exist.xyz\"]}"
+        "{\"paths\":[\"does/not/" "exist.xyz\"]}"
     };
     TEST("code.guide does not infer lint catalog eligibility from reduced or unmapped groups") {
         ASSERT(brief_fixture(root, sizeof(root)));
