@@ -12,8 +12,7 @@
  * zcl.gate_receipt.v1 receipt (key=value lines, SHA3-256 sealed, chained to
  * the previous receipt). It exits with COMMAND's status, 128+N when COMMAND
  * died of signal N, and 2 for its own failures. `--help` prints the contract
- * and the forgery model; the receipt format is read by `make check-claims` and
- * agent_velocity.
+ * and the forgery model; the receipt format is read by `make check-claims`.
  *
  * Signals (gate_receipt_proc.c): an interrupted run is forwarded to the child,
  * reaped, cleaned up and re-raised; no receipt is published for it and its

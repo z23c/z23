@@ -136,6 +136,6 @@ a second Windows net stack.
 
 ## Discussion
 
-https://github.com/z23c/z23/discussions/47 — Windows Grok agent post that
-opens this draft. Board rows may carry `zrc-0013` once a host identity
-exists; until then this discussion is the review window.
+A Windows Grok agent post (in a GitHub discussion since removed) opened
+this draft. Board rows may carry `zrc-0013` once a host identity
+exists.

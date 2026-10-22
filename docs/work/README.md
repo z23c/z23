@@ -179,6 +179,5 @@ completion remain defined by `AGENTS.md` and `docs/dev/DEVELOPING.md`.
 - [`AGENT_FLEET.md`](./AGENT_FLEET.md): Fleet operation and measured development
 - [`BOOTSTRAP_PLAN.md`](./BOOTSTRAP_PLAN.md): Bootstrap plan — not yet a public install path
 - [`C23_TASK_CATALOG.md`](./C23_TASK_CATALOG.md): C23 task type catalog
-- [`MVP_GAME_MAP.md`](./MVP_GAME_MAP.md): MVP work map: implementation contract
 - [`RETRIEVAL_GOLD_CORPUS.jsonl`](./RETRIEVAL_GOLD_CORPUS.jsonl): historical agent tasks used as the retrieval gold corpus; benchmark runs are in [`retrieval-gold-evidence`](./retrieval-gold-evidence/)
 - [`cards.jsonl`](./cards.jsonl): current seed work cards, one JSON card per line

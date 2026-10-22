@@ -3,7 +3,7 @@
  * goals - the CLOSED catalog of the report card `fleet goals` prints: the
  * thirteen fleet goals (docs/work/FLEET_SCORECARD.md), the public-node
  * acceptance criteria C1-C8 (docs/MVP.md) and the development milestones
- * D1-D8 (docs/work/DEVELOPMENT_MVP.md). An id not written here is not a
+ * D1-D8 (docs/agent/DEVELOPMENT_MVP.md). An id not written here is not a
  * row. Each row is graded by one producer in
  * tools/command/native_fleet_goals.c; a producer that cannot measure its row
  * answers `unmeasured` with the reason, never a guessed grade.
