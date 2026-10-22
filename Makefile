@@ -6442,6 +6442,7 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_source_fences.c tools/lint/lintc/gate_compile_fixture.c \
     tools/lint/lintc/gate_hotfork_stories.c \
     tools/lint/lintc/gate_function_complexity.c \
+    tools/lint/lintc/gate_function_complexity_selftest.c \
     tools/lint/lintc/gate_framework_shape.c \
     tools/lint/lintc/gate_zclassicd_reach.c \
     tools/lint/lintc/gate_file_purpose.c \
