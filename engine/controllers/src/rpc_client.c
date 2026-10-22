@@ -18,6 +18,11 @@
 
 #include "platform/time_compat.h"
 #include "platform/socket_compat.h"
+#include "platform/windows_path.h"
+#if defined(_WIN32)
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 #include "util/safe_alloc.h"
 
@@ -353,6 +358,43 @@ static void base64_encode(const char *in, size_t len, char *out)
     out[j] = 0;
 }
 
+static FILE *rpc_client_fopen(const char *path, const char *mode)
+{
+    FILE *file = fopen(path, mode);
+#if defined(_WIN32)
+    if (!file && path && mode &&
+        mode[0] == 'r' && mode[1] == 'b' && mode[2] == '\0') {
+        wchar_t wide[32768];
+        if (platform_windows_wide_path(path, wide)) {
+            int fd = _wopen(wide, _O_RDONLY | _O_BINARY);
+            if (fd >= 0) {
+                file = _fdopen(fd, mode);
+                if (!file)
+                    _close(fd);
+            }
+        }
+    }
+#endif
+    return file;
+}
+
+bool node_rpc_client_read_file(const char *path, void *buf, size_t cap,
+                               size_t *n_out)
+{
+    if (!path || !path[0] || !buf || cap == 0 || !n_out)
+        return false;
+    FILE *file = rpc_client_fopen(path, "rb");
+    if (!file)
+        return false;
+    size_t n = fread(buf, 1, cap, file);
+    int bad = ferror(file);
+    fclose(file);
+    if (bad)
+        return false;
+    *n_out = n;
+    return true;
+}
+
 /* Re-read the RPC auth cookie from <datadir>/.cookie on EVERY call so a
  * node restart that rotates the cookie is picked up by long-lived callers.
  * Returns false (and clears any stale cookie) if the file is
@@ -363,15 +405,17 @@ static void base64_encode(const char *in, size_t len, char *out)
 static bool read_cookie_at(const char *datadir, char *cookie,
                            size_t cookie_cap)
 {
-    char path[600];
-    snprintf(path, sizeof(path), "%s/.cookie", datadir);
-    FILE *f = fopen(path, "r");
-    if (!f) {
+    char path[4096];
+    int path_len = snprintf(path, sizeof(path), "%s/.cookie", datadir);
+    if (path_len <= 0 || (size_t)path_len >= sizeof(path)) {
         cookie[0] = 0;
         return false;
     }
-    size_t n = fread(cookie, 1, cookie_cap - 1, f);
-    fclose(f);
+    size_t n = 0;
+    if (!node_rpc_client_read_file(path, cookie, cookie_cap - 1, &n)) {
+        cookie[0] = 0;
+        return false;
+    }
     cookie[n] = 0;
     char *nl = strchr(cookie, '\n');
     if (nl) *nl = 0;

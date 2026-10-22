@@ -10,6 +10,7 @@
 #define _GNU_SOURCE
 #endif
 #include "platform/private_directory.h"
+#include "platform/windows_path.h"
 #include "private_acl_internal.h"
 
 #include <errno.h>
@@ -22,8 +23,7 @@
 
 static bool private_directory_wide(const char *path, wchar_t out[32768])
 {
-    return path && path[0] && MultiByteToWideChar(
-        CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, out, 32768) > 0;
+    return platform_windows_wide_path(path, out);
 }
 
 bool platform_private_directory_ensure(const char *path)

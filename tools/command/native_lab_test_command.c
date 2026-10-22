@@ -13,6 +13,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <aclapi.h>
+#include <io.h>
+#endif
 
 enum {
     LAB_CASES_FILE_MAX = 1024 * 1024,
@@ -42,6 +50,49 @@ struct lab_cases {
 
 /* ── cases ──────────────────────────────────────────────────────────── */
 
+#if defined(_WIN32)
+static bool lab_fd_owned_by_self(int fd)
+{
+    HANDLE handle = (HANDLE)_get_osfhandle(fd);
+    PSID owner = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    HANDLE token = NULL;
+    TOKEN_USER *user = NULL;
+    DWORD need = 0;
+    bool owned = false;
+    if (handle == INVALID_HANDLE_VALUE)
+        return false;
+    if (GetSecurityInfo(handle, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+                        &owner, NULL, NULL, NULL, &sd) != ERROR_SUCCESS)
+        return false;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        LocalFree(sd);
+        return false;
+    }
+    (void)GetTokenInformation(token, TokenUser, NULL, 0, &need);
+    user = need ? (TOKEN_USER *)LocalAlloc(LPTR, need) : NULL;
+    if (user && GetTokenInformation(token, TokenUser, user, need, &need) &&
+        owner && EqualSid(owner, user->User.Sid))
+        owned = true;
+    if (user)
+        LocalFree(user);
+    CloseHandle(token);
+    LocalFree(sd);
+    return owned;
+}
+#endif
+
+static bool lab_fd_owner_is_self(int fd, const struct stat *st)
+{
+#if defined(_WIN32)
+    (void)st;
+    return lab_fd_owned_by_self(fd);
+#else
+    (void)fd;
+    return st->st_uid == geteuid();
+#endif
+}
+
 static char *lab_cases_read_file(const char *path)
 {
     struct stat st;
@@ -49,7 +100,8 @@ static char *lab_cases_read_file(const char *path)
     char *buf = NULL;
     if (fd < 0)
         return NULL;
-    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
+    if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+        lab_fd_owner_is_self(fd, &st) &&
         st.st_size > 0 && st.st_size <= LAB_CASES_FILE_MAX)
         buf = zcl_malloc((size_t)st.st_size + 1, "lab.cases");
     ssize_t n = buf ? read(fd, buf, (size_t)st.st_size) : -1;

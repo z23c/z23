@@ -222,6 +222,35 @@ static bool prop_value(const char *show, const char *key, char *out,
     return false;
 }
 
+#if defined(_WIN32)
+/* UCRT has no strptime. This observer only accepts systemctl's weekday stamp. */
+static char *slo_strptime(const char *text, const char *fmt, struct tm *out)
+{
+    int year, mon, day, hour, min, sec;
+    const char *p;
+    if (!text || !fmt || !out || strcmp(fmt, "%a %Y-%m-%d %H:%M:%S") != 0)
+        return NULL;
+    p = strchr(text, ' ');
+    if (!p || p == text)
+        return NULL;
+    if (sscanf(p + 1, "%d-%d-%d %d:%d:%d",
+               &year, &mon, &day, &hour, &min, &sec) != 6)
+        return NULL;
+    if (year < 1970 || mon < 1 || mon > 12 || day < 1 || day > 31 ||
+        hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 60)
+        return NULL;
+    memset(out, 0, sizeof(*out));
+    out->tm_year = year - 1900;
+    out->tm_mon = mon - 1;
+    out->tm_mday = day;
+    out->tm_hour = hour;
+    out->tm_min = min;
+    out->tm_sec = sec;
+    return (char *)(p + 1);
+}
+#define strptime slo_strptime
+#endif
+
 bool slo_io_epoch_parse(const char *text, int64_t *out)
 {
     if (!text || !text[0] || strcmp(text, "n/a") == 0)

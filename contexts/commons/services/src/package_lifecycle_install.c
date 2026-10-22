@@ -364,7 +364,7 @@ struct zcl_result pkgl_verify_installed_receipt(
     if (!ctx || !root || !release || !lock_root || !step)
         return ZCL_ERR(-1, "null argument verifying installed evidence");
     struct vcs_package_build_receipt receipt;
-    uint8_t receipt_id[32];
+    uint8_t receipt_id[32] = {0};
     ZCL_CHECK(pkgl_installed_evidence(ctx, root, release, dep_roots,
                                       dep_count, &receipt, receipt_id));
     char installed[PKGL_PATH_MAX];

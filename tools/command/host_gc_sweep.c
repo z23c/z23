@@ -338,10 +338,12 @@ static bool hg_mark_process(struct hg_scan *scan, const char *procdir)
     bool complete = zcl_path_join(cwd, sizeof(cwd), procdir, "cwd") &&
                     hg_mark_link(scan, cwd, false);
     if (!hg_mark_fds(scan, procdir)) complete = false;
+#if !defined(_WIN32)
     struct stat st;
     /* A vanished process cannot retain a live cwd/fd; all other failures
      * remain unknown, including permissions and partial inventories. */
     if (!complete && lstat(procdir, &st) != 0 && errno == ENOENT) return true;
+#endif
     return complete;
 }
 

@@ -11,6 +11,7 @@
 #include "crypto/ed25519.h"
 #include "json/json.h"
 #include "sha3/sha3.h"
+#include "platform/file_sync.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -483,7 +484,8 @@ static bool pi_write_new(const char *dir, const char *bytes, size_t len,
     int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
     if (fd < 0)
         return false;
-    bool ok = write(fd, bytes, len) == (ssize_t)len && fsync(fd) == 0;
+    bool ok = write(fd, bytes, len) == (ssize_t)len &&
+              platform_file_sync(fd) == 0;
     ok = close(fd) == 0 && ok;
     ok = ok && rename(tmp, path) == 0;
     if (!ok)

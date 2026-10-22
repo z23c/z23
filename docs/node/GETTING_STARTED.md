@@ -203,7 +203,7 @@ P2P (peer-to-peer) services connect nodes to one another.
 | Linux | Full node | Full native workflow | Eligible read-only C23 leaves | Noise authenticated transport + DHT (distributed hash table) identity |
 | WSL2 | Full Linux node; keep the checkout on WSL ext4 | Linux workflow | Linux workflow | Noise transport + DHT identity |
 | macOS arm64 | Native node; `make macos-acceptance` | Kernel-attested focused tests; native kqueue (event notification) directory watcher | Unavailable; rebuild/restart | Noise transport works; DHT identity requires on-chain provisioning |
-| Windows MSYS2 UCRT64 | Native `z23.exe` portability lane | `make windows-acceptance` | Unavailable; rebuild/restart | Not yet measured |
+| Windows MSYS2 UCRT64 | Native `z23.exe` portability lane | `make windows-acceptance` | Unavailable; rebuild/restart | Noise transport measured on WinSock loopback; on-chain DHT provisioning is not claimed |
 
 Windows setup and the boundary between native MSYS2 and WSL2 are documented in
 [`WINDOWS.md`](WINDOWS.md). Never share `build/` or `vendor/lib/` between

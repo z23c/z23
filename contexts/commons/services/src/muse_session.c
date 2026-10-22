@@ -1059,4 +1059,24 @@ pid_t muse_session_host_pid(const struct muse_session *s)
     return s ? s->child : -1;
 }
 
+#else
+
+#include <stdio.h>
+
+struct muse_session *muse_session_open(const char *serve_argv0,
+    const struct muse_session_limits *limits, char err[MUSE_ERROR_MAX])
+{
+    (void)serve_argv0;
+    (void)limits;
+    if (err)
+        snprintf(err, MUSE_ERROR_MAX,
+                 "muse session refused: no Windows host transport");
+    return NULL;
+}
+
+void muse_session_close(struct muse_session *s)
+{
+    (void)s;
+}
+
 #endif /* !_WIN32 */

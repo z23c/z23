@@ -23,6 +23,70 @@
 #include <sys/stat.h>
 #include <pthread.h>
 #include "util/safe_alloc.h"
+#include "platform/windows_path.h"
+#if defined(_WIN32)
+#include <io.h>
+#endif
+
+#ifndef O_BINARY
+#define O_BINARY 0
+#endif
+
+/* Plain CRT open first, so a short ASCII path keeps today's success. When
+ * that loses a long path or a non-ASCII UTF-8 name, one retry uses the wide
+ * Win32 seam. Block bytes stay binary. */
+#if defined(_WIN32)
+static FILE *block_fopen_wide(const char *path, const char *mode)
+{
+    wchar_t wide[32768];
+    if (!path || !mode || !platform_windows_wide_path(path, wide)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    int flags = _O_BINARY;
+    if (mode[0] == 'r' && mode[1] == 'b' && mode[2] == '+' && mode[3] == '\0')
+        flags |= _O_RDWR;
+    else if (mode[0] == 'w' && mode[1] == 'b' && mode[2] == '+' &&
+             mode[3] == '\0')
+        flags |= _O_RDWR | _O_CREAT | _O_TRUNC;
+    else if (mode[0] == 'r' && mode[1] == 'b' && mode[2] == '\0')
+        flags |= _O_RDONLY;
+    else {
+        errno = EINVAL;
+        return NULL;
+    }
+    int fd = _wopen(wide, flags, 0666);
+    if (fd < 0)
+        return NULL;
+    FILE *file = _fdopen(fd, mode);
+    if (!file)
+        _close(fd);
+    return file;
+}
+#endif
+
+static FILE *block_fopen(const char *path, const char *mode)
+{
+    FILE *file = fopen(path, mode);
+#if defined(_WIN32)
+    if (!file)
+        file = block_fopen_wide(path, mode);
+#endif
+    return file;
+}
+
+static int block_open(const char *path, int flags)
+{
+    int fd = open(path, flags | O_BINARY);
+#if defined(_WIN32)
+    if (fd < 0) {
+        wchar_t wide[32768];
+        if (platform_windows_wide_path(path, wide))
+            fd = _wopen(wide, flags | _O_BINARY, 0666);
+    }
+#endif
+    return fd;
+}
 
 /* De-storm absent-body reads from blocks-less bundles and residual missing or
  * stale blk positions. Without this bound, millions of expected open/pread
@@ -224,7 +288,7 @@ static bool choose_append_block_pos(struct disk_block_pos *pos,
     if (!pos || !datadir)
         return false;
 
-    char blocks_dir[512];
+    char blocks_dir[4096];
     snprintf(blocks_dir, sizeof(blocks_dir), "%s/blocks", datadir);
     if (!ensure_directory(blocks_dir))
         return false;
@@ -328,9 +392,9 @@ bool disk_block_io_sync_pending(void)
 #if defined(_WIN32)
         /* Windows _commit()/FlushFileBuffers requires a write-capable handle,
          * so open the blk file for read-write even though we only sync. */
-        int fd = open(g_pending_paths[i], O_RDWR);
+        int fd = block_open(g_pending_paths[i], O_RDWR);
 #else
-        int fd = open(g_pending_paths[i], O_RDONLY);
+        int fd = block_open(g_pending_paths[i], O_RDONLY);
 #endif
         bool synced = (fd >= 0 && platform_data_sync(fd) == 0);
         if (fd >= 0)
@@ -406,7 +470,7 @@ FILE *open_disk_file(const char *datadir,
     if (pos->nFile < 0)
         return NULL;
 
-    char blocks_dir[512];
+    char blocks_dir[4096];
     snprintf(blocks_dir, sizeof(blocks_dir), "%s/blocks", datadir);
     ensure_directory(blocks_dir);
 
@@ -431,12 +495,12 @@ FILE *open_disk_file(const char *datadir,
         g_cached_nfile = -1;
     }
 
-    char path[512];
+    char path[4096];
     get_block_pos_filename(path, sizeof(path), datadir, pos, prefix);
 
-    FILE *file = fopen(path, "rb+");
+    FILE *file = block_fopen(path, "rb+");
     if (!file && disk_file_creation_allowed(read_only))
-        file = fopen(path, "wb+");
+        file = block_fopen(path, "wb+");
     if (!file) {
         fprintf(stderr, "open_disk_file: cannot open %s: %s\n",
                 path, strerror(errno));
@@ -652,7 +716,7 @@ void disk_block_io_advise_range(const char *datadir, int nFile,
     struct disk_block_pos pos = { .nFile = nFile, .nPos = 0 };
     char path[512];
     get_block_pos_filename(path, sizeof(path), datadir, &pos, prefix);
-    int fd = open(path, O_RDONLY);
+    int fd = block_open(path, O_RDONLY);
     if (fd < 0)
         return;
     platform_file_advise_sequential(fd, offset + length);
@@ -671,7 +735,7 @@ ssize_t disk_block_pread(const char *datadir, const struct disk_block_pos *pos,
     char path[512];
     get_block_pos_filename(path, sizeof(path), datadir, pos, prefix);
 
-    int fd = open(path, O_RDONLY);
+    int fd = block_open(path, O_RDONLY);
     if (fd < 0) {
         /* Throttled per nFile (see g_open_fail_throttle rationale above). The
          * boot-time pprev-repair (block_index_integrity.c) walks EVERY had-data
@@ -760,7 +824,7 @@ static int read_fd_cache_get(const char *path, bool *cached_out)
 {
     *cached_out = false;
     if (!g_read_fd_cache_enabled)
-        return open(path, O_RDONLY);  /* stateless path — caller-owned fd */
+        return block_open(path, O_RDONLY);  /* stateless path — caller-owned fd */
 
     pthread_once(&g_read_fd_once, read_fd_key_init);
     struct read_fd_cache *c = pthread_getspecific(g_read_fd_key);
@@ -781,10 +845,10 @@ static int read_fd_cache_get(const char *path, bool *cached_out)
         }
     }
     if (!c)
-        return open(path, O_RDONLY);  /* alloc/TLS failure — caller-owned fd */
+        return block_open(path, O_RDONLY);  /* alloc/TLS failure — caller-owned fd */
     if (c->fd >= 0)
         close(c->fd);
-    c->fd = open(path, O_RDONLY);
+    c->fd = block_open(path, O_RDONLY);
     if (c->fd < 0) {
         c->path[0] = '\0';
         return -1;

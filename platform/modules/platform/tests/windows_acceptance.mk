@@ -46,6 +46,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	mint_anchor_export_refusal \
 	mint_anchor_preflight_refusal \
 	nat_gateway \
+	native_optimal \
 	package_lifecycle_store_refusal \
 	package_prepare \
 	path_replace \
@@ -503,6 +504,51 @@ ZCL_WINDOWS_ACCEPTANCE_nat_gateway_FLAGS := \
 	-ffunction-sections -fdata-sections
 ZCL_WINDOWS_ACCEPTANCE_nat_gateway_LIBS := \
 	-Wl,--gc-sections -ladvapi32 -lws2_32 -liphlpapi \
+	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
+
+# Shipped Noise_XXhfs over a real WinSock loopback pair, plus the production
+# block, datadir, RPC-cookie, and RPC-client opens on short, long, and
+# non-ASCII paths. Section GC keeps the node translation units down to the
+# functions this program actually calls.
+ZCL_WINDOWS_ACCEPTANCE_native_optimal_SOURCES := \
+	tests/harness/src/native_optimal_windows_acceptance.c \
+	engine/modules/storage/src/disk_block_io.c \
+	engine/controllers/src/rpc_client.c \
+	platform/modules/platform/src/directory_compat.c \
+	platform/modules/platform/src/private_directory.c \
+	platform/modules/platform/src/private_acl_internal.c \
+	platform/modules/platform/src/private_file.c \
+	platform/modules/platform/src/clock.c \
+	platform/modules/platform/src/rng.c \
+	platform/modules/support/src/log_throttle.c \
+	platform/modules/base/src/log_level.c \
+	platform/modules/base/src/safe_alloc.c \
+	platform/modules/base/src/cleanse.c \
+	platform/modules/json/src/json.c \
+	platform/modules/sha3/src/sha3.c \
+	core/modules/net/src/noise_transport.c \
+	core/modules/noise/src/noise_handshake.c \
+	core/modules/noise/src/session_transport.c \
+	core/modules/crypto/src/sha256.c \
+	core/modules/crypto/src/hkdf_sha256.c \
+	core/modules/crypto/src/hmac_sha256.c \
+	core/modules/crypto/src/x25519_safe.c \
+	core/modules/crypto/src/curve25519.c \
+	core/modules/crypto/src/chacha20poly1305.c \
+	core/modules/crypto/src/random_secret.c \
+	core/modules/core/src/random.c \
+	core/modules/core/src/utiltime.c \
+	platform/modules/mlkem/src/mlkem.c \
+	platform/modules/mlkem/src/kpke.c \
+	platform/modules/mlkem/src/poly.c \
+	platform/modules/mlkem/src/sample.c
+ZCL_WINDOWS_ACCEPTANCE_native_optimal_FLAGS := \
+	-ffunction-sections -fdata-sections \
+	-fno-unwind-tables -fno-asynchronous-unwind-tables \
+	-Wno-unused-but-set-variable -Wno-unused-parameter
+ZCL_WINDOWS_ACCEPTANCE_native_optimal_LIBS := \
+	-Wl,--gc-sections -Wl,--exclude-all-symbols \
+	-ladvapi32 -lws2_32 -lbcrypt \
 	$(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 
 ZCL_WINDOWS_ACCEPTANCE_package_lifecycle_store_refusal_SOURCES := \

@@ -8,6 +8,7 @@
 #endif
 
 #include "platform/directory_compat.h"
+#include "platform/windows_path.h"
 #include "base/safe_alloc.h"
 
 #include "base/safe_alloc.h"
@@ -127,16 +128,12 @@ static char *wide_span_to_utf8(const wchar_t *name, size_t chars)
 
 static wchar_t *utf8_to_wide(const char *path)
 {
-    if (!path) return NULL;
-    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
-                                NULL, 0);
-    if (n <= 0) return NULL;
-    wchar_t *wide = zcl_malloc((size_t)n * sizeof(*wide), "directory_compat_wide");
-    if (!wide || !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
-                                      wide, n)) {
-        free(wide);
-        return NULL;
-    }
+    wchar_t stack[32768];
+    if (!platform_windows_wide_path(path, stack)) return NULL;
+    size_t n = wcslen(stack) + 1u;
+    wchar_t *wide = zcl_malloc(n * sizeof(*wide), "directory_compat_wide");
+    if (!wide) return NULL;
+    wmemcpy(wide, stack, n);
     return wide;
 }
 
@@ -263,12 +260,20 @@ bool platform_directory_canonical_real(const char *path, char *out,
     if (!input || !out || !out_size) { free(input); return false; }
     DWORD count = GetFullPathNameW(input, 32768, full, NULL);
     free(input);
-    if (!count || count >= 32768 || !full[0] || full[1] != L':' ||
-        (full[2] != L'\\' && full[2] != L'/'))
+    if (!count || count >= 32768 || !full[0])
         return false;
     for (wchar_t *p = full; *p; ++p)
         if (*p == L'/') *p = L'\\';
-    for (wchar_t *p = full + 3; ; ++p) {
+    /* platform_windows_wide_path extends a drive path with \\?\. The
+     * component walk still requires a DOS drive letter; keep the prefix
+     * on the buffer so CreateFileW accepts a path longer than MAX_PATH. */
+    wchar_t *body = full;
+    if (wcsncmp(full, L"\\\\?\\", 4) == 0)
+        body = full + 4;
+    if (!body[0] || body[1] != L':' ||
+        (body[2] != L'\\' && body[2] != L'/'))
+        return false;
+    for (wchar_t *p = body + 3; ; ++p) {
         if (*p != L'\\' && *p != L'\0') continue;
         wchar_t saved = *p;
         *p = L'\0';
@@ -511,6 +516,66 @@ bool platform_directory_list_regular_sorted(
     if (!out) return false;
     return platform_directory_list_children_sorted_impl(path, NULL, out);
 }
+
+/* Vendored Tor's Win32 glob (vendor/tor/src/lib/fs/path.c) dllimports
+ * PathMatchSpecA. That is the only shlwapi symbol the pinned archives
+ * reference. Defining the IAT slot here keeps SHLWAPI.dll out of the
+ * node: the PE audit does not admit it. '*' is any run of bytes, '?' is
+ * one byte, ';' separates alternatives, and ASCII letters fold case. */
+static unsigned char path_match_fold(unsigned char c)
+{
+    if (c >= 'A' && c <= 'Z')
+        return (unsigned char)(c - 'A' + 'a');
+    return c;
+}
+
+static bool path_match_one(const char *file, const char *spec,
+                           const char *spec_end)
+{
+    while (*file != '\0' && spec < spec_end) {
+        if (*spec == '*') {
+            spec++;
+            if (spec == spec_end)
+                return true;
+            for (; *file != '\0'; file++) {
+                if (path_match_one(file, spec, spec_end))
+                    return true;
+            }
+            return false;
+        }
+        if (*spec != '?' &&
+            path_match_fold((unsigned char)*file) !=
+                path_match_fold((unsigned char)*spec))
+            return false;
+        file++;
+        spec++;
+    }
+    while (spec < spec_end && *spec == '*')
+        spec++;
+    return *file == '\0' && spec == spec_end;
+}
+
+static BOOL path_match_spec_a(const char *file, const char *spec)
+{
+    if (!file || !spec || spec[0] == '\0')
+        return FALSE;
+    while (*spec != '\0') {
+        const char *end = spec;
+        while (*end != '\0' && *end != ';')
+            end++;
+        if (path_match_one(file, spec, end))
+            return TRUE;
+        spec = (*end == ';') ? end + 1 : end;
+    }
+    return FALSE;
+}
+
+BOOL WINAPI PathMatchSpecA(LPCSTR file, LPCSTR spec)
+{
+    return path_match_spec_a(file, spec);
+}
+
+BOOL (WINAPI *__imp_PathMatchSpecA)(LPCSTR, LPCSTR) = PathMatchSpecA;
 
 #else
 #include <dirent.h>

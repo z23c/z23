@@ -35,7 +35,8 @@ static bool wk_code_try(const char *cand, struct wk_docs *code)
 {
     char marker[WK_PATH_MAX];
     code->code = true;
-    if (!realpath(cand, code->root) || !zcl_path_is_dir(code->root))
+    if (!wk_canonicalize(cand, code->root, sizeof(code->root)) ||
+        !zcl_path_is_dir(code->root))
         return false;
     return zcl_path_join(marker, sizeof(marker), code->root, "AGENTS.md") &&
            wk_is_file(marker);

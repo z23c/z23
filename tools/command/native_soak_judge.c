@@ -229,7 +229,7 @@ static size_t soak_window_start(const struct soak_sample *s, size_t n,
 }
 
 static void soak_set(struct zcl_judge_result *out, const char *v,
-                     const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+                     const char *fmt, ...) __attribute__((format(gnu_printf, 3, 4)));
 
 static void soak_set(struct zcl_judge_result *out, const char *v,
                      const char *fmt, ...)

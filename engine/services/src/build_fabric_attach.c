@@ -1492,4 +1492,44 @@ struct zcl_result build_fabric_attach(
     return ZCL_OK;
 }
 
+#else
+
+#include <string.h>
+
+const char *build_fabric_attach_disposition_string(
+    enum build_fabric_attach_disposition disposition)
+{
+    switch (disposition) {
+    case BUILD_FABRIC_ATTACH_MISS: return "miss";
+    case BUILD_FABRIC_ATTACH_HIT: return "hit";
+    case BUILD_FABRIC_ATTACH_REFUSED: return "refused";
+    }
+    return "refused";
+}
+
+/* Windows has no qualified donor replay. Report a miss so the caller
+ * compiles; never report a hit. */
+struct zcl_result build_fabric_attach(
+    struct node_db *ndb, const char *workspace, struct vcs_package_store *store,
+    const struct db_build_job *req_job, const struct db_build_action *req_action,
+    const uint8_t signer_secret[32], const uint8_t signer_pubkey[32],
+    struct db_build_receipt *out_receipt,
+    struct build_fabric_attach_report *out_report)
+{
+    (void)ndb;
+    (void)workspace;
+    (void)store;
+    (void)req_job;
+    (void)req_action;
+    (void)signer_secret;
+    (void)signer_pubkey;
+    (void)out_receipt;
+    if (!out_report)
+        return ZCL_ERR(-1, "attach requires a report");
+    memset(out_report, 0, sizeof(*out_report));
+    out_report->disposition = BUILD_FABRIC_ATTACH_MISS;
+    out_report->compiler_processes = 0;
+    return ZCL_OK;
+}
+
 #endif /* !_WIN32 */

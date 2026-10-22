@@ -9,7 +9,7 @@
  * the verdict thresholds.
  *
  * Cost shape. Both candidate scans push their matching into SQLite's
- * case-insensitive LIKE operator so the 69k symbol rows and 6.3k file rows are
+ * case-insensitive LIKE operator so the symbol rows and file rows are
  * filtered in C without being marshalled out. This avoids recomputing
  * lower(column) for every query stem while retaining ASCII case folding; only
  * rows that matched a stem cross into this file. The expensive per-candidate
@@ -17,6 +17,13 @@
  * only, AFTER the cheap score has ordered them — then the pool is re-ranked
  * with the usage number in hand, because "how many files actually call this"
  * is the fact the caller came for.
+ *
+ * On Windows that LIKE plan is a full scan of every symbol row, and a
+ * four-stem query on this tree costs more than the fast command budget
+ * before the usage count even runs. The symbol scan therefore prefers a
+ * packed image of the same ordered rows, sealed to source_merkle_root_sha3
+ * and rebuilt from the store when that root changes. The store stays the
+ * authority; the pack is only a read accelerator.
  */
 
 #include "codeindex_priv.h"
@@ -28,7 +35,9 @@
 #include <sqlite3.h>
 
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Anchors held while ranking. Beyond this the scan stops admitting NEW
@@ -318,9 +327,340 @@ static void cap_bind_patterns(sqlite3_stmt *stmt,
 
 /* ── candidate scans ──────────────────────────────────────────────────── */
 
-static bool cap_scan_symbols(struct ci_store *st, struct cap_scan *s,
-                             struct ci_capability_query *q)
+/* One ordered symbol row. `name` / `anchor` absence and include guards are
+ * not evidence. Adjacent equal names for one anchor count once because the
+ * caller walks ORDER BY name, def_path: a declaration and a definition of
+ * the same symbol sit next to each other. `symbol_count` is a count of the
+ * API, not of index rows. */
+static void cap_symbol_row(struct cap_scan *s, struct ci_capability_query *q,
+                           const char *name, const char *defp,
+                           const char *declp, const char *grp,
+                           const char *doc, const char *sig,
+                           const char *kindtext)
 {
+    char kind = kindtext && kindtext[0] ? kindtext[0] : '\0';
+    const char *anchor = cap_anchor_path(defp, declp);
+    if (!name || !anchor) return;
+    if (cap_is_include_guard(name, kind)) return;
+    q->symbol_rows++;
+    struct cap_anchor *a = cap_anchor_for(s, anchor);
+    if (!a) return;
+    if (!a->group[0] && grp) ci_cpy(a->group, sizeof(a->group), grp);
+
+    uint32_t nm = 0, dm = 0;
+    for (int t = 0; t < q->term_count; t++) {
+        if (cap_contains(name, q->stems[t])) nm |= 1u << t;
+        else if (cap_contains(doc, q->stems[t]) ||
+                 cap_contains(sig, q->stems[t])) dm |= 1u << t;
+    }
+    if (nm) {
+        a->name_mask |= nm;
+        if (a->last_name[0] && strcmp(a->last_name, name) == 0) return;
+        ci_cpy(a->last_name, sizeof(a->last_name), name);
+        a->name_hits++;
+        if (a->syms_listed < CI_CAPABILITY_SYMBOL_CAP)
+            ci_cpy(a->syms[a->syms_listed++], sizeof(a->syms[0]), name);
+    } else if (dm) {
+        a->doc_mask |= dm;
+        a->doc_hits++;
+    }
+}
+
+#if defined(_WIN32)
+/* Packed symbol image. Little-endian. Not a second authority: the bytes are
+ * the store's symbol rows in ORDER BY name, def_path, and the header carries
+ * the store's source_merkle_root_sha3. A different root rebuilds the image
+ * from the store. SQLite LIKE stays the fallback when the image is absent
+ * or the root is not sealed yet.
+ *
+ *   0  char[8]  "ZCLCAP01"
+ *   8  uint8[32] source_merkle_root_sha3
+ *  40  u32       row count
+ *  44  u32       payload byte length
+ *  48  payload
+ * Each of the seven fields is u16 length, then that many bytes and a NUL.
+ * Length 0xFFFF is NULL and stores no bytes. */
+enum {
+    CAP_PACK_FIELDS = 7,
+    CAP_PACK_HEADER = 48,
+    CAP_PACK_NULL = 0xFFFF,
+    CAP_PACK_MAX = 64 * 1024 * 1024
+};
+static const char cap_pack_leaf[] = "capability_scan.v1";
+static const char cap_pack_magic[] = "ZCLCAP01";
+
+static unsigned char cap_fold_lut[256];
+static bool cap_fold_ready;
+
+static void cap_fold_init(void)
+{
+    if (cap_fold_ready) return;
+    for (int i = 0; i < 256; i++)
+        cap_fold_lut[i] = (unsigned char)i;
+    for (int c = 'A'; c <= 'Z'; c++)
+        cap_fold_lut[c] = (unsigned char)(c - 'A' + 'a');
+    cap_fold_ready = true;
+}
+
+static void cap_put_u16(unsigned char *p, unsigned v)
+{
+    p[0] = (unsigned char)(v & 0xffu);
+    p[1] = (unsigned char)((v >> 8) & 0xffu);
+}
+
+static void cap_put_u32(unsigned char *p, uint32_t v)
+{
+    p[0] = (unsigned char)(v & 0xffu);
+    p[1] = (unsigned char)((v >> 8) & 0xffu);
+    p[2] = (unsigned char)((v >> 16) & 0xffu);
+    p[3] = (unsigned char)((v >> 24) & 0xffu);
+}
+
+static uint32_t cap_get_u32(const unsigned char *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* ASCII case-fold substring. Same fold as SQLite's default LIKE, which is
+ * what the SQL scan uses as the prefilter. Classification still goes through
+ * cap_contains so a row's name-versus-doc mask does not move. */
+static bool cap_ascii_has(const char *hay, const char *needle)
+{
+    if (!hay || !needle || !needle[0]) return false;
+    size_t nl = strlen(needle);
+    unsigned char n0 = (unsigned char)needle[0];
+    for (const unsigned char *p = (const unsigned char *)hay; *p; p++) {
+        if (cap_fold_lut[*p] != n0) continue;
+        size_t i = 1;
+        for (; i < nl; i++) {
+            if (!p[i] || cap_fold_lut[p[i]] != (unsigned char)needle[i])
+                break;
+        }
+        if (i == nl) return true;
+    }
+    return false;
+}
+
+static bool cap_row_prefilter(const char *name, const char *doc,
+                              const char *sig,
+                              const struct ci_capability_query *q)
+{
+    const char *fields[3] = { name, doc, sig };
+    for (int t = 0; t < q->term_count; t++) {
+        for (int f = 0; f < 3; f++) {
+            if (cap_ascii_has(fields[f], q->stems[t])) return true;
+        }
+    }
+    return false;
+}
+
+static bool cap_pack_next(const unsigned char **cursor,
+                          const unsigned char *end,
+                          const char *out[CAP_PACK_FIELDS])
+{
+    const unsigned char *p = *cursor;
+    for (int i = 0; i < CAP_PACK_FIELDS; i++) {
+        if ((size_t)(end - p) < 2) return false;
+        unsigned len = (unsigned)p[0] | ((unsigned)p[1] << 8);
+        p += 2;
+        if (len == CAP_PACK_NULL) {
+            out[i] = NULL;
+            continue;
+        }
+        if ((size_t)(end - p) < (size_t)len + 1) return false;
+        if (p[len] != 0) return false;
+        out[i] = (const char *)p;
+        p += len + 1;
+    }
+    *cursor = p;
+    return true;
+}
+
+/* True when the image is exactly `count` well-formed rows sealed to
+ * `merkle`. Does not touch scan state. */
+static bool cap_pack_open(const unsigned char *image, size_t length,
+                          const uint8_t merkle[32],
+                          const unsigned char **payload,
+                          const unsigned char **end, uint32_t *count)
+{
+    if (!image || length < CAP_PACK_HEADER || length > CAP_PACK_MAX)
+        return false;
+    if (memcmp(image, cap_pack_magic, 8) != 0) return false;
+    if (memcmp(image + 8, merkle, 32) != 0) return false;
+    uint32_t n = cap_get_u32(image + 40);
+    uint32_t plen = cap_get_u32(image + 44);
+    if ((size_t)CAP_PACK_HEADER + (size_t)plen != length) return false;
+    const unsigned char *p = image + CAP_PACK_HEADER;
+    const unsigned char *pend = p + plen;
+    for (uint32_t i = 0; i < n; i++) {
+        const char *fields[CAP_PACK_FIELDS];
+        if (!cap_pack_next(&p, pend, fields)) return false;
+    }
+    if (p != pend) return false;
+    *payload = image + CAP_PACK_HEADER;
+    *end = pend;
+    *count = n;
+    return true;
+}
+
+static bool cap_pack_reserve(unsigned char **buf, size_t *cap, size_t need)
+{
+    if (need <= *cap) return true;
+    if (need > CAP_PACK_MAX) return false;
+    size_t next = *cap ? *cap : (size_t)1024 * 1024;
+    while (next < need) {
+        if (next > CAP_PACK_MAX / 2) return false;
+        next *= 2;
+    }
+    unsigned char *grown = zcl_realloc(*buf, next, "ci capability pack");
+    if (!grown) return false;
+    *buf = grown;
+    *cap = next;
+    return true;
+}
+
+static bool cap_pack_add_field(unsigned char **buf, size_t *cap, size_t *used,
+                               const char *text)
+{
+    if (!text) {
+        if (!cap_pack_reserve(buf, cap, *used + 2)) return false;
+        cap_put_u16(*buf + *used, CAP_PACK_NULL);
+        *used += 2;
+        return true;
+    }
+    size_t n = strlen(text);
+    if (n >= CAP_PACK_NULL) return false;
+    if (!cap_pack_reserve(buf, cap, *used + 2 + n + 1)) return false;
+    cap_put_u16(*buf + *used, (unsigned)n);
+    *used += 2;
+    if (n) memcpy(*buf + *used, text, n);
+    *used += n;
+    (*buf)[(*used)++] = 0;
+    return true;
+}
+
+static bool cap_pack_build(struct ci_store *st, const uint8_t merkle[32],
+                           unsigned char **image_out, size_t *length_out)
+{
+    *image_out = NULL;
+    *length_out = 0;
+    sqlite3 *db = ci_store_db(st);
+    sqlite3_stmt *stmt = NULL;
+    static const char sql[] =
+        "SELECT name,def_path,decl_path,\"group\",doc,signature,kind"
+        " FROM symbols ORDER BY name ASC,def_path ASC";
+    if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK)
+        return false;
+    size_t cap = 1024 * 1024;
+    unsigned char *buf = zcl_malloc(cap, "ci capability pack");
+    if (!buf) {
+        sqlite3_finalize(stmt);
+        return false;
+    }
+    size_t used = CAP_PACK_HEADER;
+    uint32_t count = 0;
+    bool ok = true;
+    int rc;
+    while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
+        const char *cols[CAP_PACK_FIELDS];
+        cols[0] = (const char *)sqlite3_column_text(stmt, 0);
+        cols[1] = (const char *)sqlite3_column_text(stmt, 1);
+        cols[2] = (const char *)sqlite3_column_text(stmt, 2);
+        cols[3] = (const char *)sqlite3_column_text(stmt, 3);
+        cols[4] = (const char *)sqlite3_column_text(stmt, 4);
+        cols[5] = (const char *)sqlite3_column_text(stmt, 5);
+        cols[6] = (const char *)sqlite3_column_text(stmt, 6);
+        for (int i = 0; ok && i < CAP_PACK_FIELDS; i++)
+            ok = cap_pack_add_field(&buf, &cap, &used, cols[i]);
+        if (!ok) break;
+        count++;
+    }
+    ok = ok && rc == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+    if (!ok) {
+        free(buf);
+        return false;
+    }
+    memcpy(buf, cap_pack_magic, 8);
+    memcpy(buf + 8, merkle, 32);
+    cap_put_u32(buf + 40, count);
+    cap_put_u32(buf + 44, (uint32_t)(used - CAP_PACK_HEADER));
+    *image_out = buf;
+    *length_out = used;
+    return true;
+}
+
+static bool cap_pack_apply(struct cap_scan *s, struct ci_capability_query *q,
+                           const unsigned char *payload,
+                           const unsigned char *end, uint32_t count)
+{
+    const unsigned char *p = payload;
+    for (uint32_t i = 0; i < count; i++) {
+        const char *f[CAP_PACK_FIELDS];
+        if (!cap_pack_next(&p, end, f)) return false;
+        /* name, def, decl, group, doc, signature, kind */
+        if (!cap_row_prefilter(f[0], f[4], f[5], q)) continue;
+        cap_symbol_row(s, q, f[0], f[1], f[2], f[3], f[4], f[5], f[6]);
+    }
+    return p == end;
+}
+
+/* 1: scan consumed the pack. 0: caller should use SQL. -1: the checked
+ * image could not be walked a second time, so scan state may be partial
+ * and SQL must not run over it. */
+static int cap_pack_try(struct ci_store *st, struct cap_scan *s,
+                        struct ci_capability_query *q, const char *root)
+{
+    if (!st || !s || !q || !root || !root[0]) return 0;
+    cap_fold_init();
+    uint8_t merkle[32];
+    size_t merkle_len = 0;
+    bool merkle_found = false;
+    if (!ci_store_meta_get(st, "source_merkle_root_sha3", merkle,
+                           sizeof(merkle), &merkle_len, &merkle_found) ||
+        !merkle_found || merkle_len != sizeof(merkle))
+        return 0;
+
+    unsigned char *image = NULL;
+    size_t length = 0;
+    bool found = false;
+    if (!ci_merkle_snapshot_image_load_windows(
+            root, cap_pack_leaf, CAP_PACK_MAX, &image, &length, &found))
+        return 0;
+    const unsigned char *payload = NULL;
+    const unsigned char *end = NULL;
+    uint32_t count = 0;
+    bool ready = found && image &&
+        cap_pack_open(image, length, merkle, &payload, &end, &count);
+    if (!ready) {
+        free(image);
+        image = NULL;
+        if (!cap_pack_build(st, merkle, &image, &length) ||
+            !cap_pack_open(image, length, merkle, &payload, &end, &count)) {
+            free(image);
+            return 0;
+        }
+        (void)ci_merkle_snapshot_image_save_windows(
+            root, cap_pack_leaf, image, length);
+    }
+    bool applied = cap_pack_apply(s, q, payload, end, count);
+    free(image);
+    return applied ? 1 : -1;
+}
+#endif
+
+static bool cap_scan_symbols(struct ci_store *st, struct cap_scan *s,
+                             struct ci_capability_query *q, const char *root)
+{
+#if defined(_WIN32)
+    int packed = cap_pack_try(st, s, q, root);
+    if (packed < 0)
+        LOG_FAIL("codeindex", "capability symbol pack diverged from its image");
+    if (packed > 0) return true;
+#else
+    (void)root;
+#endif
     static const char *const cols[] = { "name", "doc", "signature" };
     char where[1024];
     if (!cap_where(where, sizeof(where), cols, 3, q->term_count))
@@ -340,44 +680,14 @@ static bool cap_scan_symbols(struct ci_store *st, struct cap_scan *s,
 
     int rc;
     while ((rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
-        const char *name = (const char *)sqlite3_column_text(stmt, 0);
-        const char *defp = (const char *)sqlite3_column_text(stmt, 1);
-        const char *declp = (const char *)sqlite3_column_text(stmt, 2);
-        const char *grp = (const char *)sqlite3_column_text(stmt, 3);
-        const char *doc = (const char *)sqlite3_column_text(stmt, 4);
-        const char *sig = (const char *)sqlite3_column_text(stmt, 5);
-        const char *kindtext = (const char *)sqlite3_column_text(stmt, 6);
-        char kind = kindtext && kindtext[0] ? kindtext[0] : '\0';
-        const char *anchor = cap_anchor_path(defp, declp);
-        if (!name || !anchor) continue;
-        if (cap_is_include_guard(name, kind)) continue;
-        q->symbol_rows++;
-        struct cap_anchor *a = cap_anchor_for(s, anchor);
-        if (!a) continue;
-        if (!a->group[0] && grp) ci_cpy(a->group, sizeof(a->group), grp);
-
-        uint32_t nm = 0, dm = 0;
-        for (int t = 0; t < q->term_count; t++) {
-            if (cap_contains(name, q->stems[t])) nm |= 1u << t;
-            else if (cap_contains(doc, q->stems[t]) ||
-                     cap_contains(sig, q->stems[t])) dm |= 1u << t;
-        }
-        if (nm) {
-            a->name_mask |= nm;
-            /* The scan is ORDER BY name, so a name that appears twice for one
-             * anchor (a declaration and a definition of the same symbol) is
-             * adjacent. Count and list it once: `symbol_count` is a count of
-             * the API, not of index rows, and a caller checking it by hand
-             * against the listed names must get the same number. */
-            if (a->last_name[0] && strcmp(a->last_name, name) == 0) continue;
-            ci_cpy(a->last_name, sizeof(a->last_name), name);
-            a->name_hits++;
-            if (a->syms_listed < CI_CAPABILITY_SYMBOL_CAP)
-                ci_cpy(a->syms[a->syms_listed++], sizeof(a->syms[0]), name);
-        } else if (dm) {
-            a->doc_mask |= dm;
-            a->doc_hits++;
-        }
+        cap_symbol_row(s, q,
+                       (const char *)sqlite3_column_text(stmt, 0),
+                       (const char *)sqlite3_column_text(stmt, 1),
+                       (const char *)sqlite3_column_text(stmt, 2),
+                       (const char *)sqlite3_column_text(stmt, 3),
+                       (const char *)sqlite3_column_text(stmt, 4),
+                       (const char *)sqlite3_column_text(stmt, 5),
+                       (const char *)sqlite3_column_text(stmt, 6));
     }
     bool ok = rc == SQLITE_DONE;
     sqlite3_finalize(stmt);
@@ -587,7 +897,7 @@ int codeindex_capabilities(struct codeindex *ci, const char *text,
     for (size_t i = 0; i < CI_CAP_SLOTS; i++) s.slot[i] = -1;
 
     ci_store_lock(ci->store);
-    bool ok = cap_scan_symbols(ci->store, &s, q) &&
+    bool ok = cap_scan_symbols(ci->store, &s, q, ci->root) &&
               cap_scan_files(ci->store, &s, q);
     ci_store_unlock(ci->store);
     free(s.slot);

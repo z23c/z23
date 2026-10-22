@@ -30,7 +30,8 @@ static bool wk_docs_try(const char *cand, struct wk_docs *docs)
 {
     char readme[WK_PATH_MAX];
     docs->code = false;
-    if (!realpath(cand, docs->root) || !zcl_path_is_dir(docs->root))
+    if (!wk_canonicalize(cand, docs->root, sizeof(docs->root)) ||
+        !zcl_path_is_dir(docs->root))
         return false;
     return zcl_path_join(readme, sizeof(readme), docs->root, "README.md") &&
            wk_is_file(readme);
@@ -144,7 +145,7 @@ enum wk_status wk_resolve(const struct wk_docs *docs, const char *rel,
                    : snprintf(full, sizeof(full), "%s", docs->root);
     if (n <= 0 || (size_t)n >= sizeof(full))
         return WK_BAD;
-    if (!realpath(full, res))
+    if (!wk_canonicalize(full, res, sizeof(res)))
         return WK_MISSING;
     if (!wk_within(docs->root, res))
         return WK_ESCAPES;
@@ -520,7 +521,8 @@ static int wk_classify(const struct wk_docs *docs, const char *dir,
     char full[WK_PATH_MAX];
     char real[PATH_MAX];
     int n = snprintf(full, sizeof(full), "%s/%s", dir, name);
-    if (n <= 0 || (size_t)n >= sizeof(full) || !realpath(full, real) ||
+    if (n <= 0 || (size_t)n >= sizeof(full) ||
+        !wk_canonicalize(full, real, sizeof(real)) ||
         !wk_within(docs->root, real))
         return 0;
     if (docs->code)

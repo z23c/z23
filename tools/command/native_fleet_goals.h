@@ -96,7 +96,7 @@ struct zcl_goal_result zcl_goals_wiki_grade(bool answered, const char *why,
 /* Build one graded row: `fmt` formats the evidence, `next` is copied whole. */
 struct zcl_goal_result zcl_goal_make(enum zcl_goal_grade grade, const char *next,
                                      const char *fmt, ...)
-    __attribute__((format(printf, 3, 4)));
+    __attribute__((format(gnu_printf, 3, 4)));
 
 /* Grades C3 and C6 from their newest durable receipt
  * (native_fleet_goals_receipts.c). False when the id has no receipt reader. */

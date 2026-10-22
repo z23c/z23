@@ -9,10 +9,18 @@
 #define ZCL_CONTROLLERS_RPC_CLIENT_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* Call once at startup (from the node/CLI entry point). */
 void node_rpc_client_init(const char *datadir, int rpc_port);
+
+/* Binary read of one filesystem path through the same CRT open the cookie
+ * loader uses (plain path, then one Windows `\\?\` retry). `*n_out` is the
+ * byte count actually read, which may include 0x00 and 0x0A. Returns false
+ * when the path cannot be opened. Does not append a NUL. */
+bool node_rpc_client_read_file(const char *path, void *buf, size_t cap,
+                               size_t *n_out);
 
 /* Return the datadir passed to node_rpc_client_init (empty string if
  * not yet initialized). The pointer is to a static buffer owned by

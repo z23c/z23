@@ -5,6 +5,7 @@
 
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_build.h"
+#include "codeindex/codeindex_merkle.h"
 
 #include "platform/directory_compat.h"
 #include "platform/private_directory.h"
@@ -596,11 +597,46 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         goto out;
     }
 
+    /* Source-view readers accept a store only when its sealed
+     * source_merkle_root_sha3 matches the snapshot. The POSIX publisher
+     * writes that key; without it every Windows `code have` rebuilds. */
+    struct ci_merkle_cost merkle_cost = {0};
+    struct ci_merkle *merkle =
+        ci_merkle_refresh_reconciled(ci->root, &merkle_cost);
+    struct ci_merkle_node merkle_root;
+    uint8_t sealed_merkle[32];
+    bool merkle_ok = merkle && ci_merkle_root(merkle, &merkle_root);
+    if (merkle_ok)
+        memcpy(sealed_merkle, merkle_root.digest.bytes, sizeof(sealed_merkle));
+    ci_merkle_free(merkle);
+    if (!merkle_ok) {
+        failure = "Windows source Merkle root failed";
+        goto out;
+    }
+
     uint8_t built_source_stat[32], built_dep_stat[32];
     if (!ci_build_store_memory(ci->root, build_start_ms, &store,
                                built_source_stat, built_dep_stat) ||
-        !ci_store_write_image_child(store, &stage)) {
-        failure = "build or serialize Windows staging store failed";
+        !ci_store_meta_set(store, "source_merkle_root_sha3",
+                           sealed_merkle, sizeof(sealed_merkle))) {
+        failure = "build or seal Windows staging store failed";
+        goto out;
+    }
+
+    struct ci_merkle_cost final_cost = {0};
+    struct ci_merkle *final_merkle =
+        ci_merkle_refresh_reconciled(ci->root, &final_cost);
+    struct ci_merkle_node final_root;
+    bool merkle_held = final_merkle &&
+        ci_merkle_root(final_merkle, &final_root) &&
+        memcmp(sealed_merkle, final_root.digest.bytes, 32) == 0;
+    ci_merkle_free(final_merkle);
+    if (!merkle_held) {
+        failure = "source Merkle root changed during Windows rebuild";
+        goto out;
+    }
+    if (!ci_store_write_image_child(store, &stage)) {
+        failure = "serialize Windows staging store failed";
         goto out;
     }
     ci_store_close(store);

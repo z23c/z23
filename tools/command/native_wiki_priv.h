@@ -13,6 +13,16 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
+#include <limits.h>
+#endif
 
 enum {
     WK_REL_MAX = 512,      /* longest topic or page path accepted */
@@ -35,6 +45,43 @@ struct wk_docs {
     char root[WK_PATH_MAX]; /* resolved root directory */
     bool code;
 };
+
+/* Absolute form of an existing path. POSIX resolves symlinks. Windows
+ * returns the full lexical path with '/' separators so later prefix checks
+ * match the joins this tree builds. */
+static inline bool wk_canonicalize(const char *path, char *out, size_t cap)
+{
+    if (!path || !path[0] || !out || cap < 2)
+        return false;
+#if defined(_WIN32)
+    wchar_t wide[32768];
+    wchar_t full[32768];
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
+                                wide, 32768);
+    DWORD got;
+    int bytes;
+    if (n <= 0)
+        return false;
+    for (int i = 0; i < n - 1; i++)
+        if (wide[i] == L'/')
+            wide[i] = L'\\';
+    got = GetFullPathNameW(wide, 32768, full, NULL);
+    if (got == 0 || got >= 32768)
+        return false;
+    bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, full, -1,
+                                out, (int)cap, NULL, NULL);
+    if (bytes <= 0)
+        return false;
+    for (char *p = out; *p; p++)
+        if (*p == '\\')
+            *p = '/';
+    return true;
+#else
+    if (cap < PATH_MAX)
+        return false;
+    return realpath(path, out) != NULL;
+#endif
+}
 
 struct wk_meta {
     char title[WK_TEXT_MAX + 1];
