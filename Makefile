@@ -6442,7 +6442,7 @@ LINTC_NODE_SRCS = platform/modules/sha3/src/sha3.c contexts/commons/packages/zsh
 LINTC_NODE_OBJS = $(LINTC_NODE_SRCS:%.c=build/lintc-obj/node/%.o)
 LINTC_LIVE_DATADIR_SRCS = tools/lint/lintc/gate_live_datadir_isolation.c \
     tools/lint/lintc/gate_live_datadir_isolation_selftest.c
-LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/gate_boot_wiring.c tools/lint/lintc/gate_hotswap_manifests.c tools/lint/lintc/gate_hotswap_candidates_ledger.c tools/lint/lintc/gate_source_patterns.c \
+LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/lib_ledger.c tools/lint/lintc/gate_boot_wiring.c tools/lint/lintc/gate_hotswap_manifests.c tools/lint/lintc/gate_hotswap_candidates_ledger.c tools/lint/lintc/gate_source_patterns.c \
     tools/lint/lintc/gate_pattern_small.c tools/lint/lintc/gate_wire_dial.c \
     tools/lint/lintc/gate_tree_walk.c tools/lint/lintc/gate_tree_walk_selftests.c tools/lint/lintc/gate_git_scan_a.c \
     tools/lint/lintc/gate_git_scan_a_selftests.c \
