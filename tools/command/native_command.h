@@ -2943,7 +2943,7 @@ void zcl_native_handle_dev_agent_reviewscore(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
 /* dev.agent.ticketkey — the commuting-ticket key of one test group at one
- * tip (docs/agent/COMMUTING_TICKETS.md). Same one-handler-per-file shape as
+ * tip (docs/archive/COMMUTING_TICKETS.md). Same one-handler-per-file shape as
  * the lane-discipline leaves above. */
 void zcl_native_handle_dev_agent_ticketkey(
     const struct zcl_command_request *request,

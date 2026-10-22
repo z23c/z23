@@ -46,3 +46,6 @@ docs/API_REFERENCE.md
 docs/work/retrieval-gold-evidence/*.jsonl
 contexts/commons/corpus/evidence-*.json
 tools/lint/cyclomatic_complexity_baseline.txt
+
+# Historical documents; open by path. Tracked, kept for evidence only.
+docs/archive/

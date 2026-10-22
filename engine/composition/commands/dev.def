@@ -1934,7 +1934,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_dev_agent_hot)
 
 /* ticketkey answers the commuting-ticket question from
- * docs/agent/COMMUTING_TICKETS.md: the SHA3-256 key of one group's input
+ * docs/archive/COMMUTING_TICKETS.md: the SHA3-256 key of one group's input
  * closure (its test file, every source the shared-rule router assigns to
  * it, their transitive headers, the toolchain epoch, the harness version)
  * at one tip. A push that leaves the closure alone keeps the key, so only

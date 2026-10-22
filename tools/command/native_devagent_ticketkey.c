@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: dev.agent.ticketkey — compute the commuting-ticket key of one
- *          test group at one tip, exactly as docs/agent/COMMUTING_TICKETS.md
+ *          test group at one tip, exactly as docs/archive/COMMUTING_TICKETS.md
  *          specifies, so a push that leaves a group's inputs untouched keeps
  *          that group's ticket valid.
  *

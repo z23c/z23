@@ -568,7 +568,7 @@ before retirement.
 | Per-host proof locks and leases | `queue.lock`, `<key>.running`, `<key>.lease` in `tools/dev/dev_proof.c`; the queue's step lock `step.lock` in `tools/command/native_dev_land.c` | nothing; scheduling scratch only | no code path treats a lock or a lease as permission to write a verdict or to push |
 | Fleet receipt projection | `tools/command/native_dev_fleet_receipts.c` | signed observation objects | independently verified signatures, roots and receiver eligibility back the view |
 | Flash unit queue | `tools/engine_unit.c`, per-unit `--state-dir` receipts, `docs/agent/FLASH_UNIT.md` | JOB, CANDIDATE, ticket | a unit's `receipt.json` is derived from a signed ticket |
-| Commuting tickets and train protocol as separate machines | `docs/agent/COMMUTING_TICKETS.md`, `docs/agent/TRAIN_PROTOCOL.md` | this document | both are reduced to explanatory notes pointing here |
+| Commuting tickets and train protocol as separate machines | `docs/archive/COMMUTING_TICKETS.md`, `docs/agent/TRAIN_PROTOCOL.md` | this document | both are reduced to explanatory notes pointing here |
 
 `tools/lint/check_no_unattended_publish.sh` is retained and tightened: after this
 convergence, exactly one call site may push `main`.

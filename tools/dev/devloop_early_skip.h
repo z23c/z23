@@ -19,7 +19,7 @@ struct json_value;
  *     "zcl.dev_early_skip.key.v1\n" "identity:<identity>\n" "group:<G>\n"
  * then one "<path>:<SHA3-256 of the file's bytes>\n" line per closure file
  * in byte order of path. It follows the commuting-ticket key
- * (docs/agent/COMMUTING_TICKETS.md) with two deliberate differences: file
+ * (docs/archive/COMMUTING_TICKETS.md) with two deliberate differences: file
  * bytes come from the working tree the candidate was compiled from, not
  * from a committed tip, and headers are resolved the way the compiler
  * resolves them. dev.agent.ticketkey keys the committed blobs at a tip (the

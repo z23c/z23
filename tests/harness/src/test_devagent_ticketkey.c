@@ -6,7 +6,7 @@
  * The owning file->group map comes from the real tree, so no fixture
  * repository can stand in for it: this group runs against the real checkout
  * (cwd default) for group devagent_situation and pins the commuting-ticket
- * contract from docs/agent/COMMUTING_TICKETS.md — closure membership, key
+ * contract from docs/archive/COMMUTING_TICKETS.md — closure membership, key
  * shape, determinism, tip sensitivity, and the two refusal codes.
  *
  * It calls the bound handler DIRECTLY: dev.agent.ticketkey is a dev-lane
