@@ -94,12 +94,36 @@ static int capture_command(const char *command, char *out, size_t cap)
     return WEXITSTATUS(status);
 }
 
+/* Every nested runner this test starts writes its timing report here, not
+ * to the shared .cache/test-timing/last-run.json that concurrent runners
+ * overwrite between the write and our read. */
+static char g_tgs_timing_dir[PATH_MAX];
+
+static bool selector_timing_dir_init(void)
+{
+    test_make_tmpdir(g_tgs_timing_dir, sizeof(g_tgs_timing_dir),
+                     "tgs_timing", "private");
+    return g_tgs_timing_dir[0] != '\0' &&
+#if defined(_WIN32)
+           _putenv_s("ZCL_TEST_TIMING_DIR", g_tgs_timing_dir) == 0;
+#else
+           setenv("ZCL_TEST_TIMING_DIR", g_tgs_timing_dir, 1) == 0;
+#endif
+}
+
 /* These nested runs select at most two groups. Refuse a larger or partial
  * artifact instead of accidentally validating a prefix of another run. */
 static bool selector_timing_read(struct json_value *out)
 {
     char bytes[8192];
-    FILE *fp = fopen(".cache/test-timing/last-run.json", "rb");
+    char path[PATH_MAX + 32];
+    int pn = snprintf(path, sizeof(path), "%s/last-run.json",
+                      g_tgs_timing_dir);
+    if (g_tgs_timing_dir[0] == '\0' || pn < 0 || (size_t)pn >= sizeof(path)) {
+        fprintf(stderr, "selector: no private timing dir\n");
+        return false;
+    }
+    FILE *fp = fopen(path, "rb");
     if (!fp) {
         fprintf(stderr, "selector: timing artifact open failed\n");
         return false;
@@ -1461,10 +1485,10 @@ static int test_process_sensitive_groups_are_catalog_exclusive(void)
         ASSERT(!zcl_test_group_requires_exclusive_run(
             "test_codeindex_scale"));
         /* This group launches the current runner recursively to prove exact
-         * selection.  Competing with the 32-worker parent pool can kill the
-         * nested positive control under transient memory pressure, grading
-         * host saturation instead of selector semantics. */
-        ASSERT(zcl_test_group_requires_exclusive_run(
+         * selection. Each nested runner writes its timing report to a private
+         * ZCL_TEST_TIMING_DIR, so no concurrent runner can overwrite the file
+         * between its write and this test's read; it runs in the pool. */
+        ASSERT(!zcl_test_group_requires_exclusive_run(
             "test_test_group_selector"));
         ASSERT(!zcl_test_group_requires_exclusive_run(
             "test_command_registry_catalog"));
@@ -2909,6 +2933,10 @@ int test_test_group_selector(void)
 {
     if (g_tgs_state_probe) return tgs_state_probe();
     int failures = 0;
+    if (!selector_timing_dir_init()) {
+        fprintf(stderr, "selector: private timing dir setup failed\n");
+        return 1;
+    }
     failures += test_runner_private_state();
     failures += test_runner_retry_evidence();
     failures += test_runner_retry_probe_bounds();
@@ -2956,5 +2984,6 @@ int test_test_group_selector(void)
     failures += test_verdict_json_two_failures();
     failures += test_verdict_json_over_cap();
     failures += test_verdict_json_quoted_name();
+    test_cleanup_tmpdir(g_tgs_timing_dir);
     return failures;
 }

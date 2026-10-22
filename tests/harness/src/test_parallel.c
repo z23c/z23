@@ -1863,6 +1863,33 @@ static bool timing_json_string(FILE *fp, const char *text)
     return fprintf(fp, "\"%s\"", escaped) >= 0;
 }
 
+/* ZCL_TEST_TIMING_DIR redirects the report so a test that starts a nested
+ * runner can read its own file instead of racing every other runner on the
+ * shared default. Unset or empty keeps today's path. Returns the directory
+ * after creating it, or NULL (already reported) on failure. */
+static const char *test_timing_dir_prepare(void)
+{
+    const char *redirect = getenv("ZCL_TEST_TIMING_DIR");
+    if (redirect && redirect[0] != '\0') {
+        if (platform_directory_create(redirect, 0755) != 0 &&
+            errno != EEXIST) {
+            perror("test_parallel: mkdir ZCL_TEST_TIMING_DIR");
+            return NULL;
+        }
+        return redirect;
+    }
+    const char *dir = ".cache/test-timing";
+    if (platform_directory_create(".cache", 0755) != 0 && errno != EEXIST) {
+        perror("test_parallel: mkdir .cache");
+        return NULL;
+    }
+    if (platform_directory_create(dir, 0755) != 0 && errno != EEXIST) {
+        perror("test_parallel: mkdir .cache/test-timing");
+        return NULL;
+    }
+    return dir;
+}
+
 /* Per-group JSON timing artifact — the same "make results visible so
  * regressions are visible" pattern as tools/lint/run_lint.sh's
  * .cache/lint-timing/last-run.json (schema zcl.lint_timing.v1), applied
@@ -1884,15 +1911,9 @@ static void write_test_timing_json(const struct group_result *results,
                                    size_t skipped_count,
                                    const struct suite_verdict *v)
 {
-    const char *dir = ".cache/test-timing";
-    if (platform_directory_create(".cache", 0755) != 0 && errno != EEXIST) {
-        perror("test_parallel: mkdir .cache");
+    const char *dir = test_timing_dir_prepare();
+    if (!dir)
         return;
-    }
-    if (platform_directory_create(dir, 0755) != 0 && errno != EEXIST) {
-        perror("test_parallel: mkdir .cache/test-timing");
-        return;
-    }
 
     size_t *order = malloc(group_count * sizeof(*order));
     if (!order) {
@@ -1917,7 +1938,7 @@ static void write_test_timing_json(const struct group_result *results,
         order[b] = key;
     }
 
-    char tmp_path[160], final_path[160];
+    char tmp_path[4200], final_path[4200];
     snprintf(tmp_path, sizeof(tmp_path), "%s/last-run.json.tmp", dir);
     snprintf(final_path, sizeof(final_path), "%s/last-run.json", dir);
 

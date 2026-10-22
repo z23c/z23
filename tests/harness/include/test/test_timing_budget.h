@@ -21,9 +21,11 @@
  * For purely CPU-bound single-threaded measurements, prefer
  * test_thread_cpu_us() (per-thread CPU time, immune to descheduling) over
  * wall time outright — the sapling/secp256k1 constant-time tests already use
- * that shape via clock_thread_cpu_ns(). The codeindex open path below keeps
- * wall time because it includes filesystem/SQLite IO; scaling keeps that
- * latency bound meaningful instead of deleting it.
+ * that shape via clock_thread_cpu_ns(). The codeindex scale gate follows it:
+ * warm queries budget thread CPU and builds budget process CPU, so a loaded
+ * host cannot fail them by descheduling. Scaling remains for any wall-clock
+ * measurement that includes filesystem/SQLite IO, keeping that latency bound
+ * meaningful instead of deleting it.
  */
 
 #ifndef ZCL_TEST_TIMING_BUDGET_H

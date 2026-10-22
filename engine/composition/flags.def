@@ -2525,6 +2525,8 @@ Z23_FLAG("ZCL_TEST_RUNNING", "env_build", "/invalid", "-",
           "undocumented; first use tools/dev/deploy-dev-lane-selftest.sh:auto")
 Z23_FLAG("ZCL_TEST_TIMEOUT_SCALE", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_mailbox.c:auto")
+Z23_FLAG("ZCL_TEST_TIMING_DIR", "env_test", "-", "-",
+          "first use tests/harness/src/test_parallel.c:auto; redirects the runner timing report so a test that starts a nested runner reads its own last-run.json")
 Z23_FLAG("ZCL_TEST_TIMING_JSON", "env_build", "-", "-",
           "undocumented; first use tools/dev/test-registry-report.sh:auto")
 Z23_FLAG("ZCL_TEST_UMBRELLAS_SRC", "env_build", "-", "-",

@@ -151,7 +151,6 @@ bool zcl_test_group_requires_exclusive_run(const char *full_id)
            strcmp(full_id, "test_vcs_core") == 0 ||
            strcmp(full_id, "test_golden_dev_cycle") == 0 ||
            strcmp(full_id, "test_kill9_recovery") == 0 ||
-           strcmp(full_id, "test_test_group_selector") == 0 ||
            catalog_contention_sensitive(full_id);
 }
 
