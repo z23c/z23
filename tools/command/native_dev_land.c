@@ -68,6 +68,10 @@
  * replayed without a certain answer, left queued and unmarked) and
  * queued_unchecked (rows due a check that the per-beat row cap or deadline
  * left for a later beat); see the precheck section.
+ * A started step whose proof covers a land train (ZCL_LAND_TRAIN_WIDTH)
+ * reports train_members, the count of queued rows bound to its pair; status lists
+ * them under in_flight.train_members and shows each bound queued row's
+ * train_intent and train_commit. See native_dev_land_train.c.
  *
  * STEER. status fills one steer object for the row step would pick
  * (the in-flight row, else the oldest queued row, else explicit none):
@@ -137,6 +141,7 @@
 #include "command/native_dev_land_read.h"
 #include "command/native_dev_land_attestation.h"
 #include "command/native_dev_land_window.h"
+#include "command/native_dev_land_internal.h"
 #include "util/clientversion.h"
 #include "command/native_devagent.h"
 #include "command/native_dev_agents.h"
@@ -203,20 +208,14 @@
 #define DL_LINE_CAP  32768u
 #define DL_FILE_CAP  (1024u * 1024u)
 #define DL_GIT_CAP   (256u * 1024u)
-#define DL_LOG_CAP   (2u * 1024u * 1024u)
-#define DL_NOTE_MAX  512u
 
-/* Attempt ceiling for a host-load retry (a source-identity race or a
- * timeout). A real red dimension is terminal on the first attempt. */
-#define DL_ATTEMPT_MAX 3
-
-/* Wall-clock ceilings for the two long git/make actions step performs. */
-#define DL_GIT_TIMEOUT_MS  (10 * 60 * 1000)
+/* Wall-clock ceiling for the lint pass step performs (the git ceiling is
+ * in native_dev_land_internal.h). */
 #define DL_LINT_TIMEOUT_MS (30 * 60 * 1000)
 
 /* ── failure ───────────────────────────────────────────────────────────── */
 
-static void dl_fail(struct zcl_command_reply *reply, const char *code,
+void dl_fail(struct zcl_command_reply *reply, const char *code,
                     const char *phase, const char *msg, const char *evidence)
 {
     (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
@@ -302,19 +301,12 @@ static bool dl_tipish_ok(const char *s)
     return true;
 }
 
-static bool dl_sha_ok(const char *s)
+bool dl_sha_ok(const char *s)
 {
     return s && strlen(s) == 40 && dl_tipish_ok(s);
 }
 
 /* ── state dirs ────────────────────────────────────────────────────────── */
-
-struct dl_dirs {
-    char root[4096];
-    char land[4096];
-    char logs[4096];
-    char wt[4096];
-};
 
 static bool dl_mkdir_one(const char *path)
 {
@@ -690,84 +682,6 @@ static bool dl_tor_source_config(const char *wt, char *out, size_t cap)
     return n >= 0 && (size_t)n < cap;
 }
 
-/* state:   queued | inflight | landed | failed | conflict | cancelled
- * phase:   "" | rebase | regen | prebuild | prove | push  (meaningful when
- *          inflight). "regen" is native_dev_land_regen.c's unconditional
- *          post-rebase pass over the generated-doc targets (capability
- *          inventory, executor routing, doc-counts) — separate from the
- *          rebase's own conflict-only auto-resolve of the same artifacts
- *          (see "rebase conflicts on the artifacts every train
- *          regenerates" below), which fires only when a rebase conflicts
- *          on them. Both AMEND their regenerated docs into the rebased
- *          tip, and the amended id replaces `local`: this row schema gains
- *          no separate field for it, because `local` is already "the tip
- *          everything downstream proves and pushes". */
-struct dl_row {
-    long long seq;
-    long long priority_seq;
-    char ts[64];
-    char tip[80];
-    char worktree[4096];
-    char note[DL_NOTE_MAX + 1];
-    char state[16];
-    char phase[16];
-    long long attempt;
-    long long started;
-    /* Unix seconds at which the outcome writer recorded state "landed"; 0 for
-     * every other row. `ts` is the SUBMIT time and `started` the proof start,
-     * so only this says when the train landed. */
-    long long landed_at;
-    char base[80];
-    char local[80];
-    char tree[80];
-    char proof_intent[176];
-    long long predecessor_seq;
-    char predecessor_local[80], predecessor_base[80], predecessor_tree[80];
-    char predecessor_intent[176];
-    /* Signed Git landing intent, bound to the exact proven pair. The bundle
-     * lives under land/ and its digest is checked again before dispatch. */
-    char publication_target[65];
-    char publication_proof[65];
-    char publication_bundle[65];
-    char publication_signer[65];
-    char publication_signature[129];
-    char remote_tip[65];
-    char remote_source[65];
-    char remote_signer[65];
-    char remote_signature[129];
-    char pushed[80];
-    char dimension[48];
-    char log_path[4096];
-    /* Keep the complete bounded worktree-dependency refusal, including its
-     * repair command, rather than truncating the upstream 1024-byte text. */
-    char detail[1024];
-    /* A possible send without durable diagnostics forbids another send.
-     * Remote observation remains authoritative, including after a crash. */
-    bool push_diagnostic_pending;
-    long long fence_peer;
-    bool publication_hold;
-    /* The origin main this queued row was last replayed onto by the
-     * queued-row conflict precheck, so a fresh step process does not
-     * replay it again until main moves. A cache, never authority: absence, empty or a fitting
-     * non-SHA string only means "not checked yet". */
-    char prechecked[80];
-    /* Uncertain precheck answers against `uncertain_main`; at
-     * DL_PRECHECK_TRIES the check leaves the row alone until main moves.
-     * Also a cache: absence, empty or a fitting non-SHA string
-     * means "no answers yet". */
-    char uncertain_main[80];
-    long long uncertain_tries;
-    /* Set once the producer-stale recovery has been spent for this row until
-     * main moves. Written before the recovery runs; independent of dimension.
-     * Optional on disk: an older row loads as "not tried". */
-    long long producer_recovered;
-    /* Digest of the last phase mail posted for this row (state, phase,
-     * attempt, tip, dimension, note, detail, log); 0 means nothing posted.
-     * Optional on disk: an older row loads as 0, an older binary ignores
-     * the key. A cache that only decides whether a repeat row is mailed. */
-    long long phase_mail;
-};
-
 static bool dl_hold_field(const struct json_value *doc, bool *hold)
 {
     size_t found = 0;
@@ -935,7 +849,7 @@ static bool dl_remote_receipt_shape_ok(const struct dl_row *r)
         dl_hex_ok(r->remote_signature, 128);
 }
 
-static void dl_publication_clear(struct dl_row *r)
+void dl_publication_clear(struct dl_row *r)
 {
     r->publication_target[0] = '\0';
     r->publication_proof[0] = '\0';
@@ -1006,6 +920,7 @@ static bool dl_optional_row_strings(const char *line, struct dl_row *r)
         { "base", r->base, sizeof(r->base) },
         { "local", r->local, sizeof(r->local) },
         { "tree", r->tree, sizeof(r->tree) },
+        { "train_commit", r->train_commit, sizeof(r->train_commit) },
         { "proof_intent", r->proof_intent, sizeof(r->proof_intent) },
         { "publication_target", r->publication_target, sizeof(r->publication_target) },
         { "publication_proof", r->publication_proof, sizeof(r->publication_proof) },
@@ -1038,6 +953,10 @@ static bool dl_parse_dispatch_fields(const char *line, struct dl_row *r)
     (void)dl_line_int(line, "producer_recovered", &r->producer_recovered);
     /* Absent, non-integer or out-of-range (ERANGE) text stays 0; any other non-zero integer (or "1x") is spent. */
     r->producer_recovered = r->producer_recovered != 0;
+    (void)dl_line_int(line, "train_solo", &r->train_solo);
+    r->train_solo = r->train_solo != 0;
+    if (!dl_sha_ok(r->train_commit))
+        r->train_commit[0] = '\0';
     (void)dl_line_int(line, "phase_mail", &r->phase_mail);
     if (r->phase_mail < 0)
         r->phase_mail = 0;
@@ -1197,7 +1116,8 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  "\"prechecked_main\":\"%s\","
                  "\"precheck_uncertain_main\":\"%s\","
                  "\"precheck_uncertain\":%lld,\"producer_recovered\":%lld,"
-                 "\"phase_mail\":%lld,\"detail\":\"%s\","
+                 "\"phase_mail\":%lld,\"train_solo\":%lld,"
+                 "\"train_commit\":\"%s\",\"detail\":\"%s\","
                  "\"push_diagnostic_pending\":%d,\"fence_peer\":%lld,"
                  "\"publication_hold\":%s%s}\n",
                  r->seq, priority, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
@@ -1208,7 +1128,9 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  /* Unescaped on purpose: dl_prechecked_parse() and the
                   * precheck admit only a 40-hex commit id or "". */
                  e_dim, e_log, r->prechecked, r->uncertain_main,
-                 r->uncertain_tries, r->producer_recovered, r->phase_mail, e_detail,
+                 r->uncertain_tries, r->producer_recovered, r->phase_mail,
+                 r->train_solo, dl_sha_ok(r->train_commit) ? r->train_commit : "",
+                 e_detail,
                  r->push_diagnostic_pending ? 1 : 0,
                  r->fence_peer, dl_hold_literal(r->publication_hold), dependency);
     if (w <= 0 || (size_t)w >= cap)
@@ -1300,7 +1222,7 @@ static bool dl_rows_reserve(struct dl_row **rows, size_t *cap, size_t n,
 /* A malformed or legacy queue row is an obstruction, never permission to
  * forget that work. Preserve the file byte-for-byte and name the offending
  * record so another worker can diagnose it. A missing file is empty. */
-static bool dl_load_rows(const char *qpath, struct dl_row **rows_out,
+bool dl_load_rows(const char *qpath, struct dl_row **rows_out,
                          size_t *n_out, char *why, size_t why_cap)
 {
     char *text;
@@ -1548,7 +1470,7 @@ static bool dl_queue_parent_flush(const char *landdir)
 
 /* Whole-file rewrite under the row lock: flush the file before rename and
  * the parent after rename, so a pre-push checkpoint survives a restart. */
-static bool dl_rewrite_rows(const char *landdir, const char *qpath,
+bool dl_rewrite_rows(const char *landdir, const char *qpath,
                             const struct dl_row *rows, size_t n)
 {
     char tmp[4096 + 32];
@@ -1621,7 +1543,7 @@ static int dl_lock_path(const char *path, bool nonblocking)
     return fd;
 }
 
-static int dl_rows_lock(const char *landdir)
+int dl_rows_lock(const char *landdir)
 {
     char path[4096 + 32];
     if (!landdir ||
@@ -1646,7 +1568,7 @@ static int dl_rows_lock(const char *landdir)
     return dl_lock_path(path, true);
 }
 
-static void dl_unlock(int fd)
+void dl_unlock(int fd)
 {
     if (fd < 0)
         return;
@@ -1661,7 +1583,7 @@ static void dl_unlock(int fd)
 /* Run one git command in `dir` and capture its stdout. No shell is ever
  * involved: argv goes straight to execvp through util/spawn.h. Returns the
  * child's exit status, or -1 when the launch itself failed. */
-static int dl_git(const char *dir, const char *const *args, char *out,
+int dl_git(const char *dir, const char *const *args, char *out,
                   size_t cap, int timeout_ms)
 {
     const char *argv[24];
@@ -1981,7 +1903,7 @@ static bool dl_history_stream(struct platform_positioned_file *file,
     return true;
 }
 
-static bool dl_history_read(const char *path,
+bool dl_history_read(const char *path,
     bool (*visit)(const struct dl_row *, void *), void *context,
     char *why, size_t why_cap)
 {
@@ -2417,6 +2339,12 @@ static const char *dl_stub(void)
      * development binary can be told to skip a proof. */
     return NULL;
 #endif
+}
+
+/* The train module asks only whether the proof is stubbed (tests). */
+bool dl_stubbed(void)
+{
+    return dl_stub() != NULL;
 }
 
 /* The queued pair is already durable. Any worker with this checkout can run
@@ -3527,9 +3455,11 @@ static int dl_cancel_acquire(const struct dl_dirs *d, const char *qpath,
  * (`*nrows` becomes the kept count). A durable push checkpoint means the
  * remote may already have moved even if this process has not heard back:
  * preserve the row for reconciliation unless the same pair was just
- * observed settled as refused. Returns 1 taken, 0 absent, -1 refused (the
- * reply names why). */
-static int dl_cancel_take(struct dl_row *rows, size_t *nrows, long long seq,
+ * observed settled as refused. A bound train member's commits ride in its
+ * head's pair, so it is never cancelled out from under that pair. Returns
+ * 1 taken, 0 absent, -1 refused (the reply names why). */
+static int dl_cancel_take(const struct dl_dirs *d, struct dl_row *rows,
+                          size_t *nrows, long long seq,
                           bool push_settled, const struct dl_row *settled,
                           struct dl_row *hit, struct zcl_command_reply *reply)
 {
@@ -3544,6 +3474,9 @@ static int dl_cancel_take(struct dl_row *rows, size_t *nrows, long long seq,
                         "run dev land step to observe the exact remote");
                 return -1;
             }
+            if (dl_train_refuse_bound(d, rows, *nrows, &rows[i], "cancel",
+                                      reply))
+                return -1;
             found = true;
             *hit = rows[i];
             continue;               /* dropped from the live queue */
@@ -3598,7 +3531,7 @@ static void dl_cancel(const struct zcl_command_request *req,
     }
     memset(&hit, 0, sizeof(hit));
     kept = nrows;
-    int taken = dl_cancel_take(rows, &kept, seq, push_settled, &settled,
+    int taken = dl_cancel_take(&d, rows, &kept, seq, push_settled, &settled,
                                &hit, reply);
     if (taken <= 0) {
         free(rows);
@@ -3842,7 +3775,7 @@ static const char *dl_timer_word(enum dl_timer_unit timer)
     return "timer_unit=unknown";
 }
 
-static bool dl_queued_precedes(const struct dl_row *row,
+bool dl_queued_precedes(const struct dl_row *row,
                                const struct dl_row *best)
 {
     return !best || row->priority_seq < best->priority_seq ||
@@ -4275,6 +4208,8 @@ static bool dl_push_queued(struct json_value *arr, const struct dl_row *r)
          json_push_kv_str(&item, "ts", r->ts) &&
          json_push_kv_int(&item, "attempt", r->attempt) &&
          json_push_kv_str(&item, "note", r->note) &&
+         json_push_kv_str(&item, "train_intent", r->proof_intent) &&
+         json_push_kv_str(&item, "train_commit", r->train_commit) &&
          json_push_back(arr, &item);
     json_free(&item);
     return ok;
@@ -4466,6 +4401,7 @@ static void dl_status(const struct zcl_command_request *req,
             have_inflight = true;
         }
     }
+    dl_train_status(&inflight, rows, nrows);
     /* The last ten outcomes, oldest first. */
     if (!dl_outcomes_tail(opath, last, &nlast, read_why, sizeof(read_why)))
         goto fail;
@@ -4723,7 +4659,7 @@ static size_t dl_successor_index(const struct dl_row *rows, size_t nrows,
     return SIZE_MAX;
 }
 
-static void dl_log(const struct dl_row *row, const char *text);
+void dl_log(const struct dl_row *row, const char *text);
 
 /* Append the higher-sequence successor while keeping its original claim
  * priority. The original tip stays byte-identical; a crash sees either
@@ -4785,7 +4721,7 @@ done:
     return ok;
 }
 
-static void dl_step_reply(struct zcl_command_reply *reply,
+void dl_step_reply(struct zcl_command_reply *reply,
                           const struct dl_row *row, const char *state)
 {
     (void)json_push_kv_str(&reply->data, "leaf", DL_LEAF);
@@ -4831,7 +4767,7 @@ static void dl_step_reply(struct zcl_command_reply *reply,
  * it as done. Returns true when the commit landed (caller proceeds to
  * build its normal reply via dl_step_reply); false when it already wrote
  * the persist-failure reply itself. */
-static bool dl_commit_or_report(const struct dl_dirs *d, struct dl_row *row,
+bool dl_commit_or_report(const struct dl_dirs *d, struct dl_row *row,
                                 bool terminal,
                                 struct zcl_command_reply *reply,
                                 const char *intended_state)
@@ -4850,14 +4786,14 @@ static bool dl_commit_or_report(const struct dl_dirs *d, struct dl_row *row,
     return false;
 }
 
-static void dl_log_path(const struct dl_dirs *d, struct dl_row *row)
+void dl_log_path(const struct dl_dirs *d, struct dl_row *row)
 {
     (void)snprintf(row->log_path, sizeof(row->log_path),
                    "%s/land-%lld-a%lld.log", d->logs, row->seq,
                    row->attempt);
 }
 
-static void dl_log(const struct dl_row *row, const char *text)
+void dl_log(const struct dl_row *row, const char *text)
 {
     if (row->log_path[0] && text)
         (void)dl_append_text(row->log_path, text);
@@ -5751,7 +5687,7 @@ static void dl_row_move_base(struct dl_row *row, const char *observed_main)
  * and stays empty on every other path — so a caller can tell a rebase
  * that amended regenerated docs into the tip from one that did not,
  * without having to re-derive it from git. */
-static int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
+int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
                      const char *observed_main, char *why, size_t why_cap,
                      char *regen_note, size_t regen_note_cap)
 {
@@ -5888,7 +5824,7 @@ static int dl_lint_new_source(const struct dl_dirs *d, struct dl_row *row)
 }
 
 /* Everything the landing lints before it asks for a proof. */
-static int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *row)
+int dl_lint_candidate(const struct dl_dirs *d, struct dl_row *row)
 {
     int rc = dl_lint_fast(d, row);
     return rc != 0 ? rc : dl_lint_new_source(d, row);
@@ -6940,7 +6876,7 @@ static bool dl_wt_hooks_refresh(const struct dl_dirs *d,
 }
 #endif
 
-static bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
+bool dl_wt_proof_deps_ensure(const struct dl_dirs *d,
                                     const struct dl_row *r, bool stubbed,
                                     char *why, size_t why_cap)
 {
@@ -7366,7 +7302,7 @@ static void dl_window_tick(const struct dl_dirs *d, const struct dl_row *row)
     dl_window_log(row, note);
 }
 
-static bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row)
+bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row)
 {
     char rev[96];
     char tree[256];
@@ -7387,6 +7323,8 @@ static bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row)
                  row->local, row->base);
     return n > 0 && (size_t)n < sizeof(row->proof_intent);
 }
+
+
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
 /* The settled failure's evidence digest, read through the same status
@@ -7493,8 +7431,9 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
 {
     char detail[512];
     enum dl_proof p;
+    size_t members = 0;
     (void)snprintf(row->phase, sizeof(row->phase), "prove");
-    if (!dl_proof_intent_bind(d, row)) {
+    if (!dl_train_intent_bind(d, row, &members)) {
         (void)snprintf(row->state, sizeof(row->state), "failed");
         (void)snprintf(row->dimension, sizeof(row->dimension),
                        "proof_intent");
@@ -7516,6 +7455,8 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
     dl_log(row, detail);
     dl_log(row, "\n");
     if (p == DL_PROOF_UNAVAILABLE || p == DL_PROOF_FAILED) {
+        if (members && dl_train_fallback(d, row, detail, reply))
+            return;
         (void)snprintf(row->state, sizeof(row->state), "failed");
         (void)snprintf(row->dimension, sizeof(row->dimension), "proof");
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
@@ -7528,6 +7469,9 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
     }
     if (dl_commit_or_report(d, row, false, reply, "started")) {
         dl_step_reply(reply, row, "started");
+        if (members)
+            (void)json_push_kv_int(&reply->data, "train_members",
+                                   (long long)members);
         dl_window_begin(d, row);
     }
 }
@@ -7561,8 +7505,8 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
     }
     if (dl_reconcile_landing(d, row, observed_main, true, reply))
         return;
-    rebased = dl_rebase(d, row, observed_main, why, sizeof(why), regen_note,
-                        sizeof(regen_note));
+    rebased = dl_train_rebase(d, row, observed_main, why, sizeof(why),
+                              regen_note, sizeof(regen_note));
     if (rebased == 0) {
         (void)snprintf(row->state, sizeof(row->state), "conflict");
         (void)snprintf(row->dimension, sizeof(row->dimension), "rebase");
@@ -8362,7 +8306,11 @@ static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
                               const char *observed_main,
                               struct zcl_command_reply *reply)
 {
-    char prior[256];
+    char prior[256], stale[176];
+    long long head = row->seq;
+    /* A superseded train pair can never publish: release its members once
+     * the head's successor is durable. */
+    (void)snprintf(stale, sizeof(stale), "%s", row->proof_intent);
     (void)snprintf(prior, sizeof(prior),
                    "superseded proof local=%.64s base=%.64s tree=%.64s\n",
                    row->local, row->base, row->tree);
@@ -8387,6 +8335,7 @@ static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "queued");
             (void)json_push_kv_int(&reply->data, "predecessor_seq",
                                    predecessor);
+            dl_train_unbind(d, stale, head, false);
         } else {
             dl_step_reply(reply, row, "rebased");
             (void)json_push_kv_str(&reply->data, "persist", "failed");
@@ -8407,8 +8356,10 @@ static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
                    observed_main);
     dl_log(row, row->detail);
     dl_log(row, "\n");
-    if (dl_commit_or_report(d, row, false, reply, "rebased"))
-        dl_step_reply(reply, row, "rebased");
+    if (!dl_commit_or_report(d, row, false, reply, "rebased"))
+        return;
+    dl_step_reply(reply, row, "rebased");
+    dl_train_unbind(d, stale, head, false);
 }
 
 static void dl_push_intent_blocked(const struct dl_row *row, bool required,
@@ -8820,7 +8771,7 @@ static bool dl_publication_held(const struct dl_row *row,
  * configured user.email, so a private address never costs a remote round
  * trip (GH007). Nothing is hard-coded: the reference is the repo's own
  * config, and an unconfigured worktree has nothing to compare against. */
-static bool dl_push_identity_ok(const struct dl_dirs *d, const struct dl_row *row)
+bool dl_push_identity_ok(const struct dl_dirs *d, const struct dl_row *row)
 {
     char email[256], total[64], match[64], fixed[320], range[200];
     const char *get[] = { "config", "--get", "user.email", NULL };
@@ -8869,6 +8820,22 @@ static bool dl_push_identity_refuse(const struct dl_dirs *d, struct dl_row *row,
     return true;
 }
 
+/* The land train member's own landing intent: its own seq and bundle, the
+ * head's target and proof digest. An already sealed member is verified
+ * again (native_dev_land_train.c). */
+bool dl_train_seal_member(const struct dl_dirs *d, const struct dl_row *head,
+                          struct dl_row *m)
+{
+    if (m->publication_signature[0])
+        return dl_publication_verify(d, m);
+    (void)snprintf(m->publication_target, sizeof(m->publication_target), "%s",
+                   head->publication_target);
+    return dl_publication_proof_digest(d, m, m->publication_proof) &&
+           strcmp(m->publication_proof, head->publication_proof) == 0 &&
+           dl_publication_bundle_make(d, m, m->publication_bundle) &&
+           dl_publication_sign(m) && dl_publication_verify(d, m);
+}
+
 static bool dl_push_allowed(const struct dl_dirs *d, struct dl_row *row,
                               struct zcl_command_reply *reply)
 {
@@ -8879,7 +8846,7 @@ static bool dl_push_allowed(const struct dl_dirs *d, struct dl_row *row,
         return false;
     }
     return !dl_publication_held(row, reply) && dl_push_intent_ready(d, row, reply) &&
-           !dl_push_identity_refuse(d, row, reply);
+           dl_train_gate(d, row, reply) && !dl_push_identity_refuse(d, row, reply);
 }
 
 /* A hold that landed after the refresh makes the pre-push commit refuse a
@@ -9166,6 +9133,8 @@ static void dl_resume_failed_proof(const struct dl_dirs *d,
         dl_resume_interrupted_proof(d, row, detail, reply))
         return;
 #endif
+    if (dl_train_fallback(d, row, detail, reply))
+        return;
     bool host_load = dl_host_load_failure(detail);
     dl_log(row, detail);
     dl_log(row, "\n");
@@ -9851,10 +9820,11 @@ struct dl_precheck_tally {
 };
 
 /* Queued, not yet settled for this main, and not already left alone on
- * it after DL_PRECHECK_TRIES uncertain answers. */
+ * it after DL_PRECHECK_TRIES uncertain answers. A row bound to a train is
+ * judged with its train, never replayed alone. */
 static bool dl_precheck_due(const struct dl_row *row, const char *observed_main)
 {
-    if (strcmp(row->state, "queued") != 0 ||
+    if (strcmp(row->state, "queued") != 0 || row->proof_intent[0] ||
         strcmp(row->prechecked, observed_main) == 0)
         return false;
     return strcmp(row->uncertain_main, observed_main) != 0 ||
@@ -12906,7 +12876,8 @@ done:
 #endif
 }
 
-[[maybe_unused]] static struct dl_row *dl_hold_pick(struct dl_row *rows, size_t count,
+[[maybe_unused]] static struct dl_row *dl_hold_pick(const struct dl_dirs *d,
+                                   struct dl_row *rows, size_t count,
                                    long long seq, struct zcl_command_reply *reply)
 {
     struct dl_row *hit = NULL;
@@ -12929,6 +12900,8 @@ done:
                 "hold and release refuse sealed or dispatch-checkpoint rows", "locked queue");
         return NULL;
     }
+    if (dl_train_refuse_bound(d, rows, count, hit, "hold", reply))
+        return NULL;
     return hit;
 }
 
@@ -12956,7 +12929,7 @@ done:
         dl_fail(reply, "QUEUE_READ_FAILED", "hold", "cannot read queue", why);
         goto done;
     }
-    struct dl_row *hit = dl_hold_pick(rows, count, seq, reply);
+    struct dl_row *hit = dl_hold_pick(d, rows, count, seq, reply);
     if (!hit) goto done;
     hit->publication_hold = hold;
     if (!dl_rewrite_rows(d->land, path, rows, count)) {

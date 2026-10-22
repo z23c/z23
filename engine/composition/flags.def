@@ -1374,6 +1374,9 @@ Z23_FLAG("ZCL_LAND_TEST_PRECHECK_TOOL_FAIL", "env_test", "-", "-",
           "test-only failure of the queued-row precheck merge step; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND", "env_test", "-", "-",
           "test-only terminal append refusal; first use tools/command/native_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_TRAIN_WIDTH", "env_runtime", "-", "-",
+          "rows one exact land proof may cover, 2 to 8; unset or any other "
+          "value proves every row alone; first use tools/command/native_dev_land_train.c:auto")
 Z23_FLAG("ZCL_LAND_WINDOW", "env_runtime", "1", "-",
           "0 turns off the lander's LAND-WINDOW coordination (deferring a "
           "proof start behind another host's open window on the same base, "
