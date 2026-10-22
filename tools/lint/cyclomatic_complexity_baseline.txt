@@ -327,14 +327,6 @@ contexts/commons/modules/vcs/src/package_manifest.c:vcs_package_manifest_parse:2
 contexts/commons/modules/vcs/src/package_mapping.c:blob_map_parse:19
 contexts/commons/modules/vcs/src/package_mapping.c:mapping_set_serialize:20
 contexts/commons/modules/vcs/src/package_mapping.c:vcs_package_mapping_set_build:22
-contexts/commons/modules/vcs/src/package_prepare.c:prepare_apply_programs:17
-contexts/commons/modules/vcs/src/package_prepare.c:prepare_finish:52
-contexts/commons/modules/vcs/src/package_prepare.c:prepare_regular:29
-contexts/commons/modules/vcs/src/package_prepare.c:prepare_regular#2:28
-contexts/commons/modules/vcs/src/package_prepare.c:prepare_walk_dir:31
-contexts/commons/modules/vcs/src/package_prepare.c:prepare_walk_dir#2:20
-contexts/commons/modules/vcs/src/package_prepare.c:vcs_package_scan_layout:21
-contexts/commons/modules/vcs/src/package_prepare.c:vcs_package_scan_layout#2:20
 contexts/commons/modules/vcs/src/package_prepare_schema.c:prepare_meta_closed:39
 contexts/commons/modules/vcs/src/package_public_shape.c:shape_eval_local:19
 contexts/commons/modules/vcs/src/package_publish.c:vcs_package_publish_rule_string:20
