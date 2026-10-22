@@ -223,6 +223,19 @@ static bool prop_value(const char *show, const char *key, char *out,
 }
 
 #if defined(_WIN32)
+static bool slo_in_range(int v, int lo, int hi)
+{
+    return v >= lo && v <= hi;
+}
+
+static bool slo_stamp_valid(int year, int mon, int day, int hour, int min,
+                            int sec)
+{
+    return year >= 1970 && slo_in_range(mon, 1, 12) &&
+           slo_in_range(day, 1, 31) && slo_in_range(hour, 0, 23) &&
+           slo_in_range(min, 0, 59) && slo_in_range(sec, 0, 60);
+}
+
 /* UCRT has no strptime. This observer only accepts systemctl's weekday stamp. */
 static char *slo_strptime(const char *text, const char *fmt, struct tm *out)
 {
@@ -236,8 +249,7 @@ static char *slo_strptime(const char *text, const char *fmt, struct tm *out)
     if (sscanf(p + 1, "%d-%d-%d %d:%d:%d",
                &year, &mon, &day, &hour, &min, &sec) != 6)
         return NULL;
-    if (year < 1970 || mon < 1 || mon > 12 || day < 1 || day > 31 ||
-        hour < 0 || hour > 23 || min < 0 || min > 59 || sec < 0 || sec > 60)
+    if (!slo_stamp_valid(year, mon, day, hour, min, sec))
         return NULL;
     memset(out, 0, sizeof(*out));
     out->tm_year = year - 1900;

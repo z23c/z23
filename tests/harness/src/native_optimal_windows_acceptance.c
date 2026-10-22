@@ -132,124 +132,181 @@ static bool feed_wire(platform_socket_t from, platform_socket_t to,
     return ok;
 }
 
-static int noise_over_winsock(void)
+/* One loopback socket pair plus the two transports and the sealed-payload
+ * buffers a phase owns; noise_session_free is the single cleanup path. */
+struct noise_session {
+    platform_socket_t left;
+    platform_socket_t right;
+    struct noise_transport *ini;
+    struct noise_transport *res;
+    uint8_t *sealed;
+    uint8_t *ct;
+    size_t sealed_len;
+};
+
+static void noise_session_init(struct noise_session *s)
 {
-    uint8_t ini_priv[32], res_priv[32];
-    if (!rng_fill(ini_priv, sizeof(ini_priv)) ||
-        !rng_fill(res_priv, sizeof(res_priv)))
-        return fail("identity rng");
+    memset(s, 0, sizeof(*s));
+    s->left = PLATFORM_SOCKET_INVALID;
+    s->right = PLATFORM_SOCKET_INVALID;
+}
 
-    platform_socket_t left = PLATFORM_SOCKET_INVALID;
-    platform_socket_t right = PLATFORM_SOCKET_INVALID;
-    if (!loopback_pair(&left, &right))
-        return fail("winsock loopback");
+static void noise_session_free(struct noise_session *s)
+{
+    free(s->ct);
+    free(s->sealed);
+    noise_transport_free(s->ini);
+    noise_transport_free(s->res);
+    close_pair(s->left, s->right);
+    noise_session_init(s);
+}
 
-    uint8_t *msg1 = NULL;
-    size_t msg1_len = 0;
-    struct noise_transport *ini =
-        noise_transport_begin(true, ini_priv, k_magic, &msg1, &msg1_len);
-    struct noise_transport *res =
-        noise_transport_begin(false, res_priv, k_magic, NULL, NULL);
+/* Begin both transports; true when the initiator's first message has the
+ * expected length. `*msg1` is handed to the caller. */
+static bool hs_begin(struct noise_session *s, const uint8_t *ini_priv,
+                     const uint8_t *res_priv, uint8_t **msg1,
+                     size_t *msg1_len)
+{
     size_t expect1 = noise_transport_handshake_msg_len(0);
-    size_t expect2 = noise_transport_handshake_msg_len(1);
-    size_t expect3 = noise_transport_handshake_msg_len(2);
-    uint8_t *msg2 = NULL, *msg3 = NULL, *tail = NULL;
-    size_t msg2_len = 0, msg3_len = 0, tail_len = 0;
-    bool ok = ini && res && msg1 && msg1_len == expect1 && expect1 > 0 &&
-              feed_wire(left, right, res, msg1, msg1_len, &msg2, &msg2_len) &&
-              msg2_len == expect2 &&
-              feed_wire(right, left, ini, msg2, msg2_len, &msg3, &msg3_len) &&
-              msg3_len == expect3 &&
-              feed_wire(left, right, res, msg3, msg3_len, &tail, &tail_len) &&
-              tail_len == 0;
-    msg1 = NULL;
-    msg2 = NULL;
-    msg3 = NULL;
+    s->ini = noise_transport_begin(true, ini_priv, k_magic, msg1, msg1_len);
+    s->res = noise_transport_begin(false, res_priv, k_magic, NULL, NULL);
+    return s->ini && s->res && *msg1 && *msg1_len == expect1 && expect1 > 0;
+}
+
+/* feed_wire plus a check that the peer's reply has the expected length. */
+static bool hs_relay(platform_socket_t from, platform_socket_t to,
+                     struct noise_transport *peer, uint8_t *wire,
+                     size_t wire_len, size_t expect_reply, uint8_t **reply,
+                     size_t *reply_len)
+{
+    return feed_wire(from, to, peer, wire, wire_len, reply, reply_len) &&
+           *reply_len == expect_reply;
+}
+
+static bool noise_handshake(struct noise_session *s, const uint8_t *ini_priv,
+                            const uint8_t *res_priv)
+{
+    uint8_t *msg1 = NULL, *msg2 = NULL, *msg3 = NULL, *tail = NULL;
+    size_t msg1_len = 0, msg2_len = 0, msg3_len = 0, tail_len = 0;
+    bool ok = hs_begin(s, ini_priv, res_priv, &msg1, &msg1_len) &&
+              hs_relay(s->left, s->right, s->res, msg1, msg1_len,
+                       noise_transport_handshake_msg_len(1), &msg2,
+                       &msg2_len) &&
+              hs_relay(s->right, s->left, s->ini, msg2, msg2_len,
+                       noise_transport_handshake_msg_len(2), &msg3,
+                       &msg3_len) &&
+              hs_relay(s->left, s->right, s->res, msg3, msg3_len, 0, &tail,
+                       &tail_len);
     free(tail);
     struct noise_transport_snapshot ini_snap, res_snap;
-    ok = ok && noise_transport_snapshot(ini, &ini_snap) &&
-         noise_transport_snapshot(res, &res_snap) &&
-         ini_snap.established && res_snap.established;
+    return ok && noise_transport_snapshot(s->ini, &ini_snap) &&
+           noise_transport_snapshot(s->res, &res_snap) &&
+           ini_snap.established && res_snap.established;
+}
 
-    uint8_t *sealed = NULL, *plain = NULL, *extra = NULL;
-    size_t sealed_len = 0, plain_len = 0, extra_len = 0;
-    ok = ok && noise_transport_write(ini, k_payload, sizeof(k_payload),
-                                     &sealed, &sealed_len) &&
-         sealed && sealed_len > 0 &&
-         platform_socket_send_all(left, sealed, sealed_len);
-    uint8_t *ct = ok ? malloc(sealed_len) : NULL;
-    ok = ok && ct && recv_exact(right, ct, sealed_len) &&
-         noise_transport_feed(res, ct, sealed_len, &extra, &extra_len,
-                              &plain, &plain_len) &&
-         extra_len == 0 && plain_len == sizeof(k_payload) &&
-         memcmp(plain, k_payload, sizeof(k_payload)) == 0;
+static bool noise_send_sealed(struct noise_session *s)
+{
+    return noise_transport_write(s->ini, k_payload, sizeof(k_payload),
+                                 &s->sealed, &s->sealed_len) &&
+           s->sealed && s->sealed_len > 0 &&
+           platform_socket_send_all(s->left, s->sealed, s->sealed_len);
+}
+
+static bool noise_recv_verify(struct noise_session *s)
+{
+    uint8_t *plain = NULL, *extra = NULL;
+    size_t plain_len = 0, extra_len = 0;
+    s->ct = malloc(s->sealed_len);
+    bool ok = s->ct && recv_exact(s->right, s->ct, s->sealed_len) &&
+              noise_transport_feed(s->res, s->ct, s->sealed_len, &extra,
+                                   &extra_len, &plain, &plain_len) &&
+              extra_len == 0 && plain_len == sizeof(k_payload) &&
+              memcmp(plain, k_payload, sizeof(k_payload)) == 0;
     free(extra);
     free(plain);
-    if (!ok) {
-        free(ct);
-        free(sealed);
-        noise_transport_free(ini);
-        noise_transport_free(res);
-        close_pair(left, right);
-        return fail("winsock noise handshake or payload");
-    }
+    return ok;
+}
 
-    ct[sealed_len / 2] ^= 0x01u;
+/* Flip one ciphertext bit and report whether the responder accepted it. */
+static bool noise_tampered_accepted(struct noise_session *s)
+{
     uint8_t *bad_wire = NULL, *bad_plain = NULL;
     size_t bad_wire_len = 0, bad_plain_len = 0;
-    bool tampered = noise_transport_feed(res, ct, sealed_len, &bad_wire,
-                                         &bad_wire_len, &bad_plain,
-                                         &bad_plain_len);
+    s->ct[s->sealed_len / 2] ^= 0x01u;
+    bool tampered = noise_transport_feed(s->res, s->ct, s->sealed_len,
+                                         &bad_wire, &bad_wire_len,
+                                         &bad_plain, &bad_plain_len);
     free(bad_wire);
     free(bad_plain);
-    free(ct);
-    free(sealed);
-    noise_transport_free(ini);
-    noise_transport_free(res);
-    close_pair(left, right);
+    return tampered;
+}
+
+static int noise_payload_phase(const uint8_t *ini_priv,
+                               const uint8_t *res_priv)
+{
+    struct noise_session s;
+    noise_session_init(&s);
+    if (!loopback_pair(&s.left, &s.right))
+        return fail("winsock loopback");
+    if (!noise_handshake(&s, ini_priv, res_priv) || !noise_send_sealed(&s) ||
+        !noise_recv_verify(&s)) {
+        noise_session_free(&s);
+        return fail("winsock noise handshake or payload");
+    }
+    bool tampered = noise_tampered_accepted(&s);
+    noise_session_free(&s);
     if (tampered)
         return fail("tampered message was accepted");
     puts("native_optimal: tampered message refused");
+    return 0;
+}
 
-    if (!loopback_pair(&left, &right))
-        return fail("winsock loopback for tampered handshake");
-    msg1 = NULL;
-    msg1_len = 0;
-    msg2 = NULL;
-    msg2_len = 0;
-    ini = noise_transport_begin(true, ini_priv, k_magic, &msg1, &msg1_len);
-    res = noise_transport_begin(false, res_priv, k_magic, NULL, NULL);
-    /* Message 0 is the clear `e, e1` tokens. The first authenticated
-     * handshake message is the responder's `e, ee, ekem1, s, es`. */
-    if (!ini || !res || !msg1 || msg1_len != expect1 ||
-        !feed_wire(left, right, res, msg1, msg1_len, &msg2, &msg2_len) ||
-        !msg2 || msg2_len != expect2 || expect2 == 0) {
-        free(msg2);
-        noise_transport_free(ini);
-        noise_transport_free(res);
-        close_pair(left, right);
-        return fail("tampered handshake setup");
-    }
-    msg1 = NULL;
-    msg2[msg2_len - 1] ^= 0x01u;
-    uint8_t *damaged_on_wire = malloc(msg2_len);
-    bool delivered = damaged_on_wire &&
-                     platform_socket_send_all(right, msg2, msg2_len) &&
-                     recv_exact(left, damaged_on_wire, msg2_len) &&
-                     memcmp(damaged_on_wire, msg2, msg2_len) == 0;
+/* Send the damaged message over the socket and feed it to the initiator.
+ * `*delivered` reports whether the bytes crossed intact. */
+static bool noise_damaged_accepted(struct noise_session *s, const uint8_t *msg2,
+                                   size_t msg2_len, bool *delivered)
+{
+    uint8_t *on_wire = malloc(msg2_len);
     uint8_t *hs_reply = NULL, *hs_plain = NULL;
     size_t hs_reply_len = 0, hs_plain_len = 0;
-    bool accepted = delivered &&
-                    noise_transport_feed(ini, damaged_on_wire, msg2_len,
+    *delivered = on_wire && platform_socket_send_all(s->right, msg2, msg2_len) &&
+                 recv_exact(s->left, on_wire, msg2_len) &&
+                 memcmp(on_wire, msg2, msg2_len) == 0;
+    bool accepted = *delivered &&
+                    noise_transport_feed(s->ini, on_wire, msg2_len,
                                          &hs_reply, &hs_reply_len,
                                          &hs_plain, &hs_plain_len);
     free(hs_reply);
     free(hs_plain);
-    free(damaged_on_wire);
+    free(on_wire);
+    return accepted;
+}
+
+static int noise_tampered_handshake_phase(const uint8_t *ini_priv,
+                                          const uint8_t *res_priv)
+{
+    struct noise_session s;
+    noise_session_init(&s);
+    if (!loopback_pair(&s.left, &s.right))
+        return fail("winsock loopback for tampered handshake");
+    uint8_t *msg1 = NULL, *msg2 = NULL;
+    size_t msg1_len = 0, msg2_len = 0;
+    size_t expect2 = noise_transport_handshake_msg_len(1);
+    /* Message 0 is the clear `e, e1` tokens. The first authenticated
+     * handshake message is the responder's `e, ee, ekem1, s, es`. */
+    if (!hs_begin(&s, ini_priv, res_priv, &msg1, &msg1_len) ||
+        !feed_wire(s.left, s.right, s.res, msg1, msg1_len, &msg2,
+                   &msg2_len) ||
+        !msg2 || msg2_len != expect2 || expect2 == 0) {
+        free(msg2);
+        noise_session_free(&s);
+        return fail("tampered handshake setup");
+    }
+    msg2[msg2_len - 1] ^= 0x01u;
+    bool delivered = false;
+    bool accepted = noise_damaged_accepted(&s, msg2, msg2_len, &delivered);
     free(msg2);
-    noise_transport_free(ini);
-    noise_transport_free(res);
-    close_pair(left, right);
+    noise_session_free(&s);
     if (!delivered)
         return fail("tampered handshake delivery");
     if (accepted)
@@ -258,35 +315,48 @@ static int noise_over_winsock(void)
     return 0;
 }
 
-static int round_trip(const char *datadir, const char *label)
+static int noise_over_winsock(void)
 {
-    if (strlen(datadir) < 3 || !platform_private_directory_ensure(datadir))
-        return fail(label);
+    uint8_t ini_priv[32], res_priv[32];
+    if (!rng_fill(ini_priv, sizeof(ini_priv)) ||
+        !rng_fill(res_priv, sizeof(res_priv)))
+        return fail("identity rng");
+    int rc = noise_payload_phase(ini_priv, res_priv);
+    return rc != 0 ? rc : noise_tampered_handshake_phase(ini_priv, res_priv);
+}
+
+/* Each round_trip phase returns NULL on success or the failure label. */
+static const char *rt_block_create(const char *datadir,
+                                   struct disk_block_pos *pos)
+{
     disk_block_io_close_cache();
-    struct disk_block_pos pos = {.nFile = 0, .nPos = 0};
-    FILE *block = open_block_file(datadir, &pos, false);
+    FILE *block = open_block_file(datadir, pos, false);
     if (!block || fwrite(k_payload, 1, sizeof(k_payload), block) !=
                       sizeof(k_payload)) {
         if (block)
             fclose(block);
-        return fail("block create");
+        return "block create";
     }
     fclose(block);
+    return NULL;
+}
+
+static const char *rt_block_verify(const char *datadir,
+                                   struct disk_block_pos *pos)
+{
     disk_block_io_close_cache();
-    block = open_block_file(datadir, &pos, true);
+    FILE *block = open_block_file(datadir, pos, true);
     uint8_t got[sizeof(k_payload)];
     memset(got, 0, sizeof(got));
     bool block_ok = block &&
                     fread(got, 1, sizeof(got), block) == sizeof(got) &&
                     memcmp(got, k_payload, sizeof(got)) == 0;
     disk_block_io_close_cache();
-    if (!block_ok)
-        return fail("block round-trip");
+    return block_ok ? NULL : "block round-trip";
+}
 
-    char cookie[4096];
-    int cookie_len = snprintf(cookie, sizeof(cookie), "%s/.cookie", datadir);
-    if (cookie_len <= 0 || (size_t)cookie_len >= sizeof(cookie))
-        return fail("cookie path");
+static const char *rt_cookie(const char *cookie)
+{
     struct platform_private_file file;
     platform_private_file_init(&file);
     uint8_t cookie_got[sizeof(k_payload)];
@@ -298,9 +368,11 @@ static int round_trip(const char *datadir, const char *label)
                                                    sizeof(cookie_got), 0) &&
                      memcmp(cookie_got, k_payload, sizeof(k_payload)) == 0;
     platform_private_file_close(&file);
-    if (!cookie_ok)
-        return fail("rpc-cookie round-trip");
+    return cookie_ok ? NULL : "rpc-cookie round-trip";
+}
 
+static const char *rt_client(const char *datadir, const char *cookie)
+{
     uint8_t client_got[sizeof(k_payload) + 4];
     size_t client_n = 0;
     memset(client_got, 0, sizeof(client_got));
@@ -308,15 +380,17 @@ static int round_trip(const char *datadir, const char *label)
                                    &client_n) ||
         client_n != sizeof(k_payload) ||
         memcmp(client_got, k_payload, sizeof(k_payload)) != 0)
-        return fail("rpc-client round-trip");
+        return "rpc-client round-trip";
     char *answer = node_rpc_call_at_deadline(datadir, 1, "getinfo", "[]",
                                               200, 500);
     bool opened = answer && strstr(answer, "cannot read RPC auth cookie") == NULL &&
                   strstr(answer, "cannot connect") != NULL;
     free(answer);
-    if (!opened)
-        return fail("rpc-client cookie open");
+    return opened ? NULL : "rpc-client cookie open";
+}
 
+static void rt_cleanup(const char *datadir, const char *cookie)
+{
     char blocks[4096], blk[4096];
     snprintf(blocks, sizeof(blocks), "%s/blocks", datadir);
     snprintf(blk, sizeof(blk), "%s/blocks/blk00000.dat", datadir);
@@ -324,6 +398,29 @@ static int round_trip(const char *datadir, const char *label)
     wide_delete_file(blk);
     wide_remove_dir(blocks);
     wide_remove_dir(datadir);
+}
+
+static int round_trip(const char *datadir, const char *label)
+{
+    if (strlen(datadir) < 3 || !platform_private_directory_ensure(datadir))
+        return fail(label);
+    struct disk_block_pos pos = {.nFile = 0, .nPos = 0};
+    const char *bad = rt_block_create(datadir, &pos);
+    if (!bad)
+        bad = rt_block_verify(datadir, &pos);
+    if (bad)
+        return fail(bad);
+
+    char cookie[4096];
+    int cookie_len = snprintf(cookie, sizeof(cookie), "%s/.cookie", datadir);
+    if (cookie_len <= 0 || (size_t)cookie_len >= sizeof(cookie))
+        return fail("cookie path");
+    bad = rt_cookie(cookie);
+    if (!bad)
+        bad = rt_client(datadir, cookie);
+    if (bad)
+        return fail(bad);
+    rt_cleanup(datadir, cookie);
     printf("native_optimal: %s block/datadir/cookie/rpc-client PASS\n", label);
     return 0;
 }
