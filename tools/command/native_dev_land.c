@@ -12645,8 +12645,21 @@ static bool dl_fence_archive(const struct dl_dirs *d, const struct dl_fence *f, 
 static bool dl_fence_workspace(const struct dl_dirs *d, struct dl_dirs *next_dirs, const char *worktree, const char *tip, struct zcl_command_reply *reply)
 {
     char current[80];
+    char land_real[sizeof(d->land)];
     *next_dirs = *d;
-    if (!realpath(worktree, next_dirs->wt) || strcmp(next_dirs->wt, d->wt) == 0 ||
+    /* The pre-push hook admits main pushes only from checkouts strictly
+     * inside the land directory, so a replacement elsewhere could never push. */
+    if (!realpath(d->land, land_real) || !realpath(worktree, next_dirs->wt) ||
+        strncmp(next_dirs->wt, land_real, strlen(land_real)) != 0 ||
+        next_dirs->wt[strlen(land_real)] != '/' || next_dirs->wt[strlen(land_real) + 1] == 0) {
+        char rule[4400];
+        (void)snprintf(rule, sizeof(rule),
+                       "replacement checkout must live under %s/ (git worktree add %s/fence-<seq> <tip>)",
+                       d->land, d->land);
+        dl_fail(reply, "FENCE_WORKTREE_INVALID", "fence_replace", rule, worktree);
+        return false;
+    }
+    if (strcmp(next_dirs->wt, d->wt) == 0 ||
         !dl_submit_tip_resolve(next_dirs->wt, tip, current, reply) ||
         strcmp(current, tip) != 0 || !dl_rev_parse(next_dirs->wt, "HEAD", current) ||
         strcmp(current, tip) != 0 || !dl_fence_hooks_admitted(next_dirs->wt)) {

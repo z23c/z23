@@ -622,11 +622,22 @@ static int admit_pair(const char *root, const char *local, const char *base)
 }
 
 /* Only the native land queue's own checkouts may publish main. Its state
- * root is <platform_state_root>/land (driver checkout <land>/wt, fence
- * replacements beside it), the same derivation tools/command/native_dev_land.c
- * uses; the hook links the same platform/state_root.c. The existing
- * directory is resolved without creating anything: a box that never ran the
- * queue has no land directory, so every checkout there is outside it. */
+ * root is <platform_state_root>/land (driver checkout <land>/wt; a fence
+ * replacement checkout must also live under <land>/, which dev land
+ * fence_replace enforces), the same derivation
+ * tools/command/native_dev_land.c uses; the hook links the same
+ * platform/state_root.c. The existing directory is resolved without creating
+ * anything: a box that never ran the queue has no land directory, so every
+ * checkout there is outside it.
+ *
+ * This is a discipline guard, not a security boundary: the land directory is
+ * derived from XDG_STATE_HOME/HOME, which the pusher controls, and
+ * `git push --no-verify` skips the hook entirely. The exact-receipt
+ * requirement is unchanged, and server-side protection is separate.
+ *
+ * On _WIN32, _fullpath does not resolve symlinks or junctions, and the
+ * prefix compare is case-insensitive, so the symlink-escape case is not
+ * defended there. */
 static bool hook_canonical_path(const char *path, char out[PATH_MAX])
 {
 #if defined(_WIN32)
@@ -1213,8 +1224,14 @@ static int selftest(void)
                  "hollow_refused=true stale_refused=true "
                  "signature_refused=true unsigned_refused=true "
                  "child_processes=0 resident_candidate_checked=true "
-                 "land_queue_checked=true\n",
-                 (unsigned long long)(samples[949] / 1000u));
+                 "land_queue_checked=%s\n",
+                 (unsigned long long)(samples[949] / 1000u),
+#if defined(_WIN32)
+                 "false"   /* the POSIX-only land-queue cases are not run */
+#else
+                 "true"
+#endif
+                 );
     return samples[949] < 250000000u ? 0 : 1;
 }
 

@@ -11006,7 +11006,19 @@ static bool dlx_fence_prepare(struct dlx_rig *rig, const char *tag,
                             g_dlx_hooks_ok, NULL };
     setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1);
     setenv("ZCL_LAND_TEST_FENCE_POLICY", "monotonic", 1);
-    return dlx_git(rig->clone, checkout) == 0 && dlx_git(rig->clone, hooks) == 0;
+    if (dlx_git(rig->clone, checkout) != 0 || dlx_git(rig->clone, hooks) != 0) return false;
+    /* A replacement checkout must live inside the land directory (the hook
+     * admits main pushes from nowhere else): relocate the clone there. */
+    char land[1200], inside[600];
+    dlx_landdir(land, sizeof(land));
+    if (snprintf(inside, sizeof(inside), "%s/fence-replacement", land) >= (int)sizeof(inside) ||
+        rename(rig->clone, inside) != 0) return false;
+    (void)snprintf(rig->clone, sizeof(rig->clone), "%s", inside);
+    /* The landing worktree is a linked worktree of this clone: re-point it. */
+    char landing[1400];
+    (void)snprintf(landing, sizeof(landing), "%s/wt", land);
+    const char *repair[] = { "worktree", "repair", landing, NULL };
+    return dlx_git(rig->clone, repair) == 0;
 }
 
 static void dlx_fence_call(struct dlx_call *c, const struct dlx_rig *rig,
@@ -11675,11 +11687,10 @@ static int dlx_fence_checkout_drift(bool dirty)
 /* The replacement is a separate repository (as live): a no-local clone of
  * the fenced successor branch, so the old head object exists only in the
  * landing worktree's store. Signing identity is copied from the landing repo. */
-static bool dlx_fence_foreign_checkout(const struct dlx_rig *rig, char path[600])
+static bool dlx_fence_clone_to(const struct dlx_rig *rig, const char *path)
 {
     static const char *keys[] = { "gpg.format", "user.signingkey", "commit.gpgsign",
                                   "gpg.ssh.allowedSignersFile", "user.name", "user.email" };
-    (void)snprintf(path, 600, "%s.foreign", rig->clone);
     const char *clone[] = { "clone", "--quiet", "--no-local", "--single-branch",
                             "--branch", "fence-successor", rig->clone, path, NULL };
     const char *origin[] = { "remote", "set-url", "origin", rig->bare, NULL };
@@ -11693,6 +11704,48 @@ static bool dlx_fence_foreign_checkout(const struct dlx_rig *rig, char path[600]
         if (dlx_git(path, set) != 0) return false;
     }
     return dlx_git(path, hooks) == 0;
+}
+
+/* Sibling of the (land-resident) replacement checkout, so inside the land. */
+static bool dlx_fence_foreign_checkout(const struct dlx_rig *rig, char path[600])
+{
+    (void)snprintf(path, 600, "%s.foreign", rig->clone);
+    return dlx_fence_clone_to(rig, path);
+}
+
+/* The pre-push hook admits main pushes only from checkouts inside the land
+ * directory, so a replacement checkout elsewhere is refused up front. It is
+ * otherwise a valid, prepared checkout at the exact tip: only the location
+ * rule can refuse it. */
+static int dlx_fence_outside_land(void)
+{
+    int failures = 0; struct dlx_fence_case t = {0};
+    (void)snprintf(t.tag, sizeof(t.tag), "fence_outside_land");
+    dlx_isolate(t.tag);
+    TEST("land: a replacement checkout outside the land directory is refused") {
+        char outside[600];
+        ASSERT(dlx_fence_prepare(&t.rig, t.tag, t.base, t.wt, t.successor));
+        (void)snprintf(outside, sizeof(outside), "%s.outside", t.rig.bare);
+        ASSERT(dlx_fence_clone_to(&t.rig, outside));
+        struct dlx_rig other = t.rig;
+        (void)snprintf(other.clone, sizeof(other.clone), "%s", outside);
+        dlx_fence_call(&t.c, &other, t.base, t.rig.tip, t.successor);
+        ASSERT(dlx_run(&t.c));
+        ASSERT(!dlx_ok(&t.c));
+        ASSERT_STR_EQ(dlx_err_code(&t.c), "FENCE_WORKTREE_INVALID");
+        dlx_end(&t.c);
+        /* The same checkout inside the land directory is admitted. */
+        char inside[600];
+        ASSERT(dlx_fence_foreign_checkout(&t.rig, inside));
+        (void)snprintf(other.clone, sizeof(other.clone), "%s", inside);
+        dlx_fence_call(&t.c, &other, t.base, t.rig.tip, t.successor);
+        ASSERT(dlx_run(&t.c));
+        ASSERT(dlx_ok(&t.c) || strcmp(dlx_err_code(&t.c), "FENCE_WORKTREE_INVALID") != 0);
+        dlx_end(&t.c);
+        PASS();
+    } _test_next:;
+    unsetenv("ZCL_LAND_TEST_FENCE_POLICY"); unsetenv("ZCL_DEVLOOP_TEST_PROCESS"); dlx_restore();
+    return failures;
 }
 
 static int dlx_fence_missing_old_head(void)
@@ -11736,7 +11789,7 @@ static int dlx_fence_negative_cases(void)
     int failures = dlx_fence_negative_admission(0) + dlx_fence_negative_admission(1) + dlx_fence_negative_admission(2) +
         dlx_fence_negative_replay() + dlx_fence_observer_rewrite() + dlx_fence_dispatch_receiver_race() +
         dlx_fence_checkout_drift(false) + dlx_fence_checkout_drift(true) +
-        dlx_fence_missing_old_head();
+        dlx_fence_missing_old_head() + dlx_fence_outside_land();
     for (unsigned kind = 1; kind <= 6; ++kind) {
         failures += dlx_fence_negative_receiver(kind, false);
         failures += dlx_fence_negative_receiver(kind, true);

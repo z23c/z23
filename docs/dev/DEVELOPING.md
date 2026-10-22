@@ -1606,7 +1606,13 @@ Before committing:
    push only from a land-queue checkout (a worktree under the native
    `<state root>/land` directory); a push from any other worktree is refused
    with `main-push-outside-land-queue`, so `dev land` is the one publication
-   route.
+   route. This location check is a discipline guard, not a security
+   boundary: the hook derives the land directory from `XDG_STATE_HOME`/`HOME`,
+   which the pusher controls, and `git push --no-verify` skips it. The
+   exact-receipt requirement is unchanged; server-side protection is separate.
+   A `dev land fence_replace` checkout must live under `<land>/` (for example
+   `git worktree add <land>/fence-<seq> <tip>`), or the hook would refuse its
+   push.
    Windows installs the same receipt-only native admission hook. Its native
    proof producer is not implemented yet, so a missing receipt refuses
    immediately; run the explicit `make windows-acceptance` parity gate while

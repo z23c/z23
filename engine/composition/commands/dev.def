@@ -2237,7 +2237,7 @@ ZCL_COMMAND_DEV_COMMAND(
     "dev.land.fence_replace", "dev.land", "",
     "Bind an explicit paired successor to a fenced row",
     "Replaces a fenced pair with an explicit successor named by seq, base, "
-    "head, tip and worktree.", 65536,
+    "head, tip and worktree; the worktree must live under the land directory.", 65536,
     "land,fence,successor",
     "zcl.land_fence_replace_input.v1", "zcl.land.v1", "seq,base,head,tip,worktree", "",
     "z23 dev land fence_replace --seq=1",
