@@ -54,7 +54,7 @@ Search with `git grep`. Generated references (`docs/CAPABILITY_INVENTORY.jsonl`,
 - Every application write follows the ActiveRecord save lifecycle. Check allocations, log contextual errors, give command failures explanatory bodies ([DEFENSIVE_CODING.md](docs/DEFENSIVE_CODING.md)).
 - Use existing CAS, task, candidate, action, receipt, queue and signature authorities; add no competing source of truth.
 - Tests use local fixtures, isolated datadirs and consenting peers. Never weaken an assertion or threshold to pass.
-- Preserve unrelated dirty work; never reset, overwrite or commit it. Fetch `origin/main` before work and before every push; never rewrite others' history.
+- Preserve unrelated dirty work; never reset, overwrite or commit it. Fetch `origin/main` before work and before every submit; never rewrite others' history.
 - Check [AGENT_TRAPS.md](docs/agent/AGENT_TRAPS.md) before repairing behavior that may be intentional or complete.
 
 ## Authority and safety
@@ -80,7 +80,7 @@ Escalate only for consensus or custody risk, a destructive production action (da
 - Commits are authored by the repository owner; an AI-written commit ends with a `Co-Authored-By:` trailer naming the model.
 - Fleet work coordinates through native tasks and receipts, never GitHub issues or pull requests; volunteers use `card:` pull requests.
 - After placement changes run `make check-architecture-tree`.
-- Landing is receipt-gated: [section 6](docs/dev/DEVELOPING.md#6-integrate-and-push-a-coherent-slice). A push is a checkpoint; fetch, integrate and continue.
+- Only the land queue pushes main: submit with `build/bin/z23-dev dev land submit --worktree=$PWD` and follow `dev land status`. A landing is a checkpoint; fetch, integrate and continue. See [section 6](docs/dev/DEVELOPING.md#6-integrate-and-push-a-coherent-slice).
 
 ## Where detail lives
 - The one standard loop (lane, brief, verify, review, land) and the boundaries: [THE_Z23_WAY.md](docs/THE_Z23_WAY.md).

@@ -1602,7 +1602,11 @@ Before committing:
    different working state; its build pass is not exact proof qualification.
 7. On Linux and macOS, require `dev proof status` to report `passed` for the
    exact commit/base under current policy before publication. The native
-   pre-push hook reads only the exact sealed receipt.
+   pre-push hook reads only the exact sealed receipt, and it admits a main
+   push only from a land-queue checkout (a worktree under the native
+   `<state root>/land` directory); a push from any other worktree is refused
+   with `main-push-outside-land-queue`, so `dev land` is the one publication
+   route.
    Windows installs the same receipt-only native admission hook. Its native
    proof producer is not implemented yet, so a missing receipt refuses
    immediately; run the explicit `make windows-acceptance` parity gate while
@@ -1610,8 +1614,11 @@ Before committing:
 8. For shared worker publication, submit the exact candidate through native
    `dev land` tools under `devbuild --wait`. Their receipt gate and persisted
    outcome support replacement workers; no permanent lead approval is needed.
+   Never `git push` main from a lane worktree; submit with
+   `build/bin/z23-dev dev land submit --worktree=$PWD`.
    Do not create a GitHub Issue or pull request for coordination.
-9. Verify local HEAD, `origin/main`, and the remote branch SHA agree.
+9. Verify with `dev land status` that the row landed, then confirm local
+   HEAD, `origin/main`, and the remote branch SHA agree.
 
 When closing a receiver whose owned patch is already in the verified landed
 commit, preserve the patch and explicit owned-path list first. Stop writers
