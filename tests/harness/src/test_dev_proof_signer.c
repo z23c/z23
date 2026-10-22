@@ -462,14 +462,29 @@ static bool dps_git_rig(const char *dir, char *local, char *base)
 
 /* The hook admits main pushes only from a checkout inside the land queue's
  * state directory (<state root>/land). Make that checkout under the fixture
- * state root dps_isolate() chose. */
+ * state root dps_isolate() chose.
+ *
+ * The hook resolves that root with platform_state_root_existing(), which
+ * accepts only owner-private (exactly 0700) z23 and z23/dev directories. A
+ * `mkdir -p` here would create them with the process umask, so the fixture
+ * passed under a 0077 umask and failed under the 0022 or 0002 that a service
+ * driver runs with. Create the root through platform_state_root(), the same
+ * authority the signer and the land queue use, and give every directory
+ * below it an explicit 0700, so the result does not depend on the umask. */
+static bool dps_mkdir_private(const char *path)
+{
+    return mkdir(path, 0700) == 0 || errno == EEXIST;
+}
+
 static bool dps_land_checkout(char *dir, size_t size)
 {
-    char cmd[PATH_MAX * 2];
-    int n = snprintf(dir, size, "%s/z23/dev/land/wt", g_dps_state);
-    if (n <= 0 || (size_t)n >= size) return false;
-    n = snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dir);
-    return n > 0 && (size_t)n < sizeof(cmd) && system(cmd) == 0;
+    char root[PATH_MAX], land[PATH_MAX];
+    if (!platform_state_root(root, sizeof(root))) return false;
+    int n = snprintf(land, sizeof(land), "%s/land", root);
+    if (n <= 0 || (size_t)n >= sizeof(land) || !dps_mkdir_private(land))
+        return false;
+    n = snprintf(dir, size, "%s/wt", land);
+    return n > 0 && (size_t)n < size && dps_mkdir_private(dir);
 }
 
 static bool dps_put_receipt(const char *dir, const char *local,
