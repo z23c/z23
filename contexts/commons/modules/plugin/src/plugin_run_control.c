@@ -25,7 +25,7 @@
 #define PRS_RESULT_MAGIC "z23-res-run-v1"
 #define PRS_HOSTCALL_RATE_DEFAULT 200u
 #define PRS_RATE_WINDOW_NS UINT64_C(1000000000)
-#define PRS_REPLY_WRITE_MS 200
+#define PRS_PUMP_BUDGET_MS 200
 #define PRS_RX_CAP PLUGIN_HOSTCALL_MAX_FRAME
 #define PRS_RESULT_PAYLOAD PRS_TOKEN_HEX
 
@@ -97,12 +97,13 @@ static void prs_rx_fill(struct plugin_run *run)
     }
 }
 
-/* Write one whole reply within a short bound; false when the child does not
- * take it. */
-static bool prs_reply_send(const struct plugin_run *run, const uint8_t *frame, size_t len)
+/* Write one whole reply before `end`, the deadline of the whole pump, so a slow
+ * reader is not waited on afresh for every reply; false when the child does
+ * not take it in time. */
+static bool prs_reply_send(const struct plugin_run *run, const uint8_t *frame, size_t len,
+                           uint64_t end)
 {
     int fd = (int)run->launch.ipc_native;
-    uint64_t end = prs_now_ns() + (uint64_t)PRS_REPLY_WRITE_MS * UINT64_C(1000000);
     for (size_t done = 0; done < len;) {
         ssize_t n = send(fd, frame + done, len - done, MSG_DONTWAIT | MSG_NOSIGNAL);
         if (n > 0) {
@@ -159,7 +160,7 @@ static enum prs_ping prs_take_result(struct plugin_run *run)
 enum prs_step { PRS_STEP_MORE, PRS_STEP_DONE, PRS_STEP_CLOSE };
 
 /* One host-call frame at the head of the buffer. */
-static enum prs_step prs_take_hostcall(struct plugin_run *run, uint64_t now)
+static enum prs_step prs_take_hostcall(struct plugin_run *run, uint64_t now, uint64_t end)
 {
     struct plugin_hostcall_frame request;
     size_t used = 0, reply_len = 0;
@@ -176,21 +177,30 @@ static enum prs_step prs_take_hostcall(struct plugin_run *run, uint64_t now)
                                    run->opt.hostcall ? run->opt.hostcall : &none,
                                    run->ctl_reply, PLUGIN_HOSTCALL_MAX_FRAME, &reply_len);
     /* No reply means the frame was not a request (a child must not send replies). */
-    if (reply_len == 0 || !prs_reply_send(run, run->ctl_reply, reply_len))
+    if (reply_len == 0 || !prs_reply_send(run, run->ctl_reply, reply_len, end))
         return PRS_STEP_CLOSE;
     prs_rx_consume(run, used);
     return PRS_STEP_DONE;
 }
 
+/* One pump call is bounded: PRS_PUMP_BUDGET_MS of wall clock for everything it
+ * serves. A reply that cannot be written inside the budget ends the stream as a
+ * protocol violation; frames still buffered when the budget is spent wait for
+ * the next tick. The rate window is judged against the clock at each frame, not
+ * against the tick's start, so it rolls correctly inside a long pump. */
 enum prs_ping prs_control_pump(struct plugin_run *run, uint64_t now)
 {
     if (!run->ctl_rx || run->launch.ipc_native == (uintptr_t)-1)
         return PRS_PING_NONE;
     prs_rx_fill(run);
+    uint64_t end = prs_now_ns() + (uint64_t)PRS_PUMP_BUDGET_MS * UINT64_C(1000000);
     enum prs_ping seen = PRS_PING_NONE;
     while (run->ctl_rx_len > 0) {
         if (run->ctl_rx[0] == 0) {
-            enum prs_step step = prs_take_hostcall(run, now);
+            now = prs_now_ns();
+            if (now >= end)
+                break;
+            enum prs_step step = prs_take_hostcall(run, now, end);
             if (step == PRS_STEP_CLOSE)
                 return prs_control_close(run);
             if (step == PRS_STEP_MORE)

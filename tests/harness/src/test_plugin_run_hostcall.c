@@ -430,6 +430,39 @@ static int prh_case_silent_reader(struct prh_ctx *c)
     return failures;
 }
 
+static int prh_case_slow_reader(struct prh_ctx *c)
+{
+    int failures = 0;
+    TEST_CASE("one poll never serves a slow reader for longer than the pump budget") {
+        char mode[16];
+        /* More calls than the send queue holds: the host must wait for the child
+         * to read, which it does one reply every 150 ms. Unbudgeted, the polls
+         * that serve the backlog would each wait for every reply in turn. */
+        unsigned calls = prh_probe_queue() + 100;
+        snprintf(mode, sizeof(mode), "slow:%u", calls);
+        struct plugin_run *run = prh_start(&c->env, "slowread", mode, "\"chain.read\"",
+                                           &c->chain.handlers, 100000, 60000);
+        ASSERT(run != NULL);
+        uint64_t worst = 0, end = prh_now_ms() + 3000;
+        bool logged = false;
+        while (prh_now_ms() < end) {
+            uint64_t t0 = prh_now_ms();
+            (void)plugin_run_poll(run);
+            if (prh_now_ms() - t0 > worst)
+                worst = prh_now_ms() - t0;
+            struct plugin_run_info info;
+            plugin_run_info_get(run, &info);
+            logged = logged || strncmp(info.last_log, "hostcall ", 9) == 0;
+            struct timespec nap = {0, 5 * 1000 * 1000};
+            nanosleep(&nap, NULL);
+        }
+        ASSERT(logged);
+        ASSERT(worst < 1000);
+        plugin_run_close(run);
+    } TEST_END
+    return failures;
+}
+
 static int prh_case_rate(struct prh_ctx *c)
 {
     int failures = 0;
@@ -468,6 +501,7 @@ int test_plugin_run_hostcall(void)
     failures += prh_case_broken_frame(&c);
     failures += prh_case_rate(&c);
     failures += prh_case_silent_reader(&c);
+    failures += prh_case_slow_reader(&c);
     prh_chain_close(&c.chain);
     prt_env_close(&c.env);
     return failures;

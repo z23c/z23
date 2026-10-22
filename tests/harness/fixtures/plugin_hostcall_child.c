@@ -30,6 +30,7 @@
  *             supervisor's send queue (a seccomp-confined child cannot probe it
  *             itself) -- log "hostcall flooded n=<N>", then sleep without ever
  *             reading again
+ *   slow:N    as flood:N, but then read one 12-byte reply every 150 ms
  * A ping or stop frame can arrive while a reply is awaited; frames are told
  * apart by their first byte ('z' for supervisor frames, 0 for host-call). */
 #ifndef _GNU_SOURCE
@@ -207,7 +208,7 @@ static int hcc_badframe(int log_fd)
 }
 
 /* flood mode: never read again once the queue is full of replies. */
-static int hcc_flood(int log_fd, unsigned want)
+static int hcc_flood(int log_fd, unsigned want, bool slow)
 {
     char first[HCC_SUP_FRAME];
     if (!hcc_io(RESIDENT_LAUNCH_CHILD_FD, first, sizeof(first), false))
@@ -219,6 +220,18 @@ static int hcc_flood(int log_fd, unsigned want)
     int n = snprintf(line, sizeof(line), "hostcall flooded n=%u\n", sent);
     if (log_fd >= 0 && n > 0)
         (void)hcc_io(log_fd, line, (size_t)n, true);
+    if (slow) {
+        /* Take one reply every 150 ms, forever: every reply wait of a
+         * supervisor that serves the whole backlog in one pass then ends
+         * just inside its per-reply bound. */
+        uint8_t reply[12];
+        for (;;) {
+            struct timespec nap = {0, 150 * 1000 * 1000};
+            nanosleep(&nap, NULL);
+            if (!hcc_io(RESIDENT_LAUNCH_CHILD_FD, reply, sizeof(reply), false))
+                return 0;
+        }
+    }
     sleep(60);
     return 0;
 }
@@ -228,8 +241,10 @@ int main(int argc, char **argv)
     if (argc < 3 || strcmp(argv[1], "--resident") != 0)
         return 2;
     int log_fd = hcc_fd_of("log");
+    if (hcc_mode_is("slow:"))
+        return hcc_flood(log_fd, (unsigned)atoi((const char *)hcc_variant + HCC_MARKER_LEN + 5), true);
     if (hcc_mode_is("flood"))
-        return hcc_flood(log_fd, (unsigned)atoi((const char *)hcc_variant + HCC_MARKER_LEN + 6));
+        return hcc_flood(log_fd, (unsigned)atoi((const char *)hcc_variant + HCC_MARKER_LEN + 6), false);
     if (hcc_mode_is("badframe"))
         return hcc_badframe(log_fd);
     struct timespec t0, t1;
