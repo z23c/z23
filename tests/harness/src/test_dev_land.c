@@ -18768,22 +18768,29 @@ _test_next:;
     return failures;
 }
 
+/* The step reads outcomes.jsonl at its slot (terminal replay) before it
+ * reaches the push, so an unreadable history is refused there, with the
+ * slot's own evidence, whatever the train code does. With width unset the
+ * answer must be exactly that: the slot's refusal, never the publication
+ * gate's, and no requeue, no train_solo mark, nothing pushed. */
 static int test_dev_land_train_unset_unreadable_outcomes(void)
 {
     int failures = 0;
-    TEST("land: width unset, an unreadable outcomes.jsonl at push time does "
-         "not stop the push") {
+    TEST("land: width unset, an unreadable outcomes.jsonl is refused at the "
+         "step slot as before trains, with nothing pushed or marked") {
         struct dlx_rig rig;
         struct dlx_call s;
         char b[64], c[64], land[1200], opath[1400], states[256];
+        char before[64], after[64];
         int proofs = 0, landed = 0;
-        bool refused = false;
+        bool slot_refusal = false, gate_refusal = false;
         dlx_isolate("train_unset_unreadable");
         ASSERT(dlx_tr_rig(&rig, "train_unset_unreadable_rig", "pass", "b.txt",
                           b, c));
         ASSERT(dlx_tr_beat("started", 0, 1));
         ASSERT(dlx_tr_beat("landed", 0, -1));
         ASSERT(dlx_tr_beat("started", 0, 1));
+        ASSERT(dlx_origin_main(&rig, before));
         dlx_landdir(land, sizeof(land));
         ASSERT(snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", land) <
                (int)sizeof(opath));
@@ -18792,20 +18799,28 @@ static int test_dev_land_train_unset_unreadable_outcomes(void)
             FILE *f = fopen(opath, "r");
             ASSERT(f == NULL);
         }
-        /* Row 2's push beat: the pre-train code publishes here, whatever
-         * the outcome history says. */
         dlx_begin(&s, "step");
         ASSERT(dlx_run(&s));
-        refused = !dlx_ok(&s) &&
-                  strcmp(dlx_err_code(&s), "QUEUE_READ_FAILED") == 0;
-        printf("[push beat ok=%d code=%s] ", dlx_ok(&s) ? 1 : 0,
-               dlx_err_code(&s));
+        slot_refusal = !dlx_ok(&s) &&
+                       strcmp(dlx_err_code(&s), "QUEUE_READ_FAILED") == 0 &&
+                       strstr(dlx_err_evidence(&s),
+                              "outcomes.jsonl unreadable or malformed") != NULL;
+        gate_refusal = strstr(dlx_err_evidence(&s),
+                              "queue.jsonl or outcomes.jsonl") != NULL;
+        printf("[push beat ok=%d code=%s evidence=%s] ", dlx_ok(&s) ? 1 : 0,
+               dlx_err_code(&s), dlx_err_evidence(&s));
         dlx_end(&s);
         ASSERT(chmod(opath, 0600) == 0);
-        ASSERT(!refused);
-        ASSERT(dlx_tr_main_has(&rig, "b.txt"));
+        ASSERT(slot_refusal);
+        ASSERT(!gate_refusal);
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT_STR_EQ(after, before);
+        ASSERT(!dlx_tr_main_has(&rig, "b.txt"));
+        ASSERT(!dlx_tr_has_solo_mark());
+        /* Readable again, the same row lands on its own turn. */
         ASSERT(dlx_tr_drain(8, NULL, &proofs, &landed, states,
                             sizeof(states)));
+        ASSERT_STR_EQ(states, "landed,started,landed,empty");
         ASSERT(dlx_tr_all_landed(&rig, false));
         ASSERT(!dlx_tr_has_solo_mark());
         PASS();
