@@ -112,7 +112,10 @@ static bool prr_write_checked(const char *dir, const char *name, const char *tex
     bool valid = device_host_runtime_entry_parse(&parsed, text, length, receiver).ok;
     json_free(&parsed);
     if (!valid) { LOG_ERROR(PRR_TAG, "%s refused by the strict runtime parser before writing", name); return false; }
-    if (!authority_receipt_write_atomic(dir, name, (const uint8_t *)text, length, path, sizeof(path))) return false;
+    if (!authority_receipt_write_atomic(dir, name, (const uint8_t *)text, length, path, sizeof(path))) {
+        LOG_ERROR(PRR_TAG, "%s could not be written atomically", name);
+        return false;
+    }
     return zcl_native_device_host_input_file_read(path, back, sizeof(back), &got) && got == length && !memcmp(back, text, length);
 }
 
@@ -150,26 +153,45 @@ static bool prr_write_route(struct prr *run, bool receiver)
 
 /* ── hub unit environment (the 30-unit step) ─────────────────────────── */
 
-static void prr_env_remember(struct prr *run)
+/* Remembers the current unit environment so an abort can restore it. A file that is
+ * unreadable or does not fit the bounded copy is refused: restoring a truncated copy
+ * would corrupt the unit environment. A missing file is simply "no previous". */
+static bool prr_env_remember(struct prr *run)
 {
-    int fd = open(run->env_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
-    ssize_t got = fd >= 0 ? read(fd, run->env_prev, sizeof(run->env_prev) - 1) : -1;
-    if (fd >= 0) close(fd);
-    run->env_had_prev = got >= 0;
-    run->env_prev[got > 0 ? got : 0] = 0;
+    int fd = open(run->env_path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY);
+    if (fd < 0) {
+        run->env_had_prev = false;
+        run->env_prev[0] = 0;
+        if (errno == ENOENT) return true;
+        LOG_ERROR(PRR_TAG, "unit environment unreadable (errno %d)", errno);
+        return false;
+    }
+    ssize_t got;
+    do got = read(fd, run->env_prev, sizeof(run->env_prev) - 1); while (got < 0 && errno == EINTR);
+    close(fd);
+    if (got < 0 || (size_t)got >= sizeof(run->env_prev) - 1) {
+        LOG_ERROR(PRR_TAG, "unit environment unreadable or larger than %zu bytes", sizeof(run->env_prev) - 1);
+        run->env_prev[0] = 0;
+        return false;
+    }
+    run->env_had_prev = true;
+    run->env_prev[got] = 0;
+    return true;
 }
 
 static bool prr_env_switch(struct prr *run)
 {
     char text[PRR_TEXT_MAX], dir[PAIR_PATH_MAX], name[PAIR_NAME_MAX + 32];
     if (!run->cfg->hub_config[0]) return true;
-    snprintf(dir, sizeof(dir), "%s", run->cfg->hub_config);
-    snprintf(name, sizeof(name), "tunnel-receiver-%s.env", run->st->cur.client);
-    snprintf(run->env_path, sizeof(run->env_path), "%s/%s", dir, name);
-    prr_env_remember(run);
-    snprintf(text, sizeof(text), "# z23 tunnel receiver for client %s, epoch %u (written by ops mesh device pair renew)\nZ23_TUNNEL_RECEIVER_INPUT=%s/receiver.json\n",
-             run->st->cur.client, (unsigned)run->st->next, run->hdir);
-    run->env_changed = authority_receipt_write_atomic(dir, name, (const uint8_t *)text, strlen(text), NULL, 0);
+    int dn = snprintf(dir, sizeof(dir), "%s", run->cfg->hub_config);
+    int nn = snprintf(name, sizeof(name), "tunnel-receiver-%s.env", run->st->cur.client);
+    if (dn < 0 || (size_t)dn >= sizeof(dir) || nn < 0 || (size_t)nn >= sizeof(name)) return false;
+    int pn = snprintf(run->env_path, sizeof(run->env_path), "%s/%s", dir, name);
+    if (pn < 0 || (size_t)pn >= sizeof(run->env_path) || !prr_env_remember(run)) return false;
+    int tn = snprintf(text, sizeof(text), "# z23 tunnel receiver for client %s, epoch %u (written by ops mesh device pair renew)\nZ23_TUNNEL_RECEIVER_INPUT=%s/receiver.json\n",
+                      run->st->cur.client, (unsigned)run->st->next, run->hdir);
+    if (tn < 0 || (size_t)tn >= sizeof(text)) return false;
+    run->env_changed = authority_receipt_write_atomic(dir, name, (const uint8_t *)text, (size_t)tn, NULL, 0);
     return run->env_changed;
 }
 
@@ -179,8 +201,11 @@ static void prr_env_restore(struct prr *run)
     char dir[PAIR_PATH_MAX], name[PAIR_NAME_MAX + 32];
     snprintf(dir, sizeof(dir), "%s", run->cfg->hub_config);
     snprintf(name, sizeof(name), "tunnel-receiver-%s.env", run->st->cur.client);
-    if (run->env_had_prev) (void)authority_receipt_write_atomic(dir, name, (const uint8_t *)run->env_prev, strlen(run->env_prev), NULL, 0);
-    else (void)unlink(run->env_path);
+    if (run->env_had_prev) {
+        if (!authority_receipt_write_atomic(dir, name, (const uint8_t *)run->env_prev, strlen(run->env_prev), NULL, 0))
+            LOG_ERROR(PRR_TAG, "unit environment could not be restored; restore tunnel-receiver-%s.env by hand", run->st->cur.client);
+    }
+    else if (unlink(run->env_path) != 0 && errno != ENOENT) LOG_ERROR(PRR_TAG, "new unit environment could not be removed (errno %d)", errno);
     run->env_changed = false;
 }
 
@@ -194,25 +219,29 @@ static void prr_burn(struct prr *run)
     (void)authority_receipt_write_atomic(run->cdir, "burned", (const uint8_t *)text, strlen(text), NULL, 0);
 }
 
-static void prr_abort(struct prr *run)
+static bool prr_abort(struct prr *run)
 {
+    bool clean = true;
     prr_env_restore(run);
-    if (run->c_committed) (void)prr_revoke_side(run->cprof, run->h_pk);
-    if (run->h_committed) (void)prr_revoke_side(run->hprof, run->c_pk);
-    if (run->csecret[0]) (void)unlink(run->csecret);
+    if (run->c_committed && prr_revoke_side(run->cprof, run->h_pk) == PRR_FAILED) clean = false;
+    if (run->h_committed && prr_revoke_side(run->hprof, run->c_pk) == PRR_FAILED) clean = false;
+    if (run->csecret[0] && unlink(run->csecret) != 0 && errno != ENOENT) clean = false;
     prr_burn(run);
+    if (!clean) LOG_ERROR(PRR_TAG, "abort cleanup incomplete: revoke epoch N+1 by hand with ops mesh device revoke");
+    return clean;
 }
 
 static void prr_fail(struct prr *run, const char *code, const char *stage, const char *message)
 {
     run->code = code;
     run->stage = stage;
-    prr_abort(run);
+    bool clean = prr_abort(run);
     json_set_object(&run->reply->data);
     (void)json_push_kv_str(&run->reply->data, "stage", stage);
     (void)json_push_kv_int(&run->reply->data, "failed_epoch", run->st->next);
     (void)json_push_kv_int(&run->reply->data, "epoch_in_force", run->st->cur.epoch);
     (void)json_push_kv_bool(&run->reply->data, "previous_in_force", true);
+    (void)json_push_kv_bool(&run->reply->data, "abort_cleanup_complete", clean);
     pr_fail(run->reply, code, stage, message, run->made_dirs);
 }
 
@@ -221,15 +250,22 @@ static void prr_fail(struct prr *run, const char *code, const char *stage, const
 static bool prr_paths(struct prr *run)
 {
     const struct pr_state *st = run->st;
-    char name[48];
-    snprintf(run->cdir, sizeof(run->cdir), "%s/%s-e%u", run->cfg->state, run->cfg->peer, (unsigned)st->next);
-    snprintf(run->hdir, sizeof(run->hdir), "%s/%s-e%u", run->cfg->hub_state, st->cur.client, (unsigned)st->next);
-    snprintf(run->cprof, sizeof(run->cprof), "%s/profile", run->cdir);
-    snprintf(run->hprof, sizeof(run->hprof), "%s/profile", run->hdir);
-    snprintf(run->csecret_dir, sizeof(run->csecret_dir), "%s/secret", run->cdir);
-    snprintf(run->csecret, sizeof(run->csecret), "%s/psk", run->csecret_dir);
-    snprintf(name, sizeof(name), "%s-%s-e%u", st->cur.client, run->cfg->peer, (unsigned)st->next);
-    snprintf(run->route_id, sizeof(run->route_id), "%s", name);
+    int n[7];
+    n[0] = snprintf(run->cdir, sizeof(run->cdir), "%s/%s-e%u", run->cfg->state, run->cfg->peer, (unsigned)st->next);
+    n[1] = snprintf(run->hdir, sizeof(run->hdir), "%s/%s-e%u", run->cfg->hub_state, st->cur.client, (unsigned)st->next);
+    n[2] = snprintf(run->cprof, sizeof(run->cprof), "%s/profile", run->cdir);
+    n[3] = snprintf(run->hprof, sizeof(run->hprof), "%s/profile", run->hdir);
+    n[4] = snprintf(run->csecret_dir, sizeof(run->csecret_dir), "%s/secret", run->cdir);
+    n[5] = snprintf(run->csecret, sizeof(run->csecret), "%s/psk", run->csecret_dir);
+    n[6] = snprintf(run->route_id, sizeof(run->route_id), "%s-%s-e%u", st->cur.client, run->cfg->peer, (unsigned)st->next);
+    const size_t cap[7] = {sizeof(run->cdir), sizeof(run->hdir), sizeof(run->cprof), sizeof(run->hprof),
+                           sizeof(run->csecret_dir), sizeof(run->csecret), sizeof(run->route_id)};
+    for (int i = 0; i < 7; ++i) {
+        if (n[i] >= 0 && (size_t)n[i] < cap[i]) continue;
+        run->csecret[0] = 0; /* possibly truncated: never unlink it on abort */
+        prr_fail(run, "RENEW_INPUT_REFUSED", "preflight", "an epoch N+1 path or route id does not fit its bound; use shorter directories or names");
+        return false;
+    }
     return true;
 }
 
@@ -301,10 +337,10 @@ static bool prr_commit_side(struct prr *run, const struct json_value *plan_in, c
     zcl_command_reply_init(&reply, NULL);
     const char *proposal = json_get_str(json_get(&plan->data, "proposal_root"));
     json_init(&in);
-    json_copy(&in, plan_in);
+    if (!json_copy_checked(&in, plan_in)) { LOG_ERROR(PRR_TAG, "plan input copy failed"); zcl_command_reply_free(&reply); return false; }
     bool ok = proposal && json_push_kv_int(&in, "paired_at", json_get_int(json_get(&plan->data, "paired_at"))) &&
               json_push_kv_str(&in, "confirmed_proposal_root", proposal) && json_push_kv_str(&in, "secret_file", run->csecret);
-    if (!ok) { json_free(&in); return false; }
+    if (!ok) { json_free(&in); zcl_command_reply_free(&reply); return false; }
     ok = pr_leaf("ops.mesh.device.commit", &in, &reply);
     if (reply.error.mutated || ok) *committed = true;
     ok = ok && prr_bool_is(&reply, "committed", true) && prr_str_is(&reply, "secret_publication", "durable") &&
@@ -412,6 +448,8 @@ static bool prr_retire(struct prr *run)
     enum prr_revoke hub = prr_revoke_side(run->st->hub_profile, run->st->client_key);
     run->retired_client = client != PRR_FAILED;
     run->retired_hub = hub != PRR_FAILED;
+    if (!run->retired_client || !run->retired_hub)
+        LOG_ERROR(PRR_TAG, "epoch N revoke incomplete (client %d, hub %d)", (int)run->retired_client, (int)run->retired_hub);
     return run->retired_client && run->retired_hub;
 }
 
@@ -441,7 +479,7 @@ static void prr_receipt(struct prr *run, char name[96], char digest_hex[65])
 
 static void prr_emit(struct prr *run, bool retired)
 {
-    char receipt[96], digest[65], cred[65];
+    char receipt[96] = {0}, digest[65] = {0}, cred[65];
     prr_receipt(run, receipt, digest);
     snprintf(cred, sizeof(cred), "%s", run->cred);
     json_set_object(&run->reply->data);
@@ -454,6 +492,8 @@ static void prr_emit(struct prr *run, bool retired)
               json_push_kv_bool(&run->reply->data, "previous_retired", retired) && json_push_kv_str(&run->reply->data, "receipt", receipt) &&
               json_push_kv_str(&run->reply->data, "receipt_digest", digest);
     if (!ok) pr_fail(run->reply, "RENEW_SERIALIZE_FAILED", "emit", "epoch N+1 is in force but its result did not fit the bounded reply", true);
+    else if (!receipt[0])
+        pr_fail(run->reply, "RENEW_RECEIPT_FAILED", "receipt", "epoch N+1 is in force and smoked but its renewal receipt could not be written under state_dir; the pairing is valid, record it by hand", true);
 }
 
 void pair_renew_execute(const struct pr_cfg *cfg, const struct pr_state *state, struct zcl_command_reply *reply)
@@ -461,8 +501,7 @@ void pair_renew_execute(const struct pr_cfg *cfg, const struct pr_state *state, 
     struct prr run;
     memset(&run, 0, sizeof(run));
     run.cfg = cfg; run.st = state; run.reply = reply;
-    prr_paths(&run);
-    if (!prr_pair(&run) || !prr_activate(&run) || !prr_smoke(&run)) return;
+    if (!prr_paths(&run) || !prr_pair(&run) || !prr_activate(&run) || !prr_smoke(&run)) return;
     if (!prr_write_route(&run, false)) {
         prr_fail(&run, "RENEW_ACTIVATE_FAILED", "client_route", "the client route for epoch N+1 failed validation or could not be written");
         return;

@@ -495,6 +495,39 @@ static int pr_status(void)
 }
 #endif
 
+static int pr_bounds(void)
+{
+    int failures = 0;
+    TEST_CASE("pair_renew: an over-long peer is refused, and an oversized unit environment aborts with epoch N in force") {
+        struct pr_fx fx;
+        ASSERT(pr_fixture(&fx, 86400));
+        struct zcl_command_reply r = {0};
+        struct json_value in = {0};
+        char longpeer[201];
+        memset(longpeer, 'a', sizeof(longpeer) - 1); longpeer[sizeof(longpeer) - 1] = 0;
+        json_set_object(&in);
+        ASSERT(json_push_kv_str(&in, "state_dir", fx.cs)); ASSERT(json_push_kv_str(&in, "hub_state_dir", fx.hs));
+        ASSERT(json_push_kv_str(&in, "peer", longpeer));
+        ASSERT(pr_call("ops.mesh.device.pair.renew", &in, &r));
+        ASSERT(pr_code(&r, "RENEW_INPUT_REFUSED"));
+        json_free(&in); zcl_command_reply_free(&r);
+        /* A unit environment larger than the bounded copy cannot be restored faithfully: refuse before changing it. */
+        char path[1400], big[5000];
+        memset(big, '#', sizeof(big) - 1); big[sizeof(big) - 1] = 0;
+        snprintf(path, sizeof(path), "%s/tunnel-receiver-r1.env", fx.hc);
+        ASSERT(pr_write(path, big, 0600));
+        ASSERT(pr_plan(&fx, NULL, 0, &r)); ASSERT(pr_passed(&r));
+        char id[65]; snprintf(id, sizeof(id), "%s", pr_str(&r, "plan_id")); zcl_command_reply_free(&r);
+        ASSERT(pr_confirm(&fx, id, false, &r));
+        ASSERT(pr_code(&r, "RENEW_ACTIVATE_FAILED"));
+        char back[5200];
+        ASSERT(pr_read(path, back, sizeof(back))); ASSERT_EQ(strlen(back), sizeof(big) - 1);
+        zcl_command_reply_free(&r);
+        pr_close(&fx);
+    } TEST_END
+    return failures;
+}
+
 int test_pair_renew(void)
 {
     int failures = 0;
@@ -505,6 +538,7 @@ int test_pair_renew(void)
     failures += pr_no_secret_bytes();
     failures += pr_plan_binding();
     failures += pr_status();
+    failures += pr_bounds();
 #endif
     return failures;
 }

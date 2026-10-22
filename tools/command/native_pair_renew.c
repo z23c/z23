@@ -113,14 +113,22 @@ static bool pr_state_dir_in(const struct json_value *in, struct pr_cfg *cfg)
            pair_path_ok(cfg->state);
 }
 
+/* The peer name must fit its bound whole: a truncated copy could pass the name check as a different peer. */
+static bool pr_peer_in(const char *peer, struct pr_cfg *cfg)
+{
+    if (!peer) peer = "r2";
+    if (strlen(peer) >= sizeof(cfg->peer)) return false;
+    memcpy(cfg->peer, peer, strlen(peer) + 1);
+    return pair_name_ok(cfg->peer);
+}
+
 static bool pr_parse(const struct json_value *in, struct pr_cfg *cfg)
 {
     bool given;
     uint64_t days = PR_GRANT_DAYS_DEFAULT, before = PAIR_RENEW_BEFORE_DEFAULT_S;
     const char *peer = json_get_str(json_get(in, "peer"));
     memset(cfg, 0, sizeof(*cfg));
-    snprintf(cfg->peer, sizeof(cfg->peer), "%s", peer ? peer : "r2");
-    bool ok = pair_name_ok(cfg->peer) && pr_state_dir_in(in, cfg) &&
+    bool ok = pr_peer_in(peer, cfg) && pr_state_dir_in(in, cfg) &&
               pr_path_in(in, "hub_state_dir", cfg->hub_state, &given) && pr_path_in(in, "hub_config_dir", cfg->hub_config, &given) &&
               pr_path_in(in, "evidence_dir", cfg->evidence, &given) && pr_path_in(in, "slot_bin", cfg->slot_bin, &given) &&
               pr_path_in(in, "hub_unit_file", cfg->unit_file, &given) && pr_plan_id_in(in, cfg) &&
@@ -141,9 +149,11 @@ static bool pr_read_text(const char *path, char *out, size_t cap)
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NOCTTY);
     if (fd < 0) return false;
-    ssize_t got = read(fd, out, cap - 1);
+    ssize_t got;
+    do got = read(fd, out, cap - 1); while (got < 0 && errno == EINTR);
     close(fd);
-    if (got < 0) return false;
+    /* a file that fills the buffer may be cut mid-line: refuse rather than parse a prefix */
+    if (got < 0 || (size_t)got >= cap - 1) { LOG_ERROR(PR_TAG, "%s unreadable or larger than %zu bytes", path, cap - 1); return false; }
     out[got] = 0;
     return true;
 }
@@ -266,7 +276,7 @@ static bool pr_hub_grant(struct pr_state *st)
               db_device_pairing_inspect(&store, st->client_key, &row, root) && !memcmp(root, configured, 32) &&
               !memcmp(row.host_scope.binding.psk.credential_id, st->cur.row.host_scope.binding.psk.credential_id, 32);
     device_identity_close(&identity);
-    memcpy(st->hub_root, root, 32);
+    if (ok) memcpy(st->hub_root, root, 32);
     return ok;
 }
 
@@ -274,9 +284,9 @@ static bool pr_load_hub(const struct pr_cfg *cfg, struct pr_state *st, struct zc
 {
     char dir[PAIR_PATH_MAX];
     if (!cfg->hub_state[0]) return true;
-    snprintf(dir, sizeof(dir), "%s/%s-e%u", cfg->hub_state, st->cur.client, (unsigned)st->cur.epoch);
+    int dn = snprintf(dir, sizeof(dir), "%s/%s-e%u", cfg->hub_state, st->cur.client, (unsigned)st->cur.epoch);
     snprintf(st->hub_dir, sizeof(st->hub_dir), "%s", dir);
-    if (!pr_route_load(dir, "receiver.json", &st->hub_route) || !pr_hub_grant(st)) {
+    if (dn < 0 || (size_t)dn >= sizeof(dir) || !pr_route_load(dir, "receiver.json", &st->hub_route) || !pr_hub_grant(st)) {
         pr_fail(reply, "RENEW_GRANT_DRIFT", "hub", "the hub receiver route or its grant is unreadable, or no longer matches epoch N's client grant", false);
         return false;
     }
