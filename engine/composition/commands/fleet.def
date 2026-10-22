@@ -133,14 +133,14 @@ ZCL_COMMAND_READY_READ(
     "(null when every "
     "measured one is met). A value this tree cannot measure today is "
     "reported unmeasured with the reason named, never as a fabricated "
-    "zero. outcomes, attempts_dir, repo, lintc_dir, baseline, brief (a "
-    "status-brief JSON file) and datadir override "
+    "zero. outcomes, attempts_dir, repo, lintc_dir, baseline and brief (a "
+    "status-brief JSON file) override "
     "the paths a producer reads, for pointing the command at a "
     "fixture. It asks only the local node, no peer, and writes nothing.",
     32768,
     "fleet,objectives,goals,targets,status,catalog",
     "zcl.fleet_objectives_input.v1", "zcl.fleet_objectives.v1",
-    "outcomes,attempts_dir,repo,lintc_dir,baseline,brief,datadir", "",
+    "outcomes,attempts_dir,repo,lintc_dir,baseline,brief", "",
     "z23-dev fleet objectives",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,

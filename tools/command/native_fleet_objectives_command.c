@@ -18,6 +18,7 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static const char *obj_input_str(const struct zcl_command_request *request,
@@ -92,7 +93,9 @@ void zcl_native_handle_fleet_objectives(
     options.lintc_dir = obj_input_str(request, "lintc_dir");
     options.baseline = obj_input_str(request, "baseline");
     options.brief = obj_input_str(request, "brief");
-    options.datadir = obj_input_str(request, "datadir");
+    /* Not an input: this leaf never takes a datadir from its caller. The node
+     * rows read the process datadir, or the test-only flag's fixture. */
+    options.datadir = getenv("ZCL_LAND_OBJECTIVES_DATADIR");
     options.node_cache = &node_cache;
 
     n = zcl_objectives_catalog(&catalog);

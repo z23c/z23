@@ -190,7 +190,6 @@ static void fox_begin(struct fox_call *c)
 {
     fox_begin_bare(c);
     fox_set(c, "brief", FOX_NO_BRIEF);
-    fox_set(c, "datadir", FOX_NO_DATADIR);
 }
 
 static bool fox_run(struct fox_call *c)
@@ -802,6 +801,8 @@ int test_fleet_objectives(void);
 int test_fleet_objectives(void)
 {
     int failures = 0;
+    /* The node rows read this datadir; the leaf takes no datadir input. */
+    (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", FOX_NO_DATADIR, 1);
     failures += fox_case_ledger_extent();
     failures += fox_case_windows();
     failures += fox_case_git();
@@ -1440,7 +1441,6 @@ int test_fleet_objectives(void)
         struct fox_call c;
         fox_begin_bare(&c);
         fox_set(&c, "brief", brief);
-        fox_set(&c, "datadir", FOX_NO_DATADIR);
         ASSERT(fox_run(&c));
         const struct json_value *rss = fox_row(&c, "node_rss_mb");
         ASSERT(rss != NULL);

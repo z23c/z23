@@ -222,7 +222,7 @@ results print `n/a (n<3)`; executors with no predictions are capped at C.
 
 ### Objectives
 
-`z23-dev fleet objectives --datadir=<node datadir> [--format=json]` prints each named objective with
+`z23-dev fleet objectives [--format=json]` prints each named objective with
 its current value, target and status (`met`, `unmet`, `unmeasured(<reason>)`).
 The closed catalog is [`engine/composition/objectives.def`](../../engine/composition/objectives.def):
 `landing_latency_s`, `landing_attempts_per_train`, `proof_lint_wall_s`,
@@ -238,8 +238,8 @@ rows are read-only: `node_rss_mb` and `node_tip_lag_blocks` come from the same s
 brief `z23 status` prints (tip lag is the larger of the header height and the best
 peer height, minus the served height), `node_warm_restart_s` is `elapsed_s` of the
 datadir's `boot_status.json` once its stage is serving, and each is `unmeasured(<reason>)`
-when the node is down, silent or still booting. `brief` (a status-brief JSON file) and
-`datadir` point them at fixtures. `functions_over_complexity_cap` counts only pin rows,
+when the node is down, silent or still booting. `brief` (a status-brief JSON file) and the
+test-only flag `ZCL_LAND_OBJECTIVES_DATADIR` point them at fixtures; the leaf takes no datadir input. `functions_over_complexity_cap` counts only pin rows,
 the way the lint gate parses the baseline (comment and blank lines are not pins).
 It is a report, not a gate.
 
