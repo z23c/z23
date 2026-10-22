@@ -33,7 +33,6 @@ banned-str core/math/src/uint256.c 1
 banned-str core/modules/net/src/fast_sync.c 3
 banned-str core/modules/net/src/msg_headers.c 1
 banned-str core/modules/script/src/htlc.c 1
-banned-str tools/agent/agent_velocity.c 8
 banned-str tools/agent/check_claims.c 2
 banned-str tools/arena_product_journey_c23.c 2
 banned-str tools/bench_fresh_sync.c 1

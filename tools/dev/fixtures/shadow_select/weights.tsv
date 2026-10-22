@@ -771,7 +771,6 @@ test_group	test_multisig	59	17
 test_group	test_multisig_consensus_branches	59	17
 test_group	test_muse_session	714	7
 test_group	test_mutation_harness	2833	48
-test_group	test_mvp_ledger	0	5
 test_group	test_nat_route_dump	63	32
 test_group	test_native_api_contract	808	240
 test_group	test_native_spend_proof	27031	32

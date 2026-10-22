@@ -990,7 +990,6 @@ DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
 	tools/dev/z23_doctor.c \
 	tools/dev/fleet_observe_main.c \
 	tools/dev/wiki_runtime_main.c \
-	tools/dev/mvp_ledger_main.c \
 	tools/dev/test_group_weights_main.c \
 	tools/dev/action_root_reuse_study.c \
 	tools/dev/action_root_reuse_study_eval.c \
@@ -4630,7 +4629,7 @@ worktree-gc:
 # command, HEAD, dirty state, exit status, wall/child-CPU time, and a SHA3 of
 # the captured output, which is stored alongside. See the forgery model in
 # tools/agent/gate_receipt.c — this is EVIDENCE, not proof.
-.PHONY: gate-receipt gate-receipt-bin check-claims check-claims-selftest agent-velocity agent-velocity-selftest agent-sha3 dev-fleet-selftest
+.PHONY: gate-receipt gate-receipt-bin check-claims check-claims-selftest agent-sha3 dev-fleet-selftest
 
 AGENT_SHA3_SRCS := tools/agent/agent_sha3.c platform/modules/sha3/src/sha3.c
 agent-sha3: $(BIN_DIR)/agent_sha3
@@ -4661,18 +4660,6 @@ $(BIN_DIR)/gate_receipt: $(GATE_RECEIPT_SRCS) tools/agent/gate_receipt.h
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \
 	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/base/include \
 	    -o $@ $(GATE_RECEIPT_SRCS) $(HARDEN_LDFLAGS)
-
-AGENT_VELOCITY_BIN := $(BIN_DIR)/agent_velocity
-$(AGENT_VELOCITY_BIN): tools/agent/agent_velocity.c platform/modules/base/src/safe_alloc.c
-	@mkdir -p $(dir $@)
-	@$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \
-	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
-	    -Iplatform/modules/platform/include -o $@ $^ $(HARDEN_LDFLAGS)
-
-# Parser and aggregation checks of agent_velocity; no repository or receipts
-# are read.
-agent-velocity-selftest: $(AGENT_VELOCITY_BIN)
-	@$(AGENT_VELOCITY_BIN) --selftest
 
 # Permanent node-free acceptance for `z23 dev fleet`: one isolated origin,
 # three attached worktrees, exact remote heads, dirty/unpublished source, and
@@ -4860,35 +4847,6 @@ $(BIN_DIR)/z23-fleet-observe: tools/dev/fleet_observe.c \
 	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
 	    -Itools/dev -o $@ $^
 
-# z23-mvp-ledger: measures the 144-loop MVP experiment (agents.tsv,
-# loops.tsv, snapshots.tsv, kpi.tsv, the progress render). Same shape as
-# z23-fleet-observe above: the four mvp_ledger*.c cores carry no main() so
-# tests/harness/src/test_mvp_ledger.c links them directly, and
-# mvp_ledger_main.c is the CLI shim kept out of DEVLOOP_ALL_SRCS via
-# DEV_STANDALONE_SRCS. It reuses fleet_observe.c's ISO-8601 parser, the
-# repo's JSON reader and the portable directory listing rather than growing
-# its own, so the sources named here are the whole dependency set.
-MVP_LEDGER_BIN = $(BIN_DIR)/z23-mvp-ledger$(ZCL_HOST_EXEEXT)
-.PHONY: z23-mvp-ledger
-z23-mvp-ledger: $(MVP_LEDGER_BIN)
-$(MVP_LEDGER_BIN): tools/dev/mvp_ledger.c tools/dev/mvp_ledger_tsv.c \
-		tools/dev/mvp_ledger_plan.c tools/dev/mvp_ledger_join.c \
-		tools/dev/mvp_ledger_kpi.c tools/dev/mvp_ledger_main.c \
-		tools/dev/fleet_observe.c \
-		contexts/commons/packages/zutf8/src/zutf8.c \
-		platform/modules/json/src/json.c \
-		platform/modules/base/src/cleanse.c \
-		platform/modules/base/src/safe_alloc.c \
-		platform/modules/platform/src/directory_compat.c \
-		platform/modules/platform/src/clock.c
-	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(ZCL_PLATFORM_CPPFLAGS) \
-	    -D_POSIX_C_SOURCE=200809L -Itools/dev \
-	    -Icontexts/commons/packages/zutf8/include \
-	    -Iplatform/modules/json/include -Iplatform/modules/base/include \
-	    -Iplatform/modules/platform/include -Iplatform/modules/util/include \
-	    -o $@ $^
-
 # test-group-weights: regenerates tools/dev/test_group_weights.tsv, the
 # expected wall seconds that make test_parallel dispatch longest-first. The
 # input is a MEASUREMENT (.cache/test-timing/last-run.json of a full cold
@@ -5073,16 +5031,6 @@ check-claims: $(CHECK_CLAIMS_BIN)
 	@RECEIPTS='$(RECEIPTS)'; \
 	 $(CHECK_CLAIMS_BIN) $${RECEIPTS:+--dir "$$RECEIPTS"} \
 	    $(if $(CLAIMS),--require '$(CLAIMS)') $(if $(STRICT),--strict)
-
-# What a lane cost and produced, computed rather than remembered. Everything
-# that is not mechanically derivable is printed as a NOT-DERIVABLE line naming
-# what the orchestrator must supply — never silently omitted.
-#   make agent-velocity BASE=b82b40e77
-agent-velocity: $(AGENT_VELOCITY_BIN)
-	@RECEIPTS='$(RECEIPTS)'; \
-	 $(AGENT_VELOCITY_BIN) $(if $(BASE),--base '$(BASE)') \
-	    $(if $(HEAD),--head '$(HEAD)') $(if $(AGAINST),--against '$(AGAINST)') \
-	    $${RECEIPTS:+--receipts "$$RECEIPTS"}
 
 # Run ONE test group, always rebuilding the harness first:
 #   make t ONLY=service_state_driver
@@ -5739,7 +5687,6 @@ WALLET_GUI_PIC_DIR :=
 endif
 dev-bin z23-dev zclassic23-dev: $(Z23_DEV_BIN) $(Z23_DEV_BIN_ALIAS) \
 	$(WALLET_GUI_SO) \
-	$(MVP_LEDGER_BIN) \
 	$(DEV_RESTART_PLAN_TARGET) \
 	$(HOTSWAP_ACTION_PLAN) $(DEV_PACKAGE_VERIFIER_TARGET) \
 	$(ZCL_ADAPTER_RUNNER_TARGET)

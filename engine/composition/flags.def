@@ -1919,7 +1919,7 @@ Z23_FLAG("ZCL_REAL_CLOCK_GATE_SCAN_GLOB", "env_build", "-", "-",
 Z23_FLAG("ZCL_REAL_HOME", "env_build", "-", "-",
           "undocumented; first use tools/scripts/step1_refold_rate_proof.sh:auto")
 Z23_FLAG("ZCL_RECEIPT_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/agent/agent_velocity.c:auto")
+          "undocumented; first use tools/agent/check_claims.c:auto")
 Z23_FLAG("ZCL_RECEIPT_KEY", "env_build", "-", "-",
           "first use tools/scripts/promotion_receipt.sh:auto; documented at docs/dev/PROMOTION_RECEIPTS.md:42: ZCL_RECEIPT_KEY names a key whose only job is signing evidence.")
 Z23_FLAG("ZCL_RECEIPT_LEDGER", "env_build", "-", "-",

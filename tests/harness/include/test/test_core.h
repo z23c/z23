@@ -912,8 +912,6 @@ int test_atomic_commit_ordering(void);
 int test_shielded_spend_slice(void);
 int test_coldimport_restart_fragility(void);
 int test_territory(void);
-/* The MVP experiment ledger (tests/harness/src/test_mvp_ledger.c). */
-int test_mvp_ledger(void);
 /* Base-relative lint premise selection (tests/harness/src/test_lint_selection.c). */
 int test_lint_selection(void);
 
