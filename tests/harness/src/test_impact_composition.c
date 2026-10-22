@@ -11625,6 +11625,22 @@ static int test_ic_name_reference_single_word_stem_is_bounded(void)
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "route")),
                      "make_lint_gates");
         zcl_command_reply_free(&reply);
+
+        /* A stem with '_' matches as a substring, so a lintc gate named in
+         * another gate's self-check must stay split inside the stem: an
+         * edit of it routes to the lint gates, never to the key gate's
+         * engine groups. */
+        json_free(&input);
+        json_init(&input); json_set_object(&input);
+        ASSERT(json_push_kv_str(&input, "path",
+                                "tools/lint/lintc/gate_" "ratchet_ports.c"));
+        zcl_command_reply_init(&reply, "zcl.code_tests.v1");
+        zcl_native_handle_code_tests(&request, &reply);
+        groups = json_get(&reply.data, "test_groups");
+        ASSERT(groups && groups->type == JSON_ARR && groups->num_children >= 1);
+        for (size_t i = 0; i < groups->num_children; i++)
+            ASSERT(strcmp(json_get_str(&groups->children[i]), "engine") != 0);
+        zcl_command_reply_free(&reply);
         json_free(&input);
         PASS();
     } _test_next:;
