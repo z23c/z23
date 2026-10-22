@@ -142,6 +142,8 @@ ZCL_TEST_GROUP_BUILD_NEED("test_plugin_run",
     "build/fixtures/plugin_run_child", "build/fixtures/plugin_run_child")
 ZCL_TEST_GROUP_BUILD_NEED("test_plugin_call",
     "build/fixtures/plugin_call_upper", "build/fixtures/plugin_call_upper")
+ZCL_TEST_GROUP_BUILD_NEED("test_plugin_run_hostcall",
+    "build/fixtures/plugin_hostcall_child", "build/fixtures/plugin_hostcall_child")
 ZCL_TEST_GROUP_BUILD_NEED("test_plugin_package",
     "build/fixtures/plugin_run_child", "build/fixtures/plugin_run_child")
 #endif
