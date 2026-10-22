@@ -261,9 +261,8 @@ static int hl_counts_ok(const struct hl_counts *c)
 static int hl_shape_counts(const struct hl_re *re, struct hl_counts *g,
                            FILE *err)
 {
-    char q[8192], cmd[16384];
-    if (sh_single_quote(k_hl_shape_gate, q, sizeof q)
-        || ovf(snprintf(cmd, sizeof cmd, "bash %s 2>&1", q), sizeof cmd))
+    char cmd[16384];
+    if (ovf(snprintf(cmd, sizeof cmd, "%s 2>&1", k_hl_shape_gate), sizeof cmd))
         return 2;
     static char shape_out[HL_CAPTURE_CAP];
     int code = 0;
@@ -526,7 +525,7 @@ static int hl_run_impl(FILE *out, FILE *err)
                               "tools/dev/hotswap-candidates.sh");
     const char *makefile = env_or("ZCL_HOTSWAP_CANDIDATES_MAKEFILE",
                                   "Makefile");
-    const char *const inputs[4] = { tool, k_hl_shape_gate, k_hl_denied_def,
+    const char *const inputs[4] = { tool, "tools/lint/lintc/gate_hotswap_swappable_shape.c", k_hl_denied_def,
                                     makefile };
     for (int i = 0; i < 4; i++) {
         if (access(inputs[i], R_OK) == 0)

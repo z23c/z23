@@ -75,7 +75,7 @@ cat <<EOF
  * under core/ except the manifest itself.
  * A mirror living inside the sealed set would be part of its own input: writing
  * it would change the ROOT it had just recorded, forever. So it lives beside
- * the consumer instead, and build/bin/z23-lint check-core-seal-root-mirror proves
+ * the consumer instead, and tools/lint/lintc/gate_landing_proof.c proves
  * the two agree — a forgotten regeneration fails \`make lint\`, it does not ship.
  *
  * WHAT IT IS FOR. A Tier-2 hot-swap module is compiled from ONE shape-leaf TU
