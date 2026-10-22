@@ -10169,8 +10169,9 @@ static bool dp_hc_settled(const char *cwd, const char *rel)
     return dp_hf_mkdirs(dir) && dp_hf_settled_copy(from, to);
 }
 
-/* Every in-tree header the owner, the model and the story adapter read, as
- * the compiler itself names them (-MM), copied settled. */
+/* Every in-tree header and X-macro table (.def) the owner, the model and the
+ * story adapter read, as the compiler itself names them (-MM), copied
+ * settled. */
 static bool dp_hc_copy_headers(const char *cwd)
 {
     static char cmd[8192], deps[131072];
@@ -10190,7 +10191,8 @@ static bool dp_hc_copy_headers(const char *cwd)
          t = strtok(NULL, " \t\r\n\\")) {
         size_t n = strlen(t);
         if (n < 3 || t[n - 1] == ':' || t[0] == '/' ||
-            strcmp(t + n - 2, ".h") != 0)
+            (strcmp(t + n - 2, ".h") != 0 &&
+             (n < 5 || strcmp(t + n - 4, ".def") != 0)))
             continue;
         ok = dp_hc_settled(cwd, t);
     }
