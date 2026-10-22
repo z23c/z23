@@ -297,7 +297,7 @@ static int dlt_receive_cases(void)
     }
 
     TEST("land.receive: --checkout from an unrelated cwd queues a row") {
-        dlt_receive_at(&c, r.inbox, bundle, "away", r.queue);
+        dlt_receive_at(&c, "/", bundle, "away", r.queue);
         ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
         ASSERT(json_get_int(json_get(&c.reply.data, "seq")) >= 1);
         ASSERT(DLT_GIT(text, sizeof(text), r.queue, "rev-parse",
@@ -308,7 +308,7 @@ static int dlt_receive_cases(void)
 
     TEST("land.receive: --checkout naming a non-checkout refuses "
          "RECEIVE_BAD_CHECKOUT") {
-        dlt_receive_at(&c, r.queue, bundle, "away2", r.inbox);
+        dlt_receive_at(&c, r.queue, bundle, "away2", "/");
         ASSERT(dlt_refused(&c, "RECEIVE_BAD_CHECKOUT"));
         dlt_end(&c);
         dlt_receive_at(&c, r.queue, bundle, "away2", "relative/dir");
