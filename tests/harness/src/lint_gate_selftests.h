@@ -371,7 +371,7 @@ int write_file(const char *path, const char *contents);
 pid_t fork_with_retry(void);
 int run_check_raw_malloc_script(void);
 int run_gate_script(const char *script_rel, const char *mode);
-void gate_exec(char *rel, const char *arg);
+void gate_exec(const char *rel, const char *arg);
 int run_gate_script_arg(const char *script_rel, const char *mode,
                         const char *arg);
 int run_gate_script_selftest(const char *script_rel);

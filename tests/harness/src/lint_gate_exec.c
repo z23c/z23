@@ -86,11 +86,21 @@ static void epoch_selftest_progress_channel(const char *script_rel)
 }
 
 /* Runs a gate rel: a script path, or "<binary> <subcommand>" for a lintc gate
- * exec'd as `z23-lint check-X` (no shell shim). Splits the buffer in place;
- * only ever called in the forked child, so the parent copy is untouched. */
-void gate_exec(char *rel, const char *arg)
+ * exec'd as `z23-lint check-X` (no shell shim). The split happens in a bounded
+ * local copy, so `rel` may be a read-only literal; only ever called in the
+ * forked child, so the parent copy is untouched. */
+void gate_exec(const char *rel, const char *arg)
 {
-    char *sub = strchr(rel, ' ');
+    char buf[PATH_MAX];
+    size_t len = strlen(rel);
+    if (len >= sizeof buf) {
+        fprintf(stderr, "gate_exec: gate path is %zu bytes, longer than PATH_MAX (%d): %.40s...\n",
+                len, PATH_MAX, rel);
+        _exit(127);
+    }
+    memcpy(buf, rel, len + 1);
+    rel = buf;
+    char *sub = strchr(buf, ' ');
     if (sub != NULL)
         *sub++ = '\0';
     if (sub != NULL && arg != NULL)
