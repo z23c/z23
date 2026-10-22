@@ -33,6 +33,10 @@
 bool zcl_test_isolate_environment(const char *private_root,
                                   char *err, size_t err_cap);
 
+/* Runner entry convenience: isolate, or print the reason and exit(2) so no
+ * test ever runs un-isolated. */
+void zcl_test_isolate_or_exit(const char *runner, const char *private_root);
+
 /* True when this process runs under zcl_test_isolate_environment() with the
  * real HOME replaced. */
 bool zcl_test_home_is_private(void);

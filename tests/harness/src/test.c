@@ -14,6 +14,24 @@
 extern int test_sha512_isa_parity(void);
 extern int test_make_lint_gates_heavy_03(void);
 
+/* Same default-datadir containment as test_parallel's child_run: this
+ * sequential runner executes the very same groups in one process. */
+static void test_zcl_isolate_home(void)
+{
+    char iso_root[] = "test-tmp/zcl-test-home-XXXXXX";
+    if (mkdir("test-tmp", 0755) != 0 && errno != EEXIST) {
+        fprintf(stderr, "test_zcl: cannot create test-tmp: %s\n",
+                strerror(errno));
+        exit(2);
+    }
+    if (!mkdtemp(iso_root)) {
+        fprintf(stderr, "test_zcl: cannot create private root: %s\n",
+                strerror(errno));
+        exit(2);
+    }
+    zcl_test_isolate_or_exit("test_zcl", iso_root);
+}
+
 /* Required by process_block.c (normally in main.c) */
 volatile sig_atomic_t g_shutdown_requested = 0;
 
@@ -52,26 +70,7 @@ int main(int argc, char **argv)
     setbuf(stdout, NULL); /* Unbuffered for test progress visibility */
     int failures = 0;
 
-    /* Same default-datadir containment as test_parallel's child_run: this
-     * sequential runner executes the very same groups in one process. */
-    {
-        char iso_root[] = "test-tmp/zcl-test-home-XXXXXX";
-        char iso_err[512];
-        if (mkdir("test-tmp", 0755) != 0 && errno != EEXIST) {
-            fprintf(stderr, "test_zcl: cannot create test-tmp: %s\n",
-                    strerror(errno));
-            return 2;
-        }
-        if (!mkdtemp(iso_root)) {
-            fprintf(stderr, "test_zcl: cannot create private root: %s\n",
-                    strerror(errno));
-            return 2;
-        }
-        if (!zcl_test_isolate_environment(iso_root, iso_err, sizeof(iso_err))) {
-            fprintf(stderr, "test_zcl: HOME isolation failed: %s\n", iso_err);
-            return 2;
-        }
-    }
+    test_zcl_isolate_home();
 
     /* Global init required by many test groups */
     chain_params_select(CHAIN_MAIN);

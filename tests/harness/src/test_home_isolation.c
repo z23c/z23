@@ -29,6 +29,13 @@ static const char *const k_datadir_vars[] = {
     "ZCL_SLO_ORACLE_DATADIR",
 };
 
+struct iso_dirs {
+    char home[PATH_MAX];
+    char cfg[PATH_MAX];
+    char data[PATH_MAX];
+    char cache[PATH_MAX];
+};
+
 static void iso_unset(const char *name)
 {
 #if defined(_WIN32)
@@ -59,14 +66,87 @@ static bool iso_subdir(char *out, size_t cap, const char *base,
         errno = ENAMETOOLONG;
         return false;
     }
-    if (platform_private_directory_ensure(out)) return true;
-    return false;
+    return platform_private_directory_ensure(out);
 }
 
 static bool real_home_opt_in(void)
 {
     const char *v = getenv("ZCL_TEST_REAL_HOME");
     return v && strcmp(v, "1") == 0;
+}
+
+/* Record the canonical datadir BEFORE HOME moves. A nested runner keeps the
+ * outermost answer: its own HOME is already a fixture. */
+static bool iso_export_markers(char *err, size_t err_cap)
+{
+    const char *outer = getenv("ZCL_TEST_CANONICAL_DATADIR");
+    if (!outer || !outer[0]) {
+        char canonical[PATH_MAX];
+        GetDefaultDataDir(canonical, sizeof(canonical));
+        if (!iso_set("ZCL_TEST_CANONICAL_DATADIR", canonical))
+            return iso_fail(err, err_cap, "cannot export canonical datadir",
+                            canonical);
+    }
+    if (!iso_set("ZCL_TEST_HARNESS", "1"))
+        return iso_fail(err, err_cap, "cannot export harness marker", "");
+    return true;
+}
+
+static bool iso_make_dirs(struct iso_dirs *d, const char *root)
+{
+    char local[PATH_MAX];
+    return iso_subdir(d->home, sizeof(d->home), root, "home") &&
+           iso_subdir(d->cfg, sizeof(d->cfg), d->home, ".config") &&
+           iso_subdir(local, sizeof(local), d->home, ".local") &&
+           iso_subdir(d->data, sizeof(d->data), local, "share") &&
+           iso_subdir(d->cache, sizeof(d->cache), d->home, ".cache");
+}
+
+/* Sapling parameters are read-only inputs, not a datadir: keep the
+ * params-gated groups running by linking the real directory in. */
+static bool iso_link_params(const char *real_home, const char *home)
+{
+#if defined(_WIN32)
+    (void)real_home;
+    (void)home;
+    return true;
+#else
+    char src[PATH_MAX], dst[PATH_MAX];
+    struct stat st;
+    if (!real_home || !real_home[0]) return true;
+    if (snprintf(src, sizeof(src), "%s/.zcash-params", real_home) < 0 ||
+        snprintf(dst, sizeof(dst), "%s/.zcash-params", home) < 0)
+        return false;
+    if (stat(src, &st) != 0 || !S_ISDIR(st.st_mode)) return true;
+    return symlink(src, dst) == 0 || errno == EEXIST;
+#endif
+}
+
+/* A deterministic git identity: a test that drives git (commit, merge,
+ * cherry-pick) used to find the operator's ~/.gitconfig; a private HOME has
+ * none, and git refuses to commit without an identity. */
+static bool iso_write_gitconfig(const char *home)
+{
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "%s/.gitconfig", home) < 0) return false;
+    FILE *f = fopen(path, "w");
+    if (!f) return false;
+    bool ok = fputs("[user]\n\tname = Z23 Test\n"
+                    "\temail = z23-test@example.invalid\n", f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static bool iso_switch_env(const struct iso_dirs *d)
+{
+    bool ok = iso_set("HOME", d->home) && iso_set("XDG_CONFIG_HOME", d->cfg) &&
+              iso_set("XDG_DATA_HOME", d->data) &&
+              iso_set("XDG_CACHE_HOME", d->cache);
+#if defined(_WIN32)
+    ok = ok && iso_set("USERPROFILE", d->home);
+#endif
+    for (size_t i = 0; i < sizeof(k_datadir_vars) / sizeof(k_datadir_vars[0]); ++i)
+        iso_unset(k_datadir_vars[i]);
+    return ok && iso_set("ZCL_TEST_PRIVATE_HOME", "1");
 }
 
 bool zcl_test_isolate_environment(const char *private_root,
@@ -80,26 +160,15 @@ bool zcl_test_isolate_environment(const char *private_root,
     /* HOME must survive a chdir: resolve the root to an absolute path. */
     char root_abs[PATH_MAX];
 #if defined(_WIN32)
-    if (!_fullpath(root_abs, private_root, sizeof(root_abs)))
+    bool resolved = _fullpath(root_abs, private_root, sizeof(root_abs)) != NULL;
 #else
-    if (!realpath(private_root, root_abs))
+    bool resolved = realpath(private_root, root_abs) != NULL;
 #endif
+    if (!resolved)
         return iso_fail(err, err_cap, "cannot resolve private root",
                         private_root);
-    private_root = root_abs;
 
-    /* Record the canonical datadir BEFORE HOME moves. A nested runner keeps
-     * the outermost answer: its own HOME is already a fixture. */
-    const char *outer = getenv("ZCL_TEST_CANONICAL_DATADIR");
-    if (!outer || !outer[0]) {
-        char canonical[PATH_MAX];
-        GetDefaultDataDir(canonical, sizeof(canonical));
-        if (!iso_set("ZCL_TEST_CANONICAL_DATADIR", canonical))
-            return iso_fail(err, err_cap, "cannot export canonical datadir",
-                            canonical);
-    }
-    if (!iso_set("ZCL_TEST_HARNESS", "1"))
-        return iso_fail(err, err_cap, "cannot export harness marker", "");
+    if (!iso_export_markers(err, err_cap)) return false;
 
     if (real_home_opt_in()) {
         printf("test_home_isolation: ZCL_TEST_REAL_HOME=1 — HOME left real; "
@@ -108,57 +177,26 @@ bool zcl_test_isolate_environment(const char *private_root,
     }
 
     const char *real_home = getenv("HOME");
-    char home[PATH_MAX], cfg[PATH_MAX], local[PATH_MAX], data[PATH_MAX],
-         cache[PATH_MAX];
-    if (!iso_subdir(home, sizeof(home), private_root, "home"))
-        return iso_fail(err, err_cap, "cannot create private HOME", private_root);
-    if (!iso_subdir(cfg, sizeof(cfg), home, ".config") ||
-        !iso_subdir(local, sizeof(local), home, ".local") ||
-        !iso_subdir(data, sizeof(data), local, "share") ||
-        !iso_subdir(cache, sizeof(cache), home, ".cache"))
-        return iso_fail(err, err_cap, "cannot create private XDG dirs", home);
-
-#if !defined(_WIN32)
-    /* Sapling parameters are read-only inputs, not a datadir: keep the
-     * params-gated groups running by linking the real directory in. */
-    if (real_home && real_home[0]) {
-        char src[PATH_MAX], dst[PATH_MAX];
-        struct stat st;
-        if (snprintf(src, sizeof(src), "%s/.zcash-params", real_home) > 0 &&
-            snprintf(dst, sizeof(dst), "%s/.zcash-params", home) > 0 &&
-            stat(src, &st) == 0 && S_ISDIR(st.st_mode) &&
-            symlink(src, dst) != 0 && errno != EEXIST)
-            return iso_fail(err, err_cap, "cannot link params", dst);
-    }
-#else
-    (void)real_home;
-#endif
-
-    /* A deterministic git identity: a test that drives git (commit, merge,
-     * cherry-pick) used to find the operator's ~/.gitconfig; a private HOME
-     * has none, and git refuses to commit without an identity. */
-    {
-        char gitconfig[PATH_MAX];
-        if (snprintf(gitconfig, sizeof(gitconfig), "%s/.gitconfig", home) > 0) {
-            FILE *f = fopen(gitconfig, "w");
-            bool ok = f && fputs("[user]\n\tname = Z23 Test\n"
-                                 "\temail = z23-test@example.invalid\n", f) >= 0;
-            if (f && fclose(f) != 0) ok = false;
-            if (!ok) return iso_fail(err, err_cap, "cannot write", gitconfig);
-        }
-    }
-
-    if (!iso_set("HOME", home) || !iso_set("XDG_CONFIG_HOME", cfg) ||
-        !iso_set("XDG_DATA_HOME", data) || !iso_set("XDG_CACHE_HOME", cache))
-        return iso_fail(err, err_cap, "cannot set private HOME", home);
-#if defined(_WIN32)
-    if (!iso_set("USERPROFILE", home))
-        return iso_fail(err, err_cap, "cannot set private USERPROFILE", home);
-#endif
-    for (size_t i = 0; i < sizeof(k_datadir_vars) / sizeof(k_datadir_vars[0]); ++i)
-        iso_unset(k_datadir_vars[i]);
-    iso_set("ZCL_TEST_PRIVATE_HOME", "1");
+    struct iso_dirs d;
+    if (!iso_make_dirs(&d, root_abs))
+        return iso_fail(err, err_cap, "cannot create private HOME", root_abs);
+    if (!iso_link_params(real_home, d.home))
+        return iso_fail(err, err_cap, "cannot link params into", d.home);
+    if (!iso_write_gitconfig(d.home))
+        return iso_fail(err, err_cap, "cannot write .gitconfig in", d.home);
+    if (!iso_switch_env(&d))
+        return iso_fail(err, err_cap, "cannot set private HOME", d.home);
     return true;
+}
+
+void zcl_test_isolate_or_exit(const char *runner, const char *private_root)
+{
+    char err[512];
+    if (zcl_test_isolate_environment(private_root, err, sizeof(err)))
+        return;
+    fprintf(stderr, "%s: HOME isolation failed: %s\n",
+            runner ? runner : "test", err);
+    exit(2);
 }
 
 bool zcl_test_home_is_private(void)

@@ -441,14 +441,19 @@ static struct block_index *insert_index(struct main_state *ms,
     return bi;
 }
 
+/* Pin the datadir first: the stage inits cache GetDataDir(), which unpinned
+ * is $HOME/.zclassic-c23. */
+static bool srf_open_pinned(const char *dir)
+{
+    return SetDataDir(dir) && progress_store_open(dir);
+}
+
 static bool setup_fixture(struct srf_fixture *fx, const char *tag)
 {
     memset(fx, 0, sizeof(*fx));
     test_make_tmpdir(fx->dir, sizeof(fx->dir),
                      "stage_repair_script_refill", tag);
-    if (!SetDataDir(fx->dir))
-        return false;
-    if (!progress_store_open(fx->dir))
+    if (!srf_open_pinned(fx->dir))
         return false;
     sqlite3 *db = progress_store_db();
     if (!seed_schema(db))

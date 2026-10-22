@@ -606,6 +606,9 @@ static bool mp_capped_visitor(const struct block *blk, int height, void *ctx)
  * We only READ it (and immediately COPY it to an isolated path). */
 static bool mp_find_blk_dat(char *out, size_t n)
 {
+    /* Reads the operator's real block files: only on explicit opt-in, since
+     * the runners give every group a private HOME (logs the skip reason). */
+    if (zcl_test_real_home_skip("part 3 real-block fold-rate")) return false;
     const char *home = getenv("HOME");
     if (!home) return false;
     const char *cands[] = {
@@ -651,12 +654,6 @@ static int mp_part3_foldrate(void)
     int failures = 0;
     printf("\n  [part 3] SERIAL FOLD-RATE (real blk*.dat blocks -> coins_kv)\n");
 
-    /* Reads the operator's real block files: only on explicit opt-in, since
-     * the runner now gives every group a private HOME. */
-    if (zcl_test_real_home_skip("part 3 real-block fold-rate")) {
-        printf("    FOLD_RATE_RESULT: skipped (private HOME; no block data)\n");
-        return 0;
-    }
     char src_blk[512];
     if (!mp_find_blk_dat(src_blk, sizeof(src_blk))) {
         printf("    NOTE: no on-disk blk*.dat found under ~/.zclassic-c23 or "

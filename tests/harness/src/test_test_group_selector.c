@@ -2366,32 +2366,34 @@ static bool tgs_under(const char *path, const char *parent, const char *leaf)
     return path && n > 0 && (size_t)n < sizeof(want) && strcmp(path, want) == 0;
 }
 
+/* The CALLER's HOME is `expected` (empty when it ran with none): the runner
+ * must hand the group a private replacement under the retained state dir and
+ * remember the original canonical datadir for the storage writer guard. */
+static bool tgs_home_contract(const char *state, const char *expected)
+{
+    const char *home = getenv("HOME");
+    const char *canonical = getenv("ZCL_TEST_CANONICAL_DATADIR");
+    const char *harness = getenv("ZCL_TEST_HARNESS");
+    char want_canonical[PATH_MAX];
+    int n = snprintf(want_canonical, sizeof(want_canonical),
+                     "%s/.zclassic-c23", expected);
+    return home && canonical && harness && n > 0 &&
+           (size_t)n < sizeof(want_canonical) &&
+           tgs_under(home, state, "home") && strcmp(home, expected) != 0 &&
+           tgs_under(getenv("XDG_CONFIG_HOME"), home, ".config") &&
+           tgs_under(getenv("XDG_CACHE_HOME"), home, ".cache") &&
+           strcmp(canonical, want_canonical) == 0 &&
+           strcmp(harness, "1") == 0 && getenv("ZCL_DATADIR") == NULL;
+}
+
 static int tgs_state_probe(void)
 {
     const char *state = getenv("XDG_STATE_HOME");
-    const char *home = getenv("HOME");
-    /* The CALLER's HOME (empty when it ran with none): the runner must hand
-     * the group a private replacement and remember the original canonical
-     * datadir for the storage writer guard. */
     const char *expected = getenv("ZCL_TEST_RUNNER_EXPECT_HOME");
-    const char *canonical = getenv("ZCL_TEST_CANONICAL_DATADIR");
-    char path[PATH_MAX], want_canonical[PATH_MAX];
-    if (!state || !home || !expected || !canonical) return 1;
-    if (!tgs_under(home, state, "home") || strcmp(home, expected) == 0)
-        return 1;
-    if (!tgs_under(getenv("XDG_CONFIG_HOME"), home, ".config") ||
-        !tgs_under(getenv("XDG_CACHE_HOME"), home, ".cache"))
-        return 1;
-    int n = snprintf(want_canonical, sizeof(want_canonical),
-                     "%s/.zclassic-c23", expected);
-    if (n < 0 || (size_t)n >= sizeof(want_canonical) ||
-        strcmp(canonical, want_canonical) != 0)
-        return 1;
-    const char *harness = getenv("ZCL_TEST_HARNESS");
-    if (!harness || strcmp(harness, "1") != 0 || getenv("ZCL_DATADIR"))
-        return 1;
+    char path[PATH_MAX];
+    if (!state || !expected || !tgs_home_contract(state, expected)) return 1;
     if (!tgs_native_state_matches(state)) return 1;
-    n = snprintf(path, sizeof(path), "%s/runner-probe", state);
+    int n = snprintf(path, sizeof(path), "%s/runner-probe", state);
     if (n < 0 || (size_t)n >= sizeof(path)) return 1;
     FILE *f = fopen(path, "wx");
     if (!f) return 1;
