@@ -1049,6 +1049,90 @@ static void proof_observations_fold(
 #endif
 }
 
+#define PROOF_SELECT_REPLY_RESERVE 1536u
+#define PROOF_SELECT_DEFAULT_BUDGET 65536u
+
+bool zcl_dev_proof_select_reply_fits(size_t groups_len, size_t budget_bytes)
+{
+    size_t budget = budget_bytes ? budget_bytes : PROOF_SELECT_DEFAULT_BUDGET;
+    return groups_len <= budget && budget - groups_len >= PROOF_SELECT_REPLY_RESERVE;
+}
+
+/* dev.proof.select: the test groups the land proof would select for
+ * base..local, from the proof worker's own planner and selector. A lane
+ * verify runs exactly this set, so it cannot miss a group the proof runs. */
+static void proof_select(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+#ifndef ZCL_DEV_BUILD
+    (void)request;
+    zcl_command_reply_fail(
+        reply, ZCL_COMMAND_STATUS_BLOCKED, ZCL_COMMAND_EXIT_BLOCKED,
+        "DEV_BUILD_REQUIRED", "dispatch", false, false,
+        "proof selection requires the dev binary", "make dev-bin");
+#else
+    const char *base = proof_optional_text(request->input, "base");
+    const char *local = proof_optional_text(request->input, "local_commit");
+    if (!base) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+            "PROOF_SELECT_BASE_REQUIRED", "normalize", false, false,
+            "base is required: the ref the proof diffs against, e.g. "
+            "$(git merge-base origin/main HEAD)", "base");
+        return;
+    }
+    if (!local) local = "HEAD";
+    struct zcl_dev_proof_range_selection selection = {0};
+    selection.groups_size = zcl_dev_proof_select_groups_capacity();
+    selection.groups = zcl_calloc(selection.groups_size, 1,
+                                  "dev.proof.select groups");
+    if (!selection.groups) {
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
+            "PROOF_SELECT_ALLOCATION_FAILED", "select", false, true,
+            "could not allocate the group selector", "");
+        return;
+    }
+    char why[160] = {0};
+    if (!zcl_dev_proof_select_range(proof_source_root(request), base, local,
+                                    &selection, why, sizeof(why))) {
+        free(selection.groups);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "PROOF_SELECT_REFUSED", "select", false, false,
+            "the proof selector refused this range",
+            why[0] ? why : "proof_select_failed");
+        return;
+    }
+    if (!zcl_dev_proof_select_reply_fits(
+            strlen(selection.groups) + strlen(selection.gated) +
+                strlen(selection.detail),
+            request->spec ? request->spec->budget_bytes : 0)) {
+        free(selection.groups);
+        zcl_command_reply_fail(
+            reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_FAILED,
+            "PROOF_SELECT_REPLY_TOO_LARGE", "select", false, false,
+            "the selected group list exceeds this leaf's reply budget; "
+            "run the groups by name instead", "budget");
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "base", base);
+    (void)json_push_kv_str(&reply->data, "local_commit", local);
+    (void)json_push_kv_int(&reply->data, "files", (int64_t)selection.files);
+    (void)json_push_kv_str(&reply->data, "selector",
+                           selection.universal ? "universal" : "exact");
+    (void)json_push_kv_str(&reply->data, "reason", selection.reason);
+    (void)json_push_kv_str(&reply->data, "detail",
+                           selection.detail[0] ? selection.detail : "-");
+    (void)json_push_kv_int(&reply->data, "groups_selected",
+                           (int64_t)selection.count);
+    (void)json_push_kv_str(&reply->data, "host_gated",
+                           selection.gated[0] ? selection.gated : "-");
+    (void)json_push_kv_str(&reply->data, "groups", selection.groups);
+    free(selection.groups);
+#endif
+}
+
 void zcl_native_dev_proof_dispatch(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -1064,6 +1148,7 @@ void zcl_native_dev_proof_dispatch(
         {"dev.proof.retry", proof_retry},
         {"dev.proof.signer", proof_signer},
         {"dev.proof.coverage", proof_coverage},
+        {"dev.proof.select", proof_select},
         {"dev.proof.observations", proof_observations},
         {"dev.proof.observations.fold", proof_observations_fold},
     };

@@ -30,7 +30,7 @@ make -j"$(getconf _NPROCESSORS_ONLN)" z23     # build/bin/z23
 make dev-bin                                  # fast development binaries
 make t-list                                   # registered test groups
 make t-fast ONLY=<group>                      # focused tests; ONLY is mandatory
-make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=<g,g>  # one-trip verify
+make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed  # one-trip verify: the groups the land proof selects committed changes only; commit first (or ONLY=<g,g>)
 make lint-fast                                # fast lint subset
 ```
 

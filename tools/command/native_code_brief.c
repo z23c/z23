@@ -544,7 +544,9 @@ static void cb_push_next(struct cb_brief *b, const char *fmt, const char *arg)
 
 /* The group for the focused proof command: t-fast ONLY takes one name. The
  * lint umbrella is proved by the lint commands that follow, so it is named
- * only when it is the sole routed group. */
+ * only when it is the sole routed group. The verify command itself no longer
+ * takes a group: ONLY=@changed runs the set the land proof selects, which a
+ * capped presentation list of groups cannot. */
 static const char *cb_focus_group(const struct cb_brief *b)
 {
     for (size_t i = 0; i < b->ntests; i++)
@@ -557,7 +559,7 @@ static void cb_build_next(struct cb_brief *b)
 {
     const char *group = cb_focus_group(b);
     if (group)
-        cb_push_next(b, "make t-fast ONLY=%s", group);
+        cb_push_next(b, "%s", "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
     else if (b->npaths)
         cb_push_next(b, "build/bin/z23 code cost %s", b->paths[0]);
     cb_push_next(b, "%s", "make lint-fast");

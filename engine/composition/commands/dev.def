@@ -850,6 +850,29 @@ ZCL_COMMAND_DEV_READ(
     "z23-dev dev proof status")
 
 ZCL_COMMAND_DEV_READ(
+    "dev.proof.select", "dev.proof", "",
+    "Select the test groups the land proof would run for a range",
+    "Runs the proof worker's own changed-set capture, impact plan, "
+    "structural widening and test selector for base..local without a proof "
+    "cycle, and reports the exact comma-separated group set it would run. "
+    "selector is universal when the proof would run the whole catalog (an "
+    "added, deleted or type-changed input, a path-group cap, a closure it "
+    "cannot bound, or a plan the include graph cannot close), with the "
+    "reason named. Read-only; make agent-verify ONLY=@changed runs this set.",
+    65536,
+    "dev,proof,select,groups,verify,changed,land",
+    "zcl.dev_proof_input.v1", "zcl.dev_proof_select.v1",
+    "root,base,local_commit", "",
+    "z23-dev dev proof select --base=origin/main",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_verify_change,
+    "proof selection requires the dev binary",
+    "z23-dev dev proof status")
+
+ZCL_COMMAND_DEV_READ(
     "dev.proof.observations", "dev.proof", "",
     "Query this box's receiver observation index",
     "Reports what this box has observed across every proved pair: totals, "

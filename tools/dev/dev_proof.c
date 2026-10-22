@@ -6867,6 +6867,18 @@ bool zcl_dev_proof_test_needs_argv(const char *jobs, const char *groups,
 }
 #endif
 
+/* Why the selection is the size it is: one spelling shared by the attempt's
+ * test-selection.log and `dev proof select`, so a lane verify and the proof
+ * cannot word the same decision differently. */
+static const char *dp_selection_reason(const struct zcl_devloop_plan *plan,
+                                       bool widened)
+{
+    return widened                   ? "changed-input-structure"
+           : plan->path_universal    ? "path-group-cap"
+           : plan->closure_universal ? "closure-universal"
+                                     : "impact-plan";
+}
+
 /* Record the test-selection shape beside the dimension logs. "universal" is
  * the whole catalog, chosen because the plan's closure was capacity-bounded
  * (reason closure-universal), because its path floor outgrew the group cap
@@ -6882,10 +6894,7 @@ static bool proof_note_test_selection(const struct proof_paths *paths,
                                       const char *host_gated)
 {
     bool universal = plan->closure_universal;
-    const char *reason = widened               ? "changed-input-structure"
-                         : plan->path_universal ? "path-group-cap"
-                         : universal            ? "closure-universal"
-                                                : "impact-plan";
+    const char *reason = dp_selection_reason(plan, widened);
     char path[PATH_MAX];
     if (snprintf(path, sizeof(path), "%s/%s.test-selection.log", paths->logs,
                  paths->key) >= (int)sizeof(path))
@@ -7147,6 +7156,116 @@ bool zcl_dev_proof_test_changed_set_selector(
                                count_out, gated_out, gated_size);
 }
 #endif
+
+static bool dp_changed_set_close(const char *root,
+    const struct zcl_dev_proof_changed_set *set,
+    struct zcl_devloop_plan *plan, const char **reason);
+
+size_t zcl_dev_proof_select_groups_capacity(void)
+{
+    return (size_t)ZCL_DEVLOOP_MAX_PLAN_SELECTIONS *
+           (ZCL_TEST_GROUP_FULL_MAX + 1);
+}
+
+/* Where the range's changed-set list is staged: under the checkout's own
+ * build/scratch, created on demand. */
+static bool dp_select_scratch(const char *root, char *scratch, size_t size)
+{
+    char dir[PATH_MAX];
+    if (snprintf(scratch, size,
+                 "%s/build/scratch/proof-select-changed-set.txt", root) >=
+            (int)size ||
+        snprintf(dir, sizeof(dir), "%s/build", root) >= (int)sizeof(dir) ||
+        (mkdir(dir, 0755) != 0 && errno != EEXIST) ||
+        snprintf(dir, sizeof(dir), "%s/build/scratch", root) >=
+            (int)sizeof(dir) ||
+        (mkdir(dir, 0755) != 0 && errno != EEXIST))
+        return false;
+    return true;
+}
+
+/* Close and widen the plan the way the proof worker does. The first close may
+ * be what builds the code index, and the proof asks again after its graph
+ * refresh, so ask once more. A plan that still cannot close never narrows: a
+ * lane verify cannot refresh the graph, so it selects the universal set. */
+static void dp_select_close(const char *root,
+                            const struct zcl_dev_proof_changed_set *set,
+                            struct zcl_devloop_plan *plan,
+                            struct zcl_dev_proof_range_selection *out,
+                            bool *inventory_only)
+{
+    const char *refusal = "";
+    *inventory_only = false; /* the inventory is untracked build output */
+    bool admitted = dp_changed_set_close(root, set, plan, &refusal);
+    if (!admitted && zcl_devloop_plan_files(set->files, set->count, plan))
+        admitted = dp_changed_set_close(root, set, plan, &refusal);
+    bool widened = dp_changed_set_widen(set, plan, inventory_only);
+    if (admitted) {
+        out->reason = dp_selection_reason(plan, widened);
+        return;
+    }
+    (void)zcl_devloop_plan_refusal_text(plan, out->detail,
+                                        sizeof(out->detail));
+    if (!out->detail[0])
+        (void)snprintf(out->detail, sizeof(out->detail), "%s", refusal);
+    plan->closure_universal = true;
+    plan->docs_only = false;
+    *inventory_only = false;
+    out->reason = widened ? "changed-input-structure" : "plan-not-closed";
+}
+
+/* The selection the proof worker would make for base..local, from the same
+ * planner, widening and selector, without a proof cycle. A plan the include
+ * graph cannot close selects the universal set rather than a narrowed one. */
+bool zcl_dev_proof_select_range(const char *root_in, const char *base,
+                                const char *local,
+                                struct zcl_dev_proof_range_selection *out,
+                                char *why, size_t why_len)
+{
+    if (!root_in || !base || !local || !out || !out->groups ||
+        out->groups_size == 0)
+        return false;
+    char root_abs[PATH_MAX], scratch[PATH_MAX];
+    const char *root = realpath(root_in, root_abs);
+    if (!root || !dp_select_scratch(root, scratch, sizeof(scratch))) {
+        proof_why(why, why_len, "proof_select_root_unavailable");
+        return false;
+    }
+    out->groups[0] = '\0';
+    out->count = 0;
+    out->files = 0;
+    out->universal = false;
+    out->reason = "impact-plan";
+    out->gated[0] = '\0';
+    out->detail[0] = '\0';
+    struct zcl_dev_proof_changed_set set = {0};
+    struct zcl_devloop_plan *plan = zcl_calloc(1, sizeof(*plan),
+                                               "proof select plan");
+    if (!plan) {
+        proof_why(why, why_len, "proof_select_allocation_failed");
+        return false;
+    }
+    bool ok = zcl_dev_proof_changed_set_capture(root, base, local, scratch,
+                                                NULL, &set, why, why_len);
+    if (ok && !zcl_devloop_plan_files(set.files, set.count, plan)) {
+        proof_why(why, why_len, "impact_plan_invalid");
+        ok = false;
+    }
+    if (ok) {
+        bool inventory_only = false;
+        dp_select_close(root, &set, plan, out, &inventory_only);
+        out->universal = plan->closure_universal;
+        out->files = set.count;
+        ok = build_test_selector(plan, root, inventory_only, out->groups,
+                                 out->groups_size, &out->count, out->gated,
+                                 sizeof(out->gated));
+        if (!ok)
+            proof_why(why, why_len, "test_selection_invalid_or_truncated");
+    }
+    zcl_dev_proof_changed_set_release(&set);
+    free(plan);
+    return ok;
+}
 
 /* One PROBE-SUMMARY line, strictly: the four counts and nothing else.
  * A line that is too long to be a summary, lacks the prefix, or carries

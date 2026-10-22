@@ -28,4 +28,9 @@ void zcl_dev_proof_wait_conclude(struct zcl_command_reply *reply,
 void zcl_dev_proof_status_conclude(struct zcl_command_reply *reply,
                                    const struct zcl_dev_proof_status *status);
 
+/* Does a `dev proof select` reply carrying `groups_len` bytes of group
+ * names fit the leaf budget `budget_bytes` (0 = the declared 65536)? The
+ * registry drops an over-budget reply to a bare envelope, so the handler
+ * refuses by name instead and `agent-verify` never sees a half answer. */
+bool zcl_dev_proof_select_reply_fits(size_t groups_len, size_t budget_bytes);
 #endif

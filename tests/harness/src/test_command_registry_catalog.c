@@ -621,12 +621,7 @@ static int test_code_guide_brief(void)
         ASSERT(brief_array_has(json_get(&reply.data, "tests"), route));
         ASSERT(json_get(&reply.data, "tests_unmapped") == NULL);
         const char *proof = json_get_str(json_at(json_get(&reply.data, "next"), 0));
-        ASSERT(strncmp(proof, "make t-fast ONLY=", 17) == 0);
-        const char *focus = NULL;
-        for (size_t g = 0; g < acc.groups_len && !focus; g++)
-            if (strcmp(acc.groups[g], "make_lint_gates") != 0)
-                focus = acc.groups[g];
-        ASSERT(focus != NULL && strstr(proof, focus) != NULL);
+        ASSERT_STR_EQ(proof, "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
         ASSERT(strstr(proof, "make_lint_gates") == NULL);
         ASSERT(json_write(&reply.data, NULL, 0) <= 2048);
         zcl_command_reply_free(&reply);
@@ -647,7 +642,7 @@ static int test_code_guide_devagent_focus(void)
         for (size_t i = 0; i < sizeof(leaves) / sizeof(leaves[0]); i++) {
             char input[192], proof[96], group[64];
             snprintf(input, sizeof(input), "{\"paths\":[\"tools/command/native_devagent_%s.c\"]}", leaves[i]);
-            snprintf(proof, sizeof(proof), "make t-fast ONLY=devagent_%s", leaves[i]);
+            snprintf(proof, sizeof(proof), "%s", "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
             snprintf(group, sizeof(group), "devagent_%s", leaves[i]);
             ASSERT(brief_run(root, input, &reply, why, sizeof(why)));
             ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
@@ -713,7 +708,7 @@ static int test_code_guide_lint_catalog(void)
         ASSERT_EQ(reply.exit_code, ZCL_COMMAND_EXIT_OK);
         const struct json_value *next = json_get(&reply.data, "next");
         ASSERT_EQ(json_size(next), 3u);
-        ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make t-fast ONLY=make_lint_gates");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
         ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make lint-fast");
         ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "tools/lint/run_lint.sh --list");
         zcl_command_reply_free(&reply);
@@ -722,7 +717,7 @@ static int test_code_guide_lint_catalog(void)
                          &reply, why, sizeof(why)));
         next = json_get(&reply.data, "next");
         ASSERT_EQ(json_size(next), 4u);
-        ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make t-fast ONLY=make_lint_gates");
+        ASSERT_STR_EQ(json_get_str(json_at(next, 0)), "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed");
         ASSERT_STR_EQ(json_get_str(json_at(next, 1)), "make lint-fast");
         ASSERT_STR_EQ(json_get_str(json_at(next, 2)), "make lint-preflight");
         ASSERT_STR_EQ(json_get_str(json_at(next, 3)), "tools/lint/run_lint.sh --list");

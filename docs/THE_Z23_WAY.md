@@ -43,8 +43,10 @@ identity and independent reproduction.
 3. **Edit** the smallest owned surface. Reuse existing C23 first; no Python;
    never weaken an assertion or threshold. Write the test first and watch it
    fail for the intended reason, then fix it.
-4. **Verify** with `make agent-verify ONLY=<exact groups>` (find a file's group
-   with `build/bin/z23 code tests <path>`). `ONLY=` is mandatory and exact. Add
+4. **Verify** with `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed`, which runs exactly the
+   test groups the land proof selects for your committed changes (the capped
+   `code guide` and `code tests` lists miss groups the proof runs). `ONLY=<exact
+   groups>` still works for a hand-picked set; it is mandatory and exact. Add
    `make lint-fast` for a quick check and `make check-architecture-tree` after
    moving files. A cached or zero-test run is not a pass.
 5. **Review.** One reviewer who is not the author, of any model, reads the

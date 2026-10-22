@@ -11,4 +11,4 @@ Rules:
 - The source universe is defined once in `modules/codeindex/include/codeindex/source_roots.def`; change it there only.
 - Derived indexes (`.codeindex/`) are caches; delete freely, never commit.
 
-Tests: `make t-fast ONLY=codeindex`, `make t-fast ONLY=code_firsthour`; for a wider change `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=<g,g>`.
+Tests: `make t-fast ONLY=codeindex`, `make t-fast ONLY=code_firsthour`; for a wider change `make -j"$(getconf _NPROCESSORS_ONLN)" agent-verify ONLY=@changed` (committed changes; or ONLY=<g,g>).

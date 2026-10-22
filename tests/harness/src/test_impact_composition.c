@@ -5324,6 +5324,108 @@ static int test_ic_changed_set_widens_structural_changes(void)
     return failures;
 }
 
+/* `dev proof select` / `make agent-verify ONLY=@changed`: a lane verify runs
+ * the proof worker's own selection for base..local. Pinned here: a structural
+ * range selects the proof's universal set under the proof's own reason, and a
+ * range whose plan this tree cannot close never narrows -- it selects the same
+ * universal set and says why. */
+static int test_ic_proof_select_range_matches_proof_selector(void)
+{
+    int failures = 0;
+    static char ic_fixture_saved[4096];
+    bool ic_fixture_was_set =
+        ic_host_fixture_save(ic_fixture_saved, sizeof(ic_fixture_saved));
+    TEST("proof select: lane range selection equals the proof selector") {
+        ASSERT(ic_changed_fixture_build());
+        ic_host_fixture_env(true);
+        char base[65], one[65], two[65], add_h[65];
+        ASSERT(ic_read_sha("base.sha", base));
+        ASSERT(ic_read_sha("one.sha", one));
+        ASSERT(ic_read_sha("two.sha", two));
+        ASSERT(ic_read_sha("add_h.sha", add_h));
+        size_t cap = zcl_dev_proof_select_groups_capacity();
+        ASSERT(cap > 0);
+        char *proof = calloc(cap, 1);
+        char *lane = calloc(cap, 1);
+        ASSERT(proof && lane);
+        /* The proof's answer for the added header, straight from its seam. */
+        struct zcl_dev_proof_changed_set set = {0};
+        char why[256] = {0};
+        char scratch[PATH_MAX];
+        ASSERT(ic_changed_path("proof-seam.txt", scratch, sizeof(scratch)));
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        ASSERT(zcl_dev_proof_changed_set_capture(
+            IC_CHANGED_REPO, two, add_h, scratch, NULL, &set, why,
+            sizeof(why)));
+        ASSERT(set.structural_path != NULL);
+        uint32_t proof_count = 0;
+        bool proof_universal = false;
+        char gated[PROOF_HOST_GATED_MAX];
+        ASSERT(zcl_dev_proof_test_changed_set_selector(
+            &set, IC_CHANGED_REPO, proof, cap, &proof_count,
+            &proof_universal, gated, sizeof(gated)));
+        zcl_dev_proof_changed_set_release(&set);
+        ASSERT(proof_universal && proof_count > 2);
+
+        struct zcl_dev_proof_range_selection sel = {
+            .groups = lane, .groups_size = cap};
+        bool selected_ok = zcl_dev_proof_select_range(
+            IC_CHANGED_REPO, two, add_h, &sel, why, sizeof(why));
+        if (!selected_ok)
+            printf("invariant=proof_select refused why=%s\n", why);
+        ASSERT(selected_ok);
+        printf("invariant=proof_select case=structural universal=%d "
+               "selected=%u proof=%u reason=%s\n", sel.universal ? 1 : 0,
+               (unsigned)sel.count, (unsigned)proof_count, sel.reason);
+        ASSERT(sel.universal);
+        ASSERT(strcmp(sel.reason, "changed-input-structure") == 0);
+        ASSERT(sel.count == proof_count);
+        ASSERT(strcmp(lane, proof) == 0);
+        ASSERT(sel.files == 1);
+
+        /* Content-only range in a tree with no code index: the plan cannot
+         * close, so the selection is the universal set, never a narrow one. */
+        memset(lane, 0, cap);
+        struct zcl_dev_proof_range_selection open_sel = {
+            .groups = lane, .groups_size = cap};
+        ASSERT(zcl_dev_proof_select_range(IC_CHANGED_REPO, base, one,
+                                          &open_sel, why, sizeof(why)));
+        printf("invariant=proof_select case=unclosed universal=%d "
+               "selected=%u reason=%s\n", open_sel.universal ? 1 : 0,
+               (unsigned)open_sel.count, open_sel.reason);
+        ASSERT(open_sel.universal);
+        ASSERT(strcmp(open_sel.reason, "plan-not-closed") == 0);
+        ASSERT(open_sel.count == proof_count);
+        ASSERT(strcmp(lane, proof) == 0);
+        /* The universal reply must fit the declared leaf budget; shrink the
+         * budget below it and the handler's check refuses, so a reply the
+         * registry would cut to a bare envelope never reaches agent-verify
+         * as a half answer. */
+        size_t universal_len = strlen(lane) + strlen(open_sel.gated);
+        printf("invariant=proof_select_budget universal_bytes=%zu\n",
+               universal_len);
+        ASSERT(universal_len > 4096);
+        ASSERT(zcl_dev_proof_select_reply_fits(universal_len, 65536));
+        ASSERT(zcl_dev_proof_select_reply_fits(universal_len, 0));
+        ASSERT(!zcl_dev_proof_select_reply_fits(universal_len, 4096));
+        ASSERT(!zcl_dev_proof_select_reply_fits(universal_len, universal_len));
+        ASSERT(!zcl_dev_proof_select_reply_fits(65536, 65536));
+
+        /* A range that is not an ancestor pair refuses, never guesses. */
+        memset(lane, 0, cap);
+        struct zcl_dev_proof_range_selection bad = {
+            .groups = lane, .groups_size = cap};
+        ASSERT(!zcl_dev_proof_select_range(IC_CHANGED_REPO, add_h, base, &bad,
+                                           why, sizeof(why)));
+        free(proof);
+        free(lane);
+        PASS();
+    } _test_next:;
+    (void)unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    ic_host_fixture_restore(ic_fixture_saved, ic_fixture_was_set);
+    return failures;
+}
+
 /* dev_proof's own worker never captures the changed set against the shared
  * landing worktree: it captures against `generation`, the private
  * `git worktree add --detach` copy generation_prepare() already pinned to
@@ -13325,6 +13427,7 @@ int test_impact_composition(void)
     failures += test_ic_changed_set_rejects_hidden_bytes();
     failures += test_ic_changed_set_carries_a_landing_batch();
     failures += test_ic_changed_set_widens_structural_changes();
+    failures += test_ic_proof_select_range_matches_proof_selector();
     failures += test_ic_deleted_input_closes_current_graph();
     failures += test_ic_changed_set_reads_a_private_generation_worktree();
     failures += test_ic_changed_set_refuses_above_its_ceiling();

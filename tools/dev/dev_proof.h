@@ -233,6 +233,26 @@ bool zcl_dev_proof_changed_set_capture(const char *repo_root, const char *base,
                                        char *why, size_t why_len);
 void zcl_dev_proof_changed_set_release(struct zcl_dev_proof_changed_set *set);
 
+/* One base..local test selection, exactly what the proof worker would run.
+ * `groups` is the caller's buffer for the comma-separated exact selector,
+ * `gated` receives the host-gated list a universal selection left out.
+ * `reason` is a static spelling of why the set is this wide. */
+struct zcl_dev_proof_range_selection {
+    char *groups;
+    size_t groups_size;
+    uint32_t count;
+    size_t files;
+    bool universal;
+    const char *reason;
+    char detail[160];
+    char gated[PROOF_HOST_GATED_MAX];
+};
+size_t zcl_dev_proof_select_groups_capacity(void);
+bool zcl_dev_proof_select_range(const char *root, const char *base,
+                                const char *local,
+                                struct zcl_dev_proof_range_selection *out,
+                                char *why, size_t why_len);
+
 const char *zcl_dev_proof_state_name(enum zcl_dev_proof_state state);
 /* Admit a completed cycle only when its schema, canonical action inputs, and
  * one independently derived fixed-width root per selected proof dimension

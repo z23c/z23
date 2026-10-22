@@ -16,9 +16,9 @@
 
 #define CG_TAG "native.code.guide"
 #if defined(__APPLE__)
-#define CG_PROOF_COMMAND "make -j2 t-fast-exact ONLY=<group>"
+#define CG_PROOF_COMMAND "make -j2 agent-verify ONLY=@changed"
 #else
-#define CG_PROOF_COMMAND "make -j\"$(getconf _NPROCESSORS_ONLN)\" t-fast ONLY=<group>"
+#define CG_PROOF_COMMAND "make -j\"$(getconf _NPROCESSORS_ONLN)\" agent-verify ONLY=@changed"
 #endif
 
 static bool cg_render_static(struct zcl_command_reply *reply)
