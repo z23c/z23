@@ -3445,9 +3445,14 @@ ZCL_TEST_WINDOWS_COMPAT_FLAGS = $(if $(ZCL_HOST_WINDOWS),-include test/windows_c
 # Test profiles drop -Werror, but a non-void function that can fall off its
 # end is never correct and makes a test result undefined, so it stays fatal.
 ZCL_TEST_RETURN_TYPE_GATE = -Werror=return-type
+# ZCL_TEST_WERROR=1 (set by the land proof on its bundle build, see
+# tools/dev/dev_proof.c) puts -Werror back on every test-fast TU, so a compiler
+# warning fails the proof instead of scrolling past. Unset (make t-fast, dev
+# iteration) keeps the warn-only profile. It is part of the compile epoch.
+ZCL_TEST_WERROR_FLAG = $(if $(filter 1,$(ZCL_TEST_WERROR)),-Werror,)
 TEST_FAST_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \
 	-Wno-deprecated-declarations -Wno-format-truncation $(ZCL_WARN_MAYBE_UNINITIALIZED) \
-	$(ZCL_TEST_WINDOWS_COMPAT_FLAGS) $(ZCL_TEST_RETURN_TYPE_GATE)
+	$(ZCL_TEST_WINDOWS_COMPAT_FLAGS) $(ZCL_TEST_RETURN_TYPE_GATE) $(ZCL_TEST_WERROR_FLAG)
 TEST_FAST_LDFLAGS = $(filter-out $(ZCL_LTO_FLAG),$(LDFLAGS)) $(ZCL_DEV_LINKER) $(C3_TIP_LINK)
 TEST_FAST_EPOCH_COMPILE_FLAGS := $(strip $(TEST_FAST_CFLAGS) $(ZCL_EPOCH_DEPFILE_ID))
 TEST_FAST_EPOCH_LINK_FLAGS := $(strip $(TEST_FAST_LDFLAGS) $(TOR_LIBS) $(LIBS) $(GTK_LIBS) $(WEBKIT_LIBS) cxx=$(CXX))

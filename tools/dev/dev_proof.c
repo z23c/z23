@@ -8512,7 +8512,7 @@ static bool dp_worker_refresh_include_graph(struct dp_worker *w,
         return false;
     }
     const char *argv[] = {"make", "--no-print-directory", jobs,
-                          "dev-proof-bundle-prefork", NULL};
+                          "dev-proof-bundle-prefork", "ZCL_TEST_WERROR=1", NULL};
     struct zcl_dev_proof_budget budget =
         proof_step_budget(w->paths, "bundle", PROOF_BUNDLE_DEFAULT_MS);
     struct zcl_dev_proof_step_report report = {0};
@@ -9027,7 +9027,7 @@ static bool dp_worker_bundle_make(struct dp_worker *w, int *rc,
      * the same dev/test-fast epochs and depfiles as dev-proof-bundle. */
     const char *bundle_argv[] = {
         "make", "--no-print-directory", w->make_jobs,
-        "dev-proof-bundle-prefork", NULL};
+        "dev-proof-bundle-prefork", "ZCL_TEST_WERROR=1", NULL};
     struct zcl_dev_proof_budget bundle_budget =
         proof_step_budget(w->paths, "bundle", PROOF_BUNDLE_DEFAULT_MS);
     int64_t bundle_us0 = platform_time_monotonic_us();
