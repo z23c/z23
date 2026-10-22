@@ -373,6 +373,7 @@ struct sfz_item {
     bool over_pinned;      /* a reproducer's exact over-selection pin */
     size_t over_want;
     bool run;              /* false: skipped, or failed before it could run */
+    bool collected;        /* outcome read and reaped by item_collect */
     bool ok;               /* passed, or held as recorded (NOOP only in a
                               range run) */
     pid_t pid;
@@ -530,7 +531,9 @@ static void judge_item(struct sfz_group *g, struct sfz_item *it)
         g->kept = g->kept || it->o.status == SFZ_FAIL || it->o.status == SFZ_ERROR;
 }
 
-static void item_finish(struct sfz_group *g, struct sfz_item *it)
+/* Read a started item's outcome by its deadline, kill it if it ran out of
+ * time, reap it, and fill an ERROR outcome when it did not report. */
+static void item_collect(struct sfz_item *it)
 {
     int st = 0;
     int got = it->fd >= 0 ? read_by(it->fd, &it->o, sizeof(it->o), it->deadline) : 0;
@@ -552,31 +555,108 @@ static void item_finish(struct sfz_group *g, struct sfz_item *it)
             (void)snprintf(it->o.why, sizeof(it->o.why),
                            "the case process did not report (status %d)\n", st);
     }
+    it->collected = true;
+}
+
+/* Tally, print and judge a collected item. */
+static void item_report(struct sfz_group *g, struct sfz_item *it)
+{
     tally(&g->t, &it->o);
     report(&it->c, &it->o);
     judge_item(g, it);
 }
 
-/* Run every runnable item, at most SFZ_CASES_AT_ONCE at once, reporting
- * them in order; the number that did not pass. */
-static size_t run_items(struct sfz_group *g, struct sfz_item *v, size_t n)
+/* Milliseconds until the earliest live deadline, rounded up; 0 once one
+ * has passed. `live` is at least 1. */
+static int live_timeout_ms(const struct sfz_item *v, const size_t *idx, size_t live)
 {
-    size_t ring[SFZ_CASES_AT_ONCE], head = 0, live = 0, bad = 0;
-    for (size_t k = 0; k < n; k++) {
+    int64_t best = v[idx[0]].deadline, left;
+    for (size_t i = 1; i < live; i++)
+        if (v[idx[i]].deadline < best)
+            best = v[idx[i]].deadline;
+    left = best - clock_now_monotonic_ns();
+    if (left <= 0)
+        return 0;
+    left = (left + 999999) / 1000000;
+    return left > INT_MAX ? INT_MAX : (int)left;
+}
+
+/* Poll the live cases until one is readable or hung up, or its deadline
+ * passes (a failed poll makes every live case due, so none can block),
+ * then collect each due one. The live ones that remain are packed to the
+ * front of idx; returns their count. */
+static size_t live_collect(struct sfz_item *v, size_t *idx, size_t live)
+{
+    struct pollfd pf[SFZ_CASES_AT_ONCE];
+    int ret;
+    size_t kept = 0;
+    for (size_t i = 0; i < live; i++)
+        pf[i] = (struct pollfd){.fd = v[idx[i]].fd, .events = POLLIN};
+    do
+        ret = poll(pf, (nfds_t)live, live_timeout_ms(v, idx, live));
+    while (ret < 0 && errno == EINTR);
+    for (size_t i = 0; i < live; i++) {
+        struct sfz_item *it = &v[idx[i]];
+        bool due = ret < 0 || pf[i].revents != 0 ||
+                   clock_now_monotonic_ns() >= it->deadline;
+        if (due)
+            item_collect(it);
+        else
+            idx[kept++] = idx[i];
+    }
+    return kept;
+}
+
+/* Start runnable items from v[k] on in free slots, at most
+ * SFZ_CASES_AT_ONCE live. An item that did not start (no pipe or fork)
+ * is collected at once as an ERROR. Returns the next unstarted index. */
+static size_t live_fill(const struct sfz_env *env, struct sfz_item *v, size_t n,
+                        size_t k, size_t *idx, size_t *live)
+{
+    for (; k < n && *live < SFZ_CASES_AT_ONCE; k++) {
         if (!v[k].run)
             continue;
-        if (live == SFZ_CASES_AT_ONCE) {
-            item_finish(g, &v[ring[head]]);
-            head = (head + 1) % SFZ_CASES_AT_ONCE;
-            live--;
-        }
-        item_start(&g->env, &v[k]);
-        ring[(head + live++) % SFZ_CASES_AT_ONCE] = k;
+        item_start(env, &v[k]);
+        if (v[k].fd < 0)
+            item_collect(&v[k]);
+        else
+            idx[(*live)++] = k;
     }
-    for (; live > 0; live--, head = (head + 1) % SFZ_CASES_AT_ONCE)
-        item_finish(g, &v[ring[head]]);
-    for (size_t k = 0; k < n; k++)
-        bad += !v[k].ok;
+    return k;
+}
+
+/* Report, in index order, the collected run items from v[next] on; stops
+ * at the first run item still live. Returns the next index to report. */
+static size_t report_ready(struct sfz_group *g, struct sfz_item *v, size_t n,
+                           size_t next)
+{
+    for (; next < n; next++) {
+        if (!v[next].run)
+            continue;
+        if (!v[next].collected)
+            break;
+        item_report(g, &v[next]);
+    }
+    return next;
+}
+
+/* Run every runnable item, at most SFZ_CASES_AT_ONCE at once, finishing
+ * whichever is ready first but reporting them in index order; the number
+ * that did not pass. */
+static size_t run_items(struct sfz_group *g, struct sfz_item *v, size_t n)
+{
+    size_t idx[SFZ_CASES_AT_ONCE], live = 0, k = 0, next = 0, bad = 0;
+    for (size_t j = 0; j < n; j++)
+        v[j].collected = false;
+    while (k < n || live > 0) {
+        k = live_fill(&g->env, v, n, k, idx, &live);
+        next = report_ready(g, v, n, next);
+        if (live > 0)
+            live = live_collect(v, idx, live);
+    }
+    (void)report_ready(g, v, n, next);
+    for (size_t j = 0; j < n; j++)
+        bad += !v[j].ok;
     return bad;
 }
 
