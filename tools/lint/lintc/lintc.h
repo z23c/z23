@@ -140,7 +140,9 @@ int lint_families_ledger(void);
  * colon, so keys may themselves contain colons, e.g. `path:function:M`).
  * Exact-pin semantics: an over-cap item whose key is not pinned is NEW
  * (the caller reports it, since only the caller knows its cap and line);
- * a pin whose item grew or shrank fails lint_base_finish; a pin whose key
+ * a pin whose item grew fails lint_base_finish, and so does a pin whose item
+ * is now within the caller's cap (retired); a pin whose item shrank but is
+ * still over the cap passes with a note. A pin whose key
  * was never observed fails as stale. Pins may only ever fall.
  *
  * Keys must be unique per scan. When a scan can legitimately produce the
@@ -152,8 +154,10 @@ int lint_families_ledger(void);
  * Call flow: lint_base_load once; lint_base_observe for EVERY scanned item
  * (any M — a pinned item that dropped under the cap must still be seen so
  * the ratchet-down is named, not misreported as stale); the caller emits
- * its own NEW-item diagnostics; lint_base_finish emits the grew/shrank/
- * stale diagnostics and returns their count. Generation (the gate's
+ * its own NEW-item diagnostics; lint_base_finish emits the grew/retired/
+ * stale diagnostics (shrinks only as notes) and returns their count.
+ * lint_base_tighten then lowers or deletes pins in memory for the
+ * --tighten-baseline path; it never raises a pin or adds a row. Generation (the gate's
  * --write-baseline upkeep path): lint_base_pin per over-cap item, then
  * lint_base_write. Storage is caller-owned fixed buffers; declare the
  * struct in static storage (it is ~2.5 MB).
@@ -175,7 +179,10 @@ struct lint_base { struct lb_row row[LB_MAX]; int n; };
 int lint_base_load(struct lint_base *b, const char *path, FILE *err);
 int lint_base_load_set(struct lint_base *b, const char *path);
 int lint_base_observe(struct lint_base *b, const char *key, int m);
-int lint_base_finish(const struct lint_base *b, FILE *out);
+int lint_base_finish(const struct lint_base *b, FILE *out, FILE *notes,
+                     int cap, const char *hint);
+int lint_base_tighten(struct lint_base *b, int cap, int *lowered, int *deleted,
+                      int *kept);
 int lint_base_pin(struct lint_base *b, const char *key, int m);
 int lint_base_write(struct lint_base *b, const char *path, const char *hdr);
 

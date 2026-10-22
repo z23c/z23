@@ -34,9 +34,11 @@
  * #endif, the gate fails on that file and names the #if line. Nesting is a
  * stack, so an inner region resolves before its outer one.
  * Baseline semantics (only-gets-simpler ratchet): an over-cap function not
- * pinned fails; a pin whose function grew fails; a pin whose function
- * shrank fails and asks for the ratchet-down; a pin for a function that no
- * longer exists fails as stale. Exact pins pass.
+ * pinned fails; a pin whose function grew fails; a pin for a function that
+ * no longer exists fails as stale; a pin whose function is now within the
+ * cap fails as retired (delete the line, so it cannot regrow). A function
+ * that shrank but is still over the cap passes with a note, and
+ * --tighten-baseline lowers its pin in place. Exact pins pass.
  * Modes (ZCL_LINT_MODE, default RATCHET): WARN reports and exits 0;
  * RATCHET enforces the baseline; FAIL fails every over-cap function and
  * ignores the baseline.
@@ -722,6 +724,42 @@ static int cyc_key(char *key, size_t cap, const char *path, const char *name)
     return ovf(snprintf(key, cap, "%s:%s", path, name), cap);
 }
 
+static const char k_cyc_base_hdr[] =
+    "# check-cyclomatic-complexity baseline — every function over the"
+    " cyclomatic cap of 15,\n"
+    "# pinned at its current M as path:function:M (a repeated definition in"
+    " one file keys as\n"
+    "# function#2, function#3, ... in scan order). GENERATED — never"
+    " hand-edit; regenerate with:\n"
+    "#   build/bin/z23-lint check-cyclomatic-complexity --write-baseline\n"
+    "# Only-gets-simpler ratchet: a pin may only fall. A grown function, a"
+    " pin whose function\n"
+    "# no longer exists, or a pin whose function is now within the cap"
+    " fails the gate.\n"
+    "# A shrunk function still over the cap passes; --tighten-baseline"
+    " lowers its pin.\n";
+
+static const char k_cyc_tighten_cmd[] =
+    "`z23-lint check-cyclomatic-complexity --tighten-baseline`";
+
+/* --tighten-baseline: after the scan, lower each pin whose function shrank
+ * but is still over the cap, delete each retired or stale pin, and rewrite
+ * the baseline in place with its generated header. Counts go to out. A
+ * second run finds nothing to change, so the file is byte-identical. */
+static int cyc_tighten(const char *base_path, FILE *out)
+{
+    int lowered, deleted, kept;
+    if (lint_base_tighten(&g_cyc_pins, CYC_MAX, &lowered, &deleted, &kept))
+        return 2;
+    if (lint_base_write(&g_cyc_pins, base_path, k_cyc_base_hdr))
+        return 2;
+    return fprintf(out, "check_cyclomatic_complexity: tightened %s — "
+                   "lowered=%d deleted=%d kept=%d\n",
+                   base_path, lowered, deleted, kept) < 0
+               ? die("z23-lint: write failed\n", "")
+               : 0;
+}
+
 /* ── the run ───────────────────────────────────────────────────────────── */
 
 struct cyc_acc {
@@ -841,8 +879,21 @@ static int cyc_report(const struct cyc_acc *a, int files, FILE *out)
     return rc2 ? die("z23-lint: write failed\n", "") : 0;
 }
 
+/* The ratchet verdict over a completed scan: with tighten, rewrite the
+ * baseline first (lower the shrunk pins, delete the retired ones), then
+ * compare every pin. Returns the violation count, or -1 on failure. */
+static int cyc_ratchet(const char *base_path, int tighten, FILE *hits,
+                       FILE *out)
+{
+    if (tighten && cyc_tighten(base_path, out))
+        return -1;
+    return lint_base_finish(&g_cyc_pins, hits, out, CYC_MAX,
+                            k_cyc_tighten_cmd);
+}
+
 static int cyc_check(const char *root, const char *base_path,
-                     const char *mode, int report, FILE *out, FILE *err)
+                     const char *mode, int report, int tighten, FILE *out,
+                     FILE *err)
 {
     if (!report && lint_base_load(&g_cyc_pins, base_path, err))
         return 2;
@@ -862,7 +913,7 @@ static int cyc_check(const char *root, const char *base_path,
     else
         rc = each_zpath(k_cyc_ls, cyc_on_path, &w);
     if (rc == 0 && strcmp(mode, "FAIL") != 0 && !report) {
-        int cv = lint_base_finish(&g_cyc_pins, hits);
+        int cv = cyc_ratchet(base_path, tighten, hits, out);
         if (cv < 0)
             rc = 2;
         else
@@ -918,18 +969,6 @@ static int cyc_collect_pin(const char *path, const char *name, int line,
     return lint_base_pin(&g_cyc_pins, key, m);
 }
 
-static const char k_cyc_base_hdr[] =
-    "# check-cyclomatic-complexity baseline — every function over the"
-    " cyclomatic cap of 15,\n"
-    "# pinned at its current M as path:function:M (a repeated definition in"
-    " one file keys as\n"
-    "# function#2, function#3, ... in scan order). GENERATED — never"
-    " hand-edit; regenerate with:\n"
-    "#   build/bin/z23-lint check-cyclomatic-complexity --write-baseline\n"
-    "# Shrink-only ratchet: an exact pin passes; a function that grew or"
-    " shrank past its pin,\n"
-    "# or a pin whose function no longer exists, fails the gate.\n";
-
 static int cyc_write_baseline(const char *root, const char *base_path)
 {
     g_cyc_pins.n = 0;
@@ -953,24 +992,36 @@ static int cyc_write_baseline(const char *root, const char *base_path)
                : 0;
 }
 
-int check_cyclomatic_complexity_run(int argc, char **argv)
+/* At most one of --report, --write-baseline and --tighten-baseline. */
+static int cyc_args(int argc, char **argv, int *report, int *write_base,
+                    int *tighten)
 {
-    int report = 0, write_base = 0;
     for (int i = 0; i < argc; i++) {
         if (strcmp(argv[i], "--report") == 0)
-            report = 1;
+            *report = 1;
         else if (strcmp(argv[i], "--write-baseline") == 0)
-            write_base = 1;
+            *write_base = 1;
+        else if (strcmp(argv[i], "--tighten-baseline") == 0)
+            *tighten = 1;
         else
-            return die("usage: z23-lint check-cyclomatic-complexity "
-                       "[--report | --write-baseline]\n", "");
+            return 1;
     }
-    if (report && write_base)
+    return *report + *write_base + *tighten > 1;
+}
+
+int check_cyclomatic_complexity_run(int argc, char **argv)
+{
+    int report = 0, write_base = 0, tighten = 0;
+    if (cyc_args(argc, argv, &report, &write_base, &tighten))
         return die("usage: z23-lint check-cyclomatic-complexity "
-                   "[--report | --write-baseline]\n", "");
+                   "[--report | --write-baseline | --tighten-baseline]\n",
+                   "");
     const char *mode = env_or("ZCL_LINT_MODE", "RATCHET");
     if (!cyc_mode_valid(mode))
         return die("z23-lint: ZCL_LINT_MODE must be WARN, RATCHET, or FAIL\n",
+                   "");
+    if (tighten && strcmp(mode, "RATCHET") != 0)
+        return die("z23-lint: --tighten-baseline needs ZCL_LINT_MODE=RATCHET\n",
                    "");
     const char *root = getenv("ZCL_CYCLOMATIC_ROOT");
     if (root && !root[0])
@@ -989,7 +1040,7 @@ int check_cyclomatic_complexity_run(int argc, char **argv)
     }
     if (write_base)
         return cyc_write_baseline(root, base);
-    return cyc_check(root, base, mode, report, stdout, stderr);
+    return cyc_check(root, base, mode, report, tighten, stdout, stderr);
 }
 
 /* ── selftest ──────────────────────────────────────────────────────────── */
@@ -1339,17 +1390,26 @@ static const char k_cyc_st_fn[] =
     "    return x + 1;\n"
     "}\n";
 
-/* Run cyc_check against the fixture with the given baseline body; assert
- * the return code and (when needle non-NULL) that the captured error names
- * it. */
-static int cyc_st_case(const char *root, const char *base_body,
-                       const char *mode, int want_rc, const char *needle)
+/* One gate run captured: the return code and both streams. */
+struct cyc_st_run {
+    int rc;
+    char out[8192];
+    char err[8192];
+};
+
+static int cyc_st_base_path(const char *root, char *bpath, size_t cap)
+{
+    return ovf(snprintf(bpath, cap, "%s/baseline.txt", root), cap);
+}
+
+/* Write base_body as the fixture baseline and run the gate once against the
+ * fixture, optionally with --tighten-baseline semantics. */
+static int cyc_st_exec(const char *root, const char *base_body,
+                       const char *mode, int tighten, struct cyc_st_run *r)
 {
     char bpath[8192];
-    if (ovf(snprintf(bpath, sizeof bpath, "%s/baseline.txt", root),
-            sizeof bpath))
-        return 1;
-    if (csr_write(bpath, base_body))
+    if (cyc_st_base_path(root, bpath, sizeof bpath)
+        || csr_write(bpath, base_body))
         return 1;
     FILE *out = tmpfile(), *err = tmpfile();
     if (!out || !err) {
@@ -1359,19 +1419,99 @@ static int cyc_st_case(const char *root, const char *base_body,
             fclose(err);
         return 1;
     }
-    int rc = cyc_check(root, bpath, mode, 0, out, err);
-    char buf[8192];
-    if (csr_slurp(err, buf, sizeof buf)) {
-        fclose(out);
-        fclose(err);
-        return 1;
-    }
+    r->rc = cyc_check(root, bpath, mode, 0, tighten, out, err);
+    int bad = csr_slurp(out, r->out, sizeof r->out)
+        || csr_slurp(err, r->err, sizeof r->err);
     fclose(out);
     fclose(err);
-    if (rc != want_rc || (needle && strstr(buf, needle) == NULL)) {
-        fprintf(stderr, "check_cyclomatic_complexity selftest: mode %s want "
-                "rc %d needle '%s'; got rc %d and:\n%s\n",
-                mode, want_rc, needle ? needle : "(none)", rc, buf);
+    return bad;
+}
+
+/* Pass when the run returned want_rc and needle (NULL: any text) appears on
+ * stdout or stderr. */
+static int cyc_st_want(const struct cyc_st_run *r, const char *what,
+                       int want_rc, const char *needle)
+{
+    if (r->rc == want_rc
+        && (!needle || strstr(r->out, needle) || strstr(r->err, needle)))
+        return 0;
+    fprintf(stderr, "check_cyclomatic_complexity selftest: %s want rc %d "
+            "needle '%s'; got rc %d and:\n%s%s\n", what, want_rc,
+            needle ? needle : "(none)", r->rc, r->out, r->err);
+    return 1;
+}
+
+/* Run the check against the fixture with the given baseline body; assert
+ * the return code and (when needle non-NULL) that the output names it. */
+static int cyc_st_case(const char *root, const char *base_body,
+                       const char *mode, int want_rc, const char *needle)
+{
+    struct cyc_st_run r;
+    if (cyc_st_exec(root, base_body, mode, 0, &r))
+        return 1;
+    return cyc_st_want(&r, mode, want_rc, needle);
+}
+
+/* Read the fixture baseline back into buf. */
+static int cyc_st_read_base(const char *root, char *buf, size_t cap)
+{
+    char bpath[8192];
+    if (cyc_st_base_path(root, bpath, sizeof bpath))
+        return 1;
+    FILE *f = fopen(bpath, "r");
+    if (!f)
+        return 1;
+    int bad = csr_slurp(f, buf, cap);
+    fclose(f);
+    return bad;
+}
+
+/* Run --tighten-baseline against base_body and assert: the return code, the
+ * counts line, the reason text (NULL: none), and that the rewritten file is
+ * exactly the generated header followed by rows. */
+static int cyc_st_tighten(const char *root, const char *base_body,
+                          int want_rc, const char *reason,
+                          const char *counts, const char *rows)
+{
+    struct cyc_st_run r;
+    char want[8192], got[8192];
+    if (cyc_st_exec(root, base_body, "RATCHET", 1, &r))
+        return 1;
+    int bad = cyc_st_want(&r, "tighten", want_rc, counts);
+    if (!bad && reason && !strstr(r.out, reason) && !strstr(r.err, reason)) {
+        fprintf(stderr, "check_cyclomatic_complexity selftest: tighten "
+                "missing reason '%s'\n", reason);
+        bad = 1;
+    }
+    if (bad)
+        return 1;
+    if (ovf(snprintf(want, sizeof want, "%s%s", k_cyc_base_hdr, rows),
+            sizeof want))
+        return 1;
+    if (cyc_st_read_base(root, got, sizeof got) || strcmp(got, want) != 0) {
+        fprintf(stderr, "check_cyclomatic_complexity selftest: tighten "
+                "rewrote the baseline wrongly:\n%s\n", got);
+        return 1;
+    }
+    return 0;
+}
+
+/* A second tighten over its own output changes nothing: same counts, and
+ * the file is byte-identical. */
+static int cyc_st_tighten_twice(const char *root)
+{
+    struct cyc_st_run r;
+    char first[8192], second[8192];
+    if (cyc_st_exec(root, "case.c:over_cap:17\n", "RATCHET", 1, &r)
+        || cyc_st_read_base(root, first, sizeof first))
+        return 1;
+    if (cyc_st_exec(root, first, "RATCHET", 1, &r)
+        || cyc_st_want(&r, "tighten again", 0, "lowered=0 deleted=0 kept=1")
+        || cyc_st_read_base(root, second, sizeof second))
+        return 1;
+    if (strcmp(first, second) != 0) {
+        fputs("check_cyclomatic_complexity selftest: second tighten changed "
+              "the baseline\n", stderr);
         return 1;
     }
     return 0;
@@ -1402,7 +1542,8 @@ static int cyc_st_writeback(const char *root)
         return 1;
     }
     FILE *out = tmpfile(), *err = tmpfile();
-    int bad = !out || !err || cyc_check(root, wb, "RATCHET", 0, out, err);
+    int bad = !out || !err
+        || cyc_check(root, wb, "RATCHET", 0, 0, out, err);
     if (bad)
         fputs("check_cyclomatic_complexity selftest: generated baseline "
               "did not pass\n", stderr);
@@ -1437,9 +1578,37 @@ int check_cyclomatic_complexity_selftest(void)
         /* a pin below the current M fails as growth */
         bad |= cyc_st_case(root, "case.c:over_cap:15\n", "RATCHET", 1,
                            "grew M=15 -> M=16");
-        /* a pin above the current M fails and asks for the ratchet-down */
-        bad |= cyc_st_case(root, "case.c:over_cap:17\n", "RATCHET", 1,
-                           "ratchet the baseline entry down to 16");
+        /* a pin above the current M passes with a note; tighten lowers it */
+        bad |= cyc_st_case(root, "case.c:over_cap:17\n", "RATCHET", 0,
+                           "shrank M=17 -> M=16");
+        /* a pin for a function now within the cap fails as retired, so it
+         * cannot regrow under the old line */
+        bad |= cyc_st_case(root, "case.c:over_cap:16\ncase.c:calm:3\n",
+                           "RATCHET", 1,
+                           "now within the cap (M=1 <= 15); delete the "
+                           "baseline line");
+        /* tighten: a shrunk pin is lowered to the current M */
+        bad |= cyc_st_tighten(root, "case.c:over_cap:17\n", 0, NULL,
+                              "lowered=1 deleted=0 kept=0",
+                              "case.c:over_cap:16\n");
+        /* tighten: a pin for a missing function is deleted */
+        bad |= cyc_st_tighten(root, "case.c:over_cap:16\ncase.c:ghost:20\n",
+                              0, NULL, "lowered=0 deleted=1 kept=1",
+                              "case.c:over_cap:16\n");
+        /* tighten: a pin for a function within the cap is deleted */
+        bad |= cyc_st_tighten(root, "case.c:over_cap:16\ncase.c:calm:3\n",
+                              0, NULL, "lowered=0 deleted=1 kept=1",
+                              "case.c:over_cap:16\n");
+        /* tighten never raises a pin: a 15 pin on M=16 is kept and the gate
+         * still fails as growth */
+        bad |= cyc_st_tighten(root, "case.c:over_cap:15\n", 1,
+                              "grew M=15 -> M=16", "lowered=0 deleted=0 kept=1",
+                              "case.c:over_cap:15\n");
+        /* tighten never adds a row: an unpinned over-cap function stays
+         * unpinned and still fails */
+        bad |= cyc_st_tighten(root, "", 1, "not pinned",
+                              "lowered=0 deleted=0 kept=0", "");
+        bad |= cyc_st_tighten_twice(root);
         /* a pin for a missing function fails as stale */
         bad |= cyc_st_case(root, "case.c:over_cap:16\ncase.c:ghost:20\n",
                            "RATCHET", 1, "stale baseline, delete the line");

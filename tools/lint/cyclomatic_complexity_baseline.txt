@@ -2,8 +2,9 @@
 # pinned at its current M as path:function:M (a repeated definition in one file keys as
 # function#2, function#3, ... in scan order). GENERATED — never hand-edit; regenerate with:
 #   build/bin/z23-lint check-cyclomatic-complexity --write-baseline
-# Shrink-only ratchet: an exact pin passes; a function that grew or shrank past its pin,
-# or a pin whose function no longer exists, fails the gate.
+# Only-gets-simpler ratchet: a pin may only fall. A grown function, a pin whose function
+# no longer exists, or a pin whose function is now within the cap fails the gate.
+# A shrunk function still over the cap passes; --tighten-baseline lowers its pin.
 apps/skycombat/src/controllers/input_controller.c:input_controller_update:19
 apps/skycombat/src/controllers/sky_combat.c:sky_combat_run:24
 apps/skycombat/src/controllers/sky_combat_multiplayer_incremental.c:main:74

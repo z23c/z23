@@ -13655,10 +13655,11 @@ check-long-functions: $(LINTC_TOOL)
 # Cyclomatic complexity cap 15 per C function definition (decision points:
 # if/for/while/case keywords, && and || operators, ternary ?, with comments
 # and string/char literals stripped). Legacy offenders are pinned at their
-# current M in tools/lint/cyclomatic_complexity_baseline.txt, a shrink-only
-# ratchet: exact pins pass; a new, grown, shrunk, or stale entry fails.
-# Re-pin after deliberate changes with
-# build/bin/z23-lint check-cyclomatic-complexity --write-baseline.
+# current M in tools/lint/cyclomatic_complexity_baseline.txt, an
+# only-gets-simpler ratchet: exact pins pass; a new, grown, stale, or retired
+# (now within the cap) entry fails; a shrunk entry passes with a note.
+# Lower the pins with build/bin/z23-lint check-cyclomatic-complexity
+# --tighten-baseline; regenerate with --write-baseline.
 check-cyclomatic-complexity: $(LINTC_TOOL)
 	@echo "══ LINT: cyclomatic complexity cap 15 per function ══"
 	@./build/bin/z23-lint check-cyclomatic-complexity --selftest && ./build/bin/z23-lint check-cyclomatic-complexity

@@ -12,7 +12,7 @@ support, without defining another promotion ledger or requiring activation.
 |---|---|---|
 | Local behavior | Focused acceptance observing the changed invariant. | A unit pass alone does not establish consensus, custody, or public-node acceptance. |
 | Registered tests | Canonical runner verdict with exact selected groups and executed/reused/failed/skipped counts. | Zero matches, stale catalogs, unrun groups, and cached summaries alone are not green. |
-| Lint and generated artifacts | Required gates at the affected scope; owning generators reproduce tracked outputs. | Empty scans and weakened pins are not passes. Lower a shrink-only complexity pin when the function becomes simpler. |
+| Lint and generated artifacts | Required gates at the affected scope; owning generators reproduce tracked outputs. | Empty scans and weakened pins are not passes. A simpler function passes its complexity pin with a note; `check-cyclomatic-complexity --tighten-baseline` lowers the pin, and nothing raises it. |
 | Exact proof | Native receiver admits a complete receipt for the exact candidate/base and its declared dimensions. | Evidence establishes only its bound claim; signatures and hashes alone do not establish correctness. |
 | Publication | Native receipt-gated landing outcome, followed by independent remote identity verification. | A clean checkout, board row, handoff, or queued request is not publication. |
 

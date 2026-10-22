@@ -1734,32 +1734,72 @@ int lint_base_observe(struct lint_base *b, const char *key, int m)
     return (int)(r - b->row);
 }
 
-int lint_base_finish(const struct lint_base *b, FILE *out)
+/* Verdict for one pinned row: 0 passes, 1 is a violation, -1 a write
+ * failure. A shrink that stays over the cap passes and is only noted. */
+static int lb_finish_row(const struct lb_row *r, FILE *out, FILE *notes,
+                         int cap, const char *hint)
+{
+    int bad;
+    if (!r->seen)
+        bad = fprintf(out, "%s is pinned at M=%d but no longer exists — "
+                      "stale baseline, delete the line\n",
+                      r->key, r->pinned) < 0;
+    else if (r->cur > r->pinned)
+        bad = fprintf(out, "%s grew M=%d -> M=%d past its baseline pin\n",
+                      r->key, r->pinned, r->cur) < 0;
+    else if (r->cur <= cap)
+        bad = fprintf(out, "%s is pinned at M=%d but is now within the cap "
+                      "(M=%d <= %d); delete the baseline line\n",
+                      r->key, r->pinned, r->cur, cap) < 0;
+    else if (r->cur < r->pinned)
+        return fprintf(notes, "%s shrank M=%d -> M=%d; %s lowers the pin\n",
+                       r->key, r->pinned, r->cur, hint) < 0 ? -1 : 0;
+    else
+        return 0;
+    return bad ? -1 : 1;
+}
+
+int lint_base_finish(const struct lint_base *b, FILE *out, FILE *notes,
+                     int cap, const char *hint)
 {
     int viol = 0;
     for (int i = 0; i < b->n; i++) {
-        const struct lb_row *r = &b->row[i];
-        int bad;
-        if (!r->seen)
-            bad = fprintf(out, "%s is pinned at M=%d but no longer exists — "
-                          "stale baseline, delete the line\n",
-                          r->key, r->pinned) < 0;
-        else if (r->cur > r->pinned)
-            bad = fprintf(out, "%s grew M=%d -> M=%d past its baseline pin\n",
-                          r->key, r->pinned, r->cur) < 0;
-        else if (r->cur < r->pinned)
-            bad = fprintf(out, "%s shrank M=%d -> M=%d — ratchet the "
-                          "baseline entry down to %d\n",
-                          r->key, r->pinned, r->cur, r->cur) < 0;
-        else
-            continue;
-        if (bad) {
+        int v = lb_finish_row(&b->row[i], out, notes, cap, hint);
+        if (v < 0) {
             (void)die("z23-lint: write failed\n", "");
             return -1;
         }
-        viol++;
+        viol += v;
     }
     return viol;
+}
+
+/* Tighten in memory: a row whose function is gone or within the cap is
+ * deleted; a row whose function shrank but is still over the cap is lowered
+ * to the current M. A row that grew is kept as it is, and no row is added. */
+int lint_base_tighten(struct lint_base *b, int cap, int *lowered, int *deleted,
+                      int *kept)
+{
+    int w = 0;
+    *lowered = *deleted = *kept = 0;
+    for (int i = 0; i < b->n; i++) {
+        struct lb_row *r = &b->row[i];
+        if (!r->seen || r->cur <= cap) {
+            (*deleted)++;
+            continue;
+        }
+        if (r->cur < r->pinned) {
+            r->pinned = r->cur;
+            (*lowered)++;
+        } else {
+            (*kept)++;
+        }
+        if (w != i)
+            b->row[w] = b->row[i];
+        w++;
+    }
+    b->n = w;
+    return 0;
 }
 
 int lint_base_pin(struct lint_base *b, const char *key, int m)
