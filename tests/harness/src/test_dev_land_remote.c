@@ -197,27 +197,44 @@ static bool dlt_refused(const struct dlt_call *c, const char *code)
            strcmp(c->reply.error.code, code) == 0;
 }
 
-static void dlt_receive(struct dlt_call *c, const struct dlt_rig *r,
-                        const char *bundle, const char *lane)
+static void dlt_receive_at(struct dlt_call *c, const char *cwd,
+                           const char *bundle, const char *lane,
+                           const char *checkout)
 {
     dlt_begin(c, "dev.land.receive");
     (void)json_push_kv_str(&c->input, "bundle", bundle);
     (void)json_push_kv_str(&c->input, "lane", lane);
     (void)json_push_kv_str(&c->input, "note", "from the test");
-    dlt_cd(r->queue);
+    if (checkout)
+        (void)json_push_kv_str(&c->input, "checkout", checkout);
+    dlt_cd(cwd);
     zcl_native_handle_dev_land_remote(&c->request, &c->reply);
 }
 
-static void dlt_send(struct dlt_call *c, const struct dlt_rig *r,
-                     const char *note)
+static void dlt_receive(struct dlt_call *c, const struct dlt_rig *r,
+                        const char *bundle, const char *lane)
+{
+    dlt_receive_at(c, r->queue, bundle, lane, NULL);
+}
+
+static void dlt_send_co(struct dlt_call *c, const struct dlt_rig *r,
+                        const char *note, const char *remote_checkout)
 {
     dlt_begin(c, "dev.land.send");
     (void)json_push_kv_str(&c->input, "host", "queue-host");
     (void)json_push_kv_str(&c->input, "lane", "mac");
     if (note)
         (void)json_push_kv_str(&c->input, "note", note);
+    if (remote_checkout)
+        (void)json_push_kv_str(&c->input, "remote_checkout", remote_checkout);
     dlt_cd(r->sender);
     zcl_native_handle_dev_land_remote(&c->request, &c->reply);
+}
+
+static void dlt_send(struct dlt_call *c, const struct dlt_rig *r,
+                     const char *note)
+{
+    dlt_send_co(c, r, note, NULL);
 }
 
 static bool dlt_bundle(const struct dlt_rig *r, const char *name, bool two,
@@ -275,6 +292,27 @@ static int dlt_receive_cases(void)
         ASSERT(DLT_GIT(text, sizeof(text), r.queue, "rev-parse",
                        "refs/heads/remote/mac") == 0);
         ASSERT_STR_EQ(head, text);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.receive: --checkout from an unrelated cwd queues a row") {
+        dlt_receive_at(&c, r.inbox, bundle, "away", r.queue);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(json_get_int(json_get(&c.reply.data, "seq")) >= 1);
+        ASSERT(DLT_GIT(text, sizeof(text), r.queue, "rev-parse",
+                       "refs/heads/remote/away") == 0);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.receive: --checkout naming a non-checkout refuses "
+         "RECEIVE_BAD_CHECKOUT") {
+        dlt_receive_at(&c, r.queue, bundle, "away2", r.inbox);
+        ASSERT(dlt_refused(&c, "RECEIVE_BAD_CHECKOUT"));
+        dlt_end(&c);
+        dlt_receive_at(&c, r.queue, bundle, "away2", "relative/dir");
+        ASSERT(dlt_refused(&c, "RECEIVE_BAD_CHECKOUT"));
         dlt_end(&c);
         PASS();
     }
@@ -407,6 +445,31 @@ static int dlt_send_cases(void)
         dlt_end(&c);
         PASS();
     }
+
+    TEST("land.send: --remote_checkout is one quoted --checkout argument") {
+        char logtext2[8192];
+        dlt_send_co(&c, &r, NULL, "/srv/queue-co");
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        dlt_end(&c);
+        ASSERT(dlt_slurp(r.log, logtext2, sizeof(logtext2)));
+        ASSERT(strstr(logtext2, "\t'--lane=mac'\t'--checkout=/srv/queue-co'\n") !=
+               NULL);
+        PASS();
+    }
+
+    TEST("land.send: a relative or dashed remote_checkout refuses") {
+        dlt_send_co(&c, &r, NULL, "relative/co");
+        ASSERT(dlt_refused(&c, "SEND_BAD_ARGUMENT"));
+        dlt_end(&c);
+        dlt_send_co(&c, &r, NULL, "-oProxyCommand=x");
+        ASSERT(dlt_refused(&c, "SEND_BAD_ARGUMENT"));
+        dlt_end(&c);
+        dlt_send_co(&c, &r, NULL, "/srv/it's");
+        ASSERT(dlt_refused(&c, "SEND_BAD_ARGUMENT"));
+        dlt_end(&c);
+        PASS();
+    }
+
 
 _test_next:;
     dlt_done(&r);
