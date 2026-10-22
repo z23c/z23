@@ -27,6 +27,14 @@ struct dlt_rig {
     char base_sha[64];
 };
 
+static void dlt_cd(const char *dir)
+{
+    if (chdir(dir) != 0) {
+        printf("chdir FAILED\n");
+        abort();
+    }
+}
+
 static int dlt_run(const char *const *argv, char *out, size_t cap)
 {
     char sink[2];
@@ -152,7 +160,7 @@ static bool dlt_rig(struct dlt_rig *r, const char *tag)
 
 static void dlt_done(const struct dlt_rig *r)
 {
-    (void)chdir(r->cwd);
+    dlt_cd(r->cwd);
     (void)unsetenv("ZCL_LAND_PROOF_STUB");
     (void)unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
     (void)unsetenv("ZCL_LAND_REMOTE_XPORT");
@@ -196,7 +204,7 @@ static void dlt_receive(struct dlt_call *c, const struct dlt_rig *r,
     (void)json_push_kv_str(&c->input, "bundle", bundle);
     (void)json_push_kv_str(&c->input, "lane", lane);
     (void)json_push_kv_str(&c->input, "note", "from the test");
-    (void)chdir(r->queue);
+    dlt_cd(r->queue);
     zcl_native_handle_dev_land_remote(&c->request, &c->reply);
 }
 
@@ -208,7 +216,7 @@ static void dlt_send(struct dlt_call *c, const struct dlt_rig *r,
     (void)json_push_kv_str(&c->input, "lane", "mac");
     if (note)
         (void)json_push_kv_str(&c->input, "note", note);
-    (void)chdir(r->sender);
+    dlt_cd(r->sender);
     zcl_native_handle_dev_land_remote(&c->request, &c->reply);
 }
 

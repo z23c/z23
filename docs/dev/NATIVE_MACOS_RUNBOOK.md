@@ -289,3 +289,5 @@ Embedded full Tor has been observed to complete on the arm64 Mac host
 OpenSSL/libevent/zlib). What the node links is decided by which archives exist,
 on every host. Build and test instructions are in
 [`docs/node/GETTING_STARTED.md`](../node/GETTING_STARTED.md).
+
+To land from this host without a worktree on the queue host, commit and sign, then run `z23-dev dev land send --host=<queue-host> --lane=NAME` (see `docs/dev/DEVELOPING.md`, "Submit from another machine"); never push to `origin/main` directly.

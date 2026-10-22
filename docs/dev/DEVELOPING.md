@@ -1970,6 +1970,26 @@ and rollback verification. A source identity or environment variable alone
 grants no activation authority. See [`RUNBOOK.md`](../RUNBOOK.md) and the current
 command schema before any authorized deployment work.
 
+### Submit from another machine
+
+A host with no worktree on the queue host (a Mac or Windows machine) never
+pushes to `origin/main`; it sends a bundle of its unlanded commits and the
+queue host queues them like any other lane. The tip must carry a good
+signature on the queue host, or the reply is `TIP_UNSIGNED`.
+
+```
+z23-dev dev land send --host=<queue-host> --lane=NAME [--note=TEXT]
+z23-dev dev land receive --bundle=PATH --lane=NAME [--note=TEXT]   # on <queue-host>
+```
+
+`send` refuses a dirty tracked tree (`SEND_DIRTY_TREE`) and a HEAD with nothing
+ahead of `origin/main` (`SEND_NOTHING_AHEAD`), copies the bundle with `scp` and
+runs `receive` over `ssh`, relaying its JSON reply as `data.remote`. `receive`
+fetches the single head into `refs/heads/remote/NAME`, readies the detached
+worktree `land-remote/NAME` under the state root, and returns submit's reply.
+A lane worktree with tracked changes refuses `RECEIVE_WORKTREE_DIRTY` and is
+never reset. Both leaves are local-operator only.
+
 ## 7. Continue while deep proof runs
 
 After a push, fetch current upstream and continue to the next unfinished item.

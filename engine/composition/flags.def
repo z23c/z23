@@ -1354,6 +1354,8 @@ Z23_FLAG("ZCL_LAND_REGEN_GATE_STUB_FAIL", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_REGEN_MAKE_STUB", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
+Z23_FLAG("ZCL_LAND_REMOTE_XPORT", "env_test", "-", "-",
+          "test build only: one program put in front of ssh and scp by dev.land.send so the tests touch no network; first use tools/command/native_dev_land_remote.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_DIR_SYNC_FAIL", "env_test", "-", "-",
           "inject failed parent-directory sync after the landing queue rename; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_FENCE_POLICY", "env_test", "-", "-",
