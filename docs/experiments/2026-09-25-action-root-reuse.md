@@ -32,10 +32,10 @@ Git blob hashes of the sources:
 
 | Path | Blob |
 | --- | --- |
-| `tools/dev/action_root_reuse_study.c` | `b0a41c9a252e6e91057b38eb1d124b27ad84b278` |
-| `tools/dev/action_root_reuse_study_eval.c` | `cd116430919e6666e55d6c24d02af6ddf94c3ae4` |
-| `tools/dev/action_root_reuse_study_snap.c` | `da403aaf0d8f27f03b024eac2aa65a78e944e626` |
-| `tools/dev/action_root_reuse_study.h` | `6924882db0fb281082c22d85b51915469c4e8563` |
+| `action_root_reuse_study.c` | `b0a41c9a252e6e91057b38eb1d124b27ad84b278` |
+| `action_root_reuse_study_eval.c` | `cd116430919e6666e55d6c24d02af6ddf94c3ae4` |
+| `action_root_reuse_study_snap.c` | `da403aaf0d8f27f03b024eac2aa65a78e944e626` |
+| `action_root_reuse_study.h` | `6924882db0fb281082c22d85b51915469c4e8563` |
 | `contexts/commons/modules/vcs/src/build_action_v2.c` | `05674a3980774390be5fa125f65c24b9c2a9cca1` |
 | `tools/dev/devloop_action_root.c` | `ce2c03bd77c388c334969d2ab31487b0f7617627` |
 
@@ -370,3 +370,5 @@ root.
   concurrent `devbuild` load.
 - The study measures whether evidence could be reused. It does not change
   the receipt format or the proof admission path.
+
+The scripts and tools this experiment used were removed on 2026-10-22; see git history.

@@ -81,3 +81,5 @@ platform dependencies are declared and qualified under receiver policy. The
 current aircraft-only `libm` recipe is a separate component control. Until
 the complete game can pass its real confined build and local acceptance,
 neither that component nor this matched link fixture is a game release.
+
+The scripts and tools this experiment used were removed on 2026-10-22; see git history.

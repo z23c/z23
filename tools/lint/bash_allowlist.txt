@@ -79,18 +79,6 @@ tools/dev/dev-wallet-credential.sh
 tools/dev/dev_lib.sh
 tools/dev/devagent_claim_lease_selftest.sh
 tools/dev/doctor-build.sh
-tools/dev/factory-counterexamples.sh
-tools/dev/factory-evidence-audit.sh
-tools/dev/factory-evolving-fixture.sh
-tools/dev/factory-evolving-qualification.sh
-tools/dev/factory-evolving-throughput.sh
-tools/dev/factory-fault-evidence-audit.sh
-tools/dev/factory-fault-matrix.sh
-tools/dev/factory-mixed-fixture.sh
-tools/dev/factory-mixed-loc.sh
-tools/dev/factory-mixed-peer-check.sh
-tools/dev/factory-mixed-stages.sh
-tools/dev/factory-same-store-lineage.sh
 tools/dev/factory-throughput-qualification.sh
 tools/dev/fixtures/proof/generation_hook_refresh.sh
 tools/dev/fixtures/proof/stale_candidate_zcc.sh
@@ -145,9 +133,6 @@ tools/dev/retrieval-prefix-sweep.sh
 tools/dev/retrieval-profile-sweep.sh
 tools/dev/science_acceptance.sh
 tools/dev/secure-release-regressions-selftest.sh
-tools/dev/skycombat-factory-qualification.sh
-tools/dev/skycombat-libm-control.sh
-tools/dev/skycombat-platform-link-control.sh
 tools/dev/source-identity-batch-bootstrap.sh
 tools/dev/source-identity-batch-selftest.sh
 tools/dev/source-identity-selftest.sh
@@ -430,7 +415,6 @@ tools/scripts/repro_build_vars.sh
 tools/scripts/repro_network_policy_selftest.sh
 tools/scripts/rom-bundle-replicate.sh
 tools/scripts/service_args_selftest.sh
-tools/scripts/session_drill.sh
 tools/scripts/sh_str.sh
 tools/scripts/ship_progress_lib.sh
 tools/scripts/simnet_nightly.sh

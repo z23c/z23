@@ -531,7 +531,7 @@ else ifeq ($(ZCL_EPOCH_SINGLE_GOAL),dev-proof-bundle-prefork)
 # The standalone lint-tool closure includes the wiki qualifier, which shares
 # the public node object graph. Select its real epoch before acquiring leases.
 ZCL_EPOCH_PROFILES := dev test-fast node-c23
-else ifneq ($(filter dev-proof-bundle ff action-root-reuse-study,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter dev-proof-bundle ff,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
@@ -561,7 +561,7 @@ else ifneq ($(filter dev-tsan z23-dev-tsan zclassic23-dev-tsan,$(ZCL_EPOCH_SINGL
 ZCL_EPOCH_PROFILES := dev-tsan
 else ifneq ($(filter coverage coverage-locked,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := coverage
-else ifneq ($(filter lint-fast lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter lint-fast lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci t-list templates site-css explorer-css,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES :=
 endif
 endif
@@ -991,9 +991,6 @@ DEV_STANDALONE_SRCS = tools/dev/hotswap_verify_so.c \
 	tools/dev/fleet_observe_main.c \
 	tools/dev/wiki_runtime_main.c \
 	tools/dev/test_group_weights_main.c \
-	tools/dev/action_root_reuse_study.c \
-	tools/dev/action_root_reuse_study_eval.c \
-	tools/dev/action_root_reuse_study_snap.c \
 	tools/dev/sem_replay.c tools/dev/sem_replay_util.c \
 	tools/dev/sem_replay_build.c tools/dev/sem_replay_change.c \
 	tools/dev/sem_replay_plan.c tools/dev/sem_replay_step.c \
@@ -2059,7 +2056,7 @@ else ifneq ($(filter coverage coverage-locked,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := coverage
 else ifneq ($(filter fuzz fuzz-ci fuzz-ci-leaks fuzz-replay fuzz_block fuzz_script fuzz_p2p fuzz_http fuzz_compactblock fuzz_snapshot fuzz_tx_bundle fuzz_rom_manifest fuzz_overlay fuzz_ecdsa fuzz_mesh_status_proto,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := fuzz
-else ifneq ($(filter lint-fast lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop pre-push-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter lint-fast lint-land watcher-safety-gates check-dev-loop-profiles dev-loop-profile-flags print-dev-profile-dirs dev-failure-execution-id t-changed fast-changed-compile fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop pre-push-ci,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES :=
 endif
 endif
@@ -4392,7 +4389,7 @@ prove-cold-join: $(TEST_PARALLEL_REL_CANDIDATE)
 # the default `all`), so running build/bin/test_parallel directly after editing a test
 # can false-green an old binary or report "matched no groups" for a new test.
 # `make t ONLY=<group>` always rebuilds the harness first, closing that trap.
-.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-land lint-preflight fast-ci agent-fast-ci dev-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest watcher-session-stop-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
+.PHONY: t t-fast t-fast-exact t-asan asan-ci t-tsan tsan-ci t-changed ff verify-change watcher-safety-gates syntax-check build-only fast-compile fast-changed-compile dev-build-only dev-bin dev-asan z23-dev-asan zclassic23-dev-asan dev-tsan z23-dev-tsan zclassic23-dev-tsan z23-dev zclassic23-dev dev print-CFLAGS print-DEV-CFLAGS print-LDFLAGS print-DEV-LDFLAGS print-build-flags fast-rebuild rebuild-fast dev-rebuild hot-rebuild super-rebuild lint-fast lint-land lint-preflight fast-ci agent-fast-ci agent-plan agent-loop agent-dev-loop dev-watch dev-watch-once dev-watch-selftest dev-activation-selftest dev-loop-selftest native-dev-loop-wait-selftest native-dev-failure-selftest watcher-session-stop-selftest agent-index compdb dev-loop-bench dev-loop-bench-selftest hotswap-sim immutable-history-canaries historical-canaries agent-dev-status agent-dev-recover dev-recovery-selftest agent-clear-stale-dev-reindex agent-doctor doctor-build stage-dev-bin agent-stage-dev deploy-dev-fast agent-deploy-fast
 
 # ── ONLY= is validated BEFORE anything compiles ──────────────────────────
 # Every focused target below carried its ONLY= check in the RECIPE. Make builds
@@ -4873,59 +4870,6 @@ $(TEST_GROUP_WEIGHTS_BIN): tools/dev/test_group_weights.c \
 test-group-weights-regen: $(TEST_GROUP_WEIGHTS_BIN)
 	$(TEST_GROUP_WEIGHTS_BIN) --timing=$(TEST_GROUP_WEIGHTS_TIMING) \
 	    --out=tools/dev/test_group_weights.tsv
-# action-root-reuse-study:the offline experiment behind
-# docs/experiments/2026-09-25-action-root-reuse.md. It extracts immutable
-# snapshots of recent first-parent main commits (plus --pick'ed small edits),
-# derives the v2 action_root of every dev compile action in each, and reports
-# how much compile and test-cache evidence would survive each commit. Its
-# three sources carry the only main() and are kept out of every node, dev and
-# test link via DEV_STANDALONE_SRCS; the sources named here are the whole
-# dependency set. The run needs one real build's depfiles and the fast test
-# harness (for its content-keyed cache probe), so it names both.
-ACTION_ROOT_STUDY_BIN = $(BIN_DIR)/action-root-reuse-study$(ZCL_HOST_EXEEXT)
-ACTION_ROOT_STUDY_SCRATCH ?= $(HOME)/.local/state/zclassic23/scratch/action-root-study
-ACTION_ROOT_STUDY_OUT ?= $(ACTION_ROOT_STUDY_SCRATCH)/out
-ACTION_ROOT_STUDY_MAIN_REF ?= origin/main
-ACTION_ROOT_STUDY_CORPUS ?= 30
-ACTION_ROOT_STUDY_JOBS ?= 8
-ACTION_ROOT_STUDY_PICKS ?= comment=34252340c4 whitespace=bf79a0782e \
-	body=c472356ff2 body2=1f5790fc70 header=b3e9c0bddb \
-	header2=03558ceabb makeflag=9ae2b83949 makefile=6ae2602c0f \
-	gen-flags=247c320716 gen-inventory=3922dee99136d42195413a93fe9d966fda857525
-.PHONY: action-root-reuse-study-bin action-root-reuse-study
-action-root-reuse-study-bin: $(ACTION_ROOT_STUDY_BIN)
-$(ACTION_ROOT_STUDY_BIN): tools/dev/action_root_reuse_study.c \
-		tools/dev/action_root_reuse_study_eval.c \
-		tools/dev/action_root_reuse_study_snap.c \
-		tools/dev/devloop_action_root.c \
-		contexts/commons/modules/vcs/src/build_action.c \
-		contexts/commons/modules/vcs/src/build_action_v2.c \
-		contexts/commons/modules/vcs/src/build_action_v2_decode.c \
-		platform/modules/platform/src/clock.c \
-		platform/modules/platform/src/file_metadata.c \
-		platform/modules/platform/src/positioned_file.c \
-		platform/modules/platform/src/toolchain.c \
-		platform/modules/sha3/src/sha3.c \
-		platform/modules/base/src/safe_alloc.c \
-		platform/modules/base/src/log_level.c \
-		platform/modules/base/src/result.c \
-		platform/modules/util/src/spawn.c
-	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror $(ZCL_WARN_FORMAT_TRUNCATION) \
-	    $(ZCL_PLATFORM_CPPFLAGS) -D_POSIX_C_SOURCE=200809L -Itools/dev \
-	    $(ZCL_ALL_INCLUDES) -o $@ $^ -lpthread
-action-root-reuse-study: $(ACTION_ROOT_STUDY_BIN) \
-		$(TEST_PARALLEL_FAST_CANDIDATE) dev-bin
-	@mkdir -p '$(ACTION_ROOT_STUDY_OUT)'
-	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(ACTION_ROOT_STUDY_BIN) \
-	  --repo='$(CURDIR)' --scratch='$(ACTION_ROOT_STUDY_SCRATCH)' \
-	  --out='$(ACTION_ROOT_STUDY_OUT)' --build-obj='$(abspath $(DEV_OBJ_DIR))' \
-	  --test-obj='$(abspath $(TEST_FAST_OBJ_DIR))' \
-	  --test-bin='$(abspath $(TEST_PARALLEL_FAST_CANDIDATE))' \
-	  --main-ref='$(ACTION_ROOT_STUDY_MAIN_REF)' \
-	  --corpus=$(ACTION_ROOT_STUDY_CORPUS) --jobs=$(ACTION_ROOT_STUDY_JOBS) \
-	  $(addprefix --pick=,$(ACTION_ROOT_STUDY_PICKS))
-
 # z23-sem-replay: replay real commits through the incremental test-fast
 # object build, the semantic sensor and dev.change.plan, and compare what
 # make recompiled, which object bytes changed, the plain plan and the facts
@@ -6823,7 +6767,7 @@ endif
 #   ZCL_FAST_CHANGED_FILES_ONLY=1  # trust only the explicit changed-file list
 #   ZCL_FAST_COMPILE=dev make fast-ci  # force full dev-object fast-compile
 #   make pre-push-ci               # skips live probe; code gate only
-fast-ci agent-fast-ci dev-ci:
+fast-ci agent-fast-ci:
 	@mkdir -p "$(BUILD_DIR)"
 	@$(CHECKOUT_LOCK_TOOL) $(CHECKOUT_LOCK_MODE) "$(CHECKOUT_LOCK)" -- \
 	  env ZCL_FAST_BUILD_SOURCE_RECORD="$(BUILD_SOURCE_RECORD)" \

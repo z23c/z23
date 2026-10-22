@@ -107,7 +107,7 @@ OUT2="$("$TOOL" foreground "$LOCK" -- echo released-after-failure)"
 # 6. The source-wide fast gate must enter this same checkout critical section.
 # `pre-push-ci` delegates to `make fast-ci`; without this wiring a concurrent
 # focused runner can overlap the supposedly-exclusive host-latency pre-pass.
-FAST_CI_RECIPE="$(sed -n '/^fast-ci agent-fast-ci dev-ci:/,/^agent-plan:/p' "$MAKEFILE")"
+FAST_CI_RECIPE="$(sed -n '/^fast-ci agent-fast-ci:/,/^agent-plan:/p' "$MAKEFILE")"
 case "$FAST_CI_RECIPE" in
     *'$(CHECKOUT_LOCK_TOOL) $(CHECKOUT_LOCK_MODE) "$(CHECKOUT_LOCK)"'*) ;;
     *) fail 'fast-ci source-wide proof is outside the checkout lock' ;;

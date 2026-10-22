@@ -36,7 +36,7 @@ factory-induced regression.
 | Node log | `a53b8a585af3a7ba3d96285889801f4de09920ca5ae57a4b6de77f0aba05c76a` |
 | Concurrent factory ledger | `6e9266247d24de7a69d33f950ce4345b67c31e4c6c34cc5da69b3db55ebd6b0d` |
 
-`tools/dev/factory-evolving-fixture.sh` creates a C23 package with an
+`factory-evolving-fixture.sh` creates a C23 package with an
 append-only value history. Revision N tests every prefix from 1 through N,
 including the original tiny-lines behavior. The generator accepts N=1..100.
 Three successive revisions and a separate revision-100 snapshot were exercised
@@ -354,8 +354,8 @@ frozen verifier SHA-256
 and `tools/dev/fixtures/skycombat/remote_run.sh` SHA-256
 `f61bbabe15dd2ba0771bef07a248ef0fd27c5abc4a351bcb99e9c8771e162703`.
 The input is assembled from the output of
-`tools/dev/skycombat-factory-qualification.sh`, followed by
-`tools/dev/skycombat-libm-control.sh`; the frozen runner checks the recipe
+`skycombat-factory-qualification.sh`, followed by
+`skycombat-libm-control.sh`; the frozen runner checks the recipe
 and verifier bytes before it runs. On each receiver the bounded command was
 `cd ISOLATED_DIR && tar -xf bundle.tar && ./run.sh`. No node or canonical
 datadir was used; the isolated receiver directories were deleted afterward.
@@ -564,7 +564,7 @@ boundary. No remote operator accepted or ran the library in an application.
 The 20-revision run used the frozen harness copy
 `test-tmp/factory-node-health-20b-20260924/harness-run.sh` SHA-256
 `05ca57213ecdd7117b320a2d76c9ea0d0f3ca49a14dd2879d1492f9d915ee522`
-ran `tools/dev/factory-evolving-qualification.sh` for 20 revisions while
+ran `factory-evolving-qualification.sh` for 20 revisions while
 the guarded `isolated_node_env.sh` rail owned a throwaway regtest node.
 The node used a private `/tmp` datadir, 39xxx ports, and a dead P2P sink.
 It reached height-0 RPC readiness on attempt 17. No production datadir or
@@ -821,3 +821,5 @@ required group and fail-closed invalidation. Its attainable gain remains
 unmeasured here. The exact-root queue admission fix above remains the
 highest-leverage package-dispatch fix; neither proposal changes DEV evidence
 into release qualification.
+
+The scripts and tools this experiment used were removed on 2026-10-22; see git history.

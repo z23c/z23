@@ -676,7 +676,7 @@ int t_agent_fast_ci_contract(void)
         char path[PATH_MAX];
         ASSERT(repo_path(path, sizeof(path), "Makefile") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
-        ASSERT(strstr(buf, "fast-ci agent-fast-ci dev-ci") != NULL);
+        ASSERT(strstr(buf, "fast-ci agent-fast-ci") != NULL);
         ASSERT(strstr(buf, "t-fast") != NULL);
         ASSERT(strstr(buf, "test_parallel_fast") != NULL);
         ASSERT(strstr(buf, "fast-compile dev-build-only") != NULL);

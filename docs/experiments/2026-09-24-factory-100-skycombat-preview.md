@@ -11,7 +11,7 @@ accept any package for an operator. The factory's offline hosting status was
 
 ## Evolving corpus
 
-`tools/dev/factory-evolving-fixture.sh` generated 100 cumulative revisions of
+`factory-evolving-fixture.sh` generated 100 cumulative revisions of
 the real tiny-lines C23 package. Each new revision adds one value-history
 source line and tests every preceding prefix. The initial behavior remains
 under test at every revision. This is a data/compute progression; it does not
@@ -71,7 +71,7 @@ promoted to release qualification.
 
 ### Same-publisher state preservation control
 
-`tools/dev/factory-same-store-lineage.sh` replayed revisions 1 and 2 in the
+`factory-same-store-lineage.sh` replayed revisions 1 and 2 in the
 same two isolated stores with one publisher key. It explicitly tried publisher
 sequences 1 and 2 for revision 2. The script SHA-256 is
 `6df7fadc890c57dfb88b1a9fbbac929fcbe8882dc6c110bc33f756242ec2fa69`;
@@ -232,7 +232,7 @@ independent of this throughput optimization.
 
 ## Distinct-candidate concurrency and cache race
 
-`tools/dev/factory-evolving-throughput.sh` schedules the same 32 cumulative
+`factory-evolving-throughput.sh` schedules the same 32 cumulative
 source revisions at widths 1, 2, 4, 8, 16, and 32. Every revision contributes
 one useful history-source LOC, so its generated, buildable, previewed, tested,
 and locally verified LOC counts equal its distinct-candidate stage counts.
@@ -378,3 +378,5 @@ highest-leverage measured end-to-end throughput repair. It must preserve the
 current-base check, all proof gates, signed intent, and independent remote
 observation. The two-store commit and reproduction cost remains the largest
 measured per-candidate factory component.
+
+The scripts and tools this experiment used were removed on 2026-10-22; see git history.

@@ -109,7 +109,7 @@ consenting Linux development host with GCC 14.2.0 under `-std=c23 -Wall
 -Wextra -Werror -pedantic -O2`. The transfer bundle was 51,200 bytes, SHA-256
 `253727787a3e5a441fc68c1f57de9f0c61c9c79dd993dc6acfaf5997e8ebef2b`;
 the receiver matched that hash and all 12 input-manifest entries before
-compiling. The peer checker is `tools/dev/factory-mixed-peer-check.sh`, SHA-256
+compiling. The peer checker is `factory-mixed-peer-check.sh`, SHA-256
 `8a94c82adf0dcb2c4de642007b7f3964411bbe967793e9cc8434854e110a669a`.
 The bundled final-state C23 auditor SHA-256 is
 `842b92c54cf5b6991a5a28c0008de961fe4e10efb7e447b48ffae64b56e8dd10`.
@@ -172,3 +172,5 @@ pairs. The next performance repair is eligible exact-input-closure proof reuse
 across Git-base movement, retaining all mandatory publication evidence and
 independent remote observation. SkyCombat's canonical recipe and owner verdict
 remain separate release prerequisites.
+
+The scripts and tools this experiment used were removed on 2026-10-22; see git history.
