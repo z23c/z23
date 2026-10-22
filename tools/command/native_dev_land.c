@@ -13216,3 +13216,26 @@ void zcl_native_handle_dev_land(const struct zcl_command_request *request,
     dl_handle(request, reply);
     dl_reply_name_next(request, request ? dl_action(request) : NULL, reply);
 }
+
+/* Narrow in-process entries for tools/command/native_dev_land_remote.c: the
+ * receive leaf prepares a worktree at a fetched tip and then queues it through
+ * exactly the submit handler above, so none of submit's checks is duplicated.
+ * The git runner is the same no-shell dl_git every other step uses. */
+void zcl_native_dev_land_submit(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply)
+{
+    if (!reply)
+        return;
+    if (!request || !request->input) {
+        dl_fail(reply, "BAD_INPUT", "submit", "submit needs an input object",
+                "request.input was missing");
+        return;
+    }
+    dl_submit(request, reply);
+}
+
+int zcl_native_dev_land_git(const char *dir, const char *const *args,
+                            char *out, size_t cap, int timeout_ms)
+{
+    return dl_git(dir, args, out, cap, timeout_ms);
+}

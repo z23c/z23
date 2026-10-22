@@ -3013,6 +3013,16 @@ void zcl_native_handle_dev_factory(
 void zcl_native_handle_dev_land_window(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply);
+/* dev.land.receive / dev.land.send — submit from another machine
+ * (tools/command/native_dev_land_remote.c). The first two are the narrow
+ * entries it borrows from tools/command/native_dev_land.c. */
+void zcl_native_dev_land_submit(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply);
+int zcl_native_dev_land_git(const char *dir, const char *const *args,
+                            char *out, size_t cap, int timeout_ms);
+void zcl_native_handle_dev_land_remote(
+    const struct zcl_command_request *request,
+    struct zcl_command_reply *reply);
 /* dev.agent.worker — resident dev-only queue consumer
  * (tools/command/native_devagent_worker.c). Same one-handler-per-file
  * shape as the lane-discipline leaves above. */

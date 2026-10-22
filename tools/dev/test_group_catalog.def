@@ -1074,6 +1074,7 @@ ZCL_TEST_GROUP(dev_land_shard_02)
 ZCL_TEST_GROUP(dev_land_shard_03)
 ZCL_TEST_GROUP(dev_land_shard_04)
 ZCL_TEST_GROUP(dev_land_window)
+ZCL_TEST_GROUP(dev_land_remote)
 /* dev.ci: the one read-only screen over this host's CI and landing state.
  * The group exists for one property -- absent evidence never reads as a
  * pass or as an idle zero. It proves all nine views render from the

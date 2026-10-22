@@ -2679,6 +2679,7 @@ AGENT_IMPACT_RULE("tools/command/native_dev_machine_boot.c|tools/command/native_
 AGENT_IMPACT_RULE("tools/command/native_dev_machine_data.c|tools/command/native_dev_machine_data.h|tests/harness/src/test_rvmachine_data_disk.c", "rvmachine_data_disk dev_machine_boot make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_dev_machine_shell.c|tools/command/native_dev_machine_shell_session.c|tools/command/native_dev_machine_shell.h|tests/harness/src/test_dev_machine_shell.c", "dev_machine_shell make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/rvemu/src/*|platform/modules/rvemu/include/rvemu/*|platform/modules/rvplat/src/*|platform/modules/rvplat/include/rvplat/*|platform/modules/rvvirtio/src/*|platform/modules/rvvirtio/include/rvvirtio/*|platform/modules/fdt/src/*|platform/modules/fdt/include/fdt/*", "rvmachine dev_machine_boot")
+AGENT_IMPACT_RULE("tools/command/native_dev_land_remote.c|tests/harness/src/test_dev_land_remote.c", "dev_land_remote make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_dev_land_window.c|tests/harness/src/test_dev_land_window.c", "dev_land_window devagent_mail make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_devagent_boardmail.c|tests/harness/src/test_devagent_boardmail.c", "devagent_boardmail devagent_receive devagent_mail make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_dev_ci_command.c|tests/harness/src/test_dev_ci.c", "dev_ci command_registry_catalog native_api_contract command_input_bounds")

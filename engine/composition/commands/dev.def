@@ -2299,6 +2299,63 @@ ZCL_COMMAND_DEV_COMMAND(
     "landing windows are a development-lane coordination surface",
     "z23 dev land window")
 
+/* ── dev.land.receive / dev.land.send ─────────────────────────────────────
+ * Submit from another machine (tools/command/native_dev_land_remote.c). */
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.receive", "dev.land", "",
+    "Queue a bundle sent from another machine (queue host)",
+    "Verifies the git bundle in the checkout that owns the queue, fetches "
+    "its single head into refs/heads/remote/<lane>, readies the detached "
+    "worktree <state root>/land-remote/<lane> and queues that tip through "
+    "the submit path, returning submit's reply unchanged (seq, or its "
+    "refusal such as TIP_UNSIGNED). Refuses RECEIVE_BAD_LANE (lane is "
+    "[a-z0-9][a-z0-9-]{0,47}), RECEIVE_BAD_BUNDLE (verify failed, or not "
+    "exactly one head), RECEIVE_FETCH_FAILED, RECEIVE_WORKTREE_DIRTY (tracked "
+    "changes; the worktree is never reset) and RECEIVE_WORKTREE_FAILED.",
+    65536,
+    "land,receive,bundle,remote,queue",
+    "zcl.land_receive_input.v1", "zcl.land.v1", "bundle,lane,note",
+    "bundle,lane",
+    "z23-dev dev land receive --bundle=PATH --lane=NAME",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land_remote,
+    "the landing queue is a development-lane coordination surface",
+    "z23-dev dev land receive")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.land.send", "dev.land", "",
+    "Send this checkout's unlanded commits to the queue host",
+    "Refuses a dirty tracked tree (SEND_DIRTY_TREE), fetches origin main and "
+    "refuses when HEAD is not ahead (SEND_NOTHING_AHEAD), bundles HEAD "
+    "^origin/main, copies it with scp to <host>:<inbox>/<lane>-<sha12>.bundle "
+    "(inbox defaults to .cache/development-scratch/z23/land-inbox under the "
+    "remote home) and runs `<remote_cmd> dev land receive` over ssh "
+    "(remote_cmd defaults to z23-dev), relaying the remote JSON reply as "
+    "data.remote. Host, lane, note, remote_cmd and inbox are checked against "
+    "[A-Za-z0-9 ._,:/()+=-] because ssh joins its argv into a remote shell "
+    "string (SEND_BAD_ARGUMENT); every remote argument is single-quoted.",
+    65536,
+    "land,send,bundle,remote,ssh",
+    "zcl.land_send_input.v1", "zcl.land_send.v1",
+    "host,lane,note,remote_cmd,inbox", "host,lane",
+    "z23-dev dev land send --host=queue-host --lane=mac",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
+    ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_land_remote,
+    "sending a bundle to the queue host is a development-lane operation",
+    "z23-dev dev land send")
+
 /* ── dev.lane ──────────────────────────────────────────────────────────────
  * An agent worktree with the proof's vendored dependencies primed onto
  * independent inodes. Hardlinks are forbidden: they bump the shared inode's
