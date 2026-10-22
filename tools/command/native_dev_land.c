@@ -2591,33 +2591,83 @@ static void dl_watcher_kick(const char *wt, char *detail, size_t cap)
 #endif
 #endif
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+/* A land row is a fresh submission. The proof layer's ensure keeps a settled
+ * `.failed` marker for the exact (local, base) pair on purpose (it never
+ * respends a worker on its own), so a resubmission of a pair whose last
+ * attempt failed used to read that stale failure back and fail at once
+ * (seqs 724 and 726, head_changed_during_proof). Queue one fresh attempt
+ * instead. zcl_dev_proof_retry archives the failed attempt's record beside
+ * its logs (failure.txt) and refuses while a request, lease or worker is
+ * live, so an identical in-flight retry is never queued twice. Returns true
+ * with `note` naming the kept evidence when a fresh attempt was queued. */
+static bool dl_proof_requeue_failed(const char *wt, const char *local,
+                                    const char *base, char *note, size_t cap)
+{
+    struct zcl_dev_proof_status prior = {0}, again = {0};
+    if (!zcl_dev_proof_status_read(wt, local, base, &prior) ||
+        prior.state != ZCL_DEV_PROOF_STATE_FAILED)
+        return false;
+    if (!zcl_dev_proof_retry(wt, local, base, &again)) {
+        (void)snprintf(note, cap, "prior proof failure kept, retry refused: %.160s",
+                       again.detail);
+        return false;
+    }
+    (void)snprintf(note, cap,
+                   "fresh proof queued; prior failure kept as evidence: %.160s",
+                   prior.detail);
+    return true;
+}
+#endif
+
+/* The stub arm of dl_proof_request: always pending. */
+static enum dl_proof dl_proof_request_stub(const char *stub, const char *wt,
+                                           const char *local,
+                                           const char *base, char *detail,
+                                           size_t cap)
+{
+#if defined(ZCL_TESTING)
+    /* "status" reads the settled state through the production reader, so it
+     * also takes the production fresh-submission retry. */
+    char note[256] = "";
+    if (strcmp(stub, "status") == 0)
+        (void)dl_proof_requeue_failed(wt, local, base, note, sizeof(note));
+    if (note[0]) {
+        (void)snprintf(detail, cap, "%s", note);
+        return DL_PROOF_PENDING;
+    }
+#endif
+    if (strcmp(stub, "watcher_absent") == 0)
+        (void)snprintf(detail, cap, "%s", "resident_proof_watcher_absent");
+    else if (strcmp(stub, "manual") == 0)
+        dl_proof_step_detail(wt, local, base, detail, cap);
+    else
+        (void)snprintf(detail, cap, "proof stub: %s", stub);
+    return DL_PROOF_PENDING;
+}
+
 static enum dl_proof dl_proof_request(const char *wt, const char *local,
                                       const char *base, char *detail,
                                       size_t cap)
 {
     const char *stub = dl_stub();
+    char note[256] = "";
+    (void)note;
     if (detail && cap)
         detail[0] = '\0';
-    if (stub) {
-        if (strcmp(stub, "watcher_absent") == 0)
-            (void)snprintf(detail, cap, "%s",
-                           "resident_proof_watcher_absent");
-        else if (strcmp(stub, "manual") == 0)
-            dl_proof_step_detail(wt, local, base, detail, cap);
-        else
-            (void)snprintf(detail, cap, "proof stub: %s", stub);
-        return DL_PROOF_PENDING;
-    }
+    if (stub)
+        return dl_proof_request_stub(stub, wt, local, base, detail, cap);
 #ifdef ZCL_DEV_BUILD
     {
         struct zcl_dev_proof_status status = {0};
+        (void)dl_proof_requeue_failed(wt, local, base, note, sizeof(note));
         if (!zcl_dev_proof_ensure(wt, local, base, &status)) {
             (void)snprintf(detail, cap, "%s",
                            status.detail[0] ? status.detail
                                             : "proof_ensure_failed");
             return DL_PROOF_FAILED;
         }
-        (void)snprintf(detail, cap, "%s",
+        (void)snprintf(detail, cap, "%s%s%s", note, note[0] ? "; " : "",
                        status.detail[0] ? status.detail : "proof requested");
         if (status.state == ZCL_DEV_PROOF_STATE_PASSED)
             return DL_PROOF_PASSED;

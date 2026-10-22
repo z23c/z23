@@ -78,6 +78,7 @@ void zcl_native_dev_land_test_watcher_launch(const char *wt,
 #include <string.h>
 #include <time.h>
 #if !defined(_WIN32)
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -10797,6 +10798,92 @@ static int test_dev_land_proof_evidence_compile(void)
 _test_next:;
     return failures;
 }
+
+/* The newest attempt's archived failure record exists: a retry kept the
+ * failed attempt as evidence rather than deleting it. */
+static bool dlx_attempt_archive_exists(const char *real_wt, const char *local,
+                                       const char *base)
+{
+    char dir[PATH_MAX + 64], path[PATH_MAX + 512], prefix[160];
+    DIR *d;
+    struct dirent *e;
+    bool found = false;
+    (void)snprintf(dir, sizeof(dir), "%s/.cache/zcl-dev-proof/attempts",
+                   real_wt);
+    (void)snprintf(prefix, sizeof(prefix), "%s-%s.", local, base);
+    d = opendir(dir);
+    if (!d)
+        return false;
+    while (!found && (e = readdir(d)) != NULL) {
+        if (strncmp(e->d_name, prefix, strlen(prefix)) != 0)
+            continue;
+        (void)snprintf(path, sizeof(path), "%s/%s/logs/failure.txt", dir,
+                       e->d_name);
+        found = access(path, R_OK) == 0;
+    }
+    (void)closedir(d);
+    return found;
+}
+
+static int test_dev_land_resubmit_failed_pair(void)
+{
+    int failures = 0;
+    TEST("land: a new row for a pair whose last proof failed gets a fresh proof") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        struct zcl_dev_proof_status st = {0};
+        char landwt[1300], landdir[1200], script[1300], why[256];
+        char real_wt[PATH_MAX], local[64], base[64];
+        dlx_isolate("resubmit_failed");
+        ASSERT(dlx_rig_make(&rig, "resubmit_failed_rig"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        dlx_end(&c);
+        ASSERT(dlx_proving_pair(local, base));
+        dlx_land_wt(landwt, sizeof(landwt));
+        dlx_landdir(landdir, sizeof(landdir));
+        ASSERT(realpath(landwt, real_wt) != NULL);
+        (void)snprintf(script, sizeof(script), "%s/stub-child.sh", landdir);
+        const char *argv[] = { "/bin/sh", script, NULL };
+        ASSERT(dlx_write(script, k_dlx_evidence_compile_script));
+        ASSERT(zcl_dev_proof_test_settle_child(real_wt, local, base,
+                                               ZCL_DEV_PROOF_COMPILE, argv,
+                                               why, sizeof(why)));
+        /* Row 1 consumes that failure and settles failed. */
+        setenv("ZCL_LAND_PROOF_STUB", "status", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "failed");
+        dlx_end(&c);
+        ASSERT(zcl_dev_proof_status_read(real_wt, local, base, &st));
+        ASSERT_EQ((int)st.state, (int)ZCL_DEV_PROOF_STATE_FAILED);
+        /* Row 2 resubmits the same commit on the same base. */
+        (void)snprintf(script, sizeof(script), "%s/.cache/fixture", real_wt);
+        ASSERT(dlx_write(script, "isolated resubmit\n"));
+        dlx_submit(&c, &rig, rig.tip);
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_EQ(dlx_int(&c, "seq"), 2);
+        dlx_end(&c);
+        for (int i = 0; i < 2; i++) { /* a repeat step must not loop or fail */
+            dlx_begin(&c, "step");
+            ASSERT(dlx_run(&c));
+            ASSERT(strcmp(dlx_str(&c, "state"), "failed") != 0);
+            dlx_end(&c);
+        }
+        ASSERT(zcl_dev_proof_status_read(real_wt, local, base, &st));
+        ASSERT(st.state != ZCL_DEV_PROOF_STATE_FAILED);
+        /* The first attempt's failure is kept, never deleted. */
+        ASSERT(dlx_attempt_archive_exists(real_wt, local, base));
+        PASS();
+    } _test_next:;
+    dlx_restore();
+    return failures;
+}
 #endif
 
 #if !defined(_WIN32)
@@ -16161,6 +16248,8 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
      test_dev_land_tree_missing, 0u},
     {"test_dev_land_proof_evidence_test()",
      test_dev_land_proof_evidence_test, 0u},
+    {"test_dev_land_resubmit_failed_pair()",
+     test_dev_land_resubmit_failed_pair, 0u},
     {"test_dev_land_proof_evidence_compile()",
      test_dev_land_proof_evidence_compile, 0u},
 #endif
@@ -16478,6 +16567,7 @@ static const char *const g_dlx_original_calls[] = {
     "test_dev_land_tree_replacements()",
     "test_dev_land_tree_missing()",
     "test_dev_land_proof_evidence_test()",
+    "test_dev_land_resubmit_failed_pair()",
     "test_dev_land_proof_evidence_compile()",
 #endif
     "dlx_case_registration()",
