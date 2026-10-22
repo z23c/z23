@@ -29,7 +29,7 @@
 # manifest outright when it prepares the package for real.)
 #
 # HISTORY: this began as pkg_sources() private to
-# tools/lint/check_zcode_package_standalone.sh, which globbed src/ + tests/
+# build/bin/z23-lint check-zcode-package-standalone, which globbed src/ + tests/
 # and then narrowed to files[] by substring grep. Lifting it here widened it
 # to honour files[] entries OUTSIDE src/ and tests/ — the only such entry in
 # the registry today is contexts/commons/modules/commons_demo/app/main.c, which was verified to

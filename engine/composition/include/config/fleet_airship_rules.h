@@ -9,7 +9,7 @@
  * fact never means editing a consumer.
  *
  * The award refuses twice. The table already gives every self-reported
- * fact a count of zero and tools/lint/check_fleet_airship_rules.sh refuses
+ * fact a count of zero and tools/lint/lintc/gate_fleet_airship_rules.c refuses
  * any edit that raises one; fleet_airship_award ALSO skips a rule whose
  * fact is self-reported, so a table that somehow shipped a paying
  * self-reported row still pays nothing at runtime. */

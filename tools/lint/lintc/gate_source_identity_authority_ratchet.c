@@ -201,14 +201,14 @@ static int sia_ceiling(struct sia_eval *e, const char *baseline,
 static const char k_update_hdr[] =
     "# check_source_identity_authority baseline — reviewed exceptions to the\n"
     "# Q1 (baked build)/Q2 (working tree) source_id_sha256 naming and reader\n"
-    "# ratchet. See tools/lint/check_source_identity_authority.sh's header for\n"
+    "# ratchet. See build/bin/z23-lint check-source-identity-authority's header for\n"
     "# class R (positional agentbuild read) and class P (bare-key working-tree\n"
     "# producer).\n"
     "#\n"
     "# Format: <path> <count>.  COUNTS MAY ONLY SHRINK.\n"
     "#\n"
     "# Regenerate: ZCL_LINT_MODE=UPDATE "
-    "tools/lint/check_source_identity_authority.sh\n";
+    "build/bin/z23-lint check-source-identity-authority\n";
 
 static int sia_update_rows(struct sia_counts *counts, struct sia_list *rows)
 {

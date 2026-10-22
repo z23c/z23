@@ -487,7 +487,7 @@ static bool group_reads_external_inputs(const char *name)
     static const char *const ext[] = {
         /* --- execs a built binary or a repo script (whole-link input) --- */
         "agent_copy_prove",
-        /* fork/execs tools/lint/check_peer_floor_single_source.sh. */
+        /* fork/execs tools/lint/lintc/gate_landing_proof.c. */
         "anchor_peers",
         "chain_advance_atomicity",
         "chaos_harness",                  /* reads tests/fixtures block files */

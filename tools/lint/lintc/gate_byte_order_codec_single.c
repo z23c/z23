@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: C23 lint gate — check-byte-order-codec-single. Port of
- * tools/lint/check_byte_order_codec_single.sh: loading or storing a
+ * tools/lint/lintc/gate_byte_order_codec_single_report.c: loading or storing a
  * 16/32/64-bit integer at a byte address in a declared byte order must
  * live in exactly one place (platform/modules/base/include/base/
  * serialize_le.h). Any other production .c/.h that hand-rolls the shift

@@ -127,7 +127,7 @@ const char *clock_mode(void);
 int clock_grade(int v, const char *mode);
 
 /* The one family-file size ceiling. `z23-lint --families` reports each
- * family's headroom against it and tools/lint/check_lint_gate_wiring.sh
+ * family's headroom against it and tools/lint/lintc/gate_lint_gate_wiring.c
  * refuses a breach; the shell side reads this single definition out of
  * this header, so the number exists exactly once. */
 #define LINT_FAMILY_CEILING 1500

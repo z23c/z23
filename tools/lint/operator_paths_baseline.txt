@@ -169,7 +169,6 @@ A engine/composition/commands/core.def 5
 A engine/composition/commands/ops.def 1
 A engine/controllers/src/blockchain_controller_admin.c 1
 A platform/deploy/z23-node.env.example 1
-A tools/lint/check_live_datadir_isolation.sh 1
 A vendor/include/sqlite3.h 7
 B cognition/controllers/src/agent_controller.c 2
 B contexts/commons/corpus/evidence-000002.json 6

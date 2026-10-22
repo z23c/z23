@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: C23 lint gate — port of
- * tools/lint/check_supervisor_progress_declared.sh
+ * tools/lint/lintc/gate_supervisor_progress_declared.c
  * (check-supervisor-progress-declared). Every file that registers a
  * supervised child (liveness_contract_init(...)) must, per child, either
  * ARM progress detection (supervisor_set_progress_max_quiet(id, <non-zero>)
@@ -469,7 +469,7 @@ static int spd_write_update(const struct spd_counts *cur, const char *path)
             "# then lower (or delete) the number here. Adding a row is "
             "not a fix.\n"
             "# Regenerate: ZCL_LINT_MODE=UPDATE "
-            "tools/lint/check_supervisor_progress_declared.sh\n",
+            "build/bin/z23-lint check-supervisor-progress-declared\n",
             f) == EOF) {
         fclose(f);
         return die("z23-lint: write failed\n", "");

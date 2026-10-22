@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * check-macos-acceptance family — --selftest. The 21-case
- * --selftest of tools/lint/check_macos_acceptance.sh (which itself drives
+ * --selftest of tools/lint/lintc/gate_macos_acceptance.c (which itself drives
  * tools/scripts/macos_acceptance.sh --check against 16 planted fixtures
  * plus 5 reachability-rail fixtures). Every fixture is a mutation of the
  * REAL matrix/Makefile/ACCEPT-script text (never a rewritten mock), planted

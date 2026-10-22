@@ -530,7 +530,6 @@ static int nak_skip_path(const char *path)
     static const char *const ext[] = {
         ".png", ".jpg", ".gz", ".xz", ".zip", ".pdf", ".ico", ".bin", ".dat"
     };
-    if (!strcmp(path, "tools/lint/check_no_api_keys.sh")) return 1;
     if (!strncmp(path, "vendor/", 7)) return 1;
     if (!strncmp(path, "tests/harness/fuzz_seeds/", 25)) return 1;
     for (size_t i = 0; i < sizeof ext / sizeof ext[0]; i++)

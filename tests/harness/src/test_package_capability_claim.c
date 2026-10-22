@@ -4,7 +4,7 @@
  * (contexts/commons/modules/vcs/src/package_verify_capabilities.c).
  *
  * Every zcode-package.json carries a "capabilities" array, and
- * tools/lint/check_package_capabilities.sh keeps it equal to what the
+ * tools/lint/lintc/gate_package_capabilities.c keeps it equal to what the
  * shipped sources reach in THIS tree against THIS tree's
  * config/module_capabilities.def. A package that travels to a stranger
  * carries the array and none of the derivation; the unit under test lets the

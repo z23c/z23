@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-fleet-observations of the C23 lint runtime, the
- * replacement for tools/lint/check_fleet_observations.sh. engine/composition/
+ * replacement for tools/lint/lintc/gate_fleet_observations.c. engine/composition/
  * fleet_observations.def is GENERATED, never hand-typed: it reproduces
  * byte-for-byte from tests/fixtures/fleet_observations/rows.tsv through
  * build/bin/z23-fleet-observe --check, and the observed-routing block in

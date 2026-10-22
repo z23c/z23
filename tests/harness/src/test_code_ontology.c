@@ -55,8 +55,8 @@ static bool co_fixture(void)
         "# z23-generated-artifact: zcl.generated_artifact.v1\n"
         "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
         "# asserts: multi_arm_definition(path,symbol)\n"
-        "# generated-by: tools/lint/check_arm_symbol_single.sh\n"
-        "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh\n") &&
+        "# generated-by: build/bin/z23-lint check-arm-symbol-single\n"
+        "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single\n") &&
         co_write(CO_INVENTORY,
         "{\"record\":\"inventory\",\"files_scanned\":99,"
         "\"production_files\":98,\"test_files\":1}\n");

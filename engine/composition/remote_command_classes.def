@@ -36,7 +36,7 @@
  * ── DEFAULT DENY ────────────────────────────────────────────────────────────
  * REMOTE_CLASS_NEVER is the default and the majority. A leaf with no row here
  * is not "unclassified, treat as read-only"; it is a lint failure
- * (tools/lint/check_remote_command_classes.sh), because an unclassified leaf is
+ * (tools/lint/lintc/gate_remote_command_classes.c), because an unclassified leaf is
  * a decision nobody made. The gate is symmetric: a row naming a leaf the
  * registry no longer has also fails, so a renamed leaf cannot leave a stale
  * permission behind under its old name.

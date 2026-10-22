@@ -1,5 +1,5 @@
 # check_wallet_raw_prepare_log RATCHET baseline (shrink-only).
 # Stable key = <relpath>::<enclosing_function>. A swallowed prepare:
 #   sqlite3_prepare_v2(...); if (!stmt) return ...;   with no LOG_*.
-# Regenerate after fixing some: ZCL_LINT_MODE=UPDATE ./tools/lint/check_wallet_raw_prepare_log.sh
+# Regenerate after fixing some: ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-wallet-raw-prepare-log
 

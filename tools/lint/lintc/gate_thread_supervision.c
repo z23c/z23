@@ -12,7 +12,7 @@
  */
 
 /* ── check-thread-supervision ─────────────────────────────────────────────
- * Byte-parity C23 port of tools/lint/check_thread_supervision.sh (Gate #23:
+ * Byte-parity C23 port of tools/lint/lintc/gate_thread_supervision.c (Gate #23:
  * every long-running thread spawned via thread_registry_spawn( must be
  * SUPERVISED — its TU registers a liveness contract or the spawn line (or
  * the line above) carries a '// supervised:<child>' marker — MARKED-EXEMPT

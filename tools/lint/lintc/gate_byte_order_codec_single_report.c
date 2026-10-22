@@ -154,7 +154,7 @@ static int bo_write_baseline(const char *path, const struct bo_pathset *found)
             "#   zcl_write_u32_be/u64_be, zcl_read_u32_be/u64_be\n"
             "# then delete the line here. Adding a row is not a fix.\n"
             "# Regenerate: ZCL_LINT_MODE=UPDATE "
-            "tools/lint/check_byte_order_codec_single.sh\n",
+            "build/bin/z23-lint check-byte-order-codec-single\n",
             f) < 0)
         rc = die("z23-lint: write failed\n", "");
     for (int i = 0; rc == 0 && i < found->n; i++) {

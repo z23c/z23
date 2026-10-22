@@ -109,7 +109,7 @@ useful answer and is not the same as a bad topic.
 The leaf nests under `dev.agent` rather than becoming a new `dev` child
 because the top-level `dev` menu already renders 3045 of its 3072
 `ZCL_COMMAND_BRANCH_BUDGET` bytes; that budget is raised for nobody (see
-`tools/lint/check_describe_budget.sh`), and the same nesting precedent is
+`tools/lint/lintc/gate_describe_budget.c`), and the same nesting precedent is
 already recorded for `ops.debug.rom_seed` in
 [`../ROM_DELIVERY.md`](../ROM_DELIVERY.md). It also belongs there: this is a
 checkout question answered natively, next to `dev agent rules` and

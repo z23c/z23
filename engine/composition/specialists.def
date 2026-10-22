@@ -15,7 +15,7 @@
  *   test_groups   `|`-separated registered group ids the lane owns
  *   fact_kinds    comma-separated fact kinds the lane cares about
  *
- * tools/lint/check_specialists.sh is the price of writing this table: every
+ * tools/lint/lintc/gate_specialists.c is the price of writing this table: every
  * territory token must match a tracked file, every gate and test group must
  * exist, and the row count may not fall below the floor. Adding a row here
  * without a matching file, gate, or group is a false statement.

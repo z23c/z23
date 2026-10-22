@@ -27,7 +27,7 @@
  *                          `why` is the row's justification for a reader —
  *                          it is prose, and it is never an object.
  *
- * tools/lint/check_fleet_facts.sh is the price of writing this table: every
+ * tools/lint/lintc/gate_fleet_facts.c is the price of writing this table: every
  * subject and object must be a declared term, every path term must be a
  * tracked file, every relation and context must be declared, no row may
  * repeat another, and no declared term may go unused. Writing a row here

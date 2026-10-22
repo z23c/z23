@@ -54,7 +54,7 @@ SERVICES_RUNNING) are advanced through the **SYSINIT** declarative table
 succeed (fail-closed — a failed boundary returns a typed `zcl_result` and boot
 exits, instead of a silent forward-jump WARN). The deterministic
 (stage, order, name) run order is pinned by
-`tools/lint/check_sysinit_ordering.sh` against a golden file.
+`tools/lint/lintc/gate_tree_walk.c` against a golden file.
 
 - `BOOT_STAGE_DATADIR_LOCKED` — `boot_step_select_chain_and_datadir` (direct)
 - `BOOT_STAGE_CRYPTO_READY` — `boot_step_init_crypto_and_state` (direct)

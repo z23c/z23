@@ -45,7 +45,7 @@
  * one of them peer-verifiable, that row's verification changes and its
  * count can rise in the same edit.
  *
- * tools/lint/check_fleet_airship_rules.sh is the price of writing here:
+ * tools/lint/lintc/gate_fleet_airship_rules.c is the price of writing here:
  * every rule must name a declared fact and a declared asset, a rule that
  * pays anything must name a PEER_VERIFIED fact and carry OBSERVED, a rule
  * on a SELF_REPORTED fact must pay zero and carry DOCTRINE, no row may

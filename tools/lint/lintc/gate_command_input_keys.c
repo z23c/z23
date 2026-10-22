@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate check-command-input-keys, the C23 port of
- * tools/lint/check_command_input_keys.sh. The kernel rejects any input key a
+ * tools/lint/lintc/gate_command_input_keys_run.c. The kernel rejects any input key a
  * command leaf does not declare, so a key a handler reads but the .def omits
  * is unreachable from the real CLI. The gate reads the leaf macros in the
  * .def files and the C that defines their handlers, follows calls across the

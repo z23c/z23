@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-hex-codec-single of the C23 lint runtime,
- * replacing tools/lint/check_hex_codec_single.sh. RATCHET gate (file
+ * replacing tools/lint/lintc/gate_hex_codec_single.c. RATCHET gate (file
  * granularity, shrink-only baseline): base-16 encode/decode of a byte
  * buffer must live only in platform/modules/base/include/base/hex.h. A
  * file elsewhere is flagged when it carries an ENCODER shape (a hex-digit

@@ -3,7 +3,7 @@
  * Proves what a fleet node's facts are worth.
  *
  * engine/composition/fleet_airship_rules.def says which fact earns which
- * in-game asset, and tools/lint/check_fleet_airship_rules.sh refuses a table
+ * in-game asset, and tools/lint/lintc/gate_fleet_airship_rules.c refuses a table
  * that pays for a self-reported fact. That gate reads the file; THIS reads
  * the compiled table and the function the roster calls.
  *

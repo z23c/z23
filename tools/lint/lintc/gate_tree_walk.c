@@ -212,7 +212,7 @@ static int si_cmp_golden(const char *der)
     if (strcmp(gold, der) != 0) {
         fprintf(stderr, "--- %s\n%s+++ derived\n%s", k_si_gold, gold, der);
         fputs("[check_sysinit_ordering] FAIL — sysinit boundary order drifted from the golden.\n"
-              "[check_sysinit_ordering] If intentional: tools/lint/check_sysinit_ordering.sh --update\n",
+              "[check_sysinit_ordering] If intentional: build/bin/z23-lint check-sysinit-ordering --update\n",
               stderr);
         return 1;
     }
@@ -263,7 +263,7 @@ int check_sysinit_ordering_selftest(void)
     return st_ok(bad, "check_sysinit_ordering selftest: OK\n");
 }
 static const char k_clock_script[] =
-    "tools/lint/check_no_raw_clock_outside_platform.sh";
+    "build/bin/z23-lint check-no-raw-clock-outside-platform";
 
 struct clock_acc { regex_t *re; char *buf; size_t cap, used;
                    int (*keep)(const char *, const char *); int raw; };

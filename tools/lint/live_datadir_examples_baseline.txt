@@ -6,7 +6,7 @@
 # Format: <path> <count>.  COUNTS MAY ONLY SHRINK.
 # Fix a row by adding --datadir=/tmp/<fixture> to the example.
 # Trailing per-row comments are hand analysis; regeneration keeps them.
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_live_datadir_isolation.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-live-datadir-isolation
 docs/cookbook/12_sovereign_release.md 8   # zcode release/identity/epoch examples; a cookbook is copy-paste by design.
 docs/RUNBOOK.md 2   # `core wallet restore` — operator doc, plausibly aimed at a real node ON PURPOSE. Decide before "fixing".
 docs/dev/SERVICES.md 1   # `app service access <name>` — THE command that ran the boot ceremony on the live node.db. Highest priority row.

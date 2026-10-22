@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-no-unattended-publish of the C23 lint
- * runtime, replacing tools/lint/check_no_unattended_publish.sh. HARD gate,
+ * runtime, replacing tools/lint/lintc/gate_no_unattended_publish.c. HARD gate,
  * closed allowlist: no tracked shell script/systemd unit, and no native
  * leaf under tools/command/ or tools/dev/ (a .c file there), may reach
  * `git push` or
@@ -47,7 +47,7 @@ static const struct { const char *path; const char *reason; } k_nup_allow[] = {
       "lint fixture: the forbidden string is the input it tests" },
     { "tools/scripts/check_stable_publish_containment.sh",
       "lint fixture: the forbidden string is the input it tests" },
-    { "tools/lint/check_no_unattended_publish.sh",
+    { "tools/lint/lintc/gate_no_unattended_publish.c",
       "this gate; a gate exempt from itself is a place to hide, so it is "
       "listed rather than skipped" },
     { "tools/command/native_dev_land.c",

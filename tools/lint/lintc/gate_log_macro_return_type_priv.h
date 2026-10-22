@@ -2,7 +2,7 @@
  *
  * purpose: shared declarations for check-log-macro-return-type
  * (gate_log_macro_return_type.c and gate_log_macro_return_type_selftest.c) —
- * the C23 port of tools/lint/check_log_macro_return_type.sh.
+ * the C23 port of tools/lint/lintc/gate_log_macro_return_type.c.
  */
 #ifndef GATE_LOG_MACRO_RETURN_TYPE_PRIV_H
 #define GATE_LOG_MACRO_RETURN_TYPE_PRIV_H

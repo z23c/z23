@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: C23 lint gate family — port of
- * tools/lint/check_no_real_clock_test_deadline.sh (check-no-real-clock-
+ * tools/lint/lintc/gate_no_real_clock_test_deadline.c (check-no-real-clock-
  * test-deadline). Refuses, in tests/harness/src/ *.c sources, an
  * ASSERT/EXPECT/REQUIRE/ *CHECK() whose balanced-paren argument text calls
  * a real-clock reader and computes a difference (or calls difftime()), or

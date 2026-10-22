@@ -73,7 +73,7 @@ TL_LEAF(services, progress_undeclared_count, TLC_I64, TFU_GAUGE, TLV_NORMAL,
     "detection. Detection is OFF for each of them, so nobody would notice if "
     "they stopped achieving anything. This is shrink-only debt with no healthy "
     "absolute value: compare it against the floor in "
-    "tools/lint/check_supervisor_progress_declared.sh, which may only go down",
+    "tools/lint/lintc/gate_supervisor_progress_declared.c, which may only go down",
     "", "")
 
 TL_LEAF(services, children_no_results, TLC_I64, TFU_GAUGE, TLV_NORMAL,

@@ -78,7 +78,7 @@ int test_health_rollup(void)
      * rollup call: datadir-reading dumpers resolve paths through
      * diag_datadir(), and an empty datadir falls back to the default live
      * datadir under $HOME (not spelled out here:
-     * tools/lint/check_live_datadir_isolation.sh counts the literal string
+     * tools/lint/lintc/gate_live_datadir_isolation.c counts the literal string
      * even inside a comment). main_state stays NULL. */
     diagnostics_controller_set_state(NULL, dir);
 

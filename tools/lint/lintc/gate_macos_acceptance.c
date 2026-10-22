@@ -7,7 +7,7 @@
  * gate_macos_acceptance_parse.c holds the matrix/registry text parser;
  * gate_macos_acceptance_selftest.c holds --selftest.
  *
- * Byte-parity C23 port of tools/lint/check_macos_acceptance.sh's check_root
+ * Byte-parity C23 port of tools/lint/lintc/gate_macos_acceptance.c's check_root
  * — the STATIC half of the macOS acceptance contract, run for real; the
  * NATIVE half (tools/scripts/macos_acceptance.sh --run, which builds and
  * executes the derived test groups on a darwin-arm64 host) is untouched

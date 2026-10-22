@@ -183,7 +183,7 @@ static enum fxg_opt fxg_opt_of_token(const uint8_t *s, size_t n,
 /* Reads a little-endian u32 at *p via the canonical codec
  * (platform/modules/base/include/base/serialize_le.h: zcl_read_u32_le is
  * the one place this repository decodes a fixed-width byte-order field --
- * see tools/lint/check_byte_order_codec_single.sh), advancing it past the
+ * see tools/lint/lintc/gate_byte_order_codec_single_report.c), advancing it past the
  * 4 bytes, if that many remain before `end`; leaves *p unmoved and returns
  * false on truncation. */
 static bool fxg_take_u32(const uint8_t **p, const uint8_t *end, uint32_t *v)

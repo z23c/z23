@@ -9,7 +9,7 @@
 #   zcl_write_i32_le/i64_le, zcl_read_i32_le/i64_le
 #   zcl_write_u32_be/u64_be, zcl_read_u32_be/u64_be
 # then delete the line here. Adding a row is not a fix.
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_byte_order_codec_single.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-byte-order-codec-single
 engine/controllers/src/legacy_import_scan.c
 engine/controllers/src/snapshot_controller_txindex.c
 engine/jobs/src/address_index.c

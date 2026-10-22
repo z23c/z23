@@ -408,7 +408,7 @@ static int at_check_roots(struct at_acc *a, FILE *err, int *fail)
     if (rc == 0)
         rc = at_say(err, "check-architecture-tree: place the new entry under its owning authority,\n");
     if (rc == 0)
-        rc = at_say(err, "check-architecture-tree: or declare it in tools/lint/check_architecture_tree.sh\n");
+        rc = at_say(err, "check-architecture-tree: or declare it in build/bin/z23-lint check-architecture-tree\n");
     if (rc == 0)
         rc = at_diff(err, &exp, &a->roots);
     return rc;

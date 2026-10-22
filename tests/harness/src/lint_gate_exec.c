@@ -85,6 +85,24 @@ static void epoch_selftest_progress_channel(const char *script_rel)
         close(progress_fd);
 }
 
+/* Runs a gate rel: a script path, or "<binary> <subcommand>" for a lintc gate
+ * exec'd as `z23-lint check-X` (no shell shim). Splits the buffer in place;
+ * only ever called in the forked child, so the parent copy is untouched. */
+void gate_exec(char *rel, const char *arg)
+{
+    char *sub = strchr(rel, ' ');
+    if (sub != NULL)
+        *sub++ = '\0';
+    if (sub != NULL && arg != NULL)
+        execl(rel, rel, sub, arg, (char *)NULL);
+    else if (sub != NULL)
+        execl(rel, rel, sub, (char *)NULL);
+    else if (arg != NULL)
+        execl(rel, rel, arg, (char *)NULL);
+    else
+        execl(rel, rel, (char *)NULL);
+}
+
 /* Generalized gate-script runner: fork/exec the script at repo-relative
  * path `script_rel`, optionally with ZCL_LINT_MODE set to `mode` (NULL to
  * leave unset) and optionally one argv word `arg` (NULL for none).
@@ -133,9 +151,9 @@ int run_gate_script_arg(const char *script_rel, const char *mode,
         if (mode)
             (void)setenv("ZCL_LINT_MODE", mode, 1);
         if (arg)
-            execl(script, script, arg, (char *)NULL);
+            gate_exec(script, arg);
         else
-            execl(script, script, (char *)NULL);
+            gate_exec(script, NULL);
         _exit(127);
     }
 
@@ -217,7 +235,7 @@ int run_gate_script_with_worker_files(const char *script_rel,
             (void)setenv("ZCL_LINT_MODE", mode, 1);
         if (worker_files_rel)
             (void)setenv("ZCL_SUPERVISOR_WORKER_FILES", worker_abs, 1);
-        execl(script, script, (char *)NULL);
+        gate_exec(script, NULL);
         _exit(127);
     }
 
@@ -277,7 +295,7 @@ int run_gate_script_with_env(const char *script_rel,
         }
         if (env_name && env_value)
             (void)setenv(env_name, env_value, 1);
-        execl(script, script, (char *)NULL);
+        gate_exec(script, NULL);
         _exit(127);
     }
 
@@ -341,7 +359,7 @@ int run_gate_script_with_env2(const char *script_rel,
             (void)setenv(env_name1, env_value1, 1);
         if (env_name2 && env_value2)
             (void)setenv(env_name2, env_value2, 1);
-        execl(script, script, (char *)NULL);
+        gate_exec(script, NULL);
         _exit(127);
     }
 
@@ -374,7 +392,7 @@ static void gate_envv_child(const char *script, const char *out_path,
     for (size_t i = 0; i < n; i++)
         if (names[i] && values[i])
             (void)setenv(names[i], values[i], 1);
-    execl(script, script, (char *)NULL);
+    gate_exec(script, NULL);
     _exit(127);
 }
 
@@ -500,7 +518,7 @@ int run_gate_script_watched(const char *script_rel, int max_silent_secs,
             (void)dup2(fd, STDERR_FILENO);
             close(fd);
         }
-        execl(script, script, (char *)NULL);
+        gate_exec(script, NULL);
         _exit(127);
     }
     (void)setpgid(pid, pid);  /* race-free: both sides set it */

@@ -1,7 +1,7 @@
 # check_silent_bool_errors RATCHET baseline (shrink-only).
 # Stable key = <relpath>::<guarded_call>. A swallowed call failure:
 #   if (!call(...)) return false;   with no LOG_* and no // raw-return-ok:
-# Regenerate after fixing some: ZCL_LINT_MODE=UPDATE ./tools/lint/check_silent_bool_errors.sh
+# Regenerate after fixing some: ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-silent-errors-bool
 engine/jobs/src/header_admit_stage.c::stage_cursor_read_or_zero
 engine/reducer/jobs/src/reducer_frontier.c::cursor_at
 engine/reducer/jobs/src/reducer_frontier.c::log_ok_at

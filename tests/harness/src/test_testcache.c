@@ -2231,7 +2231,7 @@ static int tc_rail_pin_refused(struct testcache *tc)
         "test_codeindex",        /* execs make */
         "test_codeindex_incremental", /* popen()s two tools/ scripts */
         "test_dev_proof_signer", /* rail: self re-exec of the test image */
-        "test_engine",           /* system() runs tools/lint/check_no_api_keys.sh */
+        "test_engine",           /* system() runs build/bin/z23-lint check-no-api-keys */
         "test_p2_invariant_check", /* zcl_spawn_* exec of the checker: denylist */
         "test_sem_replay",       /* rail: execs make (the delegated tool build) */
         "test_test_group_selector", /* popen() re-execs the test image */

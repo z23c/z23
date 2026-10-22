@@ -409,7 +409,7 @@ assert green).
 
   A baselined file with no sites left is a FAILURE, not a pass: a stale row
   rusts the ratchet shut at a number the next regression can hide under.
-  Impl: `tools/lint/check_no_runtime_abort.sh`, with a mandatory `--selftest`
+  Impl: `tools/lint/lintc/gate_no_runtime_abort.c`, with a mandatory `--selftest`
   whose `_Static_assert` case is a negative control.
 
 - **Gate #11: `check-model-validation`** (HARD) — every `engine/models/src/*.c`
@@ -445,7 +445,7 @@ assert green).
   rows — a query builder cannot express `CREATE TABLE` — so those are
   expected to stay. The builder's own three files are excluded; flagging the
   rail for the keywords it emits would make the gate unfixable. Impl:
-  `tools/lint/check_model_sql_literals.sh`, with a mandatory `--selftest`
+  `tools/lint/lintc/gate_model_sql_literals.c`, with a mandatory `--selftest`
   that plants each statement shape, a stale row, and a converted-file
   regression and requires a rejection on every one.
   **Comments are stripped before matching** (`tools/lint/strip_c_comments.awk`,
@@ -724,7 +724,7 @@ assert green).
   the foundation for safe hotload AND signed off-chain contracts; the original
   live instance is `engine/composition/src/consensus_state_replay_receipt.c` (the sovereign-
   cure ACTIVATE gate, intentionally not rewired). Impl:
-  `tools/lint/check_privileged_transition_receipt.sh`.
+  `tools/lint/lintc/gate_build_config.c`.
 
 - **Gate #50: `check-telemetry-ontology`** (HARD) — every network telemetry
   field a covered `dumpstate` function emits must carry a machine-readable
@@ -840,20 +840,20 @@ assert green).
 ### Framework refactor gates (#18–#22)
 
 - **Gate #18: `check-framework-shape`** (RATCHET, was WARN) —
-  `tools/lint/framework_shape_check.sh`. Every `.c` under `app/` must live in
+  `tools/lint/lintc/gate_framework_shape.c`. Every `.c` under `app/` must live in
   one shape folder: `controllers`, `services`, `models`, `jobs`, `supervisors`,
   `conditions`, `events`, `views`. Baseline
   `tools/lint/framework_shape_allowlist.txt` (empty). Fix: move the file or
   split mixed responsibilities.
 
 - **Gate #19: `check-no-raw-clock-outside-platform`** (FAIL) —
-  `tools/lint/check_no_raw_clock_outside_platform.sh`. Bans direct
+  `tools/lint/lintc/gate_tree_walk.c`. Bans direct
   `clock_gettime(`, `time(NULL)`, `getrandom(` outside `platform/modules/platform/`. Route
   wall-clock/monotonic through the platform clock and entropy through platform
   RNG. Override `// platform-ok` on the line.
 
 - **Gate: `check-no-shellouts`** (FAIL) —
-  `tools/lint/check_no_shellouts.sh`. Bans `system(`, `popen(`, `execlp(` in
+  `tools/lint/lintc/gate_tree_walk.c`. Bans `system(`, `popen(`, `execlp(` in
   the resident node binary's own code (`app/`, `lib/` excl. `tests/harness/include/test/`,
   `src/`, `config/`). Every shell-out has been migrated onto the two in-tree
   primitives — `platform/modules/util` `file_tree_ops` (`zcl_tree_copy` / `zcl_tree_remove`,
@@ -865,7 +865,7 @@ assert green).
   a documented, reviewed exception.
 
 - **Gate: `check-no-api-keys`** (FAIL) —
-  `tools/lint/check_no_api_keys.sh`. No API credential is committed to this
+  `tools/lint/lintc/gate_git_scan_a.c`. No API credential is committed to this
   tree. `tools/engine_unit.c` dispatches work to a paid API, so this tree now
   has a reason to hold a key near it, and a key that lands in a tracked file is
   spent: it is in the history, on every clone, and on every mirror. The rule
@@ -884,7 +884,7 @@ assert green).
   gate to fail on it, so it is a gate that has been seen to fail.
 
 - **Gate: `check-no-writer-below-sealed-frontier`** (FAIL) —
-  `tools/lint/check_no_writer_below_sealed_frontier.sh`. The North Star's
+  `tools/lint/lintc/gate_tree_walk.c`. The North Star's
   single-writer-per-frontier invariant
   (`docs/commons/ARCHITECTURE_NORTH_STAR.md` invariant 1) made mechanical for the
   sealed ROM segment store (`engine/modules/storage/src/chain_segment.c`), which is
@@ -917,7 +917,7 @@ assert green).
   copy, which cannot route through a non-signal-safe shim.
 
 - **Gate #20: `check-no-raw-sqlite-in-controllers`** (RATCHET, was WARN) —
-  `tools/lint/check_no_raw_sqlite_in_controllers.sh`. Bans
+  `tools/lint/lintc/gate_ratchet_ports.c`. Bans
   `sqlite3_prepare_v2(` / `sqlite3_exec(` in `engine/controllers/`. Baseline
   `tools/lint/no_raw_sqlite_in_controllers_baseline.txt` (may only shrink). Fix:
   move reads behind projections/models, writes through the AR lifecycle.
@@ -939,13 +939,13 @@ assert green).
   `// model-columns-ok: <reason>`.
 
 - **Gate #21: `check-supervisor-domain`** (FAIL) —
-  `tools/lint/check_supervisor_domain.sh`. Production `supervisor_register(`
+  `tools/lint/lintc/gate_supervisor_domain.c`. Production `supervisor_register(`
   calls under `app/`, `config/`, `lib/` must use
   `supervisor_register_in_domain(...)` (`chain`, `net`, `mempool`, `wallet`,
   `feature`, `onion`, `op`). Deliberate root child: `// supervisor-root-ok:<tag>`.
 
 - **Gate #22: `check-framework-filename-suffix`** (FAIL/HARD) —
-  `tools/lint/check_framework_filename_suffix.sh`. No `.c` under a shape folder
+  `tools/lint/lintc/gate_git_scan_a.c`. No `.c` under a shape folder
   may end in a DIFFERENT shape's suffix (the eight: `controller`, `service`,
   `model`, `view`, `job`, `supervisor`, `condition`, `event`). A file may keep
   its own folder's suffix or a bare entity name (`models/block.c`); only a <!-- doc-path-ok: suffix example, not a path -->
@@ -954,7 +954,7 @@ assert green).
   (`models/file_service.c`), add `// suffix-ok:<tag>`. <!-- doc-path-ok: suffix example, not a path -->
 
 - **Gate #23: `check-thread-supervision`** (RATCHET) —
-  `tools/lint/check_thread_supervision.sh`. Universalizes Gate #16 from the
+  `tools/lint/lintc/gate_thread_supervision.c`. Universalizes Gate #16 from the
   services dir to EVERY `thread_registry_spawn(` call site under `app/`,
   `lib/`, `config/`. Each spawned long-running thread must be accounted for:
   (a) SUPERVISED — its TU registers a liveness contract
@@ -1075,7 +1075,7 @@ current green tree.
 | **`check-windows-acceptance-guard`** | HARD | The off-Windows guard SHAPE of every tests/-rooted Windows acceptance TU: a file that defines `main()` must open with `#if defined(_WIN32)` as its first non-comment line and close with an `#else` arm holding `typedef int <name>_not_built;` before the final `#endif` (the placeholder is load-bearing — an empty TU trips `-Werror=pedantic`), or define no `main()` at all. Exists because an unguarded `int main(void)` in a Windows acceptance TU under `tests/harness/src/` breaks the build: the harness sources link into every Linux test binary, so **no** test group could link (`multiple definition of 'main'`) while every gate stayed green — the cross-compile gates open the guard on Windows where everything looks fine, and the reconcile gate checks catalog membership, not shape. No compiler needed; it is a lexical fact, checked over the union of the `tests/harness/src/*_windows_acceptance.c` glob and every `ZCL_WINDOWS_ACCEPTANCE_*_SOURCES` row under `tests/` (the platform-module test programs do not ride the harness link). A missing catalog, a catalog naming no tests/ sources, a row naming a file not on disk, or a scan below the floor of 8 is exit 2 (UNPROVEN), never a clean pass. In `lint-fast` because that is what the push hook runs. Seven-case `--self-test` (fixtures under `$HOME/.local/state/zclassic23/scratch`, never `/tmp`) proves the exact regression shape, the tailless guard, a glob-caught stray, the no-main arm, and the floor. | `tools/lint/check_windows_acceptance_guard.sh` |
 | **`check-windows-cross-syntax`** | RATCHET | Syntax-only MinGW sweep of every `.c` containing `_WIN32` under all node source roots, including `platform/adapters/`, `engine/application/`, `src/`, and the release-visible `tools/command/` adapters that were previously omitted. Standalone/dev-only tools retain their own build targets. `tests/harness/include/test/*` inputs receive the exact test-only `-include test/windows_compat.h` selected by `ZCL_TEST_WINDOWS_COMPAT_FLAGS`; production inputs never receive that shim. The file set is self-maintaining and the shrink-only baseline is empty. Missing generated command or unbuilt OpenSSL headers remain named skips only under their documented conditions. Optional contributors without MinGW receive an explicit `SKIP`, not a pass; acceptance/pre-push/hosted CI require the compiler with `ZCL_REQUIRE_MINGW=1` and fail before compiling zero inputs. `--self-test` plants a Windows-only undeclared identifier. |
 | **`check-platform-header-guards`** | HARD | A platform-only system header may not be `#include`d outside a conditional whose condition NAMES that platform. Exists because a change shipped `engine/modules/hotswap/src/hotswap_macho_probe.c` including `<mach-o/fat.h>`, `<mach-o/loader.h>`, `<mach-o/nlist.h>` and `<mach-o/swap.h>` with no `__APPLE__` guard at all: every Linux build that reached that translation unit died at `fatal error: mach-o/fat.h: No such file or directory`, `main` was red for a day, and nothing said so — the tree had four Windows gates and zero for Darwin, and the build-epoch object cache still held pre-commit objects, so only an unrelated epoch rotation surfaced it. Unlike every Windows gate this one needs **no cross-compiler**: an unguarded platform header is a lexical fact, so it closes the class in all three directions (Apple, Win32, Linux) on whatever host runs `make lint`, in ~2.5 s (~2.8 s including its own self-test) over `lib/` `app/` `config/` `core/` `domain/` `platform/ports/`. The header table is **derived, not remembered** — every angle-bracket include in the tracked tree was enumerated and classified, and the rows deliberately NOT in it (`<sys/syscall.h>` and `<execinfo.h>`, which Darwin also ships; `<immintrin.h>` / `<arm_neon.h>`, which key on the ARCH and not the OS) are written down in the script with the reason. Acceptance is decided by a real preprocessor-conditional depth tracker, never a grep: a grep for "does this file mention `__APPLE__`" passes the exact macho defect, because the file did mention it — in a block that had already closed. `#else` inverts a frame (the `#else` of `#ifdef __APPLE__` is the *non*-Apple branch; the `#else` of `#ifndef __APPLE__` is the Apple one), `#elif` replaces it, comments are stripped so a header named in prose is not a finding, backslash continuations are joined, and `__has_include(<H>)` around `#include <H>` is accepted as the stronger guard it is. **Nothing is exempt by a hand-kept list in the gate**: the two platform-EXCLUSIVE file sets are parsed out of the build's own text — the `LIB_SRCS` per-host `filter-out` branches in `Makefile` (a source dropped on every host but one is exclusive to that one) and the `ZCL_WINDOWS_ACCEPTANCE_*_SOURCES` rows of `platform/modules/platform/tests/windows_acceptance.mk` — and an exemption is per-PLATFORM, so a Linux-exclusive source is still graded for Apple headers. Either parse coming back empty is a REFUSAL (exit 2), never a wider or narrower scan. **Baseline: none, and none is wanted.** The tree reached zero by deleting one dead `#ifdef HAVE_SYS_PRCTL_H` block in `platform/modules/util/src/util.c` that included a header nothing used, keyed on a macro defined nowhere in the repo. `--self-test` plants twelve fixtures OUTSIDE the repository — a `.c` file inside it that spells the Windows macro would silently enlist itself in `check-windows-cross-syntax`, whose file set is a `grep -l` for that token — and proves both directions: unguarded, wrong-platform-guarded, `#else`-side and after-an-already-closed-block includes go red; correctly guarded, `#ifndef`/`#else`, comment-only, `__has_include` and build-exclusive ones pass. | `tools/lint/check_platform_header_guards.sh` |
-| **`check-macos-acceptance`** | HARD | The **static** half of `tools/scripts/macos_acceptance.sh`, run for real. `engine/composition/platform/macos_capabilities.def` is the closed declarative darwin-arm64 truth: 13 capability rows each carry a legal state, typed reason, and registered evidence, while eight exact `ZCL_MACOS_REQUIRED_TEST(...)` rows pin the documented baseline groups not already selected by capability evidence. Their sorted union must equal the pinned, sorted set of exactly 43 macOS evidence groups—not merely retain its cardinality—so deletion, unknown-group substitution, and same-size registered substitutions in either half fail. The Make reachability check structurally requires the complete Mac runtime prerequisites (`z23`, `z23-package-verify`, `z23-acme`) and the tabbed `macos_acceptance.sh --run` recipe; a prose mention cannot satisfy it. The native script must also reach the canonical release cutter and execute the stripped packaged node's node-free code guide. A degraded capability still names evidence—local package acceptance does not imply installation, notarization, publication, or sync. **UNOBSERVED contract:** the native leg—43 exact groups with zero skips followed by an audited/checksummed temporary `darwin-arm64` runtime cut and packaged-node execution—is reported `UNOBSERVED`, in that word, on Linux; `make macos-acceptance` closes it on an arm64 Mac. The static self-test drives 22 positive/adversarial fixtures through the shipped validator and reachability rails. | `tools/lint/check_macos_acceptance.sh` |
+| **`check-macos-acceptance`** | HARD | The **static** half of `tools/scripts/macos_acceptance.sh`, run for real. `engine/composition/platform/macos_capabilities.def` is the closed declarative darwin-arm64 truth: 13 capability rows each carry a legal state, typed reason, and registered evidence, while eight exact `ZCL_MACOS_REQUIRED_TEST(...)` rows pin the documented baseline groups not already selected by capability evidence. Their sorted union must equal the pinned, sorted set of exactly 43 macOS evidence groups—not merely retain its cardinality—so deletion, unknown-group substitution, and same-size registered substitutions in either half fail. The Make reachability check structurally requires the complete Mac runtime prerequisites (`z23`, `z23-package-verify`, `z23-acme`) and the tabbed `macos_acceptance.sh --run` recipe; a prose mention cannot satisfy it. The native script must also reach the canonical release cutter and execute the stripped packaged node's node-free code guide. A degraded capability still names evidence—local package acceptance does not imply installation, notarization, publication, or sync. **UNOBSERVED contract:** the native leg—43 exact groups with zero skips followed by an audited/checksummed temporary `darwin-arm64` runtime cut and packaged-node execution—is reported `UNOBSERVED`, in that word, on Linux; `make macos-acceptance` closes it on an arm64 Mac. The static self-test drives 22 positive/adversarial fixtures through the shipped validator and reachability rails. | `tools/lint/lintc/gate_macos_acceptance.c` |
 | **`check-app-bundle-reproducible`** | HARD | The macOS `.app` bundler is reproducible **and** its product actually launches. `tools/scripts/make_app_bundle.sh` wraps a built tool in the minimal launchable bundle and ad-hoc signs it, because arm64 macOS refuses to execute an unsigned binary at all — so "no signature" is not available and "whatever `codesign` did this time" is not reproducible. Two failures rot silently here and neither is visible by reading the script: `codesign` stamps a trusted timestamp unless it is disabled, and any input-dependent field drifting between runs makes two bundles of identical input differ; and a bundle whose signature does not verify is **SIGKILLed by the kernel**, so a smoke test that only checks an exit status cannot distinguish "ran and declined" from "never ran at all". The gate builds the subject tool twice byte-identically first (otherwise the comparison below would be over different inputs, and it says so rather than passing), then asserts the exact printed output *and* the exit status of the bundled executable. |
 | **`check-result-discard`** | RATCHET | Shrink-only ratchet over `(void)` casts that discard a `struct zcl_result`, baseline `tools/lint/result_discard_baseline.txt`. Exists because C23 lets an explicit cast suppress `[[nodiscard]]`: annotating the type (done — see `platform/modules/util/include/util/result.h`) fences off NEW silent discards but cannot excavate the existing population, measured at 94 cast discards versus ~67 bare ones. Fix a site with `ZCL_IGNORE_RESULT(expr, "why the failure is safe to drop")`, which requires a non-empty reason at compile time via `static_assert` — the point being to make the discard *expressible* rather than merely tolerated. |
 | **`check-no-warning-suppression`** | HARD | A blanket warning suppression may not sit on a build surface unexplained. `-Wno-unused-result` and `-Wno-stringop-overflow` — in flag form, or as `#pragma GCC diagnostic ignored` — fail on any tracked makefile, `*.c`/`*.h`, or `*.sh` unless the line, or the line above it, carries `suppression-ok: <reason>` with a non-empty reason. `-Wno-unused-result` matters most: it is the SAME diagnostic GCC and Clang use to report `[[nodiscard]]`, so leaving it on silently voids the result-type discipline the repository is built around — a result type could be annotated and nothing would change. Both flags entered in the first commit as copy-forward defaults and had spread to seven compile rules; `-Wno-unused-result` was deleted outright on 2026-09-30 after its last measured site set (an ignored `setuid`, a rollback `ftruncate`, an `fgets`, an advisory `symlink`, five pre-exit report writes) was fixed or given a reasoned discard — the diagnostic now fires everywhere, so `[[nodiscard]]` and libc `warn_unused_result` are both live. `-Wno-stringop-overflow` keeps one named definition (`ZCL_WARN_STRINGOP_OVERFLOW`) carrying the reason and the command to re-derive its blocking sites. `vendor/` (third-party recipes) and `.clangd` (editor diagnostics, never emitted code) are out of scope. Hermetic detector fixtures run BEFORE the tree scan on every invocation, so the gate cannot report clean while its matcher is broken, and an empty scan set exits 2. `--self-test`. No baseline. |
@@ -1542,7 +1542,7 @@ plants each defect class in a throwaway fixture tree and asserts the gate
 rejects it *and names the offender*, with a correctly-wired fixture as the
 positive control.
 
-`check-no-stray-root-files` (`tools/lint/check_no_stray_root_files.sh`) keeps
+`check-no-stray-root-files` (`tools/lint/lintc/gate_git_scan_a.c`) keeps
 the repository root a curated list. It compares the root's depth-1 entries
 against git's tracked top-level set (derived, so a folder move needs no edit)
 plus a short allowlist of generated or developer-local entries — `build/`,

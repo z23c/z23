@@ -56,8 +56,8 @@ to the superseded generation, the loader may unmap its module.
 | Swappable allowlist (ONE row per file) | `engine/composition/hotswap_swappable.def` |
 | Stateless multi-TU island membership | `engine/composition/hotswap_islands.def` |
 | Probe leaf per file | `engine/composition/hotswap_eligible.def` |
-| Shape + READY-read-only lint, self-tested | `tools/lint/check_hotswap_swappable_shape.sh`, `tests/harness/src/test_make_lint_gates.c` |
-| Static-state lint over BOTH manifests | `tools/lint/check_hotswap_static_state.sh` |
+| Shape + READY-read-only lint, self-tested | `tools/lint/lintc/gate_hotswap_swappable_shape.c`, `tests/harness/src/test_make_lint_gates.c` |
+| Static-state lint over BOTH manifests | `tools/lint/lintc/gate_hotswap_manifests.c` |
 | Per-file build | `make hotswap-module-so FILE=<tu.c>` (or `HANDLER=<leaf>`) |
 | Resident no-Make compiler/linker authority | `tools/dev/devloop_hotswap_build.c` |
 | 20-edit latency gate | `tools/dev/hotswap-resident-bench.sh` |
@@ -564,7 +564,7 @@ safety comes from the confinement built up over this whole document —
 shape-leaf translation units only, READY read-only leaves, probe-before-publish,
 all-or-nothing publish. If a digest manifest ever becomes the *reason* to
 relax any of those, it has made the system strictly worse, not better.
-tools/lint/check_hotswap_package_receipt_is_not_authority.sh is the gate
+tools/lint/lintc/gate_hotswap_package_receipt_is_not_authority.c is the gate
 that enforces this: a package receipt may describe an artifact, and may never
 be read by the loader as a reason to accept one.
 

@@ -7,7 +7,7 @@ execution.** There is no new listener, no new dispatch path, and no wire code
 that runs anything. What lands with this document is the decision table
 [`engine/composition/remote_command_classes.def`](../../engine/composition/remote_command_classes.def)
 and its gate
-[`tools/lint/check_remote_command_classes.sh`](../../tools/lint/check_remote_command_classes.sh).
+[`tools/lint/lintc/gate_remote_command_classes.c`](../../tools/lint/lintc/gate_remote_command_classes.c).
 The transport is the next increment and needs review first. See
 [What this design does NOT do](#what-this-design-does-not-do-in-its-first-increment).
 
@@ -317,7 +317,7 @@ The counts, the per-class arguments and the per-leaf reasons live in
 rather than being restated here, so there is one place to read and one place to
 change.
 
-[`tools/lint/check_remote_command_classes.sh`](../../tools/lint/check_remote_command_classes.sh)
+[`tools/lint/lintc/gate_remote_command_classes.c`](../../tools/lint/lintc/gate_remote_command_classes.c)
 (wired into `make lint`) asserts six things, all fail-closed: every registry
 leaf has a row; every row names a live leaf; no leaf is classified twice; every
 class token is known; every `read_only` or `owner_capability` row states a

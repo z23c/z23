@@ -1088,7 +1088,7 @@ static int c_enter_socket(void)
  * node opens peer sockets + spawns threads) while still denying execve and the
  * escape family. These children prove that distinction. The record-registration
  * half of the wiring lives in engine/composition/src/boot.c and is pinned by
- * tools/lint/check_sandbox_wired.sh (a full boot in a unit test is
+ * tools/lint/lintc/gate_boot_wiring.c (a full boot in a unit test is
  * impractical). Multi-thread coverage is proven at the primitive level here:
  * seccomp TSYNC below, and the Landlock retrofit join
  * (os_sandbox_landlock_apply_to_self, tested above) — end-to-end proof that

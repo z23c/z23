@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Gate: check-hotswap-swappable-shape
- * Port of tools/lint/check_hotswap_swappable_shape.sh (now a shim). THE HARD
+ * Port of tools/lint/lintc/gate_hotswap_swappable_shape.c (now a shim). THE HARD
  * LINE for the REAL (activatable) Tier-1 hot-swap module ABI:
  * engine/composition/hotswap_swappable.def carries one row per swappable
  * source TU plus the space-separated set of command leaves that TU's module

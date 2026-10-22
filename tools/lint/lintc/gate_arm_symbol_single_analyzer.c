@@ -2,7 +2,7 @@
  *
  * check-arm-symbol-single family — the analyzer. A direct, line-oriented
  * port of the original shell gate's embedded awk program (write_analyzer()
- * in tools/lint/check_arm_symbol_single.sh): tracks brace depth (bdepth)
+ * in tools/lint/lintc/gate_arm_symbol_single.c): tracks brace depth (bdepth)
  * and paren depth (pdepth) through one file to find every top-level
  * function DEFINITION (a signature followed, eventually, by "{"), and
  * classifies each one's linkage (static vs. non-static) and whether its

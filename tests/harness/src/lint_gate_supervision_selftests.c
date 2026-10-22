@@ -29,7 +29,7 @@
  * touches the live tree/baseline: an unaccounted thread_registry_spawn trips
  * the gate; a baseline entry OR a // supervised: marker clears it; a stale
  * baseline entry (no matching uncovered spawn) trips it (shrink-only). */
-#define THREADSUP_SCRIPT_REL   "tools/lint/check_thread_supervision.sh"
+#define THREADSUP_SCRIPT_REL   "build/bin/z23-lint check-thread-supervision"
 #define THREADSUP_SCAN_DIR_REL "test-tmp/_threadsup_scan_dir_tmp"
 #define THREADSUP_KEEP_REL     "test-tmp/_threadsup_scan_dir_tmp/keep.c"
 #define THREADSUP_FIXTURE_REL  "test-tmp/_threadsup_scan_dir_tmp/_threadsup_probe_tmp.c"
@@ -861,8 +861,8 @@ static int arm_line_boundaries(void)
         "# z23-generated-artifact: zcl.generated_artifact.v1\n"
         "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
         "# asserts: multi_arm_definition(path,symbol)\n"
-        "# generated-by: tools/lint/check_arm_symbol_single.sh\n"
-        "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh\n") != 0)
+        "# generated-by: build/bin/z23-lint check-arm-symbol-single\n"
+        "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single\n") != 0)
         goto cleanup;
     /* 8191 spaces put both definitions beyond the defective copied prefix. */
     failures = arm_line_case(exe, dir, 8191 + strlen("int probe(void){return 0;}"),
@@ -965,8 +965,8 @@ static int arm_baseline_fixture(const char *dir, char path[PATH_MAX],
         "# z23-generated-artifact: zcl.generated_artifact.v1\n"
         "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
         "# asserts: multi_arm_definition(path,symbol)\n"
-        "# generated-by: tools/lint/check_arm_symbol_single.sh\n"
-        "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh\n"
+        "# generated-by: build/bin/z23-lint check-arm-symbol-single\n"
+        "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single\n"
         "%s\t%sX\n", rel, name);
     return n > 0 && n < 2048;
 }
@@ -1159,9 +1159,9 @@ int t_lint_gates_fail_loud_on_empty_scan(void)
     failures += meta_gate_empty_scan_trips(
         "tools/scripts/check_no_secret_printf.sh", "ZCL_SECRET_PRINTF_SCAN_DIRS", empty_dir);
     failures += meta_gate_empty_scan_trips(
-        "tools/lint/check_supervisor_domain.sh", "ZCL_SUPDOM_SCAN_ROOTS", empty_dir);
+        "build/bin/z23-lint check-supervisor-domain", "ZCL_SUPDOM_SCAN_ROOTS", empty_dir);
     failures += meta_gate_empty_scan_trips(
-        "tools/lint/check_thread_supervision.sh", "ZCL_THREADSUP_SCAN_ROOTS", empty_dir);
+        "build/bin/z23-lint check-thread-supervision", "ZCL_THREADSUP_SCAN_ROOTS", empty_dir);
     failures += meta_gate_empty_scan_trips(
         LONGFN_SCRIPT_REL, "ZCL_LONGFN_ENFORCED_ROOTS", empty_dir);
     failures += meta_gate_empty_scan_trips(

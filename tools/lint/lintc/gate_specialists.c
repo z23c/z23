@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-specialists lint gate of the C23 lint
- * runtime. Replaces tools/lint/check_specialists.sh: every SPECIALIST(...)
+ * runtime. Replaces tools/lint/lintc/gate_specialists.c: every SPECIALIST(...)
  * row in engine/composition/specialists.def must carry five strings (name,
  * territory, gates, test_groups, fact_kinds); every territory token must
  * match a tracked file, every gate token must be a real Makefile lint gate,

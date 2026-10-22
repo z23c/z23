@@ -15,7 +15,7 @@
  */
 
 /* ── check-supervisor-domain ─────────────────────────────────────────────
- * Byte-parity C23 port of tools/lint/check_supervisor_domain.sh (Gate #21:
+ * Byte-parity C23 port of tools/lint/lintc/gate_supervisor_domain.c (Gate #21:
  * production supervisor registration must specify a domain, plus the boot
  * background-worker lock-in on engine/composition/src/boot_*.c).
  *

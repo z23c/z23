@@ -334,7 +334,7 @@ typedef void (*api_route_contract_visit_fn)(
  * dot-def files, e.g. "core.status") that owns the same data/service this
  * route serves. When no native leaf owns it, this is "none:<short-reason>"
  * — never a guessed mapping. Checked by
- * tools/lint/check_route_command_parity.sh against
+ * tools/lint/lintc/gate_route_command_parity.c against
  * tools/lint/route_command_parity_baseline.txt. */
 struct api_resource_route {
     const char *method;

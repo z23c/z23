@@ -1,12 +1,12 @@
 # z23-generated-artifact: zcl.generated_artifact.v1
 # artifact-id: zcl.arm_symbol_single_baseline.v1
 # asserts: multi_arm_definition(path,symbol)
-# generated-by: tools/lint/check_arm_symbol_single.sh
-# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh
+# generated-by: build/bin/z23-lint check-arm-symbol-single
+# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single
 # check_arm_symbol_single baseline — <path>\t<function> pairs where a non-static
 # function is DEFINED more than once in one translation unit
 # (necessarily in disjoint preprocessor arms — see the header
-# comment in tools/lint/check_arm_symbol_single.sh for the defect class and its
+# comment in tools/lint/lintc/gate_arm_symbol_single.c for the defect class and its
 # limits). One pair per line, tab-separated. THE LIST MAY ONLY
 # SHRINK.
 #

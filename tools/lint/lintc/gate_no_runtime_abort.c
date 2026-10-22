@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: C23 lint gate — check-no-runtime-abort. Byte-parity port of
- * tools/lint/check_no_runtime_abort.sh (at 89fca9905): a shrink-only,
+ * tools/lint/lintc/gate_no_runtime_abort.c (at 89fca9905): a shrink-only,
  * per-file ratchet on RUNTIME assert()/abort() sites in network-reachable
  * code (assert() is LIVE in this build — -DNDEBUG is set only for the
  * vendored LevelDB compile). A site inside a comment or a string literal

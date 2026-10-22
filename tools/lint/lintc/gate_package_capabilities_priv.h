@@ -3,7 +3,7 @@
  * purpose: shared declarations for check-package-capabilities
  * (gate_package_capabilities.c, gate_package_capabilities_parse.c and
  * gate_package_capabilities_selftest.c) — the C23 port of
- * tools/lint/check_package_capabilities.sh.
+ * tools/lint/lintc/gate_package_capabilities.c.
  */
 #ifndef GATE_PACKAGE_CAPABILITIES_PRIV_H
 #define GATE_PACKAGE_CAPABILITIES_PRIV_H

@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-fleet-airship-rules (port of
- * tools/lint/check_fleet_airship_rules.sh, now a shim). No fleet node is
+ * tools/lint/lintc/gate_fleet_airship_rules.c, now a shim). No fleet node is
  * ever paid for a fact it reported about itself (HARD):
  * engine/composition/fleet_airship_rules.def maps a fact about a fleet
  * node to the in-game assets it earns; a row that pays out for a

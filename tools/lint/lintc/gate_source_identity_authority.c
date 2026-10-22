@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-source-identity-authority (port of
- * tools/lint/check_source_identity_authority.sh, now a shim). The JSON key
+ * tools/lint/lintc/gate_source_identity_authority.c, now a shim). The JSON key
  * "source_id_sha256" answers two different questions in this tree — Q1
  * "what source tree was this BINARY built from?" (read through the
  * schema-anchored zcl_agentbuild_v2_top_source_id) vs Q2 "what source tree

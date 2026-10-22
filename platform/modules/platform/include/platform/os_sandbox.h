@@ -167,7 +167,7 @@ struct zcl_result os_sandbox_package_leaf_restrict(
 
 /* The metrics thread's steady-state RSS-sample path, named here (not as a
  * bare string literal in engine/composition/src/boot.c or any other non-platform/modules/platform
- * .c file) so tools/lint/check_proc_self_shim.sh's raw-/proc/self-outside-
+ * .c file) so tools/lint/lintc/gate_tree_walk.c's raw-/proc/self-outside-
  * platform/modules/platform ratchet does not flag the Landlock path-GRANT construction as
  * an unshimmed read — os_sandbox never opens this path itself, it only names
  * it in a struct os_sandbox_path_rule for the boot thread to grant. */
@@ -177,7 +177,7 @@ struct zcl_result os_sandbox_package_leaf_restrict(
  * so a Landlock path-GRANT on the child's own proc entries (e.g. the
  * ZCODE package verifier's sanitizer runs, whose compiler-rt runtimes
  * re-read /proc/self/environ for their flags) is not flagged by
- * tools/lint/check_proc_self_shim.sh — os_sandbox only names the path in a
+ * tools/lint/lintc/gate_tree_walk.c — os_sandbox only names the path in a
  * struct os_sandbox_path_rule, it never opens it. */
 #define OS_SANDBOX_PROC_SELF_PATH "/proc/self"
 

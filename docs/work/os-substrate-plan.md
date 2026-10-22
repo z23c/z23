@@ -82,7 +82,7 @@ be new scope, not a Rung-0 deliverable.
 ### The gate: `check-no-shell-out`
 
 Same three-stage ratchet shape as other doc/lint gates in this tree
-(`tools/lint/check_no_raw_clock_outside_platform.sh` is the pattern to
+(`tools/lint/lintc/gate_tree_walk.c` is the pattern to
 clone): **WARN** (new violations print, do not fail) → **RATCHET**
 (baseline = current site count, shrink-only — a new site fails, an existing
 one migrating away shrinks the baseline) → **HARD** (baseline is empty,
@@ -162,7 +162,7 @@ path pins the exact inode through the `dlopen()` call at :696).
 ### Optional door-keeper gate
 
 `check-no-raw-proc-outside-platform` — a clone of
-`tools/lint/check_no_raw_clock_outside_platform.sh`'s pattern (grep for the
+`tools/lint/lintc/gate_tree_walk.c`'s pattern (grep for the
 raw pattern — here `/proc/self` or `/proc/uptime` — outside
 `platform/modules/platform/src/`, HARD with an explicit allowlist for the two async-signal-safe
 exceptions in `postmortem.c`).

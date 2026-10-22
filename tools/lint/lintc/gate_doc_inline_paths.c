@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-doc-inline-paths lint gate of the C23 lint
- * runtime. Replaces tools/lint/check_doc_inline_paths.sh: every backticked
+ * runtime. Replaces tools/lint/lintc/gate_doc_inline_paths.c: every backticked
  * source path (prong 1) and every backticked top-level module directory
  * (prong 2) in a tracked Markdown file must resolve against the tracked
  * tree. Violations are checked against a shrink-only baseline and the

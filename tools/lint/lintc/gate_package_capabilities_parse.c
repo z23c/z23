@@ -4,7 +4,7 @@
  * engine/composition/capability_classes.def, the ZCL_MODULE_CAPABILITY rows,
  * the ZCODE_PACKAGE registry rows, a manifest's top-level JSON array fields,
  * and the shipped-source enumeration (files[] honoured exactly, else
- * src+.c and tests+.c). Ported alongside tools/lint/check_package_capabilities.sh
+ * src+.c and tests+.c). Ported alongside tools/lint/lintc/gate_package_capabilities.c
  * and tools/lint/zcode_pkg_sources.sh, which check_package_capabilities.sh
  * sourced.
  */

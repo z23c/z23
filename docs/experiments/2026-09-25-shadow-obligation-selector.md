@@ -386,7 +386,7 @@ Every lint gate at 9 s or more per candidate is listed, heaviest first:
 | `check-outparam-init-before-return` | 31.4 | ineligible | the in-scope type set is every `<T>_free` anywhere in the tree (`tools/lint/check_outparam_init_before_return.sh` line 720), with a floor over it |
 | `check-no-wallclock-assertion` | 22.9 | ineligible | an allowlist-sum ratchet ceiling and a floor over matched content |
 | `check-live-datadir-isolation` | 21.8 | ineligible | baseline sum ceilings |
-| `check-doc-inline-paths` | 21.0 | ineligible | token-count floors over all docs (`fcount` ≥ 200, `dcount` ≥ 100, `tools/lint/check_doc_inline_paths.sh` lines 143–145) |
+| `check-doc-inline-paths` | 21.0 | ineligible | token-count floors over all docs (`fcount` ≥ 200, `dcount` ≥ 100, `tools/lint/lintc/gate_doc_inline_paths.c` lines 143–145) |
 | `check-ship-remote-transaction` | 20.8 | not declared | a single whole-gate unit is plausible, but it runs tree-built binaries and its self-test reads the whole Makefile; unproven without a confined run |
 | `check-command-input-keys` | 20.0 | ineligible | callee closure plus cross-leaf consistency |
 | `check-retrieval-historical-evidence` | 19.8 | not declared | runs the tree-built `retrieval-eval` and `jsonq`; as for ship |
@@ -448,7 +448,7 @@ These are the checks the lane asked for:
 
 - **(c) An edit to gate code, a baseline or the driver only** (real-01).
   Every unit went fresh with `gate-code:<file>` in all 11 cases:
-  - `check-no-api-keys` (8383/8383): `tools/lint/check_no_api_keys.sh`,
+  - `check-no-api-keys` (8383/8383): `tools/lint/lintc/gate_git_scan_a.c`,
     `tools/lint/lintc/lib.c`, `platform/modules/base/include/base/hex.h`
     (reached through the lintc include closure) and `tools/lint/run_lint.sh`;
   - `check-windows-platform-seam` (41/41):

@@ -16,7 +16,7 @@
 #
 # core/ is byte-sealed: its rows are counted and frozen, and are
 # only editable through the owner unseal ritual (make core-unseal).
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_no_runtime_abort.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-no-runtime-abort
 core/chainparams/src/chainparams.c 2
 core/chainparams/src/chainparamsbase.c 2
 core/consensus/src/script_interp.c 2

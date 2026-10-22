@@ -448,7 +448,7 @@ Use `docs/agent/AGENT_ARCHITECTURE.md` as the full checklist. The short path:
    failure (never bare `return -1`).
 3. The command registry loads every `.def` bundle at startup; there is no
    central per-command registry file to edit.
-4. `tools/lint/check_command_contract.sh` HARD-fails any leaf whose
+4. `tools/lint/lintc/gate_tree_walk.c` HARD-fails any leaf whose
    `semantics` argument is empty. Write a real one-line semantics string or
    `make lint` rejects the command.
 

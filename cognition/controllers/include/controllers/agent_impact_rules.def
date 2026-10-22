@@ -34,7 +34,7 @@ AGENT_IMPACT_RULE("cognition/modules/codeindex/include/codeindex/codeindex_seman
 AGENT_IMPACT_RULE("cognition/modules/codeindex/include/codeindex/codeindex_vector_hint.h|cognition/modules/codeindex/src/codeindex_vector_hint.c|tests/harness/src/test_code_vector_hint.c", "code_vector_hint code_ontology code_inventory ontology make_lint_gates")
 AGENT_IMPACT_RULE("docs/CAPABILITY_INVENTORY.jsonl", "code_inventory")
 AGENT_IMPACT_RULE("contexts/commons/modules/vcs/include/vcs/zcode_heuristic_replication.h|contexts/commons/modules/vcs/src/zcode_heuristic_replication.c|tests/harness/src/test_zcode_heuristic_replication.c", "zcode_heuristic_replication zcode_heuristic_lifecycle zcode_attention_verified zcode_science zcode_science_store make_lint_gates")
-AGENT_IMPACT_RULE("engine/composition/capability_classes.def|engine/composition/capability_symbols.def|engine/composition/module_capabilities.def|engine/composition/module_capabilities_linux.def|engine/composition/module_capabilities_windows.def|tools/lint/check_capability_closure.sh|tools/lint/check_package_capabilities.sh|tools/lint/zcode_pkg_sources.sh|platform/modules/base/zcode-package.json|platform/modules/sha3/zcode-package.json|platform/modules/mlkem/zcode-package.json|platform/modules/codec/zcode-package.json|platform/modules/json/zcode-package.json|platform/modules/encoding/zcode-package.json|platform/modules/rvplat/zcode-package.json|contexts/explorer/modules/presentation/zcode-package.json|platform/modules/platform/zcode-package.json|core/modules/crypto/zcode-package.json|contexts/commons/modules/vcs/zcode-package.json|contexts/commons/modules/commons_demo/zcode-package.json|platform/modules/rvvirtio/zcode-package.json|platform/modules/rvmachine/zcode-package.json", "package_capability_claim make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/capability_classes.def|engine/composition/capability_symbols.def|engine/composition/module_capabilities.def|engine/composition/module_capabilities_linux.def|engine/composition/module_capabilities_windows.def|tools/lint/lintc/gate_capability_closure.c|tools/lint/lintc/gate_package_capabilities.c|tools/lint/zcode_pkg_sources.sh|platform/modules/base/zcode-package.json|platform/modules/sha3/zcode-package.json|platform/modules/mlkem/zcode-package.json|platform/modules/codec/zcode-package.json|platform/modules/json/zcode-package.json|platform/modules/encoding/zcode-package.json|platform/modules/rvplat/zcode-package.json|contexts/explorer/modules/presentation/zcode-package.json|platform/modules/platform/zcode-package.json|core/modules/crypto/zcode-package.json|contexts/commons/modules/vcs/zcode-package.json|contexts/commons/modules/commons_demo/zcode-package.json|platform/modules/rvvirtio/zcode-package.json|platform/modules/rvmachine/zcode-package.json", "package_capability_claim make_lint_gates")
 /* The RECEIVER half of the same subject: the two tables above are what this
  * unit is handed, so a change to either must run the group that re-derives a
  * claim against them, not only the shell gate that derives it in-tree. */
@@ -86,7 +86,7 @@ AGENT_IMPACT_RULE("core/modules/net/src/https_frontdoor.c|core/modules/net/inclu
 AGENT_IMPACT_RULE("core/modules/net/src/https_server_redirect.c|core/modules/net/src/https_server_internal.h", "path_check make_lint_gates")
 AGENT_IMPACT_RULE("engine/composition/src/args.c|tests/harness/src/test_onion_persistence.c", "https_sni_select onion_persistence cli_argv_strict make_lint_gates")
 AGENT_IMPACT_RULE("engine/composition/src/boot_p2p_listen.c", "onion_persistence net make_lint_gates")
-AGENT_IMPACT_RULE("engine/modules/storage/src/chain_segment.c|engine/modules/storage/src/chain_segment_store.c|engine/modules/storage/include/storage/chain_segment.h|engine/controllers/src/chain_segment_controller.c|engine/controllers/include/controllers/chain_segment_controller.h|tests/harness/src/test_chain_segment.c|tools/lint/check_no_writer_below_sealed_frontier.sh", "chain_segment block_parse_cache segment_sealer segment_corruption syncdiag_rpc make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/storage/src/chain_segment.c|engine/modules/storage/src/chain_segment_store.c|engine/modules/storage/include/storage/chain_segment.h|engine/controllers/src/chain_segment_controller.c|engine/controllers/include/controllers/chain_segment_controller.h|tests/harness/src/test_chain_segment.c|tools/lint/lintc/gate_tree_walk.c", "chain_segment block_parse_cache segment_sealer segment_corruption syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("engine/services/src/segment_sealer_service.c|engine/services/include/services/segment_sealer_service.h|tests/harness/src/test_segment_sealer.c", "segment_sealer chain_segment supervisor syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("engine/conditions/src/segment_corruption.c|engine/conditions/include/conditions/segment_corruption.h|tests/harness/src/test_segment_corruption.c", "segment_corruption chain_segment condition_engine syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("tools/consensus_rule_sweep.c|tools/consensus_rule_sweep.h|tests/harness/src/test_consensus_rule_sweep.c", "consensus_rule_sweep make_lint_gates")
@@ -108,10 +108,10 @@ AGENT_IMPACT_RULE("engine/models/src/shared_validators.c|engine/models/include/m
 AGENT_IMPACT_RULE("platform/modules/encoding/src/utilstrencodings.c|platform/modules/encoding/include/encoding/utilstrencodings.h|platform/modules/encoding/src/utilmoneystr.c|platform/modules/encoding/include/encoding/utilmoneystr.h|tests/harness/src/test_encoding.c|tests/harness/src/test_test_str_money_codecs.c", "test_str_money_codecs test_test_str_money_codecs encoding make_lint_gates")
 /* The one hex codec: header-only, so every caller re-compiles, but the
  * behaviour under test is entirely in the header and its own group. */
-AGENT_IMPACT_RULE("platform/modules/base/include/base/hex.h|tests/harness/src/test_hex_codec.c|tools/lint/check_hex_codec_single.sh|tools/lint/hex_codec_baseline.txt", "hex_codec make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/base/include/base/hex.h|tests/harness/src/test_hex_codec.c|tools/lint/lintc/gate_hex_codec_single.c|tools/lint/hex_codec_baseline.txt", "hex_codec make_lint_gates")
 /* The one byte-order codec. crypto/common.h forwards to it, so its own
  * seven callers ride the same group; the behaviour is all in the header. */
-AGENT_IMPACT_RULE("platform/modules/base/include/base/serialize_le.h|core/modules/crypto/include/crypto/common.h|tests/harness/src/test_byte_order_codec.c|tools/lint/check_byte_order_codec_single.sh|tools/lint/byte_order_codec_baseline.txt", "byte_order_codec make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/base/include/base/serialize_le.h|core/modules/crypto/include/crypto/common.h|tests/harness/src/test_byte_order_codec.c|tools/lint/lintc/gate_byte_order_codec_single_report.c|tools/lint/byte_order_codec_baseline.txt", "byte_order_codec make_lint_gates")
 /* The one branchless all-zero/any-set byte test, which replaced 119 private
  * copies. Header-only like hex.h and serialize_le.h, so every caller
  * re-compiles, but the behaviour under test lives entirely in the header and
@@ -142,7 +142,7 @@ AGENT_IMPACT_RULE("platform/modules/util/src/clientversion.c|platform/modules/ut
 AGENT_IMPACT_RULE("tools/dev/source-identity.sh|tools/dev/source-identity-selftest.sh", "clientversion_format consensus_state_producer_receipt vcs_core make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/util/src/self_backtrace.c|platform/modules/util/include/util/self_backtrace.h|platform/modules/util/src/async_safe_write.c|platform/modules/util/include/util/async_safe_write.h|platform/modules/util/src/signal_handler.c|platform/modules/util/include/util/signal_handler.h|platform/modules/util/src/thread_registry.c|platform/modules/util/include/util/thread_registry.h|tests/harness/src/test_self_backtrace.c|tests/harness/src/test_thread_registry.c", "self_backtrace thread_registry command_registry_catalog rpc make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/util/src/thread_liveness.c|platform/modules/util/include/util/thread_liveness.h|platform/modules/util/src/supervisor.c|platform/modules/util/include/util/supervisor.h|tests/harness/src/test_supervisor_production_tree.c|tests/harness/src/test_supervisor.c", "supervisor supervisor_domains supervisor_production_tree thread_registry make_lint_gates")
-AGENT_IMPACT_RULE("engine/modules/health/src/heartbeat.c|engine/modules/metrics/src/metrics.c|engine/modules/event/src/event.c|engine/modules/rpc/src/rpc_timeout.c|engine/composition/src/db_service.c|tools/lint/check_thread_supervision.sh|tools/lint/thread_supervision_baseline.txt", "supervisor supervisor_production_tree time_authority make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/health/src/heartbeat.c|engine/modules/metrics/src/metrics.c|engine/modules/event/src/event.c|engine/modules/rpc/src/rpc_timeout.c|engine/composition/src/db_service.c|tools/lint/lintc/gate_thread_supervision.c|tools/lint/thread_supervision_baseline.txt", "supervisor supervisor_production_tree time_authority make_lint_gates")
 AGENT_IMPACT_RULE("engine/modules/health/src/heartbeat.c|engine/modules/health/include/health/heartbeat.h|tests/harness/src/test_heartbeat.c", "heartbeat make_lint_gates")
 /* time-discipline organ: the ONE operational deadline/interval clock +
  * wall-vs-CLOCK_MONOTONIC_RAW skew/step telemetry, sampled from the
@@ -273,7 +273,7 @@ AGENT_IMPACT_RULE("platform/modules/platform/src/os_proc.c|platform/modules/plat
 AGENT_IMPACT_RULE("platform/modules/platform/include/platform/resident_capability_image.h|platform/modules/platform/src/resident_capability_image.c|tests/harness/src/test_resident_capability_image.c", "resident_capability_image make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_canary_sentinel_watch.c", "canary_sentinel_watch os_proc make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_mvp_c8_judge.c|tests/harness/mvp_c8_judge_cases.sh|tools/mvp_gate.sh", "mvp_c8_judge make_lint_gates")
-AGENT_IMPACT_RULE("platform/modules/util/src/mem_pressure.c|platform/modules/util/include/util/mem_pressure.h|tests/harness/src/test_mem_pressure.c|engine/composition/src/boot_mem_pressure.c|engine/conditions/src/memory_pressure_high.c|engine/conditions/include/conditions/memory_pressure_high.h|tools/lint/check_proc_self_shim.sh|tools/lint/proc_self_shim_baseline.txt", "mem_pressure sticky_conditions os_proc supervisor condition_engine make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/util/src/mem_pressure.c|platform/modules/util/include/util/mem_pressure.h|tests/harness/src/test_mem_pressure.c|engine/composition/src/boot_mem_pressure.c|engine/conditions/src/memory_pressure_high.c|engine/conditions/include/conditions/memory_pressure_high.h|tools/lint/lintc/gate_tree_walk.c|tools/lint/proc_self_shim_baseline.txt", "mem_pressure sticky_conditions os_proc supervisor condition_engine make_lint_gates")
 /* platform/modules/base is the in-tree dependency sink (log macros, log-level filter,
  * checked allocators, zcl_result). The util/ paths below are one-line
  * forwarding headers kept so the ~734 existing includers do not churn. */
@@ -628,7 +628,7 @@ AGENT_IMPACT_RULE("engine/modules/rpc/include/rpc/client.h|engine/modules/rpc/sr
 AGENT_IMPACT_RULE("tests/harness/src/test_rpc.c|tests/harness/src/test_rpc_legacy_and_diagnostics.c|tests/harness/src/test_rpc_legacy_and_getnodelog.c|tests/harness/src/test_rpc_conversion_and_transport.c|tests/harness/src/test_rpc_request_size.c|tests/harness/include/test/test_rpc_priv.h", "rpc")
 AGENT_IMPACT_RULE("engine/modules/rpc/include/rpc/*port.h|engine/modules/rpc/src/legacy_chain_*.c|engine/services/src/header_probe.c|engine/services/src/utxo_parity_service.c|engine/services/src/utxo_reference_source_*.c|engine/services/src/zclassicd_oracle_service.c|engine/services/src/legacy_mirror_sync_internal.h", "rpc syncdiag_rpc parity_slice oracle_policy mirror_divergence_locator make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_sqlite.c", "sqlite make_lint_gates")
-AGENT_IMPACT_RULE("tests/harness/src/test.c|tests/harness/src/test_helpers.c|tests/harness/include/test/test_helpers.h|tests/harness/include/test/block_fixtures.h|tests/harness/include/test/wallet_view_fixture.h|tests/harness/include/test/test_group_selector.h|tests/harness/src/test_test_group_selector.c|tests/harness/src/test_parallel.c|tools/dev/test-group-list.sh|tools/dev/test_group_catalog.c|tools/dev/test_group_catalog.h|tools/dev/test_group_catalog.def|tools/dev/test_proof_contracts.def|tools/dev/test_group_weights.c|tools/dev/test_group_weights.h|tools/dev/test_group_weights_main.c|tools/dev/test_group_weights.tsv|tools/dev/test_proof_families.def|tools/dev/test_group_umbrellas.def|tools/dev/test_semantic_leaves.def|tools/scripts/check_test_registration.sh|tools/lint/check_accel_oracle_pinned.sh|tools/agent_fast_ci.sh", "test_group_selector test_test_group_selector boot_shutdown_marker make_lint_gates")
+AGENT_IMPACT_RULE("tests/harness/src/test.c|tests/harness/src/test_helpers.c|tests/harness/include/test/test_helpers.h|tests/harness/include/test/block_fixtures.h|tests/harness/include/test/wallet_view_fixture.h|tests/harness/include/test/test_group_selector.h|tests/harness/src/test_test_group_selector.c|tests/harness/src/test_parallel.c|tools/dev/test-group-list.sh|tools/dev/test_group_catalog.c|tools/dev/test_group_catalog.h|tools/dev/test_group_catalog.def|tools/dev/test_proof_contracts.def|tools/dev/test_group_weights.c|tools/dev/test_group_weights.h|tools/dev/test_group_weights_main.c|tools/dev/test_group_weights.tsv|tools/dev/test_proof_families.def|tools/dev/test_group_umbrellas.def|tools/dev/test_semantic_leaves.def|tools/scripts/check_test_registration.sh|tools/lint/lintc/gate_accel_oracle_pinned.c|tools/agent_fast_ci.sh", "test_group_selector test_test_group_selector boot_shutdown_marker make_lint_gates")
 /* Native changed-file planning and exact execution: implementation, public
  * shape, registry handler, and the adversarial proof of dimension honesty. */
 /* Landing acceptance owns real publisher-crash and lost-ack fixtures. Its
@@ -823,8 +823,8 @@ AGENT_IMPACT_RULE("tests/harness/src/test_replay_canary_verdict.c|tools/scripts/
 AGENT_IMPACT_RULE("core/modules/net/src/msg_tx.c", "msg_handlers mempool accept_to_mempool net_msg_dos")
 AGENT_IMPACT_RULE("engine/composition/include/config/runtime.h", "boot_phase make_lint_gates")
 AGENT_IMPACT_RULE("platform/modules/util/src/boot_status.c|platform/modules/util/include/util/boot_status.h|platform/modules/util/src/boot_phase.c|platform/modules/util/include/util/boot_phase.h|tests/harness/src/test_boot_status.c|tests/harness/src/test_boot_phase.c|engine/services/src/block_index_loader_topup.c|engine/services/src/block_index_projection_flat_bind.c|engine/services/src/block_index_integrity.c", "boot_status boot_phase block_index_topup sd_notify command_registry_catalog make_lint_gates")
-AGENT_IMPACT_RULE("platform/modules/util/src/sysinit.c|platform/modules/util/include/util/sysinit.h|tests/harness/src/test_sysinit.c|engine/composition/src/boot.c|engine/composition/src/boot_services.c|engine/composition/include/config/boot.h|tools/lint/check_sysinit_ordering.sh|tools/lint/sysinit_ordering_golden.txt", "sysinit boot_phase boot_matrix make_lint_gates")
-AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/src/os_sandbox_landlock_linux.c|platform/modules/platform/src/os_sandbox_landlock_internal.h|platform/modules/platform/include/platform/os_sandbox.h|tools/lint/check_sandbox_wired.sh|engine/controllers/src/diagnostics_registry.c", "os_sandbox sysinit syncdiag_rpc make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/util/src/sysinit.c|platform/modules/util/include/util/sysinit.h|tests/harness/src/test_sysinit.c|engine/composition/src/boot.c|engine/composition/src/boot_services.c|engine/composition/include/config/boot.h|tools/lint/lintc/gate_tree_walk.c|tools/lint/sysinit_ordering_golden.txt", "sysinit boot_phase boot_matrix make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_linux.c|platform/modules/platform/src/os_sandbox_landlock_linux.c|platform/modules/platform/src/os_sandbox_landlock_internal.h|platform/modules/platform/include/platform/os_sandbox.h|tools/lint/lintc/gate_boot_wiring.c|engine/controllers/src/diagnostics_registry.c", "os_sandbox sysinit syncdiag_rpc make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_accept_to_mempool.c", "accept_to_mempool")
 AGENT_IMPACT_RULE("core/consensus/src/locktime.c|core/consensus/include/domain/consensus/locktime.h|core/modules/validation/include/validation/contextual_check_tx.h|core/modules/validation/src/contextual_check_tx.c|core/modules/validation/src/accept_to_mempool.c|core/modules/validation/src/check_block.c|tests/harness/src/test_tx_expiry_locktime_adversarial.c", "tx_expiry_locktime_adversarial domain_consensus_locktime locktime_edge bip113_bip65 accept_to_mempool check_block_edge")
 AGENT_IMPACT_RULE("tests/harness/src/test_mempool.c", "mempool")
@@ -973,7 +973,7 @@ AGENT_IMPACT_RULE("tools/command/native_code_packet.c|tools/command/native_code_
  * already routes there). */
 AGENT_IMPACT_RULE("tools/command/native_code_owner_command.c|tools/command/native_code_cost_command.c|tools/command/native_code_recent_command.c|tests/harness/src/test_code_firsthour.c", "code_firsthour codeindex command_registry_catalog native_api_contract command_handler_snapshot hotswap_module dev_platform make_lint_gates")
 /* Specialist focus: the X-macro catalog, ranking engine, native leaf, and gate. */
-AGENT_IMPACT_RULE("engine/composition/specialists.def|cognition/modules/codeindex/include/codeindex/codeindex_focus.h|cognition/modules/codeindex/src/codeindex_focus.c|tools/command/native_code_focus_command.c|tests/harness/src/test_code_focus.c|tools/lint/check_specialists.sh", "code_focus command_registry_catalog make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/specialists.def|cognition/modules/codeindex/include/codeindex/codeindex_focus.h|cognition/modules/codeindex/src/codeindex_focus.c|tools/command/native_code_focus_command.c|tests/harness/src/test_code_focus.c|tools/lint/lintc/gate_specialists.c", "code_focus command_registry_catalog make_lint_gates")
 
 /* Verified index fetch (M4): the code.fetch leaf, its module-side
  * verify-and-install path, and the publication-ritual helpers it shares with
@@ -1040,7 +1040,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_golden_*.c", "golden_revert_roundtrip 
  * Wave 3.1 (2026-07-11): the hot-swap-eligible native controller TUs — editing
  * one must run the hot-swap groups (a bad edit can break its generation .so
  * build) plus the eligibility-scope/static-state lint gates. */
-AGENT_IMPACT_RULE("engine/modules/hotswap/src/hotswap_loader.c|engine/modules/hotswap/src/hotswap_manifest_validate.c|engine/modules/hotswap/src/hotswap_loader_internal.h|engine/modules/hotswap/include/hotswap/hotswap.h|tools/lint/check_hotswap_eligible_scope.sh|tools/lint/check_hotswap_static_state.sh|engine/composition/hotswap_eligible.def|tests/harness/fixtures/hotswap_bad_static_fixture.c|tests/harness/fixtures/hotswap_manifest_bad_scope.def|tests/harness/fixtures/hotswap_manifest_bad_static.def|tests/harness/fixtures/hotswap_manifest_no_macro.def|tests/harness/src/test_hotswap_loader.c|tests/harness/src/test_hotswap_simnet.c", "hotswap_loader hotswap_simnet make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/hotswap/src/hotswap_loader.c|engine/modules/hotswap/src/hotswap_manifest_validate.c|engine/modules/hotswap/src/hotswap_loader_internal.h|engine/modules/hotswap/include/hotswap/hotswap.h|tools/lint/lintc/gate_hotswap_manifests.c|tools/lint/lintc/gate_hotswap_manifests.c|engine/composition/hotswap_eligible.def|tests/harness/fixtures/hotswap_bad_static_fixture.c|tests/harness/fixtures/hotswap_manifest_bad_scope.def|tests/harness/fixtures/hotswap_manifest_bad_static.def|tests/harness/fixtures/hotswap_manifest_no_macro.def|tests/harness/src/test_hotswap_loader.c|tests/harness/src/test_hotswap_simnet.c", "hotswap_loader hotswap_simnet make_lint_gates")
 /* Early feedback stage of the restart proof: facts groups first, as feedback. */
 AGENT_IMPACT_RULE("tools/dev/devloop_early.c|tools/dev/devloop_early.h|tests/harness/src/test_devloop_early.c", "devloop_early make_lint_gates")
 AGENT_IMPACT_RULE("tools/dev/devloop_facts_consumer.c|tools/dev/devloop_facts_make*|tests/harness/src/test_semantic_build_inputs.c|tests/harness/src/semantic_build_inputs_*.c|tests/harness/include/test/semantic_build_inputs_fixture.h", "semantic_build_inputs make_lint_gates")
@@ -1055,7 +1055,7 @@ AGENT_IMPACT_RULE("engine/controllers/src/api_controller_dispatch.c|engine/contr
  * can break either the leaf-handler override snapshot proof
  * (command_handler_snapshot) or the loader/simnet manifest contract
  * (hotswap_loader, hotswap_simnet). */
-AGENT_IMPACT_RULE("tools/command/native_dev_hotswap.c|tools/command/native_dev_hotswap.h|engine/composition/commands/dev.def|engine/modules/hotswap/*|engine/composition/hotswap_eligible.def|engine/composition/hotswap_swappable.def|tools/lint/check_hotswap_swappable_shape.sh|tests/harness/fixtures/hotswap_swappable_bad_shape.def|tests/harness/src/test_hotswap_module.c|engine/controllers/src/status_native_handlers.c", "hotswap_loader hotswap_simnet hotswap_module command_handler_snapshot make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_dev_hotswap.c|tools/command/native_dev_hotswap.h|engine/composition/commands/dev.def|engine/modules/hotswap/*|engine/composition/hotswap_eligible.def|engine/composition/hotswap_swappable.def|tools/lint/lintc/gate_hotswap_swappable_shape.c|tests/harness/fixtures/hotswap_swappable_bad_shape.def|tests/harness/src/test_hotswap_module.c|engine/controllers/src/status_native_handlers.c", "hotswap_loader hotswap_simnet hotswap_module command_handler_snapshot make_lint_gates")
 AGENT_IMPACT_RULE("tools/scripts/remote_node_update.sh|tools/scripts/lane_recover.sh|platform/deploy/examples/z23-self-update.service|platform/deploy/examples/z23-self-update.timer", "make_lint_gates")
 AGENT_IMPACT_RULE("platform/deploy/devbuild-broker", "make_lint_gates")
 
@@ -1189,7 +1189,7 @@ AGENT_IMPACT_RULE("engine/composition/src/boot_export_consensus_bundle.c", "cons
  * foundation) + its Law-7 lint gate. Any edit to the replay receipt (the live
  * instance) also re-runs the new authority_receipt group so the extraction
  * stays behaviorally consistent with its origin. */
-AGENT_IMPACT_RULE("platform/modules/util/src/authority_receipt.c|platform/modules/util/include/util/authority_receipt.h|tests/harness/src/test_authority_receipt.c|tools/lint/check_privileged_transition_receipt.sh|tools/lint/privileged_transition_receipt_baseline.txt|engine/composition/src/consensus_state_replay_receipt*.c", "authority_receipt consensus_state_snapshot_install make_lint_gates")
+AGENT_IMPACT_RULE("platform/modules/util/src/authority_receipt.c|platform/modules/util/include/util/authority_receipt.h|tests/harness/src/test_authority_receipt.c|tools/lint/lintc/gate_build_config.c|tools/lint/privileged_transition_receipt_baseline.txt|engine/composition/src/consensus_state_replay_receipt*.c", "authority_receipt consensus_state_snapshot_install make_lint_gates")
 AGENT_IMPACT_RULE("engine/services/src/consensus_state_chain_binding_service.c|engine/services/include/services/consensus_state_chain_binding_service.h|tests/harness/src/test_consensus_state_chain_binding.c", "consensus_state_chain_binding consensus_state_snapshot_install make_lint_gates")
 AGENT_IMPACT_RULE("engine/composition/src/consensus_state_producer_receipt*.c|engine/composition/src/consensus_state_producer_receipt_internal.h|engine/composition/src/consensus_state_producer_session_retire.c|engine/composition/src/consensus_state_producer_status.c|engine/composition/include/config/consensus_state_producer_receipt.h|engine/composition/src/boot_mint_anchor.c|tests/harness/src/test_consensus_state_producer_receipt.c", "consensus_state_producer_receipt consensus_state_snapshot_export make_lint_gates")
 AGENT_IMPACT_RULE("engine/services/src/consensus_state_publication_cas.c|engine/services/include/services/consensus_state_publication_cas.h|tests/harness/src/test_consensus_state_publication_cas.c", "consensus_state_publication_cas consensus_state_chain_binding make_lint_gates")
@@ -1341,7 +1341,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_code_capsule.c", "code_capsule make_li
  * module and the resident it mounts into can prove they were compiled against
  * the same sealed consensus core. Touching the mirror, its generator, its lint
  * gate, or the manifest itself changes what every module is admitted against. */
-AGENT_IMPACT_RULE("tests/harness/src/test_hotswap_module_v2.c|tests/harness/src/test_hotswap_shelf.c|tests/harness/src/test_hotswap_rollback.c|tests/harness/fixtures/hotswap_rollback_module.c|engine/modules/hotswap/include/hotswap/hotswap_module.h|engine/modules/hotswap/include/hotswap/hotswap_shelf.h|engine/modules/hotswap/src/hotswap_activate.c|engine/composition/hotswap_swappable.def|engine/composition/hotswap_islands.def|engine/composition/hotfork_capsules.def|tools/lint/check_hotswap_swappable_shape.sh|tools/lint/check_hotswap_static_state.sh|tools/dev/hotswap-module-fast.sh|tools/dev/devloop_hotswap_build.c|tools/dev/hotswap-resident-bench.sh|tests/harness/fixtures/hotswap_swappable_not_ready_read.def|tests/harness/fixtures/hotswap_swappable_dup_leaf.def|tests/harness/fixtures/hotswap_swappable_bad_static.def|tests/harness/fixtures/hotswap_islands_*.def|engine/modules/hotswap/include/hotswap/core_seal_root.h|engine/modules/hotswap/include/hotswap/core_seal_sections.h|tools/scripts/gen_core_seal_sections.awk|tools/scripts/hotswap_module_sections.awk|tools/scripts/gen_core_seal_root.sh|tools/lint/check_core_seal_root_mirror.sh|core/MANIFEST.sha3|tools/core_seal.c|tests/harness/src/test_core_seal.c|tests/harness/src/test_core_seal_interop.c", "hotswap_module_v2 hotswap_module hotswap_shelf hotswap_rollback hotswap_loader hotswap_simnet command_handler_snapshot dev_platform make_lint_gates core_seal core_seal_interop")
+AGENT_IMPACT_RULE("tests/harness/src/test_hotswap_module_v2.c|tests/harness/src/test_hotswap_shelf.c|tests/harness/src/test_hotswap_rollback.c|tests/harness/fixtures/hotswap_rollback_module.c|engine/modules/hotswap/include/hotswap/hotswap_module.h|engine/modules/hotswap/include/hotswap/hotswap_shelf.h|engine/modules/hotswap/src/hotswap_activate.c|engine/composition/hotswap_swappable.def|engine/composition/hotswap_islands.def|engine/composition/hotfork_capsules.def|tools/lint/lintc/gate_hotswap_swappable_shape.c|tools/lint/lintc/gate_hotswap_manifests.c|tools/dev/hotswap-module-fast.sh|tools/dev/devloop_hotswap_build.c|tools/dev/hotswap-resident-bench.sh|tests/harness/fixtures/hotswap_swappable_not_ready_read.def|tests/harness/fixtures/hotswap_swappable_dup_leaf.def|tests/harness/fixtures/hotswap_swappable_bad_static.def|tests/harness/fixtures/hotswap_islands_*.def|engine/modules/hotswap/include/hotswap/core_seal_root.h|engine/modules/hotswap/include/hotswap/core_seal_sections.h|tools/scripts/gen_core_seal_sections.awk|tools/scripts/hotswap_module_sections.awk|tools/scripts/gen_core_seal_root.sh|tools/lint/lintc/gate_landing_proof.c|core/MANIFEST.sha3|tools/core_seal.c|tests/harness/src/test_core_seal.c|tests/harness/src/test_core_seal_interop.c", "hotswap_module_v2 hotswap_module hotswap_shelf hotswap_rollback hotswap_loader hotswap_simnet command_handler_snapshot dev_platform make_lint_gates core_seal core_seal_interop")
 /* Packaging half of the same pin. tools/dev/hotswap-package.sh writes and
  * verifies the <artifact>.manifest receipt (SHA3-256, source TU, leaves,
  * abi_version, core_seal_root) that a human reads before mounting a module
@@ -1350,7 +1350,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_hotswap_module_v2.c|tests/harness/src/
  * if the loader ever learns to read the receipt, admission starts trusting a
  * note written by whoever wrote the bytes. Edits here change what a module is
  * admitted against, so they ride the same hot-swap groups. */
-AGENT_IMPACT_RULE("tools/dev/hotswap-package.sh|tools/lint/check_hotswap_package_receipt_is_not_authority.sh|engine/modules/hotswap/src/hotswap_artifact_digest.c|engine/modules/hotswap/include/hotswap/hotswap_artifact_digest.h", "hotswap_module_v2 hotswap_module hotswap_loader hotswap_simnet make_lint_gates")
+AGENT_IMPACT_RULE("tools/dev/hotswap-package.sh|tools/lint/lintc/gate_hotswap_package_receipt_is_not_authority.c|engine/modules/hotswap/src/hotswap_artifact_digest.c|engine/modules/hotswap/include/hotswap/hotswap_artifact_digest.h", "hotswap_module_v2 hotswap_module hotswap_loader hotswap_simnet make_lint_gates")
 /* Pre-map admission. hotswap_sealed_image.c copies a module into a sealed
  * memory file so the bytes cannot change between the hash and the map;
  * hotswap_elf_probe.c and hotswap_macho_probe.c read what the artifact CLAIMS (seal root, ABI,
@@ -1693,14 +1693,14 @@ AGENT_IMPACT_RULE("deploy/*.env.example|deploy/examples/*.env.example", "make_li
  * correctness depends on the lint driver and the gate library, not just on
  * itself. Its selftest plants both forbidden shapes, so an edit that hollows
  * the gate trips the same group that proves it. */
-AGENT_IMPACT_RULE("tools/lint/check_no_unattended_publish.sh", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/lint/lintc/gate_no_unattended_publish.c", "make_lint_gates")
 AGENT_IMPACT_RULE("tools/lint/check_standalone_tools_link.sh", "make_lint_gates")
 /* [lane: platform-header-guards] Both gates are pure text over the tree, so
  * the lint umbrella is the whole of their coverage; each carries its own
  * --self-test, which the umbrella runs first on every invocation, so an edit
  * that hollows either one trips the same group that proves it. */
 AGENT_IMPACT_RULE("tools/lint/check_platform_header_guards.sh", "make_lint_gates")
-AGENT_IMPACT_RULE("tools/lint/check_macos_acceptance.sh", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/lint/lintc/gate_macos_acceptance.c", "make_lint_gates")
 /* [lane: public-docs-truth] ARCHITECTURE_DIAGRAMS.md,
  * ARCHITECTURE_NORTH_STAR.md, and DEVELOPING.md once carried no impact rule.
  * A change to any of them could reach the push gate with zero test groups,
@@ -1838,7 +1838,7 @@ AGENT_IMPACT_RULE("core/modules/sapling/src/params_fetch.c|core/modules/sapling/
  * applies. The gate script and its shrink-only baseline move together: a
  * baseline edit with no gate change, or a gate change with no baseline
  * update, is exactly how this ratchet would rust shut silently. */
-AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/source_identity_authority_baseline.txt", "make_lint_gates")
+AGENT_IMPACT_RULE("tools/lint/lintc/gate_source_identity_authority.c|tools/lint/source_identity_authority_baseline.txt", "make_lint_gates")
 AGENT_IMPACT_RULE("cognition/modules/ontology/include/ontology/ontology.h|cognition/modules/ontology/include/ontology/ontology_vocabulary.h|cognition/modules/ontology/src/ontology.c|cognition/modules/ontology/src/ontology_formula.c|cognition/modules/ontology/src/ontology_horn_evaluator.c|cognition/modules/ontology/src/ontology_internal.h|cognition/modules/ontology/src/ontology_horn_rule.c|cognition/modules/ontology/src/ontology_manifest.c|cognition/modules/ontology/src/ontology_vocabulary.c|tests/harness/src/test_ontology.c|tests/harness/src/test_ontology_horn_evaluator.c|tests/harness/src/test_ontology_manifest_rules.c|tests/harness/src/test_ontology_vocabulary.c", "ontology ontology_horn_evaluator ontology_manifest_rules ontology_vocabulary code_vector_hint code_ontology make_lint_gates")
 AGENT_IMPACT_RULE("cognition/modules/ontology/include/ontology/story_graph.h|cognition/modules/ontology/src/story_graph.c|contexts/commons/modules/vcs/include/vcs/zcode_app_run_observation.h|contexts/commons/modules/vcs/src/zcode_app_run_observation.c|tools/command/native_story_command.h|tools/command/native_story_command.c|engine/composition/commands/story.def|tools/command/native_zcode_work_command.c|tools/command/native_zcode_work_evidence.c|tools/command/native_zcode_work_reuse.c|tools/command/native_zcode_work_reuse_plan.c|tools/command/native_zcode_work_start.c|tools/command/native_zcode_work_accept.c|tools/command/native_zcode_work_publish.c|tools/command/native_zcode_work_review.c|tools/command/native_zcode_work_status.c|tests/harness/src/test_story_graph.c|tests/harness/src/test_read_leaf_no_datadir_write.c", "story_graph ontology zcode_dev_objects zcode_package_dev command_registry_catalog read_leaf_no_datadir_write make_lint_gates")
 /* LANE outparam-init: the gate that keeps a caller's free from walking a stale
@@ -1865,7 +1865,7 @@ AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/ou
  * because the leaf is a READY read-only catalog row bound through the native
  * bridge, and the lint-gate group because check_hotswap_swappable_shape.sh
  * carries a per-file island admission that its self-test fixtures pin. */
-AGENT_IMPACT_RULE("engine/controllers/src/policy_native_handlers.c|engine/controllers/include/controllers/policy_native_handlers.h|engine/controllers/src/policy_native_resident.c|engine/controllers/include/controllers/policy_native_resident.h|contexts/commons/modules/vcs/src/package_policy.c|contexts/commons/modules/vcs/include/vcs/package_policy.h|tests/harness/src/test_hotswap_policy_module.c|engine/composition/hotswap_islands.def|engine/composition/hotswap_probe_cases.def|tools/lint/check_hotswap_swappable_shape.sh", "hotswap_policy_module hotswap_module_v2 hotswap_module hotswap_loader command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("engine/controllers/src/policy_native_handlers.c|engine/controllers/include/controllers/policy_native_handlers.h|engine/controllers/src/policy_native_resident.c|engine/controllers/include/controllers/policy_native_resident.h|contexts/commons/modules/vcs/src/package_policy.c|contexts/commons/modules/vcs/include/vcs/package_policy.h|tests/harness/src/test_hotswap_policy_module.c|engine/composition/hotswap_islands.def|engine/composition/hotswap_probe_cases.def|tools/lint/lintc/gate_hotswap_swappable_shape.c", "hotswap_policy_module hotswap_module_v2 hotswap_module hotswap_loader command_registry_catalog native_api_contract make_lint_gates")
 
 /* The confined-build process budget. RLIMIT_NPROC is charged per REAL UID,
  * so a limit derived from a snapshot of the uid's task count is not a budget
@@ -1890,7 +1890,7 @@ AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_linux.c|platform/mod
  * exclusive make_lint_gates group, because the check that proves this rail
  * still fails lives in the REALROOT lane and an exact group name is what
  * resolves. */
-AGENT_IMPACT_RULE("tools/lint/check_lint_gate_wiring.sh|tools/lint/run_lint.sh", "make_lint_gates_realroot make_lint_gates")
+AGENT_IMPACT_RULE("tools/lint/lintc/gate_lint_gate_wiring.c|tools/lint/run_lint.sh", "make_lint_gates_realroot make_lint_gates")
 /* LANE lint-gate-wiring (adopted orphans): two check-* targets that existed,
  * passed, and were in NO gate list — nothing ever ran them. Both are pure
  * structural/hermetic and sub-100ms, so they now ride the umbrella.
@@ -2032,7 +2032,7 @@ AGENT_IMPACT_RULE("tools/deploy_verify.sh|platform/deploy/z23-cutover.sh|platfor
  * too: a leaf added to any of them is exactly the event this rule exists to
  * put a test group behind. Mapped to the lint-gate group that owns the
  * Makefile-LINT_GATES / run_lint.sh-table / docs parity assertions. */
-AGENT_IMPACT_RULE("engine/composition/hotswap_denied_leaves.def|tools/lint/check_hotswap_denied_leaves.sh|engine/composition/hotswap_eligible.def|engine/composition/hotswap_swappable.def|engine/composition/hotswap_probe_cases.def|engine/composition/hotswap_services.def|engine/composition/hotswap_islands.def", "make_lint_gates hotswap_module_v2")
+AGENT_IMPACT_RULE("engine/composition/hotswap_denied_leaves.def|tools/lint/lintc/gate_hotswap_denied_leaves.c|engine/composition/hotswap_eligible.def|engine/composition/hotswap_swappable.def|engine/composition/hotswap_probe_cases.def|engine/composition/hotswap_services.def|engine/composition/hotswap_islands.def", "make_lint_gates hotswap_module_v2")
 /* LANE test-suite module mode: the hot-swap loader's publish hooks moved out
  * from behind ZCL_DEV_BUILD to ZCL_DEV_BUILD||ZCL_TESTING so the parallel test
  * harness can load a freshly compiled module .so through THE production loader
@@ -3210,7 +3210,7 @@ AGENT_IMPACT_RULE("tools/install/install_selftest.c|tools/install/install_selfte
  * check_model_sql_literals. Both are text scanners whose verdict changes
  * if it changes, so it rides the model group the SQL gate reports through
  * as well as the lint-gate group. */
-AGENT_IMPACT_RULE("tools/lint/strip_c_comments.awk|tools/lint/check_model_sql_literals.sh|tools/lint/model_sql_literal_baseline.txt", "activerecord_query_builder models make_lint_gates")
+AGENT_IMPACT_RULE("tools/lint/strip_c_comments.awk|tools/lint/lintc/gate_model_sql_literals.c|tools/lint/model_sql_literal_baseline.txt", "activerecord_query_builder models make_lint_gates")
 
 /* Territory: a module's generated scorecard, and the general brief and
  * roll-up built on it. Every number is a projection of the code index and
@@ -3226,13 +3226,13 @@ AGENT_IMPACT_RULE("cognition/modules/territory/include/territory/territory.h|cog
  * self-test lives inside the engine group, and cold_join_sovereign rides along
  * because P2 asserts that nothing in a Z23 object file reaches a TLS client —
  * which is the exact reason this module has no transport in it. */
-AGENT_IMPACT_RULE("engine/modules/engine/src/*.c|engine/modules/engine/include/engine/*.h|tests/harness/src/test_engine.c|tests/harness/src/test_engine_claude.c|tests/harness/src/test_engine_escalate.c|tools/engine_unit.c|tools/lint/check_no_api_keys.sh", "engine engine_claude engine_escalate engine_rules cold_join_sovereign make_lint_gates")
+AGENT_IMPACT_RULE("engine/modules/engine/src/*.c|engine/modules/engine/include/engine/*.h|tests/harness/src/test_engine.c|tests/harness/src/test_engine_claude.c|tests/harness/src/test_engine_escalate.c|tools/engine_unit.c|tools/lint/lintc/gate_git_scan_a.c", "engine engine_claude engine_escalate engine_rules cold_join_sovereign make_lint_gates")
 /* The heuristic half: the rule vocabulary, the scorer that retires a rule off
  * gate outcomes, the miner that proposes one, and the read leaf that shows the
  * table. A change to the vocabulary is a change to what every executor is
  * shown, so it runs the group that proves the scoring AND the gate that keeps
  * the vocabulary closed. */
-AGENT_IMPACT_RULE("engine/composition/rule_vocab.def|engine/modules/engine/src/engine_rule_*.c|engine/modules/engine/include/engine/engine_rule_*.h|tests/harness/src/test_engine_rules.c|tools/lint/check_rule_vocabulary.sh", "engine_rules engine command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/rule_vocab.def|engine/modules/engine/src/engine_rule_*.c|engine/modules/engine/include/engine/engine_rule_*.h|tests/harness/src/test_engine_rules.c|tools/lint/lintc/gate_rule_vocabulary.c", "engine_rules engine command_registry_catalog native_api_contract make_lint_gates")
 
 /* Tier-1 macOS capability truth and its derived runner. Every declared row
  * changes which availability/refusal evidence the public aggregate claims,
@@ -3241,7 +3241,7 @@ AGENT_IMPACT_RULE("engine/composition/rule_vocab.def|engine/modules/engine/src/e
  * one native-arm64-only row: it self-skips on Linux and would make the
  * skip-free focused proof vacuous, while the static validator still requires
  * it in the 38-group union and make macos-acceptance executes it on arm64. */
-AGENT_IMPACT_RULE("engine/composition/platform/macos_capabilities.def|tools/scripts/macos_acceptance.sh|tools/lint/check_macos_acceptance.sh", "test_binary_ab_fallback test_binary_staleness test_blake2b_batch_parity test_boot_shutdown_marker_persistence test_chacha20_isa_parity test_cold_join_sovereign test_confine test_crypto test_dev_activation test_dev_platform test_directory_watcher test_encoding test_fast_sync_coins_export test_hw_profile test_net test_noise_nk_handshake test_noise_transport_parity test_noise_xx_handshake test_os_proc test_os_sandbox test_rng test_rpc test_sandbox_process_budget test_self_backtrace test_service_state test_service_state_driver test_sha256_isa_parity test_sha3_256_x4 test_sha3_512_x4 test_sqlite test_thread_qos test_tor test_wallet test_wallet_backup test_watcher_record test_z23_front_door test_zcode_verify make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/platform/macos_capabilities.def|tools/scripts/macos_acceptance.sh|tools/lint/lintc/gate_macos_acceptance.c", "test_binary_ab_fallback test_binary_staleness test_blake2b_batch_parity test_boot_shutdown_marker_persistence test_chacha20_isa_parity test_cold_join_sovereign test_confine test_crypto test_dev_activation test_dev_platform test_directory_watcher test_encoding test_fast_sync_coins_export test_hw_profile test_net test_noise_nk_handshake test_noise_transport_parity test_noise_xx_handshake test_os_proc test_os_sandbox test_rng test_rpc test_sandbox_process_budget test_self_backtrace test_service_state test_service_state_driver test_sha256_isa_parity test_sha3_256_x4 test_sha3_512_x4 test_sqlite test_thread_qos test_tor test_wallet test_wallet_backup test_watcher_record test_z23_front_door test_zcode_verify make_lint_gates")
 /* Authored personas. personas.def is prose, so nothing it says can be proven
  * by running code — which is exactly why it needs a gate rather than a test.
  * z23-lint check-persona-resolves is that gate, and it rides make_lint_gates. The
@@ -3344,7 +3344,7 @@ AGENT_IMPACT_RULE("tests/harness/src/test_util_signal_handler.c", "util_signal_h
  * admitted by, folded from the source Merkle tree's directory and leaf
  * digests. */
 AGENT_IMPACT_RULE("cognition/modules/codeindex/src/codeindex_closure.c|cognition/modules/codeindex/include/codeindex/codeindex_closure.h|tests/harness/src/test_code_closure.c", "code_closure code_merkle codeindex make_lint_gates")
-AGENT_IMPACT_RULE("engine/composition/fleet_facts.def|cognition/modules/fleetfacts/*|tools/command/native_dev_know.c|tools/lint/check_fleet_facts.sh|tests/harness/src/test_fleet_facts.c|docs/agent/EXECUTOR_HEURISTICS.md", "fleet_facts command_registry_catalog native_api_contract make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/fleet_facts.def|cognition/modules/fleetfacts/*|tools/command/native_dev_know.c|tools/lint/lintc/gate_fleet_facts.c|tests/harness/src/test_fleet_facts.c|docs/agent/EXECUTOR_HEURISTICS.md", "fleet_facts command_registry_catalog native_api_contract make_lint_gates")
 
 /* Peer admission must retain its regression for a production-only edit. */
 AGENT_IMPACT_RULE("engine/modules/fleetledger/src/fleet_ledger.c|engine/modules/fleetledger/src/fleet_ledger_replay.c|engine/modules/fleetledger/src/fleet_ledger_replay.h|engine/modules/fleetledger/include/fleetledger/fleet_ledger.h|tests/harness/src/test_fleet_ledger.c", "fleet_ledger make_lint_gates")

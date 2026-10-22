@@ -1698,7 +1698,7 @@ ZCL_COMMAND_READY_READ(
  *
  * It nests under dev.agent rather than becoming a new `dev` child because
  * the top-level `dev` menu is at its ZCL_COMMAND_BRANCH_BUDGET (see
- * tools/lint/check_describe_budget.sh); it sits next to dev.agent.rules and
+ * tools/lint/lintc/gate_describe_budget.c); it sits next to dev.agent.rules and
  * dev.agent.start. */
 
 ZCL_COMMAND_READY_READ(

@@ -1,7 +1,7 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 # check_source_identity_authority baseline — reviewed exceptions to the
 # Q1 (baked build)/Q2 (working tree) source_id_sha256 naming and reader
-# ratchet. See tools/lint/check_source_identity_authority.sh's header for
+# ratchet. See tools/lint/lintc/gate_source_identity_authority.c's header for
 # class R (positional agentbuild read) and class P (bare-key working-tree
 # producer).
 #
@@ -68,7 +68,7 @@
 #     debt (1 copy) in tools/lint/identity_parser_baseline.txt. Left for a
 #     follow-up conversion to zcl_agentbuild_v2_top_source_id.
 #
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_source_identity_authority.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-source-identity-authority
 tools/dev/agent-dev-status.sh 1
 tools/dev/deploy-dev-lane.sh 1
 tools/dev/dev_lib.sh 1

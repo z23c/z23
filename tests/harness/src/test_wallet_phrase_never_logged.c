@@ -440,7 +440,7 @@ static int t_refusal_is_scoped_to_a_spendable_wallet(void)
  * owner approved for this surface ("...in Z23 only... will not work in
  * Electrum..."). That sentence has to be READABLE on both surfaces; the other
  * surface is core.wallet.recovery.restore's help text, held by
- * tools/lint/check_describe_budget.sh + the catalog test group.
+ * tools/lint/lintc/gate_describe_budget.c + the catalog test group.
  *
  * The print runs in a forked child so the parent can drain the pty master
  * continuously — the phrase block is ~1.5 KB and a child writing into an

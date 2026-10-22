@@ -38,7 +38,7 @@
  *     is REMOTE_CLASS_NEVER and that is not a judgement call.
  *
  * ── WHY THIS IS A TLS CLIENT AND NOT A curl PIPELINE ─────────────────────
- * tools/lint/check_no_shellouts.sh is right, and `curl` is a dependency a
+ * tools/lint/lintc/gate_tree_walk.c is right, and `curl` is a dependency a
  * stranger's machine may not have. This program uses the tree's own TLS
  * client (tools/acme/tls_client.h) and its own JSON parser. It is compiled
  * straight from source into its own executable, with no intermediate object
@@ -54,7 +54,7 @@
  * decides" quietly becomes "the gate decides, except for that one".
  *
  * That does mean this program launches another program, so the tension with
- * tools/lint/check_no_shellouts.sh was checked rather than assumed, and it is
+ * tools/lint/lintc/gate_tree_walk.c was checked rather than assumed, and it is
  * not a tension:
  *   - that gate protects the ALWAYS-RUNNING NODE binary. It scans app/, lib/,
  *     src/ and config/ for system(), popen() and execlp(), because a shell-out

@@ -9,7 +9,7 @@
 
 // suffix-ok:entity-FileService — the entity is a "file service" offer (a
 // Model row), not the Service shape; the _service here names the thing,
-// not the folder. See tools/lint/check_framework_filename_suffix.sh.
+// not the folder. See tools/lint/lintc/gate_git_scan_a.c.
 
 #include "platform/time_compat.h"
 #include "models/file_service.h"

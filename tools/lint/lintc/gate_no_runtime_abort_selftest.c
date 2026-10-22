@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: --selftest for check-no-runtime-abort — plants each case from
- * tools/lint/check_no_runtime_abort.sh's own --selftest into a sandboxed
+ * tools/lint/lintc/gate_no_runtime_abort.c's own --selftest into a sandboxed
  * scan root and asserts the gate's verdict, in-process (no subshell —
  * unlike the shell, which re-execs itself; nra_run_gate() is the shared
  * entry point both the production path and this selftest call directly).

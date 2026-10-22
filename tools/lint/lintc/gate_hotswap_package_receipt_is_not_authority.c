@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: C23 lint gate — check-hotswap-package-receipt-is-not-authority.
- * Port of tools/lint/check_hotswap_package_receipt_is_not_authority.sh: the
+ * Port of tools/lint/lintc/gate_hotswap_package_receipt_is_not_authority.c: the
  * hot-swap package manifest (a sidecar record beside a built module .so) is
  * a LABEL, never a KEY. This gate proves engine/modules/hotswap/{src,include/hotswap}
  * never opens, stats, or parses a manifest FILE (no ".manifest" string

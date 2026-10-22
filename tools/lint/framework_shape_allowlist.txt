@@ -1,6 +1,6 @@
 # framework_shape_allowlist.txt
 #
-# Allowlist for tools/lint/framework_shape_check.sh
+# Allowlist for tools/lint/lintc/gate_framework_shape.c
 # Existing violations get listed here so the ratchet doesn't regress.
 # Goal: empty by Phase 2.
 #

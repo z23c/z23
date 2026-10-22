@@ -83,7 +83,7 @@ SELECTION_GATE("check-clang-portability", SELECTION_UNITS_CLANG_ORACLE, "",
  * by the gate but are in no premise, so a unit-selected run scans them
  * fresh every time. */
 SELECTION_GATE("check-no-api-keys", SELECTION_UNITS_FILES, "",
-    "tools/lint/check_no_api_keys.sh " SELECTION_DRIVER,
+    "tools/lint/lintc/gate_git_scan_a.c " SELECTION_DRIVER,
     "check-no-api-keys: " SELECTION_LINTC_VARS,
     "")
 

@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: check-no-runtime-abort's PASS/FAIL/UPDATE report — byte-parity
- * port of the reporting half of tools/lint/check_no_runtime_abort.sh (at
+ * port of the reporting half of tools/lint/lintc/gate_no_runtime_abort.c (at
  * 89fca9905), split out of gate_no_runtime_abort.c under the cyclomatic
  * complexity cap. Builds the same violation text the shell's DETAIL[]
  * array produces: a "  <path> — N runtime abort site(s), ..." header
@@ -112,7 +112,7 @@ int nra_write_update(const struct nra_ctx *c, const struct nra_rows *rows,
                   "#\n"
                   "# core/ is byte-sealed: its rows are counted and frozen, and are\n"
                   "# only editable through the owner unseal ritual (make core-unseal).\n"
-                  "# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_no_runtime_abort.sh\n",
+                  "# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-no-runtime-abort\n",
                   f);
             for (size_t i = 0; i < live.n; i++)
                 fprintf(f, "%s %d\n", live.v[i].path, live.v[i].allowed);

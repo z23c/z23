@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: --selftest for check-remote-command-classes — plants each
- * defect class from tools/lint/check_remote_command_classes.sh's own
+ * defect class from tools/lint/lintc/gate_remote_command_classes.c's own
  * selftest() into a miniature registry/agent/table fixture and asserts the
  * gate's verdict, so a gate nobody has watched fail is not an assertion.
  *

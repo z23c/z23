@@ -3,7 +3,7 @@
  * purpose: shared declarations for check-fleet-observations
  * (gate_fleet_observations.c, gate_fleet_observations_proc.c and
  * gate_fleet_observations_selftest.c) — the C23 port of
- * tools/lint/check_fleet_observations.sh.
+ * tools/lint/lintc/gate_fleet_observations.c.
  */
 #ifndef GATE_FLEET_OBSERVATIONS_PRIV_H
 #define GATE_FLEET_OBSERVATIONS_PRIV_H

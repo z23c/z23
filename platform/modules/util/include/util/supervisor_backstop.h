@@ -9,7 +9,7 @@
  * registered child's on_tick/on_stall from ONE dispatch loop. It cannot
  * register itself on the tree it drives — a wedged supervisor can't
  * detect its own wedge — so it is a documented exemption from Gate #23
- * (tools/lint/check_thread_supervision.sh), and its only prior backstop
+ * (tools/lint/lintc/gate_thread_supervision.c), and its only prior backstop
  * was the shutdown-path alarm() in app_shutdown_svc, which only fires
  * once shutdown has already been requested by something else. If the
  * supervisor thread itself dies, or wedges permanently inside one

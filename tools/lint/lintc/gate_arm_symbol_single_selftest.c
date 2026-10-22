@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * check-arm-symbol-single family — --selftest. Port of the six-case
- * --selftest of tools/lint/check_arm_symbol_single.sh: (1) a cross-arm
+ * --selftest of tools/lint/lintc/gate_arm_symbol_single.c: (1) a cross-arm
  * non-static duplicate must FAIL; (2) the same shape but both bodies
  * static must PASS; (3) a function-generating macro invoked twice under
  * different names must PASS (no false hit from the macro's own braces);

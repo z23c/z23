@@ -2,7 +2,7 @@
  *
  * purpose: gate family — hosted-suite cold-verdict verification
  * (check-hosted-suite-verdict), the C23 port of
- * tools/lint/check_hosted_suite_verdict.sh. Holds the hosted test job to one
+ * tools/lint/lintc/gate_hosted_suite_verdict.c. Holds the hosted test job to one
  * non-vacuous cold-suite verdict: exactly one SUITE VERDICT line whose fields
  * are well-formed, complete, non-duplicated and numerically coherent, plus
  * exactly one cold ALL TESTS PASSED headline and no cached or failure

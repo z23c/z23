@@ -185,8 +185,8 @@ static bool ci_fixture(void)
         "# z23-generated-artifact: zcl.generated_artifact.v1\n"
         "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
         "# asserts: multi_arm_definition(path,symbol)\n"
-        "# generated-by: tools/lint/check_arm_symbol_single.sh\n"
-        "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh\n"
+        "# generated-by: build/bin/z23-lint check-arm-symbol-single\n"
+        "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single\n"
         "platform/modules/demo/src/demo.c\tdemo_platform\n");
     if (!ok) return false;
     return ci_copy("tests/harness/include/test/code_inventory_semantic_fixture.h",
@@ -961,8 +961,8 @@ static bool ci_include_fixture(void)
             "# z23-generated-artifact: zcl.generated_artifact.v1\n"
             "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
             "# asserts: multi_arm_definition(path,symbol)\n"
-            "# generated-by: tools/lint/check_arm_symbol_single.sh\n"
-            "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh\n");
+            "# generated-by: build/bin/z23-lint check-arm-symbol-single\n"
+            "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single\n");
 }
 
 static void ci_include_semantics(const struct ci_inventory_report *report,

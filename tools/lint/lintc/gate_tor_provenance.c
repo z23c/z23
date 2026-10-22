@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family - check-tor-provenance of the C23 lint runtime, the
- * replacement for the bash body of tools/lint/check_tor_provenance.sh. The
+ * replacement for the bash body of tools/lint/lintc/gate_tor_provenance.c. The
  * bundled Tor archives are bound to the vendor/tor commit, the archive bytes
  * and the compiler that built them (tools/tor_provenance.c). The gate
  *

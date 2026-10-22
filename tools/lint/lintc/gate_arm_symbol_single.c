@@ -7,7 +7,7 @@
  * definition analyzer; gate_arm_symbol_single_coverage.c holds the
  * coverage oracle; gate_arm_symbol_single_selftest.c holds --selftest.
  *
- * Byte-parity C23 port of tools/lint/check_arm_symbol_single.sh (a
+ * Byte-parity C23 port of tools/lint/lintc/gate_arm_symbol_single.c (a
  * non-static function is DEFINED — has a body — only ONCE per translation
  * unit; since the C standard already forbids two unconditional definitions
  * of one external symbol, any hit is necessarily two disjoint preprocessor
@@ -290,8 +290,8 @@ static const char *const k_asy_claims[] = {
     "# z23-generated-artifact: zcl.generated_artifact.v1",
     "# artifact-id: zcl.arm_symbol_single_baseline.v1",
     "# asserts: multi_arm_definition(path,symbol)",
-    "# generated-by: tools/lint/check_arm_symbol_single.sh",
-    "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh",
+    "# generated-by: build/bin/z23-lint check-arm-symbol-single",
+    "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single",
 };
 enum { ASY_NCLAIMS = 5 };
 
@@ -474,7 +474,7 @@ static int asy_write_baseline(const char *baseline,
     fputs("# check_arm_symbol_single baseline — <path>\\t<function> pairs where a non-static\n"
           "# function is DEFINED more than once in one translation unit\n"
           "# (necessarily in disjoint preprocessor arms — see the header\n"
-          "# comment in tools/lint/check_arm_symbol_single.sh for the defect class and its\n"
+          "# comment in build/bin/z23-lint check-arm-symbol-single for the defect class and its\n"
           "# limits). One pair per line, tab-separated. THE LIST MAY ONLY\n"
           "# SHRINK.\n"
           "#\n"

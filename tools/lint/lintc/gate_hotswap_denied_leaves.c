@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-hotswap-denied-leaves of the C23 lint
- * runtime. Port of tools/lint/check_hotswap_denied_leaves.sh (now a shim):
+ * runtime. Port of tools/lint/lintc/gate_hotswap_denied_leaves.c (now a shim):
  * no command leaf named in engine/composition/hotswap_denied_leaves.def may
  * appear in ANY hot-swap manifest, nor in a ZCL_HOTSWAP_GEN /
  * ZCL_HOTSWAP_MODULE_GEN leaf table of a translation unit either manifest

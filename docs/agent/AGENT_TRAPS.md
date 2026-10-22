@@ -281,7 +281,7 @@ CLEAN**, and nothing fires for months.
   are now derived, one is not.** `tools/lint/repo_shape.sh` parses the
   Makefile and publishes `ZCL_REPO_TOPS[]`, and `check_no_orphan_placement.sh`
   now reads it rather than restating it. `MODULE_TOPS` in
-  `tools/lint/check_doc_inline_paths.sh` is still a hand-kept literal, and
+  `tools/lint/lintc/gate_doc_inline_paths.c` is still a hand-kept literal, and
   deliberately a **different** set — it matches doc-citable paths, so it
   includes `docs`, `apps` and `src`, which are not build roots. Do not
   "unify" the two without reading both: they answer different questions.

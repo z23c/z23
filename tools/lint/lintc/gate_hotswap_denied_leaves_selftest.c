@@ -3,7 +3,7 @@
  * purpose: selftest for check-hotswap-denied-leaves (sibling of
  * gate_hotswap_denied_leaves.c — the run() implementation lives there, its
  * declarations in lintc.h). Port of the 9-case --selftest of
- * tools/lint/check_hotswap_denied_leaves.sh: an unmodified sandbox copy
+ * tools/lint/lintc/gate_hotswap_denied_leaves.c: an unmodified sandbox copy
  * passes, a denied leaf trips as an eligibility PROBE, as one entry of a
  * space-separated swappable LEAF LIST, as a resident PROBE CASE, and inside
  * a C ZCL_HOTSWAP_GEN leaf table; the same leaf named only in a COMMENT or

@@ -8,7 +8,7 @@ Four properties, each a lookup rather than a guess:
 
 | Property | Mechanism |
 |---|---|
-| Location predicts content | 7 shape folders (the Event shape has none), lint-enforced by `tools/lint/framework_shape_check.sh` + `tools/lint/check_framework_filename_suffix.sh`; shapes canonical in `cognition/modules/codeindex/src/codeindex_group.c` (`k_app_shapes[]`) |
+| Location predicts content | 7 shape folders (the Event shape has none), lint-enforced by `tools/lint/lintc/gate_framework_shape.c` + `tools/lint/lintc/gate_git_scan_a.c`; shapes canonical in `cognition/modules/codeindex/src/codeindex_group.c` (`k_app_shapes[]`) |
 | Navigation is O(1) indexed | `cognition/modules/codeindex/` SQLite index + the `code` command branch (`engine/composition/commands/code.def`, `tools/command/native_code_command.c`) answer where-is/what-calls/what's-in-file without grep |
 | Impact is a lookup | `cognition/controllers/src/agent_impact_rules.c` (`agent_impact_apply_shared_rules`) maps a changed path → focused test groups, shared by native `agentimpact` and `make fast-ci` |
 | Content self-describes | every indexed file carries a `purpose` string, derived from the first substantive line of its top-of-file block comment (`ci_file_purpose()`, `cognition/modules/codeindex/src/codeindex_scan.c`); `code file`/`code group`/`code map` render it |
@@ -39,12 +39,12 @@ counts); `code room` is the single-room detail.
 Each follows the shape-gate ladder (`ZCL_LINT_MODE` WARN → RATCHET
 (shrink-only baseline) → HARD):
 
-- **`check-file-purpose`** (`tools/lint/check_file_purpose.sh`) — every
+- **`check-file-purpose`** (`tools/lint/lintc/gate_file_purpose.c`) — every
   indexed `.c`/`.h` must yield a non-empty derivable purpose.
-- **`check-group-purpose`** (`tools/lint/check_group_purpose.sh`) — every
+- **`check-group-purpose`** (`tools/lint/lintc/gate_doc_index.c`) — every
   group node (`ci_group_emit_all`) must have a non-empty purpose; the group
   list is finite (~35 `lib/<mod>` + fixed roots), so this gate runs HARD.
-- **`check-no-orphan-placement`** (`tools/lint/check_no_orphan_placement.sh`)
+- **`check-no-orphan-placement`** (`tools/lint/lintc/gate_ratchet_ports.c`)
   — no new source file may land in the catch-all `root` group; every file
   must resolve to a known `lib/<mod>`/`app/<shape>`/`core`/`config`/`domain`/
   `adapters`/`ports`/`tools` group.

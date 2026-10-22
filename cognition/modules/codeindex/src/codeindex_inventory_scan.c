@@ -510,10 +510,10 @@ bool inv_read_arm_symbol_baseline(struct inv_scan *s)
                         "# asserts: multi_arm_definition(path,symbol)") == 0)
             assertion = true;
         else if (strcmp(line,
-                        "# generated-by: tools/lint/check_arm_symbol_single.sh") == 0)
+                        "# generated-by: build/bin/z23-lint check-arm-symbol-single") == 0)
             generated_by = true;
         else if (strcmp(line,
-                        "# regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_arm_symbol_single.sh") == 0)
+                        "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single") == 0)
             regenerate = true;
         if (!line[0] || line[0] == '#') continue;
         char *tab = strchr(line, '\t');

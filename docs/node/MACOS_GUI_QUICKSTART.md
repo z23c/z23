@@ -20,7 +20,7 @@ application. Everything on this page is one pass through that journey.
 | Prove it headless | `make myapp-selftest` | [Run it](#run-it) |
 | Change something, see it again | edit, then `make myapp` | [Edit and see](#edit-and-see) |
 | Ship a `.app` | `make myapp-app` | [Ship it](#ship-it) |
-| Prove the `.app` reproduces | `tools/lint/check_app_bundle_reproducible.sh --bin …` | [Ship it](#ship-it) |
+| Prove the `.app` reproduces | `tools/lint/lintc/gate_app_bundle_reproducible.c --bin …` | [Ship it](#ship-it) |
 
 Commands are written `myapp`; substitute the name you chose.
 
@@ -167,7 +167,7 @@ Two runs of the bundler over the same binary must produce byte-identical
 trees, signature included:
 
 ```bash
-tools/lint/check_app_bundle_reproducible.sh --bin build/bin/myapp \
+tools/lint/lintc/gate_app_bundle_reproducible.c --bin build/bin/myapp \
     --probe-args '--frames=12 --quiet' --probe-expect 'selftest: OK frames=12'
 ```
 
@@ -176,7 +176,7 @@ headless run; the bundled executable must print it and exit 0, which is also
 the check that the signature actually launches rather than being killed by the
 kernel. The same gate with no arguments proves the default subject; the lint
 umbrella runs that form on every push
-(`z23-lint check-app-bundle-reproducible`, which `tools/lint/check_app_bundle_reproducible.sh` runs;
+(`z23-lint check-app-bundle-reproducible`, which `tools/lint/lintc/gate_app_bundle_reproducible.c` runs;
 the shim needs `build/bin/z23-lint` built first with `make build/bin/z23-lint`).
 
 ## Measured on one host

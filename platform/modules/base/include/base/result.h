@@ -42,7 +42,7 @@
  * -Wunused-value. Note also that C23 lets a `(void)` cast suppress it —
  * so this attribute is a fence against NEW silent discards, not a way to
  * excavate the existing cast-discard population. That population is what
- * tools/lint/check_result_discard.sh ratchets down. */
+ * tools/lint/lintc/gate_source_patterns.c ratchets down. */
 struct [[nodiscard]] zcl_result {
     bool        ok;
     int         code;                         /* 0 on success */
@@ -78,7 +78,7 @@ struct [[nodiscard]] zcl_result {
  * nothing about why the failure is safe to drop. This macro makes the
  * discard expressible rather than merely tolerated: `reason` must be a
  * non-empty string literal, enforced at compile time, and the lint gate
- * tools/lint/check_result_discard.sh counts every remaining bare
+ * tools/lint/lintc/gate_source_patterns.c counts every remaining bare
  * `(void)` discard as debt that may only shrink.
  *
  *   ZCL_IGNORE_RESULT(flush_cache(db), "best-effort; tip refold re-derives it");

@@ -136,7 +136,7 @@ static int run_floor_gate_selftest(const char *fixture_path)
         _putenv_s("ZCL_PEER_FLOOR_SELFTEST_FILE", fixture_path) != 0)
         return -1;
     const char *const argv[] = {
-        "sh", "tools/lint/check_peer_floor_single_source.sh", NULL,
+        "build/bin/z23-lint", "check-peer-floor-single-source", NULL,
     };
     int rc = test_spawn_argv_wait(argv);
     _putenv_s("ZCL_PEER_FLOOR_SELFTEST", "");
@@ -150,8 +150,8 @@ static int run_floor_gate_selftest(const char *fixture_path)
         if (fd >= 0) { dup2(fd, STDOUT_FILENO); dup2(fd, STDERR_FILENO); close(fd); }
         setenv("ZCL_PEER_FLOOR_SELFTEST", "1", 1);
         setenv("ZCL_PEER_FLOOR_SELFTEST_FILE", fixture_path, 1);
-        execl("tools/lint/check_peer_floor_single_source.sh",
-              "check_peer_floor_single_source.sh", (char *)NULL);
+        execl("build/bin/z23-lint", "z23-lint", "check-peer-floor-single-source",
+              (char *)NULL);
         _exit(127);
     }
     int rc = 0;

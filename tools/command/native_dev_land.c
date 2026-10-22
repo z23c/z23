@@ -2468,7 +2468,7 @@ static void dl_watcher_kick_scheduled(const char *wt, char *detail, size_t cap)
  * reason native_vault_command.c's vault_dispatch() calls target->handler(...)
  * instead of naming the routed leaf's handler directly: a literal
  * `zcl_native_handle_dev_loop_start_async(&req, &reply)` call site here
- * makes tools/lint/check_command_input_keys.sh's call-graph closure walk
+ * makes tools/lint/lintc/gate_command_input_keys_run.c's call-graph closure walk
  * INTO that function's real callee, dev_loop_ensure() (native_dev_command.c),
  * which genuinely reads "root"/"mode" off ITS OWN request — and the closure
  * has no notion of which struct instance a callee reads, only that the

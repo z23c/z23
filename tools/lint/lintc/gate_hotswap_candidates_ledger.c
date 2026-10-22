@@ -168,7 +168,7 @@ static int hl_collect(const char *buf, size_t n, const char *tok,
  *     mapping) where the shell's $? would be 128+SIG. */
 
 
-static const char k_hl_shape_gate[] = "tools/lint/check_hotswap_swappable_shape.sh";
+static const char k_hl_shape_gate[] = "build/bin/z23-lint check-hotswap-swappable-shape";
 static const char k_hl_denied_def[] = "engine/composition/hotswap_denied_leaves.def";
 static const char k_hl_denied_tok[] = "HOTSWAP_" "DENIED_LEAF(";
 
@@ -547,7 +547,7 @@ static int hl_run_impl(FILE *out, FILE *err)
     if (rc == 0)
         rc = gate_require_scanned(atoi(g.f[HL_LEAVES]), 1,
                 "check_hotswap_candidates_ledger",
-                "tools/lint/check_hotswap_swappable_shape.sh reported zero "
+                "build/bin/z23-lint check-hotswap-swappable-shape reported zero "
                 "swappable leaves");
     if (rc == 0)
         rc = hl_summary_parity(tool, &re, &g, out, &fail);

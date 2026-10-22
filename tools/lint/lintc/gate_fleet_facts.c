@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-fleet-facts of the C23 lint runtime, the
- * replacement for tools/lint/check_fleet_facts.sh. engine/composition/
+ * replacement for tools/lint/lintc/gate_fleet_facts.c. engine/composition/
  * fleet_facts.def is the one place the fleet's doctrine is written down
  * (FLEET_TERM/FLEET_RELATION/FLEET_CONTEXT/FLEET_FACT rows); this gate
  * holds it internally consistent and holds docs/agent/EXECUTOR_HEURISTICS.md's

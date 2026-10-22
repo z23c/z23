@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: C23 lint gate — check-remote-command-classes. Byte-parity port
- * of tools/lint/check_remote_command_classes.sh (at 89fca9905), which used
+ * of tools/lint/lintc/gate_remote_command_classes.c (at 89fca9905), which used
  * to reach through two standalone awk helper programs (now retired — see
  * gate_remote_command_classes_parse.c). Every command leaf in the typed
  * registry (every .def file under engine/composition/commands/) and the

@@ -29,13 +29,13 @@
 /* A new repair-rung-named file (basename contains "reconcile") planted under
  * engine/services/src so the gate's `find app -name '*.c'` scan sees it. */
 #define RRUNG_FIXTURE_DST "engine/services/src/_repair_rung_fixture_tmp_reconcile.c"
-#define BORROWED_SEED_SCRIPT_REL "tools/lint/check_no_new_borrowed_seed.sh"
+#define BORROWED_SEED_SCRIPT_REL "build/bin/z23-lint check-no-new-borrowed-seed"
 /* A production-scope caller planted under engine/services/src so the borrowed-seed
  * ratchet's app/config/lib/tools scan sees it. */
 #define BORROWED_SEED_FIXTURE_DST \
     "engine/services/src/_borrowed_seed_fixture_tmp.c"
 #define COIN_BACKFILL_CALLER_SCRIPT_REL \
-    "tools/lint/check_no_new_coin_backfill_caller.sh"
+    "build/bin/z23-lint check-no-new-coin-backfill-caller"
 /* Production-scope callers planted under engine/services/src and domain/ so the
  * coin-backfill entry-point ratchet proves both app-layer and non-app compiled
  * production roots are scanned. */
@@ -47,7 +47,7 @@
     "test-tmp/_coin_backfill_caller_root_tmp"
 
 #define WRITER_FRONTIER_SCRIPT_REL \
-    "tools/lint/check_no_writer_below_sealed_frontier.sh"
+    "build/bin/z23-lint check-no-writer-below-sealed-frontier"
 /* A non-designated production caller of the sealed-segment WRITE API
  * (chain_segment_seal_range), planted under engine/services/src; the gate
  * allowlists by exact path, so the fixture basename differs from the real
@@ -89,7 +89,7 @@ int t_no_new_repair_rung(void)
     return failures;
 }
 
-#define COORD_SHELL_SCRIPT_REL "tools/lint/check_no_new_coordination_shell.sh"
+#define COORD_SHELL_SCRIPT_REL "build/bin/z23-lint check-no-new-coordination-shell"
 /* Ratchet: the coordination-shell gate is green on the real tree, and its own
  * --selftest sandbox runs the trip and recover matrix (a new top-level script
  * trips, a stale list entry trips, an unsorted list trips, a subdirectory

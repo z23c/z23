@@ -24,7 +24,7 @@
 #include <unistd.h>
 #include "lintc.h"
 
-/* check-hotswap-eligible-scope — port of tools/lint/check_hotswap_eligible_scope.sh
+/* check-hotswap-eligible-scope — port of tools/lint/lintc/gate_hotswap_manifests.c
  * (now a shim). Every TU in the Tier-1 hot-swap eligibility manifest must be
  * an app-layer surface: consensus / validation / storage / net / coins /
  * reducer-stage code is never hot-swappable, not even in a dev build, because
@@ -531,7 +531,7 @@ int check_hotswap_eligible_scope_selftest(void)
 
 
 /* check-hotswap-static-state — port of
- * tools/lint/check_hotswap_static_state.sh (now a shim). Every TU that can be
+ * tools/lint/lintc/gate_hotswap_manifests.c (now a shim). Every TU that can be
  * recompiled into a hot-swap .so must define NO mutable file-scope statics: a
  * generation/module .so recompiles the whole TU, so a mutable file-scope
  * static becomes a fresh zero-initialized copy inside the .so and the live

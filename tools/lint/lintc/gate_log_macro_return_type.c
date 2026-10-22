@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-log-macro-return-type of the C23 lint runtime,
- * the replacement for tools/lint/check_log_macro_return_type.sh. The LOG_*
+ * the replacement for tools/lint/lintc/gate_log_macro_return_type.c. The LOG_*
  * guard macros return from the enclosing function; this gate catches the
  * return-value/type mismatches that compile but invert behavior (LOG_ERR or
  * LOG_NULL inside a bool function, LOG_FAIL inside a non-bool one).

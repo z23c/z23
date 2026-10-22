@@ -4,7 +4,7 @@
 # Fix one by stating the reason:
 #   ZCL_IGNORE_RESULT(fn(...), "why the failure is safe to drop");
 # Regenerate after fixing some:
-#   ZCL_LINT_MODE=UPDATE ./tools/lint/check_result_discard.sh
+#   ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-result-discard
 engine/conditions/src/header_stall_at_height.c::header_probe_pull_range
 engine/services/src/block_index_integrity.c::chain_set_active_tip
 engine/services/src/block_index_loader.c::chain_set_active_tip

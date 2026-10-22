@@ -109,7 +109,7 @@ static int run_install_git_hooks(const char *source_root, const char *root,
         (void)setenv("ZCL_GIT_HOOK_ROOT", root, 1);
         (void)setenv("ZCL_GIT_HOOK_NATIVE_BIN", native_bin, 1);
         (void)setenv("ZCL_GIT_HOOK_HOST", "posix", 1);
-        execl(script, script, (char *)NULL);
+        gate_exec(script, NULL);
         _exit(127);
     }
     int rc = 0;
@@ -1005,7 +1005,7 @@ int t_no_uncited_victory(void)
  * as a stray, without writing into the live source root; (3) removing the
  * override recovers green; (4) the gate is in LINT_GATES and
  * DEFENSIVE_CODING.md's canonical block. Runs on the real worktree. */
-#define ROOT_STRAY_SCRIPT_REL  "tools/lint/check_no_stray_root_files.sh"
+#define ROOT_STRAY_SCRIPT_REL  "build/bin/z23-lint check-no-stray-root-files"
 
 /* Evidence for a failed run_gate_script(ROOT_STRAY_SCRIPT_REL, ...) call:
  * reads back the gate's redirected output (bounded) and lists the root

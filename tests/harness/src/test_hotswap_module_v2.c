@@ -583,7 +583,7 @@ static int t_probe_mismatch_publishes_nothing(void)
  * longer runs — the exact hazard the pin exists to close.
  *
  * This re-derives the ROOT from core/MANIFEST.sha3 in C, independently of
- * tools/lint/check_core_seal_root_mirror.sh's shell parse, so the two would
+ * tools/lint/lintc/gate_landing_proof.c's shell parse, so the two would
  * have to be wrong the same way to agree wrongly. */
 static int t_consensus_pin_matches_the_seal(void)
 {

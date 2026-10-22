@@ -43,7 +43,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
 
-GATE="tools/lint/check_silent_bool_errors.sh"
+GATE="build/bin/z23-lint"
 mkdir -p "$ROOT/.cache"
 # The scan root stays REPO-RELATIVE on purpose: production gates walk
 # repo-relative paths, so the exclusion regexes (scan_exclusions.sh) never see
@@ -90,11 +90,11 @@ trap cleanup EXIT
 # itself launched.
 run_selftest_style() {
     env -u ZCL_LINT_PRODUCTION_SCAN \
-        ZCL_SILENT_BOOL_SCAN_DIRS_FOR_TEST="$SCAN_ROOT" bash "$@"
+        ZCL_SILENT_BOOL_SCAN_DIRS_FOR_TEST="$SCAN_ROOT" "$@"
 }
 run_production_style() {
     env ZCL_LINT_PRODUCTION_SCAN=1 \
-        ZCL_SILENT_BOOL_SCAN_DIRS_FOR_TEST="$SCAN_ROOT" bash "$@"
+        ZCL_SILENT_BOOL_SCAN_DIRS_FOR_TEST="$SCAN_ROOT" "$@"
 }
 
 fail=0
@@ -135,7 +135,7 @@ EOF
 
 # Assertion 1: production scan (what make lint runs) is CLEAN despite the
 # fixture sitting in a real scanned directory right now.
-run_production_style "$GATE" >"$PROD_OUT" 2>&1
+run_production_style "$GATE" check-silent-errors-bool >"$PROD_OUT" 2>&1
 prod_rc=$?
 assert_pass "PRODUCTION scan (ZCL_LINT_PRODUCTION_SCAN=1) ignores the mid-scan fixture" "$prod_rc"
 if [ "$prod_rc" -ne 0 ]; then
@@ -149,7 +149,7 @@ fi
 # this script may itself be running under `make check-scanner-immunity`,
 # which — being a check-% target — already has ZCL_LINT_PRODUCTION_SCAN=1 in
 # ITS OWN environment.
-run_selftest_style "$GATE" >"$SELFTEST_OUT" 2>&1
+run_selftest_style "$GATE" check-silent-errors-bool >"$SELFTEST_OUT" 2>&1
 selftest_rc=$?
 assert_fail "SELFTEST-style invocation still detects the fixture (unweakened)" "$selftest_rc"
 if [ "$selftest_rc" -eq 0 ]; then
@@ -173,18 +173,18 @@ bool _test_regression_real_violation_scanner_immunity_case(void)
 }
 EOF
 
-run_production_style "$GATE" >"$REAL_PROD_OUT" 2>&1
+run_production_style "$GATE" check-silent-errors-bool >"$REAL_PROD_OUT" 2>&1
 real_prod_rc=$?
 assert_fail "PRODUCTION scan still catches a REAL (non-fixture-named) violation" "$real_prod_rc"
 
-run_selftest_style "$GATE" >"$REAL_SELFTEST_OUT" 2>&1
+run_selftest_style "$GATE" check-silent-errors-bool >"$REAL_SELFTEST_OUT" 2>&1
 real_selftest_rc=$?
 assert_fail "SELFTEST-style scan still catches a REAL (non-fixture-named) violation" "$real_selftest_rc"
 
 rm -f "$REAL_VIOLATION"
 
 echo "== 3/5: gate recovers to clean once the real violation is removed =="
-run_production_style "$GATE" >"$RECOVER_OUT" 2>&1
+run_production_style "$GATE" check-silent-errors-bool >"$RECOVER_OUT" 2>&1
 recover_rc=$?
 assert_pass "PRODUCTION scan is clean again after cleanup" "$recover_rc"
 

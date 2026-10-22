@@ -118,9 +118,9 @@ static int gacw_setup(void)
             "# z23-generated-artifact: zcl.generated_artifact.v1\n"
             "# artifact-id: zcl.arm_symbol_single_baseline.v1\n"
             "# asserts: multi_arm_definition(path,symbol)\n"
-            "# generated-by: tools/lint/check_arm_symbol_single.sh\n"
+            "# generated-by: build/bin/z23-lint check-arm-symbol-single\n"
             "# regenerate: ZCL_LINT_MODE=UPDATE "
-            "tools/lint/check_arm_symbol_single.sh\n"
+            "build/bin/z23-lint check-arm-symbol-single\n"
             "a.c\tf\n");
     if (rc == 0)
         rc = gacw_write("self/cap.jsonl",

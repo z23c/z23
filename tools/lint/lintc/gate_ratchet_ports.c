@@ -552,7 +552,7 @@ static int sbe_update(const struct sbe_set *cur)
                  f) < 0
         || fputs("#   if (!call(...)) return false;   with no LOG_* and no // raw-return-ok:\n",
                  f) < 0
-        || fputs("# Regenerate after fixing some: ZCL_LINT_MODE=UPDATE ./tools/lint/check_silent_bool_errors.sh\n",
+        || fputs("# Regenerate after fixing some: ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-silent-errors-bool\n",
                  f) < 0)
         rc = die("z23-lint: write failed\n", "");
     for (int i = 0; rc == 0 && i < cur->count; i++) {

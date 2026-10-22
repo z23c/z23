@@ -57,7 +57,7 @@ zcl_tor_effective_cc() {
 # The ONE derivation of "what compiler identity does the Tor provenance
 # manifest bind" -- called by build_tor_full.sh (the writer) and every
 # reader (tor_archives_ready.sh's have_all()/tor_alias_check(),
-# tools/lint/check_tor_provenance.sh). Two independent re-derivations of a
+# build/bin/z23-lint check-tor-provenance). Two independent re-derivations of a
 # compiler identity have drifted before (see zcl_tor_effective_cc's comment
 # above); this closes the other half of that gap by giving both writer and
 # readers the same function, not just the same effective-CC string.

@@ -2,7 +2,7 @@
  *
  * purpose: gate family - check-app-bundle-reproducible of the C23 lint
  * runtime, the replacement for the bash body of
- * tools/lint/check_app_bundle_reproducible.sh. The macOS .app bundler
+ * tools/lint/lintc/gate_app_bundle_reproducible.c. The macOS .app bundler
  * (tools/scripts/make_app_bundle.sh) must be a pure function of its input
  * AND its product must launch. The subject compiles twice, the bundler runs
  * twice into two directories, and the trees must agree in the SHA-256 of

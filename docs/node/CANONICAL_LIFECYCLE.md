@@ -570,7 +570,7 @@ before retirement.
 | Flash unit queue | `tools/engine_unit.c`, per-unit `--state-dir` receipts, `docs/agent/FLASH_UNIT.md` | JOB, CANDIDATE, ticket | a unit's `receipt.json` is derived from a signed ticket |
 | Commuting tickets and train protocol as separate machines | `docs/archive/COMMUTING_TICKETS.md`, `docs/agent/TRAIN_PROTOCOL.md` | this document | both are reduced to explanatory notes pointing here |
 
-`tools/lint/check_no_unattended_publish.sh` is retained and tightened: after this
+`tools/lint/lintc/gate_no_unattended_publish.c` is retained and tightened: after this
 convergence, exactly one call site may push `main`.
 
 Fleet synchronization and service restarts retain their separate grants; this

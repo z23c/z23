@@ -5,7 +5,7 @@
 # Format: <path> <count>.  COUNTS MAY ONLY SHRINK.
 # The trailing comment on each row is hand analysis (whose $HOME
 # the path is built from); regeneration preserves it.
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_live_datadir_isolation.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-live-datadir-isolation
 tests/harness/src/test_agent_copy_prove.c 1   # REAL $HOME. Negative test: asserts copy-prove REFUSES the exact live path. Never opened.
 tests/harness/src/test_consensus_state_snapshot_install.c 1   # SANDBOX. `home` is "$root/gate-home", not the real $HOME.
 tests/harness/src/test_dev_activation.c 1   # SANDBOX. `sb.home` is the test's own sandbox home.

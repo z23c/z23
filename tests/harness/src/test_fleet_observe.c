@@ -3,7 +3,7 @@
  *          malformed ledger row and an unknown enum by line number, detects
  *          a drifted committed .def, and the rows it emits answer dev.know.
  *
- * NOT proven here: that tools/lint/check_fleet_observations.sh's own
+ * NOT proven here: that tools/lint/lintc/gate_fleet_observations.c's own
  * --selftest rejects a hand-edited committed file end to end — that gate
  * carries its own fixture-driven selftest, run before every scan by `make
  * check-fleet-observations`. This group proves the library the gate and the

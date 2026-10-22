@@ -75,8 +75,8 @@
 #define RAW_MALLOC_OK_FIXTURE_DST_REL "engine/controllers/src/_raw_malloc_ok_lint_fixture_tmp.c"
 #define RAW_SQLITE_SCRIPT_REL "tools/scripts/check_raw_sqlite.sh"
 #define RAW_MALLOC_SCRIPT_REL "tools/scripts/check_raw_malloc.sh"
-#define HOTSWAP_SCOPE_SCRIPT_REL  "tools/lint/check_hotswap_eligible_scope.sh"
-#define HOTSWAP_STATIC_SCRIPT_REL "tools/lint/check_hotswap_static_state.sh"
+#define HOTSWAP_SCOPE_SCRIPT_REL  "build/bin/z23-lint check-hotswap-eligible-scope"
+#define HOTSWAP_STATIC_SCRIPT_REL "build/bin/z23-lint check-hotswap-static-state"
 #define HOTSWAP_SERVICE_SCRIPT_REL \
     "tools/lint/check_hotswap_service_islands.sh"
 #define HOTSWAP_SERVICE_BAD_MANIFEST_REL \
@@ -91,7 +91,7 @@
 #define HOTSWAP_NO_MACRO_MANIFEST_REL \
     "tests/harness/fixtures/hotswap_manifest_no_macro.def"
 #define HOTSWAP_SWAPPABLE_SCRIPT_REL \
-    "tools/lint/check_hotswap_swappable_shape.sh"
+    "build/bin/z23-lint check-hotswap-swappable-shape"
 #define HOTSWAP_SWAPPABLE_MANIFEST_REL "engine/composition/hotswap_swappable.def"
 #define HOTSWAP_SWAPPABLE_BAD_MANIFEST_REL \
     "tests/harness/fixtures/hotswap_swappable_bad_shape.def"
@@ -107,7 +107,7 @@
     "tests/harness/fixtures/hotswap_islands_bad_static.def"
 #define GIT_HOOKS_SCRIPT_REL "tools/scripts/check_git_hooks_installed.sh"
 #define PRIV_RECEIPT_SCRIPT_REL \
-    "tools/lint/check_privileged_transition_receipt.sh"
+    "build/bin/z23-lint check-privileged-transition-receipt"
 /* Gate — no ordinal comparison of enum sync_trust_state. The script owns a
  * private Git fixture repo for its trip/recover selftest. */
 #define TRUST_ORDER_SCRIPT_REL \
@@ -126,7 +126,7 @@
  * --selftest builds fixture trees under TMPDIR, so it belongs to the REALROOT
  * lane. */
 #define LINT_GATE_WIRING_SCRIPT_REL \
-    "tools/lint/check_lint_gate_wiring.sh"
+    "build/bin/z23-lint check-lint-gate-wiring"
 #define NO_DEV_HISTORY_SCRIPT_REL \
     "tools/scripts/check_no_dev_history_in_contracts.sh"
 #define NO_DEV_HISTORY_FIXTURE_DST \
@@ -214,7 +214,7 @@
 #define CONDITION_COOLDOWN_SCRIPT_REL "tools/scripts/check_condition_cooldown.sh"
 #define MARKDOWN_LINK_GATE_BIN "build/bin/z23-lint"
 #define FUZZ_ARTIFACT_REPLAY_SCRIPT_REL "tools/lint/check_fuzz_artifact_replay.sh"
-#define E10_SHAPE_SCRIPT_REL "tools/lint/framework_shape_check.sh"
+#define E10_SHAPE_SCRIPT_REL "build/bin/z23-lint check-framework-shape"
 /* Same direct-selftest convention as NODE_DB_EXEC_FIXTURE_DST_REL. */
 #define E10_SHAPE_FIXTURE_DST \
     "engine/_e10_offshape_fixture_probe_tmp.c"
@@ -229,7 +229,7 @@
  * `--selftest`, so this side only dispatches the flag and asserts 0. Covers a
  * blocking primitive inside a `*_dump_state_fill` provider. */
 #define DUMPER_BLOCKING_SCRIPT_REL "tools/scripts/check_dumper_never_blocks.sh"
-#define E10_SQL_SCRIPT_REL "tools/lint/check_no_raw_sqlite_in_controllers.sh"
+#define E10_SQL_SCRIPT_REL "build/bin/z23-lint check-no-raw-sqlite-in-controllers"
 #define E10_SQL_FIXTURE_DST \
     "engine/controllers/src/sync_controller_e10_rawsql_fixture_tmp.c"
 #define E10_SQL_SERVICE_FIXTURE_DST \
@@ -269,7 +269,7 @@
 #define E6_FIXTURE_DST   "engine/services/src/_e6_write_path_fixture_tmp.c"
 #define E7_SCRIPT_REL    "tools/scripts/check_no_authoritative_ram_state.sh"
 #define E7_FIXTURE_DST   "engine/services/src/_e7_ram_state_fixture_tmp.c"
-#define FSUF_SCRIPT_REL  "tools/lint/check_framework_filename_suffix.sh"
+#define FSUF_SCRIPT_REL  "build/bin/z23-lint check-framework-filename-suffix"
 /* A foreign-shape suffix (*_controller) planted under engine/services/src. */
 #define FSUF_FIXTURE_DST "engine/services/src/_fsuf_fixture_tmp_controller.c"
 /* Gate E13 — check-consensus-parity (hard, no baseline). Scans the consensus
@@ -282,19 +282,19 @@
  * silent_bool_errors_baseline.txt). Flags a swallowed call-guard failure
  * `if (!some_call(...)) return false;` with no LOG_* and no
  * `// raw-return-ok:` marker. */
-#define SILENT_BOOL_SCRIPT_REL "tools/lint/check_silent_bool_errors.sh"
+#define SILENT_BOOL_SCRIPT_REL "build/bin/z23-lint check-silent-errors-bool"
 #define SILENT_BOOL_FIXTURE_DST \
     "engine/services/src/_silent_bool_fixture_tmp.c"
 /* Gate P2 (docs/dev/palace-design.md §3) — check-group-purpose. Runs against
  * a test-tmp/ copy of codeindex_group.c (ZCL_GROUP_PURPOSE_SRC). */
-#define GRPPURPOSE_SCRIPT_REL      "tools/lint/check_group_purpose.sh"
+#define GRPPURPOSE_SCRIPT_REL      "build/bin/z23-lint check-group-purpose"
 #define GRPPURPOSE_REAL_SRC_REL    "cognition/modules/codeindex/src/codeindex_group.c"
 #define GRPPURPOSE_OK_FIXTURE_REL  "test-tmp/_group_purpose_fixture_ok_tmp.c"
 #define GRPPURPOSE_BAD_FIXTURE_REL "test-tmp/_group_purpose_fixture_bad_tmp.c"
 /* Gate P1 (docs/dev/palace-design.md §3) — check-file-purpose. Scans an
  * isolated fixture tree under test-tmp/ (ZCL_FILE_PURPOSE_ROOT); the two
  * canned fixtures live in tests/harness/fixtures/. */
-#define FILEPURPOSE_SCRIPT_REL      "tools/lint/check_file_purpose.sh"
+#define FILEPURPOSE_SCRIPT_REL      "build/bin/z23-lint check-file-purpose"
 #define FILEPURPOSE_ROOT_REL        "test-tmp/_file_purpose_root_tmp"
 #define FILEPURPOSE_PLANT_REL       "test-tmp/_file_purpose_root_tmp/engine/" \
                                     "services/src/_file_purpose_lint_fixture_tmp.c"
@@ -303,12 +303,12 @@
 /* Gate P3 (docs/dev/palace-design.md §3) — check-no-orphan-placement. Judges
  * an explicit path list (ZCL_ORPHAN_PLACEMENT_FILES) from the path alone, so
  * no file needs to exist on disk. */
-#define ORPHAN_SCRIPT_REL "tools/lint/check_no_orphan_placement.sh"
+#define ORPHAN_SCRIPT_REL "build/bin/z23-lint check-no-orphan-placement"
 #define LOG_MACRO_RETURN_SCRIPT_REL \
-    "tools/lint/check_log_macro_return_type.sh"
+    "build/bin/z23-lint check-log-macro-return-type"
 #define LOG_MACRO_RETURN_FIXTURE_DST \
     "engine/services/src/_log_macro_return_type_fixture_tmp.c"
-#define E12_SCRIPT_REL   "tools/lint/check_honest_witness.sh"
+#define E12_SCRIPT_REL   "build/bin/z23-lint check-honest-witness"
 /* A condition .c with a pure-inverse witness ("return !detect_x()") planted
  * under engine/conditions/src. */
 #define E12_FIXTURE_DST  "engine/conditions/src/_e12_honest_witness_fixture_tmp.c"
@@ -316,7 +316,7 @@
  * boot_background_workers.c and fails any spawn (pthread_create /
  * thread_registry_spawn) not paired with a supervisor_register_in_domain.
  * Fixtures under test-tmp/ are fed via ZCL_SUPERVISOR_WORKER_FILES. */
-#define SUPDOM_SCRIPT_REL     "tools/lint/check_supervisor_domain.sh"
+#define SUPDOM_SCRIPT_REL     "build/bin/z23-lint check-supervisor-domain"
 /* A worker that spawns a thread with no domain contract (an unsupervised
  * background worker); the widened gate must catch it. */
 #define SUPDOM_BAD_WORKER_REL "test-tmp/_supdom_unsupervised_worker_fixture_tmp.c"
@@ -371,6 +371,7 @@ int write_file(const char *path, const char *contents);
 pid_t fork_with_retry(void);
 int run_check_raw_malloc_script(void);
 int run_gate_script(const char *script_rel, const char *mode);
+void gate_exec(char *rel, const char *arg);
 int run_gate_script_arg(const char *script_rel, const char *mode,
                         const char *arg);
 int run_gate_script_selftest(const char *script_rel);

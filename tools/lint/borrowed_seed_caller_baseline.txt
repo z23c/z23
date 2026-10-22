@@ -4,7 +4,7 @@
 # Act 3). The sovereign cure DELETES these callers; this baseline may only
 # shrink as it does. A NEW caller (a file not listed here) FAILS the gate.
 #
-# Enforced by tools/lint/check_no_new_borrowed_seed.sh (make lint ->
+# Enforced by tools/lint/lintc/gate_ratchet_ports.c (make lint ->
 # check-no-new-borrowed-seed). Remove a line when its caller is deleted; never
 # add one.
 engine/services/src/reindex_epilogue.c

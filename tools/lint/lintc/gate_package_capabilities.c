@@ -3,7 +3,7 @@
  * purpose: HARD gate — every C23 Commons package's zcode-package.json states
  * the union of capability classes its SHIPPED files can reach, exactly: not
  * a superset, not a subset. Ported from
- * tools/lint/check_package_capabilities.sh, which is now a 3-line exec shim
+ * tools/lint/lintc/gate_package_capabilities.c, which is now a 3-line exec shim
  * onto this binary. Parsers live in gate_package_capabilities_parse.c;
  * selftest in gate_package_capabilities_selftest.c.
  *

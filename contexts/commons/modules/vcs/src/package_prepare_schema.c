@@ -61,7 +61,7 @@ bool prepare_meta_closed(const struct json_value *meta,
     /* "capabilities": the union of capability classes (see
      * engine/composition/capability_classes.def) the package's SHIPPED files can reach.
      * OPTIONAL in this shape check and MANDATORY for a registry package —
-     * tools/lint/check_package_capabilities.sh is what refuses an absent
+     * tools/lint/lintc/gate_package_capabilities.c is what refuses an absent
      * field, because "absent" and "reaches nothing" must never collapse into
      * one reading and only a gate that derives the value can tell them
      * apart. What is checked HERE is the part a receiving node can check

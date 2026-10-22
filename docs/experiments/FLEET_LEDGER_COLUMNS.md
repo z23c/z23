@@ -24,9 +24,9 @@ cc -std=c23 -O2 -Wall -Wextra -Werror -pedantic -Itools/dev \
   tools/dev/fleet_observe.c tools/dev/fleet_observe_main.c \
   -o /tmp/z23-fleet-observe
 ZCL_FLEET_OBS_BIN=/tmp/z23-fleet-observe \
-  tools/lint/check_fleet_observations.sh --selftest
+  tools/lint/lintc/gate_fleet_observations.c --selftest
 ZCL_FLEET_OBS_BIN=/tmp/z23-fleet-observe \
-  tools/lint/check_fleet_observations.sh
+  tools/lint/lintc/gate_fleet_observations.c
 ```
 
 All eight selftest checks passed after the change. The committed fixture still

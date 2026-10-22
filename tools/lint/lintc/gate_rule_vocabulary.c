@@ -24,7 +24,7 @@
  * parsing must never read as "clean". There is no baseline — a row that
  * stopped resolving is not a debt, it is a false statement.
  *
- * Ported from tools/lint/check_rule_vocabulary.sh, now a 3-line exec shim
+ * Ported from tools/lint/lintc/gate_rule_vocabulary.c, now a 3-line exec shim
  * onto this binary. The Makefile recipe still runs this gate twice
  * (`--selftest` then a plain run), matching the shell's own dual-invocation
  * shape; main.c's `--selftest` argv dispatch routes the first half to
@@ -630,7 +630,7 @@ static int rv_st_joined(const char *const *lines, int n, int want_clean)
 }
 
 /* Each fixture below is the shell selftest's own row text, reproduced
- * verbatim, so parity with tools/lint/check_rule_vocabulary.sh is provable
+ * verbatim, so parity with tools/lint/lintc/gate_rule_vocabulary.c is provable
  * by inspection. */
 static int rv_st_scan_cases(void)
 {

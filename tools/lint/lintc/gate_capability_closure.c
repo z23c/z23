@@ -571,7 +571,7 @@ static void ccg_stale_baseline(struct ccg_scan *s)
     ccg_say(s, "check_capability_closure: VIOLATION " CCG_DASH " coverage baseline is stale:\n"
                "  only %d module_capabilities.def row(s) are unobserved in\n"
                "  %s, below CAP_CLOSURE_COVERAGE_BASELINE=%ld\n"
-               "  recorded in tools/lint/check_capability_closure.sh. Coverage\n"
+               "  recorded in build/bin/z23-lint check-capability-closure. Coverage\n"
                "  improved without lowering the baseline " CCG_DASH " that is what keeps this a\n"
                "  shrink-only ratchet instead of a number that only ever grows.\n"
                "  Lower CAP_CLOSURE_COVERAGE_BASELINE to %d (with the reason)\n"
@@ -788,7 +788,7 @@ int check_capability_closure_run(int argc, char **argv)
     int rc, sig;
     (void)argv;
     if (argc > 0) {
-        fputs("usage: tools/lint/check_capability_closure.sh [--selftest]\n", stderr);
+        fputs("usage: build/bin/z23-lint check-capability-closure [--selftest]\n", stderr);
         return 2;
     }
     if (cic_repo_root(root, sizeof root) != 0 || lsc_install() != 0)

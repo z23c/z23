@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-model-sql-literals of the C23 lint runtime,
- * the replacement for tools/lint/check_model_sql_literals.sh. A model file
+ * the replacement for tools/lint/lintc/gate_model_sql_literals.c. A model file
  * must not carry a hand-written SQL statement (reads/writes build one with
  * engine/models/include/models/query_builder.h); every file still holding a
  * literal is pinned as a "path" row (not a "key:M" ratchet) in
@@ -330,7 +330,7 @@ static const char k_msl_update_header[] =
     "# not a fix; a row whose file no longer carries literal SQL must\n"
     "# be DELETED, and this gate fails until it is.\n"
     "#\n"
-    "# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_model_sql_literals.sh\n";
+    "# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-model-sql-literals\n";
 
 static int msl_bln_cmp(const void *a, const void *b)
 { return strcmp((const char *)a, (const char *)b); }

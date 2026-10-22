@@ -58,8 +58,8 @@ CMD_DEF_DIR="${ZCL_HOTSWAP_COMMAND_DEF_DIR:-engine/composition/commands}"
 BRIDGE_TU="${ZCL_HOTSWAP_BRIDGE_TU:-tools/command/native_command.c}"
 
 # The shape roots, copied verbatim from the two gates that enforce them:
-#   tools/lint/check_hotswap_swappable_shape.sh  (ALLOWED / FORBIDDEN)
-#   tools/lint/check_hotswap_eligible_scope.sh   (FORBIDDEN)
+#   build/bin/z23-lint check-hotswap-swappable-shape  (ALLOWED / FORBIDDEN)
+#   build/bin/z23-lint check-hotswap-eligible-scope   (FORBIDDEN)
 SHAPE_ALLOWED='^(app/controllers|app/views|app/conditions)/'
 SHAPE_FORBIDDEN='^(core|lib/consensus|lib/validation|lib/storage|lib/net|lib/coins|lib/chain|lib/mining|app/jobs|lib/kernel|lib/supervisor|app/supervisors|domain/consensus)/'
 
@@ -397,7 +397,7 @@ done
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 # Mutable file-scope statics: the exact heuristic of
-# tools/lint/check_hotswap_static_state.sh, so a verdict here and that gate
+# build/bin/z23-lint check-hotswap-static-state, so a verdict here and that gate
 # cannot disagree.
 detect_statics() {
     [ -f "$1" ] || return 0
@@ -612,7 +612,7 @@ verdict_tu() {
             if [ -n "$statics" ]; then
                 echo "  rule: defines a mutable file-scope static — a module .so gets its own"
                 echo "        zero-initialized copy and the live process state is silently lost"
-                echo "        (tools/lint/check_hotswap_static_state.sh):"
+                echo "        (build/bin/z23-lint check-hotswap-static-state):"
                 printf '%s\n' "$statics" | LC_ALL=C sed 's/^/          /'
                 echo "        Move it to a sibling NON-swappable resident TU, or annotate the"
                 echo "        declaration line  hotswap-static-ok: <reason>  if provably swap-safe."
@@ -824,7 +824,7 @@ ledger() {
               mutable-static)
                 echo "  RULE: defines a mutable file-scope static (a module .so gets its own"
                 echo "        zero copy; live process state is silently lost) —"
-                echo "        tools/lint/check_hotswap_static_state.sh"
+                echo "        build/bin/z23-lint check-hotswap-static-state"
                 echo "        $n TU(s):" ;;
               denied-leaf)
                 echo "  RULE: every leaf it owns is on $DENIED_DEF"

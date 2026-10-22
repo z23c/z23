@@ -6,7 +6,7 @@
 #   supervisor_set_progress_max_quiet(id, <window_us>)  — armed, or
 #   supervisor_set_progress_exempt(id, "why it has no work units")
 # then lower (or delete) the number here. Adding a row is not a fix.
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_supervisor_progress_declared.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-supervisor-progress-declared
 engine/conditions/src/chain_integrity_failed.c 1
 engine/controllers/src/api_controller_cache_liveness.c 1
 engine/controllers/src/api_controller_lookup.c 1

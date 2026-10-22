@@ -14,7 +14,7 @@
  * So the set is CLOSED and it is DERIVED FROM ITS SOURCES. Every id here must
  * resolve to a heading in a .grok rules markdown file or a PERSONA row in
  * engine/modules/engine/include/engine/personas.def, and every heading and
- * every persona must have a row. tools/lint/check_rule_vocabulary.sh refuses
+ * every persona must have a row. tools/lint/lintc/gate_rule_vocabulary.c refuses
  * both directions. Neither half alone is enough: checking only that rows
  * resolve lets a new persona arrive unscored, and checking only that sources
  * are covered lets a row outlive the text it claims to quote.
@@ -58,7 +58,7 @@
  *
  * Consumers: engine/modules/engine/src/engine_rule_score.c (scores and
  * rewrites), tools/command/native_code_command.c (`z23 code rules`), and
- * tools/lint/check_rule_vocabulary.sh.
+ * tools/lint/lintc/gate_rule_vocabulary.c.
  */
 
 /* clang-format off */

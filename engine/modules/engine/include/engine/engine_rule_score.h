@@ -85,7 +85,7 @@
 #define ZCL_RULE_LOG_MAX         (16u * 1024u * 1024u)
 
 /* The two vocabularies the ids are closed over. A row's source decides which
- * file tools/lint/check_rule_vocabulary.sh resolves its id against. */
+ * file tools/lint/lintc/gate_rule_vocabulary.c resolves its id against. */
 enum zcl_rule_source {
     ZCL_RULE_SRC_GROK = 0,     /* a heading in a .grok rules markdown file */
     ZCL_RULE_SRC_PERSONA = 1   /* a PERSONA row in personas.def */

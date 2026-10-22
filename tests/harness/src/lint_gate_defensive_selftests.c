@@ -468,7 +468,7 @@ int run_check_raw_malloc_script(void)
             (void)dup2(fd, STDERR_FILENO);
             close(fd);
         }
-        execl(script, script, (char *)NULL);
+        gate_exec(script, NULL);
         _exit(127);
     }
 

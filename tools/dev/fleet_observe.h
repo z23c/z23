@@ -7,7 +7,7 @@
  *
  * CONTRACT. `docs/agent/EXECUTOR_HEURISTICS.md`'s doctrine table is asserted;
  * this table is MEASURED. Every row here is derived from ledger rows over a
- * trailing window, never hand-typed — tools/lint/check_fleet_observations.sh
+ * trailing window, never hand-typed — tools/lint/lintc/gate_fleet_observations.c
  * is the price of writing it: --check regenerates from a fixture ledger and
  * diffs the committed .def, so a hand edit is caught rather than believed.
  *

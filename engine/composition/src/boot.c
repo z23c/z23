@@ -848,7 +848,7 @@ static void boot_step_start_maintenance_services(void)
  * guarantee or is fail-closed. app_init calls sysinit_run_stage() at the point
  * the guarantee becomes true; run_stage advances the stage only if the records
  * succeed. Registered order does not matter — the deterministic (stage, order,
- * name) sort (pinned by tools/lint/check_sysinit_ordering.sh) does.
+ * name) sort (pinned by tools/lint/lintc/gate_tree_walk.c) does.
  *
  * ctx: WALLET_LOADED / BLOCK_INDEX_LOADED / CHAIN_TIP_RESOLVED /
  * SERVICES_RUNNING receive the `struct app_context *`; NETWORK_READY (run from

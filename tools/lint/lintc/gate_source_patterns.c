@@ -24,7 +24,7 @@
 #include <unistd.h>
 #include "lintc.h"
 
-/* check-result-discard — port of tools/lint/check_result_discard.sh (now a
+/* check-result-discard — port of tools/lint/lintc/gate_source_patterns.c (now a
  * shim). struct zcl_result is [[nodiscard]], so the compiler fences off NEW
  * bare discards, but a C23 void cast suppresses the diagnostic silently. This
  * gate is a shrink-only ratchet over the surviving cast discards: it derives
@@ -297,7 +297,7 @@ static int rd_update(void)
         "# Fix one by stating the reason:",
         "#   ZCL_IGNORE_RESULT(fn(...), \"why the failure is safe to drop\");",
         "# Regenerate after fixing some:",
-        "#   ZCL_LINT_MODE=UPDATE ./tools/lint/check_result_discard.sh",
+        "#   ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-result-discard",
     };
     FILE *f = fopen("tools/lint/result_discard_baseline.txt", "w");
     if (!f)
@@ -549,7 +549,7 @@ int check_result_discard_selftest(void)
 
 
 /* check-wallet-raw-prepare-log — port of
- * tools/lint/check_wallet_raw_prepare_log.sh (now a shim). A bare
+ * tools/lint/lintc/gate_source_patterns.c (now a shim). A bare
  * sqlite3_prepare_v2() call (one NOT inside an if-condition) whose
  * prepared-stmt NULL check returns without logging is forbidden: the gate
  * opens a 12-line window after each bare prepare, watches for an
@@ -964,7 +964,7 @@ static int wrpl_update(void)
         "# check_wallet_raw_prepare_log RATCHET baseline (shrink-only).",
         "# Stable key = <relpath>::<enclosing_function>. A swallowed prepare:",
         ("#   sqlite3_prepare_" "v2(...); if (!stmt) return ...;   with no LOG_*."),
-        "# Regenerate after fixing some: ZCL_LINT_MODE=UPDATE ./tools/lint/check_wallet_raw_prepare_log.sh",
+        "# Regenerate after fixing some: ZCL_LINT_MODE=UPDATE ./build/bin/z23-lint check-wallet-raw-prepare-log",
     };
     FILE *f = fopen("tools/lint/wallet_raw_prepare_log_baseline.txt", "w");
     if (!f)

@@ -7,7 +7,7 @@
  * so an input key the .def never declared fails here rather than from a shell.
  *
  * NOT proven here, and deliberately: that the lint gate rejects a bad row.
- * tools/lint/check_fleet_facts.sh carries its own `--selftest` over a fixture
+ * tools/lint/lintc/gate_fleet_facts.c carries its own `--selftest` over a fixture
  * table — an undeclared object, an undeclared relation, an UNKNOWN
  * confidence, a duplicated row, an empty why and an unused term each have to
  * fail before the gate will report on the real table — and `make

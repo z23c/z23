@@ -7,7 +7,7 @@
  * boot). This is the same idea WITHOUT the linker set: records are placed in
  * an explicit in-code table and registered via sysinit_register(), so the
  * full boot order is greppable in one place and pinned by a golden lint gate
- * (tools/lint/check_sysinit_ordering.sh) rather than hidden in `.init_array`
+ * (tools/lint/lintc/gate_tree_walk.c) rather than hidden in `.init_array`
  * section magic. Portable (no toolchain-specific SET_ENTRY), and every record
  * is visible to `grep`.
  *

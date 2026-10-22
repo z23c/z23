@@ -214,7 +214,7 @@ static int ldi_doc_line(struct ldi_scan *s, const char *path, const char *line)
 int ldi_doc_file(const char *path, void *ctx)
 {
     struct ldi_scan *s = ctx;
-    if (!strcmp(path, "tools/lint/check_live_datadir_isolation.sh") ||
+    if (
         (!strncmp(path, "tools/lint/live_datadir_", 23) && strstr(path, "_baseline.txt"))) return 0;
     FILE *f = fopen(path, "r");
     if (!f) return die("z23-lint: cannot open %s\n", path);

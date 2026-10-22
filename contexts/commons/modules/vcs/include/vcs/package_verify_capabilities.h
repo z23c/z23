@@ -4,7 +4,7 @@
  * "capabilities" claim.
  *
  * THE GAP THIS CLOSES. Every zcode-package.json in this registry now carries
- * a "capabilities" array, and tools/lint/check_package_capabilities.sh keeps
+ * a "capabilities" array, and tools/lint/lintc/gate_package_capabilities.c keeps
  * it exactly equal to the union of classes the shipped sources reach. That
  * gate runs in THIS tree, against THIS tree's engine/composition/module_capabilities.def,
  * which was itself derived from an object tree only this tree has. A package

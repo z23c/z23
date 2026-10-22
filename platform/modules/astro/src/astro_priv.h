@@ -29,7 +29,7 @@
  *      operation. This version is restoring binary long division, bounded by
  *      the dividend's bit length.
  *   3. Overflow. The original used assert() for limb-array exhaustion.
- *      assert() is live in this build (see tools/lint/check_no_runtime_abort.sh)
+ *      assert() is live in this build (see tools/lint/lintc/gate_no_runtime_abort.c)
  *      so that was a remote abort; with -DNDEBUG it would instead be silent
  *      corruption. Neither is acceptable for a value another node checks.
  *

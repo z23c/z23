@@ -110,7 +110,7 @@ const char *supervisor_stall_reason_name(enum supervisor_stall_reason r);
  *               purpose, with a reason an operator can read in dumpstate.
  *   UNDECLARED— nobody chose. Detection off (unchanged behaviour), counted in
  *               `progress_undeclared_count`, and floor-gated by
- *               tools/lint/check_supervisor_progress_declared.sh so the
+ *               tools/lint/lintc/gate_supervisor_progress_declared.c so the
  *               population may only shrink.
  *
  * The third signal is what makes ARMED usable on a real service:

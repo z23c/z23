@@ -5822,7 +5822,7 @@ static int test_presentation_leaves_are_display_only(void)
 }
 
 /* Every leaf's describe document fits its budget; an over-budget document
- * renders as nothing. See tools/lint/check_describe_budget.sh. */
+ * renders as nothing. See tools/lint/lintc/gate_describe_budget.c. */
 static int test_every_describe_document_fits(void)
 {
     int failures = 0;

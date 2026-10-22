@@ -110,7 +110,7 @@ missing doc fails.
 
 ## `check-honest-witness` — a remedy that reports success must observe the symptom moving
 
-**Script:** `tools/lint/check_honest_witness.sh`
+**Script:** `tools/lint/lintc/gate_source_fences.c`
 
 **The failure it was written for.** A self-healing Condition in this codebase is
 a triple: *detect*, *remedy*, *witness*. The witness is the post-condition that

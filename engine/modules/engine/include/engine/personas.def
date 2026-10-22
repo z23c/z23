@@ -88,6 +88,6 @@ PERSONA("core/modules/crypto",
     "an instruction set that has not beaten the portable C on the machine in "
     "front of you is slower than the code it replaced, and that has already "
     "happened here. Pin the oracle, measure, and let the number decide.",
-    "tools/lint/check_accel_oracle_pinned.sh")
+    "tools/lint/lintc/gate_accel_oracle_pinned.c")
 
 /* clang-format on */

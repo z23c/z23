@@ -245,9 +245,9 @@ static int gac_headers(const char *arm)
         "# z23-generated-artifact: zcl.generated_artifact.v1",
         "# artifact-id: zcl.arm_symbol_single_baseline.v1",
         "# asserts: multi_arm_definition(path,symbol)",
-        "# generated-by: tools/lint/check_arm_symbol_single.sh",
+        "# generated-by: build/bin/z23-lint check-arm-symbol-single",
         ("# regenerate: ZCL_LINT_MODE=UPDATE "
-         "tools/lint/check_arm_symbol_single.sh"),
+         "build/bin/z23-lint check-arm-symbol-single"),
     };
     int rc = 0;
     for (size_t i = 0; rc == 0 && i < sizeof hdrs / sizeof hdrs[0]; i++)

@@ -8,7 +8,7 @@
 #   zcl_hex_decode_lower(hex, out, want)  canonical form only
 #   zcl_hex_decode_n(hex, out, cap, &n)   1..cap bytes
 # then delete the line here. Adding a row is not a fix.
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_hex_codec_single.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-hex-codec-single
 contexts/explorer/views/src/explorer_factoids_difficulty.c
 engine/composition/src/consensus_state_producer_status.c
 platform/modules/encoding/src/utilstrencodings.c

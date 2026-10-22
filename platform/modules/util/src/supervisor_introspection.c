@@ -122,7 +122,7 @@ bool supervisor_dump_state_json(struct json_value *out, const char *key)
     /* Progress-policy debt, at the root where an operator reads it first:
      * how many supervised children have no answer to "how would anyone know
      * if this stopped achieving anything?". Floored (shrink-only) by
-     * tools/lint/check_supervisor_progress_declared.sh. */
+     * tools/lint/lintc/gate_supervisor_progress_declared.c. */
     json_push_kv_int (out, "progress_undeclared_count",
                       (int64_t)supervisor_progress_undeclared_count());
     /* Registry margin. 0 means the next subsystem to register runs

@@ -19,7 +19,7 @@
 #include <unistd.h>
 #include "lintc.h"
 
-/* check-sandbox-wired — port of tools/lint/check_sandbox_wired.sh (now a
+/* check-sandbox-wired — port of tools/lint/lintc/gate_boot_wiring.c (now a
  * shim). The os_sandbox steady-state profile is only a defense if boot
  * actually ENTERS it: boot.c must register a SYSINIT boundary record named
  * "sandbox" on the SERVICES_RUNNING boundary, call os_sandbox_enter(), and

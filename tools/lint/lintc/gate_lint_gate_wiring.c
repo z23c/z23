@@ -4,7 +4,7 @@
  * (Makefile LINT_GATES/LINT_FAST_GATES, run_lint.sh's gate_command() case
  * table, and the docs/DEFENSIVE_CODING.md LINT-GATES doc block), plus the
  * lintc family-file line ceiling. Ported from
- * tools/lint/check_lint_gate_wiring.sh, which is now a 3-line exec shim
+ * tools/lint/lintc/gate_lint_gate_wiring.c, which is now a 3-line exec shim
  * onto this binary. Selftest: gate_lint_gate_wiring_selftest.c.
  *
  * Sources of truth this gate never re-parses by hand: the Makefile's

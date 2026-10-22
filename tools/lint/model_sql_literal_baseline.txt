@@ -16,7 +16,7 @@
 # Migration and schema files are ordinary rows: a query builder
 # cannot express CREATE TABLE, so those are expected to stay.
 #
-# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/check_model_sql_literals.sh
+# Regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-model-sql-literals
 cognition/models/src/agent_session.c
 engine/models/src/block.c
 engine/models/src/block_projection.c
