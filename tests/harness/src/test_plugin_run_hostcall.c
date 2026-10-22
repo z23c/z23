@@ -23,9 +23,13 @@
 #include "services/plugin_host_handlers.h"
 #include "test/plugin_run_env.h"
 
+#include <pthread.h>
+#include <stdatomic.h>
+#include <sys/socket.h>
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -328,6 +332,97 @@ static int prh_case_broken_frame(struct prh_ctx *c)
     return failures;
 }
 
+/* How many 12-byte writes a fresh stream socketpair queues before the next one
+ * would block: the supervisor's replies fill its send side at the same count,
+ * leaving the queue full with every reply accepted. 0 if it cannot be probed. */
+static unsigned prh_probe_queue(void)
+{
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0)
+        return 0;
+    uint8_t chunk[12] = {0};
+    unsigned count = 0;
+    while (send(pair[0], chunk, sizeof(chunk), MSG_DONTWAIT) == (ssize_t)sizeof(chunk))
+        count++;
+    close(pair[0]);
+    close(pair[1]);
+    return count;
+}
+
+struct prh_closer {
+    struct plugin_run *run;
+    atomic_bool done;
+};
+
+static void *prh_close_thread(void *arg)
+{
+    struct prh_closer *job = arg;
+    plugin_run_close(job->run);
+    atomic_store(&job->done, true);
+    return NULL;
+}
+
+/* Close `run` on a helper thread so a wedged close fails the case instead of
+ * hanging the suite: past the bound the child is killed, which unblocks any
+ * write to it, and the thread is joined. Returns the milliseconds it took, or
+ * a value past `bound_ms` when close had to be rescued. */
+static uint64_t prh_timed_close(struct plugin_run *run, unsigned bound_ms)
+{
+    struct plugin_run_info info;
+    plugin_run_info_get(run, &info);
+    struct prh_closer job = {.run = run};
+    atomic_init(&job.done, false);
+    uint64_t t0 = prh_now_ms();
+    pthread_t tid;
+    if (pthread_create(&tid, NULL, prh_close_thread, &job) != 0)
+        return UINT64_MAX;
+    while (!atomic_load(&job.done) && prh_now_ms() - t0 < bound_ms) {
+        struct timespec nap = {0, 5 * 1000 * 1000};
+        nanosleep(&nap, NULL);
+    }
+    uint64_t took = prh_now_ms() - t0;
+    if (!atomic_load(&job.done)) {
+        if (info.pid > 0)
+            (void)kill((pid_t)info.pid, SIGKILL);
+        took = (uint64_t)bound_ms + 1;
+    }
+    (void)pthread_join(tid, NULL);
+    return took;
+}
+
+static int prh_case_silent_reader(struct prh_ctx *c)
+{
+    int failures = 0;
+    char line[160];
+    TEST_CASE("a child that fills the reply queue and never reads cannot wedge close") {
+        char mode[16];
+        unsigned queue = prh_probe_queue();
+        ASSERT(queue > 0);
+        snprintf(mode, sizeof(mode), "flood:%u", queue);
+        struct plugin_run *run = prh_start(&c->env, "flooder", mode, "\"chain.read\"",
+                                           &c->chain.handlers, 100000, 60000);
+        ASSERT(run != NULL);
+        ASSERT(prh_outcome(run, line, sizeof(line), 8000));
+        char want[64];
+        snprintf(want, sizeof(want), "hostcall flooded n=%u", queue);
+        ASSERT_STR_EQ(line, want);
+        /* Let the pump answer every queued call so the send queue is full. */
+        uint64_t end = prh_now_ms() + 400;
+        while (prh_now_ms() < end) {
+            (void)plugin_run_poll(run);
+            struct timespec nap = {0, 5 * 1000 * 1000};
+            nanosleep(&nap, NULL);
+        }
+        struct plugin_run_info info;
+        plugin_run_info_get(run, &info);
+        ASSERT_EQ(info.restarts, 0u);
+        ASSERT(info.pid > 0);
+        /* Grace is 300 ms; the stop frame may add its short send budget. */
+        ASSERT(prh_timed_close(run, 5000) < 3000);
+    } TEST_END
+    return failures;
+}
+
 static int prh_case_rate(struct prh_ctx *c)
 {
     int failures = 0;
@@ -365,6 +460,7 @@ int test_plugin_run_hostcall(void)
     failures += prh_case_no_handlers(&c);
     failures += prh_case_broken_frame(&c);
     failures += prh_case_rate(&c);
+    failures += prh_case_silent_reader(&c);
     prh_chain_close(&c.chain);
     prt_env_close(&c.env);
     return failures;

@@ -20,7 +20,13 @@
  *   paced     as tip, and the line ends " paced=1" when the second reply came a
  *             full one-second window after the first call was sent (the child
  *             times itself; the test grades only the line it logs)
+
  *   badframe  send a frame with an unknown version, then answer pings only
+ *   flood:N   wait for the first ping, then send N wallet.request calls (12-byte
+ *             PLANNED replies) -- the test passes the count that fills the
+ *             supervisor's send queue (a seccomp-confined child cannot probe it
+ *             itself) -- log "hostcall flooded n=<N>", then sleep without ever
+ *             reading again
  * A ping or stop frame can arrive while a reply is awaited; frames are told
  * apart by their first byte ('z' for supervisor frames, 0 for host-call). */
 #ifndef _GNU_SOURCE
@@ -167,11 +173,30 @@ static int hcc_serve(const char *nonce)
     return 0;
 }
 
+/* flood mode: never read again once the queue is full of replies. */
+static int hcc_flood(int log_fd, unsigned want)
+{
+    char first[HCC_SUP_FRAME];
+    if (!hcc_io(RESIDENT_LAUNCH_CHILD_FD, first, sizeof(first), false))
+        return 3;
+    unsigned sent = 0;
+    while (sent < want && hcc_send(sent + 1, 7, 1))
+        sent++;
+    char line[64];
+    int n = snprintf(line, sizeof(line), "hostcall flooded n=%u\n", sent);
+    if (log_fd >= 0 && n > 0)
+        (void)hcc_io(log_fd, line, (size_t)n, true);
+    sleep(60);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3 || strcmp(argv[1], "--resident") != 0)
         return 2;
     int log_fd = hcc_fd_of("log");
+    if (hcc_mode_is("flood"))
+        return hcc_flood(log_fd, (unsigned)atoi((const char *)hcc_variant + HCC_MARKER_LEN + 6));
     if (hcc_mode_is("badframe")) {
         (void)hcc_send(1, 1, 9);
         return hcc_serve(argv[2]);

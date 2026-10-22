@@ -86,31 +86,36 @@ void resident_launch_init(struct resident_launch *launch)
     launch->ipc_native = (uintptr_t)-1;
 }
 
-/* Exact-count stream I/O over the IPC socket. Returns false on EOF/error;
- * EINTR is retried, a partial transfer never counts as done. */
+/* Advisory write over the IPC socket, bounded in time. The stop frame is a
+ * courtesy to a cooperative app: a child that never reads can fill the
+ * parent's send queue, and a blocking send would then wedge the supervisor
+ * before it reaches the SIGKILL. Every send is MSG_DONTWAIT; a full queue is
+ * waited on for at most `budget_ms` in total, then the frame is abandoned
+ * (the caller falls through to the grace wait and the kill). EINTR is
+ * retried inside the budget. Returns true only if every byte was queued. */
 #if !defined(_WIN32)
-static bool resident_io_exact(int fd, void *data, size_t size, bool write,
-                              bool *peer_closed)
+#define RESIDENT_STOP_SEND_BUDGET_MS 50u
+static bool resident_send_bounded(int fd, const void *data, size_t size,
+                                  uint32_t budget_ms)
 {
-    unsigned char *p = data;
+    const unsigned char *p = data;
     size_t done = 0;
-    if (peer_closed) *peer_closed = false;
+    uint32_t waited_ms = 0;
     while (done < size) {
-        ssize_t part;
-        if (write) {
-            part = send(fd, p + done, size - done, MSG_NOSIGNAL);
-        } else {
-            part = recv(fd, p + done, size - done, 0);
-        }
+        ssize_t part = send(fd, p + done, size - done,
+                            MSG_NOSIGNAL | MSG_DONTWAIT);
         if (part > 0) {
             done += (size_t)part;
             continue;
         }
-        if (part == 0) {
-            if (peer_closed) *peer_closed = true;
-            return false;
+        if (part < 0 && errno == EINTR) continue;
+        if (part < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            if (waited_ms >= budget_ms) return false;
+            struct pollfd pfd = {.fd = fd, .events = POLLOUT};
+            (void)poll(&pfd, 1, 5);
+            waited_ms += 5;
+            continue;
         }
-        if (errno == EINTR) continue;
         return false;
     }
     return true;
@@ -875,9 +880,8 @@ bool resident_launch_cancel(struct resident_launch *launch,
         (void)snprintf(stop.magic, sizeof(stop.magic), "%s",
                        RESIDENT_FRAME_MAGIC_STOP);
         (void)snprintf(stop.nonce, sizeof(stop.nonce), "%s", launch->nonce);
-        bool peer_closed = false;
-        (void)resident_io_exact((int)launch->ipc_native, &stop, sizeof(stop),
-                                true, &peer_closed);
+        (void)resident_send_bounded((int)launch->ipc_native, &stop, sizeof(stop),
+                                    RESIDENT_STOP_SEND_BUDGET_MS);
     }
     uint32_t waited_ms = 0;
     int status = 0;
