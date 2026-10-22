@@ -73,6 +73,7 @@ void zcl_native_handle_fleet_objectives(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     struct zcl_objectives_options options;
+    struct zcl_objectives_node_cache node_cache = {0};
     const struct zcl_objective_row *catalog;
     struct json_value rows;
     char text[ZCL_OBJECTIVES_TEXT_MAX];
@@ -91,6 +92,7 @@ void zcl_native_handle_fleet_objectives(
     options.baseline = obj_input_str(request, "baseline");
     options.brief = obj_input_str(request, "brief");
     options.datadir = obj_input_str(request, "datadir");
+    options.node_cache = &node_cache;
 
     n = zcl_objectives_catalog(&catalog);
 
@@ -106,6 +108,7 @@ void zcl_native_handle_fleet_objectives(
         json_free(&row);
     }
 
+    zcl_objectives_node_cache_free(&node_cache);
     (void)zcl_objectives_render_text(&rows, text, sizeof(text));
     (void)zcl_objectives_render_screen(&rows, screen, sizeof(screen));
 

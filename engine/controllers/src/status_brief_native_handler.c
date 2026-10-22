@@ -855,13 +855,19 @@ char *zcl_native_status_brief_body(const struct json_value *args,
                                    struct zcl_native_body_err *err)
 {
     (void)args;
+    return zcl_native_status_brief_body_within(status_front_door_deadline_ms(),
+                                               err);
+}
+
+char *zcl_native_status_brief_body_within(long deadline_ms,
+                                          struct zcl_native_body_err *err)
+{
     if (!err)
         LOG_NULL("native.status", "status brief missing error sink");
 
     /* The flagless front door: always answer fast, even against a busy/
      * wedged node, rather than ride the generic 10s RPC ceiling every other
      * command tolerates (see status_front_door_deadline_ms()). */
-    long deadline_ms = status_front_door_deadline_ms();
     char *raw = node_rpc_call_deadline("agent", NULL, deadline_ms,
                                        deadline_ms);
     struct json_value agent;

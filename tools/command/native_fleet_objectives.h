@@ -43,6 +43,16 @@ struct zcl_objective_value {
 /* Paths and knobs every producer reads from; every field is overridable so
  * tests can drive the whole leaf against a fixture tree, and NULL selects
  * this machine's own default location. */
+/* One run's shared answer from the node: the status brief is fetched at
+ * most once per run and shared by every node producer. Zero it before the
+ * run, free it after with zcl_objectives_node_cache_free. */
+struct zcl_objectives_node_cache {
+    bool filled;
+    char *raw; /* NULL when the fetch failed */
+    int fetches; /* fetches made so far: 0 or 1 */
+};
+void zcl_objectives_node_cache_free(struct zcl_objectives_node_cache *cache);
+
 struct zcl_objectives_options {
     const char *outcomes;     /* outcomes.jsonl */
     const char *attempts_dir; /* the proof attempts directory */
@@ -53,6 +63,10 @@ struct zcl_objectives_options {
                                * asking the local node (fixtures) */
     const char *datadir;      /* the datadir whose boot_status.json is read;
                                * NULL selects the CLI's resolved datadir */
+    int64_t node_budget_ms;   /* the longest a producer may wait on the node,
+                               * connect and total; 0 keeps the status
+                               * front door's own deadline */
+    struct zcl_objectives_node_cache *node_cache; /* NULL fetches per row */
     int64_t now;              /* unix seconds the day and window readers
                                * count from; 0 reads the wall clock */
 };

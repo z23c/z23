@@ -58,35 +58,73 @@ static char *obj_node_read_file(const char *path, size_t *len_out)
     return buf;
 }
 
-/* The status brief as a parsed object: from options->brief when named, else
- * from the node through the same body `z23 status` runs. False, with the
- * reason in v, when no object can be had. */
+/* The status brief's raw text, a malloc'd string: from options->brief when
+ * named, else from the node through the same body `z23 status` runs, within
+ * options->node_budget_ms when one is set. NULL, with the reason in v, when
+ * none can be had. */
+static char *obj_node_fetch(const struct zcl_objectives_options *options,
+                            struct zcl_objective_value *v)
+{
+    char *raw;
+    size_t len = 0;
+    if (options && options->brief) {
+        raw = obj_node_read_file(options->brief, &len);
+        if (!raw)
+            obj_node_reason(v, "cannot read the status brief", options->brief);
+    } else {
+        struct zcl_native_body_err err;
+        memset(&err, 0, sizeof(err));
+        raw = (options && options->node_budget_ms > 0)
+                  ? zcl_native_status_brief_body_within(
+                        options->node_budget_ms, &err)
+                  : zcl_native_status_brief_body(NULL, &err);
+        if (!raw)
+            obj_node_reason(v, "no node answered the status brief", "");
+    }
+    return raw;
+}
+
+void zcl_objectives_node_cache_free(struct zcl_objectives_node_cache *cache)
+{
+    if (!cache)
+        return;
+    free(cache->raw);
+    cache->raw = NULL;
+    cache->filled = false;
+}
+
+/* The status brief as a parsed object. With a node cache the node is asked
+ * once per run and a failure is remembered too, so a down node costs one
+ * wait and one log line, not one per row. False, with the reason in v, when
+ * no object can be had. */
 static bool obj_node_brief(const struct zcl_objectives_options *options,
                            struct json_value *doc,
                            struct zcl_objective_value *v)
 {
-    char *raw;
-    size_t len = 0;
+    struct zcl_objectives_node_cache *cache =
+        options ? options->node_cache : NULL;
+    char *own = NULL;
+    const char *raw;
     bool ok;
-    if (options && options->brief) {
-        raw = obj_node_read_file(options->brief, &len);
-        if (!raw) {
-            obj_node_reason(v, "cannot read the status brief", options->brief);
-            return false;
+    if (cache) {
+        if (!cache->filled) {
+            cache->raw = obj_node_fetch(options, v);
+            cache->filled = true;
+            cache->fetches++;
         }
+        raw = cache->raw;
     } else {
-        struct zcl_native_body_err err;
-        memset(&err, 0, sizeof(err));
-        raw = zcl_native_status_brief_body(NULL, &err);
-        if (!raw) {
+        own = obj_node_fetch(options, v);
+        raw = own;
+    }
+    if (!raw) {
+        if (!v->reason[0])
             obj_node_reason(v, "no node answered the status brief", "");
-            return false;
-        }
-        len = strlen(raw);
+        return false;
     }
     json_init(doc);
-    ok = json_read(doc, raw, len) && doc->type == JSON_OBJ;
-    free(raw);
+    ok = json_read(doc, raw, strlen(raw)) && doc->type == JSON_OBJ;
+    free(own);
     if (!ok) {
         json_free(doc);
         obj_node_reason(v, "the status brief is not a JSON object", "");

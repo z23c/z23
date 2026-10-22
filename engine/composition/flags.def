@@ -1338,6 +1338,10 @@ Z23_FLAG("ZCL_LAND_HOOK_QUIET", "env_runtime", "-", "-",
           "post-* hooks do not schedule proofs for the transient checkouts "
           "and rebases of the landing worktree; a developer checkout never "
           "sets it; first use tools/dev/z23_git_hook.c:auto")
+Z23_FLAG("ZCL_LAND_OBJECTIVES_BRIEF", "env_test", "-", "-",
+          "test only: a status-brief JSON file the landing objectives snapshot reads for the node rows instead of asking the local node; first use tools/command/native_dev_land_objectives.c:auto")
+Z23_FLAG("ZCL_LAND_OBJECTIVES_DATADIR", "env_test", "-", "-",
+          "test only: the datadir whose boot_status.json the landing objectives snapshot reads for node_warm_restart_s instead of the default datadir; first use tools/command/native_dev_land_objectives.c:auto")
 Z23_FLAG("ZCL_LAND_MAKE", "env_test", "-", "-",
           "test build only: the make program dev land drive prove runs to build the landing-worktree producer; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_PROOF_STUB", "env_runtime", "-", "-",

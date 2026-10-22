@@ -17229,6 +17229,10 @@ static int dlx_run_shard(unsigned shard)
         printf("test_dev_land: invalid shard partition\n");
         return 1;
     }
+    /* The landing snapshot reads the node rows from these instead of asking
+     * a live node: no scenario here may reach one. */
+    (void)setenv("ZCL_LAND_OBJECTIVES_BRIEF", "/nonexistent/z23-dl/brief.json", 1);
+    (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", "/nonexistent/z23-dl/datadir", 1);
     int failures = 0;
     size_t ran = 0;
     for (size_t i = 0; i < DLX_CASE_COUNT; i++) {

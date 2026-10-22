@@ -20,6 +20,10 @@ char *zcl_native_status_body(const struct json_value *args,
                              struct zcl_native_body_err *err);
 char *zcl_native_status_brief_body(const struct json_value *args,
                                    struct zcl_native_body_err *err);
+/* The same body with the caller's own connect and total deadline in
+ * milliseconds, instead of ZCL_STATUS_DEADLINE_MS. */
+char *zcl_native_status_brief_body_within(long deadline_ms,
+                                          struct zcl_native_body_err *err);
 char *zcl_native_status_journey_body(const struct json_value *args,
                                      struct zcl_native_body_err *err);
 char *zcl_native_kpi_body(const struct json_value *args,

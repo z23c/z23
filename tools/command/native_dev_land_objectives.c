@@ -35,6 +35,11 @@
 #define DLO_SCHEMA "zcl.objectives_snapshot.v1"
 #define DLO_PATH_MAX (4096u + 96u)
 
+/* The longest the landing path waits on the node for the three product
+ * rows, in total, whatever ZCL_STATUS_DEADLINE_MS says in the driver's
+ * environment. The queue lock is held while this runs. */
+#define DLO_NODE_BUDGET_MS 250
+
 struct dlo_paths {
     char outcomes[DLO_PATH_MAX];
     char attempts[DLO_PATH_MAX];
@@ -190,6 +195,7 @@ void dl_objectives_snapshot(const struct dl_dirs *d, const struct dl_row *r,
                             bool fresh)
 {
     struct dlo_paths paths;
+    struct zcl_objectives_node_cache node_cache = {0};
     struct zcl_objectives_options options;
     char *line;
     size_t len = 0;
@@ -206,7 +212,15 @@ void dl_objectives_snapshot(const struct dl_dirs *d, const struct dl_row *r,
     options.lintc_dir = paths.lintc;
     options.baseline = paths.baseline;
     options.now = r->landed_at;
+    /* One status-brief read for the whole snapshot, bounded. The two env
+     * names let a test point the node rows at fixtures instead of a live
+     * node; unset, they read the local node and datadir. */
+    options.node_budget_ms = DLO_NODE_BUDGET_MS;
+    options.node_cache = &node_cache;
+    options.brief = getenv("ZCL_LAND_OBJECTIVES_BRIEF");
+    options.datadir = getenv("ZCL_LAND_OBJECTIVES_DATADIR");
     line = dlo_line(r, &options, &len);
+    zcl_objectives_node_cache_free(&node_cache);
     if (!line)
         return;
     if (!dl_append_row(paths.snapshot, line, len)) {

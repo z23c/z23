@@ -756,6 +756,48 @@ _test_next:;
     return failures;
 }
 
+static int fox_case_node_cache(void)
+{
+    int failures = 0;
+    char root[512];
+    test_make_tmpdir(root, sizeof(root), "fleet_objectives", "node_cache");
+    TEST("objectives: one run reads the status brief once for every node "
+         "row, and a down node is asked once") {
+        char brief[1024];
+        (void)snprintf(brief, sizeof(brief), "%s/brief_once.json", root);
+        ASSERT(fox_write(brief, "{\"hstar\":10,\"header_height\":12,"
+                                "\"rss_mb\":900}"));
+        struct zcl_objectives_node_cache cache = {0};
+        struct zcl_objectives_options o = {0};
+        o.brief = brief;
+        o.datadir = FOX_NO_DATADIR;
+        o.node_cache = &cache;
+        struct zcl_objective_value a =
+            zcl_objectives_measure(&o, "node_rss_mb");
+        struct zcl_objective_value b =
+            zcl_objectives_measure(&o, "node_tip_lag_blocks");
+        ASSERT(a.measured && b.measured);
+        ASSERT_EQ(a.value, (int64_t)900);
+        ASSERT_EQ(b.value, (int64_t)2);
+        ASSERT_EQ(cache.fetches, 1);
+        zcl_objectives_node_cache_free(&cache);
+        /* A node that does not answer is asked once, and every row says so. */
+        struct zcl_objectives_node_cache down = {0};
+        o.brief = FOX_NO_BRIEF;
+        o.node_cache = &down;
+        a = zcl_objectives_measure(&o, "node_rss_mb");
+        b = zcl_objectives_measure(&o, "node_tip_lag_blocks");
+        ASSERT(!a.measured && !b.measured);
+        ASSERT(a.reason[0] != '\0' && b.reason[0] != '\0');
+        ASSERT_EQ(down.fetches, 1);
+        zcl_objectives_node_cache_free(&down);
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 int test_fleet_objectives(void);
 int test_fleet_objectives(void)
 {
@@ -765,6 +807,7 @@ int test_fleet_objectives(void)
     failures += fox_case_git();
     failures += fox_case_screen();
     failures += fox_case_next();
+    failures += fox_case_node_cache();
     char root[512];
     char outcomes_ok[1024], outcomes_missing[1024];
     char attempts_dir[1024], inflight_dir[1024];
