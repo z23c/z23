@@ -1067,6 +1067,14 @@ static bool dl_row_encoding_start(const struct dl_row *r, char *row, size_t cap,
 }
 
 
+/* The optional "landed_at":N, member; empty for a row that never landed. */
+static bool dl_landed_at_member(const struct dl_row *r, char *out, size_t cap)
+{
+    out[0] = '\0';
+    return r->landed_at <= 0 ||
+           snprintf(out, cap, "\"landed_at\":%lld,", r->landed_at) < (int)cap;
+}
+
 static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                           size_t *len_out)
 {
@@ -1085,12 +1093,10 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
      * valid UTF-8 detail cannot overflow its escaped buffer. */
     char e_dim[128], e_log[8192], e_detail[1024 * 6 + 16];
     int w;
-    char landed_at[40] = "";
+    char landed_at[40];
     char priority[40];
-    if (!dl_row_encoding_start(r, out, cap, priority)) return false;
-    if (r->landed_at > 0 &&
-        snprintf(landed_at, sizeof(landed_at), "\"landed_at\":%lld,", r->landed_at) >=
-            (int)sizeof(landed_at))
+    if (!dl_row_encoding_start(r, out, cap, priority) ||
+        !dl_landed_at_member(r, landed_at, sizeof(landed_at)))
         return false;
     if (!dl_escape_start_fields(r, e_ts, e_tip, e_wt, e_note, e_state,
                                 e_phase) ||
