@@ -549,7 +549,7 @@ static int test_lab_test_stderr(void)
                 const struct json_value *data = json_get(&first, "data");
                 const struct json_value *rows = json_get(data, "cases");
                 ASSERT(rows && rows->num_children == counts[scenario]);
-                ASSERT_EQ(lt_int(data, "failed", NULL), counts[scenario]);
+                ASSERT_EQ(lt_int(data, "failed", NULL), (int64_t)counts[scenario]);
                 ASSERT_EQ(lab_run_count(), runs_before + counts[scenario]);
                 if (scenario == 0) {
                     ASSERT(lt_streq(lt_at(&rows->children[0], "stderr", NULL),
