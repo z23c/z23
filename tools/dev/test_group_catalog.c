@@ -128,7 +128,11 @@ bool zcl_test_group_catalog_contains(const char *full_id)
  * test_devagent_ticketkey (no timing assertion) and test_codeindex_scale (its
  * budgets are query and cold-build CPU, not wall time) were here until the
  * exclusive pass was shortened; they now run in the pool and test_parallel
- * reruns them alone once if load fails them. */
+ * reruns them alone once if load fails them. test_sapling_crypto (per-thread
+ * CPU ratios), test_validate_parallel_determinism (process-CPU comparison),
+ * test_simnet_perf (min-of-reps same-window A/B) and test_replay_canary_verdict
+ * (waits for a stamp, not a poll count) moved the same way after 12
+ * concurrent copies beside 56 busy loops failed none of them. */
 static bool catalog_contention_sensitive(const char *full_id)
 {
     static const char *const groups[] = {
@@ -144,13 +148,9 @@ bool zcl_test_group_requires_exclusive_run(const char *full_id)
     if (!full_id || !zcl_test_group_catalog_contains(full_id))
         return false;
     return strcmp(full_id, "test_command_registry_latency") == 0 ||
-           strcmp(full_id, "test_sapling_crypto") == 0 ||
            strcmp(full_id, "test_vcs_core") == 0 ||
            strcmp(full_id, "test_golden_dev_cycle") == 0 ||
            strcmp(full_id, "test_kill9_recovery") == 0 ||
-           strcmp(full_id, "test_validate_parallel_determinism") == 0 ||
-           strcmp(full_id, "test_simnet_perf") == 0 ||
-           strcmp(full_id, "test_replay_canary_verdict") == 0 ||
            strcmp(full_id, "test_test_group_selector") == 0 ||
            catalog_contention_sensitive(full_id);
 }

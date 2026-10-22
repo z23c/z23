@@ -1400,10 +1400,11 @@ static int test_process_sensitive_groups_are_catalog_exclusive(void)
             "test_command_registry_latency"));
         ASSERT(zcl_test_group_requires_exclusive_run(
             "test_command_registry_latency"));
-        /* Constant-time comparisons are paired CPU measurements. Saturated
-         * process concurrency created a 1.250 false delta in physical CI;
-         * measure cryptographic weight sensitivity before the worker pool. */
-        ASSERT(zcl_test_group_requires_exclusive_run(
+        /* Constant-time comparisons are paired per-thread CPU measurements,
+         * so descheduling drops out. They run in the pool (0 of 12 failed
+         * beside 56 busy loops); a saturation false delta would still be
+         * rerun alone once by the runner. */
+        ASSERT(!zcl_test_group_requires_exclusive_run(
             "test_sapling_crypto"));
         /* ZVCS hard-gates warm status and manifest latency. Running it in
          * the worker pool made unrelated CPU and filesystem producers turn
@@ -1428,20 +1429,19 @@ static int test_process_sensitive_groups_are_catalog_exclusive(void)
             "test_make_lint_gates_shard_08"));
         ASSERT(!lint_gates_group_requires_quiet_pool(
             "test_make_lint_gates_realroot"));
-        /* This compares forced-pool and serial routing back-to-back. The
-         * worker pool must not introduce a different producer population
-         * between those two measurements. */
-        ASSERT(zcl_test_group_requires_exclusive_run(
+        /* Forced-pool and serial routing are costed in process CPU, not
+         * wall time, so a different producer population cannot skew one
+         * arm. */
+        ASSERT(!zcl_test_group_requires_exclusive_run(
             "test_validate_parallel_determinism"));
-        /* The clean-vs-injected growth detector is a host-latency contract;
-         * parallel CPU/disk contention can invert its positive control. */
-        ASSERT(zcl_test_group_requires_exclusive_run(
+        /* The clean-vs-injected detector keeps the minimum of several reps
+         * per point and compares same-window arms; its absolute budgets are
+         * not asserted in suite, so it runs in the pool. */
+        ASSERT(!zcl_test_group_requires_exclusive_run(
             "test_simnet_perf"));
-        /* The replay-canary identity fixture waits on a child/FIFO handshake.
-         * A saturated 32-worker parent can starve that child past the bounded
-         * five-second rendezvous and grade scheduler pressure as identity
-         * failure. */
-        ASSERT(zcl_test_group_requires_exclusive_run(
+        /* The replay-canary fixture waits for the child's run-start stamp,
+         * never a poll count, so a loaded host only slows it. */
+        ASSERT(!zcl_test_group_requires_exclusive_run(
             "test_replay_canary_verdict"));
         /* The dev_platform watch-session shards hold process-stop budgets. */
         ASSERT(zcl_test_group_requires_exclusive_run(

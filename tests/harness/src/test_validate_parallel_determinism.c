@@ -28,6 +28,7 @@
 #include "jobs/script_validate_verify.h"
 #include "platform/time_compat.h"
 #include "primitives/block.h"
+#include "test/test_timing_budget.h"
 #include "primitives/transaction.h"
 #include "script/script.h"
 #include "script/script_error.h"
@@ -468,22 +469,22 @@ int test_validate_parallel_determinism(void)
         bool pool_ok = true, ser_ok = true;
 
         script_verify_set_parallel_min_inputs_for_test(0);   /* force the fan */
-        int64_t t0 = platform_time_monotonic_us();
+        uint64_t t0 = test_process_cpu_us();
         for (int i = 0; i < REPS; i++) {
             struct script_verify_summary s;
             script_verify_block(&b, H, NULL, NULL, vpd_prevout, NULL, true, &s);
             if (!sv_eq(&s, &ref)) { pool_ok = false; break; }
         }
-        int64_t us_pool = platform_time_monotonic_us() - t0;
+        uint64_t us_pool = test_process_cpu_us() - t0;
 
         script_verify_set_parallel_min_inputs_for_test(-1);  /* default => serial */
-        int64_t t1 = platform_time_monotonic_us();
+        uint64_t t1 = test_process_cpu_us();
         for (int i = 0; i < REPS; i++) {
             struct script_verify_summary s;
             script_verify_block(&b, H, NULL, NULL, vpd_prevout, NULL, true, &s);
             if (!sv_eq(&s, &ref)) { ser_ok = false; break; }
         }
-        int64_t us_ser = platform_time_monotonic_us() - t1;
+        uint64_t us_ser = test_process_cpu_us() - t1;
 
         double pool_bps = us_pool > 0 ? (double)REPS * 1e6 / (double)us_pool : 0.0;
         double ser_bps  = us_ser  > 0 ? (double)REPS * 1e6 / (double)us_ser  : 0.0;
@@ -493,8 +494,10 @@ int test_validate_parallel_determinism(void)
 
         VPD_CHECK("light-block routing verdict-identical", pool_ok && ser_ok);
         /* The serial routing eliminates the fan overhead, so it must not be
-         * materially slower. Loose bound (1.5x + 5ms slack) keeps the gate
-         * stable under scheduler noise while still catching a routing that
+         * materially slower. Both arms are costed in process CPU (user+sys,
+         * pool workers included), so a loaded host cannot starve one arm. The
+         * loose bound (1.5x + 5ms slack) keeps the gate
+         * stable under cache and SMT noise while still catching a routing that
          * accidentally kept fanning every light block. */
         VPD_CHECK("light-block serial-threshold not slower than pool",
                   us_ser <= us_pool * 3 / 2 + 5000);
