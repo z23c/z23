@@ -21,9 +21,13 @@ repeat them.
 ## Managed fleet operation
 
 Use the installed host operations, storage and worker policy before development. They own host routes, admission reserves,
-retention and concurrency. On the managed Mac use one focused
-`devbuild --wait make -j2 …` command; generic all-core examples below do not
-override that host policy. See the
+retention and concurrency. On the managed Mac (10 cores, 16 GiB) use one focused
+`devbuild --wait make -j6 …` command; generic all-core examples below do not
+override that host policy. Measured 2026-10-22: a `-j2` `macos-acceptance`
+ran for over 25 minutes with 76% of memory free and load under 3.
+`-j6` is a starting point, not a proven ceiling: `devbuild` refuses to start
+a job while free memory is below 25%, but it does not watch a running job.
+Drop to `-j4` if memory pressure turns yellow during a run. See the
 [fleet operating contract](../work/AGENT_FLEET.md#consolidated-operating-model) for
 the shared execution, transport and observation boundaries.
 
