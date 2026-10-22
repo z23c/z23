@@ -9,8 +9,8 @@ acceptance lives in [`../quality/MVP.md`](../quality/MVP.md). Maintainer-host li
 only in [`../agent/HANDOFF.md`](../agent/HANDOFF.md), consulted for an explicit host
 assignment. Do not copy live heights, process state, or benchmark anecdotes here.
 
-`AGENTS.md` owns work order; `FLEET_SCORECARD.md` owns the thirteen current
-A+ completion bars. The sections below supply scoped acceptance context.
+The [Now](#now) list below is the work order; `FLEET_SCORECARD.md` owns the
+thirteen current A+ completion bars. The sections below supply scoped acceptance context.
 Passing all of MVP.md's
 C1–C8 is necessary for platform v1 but not sufficient: platform v1 is the
 release demonstration under *Acceptance and performance* below, together with
@@ -55,10 +55,35 @@ the fleet features in item 5 and the self-hosting in item 2; they do not
 reorder P0. Requirements below are acceptance targets, not claims of
 completed implementation or measured performance.
 
+## Now
+
+At most seven items, ranked. Take the first one nobody has claimed in the
+native `dev.agent` registry, keep it to one lane with one writer, and land it
+through `dev land submit`. A dev-tooling item names the number it moves, with
+before and after values.
+
+1. **P0: tests never touch a real datadir.** Every test process runs under a
+   private HOME. A land proof or lane gate leaves no file in any default
+   datadir.
+2. **Plugins end to end.** Attest, fetch and run plugins, with host calls;
+   then the bundled apps ship as plugins ([`PLUGIN_APPS.md`](../commons/PLUGIN_APPS.md)).
+3. **Faster landing.** Several queued rows share one proof (land trains), and
+   the queue reuses a lane's exact proof receipt instead of re-running it.
+   Target: a reviewed row lands in 15 minutes or less at p50.
+4. **Generated files leave git.** The capability inventory is built into
+   `build/gen/` like the API reference, and the land queue's regeneration
+   machinery is deleted.
+5. **The strict test suite is green.** `make test` builds every binary its
+   groups need, and every group passes under the `-Werror -O3` test profile.
+6. **A new command touches only its own files.** Handler prototypes, remote
+   command classes and test prototypes are derived from the `.def` tables.
+7. **Less shell.** Shell lint gates move into the C23 `lintc` driver; the
+   shell line budget only goes down.
+
 ## Invariants and authority
 
 P0 consensus, wallet custody and public-node correctness retain absolute
-priority; after P0, the fleet A+ scorecard order in `AGENTS.md` applies. Insight,
+priority; after P0, the [Now](#now) list applies. Insight,
 Control and development machinery advance public-node reliability and C23
 Commons acceptance. Telemetry, indexing, builds, transfers and application
 operations may not delay chain advancement, synchronization or peer health.
@@ -128,7 +153,7 @@ The items below describe work to prove, not capabilities declared complete.
    Criterion 4 is rerun later with the minimal amount, when the owner schedules the
    spend. Its [`MVP.md`](../quality/MVP.md) evidence is a 0.02 ZCL note decrypted
    after mempool entry; that shows decryption, not the balance within two blocks. Criteria 6
-   and 8 retain their recorded acceptance gaps. Follow the fleet work order
+   and 8 retain their recorded acceptance gaps. Follow the [Now](#now) work order
    when selecting authorized work on these gaps.
 
 2. **Qualify protected native and guest access through restart.** Reuse the

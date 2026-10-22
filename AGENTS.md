@@ -87,5 +87,5 @@ Escalate only for consensus or custody risk, a destructive production action (da
 
 - Procedure: [DEVELOPING.md](docs/dev/DEVELOPING.md); open one section, never the whole file: [1. Orient](docs/dev/DEVELOPING.md#1-orient), [3. Edit within ownership](docs/dev/DEVELOPING.md#3-edit-within-ownership-boundaries), [4. Fast feedback](docs/dev/DEVELOPING.md#4-receive-fast-local-feedback), [5. Build and proof](docs/dev/DEVELOPING.md#5-build-and-focused-proof).
 - Maintainer hosts, fleet priorities, scorecard tiers, lanes and trains, source baseline: [Maintainer hosts](docs/dev/DEVELOPING.md#maintainer-hosts), [AGENT_FLEET.md](docs/work/AGENT_FLEET.md), [FLEET_GUIDE.md](docs/agent/FLEET_GUIDE.md).
-- Ownership map: [CODEBASE_MAP.md](docs/dev/CODEBASE_MAP.md). Current work order: [FORWARD_PLAN.md](docs/work/FORWARD_PLAN.md). Docs index: [docs/README.md](docs/README.md).
+- Ownership map: [CODEBASE_MAP.md](docs/dev/CODEBASE_MAP.md). Current work order: [FORWARD_PLAN.md#now](docs/work/FORWARD_PLAN.md#now). Docs index: [docs/README.md](docs/README.md).
 - Nested `AGENTS.md` files in `engine/`, `cognition/`, `platform/`, `apps/`, `tools/`, `tests/`, `docs/` and `vendor/` add area rules.

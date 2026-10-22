@@ -5,9 +5,9 @@
 This directory holds scoped product plans, design records, retained
 rationale, and specialist procedures. It is not itself a priority queue:
 
-1. [`../../AGENTS.md`](../../AGENTS.md) owns current work order, and
+1. The [Now list in `FORWARD_PLAN.md`](./FORWARD_PLAN.md#now) is the current work order, and
    [`FLEET_SCORECARD.md`](./FLEET_SCORECARD.md) owns the thirteen A+ completion
-   bars. [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) supplies scoped acceptance and
+   bars. The rest of [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) supplies scoped acceptance and
    implementation context.
 2. [`../quality/MVP.md`](../quality/MVP.md) owns the v1 acceptance contract.
 3. [`../agent/HANDOFF.md`](../agent/HANDOFF.md) owns maintainer-host live facts only.
@@ -50,7 +50,7 @@ Developer references (hot-swap, test-result cache, fast path, lab) live in
 | File | Authority | Purpose |
 |---|---|---|
 | [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) | PLAN | scoped acceptance and implementation context under AGENTS.md and the fleet A+ scorecard |
-| [`FLEET_SCORECARD.md`](./FLEET_SCORECARD.md) | TARGET | thirteen owner-adopted A+ bars; work order lives in `AGENTS.md` |
+| [`FLEET_SCORECARD.md`](./FLEET_SCORECARD.md) | TARGET | thirteen owner-adopted A+ bars; work order is the Now list in `FORWARD_PLAN.md` |
 | [`self-verified-tip-plan.md`](./self-verified-tip-plan.md) | DESIGN | the `G-SOV` sovereignty-gate design + open hardening items; `G-SOV` is the active gate in `sovereignty_controller.c` |
 | [`SOVEREIGN-NETWORK-ROADMAP.md`](./SOVEREIGN-NETWORK-ROADMAP.md) | FOUNDATION | durable Phase 0–6 hierarchy and promotion gates, subordinate to `FORWARD_PLAN.md` |
 | [`SOVEREIGN_MACHINE_MESH_PLAN.md`](./SOVEREIGN_MACHINE_MESH_PLAN.md) | DESIGN | owner-paired Linux/macOS/Windows machine discovery, private transfer, typed control, secure remote-service tunnels, and hot-swap acceptance |
@@ -143,9 +143,9 @@ commit — retiring a doc is not finished until its callers are gone too.
 
 ## Active control documents
 
-- **Current work:** [`../../AGENTS.md`](../../AGENTS.md) owns work order and
+- **Current work:** the [Now list in `FORWARD_PLAN.md`](./FORWARD_PLAN.md#now) is the work order and
   [`FLEET_SCORECARD.md`](./FLEET_SCORECARD.md) owns current A+ completion bars.
-  [`FORWARD_PLAN.md`](./FORWARD_PLAN.md) and other PLAN/LIVE records supply
+  The rest of `FORWARD_PLAN.md` and other PLAN/LIVE records supply
   scoped context and procedures under that order.
 - **Session entrypoint:** [`../../AGENTS.md`](../../AGENTS.md), then
   [`FORWARD_PLAN.md`](./FORWARD_PLAN.md).

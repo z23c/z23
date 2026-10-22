@@ -95,7 +95,7 @@ Open one section, never the whole file.
 | Exact incantations | [COOKBOOK.md](dev/COOKBOOK.md) |
 | Who owns what | [CODEBASE_MAP.md](dev/CODEBASE_MAP.md) |
 | Intentional behavior | [AGENT_TRAPS.md](agent/AGENT_TRAPS.md) |
-| Current work order | [FORWARD_PLAN.md](work/FORWARD_PLAN.md#current-mission) |
+| Current work order | [FORWARD_PLAN.md](work/FORWARD_PLAN.md#now) |
 | Joining a fleet, mail, wiki, gateway | [FLEET_GUIDE.md](agent/FLEET_GUIDE.md) |
 | Defensive coding and claim markers | [DEFENSIVE_CODING.md](DEFENSIVE_CODING.md) |
 | Consensus or custody work | [SECURITY_AND_INTEGRITY.md](node/SECURITY_AND_INTEGRITY.md), [CONSENSUS_PARITY_DOCTRINE.md](CONSENSUS_PARITY_DOCTRINE.md) |

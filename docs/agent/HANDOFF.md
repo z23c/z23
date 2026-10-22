@@ -211,7 +211,7 @@ Soak accrual is `make soak-evidence-report`, not process uptime.
 
 ## Pointers
 
-- [`work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md) — scoped acceptance and implementation context (work order: `AGENTS.md`).
+- [`work/FORWARD_PLAN.md`](../work/FORWARD_PLAN.md) — scoped acceptance and implementation context (work order: its Now list).
 - [`AGENT_TRAPS.md`](AGENT_TRAPS.md) — read before "fixing" anything.
 - [`MVP.md`](../quality/MVP.md) — the v1 acceptance bar.
 - [`TENACITY.md`](../TENACITY.md) — copy-first recovery doctrine.
