@@ -38,7 +38,8 @@
 #                      group. Canonical test_*/spec_* IDs select only that
 #                      group; legacy prefixless IDs preserve their former
 #                      substring union as canonical full IDs. No substring
-#                      reaches the runner.
+#                      reaches the runner. A selected umbrella is omitted
+#                      only when the complete registered shard set is selected.
 #   --resolve-exact-set CSV
 #                      canonicalize/validate a comma-separated exact set.
 #   --check-impact-rules [FILE]
@@ -265,6 +266,117 @@ check_impact_rules() {
     [ "$bad" = 0 ]
 }
 
+# Render only the canonical declaration form, including multiline rows.
+# This is compatibility glue for the native catalog, never another registry.
+# C-string escapes and POSIX locale classes are deliberately refused: decoding
+# either here could disagree with platform_glob_match's byte-wise grammar.
+fold_proof_umbrellas() {
+    proof_umbrella_source="${ZCL_TEST_UMBRELLAS_SRC:-tools/dev/test_group_umbrellas.def}"
+    [ -f "$proof_umbrella_source" ] || {
+        echo "test-group-list: missing umbrella source $proof_umbrella_source" >&2
+        return 1
+    }
+    proof_umbrella_rows="$(LC_ALL=C awk '
+        function bad() {
+            failed = 1
+            print "test-group-list: malformed or unsupported umbrella declaration at line " NR > "/dev/stderr"
+            exit 1
+        }
+        function uncomment(line,    i, c, pair, out, quoted) {
+            out = ""; quoted = 0
+            for (i = 1; i <= length(line); i++) {
+                c = substr(line, i, 1); pair = substr(line, i, 2)
+                if (comment) {
+                    if (pair == "*/") { comment = 0; i++ }
+                } else if (!quoted && pair == "/*") {
+                    comment = 1; i++; out = out " "
+                } else if (!quoted && pair == "//") {
+                    break
+                } else {
+                    out = out c
+                    if (c == "\"") quoted = !quoted
+                }
+            }
+            return out
+        }
+        {
+            line = uncomment($0)
+            if (line ~ /^[[:space:]]*$/) next
+            row = row " " line
+            if (length(row) > 8192) bad()
+            if (index(row, ")") == 0) next
+            if (split(row, fields, "\"") != 5 ||
+                fields[1] !~ /^[[:space:]]*ZCL_TEST_GROUP_UMBRELLA[[:space:]]*\([[:space:]]*$/ ||
+                fields[2] !~ /^[A-Za-z_0-9]+$/ ||
+                fields[3] !~ /^[[:space:]]*,[[:space:]]*$/ ||
+                fields[5] !~ /^[[:space:]]*\)[[:space:]]*$/ ||
+                fields[4] == "" || seen[fields[2]]++) bad()
+            pattern = fields[4]
+            # platform/glob_match.h: PLATFORM_GLOB_INPUT_MAX is 4096;
+            # longer shell patterns must never subsume a native umbrella.
+            if (length(pattern) > 4096) bad()
+            for (i = 1; i <= length(pattern); i++) {
+                c = substr(pattern, i, 1)
+                if (c !~ /^[A-Za-z_0-9]$/ && index("*?[]!^-", c) == 0) bad()
+            }
+            if (index(pattern, "[:") || index(pattern, "[.") ||
+                index(pattern, "[=")) bad()
+            print fields[2] "\t" pattern
+            row = ""
+        }
+        END { if (!failed && (comment || row !~ /^[[:space:]]*$/)) bad() }
+    ' "$proof_umbrella_source")" || return 1
+
+    proof_umbrella_drop=""
+    while IFS="$(printf '\t')" read -r proof_umbrella_id proof_umbrella_glob; do
+        [ -n "$proof_umbrella_id" ] || continue
+        is_registered "$proof_umbrella_id" || continue
+        case "
+$1" in
+            *"
+$proof_umbrella_id
+"*) ;;
+            *) continue ;;
+        esac
+        proof_umbrella_count=0
+        proof_umbrella_missing=0
+        # Registered IDs contain only identifier bytes: splitting this cache
+        # cannot expand paths or split an ID. The case pattern is data.
+        for proof_umbrella_member in $REGISTERED_CACHE; do
+            [ "$proof_umbrella_member" != "$proof_umbrella_id" ] || continue
+            case "$proof_umbrella_member" in
+                $proof_umbrella_glob)
+                    proof_umbrella_count=$((proof_umbrella_count + 1))
+                    case "
+$1" in
+                        *"
+$proof_umbrella_member
+"*) ;;
+                        *) proof_umbrella_missing=1 ;;
+                    esac ;;
+            esac
+        done
+        if [ "$proof_umbrella_count" -gt 0 ] &&
+           [ "$proof_umbrella_missing" = 0 ]; then
+            proof_umbrella_drop="$proof_umbrella_drop$proof_umbrella_id
+"
+        fi
+    done <<EOF
+$proof_umbrella_rows
+EOF
+    # All input and declaration validation finished before any selection is
+    # printed. Filtering preserves the resolver's first-selection order.
+    for proof_umbrella_member in $1; do
+        case "
+$proof_umbrella_drop" in
+            *"
+$proof_umbrella_member
+"*) ;;
+            *) printf '%s\n' "$proof_umbrella_member" ;;
+        esac
+    done
+}
+
 resolve_proof() {
     local needle candidate resolved="" exact family_count
     declare -A resolved_set=()
@@ -289,7 +401,9 @@ resolve_proof() {
         [ "$family_count" -gt 0 ] || return 1
     done
     [ -n "$resolved" ] || return 1
-    printf '%s' "$resolved"
+    # Full exact IDs still select themselves. A complete UNION of explicitly
+    # requested shards subsumes its umbrella, just like a legacy family does.
+    LC_ALL=C fold_proof_umbrellas "$resolved"
 }
 
 exact_set_help() {

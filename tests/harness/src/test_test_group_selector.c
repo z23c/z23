@@ -5,6 +5,7 @@
 #include "test/test_verdict_json.h"
 #include "platform/os_proc.h"
 #include "platform/file_metadata.h"
+#include "platform/glob_match.h"
 #include "platform/path_compat.h"
 #include "platform/state_root.h"
 #include "test_group_catalog.h"
@@ -2562,6 +2563,229 @@ static int test_runner_state_setup_refuses(void)
     return failures;
 }
 
+/* Exercise the compatibility resolver exactly as mapped fast-ci does, then
+ * hand its bounded full-ID CSV to this runner without executing scenarios. */
+static bool tgs_proof_resolver_selection(const char *arguments,
+                                         const char *const *plans,
+                                         size_t plan_count)
+{
+    char command[4096], resolved[8192], csv[8192] = "";
+    char expected[FAMILY_EXPAND_MAX][ZCL_TEST_GROUP_FULL_MAX];
+    struct family_expansion seen = {0};
+    bool truncated = true;
+    size_t want = zcl_test_group_expand_plan(
+        plans, plan_count, expected, FAMILY_EXPAND_MAX, &truncated);
+    if (truncated || want == SIZE_MAX || want == 0)
+        return false;
+    int n = snprintf(command, sizeof(command),
+        "tools/dev/test-group-list.sh --resolve-proof %s 2>/dev/null",
+        arguments);
+    if (n < 0 || (size_t)n >= sizeof(command) ||
+        capture_command(command, resolved, sizeof(resolved)) != 0)
+        return false;
+    for (char *line = resolved; *line;) {
+        char *end = strchr(line, '\n');
+        if (!end) return false;
+        *end = '\0';
+        if (!zcl_test_group_catalog_contains(line) ||
+            family_expansion_has(&seen, line) ||
+            !family_expansion_collect(line, &seen))
+            return false;
+        size_t used = strlen(csv);
+        n = snprintf(csv + used, sizeof(csv) - used, "%s%s",
+                     used ? "," : "", line);
+        if (n < 0 || (size_t)n >= sizeof(csv) - used) return false;
+        line = end + 1;
+    }
+    if (seen.len != want) return false;
+    for (size_t i = 0; i < want; i++)
+        if (!family_expansion_has(&seen, expected[i])) return false;
+    char exe[PATH_MAX];
+    static char out[256 * 1024];
+    if (!os_proc_exe_path(exe, sizeof(exe))) return false;
+    n = snprintf(command, sizeof(command),
+        "'%s' --jobs=1 --exact=%s --no-cache --selection-only 2>&1",
+        exe, csv);
+    if (n < 0 || (size_t)n >= sizeof(command) ||
+        capture_command(command, out, sizeof(out)) != 0 ||
+        !strstr(out, "executed=0 cache_probes=0") ||
+        strstr(out, "attempt group="))
+        return false;
+    size_t selected = 0;
+    for (const char *p = out; (p = strstr(p, "SELECTED ")) != NULL; p++)
+        selected++;
+    if (selected != want) return false;
+    for (size_t i = 0; i < seen.len; i++) {
+        char line[ZCL_TEST_GROUP_FULL_MAX + 16];
+        n = snprintf(line, sizeof(line), "SELECTED %s\n", seen.ids[i]);
+        if (n < 0 || (size_t)n >= sizeof(line)) return false;
+        const char *found = strstr(out, line);
+        if (!found || strstr(found + strlen(line), line)) return false;
+    }
+    return true;
+}
+
+static int test_proof_resolver_umbrellas(void)
+{
+    int failures = 0;
+    TEST("proof resolver: complete umbrellas fold before exact runner dispatch") {
+        const char *legacy[] = {"dev_land"};
+        const char *package[] = {"zcode_package_dev"};
+        const char *swarm[] = {"zcode_swarm_net"};
+        const char *singleton[] = {"test_dev_land"};
+        const char *partial[] = {"test_dev_land", "test_dev_land_shard_01",
+                                 "test_dev_land_shard_02",
+                                 "test_dev_land_shard_03"};
+        const char *complete[] = {"test_dev_land", "test_dev_land_shard_01",
+                                  "test_dev_land_shard_02",
+                                  "test_dev_land_shard_03",
+                                  "test_dev_land_shard_04"};
+        ASSERT(tgs_proof_resolver_selection("dev_land", legacy, 1));
+        ASSERT(tgs_proof_resolver_selection("zcode_package_dev", package, 1));
+        ASSERT(tgs_proof_resolver_selection("zcode_swarm_net", swarm, 1));
+        ASSERT(tgs_proof_resolver_selection("test_dev_land", singleton, 1));
+        ASSERT(tgs_proof_resolver_selection(
+            "test_dev_land test_dev_land_shard_01 test_dev_land_shard_02 "
+            "test_dev_land_shard_03", partial, 4));
+        ASSERT(tgs_proof_resolver_selection(
+            "test_dev_land test_dev_land_shard_01 test_dev_land_shard_02 "
+            "test_dev_land_shard_03 test_dev_land_shard_04", complete, 5));
+        char out[4096];
+        ASSERT_EQ(capture_command(
+            "tools/dev/test-group-list.sh --resolve-proof test_api dev_land "
+            "test_api 2>/dev/null", out, sizeof(out)), 0);
+        ASSERT_STR_EQ(out, "test_api\ntest_dev_land_shard_01\n"
+            "test_dev_land_shard_02\ntest_dev_land_shard_03\n"
+            "test_dev_land_shard_04\ntest_dev_land_window\n");
+        ASSERT_EQ(capture_command(
+            "tools/dev/test-group-list.sh --resolve-proof dev_land "
+            "test_dev_land_missing 2>/dev/null", out, sizeof(out)), 1);
+        ASSERT_STR_EQ(out, "");
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_proof_resolver_umbrella_sources(void)
+{
+    int failures = 0;
+    TEST("proof resolver: declaration fixtures fail closed without changing exact modes") {
+        char root[PATH_MAX], registry[PATH_MAX], families[PATH_MAX];
+        char umbrellas[PATH_MAX], env[4 * PATH_MAX + 160];
+        char command[4 * PATH_MAX + 512], out[4096];
+        test_make_tmpdir(root, sizeof(root), "tgs_umbrella", "sources");
+        int n = snprintf(registry, sizeof(registry), "%s/catalog.def", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(registry));
+        n = snprintf(families, sizeof(families), "%s/families.def", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(families));
+        n = snprintf(umbrellas, sizeof(umbrellas), "%s/umbrellas.def", root);
+        ASSERT(n > 0 && (size_t)n < sizeof(umbrellas));
+        ASSERT(tgs_write_file(registry, "ZCL_TEST_GROUP(dev_land)\n"
+            "ZCL_TEST_GROUP(dev_land_shard_01)\n"
+            "ZCL_TEST_GROUP(dev_land_shard_02)\n"
+            "ZCL_TEST_GROUP(dev_land_window)\n"));
+        ASSERT(tgs_write_file(families, "/* no declared families */\n"));
+        ASSERT(tgs_write_file(umbrellas, "/* multiline declaration */\n"
+            "ZCL_TEST_GROUP_UMBRELLA(\n"
+            "  \"test_dev_land\",\n  \"test_dev_land_shard_*\"\n)\n"));
+        n = snprintf(env, sizeof(env),
+            "ZCL_TEST_REGISTRY_SRC='%s' ZCL_TEST_PROOF_FAMILIES_SRC='%s' "
+            "ZCL_TEST_UMBRELLAS_SRC='%s'", registry, families, umbrellas);
+        ASSERT(n > 0 && (size_t)n < sizeof(env));
+        n = snprintf(command, sizeof(command),
+            "%s tools/dev/test-group-list.sh --resolve-proof dev_land "
+            "2>/dev/null", env);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 0);
+        ASSERT_STR_EQ(out, "test_dev_land_shard_01\n"
+            "test_dev_land_shard_02\ntest_dev_land_window\n");
+        /* The bootstrap case pattern must agree with native byte-wise globs,
+         * including classes/ranges and both negation spellings. Select only
+         * shard 01 so a missing matching shard prevents subsumption. */
+        const char *patterns[] = {
+            "test_dev_land_shard_0?", "test_dev_land_shard_0[1-2]",
+            "test_dev_land_shard_0[1]", "test_dev_land_shard_0[!2]",
+            "test_dev_land_shard_0[^2]", "test_dev_land_shard_0[!1]",
+            "test_unregistered_*",
+        };
+        for (size_t i = 0; i < sizeof(patterns) / sizeof(patterns[0]); i++) {
+            char declaration[512], partial[4 * PATH_MAX + 512];
+            n = snprintf(declaration, sizeof(declaration),
+                "ZCL_TEST_GROUP_UMBRELLA(\"test_dev_land\", \"%s\")\n",
+                patterns[i]);
+            ASSERT(n > 0 && (size_t)n < sizeof(declaration));
+            ASSERT(tgs_write_file(umbrellas, declaration));
+            n = snprintf(partial, sizeof(partial),
+                "%s tools/dev/test-group-list.sh --resolve-proof "
+                "test_dev_land test_dev_land_shard_01 2>/dev/null", env);
+            ASSERT(n > 0 && (size_t)n < sizeof(partial));
+            ASSERT_EQ(capture_command(partial, out, sizeof(out)), 0);
+            bool folds = platform_glob_match(
+                patterns[i], "test_dev_land_shard_01", false) &&
+                !platform_glob_match(
+                    patterns[i], "test_dev_land_shard_02", false);
+            ASSERT_STR_EQ(out, folds ? "test_dev_land_shard_01\n" :
+                "test_dev_land\ntest_dev_land_shard_01\n");
+        }
+        /* The unrelated canonical declarations are harmless when the fixture
+         * registry does not contain their umbrellas. */
+        ASSERT(tgs_write_file(umbrellas,
+            "ZCL_TEST_GROUP_UMBRELLA(\"test_absent\", \"test_absent_shard_*\")\n"));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 0);
+        ASSERT_STR_EQ(out, "test_dev_land\ntest_dev_land_shard_01\n"
+            "test_dev_land_shard_02\ntest_dev_land_window\n");
+        ASSERT(tgs_write_file(umbrellas, "/* no umbrellas */\n"));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 0);
+        ASSERT_STR_EQ(out, "test_dev_land\ntest_dev_land_shard_01\n"
+            "test_dev_land_shard_02\ntest_dev_land_window\n");
+        const char *bad[] = {
+            "ZCL_TEST_GROUP_UMBRELLA(\"test_dev_land\",\n",
+            "ZCL_TEST_GROUP_UMBRELLA(\"test_dev_land\", "
+            "\"test_dev_land_shard_*\", \"extra\")\n",
+            "/* unterminated comment\n",
+            "ZCL_TEST_GROUP_UMBRELLA(\"test_dev_land\", "
+            "\"test_dev_land_shard_[[:digit:]]\")\n",
+            "ZCL_TEST_GROUP_UMBRELLA(\"test_dev_land\", "
+            "\"test_dev_land_shard_0\\\\?\")\n",
+        };
+        for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            ASSERT(tgs_write_file(umbrellas, bad[i]));
+            ASSERT_EQ(capture_command(command, out, sizeof(out)), 1);
+            ASSERT_STR_EQ(out, "");
+        }
+        char long_pattern[PLATFORM_GLOB_INPUT_MAX + 2];
+        char long_declaration[PLATFORM_GLOB_INPUT_MAX + 128];
+        memset(long_pattern, '*', sizeof(long_pattern) - 1);
+        long_pattern[sizeof(long_pattern) - 1] = '\0';
+        ASSERT(!platform_glob_match(long_pattern, "test_dev_land", false));
+        n = snprintf(long_declaration, sizeof(long_declaration),
+            "ZCL_TEST_GROUP_UMBRELLA(\"test_dev_land\", \"%s\")\n",
+            long_pattern);
+        ASSERT(n > 0 && (size_t)n < sizeof(long_declaration));
+        ASSERT(tgs_write_file(umbrellas, long_declaration));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 1);
+        ASSERT_STR_EQ(out, "");
+        ASSERT(remove(umbrellas) == 0);
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 1);
+        ASSERT_STR_EQ(out, "");
+        n = snprintf(command, sizeof(command),
+            "%s tools/dev/test-group-list.sh --resolve-exact-set dev_land "
+            "2>/dev/null", env);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 0);
+        ASSERT_STR_EQ(out, "test_dev_land\n");
+        n = snprintf(command, sizeof(command),
+            "%s tools/dev/test-group-list.sh --resolve-exact dev_land "
+            "2>/dev/null", env);
+        ASSERT(n > 0 && (size_t)n < sizeof(command));
+        ASSERT_EQ(capture_command(command, out, sizeof(out)), 0);
+        ASSERT_STR_EQ(out, "test_dev_land\n");
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 int test_test_group_selector(void)
 {
     if (g_tgs_state_probe) return tgs_state_probe();
@@ -2593,6 +2817,8 @@ int test_test_group_selector(void)
     failures += test_umbrella_groups();
     failures += test_umbrella_runner_fold();
     failures += test_dev_land_runner_fold();
+    failures += test_proof_resolver_umbrellas();
+    failures += test_proof_resolver_umbrella_sources();
     failures += test_selection_only_invalid();
     failures += test_selection_only_no_acquisition();
     failures += test_selection_only_conflicts();
