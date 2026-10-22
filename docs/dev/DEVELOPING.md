@@ -86,7 +86,7 @@ exist only on maintainer hosts. Read the operations, storage and worker policy,
 then inspect the assigned lane. Their reserves
 supersede historical floors. Managed development runs remotely through `devon`
 routes; the laptop coordinates and reviews, without builds or worker copies.
-New to a fleet: [`agent/START_HERE.md`](../agent/START_HERE.md).
+New to a fleet: [`agent/FLEET_GUIDE.md`](../agent/FLEET_GUIDE.md).
 
 Reuse a sanctioned worktree and preserve owned dirty work. Route heavy builds,
 proofs, benchmarks and matrices through `devbuild --wait`, preserving job

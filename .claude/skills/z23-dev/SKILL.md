@@ -6,7 +6,7 @@ description: Use when developing Z23 as a maintainer or fleet member, understand
 Public volunteers use `.github/CONTRIBUTING.md` and the `z23-work` skill, not
 this one.
 
-Read [`AGENTS.md`](../../../AGENTS.md) first. The developer manual
+Read [`AGENTS.md`](../../../AGENTS.md) and [`docs/THE_Z23_WAY.md`](../../../docs/THE_Z23_WAY.md) first. The developer manual
 [`docs/dev/DEVELOPING.md`](../../../docs/dev/DEVELOPING.md) is large; read only the
 section for your step, with `grep -n '^## ' docs/dev/DEVELOPING.md` to find it:
 

@@ -9,6 +9,7 @@ This is a curated map, not an inventory. The documentation hierarchy is:
 1. [`../README.md`](../README.md) — public product explanation.
 2. [`../AGENTS.md`](../AGENTS.md) — model-neutral entry point for maintainers and fleet agents. Public volunteers start at [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md).
 3. [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) — current ordered work.
+3a. [`THE_Z23_WAY.md`](THE_Z23_WAY.md) — the one standard loop for Claude, Codex and humans: lane, brief, verify, review, land.
 4. [`DEVELOPING.md`](dev/DEVELOPING.md) — detailed developer procedure.
 5. [`HANDOFF.md`](agent/HANDOFF.md) — current state of the maintainer's hosted node
    only.
@@ -131,6 +132,7 @@ from a hash, signature, test, or reproduction receipt.
 
 ## Change the code
 
+- [`archive/README.md`](archive/README.md) — historical proposals and retired mechanisms; not current procedure.
 - [`agent/README.md`](agent/README.md) — agent and fleet documents: lanes,
   fleet guide, board, ledger, triggers, wiki, work cards, safety gates.
 - [`dev/README.md`](dev/README.md) — developer references: build and test

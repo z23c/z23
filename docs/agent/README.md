@@ -2,7 +2,7 @@
 
 # Agent document index
 
-New to a z23 fleet? Read [START_HERE.md](START_HERE.md) first. Then [AGENTS.md](../../AGENTS.md), then select work under its fleet priorities, using
+New to a z23 fleet? Read [THE_Z23_WAY.md](../THE_Z23_WAY.md) first. Then [AGENTS.md](../../AGENTS.md), then select work under its fleet priorities, using
 [FORWARD_PLAN.md](../work/FORWARD_PLAN.md) for scoped context. The development procedure is
 [DEVELOPING.md](../dev/DEVELOPING.md). These adapters do not reorder that work.
 
@@ -64,5 +64,4 @@ proof that a command is available in an older binary.
 ## Also in this directory
 
 - [`AGENT_API.md`](./AGENT_API.md): AGENT_API.md — native API for AI coding operators
-- [`COMMUTING_TICKETS.md`](./COMMUTING_TICKETS.md): Commuting tickets
 - [`HANDOFF.md`](./HANDOFF.md): HANDOFF — current state

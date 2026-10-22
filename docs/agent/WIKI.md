@@ -99,7 +99,7 @@ If none qualifies the reply is `DOCS_UNAVAILABLE`.
 ```sh
 z23 wiki                                  # root: title, summary, children, next commands
 z23 wiki agent                            # one topic: its pages and sub-topics
-z23 discover read agent/START_HERE.md     # one page, 4096 bytes at a time
+z23 discover read agent/FLEET_GUIDE.md    # one page, 4096 bytes at a time
 ```
 
 Summaries come from the first paragraph of a README or page, rendered as

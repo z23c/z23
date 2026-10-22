@@ -5,7 +5,7 @@ description: Use when assigning or reviewing parallel Z23 work. Keeps file owner
 ---
 
 This compatibility skill contains no independent workflow doctrine. Read
-[`AGENTS.md`](../../../AGENTS.md) and
+[`AGENTS.md`](../../../AGENTS.md), [`docs/THE_Z23_WAY.md`](../../../docs/THE_Z23_WAY.md) and
 [`docs/dev/DEVELOPING.md`](../../../docs/dev/DEVELOPING.md), then use the compact
 parallel-assignment adapter in
 [`docs/agent/LANE_LAUNCH.md`](../../../docs/agent/LANE_LAUNCH.md).
