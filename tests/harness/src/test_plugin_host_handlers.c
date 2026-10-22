@@ -311,7 +311,6 @@ static int phh_case_chain_3(void)
     struct phh_fixture f;
     uint8_t reply[PLUGIN_HOSTCALL_MAX_FRAME];
     struct plugin_hostcall_frame rep;
-    const uint32_t grant = PLUGIN_HOSTCALL_CAP_CHAIN_READ;
 
 
     TEST_CASE("a missing capability is denied before any handler runs") {
@@ -337,7 +336,6 @@ static int phh_case_chain_4(void)
     struct phh_fixture f;
     uint8_t reply[PLUGIN_HOSTCALL_MAX_FRAME];
     struct plugin_hostcall_frame rep;
-    const uint32_t grant = PLUGIN_HOSTCALL_CAP_CHAIN_READ;
 
 
     TEST_CASE("state, event and wallet methods stay unavailable") {
@@ -360,7 +358,6 @@ static int phh_case_chain_5(void)
 {
     int failures = 0;
     struct phh_fixture f;
-    uint8_t reply[PLUGIN_HOSTCALL_MAX_FRAME];
     struct plugin_hostcall_frame rep;
     const uint32_t grant = PLUGIN_HOSTCALL_CAP_CHAIN_READ;
 

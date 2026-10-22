@@ -1161,7 +1161,8 @@ int test_fleet_objectives(void)
         ASSERT(strstr(last, " of 14, unmeasured ") != NULL);
         /* The whole reply must fit the leaf's declared response budget. */
         ASSERT(c.request.spec != NULL);
-        ASSERT(json_size(&c.reply.data) + 1024 <= c.request.spec->budget_bytes);
+        ASSERT(c.request.spec->budget_bytes >= 0);
+        ASSERT(json_size(&c.reply.data) + 1024 <= (size_t)c.request.spec->budget_bytes);
         fox_end(&c);
         PASS();
     }
