@@ -326,6 +326,13 @@ static int prh_case_broken_frame(struct prh_ctx *c)
         struct plugin_run *run = prh_start(&c->env, "badframe", "badframe", "\"chain.read\"",
                                            &c->chain.handlers, 0, 300);
         ASSERT(run != NULL);
+        /* The child reports how its control socket ended: eof=1 means the host
+         * closed the stream on the framing violation, reply=0 that it did not
+         * answer the frame. A host that kept the stream open would leave the
+         * child reading until the ping-miss kill, and no line would arrive. */
+        char line[160];
+        ASSERT(prh_outcome(run, line, sizeof(line), 8000));
+        ASSERT_STR_EQ(line, "hostcall badframe eof=1 reply=0");
         ASSERT(prh_restarted(run, 8000));
         plugin_run_close(run);
     } TEST_END

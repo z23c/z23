@@ -21,7 +21,10 @@
  *             full one-second window after the first call was sent (the child
  *             times itself; the test grades only the line it logs)
 
- *   badframe  send a frame with an unknown version, then answer pings only
+ *   badframe  send a frame with an unknown version, then read supervisor frames
+ *             until the control socket ends; log "hostcall badframe eof=1
+ *             reply=0" when the stream ended with no host-call reply in it (eof=0
+ *             when the read failed some other way, reply=1 when a reply came),
  *   flood:N   wait for the first ping, then send N wallet.request calls (12-byte
  *             PLANNED replies) -- the test passes the count that fills the
  *             supervisor's send queue (a seccomp-confined child cannot probe it
@@ -173,6 +176,36 @@ static int hcc_serve(const char *nonce)
     return 0;
 }
 
+/* badframe mode: after the bad frame the supervisor must end the stream, not
+ * answer it. Read whole supervisor frames until the socket ends and report
+ * what ended it, so the test can tell a closed stream from a child that was
+ * merely killed for missing pings. */
+static int hcc_badframe(int log_fd)
+{
+    (void)hcc_send(1, 1, 9);
+    unsigned eof = 0, reply = 0;
+    for (;;) {
+        uint8_t first;
+        ssize_t n = read(RESIDENT_LAUNCH_CHILD_FD, &first, 1);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n == 0)
+            eof = 1;
+        if (n <= 0)
+            break;
+        char rest[HCC_SUP_FRAME];
+        if (first == 0)
+            reply = 1;
+        if (first == 0 || !hcc_io(RESIDENT_LAUNCH_CHILD_FD, rest, sizeof(rest) - 1, false))
+            break;
+    }
+    char line[64];
+    int len = snprintf(line, sizeof(line), "hostcall badframe eof=%u reply=%u\n", eof, reply);
+    if (log_fd >= 0 && len > 0)
+        (void)hcc_io(log_fd, line, (size_t)len, true);
+    return 0;
+}
+
 /* flood mode: never read again once the queue is full of replies. */
 static int hcc_flood(int log_fd, unsigned want)
 {
@@ -197,10 +230,8 @@ int main(int argc, char **argv)
     int log_fd = hcc_fd_of("log");
     if (hcc_mode_is("flood"))
         return hcc_flood(log_fd, (unsigned)atoi((const char *)hcc_variant + HCC_MARKER_LEN + 6));
-    if (hcc_mode_is("badframe")) {
-        (void)hcc_send(1, 1, 9);
-        return hcc_serve(argv[2]);
-    }
+    if (hcc_mode_is("badframe"))
+        return hcc_badframe(log_fd);
     struct timespec t0, t1;
     bool paced = hcc_mode_is("paced");
     (void)clock_gettime(CLOCK_MONOTONIC, &t0);
