@@ -163,7 +163,7 @@ enlarge the set.
 
 `platform/domain/encoding` and `contexts/wallet/domain` hold base58/bech32 and
 key-derivation/mnemonic primitives beside their owning authority.
-**No clock, no RNG, no IO** (lint: `check_no_raw_clock_outside_platform.sh`,
+**No clock, no RNG, no IO** (lint: `z23-lint check-no-raw-clock-outside-platform`,
 `check_domain_purity.sh`). Replayable from a 64-bit seed. Never put IO here.
 The consensus modules that used to live here are under `core/` (above).
 
@@ -507,7 +507,7 @@ RATCHET gates compare against a baseline file (e.g.
 (directory renamed, glob stops matching) reports CLEAN and nobody notices —
 `check_domain_purity.sh` is one `find domain …` away from exactly that. Call
 `gate_require_scanned <n> <min> <gate-name> "<what was empty>"` from
-`tools/lint/gate_lib.sh`, as `check_command_contract.sh` does.
+`tools/lint/gate_lib.sh`, as `z23-lint check-command-contract` does.
 
 ---
 

@@ -2,7 +2,7 @@
 
 # tools/
 
-Native command handlers (`command/`, entry `command/native_command.c`), lint gates (`lint/`: `run_lint.sh`, C23 gates in `lint/lintc/`, `check_doc_claims.sh`, `check_architecture_tree.sh`), development tooling (`dev/`, `scripts/`, `agent/`) and standalone C23 programs at the top level.
+Native command handlers (`command/`, entry `command/native_command.c`), lint gates (`lint/`: `run_lint.sh`, C23 gates in `lint/lintc/`, `check_doc_claims.sh`, `z23-lint check-architecture-tree`), development tooling (`dev/`, `scripts/`, `agent/`) and standalone C23 programs at the top level.
 
 Rules:
 - C23 only. Do not add Python or new bash; small POSIX sh stays a shim.
