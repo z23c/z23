@@ -547,7 +547,7 @@ verdict_tu() {
     esac
     [ -z "$bad" ] && [ ! -f "$tu" ] && { bad="file does not exist"; LAST_BLOCK_CLASS="missing"; }
     [ -z "$bad" ] && [[ "$tu" =~ $SHAPE_FORBIDDEN ]] && \
-        { bad="under a forbidden consensus/state/supervisor root — check_hotswap_swappable_shape.sh FORBIDDEN='$SHAPE_FORBIDDEN'. Consensus, validation, storage, net, coins, chain, mining, reducer stages, the kernel and supervisors are NEVER hot-swappable, not even in dev."
+        { bad="under a forbidden consensus/state/supervisor root — z23-lint check-hotswap-swappable-shape FORBIDDEN='$SHAPE_FORBIDDEN'. Consensus, validation, storage, net, coins, chain, mining, reducer stages, the kernel and supervisors are NEVER hot-swappable, not even in dev."
           LAST_BLOCK_CLASS="forbidden-root"; }
     [ -z "$bad" ] && [[ ! "$tu" =~ $SHAPE_ALLOWED ]] && \
         { bad="not under an allowed shape-leaf folder (engine/controllers/, contexts/explorer/views/, engine/conditions/) — a swappable TU must be a controller/view/condition LEAF. check_hotswap_swappable_shape.sh ALLOWED='$SHAPE_ALLOWED'."
@@ -671,7 +671,7 @@ verdict_tu() {
         if [ -z "$pin" ]; then
             echo
             echo "  $PROBE_DEF (the probe has no resident case yet;"
-            echo "  check_hotswap_eligible_scope.sh requires EXACTLY one):"
+            echo "  z23-lint check-hotswap-eligible-scope requires EXACTLY one):"
             echo "    HOTSWAP_PROBE_CASE(\"command.<id>.v1\", \"command\","
             echo "        \"$pl\", \"{}\", \"<zcl.output_schema.vN>\", 4096)"
         fi

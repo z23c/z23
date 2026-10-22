@@ -365,6 +365,6 @@ int check_hosted_suite_verdict_run(int argc, char **argv)
         return check_hosted_suite_verdict_selftest();
     if (argc == 1 && argv[0][0])
         return hsv_check_log(argv[0], stdout);
-    hsv_fail("usage: check_hosted_suite_verdict.sh --self-test | LOG");
+    hsv_fail("usage: z23-lint check-hosted-suite-verdict --self-test | LOG");
     return 2;
 }

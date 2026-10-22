@@ -13616,8 +13616,8 @@ check-specialists: $(LINTC_TOOL)
 
 check-fleet-airship-rules: $(LINTC_TOOL)
 	@echo "══ LINT: no airship rule pays for a fact a node reported about itself ══"
-	@sh build/bin/z23-lint check-fleet-airship-rules --selftest
-	@sh build/bin/z23-lint check-fleet-airship-rules
+	@./build/bin/z23-lint check-fleet-airship-rules --selftest
+	@./build/bin/z23-lint check-fleet-airship-rules
 
 check-fleet-facts: $(LINTC_TOOL)
 	@echo "══ LINT: every fleet fact resolves and the routing doc renders it ══"

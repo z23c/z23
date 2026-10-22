@@ -497,8 +497,8 @@ static int hcs_write_baseline(const struct bln_set *found, const char *path)
           "only\n"
           "#   zcl_hex_decode_n(hex, out, cap, &n)   1..cap bytes\n"
           "# then delete the line here. Adding a row is not a fix.\n"
-          "# Regenerate: ZCL_LINT_MODE=UPDATE tools/lint/"
-          "check_hex_codec_single.sh\n", f);
+          "# Regenerate: ZCL_LINT_MODE=UPDATE ./build/bin/"
+          "z23-lint check-hex-codec-single\n", f);
     for (int i = 0; i < sorted.count; i++)
         fprintf(f, "%s\n", sorted.n[i]);
     if (fclose(f) != 0)
