@@ -1018,6 +1018,22 @@ static bool cas_build_long_dir(char *out, size_t cap, const char *base,
     return true;
 }
 
+/* The 505-byte and 520-byte fixtures only fit their limits when their base
+ * is short, so the root must not inherit the checkout's absolute path
+ * length. Prefer the tmpfs root (/dev/shm, as test_body_persist_stage.c
+ * does); fall back to ./test-tmp where it is absent (macOS). */
+static void cas_fmt_short_tmpdir(char *buf, size_t n, const char *prefix,
+                                 const char *tag)
+{
+    if (access("/dev/shm", W_OK) == 0) {
+        int wrote = snprintf(buf, n, "/dev/shm/%s_%d_%s", prefix,
+                             (int)getpid(), tag);
+        if (wrote > 0 && (size_t)wrote < n)
+            return;
+    }
+    test_fmt_tmpdir(buf, n, prefix, tag);
+}
+
 static bool cas_write_decoy(const char *path)
 {
     FILE *f = fopen(path, "w");
@@ -1033,10 +1049,10 @@ static bool cas_write_decoy(const char *path)
 static int cas_test_overlong_home_default_refuses(void)
 {
     int failures = 0;
+    char base[PATH_MAX] = "";
     TEST("CLI-client: an over-long HOME makes the default datadir refuse "
          "(DATADIR_TOO_LONG), never a chopped prefix directory") {
-        char base[PATH_MAX];
-        test_fmt_tmpdir(base, sizeof(base), "zcl_cas_homelong", "root");
+        cas_fmt_short_tmpdir(base, sizeof(base), "zcl_cas_homelong", "root");
         (void)test_ensure_tmproot();
         cas_mkdir_p(base);
 
@@ -1067,6 +1083,8 @@ static int cas_test_overlong_home_default_refuses(void)
         ASSERT(!cas_contains(out2, "DATADIR_TOO_LONG"));
         PASS();
     } _test_next:;
+    /* Reached on every path, including a failed ASSERT's goto. */
+    if (base[0]) (void)test_rm_rf_recursive(base);
     return failures;
 }
 
@@ -1077,6 +1095,7 @@ static int cas_test_overlong_home_default_refuses(void)
 static int cas_test_zcl_rpc_overlong_datadir_refuses(void)
 {
     int failures = 0;
+    char base[PATH_MAX] = "";
     TEST("zcl-rpc: an over-long ZCL_DATADIR is refused (DATADIR_TOO_LONG, "
          "non-zero) and the chopped-path decoy cookie is not read") {
         if (!cas_file_exists(CAS_RPC_BIN) ||
@@ -1085,8 +1104,7 @@ static int cas_test_zcl_rpc_overlong_datadir_refuses(void)
                    "fixture)\n", CAS_RPC_BIN);
             goto _test_next;
         }
-        char base[PATH_MAX];
-        test_fmt_tmpdir(base, sizeof(base), "zcl_cas_rpclong", "root");
+        cas_fmt_short_tmpdir(base, sizeof(base), "zcl_cas_rpclong", "root");
         (void)test_ensure_tmproot();
         cas_mkdir_p(base);
         char dd[1024];
@@ -1110,6 +1128,8 @@ static int cas_test_zcl_rpc_overlong_datadir_refuses(void)
         ASSERT(!cas_contains(out, "decoy"));
         PASS();
     } _test_next:;
+    /* Reached on every path, including a failed ASSERT's goto. */
+    if (base[0]) (void)test_rm_rf_recursive(base);
     return failures;
 }
 int test_cli_argv_strict(void)
