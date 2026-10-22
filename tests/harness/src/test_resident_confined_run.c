@@ -6,7 +6,7 @@
  * is EACCES while the unconfined control opens it (red twin), an allowed read
  * and write succeed, exit 7 is observed as 7, a forbidden syscall is a SIGSYS
  * kill, the unavailable-sandbox refusal is named, and a CPU-bound loop pays
- * at most 5% + 20 ms for confinement (median of 3). Without Landlock the named
+ * at most 5% + 20 ms of child CPU time for confinement (median of 3). Without Landlock the named
  * refusal is asserted and the behavioural pairs print a SKIP reason.
  *
  * Hardening pairs (review of the first confined runner): an inherited
@@ -48,6 +48,7 @@
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -147,6 +148,7 @@ struct rcr_outcome {
     int code;
     int signal;
     double wall_ms;
+    double cpu_ms; /* child user+sys from wait4: immune to scheduler contention */
     double spawn_ms;
     int state, exec_errno, spawn_errno;
     uint64_t pid;
@@ -170,6 +172,11 @@ static double rcr_now_ms(void)
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+
+static double rcr_tv_ms(const struct timeval *tv)
+{
+    return (double)tv->tv_sec * 1000.0 + (double)tv->tv_usec / 1000.0;
 }
 
 static uint64_t rcr_mono_ns(void)
@@ -230,7 +237,14 @@ static struct rcr_outcome rcr_run_opts(const char *image, const struct rcr_opts 
     (void)snprintf(out.proof, sizeof(out.proof), "%s", receipt.mapped_proof);
     if (out.spawned) {
         int status = 0;
+        /* RUSAGE_CHILDREN grows by exactly this child when it is reaped (the
+         * harness reaps one child at a time here). */
+        struct rusage before = {0}, after = {0};
+        (void)getrusage(RUSAGE_CHILDREN, &before);
         while (waitpid((pid_t)launch.pid, &status, 0) < 0 && errno == EINTR) {}
+        (void)getrusage(RUSAGE_CHILDREN, &after);
+        out.cpu_ms = rcr_tv_ms(&after.ru_utime) - rcr_tv_ms(&before.ru_utime) +
+                     rcr_tv_ms(&after.ru_stime) - rcr_tv_ms(&before.ru_stime);
         out.wall_ms = rcr_now_ms() - began;
         out.exited = WIFEXITED(status);
         out.code = out.exited ? WEXITSTATUS(status) : -1;
@@ -994,13 +1008,17 @@ static int rcr_status_checks(const char *image, const struct rcr_paths *p,
     return failures;
 }
 
+/* The budget is on the CPU the confined loop burns (child user+sys), not on
+ * wall time: a wall measurement also counts every moment the scheduler left
+ * the child runnable-but-off-CPU, which under a loaded shared pool dwarfs the
+ * 5% + 20 ms budget and made this group fail in 7 of 12 land proofs. */
 static int rcr_overhead_checks(const char *image)
 {
     int failures = 0;
     struct package_resident_manifest m;
     package_resident_manifest_init(&m);
     struct rcr_outcome probe = rcr_run(image, NULL, "spin", "20000000");
-    double per_iter = probe.wall_ms > 0.5 ? probe.wall_ms / 20000000.0 : 1e-6;
+    double per_iter = probe.cpu_ms > 0.5 ? probe.cpu_ms / 20000000.0 : 1e-6;
     char iters[32];
     (void)snprintf(iters, sizeof(iters), "%lu", (unsigned long)(200.0 / per_iter));
     double unc[3], con[3];
@@ -1010,8 +1028,8 @@ static int rcr_overhead_checks(const char *image)
         struct rcr_outcome c = rcr_run(image, &m, "spin", iters);
         ok = u.spawned && c.spawned && u.exited && c.exited &&
              u.code == 0 && c.code == 0;
-        unc[i] = u.wall_ms;
-        con[i] = c.wall_ms;
+        unc[i] = u.cpu_ms;
+        con[i] = c.cpu_ms;
     }
     double mu = ok ? rcr_median3(unc) : 0.0, mc = ok ? rcr_median3(con) : 0.0;
     printf("  [overhead: iters=%s unconfined_median=%.2f ms confined_median=%.2f ms limit=%.2f ms]\n",
