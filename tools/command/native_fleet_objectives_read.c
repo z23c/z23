@@ -453,11 +453,11 @@ static bool obj_ends_with(const char *s, const char *suffix)
  * and tools/lint/run_lint.sh into <attempt>/logs/:
  *
  *   phases.txt     "zcl.dev_proof_phase.v1 <phase> <ms> ms (cumulative <ms> ms)",
- *                  one row per finished phase. The LAST phase,
- *                  dimension_lint_and_test, is written when lint and test
- *                  are both done, so its presence marks a COMPLETED attempt
- *                  (an in-flight one is skipped) and its cumulative is the
- *                  whole proof wall.
+ *                  one row per finished phase. The dimension_lint_and_test
+ *                  row is written when lint and test are both done (a later
+ *                  phase, docs_fresh_join, follows it), so its presence marks
+ *                  a COMPLETED attempt (an in-flight one is skipped) and its
+ *                  cumulative is the proof wall through lint and test.
  *   *.lint.log     "-- lint timing: N gates, wall W ms, jobs J --" (the
  *                  rule is U+2500 dashes), run_lint.sh's own wall.
  *   *.test.log     "ALL TESTS PASSED ... (S.Ss wall, N workers)" or
@@ -527,6 +527,9 @@ static void obj_test_wall_line(const char *line, void *user)
     const char *at;
     char *end;
     double s;
+    /* A cached pass replayed stored results; its time is not a suite wall. */
+    if (strncmp(line, "ALL TESTS PASSED (CACHED)", 25) == 0)
+        return;
     if (strncmp(line, "ALL TESTS PASSED", 16) != 0 &&
         strncmp(line, "SOME TESTS FAILED", 17) != 0)
         return;
@@ -540,67 +543,210 @@ static void obj_test_wall_line(const char *line, void *user)
         *(int64_t *)user = (int64_t)(s * 1000.0 + 0.5);
 }
 
+/* One completed attempt directory, <local>-<base>.<random>: the proof's pair
+ * key (dev_proof.c) plus mkdtemp's random suffix, which carries no order. */
+struct obj_attempt {
+    char logs[1100];
+    char key[200];     /* "<local>-<base>", the producer's pair key */
+    int64_t proof_ms;
+    int64_t recorded;  /* newest started/landed_at of the pair's outcome rows,
+                        * 0 when the ledger has no row for the pair */
+    time_t mtime;      /* phases.txt mtime, the last-resort order only */
+};
+
 struct obj_proof {
     char logs[1100];
+    char key[200];
     int64_t proof_ms;
 };
 
-/* The completed attempt whose phases.txt was written last, or false. */
+struct obj_attempts {
+    struct obj_attempt *items;
+    size_t n;
+    size_t cap;
+};
+
+/* The pair key out of an attempt directory name: everything before the last
+ * dot, or the whole name when it has none. */
+static bool obj_attempt_key(const char *name, char *out, size_t cap)
+{
+    const char *dot = strrchr(name, '.');
+    size_t n = dot && dot != name ? (size_t)(dot - name) : strlen(name);
+    if (n == 0 || n >= cap)
+        return false;
+    memcpy(out, name, n);
+    out[n] = '\0';
+    return true;
+}
+
+static bool obj_attempts_add(struct obj_attempts *set,
+                             const struct obj_attempt *a)
+{
+    if (set->n == set->cap) {
+        size_t cap = set->cap ? set->cap * 2 : 16;
+        struct obj_attempt *items = realloc(set->items, cap * sizeof(*items));
+        if (!items)
+            return false;
+        set->items = items;
+        set->cap = cap;
+    }
+    set->items[set->n++] = *a;
+    return true;
+}
+
+/* Folds the outcome ledger into the candidates: each outcome row names its
+ * tip pair (local, base), and the proof's attempt directory is named for the
+ * same pair, so the newest started/landed_at of a pair's rows is the time
+ * that attempt was recorded. A missing or unreadable ledger leaves every
+ * candidate unrecorded. */
+static void obj_attempts_record(struct obj_attempts *set, const char *outcomes)
+{
+    char line[OBJ_LINE_MAX];
+    FILE *fp = outcomes ? fopen(outcomes, "r") : NULL;
+    size_t len;
+    if (!fp)
+        return;
+    while (obj_ledger_line(fp, line, sizeof line, &len) == 1) {
+        struct json_value row;
+        json_init(&row);
+        if (json_read(&row, line, len) && row.type == JSON_OBJ) {
+            char pair[200];
+            const char *local = json_get_str(json_get(&row, "local"));
+            const char *base = json_get_str(json_get(&row, "base"));
+            int64_t at = json_get_int(json_get(&row, "started"));
+            int64_t landed = obj_row_landed_at(&row);
+            if (landed > at)
+                at = landed;
+            if (local[0] && base[0] && at > 0 &&
+                snprintf(pair, sizeof(pair), "%s-%s", local, base) <
+                    (int)sizeof(pair)) {
+                for (size_t i = 0; i < set->n; i++)
+                    if (strcmp(set->items[i].key, pair) == 0 &&
+                        at > set->items[i].recorded)
+                        set->items[i].recorded = at;
+            }
+        }
+        json_free(&row);
+    }
+    (void)fclose(fp);
+}
+
+/* True when a ranks after b. phases.txt carries no wall-clock stamp (its rows
+ * are durations from a monotonic clock) and the directory name's random
+ * suffix carries no order, so the order is the attempt's recorded time: the
+ * newest started/landed_at of its pair's outcome rows. An attempt with a
+ * recorded time outranks one without. The phases.txt mtime is the LAST
+ * fallback only, for attempts the ledger never saw or ties; anything that
+ * rewrites the file can touch it, so it never overrides a recorded key. */
+static bool obj_attempt_newer(const struct obj_attempt *a,
+                              const struct obj_attempt *b)
+{
+    if (a->recorded != b->recorded)
+        return a->recorded > b->recorded;
+    if (a->mtime != b->mtime)
+        return a->mtime > b->mtime;
+    return strcmp(a->logs, b->logs) > 0;
+}
+
+/* The newest completed attempt, or false. */
 static bool obj_newest_completed_attempt(const char *dir,
+                                         const char *outcomes,
                                          struct obj_proof *out)
 {
     DIR *d = opendir(dir);
     struct dirent *e;
-    time_t best = 0;
-    bool found = false;
+    struct obj_attempts set = {0};
+    size_t best = 0;
     if (!d)
         return false;
     while ((e = readdir(d))) {
-        char logs[1100], phases[1200];
+        struct obj_attempt a = {0};
+        char phases[1200];
         struct stat st;
         int64_t ms = -1;
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
             continue;
-        if (snprintf(logs, sizeof(logs), "%s/%s/logs", dir, e->d_name) >=
-                (int)sizeof(logs) ||
-            snprintf(phases, sizeof(phases), "%s/phases.txt", logs) >=
+        if (!obj_attempt_key(e->d_name, a.key, sizeof(a.key)) ||
+            snprintf(a.logs, sizeof(a.logs), "%s/%s/logs", dir, e->d_name) >=
+                (int)sizeof(a.logs) ||
+            snprintf(phases, sizeof(phases), "%s/phases.txt", a.logs) >=
                 (int)sizeof(phases))
             continue;
         if (stat(phases, &st) != 0 || !S_ISREG(st.st_mode))
             continue;
         if (!obj_log_lines(phases, obj_dimension_line, &ms) || ms < 0)
             continue;
-        if (!found || st.st_mtime > best) {
-            best = st.st_mtime;
-            found = true;
-            memcpy(out->logs, logs, sizeof(out->logs));
-            out->proof_ms = ms;
+        a.proof_ms = ms;
+        a.mtime = st.st_mtime;
+        if (!obj_attempts_add(&set, &a))
+            break;
+    }
+    (void)closedir(d);
+    if (set.n == 0) {
+        free(set.items);
+        return false;
+    }
+    obj_attempts_record(&set, outcomes);
+    for (size_t i = 1; i < set.n; i++)
+        if (obj_attempt_newer(&set.items[i], &set.items[best]))
+            best = i;
+    memcpy(out->logs, set.items[best].logs, sizeof(out->logs));
+    memcpy(out->key, set.items[best].key, sizeof(out->key));
+    out->proof_ms = set.items[best].proof_ms;
+    free(set.items);
+    return true;
+}
+
+/* The wall of one log kind (".lint.log" / ".test.log") in an attempt. The
+ * producer names it exactly "<key><suffix>" (dev_proof.c writes
+ * "<logs>/<pair key>.<dimension>.log"), so that file is read first. A
+ * directory that does not follow that name is scanned for every file with the
+ * suffix, and the one that carries the wall line wins, the smallest name
+ * first, so readdir order never decides. */
+static bool obj_log_wall(const struct obj_proof *proof, const char *suffix,
+                         void (*fn)(const char *line, void *user),
+                         char *path, size_t cap, int64_t *ms)
+{
+    DIR *d;
+    struct dirent *e;
+    char best[256] = "";
+    int64_t found = -1;
+    *ms = -1;
+    if (snprintf(path, cap, "%s/%s%s", proof->logs, proof->key, suffix) <
+            (int)cap &&
+        obj_log_lines(path, fn, ms) && *ms >= 0)
+        return true;
+    d = opendir(proof->logs);
+    if (!d)
+        return false;
+    while ((e = readdir(d))) {
+        char cand[1400];
+        int64_t v = -1;
+        if (!obj_ends_with(e->d_name, suffix) ||
+            strlen(e->d_name) >= sizeof(best) ||
+            snprintf(cand, sizeof(cand), "%s/%s", proof->logs, e->d_name) >=
+                (int)sizeof(cand) ||
+            !obj_log_lines(cand, fn, &v) || v < 0)
+            continue;
+        if (best[0] == '\0' || strcmp(e->d_name, best) < 0) {
+            (void)snprintf(best, sizeof(best), "%s", e->d_name);
+            found = v;
         }
     }
     (void)closedir(d);
-    return found;
-}
-
-static bool obj_find_log(const char *logs, const char *suffix, char *out,
-                         size_t cap)
-{
-    DIR *d = opendir(logs);
-    struct dirent *e;
-    bool found = false;
-    if (!d)
+    if (best[0] == '\0' ||
+        snprintf(path, cap, "%s/%s", proof->logs, best) >= (int)cap)
         return false;
-    while (!found && (e = readdir(d)))
-        found = obj_ends_with(e->d_name, suffix) &&
-                snprintf(out, cap, "%s/%s", logs, e->d_name) < (int)cap;
-    (void)closedir(d);
-    return found;
+    *ms = found;
+    return true;
 }
 
 static bool obj_completed_attempt(const struct zcl_objectives_options *options,
                                   struct obj_proof *proof,
                                   struct zcl_objective_value *v)
 {
-    char dirbuf[512];
+    char dirbuf[512], outbuf[512];
+    const char *outcomes = NULL;
     const char *dir = options && options->attempts_dir ? options->attempts_dir
                                                         : NULL;
     if (!dir) {
@@ -610,7 +756,9 @@ static bool obj_completed_attempt(const struct zcl_objectives_options *options,
         }
         dir = dirbuf;
     }
-    if (!obj_newest_completed_attempt(dir, proof)) {
+    if (!obj_resolve_outcomes(options, outbuf, sizeof(outbuf), &outcomes))
+        outcomes = NULL;
+    if (!obj_newest_completed_attempt(dir, outcomes, proof)) {
         obj_set_reason(v, "no completed proof attempt under %s", dir);
         return false;
     }
@@ -627,12 +775,9 @@ static struct zcl_objective_value obj_log_wall_s(
     int64_t ms = -1;
     if (!obj_completed_attempt(options, &proof, &v))
         return v;
-    if (!obj_find_log(proof.logs, suffix, log, sizeof(log))) {
-        obj_set_reason(&v, "no *%s in the newest completed attempt", suffix);
-        return v;
-    }
-    if (!obj_log_lines(log, fn, &ms) || ms < 0) {
-        obj_set_reason(&v, "no wall line in %s", log);
+    if (!obj_log_wall(&proof, suffix, fn, log, sizeof(log), &ms)) {
+        obj_set_reason(&v, "no wall line in any *%s of the newest completed "
+                           "attempt", suffix);
         return v;
     }
     v.measured = true;

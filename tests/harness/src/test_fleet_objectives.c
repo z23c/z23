@@ -23,6 +23,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <sys/time.h>
 
 #define FOX_PATH "fleet.objectives"
@@ -67,7 +68,8 @@ static bool fox_set_mtime(const char *path, long sec)
 }
 
 /* One proof attempt in the layout the proof writes it: <dir>/<name>/logs/
- * holding phases.txt, <sha>.lint.log and <sha>.test.log. An in-flight
+ * holding phases.txt, <key>.lint.log and <key>.test.log, where the attempt
+ * directory is named <key>.<random> exactly as the proof names it. An in-flight
  * attempt has no dimension_lint_and_test row. The lint and test logs carry
  * decoy lines (the budget NOTE, an indented child suite line) that a reader
  * must not mistake for the wall lines. */
@@ -77,6 +79,9 @@ static bool fox_attempt(const char *dir, const char *name, bool complete,
 {
     char path[1400], logs[1200], attempt[1100], text[4096];
     size_t n;
+    char key[200];
+    const char *dot = strrchr(name, '.');
+    (void)snprintf(key, sizeof(key), "%.*s", dot ? (int)(dot - name) : (int)strlen(name), name);
     (void)snprintf(attempt, sizeof(attempt), "%s/%s", dir, name);
     (void)snprintf(logs, sizeof(logs), "%s/logs", attempt);
     if (!fox_mkdir(attempt) || !fox_mkdir(logs))
@@ -102,7 +107,7 @@ static bool fox_attempt(const char *dir, const char *name, bool complete,
         "\xe2\x94\x80\xe2\x94\x80\n"
         "run_lint.sh: NOTE \xe2\x80\x94 wall 539041 ms exceeds the 75s soft "
         "budget\n", lint_ms);
-    (void)snprintf(path, sizeof(path), "%s/abc.lint.log", logs);
+    (void)snprintf(path, sizeof(path), "%s/%s.lint.log", logs, key);
     if (!fox_write(path, text))
         return false;
     (void)snprintf(text, sizeof(text),
@@ -112,7 +117,7 @@ static bool fox_attempt(const char *dir, const char *name, bool complete,
         "(%ss wall, 28 workers) [--exact filtered]\n"
         "    image child: ALL TESTS PASSED \xe2\x80\x94 0/1 groups failed, 0 "
         "skipped (5.7s wall, 1 workers)\n", test_wall_s);
-    (void)snprintf(path, sizeof(path), "%s/abc.test.log", logs);
+    (void)snprintf(path, sizeof(path), "%s/%s.test.log", logs, key);
     return fox_write(path, text);
 }
 
@@ -553,16 +558,22 @@ int test_fleet_objectives(void)
         "\"ts\":\"1970-01-01T10:20:00Z\",\"started\":37200,\"attempt\":1}\n"
         "{\"tip\":\"tipX3\",\"note\":\"traintrainX\",\"state\":\"landed\","
         "\"ts\":\"1970-01-01T10:41:00Z\",\"started\":38460,\"attempt\":1,"
-        "\"landed_at\":38490}\n"));
+        "\"landed_at\":38490}\n"
+        "{\"note\":\"pairold\",\"state\":\"failed\",\"local\":\"o1\","
+        "\"base\":\"b1\",\"ts\":\"1970-01-01T00:20:00Z\",\"started\":1000}\n"
+        "{\"note\":\"pairdone\",\"state\":\"failed\",\"local\":\"d1\","
+        "\"base\":\"b2\",\"ts\":\"1970-01-01T00:40:00Z\",\"started\":2000}\n"));
 
-    /* Three attempts in the real layout. "old" and "done" are complete;
-     * "done" finished later. "inflight" is the newest by mtime but has no
+    /* Three attempts in the real layout. "o1-b1" and "d1-b2" are complete;
+     * the ledger records d1-b2 later (started 2000 vs 1000), but o1-b1 has
+     * the NEWER phases.txt mtime (a touched old attempt), so only a recorded
+     * key lets d1-b2 win. "inflight" is the newest by mtime but has no
      * dimension_lint_and_test row yet, so it must be skipped. */
     ASSERT(fox_mkdir(attempts_dir));
-    ASSERT(fox_attempt(attempts_dir, "old", true, 797605, 177718, "470.7",
-                       1000000000));
-    ASSERT(fox_attempt(attempts_dir, "done", true, 2506718, 178400, "1727.9",
+    ASSERT(fox_attempt(attempts_dir, "o1-b1.aaaaaa", true, 797605, 177718, "470.7",
                        1100000000));
+    ASSERT(fox_attempt(attempts_dir, "d1-b2.bbbbbb", true, 2506718, 178400, "1727.9",
+                       1000000000));
     ASSERT(fox_attempt(attempts_dir, "newest_inflight", false, 0, 1, "1.0",
                        1200000000));
     ASSERT(fox_mkdir(inflight_dir));
@@ -797,6 +808,88 @@ int test_fleet_objectives(void)
             ASSERT(strstr(fox_row_str(row, "reason"),
                           "no completed proof attempt") != NULL);
         }
+        fox_end(&c);
+        PASS();
+    }
+
+    TEST("objectives: the test wall comes from the producer's own "
+         "<key>.test.log, not another *.test.log in the directory") {
+        char dir[1024], decoy[1400];
+        (void)snprintf(dir, sizeof(dir), "%s/two_test_logs", root);
+        ASSERT(fox_mkdir(dir));
+        ASSERT(fox_attempt(dir, "e1-b5.cccccc", true, 797605, 177718, "100.0",
+                           1000000000));
+        (void)snprintf(decoy, sizeof(decoy),
+                       "%s/e1-b5.cccccc/logs/aaa.test.log", dir);
+        ASSERT(fox_write(decoy, "ALL TESTS PASSED \xe2\x80\x94 0/1 groups "
+                                "failed, 0 skipped (9.0s wall, 1 workers)\n"));
+        struct fox_call c;
+        fox_begin(&c);
+        fox_set(&c, "outcomes", outcomes_ok);
+        fox_set(&c, "attempts_dir", dir);
+        ASSERT(fox_run(&c));
+        const struct json_value *row = fox_row(&c, "proof_test_wall_s");
+        ASSERT(row != NULL);
+        ASSERT(json_get_bool(json_get(row, "measured")));
+        ASSERT_EQ(fox_row_int(row, "value"), (int64_t)100);
+        fox_end(&c);
+        PASS();
+    }
+
+    TEST("objectives: with no producer-named log, the smallest-named "
+         "*.test.log that carries a wall line wins") {
+        char dir[1024], path[1400];
+        (void)snprintf(dir, sizeof(dir), "%s/scan_test_logs", root);
+        ASSERT(fox_mkdir(dir));
+        ASSERT(fox_attempt(dir, "s1-b6.dddddd", true, 797605, 177718, "1.0",
+                           1000000000));
+        (void)snprintf(path, sizeof(path), "%s/s1-b6.dddddd/logs/s1-b6.test.log",
+                       dir);
+        ASSERT(unlink(path) == 0);
+        (void)snprintf(path, sizeof(path), "%s/s1-b6.dddddd/logs/zzz.test.log",
+                       dir);
+        ASSERT(fox_write(path, "no wall line here\n"));
+        (void)snprintf(path, sizeof(path), "%s/s1-b6.dddddd/logs/nnn.test.log",
+                       dir);
+        ASSERT(fox_write(path, "ALL TESTS PASSED \xe2\x80\x94 0/1 groups "
+                               "failed, 0 skipped (77.0s wall, 1 workers)\n"));
+        (void)snprintf(path, sizeof(path), "%s/s1-b6.dddddd/logs/mmm.test.log",
+                       dir);
+        ASSERT(fox_write(path, "ALL TESTS PASSED \xe2\x80\x94 0/1 groups "
+                               "failed, 0 skipped (55.0s wall, 1 workers)\n"));
+        struct fox_call c;
+        fox_begin(&c);
+        fox_set(&c, "outcomes", outcomes_ok);
+        fox_set(&c, "attempts_dir", dir);
+        ASSERT(fox_run(&c));
+        const struct json_value *row = fox_row(&c, "proof_test_wall_s");
+        ASSERT(row != NULL);
+        ASSERT(json_get_bool(json_get(row, "measured")));
+        ASSERT_EQ(fox_row_int(row, "value"), (int64_t)55);
+        fox_end(&c);
+        PASS();
+    }
+
+    TEST("objectives: a cached test pass is never reported as the test "
+         "wall") {
+        char dir[1024], path[1400];
+        (void)snprintf(dir, sizeof(dir), "%s/cached_test_log", root);
+        ASSERT(fox_mkdir(dir));
+        ASSERT(fox_attempt(dir, "c1-b7.eeeeee", true, 797605, 177718, "1.0",
+                           1000000000));
+        (void)snprintf(path, sizeof(path), "%s/c1-b7.eeeeee/logs/c1-b7.test.log",
+                       dir);
+        ASSERT(fox_write(path, "ALL TESTS PASSED (CACHED) \xe2\x80\x94 0/1 "
+                               "groups failed, 0 skipped (0.1s wall, 1 "
+                               "workers)\n"));
+        struct fox_call c;
+        fox_begin(&c);
+        fox_set(&c, "outcomes", outcomes_ok);
+        fox_set(&c, "attempts_dir", dir);
+        ASSERT(fox_run(&c));
+        const struct json_value *row = fox_row(&c, "proof_test_wall_s");
+        ASSERT(row != NULL);
+        ASSERT(!json_get_bool(json_get(row, "measured")));
         fox_end(&c);
         PASS();
     }
