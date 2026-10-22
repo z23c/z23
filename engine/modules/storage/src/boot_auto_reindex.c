@@ -22,11 +22,78 @@
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
 
+#include "util/log_macros.h"
+
+#include <limits.h>
 #include <stdio.h>
 #include <stdatomic.h>
+#include <stdlib.h>
 #include <string.h>
 
 static _Atomic uint32_t g_ar_stage_seq;
+
+/* ── Test-harness containment ─────────────────────────────────────────────
+ * The test runners export ZCL_TEST_HARNESS=1 and
+ * ZCL_TEST_CANONICAL_DATADIR=<the operator's real default datadir> and swap
+ * HOME for a private one. This request file is consumed by the NEXT boot of
+ * whatever node owns the datadir, so a test that reaches the canonical
+ * datadir through any fallback (the 2026-10-22 "0 1 0" request armed under a
+ * running node) plants a rebuild the operator never asked for. Every writer
+ * below therefore refuses, fail-closed, when the harness variable is set and
+ * the datadir resolves to (or under) the canonical one. With the variables
+ * absent — production — nothing here changes. */
+
+static void ar_resolve(const char *path, char *out, size_t n)
+{
+    snprintf(out, n, "%s", path);
+#if !defined(_WIN32)
+    char real[PATH_MAX];
+    if (realpath(path, real)) {
+        snprintf(out, n, "%s", real);
+    } else {
+        /* A datadir that does not exist yet: resolve its parent. */
+        char parent[PATH_MAX];
+        const char *slash = strrchr(path, '/');
+        if (slash && slash != path &&
+            (size_t)(slash - path) < sizeof(parent)) {
+            memcpy(parent, path, (size_t)(slash - path));
+            parent[slash - path] = '\0';
+            if (realpath(parent, real))
+                snprintf(out, n, "%s%s", real, slash);
+        }
+    }
+#endif
+    size_t len = strlen(out);
+    while (len > 1 && (out[len - 1] == '/' || out[len - 1] == '\\'))
+        out[--len] = '\0';
+}
+
+static bool ar_under_canonical(const char *datadir)
+{
+    const char *h = getenv("ZCL_TEST_HARNESS");
+    const char *canon = getenv("ZCL_TEST_CANONICAL_DATADIR");
+    if (!h || !h[0] || strcmp(h, "0") == 0 || !canon || !canon[0])
+        return false;
+    char want[PATH_MAX], have[PATH_MAX];
+    ar_resolve(canon, want, sizeof(want));
+    ar_resolve(datadir, have, sizeof(have));
+    size_t wl = strlen(want);
+    return strncmp(have, want, wl) == 0 &&
+           (have[wl] == '\0' || have[wl] == '/' || have[wl] == '\\');
+}
+
+static bool ar_write_refused(const char *op, const char *datadir)
+{
+    if (!ar_under_canonical(datadir))
+        return false;
+    LOG_ERROR("boot_auto_reindex",
+              "error=TEST_CANONICAL_DATADIR_WRITE_REFUSED op=%s datadir=%s: "
+              "a test process (ZCL_TEST_HARNESS) tried to write the "
+              "operator's canonical datadir; refusing — pin the test's "
+              "datadir with SetDataDir() under a temp dir",
+              op, datadir);
+    return true;
+}
 
 static void ar_path(const char *datadir, char *out, size_t n)
 {
@@ -156,6 +223,8 @@ int boot_auto_reindex_request(const char *datadir, int32_t anchor, int reason)
 {
     if (!datadir)
         return 0;
+    if (ar_write_refused("request", datadir))
+        return 0;
     if (!reason_is_known(reason))
         reason = BOOT_AUTO_REINDEX_REASON_UNSPECIFIED;
 
@@ -217,6 +286,8 @@ int boot_auto_reindex_request(const char *datadir, int32_t anchor, int reason)
 bool boot_auto_reindex_mark_terminal(const char *datadir, int32_t anchor)
 {
     if (!datadir)
+        return false;
+    if (ar_write_refused("mark_terminal", datadir))
         return false;
     char path[512];
     ar_path(datadir, path, sizeof(path));
@@ -311,6 +382,8 @@ void boot_auto_reindex_clear(const char *datadir)
 {
     if (!datadir)
         return;
+    if (ar_write_refused("clear", datadir))
+        return;
     char path[512];
     ar_path(datadir, path, sizeof(path));
     if (platform_private_path_absent(path))
@@ -401,6 +474,8 @@ int boot_repair_episode_note(const char *datadir, uint64_t signature)
 {
     if (!datadir || !datadir[0] || signature == 0)
         return 0;
+    if (ar_write_refused("episode_note", datadir))
+        return 0;
 
     char path[512];
     ep_path(datadir, path, sizeof(path));
@@ -452,6 +527,8 @@ bool boot_repair_episode_status(const char *datadir, uint64_t *signature,
 void boot_repair_episode_clear(const char *datadir)
 {
     if (!datadir || !datadir[0])
+        return;
+    if (ar_write_refused("episode_clear", datadir))
         return;
     char path[512];
     ep_path(datadir, path, sizeof(path));

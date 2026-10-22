@@ -2476,10 +2476,10 @@ Z23_FLAG("ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
 Z23_FLAG("ZCL_TELEMETRY_SCAN_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
-Z23_FLAG("ZCL_TEST_CANONICAL_DATADIR", "env_test", "-", "-",
-          "the operator's real default datadir, exported by the test runners before they swap HOME; a runner nested under another keeps the outer value; first use tests/harness/src/test_home_isolation.c:auto")
-Z23_FLAG("ZCL_TEST_HARNESS", "env_test", "-", "-",
-          "set to 1 by the test runners (tests/harness/src/test_home_isolation.c) so code below the test layer can tell it runs under a runner; first use tests/harness/src/test_test_group_selector.c:auto")
+Z23_FLAG("ZCL_TEST_CANONICAL_DATADIR", "env_runtime", "-", "-",
+          "the operator's real default datadir, exported by the test runners before they swap HOME; the request writers in storage/boot_auto_reindex.c refuse any write at or under it while ZCL_TEST_HARNESS is set; first use engine/modules/storage/src/boot_auto_reindex.c:auto")
+Z23_FLAG("ZCL_TEST_HARNESS", "env_runtime", "-", "-",
+          "set to 1 by the test runners (tests/harness/src/test_home_isolation.c); arms the canonical-datadir writer guard in storage/boot_auto_reindex.c, absent in production; first use engine/modules/storage/src/boot_auto_reindex.c:auto")
 Z23_FLAG("ZCL_TEST_PRIVATE_HOME", "env_test", "-", "-",
           "set to 1 by the test runners when a group got a private HOME instead of the real one; first use tests/harness/src/test_home_isolation.c:auto")
 Z23_FLAG("ZCL_TEST_REAL_HOME", "env_test", "-", "-",

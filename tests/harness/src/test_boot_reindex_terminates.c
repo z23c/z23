@@ -18,9 +18,12 @@
 #include "config/boot_crashonly.h"
 #include "config/boot_error.h"
 #include "storage/boot_auto_reindex.h"
+#include "platform/environment_compat.h"
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <string.h>
 #include <stdint.h>
 #include <sys/stat.h>
@@ -35,6 +38,90 @@ static int mkdir_p_br(const char *p)
 {
     if (mkdir(p, 0700) == 0) return 0;
     return (errno == EEXIST) ? 0 : -1;
+}
+
+static bool br_exists(const char *dir, const char *leaf)
+{
+    char p[512];
+    struct stat st;
+    snprintf(p, sizeof(p), "%s/%s", dir, leaf);
+    return stat(p, &st) == 0;
+}
+
+static void br_env(const char *name, const char *value)
+{
+    if (value) (void)platform_environment_set(name, value, 1);
+    else (void)unsetenv(name);
+}
+
+/* The 2026-10-22 canonical-datadir write: under the test harness the request
+ * writers refuse the canonical datadir (and anything under it, or an alias of
+ * it) and still serve a fixture datadir; with the harness variables absent
+ * (production) the same path is written exactly as before. */
+static int br_writer_guard(void)
+{
+    int failures = 0;
+    char canon[256], other[256], alias[300];
+    test_fmt_tmpdir(canon, sizeof(canon), "boot_reindex_guard", "canon");
+    test_fmt_tmpdir(other, sizeof(other), "boot_reindex_guard", "fixture");
+    mkdir_p_br(canon);
+    mkdir_p_br(other);
+    snprintf(alias, sizeof(alias), "%s.alias", canon);
+    (void)unlink(alias);
+#if defined(_WIN32)
+    bool aliased = false;
+#else
+    bool aliased = symlink(canon, alias) == 0;
+#endif
+
+    char *saved_h = getenv("ZCL_TEST_HARNESS")
+        ? strdup(getenv("ZCL_TEST_HARNESS")) : NULL;
+    char *saved_c = getenv("ZCL_TEST_CANONICAL_DATADIR")
+        ? strdup(getenv("ZCL_TEST_CANONICAL_DATADIR")) : NULL;
+
+    br_env("ZCL_TEST_HARNESS", "1");
+    br_env("ZCL_TEST_CANONICAL_DATADIR", canon);
+    BR_CHECK("guard: request refused on the canonical datadir",
+             boot_auto_reindex_request(
+                 canon, 7, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED) == 0);
+    BR_CHECK("guard: no request file appeared there",
+             !br_exists(canon, "auto_reindex_request"));
+    BR_CHECK("guard: request refused through a symlink alias",
+             !aliased || boot_auto_reindex_request(
+                 alias, 7, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED) == 0);
+    BR_CHECK("guard: terminal marker refused",
+             !boot_auto_reindex_mark_terminal(canon, 7));
+    BR_CHECK("guard: repair-episode note refused",
+             boot_repair_episode_note(canon, 99) == 0 &&
+             !br_exists(canon, "boot_repair_episode"));
+    BR_CHECK("guard: nothing was armed", !boot_auto_reindex_pending(canon));
+    BR_CHECK("guard: a fixture datadir is still written",
+             boot_auto_reindex_request(
+                 other, 7, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED) == 1 &&
+             boot_auto_reindex_pending(other));
+    boot_auto_reindex_clear(other);
+    BR_CHECK("guard: a fixture datadir is still cleared",
+             !boot_auto_reindex_pending(other));
+
+    /* Production: no harness variable, no behaviour change. */
+    br_env("ZCL_TEST_HARNESS", NULL);
+    BR_CHECK("guard: without the harness variable the same path is written",
+             boot_auto_reindex_request(
+                 canon, 7, BOOT_AUTO_REINDEX_REASON_UNSPECIFIED) == 1);
+    /* An armed request on the canonical path is not cleared by a test. */
+    br_env("ZCL_TEST_HARNESS", "1");
+    boot_auto_reindex_clear(canon);
+    BR_CHECK("guard: clear refused on the canonical datadir",
+             br_exists(canon, "auto_reindex_request"));
+
+    br_env("ZCL_TEST_HARNESS", saved_h);
+    br_env("ZCL_TEST_CANONICAL_DATADIR", saved_c);
+    free(saved_h);
+    free(saved_c);
+    if (aliased) (void)unlink(alias);
+    test_cleanup_tmpdir(canon);
+    test_cleanup_tmpdir(other);
+    return failures;
 }
 
 int test_boot_reindex_terminates(void);
@@ -627,6 +714,8 @@ int test_boot_reindex_terminates(void)
         test_cleanup_tmpdir(dir);
         test_cleanup_tmpdir(dir2);
     }
+
+    failures += br_writer_guard();
 
     return failures;
 }
