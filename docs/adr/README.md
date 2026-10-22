@@ -26,3 +26,4 @@ Commands: `discover.wiki`, `discover.read`
 - [`0009-swap-money-shape-guard-file-size-raise.md`](./0009-swap-money-shape-guard-file-size-raise.md): ADR-0009: File-size baseline raise for the atomic-swap money-shape guard
 - [`0010-snapshot-io-file-size-raises.md`](./0010-snapshot-io-file-size-raises.md): ADR-0010: File-size raises for the consensus snapshot export/install IO
 - [`0011-native-first-execution-with-emulator-failsafe.md`](./0011-native-first-execution-with-emulator-failsafe.md): ADR-0011: Native-first execution with an emulator failsafe
+- [`0012-the-z23-way.md`](./0012-the-z23-way.md): ADR-0012: The Z23 way
