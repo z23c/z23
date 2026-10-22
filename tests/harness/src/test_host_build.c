@@ -441,8 +441,8 @@ static size_t hbt_make_tickets(const char *fifo, size_t total, size_t live,
     for (size_t i = 0; i < total; i++) {
         char path[HBT_PATH + 64];
         int fd;
-        (void)snprintf(path, sizeof(path), "%s/%019lld-1", fifo,
-                       1000000000000000000ll + (long long)i);
+        (void)snprintf(path, sizeof(path), "%s/%019lld-%d", fifo,
+                       1000000000000000000ll + (long long)i, (int)getpid());
         fd = open(path, O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
         if (fd < 0)
             return held;
@@ -543,8 +543,8 @@ static int hbt_churn_tests(const char *tmp)
     struct json_value doc;
     char dir[HBT_PATH], fifo[HBT_PATH + 16], file[HBT_PATH + 32];
 
-    TEST("host build: status counts every live waiter while other processes churn flocks") {
-        size_t held, short_rounds = 0, spawned = 0;
+    TEST("host build: status counts and names every live waiter while other processes churn flocks") {
+        size_t held, short_rounds = 0, unnamed = 0, spawned = 0;
         (void)snprintf(dir, sizeof(dir), "%s/churn", tmp);
         ASSERT(mkdir(dir, 0700) == 0);
         ASSERT(hbt_config(&cfg, dir, 1));
@@ -565,6 +565,11 @@ static int hbt_churn_tests(const char *tmp)
             if (!ba_status(cfg.state_dir, &doc) ||
                 hbt_array_size(&doc, "queued") != (size_t)TICKETS)
                 short_rounds++;
+            /* A waiter the listing dropped still reports its own pid. */
+            for (size_t k = 0; k < hbt_array_size(&doc, "queued"); k++)
+                if (json_get_int(json_get(json_at(json_get(&doc, "queued"), k),
+                                          "pid")) != (int64_t)getpid())
+                    unnamed++;
             json_free(&doc);
         }
         for (size_t i = 0; i < spawned; i++) {
@@ -576,6 +581,7 @@ static int hbt_churn_tests(const char *tmp)
         ASSERT_EQ(held, (size_t)TICKETS);
         ASSERT_EQ(spawned, (size_t)CHURNERS);
         ASSERT_EQ(short_rounds, (size_t)0);
+        ASSERT_EQ(unnamed, (size_t)0);
         PASS();
     }
 _test_next:;

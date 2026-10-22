@@ -517,6 +517,23 @@ static bool bs_ticket_held(const char *path)
     return held;
 }
 
+/* The waiter that registered a ticket names itself in its suffix; used when
+ * the lock listing dropped the ticket and only the try-lock saw it held. */
+static int bs_ticket_pid(const char *name)
+{
+    const char *dash = strchr(name, '-');
+    char *end = NULL;
+    long pid;
+    if (!dash)
+        return 0;
+    errno = 0;
+    pid = strtol(dash + 1, &end, 10);
+    if (errno != 0 || end == dash + 1 || *end != '\0' || pid <= 0 ||
+        pid > INT_MAX)
+        return 0;
+    return (int)pid;
+}
+
 /* Waiters of one directory in ticket order; entries nobody holds are stale
  * and skipped. A ticket name is <seconds><9-digit ns>-<pid>. */
 static size_t bs_push_waiters(struct json_value *out, const char *key,
@@ -535,10 +552,13 @@ static size_t bs_push_waiters(struct json_value *out, const char *key,
         bool write;
         size_t digits = strcspn(names[i], "-");
         struct json_value row;
-        if (!bs_join(path, sizeof(path), dir, names[i]) ||
-            (bs_holders(view, path, pids, 4, &write) == 0 &&
-             !bs_ticket_held(path)))
+        if (!bs_join(path, sizeof(path), dir, names[i]))
             continue;
+        if (bs_holders(view, path, pids, 4, &write) == 0) {
+            if (!bs_ticket_held(path))
+                continue;
+            pids[0] = bs_ticket_pid(names[i]);
+        }
         json_init(&row);
         json_set_object(&row);
         (void)json_push_kv_str(&row, "source", "legacy-locks");
