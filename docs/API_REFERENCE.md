@@ -74,11 +74,11 @@ z23 discover schema <path> --side=input|output
 
 | Catalog fact | Count |
 |---|---|
-| Registry entries (branches + leaves) | 1006 |
+| Registry entries (branches + leaves) | 1008 |
 | Top-level roots | 17 |
-| Branches | 214 |
-| Leaves (dispatchable command paths) | 792 |
-| … `ready` (live handler in this build) | 696 |
+| Branches | 215 |
+| Leaves (dispatchable command paths) | 793 |
+| … `ready` (live handler in this build) | 697 |
 | … `compat` (metadata only, names a fallback) | 73 |
 | … `planned` (fail-closed BLOCKED, exit 3) | 23 |
 | … dev-gated 🔧 (`ready` only in `z23-dev`) | 72 |
@@ -95,7 +95,7 @@ Per source file:
 | `engine/composition/commands/apps.def` | 20 | 4 | 16 |
 | `engine/composition/commands/app_features.def` | 78 | 21 | 57 |
 | `engine/composition/commands/store.def` | 19 | 0 | 19 |
-| `engine/composition/commands/ops.def` | 90 | 17 | 73 |
+| `engine/composition/commands/ops.def` | 92 | 18 | 74 |
 | `engine/composition/commands/dev.def` | 137 | 23 | 114 |
 | `engine/composition/commands/code.def` | 35 | 4 | 31 |
 | `engine/composition/commands/accounts.def` | 11 | 2 | 9 |
