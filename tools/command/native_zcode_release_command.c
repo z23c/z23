@@ -1206,6 +1206,35 @@ static void zr_fail_invalid(struct zcl_command_reply *reply, bool is_v2,
                            false, msg, "zcode.release.verify");
 }
 
+/* Receiver pins (optional `pin` / `pin_file` / `package_root` / `cosigs`).
+ * Runs after the signature verdict; without those keys the gate is a no-op.
+ * A v2 doc is held to a PAIR pin (`zrs1 <ed25519> 0 <slh-dsa pk>`) by
+ * release_pin_doc_gate; an Ed25519-only pin is RELEASE_PQ_UNPINNED. A pin
+ * file with a `threshold K` line takes the k-of-n gate. */
+static bool zr_pin_gate(const struct json_value *in, bool is_v2,
+                        const struct zid_doc *doc, const struct zid_doc_v2 *v2,
+                        struct zid_release *rel, int64_t now,
+                        struct zcl_command_reply *reply)
+{
+    struct release_pin_doc pd;
+    struct release_pin_threshold th;
+    memset(&pd, 0, sizeof(pd));
+    pd.doc = *doc;
+    pd.v2 = *v2;
+    pd.version = is_v2 ? ZID_DOC_VERSION_V2 : ZID_DOC_VERSION;
+    if (!release_pin_multi_gate(in, false, &pd, (uint64_t)now, rel, &th, reply,
+                                "zcode.release.verify"))
+        return false;
+    if (th.threshold > 0) {
+        json_push_kv_int(&reply->data, "threshold", (int64_t)th.threshold);
+        json_push_kv_int(&reply->data, "signers_matched",
+                         (int64_t)th.matched);
+    }
+    if (is_v2)
+        json_push_kv_bool(&reply->data, "pq_verified", pd.pq_verified);
+    return true;
+}
+
 /* ── zcode.release.verify ──────────────────────────────────────────── */
 
 void zcl_native_handle_zcode_release_verify(
@@ -1293,27 +1322,8 @@ void zcl_native_handle_zcode_release_verify(
         return;
     }
 
-    /* Receiver pins (optional `pin` / `pin_file` / `package_root`). Only
-     * runs after the signature verdict above; without any of the three
-     * keys the gate is a no-op, so unpinned callers see no change.
-     * A v2 doc is held to a PAIR pin (`zrs1 <ed25519> 0 <slh-dsa pk>`)
-     * by release_pin_doc_gate; an Ed25519-only pin is RELEASE_PQ_UNPINNED. */
-    struct release_pin_doc pd;
-    memset(&pd, 0, sizeof(pd));
-    pd.doc = doc;
-    pd.v2 = v2;
-    pd.version = is_v2 ? ZID_DOC_VERSION_V2 : ZID_DOC_VERSION;
-    struct release_pin_threshold th;
-    if (!release_pin_multi_gate(in, false, &pd, (uint64_t)now, &rel, &th,
-                                reply, "zcode.release.verify"))
+    if (!zr_pin_gate(in, is_v2, &doc, &v2, &rel, now, reply))
         return;
-    if (th.threshold > 0) {
-        json_push_kv_int(&reply->data, "threshold", (int64_t)th.threshold);
-        json_push_kv_int(&reply->data, "signers_matched",
-                         (int64_t)th.matched);
-    }
-    if (is_v2)
-        json_push_kv_bool(&reply->data, "pq_verified", pd.pq_verified);
 
     /* Chain-rooted key trust (optional `--anchored`). The signature above
      * proves the doc was signed by the key it names — it says NOTHING
