@@ -1,0 +1,69 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * The one table of ignored, untracked inputs a lane or a proof generation
+ * needs from the primary checkout. Included by proof_dependencies.h only.
+ *
+ *   ZCL_DEP(path, consumers, platform, optional, acquire)
+ *
+ * consumers: OR of ZCL_DEP_PROOF (dev_proof.c generation copy),
+ *            ZCL_DEP_LAND (the land queue's vendor ensure), ZCL_DEP_LANE
+ *            (`dev lane new`).
+ * platform:  ZCL_DEP_HOST_ANY, _LINUX or _POSIX; honoured by the proof.
+ * optional:  1 when the proof tolerates absence on both sides.
+ * acquire:   ZCL_DEP_COPY (copy this path from the primary checkout) or
+ *            ZCL_DEP_SCAN (the lane finds it by scanning vendor/tor/src/ext
+ *            and copying every archive; the row still must exist).
+ *
+ * Row order is the proof's historic copy order.
+ */
+#define ZCL_DEP_ALL (ZCL_DEP_PROOF | ZCL_DEP_LAND | ZCL_DEP_LANE)
+#define ZCL_DEP_PL (ZCL_DEP_PROOF | ZCL_DEP_LANE)
+
+ZCL_DEP("vendor/lib", ZCL_DEP_ALL, ZCL_DEP_HOST_ANY, 0, ZCL_DEP_COPY)
+ZCL_DEP("vendor/include", ZCL_DEP_ALL, ZCL_DEP_HOST_ANY, 0, ZCL_DEP_COPY)
+/* The untracked amalgamated SQLite source; the Windows acceptance link
+ * inside a full lint dies without it. */
+ZCL_DEP("vendor/sqlite3.c", ZCL_DEP_ALL, ZCL_DEP_HOST_ANY, 0, ZCL_DEP_COPY)
+ZCL_DEP("vendor/tor/libtor.a", ZCL_DEP_ALL, ZCL_DEP_HOST_ANY, 0,
+        ZCL_DEP_COPY)
+/* The manifest travels with the archives it attests. */
+ZCL_DEP("vendor/tor/.provenance", ZCL_DEP_ALL, ZCL_DEP_HOST_ANY, 0,
+        ZCL_DEP_COPY)
+/* The generated Tor Makefile records the CC= string provenance binds. */
+ZCL_DEP("vendor/tor/Makefile", ZCL_DEP_ALL, ZCL_DEP_HOST_ANY, 0,
+        ZCL_DEP_COPY)
+/* Optional cross-build outputs and download caches. */
+ZCL_DEP("vendor/.cache", ZCL_DEP_PROOF, ZCL_DEP_HOST_ANY, 1, ZCL_DEP_COPY)
+ZCL_DEP("vendor/cross", ZCL_DEP_PROOF, ZCL_DEP_HOST_ANY, 1, ZCL_DEP_COPY)
+/* Recognised as optional by the proof's per-dependency check, but no
+ * consumer copies it: the transient cross workspace is not an input. */
+ZCL_DEP("vendor/.build-x86_64-w64-mingw32", 0, ZCL_DEP_HOST_ANY, 1,
+        ZCL_DEP_COPY)
+ZCL_DEP("vendor/tor/src/ext/ed25519/donna/libed25519_donna.a", ZCL_DEP_ALL,
+        ZCL_DEP_HOST_ANY, 0, ZCL_DEP_SCAN)
+ZCL_DEP("vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a", ZCL_DEP_ALL,
+        ZCL_DEP_HOST_ANY, 0, ZCL_DEP_SCAN)
+ZCL_DEP("vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a", ZCL_DEP_ALL,
+        ZCL_DEP_HOST_ANY, 0, ZCL_DEP_SCAN)
+ZCL_DEP("build/githooks", ZCL_DEP_PL, ZCL_DEP_HOST_ANY, 0, ZCL_DEP_COPY)
+/* Checker binaries the sealed generated-docs gate execs. */
+ZCL_DEP("build/bin/z23-lint", ZCL_DEP_PL, ZCL_DEP_HOST_ANY, 0, ZCL_DEP_COPY)
+ZCL_DEP("build/bin/z23-fleet-observe", ZCL_DEP_PL, ZCL_DEP_HOST_ANY, 0,
+        ZCL_DEP_COPY)
+ZCL_DEP("build/bin/gen_capability_inventory", ZCL_DEP_PL, ZCL_DEP_HOST_ANY,
+        0, ZCL_DEP_COPY)
+/* Fixture images the rollback group dlopens by name (Linux proofs only). */
+ZCL_DEP("build/hotswap/zcl_rollback_fixture_a.so", ZCL_DEP_PL,
+        ZCL_DEP_HOST_LINUX, 0, ZCL_DEP_COPY)
+ZCL_DEP("build/hotswap/zcl_rollback_fixture_b.so", ZCL_DEP_PL,
+        ZCL_DEP_HOST_LINUX, 0, ZCL_DEP_COPY)
+/* Fixture children the resident-launch and trace groups exec by name. */
+ZCL_DEP("build/fixtures/rlc_child_v1", ZCL_DEP_PL, ZCL_DEP_HOST_POSIX, 0,
+        ZCL_DEP_COPY)
+ZCL_DEP("build/fixtures/rlc_child_broken", ZCL_DEP_PL, ZCL_DEP_HOST_POSIX, 0,
+        ZCL_DEP_COPY)
+ZCL_DEP("build/fixtures/otlp_startup_probe", ZCL_DEP_PL, ZCL_DEP_HOST_POSIX,
+        0, ZCL_DEP_COPY)
+
+#undef ZCL_DEP_ALL
+#undef ZCL_DEP_PL

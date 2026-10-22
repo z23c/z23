@@ -42,6 +42,7 @@
 #include "platform/file_clone.h"
 #include "util/path_util.h"
 #include "util/spawn.h"
+#include "proof_dependencies.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -78,23 +79,6 @@ static void dln_fail(struct zcl_command_reply *reply,
 }
 
 #if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
-static const char *const DLN_REQUIRED[] = {
-    "vendor/sqlite3.c",
-    "vendor/tor/libtor.a",
-    "vendor/tor/.provenance",
-    "vendor/tor/Makefile",
-    "vendor/lib",
-    "vendor/include",
-    "build/githooks",
-    "build/bin/z23-lint",
-    "build/bin/z23-fleet-observe",
-    "build/bin/gen_capability_inventory",
-    "build/hotswap/zcl_rollback_fixture_a.so",
-    "build/hotswap/zcl_rollback_fixture_b.so",
-    "build/fixtures/rlc_child_v1",
-    "build/fixtures/rlc_child_broken",
-    "build/fixtures/otlp_startup_probe",
-};
 
 static void dln_strip(char *s)
 {
@@ -223,19 +207,23 @@ static bool dln_collect_missing(const char *root, const char *path,
                                 struct dln_missing *m)
 {
     memset(m, 0, sizeof(*m));
-    for (size_t i = 0; i < sizeof(DLN_REQUIRED) / sizeof(DLN_REQUIRED[0]);
-         i++) {
+    size_t req_count;
+    const struct zcl_dep_row *req_rows = zcl_dep_rows(&req_count);
+    for (size_t i = 0; i < req_count; i++) {
+        const char *req = req_rows[i].path;
         char source[DLN_PATH_CAP], target[DLN_PATH_CAP];
         struct stat st;
-        if (!zcl_path_join(source, sizeof(source), root, DLN_REQUIRED[i]) ||
-            !zcl_path_join(target, sizeof(target), path, DLN_REQUIRED[i])) {
+        if (!(req_rows[i].consumers & ZCL_DEP_LANE))
+            continue;
+        if (!zcl_path_join(source, sizeof(source), root, req) ||
+            !zcl_path_join(target, sizeof(target), path, req)) {
             (void)snprintf(m->first, sizeof(m->first), "%s",
-                           DLN_REQUIRED[i]);
+                           req);
             m->count = -1;
             return false;
         }
         if (lstat(target, &st) != 0 && lstat(source, &st) != 0)
-            dln_missing_add(m, DLN_REQUIRED[i]);
+            dln_missing_add(m, req);
     }
     dln_list_close(&m->paths);
     dln_list_close(&m->fixes);
@@ -680,6 +668,39 @@ static bool dln_materialize_ext_archives(const char *root, const char *dest,
         ok = false;
     return ok;
 }
+/* Copy every table row the lane consumes by direct copy. Replies and returns
+ * false on the first failure. */
+static bool dln_materialize_required(struct zcl_command_reply *reply,
+                                     const char *root, const char *path,
+                                     int *copied)
+{
+    size_t req_count;
+    const struct zcl_dep_row *req_rows = zcl_dep_rows(&req_count);
+    for (size_t i = 0; i < req_count; i++) {
+        const char *req = req_rows[i].path;
+        char source[DLN_PATH_CAP], target[DLN_PATH_CAP], why[256];
+        if (!(req_rows[i].consumers & ZCL_DEP_LANE) ||
+            req_rows[i].acquire != ZCL_DEP_COPY)
+            continue;
+        if (!zcl_path_join(source, sizeof(source), root, req) ||
+            !zcl_path_join(target, sizeof(target), path, req)) {
+            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                     ZCL_COMMAND_EXIT_INTERNAL, "lane.materialize_failed",
+                     "materialize", req, req);
+            return false;
+        }
+        if (!dln_materialize(source, target, copied)) {
+            (void)snprintf(why, sizeof(why), "lane.materialize_failed:%s",
+                           req);
+            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                     ZCL_COMMAND_EXIT_INTERNAL, "lane.materialize_failed",
+                     "materialize", why, req);
+            return false;
+        }
+    }
+    return true;
+}
+
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 void zcl_native_handle_dev_lane_new(
@@ -805,25 +826,8 @@ void zcl_native_handle_dev_lane_new(
      * so a missing ROOT dependency refuses without copying any sibling. */
     if (!dln_preflight(reply, root, path))
         return;
-    for (size_t i = 0; i < sizeof(DLN_REQUIRED) / sizeof(DLN_REQUIRED[0]);
-         i++) {
-        char source[DLN_PATH_CAP], target[DLN_PATH_CAP];
-        if (!zcl_path_join(source, sizeof(source), root, DLN_REQUIRED[i]) ||
-            !zcl_path_join(target, sizeof(target), path, DLN_REQUIRED[i])) {
-            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                     ZCL_COMMAND_EXIT_INTERNAL, "lane.materialize_failed",
-                     "materialize", DLN_REQUIRED[i], DLN_REQUIRED[i]);
-            return;
-        }
-        if (!dln_materialize(source, target, &copied)) {
-            (void)snprintf(why, sizeof(why), "lane.materialize_failed:%s",
-                           DLN_REQUIRED[i]);
-            dln_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                     ZCL_COMMAND_EXIT_INTERNAL, "lane.materialize_failed",
-                     "materialize", why, DLN_REQUIRED[i]);
-            return;
-        }
-    }
+    if (!dln_materialize_required(reply, root, path, &copied))
+        return;
 
     failed_rel[0] = '\0';
     if (!dln_materialize_ext_archives(root, path, &copied, failed_rel,

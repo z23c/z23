@@ -141,6 +141,7 @@
 #include "command/native_devagent.h"
 #include "command/native_dev_agents.h"
 #include "dependency_links.h"
+#include "proof_dependencies.h"
 
 #include "base/safe_alloc.h"
 #include "base/hex.h"
@@ -6136,20 +6137,8 @@ static bool dl_mkdir_parents(const char *path)
  * proof's own generation-prep copier without depending on it (see that
  * function's comment for why). Each entry is checked and refused by name,
  * matching dev_proof.c's own vocabulary, so a dependency missing from the
- * submitting checkout too is never silently skipped. */
-#if !defined(_WIN32)
-static const char *const DL_VENDOR_DEPS[] = {
-    "vendor/lib",
-    "vendor/include",
-    "vendor/sqlite3.c",
-    "vendor/tor/libtor.a",
-    "vendor/tor/.provenance",
-    "vendor/tor/Makefile",
-    "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
-    "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
-    "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
-};
-#endif
+ * submitting checkout too is never silently skipped. The rows come from
+ * tools/dev/proof_dependencies.def (ZCL_DEP_LAND). */
 
 /* .git marks a submodule as actually checked out in this worktree; the
  * gitlink entry every `git worktree add` carries is metadata alone and
@@ -6341,6 +6330,52 @@ static bool dl_wt_vendor_tor_pin_matches(const struct dl_dirs *d,
     return true;
 }
 
+#if !defined(_WIN32)
+/* Materialize one proof-generation dependency into the land worktree. */
+static bool dl_wt_vendor_dep_ensure(const struct dl_dirs *d,
+                                    const struct dl_row *r, const char *dep,
+                                    bool *tor_pin_checked, char *why,
+                                    size_t why_cap)
+{
+    char source[4096 + 96], target[4096 + 96];
+    struct stat st;
+    if (snprintf(target, sizeof(target), "%s/%s", d->wt, dep) >=
+            (int)sizeof(target) ||
+        snprintf(source, sizeof(source), "%s/%s", r->worktree, dep) >=
+            (int)sizeof(source)) {
+        (void)snprintf(why, why_cap,
+                       "proof_generation_dependency_path_too_long:%s", dep);
+        return false;
+    }
+    if (strncmp(dep, "vendor/tor/", 11) == 0 &&
+        dl_wt_vendor_tor_is_submodule(d, r)) {
+        if (!dl_wt_submodule_ensure(d, "vendor/tor", why, why_cap))
+            return false;
+        if (!*tor_pin_checked) {
+            if (!dl_wt_vendor_tor_pin_matches(d, r, why, why_cap))
+                return false;
+            *tor_pin_checked = true;
+        }
+    }
+    if (lstat(target, &st) == 0)
+        return true; /* already materialized in this worktree */
+    if (!r->worktree[0] || !dl_worktree_ok(r->worktree) ||
+        lstat(source, &st) != 0) {
+        (void)snprintf(why, why_cap,
+                       "proof_generation_dependency_unavailable:%s "
+                       "(make vendor)",
+                       dep);
+        return false;
+    }
+    if (!dl_mkdir_parents(target) || !dl_materialize(source, target)) {
+        (void)snprintf(why, why_cap,
+                       "proof_generation_dependency_copy_failed:%s", dep);
+        return false;
+    }
+    return true;
+}
+#endif
+
 static bool dl_wt_vendor_ensure(const struct dl_dirs *d,
                                 const struct dl_row *r, char *why,
                                 size_t why_cap)
@@ -6356,46 +6391,13 @@ static bool dl_wt_vendor_ensure(const struct dl_dirs *d,
     return false;
 #else
     bool tor_pin_checked = false;
-    for (size_t i = 0;
-        i < sizeof(DL_VENDOR_DEPS) / sizeof(DL_VENDOR_DEPS[0]); i++) {
-        char source[4096 + 96], target[4096 + 96];
-        struct stat st;
-        if (snprintf(target, sizeof(target), "%s/%s", d->wt,
-                     DL_VENDOR_DEPS[i]) >= (int)sizeof(target) ||
-            snprintf(source, sizeof(source), "%s/%s", r->worktree,
-                     DL_VENDOR_DEPS[i]) >= (int)sizeof(source)) {
-            (void)snprintf(why, why_cap,
-                           "proof_generation_dependency_path_too_long:%s",
-                           DL_VENDOR_DEPS[i]);
+    size_t dep_count;
+    const struct zcl_dep_row *dep_rows = zcl_dep_rows(&dep_count);
+    for (size_t i = 0; i < dep_count; i++)
+        if ((dep_rows[i].consumers & ZCL_DEP_LAND) &&
+            !dl_wt_vendor_dep_ensure(d, r, dep_rows[i].path,
+                                     &tor_pin_checked, why, why_cap))
             return false;
-        }
-        if (strncmp(DL_VENDOR_DEPS[i], "vendor/tor/", 11) == 0 &&
-            dl_wt_vendor_tor_is_submodule(d, r)) {
-            if (!dl_wt_submodule_ensure(d, "vendor/tor", why, why_cap))
-                return false;
-            if (!tor_pin_checked) {
-                if (!dl_wt_vendor_tor_pin_matches(d, r, why, why_cap))
-                    return false;
-                tor_pin_checked = true;
-            }
-        }
-        if (lstat(target, &st) == 0)
-            continue; /* already materialized in this worktree */
-        if (!r->worktree[0] || !dl_worktree_ok(r->worktree) || lstat(source, &st) != 0) {
-            (void)snprintf(why, why_cap,
-                           "proof_generation_dependency_unavailable:%s "
-                           "(make vendor)",
-                           DL_VENDOR_DEPS[i]);
-            return false;
-        }
-        if (!dl_mkdir_parents(target) ||
-            !dl_materialize(source, target)) {
-            (void)snprintf(why, why_cap,
-                           "proof_generation_dependency_copy_failed:%s",
-                           DL_VENDOR_DEPS[i]);
-            return false;
-        }
-    }
     return true;
 #endif
 }

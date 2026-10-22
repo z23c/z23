@@ -19,6 +19,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "util/spawn.h"
+#include "proof_dependencies.h"
 
 #include <errno.h>
 #include <stdio.h>
@@ -218,6 +219,94 @@ static void dln_call(const char *root, struct json_value *input,
     if (chdir(saved) != 0)
          TEST_DISCARD(chdir("/"));
 }
+
+#if !defined(_WIN32)
+static int test_dev_lane_table(void)
+{
+    int failures = 0;
+    TEST("dependency table: land set within proof set and lane set") {
+        size_t n, land = 0;
+        const struct zcl_dep_row *rows = zcl_dep_rows(&n);
+        ASSERT(n > 0);
+        for (size_t i = 0; i < n; i++) {
+            if (!(rows[i].consumers & ZCL_DEP_LAND))
+                continue;
+            land++;
+            ASSERT(rows[i].consumers & ZCL_DEP_PROOF);
+            ASSERT(rows[i].consumers & ZCL_DEP_LANE);
+            ASSERT(!rows[i].optional);
+        }
+        ASSERT(land == 9);
+        ASSERT(zcl_dep_find("vendor/tor/Makefile") != NULL);
+        PASS();
+    }
+
+    TEST("lane new: every land-required row is materialized or refused") {
+        char parent[512], root[600], lane[600], path[800];
+        struct json_value input;
+        struct zcl_command_reply reply;
+        struct stat st;
+        size_t n;
+        const struct zcl_dep_row *rows = zcl_dep_rows(&n);
+
+        test_make_tmpdir(parent, sizeof(parent), "dev_lane", "table");
+        (void)snprintf(root, sizeof(root), "%s/root", parent);
+        (void)snprintf(lane, sizeof(lane), "%s/lane", parent);
+        ASSERT(dln_mkdir_p(root));
+        ASSERT(dln_fixture(root));
+
+        /* Each land row, absent from the primary, must refuse the lane by
+         * name before anything is copied. */
+        for (size_t i = 0; i < n; i++) {
+            char hide[800], keep[800];
+            if (!(rows[i].consumers & ZCL_DEP_LAND))
+                continue;
+            ASSERT((size_t)snprintf(hide, sizeof(hide), "%s/%s", root,
+                                    rows[i].path) < sizeof(hide));
+            ASSERT((size_t)snprintf(keep, sizeof(keep), "%s.held", hide) <
+                   sizeof(keep));
+            ASSERT(rename(hide, keep) == 0);
+            json_init(&input);
+            json_set_object(&input);
+            (void)json_push_kv_str(&input, "path", lane);
+            (void)json_push_kv_str(&input, "base", "HEAD");
+            dln_call(root, &input, &reply);
+            ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+            ASSERT(strstr(reply.error.code,
+                          "lane.dependency_unavailable:") != NULL);
+            ASSERT(strstr(reply.error.evidence, rows[i].path) != NULL ||
+                   strstr(reply.error.code, rows[i].path) != NULL);
+            zcl_command_reply_free(&reply);
+            json_free(&input);
+            ASSERT(rename(keep, hide) == 0);
+        }
+
+        json_init(&input);
+        json_set_object(&input);
+        (void)json_push_kv_str(&input, "path", lane);
+        (void)json_push_kv_str(&input, "base", "HEAD");
+        dln_call(root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        for (size_t i = 0; i < n; i++) {
+            if (!(rows[i].consumers & ZCL_DEP_LAND))
+                continue;
+            ASSERT((size_t)snprintf(path, sizeof(path), "%s/%s", lane,
+                                    rows[i].path) < sizeof(path));
+            ASSERT(lstat(path, &st) == 0);
+        }
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        {
+            const char *rm[] = { "worktree", "remove", "--force", lane,
+                                 NULL };
+            (void)dln_git(root, rm);
+        }
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+#endif
 
 int test_dev_lane(void);
 int test_dev_lane(void)
@@ -469,7 +558,7 @@ int test_dev_lane(void)
         ASSERT(strlen(reply.error.evidence) <= 255);
         ASSERT(strlen(reply.error.next_action) <= 255);
         ASSERT(dln_tally(reply.error.evidence, &shown, &hidden));
-        ASSERT(hidden > 0 && shown + hidden == 15);
+        ASSERT(hidden > 0 && shown + hidden == 18);
         ASSERT(dln_tally(reply.error.next_action, &shown, &hidden));
         ASSERT(hidden == 1 && shown + hidden == 6);
         vend = strstr(reply.error.next_action, "make vendor");
@@ -515,6 +604,7 @@ int test_dev_lane(void)
         json_free(&input);
         PASS();
     }
+    failures += test_dev_lane_table();
 #endif
 
 _test_next:;

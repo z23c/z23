@@ -3124,6 +3124,11 @@ worktree-prime:
 	      git submodule update --init vendor/tor >/dev/null 2>&1 \
 	        || echo "worktree-prime: WARNING - vendor/tor init failed; this worktree links the Tor STUB" >&2 ;; \
 	esac; \
+	if [ ! -f vendor/tor/Makefile ] && [ -f "$$src/vendor/tor/Makefile" ] \
+	   && [ -d vendor/tor ]; then \
+	  cp -a "$$src/vendor/tor/Makefile" vendor/tor/Makefile; \
+	  echo "worktree-prime: copied vendor/tor/Makefile from $$src (the proof and the land queue require it)"; \
+	fi; \
 	if ZCL_TOR=full tools/scripts/tor_archives_ready.sh link-only "$$src"; then \
 	  :; \
 	else \

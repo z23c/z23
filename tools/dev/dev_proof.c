@@ -16,6 +16,7 @@
 #include "dependency_links.h"
 #include "dev_proof_budget.h"
 #include "dev_proof_observation.h"
+#include "proof_dependencies.h"
 #include "devloop.h"
 #include "test_group_catalog.h"
 #include "test_group_host_need.h"
@@ -5451,9 +5452,8 @@ static bool dp_generation_build_dirs(const char *generation, char *why,
  * them, but do not require a native checkout to have built a cross target. */
 static bool dp_generation_dependency_optional(const char *dependency)
 {
-    return strcmp(dependency, "vendor/.build-x86_64-w64-mingw32") == 0 ||
-           strcmp(dependency, "vendor/.cache") == 0 ||
-           strcmp(dependency, "vendor/cross") == 0;
+    const struct zcl_dep_row *row = zcl_dep_find(dependency);
+    return row != NULL && row->optional;
 }
 
 /* Absence must agree on both sides. A reused generation with old cross
@@ -5597,78 +5597,18 @@ static bool dp_generation_dependencies(const char *root,
      * superseding an otherwise exact isolated proof generation. Provenance
      * stamps travel with vendor/lib so already verified inputs are not
      * needlessly rebuilt after the source checkpoint. */
-    static const char *const dependencies[] = {
-        "vendor/lib", "vendor/include",
-        /* The untracked amalgamated C source beside those two. No native
-         * build compiles it, so its absence looks like nothing at all --
-         * until the Windows acceptance link inside a full lint dies with
-         * "No rule to make target 'vendor/sqlite3.c'", naming a missing file
-         * rather than a missing priming step. The Makefile's worktree-prime
-         * comment names this exact trap for hand-primed worktrees; a proof
-         * generation is one more of them. */
-        "vendor/sqlite3.c",
-        "vendor/tor/libtor.a",
-        /* The manifest must travel with the archives it attests: a
-         * generation without it sees archives but no provenance, rebuilds
-         * Tor from source in RAM, and the next warm restart then re-copies
-         * the original libtor.a under a manifest that no longer matches it. */
-        "vendor/tor/.provenance",
-        /* The generated Tor Makefile records the CC= string provenance
-         * binds. Copying archives and .provenance without it makes
-         * check-tor-provenance fall back to ${CC:-cc}, a different
-         * compiler identity than the gcc that wrote the archives. */
-        "vendor/tor/Makefile",
-        /* Preserve optional cross-build outputs and download caches when
-         * present so a generation can reuse the submitting checkout's
-         * prepared target inputs without rebuilding or downloading them. */
-        "vendor/.cache",
-        /* The explicit Windows release target's staged lib/include.
-         * The acceptance catalog builds SQLite separately from
-         * vendor/sqlite3.c. build_vendor.sh removes its transient
-         * .build-<target> workspace after successful verification; that
-         * scratch directory is not a compiler input or a prerequisite. */
-        "vendor/cross",
-        "vendor/tor/src/ext/ed25519/donna/libed25519_donna.a",
-        "vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a",
-        "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a",
-        "build/githooks",
-        /* Checker binaries the sealed generated-docs gate execs before any
-         * dimension builds inside the generation: without them every fresh
-         * proof fails the gate with a misleading "stale" verdict for what
-         * is actually a missing prerequisite. Copied from the submitting
-         * checkout (required: absence refuses with the exact make target
-         * above). The later lint dimension rebuilds and re-checks with
-         * binaries built from sealed source, so a stale submitter binary
-         * can only add fail-closed friction here, never false admission. */
-        "build/bin/z23-lint",
-        "build/bin/z23-fleet-observe",
-        "build/bin/gen_capability_inventory",
-#if defined(__linux__)
-        /* Order-only test-binary prerequisites that no admitted executable
-         * links against: the rollback group dlopens these fixture images by
-         * name on Linux. Other hosts report fixture_required=false, matching
-         * the Makefile's Linux-only prerequisites. */
-        "build/hotswap/zcl_rollback_fixture_a.so",
-        "build/hotswap/zcl_rollback_fixture_b.so",
-#endif
-#if !defined(_WIN32)
-        /* Same class: the resident-launch contract group execs these
-         * fixture children by name on every POSIX host (the Makefile guards
-         * the pair on ZCL_HOST_WINDOWS only), and the test dimension runs no
-         * make that could build them inside the generation. */
-        "build/fixtures/rlc_child_v1",
-        "build/fixtures/rlc_child_broken",
-        /* test_trace execs this start-up probe by name (Makefile guards it
-         * on ZCL_HOST_WINDOWS only, like the pair above). */
-        "build/fixtures/otlp_startup_probe",
-#endif
-    };
     if (!dp_generation_build_dirs(generation, why, why_len))
         return false;
-    for (size_t i = 0; i < sizeof(dependencies) / sizeof(dependencies[0]); i++)
-        if (!dp_generation_dependency(root, generation,
-                                      dependencies[i], why, why_len))
+    size_t dep_count;
+    const struct zcl_dep_row *deps = zcl_dep_rows(&dep_count);
+    for (size_t i = 0; i < dep_count; i++) {
+        if (!(deps[i].consumers & ZCL_DEP_PROOF) ||
+            !zcl_dep_host_applies(deps[i].host))
+            continue;
+        if (!dp_generation_dependency(root, generation, deps[i].path, why,
+                                      why_len))
             return false;
+    }
     /* The submitting checkout's test-verdict store (.zvcs/objects) is
      * deliberately not in the list above. Its records are unsigned PASS
      * entries that any process running as this uid can write, and the
