@@ -5,6 +5,9 @@
 #define _DARWIN_C_SOURCE 1
 #endif
 #define _POSIX_C_SOURCE 200809L
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE /* realpath: declared only through the fortify inline otherwise */
+#endif
 
 #include "dev_proof_receipt.h"
 #include "dev_proof_signer.h"
@@ -1218,6 +1221,11 @@ static int selftest(void)
     if (!selftest_refused("resident-candidate", restore_level,
                           posix_policy_selftest())) return 1;
 #endif
+#if defined(_WIN32)
+    const char *land_queue_checked = "false"; /* POSIX-only land-queue cases */
+#else
+    const char *land_queue_checked = "true";
+#endif
     zcl_log_level_set(restore_level);
     (void)printf("git-hook-selftest: PASS checks=1000 p95_us=%llu "
                  "tamper_refused=true incomplete_refused=true "
@@ -1226,12 +1234,7 @@ static int selftest(void)
                  "child_processes=0 resident_candidate_checked=true "
                  "land_queue_checked=%s\n",
                  (unsigned long long)(samples[949] / 1000u),
-#if defined(_WIN32)
-                 "false"   /* the POSIX-only land-queue cases are not run */
-#else
-                 "true"
-#endif
-                 );
+                 land_queue_checked);
     return samples[949] < 250000000u ? 0 : 1;
 }
 
