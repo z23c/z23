@@ -6628,6 +6628,8 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_orient_facts_selftest.c \
     tools/lint/lintc/gate_tor_provenance.c \
     tools/lint/lintc/gate_markdown_links.c \
+    tools/lint/lintc/gate_no_csr_lock_on_finalize_drive.c \
+    tools/lint/lintc/gate_no_csr_lock_on_finalize_drive_selftest.c \
     tools/lint/lintc/gate_tor_provenance_selftest.c \
     $(LINTC_PREMISE_SRCS) \
     tools/lint/lintc/main.c
@@ -14512,9 +14514,9 @@ check-stage-log-reorg-unsafe:
 	@echo "══ LINT: stage-log reorg-unsafe ratchet ══"
 	@./tools/scripts/gate_stage_log_reorg_unsafe_ratchet.sh
 
-check-no-csr-lock-on-finalize-drive:
+check-no-csr-lock-on-finalize-drive: $(LINTC_TOOL)
 	@echo "══ LINT: no csr->lock on post-finalize drive (LOCK-ORDER LAW / ABBA) ══"
-	@./tools/lint/gate_no_csr_lock_on_finalize_drive.sh .
+	@./build/bin/z23-lint check-no-csr-lock-on-finalize-drive --selftest && ./build/bin/z23-lint check-no-csr-lock-on-finalize-drive .
 
 check-mint-skip-crypto-offline-only: $(LINTC_TOOL)
 	@echo "══ LINT: fast-mint crypto pass-through is offline-only ══"

@@ -295,7 +295,7 @@ gate_command() {
         check-doc-no-false-deleted)        echo './tools/lint/gate_doc_no_false_deleted.sh .' ;;
         check-zclassicd-reach-allowlist)   echo './build/bin/z23-lint check-zclassicd-reach-allowlist .' ;;
         check-stage-log-reorg-unsafe)      echo './tools/scripts/gate_stage_log_reorg_unsafe_ratchet.sh' ;;
-        check-no-csr-lock-on-finalize-drive) echo './tools/lint/gate_no_csr_lock_on_finalize_drive.sh .' ;;
+        check-no-csr-lock-on-finalize-drive) echo './build/bin/z23-lint check-no-csr-lock-on-finalize-drive --selftest && ./build/bin/z23-lint check-no-csr-lock-on-finalize-drive .' ;;
         check-mint-skip-crypto-offline-only) echo './build/bin/z23-lint check-mint-skip-crypto-offline-only .' ;;
         check-wire-harness-security-gate)  echo './build/bin/z23-lint check-wire-harness-security-gate' ;;
         check-vcs-no-git)                  echo './build/bin/z23-lint check-vcs-no-git' ;;
