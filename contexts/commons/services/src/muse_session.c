@@ -706,7 +706,7 @@ struct muse_session *muse_session_attach(pid_t child, int to_fd, int from_fd,
 }
 #endif
 
-void muse_session_close(struct muse_session *s)
+static void muse_session_close_arm(struct muse_session *s)
 {
     if (!s) return;
     if (s->to_child >= 0) {
@@ -1074,9 +1074,15 @@ struct muse_session *muse_session_open(const char *serve_argv0,
     return NULL;
 }
 
-void muse_session_close(struct muse_session *s)
+static void muse_session_close_arm(struct muse_session *s)
 {
     (void)s;
 }
 
 #endif /* !_WIN32 */
+
+/* One public definition; each platform arm above supplies the body. */
+void muse_session_close(struct muse_session *s)
+{
+    muse_session_close_arm(s);
+}
