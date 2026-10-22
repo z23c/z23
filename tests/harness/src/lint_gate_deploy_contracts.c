@@ -1147,9 +1147,9 @@ int t_agent_fast_ci_contract(void)
         free(buf);
         buf = NULL;
 
-        /* Behavioural: the pre-push changed-set resolver builds a throwaway
-         * repository and asserts a CLEAN worktree whose HEAD is ahead of its
-         * upstream still yields the committed file list. */
+        /* Behavioural: the agent_fast_ci changed-set resolver builds a
+         * throwaway repository and asserts a CLEAN worktree whose HEAD is
+         * ahead of its upstream still yields the committed file list. */
         ASSERT(run_gate_script_arg("tools/agent_fast_ci.sh", NULL,
                                    "changed-set-selftest") == 0);
         int epoch_selftest_rc = run_gate_script(

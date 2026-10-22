@@ -479,8 +479,8 @@ publication authority. Preserve competing P2P heads under receiver policy.
 Current native hook: `tools/dev/z23_git_hook.c` verifies main-ref ancestry,
 the exact signed local/base pair receipt and its child receipts. Admission
 does not compile, lint, test, fetch, wait, or invoke Make/shell. The historical
-shell oracle `tools/githooks/pre-push` still contains CI execution; it is not
-the native receipt-admission implementation. Inspect the installed hook before
+shell pre-push hook was removed; the native hook is the only
+pre-push implementation. Inspect the installed hook before
 making a statement about a particular checkout.
 
 Target hook: verify the canonical evidence predicate through its bounded

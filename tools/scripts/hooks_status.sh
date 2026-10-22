@@ -93,8 +93,6 @@ else
     esac
 fi
 
-echo "last measured wall: see the header of tools/githooks/pre-push (never"
-echo "                     re-typed here — timings drift, the file does not)"
 echo "bypass one push:     git push --no-verify   (git itself then runs no hook;"
 echo "                     nothing in this tree reads a ZCL_SKIP_PREPUSH variable —"
 echo "                     measured 2026-09-19: the native hook refuses through it)"
