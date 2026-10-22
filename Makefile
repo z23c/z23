@@ -8765,6 +8765,7 @@ test:
 
 .PHONY: test-locked
 test-locked: $(TEST_PARALLEL_REL_CANDIDATE) dev-package-verifier-ensure
+	+@$(call ZCL_TEST_BUILD_NEEDS,$(TEST_PARALLEL_REL_ACTIVE),$(TEST_PARALLEL_ARGS))
 	$(ZCL_TEST_STACK_SETUP) && $(LINKED_TEST_ENV) $(TEST_PARALLEL_REL_ACTIVE) $(TEST_PARALLEL_ARGS)
 
 .PHONY: test-full test-full-locked
