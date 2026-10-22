@@ -264,7 +264,7 @@ a premise in `tools/lint/lintc/selection_gates.def`:
 That lane also widened what counts as gate code, for all six gates:
 
 - every gate's premise now carries the lint driver (`tools/lint/run_lint.sh`
-  and `tools/lint/lint_cache.sh`) and its own Makefile rule and recipe
+  and `tools/lint/lint_cache.sh`) and its own Makefile rule and recipe <!-- doc-path-ok: deleted lint cache, kept for git recovery -->
   (`"gate:"` in make_vars). The first two declarations omitted both;
 - a `dir/` entry names every path under it;
 - every word of the gate's Makefile text that names a tree path is gate

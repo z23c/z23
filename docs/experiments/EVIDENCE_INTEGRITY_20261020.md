@@ -54,7 +54,7 @@ tip. No full qualification was inferred from this preflight.
 
 ## Full-gate refusal and bounded repair
 
-The first combined native qualification completed 222 lint gates and refused
+The first combined native qualification completed every lint gate then listed (222 at that time) and refused
 one: the complexity ratchet measured integer parsing at 16 and the combined
 boundary fixture at 24, above the existing cap of 15. The other 221 gates
 passed. No candidate was queued and affected-group proof did not run.
