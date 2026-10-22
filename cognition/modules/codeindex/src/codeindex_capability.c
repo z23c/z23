@@ -29,6 +29,7 @@
 #include "codeindex_priv.h"
 #include "codeindex/codeindex_capability.h"
 
+#include "base/serialize_le.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
 
@@ -404,22 +405,17 @@ static void cap_fold_init(void)
 
 static void cap_put_u16(unsigned char *p, unsigned v)
 {
-    p[0] = (unsigned char)(v & 0xffu);
-    p[1] = (unsigned char)((v >> 8) & 0xffu);
+    zcl_write_u16_le(p, (uint16_t)v);
 }
 
 static void cap_put_u32(unsigned char *p, uint32_t v)
 {
-    p[0] = (unsigned char)(v & 0xffu);
-    p[1] = (unsigned char)((v >> 8) & 0xffu);
-    p[2] = (unsigned char)((v >> 16) & 0xffu);
-    p[3] = (unsigned char)((v >> 24) & 0xffu);
+    zcl_write_u32_le(p, v);
 }
 
 static uint32_t cap_get_u32(const unsigned char *p)
 {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return zcl_read_u32_le(p);
 }
 
 /* ASCII case-fold substring. Same fold as SQLite's default LIKE, which is
@@ -462,7 +458,7 @@ static bool cap_pack_next(const unsigned char **cursor,
     const unsigned char *p = *cursor;
     for (int i = 0; i < CAP_PACK_FIELDS; i++) {
         if ((size_t)(end - p) < 2) return false;
-        unsigned len = (unsigned)p[0] | ((unsigned)p[1] << 8);
+        unsigned len = zcl_read_u16_le(p);
         p += 2;
         if (len == CAP_PACK_NULL) {
             out[i] = NULL;
