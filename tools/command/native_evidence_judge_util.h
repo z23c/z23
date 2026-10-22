@@ -7,6 +7,8 @@
 
 #include "native_evidence_judge.h"
 
+#include "base/format_attribute.h"
+
 enum ej_kind { EJ_MISSING, EJ_NULL, EJ_NUM };
 
 struct ej_num {
@@ -23,7 +25,7 @@ bool ej_field_str(const char *line, const char *key, char *out, size_t cap);
 
 /* Appends one formatted fragment to out->text, truncating at the bound. */
 void ej_cat(struct zcl_judge_result *out, const char *fmt, ...)
-    __attribute__((format(gnu_printf, 2, 3)));
+    ZCL_PRINTF_LIKE(2, 3);
 
 void ej_verdict(struct zcl_judge_result *out, int exit_code, const char *verdict,
                 const char *reason);
