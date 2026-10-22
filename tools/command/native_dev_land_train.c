@@ -36,7 +36,9 @@
  * passed the proof: members carry the head's stacked tip as their own
  * local, and land through the existing reconcile path (a fresh fetch and a
  * check that this local is contained in origin main), never by a push of
- * their own. dl_train_gate() (inside dl_push_allowed) requires every bound
+ * their own. dl_train_gate() (inside dl_push_allowed) is a strict no-op for
+ * a row that heads no formed train (an empty train_commit: width unset, or
+ * a head that proves alone). For a head that does, it requires every bound
  * row to be live and unchanged and, once the head is signed, seals each
  * with its own bundle and signed intent: its own seq, the head's target and
  * proof digest. A composition that changed requeues the head to prove
@@ -92,6 +94,17 @@ static bool dl_train_fresh(const struct dl_row *r)
 {
     return r->attempt == 1 && !r->train_solo && !r->predecessor_seq &&
            !r->fence_peer && !r->publication_hold;
+}
+
+/* The head of a formed train. dl_train_intent_bind() sets train_commit and
+ * the stacked proof_intent on the head row together, and dl_start_proof
+ * persists them in one row write, so a row whose train_commit is empty
+ * carries no train: no member is bound to its pair. A plain row (width
+ * unset, or nothing joinable) therefore never pays a queue or outcome read
+ * for the train, and is refused for none of its reasons. */
+bool dl_train_formed(const struct dl_row *row)
+{
+    return row->proof_intent[0] && row->train_commit[0];
 }
 
 static bool dl_train_joinable(const struct dl_row *r, const struct dl_row *head)
@@ -249,7 +262,7 @@ static int dl_train_count_edit(struct dl_row *rows, size_t n, void *context)
 static bool dl_train_bound(const struct dl_dirs *d, const struct dl_row *row)
 {
     struct dl_train_unbind u = { row->proof_intent, row->seq, false, 0 };
-    return row->proof_intent[0] && dl_rows_edit(d, dl_train_count_edit, &u) &&
+    return dl_train_formed(row) && dl_rows_edit(d, dl_train_count_edit, &u) &&
            u.count > 0;
 }
 
@@ -664,7 +677,9 @@ static void dl_train_broken(const struct dl_dirs *d, struct dl_row *row,
 bool dl_train_gate(const struct dl_dirs *d, struct dl_row *row,
                    struct zcl_command_reply *reply)
 {
-    if (!row->proof_intent[0])
+    /* Strict no-op for a row that heads no formed train: nothing is read,
+     * nothing can be refused or requeued here. */
+    if (!dl_train_formed(row))
         return true;
     struct dl_train *t = zcl_calloc(1, sizeof(*t), "dev.land.train.gate");
     struct dl_train_view v = { row, t, false };

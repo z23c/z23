@@ -8309,8 +8309,15 @@ static void dl_step_successor(const struct dl_dirs *d, struct dl_row *row,
     char prior[256], stale[176];
     long long head = row->seq;
     /* A superseded train pair can never publish: release its members once
-     * the head's successor is durable. */
-    (void)snprintf(stale, sizeof(stale), "%s", row->proof_intent);
+     * the head's successor is durable. Only a formed train has members to
+     * release (a plain row reads nothing here). They are released unmarked
+     * (solo=false) on purpose, unlike a red train: the pair went stale
+     * because main moved, which says nothing about the composition. The
+     * re-forming that allows is bounded: this head leaves the fresh pool
+     * for good (attempt > 1 here, or a requeued successor with a
+     * predecessor), so each release costs a later train one head. */
+    (void)snprintf(stale, sizeof(stale), "%s",
+                   dl_train_formed(row) ? row->proof_intent : "");
     (void)snprintf(prior, sizeof(prior),
                    "superseded proof local=%.64s base=%.64s tree=%.64s\n",
                    row->local, row->base, row->tree);

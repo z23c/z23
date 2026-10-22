@@ -164,6 +164,10 @@ struct json_value;
  * count bound to the head's pair (0: the head proves alone). */
 bool dl_train_intent_bind(const struct dl_dirs *d, struct dl_row *row,
                           size_t *members);
+/* The row heads a formed train (train_commit and the stacked proof_intent
+ * persist together); false for every plain row, which no train code reads
+ * the queue or the outcome history for. */
+bool dl_train_formed(const struct dl_row *row);
 /* A failed train proof is no verdict on the head alone: requeue the head
  * and release its members, all marked to prove alone. False: not a train. */
 bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,
@@ -171,7 +175,8 @@ bool dl_train_fallback(const struct dl_dirs *d, struct dl_row *row,
 /* A superseded pair can never publish: release the rows bound to it. */
 void dl_train_unbind(const struct dl_dirs *d, const char *intent,
                      long long head, bool solo);
-/* Every row bound to the head's pair is live, unchanged and sealed. */
+/* Every row bound to a formed train's pair is live, unchanged and sealed;
+ * a strict no-op (true, nothing read) for a row that heads no train. */
 bool dl_train_gate(const struct dl_dirs *d, struct dl_row *row,
                    struct zcl_command_reply *reply);
 /* Refuse (reply set, true) a queued row that rides in a live train. */
