@@ -241,7 +241,12 @@ static bool dlr_recv_fetch(struct dlr_recv *r, const char *lane,
         return false;
     }
     dlr_trim(sink);
-    return strcmp(sink, r->sha) == 0;
+    if (strcmp(sink, r->sha) != 0) {
+        dlr_recv_fail(reply, "RECEIVE_FETCH_FAILED", "fetch",
+                      "fetched ref does not match the bundle head", r->branch);
+        return false;
+    }
+    return true;
 }
 
 static bool dlr_exists(const char *path)

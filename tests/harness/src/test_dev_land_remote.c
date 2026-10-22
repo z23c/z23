@@ -402,10 +402,7 @@ static int dlt_send_cases(void)
                        "origin/main..chk") == 0);
         ASSERT_STR_EQ(out, "2\n");
         ASSERT(dlt_slurp(r.log, logtext, sizeof(logtext)));
-        ASSERT(strstr(logtext, "\t'--note=fix the thing (v2)'\n") != NULL ||
-               strstr(logtext, "\t'--note=fix the thing (v2)'") != NULL);
-        ASSERT(strstr(logtext, "\t'--lane=mac'\t") != NULL ||
-               strstr(logtext, "\t'--lane=mac'\n") != NULL);
+        ASSERT(strstr(logtext, "\t'--lane=mac'\t'--note=fix the thing (v2)'\n") != NULL);
         ASSERT(strstr(logtext, "\tqueue-host\tz23-dev\tdev\tland\treceive\t'--bundle=") != NULL);
         dlt_end(&c);
         PASS();
