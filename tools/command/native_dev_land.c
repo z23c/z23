@@ -32,6 +32,8 @@
  * STATE. <platform_state_root>/land (0700):
  *   queue.jsonl     one JSON object per line; the live request rows.
  *   outcomes.jsonl  one appended row per terminal outcome, newest last.
+ *   objectives.jsonl  one snapshot line of the objectives catalog per landed
+ *                   outcome (native_dev_land_objectives.c); best effort.
  *   queue.lock      the short row-file lock (seq assignment, rewrite).
  *   step.lock       the queue's own step lock: exclusive, NON-BLOCKING,
  *                   taken before step touches anything and held across the
@@ -530,7 +532,7 @@ static bool dl_read_file(const char *path, char *out, size_t cap,
  * and the next line written — by this row or another submitter's row —
  * would fuse onto those leftover bytes into one unparseable line. Loop
  * until every byte is written or a real error (not EINTR) stops us. */
-static bool dl_append_row(const char *path, const char *line, size_t len)
+bool dl_append_row(const char *path, const char *line, size_t len)
 {
     int fd;
     size_t off = 0;
@@ -1998,6 +2000,9 @@ static bool dl_record_outcome(const struct dl_dirs *d, struct dl_row *r)
 #endif
         !dl_write_row(path, r))
         return false;
+    /* Best effort and after the outcome is durable: only a row appended just
+     * now is sensed, so a replay or a mail retry never adds a second line. */
+    dl_objectives_snapshot(d, r, !present);
     return dl_outbox(d, r, "outcome");
 }
 

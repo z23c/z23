@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the dev.land objectives snapshot. */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_land_objectives.c", CAP_FS_WRITE, "")

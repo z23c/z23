@@ -1,7 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: the dev.land queue row and the few host helpers that the land
- *          train module (native_dev_land_train.c) shares with the landing
- *          service (native_dev_land.c). Nothing outside those two files
+ *          train module (native_dev_land_train.c) and the objectives
+ *          snapshot (native_dev_land_objectives.c) share with the landing
+ *          service (native_dev_land.c). Nothing outside those three files
  *          includes this header. */
 
 #ifndef ZCL_NATIVE_DEV_LAND_INTERNAL_H
@@ -114,7 +115,20 @@ struct dl_row {
     char train_commit[80];
 };
 
+/* ── the objectives snapshot (native_dev_land_objectives.c) ───────────── */
+
+/* Append one zcl.objectives_snapshot.v1 line to <land>/objectives.jsonl for a
+ * row dl_record_outcome has just appended to outcomes.jsonl in state
+ * "landed". `fresh` is false for a replayed or already-recorded row, which
+ * writes nothing. Best effort: a failure is logged to the row's attempt log
+ * and never changes the outcome, the push or the reply. */
+void dl_objectives_snapshot(const struct dl_dirs *d, const struct dl_row *r,
+                            bool fresh);
+
 /* ── host helpers the train module calls (native_dev_land.c) ───────────── */
+
+/* Append one complete line to `path` (O_APPEND, full-write loop). */
+bool dl_append_row(const char *path, const char *line, size_t len);
 
 /* The rows each stamp their log; these are the land leaf's own primitives. */
 void dl_fail(struct zcl_command_reply *reply, const char *code,

@@ -23,6 +23,7 @@
 
 #include "command/native_command.h"
 #include "command/native_dev_land_regen.h"
+#include "command/native_fleet_objectives.h"
 #include "command/native_dev_land_qualify.h"
 #include "controllers/agent_impact_rules.h"
 #include "command/native_dev_land_attestation.h"
@@ -2679,6 +2680,307 @@ static int test_dev_land_terminal_replay(void)
         ASSERT_EQ(dlx_int(&c, "seq"), 2);
         dlx_end(&c);
         unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* ── the objectives snapshot (native_dev_land_objectives.c) ──────────────
+ *
+ * Every landed outcome appends one line to <land>/objectives.jsonl, written
+ * from the same outcome path that appends outcomes.jsonl and posts the mail
+ * note. The checks below read the producer's catalog rather than a copy of
+ * it, so a new objective row cannot leave this test behind. */
+
+static const char *dlx_snap_str(const struct json_value *v)
+{
+    const char *s = v ? json_get_str(v) : NULL;
+    return s ? s : "";
+}
+
+static bool dlx_snapshot_bad(const char *what, const char *id)
+{
+    printf("[objectives snapshot: %s %s] ", what, id);
+    return false;
+}
+
+static const struct json_value *dlx_snapshot_row(const struct json_value *rows,
+                                                 const char *id)
+{
+    for (size_t i = 0; rows && i < rows->num_children; i++)
+        if (strcmp(dlx_snap_str(json_get(&rows->children[i], "id")), id) == 0)
+            return &rows->children[i];
+    return NULL;
+}
+
+/* One row's value fields: a number with its verdict and no reason, or null
+ * with null verdict and a reason. */
+static bool dlx_snapshot_value_ok(const struct json_value *r,
+                                  const struct zcl_objective_row *cat)
+{
+    const struct json_value *value = json_get(r, "value");
+    const struct json_value *met = json_get(r, "met");
+    bool has_reason = dlx_snap_str(json_get(r, "reason"))[0] != '\0';
+    if (value && value->type == JSON_INT) {
+        int64_t v = json_get_int(value);
+        bool want = strcmp(cat->direction, "max") == 0 ? v >= cat->target
+                                                        : v <= cat->target;
+        return met && met->type == JSON_BOOL && json_get_bool(met) == want &&
+               !has_reason;
+    }
+    return value && value->type == JSON_NULL && met &&
+           met->type == JSON_NULL && has_reason;
+}
+
+/* Every catalog row, in catalog order, with the catalog's own target and
+ * direction. */
+static bool dlx_snapshot_rows_ok(const struct json_value *rows)
+{
+    const struct zcl_objective_row *catalog;
+    size_t n = zcl_objectives_catalog(&catalog);
+    if (!rows || rows->type != JSON_ARR || rows->num_children != n)
+        return dlx_snapshot_bad("row count", "");
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *r = &rows->children[i];
+        if (strcmp(dlx_snap_str(json_get(r, "id")), catalog[i].id) != 0 ||
+            json_get_int(json_get(r, "target")) != catalog[i].target ||
+            strcmp(dlx_snap_str(json_get(r, "direction")),
+                   catalog[i].direction) != 0)
+            return dlx_snapshot_bad("catalog mismatch", catalog[i].id);
+        if (!dlx_snapshot_value_ok(r, &catalog[i]))
+            return dlx_snapshot_bad("value fields", catalog[i].id);
+    }
+    return true;
+}
+
+/* The snapshot names the landed outcome row: its seq, tip and landing instant. */
+static bool dlx_snapshot_header_ok(const struct json_value *doc,
+                                   const struct json_value *row)
+{
+    int64_t ts = json_get_int(json_get(doc, "ts"));
+    return strcmp(dlx_snap_str(json_get(doc, "schema")),
+                  "zcl.objectives_snapshot.v1") == 0 &&
+           strcmp(dlx_snap_str(json_get(row, "state")), "landed") == 0 &&
+           json_get_int(json_get(doc, "seq")) ==
+               json_get_int(json_get(row, "seq")) &&
+           strcmp(dlx_snap_str(json_get(doc, "tip")),
+                  dlx_snap_str(json_get(row, "tip"))) == 0 &&
+           ts > 0 && ts == json_get_int(json_get(row, "landed_at"));
+}
+
+/* Read from this queue's own outcomes.jsonl, which holds the one landed row. */
+static bool dlx_snapshot_outcomes_ok(const struct json_value *rows)
+{
+    const struct json_value *today =
+        dlx_snapshot_row(rows, "landed_rows_today");
+    const struct json_value *rate =
+        dlx_snapshot_row(rows, "land_success_rate_7d");
+    bool ok = today && rate && json_get_int(json_get(today, "value")) == 1 &&
+              !json_get_bool(json_get(today, "met")) &&
+              json_get_int(json_get(rate, "value")) == 100 &&
+              json_get_bool(json_get(rate, "met"));
+    return ok ? true : dlx_snapshot_bad("outcomes readers", "landed_rows_today");
+}
+
+/* The paths the lander hands the producer, named by its own reasons: the
+ * landing worktree's proof attempts, lint families and complexity baseline,
+ * never the working directory's. */
+static bool dlx_snapshot_wired_ok(const struct json_value *rows,
+                                  const char *landdir)
+{
+    static const struct {
+        const char *id;
+        const char *tail;
+    } wired[] = {
+        {"proof_lint_wall_s", "/wt/.cache/zcl-dev-proof/attempts"},
+        {"lint_families_over_ceiling", "/wt/tools/lint/lintc"},
+        {"functions_over_complexity_cap",
+         "/wt/tools/lint/cyclomatic_complexity_baseline.txt"},
+    };
+    char want[1700];
+    for (size_t i = 0; i < sizeof(wired) / sizeof(wired[0]); i++) {
+        const struct json_value *r = dlx_snapshot_row(rows, wired[i].id);
+        (void)snprintf(want, sizeof(want), "%s%s", landdir, wired[i].tail);
+        if (!r || !strstr(dlx_snap_str(json_get(r, "reason")), want))
+            return dlx_snapshot_bad("producer path", wired[i].id);
+    }
+    return true;
+}
+
+/* `snap` is exactly one newline-terminated line that parses as a snapshot of
+ * the landed outcome row in `outcome`. */
+static bool dlx_snapshot_matches(const char *snap, size_t snap_len,
+                                 const char *outcome, size_t outcome_len,
+                                 const char *landdir)
+{
+    struct json_value doc, row;
+    const struct json_value *rows;
+    bool ok = snap_len > 1 && snap[snap_len - 1] == '\n' &&
+              memchr(snap, '\n', snap_len) == snap + snap_len - 1;
+    json_init(&doc);
+    json_init(&row);
+    ok = ok && json_read(&doc, snap, snap_len - 1) &&
+         json_read(&row, outcome, outcome_len) &&
+         dlx_snapshot_header_ok(&doc, &row);
+    if (!ok)
+        (void)dlx_snapshot_bad("header", "does not match the outcome row");
+    rows = json_get(&doc, "objectives");
+    ok = ok && dlx_snapshot_rows_ok(rows) && dlx_snapshot_outcomes_ok(rows) &&
+         dlx_snapshot_wired_ok(rows, landdir);
+    json_free(&row);
+    json_free(&doc);
+    return ok;
+}
+
+/* The first step starts a held proof; the land state is ready after it. */
+static bool dlx_snapshot_start(struct dlx_rig *rig, const char *tag,
+                               char *landdir, size_t cap)
+{
+    struct dlx_call c;
+    char rigtag[64];
+    bool ok;
+    dlx_isolate(tag);
+    (void)snprintf(rigtag, sizeof(rigtag), "%s_rig", tag);
+    if (!dlx_rig_make(rig, rigtag))
+        return false;
+    setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+    setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    dlx_submit(&c, rig, rig->tip);
+    ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    dlx_begin(&c, "step");
+    ok = ok && dlx_run(&c) && dlx_ok(&c) &&
+         strcmp(dlx_str(&c, "state"), "started") == 0;
+    dlx_end(&c);
+    dlx_landdir(landdir, cap);
+    return ok;
+}
+
+static int test_dev_land_objectives_snapshot(void)
+{
+    int failures = 0;
+    TEST("land: a landed outcome appends one objectives snapshot, once across a mail retry") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200], opath[1400], spath[1400], maildir[1400];
+        char outcome[8192], snap[16384], again[16384];
+        size_t outcome_len, snap_len, again_len;
+        ASSERT(dlx_snapshot_start(&rig, "objectives_snapshot", landdir,
+                                  sizeof(landdir)));
+        ASSERT(snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", landdir) <
+               (int)sizeof(opath));
+        ASSERT(snprintf(spath, sizeof(spath), "%s/objectives.jsonl", landdir) <
+               (int)sizeof(spath));
+        ASSERT(snprintf(maildir, sizeof(maildir), "%s/../mail", landdir) <
+               (int)sizeof(maildir));
+        ASSERT(access(spath, F_OK) != 0);
+        /* The mail post fails after the outcome is durable, so the next two
+         * steps replay the recorded row: none may sense it again. */
+        ASSERT(dlx_write(maildir, "not a mail directory"));
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT_STR_EQ(dlx_str(&c, "persist"), "failed");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(opath, outcome, sizeof(outcome), &outcome_len));
+        ASSERT(dlx_slurp(spath, snap, sizeof(snap), &snap_len));
+        ASSERT(dlx_snapshot_matches(snap, snap_len, outcome, outcome_len,
+                                    landdir));
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "persist"), "failed");
+        dlx_end(&c);
+        ASSERT(unlink(maildir) == 0 && mkdir(maildir, 0700) == 0);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT_STR_EQ(dlx_str(&c, "persist"), "");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(spath, again, sizeof(again), &again_len));
+        ASSERT_EQ(again_len, snap_len);
+        ASSERT(memcmp(again, snap, snap_len) == 0);
+        dlx_restore();
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int test_dev_land_objectives_append_blocked(void)
+{
+    int failures = 0;
+    TEST("land: a snapshot that cannot be appended is logged and the landing stands") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200], opath[1400], spath[1400], qpath[1400];
+        char logpath[1400], remote[64], outcome[8192], queue[8192];
+        char log[65536];
+        size_t outcome_len, queue_len, log_len;
+        struct stat st;
+        ASSERT(dlx_snapshot_start(&rig, "objectives_blocked", landdir,
+                                  sizeof(landdir)));
+        ASSERT(snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", landdir) <
+               (int)sizeof(opath));
+        ASSERT(snprintf(spath, sizeof(spath), "%s/objectives.jsonl", landdir) <
+               (int)sizeof(spath));
+        ASSERT(snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", landdir) <
+               (int)sizeof(qpath));
+        ASSERT(snprintf(logpath, sizeof(logpath), "%s/logs/land-1-a1.log",
+                        landdir) < (int)sizeof(logpath));
+        /* A directory where the snapshot file belongs: open() cannot append. */
+        ASSERT(mkdir(spath, 0700) == 0);
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
+        ASSERT_STR_EQ(dlx_str(&c, "persist"), "");
+        dlx_end(&c);
+        ASSERT(dlx_origin_main(&rig, remote));
+        ASSERT_STR_EQ(remote, rig.tip);
+        ASSERT(dlx_slurp(opath, outcome, sizeof(outcome), &outcome_len));
+        ASSERT(strstr(outcome, "\"state\":\"landed\"") != NULL);
+        ASSERT(dlx_slurp(qpath, queue, sizeof(queue), &queue_len));
+        ASSERT_EQ(queue_len, 0);
+        ASSERT(stat(spath, &st) == 0 && S_ISDIR(st.st_mode));
+        ASSERT(dlx_slurp(logpath, log, sizeof(log) - 1, &log_len));
+        log[log_len] = '\0';
+        ASSERT(strstr(log, "objectives snapshot not recorded for seq 1: "
+                           "cannot append the snapshot line") != NULL);
+        ASSERT(strstr(log, spath) != NULL);
+        dlx_restore();
+        PASS();
+    }
+
+_test_next:;
+    return failures;
+}
+
+static int test_dev_land_objectives_failed_outcome(void)
+{
+    int failures = 0;
+    TEST("land: a failed outcome appends no objectives snapshot") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char landdir[1200], opath[1400], spath[1400], outcome[8192];
+        size_t outcome_len;
+        ASSERT(dlx_snapshot_start(&rig, "objectives_failed", landdir,
+                                  sizeof(landdir)));
+        ASSERT(snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", landdir) <
+               (int)sizeof(opath));
+        ASSERT(snprintf(spath, sizeof(spath), "%s/objectives.jsonl", landdir) <
+               (int)sizeof(spath));
+        setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c) && dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "failed");
+        dlx_end(&c);
+        ASSERT(dlx_slurp(opath, outcome, sizeof(outcome), &outcome_len));
+        ASSERT(strstr(outcome, "\"state\":\"failed\"") != NULL);
+        ASSERT(access(spath, F_OK) != 0);
         dlx_restore();
         PASS();
     }
@@ -16521,6 +16823,12 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
      test_dev_land_lost_persistence, 2u},
     {"test_dev_land_after_proof_restart()",
      test_dev_land_after_proof_restart, 2u},
+    {"test_dev_land_objectives_snapshot()",
+     test_dev_land_objectives_snapshot, 2u},
+    {"test_dev_land_objectives_append_blocked()",
+     test_dev_land_objectives_append_blocked, 2u},
+    {"test_dev_land_objectives_failed_outcome()",
+     test_dev_land_objectives_failed_outcome, 2u},
     {"test_dev_land_terminal_replay()",
      test_dev_land_terminal_replay, 2u},
     {"test_dev_land_outcome_visible_in_mail()",
@@ -16765,6 +17073,9 @@ static const char *const g_dlx_original_calls[] = {
     "test_dev_land_nonfastforward_client_guard()",
     "test_dev_land_lost_persistence()",
     "test_dev_land_after_proof_restart()",
+    "test_dev_land_objectives_snapshot()",
+    "test_dev_land_objectives_append_blocked()",
+    "test_dev_land_objectives_failed_outcome()",
     "test_dev_land_terminal_replay()",
     "test_dev_land_outcome_visible_in_mail()",
     "dlx_case_missing_hook()",
