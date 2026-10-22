@@ -9,21 +9,24 @@
 # metrics, above it for lower-is-better ones. Equal passes. A metric that
 # cannot be measured also fails. `*_pct` values are hundredths of a percent.
 #
-# TIGHTEN-ONLY. Raise the floor in the same commit that improves the metric.
-# Never lower a row to make a regression pass; fix the regression. Rows for
-# neutral metrics (capabilities, files_owned, territories, cmd.leaves,
-# lint_gates, test_groups) are refused.
+# TIGHTEN-ONLY. After a change improves a metric, run
+# `build/bin/z23-lint check-kpi-floor --tighten-baseline` and commit the
+# rewritten rows with that change. It moves each floor that is strictly better
+# to its current value, prints each old -> new change, and refuses, writing
+# nothing, when any metric is worse. Never lower a row to make a regression
+# pass; fix the regression. Rows for neutral metrics (capabilities,
+# files_owned, territories, cmd.leaves, lint_gates, test_groups) are refused.
 #
 # Counts of commands, lint gates and test groups are neutral, tracked but never
 # floored: consolidation that merges or retires them is an improvement.
 #
 # Show the rows behind a number: `build/bin/z23 code kpi --group=<cmd|code|docs>`.
 cmd.help_pct 10000
-cmd.ready_pct 9591
-cmd.tested 493
-code.shell_scripts 478
+cmd.ready_pct 9700
+cmd.tested 565
+code.shell_scripts 396
 code.size_debt 19
 determinism_debt 4
 docs.orphans 15
-duplicate_candidates 1875
+duplicate_candidates 1848
 untested_invariants 894
