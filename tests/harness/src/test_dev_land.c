@@ -52,6 +52,8 @@
 bool zcl_native_dev_land_test_idle_note(int64_t age_s, char *detail,
                                         size_t cap);
 int64_t zcl_native_dev_land_test_idle_bound(void);
+void zcl_native_dev_land_test_next_step(const char *code, const char *action,
+                                        long long seq, char *out, size_t cap);
 /* The drive's base probe (dl_base_observe) against one worktree's origin. */
 int zcl_native_dev_land_test_base_observe(const char *wt, const char *base);
 bool zcl_native_dev_land_test_chain_codec(const char *line, char *out, size_t cap);
@@ -10716,12 +10718,16 @@ static bool dlx_evidence_outcome_ok(const struct dlx_evidence_case *k,
     struct dlx_call c;
     char landdir[1200], path[1400], text[4096];
     size_t len = 0;
+    char steplog[96];
+    (void)snprintf(steplog, sizeof(steplog), ".%s.log", k->land_dimension);
     setenv("ZCL_LAND_PROOF_STUB", "status", 1);
     dlx_begin(&c, "step");
     bool ok = dlx_run(&c) && dlx_ok(&c) &&
               dlx_eq_str(dlx_str(&c, "state"), "failed") &&
               dlx_eq_str(dlx_str(&c, "dimension"), k->land_dimension) &&
               dlx_has(dlx_str(&c, "detail"), k->detail) &&
+              dlx_has(dlx_str(&c, "detail"), "; log: ") &&
+              dlx_has(dlx_str(&c, "detail"), steplog) &&
               strncmp(dlx_str(&c, "detail"), k->detail,
                       strlen(k->detail)) == 0;
     if (!ok)
@@ -10879,6 +10885,49 @@ static int test_dev_land_resubmit_failed_pair(void)
         ASSERT(st.state != ZCL_DEV_PROOF_STATE_FAILED);
         /* The first attempt's failure is kept, never deleted. */
         ASSERT(dlx_attempt_archive_exists(real_wt, local, base));
+        PASS();
+    } _test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_refusal_names_next_step(void)
+{
+    int failures = 0;
+    TEST("land: refusals name one actionable next step") {
+        struct dlx_call c;
+        char step[256];
+        dlx_isolate("refusal_next");
+        /* Table pins: the exact command, with the row's seq filled in. */
+        zcl_native_dev_land_test_next_step("PUBLICATION_HELD", "step", 7, step,
+                                           sizeof(step));
+        ASSERT_STR_EQ(step, "z23 dev land release --seq=7");
+        zcl_native_dev_land_test_next_step("DRIVE_BUDGET_EXHAUSTED", "drive",
+                                           3, step, sizeof(step));
+        ASSERT_STR_EQ(step, "z23 dev land drive --seq=3");
+        zcl_native_dev_land_test_next_step("BAD_INPUT", "cancel", 0, step,
+                                           sizeof(step));
+        ASSERT_STR_EQ(step, "z23 dev land cancel --help");
+        zcl_native_dev_land_test_next_step("NOT_A_REAL_CODE", "step", 0, step,
+                                           sizeof(step));
+        ASSERT_STR_EQ(step, "z23 dev land status");
+        /* End to end: a hold with no seq, an unknown verb, an unknown row. */
+        dlx_begin(&c, "hold");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "BAD_INPUT");
+        ASSERT_STR_EQ(c.reply.error.next_action, "z23 dev land hold --help");
+        dlx_end(&c);
+        dlx_begin(&c, "bogus");
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT_STR_EQ(dlx_err_code(&c), "UNKNOWN_ACTION");
+        ASSERT_STR_EQ(c.reply.error.next_action, "z23 dev land --help");
+        dlx_end(&c);
+        dlx_begin(&c, "cancel");
+        (void)json_push_kv_int(&c.input, "seq", 99);
+        ASSERT(dlx_run(&c) && !dlx_ok(&c));
+        ASSERT(c.reply.error.next_action[0] != '\0');
+        ASSERT(strstr(c.reply.error.next_action, "z23 dev land ") != NULL);
+        dlx_end(&c);
         PASS();
     } _test_next:;
     dlx_restore();
@@ -16250,6 +16299,8 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
      test_dev_land_proof_evidence_test, 0u},
     {"test_dev_land_resubmit_failed_pair()",
      test_dev_land_resubmit_failed_pair, 0u},
+    {"test_dev_land_refusal_names_next_step()",
+     test_dev_land_refusal_names_next_step, 0u},
     {"test_dev_land_proof_evidence_compile()",
      test_dev_land_proof_evidence_compile, 0u},
 #endif
@@ -16568,6 +16619,7 @@ static const char *const g_dlx_original_calls[] = {
     "test_dev_land_tree_missing()",
     "test_dev_land_proof_evidence_test()",
     "test_dev_land_resubmit_failed_pair()",
+    "test_dev_land_refusal_names_next_step()",
     "test_dev_land_proof_evidence_compile()",
 #endif
     "dlx_case_registration()",

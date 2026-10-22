@@ -7383,6 +7383,39 @@ static void dl_proof_evidence_read(const char *wt, const char *local,
         (void)snprintf(out, cap, "%s", status.evidence);
 }
 
+/* The failing step's own log, repo-relative, when the digest's `logs:` line
+ * names the attempt directory and the log exists there. A proof dimension
+ * logs as `<local>-<base>.<step>.log`, any other step as `<step>.log`. The
+ * land outcome used to say only "FAIL check-x"; the diagnosis lives here. */
+static bool dl_evidence_log_pointer(const struct dl_dirs *d,
+                                    const struct dl_row *row,
+                                    const char *evidence, char *out,
+                                    size_t cap)
+{
+    const char *line = strncmp(evidence, "logs: ", 6) == 0
+                           ? evidence : strstr(evidence, "\nlogs: ");
+    char dir[512], rel[1024], abs_path[PATH_MAX + 1100];
+    if (!line || !row->dimension[0])
+        return false;
+    line += line == evidence ? 6 : 7;
+    size_t n = strcspn(line, "\n");
+    if (n == 0 || n >= sizeof(dir))
+        return false;
+    (void)snprintf(dir, sizeof(dir), "%.*s", (int)n, line);
+    for (int form = 0; form < 2; form++) {
+        if (form == 0)
+            (void)snprintf(rel, sizeof(rel), "%s/%.64s-%.64s.%s.log", dir,
+                           row->local, row->base, row->dimension);
+        else
+            (void)snprintf(rel, sizeof(rel), "%s/%s.log", dir,
+                           row->dimension);
+        (void)snprintf(abs_path, sizeof(abs_path), "%s/%s", d->wt, rel);
+        if (access(abs_path, R_OK) == 0)
+            return snprintf(out, cap, "%s", rel) < (int)cap;
+    }
+    return false;
+}
+
 /* Name what failed on the settled row. The digest's first line leads the
  * detail with the settled token kept after it, its first word becomes the
  * dimension, and the whole digest is written beside the attempt's land log
@@ -7405,11 +7438,16 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
         (void)snprintf(row->dimension, sizeof(row->dimension), "%.*s",
                        (int)word, first);
     size_t tlen = strlen(token) < 96 ? strlen(token) : 96;
-    size_t room = sizeof(row->detail) - tlen - 4;
+    char where[1100] = "";
+    char logrel[1024];
+    if (dl_evidence_log_pointer(d, row, evidence, logrel, sizeof(logrel)))
+        (void)snprintf(where, sizeof(where), "; log: %s", logrel);
+    size_t room = sizeof(row->detail) - tlen - 4 - strlen(where);
+    if (room > sizeof(row->detail)) room = 0;
     size_t cut = strlen(first) < room ? strlen(first) : room;
     while (cut > 0 && ((unsigned char)first[cut] & 0xC0) == 0x80) cut--;
-    (void)snprintf(row->detail, sizeof(row->detail), "%.*s [%.*s]",
-                   (int)cut, first, (int)tlen, token);
+    (void)snprintf(row->detail, sizeof(row->detail), "%.*s [%.*s]%s",
+                   (int)cut, first, (int)tlen, token, where);
     dl_log(row, "proof evidence:\n");
     dl_log(row, evidence);
     dl_log(row, "\n");
@@ -12942,7 +12980,149 @@ static const char *dl_action(const struct zcl_command_request *request)
     return NULL;
 }
 
-void zcl_native_handle_dev_land(const struct zcl_command_request *request,
+/* ── a next step on every refusal ─────────────────────────────────────────
+ * Every refusal of a land verb names one actionable next step in the
+ * envelope's error.next_action: the exact command to run, or the file to
+ * read. Sites that know better set their own text first (drive --prove,
+ * attach, fence); this table fills the rest by error code so a refusal can
+ * never end at a bare code. "@A" is the verb that refused, "@S" the row's
+ * seq when the reply carries one (else the placeholder <seq>). */
+struct dl_next_entry {
+    const char *code;
+    const char *step;
+};
+
+static const struct dl_next_entry k_dl_next[] = {
+    {"BAD_INPUT", "z23 dev land @A --help"},
+    {"UNKNOWN_ACTION", "z23 dev land --help"},
+    {"SEQ_UNKNOWN", "z23 dev land status (lists the live seq numbers), then rerun with --seq=<seq>"},
+    {"UNKNOWN_SEQUENCE", "z23 dev land status (lists the live seq numbers), then rerun with --seq=<seq>"},
+    {"TIP_UNKNOWN", "git rev-parse HEAD in your worktree, then z23 dev land submit --tip=<sha>"},
+    {"TIP_UNRELATED", "git fetch origin main and rebase the tip onto origin/main, then z23 dev land submit --tip=<new sha>"},
+    {"TIP_UNSIGNED", "git commit --amend -S --no-edit, then z23 dev land submit --tip=<new sha>"},
+    {"NO_CHECKOUT", "run from inside a Z23 checkout or pass --worktree=<path>, then z23 dev land @A"},
+    {"DEV_BUILD_REQUIRED", "devbuild --wait make -j28 dev-bin, then rerun with build/bin/z23-dev dev land @A"},
+    {"ATTESTATION_UNKNOWN", "devbuild --wait make -j28 dev-bin, then rerun with build/bin/z23-dev dev land @A"},
+    {"UNAVAILABLE", "run dev land on a POSIX host; z23 dev land status reads the queue anywhere"},
+    {"STEP_WINDOWS_UNAVAILABLE", "run dev land on a POSIX host; z23 dev land status reads the queue anywhere"},
+    {"FENCE_WINDOWS_UNAVAILABLE", "run dev land on a POSIX host; z23 dev land status reads the queue anywhere"},
+    {"STATE_DIR_FAILED", "check permissions and free space of the land state directory named in error.evidence, then retry z23 dev land @A"},
+    {"QUEUE_LOCK_FAILED", "check permissions and free space of the land state directory named in error.evidence, then retry z23 dev land @A"},
+    {"QUEUE_READ_FAILED", "check permissions and free space of the land state directory named in error.evidence, then retry z23 dev land @A"},
+    {"QUEUE_WRITE_FAILED", "check permissions and free space of the land state directory named in error.evidence, then retry z23 dev land @A"},
+    {"OUTCOME_WRITE_FAILED", "check permissions and free space of the land state directory named in error.evidence, then retry z23 dev land @A"},
+    {"WORKTREE_STATE_UNAVAILABLE", "read the path named in error.evidence, repair it, then retry z23 dev land @A"},
+    {"STEP_BUSY", "wait for the holder named in error.evidence to finish, then retry z23 dev land @A"},
+    {"DRIVE_BUSY", "wait for the holder named in error.evidence to finish, then retry z23 dev land @A"},
+    {"DRIVE_LOCK_UNAVAILABLE", "wait for the holder named in error.evidence to finish, then retry z23 dev land @A"},
+    {"WORKTREE_BUSY", "wait for the holder named in error.evidence to finish, then retry z23 dev land @A"},
+    {"DRIVE_BUDGET_EXHAUSTED", "z23 dev land drive --seq=@S"},
+    {"DRIVE_ROW_BLOCKED", "z23 dev land status (names the row's blocker), then z23 dev land cancel --seq=@S if it cannot proceed"},
+    {"PROOF_INTENT_UNAVAILABLE", "z23 dev land status, then z23 dev land drive --seq=@S"},
+    {"PROOF_PRODUCER_RETRY_REFUSED", "read the failed record named in error.evidence, fix its cause, then z23 dev land drive --seq=@S --prove"},
+    {"PROOF_PRODUCER_UNAVAILABLE", "read the log named in error.evidence, fix the build, then z23 dev land drive --seq=@S --prove"},
+    {"PROOF_RECEIPT_MISSING", "read the log named in error.evidence, fix the failing gate, then z23 dev land drive --seq=@S --prove"},
+    {"PROOF_RETRY_REFUSED", "z23 dev land step (retries the re-queue), or z23 dev land status to read the pair's state"},
+    {"PROOF_STEP_REFUSED", "read the refusal in error.evidence, then z23 dev land drive --seq=@S --prove"},
+    {"EXPECTED_BASE_MISMATCH", "z23 dev land step (cuts the successor pair on the new origin/main)"},
+    {"ATTACH_TARGET_NONE", "z23 dev land status (attach needs a live proven row), then z23 dev land attach --seq=<seq>"},
+    {"FENCE_ACTIVE", "z23 dev land status (its fence section names the blocker)"},
+    {"FENCE_CONTRACT_UNAVAILABLE", "z23 dev land status (its fence section names the blocker)"},
+    {"FENCE_NEW_PAIR_UNQUALIFIED", "z23 dev land status (its fence section names the blocker)"},
+    {"FENCE_OLD_INTENT_CHANGED", "z23 dev land status (its fence section names the blocker)"},
+    {"FENCE_WORKTREE_INVALID", "z23 dev land status (its fence section names the blocker)"},
+    {"PUBLICATION_ALREADY_SEALED", "z23 dev land step"},
+    {"PUBLICATION_FENCED", "z23 dev land status, then z23 dev land fence_replace --seq=@S"},
+    {"PUBLICATION_HELD", "z23 dev land release --seq=@S"},
+    {"PUBLICATION_INTENT_INVALID", "z23 dev land status, then z23 dev land cancel --seq=@S and resubmit"},
+    {"PUBLICATION_INTENT_PERSIST_FAILED", "check the queue path in error.evidence, then z23 dev land attach --seq=@S"},
+    {"PUBLICATION_INTENT_REQUIRED", "z23 dev land attach --seq=@S"},
+    {"PUBLICATION_PAIR_CHANGED", "z23 dev land status, then z23 dev land cancel --seq=@S and resubmit"},
+    {"PUBLICATION_PROOF_FAILED", "z23 dev land status (names the failed record), fix the cause, then z23 dev land submit"},
+    {"PUBLICATION_PROOF_PENDING", "z23 dev land drive --seq=@S"},
+    {"PUBLICATION_PROOF_REQUIRED", "z23 dev land drive --seq=@S"},
+    {"PUBLICATION_STEP_WAIT_EXPIRED", "z23 dev land step"},
+    {"PUSH_OUTCOME_PERSIST_FAILED", "z23 dev land status, then z23 dev land step to reconcile against origin/main"},
+    {"PUSH_OUTCOME_UNKNOWN", "z23 dev land step (reconciles against origin/main)"},
+    {"REMOTE_RECEIPT_INVALID", "z23 dev land step (re-observes origin/main)"},
+    {"REMOTE_RECEIPT_UNAVAILABLE", "z23 dev land step (re-observes origin/main)"},
+    {"TERMINAL_REPLAY_PENDING", "z23 dev land step"},
+    {"TEST_PICK_BARRIER_FAILED", "z23 dev land step"},
+};
+
+/* Copy `src` into `out` with @A and @S expanded. */
+static void dl_next_expand(const char *src, const char *action,
+                           const char *seq, char *out, size_t cap)
+{
+    size_t used = 0;
+    for (const char *p = src; *p && used + 1 < cap; p++) {
+        const char *with = NULL;
+        if (p[0] == '@' && p[1] == 'A')
+            with = action;
+        else if (p[0] == '@' && p[1] == 'S')
+            with = seq;
+        if (with) {
+            for (const char *w = with; *w && used + 1 < cap; w++)
+                out[used++] = *w;
+            p++;
+        } else {
+            out[used++] = *p;
+        }
+    }
+    out[used] = '\0';
+}
+
+/* The next step for `code`, expanded. Unlisted codes read the queue. */
+static void dl_next_step(const char *code, const char *action,
+                         long long seq, char *out, size_t cap)
+{
+    char seqtxt[24];
+    const char *step = "z23 dev land status";
+    for (size_t i = 0; i < sizeof(k_dl_next) / sizeof(k_dl_next[0]); i++)
+        if (strcmp(k_dl_next[i].code, code) == 0) {
+            step = k_dl_next[i].step;
+            break;
+        }
+    if (seq > 0)
+        (void)snprintf(seqtxt, sizeof(seqtxt), "%lld", seq);
+    else
+        (void)snprintf(seqtxt, sizeof(seqtxt), "<seq>");
+    dl_next_expand(step, action && action[0] ? action : "status", seqtxt, out,
+                   cap);
+}
+
+/* Fill error.next_action on a refusal that set none. Runs once, after the
+ * verb returned, so no refusal path can skip it. */
+static void dl_reply_name_next(const struct zcl_command_request *request,
+                               const char *action,
+                               struct zcl_command_reply *reply)
+{
+    char step[sizeof(reply->error.next_action)];
+    const struct json_value *seq_v;
+    long long seq = 0;
+    if (reply->exit_code == ZCL_COMMAND_EXIT_OK || !reply->error.code[0] ||
+        reply->error.next_action[0])
+        return;
+    if (!dl_seq_in(request, &seq))
+        seq = 0;
+    seq_v = seq > 0 ? NULL : json_get(&reply->data, "seq");
+    if (seq_v && seq_v->type == JSON_INT)
+        seq = (long long)json_get_int(seq_v);
+    dl_next_step(reply->error.code, action, seq, step, sizeof(step));
+    (void)snprintf(reply->error.next_action, sizeof(reply->error.next_action),
+                   "%s", step);
+}
+
+#if defined(ZCL_TESTING)
+/* Test seam: the expanded step for one code, for the table-wide pin. */
+void zcl_native_dev_land_test_next_step(const char *code, const char *action,
+                                        long long seq, char *out, size_t cap)
+{
+    dl_next_step(code, action, seq, out, cap);
+}
+#endif
+
+static void dl_handle(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply)
 {
     const char *action;
@@ -13002,4 +13182,13 @@ void zcl_native_handle_dev_land(const struct zcl_command_request *request,
     dl_fail(reply, "UNKNOWN_ACTION", "route",
             "action is one of submit|attach|attach_publish|status|step|drive|hold|release|cancel|fence_replace",
             "input.action unknown");
+}
+
+void zcl_native_handle_dev_land(const struct zcl_command_request *request,
+                                struct zcl_command_reply *reply)
+{
+    if (!reply)
+        return;
+    dl_handle(request, reply);
+    dl_reply_name_next(request, request ? dl_action(request) : NULL, reply);
 }
