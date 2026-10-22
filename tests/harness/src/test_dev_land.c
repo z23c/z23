@@ -158,6 +158,7 @@ static void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_WINDOW");
     unsetenv("ZCL_LAND_WINDOW_HOST");
     unsetenv("ZCL_LAND_TRAIN_WIDTH");
+    unsetenv("ZCL_LAND_TEST_DIE_AFTER_TRAIN_BIND");
     /* The vendor/tor submodule fixtures below add a real gitlink pointing
      * at a same-host bare repo; modern git's default transport allowlist
      * otherwise refuses a local `file://`-style remote reached through
@@ -205,6 +206,7 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_WINDOW");
     unsetenv("ZCL_LAND_WINDOW_HOST");
     unsetenv("ZCL_LAND_TRAIN_WIDTH");
+    unsetenv("ZCL_LAND_TEST_DIE_AFTER_TRAIN_BIND");
     unsetenv("GIT_CONFIG_GLOBAL");
     unsetenv("GIT_ALLOW_PROTOCOL");
 }
@@ -18279,16 +18281,17 @@ static size_t dlx_tr_members(int64_t out[8])
     return n;
 }
 
-/* The quoted value of `key` on seq's line in outcomes.jsonl. */
-static bool dlx_tr_outcome_field(long long seq, const char *key, char *out,
-                                 size_t cap)
+/* The quoted value of `key` on seq's last line in the land directory's
+ * `file` (queue.jsonl or outcomes.jsonl). */
+static bool dlx_tr_file_field(const char *file, long long seq, const char *key,
+                              char *out, size_t cap)
 {
     static char text[262144];
     char land[1200], path[1400], anchor[48], quoted[64];
     size_t len = 0;
     bool found = false;
     dlx_landdir(land, sizeof(land));
-    (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", land);
+    (void)snprintf(path, sizeof(path), "%s/%s", land, file);
     if (!dlx_slurp(path, text, sizeof(text) - 1, &len))
         return false;
     text[len] = '\0';
@@ -18310,6 +18313,12 @@ static bool dlx_tr_outcome_field(long long seq, const char *key, char *out,
         line = end ? end + 1 : NULL;
     }
     return found;
+}
+
+static bool dlx_tr_outcome_field(long long seq, const char *key, char *out,
+                                 size_t cap)
+{
+    return dlx_tr_file_field("outcomes.jsonl", seq, key, out, cap);
 }
 
 /* origin main holds `path`. */
@@ -18701,6 +18710,167 @@ _test_next:;
     return failures;
 }
 
+/* ── the gate stays out of the way of plain rows ───────────────────────────
+ *
+ * Width unset is today's land: one row, one proof, one push. Every row binds
+ * a proof_intent, so the publication gate must key on the head's own formed
+ * train (a train_commit) and never read the queue or the outcome history
+ * for a plain row. */
+
+static bool dlx_tr_has_solo_mark(void)
+{
+    char land[1200], path[1400];
+    dlx_landdir(land, sizeof(land));
+    (void)snprintf(path, sizeof(path), "%s/queue.jsonl", land);
+    if (dlx_qp_file_has(path, "\"train_solo\":1"))
+        return true;
+    (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", land);
+    return dlx_qp_file_has(path, "\"train_solo\":1");
+}
+
+static int test_dev_land_train_unset_resubmitted_tip(void)
+{
+    int failures = 0;
+    TEST("land: width unset, a resubmitted tip sharing an earlier outcome's "
+         "pair lands with no requeue and no train_solo mark") {
+        struct dlx_rig rig;
+        char b[64], moved[64], rebased[64], states[256], state[32] = "";
+        int proofs = 0, landed = 0;
+        dlx_isolate("train_unset_resub");
+        ASSERT(dlx_rig_make(&rig, "train_unset_resub_rig"));
+        ASSERT(dlx_qp_branch(&rig, "re-b", "b.txt", "b\n", NULL, NULL, b));
+        setenv("ZCL_LAND_PROOF_STUB", "fail", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        /* Row 1 rebases onto a moved main as B' and fails its proof: its
+         * outcome names B' at that main as its pair. */
+        ASSERT(dlx_qp_submit(&rig, b, 1));
+        ASSERT(dlx_qp_push_main(&rig, "m.txt", "m\n", moved));
+        ASSERT(dlx_tr_beat("started", 0, 1));
+        ASSERT(dlx_tr_beat("failed", 0, 1));
+        ASSERT(dlx_tr_outcome_field(1, "local", rebased, sizeof(rebased)));
+        ASSERT(strcmp(rebased, b) != 0);
+        /* B' resubmitted: another tip, the same local@base. */
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        ASSERT(dlx_qp_submit(&rig, rebased, 2));
+        ASSERT(dlx_tr_drain(8, NULL, &proofs, &landed, states,
+                            sizeof(states)));
+        printf("[beats=%s] ", states);
+        ASSERT_STR_EQ(states, "started,landed,empty");
+        ASSERT_EQ(proofs, 1);
+        ASSERT(dlx_tr_outcome_field(2, "state", state, sizeof(state)));
+        ASSERT_STR_EQ(state, "landed");
+        ASSERT(!dlx_tr_has_solo_mark());
+        ASSERT(dlx_tr_main_has(&rig, "b.txt"));
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_train_unset_unreadable_outcomes(void)
+{
+    int failures = 0;
+    TEST("land: width unset, an unreadable outcomes.jsonl at push time does "
+         "not stop the push") {
+        struct dlx_rig rig;
+        struct dlx_call s;
+        char b[64], c[64], land[1200], opath[1400], states[256];
+        int proofs = 0, landed = 0;
+        bool refused = false;
+        dlx_isolate("train_unset_unreadable");
+        ASSERT(dlx_tr_rig(&rig, "train_unset_unreadable_rig", "pass", "b.txt",
+                          b, c));
+        ASSERT(dlx_tr_beat("started", 0, 1));
+        ASSERT(dlx_tr_beat("landed", 0, -1));
+        ASSERT(dlx_tr_beat("started", 0, 1));
+        dlx_landdir(land, sizeof(land));
+        ASSERT(snprintf(opath, sizeof(opath), "%s/outcomes.jsonl", land) <
+               (int)sizeof(opath));
+        ASSERT(chmod(opath, 0200) == 0);
+        {
+            FILE *f = fopen(opath, "r");
+            ASSERT(f == NULL);
+        }
+        /* Row 2's push beat: the pre-train code publishes here, whatever
+         * the outcome history says. */
+        dlx_begin(&s, "step");
+        ASSERT(dlx_run(&s));
+        refused = !dlx_ok(&s) &&
+                  strcmp(dlx_err_code(&s), "QUEUE_READ_FAILED") == 0;
+        printf("[push beat ok=%d code=%s] ", dlx_ok(&s) ? 1 : 0,
+               dlx_err_code(&s));
+        dlx_end(&s);
+        ASSERT(chmod(opath, 0600) == 0);
+        ASSERT(!refused);
+        ASSERT(dlx_tr_main_has(&rig, "b.txt"));
+        ASSERT(dlx_tr_drain(8, NULL, &proofs, &landed, states,
+                            sizeof(states)));
+        ASSERT(dlx_tr_all_landed(&rig, false));
+        ASSERT(!dlx_tr_has_solo_mark());
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+static int test_dev_land_train_crash_after_bind(void)
+{
+    int failures = 0;
+    TEST("land: a crash between the members' bind and the head's persist "
+         "leaves stale members that re-prove alone, never published "
+         "unproven") {
+        struct dlx_rig rig;
+        struct dlx_tr_watch w;
+        char b[64], c[64], intent[200], stale[80], states[256], none[64];
+        int64_t attempt = 0;
+        int proofs = 0, landed = 0, child_status = 0;
+        dlx_isolate("train_crash_bind");
+        ASSERT(dlx_tr_rig(&rig, "train_crash_bind_rig", "running", "b.txt", b,
+                          c));
+        ASSERT(dlx_tr_watch_start(&w, &rig));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "3", 1);
+        pid_t child = fork();
+        ASSERT(child >= 0);
+        if (child == 0) {
+            struct dlx_call cc;
+            (void)setenv("ZCL_LAND_TEST_DIE_AFTER_TRAIN_BIND", "1", 1);
+            dlx_begin(&cc, "step");
+            (void)dlx_run(&cc);
+            _exit(90);
+        }
+        ASSERT(waitpid(child, &child_status, 0) == child);
+        ASSERT(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 83);
+        /* The members are bound; the head never persisted the pair. */
+        ASSERT(!dlx_tr_inflight_intent(intent, sizeof(intent)));
+        ASSERT(dlx_tr_queued(2, &attempt, intent, sizeof(intent)));
+        ASSERT(intent[0] != '\0');
+        ASSERT(dlx_tr_queued(3, &attempt, intent, sizeof(intent)));
+        ASSERT(intent[0] != '\0');
+        ASSERT(dlx_tr_file_field("queue.jsonl", 3, "local", stale,
+                                 sizeof(stale)));
+        /* Restart with trains still on: the head and the stale members each
+         * prove on their own turn, and every tip main takes began a proof. */
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        ASSERT(dlx_tr_drain(16, &w, &proofs, &landed, states, sizeof(states)));
+        printf("[beats=%s unproven=%d] ", states, w.unproven);
+        ASSERT_EQ(proofs, 3);
+        ASSERT_EQ(landed, 3);
+        ASSERT_EQ(w.unproven, 0);
+        ASSERT(dlx_tr_all_landed(&rig, false));
+        for (long long seq = 1; seq <= 3; seq++) {
+            ASSERT(!dlx_tr_outcome_field(seq, "train_commit", none,
+                                         sizeof(none)));
+        }
+        ASSERT(!dlx_tr_has_solo_mark());
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_train_cases(void)
 {
     int failures = 0;
@@ -18713,6 +18883,9 @@ static int test_dev_land_train_cases(void)
     failures += test_dev_land_train_cancelled_row_skipped();
     failures += test_dev_land_train_member_bound();
     failures += test_dev_land_train_signed_drive();
+    failures += test_dev_land_train_unset_resubmitted_tip();
+    failures += test_dev_land_train_unset_unreadable_outcomes();
+    failures += test_dev_land_train_crash_after_bind();
     return failures;
 }
 

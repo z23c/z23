@@ -66,6 +66,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(ZCL_TESTING)
+#include <unistd.h>
+#endif
 
 #define DL_TRAIN_MAX 8
 
@@ -485,6 +488,13 @@ static bool dl_train_form(const struct dl_dirs *d, struct dl_row *row,
     if (!dl_proof_intent_bind(d, row) ||
         !dl_rows_edit(d, dl_train_bind_edit, &b))
         return false;
+#if defined(ZCL_TESTING)
+    /* Hard death between the members' bind rewrite and the head's own
+     * persist: the one window where members hold a pair no durable head
+     * holds. */
+    if (getenv("ZCL_LAND_TEST_DIE_AFTER_TRAIN_BIND"))
+        _exit(83);
+#endif
     dl_train_log_bound(row, t);
     return true;
 }
