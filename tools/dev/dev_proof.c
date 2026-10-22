@@ -8474,6 +8474,9 @@ struct dp_worker {
     struct zcl_dev_proof_budget lint_budget;
     bool lint_reads_artifacts;
     bool bundle_built_prefork;
+    /* Wall time of the bundle make the include-graph refresh ran, kept for
+     * the warm-start sidecar when that make is the proof's only one. */
+    uint64_t refresh_bundle_ms;
     /* Observation authority. Null until dp_check_resolve derives a
      * receiver, domain, and policy from the closure and this attempt's
      * signer, or a caller already holds a store (the seam). */
@@ -8507,12 +8510,15 @@ static bool dp_worker_refresh_include_graph(struct dp_worker *w,
                           "dev-proof-bundle-prefork", NULL};
     struct zcl_dev_proof_budget budget =
         proof_step_budget(w->paths, "bundle", PROOF_BUNDLE_DEFAULT_MS);
+    struct zcl_dev_proof_step_report report = {0};
     if (run_step(w->paths, w->generation, w->paths->bundle_log,
-                 argv, "bundle", &budget, NULL) != 0) {
+                 argv, "bundle", &budget, &report) != 0) {
         proof_why(why, why_len, "proof_closure_refresh_build_failed");
         return false;
     }
     w->bundle_built_prefork = true;
+    w->refresh_bundle_ms = report.elapsed_ms > 0
+        ? (uint64_t)report.elapsed_ms : 0;
     proof_phase_mark(w->phases, "closure_refresh_build");
     return true;
 }
@@ -9040,17 +9046,23 @@ static bool dp_worker_bundle_make(struct dp_worker *w, int *rc,
     return true;
 }
 
-/* The submitting checkout could not supply an admissible runner
- * or helper set: build one in the generation and re-admit. */
-static bool dp_worker_bundle(struct dp_worker *w, bool test_selected,
-                             char *why, size_t why_len)
+/* The bundle make under the receiver. `*bundle_ms` is its wall time.
+ * An include-graph refresh may already have run this very make (same argv,
+ * same cold generation) and compiled everything; a second run would only
+ * revisit the FORCE/PHONY targets, so the refresh's make stands as the
+ * proof's one bundle build and its time is the one reported. The refresh is
+ * not observed by the receiver and stays that way. */
+static bool dp_worker_bundle_build(struct dp_worker *w, uint64_t *bundle_ms,
+                                   char *why, size_t why_len)
 {
-    if (why && why_len > 0) why[0] = 0;
+    if (w->bundle_built_prefork) {
+        *bundle_ms = w->refresh_bundle_ms;
+        return true;
+    }
     struct zcl_verify_receiver rx;
     if (!dp_receiver_begin(w, &rx, why, why_len)) return false;
     int bundle_rc = 0;
-    uint64_t bundle_ms = 0;
-    bool made = dp_worker_bundle_make(w, &bundle_rc, &bundle_ms, why, why_len);
+    bool made = dp_worker_bundle_make(w, &bundle_rc, bundle_ms, why, why_len);
     bool received = dp_receiver_end(w, &rx, made ? why : NULL,
                                     made ? why_len : 0);
     if (!made) return false;
@@ -9060,6 +9072,17 @@ static bool dp_worker_bundle(struct dp_worker *w, bool test_selected,
     }
     if (!received) return false;
     w->bundle_built_prefork = true;
+    return true;
+}
+
+/* The submitting checkout could not supply an admissible runner
+ * or helper set: build one in the generation and re-admit. */
+static bool dp_worker_bundle(struct dp_worker *w, bool test_selected,
+                             char *why, size_t why_len)
+{
+    if (why && why_len > 0) why[0] = 0;
+    uint64_t bundle_ms = 0;
+    if (!dp_worker_bundle_build(w, &bundle_ms, why, why_len)) return false;
 #if defined(__APPLE__)
     /* Compare the executed bundle's plan to the requested
      * flags and graph, binding its mutation token to this
@@ -9095,6 +9118,41 @@ static bool dp_worker_bundle(struct dp_worker *w, bool test_selected,
                        w->warm_compile_ms, bundle_ms);
     return true;
 }
+
+#if defined(ZCL_TESTING)
+/* Plan, then the bundle make, over a fixture Makefile that counts its own
+ * `dev-proof-bundle-prefork` invocations. A plan whose include graph needs
+ * the refresh and a plan that does not must both leave exactly one. The
+ * receiver wrapper is the production one; `*bundle_ms` is the wall time
+ * dp_worker_bundle would carry into the warm-start sidecar. */
+bool zcl_dev_proof_test_worker_bundle(const char *submit,
+    const char *generation, const char *const *files, size_t count,
+    uint64_t *bundle_ms, char *why, size_t why_len)
+{
+    struct dp_worker *w = zcl_calloc(1, sizeof(*w), "proof_bundle_seam");
+    if (!w) {
+        proof_why(why, why_len, "proof_bundle_seam_allocation_failed");
+        return false;
+    }
+    struct proof_paths paths = {0};
+    struct dp_docs_fresh_run docs = {0};
+    (void)snprintf(paths.root, sizeof(paths.root), "%s", submit);
+    (void)snprintf(paths.state, sizeof(paths.state), "%s", generation);
+    (void)snprintf(paths.key, sizeof(paths.key), "fixture");
+    (void)snprintf(paths.bundle_log, sizeof(paths.bundle_log),
+                   "%s/closure-refresh.log", generation);
+    (void)snprintf(w->make_jobs, sizeof(w->make_jobs), "-j1");
+    w->paths = &paths;
+    w->generation = generation;
+    w->docs = &docs;
+    if (why && why_len > 0) why[0] = 0;
+    *bundle_ms = 0;
+    bool ok = dp_worker_plan(w, files, count, why, why_len) &&
+              dp_worker_bundle_build(w, bundle_ms, why, why_len);
+    free(w);
+    return ok;
+}
+#endif
 
 /* EVERYTHING EITHER DIMENSION BUILDS OR IS HANDED HAPPENS HERE,
  * BEFORE THE FORK, IN ONE SEQUENCE: the shared admitted executables,

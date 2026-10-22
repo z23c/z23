@@ -10298,6 +10298,94 @@ static int test_ic_worker_plan_graph_refresh_refuses(void)
     return failures;
 }
 
+/* Planning then the prefork bundle make, over a fixture Makefile that
+ * appends a line to bundle-invocations per `dev-proof-bundle-prefork`. */
+extern bool zcl_dev_proof_test_worker_bundle(const char *, const char *,
+    const char *const *, size_t, uint64_t *, char *, size_t);
+
+static int ic_bundle_invocations(const char *generation)
+{
+    char path[4352];
+    if (snprintf(path, sizeof(path), "%s/bundle-invocations", generation)
+        >= (int)sizeof(path))
+        return -1;
+    FILE *log = fopen(path, "rb");
+    if (!log) return 0;
+    int lines = 0;
+    for (int c; (c = fgetc(log)) != EOF;)
+        if (c == '\n') lines++;
+    fclose(log);
+    return lines;
+}
+
+static int test_ic_worker_bundle_make_once(void)
+{
+    int failures = 0;
+    TEST("proof bundle: one prefork bundle make per proof, refreshed or not") {
+#if defined(_WIN32)
+        ASSERT(true);
+#else
+        char generation[4096], submit[4096], makefile[4608], why[512];
+        uint64_t bundle_ms = 0;
+        const char *files[] = {"core/modules/net/include/net/clp.h"};
+        test_make_tmpdir(submit, sizeof(submit), "impact_composition",
+                         "bundle-once-submit");
+        ASSERT(ic_write_call_pair(submit));
+        ASSERT(ic_write_depfiles(submit));
+
+        /* A generation without an include graph: planning refreshes it with
+         * the bundle make. The first (and only) run is slow so its wall time
+         * is distinguishable from a no-op rerun, and it writes the graph. */
+        test_make_tmpdir(generation, sizeof(generation), "impact_composition",
+                         "bundle-once-refresh");
+        ASSERT(ic_write_call_pair(generation));
+        ASSERT(snprintf(makefile, sizeof(makefile),
+            ".PHONY: dev-proof-bundle-prefork\n"
+            "dev-proof-bundle-prefork:\n"
+            "\t@if [ ! -s bundle-invocations ]; then sleep 1; fi\n"
+            "\t@echo bundle >> bundle-invocations\n"
+            "\t@mkdir -p build/obj\n"
+            "\t@cp '%s/build/obj/'*.d build/obj/\n", submit)
+            < (int)sizeof(makefile));
+        ASSERT(ic_write(generation, "Makefile", makefile));
+        why[0] = '\0';
+        ASSERT(zcl_dev_proof_test_worker_bundle(submit, generation, files, 1,
+            &bundle_ms, why, sizeof(why)));
+        ASSERT_EQ(ic_bundle_invocations(generation), 1);
+        /* The sidecar's bundle time is the make that compiled. */
+        ASSERT(bundle_ms >= 900);
+
+        /* A valid graph needs no refresh: the bundle make is the only one. */
+        test_make_tmpdir(generation, sizeof(generation), "impact_composition",
+                         "bundle-once-plain");
+        ASSERT(ic_write_call_pair(generation));
+        ASSERT(ic_write_depfiles(generation));
+        ASSERT(ic_write(generation, "Makefile",
+            ".PHONY: dev-proof-bundle-prefork\n"
+            "dev-proof-bundle-prefork:\n"
+            "\t@echo bundle >> bundle-invocations\n"));
+        why[0] = '\0';
+        ASSERT(zcl_dev_proof_test_worker_bundle(submit, generation, files, 1,
+            &bundle_ms, why, sizeof(why)));
+        ASSERT_EQ(ic_bundle_invocations(generation), 1);
+
+        /* A failing bundle make still fails the step, and is not retried:
+         * one more line after the plain run's one. */
+        ASSERT(ic_write(generation, "Makefile",
+            ".PHONY: dev-proof-bundle-prefork\n"
+            "dev-proof-bundle-prefork:\n"
+            "\t@echo bundle >> bundle-invocations\n\t@exit 1\n"));
+        why[0] = '\0';
+        ASSERT(!zcl_dev_proof_test_worker_bundle(submit, generation, files, 1,
+            &bundle_ms, why, sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_bundle_build_failed");
+        ASSERT_EQ(ic_bundle_invocations(generation), 2);
+#endif
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_generation_docs_fresh_overlapped(void)
 {
     int failures = 0;
@@ -13188,6 +13276,7 @@ int test_impact_composition(void)
     failures += test_ic_worker_plan_generation();
     failures += test_ic_worker_plan_docs_before_refresh();
     failures += test_ic_worker_plan_graph_refresh_refuses();
+    failures += test_ic_worker_bundle_make_once();
     printf("closure_generation_fixtures wall_us=%lld\n",
            (long long)(platform_time_monotonic_us() - closure_fixture_started_us));
     failures += test_ic_generation_docs_fresh_refuses_missing_tools();
