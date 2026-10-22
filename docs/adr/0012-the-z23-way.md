@@ -21,8 +21,8 @@ loop, and a budget for work about the work.
 
 | Topic | Decision |
 | --- | --- |
-| Route to main | `build/bin/z23-dev dev land submit --worktree=<lane>` on the land host (r1). Only the land driver pushes `main`; the pre-push hook refuses every other `main` push. |
-| Queue host | r1 runs the single land queue and its resident driver (`z23-land-step.timer`). r2 keeps its release-build role; its queue ledger is archived. |
+| Route to main | `build/bin/z23-dev dev land submit --worktree=<lane>` on the land host. Only the land driver pushes `main`; the native pre-push hook (`tools/dev/z23_git_hook.c`, installed by `make install-hooks`) refuses every other `main` push. |
+| Queue host | The land host runs the single land queue and its resident driver (`z23-land-step.timer`). |
 | Generated docs | Not tracked (wave 2). Built into `build/gen/` by make targets; gates recompute them and nothing compares against a stored copy. |
 | Inner loop | `make check ONLY=<exact ids>` (renamed from `agent-verify`, which stays one release as an alias). `ONLY=` is exact; substring matching uses `MATCH=`. |
 | Full lint | Once per landed tree, in the land proof. Lane lint is optional feedback. |

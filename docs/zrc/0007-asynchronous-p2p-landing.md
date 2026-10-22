@@ -316,8 +316,8 @@ that calls it is woken by a row rather than by a timer.
   requires.
 - **Train stacks as durable state.** `dev train build|check` and its stack
   worktrees, replaced by CANDIDATE bundles.
-- **The in-tree shell landers.** `tools/dev/land.sh`, `tools/dev/land_lander.sh`
-  and `tools/dev/land_bench.sh`.
+- **The in-tree shell landers** (deleted; the native `dev land` queue replaces them):
+  The bash `land`, `land_lander` and `land_bench` scripts.
 - **The out-of-tree landing loops**, none of which is replaced by another
   script: `land_train_now.sh` (drives `step` on a sleep), `stack_land_loop.sh`,
   `stack_land_loop2.sh`, `stack_land_loop3.sh` (cherry-pick, conflict

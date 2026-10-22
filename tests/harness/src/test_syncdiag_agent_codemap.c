@@ -22,8 +22,6 @@ static const struct agent_impact_case {
       "docs/dev/fast-path.md", F_CODE },
     { "tools/agent_fast_ci.sh", "fast_ci_and_gates", "normal",
       "docs/dev/fast-path.md", F_CODE },
-    { "tools/githooks/pre-push", "fast_ci_and_gates", "normal",
-      "docs/dev/fast-path.md", F_CODE },
     { "Makefile.extra", "general", "normal",
       "docs/dev/CODEBASE_MAP.md", 0 },
     { "tools/githooks", "general", "normal",

@@ -1471,12 +1471,11 @@ Current limitation: proof requests, running markers, leases, failures, and
 receipts remain under each checkout's `.cache/zcl-dev-proof`. The resident
 watcher still forks one worker per claimed commit/base pair, and that worker
 initially checks the mutable submitting checkout before using its private proof
-generation. The separate `tools/land` chainlog batches the legacy
-`make pre-push-ci` path and stops at a local `land/ready` ref; it neither
-produces the native exact receipt nor publishes `main`. These are duplicate
-transitional lifecycle formats and neither is product evidence authority. Do
-not translate between them or claim that either is the unfinished signed-commit
-promoter.
+generation. The legacy chainlog lander is removed; the native `dev land`
+queue (`tools/command/native_dev_land.c`) is the only lander. The proof
+request files above and that queue are transitional lifecycle formats and
+neither is product evidence authority. Do not translate between them or claim
+that either is the unfinished signed-commit promoter.
 
 Full `make lint` is the umbrella (every gate, including whole-node tool links).
 A landing proof runs it for you inside its own generation, so main cannot go

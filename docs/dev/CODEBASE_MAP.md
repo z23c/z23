@@ -217,7 +217,7 @@ Canonical wire/root types live in `contexts/commons/modules/vcs/include/vcs/zcod
 and policy live in `engine/models/include/models/build_fabric.h` and
 `engine/services/include/services/build_fabric_*.h`. A Git object ID records
 provenance and intent; it is not a source closure, action, receipt, proof set,
-or acceptance identity. `tools/land` and `.cache/zcl-dev-proof` are current
+or acceptance identity. `.cache/zcl-dev-proof` and the native `dev land` queue are current
 developer-factory mechanisms and must not become parallel product authority.
 
 `contexts/commons/modules/metaverse/` owns the sovereign-property vocabulary: the `property_id`

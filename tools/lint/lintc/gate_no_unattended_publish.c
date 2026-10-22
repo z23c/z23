@@ -41,7 +41,7 @@ static const struct { const char *path; const char *reason; } k_nup_allow[] = {
       "commit of its own" },
     { "tools/scripts/hooks_status.sh",
       "read-only `make hooks-status` reporter; prints the same override "
-      "advice text as tools/githooks/pre-push, performs no push of its "
+      "advice text as the native pre-push hook, performs no push of its "
       "own" },
     { "tools/lint/check_stable_publish_containment.sh",
       "lint fixture: the forbidden string is the input it tests" },
@@ -98,7 +98,7 @@ static int nup_is_shell_kind(const char *p)
 {
     const char *base = strrchr(p, '/');
     base = base ? base + 1 : p;
-    return nup_ends_with(p, ".sh") || strcmp(base, "pre-push") == 0
+    return nup_ends_with(p, ".sh")
         || strcmp(base, "pre-commit") == 0 || nup_ends_with(p, ".service")
         || nup_ends_with(p, ".timer");
 }

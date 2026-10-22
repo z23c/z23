@@ -276,7 +276,7 @@ explicit_changed_file_hints() {
 # pre-push-ci` on a clean tree therefore printed PASS having executed zero
 # test groups — a green receipt for an untested commit.
 #
-# The hook (tools/githooks/pre-push) was never affected: it computes the
+# The native pre-push hook (tools/dev/z23_git_hook.c) was never affected: it computes the
 # pushed range from the refs git hands it and passes it in explicitly. This
 # fallback only fires when nobody supplied a list, which is precisely the
 # by-hand invocation that was silently vacuous.
@@ -571,7 +571,7 @@ cache_manifest() {
     printf 'node_bin_stat\t%s\n' "$node_stat"
 
     for file in Makefile "$IMPACT_RULES_FILE" tools/agent_fast_ci.sh \
-        tools/githooks/pre-push tools/deploy_guard.sh tools/deploy_verify.sh \
+        tools/deploy_guard.sh tools/deploy_verify.sh \
         tools/dev/deploy-dev-lane.sh tools/dev/agent-dev-status.sh \
         tools/dev/agent-doctor.sh \
         tools/dev/reflex-hotfork-transport-acceptance.sh \
@@ -972,7 +972,7 @@ run_shell_checks() {
     # self-test so adding one requires updating this list.
     local script
     for script in $(git ls-files "*.sh") \
-        tools/githooks/pre-push tools/githooks/pre-commit tools/zcl; do
+        tools/githooks/pre-commit tools/zcl; do
         [ -f "$script" ] || continue
         bash -n "$script"
     done

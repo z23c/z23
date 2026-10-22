@@ -1147,18 +1147,6 @@ int t_agent_fast_ci_contract(void)
         free(buf);
         buf = NULL;
 
-        ASSERT(repo_path(path, sizeof(path), "tools/githooks/pre-push") == 0);
-        ASSERT(read_entire_file(path, &buf) == 0);
-        ASSERT(strstr(buf, "Fast local edit-loop before commit:  make fast-ci")
-               != NULL);
-        ASSERT(strstr(buf, "files being pushed to origin/main") != NULL);
-        ASSERT(strstr(buf, "refs/heads/main") != NULL);
-        ASSERT(strstr(buf, "ZCL_FAST_CHANGED_FILES_FILE") != NULL);
-        ASSERT(strstr(buf, "git diff --name-only \"$rsha\" \"$lsha\"")
-               != NULL);
-        ASSERT(strstr(buf, "git rev-parse --local-env-vars") != NULL);
-        ASSERT(strstr(buf, "unset \"$name\"") != NULL);
-        ASSERT(strstr(buf, "make install-quality-linger") != NULL);
         /* Behavioural: the pre-push changed-set resolver builds a throwaway
          * repository and asserts a CLEAN worktree whose HEAD is ahead of its
          * upstream still yields the committed file list. */

@@ -506,7 +506,7 @@ preserve live ownership and scheduling locks that bound actual execution.
 | Requests, attempts, leases, logs | `.cache/zcl-dev-proof/` subtrees | nothing; pure scheduling scratch |
 | Land queue rows | `<state>/land/queue.jsonl` | JOB and CANDIDATE objects |
 | Land outcomes | `<state>/land/outcomes.jsonl` | PUBLICATION intent, immutable attempt results and REMOTE_RECEIPT objects |
-| Land chainlog verdicts | the `z23-land` record store, `tools/land/land_record.c` | the ticket objects |
+| Land verdicts | the native `dev land` queue, `<state>/land/outcomes.jsonl` | the ticket objects |
 | File-claim ledger | `<git_common_dir>/z23-agent-claims.jsonl` | CLAIM objects; advisory either way |
 | Lane and stack worktrees | `z23-stack<name>`, lane checkouts | the CANDIDATE bundle |
 | Flash unit receipts | each unit's `--state-dir`, `tools/engine_unit.c` | ticket objects, once units emit tickets |
@@ -556,16 +556,16 @@ before retirement.
 
 | Name | Where it lives | Replaced by | Delete after |
 | --- | --- | --- | --- |
-| Bash stack landers | `tools/dev/land.sh`, `tools/dev/land_lander.sh`, `tools/dev/land_bench.sh` | PUBLICATION, driven by `dev land` | `dev land` emits PUBLICATION and REMOTE_RECEIPT objects and passes the acceptance harness |
-| Human relay at the end of the lander | `publish_ready` in `tools/dev/land_lander.sh`, leaving a gated `land/ready` branch | canonical publication predicate under a scoped grant | authorized publication reconciles without human message relay; owner authority remains |
-| `z23-land` chainlog queue | `tools/land/land_main.c`, `land_queue.c`, `land_record.c` | JOB, CANDIDATE, PROOF_SET | the ticket object carries the verdict digest `land_verdict_digest` computes today |
+| Bash stack landers | the deleted bash lander scripts | PUBLICATION, driven by `dev land` | `dev land` emits PUBLICATION and REMOTE_RECEIPT objects and passes the acceptance harness |
+| Human relay at the end of the lander | the deleted bash lander's `publish_ready`, leaving a gated `land/ready` branch | canonical publication predicate under a scoped grant | authorized publication reconciles without human message relay; owner authority remains |
+| Native `dev land` queue | `tools/command/native_dev_land.c` | JOB, CANDIDATE, PROOF_SET | the ticket object carries the verdict digest the land proof computes today |
 | Land JSONL queue as authority | `<state>/land/queue.jsonl` via `tools/command/native_dev_land.c` | JOB and CANDIDATE objects; the file stays as a projection | rows are re-keyed from `seq` to `job_root` |
 | Train stacks as durable state | `tools/command/native_dev_train_command.c`, `z23-stack<name>` worktrees | CANDIDATE bundles | the train builder emits a CANDIDATE per stack |
 | Board as a queue | `docs/agent/TRAIN_PROTOCOL.md` and the DHT projection `zcode task board` in `tools/command/native_zcode_task_transport_command.c` | existing signed task/action facts; board output stays a projection | board position cannot grant build, execution or publication authority |
 | Claim ledger as publication authority | `tools/command/native_devagent_claim.c`, `<git_common_dir>/z23-agent-claims.jsonl` | advisory CLAIM objects and explicit component ownership | claims never admit publication; writer and execution safety remain |
 | Artifact shipping over ssh | `tools/ship.sh` tar-over-ssh staging; its implicit Git push is retired | CANDIDATE bundle plus ordinary git transport | deploys consume a REMOTE_RECEIPT; this remains unimplemented |
 | Proof pair-keying as reusable evidence identity | `<local>-<base>` file naming in `tools/dev/dev_proof.c` | per-unit input keys and immutable observation roots | reusable evidence survives unchanged inputs across candidates; pair envelopes remain projections |
-| Per-host proof locks and leases | `queue.lock`, `<key>.running`, `<key>.lease` in `tools/dev/dev_proof.c`; the queue's step lock `step.lock` in `tools/command/native_dev_land.c`; the lander's own box lock in `tools/dev/land_lander.sh` | nothing; scheduling scratch only | no code path treats a lock or a lease as permission to write a verdict or to push |
+| Per-host proof locks and leases | `queue.lock`, `<key>.running`, `<key>.lease` in `tools/dev/dev_proof.c`; the queue's step lock `step.lock` in `tools/command/native_dev_land.c` | nothing; scheduling scratch only | no code path treats a lock or a lease as permission to write a verdict or to push |
 | Fleet receipt projection | `tools/command/native_dev_fleet_receipts.c` | signed observation objects | independently verified signatures, roots and receiver eligibility back the view |
 | Flash unit queue | `tools/engine_unit.c`, per-unit `--state-dir` receipts, `docs/agent/FLASH_UNIT.md` | JOB, CANDIDATE, ticket | a unit's `receipt.json` is derived from a signed ticket |
 | Commuting tickets and train protocol as separate machines | `docs/agent/COMMUTING_TICKETS.md`, `docs/agent/TRAIN_PROTOCOL.md` | this document | both are reduced to explanatory notes pointing here |
