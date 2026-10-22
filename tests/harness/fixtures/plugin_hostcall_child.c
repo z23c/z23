@@ -103,6 +103,41 @@ static bool hcc_send(uint32_t id, uint16_t method, uint8_t version)
     return hcc_io(RESIDENT_LAUNCH_CHILD_FD, f, sizeof(f), true);
 }
 
+/* A supervisor frame whose first byte 'z' was already read: stop exits, a ping
+ * is answered. False means the connection failed. */
+static bool hcc_supervisor_frame(const char *nonce, uint8_t first)
+{
+    char frame[HCC_SUP_FRAME];
+    frame[0] = (char)first;
+    if (!hcc_io(RESIDENT_LAUNCH_CHILD_FD, frame + 1, sizeof(frame) - 1, false))
+        return false;
+    if (strcmp(frame, "z23-res-stop-v1") == 0)
+        exit(0);
+    return strcmp(frame, "z23-plg-ping-v1") != 0 || hcc_ping_reply(nonce, frame + 16);
+}
+
+/* Read one host-call reply frame whose first byte (0) was already read.
+ * Returns the reply status (or 0xffff on failure) and the payload. */
+static unsigned hcc_reply(uint32_t id, uint8_t *payload, size_t cap, size_t *len)
+{
+    uint8_t head[11], body[256];
+    if (!hcc_io(RESIDENT_LAUNCH_CHILD_FD, head, sizeof(head), false))
+        return 0xffff;
+    /* head holds length bytes 1..3, then version, kind, id (4) and code (2). */
+    uint32_t length = ((uint32_t)head[0] << 16) | ((uint32_t)head[1] << 8) | head[2];
+    uint32_t rid = hcc_be32(head + 5);
+    unsigned code = (unsigned)((head[9] << 8) | head[10]);
+    size_t plen = length >= 8 ? length - 8 : 0;
+    if (plen > sizeof(body) || (plen && !hcc_io(RESIDENT_LAUNCH_CHILD_FD, body, plen, false)))
+        return 0xffff;
+    if (head[4] != 2 || rid != id)
+        return 0xffff;
+    if (plen <= cap && payload)
+        memcpy(payload, body, plen);
+    *len = plen;
+    return code;
+}
+
 /* Read frames until the host-call reply for id arrives, answering pings on the
  * way. Returns the reply status (or 0xffff on failure) and the payload. */
 static unsigned hcc_await(const char *nonce, uint32_t id, uint8_t *payload, size_t cap, size_t *len)
@@ -112,32 +147,11 @@ static unsigned hcc_await(const char *nonce, uint32_t id, uint8_t *payload, size
         if (!hcc_io(RESIDENT_LAUNCH_CHILD_FD, &first, 1, false))
             return 0xffff;
         if (first == 'z') {
-            char frame[HCC_SUP_FRAME];
-            frame[0] = (char)first;
-            if (!hcc_io(RESIDENT_LAUNCH_CHILD_FD, frame + 1, sizeof(frame) - 1, false))
-                return 0xffff;
-            if (strcmp(frame, "z23-res-stop-v1") == 0)
-                exit(0);
-            if (strcmp(frame, "z23-plg-ping-v1") == 0 && !hcc_ping_reply(nonce, frame + 16))
+            if (!hcc_supervisor_frame(nonce, first))
                 return 0xffff;
             continue;
         }
-        uint8_t head[11], body[256];
-        if (first != 0 || !hcc_io(RESIDENT_LAUNCH_CHILD_FD, head, sizeof(head), false))
-            return 0xffff;
-        /* head holds length bytes 1..3, then version, kind, id (4) and code (2). */
-        uint32_t length = ((uint32_t)head[0] << 16) | ((uint32_t)head[1] << 8) | head[2];
-        uint32_t rid = hcc_be32(head + 5);
-        unsigned code = (unsigned)((head[9] << 8) | head[10]);
-        size_t plen = length >= 8 ? length - 8 : 0;
-        if (plen > sizeof(body) || (plen && !hcc_io(RESIDENT_LAUNCH_CHILD_FD, body, plen, false)))
-            return 0xffff;
-        if (head[4] != 2 || rid != id)
-            return 0xffff;
-        if (plen <= cap && payload)
-            memcpy(payload, body, plen);
-        *len = plen;
-        return code;
+        return first == 0 ? hcc_reply(id, payload, cap, len) : 0xffff;
     }
 }
 
