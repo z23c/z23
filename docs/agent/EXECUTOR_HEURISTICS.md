@@ -35,7 +35,7 @@ ownership, resource limits, exact proof reuse, and landing eligibility come
 from AGENTS.md, DEVELOPING.md, host policy, and qualified native receiver
 state; they do not depend on the model or a permanent lead.
 
-- Stack pick loops fail on regenerated files (inventory, API reference). Regenerate once on the stack.
+- Stack pick loops conflict on the two tracked generated docs (the CODEBASE_MAP counts, the routing table above). Take either side, then run `make fix-doc-counts` and `make docs-executor-routing` once on the stack; the inventory and API reference are build output and cannot conflict.
 - Revalidate a lane against the exact current base through the native landing
   route; commit distance alone does not determine safety or required work.
 - Native proof/build locks and `devbuild --wait` bound work. Do not infer a

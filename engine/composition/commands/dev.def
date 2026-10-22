@@ -1363,7 +1363,7 @@ ZCL_COMMAND_READY_READ(
  * Stacks lanes onto origin/main without waiting on lint. `build` fetches
  * origin, opens a detached worktree at <checkout-parent>/z23-stack<name>,
  * cherry-picks each source's origin/main..HEAD commits oldest-first
- * (skipping doc-regen-only commits by subject), and returns immediately — it never runs lint-fast itself.
+ * (skipping the baseline-pin commits by subject), and returns immediately — it never runs lint-fast itself.
  * `check` is the one deliberate synchronous wait: `make lint-fast` under the
  * checkout lock, bounded by --timeout. `status` reads every z23-stack*
  * worktree without mutating anything. `drop` removes a stack worktree, and
@@ -1378,8 +1378,8 @@ ZCL_COMMAND_DEV_COMMAND(
     "Builds <checkout-parent>/z23-stack<name> detached at a freshly fetched "
     "origin/main, cherry-picks each source's origin/main..HEAD commits "
     "oldest-first (a source is a worktree directory or a branch resolved in "
-    "this checkout), skips commits whose subject is doc-regen-only, and "
-    "regenerates the generated docs once. Never runs lint-fast itself: on "
+    "this checkout), skips commits whose subject is a baseline pin. "
+    "Never regenerates a document and never runs lint-fast itself: on "
     "success `next` names `dev train check`. A real cherry-pick conflict "
     "returns state=conflict naming the source and sha and leaves the stack "
     "worktree exactly as Git left it, mid-cherry-pick, for a human or agent "
@@ -1461,8 +1461,8 @@ ZCL_COMMAND_DEV_COMMAND(
     "that opened the train is usually dead by now. idle takes the LAND "
     "verdicts out of late_picks.txt, refuses unless origin/main still equals "
     "the queue's base, cherry-picks each lane's merge-base(base,sha)..sha "
-    "with -x -S, runs dev-bin/complexity/lint-gates/lint, regenerates the "
-    "generated docs as one signed commit, writes READY, then runs "
+    "with -x -S, runs dev-bin/complexity/lint-gates/lint (a stale generated "
+    "doc fails lint and stops the train), writes READY, then runs "
     "land_pre.sh and launches land_unit.sh only on PRECHECK: OK. landing "
     "reads dev.land's outcome ledger and, once the tip landed, retires the "
     "refs named in picks.txt and opens the next train's queue. A conflict, a "
@@ -2072,8 +2072,9 @@ ZCL_COMMAND_DEV_COMMAND(
     "A repeated submission of the same tip answers with the existing row. "
     "With qualify the lane's worktree first fetches, rebases onto origin/main "
     "when behind, requires signed commits, regenerates derived files, runs "
-    "full lint and every affected test group (one harness run), folds "
-    "regenerated files into the tip, and submits that tip. A failed gate "
+    "full lint and every affected test group (one harness run), refuses a "
+    "tree the gates rewrote (QUALIFY_TREE_CHANGED names the paths and, for a "
+    "generated doc, its make target) and submits that tip. A failed gate "
     "refuses with QUALIFY_LINT_FAILED, QUALIFY_GROUP_FAILED (group, log), "
     "QUALIFY_UNSIGNED_TIP, QUALIFY_TREE_CHANGED (paths), QUALIFY_DIRTY_TREE, "
     "QUALIFY_FETCH_FAILED, QUALIFY_REBASE_CONFLICT, QUALIFY_REBASE_FAILED, "

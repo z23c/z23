@@ -343,7 +343,7 @@ int test_dev_train(void)
     ASSERT(dvt_commit(src_a, "srcA: change shared"));
     ASSERT(dvt_head(src_a, sha_a1));
     ASSERT(dvt_write(src_a, "unrelated_new_file.txt", "x\n"));
-    ASSERT(dvt_commit(src_a, "Regenerate the generated docs for test"));
+    ASSERT(dvt_commit(src_a, "Pin today's complexity baseline for test"));
     ASSERT(dvt_head(src_a, sha_a2));
 
     ASSERT(dvt_write(src_b, "other.txt", "B change\n"));
@@ -370,7 +370,7 @@ int test_dev_train(void)
         PASS();
     }
 
-    TEST("train build: stacks two lanes oldest-first, skipping the regen commit") {
+    TEST("train build: stacks two lanes oldest-first, skipping the baseline-pin commit") {
         char joined[1200];
         (void)snprintf(joined, sizeof(joined), "%s\n%s", src_a, src_b);
         struct json_value input = dvt_input_build("alpha", joined);
@@ -394,8 +394,8 @@ int test_dev_train(void)
         ASSERT_STR_EQ(json_get_str(json_get(&skipped->children[0], "sha")),
                      sha_a2);
         ASSERT(strncmp(json_get_str(json_get(&skipped->children[0], "subject")),
-                      "Regenerate the generated docs",
-                      strlen("Regenerate the generated docs")) == 0);
+                      "Pin today's complexity",
+                      strlen("Pin today's complexity")) == 0);
         ASSERT(!dvt_array_has_sha(picked, sha_a2));
 
         zcl_command_reply_free(&reply);

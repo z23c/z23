@@ -32,17 +32,11 @@ struct dl_dirs {
 };
 
 /* state:   queued | inflight | landed | failed | conflict | cancelled
- * phase:   "" | rebase | regen | prebuild | prove | push  (meaningful when
- *          inflight). "regen" is native_dev_land_regen.c's unconditional
- *          post-rebase pass over the generated-doc targets (capability
- *          inventory, executor routing, doc-counts) — separate from the
- *          rebase's own conflict-only auto-resolve of the same artifacts
- *          (see "rebase conflicts on the artifacts every train
- *          regenerates" below), which fires only when a rebase conflicts
- *          on them. Both AMEND their regenerated docs into the rebased
- *          tip, and the amended id replaces `local`: this row schema gains
- *          no separate field for it, because `local` is already "the tip
- *          everything downstream proves and pushes". */
+ * phase:   "" | rebase | prebuild | prove | push  (meaningful when
+ *          inflight). A legacy "regen" phase persisted by an older binary
+ *          still loads; nothing writes it. The queue never amends a tip:
+ *          `local` is the rebased row as submitted, and every downstream
+ *          step proves and pushes exactly it. */
 struct dl_row {
     long long seq;
     long long priority_seq;
@@ -145,8 +139,7 @@ bool dl_sha_ok(const char *s);
 int dl_git(const char *dir, const char *const *args, char *out, size_t cap,
            int timeout_ms);
 int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
-              const char *observed_main, char *why, size_t why_cap,
-              char *regen_note, size_t regen_note_cap);
+              const char *observed_main, char *why, size_t why_cap);
 bool dl_push_identity_ok(const struct dl_dirs *d, const struct dl_row *row);
 void dl_publication_clear(struct dl_row *r);
 bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row);
@@ -199,8 +192,7 @@ bool dl_train_refuse_bound(const struct dl_dirs *d, const struct dl_row *rows,
                            const char *stage, struct zcl_command_reply *reply);
 /* dl_rebase for a row's own turn: first clears a binding it no longer has. */
 int dl_train_rebase(const struct dl_dirs *d, struct dl_row *row,
-                    const char *observed_main, char *why, size_t why_cap,
-                    char *regen_note, size_t regen_note_cap);
+                    const char *observed_main, char *why, size_t why_cap);
 /* Add the queued rows riding in the in-flight row's pair to its status. */
 void dl_train_status(struct json_value *inflight, const struct dl_row *rows,
                      size_t n);

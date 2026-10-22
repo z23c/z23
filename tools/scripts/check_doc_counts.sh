@@ -8,9 +8,14 @@
 #   (A) CANONICAL BLOCK (HARD): a machine-readable declaration in
 #       docs/dev/CODEBASE_MAP.md delimited by
 #         <!-- DOC-COUNTS-BEGIN --> ... <!-- DOC-COUNTS-END -->
-#       containing `key: value` lines for test_groups / port_interfaces /
-#       persistence_adapters / condition_registrations. This gate measures the
-#       real counts from the code and FAILS if the declared counts disagree. To
+#       containing `key: value` lines for port_interfaces / persistence_adapters /
+#       condition_registrations / command_bundles / command_roots /
+#       dumpstate_subsystems / app_shape_folders. This gate measures the real
+#       counts from the code and FAILS if the declared counts disagree. The
+#       test-group count is deliberately NOT declared: every new group bumps
+#       it, which made this block the most-conflicted file in the repo. Read
+#       it with `tools/dev/test-group-list.sh --count` (or `make t-list`).
+#       Prose that cites a wrong test-group count is still caught by (B). To
 #       fix a real drift: update the canonical block (and any prose) to match the
 #       code — never the other way around; the code is authoritative for what
 #       exists.
@@ -131,7 +136,6 @@ DOC=docs/dev/CODEBASE_MAP.md
 # them — run this, commit, done.
 if [ "${1:-}" = "--fix" ]; then
     sed -i \
-        -e "s/^\(test_groups[[:space:]]*:\).*/\1 $code_test_groups/" \
         -e "s/^\(port_interfaces[[:space:]]*:\).*/\1 $code_ports/" \
         -e "s/^\(persistence_adapters[[:space:]]*:\).*/\1 $code_adapters/" \
         -e "s/^\(condition_registrations[[:space:]]*:\).*/\1 $code_conditions/" \
@@ -146,7 +150,7 @@ fi
 block=$(awk '/<!-- DOC-COUNTS-BEGIN -->/{f=1;next} /<!-- DOC-COUNTS-END -->/{f=0} f' "$DOC")
 if [ -z "${block//[[:space:]]/}" ]; then
     echo "FAIL: missing or empty <!-- DOC-COUNTS-BEGIN/END --> block in $DOC"
-    echo "      Add test_groups / port_interfaces / persistence_adapters /"
+    echo "      Add port_interfaces / persistence_adapters /"
     echo "      condition_registrations declarations"
     echo "      (see the block format in $DOC) so the counts can be machine-checked."
     exit 1
@@ -170,7 +174,6 @@ check_one() {
         add_fail "$key MISMATCH — code=$measured doc-says=$declared (update the DOC-COUNTS block in $DOC)"
 }
 
-check_one test_groups             "$code_test_groups"
 check_one port_interfaces         "$code_ports"
 check_one persistence_adapters    "$code_adapters"
 check_one condition_registrations "$code_conditions"

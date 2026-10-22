@@ -12605,21 +12605,17 @@ hooks-status:
 	@tools/scripts/hooks_status.sh
 
 # One step before `make lint` in a lane: hooks, generated files, untracked
-# check. The regeneration list mirrors the lander's (DLRG_ARTIFACTS in
-# tools/command/native_dev_land_regen.c); it refuses to run unless each
-# target is an initializer row of that table (a mention in a comment does
-# not count). It never commits.
-LINT_READY_REGEN := fix-doc-counts docs-executor-routing
+# check. The author runs it and commits what it changed: the land queue never
+# regenerates or amends anything, so these are the only tracked generated
+# documents an author refreshes. It never commits.
+LINT_READY_TARGETS := fix-doc-counts docs-executor-routing
 .PHONY: lint-ready
 lint-ready: $(GIT_HOOK_BIN) $(LINTC_TOOL)
-	@for t in $(LINT_READY_REGEN); do \
-	  grep -Eq "^[[:space:]]*\{ (\"[^\"]*\", )?\"$$t\"," tools/command/native_dev_land_regen.c tools/command/native_dev_land.c || \
-	    { echo "lint-ready: FAIL: $$t is not in the lander's regeneration tables"; exit 1; }; done
 	@./tools/scripts/check_git_hooks_installed.sh >/dev/null 2>&1 || \
 	  { echo "lint-ready: hooks differ from the tracked hook; running make install-hooks"; \
 	    $(MAKE) --no-print-directory install-hooks; }
-	@echo "lint-ready: regenerating: $(LINT_READY_REGEN)"
-	@$(MAKE) --no-print-directory -s $(LINT_READY_REGEN)
+	@echo "lint-ready: regenerating: $(LINT_READY_TARGETS)"
+	@$(MAKE) --no-print-directory -s $(LINT_READY_TARGETS)
 	@echo "lint-ready: git status --short"; git status --short
 	@u=$$(git ls-files --others --exclude-standard); \
 	if [ -n "$$u" ]; then \
@@ -14597,7 +14593,7 @@ check-doc-inline-paths: $(LINTC_TOOL)
 	@echo "══ LINT: inline code paths in Markdown ══"
 	@./build/bin/z23-lint check-doc-inline-paths
 
-# Doc counts vs code: numeric claims (test_groups / port_interfaces /
+# Doc counts vs code: numeric claims (port_interfaces /
 # persistence_adapters) declared in the <!-- DOC-COUNTS --> block of
 # docs/dev/CODEBASE_MAP.md must agree with the code, and known-stale compound
 # phrases ("15 ports", "1500+ tests", ...) must not return to the prose.
@@ -14608,9 +14604,8 @@ check-doc-counts:
 # The REPAIR half of the gate above. check_doc_counts.sh already carries a
 # --fix mode (the code is authoritative, so a drift is always resolved by
 # rewriting the declared values from the code-measured ones) but nothing
-# could reach it through `make`. dev.land's rebase auto-resolve
-# (tools/command/native_dev_land.c) names one make target per regenerated
-# artifact, and docs/dev/CODEBASE_MAP.md had none.
+# could reach it through `make`. It is the author's repair: the land queue
+# never runs it, and a stale block fails the proof naming this target.
 .PHONY: fix-doc-counts
 fix-doc-counts:
 	@./tools/scripts/check_doc_counts.sh --fix

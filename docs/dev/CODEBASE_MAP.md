@@ -278,7 +278,6 @@ page changing with it.
 <!-- DOC-COUNTS-BEGIN -->
 <!-- Canonical code-derived counts (machine-checked by tools/scripts/check_doc_counts.sh). -->
 <!-- Update BOTH this block AND any prose that cites these numbers when the code moves. -->
-<!--   test_groups          = parallel test groups in tests/harness/src/test_parallel.c   -->
 <!--   port_interfaces      = platform/ports/include/ports/*.h                                -->
 <!--   persistence_adapters = platform/adapters/outbound/persistence/src/*.c                  -->
 <!--   condition_registrations = condition_register() calls in engine/conditions/src    -->
@@ -286,9 +285,10 @@ page changing with it.
 <!--   command_roots        = ZCL_COMMAND_BRANCH rows with an empty parent           -->
 <!--   dumpstate_subsystems = DIAG_* rows in diagnostics_dumpers.def                 -->
 <!--   app_shape_folders    = directories directly under app/                        -->
-<!-- Fix a mismatch with `tools/scripts/check_doc_counts.sh --fix`, never by hand.  -->
+<!-- Fix a mismatch with `make fix-doc-counts`, never by hand.                      -->
+<!-- The test-group count is not declared here (every new group bumped it); it is  -->
+<!-- printed by `tools/dev/test-group-list.sh --count`, and `make t-list` lists them. -->
 
-test_groups: 1377
 port_interfaces: 13
 persistence_adapters: 14
 condition_registrations: 56

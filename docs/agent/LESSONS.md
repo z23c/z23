@@ -159,8 +159,11 @@ cannot kill it.
 Rebasing a train that took `--ours` for
 `docs/dev/CODEBASE_MAP.md` drops the other side's DOC-COUNTS
 increment. `check-doc-counts` then fails with
-`test_groups MISMATCH — code=N doc-says=N-1`. Fix the
-`test_groups:` line in the DOC-COUNTS block, never the code.
+`<key> MISMATCH — code=N doc-says=N-1`. Run `make fix-doc-counts`, never
+hand-edit the block and never change the code. The block no longer declares
+`test_groups` (every new group bumped it); `tools/dev/test-group-list.sh
+--count` prints it. The land queue does not resolve this conflict for you: it
+refuses the row naming `make fix-doc-counts`.
 
 `build/bin/zclassic23 msg_send <peer_id> "text"` failed for
 every peer because `engine/modules/rpc/src/client.c`'s

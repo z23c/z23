@@ -500,7 +500,7 @@ static bool dtk_queue_base(const struct dtk_paths *p, const char *root,
 /* ── assembly ──────────────────────────────────────────────────────────── */
 
 /* Cherry-pick one lane's own commits: merge-base(base, sha)..sha, oldest
- * first, `-x -S`, skipping the regen/pin subjects zcl_dev_train_skip_subject()
+ * first, `-x -S`, skipping the pin subjects zcl_dev_train_skip_subject()
  * owns. A conflict STOPS: this function never resolves one. */
 static bool dtk_pick_one(const struct dtk_paths *p, const char *base,
                          const struct dtk_pick *pick, char *why, size_t cap)
@@ -558,7 +558,7 @@ static bool dtk_worktree_open(const struct dtk_paths *p, const char *root,
     return true;
 }
 
-/* ── gates and regen ───────────────────────────────────────────────────── */
+/* ── gates ───────────────────────────────────────────────────── */
 
 static bool dtk_make(const struct dtk_paths *p, const char *const argv[],
                      const char *label)
@@ -621,37 +621,6 @@ static bool dtk_gates(const struct dtk_paths *p, char *why, size_t cap)
                           p->log, strlen(p->log) > 170 ? "..." : "");
             return false;
         }
-    }
-    return true;
-}
-
-static bool dtk_regen(const struct dtk_paths *p, char *why, size_t cap)
-{
-    static const char *const routing[] = {
-        "make", "-s", "--no-print-directory", "docs-executor-routing", NULL};
-    static const char *const counts[] = {"make", "-s", "--no-print-directory",
-                                         "fix-doc-counts", NULL};
-    const char *const *steps[] = {routing, counts};
-    static const char *const labels[] = {"regen docs-executor-routing",
-                                         "regen fix-doc-counts"};
-    for (size_t i = 0; i < 2; i++) {
-        if (!dtk_make(p, steps[i], labels[i])) {
-            (void)snprintf(why, cap, "%s failed; see %.170s%s", labels[i],
-                           p->log, strlen(p->log) > 170 ? "..." : "");
-            return false;
-        }
-    }
-    static const char *const add[] = {"add", "-A", "--", "docs/", NULL};
-    static const char *const staged[] = {"diff", "--cached", "--quiet", NULL};
-    static const char *const commit[] = {
-        "commit", "-q", "-S", "-m", "Regenerate the generated docs for the train",
-        NULL};
-    (void)zcl_dev_train_git(p->wt, add, NULL, 0, DTK_GIT_TIMEOUT_MS);
-    if (zcl_dev_train_git(p->wt, staged, NULL, 0, DTK_GIT_TIMEOUT_MS) != 0 &&
-        zcl_dev_train_git(p->wt, commit, NULL, 0, DTK_GIT_TIMEOUT_MS) != 0) {
-        (void)snprintf(why, cap, "the regen commit failed; see %.180s%s",
-                       p->log, strlen(p->log) > 180 ? "..." : "");
-        return false;
     }
     return true;
 }
@@ -929,7 +898,7 @@ static bool dtk_agree_on_base(const struct dtk_paths *p, const char *root,
 static bool dtk_gate_tip(const struct dtk_paths *p, char *why, size_t why_cap,
                          char tip[41])
 {
-    return dtk_gates(p, why, why_cap) && dtk_regen(p, why, why_cap) &&
+    return dtk_gates(p, why, why_cap) &&
            dtk_rev_parse(p->wt, "HEAD", tip);
 }
 

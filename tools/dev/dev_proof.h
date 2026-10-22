@@ -521,8 +521,8 @@ bool zcl_dev_proof_test_generation_dependency(const char *root,
  * `host_gated=` list the selection note carries. */
 struct zcl_devloop_plan;
 bool zcl_dev_proof_test_build_test_selector(
-    const struct zcl_devloop_plan *plan, const char *root, bool inventory_only,
-    char *out, size_t out_size, uint32_t *count_out, char *gated_out,
+    const struct zcl_devloop_plan *plan, const char *root, char *out,
+    size_t out_size, uint32_t *count_out, char *gated_out,
     size_t gated_size);
 /* Seam for the structural-change widening: plan `set`'s files, apply the
  * same widening the proof worker applies after its plan closes, and build

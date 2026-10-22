@@ -36,11 +36,7 @@ void zcl_dev_train_strip(char *s)
 bool zcl_dev_train_skip_subject(const char *subject)
 {
     static const char *const prefixes[] = {
-        "Regenerate the generated docs",
-        "Regenerate the capability inventory",
         "Pin today's complexity",
-        "Count what the stacked lanes added",
-        "Regenerate the catalogs",
         NULL,
     };
     for (size_t i = 0; prefixes[i]; i++) {

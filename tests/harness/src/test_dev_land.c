@@ -22,7 +22,7 @@
 #include "test_group_catalog.h"
 
 #include "command/native_command.h"
-#include "command/native_dev_land_regen.h"
+#include "command/native_dev_land_prepare.h"
 #include "command/native_fleet_objectives.h"
 #include "command/native_dev_land_qualify.h"
 #include "controllers/agent_impact_rules.h"
@@ -153,8 +153,6 @@ static void dlx_isolate(const char *tag)
     unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
     unsetenv("ZCL_LAND_TEST_PRECHECK_TOOL_FAIL");
     unsetenv("ZCL_LAND_TEST_PRECHECK_BUDGET_MS");
-    unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
-    unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
     unsetenv("ZCL_LAND_DRAIN_IDLE_SEC");
     unsetenv("ZCL_LAND_WINDOW");
     unsetenv("ZCL_LAND_WINDOW_HOST");
@@ -201,8 +199,6 @@ static void dlx_restore(void)
     unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
     unsetenv("ZCL_LAND_TEST_PRECHECK_TOOL_FAIL");
     unsetenv("ZCL_LAND_TEST_PRECHECK_BUDGET_MS");
-    unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
-    unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
     unsetenv("ZCL_LAND_DRAIN_IDLE_SEC");
     unsetenv("ZCL_LAND_WINDOW");
     unsetenv("ZCL_LAND_WINDOW_HOST");
@@ -1288,7 +1284,8 @@ static bool dlx_submodule_uninit(const char *dir, const char *path)
  * The landing worktree is a `git worktree add` off this clone and shares
  * its config, so a commit dev.land makes there is signed by AMBIENT config
  * alone — which is the property under test: the leaf passes no signing
- * flag of its own, exactly like dev.train's regenerate-docs commit. */
+
+ * flag of its own. */
 static bool dlx_sign_arm(const char *dir, const char *tag)
 {
     char base[512], key[700], pub[720], allowed[760], line[1600];
@@ -1327,11 +1324,11 @@ static bool dlx_sign_arm(const char *dir, const char *tag)
 }
 
 /* Write the fixture artifacts, retaining every optional write refusal. */
-static bool dlx_regen_files(struct dlx_rig *rig, const char *body,
+static bool dlx_generated_files(struct dlx_rig *rig, const char *body,
                             const char *map_body, const char *third,
                             const char *extra)
 {
-    return dlx_write_dep(rig->clone, "docs/FIXTURE_GENERATED.jsonl", body) &&
+    return dlx_write_dep(rig->clone, "docs/agent/EXECUTOR_HEURISTICS.md", body) &&
            dlx_write_dep(rig->clone, "docs/dev/CODEBASE_MAP.md", map_body) &&
            (!third || dlx_write_dep(rig->clone, third, body)) &&
            (!extra || dlx_write_dep(rig->clone, extra, body));
@@ -1342,7 +1339,7 @@ static bool dlx_regen_files(struct dlx_rig *rig, const char *body,
  * paths as unmerged. `extra` (may be NULL) is one more path both sides
  * change, for the mixed-conflict case that must stay a plain conflict.
  * `out_tip` receives the tip to submit. */
-static bool dlx_regen_conflict(struct dlx_rig *rig, const char *extra,
+static bool dlx_generated_conflict(struct dlx_rig *rig, const char *extra,
                                char out_tip[64])
 {
     const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
@@ -1350,7 +1347,7 @@ static bool dlx_regen_conflict(struct dlx_rig *rig, const char *extra,
     char basec[64], theirs[64];
     const char *reset[] = { "reset", "--quiet", "--hard", basec, NULL };
     /* A shared base both sides agree on, on origin/main. */
-    if (!dlx_regen_files(rig, "base\n",
+    if (!dlx_generated_files(rig, "base\n",
             "<!-- DOC-COUNTS-BEGIN -->\nbase\n<!-- DOC-COUNTS-END -->\n",
             "mine.txt", extra))
         return false;
@@ -1360,7 +1357,7 @@ static bool dlx_regen_conflict(struct dlx_rig *rig, const char *extra,
         return false;
     /* The submitted tip: its own real work, plus its regeneration of two
      * of the three artifacts. */
-    if (!dlx_regen_files(rig, "mine\n",
+    if (!dlx_generated_files(rig, "mine\n",
             "<!-- DOC-COUNTS-BEGIN -->\nmine\n<!-- DOC-COUNTS-END -->\n",
             "mine.txt", extra))
         return false;
@@ -1373,7 +1370,7 @@ static bool dlx_regen_conflict(struct dlx_rig *rig, const char *extra,
         return false;
     /* origin/main lands someone else's train, which regenerated the same
      * two artifacts from ITS code. */
-    if (!dlx_regen_files(rig, "theirs\n",
+    if (!dlx_generated_files(rig, "theirs\n",
             "<!-- DOC-COUNTS-BEGIN -->\ntheirs\n<!-- DOC-COUNTS-END -->\n",
             NULL, extra))
         return false;
@@ -1394,7 +1391,7 @@ static bool dlx_rerere_autoupdate_prime(struct dlx_rig *rig)
     const char *autoupdate[] = { "config", "rerere.autoupdate", "true", NULL };
     const char *merge[] = { "merge", "--no-ff", "keep-tip", NULL };
     const char *ours[] = { "checkout", "--ours", "--",
-                           "docs/FIXTURE_GENERATED.jsonl",
+                           "docs/agent/EXECUTOR_HEURISTICS.md",
                            "docs/dev/CODEBASE_MAP.md", NULL };
     const char *rerere[] = { "rerere", NULL };
     const char *merge_abort[] = { "merge", "--abort", NULL };
@@ -1430,95 +1427,6 @@ static void dlx_land_wt(char *out, size_t cap)
     (void)snprintf(out, cap, "%s/wt", land);
 }
 
-/* `git add -A` then commit whatever is staged — dlx_commit() only ever
- * writes and commits ONE file; the docregen rig below needs a Makefile
- * plus three tracked doc files landing in a single seed commit. */
-static bool dlx_commit_all(const char *dir, const char *name, char out[64])
-{
-    const char *add[] = { "add", "-A", NULL };
-    const char *commit[] = { "-c", "user.name=land",
-                             "-c", "user.email=land@z23.invalid",
-                             "commit", "--quiet", "--no-verify",
-                             "--no-gpg-sign", "-m", name, NULL };
-    const char *head[] = { "rev-parse", "HEAD", NULL };
-    if (dlx_git(dir, add) != 0)
-        return false;
-    if (dlx_git(dir, commit) != 0)
-        return false;
-    return dlx_git_out(dir, head, out, 64) == 0 && strlen(out) == 40;
-}
-
-/* A rig carrying a real (but trivial) Makefile with the three targets
- * native_dev_land_regen.c's regen phase runs after every successful
- * rebase (docs-fixture-generated, docs-executor-routing,
- * fix-doc-counts), plus the one tracked doc file each target owns. The
- * three `*_recipe` strings are literal tab-indented Makefile recipe lines
- * (e.g. "@:" for a no-op, or a shell one-liner that dirties or refuses),
- * exercised through the SAME code path as a real landing worktree: the
- * regen phase itself carries no test-only stub, it just finds this
- * Makefile absent everywhere else and present here (see
- * native_dev_land_regen.c's TEST SEAM comment). */
-static bool dlx_rig_make_docregen(struct dlx_rig *rig, const char *tag,
-                                  const char *cap_recipe,
-                                  const char *routing_recipe,
-                                  const char *counts_recipe)
-{
-    char base[512], makefile_body[1024], jobs[16];
-    const char *init_bare[] = { "init", "--quiet", "--bare",
-                                "--initial-branch=main", rig->bare, NULL };
-    const char *clone[] = { "clone", "--quiet", rig->bare, rig->clone,
-                            NULL };
-    const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
-    const char *fetch[] = { "fetch", "--quiet", "origin", NULL };
-    char seed[64];
-    if (!platform_build_jobs_arg(jobs))
-        return false;
-    test_make_tmpdir(base, sizeof(base), "dev_land", tag);
-    (void)snprintf(rig->bare, sizeof(rig->bare), "%s/origin.git", base);
-    (void)snprintf(rig->clone, sizeof(rig->clone), "%s/clone", base);
-    if (dlx_git(NULL, init_bare) != 0)
-        return false;
-    if (dlx_git(NULL, clone) != 0)
-        return false;
-    /* The plan-refresh target the regen phase's dlrg_plan_refresh() runs
-     * when it observed any artifact's stat identity change: a trivial
-     * recipe that appends one marker line, so tests can tell how many
-     * times (if any) it ran from the resulting line count, exactly the
-     * observable this rig's fixed make-based mechanics give a test
-     * without a real dev build. */
-    if ((size_t)snprintf(makefile_body, sizeof(makefile_body),
-                         "docs-fixture-generated:\n\t%s\n"
-                         "docs-executor-routing:\n\t%s\n"
-                         "fix-doc-counts:\n\t%s\n"
-                         "build/dev-loop/restart.env:\n"
-                         "\t@test '$(filter %s,$(MAKEFLAGS))' = '%s' || "
-                         "{ echo 'FAIL restart plan build job count'; exit 1; }\n"
-                         "\t@mkdir -p build/dev-loop\n"
-                         "\t@printf 'plan\\n' >> build/dev-loop/"
-                         "restart.env\n",
-                         cap_recipe, routing_recipe, counts_recipe,
-                         jobs, jobs) >=
-            sizeof(makefile_body))
-        return false;
-    if (!dlx_write_dep(rig->clone, "Makefile", makefile_body))
-        return false;
-    if (!dlx_write_dep(rig->clone, "docs/FIXTURE_GENERATED.jsonl",
-                       "orig\n") ||
-        !dlx_write_dep(rig->clone, "docs/agent/EXECUTOR_HEURISTICS.md",
-                       "orig\n") ||
-        !dlx_write_dep(rig->clone, "docs/dev/CODEBASE_MAP.md", "orig\n"))
-        return false;
-    if (!dlx_commit_all(rig->clone, "seed", seed))
-        return false;
-    if (dlx_git(rig->clone, push) != 0)
-        return false;
-    if (dlx_git(rig->clone, fetch) != 0)
-        return false;
-    if (!dlx_commit(rig->clone, "change.txt", "one\n", rig->tip))
-        return false;
-    return true;
-}
-
 static int test_dev_land_integrated_merge(bool signing_failure)
 {
     int failures = 0;
@@ -1543,7 +1451,7 @@ static int test_dev_land_integrated_merge(bool signing_failure)
         const char *message_args[] = { "log", "-1", "--format=%B", NULL };
         dlx_isolate(signing_failure ? "merge_signfail" : "integratedmerge");
         ASSERT(dlx_rig_make(&rig, signing_failure ? "merge_signfail_rig" : "integratedmerge_rig"));
-        ASSERT(dlx_regen_conflict(&rig, "change.txt", tip));
+        ASSERT(dlx_generated_conflict(&rig, "change.txt", tip));
         ASSERT(dlx_sign_arm(rig.clone, signing_failure ? "merge_signfail_key" : "integratedmerge_sign"));
         ASSERT(dlx_git(rig.clone, checkout) == 0);
         /* Both parents changed the same source. This fixture's explicit
@@ -1614,333 +1522,6 @@ static int test_dev_land_integrated_merge(bool signing_failure)
     }
 _test_next:;
     dlx_restore();
-    return failures;
-}
-
-/* The regen phase folds generated-doc drift after a clean rebase INTO the
- * candidate's own last commit: no "Regenerate ..." commit appears, the tip
- * keeps its subject and author, its tree carries the regenerated file, the
- * amend is signed by the same ambient configuration as every landing commit,
- * and the id the proof is bound to is exactly the id that gets pushed. */
-static int test_dev_land_regen_commits_drift(void)
-{
-    int failures = 0;
-    TEST("land: the regen phase folds generated-doc drift into the tip "
-        "commit after a clean rebase, and proves and pushes that tip") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char landwt[1300], out[512], head[64], base[64], parent[64];
-        char intent[160];
-        const char *log_subject[] = { "log", "-1", "--pretty=%s", NULL };
-        const char *log_author[] = { "log", "-1", "--pretty=%an <%ae>",
-                                     NULL };
-        const char *log_sig[] = { "log", "-1", "--pretty=%G?", NULL };
-        const char *head_args[] = { "rev-parse", "HEAD", NULL };
-        const char *parent_args[] = { "rev-parse", "HEAD~1", NULL };
-        const char *tip_parent[] = { "rev-parse", "keep-tip~1", NULL };
-        const char *tip_author[] = { "log", "-1", "--pretty=%an <%ae>",
-                                     "keep-tip", NULL };
-        const char *keep[] = { "branch", "keep-tip", rig.tip, NULL };
-        const char *inventory[] = { "show",
-                                    "HEAD:docs/FIXTURE_GENERATED.jsonl",
-                                    NULL };
-        const char *remote[] = { "rev-parse", "main", NULL };
-        dlx_isolate("regendocs_a");
-        ASSERT(dlx_rig_make_docregen(
-            &rig, "regendocs_a_rig",
-            "@printf 'regen\\n' >> docs/FIXTURE_GENERATED.jsonl", "@:",
-            "@:"));
-        ASSERT(dlx_git(rig.clone, keep) == 0);
-        ASSERT(dlx_sign_arm(rig.clone, "regendocs_a_key"));
-        ASSERT(dlx_origin_main(&rig, base));
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, rig.tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        /* Past the regen phase and into the proof: a dirtied generated
-         * artifact never became a terminal state. */
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
-        dlx_end(&c);
-        dlx_land_wt(landwt, sizeof(landwt));
-        /* No new commit: the tip keeps its subject and author, sits on the
-         * same parent the submitted tip had, and is a NEW id only because
-         * its tree now carries the regenerated file. */
-        ASSERT(dlx_git_out(landwt, log_subject, out, sizeof(out)) == 0);
-        ASSERT_STR_EQ(out, "change.txt");
-        ASSERT(dlx_git_out(landwt, head_args, head, sizeof(head)) == 0);
-        ASSERT(strcmp(head, rig.tip) != 0);
-        ASSERT(dlx_git_out(landwt, parent_args, parent, sizeof(parent)) ==
-               0);
-        ASSERT(dlx_git_out(rig.clone, tip_parent, out, sizeof(out)) == 0);
-        ASSERT_STR_EQ(parent, out);
-        ASSERT_STR_EQ(parent, base);
-        ASSERT(dlx_git_out(rig.clone, tip_author, out, sizeof(out)) == 0);
-        {
-            char author[512];
-            ASSERT(dlx_git_out(landwt, log_author, author,
-                               sizeof(author)) == 0);
-            ASSERT_STR_EQ(author, out);
-        }
-        ASSERT(dlx_git_out(landwt, inventory, out, sizeof(out)) == 0);
-        ASSERT_STR_EQ(out, "orig\nregen");
-        /* Signed through the ambient commit.gpgsign configuration. */
-        ASSERT(dlx_git_out(landwt, log_sig, out, sizeof(out)) == 0);
-        ASSERT_STR_EQ(out, "G");
-        /* The proof is bound to the AMENDED tip on the exact base. */
-        dlx_begin(&c, "status");
-        ASSERT(dlx_run(&c) && dlx_ok(&c));
-        {
-            const struct json_value *flight =
-                json_get(&c.reply.data, "in_flight");
-            ASSERT(flight != NULL);
-            (void)snprintf(intent, sizeof(intent), "%s@%s", head, base);
-            ASSERT_STR_EQ(json_get_str(json_get(flight, "proof_intent")),
-                          intent);
-        }
-        dlx_end(&c);
-        /* And the pushed id is exactly the proved one. */
-        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT_STR_EQ(dlx_str(&c, "state"), "landed");
-        ASSERT_STR_EQ(dlx_str(&c, "tip_pushed"), head);
-        dlx_end(&c);
-        ASSERT(dlx_git_out(rig.bare, remote, out, sizeof(out)) == 0);
-        ASSERT_STR_EQ(out, head);
-        dlx_restore();
-        PASS();
-    } _test_next:;
-    dlx_restore();
-    return failures;
-}
-
-/* The regen phase makes no commit when the doc generators change nothing. */
-static int test_dev_land_regen_no_commit_when_clean(void)
-{
-    int failures = 0;
-    TEST("land: the regen phase makes no commit when the doc generators "
-        "change nothing") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char landwt[1300], subject[512], head[64];
-        const char *log_subject[] = { "log", "-1", "--pretty=%s", NULL };
-        const char *head_args[] = { "rev-parse", "HEAD", NULL };
-        dlx_isolate("regendocs_b");
-        ASSERT(dlx_rig_make_docregen(&rig, "regendocs_b_rig", "@:", "@:",
-                                     "@:"));
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, rig.tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
-        dlx_end(&c);
-        dlx_land_wt(landwt, sizeof(landwt));
-        /* No new commit: the tip is exactly the one submitted. */
-        ASSERT(dlx_git_out(landwt, head_args, head, sizeof(head)) == 0);
-        ASSERT(strcmp(head, rig.tip) == 0);
-        ASSERT(dlx_git_out(landwt, log_subject, subject, sizeof(subject)) ==
-              0);
-        ASSERT(strcmp(subject, "change.txt") == 0);
-        dlx_restore();
-        PASS();
-    } _test_next:;
-    return failures;
-}
-
-/* A failing regen target fails the row by name, with no commit made. */
-static int test_dev_land_regen_failure_fails_row(void)
-{
-    int failures = 0;
-    TEST("land: a failing regen target fails the row by name, with no "
-        "commit made") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        dlx_isolate("regendocs_c");
-        ASSERT(dlx_rig_make_docregen(
-            &rig, "regendocs_c_rig",
-            "@echo 'PASS check-pipefail-status-pipe 5977 ms'; "
-            "echo 'FAIL: synthetic regen failure' >&2; exit 1", "@:",
-            "@:"));
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, rig.tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
-        ASSERT(strcmp(dlx_str(&c, "dimension"), "regen") == 0);
-        ASSERT(strstr(dlx_str(&c, "detail"),
-                      "FAIL: synthetic regen failure") != NULL);
-        dlx_end(&c);
-        dlx_restore();
-        PASS();
-    } _test_next:;
-    return failures;
-}
-
-/* Each of the three regen targets appends "<make pid> <name>" to a marker
- * file. One make start costs a full Makefile parse, so all three must run
- * in ONE make invocation (one pid), in table order. */
-#define DLX_MARK(name) "@mkdir -p build; echo \"$$PPID " name "\" >> build/regen-marks"
-static int test_dev_land_regen_runs_all_targets_in_one_make(void)
-{
-    int failures = 0;
-    TEST("land: the regen phase runs all three targets in one make "
-        "invocation, in order") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char landwt[1300], marks[1400], buf[4096], head[64];
-        size_t len = 0;
-        const char *head_args[] = { "rev-parse", "HEAD", NULL };
-        int pid[3] = { 0, 0, 0 };
-        char nm[3][64];
-        dlx_isolate("regendocs_f");
-        ASSERT(dlx_rig_make_docregen(&rig, "regendocs_f_rig",
-                                     DLX_MARK("cap"), DLX_MARK("routing"),
-                                     DLX_MARK("counts")));
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, rig.tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
-        dlx_end(&c);
-        dlx_land_wt(landwt, sizeof(landwt));
-        (void)snprintf(marks, sizeof(marks), "%s/build/regen-marks", landwt);
-        ASSERT(dlx_slurp(marks, buf, sizeof(buf), &len));
-        buf[len < sizeof(buf) ? len : sizeof(buf) - 1] = '\0';
-        ASSERT(sscanf(buf, "%d %63s\n%d %63s\n%d %63s", &pid[0], nm[0],
-                      &pid[1], nm[1], &pid[2], nm[2]) == 6);
-        ASSERT(pid[0] > 0 && pid[0] == pid[1] && pid[1] == pid[2]);
-        ASSERT(strcmp(nm[0], "cap") == 0);
-        ASSERT(strcmp(nm[1], "routing") == 0);
-        ASSERT(strcmp(nm[2], "counts") == 0);
-        /* Unchanged commit behavior: nothing drifted, no regen commit. */
-        ASSERT(dlx_git_out(landwt, head_args, head, sizeof(head)) == 0);
-        ASSERT(strcmp(head, rig.tip) == 0);
-        dlx_restore();
-        PASS();
-    } _test_next:;
-    return failures;
-}
-
-/* A failure in the middle target still fails the row by that target's own
- * line, stops before the later target, and commits nothing. */
-static int test_dev_land_regen_middle_failure_names_line_and_stops(void)
-{
-    int failures = 0;
-    TEST("land: a middle regen target failing names its line, skips the "
-        "later target, and commits nothing") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char landwt[1300], marks[1400], buf[4096], head[64];
-        size_t len = 0;
-        const char *head_args[] = { "rev-parse", "HEAD", NULL };
-        dlx_isolate("regendocs_g");
-        ASSERT(dlx_rig_make_docregen(
-            &rig, "regendocs_g_rig",
-            "@printf 'regen\\n' >> docs/FIXTURE_GENERATED.jsonl",
-            "@echo 'FAIL: routing table is hollow' >&2; exit 1",
-            DLX_MARK("counts")));
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, rig.tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
-        ASSERT(strcmp(dlx_str(&c, "dimension"), "regen") == 0);
-        ASSERT(strstr(dlx_str(&c, "detail"),
-                      "FAIL: routing table is hollow") != NULL);
-        dlx_end(&c);
-        dlx_land_wt(landwt, sizeof(landwt));
-        (void)snprintf(marks, sizeof(marks), "%s/build/regen-marks", landwt);
-        /* make stopped at the failing goal: the counts recipe never ran. */
-        ASSERT(!dlx_slurp(marks, buf, sizeof(buf), &len) || len == 0);
-        ASSERT(dlx_git_out(landwt, head_args, head, sizeof(head)) == 0);
-        ASSERT(strcmp(head, rig.tip) == 0);
-        dlx_restore();
-        PASS();
-    } _test_next:;
-    return failures;
-}
-
-/* A generated artifact rewritten with IDENTICAL bytes (git sees no diff, so
- * no commit is made) still moves that file's mtime/ctime — exactly what the
- * source-mutation token the proof checks is built from. The regen phase
- * must re-seal build/dev-loop/restart.env in that case even though nothing
- * landed in git. */
-static int test_dev_land_regen_refreshes_plan_on_identical_rewrite(void)
-{
-    int failures = 0;
-    TEST("land: the regen phase re-seals the restart plan when a target "
-        "rewrites an artifact with identical bytes") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char landwt[1300], head[64], planpath[1400], log[8192];
-        size_t loglen = 0;
-        const char *head_args[] = { "rev-parse", "HEAD", NULL };
-        dlx_isolate("regendocs_d");
-        /* Rewrites the file with the SAME content dlx_rig_make_docregen
-         * seeded it with ("orig\n"): git diff --quiet sees nothing, but
-         * the write still touches the inode's mtime/ctime. */
-        ASSERT(dlx_rig_make_docregen(
-            &rig, "regendocs_d_rig",
-            "@printf 'orig\\n' > docs/FIXTURE_GENERATED.jsonl", "@:",
-            "@:"));
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, rig.tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
-        (void)snprintf(landwt, sizeof(landwt), "%s",
-                      dlx_str(&c, "log_path"));
-        ASSERT(landwt[0] != '\0');
-        ASSERT(dlx_slurp(landwt, log, sizeof(log), &loglen));
-        log[loglen < sizeof(log) ? loglen : sizeof(log) - 1] = '\0';
-        ASSERT(strstr(log, "regen: restart plan refreshed (1 artifact(s) "
-                          "rewritten, 0 committed)") != NULL);
-        dlx_end(&c);
-        /* No git-visible change: no regen commit, HEAD is still the
-         * submitted tip. */
-        dlx_land_wt(landwt, sizeof(landwt));
-        ASSERT(dlx_git_out(landwt, head_args, head, sizeof(head)) == 0);
-        ASSERT(strcmp(head, rig.tip) == 0);
-        /* The plan target ran exactly once: one marker line. */
-        (void)snprintf(planpath, sizeof(planpath),
-                      "%s/build/dev-loop/restart.env", landwt);
-        ASSERT(dlx_slurp(planpath, log, sizeof(log), &loglen));
-        log[loglen < sizeof(log) ? loglen : sizeof(log) - 1] = '\0';
-        ASSERT(strcmp(log, "plan\n") == 0);
-        dlx_restore();
-        PASS();
-    } _test_next:;
     return failures;
 }
 
@@ -2030,48 +1611,6 @@ static int test_dev_land_final_plan_preparation(void)
         ASSERT(dlx_slurp(path, body, sizeof(body), &len));
         ASSERT(len == strlen("generation-two\n"));
         ASSERT(memcmp(body, "generation-two\n", len) == 0);
-        PASS();
-    } _test_next:;
-    return failures;
-}
-
-/* The earlier document phase need not refresh an untouched plan; final
- * preparation separately binds the plan after all prerequisites settle. */
-static int test_dev_land_regen_leaves_plan_alone_when_untouched(void)
-{
-    int failures = 0;
-    TEST("land: the regen phase leaves the restart plan alone when no "
-        "artifact's stat identity changed") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char landwt[1300], planpath[1400], log[8192];
-        size_t loglen = 0;
-        dlx_isolate("regendocs_e");
-        ASSERT(dlx_rig_make_docregen(&rig, "regendocs_e_rig", "@:", "@:",
-                                     "@:"));
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, rig.tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
-        (void)snprintf(landwt, sizeof(landwt), "%s",
-                      dlx_str(&c, "log_path"));
-        ASSERT(landwt[0] != '\0');
-        ASSERT(dlx_slurp(landwt, log, sizeof(log), &loglen));
-        log[loglen < sizeof(log) ? loglen : sizeof(log) - 1] = '\0';
-        ASSERT(strstr(log, "regen: restart plan unchanged") != NULL);
-        dlx_end(&c);
-        dlx_land_wt(landwt, sizeof(landwt));
-        (void)snprintf(planpath, sizeof(planpath),
-                      "%s/build/dev-loop/restart.env", landwt);
-        /* The plan target never ran: the marker file was never created. */
-        ASSERT(!dlx_file_exists(planpath));
-        dlx_restore();
         PASS();
     } _test_next:;
     return failures;
@@ -7893,23 +7432,56 @@ static int test_dev_land_qualify_job_caps(void)
 static int test_dev_land_qualify_passes(void)
 {
     int failures = 0;
-    TEST("land: submit --qualify folds regenerated files and queues the tip") {
+    TEST("land: submit --qualify queues the tip exactly as committed") {
         struct dlx_rig rig;
         struct dlx_call c;
         char head[64], path[1300], stages[128] = {0};
         const char *rev[] = { "rev-parse", "HEAD", NULL };
         dlx_isolate("qualify_passes");
-        ASSERT(dlx_qualify_rig(&rig, "qualify_passes", "fold", "",
+        ASSERT(dlx_qualify_rig(&rig, "qualify_passes", "", "",
                                DLX_Q_LEAF_SMOKE | DLX_Q_MAP));
+        ASSERT(dlx_git_out(rig.clone, rev, head, sizeof(head)) == 0);
         ASSERT(dlx_qualify_submit(&c, &rig) && dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "queued");
-        ASSERT(dlx_git_out(rig.clone, rev, head, sizeof(head)) == 0);
         ASSERT_STR_EQ(dlx_str(&c, "tip"), head);
         ASSERT(dlx_queue_has_one());
         (void)snprintf(path, sizeof(path), "%s/build/scratch/qualify-stages", rig.clone);
         ASSERT(dlx_slurp(path, stages, sizeof(stages) - 1, NULL));
         ASSERT_STR_EQ(stages, "complexity\nlint\ntests\n");
         dlx_end(&c);
+        PASS();
+    }
+_test_next:;
+    dlx_qualify_restore();
+    return failures;
+}
+
+/* A gate that rewrites a generated document (lint-ready refreshing a stale
+ * block) used to be folded into the tip by a signed amend. Now the tree it
+ * leaves is refused, the files and the make target are named, the tip is
+ * untouched and nothing is queued. */
+static int test_dev_land_qualify_stale_doc_refused(void)
+{
+    int failures = 0;
+    TEST("land: submit --qualify refuses a stale generated document, naming "
+         "the make target, and never amends the tip") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char head[64], after[64];
+        const char *rev[] = { "rev-parse", "HEAD", NULL };
+        dlx_isolate("qualify_stale");
+        ASSERT(dlx_qualify_rig(&rig, "qualify_stale", "fold", "",
+                               DLX_Q_LEAF_SMOKE | DLX_Q_MAP));
+        ASSERT(dlx_git_out(rig.clone, rev, head, sizeof(head)) == 0);
+        ASSERT(dlx_qualify_submit(&c, &rig));
+        ASSERT(dlx_qualify_refused(&c, "QUALIFY_TREE_CHANGED"));
+        ASSERT(strstr(dlx_str(&c, "paths"), "docs/dev/CODEBASE_MAP.md") !=
+               NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "`make fix-doc-counts`") !=
+               NULL);
+        dlx_end(&c);
+        ASSERT(dlx_git_out(rig.clone, rev, after, sizeof(after)) == 0);
+        ASSERT_STR_EQ(after, head);
         PASS();
     }
 _test_next:;
@@ -10116,7 +9688,7 @@ _test_next:;
     return failures;
 }
 
-static int test_dev_land_rebase_regen_cases(void);
+static int test_dev_land_rebase_count_conflicts(void);
 static int test_dev_land_queued_precheck_cases(void);
 static int test_dev_land_train_cases(void);
 #endif
@@ -15422,30 +14994,25 @@ _test_next:;
     return failures;
 }
 
+/* The queue never regenerates, amends or merges a generated document. A
+ * rebase conflict confined to them is a plain conflict that names the make
+ * target an author runs; neither side is picked and nothing reaches origin. */
 static int dlx_case_generated_conflict(void)
 {
     int failures = 0;
-    TEST("land: a rebase conflict confined to the regenerated artifacts is "
-        "resolved from the code and folded, signed, into the candidate's "
-        "own commit, not refused") {
+    TEST("land: a rebase conflict confined to generated documents is "
+        "refused naming the make target, with no side picked and no "
+        "regeneration") {
         struct dlx_rig rig;
         struct dlx_call c;
-        char tip[64], landwt[1300], subject[512], sig[64], base[64];
-        const char *log_subject[] = { "log", "-1", "--pretty=%s", NULL };
-        const char *log_sig[] = { "log", "-1", "--pretty=%G?", NULL };
-        const char *parent_args[] = { "rev-parse", "HEAD~1", NULL };
-        const char *inventory[] = { "show",
-                                    "HEAD:docs/FIXTURE_GENERATED.jsonl",
-                                    NULL };
-        const char *map[] = { "show", "HEAD:docs/dev/CODEBASE_MAP.md", NULL };
-        const char *mine[] = { "show", "HEAD:mine.txt", NULL };
-        dlx_isolate("regenauto");
-        ASSERT(dlx_rig_make(&rig, "regenauto_rig"));
-        ASSERT(dlx_sign_arm(rig.clone, "regenauto_key"));
-        ASSERT(dlx_regen_conflict(&rig, NULL, tip));
+        char tip[64], before[64], after[64];
+        dlx_isolate("genconf");
+        ASSERT(dlx_rig_make(&rig, "genconf_rig"));
+        ASSERT(dlx_sign_arm(rig.clone, "genconf_key"));
+        ASSERT(dlx_generated_conflict(&rig, NULL, tip));
+        ASSERT(dlx_origin_main(&rig, before));
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
         dlx_submit(&c, &rig, tip);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
@@ -15453,108 +15020,21 @@ static int dlx_case_generated_conflict(void)
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
-        /* Past the rebase and into the proof: the conflict never became a
-         * terminal state. */
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict");
+        ASSERT_STR_EQ(dlx_str(&c, "dimension"), "rebase");
         ASSERT(strstr(dlx_str(&c, "detail"),
-                      "rebase: regenerated "
-                      "docs/FIXTURE_GENERATED.jsonl,"
-                      "docs/dev/CODEBASE_MAP.md") != NULL);
+                      "docs/agent/EXECUTOR_HEURISTICS.md: generated "
+                      "document") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "run `make docs-executor-routing`") != NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "docs/dev/CODEBASE_MAP.md: generated document") !=
+               NULL);
+        ASSERT(strstr(dlx_str(&c, "detail"), "run `make fix-doc-counts`") !=
+               NULL);
         dlx_end(&c);
-        dlx_land_wt(landwt, sizeof(landwt));
-        ASSERT(dlx_git_out(landwt, log_subject, subject, sizeof(subject)) ==
-              0);
-        /* No regeneration commit: the candidate's own commit, directly on
-         * the new main, carries its subject and the regenerated files. */
-        ASSERT_STR_EQ(subject, "the submitted work");
-        ASSERT(dlx_origin_main(&rig, base));
-        ASSERT(dlx_git_out(landwt, parent_args, subject, sizeof(subject)) ==
-               0);
-        ASSERT_STR_EQ(subject, base);
-        ASSERT(dlx_git_out(landwt, inventory, subject, sizeof(subject)) ==
-               0);
-        ASSERT_STR_EQ(subject, "theirs\nregenerated by dev.land");
-        ASSERT(dlx_git_out(landwt, map, subject, sizeof(subject)) == 0);
-        ASSERT_STR_EQ(subject, "<!-- DOC-COUNTS-BEGIN -->\ntheirs\n<!-- DOC-COUNTS-END -->\nregenerated by dev.land");
-        ASSERT(dlx_git_out(landwt, mine, subject, sizeof(subject)) == 0);
-        ASSERT_STR_EQ(subject, "mine");
-        /* Signed by AMBIENT config: dev.land passes no signing flag, and
-         * main rejects an unsigned commit. */
-        ASSERT(dlx_git_out(landwt, log_sig, sig, sizeof(sig)) == 0);
-        ASSERT_STR_EQ(sig, "G");
-        unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
-        dlx_restore();
-        PASS();
-    }
-_test_next:;
-    dlx_restore();
-    return failures;
-}
-
-/* A conflict on one artifact must not leave a stale count bump that merged
- * cleanly in another: every generator runs before the gates. Both lanes
- * write the same stale CODEBASE_MAP bump; only the inventory conflicts.
- * The check-doc-counts stand-in refuses until fix-doc-counts has run. */
-static int dlx_case_conflict_regens_clean_merged_artifact(void)
-{
-    int failures = 0;
-    TEST("land: a conflict on one artifact still regenerates a cleanly "
-        "merged stale one before the gates") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char tip[64], base[64], landwt[1300], out[512];
-        char mk[2048], mk2[3072], mkpath[700];
-        size_t len = 0;
-        const char *branch[] = { "branch", "keep-tip", NULL };
-        const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
-                               NULL };
-        const char *reset[] = { "reset", "--quiet", "--hard", base, NULL };
-        const char *map[] = { "show", "HEAD:docs/dev/CODEBASE_MAP.md", NULL };
-        dlx_isolate("regenclean");
-        ASSERT(dlx_rig_make_docregen(
-            &rig, "regenclean_rig",
-            "@printf 'regen\\n' > docs/FIXTURE_GENERATED.jsonl", "@:",
-            "@printf 'fixed\\n' > docs/dev/CODEBASE_MAP.md"));
-        (void)snprintf(mkpath, sizeof(mkpath), "%s/Makefile", rig.clone);
-        ASSERT(dlx_slurp(mkpath, mk, sizeof(mk) - 1, &len));
-        mk[len] = '\0';
-        ASSERT((size_t)snprintf(mk2, sizeof(mk2),
-            "%s"
-            "check-generated-artifact-contradictions:\n\t@:\n"
-            "check-doc-counts:\n\t@grep -q fixed docs/dev/CODEBASE_MAP.md || "
-            "{ echo 'FAIL: doc-count drift detected'; exit 1; }\n",
-            mk) < sizeof(mk2));
-        ASSERT(dlx_write_dep(rig.clone, "Makefile", mk2));
-        ASSERT(dlx_write_dep(rig.clone, "docs/FIXTURE_GENERATED.jsonl",
-                             "base\n"));
-        ASSERT(dlx_commit_tree(rig.clone, "gates", base));
-        ASSERT(dlx_git(rig.clone, push) == 0);
-        ASSERT(dlx_write_dep(rig.clone, "docs/FIXTURE_GENERATED.jsonl",
-                             "mine\n"));
-        ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", "bump\n"));
-        ASSERT(dlx_commit_tree(rig.clone, "the submitted work", tip));
-        ASSERT(dlx_git(rig.clone, branch) == 0);
-        ASSERT(dlx_git(rig.clone, reset) == 0);
-        ASSERT(dlx_write_dep(rig.clone, "docs/FIXTURE_GENERATED.jsonl",
-                             "theirs\n"));
-        ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", "bump\n"));
-        ASSERT(dlx_commit_tree(rig.clone, "someone else's train", out));
-        ASSERT(dlx_git(rig.clone, push) == 0);
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strstr(dlx_str(&c, "detail"), "refused after") == NULL);
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
-        dlx_end(&c);
-        dlx_land_wt(landwt, sizeof(landwt));
-        ASSERT(dlx_git_out(landwt, map, out, sizeof(out)) == 0);
-        ASSERT_STR_EQ(out, "fixed");
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT_STR_EQ(after, before);
         dlx_restore();
         PASS();
     }
@@ -15567,20 +15047,19 @@ static int dlx_case_rerere_conflict(void)
 {
     int failures = 0;
     TEST("land: rerere autoupdate cannot hide a previously resolved "
-        "generated-artifact conflict from the rebase classifier") {
+        "generated-document conflict; it is still refused by name") {
         struct dlx_rig rig;
         struct dlx_call c;
         char tip[64], landwt[1300], configured[16];
         const char *get_autoupdate[] = { "config", "--get",
                                          "rerere.autoupdate", NULL };
-        dlx_isolate("regenrerere");
-        ASSERT(dlx_rig_make(&rig, "regenrerere_rig"));
-        ASSERT(dlx_regen_conflict(&rig, NULL, tip));
+        dlx_isolate("genrerere");
+        ASSERT(dlx_rig_make(&rig, "genrerere_rig"));
+        ASSERT(dlx_generated_conflict(&rig, NULL, tip));
         ASSERT(dlx_rerere_autoupdate_prime(&rig));
-        ASSERT(dlx_sign_arm(rig.clone, "regenrerere_key"));
+        ASSERT(dlx_sign_arm(rig.clone, "genrerere_key"));
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
         dlx_submit(&c, &rig, tip);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
@@ -15588,16 +15067,14 @@ static int dlx_case_rerere_conflict(void)
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
-        ASSERT(strstr(dlx_str(&c, "detail"),
-                      "rebase: regenerated docs/FIXTURE_GENERATED.jsonl,")
-               != NULL);
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict");
+        ASSERT(strstr(dlx_str(&c, "detail"), "run `make fix-doc-counts`") !=
+               NULL);
         dlx_end(&c);
         dlx_land_wt(landwt, sizeof(landwt));
-        ASSERT(dlx_git_out(landwt, get_autoupdate, configured,
+        ASSERT(dlx_git_out(rig.clone, get_autoupdate, configured,
                            sizeof(configured)) == 0);
         ASSERT(strcmp(configured, "true") == 0);
-        unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
         dlx_restore();
         PASS();
     }
@@ -15608,16 +15085,16 @@ _test_next:;
 
 /* A row queued before the generated files left git still modifies the old
  * tracked copy; rebased onto a main that deleted it that is a modify/delete
- * conflict. The lander must settle it by deleting the path again (never by
- * re-adding it) and keep the row's own work. */
+ * conflict. The queue picks no side: it refuses, naming the git rm the
+ * author runs, and keeps the row's own work out of origin. */
 static int dlx_case_retired_generated_conflict(void)
 {
     int failures = 0;
     TEST("land: a modify/delete conflict on a retired generated file is "
-        "resolved by deleting it, never by re-adding it") {
+        "refused by name, never resolved by the queue") {
         struct dlx_rig rig;
         struct dlx_call c;
-        char tip[64], basec[64], removed[64], landwt[1300], tree[1024];
+        char tip[64], basec[64], removed[64], before[64], after[64];
         const char *branch[] = { "branch", "keep-tip", NULL };
         const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
                                NULL };
@@ -15625,10 +15102,8 @@ static int dlx_case_retired_generated_conflict(void)
         const char *retire[] = { "rm", "-q", "--",
                                  "docs/CAPABILITY_INVENTORY.jsonl",
                                  "docs/API_REFERENCE.md", NULL };
-        const char *files[] = { "ls-tree", "-r", "--name-only", "HEAD",
-                                NULL };
-        dlx_isolate("regenretired");
-        ASSERT(dlx_rig_make(&rig, "regenretired_rig"));
+        dlx_isolate("genretired");
+        ASSERT(dlx_rig_make(&rig, "genretired_rig"));
         ASSERT(dlx_write_dep(rig.clone, "docs/CAPABILITY_INVENTORY.jsonl",
                              "base\n"));
         ASSERT(dlx_write_dep(rig.clone, "docs/API_REFERENCE.md", "base\n"));
@@ -15644,10 +15119,10 @@ static int dlx_case_retired_generated_conflict(void)
         ASSERT(dlx_git(rig.clone, retire) == 0);
         ASSERT(dlx_commit_tree(rig.clone, "the files leave git", removed));
         ASSERT(dlx_git(rig.clone, push) == 0);
-        ASSERT(dlx_sign_arm(rig.clone, "regenretired_key"));
+        ASSERT(dlx_sign_arm(rig.clone, "genretired_key"));
+        ASSERT(dlx_origin_main(&rig, before));
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
         dlx_submit(&c, &rig, tip);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
@@ -15655,56 +15130,12 @@ static int dlx_case_retired_generated_conflict(void)
         dlx_begin(&c, "step");
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict");
         ASSERT(strstr(dlx_str(&c, "detail"),
-                      "rebase: dropped retired generated files") != NULL);
+                      "run `git rm docs/CAPABILITY_INVENTORY.jsonl") != NULL);
         dlx_end(&c);
-        dlx_land_wt(landwt, sizeof(landwt));
-        ASSERT(dlx_git_out(landwt, files, tree, sizeof(tree)) == 0);
-        ASSERT(strstr(tree, "retired_work.txt") != NULL);
-        ASSERT(strstr(tree, "CAPABILITY_INVENTORY") == NULL);
-        ASSERT(strstr(tree, "API_REFERENCE") == NULL);
-        unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
-        dlx_restore();
-        PASS();
-    }
-_test_next:;
-    dlx_restore();
-    return failures;
-}
-
-static int dlx_case_regen_gate(void)
-{
-    int failures = 0;
-    TEST("land: a post-regeneration gate that still refuses fails the row "
-        "by name instead of landing a tree the gates reject") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char tip[64];
-        dlx_isolate("regengate");
-        ASSERT(dlx_rig_make(&rig, "regengate_rig"));
-        ASSERT(dlx_regen_conflict(&rig, NULL, tip));
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
-        setenv("ZCL_LAND_REGEN_GATE_STUB_FAIL", "1", 1);
-        dlx_submit(&c, &rig, tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT(strcmp(dlx_str(&c, "state"), "failed") == 0);
-        ASSERT(strcmp(dlx_str(&c, "dimension"), "rebase") == 0);
-        ASSERT(strstr(dlx_str(&c, "detail"),
-                      "check-generated-artifact-contradictions refused "
-                      "after auto-resolving the rebase") != NULL);
-        ASSERT(strstr(dlx_str(&c, "detail"),
-                      "ZCL_LAND_REGEN_GATE_STUB_FAIL") != NULL);
-        dlx_end(&c);
-        unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
-        unsetenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
+        ASSERT(dlx_origin_main(&rig, after));
+        ASSERT_STR_EQ(after, before);
         dlx_restore();
         PASS();
     }
@@ -15716,17 +15147,16 @@ _test_next:;
 static int dlx_case_mixed_conflict(void)
 {
     int failures = 0;
-    TEST("land: one conflicted path outside the regenerated-artifact table "
-        "keeps the whole conflict a conflict") {
+    TEST("land: one conflicted path beside the generated documents keeps "
+        "the whole conflict a conflict, every path named") {
         struct dlx_rig rig;
         struct dlx_call c;
         char tip[64];
-        dlx_isolate("regenmixed");
-        ASSERT(dlx_rig_make(&rig, "regenmixed_rig"));
-        ASSERT(dlx_regen_conflict(&rig, "change.txt", tip));
+        dlx_isolate("genmixed");
+        ASSERT(dlx_rig_make(&rig, "genmixed_rig"));
+        ASSERT(dlx_generated_conflict(&rig, "change.txt", tip));
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
         dlx_submit(&c, &rig, tip);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
@@ -15738,14 +15168,10 @@ static int dlx_case_mixed_conflict(void)
         ASSERT(strcmp(dlx_str(&c, "dimension"), "rebase") == 0);
         ASSERT(strstr(dlx_str(&c, "detail"), "change.txt") != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"),
-                      "docs/FIXTURE_GENERATED.jsonl") != NULL);
+                      "docs/agent/EXECUTOR_HEURISTICS.md") != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"), "docs/dev/CODEBASE_MAP.md") !=
               NULL);
-        /* No regeneration note anywhere: nothing was auto-resolved. */
-        ASSERT(strstr(dlx_str(&c, "detail"), "rebase: regenerated") ==
-              NULL);
         dlx_end(&c);
-        unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
         dlx_restore();
         PASS();
     }
@@ -16239,7 +15665,7 @@ static int test_dev_land_test_hatches_testing_only(void)
 {
     static const char *const files[] = {
         "tools/command/native_dev_land.c",
-        "tools/command/native_dev_land_regen.c",
+        "tools/command/native_dev_land_prepare.c",
         "tools/command/native_dev_land_train.c",
         "tools/command/native_dev_land_window.c",
     };
@@ -16290,8 +15716,11 @@ static int test_dev_land_test_hatches_testing_only(void)
             ASSERT(s.unguarded == 0);
             total += s.guarded;
         }
-        /* Non-vacuous: the sources really do carry the guarded hatch reads. */
-        ASSERT(total >= 20);
+        /* Non-vacuous: the sources really do carry the guarded hatch reads.
+         * The floor is the exact count: 20 until the two regen-stub reads
+         * (ZCL_LAND_REGEN_MAKE_STUB, ZCL_LAND_REGEN_GATE_STUB_FAIL) were
+         * deleted with the regen phase they stubbed. */
+        ASSERT(total >= 18);
         PASS();
     }
 _test_next:;
@@ -16818,6 +16247,8 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
      test_dev_land_qualify_refusals, 1u},
     {"test_dev_land_qualify_dirty_tree()",
      test_dev_land_qualify_dirty_tree, 1u},
+    {"test_dev_land_qualify_stale_doc_refused()",
+     test_dev_land_qualify_stale_doc_refused, 1u},
     {"test_dev_land_qualify_group_verdicts()",
      test_dev_land_qualify_group_verdicts, 1u},
     {"test_dev_land_qualify_groups_reported()",
@@ -16942,36 +16373,18 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
      dlx_case_rerere_conflict, 2u},
     {"dlx_case_retired_generated_conflict()",
      dlx_case_retired_generated_conflict, 2u},
-    {"dlx_case_regen_gate()",
-     dlx_case_regen_gate, 2u},
-    {"dlx_case_conflict_regens_clean_merged_artifact()",
-     dlx_case_conflict_regens_clean_merged_artifact, 2u},
     {"dlx_case_mixed_conflict()",
      dlx_case_mixed_conflict, 2u},
     {"test_dev_land_integrated_merge(false)",
      dlx_shard_row_158, 3u},
     {"test_dev_land_integrated_merge(true)",
      dlx_shard_row_159, 3u},
-    {"test_dev_land_regen_commits_drift()",
-     test_dev_land_regen_commits_drift, 3u},
-    {"test_dev_land_regen_no_commit_when_clean()",
-     test_dev_land_regen_no_commit_when_clean, 3u},
-    {"test_dev_land_regen_failure_fails_row()",
-     test_dev_land_regen_failure_fails_row, 3u},
-    {"test_dev_land_regen_runs_all_targets_in_one_make()",
-     test_dev_land_regen_runs_all_targets_in_one_make, 3u},
-    {"test_dev_land_regen_middle_failure_names_line_and_stops()",
-     test_dev_land_regen_middle_failure_names_line_and_stops, 3u},
-    {"test_dev_land_regen_refreshes_plan_on_identical_rewrite()",
-     test_dev_land_regen_refreshes_plan_on_identical_rewrite, 3u},
-    {"test_dev_land_regen_leaves_plan_alone_when_untouched()",
-     test_dev_land_regen_leaves_plan_alone_when_untouched, 3u},
     {"test_dev_land_proof_tools_preparation()",
      test_dev_land_proof_tools_preparation, 3u},
     {"test_dev_land_final_plan_preparation()",
      test_dev_land_final_plan_preparation, 3u},
-    {"test_dev_land_rebase_regen_cases()",
-     test_dev_land_rebase_regen_cases, 3u},
+    {"test_dev_land_rebase_count_conflicts()",
+     test_dev_land_rebase_count_conflicts, 3u},
     {"test_dev_land_queued_precheck_cases()",
      test_dev_land_queued_precheck_cases, 3u},
     {"test_dev_land_train_cases()",
@@ -17106,6 +16519,7 @@ static const char *const g_dlx_original_calls[] = {
     "test_dev_land_qualify_verdict_rule()",
     "test_dev_land_qualify_refusals()",
     "test_dev_land_qualify_dirty_tree()",
+    "test_dev_land_qualify_stale_doc_refused()",
     "test_dev_land_qualify_group_verdicts()",
     "test_dev_land_qualify_groups_reported()",
     "test_dev_land_qualify_selection_refusals()",
@@ -17168,21 +16582,12 @@ static const char *const g_dlx_original_calls[] = {
     "dlx_case_generated_conflict()",
     "dlx_case_rerere_conflict()",
     "dlx_case_retired_generated_conflict()",
-    "dlx_case_regen_gate()",
-    "dlx_case_conflict_regens_clean_merged_artifact()",
     "dlx_case_mixed_conflict()",
     "test_dev_land_integrated_merge(false)",
     "test_dev_land_integrated_merge(true)",
-    "test_dev_land_regen_commits_drift()",
-    "test_dev_land_regen_no_commit_when_clean()",
-    "test_dev_land_regen_failure_fails_row()",
-    "test_dev_land_regen_runs_all_targets_in_one_make()",
-    "test_dev_land_regen_middle_failure_names_line_and_stops()",
-    "test_dev_land_regen_refreshes_plan_on_identical_rewrite()",
-    "test_dev_land_regen_leaves_plan_alone_when_untouched()",
     "test_dev_land_proof_tools_preparation()",
     "test_dev_land_final_plan_preparation()",
-    "test_dev_land_rebase_regen_cases()",
+    "test_dev_land_rebase_count_conflicts()",
     "test_dev_land_queued_precheck_cases()",
     "test_dev_land_train_cases()",
     "test_dev_land_test_hatches_testing_only()",
@@ -17318,7 +16723,9 @@ static bool dlx_mtip_commit(const char *dir, const char *msg, char out[64])
 static bool dlx_mtip_write2(const char *dir, const char *inv_body,
                             const char *path, const char *body)
 {
-    return dlx_write_dep(dir, "docs/FIXTURE_GENERATED.jsonl", inv_body) &&
+    return (!inv_body ||
+            dlx_write_dep(dir, "docs/agent/EXECUTOR_HEURISTICS.md",
+                          inv_body)) &&
            dlx_write_dep(dir, path, body);
 }
 
@@ -17356,7 +16763,7 @@ static bool dlx_mtip_diverge(struct dlx_rig *rig, struct dlx_mtip *out)
  * candidate's net change against M1 meets M2 only on the inventory unless
  * `source_conflict`. */
 static bool dlx_mtip_rig(struct dlx_rig *rig, bool source_conflict,
-                         struct dlx_mtip *out)
+                         bool generated_conflict, struct dlx_mtip *out)
 {
     char scratch[64];
     const char *c = rig->clone;
@@ -17376,10 +16783,12 @@ static bool dlx_mtip_rig(struct dlx_rig *rig, bool source_conflict,
         return false;
     if (source_conflict && !dlx_write_dep(c, "b.txt", "mine2\n"))
         return false;
-    return dlx_mtip_step(c, "mine2\n", "c.txt", "mine2\n", "candidate two",
+    return dlx_mtip_step(c, generated_conflict ? "mine2\n" : NULL, "c.txt",
+                         "mine2\n", "candidate two",
                          out->tip) &&
            dlx_git(c, to_main) == 0 &&
-           dlx_mtip_step(c, "theirs2\n", "b.txt", "theirs2\n", "train two",
+           dlx_mtip_step(c, generated_conflict ? "theirs2\n" : NULL, "b.txt",
+                         "theirs2\n", "train two",
                          out->m2) &&
            dlx_git(c, push) == 0;
 }
@@ -17396,11 +16805,11 @@ static bool dlx_land_log_has(const char *needle)
     return strstr(log, needle) != NULL;
 }
 
-static int test_dev_land_merge_tip_regenerates(void)
+static int test_dev_land_merge_tip_keeps_resolution(void)
 {
     int failures = 0;
     TEST("land: a merge-bearing tip that main moved past keeps its resolved "
-         "tree and auto-regenerates the inventory instead of conflicting") {
+         "tree and lands exactly the commit that was proved") {
         struct dlx_rig rig;
         struct dlx_mtip m;
         struct dlx_call c;
@@ -17411,7 +16820,8 @@ static int test_dev_land_merge_tip_regenerates(void)
         const char *parent[] = { "show", "-s", "--format=%P", "HEAD",
                                  NULL };
         const char *body[] = { "log", "-1", "--format=%B", "HEAD", NULL };
-        const char *inv[] = { "show", "HEAD:docs/FIXTURE_GENERATED.jsonl",
+        const char *inv[] = { "show",
+                              "HEAD:docs/agent/EXECUTOR_HEURISTICS.md",
                               NULL };
         const char *a_txt[] = { "show", "HEAD:a.txt", NULL };
         const char *b_txt[] = { "show", "HEAD:b.txt", NULL };
@@ -17419,14 +16829,13 @@ static int test_dev_land_merge_tip_regenerates(void)
         const char *head[] = { "rev-parse", "HEAD", NULL };
         const char *remote[] = { "rev-parse", "main", NULL };
         char prepared[64];
-        dlx_isolate("mtipregen");
-        ASSERT(dlx_rig_make(&rig, "mtipregen_rig"));
-        ASSERT(dlx_sign_arm(rig.clone, "mtipregen_key"));
-        ASSERT(dlx_mtip_rig(&rig, false, &m));
+        dlx_isolate("mtipkeep");
+        ASSERT(dlx_rig_make(&rig, "mtipkeep_rig"));
+        ASSERT(dlx_sign_arm(rig.clone, "mtipkeep_key"));
+        ASSERT(dlx_mtip_rig(&rig, false, false, &m));
         /* Production signing throughout the rebase step. */
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
-        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
         dlx_submit(&c, &rig, m.tip);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
@@ -17435,18 +16844,14 @@ static int test_dev_land_merge_tip_regenerates(void)
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
-        ASSERT(strstr(dlx_str(&c, "detail"),
-                      "rebase: regenerated docs/FIXTURE_GENERATED.jsonl")
-               != NULL);
         dlx_end(&c);
         dlx_land_wt(landwt, sizeof(landwt));
         ASSERT(dlx_git_out(landwt, subject, out, sizeof(out)) == 0);
         /* The merge-bearing tip was cut into ONE linear commit first, and
-         * the regenerated inventory is amended into THAT commit: its
-         * subject is the linearization's, never a regeneration's. */
+         * nothing was amended into it: its subject is the linearization's. */
         ASSERT_STR_EQ(out, "Prepare candidate for linear publication");
         ASSERT(dlx_git_out(landwt, inv, out, sizeof(out)) == 0);
-        ASSERT_STR_EQ(out, "theirs2\nregenerated by dev.land");
+        ASSERT_STR_EQ(out, "merged");
         /* The candidate's hand resolution survived; main's later train and
          * the candidate's later work are both present. */
         ASSERT(dlx_git_out(landwt, a_txt, out, sizeof(out)) == 0);
@@ -17469,10 +16874,8 @@ static int test_dev_land_merge_tip_regenerates(void)
         ASSERT(strstr(out, expect) != NULL);
         /* A replayed candidate's own source tree is not claimed. */
         ASSERT(strstr(out, "Source-Tree:") == NULL);
-        ASSERT(dlx_land_log_has("rebase: regenerated "
-                                "docs/FIXTURE_GENERATED.jsonl"));
         ASSERT(dlx_land_log_has("linearized merge-bearing candidate "));
-        /* And it lands. */
+        /* And it lands, as the very commit that was prepared. */
         ASSERT(dlx_git_out(landwt, head, prepared, sizeof(prepared)) == 0);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
         setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
@@ -17491,23 +16894,22 @@ _test_next:;
     return failures;
 }
 
-static int test_dev_land_merge_tip_source_conflict(void)
+static int test_dev_land_merge_tip_generated_conflict(void)
 {
     int failures = 0;
-    TEST("land: a merge-bearing tip with a real source conflict beside the "
-         "generated one is still a conflict") {
+    TEST("land: a merge-bearing tip whose net change meets main on a "
+         "generated document is refused naming the make target") {
         struct dlx_rig rig;
         struct dlx_mtip m;
         struct dlx_call c;
         char out[64];
         const char *remote[] = { "rev-parse", "main", NULL };
-        dlx_isolate("mtipsrc");
-        ASSERT(dlx_rig_make(&rig, "mtipsrc_rig"));
-        ASSERT(dlx_sign_arm(rig.clone, "mtipsrc_key"));
-        ASSERT(dlx_mtip_rig(&rig, true, &m));
+        dlx_isolate("mtipgen");
+        ASSERT(dlx_rig_make(&rig, "mtipgen_rig"));
+        ASSERT(dlx_sign_arm(rig.clone, "mtipgen_key"));
+        ASSERT(dlx_mtip_rig(&rig, false, true, &m));
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
-        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
         dlx_submit(&c, &rig, m.tip);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
@@ -17517,11 +16919,8 @@ static int test_dev_land_merge_tip_source_conflict(void)
         ASSERT(dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict");
         ASSERT_STR_EQ(dlx_str(&c, "dimension"), "rebase");
-        ASSERT(strstr(dlx_str(&c, "detail"), "b.txt") != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"),
-                      "docs/FIXTURE_GENERATED.jsonl") != NULL);
-        ASSERT(strstr(dlx_str(&c, "detail"), "rebase: regenerated") ==
-               NULL);
+                      "run `make docs-executor-routing`") != NULL);
         dlx_end(&c);
         ASSERT(dlx_git_out(rig.bare, remote, out, sizeof(out)) == 0);
         ASSERT_STR_EQ(out, m.m2);
@@ -17533,43 +16932,23 @@ _test_next:;
     return failures;
 }
 
-/* A linear two-commit tip whose FIRST replayed commit conflicts only on
- * the inventory and whose SECOND conflicts on real source: the conflict
- * outcome is unchanged (it names the original unmerged list), and the
- * attempt log now says why the auto-resolve stopped. Row 30's a2 log said
- * only "rebase conflict: docs/FIXTURE_GENERATED.jsonl". */
-static int test_dev_land_late_conflict_named(void)
+static int test_dev_land_merge_tip_source_conflict(void)
 {
     int failures = 0;
-    TEST("land: an auto-resolve that stops on a later replayed commit "
-         "names the path that stopped it") {
+    TEST("land: a merge-bearing tip with a real source conflict beside the "
+         "generated one is a conflict naming both") {
         struct dlx_rig rig;
+        struct dlx_mtip m;
         struct dlx_call c;
-        char scratch[64], tip[64];
-        const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
-                               NULL };
-        const char *to_cand[] = { "checkout", "--quiet", "-b", "cand",
-                                  NULL };
-        const char *to_main[] = { "checkout", "--quiet", "main", NULL };
-        dlx_isolate("lateconf");
-        ASSERT(dlx_rig_make(&rig, "lateconf_rig"));
-        ASSERT(dlx_mtip_write2(rig.clone, "base\n", "a.txt", "base\n"));
-        ASSERT(dlx_commit_tree(rig.clone, "base", scratch));
-        ASSERT(dlx_git(rig.clone, push) == 0);
-        ASSERT(dlx_git(rig.clone, to_cand) == 0);
-        ASSERT(dlx_mtip_write2(rig.clone, "mine1\n", "x.txt", "mine1\n"));
-        ASSERT(dlx_commit_tree(rig.clone, "candidate one", scratch));
-        ASSERT(dlx_mtip_write2(rig.clone, "mine2\n", "a.txt", "mine2\n"));
-        ASSERT(dlx_commit_tree(rig.clone, "candidate two", tip));
-        ASSERT(dlx_git(rig.clone, to_main) == 0);
-        ASSERT(dlx_mtip_write2(rig.clone, "theirs\n", "a.txt", "theirs\n"));
-        ASSERT(dlx_commit_tree(rig.clone, "train", scratch));
-        ASSERT(dlx_git(rig.clone, push) == 0);
-        ASSERT(dlx_sign_arm(rig.clone, "lateconf_key"));
+        char out[64];
+        const char *remote[] = { "rev-parse", "main", NULL };
+        dlx_isolate("mtipsrc");
+        ASSERT(dlx_rig_make(&rig, "mtipsrc_rig"));
+        ASSERT(dlx_sign_arm(rig.clone, "mtipsrc_key"));
+        ASSERT(dlx_mtip_rig(&rig, true, true, &m));
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
-        dlx_submit(&c, &rig, tip);
+        unsetenv("ZCL_LAND_ALLOW_UNSIGNED");
+        dlx_submit(&c, &rig, m.tip);
         ASSERT(dlx_run(&c));
         ASSERT(dlx_ok(&c));
         dlx_end(&c);
@@ -17578,56 +16957,12 @@ static int test_dev_land_late_conflict_named(void)
         ASSERT(dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict");
         ASSERT_STR_EQ(dlx_str(&c, "dimension"), "rebase");
-        ASSERT_STR_EQ(dlx_str(&c, "detail"),
-                      "docs/FIXTURE_GENERATED.jsonl");
-        dlx_end(&c);
-        ASSERT(dlx_land_log_has("rebase auto-resolve stopped: a replayed "
-                                "commit conflicted outside the regenerated "
-                                "artifacts: "));
-        ASSERT(dlx_land_log_has("a.txt"));
-        dlx_restore();
-        PASS();
-    }
-_test_next:;
-    dlx_restore();
-    return failures;
-}
-
-/* The real generator (a make target in the rig's Makefile, no stub) exits
- * nonzero after the auto-resolve: the row fails in the rebase dimension
- * and names the artifact and the target, and nothing is pushed. */
-static int test_dev_land_regen_generator_fails(void)
-{
-    int failures = 0;
-    TEST("land: a regenerate command that fails after the auto-resolve "
-         "refuses the row by name") {
-        struct dlx_rig rig;
-        struct dlx_call c;
-        char tip[64], before[64], out[64];
-        const char *remote[] = { "rev-parse", "main", NULL };
-        dlx_isolate("regengenfail");
-        ASSERT(dlx_rig_make_docregen(&rig, "regengenfail_rig", "@false",
-                                     "@:", "@:"));
-        ASSERT(dlx_regen_conflict(&rig, NULL, tip));
-        ASSERT(dlx_git_out(rig.bare, remote, before, sizeof(before)) == 0);
-        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
-        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-        dlx_submit(&c, &rig, tip);
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        dlx_end(&c);
-        dlx_begin(&c, "step");
-        ASSERT(dlx_run(&c));
-        ASSERT(dlx_ok(&c));
-        ASSERT_STR_EQ(dlx_str(&c, "state"), "failed");
-        ASSERT_STR_EQ(dlx_str(&c, "dimension"), "rebase");
+        ASSERT(strstr(dlx_str(&c, "detail"), "b.txt") != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"),
-                      "regenerating docs/FIXTURE_GENERATED.jsonl "
-                      "(docs-fixture-generated) failed after "
-                      "auto-resolving the rebase") != NULL);
+                      "docs/agent/EXECUTOR_HEURISTICS.md") != NULL);
         dlx_end(&c);
         ASSERT(dlx_git_out(rig.bare, remote, out, sizeof(out)) == 0);
-        ASSERT_STR_EQ(out, before);
+        ASSERT_STR_EQ(out, m.m2);
         dlx_restore();
         PASS();
     }
@@ -17636,67 +16971,85 @@ _test_next:;
     return failures;
 }
 
-static int test_dev_land_rebase_regen_cases(void)
+/* A CODEBASE_MAP conflict is never merged or normalised by the queue, with
+ * or without a divergent DOC-COUNTS block and with or without authored
+ * prose on both sides: every shape is refused, names `make fix-doc-counts`,
+ * and leaves the submitted tip untouched and origin where it was. */
+static int test_dev_land_rebase_count_conflicts(void)
 {
     int failures = 0;
-    const char *block = "<!-- DOC-COUNTS-BEGIN -->\ntest_groups: 1253\nport_interfaces: 13\npersistence_adapters: 14\ncondition_registrations: 56\ncommand_bundles: 31\ncommand_roots: 13\ndumpstate_subsystems: 167\napp_shape_folders: 7\n<!-- DOC-COUNTS-END -->\n";
-    for (int ordinal = 0; ordinal < 6; ordinal++) {
-        int mode = ordinal == 0 ? 4 : ordinal == 5 ? 5 : ordinal - 1; /* mode 5: map above 64 KiB */
-        TEST("land: count recovery preserves proposals and refuses invalid blocks") {
+    const char *block = "<!-- DOC-COUNTS-BEGIN -->\nport_interfaces: 13\npersistence_adapters: 14\ncondition_registrations: 56\ncommand_bundles: 31\ncommand_roots: 13\ndumpstate_subsystems: 167\napp_shape_folders: 7\n<!-- DOC-COUNTS-END -->\n";
+    for (int mode = 0; mode < 4; mode++) {
+        TEST("land: a conflict on the codebase map is refused naming "
+             "fix-doc-counts, whatever else changed in it") {
             struct dlx_rig rig;
             struct dlx_call c;
-            char base[64], tip[64], upstream[64], wt[1300];
-            static char a[90000], b[90000], p[90000], out[90000], pad[70001];
+            char base[64], tip[64], upstream[64], before[64], after[64];
+            static char a[4096], b[4096], p[4096], out[4096];
             const char *push[] = { "push", "--quiet", "origin", "HEAD:main", NULL };
             const char *keep[] = { "branch", "keep-tip", NULL };
             const char *reset[] = { "reset", "--hard", base, NULL };
             const char *show[] = { "show", "keep-tip:docs/dev/CODEBASE_MAP.md", NULL };
-            const char *head[] = { "show", "HEAD:docs/dev/CODEBASE_MAP.md", NULL };
-            dlx_isolate("countsprose");
-            ASSERT(dlx_rig_make(&rig, "countsprose_rig"));
-            memset(pad, 'x', sizeof(pad) - 1); pad[sizeof(pad) - 2] = '\n'; pad[sizeof(pad) - 1] = '\0';
-            snprintf(a, sizeof(a), "Action A.\n%s%s", mode == 5 ? pad : "", block);
-            snprintf(b, sizeof(b), "Action B.\n%s%s", mode == 5 ? pad : "", block);
-            snprintf(p, sizeof(p), "Action C.\n%s%s", mode == 5 ? pad : "", block);
-            if (mode == 2) { strcpy(a, "Action A.\n"); strcpy(b, "Action B.\n"); strcpy(p, "Action C.\n"); }
-            if (mode == 3) { strcat(a, block); strcat(b, block); strcat(p, block); }
-            if (mode >= 4) {
-                snprintf(b, sizeof(b), "Action A.\n%s%s", mode == 5 ? pad : "", block);
-                strstr(b, "1253")[3] = '4';
-                strstr(p, "1253")[3] = '5';
+            dlx_isolate("countsconf");
+            ASSERT(dlx_rig_make(&rig, "countsconf_rig"));
+            /* mode 0: prose edited on both sides, counts block shared;
+             * mode 1: prose edited on one side, block edited on the other
+             * (git merges it cleanly, so the row proceeds to the proof);
+             * mode 2: block edited differently on both sides;
+             * mode 3: no block at all, prose edited on both sides. */
+            snprintf(a, sizeof(a), "Action A.\n%s", mode == 3 ? "" : block);
+            snprintf(b, sizeof(b), "Action B.\n%s", mode == 3 ? "" : block);
+            snprintf(p, sizeof(p), "Action C.\n%s", mode == 3 ? "" : block);
+            if (mode == 1) {
+                snprintf(b, sizeof(b), "Action A.\n%s", block);
+                strstr(b, "port_interfaces: 13")[17] = '4';
+                snprintf(p, sizeof(p), "Action C.\n%s", block);
             }
-            ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", a)); ASSERT(dlx_commit_tree(rig.clone, "base", base));
+            if (mode == 2) {
+                snprintf(b, sizeof(b), "Action A.\n%s", block);
+                snprintf(p, sizeof(p), "Action A.\n%s", block);
+                strstr(b, "port_interfaces: 13")[17] = '4';
+                strstr(p, "port_interfaces: 13")[17] = '5';
+            }
+            ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", a));
+            ASSERT(dlx_commit_tree(rig.clone, "base", base));
             ASSERT(dlx_git(rig.clone, push) == 0);
             ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", p));
-            if (mode == 1) ASSERT(dlx_write_dep(rig.clone, "clean.txt", "clean\n"));
             ASSERT(dlx_commit_tree(rig.clone, "proposal", tip));
             ASSERT(dlx_git(rig.clone, keep) == 0);
             ASSERT(dlx_git(rig.clone, reset) == 0);
-            ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", b)); ASSERT(dlx_commit_tree(rig.clone, "upstream", upstream));
+            ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", b));
+            ASSERT(dlx_commit_tree(rig.clone, "upstream", upstream));
             ASSERT(dlx_git(rig.clone, push) == 0);
+            ASSERT(dlx_origin_main(&rig, before));
             setenv("ZCL_LAND_PROOF_STUB", "running", 1);
             setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
-            setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
             dlx_submit(&c, &rig, tip);
             ASSERT(dlx_run(&c)); ASSERT(dlx_ok(&c)); dlx_end(&c);
             dlx_begin(&c, "step");
             ASSERT(dlx_run(&c)); ASSERT(dlx_ok(&c));
-            ASSERT_STR_EQ(dlx_str(&c, "state"), mode >= 4 ? "started" : "conflict");
-            if (mode >= 4)
+            if (mode == 1) {
+                /* A clean three-way merge is not a conflict: the tip is
+                 * proved exactly as the merge left it. */
+                ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
+            } else {
+                ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict");
                 ASSERT(strstr(dlx_str(&c, "detail"),
-                              "rebase: regenerated docs/dev/CODEBASE_MAP.md") != NULL);
+                              "docs/dev/CODEBASE_MAP.md: generated document") != NULL);
+                ASSERT(strstr(dlx_str(&c, "detail"), "run `make fix-doc-counts`") != NULL);
+            }
             dlx_end(&c);
+            ASSERT(dlx_origin_main(&rig, after));
+            ASSERT_STR_EQ(after, before);
             ASSERT(dlx_git_out(rig.clone, show, out, sizeof(out)) == 0);
             p[strlen(p) - 1] = '\0';
             ASSERT_STR_EQ(out, p);
-            if (mode >= 4) { dlx_land_wt(wt, sizeof(wt)); ASSERT(dlx_git_out(wt, head, out, sizeof(out)) == 0); ASSERT(strstr(out, "Action C.\n") == out); }
             dlx_restore(); PASS();
         }
     }
-    failures += test_dev_land_merge_tip_regenerates();
+    failures += test_dev_land_merge_tip_keeps_resolution();
+    failures += test_dev_land_merge_tip_generated_conflict();
     failures += test_dev_land_merge_tip_source_conflict();
-    failures += test_dev_land_late_conflict_named();
-    failures += test_dev_land_regen_generator_fails();
 _test_next:
     dlx_restore();
     return failures;
@@ -18012,26 +17365,28 @@ _test_next:;
     return failures;
 }
 
-static int test_dev_land_queued_regen_only_kept(void)
+static int test_dev_land_queued_generated_conflict_ended(void)
 {
     int failures = 0;
-    TEST("land: a queued row whose only conflict is a regenerated artifact "
-         "stays queued for the rebase that settles it") {
+    TEST("land: a queued row whose only conflict is a generated document "
+         "is ended by the check, naming the make target") {
         struct dlx_rig rig;
         char b[64], m1[64], detail[512];
         dlx_isolate("qp_regen");
         ASSERT(dlx_rig_make(&rig, "qp_regen_rig"));
-        ASSERT(dlx_qp_branch(&rig, "qp-b", "docs/FIXTURE_GENERATED.jsonl",
+        ASSERT(dlx_qp_branch(&rig, "qp-b", "docs/agent/EXECUTOR_HEURISTICS.md",
                              "mine\n", "b.txt", "mine\n", b));
         ASSERT(dlx_qp_start(&rig, b));
         ASSERT(dlx_qp_beat("started", 1, 0));
-        ASSERT(dlx_qp_push_main(&rig, "docs/FIXTURE_GENERATED.jsonl",
+        ASSERT(dlx_qp_push_main(&rig, "docs/agent/EXECUTOR_HEURISTICS.md",
                                 "theirs\n", m1));
         ASSERT(dlx_qp_beat("rebased", -1, -1));
-        /* Checked against the new main, and NOT ended. */
-        ASSERT(dlx_qp_beat("started", 1, 0));
-        ASSERT(dlx_qp_queued_has(b, 1));
-        ASSERT(!dlx_qp_outcome(b, "conflict", detail, sizeof(detail)));
+        /* Checked against the new main and ended as a conflict that names
+         * the target an author runs; the queue settles nothing. */
+        ASSERT(dlx_qp_beat("started", 1, 1));
+        ASSERT(!dlx_qp_queued_has(b, 1));
+        ASSERT(dlx_qp_outcome(b, "conflict", detail, sizeof(detail)));
+        ASSERT(strstr(detail, "run `make docs-executor-routing`") != NULL);
         ASSERT(dlx_qp_a_in_flight(m1));
         dlx_restore();
         PASS();
@@ -18488,7 +17843,7 @@ static int test_dev_land_queued_precheck_cases(void)
     failures += test_dev_land_queued_conflict_detected();
     failures += test_dev_land_queued_conflict_mark_cleared();
     failures += test_dev_land_queued_mergeable_lands();
-    failures += test_dev_land_queued_regen_only_kept();
+    failures += test_dev_land_queued_generated_conflict_ended();
     failures += test_dev_land_queued_tool_failure_kept();
     failures += test_dev_land_queued_main_moves_twice();
     failures += test_dev_land_queued_union_attr_kept();
@@ -19271,10 +18626,90 @@ _test_next:;
     return failures;
 }
 
+/* The queue amends nothing. The rig's Makefile carries the two targets the
+ * old regen phase ran after every rebase, each of which would dirty a
+ * tracked document and leave a marker; a train of two rows must land with
+ * neither run, the document commits it was submitted with, and the pushed
+ * tip equal to the stacked commit the proof was bound to. */
+static int test_dev_land_train_never_amended(void)
+{
+    int failures = 0;
+    TEST("land: a train of two rows is not amended; the landed commits are "
+         "the stacked ones, no generator runs and no document changes") {
+        struct dlx_rig rig;
+        char b[64], m0[64], scratch[64], main_tip[64], pushed[2][64];
+        char commit[2][64], local[2][64], names[128], count[16], range[200];
+        char landwt[1300];
+        int proofs = 0, landed = 0;
+        char states[256];
+        const char *names_args[] = { "diff", "--name-only", m0, "main",
+                                     NULL };
+        const char *count_args[] = { "rev-list", "--count", NULL, "main",
+                                     NULL };
+        dlx_isolate("train_noamend");
+        ASSERT(dlx_rig_make(&rig, "train_noamend_rig"));
+        ASSERT(dlx_qp_push_main(&rig, "Makefile",
+            "docs-executor-routing:\n"
+            "\t@mkdir -p build; echo routing >> build/regen-marks; "
+            "echo drift >> docs/agent/EXECUTOR_HEURISTICS.md\n"
+            "fix-doc-counts:\n"
+            "\t@mkdir -p build; echo counts >> build/regen-marks; "
+            "echo drift >> docs/dev/CODEBASE_MAP.md\n"
+            "build/dev-loop/restart.env:\n"
+            "\t@mkdir -p build/dev-loop; echo plan >> $@\n", scratch));
+        ASSERT(dlx_qp_push_main(&rig, "docs/agent/EXECUTOR_HEURISTICS.md",
+                                "orig\n", scratch));
+        ASSERT(dlx_qp_push_main(&rig, "docs/dev/CODEBASE_MAP.md", "orig\n",
+                                m0));
+        ASSERT(dlx_qp_branch(&rig, "tr-b", "b.txt", "b\n", NULL, NULL, b));
+        setenv("ZCL_LAND_PROOF_STUB", "pass", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        ASSERT(dlx_qp_submit(&rig, rig.tip, 1) && dlx_qp_submit(&rig, b, 2));
+        setenv("ZCL_LAND_TRAIN_WIDTH", "2", 1);
+        ASSERT(dlx_tr_drain(8, NULL, &proofs, &landed, states,
+                            sizeof(states)));
+        ASSERT_EQ(proofs, 1);
+        ASSERT_EQ(landed, 2);
+        ASSERT(dlx_origin_main(&rig, main_tip));
+        /* Neither generator ran in the landing worktree. */
+        dlx_land_wt(landwt, sizeof(landwt));
+        (void)snprintf(names, sizeof(names), "%s/build/regen-marks", landwt);
+        ASSERT(!dlx_file_exists(names));
+        /* Main gained exactly the two submitted changes, as two commits. */
+        ASSERT(dlx_git_out(rig.bare, names_args, names, sizeof(names)) == 0);
+        ASSERT_STR_EQ(names, "b.txt\nchange.txt");
+        (void)snprintf(range, sizeof(range), "%s..main", m0);
+        count_args[2] = range;
+        ASSERT(dlx_git_out(rig.bare, count_args, count, sizeof(count)) == 0);
+        ASSERT_STR_EQ(count, "2");
+        /* Each outcome names the stacked commit that was proved; the last
+         * member's commit is the pushed tip, unamended. */
+        for (long long seq = 1; seq <= 2; seq++) {
+            size_t i = (size_t)seq - 1;
+            ASSERT(dlx_tr_outcome_field(seq, "tip_pushed", pushed[i],
+                                        sizeof(pushed[i])));
+            ASSERT(dlx_tr_outcome_field(seq, "train_commit", commit[i],
+                                        sizeof(commit[i])));
+            ASSERT(dlx_tr_outcome_field(seq, "local", local[i],
+                                        sizeof(local[i])));
+            ASSERT_STR_EQ(pushed[i], main_tip);
+        }
+        ASSERT_STR_EQ(commit[1], local[1]);
+        ASSERT_STR_EQ(commit[1], main_tip);
+        ASSERT(strcmp(commit[0], commit[1]) != 0);
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
 static int test_dev_land_train_cases(void)
 {
     int failures = 0;
     failures += test_dev_land_train_three_rows_one_proof();
+    failures += test_dev_land_train_never_amended();
     failures += test_dev_land_train_default_off();
     failures += test_dev_land_train_conflict_skipped();
     failures += test_dev_land_train_red_falls_back_to_singles();

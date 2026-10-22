@@ -392,9 +392,9 @@ fetch_origin() { runenv git fetch -q origin main; }
 
 wait_remote_tip()
 {
-    # The lane lands tip + its generated-docs regeneration commit when the
-    # edit drifts the inventory, so acceptance is ancestry, not equality
-    # (run 18: submitted 1020a75b5, landed as that plus the regen commit).
+    # The lander never amends the tip, but a rebase onto a moved main and the
+    # linearization step can still give the landed commit a new id, so
+    # acceptance is ancestry, not equality.
     local want="$1" tries=0 tip=""
     while [[ "$tries" -lt 30 ]]; do
         tip="$(remote_tip)"

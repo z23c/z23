@@ -6,7 +6,7 @@
  * dev train build stacks lanes onto main without waiting on lint: it fetches
  * origin, opens a detached worktree at <checkout-parent>/z23-stack<name>,
  * cherry-picks each source's origin/main..HEAD commits oldest-first
- * (skipping doc-regen-only commits by subject), and returns — it never runs lint-fast itself. dev train check
+ * (skipping baseline-pin commits by subject), and returns — it never runs lint-fast itself. dev train check
  * is the one deliberate synchronous wait. dev train status reads every
  * stack worktree. dev train drop removes one.
  *

@@ -3442,7 +3442,7 @@ tools/command/native_dev_hotswap.c:service_resident_observation_append:24
 tools/command/native_dev_land.c:dl_dependency_repair_one:36
 tools/command/native_dev_land.c:dl_materialize_file:43
 tools/command/native_dev_land.c:dl_status:40
-tools/command/native_dev_land.c:dl_step_start:19
+tools/command/native_dev_land.c:dl_step_start:18
 tools/command/native_dev_land.c:dl_submit:18
 tools/command/native_dev_land.c:dl_worktree_ok:17
 tools/command/native_dev_land.c:dl_wt_vendor_tor_pin_matches:17

@@ -1169,7 +1169,7 @@ static int test_ic_capacity_bound_runs_everything(void)
         ASSERT(ic_host_need_bare_root(IC_FIX_HOST_BARE));
         ic_host_fixture_env(false);
         ASSERT(zcl_dev_proof_test_build_test_selector(
-                   &capped, IC_FIX_HOST_BARE, false, selector,
+                   &capped, IC_FIX_HOST_BARE, selector,
                    sizeof(selector), &selected, gated, sizeof(gated)));
         ASSERT(zcl_test_group_catalog_count() > 2);
         bool fuzz_ready = ic_fuzz_host_ready();
@@ -1212,7 +1212,7 @@ static int test_ic_capacity_bound_runs_everything(void)
         ASSERT(ic_host_need_full_root(IC_FIX_HOST_FULL));
         ic_host_fixture_env(true);
         ASSERT(zcl_dev_proof_test_build_test_selector(
-                   &capped, IC_FIX_HOST_FULL, false, selector,
+                   &capped, IC_FIX_HOST_FULL, selector,
                    sizeof(selector), &selected, gated, sizeof(gated)));
         ASSERT(ic_selector_is_universal(selector, selected,
                                         !fuzz_ready + ic_guest_host_missing()));
@@ -1228,7 +1228,7 @@ static int test_ic_capacity_bound_runs_everything(void)
         uint32_t exact_selected = 0;
         memset(selector, 0, sizeof(selector));
         ASSERT(zcl_dev_proof_test_build_test_selector(
-                   &roomy, IC_FIX_HOST_BARE, false, selector, sizeof(selector),
+                   &roomy, IC_FIX_HOST_BARE, selector, sizeof(selector),
                    &exact_selected, gated, sizeof(gated)));
         ASSERT(exact_selected > 0);
         ASSERT((size_t)exact_selected < zcl_test_group_catalog_count());
@@ -1901,7 +1901,7 @@ static int test_ic_lint_token_selects_every_shard(void)
         uint32_t selected = 0;
         memset(selector, 0, sizeof(selector));
         ASSERT(zcl_dev_proof_test_build_test_selector(
-                   &plan, ".", false, selector, sizeof(selector), &selected,
+                   &plan, ".", selector, sizeof(selector), &selected,
                    gated, sizeof(gated)));
         /* An exact plan is never host-gated; nothing here is dropped. */
         ASSERT(gated[0] == '\0');
@@ -8933,7 +8933,7 @@ static int test_ic_build_need_umbrella_fold(void)
         char gated[PROOF_HOST_GATED_MAX];
         uint32_t selected = 0;
         ASSERT(zcl_dev_proof_test_build_test_selector(
-            &plan, IC_FIX_HOST_BARE, false, selector, sizeof(selector),
+            &plan, IC_FIX_HOST_BARE, selector, sizeof(selector),
             &selected, gated, sizeof(gated)));
         ASSERT(ic_selector_has(selector, "test_zcode_swarm_net_shard_01"));
         ASSERT(strstr(gated, "test_zcode_swarm_net_shard_01") == NULL);
@@ -9013,7 +9013,7 @@ static int test_ic_app_sync_wire_route(void)
         char gated[PROOF_HOST_GATED_MAX];
         uint32_t selected = 0;
         ASSERT(zcl_dev_proof_test_build_test_selector(
-            &plan, ".", false, selector, sizeof(selector), &selected,
+            &plan, ".", selector, sizeof(selector), &selected,
             gated, sizeof(gated)));
         ASSERT(ic_selector_has(selector, "test_app_event_sync"));
         ASSERT(gated[0] == '\0');
@@ -9047,7 +9047,7 @@ static int test_ic_app_sync_service_route(void)
         char gated[PROOF_HOST_GATED_MAX];
         uint32_t selected = 0;
         ASSERT(zcl_dev_proof_test_build_test_selector(
-            &plan, ".", false, selector, sizeof(selector), &selected,
+            &plan, ".", selector, sizeof(selector), &selected,
             gated, sizeof(gated)));
         ASSERT(ic_selector_has(selector, "test_app_event_sync"));
         ASSERT(gated[0] == '\0');
@@ -10213,6 +10213,21 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
                             i) < (int)sizeof(script));
             ASSERT(access(script, F_OK) != 0);
         }
+        /* The doc-counts block is a generated document too: stale counts alone
+         * refuse the proof naming the make target the author runs, since the
+         * land queue no longer repairs them. */
+        ASSERT(ic_write_lint(generation, "exit 0", "exit 0"));
+        ASSERT(ic_write(generation, "tools/scripts/check_doc_counts.sh",
+                        "#!/bin/sh\necho FAIL >&2\nexit 1\n"));
+        ASSERT(snprintf(script, sizeof(script), "%s/%s", generation,
+                        "tools/scripts/check_doc_counts.sh") <
+               (int)sizeof(script));
+        ASSERT(chmod(script, 0755) == 0);
+        memset(why, 0, sizeof(why));
+        ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
+                                                         sizeof(why)));
+        ASSERT_STR_EQ(why, "proof_generated_docs_stale:"
+                      "docs/dev/CODEBASE_MAP.md (make fix-doc-counts)");
         /* A generation without the checkers is a distinct refusal,
          * never a pass. */
         memset(why, 0, sizeof(why));
@@ -12216,7 +12231,7 @@ static int test_ic_include_capacity_runs_everything(void)
         ASSERT(ic_host_need_full_root(IC_FIX_HOST_FULL));
         ic_host_fixture_env(true);
         ASSERT(zcl_dev_proof_test_build_test_selector(
-                   &plan, IC_FIX_HOST_FULL, false, selector, sizeof(selector),
+                   &plan, IC_FIX_HOST_FULL, selector, sizeof(selector),
                    &selected, gated, sizeof(gated)));
         ic_host_fixture_restore(ic_fixture_saved, ic_fixture_was_set);
         ASSERT(ic_selector_is_universal(selector, selected,
@@ -12360,7 +12375,7 @@ static int test_ic_path_group_cap_runs_everything(void)
         ASSERT(ic_host_need_full_root(IC_FIX_HOST_FULL));
         ic_host_fixture_env(true);
         ASSERT(zcl_dev_proof_test_build_test_selector(
-                   &plan, IC_FIX_HOST_FULL, false, selector, sizeof(selector),
+                   &plan, IC_FIX_HOST_FULL, selector, sizeof(selector),
                    &selected, gated, sizeof(gated)));
         ic_host_fixture_restore(ic_fixture_saved, ic_fixture_was_set);
         ASSERT(ic_selector_is_universal(selector, selected,

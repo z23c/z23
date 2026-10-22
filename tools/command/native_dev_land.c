@@ -138,7 +138,7 @@
 #endif
 
 #include "command/native_command.h"
-#include "command/native_dev_land_regen.h"
+#include "command/native_dev_land_prepare.h"
 #include "command/native_dev_land_qualify.h"
 #include "command/native_dev_land_read.h"
 #include "command/native_dev_land_attestation.h"
@@ -751,6 +751,8 @@ static bool dl_row_state_ok(const struct dl_row *r)
            strcmp(r->state, "cancelled") == 0;
 }
 
+/* "regen" is accepted only so a row persisted by a binary that still had a
+ * regen phase loads; nothing writes it any more. */
 static bool dl_row_phase_ok(const struct dl_row *r)
 {
     return !r->phase[0] || strcmp(r->phase, "rebase") == 0 ||
@@ -4834,738 +4836,81 @@ static void dl_beat(const struct dl_row *row, const char *beat, int64_t started)
     if (zcl_dev_land_beat_format(&b, wire, sizeof(wire))) dl_log(row, wire);
 }
 
-/* ── rebase conflicts on the artifacts every train regenerates ──────────
+/* ── rebase conflicts on generated documents ────────────────────────────
  *
- * The <!-- DOC-COUNTS --> block of docs/dev/CODEBASE_MAP.md is GENERATED from the
- * code, and a train that lands regenerates them. Two tips landing in the
- * same window therefore collide on those files by construction, and a
- * textual merge of two generated files settles nothing: neither side is
- * authoritative, the CODE is. Refusing the whole tip for that is the queue
- * stalling on a conflict whose resolution is mechanical — take the
- * upstream side, re-run the generator that owns the file, then GATE the
- * result and commit what the code actually says.
- *
- * The table is CLOSED, and deliberately: it names the only artifact paths
- * with a regeneration target this file can name. CODEBASE_MAP also carries
- * authored prose, which must merge cleanly before regeneration. A conflict
- * touching anything else — even alongside these — is
- * still a conflict and is reported exactly as it is today, because nothing
- * mechanical can settle it. */
-struct dl_regen_artifact {
+ * The queue never regenerates, amends or merges a generated document: the
+ * tip that lands is the tip that was reviewed and signed. A document that is
+ * generated or checked from the code is an ordinary freshness gate, and the
+ * author owns the fix. A rebase that conflicts on one is therefore REFUSED
+ * like any other conflict, with the one thing the author needs added: the
+ * make target that rewrites the file. Neither side is picked, nothing is
+ * resolved, nothing is folded. */
+struct dl_generated_doc {
     const char *path;
-    const char *make_target;
-    const char *label; /* how the commit subject names it, in English */
+    const char *fix;
 };
 
-static const struct dl_regen_artifact DL_REGEN_ARTIFACTS[] = {
-#if defined(ZCL_TESTING)
-    /* The tracked fully-generated files are gone (the capability inventory
-     * and the API reference are build output under build/gen), so the
-     * take-upstream-and-regenerate path has no production row. The test
-     * build keeps one synthetic artifact so that path stays exercised. */
-    { "docs/FIXTURE_GENERATED.jsonl", "docs-fixture-generated",
-      "fixture artifact" },
-#endif
-    /* No target regenerates this page's body; `fix-doc-counts` (Makefile,
-     * next to check-doc-counts) rewrites the machine-readable DOC-COUNTS
-     * block from the code-measured values. Recovery normalizes that block
-     * to upstream before merging the three stages' authored prose; an
-     * authored conflict refuses recovery before regeneration or gates. */
-    { "docs/dev/CODEBASE_MAP.md", "fix-doc-counts", "codebase map" },
+static const struct dl_generated_doc DL_GENERATED_DOCS[] = {
+    { "docs/agent/EXECUTOR_HEURISTICS.md", "make docs-executor-routing" },
+    { "docs/dev/CODEBASE_MAP.md", "make fix-doc-counts" },
+    /* Build output under build/gen since the tracked copies were deleted. A
+     * row cut before that still edits them; there is nothing to regenerate. */
+    { "docs/CAPABILITY_INVENTORY.jsonl",
+      "git rm docs/CAPABILITY_INVENTORY.jsonl (it is build output under build/gen now)" },
+    { "docs/API_REFERENCE.md", // error-doc-ref-ok:retired git path, not a document
+      "git rm docs/API_REFERENCE.md (it is build output under build/gen now)" }, // error-doc-ref-ok:retired git path
 };
 
-/* Regenerating is only half of it: an artifact rewritten from THIS tree
- * still has to agree with the other generated artifacts and with the
- * code's own counts. These two gates are what says so. They run after the
- * generators and before anything is committed — and they run even when
- * the generators changed nothing, because "clean" is a claim about the
- * merged tree, not about the generator. */
-static const char *const DL_REGEN_GATES[] = {
-    "check-generated-artifact-contradictions",
-    "check-doc-counts",
-};
-
-#define DL_REGEN_N \
-    (sizeof(DL_REGEN_ARTIFACTS) / sizeof(DL_REGEN_ARTIFACTS[0]))
-#define DL_REGEN_GATE_N \
-    (sizeof(DL_REGEN_GATES) / sizeof(DL_REGEN_GATES[0]))
-/* An unmerged-path list about these files alone cannot be long. Making the
- * classify buffer the same size as the capture that feeds it means a
- * TRUNCATED capture is refused rather than mistaken for a short,
- * all-regenerated list — the one way this classification could fail open. */
-#define DL_REGEN_PATHS_CAP 1024u
-/* One `rebase --continue` per replayed commit. A rebase still conflicting
- * past this is not making progress; that is a setup failure, never a loop. */
-#define DL_REGEN_ROUNDS 20
-
-/* Test-only escape hatch for the generator and gate invocations below. The
- * rigs test_dev_land.c builds are throwaway git repos, not checkouts of
- * this repository: they carry no Makefile, so `make docs-capability-
- * inventory` there would fail for a reason that has nothing to do with the
- * classify / resolve / regenerate / gate / commit sequence under test. With
- * this set the make invocations are replaced by an in-process append to the
- * artifact — enough to dirty the tree so the regen commit is exercised for
- * real. Never read outside a test process, the same build-mode guard and
- * the same reasoning as dl_stub() and dl_hooks_stub_dir() above. */
-static bool dl_regen_stub(void)
+/* True when the newline-separated unmerged list `paths` names `path`. */
+static bool dl_paths_name(const char *paths, const char *path)
 {
-#if defined(ZCL_TESTING)
-    const char *s = getenv("ZCL_LAND_REGEN_MAKE_STUB");
-    return s && s[0];
-#else
-    /* A leaked test env var must never let an operator's production
-     * binary commit a hand-appended line in place of a real generator's
-     * output, nor skip the gates that check it. */
-    return false;
-#endif
-}
-
-/* The stubbed gate's verdict, so the refusal path — not just the happy
- * one — is exercised by a real case. Only ever consulted when
- * dl_regen_stub() already said this is a test process. */
-static bool dl_regen_gate_stub_fails(void)
-{
-#if defined(ZCL_TESTING)
-    const char *s = getenv("ZCL_LAND_REGEN_GATE_STUB_FAIL");
-    return s && s[0];
-#else
-    return false;
-#endif
-}
-
-/* The table index of `path`, or -1 when nothing in the closed table
- * matches it. */
-/* Generated files that left git: both are build output under build/gen now.
- * A row queued before that change may still modify the old tracked copy, and
- * rebasing it onto a main that deleted the file is a modify/delete conflict.
- * The only correct resolution is to delete the path again, never to re-add
- * it: there is nothing to regenerate or merge, and an add would resurrect a
- * file the tree no longer tracks. */
-static const char *const DL_REGEN_RETIRED[] = {
-    "docs/CAPABILITY_INVENTORY.jsonl",
-    "docs/API_REFERENCE.md", // error-doc-ref-ok: a retired git path, not a document reference
-};
-
-static bool dl_regen_retired(const char *path)
-{
-    for (size_t i = 0; i < sizeof(DL_REGEN_RETIRED) / sizeof(DL_REGEN_RETIRED[0]); i++) {
-        if (strcmp(path, DL_REGEN_RETIRED[i]) == 0)
+    size_t n = strlen(path);
+    for (const char *p = paths; p && *p;) {
+        const char *eol = strchr(p, '\n');
+        size_t len = eol ? (size_t)(eol - p) : strlen(p);
+        while (len > 0 && (p[len - 1] == '\r' || p[len - 1] == ' '))
+            len--;
+        if (len == n && strncmp(p, path, n) == 0)
             return true;
+        p = eol ? eol + 1 : NULL;
     }
     return false;
 }
 
-static int dl_regen_index(const char *path)
+/* The conflict message for the unmerged list `paths`: the paths with
+ * newlines as spaces, exactly as every conflict has always been named, and
+ * for each generated document among them the target that rewrites it. The
+ * hint is composed first so a long path list is what gets truncated. */
+static void dl_conflict_why(const char *paths, char *why, size_t cap)
 {
-    for (size_t i = 0; i < DL_REGEN_N; i++) {
-        if (strcmp(path, DL_REGEN_ARTIFACTS[i].path) == 0)
-            return (int)i;
-    }
-    return -1;
-}
-
-/* True only when `paths` (git's newline-separated unmerged list) is
- * NONEMPTY and every entry is a regenerated artifact; `seen[i]` is raised
- * for each artifact that appeared, accumulating across rounds. An empty
- * list — which is what a failed `diff --diff-filter=U` also looks like —
- * is never "all resolved". */
-static bool dl_regen_only(const char *paths, bool *seen)
-{
-    char work[DL_REGEN_PATHS_CAP];
-    char *line, *save = NULL;
-    bool any = false;
-    if (!paths || !paths[0] || strlen(paths) >= sizeof(work))
-        return false;
-    (void)snprintf(work, sizeof(work), "%s", paths);
-    for (line = strtok_r(work, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        size_t n = strlen(line);
-        int idx;
-        while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == ' '))
-            line[--n] = '\0';
-        if (!line[0])
-            continue;
-        idx = dl_regen_index(line);
-        if (idx < 0 && !dl_regen_retired(line))
-            return false;
-        if (idx >= 0)
-            seen[idx] = true;
-        any = true;
-    }
-    return any;
-}
-
-/* Merge count-page prose; take upstream for fully generated artifacts.
- * During `git rebase <upstream>` "ours" IS the upstream being rebased
- * onto — the side whose generated content already agrees with the code
- * that is on main. A path with no stage-2 entry (a delete/modify
- * conflict) makes `checkout --ours` fail, and that refuses the whole
- * auto-resolve rather than guessing. */
-static inline bool dl_counts_span(char *text, char **begin, char **end)
-{
-    const char *b = "<!-- DOC-COUNTS-BEGIN -->\n";
-    const char *e = "<!-- DOC-COUNTS-END -->\n";
-    *begin = strstr(text, b);
-    *end = strstr(text, e);
-    if (!*begin || !*end || *end < *begin ||
-        strstr(text, "<!-- DOC-COUNTS-BEGIN -->") != *begin ||
-        strstr(text, "<!-- DOC-COUNTS-END -->") != *end ||
-        (*begin != text && (*begin)[-1] != '\n') ||
-        (*end != text && (*end)[-1] != '\n') ||
-        strstr(*begin + strlen(b), "<!-- DOC-COUNTS-BEGIN -->") ||
-        strstr(*end + strlen(e), "<!-- DOC-COUNTS-END -->"))
-        return false;
-    *end += strlen(e);
-    return true;
-}
-/* Largest codebase-map stage the merge reads; a bigger one is refused, never
- * truncated. */
-#define DL_COUNTS_MAX_BYTES ((size_t)8 << 20)
-
-/* Read one index stage of docs/dev/CODEBASE_MAP.md into an exact-size heap
- * buffer (NUL-terminated). The size comes first so the capture cap is the
- * real length rather than a guess. */
-#if !defined(_WIN32)
-static bool dl_counts_stage(const struct dl_dirs *d, int stage, char **text,
-                            size_t *len)
-{
-    char spec[64], size_text[32], *endp = NULL;
-    struct zcl_spawn_binary_observation capture;
-    unsigned long long size;
-    (void)snprintf(spec, sizeof(spec), ":%d:docs/dev/CODEBASE_MAP.md", stage);
-    const char *cat[] = { "git", "-C", d->wt, "cat-file", "-s", spec, NULL };
-    if (!zcl_spawn_capture_binary(cat, size_text, sizeof(size_text) - 1,
-                                  DL_GIT_TIMEOUT_MS, &capture).ok) return false;
-    size_text[capture.output_len] = '\0';
-    size = strtoull(size_text, &endp, 10);
-    if (endp == size_text || size == 0) return false;
-    if (size > DL_COUNTS_MAX_BYTES) {
-        (void)fprintf(stderr, "dl_counts_merge: %s is %llu bytes, over the "
-                      "%zu byte ceiling\n", spec, size, DL_COUNTS_MAX_BYTES);
-        return false;
-    }
-    *text = zcl_malloc((size_t)size + 1, "dev.land.counts.stage");
-    if (!*text) return false;
-    const char *show[] = { "git", "-C", d->wt, "show", spec, NULL };
-    if (!zcl_spawn_capture_binary(show, *text, (size_t)size, DL_GIT_TIMEOUT_MS,
-                                  &capture).ok || capture.output_len != size)
-        return false;
-    (*text)[size] = '\0';
-    *len = (size_t)size;
-    return strlen(*text) == *len;
-}
-#endif
-
-/* Rebuild each stage with stage 2's count block and write the three-way
- * merge of the results to the working tree. */
-#if !defined(_WIN32)
-static bool dl_counts_combine(const struct dl_dirs *d, const char *scratch,
-                              char *const text[3], const size_t len[3],
-                              char *const begin[3], char *const end[3])
-{
-    char file[3][4220], path[4220], *merged;
-    struct zcl_spawn_binary_observation capture;
-    size_t cap = len[0] + len[1] + len[2] + 16384;
-    bool ok = false;
-    for (int i = 0; i < 3; i++) {
-        (void)snprintf(file[i], sizeof(file[i]), "%s/%d", scratch, i);
-        if ((begin[i] != text[i] &&
-             !dl_append_row(file[i], text[i], (size_t)(begin[i] - text[i]))) ||
-            !dl_append_row(file[i], begin[1], (size_t)(end[1] - begin[1])) ||
-            !dl_append_text(file[i], end[i])) return false;
-    }
-    merged = zcl_malloc(cap, "dev.land.counts.merged");
-    if (!merged) return false;
-    const char *merge[] = { "git", "-C", d->wt, "merge-file", "-p", "--",
-                            file[1], file[0], file[2], NULL };
-    if (zcl_spawn_capture_binary(merge, merged, cap - 1, DL_GIT_TIMEOUT_MS,
-                                 &capture).ok) {
-        merged[capture.output_len] = '\0';
-        (void)snprintf(path, sizeof(path), "%s/merged", scratch);
-        (void)snprintf(file[1], sizeof(file[1]), "%s/docs/dev/CODEBASE_MAP.md",
-                       d->wt);
-        ok = dl_append_text(path, merged) && rename(path, file[1]) == 0;
-    }
-    free(merged);
-    return ok;
-}
-#endif
-
-static bool dl_counts_merge(const struct dl_dirs *d)
-{
-#if defined(_WIN32)
-    (void)d;
-    return false;
-#else
-    char scratch[4200], *text[3] = { NULL, NULL, NULL };
-    char *begin[3], *end[3];
-    size_t len[3] = { 0, 0, 0 };
-    bool ok = false;
-    if (snprintf(scratch, sizeof(scratch), "%s/counts.XXXXXX", d->land) >=
-        (int)sizeof(scratch) || !mkdtemp(scratch)) return false;
-    for (int i = 0; i < 3; i++)
-        if (!dl_counts_stage(d, i + 1, &text[i], &len[i]) ||
-            !dl_counts_span(text[i], &begin[i], &end[i])) goto done;
-    ok = dl_counts_combine(d, scratch, text, len, begin, end);
-done:
-    for (int i = 0; i < 3; i++) free(text[i]);
-    if (!zcl_tree_remove(scratch).ok) ok = false;
-    return ok;
-#endif
-}
-static bool dl_regen_resolve(const struct dl_dirs *d, const char *paths)
-{
-    char work[DL_REGEN_PATHS_CAP];
-    char *line, *save = NULL;
-    if (!paths || !paths[0] || strlen(paths) >= sizeof(work))
-        return false;
-    (void)snprintf(work, sizeof(work), "%s", paths);
-    for (line = strtok_r(work, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        const char *ours[] = { "checkout", "--ours", "--", line, NULL };
-        const char *add[] = { "add", "--", line, NULL };
-        size_t n = strlen(line);
-        while (n > 0 && (line[n - 1] == '\r' || line[n - 1] == ' '))
-            line[--n] = '\0';
-        if (!line[0])
-            continue;
-        if (dl_regen_retired(line)) {
-            const char *drop[] = { "rm", "-q", "-f", "--", line, NULL };
-            if (dl_git(d->wt, drop, NULL, 0, DL_GIT_TIMEOUT_MS) != 0)
-                return false;
-            continue;
-        }
-        bool resolved = strcmp(line, "docs/dev/CODEBASE_MAP.md") == 0
-            ? dl_counts_merge(d) : dl_git(d->wt, ours, NULL, 0, DL_GIT_TIMEOUT_MS) == 0;
-        if (!resolved ||
-            dl_git(d->wt, add, NULL, 0, DL_GIT_TIMEOUT_MS) != 0)
-            return false;
-    }
-    return true;
-}
-
-/* The test stub's stand-in for a generator: dirty the artifact in place.
- * No process is spawned — a stub that spawned one would be testing the
- * spawn seam rather than the commit path it exists to reach. */
-static bool dl_regen_stub_write(const char *wt, const char *rel)
-{
-    char path[4096 + 96];
-    FILE *f;
-    if (snprintf(path, sizeof(path), "%s/%s", wt, rel) >= (int)sizeof(path))
-        return false;
-    f = fopen(path, "ab");
-    if (!f)
-        return false;
-    if (fputs("regenerated by dev.land\n", f) == EOF) {
-        (void)fclose(f);
-        return false;
-    }
-    return fclose(f) == 0;
-}
-
-/* One make target in the landing worktree — a generator or a gate. Same
- * spawn seam, same transcript handling and same actionable-line triage as
- * dl_lint_fast() below: generation uses the same `make` execution path.
- * Trust: the targets are the CANDIDATE's own Makefile recipes, run in the
- * private landing worktree -- the tree whose tools the lint and prebuild
- * below already build and execute -- so this adds no execution exposure
- * the landing did not already have. `line` receives the first
- * line a person can act on when the target failed. */
-static int dl_regen_make(const struct dl_dirs *d, struct dl_row *row,
-                         const char *target, char *line, size_t line_cap)
-{
-    /* Was a bare "-j8". These are the same make targets the proof just ran,
-     * in the same grant, so the two disagreeing about the job count meant one
-     * of them was wrong about the same machine. N now comes from the one
-     * repository-wide derivation (platform/logical_cpu.h) -- 28 inside this
-     * host's build grant, where the old literal spent 8. `jobs` must outlive
-     * argv. */
-    char jobs[16];
-    if (!platform_build_jobs_arg(jobs)) {
-        fprintf(stderr, "[dev.land] build jobs: ZCL_BUILD_MAX_JOBS must be a positive uint32 decimal\n");
-        return -1;
-    }
-    const char *argv[] = { "make", jobs, "-C", d->wt, target, NULL };
-    char *buf;
-    int rc;
-    if (line && line_cap)
-        line[0] = '\0';
-    buf = (char *)zcl_malloc(DL_LOG_CAP, "dev.land.regen");
-    if (!buf)
-        return -1;
-    rc = zcl_spawn_capture(argv, buf, DL_LOG_CAP, DL_LINT_TIMEOUT_MS);
-    dl_log(row, buf);
-    if (rc != 0 && line && line_cap) {
-        dl_first_actionable(buf, line, line_cap);
-        if (!line[0]) {
-            /* dl_first_actionable's needles do not include the doc-count
-             * gate's own MISMATCH wording, and `make`'s "*** Error" goes
-             * to stderr, which this capture does not hold. Look for the
-             * gate's word before giving up on naming a line at all. */
-            const char *m = strstr(buf, "MISMATCH");
-            if (m) {
-                const char *start = m;
-                while (start > buf && start[-1] != '\n')
-                    start--;
-                (void)snprintf(line, line_cap, "%.*s",
-                               (int)strcspn(start, "\n"), start);
-            }
-        }
-    }
-    free(buf);
-    return rc;
-}
-
-/* "rebase: regenerated <a>,<b>" — the artifacts that ACTUALLY conflicted,
- * in table order, by their raw paths, so the row says what landing added
- * to the tip rather than presenting a silently rewritten tree as an
- * ordinary rebase. Machine-facing on purpose; the commit subject below is
- * the English one. */
-static void dl_regen_note(const bool *seen, char *out, size_t cap)
-{
-    size_t used;
-    bool first = true;
-    int w;
-    if (!out || cap == 0)
+    char hint[512] = "";
+    size_t hint_len = 0, room;
+    if (!why || cap == 0)
         return;
-    out[0] = '\0';
-    bool any = false;
-    for (size_t i = 0; i < DL_REGEN_N; i++)
-        any = any || seen[i];
-    if (!any) {
-        (void)snprintf(out, cap, "rebase: dropped retired generated files");
-        return;
-    }
-    w = snprintf(out, cap, "rebase: regenerated");
-    if (w < 0 || (size_t)w >= cap) {
-        out[0] = '\0';
-        return;
-    }
-    used = (size_t)w;
-    for (size_t i = 0; i < DL_REGEN_N; i++) {
-        if (!seen[i])
+    for (size_t i = 0; paths && i < sizeof(DL_GENERATED_DOCS) /
+                                        sizeof(DL_GENERATED_DOCS[0]); i++) {
+        int w;
+        if (!dl_paths_name(paths, DL_GENERATED_DOCS[i].path))
             continue;
-        w = snprintf(out + used, cap - used, "%s%s", first ? " " : ",",
-                     DL_REGEN_ARTIFACTS[i].path);
-        if (w < 0 || (size_t)w >= cap - used) {
-            out[0] = '\0';
-            return;
+        w = snprintf(hint + hint_len, sizeof(hint) - hint_len,
+                     "%s%s: generated document, the queue does not "
+                     "regenerate or pick a side; rebase onto origin/main "
+                     "yourself, run `%s`, commit and resubmit",
+                     hint_len ? "; " : " -- ", DL_GENERATED_DOCS[i].path,
+                     DL_GENERATED_DOCS[i].fix);
+        if (w < 0 || (size_t)w >= sizeof(hint) - hint_len) {
+            hint_len = strlen(hint);
+            break;
         }
-        used += (size_t)w;
-        first = false;
+        hint_len += (size_t)w;
     }
-}
-
-/* "Regenerate the capability inventory, API reference and codebase map
- * after rebasing onto <short base>" — English, listing only what actually
- * conflicted, because this subject is read by people scanning main's
- * history, not by a parser. */
-static bool dl_regen_subject(const bool *seen, const char *base, char *out,
-                             size_t cap)
-{
-    size_t used, remaining = 0;
-    bool first = true;
-    int w;
-    if (!out || cap == 0)
-        return false;
-    out[0] = '\0';
-    for (size_t i = 0; i < DL_REGEN_N; i++) {
-        if (seen[i])
-            remaining++;
-    }
-    if (remaining == 0)
-        return false;
-    w = snprintf(out, cap, "Regenerate the");
-    if (w < 0 || (size_t)w >= cap)
-        return false;
-    used = (size_t)w;
-    for (size_t i = 0; i < DL_REGEN_N; i++) {
-        const char *sep;
-        if (!seen[i])
-            continue;
-        remaining--;
-        sep = first ? " " : (remaining == 0 ? " and " : ", ");
-        w = snprintf(out + used, cap - used, "%s%s", sep,
-                     DL_REGEN_ARTIFACTS[i].label);
-        if (w < 0 || (size_t)w >= cap - used)
-            return false;
-        used += (size_t)w;
-        first = false;
-    }
-    w = snprintf(out + used, cap - used, " after rebasing onto %.9s", base);
-    return w >= 0 && (size_t)w < cap - used;
-}
-
-/* Record the regenerated artifacts by AMENDING them into the rebased
- * candidate's last commit, never as a follow-up commit on main.
- *
- * WHY THE TIP, NOT THE REPLAYED COMMIT THAT CONFLICTED. The auto-resolve
- * above settles each conflicted replay by taking main's side, so an
- * intermediate replayed commit carries main's copy of the artifact; the
- * generators then run ONCE, on the finished tree, and describe the code of
- * that tree, which is HEAD's. Only HEAD's tree is proved and published.
- * Folding into the commit being replayed would mean running generators
- * mid-rebase for trees nobody proves, for no difference in what lands.
- *
- * `--amend --no-edit` keeps the tip's message, author and parents; `--only`
- * with the explicit closed-table paths records the tip's own tree plus
- * exactly those paths, whatever else the index holds. Signing is the
- * ambient commit.gpgsign configuration -- no -S and no --no-gpg-sign,
- * exactly as native_dev_train_command.c's regenerate-docs commit relies on
- * it; main rejects an unsigned commit, so a flag invented here would be a
- * second, divergent way to state the same policy.
- *
- * The one HEAD that cannot be amended is one main already holds (the
- * rebase skipped every candidate commit): rewriting it would rewrite
- * published history, so that case alone keeps the separate commit. */
-static int dl_regen_fold(const struct dl_dirs *d, struct dl_row *row,
-                         const bool *seen, char *why, size_t why_cap)
-{
-    const char *published_args[] = { "--no-replace-objects", "merge-base",
-                                     "--is-ancestor", "HEAD", row->base,
-                                     NULL };
-    const char *args[DL_REGEN_N + 8];
-    char subject[512];
-    size_t n = 0;
-    int ancestor_rc = dl_git(d->wt, published_args, NULL, 0,
-                           DL_GIT_TIMEOUT_MS);
-    args[n++] = "commit";
-    args[n++] = "-q";
-    if (ancestor_rc == 1) {       /* HEAD is the candidate's own commit */
-        args[n++] = "--amend";
-        args[n++] = "--no-edit";
-    } else if (ancestor_rc == 0 &&   /* main already holds HEAD */
-               dl_regen_subject(seen, row->base, subject, sizeof(subject))) {
-        args[n++] = "-m";
-        args[n++] = subject;
-    } else {
-        (void)snprintf(why, why_cap, "%s",
-                       "regen commit failed after auto-resolving the "
-                       "rebase");
-        return -1;
-    }
-    args[n++] = "--only";
-    args[n++] = "--";
-    for (size_t i = 0; i < DL_REGEN_N; i++) {
-        if (seen[i])
-            args[n++] = DL_REGEN_ARTIFACTS[i].path;
-    }
-    args[n] = NULL;
-    if (dl_git(d->wt, args, NULL, 0, DL_GIT_TIMEOUT_MS) != 0) {
-        (void)snprintf(why, why_cap, "%s",
-                       "regen commit failed after auto-resolving the "
-                       "rebase");
-        return -1;
-    }
-    return 1;
-}
-
-/* Run the generator of every `run[i]` artifact, deduped by make target. */
-static int dl_regen_generate(const struct dl_dirs *d, struct dl_row *row,
-                             const bool *run, char *why, size_t why_cap)
-{
-    char line[256];
-    for (size_t i = 0; i < DL_REGEN_N; i++) {
-        bool duplicate = false;
-        if (!run[i])
-            continue;
-        if (dl_regen_stub()) {
-            if (dl_regen_stub_write(d->wt, DL_REGEN_ARTIFACTS[i].path))
-                continue;
-            (void)snprintf(why, why_cap,
-                           "regenerating %s (%s) failed after "
-                           "auto-resolving the rebase",
-                           DL_REGEN_ARTIFACTS[i].path,
-                           DL_REGEN_ARTIFACTS[i].make_target);
-            return -1;
-        }
-        for (size_t j = 0; j < i; j++) {
-            if (run[j] && strcmp(DL_REGEN_ARTIFACTS[j].make_target,
-                                 DL_REGEN_ARTIFACTS[i].make_target) == 0)
-                duplicate = true;
-        }
-        if (duplicate)
-            continue;
-        if (dl_regen_make(d, row, DL_REGEN_ARTIFACTS[i].make_target, line,
-                          sizeof(line)) != 0) {
-            (void)snprintf(why, why_cap,
-                           "regenerating %s (%s) failed after "
-                           "auto-resolving the rebase",
-                           DL_REGEN_ARTIFACTS[i].path,
-                           DL_REGEN_ARTIFACTS[i].make_target);
-            return -1;
-        }
-    }
-    return 1;
-}
-
-/* The gates run whether or not the generators moved a byte: agreement
- * between the generated artifacts is a property of the MERGED tree,
- * and the merge is what just changed. */
-static int dl_regen_gates(const struct dl_dirs *d, struct dl_row *row,
-                          char *why, size_t why_cap)
-{
-    char line[256];
-    for (size_t i = 0; i < DL_REGEN_GATE_N; i++) {
-        int rc;
-        if (dl_regen_stub()) {
-            if (!dl_regen_gate_stub_fails())
-                continue;
-            (void)snprintf(line, sizeof(line), "%s",
-                           "FAIL: stub gate refused "
-                           "(ZCL_LAND_REGEN_GATE_STUB_FAIL)");
-            rc = 1;
-        } else {
-            rc = dl_regen_make(d, row, DL_REGEN_GATES[i], line,
-                               sizeof(line));
-        }
-        if (rc == 0)
-            continue;
-        (void)snprintf(why, why_cap,
-                       "%s refused after auto-resolving the rebase: %s",
-                       DL_REGEN_GATES[i],
-                       line[0] ? line : "no actionable line captured");
-        return -1;
-    }
-    return 1;
-}
-
-/* `touched` = conflicted artifacts plus any other one a generator moved. */
-static void dl_regen_touched(const struct dl_dirs *d, const bool *seen,
-                             const bool *run, bool *touched)
-{
-    for (size_t i = 0; i < DL_REGEN_N; i++) {
-        const char *args[] = { "diff", "--quiet", "--",
-                               DL_REGEN_ARTIFACTS[i].path, NULL };
-        touched[i] = seen[i] ||
-            (run[i] && dl_git(d->wt, args, NULL, 0, DL_GIT_TIMEOUT_MS) != 0);
-    }
-}
-
-/* Run every artifact's generator (all are deterministic, and a count bump
- * can merge cleanly yet stale while another artifact conflicts), then the
- * two gates that say the regenerated tree is self-consistent, then fold
- * whatever the generators actually changed into the tip
- * (dl_regen_fold()). Returns 1 on success,
- * -1 with `why` on a hard failure — a generator that will not run, a gate
- * that still refuses, or a commit that will not be made is not a conflict
- * any more. The stub regenerates only the conflicted artifacts. */
-static int dl_regen_run(const struct dl_dirs *d, struct dl_row *row,
-                        const bool *seen, char *why, size_t why_cap)
-{
-    const char *diff_args[DL_REGEN_N + 4];
-    bool run[DL_REGEN_N], touched[DL_REGEN_N];
-    size_t dn = 0;
-
-    for (size_t i = 0; i < DL_REGEN_N; i++)
-        run[i] = dl_regen_stub() ? seen[i] : true;
-    if (dl_regen_generate(d, row, run, why, why_cap) < 0 ||
-        dl_regen_gates(d, row, why, why_cap) < 0)
-        return -1;
-    dl_regen_touched(d, seen, run, touched);
-
-    diff_args[dn++] = "diff";
-    diff_args[dn++] = "--quiet";
-    diff_args[dn++] = "--";
-    for (size_t i = 0; i < DL_REGEN_N; i++) {
-        if (touched[i])
-            diff_args[dn++] = DL_REGEN_ARTIFACTS[i].path;
-    }
-    diff_args[dn] = NULL;
-    /* Exit 0 means the generators reproduced exactly what the upstream
-     * side already held. Nothing to record: that is a clean outcome, not
-     * a failure. */
-    if (dl_git(d->wt, diff_args, NULL, 0, DL_GIT_TIMEOUT_MS) == 0)
-        return 1;
-    return dl_regen_fold(d, row, touched, why, why_cap);
-}
-
-/* Why an auto-resolve that already settled one replayed commit handed a
- * later one back as a conflict. An empty list means `rebase --continue`
- * failed without leaving an unmerged path: the replayed commit itself was
- * refused, the signer included -- no unsigned commit is ever made here. */
-static void dl_regen_stop_log(struct dl_row *row, const char *paths)
-{
-    char note[DL_REGEN_PATHS_CAP + 160];
-    if (!paths || !paths[0]) {
-        dl_log(row, "rebase auto-resolve stopped: git rebase --continue "
-                    "failed with no unmerged path (the replayed commit, or "
-                    "its signature, was refused)\n");
-        return;
-    }
-    (void)snprintf(note, sizeof(note),
-                   "rebase auto-resolve stopped: a replayed commit "
-                   "conflicted outside the regenerated artifacts: %.*s\n",
-                   (int)DL_REGEN_PATHS_CAP, paths);
-    for (char *p = note; p[0] && p[1]; p++) {
+    room = hint_len < cap ? cap - 1 - hint_len : 0;
+    (void)snprintf(why, cap, "%.*s%s", (int)room,
+                   paths && paths[0] ? paths : "rebase refused the tip", hint);
+    for (char *p = why; *p; p++) {
         if (*p == '\n')
             *p = ' ';
     }
-    dl_log(row, note);
-}
-
-/* Drive a conflicted rebase to completion when — and only when — every
- * conflicted path is a regenerated artifact, on every replayed commit.
- *
- * Returns 1 auto-resolved (the rebase finished, the generators ran, the
- * gates passed, and their output is committed or provably identical), 0
- * not ours to settle (the caller aborts and reports the conflict
- * byte-identically to how it always has), -1 a hard failure with `why`.
- * `why` is written ONLY on -1: the caller has already composed the
- * conflict message from the original unmerged list and must keep it.
- * `paths` is the caller's capture buffer, reused for each round's
- * re-check. */
-static int dl_rebase_autoresolve(const struct dl_dirs *d, struct dl_row *row,
-                                 char *paths, size_t paths_cap, bool *seen,
-                                 char *why, size_t why_cap)
-{
-    const char *staged_args[] = { "diff", "--cached", "--quiet", NULL };
-    const char *cont_args[] = { "-c", "rerere.autoupdate=false", "-c",
-                                "core.editor=true", "rebase", "--continue", NULL };
-    const char *skip_args[] = { "-c", "rerere.autoupdate=false", "rebase", "--skip", NULL };
-    const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U",
-                                    NULL };
-    size_t recheck_cap = paths_cap < DL_REGEN_PATHS_CAP ? paths_cap
-                                                        : DL_REGEN_PATHS_CAP;
-    if (!dl_regen_only(paths, seen))
-        return 0;
-    for (int round = 0; round < DL_REGEN_ROUNDS; round++) {
-        int rc;
-        if (!dl_regen_resolve(d, paths)) {
-            dl_log(row, "rebase auto-resolve refused the conflicted "
-                        "artifact set\n");
-            return 0;
-        }
-        /* Taking the upstream side can leave the replayed commit with
-         * nothing of its own left to record — a commit that only ever
-         * regenerated these files. git refuses to continue on an empty
-         * commit and asks for --skip by name; skipping is correct there,
-         * because the commit contributes nothing the upstream side does
-         * not already hold. */
-        if (dl_git(d->wt, staged_args, NULL, 0, DL_GIT_TIMEOUT_MS) == 0)
-            rc = dl_git(d->wt, skip_args, NULL, 0, DL_GIT_TIMEOUT_MS);
-        else
-            rc = dl_git(d->wt, cont_args, NULL, 0, DL_GIT_TIMEOUT_MS);
-        if (rc == 0)
-            return dl_regen_run(d, row, seen, why, why_cap);
-        paths[0] = '\0';
-        (void)dl_git(d->wt, unmerged_args, paths, recheck_cap,
-                     DL_GIT_TIMEOUT_MS);
-        dl_trim(paths);
-        /* A nonzero continue with no unmerged paths is a rebase failure
-         * this cannot name; so is one naming anything outside the table.
-         * Both fall back to the caller's ordinary conflict outcome, whose
-         * detail names only the FIRST commit's unmerged list -- so the
-         * attempt log says what actually stopped the auto-resolve. */
-        if (!dl_regen_only(paths, seen)) {
-            dl_regen_stop_log(row, paths);
-            return 0;
-        }
-    }
-    (void)snprintf(why, why_cap, "%s",
-                   "the rebase kept conflicting on regenerated artifacts "
-                   "past the auto-resolve bound");
-    return -1;
 }
 
 /* Preserve the resolved source while giving the integrated proposal a linear
@@ -5731,15 +5076,11 @@ static void dl_row_move_base(struct dl_row *row, const char *observed_main)
 
 /* Rebase the row's tip onto origin/main inside the private landing
  * worktree. Returns 1 prepared, 0 conflict, -1 setup failure.
- *
- * `regen_note` is an OUT parameter, always initialised: it is filled only
- * when a conflict on the regenerated artifacts above was auto-resolved,
- * and stays empty on every other path — so a caller can tell a rebase
- * that amended regenerated docs into the tip from one that did not,
- * without having to re-derive it from git. */
+
+ * A conflict is never settled here: it is named (dl_conflict_why()) and the
+ * rebase aborted, whatever paths it touches. */
 int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
-                     const char *observed_main, char *why, size_t why_cap,
-                     char *regen_note, size_t regen_note_cap)
+                     const char *observed_main, char *why, size_t why_cap)
 {
     char buf[DL_GIT_CAP];
     bool integrated = false;
@@ -5747,8 +5088,6 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
                                   "rerere.autoupdate=false", "rebase", observed_main, NULL };
     const char *unmerged_args[] = { "diff", "--name-only", "--diff-filter=U", NULL };
     const char *abort_args[] = { "rebase", "--abort", NULL };
-    if (regen_note && regen_note_cap)
-        regen_note[0] = '\0';
     if (!dl_tip_checkout(d, row, observed_main, &integrated, why, why_cap))
         return -1;
     dl_row_move_base(row, observed_main);
@@ -5759,37 +5098,12 @@ int dl_rebase(const struct dl_dirs *d, struct dl_row *row,
         dl_git(d->wt, rebase_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS) !=
         0) {
         char paths[DL_GIT_CAP];
-        bool seen[DL_REGEN_N] = { false };
-        int resolved;
         (void)dl_git(d->wt, unmerged_args, paths, sizeof(paths),
                      DL_GIT_TIMEOUT_MS);
         dl_trim(paths);
-        /* Compose the conflict message FIRST, from the original list, so
-         * the auto-resolve below is free to reuse `paths` as scratch and
-         * a conflict it declines to settle still reports byte-identically
-         * to how it always has. Replacing newlines in `why` rather than
-         * in `paths` is a 1:1 substitution, so it truncates identically
-         * too. */
-        (void)snprintf(why, why_cap, "%s",
-                       paths[0] ? paths : "rebase refused the tip");
-        for (char *p = why; *p; p++) {
-            if (*p == '\n')
-                *p = ' ';
-        }
-        resolved = dl_rebase_autoresolve(d, row, paths, sizeof(paths), seen,
-                                         why, why_cap);
-        if (resolved < 0) {
-            (void)dl_git(d->wt, abort_args, buf, sizeof(buf),
-                         DL_GIT_TIMEOUT_MS);
-            return -1;
-        }
-        if (resolved > 0) {
-            dl_regen_note(seen, regen_note, regen_note_cap);
-        } else {
-            (void)dl_git(d->wt, abort_args, buf, sizeof(buf),
-                         DL_GIT_TIMEOUT_MS);
-            return 0;
-        }
+        dl_conflict_why(paths, why, why_cap);
+        (void)dl_git(d->wt, abort_args, buf, sizeof(buf), DL_GIT_TIMEOUT_MS);
+        return 0;
     }
     if (!dl_rev_parse(d->wt, "HEAD", row->local)) {
         (void)snprintf(why, why_cap, "the rebased head cannot be named");
@@ -7051,75 +6365,6 @@ static bool dl_already_landed(const struct dl_dirs *d, struct dl_row *row,
     return true;
 }
 
-/* Run the unconditional post-rebase regen phase (native_dev_land_regen.c)
- * and fold its outcome into `row`. Returns true when step should continue
- * to prebuild; false when this already recorded and replied a terminal
- * "failed" outcome, mirroring every other phase's failure arm in
- * dl_step_start() below. */
-static bool dl_step_regen(const struct dl_dirs *d, struct dl_row *row,
-                          struct zcl_command_reply *reply)
-{
-    char regen_head[80] = { 0 }, regen_why[512] = { 0 };
-    char *log;
-    int rc;
-    (void)snprintf(row->phase, sizeof(row->phase), "regen");
-    log = (char *)zcl_malloc(DL_LOG_CAP, "dev.land.regen.log");
-    rc = log ? zcl_dev_land_regen_phase(d->wt, row->base, row->tip,
-                                        regen_head, sizeof(regen_head), log,
-                                        DL_LOG_CAP, regen_why,
-                                        sizeof(regen_why))
-             : -1;
-    /* A success that cannot name HEAD would leave row->local on the
-     * pre-amend id, and the proof would then prove a tree nobody pushes. */
-    if (rc >= 0 && !dl_sha_ok(regen_head)) {
-        rc = -1;
-        (void)snprintf(regen_why, sizeof(regen_why), "%s",
-                       "regen could not name the tip it left behind");
-    }
-    if (log) {
-        dl_log(row, log);
-        free(log);
-    } else if (!regen_why[0]) {
-        (void)snprintf(regen_why, sizeof(regen_why), "%s",
-                      "out of memory preparing the regen transcript");
-    }
-    if (rc < 0) {
-        (void)snprintf(row->state, sizeof(row->state), "failed");
-        (void)snprintf(row->dimension, sizeof(row->dimension), "regen");
-        (void)snprintf(row->detail, sizeof(row->detail), "%s", regen_why);
-        dl_log(row, regen_why);
-        dl_log(row, "\n");
-        if (dl_commit_or_report(d, row, true, reply, "failed"))
-            dl_step_reply(reply, row, "failed");
-        return false;
-    }
-    /* The amended tip replaces the rebased one everywhere downstream: proof
-     * intent (local@base and tree), publication intent, receipts and the
-     * push all read row->local, and none of them has run yet. */
-    (void)snprintf(row->local, sizeof(row->local), "%s", regen_head);
-    return true;
-}
-
-/* After a successful rebase, log any regeneration note next to the attempt
- * log and run the unconditional post-rebase regen phase. Returns true when
- * dl_step_start() should continue on to prebuild; false when the regen phase
- * itself already recorded and replied a terminal "failed" outcome. */
-static bool dl_step_after_rebase(const struct dl_dirs *d, struct dl_row *row,
-                                 struct zcl_command_reply *reply,
-                                 const char *regen_note)
-{
-    /* The rebase settled a conflict on the generated artifacts by
-     * regenerating them, which amended content into the tip that the
-     * submitter never wrote. Say so -- in the row and in the attempt log -- rather
-     * than presenting a rewritten tree as an ordinary rebase. */
-    if (regen_note[0]) {
-        (void)snprintf(row->detail, sizeof(row->detail), "%s", regen_note);
-        dl_log(row, regen_note);
-        dl_log(row, "\n");
-    }
-    return dl_step_regen(d, row, reply);
-}
-
 /* A missing observation and a reconciled landing both finish this step.
  * Only a fresh remote that does not contain the candidate permits proof. */
 static bool dl_publication_verify(const struct dl_dirs *d,
@@ -7476,8 +6721,7 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
 #endif
 
 static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
-                            const char *regen_note,
-                            struct zcl_command_reply *reply)
+                           struct zcl_command_reply *reply)
 {
     char detail[512];
     enum dl_proof p;
@@ -7500,8 +6744,7 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
     }
     p = dl_proof_request(d->wt, row->local, row->base, detail,
                          sizeof(detail));
-    (void)snprintf(row->detail, sizeof(row->detail), "%s%s%s", regen_note,
-                   regen_note[0] ? "; " : "", detail);
+    (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
     dl_log(row, detail);
     dl_log(row, "\n");
     if (p == DL_PROOF_UNAVAILABLE || p == DL_PROOF_FAILED) {
@@ -7530,7 +6773,7 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
                           struct zcl_command_reply *reply,
                           char observed_main[80])
 {
-    char why[1024], tickets[512], regen_note[256];
+    char why[1024], tickets[512];
     int rebased;
 
     (void)snprintf(row->state, sizeof(row->state), "inflight");
@@ -7555,8 +6798,7 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
     }
     if (dl_reconcile_landing(d, row, observed_main, true, reply))
         return;
-    rebased = dl_train_rebase(d, row, observed_main, why, sizeof(why),
-                              regen_note, sizeof(regen_note));
+    rebased = dl_train_rebase(d, row, observed_main, why, sizeof(why));
     if (rebased == 0) {
         (void)snprintf(row->state, sizeof(row->state), "conflict");
         (void)snprintf(row->dimension, sizeof(row->dimension), "rebase");
@@ -7578,8 +6820,6 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "failed");
         return;
     }
-    if (!dl_step_after_rebase(d, row, reply, regen_note))
-        return;
     /* The lint pass is what the proof would discover last and cheapest to
      * discover first. The proof stub skips it: a test of this queue is not
      * a test of the lint suite. */
@@ -7622,7 +6862,7 @@ static void dl_step_start(const struct dl_dirs *d, struct dl_row *row,
             dl_step_reply(reply, row, "failed");
         return;
     }
-    dl_start_proof(d, row, regen_note, reply);
+    dl_start_proof(d, row, reply);
 }
 
 static void dl_prepare(const struct dl_dirs *d, struct dl_row *row,
@@ -9372,14 +8612,11 @@ static void dl_step_proof_unclaimed(const char *detail, struct zcl_command_reply
  * --write-tree`, the same ort merge a rebase pick runs.
  *
  * VERDICTS. Only CERTAINTY ends a row. CONFLICT: the first conflicting
- * replay names a path outside the regenerated-artifact table — dl_rebase()
- * stops on that same commit, dl_rebase_autoresolve() declines it, and the
- * rebase aborts as a conflict. CLEAN: every replay merged. DEFERRED: a
- * settled answer that is not a conflict — the first conflicting replay
- * touches only regenerated artifacts (dl_rebase() settles those and
- * replays on, past what this check follows), or the replay is longer than
- * DL_PRECHECK_COMMITS. CLEAN and DEFERRED rows are marked as checked for
- * this main. UNCERTAIN: anything else — git failing, crashing or timing
+ * replay conflicts on any path at all, generated documents included —
+ * dl_rebase() stops on that same commit and aborts as a conflict. CLEAN:
+ * every replay merged. DEFERRED: a settled answer that is not a conflict —
+ * the replay is longer than DL_PRECHECK_COMMITS. CLEAN and DEFERRED rows
+ * are marked as checked for this main. UNCERTAIN: anything else — git failing, crashing or timing
  * out, a missing object or unresolvable ref, a capture that may be
  * truncated, an empty or unparseable conflict list. The row is left
  * exactly as it was, unmarked, so the next beat asks again; the reason is
@@ -9437,7 +8674,7 @@ struct dl_pc {
     bool expired;
     char *buf;
     size_t cap;
-    char why[DL_REGEN_PATHS_CAP + 128];
+    char why[1152];
 };
 
 static const char *dl_precheck_word(enum dl_precheck v)
@@ -9682,27 +8919,14 @@ static enum dl_precheck dl_precheck_merge(struct dl_pc *pc, const char *base,
     return (*paths)[0] ? DL_PRECHECK_CONFLICT : DL_PRECHECK_UNCERTAIN;
 }
 
-/* A conflicted-path list dl_rebase() could not settle is a conflict, named
- * the way dl_rebase() names it (newlines as spaces). A list of regenerated
- * artifacts alone is not: dl_rebase_autoresolve() settles it and the
- * rebase replays on past what this check can follow. The list is known
- * complete here (dl_precheck_merge() refuses a capture that may be
- * truncated), and a list too long for dl_regen_only() to hold cannot be
- * the three artifacts alone: git names each path once. */
+/* A conflicted-path list is a conflict, named the way dl_rebase() names it
+ * (dl_conflict_why(): newlines as spaces, and the make target for any
+ * generated document among them). The list is known complete here
+ * (dl_precheck_merge() refuses a capture that may be truncated). */
 static enum dl_precheck dl_precheck_classify(struct dl_pc *pc,
                                              const char *paths)
 {
-    bool seen[DL_REGEN_N] = { false };
-    if (dl_regen_only(paths, seen)) {
-        (void)snprintf(pc->why, sizeof(pc->why), "%s",
-                       "conflicts only on regenerated artifacts");
-        return DL_PRECHECK_DEFERRED;
-    }
-    (void)snprintf(pc->why, sizeof(pc->why), "%s", paths);
-    for (char *p = pc->why; *p; p++) {
-        if (*p == '\n')
-            *p = ' ';
-    }
+    dl_conflict_why(paths, pc->why, sizeof(pc->why));
     return DL_PRECHECK_CONFLICT;
 }
 
@@ -11092,7 +10316,7 @@ int zcl_native_dev_land_test_watch_worker(const char *wt, const char *base,
 }
 
 /* Build the development binary in the landing worktree — the candidate's
- * own Makefile target, in the tree whose lint and regeneration recipes the
+ * own Makefile target, in the tree whose lint recipes the
  * landing already runs — and prove the pair with that binary as a child.
  * Returns 1 once the child proof has exited (its verdict is the pair's
  * settled proof state, read by the step that follows), -1 with `why` when

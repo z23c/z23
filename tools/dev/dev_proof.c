@@ -5635,9 +5635,10 @@ bool zcl_dev_proof_test_generation_dependencies(const char *root,
  * sealed generation before any expensive dimension runs. A stale generated
  * file fails the proof's own lint dimension minutes later; refusing here
  * names the exact file and its regen command in seconds, without touching
- * a byte of the candidate. The tracked paths mirror DLRG_ARTIFACTS (the
- * land queue regenerates them pre-proof); the worker only ever VERIFIES,
- * so a refusal can never be caused by something this proof wrote. */
+ * a byte of the candidate. The tracked paths are the closed set of generated
+ * docs an author refreshes with the named make target before submitting;
+ * the worker only ever VERIFIES, so a refusal can never be caused by
+ * something this proof wrote. */
 struct dp_docs_fresh_artifact {
     const char *rel;
     const char *check;
@@ -7079,7 +7080,7 @@ static bool dp_selector_groups(const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
  * comma-separated host-gated list for the selection note; it is emptied on
  * every path, so an exact selection reports no gating rather than stale text. */
 static bool build_test_selector(const struct zcl_devloop_plan *plan,
-                                const char *root, bool inventory_only,
+                                const char *root,
                                 char *out, size_t out_size,
                                 uint32_t *count_out, char *gated_out,
                                 size_t gated_size)
@@ -7088,11 +7089,6 @@ static bool build_test_selector(const struct zcl_devloop_plan *plan,
         gated_size == 0)
         return false;
     gated_out[0] = '\0';
-    if (inventory_only) {
-        (void)snprintf(out, out_size, "%s", "code_inventory");
-        *count_out = 1;
-        return true;
-    }
     size_t pos = 0;
     uint32_t count = 0;
     if (plan->closure_universal) {
@@ -7114,12 +7110,12 @@ static bool build_test_selector(const struct zcl_devloop_plan *plan,
 
 #if defined(ZCL_TESTING)
 bool zcl_dev_proof_test_build_test_selector(
-    const struct zcl_devloop_plan *plan, const char *root, bool inventory_only,
+    const struct zcl_devloop_plan *plan, const char *root,
     char *out, size_t out_size, uint32_t *count_out, char *gated_out,
     size_t gated_size)
 {
-    return build_test_selector(plan, root, inventory_only, out, out_size,
-                               count_out, gated_out, gated_size);
+    return build_test_selector(plan, root, out, out_size, count_out,
+                               gated_out, gated_size);
 }
 #endif
 
@@ -7127,15 +7123,13 @@ bool zcl_dev_proof_test_build_test_selector(
  * holds an edge for a formerly absent path, and __has_include may probe any
  * name. Such a set runs the full closure -- every catalog group the universal
  * selector admits, beside the full lint gate set every proof runs -- and
- * never the inventory-only or docs-only shortcut. */
+ * never the docs-only shortcut. */
 static bool dp_changed_set_widen(const struct zcl_dev_proof_changed_set *set,
-                                 struct zcl_devloop_plan *plan,
-                                 bool *inventory_only)
+                                 struct zcl_devloop_plan *plan)
 {
     if (!set || !set->structural_path) return false;
     plan->closure_universal = true;
     plan->docs_only = false;
-    *inventory_only = false;
     return true;
 }
 
@@ -7149,11 +7143,10 @@ bool zcl_dev_proof_test_changed_set_selector(
         return false;
     struct zcl_devloop_plan plan;
     if (!zcl_devloop_plan_files(set->files, set->count, &plan)) return false;
-    bool inventory_only = false; /* the inventory is untracked build output */
-    (void)dp_changed_set_widen(set, &plan, &inventory_only);
+    (void)dp_changed_set_widen(set, &plan);
     *universal_out = plan.closure_universal;
-    return build_test_selector(&plan, root, inventory_only, out, out_size,
-                               count_out, gated_out, gated_size);
+    return build_test_selector(&plan, root, out, out_size, count_out,
+                               gated_out, gated_size);
 }
 #endif
 
@@ -7191,15 +7184,13 @@ static bool dp_select_scratch(const char *root, char *scratch, size_t size)
 static void dp_select_close(const char *root,
                             const struct zcl_dev_proof_changed_set *set,
                             struct zcl_devloop_plan *plan,
-                            struct zcl_dev_proof_range_selection *out,
-                            bool *inventory_only)
+                            struct zcl_dev_proof_range_selection *out)
 {
     const char *refusal = "";
-    *inventory_only = false; /* the inventory is untracked build output */
     bool admitted = dp_changed_set_close(root, set, plan, &refusal);
     if (!admitted && zcl_devloop_plan_files(set->files, set->count, plan))
         admitted = dp_changed_set_close(root, set, plan, &refusal);
-    bool widened = dp_changed_set_widen(set, plan, inventory_only);
+    bool widened = dp_changed_set_widen(set, plan);
     if (admitted) {
         out->reason = dp_selection_reason(plan, widened);
         return;
@@ -7210,7 +7201,6 @@ static void dp_select_close(const char *root,
         (void)snprintf(out->detail, sizeof(out->detail), "%s", refusal);
     plan->closure_universal = true;
     plan->docs_only = false;
-    *inventory_only = false;
     out->reason = widened ? "changed-input-structure" : "plan-not-closed";
 }
 
@@ -7252,11 +7242,10 @@ bool zcl_dev_proof_select_range(const char *root_in, const char *base,
         ok = false;
     }
     if (ok) {
-        bool inventory_only = false;
-        dp_select_close(root, &set, plan, out, &inventory_only);
+        dp_select_close(root, &set, plan, out);
         out->universal = plan->closure_universal;
         out->files = set.count;
-        ok = build_test_selector(plan, root, inventory_only, out->groups,
+        ok = build_test_selector(plan, root, out->groups,
                                  out->groups_size, &out->count, out->gated,
                                  sizeof(out->gated));
         if (!ok)
@@ -8563,7 +8552,6 @@ struct dp_worker {
     const struct zcl_dev_proof_changed_set *changed;
     /* The docs-fresh checkers still running beside the read-only steps. */
     struct dp_docs_fresh_run *docs;
-    bool inventory_only;
     bool structure_widened;
     struct zcl_devloop_plan plan;
     char plan_json[ZCL_DEVLOOP_PLAN_WIRE_MAX];
@@ -8646,7 +8634,7 @@ static bool dp_worker_refresh_include_graph(struct dp_worker *w,
 static void dp_worker_widen(struct dp_worker *w, size_t file_count)
 {
     w->structure_widened =
-        dp_changed_set_widen(w->changed, &w->plan, &w->inventory_only);
+        dp_changed_set_widen(w->changed, &w->plan);
     if (!w->paths->phases[0]) return;
     char note[PROOF_CHANGED_PATH_MAX + 96];
     if (w->structure_widened)
@@ -8707,8 +8695,7 @@ bool zcl_dev_proof_test_changed_set_close(const char *root,
     if (!set || !zcl_devloop_plan_files(set->files, set->count, plan))
         return false;
     bool admitted = dp_changed_set_close(root, set, plan, reason);
-    bool inventory_only = false;
-    if (admitted) (void)dp_changed_set_widen(set, plan, &inventory_only);
+    if (admitted) (void)dp_changed_set_widen(set, plan);
     return admitted;
 }
 #endif
@@ -8910,8 +8897,8 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
         proof_why(why, why_len, "proof_job_count_unavailable");
         return false;
     }
-    dims[ZCL_DEV_PROOF_GENERATED].selected = w->inventory_only ? 1 : 0;
-    bool compile_selected = !w->inventory_only && !w->plan.docs_only;
+    dims[ZCL_DEV_PROOF_GENERATED].selected = 0; /* retired slot */
+    bool compile_selected = !w->plan.docs_only;
     dims[ZCL_DEV_PROOF_COMPILE].selected = compile_selected ? 1 : 0;
     dims[ZCL_DEV_PROOF_LINT].selected = 1;
     uint32_t test_count = 0;
@@ -8920,9 +8907,9 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
      * host needs must be asked of that tree, never of the submitting
      * checkout, or a dev box's binaries would excuse a generation that has
      * none. */
-    if (!build_test_selector(&w->plan, w->execution.root, w->inventory_only,
-                             w->groups, sizeof(w->groups), &test_count,
-                             host_gated, sizeof(host_gated))) {
+    if (!build_test_selector(&w->plan, w->execution.root, w->groups,
+                             sizeof(w->groups), &test_count, host_gated,
+                             sizeof(host_gated))) {
         proof_why(why, why_len, "test_selection_invalid_or_truncated");
         return false;
     }
@@ -8937,22 +8924,6 @@ static bool dp_worker_select(struct dp_worker *w, char *why, size_t why_len)
         return false;
     }
     return true;
-}
-
-static bool dp_dim_generated(struct dp_worker *w,
-                             struct zcl_dev_proof_dimension *generated,
-                             char *why, size_t why_len)
-{
-    if (!generated->selected) {
-        unused_dimension(ZCL_DEV_PROOF_GENERATED, generated);
-        return true;
-    }
-    const char *argv[] = {"make", "--no-print-directory", w->make_jobs,
-                          "check-capability-inventory-generated", NULL};
-    struct zcl_dev_proof_budget budget = proof_step_budget(
-        w->paths, "generated", PROOF_GENERATED_DEFAULT_MS);
-    return run_dimension(&w->execution, ZCL_DEV_PROOF_GENERATED, argv,
-                         generated, false, &budget, why, why_len);
 }
 
 /* Reuse the submitting checkout's executable when its content matches the
@@ -10442,8 +10413,9 @@ static bool dp_worker_dimensions(struct dp_worker *w, char *why,
     struct zcl_dev_proof_dimension *dims = w->receipt.dimensions;
     struct zcl_dev_proof_dimension *lint = &dims[ZCL_DEV_PROOF_LINT];
     struct zcl_dev_proof_dimension *test = &dims[ZCL_DEV_PROOF_TEST];
-    if (!dp_dim_generated(w, &dims[ZCL_DEV_PROOF_GENERATED], why, why_len))
-        return false;
+    /* Slot 0 once ran the capability-inventory check; the inventory is build
+     * output now, so the slot stays in the receipt layout, unselected. */
+    unused_dimension(ZCL_DEV_PROOF_GENERATED, &dims[ZCL_DEV_PROOF_GENERATED]);
     proof_phase_mark(w->phases, "dimension_generated");
     if (!dp_dim_compile(w, &dims[ZCL_DEV_PROOF_COMPILE], why, why_len))
         return false;
@@ -10516,7 +10488,6 @@ static bool proof_worker_body(const struct proof_paths *paths,
     w.warm = warm;
     w.changed = changed;
     w.docs = docs;
-    w.inventory_only = false; /* the inventory is untracked build output */
     w.warm_compile_mode = "skipped";
     if (!dp_worker_seal_source(&w, why, why_len)) return false;
     /* The loaded producer owns selection and impact policy. Admitting a
@@ -10533,7 +10504,6 @@ static bool proof_worker_body(const struct proof_paths *paths,
     if (!dp_docs_fresh_settle(docs, paths, why, why_len)) return false;
     proof_phase_mark(phases, "docs_fresh_join");
     bool cycle_reused =
-        !w.receipt.dimensions[ZCL_DEV_PROOF_GENERATED].selected &&
         cycle_proof_reuse(paths, w.source_before.cas_root_sha3,
                           w.receipt.dimensions);
     if (!cycle_reused && !dp_worker_dimensions(&w, why, why_len))

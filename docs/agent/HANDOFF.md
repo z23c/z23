@@ -60,9 +60,11 @@ cat ~/.local/state/zclassic23/scratch/northstar/HANDOFF_2026-09-11.md   # the ma
   top of `origin/main`. It reaches `main` only through the native lander:
   `z23-dev dev land submit --tip=<sha> --worktree=<lane>` followed by
   `dev land step` beats (the maintainer host runs a stepper unit that lingers
-  on an empty queue). The lander rebases the entry, regenerates the
-  generated documents, runs the full lint umbrella and the impact-selected
-  test groups, and pushes. Nothing else pushes: the pre-push hook refuses
+  on an empty queue). The lander rebases the entry, runs the full lint umbrella and the impact-selected
+  test groups, and pushes the tip exactly as submitted: it never regenerates or
+  amends a document. A stale generated doc fails the proof, and a rebase
+  conflict on one is refused, each naming the make target to run
+  (`make fix-doc-counts`, `make docs-executor-routing`). Nothing else pushes: the pre-push hook refuses
   every remote ref except `main`, so unlanded work stays in its lane.
 - A landing that ends in `child_proof_failed_exit_2` names no gate in the
   land log. Run `dev proof status` in the lander's worktree; its `log_dir`

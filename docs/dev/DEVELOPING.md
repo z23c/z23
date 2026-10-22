@@ -681,8 +681,11 @@ make docs-capability-inventory
 ```
 
 Commit regenerated docs in the commit whose change caused them (`git commit
---amend`), never as a separate "Regenerate ..." commit. The lander folds any
-drift it finds after rebasing into the candidate's tip commit in the same way.
+--amend`), never as a separate "Regenerate ..." commit. The lander never
+regenerates, amends or merges a generated document: a stale one fails the
+proof as `proof_generated_docs_stale:<file> (make <target>)`, and a rebase
+conflict on one is refused naming the same target. Run the target, commit the
+result and resubmit; the tip lands exactly as you signed it.
 
 When the navigator cannot answer a prose or non-symbol question, use `git grep`
 or `git ls-files`; never recursively scan the repository root. Scratch
@@ -1309,11 +1312,12 @@ legacy parity oracle; it is not called by the installed push hook.
 
 `make lint-ready` prepares a lane worktree for lint in one step. It runs
 `make install-hooks` only when `check-git-hooks-installed` would fail, runs
-the lander's regeneration targets (`docs-capability-inventory`,
-`docs-api-reference`, `fix-doc-counts`, `docs-executor-routing`), and prints
-`git status --short`. It exits non-zero while untracked non-ignored files
-exist, because lint scans tracked files only: `git add -A`, run
-`make lint-ready`, amend what it changed, then run `make lint`. It never commits.
+the two tracked-document targets (`fix-doc-counts`, `docs-executor-routing`;
+the capability inventory and API reference are build output under
+`build/gen`), and prints `git status --short`. It exits non-zero while
+untracked non-ignored files exist, because lint scans tracked files only:
+`git add -A`, run `make lint-ready`, commit what it changed, then run
+`make lint`. It never commits; neither does the lander.
 
 Every publishable proof runs the whole lint gate set, `make lint` plus
 `check-windows-acceptance`, including inventory-only changes. A scratch
@@ -1716,8 +1720,8 @@ queues the tip they qualified (the worktree's `HEAD`; `--tip` is refused with
    `QUALIFY_REBASE_FAILED`.
 3. Every commit the lane adds is signed (`QUALIFY_UNSIGNED_TIP`).
 4. `make docs-capability-inventory`, `make dev-bin`, `make install-hooks`,
-   `make lint-ready`; regenerated files are folded into the tip by a signed
-   amend (`QUALIFY_STEP_FAILED` names a failing step).
+   `make lint-ready`; a failing step refuses with `QUALIFY_STEP_FAILED`
+   naming it. Nothing is folded into the tip (see step 7).
 5. `VENDOR_CC=gcc make lint` must print `LINT: all checks passed`
    (`QUALIFY_LINT_FAILED`).
 6. Every affected test group runs in one `make t-fast-exact` invocation, so
@@ -1732,7 +1736,10 @@ queues the tip they qualified (the worktree's `HEAD`; `--tip` is refused with
    failing group refuses with `QUALIFY_GROUP_FAILED`, naming the group and
    its section log.
 7. A gate that left any other tracked file changed refuses with
-   `QUALIFY_TREE_CHANGED` and the paths; generated files only are folded in.
+   `QUALIFY_TREE_CHANGED` and the paths. For a generated document the reply
+   detail names its make target (`make fix-doc-counts`,
+   `make docs-executor-routing`): run it, commit and resubmit. The tip is
+   never amended.
 
 The reply lists the groups it ran as `groups` (`[]` when none were routed).
 Logs are kept in the worktree as `build/scratch/qualify-<step>.log`, one per

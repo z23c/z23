@@ -40,8 +40,9 @@ For every agent (Claude, Codex, humans):
 - Land through `dev land submit`; never push `main`. A refused push is the
   hook working, not a fault to route around.
 - Do not commit regenerated docs expecting them to be compared later; run
-  the make targets and read `build/gen/`. Until wave 2 lands, the landing
-  proof still folds the generated paths it knows about.
+  the make targets and read `build/gen/`. The landing queue folds
+  and amends nothing: a stale generated doc fails the proof naming its make
+  target.
 - Use `make check ONLY=<exact ids>` while editing, and run the full lint
   once, in the land proof, rather than before every commit. Lane lint is
   feedback, not a gate.

@@ -155,15 +155,14 @@ static bool dtkt_commit(const char *dir, const char *message)
 }
 
 /* The keeper's whole make surface, every target a no-op: what is under test
- * is the ORDER and the refusals. */
+ * is the ORDER and the refusals. The two doc-regeneration targets are absent
+ * on purpose: the keeper must not run them. */
 static const char *const dtkt_makefile =
     "worktree-prime:\n\t@true\n\n"
     "dev-bin:\n\t@true\n\n"
     "check-cyclomatic-complexity:\n\t@true\n\n"
     "t-fast:\n\t@true\n\n"
-    "lint:\n\t@true\n\n"
-    "docs-executor-routing:\n\t@true\n\n"
-    "fix-doc-counts:\n\t@true\n";
+    "lint:\n\t@true\n";
 
 static void dtkt_call(const char *root, struct json_value *input,
                       struct zcl_command_reply *reply)
@@ -831,14 +830,16 @@ int test_dev_train_keep(void)
         PASS();
     }
 
-    TEST("train: the skip list covers the baseline pin, not just the regens") {
-        ASSERT(zcl_dev_train_skip_subject("Regenerate the generated docs"));
-        ASSERT(zcl_dev_train_skip_subject(
-            "Regenerate the capability inventory after the merge"));
-        /* The one this list was missing. A lane's own baseline pin describes
-         * that lane's tree, never the assembled train's. */
+    TEST("train: the skip list is the baseline pin only; a lane's own regenerated-doc commit is picked") {
+        /* A lane's baseline pin describes that lane's tree, never the
+         * assembled train's. */
         ASSERT(zcl_dev_train_skip_subject("Pin today's complexity baseline"));
-        ASSERT(zcl_dev_train_skip_subject("Count what the stacked lanes added"));
+        /* The assembler regenerates nothing, so a lane's regeneration commit
+         * is the only record of its doc fix and is cherry-picked. */
+        ASSERT(!zcl_dev_train_skip_subject("Regenerate the generated docs"));
+        ASSERT(!zcl_dev_train_skip_subject(
+            "Regenerate the capability inventory after the merge"));
+        ASSERT(!zcl_dev_train_skip_subject("Count what the stacked lanes added"));
         ASSERT(!zcl_dev_train_skip_subject("Pin the release tag"));
         ASSERT(!zcl_dev_train_skip_subject("lanea: add a"));
         PASS();

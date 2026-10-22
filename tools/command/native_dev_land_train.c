@@ -14,12 +14,12 @@
  *
  * WHAT. With width N, dl_train_intent_bind() runs where dl_start_proof used
  * to bind the proof intent. The head row is already prepared (rebase onto
- * origin main, regen, lint-land, deps). Up to N-1 joinable queued rows are
+ * origin main, lint-land, deps). Up to N-1 joinable queued rows are
  * then stacked onto it in pick order, each rebased on the previous by the
  * ordinary dl_rebase(). A member that conflicts, or whose commits carry an
  * identity the push would refuse, is skipped: it stays queued, untouched,
  * and the train continues with the rest. Any other failure stops the
- * stacking. Regen, lint-land and the proof dependencies run again on the
+ * stacking. Lint-land and the proof dependencies run again on the
  * stacked tip; if that fails the head's own commit is checked out again and
  * proved alone. The STACKED TIP is then bound as the head's proof pair and
  * every member's local, base, tree and proof_intent become that pair in one
@@ -60,7 +60,6 @@
  * train_commit, and the in-flight row's train_members. */
 
 #include "command/native_dev_land_internal.h"
-#include "command/native_dev_land_regen.h"
 
 #include "base/safe_alloc.h"
 #include "json/json.h"
@@ -176,15 +175,13 @@ bool dl_train_refuse_bound(const struct dl_dirs *d, const struct dl_row *rows,
 /* Clear a train binding the row's head no longer holds before the row's
  * own rebase: nothing downstream may read a pair this row did not prepare. */
 int dl_train_rebase(const struct dl_dirs *d, struct dl_row *row,
-                    const char *observed_main, char *why, size_t why_cap,
-                    char *regen_note, size_t regen_note_cap)
+                    const char *observed_main, char *why, size_t why_cap)
 {
     row->tree[0] = '\0';
     row->proof_intent[0] = '\0';
     row->train_commit[0] = '\0';
     dl_publication_clear(row);
-    return dl_rebase(d, row, observed_main, why, why_cap, regen_note,
-                     regen_note_cap);
+    return dl_rebase(d, row, observed_main, why, why_cap);
 }
 
 /* ── queue edits ───────────────────────────────────────────────────────── */
@@ -325,10 +322,10 @@ static bool dl_train_checkout(const struct dl_dirs *d, const char *commit)
 static int dl_train_add(const struct dl_dirs *d, const struct dl_row *head,
                         struct dl_train *t, const struct dl_row *next)
 {
-    char why[512], note[256], line[800];
+    char why[512], line[800];
     struct dl_row m = *next, range = *head;
     (void)snprintf(m.log_path, sizeof(m.log_path), "%s", head->log_path);
-    int rc = dl_rebase(d, &m, t->tip, why, sizeof(why), note, sizeof(note));
+    int rc = dl_rebase(d, &m, t->tip, why, sizeof(why));
     if (rc > 0) {
         (void)snprintf(range.base, sizeof(range.base), "%s", t->tip);
         (void)snprintf(range.local, sizeof(range.local), "%s", m.local);
@@ -396,29 +393,15 @@ static bool dl_train_stack(const struct dl_dirs *d, const struct dl_row *head,
     return touched;
 }
 
-/* Regen, lint-land and the proof dependencies again, on the stacked tip.
- * A scratch row keeps the head's own detail and dimension untouched. When
- * regen amended the last member's commit, that commit is the amended one. */
+/* Lint-land and the proof dependencies again, on the stacked tip. A scratch
+ * row keeps the head's own detail and dimension untouched. Nothing here
+ * rewrites a commit: the stacked tip is exactly the members as submitted. */
 static bool dl_train_prepare(const struct dl_dirs *d, const struct dl_row *head,
                              struct dl_train *t)
 {
-    char regen_head[80] = { 0 }, why[512] = { 0 };
+    char why[512] = { 0 };
     struct dl_row probe = *head;
-    char *log = (char *)zcl_malloc(DL_LOG_CAP, "dev.land.train.regen");
-    int rc = log ? zcl_dev_land_regen_phase(d->wt, head->base,
-                                            t->m[t->n - 1].tip, regen_head,
-                                            sizeof(regen_head), log,
-                                            DL_LOG_CAP, why, sizeof(why))
-                 : -1;
-    if (log) {
-        dl_log(head, log);
-        free(log);
-    }
-    if (rc < 0 || !dl_sha_ok(regen_head)) {
-        dl_log(head, "train: regen failed on the stacked tip\n");
-        return false;
-    }
-    (void)snprintf(probe.local, sizeof(probe.local), "%s", regen_head);
+    (void)snprintf(probe.local, sizeof(probe.local), "%s", t->tip);
     if (!dl_stubbed() && dl_lint_candidate(d, &probe) != 0) {
         dl_log(head, "train: lint-land failed on the stacked tip\n");
         return false;
@@ -428,13 +411,6 @@ static bool dl_train_prepare(const struct dl_dirs *d, const struct dl_row *head,
         dl_log(head, "train: proof dependencies failed on the stacked tip\n");
         return false;
     }
-    const char *kept[] = { "merge-base", "--is-ancestor", t->tip, regen_head,
-                           NULL };
-    if (strcmp(regen_head, t->tip) != 0 &&
-        dl_git(d->wt, kept, NULL, 0, DL_GIT_TIMEOUT_MS) != 0)
-        (void)snprintf(t->commit[t->n - 1], sizeof(t->commit[0]), "%s",
-                       regen_head);
-    (void)snprintf(t->tip, sizeof(t->tip), "%s", regen_head);
     return true;
 }
 

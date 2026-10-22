@@ -4,10 +4,10 @@
  *          keeper (tools/command/native_dev_train_keep.c).
  *
  * The keeper is a second file rather than a fifth verb inside the first one
- * for the same reason native_dev_land_regen.c is separate from
+ * for the same reason native_dev_land_prepare.c is separate from
  * native_dev_land.c: one file owns one job. What the two files genuinely
  * share is a small, exact set of primitives — the no-shell git runner, the
- * doc-regen subject skip list, and the source-root resolution — and sharing
+ * baseline-pin subject skip list, and the source-root resolution — and sharing
  * them here is what keeps the skip list a SINGLE source of truth. A second
  * copy of that list in the keeper would be a second policy that drifts.
  *
@@ -37,10 +37,11 @@ void zcl_dev_train_strip(char *s);
 /* True iff `path` names a real directory (never a symlink to one). */
 bool zcl_dev_train_is_dir(const char *path);
 
-/* True iff a commit with this subject is a doc-regen-only commit that a
- * train assembler must NOT cherry-pick, because the assembler regenerates
- * the same artifacts once at the end. This is the single source of truth
- * for that list; both the hand-driven `dev train build` and the unattended
+/* True iff a commit with this subject is a baseline-pin commit that a train
+ * assembler must NOT cherry-pick: a pin describes one lane's tree, never the
+ * assembled train's, and an assembler never rewrites a baseline. A lane's
+ * regenerated-doc commit is NOT skipped; it is picked like any other. This is
+ * the single source of truth for that list; both the hand-driven `dev train build` and the unattended
  * `dev train keep` ask this one function. */
 bool zcl_dev_train_skip_subject(const char *subject);
 

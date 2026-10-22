@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: dev.land qualify gates -- fetch, rebase, signed tip, regenerated
- *          files, full lint and the affected test groups, in the lane's own
+ * purpose: dev.land qualify gates -- fetch, rebase, signed tip, derived files,
+ *          full lint and the affected test groups, in the lane's own
  *          worktree, before `dev land submit` queues it.
  *
  * Verdict rules:
@@ -207,18 +207,6 @@ static bool dlq_only_generated(const char *text)
     return true;
 }
 
-static bool dlq_amend(struct dlq *q)
-{
-    const char *signed_args[] = { "commit", "-q", "-S", "-a", "--amend",
-                                  "--no-edit", NULL };
-    const char *plain_args[] = { "commit", "-q", "--no-gpg-sign", "-a",
-                                 "--amend", "--no-edit",
-                                 NULL };
-    if (dlq_git(q, q->exempt ? plain_args : signed_args, NULL, 0) != 0)
-        return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, "amend", NULL);
-    return true;
-}
-
 static bool dlq_status(struct dlq *q, char *out, size_t cap)
 {
     const char *args[] = { "status", "--porcelain", "--untracked-files=no",
@@ -292,18 +280,26 @@ static bool dlq_signed(struct dlq *q)
     return true;
 }
 
-/* Fold regenerated tracked files into the tip. Anything else that changed
- * is refused: the qualified tree must be the tree that was gated. */
-static bool dlq_fold(struct dlq *q)
+/* The qualified tree must be the tree that was gated and committed. Nothing
+ * is folded or amended: a gate that rewrote a tracked file (a stale generated
+ * document refreshed by lint-ready) is refused, naming the files and, for a
+ * generated document, the make target that rewrites it. The author commits
+ * the result and resubmits, so the tip that queues is the tip that was
+ * reviewed. */
+static bool dlq_settled(struct dlq *q)
 {
     char status[4096], paths[1024];
     if (!dlq_status(q, status, sizeof(status)))
         return false;
     if (!status[0])
         return true;
-    if (dlq_only_generated(status))
-        return dlq_amend(q);
     dlq_porcelain_paths(status, paths, sizeof(paths));
+    if (dlq_only_generated(status))
+        (void)snprintf(q->out->detail, sizeof(q->out->detail), "%s",
+                       "stale generated document: run `make fix-doc-counts` "
+                       "(the doc-counts table) or `make "
+                       "docs-executor-routing` (the executor-routing "
+                       "table), commit it and resubmit");
     return dlq_refuse(q, ZCL_LAND_QUALIFY_TREE_CHANGED, "worktree", paths);
 }
 
@@ -357,8 +353,6 @@ static bool dlq_prepare(struct dlq *q)
         if (rc != 0)
             return dlq_refuse(q, ZCL_LAND_QUALIFY_STEP_FAILED, steps[i].name,
                               NULL);
-        if (i == 0 && !dlq_fold(q))
-            return false;
     }
     return true;
 }
@@ -737,5 +731,5 @@ bool zcl_dev_land_qualify(const char *wt, bool signing_exempt,
                           "ZCL_BUILD_MAX_JOBS", NULL);
     return dlq_clean(&q) && dlq_fetch(&q) && dlq_rebase(&q) &&
            dlq_signed(&q) && dlq_prepare(&q) && dlq_complexity(&q) && dlq_lint(&q) &&
-           dlq_groups_run(&q) && dlq_fold(&q) && dlq_finish(&q);
+           dlq_groups_run(&q) && dlq_settled(&q) && dlq_finish(&q);
 }

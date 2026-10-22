@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: dev.land qualify gates -- the pre-submit checks a lane runs in its
- *          own worktree (fetch, rebase, signed tip, regenerated files, full
+ *          own worktree (fetch, rebase, signed tip, derived files, full
  *          lint, affected test groups) before `dev land submit` queues it.
  *
  * Kept apart from native_dev_land.c, which owns the queue and its rows. This
@@ -39,10 +39,10 @@ struct zcl_land_qualify {
 };
 
 /* Run the gates in worktree `wt` and report the first refusal, or OK with the
- * tip that was qualified. The only history rewrite is folding regenerated
- * files into the tip (a signed amend) and rebasing onto origin/main when the
- * lane is behind it. `signing_exempt` skips the signature requirement and the
- * signing flag, and is meant for the landing fixtures that already gate
+ * tip that was qualified. The only history rewrite is rebasing onto
+ * origin/main when the lane is behind it; a tracked file a gate rewrote is
+ * refused as tree_changed, never folded in. `signing_exempt` skips the
+ * signature requirement and the signing flag, and is meant for the landing fixtures that already gate
  * unsigned tips behind the proof stub. Returns true on OK. */
 bool zcl_dev_land_qualify(const char *wt, bool signing_exempt,
                           struct zcl_land_qualify *out);
