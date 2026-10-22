@@ -584,7 +584,8 @@ static bool obj_attempts_add(struct obj_attempts *set,
 {
     if (set->n == set->cap) {
         size_t cap = set->cap ? set->cap * 2 : 16;
-        struct obj_attempt *items = realloc(set->items, cap * sizeof(*items));
+        struct obj_attempt *items = zcl_realloc(set->items, cap * sizeof(*items),
+                                           "fleet_objectives_attempts");
         if (!items)
             return false;
         set->items = items;
@@ -592,6 +593,25 @@ static bool obj_attempts_add(struct obj_attempts *set,
     }
     set->items[set->n++] = *a;
     return true;
+}
+
+/* One outcome row's pair time, into the candidate that pair names. */
+static void obj_attempts_note_row(struct obj_attempts *set,
+                                  const struct json_value *row)
+{
+    char pair[200];
+    const char *local = json_get_str(json_get(row, "local"));
+    const char *base = json_get_str(json_get(row, "base"));
+    int64_t at = json_get_int(json_get(row, "started"));
+    int64_t landed = obj_row_landed_at(row);
+    if (landed > at)
+        at = landed;
+    if (!local[0] || !base[0] || at <= 0 ||
+        snprintf(pair, sizeof(pair), "%s-%s", local, base) >= (int)sizeof(pair))
+        return;
+    for (size_t i = 0; i < set->n; i++)
+        if (strcmp(set->items[i].key, pair) == 0 && at > set->items[i].recorded)
+            set->items[i].recorded = at;
 }
 
 /* Folds the outcome ledger into the candidates: each outcome row names its
@@ -609,23 +629,8 @@ static void obj_attempts_record(struct obj_attempts *set, const char *outcomes)
     while (obj_ledger_line(fp, line, sizeof line, &len) == 1) {
         struct json_value row;
         json_init(&row);
-        if (json_read(&row, line, len) && row.type == JSON_OBJ) {
-            char pair[200];
-            const char *local = json_get_str(json_get(&row, "local"));
-            const char *base = json_get_str(json_get(&row, "base"));
-            int64_t at = json_get_int(json_get(&row, "started"));
-            int64_t landed = obj_row_landed_at(&row);
-            if (landed > at)
-                at = landed;
-            if (local[0] && base[0] && at > 0 &&
-                snprintf(pair, sizeof(pair), "%s-%s", local, base) <
-                    (int)sizeof(pair)) {
-                for (size_t i = 0; i < set->n; i++)
-                    if (strcmp(set->items[i].key, pair) == 0 &&
-                        at > set->items[i].recorded)
-                        set->items[i].recorded = at;
-            }
-        }
+        if (json_read(&row, line, len) && row.type == JSON_OBJ)
+            obj_attempts_note_row(set, &row);
         json_free(&row);
     }
     (void)fclose(fp);
@@ -648,6 +653,30 @@ static bool obj_attempt_newer(const struct obj_attempt *a,
     return strcmp(a->logs, b->logs) > 0;
 }
 
+/* Reads one attempt directory; false unless it is a COMPLETED attempt. */
+static bool obj_attempt_load(const char *dir, const char *name,
+                             struct obj_attempt *a)
+{
+    char phases[1200];
+    struct stat st;
+    int64_t ms = -1;
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0)
+        return false;
+    if (!obj_attempt_key(name, a->key, sizeof(a->key)) ||
+        snprintf(a->logs, sizeof(a->logs), "%s/%s/logs", dir, name) >=
+            (int)sizeof(a->logs) ||
+        snprintf(phases, sizeof(phases), "%s/phases.txt", a->logs) >=
+            (int)sizeof(phases))
+        return false;
+    if (stat(phases, &st) != 0 || !S_ISREG(st.st_mode))
+        return false;
+    if (!obj_log_lines(phases, obj_dimension_line, &ms) || ms < 0)
+        return false;
+    a->proof_ms = ms;
+    a->mtime = st.st_mtime;
+    return true;
+}
+
 /* The newest completed attempt, or false. */
 static bool obj_newest_completed_attempt(const char *dir,
                                          const char *outcomes,
@@ -661,24 +690,7 @@ static bool obj_newest_completed_attempt(const char *dir,
         return false;
     while ((e = readdir(d))) {
         struct obj_attempt a = {0};
-        char phases[1200];
-        struct stat st;
-        int64_t ms = -1;
-        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
-            continue;
-        if (!obj_attempt_key(e->d_name, a.key, sizeof(a.key)) ||
-            snprintf(a.logs, sizeof(a.logs), "%s/%s/logs", dir, e->d_name) >=
-                (int)sizeof(a.logs) ||
-            snprintf(phases, sizeof(phases), "%s/phases.txt", a.logs) >=
-                (int)sizeof(phases))
-            continue;
-        if (stat(phases, &st) != 0 || !S_ISREG(st.st_mode))
-            continue;
-        if (!obj_log_lines(phases, obj_dimension_line, &ms) || ms < 0)
-            continue;
-        a.proof_ms = ms;
-        a.mtime = st.st_mtime;
-        if (!obj_attempts_add(&set, &a))
+        if (obj_attempt_load(dir, e->d_name, &a) && !obj_attempts_add(&set, &a))
             break;
     }
     (void)closedir(d);
@@ -697,26 +709,16 @@ static bool obj_newest_completed_attempt(const char *dir,
     return true;
 }
 
-/* The wall of one log kind (".lint.log" / ".test.log") in an attempt. The
- * producer names it exactly "<key><suffix>" (dev_proof.c writes
- * "<logs>/<pair key>.<dimension>.log"), so that file is read first. A
- * directory that does not follow that name is scanned for every file with the
- * suffix, and the one that carries the wall line wins, the smallest name
- * first, so readdir order never decides. */
-static bool obj_log_wall(const struct obj_proof *proof, const char *suffix,
-                         void (*fn)(const char *line, void *user),
-                         char *path, size_t cap, int64_t *ms)
+/* Every file in logs ending in suffix that carries a wall line: the one with
+ * the smallest name wins, so readdir order never decides. */
+static bool obj_scan_logs(const char *logs, const char *suffix,
+                          void (*fn)(const char *line, void *user),
+                          char *path, size_t cap, int64_t *ms)
 {
-    DIR *d;
+    DIR *d = opendir(logs);
     struct dirent *e;
     char best[256] = "";
     int64_t found = -1;
-    *ms = -1;
-    if (snprintf(path, cap, "%s/%s%s", proof->logs, proof->key, suffix) <
-            (int)cap &&
-        obj_log_lines(path, fn, ms) && *ms >= 0)
-        return true;
-    d = opendir(proof->logs);
     if (!d)
         return false;
     while ((e = readdir(d))) {
@@ -724,7 +726,7 @@ static bool obj_log_wall(const struct obj_proof *proof, const char *suffix,
         int64_t v = -1;
         if (!obj_ends_with(e->d_name, suffix) ||
             strlen(e->d_name) >= sizeof(best) ||
-            snprintf(cand, sizeof(cand), "%s/%s", proof->logs, e->d_name) >=
+            snprintf(cand, sizeof(cand), "%s/%s", logs, e->d_name) >=
                 (int)sizeof(cand) ||
             !obj_log_lines(cand, fn, &v) || v < 0)
             continue;
@@ -735,10 +737,28 @@ static bool obj_log_wall(const struct obj_proof *proof, const char *suffix,
     }
     (void)closedir(d);
     if (best[0] == '\0' ||
-        snprintf(path, cap, "%s/%s", proof->logs, best) >= (int)cap)
+        snprintf(path, cap, "%s/%s", logs, best) >= (int)cap)
         return false;
     *ms = found;
     return true;
+}
+
+/* The wall of one log kind (".lint.log" / ".test.log") in an attempt. The
+ * producer names it exactly "<key><suffix>" (dev_proof.c writes
+ * "<logs>/<pair key>.<dimension>.log"), so that file is read first. A
+ * directory that does not follow that name is scanned for every file with the
+ * suffix, and the one that carries the wall line wins, the smallest name
+ * first, so readdir order never decides. */
+static bool obj_log_wall(const struct obj_proof *proof, const char *suffix,
+                         void (*fn)(const char *line, void *user),
+                         char *path, size_t cap, int64_t *ms)
+{
+    *ms = -1;
+    if (snprintf(path, cap, "%s/%s%s", proof->logs, proof->key, suffix) <
+            (int)cap &&
+        obj_log_lines(path, fn, ms) && *ms >= 0)
+        return true;
+    return obj_scan_logs(proof->logs, suffix, fn, path, cap, ms);
 }
 
 static bool obj_completed_attempt(const struct zcl_objectives_options *options,
