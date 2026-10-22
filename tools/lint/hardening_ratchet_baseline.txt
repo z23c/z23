@@ -69,7 +69,6 @@ local-reader engine/modules/storage/src/checkpoint_rung.c 1
 local-reader engine/modules/storage/src/ldb_reader_internal.h 1
 local-reader engine/modules/storage/src/sqlite_pinned_reader.c 1
 local-reader engine/services/src/block_index_flat_header.c 1
-local-reader engine/services/src/build_fabric_attach.c 2
 local-reader platform/modules/codec/include/codec/cursor.h 1
 local-reader platform/modules/rvmachine/src/rvmachine_snapshot_priv.h 1
 local-reader tools/command/native_dev_fleet_start.c 1
