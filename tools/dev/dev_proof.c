@@ -9362,9 +9362,11 @@ size_t zcl_dev_proof_test_dimension_argv(const char *binary, const char *only,
     "test-reuse: unqualified(no_verifier_account)"
 
 /* The longest lint is held back for the test runner's run-alone pass. That
- * pass is about a minute for the whole exclusive set on a quiet box; the cap
- * only bounds a runner that never prints its line, so lint cannot be held
- * for the whole test run. */
+ * pass is about two and a half minutes for the whole exclusive set on a
+ * universal row (median of nine proof runs: 186 s before test_crypto_registry,
+ * test_character_sheet and test_devagent_ticketkey moved to the pool, about
+ * 151 s after); the cap only bounds a runner that never prints its line, so
+ * lint cannot be held for the whole test run. */
 #define DP_LINT_HOLD_MAX_MS 180000
 
 /* Hosts with fewer available CPUs than this finish tests before lint. */
