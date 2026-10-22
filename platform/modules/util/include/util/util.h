@@ -83,6 +83,10 @@ int LogPrintStr(const char *str);
 /* Write the platform default data directory path into `out` (e.g.
  * ~/.zclassic-c23 on Linux), truncated to `out_size`. */
 void GetDefaultDataDir(char *out, size_t out_size);
+/* The default datadir a process whose HOME is `home` would resolve (the
+ * platform spelling; Windows ignores `home`). Lets a test runner name the
+ * operator's canonical datadir without reading or pinning the live one. */
+void GetDefaultDataDirUnder(const char *home, char *out, size_t out_size);
 
 /* Resolve the active data directory into `out` (truncated to `out_size`):
  * the -datadir arg if set, else the platform default; with the network

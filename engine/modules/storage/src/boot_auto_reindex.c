@@ -19,6 +19,7 @@
 #include "storage/boot_auto_reindex.h"
 #include "base/serialize_le.h"
 #include "platform/os_proc.h"
+#include "platform/directory_compat.h"
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
 
@@ -46,9 +47,8 @@ static _Atomic uint32_t g_ar_stage_seq;
 static void ar_resolve(const char *path, char *out, size_t n)
 {
     snprintf(out, n, "%s", path);
-#if !defined(_WIN32)
     char real[PATH_MAX];
-    if (realpath(path, real)) {
+    if (platform_directory_canonical_real(path, real, sizeof(real))) {
         snprintf(out, n, "%s", real);
     } else {
         /* A datadir that does not exist yet: resolve its parent. */
@@ -58,11 +58,10 @@ static void ar_resolve(const char *path, char *out, size_t n)
             (size_t)(slash - path) < sizeof(parent)) {
             memcpy(parent, path, (size_t)(slash - path));
             parent[slash - path] = '\0';
-            if (realpath(parent, real))
+            if (platform_directory_canonical_real(parent, real, sizeof(real)))
                 snprintf(out, n, "%s%s", real, slash);
         }
     }
-#endif
     size_t len = strlen(out);
     while (len > 1 && (out[len - 1] == '/' || out[len - 1] == '\\'))
         out[--len] = '\0';

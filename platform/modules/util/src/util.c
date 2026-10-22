@@ -348,7 +348,13 @@ int LogPrintStr(const char *str)
 
 void GetDefaultDataDir(char *out, size_t out_size)
 {
+    GetDefaultDataDirUnder(getenv("HOME"), out, out_size);
+}
+
+void GetDefaultDataDirUnder(const char *home, char *out, size_t out_size)
+{
 #ifdef _WIN32
+    (void)home;
     char path[MAX_PATH];
     typedef HRESULT (WINAPI *folder_fn)(HWND, int, HANDLE, DWORD, LPSTR);
     /* Avoid eager Shell32 loading before a confined selfexec reaches main. */
@@ -366,13 +372,11 @@ void GetDefaultDataDir(char *out, size_t out_size)
     else
         snprintf(out, out_size, "ZClassic");
 #elif defined(__APPLE__)
-    const char *home = getenv("HOME");
     if (home && home[0])
         snprintf(out, out_size, "%s/Library/Application Support/ZClassic", home);
     else
         snprintf(out, out_size, "/ZClassic");
 #else
-    const char *home = getenv("HOME");
     if (home && home[0])
         snprintf(out, out_size, "%s/.zclassic-c23", home);
     else

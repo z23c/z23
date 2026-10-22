@@ -2375,10 +2375,8 @@ static bool tgs_home_contract(const char *state, const char *expected)
     const char *canonical = getenv("ZCL_TEST_CANONICAL_DATADIR");
     const char *harness = getenv("ZCL_TEST_HARNESS");
     char want_canonical[PATH_MAX];
-    int n = snprintf(want_canonical, sizeof(want_canonical),
-                     "%s/.zclassic-c23", expected);
-    return home && canonical && harness && n > 0 &&
-           (size_t)n < sizeof(want_canonical) &&
+    GetDefaultDataDirUnder(expected, want_canonical, sizeof(want_canonical));
+    return home && canonical && harness &&
            tgs_under(home, state, "home") && strcmp(home, expected) != 0 &&
            tgs_under(getenv("XDG_CONFIG_HOME"), home, ".config") &&
            tgs_under(getenv("XDG_CACHE_HOME"), home, ".cache") &&
@@ -2590,9 +2588,7 @@ static int test_runner_group_home_is_private(void)
         /* HOME differs from the real one: the canonical datadir (recorded
          * before HOME moved) is NOT under it. */
         char under_home[PATH_MAX];
-        int n = snprintf(under_home, sizeof(under_home), "%s/.zclassic-c23",
-                         home);
-        ASSERT(n > 0 && (size_t)n < sizeof(under_home));
+        GetDefaultDataDirUnder(home, under_home, sizeof(under_home));
         ASSERT(strcmp(under_home, canonical) != 0);
 
         /* The un-pinned default datadir resolves under the private HOME. */

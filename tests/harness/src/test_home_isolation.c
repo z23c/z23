@@ -4,6 +4,7 @@
 
 #include "test/test_home_isolation.h"
 
+#include "platform/directory_compat.h"
 #include "platform/environment_compat.h"
 #include "platform/private_directory.h"
 #include "util/util.h"
@@ -82,7 +83,7 @@ static bool iso_export_markers(char *err, size_t err_cap)
     const char *outer = getenv("ZCL_TEST_CANONICAL_DATADIR");
     if (!outer || !outer[0]) {
         char canonical[PATH_MAX];
-        GetDefaultDataDir(canonical, sizeof(canonical));
+        GetDefaultDataDirUnder(getenv("HOME"), canonical, sizeof(canonical));
         if (!iso_set("ZCL_TEST_CANONICAL_DATADIR", canonical))
             return iso_fail(err, err_cap, "cannot export canonical datadir",
                             canonical);
@@ -159,12 +160,8 @@ bool zcl_test_isolate_environment(const char *private_root,
 
     /* HOME must survive a chdir: resolve the root to an absolute path. */
     char root_abs[PATH_MAX];
-#if defined(_WIN32)
-    bool resolved = _fullpath(root_abs, private_root, sizeof(root_abs)) != NULL;
-#else
-    bool resolved = realpath(private_root, root_abs) != NULL;
-#endif
-    if (!resolved)
+    if (!platform_directory_canonical_real(private_root, root_abs,
+                                           sizeof(root_abs)))
         return iso_fail(err, err_cap, "cannot resolve private root",
                         private_root);
 
