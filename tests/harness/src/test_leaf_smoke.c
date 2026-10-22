@@ -85,6 +85,24 @@ static enum smoke_scope smoke_classify(const struct zcl_command_spec *s)
     return SMOKE_IN;
 }
 
+/* The scratch datadir lives under the checkout's test-tmp, so an unconfined git
+ * (dev.agent.triage) discovers the enclosing repository and triages every lane
+ * branch with several git calls each: 41 s idle, past SMOKE_CALL_BOUND_S under
+ * load. The leaf must meet an empty, repository-less directory: stop git's
+ * upward discovery at the datadir's parent and drop any inherited repo pins. */
+static bool smoke_confine_git(const char *datadir)
+{
+    char ceiling[PATH_MAX];
+    int n = snprintf(ceiling, sizeof(ceiling), "%s", datadir);
+    if (n < 0 || (size_t)n >= sizeof(ceiling))
+        return false;
+    char *slash = strrchr(ceiling, '/');
+    if (slash && slash != ceiling)
+        *slash = 0;
+    return setenv("GIT_CEILING_DIRECTORIES", ceiling, 1) == 0 &&
+           unsetenv("GIT_DIR") == 0 && unsetenv("GIT_WORK_TREE") == 0;
+}
+
 /* Child: stdout to `out`, stdin and stderr to /dev/null, HOME and cwd to the scratch
  * directory, one CLI call, then _exit with the CLI status. */
 static void smoke_child(const struct zcl_command_spec *s, const char *datadir,
@@ -98,7 +116,7 @@ static void smoke_child(const struct zcl_command_spec *s, const char *datadir,
         dup2(nul, STDIN_FILENO) < 0 || dup2(nul, STDERR_FILENO) < 0)
         _exit(125);
     (void)setenv("HOME", datadir, 1);
-    if (chdir(datadir) != 0)
+    if (!smoke_confine_git(datadir) || chdir(datadir) != 0)
         _exit(125);
     if (help)
         args[n++] = "--help";
