@@ -519,6 +519,68 @@ _test_next:;
     return failures;
 }
 
+
+/* Other processes take and drop flocks all the time; /proc/locks is read in
+ * pages by position, so a lock released mid-read shifts later entries out of
+ * the listing. Churning processes must not make live waiters vanish. */
+static void hbt_churn(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CREAT | O_CLOEXEC, 0600);
+    while (fd >= 0) {
+        (void)flock(fd, LOCK_SH);
+        (void)flock(fd, LOCK_UN);
+    }
+    _exit(1);
+}
+
+static int hbt_churn_tests(const char *tmp)
+{
+    enum { TICKETS = 600, CHURNERS = 6, ROUNDS = 150 };
+    int failures = 0;
+    int fds[TICKETS];
+    pid_t kids[CHURNERS];
+    struct ba_config cfg;
+    struct json_value doc;
+    char dir[HBT_PATH], fifo[HBT_PATH + 16], file[HBT_PATH + 32];
+
+    TEST("host build: status counts every live waiter while other processes churn flocks") {
+        size_t held, short_rounds = 0, spawned = 0;
+        (void)snprintf(dir, sizeof(dir), "%s/churn", tmp);
+        ASSERT(mkdir(dir, 0700) == 0);
+        ASSERT(hbt_config(&cfg, dir, 1));
+        (void)snprintf(fifo, sizeof(fifo), "%s/state/z23.fifo", dir);
+        (void)mkdir(cfg.state_dir, 0700);
+        held = hbt_make_tickets(fifo, TICKETS, TICKETS, fds);
+        for (; spawned < CHURNERS; spawned++) {
+            (void)snprintf(file, sizeof(file), "%s/churn-%zu", dir, spawned);
+            kids[spawned] = fork();
+            if (kids[spawned] == 0)
+                hbt_churn(file);
+            if (kids[spawned] < 0)
+                break;
+        }
+        for (int round = 0; round < ROUNDS; round++) {
+            json_init(&doc);
+            json_set_object(&doc);
+            if (!ba_status(cfg.state_dir, &doc) ||
+                hbt_array_size(&doc, "queued") != (size_t)TICKETS)
+                short_rounds++;
+            json_free(&doc);
+        }
+        for (size_t i = 0; i < spawned; i++) {
+            (void)kill(kids[i], SIGKILL);
+            (void)hbt_reap(kids[i]);
+        }
+        for (size_t i = 0; i < held; i++)
+            close(fds[i]);
+        ASSERT_EQ(held, (size_t)TICKETS);
+        ASSERT_EQ(spawned, (size_t)CHURNERS);
+        ASSERT_EQ(short_rounds, (size_t)0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
 #ifdef __linux__
 /* A lock whose recorded pid has exited is attributed to the process that
  * still holds its open file description. */
@@ -909,6 +971,7 @@ int test_host_build(void)
     failures += hbt_order_tests(tmp);
     failures += hbt_signal_tests(tmp);
     failures += hbt_long_queue_tests(tmp);
+    failures += hbt_churn_tests(tmp);
 #ifdef __linux__
     failures += hbt_owner_tests(tmp);
 #endif

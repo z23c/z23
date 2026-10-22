@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -501,6 +502,21 @@ static void bs_push_lanes(struct json_value *out, const char *state_dir,
     json_free(&rows);
 }
 
+/* /proc/locks is paged by position, so a lock dropped elsewhere on the host
+ * while it is read can shift entries out of the listing. A ticket the
+ * listing does not show is therefore asked directly: a live waiter holds a
+ * shared flock, which an exclusive try-lock cannot take. */
+static bool bs_ticket_held(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    bool held;
+    if (fd < 0)
+        return false;
+    held = flock(fd, LOCK_EX | LOCK_NB) != 0 && errno == EWOULDBLOCK;
+    close(fd);
+    return held;
+}
+
 /* Waiters of one directory in ticket order; entries nobody holds are stale
  * and skipped. A ticket name is <seconds><9-digit ns>-<pid>. */
 static size_t bs_push_waiters(struct json_value *out, const char *key,
@@ -515,12 +531,13 @@ static size_t bs_push_waiters(struct json_value *out, const char *key,
         n = 0;
     for (size_t i = 0; i < n; i++) {
         char path[BA_PATH_MAX];
-        int pids[4];
+        int pids[4] = {0};
         bool write;
         size_t digits = strcspn(names[i], "-");
         struct json_value row;
         if (!bs_join(path, sizeof(path), dir, names[i]) ||
-            bs_holders(view, path, pids, 4, &write) == 0)
+            (bs_holders(view, path, pids, 4, &write) == 0 &&
+             !bs_ticket_held(path)))
             continue;
         json_init(&row);
         json_set_object(&row);
