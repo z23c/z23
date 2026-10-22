@@ -35,19 +35,30 @@ you are new; this page is about operating a host, not about building.
   `install-host-watchdog.sh`, `migrate-role-names.sh`, and the bundle and
   cutover scripts. Subdirectories `fleet-gateway/`, `devfleet/`, `examples/`,
   `systemd/` and `system/` carry their own READMEs or headers.
-- **`devbuild`** is the shared host build scheduler. It is a host program
-  installed outside this repository and shared with a
-  second project, so the installed copy is the only authority. Run
-  `devbuild --plan` to see the live admission profile. On a host it does
-  three things. It admits a bounded number of concurrent Z23 lanes. It serves
-  `--wait` waiters in FIFO order. It runs `dev land` work (or
-  `DEVBUILD_PRIORITY=land`) ahead of ordinary lanes and with a higher
-  CPUWeight. Every job runs in a capped `development.slice` scope pinned away
-  from the cores reserved for interactive use, so heavy builds never starve
-  SSH. Each finished job appends one JSON line (wait_s, run_s, rc,
-  mem_peak_mib, cpu_s, cmd) to `~/.local/state/development/devbuild.jobs.jsonl`.
-  A stale shell mirror of the scheduler used to live here and drifted from
-  the installed program, so it was removed.
+- **Shared host build scheduler (devbuild).** Host policy, not a build
+  dependency: on a machine you do not share, plain `make -j"$(nproc)" z23` is
+  complete. The scheduler is installed on the shared build host (conventionally
+  `~/.local/bin/devbuild`) and is not tracked here; call sites invoke it by
+  name (`devbuild --wait CMD...`); `devbuild --plan` prints the live
+  admission profile. A stale shell mirror of it used to live here and was
+  removed. It enforces:
+  - per-project lanes: Z23 up to 6, QEDC up to 4, one lock per lane;
+  - FIFO among `--wait` waiters, with landing jobs (`dev land`, or
+    `DEVBUILD_PRIORITY=land`) ahead of ordinary ones;
+  - one exclusive mode that runs alone;
+  - per-job CPU quota, memory cap and no swap;
+  - a reserved CPU set kept free for ssh;
+  - a disk free-space floor;
+  - the QEDC quick lane, which runs short single-script jobs ahead of long
+    builds and requeues an overrun as ordinary work.
+
+  CPU sharing: each project runs in its own child slice
+  (`development-z23.slice`, `development-qedc.slice`) at equal weight under the
+  shared `development.slice` cap, so lane count does not change a project's
+  share. A lane weighs 20 and a landing job weighs 25x a lane inside its
+  project. Measured 2026-10-22: with both projects busy the landing proof's
+  share went from 31% to 42% of the slice, and with QEDC idle from 50% to 83%.
+  Each finished job appends one JSON line to the host's job accounting file.
 - **[`devbuild-broker`](devbuild-broker)** — a staged Linux replacement for the
   host scheduler. It admits two ordinary heavy lanes, reserves an additional
   interactive lane, and orders release proof ahead of ordinary queued work.
@@ -83,8 +94,6 @@ you are new; this page is about operating a host, not about building.
   currently); both versions count the
   same running leases under one mutex. Keep the prior script as a private
   rollback copy.
-  The existing `devbuild` mirror describes the pre-cutover contract until
-  installation and qualification complete.
 
 ## What a tracked unit has to earn
 
