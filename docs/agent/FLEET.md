@@ -229,12 +229,23 @@ The closed catalog is [`engine/composition/objectives.def`](../../engine/composi
 `proof_test_wall_s`, `proof_wall_s`, `commits_landed_today`,
 `lint_families_over_ceiling`, `functions_over_complexity_cap`,
 `fresh_node_sync_eta_s`, `tokens_per_landed_commit`, `landed_rows_today`,
-`land_success_rate_7d`, `product_commit_share_7d` and `generated_churn_10d`.
+`land_success_rate_7d`, `product_commit_share_7d`, `generated_churn_10d`,
+`node_rss_mb`, `node_tip_lag_blocks` and `node_warm_restart_s`.
+Each row has a class: `product` (about the node a user runs: `node_rss_mb`,
+`node_tip_lag_blocks`, `node_warm_restart_s`, `fresh_node_sync_eta_s`) or `lab` (about
+the machinery that builds it), declared in the catalog's class column. The three node
+rows are read-only: `node_rss_mb` and `node_tip_lag_blocks` come from the same status
+brief `z23 status` prints (tip lag is the larger of the header height and the best
+peer height, minus the served height), `node_warm_restart_s` is `elapsed_s` of the
+datadir's `boot_status.json` once its stage is serving, and each is `unmeasured(<reason>)`
+when the node is down, silent or still booting. `brief` (a status-brief JSON file) and
+`datadir` point them at fixtures. `functions_over_complexity_cap` counts only pin rows,
+the way the lint gate parses the baseline (comment and blank lines are not pins).
 It is a report, not a gate.
 
 The result also carries a `screen`: one ASCII line per objective with a 20-cell
 bar toward its target, `value/target` and `met`, `UNMET` or `unmeasured(<reason>)`,
-then `lab: met N of M, unmeasured K`. The result's `next` names the one objective to work on, the measured unmet row with the largest gap (`(value - target) / max(|target|, 1)` for `min`, `(target - value) / max(|target|, 1)` for `max`; ties go to catalog order, unmeasured rows are skipped, and `next` is null when every measured row is met), and the screen closes on it as `next: <id>  <value> vs <target> <unit> - <why>`. The wall gauges read the newest COMPLETED proof
+then `lab: met N of M, unmeasured K`. The result's `next` names the one objective to work on: the measured unmet PRODUCT row with the largest gap, and only when no measured product row is unmet, the lab row with the largest gap (`(value - target) / max(|target|, 1)` for `min`, `(target - value) / max(|target|, 1)` for `max`; ties go to catalog order, unmeasured rows are skipped, and `next` is null when every measured row is met), and the screen closes on it as `next: <id>  <value> vs <target> <unit> - <why>`. The wall gauges read the newest COMPLETED proof
 attempt (the `phases.txt` in its logs directory has the `dimension_lint_and_test` row): lint from the
 lint log, test from the test log (the two run concurrently inside one dimension),
 `proof_wall_s` from the final cumulative. `commits_landed_today` and the git gauges

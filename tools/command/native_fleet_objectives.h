@@ -21,6 +21,7 @@
  * engine/composition/objectives.def. */
 struct zcl_objective_row {
     const char *id;
+    const char *class_; /* "product" or "lab" */
     const char *source;
     const char *direction; /* "min" or "max" */
     int64_t target;
@@ -48,6 +49,10 @@ struct zcl_objectives_options {
     const char *repo;         /* git worktree read for commit history */
     const char *lintc_dir;    /* tools/lint/lintc */
     const char *baseline;     /* the cyclomatic complexity baseline file */
+    const char *brief;        /* a status-brief JSON file read in place of
+                               * asking the local node (fixtures) */
+    const char *datadir;      /* the datadir whose boot_status.json is read;
+                               * NULL selects the CLI's resolved datadir */
     int64_t now;              /* unix seconds the day and window readers
                                * count from; 0 reads the wall clock */
 };
@@ -57,6 +62,15 @@ struct zcl_objectives_options {
  * on a catalog/producer drift, never on ordinary input. */
 struct zcl_objective_value zcl_objectives_measure(
     const struct zcl_objectives_options *options, const char *id);
+
+/* The product producers (native_fleet_objectives_node.c): the running node's
+ * own answers, unmeasured with a reason when it cannot give them. */
+struct zcl_objective_value zcl_objectives_node_rss_mb(
+    const struct zcl_objectives_options *options);
+struct zcl_objective_value zcl_objectives_node_tip_lag_blocks(
+    const struct zcl_objectives_options *options);
+struct zcl_objective_value zcl_objectives_node_warm_restart_s(
+    const struct zcl_objectives_options *options);
 
 /* "met", "unmet", or "unmeasured(<reason>)", written into `out` (always
  * NUL-terminated, truncated to fit). */
@@ -73,8 +87,11 @@ size_t zcl_objectives_render_text(const struct json_value *rows, char *out,
  * with the largest normalized gap to its target,
  * gap = (value - target) / max(|target|, 1) for "min" and
  * (target - value) / max(|target|, 1) for "max". Unmeasured rows are never
- * chosen and a tie goes to the earlier catalog row. `out` becomes an object
- * {id, value, target, direction, unit, gap (rounded to 3 decimals), why}, or
+ * chosen and a tie goes to the earlier catalog row. A PRODUCT row (class
+ * "product") always outranks a lab row: the largest product gap wins, and a
+ * lab row is chosen only when no measured product row is unmet. `out` becomes an object
+ * {id, class, value, target, direction, unit, gap (rounded to 3 decimals),
+ * why}, or
  * JSON null when no measured row is unmet. Returns false only when the object
  * cannot be allocated (reason on stderr, `out` left JSON null). */
 bool zcl_objectives_next(const struct json_value *rows, struct json_value *out);

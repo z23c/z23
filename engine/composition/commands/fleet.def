@@ -121,19 +121,26 @@ ZCL_COMMAND_READY_READ(
     "a local `git log` of origin/main through the no-shell spawn seam; lint_families_over_ceiling counts "
     "oversized files under tools/lint/lintc; "
     "functions_over_complexity_cap counts the cyclomatic baseline's rows "
-    "when that file exists; landed_rows_today, land_success_rate_7d, "
+    "when that file exists, counting only pin rows the way the lint gate "
+    "parses them; node_rss_mb and node_tip_lag_blocks read the local "
+    "node's status brief and node_warm_restart_s its datadir's "
+    "boot_status.json, each unmeasured with the reason when the node is "
+    "down; landed_rows_today, land_success_rate_7d, "
     "product_commit_share_7d and generated_churn_10d are the lab KPIs, and "
     "the result carries a `screen` report card and `next`, the measured "
-    "unmet objective with the largest gap to its target (null when every "
+    "unmet objective with the largest gap to its target, product "
+    "objectives (class product: the node a user runs) before lab ones "
+    "(null when every "
     "measured one is met). A value this tree cannot measure today is "
     "reported unmeasured with the reason named, never as a fabricated "
-    "zero. outcomes, attempts_dir, repo, lintc_dir and baseline override "
-    "the five paths a producer reads, for pointing the command at a "
-    "fixture. It contacts no peer and writes nothing.",
+    "zero. outcomes, attempts_dir, repo, lintc_dir, baseline, brief (a "
+    "status-brief JSON file) and datadir override "
+    "the paths a producer reads, for pointing the command at a "
+    "fixture. It asks only the local node, no peer, and writes nothing.",
     32768,
     "fleet,objectives,goals,targets,status,catalog",
     "zcl.fleet_objectives_input.v1", "zcl.fleet_objectives.v1",
-    "outcomes,attempts_dir,repo,lintc_dir,baseline", "",
+    "outcomes,attempts_dir,repo,lintc_dir,baseline,brief,datadir", "",
     "z23-dev fleet objectives",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,

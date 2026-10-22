@@ -15,12 +15,18 @@
  *
  * Row shape:
  *
- *   Z23_OBJECTIVE(id_, source_, direction_, target_, unit_, why_)
+ *   Z23_OBJECTIVE(id_, class_, source_, direction_, target_, unit_, why_)
  *
  *   id_        the objective id, verbatim and stable.
+ *   class_     "product" when the number is about the node a user runs
+ *              (its memory, lag, restart time, sync time) or "lab" when it
+ *              is about the machinery that builds it. `next` picks the
+ *              biggest unmet PRODUCT gap first and a lab gap only when no
+ *              measured product objective is unmet.
  *   source_    the one thing the value is read from, named plainly:
  *              "outcomes.jsonl", "phases.txt", "lint.log", "test.log", "git_log",
- *              "lintc_line_counts", "cyclomatic_baseline", or
+ *              "lintc_line_counts", "cyclomatic_baseline", "status_brief",
+ *              "boot_status.json", or
  *              "unmeasured" when no producer exists in the tree yet.
  *   direction_ "min" (lower is better) or "max" (higher is better).
  *   target_    the numeric threshold `met` is judged against.
@@ -32,66 +38,83 @@
  * older catalog reads as an addition rather than a reshuffle.
  */
 
-Z23_OBJECTIVE("landing_latency_s", "outcomes.jsonl", "min", 1200, "s",
+Z23_OBJECTIVE("landing_latency_s", "lab", "outcomes.jsonl", "min", 1200, "s",
              "per train, by its note: wall seconds from the newest landed "
              "train's first submission (its earliest row ts) to the landed "
              "row's landed_at; a train should land in the time one proof "
              "takes, not several")
 
-Z23_OBJECTIVE("landing_attempts_per_train", "outcomes.jsonl", "min", 1,
+Z23_OBJECTIVE("landing_attempts_per_train", "lab", "outcomes.jsonl", "min", 1,
              "count",
              "per train, by its note: the newest landed train's count of "
              "distinct landed-or-failed attempts; a train that needs more "
              "than one attempt is throwing finished proof work away")
 
-Z23_OBJECTIVE("proof_lint_wall_s", "lint.log", "min", 300, "s",
+Z23_OBJECTIVE("proof_lint_wall_s", "lab", "lint.log", "min", 300, "s",
              "lint is the gate a lane pays before it may ask for a proof, "
              "and it should be fast enough nobody skips it")
 
-Z23_OBJECTIVE("proof_test_wall_s", "test.log", "min", 600, "s",
+Z23_OBJECTIVE("proof_test_wall_s", "lab", "test.log", "min", 600, "s",
              "the test wall is the dominant cost of landing anything")
 
-Z23_OBJECTIVE("commits_landed_today", "git_log", "max", 20, "count",
+Z23_OBJECTIVE("commits_landed_today", "lab", "git_log", "max", 20, "count",
              "the only measure of the loop that is an outcome, not activity")
 
-Z23_OBJECTIVE("lint_families_over_ceiling", "lintc_line_counts", "min", 0,
+Z23_OBJECTIVE("lint_families_over_ceiling", "lab", "lintc_line_counts", "min", 0,
              "count",
              "a lint family past the line ceiling is a file nobody can "
              "read on one screen")
 
-Z23_OBJECTIVE("functions_over_complexity_cap", "cyclomatic_baseline", "min",
+Z23_OBJECTIVE("functions_over_complexity_cap", "lab", "cyclomatic_baseline", "min",
              0, "count",
              "a function past the complexity cap hides a bug the reviewer "
              "cannot see")
 
-Z23_OBJECTIVE("fresh_node_sync_eta_s", "unmeasured", "min", 3600, "s",
+Z23_OBJECTIVE("fresh_node_sync_eta_s", "product", "unmeasured", "min", 3600, "s",
              "a stranger joining the network should be caught up within an "
              "hour, not days")
 
-Z23_OBJECTIVE("tokens_per_landed_commit", "unmeasured", "min", 200000,
+Z23_OBJECTIVE("tokens_per_landed_commit", "lab", "unmeasured", "min", 200000,
              "tokens",
              "the cost of one landed commit is what the whole delegation "
              "loop is spending to make progress")
 
-Z23_OBJECTIVE("proof_wall_s", "phases.txt", "min", 900, "s",
+Z23_OBJECTIVE("proof_wall_s", "lab", "phases.txt", "min", 900, "s",
              "the whole proof, from first phase to the end of lint and "
              "test, is what a train waits on before it can land")
 
-Z23_OBJECTIVE("landed_rows_today", "outcomes.jsonl", "max", 12, "count",
+Z23_OBJECTIVE("landed_rows_today", "lab", "outcomes.jsonl", "max", 12, "count",
              "outcomes rows in state landed since UTC midnight: the lab's "
              "own throughput, counted from the landing record")
 
-Z23_OBJECTIVE("land_success_rate_7d", "outcomes.jsonl", "max", 90,
+Z23_OBJECTIVE("land_success_rate_7d", "lab", "outcomes.jsonl", "max", 90,
              "percent",
              "landed over landed plus failed outcomes in the last 7 days; "
              "a failed proof is a full proof's wall thrown away")
 
-Z23_OBJECTIVE("product_commit_share_7d", "git_log", "max", 60, "percent",
+Z23_OBJECTIVE("product_commit_share_7d", "lab", "git_log", "max", 60, "percent",
              "share of origin/main commits in 7 days that touch core/, "
              "engine/, contexts/, apps/ or platform/ rather than only "
              "tooling and docs")
 
-Z23_OBJECTIVE("generated_churn_10d", "git_log", "min", 0, "count",
+Z23_OBJECTIVE("generated_churn_10d", "lab", "git_log", "min", 0, "count",
              "origin/main commits in 10 days that touch the generated "
              "capability inventory or API reference; a generated file "
              "should not be a commit's reason to exist")
+
+Z23_OBJECTIVE("node_rss_mb", "product", "status_brief", "min", 1024, "MB",
+             "the resident memory of the running node, read from its status "
+             "brief; a node that needs more than a gigabyte cannot run on "
+             "the small machines a user owns")
+
+Z23_OBJECTIVE("node_tip_lag_blocks", "product", "status_brief", "min", 2,
+             "blocks",
+             "how far the node's served tip trails the best height it knows "
+             "(headers or a peer's tip); a node that stays in sync is "
+             "within a block or two")
+
+Z23_OBJECTIVE("node_warm_restart_s", "product", "boot_status.json", "min",
+             10, "s",
+             "seconds from process start to serving in the datadir's latest "
+             "boot beacon; a restart should hand the node back to its user "
+             "in seconds, not minutes")

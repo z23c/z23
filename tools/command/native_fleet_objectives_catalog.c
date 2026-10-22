@@ -9,8 +9,8 @@
 #include <string.h>
 
 static const struct zcl_objective_row k_objectives[] = {
-#define Z23_OBJECTIVE(id_, source_, direction_, target_, unit_, why_) \
-    {id_, source_, direction_, target_, unit_, why_},
+#define Z23_OBJECTIVE(id_, class_, source_, direction_, target_, unit_, why_) \
+    {id_, class_, source_, direction_, target_, unit_, why_},
 #include "../../engine/composition/objectives.def"
 #undef Z23_OBJECTIVE
 };

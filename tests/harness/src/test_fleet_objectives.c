@@ -17,6 +17,8 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "util/boot_phase.h"
+#include "util/boot_status.h"
 #include "util/spawn.h"
 
 #include <stdio.h>
@@ -162,7 +164,12 @@ struct fox_call {
     struct zcl_command_reply reply;
 };
 
-static void fox_begin(struct fox_call *c)
+/* Paths that do not exist: the product rows read these instead of asking a
+ * live node, so no test depends on the machine it runs on. */
+#define FOX_NO_BRIEF "/nonexistent/z23-fox/brief.json"
+#define FOX_NO_DATADIR "/nonexistent/z23-fox/datadir"
+
+static void fox_begin_bare(struct fox_call *c)
 {
     json_init(&c->input);
     json_set_object(&c->input);
@@ -177,6 +184,13 @@ static void fox_set(struct fox_call *c, const char *key, const char *value)
 {
     if (value)
         (void)json_push_kv_str(&c->input, key, value);
+}
+
+static void fox_begin(struct fox_call *c)
+{
+    fox_begin_bare(c);
+    fox_set(c, "brief", FOX_NO_BRIEF);
+    fox_set(c, "datadir", FOX_NO_DATADIR);
 }
 
 static bool fox_run(struct fox_call *c)
@@ -255,7 +269,7 @@ static int fox_line_read_error(void)
         ASSERT(!value.measured);
         ASSERT(value.reason[0] != '\0');
         ASSERT_EQ(rmdir(path), 0);
-        ASSERT(fox_write(path, "x\nx"));
+        ASSERT(fox_write(path, "a/x.c:f:16\n# note\na/y.c:g:17"));
         value = zcl_objectives_measure(&options, "functions_over_complexity_cap");
         ASSERT(value.measured);
         ASSERT_EQ(value.value, 2);
@@ -531,6 +545,17 @@ static void fox_next_row(struct json_value *rows, const char *id,
                    unit, why);
 }
 
+/* Marks the row `id` as a product objective, the way the command's rows
+ * carry the catalog's class. A row with no class reads as lab. */
+static void fox_mark_product(struct json_value *rows, const char *id)
+{
+    for (size_t i = 0; i < rows->num_children; i++) {
+        struct json_value *row = &rows->children[i];
+        if (strcmp(json_get_str(json_get(row, "id")), id) == 0)
+            (void)json_push_kv_str(row, "class", "product");
+    }
+}
+
 /* The reply's gap in thousandths, from the rounded real. */
 static int64_t fox_gap_milli(const struct json_value *next)
 {
@@ -549,6 +574,41 @@ static int64_t fox_gap_milli(const struct json_value *next)
         ASSERT_STR_EQ(fox_row_str((next), "id"), (want_id));                  \
         ASSERT_EQ(fox_gap_milli(next), (int64_t)(want_milli));                \
     } while (0)
+
+/* Writes <dir>/boot_status.json for a boot that started at 1000 and was last
+ * updated `elapsed` seconds later, standing at `stage`. */
+static bool fox_boot_beacon(const char *dir, enum boot_stage stage,
+                            int64_t elapsed)
+{
+    struct boot_status_snapshot s;
+    char buf[1024], path[700];
+    bool rb = false, sv = false;
+    memset(&s, 0, sizeof(s));
+    (void)snprintf(s.phase, sizeof(s.phase), "%s",
+                   boot_status_phase_for_stage((int)stage, &rb, &sv));
+    (void)snprintf(s.stage, sizeof(s.stage), "%s", boot_stage_name(stage));
+    s.stage_ordinal = (int32_t)stage;
+    s.height = 100;
+    s.rpc_bound = rb;
+    s.serving = sv;
+    s.started_unix = 1000;
+    s.updated_unix = 1000 + elapsed;
+    s.elapsed_s = elapsed;
+    if (boot_status_write_json(&s, buf, sizeof(buf)) == 0)
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/boot_status.json", dir);
+    return fox_write(path, buf);
+}
+
+static struct zcl_objective_value fox_measure(const char *brief,
+                                              const char *datadir,
+                                              const char *id)
+{
+    struct zcl_objectives_options o = {0};
+    o.brief = brief;
+    o.datadir = datadir;
+    return zcl_objectives_measure(&o, id);
+}
 
 static int fox_case_next(void)
 {
@@ -646,6 +706,50 @@ static int fox_case_next(void)
         ASSERT(strstr(screen, "next: none - no objective is measured yet\n") != NULL);
         PASS();
     }
+    TEST("objectives: next prefers an unmet product row over a larger lab "
+         "gap, and the screen closes on the same row") {
+        json_set_array(&rows);
+        fox_next_row(&rows, "lab_huge", "min", 100, true, 900, "s", "lab");
+        fox_next_row(&rows, "prod_small", "min", 100, true, 120, "s", "prod");
+        fox_mark_product(&rows, "prod_small");
+        FOX_ASSERT_NEXT(&rows, &next, "prod_small", 200);
+        ASSERT_STR_EQ(fox_row_str(&next, "class"), "product");
+        (void)zcl_objectives_render_screen(&rows, screen, sizeof(screen));
+        ASSERT(strstr(screen, "\nnext: prod_small  120 vs 100 s - prod\n") !=
+               NULL);
+
+        /* Catalog order does not matter: the product row may come first. */
+        json_set_array(&rows);
+        fox_next_row(&rows, "prod_small", "min", 100, true, 120, "s", "prod");
+        fox_mark_product(&rows, "prod_small");
+        fox_next_row(&rows, "lab_huge", "min", 100, true, 900, "s", "lab");
+        FOX_ASSERT_NEXT(&rows, &next, "prod_small", 200);
+
+        /* Among product rows the largest gap wins; ties go to the earlier. */
+        json_set_array(&rows);
+        fox_next_row(&rows, "lab_huge", "min", 100, true, 900, "s", "lab");
+        fox_next_row(&rows, "prod_a", "max", 10, true, 5, "n", "a");
+        fox_mark_product(&rows, "prod_a");
+        fox_next_row(&rows, "prod_b", "min", 10, true, 30, "n", "b");
+        fox_mark_product(&rows, "prod_b");
+        FOX_ASSERT_NEXT(&rows, &next, "prod_b", 2000);
+        PASS();
+    }
+    TEST("objectives: next falls back to the largest lab gap when every "
+         "product row is met or unmeasured") {
+        json_set_array(&rows);
+        fox_next_row(&rows, "lab_small", "min", 100, true, 150, "s", "lab");
+        fox_next_row(&rows, "lab_big", "min", 100, true, 400, "s", "lab");
+        fox_next_row(&rows, "prod_met", "min", 100, true, 90, "s", "prod");
+        fox_mark_product(&rows, "prod_met");
+        fox_next_row(&rows, "prod_ghost", "min", 100, false, 0, "s", "prod");
+        fox_mark_product(&rows, "prod_ghost");
+        FOX_ASSERT_NEXT(&rows, &next, "lab_big", 3000);
+        ASSERT_STR_EQ(fox_row_str(&next, "class"), "lab");
+        (void)zcl_objectives_render_screen(&rows, screen, sizeof(screen));
+        ASSERT(strstr(screen, "\nnext: lab_big  400 vs 100 s - lab\n") != NULL);
+        PASS();
+    }
 _test_next:;
     json_free(&next);
     json_free(&rows);
@@ -725,7 +829,21 @@ int test_fleet_objectives(void)
     ASSERT(fox_write_n_lines(lintc_big, 1501));
     ASSERT(fox_write_n_lines(lintc_small, 10));
 
-    ASSERT(fox_write_n_lines(baseline_ok, 7));
+    /* Seven pins among the lines the lint gate does not count: the
+     * generated header, a blank line and an indented comment. */
+    ASSERT(fox_write(baseline_ok,
+                     "# check-cyclomatic-complexity baseline\n"
+                     "# GENERATED - never hand-edit\n"
+                     "\n"
+                     "a/one.c:f1:16\n"
+                     "a/two.c:f2:20\n"
+                     "   # an indented comment\n"
+                     "a/three.c:f3:17\n"
+                     "a/four.c:f4:31\n"
+                     "a/five.c:f5#2:18\n"
+                     "\t\n"
+                     "a/six.c:f6:15\n"
+                     "a/seven.c:main:74\n"));
 
     TEST("objectives: the catalog and the answer have the same row count") {
         const struct zcl_objective_row *catalog;
@@ -1158,7 +1276,7 @@ int test_fleet_objectives(void)
         ASSERT(strstr(screen, "[####################] 178/300 met") != NULL);
         const char *last = strstr(screen, "lab: met ");
         ASSERT(last != NULL);
-        ASSERT(strstr(last, " of 14, unmeasured ") != NULL);
+        ASSERT(strstr(last, " of 17, unmeasured ") != NULL);
         /* The whole reply must fit the leaf's declared response budget. */
         ASSERT(c.request.spec != NULL);
         ASSERT(c.request.spec->budget_bytes >= 0);
@@ -1227,6 +1345,102 @@ int test_fleet_objectives(void)
         ASSERT(strstr(fox_row_str(&c.reply.data, "screen"),
                       "next: none - no objective is measured yet\n") != NULL);
         fox_end(&c);
+        PASS();
+    }
+
+    TEST("objectives: the cyclomatic count is the gate's pin rows only, and "
+         "a malformed row is unmeasured") {
+        char bad[1024];
+        (void)snprintf(bad, sizeof(bad), "%s/bad_baseline.txt", root);
+        ASSERT(fox_write(bad, "# header\n\na/one.c:f:16\nnot a pin row\n"));
+        struct zcl_objectives_options o = {0};
+        o.baseline = baseline_ok;
+        struct zcl_objective_value v =
+            zcl_objectives_measure(&o, "functions_over_complexity_cap");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)7); /* six of the thirteen lines are not pins */
+        o.baseline = bad;
+        v = zcl_objectives_measure(&o, "functions_over_complexity_cap");
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "malformed pin row") != NULL);
+        PASS();
+    }
+
+    TEST("objectives: node_rss_mb and node_tip_lag_blocks are measured from "
+         "a status-brief fixture") {
+        char brief[1024], nolag[1024], junk[1024];
+        (void)snprintf(brief, sizeof(brief), "%s/brief.json", root);
+        (void)snprintf(nolag, sizeof(nolag), "%s/brief_nolag.json", root);
+        (void)snprintf(junk, sizeof(junk), "%s/brief_junk.json", root);
+        ASSERT(fox_write(brief, "{\"hstar\":1000,\"header_height\":1004,"
+                                "\"peer_best\":1007,\"gap\":3,"
+                                "\"rss_mb\":2200,\"serving\":true}"));
+        ASSERT(fox_write(nolag, "{\"hstar\":1000,\"gap\":5}"));
+        ASSERT(fox_write(junk, "not json"));
+        struct zcl_objective_value v =
+            fox_measure(brief, FOX_NO_DATADIR, "node_rss_mb");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)2200);
+        /* The larger of the header and peer heights, less the served tip. */
+        v = fox_measure(brief, FOX_NO_DATADIR, "node_tip_lag_blocks");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)7);
+        /* No reference height: the node's own gap stands. */
+        v = fox_measure(nolag, FOX_NO_DATADIR, "node_tip_lag_blocks");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)5);
+        /* A brief without rss_mb is unmeasured, never zero. */
+        v = fox_measure(nolag, FOX_NO_DATADIR, "node_rss_mb");
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "rss_mb") != NULL);
+        /* Through the command: both rows and a 1 GB target judged. */
+        struct fox_call c;
+        fox_begin_bare(&c);
+        fox_set(&c, "brief", brief);
+        fox_set(&c, "datadir", FOX_NO_DATADIR);
+        ASSERT(fox_run(&c));
+        const struct json_value *rss = fox_row(&c, "node_rss_mb");
+        ASSERT(rss != NULL);
+        ASSERT_STR_EQ(fox_row_str(rss, "class"), "product");
+        ASSERT_STR_EQ(fox_row_str(rss, "status"), "unmet");
+        ASSERT_EQ(fox_row_int(rss, "value"), (int64_t)2200);
+        /* A product row is unmet, so next is a product row, whatever the
+         * lab gaps are. */
+        ASSERT_STR_EQ(fox_row_str(json_get(&c.reply.data, "next"), "class"),
+                      "product");
+        fox_end(&c);
+        v = fox_measure(junk, FOX_NO_DATADIR, "node_rss_mb");
+        ASSERT(!v.measured);
+        PASS();
+    }
+
+    TEST("objectives: with no node the product rows are unmeasured with a "
+         "reason") {
+        const char *ids[] = {"node_rss_mb", "node_tip_lag_blocks",
+                             "node_warm_restart_s"};
+        for (size_t i = 0; i < 3; i++) {
+            struct zcl_objective_value v =
+                fox_measure(FOX_NO_BRIEF, FOX_NO_DATADIR, ids[i]);
+            ASSERT(!v.measured);
+            ASSERT(v.reason[0] != '\0');
+        }
+        PASS();
+    }
+
+    TEST("objectives: node_warm_restart_s is the boot beacon's seconds to "
+         "serving, and unmeasured while the boot is not serving") {
+        char dd[1024];
+        (void)snprintf(dd, sizeof(dd), "%s/beacon", root);
+        ASSERT(fox_mkdir(dd));
+        ASSERT(fox_boot_beacon(dd, BOOT_STAGE_READY, 137));
+        struct zcl_objective_value v =
+            fox_measure(FOX_NO_BRIEF, dd, "node_warm_restart_s");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)137);
+        ASSERT(fox_boot_beacon(dd, BOOT_STAGE_DB_OPEN, 40));
+        v = fox_measure(FOX_NO_BRIEF, dd, "node_warm_restart_s");
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "not reached serving") != NULL);
         PASS();
     }
 

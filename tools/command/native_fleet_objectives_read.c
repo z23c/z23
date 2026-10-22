@@ -1122,6 +1122,74 @@ static struct zcl_objective_value obj_lint_families_over_ceiling(
 
 /* ── cyclomatic complexity baseline ──────────────────────────────────── */
 
+/* Whether one baseline line is a pin row, judged the way the lint gate's
+ * loader (lb_parse_line in tools/lint/lintc/lib.c) judges it: blank lines
+ * and lines whose first non-blank byte is '#' are not rows; every other
+ * line must be path:function:M with M in 1..100000. -1 is not a row, 1 is
+ * a pin, 0 is a line the gate would refuse as malformed. */
+static int obj_baseline_line(const char *line)
+{
+    const char *p = line;
+    const char *colon;
+    char *end = NULL;
+    long m;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p == '#' || *p == '\n' || *p == '\0')
+        return -1;
+    colon = strrchr(p, ':');
+    if (!colon || colon == p)
+        return 0;
+    m = strtol(colon + 1, &end, 10);
+    if (end == colon + 1)
+        return 0;
+    if (*end == '\n')
+        end++;
+    return (*end == '\0' && m >= 1 && m <= 100000) ? 1 : 0;
+}
+
+/* A baseline line longer than this is not a pin row the gate would accept
+ * (its key limit is far smaller), so it reads as malformed. */
+#define OBJ_BASELINE_LINE_MAX 4096
+
+/* The kind of the line fgets just read (see obj_baseline_line). A line longer
+ * than the buffer is drained: a comment of any length is skipped like the gate
+ * skips it, anything else is no pin. */
+static int obj_baseline_row_kind(FILE *fp, const char *line)
+{
+    int c;
+    int kind = obj_baseline_line(line);
+    if (strchr(line, '\n') || feof(fp))
+        return kind;
+    while ((c = fgetc(fp)) != EOF && c != '\n')
+        ;
+    return kind < 0 ? -1 : 0;
+}
+
+/* The pin rows of a baseline file, or -1 when it cannot be read and -2 when
+ * a line is one the gate would refuse. */
+static int64_t obj_baseline_pins(const char *path)
+{
+    FILE *fp = fopen(path, "r");
+    char line[OBJ_BASELINE_LINE_MAX];
+    int64_t pins = 0;
+    if (!fp)
+        return -1;
+    while (fgets(line, sizeof(line), fp)) {
+        int kind = obj_baseline_row_kind(fp, line);
+        if (kind == 0) {
+            pins = -2;
+            break;
+        }
+        if (kind > 0)
+            pins++;
+    }
+    if (ferror(fp))
+        pins = -1;
+    (void)fclose(fp);
+    return pins;
+}
+
 static struct zcl_objective_value obj_functions_over_complexity_cap(
     const struct zcl_objectives_options *options)
 {
@@ -1129,13 +1197,17 @@ static struct zcl_objective_value obj_functions_over_complexity_cap(
     const char *path = options && options->baseline
                           ? options->baseline
                           : "tools/lint/cyclomatic_complexity_baseline.txt";
-    int64_t lines = obj_file_line_count(path);
-    if (lines < 0) {
+    int64_t pins = obj_baseline_pins(path);
+    if (pins == -2) {
+        obj_set_reason(&v, "malformed pin row in baseline %s", path);
+        return v;
+    }
+    if (pins < 0) {
         obj_set_reason(&v, "no baseline file at %s", path);
         return v;
     }
     v.measured = true;
-    v.value = lines;
+    v.value = pins;
     return v;
 }
 
@@ -1176,6 +1248,9 @@ static const struct obj_producer k_producers[] = {
     {"lint_families_over_ceiling", obj_lint_families_over_ceiling},
     {"functions_over_complexity_cap", obj_functions_over_complexity_cap},
     {"fresh_node_sync_eta_s", obj_fresh_node_sync_eta_s},
+    {"node_rss_mb", zcl_objectives_node_rss_mb},
+    {"node_tip_lag_blocks", zcl_objectives_node_tip_lag_blocks},
+    {"node_warm_restart_s", zcl_objectives_node_warm_restart_s},
     {"tokens_per_landed_commit", obj_tokens_per_landed_commit},
     {"landed_rows_today", obj_landed_rows_today},
     {"land_success_rate_7d", obj_land_success_rate_7d},

@@ -3,7 +3,8 @@
  *          objective z23 optimizes, its current value, its target, and
  *          whether it is met, unmet, or unmeasured today.
  *
- * WHAT IT DECIDES. Only which unmet objective to work on next: the
+ * WHAT IT DECIDES. Only which unmet objective to work on next: a product
+ * objective before any lab one, and inside a class the
  * measured row with the largest gap to its target (`next` in the reply and
  * the last line of the screen). It reports what the catalog in
  * engine/composition/objectives.def declares, against what the tree can
@@ -36,6 +37,7 @@ static void obj_row_json(const struct zcl_objective_row *row,
     char status[80];
     json_set_object(out);
     (void)json_push_kv_str(out, "id", row->id);
+    (void)json_push_kv_str(out, "class", row->class_);
     (void)json_push_kv_str(out, "source", row->source);
     (void)json_push_kv_str(out, "direction", row->direction);
     (void)json_push_kv_int(out, "target", row->target);
@@ -87,6 +89,8 @@ void zcl_native_handle_fleet_objectives(
     options.repo = obj_input_str(request, "repo");
     options.lintc_dir = obj_input_str(request, "lintc_dir");
     options.baseline = obj_input_str(request, "baseline");
+    options.brief = obj_input_str(request, "brief");
+    options.datadir = obj_input_str(request, "datadir");
 
     n = zcl_objectives_catalog(&catalog);
 
@@ -148,26 +152,40 @@ static double obj_round_gap(double gap)
     return (double)(int64_t)(gap * 1000.0 + 0.5) / 1000.0;
 }
 
-/* The measured, unmet row with the largest gap; the first one in catalog
- * order wins a tie. NULL when no measured row is unmet. */
+/* A finished row's class: "product" or "lab". A row with no class reads as
+ * lab, so only a row the catalog marked product can outrank another. */
+static const char *obj_class(const struct json_value *row)
+{
+    const char *c = json_get_str(json_get(row, "class"));
+    return (c && c[0]) ? c : "lab";
+}
+
+/* The measured, unmet row to work on: a product row always outranks a lab
+ * row, the largest gap wins inside a class, and the first one in catalog
+ * order wins a tie. NULL when no measured row is unmet. The reply's `next`
+ * and the screen's closing line both come through here. */
 static const struct json_value *obj_pick_next(const struct json_value *rows,
                                               double *gap_out)
 {
     const struct json_value *best = NULL;
     double best_gap = 0.0;
+    bool best_product = false;
     for (size_t i = 0; i < rows->num_children; i++) {
         const struct json_value *row = &rows->children[i];
-        bool is_max;
+        bool is_max, product;
         double gap;
         if (!json_get_bool(json_get(row, "measured")) ||
             strcmp(json_get_str(json_get(row, "status")), "unmet") != 0)
             continue;
         is_max = strcmp(json_get_str(json_get(row, "direction")), "max") == 0;
+        product = strcmp(obj_class(row), "product") == 0;
         gap = obj_gap(is_max, json_get_int(json_get(row, "value")),
                       json_get_int(json_get(row, "target")));
-        if (!best || gap > best_gap) {
+        if (!best || (product && !best_product) ||
+            (product == best_product && gap > best_gap)) {
             best = row;
             best_gap = gap;
+            best_product = product;
         }
     }
     *gap_out = best_gap;
@@ -178,6 +196,7 @@ static bool obj_next_fill(struct json_value *out, const struct json_value *row,
                           double gap)
 {
     return json_push_kv_str(out, "id", json_get_str(json_get(row, "id"))) &&
+           json_push_kv_str(out, "class", obj_class(row)) &&
            json_push_kv_int(out, "value", json_get_int(json_get(row, "value"))) &&
            json_push_kv_int(out, "target",
                             json_get_int(json_get(row, "target"))) &&
