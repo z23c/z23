@@ -544,6 +544,37 @@ static bool remove_legacy_sidecars(
            platform_directory_child_unlink(directory, "index.kv-shm", true);
 }
 
+/* Current source Merkle root of the snapshot at `root`. */
+static bool windows_source_merkle_now(const char *root, uint8_t out[32])
+{
+    struct ci_merkle_cost cost = {0};
+    struct ci_merkle *merkle = ci_merkle_refresh_reconciled(root, &cost);
+    struct ci_merkle_node node;
+    bool ok = merkle && ci_merkle_root(merkle, &node);
+    if (ok) memcpy(out, node.digest.bytes, 32);
+    ci_merkle_free(merkle);
+    return ok;
+}
+
+static bool windows_source_merkle_held(const char *root,
+                                       const uint8_t sealed[32])
+{
+    uint8_t now[32];
+    return windows_source_merkle_now(root, now) &&
+           memcmp(sealed, now, 32) == 0;
+}
+
+static bool windows_source_stats_held(const char *root,
+                                      const uint8_t built_source[32],
+                                      const uint8_t built_dep[32])
+{
+    uint8_t source[32], dep[32];
+    return ci_source_stat_root_sha3(root, source) &&
+           memcmp(built_source, source, 32) == 0 &&
+           ci_deps_stat_root_sha3(root, dep) &&
+           memcmp(built_dep, dep, 32) == 0;
+}
+
 static bool codeindex_rebuild_internal(struct codeindex *ci,
                                        bool coalesce_if_fresh)
 {
@@ -600,16 +631,8 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     /* Source-view readers accept a store only when its sealed
      * source_merkle_root_sha3 matches the snapshot. The POSIX publisher
      * writes that key; without it every Windows `code have` rebuilds. */
-    struct ci_merkle_cost merkle_cost = {0};
-    struct ci_merkle *merkle =
-        ci_merkle_refresh_reconciled(ci->root, &merkle_cost);
-    struct ci_merkle_node merkle_root;
     uint8_t sealed_merkle[32];
-    bool merkle_ok = merkle && ci_merkle_root(merkle, &merkle_root);
-    if (merkle_ok)
-        memcpy(sealed_merkle, merkle_root.digest.bytes, sizeof(sealed_merkle));
-    ci_merkle_free(merkle);
-    if (!merkle_ok) {
+    if (!windows_source_merkle_now(ci->root, sealed_merkle)) {
         failure = "Windows source Merkle root failed";
         goto out;
     }
@@ -623,15 +646,7 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         goto out;
     }
 
-    struct ci_merkle_cost final_cost = {0};
-    struct ci_merkle *final_merkle =
-        ci_merkle_refresh_reconciled(ci->root, &final_cost);
-    struct ci_merkle_node final_root;
-    bool merkle_held = final_merkle &&
-        ci_merkle_root(final_merkle, &final_root) &&
-        memcmp(sealed_merkle, final_root.digest.bytes, 32) == 0;
-    ci_merkle_free(final_merkle);
-    if (!merkle_held) {
+    if (!windows_source_merkle_held(ci->root, sealed_merkle)) {
         failure = "source Merkle root changed during Windows rebuild";
         goto out;
     }
@@ -642,11 +657,8 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
     ci_store_close(store);
     store = NULL;
 
-    uint8_t final_source_stat[32], final_dep_stat[32];
-    if (!ci_source_stat_root_sha3(ci->root, final_source_stat) ||
-        memcmp(built_source_stat, final_source_stat, 32) != 0 ||
-        !ci_deps_stat_root_sha3(ci->root, final_dep_stat) ||
-        memcmp(built_dep_stat, final_dep_stat, 32) != 0) {
+    if (!windows_source_stats_held(ci->root, built_source_stat,
+                                   built_dep_stat)) {
         failure = "source or depfile metadata changed during Windows rebuild";
         goto out;
     }

@@ -328,6 +328,31 @@ static void cap_bind_patterns(sqlite3_stmt *stmt,
 
 /* ── candidate scans ──────────────────────────────────────────────────── */
 
+/* Which query terms the name (name mask) or, failing that, the doc and
+ * signature (doc mask) contain. */
+static void cap_term_masks(const struct ci_capability_query *q,
+                           const char *name, const char *doc, const char *sig,
+                           uint32_t *nm, uint32_t *dm)
+{
+    for (int t = 0; t < q->term_count; t++) {
+        if (cap_contains(name, q->stems[t])) *nm |= 1u << t;
+        else if (cap_contains(doc, q->stems[t]) ||
+                 cap_contains(sig, q->stems[t])) *dm |= 1u << t;
+    }
+}
+
+/* A name hit on an anchor. An adjacent repeat of the last name is one hit. */
+static void cap_record_name_hit(struct cap_anchor *a, const char *name,
+                                uint32_t nm)
+{
+    a->name_mask |= nm;
+    if (a->last_name[0] && strcmp(a->last_name, name) == 0) return;
+    ci_cpy(a->last_name, sizeof(a->last_name), name);
+    a->name_hits++;
+    if (a->syms_listed < CI_CAPABILITY_SYMBOL_CAP)
+        ci_cpy(a->syms[a->syms_listed++], sizeof(a->syms[0]), name);
+}
+
 /* One ordered symbol row. `name` / `anchor` absence and include guards are
  * not evidence. Adjacent equal names for one anchor count once because the
  * caller walks ORDER BY name, def_path: a declaration and a definition of
@@ -349,18 +374,9 @@ static void cap_symbol_row(struct cap_scan *s, struct ci_capability_query *q,
     if (!a->group[0] && grp) ci_cpy(a->group, sizeof(a->group), grp);
 
     uint32_t nm = 0, dm = 0;
-    for (int t = 0; t < q->term_count; t++) {
-        if (cap_contains(name, q->stems[t])) nm |= 1u << t;
-        else if (cap_contains(doc, q->stems[t]) ||
-                 cap_contains(sig, q->stems[t])) dm |= 1u << t;
-    }
+    cap_term_masks(q, name, doc, sig, &nm, &dm);
     if (nm) {
-        a->name_mask |= nm;
-        if (a->last_name[0] && strcmp(a->last_name, name) == 0) return;
-        ci_cpy(a->last_name, sizeof(a->last_name), name);
-        a->name_hits++;
-        if (a->syms_listed < CI_CAPABILITY_SYMBOL_CAP)
-            ci_cpy(a->syms[a->syms_listed++], sizeof(a->syms[0]), name);
+        cap_record_name_hit(a, name, nm);
     } else if (dm) {
         a->doc_mask |= dm;
         a->doc_hits++;
@@ -602,6 +618,39 @@ static bool cap_pack_apply(struct cap_scan *s, struct ci_capability_query *q,
     return p == end;
 }
 
+/* A packed image and its opened payload view. `image` is owned. */
+struct cap_pack_view {
+    unsigned char *image;
+    size_t length;
+    const unsigned char *payload;
+    const unsigned char *end;
+    uint32_t count;
+};
+
+/* Opens the loaded image when it is present and current. Otherwise rebuilds
+ * it from the store and saves it. False leaves no image behind. */
+static bool cap_pack_open_or_rebuild(struct ci_store *st, const char *root,
+                                     const uint8_t merkle[32], bool found,
+                                     struct cap_pack_view *v)
+{
+    if (found && v->image &&
+        cap_pack_open(v->image, v->length, merkle, &v->payload, &v->end,
+                      &v->count))
+        return true;
+    free(v->image);
+    v->image = NULL;
+    if (!cap_pack_build(st, merkle, &v->image, &v->length) ||
+        !cap_pack_open(v->image, v->length, merkle, &v->payload, &v->end,
+                       &v->count)) {
+        free(v->image);
+        v->image = NULL;
+        return false;
+    }
+    (void)ci_merkle_snapshot_image_save_windows(root, cap_pack_leaf, v->image,
+                                                v->length);
+    return true;
+}
+
 /* 1: scan consumed the pack. 0: caller should use SQL. -1: the checked
  * image could not be walked a second time, so scan state may be partial
  * and SQL must not run over it. */
@@ -618,30 +667,16 @@ static int cap_pack_try(struct ci_store *st, struct cap_scan *s,
         !merkle_found || merkle_len != sizeof(merkle))
         return 0;
 
-    unsigned char *image = NULL;
-    size_t length = 0;
+    struct cap_pack_view view = {0};
     bool found = false;
     if (!ci_merkle_snapshot_image_load_windows(
-            root, cap_pack_leaf, CAP_PACK_MAX, &image, &length, &found))
+            root, cap_pack_leaf, CAP_PACK_MAX, &view.image, &view.length,
+            &found))
         return 0;
-    const unsigned char *payload = NULL;
-    const unsigned char *end = NULL;
-    uint32_t count = 0;
-    bool ready = found && image &&
-        cap_pack_open(image, length, merkle, &payload, &end, &count);
-    if (!ready) {
-        free(image);
-        image = NULL;
-        if (!cap_pack_build(st, merkle, &image, &length) ||
-            !cap_pack_open(image, length, merkle, &payload, &end, &count)) {
-            free(image);
-            return 0;
-        }
-        (void)ci_merkle_snapshot_image_save_windows(
-            root, cap_pack_leaf, image, length);
-    }
-    bool applied = cap_pack_apply(s, q, payload, end, count);
-    free(image);
+    if (!cap_pack_open_or_rebuild(st, root, merkle, found, &view))
+        return 0;
+    bool applied = cap_pack_apply(s, q, view.payload, view.end, view.count);
+    free(view.image);
     return applied ? 1 : -1;
 }
 #endif
