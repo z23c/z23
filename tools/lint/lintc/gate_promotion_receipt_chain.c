@@ -2,7 +2,7 @@
  *
  * purpose: gate family - check-promotion-receipt-chain of the C23 lint
  * runtime, the replacement for the bash body of
- * tools/lint/check_promotion_receipt_chain.sh. The promotion receipt ledger
+ * build/bin/z23-lint check-promotion-receipt-chain. The promotion receipt ledger
  * stays a chain: append-only, hash-linked, signed, replicated and verifiable
  * by someone who does not trust us. The gate runs the writer's tamper-detection
  * self-test, checks the trust anchor against the record count, verifies the

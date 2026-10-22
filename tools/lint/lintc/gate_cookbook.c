@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family - check-cookbook of the C23 lint runtime, the
- * replacement for the bash body of tools/lint/check_cookbook.sh. Every
+ * replacement for the bash body of build/bin/z23-lint check-cookbook. Every
  * cookbook recipe still works (RUN rows are executed and must print their
  * token, ASK rows must still be described by the command registry, READ rows
  * cite a tracked file that still holds the symbol) and docs/dev/COOKBOOK.md still
@@ -326,9 +326,9 @@ static int ck_check_doc(struct ck_run *g, const struct ck_str *gen)
         if (!same)
             printf("fixed: %s regenerated from %s\n", cfg->doc, cfg->def);
     } else if (!ck_regular(cfg->doc)) {
-        ck_bad(g, "%s does not exist; run tools/lint/check_cookbook.sh --fix", cfg->doc);
+        ck_bad(g, "%s does not exist; run build/bin/z23-lint check-cookbook --fix", cfg->doc);
     } else if (!same) {
-        ck_bad(g, "%s has drifted from %s; run tools/lint/check_cookbook.sh --fix", cfg->doc, cfg->def);
+        ck_bad(g, "%s has drifted from %s; run build/bin/z23-lint check-cookbook --fix", cfg->doc, cfg->def);
     }
     return 0;
 }

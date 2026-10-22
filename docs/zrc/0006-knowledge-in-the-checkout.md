@@ -122,7 +122,7 @@ exists.
 
 ### The gate
 
-`make check-orient-facts` (`tools/lint/check_orient_facts.sh`) re-proves the
+`make check-orient-facts` (`build/bin/z23-lint check-orient-facts`) re-proves the
 whole table on every commit. For every row: the `path` must exist, and the
 `anchor` must be found in it by `grep -a -F -q`. It also enforces key
 uniqueness within a topic, the length caps, no tab in any field, and that
@@ -192,7 +192,7 @@ different question (where is this symbol) from a different source.
 ## Landing
 
 Landed with the commits that add `engine/composition/facts/`,
-`tools/command/native_dev_orient.c`, `tools/lint/check_orient_facts.sh`, and
+`tools/command/native_dev_orient.c`, `build/bin/z23-lint check-orient-facts`, and
 `tests/harness/src/test_dev_orient.c`. The receipt that the acceptance holds
 is `make check-orient-facts` plus the `test_dev_orient` group; both run in
 the ordinary umbrella, so the acceptance is re-proved on every commit rather

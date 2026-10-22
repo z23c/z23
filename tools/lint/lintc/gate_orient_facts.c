@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family - check-orient-facts of the C23 lint runtime, the
- * replacement for the bash body of tools/lint/check_orient_facts.sh. Every
+ * replacement for the bash body of build/bin/z23-lint check-orient-facts. Every
  * ZCL_FACT row in engine/composition/facts/ must still be true: its path must
  * exist and its anchor, a literal substring of that file, must still be
  * findable in it.

@@ -9,7 +9,7 @@
  *   path    repo-relative file the claim was read from.
  *   anchor  literal substring that must still exist in that file.
  *
- * tools/lint/check_orient_facts.sh proves every path and anchor on every
+ * build/bin/z23-lint check-orient-facts proves every path and anchor on every
  * commit, so a row that stops being true fails the build instead of
  * misleading the next reader. Never weaken an anchor to make it match;
  * delete or rewrite the row. See docs/zrc/0006-knowledge-in-the-checkout.md. */

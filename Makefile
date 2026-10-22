@@ -13616,8 +13616,8 @@ check-model-sql-literals: $(LINTC_TOOL)
 .PHONY: check-cookbook
 check-cookbook: $(Z23_DEV_BIN) $(LINTC_TOOL)
 	@echo "══ LINT: every cookbook recipe still works ══"
-	@./tools/lint/check_cookbook.sh --selftest
-	@./tools/lint/check_cookbook.sh
+	@./build/bin/z23-lint check-cookbook --selftest
+	@./build/bin/z23-lint check-cookbook
 
 check-persona-resolves: $(LINTC_TOOL)
 	@echo "══ LINT: every authored persona still resolves ══"
@@ -14186,9 +14186,9 @@ check-windows-acceptance:
 # runs; the regression must be caught before it lands, not at the next full
 # lint.
 .PHONY: check-windows-acceptance-guard
-check-windows-acceptance-guard:
+check-windows-acceptance-guard: $(LINTC_TOOL)
 	@echo "══ LINT: Windows acceptance TU off-Windows guard ══"
-	@./tools/lint/check_windows_acceptance_guard.sh --self-test && ./tools/lint/check_windows_acceptance_guard.sh
+	@./build/bin/z23-lint check-windows-acceptance-guard --selftest && ./build/bin/z23-lint check-windows-acceptance-guard
 # END windows-acceptance lane
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -14618,8 +14618,8 @@ fix-doc-counts:
 # selftest plants a broken anchor and proves the gate trips on it.
 check-orient-facts: $(LINTC_TOOL)
 	@echo "══ LINT: orientation facts still true ══"
-	@./tools/lint/check_orient_facts.sh --selftest
-	@./tools/lint/check_orient_facts.sh
+	@./build/bin/z23-lint check-orient-facts --selftest
+	@./build/bin/z23-lint check-orient-facts
 
 # Gate — the stopwatch skip-streak detector's SHELL halves. The C half is
 # covered by the test_stopwatch_skip_watch group; the shell half (the shared
@@ -14648,8 +14648,8 @@ check-proof-server-pin: $(LINTC_TOOL)
 # against HEAD, and asserts ship.sh still appends a receipt on promotion.
 check-promotion-receipt-chain: $(LINTC_TOOL)
 	@echo "══ LINT: promotion receipt chain ══"
-	@./tools/lint/check_promotion_receipt_chain.sh --selftest
-	@./tools/lint/check_promotion_receipt_chain.sh
+	@./build/bin/z23-lint check-promotion-receipt-chain --selftest
+	@./build/bin/z23-lint check-promotion-receipt-chain
 
 # Gate — execute the exact remote activation transaction embedded in ship.sh.
 # Fault injection at daemon-reload and restart must restore both the executable

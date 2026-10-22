@@ -1707,7 +1707,7 @@ ZCL_COMMAND_READY_READ(
     "The compiled fact table in engine/composition/facts/: the topic listing "
     "with a row count each, one topic's rows, or the rows whose key, claim or "
     "path contain a substring. Every row carries the repo-relative path it "
-    "was read from and a literal anchor that tools/lint/check_orient_facts.sh "
+    "was read from and a literal anchor that build/bin/z23-lint check-orient-facts "
     "proves still exists in that file, so a row that stopped being true fails "
     "the build instead of misleading a reader. An undeclared topic is refused "
     "by name; an empty query result is reported as a true count of zero. The "

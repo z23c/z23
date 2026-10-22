@@ -3306,7 +3306,7 @@ AGENT_IMPACT_RULE("engine/modules/determinism/src/*.c|engine/modules/determinism
  * plus the document generated from it. It rides make_lint_gates only — the
  * gate IS the coverage, and it runs the recipes rather than reading about
  * them. */
-AGENT_IMPACT_RULE("engine/composition/cookbook.def|tools/lint/check_cookbook.sh|docs/dev/COOKBOOK.md", "make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/cookbook.def|tools/lint/lintc/gate_cookbook.c|tools/lint/lintc/gate_cookbook_parse.c|tools/lint/lintc/gate_cookbook_priv.h|tools/lint/lintc/gate_cookbook_selftest.c|docs/dev/COOKBOOK.md", "make_lint_gates")
 
 /* These five carried no rule until a tree-wide hex-codec consolidation
  * touched them and the push gate refused. A file with no rule is not one CI
@@ -3358,7 +3358,7 @@ AGENT_IMPACT_RULE("tools/command/native_zcode_work_map.c|tools/command/native_zc
  * every row's path and anchor. A change to any of the three has to run both
  * the leaf's group and the lint gates, because a row that stops being true
  * is exactly what this is here to catch. */
-AGENT_IMPACT_RULE("engine/composition/facts/*|tools/command/native_dev_orient.c|tools/lint/check_orient_facts.sh|tests/harness/src/test_dev_orient.c", "dev_orient make_lint_gates")
+AGENT_IMPACT_RULE("engine/composition/facts/*|tools/command/native_dev_orient.c|tools/lint/lintc/gate_orient_facts.c|tools/lint/lintc/gate_orient_facts_priv.h|tools/lint/lintc/gate_orient_facts_selftest.c|tests/harness/src/test_dev_orient.c", "dev_orient make_lint_gates")
 /* dev.beta6.verify: the standalone-process preflight leaf calling the real
  * beta6_bs_arm(). */
 AGENT_IMPACT_RULE("tools/command/native_dev_beta6_verify.c|tests/harness/src/test_dev_beta6_verify.c", "dev_beta6_verify make_lint_gates")

@@ -208,7 +208,7 @@ promotion."
 
 ## The gate
 
-`check-promotion-receipt-chain` (`tools/lint/check_promotion_receipt_chain.sh`)
+`check-promotion-receipt-chain` (`build/bin/z23-lint check-promotion-receipt-chain`)
 checks five things: the hermetic self-test passes; the in-tree ledger verifies
 with `ZCL_RECEIPT_KEY` pointed at a nonexistent path (the offline-third-party
 contract); the allowed-signers file names a key *whenever the ledger holds a

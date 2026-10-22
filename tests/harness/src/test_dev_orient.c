@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Acceptance bar for dev.agent.orient (tools/command/native_dev_orient.c) and
- * the gate that keeps its rows honest (tools/lint/check_orient_facts.sh).
+ * the gate that keeps its rows honest (build/bin/z23-lint check-orient-facts).
  *
  * The leaf half calls the bound handler directly, after every input crosses
  * the real registry validator. The gate half runs the checker against a
@@ -124,7 +124,7 @@ static bool dvo_write(const char *path, const char *text)
  * documented environment); returns its exit status. */
 static int dvo_run_checker(const char *facts_dir)
 {
-    const char *const argv[] = {"./tools/lint/check_orient_facts.sh", NULL};
+    const char *const argv[] = {"./build/bin/z23-lint", "check-orient-facts", NULL};
     char out[4096];
     int rc;
 

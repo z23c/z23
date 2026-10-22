@@ -5650,11 +5650,11 @@ static const struct dp_docs_fresh_artifact DP_DOCS_FRESH[] = {
       "tools/lint/check_capability_inventory_generated.sh",
       "make docs-capability-inventory", "build/bin/gen_capability_inventory" },
     { "docs/agent/EXECUTOR_HEURISTICS.md",
-      "tools/lint/check_fleet_facts.sh",
-      "make docs-executor-routing", NULL },
+      "build/bin/z23-lint",
+      "make docs-executor-routing", "check-fleet-facts" },
     { "docs/agent/EXECUTOR_HEURISTICS.md",
-      "tools/lint/check_fleet_observations.sh",
-      "make docs-executor-routing", NULL },
+      "build/bin/z23-lint",
+      "make docs-executor-routing", "check-fleet-observations" },
     { "docs/dev/CODEBASE_MAP.md",
       "tools/scripts/check_doc_counts.sh",
       "make fix-doc-counts", NULL },
@@ -5662,7 +5662,7 @@ static const struct dp_docs_fresh_artifact DP_DOCS_FRESH[] = {
 #define DP_DOCS_FRESH_N (sizeof(DP_DOCS_FRESH) / sizeof(DP_DOCS_FRESH[0]))
 
 /* The checker binaries a sealed generation must carry before any checker
- * above may run: check_fleet_facts.sh and check_fleet_observations.sh exec
+ * above may run: z23-lint check-fleet-facts and check-fleet-observations exec
  * z23-lint, the latter runs z23-fleet-observe, and the inventory
  * checker takes the already-built generator. This list gates the fresh
  * check and mirrors the docs-proof-tools Make prerequisite set. */
@@ -5907,9 +5907,14 @@ static bool dp_docs_fresh_step_verdict(const struct dp_docs_fresh_run *run,
      * its rc and check identity in a typed tool failure. Only a
      * checker that ran and reported drift refuses as stale. */
     if (dp_docs_output_signals_tool_failure(out, report->rc)) {
-        proof_whyf(why, why_len,
-                   "proof_generated_docs_checker_tool_failure:%s:rc_%d",
-                   artifact->check, report->rc);
+        if (artifact->tool_arg)
+            proof_whyf(why, why_len,
+                       "proof_generated_docs_checker_tool_failure:%s:%s:rc_%d",
+                       artifact->check, artifact->tool_arg, report->rc);
+        else
+            proof_whyf(why, why_len,
+                       "proof_generated_docs_checker_tool_failure:%s:rc_%d",
+                       artifact->check, report->rc);
         return false;
     }
     proof_whyf(why, why_len, "proof_generated_docs_stale:%s (%s)",

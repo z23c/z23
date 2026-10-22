@@ -495,7 +495,7 @@ static bool group_reads_external_inputs(const char *name)
         "cli_auth_robust",
         "cold_start_sync",
         "crypto_perf_selftest",
-        /* dvo_run_checker spawns ./tools/lint/check_orient_facts.sh.
+        /* dvo_run_checker spawns ./build/bin/z23-lint check-orient-facts.
          * No exec-family call sits in the entry file, so the rail neither
          * refuses nor binds that script. */
         "dev_orient",

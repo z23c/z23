@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: gate family — check-windows-acceptance-guard of the C23 lint
- * runtime, the replacement for tools/lint/check_windows_acceptance_guard.sh.
+ * runtime, the replacement for build/bin/z23-lint check-windows-acceptance-guard.
  * Every tests/harness/src/NAME_windows_acceptance.c TU, and every tests/-rooted
  * source a ZCL_WINDOWS_ACCEPTANCE_*_SOURCES catalog row names, must either
  * define no main() or wrap it in the full

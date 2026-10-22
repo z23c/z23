@@ -27,7 +27,7 @@
  * A topic is one file. Adding a topic is two lines here plus that file;
  * nothing else in the tree changes, and no reader keeps a second list.
  *
- * tools/lint/check_orient_facts.sh proves every path and every anchor on
+ * build/bin/z23-lint check-orient-facts proves every path and every anchor on
  * every commit and has no baseline and no exemption list. NEVER weaken an
  * anchor to make a stale row pass — rewrite the row against what the code
  * now says, or delete it. See docs/zrc/0006-knowledge-in-the-checkout.md.

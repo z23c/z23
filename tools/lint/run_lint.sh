@@ -153,7 +153,7 @@ gate_command() {
         check-fleet-vitals)                echo './build/bin/z23-lint check-fleet-vitals --selftest && ./build/bin/z23-lint check-fleet-vitals' ;;
         check-prompt-templates)            echo './build/bin/z23-lint check-prompt-templates --selftest && ./build/bin/z23-lint check-prompt-templates' ;;
         check-rule-vocabulary)             echo './build/bin/z23-lint check-rule-vocabulary --selftest && ./build/bin/z23-lint check-rule-vocabulary' ;;
-        check-cookbook)                    echo './tools/lint/check_cookbook.sh --selftest && ./tools/lint/check_cookbook.sh' ;;
+        check-cookbook)                    echo './build/bin/z23-lint check-cookbook --selftest && ./build/bin/z23-lint check-cookbook' ;;
         check-zcode-package-registry)      echo './build/bin/z23-lint check-zcode-package-registry' ;;
         check-zcode-package-standalone)    echo './build/bin/z23-lint check-zcode-package-standalone' ;;
         check-capability-closure)          echo './build/bin/z23-lint check-capability-closure --selftest && ./build/bin/z23-lint check-capability-closure' ;;
@@ -200,7 +200,7 @@ gate_command() {
         check-supervisor-progress-declared) echo './build/bin/z23-lint check-supervisor-progress-declared' ;;
         check-stopwatch-skip-detector)     echo './build/bin/z23-lint check-stopwatch-skip-detector' ;;
         check-proof-server-pin)            echo './build/bin/z23-lint check-proof-server-pin' ;;
-        check-promotion-receipt-chain)     echo './tools/lint/check_promotion_receipt_chain.sh --selftest && ./tools/lint/check_promotion_receipt_chain.sh' ;;
+        check-promotion-receipt-chain)     echo './build/bin/z23-lint check-promotion-receipt-chain --selftest && ./build/bin/z23-lint check-promotion-receipt-chain' ;;
         check-ship-remote-transaction)     echo './tools/ship.sh --selftest && ./tools/ship_selftest.sh && ./tools/lint/check_ship_remote_transaction.sh' ;;
         check-z23-release-install)         echo 'make --no-print-directory -s z23-bootstrap install-selftest && "$ZCL_LINT_BIN_DIR/install_selftest" --selftest && bash platform/packaging/release/build_release.sh --selftest && bash tools/scripts/install_z23.sh --selftest && bash tools/scripts/deploy_z23_release.sh --selftest' ;;
         check-published-platforms)         echo './tools/lint/check_published_platforms.sh --selftest && ./tools/lint/check_published_platforms.sh' ;;
@@ -249,7 +249,7 @@ gate_command() {
         check-condition-cooldown)          echo './tools/scripts/check_condition_cooldown.sh' ;;
         check-doc-accuracy)                echo './tools/scripts/check_doc_accuracy.sh' ;;
         check-doc-counts)                  echo './tools/scripts/check_doc_counts.sh' ;;
-        check-orient-facts)                echo './tools/lint/check_orient_facts.sh --selftest && ./tools/lint/check_orient_facts.sh' ;;
+        check-orient-facts)                echo './build/bin/z23-lint check-orient-facts --selftest && ./build/bin/z23-lint check-orient-facts' ;;
         check-no-stale-pinned-facts)       echo './tools/lint/check_no_stale_pinned_facts.sh' ;;
         check-no-uncited-victory)          echo './tools/scripts/check_no_uncited_victory.sh' ;;
         check-doc-claims)                  echo './tools/lint/check_doc_claims.sh' ;;
@@ -317,7 +317,7 @@ gate_command() {
         check-clang-portability)           echo './tools/lint/check_clang_portability.sh --self-test && ./tools/lint/check_clang_portability.sh' ;;
         check-windows-platform-seam)       echo './tools/lint/check_windows_platform_seam.sh --self-test && ./tools/lint/check_windows_platform_seam.sh' ;;
         check-windows-acceptance)          echo './tools/lint/check_windows_acceptance.sh --self-test && ./tools/lint/check_windows_acceptance.sh' ;;
-        check-windows-acceptance-guard)    echo './tools/lint/check_windows_acceptance_guard.sh --self-test && ./tools/lint/check_windows_acceptance_guard.sh' ;;
+        check-windows-acceptance-guard)    echo './build/bin/z23-lint check-windows-acceptance-guard --selftest && ./build/bin/z23-lint check-windows-acceptance-guard' ;;
         check-windows-cross-syntax)        echo './tools/lint/check_windows_cross_syntax.sh' ;;
         check-platform-header-guards)      echo './tools/lint/check_platform_header_guards.sh --self-test && ./tools/lint/check_platform_header_guards.sh' ;;
         check-macos-acceptance)            echo './build/bin/z23-lint check-macos-acceptance --selftest && ./build/bin/z23-lint check-macos-acceptance' ;;

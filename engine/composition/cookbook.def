@@ -10,7 +10,7 @@
  * command that no longer exists costs more than no recipe at all, because
  * they will believe it and spend an hour.
  *
- * So every row here is CHECKED by tools/lint/check_cookbook.sh. A RUN row
+ * So every row here is CHECKED by build/bin/z23-lint check-cookbook. A RUN row
  * has its command actually run and the expected token must appear in the
  * output. An ASK row must still name a command the binary offers and reports
  * as ready. A READ row must name a tracked file that still contains the
@@ -54,7 +54,7 @@
  *     and the code cannot.
  *
  * ADDING A ROW: put it under the right SECTION, then run
- * tools/lint/check_cookbook.sh --fix to regenerate docs/dev/COOKBOOK.md. Never
+ * build/bin/z23-lint check-cookbook --fix to regenerate docs/dev/COOKBOOK.md. Never
  * edit that file by hand.
  */
 

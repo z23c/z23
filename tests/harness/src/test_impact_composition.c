@@ -118,6 +118,20 @@ static bool ic_write(const char *dir, const char *rel, const char *content)
     return true;
 }
 
+/* z23-lint serves both fleet checkers, so a fixture scripts each checker by
+ * its subcommand. The two bodies are shell statements that end their arm. */
+static bool ic_write_lint(const char *dir, const char *facts, const char *obs)
+{
+    char body[1024];
+    if (snprintf(body, sizeof(body),
+                 "#!/bin/sh\ncase \"$1\" in\n"
+                 "check-fleet-facts) %s ;;\n"
+                 "check-fleet-observations) %s ;;\n"
+                 "*) exit 0 ;;\nesac\n", facts, obs) >= (int)sizeof(body))
+        return false;
+    return ic_write(dir, "build/bin/z23-lint", body);
+}
+
 /* Whole-item membership in a comma-separated selector. A substring test would
  * find `test_onion_pair_watch` inside `test_onion_pair_watch_live` and call a
  * gated group selected. */
@@ -9977,8 +9991,8 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
 #else
         static const char *const stubs[] = {
             "tools/lint/check_capability_inventory_generated.sh",
-            "tools/lint/check_fleet_facts.sh",
-            "tools/lint/check_fleet_observations.sh",
+            "build/bin/z23-lint",
+            "build/bin/z23-lint",
             "tools/scripts/check_doc_counts.sh",
         };
         char generation[4096], bare[4096], script[4352], cmd[8704];
@@ -10005,13 +10019,13 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
             "build/bin/gen_capability_inventory",
         };
         for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
-            ASSERT(ic_write(generation, tools[i], ""));
+            ASSERT(ic_write(generation, tools[i], "#!/bin/sh\nexit 0\n"));
             ASSERT(snprintf(script, sizeof(script), "%s/%s", generation,
                             tools[i]) < (int)sizeof(script));
             ASSERT(chmod(script, 0755) == 0);
             /* The bare dir below tests the checker layer, not the
              * toolchain layer, so it carries the same binaries. */
-            ASSERT(ic_write(bare, tools[i], ""));
+            ASSERT(ic_write(bare, tools[i], "#!/bin/sh\nexit 0\n"));
             ASSERT(snprintf(script, sizeof(script), "%s/%s", bare,
                             tools[i]) < (int)sizeof(script));
             ASSERT(chmod(script, 0755) == 0);
@@ -10025,8 +10039,8 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
          * is named (deterministic order), with its regen command. */
         ASSERT(ic_write(generation, stubs[0],
                         "#!/bin/sh\necho FAIL >&2\nexit 1\n"));
-        ASSERT(ic_write(generation, stubs[2],
-                        "#!/bin/sh\necho FAIL >&2\nexit 1\n"));
+        ASSERT(ic_write_lint(generation, "exit 0",
+                             "echo FAIL >&2; exit 1"));
         memset(why, 0, sizeof(why));
         ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
                                                          sizeof(why)));
@@ -10073,8 +10087,8 @@ static bool ic_docs_fresh_fixture(char *generation, size_t len,
 {
     static const char *const stubs[] = {
         "tools/lint/check_capability_inventory_generated.sh",
-        "tools/lint/check_fleet_facts.sh",
-        "tools/lint/check_fleet_observations.sh",
+        "build/bin/z23-lint",
+        "build/bin/z23-lint",
         "tools/scripts/check_doc_counts.sh",
         "build/bin/z23-lint",
         "build/bin/z23-fleet-observe",
@@ -10469,8 +10483,8 @@ static int test_ic_generation_docs_fresh_refuses_missing_tools(void)
 #else
         static const char *const stubs[] = {
             "tools/lint/check_capability_inventory_generated.sh",
-            "tools/lint/check_fleet_facts.sh",
-            "tools/lint/check_fleet_observations.sh",
+            "build/bin/z23-lint",
+            "build/bin/z23-lint",
             "tools/scripts/check_doc_counts.sh",
         };
         static const char *const tools[] = {
@@ -10487,6 +10501,11 @@ static int test_ic_generation_docs_fresh_refuses_missing_tools(void)
                             stubs[i]) < (int)sizeof(script));
             ASSERT(chmod(script, 0755) == 0);
         }
+        /* The fleet checkers run through build/bin/z23-lint, which the stub
+         * loop above just wrote; an empty build/bin has no such binary. */
+        ASSERT(snprintf(script, sizeof(script), "%s/build/bin/z23-lint",
+                        generation) < (int)sizeof(script));
+        ASSERT(remove(script) == 0);
         /* Fresh checkers but an empty build/bin: a typed tool refusal that
          * names the first missing binary, never doc drift. */
         char why[256] = {0};
@@ -10499,44 +10518,40 @@ static int test_ic_generation_docs_fresh_refuses_missing_tools(void)
          * shell's ENOENT text): the rc is preserved in a typed tool
          * failure, never reported as stale docs. */
         for (size_t i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) {
-            ASSERT(ic_write(generation, tools[i], ""));
+            ASSERT(ic_write(generation, tools[i], "#!/bin/sh\nexit 0\n"));
             ASSERT(snprintf(script, sizeof(script), "%s/%s", generation,
                             tools[i]) < (int)sizeof(script));
             ASSERT(chmod(script, 0755) == 0);
         }
-        ASSERT(ic_write(generation, stubs[1],
-                        "#!/bin/sh\necho \"$0: line 1: build/bin/z23-lint: "
-                        "No such file or directory\" >&2\nexit 127\n"));
+        ASSERT(ic_write_lint(generation,
+                             "echo \"$0: line 1: build/bin/z23-lint: No such file or directory\" >&2; exit 127",
+                             "exit 0"));
         memset(why, 0, sizeof(why));
         ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
                                                          sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_checker_tool_failure:"
-                      "tools/lint/check_fleet_facts.sh:rc_127");
+                      "build/bin/z23-lint:check-fleet-facts:rc_127");
         /* A checker that refuses with FATAL over a missing input (rc=2, the
-         * way check_fleet_observations.sh reports a missing generator
+         * way the fleet observations checker reports a missing generator
          * binary) is likewise a tool failure, not drift. */
-        ASSERT(ic_write(generation, stubs[1], "#!/bin/sh\nexit 0\n"));
-        ASSERT(ic_write(generation, stubs[2],
-                        "#!/bin/sh\necho \"[check_fleet_observations] FATAL "
-                        "-- build/bin/z23-fleet-observe is missing\" >&2\n"
-                        "exit 2\n"));
+        ASSERT(ic_write_lint(generation, "exit 0",
+                             "echo \"[check_fleet_observations] FATAL -- build/bin/z23-fleet-observe is missing\" >&2; exit 2"));
         memset(why, 0, sizeof(why));
         ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
                                                          sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_checker_tool_failure:"
-                      "tools/lint/check_fleet_observations.sh:rc_2");
+                      "build/bin/z23-lint:check-fleet-observations:rc_2");
         /* rc=2 with no toolchain marker is still not drift. z23-lint's
          * die() and an unreadable fleet table use that code and text
          * that names neither FATAL nor a missing file. */
-        ASSERT(ic_write(generation, stubs[2], "#!/bin/sh\nexit 0\n"));
-        ASSERT(ic_write(generation, stubs[1],
-                        "#!/bin/sh\necho \"z23-lint: cannot resolve "
-                        "executable path\" >&2\nexit 2\n"));
+        ASSERT(ic_write_lint(generation,
+                             "echo \"z23-lint: cannot resolve executable path\" >&2; exit 2",
+                             "exit 0"));
         memset(why, 0, sizeof(why));
         ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
                                                          sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_checker_tool_failure:"
-                      "tools/lint/check_fleet_facts.sh:rc_2");
+                      "build/bin/z23-lint:check-fleet-facts:rc_2");
         ASSERT((size_t)snprintf(cmd, sizeof(cmd), "rm -rf '%s'",
                                 generation) < sizeof(cmd));
         ASSERT(system(cmd) == 0);

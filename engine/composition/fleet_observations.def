@@ -7,7 +7,7 @@
  *
  * Source for the committed copy: tests/fixtures/fleet_observations/rows.tsv (the live ledger at
  * $XDG_STATE_HOME/zclassic23/experiments/rows.tsv is used only when
- * an operator runs the tool by hand). tools/lint/check_fleet_observations.sh
+ * an operator runs the tool by hand). build/bin/z23-lint check-fleet-observations
  * regenerates from that same fixture and diffs this file: a hand edit
  * fails the gate. window_days=7, generated_unix=1788512400.
  *

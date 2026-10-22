@@ -162,12 +162,9 @@ tools/harvest_checkpoints.sh
 tools/lint/check_blocker_handoff_declared.sh
 tools/lint/check_capability_inventory_generated.sh
 tools/lint/check_clang_portability.sh
-tools/lint/check_cookbook.sh
 tools/lint/check_determinism_ratchet.sh
 tools/lint/check_discarded_status.sh
 tools/lint/check_doc_claims.sh
-tools/lint/check_fleet_facts.sh
-tools/lint/check_fleet_observations.sh
 tools/lint/check_fortify_masked_decls.sh
 tools/lint/check_fuzz_artifact_replay.sh
 tools/lint/check_hotswap_module_imports.sh
@@ -176,12 +173,10 @@ tools/lint/check_identity_parser_single.sh
 tools/lint/check_no_adx_overclaim.sh
 tools/lint/check_no_operator_paths.sh
 tools/lint/check_no_stale_pinned_facts.sh
-tools/lint/check_orient_facts.sh
 tools/lint/check_outparam_init_before_return.sh
 tools/lint/check_package_anatomy.sh
 tools/lint/check_pipefail_status_pipe.sh
 tools/lint/check_platform_header_guards.sh
-tools/lint/check_promotion_receipt_chain.sh
 tools/lint/check_published_platforms.sh
 tools/lint/check_read_leaf_no_boot_ceremony.sh
 tools/lint/check_release_no_dev_symbols.sh
@@ -190,7 +185,6 @@ tools/lint/check_standalone_tools_link.sh
 tools/lint/check_status_reason_single.sh
 tools/lint/check_telemetry_ontology.sh
 tools/lint/check_windows_acceptance.sh
-tools/lint/check_windows_acceptance_guard.sh
 tools/lint/check_windows_cross_syntax.sh
 tools/lint/check_windows_platform_seam.sh
 tools/lint/check_zcc_cache.sh
