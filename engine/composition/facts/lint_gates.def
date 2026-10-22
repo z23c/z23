@@ -11,19 +11,19 @@ ZCL_FACT("lint.gates", "gate_wiring_three_files",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
          "Adding a lint gate is a THREE-FILE operation")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_a",
-         "check_lint_gate_wiring.sh asserts A that every LINT_GATES/LINT_FAST_GATES member has a gate_command() case entry.",
+         "z23-lint check-lint-gate-wiring asserts A that every LINT_GATES/LINT_FAST_GATES member has a gate_command() case entry.",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
          "gate(s) in LINT_GATES/LINT_FAST_GATES with NO gate_command() entry")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_b",
-         "check_lint_gate_wiring.sh asserts B that every gate_command() entry is named by one of the two gate lists, else it is dead wiring.",
+         "z23-lint check-lint-gate-wiring asserts B that every gate_command() entry is named by one of the two gate lists, else it is dead wiring.",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
          "gate_command() entries that NO gate list names (dead wiring)")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_c",
-         "check_lint_gate_wiring.sh asserts C that every listed gate has a real check-<name> Makefile target for the ZCL_LINT_SERIAL=1 fallback.",
+         "z23-lint check-lint-gate-wiring asserts C that every listed gate has a real check-<name> Makefile target for the ZCL_LINT_SERIAL=1 fallback.",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
          "listed gate(s) with no 'check-...:' target")
 ZCL_FACT("lint.gates", "gate_wiring_assertion_d",
-         "check_lint_gate_wiring.sh asserts D that every gate_command() script path actually exists on disk.",
+         "z23-lint check-lint-gate-wiring asserts D that every gate_command() .sh script path actually exists on disk.",
          "tools/lint/lintc/gate_lint_gate_wiring.c",
          "gate_command() entries naming a script that does not exist")
 ZCL_FACT("lint.gates", "lint_gates_list_defined",

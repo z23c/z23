@@ -216,7 +216,7 @@ bool zcl_rule_mine_append(const char *path,
             " * the gate refused, and the later unit that passed the same task.\n"
             " *\n"
             " * A row here is a PROPOSAL. It is not in the closed vocabulary,\n"
-            " * check_rule_vocabulary.sh does not know about it, and no\n"
+            " * z23-lint check-rule-vocabulary does not know about it, and no\n"
             " * executor is shown it. Moving one into\n"
             " * engine/composition/rule_vocab.def is a human edit, on purpose --- and\n"
             " * ZCL_RULE_SRC_MINED is deliberately not an enum member, so the\n"

@@ -2128,9 +2128,9 @@ tor-check:
 # deliberately REFUSES to touch a tree whose manifest exists but disagrees
 # with the archives (corruption/tampering), returning non-zero instead of
 # silently re-attesting whatever bytes are on disk. That refusal must not
-# abort `make check-tor-provenance` before check_tor_provenance.sh gets to
+# abort `make check-tor-provenance` before z23-lint check-tor-provenance gets to
 # run and print the precise MISMATCH -- this target's own failure is
-# swallowed (`|| true`) for exactly that reason; check_tor_provenance.sh is
+# swallowed (`|| true`) for exactly that reason; z23-lint check-tor-provenance is
 # what actually gates the build, using its own independent check.
 tor-provenance-ready:
 	@ZCL_TOR='$(ZCL_TOR)' ZCL_CROSS_TRIPLE='$(ZCL_CROSS_TRIPLE)' \
@@ -13875,14 +13875,14 @@ check-no-raw-clock-outside-platform: $(LINTC_TOOL)
 
 # Gate: sysinit boot-boundary ordering (HARD). Pins the deterministic
 # (stage, order, name) run order of the declarative boot-stage records in
-# engine/composition/src/boot.c against a golden file. See check_sysinit_ordering.sh.
+# engine/composition/src/boot.c against a golden file. See z23-lint check-sysinit-ordering.
 check-sysinit-ordering: $(LINTC_TOOL)
 	@echo "→ Gate: sysinit_ordering"
 	@./build/bin/z23-lint check-sysinit-ordering
 
 # Gate: sandbox wiring (HARD). Asserts boot registers the os_sandbox
 # steady-state record so -sandbox=steady can never regress to zero
-# confinement. See check_sandbox_wired.sh.
+# confinement. See z23-lint check-sandbox-wired.
 check-sandbox-wired: $(LINTC_TOOL)
 	@echo "→ Gate: sandbox_wired"
 	@./build/bin/z23-lint check-sandbox-wired
@@ -13892,7 +13892,7 @@ check-sandbox-wired: $(LINTC_TOOL)
 # the net.outbound_floor supervisor child, and the peer_floor_violated
 # condition must all read it and never reintroduce a retired local literal
 # macro. Fails loud on an empty scan (repo law 10). See
-# check_peer_floor_single_source.sh.
+# z23-lint check-peer-floor-single-source.
 check-peer-floor-single-source: $(LINTC_TOOL)
 	@echo "→ Gate: peer_floor_single_source"
 	@./build/bin/z23-lint check-peer-floor-single-source
@@ -15793,7 +15793,7 @@ LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 # / check-tor-provenance ever run, instead of failing on a state nothing
 # upstream repairs. It is deliberately the best-effort target, not
 # tor-ready: a manifest that EXISTS but disagrees with the archives must
-# still reach check_tor_provenance.sh's own diagnostic and fail there, never
+# still reach z23-lint check-tor-provenance's own diagnostic and fail there, never
 # be silently re-attested here.
 lint: $(Z23_DEV_BIN) \
 	$(DEV_PACKAGE_VERIFY_BIN) $(LINT_BUILT_PREREQS) tor-provenance-ready

@@ -1515,8 +1515,8 @@ only (this host has no FreeBSD riscv64 sysroot, so no C library), the programs
 are linked and never executed by the build, and headers are not part of a
 source's hash.
 
-`check-lint-gate-wiring` (`tools/lint/lintc/gate_lint_gate_wiring.c`, exec'd via
-the 3-line `check_lint_gate_wiring.sh` shim) keeps the three files of a lint
+`check-lint-gate-wiring` (`tools/lint/lintc/gate_lint_gate_wiring.c`, run as
+`z23-lint check-lint-gate-wiring`) keeps the three files of a lint
 gate in step. **Adding a gate is a THREE-file operation**: the Makefile gets a
 `check-*:` target plus a line in `LINT_GATES`, `tools/lint/run_lint.sh` gets an
 entry in `gate_command()`'s case table (because the parallel driver execs each

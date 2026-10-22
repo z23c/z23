@@ -198,7 +198,7 @@ cost a from-empty clone pays before any of this).
 | Bundle it | `make zdemo-app` | 0.3 s |
 | Launch the bundled binary | `…/Zdemo.app/Contents/MacOS/zdemo --frames=60` | 0.4 s |
 | Launch from the Dock/Finder | `open build/app-bundle/Zdemo.app --args --seconds=2` | returns immediately; app self-exits |
-| Prove the bundle reproduces | `check_app_bundle_reproducible.sh --bin …` | 1.0 s |
+| Prove the bundle reproduces | `z23-lint check-app-bundle-reproducible --bin …` | 1.0 s |
 | Template still green | `make zhello-selftest` | 0.4 s |
 
 Read the table as: the work that is yours — scaffold, build, see, ship — is

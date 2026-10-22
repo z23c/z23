@@ -279,7 +279,7 @@ CLEAN**, and nothing fires for months.
 
 - **The top-level directory set was mirrored in several hand-kept copies; most
   are now derived, one is not.** `tools/lint/repo_shape.sh` parses the
-  Makefile and publishes `ZCL_REPO_TOPS[]`, and `check_no_orphan_placement.sh`
+  Makefile and publishes `ZCL_REPO_TOPS[]`, and `z23-lint check-no-orphan-placement`
   now reads it rather than restating it. `MODULE_TOPS` in
   `tools/lint/lintc/gate_doc_inline_paths.c` is still a hand-kept literal, and
   deliberately a **different** set — it matches doc-citable paths, so it

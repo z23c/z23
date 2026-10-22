@@ -38,7 +38,7 @@
  *       copy, versioned, rides the existing dependency machinery — and it is
  *       where this should eventually go. It is BLOCKED TODAY by this tree's
  *       own gate: a data-only package ships zero C sources, and
- *       check_package_capabilities.sh exits 2 UNPROVEN on exactly that,
+ *       z23-lint check-package-capabilities exits 2 UNPROVEN on exactly that,
  *       refusing to clear a package it cannot see any code in. Recording the
  *       block here rather than working around it.
  *
@@ -153,7 +153,7 @@
  *   - zclassic23/sha3 and zclassic23/commons-demo ship files (their test
  *     sources, and the demo application entry point) that no compiled
  *     object under the dev object tree covers, so
- *     check_package_capabilities.sh derives their contribution as UNOBSERVED
+ *     z23-lint check-package-capabilities derives their contribution as UNOBSERVED
  *     and clears an empty claim. Their text calls fprintf and fputs. The
  *     receiver, which has only the text, refuses.
  *   - zclassic23/encoding reaches FS_WRITE only inside an

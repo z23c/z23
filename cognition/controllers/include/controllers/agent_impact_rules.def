@@ -1839,7 +1839,6 @@ AGENT_IMPACT_RULE("core/modules/sapling/src/params_fetch.c|core/modules/sapling/
  * baseline edit with no gate change, or a gate change with no baseline
  * update, is exactly how this ratchet would rust shut silently. */
 AGENT_IMPACT_RULE("tools/lint/lintc/gate_source_identity_authority.c|tools/lint/source_identity_authority_baseline.txt", "make_lint_gates")
-AGENT_IMPACT_RULE("tools/lint/check_source_identity_authority.sh|tools/lint/source_identity_authority_baseline.txt", "make_lint_gates")
 AGENT_IMPACT_RULE("tools/lint/bash_allowlist.txt|tools/lint/bash_line_budget.txt|tools/lint/lintc/gate_no_new_bash.c", "make_lint_gates")
 AGENT_IMPACT_RULE("cognition/modules/ontology/include/ontology/ontology.h|cognition/modules/ontology/include/ontology/ontology_vocabulary.h|cognition/modules/ontology/src/ontology.c|cognition/modules/ontology/src/ontology_formula.c|cognition/modules/ontology/src/ontology_horn_evaluator.c|cognition/modules/ontology/src/ontology_internal.h|cognition/modules/ontology/src/ontology_horn_rule.c|cognition/modules/ontology/src/ontology_manifest.c|cognition/modules/ontology/src/ontology_vocabulary.c|tests/harness/src/test_ontology.c|tests/harness/src/test_ontology_horn_evaluator.c|tests/harness/src/test_ontology_manifest_rules.c|tests/harness/src/test_ontology_vocabulary.c", "ontology ontology_horn_evaluator ontology_manifest_rules ontology_vocabulary code_vector_hint code_ontology make_lint_gates")
 AGENT_IMPACT_RULE("cognition/modules/ontology/include/ontology/story_graph.h|cognition/modules/ontology/src/story_graph.c|contexts/commons/modules/vcs/include/vcs/zcode_app_run_observation.h|contexts/commons/modules/vcs/src/zcode_app_run_observation.c|tools/command/native_story_command.h|tools/command/native_story_command.c|engine/composition/commands/story.def|tools/command/native_zcode_work_command.c|tools/command/native_zcode_work_evidence.c|tools/command/native_zcode_work_reuse.c|tools/command/native_zcode_work_reuse_plan.c|tools/command/native_zcode_work_start.c|tools/command/native_zcode_work_accept.c|tools/command/native_zcode_work_publish.c|tools/command/native_zcode_work_review.c|tools/command/native_zcode_work_status.c|tests/harness/src/test_story_graph.c|tests/harness/src/test_read_leaf_no_datadir_write.c", "story_graph ontology zcode_dev_objects zcode_package_dev command_registry_catalog read_leaf_no_datadir_write make_lint_gates")
@@ -1865,7 +1864,7 @@ AGENT_IMPACT_RULE("tools/lint/check_outparam_init_before_return.sh|tools/lint/ou
  * singular, the manifests stay consistent, and the admit gauntlet still
  * refuses a misdeclared module. It also rides the command-catalog groups
  * because the leaf is a READY read-only catalog row bound through the native
- * bridge, and the lint-gate group because check_hotswap_swappable_shape.sh
+ * bridge, and the lint-gate group because z23-lint check-hotswap-swappable-shape
  * carries a per-file island admission that its self-test fixtures pin. */
 AGENT_IMPACT_RULE("engine/controllers/src/policy_native_handlers.c|engine/controllers/include/controllers/policy_native_handlers.h|engine/controllers/src/policy_native_resident.c|engine/controllers/include/controllers/policy_native_resident.h|contexts/commons/modules/vcs/src/package_policy.c|contexts/commons/modules/vcs/include/vcs/package_policy.h|tests/harness/src/test_hotswap_policy_module.c|engine/composition/hotswap_islands.def|engine/composition/hotswap_probe_cases.def|tools/lint/lintc/gate_hotswap_swappable_shape.c", "hotswap_policy_module hotswap_module_v2 hotswap_module hotswap_loader command_registry_catalog native_api_contract make_lint_gates")
 
@@ -1886,7 +1885,7 @@ AGENT_IMPACT_RULE("platform/modules/platform/src/os_sandbox_linux.c|platform/mod
  * reads the Make recipe. Nothing enforced the second file: three gates landed
  * with only the first half on 2026-08-26 and `make lint` was FATAL (exit 2)
  * tree-wide, reporting no gate results at all, until they were wired.
- * check_lint_gate_wiring.sh is the rail; run_lint.sh is the file it reads
+ * z23-lint check-lint-gate-wiring is the rail; run_lint.sh is the file it reads
  * (via that script's own --list / --print-command, the only supported readers
  * of the case table). Mapped to make_lint_gates_realroot as well as the
  * exclusive make_lint_gates group, because the check that proves this rail
@@ -2330,7 +2329,7 @@ AGENT_IMPACT_RULE("engine/composition/src/consensus_state_producer_receipt_final
  * compiled and executed here; the Win32 DACL arm has no executed coverage on
  * this platform, and z23-lint check-malloc scans app/ and tools/ only, so of the two
  * halves of a platform/modules/platform edit just the file-purpose header is observed by a
- * gate (check_file_purpose.sh). The refusal paths (wrong mode, wrong owner,
+ * gate (z23-lint check-file-purpose). The refusal paths (wrong mode, wrong owner,
  * symlink) are unexercised by any test. */
 AGENT_IMPACT_RULE("platform/modules/platform/src/private_directory.c", "boot_bundle_fetch wallet_backup make_lint_gates")
 
@@ -2383,7 +2382,7 @@ AGENT_IMPACT_RULE("platform/modules/platform/tests/test_directory_watcher.c|plat
  * row scans are load-bearing there, not merely compiled. Deliberately NOT
  * given the parent's authority_receipt group: that rule exists because the
  * RECEIPT half calls consensus_state_replay_receipt_authority_available()
- * and check_privileged_transition_receipt.sh greps for exactly that call.
+ * and z23-lint check-privileged-transition-receipt greps for exactly that call.
  * Neither the call nor the gate's interest crosses into the derive half. */
 AGENT_IMPACT_RULE("engine/composition/src/consensus_state_replay_receipt_derive.c|engine/composition/src/consensus_state_replay_receipt_internal.h", "consensus_state_snapshot_install make_lint_gates")
 

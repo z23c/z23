@@ -20,9 +20,9 @@ of swallowing it as "no match."
 
 Gates wired to this pattern: `check_one_write_path.sh`,
 `check_no_secret_printf.sh`, `gate_stage_log_reorg_unsafe_ratchet.sh`,
-`check_projections_pure.sh`, `check_supervisor_domain.sh`,
+`check_projections_pure.sh`, `z23-lint check-supervisor-domain`,
 `check_supervisor_registration.sh`, `check_stage_advances_or_blocks.sh`,
-`check_consensus_parity.sh` (E13), `check_honest_witness.sh` (Law 7),
+`check_consensus_parity.sh` (E13), `z23-lint check-honest-witness` (Law 7),
 `z23-lint check-no-silent-ready` (E8), `check_coins_lookup_nullcheck.sh`.
 
 ## Two fix classes for a hollow gate
@@ -41,7 +41,7 @@ Gates wired to this pattern: `check_one_write_path.sh`,
 
 ## Gates deliberately left off this pattern
 
-`check_one_result_type.sh`, `framework_shape_check.sh`,
+`check_one_result_type.sh`, `z23-lint check-framework-shape`,
 `check_no_new_repair_rung.sh` — these go
 hollow only under a core-directory rename, which coincides with a build
 break; CI still catches them red without the loud-preflight pattern. A
