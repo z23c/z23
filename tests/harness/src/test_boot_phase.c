@@ -206,21 +206,25 @@ static bool bp_mkdir_p(const char *path)
 }
 
 /* Fallback for bp_burn_block_io() when the suite tmpdir is tmpfs: a
- * disk-backed private dir under $XDG_CACHE_HOME or $HOME/.cache, verified
+ * disk-backed private dir under $ZCL_TEST_DISK_SCRATCH_ROOT (set by the
+ * harness from the real cache dir), else $XDG_CACHE_HOME or $HOME/.cache, verified
  * not to be tmpfs. Returns false (dir unset) when no such root exists. */
 static bool bp_disk_scratch_dir(char *dir, size_t dir_cap)
 {
+    /* The harness names the real disk-backed root before it moves HOME;
+     * only without it fall back to the (possibly private) cache dirs. */
+    const char *root = getenv("ZCL_TEST_DISK_SCRATCH_ROOT");
     const char *xdg = getenv("XDG_CACHE_HOME");
     const char *home = getenv("HOME");
-    char base[PATH_MAX];
-    int base_len = -1;
-    if (xdg && xdg[0])
-        base_len = snprintf(base, sizeof(base), "%s/zclassic23", xdg);
+    int n = -1;
+    if (root && root[0])
+        n = snprintf(dir, dir_cap, "%s/bootphase-%d", root, (int)getpid());
+    else if (xdg && xdg[0])
+        n = snprintf(dir, dir_cap, "%s/zclassic23/test-scratch/bootphase-%d",
+                     xdg, (int)getpid());
     else if (home && home[0])
-        base_len = snprintf(base, sizeof(base), "%s/.cache/zclassic23", home);
-    if (base_len <= 0 || (size_t)base_len >= sizeof(base))
-        return false;
-    int n = snprintf(dir, dir_cap, "%s/test-scratch/bootphase-%d", base,
+        n = snprintf(dir, dir_cap,
+                     "%s/.cache/zclassic23/test-scratch/bootphase-%d", home,
                      (int)getpid());
     if (n <= 0 || (size_t)n >= dir_cap)
         return false;

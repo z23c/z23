@@ -2366,6 +2366,15 @@ static bool tgs_under(const char *path, const char *parent, const char *leaf)
     return path && n > 0 && (size_t)n < sizeof(want) && strcmp(path, want) == 0;
 }
 
+/* ZCL_TEST_DISK_SCRATCH_ROOT, when exported, names the REAL disk-backed cache
+ * dir: absolute, and never inside the private state dir the runner made. */
+static bool tgs_scratch_root_is_real(const char *state)
+{
+    const char *root = getenv("ZCL_TEST_DISK_SCRATCH_ROOT");
+    if (!root || !root[0]) return true;
+    return root[0] == '/' && strncmp(root, state, strlen(state)) != 0;
+}
+
 /* The CALLER's HOME is `expected` (empty when it ran with none): the runner
  * must hand the group a private replacement under the retained state dir and
  * remember the original canonical datadir for the storage writer guard. */
@@ -2381,7 +2390,8 @@ static bool tgs_home_contract(const char *state, const char *expected)
            tgs_under(getenv("XDG_CONFIG_HOME"), home, ".config") &&
            tgs_under(getenv("XDG_CACHE_HOME"), home, ".cache") &&
            strcmp(canonical, want_canonical) == 0 &&
-           strcmp(harness, "1") == 0 && getenv("ZCL_DATADIR") == NULL;
+           strcmp(harness, "1") == 0 && getenv("ZCL_DATADIR") == NULL &&
+           tgs_scratch_root_is_real(state);
 }
 
 static int tgs_state_probe(void)

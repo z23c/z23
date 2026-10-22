@@ -15,6 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#if defined(__linux__)
+#include <linux/magic.h>
+#include <sys/vfs.h>
+#endif
 #if !defined(_WIN32)
 #include <unistd.h>
 #endif
@@ -150,6 +154,51 @@ static bool iso_switch_env(const struct iso_dirs *d)
     return ok && iso_set("ZCL_TEST_PRIVATE_HOME", "1");
 }
 
+#if defined(__linux__)
+/* statfs() the nearest existing ancestor of `path`: the scratch root is
+ * created lazily by its consumers, so the leaf may not exist yet. */
+static bool iso_on_tmpfs(const char *path)
+{
+    char buf[PATH_MAX];
+    if (snprintf(buf, sizeof(buf), "%s", path) >= (int)sizeof(buf))
+        return true;
+    for (;;) {
+        struct statfs sfs;
+        if (statfs(buf, &sfs) == 0)
+            return (unsigned long)sfs.f_type == (unsigned long)TMPFS_MAGIC;
+        char *slash = strrchr(buf, '/');
+        if (!slash || slash == buf) return true;
+        *slash = '\0';
+    }
+}
+#endif
+
+/* Block-I/O probes need a disk-backed directory (fsync on tmpfs never moves
+ * ru_oublock), but HOME and XDG_CACHE_HOME are about to point at a private
+ * root that may itself be tmpfs. Name the real disk-backed scratch root once,
+ * under the REAL cache dir, before HOME moves; consumers create it lazily.
+ * Nothing is exported when no disk-backed root exists. A nested runner keeps
+ * the outermost answer. */
+static void iso_export_disk_scratch(void)
+{
+    const char *outer = getenv("ZCL_TEST_DISK_SCRATCH_ROOT");
+    if (outer && outer[0]) return;
+    const char *xdg = getenv("XDG_CACHE_HOME");
+    const char *home = getenv("HOME");
+    char root[PATH_MAX];
+    int n = -1;
+    if (xdg && xdg[0])
+        n = snprintf(root, sizeof(root), "%s/zclassic23/test-scratch", xdg);
+    else if (home && home[0])
+        n = snprintf(root, sizeof(root), "%s/.cache/zclassic23/test-scratch",
+                     home);
+    if (n <= 0 || (size_t)n >= sizeof(root)) return;
+#if defined(__linux__)
+    if (iso_on_tmpfs(root)) return;
+#endif
+    (void)iso_set("ZCL_TEST_DISK_SCRATCH_ROOT", root);
+}
+
 bool zcl_test_isolate_environment(const char *private_root,
                                   char *err, size_t err_cap)
 {
@@ -173,6 +222,7 @@ bool zcl_test_isolate_environment(const char *private_root,
         return true;
     }
 
+    iso_export_disk_scratch();
     const char *real_home = getenv("HOME");
     struct iso_dirs d;
     if (!iso_make_dirs(&d, root_abs))

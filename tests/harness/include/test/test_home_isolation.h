@@ -14,7 +14,12 @@
  *   - every datadir environment variable the node honours is unset;
  *   - ZCL_TEST_HARNESS=1 and ZCL_TEST_CANONICAL_DATADIR=<the real default
  *     datadir> are exported, which the storage-layer writer guard
- *     (storage/boot_auto_reindex.h) reads to refuse a write there.
+ *     (storage/boot_auto_reindex.h) reads to refuse a write there;
+ *   - ZCL_TEST_DISK_SCRATCH_ROOT=<real cache dir>/zclassic23/test-scratch is
+ *     exported when that filesystem is not tmpfs, so block-I/O probes (fsync
+ *     on tmpfs never moves ru_oublock) keep a disk-backed directory although
+ *     HOME and XDG_CACHE_HOME moved into a possibly tmpfs private root.
+ *     Consumers create it lazily; it is unset when no disk root exists.
  *
  * ZCL_TEST_REAL_HOME=1 is the explicit opt-in for the few tests that need
  * real chain or parameter files: HOME is left alone (the writer guard still
