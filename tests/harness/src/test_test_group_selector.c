@@ -1456,8 +1456,9 @@ static int test_process_sensitive_groups_are_catalog_exclusive(void)
             "test_devagent_ticketkey"));
         ASSERT(!zcl_test_group_requires_exclusive_run(
             "test_character_sheet"));
-        /* The code-index scale gate measures a load-sensitive build ratio. */
-        ASSERT(zcl_test_group_requires_exclusive_run(
+        /* The code-index scale gate budgets CPU (warm query, cold-build
+         * linearity), so it runs in the pool. */
+        ASSERT(!zcl_test_group_requires_exclusive_run(
             "test_codeindex_scale"));
         /* This group launches the current runner recursively to prove exact
          * selection.  Competing with the 32-worker parent pool can kill the

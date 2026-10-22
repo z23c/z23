@@ -31,6 +31,9 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#if !defined(_WIN32)
+#include <sys/resource.h>
+#endif
 
 #include "crypto/sha3.h"
 #include "platform/clock.h"
@@ -122,6 +125,27 @@ static inline uint64_t test_thread_cpu_us(void)
 {
     int64_t ns = clock_thread_cpu_ns();
     return ns > 0 ? (uint64_t)ns / 1000u : 0;
+}
+
+/* Whole-process CPU microseconds (user + system, every thread) for a
+ * measurement that runs worker threads or syscalls. Descheduling drops
+ * out, so it bounds the work a phase did, not how long a loaded host made
+ * the caller wait. Falls back to the monotonic wall clock where the
+ * process has no rusage. */
+static inline uint64_t test_process_cpu_us(void)
+{
+#if defined(_WIN32)
+    int64_t now = platform_time_monotonic_us();
+    return now > 0 ? (uint64_t)now : 0;
+#else
+    struct rusage ru;
+    if (getrusage(RUSAGE_SELF, &ru) != 0)
+        return 0;
+    return (uint64_t)ru.ru_utime.tv_sec * 1000000u +
+           (uint64_t)ru.ru_utime.tv_usec +
+           (uint64_t)ru.ru_stime.tv_sec * 1000000u +
+           (uint64_t)ru.ru_stime.tv_usec;
+#endif
 }
 
 #endif /* ZCL_TEST_TIMING_BUDGET_H */

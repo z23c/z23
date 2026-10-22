@@ -123,16 +123,16 @@ bool zcl_test_group_catalog_contains(const char *full_id)
 }
 
 /* Groups that hold wall-clock budgets (process-stop budgets in the dev_platform
- * watch-session shards, load-scaled latency budgets in codeindex_scale) and so
- * run alone. test_crypto_registry (its timings are printed, never asserted),
- * test_character_sheet (pure CPU) and test_devagent_ticketkey (no timing
- * assertion) were here until the exclusive pass was shortened; they now run
- * in the pool and test_parallel reruns them alone once if load fails them. */
+ * watch-session shards) and so run alone. test_crypto_registry (its timings
+ * are printed, never asserted), test_character_sheet (pure CPU),
+ * test_devagent_ticketkey (no timing assertion) and test_codeindex_scale (its
+ * budgets are query and cold-build CPU, not wall time) were here until the
+ * exclusive pass was shortened; they now run in the pool and test_parallel
+ * reruns them alone once if load fails them. */
 static bool catalog_contention_sensitive(const char *full_id)
 {
     static const char *const groups[] = {
-        "test_dev_platform_shard_02", "test_dev_platform_shard_03",
-        "test_codeindex_scale"
+        "test_dev_platform_shard_02", "test_dev_platform_shard_03"
     };
     for (size_t i = 0; i < sizeof(groups) / sizeof(groups[0]); i++)
         if (strcmp(full_id, groups[i]) == 0) return true;
