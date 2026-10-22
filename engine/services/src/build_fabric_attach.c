@@ -50,17 +50,6 @@ enum {
     BFAT_SCAN_CAP = BUILD_FABRIC_ATTACH_SCAN_CAP,
 };
 
-const char *build_fabric_attach_disposition_string(
-    enum build_fabric_attach_disposition disposition)
-{
-    switch (disposition) {
-    case BUILD_FABRIC_ATTACH_MISS: return "miss";
-    case BUILD_FABRIC_ATTACH_HIT: return "hit";
-    case BUILD_FABRIC_ATTACH_REFUSED: return "refused";
-    }
-    return "refused";
-}
-
 static struct zcl_result bfat_refuse(struct build_fabric_attach_report *report,
                                      const char *token)
 {
@@ -1090,17 +1079,6 @@ struct zcl_result build_fabric_attach(
 
 #include <string.h>
 
-const char *build_fabric_attach_disposition_string(
-    enum build_fabric_attach_disposition disposition)
-{
-    switch (disposition) {
-    case BUILD_FABRIC_ATTACH_MISS: return "miss";
-    case BUILD_FABRIC_ATTACH_HIT: return "hit";
-    case BUILD_FABRIC_ATTACH_REFUSED: return "refused";
-    }
-    return "refused";
-}
-
 /* Windows has no qualified donor replay. Report a miss so the caller
  * compiles; never report a hit. */
 struct zcl_result build_fabric_attach(
@@ -1127,3 +1105,15 @@ struct zcl_result build_fabric_attach(
 }
 
 #endif /* !_WIN32 */
+
+/* One public definition; the mapping is portable. */
+const char *build_fabric_attach_disposition_string(
+    enum build_fabric_attach_disposition disposition)
+{
+    switch (disposition) {
+    case BUILD_FABRIC_ATTACH_MISS: return "miss";
+    case BUILD_FABRIC_ATTACH_HIT: return "hit";
+    case BUILD_FABRIC_ATTACH_REFUSED: return "refused";
+    }
+    return "refused";
+}
