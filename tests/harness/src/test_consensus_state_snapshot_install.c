@@ -2892,7 +2892,8 @@ static void csi_make_tmpdir(char *buf, size_t n)
  * SQLite fixture. child_run's chain/ECC/event initialization starts no workers.
  * Only the child opens the activation stores; the parent opens them after reap. */
 struct marker_committed_tuple {
-    uint64_t generation, coins;
+    uint64_t generation;
+    int64_t coins; /* coins_kv_count(), -1 if unavailable */
     int height;
     uint8_t root[32], tip_hash[32], artifact[32];
 };
