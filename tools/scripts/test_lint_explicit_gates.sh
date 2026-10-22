@@ -27,7 +27,7 @@ check-windows-acceptance check-other:
 	@echo $@ >> calls
 	@test "$(FAIL_GATE)" != "$@"
 EOF
-awk '/^lint lint-cached lint-cold-audit:/{copy=1} /^# Everything the lint dimension/{copy=0} copy' \
+awk '/^lint:/{copy=1} /^# Everything the lint dimension/{copy=0} copy' \
     "$root/Makefile" >> "$fixture/Makefile"
 cat > "$fixture/tools/lint/run_lint.sh" <<'EOF'
 #!/usr/bin/env bash

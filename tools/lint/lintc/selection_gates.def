@@ -52,11 +52,11 @@ SELECTION_POLICY("tools/lint/lintc/selection.c")
 SELECTION_POLICY("tools/lint/lintc/unit_exec.c")
 SELECTION_POLICY("tools/lint/lintc/selection_gates.def")
 
-/* Every gate runs through the lint driver's invocation table (run_lint.sh,
- * which sources lint_cache.sh) and its Makefile rule ("gate:" in make_vars).
+/* Every gate runs through the lint driver's invocation table (run_lint.sh)
+ * and its Makefile rule ("gate:" in make_vars).
  * A gate run by z23-lint names the variables that build it; their words
  * bring in every linked source and, through the closure, every header. */
-#define SELECTION_DRIVER "tools/lint/run_lint.sh tools/lint/lint_cache.sh"
+#define SELECTION_DRIVER "tools/lint/run_lint.sh"
 #define SELECTION_LINTC_VARS "LINTC_SRCS LINTC_NODE_SRCS LINTC_CFLAGS"
 
 SELECTION_GATE("check-windows-cross-syntax", SELECTION_UNITS_NODE_C23_WINDOWS, "",

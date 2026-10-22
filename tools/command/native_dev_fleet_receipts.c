@@ -245,8 +245,7 @@ static int fleet_receipt_compare(const void *left, const void *right)
 
 static bool fleet_lint_receipt(const char *gate)
 {
-    return strcmp(gate, "lint") == 0 || strcmp(gate, "lint-cached") == 0 ||
-           strcmp(gate, "lint-cold-audit") == 0;
+    return strcmp(gate, "lint") == 0;
 }
 
 static struct fleet_gate *fleet_gate_get(struct fleet_gate gates[],

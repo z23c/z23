@@ -100,7 +100,6 @@ Linux live signal handler ran on Darwin.
 | `make check-package-anatomy` | script self-test + run (`Makefile:2484`) | green here |
 | `make check-zcode-package-registry` | compiles `build/bin/zcode-package-registry-check`, then the script asserts every package source occurs exactly once in monolith `LIB_SRCS` and that exactly one host sandbox backend is selected (`./build/bin/z23-lint check-zcode-package-registry:54-61`) | the *script* half is host-neutral; its binary prerequisite links a GNU-ld spelling at `Makefile:2511`, so see §4 row 1 before trusting this one |
 | `make lint-fast` | inner lint subset (35 gates), including capability-inventory and package-registry freshness; `LINT_FAST_GATES` in `Makefile` | the earlier 32-gate observation does not qualify the expanded subset |
-| `make lint-cached` / `make lint-cold-audit` | result-cache variants of the umbrella | same Linux-only rules as `make lint` |
 
 Full `make lint` (`Makefile:10079`, gates listed from `Makefile:9915`) still
 hits intentional Linux-resident checks on this host; the tool-link rules in

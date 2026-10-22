@@ -1520,7 +1520,7 @@ static bool lint_built_prereqs_contract(const char *makefile)
         return false;
 
     const char *targets =
-        strstr(makefile, "\nlint lint-cached lint-cold-audit:");
+        strstr(makefile, "\nlint:");
     if (!targets) return false;
     targets++;
     const char *targets_end = make_logical_line_end(targets);
@@ -1574,10 +1574,10 @@ int t_lint_umbrellas_share_built_prereqs(void)
 
     char *missing_target = read_ok ? strdup(makefile) : NULL;
     char *targets = missing_target
-        ? strstr(missing_target, "\nlint lint-cached lint-cold-audit:") : NULL;
-    char *cold = targets ? strstr(targets, "lint-cold-audit") : NULL;
-    if (cold) cold[0] = 'L';
-    int target_mutation_trips = cold != NULL &&
+        ? strstr(missing_target, "\nlint:") : NULL;
+    char *lint_target = targets ? targets + 1 : NULL;
+    if (lint_target) lint_target[0] = 'X';
+    int target_mutation_trips = lint_target != NULL &&
         !lint_built_prereqs_contract(missing_target);
 
     TEST("[lint-gate] lint umbrellas share every built prerequisite; helper "

@@ -207,7 +207,7 @@ static void gtr_parse(struct gtr_opts *o, int argc, char **argv)
 
 static void gtr_default_tokens(struct gtr_opts *o)
 {
-    static const char *const lint[] = {"lint", "lint-cached", "lint-cold-audit"};
+    static const char *const lint[] = {"lint"};
     static const char *const tests[] = {"test", "test-parallel", "t", "t-fast", "t-asan", "t-tsan", "ci"};
 
     if (o->expect.n != 0 || o->forbid.n != 0)

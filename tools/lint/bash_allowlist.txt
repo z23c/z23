@@ -200,8 +200,6 @@ tools/lint/dumper_defs.sh
 tools/lint/gate_doc_no_false_deleted.sh
 tools/lint/gate_lib.sh
 tools/lint/gate_no_csr_lock_on_finalize_drive.sh
-tools/lint/lint_cache.sh
-tools/lint/lint_cache_selftest.sh
 tools/lint/repo_shape.sh
 tools/lint/run_lint.sh
 tools/lint/scan_exclusions.sh

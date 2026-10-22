@@ -8092,7 +8092,7 @@ static bool ic_proof_environment_child(void)
 {
     static const char *const cleared[] = {
         "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEOVERRIDES", "MAKEFILES",
-        "ZCL_LINT_CACHE_DUMP", "ZCL_LINT_GATES_DIR_X", "ZCL_REPO_SHAPE_ROOT",
+        "ZCL_LINT_GATES_DIR_X", "ZCL_REPO_SHAPE_ROOT",
         "ZCL_LINT_TU_CACHE", "ZCL_LINT_TU_CACHE_DIR",
         "ZCL_LINT_TU_CACHE_GENERATIONS", "ZCL_TEST_CACHE",
         "ZCL_TEST_CACHE_DUMP", "ZCL_TESTCACHE_STORE_ROOT",
@@ -8105,16 +8105,13 @@ static bool ic_proof_environment_child(void)
     if (setenv("ZCL_TEST_CACHE", "1", 1) != 0 ||
         setenv("ZCL_TESTCACHE_STORE_ROOT", "/checkout", 1) != 0)
         return false;
-    if (setenv("ZCL_LINT_CACHE", "1", 1) != 0 ||
-        setenv("ZCL_LINT_MODE", "UPDATE", 1) != 0 ||
+    if (setenv("ZCL_LINT_MODE", "UPDATE", 1) != 0 ||
         !zcl_dev_proof_test_prepare_environment())
         return false;
     for (size_t i = 0; i < sizeof(cleared) / sizeof(cleared[0]); i++) {
         if (getenv(cleared[i]) != NULL) return false;
     }
-    const char *cache = getenv("ZCL_LINT_CACHE");
-    const char *mode = getenv("ZCL_LINT_MODE");
-    return cache && strcmp(cache, "0") == 0 && mode == NULL;
+    return getenv("ZCL_LINT_MODE") == NULL;
 }
 
 static int test_ic_proof_environment_refuses_inherited_shortcuts(void)
@@ -10847,10 +10844,8 @@ static int test_ic_proof_env_scrubs_credentials(void)
             ASSERT(getenv(gone[i]) == NULL);
         for (size_t i = 0; i < sizeof(kept) / sizeof(kept[0]); i++)
             ASSERT(getenv(kept[i]) != NULL);
-        ASSERT_STR_EQ(getenv("ZCL_LINT_CACHE"), "0");
         (void)unsetenv("IC_FAKE_TOKENIZER");
         (void)unsetenv("IC_PLAIN_VALUE");
-        (void)unsetenv("ZCL_LINT_CACHE");
         if (saved_start) (void)setenv("ZCL_PROCESS_START_TOKEN", saved_start, 1);
         else (void)unsetenv("ZCL_PROCESS_START_TOKEN");
         if (saved_sock) (void)setenv("SSH_AUTH_SOCK", saved_sock, 1);

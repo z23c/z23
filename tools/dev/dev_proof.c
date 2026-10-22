@@ -6541,7 +6541,7 @@ static bool proof_prepare_environment(void)
 {
     static const char *const unset_names[] = {
         "MAKEFLAGS", "MFLAGS", "GNUMAKEFLAGS", "MAKEOVERRIDES", "MAKEFILES",
-        "ZCL_LINT_CACHE_DUMP", "ZCL_LINT_GATES_DIR_X", "ZCL_REPO_SHAPE_ROOT",
+        "ZCL_LINT_GATES_DIR_X", "ZCL_REPO_SHAPE_ROOT",
         "ZCL_LINT_MODE", "ZCL_LINT_TU_CACHE", "ZCL_LINT_TU_CACHE_DIR",
         "ZCL_LINT_TU_CACHE_GENERATIONS", "ZCL_TEST_CACHE",
         "ZCL_TEST_CACHE_DUMP", "ZCL_TESTCACHE_STORE_ROOT",
@@ -6550,7 +6550,7 @@ static bool proof_prepare_environment(void)
     };
     for (size_t i = 0; i < sizeof(unset_names) / sizeof(unset_names[0]); i++)
         if (unsetenv(unset_names[i]) != 0) return false;
-    return proof_scrub_credentials() && setenv("ZCL_LINT_CACHE", "0", 1) == 0;
+    return proof_scrub_credentials();
 }
 
 /* The compile cache a proof builds through. zcc's shared store

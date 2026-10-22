@@ -1,8 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: --selftest for check-lint-gate-wiring (gate_lint_gate_wiring.c).
- * Builds a scratch fixture tree carrying the REAL run_lint.sh and
- * lint_cache.sh (so --list and --print-command are the code under test,
+ * Builds a scratch fixture tree carrying the REAL run_lint.sh (so --list
+ * and --print-command are the code under test,
  * not a mock) stripped of its real case table, plants one defect per case
  * (A-G, I, J, K) and asserts lgw_check_root() rejects it and names the
  * offender, then a positive control (H) that a correctly wired
@@ -123,7 +123,6 @@ static int lgws_make_fixture(const char *repo_root, const char *d)
 {
     if (lgws_seed_dirs(d)) return 2;
     if (lgws_copy(repo_root, "tools/lint/run_lint.sh", d)) return 2;
-    if (lgws_copy(repo_root, "tools/lint/lint_cache.sh", d)) return 2;
     if (lgws_strip_driver(d)) return 2;
     return lgws_write_sentinels(d);
 }

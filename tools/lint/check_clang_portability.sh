@@ -103,8 +103,8 @@
 # --self-test plus the gate over 2108 TUs, three runs each: 196-199 s with
 # the cache off, 209-212 s cold (it also stores), 3.0-4.6 s fully warm at
 # 2108 hits. ZCL_LINT_TU_CACHE=0 turns it off and leaves this gate exactly
-# as it was before the cache existed; run_lint.sh --cold-audit turns it off
-# for you. See that file's header for why the key is sound.
+# as it was before the cache existed. See that file's header for why the key
+# is sound.
 #
 # Env:
 #   ZCL_CC             compiler to run (default: clang; gcc also supported)

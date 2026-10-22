@@ -215,7 +215,7 @@ assert_exact_profiles "$WORK/default.out" node-c23
 # objects fresh and `make lint` relinked stale objects ("undefined symbol").
 # Compare the final ZCL_EPOCH_PROFILES and ZCL_DEPFILE_PROFILES values the
 # real Makefile computes for each goal: every epoch profile must be imported.
-consistency_goals=(lint lint-cached lint-cold-audit lint-preflight ff dev-bin
+consistency_goals=(lint lint-preflight ff dev-bin
     dev-proof-bundle fast-compile dev-build-only dev-package-verifier)
 consistency_pids=()
 for goal in "${consistency_goals[@]}"; do

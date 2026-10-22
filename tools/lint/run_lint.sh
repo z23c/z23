@@ -28,20 +28,12 @@
 # needs to run first because the driver never circuit-breaks on the first
 # failure — all gates run and every failure is reported, strays included.
 #
-# Result cache (tools/lint/lint_cache.sh): DEFAULT OFF. A gate whose whole
-# scannable input is byte-identical to the last time it PASSED can be skipped,
-# which makes a re-run on an unchanged tree near-instant. `make lint`, `make
-# ci` and the pre-push gate stay COLD unless --cache is passed, so a cached
-# SKIP never gates a push. --cold-audit runs everything fresh AND asserts every
-# would-be cache hit matches its fresh verdict. See lint_cache.sh for why some
-# gates are never cached (they build things, run compilers, read built
-# binaries, git history, /proc, or untracked state) and always run.
+# Every run is cold: each requested gate executes every time. There is no
+# result cache; a gate's verdict is always its own fresh run.
 #
 # Usage:
 #   tools/lint/run_lint.sh [--jobs N] [--bin-dir DIR] [--list] GATE...
 #   tools/lint/run_lint.sh --print-command GATE   (one gate's exact command)
-#   tools/lint/run_lint.sh --cache GATE...       (opt in to the result cache)
-#   tools/lint/run_lint.sh --cold-audit GATE...  (run all fresh, verify hits)
 #   tools/lint/run_lint.sh --worker GATE         (internal: xargs child)
 #
 # Env:
@@ -58,24 +50,15 @@
 #                         gate then falls back to ZCL_CC_JOBS itself)
 #   ZCL_TOOLS_LINK_JOBS   nested standalone-link workers; defaults to 1 here
 #   ZCL_FUZZ_REPLAY_JOBS  nested fuzz-replay workers; defaults to 1 here
-#   ZCL_LINT_CACHE=1     opt in to the result cache (same as --cache)
-#   ZCL_LINT_CACHE_DIR   cache record dir (default .cache/lint-cache/<schema>)
-#   ZCL_LINT_CACHE_DUMP=<gate>
-#                        print what that gate keys on (cacheability, tree key,
-#                        gate key, hit/miss) and exit — the "why did/didn't
-#                        this hit" diagnostic
 #
 # Exit: 0 iff every gate passed; 1 if any gate failed (all gates still run,
-# so one `make lint` reports every violation) or a cold-audit divergence was
-# found; 2 on driver misuse/unknown gate.
+# so one `make lint` reports every violation); 2 on driver misuse/unknown gate.
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$ROOT"
-# shellcheck source=tools/lint/lint_cache.sh
-source "$SCRIPT_DIR/lint_cache.sh"
 
 STATE_DIR="${ZCL_LINT_TIMING_DIR:-$ROOT/.cache/lint-timing}"
 # Per-run artifact dir, never a path two runs can share. Every run used to
@@ -118,7 +101,6 @@ LONG_POLE_FIRST="check-windows-cross-syntax check-standalone-tools-link
 # entry is a LOUD driver error (exit 2), never a silent skip.
 gate_command() {
     case "$1" in
-        check-lint-cache)                  echo './tools/lint/lint_cache_selftest.sh' ;;
         check-lint-gate-wiring)            echo './build/bin/z23-lint check-lint-gate-wiring --selftest && ./build/bin/z23-lint check-lint-gate-wiring' ;;
         check-toolchain)                   echo './tools/dev/check-toolchain.sh --selftest && ./tools/dev/check-toolchain.sh' ;;
         check-dev-linker-threads)          echo 'make check-dev-linker-threads' ;;
@@ -376,56 +358,10 @@ core/modules/validation/include/validation/chainstate.h"
     eval "$cmd"
 }
 
-# Adopt the cache state the parent derived (deriving it per worker would cost
-# 116 redundant whole-tree hashes). The parent exports these three; absent or
-# malformed means "no cache", which makes the gate run.
-cache_adopt_from_env() {
-    LINT_CACHE_AVAILABLE=0
-    [ "${ZCL_LINT_CACHE_MODE:-off}" != "off" ] || return 1
-    [[ "${ZCL_LINT_CACHE_TREE_KEY_X:-}" =~ ^[0-9a-f]{64}$ ]] || return 1
-    [ -n "${ZCL_LINT_CACHE_DIR_X:-}" ] || return 1
-    LINT_CACHE_TREE_KEY="$ZCL_LINT_CACHE_TREE_KEY_X"
-    LINT_CACHE_DIR="$ZCL_LINT_CACHE_DIR_X"
-    LINT_CACHE_AVAILABLE=1
-    return 0
-}
-
 # Worker: run one gate, capture log + ms + rc artifacts, print a one-line
 # receipt. Line stays well under PIPE_BUF so concurrent workers never tear.
-#
-# Cache path, in the one order that is safe:
-#   probe (never mutates)  ->  skip on a hit, else RUN THE GATE UNCHANGED
-#   ->  store ONLY on rc 0.
-# Nothing here alters what a gate checks: on a miss it is the same command
-# with the same environment as an uncached run.
 worker() {
-    local gate="$1" start end ms rc log cmd key="" cached=0 wouldhit=0
-
-    if cache_adopt_from_env && lint_cache_gate_is_cacheable "$gate" \
-       && cmd="$(gate_command "$gate")"; then
-        key="$(lint_cache_key "$gate" "$cmd")" || key=""
-        [[ "$key" =~ ^[0-9a-f]{64}$ ]] || key=""
-        if [ -n "$key" ] && lint_cache_has_pass "$key"; then
-            wouldhit=1
-            # --cold-audit deliberately does NOT skip: it runs every gate
-            # fresh so the hit can be checked against the fresh verdict.
-            if [ "${ZCL_LINT_CACHE_MODE:-off}" != "audit" ]; then
-                cached=1
-            fi
-        fi
-    fi
-    printf '%s\n' "$wouldhit" > "$GATES_DIR/$gate.wouldhit"
-
-    if [ "$cached" -eq 1 ]; then
-        printf '%s\n' "0" > "$GATES_DIR/$gate.ms"
-        printf '%s\n' "0" > "$GATES_DIR/$gate.rc"
-        printf '%s\n' "1" > "$GATES_DIR/$gate.cached"
-        printf 'cached (unchanged inputs since this gate last passed)\n' \
-            > "$GATES_DIR/$gate.log"
-        printf 'HIT  %-42s  cached (inputs unchanged)\n' "$gate"
-        return 0
-    fi
-    printf '%s\n' "0" > "$GATES_DIR/$gate.cached"
+    local gate="$1" start end ms rc log
 
     log="$GATES_DIR/$gate.log"
     start="$(now_ms)"
@@ -435,24 +371,6 @@ worker() {
     ms=$((end - start))
     printf '%s\n' "$ms" > "$GATES_DIR/$gate.ms"
     printf '%s\n' "$rc" > "$GATES_DIR/$gate.rc"
-    if [ "$rc" -ne 0 ] && [ "$wouldhit" -eq 1 ] && [ -n "$key" ]; then
-        # A cold audit that contradicts a stored PASS poisons this exact
-        # action key. Never let a later successful run erase the conflict.
-        lint_cache_note_conflict "$key" "$gate" || rc=2
-    fi
-    # ONLY a pass is ever stored. A failure is never cached, so a red gate
-    # can never be turned green by a later run.
-    if [ "$rc" -eq 0 ] && [ -n "$key" ] && [ "$LINT_CACHE_AVAILABLE" = "1" ]; then
-        if [ "$gate" = check-flag-registry ]; then
-            local after_key
-            after_key="$(lint_cache_key "$gate" "$cmd")" || after_key=""
-            if [ "$after_key" != "$key" ]; then
-                lint_cache_note "unstable action inputs: $gate PASS not stored"
-                key=""
-            fi
-        fi
-        [ -z "$key" ] || lint_cache_store_pass "$gate" "$key"
-    fi
     if [ "$rc" -eq 0 ]; then
         printf 'PASS %-42s %7s ms\n' "$gate" "$ms"
     else
@@ -467,19 +385,12 @@ usage() {
 
 main() {
     local -a gates=()
-    # Cache mode precedence, mirroring test_parallel's: --cold-audit beats
-    # --no-cache beats (--cache | ZCL_LINT_CACHE!=0) beats OFF. OFF is the
-    # default and reproduces the historical driver exactly.
-    local cli_cache=0 cli_no_cache=0 cli_cold_audit=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --jobs)    JOBS="${2:?--jobs needs N}"; shift 2 ;;
             --jobs=*)  JOBS="${1#--jobs=}"; shift ;;
             --bin-dir) BIN_DIR="${2:?--bin-dir needs a dir}"; shift 2 ;;
             --bin-dir=*) BIN_DIR="${1#--bin-dir=}"; shift ;;
-            --cache)      cli_cache=1; shift ;;
-            --no-cache)   cli_no_cache=1; shift ;;
-            --cold-audit) cli_cold_audit=1; shift ;;
             --worker)  worker "$2"; exit $? ;;
             --list)
                 # Gate names = the case labels in gate_command() (read from
@@ -518,22 +429,6 @@ main() {
             *) echo "run_lint.sh: unknown argument '$1'" >&2; exit 2 ;;
         esac
     done
-    # Diagnostic surface: ZCL_LINT_CACHE_DUMP=<gate> prints what that gate
-    # keys on and whether it is a hit right now, then exits. Needs the same
-    # two exported vars the key folds in, so set them first.
-    if [ -n "${ZCL_LINT_CACHE_DUMP:-}" ]; then
-        local dump_gate="$ZCL_LINT_CACHE_DUMP" dump_cmd
-        export ZCL_LINT_PRODUCTION_SCAN=1
-        export ZCL_LINT_BIN_DIR="$BIN_DIR"
-        if ! dump_cmd="$(gate_command "$dump_gate")"; then
-            echo "run_lint.sh: ZCL_LINT_CACHE_DUMP='$dump_gate' is not a known gate" >&2
-            exit 2
-        fi
-        lint_cache_open "$ROOT" "$dump_gate" || true
-        lint_cache_dump "$dump_gate" "$dump_cmd"
-        exit 0
-    fi
-
     [[ "$JOBS" =~ ^[0-9]+$ ]] && [ "$JOBS" -ge 1 ] || {
         echo "run_lint.sh: --jobs must be a positive integer (got '$JOBS')" >&2; exit 2; }
     [ "$JOBS" -le 32 ] || JOBS=32
@@ -624,31 +519,6 @@ main() {
     export ZCL_LINT_BIN_DIR="$BIN_DIR"
     [[ "$BUDGET_SEC" =~ ^[0-9]+$ ]] || BUDGET_SEC=75
 
-    # ── Resolve the cache mode and derive the tree key ONCE, here in the
-    # parent, before any worker forks. Both env vars must be set before
-    # lint_cache_key() is called anywhere, since both are folded into it.
-    local cache_mode=off
-    if [ "$cli_cold_audit" -eq 1 ]; then
-        cache_mode=audit
-    elif [ "$cli_no_cache" -eq 1 ]; then
-        cache_mode=off
-    elif [ "$cli_cache" -eq 1 ] || [ "${ZCL_LINT_CACHE:-0}" != "0" ]; then
-        cache_mode=on
-    fi
-    export ZCL_LINT_CACHE_MODE=off ZCL_LINT_CACHE_TREE_KEY_X= ZCL_LINT_CACHE_DIR_X=
-    if [ "$cache_mode" != "off" ]; then
-        if lint_cache_open "$ROOT" "${gates[*]}"; then
-            export ZCL_LINT_CACHE_MODE="$cache_mode"
-            export ZCL_LINT_CACHE_TREE_KEY_X="$LINT_CACHE_TREE_KEY"
-            export ZCL_LINT_CACHE_DIR_X="$LINT_CACHE_DIR"
-        else
-            # Fail-safe: the cache could not bound its inputs, so it is not
-            # used at all and every gate runs. Never a partial keyspace.
-            lint_cache_note "disabled for this run — every gate will run"
-            cache_mode=off
-        fi
-    fi
-
     local -a serial_gates=() par_gates=() final_gates=()
     for g in "${gates[@]}"; do
         case "$SERIAL_PROLOGUE" in
@@ -706,8 +576,6 @@ main() {
     # Aggregate. A gate that produced no .rc file crashed the worker itself.
     local -a failed=()
     local total=0 rc ms
-    local cached_n=0 ran_n=0 audit_hits=0 audit_diverged=0
-    local -a diverged=()
     for g in "${gates[@]}"; do
         total=$((total + 1))
         if [ ! -f "$GATES_DIR/$g.rc" ]; then
@@ -716,23 +584,6 @@ main() {
         fi
         rc="$(cat "$GATES_DIR/$g.rc")"
         [ "$rc" = "0" ] || failed+=("$g")
-        if [ "$(cat "$GATES_DIR/$g.cached" 2>/dev/null || echo 0)" = "1" ]; then
-            cached_n=$((cached_n + 1))
-        else
-            ran_n=$((ran_n + 1))
-        fi
-        # Cold audit: a gate that carried a stored PASS at its CURRENT key,
-        # ran fresh anyway, and FAILED, proves the key does not bound the
-        # gate's real inputs. That is a cache soundness bug, and it fails the
-        # run loudly on top of the gate's own failure.
-        if [ "$cache_mode" = "audit" ] \
-           && [ "$(cat "$GATES_DIR/$g.wouldhit" 2>/dev/null || echo 0)" = "1" ]; then
-            audit_hits=$((audit_hits + 1))
-            if [ "$rc" != "0" ]; then
-                audit_diverged=$((audit_diverged + 1))
-                diverged+=("$g")
-            fi
-        fi
     done
 
     # Slowest gates first (per-gate ms artifacts make regressions visible).
@@ -741,12 +592,7 @@ main() {
         [ -f "$f" ] || continue
         printf '%s %s\n' "$(cat "$f")" "$(basename "$f" .ms)"
     done | sort -nr)"
-    local cache_note=""
-    case "$cache_mode" in
-        on)    cache_note=", cached ${cached_n} / ran ${ran_n}" ;;
-        audit) cache_note=", cold-audit: ran all ${ran_n}" ;;
-    esac
-    echo "── lint timing: ${total} gates, wall ${wall_ms} ms, jobs ${JOBS}${cache_note} ──"
+    echo "── lint timing: ${total} gates, wall ${wall_ms} ms, jobs ${JOBS} ──"
     local show=10 line
     [ "${ZCL_LINT_VERBOSE:-0}" = "1" ] && show="$total"
     printf '%s\n' "$ranked" | head -n "$show" | while read -r ms g; do
@@ -764,11 +610,6 @@ main() {
         printf '  "budget_sec":%s,\n' "$BUDGET_SEC"
         printf '  "gate_count":%s,\n' "$total"
         printf '  "failed_count":%s,\n' "${#failed[@]}"
-        printf '  "cache_mode":"%s",\n' "$cache_mode"
-        printf '  "cache_hits":%s,\n' "$cached_n"
-        printf '  "cache_ran":%s,\n' "$ran_n"
-        printf '  "cold_audit_verified":%s,\n' "$audit_hits"
-        printf '  "cold_audit_divergences":%s,\n' "$audit_diverged"
         printf '  "gates":[\n'
         local first=1
         printf '%s\n' "$ranked" | while read -r ms g; do
@@ -784,30 +625,6 @@ main() {
     if [ "$wall_ms" -gt $((BUDGET_SEC * 1000)) ]; then
         echo "run_lint.sh: NOTE — wall ${wall_ms} ms exceeds the ${BUDGET_SEC}s soft budget" \
             "(ZCL_LINT_BUDGET_SEC; see the budget comment above the lint target)" >&2
-    fi
-
-    if [ "$cache_mode" = "audit" ]; then
-        echo "cold-audit: ${audit_hits} cache-hit(s) verified against fresh runs," \
-             "${audit_diverged} divergence(s)"
-        if [ "$audit_diverged" -gt 0 ]; then
-            echo "" >&2
-            for g in "${diverged[@]}"; do
-                echo "COLD-AUDIT DIVERGENCE: $g carried a cached PASS at its current" >&2
-                echo "  key but FAILED a fresh run — the cache is UNSOUND. Its real" >&2
-                echo "  inputs are not covered by the key. Move it to the never-cached" >&2
-                echo "  set in tools/lint/lint_cache.sh with the reason." >&2
-            done
-        fi
-        if [ "$audit_hits" -eq 0 ]; then
-            echo "cold-audit: NOTE — no gate carried a stored PASS, so nothing was" \
-                 "actually verified. Warm the cache first (--cache), then re-audit." >&2
-        fi
-    fi
-
-    if [ "$audit_diverged" -gt 0 ]; then
-        echo "" >&2
-        echo "══ LINT: ${audit_diverged} cold-audit divergence(s) ══" >&2
-        exit 1
     fi
 
     if [ "${#failed[@]}" -gt 0 ]; then

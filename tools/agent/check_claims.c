@@ -700,7 +700,7 @@ static bool ccl_judge_tokens(const struct ccl_receipt *r, FILE *log, struct ccl_
 
 static bool ccl_is_lint_gate(const char *gate)
 {
-    return strcmp(gate, "lint") == 0 || strcmp(gate, "lint-cached") == 0 || strcmp(gate, "lint-cold-audit") == 0;
+    return strcmp(gate, "lint") == 0;
 }
 
 static bool ccl_judge_shape(struct ccl_ctx *c, const struct ccl_receipt *r, FILE *log, struct ccl_str *notes)

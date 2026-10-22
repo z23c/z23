@@ -11,12 +11,9 @@
 # a 170 s wall. Several agents run `make lint` many times an hour on several
 # machines, so every second here is multiplied by the fleet.
 #
-# tools/lint/lint_cache.sh already caches at GATE granularity, but its key is
-# the WHOLE tree: edit one .c and every gate's stored PASS is void, so the
-# 2108-TU sweep is paid again in full to re-check 2107 unchanged files. That
-# key was chosen when the whole umbrella cost 25 s (see that file's header);
-# at 170 s it no longer holds. This file adds the finer grain UNDERNEATH it,
-# without touching lint_cache.sh, run_lint.sh, or the Makefile.
+# Each gate is keyed per translation unit, so editing one .c re-checks only
+# that TU rather than paying the whole 2108-TU sweep again. The lint driver
+# itself runs every gate cold; this per-TU cache is the only result cache.
 #
 # WHAT IT CACHES, AND WHY THE GATES CANNOT TELL
 # A -fsyntax-only compile of one TU produces exactly two observable things:
@@ -111,10 +108,6 @@
 # ENV
 #   ZCL_LINT_TU_CACHE=0        disable (default: on)
 #   ZCL_LINT_TU_CACHE_DIR      cache root (default: <repo>/.cache/lint-tu)
-#   ZCL_LINT_CACHE_MODE=audit  set by run_lint.sh --cold-audit; disables the
-#                              cache, because a cold audit that replayed a
-#                              cached compile would be auditing the cache
-#                              against itself.
 #
 # PARENT-SIDE API (the gate, once, before it forks workers)
 #   tu_cache_setup <gate> <gate-script> <cc> <flags-nul> <scratch> \
@@ -412,9 +405,6 @@ tu_cache_setup() {
     if [ -z "$cachedir" ] || [ "${ZCL_TU_CACHE_SELFTEST_FORCE:-0}" != "1" ]; then
         if [ "${ZCL_LINT_TU_CACHE:-1}" = "0" ]; then
             tu_cache__disable "ZCL_LINT_TU_CACHE=0"; return 0
-        fi
-        if [ "${ZCL_LINT_CACHE_MODE:-off}" = "audit" ]; then
-            tu_cache__disable "--cold-audit runs everything fresh"; return 0
         fi
     fi
     if ! command -v sha256sum >/dev/null 2>&1; then

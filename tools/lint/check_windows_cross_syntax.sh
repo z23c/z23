@@ -56,8 +56,8 @@
 # for --self-test plus the gate over 234 TUs, three runs each: 93-96 s with
 # the cache off, 91-96 s cold (it also stores), 1.7-1.8 s fully warm at 234
 # hits. ZCL_LINT_TU_CACHE=0 turns it off and leaves this gate exactly as it
-# was before the cache existed; run_lint.sh --cold-audit turns it off for
-# you. See that file's header for why the key is sound.
+# was before the cache existed. See that file's header for why the key is
+# sound.
 #
 # COLD COST TODAY: since the scan became NODE_C23_SRCS it is 2339 TUs, not
 # 234. Measured 2026-09-25 on the dev reference host, cache off, standalone:

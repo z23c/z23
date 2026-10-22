@@ -535,7 +535,7 @@ else ifneq ($(filter dev-proof-bundle ff,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev test-fast
 else ifneq ($(filter dev-package-verifier,$(ZCL_EPOCH_SINGLE_GOAL)),)
 ZCL_EPOCH_PROFILES := dev
-else ifneq ($(filter lint lint-cached lint-cold-audit lint-preflight,$(ZCL_EPOCH_SINGLE_GOAL)),)
+else ifneq ($(filter lint lint-preflight,$(ZCL_EPOCH_SINGLE_GOAL)),)
 # The lint umbrellas name the dev node and confined package verifier as cold
 # prerequisites below.  Their compile epoch must therefore be selected at
 # parse time just as it is for dev-package-verifier; a zero epoch would acquire
@@ -2029,7 +2029,7 @@ else ifneq ($(filter fast-compile dev-build-only dev-package-verifier,$(ZCL_DEPF
 ZCL_DEPFILE_PROFILES := dev
 else ifneq ($(filter dev-bin z23-dev zclassic23-dev,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 ZCL_DEPFILE_PROFILES := dev $(if $(ZCL_HOST_WINDOWS),,test-fast)
-else ifneq ($(filter lint lint-cached lint-cold-audit lint-preflight,$(ZCL_DEPFILE_SINGLE_GOAL)),)
+else ifneq ($(filter lint lint-preflight,$(ZCL_DEPFILE_SINGLE_GOAL)),)
 # Keep in step with the matching ZCL_EPOCH_PROFILES branch: these umbrellas
 # compile and link the dev node and package verifier, so a header edit must
 # invalidate those objects.  An empty profile relinked stale objects.
@@ -9339,7 +9339,6 @@ determinism-receipt-abi:
 # Gate — the NONDETERMINISTIC set may only shrink (HARD).
 # Wiring lives in THREE files: this recipe, the gate_command() case in
 # tools/lint/run_lint.sh, and the LINT-GATES block in docs/DEFENSIVE_CODING.md.
-# It reads git history, so tools/lint/lint_cache.sh refuses to cache it.
 .PHONY: check-determinism-ratchet
 check-determinism-ratchet:
 	@echo "══ LINT: determinism ratchet (shrink-only) ══"
@@ -15451,10 +15450,6 @@ check-tor-provenance: tor-provenance-ready $(TOR_PROVENANCE_BIN) $(LINTC_TOOL)
 # the same parity as a gate, by NAME, in every direction across all three
 # files, plus a Make target for every listed name (ZCL_LINT_SERIAL=1 needs
 # it) and an existing script behind every table entry.
-.PHONY: check-lint-cache
-check-lint-cache:
-	@./tools/lint/lint_cache_selftest.sh
-
 check-lint-gate-wiring: $(LINTC_TOOL)
 	@echo "══ LINT: every listed gate is wired in run_lint.sh and the doc block, and back ══"
 	@./build/bin/z23-lint check-lint-gate-wiring --selftest
@@ -15535,7 +15530,6 @@ ZCL_LINT_JOBS ?= $(shell j=$$(( $(ZCL_HOST_JOBS) * 3 / 4 )); \
                    if [ "$$j" -lt 8 ]; then j=8; fi; \
                    if [ "$$j" -gt 24 ]; then j=24; fi; echo "$$j")
 LINT_GATES := \
-    check-lint-cache \
     check-lint-gate-wiring \
     check-toolchain \
     check-build-epoch-integrity \
@@ -15772,8 +15766,8 @@ LINT_GATES := \
 # build it here before the parallel lint driver bypasses check-* Make recipes.
 # Name those artifacts here so a parallel cold lint never depends on ambient
 # output from an earlier development build. Keep one set for all three
-# umbrellas: run_lint.sh dispatches the same gate set in cold, cached, and
-# cold-audit modes, so their build prerequisites must not drift apart.
+# umbrellas: run_lint.sh dispatches the same gate set for each of them, so
+# their build prerequisites must not drift apart.
 # The ordering gate's runtime orphan scenario execs and copies both the
 # launcher and the journey helper; nothing in the default build set makes
 # either, so a fresh proof generation has neither until they are named here
@@ -15799,7 +15793,7 @@ LINT_BUILT_PREREQS = tools/core_seal tools/check_observability_pairing \
 # tor-ready: a manifest that EXISTS but disagrees with the archives must
 # still reach check_tor_provenance.sh's own diagnostic and fail there, never
 # be silently re-attested here.
-lint lint-cached lint-cold-audit: $(Z23_DEV_BIN) \
+lint: $(Z23_DEV_BIN) \
 	$(DEV_PACKAGE_VERIFY_BIN) $(LINT_BUILT_PREREQS) tor-provenance-ready
 
 ifeq ($(ZCL_LINT_SERIAL),1)
@@ -15869,34 +15863,6 @@ endif
 .PHONY: verdict
 verdict:
 	@tools/scripts/verdict.sh
-
-# ── Result-cached lint (inner loop only) ─────────────────────────────────
-# `make lint` above stays COLD, always, so the canonical gate and the
-# pre-push path never accept a cached verdict. These two are the opt-ins:
-#
-#   make lint-cached      skip any gate whose entire scannable input is
-#                         byte-identical to the last time it passed. Re-running
-#                         on an unchanged tree is the case this exists for; a
-#                         run where you edited anything gets no benefit,
-#                         because the key covers the whole tree.
-#   make lint-cold-audit  run every gate FRESH and assert that every gate
-#                         carrying a stored PASS at its current key also
-#                         passed the fresh run. This is what makes the cache
-#                         trustworthy; run it after any change to the gate set
-#                         or to tools/lint/lint_cache.sh. Warm the cache first
-#                         (make lint-cached) or it has nothing to verify.
-#
-# 16 of the 117 gates are NEVER cached — they build binaries, run compilers,
-# read build output, git config, /proc, or untracked worktree state. Each
-# carries its reason in tools/lint/lint_cache.sh, and each always runs.
-.PHONY: lint-cached lint-cold-audit
-lint-cached:
-	@tools/lint/run_lint.sh --cache --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
-	@echo "══ LINT: all checks passed (cached where inputs were unchanged) ══"
-
-lint-cold-audit:
-	@tools/lint/run_lint.sh --cold-audit --jobs "$(ZCL_LINT_JOBS)" --bin-dir "$(BIN_DIR)" $(LINT_GATES)
-	@echo "══ LINT: all checks passed, every cache hit verified against a fresh run ══"
 
 # CI runs the PER-PROCESS isolated test runner (test_parallel), not the
 # monolith (test_zcl). Both build from the same TEST_SRCS and cover the same
