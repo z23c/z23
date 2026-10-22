@@ -1340,8 +1340,7 @@ ZCL_COMMAND_READY_READ(
  * Stacks lanes onto origin/main without waiting on lint. `build` fetches
  * origin, opens a detached worktree at <checkout-parent>/z23-stack<name>,
  * cherry-picks each source's origin/main..HEAD commits oldest-first
- * (skipping doc-regen-only commits by subject), regenerates the generated
- * docs once, and returns immediately — it never runs lint-fast itself.
+ * (skipping doc-regen-only commits by subject), and returns immediately — it never runs lint-fast itself.
  * `check` is the one deliberate synchronous wait: `make lint-fast` under the
  * checkout lock, bounded by --timeout. `status` reads every z23-stack*
  * worktree without mutating anything. `drop` removes a stack worktree, and

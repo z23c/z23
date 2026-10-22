@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 #include "kpi/kpi.h"
 #include "lintc.h"
 
@@ -31,8 +32,14 @@ static size_t kfg_report(const struct kpi_floor *fl,
         const struct kpi_miss *m = &miss[i];
         fprintf(out, "check-kpi-floor: FAIL %s: floor %" PRIu64 ", ",
                 m->def->id, m->floor);
-        if (m->kind == KPI_MISS_UNAVAILABLE)
+        if (m->kind == KPI_MISS_UNAVAILABLE) {
             fputs("current UNAVAILABLE", out);
+            /* The inventory-backed metrics read an untracked build output. */
+            if (strstr(m->def->source, "CAPABILITY_INVENTORY") &&
+                access("build/gen/CAPABILITY_INVENTORY.jsonl", R_OK) != 0)
+                fputs(" (the capability inventory is absent: run "
+                      "`make docs-capability-inventory`)", out);
+        }
         else
             fprintf(out, "current %" PRIu64 " (%s)", m->current,
                     kpi_direction_label(m->def->direction));

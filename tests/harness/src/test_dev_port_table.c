@@ -116,7 +116,7 @@ static bool ptt_rig_topic(const char *dir)
     if (mkdir(path, 0700) != 0 || !PTT_G(dir, "checkout", "-q", "-b", "topic"))
         return false;
     return ptt_write(dir, "d.txt", "d\n") &&
-           ptt_write(dir, "docs/CAPABILITY_INVENTORY.jsonl", "{}\n") &&
+           ptt_write(dir, "docs/dev/CODEBASE_MAP.md", "{}\n") &&
            ptt_commit(dir, "add \"d\" file") &&
            ptt_write(dir, "a.txt", "one\nTWO\nthree\n") &&
            ptt_commit(dir, "touch two") &&

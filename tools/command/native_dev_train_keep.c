@@ -627,18 +627,14 @@ static bool dtk_gates(const struct dtk_paths *p, char *why, size_t cap)
 
 static bool dtk_regen(const struct dtk_paths *p, char *why, size_t cap)
 {
-    static const char *const inventory[] = {
-        "make", "-s", "-B", "--no-print-directory", "docs-capability-inventory",
-        NULL};
     static const char *const routing[] = {
         "make", "-s", "--no-print-directory", "docs-executor-routing", NULL};
     static const char *const counts[] = {"make", "-s", "--no-print-directory",
                                          "fix-doc-counts", NULL};
-    const char *const *steps[] = {inventory, routing, counts};
-    static const char *const labels[] = {"regen docs-capability-inventory",
-                                         "regen docs-executor-routing",
+    const char *const *steps[] = {routing, counts};
+    static const char *const labels[] = {"regen docs-executor-routing",
                                          "regen fix-doc-counts"};
-    for (size_t i = 0; i < 3; i++) {
+    for (size_t i = 0; i < 2; i++) {
         if (!dtk_make(p, steps[i], labels[i])) {
             (void)snprintf(why, cap, "%s failed; see %.170s%s", labels[i],
                            p->log, strlen(p->log) > 170 ? "..." : "");

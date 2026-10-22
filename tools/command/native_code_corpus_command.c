@@ -64,7 +64,7 @@ void zcl_native_handle_code_corpus(const struct zcl_command_request *request,
     const char *root = zcl_native_source_root(request);
     char inventory[1024];
     const int n = snprintf(inventory, sizeof inventory,
-                           "%s/docs/CAPABILITY_INVENTORY.jsonl", root);
+                           "%s/build/gen/CAPABILITY_INVENTORY.jsonl", root);
     if (n <= 0 || (size_t)n >= sizeof inventory) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "CORPUS_PATH",

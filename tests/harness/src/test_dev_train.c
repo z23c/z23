@@ -7,9 +7,8 @@
  * CLI calls them after input validation) against that fixture — never
  * against the real checkout this test runs in.
  *
- * The fixture's checked-out Makefile defines worktree-prime,
- * and docs-capability-inventory as no-ops: dev.train.build
- * calls exactly those targets, and a fixture repository has none of the real
+ * The fixture's checked-out Makefile defines worktree-prime as a no-op:
+ * dev.train.build calls exactly that target, and a fixture repository has none of the real
  * tree's vendor/doc machinery to run them for real.
  */
 
@@ -106,11 +105,10 @@ static bool dvt_head(const char *dir, char sha[41])
     return true;
 }
 
-/* The fixture Makefile: worktree-prime and docs-capability-inventory as
- * no-ops, the only targets dev.train.build calls. */
+/* The fixture Makefile: worktree-prime as a no-op, the only target
+ * dev.train.build calls. */
 static const char *const dvt_makefile =
-    "worktree-prime:\n\t@true\n\n"
-    "docs-capability-inventory:\n\t@true\n";
+    "worktree-prime:\n\t@true\n";
 
 static bool dvt_fixture_root(const char *root, const char *bare)
 {

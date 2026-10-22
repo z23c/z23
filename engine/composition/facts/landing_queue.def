@@ -89,7 +89,7 @@ ZCL_FACT("landing.queue", "land_slot_lock_call",
 ZCL_FACT("landing.queue", "train_is_worktree",
          "dev train build's train is a detached git worktree at z23-stack<name>, built by cherry-picking each source's commits, with no lint-fast run inside build.",
          "tools/command/native_dev_train_command.c",
-         "docs once, and returns — it never runs lint-fast itself. dev train check")
+         "and returns — it never runs lint-fast itself. dev train check")
 ZCL_FACT("landing.queue", "train_conflict_aborts_all",
          "dev train build reports state:conflict and stops the whole build on the first cherry-pick conflict from any source.",
          "tools/command/native_dev_train_command.c",

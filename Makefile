@@ -6686,7 +6686,7 @@ LINT_FAST_GATES := \
     check-arena-view-stub \
     check-hotfork-stories
 
-# These gates check docs/CAPABILITY_INVENTORY.jsonl and package registry
+# These gates check the generated capability inventory and package registry
 # roots, including zcode-package.json dependency pins. Both also run in full lint.
 ifeq ($(ZCL_LINT_SERIAL),1)
 lint-fast: $(LINT_FAST_GATES)
@@ -12607,7 +12607,7 @@ hooks-status:
 # tools/command/native_dev_land_regen.c); it refuses to run unless each
 # target is an initializer row of that table (a mention in a comment does
 # not count). It never commits.
-LINT_READY_REGEN := docs-capability-inventory fix-doc-counts docs-executor-routing
+LINT_READY_REGEN := fix-doc-counts docs-executor-routing
 .PHONY: lint-ready
 lint-ready: $(GIT_HOOK_BIN) $(LINTC_TOOL)
 	@for t in $(LINT_READY_REGEN); do \
@@ -14906,7 +14906,7 @@ check-catalog-rooms: $(LINTC_TOOL)
 # named in tools/lint/kpi_floor.txt must be at or better than its committed
 # floor in its declared direction; raise the floor in the same commit that
 # improves the metric. Read-only over the checkout. Has --selftest.
-check-kpi-floor: $(LINTC_TOOL)
+check-kpi-floor: $(LINTC_TOOL) docs-capability-inventory
 	@echo "══ LINT: KPI scoreboard is at or better than its committed floor ══"
 	@./build/bin/z23-lint check-kpi-floor --selftest
 	@./build/bin/z23-lint check-kpi-floor
@@ -14929,10 +14929,11 @@ docs-api-reference: $(API_REFERENCE_TOOL)
 	@mkdir -p build/gen
 	@$(API_REFERENCE_TOOL) docs/API_REFERENCE.md.in build/gen/API_REFERENCE.md
 
-# docs/CAPABILITY_INVENTORY.jsonl is the complete source-derived public C23
+# The capability inventory is the complete source-derived public C23
 # capability census.  JSON Lines keeps 1,000+ headers and their full symbol
 # tables grep-friendly without requiring jq or loading one giant document.
-# The checked-in artifact is never edited: regenerate it with this target.
+# It is build output, never tracked: `make docs-capability-inventory` writes
+# build/gen/CAPABILITY_INVENTORY.jsonl (the old tracked path stays ignored).
 CAPABILITY_INVENTORY_TOOL = $(BIN_DIR)/gen_capability_inventory$(ZCL_HOST_EXEEXT)
 CAPABILITY_INVENTORY_PLATFORM_SRCS = $(if $(ZCL_HOST_WINDOWS), \
 	platform/modules/platform/src/directory_compat.c platform/modules/platform/src/positioned_file.c,)
@@ -14975,10 +14976,11 @@ docs-executor-routing: $(BIN_DIR)/z23-lint
 .PHONY: tools/gen_capability_inventory docs-capability-inventory
 tools/gen_capability_inventory: $(CAPABILITY_INVENTORY_TOOL)
 docs-capability-inventory: $(CAPABILITY_INVENTORY_TOOL)
-	@$(CAPABILITY_INVENTORY_TOOL) docs/CAPABILITY_INVENTORY.jsonl .
+	@mkdir -p build/gen
+	@$(CAPABILITY_INVENTORY_TOOL) build/gen/CAPABILITY_INVENTORY.jsonl .
 
 check-capability-inventory-generated: $(CAPABILITY_INVENTORY_TOOL)
-	@echo "══ LINT: capability inventory is complete source-derived output ══"
+	@echo "══ LINT: the generated capability inventory (build/gen) is complete ══"
 	@./tools/lint/check_capability_inventory_generated.sh --selftest \
 	  "$(CAPABILITY_INVENTORY_TOOL)"
 
@@ -14988,7 +14990,7 @@ check-capability-inventory-generated: $(CAPABILITY_INVENTORY_TOOL)
 .PHONY: docs-proof-tools
 docs-proof-tools: $(LINTC_TOOL) $(BIN_DIR)/z23-fleet-observe $(CAPABILITY_INVENTORY_TOOL)
 
-check-generated-artifact-contradictions: $(LINTC_TOOL)
+check-generated-artifact-contradictions: $(LINTC_TOOL) docs-capability-inventory
 	@echo "══ LINT: generated artifacts cannot contradict each other ══"
 	@./build/bin/z23-lint check-generated-artifact-contradictions --selftest
 	@./build/bin/z23-lint check-generated-artifact-contradictions

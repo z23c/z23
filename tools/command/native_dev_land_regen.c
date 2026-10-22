@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: dev.land regen phase mechanics — run the three generated-doc
+ * purpose: dev.land regen phase mechanics — run the generated-doc
  *          targets in the landing worktree after a successful rebase and
  *          amend whatever they actually changed into the rebased
  *          candidate's last commit, so a submission never
@@ -7,16 +7,17 @@
  *          otherwise fix by hand. Also prepares the final restart plan
  *          after the landing step finishes its other prerequisites.
  *
- * WHY THREE FIXED TARGETS, NOT A DISCOVERED SET. Exactly one make target
+ * WHY TWO FIXED TARGETS, NOT A DISCOVERED SET. Exactly one make target
  * regenerates the fleet routing table across two scripts
- * (`docs-executor-routing`), one regenerates the capability census
- * (`docs-capability-inventory`), and one repairs the doc-counts block of
+ * (`docs-executor-routing`), and one repairs the doc-counts block of
  * docs/dev/CODEBASE_MAP.md (`fix-doc-counts`, the existing repair half of
  * `check-doc-counts` — see Makefile). Each writes to exactly one tracked
- * path. The table below is CLOSED and mirrors DL_REGEN_ARTIFACTS in
+ * path. (The capability inventory and API reference are build output under
+ * build/gen, not tracked, so no target here owns them.) The table below is
+ * CLOSED and mirrors DL_REGEN_ARTIFACTS in
  * native_dev_land.c, which exists for the same reason: nothing here is
  * discovered from a diff or a directory scan, so nothing outside these
- * three paths can ever be folded into a candidate by surprise.
+ * paths can ever be folded into a candidate by surprise.
  *
  * WHY UNCONDITIONAL, NOT ONLY ON CONFLICT. native_dev_land.c's own
  * DL_REGEN_* machinery only regenerates these kinds of artifacts when a
@@ -73,7 +74,13 @@ struct dlrg_artifact {
 
 /* Closed table — see the file header WHY. */
 static const struct dlrg_artifact DLRG_ARTIFACTS[] = {
-    { "docs-capability-inventory", "docs/CAPABILITY_INVENTORY.jsonl" },
+#if defined(ZCL_TESTING)
+    /* Synthetic artifact: no production target owns a fully generated tracked
+     * file any more (the capability inventory and API reference are build
+     * output under build/gen), so the test build keeps one to exercise the
+     * regenerate-and-amend mechanics. */
+    { "docs-fixture-generated", "docs/FIXTURE_GENERATED.jsonl" },
+#endif
     { "docs-executor-routing", "docs/agent/EXECUTOR_HEURISTICS.md" },
     { "fix-doc-counts", "docs/dev/CODEBASE_MAP.md" },
 };

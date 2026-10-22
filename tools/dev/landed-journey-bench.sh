@@ -300,13 +300,10 @@ commit_edit()
 
 regen_inventory()
 {
-    # A source edit makes the committed capability inventory stale: its
-    # source_root_sha3 binds the exact scanned tree bytes, so a direct proof
-    # of the story commit refuses proof_generated_docs_stale until the
-    # inventory is regenerated (run 22). The land lane regenerates docs
-    # itself for submitted tips; the direct-proof cases must do it here.
-    runenv make docs-capability-inventory >/dev/null || return 1
-    runenv git add docs/CAPABILITY_INVENTORY.jsonl || return 1
+    # The capability inventory is untracked build output (build/gen), no longer
+    # a committed file a source edit can leave stale, so a direct proof needs
+    # nothing regenerated or staged here. Kept as a seam for the call sites.
+    return 0
 }
 
 clone_proof_pass()

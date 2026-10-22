@@ -41,7 +41,6 @@ vendor/.cache/
 vendor/.build/
 
 # Generated artifacts over 200 KB; open them by path. Never list source here.
-docs/CAPABILITY_INVENTORY.jsonl
 docs/API_REFERENCE.md
 docs/work/retrieval-gold-evidence/*.jsonl
 contexts/commons/corpus/evidence-*.json

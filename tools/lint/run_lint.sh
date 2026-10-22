@@ -558,6 +558,23 @@ main() {
         exit 2
     fi
 
+    # The capability inventory is untracked build output. Three gates read it
+    # (check-capability-inventory-generated writes it, check-kpi-floor and
+    # check-generated-artifact-contradictions consume it), and the pool runs
+    # them concurrently, so it is generated ONCE, serially, before the pool.
+    # Every path that dispatches through this driver (lint, lint-land,
+    # lint-fast, the proof's lint dimension) therefore sees a fresh file.
+    case "$requested" in
+        *" check-capability-inventory-generated "*|*" check-kpi-floor "*|\
+        *" check-generated-artifact-contradictions "*)
+            echo "run_lint.sh: generating build/gen/CAPABILITY_INVENTORY.jsonl before the gate pool" >&2
+            if ! make -s --no-print-directory docs-capability-inventory >&2; then
+                echo "run_lint.sh: FATAL — make docs-capability-inventory failed;" \
+                     "the gates that read it cannot be graded" >&2
+                exit 1
+            fi ;;
+    esac
+
     local run_start run_end wall_ms
     run_start="$(now_ms)"
     for g in "${serial_gates[@]}"; do

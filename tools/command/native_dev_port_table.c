@@ -7,8 +7,8 @@
  * most `limit`, default 64, hard cap 256), the leaf renders the commit's patch
  * and classifies it against the running result:
  *
- *   EMPTY     no diff outside the generated docs (docs/CAPABILITY_INVENTORY.jsonl,
- *             docs/dev/CODEBASE_MAP.md), which are always excluded
+ *   EMPTY     no diff outside the generated docs
+ *             (docs/dev/CODEBASE_MAP.md), which are always excluded
  *   ON_BASE   the patch reverse-applies cleanly: its change is already present
  *   CONFLICT  the patch does not apply; the commit is skipped
  *   APPLIES   the patch applies and is folded into the running result
@@ -299,7 +299,6 @@ static bool pt_count_files(struct pt_run *run, const char *sha, int *files)
     const char *args[] = {
         "diff-tree", "--root", "--no-commit-id", "-r", "--no-renames",
         "--shortstat", sha, "--", ":/",
-        ":(top,exclude)docs/CAPABILITY_INVENTORY.jsonl",
         ":(top,exclude)docs/dev/CODEBASE_MAP.md", NULL};
     const char *p = buf;
     if (pt_git(run, false, args, buf, sizeof(buf)) != 0)
@@ -317,7 +316,7 @@ static bool pt_write_patch(struct pt_run *run, const char *sha)
         "diff-tree", "--root", "--no-commit-id", "-r", "-p", "--binary",
         "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv",
         "--no-color", "--src-prefix=a/", "--dst-prefix=b/", out_opt, sha, "--",
-        ":/", ":(top,exclude)docs/CAPABILITY_INVENTORY.jsonl",
+        ":/",
         ":(top,exclude)docs/dev/CODEBASE_MAP.md", NULL};
     (void)snprintf(out_opt, sizeof(out_opt), "--output=%s", run->patch);
     if (pt_git(run, false, args, NULL, 0) != 0)

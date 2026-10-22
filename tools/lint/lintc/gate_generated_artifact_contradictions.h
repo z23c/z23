@@ -20,7 +20,6 @@ struct gac_untested {
 
 int gacs_comp(void);
 void gacs_drop(void);
-int gacs_discover_ok(const char *path);
 int gacs_consumes_path(const char *path, char *out, size_t cap);
 int gacs_meta_check(const char *path, const char *const *claims, int n,
                     const char **miss);

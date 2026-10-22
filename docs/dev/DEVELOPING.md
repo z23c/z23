@@ -666,7 +666,7 @@ cannot verify against this checkout's own source Merkle falls back to the full
 `index: rebuilt` build.
 
 Before creating a reusable helper or importing a library, search the generated
-capability census in [`CAPABILITY_INVENTORY.jsonl`](../CAPABILITY_INVENTORY.jsonl).
+capability census in `build/gen/CAPABILITY_INVENTORY.jsonl` (untracked build output; `make docs-capability-inventory` writes it).
 It includes package public headers that the interactive code index does not,
 and records exposed symbols, verified direct-use file counts, registered-test
 reachability, ranked normalized duplicate bodies, and untested declared header
@@ -1559,7 +1559,7 @@ build that checker with the normal scheduler first. A base checker build that
 changes tracked source stops for inspection before any picks.
 
 Authors leave generated package roots, dependency pins, registry projections,
-and `docs/CAPABILITY_INVENTORY.jsonl` out of their commits. The integrator runs
+and the untracked `build/gen` outputs out of their commits. The integrator runs
 `devbuild --wait bash tools/scripts/stack_tip_refresh.sh` once at the
 assembled stack tip.
 It rederives the registry and dependent pins, then runs the canonical

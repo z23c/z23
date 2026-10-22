@@ -2114,12 +2114,14 @@ static int test_ic_code_capsule_stays_with_code_owner(void)
 static int test_ic_generated_inventory_stays_focused(void)
 {
     int failures = 0;
-    TEST("impact composition: generated inventory selects only its native proof") {
+    TEST("impact composition: the retired tracked inventory path selects no shared rule") {
+        /* The inventory is build output under build/gen now; a row that
+         * still touches the old path must not pull in an owner group. */
         struct agent_impact_acc impact = {0};
-        ASSERT(agent_impact_apply_shared_rules(
-            "docs/CAPABILITY_INVENTORY.jsonl", &impact));
-        ASSERT(impact.shared_rule_hits == 1);
-        ASSERT(ic_acc_has_group(&impact, "code_inventory"));
+        (void)agent_impact_apply_shared_rules(
+            "docs/CAPABILITY_INVENTORY.jsonl", &impact);
+        ASSERT(impact.shared_rule_hits == 0);
+        ASSERT(!ic_acc_has_group(&impact, "code_inventory"));
         ASSERT(!ic_acc_has_group(&impact, "make_lint_gates"));
         PASS();
     } _test_next:;
@@ -9990,7 +9992,6 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
         ASSERT(true);
 #else
         static const char *const stubs[] = {
-            "tools/lint/check_capability_inventory_generated.sh",
             "build/bin/z23-lint",
             "build/bin/z23-lint",
             "tools/scripts/check_doc_counts.sh",
@@ -10006,10 +10007,6 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
                             stubs[i]) < (int)sizeof(script));
             ASSERT(chmod(script, 0755) == 0);
         }
-        ASSERT(ic_write(generation, stubs[0],
-                        "#!/bin/sh\n"
-                        "test \"$#\" -eq 1 && "
-                        "test \"$1\" = build/bin/gen_capability_inventory\n"));
         /* The provisioned checker binaries a sealed generation carries
          * after the docs-tools step; without them no fresh verdict below
          * could be told apart from a missing toolchain. */
@@ -10035,29 +10032,28 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
         ASSERT(zcl_dev_proof_test_generation_docs_fresh(generation, why,
                                                         sizeof(why)));
         ASSERT(why[0] == '\0');
-        /* Stale inventory plus a second stale checker: the FIRST failure
+        /* Stale routing facts plus a second stale checker: the FIRST failure
          * is named (deterministic order), with its regen command. */
-        ASSERT(ic_write(generation, stubs[0],
-                        "#!/bin/sh\necho FAIL >&2\nexit 1\n"));
-        ASSERT(ic_write_lint(generation, "exit 0",
+        ASSERT(ic_write_lint(generation, "echo FAIL >&2; exit 1",
                              "echo FAIL >&2; exit 1"));
         memset(why, 0, sizeof(why));
         ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
                                                          sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_stale:"
-                      "docs/CAPABILITY_INVENTORY.jsonl "
-                      "(make docs-capability-inventory)");
+                      "docs/agent/EXECUTOR_HEURISTICS.md "
+                      "(make docs-executor-routing)");
         /* The checkers run together as steps; the join still names the
          * earliest refusal in list order when a later one fails first,
          * and removes every step log it judged. */
-        ASSERT(ic_write(generation, stubs[0],
-                        "#!/bin/sh\nsleep 1\necho FAIL >&2\nexit 1\n"));
+        ASSERT(ic_write_lint(generation,
+                             "sleep 1; echo FAIL >&2; exit 1",
+                             "echo FAIL >&2; exit 1"));
         memset(why, 0, sizeof(why));
         ASSERT(!zcl_dev_proof_test_generation_docs_fresh(generation, why,
                                                          sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_stale:"
-                      "docs/CAPABILITY_INVENTORY.jsonl "
-                      "(make docs-capability-inventory)");
+                      "docs/agent/EXECUTOR_HEURISTICS.md "
+                      "(make docs-executor-routing)");
         for (size_t i = 0; i < sizeof(stubs) / sizeof(stubs[0]); i++) {
             ASSERT(snprintf(script, sizeof(script),
                             "%s/.generation-docs-fresh-%zu.log", generation,
@@ -10070,7 +10066,7 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
         ASSERT(!zcl_dev_proof_test_generation_docs_fresh(bare, why,
                                                          sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_checker_missing:"
-                      "tools/lint/check_capability_inventory_generated.sh");
+                      "tools/scripts/check_doc_counts.sh");
         ASSERT((size_t)snprintf(cmd, sizeof(cmd), "rm -rf '%s' '%s'",
                                 generation, bare) < sizeof(cmd));
         ASSERT(system(cmd) == 0);
@@ -10080,13 +10076,12 @@ static int test_ic_generation_docs_fresh_refuses_stale(void)
     return failures;
 }
 
-/* A generation carrying the four docs-fresh checker scripts (each `exit 0`
+/* A generation carrying the three docs-fresh checker scripts (each `exit 0`
  * unless overwritten) and the three provisioned checker binaries. */
 static bool ic_docs_fresh_fixture(char *generation, size_t len,
                                   const char *name)
 {
     static const char *const stubs[] = {
-        "tools/lint/check_capability_inventory_generated.sh",
         "build/bin/z23-lint",
         "build/bin/z23-lint",
         "tools/scripts/check_doc_counts.sh",
@@ -10185,9 +10180,7 @@ static int test_ic_worker_plan_docs_before_refresh(void)
             ".PHONY: dev-proof-bundle-prefork\n"
             "dev-proof-bundle-prefork:\n"
             "\t@touch refresh-attempted\n"));
-        ASSERT(ic_write(generation,
-            "tools/lint/check_capability_inventory_generated.sh",
-            "#!/bin/sh\necho FAIL >&2\nexit 1\n"));
+        ASSERT(ic_write_lint(generation, "echo FAIL >&2; exit 1", "exit 0"));
         ASSERT(snprintf(marker, sizeof(marker), "%s/refresh-attempted",
                         generation) < (int)sizeof(marker));
         why[0] = '\0';
@@ -10423,37 +10416,33 @@ static int test_ic_generation_docs_fresh_overlapped(void)
         /* A checker that outlives its deadline and then exits 0 before
          * the join refuses as a timeout, exactly as the serial capture's
          * deadline refused it -- never as a pass. */
-        ASSERT(ic_write(generation,
-                        "tools/lint/check_capability_inventory_generated.sh",
-                        "#!/bin/sh\nsleep 1\nexit 0\n"));
+        ASSERT(ic_write_lint(generation, "sleep 1; exit 0", "exit 0"));
         int64_t begun = platform_time_monotonic_us();
         ASSERT(!zcl_dev_proof_test_docs_fresh_overlapped(
             generation, 300, 2500, true, NULL, why, sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_check_timeout:"
-                      "docs/CAPABILITY_INVENTORY.jsonl");
+                      "docs/agent/EXECUTOR_HEURISTICS.md");
         ASSERT(platform_time_monotonic_us() - begun >= 2500 * 1000);
         /* Joined at once instead, it is the same refusal. */
         ASSERT(!zcl_dev_proof_test_docs_fresh_overlapped(
             generation, 300, 0, true, NULL, why, sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_check_timeout:"
-                      "docs/CAPABILITY_INVENTORY.jsonl");
+                      "docs/agent/EXECUTOR_HEURISTICS.md");
 
         /* Stale docs outrank a refusal a later proof step took while the
          * checkers ran, the order the serial check imposed. */
-        ASSERT(ic_write(generation,
-                        "tools/lint/check_capability_inventory_generated.sh",
-                        "#!/bin/sh\necho FAIL >&2\nexit 1\n"));
+        ASSERT(ic_write_lint(generation, "echo FAIL >&2; exit 1", "exit 0"));
         ASSERT(!zcl_dev_proof_test_docs_fresh_overlapped(
             generation, 20000, 200, false, "impact_plan_incomplete", why,
             sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_stale:"
-                      "docs/CAPABILITY_INVENTORY.jsonl "
-                      "(make docs-capability-inventory)");
+                      "docs/agent/EXECUTOR_HEURISTICS.md "
+                      "(make docs-executor-routing)");
         ASSERT(!zcl_dev_proof_test_docs_fresh_overlapped(
             generation, 20000, 0, true, NULL, why, sizeof(why)));
         ASSERT_STR_EQ(why, "proof_generated_docs_stale:"
-                      "docs/CAPABILITY_INVENTORY.jsonl "
-                      "(make docs-capability-inventory)");
+                      "docs/agent/EXECUTOR_HEURISTICS.md "
+                      "(make docs-executor-routing)");
 
         /* A cancel that lands before the first checker starts is named a
          * cancellation, never a missing checker. */
@@ -10463,7 +10452,7 @@ static int test_ic_generation_docs_fresh_overlapped(void)
         zcl_devloop_process_cancel_clear();
         ASSERT(!cancelled_ok);
         ASSERT_STR_EQ(why, "proof_generated_docs_check_cancelled:"
-                      "docs/CAPABILITY_INVENTORY.jsonl");
+                      "docs/agent/EXECUTOR_HEURISTICS.md");
         ASSERT((size_t)snprintf(cmd, sizeof(cmd), "rm -rf '%s'",
                                 generation) < sizeof(cmd));
         ASSERT(system(cmd) == 0);
@@ -10482,7 +10471,6 @@ static int test_ic_generation_docs_fresh_refuses_missing_tools(void)
         ASSERT(true);
 #else
         static const char *const stubs[] = {
-            "tools/lint/check_capability_inventory_generated.sh",
             "build/bin/z23-lint",
             "build/bin/z23-lint",
             "tools/scripts/check_doc_counts.sh",

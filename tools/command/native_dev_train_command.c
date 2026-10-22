@@ -6,8 +6,7 @@
  * dev train build stacks lanes onto main without waiting on lint: it fetches
  * origin, opens a detached worktree at <checkout-parent>/z23-stack<name>,
  * cherry-picks each source's origin/main..HEAD commits oldest-first
- * (skipping doc-regen-only commits by subject), regenerates the generated
- * docs once, and returns — it never runs lint-fast itself. dev train check
+ * (skipping doc-regen-only commits by subject), and returns — it never runs lint-fast itself. dev train check
  * is the one deliberate synchronous wait. dev train status reads every
  * stack worktree. dev train drop removes one.
  *
@@ -381,36 +380,6 @@ void zcl_native_handle_dev_train_build(
             (void)json_push_back(&picked, &item);
             json_free(&item);
         }
-    }
-
-    /* Regenerate the generated docs once, the same targets
-     * batch_build.sh used. */
-    const char *cap_argv[] = {"make", "-s", "-B", "--no-print-directory",
-                              "docs-capability-inventory", NULL};
-    struct zcl_devloop_process_result doc_result;
-    bool doc_ok =
-        zcl_devloop_process_run(stack_dir, cap_argv, DVT_MAKE_TIMEOUT_MS,
-                                &doc_result) &&
-        doc_result.exit_code == 0;
-    if (!doc_ok) {
-        (void)json_push_kv(&reply->data, "picked", &picked);
-        (void)json_push_kv(&reply->data, "skipped", &skipped);
-        (void)json_push_kv(&reply->data, "warnings", &warnings);
-        json_free(&picked); json_free(&skipped); json_free(&warnings);
-        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INTERNAL,
-                "DOC_REGEN_FAILED", "regen_docs",
-                "regenerating the generated docs failed", stack_dir);
-        return;
-    }
-    static const char *const diff_args[] = {"diff", "--cached", "--quiet",
-                                            NULL};
-    static const char *const add_args[] = {"add", "-A", "--", "docs/", NULL};
-    (void)zcl_dev_train_git(stack_dir, add_args, NULL, 0, DVT_GIT_TIMEOUT_MS);
-    if (zcl_dev_train_git(stack_dir, diff_args, NULL, 0, DVT_GIT_TIMEOUT_MS) != 0) {
-        static const char *const commit_args[] = {
-            "commit", "-q", "-m",
-            "Regenerate the generated docs for the stack", NULL};
-        (void)zcl_dev_train_git(stack_dir, commit_args, NULL, 0, DVT_GIT_TIMEOUT_MS);
     }
 
     static const char *const count_args[] = {"rev-list", "--count",

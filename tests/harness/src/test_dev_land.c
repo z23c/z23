@@ -1331,7 +1331,7 @@ static bool dlx_regen_files(struct dlx_rig *rig, const char *body,
                             const char *map_body, const char *third,
                             const char *extra)
 {
-    return dlx_write_dep(rig->clone, "docs/CAPABILITY_INVENTORY.jsonl", body) &&
+    return dlx_write_dep(rig->clone, "docs/FIXTURE_GENERATED.jsonl", body) &&
            dlx_write_dep(rig->clone, "docs/dev/CODEBASE_MAP.md", map_body) &&
            (!third || dlx_write_dep(rig->clone, third, body)) &&
            (!extra || dlx_write_dep(rig->clone, extra, body));
@@ -1394,7 +1394,7 @@ static bool dlx_rerere_autoupdate_prime(struct dlx_rig *rig)
     const char *autoupdate[] = { "config", "rerere.autoupdate", "true", NULL };
     const char *merge[] = { "merge", "--no-ff", "keep-tip", NULL };
     const char *ours[] = { "checkout", "--ours", "--",
-                           "docs/CAPABILITY_INVENTORY.jsonl",
+                           "docs/FIXTURE_GENERATED.jsonl",
                            "docs/dev/CODEBASE_MAP.md", NULL };
     const char *rerere[] = { "rerere", NULL };
     const char *merge_abort[] = { "merge", "--abort", NULL };
@@ -1450,7 +1450,7 @@ static bool dlx_commit_all(const char *dir, const char *name, char out[64])
 
 /* A rig carrying a real (but trivial) Makefile with the three targets
  * native_dev_land_regen.c's regen phase runs after every successful
- * rebase (docs-capability-inventory, docs-executor-routing,
+ * rebase (docs-fixture-generated, docs-executor-routing,
  * fix-doc-counts), plus the one tracked doc file each target owns. The
  * three `*_recipe` strings are literal tab-indented Makefile recipe lines
  * (e.g. "@:" for a no-op, or a shell one-liner that dirties or refuses),
@@ -1487,7 +1487,7 @@ static bool dlx_rig_make_docregen(struct dlx_rig *rig, const char *tag,
      * observable this rig's fixed make-based mechanics give a test
      * without a real dev build. */
     if ((size_t)snprintf(makefile_body, sizeof(makefile_body),
-                         "docs-capability-inventory:\n\t%s\n"
+                         "docs-fixture-generated:\n\t%s\n"
                          "docs-executor-routing:\n\t%s\n"
                          "fix-doc-counts:\n\t%s\n"
                          "build/dev-loop/restart.env:\n"
@@ -1502,7 +1502,7 @@ static bool dlx_rig_make_docregen(struct dlx_rig *rig, const char *tag,
         return false;
     if (!dlx_write_dep(rig->clone, "Makefile", makefile_body))
         return false;
-    if (!dlx_write_dep(rig->clone, "docs/CAPABILITY_INVENTORY.jsonl",
+    if (!dlx_write_dep(rig->clone, "docs/FIXTURE_GENERATED.jsonl",
                        "orig\n") ||
         !dlx_write_dep(rig->clone, "docs/agent/EXECUTOR_HEURISTICS.md",
                        "orig\n") ||
@@ -1642,13 +1642,13 @@ static int test_dev_land_regen_commits_drift(void)
                                      "keep-tip", NULL };
         const char *keep[] = { "branch", "keep-tip", rig.tip, NULL };
         const char *inventory[] = { "show",
-                                    "HEAD:docs/CAPABILITY_INVENTORY.jsonl",
+                                    "HEAD:docs/FIXTURE_GENERATED.jsonl",
                                     NULL };
         const char *remote[] = { "rev-parse", "main", NULL };
         dlx_isolate("regendocs_a");
         ASSERT(dlx_rig_make_docregen(
             &rig, "regendocs_a_rig",
-            "@printf 'regen\\n' >> docs/CAPABILITY_INVENTORY.jsonl", "@:",
+            "@printf 'regen\\n' >> docs/FIXTURE_GENERATED.jsonl", "@:",
             "@:"));
         ASSERT(dlx_git(rig.clone, keep) == 0);
         ASSERT(dlx_sign_arm(rig.clone, "regendocs_a_key"));
@@ -1857,7 +1857,7 @@ static int test_dev_land_regen_middle_failure_names_line_and_stops(void)
         dlx_isolate("regendocs_g");
         ASSERT(dlx_rig_make_docregen(
             &rig, "regendocs_g_rig",
-            "@printf 'regen\\n' >> docs/CAPABILITY_INVENTORY.jsonl",
+            "@printf 'regen\\n' >> docs/FIXTURE_GENERATED.jsonl",
             "@echo 'FAIL: routing table is hollow' >&2; exit 1",
             DLX_MARK("counts")));
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
@@ -1907,7 +1907,7 @@ static int test_dev_land_regen_refreshes_plan_on_identical_rewrite(void)
          * the write still touches the inode's mtime/ctime. */
         ASSERT(dlx_rig_make_docregen(
             &rig, "regendocs_d_rig",
-            "@printf 'orig\\n' > docs/CAPABILITY_INVENTORY.jsonl", "@:",
+            "@printf 'orig\\n' > docs/FIXTURE_GENERATED.jsonl", "@:",
             "@:"));
         setenv("ZCL_LAND_PROOF_STUB", "running", 1);
         setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
@@ -15435,7 +15435,7 @@ static int dlx_case_generated_conflict(void)
         const char *log_sig[] = { "log", "-1", "--pretty=%G?", NULL };
         const char *parent_args[] = { "rev-parse", "HEAD~1", NULL };
         const char *inventory[] = { "show",
-                                    "HEAD:docs/CAPABILITY_INVENTORY.jsonl",
+                                    "HEAD:docs/FIXTURE_GENERATED.jsonl",
                                     NULL };
         const char *map[] = { "show", "HEAD:docs/dev/CODEBASE_MAP.md", NULL };
         const char *mine[] = { "show", "HEAD:mine.txt", NULL };
@@ -15458,7 +15458,7 @@ static int dlx_case_generated_conflict(void)
         ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
         ASSERT(strstr(dlx_str(&c, "detail"),
                       "rebase: regenerated "
-                      "docs/CAPABILITY_INVENTORY.jsonl,"
+                      "docs/FIXTURE_GENERATED.jsonl,"
                       "docs/dev/CODEBASE_MAP.md") != NULL);
         dlx_end(&c);
         dlx_land_wt(landwt, sizeof(landwt));
@@ -15513,7 +15513,7 @@ static int dlx_case_conflict_regens_clean_merged_artifact(void)
         dlx_isolate("regenclean");
         ASSERT(dlx_rig_make_docregen(
             &rig, "regenclean_rig",
-            "@printf 'regen\\n' > docs/CAPABILITY_INVENTORY.jsonl", "@:",
+            "@printf 'regen\\n' > docs/FIXTURE_GENERATED.jsonl", "@:",
             "@printf 'fixed\\n' > docs/dev/CODEBASE_MAP.md"));
         (void)snprintf(mkpath, sizeof(mkpath), "%s/Makefile", rig.clone);
         ASSERT(dlx_slurp(mkpath, mk, sizeof(mk) - 1, &len));
@@ -15525,17 +15525,17 @@ static int dlx_case_conflict_regens_clean_merged_artifact(void)
             "{ echo 'FAIL: doc-count drift detected'; exit 1; }\n",
             mk) < sizeof(mk2));
         ASSERT(dlx_write_dep(rig.clone, "Makefile", mk2));
-        ASSERT(dlx_write_dep(rig.clone, "docs/CAPABILITY_INVENTORY.jsonl",
+        ASSERT(dlx_write_dep(rig.clone, "docs/FIXTURE_GENERATED.jsonl",
                              "base\n"));
         ASSERT(dlx_commit_tree(rig.clone, "gates", base));
         ASSERT(dlx_git(rig.clone, push) == 0);
-        ASSERT(dlx_write_dep(rig.clone, "docs/CAPABILITY_INVENTORY.jsonl",
+        ASSERT(dlx_write_dep(rig.clone, "docs/FIXTURE_GENERATED.jsonl",
                              "mine\n"));
         ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", "bump\n"));
         ASSERT(dlx_commit_tree(rig.clone, "the submitted work", tip));
         ASSERT(dlx_git(rig.clone, branch) == 0);
         ASSERT(dlx_git(rig.clone, reset) == 0);
-        ASSERT(dlx_write_dep(rig.clone, "docs/CAPABILITY_INVENTORY.jsonl",
+        ASSERT(dlx_write_dep(rig.clone, "docs/FIXTURE_GENERATED.jsonl",
                              "theirs\n"));
         ASSERT(dlx_write_dep(rig.clone, "docs/dev/CODEBASE_MAP.md", "bump\n"));
         ASSERT(dlx_commit_tree(rig.clone, "someone else's train", out));
@@ -15590,13 +15590,80 @@ static int dlx_case_rerere_conflict(void)
         ASSERT(dlx_ok(&c));
         ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
         ASSERT(strstr(dlx_str(&c, "detail"),
-                      "rebase: regenerated docs/CAPABILITY_INVENTORY.jsonl,")
+                      "rebase: regenerated docs/FIXTURE_GENERATED.jsonl,")
                != NULL);
         dlx_end(&c);
         dlx_land_wt(landwt, sizeof(landwt));
         ASSERT(dlx_git_out(landwt, get_autoupdate, configured,
                            sizeof(configured)) == 0);
         ASSERT(strcmp(configured, "true") == 0);
+        unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
+        dlx_restore();
+        PASS();
+    }
+_test_next:;
+    dlx_restore();
+    return failures;
+}
+
+/* A row queued before the generated files left git still modifies the old
+ * tracked copy; rebased onto a main that deleted it that is a modify/delete
+ * conflict. The lander must settle it by deleting the path again (never by
+ * re-adding it) and keep the row's own work. */
+static int dlx_case_retired_generated_conflict(void)
+{
+    int failures = 0;
+    TEST("land: a modify/delete conflict on a retired generated file is "
+        "resolved by deleting it, never by re-adding it") {
+        struct dlx_rig rig;
+        struct dlx_call c;
+        char tip[64], basec[64], removed[64], landwt[1300], tree[1024];
+        const char *branch[] = { "branch", "keep-tip", NULL };
+        const char *push[] = { "push", "--quiet", "origin", "HEAD:main",
+                               NULL };
+        const char *reset[] = { "reset", "--quiet", "--hard", basec, NULL };
+        const char *retire[] = { "rm", "-q", "--",
+                                 "docs/CAPABILITY_INVENTORY.jsonl",
+                                 "docs/API_REFERENCE.md", NULL };
+        const char *files[] = { "ls-tree", "-r", "--name-only", "HEAD",
+                                NULL };
+        dlx_isolate("regenretired");
+        ASSERT(dlx_rig_make(&rig, "regenretired_rig"));
+        ASSERT(dlx_write_dep(rig.clone, "docs/CAPABILITY_INVENTORY.jsonl",
+                             "base\n"));
+        ASSERT(dlx_write_dep(rig.clone, "docs/API_REFERENCE.md", "base\n"));
+        ASSERT(dlx_commit_tree(rig.clone, "tracked generated files", basec));
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        ASSERT(dlx_write_dep(rig.clone, "docs/CAPABILITY_INVENTORY.jsonl",
+                             "mine\n"));
+        ASSERT(dlx_write_dep(rig.clone, "docs/API_REFERENCE.md", "mine\n"));
+        ASSERT(dlx_write_dep(rig.clone, "retired_work.txt", "work\n"));
+        ASSERT(dlx_commit_tree(rig.clone, "the submitted work", tip));
+        ASSERT(dlx_git(rig.clone, branch) == 0);
+        ASSERT(dlx_git(rig.clone, reset) == 0);
+        ASSERT(dlx_git(rig.clone, retire) == 0);
+        ASSERT(dlx_commit_tree(rig.clone, "the files leave git", removed));
+        ASSERT(dlx_git(rig.clone, push) == 0);
+        ASSERT(dlx_sign_arm(rig.clone, "regenretired_key"));
+        setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+        setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+        setenv("ZCL_LAND_REGEN_MAKE_STUB", "1", 1);
+        dlx_submit(&c, &rig, tip);
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        dlx_end(&c);
+        dlx_begin(&c, "step");
+        ASSERT(dlx_run(&c));
+        ASSERT(dlx_ok(&c));
+        ASSERT(strcmp(dlx_str(&c, "state"), "started") == 0);
+        ASSERT(strstr(dlx_str(&c, "detail"),
+                      "rebase: dropped retired generated files") != NULL);
+        dlx_end(&c);
+        dlx_land_wt(landwt, sizeof(landwt));
+        ASSERT(dlx_git_out(landwt, files, tree, sizeof(tree)) == 0);
+        ASSERT(strstr(tree, "retired_work.txt") != NULL);
+        ASSERT(strstr(tree, "CAPABILITY_INVENTORY") == NULL);
+        ASSERT(strstr(tree, "API_REFERENCE") == NULL);
         unsetenv("ZCL_LAND_REGEN_MAKE_STUB");
         dlx_restore();
         PASS();
@@ -15671,7 +15738,7 @@ static int dlx_case_mixed_conflict(void)
         ASSERT(strcmp(dlx_str(&c, "dimension"), "rebase") == 0);
         ASSERT(strstr(dlx_str(&c, "detail"), "change.txt") != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"),
-                      "docs/CAPABILITY_INVENTORY.jsonl") != NULL);
+                      "docs/FIXTURE_GENERATED.jsonl") != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"), "docs/dev/CODEBASE_MAP.md") !=
               NULL);
         /* No regeneration note anywhere: nothing was auto-resolved. */
@@ -16873,6 +16940,8 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
      dlx_case_generated_conflict, 2u},
     {"dlx_case_rerere_conflict()",
      dlx_case_rerere_conflict, 2u},
+    {"dlx_case_retired_generated_conflict()",
+     dlx_case_retired_generated_conflict, 2u},
     {"dlx_case_regen_gate()",
      dlx_case_regen_gate, 2u},
     {"dlx_case_conflict_regens_clean_merged_artifact()",
@@ -17098,6 +17167,7 @@ static const char *const g_dlx_original_calls[] = {
     "dlx_case_current_tor()",
     "dlx_case_generated_conflict()",
     "dlx_case_rerere_conflict()",
+    "dlx_case_retired_generated_conflict()",
     "dlx_case_regen_gate()",
     "dlx_case_conflict_regens_clean_merged_artifact()",
     "dlx_case_mixed_conflict()",
@@ -17244,7 +17314,7 @@ static bool dlx_mtip_commit(const char *dir, const char *msg, char out[64])
 static bool dlx_mtip_write2(const char *dir, const char *inv_body,
                             const char *path, const char *body)
 {
-    return dlx_write_dep(dir, "docs/CAPABILITY_INVENTORY.jsonl", inv_body) &&
+    return dlx_write_dep(dir, "docs/FIXTURE_GENERATED.jsonl", inv_body) &&
            dlx_write_dep(dir, path, body);
 }
 
@@ -17337,7 +17407,7 @@ static int test_dev_land_merge_tip_regenerates(void)
         const char *parent[] = { "show", "-s", "--format=%P", "HEAD",
                                  NULL };
         const char *body[] = { "log", "-1", "--format=%B", "HEAD", NULL };
-        const char *inv[] = { "show", "HEAD:docs/CAPABILITY_INVENTORY.jsonl",
+        const char *inv[] = { "show", "HEAD:docs/FIXTURE_GENERATED.jsonl",
                               NULL };
         const char *a_txt[] = { "show", "HEAD:a.txt", NULL };
         const char *b_txt[] = { "show", "HEAD:b.txt", NULL };
@@ -17362,7 +17432,7 @@ static int test_dev_land_merge_tip_regenerates(void)
         ASSERT(dlx_ok(&c));
         ASSERT_STR_EQ(dlx_str(&c, "state"), "started");
         ASSERT(strstr(dlx_str(&c, "detail"),
-                      "rebase: regenerated docs/CAPABILITY_INVENTORY.jsonl")
+                      "rebase: regenerated docs/FIXTURE_GENERATED.jsonl")
                != NULL);
         dlx_end(&c);
         dlx_land_wt(landwt, sizeof(landwt));
@@ -17396,7 +17466,7 @@ static int test_dev_land_merge_tip_regenerates(void)
         /* A replayed candidate's own source tree is not claimed. */
         ASSERT(strstr(out, "Source-Tree:") == NULL);
         ASSERT(dlx_land_log_has("rebase: regenerated "
-                                "docs/CAPABILITY_INVENTORY.jsonl"));
+                                "docs/FIXTURE_GENERATED.jsonl"));
         ASSERT(dlx_land_log_has("linearized merge-bearing candidate "));
         /* And it lands. */
         ASSERT(dlx_git_out(landwt, head, prepared, sizeof(prepared)) == 0);
@@ -17445,7 +17515,7 @@ static int test_dev_land_merge_tip_source_conflict(void)
         ASSERT_STR_EQ(dlx_str(&c, "dimension"), "rebase");
         ASSERT(strstr(dlx_str(&c, "detail"), "b.txt") != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"),
-                      "docs/CAPABILITY_INVENTORY.jsonl") != NULL);
+                      "docs/FIXTURE_GENERATED.jsonl") != NULL);
         ASSERT(strstr(dlx_str(&c, "detail"), "rebase: regenerated") ==
                NULL);
         dlx_end(&c);
@@ -17463,7 +17533,7 @@ _test_next:;
  * the inventory and whose SECOND conflicts on real source: the conflict
  * outcome is unchanged (it names the original unmerged list), and the
  * attempt log now says why the auto-resolve stopped. Row 30's a2 log said
- * only "rebase conflict: docs/CAPABILITY_INVENTORY.jsonl". */
+ * only "rebase conflict: docs/FIXTURE_GENERATED.jsonl". */
 static int test_dev_land_late_conflict_named(void)
 {
     int failures = 0;
@@ -17505,7 +17575,7 @@ static int test_dev_land_late_conflict_named(void)
         ASSERT_STR_EQ(dlx_str(&c, "state"), "conflict");
         ASSERT_STR_EQ(dlx_str(&c, "dimension"), "rebase");
         ASSERT_STR_EQ(dlx_str(&c, "detail"),
-                      "docs/CAPABILITY_INVENTORY.jsonl");
+                      "docs/FIXTURE_GENERATED.jsonl");
         dlx_end(&c);
         ASSERT(dlx_land_log_has("rebase auto-resolve stopped: a replayed "
                                 "commit conflicted outside the regenerated "
@@ -17548,8 +17618,8 @@ static int test_dev_land_regen_generator_fails(void)
         ASSERT_STR_EQ(dlx_str(&c, "state"), "failed");
         ASSERT_STR_EQ(dlx_str(&c, "dimension"), "rebase");
         ASSERT(strstr(dlx_str(&c, "detail"),
-                      "regenerating docs/CAPABILITY_INVENTORY.jsonl "
-                      "(docs-capability-inventory) failed after "
+                      "regenerating docs/FIXTURE_GENERATED.jsonl "
+                      "(docs-fixture-generated) failed after "
                       "auto-resolving the rebase") != NULL);
         dlx_end(&c);
         ASSERT(dlx_git_out(rig.bare, remote, out, sizeof(out)) == 0);
@@ -17947,11 +18017,11 @@ static int test_dev_land_queued_regen_only_kept(void)
         char b[64], m1[64], detail[512];
         dlx_isolate("qp_regen");
         ASSERT(dlx_rig_make(&rig, "qp_regen_rig"));
-        ASSERT(dlx_qp_branch(&rig, "qp-b", "docs/CAPABILITY_INVENTORY.jsonl",
+        ASSERT(dlx_qp_branch(&rig, "qp-b", "docs/FIXTURE_GENERATED.jsonl",
                              "mine\n", "b.txt", "mine\n", b));
         ASSERT(dlx_qp_start(&rig, b));
         ASSERT(dlx_qp_beat("started", 1, 0));
-        ASSERT(dlx_qp_push_main(&rig, "docs/CAPABILITY_INVENTORY.jsonl",
+        ASSERT(dlx_qp_push_main(&rig, "docs/FIXTURE_GENERATED.jsonl",
                                 "theirs\n", m1));
         ASSERT(dlx_qp_beat("rebased", -1, -1));
         /* Checked against the new main, and NOT ended. */

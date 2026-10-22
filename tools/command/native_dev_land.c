@@ -4836,8 +4836,7 @@ static void dl_beat(const struct dl_row *row, const char *beat, int64_t started)
 
 /* ── rebase conflicts on the artifacts every train regenerates ──────────
  *
- * docs/CAPABILITY_INVENTORY.jsonl and the
- * <!-- DOC-COUNTS --> block of docs/dev/CODEBASE_MAP.md are GENERATED from the
+ * The <!-- DOC-COUNTS --> block of docs/dev/CODEBASE_MAP.md is GENERATED from the
  * code, and a train that lands regenerates them. Two tips landing in the
  * same window therefore collide on those files by construction, and a
  * textual merge of two generated files settles nothing: neither side is
@@ -4859,8 +4858,14 @@ struct dl_regen_artifact {
 };
 
 static const struct dl_regen_artifact DL_REGEN_ARTIFACTS[] = {
-    { "docs/CAPABILITY_INVENTORY.jsonl", "docs-capability-inventory",
-      "capability inventory" },
+#if defined(ZCL_TESTING)
+    /* The tracked fully-generated files are gone (the capability inventory
+     * and the API reference are build output under build/gen), so the
+     * take-upstream-and-regenerate path has no production row. The test
+     * build keeps one synthetic artifact so that path stays exercised. */
+    { "docs/FIXTURE_GENERATED.jsonl", "docs-fixture-generated",
+      "fixture artifact" },
+#endif
     /* No target regenerates this page's body; `fix-doc-counts` (Makefile,
      * next to check-doc-counts) rewrites the machine-readable DOC-COUNTS
      * block from the code-measured values. Recovery normalizes that block
@@ -4930,6 +4935,26 @@ static bool dl_regen_gate_stub_fails(void)
 
 /* The table index of `path`, or -1 when nothing in the closed table
  * matches it. */
+/* Generated files that left git: both are build output under build/gen now.
+ * A row queued before that change may still modify the old tracked copy, and
+ * rebasing it onto a main that deleted the file is a modify/delete conflict.
+ * The only correct resolution is to delete the path again, never to re-add
+ * it: there is nothing to regenerate or merge, and an add would resurrect a
+ * file the tree no longer tracks. */
+static const char *const DL_REGEN_RETIRED[] = {
+    "docs/CAPABILITY_INVENTORY.jsonl",
+    "docs/API_REFERENCE.md", // error-doc-ref-ok: a retired git path, not a document reference
+};
+
+static bool dl_regen_retired(const char *path)
+{
+    for (size_t i = 0; i < sizeof(DL_REGEN_RETIRED) / sizeof(DL_REGEN_RETIRED[0]); i++) {
+        if (strcmp(path, DL_REGEN_RETIRED[i]) == 0)
+            return true;
+    }
+    return false;
+}
+
 static int dl_regen_index(const char *path)
 {
     for (size_t i = 0; i < DL_REGEN_N; i++) {
@@ -4961,9 +4986,10 @@ static bool dl_regen_only(const char *paths, bool *seen)
         if (!line[0])
             continue;
         idx = dl_regen_index(line);
-        if (idx < 0)
+        if (idx < 0 && !dl_regen_retired(line))
             return false;
-        seen[idx] = true;
+        if (idx >= 0)
+            seen[idx] = true;
         any = true;
     }
     return any;
@@ -5103,6 +5129,12 @@ static bool dl_regen_resolve(const struct dl_dirs *d, const char *paths)
             line[--n] = '\0';
         if (!line[0])
             continue;
+        if (dl_regen_retired(line)) {
+            const char *drop[] = { "rm", "-q", "-f", "--", line, NULL };
+            if (dl_git(d->wt, drop, NULL, 0, DL_GIT_TIMEOUT_MS) != 0)
+                return false;
+            continue;
+        }
         bool resolved = strcmp(line, "docs/dev/CODEBASE_MAP.md") == 0
             ? dl_counts_merge(d) : dl_git(d->wt, ours, NULL, 0, DL_GIT_TIMEOUT_MS) == 0;
         if (!resolved ||
@@ -5197,6 +5229,13 @@ static void dl_regen_note(const bool *seen, char *out, size_t cap)
     if (!out || cap == 0)
         return;
     out[0] = '\0';
+    bool any = false;
+    for (size_t i = 0; i < DL_REGEN_N; i++)
+        any = any || seen[i];
+    if (!any) {
+        (void)snprintf(out, cap, "rebase: dropped retired generated files");
+        return;
+    }
     w = snprintf(out, cap, "rebase: regenerated");
     if (w < 0 || (size_t)w >= cap) {
         out[0] = '\0';
@@ -5609,11 +5648,11 @@ static bool dl_linearize(const struct dl_dirs *d, struct dl_row *row,
 /* A tip main has moved past is rebased, and a plain `git rebase` replays
  * each non-merge commit one at a time, DISCARDING the conflict resolutions
  * the tip's own merges of main recorded. A long-lived candidate that merged
- * main into itself (resolving the generated inventory and real source by
+ * main into itself (resolving a generated file and real source by
  * hand) therefore re-conflicts on a later replayed commit, on source it had
  * already resolved; the generated-artifact auto-resolve correctly declines
  * that, and the row ends as a conflict nobody needed (land queue row 30,
- * docs/CAPABILITY_INVENTORY.jsonl). Cut the tip's exact tree as ONE commit
+ * the then-tracked capability inventory). Cut the tip's exact tree as ONE commit
  * on merge-base(main, tip) first -- the same tree-preserving step and the
  * same signer an integrated tip takes above -- so the rebase replays the
  * candidate's net change once and conflicts only where that net change and

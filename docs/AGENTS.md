@@ -6,8 +6,8 @@ Manuals and plans. Index: `README.md`. Procedure: `dev/DEVELOPING.md` (open one 
 
 Generated, never hand-edit (regenerate with the canonical target):
 - `API_REFERENCE.md` from `API_REFERENCE.md.in` and the command `.def` files: `make docs-api-reference` writes `build/gen/API_REFERENCE.md`; it is not tracked.
-- `CAPABILITY_INVENTORY.jsonl`: `make docs-capability-inventory`.
-Both are excluded from search by the root `.ignore`; open them by path.
+- `CAPABILITY_INVENTORY.jsonl`: `make docs-capability-inventory` writes `build/gen/CAPABILITY_INVENTORY.jsonl`; it is not tracked.
+Both are build output under `build/gen`; open them by path.
 
 Rules:
 - A prose assertion about code carries a claim marker (syntax in `docs/DEFENSIVE_CODING.md`); `tools/lint/check_doc_claims.sh` fails when it stops holding. Move the marker with the text.

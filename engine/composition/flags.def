@@ -223,7 +223,7 @@ Z23_FLAG("ZCL_BIN", "env_build", "-", "-",
 Z23_FLAG("ZCL_BINARY_FALLBACK_THRESHOLD", "env_runtime", "-", "-",
           "undocumented; first use tools/zcl-nodectl.c:auto")
 Z23_FLAG("ZCL_BINARY_SLOTS_DIR", "env_runtime", "-", "-",
-          "first use tools/zcl-nodectl.c:auto; documented at docs/CAPABILITY_INVENTORY.jsonl:1158: {'record':'capability','header':'engine/services/include/services/binary_ab_fallback.h'...")
+          "first use tools/zcl-nodectl.c:auto; documented in the generated capability inventory (make docs-capability-inventory; z23 code have <name>)")
 Z23_FLAG("ZCL_BIN_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/arena_demo.sh:auto")
 Z23_FLAG("ZCL_BIP_PAGE_CACHE_KIB", "env_runtime", "-", "-",
@@ -817,7 +817,7 @@ Z23_FLAG("ZCL_DEV_WATCH_STAGE_COMMAND", "env_build", "-", "-",
 Z23_FLAG("ZCL_DEV_WATCH_STATE_DIR", "env_build", "-", "-",
           "undocumented; first use tools/dev/agent-dev-status.sh:auto")
 Z23_FLAG("ZCL_DISABLE_BOOT_DB_MAINT", "env_runtime", "-", "-",
-          "first use engine/services/src/db_maintenance.c:auto; documented at docs/CAPABILITY_INVENTORY.jsonl:1200: {'record':'capability','header':'engine/services/include/services/db_maintenance.h','in...")
+          "first use engine/services/src/db_maintenance.c:auto; documented in the generated capability inventory (make docs-capability-inventory; z23 code have <name>)")
 Z23_FLAG("ZCL_DISABLE_SHA3_WINDOW_TRIPWIRE", "env_runtime", "-", "-",
           "undocumented; first use engine/jobs/src/tip_finalize_post_step.c:auto")
 Z23_FLAG("ZCL_DISABLE_UTXO_LADDER_TRIPWIRE", "env_runtime", "-", "-",
@@ -863,7 +863,7 @@ Z23_FLAG("ZCL_DUMPER_BLOCKING_SCAN_ROOTS", "env_build", "-", "-",
 Z23_FLAG("ZCL_ED25519_BATCH_BENCH", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_zid.c:auto")
 Z23_FLAG("ZCL_ENABLE_BIP37", "env_runtime", "-", "-",
-          "first use core/modules/bloom/src/bloom.c:auto; documented at docs/CAPABILITY_INVENTORY.jsonl:502: {'record':'capability','header':'core/modules/bloom/include/bloom/bloom.h','include_tok...")
+          "first use core/modules/bloom/src/bloom.c:auto; documented in the generated capability inventory (make docs-capability-inventory; z23 code have <name>)")
 Z23_FLAG("ZCL_ENGINE_NO_THINKING", "env_runtime", "-", "-",
           "undocumented; first use engine/modules/engine/src/engine_wire_request.c:auto")
 Z23_FLAG("ZCL_ENGINE_UNIT_BIN", "env_runtime", "-", "-",
@@ -1565,7 +1565,7 @@ Z23_FLAG("ZCL_MSC_PRODUCER", "env_test", "-", "-",
 Z23_FLAG("ZCL_MSC_WAL_DIR", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_mint_skip_crypto.c:auto")
 Z23_FLAG("ZCL_NAMES_ONION_GATEWAY", "env_runtime", "-", "-",
-          "first use engine/controllers/src/name_gateway_controller.c:auto; documented at docs/CAPABILITY_INVENTORY.jsonl:877: {'record':'capability','header':'engine/controllers/include/controllers/name_gateway_co...")
+          "first use engine/controllers/src/name_gateway_controller.c:auto; documented in the generated capability inventory (make docs-capability-inventory; z23 code have <name>)")
 Z23_FLAG("ZCL_NAMES_PUBLIC_REGISTER", "env_runtime", "-", "-",
           "undocumented; first use contexts/explorer/controllers/src/name_site_controller.c:auto")
 Z23_FLAG("ZCL_ND2_A_BASE", "env_build", "39040", "-",
@@ -1728,7 +1728,7 @@ Z23_FLAG("ZCL_PARITY_HEIGHT", "env_build", "-", "-",
 Z23_FLAG("ZCL_PARITY_JUDGE_NOW", "env_build", "-", "-",
           "undocumented; first use tools/scripts/tip_agreement_judge.sh:auto")
 Z23_FLAG("ZCL_PARITY_LEDGER_DIR", "env_build", "-", "-",
-          "first use tools/scripts/tip_agreement_probe.sh:auto; documented at docs/CAPABILITY_INVENTORY.jsonl:1278: {'record':'capability','header':'engine/services/include/services/tip_agreement_watch.h...")
+          "first use tools/scripts/tip_agreement_probe.sh:auto; documented in the generated capability inventory (make docs-capability-inventory; z23 code have <name>)")
 Z23_FLAG("ZCL_PARITY_MIN_DISTINCT_PEERS", "env_build", "2", "-",
           "undocumented; first use tools/scripts/tip_agreement_probe.sh:auto")
 Z23_FLAG("ZCL_PARITY_NODE_BIN", "env_build", "-", "-",
@@ -1848,7 +1848,7 @@ Z23_FLAG("ZCL_PROMOTE_REPLAY_TIMEOUT", "env_build", "5", "-",
 Z23_FLAG("ZCL_PROMOTE_STOCK_BUILD_DIR", "env_build", "-", "-",
           "undocumented; first use tools/scripts/promote_fuzz_artifacts.sh:auto")
 Z23_FLAG("ZCL_PROMOTION_DUTY_PCT", "env_runtime", "-", "-",
-          "first use engine/services/src/sovereign_promotion_service.c:auto; documented at docs/CAPABILITY_INVENTORY.jsonl:1260: {'record':'capability','header':'engine/services/include/services/sovereign_promotion_s...")
+          "first use engine/services/src/sovereign_promotion_service.c:auto; documented in the generated capability inventory (make docs-capability-inventory; z23 code have <name>)")
 Z23_FLAG("ZCL_PROMPT_SECTIONS_DEF", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_def_parsers.c:auto")
 Z23_FLAG("ZCL_PROMPT_TEMPLATE_ROW_FLOOR", "env_build", "8", "-",
@@ -1862,7 +1862,7 @@ Z23_FLAG("ZCL_PROOF_RAM_RESERVE_BYTES", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_PROOF_TIMEOUT_MS", "env_runtime", "-", "-",
           "undocumented; first use tools/dev/dev_proof_budget.c:auto")
 Z23_FLAG("ZCL_PRUNE_KEEP_BLOCKS", "env_runtime", "-", "-",
-          "first use engine/services/src/block_pruning_service.c:auto; documented at docs/CAPABILITY_INVENTORY.jsonl:1164: {'record':'capability','header':'engine/services/include/services/block_pruning_service...")
+          "first use engine/services/src/block_pruning_service.c:auto; documented in the generated capability inventory (make docs-capability-inventory; z23 code have <name>)")
 Z23_FLAG("ZCL_PSC_WORKERS", "env_runtime", "-", "-",
           "undocumented; first use engine/jobs/src/psc_block_source.c:auto")
 Z23_FLAG("ZCL_PUBLIC_BASE", "env_build", "https://zclnet.net", "-",
@@ -1880,7 +1880,7 @@ Z23_FLAG("ZCL_PV_PARALLEL_MIN_SHIELDED", "env_runtime", "-", "-",
 Z23_FLAG("ZCL_PV_TRACE", "env_runtime", "-", "-",
           "undocumented; first use engine/jobs/src/proof_validate_trace.c:auto")
 Z23_FLAG("ZCL_PV_WORKERS", "env_runtime", "-", "-",
-          "first use engine/jobs/src/pv_lookahead.c:auto; documented at docs/CAPABILITY_INVENTORY.jsonl:927: {'record':'capability','header':'engine/jobs/include/jobs/pv_lookahead.h','include_toke...")
+          "first use engine/jobs/src/pv_lookahead.c:auto; documented in the generated capability inventory (make docs-capability-inventory; z23 code have <name>)")
 Z23_FLAG("ZCL_QUALITY_LOG_KEEP", "env_build", "8", "-",
           "first use tools/scripts/quality_log_retention.sh:auto; documented at docs/agent/AGENT_API.md:1414: with ZCL_QUALITY_LOG_KEEP / ZCL_QUALITY_LOG_MAX_BYTES.")
 Z23_FLAG("ZCL_QUALITY_LOG_MAX_BYTES", "env_build", "1073741824", "-",

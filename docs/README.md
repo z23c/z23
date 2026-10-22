@@ -174,12 +174,13 @@ from a hash, signature, test, or reproduction receipt.
 - `API_REFERENCE.md.in` — editorial template of the command catalog. The
   catalog itself is generated, never committed: `make docs-api-reference`
   writes `build/gen/API_REFERENCE.md`; edit the `.def` sources or the template.
-- [`CAPABILITY_INVENTORY.jsonl`](CAPABILITY_INVENTORY.jsonl) — generated
+- `CAPABILITY_INVENTORY.jsonl` — generated, never committed: `make
+  docs-capability-inventory` writes `build/gen/CAPABILITY_INVENTORY.jsonl`. It is the
   public-header capability map: exposed symbols, verified direct-use counts,
   registered-test reachability, ranked duplicate candidates, and untested
   declared invariants. Scanner ambiguities are named `UNPROVEN` records rather
-  than silently assigned. Regenerate it with `make docs-capability-inventory`;
-  never hand-edit it.
+  than silently assigned. Regenerate it with
+  `make docs-capability-inventory`; it is build output, never hand-edited.
 - [`BUILD.md`](dev/BUILD.md) — vendored dependencies, profiles, and reproducibility.
 - [`AI_SAFETY_GATES.md`](agent/AI_SAFETY_GATES.md) — claim and evidence discipline.
 - [`SECURITY_AND_INTEGRITY.md`](node/SECURITY_AND_INTEGRITY.md) — project security

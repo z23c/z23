@@ -64,7 +64,7 @@ const char *kpi_verdict_label(enum kpi_verdict v)
  */
 static const struct kpi_metric_def k_metrics[] = {
     { "capabilities", KPI_DIRECTION_NEUTRAL,
-      "docs/CAPABILITY_INVENTORY.jsonl", "z23 code have <name>" },
+      "build/gen/CAPABILITY_INVENTORY.jsonl", "z23 code have <name>" },
     { "cmd.help_pct", KPI_DIRECTION_HIGHER_IS_BETTER,
       "engine/composition/commands/catalog.def", "z23 discover describe <path>" },
     { "cmd.leaves", KPI_DIRECTION_NEUTRAL,
@@ -85,14 +85,14 @@ static const struct kpi_metric_def k_metrics[] = {
       "tools/lint/orphan_placement_baseline.txt",
       "cat tools/lint/orphan_placement_baseline.txt" },
     { "duplicate_candidates", KPI_DIRECTION_LOWER_IS_BETTER,
-      "docs/CAPABILITY_INVENTORY.jsonl", "z23 code have <name>" },
+      "build/gen/CAPABILITY_INVENTORY.jsonl", "z23 code have <name>" },
     { "files_owned", KPI_DIRECTION_NEUTRAL, "", "z23 code territory" },
     { "lint_gates", KPI_DIRECTION_NEUTRAL, "Makefile", "make lint" },
     { "territories", KPI_DIRECTION_NEUTRAL, "", "z23 code territory" },
     { "test_groups", KPI_DIRECTION_NEUTRAL,
       "tools/dev/test_group_catalog.def", "build/bin/test_parallel --list" },
     { "untested_invariants", KPI_DIRECTION_LOWER_IS_BETTER,
-      "docs/CAPABILITY_INVENTORY.jsonl", "z23 code general" },
+      "build/gen/CAPABILITY_INVENTORY.jsonl", "z23 code general" },
 };
 
 const struct kpi_metric_def *kpi_metric_defs(size_t *count)

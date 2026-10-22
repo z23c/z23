@@ -28,7 +28,7 @@ static bool cg_render_static(struct zcl_command_reply *reply)
         json_push_kv_str(&reply->data, "proof_command", CG_PROOF_COMMAND) &&
         json_push_kv_str(&reply->data, "lint_command", "make lint-fast") &&
         json_push_kv_str(&reply->data, "capability_inventory",
-                         "docs/CAPABILITY_INVENTORY.jsonl") &&
+                         "build/gen/CAPABILITY_INVENTORY.jsonl") &&
         json_push_kv_str(&reply->data, "inventory_regenerate",
                          "make docs-capability-inventory") &&
         json_push_kv_str(&reply->data, "receipt_status_command",

@@ -5646,9 +5646,6 @@ struct dp_docs_fresh_artifact {
 };
 
 static const struct dp_docs_fresh_artifact DP_DOCS_FRESH[] = {
-    { "docs/CAPABILITY_INVENTORY.jsonl",
-      "tools/lint/check_capability_inventory_generated.sh",
-      "make docs-capability-inventory", "build/bin/gen_capability_inventory" },
     { "docs/agent/EXECUTOR_HEURISTICS.md",
       "build/bin/z23-lint",
       "make docs-executor-routing", "check-fleet-facts" },
@@ -6869,11 +6866,6 @@ bool zcl_dev_proof_test_needs_argv(const char *jobs, const char *groups,
                                  targets);
 }
 #endif
-static bool inventory_output_only(const char *const *files, size_t count)
-{
-    return count == 1 &&
-           strcmp(files[0], "docs/CAPABILITY_INVENTORY.jsonl") == 0;
-}
 
 /* Record the test-selection shape beside the dimension logs. "universal" is
  * the whole catalog, chosen because the plan's closure was capacity-bounded
@@ -7148,7 +7140,7 @@ bool zcl_dev_proof_test_changed_set_selector(
         return false;
     struct zcl_devloop_plan plan;
     if (!zcl_devloop_plan_files(set->files, set->count, &plan)) return false;
-    bool inventory_only = inventory_output_only(set->files, set->count);
+    bool inventory_only = false; /* the inventory is untracked build output */
     (void)dp_changed_set_widen(set, &plan, &inventory_only);
     *universal_out = plan.closure_universal;
     return build_test_selector(&plan, root, inventory_only, out, out_size,
@@ -10405,7 +10397,7 @@ static bool proof_worker_body(const struct proof_paths *paths,
     w.warm = warm;
     w.changed = changed;
     w.docs = docs;
-    w.inventory_only = inventory_output_only(changed->files, changed->count);
+    w.inventory_only = false; /* the inventory is untracked build output */
     w.warm_compile_mode = "skipped";
     if (!dp_worker_seal_source(&w, why, why_len)) return false;
     /* The loaded producer owns selection and impact policy. Admitting a

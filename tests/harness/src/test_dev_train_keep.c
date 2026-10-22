@@ -162,7 +162,6 @@ static const char *const dtkt_makefile =
     "check-cyclomatic-complexity:\n\t@true\n\n"
     "t-fast:\n\t@true\n\n"
     "lint:\n\t@true\n\n"
-    "docs-capability-inventory:\n\t@true\n\n"
     "docs-executor-routing:\n\t@true\n\n"
     "fix-doc-counts:\n\t@true\n";
 

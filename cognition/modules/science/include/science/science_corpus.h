@@ -30,7 +30,7 @@
  * proven: no artifact in this tree attributes proof at line granularity, and
  * inventing one by, say, crediting every line of a file with one reached
  * symbol in it would be a fabrication dressed as a measurement. What the tree
- * does measure, in docs/CAPABILITY_INVENTORY.jsonl, is per-PUBLIC-SYMBOL
+ * does measure, in the generated capability inventory (build/gen), is per-PUBLIC-SYMBOL
  * reachability from a registered test root. That is the proven fraction this
  * report gives, over that denominator, said out loud. The line-level proven
  * fraction is reported as unmeasured, and it stays unmeasured until something

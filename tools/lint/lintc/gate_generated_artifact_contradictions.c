@@ -30,13 +30,9 @@
  * - Env: ZCL_ARTIFACT_CAPABILITY_INVENTORY and ZCL_ARTIFACT_ARM_BASELINE
  *   use ${VAR:-} semantics — unset OR empty reads as absent, so getenv
  *   plus an empty-string test, not env_or.
- * - Discovery: the git grep -l candidate list runs natively over
- *   lint_git_index_foreach (index order = git grep's tracked-file
- *   order). The shell ignored git's exit status (mapfile over a process
- *   substitution), so the reader's silent rc=2 failure mode is ignored
- *   here too; a partial enumeration degrades to the candidate-count
- *   UNPROVEN exactly as a partial git grep listing did. Only the count
- *   and (when exactly 1) the single path are ever used.
+ * - Source: the inventory is generated build output at
+ *   build/gen/CAPABILITY_INVENTORY.jsonl (make docs-capability-inventory);
+ *   no tracked copy exists to discover, and an absent file is UNPROVEN.
  * - The arm path derivation `sed -n '1s/.*"consumes":\[{"path":"...' runs
  *   only when ARM is absent AND [ -f "$CAP" ] (stat, S_ISREG, following
  *   symlinks, exactly the test builtin). An absent CAP or an unmatched
@@ -127,57 +123,10 @@ static const char k_gac_gate[] = "check-generated-artifact-contradictions";
 static char g_gac_cap[4096];
 static char g_gac_arm[4096];
 
-/* ── discovery ─────────────────────────────────────────────────────────── */
-
-static int gac_disc_cb(const char *path, int stage, void *ctx)
-{
-    (void)stage;
-    int *count = ctx;
-    if (!gacs_discover_ok(path))
-        return 0;
-    if (*count == 0
-        && ovf(snprintf(g_gac_cap, sizeof g_gac_cap, "%s", path),
-               sizeof g_gac_cap))
-        return 2;
-    (*count)++;
-    return 0;
-}
-
-/* A mandatory index extension ('link', 'sdir'): reading past it could
- * silently yield a PARTIAL candidate list, so it is named and refused
- * here rather than falling through to the exactly-one-candidate floor
- * below with an incomplete scan — the gate_supervisor_domain.c
- * sd_oracle_badext precedent, same message shape. */
-static int gac_badext_report(const char *badext)
-{
-    fprintf(stderr, "[%s] UNPROVEN — the git index carries a mandatory\n"
-            "  extension ('%s') this native reader does not interpret;\n"
-            "  reading past it could silently yield a PARTIAL file list\n"
-            "  (a split index's shared entries, a sparse directory's\n"
-            "  collapsed trees). Refusing to grade. Re-create the index\n"
-            "  without split-index/sparse extensions, or teach\n"
-            "  lint_git_index_foreach the extension first.\n",
-            k_gac_gate, badext);
-    return 2;
-}
-
-/* git grep -l ... | first-line filter, counted: exactly one candidate or
- * the discovery UNPROVEN. A non-badext reader failure is still ignored,
- * as the shell ignored git's — a genuinely partial-but-nonzero non-badext
- * scan is still caught by the exactly-one-candidate floor below. */
-static int gac_discover(void)
-{
-    int count = 0;
-    char badext[5] = "";
-    (void)lint_git_index_foreach(gac_disc_cb, &count, badext);
-    if (badext[0])
-        return gac_badext_report(badext);
-    if (count == 1)
-        return 0;
-    fprintf(stderr, "[%s] UNPROVEN — capability artifact discovery found "
-            "%d candidates\n", k_gac_gate, count);
-    return 2;
-}
+/* The capability inventory is build output, never tracked: `make
+ * docs-capability-inventory` writes it here, and ZCL_ARTIFACT_CAPABILITY_INVENTORY
+ * overrides the path for the selftest probes. */
+static const char k_gac_default_cap[] = "build/gen/CAPABILITY_INVENTORY.jsonl";
 
 /* ── resolution (CAP and ARM) ──────────────────────────────────────────── */
 
@@ -195,9 +144,14 @@ static int gac_resolve(void)
                 sizeof g_gac_cap))
             return 2;
     } else {
-        int rc = gac_discover();
-        if (rc)
-            return rc;
+        if (!gac_is_file(k_gac_default_cap)) {
+            fprintf(stderr, "[%s] UNPROVEN — the capability inventory is "
+                    "absent: %s. It is generated, not tracked; run "
+                    "`make docs-capability-inventory` first.\n",
+                    k_gac_gate, k_gac_default_cap);
+            return 2;
+        }
+        (void)snprintf(g_gac_cap, sizeof g_gac_cap, "%s", k_gac_default_cap);
     }
     const char *arm = getenv("ZCL_ARTIFACT_ARM_BASELINE");
     if (arm && *arm) {

@@ -88,13 +88,21 @@ static bool write_pkg(const char *dir, const char *pkg, const char *name)
     return spill(path, body);
 }
 
+/* All three fragments are present; an absent inventory must say which
+ * command produces it, not only that its numbers are unavailable. */
+static bool eco_has_all3(const char *text, const char *a, const char *b,
+                         const char *c)
+{
+    return strstr(text, a) && strstr(text, b) && strstr(text, c);
+}
+
 static bool build_fixture(const char *dir, bool with_inventory)
 {
     if (!mkdir_p(dir, "engine/src") ||
         !mkdir_p(dir, "contexts/wallet/src") ||
         !mkdir_p(dir, "contexts/explorer") ||
         !mkdir_p(dir, "tests/harness/src") ||
-        !mkdir_p(dir, "docs"))
+        !mkdir_p(dir, "docs") || !mkdir_p(dir, "build/gen"))
         return false;
     char path[1024];
     (void)snprintf(path, sizeof(path), "%s/engine/src/node.c", dir);
@@ -111,7 +119,7 @@ static bool build_fixture(const char *dir, bool with_inventory)
         return false;
     if (!with_inventory)
         return true;
-    (void)snprintf(path, sizeof(path), "%s/docs/CAPABILITY_INVENTORY.jsonl",
+    (void)snprintf(path, sizeof(path), "%s/build/gen/CAPABILITY_INVENTORY.jsonl",
                    dir);
     return spill(path,
                  "{\"record\":\"inventory\",\"files_scanned\":3,"
@@ -158,7 +166,7 @@ static bool build_growth_repo(const char *dir)
     (void)snprintf(src, sizeof(src), "%s/engine/src/a.c", dir);
     (void)snprintf(test, sizeof(test), "%s/tests/harness/src/t.c", dir);
     if (!mkdir_p(dir, "engine/src") || !mkdir_p(dir, "tests/harness/src") ||
-        !mkdir_p(dir, "docs"))
+        !mkdir_p(dir, "docs") || !mkdir_p(dir, "build/gen"))
         return false;
     return spill(src, "a\nb\n") && spill(test, "x\ny\n") &&
         eco_git(dir, init,
@@ -329,8 +337,9 @@ int test_ecosystem(void)
                   !bare.corpus.inventory_present &&
                   science_ecosystem_format_text(&bare, text, sizeof(text),
                                                 &text_len) &&
-                  strstr(text, "capabilities: unavailable") &&
-                  strstr(text, "duplicates: unavailable") &&
+                  eco_has_all3(text, "capabilities: unavailable",
+                               "duplicates: unavailable",
+                               "make docs-capability-inventory") &&
                   !strstr(text, "capabilities: 0") &&
                   !strstr(text, "duplicates: 0"));
 

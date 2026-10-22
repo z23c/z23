@@ -2,10 +2,9 @@
  *
  * Gates: check-generated-artifact-contradictions
  * Second file of the check-generated-artifact-contradictions family (the
- * 700-line family ceiling split): the native scanners — the git grep -l
- * discovery file test, the sed line-1 reads and BRE extractions, the
+ * 700-line family ceiling split): the native scanners — the sed line-1 reads and BRE extractions, the
  * arm-baseline row set, and the capability-inventory record parse. The
- * gate body (discovery, the verdict chain, the entry) and the family's
+ * gate body (the verdict chain, the entry) and the family's
  * parity notes live in gate_generated_artifact_contradictions.c; the
  * --selftest probes live in
  * gate_generated_artifact_contradictions_workers.c. Shared structs and
@@ -20,24 +19,8 @@
  * so the greedy leading .* takes the LAST admissible literal occurrence,
  * as sed did.
  *
- * - git grep -l '"artifact_id":"zcl.code_capability_inventory.v1"' -- is
- *   gacs_file_listed over the native git-index enumeration
- *   (lint_git_index_foreach — index order, byte-sorted by path then
- *   ascending stage, exactly the order git grep reports tracked worktree
- *   files). The pattern is a BRE, so its dots match any byte, here as
- *   there. A file is listed when at least one line matches; git matches
- *   on raw line bytes, so a NUL-bearing line is tested segment by segment
- *   (the pattern holds no NUL, making segment-wise matching exact). An
- *   unreadable, missing, or non-regular index entry is skipped silently —
- *   the shell sent git's diagnostics to /dev/null and ignored the exit
- *   status, so such an entry simply never became a candidate. A
- *   repository submodule gitlink is a directory in the worktree and is
- *   skipped on both sides.
  * - sed -n '1p' is gacs_first_line: the first line without its newline,
- *   an empty string for an empty file. In the DISCOVERY loop the shell's
- *   read ran inside a process-substitution subshell whose failure could
- *   not reach the parent, so a vanished candidate reads as
- *   not-a-candidate here too; in the later meta/consumes reads an open
+ *   an empty string for an empty file. In the meta/consumes reads an open
  *   failure is sed's "can't read" environment class (set -e exit 2 with
  *   sed's own text) and maps to die() — an environment defect, never a
  *   gate verdict.
@@ -81,7 +64,7 @@
 
 enum { GACS_MAXROW = 8192, GACS_POOL = 1 << 20, GACS_FIRST = 1 << 16 };
 
-enum { RE_GG, RE_CONS, RE_MULTI, RE_ARM, RE_UN, RE_DPATH, RE_SYM, RE_N };
+enum { RE_CONS, RE_MULTI, RE_ARM, RE_UN, RE_DPATH, RE_SYM, RE_N };
 
 struct gac_arm {
     const char *h, *p, *s, *ev, *sc, *ve;
@@ -105,10 +88,6 @@ static int g_gacs_nun;
 static struct gac_triple g_gacs_tri[GACS_MAXROW];
 static int g_gacs_ntri;
 
-static const char k_gacs_schema[] =
-    "\"generated_artifact_schema\":\"zcl.generated_artifact.v1\"";
-static const char k_gacs_artid[] =
-    "\"artifact_id\":\"zcl.code_capability_inventory.v1\"";
 static const char k_gacs_scope_pair[] =
     "\"multi_arm_definition\":true,"
     "\"definition_scope\":\"preprocessor_arm_UNPROVEN\"";
@@ -155,37 +134,6 @@ static int gacs_ptr_cmp(const void *a, const void *b)
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
-/* ── git grep -l, per file ─────────────────────────────────────────────── */
-
-static int gacs_file_listed(const char *path)
-{
-    struct stat st;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
-        return 0;
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 0;
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t n;
-    int found = 0;
-    while (!found && (n = getline(&line, &cap, f)) >= 0) {
-        if (n > 0 && line[n - 1] == '\n')
-            line[--n] = '\0';
-        if (memchr(line, '\0', (size_t)n)) {
-            const char *end = line + n;
-            for (const char *seg = line; !found && seg < end;
-                 seg += strlen(seg) + 1)
-                found = regexec(&g_gacs_re[RE_GG], seg, 0, NULL, 0) == 0;
-        } else {
-            found = regexec(&g_gacs_re[RE_GG], line, 0, NULL, 0) == 0;
-        }
-    }
-    free(line);
-    (void)fclose(f);
-    return found;
-}
-
 /* ── sed -n '1p' ───────────────────────────────────────────────────────── */
 
 static int gacs_first_line(const char *path)
@@ -213,19 +161,6 @@ static int gacs_first_line(const char *path)
     if (fclose(f) != 0 && rc == 0)
         rc = die("z23-lint: fclose failed: %s\n", path);
     return rc;
-}
-
-/* Discovery candidate: listed by the git grep, then both fixed strings on
- * its first line. A first-line read failure is swallowed (the shell's
- * read lived in a process-substitution subshell whose status was lost). */
-int gacs_discover_ok(const char *path)
-{
-    if (!gacs_file_listed(path))
-        return 0;
-    if (gacs_first_line(path) != 0)
-        return 0;
-    return strstr(g_gacs_first, k_gacs_schema) != NULL
-        && strstr(g_gacs_first, k_gacs_artid) != NULL;
 }
 
 /* The line-1 consumes substitution (greedy leading .* , the [^"] capture
@@ -566,7 +501,6 @@ const struct gac_untested *gacs_untested_at(int i)
 int gacs_comp(void)
 {
     static const char *const pats[RE_N] = {
-        "\"artifact_id\":\"zcl.code_capability_inventory.v1\"",
         ".*\"consumes\":\\[{\"path\":\"\\([^\"]*\\)\".*",
         "^{\"record\":\"multi_arm_symbol\",\"header\":\"\\([^\"]*\\)\","
         "\"symbol\":\"\\([^\"]*\\)\",\"source_path\":\"\\([^\"]*\\)\","

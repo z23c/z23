@@ -240,7 +240,7 @@ bool science_ecosystem_collect(
     const char *inventory_path = options ? options->inventory_path : NULL;
     if (!inventory_path || !inventory_path[0]) {
         int n = snprintf(inventory, sizeof(inventory),
-                         "%s/docs/CAPABILITY_INVENTORY.jsonl", root);
+                         "%s/build/gen/CAPABILITY_INVENTORY.jsonl", root);
         if (n <= 0 || (size_t)n >= sizeof(inventory))
             return eco_error(error, error_cap, "inventory path is too long");
         inventory_path = inventory;
@@ -397,7 +397,8 @@ static bool eco_text_corpus_absent(char *out, size_t cap, size_t *used)
         text_str(out, cap, used, "symbols_test_reached", "unavailable") &&
         text_str(out, cap, used, "duplicates", "unavailable") &&
         text_str(out, cap, used, "untested_invariants", "unavailable") &&
-        text_str(out, cap, used, "inventory", "absent") &&
+        text_str(out, cap, used, "inventory",
+                    "absent (run make docs-capability-inventory)") &&
         text_str(out, cap, used, "scope_agrees", "n/a");
 }
 
