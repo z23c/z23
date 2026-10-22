@@ -36,6 +36,18 @@
  * that loses a long path or a non-ASCII UTF-8 name, one retry uses the wide
  * Win32 seam. Block bytes stay binary. */
 #if defined(_WIN32)
+/* The three binary modes this file opens, as _wopen flags; -1 otherwise. */
+static int block_wide_flags(const char *mode)
+{
+    if (strcmp(mode, "rb+") == 0)
+        return _O_BINARY | _O_RDWR;
+    if (strcmp(mode, "wb+") == 0)
+        return _O_BINARY | _O_RDWR | _O_CREAT | _O_TRUNC;
+    if (strcmp(mode, "rb") == 0)
+        return _O_BINARY | _O_RDONLY;
+    return -1;
+}
+
 static FILE *block_fopen_wide(const char *path, const char *mode)
 {
     wchar_t wide[32768];
@@ -43,15 +55,8 @@ static FILE *block_fopen_wide(const char *path, const char *mode)
         errno = EINVAL;
         return NULL;
     }
-    int flags = _O_BINARY;
-    if (mode[0] == 'r' && mode[1] == 'b' && mode[2] == '+' && mode[3] == '\0')
-        flags |= _O_RDWR;
-    else if (mode[0] == 'w' && mode[1] == 'b' && mode[2] == '+' &&
-             mode[3] == '\0')
-        flags |= _O_RDWR | _O_CREAT | _O_TRUNC;
-    else if (mode[0] == 'r' && mode[1] == 'b' && mode[2] == '\0')
-        flags |= _O_RDONLY;
-    else {
+    int flags = block_wide_flags(mode);
+    if (flags < 0) {
         errno = EINVAL;
         return NULL;
     }

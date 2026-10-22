@@ -2300,7 +2300,7 @@ platform/modules/json/src/json.c:json_escape_str:18
 platform/modules/json/src/json.c:json_write:33
 platform/modules/json/src/json.c:parse_value_r:22
 platform/modules/platform/src/current_identity.c:platform_current_identity_native:17
-platform/modules/platform/src/directory_compat.c:platform_directory_canonical_real:22
+platform/modules/platform/src/directory_compat.c:platform_directory_canonical_real:19
 platform/modules/platform/src/directory_compat.c:platform_directory_list_children_sorted_impl:44
 platform/modules/platform/src/directory_compat.c:platform_directory_list_real_sorted:25
 platform/modules/platform/src/directory_transaction.c:directory_child_move_between_platform:30

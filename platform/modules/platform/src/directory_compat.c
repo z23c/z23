@@ -252,11 +252,30 @@ static HANDLE open_real_directory_component(const wchar_t *path)
     return directory;
 }
 
+/* Name the opened last component by its normalized DOS path, as UTF-8.
+ * Closes the handle. */
+static bool canonical_component_utf8(HANDLE component, char *out,
+                                     size_t out_size)
+{
+    wchar_t canonical[32768];
+    DWORD count = GetFinalPathNameByHandleW(
+        component, canonical, 32768, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(component);
+    if (!count || count >= 32768) return false;
+    const wchar_t *plain = wcsncmp(canonical, L"\\\\?\\", 4) == 0
+                               ? canonical + 4 : canonical;
+    int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                     plain, -1, NULL, 0, NULL, NULL);
+    return needed > 0 && (size_t)needed <= out_size &&
+           WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, plain,
+                               -1, out, (int)out_size, NULL, NULL) > 0;
+}
+
 bool platform_directory_canonical_real(const char *path, char *out,
                                        size_t out_size)
 {
     wchar_t *input = utf8_to_wide(path);
-    wchar_t full[32768], canonical[32768];
+    wchar_t full[32768];
     if (!input || !out || !out_size) { free(input); return false; }
     DWORD count = GetFullPathNameW(input, 32768, full, NULL);
     free(input);
@@ -280,20 +299,8 @@ bool platform_directory_canonical_real(const char *path, char *out,
         HANDLE component = open_real_directory_component(full);
         *p = saved;
         if (component == INVALID_HANDLE_VALUE) return false;
-        if (saved == L'\0') {
-            count = GetFinalPathNameByHandleW(
-                component, canonical, 32768,
-                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-            CloseHandle(component);
-            if (!count || count >= 32768) return false;
-            const wchar_t *plain = wcsncmp(canonical, L"\\\\?\\", 4) == 0
-                                       ? canonical + 4 : canonical;
-            int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
-                                             plain, -1, NULL, 0, NULL, NULL);
-            return needed > 0 && (size_t)needed <= out_size &&
-                   WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, plain,
-                                       -1, out, (int)out_size, NULL, NULL) > 0;
-        }
+        if (saved == L'\0')
+            return canonical_component_utf8(component, out, out_size);
         CloseHandle(component);
     }
 }
