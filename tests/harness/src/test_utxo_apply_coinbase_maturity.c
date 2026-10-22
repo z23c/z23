@@ -8,7 +8,7 @@
  * a coinbase output whose creation height is within COINBASE_MATURITY (100) of
  * the spending block's height (nSpendHeight - coins->nHeight <
  * COINBASE_MATURITY, where nSpendHeight = pindexPrev->nHeight + 1 = the height
- * of the block being connected). zclassic23 enforced this only in the
+ * of the block being connected). z23 enforced this only in the
  * boot-reindex connect_block.c path and the repair ladder; the LIVE reducer
  * fold (utxo_apply_delta.c) did not. The fix adds the reject behind the
  * DEFAULT-OFF runtime flag g_enforce_coinbase_maturity

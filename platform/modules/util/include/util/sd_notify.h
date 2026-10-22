@@ -3,7 +3,7 @@
  * Minimal sd_notify implementation. Talks to systemd's notification
  * socket directly (NOTIFY_SOCKET env var) — no libsystemd dependency.
  *
- * Why direct, not via libsystemd: zclassic23 ships its own statically
+ * Why direct, not via libsystemd: z23 ships its own statically
  * linked binary with zero non-libc runtime deps. The systemd notify
  * protocol is a stable, documented AF_UNIX datagram protocol; the
  * five lines of code below are easier to audit than dlopen'ing a

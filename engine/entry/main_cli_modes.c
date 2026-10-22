@@ -2751,7 +2751,7 @@ int cli_main(int argc, char **argv)
  * SAFETY FOOTGUN: this function must never bail early — "this is a node
  * boot" — the moment it hits ANY argv token starting with '-' that is not
  * one of a small hardcoded set, even if a real command word (e.g. "status")
- * follows later. `zclassic23 --rpcport=39071 status` (a double-dash typo of
+ * follows later. `z23 --rpcport=39071 status` (a double-dash typo of
  * `-rpcport=`, no `-datadir=`) must still reach "status" rather than falling
  * through main()'s dispatch chain into a full
  * node boot against the DEFAULT datadir — the protected live node's

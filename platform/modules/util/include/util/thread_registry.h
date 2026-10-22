@@ -17,7 +17,7 @@
  *     Wraps pthread_create + records the tid with a human-readable
  *     name. pthread_setname_np is set when available so `top -H` and
  *     `gdb info threads` identify the thread by purpose rather than
- *     "zclassic23". Pass NULL for `out_tid` for long-running daemons
+ *     "z23". Pass NULL for `out_tid` for long-running daemons
  *     that exit via thread_registry_shutdown_requested polling alone;
  *     pass a non-NULL pthread_t* for bounded-lifetime services that
  *     already have their own stop() routine and need to pthread_join

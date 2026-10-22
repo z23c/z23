@@ -8,7 +8,7 @@
  *   QO_SRC_LOCAL       — our own active_chain at the probed height
  *   QO_SRC_ZCLASSICD   — RPC getblockhash against the local zclassicd
  *
- * QO_SRC_PEER is populated from the latest recently accepted zclassic23
+ * QO_SRC_PEER is populated from the latest recently accepted z23
  * header per peer via quorum_oracle_record_peer_header_vote(). Lower historical
  * repair pages never downgrade or refresh that current-height evidence.
  *

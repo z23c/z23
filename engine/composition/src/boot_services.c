@@ -470,7 +470,7 @@ static void boot_register_core_liveness_and_reducer(
      * surface instead of dead-ending. */
     alerts_init();
     /* Durable blocker-firing-history bridge: mirrors every EV_OPERATOR_NEEDED
-     * page into the durable event log (EV_OPERATOR_ALERT) so `zclassic23
+     * page into the durable event log (EV_OPERATOR_ALERT) so `z23
      * dumpstate blocker_history` survives restart. Registered right after
      * alerts_init() for the same reason — BEFORE the condition engine can
      * fire. */

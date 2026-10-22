@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * test_cli_argv_strict — a double-dash typo of an operator-target flag
- * (`zclassic23 --rpcport=39071 status`, no `-datadir=`) must not make
+ * (`z23 --rpcport=39071 status`, no `-datadir=`) must not make
  * is_cli_mode() bail out at the unrecognized token: that shape falls through
  * main()'s dispatch into a full node boot against the DEFAULT datadir (the
  * protected live node's directory).

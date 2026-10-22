@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * codeindex — an in-binary, hierarchical, token-bounded source-code
- * navigator index for the zclassic23 tree.
+ * navigator index for the z23 tree.
  *
  * ── What it is ──
  * A DERIVED store (like contexts/commons/modules/vcs's index.kv) built by scanning the in-tree C

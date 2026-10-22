@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Immutable shadow catalog for the target zclassic23 process roles. */
+ * Immutable shadow catalog for the target z23 process roles. */
 
 #ifndef ZCL_CONFIG_SERVICE_CATALOG_H
 #define ZCL_CONFIG_SERVICE_CATALOG_H

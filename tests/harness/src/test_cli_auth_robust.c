@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * test_cli_auth_robust — E4 (typed CLI self-sufficiency): proves the
- * `zclassic23` CLI's `-rpcport=<N>` cookie auto-discovery and its
+ * `z23` CLI's `-rpcport=<N>` cookie auto-discovery and its
  * connection-error taxonomy (docs/dev/NATIVE_COMMAND_INTERFACE.md §25) against
  * the REAL built binary, the way an operator or orchestrator monitor
  * actually invokes it — not the underlying helpers directly (they are

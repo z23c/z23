@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * thread_registry: spawn, track, and drain zclassic23's
+ * thread_registry: spawn, track, and drain z23's
  * pthread population. See `util/thread_registry.h` for the API
  * contract and rationale. */
 

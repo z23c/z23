@@ -2012,7 +2012,7 @@ static int test_raw_transaction_error_string(void)
 }
 
 /* Direct-RPC leaves intentionally preserve zclassicd-compatible result bodies,
- * which do not carry zclassic23 schema labels. Prove each binding instead
+ * which do not carry z23 schema labels. Prove each binding instead
  * checks its stable minimum field/type shape, and prove the three legitimate
  * top-level arrays accept empty/valid lists while rejecting mixed elements. */
 static int test_bridge_rpc_success_shapes_fail_closed(void)

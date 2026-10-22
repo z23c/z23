@@ -16,7 +16,7 @@
  * This module is NOT a second error format. It renders the SAME five fields,
  * under the same names, to stderr — the only channel a pre-registry failure
  * has. A machine reader splits on the same keys it already knows; a human
- * reads the same shape it already sees from `zclassic23 <command>`.
+ * reads the same shape it already sees from `z23 <command>`.
  *
  *   FATAL boot: <message>
  *     code:     <CODE>

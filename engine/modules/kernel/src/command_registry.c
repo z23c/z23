@@ -26,7 +26,7 @@ static _Atomic uint64_t g_request_sequence = 1;
  * zcl_command_registry_describe_json.
  *
  * PROCESS-LIFETIME CAVEAT (read before treating p99 as durable): the plain
- * CLI path (`zclassic23 <command>`) is a FRESH OS PROCESS PER INVOCATION —
+ * CLI path (`z23 <command>`) is a FRESH OS PROCESS PER INVOCATION —
  * main() dispatches once and returns. A ring that lives in static process
  * memory therefore starts EMPTY on every plain CLI call; `discover describe`
  * run immediately after one CLI command will usually show observed_samples=1

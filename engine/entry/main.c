@@ -317,7 +317,7 @@ static bool main_dispatch_priority_modes(int argc, char **argv, int *rc)
         }
     }
 
-    /* CLI UX contract: bare `zclassic23`, zero arguments. The real node
+    /* CLI UX contract: bare `z23`, zero arguments. The real node
      * service NEVER invokes the binary this way (platform/deploy/z23-node.service's
      * ExecStart always passes -datadir=/-rpcport=/etc — see
      * docs/dev/NATIVE_COMMAND_INTERFACE.md "CLI UX contract"), so this is a
@@ -352,7 +352,7 @@ static bool main_dispatch_snapshot_and_cli_modes(int argc, char **argv,
     /* --gen-utxo-snapshot / --legacy-utxo-commitment: dispatched BEFORE
      * is_cli_mode() below. Both take a bare datadir path argument, and
      * is_cli_mode() treats ANY bare non-dash token as a command word — so
-     * behind it, `zclassic23 --legacy-utxo-commitment /path` was mis-routed
+     * behind it, `z23 --legacy-utxo-commitment /path` was mis-routed
      * to cli_main and refused as UNKNOWN_COMMAND (same footgun shape the
      * --importblockindex anywhere-scan above fixed). Exact argv[1] match
      * only: these verbs are always invoked first. */
@@ -402,7 +402,7 @@ static bool main_dispatch_snapshot_and_cli_modes(int argc, char **argv,
 static bool main_dispatch_recovery_modes(int argc, char **argv, int *rc)
 {
     /* Wallet backup restore mode — decrypt an encrypted wallet backup.
-     * Usage: zclassic23 --decrypt-wallet-backup <src.enc> <dst.sqlite>
+     * Usage: z23 --decrypt-wallet-backup <src.enc> <dst.sqlite>
      * Password comes from the WALLET_BACKUP_PASSWORD environment
      * variable (the same variable the node encrypts with). This is the
      * disaster-recovery path: without it, encrypted backups would be
@@ -413,7 +413,7 @@ static bool main_dispatch_recovery_modes(int argc, char **argv, int *rc)
     }
 
     /* UTXO repair mode — fetch missing UTXOs from zclassicd, no full node.
-     * Usage: zclassic23 --repair [num_blocks] [port] [creds]
+     * Usage: z23 --repair [num_blocks] [port] [creds]
      * Scans blocks ahead of current tip via zclassicd RPC, inserts missing
      * UTXOs into SQLite with correct byte order. Restart node after. */
     if (argc >= 2 && strcmp(argv[1], "--repair") == 0) {
@@ -422,7 +422,7 @@ static bool main_dispatch_recovery_modes(int argc, char **argv, int *rc)
     }
 
     /* Direct chainstate import mode — no full node startup needed.
-     * Usage: zclassic23 --importchainstate /path/to/chainstate [dbpath] */
+     * Usage: z23 --importchainstate /path/to/chainstate [dbpath] */
     if (argc >= 3 && strcmp(argv[1], "--importchainstate") == 0) {
         *rc = importchainstate_mode(argc, argv);
         return true;
@@ -435,7 +435,7 @@ static bool main_dispatch_recovery_modes(int argc, char **argv, int *rc)
      * release ceremony run on a node synced+verified from a trusted source,
      * so that future fast-imports can FATAL-verify their UTXO set against a
      * signed commitment near the tip instead of trusting the source blindly.
-     * Read-only. Usage: zclassic23 --mintutxocommitment [dbpath] */
+     * Read-only. Usage: z23 --mintutxocommitment [dbpath] */
     if (argc >= 2 && strcmp(argv[1], "--mintutxocommitment") == 0) {
         *rc = mintutxocommitment_mode(argc, argv);
         return true;
@@ -466,7 +466,7 @@ static bool main_dispatch_standalone_mode(int argc, char **argv, int *rc)
 }
 
 /* Default boot is the headless node (north star: AI-as-interface, no GUI).
- * The WebKit wallet GUI is opt-in via -gui; a plain `zclassic23`
+ * The WebKit wallet GUI is opt-in via -gui; a plain `z23`
  * and -datadir both run the node, never wallet_gui_main.
  *   build/bin/z23          → headless node
  *   build/bin/z23 -gui     → wallet GUI (needs a display)

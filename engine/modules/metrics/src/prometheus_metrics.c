@@ -69,7 +69,7 @@ static _Atomic int64_t  g_mirror_lag_critical_seconds = 0;
 /* Peer-kind gauges. Set by the metrics tick from node_health_snapshot
  * peer classification (subver_is_magicbean / subver_is_zcl23). These
  * are the "Magic Bean reporting" signal — track how many zclassicd-era
- * peers and native zclassic23 peers are connected to us over time. */
+ * peers and native z23 peers are connected to us over time. */
 static _Atomic int64_t  g_node_magicbean_peer_count;
 static _Atomic int64_t  g_node_zcl23_peer_count;
 

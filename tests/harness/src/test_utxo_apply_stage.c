@@ -2973,7 +2973,7 @@ int test_utxo_apply_stage(void)
      * the same wedge; the blocker is re-derived on the first tick of every
      * boot so the stall is immediately classified "permanent_blocker_active"
      * and the node stays up degraded with a halt an operator can see via
-     * `zclassic23 blockers`.
+     * `z23 blockers`.
      *
      * The site exercised is the script_validate_log verdict read
      * (script_validate_log_verdict_at < 0 → ua_fatal_permanent_blocker): a

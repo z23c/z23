@@ -8,7 +8,7 @@
  * directly against a single struct snapshot_sync_service), or wire-format
  * constants only (test_fast_sync.c). No test anywhere constructs the SERVE
  * side and pushes real zsnapshot/zsnapreq/zsnapdata/zsnapend bytes between
- * two independent zclassic23 message processors. This file does that.
+ * two independent z23 message processors. This file does that.
  *
  * Architecture: two fully independent "logical nodes" in one process —
  * mp_a (serving, has the UTXO snapshot in RAM) and mp_b (receiving, staging

@@ -16,7 +16,7 @@
  *       by import_row_verify, the import continues, the quarantine counter
  *       advances, and the loader declines to bridge the gap.
  *
- * Not covered: a forked `zclassic23` serving boot (boot loader-rung
+ * Not covered: a forked `z23` serving boot (boot loader-rung
  * ordering, `z23 status`), left to the heavy self-skipping child-process
  * slices such as test_importblockindex_cli_dispatch.c.
  *

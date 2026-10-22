@@ -18,7 +18,7 @@
  * ── WHAT IT DELIBERATELY DOES NOT DO ──────────────────────────────────────
  * It never starts, stops, signals or restarts anything. systemd owns the node
  * process. tools/scripts/fleet_sync.sh:18-27 records why in blood: the
- * launcher that used to live there was a way to put a SECOND zclassic23 on
+ * launcher that used to live there was a way to put a SECOND z23 on
  * ONE datadir, which corrupts it. There is deliberately no fallback launcher
  * here either — the reply NAMES the restart and the operator runs it.
  *

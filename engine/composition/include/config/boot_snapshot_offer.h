@@ -38,7 +38,7 @@ bool boot_snapshot_offer_trust_policy(
     bool sapling_cursor_found, int64_t sapling_cursor,
     bool nullifier_cursor_found, int64_t nullifier_cursor);
 
-/* Block-piece swarm is the cheap zclassic23 IBD assist: it advertises
+/* Block-piece swarm is the cheap z23 IBD assist: it advertises
  * bodies this node already has. UTXO snapshot export stays opt-in
  * (ZCL_PUBLISH_FASTSYNC_ON_BOOT) because it takes DB read locks.
  * IBD nodes (header tip far ahead of bodies) skip so boot is not spent

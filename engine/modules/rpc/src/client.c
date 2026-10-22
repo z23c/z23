@@ -126,7 +126,7 @@ static const struct convert_param convert_table[] = {
     /* msg_send's first argument is a numeric peer ID on the default p2p
      * channel. rpc_msg_send() in messaging_controller.c reads it with
      * json_get_int(), which silently returns 0 for a JSON string, so
-     * without this row `zclassic23 msg_send <peer_id> "text"` looked up
+     * without this row `z23 msg_send <peer_id> "text"` looked up
      * peer 0 for every peer ID and always failed with "Peer not found or
      * disconnected". The onchain channel's recipient (a z-address string)
      * is excluded from this conversion in rpc_convert_values() below,

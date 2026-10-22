@@ -2,7 +2,7 @@
  *
  * Heartbeat ring — single in-process watchdog surface.
  *
- * Before this module landed, zclassic23 ran six independent watchdog
+ * Before this module landed, z23 ran six independent watchdog
  * mechanisms (sync_watchdog_service, tip_watchdog, node_health_service,
  * boot_phase, rpc_timeout, plus an out-of-process zcl-watchdog ELF).
  * Each had its own definition of "stuck" and its own thread, and they

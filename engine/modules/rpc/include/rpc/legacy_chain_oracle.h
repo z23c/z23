@@ -3,7 +3,7 @@
  * Legacy zclassicd chain oracle helpers.
  *
  * These are synchronous, best-effort reads from a local legacy zclassicd RPC
- * endpoint. They are used only as bridge/oracle data while zclassic23 is still
+ * endpoint. They are used only as bridge/oracle data while z23 is still
  * building its native indexes, not as consensus acceptance rules.
  */
 

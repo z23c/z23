@@ -3355,7 +3355,7 @@ static void dev_watch_start_failed(
 }
 #endif
 
-/* A zclassic23 checkout: a canonical directory holding a readable Makefile. */
+/* A z23 checkout: a canonical directory holding a readable Makefile. */
 static bool dev_checkout_root(const char *requested, char root[PATH_MAX])
 {
     char makefile[PATH_MAX];

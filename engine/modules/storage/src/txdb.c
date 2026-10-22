@@ -105,7 +105,7 @@ bool block_tree_db_read_tx_index(struct block_tree_db *btdb,
     if (!db_read(&btdb->db, key, keylen, &val, &vallen))
         return false;
 
-    /* Try raw struct format first (written by zclassic23) */
+    /* Try raw struct format first (written by z23) */
     if (vallen == sizeof(struct disk_tx_pos)) {
         memcpy(pos, val, sizeof(struct disk_tx_pos));
         free(val);

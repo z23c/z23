@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * In-process thread CPU profiler — the C primitive behind `zclassic23 profile`.
+ * In-process thread CPU profiler — the C primitive behind `z23 profile`.
  *
  * Samples the process's threads twice, `sample_ms` apart (per-thread
  * /proc/self/task/<tid>/stat on Linux, Mach thread_info on Darwin, and

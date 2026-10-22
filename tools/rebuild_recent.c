@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * rebuild_recent — read a LIVE zclassicd data directory and rebuild N
- * blocks (or the WHOLE chain) into zclassic23's native event-log format
+ * blocks (or the WHOLE chain) into z23's native event-log format
  * at high speed, using io_uring for the write path. Times the rebuild.
  *
  * Why this is live-safe: past blocks are immutable and physically present

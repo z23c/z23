@@ -175,7 +175,7 @@ static int test_bsp_allows_bounded_mirror_after_retries(void)
 
 /* Concurrent redundancy override: when mirror lag breaches the SLO and
  * the mirror is reachable, mirror_fallback_allowed must be true REGARDLESS
- * of local recovery state. Today's bug: zclassic23 sat 2,178 blocks behind
+ * of local recovery state. Today's bug: z23 sat 2,178 blocks behind
  * zclassicd because the mirror was gated on local_retries_exhausted, but
  * that flag never tripped (only 1 eligible peer). The test below replays
  * exactly that state and asserts the mirror takes over. */

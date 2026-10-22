@@ -15,7 +15,7 @@
  * This binary is intentionally standalone (its own `cc` invocation via the
  * Makefile's BUILD_NODE_TOOL pattern, same shape as tools/sim/chaos.c and
  * every other tool in that family) — it is NOT folded into the test_zcl /
- * test_parallel / zclassic23 link units, so a nightly sweep of thousands of
+ * test_parallel / z23 link units, so a nightly sweep of thousands of
  * seeds never gates the normal build or `make ci`.
  *
  * Usage:

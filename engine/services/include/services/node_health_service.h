@@ -134,7 +134,7 @@ struct node_health_snapshot {
     int64_t  mirror_lag_critical_seconds;
     char     mirror_lag_breach_severity[16];
 
-    /* Magic Bean / zclassic23 peer classification: counts of currently
+    /* Magic Bean / z23 peer classification: counts of currently
      * connected peers whose advertised subver matches the legacy
      * /MagicBean:.../ or the native /ZClassic23:.../ identifier. ZClassic23 is
      * counted by unique remote host so an inbound+outbound socket pair to one

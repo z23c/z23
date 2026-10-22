@@ -12,7 +12,7 @@
  * Today three sources are wired:
  *   - QO_SRC_LOCAL:     active_chain_at(height) → blockhash
  *   - QO_SRC_ZCLASSICD: zclassicd_oracle_probe(height)
- *   - QO_SRC_PEER:      recent zclassic23 peer header votes
+ *   - QO_SRC_PEER:      recent z23 peer header votes
  *
  * The verdict logic accepts arbitrary N — a future P2P source plugs in
  * without changing callers. */

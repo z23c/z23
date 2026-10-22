@@ -49,7 +49,7 @@ static int t_registry_darwin_stack_headroom(void)
 
 /* Worker polls the registry's shutdown flag every ~10 ms and exits
  * cleanly when it flips. This is the contract every long-running
- * zclassic23 thread must follow. */
+ * z23 thread must follow. */
 static void *tr_worker(void *arg)
 {
     struct worker_ctx *ctx = arg;

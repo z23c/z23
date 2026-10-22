@@ -77,7 +77,7 @@ static void dev_index_set_err(char *err, size_t cap, const char *fmt,
     (void)snprintf(err, cap, fmt, detail ? detail : "");
 }
 
-/* index.db's default location: <state_root_override, or the zclassic23
+/* index.db's default location: <state_root_override, or the z23
  * root evidence_ledger_home_rel_dir resolves>/index/index.db. Split out of
  * dev_index_db_path so that function stays override-or-default plus one
  * ensure-parent-dir step. */

@@ -6,7 +6,7 @@
  * zclassicd ConnectBlock (zclassic-cpp/src/main.cpp:2567) ORs
  * SCRIPT_VERIFY_CHECKDATASIG_SIGOPS into its flags, so OP_CHECKDATASIG /
  * OP_CHECKDATASIGVERIFY count toward the MAX_BLOCK_SIGOPS (20000) ceiling
- * (script.c:117). zclassic23 gates that behind g_enforce_checkdatasig_sigops
+ * (script.c:117). z23 gates that behind g_enforce_checkdatasig_sigops
  * (-enforce-checkdatasig-sigops), default off.
  *
  * CheckBlock counts only legacy top-level sigops (no coins view); the P2SH

@@ -39,7 +39,7 @@
  * output whose creation height is within COINBASE_MATURITY (100) of the
  * spending block's height (nSpendHeight - coins->nHeight < COINBASE_MATURITY,
  * where nSpendHeight = pindexPrev->nHeight + 1 = the height of the block being
- * connected). zclassic23 enforces this in the boot-reindex connect_block.c
+ * connected). z23 enforces this in the boot-reindex connect_block.c
  * path and the repair ladder; this flag adds the reject to the LIVE reducer
  * fold below.
  *

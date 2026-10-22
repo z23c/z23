@@ -3,7 +3,7 @@
  * Cold-start benchmark: measures time from zero to fully synced
  * block explorer via FlyClient + MMB + SHA3 UTXO snapshot.
  *
- * Spawns a fresh zclassic23 node, monitors RPC + log, reports
+ * Spawns a fresh z23 node, monitors RPC + log, reports
  * phase timing for each step of the fast sync pipeline.
  *
  * Build: make bench_fresh_sync

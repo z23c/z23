@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Thin loopback RPC client used by the native command handlers and the
- * tools/command CLI.  Talks to the local zclassic23 node over HTTP on
+ * tools/command CLI.  Talks to the local z23 node over HTTP on
  * 127.0.0.1 using the cookie file in the data directory for auth. This is
  * the only public interface that knows how to speak to the node this way. */
 

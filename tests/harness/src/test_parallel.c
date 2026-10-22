@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Fork-parallel driver for the zclassic23 test suite.
+ * Fork-parallel driver for the z23 test suite.
  *
  * The sequential runner (`build/bin/test_zcl`, `main()` in test.c) executes
  * every group back-to-back on a single CPU. On a 32-core box that uses a few

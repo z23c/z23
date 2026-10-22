@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * test_consensus_parity: golden assertion that zclassic23's consensus
+ * test_consensus_parity: golden assertion that z23's consensus
  * constants are exactly zclassicd's (docs/CONSENSUS_PARITY_DOCTRINE.md),
  * cross-referenced against src/chainparams.cpp and src/consensus/upgrades.cpp.
  * To change a value, change zclassicd first and ship it network-wide.

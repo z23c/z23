@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Loopback RPC client: speaks HTTP+JSON-RPC to the local zclassic23 node.
+ * Loopback RPC client: speaks HTTP+JSON-RPC to the local z23 node.
  * Native command handlers and the tools/command CLI are its consumers.
  * See controllers/rpc_client.h for the public API. */
 

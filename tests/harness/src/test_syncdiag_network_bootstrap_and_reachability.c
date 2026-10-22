@@ -98,7 +98,7 @@ static bool sd_bootstrap_setup_addrman(struct sd_bootstrap_ctx *ctx,
     return ok;
 }
 
-/* Builds the five peers this scenario asserts on: two live zclassic23
+/* Builds the five peers this scenario asserts on: two live z23
  * peers (one inbound, one addnode-sourced with a duplicate inbound
  * connection to it), one legacy MagicBean peer, and one self-hairpin
  * connection back to our own advertised external address. */
@@ -504,7 +504,7 @@ static bool sd_bootstrapstatus_snapshot_missing_index_loader(const struct json_v
 
 /* case: bootstrapstatus exposes the versioned P2P and beta6 snapshot
  * bootstrap contract for a transport-ready node with a quorum of
- * verified zclassic23 peers, then re-reads it once a security-review
+ * verified z23 peers, then re-reads it once a security-review
  * override blocks every readiness claim, then again once the block
  * index file is missing from the snapshot bundle. */
 static bool sd_bootstrapstatus_ready_phase1(struct sd_bootstrap_ctx *ctx)

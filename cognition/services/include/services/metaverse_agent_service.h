@@ -3,7 +3,7 @@
  * metaverse_agent_service — the read side of the confined-agent broker, for
  * the `metaverse agent status` / `metaverse agent audit` leaves.
  *
- * The broker runs as its own process (`zclassic23 --metaverse-broker`), so its
+ * The broker runs as its own process (`z23 --metaverse-broker`), so its
  * state is a DIRECTORY, not in-process memory. These two calls are therefore
  * pure readers over that directory: they open nothing outside it, create
  * nothing, and answer "not present" for a directory that has never hosted a

@@ -15,7 +15,7 @@
  * coins_kv boundary-root store, written once by the live connect path
  * as its local fold passed each MMR_COMMITMENT_INTERVAL-aligned
  * height (engine/models/src/mmb_leaf_store.c:180-191). So the ladder's
- * source of truth is a copy of a zclassic23 datadir, not a JSON-RPC peer.
+ * source of truth is a copy of a z23 datadir, not a JSON-RPC peer.
  *
  * TWO FILES PER DATADIR: block hashes live in `node.db` (`blocks` table);
  * boundary UTXO roots live in the SEPARATE kernel store `consensus.db`

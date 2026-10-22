@@ -175,7 +175,7 @@ bool chaos_fault_reorg_during_artifact_download(uint64_t seed,
 
 /* Guarded exactly like (d)/(e) above: supervisor_reset_for_testing /
  * supervisor_sweep_once_for_testing are ZCL_TESTING-only, and this file also
- * compiles into the production zclassic23 binary (engine/modules/sim is a LIB_MODULE
+ * compiles into the production z23 binary (engine/modules/sim is a LIB_MODULE
  * linked into every target) which builds WITHOUT ZCL_TESTING. Reuses the
  * `chaos_sleep_ms` helper defined above (d)'s block — still in scope here,
  * same translation unit. */

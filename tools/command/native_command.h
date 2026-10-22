@@ -2207,7 +2207,7 @@ void zcl_native_status_journey_render(const struct json_value *data,
 /* Pick one short, deterministic next-step command from the same brief body
  * (dominant blocker present -> explain it; still behind -> explain sync;
  * otherwise -> a general healthcheck). Never allocates; returns a pointer to
- * a static string. Backs the bare no-arg `zclassic23` entry point and any
+ * a static string. Backs the bare no-arg `z23` entry point and any
  * leaf invoked with --next. */
 const char *zcl_native_status_brief_next_command(const struct json_value *data);
 

@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * verify_anchor_completeness — cross-checks a zclassicd chainstate LevelDB
- * against a zclassic23 kernel store (consensus.db, or the legacy progress.kv
+ * against a z23 kernel store (consensus.db, or the legacy progress.kv
  * on a pre-flip datadir) to answer one question: did the shielded history
  * importer (shielded_history_import_service.c) capture every anchor and
  * nullifier its SOURCE chainstate held?

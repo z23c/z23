@@ -46,7 +46,7 @@ const struct dev_index_source *dev_index_source_find(const char *id);
 /* Resolve the source's root directory: `state_root_override` when non-empty
  * (the CLI's --state-root=<dir>, applied to every source regardless of
  * dev_state_root, for test isolation and deliberate redirection), else the
- * zclassic23 state root or the native dev-state root per dev_state_root.
+ * z23 state root or the native dev-state root per dev_state_root.
  * Does not create anything, does not append dir_rel. No environment
  * variable is consulted here — --state-root is the only override. */
 bool dev_index_source_resolve_root(const struct dev_index_source *src,

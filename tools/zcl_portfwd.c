@@ -4,7 +4,7 @@
  *
  * WHY THIS EXISTS
  * ---------------
- * zclassic23 IS its own web server: it serves the block explorer over its
+ * z23 IS its own web server: it serves the block explorer over its
  * built-in HTTPS server on a HIGH port (8443) with an HTTP redirect on 8080,
  * bound as the UNPRIVILEGED operator user. There is no nginx / reverse proxy
  * and we never add one. But public clients hit 443/80, and binding ports <1024

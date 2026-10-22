@@ -27,7 +27,7 @@
  *     INTRODUCE1_NOT_SEEN, RENDEZVOUS1_NOT_SEEN,        test_onion_bootstrap.c)
  *     CIRCUIT_NOT_READY, P2P_FRAMING_NOT_SEEN)
  *   exit 1 with ENV_MISSING_BINARY                    -> UNOBSERVED: the
- *     (build/bin/z23, zclassic23 or zcl-rpc absent)      environment has no
+ *     (build/bin/z23, z23 or zcl-rpc absent)      environment has no
  *     runtime binaries (a proof generation builds only z23-dev and the
  *     test runner).
  *   any other nonzero exit, or a wedge                -> FAIL, with the
@@ -91,7 +91,7 @@ static bool opw_is_timeout_verdict(const char *tail)
     return false;
 }
 
-/* The script found no build/bin/z23, zclassic23 or zcl-rpc to spawn. A proof
+/* The script found no build/bin/z23, z23 or zcl-rpc to spawn. A proof
  * generation never builds them, so the pairing cannot be observed there:
  * mapped UNOBSERVED (never FAIL, never SKIP) and never cached as green. */
 static bool opw_is_missing_binary_verdict(const char *tail)

@@ -3,7 +3,7 @@
  * file COPYING or http://www.opensource.org/licenses/mit-license.php. */
 
 /* Machine-readable boundary between ZClassic L1 consensus and the
- * zclassic23 application layer exposed through REST/OpenAPI. */
+ * z23 application layer exposed through REST/OpenAPI. */
 
 #include "api_controller_internal.h"
 

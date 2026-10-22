@@ -304,7 +304,7 @@ bool chaos_fault_kill_restart_mid_fold(struct chaos_fault_result *out)
 /* test_make_tmpdir / test_rm_rf_recursive are ordinary (non-inline)
  * tests/harness/src/test_helpers.c symbols, only linked into the test_zcl /
  * test_parallel binaries (lib/test is not a LIB_MODULE, so it never links
- * into production zclassic23). Guard this fault the same way as (d)/(e) so
+ * into production z23). Guard this fault the same way as (d)/(e) so
  * a production compile never references an unresolved symbol. */
 #ifdef ZCL_TESTING
 static bool chaos_tiny_body(void *user, uint32_t h, uint8_t **bytes,
@@ -410,7 +410,7 @@ bool chaos_fault_corrupt_sealed_segment(struct chaos_fault_result *out)
 
 /* supervisor_reset_for_testing / supervisor_sweep_once_for_testing are only
  * declared under ZCL_TESTING (platform/modules/util/include/util/supervisor.h); this
- * file also compiles into the production zclassic23 binary (engine/modules/sim is a
+ * file also compiles into the production z23 binary (engine/modules/sim is a
  * LIB_MODULE linked into every target — see the Makefile's ALL_SRCS), which
  * builds WITHOUT ZCL_TESTING. The harness's own binaries (test_zcl,
  * test_parallel) always define ZCL_TESTING, so the real body below is what

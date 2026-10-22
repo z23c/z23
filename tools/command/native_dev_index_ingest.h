@@ -14,7 +14,7 @@ typedef struct sqlite3 sqlite3;
 
 /* Resolve index.db's path: `index_override` when non-empty (the CLI's
  * --index=<path>, used verbatim), else <state_root_override or the default
- * zclassic23 root>/index/index.db. No environment variable is consulted —
+ * z23 root>/index/index.db. No environment variable is consulted —
  * --index and --state-root are the only overrides, and they are independent:
  * --index alone moves the database without touching where sources are read
  * from. `create`: when true, creates the `index` directory if absent (an

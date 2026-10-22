@@ -2,7 +2,7 @@
  *
  * 7-day soak runner (MVP criterion #6).
  *
- * Separate binary that polls a running zclassic23 every 60 s for
+ * Separate binary that polls a running z23 every 60 s for
  * a configured duration (default 7 days), feeds each sample
  * through the soak_harness analyzer, writes a timestamped log,
  * and exits non-zero if the run tripped any verdict rule (crash,
@@ -41,14 +41,14 @@
  * zcl-rpc can never fall through to the live default RPC port (18232).
  *
  * Usage:
- *     make soak-7day                   (7 days, against installed zclassic23)
+ *     make soak-7day                   (7 days, against installed z23)
  *     make soak-ci                     (compressed hermetic proxy)
  *     build/bin/soak_runner --help
  *
  * Flags:
  *     --duration-sec=N      total run length (default 7d = 604800)
  *     --interval-sec=N      poll interval (default 60)
- *     --service=NAME        process name to pidof (pidof mode, default zclassic23)
+ *     --service=NAME        process name to pidof (pidof mode, default z23)
  *     --rpc=PATH            zcl-rpc binary (default build/bin/zcl-rpc)
  *     --log=PATH            output log (default ./soak-YYYYMMDD-HHMM.log)
  *     --stall-sec=N         tip stall threshold (default 1800)

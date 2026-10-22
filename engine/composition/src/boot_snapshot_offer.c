@@ -8,7 +8,7 @@
  * UTXO snapshot export stays opt-in (ZCL_PUBLISH_FASTSYNC_ON_BOOT) because
  * it takes live DB read locks. Block-piece swarm publishing is default-on
  * once bodies are within BOOT_BLOCK_SWARM_MAX_HEADER_LAG of the header tip,
- * so caught-up zclassic23 peers can feed IBD without a RAM snapshot cache.
+ * so caught-up z23 peers can feed IBD without a RAM snapshot cache.
  * It is a supervised background worker
  * (Shape 5 — MONITOR): it shares the
  * worker_on_stall handler + boot_register_worker_supervisor helper exposed by
@@ -437,7 +437,7 @@ static void *build_snapshot_offer_thread(void *arg)
     }
 
     /* Sticky/global-sync: when enabled, any SOVEREIGN at-tip
-     * zclassic23 node may build and offer a snapshot, not only file-service
+     * z23 node may build and offer a snapshot, not only file-service
      * profile nodes. Assisted nodes were rejected above before export or
      * manifest construction. The
      * offer is still only PUBLISHED once a disk-backed serving buffer is ready

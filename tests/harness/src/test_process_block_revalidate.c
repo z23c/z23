@@ -130,7 +130,7 @@ int test_process_block_revalidate(void)
      *   # before
      *   $ z23 status | jq .height
      *   3115059
-     *   $ zclassic23 blockers | jq .active_count
+     *   $ z23 blockers | jq .active_count
      *   0
      *
      *   # wait 900s (or one full coord_esc supervisor tick)

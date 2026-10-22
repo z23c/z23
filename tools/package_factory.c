@@ -6,7 +6,7 @@
  * build in two independent stores, bit-identical reproduction, self-screened
  * admission, and optional corpus registration — reusing only the existing
  * machinery: contexts/commons/modules/vcs package_prepare/release/build/reproduce, the
- * zclassic23 native CLI (zcode package dev/publish/add/verify), and the
+ * z23 native CLI (zcode package dev/publish/add/verify), and the
  * offline signers (z23-package-sign, z23-package-verify).
  * It adds NO second scheduler, store, transport, or receipt family.
  *
