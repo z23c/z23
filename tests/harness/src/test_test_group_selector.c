@@ -2565,6 +2565,60 @@ static int test_runner_state_setup_refuses(void)
 
 /* Exercise the compatibility resolver exactly as mapped fast-ci does, then
  * hand its bounded full-ID CSV to this runner without executing scenarios. */
+static bool tgs_proof_resolved_csv(char *resolved, char *csv, size_t cap,
+                                    struct family_expansion *seen)
+{
+    for (char *line = resolved; *line;) {
+        char *end = strchr(line, '\n');
+        if (!end) return false;
+        *end = '\0';
+        if (!zcl_test_group_catalog_contains(line) ||
+            family_expansion_has(seen, line) ||
+            !family_expansion_collect(line, seen))
+            return false;
+        size_t used = strlen(csv);
+        int n = snprintf(csv + used, cap - used, "%s%s",
+                         used ? "," : "", line);
+        if (n < 0 || (size_t)n >= cap - used) return false;
+        line = end + 1;
+    }
+    return true;
+}
+
+static bool tgs_proof_selected_output(const char *out,
+                                       const struct family_expansion *seen)
+{
+    size_t selected = 0;
+    for (const char *p = out; (p = strstr(p, "SELECTED ")) != NULL; p++)
+        selected++;
+    if (selected != seen->len) return false;
+    for (size_t i = 0; i < seen->len; i++) {
+        char line[ZCL_TEST_GROUP_FULL_MAX + 16];
+        int n = snprintf(line, sizeof(line), "SELECTED %s\n", seen->ids[i]);
+        if (n < 0 || (size_t)n >= sizeof(line)) return false;
+        const char *found = strstr(out, line);
+        if (!found || strstr(found + strlen(line), line)) return false;
+    }
+    return true;
+}
+
+static bool tgs_proof_runner_selection(const char *csv,
+                                       const struct family_expansion *seen)
+{
+    char exe[PATH_MAX], command[4096];
+    static char out[256 * 1024];
+    if (!os_proc_exe_path(exe, sizeof(exe))) return false;
+    int n = snprintf(command, sizeof(command),
+        "'%s' --jobs=1 --exact=%s --no-cache --selection-only 2>&1",
+        exe, csv);
+    if (n < 0 || (size_t)n >= sizeof(command) ||
+        capture_command(command, out, sizeof(out)) != 0 ||
+        !strstr(out, "executed=0 cache_probes=0") ||
+        strstr(out, "attempt group="))
+        return false;
+    return tgs_proof_selected_output(out, seen);
+}
+
 static bool tgs_proof_resolver_selection(const char *arguments,
                                          const char *const *plans,
                                          size_t plan_count)
@@ -2583,46 +2637,12 @@ static bool tgs_proof_resolver_selection(const char *arguments,
     if (n < 0 || (size_t)n >= sizeof(command) ||
         capture_command(command, resolved, sizeof(resolved)) != 0)
         return false;
-    for (char *line = resolved; *line;) {
-        char *end = strchr(line, '\n');
-        if (!end) return false;
-        *end = '\0';
-        if (!zcl_test_group_catalog_contains(line) ||
-            family_expansion_has(&seen, line) ||
-            !family_expansion_collect(line, &seen))
-            return false;
-        size_t used = strlen(csv);
-        n = snprintf(csv + used, sizeof(csv) - used, "%s%s",
-                     used ? "," : "", line);
-        if (n < 0 || (size_t)n >= sizeof(csv) - used) return false;
-        line = end + 1;
-    }
+    if (!tgs_proof_resolved_csv(resolved, csv, sizeof(csv), &seen))
+        return false;
     if (seen.len != want) return false;
     for (size_t i = 0; i < want; i++)
         if (!family_expansion_has(&seen, expected[i])) return false;
-    char exe[PATH_MAX];
-    static char out[256 * 1024];
-    if (!os_proc_exe_path(exe, sizeof(exe))) return false;
-    n = snprintf(command, sizeof(command),
-        "'%s' --jobs=1 --exact=%s --no-cache --selection-only 2>&1",
-        exe, csv);
-    if (n < 0 || (size_t)n >= sizeof(command) ||
-        capture_command(command, out, sizeof(out)) != 0 ||
-        !strstr(out, "executed=0 cache_probes=0") ||
-        strstr(out, "attempt group="))
-        return false;
-    size_t selected = 0;
-    for (const char *p = out; (p = strstr(p, "SELECTED ")) != NULL; p++)
-        selected++;
-    if (selected != want) return false;
-    for (size_t i = 0; i < seen.len; i++) {
-        char line[ZCL_TEST_GROUP_FULL_MAX + 16];
-        n = snprintf(line, sizeof(line), "SELECTED %s\n", seen.ids[i]);
-        if (n < 0 || (size_t)n >= sizeof(line)) return false;
-        const char *found = strstr(out, line);
-        if (!found || strstr(found + strlen(line), line)) return false;
-    }
-    return true;
+    return tgs_proof_runner_selection(csv, &seen);
 }
 
 static int test_proof_resolver_umbrellas(void)

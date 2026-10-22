@@ -2552,6 +2552,8 @@ Z23_FLAG("ZCL_TEST_TIMEOUT_SCALE", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_mailbox.c:auto")
 Z23_FLAG("ZCL_TEST_TIMING_JSON", "env_build", "-", "-",
           "undocumented; first use tools/dev/test-registry-report.sh:auto")
+Z23_FLAG("ZCL_TEST_UMBRELLAS_SRC", "env_build", "-", "-",
+          "first use tools/dev/test-group-list.sh:auto; umbrella declaration fixture source")
 Z23_FLAG("ZCL_TEST_VERIFY_ATTEST_PUBKEY", "env_test", "-", "-",
           "replaces the root-pinned verifier public key path, and also accepts a key file owned by the effective uid, only in a ZCL_TESTING build; a production build does not compile the read")
 Z23_FLAG("ZCL_THREADSUP_BASELINE", "env_build", "-", "-",
