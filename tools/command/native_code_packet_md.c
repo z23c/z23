@@ -82,7 +82,8 @@ size_t pk_trap_lines(unsigned mask, char (*out)[PK_TRAP_LEN])
         { PK_TRAP_COMMAND,
           "tools/command: a new unit needs a module_capabilities.def row, an "
           "agent_impact_rules.def row and cyclomatic complexity <= 15 per "
-          "function; a new leaf also needs a remote_command_classes.def row." },
+          "function; a new leaf needs no remote_command_classes.def row: no row is "
+          "NEVER, and only a permit takes one." },
         { PK_TRAP_DEF,
           "a .def edit changes generated docs: run docs-capability-inventory "
           "and fix-doc-counts, then commit what changed." },

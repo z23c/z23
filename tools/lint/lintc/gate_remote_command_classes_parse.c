@@ -462,3 +462,16 @@ int rcc_table_rows(const char *table_path, struct rcc_rows *rows)
     free(buf.s);
     return fin(f, line, table_path, rc);
 }
+
+const char *rcc_resolve_class(const struct rcc_rows *rows, const char *leaf)
+{
+    for (size_t i = 0; rows && i < rows->n; i++) {
+        if (strcmp(rows->v[i].leaf, leaf) != 0)
+            continue;
+        if (strcmp(rows->v[i].cls, "REMOTE_CLASS_READ_ONLY") == 0
+            || strcmp(rows->v[i].cls, "REMOTE_CLASS_OWNER_CAPABILITY") == 0)
+            return rows->v[i].cls;
+        return "REMOTE_CLASS_NEVER";
+    }
+    return "REMOTE_CLASS_NEVER";
+}

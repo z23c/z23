@@ -13002,17 +13002,16 @@ check-hotswap-denied-leaves: $(LINTC_TOOL)
 	@build/bin/z23-lint check-hotswap-denied-leaves --selftest
 	@build/bin/z23-lint check-hotswap-denied-leaves
 
-# Every command leaf carries exactly one remote class in
-# engine/composition/remote_command_classes.def — the decision "may a peer on our own mesh
-# ask this node to run it?" (design: docs/work/REMOTE_COMMAND_CHANNEL.md). The
-# table's default is never_remote, so a MISSING row is safe today and therefore
-# invisible; this gate makes registering a command leaf a two-file operation so
-# the decision cannot be skipped. Symmetric: a row naming a leaf the registry no
-# longer has is a permission with no owner and fails too. Covers both dispatch
-# surfaces — the typed engine/composition/commands catalog and the flat AGENT_CONTRACT
-# table. No baseline: the tree is clean, and a baseline here would only be
-# somewhere to hide the next omission. --selftest runs first and proves the gate
-# fires on each defect class.
+# engine/composition/remote_command_classes.def lists the command leaves a peer on
+# our own mesh MAY ask this node to run (design: docs/work/REMOTE_COMMAND_CHANNEL.md).
+# A leaf with no row is REMOTE_CLASS_NEVER, so registering a command needs no
+# row; only a permit takes one, and it takes a reason. This gate keeps the
+# permits honest: a row naming a leaf the registry no longer has is a
+# permission with no owner and fails, as do a duplicate row, an unknown class
+# token and a permit with no reason. Covers both dispatch surfaces — the typed
+# engine/composition/commands catalog and the flat AGENT_CONTRACT table. No
+# baseline. --selftest runs first and proves the gate fires on each defect
+# class and passes a leaf with no row.
 check-remote-command-classes: $(LINTC_TOOL)
 	@echo "══ LINT: remote command classes ══"
 	@./build/bin/z23-lint check-remote-command-classes --selftest

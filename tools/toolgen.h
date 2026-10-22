@@ -134,10 +134,14 @@ struct tg_family {
 extern const struct tg_family tg_families[];
 extern const size_t tg_family_count;
 
+/* The remote permit table. Not a generated target: a leaf with no row there is
+ * REMOTE_CLASS_NEVER, so the generator adds nothing to it; it is only read, to
+ * refuse a manifest whose path already carries a hand-written permit row. */
+extern const char tg_remote_path[];
+
 enum tg_target_kind {
     TGT_DEF,
     TGT_HEADER,
-    TGT_REMOTE,
     TGT_CATALOG,
     TGT_DATADIR
 };

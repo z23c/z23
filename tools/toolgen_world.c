@@ -336,10 +336,9 @@ bool tg_world_load(const char *root, struct tg_world *w, struct tg_err *e)
     size_t n = tg_targets(t, TG_MAX_TARGETS);
     bool ok = scan_dir(root, DEF_DIR, ".def", w, e, fn_def, 0) &&
               scan_dir(root, HEADER_DIR, ".h", w, e, fn_header, 0);
+    ok = ok && scan_file(root, tg_remote_path, w, e, fn_remote);
     for (size_t i = 0; ok && i < n; i++) {
-        if (t[i].kind == TGT_REMOTE)
-            ok = scan_file(root, t[i].path, w, e, fn_remote);
-        else if (t[i].kind == TGT_CATALOG)
+        if (t[i].kind == TGT_CATALOG)
             ok = scan_file(root, t[i].path, w, e, fn_groups);
     }
     if (!ok)

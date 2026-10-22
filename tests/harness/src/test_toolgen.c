@@ -107,7 +107,9 @@ static int fx_run(const struct fx *f, const char *mode, char *out, size_t cap)
     return zcl_spawn_capture_merged_observed(argv, out, cap, 20000, &timed_out);
 }
 
-/* The five registry files, each with its authored text around an empty block. */
+/* The four generated registry files, each with its authored text around an empty
+ * block, plus the hand-written remote permit table (no block: a new leaf with
+ * no row there is REMOTE_CLASS_NEVER). */
 static bool fx_tree(struct fx *f, const char *def_x, const char *hdr_x, const char *rem_x,
                     const char *cat_x)
 {
@@ -124,8 +126,7 @@ static bool fx_tree(struct fx *f, const char *def_x, const char *hdr_x, const ch
     snprintf(buf, sizeof buf, "#ifndef H\nvoid zcl_native_handle_fleet_old(void);\n%s\n"
              BEGIN_LINE("handlers") END_LINE("handlers") "#endif\n", hdr_x);
     ok = ok && fx_puts(f, "tools/command/native_fleet.h", buf);
-    snprintf(buf, sizeof buf, "REMOTE_COMMAND_CLASS(\"fleet.old\", REMOTE_CLASS_NEVER, \"\")\n%s\n"
-             BEGIN_LINE("remote-classes") END_LINE("remote-classes"), rem_x);
+    snprintf(buf, sizeof buf, "REMOTE_COMMAND_CLASS(\"fleet.old\", REMOTE_CLASS_READ_ONLY, \"a bounded read\")\n%s", rem_x);
     ok = ok && fx_puts(f, "engine/composition/remote_command_classes.def", buf);
     snprintf(buf, sizeof buf, "ZCL_TEST_GROUP(alpha)\nZCL_SPEC_GROUP(beta)\n%s\n"
              BEGIN_LINE("test-groups") END_LINE("test-groups") "ZCL_TEST_GROUP(omega)\n", cat_x);
@@ -505,13 +506,13 @@ static int test_tg_manifest_cap(void)
 
 static const char *const k_files[] = {
     "engine/composition/commands/fleet.def", "tools/command/native_fleet.h",
-    "engine/composition/remote_command_classes.def", "tools/dev/test_group_catalog.def",
+    "tools/dev/test_group_catalog.def",
     "tests/harness/src/test_read_leaf_no_datadir_write.c",
 };
 
 static bool snapshot(const struct fx *f, char (*bufs)[TG_OUT])
 {
-    for (size_t i = 0; i < 5; i++)
+    for (size_t i = 0; i < 4; i++)
         if (!fx_get(f, k_files[i], bufs[i], TG_OUT))
             return false;
     return true;
@@ -523,7 +524,7 @@ static bool snapshot(const struct fx *f, char (*bufs)[TG_OUT])
 static bool age_files(const struct fx *f)
 {
     struct utimbuf old = {.actime = OLD_MTIME, .modtime = OLD_MTIME};
-    for (size_t i = 0; i < 5; i++) {
+    for (size_t i = 0; i < 4; i++) {
         char path[640];
         if (!fx_path(f, k_files[i], path, sizeof path) || utime(path, &old) != 0)
             return false;
@@ -533,7 +534,7 @@ static bool age_files(const struct fx *f)
 
 static bool all_aged(const struct fx *f)
 {
-    for (size_t i = 0; i < 5; i++) {
+    for (size_t i = 0; i < 4; i++) {
         char path[640];
         struct stat st;
         if (!fx_path(f, k_files[i], path, sizeof path) || stat(path, &st) != 0 ||
@@ -547,7 +548,7 @@ static int test_tg_write_content(void)
 {
     int failures = 0;
     struct fx f = {0};
-    static char before[5][TG_OUT], after[5][TG_OUT];
+    static char before[4][TG_OUT], after[4][TG_OUT];
     char out[TG_OUT];
     TEST("toolgen: --write expands the manifest into every block and keeps authored bytes") {
         ASSERT(fx_demo(&f, VALID_JSON));
@@ -556,16 +557,21 @@ static int test_tg_write_content(void)
         ASSERT(has_error(out, "BLOCK_DRIFT"));
         ASSERT(fx_run(&f, "--write", out, sizeof out) == 0);
         ASSERT(snapshot(&f, after));
+        {
+            char remote[TG_OUT];
+            ASSERT(fx_get(&f, "engine/composition/remote_command_classes.def", remote, sizeof remote));
+            ASSERT(strstr(remote, "fleet.demo.list") == NULL);
+            ASSERT(strstr(remote, "z23-toolgen") == NULL);
+        }
         ASSERT(strstr(after[0], "ZCL_COMMAND_BRANCH(\"fleet.demo\", \"fleet\",") != NULL);
         ASSERT(strstr(after[0], "\"fleet.demo.list\", \"fleet.demo\", \"\",") != NULL);
         ASSERT(strstr(after[0], "ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FAST") != NULL);
         ASSERT(strstr(after[0], "ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT") != NULL);
         ASSERT(strstr(after[0], "ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_demo_list)") != NULL);
         ASSERT(strstr(after[1], "void zcl_native_handle_fleet_demo_list(") != NULL);
-        ASSERT(strstr(after[2], "REMOTE_COMMAND_CLASS(\"fleet.demo.list\", REMOTE_CLASS_NEVER, \"\")") != NULL);
-        ASSERT(strstr(after[3], "ZCL_TEST_GROUP(fleet_demo)\n" END_LINE("test-groups") "ZCL_TEST_GROUP(omega)") != NULL);
-        ASSERT(strstr(after[4], "{ \"fleet.demo.list\",") != NULL);
-        for (size_t i = 0; i < 5; i++) {
+        ASSERT(strstr(after[2], "ZCL_TEST_GROUP(fleet_demo)\n" END_LINE("test-groups") "ZCL_TEST_GROUP(omega)") != NULL);
+        ASSERT(strstr(after[3], "{ \"fleet.demo.list\",") != NULL);
+        for (size_t i = 0; i < 4; i++) {
             const char *begin = strstr(after[i], "/* z23-toolgen:begin");
             ASSERT(begin != NULL);
             ASSERT(strncmp(before[i], after[i], (size_t)(begin - after[i])) == 0);
@@ -583,7 +589,7 @@ static int test_tg_idempotent(void)
 {
     int failures = 0;
     struct fx f = {0};
-    static char first[5][TG_OUT], second[5][TG_OUT];
+    static char first[4][TG_OUT], second[4][TG_OUT];
     char out[TG_OUT];
     TEST("toolgen: a repeated --write is byte-identical and touches no mtime") {
         ASSERT(fx_demo(&f, VALID_JSON));
@@ -592,7 +598,7 @@ static int test_tg_idempotent(void)
         ASSERT(fx_run(&f, "--write", out, sizeof out) == 0);
         ASSERT(strstr(out, "nothing to change") != NULL);
         ASSERT(snapshot(&f, second) && all_aged(&f));
-        for (size_t i = 0; i < 5; i++)
+        for (size_t i = 0; i < 4; i++)
             ASSERT(strcmp(first[i], second[i]) == 0);
         ASSERT(fx_run(&f, "--check", out, sizeof out) == 0);
         PASS();
@@ -638,8 +644,8 @@ static int test_tg_drift_missing_block(void)
     char out[TG_OUT];
     TEST("toolgen: --check catches a missing block") {
         ASSERT(written_demo(&f));
-        ASSERT(edit_file(&f, k_files[3], "/* z23-toolgen:begin test-groups - generated, do not edit */\n", ""));
-        ASSERT(edit_file(&f, k_files[3], "/* z23-toolgen:end test-groups */\n", ""));
+        ASSERT(edit_file(&f, k_files[2], "/* z23-toolgen:begin test-groups - generated, do not edit */\n", ""));
+        ASSERT(edit_file(&f, k_files[2], "/* z23-toolgen:end test-groups */\n", ""));
         ASSERT(fx_run(&f, "--check", out, sizeof out) != 0);
         ASSERT(has_error(out, "BLOCK_MISSING"));
         PASS();
@@ -671,7 +677,7 @@ static int test_tg_drift_mixed(void)
     char out[TG_OUT];
     TEST("toolgen: --check catches a mixed generation") {
         ASSERT(written_demo(&f));
-        ASSERT(edit_file(&f, k_files[2], "REMOTE_COMMAND_CLASS(\"fleet.demo.list\", REMOTE_CLASS_NEVER, \"\")\n", ""));
+        ASSERT(edit_file(&f, k_files[2], "ZCL_TEST_GROUP(fleet_demo)\n", ""));
         ASSERT(fx_run(&f, "--check", out, sizeof out) != 0);
         ASSERT(has_error(out, "MIXED_GENERATION"));
         PASS();
@@ -684,7 +690,7 @@ static int test_tg_write_invalid(void)
 {
     int failures = 0;
     struct fx f = {0};
-    static char before[5][TG_OUT], after[5][TG_OUT];
+    static char before[4][TG_OUT], after[4][TG_OUT];
     char out[TG_OUT], json[TG_OUT];
     TEST("toolgen: --write changes nothing when a manifest is invalid") {
         ASSERT(replace_once(VALID_JSON, "\"operator\"", "\"root\"", json, sizeof json));
@@ -692,7 +698,7 @@ static int test_tg_write_invalid(void)
         ASSERT(snapshot(&f, before));
         ASSERT(fx_run(&f, "--write", out, sizeof out) != 0);
         ASSERT(snapshot(&f, after));
-        for (size_t i = 0; i < 5; i++)
+        for (size_t i = 0; i < 4; i++)
             ASSERT(strcmp(before[i], after[i]) == 0);
         PASS();
     } _test_next:;
@@ -704,7 +710,7 @@ static int test_tg_write_locked(void)
 {
     int failures = 0;
     struct fx f = {0};
-    static char before[5][TG_OUT], after[5][TG_OUT];
+    static char before[4][TG_OUT], after[4][TG_OUT];
     char out[TG_OUT];
     TEST("toolgen: --write refuses while another writer holds the lock") {
         ASSERT(fx_demo(&f, VALID_JSON));
@@ -713,7 +719,7 @@ static int test_tg_write_locked(void)
         ASSERT(fx_run(&f, "--write", out, sizeof out) != 0);
         ASSERT(has_error(out, "WRITER_BUSY"));
         ASSERT(snapshot(&f, after));
-        for (size_t i = 0; i < 5; i++)
+        for (size_t i = 0; i < 4; i++)
             ASSERT(strcmp(before[i], after[i]) == 0);
         PASS();
     } _test_next:;
@@ -739,7 +745,7 @@ static int test_tg_second_command(void)
         ASSERT(fx_demo_test(&f, "aaa_demo", "fleet.demo.show"));
         ASSERT(fx_run(&f, "--write", out, sizeof out) == 0);
         ASSERT(fx_run(&f, "--check", out, sizeof out) == 0);
-        ASSERT(fx_get(&f, k_files[3], cat, sizeof cat));
+        ASSERT(fx_get(&f, k_files[2], cat, sizeof cat));
         const char *first = strstr(cat, "ZCL_TEST_GROUP(fleet_demo)");
         const char *second = strstr(cat, "ZCL_TEST_GROUP(aaa_demo)");
         ASSERT(first && second && first < second);
@@ -951,13 +957,13 @@ static int test_tg_partial_write(void)
     char out[TG_OUT];
     TEST("toolgen: a write that fails on the third target leaves a state --check calls mixed") {
         ASSERT(fx_demo(&f, VALID_JSON));
-        set_mode(&f, "engine/composition", 0555);
+        set_mode(&f, "tools/dev", 0555);
         if (geteuid() == 0) {
             printf("toolgen: running as root; directory permissions cannot force the failure\n");
         } else {
             ASSERT(fx_run(&f, "--write", out, sizeof out) != 0);
             ASSERT(has_error(out, "WRITE_FAILED"));
-            set_mode(&f, "engine/composition", 0755);
+            set_mode(&f, "tools/dev", 0755);
             ASSERT(fx_run(&f, "--check", out, sizeof out) != 0);
             ASSERT(has_error(out, "MIXED_GENERATION"));
             ASSERT(fx_run(&f, "--write", out, sizeof out) == 0);
@@ -965,7 +971,7 @@ static int test_tg_partial_write(void)
         }
         PASS();
     } _test_next:;
-    set_mode(&f, "engine/composition", 0755);
+    set_mode(&f, "tools/dev", 0755);
     fx_drop(&f);
     return failures;
 }
@@ -979,7 +985,7 @@ static int test_tg_crlf_target(void)
     char out[TG_OUT];
     TEST("toolgen: a target with CRLF line endings is refused") {
         ASSERT(fx_demo(&f, VALID_JSON));
-        ASSERT(fx_puts(&f, k_files[3], "ZCL_TEST_GROUP(alpha)\r\n"
+        ASSERT(fx_puts(&f, k_files[2], "ZCL_TEST_GROUP(alpha)\r\n"
                        "/* z23-toolgen:begin test-groups - generated, do not edit */\r\n"
                        "/* z23-toolgen:end test-groups */\r\n"));
         ASSERT(fx_run(&f, "--write", out, sizeof out) != 0);
@@ -1016,10 +1022,10 @@ static int test_tg_no_trailing_newline(void)
     char out[TG_OUT], text[TG_OUT];
     TEST("toolgen: a target whose last line has no newline is rewritten without adding one") {
         ASSERT(fx_demo(&f, VALID_JSON));
-        ASSERT(fx_puts(&f, k_files[3], "ZCL_TEST_GROUP(alpha)\n" BEGIN_LINE("test-groups")
+        ASSERT(fx_puts(&f, k_files[2], "ZCL_TEST_GROUP(alpha)\n" BEGIN_LINE("test-groups")
                        "/* z23-toolgen:end test-groups */"));
         ASSERT(fx_run(&f, "--write", out, sizeof out) == 0);
-        ASSERT(fx_get(&f, k_files[3], text, sizeof text));
+        ASSERT(fx_get(&f, k_files[2], text, sizeof text));
         ASSERT(strstr(text, "ZCL_TEST_GROUP(fleet_demo)\n/* z23-toolgen:end test-groups */") != NULL);
         ASSERT(text[strlen(text) - 1u] == '/');
         ASSERT(fx_run(&f, "--check", out, sizeof out) == 0);

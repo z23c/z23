@@ -30,12 +30,13 @@
  *     inside the program that already owns them.
  *   - A timeout reports itself AS a timeout, never as a failure or a pass.
  *   - There is deliberately NO node command leaf for any of this, and so no
- *     row in config/remote_command_classes.def. A leaf would be a way to ask
+ *     permit row in engine/composition/remote_command_classes.def. A leaf would be a way to ask
  *     the node to spend money at a vendor, and the moment one exists the only
  *     thing standing between a stranger and that bill is a class annotation
  *     someone has to get right. A human runs this program with an argument
  *     vector; there is no wire that reaches it. If a leaf is ever added, it
- *     is REMOTE_CLASS_NEVER and that is not a judgement call.
+ *     stays REMOTE_CLASS_NEVER by having no permit row, and that is not a
+ *     judgement call.
  *
  * ── WHY THIS IS A TLS CLIENT AND NOT A curl PIPELINE ─────────────────────
  * tools/lint/lintc/gate_tree_walk.c is right, and `curl` is a dependency a

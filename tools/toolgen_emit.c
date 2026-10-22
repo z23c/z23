@@ -17,7 +17,7 @@ const struct tg_family tg_families[] = {
 };
 const size_t tg_family_count = sizeof tg_families / sizeof tg_families[0];
 
-static const char k_remote_path[] = "engine/composition/remote_command_classes.def";
+const char tg_remote_path[] = "engine/composition/remote_command_classes.def";
 static const char k_catalog_path[] = "tools/dev/test_group_catalog.def";
 static const char k_datadir_path[] = "tests/harness/src/test_read_leaf_no_datadir_write.c";
 
@@ -28,8 +28,7 @@ size_t tg_targets(struct tg_target *out, size_t max)
         out[n++] = (struct tg_target){TGT_DEF, &tg_families[i], tg_families[i].def, "commands"};
         out[n++] = (struct tg_target){TGT_HEADER, &tg_families[i], tg_families[i].header, "handlers"};
     }
-    if (n + 3u <= max) {
-        out[n++] = (struct tg_target){TGT_REMOTE, NULL, k_remote_path, "remote-classes"};
+    if (n + 2u <= max) {
         out[n++] = (struct tg_target){TGT_CATALOG, NULL, k_catalog_path, "test-groups"};
         out[n++] = (struct tg_target){TGT_DATADIR, NULL, k_datadir_path, "datadir-leaves"};
     }
@@ -44,7 +43,6 @@ bool tg_applies(const struct tg_target *t, const struct tg_manifest *m)
         return m->family == t->family;
     case TGT_DATADIR:
         return m->has_datadir;
-    case TGT_REMOTE:
     case TGT_CATALOG:
         return true;
     }
@@ -149,10 +147,6 @@ void tg_render_unit(const struct tg_target *t, const struct tg_manifest *m,
         break;
     case TGT_HEADER:
         render_header(m, sb);
-        break;
-    case TGT_REMOTE:
-        tg_sb_printf(sb, "/* %s: %s fixes this leaf to never remote. */\n", m->path, TG_PROFILE);
-        tg_sb_printf(sb, "REMOTE_COMMAND_CLASS(\"%s\", REMOTE_CLASS_NEVER, \"\")\n", m->path);
         break;
     case TGT_CATALOG:
         tg_sb_printf(sb, "ZCL_TEST_GROUP(%s)\n", m->test_group);

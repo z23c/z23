@@ -812,6 +812,18 @@ static void pk_do_impact(struct pk_run *run, const char *path)
     json_free(&top);
 }
 
+/* The class a command resolves to. A command with no row in
+ * remote_command_classes.def is REMOTE_CLASS_NEVER, and so is a row whose
+ * class token is not exactly a permit: absent or unreadable never widens. */
+static const char *pk_resolved_remote_class(const struct pk_row *rr)
+{
+    if (rr->found
+        && (strcmp(rr->caps, "REMOTE_CLASS_READ_ONLY") == 0
+            || strcmp(rr->caps, "REMOTE_CLASS_OWNER_CAPABILITY") == 0))
+        return rr->caps;
+    return "REMOTE_CLASS_NEVER";
+}
+
 static void pk_authority_commands(struct pk_run *run, const char *path)
 {
     const char *cmds[CODE_COMMAND_CAP];
@@ -824,11 +836,11 @@ static void pk_authority_commands(struct pk_run *run, const char *path)
         (void)json_push_kv_str(&o, "command", cmds[i]);
         (void)json_push_kv_str(&o, "file", path);
         (void)json_push_kv_str(&o, "remote_class",
-                               rr.found ? rr.caps : "unclassified");
+                               pk_resolved_remote_class(&rr));
         (void)json_push_kv_int(&o, "line", rr.line);
         pk_push(&run->auth, &o);
         pk_sb_add(&run->authority, "  command %-22s remote class %s", cmds[i],
-                  rr.found ? rr.caps : "UNCLASSIFIED");
+                  pk_resolved_remote_class(&rr));
         if (rr.found)
             pk_sb_add(&run->authority, "  (%s:%d)", rr.source, rr.line);
         pk_sb_add(&run->authority, "\n");

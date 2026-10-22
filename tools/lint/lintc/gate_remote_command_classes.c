@@ -3,14 +3,16 @@
  * purpose: C23 lint gate — check-remote-command-classes. Byte-parity port
  * of tools/lint/lintc/gate_remote_command_classes.c (at 89fca9905), which used
  * to reach through two standalone awk helper programs (now retired — see
- * gate_remote_command_classes_parse.c). Every command leaf in the typed
- * registry (every .def file under engine/composition/commands/) and the
- * flat agent-contract table (cognition/controllers/include/controllers/
- * agent_contracts.def) must carry exactly one row in
- * engine/composition/remote_command_classes.def, naming a known class
- * token, and (when the class permits remote reach) a non-empty reason.
- * There is no baseline: the tree is clean, and a shrink-only ratchet here
- * would only be a place to hide the next omission.
+ * gate_remote_command_classes_parse.c). A command leaf in the typed registry
+ * (every .def file under engine/composition/commands/) or the flat
+ * agent-contract table (cognition/controllers/include/controllers/
+ * agent_contracts.def) with no row in
+ * engine/composition/remote_command_classes.def is REMOTE_CLASS_NEVER: the
+ * table lists permits only, so a new leaf needs no row. Every row must name a
+ * registered leaf (no stale permit), appear once, carry a known class token
+ * and, when the class permits remote reach, a non-empty reason. There is no
+ * baseline: a shrink-only ratchet here would only hide the next stale
+ * permit.
  *
  * Gates: check-remote-command-classes
  * Single-gate family (the port's _parse.c and _selftest.c siblings share
@@ -64,30 +66,6 @@ static int rcc_print_list(FILE *out, const struct rcc_list *l)
         if (fprintf(out, "    %s\n", l->v[i]) < 0)
             return die("z23-lint: write failed\n", "");
     return 0;
-}
-
-/* comm -23 registry classified — registry entries with no row (defect A). */
-static int rcc_check_unclassified(const struct rcc_list *registry,
-                                  const struct rcc_list *classified,
-                                  const char *table, FILE *err, int *fail)
-{
-    struct rcc_list miss = { NULL, 0, 0 };
-    int rc = 0;
-    for (size_t i = 0; rc == 0 && i < registry->n; i++)
-        if (!rcc_has(classified, registry->v[i]))
-            rc = rcc_push(&miss, registry->v[i], strlen(registry->v[i]));
-    if (rc == 0 && miss.n) {
-        *fail = 1;
-        fprintf(err, "%s: FAIL — command leaves with no remote class:\n",
-                k_gate);
-        rc = rcc_print_list(err, &miss);
-        fprintf(err, "  Add one REMOTE_COMMAND_CLASS row per leaf to %s.\n",
-                table);
-        fputs("  A new command leaf is a new remote-authority decision; "
-              "make it.\n", err);
-    }
-    rcc_free(&miss);
-    return rc;
 }
 
 /* comm -13 registry classified — rows naming a leaf that does not exist
@@ -322,10 +300,7 @@ static int rcc_gather_table(const struct rcc_ctx *c, struct rcc_data *d)
 static int rcc_judge(const struct rcc_ctx *c, struct rcc_data *d, FILE *err,
                      int *fail)
 {
-    int rc = rcc_check_unclassified(&d->registry, &d->classified, c->table,
-                                    err, fail);
-    if (rc == 0)
-        rc = rcc_check_orphans(&d->registry, &d->classified, c->table, err,
+    int rc = rcc_check_orphans(&d->registry, &d->classified, c->table, err,
                                fail);
     if (rc == 0)
         rc = rcc_check_dupes(&d->classified_all, err, fail);
@@ -334,6 +309,17 @@ static int rcc_judge(const struct rcc_ctx *c, struct rcc_data *d, FILE *err,
     if (rc == 0)
         rc = rcc_check_malformed(&d->rows, err, fail);
     return rc;
+}
+
+/* Registered leaves that resolve to NEVER (no row, or a NEVER row). */
+static size_t rcc_count_never(const struct rcc_data *d)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < d->registry.n; i++)
+        if (strcmp(rcc_resolve_class(&d->rows, d->registry.v[i]),
+                   "REMOTE_CLASS_NEVER") == 0)
+            n++;
+    return n;
 }
 
 static int rcc_run_gate(const struct rcc_ctx *c, FILE *out, FILE *err)
@@ -353,9 +339,10 @@ static int rcc_run_gate(const struct rcc_ctx *c, FILE *out, FILE *err)
         rc = rcc_judge(c, &d, err, &fail);
 
     if (rc == 0 && !fail) {
-        if (fprintf(out, "%s: OK — %zu rows cover %zu command leaves "
-                    "(%zu typed, %zu agent-contract).\n", k_gate, d.rows.n,
-                    d.registry.n, d.typed.n, d.agent.n) < 0)
+        if (fprintf(out, "%s: OK — %zu permit rows over %zu command leaves "
+                    "(%zu typed, %zu agent-contract); %zu NEVER by default "
+                    "(no row).\n", k_gate, d.rows.n, d.registry.n,
+                    d.typed.n, d.agent.n, rcc_count_never(&d)) < 0)
             rc = die("z23-lint: write failed\n", "");
     } else if (rc == 0) {
         rc = 1;

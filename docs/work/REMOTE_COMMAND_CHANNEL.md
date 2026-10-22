@@ -144,8 +144,8 @@ No capability, or an unknown one, is a refusal.
 
 *Point three — the class.* The named leaf is looked up in
 [`engine/composition/remote_command_classes.def`](../../engine/composition/remote_command_classes.def).
-Anything not classified `read_only` or `owner_capability` is refused before the
-leaf is reached.
+Anything without a `read_only` or `owner_capability` row (a leaf with no row is
+`never_remote`) is refused before the leaf is reached.
 
 Only after all three does the existing leaf run — with **all** of its local
 checks intact. The remote class only ever subtracts. `hotswap_activation_authorized()`
@@ -301,8 +301,9 @@ guarantees.
 
 ## The classification and its gate
 
-Every command leaf gets exactly one class, and there is no unclassified state.
-The table covers both dispatchable surfaces: the typed dotted registry under
+Every command leaf has exactly one class, and a leaf with no row is
+`REMOTE_CLASS_NEVER`: the table lists permits only, so there is no unclassified
+state and a new non-remotable command touches no line of it. The table covers both dispatchable surfaces: the typed dotted registry under
 [`engine/composition/commands`](../../engine/composition/commands), and the flat method table in
 [`cognition/controllers/include/controllers/agent_contracts.def`](../../cognition/controllers/include/controllers/agent_contracts.def)
 that backs `z23 agentops`, `z23 dbquery` and `z23 agentdeployguard`
@@ -310,7 +311,8 @@ that backs `z23 agentops`, `z23 dbquery` and `z23 agentdeployguard`
 [`engine/controllers/src/event_controller.c`](../../engine/controllers/src/event_controller.c),
 handler in
 [`cognition/controllers/src/agent_interface_controller.c`](../../cognition/controllers/src/agent_interface_controller.c)).
-Leaving the second surface out would have left arbitrary SQL unclassified.
+Leaving the second surface out would have left arbitrary SQL without a stated
+class.
 
 The counts, the per-class arguments and the per-leaf reasons live in
 [`engine/composition/remote_command_classes.def`](../../engine/composition/remote_command_classes.def)
@@ -318,14 +320,14 @@ rather than being restated here, so there is one place to read and one place to
 change.
 
 [`tools/lint/lintc/gate_remote_command_classes.c`](../../tools/lint/lintc/gate_remote_command_classes.c)
-(wired into `make lint`) asserts six things, all fail-closed: every registry
-leaf has a row; every row names a live leaf; no leaf is classified twice; every
-class token is known; every `read_only` or `owner_capability` row states a
+(wired into `make lint`) asserts five things, all fail-closed: every row names a
+live leaf (a stale permit fails); no leaf has two rows; every class token is
+known; every `read_only` or `owner_capability` row states a
 reason; and every row is two well-formed C string literals. The last one earned
 its place immediately — the table is X-macro data that nothing `#include`s yet,
 so no compiler is watching it, and the first draft of the table shipped two rows
-with a bare quote typed inside the reason prose. Those rows passed all five
-other checks (the reason parses, silently truncated at the stray quote) and
+with a bare quote typed inside the reason prose. Those rows passed every
+other check (the reason parses, silently truncated at the stray quote) and
 would not have compiled on the day a consumer arrived.
 
 It has no baseline — the tree is clean, and a baseline would only be somewhere
@@ -333,11 +335,15 @@ to hide the next omission. Its `--selftest` plants each defect class in a
 fixture and asserts the red, because a gate nobody has watched fail is not an
 assertion.
 
-The direction that matters is the first one. The table's default is
-`never_remote`, so a **missing** row is safe today — and that is exactly what
-makes it dangerous: nothing breaks, nobody notices, and the table quietly stops
-being where the decision is made. The gate turns registering a command leaf into
-a two-file operation: register it, and say whether it may be reached remotely.
+The direction that matters is that a **missing** row is `never_remote`, and
+that is the safe direction. An earlier draft of this table listed every refused
+leaf too, so registering a command meant also adding a refusal row nobody read:
+the file changed in 52 commits in ten days and its 722 refusal rows buried the
+112 permits. Now the table lists permits only. Registering a command touches
+only the command's own files; letting a peer run it is the two-file operation,
+because that is the decision that needs an argument. The gate prints how many
+registered leaves are `never_remote` by default so the size of the refused set
+stays visible.
 
 ## What this design does NOT do in its first increment
 

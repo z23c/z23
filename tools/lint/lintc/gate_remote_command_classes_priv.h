@@ -53,6 +53,13 @@ int rcc_agent_defs(const char *agent_def, struct rcc_list *methods);
 /* source C: the class table (replaces the retired class-table awk helper). */
 int rcc_table_rows(const char *table_path, struct rcc_rows *rows);
 
+/* The class a leaf resolves to. A leaf with no row is REMOTE_CLASS_NEVER,
+ * and so is a row whose class token is not a known one: absent or
+ * unreadable never widens. Only an exact READ_ONLY or OWNER_CAPABILITY row
+ * (the first row for the leaf) yields a permit. The returned string is
+ * static or borrowed from rows. */
+const char *rcc_resolve_class(const struct rcc_rows *rows, const char *leaf);
+
 /* Re-invokes the gate against the given three sources and two floors — the
  * selftest's hook onto the same run_gate() the production path uses. */
 int rcc_run_gate_for_selftest(const char *def_dir, const char *agent_def,
