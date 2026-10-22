@@ -1022,8 +1022,12 @@ static struct zcl_objective_value obj_commits_landed_today(
 
 static const char *const k_product_paths[] = {"core/", "engine/", "contexts/",
                                               "apps/", "platform/"};
+/* Paths that were generated in past commits; matched against git history, so a
+ * path that has since left the tree still counts. Never shown as a document. */
 static const char *const k_generated_paths[] = {
-    "docs/CAPABILITY_INVENTORY.jsonl", "docs/API_REFERENCE.md"};
+    "docs/CAPABILITY_INVENTORY.jsonl",
+    "docs/API_REFERENCE.md", // error-doc-ref-ok: a git history path, not a document reference
+};
 
 /* Share, in percent, of the window's commits that touch a product path. */
 static struct zcl_objective_value obj_product_commit_share_7d(
