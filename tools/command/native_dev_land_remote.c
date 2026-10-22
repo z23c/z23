@@ -320,6 +320,31 @@ static void dlr_recv_submit(const struct dlr_recv *r,
     json_free(&in);
 }
 
+/* The queue checkout: an explicit absolute --checkout=DIR (the marker check
+ * still applies), else the walk up from the current directory. */
+static bool dlr_recv_root(const struct zcl_command_request *req,
+                         struct dlr_recv *r, struct zcl_command_reply *reply)
+{
+    const char *dir = dlr_str(req, "checkout");
+    if (!dir) {
+        if (zcl_devagent_checkout_root(NULL, r->root, sizeof(r->root)))
+            return true;
+        dlr_recv_fail(reply, "RECEIVE_NO_CHECKOUT", "checkout",
+                      "run this inside the checkout that owns the land "
+                      "queue, or pass --checkout=DIR",
+                      "no checkout root above the current directory");
+        return false;
+    }
+    if (dir[0] == '/' && dlr_arg_ok(dir, true) &&
+        zcl_devagent_checkout_root(dir, r->root, sizeof(r->root)))
+        return true;
+    dlr_recv_fail(reply, "RECEIVE_BAD_CHECKOUT", "checkout",
+                  "--checkout must be an absolute path inside the checkout "
+                  "that owns the land queue",
+                  dir);
+    return false;
+}
+
 static void dlr_receive(const struct zcl_command_request *req,
                         struct zcl_command_reply *reply)
 {
@@ -334,13 +359,10 @@ static void dlr_receive(const struct zcl_command_request *req,
         return;
     }
     r = zcl_calloc(1, sizeof(*r), "dev_land_remote.recv");
-    if (!zcl_devagent_checkout_root(NULL, r->root, sizeof(r->root)))
-        dlr_recv_fail(reply, "RECEIVE_NO_CHECKOUT", "checkout",
-                      "run this inside the checkout that owns the land queue",
-                      "no checkout root above the current directory");
-    else if (dlr_recv_bundle_verify(r, bundle, reply) &&
-             dlr_recv_head(r, reply) && dlr_recv_fetch(r, lane, reply) &&
-             dlr_recv_worktree(r, lane, reply))
+    if (dlr_recv_root(req, r, reply) &&
+        dlr_recv_bundle_verify(r, bundle, reply) &&
+        dlr_recv_head(r, reply) && dlr_recv_fetch(r, lane, reply) &&
+        dlr_recv_worktree(r, lane, reply))
         dlr_recv_submit(r, req, reply);
     free(r);
 }
@@ -348,7 +370,7 @@ static void dlr_receive(const struct zcl_command_request *req,
 /* ── send ──────────────────────────────────────────────────────────────── */
 
 struct dlr_send {
-    const char *host, *lane, *note, *cmd, *inbox;
+    const char *host, *lane, *note, *cmd, *inbox, *checkout;
     char root[DLR_PATH];
     char sha[80];
     char tmpdir[PLATFORM_TEMP_PATH_MAX];
@@ -373,6 +395,7 @@ static bool dlr_send_args(const struct zcl_command_request *req,
     s->note = dlr_str(req, "note");
     s->cmd = dlr_str(req, "remote_cmd");
     s->inbox = dlr_str(req, "inbox");
+    s->checkout = dlr_str(req, "remote_checkout");
     if (!s->cmd)
         s->cmd = DLR_DEFAULT_CMD;
     if (!s->inbox)
@@ -380,16 +403,19 @@ static bool dlr_send_args(const struct zcl_command_request *req,
     if (dlr_host_ok(s->host) && dlr_lane_ok(s->lane) &&
         dlr_arg_ok(s->cmd, true) && dlr_arg_ok(s->inbox, true) &&
         !strchr(s->inbox, ' ') &&
+        (!s->checkout || (s->checkout[0] == '/' &&
+                           dlr_arg_ok(s->checkout, true))) &&
         (!s->note || (dlr_arg_ok(s->note, false) &&
                       strlen(s->note) <= DLR_NOTE_MAX)))
         return true;
     dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
-                  "host, lane, note, remote_cmd and inbox may hold only "
+                  "host, lane, note, remote_cmd, inbox and remote_checkout may hold "
+                  "only "
                   "[A-Za-z0-9 ._,:/()+=-] (no parentheses in host, "
                   "remote_cmd or inbox; lane is [a-z0-9][a-z0-9-]{0,47}; "
                   "note is at most 512 characters); ssh joins them into one "
                   "remote shell string",
-                  "input.host, lane, note, remote_cmd or inbox");
+                  "input.host, lane, note, remote_cmd, inbox or remote_checkout");
     return false;
 }
 
@@ -539,7 +565,7 @@ static void dlr_send_relay(const char *out, int rc,
 static void dlr_send_receive(const struct dlr_send *s,
                              struct zcl_command_reply *reply)
 {
-    char b[DLR_PATH + 16], l[96], n[DLR_NOTE_MAX + 16], *out;
+    char b[DLR_PATH + 16], l[96], n[DLR_NOTE_MAX + 16], c[DLR_PATH + 16], *out;
     const char *argv[16];
     size_t k = 0;
     int rc;
@@ -557,6 +583,10 @@ static void dlr_send_receive(const struct dlr_send *s,
     if (s->note) {
         (void)snprintf(n, sizeof(n), "'--note=%s'", s->note);
         argv[k++] = n;
+    }
+    if (s->checkout) {
+        (void)snprintf(c, sizeof(c), "'--checkout=%s'", s->checkout);
+        argv[k++] = c;
     }
     argv[k] = NULL;
     out = zcl_calloc(1, DLR_OUT_CAP, "dev_land_remote.reply");

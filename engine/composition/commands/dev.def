@@ -2311,12 +2311,16 @@ ZCL_COMMAND_DEV_COMMAND(
     "refusal such as TIP_UNSIGNED). Refuses RECEIVE_BAD_LANE (lane is "
     "[a-z0-9][a-z0-9-]{0,47}), RECEIVE_BAD_BUNDLE (verify failed, or not "
     "exactly one head), RECEIVE_FETCH_FAILED, RECEIVE_WORKTREE_DIRTY (tracked "
-    "changes; the worktree is never reset) and RECEIVE_WORKTREE_FAILED.",
+    "changes; the worktree is never reset), RECEIVE_WORKTREE_FAILED and "
+    "RECEIVE_BAD_CHECKOUT (checkout is the absolute path of the queue "
+    "checkout, for a caller whose current directory is outside it, as over "
+    "ssh; without it the checkout is found above the current directory, "
+    "else RECEIVE_NO_CHECKOUT).",
     65536,
     "land,receive,bundle,remote,queue",
-    "zcl.land_receive_input.v1", "zcl.land.v1", "bundle,lane,note",
+    "zcl.land_receive_input.v1", "zcl.land.v1", "bundle,lane,note,checkout",
     "bundle,lane",
-    "z23-dev dev land receive --bundle=PATH --lane=NAME",
+    "z23-dev dev land receive --bundle=PATH --lane=NAME [--checkout=DIR]",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_PERSISTENT,
@@ -2337,13 +2341,15 @@ ZCL_COMMAND_DEV_COMMAND(
     "(inbox defaults to .cache/development-scratch/z23/land-inbox under the "
     "remote home) and runs `<remote_cmd> dev land receive` over ssh "
     "(remote_cmd defaults to z23-dev), relaying the remote JSON reply as "
-    "data.remote. Host, lane, note, remote_cmd and inbox are checked against "
+    "data.remote. Host, lane, note, remote_cmd, inbox and remote_checkout are checked against "
     "[A-Za-z0-9 ._,:/()+=-] because ssh joins its argv into a remote shell "
-    "string (SEND_BAD_ARGUMENT); every remote argument is single-quoted.",
+    "string (SEND_BAD_ARGUMENT); every remote argument is single-quoted. "
+    "remote_checkout (absolute) is forwarded as receive's --checkout, for a "
+    "queue host whose installed z23-dev runs outside any checkout.",
     65536,
     "land,send,bundle,remote,ssh",
     "zcl.land_send_input.v1", "zcl.land_send.v1",
-    "host,lane,note,remote_cmd,inbox", "host,lane",
+    "host,lane,note,remote_cmd,inbox,remote_checkout", "host,lane",
     "z23-dev dev land send --host=queue-host --lane=mac",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,

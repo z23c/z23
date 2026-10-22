@@ -1978,8 +1978,10 @@ queue host queues them like any other lane. The tip must carry a good
 signature on the queue host, or the reply is `TIP_UNSIGNED`.
 
 ```
-z23-dev dev land send --host=<queue-host> --lane=NAME [--note=TEXT]
-z23-dev dev land receive --bundle=PATH --lane=NAME [--note=TEXT]   # on <queue-host>
+z23-dev dev land send --host=<queue-host> --lane=NAME [--note=TEXT] \
+    --remote_checkout=<queue-checkout>
+z23-dev dev land receive --bundle=PATH --lane=NAME [--note=TEXT] \
+    [--checkout=<queue-checkout>]   # on <queue-host>
 ```
 
 `send` refuses a dirty tracked tree (`SEND_DIRTY_TREE`) and a HEAD with nothing
@@ -1987,6 +1989,10 @@ ahead of `origin/main` (`SEND_NOTHING_AHEAD`), copies the bundle with `scp` and
 runs `receive` over `ssh`, relaying its JSON reply as `data.remote`. `receive`
 fetches the single head into `refs/heads/remote/NAME`, readies the detached
 worktree `land-remote/NAME` under the state root, and returns submit's reply.
+`receive` finds the queue checkout above its current directory; over `ssh` that is
+the remote home, so `send` forwards `--remote_checkout` (an absolute path) as
+`--checkout` and `receive` refuses `RECEIVE_BAD_CHECKOUT` when it is not a
+checkout.
 A lane worktree with tracked changes refuses `RECEIVE_WORKTREE_DIRTY` and is
 never reset. Both leaves are local-operator only.
 
