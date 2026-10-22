@@ -520,5 +520,9 @@ int test_body_persist_stage(void)
 
     printf("body_persist_stage tests: %s\n",
            failures ? "FAILED" : "PASSED");
+#if !defined(_WIN32)
+    /* Every subtest has ended (pass or fail); drop this run's RAM trees. */
+    test_shm_reap_own("body_persist_");
+#endif
     return failures;
 }

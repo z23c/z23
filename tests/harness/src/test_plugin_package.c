@@ -713,5 +713,7 @@ int test_plugin_package(void)
 #if defined(__linux__)
     failures += pp_runtime_journey();
 #endif
+    /* Every case has ended (pass or fail); drop this run's RAM trees. */
+    test_shm_reap_own("zcode_swarm-test-tmp_");
     return failures;
 }

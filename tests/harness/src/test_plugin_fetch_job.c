@@ -482,5 +482,7 @@ int test_plugin_fetch_job(void)
     failures += pjr_case_1();
     failures += pjr_case_2();
     failures += pjr_case_3();
+    /* Every case has ended (pass or fail); drop this run's RAM trees. */
+    test_shm_reap_own("zcode_swarm-test-tmp_");
     return failures;
 }

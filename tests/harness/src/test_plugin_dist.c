@@ -332,5 +332,7 @@ int test_plugin_dist(void)
     failures += pd_refuse_downgrade();
     failures += pd_refuse_publish();
     failures += pd_refuse_big_and_link();
+    /* Every case has ended (pass or fail); drop this run's RAM trees. */
+    test_shm_reap_own("zcode_swarm-test-tmp_");
     return failures;
 }

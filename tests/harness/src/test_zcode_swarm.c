@@ -613,5 +613,9 @@ int test_zcode_swarm(void)
     failures += t_swarm_linked_record();
     failures += t_swarm_event_driven_schedule();
     failures += t_swarm_peer_offer();
+#if !defined(_WIN32)
+    /* Every case has ended (pass or fail); drop this run's RAM trees. */
+    test_shm_reap_own("zcode_swarm-test-tmp_");
+#endif
     return failures;
 }

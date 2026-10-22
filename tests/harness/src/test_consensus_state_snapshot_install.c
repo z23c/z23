@@ -5348,7 +5348,11 @@ int test_consensus_state_snapshot_install(void)
 {
 #if !defined(_WIN32)
     int crash_failures = committed_install_sigkill_test();
-    return crash_failures + test_consensus_state_snapshot_install_platform_arm();
+    int failures =
+        crash_failures + test_consensus_state_snapshot_install_platform_arm();
+    /* Every case has ended (pass or fail); drop this run's RAM root. */
+    test_shm_reap_own("consensus_state_install-");
+    return failures;
 #else
     return test_consensus_state_snapshot_install_platform_arm();
 #endif

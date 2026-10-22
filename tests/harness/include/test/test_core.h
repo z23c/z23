@@ -211,6 +211,34 @@ void test_rm_rf(const char *dir);
  * Returns the rmdir/unlink result of the top-level path. */
 int test_rm_rf_recursive(const char *path);
 
+/* Remove this process's /dev/shm fixtures: every entry named exactly
+ * "<prefix><pid>" or "<prefix><pid>_<tag>". Matching the pid as a whole
+ * token keeps pid 12 from reaping pid 123's live tree. Callers run it at the
+ * end of the group entry, after every case has ended (pass or fail). It
+ * matches only the calling pid: a fixture created by a forked child under
+ * the child's pid is not reaped by this call. */
+static inline void test_shm_reap_own(const char *prefix)
+{
+#if !defined(_WIN32)
+    char want[128];
+    int wrote = snprintf(want, sizeof(want), "%s%d", prefix, (int)getpid());
+    if (wrote <= 0 || (size_t)wrote >= sizeof(want)) return;
+    DIR *d = opendir("/dev/shm");
+    if (!d) return;
+    size_t wl = strlen(want);
+    for (struct dirent *e = readdir(d); e; e = readdir(d)) {
+        if (strncmp(e->d_name, want, wl) != 0) continue;
+        if (e->d_name[wl] != '\0' && e->d_name[wl] != '_') continue;
+        char path[320];
+        if (snprintf(path, sizeof(path), "/dev/shm/%s", e->d_name) > 0)
+            (void)test_rm_rf_recursive(path);
+    }
+    (void)closedir(d);
+#else
+    (void)prefix;
+#endif
+}
+
 /* Build "<cwd>/test-tmp/<prefix>_<pid>_<tag>" into buf, clean any stale
  * directory at that path, then mkdir test-tmp and the dir itself. */
 void test_make_tmpdir(char *buf, size_t n, const char *prefix,

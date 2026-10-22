@@ -529,10 +529,13 @@ static int t_routed_carrier_reconstructs_without_second_request(void)
 
 int test_zcode_swarm_dht(void)
 {
-    return t_discovery_inert_before_hosting() +
+    int failures = t_discovery_inert_before_hosting() +
            t_lease_completes_to_offer_after_enroll() +
            t_unhelpful_outcome_never_spin_rebegins() +
            t_expired_route_never_advertises() +
            t_adopted_root_frees_its_slot_at_once() +
            t_routed_carrier_reconstructs_without_second_request();
+    /* Every case has ended (pass or fail); drop this run's RAM trees. */
+    test_shm_reap_own("zcode_swarm-test-tmp_");
+    return failures;
 }
