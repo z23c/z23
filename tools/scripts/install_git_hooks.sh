@@ -149,7 +149,8 @@ if [[ "$host_kind" == windows ]]; then
     printf '%s\n' "  locked executables -> immutable content-addressed generation"
 else
     printf '%s\n' "Installed native git hooks"
-    printf '%s\n' "  pre-push -> admits one immutable exact commit/base receipt"
+    printf '%s\n' "  pre-push -> admits main only from land-queue checkouts, on one exact commit/base receipt"
+    printf '%s\n' "             (publish with: build/bin/z23-dev dev land submit --worktree=\$PWD)"
     printf '%s\n' "  post-commit/post-merge/post-checkout -> schedule proof and return"
 fi
 printf '%s\n' "  pre-commit -> refuses non-main-branch commits in the MAIN checkout"

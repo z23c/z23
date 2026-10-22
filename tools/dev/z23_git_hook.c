@@ -12,6 +12,7 @@
 #include "base/safe_alloc.h"
 #include "base/log_level.h"
 #include "platform/positioned_file.h"
+#include "platform/state_root.h"
 #if defined(_WIN32)
 #include "platform/private_file.h"
 #endif
@@ -620,6 +621,72 @@ static int admit_pair(const char *root, const char *local, const char *base)
     return 0;
 }
 
+/* Only the native land queue's own checkouts may publish main. Its state
+ * root is <platform_state_root>/land (driver checkout <land>/wt, fence
+ * replacements beside it), the same derivation tools/command/native_dev_land.c
+ * uses; the hook links the same platform/state_root.c. The existing
+ * directory is resolved without creating anything: a box that never ran the
+ * queue has no land directory, so every checkout there is outside it. */
+static bool hook_canonical_path(const char *path, char out[PATH_MAX])
+{
+#if defined(_WIN32)
+    return _fullpath(out, path, PATH_MAX) != NULL;
+#else
+    return realpath(path, out) != NULL;
+#endif
+}
+
+static bool hook_path_separator(char c)
+{
+#if defined(_WIN32)
+    return c == '/' || c == '\\';
+#else
+    return c == '/';
+#endif
+}
+
+static bool inside_land_queue(const char *root)
+{
+    char state[PATH_MAX], land[PATH_MAX], land_real[PATH_MAX],
+         root_real[PATH_MAX];
+    if (!platform_state_root_existing(state, sizeof(state))) return false;
+    int n = snprintf(land, sizeof(land), "%s/land", state);
+    if (n <= 0 || (size_t)n >= sizeof(land) ||
+        !hook_canonical_path(land, land_real) ||
+        !hook_canonical_path(root, root_real))
+        return false;
+    size_t len = strlen(land_real);
+    while (len > 1 && hook_path_separator(land_real[len - 1]))
+        land_real[--len] = 0;
+#if defined(_WIN32)
+    if (_strnicmp(root_real, land_real, len) != 0) return false;
+#else
+    if (strncmp(root_real, land_real, len) != 0) return false;
+#endif
+    return hook_path_separator(root_real[len]) && root_real[len + 1] != 0;
+}
+
+static int land_queue_refusal(const char *root)
+{
+    (void)fprintf(stderr,
+                  "pre-push: REFUSED status=main-push-outside-land-queue\n"
+                  "pre-push: submit instead: build/bin/z23-dev dev land "
+                  "submit --worktree=%s\n", root);
+    return 1;
+}
+
+/* Main is the only ref, and only the land queue's checkouts may publish it. */
+static int route_refusal(const char *root, const char *remote_ref)
+{
+    if (strcmp(remote_ref, "refs/heads/main") != 0) {
+        (void)fprintf(stderr,
+                      "pre-push: REFUSED status=remote-ref-not-main ref=%s\n",
+                      remote_ref);
+        return 1;
+    }
+    return inside_land_queue(root) ? 0 : land_queue_refusal(root);
+}
+
 static int pre_push(void)
 {
     char root[PATH_MAX];
@@ -641,12 +708,7 @@ static int pre_push(void)
             (void)fprintf(stderr, "pre-push: REFUSED status=ref-tuple-invalid\n");
             return 1;
         }
-        if (strcmp(remote_ref, "refs/heads/main") != 0) {
-            (void)fprintf(stderr,
-                          "pre-push: REFUSED status=remote-ref-not-main ref=%s\n",
-                          remote_ref);
-            return 1;
-        }
+        if (route_refusal(root, remote_ref)) return 1;
         if (oid_zero(local))
             return refusal("main-deletion-forbidden", local, base, 0);
         if (oid_zero(base))
@@ -913,6 +975,71 @@ static bool resident_candidate_selftest(void)
 }
 #endif
 
+#if !defined(_WIN32)
+static bool land_queue_mkdir(const char *base, const char *rel, char out[PATH_MAX])
+{
+    int n = snprintf(out, PATH_MAX, "%s/%s", base, rel);
+    return n > 0 && n < PATH_MAX && mkdir(out, 0700) == 0;
+}
+
+/* A symlink inside land that points at a lane worktree resolves outside it. */
+static bool land_queue_escape_refused(const char *land, const char *lane)
+{
+    char link[PATH_MAX];
+    size_t plen = strlen(land);
+    if (plen + sizeof("/escape") > sizeof(link)) return false;
+    memcpy(link, land, plen);
+    memcpy(link + plen, "/escape", sizeof("/escape"));
+    bool ok = symlink(lane, link) == 0 && !inside_land_queue(link);
+    (void)unlink(link);
+    return ok;
+}
+
+static bool land_queue_cases(char p[8][PATH_MAX])
+{
+    return inside_land_queue(p[3])          /* driver checkout: admitted */
+        && inside_land_queue(p[4])          /* fence replacement: admitted */
+        && !inside_land_queue(p[5])         /* lane worktree: refused */
+        && !inside_land_queue(p[2])         /* the land dir itself */
+        && !inside_land_queue(p[6])         /* sibling sharing the prefix */
+        && land_queue_escape_refused(p[2], p[5]);
+}
+
+/* Pure location policy: which checkouts may publish main. Fixture state root
+ * via XDG_STATE_HOME so the real queue directory is never consulted. */
+static bool land_queue_selftest(void)
+{
+    char base[] = "/tmp/z23-git-hook-land-XXXXXX";
+    if (!mkdtemp(base)) return false;
+    char *saved = getenv("XDG_STATE_HOME");
+    char saved_copy[PATH_MAX] = {0};
+    if (saved) (void)snprintf(saved_copy, sizeof(saved_copy), "%s", saved);
+    char p[8][PATH_MAX];
+    bool ok = setenv("XDG_STATE_HOME", base, 1) == 0;
+    ok = ok && land_queue_mkdir(base, "z23", p[0]) &&
+         land_queue_mkdir(p[0], "dev", p[1]);
+    /* No land directory yet: every checkout is outside the queue. */
+    ok = ok && !inside_land_queue(base);
+    ok = ok && land_queue_mkdir(p[1], "land", p[2]) &&
+         land_queue_mkdir(p[2], "wt", p[3]) &&
+         land_queue_mkdir(p[2], "fence-1", p[4]) &&
+         land_queue_mkdir(base, "lane", p[5]) &&
+         land_queue_mkdir(p[1], "land-evil", p[6]);
+    ok = ok && land_queue_cases(p);
+    if (saved) (void)setenv("XDG_STATE_HOME", saved_copy, 1);
+    else (void)unsetenv("XDG_STATE_HOME");
+    (void)rmdir(p[6]); (void)rmdir(p[4]); (void)rmdir(p[3]);
+    (void)rmdir(p[2]); (void)rmdir(p[1]); (void)rmdir(p[0]);
+    (void)rmdir(p[5]); (void)rmdir(base);
+    return ok;
+}
+
+static bool posix_policy_selftest(void)
+{
+    return resident_candidate_selftest() && land_queue_selftest();
+}
+#endif
+
 static int selftest(void)
 {
     static const char local[] =
@@ -1078,14 +1205,15 @@ static int selftest(void)
         return 1;
 #if !defined(_WIN32)
     if (!selftest_refused("resident-candidate", restore_level,
-                          resident_candidate_selftest())) return 1;
+                          posix_policy_selftest())) return 1;
 #endif
     zcl_log_level_set(restore_level);
     (void)printf("git-hook-selftest: PASS checks=1000 p95_us=%llu "
                  "tamper_refused=true incomplete_refused=true "
                  "hollow_refused=true stale_refused=true "
                  "signature_refused=true unsigned_refused=true "
-                 "child_processes=0 resident_candidate_checked=true\n",
+                 "child_processes=0 resident_candidate_checked=true "
+                 "land_queue_checked=true\n",
                  (unsigned long long)(samples[949] / 1000u));
     return samples[949] < 250000000u ? 0 : 1;
 }

@@ -502,7 +502,7 @@ static int test_code_guide_leaf(void)
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "lint_command")),
                       "make lint-fast") == 0);
         ASSERT(strcmp(json_get_str(json_get(&reply.data, "push_command")),
-                      "git push origin HEAD:main") == 0);
+                      "build/bin/z23-dev dev land submit --worktree=$PWD") == 0);
         ASSERT(strcmp(json_get_str(json_get(&reply.data,
                                              "receipt_status_command")),
                       "build/bin/z23-dev dev proof status") == 0);

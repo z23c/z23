@@ -460,6 +460,18 @@ static bool dps_git_rig(const char *dir, char *local, char *base)
     return true;
 }
 
+/* The hook admits main pushes only from a checkout inside the land queue's
+ * state directory (<state root>/land). Make that checkout under the fixture
+ * state root dps_isolate() chose. */
+static bool dps_land_checkout(char *dir, size_t size)
+{
+    char cmd[PATH_MAX * 2];
+    int n = snprintf(dir, size, "%s/z23/dev/land/wt", g_dps_state);
+    if (n <= 0 || (size_t)n >= size) return false;
+    n = snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", dir);
+    return n > 0 && (size_t)n < sizeof(cmd) && system(cmd) == 0;
+}
+
 static bool dps_put_receipt(const char *dir, const char *local,
                             const char *base, const void *wire, size_t len)
 {
@@ -508,7 +520,7 @@ static int test_dps_hook_admission(void)
     TEST("dev proof signer: the installed pre-push hook refuses a forged and "
          "an unsigned receipt, and admits only the one this box signed") {
         dps_isolate("hook_admission");
-        test_make_tmpdir(dir, sizeof(dir), "dev_proof_signer", "hook_repo");
+        ASSERT(dps_land_checkout(dir, sizeof(dir)));
         ASSERT(test_abs_path("build/bin/z23-git-hook", hook, sizeof(hook)));
         /* Not a skip: `make install-hooks` is mandatory in every worktree, so
          * a missing hook binary is a broken checkout, not an excused case. */
@@ -577,6 +589,30 @@ static int test_dps_hook_admission(void)
         ASSERT(dps_put_receipt(dir, local, base, wire, sizeof(wire)));
         ASSERT(dps_run(dir, argv, tuple, out, sizeof(out)) == 0);
         ASSERT(strstr(out, "PASS exact local receipt admitted") != NULL);
+
+        /* One road to main: the same genuine, signed, exact receipt held by a
+         * lane worktree outside <state root>/land is still refused, and the
+         * refusal names the submit route. */
+        char lane[PATH_MAX - 64], lane_local[65], lane_base[65];
+        test_make_tmpdir(lane, sizeof(lane), "dev_proof_signer", "hook_lane");
+        ASSERT(dps_git_rig(lane, lane_local, lane_base));
+        n = snprintf(tuple, sizeof(tuple),
+                     "refs/heads/main %s refs/heads/main %s\n", lane_local,
+                     lane_base);
+        ASSERT(n > 0 && (size_t)n < sizeof(tuple));
+        ASSERT(zcl_dev_proof_oid_decode(lane_local, receipt.local_commit,
+                                        &receipt.local_commit_len));
+        ASSERT(zcl_dev_proof_oid_decode(lane_base, receipt.remote_base,
+                                        &receipt.remote_base_len));
+        ASSERT(dps_put_lint_child(lane, &receipt));
+        ASSERT(zcl_dev_proof_receipt_seal(&receipt));
+        ASSERT(zcl_dev_proof_receipt_serialize(&receipt, wire));
+        ASSERT(dps_put_receipt(lane, lane_local, lane_base, wire,
+                               sizeof(wire)));
+        ASSERT(dps_run(lane, argv, tuple, out, sizeof(out)) != 0);
+        ASSERT(strstr(out, "status=main-push-outside-land-queue") != NULL);
+        ASSERT(strstr(out, "dev land submit --worktree=") != NULL);
+        ASSERT(strstr(out, "PASS exact local receipt admitted") == NULL);
         dps_restore();
         PASS();
     } _test_next:;
@@ -592,7 +628,7 @@ static int test_dps_hook_running_eta(void)
          "ETA, a lease whose holder died or which does not parse falls back "
          "to receipt-missing, and the legacy pre-lease marker still counts") {
         dps_isolate("hook_running_eta");
-        test_make_tmpdir(dir, sizeof(dir), "dev_proof_signer", "hook_eta");
+        ASSERT(dps_land_checkout(dir, sizeof(dir)));
         ASSERT(test_abs_path("build/bin/z23-git-hook", hook, sizeof(hook)));
         ASSERT(access(hook, X_OK) == 0);
         ASSERT(dps_git_rig(dir, local, base));

@@ -38,10 +38,10 @@ static bool cg_render_static(struct zcl_command_reply *reply)
         json_push_kv_str(&reply->data, "legacy_parity_command",
                          "make pre-push-ci") &&
         json_push_kv_str(&reply->data, "push_command",
-                         "git push origin HEAD:main") &&
+                         "build/bin/z23-dev dev land submit --worktree=$PWD") &&
         json_push_kv_str(
             &reply->data, "never",
-            "test_zcl; omit -datadir; stash; rebase; reset; force-push") &&
+            "test_zcl; omit -datadir; stash; reset; force-push") &&
         json_push_kv_str(&reply->data, "docs", "docs/dev/DEVELOPING.md");
 }
 

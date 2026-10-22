@@ -602,7 +602,7 @@ void zcl_native_handle_dev_train_check(
     if (ok) {
         char next[PATH_MAX + 64];
         (void)snprintf(next, sizeof(next),
-                      "z23-land submit --branch lane/train --head HEAD");
+                      "build/bin/z23-dev dev land submit --worktree=$PWD");
         (void)json_push_kv_str(&reply->data, "next", next);
     } else {
         (void)json_push_kv_str(&reply->data, "next", log_path);
