@@ -1,25 +1,25 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * purpose: gate family — check-api-reference-generated. docs/API_REFERENCE.md
- * must be the exact output of tools/gen_api_reference.c over the .def catalogs
- * it includes. The reference used to be transcribed by hand and drifted: a doc
- * that names a `ready` command that is actually `planned` costs an agent a
- * whole loop.
+ * purpose: gate family — check-api-reference-generated. The command reference
+ * is GENERATED (build/gen/API_REFERENCE.md, not tracked): the gate compiles
+ * tools/gen_api_reference.c, runs it over docs/API_REFERENCE.md.in into
+ * build/gen, then proves the output is complete: every heading of the template
+ * is present, no generation marker is left unexpanded, and every command leaf
+ * declared in the .def catalogs has a row. There is no stored copy to drift
+ * from; a doc that names a `ready` command that is `planned` cannot exist
+ * because the page is rebuilt from the catalog every time.
  *
- * Mechanism: compile the generator, run it into a scratch directory, compare
- * bytes. No make is invoked and nothing here reads git, so the gate behaves
- * the same inside the lint sandbox copy. The scan set is exactly what the
- * generator #includes, not a glob of the commands directory: a glob misses
- * the nested bundles and counts .def files the generator never reads.
+ * The scan set is exactly what the generator #includes, not a glob of the
+ * commands directory: a glob misses the nested bundles and counts .def files
+ * the generator never reads. No make is invoked and nothing here reads git.
  *
- * To fix a failure: edit a .def under engine/composition/commands or
- * docs/API_REFERENCE.md.in, then run `make docs-api-reference`. Never edit
- * docs/API_REFERENCE.md by hand. The selftest lives in
- * gate_api_reference_generated_selftest.c.
+ * To fix a failure: edit a .def under engine/composition/commands,
+ * docs/API_REFERENCE.md.in or the generator, then run `make docs-api-reference`.
+ * The selftest lives in gate_api_reference_generated_selftest.c.
  *
- * Exit codes: 0 clean, 1 drift, 2 fatal. The scratch directory is removed on
- * every path; a termination signal is recorded, the directory is removed, and
- * the signal is re-raised with its default disposition.
+ * Exit codes: 0 clean, 1 incomplete, 2 fatal. The scratch directory is removed
+ * on every path; a termination signal is recorded, the directory is removed,
+ * and the signal is re-raised with its default disposition.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -35,12 +35,12 @@
 #include "lintc_proc.h"
 #include "lintc_sig.h"
 
-enum { ARG_FLOOR_DEFS = 20, ARG_FLOOR_ENTRIES = 200, ARG_DIFF_HEAD = 60,
+enum { ARG_FLOOR_DEFS = 20, ARG_FLOOR_ENTRIES = 200, ARG_FLOOR_LEAVES = 300,
        ARG_GRACE_MS = 2000 };
 
 const char arg_gen_src[] = "tools/gen_api_reference.c";
 const char arg_template[] = "docs/API_REFERENCE.md.in";
-const char arg_doc[] = "docs/API_REFERENCE.md";
+const char arg_doc[] = "build/gen/API_REFERENCE.md";
 /* The POSIX default scratch parent when TMPDIR is unset. */
 const char arg_tmp_default[] = { '/', 't', 'm', 'p', '\0' };
 
@@ -104,7 +104,7 @@ int arg_def_list(struct arg_defs *d)
 
 static int arg_preflight(const struct arg_io *io, struct arg_defs *d)
 {
-    const char *const req[] = { arg_gen_src, arg_template, arg_doc };
+    const char *const req[] = { arg_gen_src, arg_template };
     for (size_t i = 0; i < sizeof req / sizeof req[0]; i++)
         if (access(req[i], F_OK) != 0) {
             fprintf(io->err, "%s: FATAL — missing %s\n", arg_name, req[i]);
@@ -158,7 +158,7 @@ int arg_open_scratch(struct arg_scratch *s)
         return -1;
     }
     snprintf(s->bin, sizeof s->bin, "%s/gen_api_reference", s->dir);
-    snprintf(s->expected, sizeof s->expected, "%s/expected.md", s->dir);
+    snprintf(s->expected, sizeof s->expected, "%s", arg_doc);
     return 0;
 }
 
@@ -218,6 +218,8 @@ static int arg_entry_floor(const char *digits)
 static int arg_generate(const struct arg_io *io, struct arg_scratch *s)
 {
     char *const argv[] = { s->bin, (char *)arg_template, s->expected, NULL };
+    if (csr_mkdirs("build/gen") != 0)
+        return die("z23-lint: cannot create build/gen\n", "");
     struct lcp_buf log = { 0 };
     int code = 0, rc = arg_exec(argv, LCP_ERR, &log, &code);
     if (rc == 0 && code != 0)
@@ -235,76 +237,161 @@ static int arg_generate(const struct arg_io *io, struct arg_scratch *s)
     return rc;
 }
 
-/* 0 when both streams reach EOF together, 1 on a differing byte, 2 on a read error. */
-static int arg_compare_streams(FILE *fa, FILE *fb)
+/* The whole file as one NUL-terminated heap buffer, or NULL. */
+char *arg_slurp(const char *path)
 {
-    int ca = 0, cb = 0;
-    while (ca == cb && ca != EOF) {
-        ca = fgetc(fa);
-        cb = fgetc(fb);
+    FILE *f = fopen(path, "rb");
+    char *buf = NULL;
+    long size = 0;
+    if (!f)
+        return NULL;
+    if (fseek(f, 0, SEEK_END) == 0 && (size = ftell(f)) >= 0 && fseek(f, 0, SEEK_SET) == 0
+        && (buf = malloc((size_t)size + 1)) != NULL) { // raw-alloc-ok:lint-runtime
+        size_t got = fread(buf, 1, (size_t)size, f);
+        if (got != (size_t)size || ferror(f)) {
+            free(buf);
+            buf = NULL;
+        } else {
+            buf[size] = '\0';
+        }
     }
-    if (ferror(fa) || ferror(fb))
-        return 2;
-    return ca == cb ? 0 : 1;
+    fclose(f);
+    return buf;
 }
 
-/* Like arg_compare_streams; *bad names the file that could not be read. */
-static int arg_compare(const char *a, const char *b, const char **bad)
+/* True when `line` occurs in text as a whole line. */
+static int arg_has_line(const char *text, const char *line, size_t len)
 {
-    FILE *fa = fopen(a, "rb"), *fb = fopen(b, "rb");
-    int rc = 2;
-    *bad = fa ? b : a;
-    if (fa && fb) {
-        rc = arg_compare_streams(fa, fb);
-        *bad = ferror(fa) ? a : b;
+    for (const char *p = text; (p = strstr(p, line)) != NULL; p += len) {
+        int starts = p == text || p[-1] == '\n';
+        int ends = p[len] == '\n' || p[len] == '\0';
+        if (starts && ends)
+            return 1;
     }
-    if (fa)
-        fclose(fa);
-    if (fb)
-        fclose(fb);
-    return rc;
+    return 0;
 }
 
-static int arg_drift(const struct arg_io *io, const struct arg_scratch *s)
+/* Every heading of the editorial template must survive into the output. */
+static int arg_check_sections(const struct arg_io *io, const char *tpl, const char *out)
 {
-    char *const argv[] = { (char *)"diff", (char *)"-u", (char *)arg_doc,
-                           (char *)s->expected, NULL };
-    struct lcp_buf diff = { 0 };
-    int code = 0, rc = arg_exec(argv, LCP_BOTH, &diff, &code);
-    if (rc == 1) {
-        lcp_buf_free(&diff);
-        return 1;
+    int missing = 0;
+    for (const char *p = tpl; *p;) {
+        const char *nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        char head[256];
+        if (n > 0 && p[0] == '#' && n < sizeof head) {
+            memcpy(head, p, n);
+            head[n] = '\0';
+            if (!arg_has_line(out, head, n)) {
+                fprintf(io->err, "%s: required section missing from %s: %s\n", arg_name,
+                        arg_doc, head);
+                missing++;
+            }
+        }
+        p += n + (nl ? 1 : 0);
     }
-    fprintf(io->err, "FAIL: %s is not what tools/gen_api_reference.c produces.\n\n"
-            "  %s is GENERATED output. Do not edit it by hand.\n"
-            "  Change the catalog (engine/composition/commands/*.def) or the editorial template\n"
-            "  (%s), then regenerate:\n\n"
-            "      make docs-api-reference\n\n"
-            "  Drift (checked-in '-' vs generated '+'), first %d lines:\n",
-            arg_doc, arg_doc, arg_template, ARG_DIFF_HEAD);
-    arg_indent(io->err, diff.data, ARG_DIFF_HEAD);
-    lcp_buf_free(&diff);
+    if (strncmp(out, "<!-- ZCL-GEN:", 13) == 0 || strstr(out, "\n<!-- ZCL-GEN:") != NULL) {
+        fprintf(io->err, "%s: %s still holds an unexpanded ZCL-GEN marker\n", arg_name, arg_doc);
+        missing++;
+    }
+    return missing;
+}
+
+/* Parses `ZCL_COMMAND_<KIND>("<path>"` with s just past `ZCL_COMMAND_`; 1 and the
+ * path for a leaf, 0 for a branch or anything else (branches own no row). */
+static int arg_leaf_at(const char *s, char *path, size_t cap)
+{
+    size_t n = strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZ_");
+    const char *q = s + n;
+    if (n == 0 || (n == 6 && strncmp(s, "BRANCH", 6) == 0))
+        return 0;
+    q += strspn(q, " \t\r\n");
+    if (*q != '(')
+        return 0;
+    q += 1 + strspn(q + 1, " \t\r\n");
+    if (*q != '"')
+        return 0;
+    q++;
+    size_t len = strcspn(q, "\"");
+    if (len == 0 || len >= cap)
+        return 0;
+    for (size_t i = 0; i < len; i++)
+        path[i] = q[i] == '.' ? ' ' : q[i];
+    path[len] = '\0';
     return 1;
 }
 
-static int arg_steps(const struct arg_io *io, struct arg_scratch *s, size_t ndefs)
+/* Counts the leaves of one .def and reports each whose CLI row is absent. */
+static int arg_check_def(const struct arg_io *io, const char *def, const char *out, size_t *leaves)
 {
+    char *text = arg_slurp(def);
+    int missing = 0;
+    if (!text)
+        return -1;
+    for (const char *p = text; (p = strstr(p, "ZCL_COMMAND_")) != NULL; p += 12) {
+        char path[160], needle[170];
+        if (!arg_leaf_at(p + 12, path, sizeof path))
+            continue;
+        (*leaves)++;
+        snprintf(needle, sizeof needle, "`%s`", path);
+        if (strstr(out, needle) == NULL) {
+            fprintf(io->err, "%s: command leaf `%s` (%s) is missing from %s\n", arg_name, path,
+                    def, arg_doc);
+            missing++;
+        }
+    }
+    free(text);
+    return missing;
+}
+
+/* Verifies the generated reference against the sources it came from: every
+ * template heading is present and every command leaf of the .def catalogs has
+ * a row. 0 clean, 1 a check failed, 2 fatal. */
+int arg_verify(const struct arg_io *io, const struct arg_defs *d, char *entries, size_t cap)
+{
+    char *out = arg_slurp(arg_doc), *tpl = arg_slurp(arg_template);
+    size_t leaves = 0;
+    int bad = 0, rc = 0;
+    if (!out || !tpl) {
+        fprintf(io->err, "%s: FATAL — cannot read %s\n", arg_name, out ? arg_template : arg_doc);
+        rc = 2;
+    } else {
+        bad = arg_check_sections(io, tpl, out);
+        for (size_t i = 0; rc == 0 && i < d->n; i++) {
+            int m = arg_check_def(io, d->path[i], out, &leaves);
+            rc = m < 0 ? 2 : 0;
+            bad += m > 0 ? m : 0;
+        }
+        if (rc == 0 && gate_require_scanned((int)leaves, ARG_FLOOR_LEAVES, arg_name,
+                                            "almost no command leaves found in the .def catalogs"))
+            rc = 2;
+    }
+    free(out);
+    free(tpl);
+    if (rc == 0 && bad == 0)
+        snprintf(entries, cap, "%zu", leaves);
+    return rc ? rc : bad > 0;
+}
+
+static int arg_steps(const struct arg_io *io, struct arg_scratch *s, const struct arg_defs *defs)
+{
+    char leaves[24];
     int rc = arg_build(io, s);
     if (rc == 0 && lsc_pending() == 0)
         rc = arg_generate(io, s);
     if (rc != 0 || lsc_pending())
         return rc ? rc : 1;
-    const char *bad = arg_doc;
-    int cmp = arg_compare(arg_doc, s->expected, &bad);
-    if (cmp == 2) {
-        fprintf(io->err, "%s: FATAL — cannot read %s\n", arg_name, bad);
-        return 2;
-    }
-    if (cmp == 1)
-        return arg_drift(io, s);
-    fprintf(io->out, "%s: clean — %s matches the generator over %zu .def catalog(s) / %s entries\n",
-            arg_name, arg_doc, ndefs, s->entries);
-    return 0;
+    rc = arg_verify(io, defs, leaves, sizeof leaves);
+    if (rc == 1)
+        fprintf(io->err, "FAIL: %s is generated into build/gen and is incomplete.\n"
+                "  Fix the catalog (engine/composition/commands/*.def) or the editorial template\n"
+                "  (%s), or the generator (%s); regenerate with: make docs-api-reference\n",
+                arg_doc, arg_template, arg_gen_src);
+    if (rc == 0)
+        fprintf(io->out, "%s: clean — %s carries every template section and all %s command leaves "
+                "of %zu .def catalog(s) / %s entries\n", arg_name, arg_doc, leaves, defs->n,
+                s->entries);
+    return rc;
 }
 
 int arg_gate(const struct arg_io *io)
@@ -318,7 +405,7 @@ int arg_gate(const struct arg_io *io)
         rc = 2;
     } else if (rc == 0) {
         owned = 1;
-        rc = arg_steps(io, &s, defs.n);
+        rc = arg_steps(io, &s, &defs);
     }
     if (owned)
         (void)rap_rm_rf(s.dir);

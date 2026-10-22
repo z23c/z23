@@ -634,14 +634,11 @@ static bool dtk_regen(const struct dtk_paths *p, char *why, size_t cap)
         "make", "-s", "--no-print-directory", "docs-executor-routing", NULL};
     static const char *const counts[] = {"make", "-s", "--no-print-directory",
                                          "fix-doc-counts", NULL};
-    static const char *const api[] = {"make", "-s", "--no-print-directory",
-                                      "docs-api-reference", NULL};
-    const char *const *steps[] = {inventory, routing, counts, api};
+    const char *const *steps[] = {inventory, routing, counts};
     static const char *const labels[] = {"regen docs-capability-inventory",
                                          "regen docs-executor-routing",
-                                         "regen fix-doc-counts",
-                                         "regen docs-api-reference"};
-    for (size_t i = 0; i < 4; i++) {
+                                         "regen fix-doc-counts"};
+    for (size_t i = 0; i < 3; i++) {
         if (!dtk_make(p, steps[i], labels[i])) {
             (void)snprintf(why, cap, "%s failed; see %.170s%s", labels[i],
                            p->log, strlen(p->log) > 170 ? "..." : "");

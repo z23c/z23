@@ -823,7 +823,7 @@ printf '%s' "$A_REVIEW_COMMIT" | "$JSONQ" eq data.review_state reviewed_ok ||
 # offer by construction (contexts/market/services/include/services/
 # market_moderation_service.h — "FAIL CLOSED BY CONSTRUCTION"). A real
 # first-contact buyer opts into the documented open-view profile before
-# browsing an unreviewed seller's catalog (docs/API_REFERENCE.md:
+# browsing an unreviewed seller's catalog (the generated API_REFERENCE.md:
 # `app market moderation profile set`, plan-then-commit); the acceptance
 # does the same so it exercises what a buyer actually does, not a gap in
 # the product's default moderation posture.

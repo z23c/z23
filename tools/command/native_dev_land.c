@@ -4876,7 +4876,7 @@ static void dl_beat(const struct dl_row *row, const char *beat, int64_t started)
 
 /* ── rebase conflicts on the artifacts every train regenerates ──────────
  *
- * docs/CAPABILITY_INVENTORY.jsonl, docs/API_REFERENCE.md and the
+ * docs/CAPABILITY_INVENTORY.jsonl and the
  * <!-- DOC-COUNTS --> block of docs/dev/CODEBASE_MAP.md are GENERATED from the
  * code, and a train that lands regenerates them. Two tips landing in the
  * same window therefore collide on those files by construction, and a
@@ -4901,7 +4901,6 @@ struct dl_regen_artifact {
 static const struct dl_regen_artifact DL_REGEN_ARTIFACTS[] = {
     { "docs/CAPABILITY_INVENTORY.jsonl", "docs-capability-inventory",
       "capability inventory" },
-    { "docs/API_REFERENCE.md", "docs-api-reference", "API reference" },
     /* No target regenerates this page's body; `fix-doc-counts` (Makefile,
      * next to check-doc-counts) rewrites the machine-readable DOC-COUNTS
      * block from the code-measured values. Recovery normalizes that block

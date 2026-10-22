@@ -225,6 +225,6 @@ Maintainers and fleet members continue with [AGENTS.md](AGENTS.md).
 ## Go deeper
 
 - **Run it:** [Getting Started](docs/node/GETTING_STARTED.md) · [Sync](docs/node/SYNC.md) · [MVP acceptance](docs/quality/MVP.md) · [Windows](docs/node/WINDOWS.md)
-- **Understand it:** [How the Node Works](docs/node/HOW_THE_NODE_WORKS.md) · [Framework](docs/commons/FRAMEWORK.md) · [API Reference](docs/API_REFERENCE.md)
+- **Understand it:** [How the Node Works](docs/node/HOW_THE_NODE_WORKS.md) · [Framework](docs/commons/FRAMEWORK.md) · Command reference: `make docs-api-reference` writes `build/gen/API_REFERENCE.md` (or ask `z23 discover describe <path>`)
 - **Build with it:** [Developing](docs/dev/DEVELOPING.md) · [Codebase Map](docs/dev/CODEBASE_MAP.md) · [Commons Quickstart](docs/commons/C23_COMMONS_QUICKSTART.md) · [Forward Plan](docs/work/FORWARD_PLAN.md)
 - **License:** [Apache-2.0](LICENSE), with upstream notices preserved in [NOTICE](NOTICE)

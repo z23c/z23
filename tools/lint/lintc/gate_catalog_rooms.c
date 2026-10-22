@@ -6,7 +6,7 @@
  * the describe-budget helper (tools/check_describe_budget.c) must expand that
  * one list and name no room directly, and the API reference generator
  * (tools/gen_api_reference.c) must include exactly the same rooms. A room the
- * generator omits ships live commands missing from docs/API_REFERENCE.md; a
+ * generator omits ships live commands missing from the generated API_REFERENCE.md; a
  * room the budget helper omits ships leaves whose describe document is never
  * rendered. Both directions of the generator comparison refuse.
  *

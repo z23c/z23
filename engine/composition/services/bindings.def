@@ -8,7 +8,7 @@
  *      `state_table_prefix` are the three namespaces you claim; the validator
  *      refuses reserved and overlapping ones.
  *   2. Declare your command leaves in a engine/composition/commands .def under your
- *      command_prefix. `discover` and docs/API_REFERENCE.md pick them up with
+ *      command_prefix. `discover` and the generated API_REFERENCE.md pick them up with
  *      no further work — the reference is generated from those .def files.
  *   3. Own your state: every table you write starts with state_table_prefix.
  *      Add the CREATE TABLE to a node.db migration like any other projection.

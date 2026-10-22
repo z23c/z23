@@ -124,5 +124,5 @@ way out. The unit file carries the install, register and retire commands.
 ## Related
 
 - [`DEVELOPING.md`](DEVELOPING.md) — the developer procedure this fits inside.
-- [`API_REFERENCE.md`](../API_REFERENCE.md) — the generated leaf reference.
+- `make docs-api-reference` — builds the generated leaf reference at `build/gen/API_REFERENCE.md` (not tracked); `z23 discover describe <path>` answers one leaf.
 - [`AGENT_TRAPS.md`](../agent/AGENT_TRAPS.md) — traps an agent should not relearn.

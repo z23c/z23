@@ -920,7 +920,7 @@ AGENT_IMPACT_RULE("tools/command/native_fleet_command.c|tests/harness/src/test_f
 AGENT_IMPACT_RULE("tools/command/native_fleet_vitals_history.c|tests/harness/src/test_fleet_vitals_history.c", "fleet_vitals_history make_lint_gates")
 AGENT_IMPACT_RULE("cognition/modules/codeindex/*|engine/composition/commands/code.def|engine/composition/commands/root.def|engine/composition/include/config/command_catalog.h|engine/composition/src/command_catalog.c|engine/modules/kernel/src/command_registry*.c|engine/modules/kernel/include/kernel/command_registry.h|tools/command/native_code_command.c|tools/command/native_code_capsule.c|tools/command/native_code_render.c|tools/command/native_code_structure.c|tools/command/native_command.c|tests/harness/src/test_command_registry_catalog.c|tests/harness/src/test_command_registry_latency.c", "command_registry_latency command_registry_catalog code_capsule native_api_contract command_handler_snapshot hotswap_module dev_platform make_lint_gates")
 AGENT_IMPACT_RULE("tests/harness/src/test_command_handler_snapshot.c", "command_handler_snapshot command_registry_catalog native_api_contract make_lint_gates")
-AGENT_IMPACT_RULE("tests/harness/src/test_native_api_contract.c|docs/API_REFERENCE.md", "native_api_contract command_registry_catalog make_lint_gates")
+AGENT_IMPACT_RULE("tests/harness/src/test_native_api_contract.c", "native_api_contract command_registry_catalog make_lint_gates")
 /* Terminal-lane human presentation (tools/command/cli_render.h): the shared
  * renderer, its dispatch wiring, and its test group. native_command.c and
  * main_cli_modes.c are also covered by the tools/command glob and the

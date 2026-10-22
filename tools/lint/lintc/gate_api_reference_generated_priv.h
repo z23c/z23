@@ -41,6 +41,10 @@ int arg_def_list(struct arg_defs *d);
 int arg_open_scratch(struct arg_scratch *s);
 /* The gate over the current directory: 0 clean, 1 drift, 2 fatal. */
 int arg_gate(const struct arg_io *io);
+/* The whole file as a NUL-terminated heap buffer (caller frees), or NULL. */
+char *arg_slurp(const char *path);
+/* Checks the generated reference against the template and .def sources; 0 clean, 1 failed, 2 fatal. */
+int arg_verify(const struct arg_io *io, const struct arg_defs *d, char *entries, size_t cap);
 /* Writes up to limit lines of data (0: all), each indented four spaces. */
 void arg_indent(FILE *out, const char *data, size_t limit);
 

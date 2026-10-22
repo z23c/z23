@@ -171,8 +171,9 @@ from a hash, signature, test, or reproduction receipt.
 - [`CHAOS_HARNESS.md`](quality/CHAOS_HARNESS.md) — the two chaos/kill harnesses (the
   deterministic sim engine and the full-binary SIGKILL recovery test), and
   where in-process dev-proof worker-death acceptance lives.
-- [`API_REFERENCE.md`](API_REFERENCE.md) — generated command catalog; edit its
-  source definitions, not the generated file.
+- `API_REFERENCE.md.in` — editorial template of the command catalog. The
+  catalog itself is generated, never committed: `make docs-api-reference`
+  writes `build/gen/API_REFERENCE.md`; edit the `.def` sources or the template.
 - [`CAPABILITY_INVENTORY.jsonl`](CAPABILITY_INVENTORY.jsonl) — generated
   public-header capability map: exposed symbols, verified direct-use counts,
   registered-test reachability, ranked duplicate candidates, and untested

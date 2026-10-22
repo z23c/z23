@@ -39,13 +39,13 @@ On a maintainer host, prefix heavy commands with `devbuild --wait` ([Maintainer 
 
 Before editing, `build/bin/z23 code guide <paths>` (MCP: `z23_code sub=guide`) returns one brief: nearest `AGENTS.md` rules, test groups, wiki lessons, first commands.
 Navigate with the binary before searching: `code map`, `code owner <path>`, `code impact <path>`, `discover help <path>`.
-Search with `git grep`. Generated references (`docs/CAPABILITY_INVENTORY.jsonl`, `docs/API_REFERENCE.md`, corpus evidence) are excluded from search by `.ignore`; open them by path.
+Search with `git grep`. Generated references (`docs/CAPABILITY_INVENTORY.jsonl`, corpus evidence) are excluded from search by `.ignore`; open them by path. The command catalog is not tracked: `make docs-api-reference` writes `build/gen/API_REFERENCE.md`.
 
 <!-- claim: symbol-present t-fast Makefile # focused registered-test target -->
 <!-- claim: symbol-present test-parallel Makefile # full registered-test target -->
 <!-- claim: symbol-present discover.schema engine/composition/commands/root.def # live schema leaf -->
 <!-- claim: symbol-present code.map engine/composition/commands/code.def # live source-map leaf -->
-<!-- claim: file-present docs/API_REFERENCE.md # generated command catalog -->
+<!-- claim: symbol-present docs-api-reference Makefile # generator target for the untracked command catalog -->
 
 ## Coding contract
 

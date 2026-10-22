@@ -164,7 +164,6 @@ A contexts/commons/corpus/report-000039.json 63
 A contexts/commons/corpus/report-000040.json 66
 A contexts/commons/corpus/report-000041.json 73
 A contexts/commons/corpus/report-000042.json 73
-A docs/API_REFERENCE.md 6
 A docs/dev/NATIVE_COMMAND_INTERFACE.md 2
 A engine/composition/commands/core.def 5
 A engine/composition/commands/ops.def 1
@@ -334,5 +333,5 @@ B tests/harness/src/test_vcs_release.c 11
 B tests/harness/src/test_zcode_contributor.c 15
 B tests/harness/src/test_zcode_publish.c 32
 B tests/harness/src/test_zcode_recipe.c 5
-B tests/harness/src/test_zcode_store.c 3
+B tests/harness/src/test_zcode_store.c 1
 B tools/scripts/zcl_intervene.sh 1

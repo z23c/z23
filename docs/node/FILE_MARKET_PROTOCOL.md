@@ -466,7 +466,6 @@ make -j"$(nproc)" t-fast-exact ONLY=test_db_migration_idempotent
 make -j"$(nproc)" t-fast-exact ONLY=test_native_api_contract
 make -j"$(nproc)" t-fast-exact ONLY=test_blob_read_bounds
 make transaction-lab-check
-make docs-api-reference
 make lint
 ```
 

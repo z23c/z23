@@ -5,7 +5,7 @@
 Manuals and plans. Index: `README.md`. Procedure: `dev/DEVELOPING.md` (open one section, never the whole file). Ownership map: `dev/CODEBASE_MAP.md`. Fleet: `agent/FLEET.md`, `work/AGENT_FLEET.md`, `agent/`; developer references: `dev/`. Current work order: `work/FORWARD_PLAN.md`.
 
 Generated, never hand-edit (regenerate with the canonical target):
-- `API_REFERENCE.md` from `API_REFERENCE.md.in` and the command `.def` files: `make docs-api-reference`.
+- `API_REFERENCE.md` from `API_REFERENCE.md.in` and the command `.def` files: `make docs-api-reference` writes `build/gen/API_REFERENCE.md`; it is not tracked.
 - `CAPABILITY_INVENTORY.jsonl`: `make docs-capability-inventory`.
 Both are excluded from search by the root `.ignore`; open them by path.
 

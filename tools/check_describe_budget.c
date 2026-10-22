@@ -5,7 +5,7 @@
  * writes into.
  *
  * Why this gate exists. `discover describe <path>` is the ONLY surface that
- * renders a leaf's long-form `semantics` contract at all: docs/API_REFERENCE.md
+ * renders a leaf's long-form `semantics` contract at all: the generated API_REFERENCE.md
  * carries summaries, and `discover help` carries a five-field child row. When a
  * leaf's describe document outgrows ZCL_COMMAND_SPEC_BUDGET,
  * zcl_command_registry_describe_json() returns 0 and the CLI reports the path

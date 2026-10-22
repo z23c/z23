@@ -1,10 +1,10 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: selftest of check-api-reference-generated. Copies exactly what the
- * gate reads into a scratch tree, proves the gate passes on it, then flips
- * one availability cell of the copied reference and proves the gate fails and
- * names docs/API_REFERENCE.md, so the gate cannot decay into a no-op. It also
- * proves that an unreadable reference is fatal and that a scratch directory
+ * gate reads into a scratch tree, proves the gate passes on it, then removes a
+ * command leaf row and a template section from the generated reference and
+ * proves each is refused by name, so the gate cannot decay into a no-op. It
+ * also proves that an unwritable reference path is fatal and that a scratch directory
  * which cannot be created (overlong or unwritable TMPDIR) removes nothing.
  * Every fixture lives under a private directory this selftest creates.
  */
@@ -26,8 +26,6 @@
 
 enum { ARS_LOG = 65536, ARS_SEG_STEP = 100, ARS_SEG_SLACK = 101 };
 
-static const char ars_planted_from[] = "| planned |";
-static const char ars_planted_to[] = "| ready |";
 static const char ars_name[] = "check_api_reference_generated selftest";
 
 static const char *const ars_fixed[] = {
@@ -71,7 +69,7 @@ static int ars_populate(const char *root)
         rc = ars_copy(root, d.path[i]);
     for (size_t i = 0; rc == 0 && i < sizeof ars_fixed / sizeof ars_fixed[0]; i++)
         rc = ars_copy(root, ars_fixed[i]);
-    const char *const own[] = { arg_gen_src, arg_template, arg_doc };
+    const char *const own[] = { arg_gen_src, arg_template };
     for (size_t i = 0; rc == 0 && i < sizeof own / sizeof own[0]; i++)
         rc = ars_copy(root, own[i]);
     return rc;
@@ -91,46 +89,65 @@ static int ars_run(const char *root, const char *home, FILE *log)
     return rc;
 }
 
-/* Copies src to dst, rewriting the first planted cell; *found says whether it did. */
-static int ars_rewrite(FILE *src, FILE *dst, int *found)
+/* Replaces the first occurrence of `from` in the generated reference with the
+ * same-length `to`; 1 when it was not found or the file could not be rewritten. */
+static int ars_tamper(const char *root, const char *from, const char *to)
 {
-    char *line = NULL;
-    size_t cap = 0;
-    ssize_t n;
-    int bad = 0;
-    *found = 0;
-    while (!bad && (n = getline(&line, &cap, src)) >= 0) {
-        char *at = *found ? NULL : strstr(line, ars_planted_from);
-        if (at) {
-            *at = '\0';
-            bad = fprintf(dst, "%s%s%s", line, ars_planted_to, at + sizeof ars_planted_from - 1) < 0;
-            *found = 1;
-        } else {
-            bad = fwrite(line, 1, (size_t)n, dst) != (size_t)n;
-        }
+    char path[PATH_MAX + 64];
+    snprintf(path, sizeof path, "%s/%s", root, arg_doc);
+    char *text = arg_slurp(path);
+    char *at = text ? strstr(text, from) : NULL;
+    int bad = !at;
+    if (at) {
+        memcpy(at, to, strlen(to));
+        FILE *out = fopen(path, "wb");
+        bad = !out || fwrite(text, 1, strlen(text), out) != strlen(text);
+        if (out && fclose(out) != 0)
+            bad = 1;
     }
-    free(line);
-    return bad || ferror(src);
+    free(text);
+    if (bad)
+        fprintf(stderr, "%s: FAIL — cannot plant %s in the generated reference;\n"
+                "  the fixture assumption broke.\n", ars_name, from);
+    return bad;
 }
 
-static int ars_flip(const char *root)
+/* Runs arg_verify in root; the tampered reference must fail and name `needle`. */
+static int ars_verify_fails(const char *root, const char *home, const char *needle)
 {
-    char path[PATH_MAX + 64], next[PATH_MAX + 80];
-    int found = 0;
-    snprintf(path, sizeof path, "%s/%s", root, arg_doc);
-    snprintf(next, sizeof next, "%s.next", path);
-    FILE *in = fopen(path, "rb"), *out = fopen(next, "wb");
-    int bad = !in || !out || ars_rewrite(in, out, &found);
-    if (in)
-        fclose(in);
-    if (out && fclose(out) != 0)
-        bad = 1;
-    if (bad || !found || rename(next, path) != 0) {
-        fprintf(stderr, "%s: FAIL — no 'planned' row\n  to tamper with; the fixture assumption broke.\n",
-                ars_name);
-        return 1;
+    char text[ARS_LOG], entries[24];
+    struct arg_defs d;
+    FILE *log = tmpfile();
+    if (!log)
+        return die("z23-lint: cannot create a temporary file\n", "");
+    struct arg_io io = { log, log };
+    int rc = chdir(root) != 0 || arg_def_list(&d) != 0 ? 2 : arg_verify(&io, &d, entries, sizeof entries);
+    if (chdir(home) != 0)
+        rc = 2;
+    fflush(log);
+    rewind(log);
+    if (csr_slurp(log, text, sizeof text) != 0)
+        text[0] = '\0';
+    fclose(log);
+    int bad = rc != 1 || !strstr(text, needle);
+    if (bad) {
+        fprintf(stderr, "%s: FAIL — a reference missing %s was not refused by name (exit %d):\n",
+                ars_name, needle, rc);
+        arg_indent(stderr, text, 0);
     }
-    return 0;
+    return bad;
+}
+
+/* The tamper test: a missing leaf row and a missing template section each fail. */
+static int ars_tampers(const char *root, const char *home)
+{
+    static const char leaf[] = "`core status`", leaf_bad[] = "`core_status`";
+    static const char head[] = "## Aliases", head_bad[] = "## Aliaxes";
+    if (ars_tamper(root, leaf, leaf_bad) || ars_verify_fails(root, home, "core status"))
+        return 1;
+    if (ars_tamper(root, leaf_bad, leaf) || ars_tamper(root, head, head_bad))
+        return 1;
+    return ars_verify_fails(root, home, head);
 }
 
 /* The gate's exit code with its captured output in text; 2 when the capture fails. */
@@ -146,20 +163,16 @@ static int ars_gate_text(const char *root, const char *home, char *text, size_t 
     return rc;
 }
 
-static int ars_expect(const char *root, const char *home, int tampered)
+static int ars_expect_clean(const char *root, const char *home)
 {
     char text[ARS_LOG];
     int rc = ars_gate_text(root, home, text, sizeof text);
-    int bad = tampered ? (rc == 0 || !strstr(text, arg_doc)) : rc != 0;
-    if (bad) {
-        fprintf(stderr, tampered ? (rc == 0 ? "%s: FAIL — a hand edit to\n  %s did NOT trip the gate. The gate is hollow.\n"
-                                            : "%s: FAIL — the failure did\n  not name %s:\n")
-                                 : "%s: FAIL — the gate did not\n  pass on an unmodified copy of the tree (%s):\n",
+    if (rc != 0) {
+        fprintf(stderr, "%s: FAIL — the gate did not\n  pass on an unmodified copy of the tree (%s):\n",
                 ars_name, arg_doc);
-        if (rc != 0 || !tampered)
-            arg_indent(stderr, text, 0);
+        arg_indent(stderr, text, 0);
     }
-    return bad;
+    return rc != 0;
 }
 
 /* A reference that cannot be read must end the gate with a fatal naming it. */
@@ -260,11 +273,11 @@ static int ars_cases(const char *priv, const char *root, const char *home)
 {
     if (ars_populate(root) != 0)
         return 1;
-    if (ars_expect(root, home, 0) || lsc_pending())
+    if (ars_expect_clean(root, home) || lsc_pending())
         return 1;
-    if (ars_flip(root) != 0)
+    if (ars_tampers(root, home) != 0)
         return 1;
-    return ars_expect(root, home, 1) || ars_truncation(priv, root, home)
+    return ars_truncation(priv, root, home)
         || ars_denied(priv, root, home) || ars_read_error(root, home);
 }
 
@@ -283,8 +296,8 @@ int check_api_reference_generated_selftest(void)
     if (sig)
         lsc_finish(sig);
     if (rc == 0)
-        printf("%s: PASS — clean tree passes, a planted hand edit fails and names %s,\n"
-               "  an unreadable reference is fatal, a refused scratch directory removes nothing\n",
-               ars_name, arg_doc);
+        printf("%s: PASS — clean tree passes, a generated reference missing a leaf row or a template\n  section is refused by name,\n"
+               "  an unwritable reference path is fatal, a refused scratch directory removes nothing\n",
+               ars_name);
     return rc;
 }

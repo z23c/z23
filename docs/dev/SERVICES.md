@@ -15,7 +15,7 @@ cannot drift:
 | How do I add one? | the header comment of `engine/composition/services/bindings.def` |
 | What services are declared here? | `z23 app service list` |
 | What does one declare exactly? | `z23 app service inspect <name>` |
-| What commands does the branch expose? | `docs/API_REFERENCE.md` — generated from `engine/composition/commands`, drift-gated |
+| What commands does the branch expose? | `make docs-api-reference` (writes `build/gen/API_REFERENCE.md`, untracked) or `z23 discover describe <path>`; completeness is gated |
 | Does a holder qualify? | `z23 app service access <name>` |
 | What state is each service in? | `z23 app service status` (currently an uninitialized CLI-local snapshot) |
 

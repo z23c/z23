@@ -45,7 +45,7 @@ Each item names the document and line that state the gap. The order is the order
 
 ## 4. Distribution
 
-Signed generations are meant to travel through the existing package swarm, with `plugin publish` and `plugin fetch` as the commands. **In progress, not done:** neither command exists in `engine/composition/commands/plugin.def`. The swarm commands that do exist are `zcode package fetch` and `zcode package attest offer` (`docs/API_REFERENCE.md`). Independent-builder attestations, where a second builder reproduces a generation and signs what it saw, are **in progress, not done**. Until both land, a plugin reaches a machine by copying a signed manifest, signature and executable and installing them by hand.
+Signed generations are meant to travel through the existing package swarm, with `plugin publish` and `plugin fetch` as the commands. **In progress, not done:** neither command exists in `engine/composition/commands/plugin.def`. The swarm commands that do exist are `zcode package fetch` and `zcode package attest offer` (`z23 discover describe <path>`). Independent-builder attestations, where a second builder reproduces a generation and signs what it saw, are **in progress, not done**. Until both land, a plugin reaches a machine by copying a signed manifest, signature and executable and installing them by hand.
 
 ## 5. Links
 

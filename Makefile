@@ -12582,10 +12582,10 @@ hooks-status:
 
 # One step before `make lint` in a lane: hooks, generated files, untracked
 # check. The regeneration list mirrors the lander's (DLRG_ARTIFACTS in
-# tools/command/native_dev_land_regen.c plus the API reference in
-# native_dev_land.c); it refuses to run unless each target is an initializer
-# row of those tables (a mention in a comment does not count). It never commits.
-LINT_READY_REGEN := docs-capability-inventory docs-api-reference fix-doc-counts docs-executor-routing
+# tools/command/native_dev_land_regen.c); it refuses to run unless each
+# target is an initializer row of that table (a mention in a comment does
+# not count). It never commits.
+LINT_READY_REGEN := docs-capability-inventory fix-doc-counts docs-executor-routing
 .PHONY: lint-ready
 lint-ready: $(GIT_HOOK_BIN) $(LINTC_TOOL)
 	@for t in $(LINT_READY_REGEN); do \
@@ -14841,16 +14841,16 @@ check-error-doc-refs: $(LINTC_TOOL)
 	@echo "══ LINT: operator-named docs exist (C string literals) ══"
 	@./build/bin/z23-lint check-error-doc-refs
 
-# docs/API_REFERENCE.md is GENERATED from engine/composition/commands/*.def by
+# The command reference is GENERATED, never tracked: `make docs-api-reference`
+# writes build/gen/API_REFERENCE.md from engine/composition/commands/*.def by
 # tools/gen_api_reference.c (editorial prose lives in docs/API_REFERENCE.md.in).
-# It used to be hand-transcribed, and drifted: the page still claimed 106 leaves
-# across 41 branches long after the catalog had more than doubled. This gate
-# regenerates into a temp file and fails on any difference, so a `.def` change
-# and the reference can never disagree. Fix a failure with
-# `make docs-api-reference`, never by editing the generated page.
-# Has --selftest (plants a hand edit, proves the gate trips).
+# It used to be committed, 63 times in 10 days, each commit a merge conflict.
+# This gate generates into build/gen and checks that every template heading and
+# every command leaf of the .def files is present; there is no stored copy.
+# Fix a failure in the .def, the template or the generator.
+# Has --selftest (drops a leaf row and a section, proves the gate trips).
 check-api-reference-generated: $(LINTC_TOOL)
-	@echo "══ LINT: docs/API_REFERENCE.md is generated, not hand-edited ══"
+	@echo "══ LINT: the generated command reference (build/gen) is complete ══"
 	@./build/bin/z23-lint check-api-reference-generated --selftest
 	@./build/bin/z23-lint check-api-reference-generated
 
@@ -14902,7 +14902,8 @@ $(API_REFERENCE_TOOL): tools/gen_api_reference.c \
 .PHONY: tools/gen_api_reference docs-api-reference
 tools/gen_api_reference: $(API_REFERENCE_TOOL)
 docs-api-reference: $(API_REFERENCE_TOOL)
-	@$(API_REFERENCE_TOOL) docs/API_REFERENCE.md.in docs/API_REFERENCE.md
+	@mkdir -p build/gen
+	@$(API_REFERENCE_TOOL) docs/API_REFERENCE.md.in build/gen/API_REFERENCE.md
 
 # docs/CAPABILITY_INVENTORY.jsonl is the complete source-derived public C23
 # capability census.  JSON Lines keeps 1,000+ headers and their full symbol

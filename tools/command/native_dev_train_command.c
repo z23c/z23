@@ -387,14 +387,9 @@ void zcl_native_handle_dev_train_build(
      * batch_build.sh used. */
     const char *cap_argv[] = {"make", "-s", "-B", "--no-print-directory",
                               "docs-capability-inventory", NULL};
-    const char *api_argv[] = {"make", "-s", "--no-print-directory",
-                              "docs-api-reference", NULL};
     struct zcl_devloop_process_result doc_result;
     bool doc_ok =
         zcl_devloop_process_run(stack_dir, cap_argv, DVT_MAKE_TIMEOUT_MS,
-                                &doc_result) &&
-        doc_result.exit_code == 0 &&
-        zcl_devloop_process_run(stack_dir, api_argv, DVT_MAKE_TIMEOUT_MS,
                                 &doc_result) &&
         doc_result.exit_code == 0;
     if (!doc_ok) {

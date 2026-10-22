@@ -164,8 +164,7 @@ static const char *const dtkt_makefile =
     "lint:\n\t@true\n\n"
     "docs-capability-inventory:\n\t@true\n\n"
     "docs-executor-routing:\n\t@true\n\n"
-    "fix-doc-counts:\n\t@true\n\n"
-    "docs-api-reference:\n\t@true\n";
+    "fix-doc-counts:\n\t@true\n";
 
 static void dtkt_call(const char *root, struct json_value *input,
                       struct zcl_command_reply *reply)

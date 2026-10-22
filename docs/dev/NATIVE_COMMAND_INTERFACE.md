@@ -5,9 +5,10 @@ Audience: LLM coding agents, application developers, node operators, and UI
 adapters
 
 This document is the grammar/tree/envelope contract. For every leaf the
-registry currently declares, see [`docs/API_REFERENCE.md`](../API_REFERENCE.md)
-(generated from `engine/composition/commands/` by `tools/gen_api_reference.c`; regenerate
-with `make docs-api-reference`). For the practical field-by-field
+registry currently declares, run `z23 discover describe <path>`, or build the
+generated reference with `make docs-api-reference` (it lands in
+`build/gen/API_REFERENCE.md`; generated from `engine/composition/commands/` by
+`tools/gen_api_reference.c`, never committed). For the practical field-by-field
 reference of the implemented agent surface (`agentops`, `agentdiagnose`,
 `healthcheck`, `agentlanes`, the service/operation catalog, and more), see
 [`docs/agent/AGENT_API.md`](../agent/AGENT_API.md).
@@ -938,7 +939,7 @@ described in older revisions of this section. Typed effect/authority/
 availability/schema/execution-mode metadata, the common result envelope, the
 stable exit-code policy, and ranked search are all live. Do not re-propose any
 of that; verify current per-leaf `ready`/`planned`/`compat` status with
-`z23 discover describe <path>` or [`docs/API_REFERENCE.md`](../API_REFERENCE.md)
+`z23 discover describe <path>` or the generated `build/gen/API_REFERENCE.md` (`make docs-api-reference`)
 rather than trusting a hand-maintained gap list here, which goes stale the
 moment a leaf ships.
 

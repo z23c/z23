@@ -440,7 +440,7 @@ Use `docs/agent/AGENT_ARCHITECTURE.md` as the full checklist. The short path:
    handler table in `engine/composition/src/command_catalog.c` and the
    describe-budget helper all expand, and once in `tools/gen_api_reference.c`.
    Miss the second and the commands work but never appear in
-   `docs/API_REFERENCE.md`; `check-catalog-rooms` fails on that mismatch by name.
+   the generated command reference (`build/gen/API_REFERENCE.md`); `check-catalog-rooms` fails on that mismatch by name.
    Give it a name, transports (`ZCL_COMMAND_TRANSPORT_NATIVE`), and a handler
    symbol.
 2. Implement the handler in the matching

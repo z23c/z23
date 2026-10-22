@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Generates docs/API_REFERENCE.md from the declarative command catalogs under
+ * Generates build/gen/API_REFERENCE.md from the declarative command catalogs under
  * the engine/composition/commands .def catalogs, so the operator-facing command reference
  * can never drift from the table the binary actually compiles.
  *

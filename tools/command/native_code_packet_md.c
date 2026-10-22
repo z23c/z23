@@ -63,7 +63,7 @@ size_t pk_gate_lines(const struct pk_facts *f, char (*out)[PK_GATE_LEN])
                    "devbuild --wait make check-capability-closure");
     (void)snprintf(out[n++], PK_GATE_LEN,
                    "timeout 2400 devbuild --wait make docs-capability-"
-                   "inventory docs-api-reference fix-doc-counts");
+                   "inventory fix-doc-counts");
     (void)snprintf(out[n++], PK_GATE_LEN,
                    "env -u GIT_EDITOR -u GIT_OPTIONAL_LOCKS timeout 2400 "
                    "devbuild --wait make lint");
@@ -84,8 +84,8 @@ size_t pk_trap_lines(unsigned mask, char (*out)[PK_TRAP_LEN])
           "agent_impact_rules.def row and cyclomatic complexity <= 15 per "
           "function; a new leaf also needs a remote_command_classes.def row." },
         { PK_TRAP_DEF,
-          "a .def edit changes generated docs: run docs-capability-inventory, "
-          "docs-api-reference and fix-doc-counts, then commit what changed." },
+          "a .def edit changes generated docs: run docs-capability-inventory "
+          "and fix-doc-counts, then commit what changed." },
         { PK_TRAP_DOCS,
           "docs: no operator paths (check-no-operator-paths) and no inline "
           "paths the doc gate cannot resolve (check-doc-inline-paths)." },

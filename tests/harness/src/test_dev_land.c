@@ -1347,7 +1347,7 @@ static bool dlx_regen_conflict(struct dlx_rig *rig, const char *extra,
     /* A shared base both sides agree on, on origin/main. */
     if (!dlx_regen_files(rig, "base\n",
             "<!-- DOC-COUNTS-BEGIN -->\nbase\n<!-- DOC-COUNTS-END -->\n",
-            "docs/API_REFERENCE.md", extra))
+            "mine.txt", extra))
         return false;
     if (!dlx_commit_tree(rig->clone, "generated artifacts", basec))
         return false;
@@ -15212,7 +15212,7 @@ static int dlx_case_conflict_regens_clean_merged_artifact(void)
         ASSERT(dlx_slurp(mkpath, mk, sizeof(mk) - 1, &len));
         mk[len] = '\0';
         ASSERT((size_t)snprintf(mk2, sizeof(mk2),
-            "%sdocs-api-reference:\n\t@:\n"
+            "%s"
             "check-generated-artifact-contradictions:\n\t@:\n"
             "check-doc-counts:\n\t@grep -q fixed docs/dev/CODEBASE_MAP.md || "
             "{ echo 'FAIL: doc-count drift detected'; exit 1; }\n",
