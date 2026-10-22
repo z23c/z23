@@ -40,7 +40,7 @@ enum { ARG_FLOOR_DEFS = 20, ARG_FLOOR_ENTRIES = 200, ARG_FLOOR_LEAVES = 300,
 
 const char arg_gen_src[] = "tools/gen_api_reference.c";
 const char arg_template[] = "docs/API_REFERENCE.md.in";
-const char arg_doc[] = "build/gen/API_REFERENCE.md";
+const char arg_doc[] = "build/gen/API_REFERENCE.md"; // error-doc-ref-ok:written by make docs-api-reference
 /* The POSIX default scratch parent when TMPDIR is unset. */
 const char arg_tmp_default[] = { '/', 't', 'm', 'p', '\0' };
 
