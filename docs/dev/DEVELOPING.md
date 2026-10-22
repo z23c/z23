@@ -1526,71 +1526,17 @@ or establish general code safety.
 
 ### Landing a stack of commits
 
-Build a filtered stack from reviewed, locally available commits with
-`devbuild --wait bash tools/scripts/stack_build.sh BASE COMMIT...`. It refuses
-dirty source or an existing Git operation, detaches at `BASE`, and makes
-signed picks in the supplied order. Conflicting, empty and merge picks are
-skipped; a pick failing the base-built canonical complexity checker is also
-skipped. Existing branch refs are not moved or published history rewritten.
-The assembled tip must pass complexity even when every input is skipped.
-The checker measures each candidate's C source and ratchet baseline. Changes
-to checker implementation itself still require the assembled tip's full lint.
-Both stack tools refuse inherited `GIT_*` variables before Git or generator
-effects, except the output-only `GIT_PAGER` and `GIT_TERMINAL_PROMPT` settings.
-They require Git's worktree root to match the script's physical root.
-Run them from an ordinary shell without ambient Git routing or configuration.
-
-For example, reconstruct the existing stack-refresh corrections in order:
-
-```bash
-devbuild --wait bash tools/scripts/stack_build.sh \
-  7a4bc550504fc7a6dfb240fdf07b35373554bbcd \
-  bc540938a5b6aa75bf2c49eaf162a2de6ff5813d \
-  a515f51ce61df51ff8492add11e8ff9442330e72
-```
-
-Standard output has one `PICKED NEW_HASH input=INPUT_HASH` or
-`SKIPPED REASON input=INPUT_HASH` line per input, then `TIP HASH` after refresh
-succeeds. Diagnostics and retained receipt locations go to standard error.
-Other Git, signing or checker failures stop without a success tip; signing
-failure preserves the staged pick and never falls back to an unsigned commit.
-The tool calls the refresh below once. Review its remaining generated changes
-and commit them normally; its content display is not a staging allowlist.
-This command prepares the stack, rather than replacing full landing gates.
-Run `devbuild --wait bash tools/scripts/stack_build.sh --selftest` for isolated
-real-Git fixtures using the existing `build/bin/z23-lint` checker. If missing,
-build that checker with the normal scheduler first. A base checker build that
-changes tracked source stops for inspection before any picks.
-
-Authors leave generated package roots, dependency pins, registry projections,
-and the untracked `build/gen` outputs out of their commits. The integrator runs
-`devbuild --wait bash tools/scripts/stack_tip_refresh.sh` once at the
-assembled stack tip.
-It rederives the registry and dependent pins, then runs the canonical
-documented-count gate. If its only failures are numeric count mismatches,
-it updates only those values in `docs/dev/CODEBASE_MAP.md` and makes a signed
-document-only commit naming each count and its old and measured values.
-Other count failures stop with the gate output; a failed correction or
-signature stops before inventory. It then regenerates the capability
-inventory and checks counts again. It prints content changes and fails if
-any step fails. Review and commit the remaining generated changes at the tip.
-Source-owned count updates still belong to the author commit; the correction
-handles residual assembled-stack drift. Check mode never repairs or commits
-counts.
-
-Both modes refuse a dirty checkout before invoking generators, including
-ignored untracked package manifests discovered by the registry.
-Run `devbuild --wait bash tools/scripts/stack_tip_refresh.sh --check` to compare
-registry, inventory, and documented-count freshness. Stale evidence fails.
-Helper builds may regenerate tracked view headers before checking; inspect
-`git status` and `git diff` afterwards, including after a refusal. Check mode
-does not report these prerequisite changes. The refresh display compares
-content only; it is not a staging allowlist or a report of mode/link changes.
-The script also provides a self-test:
-
-```bash
-devbuild --wait bash tools/scripts/stack_tip_refresh.sh --selftest
-```
+Put the ready commits on one lane branch, or submit several lanes. The land
+queue (`z23-dev dev land submit --worktree=$PWD`, then `dev land status`)
+rebases each row onto current `origin/main` and proves the tip it assembled;
+with `ZCL_LAND_TRAIN_WIDTH` set (the lander service sets 4) it stacks up to
+that many queued rows behind one exact proof. The steps below and the native
+queue notes after them give the details. No manual stack or refresh script
+exists. The capability inventory and API reference are build output under
+`build/gen` and are never committed. Registry projections and dependency pins
+are tracked and checked by the zcode-packages lint gate, so after changing
+package sources run `devbuild --wait make docs-zcode-package-registry` and
+commit its result.
 
 Before committing:
 
