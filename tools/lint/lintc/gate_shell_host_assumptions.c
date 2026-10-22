@@ -543,7 +543,10 @@ static void shl_cfg_load(struct shl_cfg *c)
     c->root = ".";
     c->scan_dir = getenv("ZCL_SHELL_HOST_SCAN_DIR");
     c->inject_path = getenv("ZCL_SHELL_HOST_INJECT_SCAN_PATH");
-    c->file_floor = atoi(env_or("ZCL_SHELL_HOST_FILE_FLOOR", "400"));
+    /* A scanner tripwire, not a ratchet: a scan that finds far fewer shell
+     * files than the tree holds means the index read broke. Shell deletions
+     * lower it; keep it about 10% under the tracked count (392 on 10-22). */
+    c->file_floor = atoi(env_or("ZCL_SHELL_HOST_FILE_FLOOR", "350"));
     c->ss_c = atoi(env_or("ZCL_SHELL_HOST_SS_CEILING", "63"));
     c->nproc_c = atoi(env_or("ZCL_SHELL_HOST_NPROC_CEILING", "36"));
     c->stat_c = atoi(env_or("ZCL_SHELL_HOST_STAT_CEILING", "108"));

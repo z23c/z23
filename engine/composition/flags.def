@@ -2149,7 +2149,7 @@ Z23_FLAG("ZCL_SHELL_HOST_BASELINE", "env_build", "-", "-",
           "undocumented; first use tools/lint/lintc/gate_shell_host_assumptions.c:auto")
 Z23_FLAG("ZCL_SHELL_HOST_BOOTSTRAP", "env_build", "0", "-",
           "undocumented; first use tools/lint/lintc/gate_shell_host_assumptions.c:auto")
-Z23_FLAG("ZCL_SHELL_HOST_FILE_FLOOR", "env_build", "400", "-",
+Z23_FLAG("ZCL_SHELL_HOST_FILE_FLOOR", "env_build", "350", "-",
           "undocumented; first use tools/lint/lintc/gate_shell_host_assumptions.c:auto")
 Z23_FLAG("ZCL_SHELL_HOST_INJECT_SCAN_FAILURE", "env_build", "0", "-",
           "undocumented; first use tools/lint/lintc/gate_shell_host_assumptions.c:auto")
