@@ -83,9 +83,9 @@ ZCL_FACT("lint.gates", "scan_floor_clang_portability",
          "tools/lint/check_clang_portability.sh",
          "SRC_FLOOR=900")
 ZCL_FACT("lint.gates", "scan_floor_byte_order_measured",
-         "check_byte_order_codec_single is ported to the native lint runtime; the shell file is now a 3-line exec shim onto z23-lint.",
+         "check_byte_order_codec_single is ported to the native lint runtime; its shell shim was deleted and callers run z23-lint directly.",
          "tools/lint/lintc/gate_byte_order_codec_single_report.c",
-         "Ported to the C23 lint runtime (check-byte-order-codec-single in")
+         "check-byte-order-codec-single, part 2")
 ZCL_FACT("lint.gates", "scan_floor_honest_witness",
          "check_honest_witness's native implementation refuses to report clean off a zero-witness scan when .c files are present, naming that exact fail-silent hole.",
          "tools/lint/lintc/gate_source_fences.c",
@@ -97,7 +97,7 @@ ZCL_FACT("lint.gates", "arm_symbol_baseline_file",
 ZCL_FACT("lint.gates", "arm_symbol_baseline_update_manual",
          "The arm_symbol_single baseline is only rewritten by an explicit UPDATE invocation, never automatically by make lint.",
          "tools/lint/lintc/gate_arm_symbol_single.c",
-         "UPDATE rewrites the baseline")
+         "baseline UPDATED:")
 ZCL_FACT("lint.gates", "arm_symbol_baseline_artifact_id",
          "The generated arm_symbol_single_baseline.txt file carries a versioned artifact-id header line identifying its schema.",
          "tools/lint/arm_symbol_single_baseline.txt",
