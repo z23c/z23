@@ -1444,19 +1444,17 @@ push or AI edit loop.
   `tools/scripts/background_quality_lane.sh coverage` weekly.
 - `z23-test-suite.timer` runs
   `tools/scripts/background_quality_lane.sh tests` hourly.
-- `z23-land-step.timer` runs one beat of the native landing service
-  (`build/bin/z23-dev dev land step`) every ~20s, plus once 2 minutes after
-  boot. It is the repo-shipped supervisor for the `dev.land` queue: it
-  replaces the out-of-tree scratch `land_stepper.sh` driver, survives a
-  crash or reboot on its own, and bounds a stuck beat with
-  `TimeoutStartSec=900` rather than letting a hang stop landing silently.
-  It never publishes on its own — `dev land submit` is the deliberate act
-  that queues a tip, and the leaf it calls publishes only a tip whose exact
-  sealed proof receipt was admitted (`tools/command/native_dev_land.c`,
-  allowlisted in `tools/lint/lintc/gate_no_unattended_publish.c`). It is
-  not the same service as `z23-lander.service`, which runs the
-  older `tools/dev/land_lander.sh` and stops at a local `land/ready` ref
-  without publishing.
+- `z23-land-step.timer` runs one bounded `dev land drive --prove` row
+  (`build/bin/z23-dev dev land drive --prove --max_rows=1`, under ordinary
+  devbuild admission) 2 minutes after boot and then ~20s after each row
+  finishes. It is the repo-shipped supervisor for the `dev.land` queue on
+  the land host, survives a crash or reboot on its own, and bounds a stuck
+  row with `TimeoutStartSec=5400` rather than letting a hang stop landing
+  silently. It never publishes on its own: `dev land submit` is the
+  deliberate act that queues a tip, and the leaf it calls publishes only a
+  tip whose exact sealed proof receipt was admitted
+  (`tools/command/native_dev_land.c`, allowlisted in
+  `tools/lint/lintc/gate_no_unattended_publish.c`).
 - All four heavyweight timer services (including simnet nightly) enter through
   `tools/scripts/quality_job_guard.sh`: an active `*mint*` service or an
   unavailable mint-state query clean-skips without replacing the prior

@@ -27,8 +27,8 @@ you are new; this page is about operating a host, not about building.
   `zclassic23-slo-pager` and `zclassic23-hold-certifier` timers (absent units
   are tolerated); two probers on one ledger would double every row and halve
   the BLIND threshold.
-- **Landing.** `z23-land-step.service` / `.timer` drive one beat of the native
-  landing service.
+- **Landing.** `z23-land-step.service` / `.timer` drive the native land queue, one
+  `dev land drive --prove` row per tick.
 - **Agents.** `zcl-agent-worker@.service` and `zcl-agent-receive@.service`, the
   instanced pair. The instance name is the box's own agent identity.
 - **Installers.** `setup.sh`, `provision-z23-build-host.sh`,
