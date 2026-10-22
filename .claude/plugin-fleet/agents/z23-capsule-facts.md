@@ -13,8 +13,8 @@ worktree path on that host, else a local one). Use only the commands below.
 Quote values; never guess.
 
 1. Read the card JSON (`zcl.work_card.v1`): `z23 fleet board show ID`, or
-   `grep '"name":"NAME"' docs/work/cards.jsonl`. Not yet native: `z23 work
-   show`. Required fields: name, level, outcome, base, owned[], forbidden[],
+   `grep '"name":"NAME"' docs/work/cards.jsonl`, or native `z23 work show ID`.
+   Required fields: name, level, outcome, base, owned[], forbidden[],
    contract[], acceptance (one argv), stop_if[], credit. Any missing: stop.
 2. `git fetch -q origin main && git rev-parse origin/main`. Record whether it
    equals `base`.

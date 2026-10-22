@@ -6699,6 +6699,7 @@ endif
 # Members of LINT_GATES already wired in run_lint.sh's gate_command() table.
 # Environment-dependent gates (check-git-hooks-installed) are deliberately out.
 # lint-fast itself is unchanged; agents keep using it for the edit loop.
+# check-kpi-floor (522 ms) failed land row 757's full proof lint after a whole stacked proof.
 LINT_LAND_EXTRA_GATES := \
     check-core-seal \
     check-remote-command-classes \
@@ -6722,7 +6723,8 @@ LINT_LAND_EXTRA_GATES := \
     check-byte-order-codec-single \
     check-hex-codec-single \
     check-hotswap-dev-only \
-    check-blocker-remedy
+    check-blocker-remedy \
+    check-kpi-floor
 LINT_LAND_GATES := $(LINT_FAST_GATES) $(LINT_LAND_EXTRA_GATES)
 
 # check-network-tool-hardening reads built binaries, so every target that

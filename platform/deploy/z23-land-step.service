@@ -4,6 +4,8 @@ Description=Z23 land queue driver (dev land drive --prove, one row)
 [Service]
 Type=oneshot
 WorkingDirectory=%h/development/z23/main
+# Land trains: one exact proof covers up to 4 queued rows (native_dev_land_train.c).
+Environment=ZCL_LAND_TRAIN_WIDTH=4
 # One bounded `dev land drive --prove` row per tick, under ordinary devbuild
 # admission (tools/command/native_dev_land.c): the row is rebased, proved and,
 # when its exact receipt is admitted, fast-forwarded onto origin/main.
