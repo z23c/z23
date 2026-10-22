@@ -4856,10 +4856,12 @@ $(BIN_DIR)/z23-fleet-observe: tools/dev/fleet_observe.c \
 # test-group-weights: regenerates tools/dev/test_group_weights.tsv, the
 # expected wall seconds that make test_parallel dispatch longest-first. The
 # input is a MEASUREMENT (.cache/test-timing/last-run.json of a full cold
-# run), not source, so no freshness gate can reproduce it; the tool refuses a
-# focused or cached run instead of silently dropping weights. The core
-# (test_group_weights.c) has no main() and is linked by the runner and the
-# harness; test_group_weights_main.c is the CLI shim kept out of
+# run), not source, so no freshness gate can reproduce it. Take it from a
+# ZCL_STRESS_TESTS=1 run, the mode every land proof uses (the stress-gated
+# groups run longer there: semantic_facts_fuzz is 290 s, not ~50 s). The
+# tool refuses a focused or cached run instead of silently dropping weights.
+# The core (test_group_weights.c) has no main() and is linked by the runner
+# and the harness; test_group_weights_main.c is the CLI shim kept out of
 # DEVLOOP_ALL_SRCS via DEV_STANDALONE_SRCS.
 TEST_GROUP_WEIGHTS_BIN = $(BIN_DIR)/test-group-weights$(ZCL_HOST_EXEEXT)
 TEST_GROUP_WEIGHTS_TIMING ?= .cache/test-timing/last-run.json
