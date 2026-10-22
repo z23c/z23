@@ -265,8 +265,8 @@ static char *pdc_remote_params(const struct zcl_command_request *request, bool *
     if (job) {
         json_push_kv_int(&one, "job", (int64_t)job);
     } else {
-        json_push_kv_str(&one, "root", zcl_native_plugin_str(request, "root"));
-        json_push_kv_str(&one, "name", zcl_native_plugin_str(request, "name"));
+        json_push_kv_str(&one, "root", plg_str(request, "root"));
+        json_push_kv_str(&one, "name", plg_str(request, "name"));
         json_push_kv_bool(&one, "allow_downgrade", pdc_flag(request, "allow-downgrade"));
         if (peer) {
             json_set_int(&peer_value, (int64_t)peer);
@@ -451,7 +451,7 @@ static bool pdc_remote_args_ok(const struct zcl_command_request *request, bool p
                                const char *params, uint64_t *wait_s)
 {
     return !bad && params && pdc_u64(request, "wait", wait_s) &&
-           (polling || (zcl_native_plugin_str(request, "root") && zcl_native_plugin_str(request, "name")));
+           (polling || (plg_str(request, "root") && plg_str(request, "name")));
 }
 
 void zcl_native_handle_plugin_fetch_remote(const struct zcl_command_request *request,
