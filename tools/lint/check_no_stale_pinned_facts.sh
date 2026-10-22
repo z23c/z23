@@ -40,7 +40,7 @@
 # measurement (a benchmark log row, an immutable ADR positioning statement).
 # The reason must be non-empty.
 #
-# This is a FORBID gate (like tools/lint/check_no_shellouts.sh): it need not
+# This is a FORBID gate (like tools/lint/lintc/gate_tree_walk.c): it need not
 # scan a non-empty set to be meaningful, but it MUST exit non-zero on a
 # violation and zero when clean. It is standalone-runnable and build-free
 # (filesystem + grep only).
