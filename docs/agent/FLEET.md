@@ -222,7 +222,7 @@ results print `n/a (n<3)`; executors with no predictions are capped at C.
 
 ### Objectives
 
-`z23-dev fleet objectives [--format=json]` prints each named objective with
+`z23-dev fleet objectives --datadir=<node datadir> [--format=json]` prints each named objective with
 its current value, target and status (`met`, `unmet`, `unmeasured(<reason>)`).
 The closed catalog is [`engine/composition/objectives.def`](../../engine/composition/objectives.def):
 `landing_latency_s`, `landing_attempts_per_train`, `proof_lint_wall_s`,
