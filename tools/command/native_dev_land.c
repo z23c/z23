@@ -713,6 +713,10 @@ struct dl_row {
     char phase[16];
     long long attempt;
     long long started;
+    /* Unix seconds at which the outcome writer recorded state "landed"; 0 for
+     * every other row. `ts` is the SUBMIT time and `started` the proof start,
+     * so only this says when the train landed. */
+    long long landed_at;
     char base[80];
     char local[80];
     char tree[80];
@@ -1071,6 +1075,7 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
     if (!dl_line_int(line, "attempt", &r->attempt) || r->attempt < 1)
         return false;
     (void)dl_line_int(line, "started", &r->started);
+    (void)dl_line_int(line, "landed_at", &r->landed_at);
     return dl_prechecked_parse(line, r) && dl_parse_dispatch_fields(line, r) &&
            dl_row_semantics_ok(r);
 }
@@ -1161,8 +1166,13 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
      * valid UTF-8 detail cannot overflow its escaped buffer. */
     char e_dim[128], e_log[8192], e_detail[1024 * 6 + 16];
     int w;
+    char landed_at[40] = "";
     char priority[40];
     if (!dl_row_encoding_start(r, out, cap, priority)) return false;
+    if (r->landed_at > 0 &&
+        snprintf(landed_at, sizeof(landed_at), "\"landed_at\":%lld,", r->landed_at) >=
+            (int)sizeof(landed_at))
+        return false;
     if (!dl_escape_start_fields(r, e_ts, e_tip, e_wt, e_note, e_state,
                                 e_phase) ||
         !dl_escape_proof_fields(r, e_base, e_local, e_tree, e_intent, dependency) ||
@@ -1175,7 +1185,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
     w = snprintf(out, cap,
                  "{\"seq\":%lld,\"priority_seq\":%s,\"ts\":\"%s\",\"tip\":\"%s\","
                  "\"worktree\":\"%s\",\"note\":\"%s\",\"state\":\"%s\","
-                 "\"phase\":\"%s\",\"attempt\":%lld,\"started\":%lld,"
+                 "\"phase\":\"%s\",\"attempt\":%lld,\"started\":%lld,%s"
                  "\"base\":\"%s\",\"local\":\"%s\",\"tree\":\"%s\","
                  "\"proof_intent\":\"%s\",\"tip_pushed\":\"%s\","
                  "\"publication_target\":\"%s\",\"publication_proof\":\"%s\","
@@ -1191,7 +1201,7 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  "\"push_diagnostic_pending\":%d,\"fence_peer\":%lld,"
                  "\"publication_hold\":%s%s}\n",
                  r->seq, priority, e_ts, e_tip, e_wt, e_note, e_state, e_phase,
-                 r->attempt, r->started, e_base, e_local, e_tree, e_intent,
+                 r->attempt, r->started, landed_at, e_base, e_local, e_tree, e_intent,
                  e_pushed, p.target, p.proof, p.bundle, p.signer, p.signature,
                  p.remote_tip, p.remote_source, p.remote_signer,
                  p.remote_signature,
@@ -2049,6 +2059,8 @@ static bool dl_record_outcome(const struct dl_dirs *d, struct dl_row *r)
         snprintf(path, sizeof(path), "%s/outcomes.jsonl", d->land) >=
             (int)sizeof(path))
         return false;
+    if (!present && strcmp(r->state, "landed") == 0 && r->landed_at == 0)
+        r->landed_at = (long long)platform_time_wall_unix();
     if (present)
         *r = prior;
     else if (

@@ -117,16 +117,18 @@ ZCL_COMMAND_READY_READ(
     "or unmeasured(<reason>). landing_latency_s and "
     "landing_attempts_per_train read the landing outcomes ledger; "
     "proof_lint_wall_s and proof_test_wall_s read the newest landing "
-    "attempt's phases.txt; commits_landed_today runs a local `git log` "
-    "through the no-shell spawn seam; lint_families_over_ceiling counts "
+    "attempt's lint and test logs and phases.txt; commits_landed_today runs "
+    "a local `git log` of origin/main through the no-shell spawn seam; lint_families_over_ceiling counts "
     "oversized files under tools/lint/lintc; "
     "functions_over_complexity_cap counts the cyclomatic baseline's rows "
-    "when that file exists. A value this tree cannot measure today is "
+    "when that file exists; landed_rows_today, land_success_rate_7d, "
+    "product_commit_share_7d and generated_churn_10d are the lab KPIs, and "
+    "the result carries a `screen` report card. A value this tree cannot measure today is "
     "reported unmeasured with the reason named, never as a fabricated "
     "zero. outcomes, attempts_dir, repo, lintc_dir and baseline override "
     "the five paths a producer reads, for pointing the command at a "
     "fixture. It contacts no peer and writes nothing.",
-    8192,
+    32768,
     "fleet,objectives,goals,targets,status,catalog",
     "zcl.fleet_objectives_input.v1", "zcl.fleet_objectives.v1",
     "outcomes,attempts_dir,repo,lintc_dir,baseline", "",

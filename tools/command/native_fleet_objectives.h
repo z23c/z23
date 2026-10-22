@@ -14,7 +14,8 @@
 
 #define ZCL_OBJECTIVES_SCHEMA "zcl.fleet_objectives.v1"
 #define ZCL_OBJECTIVES_REASON_MAX 256u
-#define ZCL_OBJECTIVES_TEXT_MAX 4096u
+#define ZCL_OBJECTIVES_TEXT_MAX 6144u
+#define ZCL_OBJECTIVES_SCREEN_MAX 8192u
 
 /* One catalog row, decided at compile time from
  * engine/composition/objectives.def. */
@@ -47,6 +48,8 @@ struct zcl_objectives_options {
     const char *repo;         /* git worktree read for commit history */
     const char *lintc_dir;    /* tools/lint/lintc */
     const char *baseline;     /* the cyclomatic complexity baseline file */
+    int64_t now;              /* unix seconds the day and window readers
+                               * count from; 0 reads the wall clock */
 };
 
 /* Measures one catalog row by id. An id this file does not recognize
@@ -65,6 +68,11 @@ void zcl_objectives_status(const struct zcl_objective_row *row,
  * Returns the bytes written (always < cap). */
 size_t zcl_objectives_render_text(const struct json_value *rows, char *out,
                                   size_t cap);
+
+/* One ASCII report-card line per objective plus a summary line
+ * "lab: met N of M, unmeasured K". Returns the bytes written (always < cap). */
+size_t zcl_objectives_render_screen(const struct json_value *rows, char *out,
+                                    size_t cap);
 
 /* Readers shared with `fleet.goals`. */
 bool zcl_objectives_parse_iso8601(const char *s, int64_t *out);

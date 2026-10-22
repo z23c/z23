@@ -54,6 +54,7 @@ void zcl_native_handle_fleet_objectives(
     const struct zcl_objective_row *catalog;
     struct json_value rows;
     char text[ZCL_OBJECTIVES_TEXT_MAX];
+    char screen[ZCL_OBJECTIVES_SCREEN_MAX];
     size_t n;
 
     if (!reply)
@@ -82,10 +83,12 @@ void zcl_native_handle_fleet_objectives(
     }
 
     (void)zcl_objectives_render_text(&rows, text, sizeof(text));
+    (void)zcl_objectives_render_screen(&rows, screen, sizeof(screen));
 
     (void)json_push_kv_str(&reply->data, "schema", ZCL_OBJECTIVES_SCHEMA);
     (void)json_push_kv(&reply->data, "objectives", &rows);
     (void)json_push_kv_str(&reply->data, "text", text);
+    (void)json_push_kv_str(&reply->data, "screen", screen);
     json_free(&rows);
 
     reply->status = ZCL_COMMAND_STATUS_PASSED;
@@ -144,5 +147,86 @@ size_t zcl_objectives_render_text(const struct json_value *rows, char *out,
         obj_put(&b, "%-32s %10s %10lld %8s %s\n", id ? id : "", value_str,
                (long long)target, unit ? unit : "", status ? status : "");
     }
+    return cap - b.left;
+}
+
+/* ── report-card screen ───────────────────────────────────────────────── */
+
+#define OBJ_BAR_WIDTH 20
+
+/* Cells of the bar to fill toward the target: value/target for a "max"
+ * objective, target/value for a "min" one (full at or under target). */
+static int obj_bar_fill(bool is_max, int64_t value, int64_t target)
+{
+    int64_t num, den;
+    if (value < 0)
+        value = 0;
+    if (is_max) {
+        if (target <= 0 || value >= target)
+            return OBJ_BAR_WIDTH;
+        num = value;
+        den = target;
+    } else {
+        if (value <= target)
+            return OBJ_BAR_WIDTH;
+        num = target;
+        den = value;
+    }
+    return (int)(num * OBJ_BAR_WIDTH / den);
+}
+
+/* The status text, ASCII only: bytes outside 0x20..0x7e become '?'. */
+static void obj_ascii(const char *s, char *out, size_t cap)
+{
+    size_t n = 0;
+    for (; s && *s && n + 1 < cap; s++)
+        out[n++] = (*s >= 0x20 && *s <= 0x7e) ? *s : '?';
+    out[n] = '\0';
+}
+
+size_t zcl_objectives_render_screen(const struct json_value *rows, char *out,
+                                    size_t cap)
+{
+    struct obj_render_buf b = {out, cap};
+    int64_t met = 0, unmeasured = 0;
+    if (!rows || !out || cap == 0)
+        return 0;
+    out[0] = '\0';
+    for (size_t i = 0; i < rows->num_children; i++) {
+        const struct json_value *row = &rows->children[i];
+        const char *id = json_get_str(json_get(row, "id"));
+        const char *status = json_get_str(json_get(row, "status"));
+        bool is_max = strcmp(json_get_str(json_get(row, "direction")),
+                             "max") == 0;
+        int64_t target = json_get_int(json_get(row, "target"));
+        char bar[OBJ_BAR_WIDTH + 1], value_str[32], verdict[ZCL_OBJECTIVES_REASON_MAX + 32];
+        int fill = 0;
+
+        if (json_get_bool(json_get(row, "measured"))) {
+            int64_t value = json_get_int(json_get(row, "value"));
+            fill = obj_bar_fill(is_max, value, target);
+            (void)snprintf(value_str, sizeof(value_str), "%lld",
+                           (long long)value);
+            if (strcmp(status, "met") == 0) {
+                met++;
+                (void)snprintf(verdict, sizeof(verdict), "met");
+            } else {
+                (void)snprintf(verdict, sizeof(verdict), "UNMET");
+            }
+        } else {
+            unmeasured++;
+            (void)snprintf(value_str, sizeof(value_str), "-");
+            obj_ascii(status, verdict, sizeof(verdict));
+        }
+        for (int c = 0; c < OBJ_BAR_WIDTH; c++)
+            bar[c] = json_get_bool(json_get(row, "measured"))
+                         ? (c < fill ? '#' : '-')
+                         : '?';
+        bar[OBJ_BAR_WIDTH] = '\0';
+        obj_put(&b, "%-30s [%s] %s/%lld %s\n", id ? id : "", bar, value_str,
+                (long long)target, verdict);
+    }
+    obj_put(&b, "lab: met %lld of %zu, unmeasured %lld\n", (long long)met,
+            rows->num_children, (long long)unmeasured);
     return cap - b.left;
 }

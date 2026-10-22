@@ -4,8 +4,10 @@
  * (tools/command/native_fleet_objectives*.c).
  *
  * Every path a producer reads is overridable, so the whole leaf runs against
- * fixtures built here. Nothing reads a real clock or asserts a clock-dependent
- * value; `commits_landed_today` is exercised but its VALUE is never asserted.
+ * fixtures built here. Nothing asserts a clock-dependent
+ * value: the day and window readers take their clock from options.now, and
+ * the git readers run over a throwaway repo whose commits carry dated
+ * GIT_COMMITTER_DATE values.
  */
 
 #include "test/test_core.h"
@@ -15,11 +17,13 @@
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
+#include "util/spawn.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 
 #define FOX_PATH "fleet.objectives"
 
@@ -55,6 +59,95 @@ static bool fox_write_n_lines(const char *path, int64_t n)
     }
     return fclose(f) == 0;
 }
+
+static bool fox_set_mtime(const char *path, long sec)
+{
+    struct timeval tv[2] = {{sec, 0}, {sec, 0}};
+    return utimes(path, tv) == 0;
+}
+
+/* One proof attempt in the layout the proof writes it: <dir>/<name>/logs/
+ * holding phases.txt, <sha>.lint.log and <sha>.test.log. An in-flight
+ * attempt has no dimension_lint_and_test row. The lint and test logs carry
+ * decoy lines (the budget NOTE, an indented child suite line) that a reader
+ * must not mistake for the wall lines. */
+static bool fox_attempt(const char *dir, const char *name, bool complete,
+                        long long cumulative_ms, long long lint_ms,
+                        const char *test_wall_s, long mtime)
+{
+    char path[1400], logs[1200], attempt[1100], text[4096];
+    size_t n;
+    (void)snprintf(attempt, sizeof(attempt), "%s/%s", dir, name);
+    (void)snprintf(logs, sizeof(logs), "%s/logs", attempt);
+    if (!fox_mkdir(attempt) || !fox_mkdir(logs))
+        return false;
+    n = (size_t)snprintf(
+        text, sizeof(text),
+        "zcl.dev_proof_phase.v1 worktree_exact_root               167 ms  "
+        "(cumulative      167 ms)\n"
+        "zcl.dev_proof_phase.v1 prefork_inputs_and_build       202395 ms  "
+        "(cumulative   972798 ms)\n");
+    if (complete)
+        (void)snprintf(text + n, sizeof(text) - n,
+                       "zcl.dev_proof_phase.v1 dimension_lint_and_test "
+                       "%10lld ms  (cumulative %10lld ms)\n",
+                       cumulative_ms - 972798, cumulative_ms);
+    (void)snprintf(path, sizeof(path), "%s/phases.txt", logs);
+    if (!fox_write(path, text) || !fox_set_mtime(path, mtime))
+        return false;
+    (void)snprintf(text, sizeof(text),
+        "make[1]: warning: jobserver unavailable: using -j1.\n"
+        "PASS check-toolchain                               1607 ms\n"
+        "\xe2\x94\x80\xe2\x94\x80 lint timing: 222 gates, wall %lld ms, jobs 21 "
+        "\xe2\x94\x80\xe2\x94\x80\n"
+        "run_lint.sh: NOTE \xe2\x80\x94 wall 539041 ms exceeds the 75s soft "
+        "budget\n", lint_ms);
+    (void)snprintf(path, sizeof(path), "%s/abc.lint.log", logs);
+    if (!fox_write(path, text))
+        return false;
+    (void)snprintf(text, sizeof(text),
+        "    image child: ALL TESTS PASSED \xe2\x80\x94 0/1 groups failed, 0 "
+        "skipped (97.9s wall, 1 workers)\n"
+        "ALL TESTS PASSED \xe2\x80\x94 0/1359 groups failed, 0 skipped "
+        "(%ss wall, 28 workers) [--exact filtered]\n"
+        "    image child: ALL TESTS PASSED \xe2\x80\x94 0/1 groups failed, 0 "
+        "skipped (5.7s wall, 1 workers)\n", test_wall_s);
+    (void)snprintf(path, sizeof(path), "%s/abc.test.log", logs);
+    return fox_write(path, text);
+}
+
+/* ── a throwaway git repo with dated commits ───────────────────────── */
+
+static int fox_git(const char *repo, const char *a, const char *b,
+                   const char *c, const char *d)
+{
+    const char *argv[] = {"git", "-C", repo, "-c", "user.name=fixture",
+                          "-c", "user.email=fixture@example.invalid",
+                          "-c", "commit.gpgsign=false", a, b, c, d, NULL};
+    char out[4096];
+    return zcl_spawn_capture(argv, out, sizeof(out), 20000);
+}
+
+/* Writes `rel` with a fresh body and commits it at unix time `when`. */
+static bool fox_commit(const char *repo, const char *rel, long long when,
+                       int serial)
+{
+    char path[1200], body[32], date[64];
+    bool ok;
+    (void)snprintf(path, sizeof(path), "%s/%s", repo, rel);
+    (void)snprintf(body, sizeof(body), "%d\n", serial);
+    (void)snprintf(date, sizeof(date), "%lld +0000", when);
+    if (!fox_write(path, body))
+        return false;
+    (void)setenv("GIT_AUTHOR_DATE", date, 1);
+    (void)setenv("GIT_COMMITTER_DATE", date, 1);
+    ok = fox_git(repo, "add", rel, NULL, NULL) == 0 &&
+         fox_git(repo, "commit", "-q", "-m", "fixture") == 0;
+    (void)unsetenv("GIT_AUTHOR_DATE");
+    (void)unsetenv("GIT_COMMITTER_DATE");
+    return ok;
+}
+
 
 /* ── one in-process invocation ──────────────────────────────────────── */
 
@@ -173,7 +266,8 @@ static int fox_case_ledger_extent(void)
     int failures = 0;
     char root[512], path[1024], raw[5000];
     const char row[] = "{\"state\":\"landed\",\"note\":\"extent\","
-        "\"ts\":\"2026-09-06T10:00:00Z\",\"attempt\":1,\"started\":1788688800}";
+        "\"ts\":\"2026-09-06T10:00:00Z\",\"attempt\":1,\"started\":1788688800,"
+        "\"landed_at\":1788692400}";
     const char *ids[] = {"landing_latency_s", "landing_attempts_per_train"};
     test_make_tmpdir(root, sizeof root, "fleet_objectives", "extent");
     for (size_t i = 0; i < 6; i++) {
@@ -214,14 +308,216 @@ _test_next:;
     return failures;
 }
 
+/* 2026-10-22T10:00:00Z, and the UTC midnight ten hours before it. */
+#define FOX_NOW 1792663200LL
+#define FOX_MIDNIGHT 1792627200LL
+#define FOX_DAY 86400LL
+
+static int fox_case_windows(void)
+{
+    int failures = 0;
+    char root[512], outcomes[1024], thin[1024], missing[1024], text[4096];
+    struct zcl_objectives_options o = {0};
+    struct zcl_objective_value v;
+    test_make_tmpdir(root, sizeof(root), "fleet_objectives", "windows");
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/outcomes.jsonl", root);
+    (void)snprintf(thin, sizeof(thin), "%s/thin.jsonl", root);
+    (void)snprintf(missing, sizeof(missing), "%s/none.jsonl", root);
+    /* now is 2026-10-22T10:00Z. A landed an hour ago but was submitted ten
+     * days ago (landed_at wins over ts); B landed two hours ago; C is an old
+     * row dated by its ts, today; D landed one second before midnight; E is
+     * an old row from three days ago. F failed two days ago. G, H are ten
+     * days old; I was cancelled today. */
+    (void)snprintf(text, sizeof(text),
+        "{\"state\":\"landed\",\"ts\":\"2026-10-12T09:00:00Z\",\"landed_at\":%lld}\n"
+        "{\"state\":\"landed\",\"ts\":\"2026-10-22T08:00:00Z\",\"landed_at\":%lld}\n"
+        "{\"state\":\"landed\",\"ts\":\"2026-10-22T02:00:00Z\"}\n"
+        "{\"state\":\"landed\",\"ts\":\"2026-10-21T23:00:00Z\",\"landed_at\":%lld}\n"
+        "{\"state\":\"landed\",\"ts\":\"2026-10-19T10:00:00Z\"}\n"
+        "{\"state\":\"failed\",\"ts\":\"2026-10-20T10:00:00Z\"}\n"
+        "{\"state\":\"failed\",\"ts\":\"2026-10-12T10:00:00Z\"}\n"
+        "{\"state\":\"landed\",\"ts\":\"2026-10-12T10:00:00Z\"}\n"
+        "{\"state\":\"cancelled\",\"ts\":\"2026-10-22T09:30:00Z\"}\n",
+        FOX_NOW - 3600, FOX_NOW - 7200, FOX_MIDNIGHT - 1);
+    o.now = FOX_NOW;
+    o.outcomes = outcomes;
+    TEST("objectives: landed_rows_today counts landed rows since UTC "
+         "midnight, dated by landed_at and else ts") {
+        ASSERT(fox_write(outcomes, text));
+        v = zcl_objectives_measure(&o, "landed_rows_today");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 3);
+        PASS();
+    }
+    TEST("objectives: land_success_rate_7d is landed over landed plus "
+         "failed in the last 7 days") {
+        v = zcl_objectives_measure(&o, "land_success_rate_7d");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 83); /* 5 landed, 1 failed in the window */
+        PASS();
+    }
+    TEST("objectives: a window with no landed or failed row, or no ledger, "
+         "is unmeasured") {
+        ASSERT(fox_write(thin,
+            "{\"state\":\"landed\",\"ts\":\"2026-10-12T10:00:00Z\"}\n"
+            "{\"state\":\"cancelled\",\"ts\":\"2026-10-22T09:30:00Z\"}\n"));
+        o.outcomes = thin;
+        v = zcl_objectives_measure(&o, "land_success_rate_7d");
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "no landed or failed") != NULL);
+        v = zcl_objectives_measure(&o, "landed_rows_today");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 0);
+        o.outcomes = missing;
+        v = zcl_objectives_measure(&o, "landed_rows_today");
+        ASSERT(!v.measured);
+        ASSERT(v.reason[0] != '\0');
+        v = zcl_objectives_measure(&o, "land_success_rate_7d");
+        ASSERT(!v.measured);
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
+static int fox_case_git(void)
+{
+    int failures = 0;
+    char root[512], repo[1024];
+    struct zcl_objectives_options o = {0};
+    struct zcl_objective_value v;
+    const char *dirs[] = {"core", "engine", "contexts", "apps", "docs", "tools"};
+    test_make_tmpdir(root, sizeof(root), "fleet_objectives", "git");
+    (void)snprintf(repo, sizeof(repo), "%s/repo", root);
+    o.repo = repo;
+    o.now = FOX_NOW;
+    TEST("objectives: the git readers count dated commits on origin/main, "
+         "not HEAD, and fall back to HEAD only without it") {
+        ASSERT(fox_mkdir(repo));
+        ASSERT_EQ(fox_git(repo, "init", "-q", NULL, NULL), 0);
+        for (size_t i = 0; i < sizeof(dirs) / sizeof(dirs[0]); i++) {
+            char d[1100];
+            (void)snprintf(d, sizeof(d), "%s/%s", repo, dirs[i]);
+            ASSERT(fox_mkdir(d));
+        }
+        ASSERT(fox_commit(repo, "docs/x.md", FOX_NOW - 12 * FOX_DAY, 1));
+        ASSERT(fox_commit(repo, "docs/API_REFERENCE.md", FOX_NOW - 9 * FOX_DAY, 2));
+        ASSERT(fox_commit(repo, "core/a.c", FOX_NOW - 6 * FOX_DAY, 3));
+        ASSERT(fox_commit(repo, "tools/t.c", FOX_NOW - 5 * FOX_DAY, 4));
+        ASSERT(fox_commit(repo, "docs/CAPABILITY_INVENTORY.jsonl", FOX_NOW - 3 * FOX_DAY, 5));
+        ASSERT(fox_commit(repo, "engine/b.c", FOX_NOW - 2 * FOX_DAY, 6));
+        ASSERT(fox_commit(repo, "contexts/c.c", FOX_NOW - 3600, 7));
+        ASSERT(fox_commit(repo, "docs/API_REFERENCE.md", FOX_NOW - 3500, 8));
+        ASSERT_EQ(fox_git(repo, "update-ref", "refs/remotes/origin/main", "HEAD", NULL), 0);
+        /* One commit that exists only on HEAD, after origin/main. */
+        ASSERT(fox_commit(repo, "apps/d.c", FOX_NOW - 1800, 9));
+
+        v = zcl_objectives_measure(&o, "commits_landed_today");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 2); /* commits 7 and 8; HEAD's commit 9 is not on origin/main */
+        v = zcl_objectives_measure(&o, "product_commit_share_7d");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 50); /* 3 of the 6 commits since day -7 touch a product dir */
+        v = zcl_objectives_measure(&o, "generated_churn_10d");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 3); /* commits 2, 5 and 8 */
+
+        ASSERT_EQ(fox_git(repo, "update-ref", "-d", "refs/remotes/origin/main", NULL), 0);
+        v = zcl_objectives_measure(&o, "commits_landed_today");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 3); /* HEAD fallback sees commit 9 too */
+        PASS();
+    }
+    TEST("objectives: the git readers are unmeasured outside a repository "
+         "and when the window holds no commit") {
+        char plain[1024];
+        (void)setenv("GIT_CEILING_DIRECTORIES", root, 1);
+        (void)snprintf(plain, sizeof(plain), "%s/plain", root);
+        ASSERT(fox_mkdir(plain));
+        o.repo = plain;
+        v = zcl_objectives_measure(&o, "commits_landed_today");
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "git log failed") != NULL);
+        v = zcl_objectives_measure(&o, "product_commit_share_7d");
+        ASSERT(!v.measured);
+        o.repo = repo;
+        o.now = FOX_NOW + 400 * FOX_DAY;
+        v = zcl_objectives_measure(&o, "product_commit_share_7d");
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "no origin/main commit") != NULL);
+        v = zcl_objectives_measure(&o, "generated_churn_10d");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 0);
+        (void)unsetenv("GIT_CEILING_DIRECTORIES");
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
+static void fox_screen_row(struct json_value *rows, const char *id,
+                           const char *direction, int64_t target,
+                           bool measured, int64_t value, const char *status)
+{
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_str(&row, "id", id);
+    (void)json_push_kv_str(&row, "direction", direction);
+    (void)json_push_kv_int(&row, "target", target);
+    (void)json_push_kv_bool(&row, "measured", measured);
+    if (measured)
+        (void)json_push_kv_int(&row, "value", value);
+    (void)json_push_kv_str(&row, "status", status);
+    (void)json_push_back(rows, &row);
+    json_free(&row);
+}
+
+static int fox_case_screen(void)
+{
+    int failures = 0;
+    struct json_value rows;
+    char screen[2048], want[2048];
+    json_init(&rows);
+    json_set_array(&rows);
+    TEST("objectives: the report card draws a 20-cell bar toward each "
+         "target, in the row's own direction, in ASCII, with a summary") {
+        fox_screen_row(&rows, "alpha_max", "max", 12, true, 6, "unmet");
+        fox_screen_row(&rows, "beta_min", "min", 600, true, 1200, "unmet");
+        fox_screen_row(&rows, "gamma_zero", "min", 0, true, 0, "met");
+        fox_screen_row(&rows, "delta_gap", "max", 900, false, 0,
+                       "unmeasured(bad \xc3\xa9 x)");
+        fox_screen_row(&rows, "eps_over", "max", 12, true, 15, "met");
+        (void)zcl_objectives_render_screen(&rows, screen, sizeof(screen));
+        (void)snprintf(want, sizeof(want),
+            "%-30s [##########----------] 6/12 UNMET\n"
+            "%-30s [##########----------] 1200/600 UNMET\n"
+            "%-30s [####################] 0/0 met\n"
+            "%-30s [????????????????????] -/900 unmeasured(bad ?? x)\n"
+            "%-30s [####################] 15/12 met\n"
+            "lab: met 2 of 5, unmeasured 1\n",
+            "alpha_max", "beta_min", "gamma_zero", "delta_gap", "eps_over");
+        ASSERT_STR_EQ(screen, want);
+        PASS();
+    }
+_test_next:;
+    json_free(&rows);
+    return failures;
+}
+
 int test_fleet_objectives(void);
 int test_fleet_objectives(void)
 {
     int failures = 0;
     failures += fox_case_ledger_extent();
+    failures += fox_case_windows();
+    failures += fox_case_git();
+    failures += fox_case_screen();
     char root[512];
     char outcomes_ok[1024], outcomes_missing[1024];
-    char attempts_dir[1024], attempt1[1200], phases_path[1300];
+    char attempts_dir[1024], inflight_dir[1024];
     char lintc_dir[1024], lintc_big[1200], lintc_small[1200];
     char baseline_ok[1024], baseline_missing[1024];
 
@@ -231,9 +527,7 @@ int test_fleet_objectives(void)
     (void)snprintf(outcomes_missing, sizeof(outcomes_missing),
                   "%s/no_such_outcomes.jsonl", root);
     (void)snprintf(attempts_dir, sizeof(attempts_dir), "%s/attempts", root);
-    (void)snprintf(attempt1, sizeof(attempt1), "%s/only", attempts_dir);
-    (void)snprintf(phases_path, sizeof(phases_path), "%s/phases.txt",
-                  attempt1);
+    (void)snprintf(inflight_dir, sizeof(inflight_dir), "%s/inflight_only", root);
     (void)snprintf(lintc_dir, sizeof(lintc_dir), "%s/lintc", root);
     (void)snprintf(lintc_big, sizeof(lintc_big), "%s/big.c", lintc_dir);
     (void)snprintf(lintc_small, sizeof(lintc_small), "%s/small.c", lintc_dir);
@@ -243,29 +537,37 @@ int test_fleet_objectives(void)
                   "%s/no_such_baseline.txt", root);
 
     /* One TRAIN is identified by its `note` ("traintrainX"), never by `tip`
-     * or `base` (both change on every rebase), so each row gets its own tip.
-     * It starts at epoch 36000, fails twice, then lands at epoch 38460:
-     * latency 2460, 3 attempts. A row for a different train ("traintrainY")
-     * sits first in the file and must not count toward either number. */
+     * or `base` (both change on every rebase). Each row's `ts` is its SUBMIT
+     * time and `started` its proof start; only the landed row's `landed_at`
+     * says when it landed. The train is first submitted at epoch 36030,
+     * fails twice, then lands at epoch 38490: latency 2460, 3 attempts. A row
+     * for a different train ("traintrainY") sits first in the file and must
+     * not count toward either number. */
     ASSERT(fox_write(
         outcomes_ok,
         "{\"tip\":\"tipY1\",\"note\":\"traintrainY\",\"state\":\"conflict\","
         "\"ts\":\"1970-01-01T09:00:00Z\",\"started\":32000}\n"
         "{\"tip\":\"tipX1\",\"note\":\"traintrainX\",\"state\":\"failed\","
-        "\"ts\":\"1970-01-01T10:00:30Z\",\"started\":36000,\"attempt\":1}\n"
+        "\"ts\":\"1970-01-01T10:00:30Z\",\"started\":36100,\"attempt\":1}\n"
         "{\"tip\":\"tipX2\",\"note\":\"traintrainX\",\"state\":\"failed\","
         "\"ts\":\"1970-01-01T10:20:00Z\",\"started\":37200,\"attempt\":1}\n"
         "{\"tip\":\"tipX3\",\"note\":\"traintrainX\",\"state\":\"landed\","
-        "\"ts\":\"1970-01-01T10:41:00Z\",\"started\":38460,\"attempt\":1}\n"));
+        "\"ts\":\"1970-01-01T10:41:00Z\",\"started\":38460,\"attempt\":1,"
+        "\"landed_at\":38490}\n"));
 
+    /* Three attempts in the real layout. "old" and "done" are complete;
+     * "done" finished later. "inflight" is the newest by mtime but has no
+     * dimension_lint_and_test row yet, so it must be skipped. */
     ASSERT(fox_mkdir(attempts_dir));
-    ASSERT(fox_mkdir(attempt1));
-    ASSERT(fox_write(
-        phases_path,
-        "generation_storage=ram\n"
-        "step=bundle budget_ms=1000 elapsed_ms=500 cause=none exit=0\n"
-        "step=lint budget_ms=999999 elapsed_ms=12345 cause=none exit=0\n"
-        "step=test budget_ms=999999 elapsed_ms=67890 cause=none exit=0\n"));
+    ASSERT(fox_attempt(attempts_dir, "old", true, 797605, 177718, "470.7",
+                       1000000000));
+    ASSERT(fox_attempt(attempts_dir, "done", true, 2506718, 178400, "1727.9",
+                       1100000000));
+    ASSERT(fox_attempt(attempts_dir, "newest_inflight", false, 0, 1, "1.0",
+                       1200000000));
+    ASSERT(fox_mkdir(inflight_dir));
+    ASSERT(fox_attempt(inflight_dir, "only_inflight", false, 0, 1, "1.0",
+                       1200000000));
 
     ASSERT(fox_mkdir(lintc_dir));
     ASSERT(fox_write_n_lines(lintc_big, 1501));
@@ -337,16 +639,20 @@ int test_fleet_objectives(void)
         PASS();
     }
 
-    TEST("objectives: landing chronology rejects invalid starts and "
+    TEST("objectives: landing chronology rejects an invalid landed_at and "
          "preserves valid durations") {
-        const char *starts[] = {"36001", "-1", "\"36000\"", "null", "36000", "35999"};
-        const int64_t expected[] = {-1, -1, -1, -1, 0, 1};
-        for (size_t i = 0; i < sizeof(starts) / sizeof(starts[0]); i++) {
+        /* The submit ts is 36000; latency is landed_at - 36000. A landed_at
+         * before the submit, zero, negative, a string or null is no landing
+         * instant at all. */
+        const char *landed[] = {"36001", "36000", "35999", "0", "-1",
+                                "\"36000\"", "null"};
+        const int64_t expected[] = {1, 0, -1, -1, -1, -1, -1};
+        for (size_t i = 0; i < sizeof(landed) / sizeof(landed[0]); i++) {
             char fixture[256];
             (void)snprintf(fixture, sizeof(fixture),
                           "{\"note\":\"chronology\",\"state\":\"landed\","
-                          "\"ts\":\"1970-01-01T10:00:00Z\",\"started\":%s,"
-                          "\"attempt\":1}\n", starts[i]);
+                          "\"ts\":\"1970-01-01T10:00:00Z\",\"started\":36500,"
+                          "\"landed_at\":%s,\"attempt\":1}\n", landed[i]);
             ASSERT(fox_write(outcomes_missing, fixture));
             struct fox_call c;
             fox_begin(&c);
@@ -369,12 +675,32 @@ int test_fleet_objectives(void)
         PASS();
     }
 
-    TEST("objectives: invalid first train start cannot fall through to a later row") {
+    TEST("objectives: an old landed row without landed_at stays unmeasured "
+         "with a clear reason, never a latency from ts or started") {
+        ASSERT(fox_write(outcomes_missing,
+            "{\"note\":\"old\",\"state\":\"landed\","
+            "\"ts\":\"1970-01-01T10:00:00Z\",\"started\":36900,"
+            "\"attempt\":1}\n"));
+        struct fox_call c;
+        fox_begin(&c);
+        fox_set(&c, "outcomes", outcomes_missing);
+        ASSERT(fox_run(&c));
+        const struct json_value *row = fox_row(&c, "landing_latency_s");
+        ASSERT(row != NULL);
+        ASSERT(!json_get_bool(json_get(row, "measured")));
+        ASSERT(strstr(fox_row_str(row, "reason"), "no landed_at") != NULL);
+        fox_end(&c);
+        ASSERT(remove(outcomes_missing) == 0);
+        PASS();
+    }
+
+    TEST("objectives: an unparseable first-row submit time cannot fall "
+         "through to a later row") {
         ASSERT(fox_write(outcomes_missing,
             "{\"note\":\"chronology\",\"state\":\"failed\","
-            "\"ts\":\"1970-01-01T09:59:59Z\",\"started\":null}\n"
+            "\"ts\":\"not a time\"}\n"
             "{\"note\":\"chronology\",\"state\":\"landed\","
-            "\"ts\":\"1970-01-01T10:00:00Z\",\"started\":36000}\n"));
+            "\"ts\":\"1970-01-01T10:00:00Z\",\"landed_at\":36001}\n"));
         struct fox_call c;
         fox_begin(&c);
         fox_set(&c, "outcomes", outcomes_missing);
@@ -390,12 +716,13 @@ int test_fleet_objectives(void)
         PASS();
     }
 
-    TEST("objectives: absent started falls back to the first row timestamp") {
+    TEST("objectives: latency runs from the train's first submission, not "
+         "the landed row's own ts") {
         ASSERT(fox_write(outcomes_missing,
             "{\"note\":\"chronology\",\"state\":\"failed\","
             "\"ts\":\"1970-01-01T09:59:59Z\"}\n"
             "{\"note\":\"chronology\",\"state\":\"landed\","
-            "\"ts\":\"1970-01-01T10:00:00Z\",\"started\":36000}\n"));
+            "\"ts\":\"1970-01-01T10:00:00Z\",\"landed_at\":36001}\n"));
         struct fox_call c;
         fox_begin(&c);
         fox_set(&c, "outcomes", outcomes_missing);
@@ -403,7 +730,7 @@ int test_fleet_objectives(void)
         const struct json_value *row = fox_row(&c, "landing_latency_s");
         ASSERT(row != NULL);
         ASSERT(json_get_bool(json_get(row, "measured")));
-        ASSERT_EQ(fox_row_int(row, "value"), (int64_t)1);
+        ASSERT_EQ(fox_row_int(row, "value"), (int64_t)2);
         ASSERT_STR_EQ(fox_row_str(row, "status"), "met");
         fox_end(&c);
         ASSERT(remove(outcomes_missing) == 0);
@@ -428,7 +755,8 @@ int test_fleet_objectives(void)
         PASS();
     }
 
-    TEST("objectives: phases.txt yields the exact rounded wall seconds") {
+    TEST("objectives: the real proof logs give lint, test and whole-proof "
+         "walls from the newest COMPLETED attempt") {
         struct fox_call c;
         fox_begin(&c);
         fox_set(&c, "outcomes", outcomes_ok);
@@ -439,11 +767,36 @@ int test_fleet_objectives(void)
         const struct json_value *lint = fox_row(&c, "proof_lint_wall_s");
         ASSERT(lint != NULL);
         ASSERT(json_get_bool(json_get(lint, "measured")));
-        ASSERT_EQ(fox_row_int(lint, "value"), (int64_t)12);
+        ASSERT_EQ(fox_row_int(lint, "value"), (int64_t)178);
         const struct json_value *test_row = fox_row(&c, "proof_test_wall_s");
         ASSERT(test_row != NULL);
         ASSERT(json_get_bool(json_get(test_row, "measured")));
-        ASSERT_EQ(fox_row_int(test_row, "value"), (int64_t)68);
+        ASSERT_EQ(fox_row_int(test_row, "value"), (int64_t)1728);
+        const struct json_value *proof = fox_row(&c, "proof_wall_s");
+        ASSERT(proof != NULL);
+        ASSERT(json_get_bool(json_get(proof, "measured")));
+        ASSERT_EQ(fox_row_int(proof, "value"), (int64_t)2507);
+        ASSERT_EQ(fox_row_int(proof, "target"), (int64_t)900);
+        ASSERT_STR_EQ(fox_row_str(proof, "status"), "unmet");
+        fox_end(&c);
+        PASS();
+    }
+
+    TEST("objectives: only an in-flight attempt is unmeasured, never zero") {
+        struct fox_call c;
+        fox_begin(&c);
+        fox_set(&c, "outcomes", outcomes_ok);
+        fox_set(&c, "attempts_dir", inflight_dir);
+        ASSERT(fox_run(&c));
+        const char *ids[] = {"proof_lint_wall_s", "proof_test_wall_s",
+                             "proof_wall_s"};
+        for (size_t i = 0; i < 3; i++) {
+            const struct json_value *row = fox_row(&c, ids[i]);
+            ASSERT(row != NULL);
+            ASSERT(!json_get_bool(json_get(row, "measured")));
+            ASSERT(strstr(fox_row_str(row, "reason"),
+                          "no completed proof attempt") != NULL);
+        }
         fox_end(&c);
         PASS();
     }
@@ -521,7 +874,7 @@ int test_fleet_objectives(void)
                      ZCL_OBJECTIVES_SCHEMA);
         const struct json_value *row = fox_row(&c, "proof_lint_wall_s");
         ASSERT(row != NULL);
-        ASSERT_STR_EQ(fox_row_str(row, "source"), "phases.txt");
+        ASSERT_STR_EQ(fox_row_str(row, "source"), "lint.log");
         ASSERT_STR_EQ(fox_row_str(row, "direction"), "min");
         ASSERT_STR_EQ(fox_row_str(row, "unit"), "s");
         ASSERT_EQ(fox_row_int(row, "target"), (int64_t)300);
@@ -548,6 +901,33 @@ int test_fleet_objectives(void)
         ASSERT(row != NULL);
         ASSERT_STR_EQ(fox_row_str(row, "id"), "commits_landed_today");
         ASSERT_STR_EQ(fox_row_str(row, "source"), "git_log");
+        fox_end(&c);
+        PASS();
+    }
+
+    TEST("objectives: the command result carries a screen, one ASCII line "
+         "per objective plus the lab summary") {
+        const struct zcl_objective_row *catalog;
+        size_t n = zcl_objectives_catalog(&catalog);
+        struct fox_call c;
+        fox_begin(&c);
+        fox_set(&c, "outcomes", outcomes_ok);
+        fox_set(&c, "attempts_dir", attempts_dir);
+        fox_set(&c, "lintc_dir", lintc_dir);
+        fox_set(&c, "baseline", baseline_ok);
+        ASSERT(fox_run(&c));
+        const char *screen = fox_row_str(&c.reply.data, "screen");
+        ASSERT_EQ(fox_count_lines(screen), (int64_t)n + 1);
+        for (const char *p = screen; *p; p++)
+            ASSERT(*p == '\n' || (*p >= 0x20 && *p <= 0x7e));
+        ASSERT(strstr(screen, "proof_lint_wall_s") != NULL);
+        ASSERT(strstr(screen, "[####################] 178/300 met") != NULL);
+        const char *last = strstr(screen, "lab: met ");
+        ASSERT(last != NULL);
+        ASSERT(strstr(last, " of 14, unmeasured ") != NULL);
+        /* The whole reply must fit the leaf's declared response budget. */
+        ASSERT(c.request.spec != NULL);
+        ASSERT(json_size(&c.reply.data) + 1024 <= c.request.spec->budget_bytes);
         fox_end(&c);
         PASS();
     }

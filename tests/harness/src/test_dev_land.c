@@ -2552,6 +2552,9 @@ static int test_dev_land_terminal_replay(void)
         dlx_end(&c);
         ASSERT(dlx_slurp(opath, outcome, sizeof(outcome), &outcome_len));
         ASSERT(outcome_len > 0);
+        /* The landed outcome carries the landing instant; ts is the submit time. */
+        ASSERT(strstr(outcome, "\"state\":\"landed\"") != NULL);
+        ASSERT(strstr(outcome, "\"landed_at\":") != NULL);
         ASSERT(dlx_slurp(qpath, queue, sizeof(queue), &queue_len));
         ASSERT(queue_len > 0);
         ASSERT(unlink(maildir) == 0 && mkdir(maildir, 0700) == 0);

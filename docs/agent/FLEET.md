@@ -226,9 +226,21 @@ results print `n/a (n<3)`; executors with no predictions are capped at C.
 its current value, target and status (`met`, `unmet`, `unmeasured(<reason>)`).
 The closed catalog is [`engine/composition/objectives.def`](../../engine/composition/objectives.def):
 `landing_latency_s`, `landing_attempts_per_train`, `proof_lint_wall_s`,
-`proof_test_wall_s`, `commits_landed_today`, `lint_families_over_ceiling`,
-`functions_over_complexity_cap`, `fresh_node_sync_eta_s` and
-`tokens_per_landed_commit`. It is a report, not a gate.
+`proof_test_wall_s`, `proof_wall_s`, `commits_landed_today`,
+`lint_families_over_ceiling`, `functions_over_complexity_cap`,
+`fresh_node_sync_eta_s`, `tokens_per_landed_commit`, `landed_rows_today`,
+`land_success_rate_7d`, `product_commit_share_7d` and `generated_churn_10d`.
+It is a report, not a gate.
+
+The result also carries a `screen`: one ASCII line per objective with a 20-cell
+bar toward its target, `value/target` and `met`, `UNMET` or `unmeasured(<reason>)`,
+then `lab: met N of M, unmeasured K`. The wall gauges read the newest COMPLETED proof
+attempt (the `phases.txt` in its logs directory has the `dimension_lint_and_test` row): lint from the
+lint log, test from the test log (the two run concurrently inside one dimension),
+`proof_wall_s` from the final cumulative. `commits_landed_today` and the git gauges
+count `origin/main` from UTC midnight and never fetch. `landing_latency_s` is the
+landed row's `landed_at` minus the train's first submission `ts`; an outcome row
+written before `landed_at` existed stays unmeasured.
 
 ### Goals
 

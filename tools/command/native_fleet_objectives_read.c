@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: The producers behind `fleet.objectives` — small static readers
- *          of outcomes.jsonl, a proof attempt's phases.txt, `git log`
+ *          of outcomes.jsonl, a completed proof attempt's phases.txt and
+ *          lint and test logs, `git log origin/main`
  *          through the no-shell spawn seam, and two line counts. Every
  *          producer answers UNMEASURED, never a fabricated zero, when its
  *          one named input is missing or unreadable.
@@ -17,6 +18,7 @@
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/state_root.h"
+#include "platform/time_compat.h"
 #include "util/spawn.h"
 #include "util/path_util.h"
 
@@ -157,8 +159,20 @@ static void obj_row_group_key(const struct json_value *row, char *out,
 struct obj_outcomes_stats {
     bool have_last_landed;
     int64_t last_landed_ts;
+    int64_t last_landed_at; /* the row's landed_at, 0 when it has none */
+
     char last_landed_note[OBJ_NOTE_MAX];
 };
+
+/* The landing instant the outcome writer stamps (unix seconds), 0 for a row
+ * written before that field existed. The row's `ts` is the SUBMIT time (the
+ * land queue stamps it once at enqueue) and `started` is when its proof began,
+ * so neither says when the train landed. */
+static int64_t obj_row_landed_at(const struct json_value *row)
+{
+    const struct json_value *v = json_get(row, "landed_at");
+    return v && v->type == JSON_INT && json_get_int(v) > 0 ? json_get_int(v) : 0;
+}
 
 static void obj_outcomes_row(const struct json_value *row,
                              struct obj_outcomes_stats *stats)
@@ -173,6 +187,7 @@ static void obj_outcomes_row(const struct json_value *row,
         return;
     stats->have_last_landed = true;
     stats->last_landed_ts = ts_unix;
+    stats->last_landed_at = obj_row_landed_at(row);
     obj_row_group_key(row, stats->last_landed_note,
                       sizeof(stats->last_landed_note));
 }
@@ -264,21 +279,14 @@ static bool obj_pair_add_new(struct obj_pair_set *set, int64_t attempt,
 struct obj_train_stats {
     bool found;
     bool invalid_start;
-    int64_t earliest_epoch; /* the earliest row's `started`, or its `ts` */
+    int64_t earliest_epoch; /* the earliest row's `ts`: its submit time */
     struct obj_pair_set attempts; /* distinct (attempt, started) landed/failed */
 };
 
-/* `started` present wins; a row with no `started` key falls back to its
- * own `ts`. */
+/* The row's submit time: `ts`, stamped once at enqueue. A row whose `ts`
+ * is absent or unparseable makes the train unmeasured. */
 static bool obj_row_start_epoch(const struct json_value *row, int64_t *out)
 {
-    const struct json_value *started_v = json_get(row, "started");
-    if (started_v) {
-        if (started_v->type != JSON_INT || json_get_int(started_v) < 0)
-            return false;
-        *out = json_get_int(started_v);
-        return true;
-    }
     const char *ts = json_get_str(json_get(row, "ts"));
     return ts[0] && obj_parse_iso8601(ts, out);
 }
@@ -391,14 +399,20 @@ static struct zcl_objective_value obj_landing_latency_s(
         obj_train_stats_free(&train);
         return v;
     }
+    if (stats.last_landed_at <= 0) {
+        obj_set_reason(&v, "newest landed row in %s has no landed_at (written "
+                       "before the field existed)", use);
+        obj_train_stats_free(&train);
+        return v;
+    }
     if (train.earliest_epoch < 0 ||
-        stats.last_landed_ts < train.earliest_epoch) {
+        stats.last_landed_at < train.earliest_epoch) {
         obj_set_reason(&v, "invalid landing chronology in %s", use);
         obj_train_stats_free(&train);
         return v;
     }
     v.measured = true;
-    v.value = stats.last_landed_ts - train.earliest_epoch;
+    v.value = stats.last_landed_at - train.earliest_epoch;
     obj_train_stats_free(&train);
     return v;
 }
@@ -427,11 +441,113 @@ static struct zcl_objective_value obj_landing_attempts_per_train(
     return v;
 }
 
-/* ── phases.txt ───────────────────────────────────────────────────────── */
+static bool obj_ends_with(const char *s, const char *suffix)
+{
+    size_t ls = strlen(s), lf = strlen(suffix);
+    return ls >= lf && strcmp(s + ls - lf, suffix) == 0;
+}
 
-/* The most recently modified attempt directory under `dir`, or false when
- * none exists. */
-static bool obj_newest_attempt(const char *dir, char *out, size_t cap)
+/* ── the newest completed proof attempt ───────────────────────────────── */
+
+/* Where the proof numbers live, read-only, written by tools/dev/dev_proof.c
+ * and tools/lint/run_lint.sh into <attempt>/logs/:
+ *
+ *   phases.txt     "zcl.dev_proof_phase.v1 <phase> <ms> ms (cumulative <ms> ms)",
+ *                  one row per finished phase. The LAST phase,
+ *                  dimension_lint_and_test, is written when lint and test
+ *                  are both done, so its presence marks a COMPLETED attempt
+ *                  (an in-flight one is skipped) and its cumulative is the
+ *                  whole proof wall.
+ *   *.lint.log     "-- lint timing: N gates, wall W ms, jobs J --" (the
+ *                  rule is U+2500 dashes), run_lint.sh's own wall.
+ *   *.test.log     "ALL TESTS PASSED ... (S.Ss wall, N workers)" or
+ *                  "SOME TESTS FAILED ...", test_parallel's suite wall.
+ *
+ * Lint and test run CONCURRENTLY inside the single dimension_lint_and_test
+ * phase, so no phase row can split them, and the attempt's phases.txt
+ * "step=test" row spans the whole dimension, lint included. Each wall is
+ * therefore taken from the log of the tool that ran it: proof_lint_wall_s
+ * from the lint log, proof_test_wall_s from the test log, proof_wall_s from
+ * the final cumulative. */
+#define OBJ_DIMENSION_PHASE "zcl.dev_proof_phase.v1 dimension_lint_and_test "
+
+/* Calls fn for each line, once, from its first OBJ_LINE_MAX bytes; the rest
+ * of an over-long line is skipped. False when the file cannot be read. */
+static bool obj_log_lines(const char *path,
+                          void (*fn)(const char *line, void *user),
+                          void *user)
+{
+    char line[OBJ_LINE_MAX];
+    bool at_start = true;
+    FILE *fp = fopen(path, "r");
+    if (!fp)
+        return false;
+    while (fgets(line, sizeof(line), fp)) {
+        size_t n = strlen(line);
+        if (at_start)
+            fn(line, user);
+        at_start = n > 0 && line[n - 1] == '\n';
+    }
+    bool ok = !ferror(fp);
+    (void)fclose(fp);
+    return ok;
+}
+
+static void obj_dimension_line(const char *line, void *user)
+{
+    const char *at;
+    char *end;
+    long long ms;
+    if (strncmp(line, OBJ_DIMENSION_PHASE, strlen(OBJ_DIMENSION_PHASE)) != 0)
+        return;
+    at = strstr(line, "(cumulative");
+    if (!at)
+        return;
+    at += strlen("(cumulative");
+    ms = strtoll(at, &end, 10);
+    if (end != at && ms >= 0)
+        *(int64_t *)user = ms;
+}
+
+static void obj_lint_wall_line(const char *line, void *user)
+{
+    const char *at = strstr(line, "lint timing:");
+    char *end;
+    long long ms;
+    if (!at || !(at = strstr(at, ", wall ")))
+        return;
+    at += strlen(", wall ");
+    ms = strtoll(at, &end, 10);
+    if (end != at && ms >= 0)
+        *(int64_t *)user = ms;
+}
+
+static void obj_test_wall_line(const char *line, void *user)
+{
+    const char *at;
+    char *end;
+    double s;
+    if (strncmp(line, "ALL TESTS PASSED", 16) != 0 &&
+        strncmp(line, "SOME TESTS FAILED", 17) != 0)
+        return;
+    at = strstr(line, "s wall,");
+    if (!at)
+        return;
+    while (at > line && ((at[-1] >= '0' && at[-1] <= '9') || at[-1] == '.'))
+        at--;
+    s = strtod(at, &end);
+    if (end != at && s >= 0.0 && s < 1e9)
+        *(int64_t *)user = (int64_t)(s * 1000.0 + 0.5);
+}
+
+struct obj_proof {
+    char logs[1100];
+    int64_t proof_ms;
+};
+
+/* The completed attempt whose phases.txt was written last, or false. */
+static bool obj_newest_completed_attempt(const char *dir,
+                                         struct obj_proof *out)
 {
     DIR *d = opendir(dir);
     struct dirent *e;
@@ -440,138 +556,345 @@ static bool obj_newest_attempt(const char *dir, char *out, size_t cap)
     if (!d)
         return false;
     while ((e = readdir(d))) {
-        char path[1024];
+        char logs[1100], phases[1200];
         struct stat st;
+        int64_t ms = -1;
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
             continue;
-        if (snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) <= 0)
+        if (snprintf(logs, sizeof(logs), "%s/%s/logs", dir, e->d_name) >=
+                (int)sizeof(logs) ||
+            snprintf(phases, sizeof(phases), "%s/phases.txt", logs) >=
+                (int)sizeof(phases))
             continue;
-        if (!zcl_path_is_dir(path) || stat(path, &st) != 0)
+        if (stat(phases, &st) != 0 || !S_ISREG(st.st_mode))
+            continue;
+        if (!obj_log_lines(phases, obj_dimension_line, &ms) || ms < 0)
             continue;
         if (!found || st.st_mtime > best) {
             best = st.st_mtime;
-            found = snprintf(out, cap, "%s", path) > 0;
+            found = true;
+            memcpy(out->logs, logs, sizeof(out->logs));
+            out->proof_ms = ms;
         }
     }
     (void)closedir(d);
     return found;
 }
 
-/* The elapsed_ms value on the "step=<name> ..." line, or -1 when the file
- * has no such line. */
-static int64_t obj_phase_elapsed_ms(const char *phases_path, const char *step)
+static bool obj_find_log(const char *logs, const char *suffix, char *out,
+                         size_t cap)
 {
-    char prefix[64];
-    char line[OBJ_LINE_MAX];
-    FILE *fp = fopen(phases_path, "r");
-    int64_t result = -1;
-    if (!fp)
-        return -1;
-    (void)snprintf(prefix, sizeof(prefix), "step=%s ", step);
-    while (fgets(line, sizeof(line), fp)) {
-        const char *at;
-        if (strncmp(line, prefix, strlen(prefix)) != 0)
-            continue;
-        at = strstr(line, " elapsed_ms=");
-        if (!at)
-            continue;
-        result = strtoll(at + strlen(" elapsed_ms="), NULL, 10);
-        break;
-    }
-    (void)fclose(fp);
-    return result;
+    DIR *d = opendir(logs);
+    struct dirent *e;
+    bool found = false;
+    if (!d)
+        return false;
+    while (!found && (e = readdir(d)))
+        found = obj_ends_with(e->d_name, suffix) &&
+                snprintf(out, cap, "%s/%s", logs, e->d_name) < (int)cap;
+    (void)closedir(d);
+    return found;
 }
 
-static struct zcl_objective_value obj_phase_wall_s(
-    const struct zcl_objectives_options *options, const char *step)
+static bool obj_completed_attempt(const struct zcl_objectives_options *options,
+                                  struct obj_proof *proof,
+                                  struct zcl_objective_value *v)
 {
-    struct zcl_objective_value v = {0};
-    char dirbuf[512], attempt[1024], phases[1088];
-    int64_t elapsed_ms;
+    char dirbuf[512];
     const char *dir = options && options->attempts_dir ? options->attempts_dir
                                                         : NULL;
     if (!dir) {
         if (!obj_default_attempts_dir(dirbuf, sizeof(dirbuf))) {
-            obj_set_reason(&v, "%s", "state root unavailable");
-            return v;
+            obj_set_reason(v, "%s", "state root unavailable");
+            return false;
         }
         dir = dirbuf;
     }
-    if (!obj_newest_attempt(dir, attempt, sizeof(attempt))) {
-        obj_set_reason(&v, "no attempt directories under %s", dir);
+    if (!obj_newest_completed_attempt(dir, proof)) {
+        obj_set_reason(v, "no completed proof attempt under %s", dir);
+        return false;
+    }
+    return true;
+}
+
+static struct zcl_objective_value obj_log_wall_s(
+    const struct zcl_objectives_options *options, const char *suffix,
+    void (*fn)(const char *line, void *user))
+{
+    struct zcl_objective_value v = {0};
+    struct obj_proof proof;
+    char log[1300];
+    int64_t ms = -1;
+    if (!obj_completed_attempt(options, &proof, &v))
+        return v;
+    if (!obj_find_log(proof.logs, suffix, log, sizeof(log))) {
+        obj_set_reason(&v, "no *%s in the newest completed attempt", suffix);
         return v;
     }
-    if (snprintf(phases, sizeof(phases), "%s/phases.txt", attempt) <= 0) {
-        obj_set_reason(&v, "%s", "attempt path too long");
-        return v;
-    }
-    elapsed_ms = obj_phase_elapsed_ms(phases, step);
-    if (elapsed_ms < 0) {
-        obj_set_reason(&v, "no matching step line in %s", phases);
+    if (!obj_log_lines(log, fn, &ms) || ms < 0) {
+        obj_set_reason(&v, "no wall line in %s", log);
         return v;
     }
     v.measured = true;
-    v.value = (elapsed_ms + 500) / 1000;
+    v.value = (ms + 500) / 1000;
     return v;
 }
 
 static struct zcl_objective_value obj_proof_lint_wall_s(
     const struct zcl_objectives_options *options)
 {
-    return obj_phase_wall_s(options, "lint");
+    return obj_log_wall_s(options, ".lint.log", obj_lint_wall_line);
 }
 
 static struct zcl_objective_value obj_proof_test_wall_s(
     const struct zcl_objectives_options *options)
 {
-    return obj_phase_wall_s(options, "test");
+    return obj_log_wall_s(options, ".test.log", obj_test_wall_line);
+}
+
+static struct zcl_objective_value obj_proof_wall_s(
+    const struct zcl_objectives_options *options)
+{
+    struct zcl_objective_value v = {0};
+    struct obj_proof proof;
+    if (!obj_completed_attempt(options, &proof, &v))
+        return v;
+    v.measured = true;
+    v.value = (proof.proof_ms + 500) / 1000;
+    return v;
+}
+
+/* ── outcomes.jsonl windows ───────────────────────────────────────────── */
+
+#define OBJ_DAY_S 86400
+#define OBJ_HISTORY_DAYS_RATE 7
+#define OBJ_HISTORY_DAYS_PRODUCT 7
+#define OBJ_HISTORY_DAYS_CHURN 10
+
+static int64_t obj_now(const struct zcl_objectives_options *options)
+{
+    return options && options->now > 0 ? options->now : platform_time_wall_unix();
+}
+
+static int64_t obj_utc_midnight(int64_t t)
+{
+    int64_t rem = t % OBJ_DAY_S;
+    return t - (rem < 0 ? rem + OBJ_DAY_S : rem);
+}
+
+/* When an outcome row happened: landed_at when the writer stamped one, else
+ * its ts (the submit time, the best a row from before landed_at can give). */
+static bool obj_row_when(const struct json_value *row, int64_t *out)
+{
+    int64_t at = obj_row_landed_at(row);
+    if (at > 0) {
+        *out = at;
+        return true;
+    }
+    return obj_parse_iso8601(json_get_str(json_get(row, "ts")), out);
+}
+
+struct obj_window {
+    int64_t today_start;
+    int64_t week_start;
+    int64_t landed_today;
+    int64_t landed_week;
+    int64_t failed_week;
+};
+
+static void obj_window_row(const struct json_value *row, void *user)
+{
+    struct obj_window *w = user;
+    const char *state = json_get_str(json_get(row, "state"));
+    bool landed = strcmp(state, "landed") == 0;
+    int64_t when;
+    if ((!landed && strcmp(state, "failed") != 0) || !obj_row_when(row, &when))
+        return;
+    if (when >= w->week_start) {
+        if (landed)
+            w->landed_week++;
+        else
+            w->failed_week++;
+    }
+    if (landed && when >= w->today_start)
+        w->landed_today++;
+}
+
+static bool obj_outcomes_window(const struct zcl_objectives_options *options,
+                                struct obj_window *w,
+                                struct zcl_objective_value *v)
+{
+    char path[512];
+    const char *use;
+    int64_t now = obj_now(options);
+    memset(w, 0, sizeof(*w));
+    w->today_start = obj_utc_midnight(now);
+    w->week_start = now - (int64_t)OBJ_HISTORY_DAYS_RATE * OBJ_DAY_S;
+    if (!obj_resolve_outcomes(options, path, sizeof(path), &use)) {
+        obj_set_reason(v, "%s", "state root unavailable");
+        return false;
+    }
+    return zcl_objectives_ledger_walk(use, obj_window_row, w, v->reason,
+                                      sizeof(v->reason));
+}
+
+static struct zcl_objective_value obj_landed_rows_today(
+    const struct zcl_objectives_options *options)
+{
+    struct zcl_objective_value v = {0};
+    struct obj_window w;
+    if (!obj_outcomes_window(options, &w, &v))
+        return v;
+    v.measured = true;
+    v.value = w.landed_today;
+    return v;
+}
+
+static struct zcl_objective_value obj_land_success_rate_7d(
+    const struct zcl_objectives_options *options)
+{
+    struct zcl_objective_value v = {0};
+    struct obj_window w;
+    int64_t total;
+    if (!obj_outcomes_window(options, &w, &v))
+        return v;
+    total = w.landed_week + w.failed_week;
+    if (total == 0) {
+        obj_set_reason(&v, "%s", "no landed or failed outcome in 7 days");
+        return v;
+    }
+    v.measured = true;
+    v.value = (w.landed_week * 100 + total / 2) / total;
+    return v;
 }
 
 /* ── git log ──────────────────────────────────────────────────────────── */
 
-static int64_t obj_count_nonblank_lines(const char *buf)
+/* The repo's origin/main, never fetched; HEAD only when it is absent. */
+static const char *obj_git_main_ref(const char *repo)
 {
-    int64_t count = 0;
-    bool in_line = false;
-    for (const char *p = buf; *p; p++) {
-        if (*p == '\n') {
-            if (in_line)
-                count++;
-            in_line = false;
-        } else if (*p != '\r') {
-            in_line = true;
-        }
+    const char *argv[] = {"git", "-C", repo, "rev-parse", "--verify",
+                          "--quiet", "refs/remotes/origin/main", NULL};
+    char out[256];
+    return zcl_spawn_capture(argv, out, sizeof(out), 5000) == 0
+               ? "refs/remotes/origin/main"
+               : "HEAD";
+}
+
+#define OBJ_GIT_OUT_MAX 65536u
+#define OBJ_GIT_PATHS_MAX 8u
+
+/* Commits reachable from the main ref with a committer time at or after
+ * `since`, limited to `paths` when any. One %ct per commit keeps the output
+ * small; the count is a bounded read, and a full buffer is a failure rather
+ * than a short count. */
+static bool obj_git_count_since(const char *repo, int64_t since,
+                                const char *const *paths, size_t npaths,
+                                int64_t *count)
+{
+    const char *argv[8 + OBJ_GIT_PATHS_MAX + 2];
+    char since_arg[48];
+    char *out = zcl_malloc(OBJ_GIT_OUT_MAX, "fleet_objectives_git");
+    size_t n = 0;
+    int64_t seen = 0;
+    bool ok;
+    if (!out || npaths > OBJ_GIT_PATHS_MAX ||
+        snprintf(since_arg, sizeof(since_arg), "--since=%lld",
+                 (long long)since) >= (int)sizeof(since_arg)) {
+        free(out);
+        return false;
     }
-    if (in_line)
-        count++;
-    return count;
+    argv[n++] = "git";
+    argv[n++] = "-C";
+    argv[n++] = repo;
+    argv[n++] = "log";
+    argv[n++] = "--format=%ct";
+    argv[n++] = since_arg;
+    argv[n++] = obj_git_main_ref(repo);
+    if (npaths) {
+        argv[n++] = "--";
+        for (size_t i = 0; i < npaths; i++)
+            argv[n++] = paths[i];
+    }
+    argv[n] = NULL;
+    ok = zcl_spawn_capture(argv, out, OBJ_GIT_OUT_MAX, 5000) == 0 &&
+         strlen(out) < OBJ_GIT_OUT_MAX - 1u;
+    for (const char *p = out; ok && *p;) {
+        char *end;
+        long long ct = strtoll(p, &end, 10);
+        if (end != p && ct >= since)
+            seen++;
+        p = strchr(end, '\n');
+        p = p ? p + 1 : end + strlen(end);
+    }
+    free(out);
+    *count = seen;
+    return ok;
+}
+
+static struct zcl_objective_value obj_git_window(
+    const struct zcl_objectives_options *options, int64_t since,
+    const char *const *paths, size_t npaths, int64_t *count)
+{
+    struct zcl_objective_value v = {0};
+    const char *repo = options && options->repo ? options->repo : ".";
+    if (!obj_git_count_since(repo, since, paths, npaths, count))
+        obj_set_reason(&v, "git log failed in %s", repo);
+    else
+        v.measured = true;
+    return v;
 }
 
 static struct zcl_objective_value obj_commits_landed_today(
     const struct zcl_objectives_options *options)
 {
-    struct zcl_objective_value v = {0};
-    const char *repo = options && options->repo ? options->repo : ".";
-    const char *argv[] = {"git",  "-C",     repo,   "log", "--since=midnight",
-                          "--pretty=oneline", "HEAD", NULL};
-    char out[65536];
-    int rc = zcl_spawn_capture(argv, out, sizeof(out), 5000);
-    if (rc != 0) {
-        obj_set_reason(&v, "git log failed in %s", repo);
+    int64_t count = 0;
+    struct zcl_objective_value v = obj_git_window(
+        options, obj_utc_midnight(obj_now(options)), NULL, 0, &count);
+    v.value = count;
+    return v;
+}
+
+static const char *const k_product_paths[] = {"core/", "engine/", "contexts/",
+                                              "apps/", "platform/"};
+static const char *const k_generated_paths[] = {
+    "docs/CAPABILITY_INVENTORY.jsonl", "docs/API_REFERENCE.md"};
+
+/* Share, in percent, of the window's commits that touch a product path. */
+static struct zcl_objective_value obj_product_commit_share_7d(
+    const struct zcl_objectives_options *options)
+{
+    int64_t since = obj_now(options) - (int64_t)OBJ_HISTORY_DAYS_PRODUCT * OBJ_DAY_S;
+    int64_t total = 0, product = 0;
+    struct zcl_objective_value v = obj_git_window(options, since, NULL, 0, &total);
+    if (!v.measured)
+        return v;
+    v = obj_git_window(options, since, k_product_paths,
+                       sizeof(k_product_paths) / sizeof(k_product_paths[0]),
+                       &product);
+    if (!v.measured)
+        return v;
+    if (total == 0) {
+        obj_set_reason(&v, "%s", "no origin/main commit in 7 days");
         return v;
     }
-    v.measured = true;
-    v.value = obj_count_nonblank_lines(out);
+    v.value = (product * 100 + total / 2) / total;
+    return v;
+}
+
+static struct zcl_objective_value obj_generated_churn_10d(
+    const struct zcl_objectives_options *options)
+{
+    int64_t count = 0;
+    struct zcl_objective_value v = obj_git_window(
+        options, obj_now(options) - (int64_t)OBJ_HISTORY_DAYS_CHURN * OBJ_DAY_S,
+        k_generated_paths,
+        sizeof(k_generated_paths) / sizeof(k_generated_paths[0]), &count);
+    v.value = count;
     return v;
 }
 
 /* ── lintc line ceiling ───────────────────────────────────────────────── */
-
-static bool obj_ends_with(const char *s, const char *suffix)
-{
-    size_t ls = strlen(s), lf = strlen(suffix);
-    return ls >= lf && strcmp(s + ls - lf, suffix) == 0;
-}
 
 static int64_t obj_file_line_count(const char *path)
 {
@@ -679,11 +1002,16 @@ static const struct obj_producer k_producers[] = {
     {"landing_attempts_per_train", obj_landing_attempts_per_train},
     {"proof_lint_wall_s", obj_proof_lint_wall_s},
     {"proof_test_wall_s", obj_proof_test_wall_s},
+    {"proof_wall_s", obj_proof_wall_s},
     {"commits_landed_today", obj_commits_landed_today},
     {"lint_families_over_ceiling", obj_lint_families_over_ceiling},
     {"functions_over_complexity_cap", obj_functions_over_complexity_cap},
     {"fresh_node_sync_eta_s", obj_fresh_node_sync_eta_s},
     {"tokens_per_landed_commit", obj_tokens_per_landed_commit},
+    {"landed_rows_today", obj_landed_rows_today},
+    {"land_success_rate_7d", obj_land_success_rate_7d},
+    {"product_commit_share_7d", obj_product_commit_share_7d},
+    {"generated_churn_10d", obj_generated_churn_10d},
 };
 
 struct zcl_objective_value zcl_objectives_measure(

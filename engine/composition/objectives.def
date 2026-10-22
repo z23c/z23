@@ -19,7 +19,7 @@
  *
  *   id_        the objective id, verbatim and stable.
  *   source_    the one thing the value is read from, named plainly:
- *              "outcomes.jsonl", "phases.txt", "git_log",
+ *              "outcomes.jsonl", "phases.txt", "lint.log", "test.log", "git_log",
  *              "lintc_line_counts", "cyclomatic_baseline", or
  *              "unmeasured" when no producer exists in the tree yet.
  *   direction_ "min" (lower is better) or "max" (higher is better).
@@ -34,8 +34,9 @@
 
 Z23_OBJECTIVE("landing_latency_s", "outcomes.jsonl", "min", 1200, "s",
              "per train, by its note: wall seconds from the newest landed "
-             "train's earliest attempt to its landed row's timestamp; a "
-             "train should land in the time one proof takes, not several")
+             "train's first submission (its earliest row ts) to the landed "
+             "row's landed_at; a train should land in the time one proof "
+             "takes, not several")
 
 Z23_OBJECTIVE("landing_attempts_per_train", "outcomes.jsonl", "min", 1,
              "count",
@@ -43,11 +44,11 @@ Z23_OBJECTIVE("landing_attempts_per_train", "outcomes.jsonl", "min", 1,
              "distinct landed-or-failed attempts; a train that needs more "
              "than one attempt is throwing finished proof work away")
 
-Z23_OBJECTIVE("proof_lint_wall_s", "phases.txt", "min", 300, "s",
+Z23_OBJECTIVE("proof_lint_wall_s", "lint.log", "min", 300, "s",
              "lint is the gate a lane pays before it may ask for a proof, "
              "and it should be fast enough nobody skips it")
 
-Z23_OBJECTIVE("proof_test_wall_s", "phases.txt", "min", 600, "s",
+Z23_OBJECTIVE("proof_test_wall_s", "test.log", "min", 600, "s",
              "the test wall is the dominant cost of landing anything")
 
 Z23_OBJECTIVE("commits_landed_today", "git_log", "max", 20, "count",
@@ -71,3 +72,26 @@ Z23_OBJECTIVE("tokens_per_landed_commit", "unmeasured", "min", 200000,
              "tokens",
              "the cost of one landed commit is what the whole delegation "
              "loop is spending to make progress")
+
+Z23_OBJECTIVE("proof_wall_s", "phases.txt", "min", 900, "s",
+             "the whole proof, from first phase to the end of lint and "
+             "test, is what a train waits on before it can land")
+
+Z23_OBJECTIVE("landed_rows_today", "outcomes.jsonl", "max", 12, "count",
+             "outcomes rows in state landed since UTC midnight: the lab's "
+             "own throughput, counted from the landing record")
+
+Z23_OBJECTIVE("land_success_rate_7d", "outcomes.jsonl", "max", 90,
+             "percent",
+             "landed over landed plus failed outcomes in the last 7 days; "
+             "a failed proof is a full proof's wall thrown away")
+
+Z23_OBJECTIVE("product_commit_share_7d", "git_log", "max", 60, "percent",
+             "share of origin/main commits in 7 days that touch core/, "
+             "engine/, contexts/, apps/ or platform/ rather than only "
+             "tooling and docs")
+
+Z23_OBJECTIVE("generated_churn_10d", "git_log", "min", 0, "count",
+             "origin/main commits in 10 days that touch the generated "
+             "capability inventory or API reference; a generated file "
+             "should not be a commit's reason to exist")
