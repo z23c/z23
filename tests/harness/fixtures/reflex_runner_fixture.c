@@ -293,7 +293,8 @@ static bool fixture_story(struct zcl_hotfork_observation_v1 *out)
     for (int fd = 3; fd < 256; fd++) {
         struct stat st;
         if (fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode))
-            (void)write(fd, &dup, sizeof(dup));
+            if (write(fd, &dup, sizeof(dup)) != (ssize_t)sizeof(dup))
+                continue; /* best effort: a closed or full pipe is the runner's case */
     }
     return ok;
 #elif defined(ZCL_REFLEX_FIXTURE_KIND_reapclose)
