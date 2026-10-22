@@ -12,6 +12,7 @@
 #include "json/json.h"
 #include "platform/atomic_link.h"
 #include "plugin/plugin_pack.h"
+#include "plugin/plugin_run.h"
 #include "plugin/plugin_store.h"
 #include "platform/time_compat.h"
 #include "../../../contexts/commons/modules/plugin/src/plugin_internal.h"
@@ -1902,6 +1903,50 @@ static int pst_case_registered(void)
     return failures;
 }
 
+static int pst_case_run_status_text(void)
+{
+    int failures = 0;
+    TEST_CASE("plugin_run status codes and next actions are stable and distinct") {
+        static const struct {
+            enum plugin_run_status status;
+            const char *code;
+        } want[] = {
+            {PLUGIN_RUN_ERR_ARGUMENT, "PLUGIN_RUN_ARGUMENT"},
+            {PLUGIN_RUN_ERR_PLATFORM, "PLUGIN_RUN_PLATFORM"},
+            {PLUGIN_RUN_ERR_STORE, "PLUGIN_RUN_STORE"},
+            {PLUGIN_RUN_ERR_CAPABILITY, "PLUGIN_RUN_CAPABILITY"},
+            {PLUGIN_RUN_ERR_SPAWN, "PLUGIN_RUN_SPAWN"},
+            {PLUGIN_RUN_ERR_FAILED, "PLUGIN_RUN_FAILED"},
+            {PLUGIN_RUN_ERR_SANDBOX, "PLUGIN_RUN_SANDBOX"},
+        };
+        size_t n = sizeof(want) / sizeof(want[0]);
+        ASSERT_STR_EQ(plugin_run_status_code(PLUGIN_RUN_ERR_CAPABILITY),
+                      "PLUGIN_RUN_CAPABILITY");
+        for (size_t i = 0; i < n; i++) {
+            const char *code = plugin_run_status_code(want[i].status);
+            const char *act = plugin_run_status_next_action(want[i].status);
+            ASSERT(code && act);
+            ASSERT_STR_EQ(code, want[i].code);
+            ASSERT(strncmp(code, "PLUGIN_RUN_", 11) == 0 && code[11] != '\0');
+            ASSERT(act[0] != '\0');
+            for (size_t j = i + 1; j < n; j++) {
+                /* Every refusal has its own code and its own remedy. */
+                ASSERT(strcmp(code, plugin_run_status_code(want[j].status)) != 0);
+                ASSERT(strcmp(act,
+                              plugin_run_status_next_action(want[j].status)) != 0);
+            }
+        }
+        /* Success carries no refusal; an unknown status reads as a failure
+         * with no action rather than reading out of range. */
+        ASSERT_STR_EQ(plugin_run_status_code(PLUGIN_RUN_OK), "");
+        ASSERT_STR_EQ(plugin_run_status_next_action(PLUGIN_RUN_OK), "");
+        ASSERT_STR_EQ(plugin_run_status_code((enum plugin_run_status)99),
+                      "PLUGIN_RUN_FAILED");
+        ASSERT_STR_EQ(plugin_run_status_next_action((enum plugin_run_status)99), "");
+    } TEST_END
+    return failures;
+}
+
 int test_plugin_store(void)
 {
     int failures = 0;
@@ -1952,6 +1997,7 @@ int test_plugin_store(void)
     failures += pst_case_unique_names();
 #endif
     failures += pst_case_crashed_install();
+    failures += pst_case_run_status_text();
     failures += pst_case_registered();
     return failures;
 }
