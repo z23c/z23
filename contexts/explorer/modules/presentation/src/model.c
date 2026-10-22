@@ -159,6 +159,28 @@ static bool printable_ascii(const char *text, size_t max)
     return true;
 }
 
+static bool item_id_repeated_after(const struct zcl_present_model_v1 *model,
+                                   uint32_t index)
+{
+    for (uint32_t j = index + 1u; j < model->item_count; j++) {
+        if (strcmp(model->items[index].id, model->items[j].id) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool form_field_valid(const struct zcl_present_model_item_v1 *item)
+{
+    if (item->kind != ZCL_PRESENT_ITEM_FORM_FIELD || !item->id[0] ||
+        !item->label[0] ||
+        item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE ||
+        (item->flags & ~(uint16_t)(ZCL_PRESENT_ITEM_REQUIRED |
+                                  ZCL_PRESENT_ITEM_READ_ONLY)) != 0 ||
+        !printable_ascii(item->value, ZCL_PRESENT_MODEL_VALUE_MAX))
+        return false;
+    return true;
+}
+
 static bool form_shape(const struct zcl_present_model_v1 *model)
 {
     if (model->kind != ZCL_PRESENT_MODEL_FORM) return true;
@@ -171,19 +193,29 @@ static bool form_shape(const struct zcl_present_model_v1 *model)
     bool editable = false;
     for (uint32_t i = 0; i < model->item_count; i++) {
         const struct zcl_present_model_item_v1 *item = &model->items[i];
-        if (item->kind != ZCL_PRESENT_ITEM_FORM_FIELD || !item->id[0] ||
-            !item->label[0] ||
-            item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE ||
-            (item->flags & ~(uint16_t)(ZCL_PRESENT_ITEM_REQUIRED |
-                                      ZCL_PRESENT_ITEM_READ_ONLY)) != 0 ||
-            !printable_ascii(item->value, ZCL_PRESENT_MODEL_VALUE_MAX))
+        if (!form_field_valid(item) || item_id_repeated_after(model, i))
             return false;
         editable |= !(item->flags & ZCL_PRESENT_ITEM_READ_ONLY);
-        for (uint32_t j = i + 1u; j < model->item_count; j++)
-            if (strcmp(item->id, model->items[j].id) == 0)
-                return false;
     }
     return editable;
+}
+
+static bool canvas_point_valid(const struct zcl_present_model_item_v1 *item)
+{
+    bool read_only = (item->flags & ZCL_PRESENT_ITEM_READ_ONLY) != 0;
+    bool is_selected = (item->flags & ZCL_PRESENT_ITEM_SELECTED) != 0;
+    if (item->kind != ZCL_PRESENT_ITEM_CANVAS_POINT || !item->id[0] ||
+        !item->label[0] ||
+        item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE ||
+        (item->flags & ~(uint16_t)(ZCL_PRESENT_ITEM_SELECTED |
+                                  ZCL_PRESENT_ITEM_READ_ONLY)) != 0 ||
+        item->numerator > ZCL_PRESENT_MODEL_CANVAS_COORD_MAX ||
+        item->denominator > ZCL_PRESENT_MODEL_CANVAS_COORD_MAX ||
+        !printable_ascii(item->label, ZCL_PRESENT_MODEL_LABEL_MAX) ||
+        !printable_ascii(item->value, ZCL_PRESENT_MODEL_VALUE_MAX) ||
+        (read_only && is_selected))
+        return false;
+    return true;
 }
 
 static bool canvas_shape(const struct zcl_present_model_v1 *model)
@@ -201,24 +233,33 @@ static bool canvas_shape(const struct zcl_present_model_v1 *model)
         const struct zcl_present_model_item_v1 *item = &model->items[i];
         bool read_only = (item->flags & ZCL_PRESENT_ITEM_READ_ONLY) != 0;
         bool is_selected = (item->flags & ZCL_PRESENT_ITEM_SELECTED) != 0;
-        if (item->kind != ZCL_PRESENT_ITEM_CANVAS_POINT || !item->id[0] ||
-            !item->label[0] ||
-            item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE ||
-            (item->flags & ~(uint16_t)(ZCL_PRESENT_ITEM_SELECTED |
-                                      ZCL_PRESENT_ITEM_READ_ONLY)) != 0 ||
-            item->numerator > ZCL_PRESENT_MODEL_CANVAS_COORD_MAX ||
-            item->denominator > ZCL_PRESENT_MODEL_CANVAS_COORD_MAX ||
-            !printable_ascii(item->label, ZCL_PRESENT_MODEL_LABEL_MAX) ||
-            !printable_ascii(item->value, ZCL_PRESENT_MODEL_VALUE_MAX) ||
-            (read_only && is_selected))
+        if (!canvas_point_valid(item) || item_id_repeated_after(model, i))
             return false;
         editable += !read_only;
         selected += is_selected;
-        for (uint32_t j = i + 1u; j < model->item_count; j++)
-            if (strcmp(item->id, model->items[j].id) == 0)
-                return false;
     }
     return editable == 1u && selected == 1u;
+}
+
+static bool qr_chunk_shape(const struct zcl_present_model_v1 *model,
+                           uint32_t index, size_t *length)
+{
+    const struct zcl_present_model_item_v1 *item = &model->items[index];
+    char expected[ZCL_PRESENT_MODEL_ID_MAX + 1u];
+    (void)snprintf(expected, sizeof(expected), "payload-%u", index);
+    if (item->kind != ZCL_PRESENT_ITEM_TEXT ||
+        item->status != ZCL_PRESENT_STATUS_NEUTRAL ||
+        item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE ||
+        item->flags != 0 || item->numerator != 0 ||
+        item->denominator != 0 || item->label[0] ||
+        strcmp(item->id, expected) != 0)
+        return false;
+    if (!bounded_length(item->value, ZCL_PRESENT_MODEL_VALUE_MAX, length) ||
+        *length == 0 ||
+        (index + 1u < model->item_count &&
+         *length != ZCL_PRESENT_MODEL_VALUE_MAX))
+        return false;
+    return true;
 }
 
 static bool qr_shape(const struct zcl_present_model_v1 *model)
@@ -230,20 +271,8 @@ static bool qr_shape(const struct zcl_present_model_v1 *model)
         return false;
     size_t total = 0;
     for (uint32_t i = 0; i < model->item_count; i++) {
-        const struct zcl_present_model_item_v1 *item = &model->items[i];
-        char expected[ZCL_PRESENT_MODEL_ID_MAX + 1u];
-        (void)snprintf(expected, sizeof(expected), "payload-%u", i);
         size_t length = 0;
-        if (item->kind != ZCL_PRESENT_ITEM_TEXT ||
-            item->status != ZCL_PRESENT_STATUS_NEUTRAL ||
-            item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE ||
-            item->flags != 0 || item->numerator != 0 ||
-            item->denominator != 0 || item->label[0] ||
-            strcmp(item->id, expected) != 0 ||
-            !bounded_length(item->value, ZCL_PRESENT_MODEL_VALUE_MAX,
-                            &length) || length == 0 ||
-            (i + 1u < model->item_count &&
-             length != ZCL_PRESENT_MODEL_VALUE_MAX) ||
+        if (!qr_chunk_shape(model, i, &length) ||
             total + length > ZCL_PRESENT_MODEL_QR_PAYLOAD_MAX)
             return false;
         total += length;
@@ -318,8 +347,8 @@ bool zcl_present_model_qr_payload_v1(
     return true;
 }
 
-bool zcl_present_model_validate_v1(const struct zcl_present_model_v1 *model,
-                                   char *error, size_t error_cap)
+static bool validate_header_v1(const struct zcl_present_model_v1 *model,
+                               char *error, size_t error_cap)
 {
     if (!model || model->struct_size != sizeof(*model) ||
         model->abi_version != ZCL_PRESENT_MODEL_ABI_V1)
@@ -345,45 +374,80 @@ bool zcl_present_model_validate_v1(const struct zcl_present_model_v1 *model,
     if (!valid_root(model->exact_root))
         return model_error(error, error_cap,
                            "visual model exact root is not lowercase SHA3 hex");
+    return true;
+}
 
+static bool item_enum_and_flags_valid(const struct zcl_present_model_item_v1 *item,
+                                      char *error, size_t error_cap)
+{
+    if (!valid_item_kind(item->kind) || !valid_status(item->status))
+        return model_error(error, error_cap,
+                           "visual model item enum is invalid");
+    if (item->flags & ~(uint16_t)(ZCL_PRESENT_ITEM_SELECTED |
+                                 ZCL_PRESENT_ITEM_REQUIRED |
+                                 ZCL_PRESENT_ITEM_READ_ONLY))
+        return model_error(error, error_cap,
+                           "visual model item flags are invalid");
+    return true;
+}
+
+static bool item_links_valid(const struct zcl_present_model_v1 *model,
+                             uint32_t index, char *error, size_t error_cap)
+{
+    const struct zcl_present_model_item_v1 *item = &model->items[index];
+    if (!valid_id(item->id, false) ||
+        !bounded_length(item->label, ZCL_PRESENT_MODEL_LABEL_MAX, NULL) ||
+        !bounded_length(item->value, ZCL_PRESENT_MODEL_VALUE_MAX, NULL))
+        return model_error(error, error_cap,
+                           "visual model item text is invalid or oversized");
+    if (item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE &&
+        item->parent_index >= model->item_count)
+        return model_error(error, error_cap,
+                           "visual model graph parent is out of range");
+    if (item->kind == ZCL_PRESENT_ITEM_GRAPH_NODE &&
+        item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE &&
+        (item->parent_index >= index ||
+         model->items[item->parent_index].kind !=
+             ZCL_PRESENT_ITEM_GRAPH_NODE))
+        return model_error(
+            error, error_cap,
+            "visual model graph parent must be an earlier graph node");
+    return true;
+}
+
+static bool item_fraction_valid(const struct zcl_present_model_item_v1 *item,
+                                char *error, size_t error_cap)
+{
+    if ((item->kind == ZCL_PRESENT_ITEM_PROGRESS ||
+         item->kind == ZCL_PRESENT_ITEM_CHART_POINT) &&
+        (item->denominator == 0 || item->numerator > item->denominator))
+        return model_error(
+            error, error_cap,
+            item->kind == ZCL_PRESENT_ITEM_PROGRESS
+                ? "visual model progress fraction is invalid"
+                : "visual model chart-point fraction is invalid");
+    return true;
+}
+
+static bool validate_items_v1(const struct zcl_present_model_v1 *model,
+                              char *error, size_t error_cap)
+{
     for (uint32_t i = 0; i < model->item_count; i++) {
         const struct zcl_present_model_item_v1 *item = &model->items[i];
-        if (!valid_item_kind(item->kind) || !valid_status(item->status))
-            return model_error(error, error_cap,
-                               "visual model item enum is invalid");
-        if (item->flags & ~(uint16_t)(ZCL_PRESENT_ITEM_SELECTED |
-                                     ZCL_PRESENT_ITEM_REQUIRED |
-                                     ZCL_PRESENT_ITEM_READ_ONLY))
-            return model_error(error, error_cap,
-                               "visual model item flags are invalid");
-        if (!valid_id(item->id, false) ||
-            !bounded_length(item->label, ZCL_PRESENT_MODEL_LABEL_MAX, NULL) ||
-            !bounded_length(item->value, ZCL_PRESENT_MODEL_VALUE_MAX, NULL))
-            return model_error(error, error_cap,
-                               "visual model item text is invalid or oversized");
-        if (item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE &&
-            item->parent_index >= model->item_count)
-            return model_error(error, error_cap,
-                               "visual model graph parent is out of range");
-        if (item->kind == ZCL_PRESENT_ITEM_GRAPH_NODE &&
-            item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE &&
-            (item->parent_index >= i ||
-             model->items[item->parent_index].kind !=
-                 ZCL_PRESENT_ITEM_GRAPH_NODE))
-            return model_error(
-                error, error_cap,
-                "visual model graph parent must be an earlier graph node");
-        if ((item->kind == ZCL_PRESENT_ITEM_PROGRESS ||
-             item->kind == ZCL_PRESENT_ITEM_CHART_POINT) &&
-            (item->denominator == 0 || item->numerator > item->denominator))
-            return model_error(
-                error, error_cap,
-                item->kind == ZCL_PRESENT_ITEM_PROGRESS
-                    ? "visual model progress fraction is invalid"
-                    : "visual model chart-point fraction is invalid");
+        if (!item_enum_and_flags_valid(item, error, error_cap) ||
+            !item_links_valid(model, i, error, error_cap) ||
+            !item_fraction_valid(item, error, error_cap))
+            return false;
     }
+    return true;
+}
+
+static bool validate_actions_v1(const struct zcl_present_model_v1 *model,
+                                char *error, size_t error_cap)
+{
     for (uint32_t i = 0; i < model->action_count; i++) {
         const struct zcl_present_model_action_v1 *action = &model->actions[i];
+        size_t length = 0;
         if (!valid_action_kind(action->kind) || action->flags != 0 ||
             !valid_id(action->id, true) ||
             !bounded_length(action->label,
@@ -392,6 +456,15 @@ bool zcl_present_model_validate_v1(const struct zcl_present_model_v1 *model,
             return model_error(error, error_cap,
                                "visual model action is invalid");
     }
+    return true;
+}
+
+bool zcl_present_model_validate_v1(const struct zcl_present_model_v1 *model,
+                                   char *error, size_t error_cap)
+{
+    if (!validate_header_v1(model, error, error_cap)) return false;
+    if (!validate_items_v1(model, error, error_cap)) return false;
+    if (!validate_actions_v1(model, error, error_cap)) return false;
     if (!action_ids_unique(model))
         return model_error(error, error_cap,
                            "visual model action ids are not unique");
@@ -449,6 +522,58 @@ static bool write_text(struct model_writer *writer, const char *text,
            write_bytes(writer, text, length);
 }
 
+static bool write_model_header(struct model_writer *writer,
+                               const struct zcl_present_model_v1 *model)
+{
+    return write_bytes(writer, MODEL_MAGIC, sizeof(MODEL_MAGIC)) &&
+           write_u16(writer, ZCL_PRESENT_MODEL_ABI_V1) &&
+           write_u16(writer, model->kind) &&
+           write_u32(writer, model->item_count) &&
+           write_u32(writer, model->action_count) &&
+           write_text(writer, model->request_id,
+                      ZCL_PRESENT_MODEL_ID_MAX) &&
+           write_text(writer, model->title,
+                      ZCL_PRESENT_MODEL_TITLE_MAX) &&
+           write_text(writer, model->summary,
+                      ZCL_PRESENT_MODEL_SUMMARY_MAX) &&
+           write_text(writer, model->exact_root,
+                      ZCL_PRESENT_MODEL_ROOT_MAX);
+}
+
+static bool write_model_items(struct model_writer *writer,
+                              const struct zcl_present_model_v1 *model)
+{
+    for (uint32_t i = 0; i < model->item_count; i++) {
+        const struct zcl_present_model_item_v1 *item = &model->items[i];
+        bool ok = write_u16(writer, item->kind) &&
+                  write_u16(writer, item->status) &&
+                  write_u16(writer, item->parent_index) &&
+                  write_u16(writer, item->flags) &&
+                  write_u32(writer, item->numerator) &&
+                  write_u32(writer, item->denominator) &&
+                  write_text(writer, item->id, ZCL_PRESENT_MODEL_ID_MAX) &&
+                  write_text(writer, item->label, ZCL_PRESENT_MODEL_LABEL_MAX) &&
+                  write_text(writer, item->value, ZCL_PRESENT_MODEL_VALUE_MAX);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool write_model_actions(struct model_writer *writer,
+                                const struct zcl_present_model_v1 *model)
+{
+    for (uint32_t i = 0; i < model->action_count; i++) {
+        const struct zcl_present_model_action_v1 *action = &model->actions[i];
+        bool ok = write_u16(writer, action->kind) &&
+                  write_u16(writer, action->flags) &&
+                  write_text(writer, action->id, ZCL_PRESENT_MODEL_ID_MAX) &&
+                  write_text(writer, action->label,
+                             ZCL_PRESENT_MODEL_ACTION_LABEL_MAX);
+        if (!ok) return false;
+    }
+    return true;
+}
+
 bool zcl_present_model_encode_v1(const struct zcl_present_model_v1 *model,
                                  uint8_t *wire, size_t wire_cap,
                                  size_t *wire_len,
@@ -461,39 +586,9 @@ bool zcl_present_model_encode_v1(const struct zcl_present_model_v1 *model,
                            "visual model output buffer is invalid");
     if (!zcl_present_model_validate_v1(model, error, error_cap)) return false;
     struct model_writer writer = {wire, wire_cap, 0};
-    bool ok = write_bytes(&writer, MODEL_MAGIC, sizeof(MODEL_MAGIC)) &&
-              write_u16(&writer, ZCL_PRESENT_MODEL_ABI_V1) &&
-              write_u16(&writer, model->kind) &&
-              write_u32(&writer, model->item_count) &&
-              write_u32(&writer, model->action_count) &&
-              write_text(&writer, model->request_id,
-                         ZCL_PRESENT_MODEL_ID_MAX) &&
-              write_text(&writer, model->title,
-                         ZCL_PRESENT_MODEL_TITLE_MAX) &&
-              write_text(&writer, model->summary,
-                         ZCL_PRESENT_MODEL_SUMMARY_MAX) &&
-              write_text(&writer, model->exact_root,
-                         ZCL_PRESENT_MODEL_ROOT_MAX);
-    for (uint32_t i = 0; ok && i < model->item_count; i++) {
-        const struct zcl_present_model_item_v1 *item = &model->items[i];
-        ok = write_u16(&writer, item->kind) &&
-             write_u16(&writer, item->status) &&
-             write_u16(&writer, item->parent_index) &&
-             write_u16(&writer, item->flags) &&
-             write_u32(&writer, item->numerator) &&
-             write_u32(&writer, item->denominator) &&
-             write_text(&writer, item->id, ZCL_PRESENT_MODEL_ID_MAX) &&
-             write_text(&writer, item->label, ZCL_PRESENT_MODEL_LABEL_MAX) &&
-             write_text(&writer, item->value, ZCL_PRESENT_MODEL_VALUE_MAX);
-    }
-    for (uint32_t i = 0; ok && i < model->action_count; i++) {
-        const struct zcl_present_model_action_v1 *action = &model->actions[i];
-        ok = write_u16(&writer, action->kind) &&
-             write_u16(&writer, action->flags) &&
-             write_text(&writer, action->id, ZCL_PRESENT_MODEL_ID_MAX) &&
-             write_text(&writer, action->label,
-                        ZCL_PRESENT_MODEL_ACTION_LABEL_MAX);
-    }
+    bool ok = write_model_header(&writer, model) &&
+              write_model_items(&writer, model) &&
+              write_model_actions(&writer, model);
     if (!ok)
         return model_error(error, error_cap,
                            "visual model exceeds its wire buffer");
@@ -536,6 +631,58 @@ static bool read_text(struct model_reader *reader, char *out, size_t max)
     return true;
 }
 
+static bool read_model_header(struct model_reader *reader, uint16_t *kind,
+                              uint32_t *item_count, uint32_t *action_count)
+{
+    uint8_t magic[sizeof(MODEL_MAGIC)];
+    uint16_t version = 0;
+    if (!read_bytes(reader, magic, sizeof(magic)) ||
+        memcmp(magic, MODEL_MAGIC, sizeof(magic)) != 0 ||
+        !read_u16(reader, &version) ||
+        version != ZCL_PRESENT_MODEL_ABI_V1 ||
+        !read_u16(reader, kind) ||
+        !read_u32(reader, item_count) ||
+        !read_u32(reader, action_count) ||
+        *item_count > ZCL_PRESENT_MODEL_ITEMS_MAX ||
+        *action_count > ZCL_PRESENT_MODEL_ACTIONS_MAX)
+        return false;
+    return true;
+}
+
+static bool read_model_items(struct model_reader *reader,
+                             struct zcl_present_model_v1 *model)
+{
+    for (uint32_t i = 0; i < model->item_count; i++) {
+        struct zcl_present_model_item_v1 *item = &model->items[i];
+        bool ok = read_u16(reader, &item->kind) &&
+                  read_u16(reader, &item->status) &&
+                  read_u16(reader, &item->parent_index) &&
+                  read_u16(reader, &item->flags) &&
+                  read_u32(reader, &item->numerator) &&
+                  read_u32(reader, &item->denominator) &&
+                  read_text(reader, item->id, ZCL_PRESENT_MODEL_ID_MAX) &&
+                  read_text(reader, item->label, ZCL_PRESENT_MODEL_LABEL_MAX) &&
+                  read_text(reader, item->value, ZCL_PRESENT_MODEL_VALUE_MAX);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool read_model_actions(struct model_reader *reader,
+                               struct zcl_present_model_v1 *model)
+{
+    for (uint32_t i = 0; i < model->action_count; i++) {
+        struct zcl_present_model_action_v1 *action = &model->actions[i];
+        bool ok = read_u16(reader, &action->kind) &&
+                  read_u16(reader, &action->flags) &&
+                  read_text(reader, action->id, ZCL_PRESENT_MODEL_ID_MAX) &&
+                  read_text(reader, action->label,
+                            ZCL_PRESENT_MODEL_ACTION_LABEL_MAX);
+        if (!ok) return false;
+    }
+    return true;
+}
+
 bool zcl_present_model_decode_v1(const uint8_t *wire, size_t wire_len,
                                  struct zcl_present_model_v1 *model,
                                  char *error, size_t error_cap)
@@ -545,20 +692,10 @@ bool zcl_present_model_decode_v1(const uint8_t *wire, size_t wire_len,
         return model_error(error, error_cap,
                            "visual model input is empty or oversized");
     struct model_reader reader = {wire, wire_len, 0};
-    uint8_t magic[sizeof(MODEL_MAGIC)];
-    uint16_t version = 0;
     uint16_t kind = 0;
     uint32_t item_count = 0;
     uint32_t action_count = 0;
-    if (!read_bytes(&reader, magic, sizeof(magic)) ||
-        memcmp(magic, MODEL_MAGIC, sizeof(magic)) != 0 ||
-        !read_u16(&reader, &version) ||
-        version != ZCL_PRESENT_MODEL_ABI_V1 ||
-        !read_u16(&reader, &kind) ||
-        !read_u32(&reader, &item_count) ||
-        !read_u32(&reader, &action_count) ||
-        item_count > ZCL_PRESENT_MODEL_ITEMS_MAX ||
-        action_count > ZCL_PRESENT_MODEL_ACTIONS_MAX)
+    if (!read_model_header(&reader, &kind, &item_count, &action_count))
         return model_error(error, error_cap,
                            "visual model wire header is invalid");
 
@@ -572,31 +709,49 @@ bool zcl_present_model_decode_v1(const uint8_t *wire, size_t wire_len,
               read_text(&reader, model->summary,
                         ZCL_PRESENT_MODEL_SUMMARY_MAX) &&
               read_text(&reader, model->exact_root,
-                        ZCL_PRESENT_MODEL_ROOT_MAX);
-    for (uint32_t i = 0; ok && i < item_count; i++) {
-        struct zcl_present_model_item_v1 *item = &model->items[i];
-        ok = read_u16(&reader, &item->kind) &&
-             read_u16(&reader, &item->status) &&
-             read_u16(&reader, &item->parent_index) &&
-             read_u16(&reader, &item->flags) &&
-             read_u32(&reader, &item->numerator) &&
-             read_u32(&reader, &item->denominator) &&
-             read_text(&reader, item->id, ZCL_PRESENT_MODEL_ID_MAX) &&
-             read_text(&reader, item->label, ZCL_PRESENT_MODEL_LABEL_MAX) &&
-             read_text(&reader, item->value, ZCL_PRESENT_MODEL_VALUE_MAX);
-    }
-    for (uint32_t i = 0; ok && i < action_count; i++) {
-        struct zcl_present_model_action_v1 *action = &model->actions[i];
-        ok = read_u16(&reader, &action->kind) &&
-             read_u16(&reader, &action->flags) &&
-             read_text(&reader, action->id, ZCL_PRESENT_MODEL_ID_MAX) &&
-             read_text(&reader, action->label,
-                       ZCL_PRESENT_MODEL_ACTION_LABEL_MAX);
-    }
+                        ZCL_PRESENT_MODEL_ROOT_MAX) &&
+              read_model_items(&reader, model) &&
+              read_model_actions(&reader, model);
     if (!ok || reader.used != reader.len)
         return model_error(error, error_cap,
                            "visual model wire is truncated or has trailing bytes");
     return zcl_present_model_validate_v1(model, error, error_cap);
+}
+
+static bool submission_models_valid(const struct zcl_present_model_v1 *original,
+                                    const struct zcl_present_model_v1 *submitted,
+                                    enum zcl_present_model_kind kind,
+                                    const char *message,
+                                    char *error, size_t error_cap)
+{
+    if (!original || !submitted ||
+        original->kind != kind ||
+        submitted->kind != kind ||
+        !zcl_present_model_validate_v1(original, error, error_cap) ||
+        !zcl_present_model_validate_v1(submitted, error, error_cap))
+        return model_error(error, error_cap, message);
+    return true;
+}
+
+static bool immutable_model_bytes_match(
+    const struct zcl_present_model_v1 *original,
+    const struct zcl_present_model_v1 *normalized,
+    const char *message, char *error, size_t error_cap)
+{
+    uint8_t expected[ZCL_PRESENT_MODEL_WIRE_MAX];
+    uint8_t received[ZCL_PRESENT_MODEL_WIRE_MAX];
+    size_t expected_len = 0, received_len = 0;
+    char why[192];
+    if (!zcl_present_model_encode_v1(
+            original, expected, sizeof(expected), &expected_len,
+            why, sizeof(why)) ||
+        !zcl_present_model_encode_v1(
+            normalized, received, sizeof(received), &received_len,
+            why, sizeof(why)) ||
+        expected_len != received_len ||
+        memcmp(expected, received, expected_len) != 0)
+        return model_error(error, error_cap, message);
+    return true;
 }
 
 bool zcl_present_model_form_submission_validate_v1(
@@ -604,13 +759,11 @@ bool zcl_present_model_form_submission_validate_v1(
     const struct zcl_present_model_v1 *submitted,
     char *error, size_t error_cap)
 {
-    if (!original || !submitted ||
-        original->kind != ZCL_PRESENT_MODEL_FORM ||
-        submitted->kind != ZCL_PRESENT_MODEL_FORM ||
-        !zcl_present_model_validate_v1(original, error, error_cap) ||
-        !zcl_present_model_validate_v1(submitted, error, error_cap))
-        return model_error(error, error_cap,
-                           "form submission model is invalid");
+    if (!submission_models_valid(original, submitted,
+                                 ZCL_PRESENT_MODEL_FORM,
+                                 "form submission model is invalid",
+                                 error, error_cap))
+        return false;
     if (original->item_count != submitted->item_count)
         return model_error(error, error_cap,
                            "form submission field count changed");
@@ -631,20 +784,11 @@ bool zcl_present_model_form_submission_validate_v1(
                        before->value);
     }
 
-    uint8_t expected[ZCL_PRESENT_MODEL_WIRE_MAX];
-    uint8_t received[ZCL_PRESENT_MODEL_WIRE_MAX];
-    size_t expected_len = 0, received_len = 0;
-    char why[192];
-    if (!zcl_present_model_encode_v1(
-            original, expected, sizeof(expected), &expected_len,
-            why, sizeof(why)) ||
-        !zcl_present_model_encode_v1(
-            &normalized, received, sizeof(received), &received_len,
-            why, sizeof(why)) ||
-        expected_len != received_len ||
-        memcmp(expected, received, expected_len) != 0)
-        return model_error(error, error_cap,
-                           "form submission changed immutable model bytes");
+    if (!immutable_model_bytes_match(
+            original, &normalized,
+            "form submission changed immutable model bytes",
+            error, error_cap))
+        return false;
     if (error && error_cap > 0) error[0] = '\0';
     return true;
 }
@@ -654,13 +798,11 @@ bool zcl_present_model_canvas_submission_validate_v1(
     const struct zcl_present_model_v1 *submitted,
     char *error, size_t error_cap)
 {
-    if (!original || !submitted ||
-        original->kind != ZCL_PRESENT_MODEL_CANVAS ||
-        submitted->kind != ZCL_PRESENT_MODEL_CANVAS ||
-        !zcl_present_model_validate_v1(original, error, error_cap) ||
-        !zcl_present_model_validate_v1(submitted, error, error_cap))
-        return model_error(error, error_cap,
-                           "canvas submission model is invalid");
+    if (!submission_models_valid(original, submitted,
+                                 ZCL_PRESENT_MODEL_CANVAS,
+                                 "canvas submission model is invalid",
+                                 error, error_cap))
+        return false;
     if (original->item_count != submitted->item_count)
         return model_error(error, error_cap,
                            "canvas submission point count changed");
@@ -678,20 +820,11 @@ bool zcl_present_model_canvas_submission_validate_v1(
         normalized.items[i].denominator = before->denominator;
     }
 
-    uint8_t expected[ZCL_PRESENT_MODEL_WIRE_MAX];
-    uint8_t received[ZCL_PRESENT_MODEL_WIRE_MAX];
-    size_t expected_len = 0, received_len = 0;
-    char why[192];
-    if (!zcl_present_model_encode_v1(
-            original, expected, sizeof(expected), &expected_len,
-            why, sizeof(why)) ||
-        !zcl_present_model_encode_v1(
-            &normalized, received, sizeof(received), &received_len,
-            why, sizeof(why)) ||
-        expected_len != received_len ||
-        memcmp(expected, received, expected_len) != 0)
-        return model_error(error, error_cap,
-                           "canvas submission changed immutable model bytes");
+    if (!immutable_model_bytes_match(
+            original, &normalized,
+            "canvas submission changed immutable model bytes",
+            error, error_cap))
+        return false;
     if (error && error_cap > 0) error[0] = '\0';
     return true;
 }
