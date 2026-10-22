@@ -36,6 +36,12 @@ export ZCL_VENDOR_OFFLINE
 export ZCL_USE_CCACHE
 endif
 
+# Agent shells export GIT_EDITOR and GIT_OPTIONAL_LOCKS. Every recipe (and
+# $(shell)) runs without them, so the lint gates that refuse any inherited
+# GIT_ selector (commons_fix_admit.sh) do not depend on each caller
+# remembering `env -u`. The scripts' own refusal stays for direct runs.
+unexport GIT_EDITOR GIT_OPTIONAL_LOCKS
+
 
 # The Windows API floor is ONE value. The product build below and the mingw
 # cross-compile of the acceptance catalog (windows_acceptance.mk) must agree:
