@@ -6,7 +6,6 @@
 # New tools are written in C23 as a nested z23 command, never as a shell script.
 .claude/plugin-fleet/bin/z23-steer-headers
 apps/z23kernel/build.sh
-platform/deploy/devbuild
 platform/deploy/devbuild-broker
 platform/deploy/fixed-result-launcher-install.sh
 platform/deploy/install-host-watchdog.sh
@@ -15,7 +14,6 @@ platform/deploy/migrate-role-names.sh
 platform/deploy/provision-z23-build-host.sh
 platform/deploy/setup.sh
 platform/deploy/test-devbuild-broker.sh
-platform/deploy/test-devbuild.sh
 platform/deploy/z23-build-zram.sh
 platform/deploy/z23-bundle-bootstrap.sh
 platform/deploy/z23-bundle-export.sh

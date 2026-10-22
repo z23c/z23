@@ -806,8 +806,8 @@ before this documentation slice. Native `dev.agent.start` reported a standalone
 checkout and `dev.agent.claim` accepted the bounded documentation/importer scope.
 Those observations establish neither a current-source build nor fleet authority.
 
-Local laptop preflight found no `devbuild` on PATH. The repository's `platform/deploy/devbuild`
-is explicitly a reference mirror, not the installed host authority. Build,
+Local laptop preflight found no `devbuild` on PATH. The repository's devbuild mirror (since removed)
+was explicitly a reference mirror, not the installed host authority. Build,
 runtime, sanitizer, mutation, integration, model and fleet tests are **NOTRUN**.
 No executable implementation or cost saving is claimed by this documentation
 slice. No session mapping, budget policy or publication grant has been supplied.

@@ -35,28 +35,19 @@ you are new; this page is about operating a host, not about building.
   `install-host-watchdog.sh`, `migrate-role-names.sh`, and the bundle and
   cutover scripts. Subdirectories `fleet-gateway/`, `devfleet/`, `examples/`,
   `systemd/` and `system/` carry their own READMEs or headers.
-- **[`devbuild`](devbuild)** — a reference copy, not an installed program, of
-  the shared host build scheduler. Z23 gets up to `DEVBUILD_Z23_LANES`
-  concurrent lanes (default 3, max 4); QEDC gets up to `DEVBUILD_QEDC_LANES`
-  concurrent lanes (default 2, max 4); each is one per lane lock. `--wait`
-  waiters are served FIFO through enqueue-ordered tickets so a long-queued
-  job is never starved by newer ones; `dev land` (or
-  `DEVBUILD_PRIORITY=land`) takes the next free Z23 lane ahead of ordinary
-  waiters. Each job runs with a per-project CPUWeight: Z23 gets 20; QEDC
-  gets `20 * DEVBUILD_Z23_LANES / DEVBUILD_QEDC_LANES` (30 at the defaults
-  of 3 and 2), so QEDC's combined share across its lanes still matches all
-  concurrent Z23 lanes' combined share. Each finished job appends one
-  JSON line — project, pid, cwd, queued/started/ended, wait_s, run_s, rc,
-  lane, mem_peak_mib, cpu_s, tree (a 16-hex checkout fingerprint from HEAD,
-  the working-tree diff and untracked file names), cmd — to
-  `~/.local/state/development/devbuild.jobs.jsonl`. A repeat of the same
-  cwd + cmd on the identical tree that previously exited 0 prints an
-  advisory stderr note.
-  [`test-devbuild.sh`](test-devbuild.sh) exercises lane overlap (Z23 and
-  QEDC), FIFO order, landing priority, the accounting file (including the
-  tree fingerprint and per-project CPUWeight), and the identical-checkout
-  note against this mirror. See the script's own header for the full
-  enforcement contract.
+- **`devbuild`** is the shared host build scheduler. It is a host program
+  installed outside this repository and shared with a
+  second project, so the installed copy is the only authority. Run
+  `devbuild --plan` to see the live admission profile. On a host it does
+  three things. It admits a bounded number of concurrent Z23 lanes. It serves
+  `--wait` waiters in FIFO order. It runs `dev land` work (or
+  `DEVBUILD_PRIORITY=land`) ahead of ordinary lanes and with a higher
+  CPUWeight. Every job runs in a capped `development.slice` scope pinned away
+  from the cores reserved for interactive use, so heavy builds never starve
+  SSH. Each finished job appends one JSON line (wait_s, run_s, rc,
+  mem_peak_mib, cpu_s, cmd) to `~/.local/state/development/devbuild.jobs.jsonl`.
+  A stale shell mirror of the scheduler used to live here and drifted from
+  the installed program, so it was removed.
 - **[`devbuild-broker`](devbuild-broker)** — a staged Linux replacement for the
   host scheduler. It admits two ordinary heavy lanes, reserves an additional
   interactive lane, and orders release proof ahead of ordinary queued work.
