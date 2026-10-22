@@ -3,7 +3,9 @@
  *          objective z23 optimizes, its current value, its target, and
  *          whether it is met, unmet, or unmeasured today.
  *
- * WHAT IT DECIDES. Nothing. It reports what the catalog in
+ * WHAT IT DECIDES. Only which unmet objective to work on next: the
+ * measured row with the largest gap to its target (`next` in the reply and
+ * the last line of the screen). It reports what the catalog in
  * engine/composition/objectives.def declares, against what the tree can
  * measure right now. No gate reads this leaf.
  */
@@ -11,6 +13,7 @@
 #include "native_fleet_objectives.h"
 
 #include "json/json.h"
+#include "util/log_macros.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -45,6 +48,23 @@ static void obj_row_json(const struct zcl_objective_row *row,
         (void)json_push_kv_str(out, "reason", value->reason);
     zcl_objectives_status(row, value, status, sizeof(status));
     (void)json_push_kv_str(out, "status", status);
+}
+
+/* Pushes `next` into the reply data: the pick object, or JSON null when no
+ * measured objective is unmet. False, with the reason on stderr, only when
+ * the object cannot be built. */
+static bool obj_push_next(struct json_value *data, const struct json_value *rows)
+{
+    struct json_value next;
+    bool ok;
+    json_init(&next);
+    ok = zcl_objectives_next(rows, &next) && json_push_kv(data, "next", &next);
+    if (!ok)
+        LOG_ERROR("fleet.objectives",
+                  "cannot attach next to the reply (%zu rows)",
+                  rows->num_children);
+    json_free(&next);
+    return ok;
 }
 
 void zcl_native_handle_fleet_objectives(
@@ -87,12 +107,105 @@ void zcl_native_handle_fleet_objectives(
 
     (void)json_push_kv_str(&reply->data, "schema", ZCL_OBJECTIVES_SCHEMA);
     (void)json_push_kv(&reply->data, "objectives", &rows);
+    if (!obj_push_next(&reply->data, &rows)) {
+        json_free(&rows);
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "NEXT_TARGET_ALLOC",
+                               "decide", false, false,
+                               "cannot build the next-target object", "");
+        return;
+    }
     (void)json_push_kv_str(&reply->data, "text", text);
     (void)json_push_kv_str(&reply->data, "screen", screen);
     json_free(&rows);
 
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
+}
+
+/* ── decide: the next target ──────────────────────────────────────────── */
+
+/* How far a measured value sits from its target, as a share of the target:
+ * (value - target) / max(|target|, 1) for "min", (target - value) / the same
+ * for "max". Positive when unmet. Done in doubles so no int64 subtraction
+ * can overflow. */
+static double obj_gap(bool is_max, int64_t value, int64_t target)
+{
+    double t = (double)target, v = (double)value;
+    double den = t < 0 ? -t : t;
+    if (den < 1.0)
+        den = 1.0;
+    return (is_max ? t - v : v - t) / den;
+}
+
+/* Three decimals, for the reply. The pick itself compares the unrounded
+ * gaps. Gaps this large are returned as they are, so the cast below stays
+ * in range. */
+static double obj_round_gap(double gap)
+{
+    if (gap >= 1e12)
+        return gap;
+    return (double)(int64_t)(gap * 1000.0 + 0.5) / 1000.0;
+}
+
+/* The measured, unmet row with the largest gap; the first one in catalog
+ * order wins a tie. NULL when no measured row is unmet. */
+static const struct json_value *obj_pick_next(const struct json_value *rows,
+                                              double *gap_out)
+{
+    const struct json_value *best = NULL;
+    double best_gap = 0.0;
+    for (size_t i = 0; i < rows->num_children; i++) {
+        const struct json_value *row = &rows->children[i];
+        bool is_max;
+        double gap;
+        if (!json_get_bool(json_get(row, "measured")) ||
+            strcmp(json_get_str(json_get(row, "status")), "unmet") != 0)
+            continue;
+        is_max = strcmp(json_get_str(json_get(row, "direction")), "max") == 0;
+        gap = obj_gap(is_max, json_get_int(json_get(row, "value")),
+                      json_get_int(json_get(row, "target")));
+        if (!best || gap > best_gap) {
+            best = row;
+            best_gap = gap;
+        }
+    }
+    *gap_out = best_gap;
+    return best;
+}
+
+static bool obj_next_fill(struct json_value *out, const struct json_value *row,
+                          double gap)
+{
+    return json_push_kv_str(out, "id", json_get_str(json_get(row, "id"))) &&
+           json_push_kv_int(out, "value", json_get_int(json_get(row, "value"))) &&
+           json_push_kv_int(out, "target",
+                            json_get_int(json_get(row, "target"))) &&
+           json_push_kv_str(out, "direction",
+                            json_get_str(json_get(row, "direction"))) &&
+           json_push_kv_str(out, "unit", json_get_str(json_get(row, "unit"))) &&
+           json_push_kv_real(out, "gap", obj_round_gap(gap)) &&
+           json_push_kv_str(out, "why", json_get_str(json_get(row, "why")));
+}
+
+bool zcl_objectives_next(const struct json_value *rows, struct json_value *out)
+{
+    const struct json_value *row;
+    double gap = 0.0;
+    if (!out)
+        return false;
+    json_set_null(out);
+    row = rows ? obj_pick_next(rows, &gap) : NULL;
+    if (!row)
+        return true;
+    json_set_object(out);
+    if (obj_next_fill(out, row, gap))
+        return true;
+    LOG_ERROR("fleet.objectives",
+              "cannot build the next target for %s: out of memory",
+              json_get_str(json_get(row, "id")));
+    json_set_null(out);
+    return false;
 }
 
 /* ── plain-text render ────────────────────────────────────────────────── */
@@ -184,6 +297,28 @@ static void obj_ascii(const char *s, char *out, size_t cap)
     out[n] = '\0';
 }
 
+/* The closing line: the next target with its value, target and why, or the
+ * plain reason there is none. ASCII, like the rest of the screen. */
+static void obj_put_next_line(struct obj_render_buf *b,
+                              const struct json_value *rows, int64_t measured)
+{
+    double gap;
+    const struct json_value *row = obj_pick_next(rows, &gap);
+    char id[80], unit[40], why[1024];
+    if (!row) {
+        obj_put(b, "next: none - %s\n",
+                measured > 0 ? "every measured objective is met"
+                             : "no objective is measured yet");
+        return;
+    }
+    obj_ascii(json_get_str(json_get(row, "id")), id, sizeof(id));
+    obj_ascii(json_get_str(json_get(row, "unit")), unit, sizeof(unit));
+    obj_ascii(json_get_str(json_get(row, "why")), why, sizeof(why));
+    obj_put(b, "next: %s  %lld vs %lld %s - %s\n", id,
+            (long long)json_get_int(json_get(row, "value")),
+            (long long)json_get_int(json_get(row, "target")), unit, why);
+}
+
 size_t zcl_objectives_render_screen(const struct json_value *rows, char *out,
                                     size_t cap)
 {
@@ -228,5 +363,6 @@ size_t zcl_objectives_render_screen(const struct json_value *rows, char *out,
     }
     obj_put(&b, "lab: met %lld of %zu, unmeasured %lld\n", (long long)met,
             rows->num_children, (long long)unmeasured);
+    obj_put_next_line(&b, rows, (int64_t)rows->num_children - unmeasured);
     return cap - b.left;
 }

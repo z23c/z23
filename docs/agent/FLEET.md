@@ -234,7 +234,7 @@ It is a report, not a gate.
 
 The result also carries a `screen`: one ASCII line per objective with a 20-cell
 bar toward its target, `value/target` and `met`, `UNMET` or `unmeasured(<reason>)`,
-then `lab: met N of M, unmeasured K`. The wall gauges read the newest COMPLETED proof
+then `lab: met N of M, unmeasured K`. The result's `next` names the one objective to work on, the measured unmet row with the largest gap (`(value - target) / max(|target|, 1)` for `min`, `(target - value) / max(|target|, 1)` for `max`; ties go to catalog order, unmeasured rows are skipped, and `next` is null when every measured row is met), and the screen closes on it as `next: <id>  <value> vs <target> <unit> - <why>`. The wall gauges read the newest COMPLETED proof
 attempt (the `phases.txt` in its logs directory has the `dimension_lint_and_test` row): lint from the
 lint log, test from the test log (the two run concurrently inside one dimension),
 `proof_wall_s` from the final cumulative. `commits_landed_today` and the git gauges

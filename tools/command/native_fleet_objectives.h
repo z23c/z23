@@ -69,8 +69,20 @@ void zcl_objectives_status(const struct zcl_objective_row *row,
 size_t zcl_objectives_render_text(const struct json_value *rows, char *out,
                                   size_t cap);
 
-/* One ASCII report-card line per objective plus a summary line
- * "lab: met N of M, unmeasured K". Returns the bytes written (always < cap). */
+/* The next target: the measured, unmet row of the finished objectives array
+ * with the largest normalized gap to its target,
+ * gap = (value - target) / max(|target|, 1) for "min" and
+ * (target - value) / max(|target|, 1) for "max". Unmeasured rows are never
+ * chosen and a tie goes to the earlier catalog row. `out` becomes an object
+ * {id, value, target, direction, unit, gap (rounded to 3 decimals), why}, or
+ * JSON null when no measured row is unmet. Returns false only when the object
+ * cannot be allocated (reason on stderr, `out` left JSON null). */
+bool zcl_objectives_next(const struct json_value *rows, struct json_value *out);
+
+/* One ASCII report-card line per objective, a summary line
+ * "lab: met N of M, unmeasured K", and a closing line "next: <id>  <value> vs
+ * <target> <unit> - <why>" (or "next: none - <reason>").
+ * Returns the bytes written (always < cap). */
 size_t zcl_objectives_render_screen(const struct json_value *rows, char *out,
                                     size_t cap);
 

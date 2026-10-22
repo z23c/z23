@@ -464,7 +464,8 @@ _test_next:;
 
 static void fox_screen_row(struct json_value *rows, const char *id,
                            const char *direction, int64_t target,
-                           bool measured, int64_t value, const char *status)
+                           bool measured, int64_t value, const char *status,
+                           const char *unit, const char *why)
 {
     struct json_value row;
     json_init(&row);
@@ -472,6 +473,8 @@ static void fox_screen_row(struct json_value *rows, const char *id,
     (void)json_push_kv_str(&row, "id", id);
     (void)json_push_kv_str(&row, "direction", direction);
     (void)json_push_kv_int(&row, "target", target);
+    (void)json_push_kv_str(&row, "unit", unit);
+    (void)json_push_kv_str(&row, "why", why);
     (void)json_push_kv_bool(&row, "measured", measured);
     if (measured)
         (void)json_push_kv_int(&row, "value", value);
@@ -489,12 +492,14 @@ static int fox_case_screen(void)
     json_set_array(&rows);
     TEST("objectives: the report card draws a 20-cell bar toward each "
          "target, in the row's own direction, in ASCII, with a summary") {
-        fox_screen_row(&rows, "alpha_max", "max", 12, true, 6, "unmet");
-        fox_screen_row(&rows, "beta_min", "min", 600, true, 1200, "unmet");
-        fox_screen_row(&rows, "gamma_zero", "min", 0, true, 0, "met");
+        fox_screen_row(&rows, "alpha_max", "max", 12, true, 6, "unmet", "n",
+                       "half of the target");
+        fox_screen_row(&rows, "beta_min", "min", 600, true, 1200, "unmet", "s",
+                       "twice the \xc3\xa9 budget");
+        fox_screen_row(&rows, "gamma_zero", "min", 0, true, 0, "met", "n", "x");
         fox_screen_row(&rows, "delta_gap", "max", 900, false, 0,
-                       "unmeasured(bad \xc3\xa9 x)");
-        fox_screen_row(&rows, "eps_over", "max", 12, true, 15, "met");
+                       "unmeasured(bad \xc3\xa9 x)", "n", "never measured");
+        fox_screen_row(&rows, "eps_over", "max", 12, true, 15, "met", "n", "x");
         (void)zcl_objectives_render_screen(&rows, screen, sizeof(screen));
         (void)snprintf(want, sizeof(want),
             "%-30s [##########----------] 6/12 UNMET\n"
@@ -502,12 +507,147 @@ static int fox_case_screen(void)
             "%-30s [####################] 0/0 met\n"
             "%-30s [????????????????????] -/900 unmeasured(bad ?? x)\n"
             "%-30s [####################] 15/12 met\n"
-            "lab: met 2 of 5, unmeasured 1\n",
+            "lab: met 2 of 5, unmeasured 1\n"
+            "next: beta_min  1200 vs 600 s - twice the ?? budget\n",
             "alpha_max", "beta_min", "gamma_zero", "delta_gap", "eps_over");
         ASSERT_STR_EQ(screen, want);
         PASS();
     }
 _test_next:;
+    json_free(&rows);
+    return failures;
+}
+
+/* A row for the next-target cases; the status follows from value and target
+ * (equal to target is met), so each case states only the numbers. */
+static void fox_next_row(struct json_value *rows, const char *id,
+                         const char *direction, int64_t target, bool measured,
+                         int64_t value, const char *unit, const char *why)
+{
+    bool is_max = strcmp(direction, "max") == 0;
+    bool met = is_max ? value >= target : value <= target;
+    fox_screen_row(rows, id, direction, target, measured, value,
+                   !measured ? "unmeasured(no data)" : met ? "met" : "unmet",
+                   unit, why);
+}
+
+/* The reply's gap in thousandths, from the rounded real. */
+static int64_t fox_gap_milli(const struct json_value *next)
+{
+    const struct json_value *gap = json_get(next, "gap");
+    if (!gap || gap->type != JSON_REAL)
+        return -12345;
+    return (int64_t)(json_get_real(gap) * 1000.0 + 0.5);
+}
+
+/* Asserts that `rows` picks `id` with this gap; the macro keeps the failing
+ * line in the report. */
+#define FOX_ASSERT_NEXT(rows, next, want_id, want_milli)                      \
+    do {                                                                      \
+        ASSERT(zcl_objectives_next((rows), (next)));                          \
+        ASSERT_EQ((next)->type, JSON_OBJ);                                    \
+        ASSERT_STR_EQ(fox_row_str((next), "id"), (want_id));                  \
+        ASSERT_EQ(fox_gap_milli(next), (int64_t)(want_milli));                \
+    } while (0)
+
+static int fox_case_next(void)
+{
+    int failures = 0;
+    struct json_value rows, next;
+    char screen[4096];
+    json_init(&rows);
+    json_init(&next);
+    TEST("objectives: next is the unmet row with the largest gap, in either "
+         "catalog order, and carries that row's fields") {
+        json_set_array(&rows);
+        fox_next_row(&rows, "small_gap", "min", 100, true, 150, "s", "half over");
+        fox_next_row(&rows, "big_gap", "min", 100, true, 300, "s", "triple");
+        FOX_ASSERT_NEXT(&rows, &next, "big_gap", 2000);
+        ASSERT_EQ(fox_row_int(&next, "value"), (int64_t)300);
+        ASSERT_EQ(fox_row_int(&next, "target"), (int64_t)100);
+        ASSERT_STR_EQ(fox_row_str(&next, "direction"), "min");
+        ASSERT_STR_EQ(fox_row_str(&next, "unit"), "s");
+        ASSERT_STR_EQ(fox_row_str(&next, "why"), "triple");
+        (void)zcl_objectives_render_screen(&rows, screen, sizeof(screen));
+        ASSERT(strstr(screen, "\nnext: big_gap  300 vs 100 s - triple\n") != NULL);
+
+        json_set_array(&rows);
+        fox_next_row(&rows, "big_gap", "min", 100, true, 300, "s", "triple");
+        fox_next_row(&rows, "small_gap", "min", 100, true, 150, "s", "half over");
+        FOX_ASSERT_NEXT(&rows, &next, "big_gap", 2000);
+        PASS();
+    }
+    TEST("objectives: next computes the gap in each row's own direction, "
+         "against max(|target|, 1)") {
+        json_set_array(&rows); /* a max row 80% short beats a min row 50% over */
+        fox_next_row(&rows, "min_row", "min", 10, true, 15, "n", "min");
+        fox_next_row(&rows, "max_row", "max", 10, true, 2, "n", "max");
+        FOX_ASSERT_NEXT(&rows, &next, "max_row", 800);
+        ASSERT_STR_EQ(fox_row_str(&next, "direction"), "max");
+
+        json_set_array(&rows); /* a min row 200% over beats a max row 10% short */
+        fox_next_row(&rows, "max_row", "max", 10, true, 9, "n", "max");
+        fox_next_row(&rows, "min_row", "min", 10, true, 30, "n", "min");
+        FOX_ASSERT_NEXT(&rows, &next, "min_row", 2000);
+
+        json_set_array(&rows); /* a zero target divides by 1, not by 0 */
+        fox_next_row(&rows, "big_target", "min", 1000, true, 2500, "n", "x");
+        fox_next_row(&rows, "zero_target", "min", 0, true, 3, "n", "x");
+        FOX_ASSERT_NEXT(&rows, &next, "zero_target", 3000);
+
+        json_set_array(&rows); /* a negative target divides by its magnitude */
+        fox_next_row(&rows, "pos_min", "min", 100, true, 130, "n", "x");
+        fox_next_row(&rows, "neg_max", "max", -50, true, -80, "n", "x");
+        FOX_ASSERT_NEXT(&rows, &next, "neg_max", 600);
+
+        json_set_array(&rows); /* one third rounds to three decimals */
+        fox_next_row(&rows, "third", "min", 3, true, 4, "n", "x");
+        FOX_ASSERT_NEXT(&rows, &next, "third", 333);
+        PASS();
+    }
+    TEST("objectives: equal gaps go to the earlier catalog row") {
+        json_set_array(&rows);
+        fox_next_row(&rows, "tie_min", "min", 100, true, 200, "n", "x");
+        fox_next_row(&rows, "tie_max", "max", 200, true, 0, "n", "x");
+        FOX_ASSERT_NEXT(&rows, &next, "tie_min", 1000);
+        json_set_array(&rows);
+        fox_next_row(&rows, "tie_max", "max", 200, true, 0, "n", "x");
+        fox_next_row(&rows, "tie_min", "min", 100, true, 200, "n", "x");
+        FOX_ASSERT_NEXT(&rows, &next, "tie_max", 1000);
+        PASS();
+    }
+    TEST("objectives: when every measured row is met, next is null and the "
+         "screen says so") {
+        json_set_array(&rows);
+        fox_next_row(&rows, "at_target", "min", 100, true, 100, "s", "x");
+        fox_next_row(&rows, "far_past", "max", 10, true, 99, "n", "x");
+        fox_next_row(&rows, "ghost", "max", 1000000, false, 0, "n", "x");
+        ASSERT(zcl_objectives_next(&rows, &next));
+        ASSERT_EQ(next.type, JSON_NULL);
+        (void)zcl_objectives_render_screen(&rows, screen, sizeof(screen));
+        ASSERT(strstr(screen, "lab: met 2 of 3, unmeasured 1\n"
+                              "next: none - every measured objective is met\n") != NULL);
+        PASS();
+    }
+    TEST("objectives: an unmeasured row is never the next target, whatever "
+         "its target, and with nothing measured next is null") {
+        json_set_array(&rows);
+        fox_next_row(&rows, "ghost_a", "max", 1000000, false, 0, "n", "x");
+        fox_next_row(&rows, "real_unmet", "min", 100, true, 101, "n", "x");
+        fox_next_row(&rows, "ghost_b", "min", 0, false, 0, "n", "x");
+        FOX_ASSERT_NEXT(&rows, &next, "real_unmet", 10);
+
+        json_set_array(&rows);
+        fox_next_row(&rows, "ghost_a", "max", 1000000, false, 0, "n", "x");
+        fox_next_row(&rows, "ghost_b", "min", 0, false, 0, "n", "x");
+        ASSERT(zcl_objectives_next(&rows, &next));
+        ASSERT_EQ(next.type, JSON_NULL);
+        (void)zcl_objectives_render_screen(&rows, screen, sizeof(screen));
+        ASSERT(strstr(screen, "next: none - no objective is measured yet\n") != NULL);
+        PASS();
+    }
+_test_next:;
+    json_free(&next);
     json_free(&rows);
     return failures;
 }
@@ -520,6 +660,7 @@ int test_fleet_objectives(void)
     failures += fox_case_windows();
     failures += fox_case_git();
     failures += fox_case_screen();
+    failures += fox_case_next();
     char root[512];
     char outcomes_ok[1024], outcomes_missing[1024];
     char attempts_dir[1024], inflight_dir[1024];
@@ -1010,7 +1151,7 @@ int test_fleet_objectives(void)
         fox_set(&c, "baseline", baseline_ok);
         ASSERT(fox_run(&c));
         const char *screen = fox_row_str(&c.reply.data, "screen");
-        ASSERT_EQ(fox_count_lines(screen), (int64_t)n + 1);
+        ASSERT_EQ(fox_count_lines(screen), (int64_t)n + 2);
         for (const char *p = screen; *p; p++)
             ASSERT(*p == '\n' || (*p >= 0x20 && *p <= 0x7e));
         ASSERT(strstr(screen, "proof_lint_wall_s") != NULL);
@@ -1021,6 +1162,69 @@ int test_fleet_objectives(void)
         /* The whole reply must fit the leaf's declared response budget. */
         ASSERT(c.request.spec != NULL);
         ASSERT(json_size(&c.reply.data) + 1024 <= c.request.spec->budget_bytes);
+        fox_end(&c);
+        PASS();
+    }
+
+    TEST("objectives: the command result names the next target, the same "
+         "row the screen closes on") {
+        struct fox_call c;
+        fox_begin(&c);
+        fox_set(&c, "outcomes", outcomes_ok);
+        fox_set(&c, "attempts_dir", attempts_dir);
+        fox_set(&c, "lintc_dir", lintc_dir);
+        fox_set(&c, "baseline", baseline_ok);
+        ASSERT(fox_run(&c));
+        const struct json_value *next = json_get(&c.reply.data, "next");
+        ASSERT(next != NULL);
+        ASSERT_EQ(next->type, JSON_OBJ);
+        const char *id = fox_row_str(next, "id");
+        const struct json_value *row = fox_row(&c, id);
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fox_row_str(row, "status"), "unmet");
+        ASSERT_EQ(fox_row_int(next, "value"), fox_row_int(row, "value"));
+        ASSERT_EQ(fox_row_int(next, "target"), fox_row_int(row, "target"));
+        ASSERT_STR_EQ(fox_row_str(next, "direction"), fox_row_str(row, "direction"));
+        ASSERT_STR_EQ(fox_row_str(next, "unit"), fox_row_str(row, "unit"));
+        ASSERT_STR_EQ(fox_row_str(next, "why"), fox_row_str(row, "why"));
+        /* The fixture ledger's train needs 3 attempts against a target of 1,
+         * a gap of 2; whatever else is unmet, the pick is at least that big. */
+        ASSERT(fox_gap_milli(next) >= 2000);
+        char want[160];
+        (void)snprintf(want, sizeof(want), "\nnext: %s  %lld vs %lld ", id,
+                       (long long)fox_row_int(next, "value"),
+                       (long long)fox_row_int(next, "target"));
+        ASSERT(strstr(fox_row_str(&c.reply.data, "screen"), want) != NULL);
+        fox_end(&c);
+        PASS();
+    }
+
+    TEST("objectives: with nothing measurable next is null in the reply and "
+         "the screen says nothing is measured") {
+        char none_outcomes[1024], none_baseline[1024], none_attempts[1024];
+        char none_lintc[1024], plain[1024];
+        (void)snprintf(none_outcomes, sizeof(none_outcomes), "%s/none.jsonl", root);
+        (void)snprintf(none_baseline, sizeof(none_baseline), "%s/none.txt", root);
+        (void)snprintf(none_attempts, sizeof(none_attempts), "%s/none_attempts",
+                       root);
+        (void)snprintf(none_lintc, sizeof(none_lintc), "%s/none_lintc", root);
+        (void)snprintf(plain, sizeof(plain), "%s/plain_repo", root);
+        ASSERT(fox_mkdir(plain));
+        (void)setenv("GIT_CEILING_DIRECTORIES", root, 1);
+        struct fox_call c;
+        fox_begin(&c);
+        fox_set(&c, "outcomes", none_outcomes);
+        fox_set(&c, "attempts_dir", none_attempts);
+        fox_set(&c, "lintc_dir", none_lintc);
+        fox_set(&c, "baseline", none_baseline);
+        fox_set(&c, "repo", plain);
+        ASSERT(fox_run(&c));
+        (void)unsetenv("GIT_CEILING_DIRECTORIES");
+        const struct json_value *next = json_get(&c.reply.data, "next");
+        ASSERT(next != NULL);
+        ASSERT_EQ(next->type, JSON_NULL);
+        ASSERT(strstr(fox_row_str(&c.reply.data, "screen"),
+                      "next: none - no objective is measured yet\n") != NULL);
         fox_end(&c);
         PASS();
     }
