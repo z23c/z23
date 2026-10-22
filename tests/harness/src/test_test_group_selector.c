@@ -925,10 +925,25 @@ static bool umbrella_every_shard(const char *full_id, void *ctx)
     return true;
 }
 
+/* Entries of a NULL-terminated list of named extras; 0 for no list. */
+static size_t plan_extra_count(const char *const *extras)
+{
+    size_t n = 0;
+    while (extras && extras[n]) n++;
+    return n;
+}
+
+static bool plan_extra_named(const char *const *extras, const char *id)
+{
+    for (size_t i = 0; extras && extras[i]; i++)
+        if (strcmp(extras[i], id) == 0) return true;
+    return false;
+}
+
 /* One umbrella's selection contract, asked through every expansion the
  * proof, the plan builder and the runner use. */
 static int umbrella_contract(const char *umbrella, const char *token,
-                             const char *plan_extra)
+                             const char *const *plan_extras)
 {
     int failures = 0;
     TEST("test group selector: an umbrella runs whole only when named "
@@ -973,18 +988,18 @@ static int umbrella_contract(const char *umbrella, const char *token,
         size_t n = zcl_test_group_expand_plan(legacy, 1, out,
                                               FAMILY_EXPAND_MAX, &truncated);
         ASSERT(!truncated);
-        ASSERT(n == shards + (plan_extra ? 1u : 0u));
+        ASSERT(n == shards + plan_extra_count(plan_extras));
         size_t extras = 0;
         for (size_t i = 0; i < n; i++) {
-            if (plan_extra && strcmp(out[i], plan_extra) == 0)
+            if (plan_extra_named(plan_extras, out[i]))
                 extras++;
             else
                 ASSERT(zcl_test_group_is_umbrella_shard(umbrella, out[i]));
             for (size_t j = 0; j < i; j++)
                 ASSERT(strcmp(out[i], out[j]) != 0);
         }
-        ASSERT(extras == (plan_extra ? 1u : 0u));
-        /* Exact count, unique members and the one named extra require every
+        ASSERT(extras == plan_extra_count(plan_extras));
+        /* Exact count, unique members and the named extras require every
          * registered shard once, without absorbing an independent group. */
         const char *exact[] = {umbrella};
         n = zcl_test_group_expand_plan(exact, 1, out, FAMILY_EXPAND_MAX,
@@ -1015,9 +1030,12 @@ static int test_umbrella_groups(void)
                                   NULL);
     failures += umbrella_contract("test_zcode_package_dev",
                                   "zcode_package_dev", NULL);
-    /* Legacy plan tokens also retain their historical substring matches. */
+    /* Legacy plan tokens also retain their historical substring matches:
+     * every registered group whose id contains "dev_land". */
+    static const char *const dev_land_extras[] = {
+        "test_dev_land_window", "test_dev_land_remote", NULL};
     failures += umbrella_contract("test_dev_land", "dev_land",
-                                  "test_dev_land_window");
+                                  dev_land_extras);
     return failures;
 }
 
@@ -2753,7 +2771,8 @@ static int test_proof_resolver_umbrellas(void)
             "test_api 2>/dev/null", out, sizeof(out)), 0);
         ASSERT_STR_EQ(out, "test_api\ntest_dev_land_shard_01\n"
             "test_dev_land_shard_02\ntest_dev_land_shard_03\n"
-            "test_dev_land_shard_04\ntest_dev_land_window\n");
+            "test_dev_land_shard_04\ntest_dev_land_window\n"
+            "test_dev_land_remote\n");
         ASSERT_EQ(capture_command(
             "tools/dev/test-group-list.sh --resolve-proof dev_land "
             "test_dev_land_missing 2>/dev/null", out, sizeof(out)), 1);
