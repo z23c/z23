@@ -14,6 +14,52 @@
 #include <string.h>
 #include <wchar.h>
 
+/* A component that is exactly "." or "..". The \\?\ prefix disables the
+ * Win32 normalization that would otherwise collapse these, and
+ * CreateDirectoryW then returns ERROR_INVALID_NAME instead of
+ * ERROR_ALREADY_EXISTS. */
+static inline bool platform_windows_dot_component(const wchar_t *path)
+{
+    const wchar_t *p = path;
+    while (*p) {
+        while (*p == L'\\')
+            p++;
+        if (!*p)
+            break;
+        const wchar_t *start = p;
+        while (*p && *p != L'\\')
+            p++;
+        size_t n = (size_t)(p - start);
+        if ((n == 1 && start[0] == L'.') ||
+            (n == 2 && start[0] == L'.' && start[1] == L'.'))
+            return true;
+    }
+    return false;
+}
+
+static inline bool platform_windows_prefix_extended(wchar_t *path,
+                                                    DWORD chars)
+{
+    if (wcsncmp(path, L"\\\\?\\", 4) == 0)
+        return true;
+    if (path[0] == L'\\' && path[1] == L'\\') {
+        if ((size_t)chars + 6 >= 32768)
+            return false;
+        memmove(path + 8, path + 2,
+                ((size_t)chars - 2u + 1u) * sizeof(wchar_t));
+        wmemcpy(path, L"\\\\?\\UNC\\", 8);
+        return true;
+    }
+    if (path[0] && path[1] == L':' && path[2] == L'\\') {
+        if ((size_t)chars + 4 >= 32768)
+            return false;
+        memmove(path + 4, path, ((size_t)chars + 1u) * sizeof(wchar_t));
+        wmemcpy(path, L"\\\\?\\", 4);
+        return true;
+    }
+    return true;
+}
+
 static inline bool platform_windows_wide_path(const char *utf8,
                                               wchar_t out[32768])
 {
@@ -28,13 +74,25 @@ static inline bool platform_windows_wide_path(const char *utf8,
         wmemcpy(out, plain, (size_t)n);
         return true;
     }
-    if (plain[0] == L'\\' && plain[1] == L'\\') {
+    bool drive = plain[0] && plain[1] == L':' && plain[2] == L'\\';
+    bool unc = plain[0] == L'\\' && plain[1] == L'\\';
+    /* Collapse "." and ".." before the prefix. GetFullPathNameW does
+     * that lexically and does not follow reparse points. Paths with no
+     * such component keep the historical prefix so a long path or a
+     * trailing dot is unchanged. */
+    if ((drive || unc) && platform_windows_dot_component(plain)) {
+        DWORD full_n = GetFullPathNameW(plain, 32768, out, NULL);
+        if (full_n == 0 || full_n >= 32768)
+            return false;
+        return platform_windows_prefix_extended(out, full_n);
+    }
+    if (unc) {
         if ((size_t)n + 6 >= 32768) return false;
         wmemcpy(out, L"\\\\?\\UNC\\", 8);
         wmemcpy(out + 8, plain + 2, (size_t)n - 2);
         return true;
     }
-    if (plain[0] && plain[1] == L':' && plain[2] == L'\\') {
+    if (drive) {
         if ((size_t)n + 4 >= 32768) return false;
         wmemcpy(out, L"\\\\?\\", 4);
         wmemcpy(out + 4, plain, (size_t)n);

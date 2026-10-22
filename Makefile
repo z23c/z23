@@ -11305,6 +11305,13 @@ $(OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 # -D emits nothing, and $(REPRO_CFLAGS) carries -gno-record-gcc-switches so the
 # command line never reaches the debug info either.
 NODE_C23_OBJECT_CFLAGS = $(NODE_C23_OBJECT_CFLAGS_BASE)
+# public_install_relpath is used only on the POSIX branch. The Windows
+# branch returns first. The file is byte-sealed, so the helper stays in
+# the translation unit; this flag keeps that sealed unused static from
+# failing -Werror on Windows alone.
+ifeq ($(ZCL_HOST_WINDOWS),1)
+$(NODE_C23_OBJ_DIR)/core/modules/net/src/https_server_install.o: NODE_C23_OBJECT_CFLAGS += -Wno-unused-function
+endif
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: NODE_C23_OBJECT_CFLAGS += $(BUILD_IDENTITY_CPPFLAGS)
 $(NODE_C23_OBJ_DIR)/platform/modules/util/src/clientversion.o: $(BUILD_IDENTITY_STAMP)
 $(NODE_C23_OBJ_DIR)/%.o: %.c $(VIEW_GEN_HEADERS) $(BUILD_FAST_EPOCH_OBJECT_PREREQ) | $(NODE_C23_LEASE)

@@ -415,6 +415,27 @@ static int temp_root(char *out, size_t out_size)
     return 0;
 }
 
+/* An existing directory addressed with ".." must survive the \\?\ prefix.
+ * CreateDirectoryW on the extended form of an uncollapsed ".." returns
+ * ERROR_INVALID_NAME; the shipped ensure calls then report failure for a
+ * directory that is already there. */
+static int dotdot_directory_ensure(const char *root)
+{
+    const char *slash = strrchr(root, '\\');
+    if (!slash || slash[1] == '\0')
+        return fail("dotdot root shape");
+    char via[2048];
+    int wrote = snprintf(via, sizeof(via), "%s\\..\\%s", root, slash + 1);
+    if (wrote <= 0 || (size_t)wrote >= sizeof(via))
+        return fail("dotdot path");
+    if (!platform_directory_ensure(via, 0755))
+        return fail("dotdot directory ensure");
+    if (!platform_private_directory_ensure(via))
+        return fail("dotdot private directory ensure");
+    printf("native_optimal: dotdot directory ensure PASS\n");
+    return 0;
+}
+
 int main(void)
 {
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -453,6 +474,8 @@ int main(void)
         rc = round_trip(utf8_path, "utf-8");
     if (rc == 0)
         rc = junction_refusal(root);
+    if (rc == 0)
+        rc = dotdot_directory_ensure(root);
     wide_remove_dir(root);
     if (rc != 0)
         return rc;

@@ -40,7 +40,6 @@ void https_server_set_public_install_root(const char *path)
                    path);
 }
 
-#if !defined(_WIN32)
 static const char *public_install_relpath(const char *url)
 {
     if (!url)
@@ -55,7 +54,6 @@ static const char *public_install_relpath(const char *url)
         return url + 1;
     return NULL;
 }
-#endif
 
 static bool public_install_filepath_under_root(const char *root,
                                                const char *url,
