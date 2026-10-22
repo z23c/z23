@@ -14362,7 +14362,9 @@ check-no-new-coordination-shell: $(LINTC_TOOL)
 # bash, dash or ksh shebang; vendor/ and contexts/commons/corpus/ excluded) must
 # be listed in tools/lint/bash_allowlist.txt. The list is hand-edited and can
 # only shrink; a new tool is a C23 nested z23 command, never a shell script.
-check-no-new-bash: $(LINTC_TOOL)
+# The summed line count of those files may not exceed tools/lint/bash_line_budget.txt
+# (the budget only goes down: z23-lint check-no-new-bash --tighten-baseline).
+check-no-new-bash: $(LINTC_TOOL) tools/lint/bash_allowlist.txt tools/lint/bash_line_budget.txt
 	@echo "══ LINT: no new shell ══"
 	@./build/bin/z23-lint check-no-new-bash --selftest
 	@./build/bin/z23-lint check-no-new-bash
