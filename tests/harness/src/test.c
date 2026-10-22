@@ -5,6 +5,7 @@
 #include "keys/key.h"
 #include "chain/chainparams.h"
 #include "devloop_reflex_runner.h"
+#include "test/test_home_isolation.h"
 #include <signal.h>
 
 /* This ISA oracle is registered as its own proof group.  Keep its serial-runner
@@ -50,6 +51,27 @@ int main(int argc, char **argv)
     zcl_reflex_runner_exit_if_requested(argc, argv);
     setbuf(stdout, NULL); /* Unbuffered for test progress visibility */
     int failures = 0;
+
+    /* Same default-datadir containment as test_parallel's child_run: this
+     * sequential runner executes the very same groups in one process. */
+    {
+        char iso_root[] = "test-tmp/zcl-test-home-XXXXXX";
+        char iso_err[512];
+        if (mkdir("test-tmp", 0755) != 0 && errno != EEXIST) {
+            fprintf(stderr, "test_zcl: cannot create test-tmp: %s\n",
+                    strerror(errno));
+            return 2;
+        }
+        if (!mkdtemp(iso_root)) {
+            fprintf(stderr, "test_zcl: cannot create private root: %s\n",
+                    strerror(errno));
+            return 2;
+        }
+        if (!zcl_test_isolate_environment(iso_root, iso_err, sizeof(iso_err))) {
+            fprintf(stderr, "test_zcl: HOME isolation failed: %s\n", iso_err);
+            return 2;
+        }
+    }
 
     /* Global init required by many test groups */
     chain_params_select(CHAIN_MAIN);

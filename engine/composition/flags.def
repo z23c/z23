@@ -2476,6 +2476,14 @@ Z23_FLAG("ZCL_TELEMETRY_SCAN_EXTRA_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
 Z23_FLAG("ZCL_TELEMETRY_SCAN_MANIFEST", "env_build", "-", "-",
           "undocumented; first use tools/lint/check_telemetry_ontology.sh:auto")
+Z23_FLAG("ZCL_TEST_CANONICAL_DATADIR", "env_test", "-", "-",
+          "the operator's real default datadir, exported by the test runners before they swap HOME; a runner nested under another keeps the outer value; first use tests/harness/src/test_home_isolation.c:auto")
+Z23_FLAG("ZCL_TEST_HARNESS", "env_test", "-", "-",
+          "set to 1 by the test runners (tests/harness/src/test_home_isolation.c) so code below the test layer can tell it runs under a runner; first use tests/harness/src/test_test_group_selector.c:auto")
+Z23_FLAG("ZCL_TEST_PRIVATE_HOME", "env_test", "-", "-",
+          "set to 1 by the test runners when a group got a private HOME instead of the real one; first use tests/harness/src/test_home_isolation.c:auto")
+Z23_FLAG("ZCL_TEST_REAL_HOME", "env_test", "-", "-",
+          "explicit opt-in (1) for the few test groups that need real chain or params files: the runners then leave HOME alone while the canonical-datadir writer guard still applies; first use tests/harness/src/test_home_isolation.c:auto")
 Z23_FLAG("ZCL_TEST_CACHE", "env_test", "-", "-",
           "first use tests/harness/src/test_parallel.c:auto; documented at docs/dev/test-result-cache.md:77: ZCL_TEST_CACHE=1 make test-parallel # opt in: skip unchanged groups, store passes")
 Z23_FLAG("ZCL_TEST_CACHE_DUMP", "env_test", "-", "-",

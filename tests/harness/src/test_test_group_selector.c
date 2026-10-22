@@ -2,6 +2,7 @@
 
 #include "test/test_core.h"
 #include "test/test_group_selector.h"
+#include "test/test_home_isolation.h"
 #include "test/test_verdict_json.h"
 #include "platform/os_proc.h"
 #include "platform/file_metadata.h"
@@ -11,6 +12,7 @@
 #include "test_group_catalog.h"
 #include "test_group_weights.h"
 #include "util/clientversion.h"
+#include "util/util.h"
 #include "json/json.h"
 
 #include <errno.h>
@@ -2357,16 +2359,39 @@ static bool tgs_native_state_matches(const char *state)
     return strcmp(native, want) == 0;
 }
 
+static bool tgs_under(const char *path, const char *parent, const char *leaf)
+{
+    char want[PATH_MAX];
+    int n = snprintf(want, sizeof(want), "%s/%s", parent, leaf);
+    return path && n > 0 && (size_t)n < sizeof(want) && strcmp(path, want) == 0;
+}
+
 static int tgs_state_probe(void)
 {
     const char *state = getenv("XDG_STATE_HOME");
     const char *home = getenv("HOME");
+    /* The CALLER's HOME (empty when it ran with none): the runner must hand
+     * the group a private replacement and remember the original canonical
+     * datadir for the storage writer guard. */
     const char *expected = getenv("ZCL_TEST_RUNNER_EXPECT_HOME");
-    char path[PATH_MAX];
-    if (!state || !expected || strcmp(home ? home : "", expected) != 0)
+    const char *canonical = getenv("ZCL_TEST_CANONICAL_DATADIR");
+    char path[PATH_MAX], want_canonical[PATH_MAX];
+    if (!state || !home || !expected || !canonical) return 1;
+    if (!tgs_under(home, state, "home") || strcmp(home, expected) == 0)
+        return 1;
+    if (!tgs_under(getenv("XDG_CONFIG_HOME"), home, ".config") ||
+        !tgs_under(getenv("XDG_CACHE_HOME"), home, ".cache"))
+        return 1;
+    int n = snprintf(want_canonical, sizeof(want_canonical),
+                     "%s/.zclassic-c23", expected);
+    if (n < 0 || (size_t)n >= sizeof(want_canonical) ||
+        strcmp(canonical, want_canonical) != 0)
+        return 1;
+    const char *harness = getenv("ZCL_TEST_HARNESS");
+    if (!harness || strcmp(harness, "1") != 0 || getenv("ZCL_DATADIR"))
         return 1;
     if (!tgs_native_state_matches(state)) return 1;
-    int n = snprintf(path, sizeof(path), "%s/runner-probe", state);
+    n = snprintf(path, sizeof(path), "%s/runner-probe", state);
     if (n < 0 || (size_t)n >= sizeof(path)) return 1;
     FILE *f = fopen(path, "wx");
     if (!f) return 1;
@@ -2473,7 +2498,7 @@ static int test_runner_retry_probe_bounds(void)
 static int test_runner_private_state(void)
 {
     int failures = 0;
-    TEST("runner: private attempt state preserves HOME and retained evidence") {
+    TEST("runner: private attempt state replaces HOME and retains evidence") {
         static char out[1024 * 1024];
         char root[PATH_MAX], exe[PATH_MAX], command[8 * PATH_MAX];
         char home[PATH_MAX], caller_state[PATH_MAX];
@@ -2495,7 +2520,7 @@ static int test_runner_private_state(void)
                          attempt == 2 ? "" : home);
             ASSERT(n >= 0 && (size_t)n < sizeof(home_env));
             n = snprintf(command, sizeof(command),
-                "cd '%s' && env %s %s %s='%s' ZCL_STATE_ROOT='%s' "
+                "cd '%s' && env -u ZCL_TEST_CANONICAL_DATADIR -u ZCL_TEST_REAL_HOME %s %s %s='%s' ZCL_STATE_ROOT='%s' "
                 "ZCL_TEST_RUNNER_EXPECT_HOME='%s' "
                 "'%s' --jobs=2 --verbose --no-cache --state-isolation-probe "
                 "--exact=test_test_group_selector,test_hex_codec 2>&1",
@@ -2532,6 +2557,50 @@ static int test_runner_private_state(void)
         FILE *retained = fopen(probe, "r");
         ASSERT(retained != NULL);
         ASSERT(fclose(retained) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Regression for the 2026-10-22 canonical-datadir write: a group that never
+ * pinned its datadir resolved GetDataDir() to the REAL $HOME/.zclassic-c23
+ * and a stage fault armed auto_reindex_request there. The runner now gives
+ * every group a private HOME; this runs INSIDE that group environment. */
+static int test_runner_group_home_is_private(void)
+{
+    int failures = 0;
+    TEST("runner: group HOME is private and the default datadir lands in it") {
+        const char *real_home_opt_in = getenv("ZCL_TEST_REAL_HOME");
+        if (real_home_opt_in && strcmp(real_home_opt_in, "1") == 0) {
+            printf("SKIP: ZCL_TEST_REAL_HOME=1 opted this runner out of HOME "
+                   "isolation\n");
+            PASS();
+            goto _test_next;
+        }
+        ASSERT(zcl_test_home_is_private());
+        const char *home = getenv("HOME");
+        const char *canonical = getenv("ZCL_TEST_CANONICAL_DATADIR");
+        ASSERT(home && home[0] && canonical && canonical[0]);
+        ASSERT(getenv("ZCL_TEST_HARNESS") &&
+               strcmp(getenv("ZCL_TEST_HARNESS"), "1") == 0);
+        ASSERT(getenv("ZCL_DATADIR") == NULL);
+
+        /* HOME differs from the real one: the canonical datadir (recorded
+         * before HOME moved) is NOT under it. */
+        char under_home[PATH_MAX];
+        int n = snprintf(under_home, sizeof(under_home), "%s/.zclassic-c23",
+                         home);
+        ASSERT(n > 0 && (size_t)n < sizeof(under_home));
+        ASSERT(strcmp(under_home, canonical) != 0);
+
+        /* The un-pinned default datadir resolves under the private HOME. */
+        char resolved[PATH_MAX];
+        ASSERT(SetDataDir(""));
+        ClearDataDirCache();
+        GetDataDir(false, resolved, sizeof(resolved));
+        ClearDataDirCache();
+        ASSERT_STR_EQ(resolved, under_home);
+        ASSERT(strcmp(resolved, canonical) != 0);
         PASS();
     } _test_next:;
     return failures;
@@ -2814,6 +2883,7 @@ int test_test_group_selector(void)
     failures += test_runner_retry_evidence();
     failures += test_runner_retry_probe_bounds();
     failures += test_runner_state_setup_refuses();
+    failures += test_runner_group_home_is_private();
     failures += test_exact_default_parallel_jobs();
     failures += test_exact_verifier_prerequisites();
     failures += test_inventory_standalone_admission();

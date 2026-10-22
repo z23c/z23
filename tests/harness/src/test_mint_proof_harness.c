@@ -27,6 +27,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_home_isolation.h"
 
 #include "chain/utxo_snapshot_loader.h"
 #include "coins/utxo_commitment.h"
@@ -650,6 +651,12 @@ static int mp_part3_foldrate(void)
     int failures = 0;
     printf("\n  [part 3] SERIAL FOLD-RATE (real blk*.dat blocks -> coins_kv)\n");
 
+    /* Reads the operator's real block files: only on explicit opt-in, since
+     * the runner now gives every group a private HOME. */
+    if (zcl_test_real_home_skip("part 3 real-block fold-rate")) {
+        printf("    FOLD_RATE_RESULT: skipped (private HOME; no block data)\n");
+        return 0;
+    }
     char src_blk[512];
     if (!mp_find_blk_dat(src_blk, sizeof(src_blk))) {
         printf("    NOTE: no on-disk blk*.dat found under ~/.zclassic-c23 or "

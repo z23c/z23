@@ -52,6 +52,7 @@
 #include "devloop_reflex_runner.h"
 #include "test/selection_build_needs.h"
 #include "test/test_group_selector.h"
+#include "test/test_home_isolation.h"
 #include "test_group_catalog.h"
 #include "test_group_weights.h"
 #include "test/test_helpers.h"
@@ -927,6 +928,17 @@ static void child_run(size_t idx, const char *out_path, const char *state_path,
         _exit(2);
     }
 #endif
+    /* Private HOME + XDG dirs under the same retained dir, datadir env vars
+     * unset, canonical datadir exported for the storage writer guard: no
+     * default-datadir fallback in any group can reach the operator's node. */
+    {
+        char iso_err[512];
+        if (!zcl_test_isolate_environment(state_path, iso_err, sizeof(iso_err))) {
+            fprintf(stderr, "test_parallel: HOME isolation failed: %s\n",
+                    iso_err);
+            _exit(2);
+        }
+    }
     printf("test_parallel: private state retained=%s\n", state_path);
     zcl_test_group_selector_state_probe(g_state_isolation_probe &&
         strcmp(g_groups[idx].name, "test_test_group_selector") == 0);
