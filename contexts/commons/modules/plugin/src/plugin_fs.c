@@ -327,8 +327,10 @@ static bool plugin_mkdirs_windows(const char *path)
         enum platform_directory_probe_result probe = platform_directory_probe_real(tmp);
         if (probe == PLATFORM_DIRECTORY_PROBE_REFUSED)
             return false;
+        /* A concurrent creator may win between the probe and the create. */
         if (probe == PLATFORM_DIRECTORY_PROBE_MISSING &&
-            !platform_private_directory_create(tmp))
+            !platform_private_directory_create(tmp) &&
+            platform_directory_probe_real(tmp) != PLATFORM_DIRECTORY_PROBE_OK)
             return false;
         char canonical[PLUGIN_PATH_MAX];
         if (!platform_directory_canonical_real(tmp, canonical, sizeof(canonical)))
@@ -356,7 +358,10 @@ bool plugin_mkdirs(const char *path)
         char saved = tmp[i];
         tmp[i] = '\0';
         bool present = stat(tmp, &st) == 0 && S_ISDIR(st.st_mode);
-        if (!present && !platform_private_directory_create(tmp))
+        /* Another thread or process may create it between the stat and the
+         * mkdir: a directory that exists now is what we wanted. */
+        if (!present && !platform_private_directory_create(tmp) &&
+            !(errno == EEXIST && stat(tmp, &st) == 0 && S_ISDIR(st.st_mode)))
             return false;
         tmp[i] = saved;
     }
