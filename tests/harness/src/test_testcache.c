@@ -2231,7 +2231,6 @@ static int tc_rail_pin_refused(struct testcache *tc)
         "test_codeindex",        /* execs make */
         "test_codeindex_incremental", /* popen()s two tools/ scripts */
         "test_dev_proof_signer", /* rail: self re-exec of the test image */
-        "test_engine",           /* system() runs build/bin/z23-lint check-no-api-keys */
         "test_p2_invariant_check", /* zcl_spawn_* exec of the checker: denylist */
         "test_sem_replay",       /* rail: execs make (the delegated tool build) */
         "test_test_group_selector", /* popen() re-execs the test image */
@@ -2264,6 +2263,7 @@ static int tc_rail_pin_bindable(struct testcache *tc)
     static const char *const bindable[] = {
         "test_acme_worker",            /* binds z23-acme */
         "test_consensus_rule_sweep",   /* binds consensus_rule_sweep */
+        "test_engine",                 /* binds z23-lint (check-no-api-keys) */
         "test_fleet_board_bridge",     /* binds fleet-board-bridge */
         "test_fleet_gateway",          /* binds z23-fleet-gateway + zclassic23 */
         "test_process_group_exec",     /* binds build/bin/process-group-exec */
