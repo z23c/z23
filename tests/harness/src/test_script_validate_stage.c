@@ -2,6 +2,7 @@
  * Unit tests for Wave S S-6 script_validate stage. */
 
 #include "test/test_core.h"
+#include "util/util.h"
 #include "test/block_fixtures.h"
 
 #include "bloom/merkle.h"
@@ -321,6 +322,8 @@ static int sv_setup(const char *tag, int n, int upstream_fail_height,
     test_fmt_tmpdir(dir_out, dir_out_size, "script_validate", tag);
     mkdir_p_sv("./test-tmp");
     mkdir_p_sv(dir_out);
+    /* Pin the datadir: script_validate_stage_init caches GetDataDir(). */
+    if (!SetDataDir(dir_out)) return 5;
     if (!progress_store_open(dir_out)) return 1;
 
     memset(ms, 0, sizeof(*ms));
@@ -344,6 +347,8 @@ static void sv_teardown(const char *dir, struct main_state *ms,
     synth_chain_sv_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
+    SetDataDir("");
+    ClearDataDirCache();
 }
 
 int test_script_validate_stage(void);

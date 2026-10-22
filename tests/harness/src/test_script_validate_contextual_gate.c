@@ -25,6 +25,7 @@
  * contextual_check_block calls. */
 
 #include "test/test_core.h"
+#include "util/util.h"
 #include "test/block_fixtures.h"
 
 #include "bloom/merkle.h"
@@ -377,6 +378,8 @@ static int cg_setup(const char *tag, char *dir_out, size_t dir_out_size,
     test_fmt_tmpdir(dir_out, dir_out_size, "contextual_gate", tag);
     cg_mkdir_p("./test-tmp");
     cg_mkdir_p(dir_out);
+    /* Pin the datadir: script_validate_stage_init caches GetDataDir(). */
+    if (!SetDataDir(dir_out)) return 3;
     if (!progress_store_open(dir_out)) return 1;
 
     memset(ms, 0, sizeof(*ms));
@@ -407,6 +410,8 @@ static void cg_teardown(const char *dir, struct main_state *ms,
     cg_chain_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
+    SetDataDir("");
+    ClearDataDirCache();
 }
 
 /* ── rule-level fixture (direct contextual_check_block calls) ────── */

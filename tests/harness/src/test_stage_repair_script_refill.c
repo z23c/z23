@@ -446,6 +446,8 @@ static bool setup_fixture(struct srf_fixture *fx, const char *tag)
     memset(fx, 0, sizeof(*fx));
     test_make_tmpdir(fx->dir, sizeof(fx->dir),
                      "stage_repair_script_refill", tag);
+    if (!SetDataDir(fx->dir))
+        return false;
     if (!progress_store_open(fx->dir))
         return false;
     sqlite3 *db = progress_store_db();
@@ -483,6 +485,8 @@ static void teardown_fixture(struct srf_fixture *fx)
     main_state_free(&fx->ms);
     progress_store_close();
     test_cleanup_tmpdir(fx->dir);
+    SetDataDir("");
+    ClearDataDirCache();
 }
 
 /* Init a hand-built reconcile result for DIRECT calls into the refill core

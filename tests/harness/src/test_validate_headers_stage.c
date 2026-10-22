@@ -14,6 +14,8 @@
  *   - pre-init guards */
 
 #include "test/test_core.h"
+#include "util/util.h"
+#include "storage/boot_auto_reindex.h"
 #include "json/json.h"
 
 #include "chain/chain.h"
@@ -421,6 +423,9 @@ static int vh_setup(const char *tag, int n, vh_validator_fn fn, void *user,
 {
     test_fmt_tmpdir(dir_out, dir_out_size, "validate_headers", tag);
     mkdir_p_vh(dir_out);
+    /* Pin the datadir: validate_headers_stage_init caches GetDataDir(), which
+     * with no pin is $HOME/.zclassic-c23 — the operator's live node. */
+    if (!SetDataDir(dir_out)) return 5;
     if (!progress_store_open(dir_out)) return 1;
 
     memset(ms, 0, sizeof(*ms));
@@ -443,6 +448,8 @@ static void vh_teardown(const char *dir, struct main_state *ms,
     synth_chain_vh_free(sc);
     progress_store_close();
     test_cleanup_tmpdir(dir);
+    SetDataDir("");
+    ClearDataDirCache();
 }
 
 /* Deny reads on validate_headers_log so the recheck query's prepare fails
@@ -488,6 +495,15 @@ static int vh_recheck_fault_throttle_invariant(void)
     VH_CHECK("fault-throttle: result is a valid job_result_t",
              r1 == JOB_ADVANCED || r1 == JOB_BLOCKED ||
              r1 == JOB_IDLE || r1 == JOB_FATAL);
+    /* The permanent fault escalates to a bounded auto-reindex REQUEST. It must
+     * land in the fixture datadir vh_setup pinned — never in the default
+     * datadir ($HOME/.zclassic-c23, the live node's on an unpinned run). */
+    char pinned[512];
+    GetDataDir(true, pinned, sizeof(pinned));
+    VH_CHECK("fault-throttle: datadir is the pinned fixture dir",
+             strncmp(pinned, dir, strlen(dir)) == 0);
+    VH_CHECK("fault-throttle: auto-reindex request armed in the fixture datadir",
+             boot_auto_reindex_pending(pinned));
     vh_teardown(dir, &ms, &sc);
     return failures;
 }
