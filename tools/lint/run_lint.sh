@@ -228,7 +228,7 @@ gate_command() {
         check-pipefail-status-pipe)        echo './tools/lint/check_pipefail_status_pipe.sh --selftest && ./tools/lint/check_pipefail_status_pipe.sh' ;;
         check-shell-host-assumptions)      echo './build/bin/z23-lint check-shell-host-assumptions --selftest && ./tools/scripts/port_probe.sh --selftest && ./tools/scripts/commons_fix_admit.sh --selftest && ./tools/scripts/isolated_node_env_selftest.sh && ./tools/scripts/service_args_selftest.sh && bash tools/scripts/two_node_peer_tip_selftest.sh && ./build/bin/z23-lint check-shell-host-assumptions' ;;
         check-discarded-status)            echo './tools/lint/check_discarded_status.sh --selftest && ./tools/lint/check_discarded_status.sh' ;;
-        check-no-wallclock-assertion)      echo './tools/lint/check_no_wallclock_assertion.sh --selftest && ./tools/lint/check_no_wallclock_assertion.sh' ;;
+        check-no-wallclock-assertion)      echo './build/bin/z23-lint check-no-wallclock-assertion --selftest && ./build/bin/z23-lint check-no-wallclock-assertion' ;;
         check-no-real-clock-test-deadline) echo './tools/lint/check_no_real_clock_test_deadline.sh --selftest && ./tools/lint/check_no_real_clock_test_deadline.sh' ;;
         check-framework-shape)             echo 'ZCL_LINT_MODE=RATCHET ./tools/lint/framework_shape_check.sh' ;;
         check-framework-filename-suffix)   echo './tools/lint/check_framework_filename_suffix.sh' ;;

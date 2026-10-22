@@ -309,6 +309,8 @@ static const struct lint_gate k_gates[] = {
       check_capability_closure_selftest },
     { "check-accel-oracle-pinned", check_accel_oracle_pinned_run,
       check_accel_oracle_pinned_selftest },
+    { "check-no-wallclock-assertion", check_no_wallclock_assertion_run,
+      check_no_wallclock_assertion_selftest },
 };
 
 /* Premise-selection subcommands; they are tools, not gates, so --list and

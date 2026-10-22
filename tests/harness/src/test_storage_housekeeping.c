@@ -26,7 +26,7 @@
  *   - a sweep with every input under its bound changes nothing
  *   - stop() while a tick's work is due returns (a deadlock here hangs the
  *     group and the runner's watchdog fails the run; no clock-graded
- *     assertion is used — see tools/lint/check_no_wallclock_assertion.sh)
+ *     assertion is used — see tools/lint/lintc/gate_no_wallclock_assertion.c)
  */
 
 #include "test/test_core.h"
@@ -504,7 +504,7 @@ static int shk_case_stop_with_tick_due(const struct storage_pacing *pacing)
          * deadlocked the group would hang here and the runner's watchdog
          * would fail the run; reaching the next line is the proof. The
          * elapsed time is printed for the transcript only — it is not
-         * graded (check_no_wallclock_assertion.sh). */
+         * graded (gate_no_wallclock_assertion.c). */
         SHK_CHECK("tick work made due again before stop",
                   shk_write_file(log_path, pacing->log_rotate_bytes + 4096));
         int64_t t0 = platform_time_monotonic_ms();

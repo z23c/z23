@@ -2636,13 +2636,13 @@ Z23_FLAG("ZCL_VENDOR_OFFLINE", "env_build", "0", "-",
 Z23_FLAG("ZCL_VERDICT_CACHE", "env_build", "-", "-",
           "undocumented; first use tools/scripts/verdict.sh:auto")
 Z23_FLAG("ZCL_WALLCLOCK_GATE_ALLOWLIST", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_wallclock_assertion.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_no_wallclock_assertion.c:auto")
 Z23_FLAG("ZCL_WALLCLOCK_GATE_CEILING", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_wallclock_assertion.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_no_wallclock_assertion.c:auto")
 Z23_FLAG("ZCL_WALLCLOCK_GATE_FILE_FLOOR", "env_build", "1", "-",
-          "undocumented; first use tools/lint/check_no_wallclock_assertion.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_no_wallclock_assertion.c:auto")
 Z23_FLAG("ZCL_WALLCLOCK_GATE_SCAN_GLOB", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_wallclock_assertion.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_no_wallclock_assertion.c:auto")
 Z23_FLAG("ZCL_WALLET_KDF_ITERS", "env_runtime", "-", "-",
           "undocumented; first use contexts/wallet/modules/wallet/src/wallet_keystore.c:auto")
 Z23_FLAG("ZCL_WALLET_NO_PHRASE_BACKUP", "env_runtime", "-", "-",

@@ -114,8 +114,8 @@
 # tests/harness/src/test_cold_join_sovereign.c, same discipline: a tree below the
 # floor is refused, never reported clean (500 objects).
 
-# Coverage floor, shrink-only ratchet (same discipline as RATCHET_CEILING in
-# check_no_wallclock_assertion.sh — read that script's header for the
+# Coverage floor, shrink-only ratchet (same discipline as
+# WCA_RATCHET_CEILING in gate_no_wallclock_assertion.c — read that file's header for the
 # convention this mirrors). Every row in engine/composition/module_capabilities.def names
 # a source file that WAS compiled into an epoch when the table was written;
 # the table is itself a coverage expectation. A partial rebuild (e.g.

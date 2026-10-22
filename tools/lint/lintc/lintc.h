@@ -519,5 +519,7 @@ int check_capability_closure_run(int argc, char **argv);
 int check_capability_closure_selftest(void);
 int check_accel_oracle_pinned_run(int argc, char **argv);
 int check_accel_oracle_pinned_selftest(void);
+int check_no_wallclock_assertion_run(int argc, char **argv);
+int check_no_wallclock_assertion_selftest(void);
 
 #endif

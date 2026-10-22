@@ -379,7 +379,7 @@ static int nrc_report(const struct nrc_acc *a, FILE *out, FILE *err,
     if (fputs(
             "\n  A verdict a busy box can flip is measuring the box, not "
             "the code — see\n"
-            "  tools/lint/check_no_wallclock_assertion.sh's header for the "
+            "  tools/lint/lintc/gate_no_wallclock_assertion.c's header for the "
             "full case.\n"
             "  If this really is the one case in this file with no "
             "injected clock (a\n"

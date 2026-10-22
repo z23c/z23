@@ -6507,6 +6507,10 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_app_bundle_reproducible_selftest.c \
     tools/lint/lintc/gate_accel_oracle_pinned.c \
     tools/lint/lintc/gate_accel_oracle_pinned_selftest.c \
+    tools/lint/lintc/gate_no_wallclock_assertion.c \
+    tools/lint/lintc/gate_no_wallclock_assertion_bind.c \
+    tools/lint/lintc/gate_no_wallclock_assertion_scan.c \
+    tools/lint/lintc/gate_no_wallclock_assertion_selftest.c \
     tools/lint/lintc/gate_no_bare_tmp_fixture.c \
     tools/lint/lintc/gate_network_tool_hardening.c \
     tools/lint/lintc/gate_object_reproducible.c \
@@ -14759,11 +14763,11 @@ check-discarded-status:
 # and this project keeps slow machines on purpose, because a slow box is the
 # only instrument that shows where the code assumes fast storage. Closed,
 # shrink-only allowlist at tools/lint/wallclock_assertion_allowlist.txt; no
-# per-line escape hatch. See the script header for what it can and cannot see.
-check-no-wallclock-assertion:
+# per-line escape hatch. See tools/lint/lintc/gate_no_wallclock_assertion.c for what it can and cannot see.
+check-no-wallclock-assertion: $(LINTC_TOOL)
 	@echo "══ LINT: no test assertion graded on a wall-clock interval ══"
-	@./tools/lint/check_no_wallclock_assertion.sh --selftest
-	@./tools/lint/check_no_wallclock_assertion.sh
+	@./build/bin/z23-lint check-no-wallclock-assertion --selftest
+	@./build/bin/z23-lint check-no-wallclock-assertion
 
 # Sibling of the gate above, scoped to the harness's own registered-group
 # sources (tests/harness/src/*.c) and closing that gate's own documented
@@ -16579,3 +16583,4 @@ wiki-runtime-compile-check: $(VIEW_GEN_HEADERS) $(GUEST_KERNEL_GEN)
 	  tools/dev/wiki_runtime.c tools/dev/wiki_runtime_main.c
 	@$(CC) $(TEST_FAST_CFLAGS) -Wno-deprecated-declarations -fsyntax-only \
 	  tools/dev/wiki_runtime.c tests/harness/src/test_wiki_runtime.c
+

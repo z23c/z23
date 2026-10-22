@@ -6,8 +6,8 @@
 # a real clock, unless the line carries a reviewed `/* real-clock: <reason>
 # */` marker.
 #
-# ── WHY A SEPARATE GATE FROM check_no_wallclock_assertion.sh ──────────────
-# check_no_wallclock_assertion.sh already refuses an ASSERT/CHECK graded on a
+# ── WHY A SEPARATE GATE FROM gate_no_wallclock_assertion.c ──────────────
+# gate_no_wallclock_assertion.c already refuses an ASSERT/CHECK graded on a
 # measured clock INTERVAL, tree-wide, with a shrink-only baseline file and
 # (deliberately) no per-line escape hatch. It also documents its own biggest
 # blind spot in its header: "IT DOES NOT SEE A FIXED-ITERATION RETRY LOOP...
@@ -53,7 +53,7 @@
 #
 # ── WHAT THIS GATE CANNOT DO (stated plainly) ─────────────────────────────
 #   * (A) is a single balanced-paren join per assertion, not the full
-#     cross-function taint fixpoint check_no_wallclock_assertion.sh runs —
+#     cross-function taint fixpoint gate_no_wallclock_assertion.c runs —
 #     an interval built from a LOCAL VARIABLE that was itself assigned from a
 #     reader on an earlier line is invisible here (that shape is exactly what
 #     the tree-wide gate exists for; this gate is the narrower, marker-driven

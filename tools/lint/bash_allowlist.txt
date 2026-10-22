@@ -216,7 +216,6 @@ tools/lint/check_no_shellouts.sh
 tools/lint/check_no_stale_pinned_facts.sh
 tools/lint/check_no_stray_root_files.sh
 tools/lint/check_no_unattended_publish.sh
-tools/lint/check_no_wallclock_assertion.sh
 tools/lint/check_no_writer_below_sealed_frontier.sh
 tools/lint/check_object_reproducible.sh
 tools/lint/check_orient_facts.sh
