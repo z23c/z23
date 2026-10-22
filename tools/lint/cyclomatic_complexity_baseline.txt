@@ -2773,8 +2773,6 @@ tests/harness/src/test_kill9_recovery.c:p11_7ib_run_phase:42
 tests/harness/src/test_kill9_recovery.c:p11_7mf_run_phase:60
 tests/harness/src/test_kill9_recovery.c:test_kill9_recovery:23
 tests/harness/src/test_kpi.c:case_table:16
-tests/harness/src/test_land_queue.c:case_canonical_bytes:28
-tests/harness/src/test_land_queue.c:case_two_submitters_race:21
 tests/harness/src/test_ldb_reader.c:lr_build_fixture:24
 tests/harness/src/test_ldb_reader.c:lr_compare:33
 tests/harness/src/test_ldb_snapshot.c:test_ldb_snapshot:27
@@ -3801,8 +3799,6 @@ tools/install/z23_bootstrap.c:bootstrap_main#2:39
 tools/install/z23_bootstrap.c:dns_attestation:16
 tools/jsonq.c:parse_path:21
 tools/jsonq.c:walk:25
-tools/land/land_main.c:cmd_gate_run:22
-tools/land/land_main.c:cmd_verdict:17
 tools/ldb_verify_c23.c:main:54
 tools/lint/lintc/gate_build_config.c:aae_check:23
 tools/lint/lintc/gate_build_config.c:aae_read_var:18

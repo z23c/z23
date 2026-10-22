@@ -3391,11 +3391,6 @@ TEST_DEV_EXECUTOR_SRCS = tools/dev/devloop_cycle.c tools/dev/dev_failure_store.c
 	$(MUTATION_LIB_SRCS) $(VERIFY_SIGNER_SRCS)
 SPEC_SRCS = $(wildcard tests/harness/spec/*.c)
 CHAOS_SIM_SRCS = tools/sim/sim_peer.c
-# The landing queue's two library translation units. land_main.c owns a
-# main() and is deliberately NOT here — the queue logic is what the test
-# group proves, and linking the CLI's entry point would collide with the
-# harness's own.
-TEST_LAND_SRCS = tools/land/land_queue.c tools/land/land_record.c
 # The premise-selection core and the unit-exec runner (no main) are proven by
 # the lint_selection group.
 # They drive POSIX Git and fork/exec, so Windows hosts leave them out.
@@ -3419,7 +3414,7 @@ ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES = $(if $(ZCL_HOST_WINDOWS),\
 	$(ZCL_WINDOWS_ACCEPTANCE_$(t)_SOURCES))),)
 TEST_SRCS_NO_MAIN = $(filter-out tests/harness/src/test.c tests/harness/src/test_parallel.c \
 	$(ZCL_WINDOWS_ACCEPTANCE_MONOLITH_EXCLUDES), $(TEST_SRCS)) \
-	$(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS) $(TEST_LINT_SELECTION_SRCS)
+	$(TEST_DEV_EXECUTOR_SRCS) $(TEST_LINT_SELECTION_SRCS)
 # Reuse the test loader's embedded SHA when present; otherwise link the package.
 TEST_HUD_SHA_SRCS := $(if $(filter tests/harness/src/test_skycombat_macho_loader.c,$(TEST_SRCS_NO_MAIN)),,contexts/commons/packages/zsha256/src/zsha256.c)
 TEST_SRCS_NO_MAIN += $(TEST_HUD_SHA_SRCS)
@@ -7277,35 +7272,6 @@ ACME_WORKER_LDFLAGS = $(HARDEN_LDFLAGS) \
 ACME_WORKER_LIBS = $(ZCL_VENDOR_LIB)/libssl.a $(ZCL_VENDOR_LIB)/libcrypto.a \
 	$(if $(ZCL_HOST_WINDOWS),-l:libwinpthread.a,-lpthread) -lm \
 	$(if $(ZCL_HOST_WINDOWS),-lws2_32 -lbcrypt -lcrypt32 -ladvapi32 -luserenv,)
-
-# ── The landing queue ─────────────────────────────────────────────────────
-# `z23-land` is the command surface of tools/dev/land.sh and the batching
-# lander. Built STRAIGHT FROM SOURCE like the ACME worker rather than linked
-# against the node: it drives git and `make`, touches no consensus state, and
-# keeping it off the node's object graph is what stops a landing queue from
-# ever becoming reachable from a peer. Its whole dependency set is the
-# chainlog it writes receipts into, the hash that chains them, and the
-# platform file seam underneath both.
-LAND_SRCS = \
-	tools/land/land_main.c \
-	tools/land/land_queue.c \
-	tools/land/land_record.c \
-	engine/modules/chainlog/src/chainlog.c \
-	platform/modules/sha3/src/sha3.c \
-	platform/modules/base/src/log_level.c \
-	platform/modules/base/src/safe_alloc.c \
-	platform/modules/platform/src/private_file.c \
-	platform/modules/platform/src/private_acl_internal.c
-LAND_INCLUDES = -Iplatform/modules/base/include -Iengine/modules/chainlog/include -Iplatform/modules/sha3/include \
-	-Iplatform/modules/platform/include -Itools/land
-LAND_CFLAGS = -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	-D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(LAND_INCLUDES)
-
-.PHONY: z23-land
-z23-land: $(BIN_DIR)/z23-land$(ZCL_HOST_EXEEXT)
-$(BIN_DIR)/z23-land$(ZCL_HOST_EXEEXT): $(LAND_SRCS)
-	@mkdir -p $(dir $@)
-	$(CC) $(LAND_CFLAGS) -o $@ $(LAND_SRCS)
 
 .PHONY: z23-acme
 z23-acme: $(BIN_DIR)/z23-acme$(ZCL_HOST_EXEEXT)
@@ -12872,7 +12838,7 @@ endif
 endif
 endif
 
-COV_TEST_SRCS := $(filter-out tests/harness/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LAND_SRCS) $(TEST_LINT_SELECTION_SRCS)
+COV_TEST_SRCS := $(filter-out tests/harness/src/test_parallel.c, $(TEST_SRCS)) $(TEST_DEV_EXECUTOR_SRCS) $(TEST_LINT_SELECTION_SRCS)
 COV_HUD_SHA_SRCS := $(if $(filter tests/harness/src/test_skycombat_macho_loader.c,$(COV_TEST_SRCS)),,contexts/commons/packages/zsha256/src/zsha256.c)
 COV_TEST_SRCS += $(COV_HUD_SHA_SRCS)
 COV_OBJS := $(patsubst %.c,$(COV_BUILD_DIR)/%.o,$(COV_TEST_SRCS) $(SPEC_SRCS) $(CHAOS_SIM_SRCS) $(ALL_SRCS))

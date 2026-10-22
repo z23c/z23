@@ -686,7 +686,6 @@ test_group	test_keystone_utxo_binding	1167	18
 test_group	test_kill9_recovery	23486	35
 test_group	test_kpi	462	26
 test_group	test_lag_slo	1386	44
-test_group	test_land_queue	37465	43
 test_group	test_lcc_write_rules	32	31
 test_group	test_ldb_reader	2235	17
 test_group	test_ldb_snapshot	1824	17

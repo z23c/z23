@@ -105,9 +105,6 @@ tools/dev/hotswap-package.sh
 tools/dev/hotswap-resident-bench.sh
 tools/dev/hotswap-symbols.sh
 tools/dev/hotswap-verify.sh
-tools/dev/land.sh
-tools/dev/land_bench.sh
-tools/dev/land_lander.sh
 tools/dev/landed-journey-bench.sh
 tools/dev/make-depfile-scope-selftest.sh
 tools/dev/market_acceptance.sh
@@ -178,7 +175,6 @@ tools/dev/zcode_dht_acceptance.sh
 tools/diagnose_gap.sh
 tools/fuzz/run_fuzz_ci.sh
 tools/githooks/pre-commit
-tools/githooks/pre-push
 tools/harvest_checkpoints.sh
 tools/lint/check_accel_oracle_pinned.sh
 tools/lint/check_app_bundle_reproducible.sh

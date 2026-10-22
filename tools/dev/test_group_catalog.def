@@ -1060,15 +1060,6 @@ ZCL_TEST_GROUP(ecosystem)
  * still UNTESTED, and skipping that check is how a register of measurements
  * becomes a register of impressions. */
 ZCL_TEST_GROUP(science)
-/* The batching landing queue. The group exists for one distinction and one
- * guarantee. The distinction: "the gate did not run" and "the gate passed"
- * are different facts, so four cases try to fabricate a landing through the
- * four ways that could collapse — no gate run, a run that did not contain
- * this submission, a red run, and a run that skipped its groups — and each
- * must refuse by name. The guarantee: a red batch refuses ONLY the culprit,
- * because a batch that rejected an agent's work over a stranger's bug would
- * be worse than not batching at all. */
-ZCL_TEST_GROUP(land_queue)
 /* The landing SERVICE: dev.land submit/status/step/cancel. The group
  * exists for one property — nothing waits. It proves submit refuses an
  * unsigned or unknown tip, that a step over an empty queue returns at

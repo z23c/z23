@@ -1325,22 +1325,12 @@ Z23_FLAG("ZCL_K9_START", "env_test", "-", "-",
           "undocumented; first use tests/harness/src/test_kill9_recovery.c:auto")
 Z23_FLAG("ZCL_LAND_ALLOW_UNSIGNED", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
-Z23_FLAG("ZCL_LAND_BASE", "env_build", "main", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
-Z23_FLAG("ZCL_LAND_BATCH_MAX", "env_build", "16", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
-Z23_FLAG("ZCL_LAND_BIN", "env_build", "-", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
 Z23_FLAG("ZCL_LAND_DEPS_TEST_FORCE", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_DRAIN_IDLE_SEC", "env_runtime", "900", "-",
           "how long a queued land request with no beat may sit before "
           "status raises drain_absent; a missing land timer raises it "
           "immediately; tests set 0; first use tools/command/native_dev_land.c:auto")
-Z23_FLAG("ZCL_LAND_GATE_CMD", "env_build", "-", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
-Z23_FLAG("ZCL_LAND_GATE_TIMEOUT_S", "env_build", "2700", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
 Z23_FLAG("ZCL_LAND_HOOKS_STUB_DIR", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_HOOK_QUIET", "env_runtime", "-", "-",
@@ -1348,12 +1338,8 @@ Z23_FLAG("ZCL_LAND_HOOK_QUIET", "env_runtime", "-", "-",
           "post-* hooks do not schedule proofs for the transient checkouts "
           "and rebases of the landing worktree; a developer checkout never "
           "sets it; first use tools/dev/z23_git_hook.c:auto")
-Z23_FLAG("ZCL_LAND_INTERVAL_S", "env_build", "30", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
 Z23_FLAG("ZCL_LAND_MAKE", "env_test", "-", "-",
           "test build only: the make program dev land drive prove runs to build the landing-worktree producer; first use tools/command/native_dev_land.c:auto")
-Z23_FLAG("ZCL_LAND_MAX_ATTEMPTS", "env_build", "2", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
 Z23_FLAG("ZCL_LAND_PROOF_STUB", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_START_PROOF_WATCHER", "env_runtime", "0", "-",
@@ -1364,22 +1350,10 @@ Z23_FLAG("ZCL_LAND_PROOF_IDLE_SEC", "env_runtime", "900", "-",
           "how long a queued, never-claimed proof request may read as an "
           "ordinary pending state before the land row names its true idle "
           "age; tests lower it to exercise the boundary; first use tools/command/native_dev_land.c:auto")
-Z23_FLAG("ZCL_LAND_QUEUE", "env_build", "-", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
-Z23_FLAG("ZCL_LAND_RACE_PATH", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_land_queue.c:auto")
-Z23_FLAG("ZCL_LAND_RACE_PREFIX", "env_test", "-", "-",
-          "undocumented; first use tests/harness/src/test_land_queue.c:auto")
-Z23_FLAG("ZCL_LAND_READY_REF", "env_build", "land/ready", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
 Z23_FLAG("ZCL_LAND_REGEN_GATE_STUB_FAIL", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_REGEN_MAKE_STUB", "env_runtime", "-", "-",
           "undocumented; first use tools/command/native_dev_land.c:auto")
-Z23_FLAG("ZCL_LAND_STATE_DIR", "env_build", "-", "-",
-          "undocumented; first use tools/dev/land_bench.sh:auto")
-Z23_FLAG("ZCL_LAND_SUBMITTER", "env_build", "-", "-",
-          "undocumented; first use tools/dev/land.sh:auto")
 Z23_FLAG("ZCL_LAND_TEST_DIR_SYNC_FAIL", "env_test", "-", "-",
           "inject failed parent-directory sync after the landing queue rename; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_FENCE_POLICY", "env_test", "-", "-",
@@ -1398,8 +1372,6 @@ Z23_FLAG("ZCL_LAND_TEST_PRECHECK_TOOL_FAIL", "env_test", "-", "-",
           "test-only failure of the queued-row precheck merge step; first use tools/command/native_dev_land.c:auto")
 Z23_FLAG("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND", "env_test", "-", "-",
           "test-only terminal append refusal; first use tools/command/native_dev_land.c:auto")
-Z23_FLAG("ZCL_LAND_TIMING", "env_build", "-", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
 Z23_FLAG("ZCL_LAND_WINDOW", "env_runtime", "1", "-",
           "0 turns off the lander's LAND-WINDOW coordination (deferring a "
           "proof start behind another host's open window on the same base, "
@@ -1409,8 +1381,6 @@ Z23_FLAG("ZCL_LAND_WINDOW_HOST", "env_runtime", "-", "-",
           "the host name the lander announces LAND-WINDOW rows under and "
           "excludes from foreign windows; default the node name; first use "
           "tools/command/native_dev_land.c:auto")
-Z23_FLAG("ZCL_LAND_WORKTREE", "env_build", "-", "-",
-          "undocumented; first use tools/dev/land_lander.sh:auto")
 Z23_FLAG("ZCL_LANE_AGENT_TIMEOUT", "env_build", "10", "-",
           "first use tools/scripts/lane_health.sh:auto; documented at docs/agent/AGENT_API.md:1025: ZCL_LANE_AGENT_TIMEOUT (default 10 seconds), separate from the cheap generic")
 Z23_FLAG("ZCL_LANE_HEALTH_SELFTEST", "env_build", "0", "-",

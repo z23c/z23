@@ -28,8 +28,7 @@ you are new; this page is about operating a host, not about building.
   are tolerated); two probers on one ledger would double every row and halve
   the BLIND threshold.
 - **Landing.** `z23-land-step.service` / `.timer` drive one beat of the native
-  landing service. `z23-lander.service` is the older shell lander and is
-  a different thing — its own header says so.
+  landing service.
 - **Agents.** `zcl-agent-worker@.service` and `zcl-agent-receive@.service`, the
   instanced pair. The instance name is the box's own agent identity.
 - **Installers.** `setup.sh`, `provision-z23-build-host.sh`,

@@ -242,7 +242,6 @@ test_code_fetch	5
 test_retrieval_generation	8
 test_chainlog	89
 test_science	121
-test_land_queue	193
 test_testcache	299
 test_dev_proof_coverage	56
 test_dev_proof_observation_index	138

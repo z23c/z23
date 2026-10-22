@@ -36,9 +36,6 @@ enum {
 
 /* Closed allowlist: path, reason. A file not named here may not publish. */
 static const struct { const char *path; const char *reason; } k_nup_allow[] = {
-    { "tools/githooks/pre-push",
-      "prints advice text naming the override command; performs no push "
-      "of its own" },
     { "tools/githooks/pre-commit",
       "prints advice text naming the override command; performs no "
       "commit of its own" },
