@@ -241,7 +241,9 @@ static void hgt_seed_request(struct host_gc_request *req, const char *pool)
         (void)mkdir(fddir, 0700);
         (void)snprintf(cwd, sizeof(cwd), "%s/cwd", procdir);
         (void)unlink(cwd);
-        (void)symlink(occupied, cwd);
+        if (symlink(occupied, cwd) != 0)
+            fprintf(stderr, "hgt_seed_request: symlink %s -> %s: %s\n", cwd, occupied,
+                    strerror(errno));
     }
 
 }
