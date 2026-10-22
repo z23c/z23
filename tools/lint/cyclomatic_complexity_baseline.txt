@@ -3719,7 +3719,7 @@ tools/dev/devloop_hotswap_build.c:hs_hotfork_build:80
 tools/dev/devloop_hotswap_build.c:zcl_devloop_hotswap_build:75
 tools/dev/devloop_plan.c:plan_add_closure:44
 tools/dev/devloop_plan.c:zcl_devloop_path_is_relevant:19
-tools/dev/devloop_plan.c:zcl_devloop_plan_files:35
+tools/dev/devloop_plan.c:zcl_devloop_plan_files:31
 tools/dev/devloop_plan.c:zcl_devloop_plan_proof_admissible:17
 tools/dev/devloop_process.c:darwin_code_signature_region:20
 tools/dev/devloop_process.c:process_run_impl:28

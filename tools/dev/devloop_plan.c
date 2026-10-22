@@ -392,23 +392,33 @@ static bool path_include_applies(const char *path)
            (has_suffix(path, ".h") || has_suffix(path, ".def"));
 }
 
-static bool plan_semantic_leaf_group(
+/* tests/harness/src/test_<g>.c naming its registered catalog group test_<g>.
+ * Helpers, fixtures, subdirectories and unregistered groups are not named. */
+static bool plan_named_test_group(
     const char *path, char full[ZCL_TEST_GROUP_FULL_MAX])
 {
     static const char prefix[] = "tests/harness/src/";
     size_t path_len = path ? strlen(path) : 0;
     size_t prefix_len = sizeof(prefix) - 1;
-    if (!full || !zcl_test_group_source_is_semantic_leaf(path) ||
-        path_len <= prefix_len + 2 ||
+    if (!full || path_len <= prefix_len + 2 ||
         strncmp(path, prefix, prefix_len) != 0 ||
-        strcmp(path + path_len - 2, ".c") != 0)
+        strcmp(path + path_len - 2, ".c") != 0 ||
+        strchr(path + prefix_len, '/') != NULL ||
+        strncmp(path + prefix_len, "test_", 5) != 0)
         return false;
     size_t group_len = path_len - prefix_len - 2;
-    if (group_len == 0 || group_len >= ZCL_TEST_GROUP_FULL_MAX)
+    if (group_len <= 5 || group_len >= ZCL_TEST_GROUP_FULL_MAX)
         return false;
     memcpy(full, path + prefix_len, group_len);
     full[group_len] = 0;
     return zcl_test_group_catalog_contains(full);
+}
+
+static bool plan_semantic_leaf_group(
+    const char *path, char full[ZCL_TEST_GROUP_FULL_MAX])
+{
+    return zcl_test_group_source_is_semantic_leaf(path) &&
+           plan_named_test_group(path, full);
 }
 
 /* Severity ordering for combining one dimension's verdict across several
@@ -623,6 +633,29 @@ static void plan_take_path_group(struct zcl_devloop_plan *plan,
     plan_note_selection(plan, group, dim, via);
 }
 
+/* Rule groups for one changed path, unioned into the plan envelope. Each rule
+ * is evaluated in its original bounded accumulator; a multi-file plan is not
+ * constrained by the smaller per-path result shape. Rules stay authoritative.
+ * The last-resort floor applies only when no rule mapped the path: a
+ * test_<g>.c then proves its own registered group; helpers, fixtures and
+ * unregistered groups stay unmapped and refuse. */
+static void plan_take_rule_groups(struct zcl_devloop_plan *out,
+                                  const char *path)
+{
+    struct agent_impact_acc per_file = {0};
+    (void)agent_impact_apply_shared_rules(path, &per_file);
+    enum zcl_devloop_dim dim =
+        (path_is_opaque_class(path) ||
+         (!path_semantic_applies(path) && !path_include_applies(path)))
+            ? ZCL_DEVLOOP_DIM_OPAQUE
+            : ZCL_DEVLOOP_DIM_SEMANTIC;
+    for (size_t g = 0; g < per_file.groups_len; g++)
+        plan_take_path_group(out, per_file.groups[g], dim, path);
+    char own_group[ZCL_TEST_GROUP_FULL_MAX];
+    if (per_file.groups_len == 0 && plan_named_test_group(path, own_group))
+        plan_take_path_group(out, own_group, dim, path);
+}
+
 bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
                             struct zcl_devloop_plan *out)
 {
@@ -681,19 +714,7 @@ bool zcl_devloop_plan_files(const char *const *files, size_t file_count,
                                  files[i]);
             continue;
         }
-        /* Each rule is evaluated in its original bounded accumulator, then
-         * unioned directly into the graph-plan envelope. A multi-file plan is
-         * not constrained by the smaller per-path result shape. */
-        struct agent_impact_acc per_file = {0};
-        (void)agent_impact_apply_shared_rules(files[i], &per_file);
-        enum zcl_devloop_dim dim =
-            (path_is_opaque_class(files[i]) ||
-             (!path_semantic_applies(files[i]) &&
-              !path_include_applies(files[i])))
-                ? ZCL_DEVLOOP_DIM_OPAQUE
-                : ZCL_DEVLOOP_DIM_SEMANTIC;
-        for (size_t g = 0; g < per_file.groups_len; g++)
-            plan_take_path_group(out, per_file.groups[g], dim, files[i]);
+        plan_take_rule_groups(out, files[i]);
     }
     out->docs_only = all_docs;
 

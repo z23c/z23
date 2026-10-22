@@ -1748,6 +1748,57 @@ static int test_ic_dimension_applicability_and_exact_execution(void)
         ASSERT(!zcl_devloop_plan_proof_admissible(&gap, &why));
         ASSERT(strcmp(why, "unmapped-code-change") == 0);
 
+        /* Last-resort floor: a test_<g>.c no rule mapped proves its own
+         * registered group; anything else stays unmapped and fails closed. */
+        {
+            const char *own[] = { "tests/harness/src/test_bip44.c" };
+            struct zcl_devloop_plan p;
+            ASSERT(zcl_devloop_plan_files(own, 1, &p));
+            ASSERT(p.path_groups_len == 1);
+            ASSERT(strcmp(p.path_groups[0], "test_bip44") == 0);
+            TEST_DISCARD(system("rm -rf " IC_FIX_MACRO));
+            ASSERT(ic_write_call_pair(IC_FIX_MACRO));
+            ASSERT(ic_write_depfiles(IC_FIX_MACRO));
+            ASSERT(ic_write(IC_FIX_MACRO, "tests/harness/src/test_bip44.c",
+                            "int bip44_fixture_leaf(void) { return 0; }\n"));
+            ASSERT(ic_write(IC_FIX_MACRO, "build/obj/test_bip44.d",
+                            "build/obj/test_bip44.o: "
+                            "tests/harness/src/test_bip44.c\n"));
+            ASSERT(zcl_devloop_plan_add_closure(IC_FIX_MACRO, own, 1, &p));
+            TEST_DISCARD(system("rm -rf " IC_FIX_MACRO));
+            why = "unset";
+            ASSERT(zcl_devloop_plan_proof_admissible(&p, &why));
+
+            const char *unreg[] = { "tests/harness/src/test_no_such_group_zz.c" };
+            ASSERT(zcl_devloop_plan_files(unreg, 1, &p));
+            why = "unset";
+            ASSERT(!zcl_devloop_plan_proof_admissible(&p, &why));
+            ASSERT(strcmp(why, "unmapped-code-change") == 0);
+
+            const char *helper[] = { "tests/harness/src/fixture_helper_zz.c" };
+            ASSERT(zcl_devloop_plan_files(helper, 1, &p));
+            why = "unset";
+            ASSERT(!zcl_devloop_plan_proof_admissible(&p, &why));
+            ASSERT(strcmp(why, "unmapped-code-change") == 0);
+
+            const char *sub[] = { "tests/harness/src/fixtures/test_bip44.c" };
+            ASSERT(zcl_devloop_plan_files(sub, 1, &p));
+            why = "unset";
+            ASSERT(!zcl_devloop_plan_proof_admissible(&p, &why));
+            ASSERT(strcmp(why, "unmapped-code-change") == 0);
+
+            /* A rule-mapped test keeps the rule's groups; the floor adds
+             * nothing on top. */
+            const char *ruled[] = {
+                "tests/harness/src/test_activerecord_query_builder.c" };
+            ASSERT(zcl_devloop_plan_files(ruled, 1, &p));
+            ASSERT(p.path_groups_len > 0);
+            ASSERT(ic_group_in(p.path_groups, p.path_groups_len,
+                               "activerecord_query_builder"));
+            ASSERT(!ic_group_in(p.path_groups, p.path_groups_len,
+                                "test_activerecord_query_builder"));
+        }
+
         /* Pure C23 service islands are product code, not harness internals.
          * Their direct path floor must name the product proof even when the
          * reverse-call graph happens to find infrastructure coverage. */
