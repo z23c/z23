@@ -205,10 +205,13 @@ enum vcs_zcode_work_context_result vcs_zcode_work_context_action_root_for_kind(
     memcpy(action.source_sha256, context->source_sha256, 32);
     memcpy(action.source_cas_sha3, context->candidate.candidate_source_root,
            32);
-    struct vcs_zcode_action_input_v1 bound_input;
+    struct vcs_zcode_action_input_v1 bound_input = {0};
     enum vcs_zcode_action_input_result parsed = vcs_zcode_action_input_parse(
         context->fixed_input, context->fixed_input_len, &bound_input);
     if (strcmp(kind, VCS_BUILD_ACTION_KIND_PACKAGE_V1) == 0) {
+        /* The package binding parses its own input; the generic parse above
+         * owns heap memory when it succeeded (a failed parse leaves none). */
+        vcs_zcode_action_input_free(&bound_input);
         if (!context_package_action_bound(context, input_root))
             return VCS_ZCODE_WORK_CONTEXT_ACTION;
     } else if (parsed == VCS_ZCODE_ACTION_INPUT_OK) {
