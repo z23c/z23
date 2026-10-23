@@ -3520,11 +3520,6 @@ tools/install/z23_bootstrap.c:dns_attestation:16
 tools/jsonq.c:parse_path:21
 tools/jsonq.c:walk:25
 tools/ldb_verify_c23.c:main:54
-tools/lint/lintc/gate_build_config.c:aae_check:23
-tools/lint/lintc/gate_build_config.c:aae_read_var:18
-tools/lint/lintc/gate_build_config.c:aae_rewrite_first:16
-tools/lint/lintc/gate_build_config.c:ptr_parse_buf:21
-tools/lint/lintc/gate_build_config.c:trs_check:37
 tools/lint/lintc/gate_git_scan_a.c:check_equihash_params_run:26
 tools/lint/lintc/gate_git_scan_a.c:check_framework_filename_suffix_run:18
 tools/lint/lintc/gate_git_scan_a.c:check_no_stray_root_files_run:18

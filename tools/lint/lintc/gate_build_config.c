@@ -108,115 +108,131 @@ static ssize_t trs_squeeze_line(char *buf, ssize_t n)
     return w;
 }
 
-int trs_check(FILE *out)
+static int trs_compile_all(regex_t *seedre, regex_t *trig, regex_t *covre,
+                           regex_t *cont)
 {
-    regex_t seedre, trig, covre, cont;
-    int cr = compile_pat(&seedre, REG_EXTENDED,
+    int cr = compile_pat(seedre, REG_EXTENDED,
                         "^ZCL_TU_" "RANDOM_SEED[[:space:]]*=", "", "", "");
     if (cr)
         return cr;
-    cr = compile_pat(&trig, REG_EXTENDED,
+    cr = compile_pat(trig, REG_EXTENDED,
                      "BUILD_(EPOCH_OBJECT_TOOL|FAST_EPOCH_OBJECT_COMMAND)\\)"
                      "[[:space:]]+(dep|coverage)[[:space:]]",
                      "", "", "");
     if (cr) {
-        regfree(&seedre);
+        regfree(seedre);
         return cr;
     }
-    cr = compile_pat(&covre, REG_EXTENDED, "[[:space:]]coverage[[:space:]]",
+    cr = compile_pat(covre, REG_EXTENDED, "[[:space:]]coverage[[:space:]]",
                      "", "", "");
     if (cr) {
-        drop2(&seedre, &trig);
+        drop2(seedre, trig);
         return cr;
     }
-    cr = compile_pat(&cont, REG_EXTENDED, "\\\\[[:space:]]*$", "", "", "");
+    cr = compile_pat(cont, REG_EXTENDED, "\\\\[[:space:]]*$", "", "", "");
     if (cr) {
-        drop3(&seedre, &trig, &covre);
+        drop3(seedre, trig, covre);
         return cr;
     }
+    return 0;
+}
 
-    FILE *f = fopen("Makefile", "r");
-    char seed_def[4096];
+static int trs_read_seed_def(const regex_t *seedre, char *seed_def,
+                             size_t seed_cap, int *found_seed)
+{
     seed_def[0] = '\0';
-    int found_seed = 0;
-    if (f) {
-        char *line = NULL;
-        size_t cap = 0;
-        ssize_t n;
-        size_t used = 0;
-        int rc = 0;
-        while ((n = getline(&line, &cap, f)) >= 0) {
-            n = trs_squeeze_line(line, n);
-            if (regexec(&seedre, line, 0, NULL, 0) != 0)
-                continue;
-            size_t ln = strlen(line);
-            if (found_seed) {
-                if (used + 1 >= sizeof seed_def) {
-                    rc = die("z23-lint: derived buffer overflow\n", "");
-                    break;
-                }
-                seed_def[used++] = '\n';
-                seed_def[used] = '\0';
-            }
-            if (used + ln >= sizeof seed_def) {
+    *found_seed = 0;
+    FILE *f = fopen("Makefile", "r");
+    if (!f)
+        return 0;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    size_t used = 0;
+    int rc = 0;
+    while ((n = getline(&line, &cap, f)) >= 0) {
+        n = trs_squeeze_line(line, n);
+        if (regexec(seedre, line, 0, NULL, 0) != 0)
+            continue;
+        size_t ln = strlen(line);
+        if (*found_seed) {
+            if (used + 1 >= seed_cap) {
                 rc = die("z23-lint: derived buffer overflow\n", "");
                 break;
             }
-            memcpy(seed_def + used, line, ln + 1);
-            used += ln;
-            found_seed = 1;
+            seed_def[used++] = '\n';
+            seed_def[used] = '\0';
         }
-        int fr = fin(f, line, "Makefile", rc);
-        if (fr) {
-            drop3(&seedre, &trig, &covre);
-            regfree(&cont);
-            return fr;
+        if (used + ln >= seed_cap) {
+            rc = die("z23-lint: derived buffer overflow\n", "");
+            break;
         }
+        memcpy(seed_def + used, line, ln + 1);
+        used += ln;
+        *found_seed = 1;
     }
+    return fin(f, line, "Makefile", rc);
+}
+
+static int trs_check_seed_value(FILE *out, const char *seed_def)
+{
+    const char *frs = strstr(seed_def, "-" "frandom-seed=");
+    if (frs && strstr(frs, "$<"))
+        return 0;
+    if (fputs("FAIL: ZCL_TU_RANDOM_SEED must expand to -frandom-seed=<per-TU value>.\n"
+              "      A seed that is the same for every TU is not a per-TU seed.\n",
+              out) < 0)
+        return die("z23-lint: write failed\n", "");
+    if (fprintf(out, "      Found: %s\n", seed_def) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
+}
+
+static int trs_check_seed(FILE *out, const regex_t *seedre)
+{
+    char seed_def[4096];
+    int found_seed = 0;
+    int rc = trs_read_seed_def(seedre, seed_def, sizeof seed_def, &found_seed);
+    if (rc)
+        return rc;
     if (!found_seed) {
-        drop3(&seedre, &trig, &covre);
-        regfree(&cont);
         if (fputs("FAIL: Makefile does not define ZCL_TU_RANDOM_SEED\n", out) < 0)
             return die("z23-lint: write failed\n", "");
         return 1;
     }
-    const char *frs = strstr(seed_def, "-" "frandom-seed=");
-    if (!frs || !strstr(frs, "$<")) {
-        drop3(&seedre, &trig, &covre);
-        regfree(&cont);
-        if (fputs("FAIL: ZCL_TU_RANDOM_SEED must expand to -frandom-seed=<per-TU value>.\n"
-                  "      A seed that is the same for every TU is not a per-TU seed.\n",
-                  out) < 0)
-            return die("z23-lint: write failed\n", "");
-        if (fprintf(out, "      Found: %s\n", seed_def) < 0)
-            return die("z23-lint: write failed\n", "");
-        return 1;
-    }
+    return trs_check_seed_value(out, seed_def);
+}
 
-    f = fopen("Makefile", "r");
-    if (!f) {
-        drop3(&seedre, &trig, &covre);
-        regfree(&cont);
-        if (fputs("FAIL: found no compile-epoch-object.sh object recipes in Makefile\n",
-                  out) < 0)
-            return die("z23-lint: write failed\n", "");
-        return 1;
-    }
+static int trs_no_recipes(FILE *out)
+{
+    if (fputs("FAIL: found no compile-epoch-object.sh object recipes in Makefile\n",
+              out) < 0)
+        return die("z23-lint: write failed\n", "");
+    return 1;
+}
+
+struct trs_tally {
+    int found, fail, dep_total, dep_seeded, cov_total;
+};
+
+static int trs_scan_recipes(FILE *f, FILE *out, const regex_t *trig,
+                            const regex_t *covre, const regex_t *cont,
+                            struct trs_tally *t)
+{
     char *line = NULL;
     size_t cap = 0;
     ssize_t n;
-    int lineno = 0, rc = 0, found = 0, fail = 0;
-    int dep_total = 0, dep_seeded = 0, cov_total = 0;
+    int lineno = 0, rc = 0;
     while ((n = getline(&line, &cap, f)) >= 0) {
         lineno++;
         n = trs_squeeze_line(line, n);
-        if (regexec(&trig, line, 0, NULL, 0) != 0)
+        if (regexec(trig, line, 0, NULL, 0) != 0)
             continue;
-        found = 1;
-        int cov = regexec(&covre, line, 0, NULL, 0) == 0;
+        t->found = 1;
+        int cov = regexec(covre, line, 0, NULL, 0) == 0;
         int start = lineno;
         int legacy = trs_is_legacy(line);
-        while (regexec(&cont, line, 0, NULL, 0) == 0) {
+        while (regexec(cont, line, 0, NULL, 0) == 0) {
             n = getline(&line, &cap, f);
             if (n < 0)
                 break;
@@ -232,26 +248,21 @@ int trs_check(FILE *out)
         const char *argv = line;
         while (*argv == '\t')
             argv++;
-        rc = trs_on_recipe(out, cov, legacy, start, argv, &dep_total, &dep_seeded,
-                           &cov_total, &fail);
+        rc = trs_on_recipe(out, cov, legacy, start, argv, &t->dep_total,
+                           &t->dep_seeded, &t->cov_total, &t->fail);
         if (rc)
             break;
     }
-    int fr = fin(f, line, "Makefile", rc);
-    drop3(&seedre, &trig, &covre);
-    regfree(&cont);
-    if (fr)
-        return fr;
-    if (!found) {
-        if (fputs("FAIL: found no compile-epoch-object.sh object recipes in Makefile\n",
-                  out) < 0)
-            return die("z23-lint: write failed\n", "");
-        return 1;
-    }
-    if (cov_total > 1) {
+    return fin(f, line, "Makefile", rc);
+}
+
+static int trs_report_recipes(FILE *out, const struct trs_tally *t)
+{
+    int fail = t->fail;
+    if (t->cov_total > 1) {
         if (fprintf(out,
                     "FAIL: expected exactly one coverage-mode object recipe, found %d.\n",
-                    cov_total) < 0)
+                    t->cov_total) < 0)
             return die("z23-lint: write failed\n", "");
         if (fputs("      The exemption is documented for one recipe; a second one has to\n"
                   "      justify itself rather than inherit the first one's reason.\n",
@@ -270,8 +281,37 @@ int trs_check(FILE *out)
     return fprintf(out,
                    "check-tu-random-seed: PASS — %d/%d per-TU object recipes pin GCC's "
                    "random seed (%d coverage recipe exempt)\n",
-                   dep_seeded, dep_total, cov_total) < 0
+                   t->dep_seeded, t->dep_total, t->cov_total) < 0
                ? die("z23-lint: write failed\n", "") : 0;
+}
+
+static int trs_check_recipes(FILE *out, const regex_t *trig,
+                             const regex_t *covre, const regex_t *cont)
+{
+    FILE *f = fopen("Makefile", "r");
+    if (!f)
+        return trs_no_recipes(out);
+    struct trs_tally t = {0};
+    int fr = trs_scan_recipes(f, out, trig, covre, cont, &t);
+    if (fr)
+        return fr;
+    if (!t.found)
+        return trs_no_recipes(out);
+    return trs_report_recipes(out, &t);
+}
+
+int trs_check(FILE *out)
+{
+    regex_t seedre, trig, covre, cont;
+    int cr = trs_compile_all(&seedre, &trig, &covre, &cont);
+    if (cr)
+        return cr;
+    int rc = trs_check_seed(out, &seedre);
+    regfree(&seedre);
+    if (!rc)
+        rc = trs_check_recipes(out, &trig, &covre, &cont);
+    drop3(&trig, &covre, &cont);
+    return rc;
 }
 
 int check_tu_random_seed_run(int argc, char **argv)
@@ -327,6 +367,59 @@ static int ptr_tok_at(const char *buf, size_t n, size_t i, size_t *len)
     return 0;
 }
 
+static size_t ptr_spec_scan(const char *buf, size_t n, size_t j, int *closed)
+{
+    int depth = 1, in_str = 0, esc = 0;
+    while (j < n && depth > 0) {
+        char c = buf[j];
+        if (in_str) {
+            if (esc)
+                esc = 0;
+            else if (c == '\\')
+                esc = 1;
+            else if (c == '"')
+                in_str = 0;
+        } else if (c == '"')
+            in_str = 1;
+        else if (c == '(')
+            depth++;
+        else if (c == ')')
+            depth--;
+        j++;
+    }
+    *closed = depth == 0;
+    return j;
+}
+
+static int ptr_spec_path(const char *spec, char *path, size_t cap)
+{
+    const char *q1 = strchr(spec, '"');
+    const char *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+    if (!q2)
+        return 0;
+    size_t pl = (size_t)(q2 - q1 - 1);
+    if (pl >= cap)
+        return die("z23-lint: derived buffer overflow\n", "");
+    memcpy(path, q1 + 1, pl);
+    path[pl] = '\0';
+    return 0;
+}
+
+static int ptr_spec_leaf(const char *spec, int *nleaf)
+{
+    char path[PTR_LEAF_LEN];
+    path[0] = '\0';
+    int prc = ptr_spec_path(spec, path, sizeof path);
+    if (prc)
+        return prc;
+    int owner = strstr(spec, "ZCL_COMMAND_AUTH_OWNER") != NULL;
+    int mutate = strstr(spec, "ZCL_COMMAND_EFFECT_MUTATE") != NULL
+              || strstr(spec, "ZCL_COMMAND_EFFECT_DESTRUCTIVE") != NULL;
+    if (owner && mutate && path[0])
+        return ptr_add_leaf(path, nleaf);
+    return 0;
+}
+
 static int ptr_parse_buf(char *buf, size_t n, int *nleaf)
 {
     size_t i = 0;
@@ -336,51 +429,13 @@ static int ptr_parse_buf(char *buf, size_t n, int *nleaf)
             i++;
             continue;
         }
-        size_t j = i + L;
-        int depth = 1, in_str = 0, esc = 0;
-        size_t spec_at = j;
-        while (j < n && depth > 0) {
-            char c = buf[j];
-            if (in_str) {
-                if (esc)
-                    esc = 0;
-                else if (c == '\\')
-                    esc = 1;
-                else if (c == '"')
-                    in_str = 0;
-            } else if (c == '"')
-                in_str = 1;
-            else if (c == '(')
-                depth++;
-            else if (c == ')')
-                depth--;
-            j++;
-        }
-        size_t spec_end = (depth == 0) ? j - 1 : j;
+        size_t spec_at = i + L;
+        int closed = 0;
+        size_t j = ptr_spec_scan(buf, n, spec_at, &closed);
+        size_t spec_end = closed ? j - 1 : j;
         char save = buf[spec_end];
         buf[spec_end] = '\0';
-        const char *spec = buf + spec_at;
-        char path[PTR_LEAF_LEN];
-        path[0] = '\0';
-        const char *q1 = strchr(spec, '"');
-        if (q1) {
-            const char *q2 = strchr(q1 + 1, '"');
-            if (q2) {
-                size_t pl = (size_t)(q2 - q1 - 1);
-                if (pl >= sizeof path) {
-                    buf[spec_end] = save;
-                    return die("z23-lint: derived buffer overflow\n", "");
-                }
-                memcpy(path, q1 + 1, pl);
-                path[pl] = '\0';
-            }
-        }
-        int owner = strstr(spec, "ZCL_COMMAND_AUTH_OWNER") != NULL;
-        int mutate = strstr(spec, "ZCL_COMMAND_EFFECT_MUTATE") != NULL
-                  || strstr(spec, "ZCL_COMMAND_EFFECT_DESTRUCTIVE") != NULL;
-        int rcadd = 0;
-        if (owner && mutate && path[0])
-            rcadd = ptr_add_leaf(path, nleaf);
+        int rcadd = ptr_spec_leaf(buf + spec_at, nleaf);
         buf[spec_end] = save;
         if (rcadd)
             return rcadd;
@@ -868,6 +923,24 @@ static int aae_append(char *value, size_t cap, const char *tok)
     return 0;
 }
 
+static void aae_strip_eol(char *line, ssize_t n)
+{
+    if (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) {
+        line[n - 1] = '\0';
+        if (n > 1 && line[n - 2] == '\r')
+            line[n - 2] = '\0';
+    }
+}
+
+static void aae_strip_continuation(const char *body)
+{
+    size_t L = strlen((char *)body);
+    while (L && isspace((unsigned char)body[L - 1]))
+        L--;
+    if (L && body[L - 1] == '\\')
+        ((char *)body)[L - 1] = '\0';
+}
+
 static int aae_read_var(const char *path, const char *name, char *value,
                         size_t cap)
 {
@@ -887,18 +960,9 @@ static int aae_read_var(const char *path, const char *name, char *value,
             active = 1;
         }
         int cont = aae_continued(body);
-        if (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r')) {
-            line[n - 1] = '\0';
-            if (n > 1 && line[n - 2] == '\r')
-                line[n - 2] = '\0';
-        }
-        if (cont) {
-            size_t L = strlen((char *)body);
-            while (L && isspace((unsigned char)body[L - 1]))
-                L--;
-            if (L && body[L - 1] == '\\')
-                ((char *)body)[L - 1] = '\0';
-        }
+        aae_strip_eol(line, n);
+        if (cont)
+            aae_strip_continuation(body);
         char *tok = aae_trim((char *)body);
         if (aae_append(value, cap, tok)) {
             rc = 2;
@@ -1009,6 +1073,18 @@ int aae_copy(const char *src, const char *dst)
     return rc;
 }
 
+static int aae_put_hit(FILE *out, const char *line, const char *hit,
+                       const char *from, const char *to)
+{
+    size_t pre = (size_t)(hit - line);
+    size_t fl = strlen(from), tl = strlen(to);
+    if (fwrite(line, 1, pre, out) != pre
+        || fwrite(to, 1, tl, out) != tl
+        || fputs(hit + fl, out) < 0)
+        return 1;
+    return 0;
+}
+
 int aae_rewrite_first(const char *src, const char *dst, const char *from,
                              const char *to)
 {
@@ -1027,11 +1103,7 @@ int aae_rewrite_first(const char *src, const char *dst, const char *from,
     while ((n = getline(&line, &cap, in)) >= 0) {
         char *hit = !done ? strstr(line, from) : NULL;
         if (hit) {
-            size_t pre = (size_t)(hit - line);
-            size_t fl = strlen(from), tl = strlen(to);
-            if (fwrite(line, 1, pre, out) != pre
-                || fwrite(to, 1, tl, out) != tl
-                || fputs(hit + fl, out) < 0) {
+            if (aae_put_hit(out, line, hit, from, to)) {
                 rc = die("z23-lint: write failed\n", "");
                 break;
             }
@@ -1056,15 +1128,19 @@ const char *aae_makefile(void)
     return env_or("ZCL_ASAN_ADX_MAKEFILE", "Makefile");
 }
 
-static int aae_check(const char *path)
+static int aae_check_readable(const char *path)
 {
     struct stat st;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
-        char msg[8192];
-        if (ovf(snprintf(msg, sizeof msg, "cannot read %s", path), sizeof msg))
-            return 2;
-        return aae_fail(msg);
-    }
+    if (stat(path, &st) == 0 && S_ISREG(st.st_mode))
+        return 0;
+    char msg[8192];
+    if (ovf(snprintf(msg, sizeof msg, "cannot read %s", path), sizeof msg))
+        return 2;
+    return aae_fail(msg);
+}
+
+static int aae_check_vars(const char *path)
+{
     char sources[8192], flags[4096], common[8192], msg[8192];
     int rc = aae_read_var(path, "ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS",
                           sources, sizeof sources);
@@ -1101,6 +1177,11 @@ static int aae_check(const char *path)
             return 2;
         return aae_fail(msg);
     }
+    return 0;
+}
+
+static int aae_check_needles(const char *path)
+{
     static const char *const needles[] = {
         "TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS := $(addprefix $(TEST_ASAN_OBJ_DIR)/,$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS:.c=.o))",
         "$(TEST_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): TEST_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)",
@@ -1108,26 +1189,37 @@ static int aae_check(const char *path)
         "$(DEV_ASAN_ADX_FRAME_POINTER_EXCEPTION_OBJS): DEV_ASAN_OBJECT_CFLAGS += $(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)",
     };
     for (size_t i = 0; i < sizeof needles / sizeof needles[0]; i++) {
-        rc = aae_require(path, needles[i]);
+        int rc = aae_require(path, needles[i]);
         if (rc)
             return rc;
     }
+    return 0;
+}
+
+static int aae_check_epoch_binding(const char *path)
+{
     int epoch_count = 0;
-    rc = aae_count_substr(path,
-                          "adx-exception=$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS):$(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)",
-                          &epoch_count);
+    int rc = aae_count_substr(path,
+                              "adx-exception=$(ASAN_ADX_FRAME_POINTER_EXCEPTION_SRCS):$(ASAN_ADX_FRAME_POINTER_EXCEPTION_FLAGS)",
+                              &epoch_count);
     if (rc)
         return rc;
     if (epoch_count != 2) {
+        char msg[8192];
         if (ovf(snprintf(msg, sizeof msg,
                          "expected the test and dev ASan compile epochs to bind the exception; found %d binding(s)",
                          epoch_count), sizeof msg))
             return 2;
         return aae_fail(msg);
     }
+    return 0;
+}
+
+static int aae_check_no_overrides(const char *path)
+{
     regex_t re;
-    rc = compile_pat(&re, REG_EXTENDED, "ASAN_COMMON_SAN_FLAGS",
-                     "[[:space:]]*=", "", "");
+    int rc = compile_pat(&re, REG_EXTENDED, "ASAN_COMMON_SAN_FLAGS",
+                         "[[:space:]]*=", "", "");
     if (rc)
         return rc;
     int override_count = 0;
@@ -1136,18 +1228,44 @@ static int aae_check(const char *path)
     if (rc)
         return rc;
     if (override_count != 0) {
+        char msg[8192];
         if (ovf(snprintf(msg, sizeof msg,
                          "found %d recipe/caller override(s) of ASAN_COMMON_SAN_FLAGS",
                          override_count), sizeof msg))
             return 2;
         return aae_fail(msg);
     }
-    rc = aae_require(path,
-                     "TEST_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \\");
+    return 0;
+}
+
+static int aae_check_cflags(const char *path)
+{
+    int rc = aae_require(path,
+                         "TEST_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) -O1 -g -DZCL_TESTING \\");
     if (rc)
         return rc;
     return aae_require(path,
                        "DEV_ASAN_CFLAGS = $(filter-out -O3 $(ZCL_LTO_FLAG) -Werror,$(CACHED_CFLAGS)) $(ZCL_DEV_OPT) -g3 -DZCL_DEV_BUILD \\");
+}
+
+static int aae_check(const char *path)
+{
+    int rc = aae_check_readable(path);
+    if (rc)
+        return rc;
+    rc = aae_check_vars(path);
+    if (rc)
+        return rc;
+    rc = aae_check_needles(path);
+    if (rc)
+        return rc;
+    rc = aae_check_epoch_binding(path);
+    if (rc)
+        return rc;
+    rc = aae_check_no_overrides(path);
+    if (rc)
+        return rc;
+    return aae_check_cflags(path);
 }
 
 int check_asan_adx_exception_run(int argc, char **argv)
