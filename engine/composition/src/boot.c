@@ -2896,12 +2896,11 @@ static bool boot_seq_reconcile_chain_state(struct app_context *ctx,
     /* Validate coins/chain agreement and execute recovery */
     t_reconcile_sub = boot_submark("blkidx.repair_relink", t_reconcile_sub);
     boot_step_execute_utxo_recovery(ctx, s->params);
-    int64_t t_part = boot_mark_step(t_reconcile_sub, "blkidx.utxo_recovery",
-                                    "blkidx.clear_stale_have_data");
+    int64_t t_part = boot_submark("blkidx.utxo_recovery", t_reconcile_sub);
     int stale_cleared = boot_step_clear_stale_have_data(scan.max_have_data_h);
-    t_part = boot_mark_step(t_part, "blkidx.clear_stale_have_data", "blkidx.scan_block_files");
+    t_part = boot_submark("blkidx.clear_stale_have_data", t_part);
     boot_step_scan_block_files(ctx, s->params, &scan, stale_cleared);
-    (void)boot_mark_step(t_part, "blkidx.scan_block_files", NULL);
+    (void)boot_submark("blkidx.scan_block_files", t_part);
     (void)boot_submark("blkidx.validate_recover", t_reconcile_sub);
     boot_topmark("block_index_reconcile", t_reconcile_blockindex);
     return true;
