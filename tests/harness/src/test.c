@@ -1159,6 +1159,7 @@ int main(int argc, char **argv)
     failures += test_sapling();
     failures += test_sapling_crypto();
     failures += test_groth16_msm_parity();
+    failures += test_bls12_381_fp_addsub_parity();
     failures += test_groth16_r1cs_oracle();
     failures += test_sapling_tree();
     failures += test_bn254();

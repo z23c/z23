@@ -264,3 +264,7 @@ later lane flips it HARD.
 - 2026-10-23T10:51:24Z — REASON: ChaCha20 AVX2/AVX-512 keystream tiers with runtime CPU dispatch and one-time portable-oracle KAT; AUTO picks the fastest verified tier on x86-64 from measured bench evidence. Output byte-identical to the portable tier. Owner crypto+AVX directive 2026-10-23.
   old ROOT: 2d1d5231a69242b07cf482cd2f7f14927eb30610d44bf056fae60697b15257b6
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-23T12:43:41Z — REASON: perf(sapling): branch-free BLS12-381 fp_add/fp_sub/fp_neg (behaviour-preserving; differential vs frozen oracle)
+  old ROOT: eb01e833cccbf2862b1bdb172b12a8548a40575b9c741605914915dc44b186cb
+  by: owner unseal ritual (make core-unseal)

@@ -40,3 +40,4 @@ core/modules/sapling/src/bn254_accel.c    tests/harness/src/test_bn254_accel.c  
 core/modules/sapling/src/fr_avx512.c      tests/harness/src/test_fr_mont_parity.c         fr_mont_parity
 core/modules/crypto/src/simd_dispatch.c   tests/harness/src/test_simd_os_support.c        simd_os_support
 platform/modules/util/src/crc32c.c        tests/harness/src/test_arm_hw_tiers.c           arm_hw_tiers
+core/modules/sapling/src/bls12_381.c      tests/harness/src/test_bls12_381_fp_addsub_parity.c bls12_381_fp_addsub_parity

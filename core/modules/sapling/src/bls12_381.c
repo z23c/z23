@@ -11,6 +11,7 @@
 #include "crypto/blake2b.h"
 #include "util/safe_alloc.h"
 #include "util/log_macros.h"
+#include "bls12_381_fp_inline.h"
 
 /* Runtime-dispatched Montgomery multiply (CPUID → BMI2+ADX or portable) */
 extern void fp_mont_mul_accel(uint64_t r[6], const uint64_t a[6], const uint64_t b[6]);
@@ -46,24 +47,6 @@ static const uint64_t FP_R2[6] = {
 
 /* ===== Fp arithmetic ===== */
 
-static bool fp_gte(const uint64_t a[6], const uint64_t b[6])
-{
-    for (int i = 5; i >= 0; i--) {
-        if (a[i] > b[i]) return true;
-        if (a[i] < b[i]) return false;
-    }
-    return true;
-}
-
-static void fp_sub_noborrow(uint64_t r[6], const uint64_t a[6], const uint64_t b[6])
-{
-    unsigned __int128 borrow = 0;
-    for (int i = 0; i < 6; i++) {
-        unsigned __int128 tmp = (unsigned __int128)a[i] - b[i] - borrow;
-        r[i] = (uint64_t)tmp;
-        borrow = (tmp >> 127) & 1;
-    }
-}
 
 /* Montgomery multiply implementation is in fr_avx512.c (runtime dispatch) */
 
@@ -87,41 +70,17 @@ bool fp_eq(const struct fp *a, const struct fp *b)
 
 void fp_add(struct fp *r, const struct fp *a, const struct fp *b)
 {
-    unsigned __int128 carry = 0;
-    uint64_t tmp[6];
-    for (int i = 0; i < 6; i++) {
-        unsigned __int128 sum = (unsigned __int128)a->d[i] + b->d[i] + carry;
-        tmp[i] = (uint64_t)sum;
-        carry = sum >> 64;
-    }
-    if (carry || fp_gte(tmp, FP_Q))
-        fp_sub_noborrow(r->d, tmp, FP_Q);
-    else
-        memcpy(r->d, tmp, 48);
+    fpi_add(r->d, a->d, b->d, FP_Q);
 }
 
 void fp_sub(struct fp *r, const struct fp *a, const struct fp *b)
 {
-    if (fp_gte(a->d, b->d)) {
-        fp_sub_noborrow(r->d, a->d, b->d);
-    } else {
-        uint64_t tmp[6];
-        unsigned __int128 carry = 0;
-        for (int i = 0; i < 6; i++) {
-            unsigned __int128 sum = (unsigned __int128)a->d[i] + FP_Q[i] + carry;
-            tmp[i] = (uint64_t)sum;
-            carry = sum >> 64;
-        }
-        fp_sub_noborrow(r->d, tmp, b->d);
-    }
+    fpi_sub(r->d, a->d, b->d, FP_Q);
 }
 
 void fp_neg(struct fp *r, const struct fp *a)
 {
-    if (fp_is_zero(a))
-        fp_zero(r);
-    else
-        fp_sub_noborrow(r->d, FP_Q, a->d);
+    fpi_neg(r->d, a->d, FP_Q);
 }
 
 void fp_mul(struct fp *r, const struct fp *a, const struct fp *b)
