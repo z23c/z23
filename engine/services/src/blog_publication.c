@@ -21,6 +21,7 @@
 
 static const uint8_t k_blog_payload_magic[4] = { 'Z', 'B', 'L', 'G' };
 static const uint8_t k_blog_anchor_lokad[4] = { 'Z', 'B', 'L', 'G' };
+static const uint8_t k_blog_anchor_version[1] = { 1 };
 
 enum blog_publication_error {
     BLOG_ERR_ARGS = -1,
@@ -198,13 +199,9 @@ static bool author_address(const uint8_t key_id_bytes[20],
                               out, out_size);
 }
 
-struct zcl_result blog_publication_validate_request(
-    struct node_db *ndb, const struct blog_publish_request *request)
+static struct zcl_result blog_request_text_valid(
+    const struct blog_publish_request *request)
 {
-    if (!ndb || !ndb->open || !request || !request->blog_name ||
-        !request->slug || !request->title || !request->body)
-        return ZCL_ERR(BLOG_ERR_ARGS,
-                       "Blog publish requires an open db and all fields");
     if (!znam_validate_name(request->blog_name))
         return ZCL_ERR(BLOG_ERR_VALIDATION,
                        "Blog name is not a canonical ZNAM identity");
@@ -217,6 +214,12 @@ struct zcl_result blog_publication_validate_request(
     if (!db_blog_body_valid(request->body))
         return ZCL_ERR(BLOG_ERR_VALIDATION,
                        "Blog body is empty, oversized, or unsafe UTF-8");
+    return ZCL_OK;
+}
+
+static struct zcl_result blog_request_sequence_valid(
+    struct node_db *ndb, const struct blog_publish_request *request)
+{
     if (!db_blog_sequence_shape_valid(request->sequence,
                                       request->previous_event_id))
         return ZCL_ERR(BLOG_ERR_VALIDATION,
@@ -230,18 +233,98 @@ struct zcl_result blog_publication_validate_request(
             return ZCL_ERR(BLOG_ERR_VALIDATION,
                            "Blog predecessor is missing or not sequence-1");
     }
+    return ZCL_OK;
+}
+
+static struct zcl_result blog_request_timestamp_valid(
+    const struct blog_publish_request *request)
+{
     time_t now = platform_time_wall_time_t();
     if (request->created_at == 0 || request->created_at > INT64_MAX ||
         now < 0 || request->created_at > (uint64_t)now +
                                         BLOG_MAX_FUTURE_SKEW_SECONDS)
         return ZCL_ERR(BLOG_ERR_VALIDATION,
                        "Blog timestamp is invalid or too far in the future");
+    return ZCL_OK;
+}
+
+static struct zcl_result blog_request_owner_valid(
+    struct node_db *ndb, const struct blog_publish_request *request)
+{
     struct znam_entry name;
     if (!db_znam_find(ndb, request->blog_name, &name))
         return ZCL_ERR(BLOG_ERR_NAME, "Blog ZNAM identity is not registered");
     if (!zcl_validate_zcl_address(name.owner_address))
         return ZCL_ERR(BLOG_ERR_NAME,
                        "Blog ZNAM owner is not a valid ZClassic address");
+    return ZCL_OK;
+}
+
+struct zcl_result blog_publication_validate_request(
+    struct node_db *ndb, const struct blog_publish_request *request)
+{
+    if (!ndb || !ndb->open || !request || !request->blog_name ||
+        !request->slug || !request->title || !request->body)
+        return ZCL_ERR(BLOG_ERR_ARGS,
+                       "Blog publish requires an open db and all fields");
+    struct zcl_result checked = blog_request_text_valid(request);
+    if (!checked.ok)
+        return checked;
+    checked = blog_request_sequence_valid(ndb, request);
+    if (!checked.ok)
+        return checked;
+    checked = blog_request_timestamp_valid(request);
+    if (!checked.ok)
+        return checked;
+    return blog_request_owner_valid(ndb, request);
+}
+
+static struct zcl_result blog_import_verify(
+    const struct zcl_app_signed_event_v1 *event,
+    struct zcl_app_event_scope_v1 *scope)
+{
+    struct zcl_result scope_result = blog_publication_scope(scope);
+    if (!scope_result.ok)
+        return scope_result;
+    char why[256];
+    if (event->kind != BLOG_EVENT_KIND_PUBLISH ||
+        !zcl_app_signed_event_v1_verify(event, scope, why, sizeof(why)))
+        return ZCL_ERR(BLOG_ERR_VERIFY, "Blog event verification failed: %s",
+                       event->kind == BLOG_EVENT_KIND_PUBLISH ? why
+                                                              : "wrong kind");
+    return ZCL_OK;
+}
+
+static struct zcl_result blog_import_store(
+    struct node_db *ndb, const struct zcl_app_signed_event_v1 *event,
+    const struct zcl_app_event_scope_v1 *scope,
+    const struct db_blog_post *post, struct db_blog_post *out)
+{
+    struct db_app_event app_event;
+    memset(&app_event, 0, sizeof(app_event));
+    app_event.event = *event;
+    app_event.received_at = post->stored_at;
+    /* One verified envelope store feeds Blog today and Social/Chat later.
+     * Keep the generic immutable event and the typed Blog projection atomic.
+     * This service must own the transaction: inferring ownership from a bare
+     * tx_open bit could accidentally join another thread or sync batch and
+     * report success for work that its real owner later rolls back. */
+    __attribute__((cleanup(db_txn_auto_rollback)))
+    struct db_txn *txn = db_txn_begin(ndb, "blog.import_event");
+    if (!txn)
+        return ZCL_ERR(BLOG_ERR_SAVE,
+                       "Blog import requires an exclusive transaction");
+    if (!db_app_event_save(ndb, &app_event, scope))
+        return ZCL_ERR(BLOG_ERR_SAVE,
+                       "Blog event failed shared AppEvent save");
+    if (!db_blog_post_save(ndb, post))
+        return ZCL_ERR(BLOG_ERR_SAVE, "Blog post failed ActiveRecord save");
+    if (!db_txn_commit(txn))
+        return ZCL_ERR(BLOG_ERR_SAVE,
+                       "Blog AppEvent transaction failed to commit");
+    if (!db_blog_post_find(ndb, post->event_id, out))
+        return ZCL_ERR(BLOG_ERR_SAVE,
+                       "Blog post conflicted with slug or author sequence");
     return ZCL_OK;
 }
 
@@ -253,15 +336,9 @@ struct zcl_result blog_publication_import_event(
         return ZCL_ERR(BLOG_ERR_ARGS, "blog import requires db, event, and output");
     memset(out, 0, sizeof(*out));
     struct zcl_app_event_scope_v1 scope;
-    struct zcl_result scope_result = blog_publication_scope(&scope);
-    if (!scope_result.ok)
-        return scope_result;
-    char why[256];
-    if (event->kind != BLOG_EVENT_KIND_PUBLISH ||
-        !zcl_app_signed_event_v1_verify(event, &scope, why, sizeof(why)))
-        return ZCL_ERR(BLOG_ERR_VERIFY, "Blog event verification failed: %s",
-                       event->kind == BLOG_EVENT_KIND_PUBLISH ? why
-                                                              : "wrong kind");
+    struct zcl_result verified = blog_import_verify(event, &scope);
+    if (!verified.ok)
+        return verified;
 
     struct db_blog_post post;
     memset(&post, 0, sizeof(post));
@@ -289,33 +366,7 @@ struct zcl_result blog_publication_import_event(
     memcpy(post.signature, event->signature, event->signature_len);
     post.signature_len = event->signature_len;
     post.stored_at = (int64_t)platform_time_wall_time_t();
-
-    /* One verified envelope store feeds Blog today and Social/Chat later.
-     * Keep the generic immutable event and the typed Blog projection atomic.
-     * This service must own the transaction: inferring ownership from a bare
-     * tx_open bit could accidentally join another thread or sync batch and
-     * report success for work that its real owner later rolls back. */
-    struct db_app_event app_event;
-    memset(&app_event, 0, sizeof(app_event));
-    app_event.event = *event;
-    app_event.received_at = post.stored_at;
-    __attribute__((cleanup(db_txn_auto_rollback)))
-    struct db_txn *txn = db_txn_begin(ndb, "blog.import_event");
-    if (!txn)
-        return ZCL_ERR(BLOG_ERR_SAVE,
-                       "Blog import requires an exclusive transaction");
-    if (!db_app_event_save(ndb, &app_event, &scope))
-        return ZCL_ERR(BLOG_ERR_SAVE,
-                       "Blog event failed shared AppEvent save");
-    if (!db_blog_post_save(ndb, &post))
-        return ZCL_ERR(BLOG_ERR_SAVE, "Blog post failed ActiveRecord save");
-    if (!db_txn_commit(txn))
-        return ZCL_ERR(BLOG_ERR_SAVE,
-                       "Blog AppEvent transaction failed to commit");
-    if (!db_blog_post_find(ndb, post.event_id, out))
-        return ZCL_ERR(BLOG_ERR_SAVE,
-                       "Blog post conflicted with slug or author sequence");
-    return ZCL_OK;
+    return blog_import_store(ndb, event, &scope, &post, out);
 }
 
 struct zcl_result blog_publication_create(
@@ -476,6 +527,49 @@ struct zcl_result blog_anchor_script_build(
     return ZCL_OK;
 }
 
+static bool blog_anchor_frame_valid(const uint8_t *script, size_t script_len)
+{
+    return script && script_len >= 1 && script_len <= MAX_OP_RETURN_RELAY &&
+        script[0] == 0x6a;
+}
+
+static bool blog_anchor_expect_push(const uint8_t **cursor, const uint8_t *end,
+                                    const uint8_t *want, size_t want_len)
+{
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    *cursor = read_push(*cursor, end, &data, &len);
+    return *cursor && len == want_len && memcmp(data, want, want_len) == 0;
+}
+
+static struct zcl_result blog_anchor_read_name(
+    const uint8_t **cursor, const uint8_t *end,
+    char blog_name[BLOG_NAME_MAX + 1])
+{
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    *cursor = read_push(*cursor, end, &data, &len);
+    if (!*cursor || len == 0 || len > BLOG_NAME_MAX || memchr(data, 0, len))
+        return ZCL_ERR(BLOG_ERR_CODEC, "Blog anchor ZNAM field is invalid");
+    memcpy(blog_name, data, len);
+    blog_name[len] = 0;
+    if (!znam_validate_name(blog_name))
+        return ZCL_ERR(BLOG_ERR_CODEC, "Blog anchor ZNAM name is noncanonical");
+    return ZCL_OK;
+}
+
+static bool blog_anchor_is_canonical(const char *blog_name,
+                                     const uint8_t event_id[32],
+                                     const uint8_t *script, size_t script_len)
+{
+    uint8_t canonical[BLOG_ANCHOR_SCRIPT_MAX];
+    size_t canonical_len = 0;
+    struct zcl_result rebuilt = blog_anchor_script_build(
+        blog_name, event_id, canonical, sizeof(canonical), &canonical_len);
+    return rebuilt.ok && canonical_len == script_len &&
+        memcmp(canonical, script, script_len) == 0;
+}
+
 struct zcl_result blog_anchor_script_parse(
     const uint8_t *script, size_t script_len,
     char blog_name[BLOG_NAME_MAX + 1], uint8_t event_id[32])
@@ -484,44 +578,70 @@ struct zcl_result blog_anchor_script_parse(
         return ZCL_ERR(BLOG_ERR_ARGS, "Blog anchor parse outputs are required");
     blog_name[0] = 0;
     memset(event_id, 0, 32);
-    if (!script || script_len < 1 || script_len > MAX_OP_RETURN_RELAY ||
-        script[0] != 0x6a)
+    if (!blog_anchor_frame_valid(script, script_len))
         return ZCL_ERR(BLOG_ERR_CODEC, "Blog anchor framing is invalid");
     const uint8_t *p = script + 1;
     const uint8_t *end = script + script_len;
     const uint8_t *data = NULL;
     size_t len = 0;
-    p = read_push(p, end, &data, &len);
-    if (!p || len != sizeof(k_blog_anchor_lokad) ||
-        memcmp(data, k_blog_anchor_lokad, len) != 0)
+    if (!blog_anchor_expect_push(&p, end, k_blog_anchor_lokad,
+                                 sizeof(k_blog_anchor_lokad)))
         return ZCL_ERR(BLOG_ERR_CODEC, "Blog anchor lokad ID is invalid");
-    p = read_push(p, end, &data, &len);
-    if (!p || len != 1 || data[0] != 1)
+    if (!blog_anchor_expect_push(&p, end, k_blog_anchor_version,
+                                 sizeof(k_blog_anchor_version)))
         return ZCL_ERR(BLOG_ERR_CODEC, "Blog anchor version is unsupported");
-    p = read_push(p, end, &data, &len);
-    if (!p || len == 0 || len > BLOG_NAME_MAX || memchr(data, 0, len))
-        return ZCL_ERR(BLOG_ERR_CODEC, "Blog anchor ZNAM field is invalid");
-    memcpy(blog_name, data, len);
-    blog_name[len] = 0;
-    if (!znam_validate_name(blog_name))
-        return ZCL_ERR(BLOG_ERR_CODEC, "Blog anchor ZNAM name is noncanonical");
+    struct zcl_result named = blog_anchor_read_name(&p, end, blog_name);
+    if (!named.ok)
+        return named;
     p = read_push(p, end, &data, &len);
     if (!p || len != 32 || p != end)
         return ZCL_ERR(BLOG_ERR_CODEC,
                        "Blog anchor event ID is missing or has trailing data");
     memcpy(event_id, data, 32);
-    uint8_t canonical[BLOG_ANCHOR_SCRIPT_MAX];
-    size_t canonical_len = 0;
-    struct zcl_result rebuilt = blog_anchor_script_build(
-        blog_name, event_id, canonical, sizeof(canonical), &canonical_len);
-    if (!rebuilt.ok ||
-        canonical_len != script_len ||
-        memcmp(canonical, script, script_len) != 0)
+    if (!blog_anchor_is_canonical(blog_name, event_id, script, script_len))
         return ZCL_ERR(BLOG_ERR_CODEC,
                        "Blog anchor uses a nonminimal encoding");
     return ZCL_OK;
 }
 
+
+static enum blog_publication_status blog_observe_status(
+    const struct db_blog_chain_anchor *anchor)
+{
+    if (!anchor->has_transaction || !anchor->has_canonical_block ||
+        anchor->op_return_height != anchor->transaction_block_height)
+        return BLOG_PUBLICATION_UNRESOLVED;
+    return memcmp(anchor->transaction_block_hash, anchor->canonical_block_hash,
+                  32) == 0
+        ? BLOG_PUBLICATION_CONFIRMED : BLOG_PUBLICATION_ORPHANED;
+}
+
+static bool blog_observe_existing_receipt(
+    struct node_db *ndb, const struct db_blog_post *post,
+    struct db_blog_publication_receipt *existing)
+{
+    return db_blog_publication_receipt_find_by_event(
+               ndb, post->event_id, existing) &&
+        strcmp(existing->blog_name, post->blog_name) == 0 &&
+        memcmp(existing->author_key_id, post->author_key_id, 20) == 0;
+}
+
+static void blog_observe_fill_receipt(
+    struct db_blog_publication_receipt *receipt,
+    const struct db_blog_post *post, const struct db_blog_chain_anchor *anchor,
+    const uint8_t znam_reg_txid[32])
+{
+    memcpy(receipt->txid, anchor->txid, 32);
+    memcpy(receipt->event_id, post->event_id, 32);
+    (void)snprintf(receipt->blog_name, sizeof(receipt->blog_name),
+                   "%s", post->blog_name);
+    memcpy(receipt->author_key_id, post->author_key_id, 20);
+    memcpy(receipt->znam_reg_txid, znam_reg_txid, 32);
+    receipt->block_height = anchor->has_transaction
+        ? anchor->transaction_block_height : anchor->op_return_height;
+    if (anchor->has_transaction)
+        memcpy(receipt->block_hash, anchor->transaction_block_hash, 32);
+}
 
 struct zcl_result blog_publication_observe_projection(
     struct node_db *ndb, const uint8_t event_id[32],
@@ -550,10 +670,7 @@ struct zcl_result blog_publication_observe_projection(
         return ZCL_OK; /* lossy projection: unresolved, never global absence */
 
     struct db_blog_publication_receipt existing;
-    bool has_existing = db_blog_publication_receipt_find_by_event(
-        ndb, post.event_id, &existing) &&
-        strcmp(existing.blog_name, post.blog_name) == 0 &&
-        memcmp(existing.author_key_id, post.author_key_id, 20) == 0;
+    bool has_existing = blog_observe_existing_receipt(ndb, &post, &existing);
     struct znam_entry name;
     bool current_name_matches = db_znam_find(ndb, post.blog_name, &name) &&
         strcmp(name.owner_address, post.author_address) == 0;
@@ -562,24 +679,10 @@ struct zcl_result blog_publication_observe_projection(
                        "ZNAM owner epoch is unavailable for this anchor");
 
     out->observed = true;
-    memcpy(out->receipt.txid, anchor.txid, 32);
-    memcpy(out->receipt.event_id, post.event_id, 32);
-    (void)snprintf(out->receipt.blog_name, sizeof(out->receipt.blog_name),
-                   "%s", post.blog_name);
-    memcpy(out->receipt.author_key_id, post.author_key_id, 20);
-    memcpy(out->receipt.znam_reg_txid,
-           current_name_matches ? name.reg_txid : existing.znam_reg_txid, 32);
-    out->receipt.block_height = anchor.has_transaction
-        ? anchor.transaction_block_height : anchor.op_return_height;
-    if (anchor.has_transaction)
-        memcpy(out->receipt.block_hash, anchor.transaction_block_hash, 32);
-    out->receipt.status = BLOG_PUBLICATION_UNRESOLVED;
-    if (anchor.has_transaction && anchor.has_canonical_block &&
-        anchor.op_return_height == anchor.transaction_block_height) {
-        out->receipt.status = memcmp(anchor.transaction_block_hash,
-                                     anchor.canonical_block_hash, 32) == 0
-            ? BLOG_PUBLICATION_CONFIRMED : BLOG_PUBLICATION_ORPHANED;
-    }
+    blog_observe_fill_receipt(&out->receipt, &post, &anchor,
+                              current_name_matches ? name.reg_txid
+                                                   : existing.znam_reg_txid);
+    out->receipt.status = blog_observe_status(&anchor);
     out->receipt.observed_at = (int64_t)platform_time_wall_time_t();
     if (!db_blog_publication_receipt_save(ndb, &out->receipt))
         return ZCL_ERR(BLOG_ERR_CHAIN,
