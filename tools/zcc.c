@@ -87,9 +87,11 @@
  * for what triggers a trim, why it is not a directory walk per compile, and
  * why an eviction interrupted at any point cannot produce a torn hit.
  *
- * A link step naming a system library (-lm, -lpthread) that this cache cannot
- * resolve under a -L directory bypasses reuse. The hermetic goals
- * (ci-reproducible, repro-verify) already force
+ * A link step naming a system library (-lm, -lpthread) is keyed by resolving
+ * it the way the linker would (see "named libraries without -L"); one this
+ * cache cannot resolve, or whose link options alter the search, bypasses
+ * reuse.
+ * The hermetic goals (ci-reproducible, repro-verify) already force
  * ZCL_USE_CCACHE=0, so no reproducibility claim is ever served from here.
  */
 
@@ -646,11 +648,71 @@ static bool plan_parse_input(struct plan *pl, const char *a, int i)
     return true;
 }
 
+#if defined(__linux__)
+/* Options that change WHICH file `-lX` names, or that this cache does not
+ * model, so a link carrying one keeps bypassing. The -Wl, allowlist holds
+ * only options that leave library selection alone; a second ",-" in the same
+ * argument could smuggle -L or -Bstatic past the prefix, so it is refused. */
+static bool linker_option_keeps_search(const char *a)
+{
+    static const char *const safe[] = {
+        "-Wl,-z,", "-Wl,--gc-sections", "-Wl,--build-id", "-Wl,-rpath,",
+        "-Wl,--as-needed", "-Wl,--no-as-needed", "-Wl,-Bsymbolic",
+        "-Wl,--hash-style=", "-Wl,-O1", "-Wl,--export-dynamic",
+        "-Wl,-export-dynamic", "-Wl,--unresolved-symbols=",
+    };
+    for (size_t i = 0; i < sizeof safe / sizeof safe[0]; i++)
+        if (strncmp(a, safe[i], strlen(safe[i])) == 0)
+            return strstr(a + 4, ",-") == NULL;
+    return false;
+}
+
+static bool arg_blocks_library_search(const char *a)
+{
+    static const char *const exact[] = {
+        "-static", "-static-pie", "-nostdlib", "-nodefaultlibs",
+        "-Xlinker", "-m32", "-mx32", "-target", "-arch",
+    };
+    static const char *const prefix[] = {
+        "--sysroot", "-isysroot", "-B", "-T", "-specs", "-fuse-ld",
+        "--target", "-l:", "-Wl,-static", "-Wl,-Bstatic", "-Wl,-Bdynamic",
+    };
+    for (size_t i = 0; i < sizeof exact / sizeof exact[0]; i++)
+        if (strcmp(a, exact[i]) == 0)
+            return true;
+    for (size_t i = 0; i < sizeof prefix / sizeof prefix[0]; i++)
+        if (strncmp(a, prefix[i], strlen(prefix[i])) == 0)
+            return true;
+    return strncmp(a, "-Wl,", 4) == 0 && !linker_option_keeps_search(a);
+}
+
+/* True when the linker's default library search is the only thing that can
+ * pick a `-lX` file, so hash_named_libs can replay it. */
+static bool named_lib_search_resolvable(const struct plan *pl)
+{
+    if (pl->rsp_n != 0)
+        return false;
+    for (int i = 1; i < pl->argc; i++)
+        if (arg_blocks_library_search(pl->argv[i]))
+            return false;
+    return true;
+}
+#else
+static bool named_lib_search_resolvable(const struct plan *pl)
+{
+    (void)pl;
+    return false;
+}
+#endif
+
 static void plan_named_library_bypass(struct plan *pl)
 {
-    /* hash_named_libs can resolve named libraries only under explicit -L
-     * directories. Parse all arguments first: a later -L still counts. */
-    if (pl->named_lib && pl->libdir_n == 0)
+    /* Libraries under an explicit -L resolve in hash_named_libs by directory.
+     * Without -L they resolve through the compiler's own search path, which
+     * hash_named_libs replays when no option can alter it. Parse all
+     * arguments first: a later -L still counts. */
+    if (pl->named_lib && pl->libdir_n == 0 &&
+        !named_lib_search_resolvable(pl))
         pl->bypass = "named library has no explicit search directory";
 }
 
@@ -1611,29 +1673,396 @@ static bool hash_toolchain(struct sha3_256_ctx *h, const struct plan *pl,
     return hash_environment(h, tmpdir_may_reach_object(pl));
 }
 
-/* Archives named by -l are real inputs; fold in the ones we can resolve. */
-static bool hash_named_libs(struct sha3_256_ctx *h, const struct plan *pl)
+#if defined(__linux__)
+/* ── named libraries without -L ──────────────────────────────────────────
+ * `-lm` with no -L is the shape of nearly every standalone tool link. The
+ * linker resolves it through the compiler's library search path, so that is
+ * replayed here: ask the compiler once (-print-search-dirs, "libraries:"),
+ * then take the first directory holding libX.so, else libX.a, as ld does.
+ * The resolved file's path and bytes enter the key exactly like an -L
+ * archive. A GNU ld script (libm.so is one on glibc) names the real files,
+ * so each absolute path it names is hashed too, depth-bounded. Anything the
+ * replay cannot prove (no directory line, an unparseable script, a relative
+ * script path, a missing file) fails the key, which bypasses: never a hit.
+ * Accepted limit: like the -L path, the implicit libc/crt files and a
+ * wrong-architecture shadow earlier in the search path are not modeled. */
+#define LIB_DIRS_MAX 16384u
+#define LIB_SCRIPT_MAX 65536u
+#define LIB_SCRIPT_DEPTH 4
+
+struct libsearch {
+    char dirs[LIB_DIRS_MAX];
+    bool loaded;
+};
+
+static bool libdirs_memo_key(const struct plan *pl, const char *cache_root,
+                             char *const query[], char key[HEXLEN + 1u])
 {
+    static const char *const env[] = {
+        "LIBRARY_PATH", "COMPILER_PATH", "GCC_EXEC_PREFIX", "SYSROOT",
+    };
+    char ccpath[PATH_MAX], digest[HEXLEN + 1u];
+    if (!resolve_cc(pl->argv[0], ccpath) ||
+        !apple_tool_digest_cached(ccpath, cache_root, "linux-libcc", digest))
+        return false;
+    struct sha3_256_ctx h;
+    sha3_256_init(&h);
+    hstr(&h, ZCC_MAGIC);
+    hstr(&h, "libdirs");
+    hstr(&h, ccpath);
+    hstr(&h, digest);
+    for (char *const *q = query; *q; q++)
+        hstr(&h, *q);
+    for (size_t i = 0; i < sizeof env / sizeof env[0]; i++) {
+        hstr(&h, env[i]);
+        hstr(&h, getenv(env[i]));
+    }
+    unsigned char d[SHA3_256_OUTPUT_SIZE];
+    sha3_256_finalize(&h, d);
+    hex_of(d, key);
+    return true;
+}
+
+/* The "libraries: =" line, without the label or trailing newline. */
+static bool libdirs_extract(const struct buf *b, char *line, size_t cap)
+{
+    static const char label[] = "libraries: =";
+    const size_t lab = sizeof label - 1u;
+    for (size_t i = 0; i + lab < b->len;) {
+        const unsigned char *eol = memchr(b->p + i, '\n', b->len - i);
+        size_t end = eol ? (size_t)(eol - b->p) : b->len;
+        if (end - i > lab && memcmp(b->p + i, label, lab) == 0) {
+            size_t n = end - i - lab;
+            if (n >= cap || memchr(b->p + i + lab, '\r', n))
+                return false;
+            memcpy(line, b->p + i + lab, n);
+            line[n] = '\0';
+            return true;
+        }
+        i = end + 1u;
+    }
+    return false;
+}
+
+static bool libdirs_probe(char *const query[], char *line, size_t cap)
+{
+    char scratch[PATH_MAX];
+    const char *temp = getenv("TMPDIR");
+    if (!temp || !*temp)
+        temp = "/tmp";
+    int written = snprintf(scratch, sizeof scratch, "%s/zcc-libs.XXXXXX", temp);
+    if (written < 0 || (size_t)written >= sizeof scratch)
+        return false;
+    int fd = mkstemp(scratch);
+    if (fd < 0)
+        return false;
+    struct buf b = { 0 };
+    bool ok = close(fd) == 0 && run_argv(query, scratch, NULL) == 0 &&
+              read_file(scratch, &b) && libdirs_extract(&b, line, cap);
+    buf_free(&b);
+    (void)unlink(scratch);
+    return ok && line[0] != '\0';
+}
+
+/* Memo file: key line, then the directory line. One slot, like the other
+ * private tool memos; a different compiler identity simply replaces it. */
+static bool libdirs_memo_read(const char *path, const char key[HEXLEN + 1u],
+                              char *line, size_t cap)
+{
+    struct buf b = { 0 };
+    bool ok = read_file(path, &b) && b.len > HEXLEN + 2u &&
+              memcmp(b.p, key, HEXLEN) == 0 && b.p[HEXLEN] == '\n' &&
+              b.p[b.len - 1u] == '\n' && b.len - HEXLEN - 2u < cap &&
+              !memchr(b.p + HEXLEN + 1u, '\0', b.len - HEXLEN - 1u);
+    if (ok) {
+        size_t n = b.len - HEXLEN - 2u;
+        memcpy(line, b.p + HEXLEN + 1u, n);
+        line[n] = '\0';
+    }
+    buf_free(&b);
+    return ok && line[0] != '\0';
+}
+
+static void libdirs_memo_write(const char *root, const char *path,
+                               const char key[HEXLEN + 1u], const char *line)
+{
+    struct buf b = { 0 };
+    char tmp[PATH_MAX];
+    int n = snprintf(tmp, sizeof tmp, "%s/tmp", root);
+    if (n > 0 && (size_t)n < sizeof tmp && buf_add(&b, key, HEXLEN) &&
+        buf_add(&b, "\n", 1u) && buf_add(&b, line, strlen(line)) &&
+        buf_add(&b, "\n", 1u))
+        (void)store_atomic(tmp, path, b.p, b.len, 0600);
+    buf_free(&b);
+}
+
+static bool libsearch_dirs(const struct plan *pl, const char *root,
+                           char *line, size_t cap)
+{
+    char **query = apple_tool_query_argv(pl, "-print-search-dirs");
+    if (!query)
+        return false;
+    char key[HEXLEN + 1u], memo[PATH_MAX];
+    bool ok = libdirs_memo_key(pl, root, query, key) &&
+              snprintf(memo, sizeof memo, "%s/linux-libdirs.memo", root) <
+                  (int)sizeof memo;
+    if (ok && libdirs_memo_read(memo, key, line, cap)) {
+        free(query);
+        return true;
+    }
+    ok = ok && libdirs_probe(query, line, cap);
+    if (ok)
+        libdirs_memo_write(root, memo, key, line);
+    free(query);
+    return ok;
+}
+
+static bool lib_candidate(const char *dir, size_t dlen, const char *name,
+                          const char *ext, char out[PATH_MAX])
+{
+    struct stat st;
+    int n = snprintf(out, PATH_MAX, "%.*s/lib%s%s", (int)dlen, dir, name, ext);
+    return n > 0 && n < PATH_MAX && stat(out, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+/* ld tries libX.so then libX.a in each directory, in search order. */
+static bool lib_resolve(const char *dirs, const char *name, char out[PATH_MAX])
+{
+    if (!name[0] || name[0] == ':' || strchr(name, '/'))
+        return false;
+    for (const char *d = dirs; *d;) {
+        const char *colon = strchr(d, ':');
+        size_t n = colon ? (size_t)(colon - d) : strlen(d);
+        if (n > 0 && d[0] != '/')
+            return false;
+        if (n > 0 && (lib_candidate(d, n, name, ".so", out) ||
+                      lib_candidate(d, n, name, ".a", out)))
+            return true;
+        d += n;
+        if (*d == ':')
+            d++;
+    }
+    return false;
+}
+
+enum script_tok { SCRIPT_END, SCRIPT_ERR, SCRIPT_WORD, SCRIPT_OPEN,
+                  SCRIPT_CLOSE };
+
+static bool script_skip_comment(const char **pp, const char *end)
+{
+    const char *p = *pp + 2;
+    while (p + 1 < end && !(p[0] == '*' && p[1] == '/'))
+        p++;
+    if (p + 1 >= end)
+        return false;
+    *pp = p + 2;
+    return true;
+}
+
+/* Skip whitespace and comments; false on an unterminated comment. */
+static bool script_skip_blank(const char **pp, const char *end)
+{
+    const char *p = *pp;
+    for (;;) {
+        while (p < end && isspace((unsigned char)*p))
+            p++;
+        if (end - p < 2 || p[0] != '/' || p[1] != '*')
+            break;
+        if (!script_skip_comment(&p, end))
+            return false;
+    }
+    *pp = p;
+    return true;
+}
+
+static enum script_tok script_token(const char **pp, const char *end,
+                                    char out[PATH_MAX])
+{
+    if (!script_skip_blank(pp, end))
+        return SCRIPT_ERR;
+    const char *p = *pp;
+    if (p >= end)
+        return SCRIPT_END;
+    if (*p == '(' || *p == ')') {
+        (*pp)++;
+        return *p == '(' ? SCRIPT_OPEN : SCRIPT_CLOSE;
+    }
+    size_t n = 0;
+    while (p + n < end && !isspace((unsigned char)p[n]) &&
+           p[n] != '(' && p[n] != ')')
+        n++;
+    if (n >= PATH_MAX)
+        return SCRIPT_ERR;
+    memcpy(out, p, n);
+    out[n] = '\0';
+    *pp = p + n;
+    return SCRIPT_WORD;
+}
+
+static bool hash_lib_file(struct sha3_256_ctx *h, const char *path, int depth);
+
+struct script_state {
+    int paren;
+    int skip_at;    /* paren depth of a directive group being skipped, or 0 */
+    bool expect;    /* the next token must open a skipped group */
+    int files;
+};
+
+static bool script_word(struct sha3_256_ctx *h, struct script_state *st,
+                        const char *tok, int depth)
+{
+    if (st->skip_at > 0)
+        return true;
+    if (st->expect)
+        return false;
+    if (!strcmp(tok, "OUTPUT_FORMAT") || !strcmp(tok, "OUTPUT_ARCH") ||
+        !strcmp(tok, "TARGET")) {
+        st->expect = true;
+        return true;
+    }
+    if (!strcmp(tok, "GROUP") || !strcmp(tok, "INPUT") ||
+        !strcmp(tok, "AS_NEEDED"))
+        return true;
+    if (tok[0] != '/')
+        return false;
+    st->files++;
+    return hash_lib_file(h, tok, depth + 1);
+}
+
+static bool script_paren(struct script_state *st, enum script_tok t)
+{
+    if (t == SCRIPT_OPEN) {
+        st->paren++;
+        if (st->expect) {
+            st->skip_at = st->paren;
+            st->expect = false;
+        }
+        return true;
+    }
+    if (st->paren == 0)
+        return false;
+    if (st->skip_at == st->paren)
+        st->skip_at = 0;
+    st->paren--;
+    return true;
+}
+
+/* Hash every absolute path a GNU ld script names. */
+static bool script_walk(struct sha3_256_ctx *h, const char *p,
+                        const char *end, int depth)
+{
+    struct script_state st = { 0 };
+    char tok[PATH_MAX];
+    enum script_tok t;
+    while ((t = script_token(&p, end, tok)) != SCRIPT_END) {
+        bool ok = t == SCRIPT_WORD ? script_word(h, &st, tok, depth)
+                : t == SCRIPT_ERR ? false
+                                  : script_paren(&st, t);
+        if (!ok)
+            return false;
+    }
+    return st.paren == 0 && !st.expect && st.files > 0;
+}
+
+/* ELF objects and ar archives are hashed as bytes; any other file must be a
+ * linker script this parser fully understands. */
+static bool lib_is_binary(const char *path, bool *binary)
+{
+    unsigned char m[8];
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    ssize_t n;
+    while ((n = read(fd, m, sizeof m)) < 0 && errno == EINTR) {}
+    bool closed = close(fd) == 0;
+    if (n < 0 || !closed)
+        return false;
+    *binary = (n >= 4 && memcmp(m, "\177ELF", 4) == 0) ||
+              (n >= 8 && memcmp(m, "!<arch>\n", 8) == 0);
+    return true;
+}
+
+static bool hash_lib_file(struct sha3_256_ctx *h, const char *path, int depth)
+{
+    char digest[HEXLEN + 1u];
+    bool binary = false;
+    if (depth > LIB_SCRIPT_DEPTH || !lib_is_binary(path, &binary) ||
+        !file_hex(path, digest))
+        return false;
+    hstr(h, path);
+    hstr(h, digest);
+    if (binary)
+        return true;
+    struct buf b = { 0 };
+    bool ok = read_file(path, &b) && b.len > 0 && b.len <= LIB_SCRIPT_MAX &&
+              script_walk(h, (const char *)b.p, (const char *)b.p + b.len,
+                          depth);
+    buf_free(&b);
+    return ok;
+}
+
+static bool hash_lib_by_search(struct sha3_256_ctx *h, const struct plan *pl,
+                               const char *cache_root,
+                               struct libsearch *ls, const char *name)
+{
+    char path[PATH_MAX];
+    if (!ls->loaded) {
+        if (!named_lib_search_resolvable(pl) ||
+            !libsearch_dirs(pl, cache_root, ls->dirs, sizeof ls->dirs))
+            return false;
+        ls->loaded = true;
+    }
+    return lib_resolve(ls->dirs, name, path) && hash_lib_file(h, path, 0);
+}
+#else
+struct libsearch {
+    bool loaded;
+};
+
+static bool hash_lib_by_search(struct sha3_256_ctx *h, const struct plan *pl,
+                               const char *cache_root,
+                               struct libsearch *ls, const char *name)
+{
+    (void)h; (void)pl; (void)cache_root; (void)ls; (void)name;
+    return false;
+}
+#endif
+
+/* An -L archive for -lX: 1 hashed, 0 not under any -L directory, -1 error. */
+static int hash_lib_under_libdirs(struct sha3_256_ctx *h,
+                                  const struct plan *pl, const char *name)
+{
+    for (int d = 0; d < pl->libdir_n; d++) {
+        char cand[PATH_MAX];
+        snprintf(cand, sizeof cand, "%s/lib%s.a", pl->libdir[d], name);
+        struct stat st;
+        if (stat(cand, &st) != 0)
+            continue;
+        hstr(h, cand);
+        char digest[HEXLEN + 1u];
+        if (!file_hex(cand, digest))
+            return -1;
+        hstr(h, digest);
+        return 1;
+    }
+    return 0;
+}
+
+/* Archives named by -l are real inputs; fold in the ones we can resolve. */
+static bool hash_named_libs(struct sha3_256_ctx *h, const struct plan *pl,
+                            const char *cache_root)
+{
+    struct libsearch ls;
+    ls.loaded = false;
     for (int i = 1; i < pl->argc; i++) {
         const char *a = pl->argv[i];
         if (strncmp(a, "-l", 2) != 0 || !a[2])
             continue;
-        bool found = false;
-        for (int d = 0; d < pl->libdir_n; d++) {
-            char cand[PATH_MAX];
-            snprintf(cand, sizeof cand, "%s/lib%s.a", pl->libdir[d], a + 2);
-            struct stat st;
-            if (stat(cand, &st) != 0)
-                continue;
-            hstr(h, cand);
-            char digest[HEXLEN + 1u];
-            if (!file_hex(cand, digest))
-                return false;
-            hstr(h, digest);
-            found = true;
-            break;
-        }
-        if (!found)
+        int under = hash_lib_under_libdirs(h, pl, a + 2);
+        if (under < 0)
+            return false;
+        if (under == 0 && (pl->libdir_n != 0 ||
+                           !hash_lib_by_search(h, pl, cache_root, &ls, a + 2)))
             return false;
     }
     return true;
@@ -1676,7 +2105,7 @@ static bool probe_key(const struct plan *pl, const char *cache_root,
         hu64(&h, (uint64_t)st.st_mtim.tv_nsec);
         hu64(&h, (uint64_t)st.st_ino);
     }
-    if (!hash_named_libs(&h, pl))
+    if (!hash_named_libs(&h, pl, cache_root))
         return false;
     unsigned char d[SHA3_256_OUTPUT_SIZE];
     sha3_256_finalize(&h, d);
@@ -1934,7 +2363,7 @@ static bool content_key(const struct plan *pl, const char *tmpdir,
         hfield(&h, b.p, b.len);
         buf_free(&b);
     }
-    if (!hash_named_libs(&h, pl))
+    if (!hash_named_libs(&h, pl, cache_root))
         return false;
     unsigned char dg[SHA3_256_OUTPUT_SIZE];
     sha3_256_finalize(&h, dg);

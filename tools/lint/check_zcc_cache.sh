@@ -700,40 +700,40 @@ HDR
 [ "$("$WORK/search")" = 2 ] ||
     fail "new earlier header did not change executed behavior"
 
-# A named library without explicit search directories cannot enter this
-# cache. Reject that shape before compiler queries or preprocessing, while
-# preserving the original compiler's output and exit status.
-cat > "$WORK/named.c" <<'SRC'
-#include <math.h>
-#include <stdio.h>
-int main(void)
-{
-    volatile double value = 81.0;
-    printf("%.0f\n", sqrt(value));
-    return 7;
+# Named libraries without -L are keyed by replaying the compiler search (libm.so is a ld script).
+printf '#include <math.h>\n#include <stdio.h>\nint main(void){volatile double v=81.0;printf("%%.0f\\n",sqrt(v));return 7;}\n' > "$WORK/named.c"
+NLF="$WORK/nlfake"; mkdir -p "$NLF" "$WORK/nl.a" "$WORK/nl.b"; cp "$WORK/named.c" "$WORK/nl.a/"; cp "$WORK/named.c" "$WORK/nl.b/"
+nl_cc() { # nl_cc DIR CC SRC LIB OUT [flags...]: PWD follows the directory.
+    local d="$1" c="$2" s="$3" l="$4" o="$5"; shift 5
+    (cd "$d" && PWD="$d" ZCC_DIR="${NL_DIR:-$ZCC_DIR}" "$ZCC" $c -std=c23 -O1 -ffile-prefix-map="$d=/zcl" "$s" "$l" -o "$o" "$@") 2>/dev/null
 }
-SRC
-"$ZCC" cc -std=c23 -O1 "$WORK/named.c" -lm -o "$WORK/named" \
-    2>"$WORK/named.err" || fail "named-library bypass compile failed"
-[ "$(last_disposition)" = BYPASS ] || fail "named library without -L was not bypassed"
-named_status=0
-"$WORK/named" >"$WORK/named.out" || named_status=$?
-[ "$named_status" = 7 ] || fail "named-library program exit status changed"
-[ "$(cat "$WORK/named.out")" = 9 ] || fail "named-library program output changed"
-cat > "$WORK/named-error.c" <<'SRC'
-#error ZCC_NAMED_LIBRARY_DIAGNOSTIC
-SRC
-named_direct_status=0
-cc -std=c23 "$WORK/named-error.c" -lm -o "$WORK/named-error" \
-    >"$WORK/named-direct.out" 2>"$WORK/named-direct.err" || named_direct_status=$?
-named_cached_status=0
-"$ZCC" cc -std=c23 "$WORK/named-error.c" -lm -o "$WORK/named-error" \
-    >"$WORK/named-cached.out" 2>"$WORK/named-cached.err" || named_cached_status=$?
-[ "$named_direct_status" != 0 ] || fail "named-library error fixture unexpectedly compiled"
-[ "$named_cached_status" = "$named_direct_status" ] || fail "named-library compiler status changed"
-cmp -s "$WORK/named-direct.out" "$WORK/named-cached.out" || fail "named-library compiler stdout changed"
-cmp -s "$WORK/named-direct.err" "$WORK/named-cached.err" || fail "named-library compiler diagnostics changed"
-[ "$(last_disposition)" = BYPASS ] || fail "named-library error was not bypassed"
+nl_is() { [ "$(last_disposition)" = "$1" ] || fail "named library: $2 (wanted $1)"; }
+nl_cc "$WORK/nl.a" cc named.c -lm "$WORK/named.a" || fail "named library: compile failed"; nl_is MISS "-lm without -L was not keyed"
+[ "$("$WORK/named.a" || echo "rc=$?")" = "$(printf '9\nrc=7')" ] || fail "named library: program behavior changed"
+nl_cc "$WORK/nl.b" cc named.c -lm "$WORK/named.b" || fail "named library: second compile failed"; nl_is HIT "a second worktree directory did not hit"
+cmp -s "$WORK/named.a" "$WORK/named.b" || fail "named library: the hit is not byte-identical"
+nl_cc "$WORK/nl.a" cc named.c -lm "$WORK/n.lto.a" -flto=auto; nl_cc "$WORK/nl.b" cc named.c -lm "$WORK/n.lto.b" -flto=auto; nl_is MISS "an -flto link crossed directories"
+printf '#error ZCC_NAMED_LIBRARY_DIAGNOSTIC\n' > "$WORK/named-error.c"
+cc -std=c23 "$WORK/named-error.c" -lm -o "$WORK/named-error" >"$WORK/named-direct.out" 2>&1 && fail "named library: error fixture compiled"
+ZCC_DIR="$WORK/cache-unkey" "$ZCC" cc -std=c23 "$WORK/named-error.c" -lm -o "$WORK/named-error" >"$WORK/named-cached.out" 2>&1 && fail "named library: error status lost"
+cmp -s "$WORK/named-direct.out" "$WORK/named-cached.out" || fail "named library: compiler diagnostics changed"
+nl_is UNKEY "a compile error was not left to the compiler"
+# A fake compiler with a private search path: changed library bytes MISS, a bad script is not served.
+cat > "$WORK/nlcc" <<WRAPPER
+#!/usr/bin/env bash
+case " \$* " in *" -print-search-dirs "*) printf 'programs: =/x/\nlibraries: =$NLF\n'; exit 0 ;; esac
+exec cc "\$@" -L"$NLF"
+WRAPPER
+chmod +x "$WORK/nlcc"; printf 'int main(void){return 0;}\n' > "$WORK/nl.a/fake.c"
+nl_fake() { printf 'int zv(void){return %s;}\n' "$1" > "$WORK/nlf.c"; cc -c "$WORK/nlf.c" -o "$WORK/nlf.o" && rm -f "$NLF/libzv.a" && ar rcs "$NLF/libzv.a" "$WORK/nlf.o"; }
+nl_fb() { nl_cc "$WORK/nl.a" "$WORK/nlcc" fake.c "$1" "$WORK/fake.out"; }
+nl_fake 5 && nl_fb -lzv && nl_is MISS "fake library first build"
+nl_fb -lzv; nl_is HIT "unchanged fake library"
+nl_fake 6 && nl_fb -lzv; nl_is MISS "changed library bytes were served"
+printf '/* GNU ld script */\nGROUP ( %s/libzv.a )\n' "$NLF" > "$NLF/libzs.so"; nl_fb -lzs; nl_fb -lzs; nl_is HIT "unchanged linker script"
+nl_fake 7 && nl_fb -lzs; nl_is MISS "a changed script target was served"
+printf '/* GNU ld script */\nGROUP ( %s/missing.a )\n' "$NLF" > "$NLF/libzg.so"; NL_DIR="$WORK/cache-unkey" nl_fb -lzg || true
+nl_is UNKEY "a script naming a missing file was keyed"
 
 # A -L appearing after -l, separated or joined, still permits archive reuse.
 cat > "$WORK/named-lib.c" <<'SRC'
