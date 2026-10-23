@@ -183,7 +183,7 @@ x11_runtime_linkable() (
     # wrong architecture, missing compiler or generic link error is unproven.
     while IFS= read -r line; do
         case "$line" in
-            *'ld: cannot find -l:libX11.so.6: No such file or directory' | \
+            *'ld: cannot find -l:libX11.so.6: No such file or directory' | *'ld.bfd: cannot find -l:libX11.so.6: No such file or directory' | \
             *'ld.lld: error: unable to find library -l:libX11.so.6')
                 missing=$((missing + 1)) ;;
             'collect2: error: ld returned 1 exit status' | \
