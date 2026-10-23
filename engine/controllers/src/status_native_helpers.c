@@ -304,6 +304,60 @@ bool status_peer_array_is_valid(const struct json_value *peers)
     return true;
 }
 
+/* Index of `value` in `names[0..count)`, or `count` when no name matches. */
+static size_t status_string_index(const char *const *names, size_t count,
+                                  const char *value)
+{
+    size_t i = 0;
+    for (; i < count; i++) {
+        if (strcmp(value, names[i]) == 0)
+            break;
+    }
+    return i;
+}
+
+/* True for peer sync states that count as ready in the survey. */
+static bool status_peer_state_is_ready(const char *state)
+{
+    static const char *const ready_states[] = {
+        "handshake_complete", "active", "syncing_headers",
+        "syncing_blocks", "snapshot_serving", "snapshot_receiving",
+    };
+    return status_string_index(ready_states, 6, state) < 6;
+}
+
+/* Fold one object peer into the survey. */
+static void status_peer_survey_add(struct peer_survey *s,
+                                   const struct json_value *peer)
+{
+    const struct json_value *inbound = json_get(peer, "inbound");
+    if (inbound && inbound->type == JSON_BOOL) {
+        if (inbound->val.b)
+            s->inbound++;
+        else
+            s->outbound++;
+    } else {
+        s->direction_known = false;
+    }
+    if (status_peer_is_zcl23(peer))
+        s->zcl23++;
+    else if (status_peer_is_magicbean(peer))
+        s->magicbean++;
+    const struct json_value *state_value = json_get(peer, "state");
+    if (state_value && state_value->type == JSON_STR) {
+        if (status_peer_state_is_ready(json_get_str(state_value)))
+            s->ready++;
+    } else {
+        s->ready_known = false;
+    }
+    int64_t h = 0;
+    if (status_read_height(peer, "startingheight", &h)) {
+        if (!s->max_height_known || h > s->max_height)
+            s->max_height = (int)h;
+        s->max_height_known = true;
+    }
+}
+
 void status_peer_survey(const struct json_value *peers,
                                struct peer_survey *out)
 {
@@ -318,38 +372,7 @@ void status_peer_survey(const struct json_value *peers,
             const struct json_value *peer = json_at(peers, i);
             if (!peer || peer->type != JSON_OBJ)
                 continue;
-            const struct json_value *inbound = json_get(peer, "inbound");
-            if (inbound && inbound->type == JSON_BOOL) {
-                if (inbound->val.b)
-                    s.inbound++;
-                else
-                    s.outbound++;
-            } else {
-                s.direction_known = false;
-            }
-            if (status_peer_is_zcl23(peer))
-                s.zcl23++;
-            else if (status_peer_is_magicbean(peer))
-                s.magicbean++;
-            const struct json_value *state_value = json_get(peer, "state");
-            if (state_value && state_value->type == JSON_STR) {
-                const char *state = json_get_str(state_value);
-                if (strcmp(state, "handshake_complete") == 0 ||
-                    strcmp(state, "active") == 0 ||
-                    strcmp(state, "syncing_headers") == 0 ||
-                    strcmp(state, "syncing_blocks") == 0 ||
-                    strcmp(state, "snapshot_serving") == 0 ||
-                    strcmp(state, "snapshot_receiving") == 0)
-                    s.ready++;
-            } else {
-                s.ready_known = false;
-            }
-            int64_t h = 0;
-            if (status_read_height(peer, "startingheight", &h)) {
-                if (!s.max_height_known || h > s.max_height)
-                    s.max_height = (int)h;
-                s.max_height_known = true;
-            }
+            status_peer_survey_add(&s, peer);
         }
     }
 
@@ -374,37 +397,49 @@ static int status_blocker_causal_priority(const struct json_value *candidate)
         blocker_class, json_get_str(json_get(candidate, "id")));
 }
 
+/* Compare the scalar payload of two values of the same type. Arrays and
+ * objects have no payload of their own; their children are compared by the
+ * caller. */
+static bool status_json_scalar_equal(const struct json_value *a,
+                                     const struct json_value *b)
+{
+    switch (a->type) {
+    case JSON_NULL:
+        break;
+    case JSON_BOOL:
+        return a->val.b == b->val.b;
+    case JSON_INT:
+        return a->val.i == b->val.i;
+    case JSON_REAL:
+        return a->val.d == b->val.d;
+    case JSON_STR:
+        return a->val.s && b->val.s && strcmp(a->val.s, b->val.s) == 0;
+    case JSON_ARR:
+    case JSON_OBJ:
+        break;
+    }
+    return true;
+}
+
+/* Two member keys match when both are absent or both name the same key. */
+static bool status_json_key_equal(const char *a, const char *b)
+{
+    if ((a == NULL) != (b == NULL))
+        return false;
+    return !a || strcmp(a, b) == 0;
+}
+
 bool status_json_equal(const struct json_value *a,
                               const struct json_value *b)
 {
     if (!a || !b || a->type != b->type ||
         a->num_children != b->num_children)
         return false;
-    switch (a->type) {
-    case JSON_NULL:
-        break;
-    case JSON_BOOL:
-        if (a->val.b != b->val.b) return false;
-        break;
-    case JSON_INT:
-        if (a->val.i != b->val.i) return false;
-        break;
-    case JSON_REAL:
-        if (a->val.d != b->val.d) return false;
-        break;
-    case JSON_STR:
-        if (!a->val.s || !b->val.s || strcmp(a->val.s, b->val.s) != 0)
-            return false;
-        break;
-    case JSON_ARR:
-    case JSON_OBJ:
-        break;
-    }
+    if (!status_json_scalar_equal(a, b))
+        return false; /* raw-return-ok:pure-equality-predicate */
     for (size_t i = 0; i < a->num_children; i++) {
-        if ((a->keys[i] == NULL) != (b->keys[i] == NULL))
-            return false;
-        if (a->keys[i] && strcmp(a->keys[i], b->keys[i]) != 0)
-            return false;
+        if (!status_json_key_equal(a->keys[i], b->keys[i]))
+            return false; /* raw-return-ok:pure-equality-predicate */
         if (!status_json_equal(&a->children[i], &b->children[i]))
             return false; /* raw-return-ok:recursive-equality-predicate */
     }
@@ -456,6 +491,39 @@ const struct json_value *status_dominant_blocker(
     return dominant;
 }
 
+/* The active and escaped totals agree with the entry count and are sane. */
+static bool status_blocker_totals_ok(const struct json_value *state,
+                                     const struct json_value *entries)
+{
+    const struct json_value *active = json_get(state, "active_count");
+    const struct json_value *escaped =
+        json_get(state, "escape_dispatched_total");
+    return active && active->type == JSON_INT &&
+           active->val.i == (int64_t)json_size(entries) &&
+           escaped && escaped->type == JSON_INT && escaped->val.i >= 0;
+}
+
+/* Tally each entry into its blocker class; false on an unknown class. */
+static bool status_blocker_class_tally(const struct json_value *entries,
+                                       int64_t derived[4])
+{
+    static const char *const class_names[] = {
+        "permanent", "transient", "dependency", "resource",
+    };
+    for (size_t i = 0; i < json_size(entries); i++) {
+        const struct json_value *entry = json_at(entries, i);
+        const char *class_name =
+            json_get_str(json_get(entry, "class"));
+        if (!entry || entry->type != JSON_OBJ || !class_name)
+            return false;
+        size_t c = status_string_index(class_names, 4, class_name);
+        if (c == 4)
+            return false;
+        derived[c]++;
+    }
+    return true;
+}
+
 bool status_blocker_counts_match(const struct json_value *state,
                                         const struct json_value *entries)
 {
@@ -463,36 +531,12 @@ bool status_blocker_counts_match(const struct json_value *state,
         "permanent_count", "transient_count",
         "dependency_count", "resource_count",
     };
-    static const char *const class_names[] = {
-        "permanent", "transient", "dependency", "resource",
-    };
     int64_t derived[4] = {0, 0, 0, 0};
 
-    const struct json_value *active = json_get(state, "active_count");
-    const struct json_value *escaped =
-        json_get(state, "escape_dispatched_total");
-    if (!active || active->type != JSON_INT ||
-        active->val.i != (int64_t)json_size(entries) ||
-        !escaped || escaped->type != JSON_INT || escaped->val.i < 0)
-        return false;
-
-    for (size_t i = 0; i < json_size(entries); i++) {
-        const struct json_value *entry = json_at(entries, i);
-        const char *class_name =
-            json_get_str(json_get(entry, "class"));
-        if (!entry || entry->type != JSON_OBJ || !class_name)
-            return false;
-        bool known = false;
-        for (size_t c = 0; c < 4; c++) {
-            if (strcmp(class_name, class_names[c]) == 0) {
-                derived[c]++;
-                known = true;
-                break;
-            }
-        }
-        if (!known)
-            return false;
-    }
+    if (!status_blocker_totals_ok(state, entries))
+        return false; /* raw-return-ok:pure-count-predicate */
+    if (!status_blocker_class_tally(entries, derived))
+        return false; /* raw-return-ok:pure-count-predicate */
 
     for (size_t c = 0; c < 4; c++) {
         const struct json_value *reported = json_get(state, count_keys[c]);
@@ -617,6 +661,129 @@ static const char *status_entries_defect(const struct json_value *entries)
     return NULL;
 }
 
+/* Make `error_out` an object carrying only a "message" string. */
+static void status_blocker_error_object(struct json_value *error_out,
+                                        const char *message)
+{
+    json_set_object(error_out);
+    json_push_kv_str(error_out, "message", message);
+}
+
+/* The dumpstate envelope names the blocker subsystem and a non-negative
+ * captured_at, and carries an object "state". */
+static bool status_blocker_envelope_ok(const struct json_value *response,
+                                       const struct json_value *state)
+{
+    const char *subsystem =
+        json_get_str(json_get(response, "subsystem"));
+    const struct json_value *captured_at = json_get(response, "captured_at");
+    return state && state->type == JSON_OBJ &&
+           subsystem && strcmp(subsystem, "blocker") == 0 &&
+           captured_at && captured_at->type == JSON_INT &&
+           captured_at->val.i >= 0;
+}
+
+/* Reject an RPC error, transport error stub or mixed error+state response.
+ * Returns false with `error_out` filled; true leaves `*state_out` set to the
+ * dumpstate "state" object, which the envelope check has validated. */
+static bool status_blocker_response_state(const struct json_value *response,
+                                          struct json_value *error_out,
+                                          const struct json_value **state_out)
+{
+    *state_out = NULL;
+    const struct json_value *rpc_error = json_get(response, "error");
+    if (rpc_error && rpc_error->type != JSON_NULL) {
+        if (rpc_error->type == JSON_OBJ) {
+            json_copy(error_out, rpc_error);
+        } else {
+            status_blocker_error_object(error_out,
+                "blocker dumpstate returned an error indicator");
+        }
+        return false;
+    }
+
+    if (json_get(response, "code") || json_get(response, "message")) {
+        /* HTTP/in-process RPC failures are normally a bare
+         * {code,message,method} object; transport stubs may wrap it under
+         * "error". Reject mixed error+state objects too: error evidence
+         * cannot be made successful by appending plausible state. */
+        json_copy(error_out, response);
+        return false;
+    }
+    const struct json_value *state = json_get(response, "state");
+    if (!status_blocker_envelope_ok(response, state)) {
+        status_blocker_error_object(error_out,
+            "blocker dumpstate missing valid blocker envelope");
+        return false;
+    }
+    *state_out = state;
+    return true;
+}
+
+/* Check the blocker entries and their counts against the dumpstate state. */
+static bool status_blocker_entries_ok(const struct json_value *state,
+                                      struct json_value *error_out)
+{
+    const struct json_value *entries = json_get(state, "blockers");
+    const char *defect = status_entries_defect(entries);
+    if (defect) {
+        status_blocker_error_object(error_out, defect);
+        return false;
+    }
+    if (!status_blocker_counts_match(state, entries)) {
+        status_blocker_error_object(error_out,
+            "blocker dumpstate counts contradict blocker entries");
+        return false;
+    }
+    return true;
+}
+
+/* Copy every surviving dumpstate state key into the summary. Stops at the
+ * first copy failure. */
+static bool status_blocker_summary_copy_state(struct json_value *summary_out,
+                                              const struct json_value *state,
+                                              bool include_entries)
+{
+    for (size_t i = 0; i < state->num_children; i++) {
+        const char *key = state->keys[i];
+        if (status_summary_skips_key(key, include_entries))
+            continue;
+        if (!status_push_kv_verified(summary_out, key,
+                                     &state->children[i]))
+            return false;
+    }
+    return true;
+}
+
+/* Fill the summary and dominant blocker from the validated dumpstate state.
+ * Returns false when any copy or verification step fails. */
+static bool status_blocker_summary_fill(struct json_value *summary_out,
+                                        struct json_value *dominant_out,
+                                        const struct json_value *state,
+                                        const struct json_value *captured_at,
+                                        bool include_entries)
+{
+    const struct json_value *entries = json_get(state, "blockers");
+    bool copy_ok = !include_entries ||
+                   status_push_compact_blockers(summary_out, entries);
+    copy_ok = status_blocker_summary_copy_state(summary_out, state,
+                                                include_entries) && copy_ok;
+    copy_ok = copy_ok && status_push_str_verified(
+        summary_out, "execution_locus", "target_node");
+    copy_ok = copy_ok && status_push_str_verified(
+        summary_out, "source_rpc", "dumpstate:blocker");
+    copy_ok = copy_ok && status_push_kv_verified(
+        summary_out, "captured_at", captured_at);
+
+    const struct json_value *selected = status_dominant_blocker(entries);
+    if (selected) {
+        json_copy(dominant_out, selected);
+        copy_ok = copy_ok && status_json_equal(dominant_out, selected);
+    }
+    return copy_ok && status_push_kv_verified(
+        summary_out, "dominant", dominant_out);
+}
+
 /* Build the blocker summary exclusively from the target node's dumpstate RPC
  * response. The native command often runs in a separate client process;
  * reading blocker globals there would describe that empty client and create a
@@ -634,101 +801,29 @@ bool status_build_blocker_summary(const char *raw,
     struct json_value response;
     json_init(&response);
     if (!raw || !json_read(&response, raw, strlen(raw))) {
-        json_set_object(error_out);
-        json_push_kv_str(error_out, "message",
-                         raw ? "invalid blocker dumpstate JSON"
-                             : "blocker dumpstate RPC returned null");
+        status_blocker_error_object(error_out,
+            raw ? "invalid blocker dumpstate JSON"
+                : "blocker dumpstate RPC returned null");
         json_free(&response);
         return false;
     }
 
-    const struct json_value *rpc_error = json_get(&response, "error");
-    if (rpc_error && rpc_error->type != JSON_NULL) {
-        if (rpc_error->type == JSON_OBJ) {
-            json_copy(error_out, rpc_error);
-        } else {
-            json_set_object(error_out);
-            json_push_kv_str(error_out, "message",
-                             "blocker dumpstate returned an error indicator");
-        }
-        json_free(&response);
-        return false;
-    }
-
-    const struct json_value *state = json_get(&response, "state");
-    if (json_get(&response, "code") || json_get(&response, "message")) {
-        /* HTTP/in-process RPC failures are normally a bare
-         * {code,message,method} object; transport stubs may wrap it under
-         * "error". Reject mixed error+state objects too: error evidence
-         * cannot be made successful by appending plausible state. */
-        json_copy(error_out, &response);
-        json_free(&response);
-        return false;
-    }
-    const char *subsystem =
-        json_get_str(json_get(&response, "subsystem"));
-    const struct json_value *captured_at =
-        json_get(&response, "captured_at");
-    if (!state || state->type != JSON_OBJ ||
-        !subsystem || strcmp(subsystem, "blocker") != 0 ||
-        !captured_at || captured_at->type != JSON_INT ||
-        captured_at->val.i < 0) {
-        json_set_object(error_out);
-        json_push_kv_str(error_out, "message",
-                         "blocker dumpstate missing valid blocker envelope");
-        json_free(&response);
-        return false;
-    }
-    const struct json_value *entries = json_get(state, "blockers");
-    const char *defect = status_entries_defect(entries);
-    if (defect) {
-        json_set_object(error_out);
-        json_push_kv_str(error_out, "message",
-                         defect);
-        json_free(&response);
-        return false;
-    }
-    if (!status_blocker_counts_match(state, entries)) {
-        json_set_object(error_out);
-        json_push_kv_str(error_out, "message",
-                         "blocker dumpstate counts contradict blocker entries");
+    const struct json_value *state = NULL;
+    if (!status_blocker_response_state(&response, error_out, &state) ||
+        !status_blocker_entries_ok(state, error_out)) {
         json_free(&response);
         return false;
     }
 
     json_set_object(summary_out);
-    bool copy_ok = !include_entries ||
-                   status_push_compact_blockers(summary_out, entries);
-    for (size_t i = 0; i < state->num_children; i++) {
-        const char *key = state->keys[i];
-        if (status_summary_skips_key(key, include_entries))
-            continue;
-        if (!status_push_kv_verified(summary_out, key,
-                                     &state->children[i])) {
-            copy_ok = false;
-            break;
-        }
-    }
-    copy_ok = copy_ok && status_push_str_verified(
-        summary_out, "execution_locus", "target_node");
-    copy_ok = copy_ok && status_push_str_verified(
-        summary_out, "source_rpc", "dumpstate:blocker");
-    copy_ok = copy_ok && status_push_kv_verified(
-        summary_out, "captured_at", captured_at);
-
-    const struct json_value *selected = status_dominant_blocker(entries);
-    if (selected) {
-        json_copy(dominant_out, selected);
-        copy_ok = copy_ok && status_json_equal(dominant_out, selected);
-    }
-    copy_ok = copy_ok && status_push_kv_verified(
-        summary_out, "dominant", dominant_out);
-    if (!copy_ok) {
+    const struct json_value *captured_at =
+        json_get(&response, "captured_at");
+    if (!status_blocker_summary_fill(summary_out, dominant_out, state,
+                                     captured_at, include_entries)) {
         json_set_null(summary_out);
         json_set_null(dominant_out);
-        json_set_object(error_out);
-        json_push_kv_str(error_out, "message",
-                         "blocker summary allocation/copy failed");
+        status_blocker_error_object(error_out,
+            "blocker summary allocation/copy failed");
         json_free(&response);
         return false;
     }
