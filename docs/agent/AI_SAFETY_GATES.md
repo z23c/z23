@@ -159,9 +159,9 @@ in the diff, with a reason attached.
 
 ## `check-no-stale-pinned-facts` — don't hand-write a number that has a live source
 
-**Script:** `tools/lint/check_no_stale_pinned_facts.sh`
+**Gate:** `tools/lint/lintc/gate_no_stale_pinned_facts.c`, run as `build/bin/z23-lint check-no-stale-pinned-facts`
 
-**The failure it was written for.** The owner's directive, quoted in the script:
+**The failure it was written for.** The owner's directive, quoted in the gate's header:
 *"don't ever rely on stale documents — build tools that make staleness
 impossible."* The triggering case was a hand-written size-in-megabytes claim
 about the compiled artifact that stayed in the docs long after the real

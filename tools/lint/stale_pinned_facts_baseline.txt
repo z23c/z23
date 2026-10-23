@@ -1,13 +1,13 @@
 # stale_pinned_facts_baseline.txt — grandfathered LIVE-STATE HEIGHT PINS.
 #
 # SHRINK-ONLY (RATCHET). Each line is `path|normalized-line-text` for a
-# pre-existing height pin tolerated by check_no_stale_pinned_facts.sh. New
+# pre-existing height pin tolerated by z23-lint check-no-stale-pinned-facts. New
 # pins that are not listed here FAIL. The concurrent doc-hygiene lane drains
 # this file toward empty by de-pinning docs to point at docs/agent/HANDOFF.md.
 #
 # NEVER add binary-size claims here — those are hard-enforced (owner directive).
 # Regenerate deterministically:
-#   ZCL_STALE_FACTS_EMIT_BASELINE=1 ./tools/lint/check_no_stale_pinned_facts.sh \
+#   ZCL_STALE_FACTS_EMIT_BASELINE=1 ./build/bin/z23-lint check-no-stale-pinned-facts . \
 #     > tools/lint/stale_pinned_facts_baseline.txt   # then re-add this header
 docs/adr/0001-personal-sovereignty-stack.md|For two days (2026-05-20 → 2026-05-22) the project oscillated between three incompatible framings — audit-first, ruthless purge, demolition-only (each rejected below in Alternatives) — while the live node sat wedged at h=3,115,059 (legacy at 3,118,574+). Each framing produced a plan that contradicted the previous one's recent commits. The user named the failure mode in `feedback_dream_first_dont_flip_flop.md` and `feedback_less_is_more_holistic.md`. The maintainer then reframed it with: *"imagine the best thing, the best architecture zclassic23 could possibly be that would get you excited"* — turning "what should we delete?" into "what are we building?", answered in `~/.claude/plans/zclassic23-ideal-architecture.md`.
 docs/adr/0001-personal-sovereignty-stack.md|> **Update 2026-07-12:** commit `ab512d577` repaired the earlier transparent-loader failure, but did not close the full-state wedge class. Canonical is now held at H*=3,176,325 by incomplete shielded anchors/nullifiers. The borrowed snapshot's digest authenticates its bytes and its anchor identifies a validated header; ZClassic headers do not commit UTXO or shielded roots, so the payload is not consensus/PoW-bound. The sovereign cure must install complete independently validated state atomically and pass copy proof. Retained below as a record of the original decision.

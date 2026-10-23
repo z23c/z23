@@ -10,7 +10,7 @@
 # projection (Program H1)"), and three agents were dispatched to redo finished
 # work. Nothing in the build could have caught it, because the claim was prose.
 #
-# THE GENERALIZATION. tools/lint/gate_doc_no_false_deleted.sh already proved
+# THE GENERALIZATION. check-doc-no-false-deleted (lintc) already proved
 # the shape — {forbidden-claim-regex, code-path, live-caller, symbol}, firing
 # only when a doc says "gone" while the code is still present AND wired — but
 # it is HARDCODED to two rows about one engine. A regex table that only a gate
