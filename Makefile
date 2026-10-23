@@ -15047,7 +15047,7 @@ build/lintc-obj/gate_capability_closure_data.o \
 build/lintc-obj/gate_capability_closure_selftest.o: \
     tools/lint/lintc/gate_capability_closure_priv.h
 
-build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h
+build/lintc-obj/%.o: tools/lint/lintc/%.c tools/lint/lintc/lintc.h tools/lint/lintc/gates.def
 	@mkdir -p $(dir $@)
 	$(CC) $(LINTC_CFLAGS) -c -o $@ $<
 	$(if $(LINTC_CLANG),$(LINTC_CLANG) $(LINTC_CFLAGS) -Wunused-but-set-variable -Wunused-variable -fsyntax-only $<,echo "lintc: clang not on PATH; Apple Clang strictness UNOBSERVED for $<")
