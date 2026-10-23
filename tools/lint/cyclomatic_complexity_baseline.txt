@@ -1979,7 +1979,7 @@ engine/services/src/chain_restore_repair.c:chain_restore_rebuild_active_chain:64
 engine/services/src/chain_state_result.c:csr_result_name:16
 engine/services/src/chain_state_service.c:csr_commit_tip:22
 engine/services/src/chain_state_service.c:csr_validate_locked:41
-engine/services/src/chain_state_validator.c:validate_coins_chain_agreement:48
+engine/services/src/chain_state_validator.c:validate_coins_chain_agreement:45
 engine/services/src/chain_tip_watchdog.c:wd_apply_tick:22
 engine/services/src/consensus_reject_index.c:cri_parse_payload:22
 engine/services/src/consensus_snapshot_export_service.c:consensus_snapshot_export_service_run_internal:54

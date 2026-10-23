@@ -35,6 +35,11 @@ enum boot_recovery_action {
     BOOT_RECOVER_RESET_CHAIN,  /* coins behind chain, reset chain tip */
     BOOT_RECOVER_RESET_COINS_TO_CHAIN_TIP,
     BOOT_RECOVER_RESET_COINS_TO_GENESIS,
+    /* Legacy coins view reads null but the DERIVED coins-best IS the active
+     * tip: coins are not empty. The validator does not mutate; the executor
+     * commits the (already active) tip through CSR so the in-memory coins
+     * view ends with best_block = tip, silently (no empty-coins alarm). */
+    BOOT_OK_COMMIT_DERIVED_BEST,
 };
 
 struct boot_validation_result {

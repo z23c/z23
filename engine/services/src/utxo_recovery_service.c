@@ -556,6 +556,47 @@ static bool integrity_checks_boot_ok(struct utxo_recovery_ctx *ctx,
     return true;
 }
 
+/* BOOT_OK_COMMIT_DERIVED_BEST: the legacy coins view read null while the
+ * DERIVED coins-best names the active tip. End in the state the old
+ * empty-coins path ended in (recover_stale_metadata -> commit_tip), minus
+ * its alarm: commit the active tip through CSR so the in-memory coins view
+ * holds best_block = tip. vr->coins_hash is the derived (== tip) hash;
+ * anything else is refused and nothing is mutated. */
+static void execute_commit_derived_best(struct utxo_recovery_ctx *ctx,
+                                        const struct boot_validation_result *vr,
+                                        struct recovery_exec_result *res)
+{
+    struct block_index *tip = active_chain_tip(&ctx->state->chain_active);
+    if (!tip || !tip->phashBlock || uint256_cmp(tip->phashBlock, &vr->coins_hash) != 0) {
+        LOG_WARN("utxo_recovery", "derived coins-best verdict no longer names the active tip; not committing");
+        return;
+    }
+    struct zcl_result rc = utxo_recovery_commit_tip(
+        ctx, &tip, "derived_coins_best_agree", true, false);
+    if (!rc.ok) {
+        LOG_WARN("utxo_recovery", "derived coins-best commit failed: %s", rc.message);
+        return;
+    }
+    res->recovered = true;
+}
+
+/* The two agree verdicts: BOOT_OK runs the integrity checks; the derived
+ * variant commits the active tip first (see above). */
+static void execute_boot_ok(struct utxo_recovery_ctx *ctx,
+                            const struct boot_validation_result *vr,
+                            struct recovery_exec_result *res)
+{
+    if (vr->action == BOOT_OK_COMMIT_DERIVED_BEST) {
+        execute_commit_derived_best(ctx, vr, res);
+        return;
+    }
+    if (!integrity_checks_boot_ok(ctx, &res->skip_activate)) {
+        res->status = ZCL_ERR(-40,
+            "utxo_recovery_execute: BOOT_OK integrity checks failed");
+        LOG_WARN("utxo_recovery", "%s", res->status.message);
+    }
+}
+
 struct recovery_exec_result utxo_recovery_execute(
     struct utxo_recovery_ctx *ctx,
     struct boot_validation_result *vr)
@@ -735,12 +776,9 @@ struct recovery_exec_result utxo_recovery_execute(
             LOG_WARN("utxo_recovery", "%s", res.status.message);
         }
         break;
+    case BOOT_OK_COMMIT_DERIVED_BEST:
     case BOOT_OK:
-        if (!integrity_checks_boot_ok(ctx, &res.skip_activate)) {
-            res.status = ZCL_ERR(-40,
-                "utxo_recovery_execute: BOOT_OK integrity checks failed");
-            LOG_WARN("utxo_recovery", "%s", res.status.message);
-        }
+        execute_boot_ok(ctx, vr, &res);
         break;
     }
 

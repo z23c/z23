@@ -34,6 +34,63 @@
  * returns the appropriate recovery action.
  * Emits EV_BOOT_VALIDATION_FAILED on mismatch. */
 
+/* Case 2 guard: the legacy coins.db view read null, but the DERIVED
+ * coins-best (coins_kv authority, hash-verified) names the active tip.
+ * Then the coins are not empty: the legacy key is a lagging projection.
+ * Requires d_have (durable hash witness), the block in the index at that
+ * height, and equality with the active chain tip's hash. Anything else
+ * returns false and leaves the empty verdict untouched. */
+static bool derived_best_is_active_tip(struct main_state *ms,
+                                       const struct block_index *chain_tip)
+{
+    int32_t d_h = -1;
+    uint8_t d_hash[32];
+    bool d_have = false;
+    if (!chain_tip || !chain_tip->phashBlock)
+        return false;
+    if (!reducer_frontier_derive_coins_best_now(&d_h, d_hash, &d_have) ||
+        d_h <= 0 || !d_have)
+        return false;
+    struct uint256 dh;
+    memcpy(dh.data, d_hash, sizeof(dh.data));
+    struct block_index *db = block_map_find(&ms->map_block_index, &dh);
+    return db && db->nHeight == d_h && chain_tip->nHeight == d_h &&
+           uint256_cmp(chain_tip->phashBlock, &dh) == 0;
+}
+
+/* Case 2: legacy coins best read null while the chain has blocks. */
+static struct boot_validation_result case_legacy_coins_empty(
+    struct main_state *ms, const struct block_index *chain_tip,
+    const char *datadir, struct boot_validation_result r)
+{
+    if (derived_best_is_active_tip(ms, chain_tip)) {
+        LOG_INFO("boot",
+                 "[boot] legacy coins.db best is unset but the DERIVED "
+                 "coins-best matches the active tip h=%d (coins_kv "
+                 "authority, hash-verified) — AGREE, coins not empty",
+                 r.chain_height);
+        /* Carry the derived (== tip) hash so the executor can commit it. */
+        r.action = BOOT_OK_COMMIT_DERIVED_BEST;
+        r.coins_height = r.chain_height;
+        memcpy(&r.coins_hash, chain_tip->phashBlock, sizeof(r.coins_hash));
+        return r;
+    }
+    /* Check if LevelDB chainstate exists for reimport */
+    char cs_path[1024];
+    snprintf(cs_path, sizeof(cs_path), "%s/chainstate", datadir);
+    struct stat st;
+    if (stat(cs_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        r.action = BOOT_RECOVER_REIMPORT;
+    } else {
+        r.action = BOOT_RECOVER_WIPE_WAIT;
+    }
+    event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
+        "coins_empty chain_h=%d action=%s",
+        r.chain_height,
+        r.action == BOOT_RECOVER_REIMPORT ? "reimport" : "wipe_wait");
+    return r;
+}
+
 struct boot_validation_result validate_coins_chain_agreement(
     struct main_state *ms,
     struct coins_view_cache *cvtip,
@@ -147,22 +204,8 @@ struct boot_validation_result validate_coins_chain_agreement(
     }
 
     /* Case 2: Coins DB empty but chain has blocks */
-    if (uint256_is_null(&coins_best)) {
-        /* Check if LevelDB chainstate exists for reimport */
-        char cs_path[1024];
-        snprintf(cs_path, sizeof(cs_path), "%s/chainstate", datadir);
-        struct stat st;
-        if (stat(cs_path, &st) == 0 && S_ISDIR(st.st_mode)) {
-            r.action = BOOT_RECOVER_REIMPORT;
-        } else {
-            r.action = BOOT_RECOVER_WIPE_WAIT;
-        }
-        event_emitf(EV_BOOT_VALIDATION_FAILED, 0,
-            "coins_empty chain_h=%d action=%s",
-            r.chain_height,
-            r.action == BOOT_RECOVER_REIMPORT ? "reimport" : "wipe_wait");
-        return r;
-    }
+    if (uint256_is_null(&coins_best))
+        return case_legacy_coins_empty(ms, chain_tip, datadir, r);
 
     /* Case 3: Coins and chain agree — all good */
     if (chain_tip->phashBlock &&
