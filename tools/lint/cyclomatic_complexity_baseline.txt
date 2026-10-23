@@ -3532,11 +3532,6 @@ tools/fingerprint_scan.c:fp_collect_undefined:16
 tools/fingerprint_scan.c:fp_prune_group:18
 tools/fingerprint_scan.c:fp_prune_link:29
 tools/fingerprint_scan.c:main:155
-tools/fleet_board_bridge.c:load_open_file:23
-tools/fleet_board_bridge.c:main:57
-tools/fleet_board_bridge.c:merge_snapshot:75
-tools/fleet_board_bridge.c:parse_row:28
-tools/fleet_board_bridge.c:post:57
 tools/fuzz/fuzz_http.c:LLVMFuzzerTestOneInput:19
 tools/fuzz/fuzz_p2p.c:fuzz_min_dispatch_payload:33
 tools/fuzz/fuzz_zcode_commons.c:LLVMFuzzerTestOneInput:23

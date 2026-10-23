@@ -28,6 +28,10 @@ struct row {
 };
 struct rows { struct row *v; size_t n, cap; };
 
+/* Field order of a board record on the wire and in parse/encode helpers. */
+enum row_field { ROWF_TS, ROWF_ID, ROWF_HOST, ROWF_AGENT, ROWF_KIND, ROWF_REF, ROWF_TEXT, ROWF_COUNT };
+static const char *const row_keys[ROWF_COUNT] = {"ts","id","host","agent","kind","ref","text"};
+
 static void error(const char *s) { fprintf(stderr, "fleet-board-bridge: %s\n", s); }
 static bool copy(char *d, size_t cap, const char *s)
 {
@@ -95,75 +99,99 @@ static const char *jstr(const struct json_value *o, const char *key)
     const struct json_value *v = json_get(o, key);
     return v && v->type == JSON_STR ? json_get_str(v) : NULL;
 }
+static void row_fields(const struct json_value *o, const char *f[ROWF_COUNT])
+{
+    for (size_t i = 0; i < ROWF_COUNT; i++) f[i] = jstr(o, row_keys[i]);
+}
+static const char *row_reason(const struct row *r, const char *const f[ROWF_COUNT])
+{
+    if (!timestamp(f[ROWF_TS])) return "invalid timestamp";
+    if (!atom(f[ROWF_ID],sizeof(r->id),false)) return "invalid id";
+    if (!atom(f[ROWF_HOST],sizeof(r->host),false)) return "invalid host";
+    if (!f[ROWF_AGENT] || !f[ROWF_AGENT][0] || strlen(f[ROWF_AGENT]) >= sizeof(r->agent))
+        return "missing or oversized agent";
+    if (!kind_ok(f[ROWF_KIND])) return "unknown kind";
+    if (!f[ROWF_REF] || strlen(f[ROWF_REF]) >= sizeof(r->ref))
+        return "missing or oversized ref";
+    if (!f[ROWF_TEXT] || strlen(f[ROWF_TEXT]) > TEXT_CAP)
+        return "missing or oversized text";
+    return NULL;
+}
+static bool row_copy(struct row *r, const char *const f[ROWF_COUNT])
+{
+    if (!(copy(r->ts,sizeof(r->ts),f[ROWF_TS]) && copy(r->id,sizeof(r->id),f[ROWF_ID]) &&
+          copy(r->host,sizeof(r->host),f[ROWF_HOST]) && copy(r->agent,sizeof(r->agent),f[ROWF_AGENT]) &&
+          copy(r->kind,sizeof(r->kind),f[ROWF_KIND]) && copy(r->ref,sizeof(r->ref),f[ROWF_REF])))
+        return false;
+    r->text = zcl_strdup(f[ROWF_TEXT],"board_text");
+    return r->text != NULL;
+}
 static bool parse_row(char *line, size_t n, struct row *r, const char **reason)
 {
     struct json_value o; json_init(&o);
     bool ok = json_read(&o, line, n) && o.type == JSON_OBJ;
-    const char *ts = ok ? jstr(&o,"ts") : NULL, *id = ok ? jstr(&o,"id") : NULL;
-    const char *host = ok ? jstr(&o,"host") : NULL, *agent = ok ? jstr(&o,"agent") : NULL;
-    const char *kind = ok ? jstr(&o,"kind") : NULL, *ref = ok ? jstr(&o,"ref") : NULL;
-    const char *text = ok ? jstr(&o,"text") : NULL;
+    const char *f[ROWF_COUNT] = {0};
+    if (ok) row_fields(&o, f);
     if (!ok) *reason = "invalid JSON object";
-    else if (!timestamp(ts)) *reason = "invalid timestamp";
-    else if (!atom(id,sizeof(r->id),false)) *reason = "invalid id";
-    else if (!atom(host,sizeof(r->host),false)) *reason = "invalid host";
-    else if (!agent || !agent[0] || strlen(agent) >= sizeof(r->agent))
-        *reason = "missing or oversized agent";
-    else if (!kind_ok(kind)) *reason = "unknown kind";
-    else if (!ref || strlen(ref) >= sizeof(r->ref))
-        *reason = "missing or oversized ref";
-    else if (!text || strlen(text) > TEXT_CAP)
-        *reason = "missing or oversized text";
-    else *reason = NULL;
+    else *reason = row_reason(r, f);
     ok = *reason == NULL;
-    if (ok) ok = copy(r->ts,sizeof(r->ts),ts) && copy(r->id,sizeof(r->id),id) &&
-        copy(r->host,sizeof(r->host),host) && copy(r->agent,sizeof(r->agent),agent) &&
-        copy(r->kind,sizeof(r->kind),kind) && copy(r->ref,sizeof(r->ref),ref);
-    if (ok) { r->text = zcl_strdup(text,"board_text"); ok = r->text != NULL; }
+    if (ok) ok = row_copy(r, f);
     json_free(&o); return ok;
+}
+static bool bounded_regular_fd(int fd, struct stat *st, uint64_t max_bytes)
+{
+    return fstat(fd,st)==0&&S_ISREG(st->st_mode)&&st->st_size>=0&&
+           (uint64_t)st->st_size<=max_bytes;
+}
+static bool reject_fd(int fd, const char *name, const char *why)
+{
+    fprintf(stderr,"fleet-board-bridge: %s: %s\n",name,why);
+    close(fd);
+    return false;
+}
+static bool snapshot_changed(int fd, const struct stat *before, uint64_t readn)
+{
+    struct stat after;
+    return fstat(fd,&after)!=0||after.st_size!=before->st_size||
+           readn!=(uint64_t)before->st_size;
+}
+static bool line_bounded(const char *line, size_t n, uint64_t readn, uint64_t size)
+{
+    return n&&line[n-1]=='\n'&&n-1<=LINE_CAP&&readn<=size;
+}
+static bool load_row(const char *name, size_t line_number, char *line, size_t n, struct rows *r)
+{
+    struct row x={0}; const char *reason=NULL;
+    line[n-1]=0;
+    if (!parse_row(line,n-1,&x,&reason) || !rows_add(r,&x)) {
+        fprintf(stderr,"fleet-board-bridge: %s:%zu: %s\n",name,line_number,
+                reason ? reason : "row capacity or allocation failure");
+        free(x.text);
+        return false;
+    }
+    return true;
 }
 static bool load_open_file(int fd, const char *name, struct rows *r,
                            uint64_t max_bytes,uint64_t *bytes_out)
 {
-    struct stat before, after;
-    bool ok=fstat(fd,&before)==0&&S_ISREG(before.st_mode)&&before.st_size>=0&&
-            (uint64_t)before.st_size<=max_bytes;
-    if (!ok) {
-        fprintf(stderr,"fleet-board-bridge: %s: not a bounded regular file\n",name);
-        close(fd);
-        return false;
-    }
-    if (!lock_fd(fd,F_RDLCK)) {
-        fprintf(stderr,"fleet-board-bridge: %s: cannot acquire read lock\n",name);
-        close(fd);
-        return false;
-    }
+    struct stat before;
+    if (!bounded_regular_fd(fd,&before,max_bytes))
+        return reject_fd(fd,name,"not a bounded regular file");
+    if (!lock_fd(fd,F_RDLCK))
+        return reject_fd(fd,name,"cannot acquire read lock");
     FILE *f=fdopen(fd,"r");
-    if (!f) {
-        fprintf(stderr,"fleet-board-bridge: %s: not a bounded regular file\n",name);
-        close(fd);
-        return false;
-    }
-    char line[LINE_CAP+2]; uint64_t readn=0; size_t line_number=0;
+    if (!f) return reject_fd(fd,name,"not a bounded regular file");
+    char line[LINE_CAP+2]; uint64_t readn=0; size_t line_number=0; bool ok=true;
     while (ok && fgets(line,sizeof(line),f)) {
         line_number++;
         size_t n=strlen(line); readn+=n;
-        if (!n || line[n-1]!='\n' || n-1>LINE_CAP || readn>(uint64_t)before.st_size) {
+        if (!line_bounded(line,n,readn,(uint64_t)before.st_size)) {
             fprintf(stderr,"fleet-board-bridge: %s:%zu: unterminated, oversized, or changing row\n",name,line_number);
             ok=false;break;
         }
-        line[n-1]=0; struct row x={0};
-        const char *reason = NULL;
-        if (!parse_row(line,n-1,&x,&reason) || !rows_add(r,&x)) {
-            fprintf(stderr,"fleet-board-bridge: %s:%zu: %s\n",name,line_number,
-                    reason ? reason : "row capacity or allocation failure");
-            free(x.text);
-            ok=false;
-            break;
-        }
+        if (!load_row(name,line_number,line,n,r)) { ok=false; break; }
     }
-    if (ferror(f) || (ok && (fstat(fd,&after)!=0 || after.st_size!=before.st_size ||
-                             readn!=(uint64_t)before.st_size))) {
+    if (ferror(f) || (ok && snapshot_changed(fd,&before,readn))) {
         fprintf(stderr,"fleet-board-bridge: %s: read error or file changed during snapshot\n",name);
         ok=false;
     }
@@ -335,45 +363,88 @@ static bool id_exists(const struct rows *rows, const char *id)
     for (size_t i = 0; i < rows->n; i++) if (!strcmp(rows->v[i].id,id)) return true;
     return false;
 }
+static const char *board_agent(void)
+{
+    const char *a=getenv("BOARD_AGENT");
+    if(!a||!*a)a=getenv("SYSTEMD_UNIT");
+    if(!a||!*a)a=getenv("USER");
+    return a;
+}
+static bool post_identity(const struct rows *prior,char ts[32],char id[128],char host[128],
+                          char agent[256],char ref[128])
+{
+    const char *a=board_agent();
+    const char *rr=getenv("BOARD_REF");
+    if (!identity(ts,id,host) || id_exists(prior,id)) return false;
+    if (!a || !*a || strlen(a)>=256 || !copy(agent,256,a)) return false;
+    return !rr || !*rr || (strlen(rr)<128 && copy(ref,128,rr));
+}
+static bool projection_name(const char *host,char name[160])
+{
+    int nn=snprintf(name,160,"%s.jsonl",host);
+    return nn>0&&(size_t)nn<160;
+}
+static char *post_line(const char *const f[ROWF_COUNT],uint64_t board_bytes,size_t *len_out)
+{
+    struct json_value o;json_init(&o);json_set_object(&o);
+    bool ok=true;
+    for(size_t i=0;ok&&i<ROWF_COUNT;i++)ok=json_push_kv_str(&o,row_keys[i],f[i]);
+    size_t n=ok?json_write(&o,NULL,0):0;
+    char *line=n&&n+1<=LINE_CAP&&board_bytes<=BYTE_CAP&&n+1<=BYTE_CAP-board_bytes?zcl_malloc(n+2,"board_line"):NULL;
+    if(!line)ok=false;
+    if(ok)ok=json_write(&o,line,n+1)==n;
+    json_free(&o);
+    if(!ok){free(line);return NULL;}
+    line[n]='\n';
+    *len_out=n;
+    return line;
+}
+static bool append_target_ok(int fd,size_t n,off_t *old)
+{
+    struct stat st;
+    if(fd<0||fstat(fd,&st)!=0||!S_ISREG(st.st_mode)||st.st_size<0||!lock_fd(fd,F_WRLCK))return false;
+    if((uint64_t)st.st_size>BYTE_CAP||n+1>BYTE_CAP-(uint64_t)st.st_size)return false;
+    *old=st.st_size;
+    return true;
+}
+static bool append_bytes(int fd,const char *line,size_t n,off_t old)
+{
+    if(write_all(fd,line,n+1)&&fsync(fd)==0)return true;
+    int rollback_rc=ftruncate(fd,old);
+    int sync_rc=fsync(fd);
+    if(rollback_rc!=0||sync_rc!=0)error("failed append could not be rolled back cleanly");
+    return false;
+}
+static bool append_record(int dirfd,const char *name,const char *line,size_t n)
+{
+    off_t old=0;
+    int fd=openat(dirfd,name,O_WRONLY|O_APPEND|O_CREAT|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK,0600);
+    bool ok=append_target_ok(fd,n,&old)&&append_bytes(fd,line,n,old);
+    if(fd>=0&&close(fd)!=0)ok=false;
+    return ok;
+}
 static bool target_state(int dirfd,const char *name,bool *exists);
+static bool board_room(int dirfd,const char *name,size_t board_files)
+{
+    bool exists=false;
+    if(!target_state(dirfd,name,&exists))return false;
+    return board_files<=FILE_CAP&&!(!exists&&board_files==FILE_CAP);
+}
 static int post(int dirfd,const char *kind,const char *text,uint64_t board_bytes,
                 size_t board_files,const struct rows *prior)
 {
     if(!kind_ok(kind)||!text||!*text||strlen(text)>TEXT_CAP){error("invalid kind or text bound");return 1;}
     char ts[32],id[128],host[128],agent[256],ref[128]={0},name[160];
-    const char *a=getenv("BOARD_AGENT");if(!a||!*a)a=getenv("SYSTEMD_UNIT");if(!a||!*a)a=getenv("USER");
-    const char *rr=getenv("BOARD_REF");
-    if(!identity(ts,id,host)||id_exists(prior,id)||!a||!*a||strlen(a)>=sizeof(agent)||!copy(agent,sizeof(agent),a)||
-       (rr&&*rr&&(strlen(rr)>=sizeof(ref)||!copy(ref,sizeof(ref),rr)))){error("invalid local identity or BOARD_REF");return 1;}
-    int nn=snprintf(name,sizeof(name),"%s.jsonl",host);if(nn<=0||(size_t)nn>=sizeof(name))return 1;
-    bool exists=false;
-    if(!target_state(dirfd,name,&exists)||board_files>FILE_CAP||
-       (!exists&&board_files==FILE_CAP)){
+    if(!post_identity(prior,ts,id,host,agent,ref)){error("invalid local identity or BOARD_REF");return 1;}
+    if(!projection_name(host,name))return 1;
+    if(!board_room(dirfd,name,board_files)){
         error("post refused: invalid local projection or board file capacity");
         return 1;
     }
-    struct json_value o;json_init(&o);json_set_object(&o);
-    bool ok=json_push_kv_str(&o,"ts",ts)&&json_push_kv_str(&o,"id",id)&&json_push_kv_str(&o,"host",host)&&
-      json_push_kv_str(&o,"agent",agent)&&json_push_kv_str(&o,"kind",kind)&&json_push_kv_str(&o,"ref",ref)&&json_push_kv_str(&o,"text",text);
-    size_t n=ok?json_write(&o,NULL,0):0;char *line=n&&n+1<=LINE_CAP&&
-      board_bytes<=BYTE_CAP&&n+1<=BYTE_CAP-board_bytes?zcl_malloc(n+2,"board_line"):NULL;
-    if (!line) ok = false;
-    if (ok) {
-        ok = json_write(&o, line, n + 1) == n;
-        line[n] = '\n';
-    }
-    json_free(&o);
-    int fd=ok?openat(dirfd,name,O_WRONLY|O_APPEND|O_CREAT|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK,0600):-1;struct stat st;off_t old=0;bool wrote=false;
-    ok=fd>=0&&fstat(fd,&st)==0&&S_ISREG(st.st_mode)&&st.st_size>=0&&lock_fd(fd,F_WRLCK)&&
-       (uint64_t)st.st_size<=BYTE_CAP&&n+1<=BYTE_CAP-(uint64_t)st.st_size;if(ok)old=st.st_size;
-    if(ok){wrote=true;ok=write_all(fd,line,n+1)&&fsync(fd)==0;}
-    if (!ok && fd >= 0 && wrote) {
-        int rollback_rc = ftruncate(fd, old);
-        int sync_rc = fsync(fd);
-        if (rollback_rc != 0 || sync_rc != 0)
-            error("failed append could not be rolled back cleanly");
-    }
-    if (fd >= 0 && close(fd) != 0) ok = false;
+    const char *f[ROWF_COUNT]={[ROWF_TS]=ts,[ROWF_ID]=id,[ROWF_HOST]=host,[ROWF_AGENT]=agent,
+                               [ROWF_KIND]=kind,[ROWF_REF]=ref,[ROWF_TEXT]=text};
+    size_t n=0;char *line=post_line(f,board_bytes,&n);
+    bool ok=line&&append_record(dirfd,name,line,n);
     free(line);
     if(!ok){error("append refused or failed");return 1;}
     if(fsync(dirfd)!=0){error("append saved; directory durability is uncertain");return 1;}
@@ -389,14 +460,140 @@ static bool target_state(int dirfd,const char *name,bool *exists)
     *exists=false;
     return errno==ENOENT;
 }
+struct merge_state {
+    struct rows prior, incoming, merged;
+    uint64_t prior_bytes, incoming_bytes;
+    struct row_index all_ids, prior_ids, incoming_ids;
+    char temp[192];
+    int temp_fd;
+    bool temp_owned, published;
+};
+static bool load_incoming(const char *incoming_path,struct rows *incoming,uint64_t *bytes)
+{
+    int input_fd=open(incoming_path,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK);
+    if(input_fd<0){
+        fprintf(stderr,"fleet-board-bridge: %s: cannot open incoming snapshot safely: %s\n",
+                incoming_path,strerror(errno));
+        return false;
+    }
+    return load_open_file(input_fd,incoming_path,incoming,BYTE_CAP,bytes);
+}
+static bool load_merge_inputs(int dirfd,const char *target,bool target_exists,
+                              const char *incoming_path,struct merge_state *s)
+{
+    if (target_exists && !load_file(dirfd,target,&s->prior,&s->prior_bytes)) return false;
+    return load_incoming(incoming_path,&s->incoming,&s->incoming_bytes);
+}
+static bool merge_index(struct merge_state *s,const struct rows *all)
+{
+    return row_index_build(all,&s->all_ids) && row_index_build(&s->prior,&s->prior_ids) &&
+           row_index_build(&s->incoming,&s->incoming_ids);
+}
+static bool rows_owned_by(const struct rows *r,const char *peer)
+{
+    for (size_t i = 0; i < r->n; i++) if (strcmp(r->v[i].host,peer)) return false;
+    return true;
+}
+static bool clone_prior(struct merge_state *s)
+{
+    for (size_t i = 0; i < s->prior_ids.n; i++) {
+        const struct row *row = s->prior_ids.v[i];
+        if ((!i || strcmp(s->prior_ids.v[i-1]->id,row->id)) && !row_clone_add(&s->merged,row))
+            return false;
+    }
+    return true;
+}
+static bool merge_incoming(struct merge_state *s)
+{
+    for (size_t i = 0; i < s->incoming_ids.n; i++) {
+        const struct row *row = s->incoming_ids.v[i];
+        const struct row *global, *seen;
+        if (i && !strcmp(s->incoming_ids.v[i-1]->id,row->id)) continue;
+        global = row_index_find(&s->all_ids,row->id);
+        seen = row_index_find(&s->prior_ids,row->id);
+        if ((global&&!row_equal(global,row))||(seen&&!row_equal(seen,row))) return false;
+        if (!global && !seen && !row_clone_add(&s->merged,row)) return false;
+    }
+    return true;
+}
+static bool build_merge(struct merge_state *s,const struct rows *all,const char *peer)
+{
+    return merge_index(s,all) && rows_owned_by(&s->prior,peer) &&
+           rows_owned_by(&s->incoming,peer) && clone_prior(s) && merge_incoming(s);
+}
+static bool capacity_ok(const struct merge_state *s,const struct rows *all,uint64_t board_bytes,
+                        size_t board_files,bool target_exists)
+{
+    return !(board_bytes<s->prior_bytes||board_files>FILE_CAP||
+             (!target_exists&&board_files==FILE_CAP)||s->prior.n>all->n||
+             s->merged.n>ROW_CAP-(all->n-s->prior.n));
+}
+static void merge_state_free(struct merge_state *s)
+{
+    free(s->all_ids.v);free(s->prior_ids.v);free(s->incoming_ids.v);
+    rows_free(&s->prior);rows_free(&s->incoming);rows_free(&s->merged);
+}
+static int create_merge_temp(int dirfd,const char *peer,char temp[192])
+{
+    for (unsigned attempt=0;attempt<64;attempt++) {
+        int nn=snprintf(temp,192,".%s.merge.%ld.%u",peer,(long)getpid(),attempt);
+        if (nn<=0||(size_t)nn>=192) return -1;
+        int fd=openat(dirfd,temp,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);
+        if (fd>=0||errno!=EEXIST) return fd;
+    }
+    return -1;
+}
+static bool sync_close(int fd,bool ok)
+{
+    if(ok)ok=fsync(fd)==0;
+    if(fd>=0&&close(fd)!=0)ok=false;
+    return ok;
+}
+static bool write_rows(int fd,const struct rows *merged,uint64_t other_bytes)
+{
+    uint64_t new_bytes=0;
+    for (size_t i=0;i<merged->n;i++) {
+        size_t n=0;char *line=encode_row(&merged->v[i],&n);
+        if (!line||new_bytes>BYTE_CAP-other_bytes||n>BYTE_CAP-other_bytes-new_bytes) {
+            free(line);
+            return false;
+        }
+        bool ok=write_all(fd,line,n);
+        free(line);
+        if (!ok) return false;
+        new_bytes+=n;
+    }
+    return true;
+}
+static bool stage_merge(int dirfd,const char *peer,uint64_t board_bytes,bool ok,struct merge_state *s)
+{
+    if (ok) s->temp_fd=create_merge_temp(dirfd,peer,s->temp);
+    if (ok && s->temp_fd<0) ok=false;
+    s->temp_owned=s->temp_fd>=0;
+    if (ok) ok=write_rows(s->temp_fd,&s->merged,board_bytes-s->prior_bytes);
+    return sync_close(s->temp_fd,ok);
+}
+static bool commit_merge(int dirfd,const char *target,bool ok,struct merge_state *s)
+{
+    bool exists=false;
+    if (ok && !target_state(dirfd,target,&exists)) ok=false;
+    if (ok) { ok=renameat(dirfd,s->temp,dirfd,target)==0; s->published=ok; }
+    if (s->published) s->temp_owned=false;
+    if (ok) ok=fsync(dirfd)==0;
+    if (s->temp_owned && unlinkat(dirfd,s->temp,0)!=0 && errno!=ENOENT) ok=false;
+    return ok;
+}
+static bool peer_target(const char *peer,char target[160])
+{
+    char own[128];
+    return atom(peer,128,false)&&local_host(own)&&strcmp(peer,own)!=0&&projection_name(peer,target);
+}
 static int merge_snapshot(int dirfd,const char *peer,const char *incoming_path,
                           uint64_t board_bytes,size_t board_files,
                           const struct rows *all)
 {
-    char own[128],target[160];
-    int nn=snprintf(target,sizeof(target),"%s.jsonl",peer);
-    if (!atom(peer,128,false)||!local_host(own)||!strcmp(peer,own)||nn<=0||
-        (size_t)nn>=sizeof(target)) {
+    char target[160];
+    if (!peer_target(peer,target)) {
         error("invalid peer alias or refusal to import own host");
         return 1;
     }
@@ -405,68 +602,20 @@ static int merge_snapshot(int dirfd,const char *peer,const char *incoming_path,
         error("peer projection target is not a regular file");
         return 1;
     }
-    struct rows prior={0},incoming={0},merged={0};uint64_t prior_bytes=0,incoming_bytes=0;
-    bool ok=true;
-    if (target_exists) {
-        ok=load_file(dirfd,target,&prior,&prior_bytes);
-    }
-    int input_fd=ok?open(incoming_path,O_RDONLY|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK):-1;
-    if (ok&&input_fd<0) {
-        fprintf(stderr,"fleet-board-bridge: %s: cannot open incoming snapshot safely: %s\n",
-                incoming_path,strerror(errno));
+    struct merge_state s={.temp_fd=-1};
+    bool ok=load_merge_inputs(dirfd,target,target_exists,incoming_path,&s);
+    if (ok) ok=build_merge(&s,all,peer);
+    if (!ok) error("merge refused: malformed ownership, conflicting id, or allocation failure");
+    if (ok&&!capacity_ok(&s,all,board_bytes,board_files,target_exists)) {
+        error("merge refused: board file or row capacity");
         ok=false;
     }
-    if (ok) ok=load_open_file(input_fd,incoming_path,&incoming,BYTE_CAP,&incoming_bytes);
-    struct row_index all_ids={0},prior_ids={0},incoming_ids={0};
-    if(ok)ok=row_index_build(all,&all_ids)&&row_index_build(&prior,&prior_ids)&&
-             row_index_build(&incoming,&incoming_ids);
-    for(size_t i=0;ok&&i<prior.n;i++)if(strcmp(prior.v[i].host,peer))ok=false;
-    for(size_t i=0;ok&&i<incoming.n;i++)if(strcmp(incoming.v[i].host,peer))ok=false;
-    for(size_t i=0;ok&&i<prior_ids.n;i++)
-        if(!i||strcmp(prior_ids.v[i-1]->id,prior_ids.v[i]->id))
-            ok=row_clone_add(&merged,prior_ids.v[i]);
-    for(size_t i=0;ok&&i<incoming_ids.n;i++) {
-        const struct row *row=incoming_ids.v[i];
-        if(i&& !strcmp(incoming_ids.v[i-1]->id,row->id))continue;
-        const struct row *global=row_index_find(&all_ids,row->id);
-        const struct row *seen=row_index_find(&prior_ids,row->id);
-        if((global&&!row_equal(global,row))||(seen&&!row_equal(seen,row)))ok=false;
-        else if(!global&&!seen)ok=row_clone_add(&merged,row);
-    }
-    if (!ok) error("merge refused: malformed ownership, conflicting id, or allocation failure");
-    if (ok&&(board_bytes<prior_bytes||board_files>FILE_CAP||
-             (!target_exists&&board_files==FILE_CAP)||
-             prior.n>all->n||merged.n>ROW_CAP-(all->n-prior.n))) {
-        error("merge refused: board file or row capacity");ok=false;
-    }
-    if (ok) rows_sort(&merged);
-    char temp[192]={0};int temp_fd=-1;bool temp_owned=false;
-    for (unsigned attempt=0;ok&&attempt<64&&temp_fd<0;attempt++) {
-        nn=snprintf(temp,sizeof(temp),".%s.merge.%ld.%u",peer,(long)getpid(),attempt);
-        if(nn<=0||(size_t)nn>=sizeof(temp)){ok=false;break;}
-        temp_fd=openat(dirfd,temp,O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC|O_NOFOLLOW,0600);
-        if(temp_fd>=0)temp_owned=true;
-        if(temp_fd<0&&errno!=EEXIST)ok=false;
-    }
-    if(ok&&temp_fd<0)ok=false;
-    uint64_t new_bytes=0,other_bytes=ok?board_bytes-prior_bytes:0;
-    for(size_t i=0;ok&&i<merged.n;i++) {
-        size_t n=0;char *line=encode_row(&merged.v[i],&n);
-        if(!line||new_bytes>BYTE_CAP-other_bytes||n>BYTE_CAP-other_bytes-new_bytes)ok=false;
-        if(ok)ok=write_all(temp_fd,line,n);
-        free(line);if(ok)new_bytes+=n;
-    }
-    if(ok)ok=fsync(temp_fd)==0;
-    if(temp_fd>=0&&close(temp_fd)!=0)ok=false;
-    if(ok&&!target_state(dirfd,target,&target_exists))ok=false;
-    bool published=false;
-    if(ok){ok=renameat(dirfd,temp,dirfd,target)==0;published=ok;}
-    if(published)temp_owned=false;
-    if(ok)ok=fsync(dirfd)==0;
-    if(temp_owned&&unlinkat(dirfd,temp,0)!=0&&errno!=ENOENT)ok=false;
-    size_t merged_count=merged.n;
-    free(all_ids.v);free(prior_ids.v);free(incoming_ids.v);
-    rows_free(&prior);rows_free(&incoming);rows_free(&merged);
+    if (ok) rows_sort(&s.merged);
+    ok=stage_merge(dirfd,peer,board_bytes,ok,&s);
+    ok=commit_merge(dirfd,target,ok,&s);
+    size_t merged_count=s.merged.n;
+    bool published=s.published;
+    merge_state_free(&s);
     if(!ok){error(published?"merge renamed peer projection; directory durability is uncertain":"merge publication failed; peer projection was not replaced");return 1;}
     printf("%zu\n",merged_count);
     return 0;
@@ -481,43 +630,119 @@ static char *join(int ac,char **av,int first)
     char *s=zcl_malloc(n,"board_text");if(!s)return NULL;size_t at=0;for(int i=first;i<ac;i++){if(i>first)s[at++]=' ';size_t m=strlen(av[i]);memcpy(s+at,av[i],m);at+=m;}s[at]=0;return s;
 }
 static void help(void){puts("usage: fleet-board-bridge [--board-dir DIR] [--json] post KIND TEXT...\n       fleet-board-bridge [--board-dir DIR] [--json] list [-n N] [--kind KIND] [--host HOST] [--open]\n       fleet-board-bridge [--board-dir DIR] merge PEER_ALIAS INCOMING_FILE");}
-int main(int ac,char **av)
+struct list_opts { const char *kind,*host; size_t lim; bool open_only,json; };
+static bool list_args(int ac,char **av,int i,struct list_opts *o)
 {
-    const char *dir=NULL,*kind=NULL,*host=NULL;bool json=false,open_only=false;size_t lim=40;int i=1;
-    while(i<ac){if(!strcmp(av[i],"--help")){help();return 0;}if(!strcmp(av[i],"--json")){json=true;i++;continue;}if(!strcmp(av[i],"--board-dir")&&i+1<ac){dir=av[i+1];i+=2;continue;}break;}
-    if(i>=ac){help();return 1;}const char *cmd=av[i++];char path[PATH_CAP];
-    if(dir){if(!copy(path,sizeof(path),dir)){error("path too long");return 1;}}else{const char *h=getenv("HOME");if(!h||snprintf(path,sizeof(path),"%s/.local/state/zclassic23/board",h)>=(int)sizeof(path))return 1;}
-    struct stat st;if(lstat(path,&st)!=0||!S_ISDIR(st.st_mode)||S_ISLNK(st.st_mode)){error("board directory must be a real directory");return 1;}
-    int dfd=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(dfd<0){error("cannot open board directory");return 1;}
-    /* This lock coordinates native bridge processes; external writers do not honor it. */
-    int guard=openat(dfd,".fleet-board-bridge.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK,0600);
-    struct stat gst;if(guard<0||fstat(guard,&gst)!=0||!S_ISREG(gst.st_mode)){if(guard>=0)close(guard);close(dfd);error("cannot lock board snapshot");return 1;}
-    if(!strcmp(cmd,"post")){if(i>=ac){close(guard);close(dfd);help();return 1;}kind=av[i++];char *text=join(ac,av,i);struct rows prior={0};uint64_t bytes=0;size_t files=0;bool ready=text&&lock_fd(guard,F_WRLCK)&&load_all(dfd,&prior,&bytes,&files)&&prior.n<ROW_CAP;int rc=ready?post(dfd,kind,text,bytes,files,&prior):1;rows_free(&prior);if(!ready)error("invalid text or board capacity");free(text);close(guard);close(dfd);return rc;}
-    if(!strcmp(cmd,"merge")){
-        if(i+2!=ac){close(guard);close(dfd);help();return 1;}
-        const char *peer=av[i],*incoming_path=av[i+1];struct rows all={0};
-        uint64_t bytes=0;size_t files=0;
-        bool ready=lock_fd(guard,F_WRLCK)&&load_all(dfd,&all,&bytes,&files);
-        int rc=ready?merge_snapshot(dfd,peer,incoming_path,bytes,files,&all):1;
-        if(!ready)error("malformed, oversized, changing, or unreadable board");
-        rows_free(&all);close(guard);close(dfd);return rc;
+    bool ok=true;
+    while(ok&&i<ac){
+        if(!strcmp(av[i],"-n")&&i+1<ac){ok=limit_parse(av[i+1],&o->lim);i+=2;}
+        else if(!strcmp(av[i],"--kind")&&i+1<ac){o->kind=av[i+1];ok=kind_ok(o->kind);i+=2;}
+        else if(!strcmp(av[i],"--host")&&i+1<ac){o->host=av[i+1];ok=atom(o->host,128,false);i+=2;}
+        else if(!strcmp(av[i],"--open")){o->open_only=true;i++;}
+        else ok=false;
     }
-    bool ok=!strcmp(cmd,"list");while(ok&&i<ac){if(!strcmp(av[i],"-n")&&i+1<ac){ok=limit_parse(av[i+1],&lim);i+=2;}else if(!strcmp(av[i],"--kind")&&i+1<ac){kind=av[i+1];ok=kind_ok(kind);i+=2;}else if(!strcmp(av[i],"--host")&&i+1<ac){host=av[i+1];ok=atom(host,128,false);i+=2;}else if(!strcmp(av[i],"--open")){open_only=true;i++;}else ok=false;}
-    if(!ok){close(guard);close(dfd);help();return 1;}struct rows all={0};uint64_t bytes=0;if(!lock_fd(guard,F_RDLCK)||!load_all(dfd,&all,&bytes,NULL)){close(guard);close(dfd);rows_free(&all);error("malformed, oversized, changing, or unreadable board");return 1;}close(guard);close(dfd);
+    return ok;
+}
+static size_t collect_refs(const struct rows *all,char **refs)
+{
+    size_t ref_count=0;
+    for(size_t x=0;x<all->n;x++)
+        if((!strcmp(all->v[x].kind,"claim")||!strcmp(all->v[x].kind,"result"))&&all->v[x].ref[0])
+            refs[ref_count++]=all->v[x].ref;
+    return ref_count;
+}
+static size_t count_matches(char *const *refs,size_t ref_count,const struct rows *all,const struct list_opts *o)
+{
+    size_t count=0;
+    for(size_t x=0;x<all->n;x++)
+        if(matches(refs,ref_count,&all->v[x],o->kind,o->host,o->open_only))count++;
+    return count;
+}
+static bool emit_tail(char *const *refs,size_t ref_count,const struct rows *all,
+                      const struct list_opts *o,size_t skip)
+{
+    size_t seen=0;bool ok=true;
+    for(size_t x=0;ok&&x<all->n;x++)
+        if(matches(refs,ref_count,&all->v[x],o->kind,o->host,o->open_only)&&seen++>=skip)
+            ok=emit(&all->v[x],o->json);
+    return ok;
+}
+static int cmd_list(int dfd,int guard,const struct list_opts *o)
+{
+    struct rows all={0};uint64_t bytes=0;
+    if(!lock_fd(guard,F_RDLCK)||!load_all(dfd,&all,&bytes,NULL)){close(guard);close(dfd);rows_free(&all);error("malformed, oversized, changing, or unreadable board");return 1;}
+    close(guard);close(dfd);
     char **refs = zcl_malloc((all.n ? all.n : 1) * sizeof(*refs), "board_refs");
     if (!refs) { rows_free(&all); return 1; }
-    size_t ref_count = 0;
-    for (size_t x = 0; x < all.n; x++) {
-        if ((!strcmp(all.v[x].kind,"claim") || !strcmp(all.v[x].kind,"result")) &&
-            all.v[x].ref[0]) refs[ref_count++] = all.v[x].ref;
-    }
+    size_t ref_count=collect_refs(&all,refs);
     qsort(refs,ref_count,sizeof(*refs),string_ptr_cmp);
-    size_t count=0;for(size_t x=0;x<all.n;x++)if(matches(refs,ref_count,&all.v[x],kind,host,open_only))count++;size_t skip=count>lim?count-lim:0,seen=0;
-    for (size_t x = 0; ok && x < all.n; x++) {
-        if (matches(refs, ref_count, &all.v[x], kind, host, open_only) && seen++ >= skip)
-            ok = emit(&all.v[x], json);
-    }
+    size_t count=count_matches(refs,ref_count,&all,o);
+    size_t skip=count>o->lim?count-o->lim:0;
+    bool ok=emit_tail(refs,ref_count,&all,o,skip);
     free(refs);
     rows_free(&all);
-    return ok ? 0 : 1;
+    return ok?0:1;
+}
+static int cmd_post(int dfd,int guard,int ac,char **av,int i)
+{
+    if(i>=ac){close(guard);close(dfd);help();return 1;}
+    const char *kind=av[i++];char *text=join(ac,av,i);
+    struct rows prior={0};uint64_t bytes=0;size_t files=0;
+    bool ready=text&&lock_fd(guard,F_WRLCK)&&load_all(dfd,&prior,&bytes,&files)&&prior.n<ROW_CAP;
+    int rc=ready?post(dfd,kind,text,bytes,files,&prior):1;
+    rows_free(&prior);if(!ready)error("invalid text or board capacity");
+    free(text);close(guard);close(dfd);return rc;
+}
+static int cmd_merge(int dfd,int guard,int ac,char **av,int i)
+{
+    if(i+2!=ac){close(guard);close(dfd);help();return 1;}
+    const char *peer=av[i],*incoming_path=av[i+1];struct rows all={0};
+    uint64_t bytes=0;size_t files=0;
+    bool ready=lock_fd(guard,F_WRLCK)&&load_all(dfd,&all,&bytes,&files);
+    int rc=ready?merge_snapshot(dfd,peer,incoming_path,bytes,files,&all):1;
+    if(!ready)error("malformed, oversized, changing, or unreadable board");
+    rows_free(&all);close(guard);close(dfd);return rc;
+}
+static int board_path(const char *dir,char path[PATH_CAP])
+{
+    if(dir){
+        if(copy(path,PATH_CAP,dir))return 0;
+        error("path too long");
+        return 1;
+    }
+    const char *h=getenv("HOME");
+    return !h||snprintf(path,PATH_CAP,"%s/.local/state/zclassic23/board",h)>=(int)PATH_CAP;
+}
+static int open_board_dir(const char *path)
+{
+    struct stat st;
+    if(lstat(path,&st)!=0||!S_ISDIR(st.st_mode)||S_ISLNK(st.st_mode)){error("board directory must be a real directory");return -1;}
+    int dfd=open(path,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+    if(dfd<0){error("cannot open board directory");return -1;}
+    return dfd;
+}
+static int open_guard(int dfd)
+{
+    struct stat gst;
+    int guard=openat(dfd,".fleet-board-bridge.lock",O_RDWR|O_CREAT|O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK,0600);
+    if(guard<0||fstat(guard,&gst)!=0||!S_ISREG(gst.st_mode)){if(guard>=0)close(guard);return -1;}
+    return guard;
+}
+int main(int ac,char **av)
+{
+    const char *dir=NULL;bool json=false;int i=1;
+    while(i<ac){if(!strcmp(av[i],"--help")){help();return 0;}if(!strcmp(av[i],"--json")){json=true;i++;continue;}if(!strcmp(av[i],"--board-dir")&&i+1<ac){dir=av[i+1];i+=2;continue;}break;}
+    if(i>=ac){help();return 1;}
+    const char *cmd=av[i++];char path[PATH_CAP];
+    if(board_path(dir,path)!=0)return 1;
+    int dfd=open_board_dir(path);
+    if(dfd<0)return 1;
+    /* This lock coordinates native bridge processes; external writers do not honor it. */
+    int guard=open_guard(dfd);
+    if(guard<0){close(dfd);error("cannot lock board snapshot");return 1;}
+    if(!strcmp(cmd,"post"))return cmd_post(dfd,guard,ac,av,i);
+    if(!strcmp(cmd,"merge"))return cmd_merge(dfd,guard,ac,av,i);
+    struct list_opts lo={.lim=40,.json=json};
+    if(strcmp(cmd,"list")||!list_args(ac,av,i,&lo)){close(guard);close(dfd);help();return 1;}
+    return cmd_list(dfd,guard,&lo);
 }
