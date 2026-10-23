@@ -157,37 +157,69 @@ static void growth_contract_digest(uint8_t out[32])
 /* Windows intentionally has no generic package/agent spawn implementation.
  * These read-only developer measurements instead use one explicit host-tool
  * capability supplied by the Windows setup courier. */
-static int growth_git_capture(const char *const argv[], char *out,
-                              size_t out_size, uint32_t timeout_ms)
-{
 #if defined(_WIN32)
+static bool growth_windows_letter(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+}
+
+static bool growth_windows_absolute(const char *image)
+{
+    if (!image) return false;
+    if (growth_windows_letter(image[0]) && image[1] == ':' &&
+        (image[2] == '/' || image[2] == '\\'))
+        return true;
+    return (image[0] == '/' || image[0] == '\\') &&
+        (image[1] == '/' || image[1] == '\\');
+}
+
+static const char *growth_windows_image(void)
+{
     const char *configured_image = getenv("ZCL_DEV_GIT_EXE");
     /* windows-setup's canonical root is C:\msys64. Custom roots are passed
      * explicitly by windows-make; neither route searches PATH or the CWD. */
-    const char *image = configured_image && configured_image[0]
+    return configured_image && configured_image[0]
         ? configured_image : "C:\\msys64\\usr\\bin\\git.exe";
-    bool absolute = image &&
-        ((((image[0] >= 'A' && image[0] <= 'Z') ||
-           (image[0] >= 'a' && image[0] <= 'z')) && image[1] == ':' &&
-          (image[2] == '/' || image[2] == '\\')) ||
-         ((image[0] == '/' || image[0] == '\\') &&
-          (image[1] == '/' || image[1] == '\\')));
-    if (!absolute || !argv || !argv[0] || strcmp(argv[0], "git") != 0 ||
-        !out || out_size == 0 || timeout_ms == 0) {
-        if (out && out_size) out[0] = '\0';
-        return -1;
-    }
-    const char *native_argv[GROWTH_ARGV_CAP];
+}
+
+static bool growth_windows_request(const char *image,
+                                   const char *const argv[], char *out,
+                                   size_t out_size, uint32_t timeout_ms)
+{
+    return growth_windows_absolute(image) && argv && argv[0] &&
+        strcmp(argv[0], "git") == 0 && out && out_size != 0u &&
+        timeout_ms != 0u;
+}
+
+static bool growth_windows_native_argv(const char *image,
+                                       const char *const argv[],
+                                       const char *native_argv[GROWTH_ARGV_CAP])
+{
     size_t argc = 0;
     while (argv[argc] && argc + 1u < GROWTH_ARGV_CAP) {
         native_argv[argc] = argc == 0 ? image : argv[argc];
         argc++;
     }
-    if (argv[argc]) {
+    if (argv[argc]) return false;
+    native_argv[argc] = NULL;
+    return true;
+}
+#endif
+
+static int growth_git_capture(const char *const argv[], char *out,
+                              size_t out_size, uint32_t timeout_ms)
+{
+#if defined(_WIN32)
+    const char *image = growth_windows_image();
+    if (!growth_windows_request(image, argv, out, out_size, timeout_ms)) {
+        if (out && out_size) out[0] = '\0';
+        return -1;
+    }
+    const char *native_argv[GROWTH_ARGV_CAP];
+    if (!growth_windows_native_argv(image, argv, native_argv)) {
         out[0] = '\0';
         return -1;
     }
-    native_argv[argc] = NULL;
     static const char *const environment[] = {
         "GIT_CONFIG_NOSYSTEM=1", "GIT_OPTIONAL_LOCKS=0", "GIT_PAGER=",
         "GIT_TERMINAL_PROMPT=0", "LANG=C", "LC_ALL=C", NULL,
@@ -316,10 +348,38 @@ static bool growth_append_delta(const char *root, const char cached_head[41],
     return ok;
 }
 
-static bool growth_cache_load(const char *root, const char head[41],
-                              struct science_code_growth_history *out,
-                              char *error, size_t error_cap)
+static bool growth_cache_child_header(struct platform_directory_child *child,
+                                      struct platform_directory_child_info *info,
+                                      uint8_t header[GROWTH_CACHE_HEADER_SIZE])
 {
+    return platform_directory_child_info(child, info) &&
+        info->link_count == 1u && info->current_user_only &&
+        platform_directory_child_read_exact(child, header,
+                                            GROWTH_CACHE_HEADER_SIZE, 0);
+}
+
+static bool growth_cache_header_matches(
+    const uint8_t header[GROWTH_CACHE_HEADER_SIZE], uint64_t file_size)
+{
+    uint8_t contract[32];
+    growth_contract_digest(contract);
+    size_t length = zcl_read_u32_le(header + GROWTH_CACHE_LENGTH);
+    return memcmp(header + GROWTH_CACHE_MAGIC, growth_cache_magic,
+                  sizeof(growth_cache_magic)) == 0 &&
+        zcl_read_u32_le(header + GROWTH_CACHE_VERSION_AT) ==
+            GROWTH_CACHE_VERSION &&
+        length > 0u && length < SCIENCE_CODE_GROWTH_GIT_BYTES_MAX &&
+        file_size == GROWTH_CACHE_HEADER_SIZE + length &&
+        memcmp(header + GROWTH_CACHE_ROOTS, contract, sizeof(contract)) == 0;
+}
+
+/* Reads and verifies the cached stream. On success the caller owns *stream_out
+ * and *length_out; on failure both are left NULL and 0. */
+static bool growth_cache_read_verified(const char *root, char **stream_out,
+                                       size_t *length_out, char cached_head[41])
+{
+    *stream_out = NULL;
+    *length_out = 0u;
     char directory_path[GROWTH_PATH_MAX];
     struct platform_directory_transaction directory;
     struct platform_directory_child child;
@@ -334,23 +394,10 @@ static bool growth_cache_load(const char *root, const char head[41],
     }
     uint8_t header[GROWTH_CACHE_HEADER_SIZE];
     struct platform_directory_child_info info;
-    uint32_t stored_length = 0;
-    bool valid = platform_directory_child_info(&child, &info) &&
-        info.link_count == 1u && info.current_user_only &&
-        platform_directory_child_read_exact(&child, header, sizeof(header), 0);
-    if (valid)
-        stored_length = zcl_read_u32_le(header + GROWTH_CACHE_LENGTH);
-    size_t length = stored_length;
-    uint8_t contract[32];
-    growth_contract_digest(contract);
-    valid = valid && memcmp(header + GROWTH_CACHE_MAGIC,
-                            growth_cache_magic, sizeof(growth_cache_magic)) == 0 &&
-        zcl_read_u32_le(header + GROWTH_CACHE_VERSION_AT) ==
-            GROWTH_CACHE_VERSION &&
-        length > 0u && length < SCIENCE_CODE_GROWTH_GIT_BYTES_MAX &&
-        info.size == sizeof(header) + length &&
-        memcmp(header + GROWTH_CACHE_ROOTS, contract, sizeof(contract)) == 0;
-    char *stream = valid ? zcl_malloc((size_t)length + 1u,
+    bool valid = growth_cache_child_header(&child, &info, header) &&
+        growth_cache_header_matches(header, info.size);
+    size_t length = valid ? zcl_read_u32_le(header + GROWTH_CACHE_LENGTH) : 0u;
+    char *stream = valid ? zcl_malloc(length + 1u,
                                       "science.code_growth.cache") : NULL;
     valid = valid && stream && platform_directory_child_read_exact(
         &child, stream, length, sizeof(header));
@@ -358,7 +405,6 @@ static bool growth_cache_load(const char *root, const char head[41],
     platform_directory_transaction_close(&directory);
     if (!valid) { free(stream); return false; }
     stream[length] = '\0';
-    char cached_head[41];
     memcpy(cached_head, header + GROWTH_CACHE_HEAD, 40u);
     cached_head[40] = '\0';
     valid = growth_head_text(cached_head, cached_head);
@@ -366,16 +412,61 @@ static bool growth_cache_load(const char *root, const char head[41],
     growth_digest(stream, length, payload);
     valid = valid && memcmp(header + GROWTH_CACHE_PAYLOAD, payload,
                             sizeof(payload)) == 0;
-    bool extended = valid && strcmp(cached_head, head) != 0;
-    if (extended)
-        valid = growth_first_parent_contains(root, cached_head, head) &&
-            growth_append_delta(root, cached_head, head, &stream, &length);
+    if (!valid) { free(stream); return false; }
+    *stream_out = stream;
+    *length_out = length;
+    return true;
+}
+
+static bool growth_cache_load(const char *root, const char head[41],
+                              struct science_code_growth_history *out,
+                              char *error, size_t error_cap)
+{
+    char cached_head[41];
+    char *stream = NULL;
+    size_t length = 0;
+    if (!growth_cache_read_verified(root, &stream, &length, cached_head))
+        return false;
+    bool extended = strcmp(cached_head, head) != 0;
+    bool valid = !extended ||
+        (growth_first_parent_contains(root, cached_head, head) &&
+         growth_append_delta(root, cached_head, head, &stream, &length));
     valid = valid && science_code_growth_parse(
         stream, length, out, error, error_cap);
     if (valid && extended) growth_cache_store(root, head, stream, length);
     free(stream);
     if (valid) out->cache_hit = true;
     return valid;
+}
+
+static bool growth_cache_create_stage(
+    struct platform_directory_transaction *directory, char *leaf,
+    size_t leaf_size, struct platform_directory_child *stage)
+{
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 32u && !created; attempt++) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &growth_cache_sequence, 1u, memory_order_relaxed);
+        int n = snprintf(leaf, leaf_size, "git-numstat.v1.tmp.%" PRIx64
+                         ".%" PRIx64,
+                         (uint64_t)clock_now_monotonic_ns(), sequence);
+        created = n > 0 && (size_t)n < leaf_size &&
+            platform_directory_child_create(directory, leaf, stage);
+    }
+    return created;
+}
+
+static bool growth_cache_write_stage(struct platform_directory_child *stage,
+                                     uint8_t header[GROWTH_CACHE_HEADER_SIZE],
+                                     const char *stream, size_t length)
+{
+    return platform_directory_child_write_exact(
+            stage, header, GROWTH_CACHE_HEADER_SIZE, 0) &&
+        platform_directory_child_write_exact(stage, stream, length,
+                                              GROWTH_CACHE_HEADER_SIZE) &&
+        platform_directory_child_truncate(
+            stage, GROWTH_CACHE_HEADER_SIZE + length) &&
+        platform_directory_child_flush(stage);
 }
 
 static void growth_cache_store(const char *root, const char head[41],
@@ -392,16 +483,8 @@ static void growth_cache_store(const char *root, const char head[41],
         !platform_directory_transaction_open(&directory, directory_path))
         return;
     char leaf[96];
-    bool created = false;
-    for (unsigned attempt = 0; attempt < 32u && !created; attempt++) {
-        uint64_t sequence = atomic_fetch_add_explicit(
-            &growth_cache_sequence, 1u, memory_order_relaxed);
-        int n = snprintf(leaf, sizeof(leaf), "git-numstat.v1.tmp.%" PRIx64
-                         ".%" PRIx64,
-                         (uint64_t)clock_now_monotonic_ns(), sequence);
-        created = n > 0 && (size_t)n < sizeof(leaf) &&
-            platform_directory_child_create(&directory, leaf, &stage);
-    }
+    bool created = growth_cache_create_stage(&directory, leaf, sizeof(leaf),
+                                             &stage);
     uint8_t header[GROWTH_CACHE_HEADER_SIZE] = {0};
     memcpy(header + GROWTH_CACHE_MAGIC, growth_cache_magic,
            sizeof(growth_cache_magic));
@@ -411,12 +494,8 @@ static void growth_cache_store(const char *root, const char head[41],
     growth_contract_digest(header + GROWTH_CACHE_ROOTS);
     growth_digest(stream, length, header + GROWTH_CACHE_PAYLOAD);
     bool staged = created;
-    bool ok = created && platform_directory_child_write_exact(
-        &stage, header, sizeof(header), 0) &&
-        platform_directory_child_write_exact(&stage, stream, length,
-                                              sizeof(header)) &&
-        platform_directory_child_truncate(&stage, sizeof(header) + length) &&
-        platform_directory_child_flush(&stage);
+    bool ok = created && growth_cache_write_stage(&stage, header, stream,
+                                                  length);
     enum platform_directory_result published = PLATFORM_DIRECTORY_IO;
     if (ok) published = platform_directory_child_move_between(
         &directory, &stage, &directory, "git-numstat.v1", false);
@@ -508,6 +587,101 @@ static bool growth_fill_inactive_days(
     return true;
 }
 
+/* Each helper returns NULL on success or the static message the caller
+ * reports; the caller keeps the early return. */
+static const char *growth_parse_header_line(
+    const char *at, const char *line_end, struct science_code_growth_history *out,
+    struct science_code_growth_day **current)
+{
+    uint64_t seconds = 0;
+    const char *timestamp = at + 43u;
+    if (!growth_sha(at + 2u) || timestamp > line_end ||
+        !growth_u64(timestamp, line_end, &seconds))
+        return "Git history header is malformed";
+    *current = growth_day(out, seconds / 86400u, at + 2u);
+    if (!*current)
+        return "daily history exceeds its bounded capacity";
+    return NULL;
+}
+
+static const char *growth_add_numstat(struct science_code_growth_day *day,
+                                      const char *at, const char *first,
+                                      const char *second, const char *path)
+{
+    uint64_t added = 0, deleted = 0;
+    if (!growth_u64(at, first, &added) ||
+        !growth_u64(first + 1, second, &deleted))
+        return "maintained C23 numstat row is not textual";
+    bool test_path = science_corpus_is_test_path(path);
+    uint64_t *day_added = test_path ? &day->test_added : &day->non_test_added;
+    uint64_t *day_deleted = test_path
+        ? &day->test_deleted : &day->non_test_deleted;
+    if (UINT64_MAX - *day_added < added ||
+        UINT64_MAX - *day_deleted < deleted)
+        return "daily line count overflowed";
+    *day_added += added;
+    *day_deleted += deleted;
+    return NULL;
+}
+
+static const char *growth_parse_numstat_line(
+    const char *at, const char *line_end, struct science_code_growth_day *current)
+{
+    const char *first = memchr(at, '\t', (size_t)(line_end - at));
+    const char *second = first
+        ? memchr(first + 1, '\t', (size_t)(line_end - first - 1))
+        : NULL;
+    const char *path = second ? second + 1 : NULL;
+    if (!first || !second) return "Git numstat row is malformed";
+    char bounded_path[4096];
+    size_t path_len = (size_t)(line_end - path);
+    if (path_len >= sizeof(bounded_path))
+        return "Git path exceeds the bounded path size";
+    memcpy(bounded_path, path, path_len);
+    bounded_path[path_len] = '\0';
+    if (!growth_source_path(bounded_path)) return NULL;
+    return growth_add_numstat(current, at, first, second, bounded_path);
+}
+
+static const char *growth_parse_line(const char *at, const char *line_end,
+                                     struct science_code_growth_history *out,
+                                     struct science_code_growth_day **current)
+{
+    if ((size_t)(line_end - at) >= 44u && at[0] == '@' && at[1] == '@')
+        return growth_parse_header_line(at, line_end, out, current);
+    if (line_end > at && *current)
+        return growth_parse_numstat_line(at, line_end, *current);
+    return NULL;
+}
+
+static const char *growth_finish_history(struct science_code_growth_history *out)
+{
+    if (out->day_count == 0)
+        return "Git history contains no maintained C23 changes";
+    qsort(out->days, out->day_count, sizeof(out->days[0]), growth_day_compare);
+    if (!growth_fill_inactive_days(out))
+        return "daily history gaps exceed bounded capacity";
+    uint64_t non_test = 0, test = 0;
+    for (size_t i = 0; i < out->day_count; i++) {
+        struct science_code_growth_day *day = &out->days[i];
+        if (day->non_test_added > UINT64_MAX - non_test ||
+            day->test_added > UINT64_MAX - test)
+            return "cumulative line count overflowed";
+        if (day->non_test_deleted > non_test + day->non_test_added ||
+            day->test_deleted > test + day->test_added)
+            return "history deletes lines outside reconstructed scope";
+        non_test += day->non_test_added;
+        non_test -= day->non_test_deleted;
+        test += day->test_added;
+        test -= day->test_deleted;
+        day->non_test_lines = non_test;
+        day->test_lines = test;
+    }
+    out->non_test_lines = non_test;
+    out->test_lines = test;
+    return NULL;
+}
+
 bool science_code_growth_parse(const char *stream, size_t stream_len,
                                struct science_code_growth_history *out,
                                char *error, size_t error_cap)
@@ -521,87 +695,12 @@ bool science_code_growth_parse(const char *stream, size_t stream_len,
     while (at < end) {
         const char *line_end = memchr(at, '\n', (size_t)(end - at));
         if (!line_end) line_end = end;
-        if ((size_t)(line_end - at) >= 44u &&
-            at[0] == '@' && at[1] == '@') {
-            uint64_t seconds = 0;
-            const char *timestamp = at + 43u;
-            if (!growth_sha(at + 2u) || timestamp > line_end ||
-                !growth_u64(timestamp, line_end, &seconds))
-                return growth_error(error, error_cap,
-                                    "Git history header is malformed");
-            current = growth_day(out, seconds / 86400u, at + 2u);
-            if (!current)
-                return growth_error(
-                    error, error_cap,
-                    "daily history exceeds its bounded capacity");
-        } else if (line_end > at && current) {
-            const char *first = memchr(at, '\t', (size_t)(line_end - at));
-            const char *second = first
-                ? memchr(first + 1, '\t',
-                         (size_t)(line_end - first - 1))
-                : NULL;
-            const char *path = second ? second + 1 : NULL;
-            if (!first || !second)
-                return growth_error(error, error_cap,
-                                    "Git numstat row is malformed");
-            char bounded_path[4096];
-            size_t path_len = (size_t)(line_end - path);
-            if (path_len >= sizeof(bounded_path))
-                return growth_error(
-                    error, error_cap,
-                    "Git path exceeds the bounded path size");
-            memcpy(bounded_path, path, path_len);
-            bounded_path[path_len] = '\0';
-            if (growth_source_path(bounded_path)) {
-                uint64_t added = 0, deleted = 0;
-                if (!growth_u64(at, first, &added) ||
-                    !growth_u64(first + 1, second, &deleted))
-                    return growth_error(
-                        error, error_cap,
-                        "maintained C23 numstat row is not textual");
-                bool test_path = science_corpus_is_test_path(bounded_path);
-                uint64_t *day_added = test_path
-                    ? &current->test_added : &current->non_test_added;
-                uint64_t *day_deleted = test_path
-                    ? &current->test_deleted : &current->non_test_deleted;
-                if (UINT64_MAX - *day_added < added ||
-                    UINT64_MAX - *day_deleted < deleted)
-                    return growth_error(error, error_cap,
-                                        "daily line count overflowed");
-                *day_added += added;
-                *day_deleted += deleted;
-            }
-        }
+        const char *problem = growth_parse_line(at, line_end, out, &current);
+        if (problem) return growth_error(error, error_cap, problem);
         at = line_end < end ? line_end + 1 : end;
     }
-    if (out->day_count == 0)
-        return growth_error(error, error_cap,
-                            "Git history contains no maintained C23 changes");
-    qsort(out->days, out->day_count, sizeof(out->days[0]), growth_day_compare);
-    if (!growth_fill_inactive_days(out))
-        return growth_error(error, error_cap,
-                            "daily history gaps exceed bounded capacity");
-    uint64_t non_test = 0, test = 0;
-    for (size_t i = 0; i < out->day_count; i++) {
-        struct science_code_growth_day *day = &out->days[i];
-        if (day->non_test_added > UINT64_MAX - non_test ||
-            day->test_added > UINT64_MAX - test)
-            return growth_error(error, error_cap,
-                                "cumulative line count overflowed");
-        if (day->non_test_deleted > non_test + day->non_test_added ||
-            day->test_deleted > test + day->test_added)
-            return growth_error(
-                error, error_cap,
-                "history deletes lines outside reconstructed scope");
-        non_test += day->non_test_added;
-        non_test -= day->non_test_deleted;
-        test += day->test_added;
-        test -= day->test_deleted;
-        day->non_test_lines = non_test;
-        day->test_lines = test;
-    }
-    out->non_test_lines = non_test;
-    out->test_lines = test;
+    const char *problem = growth_finish_history(out);
+    if (problem) return growth_error(error, error_cap, problem);
     if (error && error_cap) error[0] = '\0';
     return true;
 }
@@ -631,11 +730,46 @@ static bool growth_require_git_toplevel(const char *root, char *error,
     return true;
 }
 
+static bool growth_collect_inputs_ok(
+    const char *root, const struct science_code_growth_history *out)
+{
+    return root && root[0] && out;
+}
+
+/* True only when the checkout is still clean at the same HEAD as `head`. */
+static bool growth_identity_unchanged(const char *root, const char head[41])
+{
+    char verified_head[41];
+    bool still_clean = false;
+    return growth_git_identity(root, verified_head, &still_clean) &&
+        still_clean && strcmp(head, verified_head) == 0;
+}
+
+static bool growth_cache_hit(const char *root, const char head[41], bool clean,
+                             struct science_code_growth_history *out,
+                             char *error, size_t error_cap)
+{
+    return clean && growth_cache_load(root, head, out, error, error_cap) &&
+        growth_identity_unchanged(root, head);
+}
+
+static const char *growth_verify_census(
+    const char *root, const struct science_code_growth_history *out)
+{
+    struct science_corpus_report current;
+    if (!science_corpus_measure(root, NULL, &current))
+        return "fresh maintained C23 census failed";
+    if (current.non_test_lines != out->non_test_lines ||
+        current.test_lines != out->test_lines)
+        return "Git reconstruction disagrees with the fresh maintained C23 census";
+    return NULL;
+}
+
 bool science_code_growth_collect(const char *root,
                                  struct science_code_growth_history *out,
                                  char *error, size_t error_cap)
 {
-    if (!root || !root[0] || !out)
+    if (!growth_collect_inputs_ok(root, out))
         return growth_error(error, error_cap, "source root/history output is missing");
     if (!growth_require_git_toplevel(root, error, error_cap))
         return false;
@@ -644,13 +778,8 @@ bool science_code_growth_collect(const char *root,
     if (!growth_git_identity(root, head, &clean))
         return growth_error(error, error_cap,
                             "growth source identity could not be measured");
-    if (clean && growth_cache_load(root, head, out, error, error_cap)) {
-        char verified_head[41];
-        bool still_clean = false;
-        if (growth_git_identity(root, verified_head, &still_clean) &&
-            still_clean && strcmp(head, verified_head) == 0)
-            return true;
-    }
+    if (growth_cache_hit(root, head, clean, out, error, error_cap))
+        return true;
     char *stream = zcl_malloc(SCIENCE_CODE_GROWTH_GIT_BYTES_MAX,
                                "science.code_growth.git");
     if (!stream)
@@ -681,23 +810,12 @@ bool science_code_growth_collect(const char *root,
                 "Git history exceeded the bounded capture size");
         return false;
     }
-    struct science_corpus_report current;
-    if (!science_corpus_measure(root, NULL, &current)) {
+    const char *problem = growth_verify_census(root, out);
+    if (problem) {
         free(stream);
-        return growth_error(error, error_cap,
-                            "fresh maintained C23 census failed");
+        return growth_error(error, error_cap, problem);
     }
-    if (current.non_test_lines != out->non_test_lines ||
-        current.test_lines != out->test_lines) {
-        free(stream);
-        return growth_error(
-            error, error_cap,
-            "Git reconstruction disagrees with the fresh maintained C23 census");
-    }
-    char verified_head[41];
-    bool still_clean = false;
-    if (clean && growth_git_identity(root, verified_head, &still_clean) &&
-        still_clean && strcmp(head, verified_head) == 0)
+    if (clean && growth_identity_unchanged(root, head))
         growth_cache_store(root, head, stream, length);
     free(stream);
     return true;
