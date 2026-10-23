@@ -122,6 +122,37 @@ static bool item_flags(struct text_writer *writer, uint16_t flags)
     return text_literal(writer, "\n");
 }
 
+/* Label of the numeric line for the three kinds that carry a fraction. The
+ * caller passes only those kinds; any other kind takes the canvas label. */
+static const char *item_metric_label(uint16_t kind)
+{
+    if (kind == ZCL_PRESENT_ITEM_PROGRESS) return "  progress: ";
+    if (kind == ZCL_PRESENT_ITEM_CHART_POINT) return "  chart-point: ";
+    return "  canvas-point-x-y: ";
+}
+
+static bool text_item_metric(struct text_writer *writer,
+                             const struct zcl_present_model_item_v1 *item)
+{
+    if (item->kind != ZCL_PRESENT_ITEM_PROGRESS &&
+        item->kind != ZCL_PRESENT_ITEM_CHART_POINT &&
+        item->kind != ZCL_PRESENT_ITEM_CANVAS_POINT) return true;
+    return text_literal(writer, item_metric_label(item->kind)) &&
+           text_u32(writer, item->numerator) &&
+           text_literal(writer, "/") &&
+           text_u32(writer, item->denominator) &&
+           text_literal(writer, "\n");
+}
+
+static bool text_item_parent(struct text_writer *writer,
+                             const struct zcl_present_model_item_v1 *item)
+{
+    if (item->parent_index == ZCL_PRESENT_MODEL_PARENT_NONE) return true;
+    return text_literal(writer, "  parent-item: ") &&
+           text_u32(writer, (uint32_t)item->parent_index + 1u) &&
+           text_literal(writer, "\n");
+}
+
 static bool text_item(struct text_writer *writer,
                       const struct zcl_present_model_item_v1 *item,
                       uint32_t index)
@@ -136,25 +167,8 @@ static bool text_item(struct text_writer *writer,
         !field(writer, "  label", item->label) ||
         !field(writer, "  value", item->value))
         return false;
-    if ((item->kind == ZCL_PRESENT_ITEM_PROGRESS ||
-         item->kind == ZCL_PRESENT_ITEM_CHART_POINT ||
-         item->kind == ZCL_PRESENT_ITEM_CANVAS_POINT) &&
-        (!text_literal(writer,
-                       item->kind == ZCL_PRESENT_ITEM_PROGRESS
-                           ? "  progress: "
-                           : (item->kind == ZCL_PRESENT_ITEM_CHART_POINT
-                                  ? "  chart-point: "
-                                  : "  canvas-point-x-y: ")) ||
-         !text_u32(writer, item->numerator) ||
-         !text_literal(writer, "/") ||
-         !text_u32(writer, item->denominator) ||
-         !text_literal(writer, "\n")))
-        return false;
-    if (item->parent_index != ZCL_PRESENT_MODEL_PARENT_NONE &&
-        (!text_literal(writer, "  parent-item: ") ||
-         !text_u32(writer, (uint32_t)item->parent_index + 1u) ||
-         !text_literal(writer, "\n")))
-        return false;
+    if (!text_item_metric(writer, item)) return false;
+    if (!text_item_parent(writer, item)) return false;
     return item_flags(writer, item->flags);
 }
 
@@ -178,81 +192,132 @@ static bool text_actions(struct text_writer *writer,
     return true;
 }
 
-static bool text_document(
-    const struct zcl_present_model_v1 *model,
-    uint32_t begin, uint32_t end, uint32_t page_index, uint32_t pages,
-    char *out, size_t out_cap, size_t *out_len,
-    char *error, size_t error_cap)
+static bool text_reset_output(char *out, size_t out_cap, size_t *out_len,
+                              char *error, size_t error_cap)
 {
     if (!out || out_cap == 0 || !out_len)
         return text_error(error, error_cap,
                           "presentation text output is incomplete");
     out[0] = '\0';
     *out_len = 0;
+    return true;
+}
+
+static bool text_check_range(const struct zcl_present_model_v1 *model,
+                             uint32_t page_index, uint32_t pages,
+                             uint32_t begin, uint32_t end,
+                             char *error, size_t error_cap)
+{
     char model_why[192];
     if (!zcl_present_model_validate_v1(model, model_why, sizeof(model_why)))
         return text_error(error, error_cap, model_why);
     if (page_index >= pages || begin > end || end > model->item_count)
         return text_error(error, error_cap,
                           "presentation text page is out of range");
+    return true;
+}
+
+static bool text_page_header(struct text_writer *writer,
+                             const struct zcl_present_model_v1 *model,
+                             uint32_t page_index, uint32_t pages)
+{
+    return text_literal(writer, "ZClassic23 native instrument\n") &&
+           field(writer, "kind", zcl_present_model_kind_name(model->kind)) &&
+           field(writer, "request-id", model->request_id) &&
+           field(writer, "title", model->title) &&
+           field(writer, "summary", model->summary) &&
+           field(writer, "exact-root", model->exact_root) &&
+           text_literal(writer, "page: ") &&
+           text_u32(writer, page_index + 1u) &&
+           text_literal(writer, "/") && text_u32(writer, pages) &&
+           text_literal(writer, "\n");
+}
+
+/* Byte offsets of the page's fragment inside the whole QR payload. */
+static void qr_payload_span(const struct zcl_present_model_v1 *model,
+                            uint32_t begin, uint32_t end,
+                            uint32_t *span_begin, uint32_t *span_end,
+                            uint32_t *span_total)
+{
+    uint32_t payload_begin = 0;
+    uint32_t payload_total = 0;
+    for (uint32_t i = 0; i < model->item_count; i++) {
+        uint32_t chunk = (uint32_t)strlen(model->items[i].value);
+        if (i < begin) payload_begin += chunk;
+        payload_total += chunk;
+    }
+    uint32_t payload_end = payload_begin;
+    for (uint32_t i = begin; i < end; i++)
+        payload_end += (uint32_t)strlen(model->items[i].value);
+    *span_begin = payload_begin;
+    *span_end = payload_end;
+    *span_total = payload_total;
+}
+
+static bool text_qr_body(struct text_writer *writer,
+                         const struct zcl_present_model_v1 *model,
+                         uint32_t begin, uint32_t end)
+{
+    uint32_t payload_begin = 0;
+    uint32_t payload_end = 0;
+    uint32_t payload_total = 0;
+    qr_payload_span(model, begin, end, &payload_begin, &payload_end,
+                    &payload_total);
+    if (!text_literal(writer, "payload-bytes: ") ||
+        !text_u32(writer, payload_begin + 1u) ||
+        !text_literal(writer, "-") || !text_u32(writer, payload_end) ||
+        !text_literal(writer, " of ") ||
+        !text_u32(writer, payload_total) ||
+        !text_literal(writer, "\npayload-fragment: "))
+        return false;
+    for (uint32_t i = begin; i < end; i++)
+        if (!text_escaped(writer, model->items[i].value)) return false;
+    return text_literal(writer, "\n");
+}
+
+static bool text_item_range(struct text_writer *writer,
+                            const struct zcl_present_model_v1 *model,
+                            uint32_t begin, uint32_t end)
+{
+    bool items_ok = text_literal(writer, "items: ");
+    if (model->item_count == 0)
+        items_ok = items_ok && text_literal(writer, "0 of 0\n");
+    else
+        items_ok = items_ok && text_u32(writer, begin + 1u) &&
+            text_literal(writer, "-") && text_u32(writer, end) &&
+            text_literal(writer, " of ") &&
+            text_u32(writer, model->item_count) &&
+            text_literal(writer, "\n");
+    if (!items_ok) return false;
+    for (uint32_t i = begin; i < end; i++)
+        if (!text_item(writer, &model->items[i], i)) return false;
+    return true;
+}
+
+static bool text_document(
+    const struct zcl_present_model_v1 *model,
+    uint32_t begin, uint32_t end, uint32_t page_index, uint32_t pages,
+    char *out, size_t out_cap, size_t *out_len,
+    char *error, size_t error_cap)
+{
+    if (!text_reset_output(out, out_cap, out_len, error, error_cap))
+        return false;
+    if (!text_check_range(model, page_index, pages, begin, end,
+                          error, error_cap))
+        return false;
 
     struct text_writer writer = {.out = out, .cap = out_cap};
-    if (!text_literal(&writer, "ZClassic23 native instrument\n") ||
-        !field(&writer, "kind", zcl_present_model_kind_name(model->kind)) ||
-        !field(&writer, "request-id", model->request_id) ||
-        !field(&writer, "title", model->title) ||
-        !field(&writer, "summary", model->summary) ||
-        !field(&writer, "exact-root", model->exact_root) ||
-        !text_literal(&writer, "page: ") ||
-        !text_u32(&writer, page_index + 1u) ||
-        !text_literal(&writer, "/") || !text_u32(&writer, pages) ||
-        !text_literal(&writer, "\n"))
+    if (!text_page_header(&writer, model, page_index, pages))
         return text_error(error, error_cap,
                           "presentation text page exceeds its byte bound");
 
     if (model->kind == ZCL_PRESENT_MODEL_QR_CARD) {
-        uint32_t payload_begin = 0;
-        uint32_t payload_total = 0;
-        for (uint32_t i = 0; i < model->item_count; i++) {
-            uint32_t chunk = (uint32_t)strlen(model->items[i].value);
-            if (i < begin) payload_begin += chunk;
-            payload_total += chunk;
-        }
-        uint32_t payload_end = payload_begin;
-        for (uint32_t i = begin; i < end; i++)
-            payload_end += (uint32_t)strlen(model->items[i].value);
-        if (!text_literal(&writer, "payload-bytes: ") ||
-            !text_u32(&writer, payload_begin + 1u) ||
-            !text_literal(&writer, "-") || !text_u32(&writer, payload_end) ||
-            !text_literal(&writer, " of ") ||
-            !text_u32(&writer, payload_total) ||
-            !text_literal(&writer, "\npayload-fragment: "))
+        if (!text_qr_body(&writer, model, begin, end))
             return text_error(error, error_cap,
                               "QR text page exceeds its byte bound");
-        for (uint32_t i = begin; i < end; i++)
-            if (!text_escaped(&writer, model->items[i].value))
-                return text_error(error, error_cap,
-                                  "QR text page exceeds its byte bound");
-        if (!text_literal(&writer, "\n"))
-            return text_error(error, error_cap,
-                              "QR text page exceeds its byte bound");
-    } else {
-        bool items_ok = text_literal(&writer, "items: ");
-        if (model->item_count == 0)
-            items_ok = items_ok && text_literal(&writer, "0 of 0\n");
-        else
-            items_ok = items_ok && text_u32(&writer, begin + 1u) &&
-                text_literal(&writer, "-") && text_u32(&writer, end) &&
-                text_literal(&writer, " of ") &&
-                text_u32(&writer, model->item_count) &&
-                text_literal(&writer, "\n");
-        if (!items_ok)
-            return text_error(error, error_cap,
-                              "presentation text page exceeds its byte bound");
-        for (uint32_t i = begin; i < end; i++)
-            if (!text_item(&writer, &model->items[i], i))
-                return text_error(error, error_cap,
-                                  "presentation text page exceeds its byte bound");
+    } else if (!text_item_range(&writer, model, begin, end)) {
+        return text_error(error, error_cap,
+                          "presentation text page exceeds its byte bound");
     }
     if (!text_actions(&writer, model) ||
         !text_literal(&writer, "authority: display-only\n"))
