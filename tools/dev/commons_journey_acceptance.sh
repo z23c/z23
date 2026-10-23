@@ -615,7 +615,7 @@ cj_build_peer_helper() {
         "$REPO_ROOT/platform/modules/mlkem/src/poly.c" "$REPO_ROOT/platform/modules/mlkem/src/sample.c" \
         "$REPO_ROOT/core/modules/crypto/src/hmac_sha256.c" \
         "$REPO_ROOT/core/modules/crypto/src/hkdf_sha256.c" \
-        "$REPO_ROOT/core/modules/crypto/src/chacha20poly1305.c" \
+        "$REPO_ROOT/core/modules/crypto/src/chacha20poly1305.c" "$REPO_ROOT/core/modules/crypto/src/simd_dispatch.c" \
         "$REPO_ROOT/platform/modules/support/src/log_throttle.c" \
         "$REPO_ROOT/core/modules/crypto/src/curve25519.c" \
         "$REPO_ROOT/core/modules/crypto/src/x25519_safe.c" \

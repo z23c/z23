@@ -10933,6 +10933,7 @@ $(BIN_DIR)/simd_bench: $(SIMD_BENCH_SRCS)
 bench-simd: $(BIN_DIR)/simd_bench
 	@$(BIN_DIR)/simd_bench $(if $(CPU),--cpu=$(CPU)) $(if $(REPS),--reps=$(REPS)) \
 	    $(if $(CHACHA_ONLY),--chacha-only) \
+	    $(if $(ALLOW_PROMOTED_AUTO),--allow-promoted-auto) \
 	    $(if $(REQUIRE_CHACHA_WINS),--require-chacha-wins)
 
 # Block-body deserialization microbenchmark (tools/serial_bench.c). Drives the

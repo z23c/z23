@@ -3657,7 +3657,7 @@ tools/sim/chaos.c:run_scenario:20
 tools/sim/chaos.c:write_failure_artifacts:18
 tools/sim/simnet_trace_query.c:main:20
 tools/sim/simperf.c:main:28
-tools/simd_bench.c:bench_chacha_aead_row:38
+tools/simd_bench.c:bench_chacha_aead_row:32
 tools/simd_bench.c:main:28
 tools/snapshot_from_coinskv.c:main:17
 tools/tor_provenance.c:run_selftest:19

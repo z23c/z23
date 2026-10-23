@@ -4,6 +4,7 @@
  * Replaces libsodium crypto_aead_chacha20poly1305_ietf_encrypt/decrypt. */
 
 #include "crypto/chacha20poly1305.h"
+#include "crypto/simd_dispatch.h"
 #include "support/cleanse.h"
 #include "platform/time_compat.h"
 #include "support/log_throttle.h"
@@ -92,13 +93,23 @@ static inline void cv_store_transposed(uint8_t *out, chacha_vec4 a,
  * is architecture-specific: an Apple receipt must never promote x86 SSE2 (or
  * vice versa). A passing correctness KAT is necessary, never sufficient. */
 #define ZCL_CHACHA20_AUTO_VECTOR4_APPLE_ARM64 0
-#define ZCL_CHACHA20_AUTO_VECTOR4_X86_64     0
+/* x86-64 AUTO ceiling: the widest tier AUTO may use (0 portable, 1 SSE2,
+ * 2 AVX2, 3 AVX-512F). AUTO takes the widest tier at or below the ceiling
+ * that is also available and KAT-verified. */
+#define ZCL_CHACHA20_AUTO_X86_64_TIER        3
 #if defined(__APPLE__) && defined(__aarch64__)
-#define ZCL_CHACHA20_AUTO_VECTOR4 ZCL_CHACHA20_AUTO_VECTOR4_APPLE_ARM64
+#define ZCL_CHACHA20_AUTO_TIER ZCL_CHACHA20_AUTO_VECTOR4_APPLE_ARM64
 #elif defined(__x86_64__) || defined(_M_X64)
-#define ZCL_CHACHA20_AUTO_VECTOR4 ZCL_CHACHA20_AUTO_VECTOR4_X86_64
+#define ZCL_CHACHA20_AUTO_TIER ZCL_CHACHA20_AUTO_X86_64_TIER
 #else
-#define ZCL_CHACHA20_AUTO_VECTOR4 0
+#define ZCL_CHACHA20_AUTO_TIER 0
+#endif
+
+/* Wide x86-64 tiers need GNU-style target attributes. */
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#define ZCL_CHACHA20_X86_WIDE 1
+#else
+#define ZCL_CHACHA20_X86_WIDE 0
 #endif
 
 /* Authentication failures are attacker-controlled input on encrypted public
@@ -231,8 +242,252 @@ static bool chacha20_vector4_kat(void)
     memory_cleanse(want, sizeof want);
     return ok;
 }
+
+static void chacha20_xor4(const uint8_t key[32], uint32_t counter,
+                          const uint8_t nonce[12], const uint8_t *in,
+                          uint8_t *out)
+{
+    uint8_t blocks[256];
+    chacha20_blocks4(key, counter, nonce, blocks);
+    for (size_t i = 0; i < sizeof blocks; i++)
+        out[i] = in[i] ^ blocks[i];
+    memory_cleanse(blocks, sizeof blocks);
+}
 #undef VQR
 #endif
+
+typedef void (*chacha20_xor_fn)(const uint8_t key[32], uint32_t counter,
+                                const uint8_t nonce[12], const uint8_t *in,
+                                uint8_t *out);
+
+#if ZCL_CHACHA20_X86_WIDE
+#define CC_TGT_AVX2   __attribute__((target("avx2")))
+#define CC_TGT_AVX512 __attribute__((target("avx512f")))
+
+static void chacha20_state_words(uint32_t s[16], const uint8_t key[32],
+                                 uint32_t counter, const uint8_t nonce[12])
+{
+    s[0] = 0x61707865u; s[1] = 0x3320646eu;
+    s[2] = 0x79622d32u; s[3] = 0x6b206574u;
+    for (int i = 0; i < 8; i++) s[4 + i] = load32_le(key + 4 * i);
+    s[12] = counter;
+    s[13] = load32_le(nonce + 0);
+    s[14] = load32_le(nonce + 4);
+    s[15] = load32_le(nonce + 8);
+}
+
+#define CC_QR(ADD, XOR, R16, R12, R8, R7, a, b, c, d) \
+    a = ADD(a, b); d = XOR(d, a); d = R16(d);          \
+    c = ADD(c, d); b = XOR(b, c); b = R12(b);          \
+    a = ADD(a, b); d = XOR(d, a); d = R8(d);           \
+    c = ADD(c, d); b = XOR(b, c); b = R7(b)
+
+#define CC_ROUNDS(ADD, XOR, R16, R12, R8, R7, w)                         \
+    for (int round_ = 0; round_ < 10; round_++) {                        \
+        CC_QR(ADD, XOR, R16, R12, R8, R7, w[0], w[4], w[ 8], w[12]);     \
+        CC_QR(ADD, XOR, R16, R12, R8, R7, w[1], w[5], w[ 9], w[13]);     \
+        CC_QR(ADD, XOR, R16, R12, R8, R7, w[2], w[6], w[10], w[14]);     \
+        CC_QR(ADD, XOR, R16, R12, R8, R7, w[3], w[7], w[11], w[15]);     \
+        CC_QR(ADD, XOR, R16, R12, R8, R7, w[0], w[5], w[10], w[15]);     \
+        CC_QR(ADD, XOR, R16, R12, R8, R7, w[1], w[6], w[11], w[12]);     \
+        CC_QR(ADD, XOR, R16, R12, R8, R7, w[2], w[7], w[ 8], w[13]);     \
+        CC_QR(ADD, XOR, R16, R12, R8, R7, w[3], w[4], w[ 9], w[14]);     \
+    }
+
+/* ---- AVX2: eight blocks, one ymm per state word ---- */
+CC_TGT_AVX2 static inline __m256i y_add(__m256i a, __m256i b) { return _mm256_add_epi32(a, b); }
+CC_TGT_AVX2 static inline __m256i y_xor(__m256i a, __m256i b) { return _mm256_xor_si256(a, b); }
+/* Byte-shuffle rotations share one helper; the selector picks the rotate. */
+CC_TGT_AVX2 static inline __m256i y_shuf_bytes(__m256i v, __m256i sel)
+{ return _mm256_shuffle_epi8(v, sel); }
+#define Y_ROT16(v) y_shuf_bytes((v), _mm256_setr_epi8(                    \
+        2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13,             \
+        2, 3, 0, 1, 6, 7, 4, 5, 10, 11, 8, 9, 14, 15, 12, 13))
+#define Y_ROT8(v) y_shuf_bytes((v), _mm256_setr_epi8(                     \
+        3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14,             \
+        3, 0, 1, 2, 7, 4, 5, 6, 11, 8, 9, 10, 15, 12, 13, 14))
+CC_TGT_AVX2 static inline __m256i y_rotl12(__m256i v)
+{ return _mm256_or_si256(_mm256_slli_epi32(v, 12), _mm256_srli_epi32(v, 20)); }
+CC_TGT_AVX2 static inline __m256i y_rotl7(__m256i v)
+{ return _mm256_or_si256(_mm256_slli_epi32(v, 7), _mm256_srli_epi32(v, 25)); }
+
+CC_TGT_AVX2 static inline void y_xor_store(uint8_t *out, const uint8_t *in,
+                                           __m256i ks)
+{
+    __m256i d = _mm256_loadu_si256((const __m256i *)(const void *)in);
+    _mm256_storeu_si256((__m256i *)(void *)out, _mm256_xor_si256(d, ks));
+}
+
+/* One 4x4 word transpose per 128-bit lane, for one vector width: the template
+ * body is shared, and LO32..HI64 are that width's unpack intrinsics. */
+#define CC_DEFINE_TRANSPOSE4(NAME, TGT, VEC, LO32, HI32, LO64, HI64)          \
+TGT static inline void NAME(const VEC *x, VEC r[4])                           \
+{                                                                             \
+    VEC t0 = LO32(x[0], x[1]);                                                \
+    VEC t1 = HI32(x[0], x[1]);                                                \
+    VEC t2 = LO32(x[2], x[3]);                                                \
+    VEC t3 = HI32(x[2], x[3]);                                                \
+    r[0] = LO64(t0, t2);                                                      \
+    r[1] = HI64(t0, t2);                                                      \
+    r[2] = LO64(t1, t3);                                                      \
+    r[3] = HI64(t1, t3);                                                      \
+}
+
+/* Transpose words 4g..4g+3 of eight lanes: r[j] holds block j's four words in
+ * its low 128 bits and block 4+j's in its high 128 bits. */
+CC_DEFINE_TRANSPOSE4(y_transpose4, CC_TGT_AVX2, __m256i,
+                     _mm256_unpacklo_epi32, _mm256_unpackhi_epi32,
+                     _mm256_unpacklo_epi64, _mm256_unpackhi_epi64)
+
+CC_TGT_AVX2 static void chacha20_xor8(const uint8_t key[32], uint32_t counter,
+                                      const uint8_t nonce[12],
+                                      const uint8_t *in, uint8_t *out)
+{
+    uint32_t s[16];
+    __m256i base[16], x[16];
+    chacha20_state_words(s, key, counter, nonce);
+    for (int i = 0; i < 16; i++) base[i] = _mm256_set1_epi32((int32_t)s[i]);
+    base[12] = _mm256_add_epi32(
+        base[12], _mm256_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7));
+    memcpy(x, base, sizeof x);
+    CC_ROUNDS(y_add, y_xor, Y_ROT16, y_rotl12, Y_ROT8, y_rotl7, x)
+    for (int i = 0; i < 16; i++) x[i] = _mm256_add_epi32(x[i], base[i]);
+    for (int h = 0; h < 2; h++) {
+        __m256i lo[4], hi[4];
+        y_transpose4(x + 8 * h, lo);
+        y_transpose4(x + 8 * h + 4, hi);
+        for (int j = 0; j < 4; j++) {
+            size_t off0 = (size_t)j * 64u + (size_t)h * 32u;
+            size_t off1 = (size_t)(4 + j) * 64u + (size_t)h * 32u;
+            y_xor_store(out + off0, in + off0,
+                        _mm256_permute2x128_si256(lo[j], hi[j], 0x20));
+            y_xor_store(out + off1, in + off1,
+                        _mm256_permute2x128_si256(lo[j], hi[j], 0x31));
+        }
+        memory_cleanse(lo, sizeof lo);
+        memory_cleanse(hi, sizeof hi);
+    }
+    memory_cleanse(x, sizeof x);
+    memory_cleanse(base, sizeof base);
+    memory_cleanse(s, sizeof s);
+}
+
+/* ---- AVX-512F: sixteen blocks, one zmm per state word ---- */
+CC_TGT_AVX512 static inline __m512i z_add(__m512i a, __m512i b) { return _mm512_add_epi32(a, b); }
+CC_TGT_AVX512 static inline __m512i z_xor(__m512i a, __m512i b) { return _mm512_xor_si512(a, b); }
+CC_TGT_AVX512 static inline __m512i z_rotl16(__m512i v) { return _mm512_rol_epi32(v, 16); }
+CC_TGT_AVX512 static inline __m512i z_rotl12(__m512i v) { return _mm512_rol_epi32(v, 12); }
+CC_TGT_AVX512 static inline __m512i z_rotl8(__m512i v) { return _mm512_rol_epi32(v, 8); }
+CC_TGT_AVX512 static inline __m512i z_rotl7(__m512i v) { return _mm512_rol_epi32(v, 7); }
+
+CC_TGT_AVX512 static inline void z_xor_store(uint8_t *out, const uint8_t *in,
+                                             __m512i ks)
+{
+    __m512i d = _mm512_loadu_si512((const void *)in);
+    _mm512_storeu_si512((void *)out, _mm512_xor_si512(d, ks));
+}
+
+/* Within each 128-bit lane k (blocks 4k..4k+3): r[j] = block 4k+j's words
+ * 4g..4g+3 for the four word vectors x[0..3]. */
+CC_DEFINE_TRANSPOSE4(z_transpose4, CC_TGT_AVX512, __m512i,
+                     _mm512_unpacklo_epi32, _mm512_unpackhi_epi32,
+                     _mm512_unpacklo_epi64, _mm512_unpackhi_epi64)
+
+/* Fixed j: r[g] lane k = words 4g..4g+3 of block 4k+j. Gather the four 128-bit
+ * lanes of one block into a contiguous 64-byte keystream block and XOR it. */
+CC_TGT_AVX512 static inline void z_store_j(uint8_t *out, const uint8_t *in,
+                                           const __m512i r[4], int j)
+{
+    __m512i t0 = _mm512_shuffle_i32x4(r[0], r[1], 0x88);
+    __m512i t1 = _mm512_shuffle_i32x4(r[0], r[1], 0xdd);
+    __m512i t2 = _mm512_shuffle_i32x4(r[2], r[3], 0x88);
+    __m512i t3 = _mm512_shuffle_i32x4(r[2], r[3], 0xdd);
+    size_t o0 = (size_t)j * 64u, o1 = (size_t)(4 + j) * 64u;
+    size_t o2 = (size_t)(8 + j) * 64u, o3 = (size_t)(12 + j) * 64u;
+    z_xor_store(out + o0, in + o0, _mm512_shuffle_i32x4(t0, t2, 0x88));
+    z_xor_store(out + o1, in + o1, _mm512_shuffle_i32x4(t1, t3, 0x88));
+    z_xor_store(out + o2, in + o2, _mm512_shuffle_i32x4(t0, t2, 0xdd));
+    z_xor_store(out + o3, in + o3, _mm512_shuffle_i32x4(t1, t3, 0xdd));
+}
+
+CC_TGT_AVX512 static void chacha20_xor16(const uint8_t key[32],
+                                         uint32_t counter,
+                                         const uint8_t nonce[12],
+                                         const uint8_t *in, uint8_t *out)
+{
+    uint32_t s[16];
+    __m512i base[16], x[16], rows[4][4];
+    chacha20_state_words(s, key, counter, nonce);
+    for (int i = 0; i < 16; i++) base[i] = _mm512_set1_epi32((int32_t)s[i]);
+    base[12] = _mm512_add_epi32(
+        base[12], _mm512_setr_epi32(0, 1, 2, 3, 4, 5, 6, 7,
+                                    8, 9, 10, 11, 12, 13, 14, 15));
+    memcpy(x, base, sizeof x);
+    CC_ROUNDS(z_add, z_xor, z_rotl16, z_rotl12, z_rotl8, z_rotl7, x)
+    for (int i = 0; i < 16; i++) x[i] = _mm512_add_epi32(x[i], base[i]);
+    for (int g = 0; g < 4; g++) z_transpose4(x + 4 * g, rows[g]);
+    for (int j = 0; j < 4; j++) {
+        __m512i col[4] = {rows[0][j], rows[1][j], rows[2][j], rows[3][j]};
+        z_store_j(out, in, col, j);
+        memory_cleanse(col, sizeof col);
+    }
+    memory_cleanse(rows, sizeof rows);
+    memory_cleanse(x, sizeof x);
+    memory_cleanse(base, sizeof base);
+    memory_cleanse(s, sizeof s);
+}
+/* Compare one wide kernel against the frozen portable block function. The
+ * kernel is run at a plain counter and at one whose lane counters cross the
+ * 32-bit wrap, with in != out. Any divergent byte fails the tier. */
+static bool chacha20_wide_kat(chacha20_xor_fn fn, unsigned blocks)
+{
+    static const uint32_t counters[2] = {7u, UINT32_MAX - 4u};
+    uint8_t key[32], nonce[12], in[1024], got[1024], want[64];
+    size_t len = (size_t)blocks * 64u;
+    bool ok = len <= sizeof in;
+    for (size_t i = 0; i < sizeof key; i++) key[i] = (uint8_t)(i * 3u + 1u);
+    for (size_t i = 0; i < sizeof nonce; i++) nonce[i] = (uint8_t)(0x50u + i);
+    for (size_t i = 0; i < sizeof in; i++) in[i] = (uint8_t)(i * 7u + 3u);
+    for (size_t c = 0; ok && c < 2; c++) {
+        fn(key, counters[c], nonce, in, got);
+        for (uint32_t lane = 0; lane < blocks; lane++) {
+            chacha20_block(key, counters[c] + lane, nonce, want);
+            for (size_t i = 0; i < 64; i++)
+                if (got[(size_t)lane * 64u + i] !=
+                    (uint8_t)(in[(size_t)lane * 64u + i] ^ want[i]))
+                    ok = false;
+        }
+    }
+    memory_cleanse(key, sizeof key);
+    memory_cleanse(got, sizeof got);
+    memory_cleanse(want, sizeof want);
+    return ok;
+}
+
+static pthread_once_t g_chacha20_avx2_once = PTHREAD_ONCE_INIT;
+static bool g_chacha20_avx2_usable = false;
+static pthread_once_t g_chacha20_avx512_once = PTHREAD_ONCE_INIT;
+static bool g_chacha20_avx512_usable = false;
+
+static void chacha20_avx2_init(void)
+{
+    if (!simd_host_has_avx2()) return;
+    g_chacha20_avx2_usable = chacha20_wide_kat(chacha20_xor8, 8u);
+    if (!g_chacha20_avx2_usable)
+        LOG_ERROR("chacha20", "AVX2 eight-block portable-oracle KAT failed; tier disabled");
+}
+
+static void chacha20_avx512_init(void)
+{
+    if (!simd_host_has_avx512f()) return;
+    g_chacha20_avx512_usable = chacha20_wide_kat(chacha20_xor16, 16u);
+    if (!g_chacha20_avx512_usable)
+        LOG_ERROR("chacha20", "AVX-512F sixteen-block portable-oracle KAT failed; tier disabled");
+}
+
+#undef CC_ROUNDS
+#undef CC_QR
+#endif /* ZCL_CHACHA20_X86_WIDE */
 
 static void chacha20_vector4_init(void)
 {
@@ -254,41 +509,130 @@ bool chacha20_vector4_compiled(void)
     return ZCL_CHACHA20_VECTOR4 != 0;
 }
 
+bool chacha20_tier_compiled(enum chacha20_impl tier)
+{
+    switch (tier) {
+    case CHACHA20_IMPL_PORTABLE: return true;
+    case CHACHA20_IMPL_VECTOR4:  return ZCL_CHACHA20_VECTOR4 != 0;
+    case CHACHA20_IMPL_AVX2:
+    case CHACHA20_IMPL_AVX512:   return ZCL_CHACHA20_X86_WIDE != 0;
+    default:                     return false;
+    }
+}
+
+/* Usable = compiled, host/OS permits it, and its one-time portable-oracle KAT
+ * passed. Concurrent first callers converge through pthread_once. */
+bool chacha20_tier_available(enum chacha20_impl tier)
+{
+    switch (tier) {
+    case CHACHA20_IMPL_PORTABLE:
+        return true;
+    case CHACHA20_IMPL_VECTOR4:
+        return chacha20_vector4_available();
+#if ZCL_CHACHA20_X86_WIDE
+    case CHACHA20_IMPL_AVX2:
+        pthread_once(&g_chacha20_avx2_once, chacha20_avx2_init);
+        return g_chacha20_avx2_usable;
+    case CHACHA20_IMPL_AVX512:
+        pthread_once(&g_chacha20_avx512_once, chacha20_avx512_init);
+        return g_chacha20_avx512_usable;
+#endif
+    default:
+        return false;
+    }
+}
+
+/* The tier AUTO resolves to: the widest available, KAT-verified tier at or
+ * below the per-architecture ceiling. */
+int chacha20_auto_impl(void)
+{
+    for (int tier = ZCL_CHACHA20_AUTO_TIER; tier > 0; tier--)
+        if (chacha20_tier_available((enum chacha20_impl)tier))
+            return tier;
+    return CHACHA20_IMPL_PORTABLE;
+}
+
 bool chacha20_auto_uses_vector4(void)
 {
-    return ZCL_CHACHA20_AUTO_VECTOR4 && chacha20_vector4_available();
+    return chacha20_auto_impl() != CHACHA20_IMPL_PORTABLE;
 }
 
 int chacha20_select_impl(enum chacha20_impl which)
 {
-    if (which == CHACHA20_IMPL_PORTABLE) {
-        atomic_store_explicit(&g_chacha20_requested_impl,
-                              CHACHA20_IMPL_PORTABLE, memory_order_release);
-        return CHACHA20_IMPL_PORTABLE;
-    }
+    int selected;
     if (which == CHACHA20_IMPL_AUTO) {
         atomic_store_explicit(&g_chacha20_requested_impl,
                               CHACHA20_IMPL_AUTO, memory_order_release);
-        return chacha20_auto_uses_vector4()
-            ? CHACHA20_IMPL_VECTOR4 : CHACHA20_IMPL_PORTABLE;
+        return chacha20_auto_impl();
     }
-    int selected = chacha20_vector4_available()
-        ? CHACHA20_IMPL_VECTOR4 : CHACHA20_IMPL_PORTABLE;
+    selected = (which != CHACHA20_IMPL_PORTABLE &&
+                chacha20_tier_available(which))
+        ? (int)which : CHACHA20_IMPL_PORTABLE;
     atomic_store_explicit(&g_chacha20_requested_impl, selected,
                           memory_order_release);
     return selected;
 }
 
-const char *chacha20_implementation(void)
+static int chacha20_effective_impl(void)
 {
     int requested = atomic_load_explicit(&g_chacha20_requested_impl,
                                          memory_order_acquire);
-    if ((requested == CHACHA20_IMPL_VECTOR4 &&
-         chacha20_vector4_available()) ||
-        (requested == CHACHA20_IMPL_AUTO && chacha20_auto_uses_vector4()))
-        return ZCL_CHACHA20_VECTOR4_NAME;
-    return "portable C";
+    if (requested == CHACHA20_IMPL_AUTO)
+        return chacha20_auto_impl();
+    return chacha20_tier_available((enum chacha20_impl)requested)
+        ? requested : CHACHA20_IMPL_PORTABLE;
 }
+
+const char *chacha20_implementation(void)
+{
+    switch (chacha20_effective_impl()) {
+    case CHACHA20_IMPL_AVX512: return "AVX-512F sixteen-block";
+    case CHACHA20_IMPL_AVX2:   return "AVX2 eight-block";
+    case CHACHA20_IMPL_VECTOR4: return ZCL_CHACHA20_VECTOR4_NAME;
+    default:                   return "portable C";
+    }
+}
+
+#if ZCL_CHACHA20_VECTOR4
+struct chacha20_wide {
+    int tier;
+    unsigned blocks;
+    chacha20_xor_fn fn;
+};
+
+/* Widest first. A tier at or below the requested one is used while a whole
+ * wide block remains and no lane counter can wrap; the next narrower tier and
+ * finally the portable block loop take the rest. */
+static const struct chacha20_wide g_chacha20_wide[] = {
+#if ZCL_CHACHA20_X86_WIDE
+    {CHACHA20_IMPL_AVX512, 16u, chacha20_xor16},
+    {CHACHA20_IMPL_AVX2, 8u, chacha20_xor8},
+#endif
+    {CHACHA20_IMPL_VECTOR4, 4u, chacha20_xor4},
+};
+
+static size_t chacha20_bulk(const uint8_t key[32], uint32_t *counter,
+                            const uint8_t nonce[12], const uint8_t *in,
+                            uint8_t *out, size_t len)
+{
+    size_t pos = 0;
+    int top = chacha20_effective_impl();
+    for (size_t i = 0; top > 0 && i < sizeof g_chacha20_wide /
+                                       sizeof g_chacha20_wide[0]; i++) {
+        const struct chacha20_wide *w = &g_chacha20_wide[i];
+        if (w->tier > top ||
+            !chacha20_tier_available((enum chacha20_impl)w->tier))
+            continue;
+        size_t step = (size_t)w->blocks * 64u;
+        while (len - pos >= step && *counter <= UINT32_MAX - (w->blocks - 1u)) {
+            w->fn(key, *counter, nonce, in + pos, out + pos);
+            pos += step;
+            *counter += w->blocks;
+        }
+    }
+    return pos;
+}
+#endif
 
 bool chacha20_encrypt(const uint8_t key[32], uint32_t counter,
                        const uint8_t nonce[12],
@@ -302,21 +646,7 @@ bool chacha20_encrypt(const uint8_t key[32], uint32_t counter,
                  len, counter);
     size_t pos = 0;
 #if ZCL_CHACHA20_VECTOR4
-    int requested = atomic_load_explicit(&g_chacha20_requested_impl,
-                                         memory_order_acquire);
-    if ((requested == CHACHA20_IMPL_VECTOR4 &&
-         chacha20_vector4_available()) ||
-        (requested == CHACHA20_IMPL_AUTO && chacha20_auto_uses_vector4())) {
-        uint8_t blocks[256];
-        while (len - pos >= sizeof blocks && counter <= UINT32_MAX - 3u) {
-            chacha20_blocks4(key, counter, nonce, blocks);
-            for (size_t i = 0; i < sizeof blocks; i++)
-                ciphertext[pos + i] = plaintext[pos + i] ^ blocks[i];
-            pos += sizeof blocks;
-            counter += 4u;
-        }
-        memory_cleanse(blocks, sizeof blocks);
-    }
+    pos = chacha20_bulk(key, &counter, nonce, plaintext, ciphertext, len);
 #endif
     uint8_t block[64];
     while (pos < len) {

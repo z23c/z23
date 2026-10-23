@@ -260,3 +260,7 @@ later lane flips it HARD.
 - 2026-10-23T10:48:37Z — REASON: Ed25519/X25519 speed: replace the 16x16-bit TweetNaCl field with a radix-2^51 field (and faster double-scalar mult) without changing any accept/reject result; proven against the frozen-oracle differential test. Owner crypto+AVX directive 2026-10-23.
   old ROOT: 8f5d93d9c5349a95f231bb681368c44f59a343444b47ad8075a98f2299e3fb86
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-23T10:51:24Z — REASON: ChaCha20 AVX2/AVX-512 keystream tiers with runtime CPU dispatch and one-time portable-oracle KAT; AUTO picks the fastest verified tier on x86-64 from measured bench evidence. Output byte-identical to the portable tier. Owner crypto+AVX directive 2026-10-23.
+  old ROOT: 2d1d5231a69242b07cf482cd2f7f14927eb30610d44bf056fae60697b15257b6
+  by: owner unseal ritual (make core-unseal)

@@ -1,16 +1,17 @@
 /* SPDX-License-Identifier: Apache-2.0
  * Copyright 2026 Rhett Creighton
  *
- * Differential oracle for the paired ChaCha20 four-block tier: arm64 NEON
- * and x86-64 SSE2 must remain byte-identical to the portable block function.
- * AUTO deliberately remains portable until physical caller-shaped benchmark
- * receipts justify a separate per-architecture promotion. */
+ * Differential oracle for the ChaCha20 vector tiers: arm64 NEON, x86-64 SSE2
+ * four-block, AVX2 eight-block and AVX-512F sixteen-block must stay
+ * byte-identical to the portable block function. x86-64 AUTO is promoted only
+ * as far as the bench-simd receipts justify (ZCL_CHACHA20_AUTO_X86_64_TIER). */
 
 /* ACCEL-ORACLE: core/modules/crypto/src/chacha20poly1305.c */
 
 #define _POSIX_C_SOURCE 200809L
 
 #include "crypto/chacha20poly1305.h"
+#include "crypto/simd_dispatch.h"
 #include "platform/clock.h"
 
 #include <limits.h>
@@ -450,6 +451,371 @@ static int rfc8439_vectors(void)
     return fails;
 }
 
+/* ---- AVX2 / AVX-512F wide-tier parity (ChaCha20 8- and 16-block tiers) ---- */
+
+#define WIDE_BUF 8448u
+#define WIDE_SENTINEL 0xa5u
+#define WIDE_GUARD 32u
+#define WIDE_NO_PLANT ((size_t)-1)
+
+static uint8_t wide_plain[WIDE_BUF], wide_ref[WIDE_BUF];
+static uint8_t wide_got[WIDE_BUF], wide_inp[WIDE_BUF];
+
+struct wide_case {
+    const uint8_t *key;
+    const uint8_t *nonce;
+    uint32_t counter;
+    size_t len;
+    size_t in_off;
+    size_t out_off;
+    size_t plant; /* byte of the tier output to corrupt, or WIDE_NO_PLANT */
+};
+
+static bool wide_tier_expected(enum chacha20_impl tier)
+{
+    if (tier == CHACHA20_IMPL_AVX2) return simd_host_has_avx2();
+    if (tier == CHACHA20_IMPL_AVX512) return simd_host_has_avx512f();
+    return true;
+}
+
+static const char *wide_tier_name(enum chacha20_impl tier)
+{
+    if (tier == CHACHA20_IMPL_AVX2) return "avx2";
+    if (tier == CHACHA20_IMPL_AVX512) return "avx512";
+    return "vector4";
+}
+
+static bool wide_guard_intact(const uint8_t *p, size_t len)
+{
+    for (size_t i = 0; i < WIDE_GUARD; i++)
+        if (p[len + i] != WIDE_SENTINEL) return false;
+    return true;
+}
+
+static bool wide_fits(const struct wide_case *c)
+{
+    return c->len + c->in_off + WIDE_GUARD <= WIDE_BUF &&
+           c->len + c->out_off + WIDE_GUARD <= WIDE_BUF;
+}
+
+/* Sentinel-fill the output and the in-place buffer, and copy the input into it. */
+static void wide_seed(const struct wide_case *c, const uint8_t *in,
+                      uint8_t *inp, uint8_t *ref, uint8_t *got)
+{
+    memset(ref, WIDE_SENTINEL, c->len + WIDE_GUARD);
+    memset(got, WIDE_SENTINEL, c->len + WIDE_GUARD);
+    memcpy(inp, in, c->len);
+    memset(inp + c->len, WIDE_SENTINEL, WIDE_GUARD);
+}
+
+/* Compare the portable reference with the tier's accept flags and bytes. */
+static int wide_compare_bytes(const struct wide_case *c, bool ok_ref,
+                              bool ok_got, bool ok_in, const uint8_t *in,
+                              const uint8_t *ref, const uint8_t *got,
+                              const uint8_t *inp)
+{
+    int diffs = 0;
+    if (ok_ref != ok_got || ok_ref != ok_in) diffs++;
+    if (ok_ref && ok_got && memcmp(ref, got, c->len) != 0) diffs++;
+    if (ok_ref && ok_in && memcmp(ref, inp, c->len) != 0) diffs++;
+    if (!ok_ref && (memcmp(ref, got, c->len) != 0 ||
+                    memcmp(inp, in, c->len) != 0)) diffs++;
+    return diffs;
+}
+
+/* One differential case: portable vs `tier`, out-of-place into unaligned
+ * buffers and exactly in place. Counts every divergence (bytes, accept/refuse,
+ * a write past the end, or output written on a refusal). */
+static int wide_case(enum chacha20_impl tier, const struct wide_case *c)
+{
+    int diffs = 0;
+    uint8_t *in = wide_plain + c->in_off, *inp = wide_inp + c->in_off;
+    uint8_t *ref = wide_ref + c->out_off, *got = wide_got + c->out_off;
+    if (!wide_fits(c)) return 1;
+    wide_seed(c, in, inp, ref, got);
+
+    chacha20_select_impl(CHACHA20_IMPL_PORTABLE);
+    bool ok_ref = chacha20_encrypt(c->key, c->counter, c->nonce, in, c->len, ref);
+    if (chacha20_select_impl(tier) != (int)tier) return 1;
+    bool ok_got = chacha20_encrypt(c->key, c->counter, c->nonce, in, c->len, got);
+    bool ok_in = chacha20_encrypt(c->key, c->counter, c->nonce, inp, c->len, inp);
+    if (ok_got && c->plant < c->len) got[c->plant] ^= 1u;
+
+    diffs += wide_compare_bytes(c, ok_ref, ok_got, ok_in, in, ref, got, inp);
+    if (!wide_guard_intact(got, c->len) || !wide_guard_intact(inp, c->len))
+        diffs++;
+    return diffs;
+}
+
+static int wide_case_simple(enum chacha20_impl tier, const uint8_t *key,
+                            const uint8_t *nonce, uint32_t counter, size_t len)
+{
+    struct wide_case c = {
+        .key = key, .nonce = nonce, .counter = counter, .len = len,
+        .in_off = (len * 5u) % 7u, .out_off = (len * 3u) % 11u,
+        .plant = WIDE_NO_PLANT };
+    return wide_case(tier, &c);
+}
+
+static int wide_sweep_lengths(enum chacha20_impl tier, const uint8_t *key,
+                              const uint8_t *nonce)
+{
+    static const uint32_t counters[] = {0u, 1u, 7u, 0xdeadbee0u, 0x7fffffffu};
+    static const size_t extra[] = {1536u, 2047u, 2048u, 2111u, 2112u, 2113u,
+                                   3072u, 4096u, 8000u};
+    int diffs = 0;
+    for (size_t k = 0; k < sizeof counters / sizeof counters[0]; k++)
+        for (size_t len = 0; len <= 1100; len++)
+            diffs += wide_case_simple(tier, key, nonce, counters[k], len);
+    for (size_t i = 0; i < sizeof extra / sizeof extra[0]; i++)
+        diffs += wide_case_simple(tier, key, nonce, 1u, extra[i]);
+    return diffs;
+}
+
+/* Counters 2^32-1-k: lane counters cross the wrap, and the tier must refuse
+ * exactly where portable does, handing the last blocks to narrower code. */
+static int wide_sweep_wrap(enum chacha20_impl tier, const uint8_t *key,
+                           const uint8_t *nonce)
+{
+    static const size_t extra[] = {1536u, 2048u, 2112u, 2113u, 4096u};
+    int diffs = 0;
+    for (uint32_t k = 0; k <= 40u; k++) {
+        uint32_t counter = UINT32_MAX - k;
+        /* Only up to just past the exhaustion boundary: every refused case logs. */
+        size_t top = ((size_t)k + 3u) * 64u;
+        for (size_t len = 0; len <= 1100 && len <= top; len++)
+            diffs += wide_case_simple(tier, key, nonce, counter, len);
+        for (size_t i = 0; k > 20u && i < sizeof extra / sizeof extra[0]; i++)
+            diffs += wide_case_simple(tier, key, nonce, counter, extra[i]);
+    }
+    return diffs;
+}
+
+static int wide_sweep_random(enum chacha20_impl tier)
+{
+    int diffs = 0;
+    uint8_t key[32], nonce[12];
+    for (int trial = 0; trial < 1500; trial++) {
+        chacha_rng_fill(key, sizeof key);
+        chacha_rng_fill(nonce, sizeof nonce);
+        chacha_rng_fill(wide_plain, sizeof wide_plain);
+        uint64_t r = chacha_rng_next();
+        uint32_t counter = (uint32_t)chacha_rng_next();
+        if ((r & 15u) == 0u) counter = UINT32_MAX - (uint32_t)((r >> 8) % 70u);
+        size_t len = (size_t)(chacha_rng_next() % 4097u);
+        diffs += wide_case_simple(tier, key, nonce, counter, len);
+    }
+    return diffs;
+}
+
+/* RFC 7539 section 2.3.2 block vector, reached through chacha20_encrypt of
+ * zeros so the wide kernels (not only the scalar block) produce block 1. */
+static int wide_rfc_vector(enum chacha20_impl tier)
+{
+    static const uint8_t nonce[12] = {
+        0x00,0x00,0x00,0x09,0x00,0x00,0x00,0x4a,0x00,0x00,0x00,0x00 };
+    static const uint8_t want[64] = {
+        0x10,0xf1,0xe7,0xe4,0xd1,0x3b,0x59,0x15,0x50,0x0f,0xdd,0x1f,0xa3,0x20,0x71,0xc4,
+        0xc7,0xd1,0xf4,0xc7,0x33,0xc0,0x68,0x03,0x04,0x22,0xaa,0x9a,0xc3,0xd4,0x6c,0x4e,
+        0xd2,0x82,0x64,0x46,0x07,0x9f,0xaa,0x09,0x14,0xc2,0xd7,0x05,0xd9,0x8b,0x02,0xa2,
+        0xb5,0x12,0x9c,0xd1,0xde,0x16,0x4e,0xb9,0xcb,0xd0,0x83,0xe8,0xa2,0x50,0x3c,0x4e };
+    uint8_t key[32], zeros[1100], out[1100], block[64];
+    int diffs = 0;
+    for (size_t i = 0; i < sizeof key; i++) key[i] = (uint8_t)i;
+    memset(zeros, 0, sizeof zeros);
+    if (chacha20_select_impl(tier) != (int)tier) return 1;
+    if (!chacha20_encrypt(key, 1u, nonce, zeros, sizeof zeros, out)) return 1;
+    if (memcmp(out, want, sizeof want) != 0) diffs++;
+    for (uint32_t b = 0; b < sizeof zeros / 64u; b++) {
+        chacha20_block(key, 1u + b, nonce, block);
+        if (memcmp(out + (size_t)b * 64u, block, 64) != 0) diffs++;
+    }
+    return diffs;
+}
+
+static int wide_aead_parity(enum chacha20_impl tier, const uint8_t *key,
+                            const uint8_t *nonce)
+{
+    static const size_t lens[] = {0,1,15,16,17,63,64,65,255,256,257,511,512,
+                                  513,564,1023,1024,1025,1536,2048,4096};
+    static uint8_t ref[4096 + 16], got[4096 + 16], opened[4096];
+    int diffs = 0;
+    chacha_rng_fill(wide_plain, 4096);
+    for (size_t i = 0; i < sizeof lens / sizeof lens[0]; i++) {
+        size_t len = lens[i];
+        chacha20_select_impl(CHACHA20_IMPL_PORTABLE);
+        bool a = chacha20poly1305_encrypt(wide_plain, len, wide_plain, 17,
+                                          nonce, key, ref);
+        if (chacha20_select_impl(tier) != (int)tier) return 1;
+        bool b = chacha20poly1305_encrypt(wide_plain, len, wide_plain, 17,
+                                          nonce, key, got);
+        bool c = b && chacha20poly1305_decrypt(got, len + 16, wide_plain, 17,
+                                               nonce, key, opened);
+        if (!a || !b || !c || memcmp(ref, got, len + 16) != 0 ||
+            memcmp(opened, wide_plain, len) != 0) diffs++;
+        if (len > 0) {
+            got[len / 2] ^= 1u;
+            if (chacha20poly1305_decrypt(got, len + 16, wide_plain, 17, nonce,
+                                         key, opened)) diffs++;
+            got[len / 2] ^= 1u;
+        }
+    }
+    return diffs;
+}
+
+/* AUTO must produce bytes identical to portable and report a tier that is
+ * available (or portable). */
+static int wide_auto_equals_portable(const uint8_t *key, const uint8_t *nonce)
+{
+    int diffs = 0;
+    int tier = chacha20_select_impl(CHACHA20_IMPL_AUTO);
+    if (tier != chacha20_auto_impl()) diffs++;
+    if (tier != CHACHA20_IMPL_PORTABLE &&
+        !chacha20_tier_available((enum chacha20_impl)tier)) diffs++;
+    chacha_rng_fill(wide_plain, 1200);
+    for (size_t len = 0; len <= 1100; len++) {
+        chacha20_select_impl(CHACHA20_IMPL_PORTABLE);
+        (void)chacha20_encrypt(key, 3u, nonce, wide_plain, len, wide_ref);
+        chacha20_select_impl(CHACHA20_IMPL_AUTO);
+        (void)chacha20_encrypt(key, 3u, nonce, wide_plain, len, wide_got);
+        if (memcmp(wide_ref, wide_got, len) != 0) diffs++;
+    }
+    return diffs;
+}
+
+/* Teeth: the same comparator must see a single planted corrupted byte, at the
+ * first, a middle and the last byte, for lengths that reach each kernel. */
+static int wide_teeth(enum chacha20_impl tier, const uint8_t *key,
+                      const uint8_t *nonce)
+{
+    static const size_t lens[] = {1u, 64u, 513u, 1100u, 2112u};
+    int missed = 0;
+    chacha_rng_fill(wide_plain, sizeof wide_plain);
+    for (size_t i = 0; i < sizeof lens / sizeof lens[0]; i++) {
+        const size_t plants[3] = {0u, lens[i] / 2u, lens[i] - 1u};
+        for (size_t p = 0; p < 3; p++) {
+            struct wide_case c = {
+                .key = key, .nonce = nonce, .counter = 5u, .len = lens[i],
+                .in_off = 1u, .out_off = 3u, .plant = plants[p] };
+            if (wide_case(tier, &c) == 0) missed++;
+        }
+    }
+    return missed;
+}
+
+static int wide_check(const char *what, int diffs)
+{
+    if (diffs == 0) { printf("OK\n"); return 0; }
+    printf("FAIL (%s: %d)\n", what, diffs);
+    return 1;
+}
+
+static int wide_tier_suite(enum chacha20_impl tier, const uint8_t *key,
+                           const uint8_t *nonce)
+{
+    int failures = 0;
+    const char *name = wide_tier_name(tier);
+    if (!chacha20_tier_available(tier)) {
+        if (wide_tier_expected(tier)) {
+            printf("chacha20_isa_parity: %s tier usable on this host... FAIL (KAT disabled it)\n", name);
+            return 1;
+        }
+        printf("chacha20_isa_parity: %s tier SKIPPED (host lacks it)\n", name);
+        return 0;
+    }
+    printf("chacha20_isa_parity: %s RFC 7539 block 1 via encrypt... ", name);
+    failures += wide_check("rfc", wide_rfc_vector(tier));
+    printf("chacha20_isa_parity: %s every length 0..1100 + large, counters, unaligned, in-place... ", name);
+    failures += wide_check("lengths", wide_sweep_lengths(tier, key, nonce));
+    printf("chacha20_isa_parity: %s counters 2^32-1-k cross wrap, refusal matches portable... ", name);
+    failures += wide_check("wrap", wide_sweep_wrap(tier, key, nonce));
+    printf("chacha20_isa_parity: %s randomized keys/nonces/counters x1500... ", name);
+    failures += wide_check("random", wide_sweep_random(tier));
+    printf("chacha20_isa_parity: %s AEAD seal/open + tamper... ", name);
+    failures += wide_check("aead", wide_aead_parity(tier, key, nonce));
+    printf("chacha20_isa_parity: %s teeth: planted one-byte divergence is caught... ", name);
+    failures += wide_check("teeth-missed", wide_teeth(tier, key, nonce));
+    return failures;
+}
+
+static int chacha20_isa_wide_tiers(const uint8_t *key, const uint8_t *nonce)
+{
+    static const enum chacha20_impl tiers[] = {
+        CHACHA20_IMPL_VECTOR4, CHACHA20_IMPL_AVX2, CHACHA20_IMPL_AVX512 };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof tiers / sizeof tiers[0]; i++)
+        failures += wide_tier_suite(tiers[i], key, nonce);
+    printf("chacha20_isa_parity: AUTO equals portable bytes, resolves to a usable tier... ");
+    failures += wide_check("auto", wide_auto_equals_portable(key, nonce));
+    chacha20_select_impl(CHACHA20_IMPL_AUTO);
+    return failures;
+}
+
+/* Reported timing only (not a promotion gate): portable vs vector4 on 64 KiB. */
+static int chacha20_isa_bench_report(const uint8_t key[32],
+                                     const uint8_t nonce[12])
+{
+    int failures = 0;
+    printf("chacha20_isa_parity: reported benchmark (not a promotion gate)... ");
+    static uint8_t bench_in[65520], bench_out[65520];
+    chacha_rng_fill(bench_in, sizeof bench_in);
+    uint64_t ns[2];
+    const enum chacha20_impl impl[2] = {
+        CHACHA20_IMPL_PORTABLE, CHACHA20_IMPL_VECTOR4 };
+    for (int pass = 0; pass < 2; pass++) {
+        chacha20_select_impl(impl[pass]);
+        uint64_t start = chacha_now_ns();
+        for (int i = 0; i < 256; i++)
+            if (!chacha20_encrypt(key, 1u, nonce, bench_in,
+                                  sizeof bench_in, bench_out)) failures++;
+        ns[pass] = chacha_now_ns() - start;
+    }
+    printf("portable=%llu ns vector4=%llu ns speedup=%.2fx\n",
+           (unsigned long long)ns[0], (unsigned long long)ns[1],
+           ns[1] ? (double)ns[0] / (double)ns[1] : 0.0);
+    return failures;
+}
+
+/* Concurrent first callers of the one-time KAT must all agree on the tier. */
+static int chacha20_isa_concurrent_kat(void)
+{
+    int failures = 0;
+    printf("chacha20_isa_parity: concurrent first KAT callers converge... ");
+    enum { NPROBES = 16 };
+    pthread_t threads[NPROBES];
+    struct chacha_once_probe probes[NPROBES];
+    _Atomic unsigned ready = 0;
+    _Atomic bool start = false;
+    int created = 0;
+    for (int i = 0; i < NPROBES; i++) {
+        probes[i] = (struct chacha_once_probe){
+            .ready = &ready, .start = &start, .available = false };
+        if (pthread_create(&threads[i], NULL, chacha_once_probe_main,
+                           &probes[i]) != 0)
+            break;
+        created++;
+    }
+    while (atomic_load_explicit(&ready, memory_order_acquire) <
+           (unsigned)created)
+        sched_yield();
+    atomic_store_explicit(&start, true, memory_order_release);
+    bool converged = created == NPROBES;
+    for (int i = 0; i < created; i++) {
+        if (pthread_join(threads[i], NULL) != 0)
+            converged = false;
+    }
+    for (int i = 1; i < created; i++)
+        if (probes[i].available != probes[0].available)
+            converged = false;
+#if defined(__aarch64__) || defined(__x86_64__) || defined(_M_X64)
+    if (created == 0 || !probes[0].available)
+        converged = false;
+#endif
+    if (converged) printf("OK\n");
+    else { printf("FAIL\n"); failures++; }
+    return failures;
+}
+
 int test_chacha20_isa_parity(void)
 {
     printf("\n=== chacha20_isa_parity (portable vs four-block differential oracle) ===\n");
@@ -459,47 +825,13 @@ int test_chacha20_isa_parity(void)
     chacha_rng_fill(nonce, sizeof nonce);
     chacha_rng_fill(plain, sizeof plain);
 
-    printf("chacha20_isa_parity: concurrent first KAT callers converge... ");
-    {
-        enum { NPROBES = 16 };
-        pthread_t threads[NPROBES];
-        struct chacha_once_probe probes[NPROBES];
-        _Atomic unsigned ready = 0;
-        _Atomic bool start = false;
-        int created = 0;
-        for (int i = 0; i < NPROBES; i++) {
-            probes[i] = (struct chacha_once_probe){
-                .ready = &ready, .start = &start, .available = false };
-            if (pthread_create(&threads[i], NULL, chacha_once_probe_main,
-                               &probes[i]) != 0)
-                break;
-            created++;
-        }
-        while (atomic_load_explicit(&ready, memory_order_acquire) <
-               (unsigned)created)
-            sched_yield();
-        atomic_store_explicit(&start, true, memory_order_release);
-        bool converged = created == NPROBES;
-        for (int i = 0; i < created; i++) {
-            if (pthread_join(threads[i], NULL) != 0)
-                converged = false;
-        }
-        for (int i = 1; i < created; i++)
-            if (probes[i].available != probes[0].available)
-                converged = false;
-#if defined(__aarch64__) || defined(__x86_64__) || defined(_M_X64)
-        if (created == 0 || !probes[0].available)
-            converged = false;
-#endif
-        if (converged) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    failures += chacha20_isa_concurrent_kat();
 
     printf("chacha20_isa_parity: compiled=%s KAT-usable=%s AUTO=%s\n",
            chacha20_vector4_compiled() ? "yes" : "no",
            chacha20_vector4_available() ? "yes" : "no",
-           chacha20_select_impl(CHACHA20_IMPL_AUTO) == CHACHA20_IMPL_VECTOR4
-               ? "vector4" : "portable");
+           chacha20_select_impl(CHACHA20_IMPL_AUTO) != CHACHA20_IMPL_PORTABLE
+               ? chacha20_implementation() : "portable");
 #if defined(__aarch64__) || defined(__x86_64__) || defined(_M_X64)
     if (!chacha20_vector4_compiled() ||
         !chacha20_vector4_available()) {
@@ -507,11 +839,24 @@ int test_chacha20_isa_parity(void)
         failures++;
     }
 #endif
-    if (chacha20_select_impl(CHACHA20_IMPL_AUTO) != CHACHA20_IMPL_PORTABLE ||
-        chacha20_auto_uses_vector4() ||
-        strcmp(chacha20_implementation(), "portable C") != 0) {
-        printf("chacha20_isa_parity: AUTO promoted without benchmark receipt... FAIL\n");
-        failures++;
+    {
+        /* x86-64 AUTO takes the widest KAT-verified tier (AVX-512F > AVX2 >
+         * SSE2) under ZCL_CHACHA20_AUTO_X86_64_TIER; every other target keeps
+         * AUTO portable (Apple arm64 switch unchanged). */
+        int want_auto = CHACHA20_IMPL_PORTABLE;
+#if defined(__x86_64__)
+        for (int t = CHACHA20_IMPL_AVX512;
+             t > CHACHA20_IMPL_PORTABLE && want_auto == CHACHA20_IMPL_PORTABLE; t--)
+            if (chacha20_tier_available((enum chacha20_impl)t)) want_auto = t;
+#endif
+        bool uses = want_auto != CHACHA20_IMPL_PORTABLE;
+        if (chacha20_select_impl(CHACHA20_IMPL_AUTO) != want_auto ||
+            chacha20_auto_uses_vector4() != uses ||
+            (!uses && strcmp(chacha20_implementation(), "portable C") != 0) ||
+            (uses && strcmp(chacha20_implementation(), "portable C") == 0)) {
+            printf("chacha20_isa_parity: AUTO does not match the benchmarked promotion... FAIL\n");
+            failures++;
+        }
     }
 
     printf("chacha20_isa_parity: complete RFC 7539 block vector... ");
@@ -612,26 +957,8 @@ int test_chacha20_isa_parity(void)
 
     failures += rfc8439_vectors();
 
-    printf("chacha20_isa_parity: reported benchmark (not a promotion gate)... ");
-    {
-        static uint8_t bench_in[65520], bench_out[65520];
-        chacha_rng_fill(bench_in, sizeof bench_in);
-        uint64_t ns[2];
-        const enum chacha20_impl impl[2] = {
-            CHACHA20_IMPL_PORTABLE, CHACHA20_IMPL_VECTOR4 };
-        for (int pass = 0; pass < 2; pass++) {
-            chacha20_select_impl(impl[pass]);
-            uint64_t start = chacha_now_ns();
-            for (int i = 0; i < 256; i++)
-                if (!chacha20_encrypt(key, 1u, nonce, bench_in,
-                                      sizeof bench_in, bench_out)) failures++;
-            ns[pass] = chacha_now_ns() - start;
-        }
-        printf("portable=%llu ns vector4=%llu ns speedup=%.2fx\n",
-               (unsigned long long)ns[0], (unsigned long long)ns[1],
-               ns[1] ? (double)ns[0] / (double)ns[1] : 0.0);
-    }
-
+    failures += chacha20_isa_bench_report(key, nonce);
+    failures += chacha20_isa_wide_tiers(key, nonce);
     chacha20_select_impl(CHACHA20_IMPL_AUTO);
     printf("chacha20_isa_parity: %d failure(s)\n", failures);
     return failures;

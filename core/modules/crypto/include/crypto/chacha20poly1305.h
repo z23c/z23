@@ -24,21 +24,36 @@ bool chacha20_encrypt(const uint8_t key[32], uint32_t counter,
                        const uint8_t *plaintext, size_t len,
                        uint8_t *ciphertext);
 
-/* Select the four-stream bulk implementation used by chacha20_encrypt().
- * VECTOR4 is arm64 NEON or x86-64 SSE2 and is installed only after a one-time
- * portable-oracle KAT. A request can narrow to PORTABLE but cannot override a
- * failed KAT. AUTO is the production default. The scalar chacha20_block()
- * remains the frozen oracle on every platform. */
+/* Select the bulk implementation used by chacha20_encrypt(). Tiers are
+ * VECTOR4 (arm64 NEON or x86-64 SSE2, four blocks), AVX2 (eight blocks) and
+ * AVX512 (AVX-512F, sixteen blocks); the x86 wide tiers are gated by the audited
+ * simd_dispatch predicates (CPUID plus XCR0). Each tier is installed only after
+ * a one-time portable-oracle KAT; a divergent byte disables that tier for the
+ * life of the process. A request can narrow to a tier but cannot override a
+ * failed KAT or an unusable host: the call returns the tier actually selected
+ * (PORTABLE when the requested one is unavailable). A selected tier handles
+ * whole wide blocks, then hands the tail and the last blocks before counter
+ * wrap to the next narrower tier and finally the portable code. AUTO is the
+ * production default. The scalar chacha20_block() remains the frozen oracle on
+ * every platform. */
 enum chacha20_impl {
     CHACHA20_IMPL_AUTO = -1,
     CHACHA20_IMPL_PORTABLE = 0,
     CHACHA20_IMPL_VECTOR4 = 1,
+    CHACHA20_IMPL_AVX2 = 2,
+    CHACHA20_IMPL_AVX512 = 3,
 };
 int chacha20_select_impl(enum chacha20_impl which);
 bool chacha20_vector4_compiled(void);
 /* Stable KAT usability query. Concurrent first callers converge through the
  * one-time KAT; this never reports a transient "unavailable while testing". */
 bool chacha20_vector4_available(void);
+/* Per-tier forms of the same queries (PORTABLE is always compiled/available). */
+bool chacha20_tier_compiled(enum chacha20_impl tier);
+bool chacha20_tier_available(enum chacha20_impl tier);
+/* The tier AUTO resolves to on this host (an enum chacha20_impl value). */
+int chacha20_auto_impl(void);
+/* True when AUTO resolves to any non-portable tier. */
 bool chacha20_auto_uses_vector4(void);
 const char *chacha20_implementation(void);
 

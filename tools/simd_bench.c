@@ -80,6 +80,7 @@ static int      g_pin_cpu = -1;
 static bool     g_csv = false;
 static bool     g_chacha_only = false;
 static bool     g_require_chacha_wins = false;
+static bool     g_allow_promoted_auto = false;
 static unsigned g_failures = 0;
 static unsigned g_promotion_refusals = 0;
 
@@ -735,8 +736,8 @@ static void bench_equihash_blake2b(void)
 
 static uint8_t g_chacha_plain[CHACHA_BENCH_MAX_PLAIN];
 static uint8_t g_chacha_aad[CHACHA_BENCH_MAX_AAD];
-static uint8_t g_chacha_sealed[2][CHACHA_BENCH_MAX_PLAIN + POLY1305_TAG_SIZE];
-static uint8_t g_chacha_opened[2][CHACHA_BENCH_MAX_PLAIN];
+static uint8_t g_chacha_sealed[MAX_TIERS][CHACHA_BENCH_MAX_PLAIN + POLY1305_TAG_SIZE];
+static uint8_t g_chacha_opened[MAX_TIERS][CHACHA_BENCH_MAX_PLAIN];
 
 struct chacha_aead_ctx {
     size_t plen;
@@ -801,38 +802,124 @@ static bool chacha_promotion_sample_passes(const struct tier_result *portable,
            vector->max_ns < portable->max_ns && every_pair_won;
 }
 
+struct chacha_tier_desc {
+    enum chacha20_impl impl;
+    const char *name;
+};
+
+static const struct chacha_tier_desc g_chacha_tiers[MAX_TIERS] = {
+    {CHACHA20_IMPL_PORTABLE, "generic (portable C)"},
+#if defined(__aarch64__)
+    {CHACHA20_IMPL_VECTOR4, "NEON four-block"},
+#else
+    {CHACHA20_IMPL_VECTOR4, "SSE2 four-block"},
+#endif
+    {CHACHA20_IMPL_AVX2, "AVX2 eight-block"},
+    {CHACHA20_IMPL_AVX512, "AVX-512F sixteen-block"},
+};
+
+#if defined(__x86_64__) || defined(_M_X64)
+#define CHACHA_BENCH_NTIERS 4
+#else
+#define CHACHA_BENCH_NTIERS 2
+#endif
+
+static bool chacha_run_one(const struct chacha_aead_ctx *c, size_t plen,
+                           size_t aad_len)
+{
+    return c->open
+        ? chacha20poly1305_decrypt(
+              c->sealed, plen + POLY1305_TAG_SIZE,
+              g_chacha_aad, aad_len, c->nonce, c->key, c->opened)
+        : chacha20poly1305_encrypt(
+              g_chacha_plain, plen, g_chacha_aad, aad_len,
+              c->nonce, c->key, c->sealed);
+}
+
+/* Verify tier `t` against the portable result before it may be timed. */
+static void chacha_verify_tier(struct bench *b, struct chacha_aead_ctx *ctx,
+                               int t, size_t plen, size_t aad_len, bool open,
+                               bool portable_ok)
+{
+    b->tier[t].available =
+        chacha20_select_impl(g_chacha_tiers[t].impl) == (int)g_chacha_tiers[t].impl;
+    if (!b->tier[t].available)
+        return;
+    bool ok = chacha_run_one(&ctx[t], plen, aad_len);
+    const uint8_t *want = open ? ctx[0].opened : ctx[0].sealed;
+    const uint8_t *got = open ? ctx[t].opened : ctx[t].sealed;
+    size_t compare_len = open ? plen : plen + POLY1305_TAG_SIZE;
+    if (!portable_ok || !ok || memcmp(got, want, compare_len) != 0)
+        parity_fail(b->primitive, b->tier[t].name, got, want, compare_len);
+    else
+        b->tier[t].verified = true;
+}
+
+/* Rotated paired schedule over every verified tier: each repetition times each
+ * active tier once, the starting tier advancing by one so no tier always runs
+ * first or last. won[t] records whether tier t beat portable in every pair. */
+static void chacha_time_tiers(struct bench *b, struct chacha_aead_ctx *ctx,
+                              const int *active, int n, long inner,
+                              bool *won)
+{
+    uint64_t samples[MAX_TIERS][BENCH_MAX_REPS];
+    for (int warm = 0; warm < 7; warm++)
+        for (int k = 0; k < n; k++) {
+            int t = active[(warm + k) % n];
+            (void)chacha_time_selected(g_chacha_tiers[t].impl, inner, &ctx[t]);
+        }
+    for (int i = 0; i < n; i++)
+        won[active[i]] = true;
+    for (int rep = 0; rep < g_reps; rep++) {
+        for (int k = 0; k < n; k++) {
+            int t = active[(rep + k) % n];
+            samples[t][rep] = chacha_time_selected(
+                g_chacha_tiers[t].impl, inner, &ctx[t]);
+        }
+        for (int i = 1; i < n; i++)
+            if (samples[active[i]][rep] >= samples[0][rep])
+                won[active[i]] = false;
+    }
+    for (int i = 0; i < n; i++) {
+        if (ctx[active[i]].failed) {
+            fprintf(stderr, "FATAL: %s AEAD %s failed during timing.\n",
+                    b->primitive, ctx[active[i]].open ? "open" : "seal");
+            g_failures++;
+            for (int j = 0; j < n; j++)
+                b->tier[active[j]].verified = false;
+            return;
+        }
+    }
+    for (int i = 0; i < n; i++)
+        record_tier_samples(&b->tier[active[i]], b, samples[active[i]]);
+}
+
 static void bench_chacha_aead_row(const char *label, size_t plen,
                                   size_t aad_len, long inner, bool open)
 {
-    bool every_pair_won = false;
+    bool won[MAX_TIERS] = {false};
     struct bench b = {
         .primitive = label,
         .unit = open ? "opens" : "seals",
         .inner = inner,
         .bytes_per_op = (double)plen,
-        .ntiers = 2,
+        .ntiers = CHACHA_BENCH_NTIERS,
     };
-    b.tier[0].name = "generic (portable C)";
-#if defined(__aarch64__)
-    b.tier[1].name = "NEON four-block";
-#elif defined(__x86_64__) || defined(_M_X64)
-    b.tier[1].name = "SSE2 four-block";
-#else
-    b.tier[1].name = "vector4";
-#endif
+    for (int t = 0; t < b.ntiers; t++)
+        b.tier[t].name = g_chacha_tiers[t].name;
 
-    struct chacha_aead_ctx ctx[2];
+    struct chacha_aead_ctx ctx[MAX_TIERS];
     memset(ctx, 0, sizeof ctx);
-    for (int tier = 0; tier < 2; tier++) {
-        ctx[tier].plen = plen;
-        ctx[tier].aad_len = aad_len;
-        ctx[tier].sealed = g_chacha_sealed[tier];
-        ctx[tier].opened = g_chacha_opened[tier];
-        ctx[tier].open = open;
-        for (size_t i = 0; i < sizeof ctx[tier].key; i++)
-            ctx[tier].key[i] = (uint8_t)(i * 29u + 7u);
-        for (size_t i = 0; i < sizeof ctx[tier].nonce; i++)
-            ctx[tier].nonce[i] = (uint8_t)(i * 17u + 3u);
+    for (int t = 0; t < b.ntiers; t++) {
+        ctx[t].plen = plen;
+        ctx[t].aad_len = aad_len;
+        ctx[t].sealed = g_chacha_sealed[t];
+        ctx[t].opened = g_chacha_opened[t];
+        ctx[t].open = open;
+        for (size_t i = 0; i < sizeof ctx[t].key; i++)
+            ctx[t].key[i] = (uint8_t)(i * 29u + 7u);
+        for (size_t i = 0; i < sizeof ctx[t].nonce; i++)
+            ctx[t].nonce[i] = (uint8_t)(i * 17u + 3u);
     }
 
     b.tier[0].available =
@@ -844,8 +931,8 @@ static void bench_chacha_aead_row(const char *label, size_t plen,
                                  ctx[0].nonce, ctx[0].key,
                                  ctx[0].sealed);
     if (portable_ok && open) {
-        memcpy(ctx[1].sealed, ctx[0].sealed,
-               plen + POLY1305_TAG_SIZE);
+        for (int t = 1; t < b.ntiers; t++)
+            memcpy(ctx[t].sealed, ctx[0].sealed, plen + POLY1305_TAG_SIZE);
         portable_ok = chacha20poly1305_decrypt(
             ctx[0].sealed, plen + POLY1305_TAG_SIZE,
             g_chacha_aad, aad_len, ctx[0].nonce, ctx[0].key,
@@ -853,94 +940,52 @@ static void bench_chacha_aead_row(const char *label, size_t plen,
             memcmp(ctx[0].opened, g_chacha_plain, plen) == 0;
     }
     b.tier[0].verified = portable_ok;
+    for (int t = 1; t < b.ntiers; t++)
+        chacha_verify_tier(&b, ctx, t, plen, aad_len, open, portable_ok);
 
-    b.tier[1].available =
-        chacha20_select_impl(CHACHA20_IMPL_VECTOR4) ==
-        CHACHA20_IMPL_VECTOR4;
-    if (b.tier[1].available) {
-        bool vector_ok = open
-            ? chacha20poly1305_decrypt(
-                  ctx[1].sealed, plen + POLY1305_TAG_SIZE,
-                  g_chacha_aad, aad_len, ctx[1].nonce, ctx[1].key,
-                  ctx[1].opened)
-            : chacha20poly1305_encrypt(
-                  g_chacha_plain, plen, g_chacha_aad, aad_len,
-                  ctx[1].nonce, ctx[1].key, ctx[1].sealed);
-        const uint8_t *want = open ? ctx[0].opened : ctx[0].sealed;
-        const uint8_t *got = open ? ctx[1].opened : ctx[1].sealed;
-        size_t compare_len = open ? plen : plen + POLY1305_TAG_SIZE;
-        if (!portable_ok || !vector_ok ||
-            memcmp(got, want, compare_len) != 0) {
-            parity_fail(b.primitive, b.tier[1].name,
-                        got, want, compare_len);
-        } else {
-            b.tier[1].verified = true;
+    int active[MAX_TIERS], n = 0, widest = 0;
+    for (int t = 0; t < b.ntiers; t++)
+        if (b.tier[t].available && b.tier[t].verified) {
+            active[n++] = t;
+            widest = t;
         }
-    }
-
-    if (b.tier[0].verified && b.tier[1].verified) {
-        uint64_t samples[2][BENCH_MAX_REPS];
-        every_pair_won = true;
-
-        /* Seven discarded paired warmups let page faults, allocator arenas,
-         * frequency state, and instruction/data caches converge. */
-        for (int warm = 0; warm < 7; warm++) {
-            int first = warm & 1;
-            (void)chacha_time_selected(first ? CHACHA20_IMPL_VECTOR4
-                                             : CHACHA20_IMPL_PORTABLE,
-                                       inner, &ctx[first]);
-            (void)chacha_time_selected(first ? CHACHA20_IMPL_PORTABLE
-                                             : CHACHA20_IMPL_VECTOR4,
-                                       inner, &ctx[1 - first]);
-        }
-
-        for (int rep = 0; rep < g_reps; rep++) {
-            int first = rep & 1;
-            enum chacha20_impl first_impl = first
-                ? CHACHA20_IMPL_VECTOR4 : CHACHA20_IMPL_PORTABLE;
-            enum chacha20_impl second_impl = first
-                ? CHACHA20_IMPL_PORTABLE : CHACHA20_IMPL_VECTOR4;
-            samples[first][rep] = chacha_time_selected(
-                first_impl, inner, &ctx[first]);
-            samples[1 - first][rep] = chacha_time_selected(
-                second_impl, inner, &ctx[1 - first]);
-            if (samples[1][rep] >= samples[0][rep])
-                every_pair_won = false;
-        }
-        if (ctx[0].failed || ctx[1].failed) {
-            fprintf(stderr, "FATAL: %s AEAD %s failed during timing.\n",
-                    b.primitive, open ? "open" : "seal");
-            g_failures++;
-            b.tier[0].verified = false;
-            b.tier[1].verified = false;
-        } else {
-            record_tier_samples(&b.tier[0], &b, samples[0]);
-            record_tier_samples(&b.tier[1], &b, samples[1]);
-        }
+    if (b.tier[0].verified && n > 1) {
+        chacha_time_tiers(&b, ctx, active, n, inner, won);
     } else if (b.tier[0].verified) {
         chacha20_select_impl(CHACHA20_IMPL_PORTABLE);
         time_tier(&b.tier[0], &b, chacha_aead_body, &ctx[0]);
     }
 
+    /* The promotion gate judges the tier AUTO resolves to; while AUTO is
+     * portable it judges the widest verified tier, i.e. the candidate. */
+    int gate = widest;
+    int auto_impl = chacha20_auto_impl();
+    for (int t = 1; t < b.ntiers; t++)
+        if ((int)g_chacha_tiers[t].impl == auto_impl)
+            gate = t;
     chacha20_select_impl(CHACHA20_IMPL_AUTO);
     report(&b);
     if (g_require_chacha_wins &&
-        !chacha_promotion_sample_passes(&b.tier[0], &b.tier[1],
-                                         every_pair_won)) {
+        !chacha_promotion_sample_passes(&b.tier[0], &b.tier[gate], won[gate])) {
         fprintf(stderr,
                 "PROMOTION REFUSAL: %s did not achieve >=5%% p50/p95, "
-                "strict max, and every-pair wins.\n", b.primitive);
+                "strict max, and every-pair wins for tier '%s'.\n",
+                b.primitive, b.tier[gate].name);
         g_promotion_refusals++;
     }
-    if (!g_csv && b.tier[0].verified && b.tier[1].verified) {
-        bool p95_win = b.tier[1].p95_ns < b.tier[0].p95_ns;
-        bool worst_win = b.tier[1].max_ns < b.tier[0].max_ns;
-        printf("  paired sample    : p95=%s worst=%s AUTO=%s "
-               "(measurement only; 3 physical runs required)\n",
-               p95_win ? "VECTOR-WIN" : "NO-WIN",
-               worst_win ? "VECTOR-WIN" : "NO-WIN",
-               chacha20_auto_uses_vector4() ? "vector4" : "portable");
-    }
+    if (!g_csv && b.tier[0].verified)
+        for (int t = 1; t < b.ntiers; t++) {
+            if (!b.tier[t].verified || !b.tier[0].verified ||
+                !b.tier[t].available)
+                continue;
+            printf("  paired sample    : %-22s p95=%s worst=%s every-pair=%s "
+                   "AUTO-selected=%s (measurement only; 3 physical runs required)\n",
+                   b.tier[t].name,
+                   b.tier[t].p95_ns < b.tier[0].p95_ns ? "WIN" : "NO-WIN",
+                   b.tier[t].max_ns < b.tier[0].max_ns ? "WIN" : "NO-WIN",
+                   won[t] ? "WIN" : "NO-WIN",
+                   auto_impl == (int)g_chacha_tiers[t].impl ? "yes" : "no");
+        }
 }
 
 static void bench_chacha_aead(void)
@@ -1185,12 +1230,14 @@ static void bench_fp(int chains)
 static void usage(const char *argv0)
 {
     printf("usage: %s [--cpu=N] [--reps=N] [--csv] [--chacha-only] "
-           "[--require-chacha-wins] [--self-test]\n\n", argv0);
+           "[--require-chacha-wins] [--allow-promoted-auto] [--self-test]\n\n", argv0);
     printf("  --cpu=N      pin to logical CPU N (default 0)\n");
     printf("  --reps=N     repetitions per tier (default %d, max %d)\n",
            BENCH_REPS_DEFAULT, BENCH_MAX_REPS);
     printf("  --csv        machine-readable output\n");
     printf("  --chacha-only  run only caller-shaped ChaCha20-Poly1305 rows\n");
+    printf("  --allow-promoted-auto  post-promotion receipt: tiers are forced, so\n");
+    printf("                         AUTO already being vector-selected is not refused\n");
     printf("  --require-chacha-wins  exit 2 unless every ChaCha row meets the\n");
     printf("                 documented per-run promotion-candidate thresholds\n");
     printf("  --self-test  prove the parity checker can FAIL, then exit\n\n");
@@ -1266,6 +1313,25 @@ static int self_test(void)
     return 0;
 }
 
+/* Refuse flag combinations that would make a receipt meaningless. */
+static int bench_preflight(void)
+{
+    if (g_require_chacha_wins && !g_chacha_only) {
+        fprintf(stderr,
+                "--require-chacha-wins requires --chacha-only so unrelated "
+                "timings cannot obscure the receipt.\n");
+        return 1;
+    }
+    if (g_require_chacha_wins && !g_allow_promoted_auto &&
+        chacha20_auto_uses_vector4()) {
+        fprintf(stderr,
+                "PROMOTION REFUSAL: AUTO is already vector-selected; this "
+                "pre-promotion measurement must start portable.\n");
+        return 2;
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     for (int i = 1; i < argc; i++) {
@@ -1273,6 +1339,8 @@ int main(int argc, char **argv)
         else if (strncmp(argv[i], "--reps=", 7) == 0) g_reps = atoi(argv[i] + 7);
         else if (strcmp(argv[i], "--csv") == 0)       g_csv = true;
         else if (strcmp(argv[i], "--chacha-only") == 0) g_chacha_only = true;
+        else if (strcmp(argv[i], "--allow-promoted-auto") == 0)
+            g_allow_promoted_auto = true;
         else if (strcmp(argv[i], "--require-chacha-wins") == 0)
             g_require_chacha_wins = true;
         else if (strcmp(argv[i], "--self-test") == 0) return self_test();
@@ -1280,18 +1348,8 @@ int main(int argc, char **argv)
     }
     if (g_reps < 3) g_reps = 3;
     if (g_reps > BENCH_MAX_REPS) g_reps = BENCH_MAX_REPS;
-    if (g_require_chacha_wins && !g_chacha_only) {
-        fprintf(stderr,
-                "--require-chacha-wins requires --chacha-only so unrelated "
-                "timings cannot obscure the receipt.\n");
-        return 1;
-    }
-    if (g_require_chacha_wins && chacha20_auto_uses_vector4()) {
-        fprintf(stderr,
-                "PROMOTION REFUSAL: AUTO is already vector-selected; this "
-                "pre-promotion measurement must start portable.\n");
-        return 2;
-    }
+    int refused = bench_preflight();
+    if (refused) return refused;
 
     /* Default pin: CPU 0. Deliberately a fixed, documented choice rather than
      * "wherever we happen to be" — comparability across runs matters more than

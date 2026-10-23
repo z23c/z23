@@ -535,6 +535,7 @@ ZCL_WINDOWS_ACCEPTANCE_native_optimal_SOURCES := \
 	core/modules/crypto/src/x25519_safe.c \
 	core/modules/crypto/src/curve25519.c \
 	core/modules/crypto/src/chacha20poly1305.c \
+	core/modules/crypto/src/simd_dispatch.c \
 	core/modules/crypto/src/random_secret.c \
 	core/modules/core/src/random.c \
 	core/modules/core/src/utiltime.c \
