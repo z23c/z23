@@ -139,6 +139,19 @@ static bool batch_compiler_arg_safe(const struct zcc_epoch_batch_bytes *arg,
     return true;
 }
 
+static bool batch_path_segment_safe(const struct zcc_epoch_batch_bytes *path,
+                                    size_t component, size_t length)
+{
+    if (length == 0)
+        return false;
+    if (length == 1 && path->data[component] == '.')
+        return false;
+    if (length == 2 && path->data[component] == '.' &&
+        path->data[component + 1u] == '.')
+        return false;
+    return true;
+}
+
 static bool batch_path_is_relative(const struct zcc_epoch_batch_bytes *path)
 {
     if (!batch_field_is_text(path) ||
@@ -153,10 +166,7 @@ static bool batch_path_is_relative(const struct zcc_epoch_batch_bytes *path)
         if (i != path->length && path->data[i] != '/')
             continue;
         size_t length = (size_t)i - component;
-        if (length == 0 ||
-            (length == 1 && path->data[component] == '.') ||
-            (length == 2 && path->data[component] == '.' &&
-             path->data[component + 1u] == '.'))
+        if (!batch_path_segment_safe(path, component, length))
             return false;
         component = (size_t)i + 1u;
     }
@@ -216,8 +226,8 @@ static bool batch_args_reserve(struct zcc_epoch_batch_manifest *manifest,
     return true;
 }
 
-static enum zcc_epoch_batch_result batch_read_bindings(
-    struct batch_reader *reader, struct zcc_epoch_batch_manifest *manifest)
+static enum zcc_epoch_batch_result batch_read_magic(
+    struct batch_reader *reader)
 {
     struct zcc_epoch_batch_bytes magic = {0};
     uint32_t version = 0;
@@ -230,6 +240,31 @@ static enum zcc_epoch_batch_result batch_read_bindings(
     if (version != ZCC_EPOCH_BATCH_VERSION)
         return batch_fail(reader, ZCC_EPOCH_BATCH_UNSUPPORTED_VERSION,
                           UINT32_MAX);
+    return ZCC_EPOCH_BATCH_OK;
+}
+
+static bool batch_bindings_invalid(
+    const struct zcc_epoch_batch_manifest *manifest)
+{
+    return !batch_field_is_text(&manifest->profile) ||
+           manifest->profile.length > ZCC_EPOCH_BATCH_MAX_PROFILE ||
+           manifest->source_id.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
+           manifest->source_complete != 1u ||
+           manifest->mutation.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
+           manifest->epoch.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
+           manifest->compiler_id.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
+           manifest->environment_root.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
+           manifest->build_root.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
+           !batch_path_is_relative(&manifest->session) ||
+           !batch_path_is_in_epoch(&manifest->session, &manifest->epoch);
+}
+
+static enum zcc_epoch_batch_result batch_read_bindings(
+    struct batch_reader *reader, struct zcc_epoch_batch_manifest *manifest)
+{
+    enum zcc_epoch_batch_result result = batch_read_magic(reader);
+    if (result != ZCC_EPOCH_BATCH_OK)
+        return result;
     if (!batch_read_field(reader, &manifest->profile) ||
         !batch_read_field(reader, &manifest->source_id) ||
         !batch_read_u32(reader, &manifest->source_complete) ||
@@ -240,18 +275,19 @@ static enum zcc_epoch_batch_result batch_read_bindings(
         !batch_read_field(reader, &manifest->build_root) ||
         !batch_read_field(reader, &manifest->session))
         return batch_field_failure(reader, UINT32_MAX);
-    if (!batch_field_is_text(&manifest->profile) ||
-        manifest->profile.length > ZCC_EPOCH_BATCH_MAX_PROFILE ||
-        manifest->source_id.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
-        manifest->source_complete != 1u ||
-        manifest->mutation.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
-        manifest->epoch.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
-        manifest->compiler_id.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
-        manifest->environment_root.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
-        manifest->build_root.length != ZCC_EPOCH_BATCH_ROOT_BYTES ||
-        !batch_path_is_relative(&manifest->session) ||
-        !batch_path_is_in_epoch(&manifest->session, &manifest->epoch))
+    if (batch_bindings_invalid(manifest))
         return batch_fail(reader, ZCC_EPOCH_BATCH_AUTHORITY, UINT32_MAX);
+    return ZCC_EPOCH_BATCH_OK;
+}
+
+static enum zcc_epoch_batch_result batch_read_arg(
+    struct batch_reader *reader, struct zcc_epoch_batch_bytes *arg,
+    bool command, uint32_t job_index)
+{
+    if (!batch_read_field(reader, arg))
+        return batch_field_failure(reader, job_index);
+    if (!batch_compiler_arg_safe(arg, command))
+        return batch_fail(reader, ZCC_EPOCH_BATCH_ARGV, job_index);
     return ZCC_EPOCH_BATCH_OK;
 }
 
@@ -272,10 +308,35 @@ static enum zcc_epoch_batch_result batch_read_common_args(
             return batch_fail(reader, ZCC_EPOCH_BATCH_ALLOCATION, UINT32_MAX);
     }
     for (uint32_t i = 0; i < manifest->common_argc; ++i) {
-        if (!batch_read_field(reader, &manifest->common_argv[i]))
-            return batch_field_failure(reader, UINT32_MAX);
-        if (!batch_compiler_arg_safe(&manifest->common_argv[i], i == 0))
-            return batch_fail(reader, ZCC_EPOCH_BATCH_ARGV, UINT32_MAX);
+        enum zcc_epoch_batch_result result = batch_read_arg(
+            reader, &manifest->common_argv[i], i == 0, UINT32_MAX);
+        if (result != ZCC_EPOCH_BATCH_OK)
+            return result;
+    }
+    return ZCC_EPOCH_BATCH_OK;
+}
+
+static bool batch_job_paths_ok(const struct zcc_epoch_batch_manifest *manifest,
+                               const struct zcc_epoch_batch_job *job)
+{
+    return batch_path_is_relative(&job->source) &&
+           batch_path_is_relative(&job->output) &&
+           batch_path_is_relative(&job->depfile) &&
+           batch_path_is_in_epoch(&job->output, &manifest->epoch) &&
+           batch_path_is_in_epoch(&job->depfile, &manifest->epoch) &&
+           batch_depfile_matches_output(&job->output, &job->depfile);
+}
+
+static enum zcc_epoch_batch_result batch_read_job_argv(
+    struct batch_reader *reader, struct zcc_epoch_batch_manifest *manifest,
+    uint32_t job_index, uint32_t count)
+{
+    for (uint32_t i = 0; i < count; ++i) {
+        enum zcc_epoch_batch_result result = batch_read_arg(
+            reader, &manifest->job_argv[manifest->job_argc], false, job_index);
+        if (result != ZCC_EPOCH_BATCH_OK)
+            return result;
+        manifest->job_argc++;
     }
     return ZCC_EPOCH_BATCH_OK;
 }
@@ -292,12 +353,7 @@ static enum zcc_epoch_batch_result batch_read_job(
         !batch_read_u32(reader, &mode) ||
         !batch_read_u32(reader, &job->argv_count))
         return batch_field_failure(reader, job_index);
-    if (!batch_path_is_relative(&job->source) ||
-        !batch_path_is_relative(&job->output) ||
-        !batch_path_is_relative(&job->depfile) ||
-        !batch_path_is_in_epoch(&job->output, &manifest->epoch) ||
-        !batch_path_is_in_epoch(&job->depfile, &manifest->epoch) ||
-        !batch_depfile_matches_output(&job->output, &job->depfile))
+    if (!batch_job_paths_ok(manifest, job))
         return batch_fail(reader, ZCC_EPOCH_BATCH_PATH, job_index);
     if (mode != ZCC_EPOCH_BATCH_DEP && mode != ZCC_EPOCH_BATCH_COVERAGE)
         return batch_fail(reader, ZCC_EPOCH_BATCH_FORMAT, job_index);
@@ -310,15 +366,7 @@ static enum zcc_epoch_batch_result batch_read_job(
     uint32_t needed = manifest->job_argc + job->argv_count;
     if (!batch_args_reserve(manifest, needed, argv_capacity))
         return batch_fail(reader, ZCC_EPOCH_BATCH_ALLOCATION, job_index);
-    for (uint32_t i = 0; i < job->argv_count; ++i) {
-        if (!batch_read_field(reader, &manifest->job_argv[manifest->job_argc]))
-            return batch_field_failure(reader, job_index);
-        if (!batch_compiler_arg_safe(
-                &manifest->job_argv[manifest->job_argc], false))
-            return batch_fail(reader, ZCC_EPOCH_BATCH_ARGV, job_index);
-        manifest->job_argc++;
-    }
-    return ZCC_EPOCH_BATCH_OK;
+    return batch_read_job_argv(reader, manifest, job_index, job->argv_count);
 }
 
 static int batch_destination_compare(const void *left, const void *right)
@@ -446,12 +494,7 @@ static enum zcc_epoch_batch_result batch_manifest_validate_job(
     uint32_t expected_offset, struct zcc_epoch_batch_error *error)
 {
     const struct zcc_epoch_batch_job *job = &manifest->jobs[i];
-    if (!batch_path_is_relative(&job->source) ||
-        !batch_path_is_relative(&job->output) ||
-        !batch_path_is_relative(&job->depfile) ||
-        !batch_path_is_in_epoch(&job->output, &manifest->epoch) ||
-        !batch_path_is_in_epoch(&job->depfile, &manifest->epoch) ||
-        !batch_depfile_matches_output(&job->output, &job->depfile))
+    if (!batch_job_paths_ok(manifest, job))
         return batch_manifest_fail(error, ZCC_EPOCH_BATCH_PATH, i);
     if (job->mode != ZCC_EPOCH_BATCH_DEP &&
         job->mode != ZCC_EPOCH_BATCH_COVERAGE)
@@ -523,28 +566,42 @@ static bool batch_size_field(size_t *total,
            batch_size_add(total, 4u + (size_t)field->length);
 }
 
-static bool batch_manifest_size(
-    const struct zcc_epoch_batch_manifest *manifest, size_t *size)
+static bool batch_size_header(size_t *total,
+                              const struct zcc_epoch_batch_manifest *manifest)
 {
     const struct zcc_epoch_batch_bytes magic = {
         .data = batch_magic, .length = (uint32_t)(sizeof(batch_magic) - 1u)};
-    size_t total = 0;
-    if (!batch_size_field(&total, &magic) || !batch_size_add(&total, 4u) ||
-        !batch_size_field(&total, &manifest->profile) ||
-        !batch_size_field(&total, &manifest->source_id) ||
-        !batch_size_add(&total, 4u) ||
-        !batch_size_field(&total, &manifest->mutation) ||
-        !batch_size_field(&total, &manifest->epoch) ||
-        !batch_size_field(&total, &manifest->compiler_id) ||
-        !batch_size_field(&total, &manifest->environment_root) ||
-        !batch_size_field(&total, &manifest->build_root) ||
-        !batch_size_field(&total, &manifest->session) ||
-        !batch_size_add(&total, 4u))
+    if (!batch_size_field(total, &magic) || !batch_size_add(total, 4u) ||
+        !batch_size_field(total, &manifest->profile) ||
+        !batch_size_field(total, &manifest->source_id) ||
+        !batch_size_add(total, 4u) ||
+        !batch_size_field(total, &manifest->mutation) ||
+        !batch_size_field(total, &manifest->epoch) ||
+        !batch_size_field(total, &manifest->compiler_id) ||
+        !batch_size_field(total, &manifest->environment_root) ||
+        !batch_size_field(total, &manifest->build_root) ||
+        !batch_size_field(total, &manifest->session) ||
+        !batch_size_add(total, 4u))
         return false;
+    return true;
+}
+
+static bool batch_size_common_args(
+    size_t *total, const struct zcc_epoch_batch_manifest *manifest)
+{
     for (uint32_t i = 0; i < manifest->common_argc; ++i)
-        if (!batch_size_field(&total, &manifest->common_argv[i]))
+        if (!batch_size_field(total, &manifest->common_argv[i]))
             return false;
-    if (!batch_size_add(&total, 4u))
+    return true;
+}
+
+static bool batch_manifest_size(
+    const struct zcc_epoch_batch_manifest *manifest, size_t *size)
+{
+    size_t total = 0;
+    if (!batch_size_header(&total, manifest) ||
+        !batch_size_common_args(&total, manifest) ||
+        !batch_size_add(&total, 4u))
         return false;
     for (uint32_t i = 0; i < manifest->job_count; ++i) {
         const struct zcc_epoch_batch_job *job = &manifest->jobs[i];
@@ -582,6 +639,44 @@ static bool batch_write_field(struct batch_writer *writer,
     return true;
 }
 
+static enum zcc_epoch_batch_result batch_read_jobs(
+    struct batch_reader *reader, struct zcc_epoch_batch_manifest *out)
+{
+    if (!batch_read_u32(reader, &out->job_count))
+        return batch_fail(reader, ZCC_EPOCH_BATCH_TRUNCATED, UINT32_MAX);
+    if (out->job_count == 0 || out->job_count > ZCC_EPOCH_BATCH_MAX_JOBS)
+        return batch_fail(reader, ZCC_EPOCH_BATCH_JOB_COUNT, UINT32_MAX);
+    out->jobs = zcl_calloc(out->job_count, sizeof(*out->jobs),
+                           "zcc.epoch_batch.jobs");
+    if (!out->jobs)
+        return batch_fail(reader, ZCC_EPOCH_BATCH_ALLOCATION, UINT32_MAX);
+    uint32_t argv_capacity = 0;
+    for (uint32_t i = 0; i < out->job_count; ++i) {
+        enum zcc_epoch_batch_result result =
+            batch_read_job(reader, out, i, &argv_capacity);
+        if (result != ZCC_EPOCH_BATCH_OK)
+            return result;
+    }
+    return ZCC_EPOCH_BATCH_OK;
+}
+
+static enum zcc_epoch_batch_result batch_read_body(
+    struct batch_reader *reader, struct zcc_epoch_batch_manifest *out)
+{
+    enum zcc_epoch_batch_result result = batch_read_bindings(reader, out);
+    if (result != ZCC_EPOCH_BATCH_OK)
+        return result;
+    result = batch_read_common_args(reader, out);
+    if (result != ZCC_EPOCH_BATCH_OK)
+        return result;
+    result = batch_read_jobs(reader, out);
+    if (result != ZCC_EPOCH_BATCH_OK)
+        return result;
+    if (reader->offset != reader->size)
+        return batch_fail(reader, ZCC_EPOCH_BATCH_TRAILING_BYTES, UINT32_MAX);
+    return batch_destinations_unique(reader, out);
+}
+
 enum zcc_epoch_batch_result zcc_epoch_batch_manifest_decode(
     const uint8_t *wire, size_t wire_size,
     struct zcc_epoch_batch_manifest *out,
@@ -589,50 +684,21 @@ enum zcc_epoch_batch_result zcc_epoch_batch_manifest_decode(
 {
     if (error)
         *error = (struct zcc_epoch_batch_error){.job_index = UINT32_MAX};
-    if (!out) {
-        if (error)
-            error->code = ZCC_EPOCH_BATCH_ARGUMENT;
-        return ZCC_EPOCH_BATCH_ARGUMENT;
-    }
-    if (!batch_manifest_empty(out)) {
-        if (error)
-            error->code = ZCC_EPOCH_BATCH_ARGUMENT;
-        return ZCC_EPOCH_BATCH_ARGUMENT;
-    }
+    if (!out)
+        return batch_manifest_fail(error, ZCC_EPOCH_BATCH_ARGUMENT,
+                                   UINT32_MAX);
+    if (!batch_manifest_empty(out))
+        return batch_manifest_fail(error, ZCC_EPOCH_BATCH_ARGUMENT,
+                                   UINT32_MAX);
     *out = (struct zcc_epoch_batch_manifest){0};
-    if (!wire) {
-        if (error)
-            error->code = ZCC_EPOCH_BATCH_ARGUMENT;
-        return ZCC_EPOCH_BATCH_ARGUMENT;
-    }
-    if (wire_size > ZCC_EPOCH_BATCH_MAX_WIRE) {
-        if (error)
-            error->code = ZCC_EPOCH_BATCH_LIMIT;
-        return ZCC_EPOCH_BATCH_LIMIT;
-    }
+    if (!wire)
+        return batch_manifest_fail(error, ZCC_EPOCH_BATCH_ARGUMENT,
+                                   UINT32_MAX);
+    if (wire_size > ZCC_EPOCH_BATCH_MAX_WIRE)
+        return batch_manifest_fail(error, ZCC_EPOCH_BATCH_LIMIT, UINT32_MAX);
     struct batch_reader reader = {
         .wire = wire, .size = wire_size, .error = error};
-    enum zcc_epoch_batch_result result = batch_read_bindings(&reader, out);
-    if (result == ZCC_EPOCH_BATCH_OK)
-        result = batch_read_common_args(&reader, out);
-    if (result == ZCC_EPOCH_BATCH_OK && !batch_read_u32(&reader, &out->job_count))
-        result = batch_fail(&reader, ZCC_EPOCH_BATCH_TRUNCATED, UINT32_MAX);
-    if (result == ZCC_EPOCH_BATCH_OK &&
-        (out->job_count == 0 || out->job_count > ZCC_EPOCH_BATCH_MAX_JOBS))
-        result = batch_fail(&reader, ZCC_EPOCH_BATCH_JOB_COUNT, UINT32_MAX);
-    if (result == ZCC_EPOCH_BATCH_OK) {
-        out->jobs = zcl_calloc(out->job_count, sizeof(*out->jobs),
-                               "zcc.epoch_batch.jobs");
-        if (!out->jobs)
-            result = batch_fail(&reader, ZCC_EPOCH_BATCH_ALLOCATION, UINT32_MAX);
-    }
-    uint32_t argv_capacity = 0;
-    for (uint32_t i = 0; result == ZCC_EPOCH_BATCH_OK && i < out->job_count; ++i)
-        result = batch_read_job(&reader, out, i, &argv_capacity);
-    if (result == ZCC_EPOCH_BATCH_OK && reader.offset != reader.size)
-        result = batch_fail(&reader, ZCC_EPOCH_BATCH_TRAILING_BYTES, UINT32_MAX);
-    if (result == ZCC_EPOCH_BATCH_OK)
-        result = batch_destinations_unique(&reader, out);
+    enum zcc_epoch_batch_result result = batch_read_body(&reader, out);
     if (result != ZCC_EPOCH_BATCH_OK)
         zcc_epoch_batch_manifest_free(out);
     else if (error)
