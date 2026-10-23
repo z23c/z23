@@ -589,12 +589,6 @@ contexts/commons/modules/vcs/src/zcode_seed.c:seed_fields:19
 contexts/commons/modules/vcs/src/zcode_seed.c:vcs_c23_seed_parse:37
 contexts/commons/modules/vcs/src/zcode_shadow_election.c:shadow_snapshot_valid:18
 contexts/commons/modules/vcs/src/zcode_shadow_election.c:vcs_c23_shadow_election_build:27
-contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_approved_reproducer_set_parse:34
-contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_approved_reproducer_set_serialize:28
-contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_approved_reproducer_set_validate:16
-contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_policy_candidate_parse:29
-contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_policy_candidate_serialize:27
-contexts/commons/modules/vcs/src/zcode_shadow_policy.c:vcs_zcode_policy_candidate_validate:22
 contexts/commons/modules/vcs/src/zcode_shadow_protocol.c:protocol_report_root:17
 contexts/commons/modules/vcs/src/zcode_shadow_protocol.c:vcs_zcode_shadow_protocol_verify_cas:46
 contexts/commons/modules/vcs/src/zcode_shadow_simulation.c:shadow_package_facts:16

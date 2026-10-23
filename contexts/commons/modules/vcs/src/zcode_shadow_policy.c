@@ -78,6 +78,19 @@ enum vcs_zcode_shadow_error vcs_zcode_approved_reproducer_set_add(
     return VCS_ZCODE_SHADOW_OK;
 }
 
+static bool reproducer_set_roots_ok(
+    const struct vcs_zcode_approved_reproducer_set_v1 *set)
+{
+    if (set->sequence == 0 ||
+        !zcl_bytes_any_set(set->network_genesis_root, 32))
+        return false;
+    if ((set->sequence == 1 && !shadow_zero(set->predecessor_set_root)) ||
+        (set->sequence > 1 &&
+         !zcl_bytes_any_set(set->predecessor_set_root, 32)))
+        return false;
+    return true;
+}
+
 enum vcs_zcode_shadow_error vcs_zcode_approved_reproducer_set_validate(
     const struct vcs_zcode_approved_reproducer_set_v1 *set)
 {
@@ -86,10 +99,7 @@ enum vcs_zcode_shadow_error vcs_zcode_approved_reproducer_set_validate(
         return VCS_ZCODE_SHADOW_VERSION;
     if (set->flags != VCS_ZCODE_APPROVED_REPRODUCER_REQUIRED_FLAGS)
         return VCS_ZCODE_SHADOW_FLAGS;
-    if (set->sequence == 0 || !zcl_bytes_any_set(set->network_genesis_root, 32))
-        return VCS_ZCODE_SHADOW_ROOT;
-    if ((set->sequence == 1 && !shadow_zero(set->predecessor_set_root)) ||
-        (set->sequence > 1 && !zcl_bytes_any_set(set->predecessor_set_root, 32)))
+    if (!reproducer_set_roots_ok(set))
         return VCS_ZCODE_SHADOW_ROOT;
     if (set->entry_count == 0 ||
         set->entry_count > VCS_ZCODE_APPROVED_REPRODUCER_MAX_ENTRIES)
@@ -114,6 +124,35 @@ static bool reproducer_wire_size(size_t count, size_t *out)
                         entries, out);
 }
 
+static bool reproducer_write_header(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_approved_reproducer_set_v1 *set)
+{
+    return zcl_codec_write_bytes(writer, reproducer_magic, 8) &&
+        zcl_codec_write_u16le(writer, set->schema_version) &&
+        zcl_codec_write_u16le(writer, set->flags) &&
+        zcl_codec_write_u32le(writer, 0) &&
+        zcl_codec_write_u64le(writer, set->sequence) &&
+        zcl_codec_write_bytes(writer, set->network_genesis_root, 32) &&
+        zcl_codec_write_bytes(writer, set->predecessor_set_root, 32) &&
+        zcl_codec_write_u16le(writer, (uint16_t)set->entry_count) &&
+        zcl_codec_write_bytes(writer, (const uint8_t[6]){0}, 6);
+}
+
+static bool reproducer_write_entry(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_approved_reproducer_entry_v1 *entry)
+{
+    return zcl_codec_write_bytes(writer, entry->signer_pubkey, 32) &&
+        zcl_codec_write_bytes(writer, entry->contributor_binding_root, 32) &&
+        zcl_codec_write_bytes(writer, entry->operator_group_root, 32) &&
+        zcl_codec_write_bytes(writer, entry->action_root, 32) &&
+        zcl_codec_write_u64le(writer, entry->valid_from_epoch) &&
+        zcl_codec_write_u64le(writer, entry->valid_through_epoch) &&
+        zcl_codec_write_i64le(writer, entry->valid_from_unix) &&
+        zcl_codec_write_i64le(writer, entry->valid_through_unix);
+}
+
 enum vcs_zcode_shadow_error vcs_zcode_approved_reproducer_set_serialize(
     const struct vcs_zcode_approved_reproducer_set_v1 *set,
     uint8_t *out, size_t out_capacity, size_t *out_len)
@@ -129,32 +168,57 @@ enum vcs_zcode_shadow_error vcs_zcode_approved_reproducer_set_serialize(
     if (out_capacity < need) return VCS_ZCODE_SHADOW_WIRE_SIZE;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, need);
-    bool ok = zcl_codec_write_bytes(&writer, reproducer_magic, 8) &&
-        zcl_codec_write_u16le(&writer, set->schema_version) &&
-        zcl_codec_write_u16le(&writer, set->flags) &&
-        zcl_codec_write_u32le(&writer, 0) &&
-        zcl_codec_write_u64le(&writer, set->sequence) &&
-        zcl_codec_write_bytes(&writer, set->network_genesis_root, 32) &&
-        zcl_codec_write_bytes(&writer, set->predecessor_set_root, 32) &&
-        zcl_codec_write_u16le(&writer, (uint16_t)set->entry_count) &&
-        zcl_codec_write_bytes(&writer, (const uint8_t[6]){0}, 6);
-    for (size_t i = 0; ok && i < set->entry_count; i++) {
-        const struct vcs_zcode_approved_reproducer_entry_v1 *entry =
-            &set->entries[i];
-        ok = zcl_codec_write_bytes(&writer, entry->signer_pubkey, 32) &&
-            zcl_codec_write_bytes(&writer,
-                                  entry->contributor_binding_root, 32) &&
-            zcl_codec_write_bytes(&writer, entry->operator_group_root, 32) &&
-            zcl_codec_write_bytes(&writer, entry->action_root, 32) &&
-            zcl_codec_write_u64le(&writer, entry->valid_from_epoch) &&
-            zcl_codec_write_u64le(&writer, entry->valid_through_epoch) &&
-            zcl_codec_write_i64le(&writer, entry->valid_from_unix) &&
-            zcl_codec_write_i64le(&writer, entry->valid_through_unix);
-    }
+    bool ok = reproducer_write_header(&writer, set);
+    for (size_t i = 0; ok && i < set->entry_count; i++)
+        ok = reproducer_write_entry(&writer, &set->entries[i]);
     size_t written = 0;
     if (!ok || !zcl_codec_writer_finish(&writer, &written) || written != need)
         return VCS_ZCODE_SHADOW_WIRE_SIZE;
     *out_len = written;
+    return VCS_ZCODE_SHADOW_OK;
+}
+
+static bool reproducer_read_header(
+    struct zcl_codec_reader *reader,
+    struct vcs_zcode_approved_reproducer_set_v1 *out,
+    uint8_t magic[8], uint8_t reserved[6],
+    uint32_t *reserved32, uint16_t *count)
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u16le(reader, &out->flags) &&
+        zcl_codec_read_u32le(reader, reserved32) &&
+        zcl_codec_read_u64le(reader, &out->sequence) &&
+        zcl_codec_read_bytes(reader, out->network_genesis_root, 32) &&
+        zcl_codec_read_bytes(reader, out->predecessor_set_root, 32) &&
+        zcl_codec_read_u16le(reader, count) &&
+        zcl_codec_read_bytes(reader, reserved, 6);
+}
+
+static bool reproducer_read_entry(
+    struct zcl_codec_reader *reader,
+    struct vcs_zcode_approved_reproducer_entry_v1 *entry)
+{
+    return zcl_codec_read_bytes(reader, entry->signer_pubkey, 32) &&
+        zcl_codec_read_bytes(reader, entry->contributor_binding_root, 32) &&
+        zcl_codec_read_bytes(reader, entry->operator_group_root, 32) &&
+        zcl_codec_read_bytes(reader, entry->action_root, 32) &&
+        zcl_codec_read_u64le(reader, &entry->valid_from_epoch) &&
+        zcl_codec_read_u64le(reader, &entry->valid_through_epoch) &&
+        zcl_codec_read_i64le(reader, &entry->valid_from_unix) &&
+        zcl_codec_read_i64le(reader, &entry->valid_through_unix);
+}
+
+static enum vcs_zcode_shadow_error reproducer_header_check(
+    uint32_t reserved32, const uint8_t reserved[6], uint16_t count,
+    size_t wire_len)
+{
+    size_t expected = 0;
+    if (reserved32 != 0 || memcmp(reserved, (const uint8_t[6]){0}, 6) != 0)
+        return VCS_ZCODE_SHADOW_RESERVED;
+    if (count == 0 || count > VCS_ZCODE_APPROVED_REPRODUCER_MAX_ENTRIES ||
+        !reproducer_wire_size(count, &expected) || expected != wire_len)
+        return VCS_ZCODE_SHADOW_WIRE_SIZE;
     return VCS_ZCODE_SHADOW_OK;
 }
 
@@ -172,49 +236,26 @@ enum vcs_zcode_shadow_error vcs_zcode_approved_reproducer_set_parse(
     uint32_t reserved32 = 0;
     uint16_t count = 0;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u16le(&reader, &out->flags) &&
-        zcl_codec_read_u32le(&reader, &reserved32) &&
-        zcl_codec_read_u64le(&reader, &out->sequence) &&
-        zcl_codec_read_bytes(&reader, out->network_genesis_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->predecessor_set_root, 32) &&
-        zcl_codec_read_u16le(&reader, &count) &&
-        zcl_codec_read_bytes(&reader, reserved, sizeof(reserved));
-    size_t expected = 0;
+    bool ok = reproducer_read_header(&reader, out, magic, reserved,
+                                     &reserved32, &count);
     if (!ok || memcmp(magic, reproducer_magic, 8) != 0) {
         memset(out, 0, sizeof(*out));
         return ok ? VCS_ZCODE_SHADOW_MAGIC : VCS_ZCODE_SHADOW_WIRE_SIZE;
     }
-    if (reserved32 != 0 || memcmp(reserved, (const uint8_t[6]){0}, 6) != 0) {
+    enum vcs_zcode_shadow_error err =
+        reproducer_header_check(reserved32, reserved, count, wire_len);
+    if (err != VCS_ZCODE_SHADOW_OK) {
         memset(out, 0, sizeof(*out));
-        return VCS_ZCODE_SHADOW_RESERVED;
-    }
-    if (count == 0 || count > VCS_ZCODE_APPROVED_REPRODUCER_MAX_ENTRIES ||
-        !reproducer_wire_size(count, &expected) || expected != wire_len) {
-        memset(out, 0, sizeof(*out));
-        return VCS_ZCODE_SHADOW_WIRE_SIZE;
+        return err;
     }
     out->entry_count = count;
-    for (size_t i = 0; ok && i < out->entry_count; i++) {
-        struct vcs_zcode_approved_reproducer_entry_v1 *entry =
-            &out->entries[i];
-        ok = zcl_codec_read_bytes(&reader, entry->signer_pubkey, 32) &&
-            zcl_codec_read_bytes(&reader,
-                                 entry->contributor_binding_root, 32) &&
-            zcl_codec_read_bytes(&reader, entry->operator_group_root, 32) &&
-            zcl_codec_read_bytes(&reader, entry->action_root, 32) &&
-            zcl_codec_read_u64le(&reader, &entry->valid_from_epoch) &&
-            zcl_codec_read_u64le(&reader, &entry->valid_through_epoch) &&
-            zcl_codec_read_i64le(&reader, &entry->valid_from_unix) &&
-            zcl_codec_read_i64le(&reader, &entry->valid_through_unix);
-    }
+    for (size_t i = 0; ok && i < out->entry_count; i++)
+        ok = reproducer_read_entry(&reader, &out->entries[i]);
     if (!ok || !zcl_codec_reader_finish(&reader)) {
         memset(out, 0, sizeof(*out));
         return VCS_ZCODE_SHADOW_WIRE_SIZE;
     }
-    enum vcs_zcode_shadow_error err =
-        vcs_zcode_approved_reproducer_set_validate(out);
+    err = vcs_zcode_approved_reproducer_set_validate(out);
     if (err != VCS_ZCODE_SHADOW_OK) memset(out, 0, sizeof(*out));
     return err;
 }
@@ -314,6 +355,26 @@ void vcs_zcode_policy_candidate_init(
         VCS_ZC23_SHADOW_PRESERVATION_ATOMS;
 }
 
+static bool policy_fixed_params_ok(
+    const struct vcs_zcode_policy_candidate_v1 *policy)
+{
+    if (memcmp(policy->ticker, "ZC23", 4) != 0 ||
+        policy->decimals != VCS_ZC23_DECIMALS ||
+        policy->cap_algorithm !=
+            VCS_ZC23_CAP_ALGORITHM_WHOLE_TOKEN_HALVING_V1 ||
+        policy->admitted_category_mask != VCS_ZC23_SHADOW_CATEGORY_MASK)
+        return false;
+    if (policy->challenge_blocks != VCS_ZC23_CHALLENGE_BLOCKS ||
+        policy->challenge_seconds != VCS_ZC23_CHALLENGE_SECONDS ||
+        policy->initial_supply_atoms != VCS_ZC23_INITIAL_SUPPLY_ATOMS ||
+        policy->atoms_per_token != VCS_ZC23_ATOMS_PER_TOKEN ||
+        policy->epochs_per_era != VCS_ZC23_EPOCHS_PER_ERA ||
+        policy->base_epoch_tokens != VCS_ZC23_BASE_EPOCH_TOKENS ||
+        policy->maximum_supply_atoms != VCS_ZC23_MAX_SUPPLY_ATOMS)
+        return false;
+    return true;
+}
+
 enum vcs_zcode_shadow_error vcs_zcode_policy_candidate_validate(
     const struct vcs_zcode_policy_candidate_v1 *policy)
 {
@@ -323,19 +384,7 @@ enum vcs_zcode_shadow_error vcs_zcode_policy_candidate_validate(
         return VCS_ZCODE_SHADOW_VERSION;
     if (policy->flags != VCS_ZCODE_POLICY_CANDIDATE_REQUIRED_FLAGS)
         return VCS_ZCODE_SHADOW_FLAGS;
-    if (memcmp(policy->ticker, "ZC23", 4) != 0 ||
-        policy->decimals != VCS_ZC23_DECIMALS ||
-        policy->cap_algorithm !=
-            VCS_ZC23_CAP_ALGORITHM_WHOLE_TOKEN_HALVING_V1 ||
-        policy->admitted_category_mask != VCS_ZC23_SHADOW_CATEGORY_MASK)
-        return VCS_ZCODE_SHADOW_POLICY;
-    if (policy->challenge_blocks != VCS_ZC23_CHALLENGE_BLOCKS ||
-        policy->challenge_seconds != VCS_ZC23_CHALLENGE_SECONDS ||
-        policy->initial_supply_atoms != VCS_ZC23_INITIAL_SUPPLY_ATOMS ||
-        policy->atoms_per_token != VCS_ZC23_ATOMS_PER_TOKEN ||
-        policy->epochs_per_era != VCS_ZC23_EPOCHS_PER_ERA ||
-        policy->base_epoch_tokens != VCS_ZC23_BASE_EPOCH_TOKENS ||
-        policy->maximum_supply_atoms != VCS_ZC23_MAX_SUPPLY_ATOMS)
+    if (!policy_fixed_params_ok(policy))
         return VCS_ZCODE_SHADOW_POLICY;
     if (!zcl_bytes_any_set(policy->network_genesis_root, 32) ||
         !zcl_bytes_any_set(policy->approved_reproducer_set_root, 32) ||
@@ -377,6 +426,43 @@ enum vcs_zcode_shadow_error vcs_zcode_policy_candidate_validate_set(
         ? VCS_ZCODE_SHADOW_OK : VCS_ZCODE_SHADOW_POLICY;
 }
 
+static bool policy_write_header(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_policy_candidate_v1 *policy)
+{
+    return zcl_codec_write_bytes(writer, policy_magic, 8) &&
+        zcl_codec_write_u16le(writer, policy->schema_version) &&
+        zcl_codec_write_u16le(writer, policy->flags) &&
+        zcl_codec_write_u32le(writer, policy->policy_version) &&
+        zcl_codec_write_bytes(writer, policy->ticker, 4) &&
+        zcl_codec_write_u8(writer, policy->decimals) &&
+        zcl_codec_write_u8(writer, policy->cap_algorithm) &&
+        zcl_codec_write_u16le(writer, policy->admitted_category_mask);
+}
+
+static bool policy_write_schedule(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_policy_candidate_v1 *policy)
+{
+    return zcl_codec_write_u64le(writer, policy->challenge_blocks) &&
+        zcl_codec_write_i64le(writer, policy->challenge_seconds) &&
+        zcl_codec_write_u64le(writer, policy->initial_supply_atoms) &&
+        zcl_codec_write_u64le(writer, policy->atoms_per_token) &&
+        zcl_codec_write_u64le(writer, policy->epochs_per_era) &&
+        zcl_codec_write_u64le(writer, policy->base_epoch_tokens) &&
+        zcl_codec_write_u64le(writer, policy->maximum_supply_atoms);
+}
+
+static bool policy_write_roots(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_policy_candidate_v1 *policy)
+{
+    return zcl_codec_write_bytes(writer, policy->network_genesis_root, 32) &&
+        zcl_codec_write_bytes(writer,
+                              policy->approved_reproducer_set_root, 32) &&
+        zcl_codec_write_bytes(writer, policy->covenant_document_root, 32);
+}
+
 enum vcs_zcode_shadow_error vcs_zcode_policy_candidate_serialize(
     const struct vcs_zcode_policy_candidate_v1 *policy,
     uint8_t out[VCS_ZCODE_POLICY_CANDIDATE_WIRE_BYTES])
@@ -387,25 +473,9 @@ enum vcs_zcode_shadow_error vcs_zcode_policy_candidate_serialize(
     if (err != VCS_ZCODE_SHADOW_OK) return err;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_ZCODE_POLICY_CANDIDATE_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, policy_magic, 8) &&
-        zcl_codec_write_u16le(&writer, policy->schema_version) &&
-        zcl_codec_write_u16le(&writer, policy->flags) &&
-        zcl_codec_write_u32le(&writer, policy->policy_version) &&
-        zcl_codec_write_bytes(&writer, policy->ticker, 4) &&
-        zcl_codec_write_u8(&writer, policy->decimals) &&
-        zcl_codec_write_u8(&writer, policy->cap_algorithm) &&
-        zcl_codec_write_u16le(&writer, policy->admitted_category_mask) &&
-        zcl_codec_write_u64le(&writer, policy->challenge_blocks) &&
-        zcl_codec_write_i64le(&writer, policy->challenge_seconds) &&
-        zcl_codec_write_u64le(&writer, policy->initial_supply_atoms) &&
-        zcl_codec_write_u64le(&writer, policy->atoms_per_token) &&
-        zcl_codec_write_u64le(&writer, policy->epochs_per_era) &&
-        zcl_codec_write_u64le(&writer, policy->base_epoch_tokens) &&
-        zcl_codec_write_u64le(&writer, policy->maximum_supply_atoms) &&
-        zcl_codec_write_bytes(&writer, policy->network_genesis_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-                              policy->approved_reproducer_set_root, 32) &&
-        zcl_codec_write_bytes(&writer, policy->covenant_document_root, 32);
+    bool ok = policy_write_header(&writer, policy) &&
+        policy_write_schedule(&writer, policy) &&
+        policy_write_roots(&writer, policy);
     for (size_t i = 0; ok && i < 6; i++)
         ok = zcl_codec_write_u64le(&writer, policy->award_atoms[i]);
     ok = ok && zcl_codec_write_bytes(&writer, (const uint8_t[32]){0}, 32);
@@ -413,6 +483,40 @@ enum vcs_zcode_shadow_error vcs_zcode_policy_candidate_serialize(
     return ok && zcl_codec_writer_finish(&writer, &written) &&
                    written == VCS_ZCODE_POLICY_CANDIDATE_WIRE_BYTES
         ? VCS_ZCODE_SHADOW_OK : VCS_ZCODE_SHADOW_WIRE_SIZE;
+}
+
+static bool policy_read_header(struct zcl_codec_reader *reader,
+                               struct vcs_zcode_policy_candidate_v1 *out,
+                               uint8_t magic[8])
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u16le(reader, &out->flags) &&
+        zcl_codec_read_u32le(reader, &out->policy_version) &&
+        zcl_codec_read_bytes(reader, out->ticker, 4) &&
+        zcl_codec_read_u8(reader, &out->decimals) &&
+        zcl_codec_read_u8(reader, &out->cap_algorithm) &&
+        zcl_codec_read_u16le(reader, &out->admitted_category_mask);
+}
+
+static bool policy_read_schedule(struct zcl_codec_reader *reader,
+                                 struct vcs_zcode_policy_candidate_v1 *out)
+{
+    return zcl_codec_read_u64le(reader, &out->challenge_blocks) &&
+        zcl_codec_read_i64le(reader, &out->challenge_seconds) &&
+        zcl_codec_read_u64le(reader, &out->initial_supply_atoms) &&
+        zcl_codec_read_u64le(reader, &out->atoms_per_token) &&
+        zcl_codec_read_u64le(reader, &out->epochs_per_era) &&
+        zcl_codec_read_u64le(reader, &out->base_epoch_tokens) &&
+        zcl_codec_read_u64le(reader, &out->maximum_supply_atoms);
+}
+
+static bool policy_read_roots(struct zcl_codec_reader *reader,
+                              struct vcs_zcode_policy_candidate_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, out->network_genesis_root, 32) &&
+        zcl_codec_read_bytes(reader, out->approved_reproducer_set_root, 32) &&
+        zcl_codec_read_bytes(reader, out->covenant_document_root, 32);
 }
 
 enum vcs_zcode_shadow_error vcs_zcode_policy_candidate_parse(
@@ -426,25 +530,9 @@ enum vcs_zcode_shadow_error vcs_zcode_policy_candidate_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8], reserved[32];
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u16le(&reader, &out->flags) &&
-        zcl_codec_read_u32le(&reader, &out->policy_version) &&
-        zcl_codec_read_bytes(&reader, out->ticker, 4) &&
-        zcl_codec_read_u8(&reader, &out->decimals) &&
-        zcl_codec_read_u8(&reader, &out->cap_algorithm) &&
-        zcl_codec_read_u16le(&reader, &out->admitted_category_mask) &&
-        zcl_codec_read_u64le(&reader, &out->challenge_blocks) &&
-        zcl_codec_read_i64le(&reader, &out->challenge_seconds) &&
-        zcl_codec_read_u64le(&reader, &out->initial_supply_atoms) &&
-        zcl_codec_read_u64le(&reader, &out->atoms_per_token) &&
-        zcl_codec_read_u64le(&reader, &out->epochs_per_era) &&
-        zcl_codec_read_u64le(&reader, &out->base_epoch_tokens) &&
-        zcl_codec_read_u64le(&reader, &out->maximum_supply_atoms) &&
-        zcl_codec_read_bytes(&reader, out->network_genesis_root, 32) &&
-        zcl_codec_read_bytes(&reader,
-                             out->approved_reproducer_set_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->covenant_document_root, 32);
+    bool ok = policy_read_header(&reader, out, magic) &&
+        policy_read_schedule(&reader, out) &&
+        policy_read_roots(&reader, out);
     for (size_t i = 0; ok && i < 6; i++)
         ok = zcl_codec_read_u64le(&reader, &out->award_atoms[i]);
     ok = ok && zcl_codec_read_bytes(&reader, reserved, 32) &&
