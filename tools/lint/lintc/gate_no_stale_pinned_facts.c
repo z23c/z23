@@ -181,17 +181,10 @@ static int snf_list_add(struct snf_list *l, const char *path)
     return 0;
 }
 
-int snf_keep_path(const char *path)
-{
-    return path != NULL;
-}
-
 static int snf_git_cb(const char *path, void *ctx)
 {
     size_t n = strlen(path);
     if (n < 3 || strcmp(path + n - 3, ".md") != 0)
-        return 0;
-    if (!snf_keep_path(path))
         return 0;
     return snf_list_add(ctx, path);
 }

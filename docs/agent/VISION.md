@@ -2,7 +2,7 @@
 
 # Development system vision
 
-The [North Star](../../AGENTS.md#north-star) says what Z23 is for: software
+The [North Star](../README.md#north-star) says what Z23 is for: software
 made for you, not imposed on you. This page says how Z23 is built and grown by
 people and AI agents together, and what the development system is converging
 on. Each section states the target and what exists on `main` today.

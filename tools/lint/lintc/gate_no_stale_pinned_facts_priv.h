@@ -19,8 +19,4 @@
 int snf_check(char *const *files, int nfiles, const char *baseline, FILE *out,
               FILE *err, int emit);
 
-/* Nonzero when a tracked docs path belongs in the scan set. The set has no
- * exemptions: the live-state page and the archive are scanned too. */
-int snf_keep_path(const char *path);
-
 #endif
