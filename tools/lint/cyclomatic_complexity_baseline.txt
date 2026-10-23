@@ -411,10 +411,6 @@ contexts/commons/modules/vcs/src/source_package_transport.c:vcs_source_package_t
 contexts/commons/modules/vcs/src/space.c:manifest_shape:21
 contexts/commons/modules/vcs/src/space.c:vcs_space_manifest_decode:31
 contexts/commons/modules/vcs/src/space.c:vcs_space_result_string:17
-contexts/commons/modules/vcs/src/space_scout.c:map_shape:52
-contexts/commons/modules/vcs/src/space_scout.c:vcs_space_scout_map_validate_for_mission:32
-contexts/commons/modules/vcs/src/space_scout.c:vcs_space_scout_mission_validate:17
-contexts/commons/modules/vcs/src/space_scout.c:vcs_space_scout_run:32
 contexts/commons/modules/vcs/src/vcs.c:vcs_snapshot:26
 contexts/commons/modules/vcs/src/vcs_devloop.c:publication_artifact_chain_load:35
 contexts/commons/modules/vcs/src/vcs_devloop.c:vcs_devloop_publication_bind_accepted_candidate:33

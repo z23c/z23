@@ -82,6 +82,19 @@ const char *vcs_space_scout_truncation_string(uint8_t result)
                                                    : "unknown";
 }
 
+static bool mission_limits_bad(const struct vcs_space_scout_mission_v1 *mission)
+{
+  return mission->maximum_depth > VCS_SPACE_SCOUT_DEPTH_MAX ||
+         mission->maximum_spaces < mission->start_count ||
+         mission->maximum_spaces > VCS_SPACE_SCOUT_SPACES_MAX ||
+         !mission->maximum_portals ||
+         mission->maximum_portals > VCS_SPACE_SCOUT_PORTALS_MAX ||
+         !mission->maximum_bytes ||
+         mission->maximum_bytes > VCS_SPACE_SCOUT_BYTES_MAX ||
+         !mission->deadline_ms ||
+         mission->deadline_ms > VCS_SPACE_SCOUT_DEADLINE_MS_MAX;
+}
+
 enum vcs_space_scout_result vcs_space_scout_mission_validate(
     const struct vcs_space_scout_mission_v1 *mission)
 {
@@ -91,15 +104,7 @@ enum vcs_space_scout_result vcs_space_scout_mission_validate(
       !zcl_bytes_any_set(mission->network_genesis, 32) || !mission->observation_unix ||
       !mission->start_count ||
       mission->start_count > VCS_SPACE_SCOUT_START_MAX ||
-      mission->maximum_depth > VCS_SPACE_SCOUT_DEPTH_MAX ||
-      mission->maximum_spaces < mission->start_count ||
-      mission->maximum_spaces > VCS_SPACE_SCOUT_SPACES_MAX ||
-      !mission->maximum_portals ||
-      mission->maximum_portals > VCS_SPACE_SCOUT_PORTALS_MAX ||
-      !mission->maximum_bytes ||
-      mission->maximum_bytes > VCS_SPACE_SCOUT_BYTES_MAX ||
-      !mission->deadline_ms ||
-      mission->deadline_ms > VCS_SPACE_SCOUT_DEADLINE_MS_MAX)
+      mission_limits_bad(mission))
     return VCS_SPACE_SCOUT_ERR_SHAPE;
   return roots_ordered(mission->starting_roots, mission->start_count,
                        VCS_SPACE_SCOUT_START_MAX)
@@ -206,20 +211,28 @@ static bool result_valid(uint8_t result)
          result <= VCS_SPACE_SCOUT_MANIFEST_DEADLINE;
 }
 
-static enum vcs_space_scout_result map_shape(
+static bool truncation_is_early_stop(uint8_t truncation)
+{
+  return truncation == VCS_SPACE_SCOUT_TRUNCATION_BYTES ||
+         truncation == VCS_SPACE_SCOUT_TRUNCATION_PORTALS ||
+         truncation == VCS_SPACE_SCOUT_TRUNCATION_DEADLINE;
+}
+
+static bool map_header_bad(const struct vcs_space_scout_map_v1 *map)
+{
+  return map->schema_version != VCS_SPACE_SCOUT_MAP_VERSION ||
+         !zcl_bytes_any_set(map->mission_root, 32) || !map->observation_unix ||
+         map->bytes_observed > VCS_SPACE_SCOUT_BYTES_MAX ||
+         map->visit_count > VCS_SPACE_SCOUT_SPACES_MAX ||
+         map->portal_count > VCS_SPACE_SCOUT_PORTALS_MAX ||
+         map->failure_count > VCS_SPACE_SCOUT_SPACES_MAX ||
+         map->policy_denial_count > map->failure_count ||
+         map->truncation > VCS_SPACE_SCOUT_TRUNCATION_DEADLINE;
+}
+
+static enum vcs_space_scout_result map_visit_check(
     const struct vcs_space_scout_map_v1 *map)
 {
-  if (!map)
-    return VCS_SPACE_SCOUT_ERR_NULL;
-  if (map->schema_version != VCS_SPACE_SCOUT_MAP_VERSION ||
-      !zcl_bytes_any_set(map->mission_root, 32) || !map->observation_unix ||
-      map->bytes_observed > VCS_SPACE_SCOUT_BYTES_MAX ||
-      map->visit_count > VCS_SPACE_SCOUT_SPACES_MAX ||
-      map->portal_count > VCS_SPACE_SCOUT_PORTALS_MAX ||
-      map->failure_count > VCS_SPACE_SCOUT_SPACES_MAX ||
-      map->policy_denial_count > map->failure_count ||
-      map->truncation > VCS_SPACE_SCOUT_TRUNCATION_DEADLINE)
-    return VCS_SPACE_SCOUT_ERR_SHAPE;
   for (size_t i = 0; i < map->visit_count; i++) {
     const struct vcs_space_scout_visit_v1 *visit = &map->visits[i];
     if (!zcl_bytes_any_set(visit->space_root, 32) || !result_valid(visit->manifest_result) ||
@@ -235,25 +248,38 @@ static enum vcs_space_scout_result map_shape(
          visit->service_count != 0))
       return VCS_SPACE_SCOUT_ERR_ORDER;
   }
-  if (!zcl_bytes_all_zero((const uint8_t *)(map->visits + map->visit_count),
-                          (VCS_SPACE_SCOUT_SPACES_MAX - map->visit_count) *
-                              sizeof(map->visits[0])) ||
-      !zcl_bytes_all_zero((const uint8_t *)(map->portals + map->portal_count),
-                          (VCS_SPACE_SCOUT_PORTALS_MAX - map->portal_count) *
-                              sizeof(map->portals[0])) ||
-      !zcl_bytes_all_zero((const uint8_t *)(map->failures + map->failure_count),
-                          (VCS_SPACE_SCOUT_SPACES_MAX - map->failure_count) *
-                              sizeof(map->failures[0])))
-    return VCS_SPACE_SCOUT_ERR_ORDER;
+  return VCS_SPACE_SCOUT_OK;
+}
+
+static bool map_padding_bad(const struct vcs_space_scout_map_v1 *map)
+{
+  return !zcl_bytes_all_zero((const uint8_t *)(map->visits + map->visit_count),
+                             (VCS_SPACE_SCOUT_SPACES_MAX - map->visit_count) *
+                                 sizeof(map->visits[0])) ||
+         !zcl_bytes_all_zero((const uint8_t *)(map->portals + map->portal_count),
+                             (VCS_SPACE_SCOUT_PORTALS_MAX - map->portal_count) *
+                                 sizeof(map->portals[0])) ||
+         !zcl_bytes_all_zero((const uint8_t *)(map->failures + map->failure_count),
+                             (VCS_SPACE_SCOUT_SPACES_MAX - map->failure_count) *
+                                 sizeof(map->failures[0]));
+}
+
+static bool map_visit_verified(const struct vcs_space_scout_map_v1 *map,
+                               const uint8_t root[32])
+{
+  for (size_t j = 0; j < map->visit_count; j++)
+    if (memcmp(root, map->visits[j].space_root, 32) == 0 &&
+        map->visits[j].manifest_result == VCS_SPACE_SCOUT_MANIFEST_VERIFIED)
+      return true;
+  return false;
+}
+
+static enum vcs_space_scout_result map_portal_check(
+    const struct vcs_space_scout_map_v1 *map)
+{
   for (size_t i = 0; i < map->portal_count; i++) {
-    bool source_verified = false;
-    for (size_t j = 0; j < map->visit_count; j++)
-      if (memcmp(map->portals[i].from_root,
-                 map->visits[j].space_root, 32) == 0 &&
-          map->visits[j].manifest_result ==
-              VCS_SPACE_SCOUT_MANIFEST_VERIFIED)
-        source_verified = true;
-    if (!source_verified || !zcl_bytes_any_set(map->portals[i].from_root, 32) ||
+    if (!map_visit_verified(map, map->portals[i].from_root) ||
+        !zcl_bytes_any_set(map->portals[i].from_root, 32) ||
         !zcl_bytes_any_set(map->portals[i].to_root, 32) ||
         map->portals[i].result < VCS_SPACE_SCOUT_PORTAL_FOLLOWED ||
         map->portals[i].result > VCS_SPACE_SCOUT_PORTAL_TRUNCATED ||
@@ -264,7 +290,12 @@ static enum vcs_space_scout_result map_shape(
         (i && portal_compare(&map->portals[i - 1], &map->portals[i]) >= 0))
       return VCS_SPACE_SCOUT_ERR_ORDER;
   }
-  uint8_t denials = 0;
+  return VCS_SPACE_SCOUT_OK;
+}
+
+static enum vcs_space_scout_result map_failure_check(
+    const struct vcs_space_scout_map_v1 *map)
+{
   for (size_t i = 0; i < map->failure_count; i++) {
     if (!zcl_bytes_any_set(map->failures[i].space_root, 32) ||
         !result_valid(map->failures[i].result) ||
@@ -272,11 +303,22 @@ static enum vcs_space_scout_result map_shape(
         (i && failure_compare(&map->failures[i - 1],
                               &map->failures[i]) >= 0))
       return VCS_SPACE_SCOUT_ERR_ORDER;
+  }
+  return VCS_SPACE_SCOUT_OK;
+}
+
+static bool map_denials_bad(const struct vcs_space_scout_map_v1 *map)
+{
+  uint8_t denials = 0;
+  for (size_t i = 0; i < map->failure_count; i++)
     denials += map->failures[i].result ==
                VCS_SPACE_SCOUT_MANIFEST_POLICY_DENIED;
-  }
-  if (denials != map->policy_denial_count)
-    return VCS_SPACE_SCOUT_ERR_SHAPE;
+  return denials != map->policy_denial_count;
+}
+
+static enum vcs_space_scout_result map_failure_match_check(
+    const struct vcs_space_scout_map_v1 *map)
+{
   size_t failure_index = 0;
   for (size_t i = 0; i < map->visit_count; i++) {
     if (map->visits[i].manifest_result ==
@@ -292,6 +334,29 @@ static enum vcs_space_scout_result map_shape(
   if (failure_index != map->failure_count)
     return VCS_SPACE_SCOUT_ERR_SHAPE;
   return VCS_SPACE_SCOUT_OK;
+}
+
+static enum vcs_space_scout_result map_shape(
+    const struct vcs_space_scout_map_v1 *map)
+{
+  if (!map)
+    return VCS_SPACE_SCOUT_ERR_NULL;
+  if (map_header_bad(map))
+    return VCS_SPACE_SCOUT_ERR_SHAPE;
+  enum vcs_space_scout_result checked = map_visit_check(map);
+  if (checked != VCS_SPACE_SCOUT_OK)
+    return checked;
+  if (map_padding_bad(map))
+    return VCS_SPACE_SCOUT_ERR_ORDER;
+  checked = map_portal_check(map);
+  if (checked != VCS_SPACE_SCOUT_OK)
+    return checked;
+  checked = map_failure_check(map);
+  if (checked != VCS_SPACE_SCOUT_OK)
+    return checked;
+  if (map_denials_bad(map))
+    return VCS_SPACE_SCOUT_ERR_SHAPE;
+  return map_failure_match_check(map);
 }
 
 static size_t map_write_unsigned(const struct vcs_space_scout_map_v1 *map,
@@ -346,6 +411,75 @@ static const struct vcs_space_scout_visit_v1 *map_visit_find(
   return NULL;
 }
 
+static bool map_bounds_bad(const struct vcs_space_scout_map_v1 *map,
+                           const struct vcs_space_scout_mission_v1 *mission,
+                           const uint8_t mission_root[32])
+{
+  return memcmp(map->mission_root, mission_root, 32) != 0 ||
+         map->observation_unix != mission->observation_unix ||
+         map->visit_count > mission->maximum_spaces ||
+         map->portal_count > mission->maximum_portals ||
+         map->bytes_observed > mission->maximum_bytes;
+}
+
+static bool map_depth_bad(const struct vcs_space_scout_map_v1 *map,
+                          const struct vcs_space_scout_mission_v1 *mission)
+{
+  for (size_t i = 0; i < map->visit_count; i++)
+    if (map->visits[i].depth > mission->maximum_depth)
+      return true;
+  return false;
+}
+
+static bool map_starts_bad(const struct vcs_space_scout_map_v1 *map,
+                           const struct vcs_space_scout_mission_v1 *mission,
+                           bool early_stop)
+{
+  for (size_t i = 0; i < mission->start_count; i++)
+    if (!map_visit_find(map, mission->starting_roots[i]) && !early_stop)
+      return true;
+  return false;
+}
+
+static bool map_edge_result_bad(uint8_t result,
+                                const struct vcs_space_scout_visit_v1 *source,
+                                const struct vcs_space_scout_visit_v1 *target,
+                                const struct vcs_space_scout_mission_v1 *mission,
+                                bool early_stop)
+{
+  switch (result) {
+  case VCS_SPACE_SCOUT_PORTAL_FOLLOWED:
+    return target == NULL ||
+           target->depth != (uint8_t)(source->depth + 1u) ||
+           source->depth >= mission->maximum_depth;
+  case VCS_SPACE_SCOUT_PORTAL_CYCLE:
+    return target == NULL;
+  case VCS_SPACE_SCOUT_PORTAL_DEPTH_LIMIT:
+    return source->depth < mission->maximum_depth;
+  case VCS_SPACE_SCOUT_PORTAL_SPACE_LIMIT:
+    return source->depth >= mission->maximum_depth || target != NULL;
+  case VCS_SPACE_SCOUT_PORTAL_TRUNCATED:
+    return !early_stop || target != NULL;
+  default:
+    return false;
+  }
+}
+
+static bool map_portal_edge_bad(const struct vcs_space_scout_map_v1 *map,
+                                const struct vcs_space_scout_mission_v1 *mission,
+                                bool early_stop,
+                                const struct vcs_space_scout_portal_v1 *edge)
+{
+  const struct vcs_space_scout_visit_v1 *source =
+      map_visit_find(map, edge->from_root);
+  const struct vcs_space_scout_visit_v1 *target =
+      map_visit_find(map, edge->to_root);
+  if (!source)
+    return true;
+  return map_edge_result_bad(edge->result, source, target, mission,
+                             early_stop);
+}
+
 enum vcs_space_scout_result vcs_space_scout_map_validate_for_mission(
     const struct vcs_space_scout_map_v1 *map,
     const struct vcs_space_scout_mission_v1 *mission)
@@ -356,45 +490,15 @@ enum vcs_space_scout_result vcs_space_scout_map_validate_for_mission(
       vcs_space_scout_mission_root(mission, mission_root) !=
           VCS_SPACE_SCOUT_OK)
     return VCS_SPACE_SCOUT_ERR_SHAPE;
-  if (memcmp(map->mission_root, mission_root, 32) != 0 ||
-      map->observation_unix != mission->observation_unix ||
-      map->visit_count > mission->maximum_spaces ||
-      map->portal_count > mission->maximum_portals ||
-      map->bytes_observed > mission->maximum_bytes)
+  if (map_bounds_bad(map, mission, mission_root) ||
+      map_depth_bad(map, mission))
     return VCS_SPACE_SCOUT_ERR_SHAPE;
-  for (size_t i = 0; i < map->visit_count; i++)
-    if (map->visits[i].depth > mission->maximum_depth)
+  bool early_stop = truncation_is_early_stop(map->truncation);
+  if (map_starts_bad(map, mission, early_stop))
+    return VCS_SPACE_SCOUT_ERR_SHAPE;
+  for (size_t i = 0; i < map->portal_count; i++)
+    if (map_portal_edge_bad(map, mission, early_stop, &map->portals[i]))
       return VCS_SPACE_SCOUT_ERR_SHAPE;
-  bool early_stop = map->truncation == VCS_SPACE_SCOUT_TRUNCATION_BYTES ||
-                    map->truncation == VCS_SPACE_SCOUT_TRUNCATION_PORTALS ||
-                    map->truncation == VCS_SPACE_SCOUT_TRUNCATION_DEADLINE;
-  for (size_t i = 0; i < mission->start_count; i++)
-    if (!map_visit_find(map, mission->starting_roots[i]) && !early_stop)
-      return VCS_SPACE_SCOUT_ERR_SHAPE;
-  for (size_t i = 0; i < map->portal_count; i++) {
-    const struct vcs_space_scout_portal_v1 *edge = &map->portals[i];
-    const struct vcs_space_scout_visit_v1 *source =
-        map_visit_find(map, edge->from_root);
-    const struct vcs_space_scout_visit_v1 *target =
-        map_visit_find(map, edge->to_root);
-    if (!source)
-      return VCS_SPACE_SCOUT_ERR_SHAPE;
-    if (edge->result == VCS_SPACE_SCOUT_PORTAL_FOLLOWED &&
-        (!target || target->depth != (uint8_t)(source->depth + 1u) ||
-         source->depth >= mission->maximum_depth))
-      return VCS_SPACE_SCOUT_ERR_SHAPE;
-    if (edge->result == VCS_SPACE_SCOUT_PORTAL_CYCLE && !target)
-      return VCS_SPACE_SCOUT_ERR_SHAPE;
-    if (edge->result == VCS_SPACE_SCOUT_PORTAL_DEPTH_LIMIT &&
-        source->depth < mission->maximum_depth)
-      return VCS_SPACE_SCOUT_ERR_SHAPE;
-    if (edge->result == VCS_SPACE_SCOUT_PORTAL_SPACE_LIMIT &&
-        (source->depth >= mission->maximum_depth || target))
-      return VCS_SPACE_SCOUT_ERR_SHAPE;
-    if (edge->result == VCS_SPACE_SCOUT_PORTAL_TRUNCATED &&
-        (!early_stop || target))
-      return VCS_SPACE_SCOUT_ERR_SHAPE;
-  }
   return VCS_SPACE_SCOUT_OK;
 }
 
@@ -657,8 +761,20 @@ static bool root_seen(const uint8_t roots[][32], size_t count,
   return false;
 }
 
-enum vcs_space_scout_result vcs_space_scout_run(
-    const struct vcs_space_scout_mission_v1 *mission,
+/* State of one breadth-first walk over the space graph. */
+struct scout_walk {
+  const struct vcs_space_scout_mission_v1 *mission;
+  const struct vcs_space_scout_run_context *context;
+  struct vcs_space_scout_map_v1 *out;
+  uint8_t queue[VCS_SPACE_SCOUT_SPACES_MAX][32];
+  uint8_t depths[VCS_SPACE_SCOUT_SPACES_MAX];
+  size_t head;
+  size_t queued;
+  uint64_t deadline;
+};
+
+static enum vcs_space_scout_result walk_begin(
+    struct scout_walk *walk, const struct vcs_space_scout_mission_v1 *mission,
     const struct vcs_space_scout_run_context *context,
     struct vcs_space_scout_map_v1 *out)
 {
@@ -674,97 +790,139 @@ enum vcs_space_scout_result vcs_space_scout_run(
   if (vcs_space_scout_mission_root(mission, out->mission_root) !=
       VCS_SPACE_SCOUT_OK)
     return VCS_SPACE_SCOUT_ERR_SHAPE;
-  uint8_t queue[VCS_SPACE_SCOUT_SPACES_MAX][32] = {{0}};
-  uint8_t depths[VCS_SPACE_SCOUT_SPACES_MAX] = {0};
-  size_t head = 0, queued = mission->start_count;
-  memcpy(queue, mission->starting_roots, mission->start_count * 32u);
+  memset(walk, 0, sizeof(*walk));
+  walk->mission = mission;
+  walk->context = context;
+  walk->out = out;
+  walk->queued = mission->start_count;
+  memcpy(walk->queue, mission->starting_roots, mission->start_count * 32u);
   uint64_t start_ms = context->monotonic_ms(context->clock_context);
-  uint64_t deadline = start_ms + mission->deadline_ms;
-  if (deadline < start_ms)
-    deadline = UINT64_MAX;
-  while (head < queued) {
-    if (context->monotonic_ms(context->clock_context) >= deadline) {
-      out->truncation = VCS_SPACE_SCOUT_TRUNCATION_DEADLINE;
-      break;
-    }
-    struct vcs_space_scout_visit_v1 *visit =
-        &out->visits[out->visit_count++];
-    memcpy(visit->space_root, queue[head], 32);
-    visit->depth = depths[head];
-    struct vcs_space_manifest_v1 manifest;
-    memset(&manifest, 0, sizeof(manifest));
-    size_t wire_bytes = 0;
-    size_t remaining_bytes =
-        mission->maximum_bytes - out->bytes_observed;
-    enum vcs_space_scout_manifest_result result = context->observe(
-        context->observe_context, queue[head], remaining_bytes,
-        &manifest, &wire_bytes);
-    bool deadline_after_observe =
-        context->monotonic_ms(context->clock_context) >= deadline;
-    if (!result_valid((uint8_t)result))
-      return VCS_SPACE_SCOUT_ERR_CALLBACK;
-    if (deadline_after_observe) {
-      result = VCS_SPACE_SCOUT_MANIFEST_DEADLINE;
-      wire_bytes = 0;
-      out->truncation = VCS_SPACE_SCOUT_TRUNCATION_DEADLINE;
-    } else if (result == VCS_SPACE_SCOUT_MANIFEST_DEADLINE) {
-      wire_bytes = 0;
-      out->truncation = VCS_SPACE_SCOUT_TRUNCATION_DEADLINE;
-    } else if (result == VCS_SPACE_SCOUT_MANIFEST_BYTE_LIMIT ||
-               wire_bytes > remaining_bytes) {
-      result = VCS_SPACE_SCOUT_MANIFEST_BYTE_LIMIT;
-      wire_bytes = 0;
-      out->truncation = VCS_SPACE_SCOUT_TRUNCATION_BYTES;
-    } else if (result == VCS_SPACE_SCOUT_MANIFEST_VERIFIED) {
-      out->bytes_observed += (uint32_t)wire_bytes;
-    }
-    visit->manifest_result = (uint8_t)result;
-    if (result == VCS_SPACE_SCOUT_MANIFEST_VERIFIED) {
-      memcpy(visit->owner_zid,
-             manifest.delegation.doc.master_pubkey, 32);
-      visit->service_count = manifest.service_count;
-      memcpy(visit->service_roots, manifest.service_roots,
-             (size_t)manifest.service_count * 32u);
-      for (size_t i = 0; i < manifest.portal_count; i++) {
-        if (out->portal_count == mission->maximum_portals) {
-          out->truncation = VCS_SPACE_SCOUT_TRUNCATION_PORTALS;
-          break;
-        }
-        struct vcs_space_scout_portal_v1 *edge =
-            &out->portals[out->portal_count++];
-        memcpy(edge->from_root, queue[head], 32);
-        memcpy(edge->to_root, manifest.portal_roots[i], 32);
-        if (visit->depth >= mission->maximum_depth) {
-          edge->result = VCS_SPACE_SCOUT_PORTAL_DEPTH_LIMIT;
-          if (!out->truncation)
-            out->truncation = VCS_SPACE_SCOUT_TRUNCATION_DEPTH;
-        } else if (root_seen(queue, queued, manifest.portal_roots[i])) {
-          edge->result = VCS_SPACE_SCOUT_PORTAL_CYCLE;
-        } else if (queued == mission->maximum_spaces) {
-          edge->result = VCS_SPACE_SCOUT_PORTAL_SPACE_LIMIT;
-          if (!out->truncation)
-            out->truncation = VCS_SPACE_SCOUT_TRUNCATION_SPACES;
-        } else {
-          edge->result = VCS_SPACE_SCOUT_PORTAL_FOLLOWED;
-          memcpy(queue[queued], manifest.portal_roots[i], 32);
-          depths[queued++] = (uint8_t)(visit->depth + 1u);
-        }
-      }
-    }
-    if (result != VCS_SPACE_SCOUT_MANIFEST_VERIFIED) {
-      struct vcs_space_scout_failure_v1 *failure =
-          &out->failures[out->failure_count++];
-      memcpy(failure->space_root, queue[head], 32);
-      failure->result = (uint8_t)result;
-      out->policy_denial_count +=
-          result == VCS_SPACE_SCOUT_MANIFEST_POLICY_DENIED;
-    }
-    head++;
-    if (out->truncation == VCS_SPACE_SCOUT_TRUNCATION_BYTES ||
-        out->truncation == VCS_SPACE_SCOUT_TRUNCATION_PORTALS ||
-        out->truncation == VCS_SPACE_SCOUT_TRUNCATION_DEADLINE)
-      break;
+  walk->deadline = start_ms + mission->deadline_ms;
+  if (walk->deadline < start_ms)
+    walk->deadline = UINT64_MAX;
+  return VCS_SPACE_SCOUT_OK;
+}
+
+static bool walk_deadline_passed(const struct scout_walk *walk)
+{
+  return walk->context->monotonic_ms(walk->context->clock_context) >=
+         walk->deadline;
+}
+
+static enum vcs_space_scout_manifest_result walk_settle_result(
+    struct vcs_space_scout_map_v1 *out,
+    enum vcs_space_scout_manifest_result result, size_t wire_bytes,
+    size_t remaining_bytes, bool deadline_after_observe)
+{
+  if (deadline_after_observe) {
+    result = VCS_SPACE_SCOUT_MANIFEST_DEADLINE;
+    out->truncation = VCS_SPACE_SCOUT_TRUNCATION_DEADLINE;
+  } else if (result == VCS_SPACE_SCOUT_MANIFEST_DEADLINE) {
+    out->truncation = VCS_SPACE_SCOUT_TRUNCATION_DEADLINE;
+  } else if (result == VCS_SPACE_SCOUT_MANIFEST_BYTE_LIMIT ||
+             wire_bytes > remaining_bytes) {
+    result = VCS_SPACE_SCOUT_MANIFEST_BYTE_LIMIT;
+    out->truncation = VCS_SPACE_SCOUT_TRUNCATION_BYTES;
+  } else if (result == VCS_SPACE_SCOUT_MANIFEST_VERIFIED) {
+    out->bytes_observed += (uint32_t)wire_bytes;
   }
+  return result;
+}
+
+static void walk_record_portal(struct scout_walk *walk,
+                               const uint8_t from[32], uint8_t depth,
+                               const uint8_t to[32])
+{
+  struct vcs_space_scout_map_v1 *out = walk->out;
+  struct vcs_space_scout_portal_v1 *edge = &out->portals[out->portal_count++];
+  memcpy(edge->from_root, from, 32);
+  memcpy(edge->to_root, to, 32);
+  if (depth >= walk->mission->maximum_depth) {
+    edge->result = VCS_SPACE_SCOUT_PORTAL_DEPTH_LIMIT;
+    if (!out->truncation)
+      out->truncation = VCS_SPACE_SCOUT_TRUNCATION_DEPTH;
+  } else if (root_seen(walk->queue, walk->queued, to)) {
+    edge->result = VCS_SPACE_SCOUT_PORTAL_CYCLE;
+  } else if (walk->queued == walk->mission->maximum_spaces) {
+    edge->result = VCS_SPACE_SCOUT_PORTAL_SPACE_LIMIT;
+    if (!out->truncation)
+      out->truncation = VCS_SPACE_SCOUT_TRUNCATION_SPACES;
+  } else {
+    edge->result = VCS_SPACE_SCOUT_PORTAL_FOLLOWED;
+    memcpy(walk->queue[walk->queued], to, 32);
+    walk->depths[walk->queued++] = (uint8_t)(depth + 1u);
+  }
+}
+
+static void walk_record_portals(struct scout_walk *walk,
+                                const uint8_t from[32], uint8_t depth,
+                                const struct vcs_space_manifest_v1 *manifest)
+{
+  for (size_t i = 0; i < manifest->portal_count; i++) {
+    if (walk->out->portal_count == walk->mission->maximum_portals) {
+      walk->out->truncation = VCS_SPACE_SCOUT_TRUNCATION_PORTALS;
+      break;
+    }
+    walk_record_portal(walk, from, depth, manifest->portal_roots[i]);
+  }
+}
+
+static void walk_record_manifest(struct scout_walk *walk,
+                                 struct vcs_space_scout_visit_v1 *visit,
+                                 const uint8_t from[32],
+                                 const struct vcs_space_manifest_v1 *manifest)
+{
+  memcpy(visit->owner_zid, manifest->delegation.doc.master_pubkey, 32);
+  visit->service_count = manifest->service_count;
+  memcpy(visit->service_roots, manifest->service_roots,
+         (size_t)manifest->service_count * 32u);
+  walk_record_portals(walk, from, visit->depth, manifest);
+}
+
+static void walk_record_failure(struct vcs_space_scout_map_v1 *out,
+                                const uint8_t root[32],
+                                enum vcs_space_scout_manifest_result result)
+{
+  struct vcs_space_scout_failure_v1 *failure =
+      &out->failures[out->failure_count++];
+  memcpy(failure->space_root, root, 32);
+  failure->result = (uint8_t)result;
+  out->policy_denial_count +=
+      result == VCS_SPACE_SCOUT_MANIFEST_POLICY_DENIED;
+}
+
+static enum vcs_space_scout_result walk_visit(struct scout_walk *walk)
+{
+  struct vcs_space_scout_map_v1 *out = walk->out;
+  const uint8_t *root = walk->queue[walk->head];
+  struct vcs_space_scout_visit_v1 *visit = &out->visits[out->visit_count++];
+  memcpy(visit->space_root, root, 32);
+  visit->depth = walk->depths[walk->head];
+  struct vcs_space_manifest_v1 manifest;
+  memset(&manifest, 0, sizeof(manifest));
+  size_t wire_bytes = 0;
+  size_t remaining_bytes =
+      walk->mission->maximum_bytes - out->bytes_observed;
+  enum vcs_space_scout_manifest_result result = walk->context->observe(
+      walk->context->observe_context, root, remaining_bytes,
+      &manifest, &wire_bytes);
+  bool deadline_after_observe = walk_deadline_passed(walk);
+  if (!result_valid((uint8_t)result))
+    return VCS_SPACE_SCOUT_ERR_CALLBACK;
+  result = walk_settle_result(out, result, wire_bytes, remaining_bytes,
+                              deadline_after_observe);
+  visit->manifest_result = (uint8_t)result;
+  if (result == VCS_SPACE_SCOUT_MANIFEST_VERIFIED)
+    walk_record_manifest(walk, visit, root, &manifest);
+  else
+    walk_record_failure(out, root, result);
+  walk->head++;
+  return VCS_SPACE_SCOUT_OK;
+}
+
+static void walk_finish(struct scout_walk *walk)
+{
+  struct vcs_space_scout_map_v1 *out = walk->out;
   for (size_t i = 0; i < out->portal_count; i++)
     if ((out->portals[i].result == VCS_SPACE_SCOUT_PORTAL_FOLLOWED ||
          out->portals[i].result == VCS_SPACE_SCOUT_PORTAL_CYCLE) &&
@@ -775,5 +933,29 @@ enum vcs_space_scout_result vcs_space_scout_run(
         portal_compare);
   qsort(out->failures, out->failure_count, sizeof(out->failures[0]),
         failure_compare);
+}
+
+enum vcs_space_scout_result vcs_space_scout_run(
+    const struct vcs_space_scout_mission_v1 *mission,
+    const struct vcs_space_scout_run_context *context,
+    struct vcs_space_scout_map_v1 *out)
+{
+  struct scout_walk walk;
+  enum vcs_space_scout_result checked =
+      walk_begin(&walk, mission, context, out);
+  if (checked != VCS_SPACE_SCOUT_OK)
+    return checked;
+  while (walk.head < walk.queued) {
+    if (walk_deadline_passed(&walk)) {
+      out->truncation = VCS_SPACE_SCOUT_TRUNCATION_DEADLINE;
+      break;
+    }
+    checked = walk_visit(&walk);
+    if (checked != VCS_SPACE_SCOUT_OK)
+      return checked;
+    if (truncation_is_early_stop(out->truncation))
+      break;
+  }
+  walk_finish(&walk);
   return VCS_SPACE_SCOUT_OK;
 }
