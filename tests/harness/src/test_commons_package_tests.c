@@ -166,11 +166,6 @@ static void cpt_push_pkg(struct cpt_argv *a, const char *pkg)
     }
 }
 
-/* -Wno-free-nonheap-object: tests/test_zpem.c deliberately hands the CLI a
- * stack object to a grow path that must refuse before realloc; GCC -O1 sees
- * the dead realloc call and warns. The refusal itself is what the test
- * proves.
- *
 /* cc <flags> include and source dirs of the package and its dependencies, its own test. */
 static bool cpt_build(const char *dir, const char *pkg, const char *out)
 {
@@ -181,14 +176,18 @@ static bool cpt_build(const char *dir, const char *pkg, const char *out)
 
     a.n = 0;
     cpt_deps(pkg, deps, &nd);
-    for (const char *f = "cc -std=c23 -O1 -Wall -Wextra -Werror -pedantic "
-         "-Wno-free-nonheap-object";
+    for (const char *f = "cc -std=c23 -O1 -Wall -Wextra -Werror -pedantic";
          *f;) {
         size_t k = strcspn(f, " ");
         (void)snprintf(arg, sizeof arg, "%.*s", (int)k, f);
         cpt_push(&a, arg);
         f += k + (f[k] == ' ');
     }
+    /* tests/test_zpem.c hands the CLI a stack object on a grow path that must
+     * refuse before realloc; GCC -O1 sees the dead realloc call and warns.
+     * The refusal is what the test proves, so only zpem drops the warning. */
+    if (strcmp(pkg, "zpem") == 0)
+        cpt_push(&a, "-Wno-free-nonheap-object");
     cpt_push_pkg(&a, pkg);
     for (size_t i = 0; i < nd; i++)
         cpt_push_pkg(&a, deps[i]);
