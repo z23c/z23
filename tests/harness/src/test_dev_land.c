@@ -18639,7 +18639,7 @@ static int test_dev_land_train_never_amended(void)
         struct dlx_rig rig;
         char b[64], m0[64], scratch[64], main_tip[64], pushed[2][64];
         char commit[2][64], local[2][64], names[128], count[16], range[200];
-        char landwt[1300];
+        char landwt[1300], marks[1400];
         int proofs = 0, landed = 0;
         char states[256];
         const char *names_args[] = { "diff", "--name-only", m0, "main",
@@ -18673,8 +18673,11 @@ static int test_dev_land_train_never_amended(void)
         ASSERT(dlx_origin_main(&rig, main_tip));
         /* Neither generator ran in the landing worktree. */
         dlx_land_wt(landwt, sizeof(landwt));
-        (void)snprintf(names, sizeof(names), "%s/build/regen-marks", landwt);
-        ASSERT(!dlx_file_exists(names));
+        /* names is 128 bytes: a long checkout path truncated the mark path
+         * to a directory that exists, so the check read the wrong path. */
+        ASSERT(snprintf(marks, sizeof(marks), "%s/build/regen-marks",
+                        landwt) < (int)sizeof(marks));
+        ASSERT(!dlx_file_exists(marks));
         /* Main gained exactly the two submitted changes, as two commits. */
         ASSERT(dlx_git_out(rig.bare, names_args, names, sizeof(names)) == 0);
         ASSERT_STR_EQ(names, "b.txt\nchange.txt");
