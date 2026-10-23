@@ -47,9 +47,9 @@ static const struct brief_work *brief_find(const char *id)
     return NULL;
 }
 
-/* A boolean input. The input validator types a key as a boolean only from
- * its closed key list, so a CLI or MCP caller sends "true" or "1" as text;
- * a direct caller may send a JSON boolean. Both count. */
+/* A boolean input. runner_ok_only is in the input validator's closed boolean
+ * key list, so a CLI or MCP caller sends a JSON boolean; a direct caller that
+ * skips the validator may still send "true" or "1" as text. Both count. */
 static bool brief_flag(const struct zcl_command_request *request,
                        const char *key)
 {

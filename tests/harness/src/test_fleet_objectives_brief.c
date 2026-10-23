@@ -30,11 +30,12 @@
 struct fob_work {
     const char *id;
     int runner_ok;
+    const char *owned;
 };
 
 static const struct fob_work k_fob_work[] = {
 #define Z23_OBJECTIVE_WORK(id_, runner_ok_, owned_, acceptance_, stop_if_) \
-    {id_, runner_ok_},
+    {id_, runner_ok_, owned_},
 #include "../../../engine/composition/objective_work.def"
 #undef Z23_OBJECTIVE_WORK
 };
@@ -107,7 +108,7 @@ static void fob_begin(struct fob_call *c, const char *path,
     if (id)
         (void)json_push_kv_str(&c->input, "id", id);
     if (runner_only)
-        (void)json_push_kv_str(&c->input, "runner_ok_only", "true");
+        (void)json_push_kv_bool(&c->input, "runner_ok_only", true);
     memset(&c->request, 0, sizeof(c->request));
     c->request.input = &c->input;
     c->request.spec =
@@ -147,6 +148,79 @@ static bool fob_has_str(const struct json_value *arr, const char *want)
         if (strcmp(json_get_str(json_at(arr, i)), want) == 0)
             return true;
     return false;
+}
+
+/* What a runner_ok row must never own, as literal path prefixes: the
+ * consensus core, the reducer, the wallet, consensus storage and the land
+ * driver (objective_work.def's runner_ok_ rule). */
+static const char *const k_fob_runner_forbidden[] = {
+    "core/", "engine/reducer/", "contexts/wallet/", "engine/modules/storage/",
+    "tools/command/native_dev_land", "tools/dev/",
+};
+
+/* True when one glob of the comma list `csv` reaches a forbidden prefix:
+ * its literal part (up to the first '*') either sits inside the prefix or is
+ * an ancestor of it, as "tools/" is of "tools/command/native_dev_land". */
+static bool fob_owned_reaches_forbidden(const char *csv, char *hit,
+                                        size_t hit_size)
+{
+    const char *at = csv;
+    while (*at) {
+        size_t len = strcspn(at, ",");
+        size_t lit = strcspn(at, ",*");
+        for (size_t i = 0; i < sizeof(k_fob_runner_forbidden) /
+                                   sizeof(k_fob_runner_forbidden[0]);
+             i++) {
+            const char *f = k_fob_runner_forbidden[i];
+            size_t flen = strlen(f);
+            size_t n = lit < flen ? lit : flen;
+            if (strncmp(at, f, n) == 0) {
+                (void)snprintf(hit, hit_size, "%.*s reaches %s", (int)len, at,
+                               f);
+                return true;
+            }
+        }
+        at += len;
+        if (*at)
+            at++;
+    }
+    return false;
+}
+
+static int fob_case_runner_paths(void)
+{
+    int failures = 0;
+    char hit[256];
+    TEST("brief: no runner_ok row owns a path under core/, the reducer, the "
+         "wallet, consensus storage or the land driver") {
+        for (size_t j = 0; j < FOB_WORK_COUNT; j++) {
+            hit[0] = '\0';
+            if (k_fob_work[j].runner_ok &&
+                fob_owned_reaches_forbidden(k_fob_work[j].owned, hit,
+                                            sizeof(hit)))
+                printf("  %s: %s\n", k_fob_work[j].id, hit);
+            ASSERT(hit[0] == '\0');
+        }
+        ASSERT(fob_owned_reaches_forbidden("apps/**,tools/**", hit,
+                                           sizeof(hit)));
+        ASSERT(fob_owned_reaches_forbidden("engine/reducer/src/x.c", hit,
+                                           sizeof(hit)));
+        ASSERT(!fob_owned_reaches_forbidden("tools/lint/lintc/**", hit,
+                                            sizeof(hit)));
+        PASS();
+    }
+    TEST("brief: the registry types runner_ok_only as a boolean") {
+        struct zcl_command_input_descriptor d;
+        const struct zcl_command_spec *spec =
+            zcl_command_registry_find(zcl_command_catalog(), FOB_PATH, NULL);
+        ASSERT(spec != NULL);
+        ASSERT(zcl_command_registry_input_descriptor(spec, "runner_ok_only",
+                                                     &d));
+        ASSERT_EQ(d.type, JSON_BOOL);
+        PASS();
+    }
+_test_next:;
+    return failures;
 }
 
 static int fob_case_rows(void)
@@ -206,9 +280,14 @@ static int fob_case_pick(const struct fob_paths *p)
         fob_end(&c);
         PASS();
     }
-    TEST("brief: a JSON boolean runner_ok_only narrows the pick the same way") {
+    TEST("brief: the validator refuses a text runner_ok_only, and a direct "
+         "caller's text \"true\" narrows the pick the same way") {
+        char why[192];
         fob_begin(&c, FOB_PATH, p, NULL, false);
-        ASSERT(json_push_kv_bool(&c.input, "runner_ok_only", true));
+        ASSERT(json_push_kv_str(&c.input, "runner_ok_only", "true"));
+        ASSERT(c.request.spec != NULL);
+        ASSERT(!zcl_command_registry_input_validate(c.request.spec, &c.input,
+                                                    why, sizeof(why)));
         zcl_native_handle_fleet_objectives_brief(&c.request, &c.reply);
         ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
         ASSERT_STR_EQ(fob_objective_id(&c), "functions_over_complexity_cap");
@@ -294,6 +373,7 @@ int test_fleet_objectives_brief(void)
     test_make_tmpdir(root, sizeof(root), "fleet_objectives_brief", "root");
     (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", FOB_NOWHERE "/datadir", 1);
     failures += fob_case_rows();
+    failures += fob_case_runner_paths();
     if (!fob_fixture(root, &paths)) {
         printf("fleet_objectives_brief: cannot build the fixture tree\n");
         failures++;

@@ -65,7 +65,9 @@ Z23_OBJECTIVE_WORK("lint_families_over_ceiling", 1,
                    "outside tools/lint/lintc must move")
 
 Z23_OBJECTIVE_WORK("functions_over_complexity_cap", 1,
-                   "apps/**,platform/**,engine/composition/**,tools/**,tools/lint/cyclomatic_complexity_baseline.txt",
+                   "apps/**,platform/**,engine/composition/**,contexts/commons/**,"
+                   "contexts/explorer/**,tools/lint/lintc/**,"
+                   "tools/lint/cyclomatic_complexity_baseline.txt",
                    "z23-dev fleet objectives",
                    "the function sits in core/, engine/reducer/, "
                    "contexts/wallet/, consensus storage or the land driver, "
