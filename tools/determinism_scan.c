@@ -168,6 +168,46 @@ static long load_centi(void)
     return whole * 100 + frac;
 }
 
+/* CC and CXX both name the build's own compiler wrapper. A wrapper path that
+ * does not fit the buffer is refused before either variable is planned. */
+static bool plan_cc_set(struct env_plan *out)
+{
+    char cc[600];
+    if (!cc_value(cc, sizeof(cc))) return false;
+    return plan_add(out, "CC=%s", cc) && plan_add(out, "CXX=%s", cc);
+}
+
+static bool plan_cwd_tmp(struct env_plan *out, const char *alt_tmp)
+{
+    return plan_add(out, "TMPDIR=%s", alt_tmp) &&
+           plan_add(out, "TMP=%s", alt_tmp) &&
+           plan_add(out, "TEMP=%s", alt_tmp) &&
+           plan_add(out, "PWD=%s", alt_tmp);
+}
+
+static bool plan_locale_tz(struct env_plan *out)
+{
+    return plan_add(out, "TZ=Pacific/Kiritimati") &&
+           plan_add(out, "LC_ALL=C") &&
+           plan_add(out, "LANG=C") &&
+           plan_add(out, "LC_TIME=C") &&
+           plan_add(out, "LC_COLLATE=C");
+}
+
+static bool plan_env_pad(struct env_plan *out)
+{
+    for (int i = 0; i < ENV_PAD_VARS; i++) {
+        /* Fixed content, so the padding itself is deterministic; only its
+         * SIZE matters, and its size is what shifts the initial stack. */
+        if (!plan_add(out, "ZCL_DET_PAD_%03d="
+                           "0123456789012345678901234567890123456789"
+                           "0123456789012345678901234567890123456789"
+                           "01234567890123456789012345678901", i))
+            return false;
+    }
+    return true;
+}
+
 static bool build_plan(enum zcl_det_perturbation p, int base_jobs,
                        const char *alt_tmp, struct env_plan *out)
 {
@@ -179,11 +219,8 @@ static bool build_plan(enum zcl_det_perturbation p, int base_jobs,
     case ZCL_DET_P_BASE_REPEAT:
         return true;
 
-    case ZCL_DET_P_CC_SET: {
-        char cc[600];
-        if (!cc_value(cc, sizeof(cc))) return false;
-        return plan_add(out, "CC=%s", cc) && plan_add(out, "CXX=%s", cc);
-    }
+    case ZCL_DET_P_CC_SET:
+        return plan_cc_set(out);
 
     case ZCL_DET_P_CC_UNSET:
         plan_drop(out, "CC");
@@ -192,29 +229,13 @@ static bool build_plan(enum zcl_det_perturbation p, int base_jobs,
         return true;
 
     case ZCL_DET_P_CWD_TMP:
-        return plan_add(out, "TMPDIR=%s", alt_tmp) &&
-               plan_add(out, "TMP=%s", alt_tmp) &&
-               plan_add(out, "TEMP=%s", alt_tmp) &&
-               plan_add(out, "PWD=%s", alt_tmp);
+        return plan_cwd_tmp(out, alt_tmp);
 
     case ZCL_DET_P_LOCALE_TZ:
-        return plan_add(out, "TZ=Pacific/Kiritimati") &&
-               plan_add(out, "LC_ALL=C") &&
-               plan_add(out, "LANG=C") &&
-               plan_add(out, "LC_TIME=C") &&
-               plan_add(out, "LC_COLLATE=C");
+        return plan_locale_tz(out);
 
     case ZCL_DET_P_ENV_PAD:
-        for (int i = 0; i < ENV_PAD_VARS; i++) {
-            /* Fixed content, so the padding itself is deterministic; only its
-             * SIZE matters, and its size is what shifts the initial stack. */
-            if (!plan_add(out, "ZCL_DET_PAD_%03d="
-                               "0123456789012345678901234567890123456789"
-                               "0123456789012345678901234567890123456789"
-                               "01234567890123456789012345678901", i))
-                return false;
-        }
-        return true;
+        return plan_env_pad(out);
 
     case ZCL_DET_P_JOBS_LOW:
         out->jobs = base_jobs > 2 ? base_jobs - 3 : 1;
@@ -297,57 +318,34 @@ static bool digest_sink(void *ctx, const struct zcl_det_group_digest *g)
     return true;
 }
 
-static int run_collect(const char *profile_name, const char *out_dir,
-                       const char *runner, int jobs, const char *alt_tmp)
+/* The digests file a profile writes under out_dir. False when it does not fit. */
+static bool digests_path(const char *dir, const char *profile, char *out,
+                         size_t cap)
 {
-    enum zcl_det_perturbation p;
-    if (!zcl_det_perturbation_from_name(profile_name, &p)) {
-        fprintf(stderr, "determinism_scan: unknown profile '%s'\n", profile_name);
-        return 2;
-    }
+    return snprintf(out, cap, "%s/%s.digests", dir, profile) < (int)cap;
+}
 
-    struct env_plan plan;
-    if (!build_plan(p, jobs, alt_tmp, &plan)) {
-        fprintf(stderr, "determinism_scan: profile %s NOT APPLIED on this host\n",
-                profile_name);
-        return 3;
-    }
+/* The transcript and digests paths of one profile, both under out_dir. */
+static bool profile_paths(const char *out_dir, const char *profile_name,
+                          char *transcript, size_t tcap,
+                          char *digests, size_t dcap)
+{
+    return snprintf(transcript, tcap, "%s/%s.transcript", out_dir,
+                    profile_name) < (int)tcap &&
+           digests_path(out_dir, profile_name, digests, dcap);
+}
 
-    char transcript[1024];
-    char digests[1024];
-    if (snprintf(transcript, sizeof(transcript), "%s/%s.transcript", out_dir,
-                 profile_name) >= (int)sizeof(transcript) ||
-        snprintf(digests, sizeof(digests), "%s/%s.digests", out_dir,
-                 profile_name) >= (int)sizeof(digests)) {
-        fprintf(stderr, "determinism_scan: output path too long\n");
-        plan_free(&plan);
-        return 2;
-    }
-
-    char jobs_arg[32];
-    snprintf(jobs_arg, sizeof(jobs_arg), "--jobs=%d", plan.jobs);
-    char *const argv[] = { (char *)runner, (char *)"--verbose",
-                           (char *)"--no-cache", jobs_arg, NULL };
-
-    char **envp = compose_environ(&plan);
-    if (!envp) {
-        fprintf(stderr, "determinism_scan: out of memory composing environ\n");
-        plan_free(&plan);
-        return 2;
-    }
-
-    fprintf(stderr, "determinism_scan: %s -> %s (%s)\n", profile_name,
-            transcript, zcl_det_perturbation_why(p));
-
-    /* Load at the START of the run, before the runner's own workers land. */
-    const long load_start = load_centi();
-
+/* Runs the runner with stdout and stderr redirected to transcript, and waits
+ * for it. Returns false only when fork fails; the runner's wait status lands
+ * in *status. */
+static bool run_profile_runner(const char *runner, char *const argv[],
+                               char *const envp[], const char *transcript,
+                               int *status)
+{
     pid_t pid = fork();
     if (pid < 0) {
         fprintf(stderr, "determinism_scan: fork failed: %s\n", strerror(errno));
-        free(envp);
-        plan_free(&plan);
-        return 2;
+        return false;
     }
     if (pid == 0) {
         int fd = open(transcript, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -358,19 +356,20 @@ static int run_collect(const char *profile_name, const char *out_dir,
         execve(runner, argv, envp);
         _exit(122);
     }
+    while (waitpid(pid, status, 0) < 0 && errno == EINTR) {}
+    return true;
+}
 
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {}
-    const long load_end = load_centi();
-    const int applied_jobs = plan.jobs;
-    free(envp);
-    plan_free(&plan);
-
-    /* A non-zero runner exit is EXPECTED when the tree has failing groups, and
-     * it is not a reason to discard the measurement: a group that fails the
-     * same way under every perturbation is deterministic, and one that fails
-     * only sometimes is exactly what this tool is looking for. Only a runner
-     * that never produced a transcript is a measurement failure. */
+/* Turns the runner's transcript into the profile's digests file. A non-zero
+ * runner exit is EXPECTED when the tree has failing groups, and it is not a
+ * reason to discard the measurement: a group that fails the same way under
+ * every perturbation is deterministic, and one that fails only sometimes is
+ * exactly what this tool is looking for. Only a runner that never produced a
+ * transcript is a measurement failure. */
+static int write_profile_digests(const char *transcript, const char *digests,
+                                 const char *profile_name, int applied_jobs,
+                                 long load_start, long load_end, int status)
+{
     FILE *in = fopen(transcript, "r");
     if (!in) {
         fprintf(stderr, "determinism_scan: no transcript at %s\n", transcript);
@@ -414,6 +413,60 @@ static int run_collect(const char *profile_name, const char *out_dir,
             (unsigned long long)stats.checks,
             (unsigned long long)stats.groups_without_vector);
     return 0;
+}
+
+static int run_collect(const char *profile_name, const char *out_dir,
+                       const char *runner, int jobs, const char *alt_tmp)
+{
+    enum zcl_det_perturbation p;
+    if (!zcl_det_perturbation_from_name(profile_name, &p)) {
+        fprintf(stderr, "determinism_scan: unknown profile '%s'\n", profile_name);
+        return 2;
+    }
+
+    struct env_plan plan;
+    if (!build_plan(p, jobs, alt_tmp, &plan)) {
+        fprintf(stderr, "determinism_scan: profile %s NOT APPLIED on this host\n",
+                profile_name);
+        return 3;
+    }
+
+    char transcript[1024];
+    char digests[1024];
+    if (!profile_paths(out_dir, profile_name, transcript, sizeof(transcript),
+                       digests, sizeof(digests))) {
+        fprintf(stderr, "determinism_scan: output path too long\n");
+        plan_free(&plan);
+        return 2;
+    }
+
+    char jobs_arg[32];
+    snprintf(jobs_arg, sizeof(jobs_arg), "--jobs=%d", plan.jobs);
+    char *const argv[] = { (char *)runner, (char *)"--verbose",
+                           (char *)"--no-cache", jobs_arg, NULL };
+
+    char **envp = compose_environ(&plan);
+    if (!envp) {
+        fprintf(stderr, "determinism_scan: out of memory composing environ\n");
+        plan_free(&plan);
+        return 2;
+    }
+
+    fprintf(stderr, "determinism_scan: %s -> %s (%s)\n", profile_name,
+            transcript, zcl_det_perturbation_why(p));
+
+    /* Load at the START of the run, before the runner's own workers land. */
+    const long load_start = load_centi();
+    int status = 0;
+    const bool ran = run_profile_runner(runner, argv, envp, transcript, &status);
+    const long load_end = ran ? load_centi() : -1;
+    const int applied_jobs = plan.jobs;
+    free(envp);
+    plan_free(&plan);
+    if (!ran) return 2;
+
+    return write_profile_digests(transcript, digests, profile_name,
+                                 applied_jobs, load_start, load_end, status);
 }
 
 /* Re-derive one profile's digests from a transcript already on disk. The
@@ -530,105 +583,116 @@ static bool load_profile(struct table *t, size_t slot, const char *path,
     return true;
 }
 
-static int run_classify(const char *in_dir, const char *profile_csv,
-                        const char *baseline_path, long max_load_delta)
+/* The profile names of a --profiles= list, in measurement order. BASE must be
+ * first, and at least one more profile must follow it. */
+static bool parse_profile_csv(const char *profile_csv,
+                              enum zcl_det_perturbation *order, size_t *n_out)
 {
-    enum zcl_det_perturbation order[ZCL_DET_P__COUNT];
-    size_t n = 0;
     char csv[512];
+    size_t n = 0;
     snprintf(csv, sizeof(csv), "%s", profile_csv);
     for (char *tok = strtok(csv, ","); tok; tok = strtok(NULL, ",")) {
         if (n >= ZCL_DET_P__COUNT) {
             fprintf(stderr, "determinism_scan: too many profiles\n");
-            return 2;
+            return false;
         }
         if (!zcl_det_perturbation_from_name(tok, &order[n])) {
             fprintf(stderr, "determinism_scan: unknown profile '%s'\n", tok);
-            return 2;
+            return false;
         }
         n++;
     }
     if (n < 2) {
         fprintf(stderr, "determinism_scan: need at least BASE and one more\n");
-        return 2;
+        return false;
     }
     if (order[0] != ZCL_DET_P_BASE) {
         fprintf(stderr, "determinism_scan: BASE must be the first profile\n");
-        return 2;
+        return false;
     }
+    *n_out = n;
+    return true;
+}
 
-    struct table t = { .cells = NULL, .n_profiles = n };
-    t.cells = calloc(k_registry_len * n, sizeof(*t.cells)); // raw-alloc-ok:build-tool
-    if (!t.cells) {
-        fprintf(stderr, "determinism_scan: out of memory\n");
-        return 2;
-    }
-
-    size_t unknown_groups = 0;
-    struct profile_load loads[ZCL_DET_P__COUNT];
+/* Loads every profile's digests file in measurement order. Stops at the first
+ * file that cannot be read or parsed; the caller discards the table. */
+static bool load_all_profiles(struct table *t, const char *in_dir,
+                              const enum zcl_det_perturbation *order, size_t n,
+                              size_t *unknown_groups, struct profile_load *loads)
+{
     for (size_t i = 0; i < n; i++) {
         char path[1024];
         snprintf(path, sizeof(path), "%s/%s.digests", in_dir,
                  zcl_det_perturbation_name(order[i]));
-        if (!load_profile(&t, i, path, &unknown_groups, &loads[i])) {
-            free(t.cells);
-            return 2;
-        }
+        if (!load_profile(t, i, path, unknown_groups, &loads[i])) return false;
     }
+    return true;
+}
 
-    /* ── was the box quiet? ────────────────────────────────────────────────
-     * BASE and BASE_REPEAT are the same environment run twice, so every
-     * difference between them is supposed to be the tests' fault. If the
-     * machine's load moved between them, that assumption is void and the
-     * NONDETERMINISTIC set is not a finding — it is a measurement of the box.
-     *
-     * When that happens this refuses to write the baseline and exits
-     * non-zero. An honest "I could not measure this cleanly" is the correct
-     * answer; a baseline produced under contamination would be cited later by
-     * someone who was not here, and there would be nothing in the file to
-     * warn them. */
+/* A profile's peak load: the higher of its start and end. A profile that
+ * started quiet and ended busy was contended for part of its run. */
+static long profile_peak(const struct profile_load *l)
+{
+    return l->start > l->end ? l->start : l->end;
+}
+
+/* ── was the box quiet? ────────────────────────────────────────────────────
+ * BASE and BASE_REPEAT are the same environment run twice, so every
+ * difference between them is supposed to be the tests' fault. If the
+ * machine's load moved between them, that assumption is void and the
+ * NONDETERMINISTIC set is not a finding — it is a measurement of the box.
+ *
+ * Returns false (load not comparable) when either reference profile recorded
+ * no load, or when their peaks are further apart than max_load_delta. *ref_delta
+ * is -1 unless both loads were compared. */
+static bool check_reference_load(const struct profile_load *loads,
+                                 const enum zcl_det_perturbation *order,
+                                 size_t n, long max_load_delta, long *ref_delta)
+{
     bool load_ok = true;
-    long ref_delta = -1;
+    *ref_delta = -1;
     size_t repeat_slot = 0;
     for (size_t i = 1; i < n; i++)
         if (order[i] == ZCL_DET_P_BASE_REPEAT) repeat_slot = i;
-    if (repeat_slot != 0) {
-        const struct profile_load *a = &loads[0];
-        const struct profile_load *b = &loads[repeat_slot];
-        if (!a->present || !b->present ||
-            a->start < 0 || a->end < 0 || b->start < 0 || b->end < 0) {
-            load_ok = false;
-            fprintf(stderr,
-                    "determinism_scan: BASE or BASE_REPEAT recorded no load; "
-                    "the sweep cannot be shown to have been clean\n");
-        } else {
-            /* Compare the peaks. A profile that started quiet and ended busy
-             * was contended for part of its run, and the average would hide
-             * exactly that. */
-            const long pa = a->start > a->end ? a->start : a->end;
-            const long pb = b->start > b->end ? b->start : b->end;
-            ref_delta = pa > pb ? pa - pb : pb - pa;
-            if (ref_delta > max_load_delta) load_ok = false;
-        }
-    }
+    if (repeat_slot == 0) return load_ok;
 
-    /* ── did the scheduling contrast actually happen? ──────────────────────
-     * The load guard above asks whether the two REFERENCE profiles matched.
-     * This asks the opposite question about the SCHEDULING ones, and it is a
-     * separate failure that the first check cannot see.
-     *
-     * LOAD_HIGH exists to be the busiest profile in the sweep. If an unrelated
-     * job happened to saturate the box during BASE and then finished before
-     * LOAD_HIGH ran, LOAD_HIGH is the QUIETEST profile instead, and the
-     * contrast the TIMING_SENSITIVE verdict rests on never occurred. Nothing
-     * in the digests would look wrong: a genuinely load-sensitive group simply
-     * would not split, and would be reported DETERMINISTIC. A false green, not
-     * a false accusation.
-     *
-     * So when a SCHEDULING profile did not reach a higher load than BASE, the
-     * separation is UNMEASURED and says so. NONDETERMINISTIC rows are
-     * unaffected — they do not depend on the load contrast — so the baseline
-     * is still written, but the run cannot be mistaken for a clean one. */
+    const struct profile_load *a = &loads[0];
+    const struct profile_load *b = &loads[repeat_slot];
+    if (!a->present || !b->present ||
+        a->start < 0 || a->end < 0 || b->start < 0 || b->end < 0) {
+        fprintf(stderr,
+                "determinism_scan: BASE or BASE_REPEAT recorded no load; "
+                "the sweep cannot be shown to have been clean\n");
+        return false;
+    }
+    const long pa = profile_peak(a);
+    const long pb = profile_peak(b);
+    *ref_delta = pa > pb ? pa - pb : pb - pa;
+    if (*ref_delta > max_load_delta) load_ok = false;
+    return load_ok;
+}
+
+/* ── did the scheduling contrast actually happen? ──────────────────────────
+ * The load guard above asks whether the two REFERENCE profiles matched.
+ * This asks the opposite question about the SCHEDULING ones, and it is a
+ * separate failure that the first check cannot see.
+ *
+ * LOAD_HIGH exists to be the busiest profile in the sweep. If an unrelated
+ * job happened to saturate the box during BASE and then finished before
+ * LOAD_HIGH ran, LOAD_HIGH is the QUIETEST profile instead, and the
+ * contrast the TIMING_SENSITIVE verdict rests on never occurred. Nothing
+ * in the digests would look wrong: a genuinely load-sensitive group simply
+ * would not split, and would be reported DETERMINISTIC. A false green, not
+ * a false accusation.
+ *
+ * So when a SCHEDULING profile did not reach a higher load than BASE, the
+ * separation is UNMEASURED and says so. NONDETERMINISTIC rows are
+ * unaffected — they do not depend on the load contrast — so the baseline
+ * is still written, but the run cannot be mistaken for a clean one. */
+static bool check_scheduling_contrast(const struct profile_load *loads,
+                                      const enum zcl_det_perturbation *order,
+                                      size_t n)
+{
     bool sched_ok = true;
     for (size_t i = 1; i < n; i++) {
         if (zcl_det_perturbation_class(order[i]) != ZCL_DET_PC_SCHEDULING)
@@ -638,10 +702,8 @@ static int run_classify(const char *in_dir, const char *profile_csv,
             sched_ok = false;
             continue;
         }
-        const long base_peak = loads[0].start > loads[0].end
-                                 ? loads[0].start : loads[0].end;
-        const long this_peak = loads[i].start > loads[i].end
-                                 ? loads[i].start : loads[i].end;
+        const long base_peak = profile_peak(&loads[0]);
+        const long this_peak = profile_peak(&loads[i]);
         if (this_peak <= base_peak) {
             sched_ok = false;
             fprintf(stderr,
@@ -653,49 +715,53 @@ static int run_classify(const char *in_dir, const char *profile_csv,
                     base_peak / 100, base_peak % 100);
         }
     }
+    return sched_ok;
+}
 
-    /* Pass one: count the rows the baseline will carry, so its "# count: N"
-     * header is already correct. The gate rejects a header that disagrees with
-     * the rows, and a tool that emitted a file its own gate rejects would be a
-     * rail nobody could use. Both varying classes are rows. */
-    size_t nd_total = 0;
+/* Counts the rows the baseline will carry, so its "# count: N" header is
+ * already correct before anything is written. Both varying classes are rows.
+ * Returns false when a group cannot be classified. */
+static bool count_baseline_rows(struct table *t,
+                                const enum zcl_det_perturbation *order,
+                                size_t n, size_t *nd_total)
+{
+    *nd_total = 0;
     for (size_t g = 0; g < k_registry_len; g++) {
         struct zcl_det_verdict v;
-        if (!zcl_det_classify(&t.cells[g * n], order, n, &v)) {
-            free(t.cells);
-            return 2;
-        }
+        if (!zcl_det_classify(&t->cells[g * n], order, n, &v)) return false;
         if (v.klass == ZCL_DET_CLASS_NONDETERMINISTIC ||
-            v.klass == ZCL_DET_CLASS_TIMING_SENSITIVE) nd_total++;
+            v.klass == ZCL_DET_CLASS_TIMING_SENSITIVE)
+            (*nd_total)++;
     }
+    return true;
+}
 
-    if (!load_ok) {
-        fprintf(stderr,
-                "\ndeterminism_scan: REFUSING to write a baseline.\n"
-                "  BASE and BASE_REPEAT did not run at comparable load");
-        if (ref_delta >= 0)
-            fprintf(stderr, " (peak delta %ld.%02ld, limit %ld.%02ld)",
-                    ref_delta / 100, ref_delta % 100,
-                    max_load_delta / 100, max_load_delta % 100);
-        fprintf(stderr,
-                ".\n"
-                "  Every row this sweep would record is UNCONFIRMED: load, not\n"
-                "  the tests, is the leading explanation for any split. Re-run\n"
-                "  the sweep on a quiet box, or raise --max-load-delta only if\n"
-                "  you can say why the delta is harmless.\n");
-        baseline_path = NULL;
-    }
+/* Printed instead of a baseline when the reference loads were not comparable:
+ * every row this sweep would record is UNCONFIRMED. */
+static void report_refused_baseline(long ref_delta, long max_load_delta)
+{
+    fprintf(stderr,
+            "\ndeterminism_scan: REFUSING to write a baseline.\n"
+            "  BASE and BASE_REPEAT did not run at comparable load");
+    if (ref_delta >= 0)
+        fprintf(stderr, " (peak delta %ld.%02ld, limit %ld.%02ld)",
+                ref_delta / 100, ref_delta % 100,
+                max_load_delta / 100, max_load_delta % 100);
+    fprintf(stderr,
+            ".\n"
+            "  Every row this sweep would record is UNCONFIRMED: load, not\n"
+            "  the tests, is the leading explanation for any split. Re-run\n"
+            "  the sweep on a quiet box, or raise --max-load-delta only if\n"
+            "  you can say why the delta is harmless.\n");
+}
 
-    struct zcl_det_partition part = {0};
-    FILE *bl = NULL;
-    if (baseline_path) {
-        bl = fopen(baseline_path, "w");
-        if (!bl) {
-            fprintf(stderr, "determinism_scan: cannot write %s\n", baseline_path);
-            free(t.cells);
-            return 2;
-        }
-        fprintf(bl,
+static void write_baseline_header(FILE *bl,
+                                  const enum zcl_det_perturbation *order,
+                                  size_t n, const struct profile_load *loads,
+                                  long ref_delta, long max_load_delta,
+                                  bool sched_ok, size_t nd_total)
+{
+    fprintf(bl,
 "# Determinism ratchet baseline — registered test groups whose verdict vector\n"
 "# is NOT bitwise identical across every applied perturbation.\n"
 "#\n"
@@ -730,29 +796,29 @@ static int run_classify(const char *in_dir, const char *profile_csv,
 "# perturbation — hours of wall clock — and is never part of 'make lint'.\n"
 "#\n"
 "# perturbations applied:");
-        for (size_t i = 0; i < n; i++)
-            fprintf(bl, " %s", zcl_det_perturbation_name(order[i]));
-        /* The load each profile ran at, carried INTO the record. A later
-         * reader has no other way to tell a finding from a busy box, and the
-         * first sweep of this tree was contaminated in exactly that way. */
-        fprintf(bl, "\n#\n# load per profile (1-min average, hundredths, "
-                    "start -> end):\n");
-        for (size_t i = 0; i < n; i++) {
-            if (loads[i].present)
-                fprintf(bl, "#   %-12s jobs=%-3d %ld -> %ld\n",
-                        zcl_det_perturbation_name(order[i]), loads[i].jobs,
-                        loads[i].start, loads[i].end);
-            else
-                fprintf(bl, "#   %-12s (no load recorded)\n",
-                        zcl_det_perturbation_name(order[i]));
-        }
-        if (ref_delta >= 0)
-            fprintf(bl, "#   BASE vs BASE_REPEAT peak delta: %ld.%02ld "
-                        "(limit %ld.%02ld)\n",
-                    ref_delta / 100, ref_delta % 100,
-                    max_load_delta / 100, max_load_delta % 100);
-        if (!sched_ok)
-            fprintf(bl,
+    for (size_t i = 0; i < n; i++)
+        fprintf(bl, " %s", zcl_det_perturbation_name(order[i]));
+    /* The load each profile ran at, carried INTO the record. A later
+     * reader has no other way to tell a finding from a busy box, and the
+     * first sweep of this tree was contaminated in exactly that way. */
+    fprintf(bl, "\n#\n# load per profile (1-min average, hundredths, "
+                "start -> end):\n");
+    for (size_t i = 0; i < n; i++) {
+        if (loads[i].present)
+            fprintf(bl, "#   %-12s jobs=%-3d %ld -> %ld\n",
+                    zcl_det_perturbation_name(order[i]), loads[i].jobs,
+                    loads[i].start, loads[i].end);
+        else
+            fprintf(bl, "#   %-12s (no load recorded)\n",
+                    zcl_det_perturbation_name(order[i]));
+    }
+    if (ref_delta >= 0)
+        fprintf(bl, "#   BASE vs BASE_REPEAT peak delta: %ld.%02ld "
+                    "(limit %ld.%02ld)\n",
+                ref_delta / 100, ref_delta % 100,
+                max_load_delta / 100, max_load_delta % 100);
+    if (!sched_ok)
+        fprintf(bl,
 "#\n"
 "# WARNING — THE SCHEDULING CONTRAST DID NOT HAPPEN IN THIS SWEEP.\n"
 "# A SCHEDULING profile did not reach a higher load than BASE, so load\n"
@@ -760,9 +826,13 @@ static int run_classify(const char *in_dir, const char *profile_csv,
 "# groups missing from this file, and a group absent from it has NOT been\n"
 "# shown to be load-insensitive. Re-measure before trusting the absence of\n"
 "# a row here as evidence of anything.\n");
-        fprintf(bl, "#\n# count: %zu\n", nd_total);
-    }
+    fprintf(bl, "#\n# count: %zu\n", nd_total);
+}
 
+static void print_scan_header(const enum zcl_det_perturbation *order, size_t n,
+                              const struct profile_load *loads, long ref_delta,
+                              long max_load_delta, bool load_ok, bool sched_ok)
+{
     printf("determinism scan — %zu registered groups, %zu perturbations\n",
            k_registry_len, n);
     for (size_t i = 0; i < n; i++) {
@@ -780,81 +850,119 @@ static int run_classify(const char *in_dir, const char *profile_csv,
                ref_delta / 100, ref_delta % 100,
                max_load_delta / 100, max_load_delta % 100,
                load_ok ? "comparable" : "NOT COMPARABLE, results UNCONFIRMED");
-
-    const char *tag = load_ok ? "" : " [UNCONFIRMED — load not comparable]";
-    const char *sched_tag =
-        sched_ok ? "" : " [UNMEASURED — the scheduling contrast did not happen]";
-
     if (!sched_ok)
         printf("\n  WARNING: a SCHEDULING profile did not reach a higher load\n"
                "  than BASE, so this sweep did not test load sensitivity at\n"
                "  all. A group reading DETERMINISTIC below has NOT been shown\n"
                "  to be insensitive to load — it was simply never loaded.\n");
+}
 
+/* One verdict row: the group, its split cause, and (when bl is set) the same
+ * row in the baseline. label is the class name the baseline records. */
+static void print_split_row(FILE *bl, const char *group, const char *label,
+                            const struct zcl_det_verdict *v,
+                            const enum zcl_det_perturbation *order, size_t n)
+{
+    /* Translate slot positions into perturbation names — through the
+     * library, with THIS run's profile order, so the report and the
+     * baseline can never disagree about what split a group. */
+    char cause[512];
+    zcl_det_split_mask_string(v->split_mask, order, n, cause, sizeof(cause));
+    printf("  %-56s %s\n", group, cause);
+    if (bl) fprintf(bl, "%s %s %s\n", group, label, cause);
+}
+
+/* Every group is folded into the partition here, and each NONDETERMINISTIC
+ * group is printed with its cause. Returns false when a group cannot be
+ * classified. */
+static bool report_nondeterministic(struct table *t,
+                                    const enum zcl_det_perturbation *order,
+                                    size_t n, FILE *bl, const char *tag,
+                                    struct zcl_det_partition *part)
+{
     printf("\nNONDETERMINISTIC — the vector moved on a re-run or with the "
            "environment%s:\n", tag);
-    size_t nd_count = 0, ts_count = 0;
+    size_t nd_count = 0;
     for (size_t g = 0; g < k_registry_len; g++) {
         struct zcl_det_verdict v;
-        if (!zcl_det_classify(&t.cells[g * n], order, n, &v)) {
-            free(t.cells);
-            if (bl) fclose(bl);
-            return 2;
-        }
-        zcl_det_partition_add(&part, &v);
+        if (!zcl_det_classify(&t->cells[g * n], order, n, &v)) return false;
+        zcl_det_partition_add(part, &v);
         if (v.klass != ZCL_DET_CLASS_NONDETERMINISTIC) continue;
-
-        /* Translate slot positions into perturbation names — through the
-         * library, with THIS run's profile order, so the report and the
-         * baseline can never disagree about what split a group. */
-        char cause[512];
-        zcl_det_split_mask_string(v.split_mask, order, n, cause, sizeof(cause));
-        printf("  %-56s %s\n", k_registry[g], cause);
-        if (bl) fprintf(bl, "%s NONDETERMINISTIC %s\n", k_registry[g], cause);
+        print_split_row(bl, k_registry[g], "NONDETERMINISTIC", &v, order, n);
         nd_count++;
     }
     if (nd_count == 0) printf("  (none)\n");
+    return true;
+}
 
-    /* Its own section, never folded into the one above. A group here has
-     * settled logic and a grading rule that reads a clock; re-running it on a
-     * busier box refutes a receipt that was never wrong. */
+/* Its own section, never folded into the one above. A group here has settled
+ * logic and a grading rule that reads a clock; re-running it on a busier box
+ * refutes a receipt that was never wrong. */
+static void report_timing_sensitive(struct table *t,
+                                    const enum zcl_det_perturbation *order,
+                                    size_t n, FILE *bl, const char *tag,
+                                    const char *sched_tag)
+{
     printf("\nTIMING_SENSITIVE — the vector moved ONLY when load moved%s%s:\n",
            tag, sched_tag);
+    size_t ts_count = 0;
     for (size_t g = 0; g < k_registry_len; g++) {
         struct zcl_det_verdict v;
-        if (!zcl_det_classify(&t.cells[g * n], order, n, &v)) continue;
+        if (!zcl_det_classify(&t->cells[g * n], order, n, &v)) continue;
         if (v.klass != ZCL_DET_CLASS_TIMING_SENSITIVE) continue;
-        char cause[512];
-        zcl_det_split_mask_string(v.split_mask, order, n, cause, sizeof(cause));
-        printf("  %-56s %s\n", k_registry[g], cause);
-        if (bl) fprintf(bl, "%s TIMING_SENSITIVE %s\n", k_registry[g], cause);
+        print_split_row(bl, k_registry[g], "TIMING_SENSITIVE", &v, order, n);
         ts_count++;
     }
     if (ts_count == 0) printf("  (none)\n");
+}
 
+static void report_unknown(struct table *t,
+                           const enum zcl_det_perturbation *order, size_t n)
+{
     printf("\nUNKNOWN (could not be measured — never folded into any "
            "other bucket):\n");
     for (size_t g = 0; g < k_registry_len; g++) {
         struct zcl_det_verdict v;
-        if (!zcl_det_classify(&t.cells[g * n], order, n, &v)) continue;
+        if (!zcl_det_classify(&t->cells[g * n], order, n, &v)) continue;
         if (v.klass != ZCL_DET_CLASS_UNKNOWN) continue;
         printf("  %-56s %s\n", k_registry[g],
                zcl_det_unknown_reason_name(v.reason));
     }
+}
 
-    printf("\nPARTITION over %zu registered groups\n", part.total);
-    printf("  DETERMINISTIC      %6zu\n", part.deterministic);
-    printf("  NONDETERMINISTIC   %6zu\n", part.nondeterministic);
-    printf("  TIMING_SENSITIVE   %6zu\n", part.timing_sensitive);
-    printf("  UNKNOWN/not-run    %6zu\n", part.unknown_not_run);
-    printf("  UNKNOWN/no-vector  %6zu\n", part.unknown_no_vector);
-    printf("  UNKNOWN/partial    %6zu\n", part.unknown_partial);
+/* The three verdict sections, in the order they print. Returns false when the
+ * NONDETERMINISTIC pass cannot classify a group; nothing after it is printed. */
+static bool report_verdicts(struct table *t,
+                            const enum zcl_det_perturbation *order, size_t n,
+                            FILE *bl, bool load_ok, bool sched_ok,
+                            struct zcl_det_partition *part)
+{
+    const char *tag = load_ok ? "" : " [UNCONFIRMED — load not comparable]";
+    const char *sched_tag =
+        sched_ok ? "" : " [UNMEASURED — the scheduling contrast did not happen]";
+
+    if (!report_nondeterministic(t, order, n, bl, tag, part)) return false;
+    report_timing_sensitive(t, order, n, bl, tag, sched_tag);
+    report_unknown(t, order, n);
+    return true;
+}
+
+static void print_partition(const struct zcl_det_partition *part,
+                            size_t unknown_groups)
+{
+    printf("\nPARTITION over %zu registered groups\n", part->total);
+    printf("  DETERMINISTIC      %6zu\n", part->deterministic);
+    printf("  NONDETERMINISTIC   %6zu\n", part->nondeterministic);
+    printf("  TIMING_SENSITIVE   %6zu\n", part->timing_sensitive);
+    printf("  UNKNOWN/not-run    %6zu\n", part->unknown_not_run);
+    printf("  UNKNOWN/no-vector  %6zu\n", part->unknown_no_vector);
+    printf("  UNKNOWN/partial    %6zu\n", part->unknown_partial);
     printf("  ---------------------------\n");
     printf("  sum                %6zu  %s\n",
-           part.deterministic + part.nondeterministic + part.timing_sensitive +
-               part.unknown_not_run + part.unknown_no_vector +
-               part.unknown_partial,
-           zcl_det_partition_is_exact(&part) ? "(exact)" : "(NOT EXACT)");
+           part->deterministic + part->nondeterministic +
+               part->timing_sensitive + part->unknown_not_run +
+               part->unknown_no_vector + part->unknown_partial,
+           zcl_det_partition_is_exact(part) ? "(exact)" : "(NOT EXACT)");
     if (unknown_groups)
         printf("  note: %zu transcript group(s) were not in the registry\n",
                unknown_groups);
@@ -869,16 +977,83 @@ static int run_classify(const char *in_dir, const char *profile_csv,
            "measure is a small worker pool against a large one on an otherwise\n"
            "quiet box — not arbitrary contention — so a group can read\n"
            "DETERMINISTIC here and still refute a receipt on a loaded node.\n");
+}
+
+/* The exit code for a finished classify: a contaminated sweep is not a result,
+ * even when the partition is exact, and neither is one whose scheduling
+ * contrast never happened. */
+static int classify_exit_code(bool load_ok, bool sched_ok, bool exact)
+{
+    if (!load_ok) return 4;
+    if (!sched_ok) return 5;
+    return exact ? 0 : 1;
+}
+
+static int run_classify(const char *in_dir, const char *profile_csv,
+                        const char *baseline_path, long max_load_delta)
+{
+    enum zcl_det_perturbation order[ZCL_DET_P__COUNT];
+    size_t n = 0;
+    if (!parse_profile_csv(profile_csv, order, &n)) return 2;
+
+    struct table t = { .cells = NULL, .n_profiles = n };
+    t.cells = calloc(k_registry_len * n, sizeof(*t.cells)); // raw-alloc-ok:build-tool
+    if (!t.cells) {
+        fprintf(stderr, "determinism_scan: out of memory\n");
+        return 2;
+    }
+
+    size_t unknown_groups = 0;
+    struct profile_load loads[ZCL_DET_P__COUNT];
+    if (!load_all_profiles(&t, in_dir, order, n, &unknown_groups, loads)) {
+        free(t.cells);
+        return 2;
+    }
+
+    long ref_delta = -1;
+    bool load_ok = check_reference_load(loads, order, n, max_load_delta,
+                                        &ref_delta);
+    bool sched_ok = check_scheduling_contrast(loads, order, n);
+
+    /* Pass one: count the rows the baseline will carry. */
+    size_t nd_total = 0;
+    if (!count_baseline_rows(&t, order, n, &nd_total)) {
+        free(t.cells);
+        return 2;
+    }
+
+    if (!load_ok) {
+        report_refused_baseline(ref_delta, max_load_delta);
+        baseline_path = NULL;
+    }
+
+    FILE *bl = NULL;
+    if (baseline_path) {
+        bl = fopen(baseline_path, "w");
+        if (!bl) {
+            fprintf(stderr, "determinism_scan: cannot write %s\n", baseline_path);
+            free(t.cells);
+            return 2;
+        }
+        write_baseline_header(bl, order, n, loads, ref_delta, max_load_delta,
+                              sched_ok, nd_total);
+    }
+
+    print_scan_header(order, n, loads, ref_delta, max_load_delta, load_ok,
+                      sched_ok);
+
+    struct zcl_det_partition part = {0};
+    if (!report_verdicts(&t, order, n, bl, load_ok, sched_ok, &part)) {
+        free(t.cells);
+        if (bl) fclose(bl);
+        return 2;
+    }
+    print_partition(&part, unknown_groups);
 
     bool exact = zcl_det_partition_is_exact(&part);
     if (bl && fclose(bl) != 0) exact = false;
     free(t.cells);
-    /* A contaminated sweep is not a result, even when the partition is exact. */
-    if (!load_ok) return 4;
-    /* Nor is one whose scheduling contrast never happened — the buckets are
-     * arithmetically fine and the TIMING_SENSITIVE one is uninformed. */
-    if (!sched_ok) return 5;
-    return exact ? 0 : 1;
+    return classify_exit_code(load_ok, sched_ok, exact);
 }
 
 /* ── main ─────────────────────────────────────────────────────────────────*/
@@ -891,26 +1066,52 @@ static int run_classify(const char *in_dir, const char *profile_csv,
  * not required to be zero and -O0 and -O2 need not choose the same ones, so an
  * encoder that touched the struct's storage would print two different lines
  * here from one source file. */
+/* Fills r with the one fixed receipt the golden vector encodes. */
+static bool golden_receipt_fill(struct zcl_det_receipt *r)
+{
+    r->version = ZCL_DET_RECEIPT_VERSION;
+    if (!zcl_det_receipt_set_commit(
+            r, "0123456789abcdef0123456789abcdef01234567"))
+        return false;
+    snprintf(r->group, sizeof(r->group), "test_determinism");
+    zcl_det_receipt_label_digest("gcc-13.3.0/glibc-2.39/x86_64", r->toolchain);
+    zcl_det_receipt_label_digest("gate:ZCL_STRESS_TESTS=0,jobs=8", r->env_class);
+    r->verdict = ZCL_DET_CLASS_NONDETERMINISTIC;
+    r->reason = ZCL_DET_UNKNOWN_NONE;
+    r->perturbations = 8;
+    r->split_mask = (1u << ZCL_DET_P_CC_SET) | (1u << ZCL_DET_P_ENV_PAD);
+    r->check_count = 41;
+    for (size_t i = 0; i < ZCL_DET_DIGEST_LEN; i++) {
+        r->vector[i] = (uint8_t)(i * 7u + 3u);
+        r->producer[i] = (uint8_t)(0xA0u ^ i);
+    }
+    return true;
+}
+
+/* True when every field the encoder is required to carry survived the round
+ * trip. Pure comparison; the caller decides what a mismatch means. */
+static bool receipt_matches(const struct zcl_det_receipt *back,
+                            const struct zcl_det_receipt *r)
+{
+    return memcmp(&back->commit, &r->commit, sizeof(r->commit)) == 0 &&
+           strcmp(back->group, r->group) == 0 &&
+           back->version == r->version &&
+           back->verdict == r->verdict &&
+           back->reason == r->reason &&
+           back->perturbations == r->perturbations &&
+           back->split_mask == r->split_mask &&
+           back->check_count == r->check_count &&
+           memcmp(back->vector, r->vector, sizeof(r->vector)) == 0 &&
+           memcmp(back->producer, r->producer, sizeof(r->producer)) == 0 &&
+           memcmp(back->toolchain, r->toolchain, sizeof(r->toolchain)) == 0 &&
+           memcmp(back->env_class, r->env_class, sizeof(r->env_class)) == 0;
+}
+
 static int run_receipt_golden(void)
 {
     struct zcl_det_receipt r;
     memset(&r, 0, sizeof(r));
-    r.version = ZCL_DET_RECEIPT_VERSION;
-    if (!zcl_det_receipt_set_commit(
-            &r, "0123456789abcdef0123456789abcdef01234567"))
-        return 2;
-    snprintf(r.group, sizeof(r.group), "test_determinism");
-    zcl_det_receipt_label_digest("gcc-13.3.0/glibc-2.39/x86_64", r.toolchain);
-    zcl_det_receipt_label_digest("gate:ZCL_STRESS_TESTS=0,jobs=8", r.env_class);
-    r.verdict = ZCL_DET_CLASS_NONDETERMINISTIC;
-    r.reason = ZCL_DET_UNKNOWN_NONE;
-    r.perturbations = 8;
-    r.split_mask = (1u << ZCL_DET_P_CC_SET) | (1u << ZCL_DET_P_ENV_PAD);
-    r.check_count = 41;
-    for (size_t i = 0; i < ZCL_DET_DIGEST_LEN; i++) {
-        r.vector[i] = (uint8_t)(i * 7u + 3u);
-        r.producer[i] = (uint8_t)(0xA0u ^ i);
-    }
+    if (!golden_receipt_fill(&r)) return 2;
 
     uint8_t bytes[ZCL_DET_RECEIPT_SIZE];
     size_t len = 0;
@@ -922,16 +1123,7 @@ static int run_receipt_golden(void)
      * an encoding. */
     struct zcl_det_receipt back;
     if (!zcl_det_receipt_decode(bytes, len, &back)) return 2;
-    if (memcmp(&back.commit, &r.commit, sizeof(r.commit)) != 0 ||
-        strcmp(back.group, r.group) != 0 || back.version != r.version ||
-        back.verdict != r.verdict || back.reason != r.reason ||
-        back.perturbations != r.perturbations ||
-        back.split_mask != r.split_mask ||
-        back.check_count != r.check_count ||
-        memcmp(back.vector, r.vector, sizeof(r.vector)) != 0 ||
-        memcmp(back.producer, r.producer, sizeof(r.producer)) != 0 ||
-        memcmp(back.toolchain, r.toolchain, sizeof(r.toolchain)) != 0 ||
-        memcmp(back.env_class, r.env_class, sizeof(r.env_class)) != 0) {
+    if (!receipt_matches(&back, &r)) {
         fprintf(stderr, "determinism_scan: receipt round-trip mismatch\n");
         return 2;
     }
@@ -955,63 +1147,95 @@ static void usage(void)
         "  determinism_scan receipt-golden\n");
 }
 
+/* The options a command line may carry, with the defaults this tool has always
+ * used. parse_option() sets them; one command reads each. */
+struct scan_opts {
+    const char *profile;
+    const char *dir;
+    const char *runner;
+    const char *profiles;
+    const char *baseline;
+    const char *alt_tmp;
+    const char *transcript_in;
+    int jobs;
+    long max_load_delta;
+};
+
+/* Reads one --name=value argument into o. Returns false for an argument this
+ * tool does not know; the caller answers that with usage. */
+static bool parse_option(struct scan_opts *o, const char *arg)
+{
+    if (strncmp(arg, "--profile=", 10) == 0)       o->profile = arg + 10;
+    else if (strncmp(arg, "--transcript=", 13) == 0)
+        o->transcript_in = arg + 13;
+    else if (strncmp(arg, "--out=", 6) == 0)       o->dir = arg + 6;
+    else if (strncmp(arg, "--in=", 5) == 0)        o->dir = arg + 5;
+    else if (strncmp(arg, "--runner=", 9) == 0)    o->runner = arg + 9;
+    else if (strncmp(arg, "--profiles=", 11) == 0) o->profiles = arg + 11;
+    else if (strncmp(arg, "--baseline=", 11) == 0) o->baseline = arg + 11;
+    else if (strncmp(arg, "--alt-tmp=", 10) == 0)  o->alt_tmp = arg + 10;
+    else if (strncmp(arg, "--jobs=", 7) == 0)      o->jobs = atoi(arg + 7);
+    else if (strncmp(arg, "--max-load-delta=", 17) == 0)
+        o->max_load_delta = atol(arg + 17);
+    else return false;
+    return true;
+}
+
+static int run_parse_opts(const struct scan_opts *o)
+{
+    if (!o->transcript_in || !o->profile || !o->dir) { usage(); return 2; }
+    char digests[1024];
+    if (!digests_path(o->dir, o->profile, digests, sizeof(digests))) {
+        fprintf(stderr, "determinism_scan: output path too long\n");
+        return 2;
+    }
+    return run_parse(o->transcript_in, digests);
+}
+
+static int run_list_profiles(void)
+{
+    for (int i = 0; i < ZCL_DET_P__COUNT; i++)
+        printf("%-14s %s\n",
+               zcl_det_perturbation_name((enum zcl_det_perturbation)i),
+               zcl_det_perturbation_why((enum zcl_det_perturbation)i));
+    return 0;
+}
+
+static int dispatch_command(const char *cmd, const struct scan_opts *o)
+{
+    if (strcmp(cmd, "collect") == 0) {
+        if (!o->profile || !o->dir) { usage(); return 2; }
+        return run_collect(o->profile, o->dir, o->runner, o->jobs, o->alt_tmp);
+    }
+    if (strcmp(cmd, "parse") == 0) return run_parse_opts(o);
+    if (strcmp(cmd, "classify") == 0) {
+        if (!o->dir || !o->profiles) { usage(); return 2; }
+        return run_classify(o->dir, o->profiles, o->baseline,
+                            o->max_load_delta);
+    }
+    usage();
+    return 2;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { usage(); return 2; }
 
     if (strcmp(argv[1], "receipt-golden") == 0) return run_receipt_golden();
+    if (strcmp(argv[1], "list-profiles") == 0) return run_list_profiles();
 
-    if (strcmp(argv[1], "list-profiles") == 0) {
-        for (int i = 0; i < ZCL_DET_P__COUNT; i++)
-            printf("%-14s %s\n",
-                   zcl_det_perturbation_name((enum zcl_det_perturbation)i),
-                   zcl_det_perturbation_why((enum zcl_det_perturbation)i));
-        return 0;
-    }
-
-    const char *profile = NULL, *dir = NULL, *runner = "build/bin/test_parallel";
-    const char *profiles = NULL, *baseline = NULL, *alt_tmp = "/tmp";
-    const char *transcript_in = NULL;
-    int jobs = 8;
-    /* Peak 1-minute load, in hundredths, that BASE and BASE_REPEAT may differ
-     * by before the sweep is treated as contaminated. 2.00 is roughly one busy
-     * core plus slack — about the smallest delta that could plausibly move a
-     * wall-clock assertion. */
-    long max_load_delta = 200;
+    struct scan_opts o = {
+        .runner = "build/bin/test_parallel",
+        .alt_tmp = "/tmp",
+        .jobs = 8,
+        /* Peak 1-minute load, in hundredths, that BASE and BASE_REPEAT may
+         * differ by before the sweep is treated as contaminated. 2.00 is
+         * roughly one busy core plus slack — about the smallest delta that
+         * could plausibly move a wall-clock assertion. */
+        .max_load_delta = 200,
+    };
     for (int i = 2; i < argc; i++) {
-        if (strncmp(argv[i], "--profile=", 10) == 0)       profile = argv[i] + 10;
-        else if (strncmp(argv[i], "--transcript=", 13) == 0)
-            transcript_in = argv[i] + 13;
-        else if (strncmp(argv[i], "--out=", 6) == 0)       dir = argv[i] + 6;
-        else if (strncmp(argv[i], "--in=", 5) == 0)        dir = argv[i] + 5;
-        else if (strncmp(argv[i], "--runner=", 9) == 0)    runner = argv[i] + 9;
-        else if (strncmp(argv[i], "--profiles=", 11) == 0) profiles = argv[i] + 11;
-        else if (strncmp(argv[i], "--baseline=", 11) == 0) baseline = argv[i] + 11;
-        else if (strncmp(argv[i], "--alt-tmp=", 10) == 0)  alt_tmp = argv[i] + 10;
-        else if (strncmp(argv[i], "--jobs=", 7) == 0)      jobs = atoi(argv[i] + 7);
-        else if (strncmp(argv[i], "--max-load-delta=", 17) == 0)
-            max_load_delta = atol(argv[i] + 17);
-        else { usage(); return 2; }
+        if (!parse_option(&o, argv[i])) { usage(); return 2; }
     }
-
-    if (strcmp(argv[1], "collect") == 0) {
-        if (!profile || !dir) { usage(); return 2; }
-        return run_collect(profile, dir, runner, jobs, alt_tmp);
-    }
-    if (strcmp(argv[1], "parse") == 0) {
-        if (!transcript_in || !profile || !dir) { usage(); return 2; }
-        char digests[1024];
-        if (snprintf(digests, sizeof(digests), "%s/%s.digests", dir, profile)
-                >= (int)sizeof(digests)) {
-            fprintf(stderr, "determinism_scan: output path too long\n");
-            return 2;
-        }
-        return run_parse(transcript_in, digests);
-    }
-    if (strcmp(argv[1], "classify") == 0) {
-        if (!dir || !profiles) { usage(); return 2; }
-        return run_classify(dir, profiles, baseline, max_load_delta);
-    }
-    usage();
-    return 2;
+    return dispatch_command(argv[1], &o);
 }
