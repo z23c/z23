@@ -2057,11 +2057,6 @@ engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_init:31
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_stats_snapshot_impl:44
 engine/services/src/legacy_mirror_sync_state.c:lms_state_name:19
 engine/services/src/mesh_observation_sample.c:mesh_observation_sample_once:28
-engine/services/src/mesh_pairing_service.c:mesh_pairing_authorize:26
-engine/services/src/mesh_pairing_service.c:mesh_pairing_delegation_check:18
-engine/services/src/mesh_pairing_service.c:mesh_pairing_reason_token:20
-engine/services/src/mesh_pairing_service.c:mesh_pairing_service_accept:23
-engine/services/src/mesh_pairing_service.c:mesh_pairing_service_revoke_commit:24
 engine/services/src/mesh_private_object_admission.c:mesh_private_object_admit_offer:37
 engine/services/src/mesh_private_object_receiver.c:mesh_private_object_receiver_admit:22
 engine/services/src/mesh_private_object_receiver.c:mesh_private_object_receiver_chunk:20
