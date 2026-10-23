@@ -23,6 +23,20 @@ static bool inv_ident_char(unsigned char c)
     return isalnum(c) || c == '_';
 }
 
+/* Advances past spaces and tabs, staying inside [p, end). */
+static size_t inv_skip_blanks(const char *src, size_t p, size_t end)
+{
+    while (p < end && (src[p] == ' ' || src[p] == '\t')) p++;
+    return p;
+}
+
+/* Advances past isspace() bytes, staying inside [p, end). */
+static size_t inv_skip_space(const char *clean, size_t p, size_t end)
+{
+    while (p < end && isspace((unsigned char)clean[p])) p++;
+    return p;
+}
+
 static bool inv_include_push(struct inv_scan *s, int file_index, int line,
                              const char *token, size_t len)
 {
@@ -45,6 +59,37 @@ static bool inv_include_push(struct inv_scan *s, int file_index, int line,
     return true;
 }
 
+/* Closing delimiter for a `"` or `<` include operand at p, or 0 for neither. */
+static char inv_include_delim(const char *src, size_t p, size_t end)
+{
+    if (p < end && src[p] == '"') return '"';
+    if (p < end && src[p] == '<') return '>';
+    return 0;
+}
+
+/* Parses the line [i, end) as `#include "x"` or `#include <x>` and records the
+ * operand. Returns false only when inv_include_push fails. */
+static bool inv_include_line(struct inv_scan *s, int file_index, int line,
+                             const char *src, size_t i, size_t end)
+{
+    size_t p = inv_skip_blanks(src, i, end);
+    if (p >= end || src[p] != '#') return true;
+    p = inv_skip_blanks(src, p + 1, end);
+    static const char word[] = "include";
+    if (p + sizeof(word) - 1 > end ||
+        memcmp(src + p, word, sizeof(word) - 1) != 0)
+        return true;
+    p = inv_skip_blanks(src, p + sizeof(word) - 1, end);
+    char close = inv_include_delim(src, p, end);
+    if (!close) return true;
+    size_t start = ++p;
+    while (p < end && src[p] != close) p++;
+    if (p < end && !inv_include_push(s, file_index, line,
+                                     src + start, p - start))
+        return false;
+    return true;
+}
+
 static void inv_scan_includes(struct inv_scan *s, int file_index,
                               const char *src, size_t len)
 {
@@ -53,33 +98,52 @@ static void inv_scan_includes(struct inv_scan *s, int file_index,
     while (i < len) {
         size_t end = i;
         while (end < len && src[end] != '\n') end++;
-        size_t p = i;
-        while (p < end && (src[p] == ' ' || src[p] == '\t')) p++;
-        if (p < end && src[p] == '#') {
-            p++;
-            while (p < end && (src[p] == ' ' || src[p] == '\t')) p++;
-            static const char word[] = "include";
-            if (p + sizeof(word) - 1 <= end &&
-                memcmp(src + p, word, sizeof(word) - 1) == 0) {
-                p += sizeof(word) - 1;
-                while (p < end && (src[p] == ' ' || src[p] == '\t')) p++;
-                char close = 0;
-                if (p < end && src[p] == '"') close = '"';
-                else if (p < end && src[p] == '<') close = '>';
-                if (close) {
-                    size_t start = ++p;
-                    while (p < end && src[p] != close) p++;
-                    if (p < end && !inv_include_push(s, file_index, line,
-                                                     src + start, p - start)) {
-                        s->failed = true;
-                        return;
-                    }
-                }
-            }
+        if (!inv_include_line(s, file_index, line, src, i, end)) {
+            s->failed = true;
+            return;
         }
         i = end < len ? end + 1 : end;
         line++;
     }
+}
+
+/* Byte that replaces a blanked position: newlines survive, all else is a space. */
+static char inv_blank_byte(char c)
+{
+    return c == '\n' ? '\n' : ' ';
+}
+
+/* True when src[i] == a and src[i + 1] == b, both inside the buffer. */
+static bool inv_pair_at(const char *src, size_t len, size_t i, char a, char b)
+{
+    return i + 1 < len && src[i] == a && src[i + 1] == b;
+}
+
+enum inv_clean_state {
+    INV_CLEAN_NORMAL,
+    INV_CLEAN_LINE_COMMENT,
+    INV_CLEAN_BLOCK_COMMENT,
+    INV_CLEAN_STRING,
+    INV_CLEAN_CHARACTER
+};
+
+/* Blanks one byte inside a string or character literal (an escaped byte
+ * included) and returns the state that follows it. */
+static enum inv_clean_state inv_clean_literal(const char *src, size_t len,
+                                              char *out, size_t *i,
+                                              enum inv_clean_state state)
+{
+    char c = src[*i];
+    out[*i] = inv_blank_byte(c);
+    if (c == '\\' && *i + 1 < len) {
+        (*i)++;
+        out[*i] = inv_blank_byte(src[*i]);
+        return state;
+    }
+    if ((state == INV_CLEAN_STRING && c == '"') ||
+        (state == INV_CLEAN_CHARACTER && c == '\''))
+        return INV_CLEAN_NORMAL;
+    return state;
 }
 
 /* Build a same-length structural buffer. Comments and literal interiors are
@@ -90,37 +154,30 @@ static char *inv_clean_source(const char *src, size_t len)
 {
     char *out = zcl_malloc(len ? len : 1, "ci_inventory_clean");
     if (!out) return NULL;
-    enum { NORMAL, LINE_COMMENT, BLOCK_COMMENT, STRING, CHARACTER } state = NORMAL;
+    enum inv_clean_state state = INV_CLEAN_NORMAL;
     for (size_t i = 0; i < len; i++) {
         char c = src[i];
-        if (state == NORMAL) {
-            if (c == '/' && i + 1 < len && src[i + 1] == '/') {
-                out[i] = ' '; out[++i] = ' '; state = LINE_COMMENT;
-            } else if (c == '/' && i + 1 < len && src[i + 1] == '*') {
-                out[i] = ' '; out[++i] = ' '; state = BLOCK_COMMENT;
+        if (state == INV_CLEAN_NORMAL) {
+            if (inv_pair_at(src, len, i, '/', '/')) {
+                out[i] = ' '; out[++i] = ' '; state = INV_CLEAN_LINE_COMMENT;
+            } else if (inv_pair_at(src, len, i, '/', '*')) {
+                out[i] = ' '; out[++i] = ' '; state = INV_CLEAN_BLOCK_COMMENT;
             } else if (c == '"') {
-                out[i] = '@'; state = STRING;
+                out[i] = '@'; state = INV_CLEAN_STRING;
             } else if (c == '\'') {
-                out[i] = '$'; state = CHARACTER;
+                out[i] = '$'; state = INV_CLEAN_CHARACTER;
             } else {
                 out[i] = c;
             }
-        } else if (state == LINE_COMMENT) {
-            out[i] = c == '\n' ? '\n' : ' ';
-            if (c == '\n') state = NORMAL;
-        } else if (state == BLOCK_COMMENT) {
-            if (c == '*' && i + 1 < len && src[i + 1] == '/') {
-                out[i] = ' '; out[++i] = ' '; state = NORMAL;
-            } else out[i] = c == '\n' ? '\n' : ' ';
+        } else if (state == INV_CLEAN_LINE_COMMENT) {
+            out[i] = inv_blank_byte(c);
+            if (c == '\n') state = INV_CLEAN_NORMAL;
+        } else if (state == INV_CLEAN_BLOCK_COMMENT) {
+            if (inv_pair_at(src, len, i, '*', '/')) {
+                out[i] = ' '; out[++i] = ' '; state = INV_CLEAN_NORMAL;
+            } else out[i] = inv_blank_byte(c);
         } else {
-            out[i] = c == '\n' ? '\n' : ' ';
-            if (c == '\\' && i + 1 < len) {
-                i++;
-                out[i] = src[i] == '\n' ? '\n' : ' ';
-            } else if ((state == STRING && c == '"') ||
-                       (state == CHARACTER && c == '\'')) {
-                state = NORMAL;
-            }
+            state = inv_clean_literal(src, len, out, &i, state);
         }
     }
     return out;
@@ -183,6 +240,120 @@ static bool inv_constant_tokens(char tokens[64][32], int count,
     return true;
 }
 
+/* One normalized token: its exact text, its shape label, the exact byte
+ * count of the text and the index of the byte that follows the token. */
+struct inv_fp_token {
+    char exact[160];
+    char shape[32];
+    size_t exact_len;
+    size_t next;
+};
+
+/* Stores `len` bytes from `from` as the exact text, clipped to the buffer. */
+static void inv_token_text(struct inv_fp_token *t, const char *from, size_t len)
+{
+    if (len >= sizeof(t->exact)) len = sizeof(t->exact) - 1;
+    memcpy(t->exact, from, len);
+    t->exact[len] = '\0';
+    t->exact_len = len;
+}
+
+static void inv_literal_token(struct inv_fp_token *t, const char *src,
+                              size_t end, size_t i, char c)
+{
+    char quote = c == '@' ? '"' : '\'';
+    t->next = inv_literal_end(src, end, i, quote);
+    inv_token_text(t, src + i, t->next - i);
+    inv_cpy(t->shape, sizeof(t->shape), c == '@' ? "STR" : "CHR");
+}
+
+/* True when the identifier at i follows `.` or `->` within [start, i). */
+static bool inv_member_before(const char *clean, size_t start, size_t i)
+{
+    size_t back = i;
+    while (back > start && isspace((unsigned char)clean[back - 1])) back--;
+    if (back > start && clean[back - 1] == '.') return true;
+    return back > start + 1 && clean[back - 1] == '>' && clean[back - 2] == '-';
+}
+
+/* Shape label of a non-keyword identifier at i that ends at `next`. */
+static const char *inv_ident_shape(const char *clean, size_t start,
+                                   size_t end, size_t i, size_t next)
+{
+    size_t look = inv_skip_space(clean, next, end);
+    if (look < end && clean[look] == '(') return "CALL";
+    return inv_member_before(clean, start, i) ? "MEMBER" : "ID";
+}
+
+static void inv_ident_token(struct inv_fp_token *t, const char *clean,
+                            size_t start, size_t end, size_t i)
+{
+    size_t next = i + 1;
+    while (next < end && inv_ident_char((unsigned char)clean[next])) next++;
+    t->next = next;
+    inv_token_text(t, clean + i, next - i);
+    if (inv_keyword(t->exact))
+        inv_cpy(t->shape, sizeof(t->shape), t->exact);
+    else
+        inv_cpy(t->shape, sizeof(t->shape),
+                inv_ident_shape(clean, start, end, i, next));
+}
+
+static void inv_number_token(struct inv_fp_token *t, const char *clean,
+                             size_t end, size_t i)
+{
+    size_t next = i + 1;
+    while (next < end &&
+           (isalnum((unsigned char)clean[next]) || clean[next] == '.' ||
+            clean[next] == '\'' || clean[next] == '_')) next++;
+    t->next = next;
+    inv_token_text(t, clean + i, next - i);
+    inv_cpy(t->shape, sizeof(t->shape), "NUM");
+}
+
+/* True when `a` and `b` form one of the two-byte operators. */
+static bool inv_is_pair_op(char a, char b)
+{
+    static const char *const pairs[] = {
+        "==", "!=", "<=", ">=", "++", "--", "->", "&&", "||",
+        "<<", ">>", "+=", "-=", "*=", "/=", "%=", "&=", "|=",
+        "^=", "::", NULL
+    };
+    char pair[3] = { a, b, '\0' };
+    for (size_t p = 0; pairs[p]; p++)
+        if (strcmp(pair, pairs[p]) == 0) return true;
+    return false;
+}
+
+static void inv_punct_token(struct inv_fp_token *t, const char *clean,
+                            size_t end, size_t i)
+{
+    char c = clean[i];
+    t->exact[0] = c;
+    t->exact[1] = '\0';
+    t->exact_len = 1;
+    t->next = i + 1;
+    if (t->next < end && inv_is_pair_op(c, clean[t->next])) {
+        t->exact[1] = clean[t->next];
+        t->exact[2] = '\0';
+        t->exact_len = 2;
+        t->next++;
+    }
+    inv_cpy(t->shape, sizeof(t->shape), t->exact);
+}
+
+/* Classifies the non-space token that starts at clean[i]. */
+static void inv_next_token(struct inv_fp_token *t, const char *src,
+                           const char *clean, size_t start, size_t end,
+                           size_t i)
+{
+    unsigned char c = (unsigned char)clean[i];
+    if (c == '@' || c == '$') inv_literal_token(t, src, end, i, (char)c);
+    else if (inv_ident_start(c)) inv_ident_token(t, clean, start, end, i);
+    else if (isdigit(c)) inv_number_token(t, clean, end, i);
+    else inv_punct_token(t, clean, end, i);
+}
+
 static void inv_body_fingerprints(const char *src, const char *clean,
                                   size_t start, size_t end,
                                   struct inv_body *body)
@@ -198,82 +369,29 @@ static void inv_body_fingerprints(const char *src, const char *clean,
     int tokens = 0;
     size_t i = start;
     while (i < end) {
-        unsigned char c = (unsigned char)clean[i];
-        if (isspace(c)) { i++; continue; }
-        char exact_token[160];
-        char shape_token[32];
-        size_t exact_len = 0;
-        size_t next = i + 1;
-        if (c == '@' || c == '$') {
-            char quote = c == '@' ? '"' : '\'';
-            next = inv_literal_end(src, end, i, quote);
-            exact_len = next - i;
-            if (exact_len >= sizeof(exact_token)) exact_len = sizeof(exact_token) - 1;
-            memcpy(exact_token, src + i, exact_len);
-            exact_token[exact_len] = '\0';
-            inv_cpy(shape_token, sizeof(shape_token), c == '@' ? "STR" : "CHR");
-        } else if (inv_ident_start(c)) {
-            next = i + 1;
-            while (next < end && inv_ident_char((unsigned char)clean[next])) next++;
-            exact_len = next - i;
-            if (exact_len >= sizeof(exact_token)) exact_len = sizeof(exact_token) - 1;
-            memcpy(exact_token, clean + i, exact_len);
-            exact_token[exact_len] = '\0';
-            if (inv_keyword(exact_token)) {
-                inv_cpy(shape_token, sizeof(shape_token), exact_token);
-            } else {
-                size_t look = next;
-                while (look < end && isspace((unsigned char)clean[look])) look++;
-                if (look < end && clean[look] == '(')
-                    inv_cpy(shape_token, sizeof(shape_token), "CALL");
-                else {
-                    size_t back = i;
-                    while (back > start && isspace((unsigned char)clean[back - 1])) back--;
-                    bool member = back > start && clean[back - 1] == '.';
-                    if (back > start + 1 && clean[back - 1] == '>' &&
-                        clean[back - 2] == '-') member = true;
-                    inv_cpy(shape_token, sizeof(shape_token), member ? "MEMBER" : "ID");
-                }
-            }
-        } else if (isdigit(c)) {
-            next = i + 1;
-            while (next < end &&
-                   (isalnum((unsigned char)clean[next]) || clean[next] == '.' ||
-                    clean[next] == '\'' || clean[next] == '_')) next++;
-            exact_len = next - i;
-            if (exact_len >= sizeof(exact_token)) exact_len = sizeof(exact_token) - 1;
-            memcpy(exact_token, clean + i, exact_len);
-            exact_token[exact_len] = '\0';
-            inv_cpy(shape_token, sizeof(shape_token), "NUM");
-        } else {
-            exact_token[0] = (char)c;
-            exact_token[1] = '\0';
-            exact_len = 1;
-            if (next < end) {
-                char pair[3] = { (char)c, clean[next], '\0' };
-                static const char *const pairs[] = {
-                    "==", "!=", "<=", ">=", "++", "--", "->", "&&", "||",
-                    "<<", ">>", "+=", "-=", "*=", "/=", "%=", "&=", "|=",
-                    "^=", "::", NULL
-                };
-                for (size_t p = 0; pairs[p]; p++) if (strcmp(pair, pairs[p]) == 0) {
-                    exact_token[1] = clean[next]; exact_token[2] = '\0';
-                    exact_len = 2; next++; break;
-                }
-            }
-            inv_cpy(shape_token, sizeof(shape_token), exact_token);
-        }
-        inv_hash_token(&exact, exact_token, exact_len);
-        inv_hash_token(&shape, shape_token, strlen(shape_token));
-        if (small_count < 64) inv_cpy(small[small_count++], 32, exact_token);
+        if (isspace((unsigned char)clean[i])) { i++; continue; }
+        struct inv_fp_token tok;
+        inv_next_token(&tok, src, clean, start, end, i);
+        inv_hash_token(&exact, tok.exact, tok.exact_len);
+        inv_hash_token(&shape, tok.shape, strlen(tok.shape));
+        if (small_count < 64) inv_cpy(small[small_count++], 32, tok.exact);
         tokens++;
-        i = next;
+        i = tok.next;
     }
     sha3_256_finalize(&exact, body->exact_sha3);
     sha3_256_finalize(&shape, body->shape_sha3);
     body->token_count = tokens;
     body->constant_return = tokens == small_count &&
         inv_constant_tokens(small, small_count, body->constant_value);
+}
+
+/* True when clean[i] is a lone assignment '=' (not part of ==, !=, <=, >=). */
+static bool inv_lone_eq(const char *clean, size_t start, size_t end, size_t i)
+{
+    char before = i > start ? clean[i - 1] : 0;
+    char after = i + 1 < end ? clean[i + 1] : 0;
+    return before != '=' && before != '!' && before != '<' && before != '>' &&
+           after != '=';
 }
 
 static bool inv_has_top_eq(const char *clean, size_t start, size_t end)
@@ -284,42 +402,55 @@ static bool inv_has_top_eq(const char *clean, size_t start, size_t end)
         else if (clean[i] == ')' && paren > 0) paren--;
         else if (clean[i] == '[') bracket++;
         else if (clean[i] == ']' && bracket > 0) bracket--;
-        else if (clean[i] == '=' && paren == 0 && bracket == 0) {
-            char before = i > start ? clean[i - 1] : 0;
-            char after = i + 1 < end ? clean[i + 1] : 0;
-            if (before != '=' && before != '!' && before != '<' && before != '>' &&
-                after != '=') return true;
-        }
+        else if (clean[i] == '=' && paren == 0 && bracket == 0 &&
+                 inv_lone_eq(clean, start, end, i))
+            return true;
     }
     return false;
 }
 
-static bool inv_function_name(const char *clean, size_t start, size_t end,
-                              char name[128])
+/* True when the declaration starting at `start` opens with a typedef, struct,
+ * union or enum keyword. */
+static bool inv_tagged_decl(const char *clean, size_t start, size_t end)
 {
-    while (start < end && isspace((unsigned char)clean[start])) start++;
-    if (start == end || inv_has_top_eq(clean, start, end)) return false;
     char first[32] = "";
-    size_t f = start;
-    if (inv_ident_start((unsigned char)clean[f])) {
-        size_t e = f + 1;
+    if (inv_ident_start((unsigned char)clean[start])) {
+        size_t e = start + 1;
         while (e < end && inv_ident_char((unsigned char)clean[e])) e++;
-        size_t n = e - f < sizeof(first) - 1 ? e - f : sizeof(first) - 1;
-        memcpy(first, clean + f, n); first[n] = '\0';
+        size_t n = e - start < sizeof(first) - 1 ? e - start : sizeof(first) - 1;
+        memcpy(first, clean + start, n); first[n] = '\0';
     }
-    if (strcmp(first, "typedef") == 0 || strcmp(first, "struct") == 0 ||
-        strcmp(first, "union") == 0 || strcmp(first, "enum") == 0)
-        return false;
+    return strcmp(first, "typedef") == 0 || strcmp(first, "struct") == 0 ||
+           strcmp(first, "union") == 0 || strcmp(first, "enum") == 0;
+}
+
+/* Locates the identifier directly before the first '(' in [start, end) and
+ * sets *name_start and *name_end to its span. False when there is no '(' or
+ * no identifier directly before it. */
+static bool inv_call_name_span(const char *clean, size_t start, size_t end,
+                               size_t *name_start, size_t *name_end)
+{
     size_t lp = start;
     while (lp < end && clean[lp] != '(') lp++;
     if (lp == end) return false;
     size_t p = lp;
     while (p > start && isspace((unsigned char)clean[p - 1])) p--;
-    size_t name_end = p;
+    *name_end = p;
     while (p > start && inv_ident_char((unsigned char)clean[p - 1])) p--;
-    if (p == name_end || !inv_ident_start((unsigned char)clean[p])) return false;
-    size_t before = start;
-    while (before < p && isspace((unsigned char)clean[before])) before++;
+    if (p == *name_end || !inv_ident_start((unsigned char)clean[p])) return false;
+    *name_start = p;
+    return true;
+}
+
+static bool inv_function_name(const char *clean, size_t start, size_t end,
+                              char name[128])
+{
+    start = inv_skip_space(clean, start, end);
+    if (start == end || inv_has_top_eq(clean, start, end)) return false;
+    if (inv_tagged_decl(clean, start, end)) return false;
+    size_t p = 0, name_end = 0;
+    if (!inv_call_name_span(clean, start, end, &p, &name_end)) return false;
+    size_t before = inv_skip_space(clean, start, p);
     if (before == p) return false; /* macro invocation, no return type */
     size_t n = name_end - p;
     if (n >= 128) n = 127;
@@ -473,24 +604,16 @@ static bool inv_body_push(struct inv_scan *s, int file_index, const char *src,
     return true;
 }
 
-static void inv_scan_bodies(struct inv_scan *s, int file_index,
-                            const char *src, size_t len)
+/* Blanks every preprocessor directive line in `clean`, including the
+ * backslash-continued lines that follow it, so directive text never forms a
+ * function body. Preprocessor rows are declaration data, never bodies. */
+static void inv_blank_directives(const char *src, size_t len, char *clean)
 {
-    struct inv_guard_key *guard_keys = NULL;
-    int guard_key_count = 0;
-    if (!inv_guard_index_build(s, file_index, &guard_keys, &guard_key_count)) {
-        s->failed = true;
-        return;
-    }
-    char *clean = inv_clean_source(src, len);
-    if (!clean) { free(guard_keys); s->failed = true; return; }
-    /* Preprocessor rows are declaration data, never function bodies. */
     size_t line_start = 0;
     bool directive_continues = false;
     for (size_t i = 0; i <= len; i++) {
         if (i < len && src[i] != '\n') continue;
-        size_t p = line_start;
-        while (p < i && (src[p] == ' ' || src[p] == '\t')) p++;
+        size_t p = inv_skip_blanks(src, line_start, i);
         bool directive = directive_continues || (p < i && src[p] == '#');
         size_t tail = i;
         while (tail > line_start &&
@@ -502,61 +625,105 @@ static void inv_scan_bodies(struct inv_scan *s, int file_index,
             for (size_t j = line_start; j < i; j++) clean[j] = ' ';
         line_start = i + 1;
     }
-    size_t segment = 0, open = 0;
-    int brace = 0, paren = 0;
-    /* Tracks the 1-based line of `clean[i]` (== `src[i]`'s line -- every
-     * position, including every '\n', is carried through 1:1 by both
-     * inv_clean_source and the directive-blanking pass above) without
-     * rescanning from the start of the file for every body: `cur_line` is
-     * correct for index i at the top of each iteration, and gets bumped
-     * once per newline as the scan crosses it.  Recomputing this per body
-     * via a full O(0..offset) rescan (the previous `inv_line_of` helper)
-     * made body-line attribution O(bodies_in_file x file_size); this makes
-     * the whole file's line attribution O(file_size) once. */
+}
+
+/* Brace/paren walk state over one file's cleaned source. */
+struct inv_body_walk {
+    size_t segment;   /* start of the current top-level segment */
+    size_t open;      /* index of the '{' that opened the active body */
+    int open_line;    /* 1-based line of that '{' */
+    int brace;        /* brace depth; 0 means outside every body */
+    int paren;        /* paren depth */
+    char active[128]; /* name of the function being walked, "" when none */
+};
+
+/* True when the newline at clean[i] ends a top-level macro invocation line. */
+static bool inv_macro_line_at(const struct inv_body_walk *w, const char *clean,
+                              size_t i)
+{
+    return clean[i] == '\n' && w->brace == 0 && w->paren == 0 &&
+           inv_macro_invocation_segment(clean, w->segment, i);
+}
+
+/* Handles clean[i] while outside every body: a '{' outside parens opens one
+ * whose name comes from the segment before it. */
+static void inv_walk_outside(struct inv_body_walk *w, const char *clean,
+                             size_t i, int cur_line)
+{
+    char c = clean[i];
+    if (c == '(') { w->paren++; return; }
+    if (c == ')') { if (w->paren > 0) w->paren--; return; }
+    if (w->paren == 0 && c == '{') {
+        w->active[0] = '\0';
+        (void)inv_function_name(clean, w->segment, i, w->active);
+        w->open = i;
+        w->open_line = cur_line;
+        w->brace = 1;
+        return;
+    }
+    if (w->paren == 0 && (c == ';' || c == '}')) w->segment = i + 1;
+}
+
+/* Walks one file's cleaned source and pushes every function body found.
+ * Tracks the 1-based line of `clean[i]` (== `src[i]`'s line -- every
+ * position, including every '\n', is carried through 1:1 by both
+ * inv_clean_source and the directive-blanking pass) without rescanning from
+ * the start of the file for every body: `cur_line` is correct for index i at
+ * the top of each iteration, and gets bumped once per newline as the scan
+ * crosses it. */
+static void inv_walk_bodies(struct inv_scan *s, int file_index,
+                            const char *src, const char *clean, size_t len,
+                            const struct inv_guard_key *guard_keys,
+                            int guard_key_count)
+{
+    struct inv_body_walk w = {0};
     int cur_line = 1;
     char prev_char = '\0';
-    int open_line = 0;
-    char active[128] = "";
     for (size_t i = 0; i < len; i++) {
         if (prev_char == '\n') cur_line++;
         char c = clean[i];
         prev_char = c;
-        if (c == '\n' && brace == 0 && paren == 0 &&
-            inv_macro_invocation_segment(clean, segment, i)) {
-            segment = i + 1;
+        if (inv_macro_line_at(&w, clean, i)) {
+            w.segment = i + 1;
             continue;
         }
-        if (brace == 0) {
-            if (c == '(') { paren++; continue; }
-            if (c == ')') { if (paren > 0) paren--; continue; }
-            if (paren == 0 && c == '{') {
-                active[0] = '\0';
-                (void)inv_function_name(clean, segment, i, active);
-                open = i;
-                open_line = cur_line;
-                brace = 1;
-                continue;
-            }
-            if (paren == 0 && (c == ';' || c == '}')) segment = i + 1;
-        } else {
-            if (c == '{') brace++;
-            else if (c == '}') {
-                brace--;
-                if (brace == 0) {
-                    if (active[0] && !inv_body_push(s, file_index, src, clean,
-                                                    active, open, i,
-                                                    open_line, cur_line,
-                                                    guard_keys,
-                                                    guard_key_count)) {
-                        s->failed = true;
-                        break;
-                    }
-                    active[0] = '\0';
-                    segment = i + 1;
+        if (w.brace == 0) {
+            inv_walk_outside(&w, clean, i, cur_line);
+            continue;
+        }
+        if (c == '{') w.brace++;
+        else if (c == '}') {
+            w.brace--;
+            if (w.brace == 0) {
+                if (w.active[0] && !inv_body_push(s, file_index, src, clean,
+                                                  w.active, w.open, i,
+                                                  w.open_line, cur_line,
+                                                  guard_keys,
+                                                  guard_key_count)) {
+                    s->failed = true;
+                    break;
                 }
+                w.active[0] = '\0';
+                w.segment = i + 1;
             }
         }
     }
+}
+
+static void inv_scan_bodies(struct inv_scan *s, int file_index,
+                            const char *src, size_t len)
+{
+    struct inv_guard_key *guard_keys = NULL;
+    int guard_key_count = 0;
+    if (!inv_guard_index_build(s, file_index, &guard_keys, &guard_key_count)) {
+        s->failed = true;
+        return;
+    }
+    char *clean = inv_clean_source(src, len);
+    if (!clean) { free(guard_keys); s->failed = true; return; }
+    inv_blank_directives(src, len, clean);
+    inv_walk_bodies(s, file_index, src, clean, len, guard_keys,
+                    guard_key_count);
     free(clean);
     free(guard_keys);
 }
@@ -588,6 +755,45 @@ static bool inv_group_push(struct inv_scan *s, const char *name,
     return true;
 }
 
+/* Advances a NUL-terminated line past spaces and tabs. */
+static char *inv_skip_hspace(char *p)
+{
+    while (*p == ' ' || *p == '\t') p++;
+    return p;
+}
+
+/* Consumes a `ZCL_TEST_GROUP(` or `ZCL_SPEC_GROUP(` opener at *pp and returns
+ * its symbol prefix, or NULL when the line is not a group row. */
+static const char *inv_group_opener(char **pp)
+{
+    char *p = inv_skip_hspace(*pp);
+    const char *prefix = NULL;
+    if (strncmp(p, "ZCL_TEST_GROUP(", strlen("ZCL_TEST_GROUP(")) == 0) {
+        p += strlen("ZCL_TEST_GROUP("); prefix = "test_";
+    } else if (strncmp(p, "ZCL_SPEC_GROUP(",
+                       strlen("ZCL_SPEC_GROUP(")) == 0) {
+        p += strlen("ZCL_SPEC_GROUP("); prefix = "spec_";
+    }
+    *pp = p;
+    return prefix;
+}
+
+/* Parses one catalog line. Returns false only when inv_group_push fails. */
+static bool inv_group_line(struct inv_scan *s, char *p)
+{
+    const char *prefix = inv_group_opener(&p);
+    if (!prefix) return true;
+    p = inv_skip_hspace(p);
+    char name[128];
+    size_t used = 0;
+    while (inv_ident_char((unsigned char)*p) && used + 1 < sizeof(name))
+        name[used++] = *p++;
+    name[used] = '\0';
+    p = inv_skip_hspace(p);
+    if (used && *p == ')') return inv_group_push(s, name, prefix);
+    return true;
+}
+
 bool inv_read_registered_groups(struct inv_scan *s)
 {
     char path[4096];
@@ -598,25 +804,7 @@ bool inv_read_registered_groups(struct inv_scan *s)
     if (!f) return false;
     char line[512];
     bool ok = true;
-    while (ok && fgets(line, sizeof(line), f)) {
-        const char *prefix = NULL;
-        char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-        if (strncmp(p, "ZCL_TEST_GROUP(", strlen("ZCL_TEST_GROUP(")) == 0) {
-            p += strlen("ZCL_TEST_GROUP("); prefix = "test_";
-        } else if (strncmp(p, "ZCL_SPEC_GROUP(",
-                           strlen("ZCL_SPEC_GROUP(")) == 0) {
-            p += strlen("ZCL_SPEC_GROUP("); prefix = "spec_";
-        } else continue;
-        while (*p == ' ' || *p == '\t') p++;
-        char name[128];
-        size_t used = 0;
-        while (inv_ident_char((unsigned char)*p) && used + 1 < sizeof(name))
-            name[used++] = *p++;
-        name[used] = '\0';
-        while (*p == ' ' || *p == '\t') p++;
-        if (used && *p == ')') ok = inv_group_push(s, name, prefix);
-    }
+    while (ok && fgets(line, sizeof(line), f)) ok = inv_group_line(s, line);
     if (ferror(f)) ok = false;
     fclose(f);
     return ok && s->group_count > 0;
