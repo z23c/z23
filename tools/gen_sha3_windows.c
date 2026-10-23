@@ -292,6 +292,61 @@ static bool parse_nonnegative_int(const char *s, int *out)
     return true;
 }
 
+static bool cli_has_auth(const struct cli *c)
+{
+    return c->user[0] != '\0' && c->pass[0] != '\0';
+}
+
+/* Options that store a value and have no failure path. Returns false
+ * when `a` is not one of them. */
+static bool parse_cli_store_arg(struct cli *c, const char *a)
+{
+    if (strncmp(a, "--rpc-host=", 11) == 0) c->host = a + 11;
+    else if (strncmp(a, "--rpc-port=", 11) == 0) c->port = atoi(a + 11);
+    else if (strncmp(a, "--rpc-user=", 11) == 0)
+        snprintf(c->user, sizeof(c->user), "%s", a + 11);
+    else if (strncmp(a, "--rpc-pass=", 11) == 0)
+        snprintf(c->pass, sizeof(c->pass), "%s", a + 11);
+    else if (strncmp(a, "--out-h=", 8) == 0) c->out_h = a + 8;
+    else if (strncmp(a, "--out-c=", 8) == 0) c->out_c = a + 8;
+    else if (strncmp(a, "--max-height=", 13) == 0)
+        c->max_height = atoi(a + 13);
+    else if (strcmp(a, "--extend") == 0) c->extend = true;
+    else return false;
+    return true;
+}
+
+/* Apply one argument. Returns false after printing the reason when the
+ * argument is malformed, unknown, or asks for help. */
+static bool parse_cli_arg(struct cli *c, const char *prog, const char *a)
+{
+    if (parse_cli_store_arg(c, a)) return true;
+    if (strncmp(a, "--check-window=", 15) == 0) {
+        if (!parse_nonnegative_int(a + 15, &c->check_window)) {
+            fprintf(stderr, "--check-window must be >= 0\n");
+            return false;
+        }
+        return true;
+    }
+    if (strncmp(a, "--confirm-depth=", 16) == 0) {
+        if (!parse_nonnegative_int(a + 16, &c->confirm_depth)) {
+            fprintf(stderr, "--confirm-depth must be >= 0\n");
+            return false;
+        }
+        return true;
+    }
+    if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
+        printf("Usage: %s [--rpc-host=H] [--rpc-port=N] "
+               "[--rpc-user=U] [--rpc-pass=P] [--out-h=PATH] "
+               "[--out-c=PATH] [--max-height=H] "
+               "[--check-window=N] [--extend] "
+               "[--confirm-depth=N]\n", prog);
+        return false;
+    }
+    fprintf(stderr, "unknown arg: %s\n", a);
+    return false;
+}
+
 static bool parse_cli(int argc, char **argv, struct cli *c)
 {
     c->host = "127.0.0.1";
@@ -306,46 +361,11 @@ static bool parse_cli(int argc, char **argv, struct cli *c)
     c->confirm_depth = 240;
 
     for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
-        if (strncmp(a, "--rpc-host=", 11) == 0) c->host = a + 11;
-        else if (strncmp(a, "--rpc-port=", 11) == 0) c->port = atoi(a + 11);
-        else if (strncmp(a, "--rpc-user=", 11) == 0)
-            snprintf(c->user, sizeof(c->user), "%s", a + 11);
-        else if (strncmp(a, "--rpc-pass=", 11) == 0)
-            snprintf(c->pass, sizeof(c->pass), "%s", a + 11);
-        else if (strncmp(a, "--out-h=", 8) == 0) c->out_h = a + 8;
-        else if (strncmp(a, "--out-c=", 8) == 0) c->out_c = a + 8;
-        else if (strncmp(a, "--max-height=", 13) == 0)
-            c->max_height = atoi(a + 13);
-        else if (strncmp(a, "--check-window=", 15) == 0) {
-            if (!parse_nonnegative_int(a + 15, &c->check_window)) {
-                fprintf(stderr, "--check-window must be >= 0\n");
-                return false;
-            }
-        }
-        else if (strcmp(a, "--extend") == 0) c->extend = true;
-        else if (strncmp(a, "--confirm-depth=", 16) == 0) {
-            if (!parse_nonnegative_int(a + 16, &c->confirm_depth)) {
-                fprintf(stderr, "--confirm-depth must be >= 0\n");
-                return false;
-            }
-        }
-        else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
-            printf("Usage: %s [--rpc-host=H] [--rpc-port=N] "
-                   "[--rpc-user=U] [--rpc-pass=P] [--out-h=PATH] "
-                   "[--out-c=PATH] [--max-height=H] "
-                   "[--check-window=N] [--extend] "
-                   "[--confirm-depth=N]\n", argv[0]);
-            return false;
-        }
-        else {
-            fprintf(stderr, "unknown arg: %s\n", a);
-            return false;
-        }
+        if (!parse_cli_arg(c, argv[0], argv[i])) return false;
     }
-    if (c->user[0] == '\0' || c->pass[0] == '\0')
+    if (!cli_has_auth(c))
         load_conf_auth(c->user, c->pass);
-    if (c->user[0] == '\0' || c->pass[0] == '\0') {
+    if (!cli_has_auth(c)) {
         fprintf(stderr, "no RPC credentials (pass --rpc-user/--rpc-pass "
                         "or populate ~/.zclassic/zclassic.conf)\n");
         return false;
@@ -601,6 +621,93 @@ static double now_secs(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
+/* Seconds left to finish `todo - done` items, given that `done` items
+ * took `dt` seconds. */
+static double eta_secs(size_t done, size_t todo, double dt)
+{
+    double rate = done / (dt > 0 ? dt : 1.0);
+    return (todo - done) / (rate > 0 ? rate : 1.0);
+}
+
+/* Count the full windows buried at least confirm_depth below the tip. */
+static size_t extend_confirmed_windows(int tip, int confirm_depth)
+{
+    size_t full = (size_t)(tip + 1) / SHA3_WINDOW_SIZE;
+    while (full > 0 &&
+           (int64_t)full * SHA3_WINDOW_SIZE - 1 + confirm_depth >
+               (int64_t)tip)
+        full--;
+    return full;
+}
+
+/* Continuity proof against the deepest row we keep verbatim. */
+static bool extend_continuity_ok(struct rpc_ctx *r, size_t compiled)
+{
+    size_t probe = compiled - 2;
+    int start = (int)(probe * SHA3_WINDOW_SIZE);
+    int end = start + SHA3_WINDOW_SIZE - 1;
+    uint8_t digest[32];
+    if (!compute_window_digest(r, start, end, digest)) return false;
+    if (memcmp(digest, g_sha3_windows[probe].hash, 32) != 0) {
+        char want[65], got[65];
+        zcl_hex_encode(g_sha3_windows[probe].hash, 32, want);
+        zcl_hex_encode(digest, 32, got);
+        fprintf(stderr, "[extend] continuity FAILED at window %zu "
+                        "(h=%d..%d): locked=%s source=%s — the source "
+                        "node disagrees with locked history; refusing "
+                        "to emit anything\n",
+                probe, start, end, want, got);
+        return false;
+    }
+    printf("[extend] continuity OK at window %zu (h=%d..%d)\n",
+           probe, start, end);
+    return true;
+}
+
+/* Recompute the trailing compiled row as a full window. *replaced is
+ * set to whether the locked row differed. */
+static bool extend_recompute_last(struct rpc_ctx *r, size_t compiled,
+                                  uint8_t last_digest[32], bool *replaced)
+{
+    *replaced = false;
+    size_t wi = compiled - 1;
+    int start = (int)(wi * SHA3_WINDOW_SIZE);
+    int end = start + SHA3_WINDOW_SIZE - 1;
+    if (!compute_window_digest(r, start, end, last_digest)) return false;
+    *replaced = memcmp(last_digest, g_sha3_windows[wi].hash, 32) != 0;
+    if (*replaced) {
+        char want[65], got[65];
+        zcl_hex_encode(g_sha3_windows[wi].hash, 32, want);
+        zcl_hex_encode(last_digest, 32, got);
+        printf("[extend] REPLACING trailing window %zu (h=%d..%d): "
+               "locked=%s (partial-window mint) full=%s\n",
+               wi, start, end, want, got);
+    }
+    return true;
+}
+
+/* Append the new full windows [compiled .. full) to fc. */
+static bool extend_append_windows(struct rpc_ctx *r, FILE *fc,
+                                  size_t compiled, size_t full)
+{
+    double t0 = now_secs();
+    for (size_t wi = compiled; wi < full; wi++) {
+        int start = (int)(wi * SHA3_WINDOW_SIZE);
+        int end = start + SHA3_WINDOW_SIZE - 1;
+        uint8_t digest[32];
+        if (!compute_window_digest(r, start, end, digest)) return false;
+        emit_c_row(fc, (int32_t)start, digest);
+        size_t done = wi - compiled + 1, todo = full - compiled;
+        if ((done % 5u) == 0u || done == todo) {
+            double dt = now_secs() - t0;
+            printf("[extend] %zu/%zu new windows, ETA %.0fs\n",
+                   done, todo, eta_secs(done, todo, dt));
+            fflush(stdout);
+        }
+    }
+    return true;
+}
+
 /* Extend the compiled table in place: keep every locked row verbatim,
  * recompute the trailing row as a FULL window (the original generator
  * could emit a partial trailing window when minted mid-window — a latent
@@ -619,11 +726,7 @@ static int run_extend(struct rpc_ctx *r, const struct cli *c, int tip)
         return 1;
     }
 
-    size_t full = (size_t)(tip + 1) / SHA3_WINDOW_SIZE;
-    while (full > 0 &&
-           (int64_t)full * SHA3_WINDOW_SIZE - 1 + c->confirm_depth >
-               (int64_t)tip)
-        full--;
+    size_t full = extend_confirmed_windows(tip, c->confirm_depth);
     if (full < compiled) {
         fprintf(stderr, "[extend] source tip=%d yields %zu confirmable "
                         "full windows < compiled %zu; refusing\n",
@@ -631,47 +734,12 @@ static int run_extend(struct rpc_ctx *r, const struct cli *c, int tip)
         return 1;
     }
 
-    /* Continuity proof against the deepest row we keep verbatim. */
-    size_t probe = compiled - 2;
-    {
-        int start = (int)(probe * SHA3_WINDOW_SIZE);
-        int end = start + SHA3_WINDOW_SIZE - 1;
-        uint8_t digest[32];
-        if (!compute_window_digest(r, start, end, digest)) return 1;
-        if (memcmp(digest, g_sha3_windows[probe].hash, 32) != 0) {
-            char want[65], got[65];
-            zcl_hex_encode(g_sha3_windows[probe].hash, 32, want);
-            zcl_hex_encode(digest, 32, got);
-            fprintf(stderr, "[extend] continuity FAILED at window %zu "
-                            "(h=%d..%d): locked=%s source=%s — the source "
-                            "node disagrees with locked history; refusing "
-                            "to emit anything\n",
-                    probe, start, end, want, got);
-            return 1;
-        }
-        printf("[extend] continuity OK at window %zu (h=%d..%d)\n",
-               probe, start, end);
-    }
+    if (!extend_continuity_ok(r, compiled)) return 1;
 
-    /* Recompute the trailing compiled row as a full window. */
     uint8_t last_digest[32];
     bool last_replaced = false;
-    {
-        size_t wi = compiled - 1;
-        int start = (int)(wi * SHA3_WINDOW_SIZE);
-        int end = start + SHA3_WINDOW_SIZE - 1;
-        if (!compute_window_digest(r, start, end, last_digest)) return 1;
-        last_replaced =
-            memcmp(last_digest, g_sha3_windows[wi].hash, 32) != 0;
-        if (last_replaced) {
-            char want[65], got[65];
-            zcl_hex_encode(g_sha3_windows[wi].hash, 32, want);
-            zcl_hex_encode(last_digest, 32, got);
-            printf("[extend] REPLACING trailing window %zu (h=%d..%d): "
-                   "locked=%s (partial-window mint) full=%s\n",
-                   wi, start, end, want, got);
-        }
-    }
+    if (!extend_recompute_last(r, compiled, last_digest, &last_replaced))
+        return 1;
 
     if (!emit_header(c->out_h)) return 1;
     FILE *fc = NULL;
@@ -683,24 +751,9 @@ static int run_extend(struct rpc_ctx *r, const struct cli *c, int tip)
     emit_c_row(fc, (int32_t)((compiled - 1) * SHA3_WINDOW_SIZE),
                last_digest);
 
-    double t0 = now_secs();
-    for (size_t wi = compiled; wi < full; wi++) {
-        int start = (int)(wi * SHA3_WINDOW_SIZE);
-        int end = start + SHA3_WINDOW_SIZE - 1;
-        uint8_t digest[32];
-        if (!compute_window_digest(r, start, end, digest)) {
-            fclose(fc);
-            return 1;
-        }
-        emit_c_row(fc, (int32_t)start, digest);
-        size_t done = wi - compiled + 1, todo = full - compiled;
-        if ((done % 5u) == 0u || done == todo) {
-            double dt = now_secs() - t0;
-            double rate = done / (dt > 0 ? dt : 1.0);
-            printf("[extend] %zu/%zu new windows, ETA %.0fs\n",
-                   done, todo, (todo - done) / (rate > 0 ? rate : 1.0));
-            fflush(stdout);
-        }
+    if (!extend_append_windows(r, fc, compiled, full)) {
+        fclose(fc);
+        return 1;
     }
 
     emit_c_close(fc, full);
@@ -709,6 +762,79 @@ static int run_extend(struct rpc_ctx *r, const struct cli *c, int tip)
            c->out_h, c->out_c, full, compiled - 1,
            last_replaced ? "REPLACED (was partial)" : "unchanged",
            full - compiled, full * SHA3_WINDOW_SIZE - 1);
+    return 0;
+}
+
+/* Ask the source node for its tip. Returns false on any RPC or parse
+ * failure; the failure reason has already been printed. */
+static bool resolve_chain_tip(struct rpc_ctx *r, int *tip)
+{
+    size_t body_len = 0;
+    const char *body = rpc_call(r, "getblockcount", "[]", &body_len);
+    if (!body) return false;
+    struct json_value env;
+    const struct json_value *res = rpc_result(&env, body, body_len);
+    if (!res || res->type != JSON_INT) {
+        json_free(&env);
+        return false;
+    }
+    *tip = (int)res->val.i;
+    json_free(&env);
+    return true;
+}
+
+/* Full generate: emit every full window up to the tip. Frees r on every
+ * path, so the caller returns the result directly. */
+static int run_generate(struct rpc_ctx *r, const struct cli *c, int tip,
+                        size_t num_windows)
+{
+    /* Full windows only: a partial trailing window has no end marker in
+     * the emitted struct and false-fires the runtime tripwire once the
+     * window completes on-chain. */
+    if (num_windows * SHA3_WINDOW_SIZE > (size_t)tip + 1u) {
+        num_windows--;
+        printf("[gen_sha3_windows] dropping partial trailing window "
+               "(coverage capped at h=%zu, tip=%d)\n",
+               num_windows * SHA3_WINDOW_SIZE - 1, tip);
+    }
+
+    if (!emit_header(c->out_h)) { rpc_free(r); return 1; }
+
+    FILE *fc = NULL;
+    if (!emit_c_open(&fc, c->out_c)) { rpc_free(r); return 1; }
+
+    double t0 = now_secs();
+    double t_last = t0;
+
+    for (size_t wi = 0; wi < num_windows; wi++) {
+        int start = (int)(wi * SHA3_WINDOW_SIZE);
+        int end = start + SHA3_WINDOW_SIZE - 1;
+        if (end > tip) end = tip;
+
+        uint8_t digest[32];
+        if (!compute_window_digest(r, start, end, digest)) {
+            fclose(fc);
+            rpc_free(r);
+            return 1;
+        }
+        emit_c_row(fc, (int32_t)start, digest);
+
+        if (((wi + 1) % 50u) == 0u || wi + 1 == num_windows) {
+            double now = now_secs();
+            double dt = now - t0;
+            double pct = 100.0 * (double)(wi + 1) / (double)num_windows;
+            double eta = eta_secs(wi + 1, num_windows, dt);
+            printf("[windows] %zu/%zu (%.1f%%) ETA %.0fs (%.1fs since last)\n",
+                   wi + 1, num_windows, pct, eta, now - t_last);
+            fflush(stdout);
+            t_last = now;
+        }
+    }
+
+    emit_c_close(fc, num_windows);
+    rpc_free(r);
+    printf("[gen_sha3_windows] wrote %s and %s (%zu rows, %.1fs total)\n",
+           c->out_h, c->out_c, num_windows, now_secs() - t0);
     return 0;
 }
 
@@ -722,19 +848,9 @@ int main(int argc, char **argv)
 
     /* Resolve chain tip if --max-height not given. */
     int tip = c.max_height;
-    if (tip < 0) {
-        size_t body_len = 0;
-        const char *body = rpc_call(&r, "getblockcount", "[]", &body_len);
-        if (!body) { rpc_free(&r); return 1; }
-        struct json_value env;
-        const struct json_value *res = rpc_result(&env, body, body_len);
-        if (!res || res->type != JSON_INT) {
-            json_free(&env);
-            rpc_free(&r);
-            return 1;
-        }
-        tip = (int)res->val.i;
-        json_free(&env);
+    if (tip < 0 && !resolve_chain_tip(&r, &tip)) {
+        rpc_free(&r);
+        return 1;
     }
     if (tip < 0) {
         fprintf(stderr, "tip height = %d, nothing to do\n", tip);
@@ -759,53 +875,5 @@ int main(int argc, char **argv)
         return rc;
     }
 
-    /* Full windows only: a partial trailing window has no end marker in
-     * the emitted struct and false-fires the runtime tripwire once the
-     * window completes on-chain. */
-    if (num_windows * SHA3_WINDOW_SIZE > (size_t)tip + 1u) {
-        num_windows--;
-        printf("[gen_sha3_windows] dropping partial trailing window "
-               "(coverage capped at h=%zu, tip=%d)\n",
-               num_windows * SHA3_WINDOW_SIZE - 1, tip);
-    }
-
-    if (!emit_header(c.out_h)) { rpc_free(&r); return 1; }
-
-    FILE *fc = NULL;
-    if (!emit_c_open(&fc, c.out_c)) { rpc_free(&r); return 1; }
-
-    double t0 = now_secs();
-    double t_last = t0;
-
-    for (size_t wi = 0; wi < num_windows; wi++) {
-        int start = (int)(wi * SHA3_WINDOW_SIZE);
-        int end = start + SHA3_WINDOW_SIZE - 1;
-        if (end > tip) end = tip;
-
-        uint8_t digest[32];
-        if (!compute_window_digest(&r, start, end, digest)) {
-            fclose(fc);
-            rpc_free(&r);
-            return 1;
-        }
-        emit_c_row(fc, (int32_t)start, digest);
-
-        if (((wi + 1) % 50u) == 0u || wi + 1 == num_windows) {
-            double now = now_secs();
-            double dt = now - t0;
-            double pct = 100.0 * (double)(wi + 1) / (double)num_windows;
-            double rate = (wi + 1) / (dt > 0 ? dt : 1.0);
-            double eta = (num_windows - (wi + 1)) / (rate > 0 ? rate : 1.0);
-            printf("[windows] %zu/%zu (%.1f%%) ETA %.0fs (%.1fs since last)\n",
-                   wi + 1, num_windows, pct, eta, now - t_last);
-            fflush(stdout);
-            t_last = now;
-        }
-    }
-
-    emit_c_close(fc, num_windows);
-    rpc_free(&r);
-    printf("[gen_sha3_windows] wrote %s and %s (%zu rows, %.1fs total)\n",
-           c.out_h, c.out_c, num_windows, now_secs() - t0);
-    return 0;
+    return run_generate(&r, &c, tip, num_windows);
 }

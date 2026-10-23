@@ -3549,9 +3549,6 @@ tools/fuzz/fuzz_zcode_commons.c:fuzz_hex_wire:16
 tools/gen_api_reference.c:block_counts:17
 tools/gen_api_reference.c:block_schemas:16
 tools/gen_capability_inventory.c:main:16
-tools/gen_sha3_windows.c:main:20
-tools/gen_sha3_windows.c:parse_cli:20
-tools/gen_sha3_windows.c:run_extend:19
 tools/gen_templates.c:main:17
 tools/gen_templates.c:minify_css:44
 tools/gen_templates.c:process_dir:21
