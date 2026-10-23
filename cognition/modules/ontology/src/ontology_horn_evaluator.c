@@ -20,52 +20,35 @@ struct horn_runtime {
     enum zcl_ontology_incomplete_reason soft_reason;
 };
 
+/* Reasons without a row fall back to "horn_evidence_incomplete". */
+struct horn_reason_text {
+    enum zcl_ontology_incomplete_reason reason;
+    const char *text;
+};
+
+static const struct horn_reason_text horn_reason_texts[] = {
+    {ZCL_ONTOLOGY_REASON_FACT_BUDGET, "fact_budget_exhausted"},
+    {ZCL_ONTOLOGY_REASON_STEP_BUDGET, "step_budget_exhausted"},
+    {ZCL_ONTOLOGY_REASON_RECURSION_BUDGET, "recursion_budget_exhausted"},
+    {ZCL_ONTOLOGY_REASON_DERIVATION_BUDGET, "derivation_budget_exhausted"},
+    {ZCL_ONTOLOGY_REASON_MEMORY_BUDGET, "memory_budget_exhausted"},
+    {ZCL_ONTOLOGY_REASON_TIME_BUDGET, "time_budget_exhausted"},
+    {ZCL_ONTOLOGY_REASON_TIME_SOURCE_MISSING, "time_source_missing"},
+    {ZCL_ONTOLOGY_REASON_TIME_SOURCE_REGRESSED, "time_source_regressed"},
+    {ZCL_ONTOLOGY_REASON_PREDICATE_MISSING, "predicate_missing"},
+    {ZCL_ONTOLOGY_REASON_MANIFEST_INVALID, "manifest_invalid"},
+    {ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID, "horn_query_invalid"},
+    {ZCL_ONTOLOGY_REASON_HORN_CONTEXT_UNSUPPORTED,
+     "horn_imported_context_rule_unsupported"},
+};
+
 static const char *horn_reason_string(
     enum zcl_ontology_incomplete_reason reason)
 {
-    switch (reason) {
-    case ZCL_ONTOLOGY_REASON_FACT_BUDGET:
-        return "fact_budget_exhausted";
-    case ZCL_ONTOLOGY_REASON_STEP_BUDGET:
-        return "step_budget_exhausted";
-    case ZCL_ONTOLOGY_REASON_RECURSION_BUDGET:
-        return "recursion_budget_exhausted";
-    case ZCL_ONTOLOGY_REASON_DERIVATION_BUDGET:
-        return "derivation_budget_exhausted";
-    case ZCL_ONTOLOGY_REASON_MEMORY_BUDGET:
-        return "memory_budget_exhausted";
-    case ZCL_ONTOLOGY_REASON_TIME_BUDGET:
-        return "time_budget_exhausted";
-    case ZCL_ONTOLOGY_REASON_TIME_SOURCE_MISSING:
-        return "time_source_missing";
-    case ZCL_ONTOLOGY_REASON_TIME_SOURCE_REGRESSED:
-        return "time_source_regressed";
-    case ZCL_ONTOLOGY_REASON_PREDICATE_MISSING:
-        return "predicate_missing";
-    case ZCL_ONTOLOGY_REASON_MANIFEST_INVALID:
-        return "manifest_invalid";
-    case ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID:
-        return "horn_query_invalid";
-    case ZCL_ONTOLOGY_REASON_HORN_CONTEXT_UNSUPPORTED:
-        return "horn_imported_context_rule_unsupported";
-    case ZCL_ONTOLOGY_REASON_PREDICATE_REGISTRY_INVALID:
-    case ZCL_ONTOLOGY_REASON_PREDICATE_ARITY:
-    case ZCL_ONTOLOGY_REASON_PREDICATE_TYPE:
-    case ZCL_ONTOLOGY_REASON_PREDICATE_TIER:
-    case ZCL_ONTOLOGY_REASON_ASSERTION_INVALID:
-    case ZCL_ONTOLOGY_REASON_COVERAGE_MISSING:
-    case ZCL_ONTOLOGY_REASON_DOMAIN_MISSING:
-    case ZCL_ONTOLOGY_REASON_DOMAIN_INVALID:
-    case ZCL_ONTOLOGY_REASON_DOMAIN_CONTEXT:
-    case ZCL_ONTOLOGY_REASON_DOMAIN_REGISTRY_INVALID:
-    case ZCL_ONTOLOGY_REASON_VARIABLE_UNBOUND:
-    case ZCL_ONTOLOGY_REASON_FORMULA_EVIDENCE:
-    case ZCL_ONTOLOGY_REASON_EXPLICIT_NEGATION_UNSUPPORTED:
-    case ZCL_ONTOLOGY_REASON_ENUMERATION_EVIDENCE_UNVERIFIED:
-    case ZCL_ONTOLOGY_REASON_TYPE_EVIDENCE_UNVERIFIED:
-    case ZCL_ONTOLOGY_REASON_NONE:
-        break;
-    }
+    for (size_t i = 0;
+         i < sizeof(horn_reason_texts) / sizeof(horn_reason_texts[0]); i++)
+        if (horn_reason_texts[i].reason == reason)
+            return horn_reason_texts[i].text;
     return "horn_evidence_incomplete";
 }
 
@@ -246,26 +229,40 @@ static bool horn_working_set_bytes(
     return true;
 }
 
+static bool horn_array_bounds_valid(size_t count, size_t max,
+                                    const void *items)
+{
+    return count <= max && (count == 0 || items);
+}
+
 static bool horn_input_bounds_valid(
     const struct zcl_ontology_manifest_inputs_v1 *inputs)
 {
     return inputs &&
-           inputs->term_count <= ZCL_ONTOLOGY_MAX_HORN_TERMS &&
-           (inputs->term_count == 0 || inputs->terms) &&
-           inputs->predicate_count <= ZCL_ONTOLOGY_MAX_PREDICATES &&
-           (inputs->predicate_count == 0 || inputs->predicates) &&
-           inputs->formula_count <= ZCL_ONTOLOGY_MAX_HORN_FORMULAS &&
-           (inputs->formula_count == 0 || inputs->formulas) &&
-           inputs->rule_count <= ZCL_ONTOLOGY_MAX_HORN_RULES &&
-           (inputs->rule_count == 0 || inputs->rules) &&
-           inputs->context_count <= ZCL_ONTOLOGY_MAX_CONTEXTS &&
-           (inputs->context_count == 0 || inputs->contexts) &&
-           inputs->assertion_count <= ZCL_ONTOLOGY_MAX_HORN_FACTS &&
-           (inputs->assertion_count == 0 || inputs->assertions) &&
-           inputs->coverage_count <= ZCL_ONTOLOGY_MAX_COVERAGE &&
-           (inputs->coverage_count == 0 || inputs->coverage) &&
-           inputs->domain_count <= ZCL_ONTOLOGY_MAX_DOMAINS &&
-           (inputs->domain_count == 0 || inputs->domains);
+           horn_array_bounds_valid(inputs->term_count,
+                                   ZCL_ONTOLOGY_MAX_HORN_TERMS,
+                                   inputs->terms) &&
+           horn_array_bounds_valid(inputs->predicate_count,
+                                   ZCL_ONTOLOGY_MAX_PREDICATES,
+                                   inputs->predicates) &&
+           horn_array_bounds_valid(inputs->formula_count,
+                                   ZCL_ONTOLOGY_MAX_HORN_FORMULAS,
+                                   inputs->formulas) &&
+           horn_array_bounds_valid(inputs->rule_count,
+                                   ZCL_ONTOLOGY_MAX_HORN_RULES,
+                                   inputs->rules) &&
+           horn_array_bounds_valid(inputs->context_count,
+                                   ZCL_ONTOLOGY_MAX_CONTEXTS,
+                                   inputs->contexts) &&
+           horn_array_bounds_valid(inputs->assertion_count,
+                                   ZCL_ONTOLOGY_MAX_HORN_FACTS,
+                                   inputs->assertions) &&
+           horn_array_bounds_valid(inputs->coverage_count,
+                                   ZCL_ONTOLOGY_MAX_COVERAGE,
+                                   inputs->coverage) &&
+           horn_array_bounds_valid(inputs->domain_count,
+                                   ZCL_ONTOLOGY_MAX_DOMAINS,
+                                   inputs->domains);
 }
 
 static bool horn_cost_add(uint64_t *total, uint64_t add)
@@ -743,20 +740,27 @@ static void horn_finish(struct horn_runtime *runtime)
     result->complete = true;
 }
 
+static bool horn_query_fields_valid(
+    const struct zcl_ontology_horn_query_v1 *query)
+{
+    return query->schema_version == ZCL_ONTOLOGY_OBJECT_VERSION &&
+           query->reserved == 0 &&
+           query->arity <= ZCL_ONTOLOGY_MAX_ARITY &&
+           horn_nonzero(query->universe_root) &&
+           horn_nonzero(query->context_root) &&
+           horn_nonzero(query->predicate_root) &&
+           query->import_count <= ZCL_ONTOLOGY_MAX_IMPORTS &&
+           (query->import_count == 0 || query->import_context_roots) &&
+           query->manifest && query->inputs && query->budget;
+}
+
 static bool horn_query_shape_valid(
     const struct zcl_ontology_horn_query_v1 *query)
 {
-    if (!query || query->schema_version != ZCL_ONTOLOGY_OBJECT_VERSION ||
-        query->reserved != 0 || query->arity > ZCL_ONTOLOGY_MAX_ARITY ||
-        !horn_nonzero(query->universe_root) ||
-        !horn_nonzero(query->context_root) ||
-        !horn_nonzero(query->predicate_root) ||
-        query->import_count > ZCL_ONTOLOGY_MAX_IMPORTS ||
-        (query->import_count != 0 && !query->import_context_roots) ||
-        !query->manifest || !query->inputs || !query->budget)
+    if (!query || !horn_query_fields_valid(query)) return false;
+    if (zcl_bytes_any_set(query->reserved_bytes,
+                          sizeof(query->reserved_bytes)))
         return false;
-    for (size_t i = 0; i < sizeof(query->reserved_bytes); i++)
-        if (query->reserved_bytes[i] != 0) return false;
     for (size_t i = 0; i < ZCL_ONTOLOGY_MAX_ARITY; i++)
         if ((i < query->arity) != horn_nonzero(query->argument_roots[i]))
             return false;
@@ -849,6 +853,92 @@ static bool horn_target_valid(struct horn_runtime *runtime)
     return true;
 }
 
+static bool horn_query_roots_valid(struct horn_runtime *runtime)
+{
+    uint8_t universe_root[32], budget_root[32];
+    if (!horn_query_shape_valid(runtime->query) ||
+        !horn_input_bounds_valid(
+            runtime->query ? runtime->query->inputs : NULL)) {
+        horn_fail(runtime, ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID);
+        return false;
+    }
+    if (!zcl_source_universe_v1_root(runtime->universe, universe_root) ||
+        !zcl_ontology_budget_v1_root(runtime->query->budget, budget_root) ||
+        memcmp(universe_root, runtime->query->universe_root, 32) != 0) {
+        horn_fail(runtime, ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID);
+        return false;
+    }
+    return true;
+}
+
+static bool horn_admit_query(struct horn_runtime *runtime)
+{
+    if (!runtime->query->elapsed_us) {
+        horn_fail(runtime, ZCL_ONTOLOGY_REASON_TIME_SOURCE_MISSING);
+        return false;
+    }
+    runtime->started_us =
+        runtime->query->elapsed_us(runtime->query->elapsed_context);
+    uint64_t working_set = 0;
+    if (!horn_working_set_bytes(runtime->query, &working_set) ||
+        runtime->query->budget->memory_limit_bytes < working_set) {
+        horn_fail(runtime, ZCL_ONTOLOGY_REASON_MEMORY_BUDGET);
+        return false;
+    }
+    return horn_admission_charge(runtime);
+}
+
+static bool horn_manifest_bound(struct horn_runtime *runtime)
+{
+    if (!zcl_ontology_manifest_v1_validate(
+            runtime->query->manifest, runtime->universe,
+            runtime->query->inputs)) {
+        horn_fail(runtime, ZCL_ONTOLOGY_REASON_MANIFEST_INVALID);
+        return false;
+    }
+    if (!horn_time_available(runtime)) return false;
+    if (!horn_contexts_bound(runtime->query, runtime->query->inputs)) {
+        horn_fail(runtime, ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID);
+        return false;
+    }
+    return true;
+}
+
+static bool horn_load_predicate_roots(struct horn_runtime *runtime)
+{
+    struct zcl_ontology_evaluator *evaluator = runtime->evaluator;
+    const struct zcl_ontology_manifest_inputs_v1 *inputs =
+        runtime->query->inputs;
+    memset(evaluator->predicate_roots, 0,
+           sizeof(evaluator->predicate_roots));
+    for (size_t i = 0; i < inputs->predicate_count; i++) {
+        if (!horn_step(runtime)) return false;
+        if (!zcl_ontology_predicate_v1_root(
+                &inputs->predicates[i],
+                evaluator->predicate_roots[i])) {
+            horn_fail(runtime,
+                      ZCL_ONTOLOGY_REASON_PREDICATE_REGISTRY_INVALID);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* Each stage returns early on the first failed check; the caller always
+ * finishes the result afterwards, so every exit reports the same way. */
+static void horn_evaluate(struct horn_runtime *runtime)
+{
+    if (!horn_query_roots_valid(runtime)) return;
+    if (!horn_admit_query(runtime)) return;
+    if (!horn_manifest_bound(runtime)) return;
+    if (!horn_load_predicate_roots(runtime)) return;
+    if (!horn_step(runtime) || !horn_target_valid(runtime)) return;
+    if (!horn_load_assertions(runtime)) return;
+    (void)horn_saturate(runtime);
+    if (runtime->reason == ZCL_ONTOLOGY_REASON_NONE)
+        (void)horn_time_available(runtime);
+}
+
 bool zcl_ontology_evaluate_horn_v1(
     struct zcl_ontology_evaluator *evaluator,
     const struct zcl_source_universe_v1 *universe,
@@ -866,79 +956,7 @@ bool zcl_ontology_evaluate_horn_v1(
         .result = out,
     };
     evaluator->horn_fact_count = 0;
-    if (!horn_query_shape_valid(query) || !horn_input_bounds_valid(
-            query ? query->inputs : NULL)) {
-        horn_fail(&runtime, ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID);
-        horn_finish(&runtime);
-        return true;
-    }
-    uint8_t universe_root[32], budget_root[32];
-    if (!zcl_source_universe_v1_root(universe, universe_root) ||
-        !zcl_ontology_budget_v1_root(query->budget, budget_root) ||
-        memcmp(universe_root, query->universe_root, 32) != 0) {
-        horn_fail(&runtime, ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID);
-        horn_finish(&runtime);
-        return true;
-    }
-    if (!query->elapsed_us) {
-        horn_fail(&runtime, ZCL_ONTOLOGY_REASON_TIME_SOURCE_MISSING);
-        horn_finish(&runtime);
-        return true;
-    }
-    runtime.started_us = query->elapsed_us(query->elapsed_context);
-    uint64_t working_set = 0;
-    if (!horn_working_set_bytes(query, &working_set) ||
-        query->budget->memory_limit_bytes < working_set) {
-        horn_fail(&runtime, ZCL_ONTOLOGY_REASON_MEMORY_BUDGET);
-        horn_finish(&runtime);
-        return true;
-    }
-    if (!horn_admission_charge(&runtime)) {
-        horn_finish(&runtime);
-        return true;
-    }
-    if (!zcl_ontology_manifest_v1_validate(
-            query->manifest, universe, query->inputs)) {
-        horn_fail(&runtime, ZCL_ONTOLOGY_REASON_MANIFEST_INVALID);
-        horn_finish(&runtime);
-        return true;
-    }
-    if (!horn_time_available(&runtime)) {
-        horn_finish(&runtime);
-        return true;
-    }
-    if (!horn_contexts_bound(query, query->inputs)) {
-        horn_fail(&runtime, ZCL_ONTOLOGY_REASON_HORN_QUERY_INVALID);
-        horn_finish(&runtime);
-        return true;
-    }
-    memset(evaluator->predicate_roots, 0,
-           sizeof(evaluator->predicate_roots));
-    for (size_t i = 0; i < query->inputs->predicate_count; i++) {
-        if (!horn_step(&runtime)) {
-            horn_finish(&runtime);
-            return true;
-        }
-        if (!zcl_ontology_predicate_v1_root(
-                &query->inputs->predicates[i],
-                evaluator->predicate_roots[i])) {
-            horn_fail(&runtime,
-                      ZCL_ONTOLOGY_REASON_PREDICATE_REGISTRY_INVALID);
-            horn_finish(&runtime);
-            return true;
-        }
-    }
-    if (!horn_step(&runtime) || !horn_target_valid(&runtime)) {
-        horn_finish(&runtime);
-        return true;
-    }
-    if (!horn_load_assertions(&runtime)) {
-        horn_finish(&runtime);
-        return true;
-    }
-    (void)horn_saturate(&runtime);
-    if (runtime.reason == ZCL_ONTOLOGY_REASON_NONE)
-        (void)horn_time_available(&runtime);
+    horn_evaluate(&runtime);
     horn_finish(&runtime);
     return true;
 }

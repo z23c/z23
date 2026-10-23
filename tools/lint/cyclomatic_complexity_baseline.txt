@@ -131,10 +131,6 @@ cognition/modules/ontology/src/ontology_formula.c:zcl_ontology_derivation_v1_roo
 cognition/modules/ontology/src/ontology_formula.c:zcl_ontology_domain_v1_root:18
 cognition/modules/ontology/src/ontology_formula.c:zcl_ontology_evaluate_formula_v1:27
 cognition/modules/ontology/src/ontology_formula.c:zcl_ontology_horn_derivation_v1_root:25
-cognition/modules/ontology/src/ontology_horn_evaluator.c:horn_input_bounds_valid:25
-cognition/modules/ontology/src/ontology_horn_evaluator.c:horn_query_shape_valid:18
-cognition/modules/ontology/src/ontology_horn_evaluator.c:horn_reason_string:29
-cognition/modules/ontology/src/ontology_horn_evaluator.c:zcl_ontology_evaluate_horn_v1:24
 cognition/modules/ontology/src/ontology_horn_rule.c:horn_atom_valid:22
 cognition/modules/ontology/src/ontology_horn_rule.c:zcl_ontology_horn_rule_v1_validate:22
 cognition/modules/ontology/src/ontology_manifest.c:zcl_ontology_manifest_v1_validate:17
