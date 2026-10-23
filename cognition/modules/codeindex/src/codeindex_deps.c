@@ -183,8 +183,11 @@ const char *ci_deps_include_narrow_cause(void)
 
 /* `rule` is a short stable tag; `path` is the repo-relative file it fired
  * on, or NULL when the depfile itself is the evidence. */
+static unsigned long g_unsafe_events;
+
 static void note_include_narrow_unsafe(const char *rule, const char *path)
 {
+    g_unsafe_events++;
     if (!g_include_narrow_unsafe) {
         if (path && path[0])
             (void)snprintf(g_include_narrow_cause,
@@ -762,6 +765,16 @@ static void note_unit_text_includes(const char *root, const char *token,
         note_text_includes(root, unit, dep_text, cb, user);
 }
 
+/* The first in-tree prerequisite newer than the depfile being scanned. The
+ * verdict waits for the end of the scan: see resolve_stale_depfiles. */
+static char g_stale_src[CI_PATH_MAX];
+
+static void note_stale_prereq(const char *src)
+{
+    if (g_stale_src[0] == '\0')
+        (void)snprintf(g_stale_src, sizeof g_stale_src, "%s", src);
+}
+
 static void note_source_newer_than_depfile(
     const char *root, const char *src,
     const struct platform_positioned_file_snapshot *dep)
@@ -782,7 +795,7 @@ static void note_source_newer_than_depfile(
 #endif
     if (sec > dep->modified_seconds ||
         (sec == dep->modified_seconds && nsec > dep->modified_nanoseconds))
-        note_include_narrow_unsafe("prereq_newer_than_depfile", src);
+        note_stale_prereq(src);
 }
 
 static bool dep_take_token(const char *text, size_t len, size_t *io,
@@ -928,6 +941,94 @@ static void note_depfile_narrow_safety(
     note_depfile_rule_gaps(root, text, len, dep, cb, user);
 }
 
+/* A depfile with a prerequisite newer than itself describes an older build of
+ * its unit. When the SAME primary unit also has a depfile in another build
+ * profile whose every prerequisite is older than that depfile, the include
+ * graph still holds the unit's current edges: the stale depfile is
+ * superseded. Its own edges are kept (the union is never smaller), only its
+ * refusal is withdrawn. A unit with no such fresh depfile keeps the refusal.
+ * The verdict waits for the end of the sorted scan because the fresh depfile
+ * may sort after the stale one. */
+struct stale_depfile {
+    char *unit;
+    char *depfile;
+    char *src;
+};
+
+static struct dep_paths g_fresh_units;
+static struct stale_depfile *g_stale_list;
+static size_t g_stale_count;
+static size_t g_stale_cap;
+
+static void stale_depfiles_reset(void)
+{
+    for (size_t i = 0; i < g_stale_count; i++) {
+        free(g_stale_list[i].unit);
+        free(g_stale_list[i].depfile);
+        free(g_stale_list[i].src);
+    }
+    free(g_stale_list);
+    g_stale_list = NULL;
+    g_stale_count = 0;
+    g_stale_cap = 0;
+    dep_paths_free(&g_fresh_units);
+    g_stale_src[0] = '\0';
+}
+
+static bool stale_depfile_push(const char *unit, const char *depfile,
+                               const char *src)
+{
+    if (g_stale_count == g_stale_cap) {
+        size_t next = g_stale_cap ? g_stale_cap * 2 : 16;
+        struct stale_depfile *list = zcl_realloc(
+            g_stale_list, next * sizeof(*list), "codeindex stale depfiles");
+        if (!list)
+            return false;
+        g_stale_list = list;
+        g_stale_cap = next;
+    }
+    struct stale_depfile *e = &g_stale_list[g_stale_count];
+    e->unit = zcl_strdup(unit, "codeindex stale unit");
+    e->depfile = zcl_strdup(depfile, "codeindex stale depfile");
+    e->src = zcl_strdup(src, "codeindex stale source");
+    if (!e->unit || !e->depfile || !e->src) {
+        free(e->unit);
+        free(e->depfile);
+        free(e->src);
+        return false;
+    }
+    g_stale_count++;
+    return true;
+}
+
+/* After one non-foreign depfile was scanned: file it as fresh, as stale
+ * pending a verdict, or (no usable unit, no memory) refuse at once. */
+static void classify_scanned_depfile(const char *relpath, const char *unit,
+                                     bool have_unit,
+                                     unsigned long events_before)
+{
+    if (g_stale_src[0] == '\0') {
+        if (have_unit && g_unsafe_events == events_before)
+            (void)dep_paths_push(&g_fresh_units, unit);
+        return;
+    }
+    if (!have_unit || !stale_depfile_push(unit, relpath, g_stale_src))
+        note_include_narrow_unsafe("prereq_newer_than_depfile", g_stale_src);
+}
+
+static void resolve_stale_depfiles(void)
+{
+    for (size_t i = 0; i < g_stale_count; i++) {
+        if (dep_paths_has(&g_fresh_units, g_stale_list[i].unit))
+            continue;
+        g_scan_depfile = g_stale_list[i].depfile;
+        note_include_narrow_unsafe("prereq_newer_than_depfile",
+                                   g_stale_list[i].src);
+        g_scan_depfile = "";
+    }
+    stale_depfiles_reset();
+}
+
 /* A foreign depfile is hashed by the caller but adds no edge or refusal. */
 static void scan_depfile_text(
     const char *root, const char *relpath, char *buf, size_t len,
@@ -938,8 +1039,14 @@ static void scan_depfile_text(
     if (depfile_unit_foreign(root, buf, len)) {
         note_foreign_depfile(relpath);
     } else {
+        char unit[CI_PATH_MAX];
+        /* parse_depfile edits the text in place: name the unit first. */
+        bool have_unit = depfile_primary_unit(root, buf, len, unit);
+        unsigned long events_before = g_unsafe_events;
+        g_stale_src[0] = '\0';
         note_depfile_narrow_safety(root, buf, len, dep, cb, user);
         parse_depfile(root, buf, len, cb, user);
+        classify_scanned_depfile(relpath, unit, have_unit, events_before);
     }
     g_scan_depfile = "";
 }
@@ -1009,6 +1116,7 @@ static bool deps_scan_exact(const char *root, ci_dep_cb cb, void *user,
     g_include_narrow_cause[0] = '\0';
     g_foreign_depfiles = 0;
     g_foreign_first[0] = '\0';
+    stale_depfiles_reset();
     dep_edge_root_begin();
     if (!root || !exact_out)
         LOG_FAIL("codeindex", "null arg to deps_scan");
@@ -1047,6 +1155,7 @@ static bool deps_scan_exact(const char *root, ci_dep_cb cb, void *user,
     dep_paths_free(&paths);
     if (!ok)
         LOG_FAIL("codeindex", "scan depfiles failed");
+    resolve_stale_depfiles();
     report_foreign_depfiles();
     sha3_256_finalize(&sha, exact_out);
     dep_edge_root_end();

@@ -1278,6 +1278,103 @@ static int test_code_impact_unsafe_cause(void)
     return failures;
 }
 
+/* Two build profiles each leave a depfile for the same unit. A stale one is
+ * superseded when the other is fresh; with no fresh partner it still refuses,
+ * and its edges are kept either way (the union is never smaller). */
+static void ci_prof_mtime(const char *dir, const char *rel, long delta)
+{
+    char path[512];
+    struct utimbuf times;
+    snprintf(path, sizeof path, "%s/%s", dir, rel);
+    times.actime = 1700000000L + delta;
+    times.modtime = 1700000000L + delta;
+    (void)utime(path, &times);
+}
+
+/* a_dep/b_dep NULL: that profile has no depfile. Deltas are against the
+ * source and header mtime; a negative delta makes that depfile stale. */
+static int ci_prof_case(const char *name, const char *a_path,
+                        const char *a_dep, long a_delta, const char *b_path,
+                        const char *b_dep, long b_delta, const char *want,
+                        const char *query)
+{
+    static const char *const src =
+        "/* narrow */\n#include \"net/real.h\"\nint ci_narrow(void){return 1;}\n";
+    int failures = 0;
+    char dir[256];
+    snprintf(dir, sizeof dir, CI_NARROW_FIX "/prof_%s", name);
+ TEST_DISCARD(system("rm -rf " CI_NARROW_FIX));
+    bool ready = ci_impact_mk_write(dir, "core/modules/net/include/net/extra.h",
+                                    "int ci_narrow_extra(void);\n") &&
+                 ci_impact_mk_write(dir, "core/modules/net/include/net/real.h",
+                                    "int ci_narrow_real(void);\n") &&
+                 ci_impact_mk_write(dir, "core/modules/net/src/narrow.c", src) &&
+                 ci_impact_mk_write(dir, a_path, a_dep);
+    if (ready && b_dep)
+        ready = ci_impact_mk_write(dir, b_path, b_dep);
+    ci_prof_mtime(dir, "core/modules/net/src/narrow.c", 0);
+    ci_prof_mtime(dir, "core/modules/net/include/net/real.h", 0);
+    ci_prof_mtime(dir, "core/modules/net/include/net/extra.h", 0);
+    ci_prof_mtime(dir, a_path, a_delta);
+    if (b_dep)
+        ci_prof_mtime(dir, b_path, b_delta);
+    char cause[CODEINDEX_INCLUDE_UNSAFE_CAUSE_MAX] = "unset";
+    bool unsafe = false;
+    struct codeindex *index = ready ? codeindex_open(dir) : NULL;
+    if (index) {
+        unsafe = codeindex_include_unsafe_cause(index, cause, sizeof cause);
+        codeindex_close(index);
+    }
+    char dim[64] = "";
+    long long count = -1;
+    bool dim_ok = !query || (ready &&
+        ci_narrow_dim(dir, query, dim, sizeof dim, &count));
+    printf("invariant=stale_depfile_superseded case=%s unsafe=%d "
+           "cause=\"%s\" include_dimension=%s count=%lld\n",
+           name, unsafe ? 1 : 0, cause, dim, count);
+    TEST("code_impact: a stale depfile is superseded only by a fresh one") {
+        ASSERT(index != NULL);
+        ASSERT(dim_ok);
+        ASSERT(unsafe == (want[0] != '\0'));
+        ASSERT_STR_EQ(cause, want);
+        if (query && !want[0])
+            ASSERT(strcmp(dim, "complete") == 0 && count >= 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_code_impact_stale_profile_depfile(void)
+{
+    static const char *const dep =
+        "build/x/narrow.o: core/modules/net/src/narrow.c "
+        "core/modules/net/include/net/real.h\n";
+    static const char *const dep_extra =
+        "build/x/narrow.o: core/modules/net/src/narrow.c "
+        "core/modules/net/include/net/real.h "
+        "core/modules/net/include/net/extra.h\n";
+    static const char *const refuse =
+        "prereq_newer_than_depfile build/obj/narrow.d -> "
+        "core/modules/net/src/narrow.c";
+    static const char *const real = "core/modules/net/include/net/real.h";
+    static const char *const extra = "core/modules/net/include/net/extra.h";
+    int failures = 0;
+    /* the fresh depfile sorts before the stale one, then after it */
+    failures += ci_prof_case("fresh_first", "build/obj/narrow.d", dep, -5,
+                             "build/fuzz-obj/narrow.d", dep, 5, "", real);
+    failures += ci_prof_case("fresh_last", "build/obj/narrow.d", dep, -5,
+                             "build/zz-obj/narrow.d", dep, 5, "", real);
+    failures += ci_prof_case("stale_only", "build/obj/narrow.d", dep, -5,
+                             NULL, NULL, 0, refuse, real);
+    failures += ci_prof_case("both_stale", "build/obj/narrow.d", dep, -5,
+                             "build/zz-obj/narrow.d", dep, -3, refuse, real);
+    /* the stale depfile alone names extra.h: its edge still counts */
+    failures += ci_prof_case("stale_edge", "build/obj/narrow.d", dep_extra,
+                             -5, "build/zz-obj/narrow.d", dep, 5, "", extra);
+ TEST_DISCARD(system("rm -rf " CI_NARROW_FIX));
+    return failures;
+}
+
 /* HOT_FORK caches depfiles for deleted .resident unity wrappers. They are
  * not the ordinary compiler graph and must not poison a live unit's impact. */
 static int test_code_impact_hotfork_cache_scope(void)
@@ -1836,6 +1933,7 @@ int test_code_impact(void)
     failures += test_code_route_consumer_bounds();
     failures += test_code_impact_unsafe_narrow();
     failures += test_code_impact_unsafe_cause();
+    failures += test_code_impact_stale_profile_depfile();
     failures += test_code_impact_hotfork_cache_scope();
     failures += test_code_impact_deleted_unlisted_input();
     failures += test_code_impact_incremental_include();
