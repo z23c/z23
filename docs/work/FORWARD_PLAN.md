@@ -62,21 +62,23 @@ native `dev.agent` registry, keep it to one lane with one writer, and land it
 through `dev land submit`. A dev-tooling item names the number it moves, with
 before and after values.
 
-1. **P0: tests never touch a real datadir.** Every test process runs under a
-   private HOME. A land proof or lane gate leaves no file in any default
-   datadir.
+1. **Whole-suite proofs pass the first time.** A group that fails only under
+   load gets a root-cause fix (a private path, a CPU budget instead of a wall
+   clock), never a rerun or a weaker assertion. Next: the `build_fabric`
+   proof-wiring cases when the universal set runs.
 2. **Plugins end to end.** Attest, fetch and run plugins, with host calls;
    then the bundled apps ship as plugins ([`PLUGIN_APPS.md`](../commons/PLUGIN_APPS.md)).
-3. **Faster landing.** Several queued rows share one proof (land trains), and
-   the queue reuses a lane's exact proof receipt instead of re-running it.
-   Target: a reviewed row lands in 15 minutes or less at p50.
-4. **Generated files leave git.** The capability inventory is built into
-   `build/gen/` like the API reference, and the land queue's regeneration
-   machinery is deleted.
+3. **The lab closes its loop.** The land driver records `fleet objectives`
+   after every landing, and `fleet objectives` names the biggest unmet gap.
+   Next, a land failure that repeats across rows becomes that gap.
+4. **Functions under the complexity cap.** `fleet objectives` names
+   `functions_over_complexity_cap` (3,886 functions over the cap of 15 on
+   2026-10-22) as the biggest gap. Split product-room functions first,
+   behaviour-preserving, and lower each pin.
 5. **The strict test suite is green.** `make test` builds every binary its
    groups need, and every group passes under the `-Werror -O3` test profile.
-6. **A new command touches only its own files.** Handler prototypes, remote
-   command classes and test prototypes are derived from the `.def` tables.
+6. **A new command touches only its own files.** Handler prototypes and remote
+   command classes now come from the `.def` tables; test prototypes are next.
 7. **Less shell.** Shell lint gates move into the C23 `lintc` driver; the
    shell line budget only goes down.
 
