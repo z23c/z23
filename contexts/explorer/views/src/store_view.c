@@ -261,6 +261,37 @@ static size_t store_wrap_response(const char *body, size_t body_len,
         (int)body_len, body);
 }
 
+/* Copy a download filename into `out`, dropping any quote, CR or LF so the
+ * Content-Disposition header stays well-formed (header injection guard). */
+static void store_disposition_filename(char *out, size_t outmax,
+                                       const char *download_filename)
+{
+    size_t j = 0;
+    for (size_t i = 0; download_filename[i] && j < outmax - 1; i++) {
+        char c = download_filename[i];
+        if (c == '"' || c == '\r' || c == '\n')
+            continue;
+        out[j++] = c;
+    }
+    out[j] = '\0';
+}
+
+/* Build the optional Content-Disposition line into `out`; empty when there is
+ * no download filename or it sanitises to nothing. */
+static void store_content_disposition(char *out, size_t outmax,
+                                      const char *download_filename)
+{
+    out[0] = '\0';
+    if (!download_filename || !download_filename[0])
+        return;
+    char safe_name[STORE_BLOB_NAME_MAX + 1];
+    store_disposition_filename(safe_name, sizeof(safe_name), download_filename);
+    if (safe_name[0])
+        snprintf(out, outmax,
+                 "Content-Disposition: attachment; filename=\"%s\"\r\n",
+                 safe_name);
+}
+
 /* Wrap arbitrary bytes (which may contain embedded NULs) as a 200 OK
  * response with the given content-type and Content-Length. The body is
  * memcpy'd unmodified after the header terminator — never routed through a
@@ -282,24 +313,8 @@ size_t store_binary_response(const uint8_t *body, size_t body_len,
         content_type = "engine/application/octet-stream";
 
     char disposition[STORE_BLOB_NAME_MAX + 64];
-    disposition[0] = '\0';
-    if (download_filename && download_filename[0]) {
-        /* Strip any quote/CR/LF from the filename to keep the header
-         * well-formed (header injection guard). */
-        char safe_name[STORE_BLOB_NAME_MAX + 1];
-        size_t j = 0;
-        for (size_t i = 0; download_filename[i] && j < sizeof(safe_name) - 1; i++) {
-            char c = download_filename[i];
-            if (c == '"' || c == '\r' || c == '\n')
-                continue;
-            safe_name[j++] = c;
-        }
-        safe_name[j] = '\0';
-        if (safe_name[0])
-            snprintf(disposition, sizeof(disposition),
-                     "Content-Disposition: attachment; filename=\"%s\"\r\n",
-                     safe_name);
-    }
+    store_content_disposition(disposition, sizeof(disposition),
+                              download_filename);
 
     int hdr_len = snprintf((char *)resp, max,
         "HTTP/1.1 200 OK\r\n"
@@ -707,6 +722,17 @@ size_t serve_product_detail_json(sqlite3 *db, int64_t product_id,
     return store_emit_json(&doc, "200 OK", resp, max);
 }
 
+/* One "Payment:" or "Mint:" transaction line for the order page; empty when
+ * the order has no such txid yet. */
+static void store_order_txid_row(char *out, size_t outmax, const char *label,
+                                 const char *safe_txid, bool present)
+{
+    out[0] = '\0';
+    if (present)
+        (void)snprintf(out, outmax, "<p>%s: <code>%s</code></p>",
+                       label, safe_txid);
+}
+
 /* GET /store/order/:id — check status */
 size_t serve_order_status(sqlite3 *db, int64_t order_id,
                                   uint8_t *resp, size_t max)
@@ -747,6 +773,12 @@ size_t serve_order_status(sqlite3 *db, int64_t order_id,
     char status_price[32];
     format_zcl_price(status_price, sizeof(status_price), order.amount_zatoshi);
 
+    char pay_row[sizeof(safe_ptxid) + 64], mint_row[sizeof(safe_mtxid) + 64];
+    store_order_txid_row(pay_row, sizeof(pay_row), "Payment", safe_ptxid,
+                         order.payment_txid[0] != '\0');
+    store_order_txid_row(mint_row, sizeof(mint_row), "Mint", safe_mtxid,
+                         order.mint_txid[0] != '\0');
+
     n = snprintf(body + off, sizeof(body) - off,
         "<h1>Order #%lld</h1>"
         "<div class='product'>"
@@ -755,7 +787,7 @@ size_t serve_order_status(sqlite3 *db, int64_t order_id,
         "<p>Amount: <span class='price'>%s ZCL</span></p>"
         "<p>Payment address:</p><div class='addr'>%s</div>"
         "<p>Deliver to:</p><div class='addr'>%s</div>"
-        "%s%s%s%s%s%s"
+        "%s%s"
         "<p><a href='/store/orders/%lld'>Refresh</a> | "
         "<a href='/store/orders'>&larr; Back to orders</a></p>"
         "</div>",
@@ -766,12 +798,8 @@ size_t serve_order_status(sqlite3 *db, int64_t order_id,
         status_price,
         safe_pay,
         safe_cust,
-        order.payment_txid[0] ? "<p>Payment: <code>" : "",
-        order.payment_txid[0] ? safe_ptxid : "",
-        order.payment_txid[0] ? "</code></p>" : "",
-        order.mint_txid[0] ? "<p>Mint: <code>" : "",
-        order.mint_txid[0] ? safe_mtxid : "",
-        order.mint_txid[0] ? "</code></p>" : "",
+        pay_row,
+        mint_row,
         (long long)order_id);
     if (n > 0) off += (size_t)n;
 
@@ -781,106 +809,68 @@ size_t serve_order_status(sqlite3 *db, int64_t order_id,
     return store_html_response(body, off, resp, max);
 }
 
-/* Serve a token-gated page. Checks balance, returns content or 403. */
-size_t serve_gated_content(sqlite3 *db, const char *customer_addr,
-                                   const char *token_id, uint64_t required,
-                                   const char *datadir,
-                                   uint8_t *resp, size_t max)
+/* Token-gated 403 page: states the required token count and the caller's
+ * balance. */
+static size_t store_gated_denied_response(uint64_t required, uint64_t balance,
+                                          const char *safe_token,
+                                          uint8_t *resp, size_t max)
 {
-    uint64_t balance = store_access_token_balance(datadir, customer_addr,
-                                                  token_id);
+    char body[24576];
+    size_t off = 0;
+    int n = html_body_start(body, sizeof(body), "Access Denied");
+    if (n > 0) off = (size_t)n;
+    n = snprintf(body + off, sizeof(body) - off,
+        "<h1>Access Denied</h1>"
+        "<div class='card'>"
+        "<p>This service requires %llu %s tokens.</p>"
+        "<p>Your balance: %llu</p>"
+        "<p><a href='/store'>&larr; Get tokens</a></p>"
+        "</div>",
+        (unsigned long long)required, safe_token,
+        (unsigned long long)balance);
+    if (n > 0) off += (size_t)n;
+    n = html_body_end(body + off, sizeof(body) - off);
+    if (n > 0) off += (size_t)n;
+    return store_error_response("403 Forbidden", body, off, resp, max);
+}
 
-    char safe_token[128], safe_addr[256];
-    html_escape(safe_token, sizeof(safe_token), token_id ? token_id : "");
-    html_escape(safe_addr, sizeof(safe_addr),
-                customer_addr ? customer_addr : "");
+/* Token-gated page for a blob too large to inline: an honest HTML page stating
+ * size + content hash rather than silently truncating the payload. `hex` is the
+ * lowercase SHA3-256 of the blob. */
+static size_t store_gated_oversize_response(const char *hex, int64_t blob_size,
+                                            const char *safe_addr,
+                                            uint8_t *resp, size_t max)
+{
+    char big_body[24576];
+    size_t boff = 0;
+    int bn = html_body_start(big_body, sizeof(big_body), "Premium Content");
+    if (bn > 0) boff = (size_t)bn;
+    bn = snprintf(big_body + boff, sizeof(big_body) - boff,
+        "<h1>Premium Content</h1>"
+        "<div class='card'>"
+        "<p>Welcome, %s</p>"
+        "<p>This download is %lld bytes — too large to serve inline "
+        "over the onion path (max %d bytes). Chunked download is a "
+        "future extension.</p>"
+        "<p>Content hash (SHA3-256):</p><div class='addr'>%s</div>"
+        "</div>"
+        "<p><a href='/store'>&larr; Back to store</a></p>",
+        safe_addr,
+        (long long)blob_size,
+        STORE_BLOB_INLINE_MAX,
+        hex);
+    if (bn > 0) boff += (size_t)bn;
+    bn = html_body_end(big_body + boff, sizeof(big_body) - boff);
+    if (bn > 0) boff += (size_t)bn;
+    return store_html_response(big_body, boff, resp, max);
+}
 
-    if (!store_check_token_access(datadir, customer_addr, token_id, required)) {
-        char body[24576];
-        size_t off = 0;
-        int n = html_body_start(body, sizeof(body), "Access Denied");
-        if (n > 0) off = (size_t)n;
-        n = snprintf(body + off, sizeof(body) - off,
-            "<h1>Access Denied</h1>"
-            "<div class='card'>"
-            "<p>This service requires %llu %s tokens.</p>"
-            "<p>Your balance: %llu</p>"
-            "<p><a href='/store'>&larr; Get tokens</a></p>"
-            "</div>",
-            (unsigned long long)required, safe_token,
-            (unsigned long long)balance);
-        if (n > 0) off += (size_t)n;
-        n = html_body_end(body + off, sizeof(body) - off);
-        if (n > 0) off += (size_t)n;
-        return store_error_response("403 Forbidden", body, off, resp, max);
-    }
-
-    /* Customer holds the token. If the product behind this token attached
-     * a file payload, stream the real bytes; otherwise fall back to the
-     * HTML "access granted" page (backward compatible for all tokens
-     * without an attached file). */
-    struct node_db ndb = { .db = db, .open = (db != NULL) };
-    struct db_store_product product;
-    memset(&product, 0, sizeof(product));
-
-    if (db && token_id &&
-        db_store_product_find_by_token(&ndb, token_id, &product) &&
-        product.has_content) {
-
-        struct db_store_blob blob;
-        memset(&blob, 0, sizeof(blob));
-
-        if (db_store_blob_find(&ndb, product.content_hash, &blob)) {
-            int64_t blob_size = blob.size_bytes;
-            if (blob.data_len <= STORE_BLOB_INLINE_MAX) {
-                /* Inline path: stream the actual file bytes. */
-                size_t out_len = store_binary_response(
-                    blob.data, blob.data_len, blob.content_type,
-                    blob.filename[0] ? blob.filename : NULL, resp, max);
-                db_store_blob_free(&blob);
-                if (out_len > 0)
-                    return out_len;
-                /* Did not fit the response buffer — fall through to the
-                 * too-large HTML page below rather than overflow. */
-            } else {
-                db_store_blob_free(&blob);
-            }
-
-            /* Too large for the inline (.onion 64 KiB) path: serve an
-             * honest HTML page stating size + content hash rather than
-             * silently truncating the payload. */
-            char hex[2 * 32 + 1];
-            for (int i = 0; i < 32; i++)
-                snprintf(hex + i * 2, 3, "%02x", product.content_hash[i]);
-            char big_body[24576];
-            size_t boff = 0;
-            int bn = html_body_start(big_body, sizeof(big_body),
-                                     "Premium Content");
-            if (bn > 0) boff = (size_t)bn;
-            bn = snprintf(big_body + boff, sizeof(big_body) - boff,
-                "<h1>Premium Content</h1>"
-                "<div class='card'>"
-                "<p>Welcome, %s</p>"
-                "<p>This download is %lld bytes — too large to serve inline "
-                "over the onion path (max %d bytes). Chunked download is a "
-                "future extension.</p>"
-                "<p>Content hash (SHA3-256):</p><div class='addr'>%s</div>"
-                "</div>"
-                "<p><a href='/store'>&larr; Back to store</a></p>",
-                safe_addr,
-                (long long)blob_size,
-                STORE_BLOB_INLINE_MAX,
-                hex);
-            if (bn > 0) boff += (size_t)bn;
-            bn = html_body_end(big_body + boff, sizeof(big_body) - boff);
-            if (bn > 0) boff += (size_t)bn;
-            return store_html_response(big_body, boff, resp, max);
-        }
-        /* Product references a blob that isn't present — fall through to
-         * the access-granted page rather than 500. */
-    }
-
-    /* No file payload — emit the existing "access granted" page. */
+/* Token-gated "access granted" page, served when no file payload is attached. */
+static size_t store_gated_granted_response(uint64_t balance,
+                                           const char *safe_token,
+                                           const char *safe_addr,
+                                           uint8_t *resp, size_t max)
+{
     char body[24576];
     size_t off = 0;
     int n = html_body_start(body, sizeof(body), "Premium Service");
@@ -900,4 +890,90 @@ size_t serve_gated_content(sqlite3 *db, const char *customer_addr,
     n = html_body_end(body + off, sizeof(body) - off);
     if (n > 0) off += (size_t)n;
     return store_html_response(body, off, resp, max);
+}
+
+/* Serve a located blob and release it: the raw bytes when they fit the inline
+ * limit and the response buffer, otherwise the too-large page. Always returns
+ * a nonzero response length. */
+static size_t store_gated_blob_response(struct db_store_blob *blob,
+                                        const uint8_t hash[32],
+                                        const char *safe_addr,
+                                        uint8_t *resp, size_t max)
+{
+    int64_t blob_size = blob->size_bytes;
+    if (blob->data_len <= STORE_BLOB_INLINE_MAX) {
+        /* Inline path: stream the actual file bytes. */
+        size_t inline_len = store_binary_response(
+            blob->data, blob->data_len, blob->content_type,
+            blob->filename[0] ? blob->filename : NULL, resp, max);
+        db_store_blob_free(blob);
+        if (inline_len > 0)
+            return inline_len;
+        /* Did not fit the response buffer — fall through to the
+         * too-large HTML page below rather than overflow. */
+    } else {
+        db_store_blob_free(blob);
+    }
+
+    char hex[65];
+    store_hash_hex(hash, true, hex);
+    return store_gated_oversize_response(hex, blob_size, safe_addr, resp, max);
+}
+
+/* Token-gated file payload: when the product behind `token_id` attached a blob,
+ * write the response to *out_len and return true. Returns false (writing
+ * nothing) when there is no servable blob, so the caller falls through to the
+ * access-granted page rather than 500. */
+static bool store_gated_file_response(sqlite3 *db, const char *token_id,
+                                      const char *safe_addr, uint8_t *resp,
+                                      size_t max, size_t *out_len)
+{
+    struct node_db ndb = { .db = db, .open = (db != NULL) };
+    struct db_store_product product;
+    memset(&product, 0, sizeof(product));
+
+    if (!db || !token_id ||
+        !db_store_product_find_by_token(&ndb, token_id, &product) ||
+        !product.has_content)
+        return false;
+
+    struct db_store_blob blob;
+    memset(&blob, 0, sizeof(blob));
+    if (db_store_blob_find(&ndb, product.content_hash, &blob)) {
+        *out_len = store_gated_blob_response(&blob, product.content_hash,
+                                             safe_addr, resp, max);
+        return true;
+    }
+    return false;
+}
+
+/* Serve a token-gated page. Checks balance, returns content or 403. */
+size_t serve_gated_content(sqlite3 *db, const char *customer_addr,
+                                   const char *token_id, uint64_t required,
+                                   const char *datadir,
+                                   uint8_t *resp, size_t max)
+{
+    uint64_t balance = store_access_token_balance(datadir, customer_addr,
+                                                  token_id);
+
+    char safe_token[128], safe_addr[256];
+    html_escape(safe_token, sizeof(safe_token), token_id ? token_id : "");
+    html_escape(safe_addr, sizeof(safe_addr),
+                customer_addr ? customer_addr : "");
+
+    if (!store_check_token_access(datadir, customer_addr, token_id, required))
+        return store_gated_denied_response(required, balance, safe_token,
+                                           resp, max);
+
+    /* Customer holds the token. If the product behind this token attached
+     * a file payload, stream the real bytes; otherwise fall back to the
+     * HTML "access granted" page (backward compatible for all tokens
+     * without an attached file). */
+    size_t file_len = 0;
+    if (store_gated_file_response(db, token_id, safe_addr, resp, max,
+                                  &file_len))
+        return file_len;
+
+    return store_gated_granted_response(balance, safe_token, safe_addr,
+                                        resp, max);
 }

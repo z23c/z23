@@ -808,9 +808,6 @@ contexts/explorer/views/src/explorer_stats_view.c:render_shielded_section:25
 contexts/explorer/views/src/explorer_tx_view.c:explorer_view_tx:27
 contexts/explorer/views/src/name_gateway_view.c:gw_escape_append:17
 contexts/explorer/views/src/qr_popup.c:qr_popup_card_render:18
-contexts/explorer/views/src/store_view.c:serve_gated_content:22
-contexts/explorer/views/src/store_view.c:serve_order_status:16
-contexts/explorer/views/src/store_view.c:store_binary_response:19
 contexts/explorer/views/src/ui_present.c:ui_present_model_from_json:25
 contexts/explorer/views/src/ui_present.c:ui_present_parse_item:17
 contexts/explorer/views/src/ui_present_document.c:ui_present_document_from_model:17
