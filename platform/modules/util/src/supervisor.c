@@ -772,13 +772,18 @@ static void runner_on_stall(struct liveness_contract *self)
 {
     (void)self;
     struct blocker_record rec;
+    char reason[BLOCKER_REASON_MAX];
+    /* g_runner_active_name is written under g_lock around on_tick; the
+     * sweep and stall-runner callers hold no lock here. */
+    pthread_mutex_lock(&g_lock);
+    snprintf(reason, sizeof(reason),
+             "child %s on_tick is wedged past its deadline on the tick-runner "
+             "thread; the sweep heartbeat is unaffected (node stays alive); "
+             "see `dumpstate supervisor` for last_tick_age",
+             g_runner_active_name[0] != '\0' ? g_runner_active_name : "unknown");
+    pthread_mutex_unlock(&g_lock);
     if (blocker_init(&rec, "supervisor.tick_runner_wedged", "supervisor",
-                     BLOCKER_TRANSIENT,
-                     "a supervised child's on_tick has run on the tick-runner "
-                     "thread past its deadline; the sweep heartbeat is "
-                     "unaffected (node stays alive) but one child's periodic "
-                     "work is wedged — inspect `dumpstate supervisor` for the "
-                     "child whose last_tick_age exceeds its period"))
+                     BLOCKER_TRANSIENT, reason))
         (void)blocker_set(&rec);
 }
 

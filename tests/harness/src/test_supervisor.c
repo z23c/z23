@@ -449,6 +449,73 @@ static int check_blocked_tick_sweep_progress(void)
     return failures;
 }
 
+/* Poll until the sweep has delivered the blocker `id`, bounded by timeout_ms. */
+static bool wait_blocker_present(const char *id, int timeout_ms)
+{
+    for (int elapsed = 0; elapsed < timeout_ms; elapsed++) {
+        if (blocker_exists(id))
+            return true;
+        sleep_ms(1);
+    }
+    return blocker_exists(id);
+}
+
+/* Copy the reason of the first active blocker whose id matches exactly. */
+static bool read_blocker_reason(const char *id, char *out, size_t out_len)
+{
+    struct blocker_snapshot snaps[16];
+    int n = blocker_snapshot_all(snaps, 16);
+    for (int i = 0; i < n; i++) {
+        if (strcmp(snaps[i].id, id) == 0) {
+            snprintf(out, out_len, "%s", snaps[i].reason);
+            return true;
+        }
+    }
+    return false;
+}
+
+/* The wedged tick-runner blocker names the stuck child first. Real tick-runner
+ * thread: a child's on_tick blocks, the runner heartbeat is backdated past the
+ * 30 s runner deadline, and the sweep names the child in the blocker reason.
+ * Only the real thread sets the active name, so the threadless case above
+ * cannot check it. */
+static int check_wedged_blocker_names_child(void)
+{
+    int failures = 0;
+    supervisor_reset_for_testing();
+    blocker_reset_for_testing();
+    static struct liveness_contract wedged_child;
+    static struct blocking_tick wedged_probe = {
+        .gate = {.lock = PTHREAD_MUTEX_INITIALIZER,
+                 .changed = PTHREAD_COND_INITIALIZER},
+    };
+    char reason[BLOCKER_REASON_MAX];
+    liveness_contract_init(&wedged_child, "loop.wedged_tick");
+    wedged_child.ctx = &wedged_probe;
+    wedged_child.on_tick = barrier_tick;
+    (void)supervisor_register(&wedged_child);
+    atomic_fetch_sub(&wedged_child.last_tick_us, 2000000);
+    atomic_store(&wedged_child.period_secs, 1);
+    supervisor_set_tick_ms_for_testing(5);
+    bool started = supervisor_start();
+    bool entered = started && wait_stall_entered(&wedged_probe.gate);
+    SUP_CHECK("wedged child is inside on_tick", entered);
+    supervisor_tick_runner_backdate_hb_for_testing(31000000);  /* > 30 s */
+    bool named = entered &&
+        wait_blocker_present("supervisor.tick_runner_wedged", 2000);
+    SUP_CHECK("wedged tick-runner blocker is set", named);
+    bool has_reason = named &&
+        read_blocker_reason("supervisor.tick_runner_wedged",
+                            reason, sizeof(reason));
+    SUP_CHECK("wedged blocker reason starts with the stuck child name",
+        has_reason && strncmp(reason, "child loop.wedged_tick ",
+                              strlen("child loop.wedged_tick ")) == 0);
+    release_stall_probe(&wedged_probe.gate);
+    supervisor_stop();
+    blocker_reset_for_testing();
+    return failures;
+}
+
 int test_supervisor(void)
 {
     printf("\n=== supervisor tests ===\n");
@@ -1387,6 +1454,8 @@ int test_supervisor(void)
 
         blocker_reset_for_testing();
     }
+
+    failures += check_wedged_blocker_names_child();
 
     /* Restore default tick period for any later tests. */
     supervisor_set_tick_ms_for_testing(1000);
