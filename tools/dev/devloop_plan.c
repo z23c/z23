@@ -848,28 +848,23 @@ static bool plan_fold_reached_file(struct zcl_devloop_plan *plan,
                                    enum zcl_devloop_dim dim)
 {
     char leaf_group[ZCL_TEST_GROUP_FULL_MAX];
-    if (plan_semantic_leaf_group(reached, leaf_group)) {
-        if (plan_group_present(plan, leaf_group))
-            return true;
-        if (plan->closure_groups_len >= plan_group_cap())
-            return false;
-        snprintf(plan->closure_groups[plan->closure_groups_len],
-                 sizeof(plan->closure_groups[0]), "%s", leaf_group);
-        plan->closure_groups_len++;
-        plan_note_selection(plan, leaf_group, dim, reached);
-        return true;
-    }
     struct agent_impact_acc acc = {0};
+    /* A reached semantic leaf contributes its own group AND still folds the
+     * rule groups the reached file matches: the leaf row only removes the
+     * runner fanout, never the proof the path rules demand. Slot 0 of the
+     * walk is the leaf group; slots 1.. are acc.groups. */
+    size_t first = plan_semantic_leaf_group(reached, leaf_group) ? 0 : 1;
     (void)agent_impact_apply_shared_rules(reached, &acc);
-    for (size_t g = 0; g < acc.groups_len; g++) {
-        if (plan_group_present(plan, acc.groups[g]))
+    for (size_t g = first; g <= acc.groups_len; g++) {
+        const char *group = g == 0 ? leaf_group : acc.groups[g - 1];
+        if (plan_group_present(plan, group))
             continue;
         if (plan->closure_groups_len >= plan_group_cap())
             return false;
         snprintf(plan->closure_groups[plan->closure_groups_len],
-                 sizeof(plan->closure_groups[0]), "%s", acc.groups[g]);
+                 sizeof(plan->closure_groups[0]), "%s", group);
         plan->closure_groups_len++;
-        plan_note_selection(plan, acc.groups[g], dim, reached);
+        plan_note_selection(plan, group, dim, reached);
     }
     return true;
 }

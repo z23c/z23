@@ -550,8 +550,647 @@ static int tr_eval(struct tr_set *cat)
     return tr_report(ndrift, drift, &orph, ep.entries, cat->c, serial_checked);
 }
 
+/* ---- semantic-leaf proof --------------------------------------------------
+ * Every ZCL_TEST_SEMANTIC_LEAF(<g>) row asserts that tests/harness/src/
+ * test_<g>.c is a proof leaf: nothing else can depend on it, so a change to it
+ * affects exactly its own group. That claim is PROVEN here, not trusted:
+ *  (a) no file-scope function/object definition with external linkage except
+ *      the entry point test_<g> (extern declarations/prototypes are fine);
+ *  (b) no #include of a .c or .inc body;
+ *  (c) the identifier test_<g> appears in no other tracked C source/header/
+ *      registry except the runner plumbing (test.c, test_parallel.c).
+ * The scan is comment/string/char-literal aware and fails closed: a file
+ * scope construct it cannot classify rejects the row (never accepts it). */
+enum { TR_BUF = 2 * 1024 * 1024, TR_WHY = 256 };
+enum { TW_NONE, TW_STATIC, TW_TYPEDEF, TW_EXTERN, TW_SA, TW_ATTR, TW_TAG,
+       TW_QUAL };
+
+static char tr_buf[TR_BUF];
+
+struct tr_leaf { char n[TR_NAME]; char why[TR_WHY]; };
+struct tr_leaves { struct tr_leaf l[TR_MAX]; int c; };
+
+struct tr_sc { const char *entry; char why[TR_WHY]; int entry_seen; };
+
+struct tr_dc {
+    int ntok, paren, brk, body, post_body;
+    int is_static, is_typedef, is_extern, is_assign, is_sa, attr_next;
+    int call, funcptr, macro_first, first_tag, has_tag, prev_word;
+    char name[TR_NAME], fname[TR_NAME], prev[TR_NAME];
+};
+
+static const char *const k_tr_runner_ref[] = { "tests/harness/src/test.c",
+                                               "tests/harness/src/test_parallel.c" };
+
+static size_t tr_skip_lit(char *b, size_t i, size_t n, char q)
+{
+    b[i++] = ' ';
+    while (i < n && b[i] != q && b[i] != '\n') {
+        if (b[i] == '\\' && i + 1 < n && b[i + 1] != '\n')
+            b[i++] = ' ';
+        b[i++] = ' ';
+    }
+    if (i < n && b[i] == q)
+        b[i++] = ' ';
+    return i;
+}
+
+static size_t tr_skip_cmt(char *b, size_t i, size_t n, int block)
+{
+    while (i < n) {
+        if (block && b[i] == '*' && i + 1 < n && b[i + 1] == '/') {
+            b[i++] = ' ';
+            b[i++] = ' ';
+            return i;
+        }
+        if (!block && b[i] == '\n')
+            return i;
+        if (b[i] != '\n')
+            b[i] = ' ';
+        i++;
+    }
+    return i;
+}
+
+/* Blank comments, string and character literals in place (newlines kept). */
+static void tr_blank(char *b, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        int nx = i + 1 < n;
+        if (b[i] == '/' && nx && (b[i + 1] == '*' || b[i + 1] == '/'))
+            i = tr_skip_cmt(b, i, n, b[i + 1] == '*');
+        else if (b[i] == '"')
+            i = tr_skip_lit(b, i, n, '"');
+        else if (b[i] == '\'' && !(i && isalnum((unsigned char)b[i - 1])))
+            i = tr_skip_lit(b, i, n, '\'');
+        else
+            i++;
+    }
+}
+
+/* Blank preprocessor directive lines (with backslash continuations). */
+static void tr_blank_directives(char *b, size_t n)
+{
+    size_t i = 0;
+    while (i < n) {
+        size_t s = i;
+        int esc = 0, dir;
+        while (s < n && (b[s] == ' ' || b[s] == '\t'))
+            s++;
+        dir = s < n && b[s] == '#';
+        while (i < n && !(b[i] == '\n' && !esc)) {
+            esc = dir && b[i] == '\\';
+            if (dir && b[i] != '\n')
+                b[i] = ' ';
+            i++;
+        }
+        i++;
+    }
+}
+
+/* Copy the target of a raw `#include "x"` / `#include <x>` line into out;
+ * 0 if the line is not an include directive. */
+static int tr_include_target(const char *s, char *out, size_t cap)
+{
+    size_t k;
+    while (*s == ' ' || *s == '\t')
+        s++;
+    if (*s++ != '#')
+        return 0;
+    while (*s == ' ' || *s == '\t')
+        s++;
+    if (strncmp(s, "include", 7) != 0)
+        return 0;
+    s += 7;
+    s += strcspn(s, "\"<\n");
+    if (*s != '"' && *s != '<')
+        return 0;
+    s++;
+    k = strcspn(s, "\">\n");
+    if (k + 1 > cap)
+        return 0;
+    memcpy(out, s, k);
+    out[k] = '\0';
+    return 1;
+}
+
+static int tr_has_sfx(const char *s, const char *sfx)
+{
+    size_t k = strlen(s), m = strlen(sfx);
+    return k > m && strcmp(s + k - m, sfx) == 0;
+}
+
+/* Visit every include target in raw text; fn(target, ctx) returns nonzero to
+ * stop and is propagated. */
+static int tr_each_include(const char *b, int (*fn)(const char *, void *),
+                           void *ctx)
+{
+    const char *p = b;
+    char t[RS_PATH];
+    int rc = 0;
+    while (!rc && p && *p) {
+        if (tr_include_target(p, t, sizeof t))
+            rc = fn(t, ctx);
+        p = strchr(p, '\n');
+        p = p ? p + 1 : NULL;
+    }
+    return rc;
+}
+
+static int tr_inc_body_cb(const char *t, void *ctx)
+{
+    (void)ctx;
+    return tr_has_sfx(t, ".c") || tr_has_sfx(t, ".inc");
+}
+
+static int tr_includes_body(const char *b)
+{
+    return tr_each_include(b, tr_inc_body_cb, NULL);
+}
+
+/* .def registries are data unless some C file #includes them: record the
+ * basename of every included .def so a name mention there only counts when
+ * the registry is compiled. */
+static struct tr_set tr_incdefs;
+
+static int tr_incdef_cb(const char *t, void *ctx)
+{
+    const char *base = strrchr(t, '/');
+    (void)ctx;
+    base = base ? base + 1 : t;
+    if (tr_has_sfx(base, ".def") && strlen(base) < TR_NAME)
+        return tr_add(&tr_incdefs, base) != 0;
+    return 0;
+}
+
+static int tr_kw(const char *w)
+{
+    static const struct { const char *n; int code; } t[] = {
+        {"static", TW_STATIC}, {"typedef", TW_TYPEDEF},
+        {"extern", TW_EXTERN}, {"_Static_assert", TW_SA},
+        {"static_assert", TW_SA}, {"__attribute__", TW_ATTR},
+        {"__attribute", TW_ATTR}, {"_Alignas", TW_ATTR},
+        {"alignas", TW_ATTR}, {"__declspec", TW_ATTR},
+        {"struct", TW_TAG}, {"union", TW_TAG}, {"enum", TW_TAG},
+        {"const", TW_QUAL}, {"volatile", TW_QUAL}, {"restrict", TW_QUAL},
+    };
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++)
+        if (strcmp(w, t[i].n) == 0)
+            return t[i].code;
+    return TW_NONE;
+}
+
+static void tr_word(struct tr_dc *d, const char *w)
+{
+    int kw;
+    if (d->paren || d->brk)
+        return;
+    kw = tr_kw(w);
+    d->ntok++;
+    d->post_body += d->body;
+    d->is_static |= kw == TW_STATIC;
+    d->is_typedef |= kw == TW_TYPEDEF;
+    d->is_extern |= kw == TW_EXTERN;
+    d->is_sa |= kw == TW_SA;
+    d->attr_next |= kw == TW_ATTR;
+    d->has_tag |= kw == TW_TAG;
+    d->first_tag |= kw == TW_TAG && d->ntok == 1;
+    if (!d->is_assign && kw != TW_QUAL)
+        snprintf(d->name, sizeof d->name, "%s", w);
+    snprintf(d->prev, sizeof d->prev, "%s", w);
+    d->prev_word = 1;
+}
+
+static void tr_open_paren(struct tr_dc *d, const char *rest)
+{
+    if (!d->paren && !d->brk) {
+        rest += strspn(rest, " \t\n");
+        if (d->attr_next)
+            d->attr_next = 0;
+        else if (!d->call && !d->is_sa && *rest == '*')
+            d->funcptr = 1;
+        else if (!d->call && !d->is_sa && d->prev_word) {
+            d->call = 1;
+            d->macro_first = d->ntok == 1;
+            snprintf(d->fname, sizeof d->fname, "%s", d->prev);
+        }
+        d->ntok++;
+    }
+    d->paren++;
+    d->prev_word = 0;
+}
+
+static void tr_punct(struct tr_dc *d, char c, const char *rest)
+{
+    if (c == '(') {
+        tr_open_paren(d, rest);
+        return;
+    }
+    if (c == ')' && d->paren)
+        d->paren--;
+    else if (c == '[' && !d->paren)
+        d->brk++;
+    else if (c == ']' && d->brk && !d->paren)
+        d->brk--;
+    else if (!d->paren && !d->brk) {
+        d->ntok++;
+        d->is_assign |= c == '=';
+    }
+    d->prev_word = 0;
+}
+
+static int tr_fin_func(const struct tr_dc *d, struct tr_sc *sc)
+{
+    if (d->macro_first) {
+        snprintf(sc->why, sizeof sc->why, "file-scope macro invocation or "
+                 "implicit-int definition '%s'", d->fname);
+        return 1;
+    }
+    if (d->call && strcmp(d->fname, sc->entry) == 0) {
+        sc->entry_seen = 1;
+        return 0;
+    }
+    if (d->is_static)
+        return 0;
+    snprintf(sc->why, sizeof sc->why, "non-static function definition '%s'",
+             d->call ? d->fname : d->name);
+    return 1;
+}
+
+/* A statement with a call-shaped declarator and no initializer is a function
+ * prototype (fine) unless it is a bare macro invocation (fail closed). */
+static int tr_fin_proto(const struct tr_dc *d, struct tr_sc *sc)
+{
+    if (!d->macro_first)
+        return 0;
+    snprintf(sc->why, sizeof sc->why, "file-scope macro invocation '%s'",
+             d->fname);
+    return 1;
+}
+
+static int tr_fin_semi(const struct tr_dc *d, struct tr_sc *sc)
+{
+    if (d->ntok == 0 || d->is_sa || d->is_typedef || d->is_static ||
+        d->is_extern)
+        return 0;
+    if (d->call && !d->funcptr && !d->is_assign)
+        return tr_fin_proto(d, sc);
+    if (d->first_tag && d->ntok == 2 && !d->body)
+        return 0;
+    if (d->body && !d->post_body && !d->is_assign)
+        return 0;
+    snprintf(sc->why, sizeof sc->why, "non-static object definition '%s'",
+             d->name);
+    return 1;
+}
+
+/* 0 aggregate/initializer body, 1 function definition, 2 unrecognized. */
+static int tr_brace_kind(const struct tr_dc *d)
+{
+    if (d->is_assign || d->is_typedef)
+        return 0;
+    if (d->call || d->funcptr)
+        return 1;
+    return d->has_tag ? 0 : 2;
+}
+
+static int tr_skip_braces(const char *b, size_t *i, size_t n)
+{
+    int depth = 0;
+    for (size_t k = *i; k < n; k++) {
+        if (b[k] == '{')
+            depth++;
+        else if (b[k] == '}' && --depth == 0) {
+            *i = k + 1;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int tr_open_brace(struct tr_dc *d, const char *b, size_t *i, size_t n,
+                         struct tr_sc *sc)
+{
+    int kind = tr_brace_kind(d), rc = 0;
+    if (tr_skip_braces(b, i, n) != 0) {
+        snprintf(sc->why, sizeof sc->why, "unbalanced braces");
+        return 1;
+    }
+    if (kind == 2) {
+        snprintf(sc->why, sizeof sc->why, "unclassifiable file-scope block");
+        return 1;
+    }
+    if (kind == 1) {
+        rc = tr_fin_func(d, sc);
+        memset(d, 0, sizeof *d);
+        return rc;
+    }
+    d->body = 1;
+    d->ntok++;
+    return 0;
+}
+
+static size_t tr_word_end(const char *b, size_t i, size_t n, char *w)
+{
+    size_t k = 0;
+    while (i < n && (isalnum((unsigned char)b[i]) || b[i] == '_')) {
+        if (k + 1 < TR_NAME)
+            w[k++] = b[i];
+        i++;
+    }
+    w[k] = '\0';
+    return i;
+}
+
+/* Consume one non-space token at b[*ip]; nonzero when it proves a violation. */
+static int tr_scan_tok(struct tr_dc *d, const char *b, size_t *ip, size_t n,
+                       struct tr_sc *sc)
+{
+    size_t i = *ip;
+    unsigned char c = (unsigned char)b[i];
+    char w[TR_NAME];
+    int rc = 0;
+    if (isalpha(c) || c == '_') {
+        i = tr_word_end(b, i, n, w);
+        tr_word(d, w);
+    } else if (isdigit(c)) {
+        while (i < n && (isalnum((unsigned char)b[i]) || b[i] == '.'))
+            i++;
+        d->ntok += !d->paren && !d->brk;
+    } else if (c == '{' && !d->paren && !d->brk) {
+        rc = tr_open_brace(d, b, &i, n, sc);
+    } else if (c == ';' && !d->paren) {
+        rc = tr_fin_semi(d, sc);
+        memset(d, 0, sizeof *d);
+        i++;
+    } else {
+        tr_punct(d, (char)c, b + i + 1);
+        i++;
+    }
+    *ip = i;
+    return rc;
+}
+
+/* Scan blanked, directive-free source for external-linkage definitions.
+ * Returns 0 clean, 1 rejected (sc->why says why). */
+static int tr_scan_defs(const char *b, size_t n, struct tr_sc *sc)
+{
+    struct tr_dc d;
+    size_t i = 0;
+    memset(&d, 0, sizeof d);
+    sc->entry_seen = 0;
+    while (i < n) {
+        if (isspace((unsigned char)b[i]))
+            i++;
+        else if (tr_scan_tok(&d, b, &i, n, sc))
+            return 1;
+    }
+    return 0;
+}
+
+/* Prove rules (a) and (b) on the text in tr_buf[0..n). */
+static int tr_leaf_text(size_t n, struct tr_sc *sc)
+{
+    if (tr_includes_body(tr_buf)) {
+        snprintf(sc->why, sizeof sc->why, "includes a .c or .inc body");
+        return 1;
+    }
+    tr_blank(tr_buf, n);
+    tr_blank_directives(tr_buf, n);
+    if (tr_scan_defs(tr_buf, n, sc))
+        return 1;
+    if (!sc->entry_seen) {
+        snprintf(sc->why, sizeof sc->why, "does not define its entry point %s",
+                 sc->entry);
+        return 1;
+    }
+    return 0;
+}
+
+static int tr_load(const char *path, size_t *n)
+{
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 1;
+    *n = fread(tr_buf, 1, TR_BUF - 1, f);
+    int bad = ferror(f) || fgetc(f) != EOF;
+    fclose(f);
+    tr_buf[*n] = '\0';
+    return bad;
+}
+
+static void tr_leaf_file(struct tr_leaf *lf)
+{
+    char path[RS_PATH], entry[TR_NAME + 8];
+    struct tr_sc sc = {0};
+    size_t n = 0;
+    if (ovf(snprintf(path, sizeof path, "%s/test_%s.c", k_tr_dir, lf->n),
+            sizeof path) ||
+        ovf(snprintf(entry, sizeof entry, "test_%s", lf->n), sizeof entry)) {
+        snprintf(lf->why, sizeof lf->why, "name too long");
+        return;
+    }
+    sc.entry = entry;
+    if (tr_load(path, &n)) {
+        snprintf(lf->why, sizeof lf->why, "source file missing or unreadable");
+        return;
+    }
+    if (tr_leaf_text(n, &sc))
+        snprintf(lf->why, sizeof lf->why, "%s", sc.why);
+}
+
+static struct tr_leaf *tr_leaf_find(struct tr_leaves *ls, const char *g)
+{
+    for (int i = 0; i < ls->c; i++)
+        if (strcmp(ls->l[i].n, g) == 0)
+            return &ls->l[i];
+    return NULL;
+}
+
+/* `int test_<g>(void);` is a declaration, not a use: it names the symbol the
+ * runner links against without calling or referencing it. */
+static int tr_is_proto_decl(const char *start, const char *p, const char *after)
+{
+    const char *q = p;
+    while (q > start && (q[-1] == ' ' || q[-1] == '\t'))
+        q--;
+    if (q - start < 3 || strncmp(q - 3, "int", 3) != 0 ||
+        (q - start > 3 && (isalnum((unsigned char)q[-4]) || q[-4] == '_')))
+        return 0;
+    after += strspn(after, " \t");
+    if (strncmp(after, "(void)", 6) != 0)
+        return 0;
+    after += 6;
+    after += strspn(after, " \t");
+    return *after == ';';
+}
+
+/* Rule (c): note every leaf whose entry point `test_<g>` appears as a code
+ * identifier in the blanked text of tr_buf, other than in its own file. */
+enum { TR_DEFHITS = 4096 };
+static struct { int leaf; char path[RS_PATH]; } tr_defhit[TR_DEFHITS];
+static int tr_ndefhit;
+
+static void tr_note_ref(struct tr_leaves *ls, struct tr_leaf *lf, const char *path)
+{
+    char own[RS_PATH];
+    snprintf(own, sizeof own, "%s/test_%s.c", k_tr_dir, lf->n);
+    if (strcmp(own, path) == 0)
+        return;
+    if (tr_has_sfx(path, ".def")) {
+        if (tr_ndefhit < TR_DEFHITS) {
+            tr_defhit[tr_ndefhit].leaf = (int)(lf - ls->l);
+            snprintf(tr_defhit[tr_ndefhit].path, RS_PATH, "%s", path);
+            tr_ndefhit++;
+        } else {
+            snprintf(lf->why, sizeof lf->why, "too many registry mentions");
+        }
+        return;
+    }
+    snprintf(lf->why, sizeof lf->why, "entry point referenced outside "
+             "runner plumbing: %s", path);
+}
+
+/* A .def mention counts only when that registry is #included by C. */
+static void tr_resolve_defs(struct tr_leaves *ls)
+{
+    for (int i = 0; i < tr_ndefhit; i++) {
+        const char *base = strrchr(tr_defhit[i].path, '/');
+        struct tr_leaf *lf = &ls->l[tr_defhit[i].leaf];
+        base = base ? base + 1 : tr_defhit[i].path;
+        if (!lf->why[0] && tr_has(&tr_incdefs, base))
+            snprintf(lf->why, sizeof lf->why, "entry point referenced "
+                     "in compiled registry: %s", tr_defhit[i].path);
+    }
+}
+
+static void tr_refs_in(struct tr_leaves *ls, const char *path)
+{
+    const char *p = tr_buf;
+    char w[TR_NAME];
+    while ((p = strstr(p, "test_")) != NULL) {
+        struct tr_leaf *lf = NULL;
+        int prefixed = p > tr_buf && (isalnum((unsigned char)p[-1]) || p[-1] == '_');
+        size_t e = tr_word_end(p, 0, 256, w);
+        if (!prefixed && !tr_is_proto_decl(tr_buf, p, p + e))
+            lf = tr_leaf_find(ls, w + 5);
+        p += e;
+        if (!lf || lf->why[0])
+            continue;
+        tr_note_ref(ls, lf, path);
+    }
+}
+
+static int tr_ref_suffix(const char *path)
+{
+    static const char *const sfx[] = { ".c", ".h", ".inc", ".def" };
+    size_t k = strlen(path);
+    for (size_t i = 0; i < sizeof sfx / sizeof sfx[0]; i++) {
+        size_t m = strlen(sfx[i]);
+        if (k > m && strcmp(path + k - m, sfx[i]) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+static int tr_is_runner_ref(const char *path)
+{
+    for (size_t i = 0; i < sizeof k_tr_runner_ref / sizeof k_tr_runner_ref[0]; i++)
+        if (strcmp(path, k_tr_runner_ref[i]) == 0)
+            return 1;
+    return 0;
+}
+
+static int tr_ref_file(const char *path, struct tr_leaves *ls)
+{
+    size_t n = 0;
+    if (!tr_ref_suffix(path))
+        return 0;
+    if (tr_load(path, &n)) {
+        fprintf(stderr, "z23-lint: UNPROVEN — cannot read %s\n", path);
+        return 2;
+    }
+    if (!tr_has_sfx(path, ".def") &&
+        tr_each_include(tr_buf, tr_incdef_cb, NULL))
+        return 2;
+    if (tr_is_runner_ref(path) || !strstr(tr_buf, "test_"))
+        return 0;
+    tr_blank(tr_buf, n);
+    tr_refs_in(ls, path);
+    return 0;
+}
+
+static int tr_ref_index_cb(const char *path, int stage, void *ctx)
+{
+    return stage == 0 ? tr_ref_file(path, ctx) : 0;
+}
+
+static int tr_ref_walk_cb(const char *path, void *ctx)
+{
+    return tr_ref_file(path, ctx);
+}
+
+static int tr_leaf_refs(struct tr_leaves *ls)
+{
+    char badext[5] = "";
+    int rc;
+    tr_ndefhit = 0;
+    tr_incdefs.c = 0;
+    if (!lint_prod_scan()) {
+        rc = walk_src("tests/harness/src", 1, tr_ref_walk_cb, ls);
+        if (!rc)
+            rc = walk_src("tests/harness/include", 1, tr_ref_walk_cb, ls);
+        if (!rc)
+            tr_resolve_defs(ls);
+        return rc;
+    }
+    rc = lint_git_index_foreach(tr_ref_index_cb, ls, badext);
+    if (badext[0]) {
+        fprintf(stderr, "z23-lint: UNPROVEN — the git index carries a "
+                        "mandatory extension ('%s') this native reader does "
+                        "not interpret; refusing to grade.\n", badext);
+        return 2;
+    }
+    if (!rc)
+        tr_resolve_defs(ls);
+    return rc;
+}
+
+static int tr_leaf_gate(const struct tr_set *rows)
+{
+    static struct tr_leaves ls;
+    int i, bad = 0, rc;
+    ls.c = 0;
+    for (i = 0; i < rows->c; i++) {
+        memset(&ls.l[i], 0, sizeof ls.l[i]);
+        snprintf(ls.l[i].n, sizeof ls.l[i].n, "%s", rows->n[i]);
+        ls.c++;
+        tr_leaf_file(&ls.l[i]);
+    }
+    rc = tr_leaf_refs(&ls);
+    if (rc)
+        return rc;
+    for (i = 0; i < ls.c; i++) {
+        if (!ls.l[i].why[0])
+            continue;
+        if (!bad++)
+            fputs("FAIL: ZCL_TEST_SEMANTIC_LEAF row(s) in "
+                  "tools/dev/test_semantic_leaves.def are not provable "
+                  "leaves:\n", stdout);
+        printf("    %s   (%s)\n", ls.l[i].n, ls.l[i].why);
+    }
+    if (bad)
+        fputs("\n  A semantic leaf must define nothing with external linkage "
+              "but its test_<g>\n  entry point, include no .c/.inc body, and "
+              "be referenced only by the runner.\n  Fix: remove the row (the "
+              "file then plans through the semantic graph).\n", stdout);
+    return bad ? 1 : 0;
+}
+
 int check_test_registration_run(int argc, char **argv)
 {
+    static struct tr_set leaves;
     struct tr_set cat = {0};
     int rc;
     (void)argc;
@@ -566,7 +1205,7 @@ int check_test_registration_run(int argc, char **argv)
     rc = tr_parse_macro(k_tr_cat, "ZCL_TEST_GROUP", &cat);
     if (rc)
         return rc;
-    rc = tr_parse_macro(k_tr_leaf, "ZCL_TEST_SEMANTIC_LEAF", &(struct tr_set){0});
+    rc = tr_parse_macro(k_tr_leaf, "ZCL_TEST_SEMANTIC_LEAF", &leaves);
     if (rc)
         return rc;
     if (cat.c < 100) {
@@ -574,6 +1213,9 @@ int check_test_registration_run(int argc, char **argv)
                         "catalog entries parsed\n", cat.c);
         return 2;
     }
+    rc = tr_leaf_gate(&leaves);
+    if (rc)
+        return rc;
     return tr_eval(&cat);
 }
 
@@ -588,10 +1230,111 @@ static int tr_st_entry(void)
     return tr_is_entry("tests/harness/src/test_hex_codec.c", "hex_codec") != 1;
 }
 
+/* Prove a literal translation unit through the same text path real rows use. */
+static int tr_st_prove(const char *src, const char *entry, struct tr_sc *sc)
+{
+    int n = snprintf(tr_buf, TR_BUF, "%s", src);
+    memset(sc, 0, sizeof *sc);
+    sc->entry = entry;
+    return n < 0 ? 1 : tr_leaf_text((size_t)n, sc);
+}
+
+static int tr_st_expect(const char *label, const char *src, int want_reject,
+                        const char *needle)
+{
+    struct tr_sc sc;
+    int rej = tr_st_prove(src, "test_zz", &sc);
+    if (rej == want_reject && (!needle || strstr(sc.why, needle)))
+        return 0;
+    fprintf(stderr, "check_test_registration: FATAL — leaf selftest '%s' "
+                    "expected %s (%s), got %s [%s]\n", label,
+            want_reject ? "reject" : "accept", needle ? needle : "-",
+            rej ? "reject" : "accept", sc.why);
+    return 1;
+}
+
+static int tr_leaf_st(void)
+{
+    static const char clean[] =
+        "/* int hidden(void) { return 1; } */\n"
+        "#include \"test/harness.h\"\n"
+        "#define MACRO_FN(x) int x(void) { return 0; }\n"
+        "extern int other_symbol(int);\nint proto(void);\n"
+        "static int helper(void) { return \"int fake(void) {\"[0]; }\n"
+        "static const int tbl[] = { 1, 2 };\n"
+        "struct pt { int a; };\ntypedef struct { int b; } pt_t;\n"
+        "enum { K_A, K_B };\nstruct fwd;\n"
+        "_Static_assert(sizeof(int) == 4, \"x\");\n"
+        "int test_zz(void);\nint test_zz(void)\n{\n    return helper();\n}\n";
+    int bad = 0;
+    bad |= tr_st_expect("clean", clean, 0, NULL);
+    bad |= tr_st_expect("helper", "int sbi_consume(void) { return 1; }\n"
+                        "int test_zz(void) { return 0; }\n", 1,
+                        "non-static function definition 'sbi_consume'");
+    bad |= tr_st_expect("object", "int shared = 3;\nint test_zz(void) "
+                        "{ return 0; }\n", 1, "non-static object");
+    bad |= tr_st_expect("tentative", "int tentative;\nint test_zz(void) "
+                        "{ return 0; }\n", 1, "'tentative'");
+    bad |= tr_st_expect("aggregate", "struct s { int a; } g;\nint test_zz"
+                        "(void) { return 0; }\n", 1, "'g'");
+    bad |= tr_st_expect("macro", "DECLARE_THING(x)\nint test_zz(void) "
+                        "{ return 0; }\n", 1, "macro");
+    bad |= tr_st_expect("include", "#include \"body.c\"\nint test_zz(void) "
+                        "{ return 0; }\n", 1, "includes");
+    bad |= tr_st_expect("noentry", "static int f(void) { return 0; }\n", 1,
+                        "entry point");
+    snprintf(tr_buf, TR_BUF, "%s", "int test_p(void);\nint a = test_zz();\n/* test_q */ "
+             "\"test_q\" test_zzz\n");
+    {
+        static struct tr_leaves ls;
+        ls.c = 3;
+        snprintf(ls.l[0].n, sizeof ls.l[0].n, "zz");
+        snprintf(ls.l[1].n, sizeof ls.l[1].n, "q");
+        snprintf(ls.l[2].n, sizeof ls.l[2].n, "p");
+        memset(ls.l[0].why, 0, sizeof ls.l[0].why);
+        memset(ls.l[1].why, 0, sizeof ls.l[1].why);
+        memset(ls.l[2].why, 0, sizeof ls.l[2].why);
+        tr_blank(tr_buf, strlen(tr_buf));
+        tr_refs_in(&ls, "tools/x.c");
+        if (!ls.l[0].why[0] || ls.l[1].why[0] || ls.l[2].why[0]) {
+            fputs("check_test_registration: FATAL — leaf reference selftest "
+                  "failed\n", stderr);
+            bad = 1;
+        }
+    }
+    return bad;
+}
+
+/* A name in a .def counts only once some C file #includes that registry. */
+static int tr_def_st(void)
+{
+    static struct tr_leaves ls;
+    int bad;
+    memset(&ls, 0, sizeof ls);
+    ls.c = 1;
+    snprintf(ls.l[0].n, sizeof ls.l[0].n, "zz");
+    tr_ndefhit = 0;
+    tr_incdefs.c = 0;
+    snprintf(tr_buf, TR_BUF, "%s", "ROW(test_zz)\n");
+    tr_refs_in(&ls, "a/data.def");
+    tr_resolve_defs(&ls);
+    bad = ls.l[0].why[0] != '\0' || tr_ndefhit != 1;
+    tr_add(&tr_incdefs, "data.def");
+    tr_resolve_defs(&ls);
+    bad |= ls.l[0].why[0] == '\0';
+    tr_ndefhit = 0;
+    tr_incdefs.c = 0;
+    if (bad)
+        fputs("check_test_registration: FATAL — registry-mention selftest "
+              "failed\n", stderr);
+    return bad;
+}
+
 int check_test_registration_selftest(void)
 {
-    return st_ok(tr_uniq_st() || tr_st_parse() || tr_st_entry(),
+    return st_ok(tr_uniq_st() || tr_st_parse() || tr_st_entry() || tr_leaf_st() ||
+                     tr_def_st(),
                  "check_test_registration selftest: PASS — uniqueness "
-                 "controls, catalog parse, and a filename-matching entry "
-                 "point are proven\n");
+                 "controls, catalog parse, a filename-matching entry "
+                 "point, and the semantic-leaf proof are proven\n");
 }

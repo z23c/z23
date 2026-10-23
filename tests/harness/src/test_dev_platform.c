@@ -440,14 +440,14 @@ static int test_change_plan_closure(void)
         return 1;
     TEST("dev platform: change plan unions symbol-closure groups onto the path floor") {
         const char *leaf_files[] = {
-            "tests/harness/src/test_dev_platform.c",
+            "tests/harness/src/test_file_controller.c",
         };
         struct zcl_devloop_plan leaf_plan;
         ASSERT(zcl_devloop_plan_files(leaf_files, 1, &leaf_plan));
         ASSERT(leaf_plan.path_groups_len == 1);
         ASSERT(dp_group_in(leaf_plan.path_groups,
                            leaf_plan.path_groups_len,
-                           "test_dev_platform"));
+                           "test_file_controller"));
 
         ASSERT(test_rm_rf_recursive(fixture) == 0 || errno == ENOENT);
         /* tor_integration.c defines the changed leaf; download.c's function
@@ -463,7 +463,7 @@ static int test_change_plan_closure(void)
                            "#include \"net/clp.h\"\n"
                            "int dl_top(int x) { return tor_leaf(x) * 2; }\n"));
         ASSERT(dp_mk_write(fixture,
-                           "tests/harness/src/test_dev_platform.c",
+                           "tests/harness/src/test_file_controller.c",
                            "/* semantic test leaf fixture */\n"
                            "#include \"net/clp.h\"\n"
                            "int test_dev_platform(void) { return tor_leaf(1); }\n"));
@@ -500,7 +500,7 @@ static int test_change_plan_closure(void)
         ASSERT(dp_group_in(plan.closure_groups, plan.closure_groups_len,
                            "download"));
         ASSERT(dp_group_in(plan.closure_groups, plan.closure_groups_len,
-                           "test_dev_platform"));
+                           "test_file_controller"));
         ASSERT(!dp_group_in(plan.closure_groups, plan.closure_groups_len,
                             "blog"));
         /* Additive only: the path floor is never dropped, and a closure group

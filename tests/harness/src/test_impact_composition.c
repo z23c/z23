@@ -439,6 +439,123 @@ static bool ic_group_in(const char (*groups)[ZCL_DEVLOOP_GROUP_MAX],
     return false;
 }
 
+/* An audited harness test translation unit that a production rule also lists
+ * (rule :181 binds chacha20poly1305.c, its header and
+ * test_chacha20_isa_parity.c to 13 groups) is its own exact path floor:
+ * editing only the test must not inherit the production file's blast radius.
+ * The production file keeps every one of those groups. */
+static bool ic_leaf_floor_witness(void)
+{
+    static const char *const rule_groups[] = {
+        "chacha20_isa_parity", "crypto", "noise_nk_handshake",
+        "noise_xx_handshake", "session_transport", "noise_transport_parity",
+        "mesh_private_object_crypto", "wallet_metadata_encryption",
+        "file_market", "sapling", "wallet_backup", "hw_profile",
+        "make_lint_gates" };
+    const char *test_file[] = {
+        "tests/harness/src/test_chacha20_isa_parity.c" };
+    const char *prod_file[] = {
+        "core/modules/crypto/src/chacha20poly1305.c" };
+    struct zcl_devloop_plan p;
+    if (!zcl_devloop_plan_files(test_file, 1, &p) ||
+        p.path_groups_len != 1 ||
+        strcmp(p.path_groups[0], "test_chacha20_isa_parity") != 0)
+        return false;
+    if (!zcl_devloop_plan_files(prod_file, 1, &p))
+        return false;
+    for (size_t i = 0; i < sizeof(rule_groups) / sizeof(rule_groups[0]); i++)
+        if (!ic_group_in(p.path_groups, p.path_groups_len, rule_groups[i]))
+            return false;
+    return true;
+}
+
+/* Every id in `want` is selected by the plan's COMPLETE execution set. */
+static bool ic_selects_all(const struct zcl_devloop_plan *p,
+                           const char *const *want, size_t n)
+{
+    bool all = true;
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(zcl_devloop_plan_selects_answer(p, want[i]),
+                   "selected") == 0)
+            continue;
+        fprintf(stderr, "ic: not selected: %s\n", want[i]);
+        all = false;
+    }
+    return all;
+}
+
+/* The COMPLETE plan (path floor + real semantic closure of this checkout). */
+static bool ic_file_selects(const char *path, const char *const *want,
+                            size_t n)
+{
+    const char *files[] = { path };
+    char cwd[1024];
+    struct zcl_devloop_plan p;
+    return getcwd(cwd, sizeof(cwd)) != NULL &&
+           zcl_devloop_plan_files(files, 1, &p) &&
+           zcl_devloop_plan_add_closure(cwd, files, 1, &p) &&
+           ic_selects_all(&p, want, n);
+}
+
+/* The audited test file plans to EXACTLY its own group: the path floor holds
+ * that one group and the closure adds nothing (the seed is a proof leaf, so
+ * neither graph dimension applies). Exact set equality, not membership. */
+static bool ic_leaf_exact_witness(void)
+{
+    const char *files[] = { "tests/harness/src/test_chacha20_isa_parity.c" };
+    struct zcl_devloop_plan p;
+    return zcl_devloop_plan_files(files, 1, &p) &&
+           zcl_devloop_plan_add_closure(".", files, 1, &p) &&
+           p.path_groups_len == 1 &&
+           strcmp(p.path_groups[0], "test_chacha20_isa_parity") == 0 &&
+           p.closure_groups_len == 0 && !p.closure_universal;
+}
+
+/* Reaching a semantic leaf contributes its own group AND still folds the
+ * rule groups the reached file matches (the production selection must never
+ * shrink because a test became a leaf). */
+static bool ic_leaf_fold_keeps_rule_groups(void)
+{
+    static const char *const keep[] = {
+        "chacha20_isa_parity", "crypto", "noise_nk_handshake",
+        "noise_xx_handshake", "session_transport", "wallet_backup",
+        "make_lint_gates" };
+    struct zcl_devloop_plan p;
+    if (!zcl_devloop_plan_files(NULL, 0, &p) ||
+        !zcl_devloop_plan_fold_file(
+            &p, "tests/harness/src/test_chacha20_isa_parity.c",
+            ZCL_DEVLOOP_DIM_SEMANTIC))
+        return false;
+    return ic_group_in(p.closure_groups, p.closure_groups_len,
+                       "test_chacha20_isa_parity") &&
+           ic_selects_all(&p, keep, sizeof(keep) / sizeof(keep[0]));
+}
+
+/* Production files keep the named proof groups they selected before the
+ * semantic-leaf registry grew (measured against origin/main). */
+static bool ic_prod_keeps_groups_witness(void)
+{
+    static const char *const chacha[] = {
+        "chacha20_isa_parity", "crypto", "noise_nk_handshake",
+        "noise_xx_handshake", "session_transport", "mesh_private_object_crypto",
+        "wallet_backup", "sapling", "file_market", "make_lint_gates" };
+    static const char *const ed25519[] = {
+        "crypto", "ed25519_differential", "sapling", "sapling_crypto",
+        "shielded_payment_gate", "make_lint_gates", "simnet_shielded_wallet_e2e",
+        "mesh_private_object_crypto" };
+    static const char *const identity[] = {
+        "sapling", "vault_dispatch", "vault_read", "vault_session",
+        "shielded_payment_gate", "shielded_receive_persist",
+        "shielded_spend_slice", "make_lint_gates" };
+    bool a = ic_file_selects("core/modules/crypto/src/chacha20poly1305.c",
+                             chacha, sizeof(chacha) / sizeof(chacha[0]));
+    bool b = ic_file_selects("core/modules/crypto/src/ed25519.c", ed25519,
+                             sizeof(ed25519) / sizeof(ed25519[0]));
+    bool c = ic_file_selects("contexts/wallet/models/src/wallet_identity.c",
+                             identity, sizeof(identity) / sizeof(identity[0]));
+    return a && b && c;
+}
+
 /* Union membership across BOTH group arrays — the composed plan. */
 static bool ic_planned(const struct zcl_devloop_plan *p, const char *g)
 {
@@ -1797,6 +1914,10 @@ static int test_ic_dimension_applicability_and_exact_execution(void)
                                "activerecord_query_builder"));
             ASSERT(!ic_group_in(p.path_groups, p.path_groups_len,
                                 "test_activerecord_query_builder"));
+            ASSERT(ic_leaf_floor_witness());
+            ASSERT(ic_leaf_exact_witness());
+            ASSERT(ic_leaf_fold_keeps_rule_groups());
+            ASSERT(ic_prod_keeps_groups_witness());
         }
 
         /* Pure C23 service islands are product code, not harness internals.
