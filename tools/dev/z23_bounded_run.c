@@ -6,6 +6,19 @@
  * killing only a test's immediate PID can leave descendants alive after a
  * gate reports failure. POSIX children start a new session; Windows children
  * run under a kill-on-close Job Object. */
+#if !defined(_WIN32)
+#define _POSIX_C_SOURCE 200809L
+#endif
+#include <stdbool.h>
+#include <stdint.h>
+
+/* Shared by both platform parsers: a timeout must be non-zero and fit the
+ * 32-bit wait interval. */
+static bool timeout_ms_in_range(unsigned long long parsed)
+{
+    return parsed != 0 && parsed <= UINT32_MAX;
+}
+
 #if defined(_WIN32)
 #ifndef UNICODE
 #define UNICODE
@@ -55,6 +68,29 @@ static bool append_wide(struct wide_buffer *buffer, wchar_t value)
     return true;
 }
 
+static bool append_repeated(struct wide_buffer *buffer, wchar_t value,
+                           size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (!append_wide(buffer, value))
+            return false;
+    return true;
+}
+
+/* One non-backslash cursor value: a quote is preceded by doubled backslashes,
+ * a NUL ends the argument (doubled backslashes only when quoted). */
+static bool append_argument_char(struct wide_buffer *line, wchar_t value,
+                                 size_t slashes, bool quote)
+{
+    if (value == L'\"')
+        return append_repeated(line, L'\\', slashes * 2u + 1u) &&
+               append_wide(line, L'\"');
+    if (value == 0 && quote)
+        slashes *= 2u;
+    return append_repeated(line, L'\\', slashes) &&
+           (value == 0 || append_wide(line, value));
+}
+
 /* CommandLineToArgvW-compatible quoting, including trailing backslashes. */
 static bool append_argument(struct wide_buffer *line, const wchar_t *argument)
 {
@@ -69,23 +105,10 @@ static bool append_argument(struct wide_buffer *line, const wchar_t *argument)
             slashes++;
             continue;
         }
-        if (*cursor == L'\"') {
-            for (size_t i = 0; i < slashes * 2u + 1u; i++)
-                if (!append_wide(line, L'\\'))
-                    return false;
-            if (!append_wide(line, L'\"'))
-                return false;
-        } else {
-            if (*cursor == 0 && quote)
-                slashes *= 2u;
-            for (size_t i = 0; i < slashes; i++)
-                if (!append_wide(line, L'\\'))
-                    return false;
-            if (*cursor == 0)
-                break;
-            if (!append_wide(line, *cursor))
-                return false;
-        }
+        if (!append_argument_char(line, *cursor, slashes, quote))
+            return false;
+        if (*cursor == 0)
+            break;
         slashes = 0;
     }
     return (!quote || append_wide(line, L'\"')) && append_wide(line, 0);
@@ -112,6 +135,119 @@ static bool absolute_path(const wchar_t *path)
                     (path[0] == L'\\' && path[1] == L'\\'));
 }
 
+static bool parse_timeout_arg(const wchar_t *text, unsigned long long *parsed)
+{
+    wchar_t *end = NULL;
+    errno = 0;
+    *parsed = wcstoull(text, &end, 10);
+    return !errno && end && !*end && timeout_ms_in_range(*parsed);
+}
+
+/* Everything one bounded launch produced, kept so the report and the wait can
+ * run after the launch sequence without re-deriving any state. */
+struct bounded_launch {
+    HANDLE job;
+    PROCESS_INFORMATION process;
+    bool job_ok;
+    DWORD job_error;
+    bool started;
+    DWORD start_error;
+    bool assigned;
+    DWORD assign_error;
+    bool resumed;
+    DWORD resume_error;
+};
+
+static void create_kill_job(struct bounded_launch *launch)
+{
+    launch->job = CreateJobObjectW(NULL, NULL);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    launch->job_ok = launch->job && SetInformationJobObject(
+        launch->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+    launch->job_error = launch->job_ok ? ERROR_SUCCESS : GetLastError();
+}
+
+static void launch_suspended(struct bounded_launch *launch,
+                             wchar_t *const argv[], wchar_t *line,
+                             DWORD previous_thread_mode)
+{
+    create_kill_job(launch);
+    STARTUPINFOW startup = {.cb = sizeof(startup),
+                            .dwFlags = STARTF_USESHOWWINDOW,
+                            .wShowWindow = SW_HIDE};
+    DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
+                  CREATE_UNICODE_ENVIRONMENT;
+    launch->started = launch->job_ok && CreateProcessW(
+        argv[0], line, NULL, NULL, TRUE, flags, NULL, NULL,
+        &startup, &launch->process);
+    launch->start_error = launch->started ? ERROR_SUCCESS : GetLastError();
+    (void)SetThreadErrorMode(previous_thread_mode, NULL);
+    launch->assigned = launch->started &&
+        AssignProcessToJobObject(launch->job, launch->process.hProcess);
+    launch->assign_error = launch->assigned ? ERROR_SUCCESS : GetLastError();
+    launch->resumed = launch->assigned &&
+        ResumeThread(launch->process.hThread) != (DWORD)-1;
+    launch->resume_error = launch->resumed ? ERROR_SUCCESS : GetLastError();
+    if (launch->started && !launch->resumed)
+        (void)TerminateProcess(launch->process.hProcess, RUN_INFRA);
+}
+
+static void report_launch_failure(const struct bounded_launch *launch,
+                                  const wchar_t *program)
+{
+    if (!launch->job_ok)
+        fwprintf(stderr,
+                 L"z23_bounded_run: Job Object setup failed winerr=%lu\n",
+                 (unsigned long)launch->job_error);
+    else if (!launch->started)
+        fwprintf(stderr,
+                 L"z23_bounded_run: CreateProcessW failed path=%ls winerr=%lu\n",
+                 program, (unsigned long)launch->start_error);
+    else if (!launch->assigned)
+        fwprintf(stderr,
+                 L"z23_bounded_run: AssignProcessToJobObject failed winerr=%lu\n",
+                 (unsigned long)launch->assign_error);
+    else if (!launch->resumed)
+        fwprintf(stderr,
+                 L"z23_bounded_run: ResumeThread failed winerr=%lu\n",
+                 (unsigned long)launch->resume_error);
+}
+
+static int finish_wait(const struct bounded_launch *launch, DWORD waited)
+{
+    if (waited == WAIT_TIMEOUT) {
+        (void)TerminateJobObject(launch->job, RUN_TIMEOUT);
+        (void)WaitForSingleObject(launch->process.hProcess, 5000u);
+        return RUN_TIMEOUT;
+    }
+    if (waited == WAIT_OBJECT_0) {
+        DWORD exit_code = RUN_INFRA;
+        if (GetExitCodeProcess(launch->process.hProcess, &exit_code))
+            return (int)exit_code;
+        fwprintf(stderr,
+                 L"z23_bounded_run: GetExitCodeProcess failed "
+                 L"winerr=%lu\n",
+                 (unsigned long)GetLastError());
+        return RUN_INFRA;
+    }
+    fwprintf(stderr,
+             L"z23_bounded_run: WaitForSingleObject failed "
+             L"result=%lu winerr=%lu\n",
+             (unsigned long)waited, (unsigned long)GetLastError());
+    return RUN_INFRA;
+}
+
+static int wait_for_launch(const struct bounded_launch *launch,
+                           uint64_t timeout_ms)
+{
+    if (!launch->resumed)
+        return RUN_INFRA;
+    DWORD waited = WaitForSingleObject(launch->process.hProcess,
+                                       (DWORD)timeout_ms);
+    return finish_wait(launch, waited);
+}
+
 static int run_bounded(uint64_t timeout_ms, wchar_t *const argv[])
 {
     if (!argv || !argv[0] || timeout_ms == 0 || timeout_ms > UINT32_MAX)
@@ -130,77 +266,17 @@ static int run_bounded(uint64_t timeout_ms, wchar_t *const argv[])
         return RUN_INFRA;
     }
 
-    HANDLE job = CreateJobObjectW(NULL, NULL);
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
-    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    bool job_ok = job && SetInformationJobObject(
-        job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
-    DWORD job_error = job_ok ? ERROR_SUCCESS : GetLastError();
-    STARTUPINFOW startup = {.cb = sizeof(startup),
-                            .dwFlags = STARTF_USESHOWWINDOW,
-                            .wShowWindow = SW_HIDE};
-    PROCESS_INFORMATION process = {0};
-    DWORD flags = CREATE_NO_WINDOW | CREATE_SUSPENDED |
-                  CREATE_UNICODE_ENVIRONMENT;
-    bool started = job_ok && CreateProcessW(
-        argv[0], line, NULL, NULL, TRUE, flags, NULL, NULL,
-        &startup, &process);
-    DWORD start_error = started ? ERROR_SUCCESS : GetLastError();
-    (void)SetThreadErrorMode(previous_thread_mode, NULL);
-    bool assigned = started && AssignProcessToJobObject(job, process.hProcess);
-    DWORD assign_error = assigned ? ERROR_SUCCESS : GetLastError();
-    bool resumed = assigned && ResumeThread(process.hThread) != (DWORD)-1;
-    DWORD resume_error = resumed ? ERROR_SUCCESS : GetLastError();
-    if (started && !resumed)
-        (void)TerminateProcess(process.hProcess, RUN_INFRA);
+    struct bounded_launch launch = {0};
+    launch_suspended(&launch, argv, line, previous_thread_mode);
+    report_launch_failure(&launch, argv[0]);
+    int result = wait_for_launch(&launch, timeout_ms);
 
-    if (!job_ok)
-        fwprintf(stderr,
-                 L"z23_bounded_run: Job Object setup failed winerr=%lu\n",
-                 (unsigned long)job_error);
-    else if (!started)
-        fwprintf(stderr,
-                 L"z23_bounded_run: CreateProcessW failed path=%ls winerr=%lu\n",
-                 argv[0], (unsigned long)start_error);
-    else if (!assigned)
-        fwprintf(stderr,
-                 L"z23_bounded_run: AssignProcessToJobObject failed winerr=%lu\n",
-                 (unsigned long)assign_error);
-    else if (!resumed)
-        fwprintf(stderr,
-                 L"z23_bounded_run: ResumeThread failed winerr=%lu\n",
-                 (unsigned long)resume_error);
-
-    int result = RUN_INFRA;
-    if (resumed) {
-        DWORD waited = WaitForSingleObject(process.hProcess, (DWORD)timeout_ms);
-        if (waited == WAIT_TIMEOUT) {
-            (void)TerminateJobObject(job, RUN_TIMEOUT);
-            (void)WaitForSingleObject(process.hProcess, 5000u);
-            result = RUN_TIMEOUT;
-        } else if (waited == WAIT_OBJECT_0) {
-            DWORD exit_code = RUN_INFRA;
-            if (GetExitCodeProcess(process.hProcess, &exit_code))
-                result = (int)exit_code;
-            else
-                fwprintf(stderr,
-                         L"z23_bounded_run: GetExitCodeProcess failed "
-                         L"winerr=%lu\n",
-                         (unsigned long)GetLastError());
-        } else {
-            fwprintf(stderr,
-                     L"z23_bounded_run: WaitForSingleObject failed "
-                     L"result=%lu winerr=%lu\n",
-                     (unsigned long)waited, (unsigned long)GetLastError());
-        }
+    if (launch.started) {
+        CloseHandle(launch.process.hThread);
+        CloseHandle(launch.process.hProcess);
     }
-
-    if (started) {
-        CloseHandle(process.hThread);
-        CloseHandle(process.hProcess);
-    }
-    if (job)
-        CloseHandle(job); /* kills any descendant the primary left behind */
+    if (launch.job)
+        CloseHandle(launch.job); /* kills any descendant the primary left behind */
     free(line);
     return result;
 }
@@ -234,11 +310,8 @@ int wmain(int argc, wchar_t **argv)
                  argv[0]);
         return RUN_INFRA;
     }
-    wchar_t *end = NULL;
-    errno = 0;
-    unsigned long long parsed = wcstoull(argv[1], &end, 10);
-    if (errno || !end || *end || parsed == 0 || parsed > UINT32_MAX ||
-        !absolute_path(argv[2])) {
+    unsigned long long parsed = 0;
+    if (!parse_timeout_arg(argv[1], &parsed) || !absolute_path(argv[2])) {
         fwprintf(stderr,
                  L"z23_bounded_run: invalid timeout or non-absolute program\n");
         return RUN_INFRA;
@@ -247,8 +320,6 @@ int wmain(int argc, wchar_t **argv)
 }
 
 #else
-#define _POSIX_C_SOURCE 200809L
-
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -319,26 +390,32 @@ static int child_status(int status)
     return RUN_INFRA;
 }
 
-static int run_bounded(uint64_t timeout_ms, char *const argv[])
+static bool parse_timeout_arg(const char *text, unsigned long long *parsed)
 {
-    if (!argv || !argv[0] || timeout_ms == 0) return RUN_INFRA;
+    char *end = NULL;
+    errno = 0;
+    *parsed = strtoull(text, &end, 10);
+    return !errno && end && !*end && timeout_ms_in_range(*parsed);
+}
+
+/* Forks the session leader; only the child branch execs or exits. */
+static pid_t spawn_leader(char *const argv[])
+{
     pid_t leader = fork();
     if (leader < 0) {
         fprintf(stderr, "z23_bounded_run: fork failed: %s\n", strerror(errno));
-        return RUN_INFRA;
+        return leader;
     }
     if (leader == 0) {
         if (setsid() < 0) _exit(RUN_INFRA);
         execv(argv[0], argv);
         _exit(RUN_INFRA);
     }
+    return leader;
+}
 
-    uint64_t started = 0;
-    if (!monotonic_ms(&started)) {
-        reap_group(leader);
-        (void)waitpid(leader, NULL, 0);
-        return RUN_INFRA;
-    }
+static int wait_for_leader(pid_t leader, uint64_t started, uint64_t timeout_ms)
+{
     for (;;) {
         int status = 0;
         pid_t got = waitpid(leader, &status, WNOHANG);
@@ -367,6 +444,21 @@ static int run_bounded(uint64_t timeout_ms, char *const argv[])
         struct timespec tick = {.tv_nsec = 1000000L};
         (void)nanosleep(&tick, NULL);
     }
+}
+
+static int run_bounded(uint64_t timeout_ms, char *const argv[])
+{
+    if (!argv || !argv[0] || timeout_ms == 0) return RUN_INFRA;
+    pid_t leader = spawn_leader(argv);
+    if (leader < 0) return RUN_INFRA;
+
+    uint64_t started = 0;
+    if (!monotonic_ms(&started)) {
+        reap_group(leader);
+        (void)waitpid(leader, NULL, 0);
+        return RUN_INFRA;
+    }
+    return wait_for_leader(leader, started, timeout_ms);
 }
 
 static volatile sig_atomic_t selftest_stop;
@@ -466,11 +558,8 @@ int main(int argc, char **argv)
                 argv[0]);
         return RUN_INFRA;
     }
-    char *end = NULL;
-    errno = 0;
-    unsigned long long parsed = strtoull(argv[1], &end, 10);
-    if (errno || !end || *end || parsed == 0 || parsed > UINT32_MAX ||
-        argv[2][0] != '/') {
+    unsigned long long parsed = 0;
+    if (!parse_timeout_arg(argv[1], &parsed) || argv[2][0] != '/') {
         fprintf(stderr, "z23_bounded_run: invalid timeout or non-absolute program\n");
         return RUN_INFRA;
     }
