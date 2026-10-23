@@ -2057,10 +2057,6 @@ engine/services/src/legacy_mirror_sync_service.c:lms_parse_int_result:21
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_init:31
 engine/services/src/legacy_mirror_sync_state.c:legacy_mirror_sync_stats_snapshot_impl:44
 engine/services/src/legacy_mirror_sync_state.c:lms_state_name:19
-engine/services/src/mesh_observation_json.c:mesh_observation_parse_json:17
-engine/services/src/mesh_observation_json.c:mo_parse_anchors:16
-engine/services/src/mesh_observation_json.c:mo_parse_edges:26
-engine/services/src/mesh_observation_json.c:mo_parse_self:35
 engine/services/src/mesh_observation_sample.c:mesh_observation_sample_once:28
 engine/services/src/mesh_pairing_service.c:mesh_pairing_authorize:26
 engine/services/src/mesh_pairing_service.c:mesh_pairing_delegation_check:18

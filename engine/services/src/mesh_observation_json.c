@@ -428,60 +428,194 @@ static bool mo_take_outcome(struct mo_parse_ctx *c,
     return true;
 }
 
+/* An array field, read as a whole. Absent is fine: *arr stays NULL and the
+ * caller has nothing to read. A wrong type, or more rows than `max`, is a
+ * NAMED refusal, never a clipped read. */
+static bool mo_open_array(struct mo_parse_ctx *c, const struct json_value *obj,
+                          const char *key, size_t max, const char *not_array,
+                          const char *overflow, const struct json_value **arr,
+                          size_t *n)
+{
+    *arr = NULL;
+    *n = 0;
+    const struct json_value *v = json_get(obj, key);
+    if (!v || v->type == JSON_NULL)
+        return true;
+    if (v->type != JSON_ARR)
+        return mo_refuse(c, not_array);
+    *n = json_size(v);
+    if (*n > max)
+        return mo_refuse(c, overflow);
+    *arr = v;
+    return true;
+}
+
+/* One row of an array: it must be an object, or the row is refused. */
+static bool mo_take_row(struct mo_parse_ctx *c, const struct json_value *arr,
+                        size_t i, const struct json_value **row)
+{
+    *row = json_at(arr, i);
+    if (!*row || (*row)->type != JSON_OBJ)
+        return mo_refuse(c, "bad_field_type");
+    return true;
+}
+
+static bool mo_parse_anchor(struct mo_parse_ctx *c,
+                            const struct json_value *a,
+                            struct mesh_obs_self *dst)
+{
+    int64_t back = 0;
+    if (!mo_take_int(c, a, "back", 0, "negative_value", &back))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    int slot = -1;
+    for (int r = 0; r < MESH_OBS_ANCHORS; r++)
+        if (MESH_OBS_ANCHOR_BACK[r] == (int32_t)back)
+            slot = r;
+    if (slot < 0)
+        return mo_refuse(c, "unknown_anchor_rung");
+    int64_t h = 0;
+    if (!mo_take_int(c, a, "height", 0, "negative_height", &h))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_hash(c, a, "hash", dst->anchors[slot].hash_hex))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_bool(c, a, "present", &dst->anchors[slot].present))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    dst->anchors[slot].height = h;
+    /* A rung is only usable when it actually carries a hash — a
+     * present flag with no hash is dropped, never guessed at. */
+    if (!dst->anchors[slot].hash_hex[0])
+        dst->anchors[slot].present = false;
+    return true;
+}
+
 static bool mo_parse_anchors(struct mo_parse_ctx *c,
                              const struct json_value *self,
                              struct mesh_obs_self *dst)
 {
-    const struct json_value *arr = json_get(self, "anchors");
-    if (!arr || arr->type == JSON_NULL)
+    const struct json_value *arr = NULL;
+    size_t n = 0;
+    if (!mo_open_array(c, self, "anchors", (size_t)MESH_OBS_ANCHORS,
+                       "anchors_not_an_array", "anchors_overflow", &arr, &n))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!arr)
         return true;
-    if (arr->type != JSON_ARR)
-        return mo_refuse(c, "anchors_not_an_array");
-    size_t n = json_size(arr);
-    if (n > (size_t)MESH_OBS_ANCHORS)
-        return mo_refuse(c, "anchors_overflow");
     for (size_t i = 0; i < n; i++) {
-        const struct json_value *a = json_at(arr, i);
-        if (!a || a->type != JSON_OBJ)
-            return mo_refuse(c, "bad_field_type");
-        int64_t back = 0;
-        if (!mo_take_int(c, a, "back", 0, "negative_value", &back))
+        const struct json_value *a = NULL;
+        if (!mo_take_row(c, arr, i, &a))
             return false;   // raw-return-ok:refusal-named-in-reason-out
-        int slot = -1;
-        for (int r = 0; r < MESH_OBS_ANCHORS; r++)
-            if (MESH_OBS_ANCHOR_BACK[r] == (int32_t)back)
-                slot = r;
-        if (slot < 0)
-            return mo_refuse(c, "unknown_anchor_rung");
-        int64_t h = 0;
-        if (!mo_take_int(c, a, "height", 0, "negative_height", &h))
+        if (!mo_parse_anchor(c, a, dst))
             return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_hash(c, a, "hash", dst->anchors[slot].hash_hex))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_bool(c, a, "present", &dst->anchors[slot].present))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        dst->anchors[slot].height = h;
-        /* A rung is only usable when it actually carries a hash — a
-         * present flag with no hash is dropped, never guessed at. */
-        if (!dst->anchors[slot].hash_hex[0])
-            dst->anchors[slot].present = false;
     }
     return true;
 }
 
-static bool mo_parse_self(struct mo_parse_ctx *c, const struct json_value *root,
-                          struct mesh_obs_self *dst)
+/* Edge identity: who the peer is and which stage each probe reached. */
+static bool mo_parse_edge_id(struct mo_parse_ctx *c,
+                             const struct json_value *e,
+                             struct mesh_obs_edge *d)
 {
-    const struct json_value *self = json_get(root, "self");
-    if (!self)
-        return mo_refuse(c, "self_missing");
-    if (self->type != JSON_OBJ)
-        return mo_refuse(c, "self_not_an_object");
+    if (!mo_take_str(c, e, "peer_key_hex", d->peer_key_hex,
+                     sizeof(d->peer_key_hex)))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (d->peer_key_hex[0] &&
+        !mo_hex_n(d->peer_key_hex, NET_SERVICE_KEY_SIZE * 2))
+        return mo_refuse(c, "bad_key_hex");
+    if (!mo_take_str(c, e, "peer_onion", d->peer_onion,
+                     sizeof(d->peer_onion)))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_bool(c, e, "inbound", &d->inbound))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_outcome(c, e, "transport", &d->transport))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_stage(c, e, "stage", &d->stage))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    return true;
+}
 
-    memcpy(dst->schema, MESH_OBS_SCHEMA, sizeof(MESH_OBS_SCHEMA));
+/* Edge timing: every elapsed value, each floored at -1 (never measured). */
+static bool mo_parse_edge_timing(struct mo_parse_ctx *c,
+                                 const struct json_value *e,
+                                 struct mesh_obs_edge *d)
+{
+    if (!mo_take_int(c, e, "stage_elapsed_us", -1, "value_below_floor",
+                     &d->stage_elapsed_us))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_int(c, e, "deadline_us", -1, "value_below_floor",
+                     &d->deadline_us))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_int(c, e, "last_recv_age_us", -1, "value_below_floor",
+                     &d->last_recv_age_us))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_int(c, e, "last_send_age_us", -1, "value_below_floor",
+                     &d->last_send_age_us))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_int(c, e, "connected_age_us", -1, "value_below_floor",
+                     &d->connected_age_us))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_int(c, e, "min_ping_us", -1, "value_below_floor",
+                     &d->min_ping_us))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    return true;
+}
 
-    int64_t tmp = 0;
-    bool b = false;
+/* Edge claim: what the peer says its tip is, and whether we verified it. */
+static bool mo_parse_edge_claim(struct mo_parse_ctx *c,
+                                const struct json_value *e,
+                                struct mesh_obs_edge *d)
+{
+    /* -1 is "the peer told me nothing"; anything below that is a
+     * malformed claim. */
+    if (!mo_take_int(c, e, "claimed_height", -1, "negative_height",
+                     &d->claimed_height))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_hash(c, e, "claimed_tip_hash_hex",
+                      d->claimed_tip_hash_hex))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_int(c, e, "claim_age_us", -1, "value_below_floor",
+                     &d->claim_age_us))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_bool(c, e, "claim_verified_locally",
+                      &d->claim_verified_locally))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_take_outcome(c, e, "header_service", &d->header_service))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    return true;
+}
+
+static bool mo_parse_edges(struct mo_parse_ctx *c,
+                           const struct json_value *root,
+                           struct mesh_observation *dst)
+{
+    const struct json_value *arr = NULL;
+    size_t n = 0;
+    /* A document declaring more edges than connman can even hold is
+     * refused BY NAME rather than silently clipped. */
+    if (!mo_open_array(c, root, "edges", (size_t)MESH_OBS_EDGES_MAX,
+                       "edges_not_an_array", "edges_overflow", &arr, &n))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!arr)
+        return true;
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *e = NULL;
+        if (!mo_take_row(c, arr, i, &e))
+            return false;   // raw-return-ok:refusal-named-in-reason-out
+        struct mesh_obs_edge *d = &dst->edges[i];
+        if (!mo_parse_edge_id(c, e, d))
+            return false;   // raw-return-ok:refusal-named-in-reason-out
+        if (!mo_parse_edge_timing(c, e, d))
+            return false;   // raw-return-ok:refusal-named-in-reason-out
+        if (!mo_parse_edge_claim(c, e, d))
+            return false;   // raw-return-ok:refusal-named-in-reason-out
+    }
+    dst->edge_count = (int32_t)n;
+    return true;
+}
+
+/* Self, in three groups read in the order the emitter wrote them. */
+static bool mo_parse_self_head(struct mo_parse_ctx *c,
+                               const struct json_value *self,
+                               struct mesh_obs_self *dst)
+{
     if (!mo_take_str(c, self, "onion", dst->onion, sizeof(dst->onion)))
         return false;   // raw-return-ok:refusal-named-in-reason-out
     if (!mo_take_str(c, self, "source_id", dst->source_id,
@@ -501,6 +635,14 @@ static bool mo_parse_self(struct mo_parse_ctx *c, const struct json_value *root,
     if (!mo_take_int(c, self, "tip_time_unix", 0, "negative_value",
                      &dst->tip_time_unix))
         return false;   // raw-return-ok:refusal-named-in-reason-out
+    return true;
+}
+
+static bool mo_parse_self_chain(struct mo_parse_ctx *c,
+                                const struct json_value *self,
+                                struct mesh_obs_self *dst)
+{
+    int64_t tmp = 0;
     if (!mo_parse_anchors(c, self, dst))
         return false;   // raw-return-ok:refusal-named-in-reason-out
     if (!mo_take_int(c, self, "provable_tip", 0, "negative_height", &tmp))
@@ -515,7 +657,7 @@ static bool mo_parse_self(struct mo_parse_ctx *c, const struct json_value *root,
     if (!mo_take_int(c, self, "implied_hashrate_ratio_milli", -1,
                      "value_below_floor",
                      &dst->implied_hashrate_ratio_milli))
-        return false;
+        return false;   // raw-return-ok:refusal-named-in-reason-out
     if (!mo_take_int(c, self, "arrival_window_blocks", 0, "negative_value",
                      &tmp))
         return false;   // raw-return-ok:refusal-named-in-reason-out
@@ -526,7 +668,14 @@ static bool mo_parse_self(struct mo_parse_ctx *c, const struct json_value *root,
         return false;   // raw-return-ok:refusal-named-in-reason-out
     if (!mo_take_bool(c, self, "tor_stub_build", &dst->tor_stub_build))
         return false;   // raw-return-ok:refusal-named-in-reason-out
+    return true;
+}
 
+static bool mo_parse_capability(struct mo_parse_ctx *c,
+                                const struct json_value *self,
+                                struct mesh_obs_self *dst)
+{
+    int64_t tmp = 0;
     const struct json_value *cap = json_get(self, "capability");
     if (cap && cap->type != JSON_NULL) {
         if (cap->type != JSON_OBJ)
@@ -556,7 +705,14 @@ static bool mo_parse_self(struct mo_parse_ctx *c, const struct json_value *root,
         dst->fsync_us = -1;
         dst->pread_us = -1;
     }
+    return true;
+}
 
+static bool mo_parse_self_sample(struct mo_parse_ctx *c,
+                                 const struct json_value *self,
+                                 struct mesh_obs_self *dst)
+{
+    bool b = false;
     if (!mo_take_int(c, self, "sampled_unix", 0, "negative_value",
                      &dst->sampled_unix))
         return false;   // raw-return-ok:refusal-named-in-reason-out
@@ -575,77 +731,23 @@ static bool mo_parse_self(struct mo_parse_ctx *c, const struct json_value *root,
     return true;
 }
 
-static bool mo_parse_edges(struct mo_parse_ctx *c,
-                           const struct json_value *root,
-                           struct mesh_observation *dst)
+static bool mo_parse_self(struct mo_parse_ctx *c, const struct json_value *root,
+                          struct mesh_obs_self *dst)
 {
-    const struct json_value *arr = json_get(root, "edges");
-    if (!arr || arr->type == JSON_NULL)
-        return true;
-    if (arr->type != JSON_ARR)
-        return mo_refuse(c, "edges_not_an_array");
-    size_t n = json_size(arr);
-    /* A document declaring more edges than connman can even hold is
-     * refused BY NAME rather than silently clipped. */
-    if (n > (size_t)MESH_OBS_EDGES_MAX)
-        return mo_refuse(c, "edges_overflow");
-    for (size_t i = 0; i < n; i++) {
-        const struct json_value *e = json_at(arr, i);
-        if (!e || e->type != JSON_OBJ)
-            return mo_refuse(c, "bad_field_type");
-        struct mesh_obs_edge *d = &dst->edges[i];
-        if (!mo_take_str(c, e, "peer_key_hex", d->peer_key_hex,
-                         sizeof(d->peer_key_hex)))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (d->peer_key_hex[0] &&
-            !mo_hex_n(d->peer_key_hex, NET_SERVICE_KEY_SIZE * 2))
-            return mo_refuse(c, "bad_key_hex");
-        if (!mo_take_str(c, e, "peer_onion", d->peer_onion,
-                         sizeof(d->peer_onion)))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_bool(c, e, "inbound", &d->inbound))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_outcome(c, e, "transport", &d->transport))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_stage(c, e, "stage", &d->stage))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_int(c, e, "stage_elapsed_us", -1, "value_below_floor",
-                         &d->stage_elapsed_us))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_int(c, e, "deadline_us", -1, "value_below_floor",
-                         &d->deadline_us))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_int(c, e, "last_recv_age_us", -1, "value_below_floor",
-                         &d->last_recv_age_us))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_int(c, e, "last_send_age_us", -1, "value_below_floor",
-                         &d->last_send_age_us))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_int(c, e, "connected_age_us", -1, "value_below_floor",
-                         &d->connected_age_us))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_int(c, e, "min_ping_us", -1, "value_below_floor",
-                         &d->min_ping_us))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        /* -1 is "the peer told me nothing"; anything below that is a
-         * malformed claim. */
-        if (!mo_take_int(c, e, "claimed_height", -1, "negative_height",
-                         &d->claimed_height))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_hash(c, e, "claimed_tip_hash_hex",
-                          d->claimed_tip_hash_hex))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_int(c, e, "claim_age_us", -1, "value_below_floor",
-                         &d->claim_age_us))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_bool(c, e, "claim_verified_locally",
-                          &d->claim_verified_locally))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-        if (!mo_take_outcome(c, e, "header_service", &d->header_service))
-            return false;   // raw-return-ok:refusal-named-in-reason-out
-    }
-    dst->edge_count = (int32_t)n;
-    return true;
+    const struct json_value *self = json_get(root, "self");
+    if (!self)
+        return mo_refuse(c, "self_missing");
+    if (self->type != JSON_OBJ)
+        return mo_refuse(c, "self_not_an_object");
+
+    memcpy(dst->schema, MESH_OBS_SCHEMA, sizeof(MESH_OBS_SCHEMA));
+    if (!mo_parse_self_head(c, self, dst))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_parse_self_chain(c, self, dst))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    if (!mo_parse_capability(c, self, dst))
+        return false;   // raw-return-ok:refusal-named-in-reason-out
+    return mo_parse_self_sample(c, self, dst);
 }
 
 /* Coverage, read back. The emitter has always written this block (a truncated
@@ -693,6 +795,39 @@ static bool mo_parse_coverage(struct mo_parse_ctx *c,
     return true;
 }
 
+/* The document envelope: size, syntax, then the schema token. Every refusal
+ * here frees the JSON arena before it returns; a document that opens is the
+ * caller's to free. */
+static bool mo_open_root(struct mo_parse_ctx *c, const char *body, size_t len,
+                         struct json_value *root)
+{
+    if (!body || len == 0)
+        return mo_refuse(c, "empty_body");
+    if (len > MESH_OBS_DOC_MAX)
+        return mo_refuse(c, "document_too_large");
+
+    json_init(root);
+    if (!json_read(root, body, len)) {
+        json_free(root);
+        return mo_refuse(c, "json_malformed");
+    }
+    if (root->type != JSON_OBJ) {
+        json_free(root);
+        return mo_refuse(c, "not_an_object");
+    }
+
+    const struct json_value *schema = json_get(root, "schema");
+    if (!schema || schema->type != JSON_STR) {
+        json_free(root);
+        return mo_refuse(c, "schema_missing");
+    }
+    if (strcmp(json_get_str(schema), MESH_OBS_SCHEMA) != 0) {
+        json_free(root);
+        return mo_refuse(c, "schema_mismatch");
+    }
+    return true;
+}
+
 bool mesh_observation_parse_json(const char *body, size_t len,
                                  struct mesh_observation *out,
                                  char reason_out[MESH_OBS_REASON_MAX])
@@ -702,39 +837,10 @@ bool mesh_observation_parse_json(const char *body, size_t len,
         reason_out[0] = '\0';
     if (!out)
         return false;
-    if (!body || len == 0) {
-        ctx.reason = "empty_body";
-        goto refuse;
-    }
-    if (len > MESH_OBS_DOC_MAX) {
-        ctx.reason = "document_too_large";
-        goto refuse;
-    }
 
     struct json_value root = {0};
-    json_init(&root);
-    if (!json_read(&root, body, len)) {
-        json_free(&root);
-        ctx.reason = "json_malformed";
+    if (!mo_open_root(&ctx, body, len, &root))
         goto refuse;
-    }
-    if (root.type != JSON_OBJ) {
-        json_free(&root);
-        ctx.reason = "not_an_object";
-        goto refuse;
-    }
-
-    const struct json_value *schema = json_get(&root, "schema");
-    if (!schema || schema->type != JSON_STR) {
-        json_free(&root);
-        ctx.reason = "schema_missing";
-        goto refuse;
-    }
-    if (strcmp(json_get_str(schema), MESH_OBS_SCHEMA) != 0) {
-        json_free(&root);
-        ctx.reason = "schema_mismatch";
-        goto refuse;
-    }
 
     /* Build into a local so a refusal at ANY field leaves *out untouched.
      * The house JSON parser owns its own arena and it is released here; the
