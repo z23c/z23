@@ -261,4 +261,22 @@ int tor_integration_fetch_onion_post_blocking(const char *onion_address,
                                                struct onion_fetch_result *result,
                                                int timeout_secs);
 
+/* Request hand-off that the blocking fetch performs in place of the dynhost
+ * client. Production passes the dynhost wrappers; a test fake accepts the
+ * request and never calls back, which exercises a shutdown-abandoned fetch. */
+typedef int (*tor_fetch_dispatch_fn)(const char *onion_address,
+                                     const char *path, bool use_post,
+                                     const uint8_t *body, size_t body_len,
+                                     tor_fetch_callback_fn callback,
+                                     void *ctx, int timeout_secs);
+
+#ifdef ZCL_TESTING
+/* Test seam: tor_integration_fetch_onion_blocking with an injected
+ * dispatcher, so the wait loop runs without a live Tor client. */
+int tor_integration_fetch_onion_blocking_for_test(
+    const char *onion_address, const char *path,
+    struct onion_fetch_result *result, int timeout_secs,
+    tor_fetch_dispatch_fn dispatch);
+#endif
+
 #endif

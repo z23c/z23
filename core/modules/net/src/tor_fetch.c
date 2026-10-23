@@ -9,6 +9,7 @@
 #include "support/cleanse.h"
 #include "util/log_macros.h"
 #include "util/safe_alloc.h"
+#include "util/thread_registry.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -105,13 +106,63 @@ static void blocking_fetch_cb(int status, const uint8_t *body,
     blocking_fetch_release(ctx);
 }
 
-static int fetch_onion_blocking_ex(const char *onion_address,
-                                   const char *path,
-                                   bool use_post,
-                                   const uint8_t *req_body,
-                                   size_t req_body_len,
-                                   struct onion_fetch_result *result,
-                                   int timeout_secs)
+static int dispatch_onion_fetch(const char *onion_address, const char *path,
+                                bool use_post,
+                                const uint8_t *req_body, size_t req_body_len,
+                                tor_fetch_callback_fn callback, void *ctx,
+                                int timeout_secs)
+{
+    return use_post
+        ? tor_integration_fetch_onion_post(onion_address, path,
+                                           req_body, req_body_len,
+                                           callback, ctx, timeout_secs)
+        : tor_integration_fetch_onion(onion_address, path,
+                                      callback, ctx, timeout_secs);
+}
+
+static int blocking_fetch_wait(struct blocking_fetch_ctx *ctx,
+                               struct onion_fetch_result *result,
+                               const char *onion_address, const char *path,
+                               int timeout_secs)
+{
+    int wait_ms = (timeout_secs > 0 ? timeout_secs : 60) * 1000;
+    for (int elapsed = 0; elapsed < wait_ms; elapsed += 100) {
+        if (atomic_load(&ctx->complete) != 0) {
+            int ok = atomic_load(&ctx->complete) == 1;
+            result->status = ctx->status;
+            result->body = ctx->body;
+            result->body_len = ctx->body_len;
+            ctx->body = NULL;
+            atomic_store(&result->complete, ok ? 1 : -1);
+            blocking_fetch_release(ctx);
+            return ok ? 0 : -1;
+        }
+        if (thread_registry_shutdown_requested()) {
+            /* Same exit as a timeout; the callback keeps its reference. */
+            blocking_fetch_release(ctx);
+            atomic_store(&result->complete, -1);
+            LOG_ERR("tor", "fetch_onion_blocking abandoned for shutdown "
+                           "after %dms for %s%s", elapsed, onion_address,
+                    path);
+        }
+        platform_sleep_ms(100);
+    }
+
+    /* The callback retains its reference and may safely finish later. */
+    blocking_fetch_release(ctx);
+    atomic_store(&result->complete, -1);
+    LOG_ERR("tor", "fetch_onion_blocking timed out after %ds for %s%s",
+            timeout_secs > 0 ? timeout_secs : 60, onion_address, path);
+}
+
+static int fetch_onion_blocking_with(const char *onion_address,
+                                     const char *path,
+                                     bool use_post,
+                                     const uint8_t *req_body,
+                                     size_t req_body_len,
+                                     struct onion_fetch_result *result,
+                                     int timeout_secs,
+                                     tor_fetch_dispatch_fn dispatch)
 {
     if (!result)
         LOG_ERR("tor", "fetch_onion_blocking called with NULL result");
@@ -125,14 +176,8 @@ static int fetch_onion_blocking_ex(const char *onion_address,
     atomic_init(&ctx->refs, 2);
     atomic_init(&ctx->complete, 0);
 
-    int rc = use_post
-        ? tor_integration_fetch_onion_post(onion_address, path,
-                                           req_body, req_body_len,
-                                           blocking_fetch_cb, ctx,
-                                           timeout_secs)
-        : tor_integration_fetch_onion(onion_address, path,
-                                      blocking_fetch_cb, ctx,
-                                      timeout_secs);
+    int rc = dispatch(onion_address, path, use_post, req_body, req_body_len,
+                      blocking_fetch_cb, ctx, timeout_secs);
     if (rc < 0) {
         /* Dispatch failed: release both waiter and never-called callback. */
         blocking_fetch_release(ctx);
@@ -141,26 +186,20 @@ static int fetch_onion_blocking_ex(const char *onion_address,
         LOG_ERR("tor", "fetch_onion failed for %s%s", onion_address, path);
     }
 
-    int wait_ms = (timeout_secs > 0 ? timeout_secs : 60) * 1000;
-    for (int elapsed = 0; elapsed < wait_ms; elapsed += 100) {
-        if (atomic_load(&ctx->complete) != 0) {
-            int ok = atomic_load(&ctx->complete) == 1;
-            result->status = ctx->status;
-            result->body = ctx->body;
-            result->body_len = ctx->body_len;
-            ctx->body = NULL;
-            atomic_store(&result->complete, ok ? 1 : -1);
-            blocking_fetch_release(ctx);
-            return ok ? 0 : -1;
-        }
-        platform_sleep_ms(100);
-    }
+    return blocking_fetch_wait(ctx, result, onion_address, path, timeout_secs);
+}
 
-    /* The callback retains its reference and may safely finish later. */
-    blocking_fetch_release(ctx);
-    atomic_store(&result->complete, -1);
-    LOG_ERR("tor", "fetch_onion_blocking timed out after %ds for %s%s",
-            timeout_secs > 0 ? timeout_secs : 60, onion_address, path);
+static int fetch_onion_blocking_ex(const char *onion_address,
+                                   const char *path,
+                                   bool use_post,
+                                   const uint8_t *req_body,
+                                   size_t req_body_len,
+                                   struct onion_fetch_result *result,
+                                   int timeout_secs)
+{
+    return fetch_onion_blocking_with(onion_address, path, use_post,
+                                     req_body, req_body_len, result,
+                                     timeout_secs, dispatch_onion_fetch);
 }
 
 int tor_integration_fetch_onion_blocking(const char *onion_address,
@@ -182,3 +221,16 @@ int tor_integration_fetch_onion_post_blocking(const char *onion_address,
     return fetch_onion_blocking_ex(onion_address, path, true, body, body_len,
                                    result, timeout_secs);
 }
+
+#ifdef ZCL_TESTING
+int tor_integration_fetch_onion_blocking_for_test(
+    const char *onion_address, const char *path,
+    struct onion_fetch_result *result, int timeout_secs,
+    tor_fetch_dispatch_fn dispatch)
+{
+    if (!dispatch)
+        LOG_ERR("tor", "fetch_onion_blocking_for_test called without dispatch");
+    return fetch_onion_blocking_with(onion_address, path, false, NULL, 0,
+                                     result, timeout_secs, dispatch);
+}
+#endif

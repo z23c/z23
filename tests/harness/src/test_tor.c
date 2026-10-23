@@ -9,7 +9,11 @@
 #include "net/onion_service.h"
 #include "util/log_rotate.h"
 #include "config/boot_internal.h"
+#include "platform/time_compat.h"
+#include "util/thread_registry.h"
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <errno.h>
@@ -1000,6 +1004,83 @@ static int test_remove_tree_trailing_separator_keeps_target(void)
 }
 #endif
 
+/* ── blocking onion fetch abandons on process shutdown ───────────────
+ * An in-flight blocking fetch polled out its full timeout (60 s by
+ * default) at shutdown. The shutdown flag is process-wide and cannot be
+ * reset, so the probe runs in a forked child that _exit()s, which keeps the
+ * parent's buffered stdout out of the child. The fake dispatcher accepts
+ * the request and never calls back; the child then completes the callback
+ * reference itself so the fetch context is freed rather than leaked. */
+static tor_fetch_callback_fn g_shutdown_probe_cb;
+static void *g_shutdown_probe_ctx;
+
+static int shutdown_probe_fake_dispatch(const char *onion_address,
+                                        const char *path, bool use_post,
+                                        const uint8_t *body, size_t body_len,
+                                        tor_fetch_callback_fn callback,
+                                        void *ctx, int timeout_secs)
+{
+    (void)onion_address;
+    (void)path;
+    (void)use_post;
+    (void)body;
+    (void)body_len;
+    (void)timeout_secs;
+    g_shutdown_probe_cb = callback;
+    g_shutdown_probe_ctx = ctx;
+    return 0;
+}
+
+static int shutdown_probe_child(void)
+{
+    struct onion_fetch_result res;
+    memset(&res, 0, sizeof(res));
+    int64_t t0 = platform_time_monotonic_ms();
+    thread_registry_request_shutdown();
+    int rc = tor_integration_fetch_onion_blocking_for_test(
+        "probe.onion", "/", &res, 30, shutdown_probe_fake_dispatch);
+    int64_t elapsed = platform_time_monotonic_ms() - t0;
+    if (g_shutdown_probe_cb)
+        g_shutdown_probe_cb(200, NULL, 0, g_shutdown_probe_ctx);
+    return (rc == -1 && elapsed < 2000) ? 0 : 1;
+}
+
+static int test_blocking_fetch_abandons_on_shutdown(void)
+{
+    printf("test_blocking_fetch_abandons_on_shutdown: ");
+    pid_t pid = fork();
+    if (pid < 0) {
+        printf("FAIL (fork)\n");
+        return 1;
+    }
+    if (pid == 0)
+        _exit(shutdown_probe_child());
+
+    int status = 0;
+    bool done = false;
+    for (int i = 0; i < 150 && !done; i++) {
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid)
+            done = true;
+        else if (w < 0)
+            break;
+        else
+            platform_sleep_ms(100); /* real-clock: bounds the wait on a forked child's exit; the child measures the fetch on its own monotonic clock */
+    }
+    if (!done) {
+        kill(pid, SIGKILL);
+        (void)waitpid(pid, &status, 0);
+        printf("FAIL (child still blocked after 15 s)\n");
+        return 1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        printf("FAIL (fetch did not return -1 within 2 s of shutdown)\n");
+        return 1;
+    }
+    printf("OK\n");
+    return 0;
+}
+
 int test_tor(void)
 
 {
@@ -1035,6 +1116,9 @@ int test_tor(void)
 
     /* vendor pin must ship the POST client core already sells */
     failures += test_dynhost_post_client_pin();
+
+    /* shutdown must not wait out an in-flight blocking onion fetch */
+    failures += test_blocking_fetch_abandons_on_shutdown();
 
     printf("Tor integration: %d failures\n", failures);
     return failures;
