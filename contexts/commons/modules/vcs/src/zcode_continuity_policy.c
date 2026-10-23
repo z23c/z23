@@ -14,38 +14,46 @@
 static const uint8_t continuity_magic[8] =
     {'Z','C','C','O','N','T','\r','\n'};
 
+/* All-zero root used as the empty side of a transition. It has static
+ * storage because the event-key shape keeps pointers to it. */
+static const uint8_t continuity_zero_root[32];
+
+static const char *const continuity_error_names[] = {
+    [VCS_ZCODE_CONTINUITY_OK] = "ok",
+    [VCS_ZCODE_CONTINUITY_NULL] = "null-argument",
+    [VCS_ZCODE_CONTINUITY_WIRE_SIZE] = "wire-size",
+    [VCS_ZCODE_CONTINUITY_MAGIC] = "wire-magic",
+    [VCS_ZCODE_CONTINUITY_VERSION] = "schema-version",
+    [VCS_ZCODE_CONTINUITY_EVENT_MASK] = "closed-event-mask",
+    [VCS_ZCODE_CONTINUITY_FLAGS] = "authority-or-simulation-flags",
+    [VCS_ZCODE_CONTINUITY_ROOT] = "required-root",
+    [VCS_ZCODE_CONTINUITY_TRANSITION] = "capsule-transition",
+    [VCS_ZCODE_CONTINUITY_CAP] = "cycle-or-amount-cap",
+    [VCS_ZCODE_CONTINUITY_TIME] = "time-order",
+    [VCS_ZCODE_CONTINUITY_SEQUENCE] = "sequence",
+    [VCS_ZCODE_CONTINUITY_SIGNATURE] = "signature",
+    [VCS_ZCODE_CONTINUITY_CONTEXT] = "validation-context",
+    [VCS_ZCODE_CONTINUITY_CAS] = "canonical-cas",
+    [VCS_ZCODE_CONTINUITY_NETWORK] = "network-mismatch",
+    [VCS_ZCODE_CONTINUITY_CONTRIBUTOR] = "contributor-binding",
+    [VCS_ZCODE_CONTINUITY_PACKAGE] = "package-binding",
+    [VCS_ZCODE_CONTINUITY_RELEASE] = "release-binding",
+    [VCS_ZCODE_CONTINUITY_PROOF_POLICY] = "proof-policy-binding",
+};
+
 const char *vcs_zcode_continuity_error_string(
     enum vcs_zcode_continuity_error error)
 {
-    switch (error) {
-    case VCS_ZCODE_CONTINUITY_OK: return "ok";
-    case VCS_ZCODE_CONTINUITY_NULL: return "null-argument";
-    case VCS_ZCODE_CONTINUITY_WIRE_SIZE: return "wire-size";
-    case VCS_ZCODE_CONTINUITY_MAGIC: return "wire-magic";
-    case VCS_ZCODE_CONTINUITY_VERSION: return "schema-version";
-    case VCS_ZCODE_CONTINUITY_EVENT_MASK: return "closed-event-mask";
-    case VCS_ZCODE_CONTINUITY_FLAGS: return "authority-or-simulation-flags";
-    case VCS_ZCODE_CONTINUITY_ROOT: return "required-root";
-    case VCS_ZCODE_CONTINUITY_TRANSITION: return "capsule-transition";
-    case VCS_ZCODE_CONTINUITY_CAP: return "cycle-or-amount-cap";
-    case VCS_ZCODE_CONTINUITY_TIME: return "time-order";
-    case VCS_ZCODE_CONTINUITY_SEQUENCE: return "sequence";
-    case VCS_ZCODE_CONTINUITY_SIGNATURE: return "signature";
-    case VCS_ZCODE_CONTINUITY_CONTEXT: return "validation-context";
-    case VCS_ZCODE_CONTINUITY_CAS: return "canonical-cas";
-    case VCS_ZCODE_CONTINUITY_NETWORK: return "network-mismatch";
-    case VCS_ZCODE_CONTINUITY_CONTRIBUTOR: return "contributor-binding";
-    case VCS_ZCODE_CONTINUITY_PACKAGE: return "package-binding";
-    case VCS_ZCODE_CONTINUITY_RELEASE: return "release-binding";
-    case VCS_ZCODE_CONTINUITY_PROOF_POLICY: return "proof-policy-binding";
-    }
+    size_t count = sizeof(continuity_error_names) /
+                   sizeof(continuity_error_names[0]);
+    if ((size_t)error < count && continuity_error_names[error] != NULL)
+        return continuity_error_names[error];
     return "unknown";
 }
 
-static enum vcs_zcode_continuity_error continuity_fields(
-    const struct vcs_zcode_continuity_policy_v1 *policy, bool signed_wire)
+static enum vcs_zcode_continuity_error continuity_check_header(
+    const struct vcs_zcode_continuity_policy_v1 *policy)
 {
-    if (!policy) return VCS_ZCODE_CONTINUITY_NULL;
     if (policy->schema_version != VCS_ZCODE_CONTINUITY_POLICY_VERSION)
         return VCS_ZCODE_CONTINUITY_VERSION;
     if (policy->event_mask == 0 ||
@@ -57,6 +65,12 @@ static enum vcs_zcode_continuity_error continuity_fields(
     if ((policy->flags & required) != required ||
         (policy->flags & ~allowed) != 0)
         return VCS_ZCODE_CONTINUITY_FLAGS;
+    return VCS_ZCODE_CONTINUITY_OK;
+}
+
+static enum vcs_zcode_continuity_error continuity_check_roots(
+    const struct vcs_zcode_continuity_policy_v1 *policy)
+{
     const uint8_t *roots[] = {
         policy->network_genesis_root,
         policy->zc23_token_or_simulation_root,
@@ -70,6 +84,12 @@ static enum vcs_zcode_continuity_error continuity_fields(
             return VCS_ZCODE_CONTINUITY_ROOT;
     if (memcmp(policy->from_capsule_root, policy->to_capsule_root, 32) == 0)
         return VCS_ZCODE_CONTINUITY_TRANSITION;
+    return VCS_ZCODE_CONTINUITY_OK;
+}
+
+static enum vcs_zcode_continuity_error continuity_check_caps(
+    const struct vcs_zcode_continuity_policy_v1 *policy)
+{
     uint64_t maximum_total = 0;
     if (policy->maximum_cycles == 0 || policy->per_cycle_cap_atoms == 0 ||
         policy->total_cap_atoms < policy->per_cycle_cap_atoms ||
@@ -77,10 +97,31 @@ static enum vcs_zcode_continuity_error continuity_fields(
                      &maximum_total) ||
         policy->total_cap_atoms > maximum_total)
         return VCS_ZCODE_CONTINUITY_CAP;
+    return VCS_ZCODE_CONTINUITY_OK;
+}
+
+static enum vcs_zcode_continuity_error continuity_check_time_sequence(
+    const struct vcs_zcode_continuity_policy_v1 *policy)
+{
     if (policy->created_unix <= 0 ||
         policy->expires_unix <= policy->created_unix)
         return VCS_ZCODE_CONTINUITY_TIME;
     if (policy->sequence == 0) return VCS_ZCODE_CONTINUITY_SEQUENCE;
+    return VCS_ZCODE_CONTINUITY_OK;
+}
+
+static enum vcs_zcode_continuity_error continuity_fields(
+    const struct vcs_zcode_continuity_policy_v1 *policy, bool signed_wire)
+{
+    if (!policy) return VCS_ZCODE_CONTINUITY_NULL;
+    enum vcs_zcode_continuity_error error = continuity_check_header(policy);
+    if (error != VCS_ZCODE_CONTINUITY_OK) return error;
+    error = continuity_check_roots(policy);
+    if (error != VCS_ZCODE_CONTINUITY_OK) return error;
+    error = continuity_check_caps(policy);
+    if (error != VCS_ZCODE_CONTINUITY_OK) return error;
+    error = continuity_check_time_sequence(policy);
+    if (error != VCS_ZCODE_CONTINUITY_OK) return error;
     if (signed_wire && !zcl_bytes_any_set(policy->signature, 32))
         return VCS_ZCODE_CONTINUITY_SIGNATURE;
     return VCS_ZCODE_CONTINUITY_OK;
@@ -90,6 +131,45 @@ enum vcs_zcode_continuity_error vcs_zcode_continuity_policy_validate(
     const struct vcs_zcode_continuity_policy_v1 *policy)
 {
     return continuity_fields(policy, true);
+}
+
+static bool continuity_write_head(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_continuity_policy_v1 *policy)
+{
+    return zcl_codec_write_bytes(writer, continuity_magic, 8) &&
+        zcl_codec_write_u16le(writer, policy->schema_version) &&
+        zcl_codec_write_u16le(writer, policy->event_mask) &&
+        zcl_codec_write_u8(writer, policy->flags) &&
+        zcl_codec_write_u8(writer, 0) &&
+        zcl_codec_write_u16le(writer, 0);
+}
+
+static bool continuity_write_roots(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_continuity_policy_v1 *policy)
+{
+    return zcl_codec_write_bytes(writer, policy->network_genesis_root, 32) &&
+        zcl_codec_write_bytes(writer,
+            policy->zc23_token_or_simulation_root, 32) &&
+        zcl_codec_write_bytes(writer,
+            policy->patron_contributor_binding_root, 32) &&
+        zcl_codec_write_bytes(writer, policy->patron_zid_pubkey, 32) &&
+        zcl_codec_write_bytes(writer, policy->package_root, 32) &&
+        zcl_codec_write_bytes(writer, policy->current_release_root, 32) &&
+        zcl_codec_write_bytes(writer, policy->from_capsule_root, 32) &&
+        zcl_codec_write_bytes(writer, policy->to_capsule_root, 32) &&
+        zcl_codec_write_bytes(writer, policy->proof_policy_root, 32);
+}
+
+static bool continuity_write_tail(struct zcl_codec_writer *writer,
+    const struct vcs_zcode_continuity_policy_v1 *policy)
+{
+    return zcl_codec_write_u32le(writer, policy->maximum_cycles) &&
+        zcl_codec_write_u32le(writer, 0) &&
+        zcl_codec_write_u64le(writer, policy->per_cycle_cap_atoms) &&
+        zcl_codec_write_u64le(writer, policy->total_cap_atoms) &&
+        zcl_codec_write_i64le(writer, policy->created_unix) &&
+        zcl_codec_write_i64le(writer, policy->expires_unix) &&
+        zcl_codec_write_u64le(writer, policy->sequence);
 }
 
 static enum vcs_zcode_continuity_error continuity_body(
@@ -103,30 +183,9 @@ static enum vcs_zcode_continuity_error continuity_body(
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out,
                           VCS_ZCODE_CONTINUITY_POLICY_BODY_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, continuity_magic, 8) &&
-        zcl_codec_write_u16le(&writer, policy->schema_version) &&
-        zcl_codec_write_u16le(&writer, policy->event_mask) &&
-        zcl_codec_write_u8(&writer, policy->flags) &&
-        zcl_codec_write_u8(&writer, 0) &&
-        zcl_codec_write_u16le(&writer, 0) &&
-        zcl_codec_write_bytes(&writer, policy->network_genesis_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-            policy->zc23_token_or_simulation_root, 32) &&
-        zcl_codec_write_bytes(&writer,
-            policy->patron_contributor_binding_root, 32) &&
-        zcl_codec_write_bytes(&writer, policy->patron_zid_pubkey, 32) &&
-        zcl_codec_write_bytes(&writer, policy->package_root, 32) &&
-        zcl_codec_write_bytes(&writer, policy->current_release_root, 32) &&
-        zcl_codec_write_bytes(&writer, policy->from_capsule_root, 32) &&
-        zcl_codec_write_bytes(&writer, policy->to_capsule_root, 32) &&
-        zcl_codec_write_bytes(&writer, policy->proof_policy_root, 32) &&
-        zcl_codec_write_u32le(&writer, policy->maximum_cycles) &&
-        zcl_codec_write_u32le(&writer, 0) &&
-        zcl_codec_write_u64le(&writer, policy->per_cycle_cap_atoms) &&
-        zcl_codec_write_u64le(&writer, policy->total_cap_atoms) &&
-        zcl_codec_write_i64le(&writer, policy->created_unix) &&
-        zcl_codec_write_i64le(&writer, policy->expires_unix) &&
-        zcl_codec_write_u64le(&writer, policy->sequence);
+    bool ok = continuity_write_head(&writer, policy) &&
+        continuity_write_roots(&writer, policy) &&
+        continuity_write_tail(&writer, policy);
     size_t written = 0;
     return ok && zcl_codec_writer_finish(&writer, &written) &&
            written == VCS_ZCODE_CONTINUITY_POLICY_BODY_BYTES
@@ -161,6 +220,48 @@ enum vcs_zcode_continuity_error vcs_zcode_continuity_policy_serialize(
     return error;
 }
 
+static bool continuity_read_head(struct zcl_codec_reader *reader,
+    uint8_t magic[8], struct vcs_zcode_continuity_policy_v1 *out,
+    uint8_t *reserved8, uint16_t *reserved16)
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u16le(reader, &out->event_mask) &&
+        zcl_codec_read_u8(reader, &out->flags) &&
+        zcl_codec_read_u8(reader, reserved8) &&
+        zcl_codec_read_u16le(reader, reserved16);
+}
+
+static bool continuity_read_roots(struct zcl_codec_reader *reader,
+    struct vcs_zcode_continuity_policy_v1 *out)
+{
+    return zcl_codec_read_bytes(reader, out->network_genesis_root, 32) &&
+        zcl_codec_read_bytes(reader,
+            out->zc23_token_or_simulation_root, 32) &&
+        zcl_codec_read_bytes(reader,
+            out->patron_contributor_binding_root, 32) &&
+        zcl_codec_read_bytes(reader, out->patron_zid_pubkey, 32) &&
+        zcl_codec_read_bytes(reader, out->package_root, 32) &&
+        zcl_codec_read_bytes(reader, out->current_release_root, 32) &&
+        zcl_codec_read_bytes(reader, out->from_capsule_root, 32) &&
+        zcl_codec_read_bytes(reader, out->to_capsule_root, 32) &&
+        zcl_codec_read_bytes(reader, out->proof_policy_root, 32);
+}
+
+static bool continuity_read_tail(struct zcl_codec_reader *reader,
+    struct vcs_zcode_continuity_policy_v1 *out, uint32_t *reserved32)
+{
+    return zcl_codec_read_u32le(reader, &out->maximum_cycles) &&
+        zcl_codec_read_u32le(reader, reserved32) &&
+        zcl_codec_read_u64le(reader, &out->per_cycle_cap_atoms) &&
+        zcl_codec_read_u64le(reader, &out->total_cap_atoms) &&
+        zcl_codec_read_i64le(reader, &out->created_unix) &&
+        zcl_codec_read_i64le(reader, &out->expires_unix) &&
+        zcl_codec_read_u64le(reader, &out->sequence) &&
+        zcl_codec_read_bytes(reader, out->signature, 64) &&
+        zcl_codec_reader_finish(reader);
+}
+
 enum vcs_zcode_continuity_error vcs_zcode_continuity_policy_parse(
     const uint8_t *wire, size_t wire_len,
     struct vcs_zcode_continuity_policy_v1 *out)
@@ -174,32 +275,10 @@ enum vcs_zcode_continuity_error vcs_zcode_continuity_policy_parse(
     uint16_t reserved16 = 0;
     uint32_t reserved32 = 0;
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u16le(&reader, &out->event_mask) &&
-        zcl_codec_read_u8(&reader, &out->flags) &&
-        zcl_codec_read_u8(&reader, &reserved8) &&
-        zcl_codec_read_u16le(&reader, &reserved16) &&
-        zcl_codec_read_bytes(&reader, out->network_genesis_root, 32) &&
-        zcl_codec_read_bytes(&reader,
-            out->zc23_token_or_simulation_root, 32) &&
-        zcl_codec_read_bytes(&reader,
-            out->patron_contributor_binding_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->patron_zid_pubkey, 32) &&
-        zcl_codec_read_bytes(&reader, out->package_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->current_release_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->from_capsule_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->to_capsule_root, 32) &&
-        zcl_codec_read_bytes(&reader, out->proof_policy_root, 32) &&
-        zcl_codec_read_u32le(&reader, &out->maximum_cycles) &&
-        zcl_codec_read_u32le(&reader, &reserved32) &&
-        zcl_codec_read_u64le(&reader, &out->per_cycle_cap_atoms) &&
-        zcl_codec_read_u64le(&reader, &out->total_cap_atoms) &&
-        zcl_codec_read_i64le(&reader, &out->created_unix) &&
-        zcl_codec_read_i64le(&reader, &out->expires_unix) &&
-        zcl_codec_read_u64le(&reader, &out->sequence) &&
-        zcl_codec_read_bytes(&reader, out->signature, 64) &&
-        zcl_codec_reader_finish(&reader);
+    bool ok = continuity_read_head(&reader, magic, out, &reserved8,
+                                   &reserved16) &&
+        continuity_read_roots(&reader, out) &&
+        continuity_read_tail(&reader, out, &reserved32);
     enum vcs_zcode_continuity_error error = !ok
         ? VCS_ZCODE_CONTINUITY_WIRE_SIZE
         : memcmp(magic, continuity_magic, 8) != 0
@@ -258,15 +337,56 @@ enum vcs_zcode_continuity_error vcs_zcode_continuity_policy_verify(
         ? VCS_ZCODE_CONTINUITY_OK : VCS_ZCODE_CONTINUITY_SIGNATURE;
 }
 
-enum vcs_zcode_continuity_error vcs_zcode_continuity_event_key(
-    const struct vcs_zcode_creation_attribution_v1 *attribution,
-    const struct vcs_zcode_continuity_policy_v1 *policy,
-    const struct vcs_zcode_task_v1 *task,
-    const struct vcs_zcode_score_receipt_v1 *score, uint8_t out[32])
+/* Maps a creation category to its event class and score unit. Shared by the
+ * continuity and creation event keys so the two cannot drift apart. */
+static bool creation_event_class(uint16_t category, uint8_t *event_class,
+    uint8_t *score_unit)
 {
-    if (out) memset(out, 0, 32);
-    if (!attribution || !policy || !task || !score || !out)
-        return VCS_ZCODE_CONTINUITY_NULL;
+    switch (category) {
+    case VCS_ZCODE_CREATION_BORN_RED_FIX:
+    case VCS_ZCODE_CREATION_SECURITY_FIX:
+        *event_class = 1;
+        *score_unit = VCS_ZCODE_SCORE_BORN_RED_DEFECT_TEST;
+        return true;
+    case VCS_ZCODE_CREATION_INDEPENDENT_REPRODUCTION:
+        *event_class = 2;
+        *score_unit = VCS_ZCODE_SCORE_INDEPENDENT_REPRODUCTION;
+        return true;
+    case VCS_ZCODE_CREATION_COMPATIBILITY:
+        *event_class = 3;
+        *score_unit = VCS_ZCODE_SCORE_COMPATIBILITY_MAINTENANCE;
+        return true;
+    case VCS_ZCODE_CREATION_PRESERVATION:
+        *event_class = 4;
+        *score_unit = VCS_ZCODE_SCORE_COMPATIBILITY_MAINTENANCE;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool continuity_score_matches(
+    const struct vcs_zcode_score_receipt_v1 *score,
+    const struct vcs_zcode_creation_attribution_v1 *attribution)
+{
+    return vcs_zcode_score_receipt_verify(score) == VCS_ZCODE_SCORE_OK &&
+        memcmp(score->task_root, attribution->task_root, 32) == 0 &&
+        memcmp(score->candidate_root, attribution->candidate_root, 32) == 0 &&
+        memcmp(score->package_root, attribution->package_root, 32) == 0 &&
+        memcmp(score->release_root, attribution->release_root, 32) == 0;
+}
+
+static bool continuity_score_awarded(
+    const struct vcs_zcode_score_receipt_v1 *score, uint8_t score_unit)
+{
+    return (score->awarded_mask & (UINT8_C(1) << score_unit)) != 0 &&
+        zcl_bytes_any_set(score->evidence_roots[score_unit], 32);
+}
+
+static enum vcs_zcode_continuity_error continuity_event_lineage_check(
+    const struct vcs_zcode_creation_attribution_v1 *attribution,
+    const struct vcs_zcode_continuity_policy_v1 *policy)
+{
     if (vcs_zcode_creation_attribution_validate(attribution) !=
             VCS_ZCODE_CREATION_OK ||
         attribution->category == VCS_ZCODE_CREATION_PUBLIC_SOURCE ||
@@ -276,12 +396,19 @@ enum vcs_zcode_continuity_error vcs_zcode_continuity_event_key(
     if (vcs_zcode_continuity_policy_verify(
             policy, attribution->created_unix) != VCS_ZCODE_CONTINUITY_OK)
         return VCS_ZCODE_CONTINUITY_SIGNATURE;
-
     uint8_t policy_root[32];
     if (vcs_zcode_continuity_policy_root(policy, policy_root) !=
             VCS_ZCODE_CONTINUITY_OK ||
         memcmp(policy_root, attribution->lineage_root, 32) != 0)
         return VCS_ZCODE_CONTINUITY_ROOT;
+    return VCS_ZCODE_CONTINUITY_OK;
+}
+
+static enum vcs_zcode_continuity_error continuity_event_binding_check(
+    const struct vcs_zcode_creation_attribution_v1 *attribution,
+    const struct vcs_zcode_continuity_policy_v1 *policy,
+    const struct vcs_zcode_task_v1 *task)
+{
     if (memcmp(policy->package_root, attribution->package_root, 32) != 0 ||
         memcmp(policy->current_release_root,
                attribution->release_root, 32) != 0)
@@ -296,74 +423,92 @@ enum vcs_zcode_continuity_error vcs_zcode_continuity_event_key(
         return VCS_ZCODE_CONTINUITY_TRANSITION;
     if (attribution->award_atoms > policy->per_cycle_cap_atoms)
         return VCS_ZCODE_CONTINUITY_CAP;
-    if (vcs_zcode_score_receipt_verify(score) != VCS_ZCODE_SCORE_OK ||
-        memcmp(score->task_root, attribution->task_root, 32) != 0 ||
-        memcmp(score->candidate_root, attribution->candidate_root, 32) != 0 ||
-        memcmp(score->package_root, attribution->package_root, 32) != 0 ||
-        memcmp(score->release_root, attribution->release_root, 32) != 0)
-        return VCS_ZCODE_CONTINUITY_CAS;
+    return VCS_ZCODE_CONTINUITY_OK;
+}
 
-    uint8_t event_class = 0, score_unit = 0;
-    const uint8_t *subject = NULL, *from = NULL, *to = NULL;
-    uint8_t zero[32] = {0};
-    switch (attribution->category) {
-    case VCS_ZCODE_CREATION_BORN_RED_FIX:
+/* The event shape: class, score unit and the three hashed roots. */
+struct continuity_event_shape {
+    uint8_t event_class;
+    uint8_t score_unit;
+    const uint8_t *subject;
+    const uint8_t *from;
+    const uint8_t *to;
+};
+
+static enum vcs_zcode_continuity_error continuity_event_shape(
+    const struct vcs_zcode_creation_attribution_v1 *attribution,
+    const struct vcs_zcode_continuity_policy_v1 *policy,
+    const struct vcs_zcode_score_receipt_v1 *score,
+    struct continuity_event_shape *shape)
+{
+    if (!creation_event_class(attribution->category, &shape->event_class,
+                              &shape->score_unit))
+        return VCS_ZCODE_CONTINUITY_EVENT_MASK;
+    switch (shape->event_class) {
+    case 1:
         if ((policy->event_mask & VCS_ZCODE_CONTINUITY_BORN_RED_FIX) == 0)
             return VCS_ZCODE_CONTINUITY_EVENT_MASK;
-        event_class = 1;
-        score_unit = VCS_ZCODE_SCORE_BORN_RED_DEFECT_TEST;
-        subject = score->evidence_roots[score_unit];
-        from = zero; to = zero;
+        shape->subject = score->evidence_roots[shape->score_unit];
+        shape->from = continuity_zero_root;
+        shape->to = continuity_zero_root;
         break;
-    case VCS_ZCODE_CREATION_SECURITY_FIX:
-        if ((policy->event_mask & VCS_ZCODE_CONTINUITY_BORN_RED_FIX) == 0)
-            return VCS_ZCODE_CONTINUITY_EVENT_MASK;
-        event_class = 1;
-        score_unit = VCS_ZCODE_SCORE_BORN_RED_DEFECT_TEST;
-        subject = score->evidence_roots[score_unit];
-        from = zero; to = zero;
-        break;
-    case VCS_ZCODE_CREATION_INDEPENDENT_REPRODUCTION:
+    case 2:
         if ((policy->event_mask &
              VCS_ZCODE_CONTINUITY_INDEPENDENT_REPRODUCTION) == 0)
             return VCS_ZCODE_CONTINUITY_EVENT_MASK;
-        event_class = 2;
-        score_unit = VCS_ZCODE_SCORE_INDEPENDENT_REPRODUCTION;
-        subject = attribution->release_root;
-        from = zero; to = policy->to_capsule_root;
+        shape->subject = attribution->release_root;
+        shape->from = continuity_zero_root;
+        shape->to = policy->to_capsule_root;
         break;
-    case VCS_ZCODE_CREATION_COMPATIBILITY:
+    case 3:
         if ((policy->event_mask & VCS_ZCODE_CONTINUITY_COMPATIBILITY) == 0)
             return VCS_ZCODE_CONTINUITY_EVENT_MASK;
-        event_class = 3;
-        score_unit = VCS_ZCODE_SCORE_COMPATIBILITY_MAINTENANCE;
-        subject = attribution->package_root;
-        from = policy->from_capsule_root;
-        to = policy->to_capsule_root;
+        shape->subject = attribution->package_root;
+        shape->from = policy->from_capsule_root;
+        shape->to = policy->to_capsule_root;
         break;
-    case VCS_ZCODE_CREATION_PRESERVATION:
+    case 4:
         if ((policy->event_mask & VCS_ZCODE_CONTINUITY_PRESERVATION) == 0)
             return VCS_ZCODE_CONTINUITY_EVENT_MASK;
-        event_class = 4;
-        score_unit = VCS_ZCODE_SCORE_COMPATIBILITY_MAINTENANCE;
-        subject = attribution->release_root;
-        from = policy->from_capsule_root;
-        to = policy->to_capsule_root;
+        shape->subject = attribution->release_root;
+        shape->from = policy->from_capsule_root;
+        shape->to = policy->to_capsule_root;
         break;
-    default: return VCS_ZCODE_CONTINUITY_EVENT_MASK;
     }
-    if ((score->awarded_mask & (UINT8_C(1) << score_unit)) == 0 ||
-        !zcl_bytes_any_set(score->evidence_roots[score_unit], 32))
+    return VCS_ZCODE_CONTINUITY_OK;
+}
+
+enum vcs_zcode_continuity_error vcs_zcode_continuity_event_key(
+    const struct vcs_zcode_creation_attribution_v1 *attribution,
+    const struct vcs_zcode_continuity_policy_v1 *policy,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_score_receipt_v1 *score, uint8_t out[32])
+{
+    if (out) memset(out, 0, 32);
+    if (!attribution || !policy || !task || !score || !out)
+        return VCS_ZCODE_CONTINUITY_NULL;
+    enum vcs_zcode_continuity_error error =
+        continuity_event_lineage_check(attribution, policy);
+    if (error != VCS_ZCODE_CONTINUITY_OK) return error;
+    error = continuity_event_binding_check(attribution, policy, task);
+    if (error != VCS_ZCODE_CONTINUITY_OK) return error;
+    if (!continuity_score_matches(score, attribution))
+        return VCS_ZCODE_CONTINUITY_CAS;
+
+    struct continuity_event_shape shape = {0};
+    error = continuity_event_shape(attribution, policy, score, &shape);
+    if (error != VCS_ZCODE_CONTINUITY_OK) return error;
+    if (!continuity_score_awarded(score, shape.score_unit))
         return VCS_ZCODE_CONTINUITY_CAS;
 
     struct sha3_256_ctx sha;
     static const char domain[] = VCS_ZCODE_CONTINUITY_EVENT_KEY_DOMAIN;
     sha3_256_init(&sha);
     sha3_256_write(&sha, (const uint8_t *)domain, sizeof(domain));
-    sha3_256_write(&sha, &event_class, sizeof(event_class));
-    sha3_256_write(&sha, subject, 32);
-    sha3_256_write(&sha, from, 32);
-    sha3_256_write(&sha, to, 32);
+    sha3_256_write(&sha, &shape.event_class, sizeof(shape.event_class));
+    sha3_256_write(&sha, shape.subject, 32);
+    sha3_256_write(&sha, shape.from, 32);
+    sha3_256_write(&sha, shape.to, 32);
     sha3_256_finalize(&sha, out);
     return VCS_ZCODE_CONTINUITY_OK;
 }
@@ -380,39 +525,16 @@ enum vcs_zcode_continuity_error vcs_zcode_creation_event_key(
             VCS_ZCODE_CREATION_OK ||
         attribution->category == VCS_ZCODE_CREATION_PUBLIC_SOURCE)
         return VCS_ZCODE_CONTINUITY_EVENT_MASK;
-    if (vcs_zcode_score_receipt_verify(score) != VCS_ZCODE_SCORE_OK ||
-        memcmp(score->task_root, attribution->task_root, 32) != 0 ||
-        memcmp(score->candidate_root, attribution->candidate_root, 32) != 0 ||
-        memcmp(score->package_root, attribution->package_root, 32) != 0 ||
-        memcmp(score->release_root, attribution->release_root, 32) != 0 ||
+    if (!continuity_score_matches(score, attribution) ||
         memcmp(task->proof_policy_root,
                attribution->proof_policy_root, 32) != 0)
         return VCS_ZCODE_CONTINUITY_CAS;
 
     uint8_t event_class = 0, score_unit = 0;
-    switch (attribution->category) {
-    case VCS_ZCODE_CREATION_BORN_RED_FIX:
-    case VCS_ZCODE_CREATION_SECURITY_FIX:
-        event_class = 1;
-        score_unit = VCS_ZCODE_SCORE_BORN_RED_DEFECT_TEST;
-        break;
-    case VCS_ZCODE_CREATION_INDEPENDENT_REPRODUCTION:
-        event_class = 2;
-        score_unit = VCS_ZCODE_SCORE_INDEPENDENT_REPRODUCTION;
-        break;
-    case VCS_ZCODE_CREATION_COMPATIBILITY:
-        event_class = 3;
-        score_unit = VCS_ZCODE_SCORE_COMPATIBILITY_MAINTENANCE;
-        break;
-    case VCS_ZCODE_CREATION_PRESERVATION:
-        event_class = 4;
-        score_unit = VCS_ZCODE_SCORE_COMPATIBILITY_MAINTENANCE;
-        break;
-    default:
+    if (!creation_event_class(attribution->category, &event_class,
+                              &score_unit))
         return VCS_ZCODE_CONTINUITY_EVENT_MASK;
-    }
-    if ((score->awarded_mask & (UINT8_C(1) << score_unit)) == 0 ||
-        !zcl_bytes_any_set(score->evidence_roots[score_unit], 32))
+    if (!continuity_score_awarded(score, score_unit))
         return VCS_ZCODE_CONTINUITY_CAS;
 
     struct sha3_256_ctx sha;

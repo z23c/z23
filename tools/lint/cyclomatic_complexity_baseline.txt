@@ -452,12 +452,6 @@ contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_from_
 contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_validate:28
 contexts/commons/modules/vcs/src/zcode_commons_economics.c:vcs_zcode_commons_error_string:19
 contexts/commons/modules/vcs/src/zcode_commons_economics.c:vcs_zcode_epoch_select_v2:39
-contexts/commons/modules/vcs/src/zcode_continuity_policy.c:continuity_body:28
-contexts/commons/modules/vcs/src/zcode_continuity_policy.c:continuity_fields:20
-contexts/commons/modules/vcs/src/zcode_continuity_policy.c:vcs_zcode_continuity_error_string:21
-contexts/commons/modules/vcs/src/zcode_continuity_policy.c:vcs_zcode_continuity_event_key:36
-contexts/commons/modules/vcs/src/zcode_continuity_policy.c:vcs_zcode_continuity_policy_parse:33
-contexts/commons/modules/vcs/src/zcode_continuity_policy.c:vcs_zcode_creation_event_key:21
 contexts/commons/modules/vcs/src/zcode_contributor_binding.c:binding_fields:20
 contexts/commons/modules/vcs/src/zcode_contributor_binding.c:binding_fields_v2:29
 contexts/commons/modules/vcs/src/zcode_contributor_binding.c:vcs_zcode_contributor_binding_seal_v2:37
