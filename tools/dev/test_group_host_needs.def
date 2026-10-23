@@ -408,6 +408,10 @@ ZCL_TEST_GROUP_BUILD_NEED("test_z23kernel_boot", "build/bin/z23kernel.identity",
  * runtime acceptance also builds the optional program separately. */
 ZCL_TEST_GROUP_BUILD_NEED("test_device_host_runtime", "build/bin/z23", "z23")
 ZCL_TEST_GROUP_BUILD_NEED("test_device_host_runtime", "build/bin/tunnel", "native-tunnel")
+/* Its terminal hub cases exec fbsh as the session shell; without it the hub
+ * answers REFUSE instead of READY. The proof prefork builds it; local runs
+ * need the row. */
+ZCL_TEST_GROUP_BUILD_NEED("test_device_host_runtime", "build/bin/fbsh", "fbsh")
 ZCL_TEST_GROUP_BUILD_NEED("test_device_command", "build/bin/z23", "z23")
 ZCL_TEST_GROUP_BUILD_NEED("test_zcode_package_artifact", "build/bin/z23", "z23")
 
