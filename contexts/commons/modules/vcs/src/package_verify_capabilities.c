@@ -227,24 +227,28 @@ const char *vcs_pkgcap_verdict_string(enum vcs_pkgcap_verdict verdict)
 
 const char *vcs_pkgcap_rule_string(enum vcs_pkgcap_rule rule)
 {
-    switch (rule) {
-    case VCS_PKGCAP_RULE_MATCH: return "match";
-    case VCS_PKGCAP_RULE_REACH_EXCEEDS_CLAIM: return "reach-exceeds-claim";
-    case VCS_PKGCAP_RULE_NULL_ARGUMENT: return "null-argument";
-    case VCS_PKGCAP_RULE_NO_TABLE: return "no-capability-table";
-    case VCS_PKGCAP_RULE_TABLE_HOLLOW: return "capability-table-hollow";
-    case VCS_PKGCAP_RULE_TABLE_UNSOUND: return "capability-table-unsound";
-    case VCS_PKGCAP_RULE_TABLE_DIGEST_MISMATCH:
-        return "capability-table-digest-mismatch";
-    case VCS_PKGCAP_RULE_NO_MANIFEST: return "no-manifest";
-    case VCS_PKGCAP_RULE_MANIFEST_UNPARSEABLE: return "manifest-unparseable";
-    case VCS_PKGCAP_RULE_CLAIM_ABSENT: return "claim-absent";
-    case VCS_PKGCAP_RULE_CLAIM_MALFORMED: return "claim-malformed";
-    case VCS_PKGCAP_RULE_NO_SHIPPED_SOURCES: return "no-shipped-sources";
-    case VCS_PKGCAP_RULE_SOURCE_UNREADABLE: return "source-unreadable";
-    case VCS_PKGCAP_RULE_LIMIT_EXCEEDED: return "limit-exceeded";
-    case VCS_PKGCAP_RULE_CLAIM_NOT_REACHED: return "claim-not-reached";
-    }
+    /* One name per rule, indexed by the enum value. A value outside the enum
+     * reads as the unknown-rule name. */
+    static const char *const k_rule_names[] = {
+        [VCS_PKGCAP_RULE_MATCH] = "match",
+        [VCS_PKGCAP_RULE_REACH_EXCEEDS_CLAIM] = "reach-exceeds-claim",
+        [VCS_PKGCAP_RULE_NULL_ARGUMENT] = "null-argument",
+        [VCS_PKGCAP_RULE_NO_TABLE] = "no-capability-table",
+        [VCS_PKGCAP_RULE_TABLE_HOLLOW] = "capability-table-hollow",
+        [VCS_PKGCAP_RULE_TABLE_UNSOUND] = "capability-table-unsound",
+        [VCS_PKGCAP_RULE_TABLE_DIGEST_MISMATCH] =
+            "capability-table-digest-mismatch",
+        [VCS_PKGCAP_RULE_NO_MANIFEST] = "no-manifest",
+        [VCS_PKGCAP_RULE_MANIFEST_UNPARSEABLE] = "manifest-unparseable",
+        [VCS_PKGCAP_RULE_CLAIM_ABSENT] = "claim-absent",
+        [VCS_PKGCAP_RULE_CLAIM_MALFORMED] = "claim-malformed",
+        [VCS_PKGCAP_RULE_NO_SHIPPED_SOURCES] = "no-shipped-sources",
+        [VCS_PKGCAP_RULE_SOURCE_UNREADABLE] = "source-unreadable",
+        [VCS_PKGCAP_RULE_LIMIT_EXCEEDED] = "limit-exceeded",
+        [VCS_PKGCAP_RULE_CLAIM_NOT_REACHED] = "claim-not-reached",
+    };
+    if ((size_t)rule < sizeof(k_rule_names) / sizeof(k_rule_names[0]))
+        return k_rule_names[rule];
     return "unknown-rule";
 }
 
@@ -378,123 +382,192 @@ static void pkgcap_record(struct pkgcap_scan_ctx *ctx, const char *class_name,
  * is excluded; a `#include` line is skipped whole, so `<sys/socket.h>` does
  * not read as a socket call. No preprocessor runs — see the header for what
  * that costs in both directions. */
+
+/* The scan position. prev1 and prev2 are the two bytes before i, which is all
+ * the member-access test needs; line is the 1-based line of text[i]; line_start
+ * is true until the first token of a line has been read. */
+struct pkgcap_scan_pos {
+    size_t i;
+    uint32_t line;
+    char prev1;
+    char prev2;
+    bool line_start;
+};
+
+static void pkgcap_scan_push(struct pkgcap_scan_pos *cur, char c)
+{
+    cur->prev2 = cur->prev1;
+    cur->prev1 = c;
+}
+
+/* Newlines, horizontal space and a backslash-newline splice. A spliced line
+ * stays the same logical line. */
+static bool pkgcap_scan_blank(const char *text, size_t len,
+                              struct pkgcap_scan_pos *cur)
+{
+    char c = text[cur->i];
+    if (c == '\n') {
+        cur->line++;
+        cur->line_start = true;
+        cur->i++;
+        return true;
+    }
+    if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') {
+        cur->i++;
+        return true;
+    }
+    if (c == '\\' && cur->i + 1 < len && text[cur->i + 1] == '\n') {
+        cur->line++;
+        cur->i += 2;
+        return true;
+    }
+    return false;
+}
+
+static void pkgcap_skip_block_comment(const char *text, size_t len,
+                                      struct pkgcap_scan_pos *cur)
+{
+    cur->i += 2;
+    while (cur->i + 1 < len &&
+           !(text[cur->i] == '*' && text[cur->i + 1] == '/')) {
+        if (text[cur->i] == '\n') cur->line++;
+        cur->i++;
+    }
+    cur->i = cur->i + 1 < len ? cur->i + 2 : len;
+    pkgcap_scan_push(cur, '\0');
+}
+
+/* Line and block comments. Neither touches line_start. */
+static bool pkgcap_scan_comment(const char *text, size_t len,
+                                struct pkgcap_scan_pos *cur)
+{
+    char c = text[cur->i];
+    if (c == '/' && cur->i + 1 < len && text[cur->i + 1] == '/') {
+        cur->i += 2;
+        while (cur->i < len && text[cur->i] != '\n') cur->i++;
+        return true;
+    }
+    if (c == '/' && cur->i + 1 < len && text[cur->i + 1] == '*') {
+        pkgcap_skip_block_comment(text, len, cur);
+        return true;
+    }
+    return false;
+}
+
+/* True when the keyword `include` starts at j and is not a longer identifier. */
+static bool pkgcap_is_include_word(const char *text, size_t len, size_t j)
+{
+    if (j + 7 > len || strncmp(text + j, "include", 7) != 0) return false;
+    return j + 7 == len || !pkgcap_ident_char(text[j + 7]);
+}
+
+/* Consume to the end of a directive line, through its splices. The newline
+ * that ends the line is left for the caller. */
+static void pkgcap_skip_directive_line(const char *text, size_t len,
+                                       struct pkgcap_scan_pos *cur)
+{
+    while (cur->i < len && text[cur->i] != '\n') {
+        if (text[cur->i] == '\\' && cur->i + 1 < len &&
+            text[cur->i + 1] == '\n') {
+            cur->line++;
+            cur->i++;
+        }
+        cur->i++;
+    }
+}
+
+/* A `#include` line at the start of a line names header paths, not calls.
+ * Returns false, with nothing consumed, when the line is not an include. */
+static bool pkgcap_skip_include(const char *text, size_t len,
+                                struct pkgcap_scan_pos *cur)
+{
+    size_t j = cur->i + 1;
+    while (j < len && (text[j] == ' ' || text[j] == '\t')) j++;
+    if (!pkgcap_is_include_word(text, len, j)) return false;
+    pkgcap_skip_directive_line(text, len, cur);
+    return true;
+}
+
+/* String and character literals. The quote is pushed as the previous byte. */
+static bool pkgcap_scan_literal(const char *text, size_t len,
+                                struct pkgcap_scan_pos *cur)
+{
+    char quote = text[cur->i];
+    if (quote != '"' && quote != '\'') return false;
+    cur->i++;
+    while (cur->i < len && text[cur->i] != quote) {
+        if (text[cur->i] == '\\' && cur->i + 1 < len) {
+            if (text[cur->i + 1] == '\n') cur->line++;
+            cur->i++;
+        } else if (text[cur->i] == '\n') {
+            cur->line++;
+        }
+        cur->i++;
+    }
+    if (cur->i < len) cur->i++;
+    pkgcap_scan_push(cur, quote);
+    return true;
+}
+
+/* An identifier that names a capability symbol is a reach. Each class it
+ * classifies to is recorded, with whether the name is call-shaped. */
+static void pkgcap_reach_ident(struct pkgcap_scan_ctx *ctx, const char *text,
+                               size_t len, const struct pkgcap_scan_pos *cur,
+                               size_t start, size_t ident_len)
+{
+    const char *classes[PKGCAP_SPELLINGS];
+    uint32_t n = pkgcap_lookup(ctx->table, text + start, ident_len, classes);
+    if (n == 0) return;
+    size_t j = cur->i;
+    while (j < len && (text[j] == ' ' || text[j] == '\t' ||
+                       text[j] == '\n' || text[j] == '\r'))
+        j++;
+    bool call_shaped = j < len && text[j] == '(';
+    for (uint32_t k = 0; k < n; k++)
+        pkgcap_record(ctx, classes[k], text + start, ident_len, cur->line,
+                      call_shaped);
+}
+
+static void pkgcap_scan_ident(struct pkgcap_scan_ctx *ctx, const char *text,
+                              size_t len, struct pkgcap_scan_pos *cur)
+{
+    size_t start = cur->i;
+    while (cur->i < len && pkgcap_ident_char(text[cur->i])) cur->i++;
+    size_t ident_len = cur->i - start;
+    bool member = (cur->prev1 == '.' && cur->prev2 != '.') ||
+                  (cur->prev1 == '>' && cur->prev2 == '-');
+    pkgcap_scan_push(cur, text[cur->i - 1]);
+    if (member || ident_len >= VCS_PKGCAP_SYMBOL_MAX) return;
+    pkgcap_reach_ident(ctx, text, len, cur, start, ident_len);
+}
+
+/* One token, or one run of trivia, from the cursor. Every call advances i. */
+static void pkgcap_scan_step(struct pkgcap_scan_ctx *ctx, const char *text,
+                             size_t len, struct pkgcap_scan_pos *cur)
+{
+    char c = text[cur->i];
+    if (pkgcap_scan_blank(text, len, cur) ||
+        pkgcap_scan_comment(text, len, cur))
+        return;
+    if (c == '#' && cur->line_start && pkgcap_skip_include(text, len, cur))
+        return;
+    cur->line_start = false;
+    if (pkgcap_scan_literal(text, len, cur)) return;
+    if (pkgcap_ident_start(c)) {
+        pkgcap_scan_ident(ctx, text, len, cur);
+        return;
+    }
+    pkgcap_scan_push(cur, c);
+    cur->i++;
+}
+
 static void pkgcap_scan_source(struct pkgcap_scan_ctx *ctx, const char *text,
                                size_t len)
 {
-    size_t i = 0;
-    uint32_t line = 1;
-    char prev1 = '\0';
-    char prev2 = '\0';
-    bool line_start = true;
-
-    while (i < len) {
-        char c = text[i];
-
-        if (c == '\n') {
-            line++;
-            line_start = true;
-            i++;
-            continue;
-        }
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\f' || c == '\v') {
-            i++;
-            continue;
-        }
-        if (c == '\\' && i + 1 < len && text[i + 1] == '\n') {
-            line++;
-            i += 2;
-            continue; /* a spliced line stays the same logical line */
-        }
-
-        /* comments */
-        if (c == '/' && i + 1 < len && text[i + 1] == '/') {
-            i += 2;
-            while (i < len && text[i] != '\n') i++;
-            continue;
-        }
-        if (c == '/' && i + 1 < len && text[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < len && !(text[i] == '*' && text[i + 1] == '/')) {
-                if (text[i] == '\n') line++;
-                i++;
-            }
-            i = i + 1 < len ? i + 2 : len;
-            prev2 = prev1;
-            prev1 = '\0';
-            continue;
-        }
-
-        /* a #include line names header paths, not calls */
-        if (line_start && c == '#') {
-            size_t j = i + 1;
-            while (j < len && (text[j] == ' ' || text[j] == '\t')) j++;
-            if (j + 7 <= len && strncmp(text + j, "include", 7) == 0 &&
-                (j + 7 == len || !pkgcap_ident_char(text[j + 7]))) {
-                while (i < len && text[i] != '\n') {
-                    if (text[i] == '\\' && i + 1 < len &&
-                        text[i + 1] == '\n') {
-                        line++;
-                        i++;
-                    }
-                    i++;
-                }
-                continue;
-            }
-            line_start = false;
-            prev2 = prev1;
-            prev1 = c;
-            i++;
-            continue;
-        }
-        line_start = false;
-
-        /* string and character literals */
-        if (c == '"' || c == '\'') {
-            char quote = c;
-            i++;
-            while (i < len && text[i] != quote) {
-                if (text[i] == '\\' && i + 1 < len) {
-                    if (text[i + 1] == '\n') line++;
-                    i++;
-                } else if (text[i] == '\n') {
-                    line++;
-                }
-                i++;
-            }
-            if (i < len) i++;
-            prev2 = prev1;
-            prev1 = quote;
-            continue;
-        }
-
-        if (pkgcap_ident_start(c)) {
-            size_t start = i;
-            while (i < len && pkgcap_ident_char(text[i])) i++;
-            size_t ident_len = i - start;
-            bool member = (prev1 == '.' && prev2 != '.') ||
-                          (prev1 == '>' && prev2 == '-');
-            prev2 = prev1;
-            prev1 = text[i - 1];
-            if (member || ident_len >= VCS_PKGCAP_SYMBOL_MAX) continue;
-            const char *classes[PKGCAP_SPELLINGS];
-            uint32_t n =
-                pkgcap_lookup(ctx->table, text + start, ident_len, classes);
-            if (n == 0) continue;
-            size_t j = i;
-            while (j < len && (text[j] == ' ' || text[j] == '\t' ||
-                               text[j] == '\n' || text[j] == '\r'))
-                j++;
-            bool call_shaped = j < len && text[j] == '(';
-            for (uint32_t k = 0; k < n; k++)
-                pkgcap_record(ctx, classes[k], text + start, ident_len, line,
-                              call_shaped);
-            continue;
-        }
-
-        prev2 = prev1;
-        prev1 = c;
-        i++;
-    }
+    struct pkgcap_scan_pos cur = {
+        .i = 0, .line = 1, .prev1 = '\0', .prev2 = '\0', .line_start = true
+    };
+    while (cur.i < len) pkgcap_scan_step(ctx, text, len, &cur);
 }
 
 /* ── table load ──────────────────────────────────────────────────── */
@@ -511,15 +584,18 @@ static bool pkgcap_row_space(char c)
     return c == ' ' || c == '\t' || c == '\n' || c == '\r';
 }
 
-static bool pkgcap_table_load(const char *text, size_t len,
-                              struct pkgcap_table *out, uint32_t *attempted,
-                              uint32_t *parsed)
+static size_t pkgcap_skip_row_space(const char *text, size_t len, size_t j)
 {
-    /* Size the index from the file rather than from a guess. A fixed table
-     * that silently stops inserting once it fills would DROP rows — and a
-     * dropped row is a declassified symbol, which is exactly what a
-     * substituted table is for. Count the markers first, then size to four
-     * times that so the open addressing never runs hot. */
+    while (j < len && pkgcap_row_space(text[j])) j++;
+    return j;
+}
+
+/* Count the row markers. The index is sized from this count, not from a
+ * guess: a fixed table that silently stops inserting once it fills would DROP
+ * rows — and a dropped row is a declassified symbol, which is exactly what a
+ * substituted table is for. */
+static size_t pkgcap_count_markers(const char *text, size_t len)
+{
     const size_t marker_len = sizeof(PKGCAP_ROW_MARKER) - 1;
     size_t markers = 0;
     for (size_t k = 0; k + marker_len <= len; k++)
@@ -527,6 +603,12 @@ static bool pkgcap_table_load(const char *text, size_t len,
             markers++;
             k += marker_len - 1;
         }
+    return markers;
+}
+
+/* Four slots per marker, so the open addressing never runs hot. */
+static bool pkgcap_table_alloc(struct pkgcap_table *out, size_t markers)
+{
     size_t slot_count = 1024;
     while (slot_count < markers * 4 + 8) {
         if (slot_count > (size_t)1 << 24) return false;
@@ -537,6 +619,72 @@ static bool pkgcap_table_load(const char *text, size_t len,
     out->mask = slot_count - 1;
     out->rows = 0;
     out->classified = 0;
+    return true;
+}
+
+static size_t pkgcap_symbol_end(const char *text, size_t len, size_t j)
+{
+    while (j < len && text[j] != '"' && text[j] != '\n') j++;
+    return j;
+}
+
+static size_t pkgcap_class_end(const char *text, size_t len, size_t j)
+{
+    while (j < len && ((text[j] >= 'A' && text[j] <= 'Z') ||
+                       (text[j] >= '0' && text[j] <= '9') || text[j] == '_'))
+        j++;
+    return j;
+}
+
+static bool pkgcap_row_fields_ok(size_t sym_len, const char *cls,
+                                 size_t cls_len)
+{
+    return sym_len > 0 && sym_len < VCS_PKGCAP_SYMBOL_MAX && cls_len > 4 &&
+           cls_len < VCS_PKGCAP_CLASS_MAX && strncmp(cls, "CAP_", 4) == 0;
+}
+
+/* Read one row whose marker ends at `after`. A row that does not parse
+ * returns `after`, so the caller resumes just past the marker; a row that
+ * parses returns the index past its class. A long symbol pushes its class onto
+ * the NEXT line — seven rows in this tree's own table do exactly that. A reader
+ * that skipped only spaces and tabs dropped all seven silently, which is one
+ * declassified symbol per dropped row. Newlines are whitespace here for that
+ * reason, and the attempted/parsed comparison in the caller is what makes the
+ * next such drop loud instead of silent. */
+static size_t pkgcap_load_row(const char *text, size_t len, size_t after,
+                              struct pkgcap_table *table, uint32_t *attempted,
+                              uint32_t *parsed)
+{
+    size_t j = pkgcap_skip_row_space(text, len, after);
+    /* The marker must be followed by a quoted symbol. That is what keeps the
+     * prose occurrence of the macro name in the table file's own header
+     * comment from parsing as a row, and it is why the attempted count is a
+     * count of ROWS rather than of mentions. */
+    if (j >= len || text[j] != '"') return after;
+    (*attempted)++;
+    size_t sym_start = j + 1;
+    size_t sym_end = pkgcap_symbol_end(text, len, sym_start);
+    if (sym_end >= len || text[sym_end] != '"') return after;
+    size_t sym_len = sym_end - sym_start;
+    j = pkgcap_skip_row_space(text, len, sym_end + 1);
+    if (j >= len || text[j] != ',') return after;
+    size_t cls_start = pkgcap_skip_row_space(text, len, j + 1);
+    j = pkgcap_class_end(text, len, cls_start);
+    size_t cls_len = j - cls_start;
+    if (pkgcap_row_fields_ok(sym_len, text + cls_start, cls_len)) {
+        pkgcap_table_put(table, text + sym_start, sym_len, text + cls_start,
+                         cls_len);
+        (*parsed)++;
+    }
+    return j;
+}
+
+static bool pkgcap_table_load(const char *text, size_t len,
+                              struct pkgcap_table *out, uint32_t *attempted,
+                              uint32_t *parsed)
+{
+    const size_t marker_len = sizeof(PKGCAP_ROW_MARKER) - 1;
+    if (!pkgcap_table_alloc(out, pkgcap_count_markers(text, len))) return false;
     *attempted = 0;
     *parsed = 0;
 
@@ -546,53 +694,7 @@ static bool pkgcap_table_load(const char *text, size_t len,
             i++;
             continue;
         }
-        size_t j = i + marker_len;
-        while (j < len && pkgcap_row_space(text[j])) j++;
-        /* The marker must be followed by a quoted symbol. That is what keeps
-         * the prose occurrence of the macro name in the table file's own
-         * header comment from parsing as a row, and it is why the attempted
-         * count below is a count of ROWS rather than of mentions. */
-        if (j >= len || text[j] != '"') {
-            i += marker_len;
-            continue;
-        }
-        (*attempted)++;
-        j++;
-        size_t sym_start = j;
-        while (j < len && text[j] != '"' && text[j] != '\n') j++;
-        if (j >= len || text[j] != '"') {
-            i += marker_len;
-            continue;
-        }
-        size_t sym_len = j - sym_start;
-        j++;
-        while (j < len && pkgcap_row_space(text[j])) j++;
-        if (j >= len || text[j] != ',') {
-            i += marker_len;
-            continue;
-        }
-        j++;
-        /* A long symbol pushes its class onto the NEXT line — seven rows in
-         * this tree's own table do exactly that. A reader that skipped only
-         * spaces and tabs dropped all seven silently, which is one
-         * declassified symbol per dropped row. Newlines are whitespace here
-         * for that reason, and the attempted/parsed comparison in the caller
-         * is what makes the next such drop loud instead of silent. */
-        while (j < len && pkgcap_row_space(text[j])) j++;
-        size_t cls_start = j;
-        while (j < len && ((text[j] >= 'A' && text[j] <= 'Z') ||
-                           (text[j] >= '0' && text[j] <= '9') ||
-                           text[j] == '_'))
-            j++;
-        size_t cls_len = j - cls_start;
-        if (sym_len > 0 && sym_len < VCS_PKGCAP_SYMBOL_MAX && cls_len > 4 &&
-            cls_len < VCS_PKGCAP_CLASS_MAX &&
-            strncmp(text + cls_start, "CAP_", 4) == 0) {
-            pkgcap_table_put(out, text + sym_start, sym_len, text + cls_start,
-                             cls_len);
-            (*parsed)++;
-        }
-        i = j;
+        i = pkgcap_load_row(text, len, i + marker_len, out, attempted, parsed);
     }
     return true;
 }
@@ -716,14 +818,13 @@ static bool pkgcap_claim_load(const struct json_value *meta,
     return true;
 }
 
-bool vcs_package_verify_capabilities(const struct vcs_pkgcap_options *options,
-                                     struct vcs_pkgcap_report *out)
-{
-    if (!out) return false;
-    memset(out, 0, sizeof(*out));
-    out->verdict = (uint8_t)VCS_PKGCAP_UNPROVEN;
-    out->rule = (uint8_t)VCS_PKGCAP_RULE_NULL_ARGUMENT;
+/* Each stage below that refuses leaves its verdict in out, frees what it was
+ * handed, and returns false. A stage that passes hands on what it built: the
+ * table and the manifest flow forward until the sources stage frees them. */
 
+static bool pkgcap_options_ok(const struct vcs_pkgcap_options *options,
+                              struct vcs_pkgcap_report *out)
+{
     if (!options || !options->package_dir || !options->package_dir[0])
         return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
                               VCS_PKGCAP_RULE_NULL_ARGUMENT,
@@ -734,71 +835,60 @@ bool vcs_package_verify_capabilities(const struct vcs_pkgcap_options *options,
             "no capability symbol table supplied: without one the claim can "
             "only be believed, and a believed claim is what this check "
             "exists to replace");
+    return true;
+}
 
-    /* ── the table: read, digest, pin, sanity ─────────────────────── */
-    char *table_text = NULL;
-    size_t table_len = 0;
+/* Read the table and pin its digest. The bytes stay with the caller. */
+static bool pkgcap_table_pinned(const struct vcs_pkgcap_options *options,
+                                struct vcs_pkgcap_report *out, char **text,
+                                size_t *len)
+{
     if (!pkgcap_read_file(options->table_path, VCS_PKGCAP_MAX_TABLE_BYTES,
-                          &table_text, &table_len))
+                          text, len))
         return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
                               VCS_PKGCAP_RULE_NO_TABLE,
                               "capability symbol table unreadable: %s",
                               options->table_path);
 
-    zcl_sha3_256((const unsigned char *)table_text, table_len,
-                 out->table_digest);
+    zcl_sha3_256((const unsigned char *)*text, *len, out->table_digest);
     out->has_table_digest = true;
 
     if (options->expected_table_digest &&
         memcmp(out->table_digest, options->expected_table_digest, 32) != 0) {
-        free(table_text);
+        free(*text);
         return pkgcap_verdict(
             out, VCS_PKGCAP_UNPROVEN, VCS_PKGCAP_RULE_TABLE_DIGEST_MISMATCH,
             "capability symbol table is not the pinned one: a substituted "
             "table grades the claim it was chosen to clear");
     }
+    return true;
+}
 
-    struct pkgcap_table table = { 0 };
-    uint32_t attempted = 0;
-    uint32_t parsed = 0;
-    if (!pkgcap_table_load(table_text, table_len, &table, &attempted,
-                           &parsed)) {
-        free(table_text);
-        pkgcap_table_free(&table);
+/* Index the table text. The text is freed on both outcomes. */
+static bool pkgcap_table_index(char *text, size_t len,
+                               struct vcs_pkgcap_report *out,
+                               struct pkgcap_table *table, uint32_t *attempted,
+                               uint32_t *parsed)
+{
+    if (!pkgcap_table_load(text, len, table, attempted, parsed)) {
+        free(text);
+        pkgcap_table_free(table);
         return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
                               VCS_PKGCAP_RULE_TABLE_HOLLOW,
                               "capability symbol table could not be indexed");
     }
-    free(table_text);
-    out->table_rows = table.rows;
-    out->table_rows_classified = table.classified;
+    free(text);
+    out->table_rows = table->rows;
+    out->table_rows_classified = table->classified;
+    return true;
+}
 
-    /* A row this reader started and did not finish is a symbol that silently
-     * became unclassified, which is indistinguishable from a substituted
-     * table that deleted it. Refuse rather than grade a package against a
-     * table this receiver only partly understood. */
-    if (parsed != attempted) {
-        pkgcap_table_free(&table);
-        return pkgcap_verdict(
-            out, VCS_PKGCAP_UNPROVEN, VCS_PKGCAP_RULE_TABLE_UNSOUND,
-            "capability symbol table has %u row(s) this reader could not "
-            "parse (%u of %u): an unread row is an unclassified symbol",
-            attempted - parsed, parsed, attempted);
-    }
-
-    if (table.rows < VCS_PKGCAP_MIN_TABLE_ROWS || table.classified == 0) {
-        uint32_t rows = table.rows;
-        uint32_t classified = table.classified;
-        pkgcap_table_free(&table);
-        return pkgcap_verdict(
-            out, VCS_PKGCAP_UNPROVEN, VCS_PKGCAP_RULE_TABLE_HOLLOW,
-            "capability symbol table parsed %u row(s), %u classified: every "
-            "package would derive the empty set off a table that saw nothing",
-            rows, classified);
-    }
-
+/* A table that declassifies an anchor is a substituted table. */
+static bool pkgcap_table_anchors(struct vcs_pkgcap_report *out,
+                                 struct pkgcap_table *table)
+{
     for (size_t i = 0; i < PKGCAP_ANCHOR_COUNT; i++) {
-        const char *cls = pkgcap_table_get(&table, k_pkgcap_anchors[i].symbol,
+        const char *cls = pkgcap_table_get(table, k_pkgcap_anchors[i].symbol,
                                            strlen(k_pkgcap_anchors[i].symbol));
         if (cls && strcmp(cls, k_pkgcap_anchors[i].class_name) == 0) continue;
         char detail[VCS_PKGCAP_DETAIL_MAX];
@@ -808,17 +898,69 @@ bool vcs_package_verify_capabilities(const struct vcs_pkgcap_options *options,
                        "table",
                        k_pkgcap_anchors[i].symbol, cls ? cls : "nothing",
                        k_pkgcap_anchors[i].class_name);
-        pkgcap_table_free(&table);
+        pkgcap_table_free(table);
         return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
                               VCS_PKGCAP_RULE_TABLE_UNSOUND, "%s", detail);
     }
+    return true;
+}
 
-    /* ── the manifest and its claim ───────────────────────────────── */
+/* Whether the indexed table is one this receiver understood in full. */
+static bool pkgcap_table_sound(struct vcs_pkgcap_report *out,
+                               struct pkgcap_table *table, uint32_t attempted,
+                               uint32_t parsed)
+{
+    /* A row this reader started and did not finish is a symbol that silently
+     * became unclassified, which is indistinguishable from a substituted
+     * table that deleted it. Refuse rather than grade a package against a
+     * table this receiver only partly understood. */
+    if (parsed != attempted) {
+        pkgcap_table_free(table);
+        return pkgcap_verdict(
+            out, VCS_PKGCAP_UNPROVEN, VCS_PKGCAP_RULE_TABLE_UNSOUND,
+            "capability symbol table has %u row(s) this reader could not "
+            "parse (%u of %u): an unread row is an unclassified symbol",
+            attempted - parsed, parsed, attempted);
+    }
+    if (table->rows < VCS_PKGCAP_MIN_TABLE_ROWS || table->classified == 0) {
+        uint32_t rows = table->rows;
+        uint32_t classified = table->classified;
+        pkgcap_table_free(table);
+        return pkgcap_verdict(
+            out, VCS_PKGCAP_UNPROVEN, VCS_PKGCAP_RULE_TABLE_HOLLOW,
+            "capability symbol table parsed %u row(s), %u classified: every "
+            "package would derive the empty set off a table that saw nothing",
+            rows, classified);
+    }
+    return pkgcap_table_anchors(out, table);
+}
+
+/* ── table: read, digest, pin, index, sanity ─────────────────────── */
+static bool pkgcap_table_stage(const struct vcs_pkgcap_options *options,
+                               struct vcs_pkgcap_report *out,
+                               struct pkgcap_table *table)
+{
+    char *text = NULL;
+    size_t len = 0;
+    if (!pkgcap_table_pinned(options, out, &text, &len)) return false;
+    uint32_t attempted = 0;
+    uint32_t parsed = 0;
+    if (!pkgcap_table_index(text, len, out, table, &attempted, &parsed))
+        return false;
+    return pkgcap_table_sound(out, table, attempted, parsed);
+}
+
+/* ── the manifest and its claim ──────────────────────────────────── */
+static bool pkgcap_manifest_stage(const struct vcs_pkgcap_options *options,
+                                  struct vcs_pkgcap_report *out,
+                                  struct pkgcap_table *table,
+                                  struct json_value *meta)
+{
     char manifest_path[VCS_PKGCAP_PATH_MAX * 2];
     int wrote = snprintf(manifest_path, sizeof(manifest_path),
                          "%s/zcode-package.json", options->package_dir);
     if (wrote < 0 || (size_t)wrote >= sizeof(manifest_path)) {
-        pkgcap_table_free(&table);
+        pkgcap_table_free(table);
         return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
                               VCS_PKGCAP_RULE_LIMIT_EXCEEDED,
                               "package directory path is too long");
@@ -827,79 +969,164 @@ bool vcs_package_verify_capabilities(const struct vcs_pkgcap_options *options,
     size_t meta_len = 0;
     if (!pkgcap_read_file(manifest_path, VCS_PKGCAP_MAX_MANIFEST_BYTES,
                           &meta_text, &meta_len)) {
-        pkgcap_table_free(&table);
+        pkgcap_table_free(table);
         return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
                               VCS_PKGCAP_RULE_NO_MANIFEST,
                               "no readable manifest at %s", manifest_path);
     }
-    struct json_value meta;
-    json_init(&meta);
-    if (!json_read(&meta, meta_text, meta_len) || meta.type != JSON_OBJ) {
-        json_free(&meta);
+    json_init(meta);
+    if (!json_read(meta, meta_text, meta_len) || meta->type != JSON_OBJ) {
+        json_free(meta);
         free(meta_text);
-        pkgcap_table_free(&table);
+        pkgcap_table_free(table);
         return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
                               VCS_PKGCAP_RULE_MANIFEST_UNPARSEABLE,
                               "manifest is not a JSON object");
     }
     free(meta_text);
     char shape_detail[128] = "";
-    if (!prepare_meta_closed(&meta, shape_detail, sizeof(shape_detail))) {
-        json_free(&meta);
-        pkgcap_table_free(&table);
+    if (!prepare_meta_closed(meta, shape_detail, sizeof(shape_detail))) {
+        json_free(meta);
+        pkgcap_table_free(table);
         return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
                               VCS_PKGCAP_RULE_MANIFEST_UNPARSEABLE,
                               "manifest is not the closed C23 package shape%s%s",
                               shape_detail[0] ? ": " : "", shape_detail);
     }
-    if (!pkgcap_claim_load(&meta, out)) {
-        json_free(&meta);
-        pkgcap_table_free(&table);
+    if (!pkgcap_claim_load(meta, out)) {
+        json_free(meta);
+        pkgcap_table_free(table);
         return false;
     }
+    return true;
+}
 
-    /* ── what it ships ────────────────────────────────────────────── */
+/* The shipped files a manifest's `files` array declares. A non-C entry is
+ * skipped; a non-string or non-canonical entry refuses the listing. */
+static bool pkgcap_list_declared(const struct json_value *files,
+                                 struct pkgcap_sources *sources)
+{
+    bool listing_ok = true;
+    for (size_t i = 0; i < files->num_children; i++) {
+        const char *p = json_get_str(&files->children[i]);
+        if (!p) {
+            listing_ok = false;
+            continue;
+        }
+        if (!pkgcap_is_scannable(p)) continue;
+        /* A shipped path that is not canonical is a traversal attempt or
+         * a manifest this receiver cannot follow; either way it is not a
+         * file to quietly skip. */
+        if (!vcs_package_path_valid(p)) {
+            listing_ok = false;
+            continue;
+        }
+        if (!pkgcap_sources_add(sources, p)) listing_ok = false;
+    }
+    return listing_ok;
+}
+
+/* Both subtrees are listed even when the first fails. */
+static bool pkgcap_list_by_convention(const char *package_dir,
+                                      struct pkgcap_sources *sources)
+{
+    bool src_ok = pkgcap_sources_from_dir(package_dir, "src", sources);
+    bool tests_ok = pkgcap_sources_from_dir(package_dir, "tests", sources);
+    return src_ok && tests_ok;
+}
+
+static bool pkgcap_list_sources(const struct vcs_pkgcap_options *options,
+                                const struct json_value *meta,
+                                struct pkgcap_sources *sources)
+{
+    const struct json_value *files = json_get(meta, "files");
+    if (files && files->type == JSON_ARR)
+        return pkgcap_list_declared(files, sources);
+    return pkgcap_list_by_convention(options->package_dir, sources);
+}
+
+/* Read one shipped source and record its reach. */
+static bool pkgcap_scan_one(const struct vcs_pkgcap_options *options,
+                            struct vcs_pkgcap_report *out,
+                            struct pkgcap_table *table,
+                            struct pkgcap_sources *sources, uint32_t i)
+{
+    char path[VCS_PKGCAP_PATH_MAX * 2];
+    int w = snprintf(path, sizeof(path), "%s/%s", options->package_dir,
+                     sources->paths[i]);
+    if (w < 0 || (size_t)w >= sizeof(path)) {
+        pkgcap_sources_free(sources);
+        pkgcap_table_free(table);
+        return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
+                              VCS_PKGCAP_RULE_LIMIT_EXCEEDED,
+                              "shipped path is too long: %s",
+                              sources->paths[i]);
+    }
+    char *text = NULL;
+    size_t text_len = 0;
+    if (!pkgcap_read_file(path, VCS_PKGCAP_MAX_SOURCE_BYTES, &text,
+                          &text_len)) {
+        char rel[VCS_PKGCAP_PATH_MAX];
+        (void)snprintf(rel, sizeof(rel), "%s", sources->paths[i]);
+        pkgcap_sources_free(sources);
+        pkgcap_table_free(table);
+        return pkgcap_verdict(
+            out, VCS_PKGCAP_UNPROVEN, VCS_PKGCAP_RULE_SOURCE_UNREADABLE,
+            "shipped source %s could not be read to the end: an unread "
+            "file is not a clean file",
+            rel);
+    }
+    struct pkgcap_scan_ctx ctx = {
+        .table = table, .report = out, .rel_path = sources->paths[i]
+    };
+    pkgcap_scan_source(&ctx, text, text_len);
+    free(text);
+    out->sources_scanned++;
+    return true;
+}
+
+/* ── derive ───────────────────────────────────────────────────────── */
+static bool pkgcap_derive_reach(const struct vcs_pkgcap_options *options,
+                                struct vcs_pkgcap_report *out,
+                                struct pkgcap_table *table,
+                                struct pkgcap_sources *sources)
+{
+    for (uint32_t i = 0; i < sources->count; i++)
+        if (!pkgcap_scan_one(options, out, table, sources, i)) return false;
+    pkgcap_sources_free(sources);
+    pkgcap_table_free(table);
+
+    if (out->derived.truncated || out->findings_truncated)
+        return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
+                              VCS_PKGCAP_RULE_LIMIT_EXCEEDED,
+                              "derived more than %u distinct classes",
+                              (unsigned)VCS_PKGCAP_MAX_CLASSES);
+    return true;
+}
+
+/* ── what it ships ───────────────────────────────────────────────── */
+static bool pkgcap_sources_stage(const struct vcs_pkgcap_options *options,
+                                 struct vcs_pkgcap_report *out,
+                                 struct pkgcap_table *table,
+                                 struct json_value *meta)
+{
     struct pkgcap_sources sources = { 0 };
     sources.paths = zcl_calloc(VCS_PKGCAP_MAX_SOURCES,
                                sizeof(*sources.paths), "pkgcap.sources");
     if (!sources.paths) {
-        json_free(&meta);
-        pkgcap_table_free(&table);
+        json_free(meta);
+        pkgcap_table_free(table);
         return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
                               VCS_PKGCAP_RULE_LIMIT_EXCEEDED,
                               "could not allocate the shipped-source list");
     }
-    const struct json_value *files = json_get(&meta, "files");
-    bool listing_ok = true;
-    if (files && files->type == JSON_ARR) {
-        for (size_t i = 0; i < files->num_children; i++) {
-            const char *p = json_get_str(&files->children[i]);
-            if (!p) {
-                listing_ok = false;
-                continue;
-            }
-            if (!pkgcap_is_scannable(p)) continue;
-            /* A shipped path that is not canonical is a traversal attempt or
-             * a manifest this receiver cannot follow; either way it is not a
-             * file to quietly skip. */
-            if (!vcs_package_path_valid(p)) {
-                listing_ok = false;
-                continue;
-            }
-            if (!pkgcap_sources_add(&sources, p)) listing_ok = false;
-        }
-    } else {
-        if (!pkgcap_sources_from_dir(options->package_dir, "src", &sources))
-            listing_ok = false;
-        if (!pkgcap_sources_from_dir(options->package_dir, "tests", &sources))
-            listing_ok = false;
-    }
-    json_free(&meta);
+    bool listing_ok = pkgcap_list_sources(options, meta, &sources);
+    json_free(meta);
     out->sources_listed = sources.count;
 
     if (!listing_ok || sources.overflow) {
         pkgcap_sources_free(&sources);
-        pkgcap_table_free(&table);
+        pkgcap_table_free(table);
         return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
                               VCS_PKGCAP_RULE_LIMIT_EXCEEDED,
                               "shipped-file list is not one this receiver can "
@@ -907,80 +1134,37 @@ bool vcs_package_verify_capabilities(const struct vcs_pkgcap_options *options,
     }
     if (sources.count == 0) {
         pkgcap_sources_free(&sources);
-        pkgcap_table_free(&table);
+        pkgcap_table_free(table);
         return pkgcap_verdict(
             out, VCS_PKGCAP_UNPROVEN, VCS_PKGCAP_RULE_NO_SHIPPED_SOURCES,
             "package ships zero C sources: deriving the empty set from an "
             "empty file list would clear it without reading a line");
     }
+    return pkgcap_derive_reach(options, out, table, &sources);
+}
 
-    /* ── derive ───────────────────────────────────────────────────── */
-    struct pkgcap_scan_ctx ctx = {
-        .table = &table, .report = out, .rel_path = NULL
-    };
-    for (uint32_t i = 0; i < sources.count; i++) {
-        char path[VCS_PKGCAP_PATH_MAX * 2];
-        int w = snprintf(path, sizeof(path), "%s/%s", options->package_dir,
-                         sources.paths[i]);
-        if (w < 0 || (size_t)w >= sizeof(path)) {
-            pkgcap_sources_free(&sources);
-            pkgcap_table_free(&table);
-            return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
-                                  VCS_PKGCAP_RULE_LIMIT_EXCEEDED,
-                                  "shipped path is too long: %s",
-                                  sources.paths[i]);
-        }
-        char *text = NULL;
-        size_t text_len = 0;
-        if (!pkgcap_read_file(path, VCS_PKGCAP_MAX_SOURCE_BYTES, &text,
-                              &text_len)) {
-            char rel[VCS_PKGCAP_PATH_MAX];
-            (void)snprintf(rel, sizeof(rel), "%s", sources.paths[i]);
-            pkgcap_sources_free(&sources);
-            pkgcap_table_free(&table);
-            return pkgcap_verdict(
-                out, VCS_PKGCAP_UNPROVEN, VCS_PKGCAP_RULE_SOURCE_UNREADABLE,
-                "shipped source %s could not be read to the end: an unread "
-                "file is not a clean file",
-                rel);
-        }
-        ctx.rel_path = sources.paths[i];
-        pkgcap_scan_source(&ctx, text, text_len);
-        free(text);
-        out->sources_scanned++;
-    }
-    pkgcap_sources_free(&sources);
-    pkgcap_table_free(&table);
+/* ── compare ──────────────────────────────────────────────────────── */
 
-    if (out->derived.truncated || out->findings_truncated)
-        return pkgcap_verdict(out, VCS_PKGCAP_UNPROVEN,
-                              VCS_PKGCAP_RULE_LIMIT_EXCEEDED,
-                              "derived more than %u distinct classes",
-                              (unsigned)VCS_PKGCAP_MAX_CLASSES);
-
-    /* ── compare ──────────────────────────────────────────────────── */
-    const char *excess = NULL;
-    const struct vcs_pkgcap_finding *evidence = NULL;
+/* The first derived class the manifest does not claim, with one piece of
+ * evidence for it when a finding names it. */
+static void pkgcap_find_excess(const struct vcs_pkgcap_report *out,
+                               const char **excess,
+                               const struct vcs_pkgcap_finding **evidence)
+{
     for (uint32_t i = 0; i < out->derived.count; i++) {
         if (pkgcap_set_has(&out->claimed, out->derived.names[i])) continue;
-        excess = out->derived.names[i];
+        *excess = out->derived.names[i];
         for (uint32_t f = 0; f < out->finding_count; f++)
-            if (strcmp(out->findings[f].class_name, excess) == 0) {
-                evidence = &out->findings[f];
+            if (strcmp(out->findings[f].class_name, *excess) == 0) {
+                *evidence = &out->findings[f];
                 break;
             }
         break;
     }
-    out->no_excess_reach = excess == NULL &&
-                           out->sources_scanned == out->sources_listed;
+}
 
-    if (excess)
-        return pkgcap_verdict(
-            out, VCS_PKGCAP_REFUSED, VCS_PKGCAP_RULE_REACH_EXCEEDS_CLAIM,
-            "%s is reached by %s%s%s but the manifest does not claim it",
-            excess, evidence ? evidence->file : "a shipped source",
-            evidence ? " via " : "", evidence ? evidence->symbol : "");
-
+static bool pkgcap_claims_reached(struct vcs_pkgcap_report *out)
+{
     for (uint32_t i = 0; i < out->claimed.count; i++) {
         if (pkgcap_set_has(&out->derived, out->claimed.names[i])) continue;
         /* The claim is wider than the reach this scan can see. The receiver
@@ -995,7 +1179,40 @@ bool vcs_package_verify_capabilities(const struct vcs_pkgcap_options *options,
             "spots",
             out->claimed.names[i]);
     }
-
     return pkgcap_verdict(out, VCS_PKGCAP_VERIFIED, VCS_PKGCAP_RULE_MATCH,
                           NULL);
+}
+
+static bool pkgcap_compare(struct vcs_pkgcap_report *out)
+{
+    const char *excess = NULL;
+    const struct vcs_pkgcap_finding *evidence = NULL;
+    pkgcap_find_excess(out, &excess, &evidence);
+    out->no_excess_reach = excess == NULL &&
+                           out->sources_scanned == out->sources_listed;
+
+    if (excess)
+        return pkgcap_verdict(
+            out, VCS_PKGCAP_REFUSED, VCS_PKGCAP_RULE_REACH_EXCEEDS_CLAIM,
+            "%s is reached by %s%s%s but the manifest does not claim it",
+            excess, evidence ? evidence->file : "a shipped source",
+            evidence ? " via " : "", evidence ? evidence->symbol : "");
+    return pkgcap_claims_reached(out);
+}
+
+bool vcs_package_verify_capabilities(const struct vcs_pkgcap_options *options,
+                                     struct vcs_pkgcap_report *out)
+{
+    if (!out) return false;
+    memset(out, 0, sizeof(*out));
+    out->verdict = (uint8_t)VCS_PKGCAP_UNPROVEN;
+    out->rule = (uint8_t)VCS_PKGCAP_RULE_NULL_ARGUMENT;
+
+    if (!pkgcap_options_ok(options, out)) return false;
+    struct pkgcap_table table = { 0 };
+    if (!pkgcap_table_stage(options, out, &table)) return false;
+    struct json_value meta = { 0 };
+    if (!pkgcap_manifest_stage(options, out, &table, &meta)) return false;
+    if (!pkgcap_sources_stage(options, out, &table, &meta)) return false;
+    return pkgcap_compare(out);
 }
