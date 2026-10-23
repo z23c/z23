@@ -99,7 +99,47 @@ static bool rep_pair_seen(const struct shop_rep_pair *set, size_t count,
     return false;
 }
 
+static void rep_add_root(uint8_t (*set)[32], size_t *count,
+                         const uint8_t root[32])
+{
+    if (*count < SHOP_REP_MAX_PACKAGES && !rep_root_seen(set, *count, root))
+        memcpy(set[(*count)++], root, 32);
+}
+
+static void rep_add_pair(struct shop_rep_pair *pairs, size_t *count,
+                         const struct vcs_package_release *r)
+{
+    if (*count < SHOP_REP_MAX_PACKAGES &&
+        !rep_pair_seen(pairs, *count, r->package_root, r->recipe_root)) {
+        memcpy(pairs[*count].package_root, r->package_root, 32);
+        memcpy(pairs[*count].recipe_root, r->recipe_root, 32);
+        (*count)++;
+    }
+}
+
 /* ── publication + the local observation window ─────────────────────── */
+
+/* The observation record: the envelope file's mtime in THIS store. False
+ * when the release id or the envelope file cannot be read. */
+static bool rep_release_mtime(const char *zcode_dir,
+                              const struct vcs_package_release *r,
+                              int64_t *mtime_out)
+{
+    uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
+    if (vcs_package_release_id(r, id) != VCS_PACKAGE_RELEASE_OK)
+        return false;
+    char id_hex[65];
+    zcl_hex_encode(id, 32, id_hex);
+    char path[4400];
+    int n = snprintf(path, sizeof(path), "%s/releases/%s", zcode_dir,
+                     id_hex);
+    struct stat st;
+    if (n <= 0 || (size_t)n >= sizeof(path) || stat(path, &st) != 0)
+        return false;
+    *mtime_out = st.st_mtime;
+    return true;
+}
+
 static void rep_collect_publication(const char *zcode_dir,
                                     const uint8_t publisher[33],
                                     struct shop_reputation_view_input_v1 *ev,
@@ -126,37 +166,18 @@ static void rep_collect_publication(const char *zcode_dir,
     int64_t oldest = 0;
     for (size_t i = 0; i < count; i++) {
         const struct vcs_package_release *r = &releases[i];
-        if (*all_pkg_count < SHOP_REP_MAX_PACKAGES &&
-            !rep_root_seen(all_pkgs, *all_pkg_count, r->package_root))
-            memcpy(all_pkgs[(*all_pkg_count)++], r->package_root, 32);
+        rep_add_root(all_pkgs, all_pkg_count, r->package_root);
         if (memcmp(r->publisher_pubkey, publisher, 33) != 0)
             continue;
         ev->releases++;
         if (r->publisher_sequence > ev->max_publisher_sequence)
             ev->max_publisher_sequence = r->publisher_sequence;
-        if (*subject_pkg_count < SHOP_REP_MAX_PACKAGES &&
-            !rep_root_seen(subject_pkgs, *subject_pkg_count, r->package_root))
-            memcpy(subject_pkgs[(*subject_pkg_count)++], r->package_root, 32);
-        if (*pair_count < SHOP_REP_MAX_PACKAGES &&
-            !rep_pair_seen(pairs, *pair_count, r->package_root,
-                           r->recipe_root)) {
-            memcpy(pairs[*pair_count].package_root, r->package_root, 32);
-            memcpy(pairs[*pair_count].recipe_root, r->recipe_root, 32);
-            (*pair_count)++;
-        }
-        /* The observation record: the envelope file's mtime in THIS store. */
-        uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
-        if (vcs_package_release_id(r, id) == VCS_PACKAGE_RELEASE_OK) {
-            char id_hex[65];
-            zcl_hex_encode(id, 32, id_hex);
-            char path[4400];
-            int n = snprintf(path, sizeof(path), "%s/releases/%s", zcode_dir,
-                             id_hex);
-            struct stat st;
-            if (n > 0 && (size_t)n < sizeof(path) && stat(path, &st) == 0 &&
-                (oldest == 0 || st.st_mtime < oldest))
-                oldest = st.st_mtime;
-        }
+        rep_add_root(subject_pkgs, subject_pkg_count, r->package_root);
+        rep_add_pair(pairs, pair_count, r);
+        int64_t mtime = 0;
+        if (rep_release_mtime(zcode_dir, r, &mtime) &&
+            (oldest == 0 || mtime < oldest))
+            oldest = mtime;
     }
     free(releases);
     ev->packages = (uint32_t)*subject_pkg_count;
@@ -192,6 +213,40 @@ static void rep_collect_reproduction(const char *zcode_dir,
 }
 
 /* ── attestations: parse + verify, dedupe signer pubkeys ────────────── */
+
+/* Read and verify one filed attestation: true only when the bytes parse and
+ * the secp256k1 signature verifies. An unreadable or bad file is not evidence. */
+static bool rep_load_attestation(const char *dir, const char *name,
+                                 uint8_t *wire, struct vcs_package_attest *a)
+{
+    char path[4400];
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return false;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    size_t len = fread(wire, 1, VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES, f);
+    bool trailing = !feof(f);
+    fclose(f);
+    if (trailing || len == 0)
+        return false;
+    /* Only a signature-verified attestation is evidence; an unparseable
+     * or bad-signature file is ignored, never counted either way. */
+    return vcs_package_attest_parse(wire, len, a) == VCS_PACKAGE_ATTEST_OK &&
+           vcs_package_attest_verify(a) == VCS_PACKAGE_ATTEST_OK;
+}
+
+static void rep_add_verifier(uint8_t (*verifiers)[33], size_t *count,
+                             const uint8_t pubkey[33])
+{
+    bool seen = false;
+    for (size_t v = 0; v < *count && !seen; v++)
+        seen = memcmp(verifiers[v], pubkey, 33) == 0;
+    if (!seen && *count < SHOP_REP_MAX_VERIFIERS)
+        memcpy(verifiers[(*count)++], pubkey, 33);
+}
+
 static void rep_collect_attestations(const char *zcode_dir,
                                      const uint8_t (*subject_pkgs)[32],
                                      size_t subject_pkg_count,
@@ -230,32 +285,13 @@ static void rep_collect_attestations(const char *zcode_dir,
             break;
         }
         scanned++;
-        char path[4400];
-        n = snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
-        if (n < 0 || (size_t)n >= sizeof(path))
-            continue;
-        FILE *f = fopen(path, "rb");
-        if (!f)
-            continue;
-        size_t len = fread(wire, 1, VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES, f);
-        bool trailing = !feof(f);
-        fclose(f);
-        if (trailing || len == 0)
-            continue;
         struct vcs_package_attest a;
-        /* Only a signature-verified attestation is evidence; an unparseable
-         * or bad-signature file is ignored, never counted either way. */
-        if (vcs_package_attest_parse(wire, len, &a) != VCS_PACKAGE_ATTEST_OK ||
-            vcs_package_attest_verify(&a) != VCS_PACKAGE_ATTEST_OK)
+        if (!rep_load_attestation(dir, de->d_name, wire, &a))
             continue;
         if (!rep_root_seen(subject_pkgs, subject_pkg_count, a.package_root))
             continue;
         ev->valid_attestations++;
-        bool seen = false;
-        for (size_t v = 0; v < verifier_count && !seen; v++)
-            seen = memcmp(verifiers[v], a.verifier_pubkey, 33) == 0;
-        if (!seen && verifier_count < SHOP_REP_MAX_VERIFIERS)
-            memcpy(verifiers[verifier_count++], a.verifier_pubkey, 33);
+        rep_add_verifier(verifiers, &verifier_count, a.verifier_pubkey);
     }
     ev->distinct_verifiers = (uint32_t)verifier_count;
     free(verifiers);
@@ -264,6 +300,67 @@ static void rep_collect_attestations(const char *zcode_dir,
 }
 
 /* ── dependent packages: root-committed declarations, read locally ──── */
+
+/* Read the declaration member's bytes from the local CAS and verify them
+ * against the chunk hash the manifest commits to. */
+static bool rep_read_meta_chunk(const char *zcode_dir,
+                                const struct vcs_package_file *meta,
+                                uint8_t *text, size_t *len_out)
+{
+    char chunk_hex[65];
+    zcl_hex_encode(meta->chunk_hashes, 32, chunk_hex);
+    char path[4400];
+    int n = snprintf(path, sizeof(path), "%s/cas/sha3/%.2s/%s",
+                     zcode_dir, chunk_hex, chunk_hex);
+    FILE *cf = n > 0 && (size_t)n < sizeof(path) ? fopen(path, "rb") : NULL;
+    if (!cf)
+        return false;
+    size_t got = fread(text, 1, (size_t)meta->size, cf);
+    int extra = fgetc(cf);
+    fclose(cf);
+    /* The chunk hash binds the bytes to the manifest (and so to the package
+     * root): verify before trusting a declaration. */
+    uint8_t chash[32];
+    if (got != (size_t)meta->size || extra != EOF ||
+        !vcs_package_chunk_hash(text, got, chash) ||
+        memcmp(chash, meta->chunk_hashes, 32) != 0)
+        return false;
+    *len_out = got;
+    return true;
+}
+
+static const struct vcs_package_file *
+rep_find_deps_meta(const struct vcs_package_manifest *manifest)
+{
+    const struct vcs_package_file *meta = NULL;
+    for (size_t i = 0; i < manifest->count; i++)
+        if (strcmp(manifest->files[i].path, VCS_PACKAGE_DEPS_META_PATH) == 0)
+            meta = &manifest->files[i];
+    return meta;
+}
+
+/* A parsed manifest yields its declaration only when its root matches the
+ * package root; a missing declaration file means no dependencies. */
+static bool rep_declaration_from_manifest(const char *zcode_dir,
+                                          const uint8_t package_root[32],
+                                          struct vcs_package_manifest *manifest,
+                                          uint8_t *text, size_t *len_out)
+{
+    /* The package root commits the manifest: a persisted manifest whose
+     * root no longer matches carries no committed declaration at all. */
+    uint8_t mroot[32];
+    if (!vcs_package_manifest_root(manifest, mroot) ||
+        memcmp(mroot, package_root, 32) != 0)
+        return false;
+    const struct vcs_package_file *meta = rep_find_deps_meta(manifest);
+    if (!meta) {
+        *len_out = 0;   /* no declaration file: no dependencies */
+        return true;
+    }
+    if (meta->size > VCS_PACKAGE_DEPS_META_MAX_BYTES || meta->chunk_count != 1)
+        return false;
+    return rep_read_meta_chunk(zcode_dir, meta, text, len_out);
+}
 
 /* Read the zcode-package.json declaration member of one package from the
  * local CAS. Returns false when the bytes are not held locally (the member
@@ -296,45 +393,8 @@ static bool rep_read_declaration(const char *zcode_dir,
     struct vcs_package_manifest manifest;
     if (!trailing && len > 0 &&
         vcs_package_manifest_parse(wire, len, &manifest)) {
-        /* The package root commits the manifest: a persisted manifest whose
-         * root no longer matches carries no committed declaration at all. */
-        uint8_t mroot[32];
-        if (!vcs_package_manifest_root(&manifest, mroot) ||
-            memcmp(mroot, package_root, 32) != 0) {
-            vcs_package_manifest_free(&manifest);
-            free(wire);
-            return false;
-        }
-        const struct vcs_package_file *meta = NULL;
-        for (size_t i = 0; i < manifest.count; i++)
-            if (strcmp(manifest.files[i].path, VCS_PACKAGE_DEPS_META_PATH) == 0)
-                meta = &manifest.files[i];
-        if (!meta) {
-            *len_out = 0;   /* no declaration file: no dependencies */
-            ok = true;
-        } else if (meta->size <= VCS_PACKAGE_DEPS_META_MAX_BYTES &&
-                   meta->chunk_count == 1) {
-            char chunk_hex[65];
-            zcl_hex_encode(meta->chunk_hashes, 32, chunk_hex);
-            n = snprintf(path, sizeof(path), "%s/cas/sha3/%.2s/%s",
-                         zcode_dir, chunk_hex, chunk_hex);
-            FILE *cf = n > 0 && (size_t)n < sizeof(path) ? fopen(path, "rb")
-                                                         : NULL;
-            if (cf) {
-                size_t got = fread(text, 1, (size_t)meta->size, cf);
-                int extra = fgetc(cf);
-                fclose(cf);
-                /* The chunk hash binds the bytes to the manifest (and so to
-                 * the package root): verify before trusting a declaration. */
-                uint8_t chash[32];
-                if (got == (size_t)meta->size && extra == EOF &&
-                    vcs_package_chunk_hash(text, got, chash) &&
-                    memcmp(chash, meta->chunk_hashes, 32) == 0) {
-                    *len_out = got;
-                    ok = true;
-                }
-            }
-        }
+        ok = rep_declaration_from_manifest(zcode_dir, package_root, &manifest,
+                                           text, len_out);
         vcs_package_manifest_free(&manifest);
     }
     free(wire);
@@ -498,6 +558,127 @@ static bool rep_render(struct json_value *data, const char *publisher_hex,
     return true;
 }
 
+/* ── the handler's steps ────────────────────────────────────────────── */
+
+/* The datadir the caller named, else the command's --datadir default. NULL
+ * when neither is set. */
+static const char *rep_datadir_or_default(const struct zcl_command_request *request)
+{
+    const char *datadir = json_get_str(json_get(request->input, "datadir"));
+    if (!datadir || !datadir[0])
+        datadir = zcl_native_command_datadir();
+    return datadir && datadir[0] ? datadir : NULL;
+}
+
+/* The 66-hex compressed secp256k1 publisher key, decoded into out[33]. */
+static bool rep_publisher_parse(const char *hex, uint8_t out[33])
+{
+    return hex && strlen(hex) == 66 && zcl_hex_decode_lower(hex, out, 33);
+}
+
+/* A caller-supplied now_unix must be a positive integer. */
+static bool rep_now_parse(const struct json_value *now, int64_t *now_unix)
+{
+    if (now->type != JSON_INT || json_get_int(now) <= 0)
+        return false;
+    *now_unix = json_get_int(now);
+    return true;
+}
+
+/* <datadir>/zcode, or false when the path does not fit the buffer. */
+static bool rep_zcode_dir_build(const char *datadir, char *zcode_dir,
+                                size_t cap)
+{
+    int n = snprintf(zcode_dir, cap, "%s/zcode", datadir);
+    return n >= 0 && (size_t)n < cap;
+}
+
+/* Absent and unreadable are not the same answer: a present
+ * non-directory at the store path — or at any of the store's known
+ * subdirectories — must refuse by name, never be reported as an
+ * empty store (the read-leaf doctrine, asserted by
+ * test_read_leaf_no_datadir_write's payload-store case, which breaks
+ * zcode/manifests for this leaf). A fresh store has none of these
+ * subdirectories yet, and that absence is the legitimate empty
+ * answer. On refusal the offending path is copied into blocked. */
+static bool rep_store_layout_ok(const char *zcode_dir, char *blocked,
+                                size_t cap)
+{
+    static const char *const subdirs[] = {
+        "", "releases", "manifests", "receipts", "attestations", "rewards"
+    };
+    struct stat st;
+    for (size_t i = 0; i < sizeof(subdirs) / sizeof(subdirs[0]); i++) {
+        char probe[4400];
+        int pn = snprintf(probe, sizeof(probe), "%s%s%s", zcode_dir,
+                          subdirs[i][0] ? "/" : "", subdirs[i]);
+        if (pn < 0 || (size_t)pn >= sizeof(probe))
+            continue;
+        if (stat(probe, &st) == 0 && !S_ISDIR(st.st_mode)) {
+            (void)snprintf(blocked, cap, "%s", probe);
+            return false;
+        }
+    }
+    return true;
+}
+
+/* The collectors' caller-owned scratch buffers. */
+struct shop_rep_buffers {
+    uint8_t (*subject_pkgs)[32];
+    uint8_t (*all_pkgs)[32];
+    struct shop_rep_pair *pairs;
+};
+
+static void rep_buffers_free(struct shop_rep_buffers *b)
+{
+    free(b->pairs);
+    free(b->all_pkgs);
+    free(b->subject_pkgs);
+}
+
+static bool rep_buffers_alloc(struct shop_rep_buffers *b)
+{
+    b->subject_pkgs = zcl_calloc(
+        SHOP_REP_MAX_PACKAGES, sizeof(*b->subject_pkgs), "shop_rep_subject_pkgs");
+    b->all_pkgs = zcl_calloc(
+        SHOP_REP_MAX_PACKAGES, sizeof(*b->all_pkgs), "shop_rep_all_pkgs");
+    b->pairs = zcl_calloc(
+        SHOP_REP_MAX_PACKAGES, sizeof(*b->pairs), "shop_rep_pairs");
+    if (b->subject_pkgs && b->all_pkgs && b->pairs)
+        return true;
+    rep_buffers_free(b);
+    return false;
+}
+
+static void rep_collect_evidence(const char *zcode_dir,
+                                 const uint8_t publisher[33],
+                                 struct shop_reputation_view_input_v1 *ev,
+                                 const struct shop_rep_buffers *b)
+{
+    if (!ev->store_present)
+        return;
+    size_t subject_pkg_count = 0, all_pkg_count = 0, pair_count = 0;
+    rep_collect_publication(zcode_dir, publisher, ev, b->subject_pkgs,
+                            &subject_pkg_count, b->pairs, &pair_count,
+                            b->all_pkgs, &all_pkg_count);
+    rep_collect_reproduction(zcode_dir, b->pairs, pair_count, ev);
+    rep_collect_attestations(zcode_dir, b->subject_pkgs, subject_pkg_count,
+                             ev);
+    rep_collect_dependents(zcode_dir, b->subject_pkgs, subject_pkg_count,
+                           b->all_pkgs, all_pkg_count, ev);
+    rep_collect_settlements(zcode_dir, publisher, ev);
+}
+
+static void rep_finish_observation(struct shop_reputation_view_input_v1 *ev,
+                                   int64_t now_unix)
+{
+    if (ev->observed && now_unix >= ev->first_observed_unix) {
+        ev->days_observed = (now_unix - ev->first_observed_unix) / 86400;
+    } else {
+        ev->observed = false;
+    }
+}
+
 /* ── the handler ────────────────────────────────────────────────────── */
 void zcl_native_handle_shop_reputation(
     const struct zcl_command_request *request,
@@ -505,10 +686,8 @@ void zcl_native_handle_shop_reputation(
 {
     if (!request || !reply)
         return;
-    const char *datadir = json_get_str(json_get(request->input, "datadir"));
-    if (!datadir || !datadir[0])
-        datadir = zcl_native_command_datadir();
-    if (!datadir || !datadir[0]) {
+    const char *datadir = rep_datadir_or_default(request);
+    if (!datadir) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "MISSING_DATADIR",
                                "normalize", false, false,
@@ -519,8 +698,7 @@ void zcl_native_handle_shop_reputation(
     const char *publisher_hex =
         json_get_str(json_get(request->input, "publisher"));
     uint8_t publisher[33];
-    if (!publisher_hex || strlen(publisher_hex) != 66 ||
-        !zcl_hex_decode_lower(publisher_hex, publisher, 33)) {
+    if (!rep_publisher_parse(publisher_hex, publisher)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "BAD_PUBLISHER_INPUT",
                                "validate", false, false,
@@ -532,99 +710,52 @@ void zcl_native_handle_shop_reputation(
     }
     int64_t now_unix = clock_now_wall_ms() / 1000;
     const struct json_value *now = json_get(request->input, "now_unix");
-    if (now) {
-        if (now->type != JSON_INT || json_get_int(now) <= 0) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                                   ZCL_COMMAND_EXIT_INVALID, "BAD_NOW_UNIX",
-                                   "validate", false, false,
-                                   "now_unix must be a positive integer",
-                                   "now_unix");
-            return;
-        }
-        now_unix = json_get_int(now);
+    if (now && !rep_now_parse(now, &now_unix)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_NOW_UNIX",
+                               "validate", false, false,
+                               "now_unix must be a positive integer",
+                               "now_unix");
+        return;
     }
 
     char zcode_dir[4400];
-    int n = snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", datadir);
-    if (n < 0 || (size_t)n >= sizeof(zcode_dir)) {
+    if (!rep_zcode_dir_build(datadir, zcode_dir, sizeof(zcode_dir))) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INVALID, "DATADIR_TOO_LONG",
                                "normalize", false, false,
                                "datadir path too long", datadir);
         return;
     }
+    char blocked[4400];
+    if (!rep_store_layout_ok(zcode_dir, blocked, sizeof(blocked))) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
+                               ZCL_COMMAND_EXIT_BLOCKED,
+                               "ZCODE_STORE_UNREADABLE", "execute",
+                               false, false,
+                               "a path inside <datadir>/zcode exists "
+                               "but is not a readable store directory "
+                               "— inspect it before trusting any "
+                               "'no_record' row", blocked);
+        return;
+    }
 
     struct shop_reputation_view_input_v1 ev;
     memset(&ev, 0, sizeof(ev));
     struct stat st;
-    /* Absent and unreadable are not the same answer: a present
-     * non-directory at the store path — or at any of the store's known
-     * subdirectories — must refuse by name, never be reported as an
-     * empty store (the read-leaf doctrine, asserted by
-     * test_read_leaf_no_datadir_write's payload-store case, which breaks
-     * zcode/manifests for this leaf). A fresh store has none of these
-     * subdirectories yet, and that absence is the legitimate empty
-     * answer. */
-    static const char *const subdirs[] = {
-        "", "releases", "manifests", "receipts", "attestations", "rewards"
-    };
-    for (size_t i = 0; i < sizeof(subdirs) / sizeof(subdirs[0]); i++) {
-        char probe[4400];
-        int pn = snprintf(probe, sizeof(probe), "%s%s%s", zcode_dir,
-                          subdirs[i][0] ? "/" : "", subdirs[i]);
-        if (pn < 0 || (size_t)pn >= sizeof(probe))
-            continue;
-        if (stat(probe, &st) == 0 && !S_ISDIR(st.st_mode)) {
-            zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_BLOCKED,
-                                   ZCL_COMMAND_EXIT_BLOCKED,
-                                   "ZCODE_STORE_UNREADABLE", "execute",
-                                   false, false,
-                                   "a path inside <datadir>/zcode exists "
-                                   "but is not a readable store directory "
-                                   "— inspect it before trusting any "
-                                   "'no_record' row", probe);
-            return;
-        }
-    }
     ev.store_present = stat(zcode_dir, &st) == 0 && S_ISDIR(st.st_mode);
 
-    uint8_t (*subject_pkgs)[32] = zcl_calloc(
-        SHOP_REP_MAX_PACKAGES, sizeof(*subject_pkgs), "shop_rep_subject_pkgs");
-    uint8_t (*all_pkgs)[32] = zcl_calloc(
-        SHOP_REP_MAX_PACKAGES, sizeof(*all_pkgs), "shop_rep_all_pkgs");
-    struct shop_rep_pair *pairs = zcl_calloc(
-        SHOP_REP_MAX_PACKAGES, sizeof(*pairs), "shop_rep_pairs");
-    if (!subject_pkgs || !all_pkgs || !pairs) {
-        free(subject_pkgs);
-        free(all_pkgs);
-        free(pairs);
+    struct shop_rep_buffers bufs;
+    if (!rep_buffers_alloc(&bufs)) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                                ZCL_COMMAND_EXIT_INTERNAL, "ALLOC",
                                "execute", false, false,
                                "evidence buffers", zcode_dir);
         return;
     }
-    size_t subject_pkg_count = 0, all_pkg_count = 0, pair_count = 0;
-    if (ev.store_present) {
-        rep_collect_publication(zcode_dir, publisher, &ev, subject_pkgs,
-                                &subject_pkg_count, pairs, &pair_count,
-                                all_pkgs, &all_pkg_count);
-        rep_collect_reproduction(zcode_dir, pairs, pair_count, &ev);
-        rep_collect_attestations(zcode_dir, subject_pkgs, subject_pkg_count,
-                                 &ev);
-        rep_collect_dependents(zcode_dir, subject_pkgs, subject_pkg_count,
-                               all_pkgs, all_pkg_count, &ev);
-        rep_collect_settlements(zcode_dir, publisher, &ev);
-    }
-    free(pairs);
-    free(all_pkgs);
-    free(subject_pkgs);
-
-    if (ev.observed && now_unix >= ev.first_observed_unix) {
-        ev.days_observed = (now_unix - ev.first_observed_unix) / 86400;
-    } else {
-        ev.observed = false;
-    }
+    rep_collect_evidence(zcode_dir, publisher, &ev, &bufs);
+    rep_buffers_free(&bufs);
+    rep_finish_observation(&ev, now_unix);
 
     if (!rep_render(&reply->data, publisher_hex, datadir, now_unix, &ev))
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
