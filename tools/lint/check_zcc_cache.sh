@@ -948,11 +948,7 @@ fi
 unkey="$("$ZCC" --zcc-stats | awk '/unkeyable/ {print $2}')"
 [ "${unkey:-0}" = 0 ] || fail "$unkey compile(s) could not be keyed at all"
 
-# 10. THE FIFTH REGRESSION: PWD and TMPDIR were hashed as raw environment
-#     values. devbuild gives every job a fresh TMPDIR and every worktree has
-#     its own PWD, so the same tree missed from one job to the next (fleet hit
-#     rate 5.6%). The working directory is already keyed through the
-#     prefix-map-normalized getcwd, and TMPDIR cannot reach an ordinary object.
+# 10. THE FIFTH REGRESSION: raw PWD/TMPDIR in the key; cwd is keyed via the prefix-mapped getcwd.
 envkey_src='int zcl_envkey_probe(void) { return 7; }'
 mkdir -p "$WORK/envdir.a" "$WORK/envdir.b" "$WORK/envtmp.a" "$WORK/envtmp.b"
 printf '%s\n' "$envkey_src" > "$WORK/envdir.a/env.c"
@@ -1003,6 +999,10 @@ for t in a b; do
 done
 [ "$(last_disposition)" = HIT ] || fail "env key (d): -frandom-seed re-keyed on TMPDIR"
 cmp -s "$WORK/seed.a.o" "$WORK/seed.b.o" || fail "env key (d): bytes differ"
+# (e) -flto IR embeds the real cwd: a prefix map must NOT make it shareable.
+for d in a b; do env_build "$WORK/envdir.$d" "$WORK/envtmp.a" "$WORK/lto.$d.o" \
+    -flto=auto -ffile-prefix-map="$WORK/envdir.$d=/zcl" || fail "env key (e): compile"; done
+[ "$(last_disposition)" = MISS ] || fail "env key (e): -flto object crossed directories"
 
 # Same-content requests share one compile; independent keys and audit requests
 # retain their own compiler execution. Barriers follow real compilation so a
