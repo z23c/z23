@@ -142,6 +142,314 @@ static int caller_open_case(const uint8_t key[32], const uint8_t nonce[12],
     return 0;
 }
 
+/* RFC 8439 published vectors. Every hex string is copied from
+ * https://www.rfc-editor.org/rfc/rfc8439.txt and decoded at run time. */
+
+/* Sections 2.4.2 (key, nonce, counter 1, ciphertext) and 2.8.2 (plaintext). */
+static const char *const rfc_k242_hex =
+    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    ;
+static const char *const rfc_n242_hex =
+    "000000000000004a00000000"
+    ;
+static const char *const rfc_c242_hex =
+    "6e2e359a2568f98041ba0728dd0d6981e97e7aec1d4360c20a27afccfd9fae0b"
+    "f91b65c5524733ab8f593dabcd62b3571639d624e65152ab8f530c359f0861d8"
+    "07ca0dbf500d6a6156a38e088a22b65e52bc514d16ccf806818ce91ab7793736"
+    "5af90bbf74a35be6b40b8eedf2785e42874d"
+    ;
+/* Sections 2.4.2 and 2.8.2 plaintext: "Ladies and Gentlemen ..." (114 bytes). */
+static const char *const rfc_p114_hex =
+    "4c616469657320616e642047656e746c656d656e206f662074686520636c6173"
+    "73206f66202739393a204966204920636f756c64206f6666657220796f75206f"
+    "6e6c79206f6e652074697020666f7220746865206675747572652c2073756e73"
+    "637265656e20776f756c642062652069742e"
+    ;
+/* Section 2.5.2: key material (r || s) and tag for the 34-byte message below. */
+static const char *const rfc_k252_hex =
+    "85d6be7857556d337f4452fe42d506a80103808afb0db2fd4abff6af4149f51b"
+    ;
+static const char *const rfc_t252_hex =
+    "a8061dc1305136c6c22b8baf0c0127a9"
+    ;
+static const char rfc_msg_text[] = "Cryptographic Forum Research Group";
+/* Section 2.6.2: key, nonce, counter 0 and the 32-byte one-time key. */
+static const char *const rfc_k262_hex =
+    "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+    ;
+static const char *const rfc_n262_hex =
+    "000000000001020304050607"
+    ;
+static const char *const rfc_otk262_hex =
+    "8ad5a08b905f81cc815040274ab29471a833b637e3fd0da508dbb8e2fdd1a646"
+    ;
+/* Section 2.8.2: key, nonce (fixed || IV), AAD, ciphertext and tag. */
+static const char *const rfc_k282_hex =
+    "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+    ;
+static const char *const rfc_n282_hex =
+    "070000004041424344454647"
+    ;
+static const char *const rfc_aad282_hex =
+    "50515253c0c1c2c3c4c5c6c7"
+    ;
+static const char *const rfc_c282_hex =
+    "d31a8d34648e60db7b86afbc53ef7ec2a4aded51296e08fea9e2b5a736ee62d6"
+    "3dbea45e8ca9671282fafb69da92728b1a71de0a9e060b2905d6a5b67ecd3b36"
+    "92ddbd7f2d778b8c9803aee328091b58fab324e4fad675945585808b4831d7bc"
+    "3ff4def08e4b7a9de576d26586cec64b6116"
+    ;
+static const char *const rfc_t282_hex =
+    "1ae10b594f09e26a7e902ecbd0600691"
+    ;
+/* Appendix A.5: key, nonce, AAD, ciphertext, received tag and plaintext. */
+static const char *const rfc_ka5_hex =
+    "1c9240a5eb55d38af333888604f6b5f0473917c1402b80099dca5cbc207075c0"
+    ;
+static const char *const rfc_na5_hex =
+    "000000000102030405060708"
+    ;
+static const char *const rfc_aada5_hex =
+    "f33388860000000000004e91"
+    ;
+static const char *const rfc_ca5_hex =
+    "64a0861575861af460f062c79be643bd5e805cfd345cf389f108670ac76c8cb2"
+    "4c6cfc18755d43eea09ee94e382d26b0bdb7b73c321b0100d4f03b7f355894cf"
+    "332f830e710b97ce98c8a84abd0b948114ad176e008d33bd60f982b1ff37c855"
+    "9797a06ef4f0ef61c186324e2b3506383606907b6a7c02b0f9f6157b53c867e4"
+    "b9166c767b804d46a59b5216cde7a4e99040c5a40433225ee282a1b0a06c523e"
+    "af4534d7f83fa1155b0047718cbc546a0d072b04b3564eea1b422273f548271a"
+    "0bb2316053fa76991955ebd63159434ecebb4e466dae5a1073a6727627097a10"
+    "49e617d91d361094fa68f0ff77987130305beaba2eda04df997b714d6c6f2c29"
+    "a6ad5cb4022b02709b"
+    ;
+static const char *const rfc_ta5_hex =
+    "eead9d67890cbb22392336fea1851f38"
+    ;
+static const char *const rfc_pa5_hex =
+    "496e7465726e65742d4472616674732061726520647261667420646f63756d65"
+    "6e74732076616c696420666f722061206d6178696d756d206f6620736978206d"
+    "6f6e74687320616e64206d617920626520757064617465642c207265706c6163"
+    "65642c206f72206f62736f6c65746564206279206f7468657220646f63756d65"
+    "6e747320617420616e792074696d652e20497420697320696e617070726f7072"
+    "6961746520746f2075736520496e7465726e65742d4472616674732061732072"
+    "65666572656e6365206d6174657269616c206f7220746f206369746520746865"
+    "6d206f74686572207468616e206173202fe2809c776f726b20696e2070726f67"
+    "726573732e2fe2809d"
+    ;
+
+static const enum chacha20_impl rfc_tiers[2] = {
+    CHACHA20_IMPL_PORTABLE, CHACHA20_IMPL_VECTOR4 };
+
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+/* Decodes exactly out_len bytes; any length or digit mismatch is refused. */
+static bool hex_decode(const char *hex, uint8_t *out, size_t out_len)
+{
+    if (strlen(hex) != out_len * 2u) return false;
+    for (size_t i = 0; i < out_len; i++) {
+        int hi = hex_nibble(hex[2 * i]);
+        int lo = hex_nibble(hex[2 * i + 1]);
+        if (hi < 0 || lo < 0) return false;
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
+static int rfc_report(const char *name, bool ok)
+{
+    printf("chacha20_isa_parity: RFC 8439 %s... %s\n",
+           name, ok ? "OK" : "FAIL");
+    return ok ? 0 : 1;
+}
+
+static bool rfc_2_4_2_ok(void)
+{
+    uint8_t key[32], nonce[12], plain[114], want[114], got[114];
+    if (!hex_decode(rfc_k242_hex, key, sizeof key) ||
+        !hex_decode(rfc_n242_hex, nonce, sizeof nonce) ||
+        !hex_decode(rfc_p114_hex, plain, sizeof plain) ||
+        !hex_decode(rfc_c242_hex, want, sizeof want))
+        return false;
+    for (size_t t = 0; t < 2; t++) {
+        chacha20_select_impl(rfc_tiers[t]);
+        if (!chacha20_encrypt(key, 1u, nonce, plain, sizeof plain, got) ||
+            memcmp(got, want, sizeof got) != 0)
+            return false;
+    }
+    return true;
+}
+
+static bool rfc_2_5_2_ok(void)
+{
+    uint8_t key[32], want[16], tag[16];
+    if (!hex_decode(rfc_k252_hex, key, sizeof key) ||
+        !hex_decode(rfc_t252_hex, want, sizeof want))
+        return false;
+    poly1305_mac((const uint8_t *)rfc_msg_text, strlen(rfc_msg_text),
+                 key, tag);
+    return memcmp(tag, want, sizeof tag) == 0;
+}
+
+static bool rfc_2_6_2_ok(void)
+{
+    static const uint8_t zero[32] = {0};
+    uint8_t key[32], nonce[12], want[32], got[32];
+    if (!hex_decode(rfc_k262_hex, key, sizeof key) ||
+        !hex_decode(rfc_n262_hex, nonce, sizeof nonce) ||
+        !hex_decode(rfc_otk262_hex, want, sizeof want))
+        return false;
+    for (size_t t = 0; t < 2; t++) {
+        chacha20_select_impl(rfc_tiers[t]);
+        /* Keystream of counter 0 is the one-time Poly1305 key. */
+        if (!chacha20_encrypt(key, 0u, nonce, zero, sizeof zero, got) ||
+            memcmp(got, want, sizeof got) != 0)
+            return false;
+    }
+    return true;
+}
+
+struct rfc_aead_282 {
+    uint8_t key[32], nonce[12], aad[12], plain[114], sealed[130];
+};
+
+static bool rfc_load_282(struct rfc_aead_282 *v)
+{
+    return hex_decode(rfc_k282_hex, v->key, sizeof v->key) &&
+           hex_decode(rfc_n282_hex, v->nonce, sizeof v->nonce) &&
+           hex_decode(rfc_aad282_hex, v->aad, sizeof v->aad) &&
+           hex_decode(rfc_p114_hex, v->plain, sizeof v->plain) &&
+           hex_decode(rfc_c282_hex, v->sealed, 114) &&
+           hex_decode(rfc_t282_hex, v->sealed + 114, 16);
+}
+
+/* True only when open refuses and leaves every plaintext byte untouched. */
+static bool rfc_open_refused(const uint8_t *sealed, size_t sealed_len,
+                             const uint8_t *aad, const uint8_t nonce[12],
+                             const uint8_t key[32])
+{
+    uint8_t opened[114];
+    memset(opened, 0xa5, sizeof opened);
+    bool accepted = chacha20poly1305_decrypt(sealed, sealed_len, aad, 12,
+                                             nonce, key, opened);
+    return !accepted && bytes_are(opened, sizeof opened, 0xa5);
+}
+
+static bool rfc_2_8_2_seal_ok(const struct rfc_aead_282 *v)
+{
+    uint8_t got[130], opened[114];
+    for (size_t t = 0; t < 2; t++) {
+        chacha20_select_impl(rfc_tiers[t]);
+        if (!chacha20poly1305_encrypt(v->plain, sizeof v->plain,
+                                      v->aad, sizeof v->aad,
+                                      v->nonce, v->key, got) ||
+            memcmp(got, v->sealed, sizeof got) != 0)
+            return false;
+        if (!chacha20poly1305_decrypt(v->sealed, sizeof v->sealed,
+                                      v->aad, sizeof v->aad,
+                                      v->nonce, v->key, opened) ||
+            memcmp(opened, v->plain, sizeof opened) != 0)
+            return false;
+    }
+    return true;
+}
+
+static bool rfc_2_8_2_tamper_ok(const struct rfc_aead_282 *v)
+{
+    uint8_t sealed[130], aad[12];
+    for (size_t t = 0; t < 2; t++) {
+        chacha20_select_impl(rfc_tiers[t]);
+        memcpy(sealed, v->sealed, sizeof sealed);
+        sealed[129] ^= 1u;
+        if (!rfc_open_refused(sealed, sizeof sealed, v->aad, v->nonce,
+                              v->key))
+            return false;
+        memcpy(sealed, v->sealed, sizeof sealed);
+        sealed[57] ^= 1u;
+        if (!rfc_open_refused(sealed, sizeof sealed, v->aad, v->nonce,
+                              v->key))
+            return false;
+        memcpy(aad, v->aad, sizeof aad);
+        aad[0] ^= 1u;
+        if (!rfc_open_refused(v->sealed, sizeof v->sealed, aad, v->nonce,
+                              v->key))
+            return false;
+    }
+    return true;
+}
+
+static bool rfc_empty_round_trip_ok(const struct rfc_aead_282 *v)
+{
+    static const uint8_t none[1] = {0};
+    uint8_t sealed[16], opened[1];
+    for (size_t t = 0; t < 2; t++) {
+        chacha20_select_impl(rfc_tiers[t]);
+        if (!chacha20poly1305_encrypt(none, 0, none, 0, v->nonce, v->key,
+                                      sealed) ||
+            !chacha20poly1305_decrypt(sealed, sizeof sealed, none, 0,
+                                      v->nonce, v->key, opened))
+            return false;
+        sealed[15] ^= 1u;
+        if (chacha20poly1305_decrypt(sealed, sizeof sealed, none, 0,
+                                     v->nonce, v->key, opened))
+            return false;
+    }
+    return true;
+}
+
+struct rfc_a5 {
+    uint8_t key[32], nonce[12], aad[12], sealed[281], plain[265];
+};
+
+static bool rfc_load_a5(struct rfc_a5 *v)
+{
+    return hex_decode(rfc_ka5_hex, v->key, sizeof v->key) &&
+           hex_decode(rfc_na5_hex, v->nonce, sizeof v->nonce) &&
+           hex_decode(rfc_aada5_hex, v->aad, sizeof v->aad) &&
+           hex_decode(rfc_ca5_hex, v->sealed, 265) &&
+           hex_decode(rfc_ta5_hex, v->sealed + 265, 16) &&
+           hex_decode(rfc_pa5_hex, v->plain, sizeof v->plain);
+}
+
+static bool rfc_a5_ok(const struct rfc_a5 *v)
+{
+    uint8_t opened[265];
+    for (size_t t = 0; t < 2; t++) {
+        chacha20_select_impl(rfc_tiers[t]);
+        if (!chacha20poly1305_decrypt(v->sealed, sizeof v->sealed,
+                                      v->aad, sizeof v->aad,
+                                      v->nonce, v->key, opened) ||
+            memcmp(opened, v->plain, sizeof opened) != 0)
+            return false;
+    }
+    return true;
+}
+
+static int rfc8439_vectors(void)
+{
+    struct rfc_aead_282 v282;
+    struct rfc_a5 a5;
+    int fails = 0;
+    fails += rfc_report("2.4.2 ChaCha20 encryption", rfc_2_4_2_ok());
+    fails += rfc_report("2.5.2 Poly1305 tag", rfc_2_5_2_ok());
+    fails += rfc_report("2.6.2 Poly1305 key generation", rfc_2_6_2_ok());
+    bool loaded = rfc_load_282(&v282);
+    fails += rfc_report("2.8.2 AEAD seal and open",
+                        loaded && rfc_2_8_2_seal_ok(&v282));
+    fails += rfc_report("2.8.2 flipped tag, ciphertext and AAD refused",
+                        loaded && rfc_2_8_2_tamper_ok(&v282));
+    fails += rfc_report("empty AAD and plaintext round-trip",
+                        loaded && rfc_empty_round_trip_ok(&v282));
+    fails += rfc_report("A.5 AEAD decryption",
+                        rfc_load_a5(&a5) && rfc_a5_ok(&a5));
+    return fails;
+}
+
 int test_chacha20_isa_parity(void)
 {
     printf("\n=== chacha20_isa_parity (portable vs four-block differential oracle) ===\n");
@@ -301,6 +609,8 @@ int test_chacha20_isa_parity(void)
         if (diffs == 0) printf("OK\n");
         else { printf("FAIL (%d)\n", diffs); failures++; }
     }
+
+    failures += rfc8439_vectors();
 
     printf("chacha20_isa_parity: reported benchmark (not a promotion gate)... ");
     {
