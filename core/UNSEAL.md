@@ -252,3 +252,7 @@ later lane flips it HARD.
 - 2026-10-20T01:29:24Z — REASON: state-offer freshness exemption generalised from the keystone height to any baked ladder rung height so a fresh node can be offered the h=3200000 bundle; no block/tx/header/difficulty predicate touched (owner-approved 2026-10-19 fresh-checkpoint activation)
   old ROOT: 4d3c4f6ded95fa9b5d1426901b531094cae5ef6e3d497555c9c22cd44d6e84d9
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-23T11:11:32Z — REASON: ff1: stream the CBC-MAC over P||Q so a tweak longer than the fixed 256-byte staging buffer is encrypted instead of silently returned unchanged; ZIP 32 (empty tweak, 88 bits) output byte-identical
+  old ROOT: 1611ae4fe96c2add865ebf0c0d4d90491530af7bb41912b7efd205bc8d3585c0
+  by: owner unseal ritual (make core-unseal)

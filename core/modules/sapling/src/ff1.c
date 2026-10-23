@@ -8,22 +8,51 @@
 #include "support/cleanse.h"
 #include <string.h>
 
-static void aes_cbcmac(const struct aes256_ctx *aes,
-                       const uint8_t *data, size_t len,
-                       uint8_t mac[16])
+/* Incremental AES CBC-MAC over a stream whose total length is a multiple
+ * of 16: bytes are staged one block at a time, never the whole message. */
+struct cbcmac_stream {
+    const struct aes256_ctx *aes;
+    uint8_t mac[16];
+    uint8_t blk[16];
+    size_t fill;
+};
+
+static void cbcmac_init(struct cbcmac_stream *s, const struct aes256_ctx *aes)
 {
-    uint8_t block[16];
-    memset(mac, 0, 16);
-    size_t pos = 0;
-    while (pos < len) {
-        size_t chunk = (len - pos < 16) ? len - pos : 16;
-        memset(block, 0, 16);
-        memcpy(block, data + pos, chunk);
-        for (int i = 0; i < 16; i++)
-            block[i] ^= mac[i];
-        aes256_encrypt(aes, block, mac);
-        pos += 16;
-    }
+    s->aes = aes;
+    memset(s->mac, 0, sizeof(s->mac));
+    memset(s->blk, 0, sizeof(s->blk));
+    s->fill = 0;
+}
+
+static void cbcmac_absorb_byte(struct cbcmac_stream *s, uint8_t b)
+{
+    s->blk[s->fill++] = b;
+    if (s->fill < 16)
+        return;
+    for (int i = 0; i < 16; i++)
+        s->blk[i] ^= s->mac[i];
+    aes256_encrypt(s->aes, s->blk, s->mac);
+    s->fill = 0;
+}
+
+static void cbcmac_absorb(struct cbcmac_stream *s, const uint8_t *p, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        cbcmac_absorb_byte(s, p[i]);
+}
+
+static void cbcmac_zeros(struct cbcmac_stream *s, size_t len)
+{
+    for (size_t i = 0; i < len; i++)
+        cbcmac_absorb_byte(s, 0);
+}
+
+/* Copy the MAC out and wipe the stream state. */
+static void cbcmac_finish(struct cbcmac_stream *s, uint8_t out[16])
+{
+    memcpy(out, s->mac, 16);
+    memory_cleanse(s, sizeof(*s));
 }
 
 /* Convert bits [start_bit..start_bit+n_bits) from LE-byte array to BE number */
@@ -121,32 +150,23 @@ void ff1_aes256_encrypt(const uint8_t key[32],
         size_t b = (right_bits + 7) / 8;
         size_t d = 4 * ((b + 3) / 4) + 4;
 
-        /* Build Q: tweak || pad || i_byte || B_bytes */
+        /* Q = tweak || zero pad || i_byte || B_bytes, streamed after P */
         size_t q_raw = tweak_len + 1 + b;
-        size_t q_padded = ((q_raw + 15) / 16) * 16;
-        size_t pad = q_padded - q_raw;
+        size_t pad = (16 - q_raw % 16) % 16;
 
-        size_t pq_len = 16 + q_padded;
-        uint8_t pq[256];
-        if (pq_len > sizeof(pq)) {
-            memory_cleanse(pq, sizeof(pq));
-            memory_cleanse(&aes, sizeof(aes));
-            return;
-        }
-
-        memcpy(pq, P, 16);
-        size_t off = 16;
+        struct cbcmac_stream cm;
+        cbcmac_init(&cm, &aes);
+        cbcmac_absorb(&cm, P, 16);
         if (tweak_len > 0 && tweak)
-            memcpy(pq + off, tweak, tweak_len);
-        off += tweak_len;
-        memset(pq + off, 0, pad);
-        off += pad;
-        pq[off++] = (uint8_t)i;
-        memcpy(pq + off, right + 16 - b, b);
-        off += b;
+            cbcmac_absorb(&cm, tweak, tweak_len);
+        else
+            cbcmac_zeros(&cm, tweak_len);
+        cbcmac_zeros(&cm, pad);
+        cbcmac_absorb_byte(&cm, (uint8_t)i);
+        cbcmac_absorb(&cm, right + 16 - b, b);
 
         uint8_t R[16];
-        aes_cbcmac(&aes, pq, off, R);
+        cbcmac_finish(&cm, R);
 
         uint8_t S[48];
         memcpy(S, R, 16);
@@ -176,7 +196,6 @@ void ff1_aes256_encrypt(const uint8_t key[32],
         memory_cleanse(c, sizeof(c));
         memory_cleanse(S, sizeof(S));
         memory_cleanse(R, sizeof(R));
-        memory_cleanse(pq, sizeof(pq));
 
         size_t t = left_bits;
         left_bits = right_bits;

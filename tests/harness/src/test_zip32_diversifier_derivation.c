@@ -67,13 +67,10 @@ static const struct ff1_zc_vec ff1_zc_vectors[] = {
     /* lines 95-97: x = [0, 1]*44, empty tweak */
     { 0, "01", 2,
       "0000111101000001111011010111011111110001100101000000001101101110100010010111001100100110" },
-    /* FIXME(ff1.c divergence): lines 101-103, x = [0, 1]*44 with
-     * tweak = bytes(range(255)) is not in the table. ff1.c stages
-     * 16 + round_up(255 + 1 + b, 16) = 288 bytes into pq[256], takes its
-     * size-check early return, and leaves the input unchanged, so this
-     * case fails. Re-enable when the crypto source accepts 255-byte tweaks.
-     * { 255, "01", 2,
-     *   "0111110110001000000111010110000100010101101000000011100111100100100010101101111010100011" }, */
+    /* lines 101-103: x = [0, 1]*44, tweak = bytes(range(255)); the 255-byte
+     * tweak makes the CBC-MAC message longer than any fixed staging buffer. */
+    { 255, "01", 2,
+      "0111110110001000000111010110000100010101101000000011100111100100100010101101111010100011" },
 };
 
 static bool ff1_zc_vector_matches(const struct ff1_zc_vec *v)
