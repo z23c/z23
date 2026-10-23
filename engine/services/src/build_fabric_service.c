@@ -171,6 +171,17 @@ static bool bf_action_same_plan(const struct db_build_action *a,
            strcmp(a->resource_policy, b->resource_policy) == 0;
 }
 
+/* One comma-separated token spans [at, end). Trailing blanks are not part of
+ * the name, so "gpu , cpu" matches both "gpu" and "cpu". */
+static bool bf_capability_token_matches(const char *at, const char *end,
+                                        const char *wanted, size_t wanted_len)
+{
+    const char *trim = end;
+    while (trim > at && (trim[-1] == ' ' || trim[-1] == '\t')) trim--;
+    return (size_t)(trim - at) == wanted_len &&
+           memcmp(at, wanted, wanted_len) == 0;
+}
+
 static bool bf_capability_has(const char *capabilities, const char *wanted)
 {
     if (!capabilities || !wanted || !wanted[0])
@@ -181,10 +192,7 @@ static bool bf_capability_has(const char *capabilities, const char *wanted)
         while (*at == ',' || *at == ' ' || *at == '\t') at++;
         const char *end = at;
         while (*end && *end != ',') end++;
-        const char *trim = end;
-        while (trim > at && (trim[-1] == ' ' || trim[-1] == '\t')) trim--;
-        if ((size_t)(trim - at) == wanted_len &&
-            memcmp(at, wanted, wanted_len) == 0)
+        if (bf_capability_token_matches(at, end, wanted, wanted_len))
             return true;
         at = *end ? end + 1 : end;
     }
@@ -207,16 +215,75 @@ static bool bf_action_identity_current(const struct db_build_job *job,
            strcmp(expected, action->action_id) == 0;
 }
 
-struct zcl_result build_fabric_plan(struct node_db *ndb,
-                                    const struct db_build_job *job,
-                                    const struct db_build_action *action)
+/* Shared guards for the leased calls: ids are lowercase hex, the clock is
+ * non-negative, and the db is open. Callers keep their own lease bounds. */
+static bool bf_lease_ids_valid(struct node_db *ndb, const char *id,
+                               const char *lease_id, int64_t now)
 {
-    if (!ndb || !ndb->open || !job || !action)
-        return ZCL_ERR(-1, "build plan requires an open db, job, and action");
+    return ndb && ndb->open && zcl_is_lower_hex(id, BUILD_FABRIC_ID_HEX) &&
+           zcl_is_lower_hex(lease_id, BUILD_FABRIC_ID_HEX) && now >= 0;
+}
+
+/* A zero expiry means there is no live lease to act under. */
+static bool bf_lease_expired(const struct db_build_action *action, int64_t now)
+{
+    return action->lease_expires_at == 0 || now >= action->lease_expires_at;
+}
+
+static bool bf_lease_held_state(const char *state)
+{
+    return strcmp(state, "CLAIMED") == 0 || strcmp(state, "RUNNING") == 0 ||
+           strcmp(state, "VERIFYING") == 0;
+}
+
+static bool bf_load_action_job(struct node_db *ndb, const char *action_id,
+                               struct db_build_action *action,
+                               struct db_build_job *job)
+{
+    return db_build_action_find(ndb, action_id, action) &&
+           db_build_job_find(ndb, action->job_id, job);
+}
+
+static bool bf_job_by_id(struct node_db *ndb, const char *job_id,
+                         struct db_build_job *job)
+{
+    return ndb && ndb->open && job_id && db_build_job_find(ndb, job_id, job);
+}
+
+/* A worker may sign or claim only while approved, unrevoked, and unexpired;
+ * an expiry of zero means it never expires. */
+static bool bf_worker_active(const struct db_build_worker *worker, int64_t now)
+{
+    return worker->approved && !worker->revoked &&
+           (worker->expires_at == 0 || now < worker->expires_at);
+}
+
+static bool bf_profile_ok(const char *profile)
+{
+    return profile && profile[0] &&
+           strlen(profile) <= BUILD_FABRIC_PROFILE_MAX;
+}
+
+static bool bf_finish_outcome_valid(const char *outcome)
+{
+    return strcmp(outcome, "FAILED") == 0 ||
+           strcmp(outcome, "LOCAL_FALLBACK") == 0 ||
+           strcmp(outcome, "CANCELLED") == 0;
+}
+
+static struct zcl_result bf_plan_lifecycle(const struct db_build_job *job,
+                                           const struct db_build_action *action)
+{
     if (strcmp(job->state, "PLANNED") != 0 ||
         strcmp(action->state, "SNAPSHOTTED") != 0 ||
         strcmp(job->job_id, action->job_id) != 0)
         return ZCL_ERR(-1, "build plan lifecycle or ownership is invalid");
+    return ZCL_OK;
+}
+
+static struct zcl_result bf_plan_fixed_policy(
+    const struct db_build_action *action)
+{
     uint8_t fixed_flags[32], fixed_environment[32];
     char fixed_flags_hex[65], fixed_environment_hex[65];
     if (!vcs_build_action_v1_fixed_flags_root_for_kind(
@@ -229,6 +296,12 @@ struct zcl_result build_fabric_plan(struct node_db *ndb,
     if (strcmp(action->flags_sha3, fixed_flags_hex) != 0 ||
         strcmp(action->environment_sha3, fixed_environment_hex) != 0)
         return ZCL_ERR(-1, "supervisor fixed flags or environment mismatch");
+    return ZCL_OK;
+}
+
+static struct zcl_result bf_plan_identity(const struct db_build_job *job,
+                                          const struct db_build_action *action)
+{
     char expected_action[BUILD_FABRIC_ID_HEX + 1];
     char expected_job[BUILD_FABRIC_ID_HEX + 1];
     if (!build_fabric_action_id(job, action, expected_action).ok ||
@@ -236,19 +309,14 @@ struct zcl_result build_fabric_plan(struct node_db *ndb,
         !build_fabric_job_id(job, action->action_id, expected_job).ok ||
         strcmp(expected_job, job->job_id) != 0)
         return ZCL_ERR(-1, "build plan ids do not match immutable inputs");
-    struct db_build_job prior_job;
-    bool have_job = db_build_job_find(ndb, job->job_id, &prior_job);
-    if (have_job && !bf_job_same_plan(&prior_job, job))
-        return ZCL_ERR(-1, "job id collides with a different immutable plan");
-    struct db_build_action prior_action;
-    bool have_action = db_build_action_find(ndb, action->action_id,
-                                             &prior_action);
-    if (have_action && !bf_action_same_plan(&prior_action, action))
-        return ZCL_ERR(-1, "action id collides with different immutable inputs");
-    /* An idempotent plan replay proves identity only.  In particular, it must
-     * never rewind an already-queued or completed durable record. */
-    if (have_job && have_action)
-        return ZCL_OK;
+    return ZCL_OK;
+}
+
+static struct zcl_result bf_plan_persist(struct node_db *ndb,
+                                         const struct db_build_job *job,
+                                         const struct db_build_action *action,
+                                         bool have_job, bool have_action)
+{
     if (!node_db_begin(ndb))
         return ZCL_ERR(-1, "cannot begin build plan transaction");
     bool ok = (have_job || db_build_job_save(ndb, job)) &&
@@ -262,6 +330,34 @@ struct zcl_result build_fabric_plan(struct node_db *ndb,
     return ZCL_OK;
 }
 
+struct zcl_result build_fabric_plan(struct node_db *ndb,
+                                    const struct db_build_job *job,
+                                    const struct db_build_action *action)
+{
+    if (!ndb || !ndb->open || !job || !action)
+        return ZCL_ERR(-1, "build plan requires an open db, job, and action");
+    struct zcl_result check = bf_plan_lifecycle(job, action);
+    if (!check.ok) return check;
+    check = bf_plan_fixed_policy(action);
+    if (!check.ok) return check;
+    check = bf_plan_identity(job, action);
+    if (!check.ok) return check;
+    struct db_build_job prior_job;
+    bool have_job = db_build_job_find(ndb, job->job_id, &prior_job);
+    if (have_job && !bf_job_same_plan(&prior_job, job))
+        return ZCL_ERR(-1, "job id collides with a different immutable plan");
+    struct db_build_action prior_action;
+    bool have_action = db_build_action_find(ndb, action->action_id,
+                                             &prior_action);
+    if (have_action && !bf_action_same_plan(&prior_action, action))
+        return ZCL_ERR(-1, "action id collides with different immutable inputs");
+    /* An idempotent plan replay proves identity only.  In particular, it must
+     * never rewind an already-queued or completed durable record. */
+    if (have_job && have_action)
+        return ZCL_OK;
+    return bf_plan_persist(ndb, job, action, have_job, have_action);
+}
+
 struct zcl_result build_fabric_plan_reproduction(
     struct node_db *ndb, const char *primary_action_id,
     const char *reproduction_profile, int64_t now,
@@ -271,14 +367,12 @@ struct zcl_result build_fabric_plan_reproduction(
     if (out_action_id) out_action_id[0] = '\0';
     if (out_job_id) out_job_id[0] = '\0';
     if (!ndb || !ndb->open || !zcl_is_lower_hex(primary_action_id, BUILD_FABRIC_ID_HEX) ||
-        !reproduction_profile || !reproduction_profile[0] ||
-        strlen(reproduction_profile) > BUILD_FABRIC_PROFILE_MAX ||
-        now <= 0 || !out_action_id || !out_job_id)
+        !bf_profile_ok(reproduction_profile) || now <= 0 ||
+        !out_action_id || !out_job_id)
         return ZCL_ERR(-1, "reproduction plan requires exact inputs");
     struct db_build_action action;
     struct db_build_job job;
-    if (!db_build_action_find(ndb, primary_action_id, &action) ||
-        !db_build_job_find(ndb, action.job_id, &job) ||
+    if (!bf_load_action_job(ndb, primary_action_id, &action, &job) ||
         !bf_action_identity_current(&job, &action))
         return ZCL_ERR(-1, "primary action is absent or noncanonical");
     if (strcmp(job.profile, reproduction_profile) == 0)
@@ -322,17 +416,25 @@ static bool bf_terminal(const char *state)
                      strcmp(state, "DISPUTED") == 0);
 }
 
+static struct zcl_result bf_submit_state(const struct db_build_job *job)
+{
+    if (strcmp(job->state, "PLANNED") != 0 &&
+        strcmp(job->state, "SNAPSHOTTED") != 0)
+        return ZCL_ERR(-1, "job state %s cannot transition to QUEUED", job->state);
+    return ZCL_OK;
+}
+
 struct zcl_result build_fabric_submit(struct node_db *ndb,
                                       const char *job_id, int64_t now)
 {
     struct db_build_job job;
-    if (!ndb || !ndb->open || !job_id || !db_build_job_find(ndb, job_id, &job))
+    if (!bf_job_by_id(ndb, job_id, &job))
         return ZCL_ERR(-1, "build job not found");
     if (strcmp(job.state, "QUEUED") == 0)
         return ZCL_OK;
-    if (strcmp(job.state, "PLANNED") != 0 &&
-        strcmp(job.state, "SNAPSHOTTED") != 0)
-        return ZCL_ERR(-1, "job state %s cannot transition to QUEUED", job.state);
+    struct zcl_result state = bf_submit_state(&job);
+    if (!state.ok)
+        return state;
     struct db_build_action *actions = bf_actions_scratch("build.submit.actions");
     if (!actions)
         return ZCL_ERR(-1, "cannot allocate build action scan buffer");
@@ -366,20 +468,50 @@ struct zcl_result build_fabric_submit(struct node_db *ndb,
     return ZCL_OK;
 }
 
+/* A queued action is claimable when this worker holds its capability and its
+ * job is still queued, uncancelled, and bound to the same immutable identity. */
+static bool bf_claim_eligible(struct node_db *ndb,
+                              const struct db_build_worker *worker,
+                              const struct db_build_action *queued,
+                              struct db_build_job *job)
+{
+    return build_fabric_worker_capability_check(worker->capabilities,
+                                                queued->kind).ok &&
+           db_build_job_find(ndb, queued->job_id, job) &&
+           !job->cancel_requested && strcmp(job->state, "QUEUED") == 0 &&
+           bf_action_identity_current(job, queued);
+}
+
+static bool bf_claim_persist(struct node_db *ndb,
+                             const struct db_build_action *next,
+                             struct db_build_job *job, int64_t now)
+{
+    bool ok = db_build_action_claim_queued(ndb, next);
+    if (ok) {
+        (void)snprintf(job->state, sizeof(job->state), "CLAIMED");
+        job->updated_at = now;
+        ok = db_build_job_save(ndb, job) && node_db_commit(ndb);
+    }
+    if (!ok) {
+        if (!node_db_rollback(ndb))
+            LOG_ERROR("build_fabric", "claim and rollback both failed");
+    }
+    return ok;
+}
+
 struct zcl_result build_fabric_claim(
     struct node_db *ndb, const char *worker_id, const char *lease_id,
     int64_t now, int64_t lease_seconds, struct db_build_action *out,
     bool *claimed)
 {
     if (claimed) *claimed = false;
-    if (!ndb || !ndb->open || !zcl_is_lower_hex(worker_id, BUILD_FABRIC_ID_HEX) ||
-        !zcl_is_lower_hex(lease_id, BUILD_FABRIC_ID_HEX) || now < 0 ||
+    if (!bf_lease_ids_valid(ndb, worker_id, lease_id, now) ||
         lease_seconds < BUILD_FABRIC_LEASE_SECONDS_MIN ||
         lease_seconds > BUILD_FABRIC_LEASE_SECONDS_MAX || !out || !claimed)
         return ZCL_ERR(-1, "claim requires valid worker, lease, time, and bounds");
     struct db_build_worker worker;
-    if (!db_build_worker_find(ndb, worker_id, &worker) || !worker.approved ||
-        worker.revoked || (worker.expires_at && now >= worker.expires_at))
+    if (!db_build_worker_find(ndb, worker_id, &worker) ||
+        !bf_worker_active(&worker, now))
         return ZCL_ERR(-1, "worker is unapproved, expired, or revoked");
     struct db_build_action *queued = bf_actions_scratch("build.claim.queued");
     if (!queued)
@@ -387,13 +519,8 @@ struct zcl_result build_fabric_claim(
     int count = db_build_actions_queued(ndb, queued,
                                         BUILD_FABRIC_ACTION_LIMIT);
     for (int i = 0; i < count; i++) {
-        if (!build_fabric_worker_capability_check(worker.capabilities,
-                                                  queued[i].kind).ok)
-            continue;
         struct db_build_job job;
-        if (!db_build_job_find(ndb, queued[i].job_id, &job) ||
-            job.cancel_requested || strcmp(job.state, "QUEUED") != 0 ||
-            !bf_action_identity_current(&job, &queued[i]))
+        if (!bf_claim_eligible(ndb, &worker, &queued[i], &job))
             continue;
         struct db_build_action next = queued[i];
         (void)snprintf(next.state, sizeof(next.state), "CLAIMED");
@@ -408,17 +535,8 @@ struct zcl_result build_fabric_claim(
         next.updated_at = now;
         if (!node_db_begin(ndb)) { free(queued); return ZCL_ERR(
             -1, "cannot begin build claim transaction"); }
-        bool ok = db_build_action_claim_queued(ndb, &next);
-        if (ok) {
-            (void)snprintf(job.state, sizeof(job.state), "CLAIMED");
-            job.updated_at = now;
-            ok = db_build_job_save(ndb, &job) && node_db_commit(ndb);
-        }
-        if (!ok) {
-            if (!node_db_rollback(ndb))
-                LOG_ERROR("build_fabric", "claim and rollback both failed");
+        if (!bf_claim_persist(ndb, &next, &job, now))
             continue; /* another owner won this candidate */
-        }
         *out = next;
         *claimed = true;
         free(queued);
@@ -428,27 +546,39 @@ struct zcl_result build_fabric_claim(
     return ZCL_OK;
 }
 
+/* Every leased transition re-checks the same ownership facts before it writes:
+ * the expected state and lease, a live job, an unexpired lease, and identity. */
+static struct zcl_result bf_leased_guard(const struct db_build_action *action,
+                                         const struct db_build_job *job,
+                                         const char *lease_id,
+                                         const char *expected_state,
+                                         int64_t now)
+{
+    if (strcmp(action->state, expected_state) != 0 ||
+        strcmp(action->lease_id, lease_id) != 0)
+        return ZCL_ERR(-1, "lease or expected action state is stale");
+    if (job->cancel_requested || strcmp(job->state, "CANCELLED") == 0)
+        return ZCL_ERR(-1, "build job is cancelled");
+    if (bf_lease_expired(action, now))
+        return ZCL_ERR(-1, "build action lease has expired");
+    if (!bf_action_identity_current(job, action))
+        return ZCL_ERR(-1, "build action immutable identity is stale");
+    return ZCL_OK;
+}
+
 static struct zcl_result bf_leased_transition(
     struct node_db *ndb, const char *action_id, const char *lease_id,
     const char *expected_state, const char *next_state, int64_t now)
 {
-    if (!ndb || !ndb->open || !zcl_is_lower_hex(action_id, BUILD_FABRIC_ID_HEX) ||
-        !zcl_is_lower_hex(lease_id, BUILD_FABRIC_ID_HEX) || now < 0)
+    if (!bf_lease_ids_valid(ndb, action_id, lease_id, now))
         return ZCL_ERR(-1, "leased transition requires valid ids and time");
     struct db_build_action action;
     struct db_build_job job;
-    if (!db_build_action_find(ndb, action_id, &action) ||
-        !db_build_job_find(ndb, action.job_id, &job))
+    if (!bf_load_action_job(ndb, action_id, &action, &job))
         return ZCL_ERR(-1, "leased action or job not found");
-    if (strcmp(action.state, expected_state) != 0 ||
-        strcmp(action.lease_id, lease_id) != 0)
-        return ZCL_ERR(-1, "lease or expected action state is stale");
-    if (job.cancel_requested || strcmp(job.state, "CANCELLED") == 0)
-        return ZCL_ERR(-1, "build job is cancelled");
-    if (action.lease_expires_at == 0 || now >= action.lease_expires_at)
-        return ZCL_ERR(-1, "build action lease has expired");
-    if (!bf_action_identity_current(&job, &action))
-        return ZCL_ERR(-1, "build action immutable identity is stale");
+    struct zcl_result guard = bf_leased_guard(&action, &job, lease_id,
+                                              expected_state, now);
+    if (!guard.ok) return guard;
     struct db_build_action next = action;
     (void)snprintf(next.state, sizeof(next.state), "%s", next_state);
     if (strcmp(next_state, "RUNNING") == 0 && next.started_at == 0)
@@ -491,21 +621,17 @@ struct zcl_result build_fabric_heartbeat(
     struct node_db *ndb, const char *action_id, const char *lease_id,
     int64_t now, int64_t lease_seconds)
 {
-    if (!ndb || !ndb->open || !zcl_is_lower_hex(action_id, BUILD_FABRIC_ID_HEX) ||
-        !zcl_is_lower_hex(lease_id, BUILD_FABRIC_ID_HEX) || now < 0 ||
+    if (!bf_lease_ids_valid(ndb, action_id, lease_id, now) ||
         lease_seconds < BUILD_FABRIC_LEASE_SECONDS_MIN ||
         lease_seconds > BUILD_FABRIC_LEASE_SECONDS_MAX)
         return ZCL_ERR(-1, "heartbeat requires valid ids, time, and bounds");
     struct db_build_action action;
     struct db_build_job job;
-    if (!db_build_action_find(ndb, action_id, &action) ||
-        !db_build_job_find(ndb, action.job_id, &job))
+    if (!bf_load_action_job(ndb, action_id, &action, &job))
         return ZCL_ERR(-1, "heartbeat action or job not found");
-    if ((strcmp(action.state, "CLAIMED") != 0 &&
-         strcmp(action.state, "RUNNING") != 0 &&
-         strcmp(action.state, "VERIFYING") != 0) ||
+    if (!bf_lease_held_state(action.state) ||
         strcmp(action.lease_id, lease_id) != 0 || job.cancel_requested ||
-        action.lease_expires_at == 0 || now >= action.lease_expires_at ||
+        bf_lease_expired(&action, now) ||
         !bf_action_identity_current(&job, &action))
         return ZCL_ERR(-1, "heartbeat lease, authority, or identity is stale");
     const struct db_build_action expected = action;
@@ -567,20 +693,14 @@ struct zcl_result build_fabric_finish_leased(
     struct node_db *ndb, const char *action_id, const char *lease_id,
     const char *outcome, const char *detail, int64_t now)
 {
-    if (!ndb || !ndb->open || !zcl_is_lower_hex(action_id, BUILD_FABRIC_ID_HEX) ||
-        !zcl_is_lower_hex(lease_id, BUILD_FABRIC_ID_HEX) || !outcome || !detail || now < 0 ||
-        (strcmp(outcome, "FAILED") != 0 &&
-         strcmp(outcome, "LOCAL_FALLBACK") != 0 &&
-         strcmp(outcome, "CANCELLED") != 0))
+    if (!bf_lease_ids_valid(ndb, action_id, lease_id, now) || !outcome ||
+        !detail || !bf_finish_outcome_valid(outcome))
         return ZCL_ERR(-1, "leased finish requires a named terminal outcome");
     struct db_build_action action;
     struct db_build_job job;
-    if (!db_build_action_find(ndb, action_id, &action) ||
-        !db_build_job_find(ndb, action.job_id, &job))
+    if (!bf_load_action_job(ndb, action_id, &action, &job))
         return ZCL_ERR(-1, "leased finish action or job not found");
-    if ((strcmp(action.state, "CLAIMED") != 0 &&
-         strcmp(action.state, "RUNNING") != 0 &&
-         strcmp(action.state, "VERIFYING") != 0) ||
+    if (!bf_lease_held_state(action.state) ||
         strcmp(action.lease_id, lease_id) != 0)
         return ZCL_ERR(-1, "leased finish owner or state is stale");
     const struct db_build_action expected = action;
@@ -611,7 +731,7 @@ struct zcl_result build_fabric_cancel(struct node_db *ndb,
                                       const char *job_id, int64_t now)
 {
     struct db_build_job job;
-    if (!ndb || !ndb->open || !job_id || !db_build_job_find(ndb, job_id, &job))
+    if (!bf_job_by_id(ndb, job_id, &job))
         return ZCL_ERR(-1, "build job not found");
     if (strcmp(job.state, "CANCELLED") == 0)
         return ZCL_OK;
@@ -702,6 +822,128 @@ struct zcl_result build_fabric_worker_revoke(
     return ZCL_OK;
 }
 
+/* The receipt must name this action, job, worker, and lease exactly; any
+ * differing field means the receipt is bound to something else. */
+static bool bf_receipt_mismatch(const struct db_build_receipt *receipt,
+                                const struct db_build_action *action)
+{
+    return strcmp(action->job_id, receipt->job_id) != 0 ||
+           strcmp(receipt->action_sha3, action->action_id) != 0 ||
+           strcmp(receipt->worker_id, action->worker_id) != 0 ||
+           strcmp(receipt->lease_id, action->lease_id) != 0;
+}
+
+/* A settled action that already holds this receipt is a replay, not an error. */
+static bool bf_receipt_replayed(struct node_db *ndb,
+                                const struct db_build_action *action,
+                                const struct db_build_receipt *receipt)
+{
+    struct db_build_receipt prior;
+    return (strcmp(action->state, "ACCEPTED") == 0 ||
+            strcmp(action->state, "FAILED") == 0) &&
+           db_build_receipt_find(ndb, receipt->receipt_id, &prior);
+}
+
+static struct zcl_result bf_receipt_authentic(
+    const struct db_build_receipt *receipt, const struct db_build_worker *worker)
+{
+    char expected_id[65];
+    if (!build_fabric_receipt_id(receipt, expected_id).ok ||
+        strcmp(expected_id, receipt->receipt_id) != 0)
+        return ZCL_ERR(-1, "receipt id does not match its canonical preimage");
+    uint8_t id[32], sig[64], pubkey[32];
+    if (!zcl_hex_decode_lower(receipt->receipt_id, id, sizeof(id)) ||
+        !zcl_hex_decode_lower(receipt->signature, sig, sizeof(sig)) ||
+        !zcl_hex_decode_lower(worker->signer_pubkey, pubkey, sizeof(pubkey)) ||
+        !ed25519_verify(sig, id, sizeof(id), pubkey))
+        return ZCL_ERR(-1, "receipt Ed25519 signature is invalid");
+    return ZCL_OK;
+}
+
+static void bf_receipt_settle(struct db_build_action *action,
+                              const struct db_build_receipt *receipt,
+                              int64_t now)
+{
+    const bool passed = receipt->exit_status == 0;
+    const char *verdict = passed ? "ACCEPTED" : "FAILED";
+    (void)snprintf(action->state, sizeof(action->state), "%s", verdict);
+    (void)snprintf(action->outcome, sizeof(action->outcome), "%s", verdict);
+    if (!passed)
+        (void)snprintf(action->last_error, sizeof(action->last_error),
+                       "fixed-action-reported-failure");
+    (void)snprintf(action->output_root_sha3, sizeof(action->output_root_sha3),
+                   "%s", receipt->output_sha3);
+    (void)snprintf(action->worker_id, sizeof(action->worker_id), "%s",
+                   receipt->worker_id);
+    action->finished_at = now;
+    action->updated_at = now;
+}
+
+static bool bf_actions_all_accepted(const struct db_build_action *actions,
+                                    int count)
+{
+    for (int i = 0; i < count; i++)
+        if (strcmp(actions[i].state, "ACCEPTED") != 0 &&
+            strcmp(actions[i].state, "CACHE_HIT") != 0)
+            return false;
+    return true;
+}
+
+static bool bf_receipt_finish_job(struct node_db *ndb,
+                                  const struct db_build_receipt *receipt,
+                                  const char *outcome, int64_t now)
+{
+    struct db_build_job job;
+    bool ok = db_build_job_find(ndb, receipt->job_id, &job);
+    if (ok) {
+        (void)snprintf(job.state, sizeof(job.state), "%s", outcome);
+        (void)snprintf(job.outcome, sizeof(job.outcome), "%s", outcome);
+        job.updated_at = now;
+        ok = db_build_job_save(ndb, &job);
+    }
+    return ok;
+}
+
+static bool bf_receipt_apply(struct node_db *ndb,
+                             const struct db_build_receipt *receipt,
+                             struct db_build_action *action,
+                             const struct db_build_action *expected,
+                             int64_t now)
+{
+    const bool passed = receipt->exit_status == 0;
+    bool ok = db_build_receipt_save(ndb, receipt) &&
+              db_build_action_save_leased(ndb, action, expected);
+    struct db_build_action *actions = bf_actions_scratch("build.receipt.actions");
+    int count = actions && ok ? db_build_job_actions(
+        ndb, receipt->job_id, actions, BUILD_FABRIC_ACTION_LIMIT) : 0;
+    ok = ok && actions != NULL;
+    bool all_accepted = passed && count > 0 &&
+                        bf_actions_all_accepted(actions, count);
+    if (ok && all_accepted)
+        ok = bf_receipt_finish_job(ndb, receipt, "ACCEPTED", now);
+    else if (ok && !passed)
+        ok = bf_receipt_finish_job(ndb, receipt, "FAILED", now);
+    ok = ok && node_db_commit(ndb);
+    free(actions);
+    return ok;
+}
+
+static struct zcl_result bf_receipt_commit(struct node_db *ndb,
+                                           const struct db_build_receipt *receipt,
+                                           struct db_build_action *action,
+                                           const struct db_build_action *expected,
+                                           int64_t now)
+{
+    if (!node_db_begin(ndb))
+        return ZCL_ERR(-1, "cannot begin receipt acceptance transaction");
+    if (!bf_receipt_apply(ndb, receipt, action, expected, now)) {
+        if (!node_db_rollback(ndb))
+            LOG_ERROR("build_fabric", "receipt accept and rollback both failed");
+        return ZCL_ERR(-1, "verified receipt could not be accepted atomically");
+    }
+    return ZCL_OK;
+}
+
 struct zcl_result build_fabric_receipt_accept(
     struct node_db *ndb, const struct db_build_receipt *receipt, int64_t now)
 {
@@ -711,90 +953,23 @@ struct zcl_result build_fabric_receipt_accept(
         return ZCL_ERR(-1, "only a local accepted receipt may advance an action");
     struct db_build_worker worker;
     if (!db_build_worker_find(ndb, receipt->worker_id, &worker) ||
-        !worker.approved || worker.revoked ||
-        (worker.expires_at != 0 && now >= worker.expires_at))
+        !bf_worker_active(&worker, now))
         return ZCL_ERR(-1, "receipt signer is unapproved, expired, or revoked");
     struct db_build_action action;
     if (!db_build_action_find(ndb, receipt->action_id, &action) ||
-        strcmp(action.job_id, receipt->job_id) != 0 ||
-        strcmp(receipt->action_sha3, action.action_id) != 0 ||
-        strcmp(receipt->worker_id, action.worker_id) != 0 ||
-        strcmp(receipt->lease_id, action.lease_id) != 0)
+        bf_receipt_mismatch(receipt, &action))
         return ZCL_ERR(-1, "receipt is not bound to the named action and job");
-    if (strcmp(action.state, "ACCEPTED") == 0 ||
-        strcmp(action.state, "FAILED") == 0) {
-        struct db_build_receipt prior;
-        if (db_build_receipt_find(ndb, receipt->receipt_id, &prior))
-            return ZCL_OK;
-    }
+    if (bf_receipt_replayed(ndb, &action, receipt))
+        return ZCL_OK;
     if (strcmp(action.state, "VERIFYING") != 0)
         return ZCL_ERR(-1, "action state %s cannot accept a receipt",
                        action.state);
-    if (action.lease_expires_at == 0 || now >= action.lease_expires_at)
+    if (bf_lease_expired(&action, now))
         return ZCL_ERR(-1, "receipt action lease is expired");
-    char expected_id[65];
-    if (!build_fabric_receipt_id(receipt, expected_id).ok ||
-        strcmp(expected_id, receipt->receipt_id) != 0)
-        return ZCL_ERR(-1, "receipt id does not match its canonical preimage");
-    uint8_t id[32], sig[64], pubkey[32];
-    if (!zcl_hex_decode_lower(receipt->receipt_id, id, sizeof(id)) ||
-        !zcl_hex_decode_lower(receipt->signature, sig, sizeof(sig)) ||
-        !zcl_hex_decode_lower(worker.signer_pubkey, pubkey, sizeof(pubkey)) ||
-        !ed25519_verify(sig, id, sizeof(id), pubkey))
-        return ZCL_ERR(-1, "receipt Ed25519 signature is invalid");
-    const bool passed = receipt->exit_status == 0;
+    struct zcl_result authentic = bf_receipt_authentic(receipt, &worker);
+    if (!authentic.ok)
+        return authentic;
     const struct db_build_action expected = action;
-    (void)snprintf(action.state, sizeof(action.state), "%s",
-                   passed ? "ACCEPTED" : "FAILED");
-    (void)snprintf(action.outcome, sizeof(action.outcome), "%s",
-                   passed ? "ACCEPTED" : "FAILED");
-    if (!passed)
-        (void)snprintf(action.last_error, sizeof(action.last_error),
-                       "fixed-action-reported-failure");
-    (void)snprintf(action.output_root_sha3, sizeof(action.output_root_sha3),
-                   "%s", receipt->output_sha3);
-    (void)snprintf(action.worker_id, sizeof(action.worker_id), "%s",
-                   receipt->worker_id);
-    action.finished_at = now;
-    action.updated_at = now;
-    if (!node_db_begin(ndb))
-        return ZCL_ERR(-1, "cannot begin receipt acceptance transaction");
-    bool ok = db_build_receipt_save(ndb, receipt) &&
-              db_build_action_save_leased(ndb, &action, &expected);
-    struct db_build_action *actions = bf_actions_scratch("build.receipt.actions");
-    int count = actions && ok ? db_build_job_actions(
-        ndb, receipt->job_id, actions, BUILD_FABRIC_ACTION_LIMIT) : 0;
-    ok = ok && actions != NULL;
-    bool all_accepted = passed && count > 0;
-    for (int i = 0; i < count; i++)
-        if (strcmp(actions[i].state, "ACCEPTED") != 0 &&
-            strcmp(actions[i].state, "CACHE_HIT") != 0)
-            all_accepted = false;
-    if (ok && all_accepted) {
-        struct db_build_job job;
-        ok = db_build_job_find(ndb, receipt->job_id, &job);
-        if (ok) {
-            (void)snprintf(job.state, sizeof(job.state), "ACCEPTED");
-            (void)snprintf(job.outcome, sizeof(job.outcome), "ACCEPTED");
-            job.updated_at = now;
-            ok = db_build_job_save(ndb, &job);
-        }
-    } else if (ok && !passed) {
-        struct db_build_job job;
-        ok = db_build_job_find(ndb, receipt->job_id, &job);
-        if (ok) {
-            (void)snprintf(job.state, sizeof(job.state), "FAILED");
-            (void)snprintf(job.outcome, sizeof(job.outcome), "FAILED");
-            job.updated_at = now;
-            ok = db_build_job_save(ndb, &job);
-        }
-    }
-    ok = ok && node_db_commit(ndb);
-    free(actions);
-    if (!ok) {
-        if (!node_db_rollback(ndb))
-            LOG_ERROR("build_fabric", "receipt accept and rollback both failed");
-        return ZCL_ERR(-1, "verified receipt could not be accepted atomically");
-    }
-    return ZCL_OK;
+    bf_receipt_settle(&action, receipt, now);
+    return bf_receipt_commit(ndb, receipt, &action, &expected, now);
 }
