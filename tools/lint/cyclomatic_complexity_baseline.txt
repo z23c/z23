@@ -3285,9 +3285,6 @@ tools/command/native_metaverse_space_command.c:mvspace_manifest:25
 tools/command/native_metaverse_space_command.c:mvspace_verbs:19
 tools/command/native_metaverse_space_command.c:zcl_native_handle_metaverse_space_publish:21
 tools/command/native_metaverse_space_command.c:zcl_native_metaverse_space_discover_until:60
-tools/command/native_metaverse_space_scout_command.c:scout_mission_input:16
-tools/command/native_metaverse_space_scout_command.c:scout_observe_manifest:16
-tools/command/native_metaverse_space_scout_command.c:zcl_native_handle_metaverse_space_scout_show:17
 tools/command/native_net_census.c:zcl_native_handle_network_census:18
 tools/command/native_node_db_ro.c:zcl_ro_guard_intact:17
 tools/command/native_node_db_ro.c:zcl_ro_immutable_uri:16

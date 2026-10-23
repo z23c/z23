@@ -111,6 +111,19 @@ static bool scout_starting_roots(const struct json_value *input,
   return true;
 }
 
+static bool scout_mission_bounds_ok(int64_t observation, int64_t depth,
+                                    int64_t spaces, int64_t portals,
+                                    int64_t bytes, int64_t deadline)
+{
+  return observation >= 1 && depth >= 0 && spaces >= 1 && portals >= 1 &&
+         bytes >= 1 && deadline >= 1 &&
+         depth <= VCS_SPACE_SCOUT_DEPTH_MAX &&
+         spaces <= VCS_SPACE_SCOUT_SPACES_MAX &&
+         portals <= VCS_SPACE_SCOUT_PORTALS_MAX &&
+         bytes <= VCS_SPACE_SCOUT_BYTES_MAX &&
+         deadline <= VCS_SPACE_SCOUT_DEADLINE_MS_MAX;
+}
+
 static bool scout_mission_input(
     const struct json_value *input,
     const struct vcs_zcode_dht_delegation *delegation,
@@ -125,13 +138,8 @@ static bool scout_mission_input(
   int64_t portals = scout_int(input, "maximum_portals", -1);
   int64_t bytes = scout_int(input, "maximum_bytes", -1);
   int64_t deadline = scout_int(input, "deadline_ms", -1);
-  if (observation < 1 || depth < 0 || spaces < 1 || portals < 1 ||
-      bytes < 1 || deadline < 1 ||
-      depth > VCS_SPACE_SCOUT_DEPTH_MAX ||
-      spaces > VCS_SPACE_SCOUT_SPACES_MAX ||
-      portals > VCS_SPACE_SCOUT_PORTALS_MAX ||
-      bytes > VCS_SPACE_SCOUT_BYTES_MAX ||
-      deadline > VCS_SPACE_SCOUT_DEADLINE_MS_MAX ||
+  if (!scout_mission_bounds_ok(observation, depth, spaces, portals, bytes,
+                               deadline) ||
       !scout_starting_roots(input, mission))
     return false;
   mission->schema_version = VCS_SPACE_SCOUT_MISSION_VERSION;
@@ -297,6 +305,90 @@ static enum vcs_space_scout_manifest_result scout_verify_local(
   return VCS_SPACE_SCOUT_MANIFEST_VERIFIED;
 }
 
+static bool scout_reply_flag(const struct zcl_command_reply *reply,
+                             const char *code, const char *key)
+{
+  return strcmp(reply->error.code, code) == 0 ||
+         json_get_bool_or(&reply->data, key, false);
+}
+
+static bool scout_policy_refused(const struct zcl_command_reply *reply)
+{
+  int64_t denials = json_get_int_or(&reply->data, "policy_denied", 0);
+  int64_t tried = json_get_int_or(&reply->data, "candidates_tried", 0);
+  return strcmp(reply->error.code, "SOVEREIGNTY_DENIED") == 0 ||
+         (denials > 0 && tried == 0);
+}
+
+/* Returns the discovery verdict that ends observation early, or NOT_FOUND
+ * when the reply raises none (the caller then decides on admission). */
+static enum vcs_space_scout_manifest_result scout_discovery_verdict(
+    const struct zcl_command_reply *reply)
+{
+  if (scout_reply_flag(reply, "DISCOVERY_DEADLINE", "deadline_reached"))
+    return VCS_SPACE_SCOUT_MANIFEST_DEADLINE;
+  if (scout_reply_flag(reply, "DISCOVERY_BYTE_LIMIT", "byte_limit_reached"))
+    return VCS_SPACE_SCOUT_MANIFEST_BYTE_LIMIT;
+  if (scout_policy_refused(reply))
+    return VCS_SPACE_SCOUT_MANIFEST_POLICY_DENIED;
+  if (json_get_bool_or(&reply->data, "fetch_scheduled", false))
+    return VCS_SPACE_SCOUT_MANIFEST_FETCH_SCHEDULED;
+  return VCS_SPACE_SCOUT_MANIFEST_NOT_FOUND;
+}
+
+static void scout_note_discovery_mutation(
+    const struct scout_observer_context *context,
+    const struct zcl_command_reply *reply, bool admitted)
+{
+  bool newly_admitted = admitted &&
+      json_get_bool_or(&reply->data, "new", false);
+  bool scheduled = json_get_bool_or(&reply->data, "fetch_scheduled", false);
+  /* Provider routing may create/update a resumable transfer record. Its
+   * current RPC does not expose a narrower mutation receipt, so fail closed
+   * on truthfulness: any accepted schedule is reported as mutation. */
+  if (newly_admitted || scheduled)
+    *context->mutated_out = true;
+}
+
+static void scout_discovery_input(
+    const struct scout_observer_context *context, const uint8_t root[32],
+    size_t maximum_wire_bytes, struct json_value *input)
+{
+  char hex[65];
+  zcl_hex_encode(root, 32, hex);
+  json_init(input);
+  json_set_object(input);
+  json_push_kv_str(input, "root", hex);
+  json_push_kv_str(input, "kind", "space_manifest");
+  json_push_kv_str(input, "workspace", context->workspace);
+  json_push_kv_str(input, "datadir", context->datadir);
+  json_push_kv_int(input, "maximum_wire_bytes",
+                   (int64_t)maximum_wire_bytes);
+}
+
+static enum vcs_space_scout_manifest_result scout_discover_manifest(
+    const struct scout_observer_context *context, const uint8_t root[32],
+    size_t maximum_wire_bytes, bool *admitted_out)
+{
+  struct json_value input;
+  scout_discovery_input(context, root, maximum_wire_bytes, &input);
+  struct zcl_command_request request;
+  memset(&request, 0, sizeof(request));
+  request.input = &input;
+  struct zcl_command_reply reply;
+  zcl_command_reply_init(&reply, "zcl.metaverse_space_discover.v1");
+  zcl_native_metaverse_space_discover_until(
+      &request, &reply, context->deadline_mono_ms, maximum_wire_bytes);
+  bool admitted = json_get_bool_or(&reply.data, "admitted", false);
+  enum vcs_space_scout_manifest_result verdict =
+      scout_discovery_verdict(&reply);
+  scout_note_discovery_mutation(context, &reply, admitted);
+  zcl_command_reply_free(&reply);
+  json_free(&input);
+  *admitted_out = admitted;
+  return verdict;
+}
+
 static enum vcs_space_scout_manifest_result scout_observe_manifest(
     void *opaque, const uint8_t root[32], size_t maximum_wire_bytes,
     struct vcs_space_manifest_v1 *manifest_out, size_t *wire_bytes_out)
@@ -312,52 +404,11 @@ static enum vcs_space_scout_manifest_result scout_observe_manifest(
   if (local != VCS_SPACE_SCOUT_MANIFEST_NOT_FOUND)
     return local;
 
-  char hex[65];
-  zcl_hex_encode(root, 32, hex);
-  struct json_value input;
-  json_init(&input);
-  json_set_object(&input);
-  json_push_kv_str(&input, "root", hex);
-  json_push_kv_str(&input, "kind", "space_manifest");
-  json_push_kv_str(&input, "workspace", context->workspace);
-  json_push_kv_str(&input, "datadir", context->datadir);
-  json_push_kv_int(&input, "maximum_wire_bytes",
-                   (int64_t)maximum_wire_bytes);
-  struct zcl_command_request request;
-  memset(&request, 0, sizeof(request));
-  request.input = &input;
-  struct zcl_command_reply reply;
-  zcl_command_reply_init(&reply, "zcl.metaverse_space_discover.v1");
-  zcl_native_metaverse_space_discover_until(
-      &request, &reply, context->deadline_mono_ms, maximum_wire_bytes);
-  bool admitted = json_get_bool_or(&reply.data, "admitted", false);
-  bool newly_admitted = admitted &&
-      json_get_bool_or(&reply.data, "new", false);
-  bool scheduled = json_get_bool_or(&reply.data, "fetch_scheduled", false);
-  bool deadline = strcmp(reply.error.code, "DISCOVERY_DEADLINE") == 0 ||
-                  json_get_bool_or(&reply.data, "deadline_reached", false);
-  bool byte_limit =
-      strcmp(reply.error.code, "DISCOVERY_BYTE_LIMIT") == 0 ||
-      json_get_bool_or(&reply.data, "byte_limit_reached", false);
-  int64_t denials = json_get_int_or(&reply.data, "policy_denied", 0);
-  int64_t tried = json_get_int_or(&reply.data, "candidates_tried", 0);
-  bool policy = strcmp(reply.error.code, "SOVEREIGNTY_DENIED") == 0 ||
-                (denials > 0 && tried == 0);
-  /* Provider routing may create/update a resumable transfer record. Its
-   * current RPC does not expose a narrower mutation receipt, so fail closed
-   * on truthfulness: any accepted schedule is reported as mutation. */
-  if (newly_admitted || scheduled)
-    *context->mutated_out = true;
-  zcl_command_reply_free(&reply);
-  json_free(&input);
-  if (deadline)
-    return VCS_SPACE_SCOUT_MANIFEST_DEADLINE;
-  if (byte_limit)
-    return VCS_SPACE_SCOUT_MANIFEST_BYTE_LIMIT;
-  if (policy)
-    return VCS_SPACE_SCOUT_MANIFEST_POLICY_DENIED;
-  if (scheduled)
-    return VCS_SPACE_SCOUT_MANIFEST_FETCH_SCHEDULED;
+  bool admitted = false;
+  enum vcs_space_scout_manifest_result found = scout_discover_manifest(
+      context, root, maximum_wire_bytes, &admitted);
+  if (found != VCS_SPACE_SCOUT_MANIFEST_NOT_FOUND)
+    return found;
   if (!admitted)
     return VCS_SPACE_SCOUT_MANIFEST_NOT_FOUND;
   return scout_verify_local(context, root, maximum_wire_bytes,
@@ -534,6 +585,73 @@ static void scout_push_map(struct json_value *data,
   json_push_kv(data, "failures", &failures); json_free(&failures);
 }
 
+static bool scout_map_binds_attestation(
+    struct vcs_space_scout_map_v1 *map,
+    struct vcs_space_scout_mission_v1 *mission,
+    const struct vcs_space_scout_attestation_v1 *attestation)
+{
+  return memcmp(map->mission_root, attestation->mission_root, 32) == 0 &&
+         map->observation_unix == attestation->observation_unix &&
+         mission->observation_unix == attestation->observation_unix &&
+         vcs_space_scout_map_validate_for_mission(map, mission) ==
+             VCS_SPACE_SCOUT_OK &&
+         memcmp(mission->network_genesis,
+                attestation->observer_delegation.network_genesis, 32) == 0;
+}
+
+/* On failure *failure carries the result that names the broken link. */
+static bool scout_show_linked(
+    const char *resolved, struct vcs_space_scout_attestation_v1 *attestation,
+    struct vcs_space_scout_map_v1 *map,
+    struct vcs_space_scout_mission_v1 *mission, struct zcl_result *failure)
+{
+  *failure = ZCL_OK;
+  char evidence_root[65], mission_root[65];
+  zcl_hex_encode(attestation->evidence_map_root, 32, evidence_root);
+  zcl_hex_encode(attestation->mission_root, 32, mission_root);
+  struct zcl_result shown = metaverse_space_scout_show(
+      resolved, evidence_root, map);
+  struct zcl_result mission_shown = shown.ok
+      ? metaverse_space_scout_mission_show(resolved, mission_root, mission)
+      : shown;
+  if (!shown.ok) {
+    *failure = shown;
+    return false;
+  }
+  if (!mission_shown.ok) {
+    *failure = mission_shown;
+    return false;
+  }
+  if (!scout_map_binds_attestation(map, mission, attestation)) {
+    *failure = ZCL_ERR(-1, "attestation does not bind this mission/map");
+    return false;
+  }
+  return true;
+}
+
+static void scout_push_attestation(
+    struct json_value *data, const char *attestation_root,
+    struct vcs_space_scout_attestation_v1 *attestation)
+{
+  char evidence_root[65], mission_root[65], observer[65];
+  zcl_hex_encode(attestation->evidence_map_root, 32, evidence_root);
+  zcl_hex_encode(attestation->mission_root, 32, mission_root);
+  zcl_hex_encode(attestation->observer_delegation.doc.master_pubkey, 32,
+                 observer);
+  json_push_kv_str(data, "attestation_root", attestation_root);
+  json_push_kv_str(data, "evidence_map_root", evidence_root);
+  json_push_kv_str(data, "mission_root", mission_root);
+  json_push_kv_str(data, "observer_zid", observer);
+  json_push_kv_bool(data, "signature_verified", true);
+  json_push_kv_bool(data, "observer_currently_chain_authorized",
+                    zcl_native_zcode_delegation_authorized(
+                        &attestation->observer_delegation, NULL, 0));
+  json_push_kv_bool(data, "local_evidence", true);
+  json_push_kv_bool(data, "global_truth", false);
+  json_push_kv_bool(data, "grants_authority", false);
+  json_push_kv_bool(data, "executable", false);
+}
+
 void zcl_native_handle_metaverse_space_scout_show(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -552,11 +670,6 @@ void zcl_native_handle_metaverse_space_scout_show(
                attested.message);
     return;
   }
-  char evidence_root[65], mission_root[65], observer[65];
-  zcl_hex_encode(attestation.evidence_map_root, 32, evidence_root);
-  zcl_hex_encode(attestation.mission_root, 32, mission_root);
-  zcl_hex_encode(attestation.observer_delegation.doc.master_pubkey, 32,
-                 observer);
   struct vcs_space_scout_map_v1 *map = zcl_malloc(
       sizeof(*map), "space_scout_show_map");
   if (!map) {
@@ -564,39 +677,14 @@ void zcl_native_handle_metaverse_space_scout_show(
                "evidence map allocation failed");
     return;
   }
-  struct zcl_result shown = metaverse_space_scout_show(
-      resolved, evidence_root, map);
   struct vcs_space_scout_mission_v1 mission;
-  struct zcl_result mission_shown = shown.ok
-      ? metaverse_space_scout_mission_show(resolved, mission_root, &mission)
-      : shown;
-  if (!shown.ok || !mission_shown.ok ||
-      memcmp(map->mission_root, attestation.mission_root, 32) != 0 ||
-      map->observation_unix != attestation.observation_unix ||
-      mission.observation_unix != attestation.observation_unix ||
-      vcs_space_scout_map_validate_for_mission(map, &mission) !=
-          VCS_SPACE_SCOUT_OK ||
-      memcmp(mission.network_genesis,
-             attestation.observer_delegation.network_genesis, 32) != 0) {
+  struct zcl_result link;
+  if (!scout_show_linked(resolved, &attestation, map, &mission, &link)) {
     free(map);
-    scout_fail(reply, "SCOUT_EVIDENCE_LINK_INVALID", "show",
-               !shown.ok ? shown.message
-               : !mission_shown.ok ? mission_shown.message
-               : "attestation does not bind this mission/map");
+    scout_fail(reply, "SCOUT_EVIDENCE_LINK_INVALID", "show", link.message);
     return;
   }
-  json_push_kv_str(&reply->data, "attestation_root", attestation_root);
-  json_push_kv_str(&reply->data, "evidence_map_root", evidence_root);
-  json_push_kv_str(&reply->data, "mission_root", mission_root);
-  json_push_kv_str(&reply->data, "observer_zid", observer);
-  json_push_kv_bool(&reply->data, "signature_verified", true);
-  json_push_kv_bool(&reply->data, "observer_currently_chain_authorized",
-                    zcl_native_zcode_delegation_authorized(
-                        &attestation.observer_delegation, NULL, 0));
-  json_push_kv_bool(&reply->data, "local_evidence", true);
-  json_push_kv_bool(&reply->data, "global_truth", false);
-  json_push_kv_bool(&reply->data, "grants_authority", false);
-  json_push_kv_bool(&reply->data, "executable", false);
+  scout_push_attestation(&reply->data, attestation_root, &attestation);
   struct json_value mission_data;
   json_init(&mission_data);
   json_set_object(&mission_data);
