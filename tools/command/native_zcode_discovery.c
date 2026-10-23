@@ -21,6 +21,53 @@ static zcl_native_zcode_discovery_test_fn g_test_route;
 
 static bool discovery_root(const char *hex);
 
+/* Serialises [input] as the single RPC param into a fresh wire string. NULL
+ * when the allocation or the write fails; the caller frees it. */
+static char *zcode_params_wire(struct json_value *input, const char *tag)
+{
+  struct json_value params;
+  json_init(&params);
+  json_set_array(&params);
+  json_push_back(&params, input);
+  size_t needed = json_write(&params, NULL, 0);
+  char *wire = zcl_malloc(needed + 1u, tag);
+  if (wire && json_write(&params, wire, needed + 1u) != needed) {
+    free(wire);
+    wire = NULL;
+  }
+  json_free(&params);
+  return wire;
+}
+
+/* Sends [input] as the RPC param. total_ms > 0 bounds the call to that many
+ * milliseconds; 0 leaves it unbounded. The caller frees the reply. */
+static char *zcode_rpc_call_params(const char *method,
+                                   struct json_value *input, long total_ms,
+                                   const char *tag)
+{
+  char *wire = zcode_params_wire(input, tag);
+  zcl_native_bridge_ensure_rpc();
+  char *raw = NULL;
+  if (wire)
+    raw = total_ms > 0
+        ? node_rpc_call_deadline(method, wire, total_ms, total_ms)
+        : node_rpc_call(method, wire);
+  free(wire);
+  return raw;
+}
+
+/* Copies the reply's error code into error_out, or RPC_UNAVAILABLE when the
+ * reply carries none. */
+static void zcode_error_code_out(const struct json_value *result,
+                                 char *error_out, size_t error_capacity)
+{
+  if (!error_out || !error_capacity)
+    return;
+  const char *code = json_get_str(json_get(result, "code"));
+  (void)snprintf(error_out, error_capacity, "%s",
+                 code ? code : "RPC_UNAVAILABLE");
+}
+
 static bool zcode_read_rpc(const char *method, const char *operation,
                            struct json_value *input,
                            struct json_value *result)
@@ -30,21 +77,12 @@ static bool zcode_read_rpc(const char *method, const char *operation,
     return false;
   if (operation && !json_get(input, "operation"))
     json_push_kv_str(input, "operation", operation);
-  struct json_value params;
-  json_init(&params);
-  json_set_array(&params);
-  json_push_back(&params, input);
-  size_t needed = json_write(&params, NULL, 0);
-  char *wire = zcl_malloc(needed + 1u, "zcode.discovery.rpc");
-  if (!wire || json_write(&params, wire, needed + 1u) != needed) {
-    free(wire);
-    json_free(&params);
+  char *wire = zcode_params_wire(input, "zcode.discovery.rpc");
+  if (!wire)
     return false;
-  }
   zcl_native_bridge_ensure_rpc();
   char *raw = node_rpc_call(method, wire);
   free(wire);
-  json_free(&params);
   if (!raw)
     return false;
   bool ok = json_read(result, raw, strlen(raw)) &&
@@ -144,6 +182,52 @@ static int pointer_candidate_compare(const void *left, const void *right)
                        : strcmp(a->provider_node_id, b->provider_node_id);
 }
 
+/* Writes the candidate only when all three roots decode; a row that fails
+ * leaves the candidate slot untouched. */
+static bool pointer_candidate_fill(
+    struct zcl_native_zcode_pointer_candidate *candidate,
+    const struct json_value *row, size_t source_index)
+{
+  const char *transport = json_get_str(json_get(row, "transport_root"));
+  const char *publisher = json_get_str(json_get(row, "publisher_zid"));
+  const char *provider = json_get_str(json_get(row, "provider_node_id"));
+  if (!discovery_root(transport) || !discovery_root(publisher) ||
+      !discovery_root(provider))
+    return false;
+  memcpy(candidate->transport_root, transport, 65);
+  memcpy(candidate->publisher_zid, publisher, 65);
+  memcpy(candidate->provider_node_id, provider, 65);
+  candidate->provider_authenticated =
+      json_get_bool_or(row, "provider_authenticated", false);
+  candidate->source_index = (uint32_t)source_index;
+  return true;
+}
+
+/* Moves the first candidate of each transport root ahead of the rest, keeping
+ * the sorted order inside each group. */
+static void pointer_candidates_diversify(
+    struct zcl_native_zcode_pointer_candidates *out)
+{
+  struct zcl_native_zcode_pointer_candidate
+      diverse[VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS];
+  bool selected[VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS] = {false};
+  size_t used = 0;
+  for (size_t i = 0; i < out->count; i++) {
+    bool seen = false;
+    for (size_t j = 0; j < used; j++)
+      seen |= strcmp(diverse[j].transport_root,
+                     out->rows[i].transport_root) == 0;
+    if (!seen) {
+      diverse[used++] = out->rows[i];
+      selected[i] = true;
+    }
+  }
+  for (size_t i = 0; i < out->count; i++)
+    if (!selected[i])
+      diverse[used++] = out->rows[i];
+  memcpy(out->rows, diverse, out->count * sizeof(out->rows[0]));
+}
+
 bool zcl_native_zcode_pointer_candidates_build(
     const struct json_value *records,
     struct zcl_native_zcode_pointer_candidates *out)
@@ -163,42 +247,58 @@ bool zcl_native_zcode_pointer_candidates_build(
     if (conflicted || superseded ||
         out->count == VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS)
       continue;
-    const char *transport = json_get_str(json_get(row, "transport_root"));
-    const char *publisher = json_get_str(json_get(row, "publisher_zid"));
-    const char *provider = json_get_str(json_get(row, "provider_node_id"));
-    if (!discovery_root(transport) || !discovery_root(publisher) ||
-        !discovery_root(provider))
-      continue;
-    struct zcl_native_zcode_pointer_candidate *candidate =
-        &out->rows[out->count++];
-    memcpy(candidate->transport_root, transport, 65);
-    memcpy(candidate->publisher_zid, publisher, 65);
-    memcpy(candidate->provider_node_id, provider, 65);
-    candidate->provider_authenticated =
-        json_get_bool_or(row, "provider_authenticated", false);
-    candidate->source_index = (uint32_t)i;
+    if (pointer_candidate_fill(&out->rows[out->count], row, i))
+      out->count++;
   }
   qsort(out->rows, out->count, sizeof(out->rows[0]),
         pointer_candidate_compare);
-  struct zcl_native_zcode_pointer_candidate
-      diverse[VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS];
-  bool selected[VCS_ZCODE_DHT_RECORD_DISCOVERY_MAX_RESULTS] = {false};
-  size_t used = 0;
-  for (size_t i = 0; i < out->count; i++) {
-    bool seen = false;
-    for (size_t j = 0; j < used; j++)
-      seen |= strcmp(diverse[j].transport_root,
-                     out->rows[i].transport_root) == 0;
-    if (!seen) {
-      diverse[used++] = out->rows[i];
-      selected[i] = true;
-    }
-  }
-  for (size_t i = 0; i < out->count; i++)
-    if (!selected[i])
-      diverse[used++] = out->rows[i];
-  memcpy(out->rows, diverse, out->count * sizeof(out->rows[0]));
+  pointer_candidates_diversify(out);
   return out->count != 0;
+}
+
+static bool publish_args_valid(const char *kind, const char *namespace_name,
+                               const char *transport_root,
+                               const char *token_out, int64_t sequence,
+                               int64_t not_before, int64_t expiry)
+{
+  return kind && namespace_name && transport_root && token_out &&
+         sequence >= 1 && not_before >= 1 && expiry > not_before;
+}
+
+static void publish_plan_fields(struct json_value *input, const char *kind,
+                                const char *namespace_name,
+                                const char *semantic_root,
+                                const char *transport_root, int64_t sequence,
+                                int64_t not_before, int64_t expiry)
+{
+  json_push_kv_str(input, "mode", "plan");
+  json_push_kv_str(input, "kind", kind);
+  json_push_kv_str(input, "namespace", namespace_name);
+  if (semantic_root)
+    json_push_kv_str(input, "semantic_root", semantic_root);
+  json_push_kv_str(input, "transport_root", transport_root);
+  json_push_kv_int(input, "sequence", sequence);
+  json_push_kv_int(input, "not_before", not_before);
+  json_push_kv_int(input, "expiry", expiry);
+}
+
+/* The plan step: true only when the reply carries a 64-hex plan token, which
+ * is copied into token_out. A refused plan fills error_out. */
+static bool publish_plan_token(struct json_value *input, char token_out[65],
+                               char *error_out, size_t error_capacity)
+{
+  struct json_value result;
+  if (!zcode_read_rpc("zcode_dht_status", "publish", input, &result)) {
+    zcode_error_code_out(&result, error_out, error_capacity);
+    json_free(&result);
+    return false;
+  }
+  const char *token = json_get_str(json_get(&result, "plan_token"));
+  bool valid = token && strlen(token) == 64u;
+  if (valid)
+    memcpy(token_out, token, 65u);
+  json_free(&result);
+  return valid;
 }
 
 bool zcl_native_zcode_publish_record(
@@ -211,36 +311,15 @@ bool zcl_native_zcode_publish_record(
     error_out[0] = '\0';
   if (token_out)
     token_out[0] = '\0';
-  if (!kind || !namespace_name || !transport_root || !token_out ||
-      sequence < 1 || not_before < 1 || expiry <= not_before)
+  if (!publish_args_valid(kind, namespace_name, transport_root, token_out,
+                          sequence, not_before, expiry))
     return false;
   struct json_value input, result;
   json_init(&input);
   json_set_object(&input);
-  json_push_kv_str(&input, "mode", "plan");
-  json_push_kv_str(&input, "kind", kind);
-  json_push_kv_str(&input, "namespace", namespace_name);
-  if (semantic_root)
-    json_push_kv_str(&input, "semantic_root", semantic_root);
-  json_push_kv_str(&input, "transport_root", transport_root);
-  json_push_kv_int(&input, "sequence", sequence);
-  json_push_kv_int(&input, "not_before", not_before);
-  json_push_kv_int(&input, "expiry", expiry);
-  if (!zcode_read_rpc("zcode_dht_status", "publish", &input, &result)) {
-    const char *code = json_get_str(json_get(&result, "code"));
-    if (error_out && error_capacity)
-      (void)snprintf(error_out, error_capacity, "%s",
-                     code ? code : "RPC_UNAVAILABLE");
-    json_free(&result);
-    json_free(&input);
-    return false;
-  }
-  const char *token = json_get_str(json_get(&result, "plan_token"));
-  bool valid = token && strlen(token) == 64u;
-  if (valid)
-    memcpy(token_out, token, 65u);
-  json_free(&result);
-  if (!valid) {
+  publish_plan_fields(&input, kind, namespace_name, semantic_root,
+                      transport_root, sequence, not_before, expiry);
+  if (!publish_plan_token(&input, token_out, error_out, error_capacity)) {
     json_free(&input);
     return false;
   }
@@ -248,11 +327,8 @@ bool zcl_native_zcode_publish_record(
   json_push_kv_str(&input, "plan_token", token_out);
   bool committed = zcode_read_rpc(
       "zcode_dht_status", "publish", &input, &result);
-  if (!committed && error_out && error_capacity) {
-    const char *code = json_get_str(json_get(&result, "code"));
-    (void)snprintf(error_out, error_capacity, "%s",
-                   code ? code : "RPC_UNAVAILABLE");
-  }
+  if (!committed)
+    zcode_error_code_out(&result, error_out, error_capacity);
   json_free(&result);
   json_free(&input);
   return committed;
@@ -292,39 +368,112 @@ static bool record_rpc_until(const char *method, struct json_value *input,
   int64_t remaining = deadline_mono_ms - platform_time_monotonic_ms();
   if (remaining <= 0)
     return false;
-  struct json_value params;
-  json_init(&params);
-  json_set_array(&params);
-  json_push_back(&params, input);
-  size_t needed = json_write(&params, NULL, 0);
-  char *wire = zcl_malloc(needed + 1u, "zcode.records.deadline.rpc");
-  bool encoded = wire && json_write(&params, wire, needed + 1u) == needed;
-  zcl_native_bridge_ensure_rpc();
-  char *raw = encoded
-      ? node_rpc_call_deadline(
-            method, wire, remaining > LONG_MAX ? LONG_MAX : (long)remaining,
-            remaining > LONG_MAX ? LONG_MAX : (long)remaining)
-      : NULL;
-  free(wire);
-  json_free(&params);
+  char *raw = zcode_rpc_call_params(
+      method, input, remaining > LONG_MAX ? LONG_MAX : (long)remaining,
+      "zcode.records.deadline.rpc");
   bool parsed = raw && json_read(result, raw, strlen(raw)) &&
                 result->type == JSON_OBJ;
   free(raw);
   return parsed;
 }
 
-static void records_cancel_until(const char *lookup, const char *owner,
+/* The lookup slot the node hands back from zcode_dht_record_begin. */
+struct records_slot {
+  char lookup[33];
+  char owner[33];
+};
+
+static void records_cancel_until(const struct records_slot *slot,
                                  int64_t deadline_mono_ms)
 {
   struct json_value input, result;
   json_init(&input);
   json_set_object(&input);
-  json_push_kv_str(&input, "lookup_id", lookup);
-  json_push_kv_str(&input, "owner_token", owner);
+  json_push_kv_str(&input, "lookup_id", slot->lookup);
+  json_push_kv_str(&input, "owner_token", slot->owner);
   (void)record_rpc_until("zcode_dht_record_cancel", &input, &result,
                          deadline_mono_ms);
   json_free(&result);
   json_free(&input);
+}
+
+/* Opens the lookup. False when the node refuses or the reply lacks a
+ * well-formed slot; *deadline_reached_out is set when the refusal came at
+ * the cancel point. */
+static bool records_begin_until(struct json_value *selector,
+                                int64_t cancel_at, struct records_slot *slot,
+                                bool *deadline_reached_out)
+{
+  struct json_value body;
+  if (!record_rpc_until("zcode_dht_record_begin", selector, &body,
+                        cancel_at) ||
+      !json_get_bool_or(&body, "ok", false)) {
+    json_free(&body);
+    if (platform_time_monotonic_ms() >= cancel_at)
+      *deadline_reached_out = true;
+    return false;
+  }
+  const char *lookup_value = json_get_str(json_get(&body, "lookup_id"));
+  const char *owner_value = json_get_str(json_get(&body, "owner_token"));
+  bool admitted = lookup_value && owner_value &&
+                  strlen(lookup_value) == 32u && strlen(owner_value) == 32u;
+  if (admitted) {
+    memcpy(slot->lookup, lookup_value, sizeof(slot->lookup));
+    memcpy(slot->owner, owner_value, sizeof(slot->owner));
+  }
+  json_free(&body);
+  return admitted;
+}
+
+/* One zcode_dht_record_poll. Returns true while the lookup is pending; the
+ * answer lands in body and *passed_out says whether the poll passed. */
+static bool records_poll_pending(const struct records_slot *slot,
+                                 int64_t cancel_at, struct json_value *body,
+                                 bool *passed_out)
+{
+  struct json_value poll;
+  json_init(&poll);
+  json_set_object(&poll);
+  json_push_kv_str(&poll, "lookup_id", slot->lookup);
+  json_push_kv_str(&poll, "owner_token", slot->owner);
+  bool called = record_rpc_until("zcode_dht_record_poll", &poll, body,
+                                 cancel_at);
+  const char *state = called ? json_get_str(json_get(body, "state")) : NULL;
+  bool passed = called && json_get_bool_or(body, "ok", false);
+  bool pending = passed && state && strcmp(state, "pending") == 0;
+  json_free(&poll);
+  *passed_out = passed;
+  return pending;
+}
+
+/* Terminal poll answer: copy a passing body out and release the lookup. */
+static bool records_finish_until(const struct records_slot *slot,
+                                 int64_t deadline_mono_ms,
+                                 int64_t cancel_at, struct json_value *body,
+                                 struct json_value *result, bool passed,
+                                 bool *deadline_reached_out)
+{
+  if (passed)
+    json_copy(result, body);
+  json_free(body);
+  /* Terminal either way: give the bounded lookup slot back. The node
+   * retains a terminal result for a short window, so not cancelling
+   * would make the next honest discovery fail for a reason that has
+   * nothing to do with the network. */
+  records_cancel_until(slot, deadline_mono_ms);
+  if (!passed && platform_time_monotonic_ms() >= cancel_at)
+    *deadline_reached_out = true;
+  return passed;
+}
+
+/* Sleeps between polls, at most 50 ms and never past the cancel point. */
+static void records_poll_pause(int64_t cancel_at)
+{
+  int64_t now = platform_time_monotonic_ms();
+  if (now >= cancel_at)
+    return;
+  int64_t remaining = cancel_at - now;
+  platform_sleep_ms((unsigned)(remaining < 50 ? remaining : 50));
 }
 
 bool zcl_native_zcode_records_discover_until(
@@ -346,66 +495,24 @@ bool zcl_native_zcode_records_discover_until(
     *deadline_reached_out = true;
     return false;
   }
-  struct json_value body;
-  if (!record_rpc_until("zcode_dht_record_begin", selector, &body,
-                        cancel_at) ||
-      !json_get_bool_or(&body, "ok", false)) {
-    json_free(&body);
-    if (platform_time_monotonic_ms() >= cancel_at)
-      *deadline_reached_out = true;
-    return false;
-  }
-  const char *lookup_value = json_get_str(json_get(&body, "lookup_id"));
-  const char *owner_value = json_get_str(json_get(&body, "owner_token"));
-  char lookup[33], owner[33];
-  bool admitted = lookup_value && owner_value &&
-                  strlen(lookup_value) == 32u && strlen(owner_value) == 32u;
-  if (admitted) {
-    memcpy(lookup, lookup_value, sizeof(lookup));
-    memcpy(owner, owner_value, sizeof(owner));
-  }
-  json_free(&body);
-  if (!admitted)
+  struct records_slot slot = {0};
+  if (!records_begin_until(selector, cancel_at, &slot, deadline_reached_out))
     return false;
 
   for (;;) {
     int64_t now = platform_time_monotonic_ms();
     if (now >= cancel_at) {
-      records_cancel_until(lookup, owner, deadline_mono_ms);
+      records_cancel_until(&slot, deadline_mono_ms);
       *deadline_reached_out = true;
       return false;
     }
-    struct json_value poll;
-    json_init(&poll);
-    json_set_object(&poll);
-    json_push_kv_str(&poll, "lookup_id", lookup);
-    json_push_kv_str(&poll, "owner_token", owner);
-    bool called = record_rpc_until("zcode_dht_record_poll", &poll, &body,
-                                   cancel_at);
-    const char *state = called ? json_get_str(json_get(&body, "state")) : NULL;
-    bool passed = called && json_get_bool_or(&body, "ok", false);
-    bool pending = passed && state && strcmp(state, "pending") == 0;
-    if (!pending) {
-      if (passed)
-        json_copy(result, &body);
-      json_free(&body);
-      json_free(&poll);
-      /* Terminal either way: give the bounded lookup slot back. The node
-       * retains a terminal result for a short window, so not cancelling
-       * would make the next honest discovery fail for a reason that has
-       * nothing to do with the network. */
-      records_cancel_until(lookup, owner, deadline_mono_ms);
-      if (!passed && platform_time_monotonic_ms() >= cancel_at)
-        *deadline_reached_out = true;
-      return passed;
-    }
+    struct json_value body;
+    bool passed = false;
+    if (!records_poll_pending(&slot, cancel_at, &body, &passed))
+      return records_finish_until(&slot, deadline_mono_ms, cancel_at, &body,
+                                  result, passed, deadline_reached_out);
     json_free(&body);
-    json_free(&poll);
-    now = platform_time_monotonic_ms();
-    if (now >= cancel_at)
-      continue;
-    int64_t remaining = cancel_at - now;
-    platform_sleep_ms((unsigned)(remaining < 50 ? remaining : 50));
+    records_poll_pause(cancel_at);
   }
 }
 
@@ -416,22 +523,9 @@ static bool provider_route_budget(struct json_value *selector,
   if (!selector || !result)
     return false;
   json_init(result);
-  struct json_value params;
-  json_init(&params);
-  json_set_array(&params);
-  json_push_back(&params, selector);
-  size_t needed = json_write(&params, NULL, 0);
-  char *wire = zcl_malloc(needed + 1u, "zcode.provider.route.rpc");
-  bool encoded = wire && json_write(&params, wire, needed + 1u) == needed;
-  zcl_native_bridge_ensure_rpc();
-  char *raw = encoded
-      ? (total_ms > 0
-             ? node_rpc_call_deadline("zcode_dht_provider_route", wire,
-                                      total_ms, total_ms)
-             : node_rpc_call("zcode_dht_provider_route", wire))
-      : NULL;
-  free(wire);
-  json_free(&params);
+  char *raw = zcode_rpc_call_params(
+      "zcode_dht_provider_route", selector, total_ms,
+      "zcode.provider.route.rpc");
   bool routed = raw && json_read(result, raw, strlen(raw)) &&
                 result->type == JSON_OBJ &&
                 json_get_bool_or(result, "ok", false);
@@ -455,6 +549,19 @@ void zcl_native_zcode_discovery_test_backend(
 }
 #endif
 
+/* Reads the "count" of a discovery reply, freeing the reply. False unless the
+ * count is a positive uint32; count_out is written only on success. */
+static bool discovered_record_count(bool found, struct json_value *discovered,
+                                    uint32_t *count_out)
+{
+  int64_t count = found ? json_get_int(json_get(discovered, "count")) : 0;
+  json_free(discovered);
+  if (count <= 0 || count > UINT32_MAX)
+    return false;
+  *count_out = (uint32_t)count;
+  return true;
+}
+
 bool zcl_native_zcode_provider_discover_and_route(
     struct json_value *selector, struct json_value *route_result,
     uint32_t *record_count_out)
@@ -472,11 +579,8 @@ bool zcl_native_zcode_provider_discover_and_route(
 #else
   bool found = zcl_native_zcode_records_discover(selector, &discovered);
 #endif
-  int64_t count = found ? json_get_int(json_get(&discovered, "count")) : 0;
-  json_free(&discovered);
-  if (count <= 0 || count > UINT32_MAX)
+  if (!discovered_record_count(found, &discovered, record_count_out))
     return false;
-  *record_count_out = (uint32_t)count;
 #ifdef ZCL_TESTING
   return g_test_route ? g_test_route(selector, route_result)
                       : zcl_native_zcode_provider_route(selector,
@@ -486,41 +590,29 @@ bool zcl_native_zcode_provider_discover_and_route(
 #endif
 }
 
-bool zcl_native_zcode_provider_discover_and_route_until(
-    struct json_value *selector, struct json_value *route_result,
-    uint32_t *record_count_out, int64_t deadline_mono_ms,
-    bool *deadline_reached_out)
-{
-  if (record_count_out)
-    *record_count_out = 0;
-  if (deadline_reached_out)
-    *deadline_reached_out = false;
-  if (!selector || !route_result || !record_count_out ||
-      !deadline_reached_out)
-    return false;
 #ifdef ZCL_TESTING
-  if (g_test_discover) {
-    struct json_value discovered;
-    json_init(&discovered);
-    bool found = g_test_discover(selector, &discovered);
-    int64_t count = found
-                        ? json_get_int(json_get(&discovered, "count")) : 0;
-    json_free(&discovered);
-    if (count <= 0 || count > UINT32_MAX)
-      return false;
-    *record_count_out = (uint32_t)count;
-    return g_test_route && g_test_route(selector, route_result);
-  }
-#endif
+static bool provider_route_test_until(struct json_value *selector,
+                                      struct json_value *route_result,
+                                      uint32_t *record_count_out)
+{
   struct json_value discovered;
   json_init(&discovered);
-  bool found = zcl_native_zcode_records_discover_until(
-      selector, &discovered, deadline_mono_ms, deadline_reached_out);
-  int64_t count = found ? json_get_int(json_get(&discovered, "count")) : 0;
-  json_free(&discovered);
-  if (count <= 0 || count > UINT32_MAX || *deadline_reached_out)
+  bool found = g_test_discover(selector, &discovered);
+  uint32_t count = 0;
+  if (!discovered_record_count(found, &discovered, &count))
     return false;
-  *record_count_out = (uint32_t)count;
+  *record_count_out = count;
+  return g_test_route && g_test_route(selector, route_result);
+}
+#endif
+
+/* Routes within the remaining budget. Either check that finds the deadline
+ * already past sets *deadline_reached_out and returns false. */
+static bool provider_route_until_deadline(struct json_value *selector,
+                                          struct json_value *route_result,
+                                          int64_t deadline_mono_ms,
+                                          bool *deadline_reached_out)
+{
   if (platform_time_monotonic_ms() >= deadline_mono_ms) {
     *deadline_reached_out = true;
     return false;
@@ -540,6 +632,36 @@ bool zcl_native_zcode_provider_discover_and_route_until(
   return routed;
 }
 
+bool zcl_native_zcode_provider_discover_and_route_until(
+    struct json_value *selector, struct json_value *route_result,
+    uint32_t *record_count_out, int64_t deadline_mono_ms,
+    bool *deadline_reached_out)
+{
+  if (record_count_out)
+    *record_count_out = 0;
+  if (deadline_reached_out)
+    *deadline_reached_out = false;
+  if (!selector || !route_result || !record_count_out ||
+      !deadline_reached_out)
+    return false;
+#ifdef ZCL_TESTING
+  if (g_test_discover)
+    return provider_route_test_until(selector, route_result,
+                                     record_count_out);
+#endif
+  struct json_value discovered;
+  json_init(&discovered);
+  bool found = zcl_native_zcode_records_discover_until(
+      selector, &discovered, deadline_mono_ms, deadline_reached_out);
+  uint32_t count = 0;
+  if (!discovered_record_count(found, &discovered, &count) ||
+      *deadline_reached_out)
+    return false;
+  *record_count_out = count;
+  return provider_route_until_deadline(selector, route_result,
+                                       deadline_mono_ms, deadline_reached_out);
+}
+
 static bool delegation_authorized_budget(
     const struct vcs_zcode_dht_delegation *delegation,
     long total_ms, char *error_out, size_t error_capacity)
@@ -553,36 +675,20 @@ static bool delegation_authorized_budget(
     return false;
   char hex[VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES * 2u + 1u];
   zcl_hex_encode(delegation_wire, sizeof(delegation_wire), hex);
-  struct json_value input, params, result;
+  struct json_value input, result;
   json_init(&input);
-  json_init(&params);
   json_init(&result);
   json_set_object(&input);
   json_push_kv_str(&input, "delegation_wire", hex);
-  json_set_array(&params);
-  json_push_back(&params, &input);
-  size_t needed = json_write(&params, NULL, 0);
-  char *wire = zcl_malloc(needed + 1u, "zcode.delegation.check.rpc");
-  bool encoded = wire && json_write(&params, wire, needed + 1u) == needed;
-  zcl_native_bridge_ensure_rpc();
-  char *raw = encoded
-      ? (total_ms > 0
-             ? node_rpc_call_deadline("zcode_dht_delegation_check", wire,
-                                      total_ms, total_ms)
-             : node_rpc_call("zcode_dht_delegation_check", wire))
-      : NULL;
-  free(wire);
-  json_free(&params);
+  char *raw = zcode_rpc_call_params("zcode_dht_delegation_check", &input,
+                                    total_ms, "zcode.delegation.check.rpc");
   json_free(&input);
   bool authorized = raw && json_read(&result, raw, strlen(raw)) &&
                     result.type == JSON_OBJ &&
                     json_get_bool_or(&result, "ok", false) &&
                     json_get_bool_or(&result, "chain_authorized", false);
-  if (!authorized && error_out && error_capacity) {
-    const char *code = json_get_str(json_get(&result, "code"));
-    (void)snprintf(error_out, error_capacity, "%s",
-                   code ? code : "RPC_UNAVAILABLE");
-  }
+  if (!authorized)
+    zcode_error_code_out(&result, error_out, error_capacity);
   json_free(&result);
   free(raw);
   return authorized;
