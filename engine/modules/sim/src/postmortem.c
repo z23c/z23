@@ -172,29 +172,33 @@ int postmortem_remove_tree(const char *path)
     return first_err;
 }
 
+static void json_escape_put(char *out, size_t out_cap, size_t *w,
+                            unsigned char c)
+{
+    if ((c == '"' || c == '\\') && *w + 2 < out_cap) {
+        out[(*w)++] = '\\';
+        out[(*w)++] = (char)c;
+    } else if (c == '\n' && *w + 2 < out_cap) {
+        out[(*w)++] = '\\';
+        out[(*w)++] = 'n';
+    } else if (c == '\r' && *w + 2 < out_cap) {
+        out[(*w)++] = '\\';
+        out[(*w)++] = 'r';
+    } else if (c == '\t' && *w + 2 < out_cap) {
+        out[(*w)++] = '\\';
+        out[(*w)++] = 't';
+    } else if (c >= 0x20) {
+        out[(*w)++] = (char)c;
+    }
+}
+
 static void json_escape_string(const char *in, char *out, size_t out_cap)
 {
     if (!out || out_cap == 0) return;
     size_t w = 0;
     if (!in) in = "";
-    for (size_t r = 0; in[r] && w + 1 < out_cap; r++) {
-        unsigned char c = (unsigned char)in[r];
-        if ((c == '"' || c == '\\') && w + 2 < out_cap) {
-            out[w++] = '\\';
-            out[w++] = (char)c;
-        } else if (c == '\n' && w + 2 < out_cap) {
-            out[w++] = '\\';
-            out[w++] = 'n';
-        } else if (c == '\r' && w + 2 < out_cap) {
-            out[w++] = '\\';
-            out[w++] = 'r';
-        } else if (c == '\t' && w + 2 < out_cap) {
-            out[w++] = '\\';
-            out[w++] = 't';
-        } else if (c >= 0x20) {
-            out[w++] = (char)c;
-        }
-    }
+    for (size_t r = 0; in[r] && w + 1 < out_cap; r++)
+        json_escape_put(out, out_cap, &w, (unsigned char)in[r]);
     out[w] = '\0';
 }
 
@@ -311,18 +315,9 @@ static int signal_write_empty_file(const char *path)
     return signal_write_file(path, "", 0);
 }
 
-#if defined(__linux__)
-static int signal_copy_file_limited(const char *src, const char *dst,
-                                    size_t max_bytes)
+/* Copies at most max_bytes from in to out, then closes both descriptors. */
+static int signal_copy_fds_limited(int in, int out, size_t max_bytes)
 {
-    int in = open(src, O_RDONLY);
-    if (in < 0) return -1;
-    int out = open(dst, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-    if (out < 0) {
-        close(in);
-        return -1;
-    }
-
     char buf[512];
     size_t copied = 0;
     int ok = 0;
@@ -349,6 +344,20 @@ static int signal_copy_file_limited(const char *src, const char *dst,
     if (close(in) != 0 && ok == 0) ok = -1;
     return ok;
 }
+
+#if defined(__linux__)
+static int signal_copy_file_limited(const char *src, const char *dst,
+                                    size_t max_bytes)
+{
+    int in = open(src, O_RDONLY);
+    if (in < 0) return -1;
+    int out = open(dst, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (out < 0) {
+        close(in);
+        return -1;
+    }
+    return signal_copy_fds_limited(in, out, max_bytes);
+}
 #endif
 
 static int signal_copy_tail_limited(const char *src, const char *dst,
@@ -373,32 +382,7 @@ static int signal_copy_tail_limited(const char *src, const char *dst,
         close(in);
         return -1;
     }
-
-    char buf[512];
-    size_t copied = 0;
-    int ok = 0;
-    while (copied < max_bytes) {
-        size_t want = max_bytes - copied;
-        if (want > sizeof(buf)) want = sizeof(buf);
-        ssize_t got = read(in, buf, want);
-        if (got < 0 && errno == EINTR)
-            continue;
-        if (got < 0) {
-            ok = -1;
-            break;
-        }
-        if (got == 0)
-            break;
-        if (signal_write_all(out, buf, (size_t)got) != got) {
-            ok = -1;
-            break;
-        }
-        copied += (size_t)got;
-    }
-
-    if (close(out) != 0 && ok == 0) ok = -1;
-    if (close(in) != 0 && ok == 0) ok = -1;
-    return ok;
+    return signal_copy_fds_limited(in, out, max_bytes);
 }
 
 static void derive_signal_log_path(const char *dir)
@@ -425,6 +409,68 @@ static void derive_signal_log_path(const char *dir)
            log_suffix, log_suffix_len + 1u);
 }
 
+/* Manifest fields up to and including tape_size_bytes. */
+static int signal_manifest_head(char *manifest, size_t cap, size_t *off,
+                                int sig, int64_t crash_unix, size_t tape_size)
+{
+    if (signal_append_cstr(manifest, cap, off,
+                           "{\n"
+                           "  \"version\": 1,\n"
+                           "  \"format\": \"unpacked-cap-v1\",\n"
+                           "  \"crash_signal\": ") != 0) return -1;
+    if (signal_append_i64(manifest, cap, off, sig) != 0) return -1;
+    if (signal_append_cstr(manifest, cap, off,
+                           ",\n"
+                           "  \"crash_unix\": ") != 0) return -1;
+    if (signal_append_i64(manifest, cap, off, crash_unix) != 0) return -1;
+    if (signal_append_cstr(manifest, cap, off,
+                           ",\n"
+                           "  \"reason\": \"fatal-signal\",\n"
+                           "  \"tape_size_bytes\": ") != 0) return -1;
+    if (signal_append_u64(manifest, cap, off, (uint64_t)tape_size) != 0)
+        return -1;
+    return 0;
+}
+
+/* Manifest counter fields from the tape. */
+static int signal_manifest_counts(char *manifest, size_t cap, size_t *off,
+                                  uint64_t rng_count,
+                                  uint64_t clock_advance_count,
+                                  uint64_t inject_count)
+{
+    if (signal_append_cstr(manifest, cap, off,
+                           ",\n"
+                           "  \"rng_count\": ") != 0) return -1;
+    if (signal_append_u64(manifest, cap, off, rng_count) != 0) return -1;
+    if (signal_append_cstr(manifest, cap, off,
+                           ",\n"
+                           "  \"clock_advance_count\": ") != 0) return -1;
+    if (signal_append_u64(manifest, cap, off, clock_advance_count) != 0)
+        return -1;
+    if (signal_append_cstr(manifest, cap, off,
+                           ",\n"
+                           "  \"inject_count\": ") != 0) return -1;
+    if (signal_append_u64(manifest, cap, off, inject_count) != 0) return -1;
+    return 0;
+}
+
+/* Manifest build identity and closing brace. */
+static int signal_manifest_build(char *manifest, size_t cap, size_t *off)
+{
+    if (signal_append_cstr(manifest, cap, off,
+                           ",\n"
+                           "  \"build_id\": \"") != 0) return -1;
+    if (signal_append_cstr(manifest, cap, off, CLIENT_NAME) != 0) return -1;
+    if (signal_append_cstr(manifest, cap, off, "-") != 0) return -1;
+    if (signal_append_u64(manifest, cap, off, (uint64_t)CLIENT_VERSION) != 0)
+        return -1;
+    if (signal_append_cstr(manifest, cap, off,
+                           "\",\n"
+                           "  \"git_sha\": \"unknown\"") != 0) return -1;
+    if (signal_append_cstr(manifest, cap, off, "\n}\n") != 0) return -1;
+    return 0;
+}
+
 static int signal_write_manifest(const char *path, int sig,
                                  int64_t crash_unix, size_t tape_size,
                                  uint64_t rng_count,
@@ -434,53 +480,13 @@ static int signal_write_manifest(const char *path, int sig,
     char manifest[768];
     size_t off = 0;
     manifest[0] = '\0';
-    if (signal_append_cstr(manifest, sizeof(manifest), &off,
-                           "{\n"
-                           "  \"version\": 1,\n"
-                           "  \"format\": \"unpacked-cap-v1\",\n"
-                           "  \"crash_signal\": ") != 0) return -1;
-    if (signal_append_i64(manifest, sizeof(manifest), &off, sig) != 0)
+    if (signal_manifest_head(manifest, sizeof(manifest), &off, sig,
+                             crash_unix, tape_size) != 0) return -1;
+    if (signal_manifest_counts(manifest, sizeof(manifest), &off, rng_count,
+                               clock_advance_count, inject_count) != 0)
         return -1;
-    if (signal_append_cstr(manifest, sizeof(manifest), &off,
-                           ",\n"
-                           "  \"crash_unix\": ") != 0) return -1;
-    if (signal_append_i64(manifest, sizeof(manifest), &off, crash_unix) != 0)
+    if (signal_manifest_build(manifest, sizeof(manifest), &off) != 0)
         return -1;
-    if (signal_append_cstr(manifest, sizeof(manifest), &off,
-                           ",\n"
-                           "  \"reason\": \"fatal-signal\",\n"
-                           "  \"tape_size_bytes\": ") != 0) return -1;
-    if (signal_append_u64(manifest, sizeof(manifest), &off,
-                          (uint64_t)tape_size) != 0) return -1;
-    if (signal_append_cstr(manifest, sizeof(manifest), &off,
-                           ",\n"
-                           "  \"rng_count\": ") != 0) return -1;
-    if (signal_append_u64(manifest, sizeof(manifest), &off,
-                          rng_count) != 0) return -1;
-    if (signal_append_cstr(manifest, sizeof(manifest), &off,
-                           ",\n"
-                           "  \"clock_advance_count\": ") != 0) return -1;
-    if (signal_append_u64(manifest, sizeof(manifest), &off,
-                          clock_advance_count) != 0) return -1;
-    if (signal_append_cstr(manifest, sizeof(manifest), &off,
-                           ",\n"
-                           "  \"inject_count\": ") != 0) return -1;
-    if (signal_append_u64(manifest, sizeof(manifest), &off,
-                          inject_count) != 0) return -1;
-    if (signal_append_cstr(manifest, sizeof(manifest), &off,
-                           ",\n"
-                           "  \"build_id\": \"") != 0) return -1;
-    if (signal_append_cstr(manifest, sizeof(manifest), &off,
-                           CLIENT_NAME) != 0) return -1;
-    if (signal_append_cstr(manifest, sizeof(manifest), &off, "-") != 0)
-        return -1;
-    if (signal_append_u64(manifest, sizeof(manifest), &off,
-                          (uint64_t)CLIENT_VERSION) != 0) return -1;
-    if (signal_append_cstr(manifest, sizeof(manifest), &off,
-                           "\",\n"
-                           "  \"git_sha\": \"unknown\"") != 0) return -1;
-    if (signal_append_cstr(manifest, sizeof(manifest), &off,
-                           "\n}\n") != 0) return -1;
     return signal_write_file(path, manifest, off);
 }
 
@@ -500,6 +506,60 @@ static int signal_write_coremarker(const char *path, int64_t crash_unix)
     return signal_write_file(path, marker, off);
 }
 
+/* Fault header: signal number, si_code and fault address. */
+static int signal_append_fault_header(char *regs, size_t cap, size_t *off,
+                                      int sig, const siginfo_t *info)
+{
+    if (signal_append_cstr(regs, cap, off, "signal: ") != 0) return -1;
+    if (signal_append_i64(regs, cap, off, sig) != 0) return -1;
+    if (signal_append_cstr(regs, cap, off, "\nsi_code: ") != 0) return -1;
+    if (signal_append_i64(regs, cap, off,
+                          info ? (int64_t)info->si_code : 0) != 0)
+        return -1;
+    if (signal_append_cstr(regs, cap, off, "\nfault_addr: ") != 0) return -1;
+    if (signal_append_hex_u64(regs, cap, off,
+                              info ? (uint64_t)(uintptr_t)info->si_addr
+                                   : 0) != 0)
+        return -1;
+    return 0;
+}
+
+#if defined(__linux__) && defined(__x86_64__) && defined(REG_RIP)
+/* General-purpose registers from the ucontext, or the unavailable marker. */
+static int signal_append_gregs(char *regs, size_t cap, size_t *off,
+                               const void *ucontext)
+{
+    const ucontext_t *uc = (const ucontext_t *)ucontext;
+    if (!uc)
+        return signal_append_cstr(regs, cap, off,
+                                  "\nregisters: unavailable\n");
+    const greg_t *g = uc->uc_mcontext.gregs;
+    const struct {
+        const char *name;
+        int idx;
+    } fields[] = {
+        { "rip", REG_RIP },
+        { "rsp", REG_RSP },
+        { "rbp", REG_RBP },
+        { "rax", REG_RAX },
+        { "rbx", REG_RBX },
+        { "rcx", REG_RCX },
+        { "rdx", REG_RDX },
+        { "rsi", REG_RSI },
+        { "rdi", REG_RDI },
+    };
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
+        if (signal_append_cstr(regs, cap, off, "\n") != 0 ||
+            signal_append_cstr(regs, cap, off, fields[i].name) != 0 ||
+            signal_append_cstr(regs, cap, off, ": ") != 0 ||
+            signal_append_hex_u64(regs, cap, off,
+                                  (uint64_t)g[fields[i].idx]) != 0)
+            return -1;
+    }
+    return 0;
+}
+#endif
+
 static int signal_write_registers(const char *path, int sig,
                                   const siginfo_t *info,
                                   const void *ucontext)
@@ -510,53 +570,12 @@ static int signal_write_registers(const char *path, int sig,
     char regs[1024];
     size_t off = 0;
     regs[0] = '\0';
-    if (signal_append_cstr(regs, sizeof(regs), &off, "signal: ") != 0)
-        return -1;
-    if (signal_append_i64(regs, sizeof(regs), &off, sig) != 0)
-        return -1;
-    if (signal_append_cstr(regs, sizeof(regs), &off, "\nsi_code: ") != 0)
-        return -1;
-    if (signal_append_i64(regs, sizeof(regs), &off,
-                          info ? (int64_t)info->si_code : 0) != 0)
-        return -1;
-    if (signal_append_cstr(regs, sizeof(regs), &off, "\nfault_addr: ") != 0)
-        return -1;
-    if (signal_append_hex_u64(regs, sizeof(regs), &off,
-                              info ? (uint64_t)(uintptr_t)info->si_addr
-                                   : 0) != 0)
+    if (signal_append_fault_header(regs, sizeof(regs), &off, sig, info) != 0)
         return -1;
 
 #if defined(__linux__) && defined(__x86_64__) && defined(REG_RIP)
-    const ucontext_t *uc = (const ucontext_t *)ucontext;
-    if (uc) {
-        const greg_t *g = uc->uc_mcontext.gregs;
-        const struct {
-            const char *name;
-            int idx;
-        } fields[] = {
-            { "rip", REG_RIP },
-            { "rsp", REG_RSP },
-            { "rbp", REG_RBP },
-            { "rax", REG_RAX },
-            { "rbx", REG_RBX },
-            { "rcx", REG_RCX },
-            { "rdx", REG_RDX },
-            { "rsi", REG_RSI },
-            { "rdi", REG_RDI },
-        };
-        for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) {
-            if (signal_append_cstr(regs, sizeof(regs), &off, "\n") != 0 ||
-                signal_append_cstr(regs, sizeof(regs), &off,
-                                   fields[i].name) != 0 ||
-                signal_append_cstr(regs, sizeof(regs), &off, ": ") != 0 ||
-                signal_append_hex_u64(regs, sizeof(regs), &off,
-                                      (uint64_t)g[fields[i].idx]) != 0)
-                return -1;
-        }
-    } else if (signal_append_cstr(regs, sizeof(regs), &off,
-                                  "\nregisters: unavailable\n") != 0) {
+    if (signal_append_gregs(regs, sizeof(regs), &off, ucontext) != 0)
         return -1;
-    }
 #else
     if (signal_append_cstr(regs, sizeof(regs), &off,
                            "\nregisters: unavailable\n") != 0)
@@ -569,42 +588,36 @@ static int signal_write_registers(const char *path, int sig,
     return signal_write_file(path, regs, off);
 }
 
-int postmortem_capture_write(const struct postmortem_capture_opts *opts,
-                             char *capsule_path_out,
-                             size_t capsule_path_cap)
+static int capture_cap_dir(const char *dir, int64_t ts, char *cap_dir,
+                           size_t cap)
 {
-    if (!opts || !opts->dir || !*opts->dir || !opts->tape)
-        return -EINVAL;
-
-    int rc = mkdir_if_needed(opts->dir);
-    if (rc != 0) return rc;
-
-    int64_t ts = opts->crash_unix > 0
-        ? opts->crash_unix
-        : clock_now_wall_ms() / 1000;
     char name[128];
     snprintf(name, sizeof(name), "%lld-%d.cap",
              (long long)ts, (int)getpid());
+    int n = snprintf(cap_dir, cap, "%s/%s", dir, name);
+    if (n < 0 || (size_t)n >= cap) return -ENAMETOOLONG;
+    return 0;
+}
 
-    char cap_dir[512];
-    int n = snprintf(cap_dir, sizeof(cap_dir), "%s/%s", opts->dir, name);
-    if (n < 0 || (size_t)n >= sizeof(cap_dir)) return -ENAMETOOLONG;
-
-    rc = mkdir_if_needed(cap_dir);
-    if (rc != 0) return rc;
-
+static int capture_write_tape(const struct postmortem_capture_opts *opts,
+                              const char *cap_dir)
+{
     char tape_path[576];
     snprintf(tape_path, sizeof(tape_path), "%s/tape.bin", cap_dir);
     size_t tape_need = seed_tape_size_bytes(opts->tape);
     uint8_t *tape_buf = (uint8_t *)zcl_malloc(tape_need, "postmortem.tape");
     if (!tape_buf) return -ENOMEM;
     size_t tape_written = 0;
-    rc = seed_tape_save_to_memory(opts->tape, tape_buf, tape_need,
-                                  &tape_written);
+    int rc = seed_tape_save_to_memory(opts->tape, tape_buf, tape_need,
+                                      &tape_written);
     if (rc == 0) rc = write_bytes_file(tape_path, tape_buf, tape_written);
     free(tape_buf);
-    if (rc != 0) return rc;
+    return rc;
+}
 
+static int capture_write_manifest(const struct postmortem_capture_opts *opts,
+                                  int64_t ts, const char *cap_dir)
+{
     char manifest_path[576];
     snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json",
              cap_dir);
@@ -637,12 +650,15 @@ int postmortem_capture_write(const struct postmortem_capture_opts *opts,
         CLIENT_NAME,
         version);
     if (mn < 0 || (size_t)mn >= sizeof(manifest)) return -EOVERFLOW;
-    rc = write_bytes_file(manifest_path, manifest, (size_t)mn);
-    if (rc != 0) return rc;
+    return write_bytes_file(manifest_path, manifest, (size_t)mn);
+}
 
+static int capture_write_sidecars(const struct postmortem_capture_opts *opts,
+                                  int64_t ts, const char *cap_dir)
+{
     char proc_path[576];
     snprintf(proc_path, sizeof(proc_path), "%s/procstatus.txt", cap_dir);
-    rc = copy_proc_status(proc_path);
+    int rc = copy_proc_status(proc_path);
     if (rc != 0) return rc;
 
     char log_path[576];
@@ -664,47 +680,56 @@ int postmortem_capture_write(const struct postmortem_capture_opts *opts,
         "postmortem capsule captured at %lld; match with corefile near this timestamp\n",
         (long long)ts);
     if (marker_n < 0 || (size_t)marker_n >= sizeof(marker)) return -EOVERFLOW;
-    rc = write_bytes_file(marker_path, marker, (size_t)marker_n);
-    if (rc != 0) return rc;
+    return write_bytes_file(marker_path, marker, (size_t)marker_n);
+}
 
-    if (capsule_path_out && capsule_path_cap > 0) {
-        int pn = snprintf(capsule_path_out, capsule_path_cap, "%s", cap_dir);
-        if (pn < 0 || (size_t)pn >= capsule_path_cap) return -ENAMETOOLONG;
+static int capture_report_path(const char *cap_dir, char *out, size_t cap)
+{
+    if (out && cap > 0) {
+        int pn = snprintf(out, cap, "%s", cap_dir);
+        if (pn < 0 || (size_t)pn >= cap) return -ENAMETOOLONG;
     }
     fprintf(stderr,  // obs-ok:postmortem-capsule-path-diagnostic
             "[postmortem] capsule written: %s\n", cap_dir);
     return 0;
 }
 
-static void postmortem_crash_hook(int sig, zcl_signal_info_t *info,
-                                  void *ucontext,
-                                  void *ctx)
+int postmortem_capture_write(const struct postmortem_capture_opts *opts,
+                             char *capsule_path_out,
+                             size_t capsule_path_cap)
 {
-    (void)ctx;
-    if (g_postmortem_in_handler || !g_postmortem_tape ||
-        g_postmortem_dir[0] == '\0' || !g_postmortem_signal_tape_buf ||
-        g_postmortem_signal_tape_cap == 0) {
-        return;
-    }
-    g_postmortem_in_handler = 1;
+    if (!opts || !opts->dir || !*opts->dir || !opts->tape)
+        return -EINVAL;
 
-    size_t tape_written = 0;
-    uint64_t rng_count = seed_tape_rng_count(g_postmortem_tape);
-    uint64_t clock_advance_count =
-        seed_tape_clock_advance_count(g_postmortem_tape);
-    uint64_t inject_count = seed_tape_inject_count(g_postmortem_tape);
-    if (seed_tape_save_to_memory(g_postmortem_tape,
-                                 g_postmortem_signal_tape_buf,
-                                 g_postmortem_signal_tape_cap,
-                                 &tape_written) != 0 ||
-        tape_written == 0) {
-        g_postmortem_in_handler = 0;
-        return;
-    }
+    int rc = mkdir_if_needed(opts->dir);
+    if (rc != 0) return rc;
 
-    int64_t crash_unix = g_postmortem_install_unix > 0
-        ? g_postmortem_install_unix
-        : 0;
+    int64_t ts = opts->crash_unix > 0
+        ? opts->crash_unix
+        : clock_now_wall_ms() / 1000;
+
+    char cap_dir[512];
+    rc = capture_cap_dir(opts->dir, ts, cap_dir, sizeof(cap_dir));
+    if (rc != 0) return rc;
+
+    rc = mkdir_if_needed(cap_dir);
+    if (rc != 0) return rc;
+
+    rc = capture_write_tape(opts, cap_dir);
+    if (rc != 0) return rc;
+
+    rc = capture_write_manifest(opts, ts, cap_dir);
+    if (rc != 0) return rc;
+
+    rc = capture_write_sidecars(opts, ts, cap_dir);
+    if (rc != 0) return rc;
+
+    return capture_report_path(cap_dir, capsule_path_out, capsule_path_cap);
+}
+
+/* Async-signal-safe: builds "<install_unix>-<pid>.cap" under the dump dir. */
+static int crash_hook_cap_dir(int64_t crash_unix, char *cap_dir, size_t cap)
+{
     char name[128];
     size_t off = 0;
     name[0] = '\0';
@@ -713,34 +738,27 @@ static void postmortem_crash_hook(int sig, zcl_signal_info_t *info,
         signal_append_u64(name, sizeof(name), &off,
                           (uint64_t)getpid()) != 0 ||
         signal_append_cstr(name, sizeof(name), &off, ".cap") != 0) {
-        g_postmortem_in_handler = 0;
-        return;
+        return -1;
     }
+    return signal_join_path(cap_dir, cap, g_postmortem_dir, name);
+}
 
-    char cap_dir[512];
-    if (signal_join_path(cap_dir, sizeof(cap_dir),
-                         g_postmortem_dir, name) != 0) {
-        g_postmortem_in_handler = 0;
-        return;
-    }
-
-    (void)mkdir(g_postmortem_dir, 0755);
-    if (mkdir(cap_dir, 0755) != 0 && errno != EEXIST) {
-        g_postmortem_in_handler = 0;
-        return;
-    }
-
+static int crash_hook_write_tape(const char *cap_dir, size_t tape_written)
+{
     char path[576];
     if (signal_join_path(path, sizeof(path), cap_dir, "tape.bin") != 0 ||
         signal_write_file(path, g_postmortem_signal_tape_buf,
                           tape_written) != 0) {
-        g_postmortem_in_handler = 0;
-        return;
+        return -1;
     }
-    if (signal_join_path(path, sizeof(path), cap_dir, "manifest.json") == 0)
-        (void)signal_write_manifest(path, sig, crash_unix, tape_written,
-                                    rng_count, clock_advance_count,
-                                    inject_count);
+    return 0;
+}
+
+static void crash_hook_write_sidecars(int sig, zcl_signal_info_t *info,
+                                      void *ucontext, int64_t crash_unix,
+                                      const char *cap_dir)
+{
+    char path[576];
     if (signal_join_path(path, sizeof(path), cap_dir, "procstatus.txt") == 0) {
 #if defined(__linux__)
         (void)signal_copy_file_limited("/proc/self/status", path, 8192);
@@ -762,7 +780,58 @@ static void postmortem_crash_hook(int sig, zcl_signal_info_t *info,
         (void)signal_write_registers(path, sig, info, ucontext);
     if (signal_join_path(path, sizeof(path), cap_dir, "coremarker.txt") == 0)
         (void)signal_write_coremarker(path, crash_unix);
+}
 
+static void crash_hook_capture(int sig, zcl_signal_info_t *info,
+                               void *ucontext)
+{
+    size_t tape_written = 0;
+    uint64_t rng_count = seed_tape_rng_count(g_postmortem_tape);
+    uint64_t clock_advance_count =
+        seed_tape_clock_advance_count(g_postmortem_tape);
+    uint64_t inject_count = seed_tape_inject_count(g_postmortem_tape);
+    if (seed_tape_save_to_memory(g_postmortem_tape,
+                                 g_postmortem_signal_tape_buf,
+                                 g_postmortem_signal_tape_cap,
+                                 &tape_written) != 0 ||
+        tape_written == 0) {
+        return;
+    }
+
+    int64_t crash_unix = g_postmortem_install_unix > 0
+        ? g_postmortem_install_unix
+        : 0;
+    char cap_dir[512];
+    if (crash_hook_cap_dir(crash_unix, cap_dir, sizeof(cap_dir)) != 0)
+        return;
+
+    (void)mkdir(g_postmortem_dir, 0755);
+    if (mkdir(cap_dir, 0755) != 0 && errno != EEXIST)
+        return;
+
+    if (crash_hook_write_tape(cap_dir, tape_written) != 0)
+        return;
+
+    char path[576];
+    if (signal_join_path(path, sizeof(path), cap_dir, "manifest.json") == 0)
+        (void)signal_write_manifest(path, sig, crash_unix, tape_written,
+                                    rng_count, clock_advance_count,
+                                    inject_count);
+    crash_hook_write_sidecars(sig, info, ucontext, crash_unix, cap_dir);
+}
+
+static void postmortem_crash_hook(int sig, zcl_signal_info_t *info,
+                                  void *ucontext,
+                                  void *ctx)
+{
+    (void)ctx;
+    if (g_postmortem_in_handler || !g_postmortem_tape ||
+        g_postmortem_dir[0] == '\0' || !g_postmortem_signal_tape_buf ||
+        g_postmortem_signal_tape_cap == 0) {
+        return;
+    }
+    g_postmortem_in_handler = 1;
+    crash_hook_capture(sig, info, ucontext);
     g_postmortem_in_handler = 0;
 }
 
@@ -808,23 +877,23 @@ void postmortem_uninstall(void)
     g_postmortem_in_handler = 0;
 }
 
-seed_tape_t *postmortem_capsule_load_tape(const char *capsule_path)
+static seed_tape_t *capsule_load_tape_gz(const char *capsule_path)
 {
-    if (!capsule_path || !*capsule_path) return NULL;
-    if (postmortem_has_suffix(capsule_path, ".cap.gz")) {
-        uint8_t *buf = NULL;
-        size_t size = 0;
-        int rc = gz_read_tar_member(capsule_path, "tape.bin", &buf, &size,
-                                    POSTMORTEM_GZ_MEMBER_MAX);
-        if (rc != 0 || !buf || size == 0) {
-            free(buf);
-            return NULL;
-        }
-        seed_tape_t *tape = seed_tape_load_from_memory(buf, size);
+    uint8_t *buf = NULL;
+    size_t size = 0;
+    int rc = gz_read_tar_member(capsule_path, "tape.bin", &buf, &size,
+                                POSTMORTEM_GZ_MEMBER_MAX);
+    if (rc != 0 || !buf || size == 0) {
         free(buf);
-        return tape;
+        return NULL;
     }
+    seed_tape_t *tape = seed_tape_load_from_memory(buf, size);
+    free(buf);
+    return tape;
+}
 
+static seed_tape_t *capsule_load_tape_dir(const char *capsule_path)
+{
     char tape_path[576];
     int n = snprintf(tape_path, sizeof(tape_path), "%s/tape.bin",
                      capsule_path);
@@ -866,6 +935,14 @@ seed_tape_t *postmortem_capsule_load_tape(const char *capsule_path)
     return tape;
 }
 
+seed_tape_t *postmortem_capsule_load_tape(const char *capsule_path)
+{
+    if (!capsule_path || !*capsule_path) return NULL;
+    if (postmortem_has_suffix(capsule_path, ".cap.gz"))
+        return capsule_load_tape_gz(capsule_path);
+    return capsule_load_tape_dir(capsule_path);
+}
+
 bool postmortem_capsule_validate(const char *capsule_path)
 {
     if (!capsule_path || !*capsule_path) return false;
@@ -897,6 +974,82 @@ bool postmortem_capsule_validate(const char *capsule_path)
     return true;
 }
 
+static const char *const capsule_required_members[] = {
+    "manifest.json",
+    "tape.bin",
+};
+
+static const char *const capsule_optional_members[] = {
+    "procstatus.txt",
+    "log.txt",
+    "registers.txt",
+    "coremarker.txt",
+};
+
+/* Adds capsule_path/name to the archive; optional members are skipped
+ * when they are absent or not regular files. */
+static int capsule_tar_member(gzFile gz, const char *capsule_path,
+                              const char *name, bool optional)
+{
+    char path[640];
+    int n = snprintf(path, sizeof(path), "%s/%s", capsule_path, name);
+    if (n < 0 || (size_t)n >= sizeof(path)) return -ENAMETOOLONG;
+    if (optional) {
+        struct stat st;
+        if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return 0;
+    }
+    return tar_write_file(gz, name, path);
+}
+
+static int capsule_compress_members(gzFile gz, const char *capsule_path)
+{
+    int rc = 0;
+    for (size_t i = 0; rc == 0 &&
+         i < sizeof(capsule_required_members) /
+             sizeof(capsule_required_members[0]); i++)
+        rc = capsule_tar_member(gz, capsule_path,
+                                capsule_required_members[i], false);
+    for (size_t i = 0; rc == 0 &&
+         i < sizeof(capsule_optional_members) /
+             sizeof(capsule_optional_members[0]); i++)
+        rc = capsule_tar_member(gz, capsule_path,
+                                capsule_optional_members[i], true);
+
+    if (rc == 0) {
+        uint8_t zero[TAR_BLOCK_SIZE * 2u] = {0};
+        rc = gz_write_all(gz, zero, sizeof(zero));
+    }
+    return rc;
+}
+
+static int capsule_check_dir(const char *capsule_path)
+{
+    struct stat st;
+    if (stat(capsule_path, &st) != 0) return -errno;
+    if (!S_ISDIR(st.st_mode)) return -ENOTDIR;
+    return 0;
+}
+
+static int capsule_compress_paths(const char *capsule_path,
+                                  char *dst, size_t dst_cap,
+                                  char *tmp, size_t tmp_cap)
+{
+    int n = snprintf(dst, dst_cap, "%s.gz", capsule_path);
+    if (n < 0 || (size_t)n >= dst_cap) return -ENAMETOOLONG;
+    n = snprintf(tmp, tmp_cap, "%s.tmp", dst);
+    if (n < 0 || (size_t)n >= tmp_cap) return -ENAMETOOLONG;
+    return 0;
+}
+
+static int capsule_compress_report_path(const char *dst, char *out,
+                                        size_t cap)
+{
+    if (!out || cap == 0) return 0;
+    int n = snprintf(out, cap, "%s", dst);
+    if (n < 0 || (size_t)n >= cap) return -ENAMETOOLONG;
+    return 0;
+}
+
 int postmortem_capsule_compress(const char *capsule_path,
                                 char *compressed_path_out,
                                 size_t compressed_path_cap)
@@ -904,57 +1057,19 @@ int postmortem_capsule_compress(const char *capsule_path,
     if (!capsule_path || !*capsule_path) return -EINVAL;
     if (!postmortem_has_suffix(capsule_path, ".cap")) return -EINVAL;
 
-    struct stat st;
-    if (stat(capsule_path, &st) != 0) return -errno;
-    if (!S_ISDIR(st.st_mode)) return -ENOTDIR;
+    int rc = capsule_check_dir(capsule_path);
+    if (rc != 0) return rc;
 
     char dst[576];
-    int n = snprintf(dst, sizeof(dst), "%s.gz", capsule_path);
-    if (n < 0 || (size_t)n >= sizeof(dst)) return -ENAMETOOLONG;
-
     char tmp[640];
-    n = snprintf(tmp, sizeof(tmp), "%s.tmp", dst);
-    if (n < 0 || (size_t)n >= sizeof(tmp)) return -ENAMETOOLONG;
+    rc = capsule_compress_paths(capsule_path, dst, sizeof(dst),
+                                tmp, sizeof(tmp));
+    if (rc != 0) return rc;
 
     gzFile gz = gzopen(tmp, "wb6");
     if (!gz) return errno ? -errno : -EIO;
 
-    const char *required[] = { "manifest.json", "tape.bin" };
-    int rc = 0;
-    for (size_t i = 0; i < sizeof(required) / sizeof(required[0]); i++) {
-        char path[640];
-        n = snprintf(path, sizeof(path), "%s/%s", capsule_path, required[i]);
-        if (n < 0 || (size_t)n >= sizeof(path)) {
-            rc = -ENAMETOOLONG;
-            break;
-        }
-        rc = tar_write_file(gz, required[i], path);
-        if (rc != 0) break;
-    }
-
-    const char *optional[] = {
-        "procstatus.txt",
-        "log.txt",
-        "registers.txt",
-        "coremarker.txt",
-    };
-    for (size_t i = 0; rc == 0 &&
-         i < sizeof(optional) / sizeof(optional[0]); i++) {
-        char path[640];
-        n = snprintf(path, sizeof(path), "%s/%s", capsule_path, optional[i]);
-        if (n < 0 || (size_t)n >= sizeof(path)) {
-            rc = -ENAMETOOLONG;
-            break;
-        }
-        if (stat(path, &st) == 0 && S_ISREG(st.st_mode))
-            rc = tar_write_file(gz, optional[i], path);
-    }
-
-    if (rc == 0) {
-        uint8_t zero[TAR_BLOCK_SIZE * 2u] = {0};
-        rc = gz_write_all(gz, zero, sizeof(zero));
-    }
-
+    rc = capsule_compress_members(gz, capsule_path);
     int close_rc = gzclose(gz);
     if (rc == 0 && close_rc != Z_OK) rc = -EIO;
     if (rc != 0) {
@@ -971,12 +1086,8 @@ int postmortem_capsule_compress(const char *capsule_path,
     rc = postmortem_remove_tree(capsule_path);
     if (rc != 0) return rc;
 
-    if (compressed_path_out && compressed_path_cap > 0) {
-        n = snprintf(compressed_path_out, compressed_path_cap, "%s", dst);
-        if (n < 0 || (size_t)n >= compressed_path_cap)
-            return -ENAMETOOLONG;
-    }
-    return 0;
+    return capsule_compress_report_path(dst, compressed_path_out,
+                                        compressed_path_cap);
 }
 
 int postmortem_capsule_compress_unpacked(const char *dir,

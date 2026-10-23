@@ -1807,14 +1807,6 @@ engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_call_with_timeout:29
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_fill_missing_creds:20
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_parse_conf_stream:26
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_parse_result_string_array:20
-engine/modules/sim/src/postmortem.c:json_escape_string:16
-engine/modules/sim/src/postmortem.c:postmortem_capsule_compress:32
-engine/modules/sim/src/postmortem.c:postmortem_capsule_load_tape:16
-engine/modules/sim/src/postmortem.c:postmortem_capture_write:26
-engine/modules/sim/src/postmortem.c:postmortem_crash_hook:25
-engine/modules/sim/src/postmortem.c:signal_copy_tail_limited:17
-engine/modules/sim/src/postmortem.c:signal_write_manifest:19
-engine/modules/sim/src/postmortem.c:signal_write_registers:20
 engine/modules/sim/src/postmortem_inventory.c:postmortem_capsule_list:20
 engine/modules/sim/src/postmortem_inventory.c:postmortem_capsule_prune:19
 engine/modules/sim/src/seed_tape.c:seed_tape_load_from_memory:24
