@@ -58,6 +58,36 @@ bool proof_verify_block_has_shielded_proofs(const struct block *blk)
     return false;
 }
 
+/* Smallest proof-set size for which the batched Groth16 verify beats n single
+ * verifies. Measured 2026-10-23, same process, interleaved, median of 21 rounds,
+ * real prover proofs (ms; batch / n x one):
+ *   n        1     2     3      4      6      8
+ *   output   4.72/3.62  6.39/7.31  8.01/10.96  9.43/14.23  12.45/21.21  15.57/28.27
+ *   spend    4.61/3.51  6.53/7.43  8.31/11.16  9.93/14.78  13.05/22.07  15.88/28.54
+ * batch/one ratio: n=1 1.30/1.31 (batch loses), n=2 0.87/0.88 (first >=10% win),
+ * n=3 0.73/0.74, n=8 0.55/0.56. A batch of 1 does 3n+1 constant-time scalar
+ * multiplications that a single verify never pays. Below the constant the
+ * per-proof check is used directly: exact, with no batch soundness error. */
+#define PV_SAPLING_OUTPUT_BATCH_MIN 2u
+#define PV_SAPLING_SPEND_BATCH_MIN 2u
+static const size_t pv_sapling_batch_min[2] = {
+    PV_SAPLING_OUTPUT_BATCH_MIN, PV_SAPLING_SPEND_BATCH_MIN
+};
+
+/* True iff every prepared proof verifies on its own. */
+static bool pv_sapling_each_ok(bool is_spend, const struct groth16_proof *p,
+                               const uint64_t (*pub)[4], size_t n, size_t ni)
+{
+    for (size_t i = 0; i < n; i++) {
+        bool one = is_spend
+            ? zclassic_sapling_spend_groth16_one(&p[i], &pub[i * ni])
+            : zclassic_sapling_output_groth16_one(&p[i], &pub[i * ni]);
+        if (!one)
+            return false;
+    }
+    return true;
+}
+
 /* Verify one homogeneous Sapling proof set (all spends OR all outputs) with
  * batched Groth16 + a per-proof fallback for attribution. Verdict-identical to
  * the per-description check_* sweep; the accept path — every real block — is
@@ -103,23 +133,18 @@ static bool pv_sapling_set(void *sctx, const struct transaction *tx,
             return false;
         }
     }
-    bool batch = is_spend ? zclassic_sapling_spend_groth16_batch(p, pub, n)
-                          : zclassic_sapling_output_groth16_batch(p, pub, n);
-    if (!batch) {
-        for (size_t i = 0; i < n; i++) {
-            bool one = is_spend
-                ? zclassic_sapling_spend_groth16_one(&p[i], &pub[i * ni])
-                : zclassic_sapling_output_groth16_one(&p[i], &pub[i * ni]);
-            if (!one) {
-                free(p); free(pub);
-                out->ok = false;
-                out->first_failure_proof_type = ftype;
-                return false;
-            }
-        }
-    }
+    size_t min_batch = pv_sapling_batch_min[is_spend ? 1 : 0];
+    bool ok = n >= min_batch &&
+              (is_spend ? zclassic_sapling_spend_groth16_batch(p, pub, n)
+                        : zclassic_sapling_output_groth16_batch(p, pub, n));
+    if (!ok)
+        ok = pv_sapling_each_ok(is_spend, p, pub, n, ni);
     free(p); free(pub);
-    return true;
+    if (!ok) {
+        out->ok = false;
+        out->first_failure_proof_type = ftype;
+    }
+    return ok;
 }
 
 static bool default_verify_tx(const struct transaction *tx, int height,

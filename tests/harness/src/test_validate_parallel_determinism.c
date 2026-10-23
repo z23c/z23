@@ -32,8 +32,19 @@
 #include "primitives/transaction.h"
 #include "script/script.h"
 #include "script/script_error.h"
+#include "script/sighashtype.h"
+#include "consensus/upgrades.h"
+#include "validation/sighash.h"
+#include "sapling/sapling.h"
+#include "sapling/sapling_prover.h"
+#include "sapling/params_init.h"
+#include "sapling/fr.h"
+#include "sapling/incremental_merkle_tree.h"
+#include "support/cleanse.h"
+#include "util/safe_alloc.h"
 
 #include <stdbool.h>
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -215,6 +226,214 @@ static bool pv_determinism(const struct block *blk, int height,
             return false;
     }
     return true;
+}
+
+/* ── real single-proof Sapling sets (the n < batch-minimum direct path) ───── */
+
+#define VPD_SHIELDED_VALUE 54321
+
+static bool vpd_real_params(void)
+{
+    const char *home = getenv("HOME");
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/.zcash-params", (home && *home) ? home : ".");
+    return (sapling_params_loaded() || sapling_init_params(dir)) &&
+           zclassic_sapling_prover_is_ready();
+}
+
+static void vpd_sapling_tx_init(struct transaction *tx, int64_t value_balance)
+{
+    transaction_init(tx);
+    tx->overwintered = true;
+    tx->version = SAPLING_TX_VERSION;
+    tx->version_group_id = SAPLING_VERSION_GROUP_ID;
+    tx->value_balance = value_balance;
+}
+
+/* The sighash default_verify_tx will recompute for this tx at `height`. */
+static bool vpd_sapling_sighash(const struct transaction *tx, int height,
+                                struct uint256 *sh)
+{
+    struct script empty;
+    empty.size = 0;
+    struct sighash_type ht = { .raw = SIGHASH_ALL };
+    uint32_t branch = consensus_current_epoch_branch_id(
+        height, &chain_params_get()->consensus);
+    return signature_hash(&empty, tx, NOT_AN_INPUT, ht, 0, branch, NULL, sh);
+}
+
+/* Optionally turn the proof's C point into -C: still a valid curve point, so
+ * it decodes and reaches the pairing check, which it fails. Applied BEFORE the
+ * sighash, which covers the proofs, so every signature stays honest. */
+static bool vpd_flip_proof(unsigned char *zkproof, bool flip)
+{
+    if (flip)
+        zkproof[144] ^= 0x20;
+    return true;
+}
+
+/* One output description from the production prover, value in, no spends. */
+static bool vpd_one_output_tx(struct transaction *tx, void *pctx, int height,
+                              bool flip)
+{
+    vpd_sapling_tx_init(tx, -VPD_SHIELDED_VALUE);
+    tx->v_shielded_output = zcl_calloc(1, sizeof(*tx->v_shielded_output),
+                                       "vpd out");
+    if (!tx->v_shielded_output)
+        return false;
+    tx->num_shielded_output = 1;
+    uint8_t d[11] = {0}, ask[32], nsk[32], ovk[32], ak[32], nk[32], ivk[32];
+    uint8_t pkd[32];
+    bool have_d = false;
+    for (int i = 0; i < 256 && !have_d; i++) {
+        d[0] = (uint8_t)i;
+        have_d = sapling_check_diversifier(d);
+    }
+    sapling_generate_r(ask); sapling_generate_r(nsk); sapling_generate_r(ovk);
+    sapling_ask_to_ak(ask, ak); sapling_nsk_to_nk(nsk, nk);
+    sapling_crh_ivk(ak, nk, ivk);
+    struct output_description *od = &tx->v_shielded_output[0];
+    struct uint256 sh;
+    return have_d && sapling_ivk_to_pkd(ivk, d, pkd) &&
+           sapling_build_output_with_ctx(pctx, ovk, d, pkd, VPD_SHIELDED_VALUE,
+               NULL, od->cv.data, od->cm.data, od->ephemeral_key.data,
+               od->enc_ciphertext, od->out_ciphertext, od->zkproof) &&
+           vpd_flip_proof(od->zkproof, flip) &&
+           vpd_sapling_sighash(tx, height, &sh) &&
+           zclassic_sapling_binding_sig(pctx, tx->value_balance, sh.data,
+                                        tx->binding_sig);
+}
+
+struct vpd_note {
+    uint8_t ask[32], ak[32], nsk[32], nk[32], ar[32], d[11], pkd[32], rcm[32];
+    uint8_t anchor[32], witness[1 + 32 * 33];
+    size_t witness_len;
+};
+
+/* A fixed-seed note in a one-leaf tree, with its Merkle path. */
+static bool vpd_make_note(struct vpd_note *n)
+{
+    memset(n, 0, sizeof(*n));
+    n->ask[0] = 0x40; n->ask[1] = 0x99; n->nsk[0] = 0x08; n->nsk[1] = 0x5A;
+    n->ar[0] = 0x03; n->rcm[0] = 0x11; n->rcm[3] = 0x7C;
+    bool have_d = false;
+    for (int i = 0; i < 256 && !have_d; i++) {
+        n->d[0] = (uint8_t)i;
+        have_d = sapling_check_diversifier(n->d);
+    }
+    uint8_t ivk[32], cm[32];
+    sapling_ask_to_ak(n->ask, n->ak); sapling_nsk_to_nk(n->nsk, n->nk);
+    sapling_crh_ivk(n->ak, n->nk, ivk);
+    if (!have_d || !sapling_ivk_to_pkd(ivk, n->d, n->pkd) ||
+        !sapling_compute_cm(n->d, n->pkd, VPD_SHIELDED_VALUE, n->rcm, cm))
+        return false;
+    struct incremental_merkle_tree tree;
+    struct incremental_witness w;
+    struct uint256 leaf, anchor;
+    memcpy(leaf.data, cm, 32);
+    sapling_tree_init(&tree);
+    incremental_tree_append(&tree, &leaf);
+    incremental_witness_init(&w, &tree);
+    incremental_witness_root(&w, &anchor);
+    memcpy(n->anchor, anchor.data, 32);
+    return incremental_witness_merkle_path(&w, n->witness, &n->witness_len);
+}
+
+/* One spend description from the production prover, value out, no outputs. */
+static bool vpd_one_spend_tx(struct transaction *tx, void *pctx, int height,
+                             bool flip)
+{
+    struct vpd_note n;
+    vpd_sapling_tx_init(tx, VPD_SHIELDED_VALUE);
+    tx->v_shielded_spend = zcl_calloc(1, sizeof(*tx->v_shielded_spend),
+                                      "vpd spend");
+    if (!tx->v_shielded_spend || !vpd_make_note(&n))
+        return false;
+    tx->num_shielded_spend = 1;
+    struct spend_description *sd = &tx->v_shielded_spend[0];
+    memcpy(sd->anchor.data, n.anchor, 32);
+    struct uint256 sh;
+    struct fs ask_fs, ar_fs, rsk_fs;
+    uint8_t rsk[32];
+    fs_from_bytes(&ask_fs, n.ask); fs_from_bytes(&ar_fs, n.ar);
+    fs_add(&rsk_fs, &ask_fs, &ar_fs); fs_to_bytes(rsk, &rsk_fs);
+    bool ok = zclassic_sapling_spend_proof(pctx, n.ak, n.nsk, n.d, n.rcm, n.ar,
+                  VPD_SHIELDED_VALUE, n.anchor, n.witness, n.witness_len,
+                  sd->cv.data, sd->rk.data, sd->zkproof) &&
+              sapling_compute_nf(n.d, n.pkd, VPD_SHIELDED_VALUE, n.rcm, n.ak,
+                                 n.nk, 0, sd->nullifier.data) &&
+              vpd_flip_proof(sd->zkproof, flip) &&
+              vpd_sapling_sighash(tx, height, &sh) &&
+              redjubjub_sign(rsk, sh.data, 32, sd->spend_auth_sig, 5) &&
+              zclassic_sapling_binding_sig(pctx, tx->value_balance, sh.data,
+                                           tx->binding_sig);
+    memory_cleanse(rsk, sizeof(rsk));
+    return ok;
+}
+
+/* Verify `tx` through the built-in verifier and compare to the expectation. */
+static bool vpd_real_verdict(struct transaction *tx, int height, bool want_ok,
+                             const char *want_type)
+{
+    struct block b;
+    block_init(&b);
+    b.num_vtx = 1;
+    b.vtx = tx;
+    struct proof_verify_summary s;
+    proof_verify_block(&b, height, NULL, NULL, false, NULL, NULL, NULL, &s);
+    b.num_vtx = 0;
+    b.vtx = NULL;
+    block_free(&b);
+    return (s.ok != 0) == want_ok && !s.internal_error &&
+           (want_ok || (s.first_failure_proof_type &&
+                        strcmp(s.first_failure_proof_type, want_type) == 0));
+}
+
+/* A set of ONE proof takes the direct per-proof path: honest accepted, one
+ * flipped zkproof byte rejected and attributed to the right proof type. */
+/* One honest or tampered single-proof tx through the built-in verifier. */
+static int vpd_real_one(bool spend, bool bad, int height)
+{
+    int failures = 0;
+    struct transaction tx;
+    transaction_init(&tx);
+    void *pctx = zclassic_sapling_proving_ctx_init();
+    bool built = pctx && (spend ? vpd_one_spend_tx(&tx, pctx, height, bad)
+                                : vpd_one_output_tx(&tx, pctx, height, bad));
+    const char *kind = spend ? "1 spend" : "1 output";
+    char name[96];
+    snprintf(name, sizeof(name), "real %s tx built (%s)", kind,
+             bad ? "flipped proof" : "honest");
+    VPD_CHECK(name, built);
+    if (built) {
+        snprintf(name, sizeof(name), bad ? "%s, flipped proof byte -> %s"
+                                         : "%s accepted%.0s", kind,
+                 spend ? "sapling_spend" : "sapling_output");
+        VPD_CHECK(name, vpd_real_verdict(&tx, height, !bad,
+                      spend ? "sapling_spend" : "sapling_output"));
+    }
+    if (pctx)
+        zclassic_sapling_proving_ctx_free(pctx);
+    transaction_free(&tx);
+    return failures;
+}
+
+/* A set of ONE proof takes the direct per-proof path (below the batch
+ * minimum): honest accepted, one tampered proof rejected and attributed. */
+static int vpd_real_small_set(bool spend, int height)
+{
+    return vpd_real_one(spend, false, height) +
+           vpd_real_one(spend, true, height);
+}
+
+static int vpd_real_sapling_small_sets(int height)
+{
+    if (!vpd_real_params()) {
+        printf("parallel_determinism: SKIP real 1-proof sapling sets "
+               "(~/.zcash-params absent)\n");
+        return 0;
+    }
+    return vpd_real_small_set(false, height) + vpd_real_small_set(true, height);
 }
 
 /* ── the tests ────────────────────────────────────────────────────────────── */
@@ -503,6 +722,8 @@ int test_validate_parallel_determinism(void)
                   us_ser <= us_pool * 3 / 2 + 5000);
         vpd_block_free(&b);
     }
+
+    failures += vpd_real_sapling_small_sets(H);
 
     /* Join the lazily-started pools so no worker outlives the test. */
     script_verify_pool_shutdown();
