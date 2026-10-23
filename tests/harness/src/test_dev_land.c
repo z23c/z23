@@ -13515,7 +13515,8 @@ static bool dlx_pc_missing_lint_refused(void)
     dlx_pc_submit(&c, &rig, NULL, NULL);
     ok = dlx_run(&c) && !dlx_ok(&c) &&
          strcmp(dlx_err_code(&c), "PRECHECK_UNAVAILABLE") == 0 &&
-         strstr(c.reply.error.message, "make worktree-prime") != NULL;
+         strstr(c.reply.error.message,
+                "make build/bin/z23-lint docs-capability-inventory") != NULL;
     dlx_end(&c);
     ok = ok && dlx_queue_empty();
     dlx_restore();
