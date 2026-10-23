@@ -424,20 +424,27 @@ static uint32_t bil_effective_bits(int32_t height, const uint8_t hash[32],
     return n_bits;
 }
 
+bool block_index_row_admissible(int32_t height, const uint8_t hash[32],
+                           const uint8_t prev_hash[32], uint32_t n_bits,
+                           const struct chain_params *cp, uint32_t *effective_bits)
+{
+    uint32_t bits = bil_effective_bits(height, hash, prev_hash, n_bits, cp);
+    if (effective_bits)
+        *effective_bits = bits;
+    return !cp || block_row_verify(hash, bits, NULL, cp, false) ==
+                      BLOCK_ROW_VERIFY_OK;
+}
+
 bool block_index_row_admit(int32_t height, const uint8_t hash[32],
                            const uint8_t prev_hash[32], uint32_t n_bits,
                            const struct chain_params *cp,
                            int64_t *bad_count, uint32_t *effective_bits)
 {
-    uint32_t bits = bil_effective_bits(height, hash, prev_hash, n_bits, cp);
-    if (effective_bits)
-        *effective_bits = bits;
-    if (cp && block_row_verify(hash, bits, NULL, cp, false) !=
-                  BLOCK_ROW_VERIFY_OK) {
-        flat_quarantine_row(height, hash, bad_count);
-        return false;
-    }
-    return true;
+    if (block_index_row_admissible(height, hash, prev_hash, n_bits, cp,
+                                   effective_bits))
+        return true;
+    flat_quarantine_row(height, hash, bad_count);
+    return false;
 }
 
 static struct zcl_result bil_flat_insert_rows(

@@ -425,6 +425,73 @@ static int run_admission_gate_cases(void)
     return failures;
 }
 
+/* Emit a new dirty tip row and report whether the bound path covers it. */
+static bool bindgate_tip_is_bound(event_log_t *log,
+                                  block_index_projection_t *bip,
+                                  const char *dir, const struct uint256 *tip,
+                                  const struct uint256 *prev, uint32_t st)
+{
+    return topup_emit_row(log, tip, prev, 132, st, 2, 300, 1) &&
+           block_index_projection_catch_up(bip) != UINT64_MAX &&
+           block_index_projection_bound_covers_tip(bip, dir, tip->data, 132);
+}
+
+/* The projection holds a row the admission gate refuses (high hash). The flat
+ * snapshot correctly excludes it, so the shutdown bind must still succeed and
+ * the next top-up must stay on the bound-delta path; a missing ADMITTABLE row
+ * must still refuse the bind. */
+static int run_bind_excludes_refused_row_case(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "topup", "bindgate");
+    char log_path[320], db_path[320];
+    snprintf(log_path, sizeof(log_path), "%s/events", dir);
+    snprintf(db_path, sizeof(db_path), "%s/projection.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *bip = log
+        ? block_index_projection_open(db_path, log) : NULL;
+    struct main_state source;
+    main_state_init(&source);
+    struct uint256 good = {0}, bad = {0}, tip = {0};
+    good.data[0] = 0x31;
+    bad.data[0] = 0x32;
+    bad.data[31] = 0xFF;  /* far above the 0x2000ffff target */
+    tip.data[0] = 0x34;
+    const uint32_t st = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    struct uint256 extra = {0};
+    extra.data[0] = 0x30;  /* flat-only row: flat count >= projection count */
+    struct block_index *sx = topup_insert_entry(&source, &extra, 129);
+    struct block_index *sg = topup_insert_entry(&source, &good, 130);
+    if (sg) { sg->nStatus = st; sg->nFile = 2; sg->nDataPos = 100; sg->nTx = 1; }
+    bool emitted = log && bip && sg && sx &&
+        topup_emit_row(log, &good, NULL, 130, st, 2, 100, 1) &&
+        topup_emit_row(log, &bad, NULL, 131, st, 2, 200, 1) &&
+        block_index_projection_catch_up(bip) != UINT64_MAX;
+    TOPUP_CHECK("bindgate: fixture ready", emitted);
+    struct block_index_flat_identity identity;
+    bool saved = emitted && save_block_index_flat_identity(
+        dir, &source, &identity).ok;
+    TOPUP_CHECK("bindgate: flat saved without the refused row", saved);
+    int64_t q0 = block_index_flat_row_quarantined();
+    TOPUP_CHECK("bindgate: bind succeeds despite the refused row",
+                saved && block_index_projection_bind_saved_flat_state(
+                    bip, &identity, &source));
+    TOPUP_CHECK("bindgate: the coverage proof leaves the quarantine counter",
+                block_index_flat_row_quarantined() == q0);
+    TOPUP_CHECK("bindgate: next topup is bound-delta",
+                saved && bindgate_tip_is_bound(log, bip, dir, &tip, &good, st));
+    /* An admittable row the flat state lacks still refuses the bind. */
+    TOPUP_CHECK("bindgate: missing admittable row still refuses",
+                saved && !block_index_projection_bind_saved_flat_state(
+                    bip, &identity, &source));
+    if (bip) block_index_projection_close(bip);
+    if (log) event_log_close(log);
+    main_state_free(&source);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int run_bound_topup_integration(void)
 {
     int failures = 0;
@@ -770,7 +837,8 @@ int test_block_index_topup(void)
     failures += run_bound_topup_integration() + run_undo_topup_cases()
                 + run_undo_changed_file_cases()
                 + run_undo_insert_seal_cases()
-                + run_admission_gate_cases();
+                + run_admission_gate_cases()
+                + run_bind_excludes_refused_row_case();
     chain_params_select(CHAIN_MAIN);
     return failures;
 }

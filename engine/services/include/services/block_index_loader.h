@@ -236,6 +236,13 @@ int64_t block_index_flat_row_quarantined(void);
  * flat-row quarantine counter + blocker + throttled WARN and returns false;
  * the caller skips it. *effective_bits (optional) gets the bits to store. */
 struct chain_params;
+/* Side-effect-free half of the gate: same verdict as block_index_row_admit
+ * but no quarantine counter, blocker or WARN. For read-only coverage proofs
+ * (the shutdown flat-bind) that must agree with the loaders per row. */
+bool block_index_row_admissible(int32_t height, const uint8_t hash[32],
+                                const uint8_t prev_hash[32], uint32_t n_bits,
+                                const struct chain_params *cp,
+                                uint32_t *effective_bits);
 bool block_index_row_admit(int32_t height, const uint8_t hash[32],
                            const uint8_t prev_hash[32], uint32_t n_bits,
                            const struct chain_params *cp,

@@ -9,6 +9,7 @@
 #include "services/block_index_loader.h"
 
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "storage/block_index_projection.h"
 #include "validation/main_state.h"
 
@@ -21,6 +22,14 @@ static bool flat_state_covers_projection_row(
     const uint8_t hash[32], const struct disk_block_index *row, void *user)
 {
     struct main_state *state = user;
+    /* A row the loaders' admission gate refuses (flat loader
+     * snapshot loader via block_index_row_admit, projection top-up via
+     * topup_row_admitted) is correctly absent from the flat snapshot and the
+     * map, so it is not a coverage gap. Same predicate, no quarantine side
+     * effects. Every admittable row still needs the full match below. */
+    if (!block_index_row_admissible(row->nHeight, hash, row->hashPrev.data,
+                                    row->nBits, chain_params_get(), NULL))
+        return true;
     struct uint256 key;
     memcpy(key.data, hash, sizeof(key.data));
     struct block_index *flat = block_map_find(&state->map_block_index, &key);
