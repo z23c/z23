@@ -74,20 +74,20 @@ vcs_zcode_work_context_import_authority(
         context->candidate_authority, context->candidate_authority_len);
 }
 
-static enum vcs_zcode_work_context_result context_validate(
-    const struct vcs_zcode_work_context_v1 *context, int64_t now_unix)
+static bool context_null_shape(
+    const struct vcs_zcode_work_context_v1 *context)
 {
-    if (!context || !context->fixed_input ||
+    return !context || !context->fixed_input ||
         ((context->candidate_authority == NULL) !=
          (context->candidate_authority_len == 0)) ||
         ((context->task_authority == NULL) !=
-         (context->task_authority_len == 0)))
-        return VCS_ZCODE_WORK_CONTEXT_NULL;
-    size_t profile_len = strnlen(context->profile, sizeof(context->profile));
-    if (!zcl_bytes_any_set(context->source_sha256, 32) || profile_len == 0 ||
-        profile_len > VCS_ZCODE_WORK_CONTEXT_PROFILE_MAX)
-        return VCS_ZCODE_WORK_CONTEXT_SHAPE;
-    if (context->fixed_input_len == 0 ||
+         (context->task_authority_len == 0));
+}
+
+static bool context_limit_exceeded(
+    const struct vcs_zcode_work_context_v1 *context, size_t profile_len)
+{
+    return context->fixed_input_len == 0 ||
         SIZE_MAX - context->fixed_input_len <
             context->candidate_authority_len ||
         SIZE_MAX - context->fixed_input_len -
@@ -99,8 +99,12 @@ static enum vcs_zcode_work_context_result context_validate(
         context->fixed_input_len + context->candidate_authority_len +
                 context->task_authority_len >
             VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES -
-                VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES - profile_len)
-        return VCS_ZCODE_WORK_CONTEXT_LIMIT;
+                VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES - profile_len;
+}
+
+static enum vcs_zcode_work_context_result context_validate_stale(
+    const struct vcs_zcode_work_context_v1 *context, int64_t now_unix)
+{
     if (vcs_zcode_task_validate_at(&context->task, now_unix) !=
             VCS_ZCODE_DEV_OK ||
         vcs_zcode_candidate_validate_for_task(
@@ -115,6 +119,77 @@ static enum vcs_zcode_work_context_result context_validate(
         memcmp(policy_root, context->task.proof_policy_root, 32) != 0)
         return VCS_ZCODE_WORK_CONTEXT_STALE;
     return VCS_ZCODE_WORK_CONTEXT_OK;
+}
+
+static enum vcs_zcode_work_context_result context_validate(
+    const struct vcs_zcode_work_context_v1 *context, int64_t now_unix)
+{
+    if (context_null_shape(context)) return VCS_ZCODE_WORK_CONTEXT_NULL;
+    size_t profile_len = strnlen(context->profile, sizeof(context->profile));
+    if (!zcl_bytes_any_set(context->source_sha256, 32) || profile_len == 0 ||
+        profile_len > VCS_ZCODE_WORK_CONTEXT_PROFILE_MAX)
+        return VCS_ZCODE_WORK_CONTEXT_SHAPE;
+    if (context_limit_exceeded(context, profile_len))
+        return VCS_ZCODE_WORK_CONTEXT_LIMIT;
+    return context_validate_stale(context, now_unix);
+}
+
+static bool context_package_binding(
+    const struct vcs_zcode_work_context_v1 *context,
+    struct vcs_zcode_package_action_input_v1 *package_input,
+    uint8_t input_root[32])
+{
+    uint8_t task_root[32], candidate_root[32];
+    return vcs_zcode_task_root(&context->task, task_root) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_root(&context->candidate, candidate_root) ==
+            VCS_ZCODE_DEV_OK &&
+        memcmp(package_input->task_root, task_root, 32) == 0 &&
+        memcmp(package_input->candidate_root, candidate_root, 32) == 0 &&
+        memcmp(package_input->candidate_source_root,
+               context->candidate.candidate_source_root, 32) == 0 &&
+        memcmp(package_input->base_source_root,
+               context->task.source_root, 32) == 0 &&
+        memcmp(package_input->dependency_lock_root,
+               context->task.dependency_lock_root, 32) == 0 &&
+        memcmp(package_input->acceptance_recipe_root,
+               context->task.acceptance_tests_root, 32) == 0 &&
+        vcs_zcode_package_action_input_root(
+            package_input, input_root) == VCS_ZCODE_ACTION_INPUT_OK;
+}
+
+static bool context_package_action_bound(
+    const struct vcs_zcode_work_context_v1 *context, uint8_t input_root[32])
+{
+    struct vcs_zcode_package_action_input_v1 package_input;
+    return vcs_zcode_package_action_input_parse(
+               context->fixed_input, context->fixed_input_len,
+               &package_input) == VCS_ZCODE_ACTION_INPUT_OK &&
+        context_package_binding(context, &package_input, input_root);
+}
+
+static bool context_generic_binding(
+    const struct vcs_zcode_work_context_v1 *context,
+    struct vcs_zcode_action_input_v1 *bound_input, const char *kind,
+    uint8_t input_root[32])
+{
+    uint8_t task_root[32], candidate_root[32];
+    uint8_t expected_kind = vcs_build_action_v1_work_kind(kind);
+    return expected_kind != 0 &&
+        bound_input->work_kind == expected_kind &&
+        vcs_zcode_task_root(&context->task, task_root) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_root(&context->candidate, candidate_root) ==
+            VCS_ZCODE_DEV_OK &&
+        memcmp(bound_input->task_root, task_root, 32) == 0 &&
+        memcmp(bound_input->candidate_root, candidate_root, 32) == 0 &&
+        memcmp(bound_input->candidate_source_root,
+               context->candidate.candidate_source_root, 32) == 0 &&
+        memcmp(bound_input->dependency_lock_root,
+               context->task.dependency_lock_root, 32) == 0 &&
+        memcmp(bound_input->acceptance_tests_root,
+               context->task.acceptance_tests_root, 32) == 0 &&
+        vcs_zcode_action_input_root(bound_input, input_root) ==
+            VCS_ZCODE_ACTION_INPUT_OK;
 }
 
 enum vcs_zcode_work_context_result vcs_zcode_work_context_action_root_for_kind(
@@ -134,47 +209,11 @@ enum vcs_zcode_work_context_result vcs_zcode_work_context_action_root_for_kind(
     enum vcs_zcode_action_input_result parsed = vcs_zcode_action_input_parse(
         context->fixed_input, context->fixed_input_len, &bound_input);
     if (strcmp(kind, VCS_BUILD_ACTION_KIND_PACKAGE_V1) == 0) {
-        struct vcs_zcode_package_action_input_v1 package_input;
-        parsed = vcs_zcode_package_action_input_parse(
-            context->fixed_input, context->fixed_input_len, &package_input);
-        uint8_t task_root[32], candidate_root[32];
-        bool binding = parsed == VCS_ZCODE_ACTION_INPUT_OK &&
-            vcs_zcode_task_root(&context->task, task_root) ==
-                VCS_ZCODE_DEV_OK &&
-            vcs_zcode_candidate_root(&context->candidate, candidate_root) ==
-                VCS_ZCODE_DEV_OK &&
-            memcmp(package_input.task_root, task_root, 32) == 0 &&
-            memcmp(package_input.candidate_root, candidate_root, 32) == 0 &&
-            memcmp(package_input.candidate_source_root,
-                   context->candidate.candidate_source_root, 32) == 0 &&
-            memcmp(package_input.base_source_root,
-                   context->task.source_root, 32) == 0 &&
-            memcmp(package_input.dependency_lock_root,
-                   context->task.dependency_lock_root, 32) == 0 &&
-            memcmp(package_input.acceptance_recipe_root,
-                   context->task.acceptance_tests_root, 32) == 0 &&
-            vcs_zcode_package_action_input_root(
-                &package_input, input_root) == VCS_ZCODE_ACTION_INPUT_OK;
-        if (!binding) return VCS_ZCODE_WORK_CONTEXT_ACTION;
+        if (!context_package_action_bound(context, input_root))
+            return VCS_ZCODE_WORK_CONTEXT_ACTION;
     } else if (parsed == VCS_ZCODE_ACTION_INPUT_OK) {
-        uint8_t task_root[32], candidate_root[32];
-        uint8_t expected_kind = vcs_build_action_v1_work_kind(kind);
-        bool binding = expected_kind != 0 &&
-            bound_input.work_kind == expected_kind &&
-            vcs_zcode_task_root(&context->task, task_root) ==
-                VCS_ZCODE_DEV_OK &&
-            vcs_zcode_candidate_root(&context->candidate, candidate_root) ==
-                VCS_ZCODE_DEV_OK &&
-            memcmp(bound_input.task_root, task_root, 32) == 0 &&
-            memcmp(bound_input.candidate_root, candidate_root, 32) == 0 &&
-            memcmp(bound_input.candidate_source_root,
-                   context->candidate.candidate_source_root, 32) == 0 &&
-            memcmp(bound_input.dependency_lock_root,
-                   context->task.dependency_lock_root, 32) == 0 &&
-            memcmp(bound_input.acceptance_tests_root,
-                   context->task.acceptance_tests_root, 32) == 0 &&
-            vcs_zcode_action_input_root(&bound_input, input_root) ==
-                VCS_ZCODE_ACTION_INPUT_OK;
+        bool binding = context_generic_binding(
+            context, &bound_input, kind, input_root);
         vcs_zcode_action_input_free(&bound_input);
         if (!binding) return VCS_ZCODE_WORK_CONTEXT_ACTION;
     } else {
@@ -217,6 +256,51 @@ enum vcs_zcode_work_context_result vcs_zcode_work_context_action_root(
         input_root);
 }
 
+struct context_wire_parts {
+    uint8_t task[VCS_ZCODE_TASK_WIRE_BYTES];
+    uint8_t candidate[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
+    uint8_t policy[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
+};
+
+static bool context_serialize_parts(
+    const struct vcs_zcode_work_context_v1 *context,
+    struct context_wire_parts *parts)
+{
+    return vcs_zcode_task_serialize(&context->task, parts->task) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_serialize(&context->candidate, parts->candidate) ==
+            VCS_ZCODE_DEV_OK &&
+        vcs_zcode_proof_policy_serialize(&context->proof_policy,
+                                         parts->policy) == VCS_ZCODE_DEV_OK;
+}
+
+static bool context_write_frame(
+    uint8_t *wire, size_t total,
+    const struct vcs_zcode_work_context_v1 *context, size_t profile_len,
+    const struct context_wire_parts *parts)
+{
+    struct zcl_codec_writer writer;
+    zcl_codec_writer_init(&writer, wire, total);
+    bool ok = zcl_codec_write_bytes(&writer, context_magic,
+                                    sizeof(context_magic)) &&
+        zcl_codec_write_u16le(&writer, VCS_ZCODE_WORK_CONTEXT_VERSION) &&
+        zcl_codec_write_u16le(&writer, (uint16_t)profile_len) &&
+        zcl_codec_write_u32le(&writer, 0) &&
+        zcl_codec_write_u64le(&writer, context->fixed_input_len) &&
+        zcl_codec_write_bytes(&writer, context->source_sha256, 32) &&
+        zcl_codec_write_bytes(&writer, parts->task, sizeof(parts->task)) &&
+        zcl_codec_write_bytes(&writer, parts->candidate,
+                              sizeof(parts->candidate)) &&
+        zcl_codec_write_bytes(&writer, parts->policy,
+                              sizeof(parts->policy)) &&
+        zcl_codec_write_bytes(&writer, context->profile, profile_len) &&
+        zcl_codec_write_bytes(&writer, context->fixed_input,
+                              context->fixed_input_len);
+    size_t written = 0;
+    return ok && zcl_codec_writer_finish(&writer, &written) &&
+        written == total;
+}
+
 enum vcs_zcode_work_context_result vcs_zcode_work_context_serialize(
     const struct vcs_zcode_work_context_v1 *context, int64_t now_unix,
     uint8_t **out, size_t *out_len)
@@ -231,34 +315,9 @@ enum vcs_zcode_work_context_result vcs_zcode_work_context_serialize(
                    context->fixed_input_len;
     uint8_t *wire = zcl_malloc(total, "zcode.work_context");
     if (!wire) return VCS_ZCODE_WORK_CONTEXT_ALLOC;
-    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
-    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
-    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
-    if (vcs_zcode_task_serialize(&context->task, task_wire) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_candidate_serialize(&context->candidate, candidate_wire) !=
-            VCS_ZCODE_DEV_OK ||
-        vcs_zcode_proof_policy_serialize(&context->proof_policy,
-                                         policy_wire) != VCS_ZCODE_DEV_OK)
-        goto reject;
-    struct zcl_codec_writer writer;
-    zcl_codec_writer_init(&writer, wire, total);
-    bool ok = zcl_codec_write_bytes(&writer, context_magic,
-                                    sizeof(context_magic)) &&
-        zcl_codec_write_u16le(&writer, VCS_ZCODE_WORK_CONTEXT_VERSION) &&
-        zcl_codec_write_u16le(&writer, (uint16_t)profile_len) &&
-        zcl_codec_write_u32le(&writer, 0) &&
-        zcl_codec_write_u64le(&writer, context->fixed_input_len) &&
-        zcl_codec_write_bytes(&writer, context->source_sha256, 32) &&
-        zcl_codec_write_bytes(&writer, task_wire, sizeof(task_wire)) &&
-        zcl_codec_write_bytes(&writer, candidate_wire,
-                              sizeof(candidate_wire)) &&
-        zcl_codec_write_bytes(&writer, policy_wire, sizeof(policy_wire)) &&
-        zcl_codec_write_bytes(&writer, context->profile, profile_len) &&
-        zcl_codec_write_bytes(&writer, context->fixed_input,
-                              context->fixed_input_len);
-    size_t written = 0;
-    if (!ok || !zcl_codec_writer_finish(&writer, &written) || written != total)
+    struct context_wire_parts parts;
+    if (!context_serialize_parts(context, &parts) ||
+        !context_write_frame(wire, total, context, profile_len, &parts))
         goto reject;
     *out = wire; *out_len = total;
     return VCS_ZCODE_WORK_CONTEXT_OK;
@@ -267,54 +326,81 @@ reject:
     return VCS_ZCODE_WORK_CONTEXT_SHAPE;
 }
 
+static bool context_wire_frame_ok(const uint8_t *wire, size_t wire_len)
+{
+    return !(wire_len < VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES ||
+             wire_len > VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES ||
+             memcmp(wire, context_magic, sizeof(context_magic)) != 0);
+}
+
+static bool context_read_header(struct zcl_codec_reader *reader,
+                                uint16_t *profile_len, uint64_t *input_len64)
+{
+    uint16_t version;
+    uint32_t reserved;
+    return zcl_codec_read_u16le(reader, &version) &&
+        zcl_codec_read_u16le(reader, profile_len) &&
+        zcl_codec_read_u32le(reader, &reserved) &&
+        zcl_codec_read_u64le(reader, input_len64) &&
+        version == VCS_ZCODE_WORK_CONTEXT_VERSION && reserved == 0;
+}
+
+static bool context_header_lengths_ok(size_t wire_len, uint16_t profile_len,
+                                      uint64_t input_len64)
+{
+    return !(profile_len == 0 ||
+             profile_len > VCS_ZCODE_WORK_CONTEXT_PROFILE_MAX ||
+             input_len64 == 0 || input_len64 > SIZE_MAX ||
+             (uint64_t)VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES + profile_len +
+                     input_len64 != wire_len);
+}
+
+static bool context_read_sections(struct zcl_codec_reader *reader,
+                                  struct vcs_zcode_work_context_v1 *out,
+                                  struct context_wire_parts *parts)
+{
+    return zcl_codec_read_bytes(reader, out->source_sha256, 32) &&
+        zcl_codec_read_bytes(reader, parts->task, sizeof(parts->task)) &&
+        zcl_codec_read_bytes(reader, parts->candidate,
+                             sizeof(parts->candidate)) &&
+        zcl_codec_read_bytes(reader, parts->policy, sizeof(parts->policy));
+}
+
+static bool context_parse_sections(struct vcs_zcode_work_context_v1 *out,
+                                   struct context_wire_parts *parts)
+{
+    return vcs_zcode_task_parse(parts->task, sizeof(parts->task),
+                                &out->task) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_candidate_parse(parts->candidate, sizeof(parts->candidate),
+                                  &out->candidate) == VCS_ZCODE_DEV_OK &&
+        vcs_zcode_proof_policy_parse(parts->policy, sizeof(parts->policy),
+                                     &out->proof_policy) == VCS_ZCODE_DEV_OK;
+}
+
 enum vcs_zcode_work_context_result vcs_zcode_work_context_parse(
     const uint8_t *wire, size_t wire_len, int64_t now_unix,
     struct vcs_zcode_work_context_v1 *out)
 {
     if (!wire || !out) return VCS_ZCODE_WORK_CONTEXT_NULL;
     vcs_zcode_work_context_init(out);
-    if (wire_len < VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES ||
-        wire_len > VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES ||
-        memcmp(wire, context_magic, sizeof(context_magic)) != 0)
+    if (!context_wire_frame_ok(wire, wire_len))
         return VCS_ZCODE_WORK_CONTEXT_SHAPE;
     struct zcl_codec_reader reader;
     zcl_codec_reader_init(&reader, wire + sizeof(context_magic),
                           wire_len - sizeof(context_magic));
-    uint16_t version, profile_len;
-    uint32_t reserved;
+    uint16_t profile_len;
     uint64_t input_len64;
-    if (!zcl_codec_read_u16le(&reader, &version) ||
-        !zcl_codec_read_u16le(&reader, &profile_len) ||
-        !zcl_codec_read_u32le(&reader, &reserved) ||
-        !zcl_codec_read_u64le(&reader, &input_len64) ||
-        version != VCS_ZCODE_WORK_CONTEXT_VERSION || reserved != 0)
+    if (!context_read_header(&reader, &profile_len, &input_len64))
         return VCS_ZCODE_WORK_CONTEXT_SHAPE;
-    if (profile_len == 0 || profile_len > VCS_ZCODE_WORK_CONTEXT_PROFILE_MAX ||
-        input_len64 == 0 || input_len64 > SIZE_MAX ||
-        (uint64_t)VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES + profile_len +
-                input_len64 != wire_len)
+    if (!context_header_lengths_ok(wire_len, profile_len, input_len64))
         return VCS_ZCODE_WORK_CONTEXT_SHAPE;
-    uint8_t task_wire[VCS_ZCODE_TASK_WIRE_BYTES];
-    uint8_t candidate_wire[VCS_ZCODE_CANDIDATE_WIRE_BYTES];
-    uint8_t policy_wire[VCS_ZCODE_PROOF_POLICY_WIRE_BYTES];
-    if (!zcl_codec_read_bytes(&reader, out->source_sha256, 32) ||
-        !zcl_codec_read_bytes(&reader, task_wire, sizeof(task_wire)) ||
-        !zcl_codec_read_bytes(&reader, candidate_wire,
-                              sizeof(candidate_wire)) ||
-        !zcl_codec_read_bytes(&reader, policy_wire, sizeof(policy_wire)) ||
-        vcs_zcode_task_parse(task_wire, sizeof(task_wire),
-                             &out->task) != VCS_ZCODE_DEV_OK)
+    struct context_wire_parts parts;
+    if (!context_read_sections(&reader, out, &parts) ||
+        !context_parse_sections(out, &parts))
         goto reject;
-    if (vcs_zcode_candidate_parse(candidate_wire,
-            sizeof(candidate_wire), &out->candidate) !=
-            VCS_ZCODE_DEV_OK) goto reject;
-    if (vcs_zcode_proof_policy_parse(policy_wire,
-            sizeof(policy_wire), &out->proof_policy) !=
-            VCS_ZCODE_DEV_OK) goto reject;
-    uint16_t decoded_profile_len;
-    if (!zcl_codec_read_bytes(&reader, out->profile, profile_len)) goto reject;
-    decoded_profile_len = profile_len;
-    out->profile[decoded_profile_len] = '\0';
+    if (!zcl_codec_read_bytes(&reader, out->profile, profile_len))
+        goto reject;
+    out->profile[profile_len] = '\0';
     out->fixed_input_len = (size_t)input_len64;
     out->fixed_input = zcl_malloc(out->fixed_input_len,
                                    "zcode.work_context.input");
@@ -338,76 +424,62 @@ reject:
     return VCS_ZCODE_WORK_CONTEXT_SHAPE;
 }
 
-static enum vcs_zcode_work_context_result context_put_for_kind(
-    struct vcs_package_store *store,
-    const struct vcs_zcode_work_context_v1 *context, const char *kind,
-    int64_t now_unix, const char *repo_root, uint8_t package_root[32],
-    uint8_t action_root[32])
+static bool context_put_add_authority_files(
+    struct vcs_package_manifest *manifest,
+    const struct vcs_zcode_work_context_v1 *context, uint8_t *wire,
+    size_t wire_len)
 {
-    if (!store || !package_root || !action_root)
-        return VCS_ZCODE_WORK_CONTEXT_NULL;
-    uint8_t input_root[32];
-    enum vcs_zcode_work_context_result result =
-        vcs_zcode_work_context_action_root_for_kind(
-            context, kind, now_unix, action_root, input_root);
-    if (result != VCS_ZCODE_WORK_CONTEXT_OK) return result;
-    uint8_t *wire = NULL; size_t wire_len = 0;
-    result = vcs_zcode_work_context_serialize(context, now_unix, &wire,
-                                              &wire_len);
-    if (result != VCS_ZCODE_WORK_CONTEXT_OK) return result;
-    struct vcs_package_manifest manifest;
-    vcs_package_manifest_init(&manifest);
     bool built = vcs_package_content_add_file(
-        &manifest, VCS_ZCODE_WORK_CONTEXT_PATH, VCS_PACKAGE_MODE_FILE,
+        manifest, VCS_ZCODE_WORK_CONTEXT_PATH, VCS_PACKAGE_MODE_FILE,
         wire, wire_len);
     if (built && context->candidate_authority_len > 0)
         built = vcs_package_content_add_file(
-            &manifest, VCS_ZCODE_CANDIDATE_BUNDLE_PATH,
+            manifest, VCS_ZCODE_CANDIDATE_BUNDLE_PATH,
             VCS_PACKAGE_MODE_FILE,
             context->candidate_authority, context->candidate_authority_len);
     if (built && context->task_authority_len > 0)
         built = vcs_package_content_add_file(
-            &manifest, VCS_ZCODE_TASK_AUTHORITY_BUNDLE_PATH,
+            manifest, VCS_ZCODE_TASK_AUTHORITY_BUNDLE_PATH,
             VCS_PACKAGE_MODE_FILE,
             context->task_authority, context->task_authority_len);
-    enum vcs_zcode_candidate_tree_result tree_result =
-        VCS_ZCODE_CANDIDATE_TREE_OK;
-    if (built && repo_root) {
-        uint64_t metadata_bytes = context->fixed_input_len +
-            context->candidate_authority_len + context->task_authority_len;
-        uint64_t remaining = context->task.max_context_bytes - metadata_bytes;
-        uint64_t overhead = VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES +
-                            strlen(context->profile);
-        uint64_t store_remaining = VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES -
-                                   overhead - metadata_bytes;
-        if (remaining > store_remaining) remaining = store_remaining;
-        uint64_t tree_bytes = 0;
-        tree_result = vcs_zcode_candidate_tree_add_manifest(
-            repo_root, &context->task, &context->candidate, remaining,
-            &manifest, &tree_bytes);
-        built = tree_result == VCS_ZCODE_CANDIDATE_TREE_OK;
-    }
-    uint8_t *manifest_wire = NULL; size_t manifest_len = 0;
-    built = built && vcs_package_manifest_root(&manifest, package_root) &&
-            vcs_package_manifest_serialize(&manifest, &manifest_wire,
-                                           &manifest_len);
-    vcs_package_manifest_free(&manifest);
-    if (!built) {
-        free(manifest_wire); free(wire);
-        return tree_result == VCS_ZCODE_CANDIDATE_TREE_LIMIT
-            ? VCS_ZCODE_WORK_CONTEXT_LIMIT : VCS_ZCODE_WORK_CONTEXT_SHAPE;
-    }
-    uint8_t admitted[32];
-    enum vcs_package_store_result stored = vcs_package_store_put_manifest(
-        store, manifest_wire, manifest_len, admitted);
-    free(manifest_wire);
-    if (stored != VCS_PACKAGE_STORE_OK ||
-        memcmp(admitted, package_root, 32) != 0) {
-        free(wire); return VCS_ZCODE_WORK_CONTEXT_STORE;
-    }
-    result = vcs_package_content_put_file(
-                 store, package_root, VCS_ZCODE_WORK_CONTEXT_PATH,
-                 wire, wire_len) == VCS_PACKAGE_STORE_OK
+    return built;
+}
+
+static enum vcs_zcode_candidate_tree_result context_put_add_tree(
+    const struct vcs_zcode_work_context_v1 *context, const char *repo_root,
+    struct vcs_package_manifest *manifest)
+{
+    uint64_t metadata_bytes = context->fixed_input_len +
+        context->candidate_authority_len + context->task_authority_len;
+    uint64_t remaining = context->task.max_context_bytes - metadata_bytes;
+    uint64_t overhead = VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES +
+                        strlen(context->profile);
+    uint64_t store_remaining = VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES -
+                               overhead - metadata_bytes;
+    if (remaining > store_remaining) remaining = store_remaining;
+    uint64_t tree_bytes = 0;
+    return vcs_zcode_candidate_tree_add_manifest(
+        repo_root, &context->task, &context->candidate, remaining, manifest,
+        &tree_bytes);
+}
+
+static bool context_put_seal_manifest(
+    struct vcs_package_manifest *manifest, bool built,
+    uint8_t package_root[32], uint8_t **manifest_wire, size_t *manifest_len)
+{
+    return built && vcs_package_manifest_root(manifest, package_root) &&
+        vcs_package_manifest_serialize(manifest, manifest_wire, manifest_len);
+}
+
+static enum vcs_zcode_work_context_result context_put_files(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const struct vcs_zcode_work_context_v1 *context, const char *repo_root,
+    uint8_t *wire, size_t wire_len)
+{
+    enum vcs_zcode_work_context_result result =
+        vcs_package_content_put_file(
+            store, package_root, VCS_ZCODE_WORK_CONTEXT_PATH, wire,
+            wire_len) == VCS_PACKAGE_STORE_OK
         ? VCS_ZCODE_WORK_CONTEXT_OK : VCS_ZCODE_WORK_CONTEXT_STORE;
     if (result == VCS_ZCODE_WORK_CONTEXT_OK &&
         context->candidate_authority_len > 0)
@@ -430,6 +502,55 @@ static enum vcs_zcode_work_context_result context_put_for_kind(
             store, package_root, repo_root, &context->candidate) !=
                 VCS_ZCODE_CANDIDATE_TREE_OK)
         result = VCS_ZCODE_WORK_CONTEXT_STORE;
+    return result;
+}
+
+static enum vcs_zcode_work_context_result context_put_for_kind(
+    struct vcs_package_store *store,
+    const struct vcs_zcode_work_context_v1 *context, const char *kind,
+    int64_t now_unix, const char *repo_root, uint8_t package_root[32],
+    uint8_t action_root[32])
+{
+    if (!store || !package_root || !action_root)
+        return VCS_ZCODE_WORK_CONTEXT_NULL;
+    uint8_t input_root[32];
+    enum vcs_zcode_work_context_result result =
+        vcs_zcode_work_context_action_root_for_kind(
+            context, kind, now_unix, action_root, input_root);
+    if (result != VCS_ZCODE_WORK_CONTEXT_OK) return result;
+    uint8_t *wire = NULL; size_t wire_len = 0;
+    result = vcs_zcode_work_context_serialize(context, now_unix, &wire,
+                                              &wire_len);
+    if (result != VCS_ZCODE_WORK_CONTEXT_OK) return result;
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    bool built = context_put_add_authority_files(&manifest, context, wire,
+                                                 wire_len);
+    enum vcs_zcode_candidate_tree_result tree_result =
+        VCS_ZCODE_CANDIDATE_TREE_OK;
+    if (built && repo_root) {
+        tree_result = context_put_add_tree(context, repo_root, &manifest);
+        built = tree_result == VCS_ZCODE_CANDIDATE_TREE_OK;
+    }
+    uint8_t *manifest_wire = NULL; size_t manifest_len = 0;
+    built = context_put_seal_manifest(&manifest, built, package_root,
+                                      &manifest_wire, &manifest_len);
+    vcs_package_manifest_free(&manifest);
+    if (!built) {
+        free(manifest_wire); free(wire);
+        return tree_result == VCS_ZCODE_CANDIDATE_TREE_LIMIT
+            ? VCS_ZCODE_WORK_CONTEXT_LIMIT : VCS_ZCODE_WORK_CONTEXT_SHAPE;
+    }
+    uint8_t admitted[32];
+    enum vcs_package_store_result stored = vcs_package_store_put_manifest(
+        store, manifest_wire, manifest_len, admitted);
+    free(manifest_wire);
+    if (stored != VCS_PACKAGE_STORE_OK ||
+        memcmp(admitted, package_root, 32) != 0) {
+        free(wire); return VCS_ZCODE_WORK_CONTEXT_STORE;
+    }
+    result = context_put_files(store, package_root, context, repo_root, wire,
+                               wire_len);
     free(wire);
     return result;
 }
@@ -563,6 +684,108 @@ static enum vcs_zcode_work_context_result context_get_file(
                                        : VCS_ZCODE_WORK_CONTEXT_CORRUPT;
 }
 
+static enum vcs_zcode_work_context_result context_load_manifest(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    struct vcs_package_manifest *manifest)
+{
+    uint8_t *manifest_wire = NULL; size_t manifest_len = 0;
+    if (vcs_package_store_get_manifest_wire(
+            store, package_root, &manifest_wire, &manifest_len) !=
+            VCS_PACKAGE_STORE_OK)
+        return VCS_ZCODE_WORK_CONTEXT_ABSENT;
+    bool parsed = vcs_package_manifest_parse(manifest_wire, manifest_len,
+                                              manifest);
+    free(manifest_wire);
+    return parsed ? VCS_ZCODE_WORK_CONTEXT_OK : VCS_ZCODE_WORK_CONTEXT_CORRUPT;
+}
+
+struct context_manifest_slots {
+    int context;
+    int authority;
+    int task_authority;
+};
+
+static bool context_manifest_shape_ok(
+    struct vcs_package_manifest *manifest, const uint8_t package_root[32],
+    struct context_manifest_slots *slots)
+{
+    slots->context = context_manifest_file_index(
+        manifest, VCS_ZCODE_WORK_CONTEXT_PATH);
+    slots->authority = context_manifest_file_index(
+        manifest, VCS_ZCODE_CANDIDATE_BUNDLE_PATH);
+    slots->task_authority = context_manifest_file_index(
+        manifest, VCS_ZCODE_TASK_AUTHORITY_BUNDLE_PATH);
+    size_t known_files = 1u + (slots->authority >= 0 ? 1u : 0u) +
+        (slots->task_authority >= 0 ? 1u : 0u) +
+        context_manifest_candidate_files(manifest);
+    uint8_t derived[32];
+    if (manifest->count < 1 || slots->context < 0 ||
+        manifest->count != known_files ||
+        manifest->files[slots->context].size <
+            VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES ||
+        !vcs_package_manifest_root(manifest, derived) ||
+        memcmp(derived, package_root, 32) != 0)
+        return false;
+    return true;
+}
+
+struct context_files {
+    uint8_t *wire;
+    size_t wire_len;
+    uint8_t *authority;
+    size_t authority_len;
+    uint8_t *task_authority;
+    size_t task_authority_len;
+};
+
+static enum vcs_zcode_work_context_result context_get_files(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const struct vcs_package_manifest *manifest,
+    const struct context_manifest_slots *slots, struct context_files *files)
+{
+    enum vcs_zcode_work_context_result result = context_get_file(
+        store, package_root, manifest, (size_t)slots->context,
+        &files->wire, &files->wire_len);
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK && slots->authority >= 0)
+        result = context_get_file(
+            store, package_root, manifest, (size_t)slots->authority,
+            &files->authority, &files->authority_len);
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK && slots->task_authority >= 0)
+        result = context_get_file(
+            store, package_root, manifest, (size_t)slots->task_authority,
+            &files->task_authority, &files->task_authority_len);
+    return result;
+}
+
+static enum vcs_zcode_work_context_result context_parse_fetched(
+    const uint8_t *wire, size_t wire_len, uint64_t total_bytes,
+    int64_t now_unix, struct vcs_zcode_work_context_v1 *out)
+{
+    enum vcs_zcode_work_context_result result =
+        vcs_zcode_work_context_parse(wire, wire_len, now_unix, out);
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK) {
+        uint64_t overhead = VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES +
+                            strlen(out->profile);
+        if (total_bytes < overhead ||
+            total_bytes - overhead > out->task.max_context_bytes)
+            result = VCS_ZCODE_WORK_CONTEXT_LIMIT;
+    }
+    return result;
+}
+
+static enum vcs_zcode_work_context_result context_adopt_files(
+    struct vcs_zcode_work_context_v1 *out, struct context_files *files,
+    int64_t now_unix)
+{
+    out->candidate_authority = files->authority;
+    out->candidate_authority_len = files->authority_len;
+    files->authority = NULL;
+    out->task_authority = files->task_authority;
+    out->task_authority_len = files->task_authority_len;
+    files->task_authority = NULL;
+    return context_validate(out, now_unix);
+}
+
 enum vcs_zcode_work_context_result vcs_zcode_work_context_get(
     struct vcs_package_store *store, const uint8_t package_root[32],
     int64_t now_unix, struct vcs_zcode_work_context_v1 *out)
@@ -574,70 +797,26 @@ enum vcs_zcode_work_context_result vcs_zcode_work_context_get(
     if (!vcs_package_store_package_status(store, package_root, &status) ||
         !status.complete)
         return VCS_ZCODE_WORK_CONTEXT_ABSENT;
-    uint8_t *manifest_wire = NULL; size_t manifest_len = 0;
-    if (vcs_package_store_get_manifest_wire(
-            store, package_root, &manifest_wire, &manifest_len) !=
-            VCS_PACKAGE_STORE_OK)
-        return VCS_ZCODE_WORK_CONTEXT_ABSENT;
     struct vcs_package_manifest manifest;
-    bool parsed = vcs_package_manifest_parse(manifest_wire, manifest_len,
-                                              &manifest);
-    free(manifest_wire);
-    uint8_t derived[32];
-    int context_index = parsed ? context_manifest_file_index(
-        &manifest, VCS_ZCODE_WORK_CONTEXT_PATH) : -1;
-    int authority_index = parsed ? context_manifest_file_index(
-        &manifest, VCS_ZCODE_CANDIDATE_BUNDLE_PATH) : -1;
-    int task_authority_index = parsed ? context_manifest_file_index(
-        &manifest, VCS_ZCODE_TASK_AUTHORITY_BUNDLE_PATH) : -1;
-    size_t known_files = 1u + (authority_index >= 0 ? 1u : 0u) +
-        (task_authority_index >= 0 ? 1u : 0u) +
-        (parsed ? context_manifest_candidate_files(&manifest) : 0u);
-    if (!parsed || manifest.count < 1 ||
-        context_index < 0 || manifest.count != known_files ||
-        manifest.files[context_index].size <
-            VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES ||
-        !vcs_package_manifest_root(&manifest, derived) ||
-        memcmp(derived, package_root, 32) != 0) {
-        if (parsed) vcs_package_manifest_free(&manifest);
+    enum vcs_zcode_work_context_result result =
+        context_load_manifest(store, package_root, &manifest);
+    if (result != VCS_ZCODE_WORK_CONTEXT_OK) return result;
+    struct context_manifest_slots slots;
+    if (!context_manifest_shape_ok(&manifest, package_root, &slots)) {
+        vcs_package_manifest_free(&manifest);
         return VCS_ZCODE_WORK_CONTEXT_CORRUPT;
     }
-    uint8_t *wire = NULL, *authority = NULL, *task_authority = NULL;
-    size_t wire_len = 0, authority_len = 0, task_authority_len = 0;
-    enum vcs_zcode_work_context_result result = context_get_file(
-        store, package_root, &manifest, (size_t)context_index,
-        &wire, &wire_len);
-    if (result == VCS_ZCODE_WORK_CONTEXT_OK && authority_index >= 0)
-        result = context_get_file(
-            store, package_root, &manifest, (size_t)authority_index,
-            &authority, &authority_len);
-    if (result == VCS_ZCODE_WORK_CONTEXT_OK && task_authority_index >= 0)
-        result = context_get_file(
-            store, package_root, &manifest, (size_t)task_authority_index,
-            &task_authority, &task_authority_len);
+    struct context_files files = {0};
+    result = context_get_files(store, package_root, &manifest, &slots,
+                               &files);
     vcs_package_manifest_free(&manifest);
     if (result == VCS_ZCODE_WORK_CONTEXT_OK)
-        result = vcs_zcode_work_context_parse(wire, wire_len, now_unix, out);
-    if (result == VCS_ZCODE_WORK_CONTEXT_OK) {
-        uint64_t overhead = VCS_ZCODE_WORK_CONTEXT_FIXED_BYTES +
-                            strlen(out->profile);
-        if (status.total_bytes < overhead ||
-            status.total_bytes - overhead > out->task.max_context_bytes)
-            result = VCS_ZCODE_WORK_CONTEXT_LIMIT;
-    }
-    free(wire);
-    if (result == VCS_ZCODE_WORK_CONTEXT_OK) {
-        out->candidate_authority = authority;
-        out->candidate_authority_len = authority_len;
-        authority = NULL;
-        out->task_authority = task_authority;
-        out->task_authority_len = task_authority_len;
-        task_authority = NULL;
-        result = context_validate(out, now_unix);
-        if (result != VCS_ZCODE_WORK_CONTEXT_OK)
-            vcs_zcode_work_context_free(out);
-    }
-    free(task_authority); free(authority);
+        result = context_parse_fetched(files.wire, files.wire_len,
+                                       status.total_bytes, now_unix, out);
+    free(files.wire);
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK)
+        result = context_adopt_files(out, &files, now_unix);
+    free(files.task_authority); free(files.authority);
     if (result != VCS_ZCODE_WORK_CONTEXT_OK)
         vcs_zcode_work_context_free(out);
     return result;
@@ -752,6 +931,32 @@ static bool context_action_input_current(
         work_kind) == VCS_ZCODE_ACTION_INPUT_OK;
 }
 
+static enum vcs_zcode_work_context_result context_restore_objects(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const char *receiver_root, const char *kind, int64_t now_unix,
+    const struct vcs_zcode_work_context_v1 *context,
+    struct vcs_zcode_work_context_roots *roots)
+{
+    enum vcs_zcode_work_context_result result = context_restore_authority(
+        store, package_root, receiver_root, context);
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK &&
+        !context_source_manifest_id(
+            receiver_root, context, roots->source_manifest_id))
+        result = VCS_ZCODE_WORK_CONTEXT_ACTION;
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK)
+        result = vcs_zcode_work_context_action_root_for_kind(
+            context, kind, now_unix, roots->action_root, roots->input_root);
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK &&
+        !context_store_action_objects(
+            receiver_root, context, roots->input_root))
+        result = VCS_ZCODE_WORK_CONTEXT_STORE;
+    if (result == VCS_ZCODE_WORK_CONTEXT_OK &&
+        !context_action_input_current(
+            receiver_root, context, kind, roots->input_root))
+        result = VCS_ZCODE_WORK_CONTEXT_ACTION;
+    return result;
+}
+
 enum vcs_zcode_work_context_result
 vcs_zcode_work_context_restore_for_kind(
     struct vcs_package_store *store, const uint8_t package_root[32],
@@ -766,23 +971,8 @@ vcs_zcode_work_context_restore_for_kind(
     enum vcs_zcode_work_context_result result = vcs_zcode_work_context_get(
         store, package_root, now_unix, &context);
     if (result != VCS_ZCODE_WORK_CONTEXT_OK) return result;
-    result = context_restore_authority(
-        store, package_root, receiver_root, &context);
-    if (result == VCS_ZCODE_WORK_CONTEXT_OK &&
-        !context_source_manifest_id(
-            receiver_root, &context, roots->source_manifest_id))
-        result = VCS_ZCODE_WORK_CONTEXT_ACTION;
-    if (result == VCS_ZCODE_WORK_CONTEXT_OK)
-        result = vcs_zcode_work_context_action_root_for_kind(
-            &context, kind, now_unix, roots->action_root, roots->input_root);
-    if (result == VCS_ZCODE_WORK_CONTEXT_OK &&
-        !context_store_action_objects(
-            receiver_root, &context, roots->input_root))
-        result = VCS_ZCODE_WORK_CONTEXT_STORE;
-    if (result == VCS_ZCODE_WORK_CONTEXT_OK &&
-        !context_action_input_current(
-            receiver_root, &context, kind, roots->input_root))
-        result = VCS_ZCODE_WORK_CONTEXT_ACTION;
+    result = context_restore_objects(store, package_root, receiver_root, kind,
+                                     now_unix, &context, roots);
     if (result == VCS_ZCODE_WORK_CONTEXT_OK)
         memcpy(roots->source_root,
                context.candidate.candidate_source_root, 32);

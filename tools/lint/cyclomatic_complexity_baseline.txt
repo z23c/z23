@@ -648,13 +648,6 @@ contexts/commons/modules/vcs/src/zcode_task_authority_bundle.c:vcs_zcode_task_au
 contexts/commons/modules/vcs/src/zcode_task_context.c:vcs_zcode_task_context_admit:30
 contexts/commons/modules/vcs/src/zcode_task_context.c:vcs_zcode_task_context_export:21
 contexts/commons/modules/vcs/src/zcode_task_context.c:vcs_zcode_task_context_verify_wires:22
-contexts/commons/modules/vcs/src/zcode_work_context.c:context_put_for_kind:29
-contexts/commons/modules/vcs/src/zcode_work_context.c:context_validate:18
-contexts/commons/modules/vcs/src/zcode_work_context.c:vcs_zcode_work_context_action_root_for_kind:30
-contexts/commons/modules/vcs/src/zcode_work_context.c:vcs_zcode_work_context_get:32
-contexts/commons/modules/vcs/src/zcode_work_context.c:vcs_zcode_work_context_parse:29
-contexts/commons/modules/vcs/src/zcode_work_context.c:vcs_zcode_work_context_restore_for_kind:17
-contexts/commons/modules/vcs/src/zcode_work_context.c:vcs_zcode_work_context_serialize:21
 contexts/commons/modules/vcs/src/zcode_work_node.c:vcs_zcode_work_node_publish_result:22
 contexts/commons/modules/vcs/src/zcode_work_node.c:vcs_zcode_work_node_submit:27
 contexts/commons/modules/vcs/src/zcode_work_node.c:vcs_zcode_work_node_tick:26
