@@ -150,6 +150,35 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives)
 
 ZCL_COMMAND_READY_READ(
+    "fleet.objectives.brief", "fleet", "",
+    "A work card for the objective z23 should work on next",
+    "Picks the objective `fleet objectives` would pick as `next` (the "
+    "measured unmet row with the largest gap, product before lab) and prints "
+    "it as a zcl.work_card.v1-shaped card: name, level, outcome, owned and "
+    "forbidden paths, the acceptance command and the stop_if conditions from "
+    "engine/composition/objective_work.def, plus an `objective` object with "
+    "its id, value, target, gap, unit, why and runner_ok. runner_ok_only "
+    "narrows the pick to objectives whose work row is safe for an unattended "
+    "runner (behaviour-preserving or measurement-only work outside core/, the "
+    "reducer, the wallet and the land driver). id briefs that one objective "
+    "instead; an id not in the catalog is refused by name, and one that is met "
+    "or unmeasured has nothing to brief. The card carries no base: take it "
+    "from origin/main. outcomes, attempts_dir, repo, lintc_dir, baseline and "
+    "brief override the paths the measurement reads, as for `fleet "
+    "objectives`. It asks only the local node, no peer, and writes nothing.",
+    32768,
+    "fleet,objectives,brief,work,card,next,runner",
+    "zcl.fleet_objectives_brief_input.v1", "zcl.work_card.v1",
+    "id,runner_ok_only,outcomes,attempts_dir,repo,lintc_dir,baseline,brief", "",
+    "z23-dev fleet objectives brief",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives_brief)
+
+ZCL_COMMAND_READY_READ(
     "fleet.goals", "fleet", "",
     "The live fleet report card: goals G1-G13, criteria C1-C8, milestones D1-D8",
     "Prints one row per id in the closed catalog "

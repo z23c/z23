@@ -1,0 +1,136 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ *
+ * objective_work — for every objective in the closed catalog
+ * (engine/composition/objectives.def), where its fix lives, the one command
+ * that shows it moved, and when to stop. `fleet objectives` DECIDES which
+ * objective to work on; `fleet objectives brief` turns that pick into a
+ * zcl.work_card.v1-shaped card from the row below. Exactly one row per
+ * catalog id, none extra; tests/harness/src/test_fleet_objectives_brief.c
+ * refuses a missing, duplicate or orphan row.
+ *
+ * Row shape:
+ *
+ *   Z23_OBJECTIVE_WORK(id_, runner_ok_, owned_paths_, acceptance_, stop_if_)
+ *
+ *   id_          the objective id, verbatim from objectives.def.
+ *   runner_ok_   1 only when the work is behaviour-preserving or
+ *                measurement-only AND never touches core/, engine/reducer/,
+ *                contexts/wallet/, consensus storage (coins, event log,
+ *                block index, nullifiers) or the land driver
+ *                (tools/command/native_dev_land*). 0 hands the objective to
+ *                a human-supervised lane. An unattended runner may take only
+ *                runner_ok=1 rows.
+ *   owned_paths_ a short comma list, no spaces, of repo globs where the fix
+ *                lives.
+ *   acceptance_  the exact command that shows the objective moved: words of
+ *                letters, digits and _./=:,+- joined by single spaces, the
+ *                charset a work card accepts.
+ *   stop_if_     when to stop and hand back to a human.
+ *
+ * Append new rows at the end, in step with objectives.def.
+ */
+
+Z23_OBJECTIVE_WORK("landing_latency_s", 0,
+                   "tools/command/native_dev_land*,tools/dev/**",
+                   "z23-dev fleet objectives",
+                   "the fix needs a change to the land driver or the proof "
+                   "phases")
+
+Z23_OBJECTIVE_WORK("landing_attempts_per_train", 0,
+                   "tools/command/native_dev_land*,tools/dev/**",
+                   "z23-dev fleet objectives",
+                   "the retry cause sits in the land driver or in a test "
+                   "that fails only under the train")
+
+Z23_OBJECTIVE_WORK("proof_lint_wall_s", 0,
+                   "tools/lint/**,Makefile",
+                   "z23-dev fleet objectives",
+                   "a speed-up would skip or weaken a lint gate")
+
+Z23_OBJECTIVE_WORK("proof_test_wall_s", 0,
+                   "tests/harness/**,tools/dev/test_group_catalog.def",
+                   "z23-dev fleet objectives",
+                   "a speed-up would drop, skip or weaken a test")
+
+Z23_OBJECTIVE_WORK("commits_landed_today", 0,
+                   "docs/work/**",
+                   "z23-dev fleet objectives",
+                   "the count can only rise by landing more work, which is "
+                   "the loop's output and not a file to edit")
+
+Z23_OBJECTIVE_WORK("lint_families_over_ceiling", 1,
+                   "tools/lint/lintc/**",
+                   "z23-dev fleet objectives",
+                   "a split would change what a gate accepts, or any file "
+                   "outside tools/lint/lintc must move")
+
+Z23_OBJECTIVE_WORK("functions_over_complexity_cap", 1,
+                   "apps/**,platform/**,engine/composition/**,tools/**,tools/lint/cyclomatic_complexity_baseline.txt",
+                   "z23-dev fleet objectives",
+                   "the function sits in core/, engine/reducer/, "
+                   "contexts/wallet/, consensus storage or the land driver, "
+                   "or a split would change behaviour")
+
+Z23_OBJECTIVE_WORK("fresh_node_sync_eta_s", 1,
+                   "tools/command/native_fleet_objectives*.c,engine/composition/objectives.def",
+                   "z23-dev fleet objectives",
+                   "measuring it needs a change to sync code or to a "
+                   "consensus store, or a real fresh-node run")
+
+Z23_OBJECTIVE_WORK("tokens_per_landed_commit", 1,
+                   "tools/command/native_fleet_objectives*.c,engine/composition/objectives.def",
+                   "z23-dev fleet objectives",
+                   "the token count has no ledger to read without a new "
+                   "writer in the land driver")
+
+Z23_OBJECTIVE_WORK("proof_wall_s", 0,
+                   "tools/command/native_dev_land*,tools/dev/**",
+                   "z23-dev fleet objectives",
+                   "a speed-up touches the land driver or weakens a proof "
+                   "phase")
+
+Z23_OBJECTIVE_WORK("landed_rows_today", 0,
+                   "docs/work/**",
+                   "z23-dev fleet objectives",
+                   "the count follows landed work and is not a file to edit")
+
+Z23_OBJECTIVE_WORK("land_success_rate_7d", 0,
+                   "tools/command/native_dev_land*,tools/dev/**",
+                   "z23-dev fleet objectives",
+                   "the failure root sits in the land driver or in a flaky "
+                   "test that needs the owner")
+
+Z23_OBJECTIVE_WORK("land_failure_repeats", 0,
+                   "tools/command/native_dev_land*,tools/dev/**",
+                   "z23-dev fleet objectives",
+                   "the repeating failure sits in the land driver or in a "
+                   "flaky test that needs the owner")
+
+Z23_OBJECTIVE_WORK("product_commit_share_7d", 0,
+                   "core/**,engine/**,contexts/**,apps/**,platform/**",
+                   "z23-dev fleet objectives",
+                   "the share can only rise by choosing product work, which "
+                   "is a human decision")
+
+Z23_OBJECTIVE_WORK("generated_churn_10d", 0,
+                   "tools/lint/**,docs/API_REFERENCE.md.in",
+                   "z23-dev fleet objectives",
+                   "a fix would loosen the generated-file gate")
+
+Z23_OBJECTIVE_WORK("node_rss_mb", 0,
+                   "core/**,engine/**,platform/**",
+                   "z23-dev fleet objectives",
+                   "the memory sits in a consensus store, the reducer or "
+                   "the wallet, or the node is down so the value is stale")
+
+Z23_OBJECTIVE_WORK("node_tip_lag_blocks", 0,
+                   "core/**,engine/**,platform/**",
+                   "z23-dev fleet objectives",
+                   "the lag sits in sync, validation or a consensus store, "
+                   "or the node is down so the value is stale")
+
+Z23_OBJECTIVE_WORK("node_warm_restart_s", 0,
+                   "core/**,engine/**,platform/**",
+                   "z23-dev fleet objectives",
+                   "the restart cost sits in boot of a consensus store or "
+                   "the reducer")
