@@ -397,10 +397,8 @@ void enemy_ai_attack(enemy_t* enemy, Vector3 target, enemy_manager_t* manager, f
     return;
 }
 
-void enemies_update(enemy_manager_t* manager, Vector3 player_pos, float dt) {
-    if (!manager) return;
-    
-    // Update wave spawning
+// Wave spawning and completion, run once per frame before the enemy loop
+static void enemies_update_waves(enemy_manager_t* manager, float dt) {
     manager->wave_timer += dt;
     if (manager->current_wave < manager->total_waves) {
         enemy_wave_t* wave = &manager->waves[manager->current_wave];
@@ -408,82 +406,82 @@ void enemies_update(enemy_manager_t* manager, Vector3 player_pos, float dt) {
             enemies_spawn_wave(manager, manager->current_wave);
             manager->wave_active = true;
         }
-        
+
         // Check wave completion
         if (manager->wave_active && enemies_wave_complete(manager)) {
             manager->current_wave++;
             manager->wave_active = false;
         }
     }
-    
-    // Update enemies
-    for (int i = 0; i < manager->max_enemies; i++) {
-        enemy_t* enemy = &manager->enemies[i];
-        if (enemy->health <= 0) continue;
-        
-        // Update AI
-        enemy_ai_update(enemy, player_pos, dt);
-        
-        // Execute behavior
-        switch (enemy->state) {
-            case AI_PATROL:
-                enemy_ai_patrol(enemy, dt);
-                break;
-            case AI_CHASE:
-                enemy_ai_chase(enemy, player_pos, dt);
-                break;
-            case AI_ATTACK:
-                enemy_ai_attack(enemy, player_pos, manager, dt);
-                break;
-            case AI_EVADE:
-                // Evasive maneuvers
-                if (enemy->can_barrel_roll && (rand() % 100) < 20) {
-                    enemy_barrel_roll(enemy);
-                }
-                break;
-            case AI_FORMATION:
-                if (enemy->leader && enemy->leader->health > 0) {
-                    Vector3 target = Vector3Add(enemy->leader->position, enemy->formation_offset);
-                    enemy_ai_chase(enemy, target, dt);
-                } else {
-                    enemy->state = AI_CHASE;
-                }
-                break;
-            default: break;
-        }
-        
-        // Update visual effects
-        if (enemy->damage_flash > 0) {
-            enemy->damage_flash -= dt * 5.0f;
-        }
-        
-        // Update death
-        if (enemy->dying) {
-            enemy->death_timer += dt;
-            if (enemy->death_timer > 2.0f) {
-                enemy->health = 0;
-                manager->active_count--;
+}
+
+// Execute one enemy's behaviour for its current AI state
+static void enemy_execute_behavior(enemy_manager_t* manager, enemy_t* enemy, Vector3 player_pos, float dt) {
+    switch (enemy->state) {
+        case AI_PATROL:
+            enemy_ai_patrol(enemy, dt);
+            break;
+        case AI_CHASE:
+            enemy_ai_chase(enemy, player_pos, dt);
+            break;
+        case AI_ATTACK:
+            enemy_ai_attack(enemy, player_pos, manager, dt);
+            break;
+        case AI_EVADE:
+            // Evasive maneuvers
+            if (enemy->can_barrel_roll && (rand() % 100) < 20) {
+                enemy_barrel_roll(enemy);
             }
+            break;
+        case AI_FORMATION:
+            if (enemy->leader && enemy->leader->health > 0) {
+                Vector3 target = Vector3Add(enemy->leader->position, enemy->formation_offset);
+                enemy_ai_chase(enemy, target, dt);
+            } else {
+                enemy->state = AI_CHASE;
+            }
+            break;
+        default: break;
+    }
+}
+
+// Damage flash fade and death countdown for one enemy
+static void enemy_update_timers(enemy_manager_t* manager, enemy_t* enemy, float dt) {
+    // Update visual effects
+    if (enemy->damage_flash > 0) {
+        enemy->damage_flash -= dt * 5.0f;
+    }
+
+    // Update death
+    if (enemy->dying) {
+        enemy->death_timer += dt;
+        if (enemy->death_timer > 2.0f) {
+            enemy->health = 0;
+            manager->active_count--;
         }
     }
-    
-    // Update combo
+}
+
+// Combo window countdown
+static void enemies_update_combo(enemy_manager_t* manager, float dt) {
     if (manager->combo_timer > 0) {
         manager->combo_timer -= dt;
         if (manager->combo_timer <= 0) {
             manager->combo_count = 0;
         }
     }
-    
-    // Update enemy projectiles
+}
+
+// Advance enemy projectiles and retire the expired ones
+static void enemies_update_projectiles(enemy_manager_t* manager, float dt) {
     for (int i = 0; i < MAX_ENEMY_PROJECTILES; i++) {
         if (manager->projectiles[i].active) {
             enemy_projectile_t* proj = &manager->projectiles[i];
-            
+
             // Update position
             proj->position = Vector3Add(proj->position, Vector3Scale(proj->velocity, dt));
             proj->life -= dt;
-            
+
             if (proj->life <= 0) {
                 proj->active = false;
             }
@@ -491,108 +489,142 @@ void enemies_update(enemy_manager_t* manager, Vector3 player_pos, float dt) {
     }
 }
 
-void enemies_draw(enemy_manager_t* manager) {
+void enemies_update(enemy_manager_t* manager, Vector3 player_pos, float dt) {
     if (!manager) return;
-    
+
+    // Update wave spawning
+    enemies_update_waves(manager, dt);
+
+    // Update enemies
     for (int i = 0; i < manager->max_enemies; i++) {
         enemy_t* enemy = &manager->enemies[i];
         if (enemy->health <= 0) continue;
-        
+
+        // Update AI
+        enemy_ai_update(enemy, player_pos, dt);
+
+        // Execute behavior
+        enemy_execute_behavior(manager, enemy, player_pos, dt);
+
+        // Update visual effects and death
+        enemy_update_timers(manager, enemy, dt);
+    }
+
+    // Update combo
+    enemies_update_combo(manager, dt);
+
+    // Update enemy projectiles
+    enemies_update_projectiles(manager, dt);
+}
+
+// Draw one enemy as a plane: fuselage, wings, tail, cockpit, engine glow, shield and health bar
+static void enemy_draw_plane(const enemy_t* enemy, Color color) {
+    // Fuselage (body)
+    DrawCube(enemy->position, enemy->scale * 3, enemy->scale * 0.5f, enemy->scale * 0.5f, color);
+
+    // Wings
+    DrawCube((Vector3){enemy->position.x, enemy->position.y - enemy->scale * 0.1f, enemy->position.z},
+            enemy->scale * 0.2f, enemy->scale * 0.1f, enemy->scale * 4, color);
+
+    // Tail
+    Vector3 tail_pos = {enemy->position.x - enemy->scale * 1.2f, enemy->position.y, enemy->position.z};
+    DrawCube(tail_pos, enemy->scale * 0.3f, enemy->scale, enemy->scale * 0.1f, color);
+
+    // Cockpit (darker shade)
+    Color cockpit_color = {color.r/2, color.g/2, color.b/2, color.a};
+    Vector3 cockpit_pos = {enemy->position.x + enemy->scale * 0.8f, enemy->position.y + enemy->scale * 0.2f, enemy->position.z};
+    DrawCube(cockpit_pos, enemy->scale * 0.6f, enemy->scale * 0.3f, enemy->scale * 0.4f, cockpit_color);
+
+    // Engine glow based on speed
+    if (enemy->speed > 0) {
+        Color engine_color = {255, 200, 100, 200};
+        Vector3 engine_pos = {enemy->position.x - enemy->scale * 1.5f, enemy->position.y, enemy->position.z};
+        DrawSphere(engine_pos, enemy->scale * 0.3f, engine_color);
+    }
+
+    // Draw shields
+    if (enemy->has_shields && enemy->shield_power > 0) {
+        Color shield_color = {100, 200, 255, (unsigned char)(enemy->shield_power * 1.5f)};
+        DrawSphereWires(enemy->position, enemy->scale * 1.5f, 8, 8, shield_color);
+    }
+
+    // Health bar
+    if (enemy->health < enemy->max_health && enemy->max_health > 0) {
+        Vector3 bar_pos = enemy->position;
+        bar_pos.y += enemy->scale * 2;
+
+        float health_percent = safe_divide(enemy->health, enemy->max_health);
+        Color health_color = health_percent > 0.5f ? GREEN :
+                            health_percent > 0.25f ? YELLOW : RED;
+
+        DrawCube(bar_pos, enemy->scale * 2 * health_percent, 0.2f, 0.2f, health_color);
+    }
+}
+
+// Draw one enemy projectile with a trail effect chosen by the firing enemy type
+static void enemy_draw_projectile(const enemy_projectile_t* proj) {
+    // Draw projectile with trail effect
+    Vector3 trail_start = Vector3Subtract(proj->position,
+                                         Vector3Scale(SafeVector3Normalize(proj->velocity), 5.0f));
+
+    // Different effects based on enemy type
+    switch (proj->from_enemy) {
+        case ENEMY_TURRET:
+            // Turret fires thick plasma bolts
+            DrawSphere(proj->position, 1.5f, proj->color);
+            DrawSphere(proj->position, 2.0f, Fade(proj->color, 0.3f));
+            DrawLine3D(proj->position, trail_start, proj->color);
+            break;
+
+        case ENEMY_BOSS_MECH:
+            // Boss fires energy orbs
+            float pulse = sinf(GetTime() * 20.0f) * 0.3f + 1.0f;
+            DrawSphere(proj->position, 2.0f * pulse, proj->color);
+            DrawSphere(proj->position, 3.0f * pulse, Fade(proj->color, 0.2f));
+
+            // Energy particles
+            for (int j = 0; j < 3; j++) {
+                Vector3 particle_pos = Vector3Subtract(proj->position,
+                    Vector3Scale(proj->velocity, j * 0.01f));
+                DrawSphere(particle_pos, 0.5f, Fade(WHITE, 0.8f - j * 0.2f));
+            }
+            break;
+
+        case ENEMY_FIGHTER:
+            // Fighter fires laser bolts
+            DrawCapsule(proj->position, trail_start, 0.3f, 4, 4, proj->color);
+            DrawSphere(proj->position, 0.5f, WHITE);
+            break;
+
+        default:
+            // Standard projectile
+            DrawSphere(proj->position, 0.8f, proj->color);
+            DrawLine3D(proj->position, trail_start, Fade(proj->color, 0.5f));
+            break;
+    }
+}
+
+void enemies_draw(enemy_manager_t* manager) {
+    if (!manager) return;
+
+    for (int i = 0; i < manager->max_enemies; i++) {
+        enemy_t* enemy = &manager->enemies[i];
+        if (enemy->health <= 0) continue;
+
         // Flash when damaged
         Color color = enemy->color;
         if (enemy->damage_flash > 0) {
             color = WHITE;
         }
-        
+
         // Draw all enemies as PLANE SHAPES with different colors
-        // Basic plane shape for all enemy types
-        
-        // Fuselage (body)
-        DrawCube(enemy->position, enemy->scale * 3, enemy->scale * 0.5f, enemy->scale * 0.5f, color);
-        
-        // Wings
-        DrawCube((Vector3){enemy->position.x, enemy->position.y - enemy->scale * 0.1f, enemy->position.z}, 
-                enemy->scale * 0.2f, enemy->scale * 0.1f, enemy->scale * 4, color);
-        
-        // Tail
-        Vector3 tail_pos = {enemy->position.x - enemy->scale * 1.2f, enemy->position.y, enemy->position.z};
-        DrawCube(tail_pos, enemy->scale * 0.3f, enemy->scale, enemy->scale * 0.1f, color);
-        
-        // Cockpit (darker shade)
-        Color cockpit_color = {color.r/2, color.g/2, color.b/2, color.a};
-        Vector3 cockpit_pos = {enemy->position.x + enemy->scale * 0.8f, enemy->position.y + enemy->scale * 0.2f, enemy->position.z};
-        DrawCube(cockpit_pos, enemy->scale * 0.6f, enemy->scale * 0.3f, enemy->scale * 0.4f, cockpit_color);
-        
-        // Engine glow based on speed
-        if (enemy->speed > 0) {
-            Color engine_color = {255, 200, 100, 200};
-            Vector3 engine_pos = {enemy->position.x - enemy->scale * 1.5f, enemy->position.y, enemy->position.z};
-            DrawSphere(engine_pos, enemy->scale * 0.3f, engine_color);
-        }
-        
-        // Draw shields
-        if (enemy->has_shields && enemy->shield_power > 0) {
-            Color shield_color = {100, 200, 255, (unsigned char)(enemy->shield_power * 1.5f)};
-            DrawSphereWires(enemy->position, enemy->scale * 1.5f, 8, 8, shield_color);
-        }
-        
-        // Health bar
-        if (enemy->health < enemy->max_health && enemy->max_health > 0) {
-            Vector3 bar_pos = enemy->position;
-            bar_pos.y += enemy->scale * 2;
-            
-            float health_percent = safe_divide(enemy->health, enemy->max_health);
-            Color health_color = health_percent > 0.5f ? GREEN : 
-                                health_percent > 0.25f ? YELLOW : RED;
-            
-            DrawCube(bar_pos, enemy->scale * 2 * health_percent, 0.2f, 0.2f, health_color);
-        }
+        enemy_draw_plane(enemy, color);
     }
-    
+
     // Draw enemy projectiles
     for (int i = 0; i < MAX_ENEMY_PROJECTILES; i++) {
         if (manager->projectiles[i].active) {
-            enemy_projectile_t* proj = &manager->projectiles[i];
-            
-            // Draw projectile with trail effect
-            Vector3 trail_start = Vector3Subtract(proj->position, 
-                                                 Vector3Scale(SafeVector3Normalize(proj->velocity), 5.0f));
-            
-            // Different effects based on enemy type
-            switch (proj->from_enemy) {
-                case ENEMY_TURRET:
-                    // Turret fires thick plasma bolts
-                    DrawSphere(proj->position, 1.5f, proj->color);
-                    DrawSphere(proj->position, 2.0f, Fade(proj->color, 0.3f));
-                    DrawLine3D(proj->position, trail_start, proj->color);
-                    break;
-                    
-                case ENEMY_BOSS_MECH:
-                    // Boss fires energy orbs
-                    float pulse = sinf(GetTime() * 20.0f) * 0.3f + 1.0f;
-                    DrawSphere(proj->position, 2.0f * pulse, proj->color);
-                    DrawSphere(proj->position, 3.0f * pulse, Fade(proj->color, 0.2f));
-                    
-                    // Energy particles
-                    for (int j = 0; j < 3; j++) {
-                        Vector3 particle_pos = Vector3Subtract(proj->position,
-                            Vector3Scale(proj->velocity, j * 0.01f));
-                        DrawSphere(particle_pos, 0.5f, Fade(WHITE, 0.8f - j * 0.2f));
-                    }
-                    break;
-                    
-                case ENEMY_FIGHTER:
-                    // Fighter fires laser bolts
-                    DrawCapsule(proj->position, trail_start, 0.3f, 4, 4, proj->color);
-                    DrawSphere(proj->position, 0.5f, WHITE);
-                    break;
-                    
-                default:
-                    // Standard projectile
-                    DrawSphere(proj->position, 0.8f, proj->color);
-                    DrawLine3D(proj->position, trail_start, Fade(proj->color, 0.5f));
-                    break;
-            }
+            enemy_draw_projectile(&manager->projectiles[i]);
         }
     }
 }
@@ -773,31 +805,29 @@ bool enemies_check_player_hit(enemy_manager_t* manager, Vector3 player_pos, floa
     return hit;
 }
 
-// Spawn MASSIVE WAVES of enemies FAR AWAY for target practice!
-void enemies_spawn_massive_wave(enemy_manager_t* manager) {
-    if (!manager || !manager->enemies) return;
-    
-    // Clear existing enemies
+// Clear every slot before a massive wave is laid out
+static void massive_wave_clear(enemy_manager_t* manager) {
     for (int i = 0; i < manager->max_enemies; i++) {
         manager->enemies[i].health = 0;
     }
     manager->active_count = 0;
-    
-    // MASSIVE SWARM AHEAD - Fill the distant sky with enemies!
-    int enemies_to_spawn = manager->max_enemies - 10; // Leave room for spawning more
-    int current = 0;
-    
-    // Wave 1: Grid of drones FAR in the distance
-    for (int x = -15; x <= 15 && current < enemies_to_spawn/4; x += 3) {
-        for (int z = 20; z <= 40 && current < enemies_to_spawn/4; z += 4) {
+}
+
+// Wave 1: Grid of drones FAR in the distance
+static int massive_wave_drones(enemy_manager_t* manager, int current, int limit) {
+    for (int x = -15; x <= 15 && current < limit; x += 3) {
+        for (int z = 20; z <= 40 && current < limit; z += 4) {
             Vector3 pos = {x * 20.0f, 60.0f + (rand() % 40), z * 20.0f + 100.0f}; // Much closer!
             enemies_spawn(manager, ENEMY_DRONE, pos);
             current++;
         }
     }
-    
-    // Wave 2: Fighter squadrons in V formations - DISTANT
-    for (int squad = 0; squad < 8 && current < enemies_to_spawn/2; squad++) {
+    return current;
+}
+
+// Wave 2: Fighter squadrons in V formations - DISTANT
+static int massive_wave_fighters(enemy_manager_t* manager, int current, int limit) {
+    for (int squad = 0; squad < 8 && current < limit; squad++) {
         float base_x = -600.0f + squad * 150.0f;
         float base_z = 800.0f + squad * 100.0f;  // Very far!
         for (int i = 0; i < 7; i++) {
@@ -810,18 +840,24 @@ void enemies_spawn_massive_wave(enemy_manager_t* manager) {
             current++;
         }
     }
-    
-    // Wave 3: High altitude bombers
-    for (int x = -20; x <= 20 && current < 3*enemies_to_spawn/4; x += 2) {
-        for (int z = 0; z <= 10 && current < 3*enemies_to_spawn/4; z++) {
+    return current;
+}
+
+// Wave 3: High altitude bombers
+static int massive_wave_bombers(enemy_manager_t* manager, int current, int limit) {
+    for (int x = -20; x <= 20 && current < limit; x += 2) {
+        for (int z = 0; z <= 10 && current < limit; z++) {
             Vector3 pos = {x * 20.0f, 100.0f + (rand() % 50), z * 30.0f + 200.0f}; // Much closer!
             enemies_spawn(manager, ENEMY_BOMBER, pos);
             current++;
         }
     }
-    
-    // Wave 4: Swarm clouds scattered everywhere
-    for (int i = 0; i < enemies_to_spawn - current; i++) {
+    return current;
+}
+
+// Wave 4: Swarm clouds scattered everywhere
+static void massive_wave_swarm(enemy_manager_t* manager, int count) {
+    for (int i = 0; i < count; i++) {
         float angle = (float)(rand() % 360) * DEG2RAD;
         float radius = 80.0f + (rand() % 200);  // 80-280 units away - visible!
         float height = 50.0f + (rand() % 300);
@@ -832,7 +868,24 @@ void enemies_spawn_massive_wave(enemy_manager_t* manager) {
         };
         enemies_spawn(manager, ENEMY_SWARM, pos);
     }
-    
+}
+
+// Spawn MASSIVE WAVES of enemies FAR AWAY for target practice!
+void enemies_spawn_massive_wave(enemy_manager_t* manager) {
+    if (!manager || !manager->enemies) return;
+
+    // Clear existing enemies
+    massive_wave_clear(manager);
+
+    // MASSIVE SWARM AHEAD - Fill the distant sky with enemies!
+    int enemies_to_spawn = manager->max_enemies - 10; // Leave room for spawning more
+    int current = 0;
+
+    current = massive_wave_drones(manager, current, enemies_to_spawn/4);
+    current = massive_wave_fighters(manager, current, enemies_to_spawn/2);
+    current = massive_wave_bombers(manager, current, 3*enemies_to_spawn/4);
+    massive_wave_swarm(manager, enemies_to_spawn - current);
+
     printf("MASSIVE ENEMY WAVE SPAWNED: %d enemies!\n", manager->active_count);
 }
 
@@ -841,102 +894,4 @@ void enemies_spawn_practice_targets(enemy_manager_t* manager) {
     // Just call the massive wave function instead!
     enemies_spawn_massive_wave(manager);
     return;
-    
-    if (!manager || !manager->enemies) return;
-    
-    // Clear existing enemies
-    for (int i = 0; i < manager->max_enemies; i++) {
-        manager->enemies[i].health = 0;
-    }
-    manager->active_count = 0;
-    
-    // Pattern 1: Horizontal line of slow-moving drones
-    for (int i = 0; i < 8; i++) {
-        Vector3 pos = {-150.0f + i * 40.0f, 50.0f, 200.0f};
-        enemies_spawn(manager, ENEMY_DRONE, pos);
-        
-        // Make them fly in straight line
-        if (manager->active_count > 0 && manager->active_count <= manager->max_enemies) {
-            int idx = manager->active_count - 1;
-            if (idx >= 0 && idx < manager->max_enemies) {
-                enemy_t* enemy = &manager->enemies[idx];
-                enemy->state = AI_PATROL;
-                enemy->velocity = (Vector3){20.0f, 0, 0};  // Slow horizontal movement
-                enemy->max_health = 50.0f;  // Easy to destroy
-                enemy->health = 50.0f;
-            }
-        }
-    }
-    
-    // Pattern 2: Vertical line of stationary targets
-    for (int i = 0; i < 6; i++) {
-        Vector3 pos = {100.0f, 30.0f + i * 20.0f, 150.0f};
-        enemies_spawn(manager, ENEMY_TURRET, pos);
-        
-        // Make them stationary
-        if (manager->active_count > 0 && manager->active_count <= manager->max_enemies) {
-            int idx = manager->active_count - 1;
-            if (idx >= 0 && idx < manager->max_enemies) {
-                enemy_t* enemy = &manager->enemies[idx];
-                enemy->state = AI_PATROL;
-                enemy->velocity = (Vector3){0, 0, 0};  // No movement
-                enemy->max_health = 30.0f;  // Very easy
-                enemy->health = 30.0f;
-            }
-        }
-    }
-    
-    // Pattern 3: Circle of fighters
-    float circle_radius = 100.0f;
-    int circle_count = 12;
-    for (int i = 0; i < circle_count; i++) {
-        float angle = (i / (float)circle_count) * PI * 2.0f;
-        Vector3 pos = {
-            cosf(angle) * circle_radius,
-            80.0f,
-            200.0f + sinf(angle) * circle_radius
-        };
-        enemies_spawn(manager, ENEMY_FIGHTER, pos);
-        
-        // Make them orbit in a circle
-        if (manager->active_count > 0 && manager->active_count <= manager->max_enemies) {
-            int idx = manager->active_count - 1;
-            if (idx >= 0 && idx < manager->max_enemies) {
-                enemy_t* enemy = &manager->enemies[idx];
-                enemy->state = AI_PATROL;
-                // Velocity perpendicular to radius for circular motion
-                enemy->velocity = (Vector3){
-                    -sinf(angle) * 30.0f,  // Moderate speed
-                    0,
-                    cosf(angle) * 30.0f
-                };
-                enemy->max_health = 40.0f;
-                enemy->health = 40.0f;
-            }
-        }
-    }
-    
-    // Pattern 4: Figure-8 pattern
-    for (int i = 0; i < 10; i++) {
-        float t = (i / 10.0f) * PI * 2.0f;
-        float x = sinf(t) * 80.0f;
-        float z = sinf(2 * t) * 40.0f + 250.0f;
-        Vector3 pos = {x, 60.0f, z};
-        enemies_spawn(manager, ENEMY_SWARM, pos);
-        
-        if (manager->active_count > 0 && manager->active_count <= manager->max_enemies) {
-            int idx = manager->active_count - 1;
-            if (idx >= 0 && idx < manager->max_enemies) {
-                enemy_t* enemy = &manager->enemies[idx];
-                enemy->state = AI_PATROL;
-                enemy->velocity = (Vector3){
-                    cosf(t) * 40.0f,
-                    0,
-                    cosf(2 * t) * 80.0f
-                };
-                enemy->max_health = 20.0f;  // Very fragile
-                enemy->health = 20.0f;
-            }
-        }
-    }
 }
