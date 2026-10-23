@@ -577,6 +577,11 @@ void progress_store_tx_lock(void)
     pthread_mutex_lock(&g_tx_lock);
 }
 
+const void *progress_store_tx_lock_addr(void)
+{
+    return &g_tx_lock;
+}
+
 bool progress_store_tx_trylock(void)
 {
     pthread_once(&g_tx_lock_once, progress_store_tx_lock_init);

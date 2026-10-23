@@ -385,6 +385,14 @@ bool os_proc_io_bytes(uint64_t *out);
  * /proc/self/maps directly. */
 char *os_proc_self_maps_read(size_t max, size_t *len_out);
 
+/* Per-thread introspection for hang evidence (Linux /proc/self/task; elsewhere
+ * 0 / false). Read-only, never blocks. os_proc_self_task_ids fills up to `max`
+ * thread ids and reports the full count in *total (may be NULL).
+ * os_proc_self_task_read reads one of "stat", "wchan", "syscall" for `tid`
+ * into `buf` (NUL-terminated); false on any open/read failure. */
+size_t os_proc_self_task_ids(long *out, size_t max, size_t *total);
+bool os_proc_self_task_read(long tid, const char *name, char *buf, size_t cap);
+
 #ifdef __cplusplus
 }
 #endif

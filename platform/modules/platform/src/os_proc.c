@@ -1340,3 +1340,75 @@ bool os_proc_visit_paths(os_proc_path_visitor visitor, void *opaque)
     return false;
 #endif
 }
+
+#if defined(__linux__)
+/* Only these per-thread procfs files may be read through the shim. */
+static bool os_proc_task_file_allowed(const char *name)
+{
+    return name && (strcmp(name, "stat") == 0 || strcmp(name, "wchan") == 0 ||
+                    strcmp(name, "syscall") == 0);
+}
+
+static size_t os_proc_task_ids_scan(DIR *d, long *out, size_t max,
+                                    size_t *total)
+{
+    size_t n = 0, all = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        char *end = NULL;
+        if (e->d_name[0] < '0' || e->d_name[0] > '9')
+            continue;
+        long tid = strtol(e->d_name, &end, 10);
+        if (*end != '\0')
+            continue;
+        all++;
+        if (out && n < max)
+            out[n++] = tid;
+    }
+    if (total) *total = all;
+    return n;
+}
+#endif
+
+size_t os_proc_self_task_ids(long *out, size_t max, size_t *total)
+{
+    if (total) *total = 0;
+#if defined(__linux__)
+    DIR *d = opendir("/proc/self/task");
+    if (!d)
+        return 0;
+    size_t n = os_proc_task_ids_scan(d, out, max, total);
+    closedir(d);
+    return n;
+#else
+    (void)out;
+    (void)max;
+    return 0;
+#endif
+}
+
+bool os_proc_self_task_read(long tid, const char *name, char *buf, size_t cap)
+{
+    if (!buf || cap == 0)
+        return false;
+    buf[0] = '\0';
+#if defined(__linux__)
+    if (tid <= 0 || !os_proc_task_file_allowed(name))
+        return false;
+    char path[96];
+    snprintf(path, sizeof(path), "/proc/self/task/%ld/%s", tid, name);
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+    ssize_t n = read(fd, buf, cap - 1);
+    (void)close(fd);
+    if (n < 0)
+        return false;
+    buf[n] = '\0';
+    return true;
+#else
+    (void)tid;
+    (void)name;
+    return false;
+#endif
+}

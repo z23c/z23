@@ -89,6 +89,9 @@ void progress_store_tx_lock(void);
 /* Non-blocking counterpart for observational surfaces. Returns true with the
  * recursive lock held, or false immediately when a reducer batch owns it. */
 bool progress_store_tx_trylock(void);
+/* Address of the tx mutex, for matching a futex address in a hang
+ * snapshot. Observational: never lock through it. */
+const void *progress_store_tx_lock_addr(void);
 void progress_store_tx_unlock(void);
 
 /* Switch the durability PRAGMA on the open consensus.db handle.

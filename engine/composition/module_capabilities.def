@@ -951,7 +951,7 @@ ZCL_MODULE_CAPABILITY("cognition/modules/session/src/mesh_terminal_hub_io.c", CA
 ZCL_MODULE_CAPABILITY("cognition/modules/session/src/mesh_terminal_hub_server.c", CAP_NETWORK|CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_PRIVILEGE, "the privileged hub server: accepts the loopback listener, forks one confined worker per accepted connection, reads and writes the key file, and tracks each shell with a raw pidfd_open syscall")
 ZCL_MODULE_CAPABILITY("cognition/modules/session/src/mesh_terminal_worker.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_CLOCK|CAP_PRIVILEGE, "the Linux confined terminal worker: opens and configures a pseudo-terminal, forks and supervises the bounded shell process, installs its confinement, and enforces timed teardown")
 ZCL_MODULE_CAPABILITY("cognition/modules/session/src/mesh_terminal_worker_spawn.c", CAP_FS_READ|CAP_FS_WRITE|CAP_PROCESS|CAP_PRIVILEGE, "terminal worker spawn helpers: the child opens the pty slave and takes the controlling terminal, and an abandoned child is killed and reaped")
-ZCL_MODULE_CAPABILITY("engine/modules/sim/src/postmortem.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/modules/sim/src/postmortem.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "crash capsule stamps the fatal-signal time via async-signal-safe clock_gettime")
 ZCL_MODULE_CAPABILITY("engine/modules/sim/src/postmortem_archive.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/sim/src/postmortem_inventory.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/sim/src/seed_tape.c", CAP_FS_READ|CAP_FS_WRITE, "")

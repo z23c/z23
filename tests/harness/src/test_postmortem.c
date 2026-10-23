@@ -8,6 +8,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <time.h>
 #include <stdio.h>
 #include <string.h>
 #include <signal.h>
@@ -86,6 +87,15 @@ static int test_postmortem_install_validates_dir(void)
     return failures;
 }
 
+/* The child sleeps 2 s between install and abort, so a capsule stamped with
+ * install time lands before t_before_fork + 2. */
+static bool crash_time_is_after(int rc, size_t count,
+                                const struct postmortem_capsule_entry *e,
+                                time_t floor_unix)
+{
+    return rc == 0 && count == 1 && e[0].crash_unix >= (int64_t)floor_unix;
+}
+
 static int test_signal_handler_capsule(void)
 {
     int failures = 0;
@@ -103,10 +113,12 @@ static int test_signal_handler_capsule(void)
         seed_tape_inject(tape, 13, "sig", 3);
     }
 
+    time_t t_before_fork = time(NULL);
     pid_t pid = fork();
     if (pid == 0) {
         if (!tape || postmortem_install(tape, dir) != 0)
             _exit(121);
+        sleep(2); /* crash well after install: capsule must say so */
         raise(SIGABRT);
         _exit(122);
     }
@@ -128,6 +140,8 @@ static int test_signal_handler_capsule(void)
         PM_CHECK("signal capsule listed", rc == 0 && count == 1);
         PM_CHECK("signal capsule records signal",
                  rc == 0 && count == 1 && entries[0].crash_signal == SIGABRT);
+        PM_CHECK("signal capsule crash_unix is the crash time, not install",
+                 crash_time_is_after(rc, count, entries, t_before_fork + 2));
         if (rc == 0 && count == 1) {
             char proc_path[576];
             snprintf(proc_path, sizeof(proc_path), "%s/procstatus.txt",

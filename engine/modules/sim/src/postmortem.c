@@ -14,6 +14,7 @@
 #include "util/signal_handler.h"
 #include "util/safe_alloc.h"
 
+#include <time.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -727,7 +728,7 @@ int postmortem_capture_write(const struct postmortem_capture_opts *opts,
     return capture_report_path(cap_dir, capsule_path_out, capsule_path_cap);
 }
 
-/* Async-signal-safe: builds "<install_unix>-<pid>.cap" under the dump dir. */
+/* Async-signal-safe: builds "<crash_unix>-<pid>.cap" under the dump dir. */
 static int crash_hook_cap_dir(int64_t crash_unix, char *cap_dir, size_t cap)
 {
     char name[128];
@@ -782,6 +783,17 @@ static void crash_hook_write_sidecars(int sig, zcl_signal_info_t *info,
         (void)signal_write_coremarker(path, crash_unix);
 }
 
+/* Time the fatal signal was handled. clock_gettime is async-signal-safe
+ * (time() is not guaranteed to be); the install time is only a fallback
+ * if the clock read fails. */
+static int64_t crash_hook_now_unix(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) == 0 && ts.tv_sec > 0) // platform-ok: async-signal-safe clock read in a fatal-signal handler
+        return (int64_t)ts.tv_sec;
+    return g_postmortem_install_unix > 0 ? g_postmortem_install_unix : 0;
+}
+
 static void crash_hook_capture(int sig, zcl_signal_info_t *info,
                                void *ucontext)
 {
@@ -798,9 +810,7 @@ static void crash_hook_capture(int sig, zcl_signal_info_t *info,
         return;
     }
 
-    int64_t crash_unix = g_postmortem_install_unix > 0
-        ? g_postmortem_install_unix
-        : 0;
+    int64_t crash_unix = crash_hook_now_unix();
     char cap_dir[512];
     if (crash_hook_cap_dir(crash_unix, cap_dir, sizeof(cap_dir)) != 0)
         return;

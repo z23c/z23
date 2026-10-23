@@ -51,6 +51,7 @@
 #include <sys/un.h>
 #endif
 #include <string.h>
+#include <stdio.h>
 #include <unistd.h>
 
 #if !defined(_WIN32)
@@ -979,7 +980,54 @@ static int test_sd_notify_platform_arm(void)
 
 #endif /* !_WIN32 */
 
+/* Withhold evidence formatters (boot_sd_watchdog_evidence.c). */
+static int test_sd_watchdog_evidence(void)
+{
+    int failures = 0;
+    char out[256];
+    boot_sd_watchdog_format_drive_fields(out, sizeof(out), "stage_sync", true,
+                                         "reducer_kick", 1234567);
+    SDN_CHECK("drive fields name active_cb", strstr(out, "active_cb=stage_sync"));
+    SDN_CHECK("drive fields name label and age",
+              strstr(out, "drive_label=reducer_kick") &&
+              strstr(out, "drive_age_us=1234567") &&
+              strstr(out, "drive_active=1"));
+    boot_sd_watchdog_format_drive_fields(out, sizeof(out), NULL, false, "", 0);
+    SDN_CHECK("drive fields default to none",
+              strstr(out, "active_cb=none") && strstr(out, "drive_label=none"));
+    SDN_CHECK("task line parses fixture",
+              boot_sd_watchdog_format_task_line(out, sizeof(out), 4242,
+                  "4242 (zcl msg (x)) D 1 2 3 0\n", "futex_wait_queue\n",
+                  "202 0x7ffd1234 0x80 0x0 0x0 0x0 0x0 0x7ffc 0x7f00\n") &&
+              strstr(out, "tid=4242") && strstr(out, "comm=zcl msg (x)") &&
+              strstr(out, "st=D") && strstr(out, "wchan=futex_wait_queue") &&
+              strstr(out, "sys=202 a0=0x7ffd1234"));
+    SDN_CHECK("task line handles running and empty wchan",
+              boot_sd_watchdog_format_task_line(out, sizeof(out), 7,
+                  "7 (a) R 1\n", "", "running\n") &&
+              strstr(out, "wchan=-") && strstr(out, "sys=running"));
+    SDN_CHECK("task line rejects malformed stat",
+              !boot_sd_watchdog_format_task_line(out, sizeof(out), 1,
+                                                 "garbage", "", ""));
+#if defined(__linux__)
+    char stat[512] = "";
+    FILE *fp = fopen("/proc/thread-self/stat", "r");
+    SDN_CHECK("calling thread has a stat file", fp != NULL);
+    if (fp) {
+        size_t n = fread(stat, 1, sizeof(stat) - 1, fp);
+        stat[n] = 0;
+        fclose(fp);
+        SDN_CHECK("live stat formats for calling thread",
+                  boot_sd_watchdog_format_task_line(out, sizeof(out),
+                      (long)getpid(), stat, "", "") &&
+                  strstr(out, "st=R"));
+    }
+    boot_sd_watchdog_log_thread_snapshot();
+#endif
+    return failures;
+}
+
 int test_sd_notify(void)
 {
-    return test_sd_notify_platform_arm();
+    return test_sd_notify_platform_arm() + test_sd_watchdog_evidence();
 }

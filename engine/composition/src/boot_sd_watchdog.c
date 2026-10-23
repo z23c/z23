@@ -466,16 +466,18 @@ static void boot_sd_watchdog_describe_pillars(char *out, size_t cap)
                            ? now_us - ll.message_last_progress_us : -1;
     int64_t dial_age = ll.dial_last_progress_us > 0
                            ? now_us - ll.dial_last_progress_us : -1;
+    char drive[160];
+    boot_sd_watchdog_live_drive_fields(drive, sizeof(drive));
     snprintf(out, cap,
              "sweep=%d tick_running=%d tick_hb_age_us=%lld "
              "connman_started=%d msg_age_us=%lld dial_age_us=%lld "
-             "dial_wait_until_us=%lld bound_us=%lld work_probe=%d",
+             "dial_wait_until_us=%lld bound_us=%lld work_probe=%d %s",
              (int)boot_sd_watchdog_supervisor_alive(),
              (int)supervisor_tick_runner_running(),
              (long long)supervisor_tick_runner_last_hb_age_us(),
              (int)ll.started, (long long)msg_age, (long long)dial_age,
              (long long)ll.dial_bounded_wait_until_us,
-             (long long)bound_us, (int)thread_work_probe_supported());
+             (long long)bound_us, (int)thread_work_probe_supported(), drive);
 }
 
 /* boot_progress freshness, shared by the collect tick (STATUS label) and
@@ -590,7 +592,7 @@ static void *boot_sd_watchdog_pet_main(void *arg)
             /* `runtime=0` names the conjunction, not the term. Print every
              * pillar's raw observation so the journal shows which leg refused
              * and by how much. */
-            char pillars[256];
+            char pillars[512];
             boot_sd_watchdog_describe_pillars(pillars, sizeof(pillars));
             if (pet) {
                 LOG_INFO("boot",
@@ -602,6 +604,7 @@ static void *boot_sd_watchdog_pet_main(void *arg)
                          "systemd will kill this process unless it resumes: "
                          "recent_progress=%d %s",
                          (int)recent, pillars);
+                boot_sd_watchdog_log_thread_snapshot();
             }
             s_last_pet = pet;
         }

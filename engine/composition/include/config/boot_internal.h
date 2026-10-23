@@ -556,6 +556,18 @@ unsigned boot_ready_legs_confirmed_count(const struct boot_ready_legs *l);
 void boot_ready_legs_describe(const struct boot_ready_legs *l,
                               char *out, size_t cap);
 
+/* Withhold-evidence helpers (boot_sd_watchdog_evidence.c). Observation only. */
+void boot_sd_watchdog_format_drive_fields(char *out, size_t cap,
+                                          const char *active_cb,
+                                          bool drive_active,
+                                          const char *drive_label,
+                                          int64_t drive_age_us);
+void boot_sd_watchdog_live_drive_fields(char *out, size_t cap);
+bool boot_sd_watchdog_format_task_line(char *out, size_t cap, long tid,
+                                       const char *stat, const char *wchan,
+                                       const char *syscall_text);
+void boot_sd_watchdog_log_thread_snapshot(void);
+
 #ifdef ZCL_TESTING
 /* Pillar 7's own refusal: a root supervisor sweep that has stopped advancing
  * withholds the systemd keepalive, so systemd restarts the process. A sweep
