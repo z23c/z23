@@ -8,6 +8,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,7 +19,7 @@
 #include "lintc_proc.h"
 #include "lintc_sig.h"
 
-enum { CGS_CASES = 23, CGS_FILLER = 500 };
+enum { CGS_CASES = 25, CGS_FILLER = 500 };
 
 static const char k_fx0[] = "build/dev-obj/epochs/fx0";
 
@@ -543,6 +544,41 @@ static int cgs_case_r(const struct ccs_fx *fx)
     return cgs_check(fx, "r", &cfg, 0, need, "R: an object whose source is absent is foreign, counted, and not graded");
 }
 
+/* W. an object older than its source is a stale build: UNPROVEN (2) and named
+ * as stale, never graded. The source's mtime is set into the future. */
+static int cgs_case_w(const struct ccs_fx *fx)
+{
+    struct ccg_cfg cfg;
+    char src[CCD_PATH], obj[CCD_PATH];
+    struct stat ost;
+    struct timespec t[2] = { { 0, UTIME_OMIT }, { 0, 0 } };
+    const char *const need[] = { "UNPROVEN", "older than their sources", "fixture_src/stale_user.o", NULL };
+    cgs_cfg(&cfg);
+    if (cgs_base(fx, "w", "") != 0 || cgs_unit(fx, "w", "fixture_src/stale_user.c", k_use, NULL) != 0)
+        return ccs_say(0, "W: fixture");
+    ccs_path(fx, "w/fixture_src/stale_user.c", src);
+    ccs_path(fx, "w/build/dev-obj/epochs/fx0/fixture_src/stale_user.o", obj);
+    if (stat(obj, &ost) != 0)
+        return ccs_say(0, "W: stat object");
+    t[1].tv_sec = ost.st_mtime + 100;
+    if (utimensat(AT_FDCWD, src, t, 0) != 0)
+        return ccs_say(0, "W: utimensat");
+    return cgs_check(fx, "w", &cfg, 2, need, "W: an object older than its source is UNPROVEN, never graded");
+}
+
+/* X. the same tree with every object newer than its source grades as before:
+ * clean (0) and not reported stale. */
+static int cgs_case_x(const struct ccs_fx *fx)
+{
+    struct ccg_cfg cfg;
+    char row[CCD_PATH];
+    cgs_cfg(&cfg);
+    if (cgs_base(fx, "x", cgs_row(row, sizeof row, "fixture_src/fresh_user.c", "CAP_NETWORK")) != 0
+        || cgs_unit(fx, "x", "fixture_src/fresh_user.c", k_use, NULL) != 0)
+        return ccs_say(0, "X: fixture");
+    return cgs_check(fx, "x", &cfg, 0, NULL, "X: objects newer than their sources grade as before, not stale");
+}
+
 static int cgs_skip_root(const char *label)
 {
     if (geteuid() != 0)
@@ -624,7 +660,8 @@ static int cgs_cases(const struct ccs_fx *fx)
     return cgs_case_a(fx) + cgs_case_b(fx) + cgs_case_c(fx) + cgs_case_d(fx) + cgs_case_e(fx) + cgs_case_f(fx) +
            cgs_case_g(fx) + cgs_case_h() + cgs_case_i(fx) + cgs_case_j(fx) + cgs_case_k(fx) + cgs_case_l() +
            cgs_case_m(fx) + cgs_case_n1(fx) + cgs_case_n2(fx) + cgs_case_o(fx) + cgs_case_p(fx) + cgs_case_q(fx) +
-           cgs_case_r(fx) + cgs_case_s(fx) + cgs_case_t(fx) + cgs_case_u(fx) + cgs_case_v(fx);
+           cgs_case_r(fx) + cgs_case_s(fx) + cgs_case_t(fx) + cgs_case_u(fx) + cgs_case_v(fx) + cgs_case_w(fx) +
+           cgs_case_x(fx);
 }
 
 int check_capability_closure_selftest(void)

@@ -9,6 +9,9 @@
  * those of the shell gate this replaced.
  */
 #define _POSIX_C_SOURCE 200809L
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE 1 /* st_mtimespec is hidden under _POSIX_C_SOURCE alone */
+#endif
 #include <dirent.h>
 #include <errno.h>
 #include <regex.h>
@@ -28,8 +31,15 @@
 
 #define CCG_DASH "\xe2\x80\x94"
 
+/* Nanosecond modification time of a struct stat, per platform. */
+#if defined(__APPLE__)
+#define CCG_MTIME(st) ((st).st_mtimespec)
+#else
+#define CCG_MTIME(st) ((st).st_mtim)
+#endif
+
 /* Anti-hollow floor: a tree below it is refused, never reported clean. */
-enum { CCG_MIN_OBJECTS = 500, CCG_FOREIGN_SHOWN = 5, CCG_UNOBS_SHOWN = 20 };
+enum { CCG_MIN_OBJECTS = 500, CCG_FOREIGN_SHOWN = 5, CCG_UNOBS_SHOWN = 20, CCG_STALE_SHOWN = 5 };
 
 /* Declared rows with no compiled object anywhere in a complete epoch: the
  * standalone tools tests/harness/src/test_thread_qos.c and
@@ -52,7 +62,7 @@ struct ccg_scan {
     const struct ccg_cfg *cfg;
     const char *root;
     char epoch[CCD_PATH];
-    struct ccd_map sym, compiled, used, defined, undef, foreign;
+    struct ccd_map sym, compiled, used, defined, undef, foreign, older;
     size_t n_sym;
     struct ccd_mods mods;
     struct ccg_list objs, uses, unobs, compiled_out;
@@ -101,6 +111,7 @@ static void ccg_free(struct ccg_scan *s)
     ccd_map_free(&s->defined);
     ccd_map_free(&s->undef);
     ccd_map_free(&s->foreign);
+    ccd_map_free(&s->older);
     ccd_map_free(&s->macros.def);
     ccd_mods_free(&s->mods);
     ccd_nm_free(&s->nm);
@@ -259,6 +270,57 @@ static void ccg_foreign_report(const struct ccg_scan *s)
         ccg_say(s, "    %s\n", s->foreign.ent[i].key);
 }
 
+/* An object older than its translation unit was compiled from source that has
+ * since changed: a stale tree, never graded. Header-only edits are not seen
+ * here (the object's own .c is unchanged), so they are not detected. */
+static int ccg_is_stale(const struct ccg_scan *s, const char *rel)
+{
+    char src[CCD_PATH], obj[CCD_PATH], srcp[CCD_PATH];
+    struct stat ost, sst;
+    struct timespec a, b;
+    ccg_c_of(rel, src, sizeof src);
+    if (!ccg_is_file(s->root, src))
+        return 0;
+    if (snprintf(obj, sizeof obj, "%s/%s", s->epoch, rel) >= (int)sizeof obj
+        || snprintf(srcp, sizeof srcp, "%s/%s", s->root, src) >= (int)sizeof srcp)
+        return ccg_walk_fail(s, "path too long under", s->epoch, 0);
+    if (stat(obj, &ost) != 0)
+        return ccg_walk_fail(s, "cannot stat", obj, errno);
+    if (stat(srcp, &sst) != 0)
+        return ccg_walk_fail(s, "cannot stat", srcp, errno);
+    a = CCG_MTIME(sst);
+    b = CCG_MTIME(ost);
+    return a.tv_sec > b.tv_sec || (a.tv_sec == b.tv_sec && a.tv_nsec > b.tv_nsec);
+}
+
+/* Records every object that is stale; restart-base.o is never graded, so it is
+ * never judged here either. 0 on success, CCG_REPORTED or -1 on failure. */
+static int ccg_stale_scan(struct ccg_scan *s, const struct ccd_map *rel)
+{
+    for (size_t i = 0; i < rel->n; i++) {
+        const char *key = rel->ent[i].key;
+        const char *slash = strrchr(key, '/');
+        int st;
+        if (strcmp(slash ? slash + 1 : key, "restart-base.o") == 0)
+            continue;
+        st = ccg_is_stale(s, key);
+        if (st == CCG_REPORTED)
+            return CCG_REPORTED;
+        if (st == 1 && ccd_map_put(&s->older, key, "") != 0)
+            return -1;
+    }
+    return 0;
+}
+
+static void ccg_stale_report(const struct ccg_scan *s)
+{
+    ccg_say(s, "check_capability_closure: UNPROVEN " CCG_DASH " %zu object(s) under %s are older than their sources\n"
+               "  (a stale build; run 'make dev-bin' and re-run). Never graded as pass or fail. First %d:\n",
+            s->older.n, s->epoch, CCG_STALE_SHOWN);
+    for (size_t i = 0; i < s->older.n && i < CCG_STALE_SHOWN; i++)
+        ccg_say(s, "    %s\n", s->older.ent[i].key);
+}
+
 /* Freezes the object list once, so a build running underneath cannot change
  * the evidence set. */
 static int ccg_objects(struct ccg_scan *s)
@@ -278,6 +340,12 @@ static int ccg_objects(struct ccg_scan *s)
         return 2;
     }
     rc = ccg_walk(s, s->epoch, "", ".o", &rel);
+    if (rc == 0)
+        rc = ccg_stale_scan(s, &rel);
+    if (rc == 0 && s->older.n > 0) {
+        ccg_stale_report(s);
+        rc = CCG_REPORTED;
+    }
     for (size_t i = 0; rc == 0 && i < rel.n; i++)
         rc = ccg_grade_object(s, rel.ent[i].key);
     ccd_map_free(&rel);
