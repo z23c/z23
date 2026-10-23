@@ -142,10 +142,13 @@ static int test_spawn_capture_pinned_fd(void)
 {
     int failures = 0;
     TEST("spawn: pinned executable ignores a missing pathname") {
-        int fd = open("/bin/echo", O_RDONLY | O_CLOEXEC);
+        /* A shell, not /bin/echo: Ubuntu 26.04's echo is the uutils
+         * multicall binary, which picks its applet from the exec path
+         * ("/dev/fd/N" under fexecve) and refuses to run. */
+        int fd = open("/bin/sh", O_RDONLY | O_CLOEXEC);
         ASSERT(fd >= 0);
-        const char *argv[] = { "/no/such/spawn-image",
-                               "pinned-executable-ran", NULL };
+        const char *argv[] = { "/no/such/spawn-image", "-c",
+                               "echo pinned-executable-ran", NULL };
         char buf[128] = {0};
         int rc = zcl_spawn_capture_cancelable_fd(fd, argv, buf,
                                                   sizeof(buf), 3000,
