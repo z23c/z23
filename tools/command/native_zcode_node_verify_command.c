@@ -92,6 +92,11 @@
 #define NV_DEFAULT_TIMEOUT_S 5400
 #define NV_MAX_TIMEOUT_S 43200
 #define NV_COMMENT_MAX 4096u
+/* Smallest image each reader can parse: a 64-byte ELF64 header plus one
+ * byte, and a 32-byte mach_header_64. */
+#define NV_ELF_MIN_BYTES 65
+#define NV_MACHO_MIN_BYTES 32
+#define NV_MACHO_HDR_LEN 32
 
 static void nv_fail(struct zcl_command_reply *reply, const char *code,
                     const char *message, const char *evidence)
@@ -154,54 +159,97 @@ static bool nv_read_at(FILE *f, uint64_t off, void *dst, size_t len,
     return fread(dst, 1, len, f) == len;
 }
 
-/* Copy the raw `.comment` bytes of the ELF at `path` into `out`. Returns
- * the byte count, or 0 when the file is not an ELF64-LE or has no
- * `.comment`. */
-static size_t nv_elf_comment(const char *path, unsigned char *out, size_t cap)
+/* Signature shared by the two image readers. Each returns the number of
+ * bytes it copied into `out`, or 0 when the image carries no record it
+ * understands. */
+typedef size_t (*nv_image_reader_fn)(FILE *f, uint64_t fsz, unsigned char *out,
+                                     size_t cap);
+
+/* Stat `path`, refuse anything that is not a regular file of at least
+ * `min_size` bytes, then hand the open file to `reader`. The one place the
+ * readers open a file, so both sides of the comparison see the same rules. */
+static size_t nv_read_image(const char *path, off_t min_size,
+                            nv_image_reader_fn reader, unsigned char *out,
+                            size_t cap)
 {
     struct stat st;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 64)
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < min_size)
         return 0;
     uint64_t fsz = (uint64_t)st.st_size;
     FILE *f = fopen(path, "rb");
     if (!f)
         return 0;
+    size_t got = reader(f, fsz, out, cap);
+    (void)fclose(f);
+    return got;
+}
 
-    size_t got = 0;
+/* The ELF64-LE fields the `.comment` lookup needs from the file header. */
+struct nv_elf_tab {
+    uint64_t shoff;
+    uint16_t shentsize;
+    uint16_t shnum;
+    uint16_t shstrndx;
+};
+
+/* Read the ELF64-LE header and its section-table fields. False when the
+ * file is not ELF64-LE or the table fields are unusable. */
+static bool nv_elf_read_tab(FILE *f, uint64_t fsz, struct nv_elf_tab *t)
+{
     unsigned char eh[64];
     if (!nv_read_at(f, 0, eh, sizeof(eh), fsz))
-        goto done;
+        return false;
     if (memcmp(eh, "\x7f" "ELF", 4) != 0 || eh[4] != 2 || eh[5] != 1)
-        goto done; /* not ELF64 little-endian */
+        return false; /* not ELF64 little-endian */
+    t->shoff = zcl_read_u64_le(eh + 0x28);
+    t->shentsize = zcl_read_u16_le(eh + 0x3A);
+    t->shnum = zcl_read_u16_le(eh + 0x3C);
+    t->shstrndx = zcl_read_u16_le(eh + 0x3E);
+    return t->shentsize >= 64 && t->shnum != 0 && t->shstrndx < t->shnum;
+}
 
-    uint64_t shoff = zcl_read_u64_le(eh + 0x28);
-    uint16_t shentsize = zcl_read_u16_le(eh + 0x3A);
-    uint16_t shnum = zcl_read_u16_le(eh + 0x3C);
-    uint16_t shstrndx = zcl_read_u16_le(eh + 0x3E);
-    if (shentsize < 64 || shnum == 0 || shstrndx >= shnum)
-        goto done;
-
-    /* The section-header string table, so section names can be read. */
+/* The section-header string table, so section names can be read. On success
+ * `*strtab` is a NUL-terminated buffer the caller frees; on failure it stays
+ * NULL and nothing is allocated. */
+static bool nv_elf_load_strtab(FILE *f, uint64_t fsz,
+                               const struct nv_elf_tab *t, char **strtab,
+                               uint64_t *strsz)
+{
+    *strtab = NULL;
+    *strsz = 0;
     unsigned char sh[64];
-    if (!nv_read_at(f, shoff + (uint64_t)shstrndx * shentsize, sh, sizeof(sh),
-                    fsz))
-        goto done;
+    if (!nv_read_at(f, t->shoff + (uint64_t)t->shstrndx * t->shentsize, sh,
+                    sizeof(sh), fsz))
+        return false;
     uint64_t stroff = zcl_read_u64_le(sh + 0x18);
-    uint64_t strsz = zcl_read_u64_le(sh + 0x20);
-    if (strsz == 0 || strsz > (1u << 20))
-        goto done;
-    char *strtab = zcl_malloc((size_t)strsz + 1, "node_verify_strtab");
-    if (!strtab)
-        goto done;
-    if (!nv_read_at(f, stroff, strtab, (size_t)strsz, fsz)) {
-        free(strtab);
-        goto done;
+    uint64_t sz = zcl_read_u64_le(sh + 0x20);
+    if (sz == 0 || sz > (1u << 20))
+        return false;
+    char *buf = zcl_malloc((size_t)sz + 1, "node_verify_strtab");
+    if (!buf)
+        return false;
+    if (!nv_read_at(f, stroff, buf, (size_t)sz, fsz)) {
+        free(buf);
+        return false;
     }
-    strtab[strsz] = '\0';
+    buf[sz] = '\0';
+    *strtab = buf;
+    *strsz = sz;
+    return true;
+}
 
-    for (uint16_t i = 0; i < shnum; i++) {
-        if (!nv_read_at(f, shoff + (uint64_t)i * shentsize, sh, sizeof(sh),
-                        fsz))
+/* Walk the section headers for `.comment` and copy its bytes into `out`.
+ * Returns the byte count, or 0 when it is absent, out of bounds, or larger
+ * than `cap`. */
+static size_t nv_elf_find_comment(FILE *f, uint64_t fsz,
+                                  const struct nv_elf_tab *t,
+                                  const char *strtab, uint64_t strsz,
+                                  unsigned char *out, size_t cap)
+{
+    unsigned char sh[64];
+    for (uint16_t i = 0; i < t->shnum; i++) {
+        if (!nv_read_at(f, t->shoff + (uint64_t)i * t->shentsize, sh,
+                        sizeof(sh), fsz))
             break;
         uint32_t name = zcl_read_u32_le(sh + 0x00);
         if (name >= strsz || strcmp(strtab + name, ".comment") != 0)
@@ -211,13 +259,26 @@ static size_t nv_elf_comment(const char *path, unsigned char *out, size_t cap)
         if (size == 0 || size > cap)
             break;
         if (nv_read_at(f, off, out, (size_t)size, fsz))
-            got = (size_t)size;
+            return (size_t)size;
         break;
     }
-    free(strtab);
+    return 0;
+}
 
-done:
-    (void)fclose(f);
+/* The ELF `.comment` reader: header, then section-name table, then the
+ * `.comment` section itself. */
+static size_t nv_elf_read_comment(FILE *f, uint64_t fsz, unsigned char *out,
+                                  size_t cap)
+{
+    struct nv_elf_tab t = {0};
+    if (!nv_elf_read_tab(f, fsz, &t))
+        return 0;
+    char *strtab = NULL;
+    uint64_t strsz = 0;
+    if (!nv_elf_load_strtab(f, fsz, &t, &strtab, &strsz))
+        return 0;
+    size_t got = nv_elf_find_comment(f, fsz, &t, strtab, strsz, out, cap);
+    free(strtab);
     return got;
 }
 
@@ -227,29 +288,14 @@ done:
  * same portable rule without executing either image. Fat/universal images
  * stay UNKNOWN until their slice selection is explicit; guessing a slice
  * would make the identity host-dependent. */
-static size_t nv_macho_build_version(const char *path, unsigned char *out,
-                                     size_t cap)
+
+/* Walk the load commands for LC_BUILD_VERSION and copy its bytes into `out`.
+ * Returns the byte count, or 0 when no such command is found within bounds. */
+static size_t nv_macho_find_build_version(FILE *f, uint64_t fsz,
+                                          uint32_t ncmds, uint32_t sizeofcmds,
+                                          unsigned char *out, size_t cap)
 {
-    struct stat st;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size < 32)
-        return 0;
-    uint64_t fsz = (uint64_t)st.st_size;
-    FILE *f = fopen(path, "rb");
-    if (!f)
-        return 0;
-
-    size_t got = 0;
-    unsigned char mh[32];
-    if (!nv_read_at(f, 0, mh, sizeof(mh), fsz) ||
-        zcl_read_u32_le(mh) != UINT32_C(0xfeedfacf))
-        goto done;
-    uint32_t ncmds = zcl_read_u32_le(mh + 16);
-    uint32_t sizeofcmds = zcl_read_u32_le(mh + 20);
-    if (ncmds == 0 || ncmds > 4096 || sizeofcmds < 8 ||
-        (uint64_t)sizeofcmds > fsz - sizeof(mh))
-        goto done;
-
-    uint64_t off = sizeof(mh);
+    uint64_t off = NV_MACHO_HDR_LEN;
     uint64_t end = off + sizeofcmds;
     for (uint32_t i = 0; i < ncmds; i++) {
         unsigned char lc[8];
@@ -266,56 +312,36 @@ static size_t nv_macho_build_version(const char *path, unsigned char *out,
             if (cmdsize < 24 || cmdsize > cap)
                 break;
             if (nv_read_at(f, off, out, cmdsize, fsz))
-                got = cmdsize;
+                return (size_t)cmdsize;
             break;
         }
         off += cmdsize;
     }
-
-done:
-    (void)fclose(f);
-    return got;
+    return 0;
 }
 
-/* Fill `hex` (65 bytes) with SHA3-256 over the image's recorded toolchain
- * bytes and `desc` with a printable rendering. Both become "" / "" when the
- * image has no supported record — an honest UNKNOWN, never a fabricated
- * identity. */
-static void nv_toolchain(const char *path, char hex[65], char *desc,
-                         size_t desc_cap)
+/* The Mach-O reader: the 64-bit little-endian magic and load-command bounds,
+ * then the scan for LC_BUILD_VERSION. */
+static size_t nv_macho_read_build_version(FILE *f, uint64_t fsz,
+                                          unsigned char *out, size_t cap)
 {
-    hex[0] = '\0';
-    if (desc && desc_cap)
-        desc[0] = '\0';
-    unsigned char raw[NV_COMMENT_MAX];
-    size_t n = nv_elf_comment(path, raw, sizeof(raw));
-    bool macho = false;
-    if (n == 0) {
-        n = nv_macho_build_version(path, raw, sizeof(raw));
-        macho = n > 0;
-    }
-    if (n == 0)
-        return;
-    uint8_t d[32];
-    zcl_sha3_256(raw, n, d);
-    zcl_hex_encode(d, 32, hex);
-    if (!desc || desc_cap == 0)
-        return;
-    if (macho) {
-        uint32_t platform = zcl_read_u32_le(raw + 8);
-        uint32_t minos = zcl_read_u32_le(raw + 12);
-        uint32_t sdk = zcl_read_u32_le(raw + 16);
-        uint32_t ntools = zcl_read_u32_le(raw + 20);
-        (void)snprintf(desc, desc_cap,
-                       "Mach-O build platform=%u minos=%u.%u.%u "
-                       "sdk=%u.%u.%u tools=%u",
-                       platform, minos >> 16, (minos >> 8) & 0xffu,
-                       minos & 0xffu, sdk >> 16, (sdk >> 8) & 0xffu,
-                       sdk & 0xffu, ntools);
-        return;
-    }
-    /* `.comment` is a run of NUL-separated strings. Render them separated by
-     * "; " so several producers stay visible in one printable line. */
+    unsigned char mh[NV_MACHO_HDR_LEN];
+    if (!nv_read_at(f, 0, mh, sizeof(mh), fsz) ||
+        zcl_read_u32_le(mh) != UINT32_C(0xfeedfacf))
+        return 0;
+    uint32_t ncmds = zcl_read_u32_le(mh + 16);
+    uint32_t sizeofcmds = zcl_read_u32_le(mh + 20);
+    if (ncmds == 0 || ncmds > 4096 || sizeofcmds < 8 ||
+        (uint64_t)sizeofcmds > fsz - sizeof(mh))
+        return 0;
+    return nv_macho_find_build_version(f, fsz, ncmds, sizeofcmds, out, cap);
+}
+
+/* Render `.comment` as its NUL-separated strings, joined by "; " so several
+ * producers stay visible in one printable line. */
+static void nv_comment_describe(const unsigned char *raw, size_t n, char *desc,
+                                size_t desc_cap)
+{
     size_t w = 0;
     for (size_t i = 0; i < n && w + 1 < desc_cap;) {
         size_t len = strnlen((const char *)raw + i, n - i);
@@ -332,6 +358,55 @@ static void nv_toolchain(const char *path, char hex[65], char *desc,
         i += len + 1;
     }
     desc[w] = '\0';
+}
+
+/* Render a Mach-O LC_BUILD_VERSION record: platform, minimum OS, SDK and
+ * tool count. */
+static void nv_macho_describe(const unsigned char *raw, char *desc,
+                              size_t desc_cap)
+{
+    uint32_t platform = zcl_read_u32_le(raw + 8);
+    uint32_t minos = zcl_read_u32_le(raw + 12);
+    uint32_t sdk = zcl_read_u32_le(raw + 16);
+    uint32_t ntools = zcl_read_u32_le(raw + 20);
+    (void)snprintf(desc, desc_cap,
+                   "Mach-O build platform=%u minos=%u.%u.%u "
+                   "sdk=%u.%u.%u tools=%u",
+                   platform, minos >> 16, (minos >> 8) & 0xffu,
+                   minos & 0xffu, sdk >> 16, (sdk >> 8) & 0xffu,
+                   sdk & 0xffu, ntools);
+}
+
+/* Fill `hex` (65 bytes) with SHA3-256 over the image's recorded toolchain
+ * bytes and `desc` with a printable rendering. Both become "" / "" when the
+ * image has no supported record — an honest UNKNOWN, never a fabricated
+ * identity. */
+static void nv_toolchain(const char *path, char hex[65], char *desc,
+                         size_t desc_cap)
+{
+    hex[0] = '\0';
+    if (desc && desc_cap)
+        desc[0] = '\0';
+    unsigned char raw[NV_COMMENT_MAX];
+    size_t n = nv_read_image(path, NV_ELF_MIN_BYTES, nv_elf_read_comment, raw,
+                             sizeof(raw));
+    bool macho = false;
+    if (n == 0) {
+        n = nv_read_image(path, NV_MACHO_MIN_BYTES,
+                          nv_macho_read_build_version, raw, sizeof(raw));
+        macho = n > 0;
+    }
+    if (n == 0)
+        return;
+    uint8_t d[32];
+    zcl_sha3_256(raw, n, d);
+    zcl_hex_encode(d, 32, hex);
+    if (!desc || desc_cap == 0)
+        return;
+    if (macho)
+        nv_macho_describe(raw, desc, desc_cap);
+    else
+        nv_comment_describe(raw, n, desc, desc_cap);
 }
 
 /* ── the local rebuild driver ───────────────────────────────────────────── */
@@ -370,6 +445,18 @@ static int nv_run_driver(const char *source_dir, const char *scratch_dir,
 }
 
 /* ── reply rendering ────────────────────────────────────────────────────── */
+
+struct nv_ctx {
+    char artifact[PATH_MAX];
+    char source_dir[PATH_MAX];
+    char scratch[PATH_MAX];
+    char receipt_path[PATH_MAX];
+    char rebuilt_path[PATH_MAX];
+    const char *profile;
+    int jobs;
+    int timeout_s;
+    bool artifact_is_self;
+};
 
 static bool nv_push_rows(struct json_value *data,
                          const struct vcs_node_repro_report *rep)
@@ -496,30 +583,94 @@ static const char *nv_advice(enum vcs_node_repro_verdict v)
     return "no verdict was reached; treat this as unverified.";
 }
 
+/* The verdict and what it means: the first fields a reader sees. */
+static bool nv_push_verdict(struct json_value *data,
+                            const struct vcs_node_repro_report *rep,
+                            bool full_match)
+{
+    enum vcs_node_repro_verdict verdict =
+        (enum vcs_node_repro_verdict)rep->verdict;
+    return json_push_kv_str(data, "verdict",
+                            vcs_node_repro_verdict_string(verdict)) &&
+           json_push_kv_bool(data, "bytes_match", full_match) &&
+           json_push_kv_bool(data, "fully_verified",
+                             verdict == VCS_NODE_REPRO_MATCH) &&
+           /* THE ENVELOPE IS NOT THE VERDICT. `status:PASSED` on this leaf
+            * means the check RAN — the registry drops the whole `data` object
+            * on any other status (command_registry.c:2158-2164), and a
+            * mismatch whose diagnosis was thrown away is the useless bare red
+            * light this command exists to replace. Read `verdict`. `partial`
+            * is NOT a pass. */
+           json_push_kv_str(
+               data, "status_means",
+               "the envelope status says this check ran to completion; it is "
+               "NOT the verdict. Read `verdict`: only `match` is a full pass, "
+               "and `partial` is not a pass") &&
+           json_push_kv_str(data, "detail", rep->detail) &&
+           json_push_kv_str(data, "means", nv_advice(verdict));
+}
+
+/* The two receipts, the received one first. */
+static bool nv_push_receipts(struct json_value *data, const struct nv_ctx *c,
+                             const struct vcs_node_receipt *received,
+                             const struct vcs_node_receipt *rebuilt)
+{
+    return nv_push_receipt(data, "received", received, c->artifact) &&
+           nv_push_receipt(data, "rebuilt", rebuilt, c->rebuilt_path);
+}
+
+/* Which identities the comparator could establish, and whether they agree. */
+static bool nv_push_identity(struct json_value *data,
+                             const struct vcs_node_repro_report *rep)
+{
+    return json_push_kv_bool(data, "source_identity_known",
+                             rep->source_id_known) &&
+           json_push_kv_bool(data, "source_identity_agrees",
+                             rep->source_id_agrees) &&
+           json_push_kv_bool(data, "toolchain_known", rep->toolchain_known) &&
+           json_push_kv_bool(data, "toolchain_agrees", rep->toolchain_agrees);
+}
+
+/* How many artifacts were compared, matched, differed and left unverified. */
+static bool nv_push_counts(struct json_value *data,
+                           const struct vcs_node_repro_report *rep)
+{
+    return json_push_kv_int(data, "artifacts_compared",
+                            (int64_t)rep->compared) &&
+           json_push_kv_int(data, "artifacts_matched",
+                            (int64_t)rep->matched) &&
+           json_push_kv_int(data, "artifacts_differed",
+                            (int64_t)rep->differed) &&
+           json_push_kv_int(data, "unverified_count",
+                            (int64_t)rep->unverified);
+}
+
+/* What was checked, where, and the scope statement that bounds the verdict. */
+static bool nv_push_scope(struct json_value *data, const struct nv_ctx *c)
+{
+    return json_push_kv_str(data, "profile", c->profile) &&
+           json_push_kv_str(data, "source_dir", c->source_dir) &&
+           json_push_kv_str(data, "scratch_dir", c->scratch) &&
+           json_push_kv_bool(data, "artifact_is_this_process",
+                             c->artifact_is_self) &&
+           json_push_kv_str(
+               data, "scope",
+               "this compares the artifact named under `received` against "
+               "bytes built here from `source_dir`. It asked no server, and it "
+               "never checked a published hash against the file it was "
+               "published beside. Components listed under `unverified` were "
+               "not rebuilt and are NOT covered by the verdict.") &&
+           json_push_kv_bool(data, "github_contacted", false);
+}
+
 /* ── the handler ────────────────────────────────────────────────────────── */
 
-struct nv_ctx {
-    char artifact[PATH_MAX];
-    char source_dir[PATH_MAX];
-    char scratch[PATH_MAX];
-    char receipt_path[PATH_MAX];
-    char rebuilt_path[PATH_MAX];
-    const char *profile;
-    int jobs;
-    int timeout_s;
-    bool artifact_is_self;
-};
-
-/* Resolve every path and policy input, or name the refusal. */
-static bool nv_resolve(const struct zcl_command_request *request,
-                       struct zcl_command_reply *reply, struct nv_ctx *c)
+/* Resolve the artifact path and whether it is this process's own binary. */
+static bool nv_resolve_artifact(const struct json_value *in,
+                                struct zcl_command_reply *reply,
+                                struct nv_ctx *c, bool have_self,
+                                const char *self)
 {
-    char makefile[PATH_MAX];
-    memset(c, 0, sizeof(*c));
-    const struct json_value *in = request->input;
-
-    char self[PATH_MAX] = "";
-    bool have_self = os_proc_exe_path(self, sizeof(self));
     const char *artifact = nv_str(in, "artifact");
     if (!artifact) {
         if (!have_self) {
@@ -551,7 +702,15 @@ static bool nv_resolve(const struct zcl_command_request *request,
      * provenance is exactly what is in question is not a verification
      * step. */
     c->artifact_is_self = have_self && strcmp(c->artifact, self) == 0;
+    return true;
+}
 
+/* Resolve the source tree and confirm it has a Makefile to rebuild from. */
+static bool nv_resolve_source(const struct json_value *in,
+                              struct zcl_command_reply *reply,
+                              struct nv_ctx *c)
+{
+    char makefile[PATH_MAX];
     const char *src = nv_str(in, "source_dir");
     if (!src) src = ".";
     if (!platform_directory_canonical_real(src, c->source_dir,
@@ -576,27 +735,47 @@ static bool nv_resolve(const struct zcl_command_request *request,
                 c->source_dir);
         return false;
     }
+    return true;
+}
 
+/* The default scratch root when the caller named none. False, with the
+ * refusal already written, only when HOME is unset on a non-Windows host. */
+static bool nv_default_scratch(struct zcl_command_reply *reply,
+                               struct nv_ctx *c, int *n)
+{
+#if defined(_WIN32)
+    char state[PATH_MAX];
+    (void)reply;
+    *n = platform_state_root(state, sizeof(state))
+             ? snprintf(c->scratch, sizeof(c->scratch),
+                        "%s/scratch/node-verify", state)
+             : -1;
+    return true;
+#else
+    const char *home = getenv("HOME");
+    if (!home || !home[0]) {
+        nv_fail(reply, "NO_SCRATCH_DIR",
+                "no scratch_dir was given and HOME is unset, so there is "
+                "nowhere to put an isolated build tree", NULL);
+        return false;
+    }
+    *n = snprintf(c->scratch, sizeof(c->scratch),
+                  "%s/.local/state/zclassic23/scratch/node-verify", home);
+    return true;
+#endif
+}
+
+/* Resolve the scratch directory and the two receipt paths inside it. */
+static bool nv_resolve_scratch(const struct json_value *in,
+                               struct zcl_command_reply *reply,
+                               struct nv_ctx *c)
+{
     const char *scratch = nv_str(in, "scratch_dir");
+    int n = -1;
     if (scratch) {
         n = snprintf(c->scratch, sizeof(c->scratch), "%s", scratch);
-    } else {
-#if defined(_WIN32)
-        char state[PATH_MAX];
-        n = platform_state_root(state, sizeof(state))
-            ? snprintf(c->scratch, sizeof(c->scratch),
-                       "%s/scratch/node-verify", state) : -1;
-#else
-        const char *home = getenv("HOME");
-        if (!home || !home[0]) {
-            nv_fail(reply, "NO_SCRATCH_DIR",
-                    "no scratch_dir was given and HOME is unset, so there is "
-                    "nowhere to put an isolated build tree", NULL);
-            return false;
-        }
-        n = snprintf(c->scratch, sizeof(c->scratch),
-                     "%s/.local/state/zclassic23/scratch/node-verify", home);
-#endif
+    } else if (!nv_default_scratch(reply, c, &n)) {
+        return false;
     }
     if (n <= 0 || (size_t)n >= sizeof(c->scratch)) {
         nv_fail(reply, "SCRATCH_PATH_TOO_LONG",
@@ -607,7 +786,14 @@ static bool nv_resolve(const struct zcl_command_request *request,
                    "%s/rebuild.receipt", c->scratch);
     (void)snprintf(c->rebuilt_path, sizeof(c->rebuilt_path),
                    "%s/build/bin/z23", c->scratch);
+    return true;
+}
 
+/* Resolve the build profile, refusing any name that is not one of the two. */
+static bool nv_resolve_profile(const struct json_value *in,
+                               struct zcl_command_reply *reply,
+                               struct nv_ctx *c)
+{
     const char *profile = nv_str(in, "profile");
     if (!profile)
         profile = "default";
@@ -618,9 +804,21 @@ static bool nv_resolve(const struct zcl_command_request *request,
         return false;
     }
     c->profile = profile;
+    return true;
+}
 
-    const struct json_value *jv = in ? json_get(in, "jobs") : NULL;
-    long jobs = jv ? (long)json_get_int(jv) : 0;
+/* An integer input, or 0 when it is absent. */
+static long nv_int_input(const struct json_value *in, const char *key)
+{
+    const struct json_value *v = in ? json_get(in, key) : NULL;
+    return v ? (long)json_get_int(v) : 0;
+}
+
+/* Clamp the job count and the timeout to their policy bounds. Neither one
+ * refuses; an absent or nonsensical value takes its default. */
+static void nv_resolve_limits(const struct json_value *in, struct nv_ctx *c)
+{
+    long jobs = nv_int_input(in, "jobs");
     if (jobs <= 0)
         jobs = (long)platform_logical_cpu_count();
     if (jobs <= 0)
@@ -629,13 +827,29 @@ static bool nv_resolve(const struct zcl_command_request *request,
         jobs = 4096;
     c->jobs = (int)jobs;
 
-    const struct json_value *tv = in ? json_get(in, "timeout_seconds") : NULL;
-    long secs = tv ? (long)json_get_int(tv) : 0;
+    long secs = nv_int_input(in, "timeout_seconds");
     if (secs <= 0)
         secs = NV_DEFAULT_TIMEOUT_S;
     if (secs > NV_MAX_TIMEOUT_S)
         secs = NV_MAX_TIMEOUT_S;
     c->timeout_s = (int)secs;
+}
+
+/* Resolve every path and policy input, or name the refusal. */
+static bool nv_resolve(const struct zcl_command_request *request,
+                       struct zcl_command_reply *reply, struct nv_ctx *c)
+{
+    memset(c, 0, sizeof(*c));
+    const struct json_value *in = request->input;
+
+    char self[PATH_MAX] = "";
+    bool have_self = os_proc_exe_path(self, sizeof(self));
+    if (!nv_resolve_artifact(in, reply, c, have_self, self) ||
+        !nv_resolve_source(in, reply, c) ||
+        !nv_resolve_scratch(in, reply, c) ||
+        !nv_resolve_profile(in, reply, c))
+        return false;
+    nv_resolve_limits(in, c);
     return true;
 }
 
@@ -662,6 +876,95 @@ static bool nv_load_receipt(const char *path, struct vcs_node_receipt *out,
     return vcs_node_receipt_decode(text, n, out, why, why_cap);
 }
 
+/* Step 1: the artifact the user HAS. False, with the refusal written, when
+ * its bytes cannot be read end to end. */
+static bool nv_measure_received(const struct nv_ctx *c,
+                                struct zcl_command_reply *reply,
+                                struct vcs_node_receipt *received)
+{
+    memset(received, 0, sizeof(*received));
+    received->producer = VCS_NODE_PRODUCER_RECEIVED;
+    received->artifact_count = 1;
+    (void)snprintf(received->artifacts[0].path,
+                   sizeof(received->artifacts[0].path), "%s",
+                   NV_ARTIFACT_PATH);
+    if (!nv_file_digest(c->artifact, received->artifacts[0].sha3,
+                        &received->artifacts[0].bytes)) {
+        nv_fail(reply, "ARTIFACT_UNREADABLE",
+                "the artifact could not be read end to end, so its bytes "
+                "cannot be hashed", c->artifact);
+        return false;
+    }
+    if (c->artifact_is_self) {
+        const char *sid = zcl_build_source_id_sha256();
+        if (sid && strlen(sid) == 64)
+            (void)snprintf(received->source_id, sizeof(received->source_id),
+                           "%s", sid);
+    }
+    nv_toolchain(c->artifact, received->toolchain_id, received->toolchain_desc,
+                 sizeof(received->toolchain_desc));
+    return true;
+}
+
+/* Step 2: the bytes THIS machine builds. Runs the driver and reads the
+ * receipt it wrote. False, with the refusal written, when the rebuild fails
+ * or its receipt cannot be read. */
+static bool nv_rebuild(const struct nv_ctx *c, struct zcl_command_reply *reply,
+                       struct vcs_node_receipt *rebuilt)
+{
+    static char log[8192];
+    log[0] = '\0';
+    (void)remove(c->receipt_path);
+    int rc = nv_run_driver(c->source_dir, c->scratch, c->receipt_path,
+                           c->profile, c->jobs, c->timeout_s, log, sizeof(log));
+    if (rc != 0) {
+        char msg[512];
+        (void)snprintf(msg, sizeof(msg),
+                       "the local rebuild did not complete (driver exit %d); "
+                       "nothing was compared, so nothing is verified", rc);
+        nv_fail(reply, "REBUILD_FAILED", msg, c->scratch);
+        return false;
+    }
+
+    char why[256] = "";
+    if (!nv_load_receipt(c->receipt_path, rebuilt, why, sizeof(why))) {
+        nv_fail(reply, "REBUILD_RECEIPT_INVALID",
+                why[0] ? why : "the rebuild receipt could not be read",
+                c->receipt_path);
+        return false;
+    }
+    /* The toolchain of the REBUILT artifact is measured here, by the same
+     * reader that measured the received one, unless the receipt already
+     * carried one. Two different measurements would make every honest build
+     * look like a toolchain mismatch. */
+    if (!rebuilt->toolchain_id[0])
+        nv_toolchain(c->rebuilt_path, rebuilt->toolchain_id, NULL, 0);
+    return true;
+}
+
+/* Every field of the reply, in the order a reader sees them. Stops at the
+ * first field the reply refuses, as the original single chain did. */
+static bool nv_push_report(struct json_value *data, const struct nv_ctx *c,
+                           const struct vcs_node_receipt *received,
+                           const struct vcs_node_receipt *rebuilt,
+                           struct vcs_node_repro_report *rep, bool full_match)
+{
+    bool ok = nv_push_verdict(data, rep, full_match) &&
+              nv_push_receipts(data, c, received, rebuilt) &&
+              nv_push_identity(data, rep) && nv_push_counts(data, rep) &&
+              nv_push_rows(data, rep) && nv_push_gaps(data, rep) &&
+              nv_push_scope(data, c);
+    if (!c->artifact_is_self)
+        ok = ok && json_push_kv_str(
+                       data, "source_identity_note",
+                       "the source identity baked into an executable is "
+                       "readable only for the one this process is running; "
+                       "for any other file it stays unknown, because "
+                       "executing an artifact to ask what it is made of is "
+                       "not a verification step");
+    return ok;
+}
+
 void zcl_native_handle_zcode_node_verify(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -673,121 +976,19 @@ void zcl_native_handle_zcode_node_verify(
 
     /* ── 1. the artifact the user HAS ─────────────────────────────────── */
     struct vcs_node_receipt received;
-    memset(&received, 0, sizeof(received));
-    received.producer = VCS_NODE_PRODUCER_RECEIVED;
-    received.artifact_count = 1;
-    (void)snprintf(received.artifacts[0].path,
-                   sizeof(received.artifacts[0].path), "%s",
-                   NV_ARTIFACT_PATH);
-    if (!nv_file_digest(c.artifact, received.artifacts[0].sha3,
-                        &received.artifacts[0].bytes)) {
-        nv_fail(reply, "ARTIFACT_UNREADABLE",
-                "the artifact could not be read end to end, so its bytes "
-                "cannot be hashed", c.artifact);
+    if (!nv_measure_received(&c, reply, &received))
         return;
-    }
-    if (c.artifact_is_self) {
-        const char *sid = zcl_build_source_id_sha256();
-        if (sid && strlen(sid) == 64)
-            (void)snprintf(received.source_id, sizeof(received.source_id),
-                           "%s", sid);
-    }
-    nv_toolchain(c.artifact, received.toolchain_id, received.toolchain_desc,
-                 sizeof(received.toolchain_desc));
 
     /* ── 2. the bytes THIS machine builds ─────────────────────────────── */
-    static char log[8192];
-    log[0] = '\0';
-    (void)remove(c.receipt_path);
-    int rc = nv_run_driver(c.source_dir, c.scratch, c.receipt_path,
-                           c.profile, c.jobs, c.timeout_s, log, sizeof(log));
-    if (rc != 0) {
-        char msg[512];
-        (void)snprintf(msg, sizeof(msg),
-                       "the local rebuild did not complete (driver exit %d); "
-                       "nothing was compared, so nothing is verified", rc);
-        nv_fail(reply, "REBUILD_FAILED", msg, c.scratch);
-        return;
-    }
-
     struct vcs_node_receipt rebuilt;
-    char why[256] = "";
-    if (!nv_load_receipt(c.receipt_path, &rebuilt, why, sizeof(why))) {
-        nv_fail(reply, "REBUILD_RECEIPT_INVALID",
-                why[0] ? why : "the rebuild receipt could not be read",
-                c.receipt_path);
+    if (!nv_rebuild(&c, reply, &rebuilt))
         return;
-    }
-    /* The toolchain of the REBUILT artifact is measured here, by the same
-     * reader that measured the received one, unless the receipt already
-     * carried one. Two different measurements would make every honest build
-     * look like a toolchain mismatch. */
-    if (!rebuilt.toolchain_id[0])
-        nv_toolchain(c.rebuilt_path, rebuilt.toolchain_id, NULL, 0);
 
     /* ── 3. the verdict ───────────────────────────────────────────────── */
     struct vcs_node_repro_report rep;
     bool full_match = vcs_node_reproduce_compare(&received, &rebuilt, &rep);
-    enum vcs_node_repro_verdict verdict =
-        (enum vcs_node_repro_verdict)rep.verdict;
-
-    struct json_value *data = &reply->data;
-    bool ok =
-        json_push_kv_str(data, "verdict",
-                         vcs_node_repro_verdict_string(verdict)) &&
-        json_push_kv_bool(data, "bytes_match", full_match) &&
-        json_push_kv_bool(data, "fully_verified",
-                          verdict == VCS_NODE_REPRO_MATCH) &&
-        /* THE ENVELOPE IS NOT THE VERDICT. `status:PASSED` on this leaf means
-         * the check RAN — the registry drops the whole `data` object on any
-         * other status (command_registry.c:2158-2164), and a mismatch whose
-         * diagnosis was thrown away is the useless bare red light this
-         * command exists to replace. Read `verdict`. `partial` is NOT a
-         * pass. */
-        json_push_kv_str(
-            data, "status_means",
-            "the envelope status says this check ran to completion; it is "
-            "NOT the verdict. Read `verdict`: only `match` is a full pass, "
-            "and `partial` is not a pass") &&
-        json_push_kv_str(data, "detail", rep.detail) &&
-        json_push_kv_str(data, "means", nv_advice(verdict)) &&
-        nv_push_receipt(data, "received", &received, c.artifact) &&
-        nv_push_receipt(data, "rebuilt", &rebuilt, c.rebuilt_path) &&
-        json_push_kv_bool(data, "source_identity_known", rep.source_id_known) &&
-        json_push_kv_bool(data, "source_identity_agrees",
-                          rep.source_id_agrees) &&
-        json_push_kv_bool(data, "toolchain_known", rep.toolchain_known) &&
-        json_push_kv_bool(data, "toolchain_agrees", rep.toolchain_agrees) &&
-        json_push_kv_int(data, "artifacts_compared", (int64_t)rep.compared) &&
-        json_push_kv_int(data, "artifacts_matched", (int64_t)rep.matched) &&
-        json_push_kv_int(data, "artifacts_differed", (int64_t)rep.differed) &&
-        json_push_kv_int(data, "unverified_count",
-                         (int64_t)rep.unverified) &&
-        nv_push_rows(data, &rep) && nv_push_gaps(data, &rep) &&
-        json_push_kv_str(data, "profile", c.profile) &&
-        json_push_kv_str(data, "source_dir", c.source_dir) &&
-        json_push_kv_str(data, "scratch_dir", c.scratch) &&
-        json_push_kv_bool(data, "artifact_is_this_process",
-                          c.artifact_is_self) &&
-        json_push_kv_str(
-            data, "scope",
-            "this compares the artifact named under `received` against bytes "
-            "built here from `source_dir`. It asked no server, and it never "
-            "checked a published hash against the file it was published "
-            "beside. Components listed under `unverified` were not rebuilt "
-            "and are NOT covered by the verdict.") &&
-        json_push_kv_bool(data, "github_contacted", false);
-
-    if (!c.artifact_is_self)
-        ok = ok && json_push_kv_str(
-                       data, "source_identity_note",
-                       "the source identity baked into an executable is "
-                       "readable only for the one this process is running; "
-                       "for any other file it stays unknown, because "
-                       "executing an artifact to ask what it is made of is "
-                       "not a verification step");
-
-    if (!ok) {
+    if (!nv_push_report(&reply->data, &c, &received, &rebuilt, &rep,
+                        full_match)) {
         nv_fail(reply, "VERIFY_REPLY_REFUSED",
                 "the verify reply object refused a field", c.artifact);
         return;
