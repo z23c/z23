@@ -169,6 +169,7 @@ struct fox_call {
  * live node, so no test depends on the machine it runs on. */
 #define FOX_NO_BRIEF "/nonexistent/z23-fox/brief.json"
 #define FOX_NO_DATADIR "/nonexistent/z23-fox/datadir"
+#define FOX_NO_STOPWATCH "/nonexistent/z23-fox/stopwatch/history.jsonl"
 
 static void fox_begin_bare(struct fox_call *c)
 {
@@ -967,12 +968,182 @@ _test_next:;
     return failures;
 }
 
+/* ── fresh_node_sync_eta_s: the C3 cold-sync stopwatch ledger ─────── */
+
+#define FOX_SYNC_NOW ((int64_t)1800000000)
+#define FOX_SYNC_DAY ((int64_t)86400)
+#define FOX_SYNC_LOOPBACK "127.0.0.1:39070"
+/* RFC 5737 documentation address: a stranger's peer, never loopback. */
+#define FOX_SYNC_REMOTE "192.0.2.7:39070"
+#define FOX_SYNC_STATUS_MAX (ZCL_OBJECTIVES_REASON_MAX + 32u)
+
+/* Appends raw text to a ledger, creating it on first use. */
+static bool fox_sync_put(const char *path, const char *text)
+{
+    FILE *f = fopen(path, "ab");
+    bool wrote;
+    if (!f)
+        return false;
+    wrote = fputs(text, f) >= 0;
+    return fclose(f) == 0 && wrote;
+}
+
+/* Appends one stopwatch record. `wall` is a JSON literal: a number, null or a
+ * string. */
+static bool fox_sync_append(const char *path, int64_t ts, const char *wall,
+                            const char *peer, const char *verdict)
+{
+    char line[512];
+    (void)snprintf(line, sizeof(line),
+                   "{\"ts\":%lld,\"verdict\":\"%s\",\"wall_clock_seconds\":%s,"
+                   "\"peer\":\"%s\",\"build_commit\":\"abcdef1234567890\","
+                   "\"node_bin_sha256\":\"00ff\"}\n",
+                   (long long)ts, verdict, wall, peer);
+    return fox_sync_put(path, line);
+}
+
+static struct zcl_objective_value fox_sync_measure(const char *path,
+                                                   int64_t now)
+{
+    struct zcl_objectives_options o = {0};
+    o.now = now;
+    (void)setenv("ZCL_C3_STOPWATCH_HISTORY", path, 1);
+    return zcl_objectives_measure(&o, "fresh_node_sync_eta_s");
+}
+
+static void fox_sync_status(const struct zcl_objective_value *v, char *out,
+                            size_t cap)
+{
+    const struct zcl_objective_row *catalog;
+    size_t n = zcl_objectives_catalog(&catalog);
+    out[0] = '\0';
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(catalog[i].id, "fresh_node_sync_eta_s") == 0) {
+            zcl_objectives_status(&catalog[i], v, out, cap);
+            return;
+        }
+    }
+}
+
+static int fox_case_sync(void)
+{
+    int failures = 0;
+    char root[512], path[1024], absent[1100], status[FOX_SYNC_STATUS_MAX];
+    struct zcl_objective_value v;
+    test_make_tmpdir(root, sizeof(root), "fleet_objectives", "sync");
+    (void)snprintf(absent, sizeof(absent), "%s/none.jsonl", root);
+    (void)snprintf(path, sizeof(path), "%s/history.jsonl", root);
+
+    TEST("objectives: no stopwatch ledger is unmeasured by name") {
+        v = fox_sync_measure(absent, FOX_SYNC_NOW);
+        ASSERT(!v.measured);
+        ASSERT_STR_EQ(v.reason, "no stopwatch ledger");
+        PASS();
+    }
+
+    TEST("objectives: a newest stopwatch run older than 7 days is unmeasured, "
+         "with its age and verdict") {
+        (void)unlink(path);
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 8 * FOX_SYNC_DAY, "467",
+                               FOX_SYNC_REMOTE, "pass"));
+        v = fox_sync_measure(path, FOX_SYNC_NOW);
+        ASSERT(!v.measured);
+        ASSERT_STR_EQ(v.reason,
+                      "no stopwatch run in 7 days (newest 192 h, verdict pass)");
+        PASS();
+    }
+
+    TEST("objectives: a fresh run from a loopback peer is never graded met") {
+        (void)unlink(path);
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 3600, "467",
+                               FOX_SYNC_LOOPBACK, "pass"));
+        v = fox_sync_measure(path, FOX_SYNC_NOW);
+        ASSERT(!v.measured);
+        ASSERT_STR_EQ(v.reason,
+                      "local-peer proxy (peer=127.0.0.1:39070, build=abcdef12, "
+                      "age=1 h); a real-network run is needed for met");
+        fox_sync_status(&v, status, sizeof(status));
+        ASSERT_STR_EQ(status,
+                      "unmeasured(local-peer proxy (peer=127.0.0.1:39070, "
+                      "build=abcdef12, age=1 h); a real-network run is needed "
+                      "for met)");
+        PASS();
+    }
+
+    TEST("objectives: a fresh non-loopback run of 467 s is met") {
+        (void)unlink(path);
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 3600, "467",
+                               FOX_SYNC_REMOTE, "pass"));
+        v = fox_sync_measure(path, FOX_SYNC_NOW);
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)467);
+        fox_sync_status(&v, status, sizeof(status));
+        ASSERT_STR_EQ(status, "met");
+        PASS();
+    }
+
+    TEST("objectives: a fresh non-loopback run of 5000 s is unmet") {
+        (void)unlink(path);
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 3600, "5000",
+                               FOX_SYNC_REMOTE, "pass"));
+        v = fox_sync_measure(path, FOX_SYNC_NOW);
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)5000);
+        fox_sync_status(&v, status, sizeof(status));
+        ASSERT_STR_EQ(status, "unmet");
+        PASS();
+    }
+
+    TEST("objectives: the newest record with a wall clock wins, not the first") {
+        (void)unlink(path);
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 7200, "5000",
+                               FOX_SYNC_REMOTE, "pass"));
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 600, "467",
+                               FOX_SYNC_REMOTE, "pass"));
+        v = fox_sync_measure(path, FOX_SYNC_NOW);
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)467);
+        PASS();
+    }
+
+    TEST("objectives: malformed, overlong and null-wall lines are skipped") {
+        static char overlong[5002];
+        (void)unlink(path);
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 7200, "900",
+                               FOX_SYNC_REMOTE, "pass"));
+        ASSERT(fox_sync_put(path, "this is not json\n"));
+        memset(overlong, 'x', 5000);
+        overlong[5000] = '\n';
+        overlong[5001] = '\0';
+        ASSERT(fox_sync_put(path, overlong));
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 3600, "467",
+                               FOX_SYNC_REMOTE, "pass"));
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 60, "null",
+                               FOX_SYNC_REMOTE, "pass"));
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 30, "\"fast\"",
+                               FOX_SYNC_REMOTE, "pass"));
+        v = fox_sync_measure(path, FOX_SYNC_NOW);
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)467);
+        PASS();
+    }
+
+_test_next:;
+    (void)setenv("ZCL_C3_STOPWATCH_HISTORY", FOX_NO_STOPWATCH, 1);
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 int test_fleet_objectives(void);
 int test_fleet_objectives(void)
 {
     int failures = 0;
     /* The node rows read this datadir; the leaf takes no datadir input. */
     (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", FOX_NO_DATADIR, 1);
+    /* Never the real HOME ledger: every case that reaches the producer sees
+     * a path that does not exist unless the case names its own fixture. */
+    (void)setenv("ZCL_C3_STOPWATCH_HISTORY", FOX_NO_STOPWATCH, 1);
+    failures += fox_case_sync();
     failures += fox_case_ledger_extent();
     failures += fox_case_windows();
     failures += fox_case_repeats();
@@ -1419,7 +1590,7 @@ int test_fleet_objectives(void)
         const struct json_value *eta = fox_row(&c, "fresh_node_sync_eta_s");
         ASSERT(eta != NULL);
         ASSERT_STR_EQ(fox_row_str(eta, "status"),
-                     "unmeasured(producer is a future leaf)");
+                     "unmeasured(no stopwatch ledger)");
         const struct json_value *tok =
             fox_row(&c, "tokens_per_landed_commit");
         ASSERT(tok != NULL);

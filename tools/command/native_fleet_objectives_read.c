@@ -23,9 +23,11 @@
 #include "util/path_util.h"
 
 #include <dirent.h>
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 
 #define OBJ_LINE_MAX 4096u
@@ -1410,16 +1412,212 @@ static struct zcl_objective_value obj_functions_over_complexity_cap(
     return v;
 }
 
-/* ── not producible from this tree today ─────────────────────────────── */
+/* ── fresh_node_sync_eta_s: the C3 cold-sync stopwatch ledger ─────────── */
+
+/* One cold sync is one stopwatch record. The objective grades the newest
+ * record that carries a wall clock, and only while that record is fresh. */
+#define OBJ_SYNC_FRESH_S (7 * OBJ_DAY_S)
+#define OBJ_SYNC_PEER_MAX 64u
+#define OBJ_SYNC_VERDICT_MAX 64u
+#define OBJ_SYNC_BUILD_MAX 9u /* eight commit characters and the NUL */
+
+struct obj_sync_newest {
+    bool have;
+    int64_t ts;
+    int64_t wall_s;
+    char verdict[OBJ_SYNC_VERDICT_MAX];
+    char peer[OBJ_SYNC_PEER_MAX];
+    char build[OBJ_SYNC_BUILD_MAX];
+};
+
+/* A JSON integer, or a real rounded to the nearest second. Anything else,
+ * null included, is not a measurement. */
+static bool obj_sync_number(const struct json_value *v, int64_t *out)
+{
+    if (!v)
+        return false;
+    if (v->type == JSON_INT) {
+        *out = json_get_int(v);
+        return *out >= 0;
+    }
+    if (v->type == JSON_REAL) {
+        double d = json_get_real(v);
+        if (!(d >= 0.0 && d < 1e15))
+            return false;
+        *out = (int64_t)(d + 0.5);
+        return true;
+    }
+    return false;
+}
+
+/* Keeps the newest measured record; a later line wins a tie in ts. */
+static void obj_sync_row(const struct json_value *row,
+                         struct obj_sync_newest *n)
+{
+    int64_t ts, wall;
+    const char *s;
+    if (!obj_sync_number(json_get(row, "ts"), &ts) ||
+        !obj_sync_number(json_get(row, "wall_clock_seconds"), &wall))
+        return;
+    if (n->have && ts < n->ts)
+        return;
+    n->have = true;
+    n->ts = ts;
+    n->wall_s = wall;
+    s = json_get_str(json_get(row, "verdict"));
+    obj_repeat_put(n->verdict, sizeof(n->verdict), s, strlen(s));
+    s = json_get_str(json_get(row, "peer"));
+    obj_repeat_put(n->peer, sizeof(n->peer), s, strlen(s));
+    s = json_get_str(json_get(row, "build_commit"));
+    obj_repeat_put(n->build, sizeof(n->build), s, strlen(s));
+}
+
+/* A malformed line, or one that is not an object, is skipped. */
+static void obj_sync_try(const char *line, size_t len,
+                         struct obj_sync_newest *n)
+{
+    struct json_value row;
+    json_init(&row);
+    if (json_read(&row, line, len) && row.type == JSON_OBJ)
+        obj_sync_row(&row, n);
+    json_free(&row);
+}
+
+/* Reads one line of at most cap - 1 bytes. An overlong line is drained to
+ * its end and reported with *whole false, so a skipped line never grows the
+ * buffer. Returns 1 for a line, 0 at EOF, -1 on a read error. */
+static int obj_sync_line(FILE *fp, char *line, size_t cap, bool *whole)
+{
+    size_t len;
+    if (!fgets(line, (int)cap, fp))
+        return ferror(fp) ? -1 : 0;
+    len = strlen(line);
+    if (len > 0 && line[len - 1] == '\n') {
+        *whole = true;
+        return 1;
+    }
+    if (feof(fp)) {
+        *whole = true;
+        return 1;
+    }
+    *whole = false;
+    int ch;
+    do {
+        ch = fgetc(fp);
+    } while (ch != EOF && ch != '\n');
+    return ferror(fp) ? -1 : 1;
+}
+
+/* 1 when the ledger was read, 0 when it does not exist, -1 when it cannot be
+ * read to its end. */
+static int obj_sync_scan(const char *path, struct obj_sync_newest *n)
+{
+    char line[OBJ_LINE_MAX];
+    bool whole = false;
+    int status;
+    FILE *fp = fopen(path, "r");
+    if (!fp)
+        return errno == ENOENT ? 0 : -1;
+    while ((status = obj_sync_line(fp, line, sizeof line, &whole)) == 1) {
+        if (whole)
+            obj_sync_try(line, strlen(line), n);
+    }
+    if (fclose(fp) != 0 || status < 0)
+        return -1;
+    return 1;
+}
+
+/* The host of "host:port", "[v6]:port" or a bare IPv6 address. */
+static void obj_sync_host(const char *peer, char *host, size_t cap)
+{
+    const char *start = peer;
+    const char *stop = peer + strlen(peer);
+    size_t colons = 0;
+    for (const char *p = peer; *p; p++)
+        colons += *p == ':';
+    if (peer[0] == '[') {
+        const char *close = strchr(peer, ']');
+        start = peer + 1;
+        if (close)
+            stop = close;
+    } else if (colons == 1) {
+        stop = strchr(peer, ':');
+    }
+    obj_repeat_put(host, cap, start, (size_t)(stop - start));
+}
+
+/* An empty peer is unknown, so it is treated as local: a run that cannot be
+ * shown to come from the network never grades met. */
+static bool obj_sync_loopback(const char *peer)
+{
+    char host[OBJ_SYNC_PEER_MAX];
+    obj_sync_host(peer, host, sizeof(host));
+    return host[0] == '\0' || strncmp(host, "127.", 4) == 0 ||
+           strcmp(host, "::1") == 0 || strcasecmp(host, "localhost") == 0 ||
+           strncmp(host, "::ffff:127.", 11) == 0;
+}
 
 static struct zcl_objective_value obj_fresh_node_sync_eta_s(
     const struct zcl_objectives_options *options)
 {
     struct zcl_objective_value v = {0};
-    (void)options;
-    obj_set_reason(&v, "%s", "producer is a future leaf");
+    struct obj_sync_newest n = {0};
+    const char *env = getenv("ZCL_C3_STOPWATCH_HISTORY");
+    const char *home = getenv("HOME");
+    char path[1024];
+    int64_t age_s, age_h;
+    int len, scan;
+    /* The ledger: ZCL_C3_STOPWATCH_HISTORY when set, else the release path
+     * under HOME. A path that does not fit is no ledger, never a prefix. */
+    if (env && env[0])
+        len = snprintf(path, sizeof(path), "%s", env);
+    else if (home && home[0])
+        len = snprintf(path, sizeof(path),
+                       "%s/.local/state/zclassic23-c3-stopwatch/history.jsonl",
+                       home);
+    else
+        len = -1;
+    if (len <= 0 || (size_t)len >= sizeof(path)) {
+        obj_set_reason(&v, "%s", "no stopwatch ledger");
+        return v;
+    }
+    scan = obj_sync_scan(path, &n);
+    if (scan == 0) {
+        obj_set_reason(&v, "%s", "no stopwatch ledger");
+        return v;
+    }
+    if (scan < 0) {
+        obj_set_reason(&v, "%s", "stopwatch ledger unreadable");
+        return v;
+    }
+    if (!n.have) {
+        obj_set_reason(&v, "%s",
+                       "no stopwatch run in 7 days (no completed run in the ledger)");
+        return v;
+    }
+    age_s = obj_now(options) - n.ts;
+    age_h = age_s / 3600;
+    if (age_s > OBJ_SYNC_FRESH_S) {
+        (void)snprintf(v.reason, sizeof(v.reason),
+                       "no stopwatch run in 7 days (newest %lld h, verdict %s)",
+                       (long long)age_h, n.verdict);
+        return v;
+    }
+    /* Fail closed: a local-peer run is a proxy, never a stranger's sync. It
+     * stays unmeasured until a real-network run exists. */
+    if (obj_sync_loopback(n.peer)) {
+        (void)snprintf(v.reason, sizeof(v.reason),
+                       "local-peer proxy (peer=%s, build=%s, age=%lld h); "
+                       "a real-network run is needed for met",
+                       n.peer, n.build, (long long)age_h);
+        return v;
+    }
+    v.measured = true;
+    v.value = n.wall_s;
     return v;
 }
+
+/* ── not producible from this tree today ─────────────────────────────── */
 
 static struct zcl_objective_value obj_tokens_per_landed_commit(
     const struct zcl_objectives_options *options)
