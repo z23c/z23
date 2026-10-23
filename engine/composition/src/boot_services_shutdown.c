@@ -160,16 +160,10 @@ static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc,
     /* Same for the condition-engine handle (sync_monitor_connman()), read by
      * conditions, catchup cadence, mesh sampling and network monitor. */
     sync_monitor_clear_connman();
-    /* A diagnostics capture that did not drain is still an owned READER of
-     * connman. Retaining the allocation costs a process that is about to
-     * _exit() nothing; freeing it under a live reader is a use-after-free. */
-    if (diagnostics_drained) {
-        connman_free(svc->connman);
-        printf("[shutdown] connman stopped\n");
-    } else {
-        printf("[shutdown] connman retained: an undrained diagnostics "
-               "capture still owns it\n");
-    }
+    /* connman is joined but deliberately NOT freed here: the supervisor
+     * (sticky escalator, net supervisor children) and other runtime workers
+     * still run until the worker-drain stage and can read it. It is freed in
+     * shutdown_release_owned_resources(), after every such thread is joined. */
 
     /* Final flush in case message thread connected blocks before exit. */
     bool final_flush_ok = shutdown_flush_coins_to_sqlite(svc, "final");
@@ -390,6 +384,15 @@ static void shutdown_release_owned_resources(struct boot_svc_ctx *svc,
     zcl_service_kernel_reset(&svc->runtime_kernel);
     zcl_service_kernel_reset(&svc->network_kernel);
     zcl_service_kernel_reset(&svc->service_kernel);
+    /* LIFETIME RULE: connman is freed only after every thread that can reach
+     * it or its addrman is joined: the maintenance kernel (network crawler,
+     * network monitor) in boot_stop_platform_services before app_shutdown_svc,
+     * the network kernel and connman_join in network-quiesce, the self-heal
+     * runner, supervisor (sticky escalator, net supervisor children) and the
+     * thread registry in worker-drain / runtime-persist. An undrained
+     * diagnostics capture returned early above and keeps it. */
+    connman_free(svc->connman);
+    printf("[shutdown] connman stopped\n");
     /* Stages were quiesced before persistence and the final registry join;
      * the state they read can now go. proof_validate uses the Sapling params. */
     wallet_free(svc->wallet);

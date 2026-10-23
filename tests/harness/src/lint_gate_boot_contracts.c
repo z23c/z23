@@ -222,36 +222,106 @@ int t_boot_shutdown_persistence_order_contract(void)
     return failures;
 }
 
+/* Blank // and block comments in place (same length) so token searches only
+ * see code. */
+static void blank_c_comments(char *s)
+{
+    for (; *s; s++) {
+        if (s[0] == '/' && s[1] == '/') {
+            while (*s && *s != '\n')
+                *s++ = ' ';
+            if (!*s)
+                return;
+        } else if (s[0] == '/' && s[1] == '*') {
+            *s++ = ' ';
+            *s++ = ' ';
+            while (*s && !(s[0] == '*' && s[1] == '/')) {
+                if (*s != '\n')
+                    *s = ' ';
+                s++;
+            }
+            if (!*s)
+                return;
+            *s++ = ' ';
+            *s = ' ';
+        }
+    }
+}
+
+/* Locate the body of a file-scope function: the text from its definition line
+ * to the first "\n}" after it. Returns the body start, writes its end. */
+static char *function_body(char *buf, const char *def, char **end)
+{
+    char *start = strstr(buf, def);
+    if (!start)
+        return NULL;
+    char *close = strstr(start, "\n}");
+    if (!close)
+        return NULL;
+    *end = close;
+    return start;
+}
+
+static bool in_range(const char *p, const char *lo, const char *hi)
+{
+    return p && p >= lo && p < hi;
+}
+
 int t_boot_shutdown_connman_holders_stop_first(void)
 {
     int failures = 0;
     char *buf = NULL;
-    TEST("no connman holder outlives connman_free in shutdown") {
-        /* The self-heal runner reads connman through sync_monitor_connman()
-         * and a remedy can block ~60 s in a Tor fetch before saving the
-         * addrman. It must be signalled and joined, and the published handle
-         * revoked, before connman_free() (r5 shutdown SEGV). */
+    TEST("connman is freed only after every connman holder is joined") {
+        /* The self-heal runner, the sticky escalator (supervisor) and other
+         * workers read connman via sync_monitor_connman() and can block ~60 s
+         * in a Tor fetch. connman is joined in network-quiesce but freed only
+         * in shutdown_release_owned_resources, after worker-drain and
+         * runtime-persist joined every thread. */
         char path[PATH_MAX];
         ASSERT(repo_path(path, sizeof(path),
                          "engine/composition/src/boot_services_shutdown.c") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
-        char *request = strstr(buf, "self_heal_request_stop();");
-        char *stop = strstr(buf, "self_heal_stop();");
-        char *join = strstr(buf, "connman_join(svc->connman);");
-        char *clear = strstr(buf, "sync_monitor_clear_connman();");
-        char *rpc_clear = strstr(buf, "rpc_net_set_connman(NULL);");
-        char *freed = strstr(buf, "connman_free(svc->connman);");
-        ASSERT(request != NULL);
-        ASSERT(stop != NULL);
-        ASSERT(join != NULL);
-        ASSERT(clear != NULL);
-        ASSERT(rpc_clear != NULL);
-        ASSERT(freed != NULL);
-        ASSERT(request < stop);
-        ASSERT(stop < join);
-        ASSERT(stop < freed);
-        ASSERT(clear < freed);
-        ASSERT(rpc_clear < freed);
+        blank_c_comments(buf);
+        char *q_end = NULL, *d_end = NULL, *p_end = NULL, *r_end = NULL;
+        char *quiesce = function_body(
+            buf, "static bool shutdown_quiesce_network_and_flush_coins(",
+            &q_end);
+        char *drain = function_body(
+            buf, "static void shutdown_stop_runtime_and_drain_workers(",
+            &d_end);
+        char *persist = function_body(
+            buf, "static bool shutdown_persist_runtime_state(", &p_end);
+        char *release = function_body(
+            buf, "static void shutdown_release_owned_resources(", &r_end);
+        ASSERT(quiesce && drain && persist && release);
+        /* network-quiesce keeps join + revocations but never frees. */
+        ASSERT(!in_range(strstr(quiesce, "connman_free("), quiesce, q_end));
+        ASSERT(in_range(strstr(quiesce, "self_heal_request_stop();"),
+                        quiesce, q_end));
+        ASSERT(in_range(strstr(quiesce, "self_heal_stop();"), quiesce, q_end));
+        ASSERT(in_range(strstr(quiesce, "connman_join(svc->connman);"),
+                        quiesce, q_end));
+        ASSERT(in_range(strstr(quiesce, "rpc_net_set_connman(NULL);"),
+                        quiesce, q_end));
+        ASSERT(in_range(strstr(quiesce, "sync_monitor_clear_connman();"),
+                        quiesce, q_end));
+        /* The free is in the release stage, after the supervisor and the
+         * registry joins, and behind the diagnostics_drained early return. */
+        char *sup = strstr(drain, "supervisor_stop();");
+        char *join_except =
+            strstr(drain, "thread_registry_join_all_except(");
+        char *join_all = strstr(persist, "thread_registry_join_all(");
+        char *freed = strstr(release, "connman_free(svc->connman);");
+        char *guard = strstr(release, "if (!diagnostics_drained)");
+        ASSERT(in_range(sup, drain, d_end));
+        ASSERT(in_range(join_except, drain, d_end));
+        ASSERT(in_range(join_all, persist, p_end));
+        ASSERT(in_range(freed, release, r_end));
+        ASSERT(in_range(guard, release, r_end));
+        ASSERT(guard < freed);
+        /* Function order in the file is the shutdown order: quiesce, drain,
+         * persist, release. */
+        ASSERT(quiesce < drain && drain < persist && persist < release);
         PASS();
     } _test_next:;
     free(buf);
