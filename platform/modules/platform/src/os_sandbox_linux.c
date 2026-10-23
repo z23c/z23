@@ -1306,13 +1306,11 @@ struct zcl_result os_sandbox_write_userns_maps(pid_t pid, unsigned inside_uid,
 
 /* ── capability probe ──────────────────────────────────────────────────── */
 
-/* Child body for the userns probe: unshare a user namespace, report via exit
- * code (0 = worked, 1 = EPERM/other). Runs in a forked child so the calling
- * process is never mutated. */
+/* Child body for the userns probe: exit 0 = a user namespace with its identity
+ * map works (the unshare alone passes under the AppArmor restriction). */
 static int userns_probe_child(void)
 {
-    if (unshare(CLONE_NEWUSER) == 0) return 0;
-    return 1;
+    return os_sandbox_userns_identity_probe() ? 0 : 1;
 }
 
 struct os_sandbox_caps os_sandbox_probe_caps(void)

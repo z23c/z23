@@ -1,0 +1,16 @@
+# AppArmor profile: let the installed z23 binary create user namespaces.
+#
+# Ubuntu 23.10+ ships kernel.apparmor_restrict_unprivileged_userns=1. Under it
+# an unconfined process may call unshare(CLONE_NEWUSER) but cannot write
+# /proc/self/uid_map, so the terminal hub refuses every session
+# (TERMINAL_PIDNS_UNAVAILABLE). This profile is unconfined apart from the
+# `userns,` permission; it adds no other confinement and no other grant.
+#
+# Release layout: ~/.local/lib/z23/<sha256>/z23 (the glob matches any user's home).
+# Install: see README.md in this directory (one root command).
+abi <abi/4.0>,
+include <tunables/global>
+
+profile z23-userns @{HOME}/.local/lib/z23/*/z23 flags=(unconfined) {
+  userns,
+}

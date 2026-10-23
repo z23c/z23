@@ -380,6 +380,12 @@ const int *os_sandbox_terminal_worker_denied_syscalls(size_t *count_out);
  * unconfined fallback. */
 int os_sandbox_pidns_enter(int close_fd);
 
+/* Linux only, call in a throwaway forked child: unshare(CLONE_NEWUSER) and
+ * write the identity uid/gid maps. False where the host refuses the maps (e.g.
+ * kernel.apparmor_restrict_unprivileged_userns=1). Behind
+ * os_sandbox_userns_available(). */
+bool os_sandbox_userns_identity_probe(void);
+
 /* Install a hand-rolled seccomp-bpf DENY-list (no libseccomp): every syscall
  * in `denied` returns SECCOMP_RET_KILL_PROCESS; everything else defaults to
  * SECCOMP_RET_ALLOW. A deny-list (not an allow-list) is deliberate — even a

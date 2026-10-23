@@ -41,6 +41,19 @@ degrade to Landlock+seccomp+rlimits-only on this box — full namespace
 stacking works (see the degraded-fallback profile below for a host that
 answers this probe differently).
 
+**CORRECTION (2026-10-23, Ubuntu 26.04, kernel 7.0).** The verdict above is
+wrong for the path the terminal worker uses. This probe never wrote
+`/proc/self/uid_map`. With `kernel.apparmor_restrict_unprivileged_userns=1`
+an *unconfined* shell can `unshare(CLONE_NEWUSER)`, but the uid_map write is
+refused (`unshare -Ur true` -> "write failed /proc/self/uid_map: Operation not
+permitted"), so `os_sandbox_pidns_enter()` fails and the hub refuses every
+session with `TERMINAL_PIDNS_UNAVAILABLE`. The gate is open only where the
+sysctl is 0 or the binary runs under a profile with `userns,`. The profile
+ships at `platform/packaging/linux/apparmor/z23-userns` (not auto-installed;
+see its README). `os_sandbox_userns_available()` now also writes the
+identity uid_map, so it reports this host class truthfully. The refusal is
+correct and stays: never an unconfined shell.
+
 ## PROBE 2 — rootless PTY
 
 Full cycle — `posix_openpt(O_RDWR|O_NOCTTY)` → `grantpt` → `unlockpt` →

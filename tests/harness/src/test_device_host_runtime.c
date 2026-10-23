@@ -18,6 +18,7 @@ static_assert(_Generic(device_host_runtime_entry_parse(NULL, NULL, 0, false), st
     "fallible device API returns canonical zcl_result");
 #include "platform/socket_compat.h"
 #include "platform/clock.h"
+#include "platform/os_sandbox.h"
 #include "base/hex.h"
 #include "json/json.h"
 #include "command/native_command.h"
@@ -450,8 +451,20 @@ static int hop_compare(const void *a, const void *b)
 {
     int64_t x = *(const int64_t *)a, y = *(const int64_t *)b; return (x > y) - (x < y);
 }
+/* The hub runs every session in a user+PID namespace and refuses (never an
+ * unconfined shell) where the host denies one, e.g. Ubuntu 23.10+ with
+ * kernel.apparmor_restrict_unprivileged_userns=1. Those legs reach READY only
+ * where the namespace works; elsewhere they report UNOBSERVED. */
+static bool runtime_userns_observed(const char *leg)
+{
+    if (os_sandbox_userns_available()) return true;
+    printf("UNOBSERVED (device_host_runtime: user namespaces refused on this host, see\n"
+           "  platform/packaging/linux/apparmor — %s)\n", leg);
+    return false;
+}
 static int runtime_hub_hop(void)
 {
+    if (!runtime_userns_observed("terminal hub hop")) return 0;
     enum { SAMPLES = 100 };
     int failures = 0; struct runtime_fixture fixture; runtime_fixture_init(&fixture); struct json_value input = {0};
     pid_t hub = -1; char shell[600];
@@ -564,6 +577,7 @@ static bool hop_connect(const char *key_path, const char *json_path, const char 
 }
 static int runtime_hub_connect(bool wrong)
 {
+    if (!wrong && !runtime_userns_observed("terminal connect route_input")) return 0;
     int failures = 0; struct runtime_fixture fixture; runtime_fixture_init(&fixture); struct json_value input = {0};
     fixture.different_secret = wrong; pid_t hub = -1; char shell[600], key_path[1300], json_path[1300], out[4096], err[4096];
     TEST_CASE(wrong ? "HOST runtime: terminal connect --route_input with a wrong PSK ends in one typed line"

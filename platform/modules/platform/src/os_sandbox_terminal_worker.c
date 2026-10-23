@@ -175,6 +175,15 @@ static bool pidns_map_identity(uid_t uid, gid_t gid)
     return pidns_write_file("/proc/self/uid_map", line);
 }
 
+/* Linux, forked child only (it mutates the caller): unshare a user namespace
+ * and write the same identity maps os_sandbox_pidns_enter() writes. */
+bool os_sandbox_userns_identity_probe(void)
+{
+    uid_t uid = getuid(); /* before the unshare: afterwards both read as overflow ids */
+    gid_t gid = getgid();
+    return unshare(CLONE_NEWUSER) == 0 && pidns_map_identity(uid, gid);
+}
+
 /* Mirror a raw wait status as this process's own death: the supervisor's
  * waitpid must see the same signal / exit code the shell produced. */
 [[noreturn]] static void pidns_mirror(int status)

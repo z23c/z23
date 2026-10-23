@@ -28,6 +28,13 @@ enum {
 bool twx_tty_setup(const struct mesh_terminal_worker_config *cfg,
                    const char *slave_path);
 
+/* The one line a refused user+PID namespace reports. `userns_probe_ok` is
+ * os_sandbox_userns_available() on the refusing host: false names the likely
+ * cause (Ubuntu 23.10+ kernel.apparmor_restrict_unprivileged_userns=1) and the
+ * shipped profile; true keeps the neutral text. Never suggests an unconfined
+ * shell. */
+const char *twx_pidns_refusal(bool userns_probe_ok);
+
 /* The named refusal for a non-zero stage byte read from the staging pipe. */
 struct zcl_result twx_stage_error(uint8_t stage);
 

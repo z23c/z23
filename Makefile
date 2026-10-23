@@ -7154,6 +7154,7 @@ $(BIN_DIR)/z23-package-verify: $(VIEW_GEN_HEADERS) \
 # scrubs credentials before it invokes the fixed Codex CLI; the node handler
 # never executes a caller-supplied command.
 ZCL_TOOL_SANDBOX_SRC = platform/modules/platform/src/os_sandbox_linux.c \
+	platform/modules/platform/src/os_sandbox_terminal_worker.c \
 	platform/modules/platform/src/os_sandbox_landlock_linux.c \
 	platform/modules/platform/src/os_sandbox_package_linux.c
 ifneq ($(filter-out Linux,$(ZCL_HOST_OS)),)

@@ -15,6 +15,8 @@
 #include <termios.h> /* struct winsize */
 #include <unistd.h>
 
+#include "platform/os_sandbox.h"
+
 bool twx_tty_setup(const struct mesh_terminal_worker_config *cfg,
                    const char *slave_path)
 {
@@ -32,6 +34,15 @@ bool twx_tty_setup(const struct mesh_terminal_worker_config *cfg,
     return true;
 }
 
+const char *twx_pidns_refusal(bool userns_probe_ok)
+{
+    if (userns_probe_ok)
+        return "TERMINAL_PIDNS_UNAVAILABLE: user+PID namespace refused; no unconfined fallback";
+    return "TERMINAL_PIDNS_UNAVAILABLE: user+PID namespace refused "
+           "(kernel.apparmor_restrict_unprivileged_userns=1? install "
+           "platform/packaging/linux/apparmor/z23-userns); no unconfined fallback";
+}
+
 struct zcl_result twx_stage_error(uint8_t stage)
 {
     static const struct {
@@ -43,13 +54,16 @@ struct zcl_result twx_stage_error(uint8_t stage)
         { TW_STAGE_CHDIR, MESH_TERMINAL_WORKER_ERR_CONFIG, "workdir chdir" },
         { TW_STAGE_CONFINEMENT, MESH_TERMINAL_WORKER_ERR_CONFINEMENT, "sandbox enter" },
         { TW_STAGE_EXEC, MESH_TERMINAL_WORKER_ERR_EXEC, "execve" },
-        { TW_STAGE_PIDNS, MESH_TERMINAL_WORKER_ERR_PIDNS_UNAVAILABLE,
-          "TERMINAL_PIDNS_UNAVAILABLE: user+PID namespace refused; no unconfined fallback" },
+        { TW_STAGE_PIDNS, MESH_TERMINAL_WORKER_ERR_PIDNS_UNAVAILABLE, NULL },
     };
     enum mesh_terminal_worker_error code = MESH_TERMINAL_WORKER_ERR_SPAWN;
     const char *what = "unknown stage";
     for (size_t i = 0; i < sizeof k / sizeof k[0]; i++)
-        if (k[i].stage == stage) { code = k[i].code; what = k[i].what; }
+        if (k[i].stage == stage) {
+            code = k[i].code;
+            what = k[i].what ? k[i].what
+                             : twx_pidns_refusal(os_sandbox_userns_available());
+        }
     return ZCL_ERR(code, "worker child failed at %s (stage %u)", what, (unsigned)stage);
 }
 

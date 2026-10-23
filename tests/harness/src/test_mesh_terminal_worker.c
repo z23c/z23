@@ -1584,12 +1584,36 @@ static int test_mesh_terminal_worker_platform_arm(void)
 
 #endif /* __linux__ */
 
+#if defined(__linux__)
+static int test_mesh_terminal_pidns_refusal_text(void)
+{
+    int failures = 0;
+    const char *refused = twx_pidns_refusal(false);
+    const char *other = twx_pidns_refusal(true);
+    failures = check(failures, strstr(refused, "kernel.apparmor_restrict_unprivileged_userns") != NULL,
+                     "pidns refusal names the sysctl");
+    failures = check(failures, strstr(refused, "platform/packaging/linux/apparmor/z23-userns") != NULL,
+                     "pidns refusal names the shipped profile");
+    failures = check(failures, strstr(other, "apparmor") == NULL &&
+                     strstr(other, "TERMINAL_PIDNS_UNAVAILABLE") != NULL,
+                     "pidns refusal stays neutral when the userns probe passed");
+    /* twx_stage_error wraps it in "worker child failed at %s (stage N)". */
+    failures = check(failures, strlen(refused) + 40 < ZCL_RESULT_MSG_MAX,
+                     "pidns refusal fits the result message without truncation");
+    failures = check(failures, strstr(refused, "no unconfined fallback") != NULL &&
+                     strstr(refused, "unconfined shell") == NULL,
+                     "pidns refusal keeps the no-fallback statement");
+    return failures;
+}
+#endif
+
 int test_mesh_terminal_worker(void)
 {
     int failures = test_mesh_terminal_worker_bookkeeping();
     failures += test_mesh_terminal_shell_path_table();
 #if defined(__linux__)
     failures += partial_input_effects();
+    failures += test_mesh_terminal_pidns_refusal_text();
     failures += test_interrupted_reaping();
     failures += test_interrupted_startup_reaping();
 #endif

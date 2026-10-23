@@ -116,6 +116,13 @@ static bool hub_cl_write_out(struct hub_cl *c, const uint8_t *p, size_t n, bool 
     return true;
 }
 
+/* Names the likely cause when the server host refuses user namespaces. */
+#define HUB_MSG_CONFINEMENT                                                     \
+    "the terminal server could not start its confined shell (Ubuntu: see " \
+    "kernel.apparmor_restrict_unprivileged_userns, platform/packaging/linux/apparmor)"
+_Static_assert(sizeof HUB_MSG_CONFINEMENT <= sizeof((struct mesh_terminal_hub_client_result *)0)->message,
+               "confinement refusal text must fit the result message");
+
 static const struct {
     int refusal, exit_code;
     const char *code, *message;
@@ -127,7 +134,7 @@ static const struct {
     { MESH_TERMINAL_HUB_REFUSE_REQUEST, 2, "REQUEST_REFUSED",
       "the terminal server rejected the request" },
     { MESH_TERMINAL_HUB_REFUSE_CONFINEMENT, 3, "CONFINEMENT_UNAVAILABLE",
-      "the terminal server could not start its confined shell" },
+      HUB_MSG_CONFINEMENT },
     { MESH_TERMINAL_HUB_REFUSE_EXEC, 2, "EXEC_REFUSED",
       "the terminal server cannot run that program (not an absolute path to an executable file)" },
     { MESH_TERMINAL_HUB_REFUSE_SHUTDOWN, 5, "SERVER_STOPPING",
