@@ -31,12 +31,14 @@
 #include "util/storage_pacing.h"
 #include "util/thread_registry.h"
 
+#include <fcntl.h>
 #include <pthread.h>
 #include <sqlite3.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define SPC(name, expr) do { \
     printf("storage_pacing: %s... ", (name)); \
@@ -901,6 +903,113 @@ static int test_bg_quick_check_real_scan(void)
     return failures;
 }
 
+/* Read the whole (small) file into buf; false when it cannot be read. */
+static bool spc_slurp(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    size_t n = fread(buf, 1, cap - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    return true;
+}
+
+/* Flip the page-type byte of table b's root page (a leaf holding rows). */
+static bool spc_corrupt_root_of(const char *path, const char *table,
+                                long long *root_out)
+{
+    sqlite3 *db = NULL;
+    sqlite3_stmt *q = NULL;
+    long long root = 0, psz = 0;
+    if (sqlite3_open(path, &db) != SQLITE_OK)
+        goto out;
+    if (sqlite3_prepare_v2(db, "SELECT rootpage, "
+            "(SELECT page_size FROM pragma_page_size) FROM sqlite_schema "
+            "WHERE name = ?", -1, &q, NULL) != SQLITE_OK)
+        goto out;
+    sqlite3_bind_text(q, 1, table, -1, SQLITE_STATIC);
+    if (sqlite3_step(q) == SQLITE_ROW) {
+        root = sqlite3_column_int64(q, 0);
+        psz = sqlite3_column_int64(q, 1);
+    }
+out:
+    if (q)
+        sqlite3_finalize(q);
+    if (db)
+        sqlite3_close(db);
+    if (root < 2 || psz <= 0)
+        return false;
+    FILE *f = fopen(path, "r+b");
+    if (!f)
+        return false;
+    unsigned char zero = 0;
+    bool ok = fseek(f, (long)((root - 1) * psz), SEEK_SET) == 0 &&
+              fwrite(&zero, 1, 1, f) == 1;
+    ok = fclose(f) == 0 && ok;
+    *root_out = root;
+    return ok;
+}
+
+/* A failed background quick_check must name the table or index of each
+ * corrupt b-tree, not just "Tree N page M": the operator otherwise has to
+ * open the database by hand. */
+static int test_bg_quick_check_names_corrupt_table(void)
+{
+    int failures = 0;
+    char dir[512];
+    test_make_tmpdir(dir, sizeof(dir), "bg_quick_check", "names_tree");
+    char path[600], errpath[600];
+    snprintf(path, sizeof(path), "%s/node.db", dir);
+    snprintf(errpath, sizeof(errpath), "%s/stderr.txt", dir);
+
+    static const char *k_fixture_sql =
+        "CREATE TABLE alpha(k INTEGER PRIMARY KEY, v TEXT);"
+        "CREATE TABLE beta_rows(k INTEGER PRIMARY KEY, v TEXT);"
+        "CREATE INDEX alpha_v ON alpha(v);"
+        "INSERT INTO alpha VALUES(1,'a'),(2,'b');"
+        "INSERT INTO beta_rows VALUES(1,'x'),(2,'y'),(3,'z');";
+    sqlite3 *db = NULL;
+    bool built = false;
+    if (sqlite3_open(path, &db) == SQLITE_OK)
+        built = sqlite3_exec(db, k_fixture_sql, NULL, NULL, NULL) == SQLITE_OK;
+    if (db)
+        sqlite3_close(db);
+    long long root = 0;
+    bool corrupted = built && spc_corrupt_root_of(path, "beta_rows", &root);
+    SPC("the fixture was built and one b-tree page corrupted", corrupted);
+
+    thread_registry_reset_for_test();
+    struct boot_bg_quick_check_pace pace;
+    memset(&pace, 0, sizeof(pace));
+    fflush(stderr);
+    int saved = dup(STDERR_FILENO);
+    int efd = open(errpath, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    bool redirected = saved >= 0 && efd >= 0 &&
+                      dup2(efd, STDERR_FILENO) >= 0;
+    bool ok = boot_fast_restart_bg_quick_check_scan_for_test(path, &pace);
+    fflush(stderr);
+    if (saved >= 0) {
+        dup2(saved, STDERR_FILENO);
+        close(saved);
+    }
+    if (efd >= 0)
+        close(efd);
+    SPC("stderr was captured", redirected);
+    SPC("the corrupt database fails the check", !ok);
+
+    char err[4096] = "";
+    SPC("the alert text was read back", spc_slurp(errpath, err, sizeof(err)));
+    char want[160];
+    snprintf(want, sizeof(want),
+             "tree %lld is table beta_rows on table beta_rows", root);
+    SPC("the alert names the corrupt table", strstr(err, want) != NULL);
+    SPC("the healthy table is not blamed", strstr(err, "alpha") == NULL);
+
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
 int test_storage_pacing(void)
 
 {
@@ -922,6 +1031,7 @@ int test_storage_pacing(void)
     failures += test_bg_quick_check_never_queues();
     failures += test_bg_quick_check_real_scan();
     failures += test_bg_quick_check_outcome_str();
+    failures += test_bg_quick_check_names_corrupt_table();
     if (failures == 0)
         printf("=== storage_pacing tests: ALL PASS ===\n");
     else

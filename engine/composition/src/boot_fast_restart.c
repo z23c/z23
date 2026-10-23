@@ -340,6 +340,95 @@ static int boot_bg_quick_check_progress(void *arg)
     return 0;  /* SQLite continue code: trickling through the gap */
 }
 
+/* quick_check names a damaged b-tree only by its root page number ("Tree
+ * 25436 page 1919745: ..."). Operators had to open the database by hand to
+ * learn which table or index that is; the read-only handle is already open,
+ * so look each root up in sqlite_schema and say it in the alert. */
+#define BG_QC_MAX_TREES 8
+#define BG_QC_NAMES_CAP 256
+
+/* Collect up to BG_QC_MAX_TREES distinct "Tree <N> page" roots from the
+ * (possibly multi-line) result text. Returns the count. */
+static int boot_bg_quick_check_parse_roots(const char *txt,
+                                           sqlite3_int64 *roots)
+{
+    int n = 0;
+    const char *p = txt;
+    while (p && n < BG_QC_MAX_TREES && (p = strstr(p, "Tree ")) != NULL) {
+        p += 5;
+        char *end = NULL;
+        long long v = strtoll(p, &end, 10);
+        if (end == p || v <= 0 || strncmp(end, " page", 5) != 0)
+            continue;
+        bool seen = false;
+        for (int i = 0; i < n; i++)
+            seen = seen || roots[i] == v;
+        if (!seen)
+            roots[n++] = v;
+    }
+    return n;
+}
+
+static void boot_bg_quick_check_append(char *dst, size_t cap, const char *s)
+{
+    size_t len = strlen(dst);
+    if (len + 1 >= cap)
+        return;
+    snprintf(dst + len, cap - len, "%s%s", len ? "," : "", s);
+}
+
+/* One root: print its alert line and append to the event lists. A lookup
+ * failure is printed and changes nothing else; the verdict is already FAILED. */
+static void boot_bg_quick_check_name_root(sqlite3 *db, sqlite3_int64 root,
+                                          char *trees, char *tables)
+{
+    sqlite3_stmt *q = NULL;
+    int rc = sqlite3_prepare_v2(
+        db, "SELECT type, name, tbl_name FROM sqlite_schema "
+            "WHERE rootpage = ?", -1, &q, NULL);
+    if (rc == SQLITE_OK && q)
+        rc = sqlite3_bind_int64(q, 1, root);
+    int step_rc = rc == SQLITE_OK
+        ? sqlite3_step(q)  // raw-sql-ok:read-only-introspection
+        : rc;
+    char item[160];
+    if (step_rc == SQLITE_ROW) {
+        const char *type = (const char *)sqlite3_column_text(q, 0);
+        const char *name = (const char *)sqlite3_column_text(q, 1);
+        const char *tbl = (const char *)sqlite3_column_text(q, 2);
+        fprintf(stderr,  // obs-ok:operator-surface-is-the-alert
+                "[ALERT] bg_quick_check: tree %lld is %s %s on table %s\n",
+                (long long)root, type ? type : "?", name ? name : "?",
+                tbl ? tbl : "?");
+        snprintf(item, sizeof(item), "%lld:%s", (long long)root,
+                 name ? name : "?");
+        boot_bg_quick_check_append(trees, BG_QC_NAMES_CAP, item);
+        boot_bg_quick_check_append(tables, BG_QC_NAMES_CAP, tbl ? tbl : "?");
+    } else if (step_rc == SQLITE_DONE) {
+        fprintf(stderr,  // obs-ok:operator-surface-is-the-alert
+                "[ALERT] bg_quick_check: tree %lld is not in sqlite_schema "
+                "(freelist or orphan page)\n", (long long)root);
+    } else {
+        fprintf(stderr,  // obs-ok:operator-surface-is-the-alert
+                "[ALERT] bg_quick_check: tree %lld: lookup failed (%s)\n",
+                (long long)root, sqlite3_errstr(step_rc));
+    }
+    if (q)
+        sqlite3_finalize(q);
+}
+
+/* Name every damaged tree in `txt`. Runs only on a failed row, after the scan
+ * uninstalled its progress hook and gave the pacing token back, so the
+ * lookups cannot disturb pacing state. Read-only, bounded. */
+static void boot_bg_quick_check_name_trees(sqlite3 *db, const char *txt,
+                                           char *trees, char *tables)
+{
+    sqlite3_int64 roots[BG_QC_MAX_TREES];
+    int n = db && txt ? boot_bg_quick_check_parse_roots(txt, roots) : 0;
+    for (int i = 0; i < n; i++)
+        boot_bg_quick_check_name_root(db, roots[i], trees, tables);
+}
+
 /* Read one quick_check result row. True only for the literal "ok"; anything
  * else is raised LOUDLY via EV_DB_ERROR + EV_OPERATOR_NEEDED (the latter
  * latches DEGRADED in the health surface until an operator acts). */
@@ -356,11 +445,22 @@ static bool boot_bg_quick_check_row_ok(
             "[ALERT] bg_quick_check: %s integrity FAILED after a "
             "%s: %s\n",
             label, kind, txt ? (const char *)txt : "(no detail)");
+    char trees[BG_QC_NAMES_CAP] = "";
+    char tables[BG_QC_NAMES_CAP] = "";
+    boot_bg_quick_check_name_trees(sqlite3_db_handle(st),
+                                   (const char *)txt, trees, tables);
+    char trees_f[BG_QC_NAMES_CAP + 16] = "";
+    char tables_f[BG_QC_NAMES_CAP + 16] = "";
+    if (trees[0])
+        snprintf(trees_f, sizeof(trees_f), " trees=%s", trees);
+    if (tables[0])
+        snprintf(tables_f, sizeof(tables_f), " tables=%s", tables);
     event_emitf(EV_DB_ERROR, 0,
-                "bg_quick_check failed target=%s result=%s",
-                label, txt ? (const char *)txt : "unknown");
+                "bg_quick_check failed target=%s result=%s%s",
+                label, txt ? (const char *)txt : "unknown", trees_f);
     event_emitf(EV_OPERATOR_NEEDED, 0,
-                "condition=bg_quick_check_failed detail=%s_integrity", label);
+                "condition=bg_quick_check_failed detail=%s_integrity%s",
+                label, tables_f);
     return false;
 }
 
