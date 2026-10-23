@@ -38,6 +38,7 @@ struct zcl_objective_value {
     bool measured;
     int64_t value;
     char reason[ZCL_OBJECTIVES_REASON_MAX];
+    char note[ZCL_OBJECTIVES_REASON_MAX]; /* measured: what the value names, or "" */
 };
 
 /* Paths and knobs every producer reads from; every field is overridable so
@@ -105,7 +106,7 @@ size_t zcl_objectives_render_text(const struct json_value *rows, char *out,
  * "product") always outranks a lab row: the largest product gap wins, and a
  * lab row is chosen only when no measured product row is unmet. `out` becomes an object
  * {id, class, value, target, direction, unit, gap (rounded to 3 decimals),
- * why}, or
+ * why, note (the row's per-measurement note, "" when none)}, or
  * JSON null when no measured row is unmet. Returns false only when the object
  * cannot be allocated (reason on stderr, `out` left JSON null). */
 bool zcl_objectives_next(const struct json_value *rows, struct json_value *out);

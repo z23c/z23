@@ -92,6 +92,11 @@ Z23_OBJECTIVE("land_success_rate_7d", "lab", "outcomes.jsonl", "max", 90,
              "landed over landed plus failed outcomes in the last 7 days; "
              "a failed proof is a full proof's wall thrown away")
 
+Z23_OBJECTIVE("land_failure_repeats", "lab", "outcomes.jsonl", "min", 1,
+             "count",
+             "a failure that repeats across land rows is a flake or trap "
+             "every agent will hit until it is fixed once at the root")
+
 Z23_OBJECTIVE("product_commit_share_7d", "lab", "git_log", "max", 60, "percent",
              "share of origin/main commits in 7 days that touch core/, "
              "engine/, contexts/, apps/ or platform/ rather than only "

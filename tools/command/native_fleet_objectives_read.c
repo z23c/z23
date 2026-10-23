@@ -933,6 +933,205 @@ static struct zcl_objective_value obj_land_success_rate_7d(
     return v;
 }
 
+/* ── land_failure_repeats ─────────────────────────────────────────────── */
+
+/* A failed land outcome is keyed by what failed, and the objective is the
+ * highest count of in-window failed outcomes sharing one key. The window is
+ * the OBJ_REPEAT_WINDOW_S before the NEWEST outcome's ts (never the wall
+ * clock), so a fixture ledger answers the same on every day. State `conflict`
+ * is a rebase problem and `cancelled`/`fenced` are not failures: only state
+ * `failed` counts. The outcome rows carry no train field for a member that
+ * re-proves alone, so one failure is deduped by (key, tip): the same tip
+ * failing the same way on a later attempt counts once. */
+#define OBJ_REPEAT_WINDOW_S ((int64_t)24 * 3600)
+#define OBJ_KEY_MAX 64u
+#define OBJ_TIP_MAX 48u
+
+struct obj_failure {
+    char key[OBJ_KEY_MAX];
+    char tip[OBJ_TIP_MAX];
+};
+
+struct obj_repeats {
+    int64_t newest; /* newest ts of any row, 0 until one parses */
+    int64_t floor;  /* first in-window ts, set before the second walk */
+    struct obj_failure *items;
+    size_t n;
+    size_t cap;
+    bool oom;
+};
+
+static void obj_repeat_put(char *out, size_t cap, const char *s, size_t len)
+{
+    if (len >= cap)
+        len = cap - 1u;
+    memcpy(out, s, len);
+    out[len] = '\0';
+}
+
+static bool obj_key_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '-';
+}
+
+/* A test row's detail starts "test <group>: ..."; a detail with no group
+ * ("test: no FAIL line ...") keys as plain "test". */
+static void obj_repeat_test_key(const char *detail, char *out, size_t cap)
+{
+    size_t len = 0;
+    if (strncmp(detail, "test ", 5) == 0)
+        while (obj_key_char(detail[5 + len]))
+            len++;
+    if (len == 0)
+        (void)snprintf(out, cap, "%s", "test");
+    else
+        obj_repeat_put(out, cap, detail + 5, len);
+}
+
+/* A lint row's detail names its gate as the first `check-...` token. */
+static void obj_repeat_lint_key(const char *detail, char *out, size_t cap)
+{
+    const char *at = strstr(detail, "check-");
+    size_t len = 0;
+    while (at && obj_key_char(at[len]))
+        len++;
+    if (len == 0)
+        (void)snprintf(out, cap, "%s", "lint");
+    else
+        obj_repeat_put(out, cap, at, len);
+}
+
+/* Any other dimension keys as itself, cut at its first ':' (some carry a
+ * path suffix); a row with no dimension keys as "failed". */
+static void obj_repeat_key(const struct json_value *row, char *out, size_t cap)
+{
+    const char *dim = json_get_str(json_get(row, "dimension"));
+    const char *detail = json_get_str(json_get(row, "detail"));
+    size_t len = 0;
+    if (strcmp(dim, "test") == 0) {
+        obj_repeat_test_key(detail, out, cap);
+        return;
+    }
+    if (strcmp(dim, "lint") == 0) {
+        obj_repeat_lint_key(detail, out, cap);
+        return;
+    }
+    while (dim[len] && dim[len] != ':')
+        len++;
+    if (len == 0)
+        (void)snprintf(out, cap, "%s", "failed");
+    else
+        obj_repeat_put(out, cap, dim, len);
+}
+
+static void obj_repeats_newest_row(const struct json_value *row, void *user)
+{
+    struct obj_repeats *r = user;
+    int64_t ts;
+    if (obj_parse_iso8601(json_get_str(json_get(row, "ts")), &ts) &&
+        ts > r->newest)
+        r->newest = ts;
+}
+
+static bool obj_repeats_add(struct obj_repeats *r, const char *key,
+                            const char *tip)
+{
+    for (size_t i = 0; i < r->n; i++)
+        if (strcmp(r->items[i].key, key) == 0 &&
+            strcmp(r->items[i].tip, tip) == 0)
+            return true;
+    if (r->n == r->cap) {
+        size_t next = r->cap ? r->cap * 2u : 32u;
+        struct obj_failure *grown = zcl_realloc(
+            r->items, next * sizeof(*grown), "fleet_objectives_failures");
+        if (!grown)
+            return false;
+        r->items = grown;
+        r->cap = next;
+    }
+    obj_repeat_put(r->items[r->n].key, OBJ_KEY_MAX, key, strlen(key));
+    obj_repeat_put(r->items[r->n].tip, OBJ_TIP_MAX, tip, strlen(tip));
+    r->n++;
+    return true;
+}
+
+static void obj_repeats_failed_row(const struct json_value *row, void *user)
+{
+    struct obj_repeats *r = user;
+    char key[OBJ_KEY_MAX];
+    int64_t ts;
+    if (r->oom || strcmp(json_get_str(json_get(row, "state")), "failed") != 0)
+        return;
+    if (!obj_parse_iso8601(json_get_str(json_get(row, "ts")), &ts) ||
+        ts < r->floor)
+        return;
+    obj_repeat_key(row, key, sizeof(key));
+    if (!obj_repeats_add(r, key, json_get_str(json_get(row, "tip"))))
+        r->oom = true;
+}
+
+/* The highest per-key count, the first key to reach it on a tie. */
+static size_t obj_repeats_top(const struct obj_repeats *r, size_t *at)
+{
+    size_t best = 0;
+    *at = 0;
+    for (size_t i = 0; i < r->n; i++) {
+        size_t count = 0;
+        for (size_t j = 0; j < r->n; j++)
+            if (strcmp(r->items[i].key, r->items[j].key) == 0)
+                count++;
+        if (count > best) {
+            best = count;
+            *at = i;
+        }
+    }
+    return best;
+}
+
+static bool obj_repeats_collect(const char *path, struct obj_repeats *r,
+                                struct zcl_objective_value *v)
+{
+    memset(r, 0, sizeof(*r));
+    if (!zcl_objectives_ledger_walk(path, obj_repeats_newest_row, r, v->reason,
+                                    sizeof(v->reason)))
+        return false;
+    r->floor = r->newest - OBJ_REPEAT_WINDOW_S;
+    if (!zcl_objectives_ledger_walk(path, obj_repeats_failed_row, r, v->reason,
+                                    sizeof(v->reason)))
+        return false;
+    if (r->oom) {
+        obj_set_reason(v, "%s", "out of memory counting failures");
+        return false;
+    }
+    return true;
+}
+
+static struct zcl_objective_value obj_land_failure_repeats(
+    const struct zcl_objectives_options *options)
+{
+    struct zcl_objective_value v = {0};
+    struct obj_repeats r;
+    char path[512];
+    const char *use;
+    size_t at, top;
+
+    if (!obj_resolve_outcomes(options, path, sizeof(path), &use)) {
+        obj_set_reason(&v, "%s", "state root unavailable");
+        return v;
+    }
+    if (obj_repeats_collect(use, &r, &v)) {
+        top = obj_repeats_top(&r, &at);
+        v.measured = true;
+        v.value = (int64_t)top;
+        if (top > 0)
+            (void)snprintf(v.note, sizeof(v.note), "%s failed in %zu row%s",
+                           r.items[at].key, top, top == 1 ? "" : "s");
+    }
+    free(r.items);
+    return v;
+}
+
 /* ── git log ──────────────────────────────────────────────────────────── */
 
 /* The repo's origin/main, never fetched; HEAD only when it is absent. */
@@ -1254,6 +1453,7 @@ static const struct obj_producer k_producers[] = {
     {"tokens_per_landed_commit", obj_tokens_per_landed_commit},
     {"landed_rows_today", obj_landed_rows_today},
     {"land_success_rate_7d", obj_land_success_rate_7d},
+    {"land_failure_repeats", obj_land_failure_repeats},
     {"product_commit_share_7d", obj_product_commit_share_7d},
     {"generated_churn_10d", obj_generated_churn_10d},
 };

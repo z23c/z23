@@ -229,7 +229,8 @@ The closed catalog is [`engine/composition/objectives.def`](../../engine/composi
 `proof_test_wall_s`, `proof_wall_s`, `commits_landed_today`,
 `lint_families_over_ceiling`, `functions_over_complexity_cap`,
 `fresh_node_sync_eta_s`, `tokens_per_landed_commit`, `landed_rows_today`,
-`land_success_rate_7d`, `product_commit_share_7d`, `generated_churn_10d`,
+`land_success_rate_7d`, `land_failure_repeats`, `product_commit_share_7d`,
+`generated_churn_10d`,
 `node_rss_mb`, `node_tip_lag_blocks` and `node_warm_restart_s`.
 Each row has a class: `product` (about the node a user runs: `node_rss_mb`,
 `node_tip_lag_blocks`, `node_warm_restart_s`, `fresh_node_sync_eta_s`) or `lab` (about
@@ -252,6 +253,16 @@ lint log, test from the test log (the two run concurrently inside one dimension)
 count `origin/main` from UTC midnight and never fetch. `landing_latency_s` is the
 landed row's `landed_at` minus the train's first submission `ts`; an outcome row
 written before `landed_at` existed stays unmeasured.
+
+`land_failure_repeats` is the LEARN step: over the 24 h before the newest outcome's `ts`
+(not the wall clock) it keys each `failed` outcome by its test group (the `test <group>:`
+in the detail), its lint gate (the `check-...` name in the detail) or its dimension (cut at
+the first colon), counts rows per key and reports the highest count; the measured row
+carries a `note` such as `test_build_fabric failed in 3 rows`, shown in the text table,
+in `next` and on the screen's closing line. `conflict`, `cancelled` and `landed` rows are
+ignored, and the same key on the same tip counts once, since a train member re-proving alone
+leaves no train field to tell it apart. A malformed ledger line makes it unmeasured, like
+the other ledger readers.
 
 ### Goals
 

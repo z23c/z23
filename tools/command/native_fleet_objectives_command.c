@@ -45,10 +45,13 @@ static void obj_row_json(const struct zcl_objective_row *row,
     (void)json_push_kv_str(out, "unit", row->unit);
     (void)json_push_kv_str(out, "why", row->why);
     (void)json_push_kv_bool(out, "measured", value->measured);
-    if (value->measured)
+    if (value->measured) {
         (void)json_push_kv_int(out, "value", value->value);
-    else
+        if (value->note[0])
+            (void)json_push_kv_str(out, "note", value->note);
+    } else {
         (void)json_push_kv_str(out, "reason", value->reason);
+    }
     zcl_objectives_status(row, value, status, sizeof(status));
     (void)json_push_kv_str(out, "status", status);
 }
@@ -211,7 +214,8 @@ static bool obj_next_fill(struct json_value *out, const struct json_value *row,
                             json_get_str(json_get(row, "direction"))) &&
            json_push_kv_str(out, "unit", json_get_str(json_get(row, "unit"))) &&
            json_push_kv_real(out, "gap", obj_round_gap(gap)) &&
-           json_push_kv_str(out, "why", json_get_str(json_get(row, "why")));
+           json_push_kv_str(out, "why", json_get_str(json_get(row, "why"))) &&
+           json_push_kv_str(out, "note", json_get_str(json_get(row, "note")));
 }
 
 bool zcl_objectives_next(const struct json_value *rows, struct json_value *out)
@@ -283,8 +287,10 @@ size_t zcl_objectives_render_text(const struct json_value *rows, char *out,
                           (long long)json_get_int(json_get(row, "value")));
         else
             (void)snprintf(value_str, sizeof(value_str), "%s", "-");
-        obj_put(&b, "%-32s %10s %10lld %8s %s\n", id ? id : "", value_str,
-               (long long)target, unit ? unit : "", status ? status : "");
+        const char *note = json_get_str(json_get(row, "note"));
+        obj_put(&b, "%-32s %10s %10lld %8s %s%s%s\n", id ? id : "", value_str,
+               (long long)target, unit ? unit : "", status ? status : "",
+               note[0] ? "  " : "", note);
     }
     return cap - b.left;
 }
@@ -330,7 +336,7 @@ static void obj_put_next_line(struct obj_render_buf *b,
 {
     double gap;
     const struct json_value *row = obj_pick_next(rows, &gap);
-    char id[80], unit[40], why[1024];
+    char id[80], unit[40], why[1024], note[ZCL_OBJECTIVES_REASON_MAX];
     if (!row) {
         obj_put(b, "next: none - %s\n",
                 measured > 0 ? "every measured objective is met"
@@ -340,9 +346,11 @@ static void obj_put_next_line(struct obj_render_buf *b,
     obj_ascii(json_get_str(json_get(row, "id")), id, sizeof(id));
     obj_ascii(json_get_str(json_get(row, "unit")), unit, sizeof(unit));
     obj_ascii(json_get_str(json_get(row, "why")), why, sizeof(why));
-    obj_put(b, "next: %s  %lld vs %lld %s - %s\n", id,
+    obj_ascii(json_get_str(json_get(row, "note")), note, sizeof(note));
+    obj_put(b, "next: %s  %lld vs %lld %s - %s%s%s%s\n", id,
             (long long)json_get_int(json_get(row, "value")),
-            (long long)json_get_int(json_get(row, "target")), unit, why);
+            (long long)json_get_int(json_get(row, "target")), unit, why,
+            note[0] ? " [" : "", note, note[0] ? "]" : "");
 }
 
 size_t zcl_objectives_render_screen(const struct json_value *rows, char *out,

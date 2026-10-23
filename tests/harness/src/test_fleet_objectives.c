@@ -399,6 +399,175 @@ _test_next:;
     return failures;
 }
 
+/* One outcomes line for the land_failure_repeats fixtures. */
+static void fox_frow(char *out, size_t cap, const char *state, const char *ts,
+                     const char *tip, const char *dim, const char *detail)
+{
+    (void)snprintf(out + strlen(out), cap - strlen(out),
+                   "{\"state\":\"%s\",\"ts\":\"%s\",\"tip\":\"%s\","
+                   "\"dimension\":\"%s\",\"detail\":\"%s\"}\n",
+                   state, ts, tip, dim, detail);
+}
+
+#define FOX_TF "test test_build_fabric: FAIL at tests/x.c:382 (a) [child_proof_failed_exit_1]"
+
+static int fox_case_repeats(void)
+{
+    int failures = 0;
+    char root[512], path[1024], text[8192];
+    struct zcl_objectives_options o = {0};
+    struct zcl_objective_value v;
+    test_make_tmpdir(root, sizeof(root), "fleet_objectives", "repeats");
+    (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", root);
+    o.outcomes = path;
+    TEST("objectives: land_failure_repeats counts the most repeated key and "
+         "names it") {
+        text[0] = '\0';
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T08:00:00Z", "t1", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T09:00:00Z", "t2", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T10:00:00Z", "t3", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T10:30:00Z", "t4", "test",
+                 "test test_host_build: FAIL at tests/y.c:1 (b)");
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 3);
+        ASSERT_STR_EQ(v.note, "test_build_fabric failed in 3 rows");
+        PASS();
+    }
+    TEST("objectives: the key is the test group, the lint gate, or the "
+         "dimension") {
+        text[0] = '\0';
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T08:00:00Z", "t1", "lint",
+                 "FAIL check-file-size-ceiling      92 ms (rc=1)");
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T09:00:00Z", "t2", "lint",
+                 "lint check-file-size-ceiling: FAIL check-file-size-ceiling 1 ms");
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T09:10:00Z", "t3", "lint", "no gate");
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T09:20:00Z", "t4", "test",
+                 "test: no FAIL line in its log");
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T09:30:00Z", "t5", "regen", "x");
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT_EQ(v.value, 2);
+        ASSERT_STR_EQ(v.note, "check-file-size-ceiling failed in 2 rows");
+        text[0] = '\0';
+        for (int i = 0; i < 3; i++) {
+            char tip[8];
+            (void)snprintf(tip, sizeof(tip), "u%d", i);
+            fox_frow(text, sizeof(text), "failed", "2026-10-22T09:00:00Z", tip,
+                     "unmapped-code-change", "x");
+        }
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T09:00:00Z", "u9", "rebase", "x");
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT_EQ(v.value, 3);
+        ASSERT_STR_EQ(v.note, "unmapped-code-change failed in 3 rows");
+        PASS();
+    }
+    TEST("objectives: failures older than 24 h before the newest outcome "
+         "are not counted") {
+        text[0] = '\0';
+        fox_frow(text, sizeof(text), "failed", "2026-10-20T08:00:00Z", "o1", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "failed", "2026-10-21T07:59:59Z", "o2", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "failed", "2026-10-21T08:00:00Z", "o3", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "landed", "2026-10-22T08:00:00Z", "n1", "", "");
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 1); /* only o3: exactly 24 h back is in the window */
+        PASS();
+    }
+    TEST("objectives: landed, cancelled, conflict and fenced rows are ignored; "
+         "no failed row is 0 and met") {
+        struct fox_call c;
+        text[0] = '\0';
+        fox_frow(text, sizeof(text), "landed", "2026-10-22T08:00:00Z", "a", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "cancelled", "2026-10-22T08:00:00Z", "b", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "conflict", "2026-10-22T08:00:00Z", "c", "rebase", "x");
+        fox_frow(text, sizeof(text), "conflict", "2026-10-22T08:10:00Z", "d", "rebase", "x");
+        fox_frow(text, sizeof(text), "fenced", "2026-10-22T08:20:00Z", "e", "test", FOX_TF);
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 0);
+        ASSERT_STR_EQ(v.note, "");
+        fox_begin(&c);
+        fox_set(&c, "outcomes", path);
+        ASSERT(fox_run(&c));
+        const struct json_value *row = fox_row(&c, "land_failure_repeats");
+        ASSERT(row != NULL);
+        ASSERT_STR_EQ(fox_row_str(row, "status"), "met");
+        ASSERT_STR_EQ(fox_row_str(row, "note"), "");
+        fox_end(&c);
+        ASSERT(fox_write(path, ""));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, 0);
+        PASS();
+    }
+    TEST("objectives: a malformed line is unmeasured with the reason, never "
+         "a count") {
+        text[0] = '\0';
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T08:00:00Z", "m1", "test", FOX_TF);
+        (void)strcat(text, "{not json\n");
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T09:00:00Z", "m2", "test", FOX_TF);
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "incomplete ledger") != NULL);
+        o.outcomes = "/nonexistent/fox/outcomes.jsonl";
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT(!v.measured);
+        o.outcomes = path;
+        PASS();
+    }
+    TEST("objectives: one failure re-proved alone on the same tip counts "
+         "once") {
+        text[0] = '\0';
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T08:00:00Z", "same", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T08:20:00Z", "same", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T08:40:00Z", "same", "test", FOX_TF);
+        fox_frow(text, sizeof(text), "failed", "2026-10-22T09:00:00Z", "other", "test", FOX_TF);
+        ASSERT(fox_write(path, text));
+        v = zcl_objectives_measure(&o, "land_failure_repeats");
+        ASSERT_EQ(v.value, 2);
+        PASS();
+    }
+    TEST("objectives: the note reaches the text table, next and the screen") {
+        struct json_value rows, row, next;
+        char out[4096];
+        json_init(&rows);
+        json_set_array(&rows);
+        json_init(&row);
+        json_set_object(&row);
+        ASSERT(json_push_kv_str(&row, "id", "land_failure_repeats"));
+        ASSERT(json_push_kv_str(&row, "class", "lab"));
+        ASSERT(json_push_kv_str(&row, "direction", "min"));
+        ASSERT(json_push_kv_int(&row, "target", 1));
+        ASSERT(json_push_kv_str(&row, "unit", "count"));
+        ASSERT(json_push_kv_str(&row, "why", "w"));
+        ASSERT(json_push_kv_bool(&row, "measured", true));
+        ASSERT(json_push_kv_int(&row, "value", 3));
+        ASSERT(json_push_kv_str(&row, "note", "test_build_fabric failed in 3 rows"));
+        ASSERT(json_push_kv_str(&row, "status", "unmet"));
+        ASSERT(json_push_back(&rows, &row));
+        json_free(&row);
+        (void)zcl_objectives_render_text(&rows, out, sizeof(out));
+        ASSERT(strstr(out, "test_build_fabric failed in 3 rows") != NULL);
+        (void)zcl_objectives_render_screen(&rows, out, sizeof(out));
+        ASSERT(strstr(out, "[test_build_fabric failed in 3 rows]") != NULL);
+        json_init(&next);
+        ASSERT(zcl_objectives_next(&rows, &next));
+        ASSERT_STR_EQ(fox_row_str(&next, "note"), "test_build_fabric failed in 3 rows");
+        json_free(&next);
+        json_free(&rows);
+        PASS();
+    }
+_test_next:;
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 static int fox_case_git(void)
 {
     int failures = 0;
@@ -805,6 +974,7 @@ int test_fleet_objectives(void)
     (void)setenv("ZCL_LAND_OBJECTIVES_DATADIR", FOX_NO_DATADIR, 1);
     failures += fox_case_ledger_extent();
     failures += fox_case_windows();
+    failures += fox_case_repeats();
     failures += fox_case_git();
     failures += fox_case_screen();
     failures += fox_case_next();
@@ -1320,7 +1490,7 @@ int test_fleet_objectives(void)
         ASSERT(strstr(screen, "[####################] 178/300 met") != NULL);
         const char *last = strstr(screen, "lab: met ");
         ASSERT(last != NULL);
-        ASSERT(strstr(last, " of 17, unmeasured ") != NULL);
+        ASSERT(strstr(last, " of 18, unmeasured ") != NULL);
         /* The whole reply must fit the leaf's declared response budget. */
         ASSERT(c.request.spec != NULL);
         ASSERT(c.request.spec->budget_bytes >= 0);

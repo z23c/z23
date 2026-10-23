@@ -125,7 +125,7 @@ ZCL_COMMAND_READY_READ(
     "parses them; node_rss_mb and node_tip_lag_blocks read the local "
     "node's status brief and node_warm_restart_s its datadir's "
     "boot_status.json, each unmeasured with the reason when the node is "
-    "down; landed_rows_today, land_success_rate_7d, "
+    "down; landed_rows_today, land_success_rate_7d, land_failure_repeats, "
     "product_commit_share_7d and generated_churn_10d are the lab KPIs, and "
     "the result carries a `screen` report card and `next`, the measured "
     "unmet objective with the largest gap to its target, product "
