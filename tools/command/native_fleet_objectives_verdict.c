@@ -750,3 +750,89 @@ void zcl_native_handle_fleet_objectives_verdict(
     }
     fvd_scan_free(&sc);
 }
+
+/* ── seq listing, for the loop step ───────────────────────────────────── */
+
+struct fvd_seqs {
+    int64_t *v;
+    size_t n, cap;
+    size_t skipped;
+    bool oom;
+};
+
+static void fvd_seqs_push(struct fvd_seqs *s, int64_t seq)
+{
+    if (s->n == s->cap) {
+        size_t ncap = s->cap ? s->cap * 2u : 256u;
+        int64_t *grow = zcl_realloc(s->v, ncap * sizeof(*grow), "snapshot seqs");
+        if (!grow) {
+            s->oom = true;
+            return;
+        }
+        s->v = grow;
+        s->cap = ncap;
+    }
+    s->v[s->n++] = seq;
+}
+
+static void fvd_seqs_line(struct fvd_seqs *s, const char *line, size_t len)
+{
+    struct json_value v;
+    int64_t seq = 0;
+    if (fvd_blank(line))
+        return;
+    json_init(&v);
+    if (json_read(&v, line, len) && fvd_row_valid(&v, &seq))
+        fvd_seqs_push(s, seq);
+    else
+        s->skipped++;
+    json_free(&v);
+}
+
+bool zcl_objectives_snapshot_seqs(const char *path, int64_t **seqs, size_t *n,
+                                  size_t *skipped)
+{
+    struct fvd_seqs s = {NULL, 0, 0, 0, false};
+    char *line;
+    FILE *f;
+    enum fvd_line st;
+    size_t len;
+    bool ok;
+    *seqs = NULL;
+    *n = 0;
+    if (skipped)
+        *skipped = 0;
+    f = fopen(path, "rb");
+    line = f ? zcl_malloc(FVD_LINE_MAX + 1u, "snapshot seq line") : NULL;
+    if (!line) {
+        if (f)
+            (void)fclose(f);
+        return false;
+    }
+    while (!s.oom && (st = fvd_read_line(f, line, FVD_LINE_MAX, &len)) !=
+                         FVD_LINE_EOF) {
+        if (st == FVD_LINE_LONG)
+            s.skipped++;
+        else
+            fvd_seqs_line(&s, line, len);
+    }
+    ok = !ferror(f) && !s.oom;
+    (void)fclose(f);
+    free(line);
+    if (!ok) {
+        free(s.v);
+        return false;
+    }
+    *seqs = s.v;
+    *n = s.n;
+    if (skipped)
+        *skipped = s.skipped;
+    return true;
+}
+
+bool zcl_objectives_snapshot_path(const struct zcl_command_request *request,
+                                  char *out, size_t cap,
+                                  struct zcl_command_reply *reply)
+{
+    return fvd_path(request, out, cap, reply);
+}

@@ -136,6 +136,17 @@ bool zcl_objectives_ledger_walk(const char *path,
                                 void (*row)(const struct json_value *, void *),
                                 void *user, char *reason, size_t reason_cap);
 
+/* fleet.objectives.verdict helpers, shared with fleet.objectives.step (one
+ * reader of objectives.jsonl, no copy). The path is the request's `snapshot`
+ * input or <state>/land/objectives.jsonl; false, with the reply filled, when
+ * neither exists. The seqs are every valid snapshot row's seq in file order
+ * (caller frees); false on a read or allocation error. */
+bool zcl_objectives_snapshot_path(const struct zcl_command_request *request,
+                                  char *out, size_t cap,
+                                  struct zcl_command_reply *reply);
+bool zcl_objectives_snapshot_seqs(const char *path, int64_t **seqs, size_t *n,
+                                  size_t *skipped);
+
 /* The bound leaf: fleet.objectives. */
 void zcl_native_handle_fleet_objectives(
     const struct zcl_command_request *request, struct zcl_command_reply *reply);

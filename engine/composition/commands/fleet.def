@@ -218,6 +218,43 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives_verdict)
 
 ZCL_COMMAND_READY_READ(
+    "fleet.objectives.step", "fleet.loop", "",
+    "Decide the lab loop's next action: run, wait, paused or none",
+    "The glue of the self-improving loop; it launches nothing. A land row "
+    "whose note starts with `loop:<objective_id>:` was made by the loop (no "
+    "separate ledger: that prefix is the whole record). For each landed loop "
+    "row, newest first and at most 20, it compares the objectives snapshot at "
+    "the landing's seq with the newest snapshot below it (the rows "
+    "`fleet objectives verdict` reads, called in process) and reports the "
+    "verdict of that row's own objective in `verdicts`. If the newest two "
+    "landed loop rows both regressed their own objective the action is "
+    "`paused`, naming both seqs and objective ids; force: true overrides that "
+    "for one call and the result says so (`forced`); nothing is stored. If a "
+    "loop row is queued, proving or otherwise not final in the land queue the "
+    "action is `wait`, naming its seq. Otherwise the work order of `fleet "
+    "objectives brief` is built in process: a runner_ok top objective gives "
+    "action `run` with next = {objective, level, runner_ok, lane "
+    "`loop-<objective_id>-<n>`, note_prefix `loop:<objective_id>:`, brief}; a "
+    "top objective that is not runner_ok, or none unmet, gives action `none` "
+    "with the reason. The result is {action, reason, paused, forced, "
+    "verdicts[], next, screen}. snapshot overrides the objectives.jsonl path; "
+    "outcomes, attempts_dir, repo, lintc_dir, baseline, brief and exclude "
+    "steer the measurement as for `fleet objectives brief`. It asks only the "
+    "local node, no peer, and writes nothing.",
+    32768,
+    "fleet,objectives,step,loop,pause,regression,landing,runner",
+    "zcl.fleet_objectives_step_input.v1", "zcl.fleet_objectives_step.v1",
+    "force,snapshot,outcomes,attempts_dir,repo,lintc_dir,baseline,brief,"
+    "exclude", "",
+    "z23-dev fleet objectives step",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives_step)
+
+ZCL_COMMAND_READY_READ(
     "fleet.goals", "fleet", "",
     "The live fleet report card: goals G1-G13, criteria C1-C8, milestones D1-D8",
     "Prints one row per id in the closed catalog "
