@@ -2104,11 +2104,11 @@ int test_chain(void)
     {
         size_t sz = sizeof(struct block_index);
         printf("(%zu bytes) ", sz);
-        /* Struct should be <=296 bytes after removing Sprout anchor/root
+        /* Struct should be <=288 bytes after removing Sprout anchor/root
          * and reordering fields to eliminate padding. If someone adds a
          * large field without realizing the memory cost, this will catch
-         * it: 3M entries * 296 = 888MB which is acceptable. */
-        bool ok = (sz <= 296);
+         * it: 3M entries * 288 = 864MB which is acceptable. */
+        bool ok = (sz <= 288);
         /* Verify nSolution pointer is NULL after init */
         struct block_index bi;
         block_index_init(&bi);

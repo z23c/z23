@@ -38,7 +38,7 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-9c052346532042065694d7db96f130e3605ddb8ee5c0ed2ee2756bafc9f4577a  core/UNSEAL.md
+1619637b14a593ead8e142cde521318483d3c7174fb2e3b2f07097a7cb18c86d  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 1b38019875d5bb928f13ca3ac4f2d93f346c4a12699fbb41265f23cc3d7ee8c2  core/chainparams/include/chain/checkpoints.h
@@ -103,7 +103,7 @@ d4d8c810cc05290d314a294c7f61418a238360cd7f1008e5ea4f24058061208a  core/modules/b
 d6cd644c5668f196dc6463c4686ac47ea9763dabee0fd78153979593a727cdf4  core/modules/bloom/src/bloom.c
 5a2bc654bef2748cd9b9fc248bcd6bca5e1694b0906fe67c9c829f32b72d7fe5  core/modules/bloom/src/merkle.c
 bf24351ad8a7abdfd23da436b5716918c823759b2c10e57d43230f75d6ce01a5  core/modules/bloom/src/merkleblock.c
-40cab57c363d0a3c61a98856671c1cf244aec945cbc2e1dafad9bf802c619f59  core/modules/chain/include/chain/chain.h
+3149145587e0b047c235c0f09193434ea6fde034be724c593be43793c43d4b5e  core/modules/chain/include/chain/chain.h
 3497cd74569902b96e99db59c94eb66fed6bef99af08aef32c3f47fe21b7f37d  core/modules/chain/include/chain/mmb.h
 c34c5289914d65d0e9b951a4f2910e8abb8aa2ed3cf595ce2d68079ff798ba6d  core/modules/chain/include/chain/mmr.h
 26042385b08da5c50b248b5cedc1288127db785780fcb32b6c5b602c0c6ae77e  core/modules/chain/include/chain/sha3_windows.h
@@ -594,7 +594,7 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  556  4  2bf31dec27611bde8cc4e537978f4ff05ba6a49fe8e47fa1aa785ff40179f5cf  core
+SECTION  556  4  34fcd8c4e7f6d618cb990be6384ba4dac9bed0871316779234dff7eb28be5fdc  core
 SECTION  12  16  6169522647bfed2194c0519612c2d0feeb318858ce714a56550e426c63b44f14  core/chainparams
 SECTION  6  24  63dff36c30ea1f9c45ed358d05006795f91e44b502d1d1b1196fc4a2cca2570b  core/chainparams/include
 SECTION  6  30  c247859f7b026dc314874fe7f2bfda58f885c05c44ff2fd601ebc3ce25ebeb48  core/chainparams/include/chain
@@ -608,14 +608,14 @@ SECTION  10  9  4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da
 SECTION  5  17  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd  core/math/include
 SECTION  5  22  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38  core/math/include/core
 SECTION  5  13  bed7851826222b99834c6ee74bb3e7ce6155798a5ef78c798fe2f836bbf30862  core/math/src
-SECTION  490  12  a61483c190e46b586fe9701b999037cb5f9b994dbc2550b7b275f72b0a8e5bcd  core/modules
+SECTION  490  12  bb33f3b5892decc8e7b426bf508060ad7a8dba8ecb2f5338ecaee74e139065cf  core/modules
 SECTION  6  18  d39a267ed7843199fea7ad58a9c6cbc6d0acd538ff04e13d69147a51924c8648  core/modules/bloom
 SECTION  3  26  25f9f764136ebc796a9aaed6dc708deba3347052954808e4efacd66eed7255c6  core/modules/bloom/include
 SECTION  3  32  2648501012a71f5658485e08ef8fb567f46f716f1fd96cbfcb93666c234a6686  core/modules/bloom/include/bloom
 SECTION  3  22  34c5eb57f8d1fe1da5eef03661d47796a85ac1eb2689552332d8e959751796b5  core/modules/bloom/src
-SECTION  12  18  ce6bcab17c008ca71a49a06e4a9c994f66f174eddce86043bdc851ec0151183f  core/modules/chain
-SECTION  6  26  e1a26cc48bd376656def12c32ac685818e4b41d469f016991c7eab67c138657e  core/modules/chain/include
-SECTION  6  32  abed548f8d4ea98e94f93fe57a7960363b14b5e05500981fa2aaa1fe2d47e60d  core/modules/chain/include/chain
+SECTION  12  18  d5ae67aaaf5feef9956ce79d681082a91f3b8341bf99455a9f6be7985f0451a6  core/modules/chain
+SECTION  6  26  17322831a8c3b65315ce6d218a67ebe7b99c0a5801d4b893c1b13f864f3ba984  core/modules/chain/include
+SECTION  6  32  e1248719ca237a7c8d8c68341d388b8b004e095399e95de7a95d4660f0fc52de  core/modules/chain/include/chain
 SECTION  6  22  df773302b43804f0ad05e4f190a8fa0a404d2a691b09e01fa749bb41e03688f3  core/modules/chain/src
 SECTION  11  18  d2318a6464b70cdd6385101f6dce5357d56e8218a006c2756de240a76fb0e7ce  core/modules/coins
 SECTION  6  26  54af65fed882eb12e6e5fc15e47e05848719dca863fc7bc4134c1d9a4c22d994  core/modules/coins/include
@@ -674,5 +674,5 @@ SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  6862591d913521af9bc6883c09c1be51c872e8fb9fab060ead82600437996038
-ROOT  5acb8dd0ba8959a3dfb47502c3e875e2599e7768657dd6028b143d85658e6d9e
+TREE  ec18cc020daf5a3d5d93e0050524ff5031a779e0d8f9265d3dd97df95a7575aa
+ROOT  fa22044090a24757e7ac708bd4a99f6501541fc094be3a45f23e161fcf94a82f

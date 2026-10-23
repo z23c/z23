@@ -107,7 +107,6 @@ struct block_index {
     int64_t nChainSproutValue;
     int64_t nSaplingValue;
     int64_t nChainSaplingValue;
-    uint64_t nTimeReceived;
     unsigned char *nSolution;      /* heap-allocated, NULL if not loaded */
     size_t nSolutionSize;
 

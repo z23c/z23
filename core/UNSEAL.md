@@ -276,3 +276,7 @@ later lane flips it HARD.
 - 2026-10-23T16:20:03Z — REASON: block_map buckets drop the duplicated 32-byte key (compare against index->hashBlock): about -320 MB node memory, same slots, same iteration order, no consensus logic change
   old ROOT: 6c26eea8b8ada9f6784757204ac27576890e7b35ea6f93245c47c238455895bf
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-23T23:21:43Z — REASON: chain.h: drop struct block_index.nTimeReceived, a field with no reader or writer anywhere in the tree (8 B per block index entry, ~25 MB at mainnet height); layout-only, no consensus predicate or on-disk format reads it
+  old ROOT: 5acb8dd0ba8959a3dfb47502c3e875e2599e7768657dd6028b143d85658e6d9e
+  by: owner unseal ritual (make core-unseal)
