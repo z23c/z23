@@ -478,9 +478,15 @@ static void fvd_put(struct fvd_buf *b, const char *fmt, ...)
 static void fvd_ascii(const char *s, char *out, size_t cap)
 {
     size_t n = 0;
-    for (; s && *s && n + 1 < cap; s++)
-        out[n++] = (*s >= 0x20 && *s <= 0x7e) ? *s : '?';
-    out[n] = '\0';
+    if (!s || cap == 0)
+        s = "";
+    while (s[n] && n + 1 < cap) {
+        unsigned char ch = (unsigned char)s[n];
+        out[n] = (ch >= 0x20 && ch < 0x7f) ? (char)ch : '?';
+        n++;
+    }
+    if (cap > 0)
+        out[n] = '\0';
 }
 
 static void fvd_num(const struct json_value *v, char *out, size_t cap)
