@@ -599,6 +599,7 @@ int test_beta6_bootstrap(void)
         struct p2p_node node;
         memset(&mp, 0, sizeof(mp));
         memset(&node, 0, sizeof(node));
+        node.socket = ZCL_INVALID_SOCKET;
         net_manager_init(&nm);
         nm.local_host_nonce = 7;
         mp.net_mgr = &nm;
@@ -626,6 +627,7 @@ int test_beta6_bootstrap(void)
         struct p2p_node node;
         memset(&mp, 0, sizeof(mp));
         memset(&node, 0, sizeof(node));
+        node.socket = ZCL_INVALID_SOCKET;
         net_manager_init(&nm);
         nm.local_host_nonce = 7;
         mp.net_mgr = &nm;
@@ -673,6 +675,7 @@ int test_beta6_bootstrap(void)
         memset(&mp, 0, sizeof(mp));
         mp.params = &params;
         memset(&node, 0, sizeof(node));
+        node.socket = ZCL_INVALID_SOCKET;
         zcl_mutex_init(&node.cs_send);
         seam_addr_loopback(&node.addr);
 

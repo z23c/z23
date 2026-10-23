@@ -18,12 +18,13 @@
 #include "platform/positioned_file.h"
 #include "util/sync.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
 
 static zcl_mutex_t g_serve_lock;
 static bool g_serve_lock_ready;
-static bool g_armed;
+static _Atomic bool g_armed;
 static char g_source_dir[4096];
 static struct beta6_bs_manifest g_manifest;
 
@@ -211,7 +212,7 @@ struct zcl_result beta6_bs_arm_cancellable(const char *source_dir, const char *n
     beta6_bs_manifest_free(&g_manifest);
     g_manifest = built;
     snprintf(g_source_dir, sizeof(g_source_dir), "%s", source_dir);
-    g_armed = true;
+    atomic_store_explicit(&g_armed, true, memory_order_release);
     UNLOCK(g_serve_lock);
     return ZCL_OK;
 }
@@ -220,16 +221,16 @@ void beta6_bs_disarm(void)
 {
     serve_lock_init_once();
     LOCK(g_serve_lock);
+    atomic_store_explicit(&g_armed, false, memory_order_release);
     beta6_bs_manifest_free(&g_manifest);
     beta6_bs_manifest_init(&g_manifest);
     g_source_dir[0] = '\0';
-    g_armed = false;
     UNLOCK(g_serve_lock);
 }
 
 struct zcl_result beta6_bs_status(void)
 {
-    if (!g_armed)
+    if (!atomic_load_explicit(&g_armed, memory_order_acquire))
         return ZCL_ERR(BETA6_BS_ERR_REFUSED,
                        "the beta6 bootstrap snapshot service is not armed; set "
                        "-beta6-bootstrap-source");
@@ -238,12 +239,12 @@ struct zcl_result beta6_bs_status(void)
 
 const char *beta6_bs_source_dir(void)
 {
-    return g_armed ? g_source_dir : "";
+    return atomic_load_explicit(&g_armed, memory_order_acquire) ? g_source_dir : "";
 }
 
 const struct beta6_bs_manifest *beta6_bs_manifest(void)
 {
-    return g_armed ? &g_manifest : NULL;
+    return atomic_load_explicit(&g_armed, memory_order_acquire) ? &g_manifest : NULL;
 }
 
 struct zcl_result beta6_bs_validate_chunk_range(uint64_t offset, uint64_t length,

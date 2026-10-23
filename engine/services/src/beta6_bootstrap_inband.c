@@ -40,6 +40,7 @@
 #include "base/safe_alloc.h"
 #include "platform/clock.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -58,7 +59,7 @@ static char s_params_dir[4096];
  * cross-stream manifest-equality check pass. */
 static unsigned char *s_manifest_bytes;
 static size_t s_manifest_len;
-static bool s_ready;
+static _Atomic bool s_ready;
 
 /* ── framing ─────────────────────────────────────────────────────────── */
 
@@ -117,7 +118,7 @@ static bool peer_quota_key(const struct p2p_node *node, char *out, size_t out_si
 
 static bool serve_snapshot_manifest(struct msg_processor *mp, struct p2p_node *node)
 {
-    if (!s_manifest_bytes)
+    if (!atomic_load_explicit(&s_ready, memory_order_acquire) || !s_manifest_bytes)
         return send_reject(mp, node, "getbsman", "no beta6 snapshot is armed");
     return send_reply(mp, node, "bsman", s_manifest_bytes, s_manifest_len);
 }
@@ -254,7 +255,7 @@ struct zcl_result beta6_bs_inband_serve(struct msg_processor *mp, struct p2p_nod
 
 struct zcl_result beta6_bs_inband_status(void)
 {
-    if (!s_ready)
+    if (!atomic_load_explicit(&s_ready, memory_order_acquire))
         return ZCL_ERR(BETA6_BS_ERR_REFUSED,
                        "the beta6 in-band bootstrap manifest is not cached");
     return beta6_bs_status();
@@ -262,7 +263,7 @@ struct zcl_result beta6_bs_inband_status(void)
 
 struct zcl_result beta6_bs_inband_params_status(void)
 {
-    if (!s_ready)
+    if (!atomic_load_explicit(&s_ready, memory_order_acquire))
         return ZCL_ERR(BETA6_BS_ERR_REFUSED,
                        "beta6 in-band seam is not armed");
     if (s_params_dir[0] == '\0')
@@ -305,13 +306,13 @@ struct zcl_result beta6_bs_inband_arm(const char *network, const char *params_di
 
     snprintf(s_network, sizeof(s_network), "%s", network ? network : "");
     snprintf(s_params_dir, sizeof(s_params_dir), "%s", params_dir ? params_dir : "");
-    s_ready = true;
+    atomic_store_explicit(&s_ready, true, memory_order_release);
     return ZCL_OK;
 }
 
 void beta6_bs_inband_disarm(void)
 {
-    s_ready = false;
+    atomic_store_explicit(&s_ready, false, memory_order_release);
     free(s_manifest_bytes);
     s_manifest_bytes = NULL;
     s_manifest_len = 0;
