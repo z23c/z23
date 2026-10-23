@@ -1626,17 +1626,6 @@ static struct zcl_objective_value obj_fresh_node_sync_eta_s(
     return v;
 }
 
-/* ── not producible from this tree today ─────────────────────────────── */
-
-static struct zcl_objective_value obj_tokens_per_landed_commit(
-    const struct zcl_objectives_options *options)
-{
-    struct zcl_objective_value v = {0};
-    (void)options;
-    obj_set_reason(&v, "%s", "producer is the experiment ledger");
-    return v;
-}
-
 /* ── dispatch ─────────────────────────────────────────────────────────── */
 
 struct obj_producer {
@@ -1657,7 +1646,7 @@ static const struct obj_producer k_producers[] = {
     {"node_rss_mb", zcl_objectives_node_rss_mb},
     {"node_tip_lag_blocks", zcl_objectives_node_tip_lag_blocks},
     {"node_warm_restart_s", zcl_objectives_node_warm_restart_s},
-    {"tokens_per_landed_commit", obj_tokens_per_landed_commit},
+    {"tokens_per_landed_commit", zcl_objectives_tokens_per_landed_commit},
     {"landed_rows_today", obj_landed_rows_today},
     {"land_success_rate_7d", obj_land_success_rate_7d},
     {"land_failure_repeats", obj_land_failure_repeats},

@@ -74,8 +74,10 @@ Z23_OBJECTIVE("fresh_node_sync_eta_s", "product", "unmeasured", "min", 3600, "s"
              "a stranger joining the network should be caught up within an "
              "hour, not days")
 
-Z23_OBJECTIVE("tokens_per_landed_commit", "lab", "unmeasured", "min", 200000,
-             "tokens",
+Z23_OBJECTIVE("tokens_per_landed_commit", "lab",
+             "experiment ledger result rows, tokens_in+tokens_out (cache reads "
+             "excluded) / landed rows, 7 days",
+             "min", 200000, "tokens",
              "the cost of one landed commit is what the whole delegation "
              "loop is spending to make progress")
 

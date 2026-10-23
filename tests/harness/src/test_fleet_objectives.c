@@ -170,6 +170,7 @@ struct fox_call {
 #define FOX_NO_BRIEF "/nonexistent/z23-fox/brief.json"
 #define FOX_NO_DATADIR "/nonexistent/z23-fox/datadir"
 #define FOX_NO_STOPWATCH "/nonexistent/z23-fox/stopwatch/history.jsonl"
+#define FOX_NO_STATE "/nonexistent/z23-fox/state"
 
 static void fox_begin_bare(struct fox_call *c)
 {
@@ -1156,6 +1157,166 @@ _test_next:;
     return failures;
 }
 
+/* ── tokens_per_landed_commit ─────────────────────────────────────────── */
+
+/* The window is the 7 days before FOX_TOK_NOW (2026-10-23T12:00:00Z). */
+#define FOX_TOK_NOW ((int64_t)1792756800)
+#define FOX_TOK_IN_A "2026-10-22T10:00:00Z"
+#define FOX_TOK_IN_B "2026-10-20T10:00:00Z"
+#define FOX_TOK_OLD "2026-09-01T00:00:00Z"
+#define FOX_TOK_HEAD                                                        \
+    "ts\tkind\tbox\ttask_id\ttask_class\tstory\texecutor\tharness\tmodel\t" \
+    "effort\ttokens_in\ttokens_out\ttokens_cache\ttokens_reasoning\t"        \
+    "tool_uses\tturns\twall_s\toutcome\tlines_added\tlines_removed\t"        \
+    "defects\tnote\n"
+
+/* One 22-column experiment ledger row; the token columns are the 11th and
+ * 12th, the rest is a closed-vocabulary filler. */
+static bool fox_tok_row(FILE *f, const char *ts, const char *kind,
+                        const char *tin, const char *tout)
+{
+    return fprintf(f,
+                   "%s\t%s\tnode1\tid\tverify\tunknown\tclaude-opus\t"
+                   "agent-tool\tm\tmedium\t%s\t%s\t0\t0\t0\t0\t0\tunknown\t"
+                   "0\t0\t0\tfixture\n",
+                   ts, kind, tin, tout) > 0;
+}
+
+/* One outcomes.jsonl row with the given ts and state. */
+static bool fox_tok_landed(FILE *f, const char *ts, const char *state)
+{
+    return fprintf(f, "{\"seq\":1,\"ts\":\"%s\",\"state\":\"%s\"}\n", ts,
+                   state) > 0;
+}
+
+static struct zcl_objective_value fox_tok_measure(const char *ledger,
+                                                  const char *outcomes)
+{
+    struct zcl_objectives_options o;
+    memset(&o, 0, sizeof(o));
+    o.experiments = ledger;
+    o.outcomes = outcomes;
+    o.now = FOX_TOK_NOW;
+    return zcl_objectives_measure(&o, "tokens_per_landed_commit");
+}
+
+/* A ledger whose window holds 2000 result tokens (1200 + 800), one predict
+ * row and one out-of-window result that must not count, and two malformed
+ * rows (a short row and a non-numeric token column) that are skipped. */
+static bool fox_tok_write_ledger(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    bool ok;
+    if (!f)
+        return false;
+    ok = fputs(FOX_TOK_HEAD, f) >= 0 &&
+         fox_tok_row(f, FOX_TOK_IN_A, "result", "1000", "200") &&
+         fox_tok_row(f, FOX_TOK_IN_B, "result", "300", "500") &&
+         fox_tok_row(f, FOX_TOK_IN_A, "predict", "9999", "9999") &&
+         fox_tok_row(f, FOX_TOK_OLD, "result", "50000", "50000") &&
+         fputs("2026-10-22T10:00:00Z\tresult\tnode1\tshort\n", f) >= 0 &&
+         fox_tok_row(f, FOX_TOK_IN_A, "result", "12x", "5");
+    return fclose(f) == 0 && ok;
+}
+
+/* Three landed rows in the window (one failed and one old landed row must
+ * not count): 2000 / 3 rounds down to 666. */
+static bool fox_tok_write_outcomes(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    bool ok;
+    if (!f)
+        return false;
+    ok = fox_tok_landed(f, "2026-10-21T10:00:00Z", "landed") &&
+         fox_tok_landed(f, FOX_TOK_IN_A, "landed") &&
+         fox_tok_landed(f, FOX_TOK_IN_B, "landed") &&
+         fox_tok_landed(f, FOX_TOK_IN_A, "failed") &&
+         fox_tok_landed(f, FOX_TOK_OLD, "landed");
+    return fclose(f) == 0 && ok;
+}
+
+static int fox_case_tokens_measure(const char *root)
+{
+    int failures = 0;
+    char ledger[1024], outcomes[1024];
+    struct zcl_objective_value v;
+    (void)snprintf(ledger, sizeof(ledger), "%s/rows.tsv", root);
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/tok_outcomes.jsonl", root);
+    TEST("objectives: tokens_per_landed_commit is measured: result tokens in "
+         "the window over landed rows, rounded down, malformed lines skipped "
+         "and counted") {
+        ASSERT(fox_tok_write_ledger(ledger));
+        ASSERT(fox_tok_write_outcomes(outcomes));
+        v = fox_tok_measure(ledger, outcomes);
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)666);
+        ASSERT(strstr(v.note, "2 result rows") != NULL);
+        ASSERT(strstr(v.note, "2 malformed") != NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int fox_case_tokens_refuse(const char *root)
+{
+    int failures = 0;
+    char ledger[1024], outcomes[1024], none[1024];
+    struct zcl_objective_value v;
+    FILE *f;
+    (void)snprintf(ledger, sizeof(ledger), "%s/rows.tsv", root);
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/tok_outcomes.jsonl", root);
+    (void)snprintf(none, sizeof(none), "%s/no_such_rows.tsv", root);
+    TEST("objectives: tokens_per_landed_commit is unmeasured, naming the "
+         "cause, when the ledger is missing") {
+        ASSERT(fox_tok_write_outcomes(outcomes));
+        v = fox_tok_measure(none, outcomes);
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "missing experiment ledger") != NULL);
+        PASS();
+    }
+    TEST("objectives: tokens_per_landed_commit is unmeasured when the window "
+         "has no result row") {
+        ASSERT(fox_tok_write_outcomes(outcomes));
+        f = fopen(ledger, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs(FOX_TOK_HEAD, f) >= 0);
+        ASSERT(fox_tok_row(f, FOX_TOK_IN_A, "predict", "5", "5"));
+        ASSERT(fox_tok_row(f, FOX_TOK_OLD, "result", "5", "5"));
+        ASSERT(fclose(f) == 0);
+        v = fox_tok_measure(ledger, outcomes);
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "no experiment ledger result row") != NULL);
+        PASS();
+    }
+    TEST("objectives: tokens_per_landed_commit is unmeasured when the window "
+         "has no landed row") {
+        ASSERT(fox_tok_write_ledger(ledger));
+        f = fopen(outcomes, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fox_tok_landed(f, FOX_TOK_IN_A, "failed"));
+        ASSERT(fox_tok_landed(f, FOX_TOK_OLD, "landed"));
+        ASSERT(fclose(f) == 0);
+        v = fox_tok_measure(ledger, outcomes);
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "no landed row") != NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int fox_case_tokens(void)
+{
+    int failures = 0;
+    char root[512];
+    test_make_tmpdir(root, sizeof(root), "fleet_objectives", "tokens");
+    failures += fox_case_tokens_measure(root);
+    failures += fox_case_tokens_refuse(root);
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 int test_fleet_objectives(void);
 int test_fleet_objectives(void)
 {
@@ -1165,6 +1326,8 @@ int test_fleet_objectives(void)
     /* Never the real HOME ledger: every case that reaches the producer sees
      * a path that does not exist unless the case names its own fixture. */
     (void)setenv("ZCL_C3_STOPWATCH_HISTORY", FOX_NO_STOPWATCH, 1);
+    /* Never the real experiment ledger: no XDG state root exists here. */
+    (void)setenv("XDG_STATE_HOME", FOX_NO_STATE, 1);
     failures += fox_case_sync();
     failures += fox_case_ledger_extent();
     failures += fox_case_windows();
@@ -1173,6 +1336,7 @@ int test_fleet_objectives(void)
     failures += fox_case_screen();
     failures += fox_case_next();
     failures += fox_case_node_cache();
+    failures += fox_case_tokens();
     char root[512];
     char outcomes_ok[1024], outcomes_missing[1024];
     char attempts_dir[1024], inflight_dir[1024];
@@ -1600,8 +1764,8 @@ int test_fleet_objectives(void)
         PASS();
     }
 
-    TEST("objectives: the two undeclared objectives are always unmeasured, "
-        "by name") {
+    TEST("objectives: the undeclared eta is unmeasured, by name; tokens "
+        "names its missing ledger") {
         struct fox_call c;
         fox_begin(&c);
         fox_set(&c, "outcomes", outcomes_ok);
@@ -1616,8 +1780,8 @@ int test_fleet_objectives(void)
         const struct json_value *tok =
             fox_row(&c, "tokens_per_landed_commit");
         ASSERT(tok != NULL);
-        ASSERT_STR_EQ(fox_row_str(tok, "status"),
-                     "unmeasured(producer is the experiment ledger)");
+        ASSERT(strncmp(fox_row_str(tok, "status"),
+                       "unmeasured(missing experiment ledger", 36) == 0);
         fox_end(&c);
         PASS();
     }

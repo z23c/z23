@@ -64,6 +64,9 @@ struct zcl_objectives_options {
                                * asking the local node (fixtures) */
     const char *datadir;      /* the datadir whose boot_status.json is read;
                                * NULL selects the CLI's resolved datadir */
+    const char *experiments;  /* the experiment ledger rows.tsv; NULL selects
+                               * $XDG_STATE_HOME/zclassic23/experiments/rows.tsv
+                               * (else ~/.local/state/...) */
     int64_t node_budget_ms;   /* the longest a producer may wait on the node,
                                * connect and total; 0 keeps the status
                                * front door's own deadline */
@@ -85,6 +88,10 @@ struct zcl_objective_value zcl_objectives_node_rss_mb(
 struct zcl_objective_value zcl_objectives_node_tip_lag_blocks(
     const struct zcl_objectives_options *options);
 struct zcl_objective_value zcl_objectives_node_warm_restart_s(
+    const struct zcl_objectives_options *options);
+
+/* The experiment-ledger producer (native_fleet_objectives_tokens.c). */
+struct zcl_objective_value zcl_objectives_tokens_per_landed_commit(
     const struct zcl_objectives_options *options);
 
 /* "met", "unmet", or "unmeasured(<reason>)", written into `out` (always
