@@ -659,6 +659,7 @@ static enum vcs_package_prepare_error prepare_finish(
     struct json_value meta;
     if (!json_read(&meta, (const char *)walk->meta, walk->meta_len) ||
         meta.type != JSON_OBJ) {
+        json_free(&meta);
         prepare_detail(walk, "%s is not a JSON object",
                        VCS_PACKAGE_DEPS_META_PATH);
         return VCS_PACKAGE_PREPARE_ERR_META;
@@ -1343,18 +1344,22 @@ static bool prepare_walk_dir(struct prepare_walk *walk, int dir_fd,
 
 /* Walks a real child directory through its own descriptor. A local control
  * directory at the root is skipped without error. A child that cannot be
- * opened fails the walk without setting walk->error, as it always has. */
+ * opened fails the walk with CHANGED (replaced or vanished) or IO. */
 static bool prepare_walk_subdir(struct prepare_walk *walk, int dir_fd,
                                 const char *prefix, const char *name,
                                 const char *path)
 {
-    if (prepare_local_control_dir(prefix, name))
-        return true;
+    if (prepare_local_control_dir(prefix, name)) return true;
     int child = openat(dir_fd, name,
                        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    bool ok = child >= 0 && prepare_walk_dir(walk, child, path);
-    if (child >= 0)
-        close(child);
+    if (child < 0) {
+        walk->error = (errno == ELOOP || errno == ENOENT || errno == ENOTDIR)
+            ? VCS_PACKAGE_PREPARE_ERR_CHANGED : VCS_PACKAGE_PREPARE_ERR_IO;
+        prepare_detail(walk, "%s: open directory: %s", path, strerror(errno));
+        return false;
+    }
+    bool ok = prepare_walk_dir(walk, child, path);
+    close(child);
     return ok;
 }
 
@@ -1421,6 +1426,16 @@ static bool prepare_walk_dir(struct prepare_walk *walk, int dir_fd,
     return ok;
 }
 
+static int prepare_open_root(const char *dir, char *detail, size_t cap)
+{
+    if (detail && cap)
+        detail[0] = '\0';
+    int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0 && detail && cap)
+        (void)snprintf(detail, cap, "%s: %s", dir, strerror(errno));
+    return fd;
+}
+
 enum vcs_package_prepare_error vcs_package_prepare(
     const struct vcs_package_prepare_options *options,
     struct vcs_package_prepared *out, char *detail, size_t detail_cap)
@@ -1428,16 +1443,9 @@ enum vcs_package_prepare_error vcs_package_prepare(
     if (!options || !options->dir || !out)
         return VCS_PACKAGE_PREPARE_ERR_NULL;
     vcs_package_prepared_init(out);
-    if (detail && detail_cap)
-        detail[0] = '\0';
-    int root_fd = open(options->dir,
-                       O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (root_fd < 0) {
-        if (detail && detail_cap)
-            (void)snprintf(detail, detail_cap, "%s: %s", options->dir,
-                           strerror(errno));
+    int root_fd = prepare_open_root(options->dir, detail, detail_cap);
+    if (root_fd < 0)
         return VCS_PACKAGE_PREPARE_ERR_PATH;
-    }
     struct prepare_walk walk = {
         .out = out,
         .error = VCS_PACKAGE_PREPARE_OK,
@@ -1464,15 +1472,9 @@ enum vcs_package_prepare_error vcs_package_scan_layout(
         return VCS_PACKAGE_PREPARE_ERR_NULL;
     vcs_package_prepared_init(out);
     *has_package_config = false;
-    if (detail && detail_cap)
-        detail[0] = '\0';
-    int root_fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
-    if (root_fd < 0) {
-        if (detail && detail_cap)
-            (void)snprintf(detail, detail_cap, "%s: %s", dir,
-                           strerror(errno));
+    int root_fd = prepare_open_root(dir, detail, detail_cap);
+    if (root_fd < 0)
         return VCS_PACKAGE_PREPARE_ERR_PATH;
-    }
     struct prepare_walk walk = {
         .out = out,
         .error = VCS_PACKAGE_PREPARE_OK,

@@ -432,6 +432,37 @@ static int artifact_reader_refusal(unsigned kind)
     free(bytes); json_free(&input); if (fixture.home[0]) test_rm_rf(fixture.home);
     return failures;
 }
+/* kind 0: a mode-000 child directory; kind 1: a package manifest whose root
+ * is a JSON array. Both must refuse the package with a named detail. */
+static int artifact_walk_refusal(unsigned kind)
+{
+    int failures = 0; struct artifact_fixture fixture = {0}; char dir[1600] = "";
+    TEST_CASE("package prepare: an unopenable child directory or array-root manifest refuses the package") {
+        ASSERT(artifact_fixture_open(&fixture));
+        struct vcs_package_prepare_options options = {.dir = fixture.source, .publisher_sequence = 1, .chain_id = fixture.chain};
+        ASSERT(zcl_hex_decode_lower(artifact_public_key, options.publisher_pubkey, 33));
+        char detail[256] = "", sdetail[256] = ""; struct vcs_package_prepared prepared, scanned; bool has_config = false;
+        enum vcs_package_prepare_error err, serr = VCS_PACKAGE_PREPARE_OK;
+        if (kind == 0 && geteuid() == 0) { printf("package_artifact: SKIP (root ignores mode 000)\n"); }
+        else if (kind == 0) {
+            ASSERT(artifact_path(dir, sizeof(dir), fixture.source, "docs")); ASSERT(chmod(dir, 0) == 0);
+            err = vcs_package_prepare(&options, &prepared, detail, sizeof(detail));
+            serr = vcs_package_scan_layout(fixture.source, &scanned, &has_config, sdetail, sizeof(sdetail));
+            vcs_package_prepared_free(&scanned);
+            ASSERT(err != VCS_PACKAGE_PREPARE_OK); ASSERT(strstr(detail, "docs") != NULL);
+            ASSERT(serr != VCS_PACKAGE_PREPARE_OK); ASSERT(strstr(sdetail, "docs") != NULL);
+        } else {
+            { char mp[1600]; ASSERT(artifact_path(mp, sizeof(mp), fixture.source, "zcode-package.json")); ASSERT(unlink(mp) == 0); }
+            ASSERT(artifact_fixture_file(&fixture, "zcode-package.json", "[\"a\",\"b\"]\n"));
+            err = vcs_package_prepare(&options, &prepared, detail, sizeof(detail));
+            ASSERT_EQ(err, VCS_PACKAGE_PREPARE_ERR_META);
+            ASSERT(strstr(detail, "zcode-package.json is not a JSON object") != NULL);
+        }
+    } TEST_END
+    if (dir[0]) (void)chmod(dir, 0700);
+    if (fixture.home[0]) test_rm_rf(fixture.home);
+    return failures;
+}
 int test_zcode_package_artifact(void);
 int test_zcode_package_artifact(void)
 {
@@ -439,6 +470,7 @@ int test_zcode_package_artifact(void)
         artifact_export_interruption(2, false) + artifact_export_interruption(0, true);
     for (unsigned i = 0; i < 3; ++i) failures += artifact_export_preflight(i);
     for (unsigned i = 0; i < 9; ++i) failures += artifact_reader_refusal(i);
+    for (unsigned i = 0; i < 2; ++i) failures += artifact_walk_refusal(i);
     return failures;
 }
 #else
