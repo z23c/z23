@@ -532,6 +532,36 @@ static void brief_finish(struct zcl_command_reply *reply,
         brief_pass(reply);
 }
 
+/* With runner_ok_only, records the unmet objective that ranks first overall
+ * when it is not runner_ok and so was passed over: `skipped`, an array of
+ * {objective, reason}. Read by the loop step, which would otherwise measure
+ * twice (once plain, once narrowed) to learn it. Absent when nothing was
+ * passed over. */
+static void brief_note_skipped(struct zcl_command_reply *reply,
+                               const struct json_value *rows)
+{
+    struct json_value top, arr, item;
+    const char *id;
+    const struct brief_work *work;
+    json_init(&top);
+    json_init(&arr);
+    json_init(&item);
+    if (zcl_objectives_next(rows, &top) && !json_is_null(&top)) {
+        id = json_get_str(json_get(&top, "id"));
+        work = brief_find(id);
+        json_set_array(&arr);
+        json_set_object(&item);
+        if (work && !work->runner_ok &&
+            json_push_kv_str(&item, "objective", id) &&
+            json_push_kv_str(&item, "reason", "not runner_ok") &&
+            json_push_back(&arr, &item))
+            (void)json_push_kv(&reply->data, "skipped", &arr);
+    }
+    json_free(&item);
+    json_free(&arr);
+    json_free(&top);
+}
+
 /* Fills the reply from the narrowed rows; the pick is zcl_objectives_next. */
 static void brief_reply(struct zcl_command_reply *reply,
                         const struct json_value *rows, const char *id,
@@ -560,6 +590,8 @@ static void brief_reply(struct zcl_command_reply *reply,
         brief_finish(reply, &next,
                      brief_find(json_get_str(json_get(&next, "id"))), in);
     }
+    if (ok && runner_only && !id && reply->status == ZCL_COMMAND_STATUS_PASSED)
+        brief_note_skipped(reply, rows);
     json_free(&next);
     json_free(&narrowed);
 }

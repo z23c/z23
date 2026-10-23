@@ -14,6 +14,7 @@
 #include "command/native_command.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
+#include "engine/engine_prompt.h"
 #include "kernel/command_registry.h"
 
 #include <errno.h>
@@ -383,16 +384,83 @@ static int fst_case_none_and_skips(void)
     int failures = 0;
     struct fst_world w;
     struct fst_call c;
-    TEST("step: a top objective that is not runner_ok is action none") {
+    TEST("step: a top objective that is not runner_ok falls through to the "
+         "top runnable one and lists what it skipped") {
+        const struct json_value *sk;
+        ASSERT(fst_world(&w, "fall", 2200));
+        fst_file(&w, "outcomes.jsonl", "");
+        fst_file(&w, "queue.jsonl", "");
+        fst_file(&w, "objectives.jsonl", "");
+        ASSERT(fst_run(&c, &w, false));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(fst_str(&c, "action"), "run");
+        ASSERT_STR_EQ(fst_next_str(&c, "objective"), FST_OBJ);
+        sk = json_get(&c.reply.data, "skipped");
+        ASSERT_EQ(json_size(sk), 1);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(sk, 0), "objective")),
+                      "node_rss_mb");
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(sk, 0), "reason")),
+                      "not runner_ok");
+        ASSERT(strstr(fst_str(&c, "screen"),
+                      "skipped node_rss_mb: not runner_ok") != NULL);
+        fst_end(&c);
+        fst_restore(&w);
+        PASS();
+    }
+    TEST("step: no runner_ok objective unmet is action none, skipped named") {
         ASSERT(fst_world(&w, "none", 2200));
+        ASSERT(fst_write(w.baseline, ""));
         fst_file(&w, "outcomes.jsonl", "");
         fst_file(&w, "queue.jsonl", "");
         fst_file(&w, "objectives.jsonl", "");
         ASSERT(fst_run(&c, &w, false));
         ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
         ASSERT_STR_EQ(fst_str(&c, "action"), "none");
-        ASSERT(strstr(fst_str(&c, "reason"), "node_rss_mb") != NULL);
-        ASSERT(strstr(fst_str(&c, "reason"), "not runner_ok") != NULL);
+        ASSERT(strstr(fst_str(&c, "reason"), "skipped node_rss_mb") != NULL);
+        ASSERT_EQ(json_size(json_get(&c.reply.data, "skipped")), 1);
+        ASSERT(json_get(&c.reply.data, "dispatch") == NULL);
+        fst_end(&c);
+        fst_restore(&w);
+        PASS();
+    }
+    TEST("step: run carries a dispatch with a task engine_unit parses and an "
+         "argv without --yes-dispatch") {
+        const struct json_value *dp, *argv;
+        const char *task;
+        struct engine_contract ct;
+        char why[ENGINE_CONTRACT_REASON_BYTES];
+        bool has_task = false, has_nogroup = false;
+        ASSERT(fst_world(&w, "dispatch", 100));
+        fst_file(&w, "outcomes.jsonl", "");
+        fst_file(&w, "queue.jsonl", "");
+        fst_file(&w, "objectives.jsonl", "");
+        ASSERT(fst_run(&c, &w, false));
+        dp = json_get(&c.reply.data, "dispatch");
+        ASSERT(dp != NULL);
+        ASSERT_STR_EQ(json_get_str(json_get(dp, "lane")),
+                      "loop-functions-over-complexity-cap-1");
+        ASSERT_STR_EQ(json_get_str(json_get(dp, "note_prefix")),
+                      "loop:" FST_OBJ ":");
+        ASSERT_STR_EQ(json_get_str(json_get(dp, "engine")), "claude-haiku");
+        ASSERT_STR_EQ(json_get_str(json_get(dp, "group")), "--no-group");
+        ASSERT(json_get_str(json_get(dp, "group_reason"))[0] != '\0');
+        task = json_get_str(json_get(dp, "task_text"));
+        ASSERT_STR_EQ(engine_prompt_kind_from_header(task), "fix-gate");
+        ASSERT_EQ(engine_contract_check(task, strlen(task), &ct, why,
+                                        sizeof(why)),
+                  ENGINE_CONTRACT_LEGACY);
+        ASSERT(strstr(task, "Acceptance: z23-dev fleet objectives") != NULL);
+        ASSERT(strstr(task, "Target file: apps/") != NULL);
+        argv = json_get(dp, "argv");
+        ASSERT(json_size(argv) >= 6);
+        for (size_t i = 0; i < json_size(argv); i++) {
+            const char *a = json_get_str(json_at(argv, i));
+            ASSERT(strcmp(a, "--yes-dispatch") != 0);
+            has_task = has_task || strcmp(a, "--task") == 0;
+            has_nogroup = has_nogroup || strcmp(a, "--no-group") == 0;
+        }
+        ASSERT(has_task && has_nogroup);
+        ASSERT(strstr(fst_str(&c, "screen"), "--yes-dispatch") != NULL);
         fst_end(&c);
         fst_restore(&w);
         PASS();

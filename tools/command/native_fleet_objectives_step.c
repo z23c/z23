@@ -28,8 +28,20 @@
  * OTHERWISE the brief runs: a runner_ok top objective is action `run` with
  * the objective, level, a suggested lane name `loop-<objective_id>-<n>` (n is
  * the next land seq), the land note prefix `loop:<objective_id>:` and the
- * brief fields; a top objective that is not runner_ok, or none unmet, is
- * action `none` with the reason. */
+ * brief fields.
+ *
+ * FALL-THROUGH. A top unmet objective that is not runner_ok is not a dead
+ * end: the brief is asked over the runner_ok rows only (its runner_ok_only)
+ * and reports the unmet objective it passed over, which the step lists in
+ * data.skipped[], so the loop takes the top runnable objective. Only when no runner_ok objective is unmet is the action
+ * `none` (the skipped ones are named in the reason).
+ *
+ * DISPATCH. A `run` also carries data.dispatch = {lane, note_prefix, engine,
+ * engine_reason, group, group_reason, task_file, task_text, argv[]}: the work
+ * card rendered as the task file engine_unit takes (a `kind:` header, a blank
+ * line, prose) and the engine_unit command WITHOUT --yes-dispatch. The step
+ * never dispatches, writes no file and creates no lane; an operator writes
+ * task_text to task_file and runs argv plus --yes-dispatch. */
 
 #include "command/native_command.h"
 #include "command/native_dev_land_read.h"
@@ -79,6 +91,8 @@ struct stp_decision {
     char reason[320];
     bool paused, forced;
     struct json_value next;
+    struct json_value skipped;  /* array of {objective, reason} */
+    struct json_value dispatch; /* object on run, else JSON_NULL */
 };
 
 struct stp_buf {
@@ -394,6 +408,9 @@ static bool stp_wait_next(struct stp_decision *d, const struct stp_scan *sc)
 
 /* ── brief ────────────────────────────────────────────────────────────── */
 
+static bool stp_build_dispatch(struct stp_decision *d,
+                               const struct json_value *card);
+
 static bool stp_run_next(struct stp_decision *d, const struct json_value *card,
                          long long next_seq)
 {
@@ -427,8 +444,13 @@ static bool stp_decide_brief(struct stp_decision *d,
     const char *id = stp_str(obj, "id");
     if (none || !obj || !id) {
         d->action = "none";
-        (void)snprintf(d->reason, sizeof(d->reason), "%.300s",
-                       none ? none : "the brief named no objective");
+        (void)snprintf(d->reason, sizeof(d->reason), "%.200s%s%.80s%s",
+                       none ? none : "the brief named no objective",
+                       json_size(&d->skipped) ? " (skipped " : "",
+                       json_size(&d->skipped)
+                           ? stp_str(json_at(&d->skipped, 0), "objective")
+                           : "",
+                       json_size(&d->skipped) ? ": not runner_ok)" : "");
         return true;
     }
     if (!json_get_bool(json_get(obj, "runner_ok"))) {
@@ -441,8 +463,22 @@ static bool stp_decide_brief(struct stp_decision *d,
     d->action = "run";
     (void)snprintf(d->reason, sizeof(d->reason),
                    "no loop row is in flight and the loop is not paused; the "
-                   "top unmet objective %.80s is runner_ok", id);
-    return stp_run_next(d, &brief->data, next_seq);
+                   "top unmet %sobjective %.80s is runner_ok",
+                   json_size(&d->skipped) ? "runner_ok " : "", id);
+    return stp_run_next(d, &brief->data, next_seq) &&
+           stp_build_dispatch(d, &brief->data);
+}
+
+/* Copies the brief's `skipped` array (the top objective it passed over
+ * because it is not runner_ok) into d->skipped. */
+static bool stp_take_skipped(struct stp_decision *d,
+                             const struct zcl_command_reply *brief)
+{
+    const struct json_value *arr = json_get(&brief->data, "skipped");
+    for (size_t i = 0; i < json_size(arr); i++)
+        if (!json_push_back(&d->skipped, json_at(arr, i)))
+            return false;
+    return true;
 }
 
 /* ── screen ───────────────────────────────────────────────────────────── */
@@ -466,6 +502,196 @@ static void stp_put(struct stp_buf *b, const char *fmt, ...)
     b->left -= (size_t)n;
 }
 
+/* ── dispatch ─────────────────────────────────────────────────────────── */
+
+/* The prompt kind the task file declares. engine_unit reads it from the
+ * header (engine_prompt_kind_from_header). No kind is written for the loop
+ * itself; fix-gate is the closest template: the assertion or baseline is the
+ * specification and weakening it to get green is the one forbidden outcome. */
+#define STP_TASK_KIND "fix-gate"
+#define STP_TASK_CAP 8192u
+#define STP_ENGINE_BIN "build/bin/engine_unit"
+#define STP_COMPLEXITY_ID "functions_over_complexity_cap"
+
+/* "label: a, b, c\n" for a string array; nothing for an empty or absent one. */
+static void stp_put_list(struct stp_buf *b, const char *label,
+                         const struct json_value *arr)
+{
+    size_t n = json_size(arr);
+    if (n == 0)
+        return;
+    stp_put(b, "%s: ", label);
+    for (size_t i = 0; i < n; i++)
+        stp_put(b, "%s%s", i ? ", " : "", json_get_str(json_at(arr, i)));
+    stp_put(b, "\n");
+}
+
+/* "Functions over the cap: name (m), ..." from the card's pins. */
+static void stp_put_pins(struct stp_buf *b, const struct json_value *pins)
+{
+    size_t n = json_size(pins);
+    if (n == 0)
+        return;
+    stp_put(b, "Functions over the cap: ");
+    for (size_t i = 0; i < n; i++) {
+        const struct json_value *p = json_at(pins, i);
+        stp_put(b, "%s%s (complexity %lld)", i ? ", " : "",
+                json_get_str(json_get(p, "function")),
+                (long long)json_get_int(json_get(p, "m")));
+    }
+    stp_put(b, "\n");
+}
+
+/* The work card in the form engine_unit's --task file takes: a header (the
+ * `kind:` line), one blank line, then prose naming the job, the files, the
+ * bar and when to stop. engine_unit treats the body as opaque text and
+ * appends the contents of the files the body names. False when it did not
+ * fit. */
+static bool stp_render_task(const struct json_value *card, char *out,
+                            size_t cap)
+{
+    struct stp_buf b = {out, cap};
+    const struct json_value *obj = json_get(card, "objective");
+    const char *target = stp_str(card, "target_file");
+    out[0] = '\0';
+    stp_put(&b, "kind: " STP_TASK_KIND "\n\n");
+    stp_put(&b, "Work card %s (level %s) for objective %s.\n\n",
+            stp_str(card, "name") ? stp_str(card, "name") : "",
+            stp_str(card, "level") ? stp_str(card, "level") : "",
+            stp_str(obj, "id") ? stp_str(obj, "id") : "");
+    stp_put(&b, "Outcome: %s\n", stp_str(card, "outcome") ? stp_str(card, "outcome") : "");
+    if (target)
+        stp_put(&b, "Target file: %s\n", target);
+    stp_put_list(&b, "Edit only these paths", json_get(card, "owned"));
+    stp_put_list(&b, "Never touch", json_get(card, "forbidden"));
+    stp_put_list(&b, "Contract", json_get(card, "contract"));
+    stp_put(&b, "Acceptance: %s\n",
+            stp_str(card, "acceptance") ? stp_str(card, "acceptance") : "");
+    stp_put_pins(&b, json_get(card, "pins"));
+    stp_put_list(&b, "Stop and report, edit nothing, when", json_get(card, "stop_if"));
+    return b.left > 1u;
+}
+
+/* The engine for a card, with the reason. Complexity-cap splits are
+ * mechanical and behaviour-preserving, so the cheaper claude-haiku takes
+ * them, as does any card that says its level is haiku; every other runner_ok
+ * card is code work and goes to claude-sonnet. */
+static const char *stp_pick_engine(const char *objective, const char *level,
+                                   const char **why)
+{
+    if (level && strcmp(level, "haiku") == 0) {
+        *why = "the card's level is haiku";
+        return "claude-haiku";
+    }
+    if (objective && strcmp(objective, STP_COMPLEXITY_ID) == 0) {
+        *why = "splitting a function under the complexity cap is mechanical "
+               "and behaviour-preserving, which claude-haiku can do";
+        return "claude-haiku";
+    }
+    *why = "any other runner_ok card is code work, which needs claude-sonnet";
+    return "claude-sonnet";
+}
+
+/* The test group engine_unit judges with, derived the way the card names its
+ * acceptance: only an acceptance written as a group run (`ONLY=<group>`)
+ * names one. False, with the reason, when it is a measurement command. */
+static bool stp_pick_group(const char *acceptance, char *group, size_t cap,
+                           const char **why)
+{
+    const char *p = acceptance ? strstr(acceptance, "ONLY=") : NULL;
+    size_t n = 0;
+    if (p) {
+        p += strlen("ONLY=");
+        n = strcspn(p, " ,");
+    }
+    if (n == 0 || n >= cap) {
+        *why = "the acceptance is a measurement command, not a test group, "
+               "so engine_unit has no group to judge with and its verdict "
+               "will be UNVERIFIED; run the acceptance command to judge";
+        return false;
+    }
+    memcpy(group, p, n);
+    group[n] = '\0';
+    *why = "the group named by the card's acceptance";
+    return true;
+}
+
+static bool stp_push_argv(struct json_value *disp, const char *engine,
+                          const char *file, const char *group)
+{
+    struct json_value argv;
+    bool ok;
+    json_init(&argv);
+    json_set_array(&argv);
+    ok = stp_push_str_item(&argv, STP_ENGINE_BIN) &&
+         stp_push_str_item(&argv, "--engine") &&
+         stp_push_str_item(&argv, engine) &&
+         stp_push_str_item(&argv, "--task") && stp_push_str_item(&argv, file) &&
+         (group[0] ? stp_push_str_item(&argv, "--group") &&
+                         stp_push_str_item(&argv, group)
+                   : stp_push_str_item(&argv, "--no-group")) &&
+         json_push_kv(disp, "argv", &argv);
+    json_free(&argv);
+    return ok;
+}
+
+/* Builds d->dispatch for the run card: {lane, note_prefix, engine,
+ * engine_reason, group, group_reason, task_file, task_text, argv[]}. The
+ * argv is engine_unit WITHOUT --yes-dispatch; the step never dispatches and
+ * writes no file. */
+static bool stp_build_dispatch(struct stp_decision *d,
+                               const struct json_value *card)
+{
+    const struct json_value *obj = json_get(card, "objective");
+    const char *engine_why, *group_why, *lane = stp_str(&d->next, "lane");
+    const char *engine =
+        stp_pick_engine(stp_str(obj, "id"), stp_str(card, "level"), &engine_why);
+    char group[96] = "", file[200], task[STP_TASK_CAP];
+    bool has_group = stp_pick_group(stp_str(card, "acceptance"), group,
+                                    sizeof(group), &group_why);
+    if (!stp_render_task(card, task, sizeof(task)))
+        return false;
+    (void)snprintf(file, sizeof(file), "build/scratch/%s.task.txt", lane);
+    json_set_object(&d->dispatch);
+    return json_push_kv_str(&d->dispatch, "lane", lane) &&
+           json_push_kv_str(&d->dispatch, "note_prefix",
+                            stp_str(&d->next, "note_prefix")) &&
+           json_push_kv_str(&d->dispatch, "engine", engine) &&
+           json_push_kv_str(&d->dispatch, "engine_reason", engine_why) &&
+           json_push_kv_str(&d->dispatch, "group",
+                            has_group ? group : "--no-group") &&
+           json_push_kv_str(&d->dispatch, "group_reason", group_why) &&
+           json_push_kv_str(&d->dispatch, "task_file", file) &&
+           json_push_kv_str(&d->dispatch, "task_text", task) &&
+           stp_push_argv(&d->dispatch, engine, file, group);
+}
+
+static void stp_screen_skipped(struct stp_buf *b, const struct stp_decision *d)
+{
+    for (size_t i = 0; i < json_size(&d->skipped); i++) {
+        const struct json_value *s = json_at(&d->skipped, i);
+        stp_put(b, "skipped %s: %s\n", stp_str(s, "objective"),
+                stp_str(s, "reason"));
+    }
+}
+
+/* The two commands a person runs; the step itself runs neither. */
+static void stp_screen_dispatch(struct stp_buf *b, const struct stp_decision *d)
+{
+    const struct json_value *argv = json_get(&d->dispatch, "argv");
+    if (json_size(argv) == 0)
+        return;
+    stp_put(b, "engine %s: %s\ngroup: %s\n",
+            stp_str(&d->dispatch, "engine"),
+            stp_str(&d->dispatch, "engine_reason"),
+            stp_str(&d->dispatch, "group_reason"));
+    stp_put(b, "1. write data.dispatch.task_text to %s\n2.",
+            stp_str(&d->dispatch, "task_file"));
+    for (size_t i = 0; i < json_size(argv); i++)
+        stp_put(b, " %s", json_get_str(json_at(argv, i)));
+    stp_put(b, " --yes-dispatch\n");
+}
+
 static void stp_screen(char *out, size_t cap, const struct stp_decision *d,
                        const struct stp_verdict *v, size_t n)
 {
@@ -479,6 +705,8 @@ static void stp_screen(char *out, size_t cap, const struct stp_decision *d,
     if (lane)
         stp_put(&b, "lane %s, note prefix %s%s:\n", lane, STP_PREFIX,
                 objective);
+    stp_screen_skipped(&b, d);
+    stp_screen_dispatch(&b, d);
     for (size_t i = 0; i < n && i < 5u; i++)
         stp_put(&b, "landed seq %lld %s: %s%s%.60s\n", v[i].seq,
                 v[i].objective, v[i].verdict, v[i].reason[0] ? " - " : "",
@@ -507,7 +735,7 @@ static bool stp_fill(struct zcl_command_reply *reply,
                      size_t n)
 {
     struct json_value arr;
-    char screen[2048];
+    char screen[3072];
     bool ok = true;
     json_init(&arr);
     json_set_array(&arr);
@@ -520,6 +748,9 @@ static bool stp_fill(struct zcl_command_reply *reply,
          json_push_kv_bool(&reply->data, "paused", d->paused) &&
          json_push_kv_bool(&reply->data, "forced", d->forced) &&
          json_push_kv(&reply->data, "verdicts", &arr) &&
+         json_push_kv(&reply->data, "skipped", &d->skipped) &&
+         (json_is_null(&d->dispatch) ||
+          json_push_kv(&reply->data, "dispatch", &d->dispatch)) &&
          json_push_kv(&reply->data, "next", &d->next) &&
          json_push_kv_str(&reply->data, "screen", screen);
     json_free(&arr);
@@ -548,10 +779,11 @@ static bool stp_brief_args(struct json_value *obj, const struct json_value *src)
         if (s && s[0] && !json_push_kv_str(obj, keys[i], s))
             return false;
     }
-    return true;
+    return json_push_kv_bool(obj, "runner_ok_only", true);
 }
 
-/* Runs the brief in process over those paths; its reply lands in *brief. */
+/* Runs the brief in process over those paths, narrowed to runner_ok rows;
+ * its reply lands in *brief. */
 static bool stp_ask_brief(const struct zcl_command_request *request,
                           struct zcl_command_reply *brief)
 {
@@ -569,14 +801,39 @@ static bool stp_ask_brief(const struct zcl_command_request *request,
     return ok;
 }
 
+/* Asks the brief over the runner_ok rows only (it reports the top objective
+ * it passed over as `skipped`), and decides run or none from the reply. False,
+ * with the reply filled, on failure. */
+static bool stp_decide_work(const struct zcl_command_request *request,
+                            const struct stp_scan *sc, struct stp_decision *d,
+                            struct zcl_command_reply *reply)
+{
+    struct zcl_command_reply brief;
+    bool ok = false;
+    if (!stp_ask_brief(request, &brief)) {
+        stp_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "STEP_ALLOC",
+                 "out of memory building the brief request");
+        return false;
+    }
+    if (brief.status != ZCL_COMMAND_STATUS_PASSED)
+        stp_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "STEP_BRIEF",
+                 "fleet.objectives.brief could not pick an objective");
+    else if (!stp_take_skipped(d, &brief) ||
+             !stp_decide_brief(d, &brief, sc->max_seq + 1))
+        stp_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "STEP_ALLOC",
+                 "out of memory building the work order");
+    else
+        ok = true;
+    zcl_command_reply_free(&brief);
+    return ok;
+}
+
 /* Decides from the scan and verdicts; runs the brief only when nothing else
  * decides. False, with the reply filled, on failure. */
 static bool stp_decide(const struct zcl_command_request *request,
                        const struct stp_scan *sc, const struct stp_verdict *v,
                        struct stp_decision *d, struct zcl_command_reply *reply)
 {
-    struct zcl_command_reply brief;
-    bool ok;
     if (!stp_decide_paused(d, v, sc->n_landed, stp_flag(request, "force"))) {
         stp_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "STEP_ALLOC",
                  "out of memory building the pause record");
@@ -591,21 +848,7 @@ static bool stp_decide(const struct zcl_command_request *request,
                  "out of memory building the wait record");
         return false;
     }
-    if (!stp_ask_brief(request, &brief)) {
-        stp_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "STEP_ALLOC",
-                 "out of memory building the brief request");
-        return false;
-    }
-    if (brief.status != ZCL_COMMAND_STATUS_PASSED)
-        stp_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "STEP_BRIEF",
-                 "fleet.objectives.brief could not pick an objective");
-    ok = brief.status == ZCL_COMMAND_STATUS_PASSED &&
-         stp_decide_brief(d, &brief, sc->max_seq + 1);
-    if (!ok && reply->status != ZCL_COMMAND_STATUS_FAILED)
-        stp_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "STEP_ALLOC",
-                 "out of memory building the work order");
-    zcl_command_reply_free(&brief);
-    return ok;
+    return stp_decide_work(request, sc, d, reply);
 }
 
 void zcl_native_handle_fleet_objectives_step(
@@ -624,6 +867,9 @@ void zcl_native_handle_fleet_objectives_step(
     memset(&d, 0, sizeof(d));
     json_init(&d.next);
     json_set_object(&d.next);
+    json_init(&d.skipped);
+    json_set_array(&d.skipped);
+    json_init(&d.dispatch);
     if (!request || !zcl_dev_land_rows_read(&rows, &n, NULL)) {
         stp_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "STEP_LAND_READ",
                  "cannot read the land queue rows");
@@ -642,4 +888,6 @@ void zcl_native_handle_fleet_objectives_step(
     }
     free(rows);
     json_free(&d.next);
+    json_free(&d.skipped);
+    json_free(&d.dispatch);
 }
