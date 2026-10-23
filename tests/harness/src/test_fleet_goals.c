@@ -936,6 +936,45 @@ static bool fgl_grant(const char *home, char route[], size_t cap)
         dir, peer, expected) < (int)cap;
 }
 
+/* ── D5: tokens per landed change, from the measured objective ───────── */
+
+static int fgl_case_d5(const char *root)
+{
+    int failures = 0;
+    char ledger[600], outcomes[600];
+    struct zcl_goals_options o;
+    struct zcl_goal_result r;
+    fgl_options(&o);
+    (void)snprintf(ledger, sizeof(ledger), "%s/d5_rows.tsv", root);
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/d5_outcomes.jsonl", root);
+    o.experiments = ledger;
+    o.outcomes = outcomes;
+    TEST("D5: no experiment ledger is unmeasured and names the file") {
+        (void)unlink(ledger);
+        ASSERT(fgl_write(outcomes,
+                         "{\"seq\":1,\"ts\":\"2027-01-13T10:00:00Z\","
+                         "\"state\":\"landed\"}\n"));
+        r = zcl_goals_measure(&o, "D5");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "missing experiment ledger"));
+        PASS();
+    }
+    TEST("D5: a measured tokens_per_landed_commit grades PARTIAL with its "
+         "value, not PASS") {
+        ASSERT(fgl_write(ledger,
+                         "ts\tkind\n"
+                         "2027-01-14T10:00:00Z\tresult\tnode1\tid\tverify\t"
+                         "unknown\tclaude-opus\tagent-tool\tm\tmedium\t1000\t"
+                         "200\t0\t0\t0\t0\t0\tunknown\t0\t0\t0\tfixture\n"));
+        r = zcl_goals_measure(&o, "D5");
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgl_has(r.evidence, "1200 tokens per landed commit"));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int fgl_case_g3(const char *root)
 {
     int failures = 0;
@@ -1026,6 +1065,7 @@ int test_fleet_goals(void)
     failures += fgl_case_hosts();
     failures += fgl_case_g1(root);
     failures += fgl_case_g3(root);
+    failures += fgl_case_d5(root);
     failures += fgl_case_render();
     failures += fgl_case_bound();
     failures += fgl_case_wiki();

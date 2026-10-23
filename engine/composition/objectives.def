@@ -24,9 +24,9 @@
  *              biggest unmet PRODUCT gap first and a lab gap only when no
  *              measured product objective is unmet.
  *   source_    the one thing the value is read from, named plainly:
- *              "outcomes.jsonl", "phases.txt", "lint.log", "test.log", "git_log",
- *              "lintc_line_counts", "cyclomatic_baseline", "status_brief",
- *              "boot_status.json", or
+ *              "outcomes.jsonl", "rows.tsv", "phases.txt", "lint.log",
+ *              "test.log", "git_log", "lintc_line_counts",
+ *              "cyclomatic_baseline", "status_brief", "boot_status.json", or
  *              "unmeasured" when no producer exists in the tree yet.
  *   direction_ "min" (lower is better) or "max" (higher is better).
  *   target_    the numeric threshold `met` is judged against.
@@ -74,12 +74,14 @@ Z23_OBJECTIVE("fresh_node_sync_eta_s", "product", "unmeasured", "min", 3600, "s"
              "a stranger joining the network should be caught up within an "
              "hour, not days")
 
-Z23_OBJECTIVE("tokens_per_landed_commit", "lab",
-             "experiment ledger result rows, tokens_in+tokens_out (cache reads "
-             "excluded) / landed rows, 7 days",
+Z23_OBJECTIVE("tokens_per_landed_commit", "lab", "rows.tsv",
              "min", 200000, "tokens",
              "the cost of one landed commit is what the whole delegation "
-             "loop is spending to make progress")
+             "loop is spending to make progress; it is tokens_in+tokens_out "
+             "of the ledger's result rows (cache reads excluded) over the "
+             "landed outcomes rows, 7 days, and the ledger producer "
+             "over-counted 3-4.5x before 2026-10-23 18:05Z, so the 7-day "
+             "value is mixed until 2026-10-30")
 
 Z23_OBJECTIVE("proof_wall_s", "lab", "phases.txt", "min", 900, "s",
              "the whole proof, from first phase to the end of lint and "

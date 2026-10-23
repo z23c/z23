@@ -323,9 +323,6 @@ static const struct gr_static k_static[] = {
      "card: build the seeded-defect review set"},
     {"D4", false, "first-time acceptance is not recorded per delivery",
      "card: record review verdicts per delivery"},
-    {"D5", false, "tokens per landed change have no producer "
-                  "(`tokens_per_landed_commit` is unmeasured)",
-     "card: wire the experiment ledger into fleet objectives"},
     {"D6", false, "delivery-to-verdict time is not recorded",
      "card: stamp delivery and verdict times in the test lane"},
 };
@@ -1073,6 +1070,30 @@ static struct zcl_goal_result gr_d7(const struct zcl_goals_options *o)
                          GOALS_SPACING_MAX_S);
 }
 
+/* ── D5: tokens per landed change, graded from the objective ──────────── */
+
+/* The D5 card is the objective `tokens_per_landed_commit` itself: unmeasured
+ * when that objective is, else PARTIAL with its value. It is not PASS while
+ * the 7-day window still mixes rows the producer over-counted. */
+static struct zcl_goal_result gr_d5(const struct zcl_goals_options *o)
+{
+    static const char next[] =
+        "measured by `z23 fleet objectives` (bar 200000 tokens per landed "
+        "commit); PASS waits for the window to clear 2026-10-30";
+    struct zcl_objectives_options oo;
+    struct zcl_objective_value v;
+    memset(&oo, 0, sizeof(oo));
+    oo.outcomes = o ? o->outcomes : NULL;
+    oo.experiments = o ? o->experiments : NULL;
+    oo.now = gr_now(o);
+    v = zcl_objectives_measure(&oo, "tokens_per_landed_commit");
+    if (!v.measured)
+        return gr_unmeasured(next, "%s", v.reason);
+    return zcl_goal_make(ZCL_GOAL_PARTIAL, next,
+                         "%lld tokens per landed commit over 7 days, %s",
+                         (long long)v.value, v.note);
+}
+
 /* ── G13: active lane claims ──────────────────────────────────────────── */
 
 /* The claims ledger: the explicit claims input, else the git common dir of
@@ -1200,7 +1221,7 @@ static const struct {
     {"G1", gr_g1},   {"G3", gr_g3},   {"G4", gr_g4},   {"G6", gr_g6},
     {"G7", gr_g7},   {"G8", gr_g8},
     {"G9", gr_g9},   {"G12", gr_g12}, {"G13", gr_g13}, {"D7", gr_d7},
-    {"D8", gr_d8},
+    {"D8", gr_d8},   {"D5", gr_d5},
 };
 
 struct zcl_goal_result zcl_goals_measure(

@@ -1170,16 +1170,34 @@ _test_next:;
     "tool_uses\tturns\twall_s\toutcome\tlines_added\tlines_removed\t"        \
     "defects\tnote\n"
 
-/* One 22-column experiment ledger row; the token columns are the 11th and
- * 12th, the rest is a closed-vocabulary filler. */
-static bool fox_tok_row(FILE *f, const char *ts, const char *kind,
-                        const char *tin, const char *tout)
+/* One 22-column experiment ledger row with the given token columns (the
+ * 11th, 12th and 13th) and note (the 22nd); the rest is a closed-vocabulary
+ * filler. */
+static bool fox_tok_row_full(FILE *f, const char *ts, const char *kind,
+                             const char *tin, const char *tout,
+                             const char *cache, const char *note)
 {
     return fprintf(f,
                    "%s\t%s\tnode1\tid\tverify\tunknown\tclaude-opus\t"
-                   "agent-tool\tm\tmedium\t%s\t%s\t0\t0\t0\t0\t0\tunknown\t"
-                   "0\t0\t0\tfixture\n",
-                   ts, kind, tin, tout) > 0;
+                   "agent-tool\tm\tmedium\t%s\t%s\t%s\t0\t0\t0\t0\tunknown\t"
+                   "0\t0\t0\t%s\n",
+                   ts, kind, tin, tout, cache, note) > 0;
+}
+
+static bool fox_tok_row(FILE *f, const char *ts, const char *kind,
+                        const char *tin, const char *tout)
+{
+    return fox_tok_row_full(f, ts, kind, tin, tout, "0", "fixture");
+}
+
+/* A valid in-window result row well past the old 1023-byte line cap (its
+ * note is 2000 bytes). */
+static bool fox_tok_long_row(FILE *f, const char *ts)
+{
+    static char note[2001];
+    memset(note, 'x', sizeof(note) - 1u);
+    note[sizeof(note) - 1u] = '\0';
+    return fox_tok_row_full(f, ts, "result", "100", "0", "0", note);
 }
 
 /* One outcomes.jsonl row with the given ts and state. */
@@ -1200,9 +1218,11 @@ static struct zcl_objective_value fox_tok_measure(const char *ledger,
     return zcl_objectives_measure(&o, "tokens_per_landed_commit");
 }
 
-/* A ledger whose window holds 2000 result tokens (1200 + 800), one predict
- * row and one out-of-window result that must not count, and two malformed
- * rows (a short row and a non-numeric token column) that are skipped. */
+/* A ledger whose window holds 2100 result tokens (1200 + 800 + 100), one
+ * predict row and one out-of-window result that must not count, and two
+ * malformed rows (a short row and a non-numeric token column) that are
+ * skipped. The first in-window row carries a 999999 tokens_cache, which is
+ * not billed and must not move the sum; the 2000-byte row must be counted. */
 static bool fox_tok_write_ledger(const char *path)
 {
     FILE *f = fopen(path, "wb");
@@ -1210,8 +1230,10 @@ static bool fox_tok_write_ledger(const char *path)
     if (!f)
         return false;
     ok = fputs(FOX_TOK_HEAD, f) >= 0 &&
-         fox_tok_row(f, FOX_TOK_IN_A, "result", "1000", "200") &&
+         fox_tok_row_full(f, FOX_TOK_IN_A, "result", "1000", "200", "999999",
+                          "fixture") &&
          fox_tok_row(f, FOX_TOK_IN_B, "result", "300", "500") &&
+         fox_tok_long_row(f, FOX_TOK_IN_B) &&
          fox_tok_row(f, FOX_TOK_IN_A, "predict", "9999", "9999") &&
          fox_tok_row(f, FOX_TOK_OLD, "result", "50000", "50000") &&
          fputs("2026-10-22T10:00:00Z\tresult\tnode1\tshort\n", f) >= 0 &&
@@ -1220,7 +1242,7 @@ static bool fox_tok_write_ledger(const char *path)
 }
 
 /* Three landed rows in the window (one failed and one old landed row must
- * not count): 2000 / 3 rounds down to 666. */
+ * not count): 2100 / 3 rounds down to 700. */
 static bool fox_tok_write_outcomes(const char *path)
 {
     FILE *f = fopen(path, "wb");
@@ -1249,8 +1271,8 @@ static int fox_case_tokens_measure(const char *root)
         ASSERT(fox_tok_write_outcomes(outcomes));
         v = fox_tok_measure(ledger, outcomes);
         ASSERT(v.measured);
-        ASSERT_EQ(v.value, (int64_t)666);
-        ASSERT(strstr(v.note, "2 result rows") != NULL);
+        ASSERT_EQ(v.value, (int64_t)700);
+        ASSERT(strstr(v.note, "3 result rows") != NULL);
         ASSERT(strstr(v.note, "2 malformed") != NULL);
         PASS();
     }

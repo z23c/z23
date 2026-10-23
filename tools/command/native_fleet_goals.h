@@ -77,6 +77,8 @@ struct zcl_goals_options {
     int64_t origin_tip_unix;    /* commit time of origin/main; 0 = ask git */
     const char *tunnel_bench;   /* G1: tunnel bench receipt file */
     const char *shell_routes;   /* G3: directory of <host>.json shell routes */
+    const char *experiments;    /* D5: experiment ledger rows.tsv; NULL = the
+                                 * default $XDG_STATE_HOME path */
 };
 
 const char *zcl_goal_grade_name(enum zcl_goal_grade grade);

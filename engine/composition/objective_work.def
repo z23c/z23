@@ -91,8 +91,9 @@ Z23_OBJECTIVE_WORK("fresh_node_sync_eta_s", 0,
 Z23_OBJECTIVE_WORK("tokens_per_landed_commit", 0,
                    "tools/command/native_fleet_objectives*.c,engine/composition/objectives.def",
                    "z23-dev fleet objectives",
-                   "the token count has no ledger to read without a new "
-                   "writer in the land driver")
+                   "the ledger is read here; its token columns are written "
+                   "by the host hook outside this repo, so accuracy fixes "
+                   "land there")
 
 Z23_OBJECTIVE_WORK("proof_wall_s", 0,
                    "tools/command/native_dev_land*,tools/dev/**",

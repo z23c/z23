@@ -21,7 +21,7 @@
 #include <string.h>
 
 #define TPC_WINDOW_S ((int64_t)7 * 86400)
-#define TPC_LINE_CAP 1024u
+#define TPC_LINE_CAP 8192u
 #define TPC_FIELDS 22u
 #define TPC_TOKEN_DIGITS 18u
 
