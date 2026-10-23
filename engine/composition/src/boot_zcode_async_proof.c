@@ -87,20 +87,78 @@ void boot_zcode_async_proof_drain_admissions(
     }
 }
 
+/* Only one canonical object in a one-element params array is accepted. */
+static const struct json_value *async_proof_rpc_input(
+    const struct json_value *params)
+{
+    const struct json_value *input = params && params->type == JSON_ARR &&
+        json_size(params) == 1 ? json_at(params, 0) : NULL;
+    return input && input->type == JSON_OBJ ? input : NULL;
+}
+
+/* Replace the reply with a failed envelope; a NULL phase is omitted. */
+static void async_proof_rpc_reject(
+    struct json_value *result, const char *code, const char *phase,
+    const char *message)
+{
+    json_set_object(result);
+    (void)json_push_kv_bool(result, "ok", false);
+    (void)json_push_kv_str(result, "code", code);
+    if (phase) (void)json_push_kv_str(result, "phase", phase);
+    (void)json_push_kv_str(result, "message", message);
+}
+
+/* Append the passed reply's data and its exact continuation list. */
+static bool async_proof_rpc_render_next(
+    struct json_value *result, struct zcl_command_reply *reply)
+{
+    struct json_value next;
+    json_init(&next); json_set_array(&next);
+    bool rendered = json_push_kv(result, "data", &reply->data);
+    for (size_t i = 0; rendered && i < reply->next_count; i++) {
+        struct json_value item;
+        json_init(&item); json_set_object(&item);
+        rendered = json_push_kv_str(&item, "command", reply->next[i].command) &&
+            json_push_kv_str(&item, "input_json", reply->next[i].input_json) &&
+            json_push_kv_str(&item, "reason", reply->next[i].reason) &&
+            json_push_back(&next, &item);
+        json_free(&item);
+    }
+    rendered = rendered && json_push_kv(result, "next", &next);
+    json_free(&next);
+    return rendered;
+}
+
+/* A failed command keeps its own error fields, or the route's fallbacks. */
+static void async_proof_rpc_fail(
+    struct json_value *result, struct zcl_command_reply *reply,
+    const char *fallback_code, const char *fallback_phase)
+{
+    (void)json_push_kv_str(result, "code",
+                           reply->error.code[0] ? reply->error.code :
+                                                  fallback_code);
+    (void)json_push_kv_str(result, "phase",
+                           reply->error.phase[0] ? reply->error.phase :
+                                                   fallback_phase);
+    (void)json_push_kv_str(result, "message",
+                           reply->error.message[0] ? reply->error.message :
+                                                     "live admission failed");
+    (void)json_push_kv_str(result, "evidence",
+                           reply->error.evidence[0]
+                               ? reply->error.evidence : fallback_phase);
+    (void)json_push_kv_bool(result, "retryable", reply->error.retryable);
+    (void)json_push_kv_bool(result, "mutated", reply->error.mutated);
+}
+
 static bool async_proof_rpc_run(
     const struct json_value *params, struct json_value *result,
     const char *schema, zcl_command_handler_fn handler,
     const char *fallback_code, const char *fallback_phase)
 {
-    const struct json_value *input = params && params->type == JSON_ARR &&
-        json_size(params) == 1 ? json_at(params, 0) : NULL;
-    if (!input || input->type != JSON_OBJ) {
-        json_set_object(result);
-        (void)json_push_kv_bool(result, "ok", false);
-        (void)json_push_kv_str(result, "code", "INVALID_INPUT");
-        (void)json_push_kv_str(result, "phase", "validate");
-        (void)json_push_kv_str(result, "message",
-                               "one canonical command input object is required");
+    const struct json_value *input = async_proof_rpc_input(params);
+    if (!input) {
+        async_proof_rpc_reject(result, "INVALID_INPUT", "validate",
+            "one canonical command input object is required");
         return true;
     }
     struct zcl_command_request request = { .input = input };
@@ -111,43 +169,12 @@ static bool async_proof_rpc_run(
     bool passed = reply.status == ZCL_COMMAND_STATUS_PASSED &&
                   reply.exit_code == ZCL_COMMAND_EXIT_OK;
     (void)json_push_kv_bool(result, "ok", passed);
-    if (passed) {
-        struct json_value next;
-        json_init(&next); json_set_array(&next);
-        bool rendered = json_push_kv(result, "data", &reply.data);
-        for (size_t i = 0; rendered && i < reply.next_count; i++) {
-            struct json_value item;
-            json_init(&item); json_set_object(&item);
-            rendered = json_push_kv_str(&item, "command", reply.next[i].command) &&
-                json_push_kv_str(&item, "input_json", reply.next[i].input_json) &&
-                json_push_kv_str(&item, "reason", reply.next[i].reason) &&
-                json_push_back(&next, &item);
-            json_free(&item);
-        }
-        rendered = rendered && json_push_kv(result, "next", &next);
-        json_free(&next);
-        if (!rendered) {
-            json_free(result); json_set_object(result);
-            (void)json_push_kv_bool(result, "ok", false);
-            (void)json_push_kv_str(result, "code", "LIVE_REPLY_RENDER_FAILED");
-            (void)json_push_kv_str(result, "message",
-                                   "the exact command continuation could not be serialized");
-        }
-    } else {
-        (void)json_push_kv_str(result, "code",
-                               reply.error.code[0] ? reply.error.code :
-                                                     fallback_code);
-        (void)json_push_kv_str(result, "phase",
-                               reply.error.phase[0] ? reply.error.phase :
-                                                      fallback_phase);
-        (void)json_push_kv_str(result, "message",
-                               reply.error.message[0] ? reply.error.message :
-                                                        "live admission failed");
-        (void)json_push_kv_str(result, "evidence",
-                               reply.error.evidence[0]
-                                   ? reply.error.evidence : fallback_phase);
-        (void)json_push_kv_bool(result, "retryable", reply.error.retryable);
-        (void)json_push_kv_bool(result, "mutated", reply.error.mutated);
+    if (!passed) {
+        async_proof_rpc_fail(result, &reply, fallback_code, fallback_phase);
+    } else if (!async_proof_rpc_render_next(result, &reply)) {
+        json_free(result);
+        async_proof_rpc_reject(result, "LIVE_REPLY_RENDER_FAILED", NULL,
+            "the exact command continuation could not be serialized");
     }
     zcl_command_reply_free(&reply);
     return true;
@@ -326,6 +353,104 @@ static bool async_load_task(const char *workspace,
     return ok;
 }
 
+/* The store must hold the context package complete; its size is reported. */
+static bool async_context_status(
+    struct vcs_package_store *store, const uint8_t root[32],
+    uint64_t *total_bytes)
+{
+    struct vcs_package_store_status status;
+    if (!vcs_package_store_package_status(store, root, &status) ||
+        !status.complete)
+        return false;
+    *total_bytes = status.total_bytes;
+    return true;
+}
+
+static bool async_context_args_ok(
+    struct vcs_package_store *store, const char *workspace,
+    bool *cache_hit, uint64_t *context_bytes)
+{
+    return store && workspace && workspace[0] == '/' && cache_hit &&
+        context_bytes;
+}
+
+/* The action already binds a context package; reuse it only when complete. */
+static struct zcl_result async_context_reuse(
+    struct vcs_package_store *store, const struct db_build_action *action,
+    uint8_t context_root[32], bool *cache_hit, uint64_t *context_bytes)
+{
+    if (!zcl_hex_decode_lower(action->context_root_sha3, context_root, 32) ||
+        !async_context_status(store, context_root, context_bytes))
+        return ZCL_ERR(-1, "bound context package is incomplete");
+    *cache_hit = true;
+    return ZCL_OK;
+}
+
+/* On failure the caller still owns and frees any input_wire it was handed. */
+static bool async_context_load_inputs(
+    const char *workspace, const struct db_build_action *action,
+    const struct vcs_zcode_task_v1 *task,
+    struct vcs_zcode_candidate_v1 *candidate,
+    struct vcs_zcode_proof_policy_v1 *policy,
+    uint8_t **input_wire, size_t *input_len)
+{
+    uint8_t *candidate_wire = NULL, *policy_wire = NULL;
+    size_t candidate_len = 0, policy_len = 0;
+    bool loaded = async_load_object(workspace,
+            action->candidate_root_sha3, VCS_ZCODE_CANDIDATE_WIRE_BYTES,
+            &candidate_wire, &candidate_len) &&
+        vcs_zcode_candidate_parse(candidate_wire, candidate_len,
+                                  candidate) == VCS_ZCODE_DEV_OK &&
+        async_load_object(workspace,
+            action->proof_policy_root_sha3,
+            VCS_ZCODE_PROOF_POLICY_WIRE_BYTES, &policy_wire, &policy_len) &&
+        vcs_zcode_proof_policy_parse(policy_wire, policy_len,
+                                     policy) == VCS_ZCODE_DEV_OK &&
+        async_load_object(workspace, action->input_root_sha3,
+                          task->max_context_bytes, input_wire, input_len);
+    free(policy_wire);
+    free(candidate_wire);
+    return loaded;
+}
+
+/* The packed context carries the candidate and task authority bundles; both
+ * must export, and only from a source that hashed to a usable identity. */
+static bool async_context_authority_ok(
+    const char *workspace, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate, bool source_ok,
+    struct vcs_zcode_work_context_v1 *context)
+{
+    if (!source_ok) return false;
+    return vcs_zcode_candidate_bundle_export(workspace, task, candidate,
+               &context->candidate_authority,
+               &context->candidate_authority_len) ==
+               VCS_ZCODE_CANDIDATE_BUNDLE_OK &&
+           vcs_zcode_task_authority_bundle_export(workspace, task,
+               &context->task_authority, &context->task_authority_len) ==
+               VCS_ZCODE_TASK_AUTHORITY_OK;
+}
+
+/* Bind the packed context root to the action; the action must own it. */
+static struct zcl_result async_context_bind(
+    struct node_db *ndb, struct vcs_package_store *store,
+    struct db_build_action *action, const uint8_t context_root[32],
+    const uint8_t action_root[32], uint64_t *context_bytes)
+{
+    uint8_t expected_action[32];
+    char context_hex[65];
+    if (!zcl_hex_decode_lower(action->action_id, expected_action, 32) ||
+        memcmp(action_root, expected_action, 32) != 0)
+        return ZCL_ERR(-1, "context package does not bind the action");
+    zcl_hex_encode(context_root, 32, context_hex);
+    if (!db_build_action_bind_context(ndb, action->action_id, context_hex))
+        return ZCL_ERR(-1, "context root could not bind to the action");
+    (void)snprintf(action->context_root_sha3,
+                   sizeof(action->context_root_sha3), "%s", context_hex);
+    if (!async_context_status(store, context_root, context_bytes))
+        return ZCL_ERR(-1, "new context package status disappeared");
+    return ZCL_OK;
+}
+
 static struct zcl_result async_context_build(
     struct node_db *ndb, const struct db_build_job *job,
     struct db_build_action *action, int64_t now,
@@ -335,42 +460,19 @@ static struct zcl_result async_context_build(
     struct vcs_package_store *store = vcs_package_store_global();
     if (cache_hit) *cache_hit = false;
     if (context_bytes) *context_bytes = 0;
-    if (!store || !workspace || workspace[0] != '/' || !cache_hit ||
-        !context_bytes)
+    if (!async_context_args_ok(store, workspace, cache_hit, context_bytes))
         return ZCL_ERR(-1, "package/CAS owners unavailable");
     if (!async_load_task(workspace, action, task))
         return ZCL_ERR(-1, "task object unavailable");
-    if (action->context_root_sha3[0]) {
-        struct vcs_package_store_status status;
-        if (!zcl_hex_decode_lower(action->context_root_sha3,
-                                  context_root, 32) ||
-            !vcs_package_store_package_status(store, context_root, &status) ||
-            !status.complete)
-            return ZCL_ERR(-1, "bound context package is incomplete");
-        *cache_hit = true;
-        *context_bytes = status.total_bytes;
-        return ZCL_OK;
-    }
+    if (action->context_root_sha3[0])
+        return async_context_reuse(store, action, context_root, cache_hit,
+                                   context_bytes);
     struct vcs_zcode_candidate_v1 candidate;
     struct vcs_zcode_proof_policy_v1 policy;
-    uint8_t *candidate_wire = NULL, *policy_wire = NULL, *input_wire = NULL;
-    size_t candidate_len = 0, policy_len = 0, input_len = 0;
-    bool loaded = async_load_object(workspace,
-            action->candidate_root_sha3, VCS_ZCODE_CANDIDATE_WIRE_BYTES,
-            &candidate_wire, &candidate_len) &&
-        vcs_zcode_candidate_parse(candidate_wire, candidate_len,
-                                  &candidate) == VCS_ZCODE_DEV_OK &&
-        async_load_object(workspace,
-            action->proof_policy_root_sha3,
-            VCS_ZCODE_PROOF_POLICY_WIRE_BYTES, &policy_wire, &policy_len) &&
-        vcs_zcode_proof_policy_parse(policy_wire, policy_len,
-                                     &policy) == VCS_ZCODE_DEV_OK &&
-        async_load_object(workspace, action->input_root_sha3,
-                          task->max_context_bytes,
-                          &input_wire, &input_len);
-    free(policy_wire);
-    free(candidate_wire);
-    if (!loaded) {
+    uint8_t *input_wire = NULL;
+    size_t input_len = 0;
+    if (!async_context_load_inputs(workspace, action, task, &candidate,
+                                   &policy, &input_wire, &input_len)) {
         free(input_wire);
         return ZCL_ERR(-1, "candidate, policy, or fixed input unavailable");
     }
@@ -385,22 +487,10 @@ static struct zcl_result async_context_build(
     context.proof_policy = policy;
     context.fixed_input = input_wire;
     context.fixed_input_len = input_len;
-    enum vcs_zcode_candidate_bundle_result candidate_bundle = source_ok
-        ? vcs_zcode_candidate_bundle_export(
-              workspace, task, &candidate,
-              &context.candidate_authority,
-              &context.candidate_authority_len)
-        : VCS_ZCODE_CANDIDATE_BUNDLE_CAS;
-    enum vcs_zcode_task_authority_result task_bundle =
-        candidate_bundle == VCS_ZCODE_CANDIDATE_BUNDLE_OK
-            ? vcs_zcode_task_authority_bundle_export(
-                  workspace, task, &context.task_authority,
-                  &context.task_authority_len)
-            : VCS_ZCODE_TASK_AUTHORITY_CAS;
     uint8_t action_root[32];
     enum vcs_zcode_work_context_result packed =
-        candidate_bundle == VCS_ZCODE_CANDIDATE_BUNDLE_OK &&
-        task_bundle == VCS_ZCODE_TASK_AUTHORITY_OK
+        async_context_authority_ok(workspace, task, &candidate, source_ok,
+                                   &context)
             ? vcs_zcode_work_context_put_for_kind_with_candidate(
                   store, &context, action->kind, now,
                   workspace, context_root, action_root)
@@ -408,26 +498,11 @@ static struct zcl_result async_context_build(
     context.fixed_input = NULL;
     vcs_zcode_work_context_free(&context);
     free(input_wire);
-    uint8_t expected_action[32];
-    char context_hex[65];
     if (packed != VCS_ZCODE_WORK_CONTEXT_OK)
         return ZCL_ERR(-1, "context package refused: %s",
                        vcs_zcode_work_context_result_string(packed));
-    if (!zcl_hex_decode_lower(action->action_id, expected_action, 32) ||
-        memcmp(action_root, expected_action, 32) != 0) {
-        return ZCL_ERR(-1, "context package does not bind the action");
-    }
-    zcl_hex_encode(context_root, 32, context_hex);
-    if (!db_build_action_bind_context(ndb, action->action_id, context_hex))
-        return ZCL_ERR(-1, "context root could not bind to the action");
-    (void)snprintf(action->context_root_sha3,
-                   sizeof(action->context_root_sha3), "%s", context_hex);
-    struct vcs_package_store_status status;
-    if (!vcs_package_store_package_status(store, context_root, &status) ||
-        !status.complete)
-        return ZCL_ERR(-1, "new context package status disappeared");
-    *context_bytes = status.total_bytes;
-    return ZCL_OK;
+    return async_context_bind(ndb, store, action, context_root, action_root,
+                              context_bytes);
 }
 
 /* This peer was already discovered for the event and its lease is live. */
@@ -450,6 +525,121 @@ static bool async_keeps_live_lease(struct vcs_zcode_work_node *work,
          boot_zcode_async_session_lost(work, event));
 }
 
+static bool async_dispatchable_kind(uint8_t work_kind)
+{
+    return work_kind == VCS_ZCODE_WORK_BUILD ||
+        work_kind == VCS_ZCODE_WORK_TEST || work_kind == VCS_ZCODE_WORK_FUZZ;
+}
+
+/* Per-attempt timings and cache facts that the dispatch log reports. */
+struct async_dispatch_timing {
+    bool context_cache_hit;
+    uint64_t context_bytes;
+    int64_t context_us;
+    int64_t selection_us;
+    int64_t submit_us;
+};
+
+/* The lease is the task CPU ceiling plus transport time, clamped to the
+ * peer's capability. A live lease keeps its recorded deadline instead. */
+static int64_t async_dispatch_deadline(
+    struct vcs_zcode_work_node *work, const struct db_build_proof_event *event,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_work_capability_v1 *capability, uint64_t peer,
+    int64_t now)
+{
+    uint32_t requested_lease =
+        task->max_cpu_seconds < UINT32_MAX - ASYNC_PROOF_TRANSPORT_SECONDS
+        ? task->max_cpu_seconds + ASYNC_PROOF_TRANSPORT_SECONDS
+        : task->max_cpu_seconds;
+    if (requested_lease < ASYNC_PROOF_TRANSPORT_SECONDS + 1u)
+        requested_lease = ASYNC_PROOF_TRANSPORT_SECONDS + 1u;
+    if (requested_lease > capability->max_lease_seconds)
+        requested_lease = capability->max_lease_seconds;
+    int64_t lease_end = now + requested_lease;
+    if (async_keeps_live_lease(work, event, peer, now))
+        return event->deadline_at;
+    return lease_end < task->expires_unix ? lease_end
+                                          : task->expires_unix - 1;
+}
+
+/* The request binds every root the worker must verify, with each limit
+ * clamped to what both the task and the peer's capability allow. */
+static struct vcs_zcode_work_request_v1 async_dispatch_request(
+    const struct db_build_action *action, const struct db_build_job *job,
+    const struct db_build_proof_event *event,
+    const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_work_capability_v1 *capability, uint8_t work_kind,
+    int64_t deadline, const uint8_t context_root[32])
+{
+    struct vcs_zcode_work_request_v1 request = {
+        .request_id = event->request_id,
+        .work_kind = work_kind,
+        .target = VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3,
+        .max_cpu_seconds = task->max_cpu_seconds < capability->max_cpu_seconds
+            ? task->max_cpu_seconds : capability->max_cpu_seconds,
+        .max_memory_bytes =
+            task->max_memory_bytes < capability->max_memory_bytes
+            ? task->max_memory_bytes : capability->max_memory_bytes,
+        .max_output_bytes =
+            task->max_output_bytes < capability->max_output_bytes
+            ? task->max_output_bytes : capability->max_output_bytes,
+        .deadline_unix = deadline,
+    };
+    (void)zcl_hex_decode_lower(action->task_root_sha3, request.task_root, 32);
+    (void)zcl_hex_decode_lower(action->candidate_root_sha3,
+                               request.candidate_root, 32);
+    (void)zcl_hex_decode_lower(action->action_id, request.action_root, 32);
+    (void)zcl_hex_decode_lower(action->input_root_sha3,
+                               request.input_root, 32);
+    memcpy(request.context_root, context_root, 32);
+    (void)zcl_hex_decode_lower(action->proof_policy_root_sha3,
+                               request.proof_policy_root, 32);
+    (void)zcl_hex_decode_lower(job->toolchain_sha3,
+                               request.toolchain_capsule_root, 32);
+    return request;
+}
+
+/* A new lease records the discovered peer once and logs the dispatch stages.
+ * A discovery that is already live has nothing to record. */
+static void async_dispatch_record(
+    struct node_db *ndb, const struct db_build_action *action,
+    const struct db_build_proof_event *event, uint64_t peer,
+    const struct vcs_zcode_work_request_v1 *request, int64_t now,
+    const struct async_dispatch_timing *timing)
+{
+    if (async_active_discovery(event, peer, now)) return;
+    char context_hex[65];
+    zcl_hex_encode(request->context_root, 32, context_hex);
+    struct db_build_proof_event next;
+    int64_t discovery_us = now > event->created_at
+        ? (now - event->created_at) * INT64_C(1000000) : 0;
+    struct zcl_result discovered = build_fabric_proof_transition(
+        ndb, action->action_id, "PEER_DISCOVERED", peer,
+        request->request_id, context_hex, NULL, request->deadline_unix,
+        discovery_us, now, &next);
+    if (!discovered.ok) return;
+    struct vcs_zcode_work_swarm_message message = {
+        .type = VCS_ZCODE_WORK_SWARM_REQUEST,
+        .body.request = *request,
+    };
+    LOG_INFO("zcode.proof_perf",
+             "schema=zcl.async_proof_perf.v1 action=%s "
+             "stage=requester_dispatch at_unix_us=%lld "
+             "context_prepare_us=%lld "
+             "context_bytes=%llu context_cache_hit=%d "
+             "peer_selection_us=%lld request_submit_us=%lld "
+             "request_wire_bytes=%zu retry=%d",
+             action->action_id, (long long)platform_time_realtime_us(),
+             (long long)(timing->context_us < 0 ? 0 : timing->context_us),
+             (unsigned long long)timing->context_bytes,
+             timing->context_cache_hit ? 1 : 0,
+             (long long)(timing->selection_us < 0 ? 0 : timing->selection_us),
+             (long long)(timing->submit_us < 0 ? 0 : timing->submit_us),
+             vcs_zcode_work_swarm_wire_size(&message),
+             event->peer_id != 0 ? 1 : 0);
+}
+
 static void async_dispatch(
     struct boot_svc_ctx *svc, struct vcs_zcode_work_node *work,
     struct node_db *ndb, const struct db_build_proof_event *event,
@@ -461,19 +651,16 @@ static void async_dispatch(
         !db_build_job_find(ndb, action.job_id, &job))
         return;
     uint8_t work_kind = vcs_build_action_v1_work_kind(action.kind);
-    if (work_kind != VCS_ZCODE_WORK_BUILD &&
-        work_kind != VCS_ZCODE_WORK_TEST &&
-        work_kind != VCS_ZCODE_WORK_FUZZ)
+    if (!async_dispatchable_kind(work_kind))
         return;
     struct vcs_zcode_task_v1 task;
     uint8_t context_root[32];
-    bool context_cache_hit = false;
-    uint64_t context_bytes = 0;
+    struct async_dispatch_timing timing = { 0 };
     int64_t context_started_us = platform_time_monotonic_us();
     struct zcl_result packed = async_context_build(
         ndb, &job, &action, now, event->workspace, &task, context_root,
-        &context_cache_hit, &context_bytes);
-    int64_t context_us = platform_time_monotonic_us() - context_started_us;
+        &timing.context_cache_hit, &timing.context_bytes);
+    timing.context_us = platform_time_monotonic_us() - context_started_us;
     if (!packed.ok) {
         LOG_WARN("net.zcode_async",
                  "dispatch refused action=%s stage=context_prepare reason=%s",
@@ -495,85 +682,24 @@ static void async_dispatch(
                  event->action_id);
         return;
     }
-    int64_t selection_us = platform_time_monotonic_us() - selection_started_us;
-    uint32_t requested_lease =
-        task.max_cpu_seconds < UINT32_MAX - ASYNC_PROOF_TRANSPORT_SECONDS
-        ? task.max_cpu_seconds + ASYNC_PROOF_TRANSPORT_SECONDS
-        : task.max_cpu_seconds;
-    if (requested_lease < ASYNC_PROOF_TRANSPORT_SECONDS + 1u)
-        requested_lease = ASYNC_PROOF_TRANSPORT_SECONDS + 1u;
-    if (requested_lease > capability.max_lease_seconds)
-        requested_lease = capability.max_lease_seconds;
-    bool active_discovery = async_active_discovery(event, peer, now);
-    int64_t lease_end = now + requested_lease;
-    int64_t deadline = async_keeps_live_lease(work, event, peer, now)
-        ? event->deadline_at
-        : (lease_end < task.expires_unix ? lease_end : task.expires_unix - 1);
+    timing.selection_us = platform_time_monotonic_us() - selection_started_us;
+    int64_t deadline = async_dispatch_deadline(work, event, &task,
+                                               &capability, peer, now);
     if (deadline <= now) return;
-    struct vcs_zcode_work_request_v1 request = {
-        .request_id = event->request_id,
-        .work_kind = work_kind,
-        .target = VCS_ZCODE_WORK_TARGET_LINUX_X86_64_V3,
-        .max_cpu_seconds = task.max_cpu_seconds < capability.max_cpu_seconds
-            ? task.max_cpu_seconds : capability.max_cpu_seconds,
-        .max_memory_bytes = task.max_memory_bytes < capability.max_memory_bytes
-            ? task.max_memory_bytes : capability.max_memory_bytes,
-        .max_output_bytes = task.max_output_bytes < capability.max_output_bytes
-            ? task.max_output_bytes : capability.max_output_bytes,
-        .deadline_unix = deadline,
-    };
-    (void)zcl_hex_decode_lower(action.task_root_sha3, request.task_root, 32);
-    (void)zcl_hex_decode_lower(action.candidate_root_sha3,
-                               request.candidate_root, 32);
-    (void)zcl_hex_decode_lower(action.action_id, request.action_root, 32);
-    (void)zcl_hex_decode_lower(action.input_root_sha3,
-                               request.input_root, 32);
-    memcpy(request.context_root, context_root, 32);
-    (void)zcl_hex_decode_lower(action.proof_policy_root_sha3,
-                               request.proof_policy_root, 32);
-    (void)zcl_hex_decode_lower(job.toolchain_sha3,
-                               request.toolchain_capsule_root, 32);
-    if (!vcs_zcode_work_request_seal(
-            &request, s_requester_secret, s_requester_pubkey))
+    struct vcs_zcode_work_request_v1 request = async_dispatch_request(
+        &action, &job, event, &task, &capability, work_kind, deadline,
+        context_root);
+    if (!vcs_zcode_work_request_seal(&request, s_requester_secret,
+                                     s_requester_pubkey))
         return;
     int64_t submit_started = platform_time_monotonic_us();
     enum vcs_zcode_work_node_result submitted = vcs_zcode_work_node_submit(
         work, peer, &request, now);
-    int64_t submit_us = platform_time_monotonic_us() - submit_started;
+    timing.submit_us = platform_time_monotonic_us() - submit_started;
     if (submitted != VCS_ZCODE_WORK_NODE_OK &&
         submitted != VCS_ZCODE_WORK_NODE_REPLAY)
         return;
-    char context_hex[65];
-    zcl_hex_encode(context_root, 32, context_hex);
-    struct db_build_proof_event next;
-    bool changed_lease = !active_discovery;
-    if (changed_lease) {
-        int64_t discovery_us = now > event->created_at
-            ? (now - event->created_at) * INT64_C(1000000) : 0;
-        struct zcl_result discovered = build_fabric_proof_transition(
-            ndb, action.action_id, "PEER_DISCOVERED", peer,
-            request.request_id, context_hex, NULL, deadline,
-            discovery_us, now, &next);
-        if (!discovered.ok) return;
-        struct vcs_zcode_work_swarm_message message = {
-            .type = VCS_ZCODE_WORK_SWARM_REQUEST,
-            .body.request = request,
-        };
-        LOG_INFO("zcode.proof_perf",
-                 "schema=zcl.async_proof_perf.v1 action=%s "
-                 "stage=requester_dispatch at_unix_us=%lld "
-                 "context_prepare_us=%lld "
-                 "context_bytes=%llu context_cache_hit=%d "
-                 "peer_selection_us=%lld request_submit_us=%lld "
-                 "request_wire_bytes=%zu retry=%d",
-                 action.action_id, (long long)platform_time_realtime_us(),
-                 (long long)(context_us < 0 ? 0 : context_us),
-                 (unsigned long long)context_bytes, context_cache_hit ? 1 : 0,
-                 (long long)(selection_us < 0 ? 0 : selection_us),
-                 (long long)(submit_us < 0 ? 0 : submit_us),
-                 vcs_zcode_work_swarm_wire_size(&message),
-                 event->peer_id != 0 ? 1 : 0);
-    }
+    async_dispatch_record(ndb, &action, event, peer, &request, now, &timing);
 }
 
 static int64_t async_elapsed_us(int64_t later, int64_t earlier)
@@ -584,29 +710,50 @@ static int64_t async_elapsed_us(int64_t later, int64_t earlier)
         ? INT64_MAX : (int64_t)(delta * UINT64_C(1000000));
 }
 
+/* Observation entry points need an open node, a peer and a positive clock. */
+static bool async_observe_ready(
+    const struct node_db *ndb, uint64_t peer, int64_t now)
+{
+    return ndb && ndb->open && peer != 0 && now > 0;
+}
+
+/* The latest proof event must still be this exact request on this peer. */
+static bool async_event_is_request(
+    const struct db_build_proof_event *event,
+    const struct vcs_zcode_work_request_v1 *request, uint64_t peer)
+{
+    return event->request_id == request->request_id && event->peer_id == peer;
+}
+
+/* The proof state a worker progress stage may advance to, or NULL. */
+static const char *async_progress_state(uint8_t stage,
+                                        const char *current_state)
+{
+    if (stage == VCS_ZCODE_WORK_PROGRESS_CONTEXT_READY &&
+        strcmp(current_state, "PEER_DISCOVERED") == 0)
+        return "CONTEXT_READY";
+    if (stage == VCS_ZCODE_WORK_PROGRESS_EXECUTION_STARTED &&
+        strcmp(current_state, "CONTEXT_READY") == 0)
+        return "RUNNING";
+    return NULL;
+}
+
 bool boot_zcode_async_proof_observe_progress(
     struct node_db *ndb, uint64_t peer,
     const struct vcs_zcode_work_request_v1 *request,
     const struct vcs_zcode_work_progress_v1 *progress, int64_t now)
 {
-    if (!ndb || !ndb->open || !request || !progress || peer == 0 || now <= 0)
+    if (!async_observe_ready(ndb, peer, now) || !request || !progress)
         return false;
     char action_id[65];
     zcl_hex_encode(request->action_root, 32, action_id);
     struct db_build_proof_event current, next;
     if (!db_build_proof_event_latest(ndb, action_id, &current) ||
-        current.request_id != request->request_id || current.peer_id != peer ||
+        !async_event_is_request(&current, request, peer) ||
         (current.deadline_at > 0 && now >= current.deadline_at))
         return false;
-    const char *state = NULL;
-    if (progress->stage == VCS_ZCODE_WORK_PROGRESS_CONTEXT_READY &&
-        strcmp(current.state, "PEER_DISCOVERED") == 0)
-        state = "CONTEXT_READY";
-    else if (progress->stage == VCS_ZCODE_WORK_PROGRESS_EXECUTION_STARTED &&
-             strcmp(current.state, "CONTEXT_READY") == 0)
-        state = "RUNNING";
-    else
-        return false;
+    const char *state = async_progress_state(progress->stage, current.state);
+    if (!state) return false;
     return build_fabric_proof_transition(
         ndb, action_id, state, peer, request->request_id, NULL, NULL,
         current.deadline_at, async_elapsed_us(now, current.created_at), now,
@@ -636,44 +783,65 @@ bool boot_zcode_async_proof_observe_admission(
         ndb, action_id, "PEER_DISCOVERED", peer, request->request_id,
         NULL, NULL, now, 0, now, &reroute).ok;
 }
+/* A result is recorded only against a running event, or one whose remote
+ * receipt is already recorded, and a running event must not be expired. */
+static bool async_result_state_ok(
+    const struct db_build_proof_event *current, int64_t now)
+{
+    bool running = strcmp(current->state, "RUNNING") == 0;
+    bool remote_recorded = strcmp(current->state, "REMOTE_GREEN") == 0 ||
+        strcmp(current->state, "REMOTE_RED") == 0;
+    if ((!running && !remote_recorded) ||
+        (running && current->deadline_at > 0 && now >= current->deadline_at))
+        return false;
+    return true;
+}
+
+/* A running event first records the remote receipt and adopts that event.
+ * A remote-recorded event must already hold this exact receipt root. */
+static bool async_result_record_remote(
+    struct node_db *ndb, const char *action_id, uint64_t peer,
+    const struct vcs_zcode_work_request_v1 *request,
+    const struct vcs_zcode_work_result_v1 *result, const char *receipt_root,
+    int64_t now, struct db_build_proof_event *current)
+{
+    if (strcmp(current->state, "RUNNING") != 0)
+        return strcmp(current->receipt_root_sha3, receipt_root) == 0;
+    const char *remote_state =
+        result->receipt.status == VCS_ZCODE_WORK_PASS &&
+        result->receipt.exit_status == 0 ? "REMOTE_GREEN" : "REMOTE_RED";
+    int64_t remote_us = async_elapsed_us(
+        result->receipt.finished_unix, result->receipt.started_unix);
+    struct db_build_proof_event remote;
+    struct zcl_result marked = build_fabric_proof_transition(
+        ndb, action_id, remote_state, peer, request->request_id, NULL,
+        receipt_root, current->deadline_at, remote_us, now, &remote);
+    if (!marked.ok) return false;
+    *current = remote;
+    return true;
+}
+
 bool boot_zcode_async_proof_observe_result(
     struct node_db *ndb, uint64_t peer,
     const struct vcs_zcode_work_request_v1 *request,
     const struct vcs_zcode_work_result_v1 *result,
     const char *receipt_root, int64_t verification_us, int64_t now)
 {
-    if (!ndb || !ndb->open || !request || !result || !receipt_root ||
-        !receipt_root[0] || peer == 0 || verification_us < 0 || now <= 0)
+    if (!async_observe_ready(ndb, peer, now) || !request || !result ||
+        !receipt_root || !receipt_root[0] || verification_us < 0)
         return false;
     char action_id[65];
     zcl_hex_encode(request->action_root, 32, action_id);
-    struct db_build_proof_event current, remote, verified;
+    struct db_build_proof_event current, verified;
     if (!db_build_proof_event_latest(ndb, action_id, &current) ||
-        current.request_id != request->request_id ||
-        current.peer_id != peer)
+        !async_event_is_request(&current, request, peer))
         return false;
     if (strcmp(current.state, "RECEIPT_VERIFIED") == 0)
         return strcmp(current.receipt_root_sha3, receipt_root) == 0;
-    bool running = strcmp(current.state, "RUNNING") == 0;
-    bool remote_recorded = strcmp(current.state, "REMOTE_GREEN") == 0 ||
-        strcmp(current.state, "REMOTE_RED") == 0;
-    if ((!running && !remote_recorded) ||
-        (running && current.deadline_at > 0 && now >= current.deadline_at))
+    if (!async_result_state_ok(&current, now) ||
+        !async_result_record_remote(ndb, action_id, peer, request, result,
+                                    receipt_root, now, &current))
         return false;
-    int64_t remote_us = async_elapsed_us(
-        result->receipt.finished_unix, result->receipt.started_unix);
-    const char *remote_state =
-        result->receipt.status == VCS_ZCODE_WORK_PASS &&
-        result->receipt.exit_status == 0 ? "REMOTE_GREEN" : "REMOTE_RED";
-    if (running) {
-        struct zcl_result marked = build_fabric_proof_transition(
-            ndb, action_id, remote_state, peer, request->request_id, NULL,
-            receipt_root, current.deadline_at, remote_us, now, &remote);
-        if (!marked.ok) return false;
-        current = remote;
-    } else if (strcmp(current.receipt_root_sha3, receipt_root) != 0) {
-        return false;
-    }
     struct zcl_result marked = build_fabric_proof_transition(
         ndb, action_id, "RECEIPT_VERIFIED", peer, request->request_id,
         NULL, receipt_root, current.deadline_at, verification_us, now,
