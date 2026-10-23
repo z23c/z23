@@ -6525,6 +6525,11 @@ endif
 # Environment-dependent gates (check-git-hooks-installed) are deliberately out.
 # lint-fast itself is unchanged; agents keep using it for the edit loop.
 # check-kpi-floor (522 ms) failed land row 757's full proof lint after a whole stacked proof.
+# check-no-new-bash (280 ms median) failed 2 lane full-lint runs on 2026-10-23.
+# check-no-block-index-flat (301 ms median) failed 1 lane full-lint run on 2026-10-23.
+# check-hardening-ratchet (835 ms median) failed 1 lane full-lint run on 2026-10-23.
+# check-error-doc-refs (331 ms median) failed 1 lane full-lint run on 2026-10-23.
+# check-accel-oracle-pinned (2426 ms median) failed 1 lane full-lint run on 2026-10-23.
 LINT_LAND_EXTRA_GATES := \
     check-core-seal \
     check-remote-command-classes \
@@ -6549,7 +6554,12 @@ LINT_LAND_EXTRA_GATES := \
     check-hex-codec-single \
     check-hotswap-dev-only \
     check-blocker-remedy \
-    check-kpi-floor
+    check-kpi-floor \
+    check-no-new-bash \
+    check-no-block-index-flat \
+    check-hardening-ratchet \
+    check-error-doc-refs \
+    check-accel-oracle-pinned
 LINT_LAND_GATES := $(LINT_FAST_GATES) $(LINT_LAND_EXTRA_GATES)
 
 # check-network-tool-hardening reads built binaries, so every target that
