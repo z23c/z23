@@ -565,6 +565,27 @@ static bool fvd_push_regressions(struct json_value *data,
     return ok;
 }
 
+static bool fvd_push_all(struct json_value *data, const struct fvd_scan *sc,
+                         const struct fvd_row *before,
+                         const struct fvd_row *after, const char *path,
+                         struct json_value *entries,
+                         const struct fvd_counts *c, const char *screen)
+{
+    return json_push_kv_str(data, "schema", FVD_SCHEMA_OUT) &&
+           json_push_kv_str(data, "snapshot", path) &&
+           fvd_push_row(data, "before", before) &&
+           fvd_push_row(data, "after", after) &&
+           json_push_kv(data, "objectives", entries) &&
+           json_push_kv_int(data, "improved", c->improved) &&
+           json_push_kv_int(data, "regressed", c->regressed) &&
+           json_push_kv_int(data, "unchanged", c->unchanged) &&
+           json_push_kv_int(data, "unmeasured", c->unmeasured) &&
+           fvd_push_regressions(data, entries) &&
+           json_push_kv_int(data, "rows", (int64_t)sc->rows) &&
+           json_push_kv_int(data, "skipped", (int64_t)sc->skipped) &&
+           json_push_kv_str(data, "screen", screen);
+}
+
 static bool fvd_fill(struct json_value *data, const struct fvd_scan *sc,
                      const struct fvd_row *before, const struct fvd_row *after,
                      const char *only, const char *path)
@@ -580,19 +601,8 @@ static bool fvd_fill(struct json_value *data, const struct fvd_scan *sc,
                            &c);
     if (ok)
         fvd_screen(screen, FVD_SCREEN_MAX, before, after, &entries, &c);
-    ok = ok && json_push_kv_str(data, "schema", FVD_SCHEMA_OUT) &&
-         json_push_kv_str(data, "snapshot", path) &&
-         fvd_push_row(data, "before", before) &&
-         fvd_push_row(data, "after", after) &&
-         json_push_kv(data, "objectives", &entries) &&
-         json_push_kv_int(data, "improved", c.improved) &&
-         json_push_kv_int(data, "regressed", c.regressed) &&
-         json_push_kv_int(data, "unchanged", c.unchanged) &&
-         json_push_kv_int(data, "unmeasured", c.unmeasured) &&
-         fvd_push_regressions(data, &entries) &&
-         json_push_kv_int(data, "rows", (int64_t)sc->rows) &&
-         json_push_kv_int(data, "skipped", (int64_t)sc->skipped) &&
-         json_push_kv_str(data, "screen", screen);
+    ok = ok && fvd_push_all(data, sc, before, after, path, &entries, &c,
+                            screen);
     json_free(&entries);
     free(screen);
     return ok;
