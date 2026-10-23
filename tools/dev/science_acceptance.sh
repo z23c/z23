@@ -459,7 +459,7 @@ sa_build_fixture() {
         "$REPO_ROOT/contexts/commons/modules/vcs/src/vcs_object.c" \
         "$REPO_ROOT/contexts/commons/modules/vcs/src/package_store.c" \
         "$REPO_ROOT/contexts/commons/modules/vcs/src/package_store_catalog.c" \
-        "$REPO_ROOT/contexts/commons/modules/vcs/src/package_store_io.c" \
+        "$REPO_ROOT/contexts/commons/modules/vcs/src/package_store_io.c" "$REPO_ROOT/contexts/commons/modules/vcs/src/package_store_fs.c" \
         "$REPO_ROOT/contexts/commons/modules/vcs/src/package_manifest.c" \
         "$REPO_ROOT/contexts/commons/modules/vcs/src/build_action.c" \
         "$REPO_ROOT/platform/modules/codec/src/cursor.c" \
