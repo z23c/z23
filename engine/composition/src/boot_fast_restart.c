@@ -15,6 +15,8 @@
 #include "core/uint256.h"
 #include "jobs/reducer_frontier.h"
 #include "jobs/tip_finalize_stage.h"
+#include "storage/event_log.h"
+#include "storage/event_log_singleton.h"
 #include "storage/progress_store.h"
 #include "services/block_index_loader.h"
 #include "services/chain_restore_repair.h"
@@ -504,10 +506,58 @@ bool boot_bg_quick_check_start(const struct boot_bg_quick_check_target *target)
     return true;
 }
 
+/* The event log's open trusts the prefix its clean-close receipt vouches for
+ * instead of re-reading it (storage/event_log.h, "Verified-prefix receipt").
+ * This background pass re-proves that prefix, off the boot path, so a flipped
+ * byte is still found — after READY instead of at boot. */
+static bool boot_event_log_audit_should_stop(void)
+{
+    return thread_registry_shutdown_requested();
+}
+
+static void *boot_event_log_audit_entry(void *arg)
+{
+    (void)arg;
+    event_log_t *log = event_log_singleton();
+    if (!log)
+        return NULL;   /* not wired this boot: nothing to audit */
+
+    uint64_t audited = 0;
+    int64_t t0 = platform_time_monotonic_ms();
+    int rc = event_log_audit_prefix(log, boot_event_log_audit_should_stop,
+                                    &audited);
+    if (rc < 0) {
+        /* Same loud surface as a failed node.db quick_check; the audit has
+         * already dropped the receipt so the next boot walks and truncates. */
+        fprintf(stderr,  // obs-ok:operator-surface-is-the-alert
+                "[ALERT] bg_quick_check: event_log integrity FAILED after a "
+                "receipt-vouched prefix audit (%llu bytes verified)\n",
+                (unsigned long long)audited);
+        event_emitf(EV_DB_ERROR, 0,
+                    "bg_quick_check failed target=event_log result=%s",
+                    "prefix_audit_mismatch");
+        event_emitf(EV_OPERATOR_NEEDED, 0,
+                    "condition=bg_quick_check_failed detail=event_log_integrity");
+    }
+    printf("[boot] bg_quick_check %s target=event_log (receipt prefix audit) "
+           "bytes=%llu ms=%lld\n",
+           rc == 0 ? "ok" : rc < 0 ? "FAILED" : "did not complete",
+           (unsigned long long)audited,
+           (long long)(platform_time_monotonic_ms() - t0));
+    return NULL;
+}
+
 void boot_fast_restart_start_bg_quick_check(const char *datadir)
 {
     if (!datadir)
         return;
+    /* The receipt audit is independent of whether node.db's quick_check was
+     * skipped: it is the only place a receipt-skipped prefix is re-read. */
+    // thread-supervision-ok:bounded one-shot prefix audit, shutdown-cancelled and joined by the registry
+    if (thread_registry_spawn("event_log_audit", boot_event_log_audit_entry,
+                              NULL, NULL) != 0)
+        fprintf(stderr,
+                "WARNING: failed to spawn event_log prefix audit thread\n");
     if (!boot_shutdown_marker_quick_check_was_skipped() &&
         !boot_shutdown_marker_quick_check_was_deferred())
         return;

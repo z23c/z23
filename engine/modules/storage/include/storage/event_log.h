@@ -269,6 +269,26 @@ void event_log_append_stats(uint64_t *barrier_appends,
  * commit on a false return). NULL-safe (returns true). */
 bool event_log_flush(event_log_t *log);
 
+/* ── Verified-prefix receipt ───────────────────────────────────────────
+ * A clean event_log_close() leaves a sidecar `<path>.verified` vouching for
+ * the whole file up to a record boundary. The next event_log_open() re-checks
+ * only the record that ends there and runs the torn-tail recovery walk from
+ * that point instead of from offset 0 (20 s on a 1.4 GB log). Torn-tail
+ * semantics are unchanged: the same tail truncates at the same offset. The
+ * sidecar is dropped, durably, before any truncate, and ignored (and removed)
+ * on any mismatch, in which case open does the full walk as before.
+ *
+ * Because open then trusts the prefix instead of re-reading it, this call
+ * re-proves it off the boot path: it CRC-walks [0, vouched prefix) through the
+ * handle (pread only, never truncates, never writes). Returns 0 when the prefix
+ * is intact or nothing was skipped at open, 1 when `should_stop` (optional,
+ * polled every few thousand records) asked it to quit early, and -1 when a
+ * record is damaged: it then logs loudly, unlinks the sidecar so the next boot
+ * does the full walk and truncation, and stops this handle re-vouching at
+ * close. `*audited_bytes` (optional) is the span verified. */
+int event_log_audit_prefix(event_log_t *log, bool (*should_stop)(void),
+                           uint64_t *audited_bytes);
+
 #ifdef ZCL_TESTING
 const char *event_log_crc32c_impl(void);
 uint32_t event_log_crc32c_test_sw(const void *data, size_t len);
@@ -282,6 +302,12 @@ void event_log_test_reset_append_stats(void);       /* zero the three counters *
 void event_log_test_set_force_per_append(int v);    /* -1=env, 0=off, 1=forced */
 int  event_log_test_fd(event_log_t *log);           /* raw fd (for fault inject) */
 void event_log_test_set_fd(event_log_t *log, int fd);
+
+/* Receipt test hooks: bytes the last event_log_open() recovery walk covered
+ * (everything on a full walk, only the tail past the receipt on the fast path)
+ * and whether that open accepted a receipt. */
+uint64_t event_log_test_last_open_walked_bytes(void);
+bool event_log_test_last_open_used_receipt(void);
 #endif
 
 #endif /* ZCL_STORAGE_EVENT_LOG_H */

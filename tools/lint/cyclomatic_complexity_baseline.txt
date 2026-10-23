@@ -1884,7 +1884,6 @@ engine/modules/storage/src/disk_block_io_repair.c:repair_scan_one_file:18
 engine/modules/storage/src/event_log.c:event_log_append:16
 engine/modules/storage/src/event_log.c:event_log_read:17
 engine/modules/storage/src/event_log.c:event_log_stream:19
-engine/modules/storage/src/event_log.c:recover_truncate_partial:17
 engine/modules/storage/src/ldb_reader_format.c:ldb_map_file:20
 engine/modules/storage/src/ldb_reader_version.c:apply_edit:34
 engine/modules/storage/src/ldb_reader_version.c:ldb_memtable_load:16

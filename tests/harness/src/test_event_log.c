@@ -6,13 +6,15 @@
  * Coverage: append/read round-trip, in-order streaming, fingerprint
  * determinism and sensitivity, targeted recovery plus an opt-in kill-9 fuzz
  * harness, opt-in throughput benchmark (ZCL_EVENT_LOG_BENCH=1), empty and
- * large payloads, corrupt tail detection. Default CI uses small counts;
+ * large payloads, corrupt tail detection, the verified-prefix receipt (fast
+ * reopen, stale fallbacks, off-boot prefix audit). Default CI uses small counts;
  * ZCL_EVENT_LOG_EXHAUSTIVE=1 runs the larger matrices.
  * Tmpdirs live under ./test-tmp/event_log_<pid>_<tag>/. */
 
 #include "test/test_core.h"
 
 #include "platform/time_compat.h"
+#include "crypto/sha3.h"
 #include "services/reducer_ingest_service.h"
 #include "storage/event_log.h"
 #include "storage/event_log_singleton.h"
@@ -1204,6 +1206,353 @@ done:
     return failures;
 }
 
+/* ── verified-prefix receipt ───────────────────────────────────────── */
+
+#define RCPT_EVENTS 24
+
+static void rc_sidecar(char *out, size_t cap, const char *path)
+{
+    snprintf(out, cap, "%s.verified", path);
+}
+
+static bool rc_exists(const char *p)
+{
+    struct stat st;
+    return stat(p, &st) == 0;
+}
+
+/* Fresh log of RCPT_EVENTS events (payloads >= 8 bytes so offset 16 is always
+ * payload), cleanly closed. *last_off is the start of the last event. */
+static uint64_t rc_make_log(const char *path, uint64_t *last_off)
+{
+    unlink(path);
+    char side[600];
+    rc_sidecar(side, sizeof(side), path);
+    unlink(side);
+    event_log_t *log = event_log_open(path);
+    if (!log) return 0;
+    for (int i = 0; i < RCPT_EVENTS; i++) {
+        uint8_t buf[200];
+        size_t len = 8u + (size_t)i * 3u;
+        memset(buf, 0x20 + i, sizeof(buf));
+        uint64_t off = event_log_append(log, EV_BLOCK_HEADER, buf, len);
+        if (last_off) *last_off = off;
+    }
+    uint64_t size = event_log_size(log);
+    event_log_close(log);
+    return size;
+}
+
+static bool rc_flip_byte(const char *path, uint64_t off)
+{
+    int fd = open(path, O_RDWR);
+    if (fd < 0) return false;
+    uint8_t b = 0;
+    bool ok = pread(fd, &b, 1, (off_t)off) == 1;
+    b ^= 0xFF;
+    ok = ok && pwrite(fd, &b, 1, (off_t)off) == 1;
+    fsync(fd);
+    close(fd);
+    return ok;
+}
+
+static bool rc_append_raw(const char *path, const void *data, size_t n)
+{
+    int fd = open(path, O_WRONLY | O_APPEND);
+    if (fd < 0) return false;
+    bool ok = write(fd, data, n) == (ssize_t)n;
+    fsync(fd);
+    close(fd);
+    return ok;
+}
+
+/* Open, report (size, walked bytes, receipt used), close. */
+struct rc_open_info { bool opened, used; uint64_t size, walked; };
+
+static struct rc_open_info rc_reopen(const char *path)
+{
+    struct rc_open_info i = {0};
+    event_log_t *log = event_log_open(path);
+    if (!log) return i;
+    i.opened = true;
+    i.size = event_log_size(log);
+    i.walked = event_log_test_last_open_walked_bytes();
+    i.used = event_log_test_last_open_used_receipt();
+    event_log_close(log);
+    return i;
+}
+
+static bool rc_stream_count_is(const char *path, int want)
+{
+    event_log_t *log = event_log_open(path);
+    if (!log) return false;
+    struct stream_ctx sc = {0};
+    sc.ordered = true;
+    event_log_stream(log, 0, stream_cb, &sc);
+    event_log_close(log);
+    return sc.count == want;
+}
+
+/* Rewrite a sidecar field and (optionally) re-seal its checksum, so identity
+ * and checksum rejection can be told apart. */
+static bool rc_patch_sidecar(const char *side, size_t off, uint8_t delta,
+                             bool reseal)
+{
+    uint8_t raw[96];
+    FILE *f = fopen(side, "rb");
+    if (!f) return false;
+    bool ok = fread(raw, 1, sizeof(raw), f) == sizeof(raw);
+    fclose(f);
+    if (!ok) return false;
+    raw[off] = (uint8_t)(raw[off] + delta);
+    if (reseal) {
+        struct sha3_256_ctx h;
+        sha3_256_init(&h);
+        sha3_256_write(&h, raw, 64);
+        sha3_256_finalize(&h, raw + 64);
+    }
+    f = fopen(side, "wb");
+    if (!f) return false;
+    ok = fwrite(raw, 1, sizeof(raw), f) == sizeof(raw);
+    fclose(f);
+    return ok;
+}
+
+struct rc_ctx {
+    char path[512];
+    char side[600];
+    char copy[600];
+    char copy_side[700];
+    int failures;
+};
+
+static void rc_copy_file(const char *src, const char *dst)
+{
+    FILE *in = fopen(src, "rb");
+    FILE *out = fopen(dst, "wb");
+    char buf[4096];
+    size_t n;
+    while (in && out && (n = fread(buf, 1, sizeof(buf), in)) > 0)
+        fwrite(buf, 1, n, out);
+    if (in) fclose(in);
+    if (out) fclose(out);
+}
+
+static void rc_truncate_to(const char *path, uint64_t size)
+{
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return;
+    TEST_DISCARD(ftruncate(fd, (off_t)size));
+    fsync(fd);
+    close(fd);
+}
+
+static uint64_t rc_file_size(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 ? (uint64_t)st.st_size : 0;
+}
+
+/* Open the log, append `n` fixed events, close cleanly. */
+static void rc_append_session(const char *path, int n, size_t len)
+{
+    event_log_t *l = event_log_open(path);
+    uint8_t b[64];
+    memset(b, 0x7A, sizeof(b));
+    for (int i = 0; l && i < n; i++)
+        event_log_append(l, EV_BLOCK_HEADER, b, len);
+    if (l) event_log_close(l);
+}
+
+static bool rc_fell_back(struct rc_open_info oi, uint64_t walked)
+{
+    return oi.opened && !oi.used && oi.walked == walked;
+}
+
+/* 1. A clean close leaves a receipt; reopen takes the fast path. */
+static void rc_case_fast_path(struct rc_ctx *c)
+{
+    int failures = 0;
+    uint64_t size = rc_make_log(c->path, NULL);
+    EL_CHECK("receipt: clean close writes the sidecar",
+             size > 0 && rc_exists(c->side));
+    struct rc_open_info oi = rc_reopen(c->path);
+    EL_CHECK("receipt: reopen uses the receipt",
+             oi.opened && oi.used && oi.size == size);
+    EL_CHECK("receipt: fast path walks zero bytes", oi.walked == 0);
+    EL_CHECK("receipt: stream still sees every event",
+             rc_stream_count_is(c->path, RCPT_EVENTS));
+    rc_append_session(c->path, 3, 16);
+    oi = rc_reopen(c->path);
+    EL_CHECK("receipt: receipt advances across sessions",
+             oi.used && oi.walked == 0 && oi.size > size);
+    EL_CHECK("receipt: count after second session",
+             rc_stream_count_is(c->path, RCPT_EVENTS + 3));
+    c->failures += failures;
+}
+
+/* 2. A torn tail past the receipt truncates exactly as the full walk does. */
+static void rc_case_torn_tail(struct rc_ctx *c)
+{
+    int failures = 0;
+    uint64_t s1_size = rc_make_log(c->path, NULL);
+    uint8_t s1[96];
+    FILE *f = fopen(c->side, "rb");
+    bool got = f && fread(s1, 1, sizeof(s1), f) == sizeof(s1);
+    if (f) fclose(f);
+    EL_CHECK("receipt: captured sidecar for the stale-ahead case", got);
+    rc_append_session(c->path, 2, 40);
+    uint64_t s2_size = rc_file_size(c->path);
+    /* Put the OLDER receipt back and tear the final event: the receipt is
+     * valid (identity, size, last record) but trails the real tail. */
+    f = fopen(c->side, "wb");
+    if (f) { fwrite(s1, 1, sizeof(s1), f); fclose(f); }
+    rc_truncate_to(c->path, s2_size - 5);
+    rc_copy_file(c->path, c->copy);       /* reference: no receipt, full walk */
+    unlink(c->copy_side);
+    struct rc_open_info full = rc_reopen(c->copy);
+    struct rc_open_info oi = rc_reopen(c->path);
+    EL_CHECK("receipt: torn tail uses the receipt",
+             oi.used && oi.walked > 0 && oi.walked < s2_size - s1_size);
+    EL_CHECK("receipt: torn tail truncates exactly like the full walk",
+             !full.used && oi.size == full.size &&
+             oi.size > s1_size && oi.size < s2_size);
+    EL_CHECK("receipt: torn tail keeps the whole events before it",
+             rc_stream_count_is(c->path, RCPT_EVENTS + 1));
+    c->failures += failures;
+}
+
+/* 3. A truncate removes the sidecar before it shrinks the file. */
+static void rc_case_truncate_drops_sidecar(struct rc_ctx *c)
+{
+    int failures = 0;
+    uint64_t size = rc_make_log(c->path, NULL);
+    EL_CHECK("receipt: sidecar present before the tear", rc_exists(c->side));
+    EL_CHECK("receipt: garbage tail appended",
+             rc_append_raw(c->path, "\x05\x00\x00\x00torn", 8));
+    event_log_t *l = event_log_open(c->path);
+    EL_CHECK("receipt: truncating open succeeds",
+             l && event_log_size(l) == size);
+    EL_CHECK("receipt: truncate path removed the sidecar",
+             !rc_exists(c->side));
+    if (l) event_log_close(l);
+    EL_CHECK("receipt: clean close recreates it", rc_exists(c->side));
+    c->failures += failures;
+}
+
+/* 4a. A replaced file or a shorter file invalidates the receipt. */
+static void rc_case_stale_file(struct rc_ctx *c)
+{
+    int failures = 0;
+    uint64_t size = rc_make_log(c->path, NULL);
+    TEST_DISCARD(rename(c->path, c->copy));     /* new inode, same bytes */
+    rc_copy_file(c->copy, c->path);
+    unlink(c->copy);
+    struct rc_open_info oi = rc_reopen(c->path);
+    EL_CHECK("receipt: replaced file rejects the receipt",
+             rc_fell_back(oi, size) && oi.size == size);
+
+    size = rc_make_log(c->path, NULL);
+    rc_truncate_to(c->path, size - 3);
+    oi = rc_reopen(c->path);
+    EL_CHECK("receipt: file shorter than verified_end rejects the receipt",
+             oi.opened && !oi.used && oi.size < size);
+    c->failures += failures;
+}
+
+/* 4b. A damaged or mismatching sidecar is ignored. */
+static void rc_case_bad_sidecar(struct rc_ctx *c)
+{
+    int failures = 0;
+    uint64_t size = rc_make_log(c->path, NULL);
+    EL_CHECK("receipt: identity patched (checksum resealed)",
+             rc_patch_sidecar(c->side, 40, 1, true));
+    EL_CHECK("receipt: identity mismatch rejects the receipt",
+             rc_fell_back(rc_reopen(c->path), size));
+
+    size = rc_make_log(c->path, NULL);
+    EL_CHECK("receipt: checksum left stale",
+             rc_patch_sidecar(c->side, 16, 1, false));
+    struct rc_open_info oi = rc_reopen(c->path);
+    EL_CHECK("receipt: bad sidecar checksum rejects the receipt",
+             rc_fell_back(oi, size) && oi.size == size);
+
+    size = rc_make_log(c->path, NULL);
+    FILE *f = fopen(c->side, "wb");
+    if (f) { fwrite("ZCLEVRCP", 1, 8, f); fclose(f); }
+    EL_CHECK("receipt: short sidecar rejects the receipt",
+             rc_fell_back(rc_reopen(c->path), size));
+    c->failures += failures;
+}
+
+/* 4c. The one record the receipt re-verifies is corrupt. */
+static void rc_case_corrupt_last_record(struct rc_ctx *c)
+{
+    int failures = 0;
+    uint64_t last_off = 0;
+    rc_make_log(c->path, &last_off);
+    EL_CHECK("receipt: last verified record corrupted",
+             rc_flip_byte(c->path, last_off + 16));
+    struct rc_open_info oi = rc_reopen(c->path);
+    EL_CHECK("receipt: corrupt last record rejects the receipt and truncates it",
+             oi.opened && !oi.used && oi.size == last_off);
+    c->failures += failures;
+}
+
+/* 5. The off-boot audit catches damage inside the vouched prefix. */
+static void rc_case_audit(struct rc_ctx *c)
+{
+    int failures = 0;
+    uint64_t size = rc_make_log(c->path, NULL);
+    event_log_t *l = event_log_open(c->path);
+    uint64_t audited = 0;
+    EL_CHECK("receipt: audit of an intact prefix passes",
+             l && event_log_audit_prefix(l, NULL, &audited) == 0 &&
+             audited == size);
+    if (l) event_log_close(l);
+
+    EL_CHECK("receipt: flipped byte inside the prefix",
+             rc_flip_byte(c->path, 16 + 2));    /* payload of event 0 */
+    l = event_log_open(c->path);
+    EL_CHECK("receipt: open still takes the fast path",
+             l && event_log_test_last_open_used_receipt() &&
+             event_log_size(l) == size);
+    EL_CHECK("receipt: audit detects the flipped byte",
+             l && event_log_audit_prefix(l, NULL, &audited) == -1);
+    EL_CHECK("receipt: failed audit removed the sidecar", !rc_exists(c->side));
+    if (l) event_log_close(l);
+    EL_CHECK("receipt: close does not re-vouch for a damaged prefix",
+             !rc_exists(c->side));
+    struct rc_open_info oi = rc_reopen(c->path);
+    EL_CHECK("receipt: next open does the full walk and truncates",
+             oi.opened && !oi.used && oi.size == 0);
+    c->failures += failures;
+}
+
+static int run_receipt(int *failures_out)
+{
+    char dir[256];
+    test_fmt_tmpdir(dir, sizeof(dir), "event_log", "receipt");
+    el_mkdir_p(dir);
+    struct rc_ctx c = {0};
+    snprintf(c.path, sizeof(c.path), "%s/events.log", dir);
+    rc_sidecar(c.side, sizeof(c.side), c.path);
+    snprintf(c.copy, sizeof(c.copy), "%s/copy.log", dir);
+    rc_sidecar(c.copy_side, sizeof(c.copy_side), c.copy);
+
+    rc_case_fast_path(&c);
+    rc_case_torn_tail(&c);
+    rc_case_truncate_drops_sidecar(&c);
+    rc_case_stale_file(&c);
+    rc_case_bad_sidecar(&c);
+    rc_case_corrupt_last_record(&c);
+    rc_case_audit(&c);
+
+    test_cleanup_tmpdir(dir);
+    *failures_out += c.failures;
+    return c.failures;
+}
+
 static int test_event_log_platform_arm(void)
 {
     printf("\n=== event_log tests ===\n");
@@ -1218,6 +1567,7 @@ static int test_event_log_platform_arm(void)
     run_deferred_sync(&failures);
     run_append_path_attribution(&failures);
     run_targeted_recovery(&failures);
+    run_receipt(&failures);
     run_crc32c_dispatch(&failures);
 
     printf("event_log: %d failures\n", failures);
