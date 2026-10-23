@@ -423,32 +423,25 @@ static void chaos_auto_reindex_cleanup(struct chaos_ctx *ctx)
     ctx->auto_reindex_datadir[0] = '\0';
 }
 
-static int write_failure_artifacts(const struct chaos_ctx *ctx)
+/* Builds the summary and copied-scenario paths inside the artifact directory.
+ * Returns -ENAMETOOLONG when either would not fit. */
+static int chaos_artifact_paths(const char *dir, const char *stem,
+                                char *summary_path, size_t summary_len,
+                                char *scenario_path, size_t scenario_len)
 {
-    const char *dir = ctx && ctx->artifact_dir ? ctx->artifact_dir
-                                               : "chaos-output";
-    if (!ctx || !ctx->scenario_path || !*ctx->scenario_path)
-        return -EINVAL;
-    if (mkdir(dir, 0777) != 0 && errno != EEXIST)
-        return -errno;
-
-    char stem[128];
-    sanitize_artifact_stem(ctx->scenario_path, stem, sizeof(stem));
-
-    char summary_path[512];
-    char scenario_path[512];
-    int n = snprintf(summary_path, sizeof(summary_path),
-                     "%s/%s.failure.txt", dir, stem);
-    if (n < 0 || (size_t)n >= sizeof(summary_path))
+    int n = snprintf(summary_path, summary_len, "%s/%s.failure.txt", dir, stem);
+    if (n < 0 || (size_t)n >= summary_len)
         return -ENAMETOOLONG;
-    n = snprintf(scenario_path, sizeof(scenario_path),
-                 "%s/%s.scenario", dir, stem);
-    if (n < 0 || (size_t)n >= sizeof(scenario_path))
+    n = snprintf(scenario_path, scenario_len, "%s/%s.scenario", dir, stem);
+    if (n < 0 || (size_t)n >= scenario_len)
         return -ENAMETOOLONG;
+    return 0;
+}
 
-    FILE *summary = fopen(summary_path, "wb");
-    if (!summary)
-        return -errno;
+/* Failure-summary lines: run identity and the core counters. */
+static void chaos_summary_run_fields(FILE *summary,
+                                     const struct chaos_ctx *ctx)
+{
     fprintf(summary, "scenario=%s\n", ctx->scenario_path);
     fprintf(summary, "seed=%s0x%016" PRIx64 "\n",
             ctx->seed_set ? "" : "(default)", ctx->seed);
@@ -472,11 +465,23 @@ static int write_failure_artifacts(const struct chaos_ctx *ctx)
     fprintf(summary, "scheduled_events=%" PRIu64 "\n",
             ctx->scheduled_event_count);
     fprintf(summary, "simnet_mode=%d\n", ctx->simnet_mode ? 1 : 0);
+}
+
+/* Failure-summary lines for simnet runs; nothing is written in legacy mode. */
+static void chaos_summary_simnet_fields(FILE *summary,
+                                        const struct chaos_ctx *ctx)
+{
     if (ctx->simnet_mode) {
         fprintf(summary, "simnet_node_count=%zu\n", ctx->simnet_node_count);
         fprintf(summary, "simnet_tip_monotonic=%d\n",
                 ctx->simnet_monotonic_ok ? 1 : 0);
     }
+}
+
+/* Failure-summary lines: faults, partitions and auto-reindex state. */
+static void chaos_summary_fault_fields(FILE *summary,
+                                       const struct chaos_ctx *ctx)
+{
     fprintf(summary, "alloc_faults=%" PRIu64 "\n", ctx->alloc_fault_count);
     fprintf(summary, "graceful_shutdowns=%" PRId64 "\n",
             ctx->graceful_shutdowns);
@@ -498,6 +503,33 @@ static int write_failure_artifacts(const struct chaos_ctx *ctx)
             ctx->auto_reindex_requests);
     fprintf(summary, "auto_reindex_clears=%" PRId64 "\n",
             ctx->auto_reindex_clears);
+}
+
+static int write_failure_artifacts(const struct chaos_ctx *ctx)
+{
+    const char *dir = ctx && ctx->artifact_dir ? ctx->artifact_dir
+                                               : "chaos-output";
+    if (!ctx || !ctx->scenario_path || !*ctx->scenario_path)
+        return -EINVAL;
+    if (mkdir(dir, 0777) != 0 && errno != EEXIST)
+        return -errno;
+
+    char stem[128];
+    sanitize_artifact_stem(ctx->scenario_path, stem, sizeof(stem));
+
+    char summary_path[512];
+    char scenario_path[512];
+    int rc = chaos_artifact_paths(dir, stem, summary_path, sizeof(summary_path),
+                                  scenario_path, sizeof(scenario_path));
+    if (rc != 0)
+        return rc;
+
+    FILE *summary = fopen(summary_path, "wb");
+    if (!summary)
+        return -errno;
+    chaos_summary_run_fields(summary, ctx);
+    chaos_summary_simnet_fields(summary, ctx);
+    chaos_summary_fault_fields(summary, ctx);
     fprintf(summary, "artifact_scenario=%s\n", scenario_path);
     fprintf(summary, "replay_command=build/bin/z23-chaos --scenario=%s --verbose\n",
             scenario_path);
@@ -563,8 +595,11 @@ static int compare_metric(int64_t actual, const char *op, int64_t expected)
     return -2;
 }
 
-static bool metric_value(const struct chaos_ctx *ctx, const char *name,
-                         int64_t *out)
+/* metric_value() is split into four name groups so each stays under the
+ * complexity cap. Every metric name belongs to exactly one group, so the order
+ * of the || chain never changes which value is reported. */
+static bool chaos_metric_node_state(const struct chaos_ctx *ctx,
+                                    const char *name, int64_t *out)
 {
     if (strcmp(name, "tip_height") == 0) {
         *out = ctx->tip_height;
@@ -578,17 +613,8 @@ static bool metric_value(const struct chaos_ctx *ctx, const char *name,
         *out = ctx->consensus_rejects;
         return true;
     }
-    if (strcmp(name, "clock_advance_seconds") == 0) {
-        *out = ctx->clock_advance_seconds;
-        return true;
-    }
-    if (strcmp(name, "graceful_shutdowns") == 0) {
-        *out = ctx->graceful_shutdowns;
-        return true;
-    }
-    if (strcmp(name, "mempool_prune_runs") == 0 ||
-        strcmp(name, "mempool_prunes") == 0) {
-        *out = ctx->mempool_prune_runs;
+    if (strcmp(name, "block_bytes") == 0) {
+        *out = ctx->block_bytes;
         return true;
     }
     if (strcmp(name, "active_peers") == 0) {
@@ -603,16 +629,31 @@ static bool metric_value(const struct chaos_ctx *ctx, const char *name,
         *out = (int64_t)ctx->peers.blocks_sent;
         return true;
     }
-    if (strcmp(name, "block_bytes") == 0) {
-        *out = ctx->block_bytes;
-        return true;
-    }
     if (strcmp(name, "malformed_blocks") == 0) {
         *out = (int64_t)ctx->peers.malformed_blocks_sent;
         return true;
     }
+    return false;
+}
+
+static bool chaos_metric_events(const struct chaos_ctx *ctx, const char *name,
+                                int64_t *out)
+{
+    if (strcmp(name, "clock_advance_seconds") == 0) {
+        *out = ctx->clock_advance_seconds;
+        return true;
+    }
     if (strcmp(name, "clock_advance_count") == 0) {
         *out = (int64_t)ctx->clock_advance_count;
+        return true;
+    }
+    if (strcmp(name, "graceful_shutdowns") == 0) {
+        *out = ctx->graceful_shutdowns;
+        return true;
+    }
+    if (strcmp(name, "mempool_prune_runs") == 0 ||
+        strcmp(name, "mempool_prunes") == 0) {
+        *out = ctx->mempool_prune_runs;
         return true;
     }
     if (strcmp(name, "scheduled_events") == 0) {
@@ -631,6 +672,12 @@ static bool metric_value(const struct chaos_ctx *ctx, const char *name,
         *out = ctx->sim_wall_unix;
         return true;
     }
+    return false;
+}
+
+static bool chaos_metric_auto_reindex(const struct chaos_ctx *ctx,
+                                      const char *name, int64_t *out)
+{
     if (strcmp(name, "auto_reindex_anchor") == 0) {
         *out = ctx->auto_reindex_anchor;
         return true;
@@ -655,6 +702,12 @@ static bool metric_value(const struct chaos_ctx *ctx, const char *name,
         *out = ctx->auto_reindex_clears;
         return true;
     }
+    return false;
+}
+
+static bool chaos_metric_simnet(const struct chaos_ctx *ctx, const char *name,
+                                int64_t *out)
+{
     if (strcmp(name, "simnet_converged") == 0) {
         *out = chaos_simnet_converged(ctx) ? 1 : 0;
         return true;
@@ -668,6 +721,15 @@ static bool metric_value(const struct chaos_ctx *ctx, const char *name,
         return true;
     }
     return false;
+}
+
+static bool metric_value(const struct chaos_ctx *ctx, const char *name,
+                         int64_t *out)
+{
+    return chaos_metric_node_state(ctx, name, out) ||
+           chaos_metric_events(ctx, name, out) ||
+           chaos_metric_auto_reindex(ctx, name, out) ||
+           chaos_metric_simnet(ctx, name, out);
 }
 
 static int handle_expect(struct chaos_ctx *ctx, int argc, char **argv,
@@ -787,49 +849,72 @@ static int handle_random_kill_peers(struct chaos_ctx *ctx, int argc,
     return 0;
 }
 
-static int handle_send_block(struct chaos_ctx *ctx, int argc, char **argv,
-                             int line_no)
+/* Parses the peer=I argument shared by the send commands. `what` is the full
+ * error text reported when the id is missing or not an integer. */
+static int chaos_send_parse_peer(int argc, char **argv, uint64_t *peer_id,
+                                 const char *what, int line_no)
 {
-    if (argc != 3 && argc != 4)
-        return fail_line(line_no,
-                         "send_block requires peer=I file=PATH [height=N]");
-
     const char *peer_arg = arg_value(argc, argv, "peer");
-    const char *path = arg_value(argc, argv, "file");
-    const char *height_arg = arg_value(argc, argv, "height");
-    uint64_t peer_id = 0;
-    if (!peer_arg || !parse_u64_auto(peer_arg, &peer_id) ||
-        peer_id > UINT32_MAX) {
-        return fail_line(line_no, "send_block peer must be integer");
+    if (!peer_arg || !parse_u64_auto(peer_arg, peer_id) ||
+        *peer_id > UINT32_MAX) {
+        return fail_line(line_no, what);
     }
-    if (!path || !*path)
-        return fail_line(line_no, "send_block file is required");
-    int64_t height = 0;
-    if (height_arg && (!zcl_parse_i64(height_arg, &height) || height <= 0))
-        return fail_line(line_no, "send_block height must be a positive integer");
+    return 0;
+}
 
+/* Checks that the peer exists and is connected, in that order. `cmd` prefixes
+ * the error text, e.g. "send_block". */
+static int chaos_send_peer_ready(struct chaos_ctx *ctx, uint64_t peer_id,
+                                 const char *cmd, int line_no)
+{
+    char msg[96];
     const struct sim_peer *peer = sim_peer_get(&ctx->peers, (unsigned)peer_id);
-    if (!peer)
-        return fail_line(line_no, "send_block peer is not configured");
-    if (!peer->connected)
-        return fail_line(line_no, "send_block peer is disconnected");
-    if (net_partition_active_at(platform_time_wall_unix())) {
-        ctx->net_partition_drops++;
-        return 0;
+    if (!peer) {
+        snprintf(msg, sizeof(msg), "%s peer is not configured", cmd);
+        return fail_line(line_no, msg);
     }
+    if (!peer->connected) {
+        snprintf(msg, sizeof(msg), "%s peer is disconnected", cmd);
+        return fail_line(line_no, msg);
+    }
+    return 0;
+}
 
-    size_t bytes_read = 0;
-    int rc = sim_peer_send_block(&ctx->peers, (unsigned)peer_id, path,
-                                 &bytes_read);
+/* Returns true, counting the drop, when a simulated partition swallows a send. */
+static bool chaos_send_partition_drop(struct chaos_ctx *ctx)
+{
+    if (!net_partition_active_at(platform_time_wall_unix()))
+        return false;
+    ctx->net_partition_drops++;
+    return true;
+}
+
+static int chaos_send_block_height(const char *height_arg, int64_t *height,
+                                   int line_no)
+{
+    if (height_arg && (!zcl_parse_i64(height_arg, height) || *height <= 0))
+        return fail_line(line_no, "send_block height must be a positive integer");
+    return 0;
+}
+
+/* Maps a failed sim_peer_send_block() onto the send_block error text. */
+static int chaos_send_block_fail(int rc, int line_no)
+{
     if (rc == -ENOENT)
         return fail_line(line_no, "send_block peer is not configured");
     if (rc == -ENOTCONN)
         return fail_line(line_no, "send_block peer is disconnected");
     if (rc == -ENODATA)
         return fail_line(line_no, "send_block fixture is empty");
-    if (rc != 0)
-        return fail_line(line_no, "send_block fixture could not be read");
+    return fail_line(line_no, "send_block fixture could not be read");
+}
 
+/* Accounts for a block that was sent: bytes always, height either as given or
+ * as the next block when no height argument was supplied. */
+static int chaos_send_block_account(struct chaos_ctx *ctx, size_t bytes_read,
+                                    const char *height_arg, int64_t height,
+                                    int line_no)
+{
     if (bytes_read > (size_t)(INT64_MAX - ctx->block_bytes))
         return fail_line(line_no, "send_block byte counter overflows");
     ctx->block_bytes += (int64_t)bytes_read;
@@ -842,6 +927,39 @@ static int handle_send_block(struct chaos_ctx *ctx, int argc, char **argv,
     return 0;
 }
 
+static int handle_send_block(struct chaos_ctx *ctx, int argc, char **argv,
+                             int line_no)
+{
+    if (argc != 3 && argc != 4)
+        return fail_line(line_no,
+                         "send_block requires peer=I file=PATH [height=N]");
+
+    const char *path = arg_value(argc, argv, "file");
+    const char *height_arg = arg_value(argc, argv, "height");
+    uint64_t peer_id = 0;
+    int rc = chaos_send_parse_peer(argc, argv, &peer_id,
+                                   "send_block peer must be integer", line_no);
+    if (rc != 0) return rc;
+    if (!path || !*path)
+        return fail_line(line_no, "send_block file is required");
+    int64_t height = 0;
+    rc = chaos_send_block_height(height_arg, &height, line_no);
+    if (rc != 0) return rc;
+
+    rc = chaos_send_peer_ready(ctx, peer_id, "send_block", line_no);
+    if (rc != 0) return rc;
+    if (chaos_send_partition_drop(ctx))
+        return 0;
+
+    size_t bytes_read = 0;
+    rc = sim_peer_send_block(&ctx->peers, (unsigned)peer_id, path, &bytes_read);
+    if (rc != 0)
+        return chaos_send_block_fail(rc, line_no);
+
+    return chaos_send_block_account(ctx, bytes_read, height_arg, height,
+                                    line_no);
+}
+
 static int handle_send_malformed_block(struct chaos_ctx *ctx, int argc,
                                        char **argv, int line_no)
 {
@@ -849,28 +967,21 @@ static int handle_send_malformed_block(struct chaos_ctx *ctx, int argc,
         return fail_line(line_no,
                          "send_malformed_block requires peer=I type=ENUM");
 
-    const char *peer_arg = arg_value(argc, argv, "peer");
     const char *type = arg_value(argc, argv, "type");
     uint64_t peer_id = 0;
-    if (!peer_arg || !parse_u64_auto(peer_arg, &peer_id) ||
-        peer_id > UINT32_MAX) {
-        return fail_line(line_no, "send_malformed_block peer must be integer");
-    }
+    int rc = chaos_send_parse_peer(argc, argv, &peer_id,
+                                   "send_malformed_block peer must be integer",
+                                   line_no);
+    if (rc != 0) return rc;
     if (!type || !sim_peer_malformed_type_known(type))
         return fail_line(line_no, "send_malformed_block unknown type");
 
-    const struct sim_peer *peer = sim_peer_get(&ctx->peers, (unsigned)peer_id);
-    if (!peer)
-        return fail_line(line_no, "send_malformed_block peer is not configured");
-    if (!peer->connected)
-        return fail_line(line_no, "send_malformed_block peer is disconnected");
-    if (net_partition_active_at(platform_time_wall_unix())) {
-        ctx->net_partition_drops++;
+    rc = chaos_send_peer_ready(ctx, peer_id, "send_malformed_block", line_no);
+    if (rc != 0) return rc;
+    if (chaos_send_partition_drop(ctx))
         return 0;
-    }
 
-    int rc = sim_peer_send_malformed_block(&ctx->peers, (unsigned)peer_id,
-                                           type);
+    rc = sim_peer_send_malformed_block(&ctx->peers, (unsigned)peer_id, type);
     if (rc == -ENOENT)
         return fail_line(line_no, "send_malformed_block peer is not configured");
     if (rc == -ENOTCONN)
@@ -1141,39 +1252,28 @@ static int handle_mode(struct chaos_ctx *ctx, int argc, char **argv,
     return 0;
 }
 
-static int handle_simnet_nodes(struct chaos_ctx *ctx, int argc, char **argv,
-                               int line_no)
+/* honest=<permille> (0..1000; 1000=all honest, the default). Integer
+ * permille — NOT a float — for exact deterministic reproducibility. Leaves
+ * *honest_permille untouched when the optional argument is absent. */
+static int chaos_simnet_parse_honest(int argc, char **argv,
+                                     int *honest_permille, int line_no)
 {
-    if (!ctx->simnet_mode)
-        return fail_line(line_no, "simnet_nodes requires 'mode simnet' first");
-    if (ctx->simnet)
-        return fail_line(line_no, "simnet_nodes already created a cluster");
-    if (argc != 2 && argc != 3)
+    if (argc != 3)
+        return 0;
+    const char *hv = arg_value(argc, argv, "honest");
+    uint64_t permille = 0;
+    if (!hv || !parse_u64_auto(hv, &permille) || permille > 1000)
         return fail_line(line_no,
-                         "simnet_nodes requires N [honest=<permille>]");
-    uint64_t n = 0;
-    if (!parse_u64_auto(argv[1], &n) || n < CHAOS_SIMNET_MIN_NODES ||
-        n > CHAOS_SIMNET_MAX_NODES) {
-        return fail_line(line_no, "simnet_nodes must be 2..128");
-    }
+                         "simnet_nodes honest= must be 0..1000 (permille)");
+    *honest_permille = (int)permille;
+    return 0;
+}
 
-    /* honest=<permille> (0..1000; 1000=all honest, the default). Integer
-     * permille — NOT a float — for exact deterministic reproducibility. */
-    int honest_permille = 1000;
-    if (argc == 3) {
-        const char *hv = arg_value(argc, argv, "honest");
-        uint64_t permille = 0;
-        if (!hv || !parse_u64_auto(hv, &permille) || permille > 1000)
-            return fail_line(line_no,
-                             "simnet_nodes honest= must be 0..1000 (permille)");
-        honest_permille = (int)permille;
-    }
-
-    ctx->simnet = simnet_cluster_init((size_t)n, ctx->seed);
-    if (!ctx->simnet)
-        return fail_line(line_no, "simnet cluster init failed");
-    ctx->simnet_node_count = (size_t)n;
-
+/* Allocates the per-node bookkeeping arrays. On failure every simnet piece
+ * is released before the error is reported. */
+static int chaos_simnet_alloc_bookkeeping(struct chaos_ctx *ctx, uint64_t n,
+                                          int line_no)
+{
     ctx->simnet_nodes = zcl_calloc((size_t)n, sizeof(*ctx->simnet_nodes),
                                    "chaos_simnet_nodes");
     ctx->simnet_partitioned =
@@ -1187,13 +1287,15 @@ static int handle_simnet_nodes(struct chaos_ctx *ctx, int argc, char **argv,
         chaos_simnet_cleanup(ctx);
         return fail_line(line_no, "simnet bookkeeping allocation failed");
     }
-    for (uint64_t i = 0; i < n; i++)
-        ctx->simnet_last_height[i] = INT32_MIN;
-    ctx->simnet_monotonic_ok = true;
+    return 0;
+}
 
-    /* Assign roles from the disjoint byzantine sub-stream. permille=1000 draws
-     * nothing and tags nothing, so an all-honest cluster runs exactly as it did
-     * before roles existed. Node 0 is always honest (convergence reference). */
+/* Assign roles from the disjoint byzantine sub-stream. permille=1000 draws
+ * nothing and tags nothing, so an all-honest cluster runs exactly as it did
+ * before roles existed. Node 0 is always honest (convergence reference). */
+static int chaos_simnet_assign_roles(struct chaos_ctx *ctx, uint64_t n,
+                                     int honest_permille, int line_no)
+{
     ctx->simnet_honest_permille = honest_permille;
     ctx->simnet_byz_rng = ctx->seed ^ CHAOS_SIMNET_BYZ_TAG;
     for (uint64_t i = 0; i < n; i++) {
@@ -1210,6 +1312,40 @@ static int handle_simnet_nodes(struct chaos_ctx *ctx, int argc, char **argv,
         }
     }
     return 0;
+}
+
+static int handle_simnet_nodes(struct chaos_ctx *ctx, int argc, char **argv,
+                               int line_no)
+{
+    if (!ctx->simnet_mode)
+        return fail_line(line_no, "simnet_nodes requires 'mode simnet' first");
+    if (ctx->simnet)
+        return fail_line(line_no, "simnet_nodes already created a cluster");
+    if (argc != 2 && argc != 3)
+        return fail_line(line_no,
+                         "simnet_nodes requires N [honest=<permille>]");
+    uint64_t n = 0;
+    if (!parse_u64_auto(argv[1], &n) || n < CHAOS_SIMNET_MIN_NODES ||
+        n > CHAOS_SIMNET_MAX_NODES) {
+        return fail_line(line_no, "simnet_nodes must be 2..128");
+    }
+
+    int honest_permille = 1000;
+    int rc = chaos_simnet_parse_honest(argc, argv, &honest_permille, line_no);
+    if (rc != 0) return rc;
+
+    ctx->simnet = simnet_cluster_init((size_t)n, ctx->seed);
+    if (!ctx->simnet)
+        return fail_line(line_no, "simnet cluster init failed");
+    ctx->simnet_node_count = (size_t)n;
+
+    rc = chaos_simnet_alloc_bookkeeping(ctx, n, line_no);
+    if (rc != 0) return rc;
+    for (uint64_t i = 0; i < n; i++)
+        ctx->simnet_last_height[i] = INT32_MIN;
+    ctx->simnet_monotonic_ok = true;
+
+    return chaos_simnet_assign_roles(ctx, n, honest_permille, line_no);
 }
 
 static int chaos_simnet_parse_node(struct chaos_ctx *ctx, int argc,
@@ -1469,6 +1605,77 @@ static const struct chaos_command *find_command(const char *name)
     return NULL;
 }
 
+/* Releases everything a scenario run holds, on every exit path. */
+static void chaos_scenario_teardown(struct chaos_ctx *ctx)
+{
+    platform_clock_clear_source();
+    chaos_auto_reindex_cleanup(ctx);
+    chaos_simnet_cleanup(ctx);
+}
+
+/* Runs one scenario line (blank and comment-only lines included). Returns 0 to
+ * keep going and 1 after the failure has been reported. */
+static int chaos_scenario_exec_line(struct chaos_ctx *ctx, char *line,
+                                    int line_no)
+{
+    char *hash = strchr(line, '#');
+    if (hash) *hash = '\0';
+    char *body = trim_ascii(line);
+    if (*body == '\0') return 0;
+
+    char *argv[CHAOS_MAX_ARGS];
+    int argc = split_args(body, argv, CHAOS_MAX_ARGS);
+    if (argc < 0) {
+        fprintf(stderr, "chaos:%d: too many arguments\n", line_no);
+        return 1;
+    }
+
+    const struct chaos_command *cmd = find_command(argv[0]);
+    if (!cmd) {
+        fprintf(stderr, "chaos:%d: unknown command '%s'\n",
+                line_no, argv[0]);
+        return 1;
+    }
+    if (cmd->handler(ctx, argc, argv, line_no) != 0)
+        return 1;
+    if (ctx->verbose)
+        printf("chaos:%d: %s OK\n", line_no, argv[0]);
+    return 0;
+}
+
+/* simnet mode: re-check the cluster invariants regardless of what the scenario
+ * explicitly asserted. A drain here is a no-op if the last command already
+ * drained the queue. Returns 0 when every invariant holds. */
+static int chaos_simnet_final_check(struct chaos_ctx *ctx)
+{
+    if (!ctx->simnet) {
+        fprintf(stderr,
+                "chaos: mode simnet requires a simnet_nodes command\n");
+        return 1;
+    }
+    if (!simnet_cluster_deliver_pending(ctx->simnet)) {
+        fprintf(stderr,
+                "chaos: simnet final delivery drain failed\n");
+        return 1;
+    }
+    chaos_simnet_track_heights(ctx);
+    bool converged = chaos_simnet_converged(ctx);
+    if (!converged) {
+        fprintf(stderr,
+                "chaos: simnet invariant violation: cluster did not "
+                "converge (tip hash / coins digest differ across "
+                "nodes)\n");
+    }
+    if (!ctx->simnet_monotonic_ok) {
+        fprintf(stderr,
+                "chaos: simnet invariant violation: a node's tip "
+                "height regressed\n");
+    }
+    if (!converged || !ctx->simnet_monotonic_ok)
+        return 1;
+    return 0;
+}
+
 static int run_scenario(struct chaos_ctx *ctx)
 {
     net_partition_clear();
@@ -1479,9 +1686,7 @@ static int run_scenario(struct chaos_ctx *ctx)
     if (!fp) {
         fprintf(stderr, "chaos: failed to open %s: %s\n",
                 ctx->scenario_path, strerror(errno));
-        platform_clock_clear_source();
-        chaos_auto_reindex_cleanup(ctx);
-        chaos_simnet_cleanup(ctx);
+        chaos_scenario_teardown(ctx);
         return 1;
     }
 
@@ -1495,103 +1700,30 @@ static int run_scenario(struct chaos_ctx *ctx)
         } else if (!feof(fp)) {
             fprintf(stderr, "chaos:%d: line too long\n", line_no);
             fclose(fp);
-            platform_clock_clear_source();
-            chaos_auto_reindex_cleanup(ctx);
-            chaos_simnet_cleanup(ctx);
+            chaos_scenario_teardown(ctx);
             return 1;
         }
 
-        char *hash = strchr(line, '#');
-        if (hash) *hash = '\0';
-        char *body = trim_ascii(line);
-        if (*body == '\0') continue;
-
-        char *argv[CHAOS_MAX_ARGS];
-        int argc = split_args(body, argv, CHAOS_MAX_ARGS);
-        if (argc < 0) {
-            fprintf(stderr, "chaos:%d: too many arguments\n", line_no);
+        if (chaos_scenario_exec_line(ctx, line, line_no) != 0) {
             fclose(fp);
-            platform_clock_clear_source();
-            chaos_auto_reindex_cleanup(ctx);
-            chaos_simnet_cleanup(ctx);
+            chaos_scenario_teardown(ctx);
             return 1;
         }
-
-        const struct chaos_command *cmd = find_command(argv[0]);
-        if (!cmd) {
-            fprintf(stderr, "chaos:%d: unknown command '%s'\n",
-                    line_no, argv[0]);
-            fclose(fp);
-            platform_clock_clear_source();
-            chaos_auto_reindex_cleanup(ctx);
-            chaos_simnet_cleanup(ctx);
-            return 1;
-        }
-        int rc = cmd->handler(ctx, argc, argv, line_no);
-        if (rc != 0) {
-            fclose(fp);
-            platform_clock_clear_source();
-            chaos_auto_reindex_cleanup(ctx);
-            chaos_simnet_cleanup(ctx);
-            return 1;
-        }
-        if (ctx->verbose)
-            printf("chaos:%d: %s OK\n", line_no, argv[0]);
     }
 
     fclose(fp);
 
-    /* simnet mode: re-check the cluster invariants regardless of what the
-     * scenario explicitly asserted. A drain here is a no-op if the last
-     * command already drained the queue. */
-    if (ctx->simnet_mode) {
-        if (!ctx->simnet) {
-            fprintf(stderr,
-                    "chaos: mode simnet requires a simnet_nodes command\n");
-            platform_clock_clear_source();
-            chaos_auto_reindex_cleanup(ctx);
-            chaos_simnet_cleanup(ctx);
-            return 1;
-        }
-        if (!simnet_cluster_deliver_pending(ctx->simnet)) {
-            fprintf(stderr,
-                    "chaos: simnet final delivery drain failed\n");
-            platform_clock_clear_source();
-            chaos_auto_reindex_cleanup(ctx);
-            chaos_simnet_cleanup(ctx);
-            return 1;
-        }
-        chaos_simnet_track_heights(ctx);
-        bool converged = chaos_simnet_converged(ctx);
-        if (!converged) {
-            fprintf(stderr,
-                    "chaos: simnet invariant violation: cluster did not "
-                    "converge (tip hash / coins digest differ across "
-                    "nodes)\n");
-        }
-        if (!ctx->simnet_monotonic_ok) {
-            fprintf(stderr,
-                    "chaos: simnet invariant violation: a node's tip "
-                    "height regressed\n");
-        }
-        if (!converged || !ctx->simnet_monotonic_ok) {
-            platform_clock_clear_source();
-            chaos_auto_reindex_cleanup(ctx);
-            chaos_simnet_cleanup(ctx);
-            return 1;
-        }
+    if (ctx->simnet_mode && chaos_simnet_final_check(ctx) != 0) {
+        chaos_scenario_teardown(ctx);
+        return 1;
     }
 
     if (ctx->expect_count == 0) {
         fprintf(stderr, "chaos: scenario has no expect assertions\n");
-        platform_clock_clear_source();
-        chaos_auto_reindex_cleanup(ctx);
-        chaos_simnet_cleanup(ctx);
+        chaos_scenario_teardown(ctx);
         return 1;
     }
-    platform_clock_clear_source();
-    chaos_auto_reindex_cleanup(ctx);
-    chaos_simnet_cleanup(ctx);
+    chaos_scenario_teardown(ctx);
     return 0;
 }
 
@@ -1613,38 +1745,74 @@ static void usage(const char *argv0)
             argv0);
 }
 
+/* Applies one command-line argument. Returns 0 when accepted, or 2 after the
+ * usage or error text has been printed. */
+static int chaos_main_arg(struct chaos_ctx *ctx, const char *argv0,
+                          const char *arg)
+{
+    if (strncmp(arg, "--scenario=", 11) == 0) {
+        ctx->scenario_path = arg + 11;
+    } else if (strncmp(arg, "--seed=", 7) == 0) {
+        uint64_t seed = 0;
+        if (!parse_u64_auto(arg + 7, &seed)) {
+            fprintf(stderr, "chaos: --seed must be an integer or hex value\n");
+            return 2;
+        }
+        ctx->seed_override = seed;
+        ctx->seed_override_set = true;
+    } else if (strncmp(arg, "--artifact-dir=", 15) == 0) {
+        ctx->artifact_dir = arg + 15;
+    } else if (strncmp(arg, "--trace-dir=", 12) == 0) {
+        if (strlen(arg + 12) >= sizeof(ctx->trace_dir)) {
+            fprintf(stderr, "chaos: --trace-dir path is too long\n");
+            return 2;
+        }
+        snprintf(ctx->trace_dir, sizeof(ctx->trace_dir), "%s", arg + 12);
+        ctx->trace_dir_set = true;
+    } else if (strcmp(arg, "--verbose") == 0) {
+        ctx->verbose = true;
+    } else {
+        usage(argv0);
+        return 2;
+    }
+    return 0;
+}
+
+/* Prints the PASS line, or the FAIL line plus the failure artifacts. */
+static void chaos_print_outcome(const struct chaos_ctx *ctx, int rc)
+{
+    if (rc == 0) {
+        printf("PASS %s seed=%s0x%016" PRIx64
+               " boot_phase=%s peers=%u expects=%zu\n",
+               ctx->scenario_path,
+               ctx->seed_set ? "" : "(default)",
+               ctx->seed,
+               ctx->boot_phase,
+               ctx->peer_count,
+               ctx->expect_count);
+        return;
+    }
+    printf("FAIL %s\n", ctx->scenario_path);
+    if (ctx->simnet_mode) {
+        printf("SIMNET REPRO SEED=0x%016" PRIx64 "\n", ctx->seed);
+    }
+    int artifact_rc = write_failure_artifacts(ctx);
+    if (artifact_rc == 0)
+        printf("ARTIFACTS %s\n",
+               ctx->artifact_dir ? ctx->artifact_dir : "chaos-output");
+    else
+        fprintf(stderr, "chaos: failed to write artifacts: %s\n",
+                strerror(-artifact_rc));
+}
+
 int main(int argc, char **argv)
 {
     struct chaos_ctx ctx;
     chaos_ctx_init(&ctx);
 
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--scenario=", 11) == 0) {
-            ctx.scenario_path = argv[i] + 11;
-        } else if (strncmp(argv[i], "--seed=", 7) == 0) {
-            uint64_t seed = 0;
-            if (!parse_u64_auto(argv[i] + 7, &seed)) {
-                fprintf(stderr, "chaos: --seed must be an integer or hex value\n");
-                return 2;
-            }
-            ctx.seed_override = seed;
-            ctx.seed_override_set = true;
-        } else if (strncmp(argv[i], "--artifact-dir=", 15) == 0) {
-            ctx.artifact_dir = argv[i] + 15;
-        } else if (strncmp(argv[i], "--trace-dir=", 12) == 0) {
-            if (strlen(argv[i] + 12) >= sizeof(ctx.trace_dir)) {
-                fprintf(stderr, "chaos: --trace-dir path is too long\n");
-                return 2;
-            }
-            snprintf(ctx.trace_dir, sizeof(ctx.trace_dir), "%s",
-                     argv[i] + 12);
-            ctx.trace_dir_set = true;
-        } else if (strcmp(argv[i], "--verbose") == 0) {
-            ctx.verbose = true;
-        } else {
-            usage(argv[0]);
-            return 2;
-        }
+        int arg_rc = chaos_main_arg(&ctx, argv[0], argv[i]);
+        if (arg_rc != 0) return arg_rc;
     }
 
     if (!ctx.scenario_path || !*ctx.scenario_path) {
@@ -1659,28 +1827,7 @@ int main(int argc, char **argv)
     chain_params_select(CHAIN_MAIN);
 
     int rc = run_scenario(&ctx);
-    if (rc == 0) {
-        printf("PASS %s seed=%s0x%016" PRIx64
-               " boot_phase=%s peers=%u expects=%zu\n",
-               ctx.scenario_path,
-               ctx.seed_set ? "" : "(default)",
-               ctx.seed,
-               ctx.boot_phase,
-               ctx.peer_count,
-               ctx.expect_count);
-    } else {
-        printf("FAIL %s\n", ctx.scenario_path);
-        if (ctx.simnet_mode) {
-            printf("SIMNET REPRO SEED=0x%016" PRIx64 "\n", ctx.seed);
-        }
-        int artifact_rc = write_failure_artifacts(&ctx);
-        if (artifact_rc == 0)
-            printf("ARTIFACTS %s\n",
-                   ctx.artifact_dir ? ctx.artifact_dir : "chaos-output");
-        else
-            fprintf(stderr, "chaos: failed to write artifacts: %s\n",
-                    strerror(-artifact_rc));
-    }
+    chaos_print_outcome(&ctx, rc);
     return rc;
 }
 #endif
