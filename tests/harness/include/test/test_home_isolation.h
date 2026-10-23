@@ -20,6 +20,9 @@
  *     on tmpfs never moves ru_oublock) keep a disk-backed directory although
  *     HOME and XDG_CACHE_HOME moved into a possibly tmpfs private root.
  *     Consumers create it lazily; it is unset when no disk root exists.
+ *   - every inherited environment entry of 32 KiB or more is unset (make
+ *     echoes a whole-suite selection into MAKEFLAGS past the 64 KiB bound the
+ *     build worker's proof key can bind, so no group could issue a ticket).
  *
  * ZCL_TEST_REAL_HOME=1 is the explicit opt-in for the few tests that need
  * real chain or parameter files: HOME is left alone (the writer guard still

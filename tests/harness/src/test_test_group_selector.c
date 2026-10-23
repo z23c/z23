@@ -2420,6 +2420,20 @@ static bool tgs_scratch_root_is_real(const char *state)
     return root[0] == '/' && strncmp(root, state, strlen(state)) != 0;
 }
 
+/* The runner is started with a 70000-byte variable the proof key cannot
+ * bind (see test_home_isolation.c); the group must not see it, nor any other
+ * entry of that size. */
+#define TGS_OVERSIZED_PROBE "ZCL_TEST_OVERSIZED_PROBE"
+
+static bool tgs_environment_bounded(void)
+{
+    extern char **environ;
+    if (getenv(TGS_OVERSIZED_PROBE)) return false;
+    for (char **e = environ; e && *e; ++e)
+        if (strnlen(*e, 32768) == 32768) return false;
+    return true;
+}
+
 /* The CALLER's HOME is `expected` (empty when it ran with none): the runner
  * must hand the group a private replacement under the retained state dir and
  * remember the original canonical datadir for the storage writer guard. */
@@ -2430,7 +2444,7 @@ static bool tgs_home_contract(const char *state, const char *expected)
     const char *harness = getenv("ZCL_TEST_HARNESS");
     char want_canonical[PATH_MAX];
     GetDefaultDataDirUnder(expected, want_canonical, sizeof(want_canonical));
-    return home && canonical && harness &&
+    return tgs_environment_bounded() && home && canonical && harness &&
            tgs_under(home, state, "home") && strcmp(home, expected) != 0 &&
            tgs_under(getenv("XDG_CONFIG_HOME"), home, ".config") &&
            tgs_under(getenv("XDG_CACHE_HOME"), home, ".cache") &&
@@ -2575,7 +2589,8 @@ static int test_runner_private_state(void)
                          attempt == 2 ? "" : home);
             ASSERT(n >= 0 && (size_t)n < sizeof(home_env));
             n = snprintf(command, sizeof(command),
-                "cd '%s' && env -u ZCL_TEST_CANONICAL_DATADIR -u ZCL_TEST_REAL_HOME %s %s %s='%s' ZCL_STATE_ROOT='%s' "
+                "cd '%s' && env -u ZCL_TEST_CANONICAL_DATADIR -u ZCL_TEST_REAL_HOME %s %s %s='%s' "
+                TGS_OVERSIZED_PROBE "=\"$(head -c 70000 /dev/zero | tr '\\0' x)\" ZCL_STATE_ROOT='%s' "
                 "ZCL_TEST_RUNNER_EXPECT_HOME='%s' "
                 "'%s' --jobs=2 --verbose --no-cache --state-isolation-probe "
                 "--exact=test_test_group_selector,test_hex_codec 2>&1",

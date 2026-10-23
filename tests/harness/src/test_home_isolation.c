@@ -199,6 +199,47 @@ static void iso_export_disk_scratch(void)
     (void)iso_set("ZCL_TEST_DISK_SCRATCH_ROOT", root);
 }
 
+#if !defined(_WIN32)
+extern char **environ;
+#endif
+
+/* A caller's environment can carry an entry the build worker's proof key
+ * cannot bind: bfat_hash_verifier_environment hashes the whole inherited
+ * environment and refuses any single entry of 64 KiB or more, which leaves
+ * a worker unable to issue a proof ticket and naming the cause only as an
+ * unavailable key. `make` exports its command line in MAKEFLAGS once per
+ * sub-make level, so a whole-suite selection (about 1370 group names, the
+ * `agent-verify` universal set) reaches that size, and no narrower run
+ * does. No group reads such an entry, so each is dropped here, by name,
+ * before any group runs. */
+#define ISO_ENV_ENTRY_MAX 32768u
+#define ISO_ENV_DROP_MAX 32u
+
+static void iso_drop_oversized_environment(void)
+{
+#if !defined(_WIN32)
+    char *names[ISO_ENV_DROP_MAX];
+    size_t sizes[ISO_ENV_DROP_MAX];
+    unsigned found = 0;
+    for (char **e = environ; e && *e && found < ISO_ENV_DROP_MAX; ++e) {
+        size_t len = strnlen(*e, (size_t)1 << 20);
+        const char *eq = strchr(*e, '=');
+        if (len < ISO_ENV_ENTRY_MAX || !eq || eq == *e) continue;
+        char *name = strndup(*e, (size_t)(eq - *e));
+        if (!name) continue;
+        names[found] = name;
+        sizes[found++] = len;
+    }
+    for (unsigned i = 0; i < found; ++i) {
+        iso_unset(names[i]);
+        printf("test_home_isolation: dropped inherited %s (%zu bytes) "
+               "past the %u-byte entry bound\n",
+               names[i], sizes[i], (unsigned)ISO_ENV_ENTRY_MAX);
+        free(names[i]);
+    }
+#endif
+}
+
 bool zcl_test_isolate_environment(const char *private_root,
                                   char *err, size_t err_cap)
 {
@@ -214,6 +255,7 @@ bool zcl_test_isolate_environment(const char *private_root,
         return iso_fail(err, err_cap, "cannot resolve private root",
                         private_root);
 
+    iso_drop_oversized_environment();
     if (!iso_export_markers(err, err_cap)) return false;
 
     if (real_home_opt_in()) {
