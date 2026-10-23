@@ -16023,7 +16023,9 @@ pr-check:
 # agent-verify: the one verification trip for an edit. It runs the four checks
 # every edit must pass, each as its own sub-make with its own log, and keeps
 # going after a failure so one trip shows every red step. Full lint and the
-# wide group list stay with the landing step.
+# wide group list stay with the landing step. The test step builds with
+# ZCL_TEST_WERROR=1, as the land proof's bundle build does, so a compiler
+# warning fails here instead of after a queue wait (row 916, 10-23).
 #   make -j28 agent-verify ONLY=@changed        (default: the proof's groups)
 #   make -j28 agent-verify ONLY=<group,group>   (an explicit set, unchanged)
 # ONLY=@changed runs exactly the test groups the land proof selects for this
@@ -16080,7 +16082,7 @@ agent-verify:
 	    if [ $$rc -ne 0 ]; then failed="$$failed $$step"; fi; \
 	 }; \
 	 av_step check-cyclomatic-complexity; \
-	 av_step t-fast-exact "ONLY=$$only"; \
+	 av_step t-fast-exact "ONLY=$$only" ZCL_TEST_WERROR=1; \
 	 av_step docs-capability-inventory; \
 	 av_step lint-fast; \
 	 if [ -z "$$failed" ]; then \
