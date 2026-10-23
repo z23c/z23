@@ -1538,10 +1538,6 @@ engine/controllers/src/explain_native_handlers.c:explain_build:26
 engine/controllers/src/explain_native_handlers.c:explain_compose_health:26
 engine/controllers/src/explain_native_handlers.c:explain_compose_sync:57
 engine/controllers/src/fact_writers_coverage.c:fw_scan_header:19
-engine/controllers/src/fact_writers_text.c:fw_call_arg:26
-engine/controllers/src/fact_writers_text.c:fw_collect_macros:25
-engine/controllers/src/fact_writers_text.c:fw_join_literals:24
-engine/controllers/src/fact_writers_text.c:fw_key_param_index:17
 engine/controllers/src/file_controller.c:file_manifest_build:20
 engine/controllers/src/file_controller.c:file_manifest_load:23
 engine/controllers/src/health_controller.c:rpc_getservicehealth:30

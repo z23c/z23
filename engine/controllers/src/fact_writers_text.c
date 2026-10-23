@@ -28,6 +28,13 @@ bool fw_ident_char(char c)
            (c >= '0' && c <= '9') || c == '_';
 }
 
+/* Skip leading whitespace (any byte <= ' '); returns the first other byte. */
+static const char *fw_skip_blank(const char *p)
+{
+    while (*p && (unsigned char)*p <= ' ') p++;
+    return p;
+}
+
 /* Word-boundary substring search. Returns the offset, or -1. */
 long fw_find_word(const char *hay, const char *needle, long from)
 {
@@ -170,6 +177,44 @@ const char *fw_macro_lookup(const struct fw_macros *m, const char *name)
     return NULL;
 }
 
+/* Append the body of a string literal (`p` is just past its opening quote) to
+ * out[*o], decoding the common escapes. Returns the byte after the closing quote. */
+static const char *fw_join_quoted(const char *p, char *out, size_t cap,
+                                  size_t *o)
+{
+    while (*p && *p != '"') {
+        if (*p == '\\' && p[1]) {
+            /* keep common escapes readable; drop the rest */
+            char c = p[1];
+            char decoded = (c == 'n') ? '\n' : (c == 't') ? '\t' : c;
+            if (*o + 1 < cap) out[(*o)++] = decoded;
+            p += 2;
+            continue;
+        }
+        if (*o + 1 < cap) out[(*o)++] = *p;
+        p++;
+    }
+    if (*p == '"') p++;
+    return p;
+}
+
+/* Append the string value of the macro named at `p` to out[*o]. Returns the
+ * byte after the name, or NULL when no string-valued macro has that name. */
+static const char *fw_join_macro(const char *p, const struct fw_macros *m,
+                                 char *out, size_t cap, size_t *o)
+{
+    char id[FW_MACRO_NAME_MAX];
+    size_t k = 0;
+    const char *q = p;
+    while (fw_ident_char(*q) && k + 1 < sizeof(id)) id[k++] = *q++;
+    id[k] = '\0';
+    const char *val = fw_macro_lookup(m, id);
+    if (!val) return NULL;
+    for (const char *v = val; *v; v++)
+        if (*o + 1 < cap) out[(*o)++] = *v;
+    return q;
+}
+
 /* Concatenate the adjacent string-literal pieces starting at `p` (which must
  * point at the opening quote), resolving an interleaved string-valued macro
  * identifier. Returns the byte after the last consumed piece. */
@@ -179,34 +224,14 @@ const char *fw_join_literals(const char *p, const struct fw_macros *m,
     size_t o = 0;
     out[0] = '\0';
     for (;;) {
-        while (*p && (unsigned char)*p <= ' ') p++;
+        p = fw_skip_blank(p);
         if (*p == '"') {
-            p++;
-            while (*p && *p != '"') {
-                if (*p == '\\' && p[1]) {
-                    /* keep common escapes readable; drop the rest */
-                    char c = p[1];
-                    char decoded = (c == 'n') ? '\n' : (c == 't') ? '\t' : c;
-                    if (o + 1 < cap) out[o++] = decoded;
-                    p += 2;
-                    continue;
-                }
-                if (o + 1 < cap) out[o++] = *p;
-                p++;
-            }
-            if (*p == '"') p++;
+            p = fw_join_quoted(p + 1, out, cap, &o);
             continue;
         }
         if (m && fw_ident_char(*p) && !(*p >= '0' && *p <= '9')) {
-            char id[FW_MACRO_NAME_MAX];
-            size_t k = 0;
-            const char *q = p;
-            while (fw_ident_char(*q) && k + 1 < sizeof(id)) id[k++] = *q++;
-            id[k] = '\0';
-            const char *val = fw_macro_lookup(m, id);
-            if (!val) break;
-            for (const char *v = val; *v; v++)
-                if (o + 1 < cap) out[o++] = *v;
+            const char *q = fw_join_macro(p, m, out, cap, &o);
+            if (!q) break;
             p = q;
             continue;
         }
@@ -214,6 +239,37 @@ const char *fw_join_literals(const char *p, const struct fw_macros *m,
     }
     out[o < cap ? o : cap - 1] = '\0';
     return p;
+}
+
+/* Locate the value of a `#define NAME "…"` line. Stores NAME in name[cap] and
+ * returns the opening quote of the value, or NULL when the line is not an
+ * object-like define with a string-literal value. */
+static const char *fw_define_value(const char *line, char *name, size_t cap)
+{
+    const char *p = fw_skip_blank(line);
+    if (*p != '#') return NULL;
+    p = fw_skip_blank(p + 1);
+    if (strncmp(p, "define", 6) != 0 || fw_ident_char(p[6])) return NULL;
+    p = fw_skip_blank(p + 6);
+    size_t k = 0;
+    while (fw_ident_char(*p) && k + 1 < cap) name[k++] = *p++;
+    name[k] = '\0';
+    if (k == 0 || *p == '(') return NULL;   /* function-like macro */
+    p = fw_skip_blank(p);
+    return (*p == '"') ? p : NULL;
+}
+
+/* Record one source line if it is a string-valued macro definition. Returns
+ * false only when the macro table cannot grow; a non-matching line is true. */
+static bool fw_collect_line(const char *line, struct fw_macros *m)
+{
+    char name[FW_MACRO_NAME_MAX];
+    const char *p = fw_define_value(line, name, sizeof(name));
+    if (!p) return true;
+    char value[FACT_KEY_MAX];
+    (void)fw_join_literals(p, m, value, sizeof(value));
+    if (value[0] == '\0') return true;
+    return fw_macros_push(m, name, value);
 }
 
 /* Harvest `#define NAME "…"` (including adjacent-literal concatenations) from
@@ -233,25 +289,7 @@ bool fw_collect_macros(const struct fw_file *f, struct fw_macros *m)
         memcpy(line, at, line_len);
         line[line_len] = '\0';
         at = nl ? nl + 1 : end;
-        const char *p = line;
-        while (*p && (unsigned char)*p <= ' ') p++;
-        if (*p != '#') continue;
-        p++;
-        while (*p && (unsigned char)*p <= ' ') p++;
-        if (strncmp(p, "define", 6) != 0 || fw_ident_char(p[6])) continue;
-        p += 6;
-        while (*p && (unsigned char)*p <= ' ') p++;
-        char name[FW_MACRO_NAME_MAX];
-        size_t k = 0;
-        while (fw_ident_char(*p) && k + 1 < sizeof(name)) name[k++] = *p++;
-        name[k] = '\0';
-        if (k == 0 || *p == '(') continue;   /* function-like macro */
-        while (*p && (unsigned char)*p <= ' ') p++;
-        if (*p != '"') continue;
-        char value[FACT_KEY_MAX];
-        (void)fw_join_literals(p, m, value, sizeof(value));
-        if (value[0] == '\0') continue;
-        if (!fw_macros_push(m, name, value)) return false;
+        if (!fw_collect_line(line, m)) return false;
     }
     return true;
 }
@@ -282,47 +320,64 @@ void fw_join_call(const struct fw_file *f, size_t lineno,
     out[o < cap ? o : cap - 1] = '\0';
 }
 
+/* Skip a string or character literal. `p` is just past the opening quote `q`;
+ * returns the closing quote, or the NUL that ends the text. */
+static const char *fw_skip_literal(const char *p, char q)
+{
+    while (*p && *p != q) {
+        if (*p == '\\' && p[1]) p++;
+        p++;
+    }
+    return p;
+}
+
+/* Pointer just past the '(' of the first `fn(` call in `text`, or NULL. */
+static const char *fw_call_open(const char *text, const char *fn)
+{
+    long at = fw_find_word(text, fn, 0);
+    if (at < 0) return NULL;
+    const char *p = fw_skip_blank(text + at + strlen(fn));
+    if (*p != '(') return NULL;
+    return p + 1;
+}
+
+/* Find the byte range [*start, *end) of argument `idx` in the argument list
+ * beginning at `p` (just past the call's '('). False when that argument is
+ * absent; the range is still set to where the scan stopped. */
+static bool fw_call_arg_range(const char *p, int idx, const char **start,
+                              const char **end)
+{
+    int depth = 1, arg = 0;
+    *start = p;
+    for (; *p; p++) {
+        if (*p == '"' || *p == '\'') {
+            p = fw_skip_literal(p + 1, *p);
+            if (!*p) break;
+            continue;
+        }
+        if (*p == '(' || *p == '[') depth++;
+        else if (*p == ')' || *p == ']') {
+            if (--depth == 0) break;
+        } else if (*p == ',' && depth == 1) {
+            if (arg == idx) break;
+            arg++;
+            *start = p + 1;
+        }
+    }
+    *end = p;
+    return arg == idx;
+}
+
 /* Extract argument `idx` (0-based) of the first `fn(` call in `text`.
  * Returns false when the call or the argument is not present. */
 bool fw_call_arg(const char *text, const char *fn, int idx,
                         char *out, size_t cap)
 {
-    long at = fw_find_word(text, fn, 0);
-    if (at < 0) return false;
-    const char *p = text + at + strlen(fn);
-    while (*p && (unsigned char)*p <= ' ') p++;
-    if (*p != '(') return false;
-    p++;
-    int depth = 1, arg = 0;
-    const char *start = p;
-    bool in_str = false, in_chr = false;
-    for (; *p; p++) {
-        if (in_str) {
-            if (*p == '\\' && p[1]) { p++; continue; }
-            if (*p == '"') in_str = false;
-            continue;
-        }
-        if (in_chr) {
-            if (*p == '\\' && p[1]) { p++; continue; }
-            if (*p == '\'') in_chr = false;
-            continue;
-        }
-        if (*p == '"') { in_str = true; continue; }
-        if (*p == '\'') { in_chr = true; continue; }
-        if (*p == '(' || *p == '[') { depth++; continue; }
-        if (*p == ')' || *p == ']') {
-            depth--;
-            if (depth == 0) break;
-            continue;
-        }
-        if (*p == ',' && depth == 1) {
-            if (arg == idx) break;
-            arg++;
-            start = p + 1;
-        }
-    }
-    if (arg != idx) return false;
-    size_t n = (size_t)(p - start);
+    const char *p = fw_call_open(text, fn);
+    if (!p) return false;
+    const char *start = NULL, *end = NULL;
+    if (!fw_call_arg_range(p, idx, &start, &end)) return false;
+    size_t n = (size_t)(end - start);
     if (n > cap - 1) n = cap - 1;
     memcpy(out, start, n);
     out[n] = '\0';
@@ -362,6 +417,16 @@ bool fw_key_plausible(const char *key)
     return true;
 }
 
+/* True when the parameter text in [start, start + n) is a `const char *`. */
+static bool fw_param_is_str(const char *start, size_t n)
+{
+    char one[256];
+    if (n >= sizeof(one)) n = sizeof(one) - 1;
+    memcpy(one, start, n);
+    one[n] = '\0';
+    return strstr(one, "const char *") || strstr(one, "const char*");
+}
+
 int fw_key_param_index(const char *decl)
 {
     const char *open = strchr(decl, '(');
@@ -376,12 +441,7 @@ int fw_key_param_index(const char *decl)
             if (depth > 0) continue;
         }
         if (end || (*p == ',' && depth == 1) || depth == 0) {
-            size_t n = (size_t)(p - start);
-            char one[256];
-            if (n >= sizeof(one)) n = sizeof(one) - 1;
-            memcpy(one, start, n);
-            one[n] = '\0';
-            if (strstr(one, "const char *") || strstr(one, "const char*"))
+            if (fw_param_is_str(start, (size_t)(p - start)))
                 return idx;
             if (end || depth == 0) return -1; // raw-return-ok:no-keyed-param
             idx++;
