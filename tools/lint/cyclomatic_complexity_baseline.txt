@@ -3080,12 +3080,6 @@ tests/harness/src/test_zendp_revocation.c:zr_case_revoked_key_stops_being_advert
 tests/harness/src/test_zid.c:test_ed25519_batch:40
 tests/harness/src/test_zid.c:test_zid:205
 tests/harness/src/test_zid.c:test_zid_domain_store:75
-tests/harness/src/test_zid_identity.c:test_dumper:43
-tests/harness/src/test_zid_identity.c:test_resolve_and_paging:31
-tests/harness/src/test_zid_identity.c:test_schema_and_roundtrip:36
-tests/harness/src/test_zid_identity.c:test_zid_overlay_feed:43
-tests/harness/src/test_zid_identity.c:test_znam_zid_text_feed:44
-tests/harness/src/test_zid_identity.c:zid_validation_cases:21
 tests/harness/src/test_zid_seniority.c:test_zid_seniority:139
 tests/harness/src/test_znam.c:test_znam:228
 tests/harness/src/test_znam.c:test_znam_wallet_sweep:27

@@ -79,38 +79,48 @@ static void hex32(const uint8_t *b, char out[65])
     out[64] = '\0';
 }
 
+/* One check's verdict: prints OK or FAIL and returns its failure count. */
+static int zid_verdict(bool ok)
+{
+    if (ok) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
 /* ── (1)+(2) schema, save/find round-trip ─────────────────────────── */
 
-static int test_schema_and_roundtrip(void)
+static int zid_schema_objects_check(struct node_db *ndb)
 {
     int failures = 0;
-    struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-
-    printf("zid_identity: open in-memory node.db (schema v%d)... ",
-           NODE_DB_MAX_SCHEMA);
-    if (node_db_open(&ndb, ":memory:") && ndb.open) printf("OK\n");
-    else { printf("FAIL\n"); return 1; }
 
     printf("zid_identity: schema_version is %d... ", NODE_DB_MAX_SCHEMA);
-    { int v = node_db_schema_version(&ndb);
+    { int v = node_db_schema_version(ndb);
       if (v == NODE_DB_MAX_SCHEMA) printf("OK\n");
       else { printf("FAIL (got %d)\n", v); failures++; } }
 
     printf("zid_identity: v37 created zid_identities... ");
-    { int n = count_rows(&ndb,
+    { int n = count_rows(ndb,
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table'"
         " AND name='zid_identities'");
       if (n == 1) printf("OK\n");
       else { printf("FAIL (got %d)\n", n); failures++; } }
 
     printf("zid_identity: name + anchor_height indexes exist... ");
-    { int n = count_rows(&ndb,
+    { int n = count_rows(ndb,
         "SELECT COUNT(*) FROM sqlite_master WHERE type='index'"
         " AND name IN ('idx_zid_identities_name',"
         "              'idx_zid_identities_height')");
       if (n == 2) printf("OK\n");
       else { printf("FAIL (got %d)\n", n); failures++; } }
+    return failures;
+}
+
+static int zid_full_row_roundtrip(struct node_db *ndb)
+{
+    int failures = 0;
 
     /* Full-field row: rotated, znam_text, named, with an owner. */
     struct zid_identity r;
@@ -123,13 +133,12 @@ static int test_schema_and_roundtrip(void)
     r.updated_height = 1500;
 
     printf("zid_identity: save a full rotated/znam_text row... ");
-    if (db_zid_identity_save(&ndb, &r)) printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
+    failures += zid_verdict(db_zid_identity_save(ndb, &r));
 
     printf("zid_identity: find round-trips every field... ");
     { struct zid_identity got;
       memset(&got, 0xff, sizeof(got));
-      bool ok = db_zid_identity_find(&ndb, r.master_pubkey, &got) &&
+      bool ok = db_zid_identity_find(ndb, r.master_pubkey, &got) &&
                 memcmp(got.master_pubkey, r.master_pubkey, 32) == 0 &&
                 memcmp(got.anchor_txid, r.anchor_txid, 32) == 0 &&
                 got.anchor_height == 1000 &&
@@ -140,7 +149,13 @@ static int test_schema_and_roundtrip(void)
                 strcmp(got.source, ZID_IDENTITY_SOURCE_ZNAM_TEXT) == 0 &&
                 strcmp(got.name, "alice") == 0 &&
                 strcmp(got.owner_address, r.owner_address) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_minimal_row_checks(struct node_db *ndb)
+{
+    int failures = 0;
 
     /* Minimal row: active, zid_overlay, no name / owner / successor. */
     struct zid_identity m;
@@ -148,24 +163,23 @@ static int test_schema_and_roundtrip(void)
            ZID_IDENTITY_SOURCE_ZID_OVERLAY, NULL);
 
     printf("zid_identity: save a minimal overlay row (NULL columns)... ");
-    if (db_zid_identity_save(&ndb, &m)) printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
+    failures += zid_verdict(db_zid_identity_save(ndb, &m));
 
     printf("zid_identity: NULL successor/name/owner read back empty... ");
     { struct zid_identity got;
       memset(&got, 0xff, sizeof(got));
-      bool ok = db_zid_identity_find(&ndb, m.master_pubkey, &got) &&
+      bool ok = db_zid_identity_find(ndb, m.master_pubkey, &got) &&
                 !got.has_successor && got.name[0] == '\0' &&
                 got.owner_address[0] == '\0' &&
                 strcmp(got.status, ZID_IDENTITY_STATUS_ACTIVE) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity: find misses on an unknown pubkey... ");
     { uint8_t unknown[32];
       memset(unknown, 0x99, 32);
       struct zid_identity got;
-      bool ok = !db_zid_identity_find(&ndb, unknown, &got);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      bool ok = !db_zid_identity_find(ndb, unknown, &got);
+      failures += zid_verdict(ok); }
 
     printf("zid_identity: re-save overwrites in place (PK master_pubkey)... ");
     { struct zid_identity up = m;
@@ -173,27 +187,51 @@ static int test_schema_and_roundtrip(void)
                ZID_IDENTITY_STATUS_REVOKED);
       up.updated_height = 4242;
       struct zid_identity got;
-      bool ok = db_zid_identity_save(&ndb, &up) &&
-                db_zid_identity_count(&ndb) == 2 &&
-                db_zid_identity_find(&ndb, m.master_pubkey, &got) &&
+      bool ok = db_zid_identity_save(ndb, &up) &&
+                db_zid_identity_count(ndb) == 2 &&
+                db_zid_identity_find(ndb, m.master_pubkey, &got) &&
                 strcmp(got.status, ZID_IDENTITY_STATUS_REVOKED) == 0 &&
                 got.updated_height == 4242;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_counts_and_truncate_checks(struct node_db *ndb)
+{
+    int failures = 0;
 
     printf("zid_identity: count_by_status splits the table... ");
-    { bool ok = db_zid_identity_count(&ndb) == 2 &&
+    { bool ok = db_zid_identity_count(ndb) == 2 &&
                 db_zid_identity_count_by_status(
-                    &ndb, ZID_IDENTITY_STATUS_ROTATED) == 1 &&
+                    ndb, ZID_IDENTITY_STATUS_ROTATED) == 1 &&
                 db_zid_identity_count_by_status(
-                    &ndb, ZID_IDENTITY_STATUS_REVOKED) == 1 &&
+                    ndb, ZID_IDENTITY_STATUS_REVOKED) == 1 &&
                 db_zid_identity_count_by_status(
-                    &ndb, ZID_IDENTITY_STATUS_ACTIVE) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+                    ndb, ZID_IDENTITY_STATUS_ACTIVE) == 0;
+      failures += zid_verdict(ok); }
 
     printf("zid_identity: truncate empties the rebuildable projection... ");
-    { bool ok = db_zid_identity_truncate(&ndb) &&
-                db_zid_identity_count(&ndb) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    { bool ok = db_zid_identity_truncate(ndb) &&
+                db_zid_identity_count(ndb) == 0;
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int test_schema_and_roundtrip(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+
+    printf("zid_identity: open in-memory node.db (schema v%d)... ",
+           NODE_DB_MAX_SCHEMA);
+    if (node_db_open(&ndb, ":memory:") && ndb.open) printf("OK\n");
+    else { printf("FAIL\n"); return 1; }
+
+    failures += zid_schema_objects_check(&ndb);
+    failures += zid_full_row_roundtrip(&ndb);
+    failures += zid_minimal_row_checks(&ndb);
+    failures += zid_counts_and_truncate_checks(&ndb);
 
     node_db_close(&ndb);
     return failures;
@@ -217,19 +255,19 @@ static int zid_validation_cases(void)
 
     printf("zid_identity validate: NULL row rejected... ");
     { bool ok = !db_zid_identity_validate(NULL, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: active/znam_text accepted... ");
     mk_row(&r, 0x01, 10, ZID_IDENTITY_STATUS_ACTIVE,
            ZID_IDENTITY_SOURCE_ZNAM_TEXT, "bob");
     { bool ok = db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: revoked/zid_overlay accepted... ");
     mk_row(&r, 0x02, 10, ZID_IDENTITY_STATUS_REVOKED,
            ZID_IDENTITY_SOURCE_ZID_OVERLAY, NULL);
     { bool ok = db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: rotated + successor accepted... ");
     mk_row(&r, 0x03, 10, ZID_IDENTITY_STATUS_ROTATED,
@@ -237,33 +275,33 @@ static int zid_validation_cases(void)
     memset(r.successor_pubkey, 0x7e, 32);
     r.has_successor = true;
     { bool ok = db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: unknown status rejected... ");
     mk_row(&r, 0x04, 10, "expired", ZID_IDENTITY_SOURCE_ZNAM_TEXT, NULL);
     { bool ok = !db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: empty status rejected... ");
     mk_row(&r, 0x05, 10, "", ZID_IDENTITY_SOURCE_ZNAM_TEXT, NULL);
     { bool ok = !db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: unknown source rejected... ");
     mk_row(&r, 0x06, 10, ZID_IDENTITY_STATUS_ACTIVE, "hearsay", NULL);
     { bool ok = !db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: empty source rejected... ");
     mk_row(&r, 0x07, 10, ZID_IDENTITY_STATUS_ACTIVE, "", NULL);
     { bool ok = !db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: rotated WITHOUT successor rejected... ");
     mk_row(&r, 0x08, 10, ZID_IDENTITY_STATUS_ROTATED,
            ZID_IDENTITY_SOURCE_ZID_OVERLAY, NULL);
     { bool ok = !db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: active WITH successor rejected... ");
     mk_row(&r, 0x09, 10, ZID_IDENTITY_STATUS_ACTIVE,
@@ -271,7 +309,7 @@ static int zid_validation_cases(void)
     memset(r.successor_pubkey, 0x5c, 32);
     r.has_successor = true;
     { bool ok = !db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: revoked WITH successor rejected... ");
     mk_row(&r, 0x0a, 10, ZID_IDENTITY_STATUS_REVOKED,
@@ -279,34 +317,34 @@ static int zid_validation_cases(void)
     memset(r.successor_pubkey, 0x5c, 32);
     r.has_successor = true;
     { bool ok = !db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: all-zero successor rejected... ");
     mk_row(&r, 0x0b, 10, ZID_IDENTITY_STATUS_ROTATED,
            ZID_IDENTITY_SOURCE_ZID_OVERLAY, NULL);
     r.has_successor = true;  /* successor_pubkey left all-zero */
     { bool ok = !db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: negative anchor_height rejected... ");
     mk_row(&r, 0x0c, 10, ZID_IDENTITY_STATUS_ACTIVE,
            ZID_IDENTITY_SOURCE_ZNAM_TEXT, NULL);
     r.anchor_height = -1;
     { bool ok = !db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity validate: negative updated_height rejected... ");
     mk_row(&r, 0x0d, 10, ZID_IDENTITY_STATUS_ACTIVE,
            ZID_IDENTITY_SOURCE_ZNAM_TEXT, NULL);
     r.updated_height = -7;
     { bool ok = !db_zid_identity_validate(&r, &errs);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity: an invalid row never reaches the table... ");
     { mk_row(&r, 0x0e, 10, "bogus", ZID_IDENTITY_SOURCE_ZNAM_TEXT, NULL);
       bool ok = !db_zid_identity_save(&ndb, &r) &&
                 db_zid_identity_count(&ndb) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid_identity: save on a closed db fails loudly... ");
     { struct node_db closed;
@@ -315,13 +353,116 @@ static int zid_validation_cases(void)
              ZID_IDENTITY_SOURCE_ZNAM_TEXT, NULL);
       bool ok = !db_zid_identity_save(&closed, &r) &&
                 !db_zid_identity_save(&ndb, NULL);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     node_db_close(&ndb);
     return failures;
 }
 
 /* ── (4)+(5) find_by_name, list paging ────────────────────────────── */
+
+static int zid_seed_resolve_rows(struct node_db *ndb)
+{
+    int failures = 0;
+
+    /* Four named znam_text rows at ascending heights + one unnamed. */
+    static const char *names[4] = {"alpha", "bravo", "charlie", "delta"};
+    for (int i = 0; i < 4; i++) {
+        struct zid_identity r;
+        mk_row(&r, (uint8_t)(0x40 + i), 100 + i, ZID_IDENTITY_STATUS_ACTIVE,
+               ZID_IDENTITY_SOURCE_ZNAM_TEXT, names[i]);
+        if (!db_zid_identity_save(ndb, &r)) failures++;
+    }
+    { struct zid_identity r;
+      mk_row(&r, 0x50, 5, ZID_IDENTITY_STATUS_ACTIVE,
+             ZID_IDENTITY_SOURCE_ZID_OVERLAY, NULL);
+      if (!db_zid_identity_save(ndb, &r)) failures++; }
+
+    printf("zid_identity: 5 rows seeded... ");
+    { int64_t n = db_zid_identity_count(ndb);
+      if (n == 5) printf("OK\n");
+      else { printf("FAIL (got %lld)\n", (long long)n); failures++; } }
+    return failures;
+}
+
+static int zid_find_by_name_checks(struct node_db *ndb)
+{
+    int failures = 0;
+
+    printf("zid_identity: find_by_name resolves a znam_text row... ");
+    { struct zid_identity got;
+      bool ok = db_zid_identity_find_by_name(ndb, "charlie", &got) &&
+                got.anchor_height == 102 &&
+                strcmp(got.name, "charlie") == 0 &&
+                got.master_pubkey[0] == 0x42;
+      failures += zid_verdict(ok); }
+
+    printf("zid_identity: find_by_name misses an unknown name... ");
+    { struct zid_identity got;
+      bool ok = !db_zid_identity_find_by_name(ndb, "nobody", &got);
+      failures += zid_verdict(ok); }
+
+    printf("zid_identity: find_by_name rejects NULL/empty name... ");
+    { struct zid_identity got;
+      bool ok = !db_zid_identity_find_by_name(ndb, NULL, &got) &&
+                !db_zid_identity_find_by_name(ndb, "", &got);
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_list_newest_first(struct node_db *ndb)
+{
+    int failures = 0;
+
+    printf("zid_identity: list is newest-anchor-first... ");
+    { struct zid_identity page[8];
+      int n = db_zid_identity_list(ndb, page, 8, 0);
+      bool ok = n == 5 &&
+                page[0].anchor_height == 103 &&
+                page[1].anchor_height == 102 &&
+                page[2].anchor_height == 101 &&
+                page[3].anchor_height == 100 &&
+                page[4].anchor_height == 5;
+      if (ok) printf("OK\n");
+      else { printf("FAIL (n=%d)\n", n); failures++; } }
+    return failures;
+}
+
+static int zid_list_paging_checks(struct node_db *ndb)
+{
+    int failures = 0;
+
+    printf("zid_identity: list max caps the page... ");
+    { struct zid_identity page[8];
+      int n = db_zid_identity_list(ndb, page, 2, 0);
+      bool ok = n == 2 && page[0].anchor_height == 103 &&
+                page[1].anchor_height == 102;
+      if (ok) printf("OK\n");
+      else { printf("FAIL (n=%d)\n", n); failures++; } }
+
+    printf("zid_identity: list offset walks the page... ");
+    { struct zid_identity page[8];
+      int n = db_zid_identity_list(ndb, page, 2, 2);
+      bool ok = n == 2 && page[0].anchor_height == 101 &&
+                page[1].anchor_height == 100;
+      if (ok) printf("OK\n");
+      else { printf("FAIL (n=%d)\n", n); failures++; } }
+
+    printf("zid_identity: list past the end returns 0... ");
+    { struct zid_identity page[8];
+      int n = db_zid_identity_list(ndb, page, 4, 99);
+      if (n == 0) printf("OK\n");
+      else { printf("FAIL (n=%d)\n", n); failures++; } }
+
+    printf("zid_identity: list rejects a bad page (max<=0, offset<0)... ");
+    { struct zid_identity page[8];
+      bool ok = db_zid_identity_list(ndb, page, 0, 0) == 0 &&
+                db_zid_identity_list(ndb, page, -1, 0) == 0 &&
+                db_zid_identity_list(ndb, page, 4, -1) == 0 &&
+                db_zid_identity_list(ndb, NULL, 4, 0) == 0;
+      failures += zid_verdict(ok); }
+    return failures;
+}
 
 static int test_resolve_and_paging(void)
 {
@@ -334,84 +475,10 @@ static int test_resolve_and_paging(void)
         return 1;
     }
 
-    /* Four named znam_text rows at ascending heights + one unnamed. */
-    static const char *names[4] = {"alpha", "bravo", "charlie", "delta"};
-    for (int i = 0; i < 4; i++) {
-        struct zid_identity r;
-        mk_row(&r, (uint8_t)(0x40 + i), 100 + i, ZID_IDENTITY_STATUS_ACTIVE,
-               ZID_IDENTITY_SOURCE_ZNAM_TEXT, names[i]);
-        if (!db_zid_identity_save(&ndb, &r)) failures++;
-    }
-    { struct zid_identity r;
-      mk_row(&r, 0x50, 5, ZID_IDENTITY_STATUS_ACTIVE,
-             ZID_IDENTITY_SOURCE_ZID_OVERLAY, NULL);
-      if (!db_zid_identity_save(&ndb, &r)) failures++; }
-
-    printf("zid_identity: 5 rows seeded... ");
-    { int64_t n = db_zid_identity_count(&ndb);
-      if (n == 5) printf("OK\n");
-      else { printf("FAIL (got %lld)\n", (long long)n); failures++; } }
-
-    printf("zid_identity: find_by_name resolves a znam_text row... ");
-    { struct zid_identity got;
-      bool ok = db_zid_identity_find_by_name(&ndb, "charlie", &got) &&
-                got.anchor_height == 102 &&
-                strcmp(got.name, "charlie") == 0 &&
-                got.master_pubkey[0] == 0x42;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zid_identity: find_by_name misses an unknown name... ");
-    { struct zid_identity got;
-      bool ok = !db_zid_identity_find_by_name(&ndb, "nobody", &got);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zid_identity: find_by_name rejects NULL/empty name... ");
-    { struct zid_identity got;
-      bool ok = !db_zid_identity_find_by_name(&ndb, NULL, &got) &&
-                !db_zid_identity_find_by_name(&ndb, "", &got);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zid_identity: list is newest-anchor-first... ");
-    { struct zid_identity page[8];
-      int n = db_zid_identity_list(&ndb, page, 8, 0);
-      bool ok = n == 5 &&
-                page[0].anchor_height == 103 &&
-                page[1].anchor_height == 102 &&
-                page[2].anchor_height == 101 &&
-                page[3].anchor_height == 100 &&
-                page[4].anchor_height == 5;
-      if (ok) printf("OK\n");
-      else { printf("FAIL (n=%d)\n", n); failures++; } }
-
-    printf("zid_identity: list max caps the page... ");
-    { struct zid_identity page[8];
-      int n = db_zid_identity_list(&ndb, page, 2, 0);
-      bool ok = n == 2 && page[0].anchor_height == 103 &&
-                page[1].anchor_height == 102;
-      if (ok) printf("OK\n");
-      else { printf("FAIL (n=%d)\n", n); failures++; } }
-
-    printf("zid_identity: list offset walks the page... ");
-    { struct zid_identity page[8];
-      int n = db_zid_identity_list(&ndb, page, 2, 2);
-      bool ok = n == 2 && page[0].anchor_height == 101 &&
-                page[1].anchor_height == 100;
-      if (ok) printf("OK\n");
-      else { printf("FAIL (n=%d)\n", n); failures++; } }
-
-    printf("zid_identity: list past the end returns 0... ");
-    { struct zid_identity page[8];
-      int n = db_zid_identity_list(&ndb, page, 4, 99);
-      if (n == 0) printf("OK\n");
-      else { printf("FAIL (n=%d)\n", n); failures++; } }
-
-    printf("zid_identity: list rejects a bad page (max<=0, offset<0)... ");
-    { struct zid_identity page[8];
-      bool ok = db_zid_identity_list(&ndb, page, 0, 0) == 0 &&
-                db_zid_identity_list(&ndb, page, -1, 0) == 0 &&
-                db_zid_identity_list(&ndb, page, 4, -1) == 0 &&
-                db_zid_identity_list(&ndb, NULL, 4, 0) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zid_seed_resolve_rows(&ndb);
+    failures += zid_find_by_name_checks(&ndb);
+    failures += zid_list_newest_first(&ndb);
+    failures += zid_list_paging_checks(&ndb);
 
     node_db_close(&ndb);
     return failures;
@@ -419,13 +486,113 @@ static int test_resolve_and_paging(void)
 
 /* ── (6) the state dumper ─────────────────────────────────────────── */
 
+/* Wires this test's own file-backed node.db as the process runtime context.
+ * Returns whether the wiring succeeded; the caller reports the verdict. */
+static bool zid_dump_wire(struct node_db *ndb, struct db_service *dbsvc,
+                          struct app_runtime_context *runtime,
+                          const char *dbpath)
+{
+    bool wired = node_db_open(ndb, dbpath) && ndb->open;
+    if (wired) {
+        db_service_init(dbsvc);
+        wired = db_service_attach(dbsvc, ndb) && db_service_start(dbsvc);
+    }
+    if (wired) {
+        runtime->db_service = dbsvc;
+        app_runtime_set_current(runtime);
+    }
+    return wired;
+}
+
+static int zid_dump_shape_checks(void)
+{
+    int failures = 0;
+
+    printf("zid_identity dump: no key emits a well-formed totals object... ");
+    { struct json_value out;
+      json_init(&out);
+      bool ok = zid_identity_dump_state_json(&out, NULL) &&
+                out.type == JSON_OBJ &&
+                json_get(&out, "db_open") != NULL &&
+                json_get(&out, "total_rows") != NULL &&
+                json_get(&out, "active_rows") != NULL &&
+                json_get(&out, "rotated_rows") != NULL &&
+                json_get(&out, "revoked_rows") != NULL &&
+                json_get(&out, "found") == NULL;
+      json_free(&out);
+      failures += zid_verdict(ok); }
+
+    printf("zid_identity dump: a key form always reports found... ");
+    { struct json_value out;
+      json_init(&out);
+      bool ok = zid_identity_dump_state_json(&out, "alpha") &&
+                out.type == JSON_OBJ &&
+                json_get(&out, "key") != NULL &&
+                json_get(&out, "found") != NULL;
+      json_free(&out);
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_dump_resolve_pubkey(bool seeded, const char *pk_hex)
+{
+    int failures = 0;
+
+    printf("zid_identity dump: 64-hex pubkey key resolves the row... ");
+    { struct json_value out;
+      json_init(&out);
+      bool ok = seeded && zid_identity_dump_state_json(&out, pk_hex) &&
+                json_get_bool(json_get(&out, "found")) &&
+                json_get(&out, "master_pubkey") != NULL &&
+                json_get(&out, "anchor_txid") != NULL &&
+                json_get_int(json_get(&out, "anchor_height")) == 777 &&
+                json_get(&out, "successor_pubkey") == NULL;
+      json_free(&out);
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_dump_resolve_name_totals(bool seeded)
+{
+    int failures = 0;
+
+    printf("zid_identity dump: ZNAM-name key resolves the row... ");
+    { struct json_value out;
+      json_init(&out);
+      bool ok = seeded &&
+                zid_identity_dump_state_json(&out, "dumpername") &&
+                json_get_bool(json_get(&out, "found")) &&
+                json_get_int(json_get(&out, "updated_height")) == 777;
+      json_free(&out);
+      failures += zid_verdict(ok); }
+
+    printf("zid_identity dump: totals count the seeded row... ");
+    { struct json_value out;
+      json_init(&out);
+      bool ok = seeded && zid_identity_dump_state_json(&out, NULL) &&
+                json_get_int(json_get(&out, "total_rows")) >= 1 &&
+                json_get_int(json_get(&out, "active_rows")) >= 1;
+      json_free(&out);
+      failures += zid_verdict(ok); }
+
+    printf("zid_identity dump: an unknown key reports found=false... ");
+    { struct json_value out;
+      json_init(&out);
+      bool ok = zid_identity_dump_state_json(&out, "no-such-name") &&
+                json_get(&out, "found") != NULL &&
+                !json_get_bool(json_get(&out, "found")) &&
+                json_get(&out, "master_pubkey") == NULL;
+      json_free(&out);
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
 static int test_dumper(void)
 {
     int failures = 0;
 
     printf("zid_identity dump: rejects a NULL out... ");
-    { bool ok = !zid_identity_dump_state_json(NULL, NULL);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zid_verdict(!zid_identity_dump_state_json(NULL, NULL));
 
     /* The dumper resolves through app_runtime_node_db(), so wire a real
      * runtime handle at this test's own file-backed node.db — otherwise the
@@ -441,43 +608,12 @@ static int test_dumper(void)
     memset(&dbsvc, 0, sizeof(dbsvc));
     memset(&runtime, 0, sizeof(runtime));
 
-    bool wired = node_db_open(&ndb, dbpath) && ndb.open;
-    if (wired) {
-        db_service_init(&dbsvc);
-        wired = db_service_attach(&dbsvc, &ndb) && db_service_start(&dbsvc);
-    }
-    if (wired) {
-        runtime.db_service = &dbsvc;
-        app_runtime_set_current(&runtime);
-    }
+    bool wired = zid_dump_wire(&ndb, &dbsvc, &runtime, dbpath);
 
     printf("zid_identity dump: runtime node.db wired... ");
-    if (wired && app_runtime_node_db() == &ndb) printf("OK\n");
-    else { printf("FAIL\n"); failures++; }
+    failures += zid_verdict(wired && app_runtime_node_db() == &ndb);
 
-    printf("zid_identity dump: no key emits a well-formed totals object... ");
-    { struct json_value out;
-      json_init(&out);
-      bool ok = zid_identity_dump_state_json(&out, NULL) &&
-                out.type == JSON_OBJ &&
-                json_get(&out, "db_open") != NULL &&
-                json_get(&out, "total_rows") != NULL &&
-                json_get(&out, "active_rows") != NULL &&
-                json_get(&out, "rotated_rows") != NULL &&
-                json_get(&out, "revoked_rows") != NULL &&
-                json_get(&out, "found") == NULL;
-      json_free(&out);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zid_identity dump: a key form always reports found... ");
-    { struct json_value out;
-      json_init(&out);
-      bool ok = zid_identity_dump_state_json(&out, "alpha") &&
-                out.type == JSON_OBJ &&
-                json_get(&out, "key") != NULL &&
-                json_get(&out, "found") != NULL;
-      json_free(&out);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zid_dump_shape_checks();
 
     struct node_db *rt = app_runtime_node_db();
     if (rt && rt->open) {
@@ -489,46 +625,8 @@ static int test_dumper(void)
         char pk_hex[65];
         hex32(r.master_pubkey, pk_hex);
 
-        printf("zid_identity dump: 64-hex pubkey key resolves the row... ");
-        { struct json_value out;
-          json_init(&out);
-          bool ok = seeded && zid_identity_dump_state_json(&out, pk_hex) &&
-                    json_get_bool(json_get(&out, "found")) &&
-                    json_get(&out, "master_pubkey") != NULL &&
-                    json_get(&out, "anchor_txid") != NULL &&
-                    json_get_int(json_get(&out, "anchor_height")) == 777 &&
-                    json_get(&out, "successor_pubkey") == NULL;
-          json_free(&out);
-          if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-        printf("zid_identity dump: ZNAM-name key resolves the row... ");
-        { struct json_value out;
-          json_init(&out);
-          bool ok = seeded &&
-                    zid_identity_dump_state_json(&out, "dumpername") &&
-                    json_get_bool(json_get(&out, "found")) &&
-                    json_get_int(json_get(&out, "updated_height")) == 777;
-          json_free(&out);
-          if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-        printf("zid_identity dump: totals count the seeded row... ");
-        { struct json_value out;
-          json_init(&out);
-          bool ok = seeded && zid_identity_dump_state_json(&out, NULL) &&
-                    json_get_int(json_get(&out, "total_rows")) >= 1 &&
-                    json_get_int(json_get(&out, "active_rows")) >= 1;
-          json_free(&out);
-          if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-        printf("zid_identity dump: an unknown key reports found=false... ");
-        { struct json_value out;
-          json_init(&out);
-          bool ok = zid_identity_dump_state_json(&out, "no-such-name") &&
-                    json_get(&out, "found") != NULL &&
-                    !json_get_bool(json_get(&out, "found")) &&
-                    json_get(&out, "master_pubkey") == NULL;
-          json_free(&out);
-          if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+        failures += zid_dump_resolve_pubkey(seeded, pk_hex);
+        failures += zid_dump_resolve_name_totals(seeded);
 
         db_zid_identity_truncate(rt);
     } else {
@@ -705,96 +803,112 @@ static int test_dispatch_reaches_every_overlay(void)
 
 /* Feed 2 — the dedicated ZID overlay: ANCHOR / ROTATE / REVOKE + the
  * owner-authorization refusals. */
-static int test_zid_overlay_feed(void)
+static int zid_overlay_anchor_check(struct node_db *ndb, uint8_t k1[32])
 {
     int failures = 0;
-    struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    if (!node_db_open(&ndb, ":memory:") || !ndb.open) {
-        printf("zid overlay feed: open FAIL\n");
-        return 1;
-    }
-
-    uint8_t ownerA[20], attackerB[20];
-    memset(ownerA, 0x41, 20);
-    memset(attackerB, 0x42, 20);
-    for (uint8_t i = 0; i < 6; i++)
-        seed_owner_utxo(&ndb, (uint8_t)(0xE0 + i), 0, ownerA, 10);
-    seed_owner_utxo(&ndb, 0xEF, 0, attackerB, 10);
-
-    uint8_t k1[32], k2[32];
-    memset(k1, 0x91, 32);
-    memset(k2, 0x92, 32);
     uint8_t buf[128];
     size_t len;
 
     printf("zid overlay: ANCHOR projects an active row... ");
     len = zid_anchor_build_anchor(buf, sizeof(buf), k1);
-    run_op(&ndb, buf, len, 0xE0, 0, 500);
-    struct zid_identity r1;
-    { bool ok = db_zid_identity_find(&ndb, k1, &r1) &&
+    run_op(ndb, buf, len, 0xE0, 0, 500);
+    { struct zid_identity r1;
+      bool ok = db_zid_identity_find(ndb, k1, &r1) &&
                 strcmp(r1.status, ZID_IDENTITY_STATUS_ACTIVE) == 0 &&
                 strcmp(r1.source, ZID_IDENTITY_SOURCE_ZID_OVERLAY) == 0 &&
                 r1.anchor_height == 500 && r1.updated_height == 500 &&
                 !r1.has_successor && r1.owner_address[0] != '\0' &&
                 r1.name[0] == '\0';
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_overlay_rotate_refused(struct node_db *ndb, uint8_t k1[32],
+                                      uint8_t k2[32])
+{
+    int failures = 0;
+    uint8_t buf[128];
+    size_t len;
 
     /* An unauthorized ROTATE is a logged no-op — never fatal, and it must
      * leave the standing identity untouched. */
     printf("zid overlay: ROTATE by a non-owner is refused... ");
     len = zid_anchor_build_rotate(buf, sizeof(buf), k1, k2);
-    run_op(&ndb, buf, len, 0xEF, 0, 501);
+    run_op(ndb, buf, len, 0xEF, 0, 501);
     { struct zid_identity still, target;
-      bool ok = db_zid_identity_find(&ndb, k1, &still) &&
+      bool ok = db_zid_identity_find(ndb, k1, &still) &&
                 strcmp(still.status, ZID_IDENTITY_STATUS_ACTIVE) == 0 &&
                 !still.has_successor &&
                 still.updated_height == 500 &&
-                !db_zid_identity_find(&ndb, k2, &target) &&
-                db_zid_identity_count(&ndb) == 1;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+                !db_zid_identity_find(ndb, k2, &target) &&
+                db_zid_identity_count(ndb) == 1;
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_overlay_rotate_owner(struct node_db *ndb, uint8_t k1[32],
+                                    uint8_t k2[32])
+{
+    int failures = 0;
+    uint8_t buf[128];
+    size_t len;
 
     printf("zid overlay: ROTATE by the owner supersedes the old key... ");
     len = zid_anchor_build_rotate(buf, sizeof(buf), k1, k2);
-    run_op(&ndb, buf, len, 0xE1, 0, 502);
+    run_op(ndb, buf, len, 0xE1, 0, 502);
     { struct zid_identity old, new_row;
-      bool ok = db_zid_identity_find(&ndb, k1, &old) &&
+      bool ok = db_zid_identity_find(ndb, k1, &old) &&
                 strcmp(old.status, ZID_IDENTITY_STATUS_ROTATED) == 0 &&
                 old.has_successor &&
                 memcmp(old.successor_pubkey, k2, 32) == 0 &&
                 old.anchor_height == 500 &&    /* the ANCHOR, not the rotate */
                 old.updated_height == 502 &&
-                db_zid_identity_find(&ndb, k2, &new_row) &&
+                db_zid_identity_find(ndb, k2, &new_row) &&
                 strcmp(new_row.status, ZID_IDENTITY_STATUS_ACTIVE) == 0 &&
                 new_row.anchor_height == 502 &&
-                db_zid_identity_count(&ndb) == 2;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+                db_zid_identity_count(ndb) == 2;
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_overlay_revoke_checks(struct node_db *ndb, uint8_t k2[32])
+{
+    int failures = 0;
+    uint8_t buf[128];
+    size_t len;
 
     printf("zid overlay: REVOKE by a non-owner is refused... ");
     len = zid_anchor_build_revoke(buf, sizeof(buf), k2);
-    run_op(&ndb, buf, len, 0xEF, 1, 503);
+    run_op(ndb, buf, len, 0xEF, 1, 503);
     { struct zid_identity got;
-      bool ok = db_zid_identity_find(&ndb, k2, &got) &&
+      bool ok = db_zid_identity_find(ndb, k2, &got) &&
                 strcmp(got.status, ZID_IDENTITY_STATUS_ACTIVE) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     printf("zid overlay: REVOKE by the owner retires the key... ");
     len = zid_anchor_build_revoke(buf, sizeof(buf), k2);
-    run_op(&ndb, buf, len, 0xE2, 0, 504);
+    run_op(ndb, buf, len, 0xE2, 0, 504);
     { struct zid_identity got;
-      bool ok = db_zid_identity_find(&ndb, k2, &got) &&
+      bool ok = db_zid_identity_find(ndb, k2, &got) &&
                 strcmp(got.status, ZID_IDENTITY_STATUS_REVOKED) == 0 &&
                 !got.has_successor && got.updated_height == 504;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
 
     /* A revoked key stays dead: a fresh ANCHOR must not resurrect it. */
     printf("zid overlay: re-ANCHOR of a revoked key is refused... ");
     len = zid_anchor_build_anchor(buf, sizeof(buf), k2);
-    run_op(&ndb, buf, len, 0xE3, 0, 505);
+    run_op(ndb, buf, len, 0xE3, 0, 505);
     { struct zid_identity got;
-      bool ok = db_zid_identity_find(&ndb, k2, &got) &&
+      bool ok = db_zid_identity_find(ndb, k2, &got) &&
                 strcmp(got.status, ZID_IDENTITY_STATUS_REVOKED) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_overlay_idempotent_check(const uint8_t ownerA[20])
+{
+    int failures = 0;
+    uint8_t buf[128];
 
     /* Re-walking a block must rewrite identical rows, not fork them. */
     printf("zid overlay: re-processing the ANCHOR block is idempotent... ");
@@ -817,7 +931,36 @@ static int test_zid_overlay_feed(void)
                count_rows(&idb, "SELECT COUNT(*) FROM op_returns") == 1;
           node_db_close(&idb);
       }
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int test_zid_overlay_feed(void)
+{
+    int failures = 0;
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    if (!node_db_open(&ndb, ":memory:") || !ndb.open) {
+        printf("zid overlay feed: open FAIL\n");
+        return 1;
+    }
+
+    uint8_t ownerA[20], attackerB[20];
+    memset(ownerA, 0x41, 20);
+    memset(attackerB, 0x42, 20);
+    for (uint8_t i = 0; i < 6; i++)
+        seed_owner_utxo(&ndb, (uint8_t)(0xE0 + i), 0, ownerA, 10);
+    seed_owner_utxo(&ndb, 0xEF, 0, attackerB, 10);
+
+    uint8_t k1[32], k2[32];
+    memset(k1, 0x91, 32);
+    memset(k2, 0x92, 32);
+
+    failures += zid_overlay_anchor_check(&ndb, k1);
+    failures += zid_overlay_rotate_refused(&ndb, k1, k2);
+    failures += zid_overlay_rotate_owner(&ndb, k1, k2);
+    failures += zid_overlay_revoke_checks(&ndb, k2);
+    failures += zid_overlay_idempotent_check(ownerA);
 
     node_db_close(&ndb);
     return failures;
@@ -825,6 +968,163 @@ static int test_zid_overlay_feed(void)
 
 /* Feed 1 — the ZNAM "zid" text convention (this is the one that ships
  * first, so it must stand up with no ZID overlay involved at all). */
+static int zid_znam_text_projects(struct node_db *ndb, uint8_t k1[32],
+                                  const char *k1_hex, const char *k2_hex)
+{
+    int failures = 0;
+    uint8_t buf[256];
+    size_t len;
+
+    printf("znam zid text: SET_TEXT zid=<64-hex> projects an identity... ");
+    len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", k1_hex);
+    run_op(ndb, buf, len, 0xF1, 0, 701);
+    { struct zid_identity got;
+      bool ok = db_zid_identity_find(ndb, k1, &got) &&
+                strcmp(got.status, ZID_IDENTITY_STATUS_ACTIVE) == 0 &&
+                strcmp(got.source, ZID_IDENTITY_SOURCE_ZNAM_TEXT) == 0 &&
+                strcmp(got.name, "zidname") == 0 &&
+                got.owner_address[0] != '\0' &&
+                got.anchor_height == 701;
+      failures += zid_verdict(ok); }
+
+    printf("znam zid text: find_by_name resolves the anchored key... ");
+    { struct zid_identity got;
+      bool ok = db_zid_identity_find_by_name(ndb, "zidname", &got) &&
+                memcmp(got.master_pubkey, k1, 32) == 0;
+      failures += zid_verdict(ok); }
+
+    /* A malformed value is not an identity — the TEXT RECORD is still
+     * stored exactly as today, and nothing is projected. */
+    printf("znam zid text: a 63-char value stores text, projects nothing... ");
+    { char short_hex[64];
+      memcpy(short_hex, k2_hex, 63);
+      short_hex[63] = '\0';
+      int64_t before = db_zid_identity_count(ndb);
+      len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", short_hex);
+      run_op(ndb, buf, len, 0xF2, 0, 702);
+      char txt[256] = {0};
+      bool ok = db_zid_identity_count(ndb) == before &&
+                db_znam_text_get(ndb, "zidname", "zid", txt, sizeof(txt)) &&
+                strcmp(txt, short_hex) == 0;
+      failures += zid_verdict(ok); }
+
+    printf("znam zid text: a non-hex 64-char value projects nothing... ");
+    { char bad[65];
+      memset(bad, 'z', 64);
+      bad[64] = '\0';
+      int64_t before = db_zid_identity_count(ndb);
+      len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", bad);
+      run_op(ndb, buf, len, 0xF3, 0, 703);
+      char txt[256] = {0};
+      bool ok = db_zid_identity_count(ndb) == before &&
+                db_znam_text_get(ndb, "zidname", "zid", txt, sizeof(txt)) &&
+                strcmp(txt, bad) == 0;
+      failures += zid_verdict(ok); }
+
+    printf("znam zid text: a non-'zid' text key projects nothing... ");
+    { int64_t before = db_zid_identity_count(ndb);
+      len = znam_build_set_text(buf, sizeof(buf), "zidname", "onion", k2_hex);
+      run_op(ndb, buf, len, 0xF4, 0, 704);
+      bool ok = db_zid_identity_count(ndb) == before;
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_znam_text_replay(struct node_db *ndb, const uint8_t *buf,
+                                size_t len, uint8_t k1[32], uint8_t k2[32])
+{
+    int failures = 0;
+
+    printf("znam zid text: re-processing the SET_TEXT block is idempotent... ");
+    { int64_t before = db_zid_identity_count(ndb);
+      struct zid_identity a1, a2, b1, b2;
+      bool ok = db_zid_identity_find(ndb, k1, &a1) &&
+                db_zid_identity_find(ndb, k2, &b1);
+      run_op(ndb, buf, len, 0xF5, 0, 705);
+      ok = ok && db_zid_identity_count(ndb) == before &&
+           db_zid_identity_find(ndb, k1, &a2) &&
+           db_zid_identity_find(ndb, k2, &b2) &&
+           memcmp(&a1, &a2, sizeof(a1)) == 0 &&
+           memcmp(&b1, &b2, sizeof(b1)) == 0;
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_znam_text_rotate(struct node_db *ndb, uint8_t k1[32],
+                                uint8_t k2[32], const char *k2_hex)
+{
+    int failures = 0;
+    uint8_t buf[256];
+    size_t len;
+
+    printf("znam zid text: a new key from the same owner rotates... ");
+    len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", k2_hex);
+    run_op(ndb, buf, len, 0xF5, 0, 705);
+    { struct zid_identity old, new_row;
+      bool ok = db_zid_identity_find(ndb, k1, &old) &&
+                strcmp(old.status, ZID_IDENTITY_STATUS_ROTATED) == 0 &&
+                old.has_successor &&
+                memcmp(old.successor_pubkey, k2, 32) == 0 &&
+                old.anchor_height == 701 && old.updated_height == 705 &&
+                db_zid_identity_find(ndb, k2, &new_row) &&
+                strcmp(new_row.status, ZID_IDENTITY_STATUS_ACTIVE) == 0 &&
+                strcmp(new_row.name, "zidname") == 0 &&
+                new_row.anchor_height == 705;
+      failures += zid_verdict(ok); }
+
+    printf("znam zid text: find_by_name follows the rotation... ");
+    { struct zid_identity got;
+      bool ok = db_zid_identity_find_by_name(ndb, "zidname", &got) &&
+                memcmp(got.master_pubkey, k2, 32) == 0;
+      failures += zid_verdict(ok); }
+
+    failures += zid_znam_text_replay(ndb, buf, len, k1, k2);
+    return failures;
+}
+
+static int zid_znam_text_revoke(struct node_db *ndb, uint8_t k2[32])
+{
+    int failures = 0;
+    uint8_t buf[256];
+    size_t len;
+
+    printf("znam zid text: an empty value revokes the identity... ");
+    len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", "");
+    run_op(ndb, buf, len, 0xF6, 0, 706);
+    { struct zid_identity got;
+      bool ok = db_zid_identity_find(ndb, k2, &got) &&
+                strcmp(got.status, ZID_IDENTITY_STATUS_REVOKED) == 0 &&
+                !got.has_successor && got.updated_height == 706;
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
+static int zid_znam_text_non_owner(struct node_db *ndb)
+{
+    int failures = 0;
+    uint8_t buf[256];
+    size_t len;
+
+    /* The upstream owner check is untouched: a non-owner SET_TEXT never
+     * reaches the identity feed at all. */
+    printf("znam zid text: a non-owner SET_TEXT projects nothing... ");
+    { uint8_t attacker[20];
+      memset(attacker, 0x52, 20);
+      seed_owner_utxo(ndb, 0xFB, 0, attacker, 10);
+      uint8_t k3[32];
+      char k3_hex[65];
+      memset(k3, 0xB3, 32);
+      hex32(k3, k3_hex);
+      int64_t before = db_zid_identity_count(ndb);
+      len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", k3_hex);
+      run_op(ndb, buf, len, 0xFB, 0, 707);
+      struct zid_identity got;
+      bool ok = db_zid_identity_count(ndb) == before &&
+                !db_zid_identity_find(ndb, k3, &got);
+      failures += zid_verdict(ok); }
+    return failures;
+}
+
 static int test_znam_zid_text_feed(void)
 {
     int failures = 0;
@@ -853,119 +1153,10 @@ static int test_znam_zid_text_feed(void)
                               "t1zidowner");
     run_op(&ndb, buf, len, 0xF0, 0, 700);
 
-    printf("znam zid text: SET_TEXT zid=<64-hex> projects an identity... ");
-    len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", k1_hex);
-    run_op(&ndb, buf, len, 0xF1, 0, 701);
-    { struct zid_identity got;
-      bool ok = db_zid_identity_find(&ndb, k1, &got) &&
-                strcmp(got.status, ZID_IDENTITY_STATUS_ACTIVE) == 0 &&
-                strcmp(got.source, ZID_IDENTITY_SOURCE_ZNAM_TEXT) == 0 &&
-                strcmp(got.name, "zidname") == 0 &&
-                got.owner_address[0] != '\0' &&
-                got.anchor_height == 701;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("znam zid text: find_by_name resolves the anchored key... ");
-    { struct zid_identity got;
-      bool ok = db_zid_identity_find_by_name(&ndb, "zidname", &got) &&
-                memcmp(got.master_pubkey, k1, 32) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    /* A malformed value is not an identity — the TEXT RECORD is still
-     * stored exactly as today, and nothing is projected. */
-    printf("znam zid text: a 63-char value stores text, projects nothing... ");
-    { char short_hex[64];
-      memcpy(short_hex, k2_hex, 63);
-      short_hex[63] = '\0';
-      int64_t before = db_zid_identity_count(&ndb);
-      len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", short_hex);
-      run_op(&ndb, buf, len, 0xF2, 0, 702);
-      char txt[256] = {0};
-      bool ok = db_zid_identity_count(&ndb) == before &&
-                db_znam_text_get(&ndb, "zidname", "zid", txt, sizeof(txt)) &&
-                strcmp(txt, short_hex) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("znam zid text: a non-hex 64-char value projects nothing... ");
-    { char bad[65];
-      memset(bad, 'z', 64);
-      bad[64] = '\0';
-      int64_t before = db_zid_identity_count(&ndb);
-      len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", bad);
-      run_op(&ndb, buf, len, 0xF3, 0, 703);
-      char txt[256] = {0};
-      bool ok = db_zid_identity_count(&ndb) == before &&
-                db_znam_text_get(&ndb, "zidname", "zid", txt, sizeof(txt)) &&
-                strcmp(txt, bad) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("znam zid text: a non-'zid' text key projects nothing... ");
-    { int64_t before = db_zid_identity_count(&ndb);
-      len = znam_build_set_text(buf, sizeof(buf), "zidname", "onion", k2_hex);
-      run_op(&ndb, buf, len, 0xF4, 0, 704);
-      bool ok = db_zid_identity_count(&ndb) == before;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("znam zid text: a new key from the same owner rotates... ");
-    len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", k2_hex);
-    run_op(&ndb, buf, len, 0xF5, 0, 705);
-    { struct zid_identity old, new_row;
-      bool ok = db_zid_identity_find(&ndb, k1, &old) &&
-                strcmp(old.status, ZID_IDENTITY_STATUS_ROTATED) == 0 &&
-                old.has_successor &&
-                memcmp(old.successor_pubkey, k2, 32) == 0 &&
-                old.anchor_height == 701 && old.updated_height == 705 &&
-                db_zid_identity_find(&ndb, k2, &new_row) &&
-                strcmp(new_row.status, ZID_IDENTITY_STATUS_ACTIVE) == 0 &&
-                strcmp(new_row.name, "zidname") == 0 &&
-                new_row.anchor_height == 705;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("znam zid text: find_by_name follows the rotation... ");
-    { struct zid_identity got;
-      bool ok = db_zid_identity_find_by_name(&ndb, "zidname", &got) &&
-                memcmp(got.master_pubkey, k2, 32) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("znam zid text: re-processing the SET_TEXT block is idempotent... ");
-    { int64_t before = db_zid_identity_count(&ndb);
-      struct zid_identity a1, a2, b1, b2;
-      bool ok = db_zid_identity_find(&ndb, k1, &a1) &&
-                db_zid_identity_find(&ndb, k2, &b1);
-      run_op(&ndb, buf, len, 0xF5, 0, 705);
-      ok = ok && db_zid_identity_count(&ndb) == before &&
-           db_zid_identity_find(&ndb, k1, &a2) &&
-           db_zid_identity_find(&ndb, k2, &b2) &&
-           memcmp(&a1, &a2, sizeof(a1)) == 0 &&
-           memcmp(&b1, &b2, sizeof(b1)) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("znam zid text: an empty value revokes the identity... ");
-    len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", "");
-    run_op(&ndb, buf, len, 0xF6, 0, 706);
-    { struct zid_identity got;
-      bool ok = db_zid_identity_find(&ndb, k2, &got) &&
-                strcmp(got.status, ZID_IDENTITY_STATUS_REVOKED) == 0 &&
-                !got.has_successor && got.updated_height == 706;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    /* The upstream owner check is untouched: a non-owner SET_TEXT never
-     * reaches the identity feed at all. */
-    printf("znam zid text: a non-owner SET_TEXT projects nothing... ");
-    { uint8_t attacker[20];
-      memset(attacker, 0x52, 20);
-      seed_owner_utxo(&ndb, 0xFB, 0, attacker, 10);
-      uint8_t k3[32];
-      char k3_hex[65];
-      memset(k3, 0xB3, 32);
-      hex32(k3, k3_hex);
-      int64_t before = db_zid_identity_count(&ndb);
-      len = znam_build_set_text(buf, sizeof(buf), "zidname", "zid", k3_hex);
-      run_op(&ndb, buf, len, 0xFB, 0, 707);
-      struct zid_identity got;
-      bool ok = db_zid_identity_count(&ndb) == before &&
-                !db_zid_identity_find(&ndb, k3, &got);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zid_znam_text_projects(&ndb, k1, k1_hex, k2_hex);
+    failures += zid_znam_text_rotate(&ndb, k1, k2, k2_hex);
+    failures += zid_znam_text_revoke(&ndb, k2);
+    failures += zid_znam_text_non_owner(&ndb);
 
     node_db_close(&ndb);
     return failures;
