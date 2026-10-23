@@ -397,25 +397,25 @@ static bool pc_enabled(void)
     return !dl_stubbed();
 }
 
-bool zcl_dev_land_precheck(const char *leaf, const char *wt,
-                           const char *land_dir, const char *mode, char *note,
-                           size_t cap, struct zcl_command_reply *reply)
+/* The lint gates lint the worktree root, so they only speak for the tip when
+ * the tip is that tree's HEAD. */
+static bool pc_tip_is_head(const char *wt, const char *tip)
+{
+    const char *argv[] = {"git", "-C", wt, "rev-parse", "HEAD", NULL};
+    char head[128];
+    if (zcl_spawn_capture(argv, head, sizeof(head), 30000) != 0)
+        return false;
+    head[strcspn(head, "\r\n")] = '\0';
+    return strcmp(head, tip) == 0;
+}
+
+static bool pc_run_gates(const char *leaf, const char *wt,
+                         const char *land_dir, struct zcl_command_reply *reply)
 {
     struct zcl_land_precheck_gates *g;
     struct pc_run *r;
     char ledger[4096 + 32], dir[4096];
     bool ok;
-    if (mode && strcmp(mode, "sent") == 0)
-        return true;
-    if (mode && strcmp(mode, "skip") == 0)
-        return pc_skip(leaf, note, cap, reply);
-    if (mode && strcmp(mode, "run") != 0) {
-        pc_fail(reply, leaf, "BAD_INPUT", "precheck is `run` (default) or `skip`",
-                mode);
-        return false;
-    }
-    if (!pc_enabled())
-        return true;
     r = zcl_calloc(1, sizeof(*r), "dev_land_precheck.run");
     r->leaf = leaf;
     r->wt = wt;
@@ -452,4 +452,33 @@ bool zcl_dev_land_precheck(const char *leaf, const char *wt,
     free(g);
     free(r);
     return ok;
+}
+
+bool zcl_dev_land_precheck(const char *leaf, const char *wt,
+                           const char *land_dir, const char *mode,
+                           const char *tip, bool checked_elsewhere, char *note,
+                           size_t cap, struct zcl_command_reply *reply)
+{
+    /* The mode is validated first, on every path: `sent` and any other word
+     * are refused so a caller can never name a bypass. */
+    if (mode && strcmp(mode, "run") != 0 && strcmp(mode, "skip") != 0) {
+        pc_fail(reply, leaf, "BAD_INPUT",
+                "precheck is `run` (the default) or `skip`; nothing else is "
+                "accepted",
+                mode);
+        return false;
+    }
+    if (mode && strcmp(mode, "skip") == 0)
+        return pc_skip(leaf, note, cap, reply);
+    if (checked_elsewhere || !pc_enabled())
+        return true;
+    if (tip && !pc_tip_is_head(wt, tip)) {
+        pc_fail(reply, leaf, "PRECHECK_TIP_NOT_HEAD",
+                "the precheck lints the worktree, which is not at the tip "
+                "being queued; check out the tip (or use --qualify) and "
+                "resubmit, or pass --precheck=skip",
+                tip);
+        return false;
+    }
+    return pc_run_gates(leaf, wt, land_dir, reply);
 }

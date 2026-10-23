@@ -2079,9 +2079,14 @@ ZCL_COMMAND_DEV_COMMAND(
     "QUALIFY_UNSIGNED_TIP, QUALIFY_TREE_CHANGED (paths), QUALIFY_DIRTY_TREE, "
     "QUALIFY_FETCH_FAILED, QUALIFY_REBASE_CONFLICT, QUALIFY_REBASE_FAILED, "
     "QUALIFY_GROUP_SELECTION or QUALIFY_STEP_FAILED "
-    "and queues nothing.", 65536,
+    "and queues nothing. Before queueing it runs a local lint precheck "
+    "(core gates plus every lint gate that failed in the last 7 days) on the "
+    "worktree and refuses PRECHECK_FAILED; precheck=run (default) runs it and "
+    "needs the tip to be the worktree HEAD, precheck=skip queues without it and "
+    "appends \" [precheck skipped]\" to the note; any other value is "
+    "refused BAD_INPUT.", 65536,
     "land,submit,queue,lane,tip",
-    "zcl.land_submit_input.v1", "zcl.land.v1", "tip,worktree,note,json,qualify", "",
+    "zcl.land_submit_input.v1", "zcl.land.v1", "tip,worktree,note,json,qualify,precheck", "",
     "z23 dev land submit --worktree=PATH --qualify",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
@@ -2368,11 +2373,15 @@ ZCL_COMMAND_DEV_COMMAND(
     "[A-Za-z0-9 ._,:/()+=-] because ssh joins its argv into a remote shell "
     "string (SEND_BAD_ARGUMENT); every remote argument is single-quoted. "
     "remote_checkout (absolute) is forwarded as receive's --checkout, for a "
-    "queue host whose installed z23-dev runs outside any checkout.",
+    "queue host whose installed z23-dev runs outside any checkout. A local "
+    "lint precheck runs first (precheck=run, the default; PRECHECK_FAILED "
+    "refuses before any bundle or ssh); precheck=skip sends without it and "
+    "appends \" [precheck skipped]\" to the note; any other value is "
+    "refused BAD_INPUT.",
     65536,
     "land,send,bundle,remote,ssh",
     "zcl.land_send_input.v1", "zcl.land_send.v1",
-    "host,lane,note,remote_cmd,inbox,remote_checkout", "host,lane",
+    "host,lane,note,remote_cmd,inbox,remote_checkout,precheck", "host,lane",
     "z23-dev dev land send --host=queue-host --lane=mac",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,

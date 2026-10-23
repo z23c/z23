@@ -1416,7 +1416,9 @@ void zcl_dev_orient_banner(char *out, size_t cap);
 /* dev.land.receive / dev.land.send — submit from another machine
  * (tools/command/native_dev_land_remote.c). The first two are the narrow
  * entries it borrows from tools/command/native_dev_land.c. */
-void zcl_native_dev_land_submit(const struct zcl_command_request *request,
+/* Receive-only: the sending host already ran the precheck, so this entry
+ * skips it. Not reachable from any input key. */
+void zcl_native_dev_land_submit_received(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply);
 int zcl_native_dev_land_git(const char *dir, const char *const *args,
                             char *out, size_t cap, int timeout_ms);

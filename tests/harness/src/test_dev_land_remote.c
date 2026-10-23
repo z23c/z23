@@ -9,6 +9,7 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_dev_land_precheck.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -235,6 +236,31 @@ static void dlt_send(struct dlt_call *c, const struct dlt_rig *r,
                      const char *note)
 {
     dlt_send_co(c, r, note, NULL);
+}
+
+/* A lane z23-lint: answers --list with the core gates and fails the gate
+ * named in build/precheck-fail, read relative to the cwd. */
+#define DLT_PC_LINT                                                          \
+    "#!/bin/sh\n"                                                            \
+    "if [ \"$1\" = --list ]; then printf 'check-file-size-ceiling\\n"        \
+    "check-cyclomatic-complexity\\ncheck-core-seal\\ncheck-arm-symbol-single\\n'; exit 0; fi\n" \
+    "if [ -f build/precheck-fail ] && [ \"$1\" = \"$(cat build/precheck-fail)\" ]; then\n" \
+    "  echo \"gate $1 failed\"; exit 2\n"                                    \
+    "fi\n"                                                                   \
+    "exit 0\n"
+
+static void dlt_send_pc(struct dlt_call *c, const struct dlt_rig *r,
+                        const char *note, const char *mode)
+{
+    dlt_begin(c, "dev.land.send");
+    (void)json_push_kv_str(&c->input, "host", "queue-host");
+    (void)json_push_kv_str(&c->input, "lane", "mac");
+    if (note)
+        (void)json_push_kv_str(&c->input, "note", note);
+    if (mode)
+        (void)json_push_kv_str(&c->input, "precheck", mode);
+    dlt_cd(r->sender);
+    zcl_native_handle_dev_land_remote(&c->request, &c->reply);
 }
 
 static bool dlt_bundle(const struct dlt_rig *r, const char *name, bool two,
@@ -471,7 +497,51 @@ static int dlt_send_cases(void)
     }
 
 
+    TEST("land.send: a failing precheck refuses before any bundle or ssh") {
+        char lint[900], fail[900];
+        (void)snprintf(fail, sizeof(fail), "%s/build", r.sender);
+        (void)mkdir(fail, 0755);
+        (void)snprintf(lint, sizeof(lint), "%s/build/bin", r.sender);
+        (void)mkdir(lint, 0755);
+        (void)snprintf(lint, sizeof(lint), "%s/build/bin/z23-lint", r.sender);
+        (void)snprintf(fail, sizeof(fail), "%s/build/precheck-fail", r.sender);
+        ASSERT(dlt_write(lint, DLT_PC_LINT, 0755));
+        ASSERT(dlt_write(fail, "check-core-seal\n", 0644));
+        (void)remove(r.log);
+        zcl_dev_land_precheck_test_force(true);
+        dlt_send_pc(&c, &r, "n", NULL);
+        ASSERT(dlt_refused(&c, "PRECHECK_FAILED"));
+        ASSERT(access(r.log, F_OK) != 0);
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.send: precheck=skip sends with the note marker, no gate runs") {
+        char logtext3[8192];
+        (void)remove(r.log);
+        dlt_send_pc(&c, &r, "why", "skip");
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        dlt_end(&c);
+        ASSERT(dlt_slurp(r.log, logtext3, sizeof(logtext3)));
+        ASSERT(strstr(logtext3, "'--note=why [precheck skipped]'") != NULL);
+        PASS();
+    }
+
+    TEST("land.send: a bad or caller-supplied `sent` precheck refuses BAD_INPUT") {
+        (void)remove(r.log);
+        dlt_send_pc(&c, &r, "n", "bogus");
+        ASSERT(dlt_refused(&c, "BAD_INPUT"));
+        dlt_end(&c);
+        dlt_send_pc(&c, &r, "n", "sent");
+        ASSERT(dlt_refused(&c, "BAD_INPUT"));
+        ASSERT(strstr(c.reply.error.message, "skip") != NULL);
+        dlt_end(&c);
+        ASSERT(access(r.log, F_OK) != 0);
+        PASS();
+    }
+
 _test_next:;
+    zcl_dev_land_precheck_test_force(false);
     dlt_done(&r);
     return failures;
 }

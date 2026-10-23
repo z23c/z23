@@ -37,16 +37,22 @@ void zcl_land_precheck_gate_set(const char *outcomes_path, int64_t now_s,
                                 struct zcl_land_precheck_gates *out);
 
 /* Run the precheck for `leaf` ("dev.land" or "dev.land.send") in the lane
- * worktree `wt`. `mode` is the precheck input: NULL or "run" runs the gates,
- * "skip" appends ZCL_LAND_PRECHECK_SKIP_SUFFIX to `note` (a buffer of `cap`
- * bytes holding the current note) and runs nothing, "sent" means the sender
- * already ran it (the receive path). `land_dir` is the land state directory;
+ * worktree `wt`. `mode` is the caller's precheck input: NULL or "run" runs
+ * the gates, "skip" appends ZCL_LAND_PRECHECK_SKIP_SUFFIX to `note` (a buffer
+ * of `cap` bytes holding the current note) and runs nothing; any other value
+ * is refused BAD_INPUT, on every path. `checked_elsewhere` is an internal
+ * flag, never an input key: true when the gates already ran for this exact
+ * tree (--qualify's full lint, or the sending host on the receive path), so
+ * "run" runs nothing, while the mode check and the skip marker still apply.
+ * `tip`, when not NULL, must equal the HEAD of `wt` for "run" to lint it
+ * (PRECHECK_TIP_NOT_HEAD otherwise). `land_dir` is the land state directory;
  * NULL resolves the default one. Returns true to go on; false fills `reply`
  * with the refusal and the caller queues or packages nothing. Under the
  * landing proof stub (tests) the gates are not run unless a test forces
  * them. On success reply->data gains precheck_ran / precheck_skipped. */
 bool zcl_dev_land_precheck(const char *leaf, const char *wt,
-                           const char *land_dir, const char *mode, char *note,
+                           const char *land_dir, const char *mode,
+                           const char *tip, bool checked_elsewhere, char *note,
                            size_t cap, struct zcl_command_reply *reply);
 
 #if defined(ZCL_TESTING)

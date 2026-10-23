@@ -313,13 +313,14 @@ static void dlr_recv_submit(const struct dlr_recv *r,
     json_init(&in);
     json_set_object(&in);
     (void)json_push_kv_str(&in, "tip", r->sha);
-    /* The sender ran the precheck in the lane it bundled. */
-    (void)json_push_kv_str(&in, "precheck", "sent");
+    /* No precheck key: the sender ran it, and the received entry below
+     * skips it by an internal flag no input value can set. A skip the
+     * sender chose is already in the note it sent. */
     (void)json_push_kv_str(&in, "worktree", r->wt);
     if (note)
         (void)json_push_kv_str(&in, "note", note);
     sub.input = &in;
-    zcl_native_dev_land_submit(&sub, reply);
+    zcl_native_dev_land_submit_received(&sub, reply);
     json_free(&in);
 }
 
@@ -575,8 +576,8 @@ static bool dlr_send_precheck(struct dlr_send *s,
     (void)snprintf(s->note_buf, sizeof(s->note_buf), "%s",
                    s->note ? s->note : "");
     if (!zcl_dev_land_precheck("dev.land.send", s->root, NULL,
-                               dlr_str(req, "precheck"), s->note_buf,
-                               sizeof(s->note_buf), reply))
+                               dlr_str(req, "precheck"), NULL, false,
+                               s->note_buf, sizeof(s->note_buf), reply))
         return false;
     if (s->note_buf[0])
         s->note = s->note_buf;

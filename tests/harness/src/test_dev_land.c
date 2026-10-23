@@ -13429,6 +13429,10 @@ static bool dlx_pc_skip_marks_note(void)
     dlx_pc_submit(&c, &rig, "bogus", NULL);
     ok = ok && dlx_run(&c) && strcmp(dlx_err_code(&c), "BAD_INPUT") == 0;
     dlx_end(&c);
+    dlx_pc_submit(&c, &rig, "sent", NULL);
+    ok = ok && dlx_run(&c) && strcmp(dlx_err_code(&c), "BAD_INPUT") == 0 &&
+         strstr(c.reply.error.message, "skip") != NULL;
+    dlx_end(&c);
     ok = ok && dlx_queue_empty();
     dlx_pc_submit(&c, &rig, "skip", "why");
     ok = ok && dlx_run(&c) && dlx_ok(&c);
@@ -13486,6 +13490,30 @@ static bool dlx_pc_missing_lint_refused(void)
     return ok;
 }
 
+/* The gates lint the worktree, so a tip that is not its HEAD is refused. */
+static bool dlx_pc_tip_not_head_refused(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char parent[64];
+    const char *rev[] = { "rev-parse", "HEAD~1", NULL };
+    bool ok;
+    if (!dlx_pc_rig(&rig, "precheck_tip", true, "check-core-seal\n") ||
+        dlx_git_out(rig.clone, rev, parent, sizeof(parent)) != 0)
+        return false;
+    parent[strcspn(parent, "\n")] = '\0';
+    dlx_begin(&c, NULL);
+    (void)json_push_kv_str(&c.input, "action", "submit");
+    (void)json_push_kv_str(&c.input, "tip", parent);
+    (void)json_push_kv_str(&c.input, "worktree", rig.clone);
+    ok = dlx_run(&c) && !dlx_ok(&c) &&
+         strcmp(dlx_err_code(&c), "PRECHECK_TIP_NOT_HEAD") == 0;
+    dlx_end(&c);
+    ok = ok && dlx_queue_empty() && !dlx_pc_ran(&rig, "check-core-seal");
+    dlx_restore();
+    return ok;
+}
+
 static int dlx_case_precheck(void)
 {
     int failures = 0;
@@ -13511,6 +13539,10 @@ static int dlx_case_precheck(void)
     }
     TEST("land: precheck without a lane z23-lint refuses with the prime hint") {
         ASSERT(dlx_pc_missing_lint_refused());
+        PASS();
+    }
+    TEST("land: precheck refuses a tip that is not the worktree HEAD") {
+        ASSERT(dlx_pc_tip_not_head_refused());
         PASS();
     }
 _test_next:;

@@ -3323,23 +3323,28 @@ static void dl_submit_report_groups(struct zcl_command_reply *reply,
     json_free(&list);
 }
 
-/* The local lint precheck, before anything is queued; --qualify already ran
- * full lint. note_buf holds the note the row will carry. */
+/* The local lint precheck, before anything is queued. note_buf holds the note
+ * the row will carry. The mode is validated and the skip marker applied on
+ * every path. Two paths do not run the gates: --qualify (it already ran full
+ * lint on exactly this tip, and its row records that) and the receive entry
+ * (the sending host ran the precheck; a skip it chose is in the note). Any
+ * other tip must be the worktree's HEAD, since the gates lint the worktree. */
 static bool dl_submit_precheck(const struct zcl_command_request *req,
                                const struct dl_dirs *d, const char *root,
+                               const char *full, bool sender_checked,
                                const struct zcl_land_qualify *qr,
                                char *note_buf, size_t cap,
                                struct zcl_command_reply *reply)
 {
     const char *note = dl_str(req, "note");
     (void)snprintf(note_buf, cap, "%s", note ? note : "");
-    if (qr->tip[0])
-        return true;
-    return zcl_dev_land_precheck(DL_LEAF, root, d->land,
-                                 dl_str(req, "precheck"), note_buf, cap, reply);
+    return zcl_dev_land_precheck(DL_LEAF, root, d->land, dl_str(req, "precheck"),
+                                 full, sender_checked || qr->tip[0] != '\0',
+                                 note_buf, cap, reply);
 }
 
 static void dl_submit(const struct zcl_command_request *req,
+                      bool sender_checked,
                       struct zcl_command_reply *reply)
 {
     struct dl_dirs d;
@@ -3421,7 +3426,8 @@ static void dl_submit(const struct zcl_command_request *req,
                 "input.note over the row budget");
         return;
     }
-    if (!dl_submit_precheck(req, &d, root, &qr, note_buf, sizeof(note_buf),
+    if (!dl_submit_precheck(req, &d, root, full,
+                            sender_checked, &qr, note_buf, sizeof(note_buf),
                             reply))
         return;
     memset(&r, 0, sizeof(r));
@@ -12463,7 +12469,7 @@ static void dl_handle(const struct zcl_command_request *request,
     }
     if (dl_hold_action(action, request, reply)) return;
     if (strcmp(action, "submit") == 0) {
-        dl_submit(request, reply);
+        dl_submit(request, false, reply);
         return;
     }
     if (strcmp(action, "fence_replace") == 0) {
@@ -12513,7 +12519,7 @@ void zcl_native_handle_dev_land(const struct zcl_command_request *request,
  * receive leaf prepares a worktree at a fetched tip and then queues it through
  * exactly the submit handler above, so none of submit's checks is duplicated.
  * The git runner is the same no-shell dl_git every other step uses. */
-void zcl_native_dev_land_submit(const struct zcl_command_request *request,
+void zcl_native_dev_land_submit_received(const struct zcl_command_request *request,
                                 struct zcl_command_reply *reply)
 {
     if (!reply)
@@ -12523,7 +12529,7 @@ void zcl_native_dev_land_submit(const struct zcl_command_request *request,
                 "request.input was missing");
         return;
     }
-    dl_submit(request, reply);
+    dl_submit(request, true, reply);
 }
 
 int zcl_native_dev_land_git(const char *dir, const char *const *args,
