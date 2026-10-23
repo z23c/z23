@@ -33,6 +33,9 @@
 /* ── block_index_cmp_height ────────────────────────────────────── */
 
 int boot_block_scan_test_worker_count(int nfiles, uint32_t cpus);
+int boot_block_scan_test_gap_height(struct main_state *ms,
+                                    struct block_index *genesis_bi,
+                                    bool force_slow);
 
 #ifndef _WIN32
 static bool scan_descriptor_matches_policy(
@@ -727,6 +730,87 @@ static int test_wallet_scan_cursor_start(void)
     return 1;
 }
 
+/* ── chain-gap diagnostic: single-pass walk equals the per-height scan ── */
+
+static struct block_index *gap_add(struct main_state *ms, int height,
+                                   struct block_index *pprev, uint32_t *serial)
+{
+    struct block_index *b = zcl_malloc(sizeof(*b), "test.gap.bi");
+    if (!b)
+        return NULL;
+    block_index_init(b);
+    b->nHeight = height;
+    b->pprev = pprev;
+    b->nTx = 1;
+    b->nChainTx = height == 0 ? 1 : 0;
+    struct uint256 h;
+    memset(&h, 0, sizeof(h));
+    h.data[0] = (uint8_t)(*serial);
+    h.data[1] = (uint8_t)(*serial >> 8);
+    h.data[2] = (uint8_t)(*serial >> 16);
+    (*serial)++;
+    if (!block_map_insert(&ms->map_block_index, &h, b)) {
+        free(b);
+        return NULL;
+    }
+    return b;
+}
+
+/* Build genesis, a fork entry at h=2 (inserted before the real h=2), a
+ * chain to `top`, skipping `missing` (0 = none) and adding an unlinked
+ * stray at the missing height. Returns the number of failures. */
+static int gap_scenario(int top, int missing, int expect_gap)
+{
+    struct main_state ms;
+    main_state_init(&ms);
+    uint32_t serial = 1;
+    int failures = 0;
+    struct block_index *g = gap_add(&ms, 0, NULL, &serial);
+    struct block_index *prev = g;
+    if (!g || !gap_add(&ms, 2, g, &serial)) /* fork: pprev is genesis */
+        failures++;
+    for (int h = 1; g && h <= top; h++) {
+        if (h == missing) {
+            struct block_index *stray = gap_add(&ms, h, NULL, &serial);
+            if (stray)
+                stray->nStatus |= BLOCK_HAVE_DATA;
+            else
+                failures++;
+            break;
+        }
+        prev = gap_add(&ms, h, prev, &serial);
+        if (!prev) {
+            failures++;
+            break;
+        }
+    }
+    if (g) {
+        int fast = boot_block_scan_test_gap_height(&ms, g, false);
+        int slow = boot_block_scan_test_gap_height(&ms, g, true);
+        failures += fast != expect_gap || slow != expect_gap;
+    }
+    struct block_index *b;
+    size_t it = 0;
+    while (block_map_next(&ms.map_block_index, &it, NULL, &b))
+        free(b);
+    main_state_free(&ms);
+    return failures;
+}
+
+static int test_chain_gap_walk(void)
+{
+    printf("GIVEN chains with a fork and a missing height "
+           "WHEN the gap walk runs THEN fast == slow == expected... ");
+    int failures = 0;
+    failures += gap_scenario(1100, 0, -1); /* contiguous past 999 */
+    failures += gap_scenario(40, 7, 7);    /* gap at h=7 with a stray */
+    failures += gap_scenario(3, 0, 4);     /* chain ends: gap at h=4 */
+    failures += gap_scenario(1, 1, 1);     /* gap at the first height */
+    if (failures == 0) { printf("OK\n"); return 0; }
+    printf("FAIL (%d)\n", failures);
+    return 1;
+}
+
 int test_block_scan(void)
 {
     int failures = 0;
@@ -736,6 +820,7 @@ int test_block_scan(void)
     failures += test_scan_block_descriptor_cloexec();
     failures += test_scan_storage_concurrency();
     failures += test_cmp_height();
+    failures += test_chain_gap_walk();
     failures += test_failed_child_propagation();
     failures += test_nchaintx_propagation();
     failures += test_block_magic();

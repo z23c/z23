@@ -620,33 +620,119 @@ static struct block_index *scan_find_any_at_height(struct main_state *ms,
             return fb;
     return NULL;
 }
+/* Entries with 1 <= nHeight < SCAN_GAP_MAX_HEIGHT, in map iteration order.
+ * The gap diagnostic only ever looks at these, so one pass over the whole
+ * map replaces one pass per height. `e == NULL` means "not collected":
+ * callers then fall back to scanning the full map. */
+#define SCAN_GAP_MAX_HEIGHT 1000
+struct scan_low_entries {
+    struct block_index **e;
+    size_t n;
+};
+static bool scan_is_low_entry(const struct block_index *b)
+{
+    return b && b->nHeight >= 1 && b->nHeight < SCAN_GAP_MAX_HEIGHT;
+}
+/* One counting pass plus one filling pass; both O(map size). On allocation
+ * failure logs and leaves `out->e` NULL so the caller uses the slow walk. */
+static void scan_collect_low_entries(struct main_state *ms,
+                                     struct scan_low_entries *out)
+{
+    size_t it = 0, count = 0;
+    struct block_index *b;
+    out->e = NULL;
+    out->n = 0;
+    while (block_map_next(&ms->map_block_index, &it, NULL, &b))
+        if (scan_is_low_entry(b))
+            count++;
+    out->e = zcl_malloc((count ? count : 1) * sizeof(*out->e),
+                        "boot.scan.gap_low");
+    if (!out->e) {
+        fprintf(stderr, "scan: cannot allocate %zu low-height entries for "
+                "the chain-gap diagnostic; using the slow walk\n", count);
+        return;
+    }
+    it = 0;
+    while (out->n < count &&
+           block_map_next(&ms->map_block_index, &it, NULL, &b))
+        if (scan_is_low_entry(b))
+            out->e[out->n++] = b;
+}
+/* First collected child of `walk` at height `h`, or NULL. */
+static struct block_index *scan_low_child_at(const struct scan_low_entries *lo,
+                                             const struct block_index *walk,
+                                             int h)
+{
+    for (size_t i = 0; i < lo->n; i++)
+        if (lo->e[i]->pprev == walk && lo->e[i]->nHeight == h)
+            return lo->e[i];
+    return NULL;
+}
+/* First collected entry at height `h`, or NULL. */
+static struct block_index *scan_low_any_at(const struct scan_low_entries *lo,
+                                           int h)
+{
+    for (size_t i = 0; i < lo->n; i++)
+        if (lo->e[i]->nHeight == h)
+            return lo->e[i];
+    return NULL;
+}
+static struct block_index *scan_gap_child(struct main_state *ms,
+                                          const struct scan_low_entries *lo,
+                                          struct block_index *walk, int h)
+{
+    return lo->e ? scan_low_child_at(lo, walk, h)
+                 : scan_find_child_at_height(ms, walk, h);
+}
+static struct block_index *scan_gap_alt(struct main_state *ms,
+                                        const struct scan_low_entries *lo,
+                                        int h)
+{
+    return lo->e ? scan_low_any_at(lo, h) : scan_find_any_at_height(ms, h);
+}
 /* Walk the active chain forward from genesis and report the first height
  * with no child link. Returns that height, or -1 when contiguous. */
 static int scan_walk_chain_for_gap(struct main_state *ms,
-                                   struct block_index *genesis_bi)
+                                   struct block_index *genesis_bi,
+                                   const struct scan_low_entries *lo)
 {
-    int gap_h = -1;
     struct block_index *walk = genesis_bi;
-    for (int h = 1; h < 1000 && gap_h < 0; h++) {
-        struct block_index *next = scan_find_child_at_height(ms, walk, h);
-        bool found_next = next != NULL;
-        if (found_next) {
+    for (int h = 1; h < SCAN_GAP_MAX_HEIGHT; h++) {
+        struct block_index *next = scan_gap_child(ms, lo, walk, h);
+        if (next) {
             walk = next;
             continue;
         }
         /* Try finding ANY block at height h */
-        struct block_index *alt = scan_find_any_at_height(ms, h);
+        struct block_index *alt = scan_gap_alt(ms, lo, h);
         printf("  Chain gap at h=%d: pprev_child=%s "
                "alt_at_h=%s have_data=%d nTx=%u\n",
-               h,
-               found_next ? "yes" : "no",
-               alt ? "yes" : "no",
+               h, "no", alt ? "yes" : "no",
                alt ? !!(alt->nStatus & BLOCK_HAVE_DATA) : 0,
                alt ? alt->nTx : 0);
-        gap_h = h;
+        return h;
     }
+    return -1;
+}
+/* Collect, walk, release. `force_slow` skips the collection (test seam). */
+static int scan_gap_height(struct main_state *ms,
+                           struct block_index *genesis_bi, bool force_slow)
+{
+    struct scan_low_entries lo = {NULL, 0};
+    if (!force_slow)
+        scan_collect_low_entries(ms, &lo);
+    int gap_h = scan_walk_chain_for_gap(ms, genesis_bi, &lo);
+    free(lo.e);
     return gap_h;
 }
+#ifdef ZCL_TESTING
+int boot_block_scan_test_gap_height(struct main_state *ms,
+                                    struct block_index *genesis_bi,
+                                    bool force_slow)
+{
+    return scan_gap_height(ms, genesis_bi, force_slow);
+}
+#endif
 /* Find first gap in chain — diagnostic for pprev breaks */
 static void scan_report_first_chain_gap(struct main_state *ms)
 {
@@ -654,7 +740,7 @@ static void scan_report_first_chain_gap(struct main_state *ms)
     if (!genesis_bi)
         return;
     /* Walk forward from genesis via the active chain */
-    if (scan_walk_chain_for_gap(ms, genesis_bi) < 0)
+    if (scan_gap_height(ms, genesis_bi, false) < 0)
         printf("  Chain contiguous from genesis to h=999+\n");
 }
 /* Count blocks with HAVE_DATA but no nChainTx — these are
