@@ -42,7 +42,7 @@
 /* See vcs/package_store.h: OFF by default, so every store_atomic_write
  * fsyncs/FlushFileBuffers before its atomic rename exactly as the
  * crash-recovery contract requires. */
-static _Atomic bool g_store_deferred_sync = false;
+_Atomic bool g_store_deferred_sync = false;
 
 void vcs_package_store_set_deferred_sync(bool enabled)
 {
@@ -54,220 +54,10 @@ bool vcs_package_store_deferred_sync_enabled(void)
     return atomic_load(&g_store_deferred_sync);
 }
 
-#if defined(_WIN32)
-static void store_set_errno(DWORD error)
-{
-    switch (error) {
-    case ERROR_FILE_NOT_FOUND:
-    case ERROR_PATH_NOT_FOUND: errno = ENOENT; break;
-    case ERROR_ACCESS_DENIED:
-    case ERROR_SHARING_VIOLATION: errno = EACCES; break;
-    case ERROR_ALREADY_EXISTS:
-    case ERROR_FILE_EXISTS: errno = EEXIST; break;
-    case ERROR_DIR_NOT_EMPTY: errno = ENOTEMPTY; break;
-    default: errno = EIO; break;
-    }
-}
-
-static bool store_wide_path(const char *path, wchar_t out[STORE_PATH_MAX])
-{
-    int count = path ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-                                            path, -1, NULL, 0) : 0;
-    return count > 0 && count <= (int)STORE_PATH_MAX &&
-           MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, out,
-                               count) == count;
-}
-
-static bool store_win32_real_directory(const wchar_t *path)
-{
-    HANDLE handle = CreateFileW(
-        path, FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    FILE_ATTRIBUTE_TAG_INFO tag;
-    bool ok = handle != INVALID_HANDLE_VALUE &&
-              GetFileInformationByHandleEx(handle, FileAttributeTagInfo,
-                                            &tag, sizeof(tag)) &&
-              (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-              (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-    if (handle != INVALID_HANDLE_VALUE)
-        CloseHandle(handle);
-    return ok;
-}
-
-static bool store_win32_delete_leaf(const wchar_t *path, DWORD attributes)
-{
-    if ((attributes & FILE_ATTRIBUTE_READONLY) != 0 &&
-        !SetFileAttributesW(path, attributes & ~FILE_ATTRIBUTE_READONLY))
-        return false;
-    if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
-        return RemoveDirectoryW(path) != 0;
-    return DeleteFileW(path) != 0;
-}
-#endif
-
 bool store_name_is_hex64(const char *name)
 {
     uint8_t scratch[32];
     return zcl_hex_decode_lower(name, scratch, 32);
-}
-
-#if !defined(_WIN32)
-static bool store_mkdir_real(const char *path)
-{
-    if (mkdir(path, 0700) != 0 && errno != EEXIST)
-        LOG_FAIL(STORE_LOG, "create store directory %s: %s", path,
-                 strerror(errno));
-    struct stat st;
-    if (lstat(path, &st) != 0)
-        LOG_FAIL(STORE_LOG, "inspect store directory %s: %s", path,
-                 strerror(errno));
-    if (!S_ISDIR(st.st_mode))
-        LOG_FAIL(STORE_LOG, "store path is not a real directory: %s", path);
-    return true;
-}
-#endif
-
-bool store_mkdir_p(const char *path)
-{
-#if defined(_WIN32)
-    wchar_t wide[STORE_PATH_MAX];
-    if (!store_wide_path(path, wide) || !wide[0])
-        return false;
-    for (wchar_t *p = wide + 1; ; p++) {
-        if (*p != L'/' && *p != L'\\' && *p != L'\0')
-            continue;
-        wchar_t saved = *p;
-        if (p == wide + 2 && wide[1] == L':') {
-            if (saved == L'\0')
-                return store_win32_real_directory(wide);
-            continue;
-        }
-        *p = L'\0';
-        bool created = CreateDirectoryW(wide, NULL) != 0;
-        DWORD error = created ? ERROR_SUCCESS : GetLastError();
-        bool ok = (created || error == ERROR_ALREADY_EXISTS) &&
-                  store_win32_real_directory(wide);
-        *p = saved;
-        if (!ok)
-            return false;
-        if (saved == L'\0')
-            return true;
-    }
-#else
-    char buf[STORE_PATH_MAX];
-    size_t len = strlen(path);
-    if (len == 0 || len >= sizeof(buf))
-        return false;
-    memcpy(buf, path, len + 1);
-    for (char *p = buf + 1; *p; p++) {
-        if (*p != '/')
-            continue;
-        *p = '\0';
-        if (!store_mkdir_real(buf))
-            return false;
-        *p = '/';
-    }
-    return store_mkdir_real(buf);
-#endif
-}
-
-bool store_rm_rf(const char *path)
-{
-#if defined(_WIN32)
-    wchar_t wide[STORE_PATH_MAX];
-    if (!store_wide_path(path, wide))
-        return false;
-    DWORD attrs = GetFileAttributesW(wide);
-    if (attrs == INVALID_FILE_ATTRIBUTES) {
-        DWORD error = GetLastError();
-        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
-            return true;
-        store_set_errno(error);
-        return false;
-    }
-    if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
-        (attrs & FILE_ATTRIBUTE_DIRECTORY) == 0)
-        return store_win32_delete_leaf(wide, attrs);
-    if (!store_win32_real_directory(wide))
-        return false;
-    size_t len = wcslen(wide);
-    if (len + 3 > STORE_PATH_MAX)
-        return false;
-    wchar_t pattern[STORE_PATH_MAX];
-    memcpy(pattern, wide, (len + 1) * sizeof(*wide));
-    if (len && pattern[len - 1] != L'/' && pattern[len - 1] != L'\\')
-        pattern[len++] = L'\\';
-    pattern[len++] = L'*';
-    pattern[len] = L'\0';
-    WIN32_FIND_DATAW entry;
-    HANDLE find = FindFirstFileW(pattern, &entry);
-    bool ok = true;
-    if (find != INVALID_HANDLE_VALUE) {
-        do {
-            if (wcscmp(entry.cFileName, L".") == 0 ||
-                wcscmp(entry.cFileName, L"..") == 0)
-                continue;
-            wchar_t child[STORE_PATH_MAX];
-            int n = swprintf(child, STORE_PATH_MAX, L"%ls\\%ls", wide,
-                             entry.cFileName);
-            if (n <= 0 || (size_t)n >= STORE_PATH_MAX) {
-                ok = false;
-                continue;
-            }
-            if ((entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                if (!store_win32_delete_leaf(child, entry.dwFileAttributes))
-                    ok = false;
-                continue;
-            }
-            int utf8_count = WideCharToMultiByte(
-                CP_UTF8, WC_ERR_INVALID_CHARS, child, -1, NULL, 0, NULL, NULL);
-            char child_utf8[STORE_PATH_MAX];
-            if (utf8_count <= 0 || utf8_count > (int)STORE_PATH_MAX ||
-                WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, child, -1,
-                                    child_utf8, utf8_count, NULL, NULL) !=
-                    utf8_count ||
-                !store_rm_rf(child_utf8))
-                ok = false;
-        } while (FindNextFileW(find, &entry));
-        if (GetLastError() != ERROR_NO_MORE_FILES)
-            ok = false;
-        FindClose(find);
-    } else if (GetLastError() != ERROR_FILE_NOT_FOUND) {
-        ok = false;
-    }
-    if (!store_win32_delete_leaf(wide, attrs))
-        ok = false;
-    return ok;
-#else
-    struct stat st;
-    if (lstat(path, &st) != 0)
-        return errno == ENOENT;
-    if (!S_ISDIR(st.st_mode))
-        return unlink(path) == 0;
-    DIR *dir = opendir(path);
-    if (!dir)
-        return false;
-    bool ok = true;
-    struct dirent *ent;
-    while ((ent = readdir(dir)) != NULL) {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
-            continue;
-        char child[STORE_PATH_MAX];
-        int n = snprintf(child, sizeof(child), "%s/%s", path, ent->d_name);
-        if (n <= 0 || (size_t)n >= sizeof(child)) {
-            ok = false;
-            continue;
-        }
-        if (!store_rm_rf(child))
-            ok = false;
-    }
-    closedir(dir);
-    if (rmdir(path) != 0)
-        ok = false;
-    return ok;
-#endif
 }
 
 bool store_path_exists(const char *path)
@@ -377,98 +167,6 @@ bool store_unlink(const char *path)
     return false;
 #else
     return unlink(path) == 0 || errno == ENOENT;
-#endif
-}
-
-bool store_atomic_write(const char *path, const uint8_t *data,
-                        size_t data_len)
-{
-#if defined(_WIN32)
-    static _Atomic uint64_t g_seq = 0;
-    uint64_t seq = atomic_fetch_add(&g_seq, 1);
-    char tmp[STORE_PATH_MAX];
-    int tn = snprintf(tmp, sizeof(tmp), "%s%s.%lu.%llu", path,
-                      STORE_TEMP_SUFFIX, (unsigned long)GetCurrentProcessId(),
-                      (unsigned long long)seq);
-    wchar_t wide_tmp[STORE_PATH_MAX], wide_path[STORE_PATH_MAX];
-    if (tn <= 0 || (size_t)tn >= sizeof(tmp) ||
-        !store_wide_path(tmp, wide_tmp) || !store_wide_path(path, wide_path))
-        LOG_FAIL(STORE_LOG, "temp path too long for %s", path);
-    HANDLE file = CreateFileW(wide_tmp, GENERIC_WRITE, 0, NULL, CREATE_NEW,
-                              FILE_ATTRIBUTE_NORMAL |
-                                  FILE_FLAG_WRITE_THROUGH,
-                              NULL);
-    if (file == INVALID_HANDLE_VALUE)
-        LOG_FAIL(STORE_LOG, "open temp %s: Win32 error %lu", tmp,
-                 (unsigned long)GetLastError());
-    size_t off = 0;
-    bool ok = true;
-    while (off < data_len) {
-        DWORD amount = data_len - off > UINT32_MAX
-                           ? UINT32_MAX
-                           : (DWORD)(data_len - off);
-        DWORD written = 0;
-        if (!WriteFile(file, data + off, amount, &written, NULL) ||
-            written == 0) {
-            ok = false;
-            break;
-        }
-        off += written;
-    }
-    if (ok && !atomic_load(&g_store_deferred_sync))
-        ok = FlushFileBuffers(file) != 0;
-    if (!CloseHandle(file))
-        ok = false;
-    if (ok)
-        ok = MoveFileExW(wide_tmp, wide_path,
-                         MOVEFILE_REPLACE_EXISTING |
-                             MOVEFILE_WRITE_THROUGH) != 0;
-    if (!ok) {
-        DWORD error = GetLastError();
-        (void)DeleteFileW(wide_tmp);
-        LOG_FAIL(STORE_LOG, "durable write %s: Win32 error %lu", path,
-                 (unsigned long)error);
-    }
-    return true;
-#else
-    static _Atomic uint64_t g_seq = 0;
-    uint64_t seq = atomic_fetch_add(&g_seq, 1);
-    char tmp[STORE_PATH_MAX];
-    int tn = snprintf(tmp, sizeof(tmp), "%s%s.%ld.%llu", path,
-                      STORE_TEMP_SUFFIX, (long)getpid(),
-                      (unsigned long long)seq);
-    if (tn <= 0 || (size_t)tn >= sizeof(tmp))
-        LOG_FAIL(STORE_LOG, "temp path too long for %s", path);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
-    if (fd < 0)
-        LOG_FAIL(STORE_LOG, "open temp %s: %s", tmp, strerror(errno));
-    size_t off = 0;
-    while (off < data_len) {
-        ssize_t w = write(fd, data + off, data_len - off);
-        if (w < 0) {
-            if (errno == EINTR)
-                continue;
-            close(fd);
-            unlink(tmp);
-            LOG_FAIL(STORE_LOG, "write temp %s: %s", tmp, strerror(errno));
-        }
-        off += (size_t)w;
-    }
-    if (!atomic_load(&g_store_deferred_sync) && fsync(fd) != 0) {
-        close(fd);
-        unlink(tmp);
-        LOG_FAIL(STORE_LOG, "fsync temp %s: %s", tmp, strerror(errno));
-    }
-    if (close(fd) != 0) {
-        unlink(tmp);
-        LOG_FAIL(STORE_LOG, "close temp %s: %s", tmp, strerror(errno));
-    }
-    if (rename(tmp, path) != 0) {
-        unlink(tmp);
-        LOG_FAIL(STORE_LOG, "rename %s -> %s: %s", tmp, path,
-                 strerror(errno));
-    }
-    return true;
 #endif
 }
 
@@ -645,148 +343,54 @@ bool store_package_complete(const struct vcs_package_store *store,
     return (uint64_t)present == (uint64_t)pkg->chunk_count;
 }
 
+/* Staging directory, staged manifest and final manifest paths for a commit. */
+static bool store_commit_paths(const struct vcs_package_store *store,
+                               const struct store_package *pkg,
+                               char staging_dir[STORE_PATH_MAX],
+                               char staged[STORE_PATH_MAX],
+                               char final[STORE_PATH_MAX])
+{
+    int dn = snprintf(staging_dir, STORE_PATH_MAX, "%s/staging/%s",
+                      store->root, pkg->root_hex);
+    int sn = snprintf(staged, STORE_PATH_MAX, "%s/manifest", staging_dir);
+    int fn = snprintf(final, STORE_PATH_MAX, "%s/manifests/%s", store->root,
+                      pkg->root_hex);
+    return dn > 0 && (size_t)dn < STORE_PATH_MAX && sn > 0 &&
+           (size_t)sn < STORE_PATH_MAX && fn > 0 &&
+           (size_t)fn < STORE_PATH_MAX;
+}
+
 bool store_package_commit(struct vcs_package_store *store,
                           struct store_package *pkg)
 {
-#if defined(_WIN32)
     char staging_dir[STORE_PATH_MAX];
     char staged[STORE_PATH_MAX];
     char final[STORE_PATH_MAX];
-    int dn = snprintf(staging_dir, sizeof(staging_dir), "%s/staging/%s",
-                      store->root, pkg->root_hex);
-    int sn = snprintf(staged, sizeof(staged), "%s/manifest", staging_dir);
-    int fn = snprintf(final, sizeof(final), "%s/manifests/%s", store->root,
-                      pkg->root_hex);
+#if defined(_WIN32)
     wchar_t wide_staged[STORE_PATH_MAX], wide_final[STORE_PATH_MAX];
-    if (dn <= 0 || (size_t)dn >= sizeof(staging_dir) || sn <= 0 ||
-        (size_t)sn >= sizeof(staged) || fn <= 0 ||
-        (size_t)fn >= sizeof(final) || !store_wide_path(staged, wide_staged) ||
+    if (!store_commit_paths(store, pkg, staging_dir, staged, final) ||
+        !store_wide_path(staged, wide_staged) ||
         !store_wide_path(final, wide_final))
         LOG_FAIL(STORE_LOG, "commit path too long for %s", pkg->root_hex);
     if (!MoveFileExW(wide_staged, wide_final,
                      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
         LOG_FAIL(STORE_LOG, "commit rename %s -> %s: Win32 error %lu", staged,
                  final, (unsigned long)GetLastError());
-    if (!store_rm_rf(staging_dir))
-        LOG_FAIL(STORE_LOG, "commit cleanup %s", staging_dir);
-    pkg->committed = true;
-    store_package_touch(store, pkg);
-    return true;
 #else
-    char staging_dir[STORE_PATH_MAX];
-    char staged[STORE_PATH_MAX];
-    char final[STORE_PATH_MAX];
-    int dn = snprintf(staging_dir, sizeof(staging_dir), "%s/staging/%s",
-                      store->root, pkg->root_hex);
-    int sn = snprintf(staged, sizeof(staged), "%s/manifest", staging_dir);
-    int fn = snprintf(final, sizeof(final), "%s/manifests/%s", store->root,
-                      pkg->root_hex);
-    if (dn <= 0 || (size_t)dn >= sizeof(staging_dir) || sn <= 0 ||
-        (size_t)sn >= sizeof(staged) || fn <= 0 ||
-        (size_t)fn >= sizeof(final))
+    if (!store_commit_paths(store, pkg, staging_dir, staged, final))
         LOG_FAIL(STORE_LOG, "commit path too long for %s", pkg->root_hex);
     if (rename(staged, final) != 0)
         LOG_FAIL(STORE_LOG, "commit rename %s -> %s: %s", staged, final,
                  strerror(errno));
+#endif
     if (!store_rm_rf(staging_dir))
         LOG_FAIL(STORE_LOG, "commit cleanup %s", staging_dir);
     pkg->committed = true;
     store_package_touch(store, pkg);
     return true;
-#endif
 }
 
 /* ── open / recovery ──────────────────────────────────────────────── */
-
-static void store_sweep_temps(struct vcs_package_store *store,
-                              const char *dir)
-{
-#if defined(_WIN32)
-    (void)store;
-    struct platform_directory_list dirs = {0};
-    struct platform_directory_list files = {0};
-    if (!platform_directory_list_real_sorted(dir, &dirs))
-        return;
-    for (size_t i = 0; i < dirs.count; i++) {
-        char child[STORE_PATH_MAX];
-        int n = snprintf(child, sizeof(child), "%s/%s", dir,
-                         dirs.entries[i].name);
-        if (n > 0 && (size_t)n < sizeof(child))
-            store_sweep_temps(store, child);
-    }
-    platform_directory_list_free(&dirs);
-    if (!platform_directory_list_regular_sorted(dir, &files))
-        return;
-    for (size_t i = 0; i < files.count; i++) {
-        const char *owner_text = strstr(files.entries[i].name,
-                                        STORE_TEMP_SUFFIX ".");
-        unsigned long owner = 0;
-        unsigned long long sequence = 0;
-        int consumed = 0;
-        bool live = false;
-        if (owner_text &&
-            sscanf(owner_text + sizeof(STORE_TEMP_SUFFIX), "%lu.%llu%n",
-                   &owner, &sequence, &consumed) == 2 && owner > 0 &&
-            owner_text[sizeof(STORE_TEMP_SUFFIX) + consumed] == '\0') {
-            HANDLE process = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)owner);
-            if (process) {
-                DWORD exit_code = 0;
-                live = GetExitCodeProcess(process, &exit_code) &&
-                       exit_code == STILL_ACTIVE;
-                CloseHandle(process);
-            } else {
-                live = GetLastError() == ERROR_ACCESS_DENIED;
-            }
-        }
-        (void)sequence;
-        if (!live && owner_text) {
-            char child[STORE_PATH_MAX];
-            int n = snprintf(child, sizeof(child), "%s/%s", dir,
-                             files.entries[i].name);
-            wchar_t wide[STORE_PATH_MAX];
-            if (n > 0 && (size_t)n < sizeof(child) &&
-                store_wide_path(child, wide) && DeleteFileW(wide))
-                LOG_INFO(STORE_LOG, "swept leftover temp %s", child);
-        }
-    }
-    platform_directory_list_free(&files);
-#else
-    DIR *d = opendir(dir);
-    if (!d)
-        return;
-    struct dirent *ent;
-    while ((ent = readdir(d)) != NULL) {
-        if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
-            continue;
-        char child[STORE_PATH_MAX];
-        int n = snprintf(child, sizeof(child), "%s/%s", dir, ent->d_name);
-        if (n <= 0 || (size_t)n >= sizeof(child))
-            continue;
-        struct stat st;
-        if (lstat(child, &st) != 0)
-            continue;
-        if (S_ISDIR(st.st_mode)) {
-            store_sweep_temps(store, child);
-        } else if (strstr(ent->d_name, STORE_TEMP_SUFFIX ".") != NULL) {
-            const char *owner_text = strstr(
-                ent->d_name, STORE_TEMP_SUFFIX ".");
-            long owner = 0;
-            unsigned long long sequence = 0;
-            int consumed = 0;
-            bool owned_by_live_process = owner_text &&
-                sscanf(owner_text + sizeof(STORE_TEMP_SUFFIX),
-                       "%ld.%llu%n", &owner, &sequence, &consumed) == 2 &&
-                owner > 0 &&
-                owner_text[sizeof(STORE_TEMP_SUFFIX) + consumed] == '\0' &&
-                (kill((pid_t)owner, 0) == 0 || errno == EPERM);
-            (void)sequence;
-            if (!owned_by_live_process && unlink(child) == 0)
-                LOG_INFO(STORE_LOG, "swept leftover temp %s", child);
-        }
-    }
-    closedir(d);
-#endif
-}
 
 /* Read a whole file bounded by VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES. */
 static int store_chunk_hash_cmp(const void *a, const void *b)
@@ -1128,15 +732,11 @@ static void store_load_committed_record(struct vcs_package_store *store,
     free(wire);
 }
 
-/* Load every committed and staged manifest. Any indeterminate staged read or
- * catalog failure refuses open without deleting the bytes: allocation and
- * I/O failures cannot be distinguished safely from malformed staging here.
- * A manifest already renamed into verified committed storage may leave an
- * empty staging directory after a crash; that directory alone is discarded. */
-static bool store_load_manifests(struct vcs_package_store *store)
+/* Every committed manifest under dir. An unreadable entry or listing marks
+ * the catalog incomplete; the caller decides whether that refuses open. */
+static void store_load_committed(struct vcs_package_store *store,
+                                 const char *dir)
 {
-    char dir[STORE_PATH_MAX];
-    snprintf(dir, sizeof(dir), "%s/manifests", store->root);
 #if defined(_WIN32)
     struct platform_directory_list files = {0};
     if (platform_directory_list_regular_sorted(dir, &files)) {
@@ -1149,21 +749,6 @@ static bool store_load_manifests(struct vcs_package_store *store)
         platform_directory_list_free(&files);
     } else
         store->catalog_incomplete = true;
-    snprintf(dir, sizeof(dir), "%s/staging", store->root);
-    struct platform_directory_list dirs = {0};
-    if (!platform_directory_list_real_sorted(dir, &dirs))
-        LOG_FAIL(STORE_LOG, "list staging manifests under %s", dir);
-    for (size_t i = 0; i < dirs.count; i++) {
-        const char *name = dirs.entries[i].name;
-        if (!store_name_is_hex64(name))
-            continue;
-        if (!store_load_staged_record(store, dir, name)) {
-            platform_directory_list_free(&dirs);
-            return false;
-        }
-    }
-    platform_directory_list_free(&dirs);
-    return true;
 #else
     DIR *d = opendir(dir);
     if (d) {
@@ -1180,8 +765,37 @@ static bool store_load_manifests(struct vcs_package_store *store)
         closedir(d);
     } else
         store->catalog_incomplete = true;
+#endif
+}
+
+/* Load every committed and staged manifest. Any indeterminate staged read or
+ * catalog failure refuses open without deleting the bytes: allocation and
+ * I/O failures cannot be distinguished safely from malformed staging here.
+ * A manifest already renamed into verified committed storage may leave an
+ * empty staging directory after a crash; that directory alone is discarded. */
+static bool store_load_manifests(struct vcs_package_store *store)
+{
+    char dir[STORE_PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/manifests", store->root);
+    store_load_committed(store, dir);
     snprintf(dir, sizeof(dir), "%s/staging", store->root);
-    d = opendir(dir);
+#if defined(_WIN32)
+    struct platform_directory_list dirs = {0};
+    if (!platform_directory_list_real_sorted(dir, &dirs))
+        LOG_FAIL(STORE_LOG, "list staging manifests under %s", dir);
+    for (size_t i = 0; i < dirs.count; i++) {
+        const char *name = dirs.entries[i].name;
+        if (!store_name_is_hex64(name))
+            continue;
+        if (!store_load_staged_record(store, dir, name)) {
+            platform_directory_list_free(&dirs);
+            return false;
+        }
+    }
+    platform_directory_list_free(&dirs);
+    return true;
+#else
+    DIR *d = opendir(dir);
     if (!d)
         LOG_FAIL(STORE_LOG, "open staging manifests under %s: %s", dir,
                  strerror(errno));
@@ -1247,6 +861,20 @@ static bool store_gc_ref_capacity(const struct vcs_package_store *store,
     return true;
 }
 
+/* Concat every loaded record's unique hashes into refs, sorted; returns the
+ * count. refs holds ref_cap entries as sized by store_gc_ref_capacity. */
+static size_t store_gc_collect_refs(const struct vcs_package_store *store,
+                                    uint8_t (*refs)[32])
+{
+    size_t ref_count = 0;
+    for (size_t i = 0; i < store->pkg_count; i++)
+        for (size_t c = 0; c < store->pkgs[i].chunk_count; c++)
+            memcpy(refs[ref_count++], store->pkgs[i].chunks[c].hash, 32);
+    if (ref_count > 0)
+        qsort(refs, ref_count, sizeof(*refs), store_hash_cmp);
+    return ref_count;
+}
+
 /* Delete CAS objects no loaded manifest references; build the CAS set. */
 static bool store_gc_cas(struct vcs_package_store *store)
 {
@@ -1260,12 +888,7 @@ static bool store_gc_cas(struct vcs_package_store *store)
         if (!refs)
             LOG_FAIL(STORE_LOG, "alloc %zu GC refs", ref_cap);
     }
-    size_t ref_count = 0;
-    for (size_t i = 0; i < store->pkg_count; i++)
-        for (size_t c = 0; c < store->pkgs[i].chunk_count; c++)
-            memcpy(refs[ref_count++], store->pkgs[i].chunks[c].hash, 32);
-    if (ref_count > 0)
-        qsort(refs, ref_count, sizeof(*refs), store_hash_cmp);
+    size_t ref_count = store_gc_collect_refs(store, refs);
 
     char cas_dir[STORE_PATH_MAX];
     snprintf(cas_dir, sizeof(cas_dir), "%s/cas/sha3", store->root);

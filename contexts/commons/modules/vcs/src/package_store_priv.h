@@ -2,8 +2,10 @@
  *
  * package_store_priv — private internals shared by the package_store
  * implementation units (package_store.c = public API/policy,
- * package_store_io.c = filesystem layout + crash recovery). NOT a public
- * header: nothing outside contexts/commons/modules/vcs/src/ includes this. */
+ * package_store_io.c = filesystem layout + crash recovery, package_store_fs.c
+ * = filesystem primitives: mkdir, delete, durable writes, temp sweep). NOT a
+ * public header: nothing outside contexts/commons/modules/vcs/src/ includes
+ * this. */
 
 #ifndef ZCL_VCS_PACKAGE_STORE_PRIV_H
 #define ZCL_VCS_PACKAGE_STORE_PRIV_H
@@ -13,6 +15,14 @@
 #include "vcs/package_manifest.h"
 
 #include <pthread.h>
+#include <stdatomic.h>
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <wchar.h>
+#include <windows.h>
+#endif
 
 #define STORE_PATH_MAX 4096u
 #define STORE_TEMP_SUFFIX ".zstmp"
@@ -87,16 +97,32 @@ void store_package_touch(struct vcs_package_store *store,
 void store_packages_touch_hash(struct vcs_package_store *store,
                                const uint8_t hash[32]);
 
-/* ── shared small helpers (package_store_io.c) ────────────────────── */
+/* ── shared small helpers (package_store_io.c, package_store_fs.c) ── */
+
+/* Set by vcs_package_store_set_deferred_sync; defined in package_store_io.c. */
+extern _Atomic bool g_store_deferred_sync;
 
 bool store_name_is_hex64(const char *name);
 bool store_directory_exists(const char *path);
+
+/* Win32 error and path helpers: defined in package_store_fs.c, used by the
+ * no-follow probes and unlink in package_store_io.c. */
+#if defined(_WIN32)
+void store_set_errno(DWORD error);
+bool store_wide_path(const char *path, wchar_t out[STORE_PATH_MAX]);
+bool store_win32_real_directory(const wchar_t *path);
+bool store_win32_delete_leaf(const wchar_t *path, DWORD attributes);
+#endif
 
 /* mkdir -p (every component); false on failure (logged by caller). */
 bool store_mkdir_p(const char *path);
 
 /* Recursive delete of a file or directory tree (pure C). */
 bool store_rm_rf(const char *path);
+
+/* Delete leftover temp files whose owner pid is gone, recursing under dir;
+ * logs each swept file. Runs during open-time recovery (package_store_fs.c). */
+void store_sweep_temps(struct vcs_package_store *store, const char *dir);
 
 /* UTF-8 no-follow file presence/removal used by store policy paths. */
 bool store_path_exists(const char *path);
