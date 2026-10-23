@@ -1749,11 +1749,6 @@ engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_experiment_stats:
 engine/modules/fleetledger/src/fleet_ledger.c:zcl_fleet_ledger_query:30
 engine/modules/fleetledger/src/fleet_ledger_row.c:zcl_fleet_row_decode:20
 engine/modules/fleetledger/src/fleet_ledger_row.c:zcl_fleet_row_validate:36
-engine/modules/framework/src/app_checkpoint.c:validate_and_digest_chunks:16
-engine/modules/framework/src/app_checkpoint.c:validate_lineage_checked:25
-engine/modules/framework/src/app_checkpoint.c:validate_structure_and_digest:35
-engine/modules/framework/src/app_checkpoint.c:warm_cache_shape_valid:32
-engine/modules/framework/src/app_checkpoint.c:zcl_app_checkpoint_validate_admission_v1:55
 engine/modules/framework/src/app_definition.c:definition_semantic_validate:33
 engine/modules/framework/src/app_definition.c:mount_valid:19
 engine/modules/framework/src/app_definition.c:parser_skip_trivia:17
