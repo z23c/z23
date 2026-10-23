@@ -137,6 +137,22 @@ static void copy_bounded(char *dst, size_t cap, const char *src, size_t len)
     dst[len] = '\0';
 }
 
+static const char kRulePrefix[] = "ZCL_RULE(";
+
+/* The index one past the end of the line starting at i: its '\n', or len. */
+static size_t line_end_from(const char *t, size_t len, size_t i)
+{
+    size_t eol = i;
+    while (eol < len && t[eol] != '\n') eol++;
+    return eol;
+}
+
+static bool rule_line_prefix(const char *line, size_t llen)
+{
+    return llen > sizeof kRulePrefix - 1 &&
+           memcmp(line, kRulePrefix, sizeof kRulePrefix - 1) == 0;
+}
+
 /* The one quoted literal starting at *at, unescaped only for \" and \\ —
  * a rule text carries no other escape and inventing support for the rest
  * would be a second JSON parser nobody asked for. Returns false if there is
@@ -192,6 +208,60 @@ static bool parse_u32(const char *s, uint32_t *out)
 
 /* ── vocabulary text parser ──────────────────────────────────────────── */
 
+static bool parse_rule_enums(const char *src, const char *st,
+                             struct zcl_rule_row *row)
+{
+    if (strcmp(src, "ZCL_RULE_SRC_GROK") == 0)
+        row->source = ZCL_RULE_SRC_GROK;
+    else if (strcmp(src, "ZCL_RULE_SRC_PERSONA") == 0)
+        row->source = ZCL_RULE_SRC_PERSONA;
+    else
+        return false;
+
+    if (strcmp(st, "ZCL_RULE_SHADOW") == 0)
+        row->state = ZCL_RULE_SHADOW;
+    else if (strcmp(st, "ZCL_RULE_OBEYED") == 0)
+        row->state = ZCL_RULE_OBEYED;
+    else if (strcmp(st, "ZCL_RULE_RETIRED") == 0)
+        row->state = ZCL_RULE_RETIRED;
+    else
+        return false;
+    return true;
+}
+
+static bool parse_rule_numbers(const char *fl, const char *mt,
+                               struct zcl_rule_row *row)
+{
+    if (!parse_u32(fl, &row->floor_permille)) return false;
+    if (!parse_u32(mt, &row->min_trials)) return false;
+    return row->floor_permille <= 1000u && row->min_trials != 0u;
+}
+
+static bool parse_rule_row(const char *line, size_t llen, uint32_t line_no,
+                           const struct zcl_rule_vocab *out,
+                           struct zcl_rule_row *row)
+{
+    memset(row, 0, sizeof *row);
+    row->line = line_no;
+
+    size_t at = sizeof kRulePrefix - 1;
+    char src[40], st[40], fl[24], mt[24];
+    if (!take_quoted(line, llen, &at, row->id, sizeof row->id)) return false;
+    if (!take_bare(line, llen, &at, src, sizeof src)) return false;
+    if (!take_bare(line, llen, &at, st, sizeof st)) return false;
+    if (!take_bare(line, llen, &at, fl, sizeof fl)) return false;
+    if (!take_bare(line, llen, &at, mt, sizeof mt)) return false;
+    while (at < llen && (line[at] == ',' || line[at] == ' ')) at++;
+    if (!take_quoted(line, llen, &at, row->text, sizeof row->text))
+        return false;
+
+    if (!parse_rule_enums(src, st, row)) return false;
+    if (!parse_rule_numbers(fl, mt, row)) return false;
+    /* A duplicate id would give one rule two scores and let the
+     * rewriter edit whichever it saw first. */
+    return zcl_rule_vocab_find(out, row->id) == NULL;
+}
+
 bool zcl_rule_vocab_parse(const char *text, size_t len,
                           struct zcl_rule_vocab *out)
 {
@@ -201,57 +271,15 @@ bool zcl_rule_vocab_parse(const char *text, size_t len,
     uint32_t line_no = 0;
     size_t i = 0;
     while (i < len) {
-        size_t eol = i;
-        while (eol < len && text[eol] != '\n') eol++;
+        size_t eol = line_end_from(text, len, i);
         line_no++;
         size_t llen = eol - i;
         const char *line = text + i;
 
-        static const char kPrefix[] = "ZCL_RULE(";
-        if (llen > sizeof kPrefix - 1 &&
-            memcmp(line, kPrefix, sizeof kPrefix - 1) == 0) {
+        if (rule_line_prefix(line, llen)) {
             if (out->count >= ZCL_RULE_VOCAB_MAX) return false;
             struct zcl_rule_row row;
-            memset(&row, 0, sizeof row);
-            row.line = line_no;
-
-            size_t at = sizeof kPrefix - 1;
-            char src[40], st[40], fl[24], mt[24];
-            if (!take_quoted(line, llen, &at, row.id, sizeof row.id))
-                return false;
-            if (!take_bare(line, llen, &at, src, sizeof src)) return false;
-            if (!take_bare(line, llen, &at, st, sizeof st)) return false;
-            if (!take_bare(line, llen, &at, fl, sizeof fl)) return false;
-            if (!take_bare(line, llen, &at, mt, sizeof mt)) return false;
-            while (at < llen && (line[at] == ',' || line[at] == ' ')) at++;
-            if (!take_quoted(line, llen, &at, row.text, sizeof row.text))
-                return false;
-
-            if (strcmp(src, "ZCL_RULE_SRC_GROK") == 0)
-                row.source = ZCL_RULE_SRC_GROK;
-            else if (strcmp(src, "ZCL_RULE_SRC_PERSONA") == 0)
-                row.source = ZCL_RULE_SRC_PERSONA;
-            else
-                return false;
-
-            if (strcmp(st, "ZCL_RULE_SHADOW") == 0)
-                row.state = ZCL_RULE_SHADOW;
-            else if (strcmp(st, "ZCL_RULE_OBEYED") == 0)
-                row.state = ZCL_RULE_OBEYED;
-            else if (strcmp(st, "ZCL_RULE_RETIRED") == 0)
-                row.state = ZCL_RULE_RETIRED;
-            else
-                return false;
-
-            if (!parse_u32(fl, &row.floor_permille)) return false;
-            if (!parse_u32(mt, &row.min_trials)) return false;
-            if (row.floor_permille > 1000u || row.min_trials == 0u)
-                return false;
-            /* A duplicate id would give one rule two scores and let the
-             * rewriter edit whichever it saw first. */
-            for (uint32_t k = 0; k < out->count; k++)
-                if (strcmp(out->row[k].id, row.id) == 0) return false;
-
+            if (!parse_rule_row(line, llen, line_no, out, &row)) return false;
             out->row[out->count++] = row;
         }
         i = (eol < len) ? eol + 1 : eol;
@@ -295,6 +323,14 @@ static bool jint(const struct json_value *o, const char *k, int64_t *out)
     return true;
 }
 
+static bool jnonneg(const struct json_value *o, const char *k, int64_t *out)
+{
+    int64_t n = 0;
+    if (!jint(o, k, &n) || n < 0) return false;
+    *out = n;
+    return true;
+}
+
 /* Integers only, as the schema says. A boolean field is an integer 0/1 or a
  * JSON true/false; both are accepted and nothing else is. */
 static bool jbool(const struct json_value *o, const char *k, bool *out)
@@ -304,6 +340,70 @@ static bool jbool(const struct json_value *o, const char *k, bool *out)
     if (v->type == JSON_BOOL) { *out = json_get_bool(v); return true; }
     if (v->type == JSON_INT)  { *out = json_get_int(v) != 0; return true; }
     return false;
+}
+
+static void copy_str_field(const struct json_value *o, const char *k,
+                           char *dst, size_t cap)
+{
+    const char *s = jstr(o, k);
+    if (s) copy_bounded(dst, cap, s, strlen(s));
+}
+
+static void receipt_meta_from_json(const struct json_value *o,
+                                   struct zcl_rule_receipt *r)
+{
+    copy_str_field(o, "engine", r->engine, sizeof r->engine);
+    copy_str_field(o, "model", r->model, sizeof r->model);
+    copy_str_field(o, "kind", r->kind, sizeof r->kind);
+    copy_str_field(o, "group", r->group, sizeof r->group);
+    copy_str_field(o, "template_sha3", r->template_sha3,
+                   sizeof r->template_sha3);
+    copy_str_field(o, "worktree_head", r->worktree_head,
+                   sizeof r->worktree_head);
+
+    int64_t n = 0;
+    if (jnonneg(o, "ts", &n)) r->ts = (uint64_t)n;
+    if (jnonneg(o, "prompt_tokens", &n)) r->prompt_tokens = n;
+    if (jnonneg(o, "completion_tokens", &n)) r->completion_tokens = n;
+    if (jnonneg(o, "wall_ms", &n)) r->wall_ms = n;
+    if (jint(o, "http_status", &n)) r->http_status = n;
+}
+
+static void receipt_shown_from_json(const struct json_value *o,
+                                    struct zcl_rule_receipt *r)
+{
+    const struct json_value *shown = json_get(o, "rules_shown");
+    if (!shown || shown->type != JSON_ARR) return;
+    size_t cnt = json_size(shown);
+    for (size_t i = 0; i < cnt && r->rules_shown_count < ZCL_RULE_SHOWN_MAX;
+         i++) {
+        const struct json_value *e = json_at(shown, i);
+        if (!e || e->type != JSON_STR) continue;
+        const char *id = json_get_str(e);
+        if (!id || !*id) continue;
+        copy_bounded(r->rules_shown[r->rules_shown_count],
+                     ZCL_RULE_ID_MAX, id, strlen(id));
+        r->rules_shown_count++;
+    }
+}
+
+/* The outcome is where the ONE signal lives. A receipt with no outcome
+ * object is not a receipt about an outcome, so it is refused rather than
+ * counted as a failure — those are different facts. */
+static bool receipt_outcome_from_json(const struct json_value *o,
+                                      struct zcl_rule_receipt *r)
+{
+    const struct json_value *out = json_get(o, "outcome");
+    if (!out || out->type != JSON_OBJ) return false;
+    if (!jbool(out, "gate_pass", &r->gate_pass)) return false;
+    (void)jbool(out, "applied", &r->applied);
+    int64_t n = 0;
+    if (jnonneg(out, "groups_ran", &n)) r->groups_ran = (uint32_t)n;
+    if (jnonneg(out, "groups_failed", &n)) r->groups_failed = (uint32_t)n;
+    if (jnonneg(out, "retries", &n)) r->retries = (uint32_t)n;
+    if (jnonneg(out, "lines_changed", &n)) r->lines_changed = (uint32_t)n;
+    if (jint(out, "lint_rc", &n)) r->lint_rc = n;
+    return true;
 }
 
 static bool receipt_from_json(const struct json_value *o,
@@ -318,58 +418,41 @@ static bool receipt_from_json(const struct json_value *o,
     copy_bounded(r->unit_id, sizeof r->unit_id, s, strlen(s));
     if (!(s = jstr(o, "task_sha3"))) return false;
     copy_bounded(r->task_sha3, sizeof r->task_sha3, s, strlen(s));
+    receipt_meta_from_json(o, r);
+    receipt_shown_from_json(o, r);
+    return receipt_outcome_from_json(o, r);
+}
 
-    if ((s = jstr(o, "engine")))
-        copy_bounded(r->engine, sizeof r->engine, s, strlen(s));
-    if ((s = jstr(o, "model")))
-        copy_bounded(r->model, sizeof r->model, s, strlen(s));
-    if ((s = jstr(o, "kind")))
-        copy_bounded(r->kind, sizeof r->kind, s, strlen(s));
-    if ((s = jstr(o, "group")))
-        copy_bounded(r->group, sizeof r->group, s, strlen(s));
-    if ((s = jstr(o, "template_sha3")))
-        copy_bounded(r->template_sha3, sizeof r->template_sha3, s, strlen(s));
-    if ((s = jstr(o, "worktree_head")))
-        copy_bounded(r->worktree_head, sizeof r->worktree_head, s, strlen(s));
-
-    int64_t n = 0;
-    if (jint(o, "ts", &n) && n >= 0) r->ts = (uint64_t)n;
-    if (jint(o, "prompt_tokens", &n) && n >= 0) r->prompt_tokens = n;
-    if (jint(o, "completion_tokens", &n) && n >= 0)
-        r->completion_tokens = n;
-    if (jint(o, "wall_ms", &n) && n >= 0) r->wall_ms = n;
-    if (jint(o, "http_status", &n)) r->http_status = n;
-
-    const struct json_value *shown = json_get(o, "rules_shown");
-    if (shown && shown->type == JSON_ARR) {
-        size_t cnt = json_size(shown);
-        for (size_t i = 0; i < cnt && r->rules_shown_count < ZCL_RULE_SHOWN_MAX;
-             i++) {
-            const struct json_value *e = json_at(shown, i);
-            if (!e || e->type != JSON_STR) continue;
-            const char *id = json_get_str(e);
-            if (!id || !*id) continue;
-            copy_bounded(r->rules_shown[r->rules_shown_count],
-                         ZCL_RULE_ID_MAX, id, strlen(id));
-            r->rules_shown_count++;
-        }
-    }
-
-    /* The outcome is where the ONE signal lives. A receipt with no outcome
-     * object is not a receipt about an outcome, so it is refused rather than
-     * counted as a failure — those are different facts. */
-    const struct json_value *out = json_get(o, "outcome");
-    if (!out || out->type != JSON_OBJ) return false;
-    if (!jbool(out, "gate_pass", &r->gate_pass)) return false;
-    (void)jbool(out, "applied", &r->applied);
-    if (jint(out, "groups_ran", &n) && n >= 0) r->groups_ran = (uint32_t)n;
-    if (jint(out, "groups_failed", &n) && n >= 0)
-        r->groups_failed = (uint32_t)n;
-    if (jint(out, "retries", &n) && n >= 0) r->retries = (uint32_t)n;
-    if (jint(out, "lines_changed", &n) && n >= 0)
-        r->lines_changed = (uint32_t)n;
-    if (jint(out, "lint_rc", &n)) r->lint_rc = n;
+static bool line_is_blank(const char *line, size_t llen)
+{
+    for (size_t k = 0; k < llen; k++)
+        if (line[k] != ' ' && line[k] != '\t' && line[k] != '\r')
+            return false;
     return true;
+}
+
+/* Decodes one record into *r. The caller owns v and frees it. The record's
+ * prev_sha3 must be the link the log has reached so far. */
+static enum zcl_rule_chain_status receipt_decode(struct json_value *v,
+                                                 const char *line, size_t llen,
+                                                 const char *expect,
+                                                 struct zcl_rule_receipt *r)
+{
+    if (!json_read(v, line, llen)) return ZCL_RULE_CHAIN_MALFORMED;
+    if (v->type != JSON_OBJ) return ZCL_RULE_CHAIN_MALFORMED;
+    const char *prev = jstr(v, "prev_sha3");
+    if (!prev || strlen(prev) != 64) return ZCL_RULE_CHAIN_MALFORMED;
+    /* THE WHOLE LOG, NOT THE HONEST PREFIX. A score computed from the
+     * records before a break is a number that reads as evidence and is
+     * not one, so a break refuses everything. */
+    if (memcmp(prev, expect, 64) != 0) return ZCL_RULE_CHAIN_BROKEN;
+
+    memset(r, 0, sizeof *r);
+    r->prompt_tokens = -1;
+    r->completion_tokens = -1;
+    r->wall_ms = -1;
+    if (!receipt_from_json(v, r)) return ZCL_RULE_CHAIN_MALFORMED;
+    return ZCL_RULE_CHAIN_OK;
 }
 
 enum zcl_rule_chain_status
@@ -389,56 +472,27 @@ zcl_rule_receipts_parse(const char *text, size_t len,
     uint32_t line_no = 0;
     size_t i = 0;
     while (i < len) {
-        size_t eol = i;
-        while (eol < len && text[eol] != '\n') eol++;
+        size_t eol = line_end_from(text, len, i);
         size_t llen = eol - i;
         const char *line = text + i;
         i = (eol < len) ? eol + 1 : eol;
 
         /* Blank lines are not records and are not errors: a file that ends
          * with a newline has one. */
-        bool blank = true;
-        for (size_t k = 0; k < llen; k++)
-            if (line[k] != ' ' && line[k] != '\t' && line[k] != '\r')
-                { blank = false; break; }
-        if (blank) continue;
+        if (line_is_blank(line, llen)) continue;
 
         line_no++;
         if (bad_line) *bad_line = line_no;
         if (llen > ZCL_RULE_LINE_MAX) return ZCL_RULE_CHAIN_OVERFLOW;
         if (out->count >= ZCL_RULE_RECEIPT_MAX) return ZCL_RULE_CHAIN_OVERFLOW;
 
+        struct zcl_rule_receipt r;
         struct json_value v;
         json_init(&v);
-        if (!json_read(&v, line, llen)) {
-            json_free(&v);
-            return ZCL_RULE_CHAIN_MALFORMED;
-        }
-        if (v.type != JSON_OBJ) { json_free(&v); return ZCL_RULE_CHAIN_MALFORMED; }
-
-        const char *prev = jstr(&v, "prev_sha3");
-        if (!prev || strlen(prev) != 64) {
-            json_free(&v);
-            return ZCL_RULE_CHAIN_MALFORMED;
-        }
-        /* THE WHOLE LOG, NOT THE HONEST PREFIX. A score computed from the
-         * records before a break is a number that reads as evidence and is
-         * not one, so a break refuses everything. */
-        if (memcmp(prev, expect, 64) != 0) {
-            json_free(&v);
-            return ZCL_RULE_CHAIN_BROKEN;
-        }
-
-        struct zcl_rule_receipt r;
-        memset(&r, 0, sizeof r);
-        r.prompt_tokens = -1;
-        r.completion_tokens = -1;
-        r.wall_ms = -1;
-        if (!receipt_from_json(&v, &r)) {
-            json_free(&v);
-            return ZCL_RULE_CHAIN_MALFORMED;
-        }
+        enum zcl_rule_chain_status st =
+            receipt_decode(&v, line, llen, expect, &r);
         json_free(&v);
+        if (st != ZCL_RULE_CHAIN_OK) return st;
         r.seq = line_no;
         out->r[out->count++] = r;
         zcl_rule_chain_link(line, llen, expect);
@@ -492,11 +546,149 @@ static uint32_t mean_milli(uint64_t total, uint32_t n)
     return (uint32_t)((total * 1000ull + n / 2) / n);
 }
 
+static uint32_t rate_permille(uint64_t passes, uint32_t trials)
+{
+    if (trials == 0) return 0;
+    return (uint32_t)((1000ull * passes + trials / 2) / trials);
+}
+
 static bool receipt_shows(const struct zcl_rule_receipt *r, const char *id)
 {
     for (uint32_t i = 0; i < r->rules_shown_count; i++)
         if (strcmp(r->rules_shown[i], id) == 0) return true;
     return false;
+}
+
+static void add_killer(struct zcl_rule_score *sc, const char *unit_id)
+{
+    sc->killer_total++;
+    if (sc->killer_count < ZCL_RULE_KILLER_MAX) {
+        copy_bounded(sc->killer[sc->killer_count], ZCL_RULE_UNIT_ID_MAX,
+                     unit_id, strlen(unit_id));
+        sc->killer_count++;
+    }
+}
+
+static void score_one_rule(const struct zcl_rule_row *row,
+                           const struct zcl_rule_receipt_log *log,
+                           struct zcl_rule_score *sc)
+{
+    memset(sc, 0, sizeof *sc);
+    copy_bounded(sc->id, sizeof sc->id, row->id, strlen(row->id));
+    sc->state = row->state;
+    sc->floor_permille = row->floor_permille;
+    sc->min_trials = row->min_trials;
+
+    uint64_t retries = 0, lines = 0;
+    for (uint32_t j = 0; log && j < log->count; j++) {
+        const struct zcl_rule_receipt *r = &log->r[j];
+        if (!receipt_shows(r, row->id)) continue;
+        sc->trials++;
+        retries += r->retries;
+        lines += r->lines_changed;
+        if (r->gate_pass) sc->passes++;
+        else add_killer(sc, r->unit_id);
+    }
+    sc->lower_permille = zcl_rule_wilson_lower_permille(sc->passes,
+                                                        sc->trials);
+    sc->rate_permille = rate_permille(sc->passes, sc->trials);
+    sc->mean_retries_milli = mean_milli(retries, sc->trials);
+    sc->mean_lines_milli = mean_milli(lines, sc->trials);
+}
+
+/* Kinds are opened in first-seen order so the report is stable. */
+static void tally_kind(struct zcl_rule_scoring *out,
+                       const struct zcl_rule_receipt *r)
+{
+    const char *kind = r->kind[0] ? r->kind : "(none)";
+    struct zcl_rule_kind_score *ks = NULL;
+    for (uint32_t i = 0; i < out->kind_count && !ks; i++)
+        if (strcmp(out->kind[i].kind, kind) == 0) ks = &out->kind[i];
+    if (!ks) {
+        if (out->kind_count >= ZCL_RULE_KIND_ROWS_MAX) return;
+        ks = &out->kind[out->kind_count++];
+        memset(ks, 0, sizeof *ks);
+        copy_bounded(ks->kind, sizeof ks->kind, kind, strlen(kind));
+    }
+    ks->trials++;
+    if (r->gate_pass) ks->passes++;
+    /* Totals are accumulated in the milli fields and divided below; the
+     * struct carries no second pair of counters to fall out of step. */
+    ks->mean_retries_milli += r->retries;
+    ks->mean_lines_milli += r->lines_changed;
+}
+
+static void finish_kind_scores(struct zcl_rule_scoring *out)
+{
+    for (uint32_t i = 0; i < out->kind_count; i++) {
+        struct zcl_rule_kind_score *ks = &out->kind[i];
+        ks->lower_permille = zcl_rule_wilson_lower_permille(ks->passes,
+                                                            ks->trials);
+        ks->rate_permille = rate_permille(ks->passes, ks->trials);
+        uint32_t rt = ks->mean_retries_milli, ln = ks->mean_lines_milli;
+        ks->mean_retries_milli = mean_milli(rt, ks->trials);
+        ks->mean_lines_milli = mean_milli(ln, ks->trials);
+    }
+}
+
+static void sort_permille(uint32_t *vals, uint32_t n)
+{
+    for (uint32_t a = 1; a < n; a++) {
+        uint32_t key = vals[a];
+        uint32_t b = a;
+        while (b > 0 && vals[b - 1] > key) { vals[b] = vals[b - 1]; b--; }
+        vals[b] = key;
+    }
+}
+
+/* The baseline a shadow rule must beat: the MEDIAN lower bound of the
+ * obeyed rules that have actually been measured. Unmeasured obeyed rows
+ * are excluded — including them would let a vocabulary full of untried
+ * rules drag the bar to zero and promote anything. With no measured
+ * obeyed rule there is no baseline and nothing is promotable, because
+ * "better than nothing" is not a comparison. */
+static void set_obeyed_baseline(struct zcl_rule_scoring *out)
+{
+    uint32_t vals[ZCL_RULE_VOCAB_MAX];
+    uint32_t nvals = 0;
+    for (uint32_t i = 0; i < out->rule_count; i++) {
+        const struct zcl_rule_score *sc = &out->rule[i];
+        if (sc->state != ZCL_RULE_OBEYED) continue;
+        if (sc->trials < sc->min_trials) continue;
+        vals[nvals++] = sc->lower_permille;
+    }
+    if (nvals == 0) return;
+    sort_permille(vals, nvals);
+    /* An even count takes the LOWER middle value rather than an average:
+     * an average would invent a bound no rule ever scored, and this one
+     * is a bar that a promotion has to clear. */
+    out->obeyed_baseline_permille = vals[(nvals - 1) / 2];
+    out->baseline_known = true;
+}
+
+static void assign_verdict(struct zcl_rule_scoring *out,
+                           struct zcl_rule_score *sc)
+{
+    if (sc->state == ZCL_RULE_RETIRED) {
+        sc->verdict = ZCL_RULE_VERDICT_ALREADY_RETIRED;
+    } else if (sc->trials == 0) {
+        sc->verdict = ZCL_RULE_VERDICT_UNTRIED;
+    } else if (sc->trials < sc->min_trials) {
+        sc->verdict = ZCL_RULE_VERDICT_INSUFFICIENT;
+    } else if (sc->state == ZCL_RULE_OBEYED) {
+        sc->verdict = (sc->lower_permille < sc->floor_permille)
+                        ? ZCL_RULE_VERDICT_RETIRE
+                        : ZCL_RULE_VERDICT_HOLD;
+        if (sc->verdict == ZCL_RULE_VERDICT_RETIRE) out->retire_count++;
+    } else { /* shadow, measured */
+        if (out->baseline_known &&
+            sc->lower_permille > out->obeyed_baseline_permille) {
+            sc->verdict = ZCL_RULE_VERDICT_PROMOTABLE;
+            out->promotable_count++;
+        } else {
+            sc->verdict = ZCL_RULE_VERDICT_HOLD;
+        }
+    }
 }
 
 void zcl_rule_score_all(const struct zcl_rule_vocab *v,
@@ -509,125 +701,18 @@ void zcl_rule_score_all(const struct zcl_rule_vocab *v,
     out->receipts = log ? log->count : 0;
 
     for (uint32_t i = 0; i < v->count && i < ZCL_RULE_VOCAB_MAX; i++) {
-        const struct zcl_rule_row *row = &v->row[i];
         struct zcl_rule_score *sc = &out->rule[out->rule_count++];
-        memset(sc, 0, sizeof *sc);
-        copy_bounded(sc->id, sizeof sc->id, row->id, strlen(row->id));
-        sc->state = row->state;
-        sc->floor_permille = row->floor_permille;
-        sc->min_trials = row->min_trials;
-
-        uint64_t retries = 0, lines = 0;
-        for (uint32_t j = 0; log && j < log->count; j++) {
-            const struct zcl_rule_receipt *r = &log->r[j];
-            if (!receipt_shows(r, row->id)) continue;
-            sc->trials++;
-            retries += r->retries;
-            lines += r->lines_changed;
-            if (r->gate_pass) {
-                sc->passes++;
-            } else {
-                sc->killer_total++;
-                if (sc->killer_count < ZCL_RULE_KILLER_MAX) {
-                    copy_bounded(sc->killer[sc->killer_count],
-                                 ZCL_RULE_UNIT_ID_MAX, r->unit_id,
-                                 strlen(r->unit_id));
-                    sc->killer_count++;
-                }
-            }
-        }
-        sc->lower_permille = zcl_rule_wilson_lower_permille(sc->passes,
-                                                            sc->trials);
-        sc->rate_permille = sc->trials
-            ? (uint32_t)((1000ull * sc->passes + sc->trials / 2) / sc->trials)
-            : 0;
-        sc->mean_retries_milli = mean_milli(retries, sc->trials);
-        sc->mean_lines_milli = mean_milli(lines, sc->trials);
+        score_one_rule(&v->row[i], log, sc);
     }
 
     /* Per template kind, in first-seen order so the report is stable. */
-    for (uint32_t j = 0; log && j < log->count; j++) {
-        const struct zcl_rule_receipt *r = &log->r[j];
-        const char *kind = r->kind[0] ? r->kind : "(none)";
-        struct zcl_rule_kind_score *ks = NULL;
-        for (uint32_t i = 0; i < out->kind_count; i++)
-            if (strcmp(out->kind[i].kind, kind) == 0) { ks = &out->kind[i]; break; }
-        if (!ks) {
-            if (out->kind_count >= ZCL_RULE_KIND_ROWS_MAX) continue;
-            ks = &out->kind[out->kind_count++];
-            memset(ks, 0, sizeof *ks);
-            copy_bounded(ks->kind, sizeof ks->kind, kind, strlen(kind));
-        }
-        ks->trials++;
-        if (r->gate_pass) ks->passes++;
-        /* Totals are accumulated in the milli fields and divided below; the
-         * struct carries no second pair of counters to fall out of step. */
-        ks->mean_retries_milli += r->retries;
-        ks->mean_lines_milli += r->lines_changed;
-    }
-    for (uint32_t i = 0; i < out->kind_count; i++) {
-        struct zcl_rule_kind_score *ks = &out->kind[i];
-        ks->lower_permille = zcl_rule_wilson_lower_permille(ks->passes,
-                                                            ks->trials);
-        ks->rate_permille = ks->trials
-            ? (uint32_t)((1000ull * ks->passes + ks->trials / 2) / ks->trials)
-            : 0;
-        uint32_t rt = ks->mean_retries_milli, ln = ks->mean_lines_milli;
-        ks->mean_retries_milli = mean_milli(rt, ks->trials);
-        ks->mean_lines_milli = mean_milli(ln, ks->trials);
-    }
+    for (uint32_t j = 0; log && j < log->count; j++)
+        tally_kind(out, &log->r[j]);
+    finish_kind_scores(out);
 
-    /* The baseline a shadow rule must beat: the MEDIAN lower bound of the
-     * obeyed rules that have actually been measured. Unmeasured obeyed rows
-     * are excluded — including them would let a vocabulary full of untried
-     * rules drag the bar to zero and promote anything. With no measured
-     * obeyed rule there is no baseline and nothing is promotable, because
-     * "better than nothing" is not a comparison. */
-    uint32_t vals[ZCL_RULE_VOCAB_MAX];
-    uint32_t nvals = 0;
-    for (uint32_t i = 0; i < out->rule_count; i++) {
-        const struct zcl_rule_score *sc = &out->rule[i];
-        if (sc->state != ZCL_RULE_OBEYED) continue;
-        if (sc->trials < sc->min_trials) continue;
-        vals[nvals++] = sc->lower_permille;
-    }
-    if (nvals > 0) {
-        for (uint32_t a = 1; a < nvals; a++) {
-            uint32_t key = vals[a];
-            uint32_t b = a;
-            while (b > 0 && vals[b - 1] > key) { vals[b] = vals[b - 1]; b--; }
-            vals[b] = key;
-        }
-        /* An even count takes the LOWER middle value rather than an average:
-         * an average would invent a bound no rule ever scored, and this one
-         * is a bar that a promotion has to clear. */
-        out->obeyed_baseline_permille = vals[(nvals - 1) / 2];
-        out->baseline_known = true;
-    }
-
-    for (uint32_t i = 0; i < out->rule_count; i++) {
-        struct zcl_rule_score *sc = &out->rule[i];
-        if (sc->state == ZCL_RULE_RETIRED) {
-            sc->verdict = ZCL_RULE_VERDICT_ALREADY_RETIRED;
-        } else if (sc->trials == 0) {
-            sc->verdict = ZCL_RULE_VERDICT_UNTRIED;
-        } else if (sc->trials < sc->min_trials) {
-            sc->verdict = ZCL_RULE_VERDICT_INSUFFICIENT;
-        } else if (sc->state == ZCL_RULE_OBEYED) {
-            sc->verdict = (sc->lower_permille < sc->floor_permille)
-                            ? ZCL_RULE_VERDICT_RETIRE
-                            : ZCL_RULE_VERDICT_HOLD;
-            if (sc->verdict == ZCL_RULE_VERDICT_RETIRE) out->retire_count++;
-        } else { /* shadow, measured */
-            if (out->baseline_known &&
-                sc->lower_permille > out->obeyed_baseline_permille) {
-                sc->verdict = ZCL_RULE_VERDICT_PROMOTABLE;
-                out->promotable_count++;
-            } else {
-                sc->verdict = ZCL_RULE_VERDICT_HOLD;
-            }
-        }
-    }
+    set_obeyed_baseline(out);
+    for (uint32_t i = 0; i < out->rule_count; i++)
+        assign_verdict(out, &out->rule[i]);
 }
 
 /* ── rendering ───────────────────────────────────────────────────────── */
@@ -731,6 +816,46 @@ static bool retire_line(const char *line, size_t llen, char *buf, size_t cap,
     return true;
 }
 
+/* The row this def line retires, or NULL. Match by id, never by line number
+ * alone: an edit elsewhere in the file would otherwise retire the wrong row. */
+static const struct zcl_rule_score *retire_target(
+    const struct zcl_rule_scoring *s, const char *line, size_t llen)
+{
+    if (!rule_line_prefix(line, llen)) return NULL;
+    size_t at = sizeof kRulePrefix - 1;
+    char id[ZCL_RULE_ID_MAX];
+    if (!take_quoted(line, llen, &at, id, sizeof id)) return NULL;
+    for (uint32_t k = 0; k < s->rule_count; k++)
+        if (s->rule[k].verdict == ZCL_RULE_VERDICT_RETIRE &&
+            strcmp(s->rule[k].id, id) == 0)
+            return &s->rule[k];
+    return NULL;
+}
+
+/* The audit comment carries the numbers AND the receipts, because a
+ * retirement a person cannot argue with is a retirement nobody can undo on
+ * evidence. Returns false if it would not fit. */
+static bool retire_note(const struct zcl_rule_score *kill, char *note,
+                        size_t cap, size_t *nl)
+{
+    *nl = 0;
+    if (!app(note, cap, nl,
+             "/* auto-retired: trials=%u passes=%u lower=%u floor=%u; "
+             "failing units:",
+             kill->trials, kill->passes, kill->lower_permille,
+             kill->floor_permille))
+        return false;
+    for (uint32_t k = 0; k < kill->killer_count; k++)
+        if (!app(note, cap, nl, " %s", kill->killer[k])) return false;
+    if (kill->killer_total > kill->killer_count &&
+        !app(note, cap, nl, " (+%u more)",
+             kill->killer_total - kill->killer_count))
+        return false;
+    return app(note, cap, nl,
+               ". Delete this comment and set the state back to turn it on "
+               "again. */\n");
+}
+
 size_t zcl_rule_vocab_apply_retirements(const char *def_text, size_t def_len,
                                         const struct zcl_rule_scoring *s,
                                         char *buf, size_t cap)
@@ -740,58 +865,15 @@ size_t zcl_rule_vocab_apply_retirements(const char *def_text, size_t def_len,
     size_t i = 0;
 
     while (i < def_len) {
-        size_t eol = i;
-        while (eol < def_len && def_text[eol] != '\n') eol++;
+        size_t eol = line_end_from(def_text, def_len, i);
         size_t llen = eol - i;
         const char *line = def_text + i;
 
-        const struct zcl_rule_score *kill = NULL;
-        static const char kPrefix[] = "ZCL_RULE(";
-        if (llen > sizeof kPrefix - 1 &&
-            memcmp(line, kPrefix, sizeof kPrefix - 1) == 0) {
-            /* Match by id, never by line number alone: an edit elsewhere in
-             * the file would otherwise retire the wrong row. */
-            size_t at2 = sizeof kPrefix - 1;
-            char id[ZCL_RULE_ID_MAX];
-            if (take_quoted(line, llen, &at2, id, sizeof id)) {
-                for (uint32_t k = 0; k < s->rule_count; k++)
-                    if (s->rule[k].verdict == ZCL_RULE_VERDICT_RETIRE &&
-                        strcmp(s->rule[k].id, id) == 0)
-                        { kill = &s->rule[k]; break; }
-            }
-        }
-
+        const struct zcl_rule_score *kill = retire_target(s, line, llen);
         if (kill) {
-            /* The audit comment carries the numbers AND the receipts, because
-             * a retirement a person cannot argue with is a retirement nobody
-             * can undo on evidence. */
             char note[1024];
-            int n = snprintf(note, sizeof note,
-                             "/* auto-retired: trials=%u passes=%u "
-                             "lower=%u floor=%u; failing units:",
-                             kill->trials, kill->passes, kill->lower_permille,
-                             kill->floor_permille);
-            if (n < 0 || (size_t)n >= sizeof note) return 0;
-            size_t nl = (size_t)n;
-            for (uint32_t k = 0; k < kill->killer_count; k++) {
-                int m = snprintf(note + nl, sizeof note - nl, " %s",
-                                 kill->killer[k]);
-                if (m < 0 || (size_t)m >= sizeof note - nl) return 0;
-                nl += (size_t)m;
-            }
-            if (kill->killer_total > kill->killer_count) {
-                int m = snprintf(note + nl, sizeof note - nl,
-                                 " (+%u more)",
-                                 kill->killer_total - kill->killer_count);
-                if (m < 0 || (size_t)m >= sizeof note - nl) return 0;
-                nl += (size_t)m;
-            }
-            int m = snprintf(note + nl, sizeof note - nl,
-                             ". Delete this comment and set the state back to "
-                             "turn it on again. */\n");
-            if (m < 0 || (size_t)m >= sizeof note - nl) return 0;
-            nl += (size_t)m;
-
+            size_t nl = 0;
+            if (!retire_note(kill, note, sizeof note, &nl)) return 0;
             if (at + nl > cap) return 0;
             memcpy(buf + at, note, nl); at += nl;
             if (!retire_line(line, llen, buf, cap, &at)) return 0;
@@ -818,9 +900,7 @@ static size_t line_start_of(const char *t, size_t len, uint32_t want)
 
 static size_t line_len_at(const char *t, size_t len, size_t start)
 {
-    size_t e = start;
-    while (e < len && t[e] != '\n') e++;
-    return e - start;
+    return line_end_from(t, len, start) - start;
 }
 
 /* One def line with the SHADOW token spelled OBEYED — the + side of the
@@ -846,30 +926,38 @@ static bool promoted_line(const char *line, size_t ll, char *out, size_t cap)
     return true;
 }
 
-size_t zcl_rule_promotion_patch(const char *def_text, size_t def_len,
-                               const char *def_path,
-                               const struct zcl_rule_row *row,
-                               const struct zcl_rule_score *score,
-                               uint32_t obeyed_baseline_permille,
-                               char *buf, size_t cap)
-{
-    if (!def_text || !def_path || !row || !score || !buf || cap == 0) return 0;
-    if (row->line == 0) return 0;
+/* The lines a hunk shows: the changed line and its context, clipped. */
+struct promo_hunk {
+    uint32_t first;
+    uint32_t last;
+    uint32_t count;
+};
 
+/* Fills *h for a change at line. Returns false if line is past the file. */
+static bool promo_hunk_bounds(const char *def_text, size_t def_len,
+                              uint32_t line, struct promo_hunk *h)
+{
     uint32_t total = 1;
     for (size_t i = 0; i < def_len; i++) if (def_text[i] == '\n') total++;
-    if (row->line > total) return 0;
+    if (line > total) return false;
 
     uint32_t ctx = 3;
-    uint32_t first = row->line > ctx ? row->line - ctx : 1;
-    uint32_t last = row->line + ctx;
-    if (last > total) last = total;
-    uint32_t count = last - first + 1;
+    h->first = line > ctx ? line - ctx : 1;
+    h->last = line + ctx;
+    if (h->last > total) h->last = total;
+    h->count = h->last - h->first + 1;
+    return true;
+}
 
-    size_t at = 0;
+static bool promo_header(char *buf, size_t cap, size_t *at,
+                         const struct zcl_rule_row *row,
+                         const struct zcl_rule_score *score,
+                         uint32_t obeyed_baseline_permille,
+                         const char *def_path, const struct promo_hunk *h)
+{
     /* A patch, not an edit. Nothing in this tree applies it; a person does,
      * having read what the numbers were when it was proposed. */
-    if (!app(buf, cap, &at,
+    return app(buf, cap, at,
              "# proposed promotion of %s from shadow to obeyed\n"
              "# trials=%u passes=%u wilson_lower=%u obeyed_baseline=%u "
              "min_trials=%u\n"
@@ -881,29 +969,48 @@ size_t zcl_rule_promotion_patch(const char *def_text, size_t def_len,
              "--- a/%s\n+++ b/%s\n@@ -%u,%u +%u,%u @@\n",
              row->id, score->trials, score->passes, score->lower_permille,
              obeyed_baseline_permille, score->min_trials, def_path, def_path,
-             first, count, first, count))
-        return 0;
+             h->first, h->count, h->first, h->count);
+}
 
-    /* A unified diff's + line sits IMMEDIATELY after its - line, ahead of
-     * the trailing context. Emitted after the context instead, `git apply`
-     * deletes the row in place and inserts the obeyed line below it — a
-     * move of the row, not the one-token rewrite the hunk counts. */
-    for (uint32_t ln = first; ln <= last; ln++) {
-        size_t st = line_start_of(def_text, def_len, ln);
-        size_t ll = line_len_at(def_text, def_len, st);
-        if (ln != row->line) {
-            if (!app(buf, cap, &at, " %.*s\n", (int)ll, def_text + st))
-                return 0;
-            continue;
-        }
-        if (!app(buf, cap, &at, "-%.*s\n", (int)ll, def_text + st))
+/* One hunk line: context, or for the promoted row the - line and then its +
+ * line. A unified diff's + line sits IMMEDIATELY after its - line, ahead of
+ * the trailing context. Emitted after the context instead, `git apply`
+ * deletes the row in place and inserts the obeyed line below it — a move of
+ * the row, not the one-token rewrite the hunk counts. */
+static bool promo_line(const char *def_text, size_t def_len, uint32_t ln,
+                       uint32_t row_line, char *buf, size_t cap, size_t *at)
+{
+    size_t st = line_start_of(def_text, def_len, ln);
+    size_t ll = line_len_at(def_text, def_len, st);
+    if (ln != row_line)
+        return app(buf, cap, at, " %.*s\n", (int)ll, def_text + st);
+    if (!app(buf, cap, at, "-%.*s\n", (int)ll, def_text + st)) return false;
+    char newline[ZCL_RULE_LINE_MAX];
+    if (!promoted_line(def_text + st, ll, newline, sizeof newline))
+        return false;
+    return app(buf, cap, at, "+%s\n", newline);
+}
+
+size_t zcl_rule_promotion_patch(const char *def_text, size_t def_len,
+                               const char *def_path,
+                               const struct zcl_rule_row *row,
+                               const struct zcl_rule_score *score,
+                               uint32_t obeyed_baseline_permille,
+                               char *buf, size_t cap)
+{
+    if (!def_text || !def_path || !row || !score || !buf || cap == 0) return 0;
+    if (row->line == 0) return 0;
+
+    struct promo_hunk h;
+    if (!promo_hunk_bounds(def_text, def_len, row->line, &h)) return 0;
+
+    size_t at = 0;
+    if (!promo_header(buf, cap, &at, row, score, obeyed_baseline_permille,
+                      def_path, &h))
+        return 0;
+    for (uint32_t ln = h.first; ln <= h.last; ln++)
+        if (!promo_line(def_text, def_len, ln, row->line, buf, cap, &at))
             return 0;
-        char newline[ZCL_RULE_LINE_MAX];
-        if (!promoted_line(def_text + st, ll, newline, sizeof newline))
-            return 0;
-        if (!app(buf, cap, &at, "+%s\n", newline))
-            return 0;
-    }
     return at;
 }
 
@@ -1067,6 +1174,73 @@ static void rule_def_unlock(int fd)
 #endif
 }
 
+/* OK when the live def is still exactly old_text, IO on a read error, and
+ * STALE when it is any other length or any other bytes. The fresh read is
+ * bounded by what the caller read: a file of a different length is already
+ * not the bytes the caller read, whatever they are. */
+static enum zcl_rule_rewrite_status rule_def_check_fresh(
+    int live, const char *old_text, size_t old_len, char *fresh)
+{
+    size_t got = 0;
+    while (got < old_len) {
+        ssize_t r = read(live, fresh + got, old_len - got);
+        if (r < 0 && errno == EINTR) continue;
+        if (r < 0) return ZCL_RULE_REWRITE_ERR_IO;
+        if (r == 0) break;
+        got += (size_t)r;
+    }
+    if (got != old_len) return ZCL_RULE_REWRITE_ERR_STALE;
+
+    ssize_t one = read(live, fresh + got, 1);
+    if (one < 0 && errno == EINTR) one = read(live, fresh + got, 1);
+    if (one < 0) return ZCL_RULE_REWRITE_ERR_IO;
+    if (one != 0) return ZCL_RULE_REWRITE_ERR_STALE;
+
+    unsigned char want[32], have[32];
+    zcl_sha3_256((const unsigned char *)old_text, old_len, want);
+    zcl_sha3_256((const unsigned char *)fresh, old_len, have);
+    if (memcmp(want, have, sizeof want) != 0) return ZCL_RULE_REWRITE_ERR_STALE;
+    return ZCL_RULE_REWRITE_OK;
+}
+
+/* The new bytes, whole, into tmp: flushed and fsynced before any rename. */
+static bool rule_def_write_tmp(const char *tmp, const char *new_text,
+                               size_t new_len)
+{
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return false;
+    bool ok = fwrite(new_text, 1, new_len, f) == new_len &&
+              fflush(f) == 0 &&
+#if defined(_WIN32)
+              _commit(fileno(f)) == 0;
+#else
+              fsync(fileno(f)) == 0;
+#endif
+    if (fclose(f) != 0) ok = false;
+    return ok;
+}
+
+/* On Windows the lock and the handle are released before the rename, so
+ * *live is set to -1 there. */
+static enum zcl_rule_rewrite_status rule_def_publish(
+    int *live, const char *path, const char *tmp, const char *new_text,
+    size_t new_len)
+{
+    bool ok = rule_def_write_tmp(tmp, new_text, new_len);
+#if defined(_WIN32)
+    rule_def_unlock(*live);
+    (void)close(*live);
+    *live = -1;
+#else
+    (void)live;
+#endif
+    if (!ok || rule_def_replace(tmp, path) != 0) {
+        (void)unlink(tmp);
+        return ZCL_RULE_REWRITE_ERR_IO;
+    }
+    return ZCL_RULE_REWRITE_OK;
+}
+
 /* The one writer of the live def. Nothing here ever opens `path` for
  * writing: the new bytes go whole into `<path>.tmp` in the same directory,
  * are flushed and fsynced, and a single rename publishes them. A crash, an
@@ -1111,62 +1285,9 @@ zcl_rule_def_rewrite(const char *path, const char *old_text, size_t old_len,
 
     enum zcl_rule_rewrite_status st = ZCL_RULE_REWRITE_ERR_IO;
     if (rule_def_lock(live)) {
-        /* Fresh read under the lock, bounded by what the caller read: a
-         * file of a different length is already not the bytes the caller
-         * read, whatever they are. */
-        size_t got = 0;
-        bool read_err = false;
-        while (got < old_len) {
-            ssize_t r = read(live, fresh + got, old_len - got);
-            if (r < 0 && errno == EINTR) continue;
-            if (r < 0) { read_err = true; break; }
-            if (r == 0) break;
-            got += (size_t)r;
-        }
-        bool same_len = false;
-        if (!read_err && got == old_len) {
-            ssize_t one = read(live, fresh + got, 1);
-            if (one < 0 && errno == EINTR) one = read(live, fresh + got, 1);
-            if (one < 0) read_err = true;
-            else same_len = (one == 0);
-        }
-
-        if (read_err) {
-            st = ZCL_RULE_REWRITE_ERR_IO;
-        } else if (!same_len) {
-            st = ZCL_RULE_REWRITE_ERR_STALE;
-        } else {
-            unsigned char want[32], have[32];
-            zcl_sha3_256((const unsigned char *)old_text, old_len, want);
-            zcl_sha3_256((const unsigned char *)fresh, old_len, have);
-            if (memcmp(want, have, sizeof want) != 0) {
-                st = ZCL_RULE_REWRITE_ERR_STALE;
-            } else {
-                FILE *f = fopen(tmp, "wb");
-                bool ok = f != NULL;
-                if (ok) {
-                    ok = fwrite(new_text, 1, new_len, f) == new_len &&
-                         fflush(f) == 0 &&
-#if defined(_WIN32)
-                         _commit(fileno(f)) == 0;
-#else
-                         fsync(fileno(f)) == 0;
-#endif
-                    if (fclose(f) != 0) ok = false;
-                }
-#if defined(_WIN32)
-                rule_def_unlock(live);
-                (void)close(live);
-                live = -1;
-#endif
-                if (!ok || rule_def_replace(tmp, path) != 0) {
-                    (void)unlink(tmp);
-                    st = ZCL_RULE_REWRITE_ERR_IO;
-                } else {
-                    st = ZCL_RULE_REWRITE_OK;
-                }
-            }
-        }
+        st = rule_def_check_fresh(live, old_text, old_len, fresh);
+        if (st == ZCL_RULE_REWRITE_OK)
+            st = rule_def_publish(&live, path, tmp, new_text, new_len);
         if (live >= 0) rule_def_unlock(live);
     }
     if (live >= 0) (void)close(live);
@@ -1202,6 +1323,136 @@ static void safe_basename(const char *id, char *out, size_t cap)
     out[w] = '\0';
 }
 
+/* Returns true only when the patch for sc was written. */
+static bool write_promotion_patch(const char *state_dir, const char *vocab_path,
+                                  const char *def_text, size_t def_len,
+                                  const struct zcl_rule_row *row,
+                                  const struct zcl_rule_score *sc,
+                                  uint32_t baseline)
+{
+    char base[ZCL_RULE_ID_MAX + 8];
+    safe_basename(sc->id, base, sizeof base);
+    char path[1024];
+    int pn = snprintf(path, sizeof path, "%s/%s/%s.patch", state_dir,
+                      ZCL_RULE_PROMOTIONS_DIR, base);
+    if (pn < 0 || (size_t)pn >= sizeof path) return false;
+    char *pbuf = zcl_calloc(1, 16384, "rule_score");
+    if (!pbuf) return false;
+    size_t pl = zcl_rule_promotion_patch(def_text, def_len, vocab_path, row,
+                                         sc, baseline, pbuf, 16384);
+    bool ok = pl > 0 && write_whole(path, pbuf, pl);
+    free(pbuf);
+    return ok;
+}
+
+static void run_retire(const char *vocab_path, const char *def_text,
+                       size_t def_len, struct zcl_rule_run *out)
+{
+    size_t cap = def_len + 1024u * (size_t)out->scoring.retire_count + 1024u;
+    char *nbuf = zcl_calloc(1, cap, "rule_score");
+    if (!nbuf) return;
+    size_t n = zcl_rule_vocab_apply_retirements(def_text, def_len,
+                                                &out->scoring, nbuf, cap);
+    if (n > 0) {
+        enum zcl_rule_rewrite_status rw = zcl_rule_def_rewrite(
+            vocab_path, def_text, def_len, nbuf, n);
+        if (rw == ZCL_RULE_REWRITE_OK)
+            out->retired_written = out->scoring.retire_count;
+        else if (!out->note[0])
+            (void)snprintf(out->note, sizeof out->note,
+                           rw == ZCL_RULE_REWRITE_ERR_STALE
+                               ? "refused to rewrite %s: the def "
+                                 "changed on disk since it was read; "
+                                 "the original stands"
+                               : "refused to rewrite %s: the temp "
+                                 "write, the fsync or the rename "
+                                 "failed; the original def is "
+                                 "untouched",
+                           vocab_path);
+    }
+    free(nbuf);
+}
+
+static void run_write_promotions(const char *state_dir, const char *vocab_path,
+                                 const char *def_text, size_t def_len,
+                                 const struct zcl_rule_vocab *vocab,
+                                 struct zcl_rule_run *out)
+{
+    /* An existing directory is not an error; a missing one would silently
+     * drop every proposal this run made. */
+    char pdir[1024];
+    int dn = snprintf(pdir, sizeof pdir, "%s/%s", state_dir,
+                      ZCL_RULE_PROMOTIONS_DIR);
+    if (dn > 0 && (size_t)dn < sizeof pdir) {
+#if defined(_WIN32)
+        (void)_mkdir(pdir);
+#else
+        (void)mkdir(pdir, 0755);
+#endif
+    }
+    for (uint32_t i = 0; i < out->scoring.rule_count; i++) {
+        const struct zcl_rule_score *sc = &out->scoring.rule[i];
+        if (sc->verdict != ZCL_RULE_VERDICT_PROMOTABLE) continue;
+        const struct zcl_rule_row *row = zcl_rule_vocab_find(vocab, sc->id);
+        if (!row) continue;
+        if (write_promotion_patch(state_dir, vocab_path, def_text, def_len, row,
+                                  sc, out->scoring.obeyed_baseline_permille))
+            out->patches_written++;
+    }
+}
+
+static void run_apply(const char *vocab_path, const char *state_dir,
+                      const char *def_text, size_t def_len,
+                      const struct zcl_rule_vocab *vocab,
+                      struct zcl_rule_run *out)
+{
+    if (out->scoring.retire_count > 0)
+        run_retire(vocab_path, def_text, def_len, out);
+    if (state_dir && out->scoring.promotable_count > 0)
+        run_write_promotions(state_dir, vocab_path, def_text, def_len, vocab,
+                             out);
+}
+
+static void run_load_vocab(const char *vocab_path, const char *def_text,
+                           size_t def_len, struct zcl_rule_vocab *vocab,
+                           struct zcl_rule_run *out)
+{
+    if (def_text && zcl_rule_vocab_parse(def_text, def_len, vocab)) {
+        out->vocab_ok = true;
+        return;
+    }
+    /* A vocabulary that would not parse is NOT quietly replaced by the
+     * compiled one: that would score a checkout against a table it does
+     * not contain. Say so, use the builtin, and refuse to apply. */
+    *vocab = *zcl_rule_vocab_builtin();
+    out->vocab_ok = false;
+    (void)snprintf(out->note, sizeof out->note,
+                   "%s did not parse; scoring the vocabulary compiled "
+                   "into this binary and applying nothing", vocab_path);
+}
+
+static void run_load_log(const char *chainlog_path, const char *log_text,
+                         size_t log_len, struct zcl_rule_receipt_log *log,
+                         struct zcl_rule_run *out)
+{
+    if (!log_text) {
+        out->chain = ZCL_RULE_CHAIN_EMPTY;
+        if (!out->note[0])
+            (void)snprintf(out->note, sizeof out->note,
+                           "no receipts at %s; every rule is untried, which "
+                           "is not the same fact as failing", chainlog_path);
+        return;
+    }
+    out->chain = zcl_rule_receipts_parse(log_text, log_len, log,
+                                         &out->bad_line);
+    out->log_ok = (out->chain == ZCL_RULE_CHAIN_OK);
+    if (!out->log_ok && !out->note[0])
+        (void)snprintf(out->note, sizeof out->note,
+                       "%s refused at line %u: %s", chainlog_path,
+                       out->bad_line,
+                       zcl_rule_chain_status_label(out->chain));
+}
+
 bool zcl_rule_score_run(const char *vocab_path, const char *chainlog_path,
                         const char *state_dir, bool apply,
                         struct zcl_rule_run *out)
@@ -1213,40 +1464,13 @@ bool zcl_rule_score_run(const char *vocab_path, const char *chainlog_path,
     size_t def_len = 0;
     char *def_text = read_whole(vocab_path, ZCL_RULE_DEF_MAX, &def_len);
     struct zcl_rule_vocab vocab;
-    if (def_text && zcl_rule_vocab_parse(def_text, def_len, &vocab)) {
-        out->vocab_ok = true;
-    } else {
-        /* A vocabulary that would not parse is NOT quietly replaced by the
-         * compiled one: that would score a checkout against a table it does
-         * not contain. Say so, use the builtin, and refuse to apply. */
-        vocab = *zcl_rule_vocab_builtin();
-        out->vocab_ok = false;
-        (void)snprintf(out->note, sizeof out->note,
-                       "%s did not parse; scoring the vocabulary compiled "
-                       "into this binary and applying nothing", vocab_path);
-    }
+    run_load_vocab(vocab_path, def_text, def_len, &vocab, out);
 
     size_t log_len = 0;
     char *log_text = read_whole(chainlog_path, ZCL_RULE_LOG_MAX, &log_len);
     struct zcl_rule_receipt_log *log = zcl_calloc(1, sizeof *log, "rule_score");
     if (!log) { free(def_text); free(log_text); return false; }
-
-    if (!log_text) {
-        out->chain = ZCL_RULE_CHAIN_EMPTY;
-        if (!out->note[0])
-            (void)snprintf(out->note, sizeof out->note,
-                           "no receipts at %s; every rule is untried, which "
-                           "is not the same fact as failing", chainlog_path);
-    } else {
-        out->chain = zcl_rule_receipts_parse(log_text, log_len, log,
-                                             &out->bad_line);
-        out->log_ok = (out->chain == ZCL_RULE_CHAIN_OK);
-        if (!out->log_ok && !out->note[0])
-            (void)snprintf(out->note, sizeof out->note,
-                           "%s refused at line %u: %s", chainlog_path,
-                           out->bad_line,
-                           zcl_rule_chain_status_label(out->chain));
-    }
+    run_load_log(chainlog_path, log_text, log_len, log, out);
 
     zcl_rule_score_all(&vocab, out->log_ok ? log : NULL, &out->scoring);
 
@@ -1254,68 +1478,8 @@ bool zcl_rule_score_run(const char *vocab_path, const char *chainlog_path,
      * whose chain did not verify is a change to the tree justified by
      * evidence that failed its own check. */
     bool may_apply = apply && out->vocab_ok && out->log_ok && def_text;
-    if (may_apply && out->scoring.retire_count > 0) {
-        size_t cap = def_len + 1024u * (size_t)out->scoring.retire_count + 1024u;
-        char *nbuf = zcl_calloc(1, cap, "rule_score");
-        if (nbuf) {
-            size_t n = zcl_rule_vocab_apply_retirements(def_text, def_len,
-                                                        &out->scoring,
-                                                        nbuf, cap);
-            if (n > 0) {
-                enum zcl_rule_rewrite_status rw = zcl_rule_def_rewrite(
-                    vocab_path, def_text, def_len, nbuf, n);
-                if (rw == ZCL_RULE_REWRITE_OK)
-                    out->retired_written = out->scoring.retire_count;
-                else if (!out->note[0])
-                    (void)snprintf(out->note, sizeof out->note,
-                                   rw == ZCL_RULE_REWRITE_ERR_STALE
-                                       ? "refused to rewrite %s: the def "
-                                         "changed on disk since it was read; "
-                                         "the original stands"
-                                       : "refused to rewrite %s: the temp "
-                                         "write, the fsync or the rename "
-                                         "failed; the original def is "
-                                         "untouched",
-                                   vocab_path);
-            }
-            free(nbuf);
-        }
-    }
-    if (may_apply && state_dir && out->scoring.promotable_count > 0) {
-        char pdir[1024];
-        int dn = snprintf(pdir, sizeof pdir, "%s/%s", state_dir,
-                          ZCL_RULE_PROMOTIONS_DIR);
-        /* An existing directory is not an error; a missing one would silently
-         * drop every proposal this run made. */
-        if (dn > 0 && (size_t)dn < sizeof pdir) {
-#if defined(_WIN32)
-            (void)_mkdir(pdir);
-#else
-            (void)mkdir(pdir, 0755);
-#endif
-        }
-        for (uint32_t i = 0; i < out->scoring.rule_count; i++) {
-            const struct zcl_rule_score *sc = &out->scoring.rule[i];
-            if (sc->verdict != ZCL_RULE_VERDICT_PROMOTABLE) continue;
-            const struct zcl_rule_row *row = zcl_rule_vocab_find(&vocab, sc->id);
-            if (!row) continue;
-            char base[ZCL_RULE_ID_MAX + 8];
-            safe_basename(sc->id, base, sizeof base);
-            char path[1024];
-            int pn = snprintf(path, sizeof path, "%s/%s/%s.patch", state_dir,
-                              ZCL_RULE_PROMOTIONS_DIR, base);
-            if (pn < 0 || (size_t)pn >= sizeof path) continue;
-            char *pbuf = zcl_calloc(1, 16384, "rule_score");
-            if (!pbuf) continue;
-            size_t pl = zcl_rule_promotion_patch(def_text, def_len, vocab_path,
-                                                 row, sc,
-                                                 out->scoring.obeyed_baseline_permille,
-                                                 pbuf, 16384);
-            if (pl > 0 && write_whole(path, pbuf, pl))
-                out->patches_written++;
-            free(pbuf);
-        }
-    }
+    if (may_apply)
+        run_apply(vocab_path, state_dir, def_text, def_len, &vocab, out);
 
     free(log);
     free(def_text);
