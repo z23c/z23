@@ -188,6 +188,94 @@ static bool receiver_admission_binds_offer(
         memcmp(offer_root, admission->offer_root, 32) == 0;
 }
 
+static void receiver_slot_bind(
+    struct mesh_private_object_receive_slot *slot,
+    const struct mesh_private_object_offer_v1 *offer,
+    const struct mesh_private_object_admission *admission,
+    uint64_t peer_token)
+{
+    slot->offer = *offer;
+    slot->admission = *admission;
+    slot->peer_token = peer_token;
+}
+
+static bool receiver_slot_bound(
+    const struct mesh_private_object_receive_slot *slot, uint64_t peer_token,
+    const uint8_t offer_request_id[32])
+{
+    return slot->peer_token == peer_token &&
+        memcmp(slot->offer.request_id, offer_request_id, 32) == 0;
+}
+
+static struct zcl_result receiver_admit_resume(
+    struct mesh_private_object_receive_slot *slot,
+    const struct mesh_private_object_offer_v1 *offer,
+    const struct mesh_private_object_admission *admission,
+    uint64_t peer_token, uint64_t first_request_id,
+    enum mesh_private_object_receiver_result *out)
+{
+    if (!receiver_admission_matches(slot, admission))
+        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_AUTH);
+    receiver_slot_bind(slot, offer, admission, peer_token);
+    if (!receiver_schedule_reset(slot, first_request_id))
+        return ZCL_ERR(-2, "private-object resume schedule failed");
+    if (mesh_private_object_stage_count_v1(slot->stage) ==
+        offer->chunk_count)
+        return receiver_staged_if_complete(slot, out);
+    return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_RESUME);
+}
+
+static struct zcl_result receiver_stage_open_failed(
+    enum mesh_private_object_stage_error opened,
+    enum mesh_private_object_receiver_result *out)
+{
+    if (opened == MESH_PRIVATE_OBJECT_STAGE_BUSY)
+        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_BUSY);
+    if (opened == MESH_PRIVATE_OBJECT_STAGE_AUTH)
+        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_AUTH);
+    if (opened == MESH_PRIVATE_OBJECT_STAGE_IDENTITY ||
+        opened == MESH_PRIVATE_OBJECT_STAGE_CORRUPT)
+        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_CORRUPT);
+    return ZCL_ERR(-2, "private-object stage open failed: %s",
+                   mesh_private_object_stage_error_string(opened));
+}
+
+static struct zcl_result receiver_admit_fresh(
+    struct mesh_private_object_receiver *receiver,
+    struct mesh_private_object_receive_slot *slot,
+    const struct mesh_private_object_offer_v1 *offer,
+    const struct mesh_private_object_admission *admission,
+    const uint8_t transfer_id[32], uint64_t peer_token,
+    uint64_t first_request_id,
+    enum mesh_private_object_receiver_result *out)
+{
+    struct mesh_private_object_stage *stage = NULL;
+    enum mesh_private_object_stage_error opened =
+        mesh_private_object_stage_open_v1(
+            &stage, receiver->private_root, offer, receiver->target_secret);
+    if (opened != MESH_PRIVATE_OBJECT_STAGE_OK)
+        return receiver_stage_open_failed(opened, out);
+    if (mesh_private_object_stage_cancelled_v1(stage, NULL)) {
+        mesh_private_object_stage_close(stage);
+        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);
+    }
+    memset(slot, 0, sizeof(*slot));
+    slot->used = true;
+    memcpy(slot->transfer_id, transfer_id, 32);
+    receiver_slot_bind(slot, offer, admission, peer_token);
+    slot->stage = stage;
+    uint32_t durable_chunks = mesh_private_object_stage_count_v1(stage);
+    if (!receiver_schedule_reset(slot, first_request_id)) {
+        receiver_slot_clear(slot);
+        return ZCL_ERR(-2, "private-object stage schedule failed");
+    }
+    if (durable_chunks == offer->chunk_count)
+        return receiver_staged_if_complete(slot, out);
+    return receiver_reply(out, durable_chunks
+        ? MESH_PRIVATE_OBJECT_RECEIVER_RESUME
+        : MESH_PRIVATE_OBJECT_RECEIVER_OK);
+}
+
 struct zcl_result mesh_private_object_receiver_admit(
     struct mesh_private_object_receiver *receiver,
     const struct mesh_private_object_offer_v1 *offer,
@@ -205,56 +293,66 @@ struct zcl_result mesh_private_object_receiver_admit(
         return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_AUTH);
     struct mesh_private_object_receive_slot *slot =
         receiver_find(receiver, transfer_id);
-    if (slot) {
-        if (!receiver_admission_matches(slot, admission))
-            return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_AUTH);
-        slot->offer = *offer;
-        slot->admission = *admission;
-        slot->peer_token = peer_token;
-        if (!receiver_schedule_reset(slot, first_request_id))
-            return ZCL_ERR(-2, "private-object resume schedule failed");
-        if (mesh_private_object_stage_count_v1(slot->stage) ==
-            offer->chunk_count)
-            return receiver_staged_if_complete(slot, out);
-        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_RESUME);
-    }
+    if (slot)
+        return receiver_admit_resume(slot, offer, admission, peer_token,
+                                     first_request_id, out);
     slot = receiver_free_slot(receiver);
     if (!slot) return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_BUSY);
-    struct mesh_private_object_stage *stage = NULL;
-    enum mesh_private_object_stage_error opened =
-        mesh_private_object_stage_open_v1(
-            &stage, receiver->private_root, offer, receiver->target_secret);
-    if (opened == MESH_PRIVATE_OBJECT_STAGE_BUSY)
-        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_BUSY);
-    if (opened == MESH_PRIVATE_OBJECT_STAGE_AUTH)
-        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_AUTH);
-    if (opened == MESH_PRIVATE_OBJECT_STAGE_IDENTITY ||
-        opened == MESH_PRIVATE_OBJECT_STAGE_CORRUPT)
-        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_CORRUPT);
-    if (opened != MESH_PRIVATE_OBJECT_STAGE_OK)
-        return ZCL_ERR(-2, "private-object stage open failed: %s",
-                       mesh_private_object_stage_error_string(opened));
-    if (mesh_private_object_stage_cancelled_v1(stage, NULL)) {
-        mesh_private_object_stage_close(stage);
-        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED);
-    }
-    memset(slot, 0, sizeof(*slot));
-    slot->used = true;
-    slot->peer_token = peer_token;
-    memcpy(slot->transfer_id, transfer_id, 32);
-    slot->offer = *offer;
-    slot->admission = *admission;
-    slot->stage = stage;
-    uint32_t durable_chunks = mesh_private_object_stage_count_v1(stage);
-    if (!receiver_schedule_reset(slot, first_request_id)) {
-        receiver_slot_clear(slot);
-        return ZCL_ERR(-2, "private-object stage schedule failed");
-    }
-    if (durable_chunks == offer->chunk_count)
+    return receiver_admit_fresh(receiver, slot, offer, admission, transfer_id,
+                                peer_token, first_request_id, out);
+}
+
+static bool receiver_drive_emit_request(
+    struct mesh_private_object_receive_slot *slot,
+    const struct mesh_private_object_scheduled_request *scheduled,
+    mesh_private_object_request_emit_fn emit, void *emit_context)
+{
+    struct mesh_private_object_chunk_request_v1 request = {
+        .chunk_request_id = scheduled->request_id,
+        .chunk_index = scheduled->chunk_index,
+    };
+    memcpy(request.transfer_id, slot->transfer_id, 32);
+    memcpy(request.offer_request_id, slot->offer.request_id, 32);
+    return emit(&request, emit_context);
+}
+
+static struct zcl_result receiver_drive_backpressure(
+    struct mesh_private_object_receive_slot *slot, uint64_t request_id,
+    enum mesh_private_object_receiver_result *out)
+{
+    if (!mesh_private_object_schedule_v1_unissue(&slot->schedule, request_id))
+        return ZCL_ERR(-2, "private-object unsent request rollback failed");
+    return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_BACKPRESSURE);
+}
+
+/* One scheduler step. *more is true only after one request was emitted;
+ * otherwise the returned result is the drive's final answer. */
+static struct zcl_result receiver_drive_step(
+    struct mesh_private_object_receive_slot *slot, uint64_t now_ms,
+    mesh_private_object_request_emit_fn emit, void *emit_context,
+    size_t *emitted_out, enum mesh_private_object_receiver_result *out,
+    bool *more)
+{
+    struct mesh_private_object_scheduled_request scheduled;
+    enum mesh_private_object_schedule_result next =
+        mesh_private_object_schedule_v1_next(
+            &slot->schedule, now_ms, &scheduled);
+    *more = false;
+    if (next == MESH_PRIVATE_OBJECT_SCHEDULE_COMPLETE)
         return receiver_staged_if_complete(slot, out);
-    return receiver_reply(out, durable_chunks
-        ? MESH_PRIVATE_OBJECT_RECEIVER_RESUME
-        : MESH_PRIVATE_OBJECT_RECEIVER_OK);
+    if (next == MESH_PRIVATE_OBJECT_SCHEDULE_EXHAUSTED)
+        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_EXHAUSTED);
+    if (next == MESH_PRIVATE_OBJECT_SCHEDULE_WAIT)
+        return receiver_reply(out, *emitted_out
+            ? MESH_PRIVATE_OBJECT_RECEIVER_OK
+            : MESH_PRIVATE_OBJECT_RECEIVER_WAIT);
+    if (next != MESH_PRIVATE_OBJECT_SCHEDULE_REQUEST)
+        return ZCL_ERR(-2, "private-object scheduler state is invalid");
+    if (!receiver_drive_emit_request(slot, &scheduled, emit, emit_context))
+        return receiver_drive_backpressure(slot, scheduled.request_id, out);
+    (*emitted_out)++;
+    *more = true;
+    return ZCL_OK;
 }
 
 struct zcl_result mesh_private_object_receiver_drive(
@@ -278,36 +376,34 @@ struct zcl_result mesh_private_object_receiver_drive(
     if (!receiver_admission_matches(slot, admission))
         return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_AUTH);
     for (;;) {
-        struct mesh_private_object_scheduled_request scheduled;
-        enum mesh_private_object_schedule_result next =
-            mesh_private_object_schedule_v1_next(
-                &slot->schedule, now_ms, &scheduled);
-        if (next == MESH_PRIVATE_OBJECT_SCHEDULE_COMPLETE)
-            return receiver_staged_if_complete(slot, out);
-        if (next == MESH_PRIVATE_OBJECT_SCHEDULE_EXHAUSTED)
-            return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_EXHAUSTED);
-        if (next == MESH_PRIVATE_OBJECT_SCHEDULE_WAIT)
-            return receiver_reply(out, *emitted_out
-                ? MESH_PRIVATE_OBJECT_RECEIVER_OK
-                : MESH_PRIVATE_OBJECT_RECEIVER_WAIT);
-        if (next != MESH_PRIVATE_OBJECT_SCHEDULE_REQUEST)
-            return ZCL_ERR(-2, "private-object scheduler state is invalid");
-        struct mesh_private_object_chunk_request_v1 request = {
-            .chunk_request_id = scheduled.request_id,
-            .chunk_index = scheduled.chunk_index,
-        };
-        memcpy(request.transfer_id, slot->transfer_id, 32);
-        memcpy(request.offer_request_id, slot->offer.request_id, 32);
-        if (!emit(&request, emit_context)) {
-            if (!mesh_private_object_schedule_v1_unissue(
-                    &slot->schedule, scheduled.request_id))
-                return ZCL_ERR(-2,
-                    "private-object unsent request rollback failed");
-            return receiver_reply(
-                out, MESH_PRIVATE_OBJECT_RECEIVER_BACKPRESSURE);
-        }
-        (*emitted_out)++;
+        bool more = false;
+        struct zcl_result step = receiver_drive_step(
+            slot, now_ms, emit, emit_context, emitted_out, out, &more);
+        if (!more) return step;
     }
+}
+
+static bool receiver_chunk_args_valid(
+    const struct mesh_private_object_receiver *receiver,
+    const struct mesh_private_object_chunk_v1 *chunk,
+    const struct mesh_private_object_admission *admission,
+    uint64_t peer_token)
+{
+    return receiver && chunk && chunk->sealed && admission &&
+        chunk->chunk_request_id != 0 && peer_token != 0;
+}
+
+static struct zcl_result receiver_chunk_stored(
+    struct mesh_private_object_receive_slot *slot, uint32_t chunk_index,
+    enum mesh_private_object_receiver_result *out)
+{
+    if (!mesh_private_object_schedule_v1_complete_chunk(
+            &slot->schedule, chunk_index))
+        return ZCL_ERR(-2, "private-object durable schedule update failed");
+    if (mesh_private_object_stage_count_v1(slot->stage) !=
+        slot->offer.chunk_count)
+        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_OK);
+    return receiver_staged_if_complete(slot, out);
 }
 
 struct zcl_result mesh_private_object_receiver_chunk(
@@ -318,14 +414,12 @@ struct zcl_result mesh_private_object_receiver_chunk(
 {
     if (!out) return ZCL_ERR(-1, "private-object chunk requires output");
     *out = MESH_PRIVATE_OBJECT_RECEIVER_INVALID;
-    if (!receiver || !chunk || !chunk->sealed || !admission ||
-        chunk->chunk_request_id == 0 || peer_token == 0)
+    if (!receiver_chunk_args_valid(receiver, chunk, admission, peer_token))
         return ZCL_ERR(-1, "private-object chunk context is invalid");
     struct mesh_private_object_receive_slot *slot =
         receiver_find(receiver, chunk->transfer_id);
     if (!slot) return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_NOT_FOUND);
-    if (slot->peer_token != peer_token ||
-        memcmp(slot->offer.request_id, chunk->offer_request_id, 32) != 0)
+    if (!receiver_slot_bound(slot, peer_token, chunk->offer_request_id))
         return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_BINDING);
     if (!receiver_admission_matches(slot, admission))
         return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_AUTH);
@@ -346,13 +440,7 @@ struct zcl_result mesh_private_object_receiver_chunk(
     if (stored != MESH_PRIVATE_OBJECT_STAGE_OK)
         return ZCL_ERR(-2, "private-object stage write failed: %s",
                        mesh_private_object_stage_error_string(stored));
-    if (!mesh_private_object_schedule_v1_complete_chunk(
-            &slot->schedule, chunk->chunk_index))
-        return ZCL_ERR(-2, "private-object durable schedule update failed");
-    if (mesh_private_object_stage_count_v1(slot->stage) !=
-        slot->offer.chunk_count)
-        return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_OK);
-    return receiver_staged_if_complete(slot, out);
+    return receiver_chunk_stored(slot, chunk->chunk_index, out);
 }
 
 struct zcl_result mesh_private_object_receiver_cancel(
@@ -367,8 +455,7 @@ struct zcl_result mesh_private_object_receiver_cancel(
     struct mesh_private_object_receive_slot *slot =
         receiver_find(receiver, cancel->transfer_id);
     if (!slot) return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_NOT_FOUND);
-    if (slot->peer_token != peer_token ||
-        memcmp(slot->offer.request_id, cancel->offer_request_id, 32) != 0)
+    if (!receiver_slot_bound(slot, peer_token, cancel->offer_request_id))
         return receiver_reply(out, MESH_PRIVATE_OBJECT_RECEIVER_BINDING);
     enum mesh_private_object_stage_error stored =
         mesh_private_object_stage_cancel_v1(slot->stage, cancel);
