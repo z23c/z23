@@ -223,105 +223,85 @@ static bool zec_stable_read(const char *path, void *bytes, size_t capacity,
 
 /* Every library refusal gets its own operator-facing code and sentence.
  * The four chain outcomes stay four outcomes: "the chain could not be
- * asked" must never read the same as "the chain said no". */
+ * asked" must never read the same as "the chain said no". A refusal with
+ * no row here keeps the generic code and the library's own sentence. */
+struct zec_refusal {
+    const char *code;
+    const char *msg;   /* NULL: rendered at the call (the window ceiling) */
+};
+
+static const struct zec_refusal k_zec_refusals[] = {
+    [ZENDP_ERR_NULL] = { "BAD_ARGUMENT", "a required argument was missing" },
+    [ZENDP_ERR_SHAPE] = { "BAD_ENDPOINT",
+        "the record names no reachable endpoint, or carries a field "
+        "its flags do not claim" },
+    [ZENDP_ERR_ENCODE] = { "ENCODE_FAILED", "the record would not encode" },
+    [ZENDP_ERR_SIGN] = { "SIGN_REFUSED",
+        "signing refused — the validity window never opens (expiry "
+        "must be after not_before) or the seed is unusable" },
+    [ZENDP_ERR_WINDOW_TOO_LONG] = { "WINDOW_TOO_LONG", NULL },
+    [ZENDP_ERR_BLOB] = { "BLOB_REFUSED",
+        "the content-addressed store refused the record bytes" },
+    [ZENDP_ERR_ABSENT] = { "ENDPOINT_ABSENT",
+        "no record is filed for this identity at the current period "
+        "or its predecessor — the publisher must republish each period" },
+    [ZENDP_ERR_DECODE] = { "DOC_DECODE_FAILED",
+        "the bytes are not a well-formed zid document" },
+    [ZENDP_ERR_VERIFY] = { "VERIFY_FAILED",
+        "the signature or the validity window failed — tampered, "
+        "corrupted, expired, or not yet valid" },
+    [ZENDP_ERR_BODY] = { "NOT_AN_ENDPOINT_BODY",
+        "the document verified but its body is not a ZIDE endpoint "
+        "record, or the record's own window has not opened yet" },
+    [ZENDP_ERR_KEY_MISMATCH] = { "KEY_MISMATCH",
+        "the record filed at this identity's address is signed by a "
+        "different identity" },
+    [ZENDP_ERR_STALE] = { "STALE_SEQ",
+        "this record does not supersede the one already held — "
+        "rotation requires a strictly higher seq; nothing was written" },
+    [ZENDP_ERR_FULL] = { "DIRECTORY_FULL",
+        "the endpoint directory has no free slot" },
+    [ZENDP_ERR_FETCH] = { "FETCH_REFUSED", "the swarm refused the download" },
+    [ZENDP_ERR_NO_ANCHOR_LOOKUP] = { "NO_CHAIN_LOOKUP",
+        "nothing here can ask the chain about the signing key, so no "
+        "record may be treated as anchored — this fails closed on "
+        "purpose. Run this against a node datadir whose node.db is "
+        "readable." },
+    [ZENDP_ERR_ANCHOR_UNAVAILABLE] = { "CHAIN_UNAVAILABLE",
+        "the chain was asked about the signing key and the lookup "
+        "itself failed — this is NOT the same as the chain saying no" },
+    [ZENDP_ERR_NOT_ANCHORED] = { "KEY_NOT_ANCHORED",
+        "the signing key was never anchored on-chain — the record is "
+        "discarded, not stored" },
+    [ZENDP_ERR_ROTATED] = { "KEY_ROTATED",
+        "the signing key was rotated away — the record is discarded, "
+        "not stored" },
+    [ZENDP_ERR_REVOKED] = { "KEY_REVOKED",
+        "the signing key was revoked — the record is discarded, not "
+        "stored" },
+};
+
+/* The table row for a refusal, or NULL when it has none (ZENDP_OK has
+ * no row, and neither does any value outside the enum). */
+static const struct zec_refusal *zec_refusal_row(enum zendp_result r)
+{
+    size_t n = sizeof(k_zec_refusals) / sizeof(k_zec_refusals[0]);
+    if ((size_t)r >= n || !k_zec_refusals[r].code)
+        return NULL;
+    return &k_zec_refusals[r];
+}
+
 static void zec_fail_result(struct zcl_command_reply *reply,
                             enum zendp_result r, const char *evidence)
 {
+    if (r == ZENDP_OK)
+        return;
     const char *code = "ENDPOINT_REFUSED";
     const char *msg = zendp_result_string(r);
-    switch (r) {
-    case ZENDP_ERR_NULL:
-        code = "BAD_ARGUMENT";
-        msg = "a required argument was missing";
-        break;
-    case ZENDP_ERR_SHAPE:
-        code = "BAD_ENDPOINT";
-        msg = "the record names no reachable endpoint, or carries a field "
-              "its flags do not claim";
-        break;
-    case ZENDP_ERR_ENCODE:
-        code = "ENCODE_FAILED";
-        msg = "the record would not encode";
-        break;
-    case ZENDP_ERR_SIGN:
-        code = "SIGN_REFUSED";
-        msg = "signing refused — the validity window never opens (expiry "
-              "must be after not_before) or the seed is unusable";
-        break;
-    case ZENDP_ERR_WINDOW_TOO_LONG:
-        code = "WINDOW_TOO_LONG";
-        msg = zec_window_too_long_message();
-        break;
-    case ZENDP_ERR_BLOB:
-        code = "BLOB_REFUSED";
-        msg = "the content-addressed store refused the record bytes";
-        break;
-    case ZENDP_ERR_ABSENT:
-        code = "ENDPOINT_ABSENT";
-        msg = "no record is filed for this identity at the current period "
-              "or its predecessor — the publisher must republish each period";
-        break;
-    case ZENDP_ERR_DECODE:
-        code = "DOC_DECODE_FAILED";
-        msg = "the bytes are not a well-formed zid document";
-        break;
-    case ZENDP_ERR_VERIFY:
-        code = "VERIFY_FAILED";
-        msg = "the signature or the validity window failed — tampered, "
-              "corrupted, expired, or not yet valid";
-        break;
-    case ZENDP_ERR_BODY:
-        code = "NOT_AN_ENDPOINT_BODY";
-        msg = "the document verified but its body is not a ZIDE endpoint "
-              "record, or the record's own window has not opened yet";
-        break;
-    case ZENDP_ERR_KEY_MISMATCH:
-        code = "KEY_MISMATCH";
-        msg = "the record filed at this identity's address is signed by a "
-              "different identity";
-        break;
-    case ZENDP_ERR_STALE:
-        code = "STALE_SEQ";
-        msg = "this record does not supersede the one already held — "
-              "rotation requires a strictly higher seq; nothing was written";
-        break;
-    case ZENDP_ERR_FULL:
-        code = "DIRECTORY_FULL";
-        msg = "the endpoint directory has no free slot";
-        break;
-    case ZENDP_ERR_FETCH:
-        code = "FETCH_REFUSED";
-        msg = "the swarm refused the download";
-        break;
-    case ZENDP_ERR_NO_ANCHOR_LOOKUP:
-        code = "NO_CHAIN_LOOKUP";
-        msg = "nothing here can ask the chain about the signing key, so no "
-              "record may be treated as anchored — this fails closed on "
-              "purpose. Run this against a node datadir whose node.db is "
-              "readable.";
-        break;
-    case ZENDP_ERR_ANCHOR_UNAVAILABLE:
-        code = "CHAIN_UNAVAILABLE";
-        msg = "the chain was asked about the signing key and the lookup "
-              "itself failed — this is NOT the same as the chain saying no";
-        break;
-    case ZENDP_ERR_NOT_ANCHORED:
-        code = "KEY_NOT_ANCHORED";
-        msg = "the signing key was never anchored on-chain — the record is "
-              "discarded, not stored";
-        break;
-    case ZENDP_ERR_ROTATED:
-        code = "KEY_ROTATED";
-        msg = "the signing key was rotated away — the record is discarded, "
-              "not stored";
-        break;
-    case ZENDP_ERR_REVOKED:
-        code = "KEY_REVOKED";
-        msg = "the signing key was revoked — the record is discarded, not "
-              "stored";
-        break;
-    case ZENDP_OK:
-        return;
+    const struct zec_refusal *row = zec_refusal_row(r);
+    if (row) {
+        code = row->code;
+        msg = row->msg ? row->msg : zec_window_too_long_message();
     }
     zec_fail(reply, code, "execute", msg, evidence);
 }
@@ -433,19 +413,11 @@ static bool zec_record_dir(const char *datadir, char *out, size_t out_size,
     return true;
 }
 
-static bool zec_write_record(const char *datadir, const char *key_hex,
-                             const char *doc_hex, char *path_out,
-                             size_t path_size, char *err, size_t err_size)
-{
-    char dir[1024];
-    if (!zec_record_dir(datadir, dir, sizeof(dir), err, err_size))
-        return false;
-    int n = snprintf(path_out, path_size, "%s/%s.zid", dir, key_hex);
-    if (n <= 0 || (size_t)n >= path_size) {
-        snprintf(err, err_size, "path too long under datadir");
-        return false;
-    }
 #if defined(_WIN32)
+static bool zec_write_record_win(const char *dir, const char *key_hex,
+                                 const char *doc_hex, char *err,
+                                 size_t err_size)
+{
     struct platform_directory_transaction directory;
     struct platform_directory_child staged;
     platform_directory_transaction_init(&directory);
@@ -473,7 +445,11 @@ static bool zec_write_record(const char *datadir, const char *key_hex,
     platform_directory_transaction_close(&directory);
     if (!ok) snprintf(err, err_size, "atomic endpoint write failed");
     return ok;
+}
 #else
+static bool zec_write_record_posix(const char *path_out, const char *doc_hex,
+                                   char *err, size_t err_size)
+{
     int fd = open(path_out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (fd < 0) {
         snprintf(err, err_size, "open %s: %s", path_out, strerror(errno));
@@ -488,6 +464,25 @@ static bool zec_write_record(const char *datadir, const char *key_hex,
         return false;
     }
     return true;
+}
+#endif
+
+static bool zec_write_record(const char *datadir, const char *key_hex,
+                             const char *doc_hex, char *path_out,
+                             size_t path_size, char *err, size_t err_size)
+{
+    char dir[1024];
+    if (!zec_record_dir(datadir, dir, sizeof(dir), err, err_size))
+        return false;
+    int n = snprintf(path_out, path_size, "%s/%s.zid", dir, key_hex);
+    if (n <= 0 || (size_t)n >= path_size) {
+        snprintf(err, err_size, "path too long under datadir");
+        return false;
+    }
+#if defined(_WIN32)
+    return zec_write_record_win(dir, key_hex, doc_hex, err, err_size);
+#else
+    return zec_write_record_posix(path_out, doc_hex, err, err_size);
 #endif
 }
 
@@ -662,17 +657,30 @@ static void zec_push_record(struct zcl_command_reply *reply,
 
 /* ── input -> struct zendp ─────────────────────────────────────────── */
 
-/* Build the record body from operator input. Every transport is
- * optional and "none" is not: a record naming no way to reach anything
- * is refused here by name rather than handed to the library to reject
- * with a less specific message. */
-static bool zec_build_endpoint(const struct json_value *in,
-                               struct zcl_command_reply *reply,
-                               const char *cmd, int64_t now,
-                               struct zendp *ep)
+/* One transport's port: an absent field takes 8033, and anything outside
+ * 1..65535 is refused by name. The caller supplies the message, so each
+ * field keeps its own sentence. */
+static bool zec_input_port(const struct json_value *in,
+                           struct zcl_command_reply *reply, const char *cmd,
+                           const char *key, const char *message,
+                           uint16_t *port_out)
 {
-    memset(ep, 0, sizeof(*ep));
+    *port_out = 0;
+    int64_t port = zec_input_int(in, key, 8033);
+    if (port <= 0 || port > 65535) {
+        zec_fail(reply, "BAD_PORT", "normalize", message, cmd);
+        return false;
+    }
+    *port_out = (uint16_t)port;
+    return true;
+}
 
+/* The three transports: each is optional, and a named one is validated
+ * and flagged. A record with no transport at all is refused here. */
+static bool zec_build_transports(const struct json_value *in,
+                                 struct zcl_command_reply *reply,
+                                 const char *cmd, struct zendp *ep)
+{
     const char *onion = zec_input_str(in, "onion");
     if (onion && onion[0]) {
         if (!zdesc_onion_valid(onion)) {
@@ -681,14 +689,12 @@ static bool zec_build_endpoint(const struct json_value *in,
                      "ending in .onion", cmd);
             return false;
         }
-        int64_t port = zec_input_int(in, "onion_port", 8033);
-        if (port <= 0 || port > 65535) {
-            zec_fail(reply, "BAD_PORT", "normalize",
-                     "onion_port must be 1..65535", cmd);
+        uint16_t port = 0;
+        if (!zec_input_port(in, reply, cmd, "onion_port",
+                            "onion_port must be 1..65535", &port))
             return false;
-        }
         snprintf(ep->onion, sizeof(ep->onion), "%s", onion);
-        ep->onion_port = (uint16_t)port;
+        ep->onion_port = port;
         ep->flags |= ZENDP_HAS_ONION;
     }
 
@@ -699,13 +705,11 @@ static bool zec_build_endpoint(const struct json_value *in,
                      "ipv4 must be a dotted-quad address", ipv4);
             return false;
         }
-        int64_t port = zec_input_int(in, "ipv4_port", 8033);
-        if (port <= 0 || port > 65535) {
-            zec_fail(reply, "BAD_PORT", "normalize",
-                     "ipv4_port must be 1..65535", cmd);
+        uint16_t port = 0;
+        if (!zec_input_port(in, reply, cmd, "ipv4_port",
+                            "ipv4_port must be 1..65535", &port))
             return false;
-        }
-        ep->ipv4_port = (uint16_t)port;
+        ep->ipv4_port = port;
         ep->flags |= ZENDP_HAS_IPV4;
     }
 
@@ -716,13 +720,11 @@ static bool zec_build_endpoint(const struct json_value *in,
                      "ipv6 must be a colon-separated address", ipv6);
             return false;
         }
-        int64_t port = zec_input_int(in, "ipv6_port", 8033);
-        if (port <= 0 || port > 65535) {
-            zec_fail(reply, "BAD_PORT", "normalize",
-                     "ipv6_port must be 1..65535", cmd);
+        uint16_t port = 0;
+        if (!zec_input_port(in, reply, cmd, "ipv6_port",
+                            "ipv6_port must be 1..65535", &port))
             return false;
-        }
-        ep->ipv6_port = (uint16_t)port;
+        ep->ipv6_port = port;
         ep->flags |= ZENDP_HAS_IPV6;
     }
 
@@ -732,7 +734,14 @@ static bool zec_build_endpoint(const struct json_value *in,
                  "pass onion, ipv4 or ipv6", cmd);
         return false;
     }
+    return true;
+}
 
+/* The claims the record makes about this node, and its validity. */
+static bool zec_build_claims(const struct json_value *in,
+                             struct zcl_command_reply *reply, const char *cmd,
+                             int64_t now, struct zendp *ep)
+{
     int64_t services = zec_input_int(in, "services", 0);
     int64_t height = zec_input_int(in, "height", 0);
     if (services < 0 || height < 0 || height > (int64_t)UINT32_MAX) {
@@ -754,6 +763,21 @@ static bool zec_build_endpoint(const struct json_value *in,
         return false;
     }
     return true;
+}
+
+/* Build the record body from operator input. Every transport is
+ * optional and "none" is not: a record naming no way to reach anything
+ * is refused here by name rather than handed to the library to reject
+ * with a less specific message. */
+static bool zec_build_endpoint(const struct json_value *in,
+                               struct zcl_command_reply *reply,
+                               const char *cmd, int64_t now,
+                               struct zendp *ep)
+{
+    memset(ep, 0, sizeof(*ep));
+    if (!zec_build_transports(in, reply, cmd, ep))
+        return false;
+    return zec_build_claims(in, reply, cmd, now, ep);
 }
 
 /* Load record wire bytes from --doc=<hex> or --file=<path>. */
@@ -873,6 +897,170 @@ static void zec_close_chain(void)
 
 /* ── zcode.endpoint.publish ────────────────────────────────────────── */
 
+/* The validity window for this record. An absent expiry takes the
+ * standard validity from not_before. Both window rules come from
+ * zendp_window_check, the same function the signer and every verifier
+ * call. Nothing about the window is re-derived here; only the
+ * operator-facing wording is local. */
+static bool zec_publish_window(const struct json_value *in,
+                               struct zcl_command_reply *reply,
+                               const char *cmd, const struct zendp *ep,
+                               uint64_t *expiry_out)
+{
+    *expiry_out = 0;
+    int64_t expiry_in = zec_input_int(in, "expiry", 0);
+    /* The default is derived UNSIGNED. ep.not_before is operator input
+     * and can be as large as INT64_MAX, so
+     * `(int64_t)ep.not_before + ZEC_DEFAULT_VALIDITY_SECONDS` is a
+     * signed overflow — undefined behaviour, not a wrap you can reason
+     * about. ep.not_before is <= INT64_MAX by construction above, so the
+     * unsigned add below cannot wrap uint64_t. */
+    uint64_t expiry = expiry_in > 0
+                          ? (uint64_t)expiry_in
+                          : ep->not_before +
+                                (uint64_t)ZEC_DEFAULT_VALIDITY_SECONDS;
+    switch (zendp_window_check(ep->not_before, expiry)) {
+    case ZENDP_WINDOW_NEVER_OPENS:
+        zec_fail(reply, "BAD_WINDOW", "normalize",
+                 "expiry must be after not_before — a window that never "
+                 "opens is a publisher bug, not a verifier's problem", cmd);
+        return false;
+    case ZENDP_WINDOW_TOO_LONG:
+        zec_fail(reply, "WINDOW_TOO_LONG", "normalize",
+                 zec_window_too_long_message(), cmd);
+        return false;
+    case ZENDP_WINDOW_OK:
+        break;
+    }
+    *expiry_out = expiry;
+    return true;
+}
+
+/* Replay defence across invocations, checked BEFORE the store is
+ * touched so a refused republish writes nothing at all. Returns true
+ * when the refusal has been reported. */
+static bool zec_publish_stale_refused(struct zcl_command_reply *reply,
+                                      const char *cmd, const char *datadir,
+                                      int64_t now, int64_t seq,
+                                      uint8_t seed[32])
+{
+    uint8_t pk[32], sk[32];
+    ed25519_keypair(pk, sk, seed);
+    memory_cleanse(sk, sizeof(sk));
+    uint64_t held = 0;
+    if (!zec_held_seq(datadir, pk, zdesc_period_at((uint64_t)now), &held) ||
+        (uint64_t)seq > held)
+        return false;
+    memory_cleanse(seed, 32);
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "seq %lld does not supersede the endpoint record already "
+             "filed for this identity (seq %llu) — rotation needs a "
+             "strictly higher seq; nothing was written",
+             (long long)seq, (unsigned long long)held);
+    zec_fail(reply, "STALE_SEQ", "execute", msg, cmd);
+    return true;
+}
+
+/* Store the record and hand it to the directory projection, with the
+ * chain consulted for the signing key. Returns false after the refusal
+ * has been reported. The seed is cleansed on every path out. */
+static bool zec_publish_store(struct zcl_command_reply *reply,
+                              const char *cmd, const char *datadir,
+                              const struct zendp *ep, int64_t seq,
+                              uint64_t expiry, int64_t now, uint8_t seed[32],
+                              uint8_t root[32], uint8_t pubkey[32])
+{
+    struct vcs_package_store *store =
+        vcs_package_store_open(datadir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    if (!store) {
+        memory_cleanse(seed, 32);
+        zec_fail(reply, "STORE_UNAVAILABLE", "execute",
+                 "cannot open the content-addressed package store under "
+                 "<datadir>/zcode", datadir);
+        return false;
+    }
+
+    zendp_directory_init(&g_cli_dir);
+    (void)zec_open_chain(datadir);
+    enum zendp_result r =
+        zendp_publish_to(store, &g_cli_dir, ep, (uint64_t)seq,
+                         (uint64_t)expiry, seed, (uint64_t)now, root, pubkey);
+    zec_close_chain();
+    memory_cleanse(seed, 32);
+    vcs_package_store_close(store);
+    if (r != ZENDP_OK) {
+        zec_fail_result(reply, r, cmd);
+        return false;
+    }
+    return true;
+}
+
+/* The directory's entry for the identity just published. A missing entry
+ * is a refusal, never an empty reply. */
+static const struct zendp_entry *zec_publish_entry(
+    struct zcl_command_reply *reply, const char *cmd, const uint8_t pubkey[32])
+{
+    const struct zendp_entry *entry = NULL;
+    if (!zendp_directory_find(&g_cli_dir, pubkey, &entry) || !entry) {
+        zec_fail(reply, "DIRECTORY_LOST", "execute",
+                 "the record was stored but its directory entry is missing",
+                 cmd);
+        return NULL;
+    }
+    return entry;
+}
+
+/* The canonical wire bytes of the accepted doc, as hex. */
+static bool zec_publish_encode(struct zcl_command_reply *reply,
+                               const char *cmd, const struct zid_doc *doc,
+                               char *doc_hex, size_t doc_hex_size,
+                               size_t *wire_len_out)
+{
+    *wire_len_out = 0;
+    uint8_t wire[ZID_DOC_MAX];
+    size_t wire_len = zid_doc_encode(wire, sizeof(wire), doc);
+    if (wire_len == 0) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INTERNAL, "ENCODE_FAILED",
+                               "serialize", false, true,
+                               "zid_doc_encode failed after a successful "
+                               "publish", cmd);
+        return false;
+    }
+    HexStr(wire, wire_len, false, doc_hex, doc_hex_size);
+    *wire_len_out = wire_len;
+    return true;
+}
+
+/* Publishing does not REQUIRE an anchor — the anchor transaction can
+ * still be unconfirmed — but an unanchored record is never offered
+ * to peer discovery, so say so plainly instead of implying success. */
+static void zec_push_discoverable(struct zcl_command_reply *reply,
+                                  const struct zendp_anchor *anchor)
+{
+    bool discoverable = anchor->state == ZENDP_ANCHOR_ACTIVE;
+    json_push_kv_bool(&reply->data, "discoverable", discoverable);
+    if (!discoverable)
+        json_push_kv_str(&reply->data, "discoverable_note",
+                         "the signing key is not ACTIVE on-chain, so this "
+                         "record is stored and addressable but will NOT be "
+                         "offered to peer discovery — anchor the identity "
+                         "first, then republish with a higher seq");
+    zec_push_verification_status(reply, discoverable);
+}
+
+static void zec_push_save_outcome(struct zcl_command_reply *reply, bool saved,
+                                  const char *saved_path,
+                                  const char *save_err)
+{
+    json_push_kv_bool(&reply->data, "saved", saved);
+    if (saved)
+        json_push_kv_str(&reply->data, "saved_path", saved_path);
+    else
+        json_push_kv_str(&reply->data, "save_error", save_err);
+}
+
 void zcl_native_handle_zendp_publish(const struct zcl_command_request *request,
                                      struct zcl_command_reply *reply)
 {
@@ -904,33 +1092,9 @@ void zcl_native_handle_zendp_publish(const struct zcl_command_request *request,
                  "every republish", cmd);
         return;
     }
-    int64_t expiry_in = zec_input_int(in, "expiry", 0);
-    /* The default is derived UNSIGNED. ep.not_before is operator input
-     * and can be as large as INT64_MAX, so
-     * `(int64_t)ep.not_before + ZEC_DEFAULT_VALIDITY_SECONDS` is a
-     * signed overflow — undefined behaviour, not a wrap you can reason
-     * about. ep.not_before is <= INT64_MAX by construction above, so the
-     * unsigned add below cannot wrap uint64_t. */
-    uint64_t expiry = expiry_in > 0
-                          ? (uint64_t)expiry_in
-                          : ep.not_before +
-                                (uint64_t)ZEC_DEFAULT_VALIDITY_SECONDS;
-    /* Both window rules come from zendp_window_check — the same function
-     * the signer and every verifier call. Nothing about the window is
-     * re-derived here; only the operator-facing wording is local. */
-    switch (zendp_window_check(ep.not_before, expiry)) {
-    case ZENDP_WINDOW_NEVER_OPENS:
-        zec_fail(reply, "BAD_WINDOW", "normalize",
-                 "expiry must be after not_before — a window that never "
-                 "opens is a publisher bug, not a verifier's problem", cmd);
+    uint64_t expiry = 0;
+    if (!zec_publish_window(in, reply, cmd, &ep, &expiry))
         return;
-    case ZENDP_WINDOW_TOO_LONG:
-        zec_fail(reply, "WINDOW_TOO_LONG", "normalize",
-                 zec_window_too_long_message(), cmd);
-        return;
-    case ZENDP_WINDOW_OK:
-        break;
-    }
 
     const char *datadir = zec_datadir(request);
     if (!datadir) {
@@ -947,74 +1111,28 @@ void zcl_native_handle_zendp_publish(const struct zcl_command_request *request,
         return;
     }
 
-    /* Replay defence across invocations, checked BEFORE the store is
-     * touched so a refused republish writes nothing at all. */
-    uint8_t pk[32], sk[32];
-    ed25519_keypair(pk, sk, seed);
-    memory_cleanse(sk, sizeof(sk));
-    uint64_t held = 0;
-    if (zec_held_seq(datadir, pk, zdesc_period_at((uint64_t)now), &held) &&
-        (uint64_t)seq <= held) {
-        memory_cleanse(seed, sizeof(seed));
-        char msg[256];
-        snprintf(msg, sizeof(msg),
-                 "seq %lld does not supersede the endpoint record already "
-                 "filed for this identity (seq %llu) — rotation needs a "
-                 "strictly higher seq; nothing was written",
-                 (long long)seq, (unsigned long long)held);
-        zec_fail(reply, "STALE_SEQ", "execute", msg, cmd);
+    if (zec_publish_stale_refused(reply, cmd, datadir, now, seq, seed))
         return;
-    }
 
-    struct vcs_package_store *store =
-        vcs_package_store_open(datadir, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
-    if (!store) {
-        memory_cleanse(seed, sizeof(seed));
-        zec_fail(reply, "STORE_UNAVAILABLE", "execute",
-                 "cannot open the content-addressed package store under "
-                 "<datadir>/zcode", datadir);
-        return;
-    }
-
-    zendp_directory_init(&g_cli_dir);
-    (void)zec_open_chain(datadir);
     uint8_t root[32], pubkey[32];
-    enum zendp_result r =
-        zendp_publish_to(store, &g_cli_dir, &ep, (uint64_t)seq,
-                         (uint64_t)expiry, seed, (uint64_t)now, root, pubkey);
-    zec_close_chain();
-    memory_cleanse(seed, sizeof(seed));
-    vcs_package_store_close(store);
-    if (r != ZENDP_OK) {
-        zec_fail_result(reply, r, cmd);
+    if (!zec_publish_store(reply, cmd, datadir, &ep, seq, expiry, now, seed,
+                           root, pubkey))
         return;
-    }
 
-    const struct zendp_entry *entry = NULL;
-    if (!zendp_directory_find(&g_cli_dir, pubkey, &entry) || !entry) {
-        zec_fail(reply, "DIRECTORY_LOST", "execute",
-                 "the record was stored but its directory entry is missing",
-                 cmd);
+    const struct zendp_entry *entry = zec_publish_entry(reply, cmd, pubkey);
+    if (!entry)
         return;
-    }
     struct zid_doc doc = entry->doc;
     uint64_t period = entry->period;
     struct zendp_anchor anchor = entry->anchor;
     uint8_t record_key[32];
     memcpy(record_key, entry->record_key, 32);
 
-    uint8_t wire[ZID_DOC_MAX];
-    size_t wire_len = zid_doc_encode(wire, sizeof(wire), &doc);
-    if (wire_len == 0) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INTERNAL, "ENCODE_FAILED",
-                               "serialize", false, true,
-                               "zid_doc_encode failed after a successful "
-                               "publish", cmd);
-        return;
-    }
     char doc_hex[ZID_DOC_MAX * 2 + 1];
-    HexStr(wire, wire_len, false, doc_hex, sizeof(doc_hex));
+    size_t wire_len = 0;
+    if (!zec_publish_encode(reply, cmd, &doc, doc_hex, sizeof(doc_hex),
+                            &wire_len))
+        return;
 
     char key_hex[65], root_hex[65];
     zec_hex32(record_key, key_hex);
@@ -1034,24 +1152,8 @@ void zcl_native_handle_zendp_publish(const struct zcl_command_request *request,
     json_push_kv_int(&reply->data, "period_seconds", ZDESC_PERIOD_SECONDS);
     zec_push_record(reply, &doc, &ep);
     zec_push_anchor(reply, &anchor);
-
-    /* Publishing does not REQUIRE an anchor — the anchor transaction can
-     * still be unconfirmed — but an unanchored record is never offered
-     * to peer discovery, so say so plainly instead of implying success. */
-    bool discoverable = anchor.state == ZENDP_ANCHOR_ACTIVE;
-    json_push_kv_bool(&reply->data, "discoverable", discoverable);
-    if (!discoverable)
-        json_push_kv_str(&reply->data, "discoverable_note",
-                         "the signing key is not ACTIVE on-chain, so this "
-                         "record is stored and addressable but will NOT be "
-                         "offered to peer discovery — anchor the identity "
-                         "first, then republish with a higher seq");
-    zec_push_verification_status(reply, discoverable);
-    json_push_kv_bool(&reply->data, "saved", saved);
-    if (saved)
-        json_push_kv_str(&reply->data, "saved_path", saved_path);
-    else
-        json_push_kv_str(&reply->data, "save_error", save_err);
+    zec_push_discoverable(reply, &anchor);
+    zec_push_save_outcome(reply, saved, saved_path, save_err);
     json_push_kv_str(&reply->data, "next",
                      "the node loads and re-verifies filed records at start. "
                      "Nothing republishes for you: the record key rotates "
@@ -1238,6 +1340,41 @@ void zcl_native_handle_zendp_accept(const struct zcl_command_request *request,
 
 /* ── zcode.endpoint.resolve ────────────────────────────────────────── */
 
+/* THE BOUNDARY RULE: current period first, then the one before, so a
+ * publisher on the other side of midnight is still findable. Reports the
+ * period actually used and the key and file it was read from, whether or
+ * not a record was found. */
+static bool zec_resolve_locate(const char *datadir, const uint8_t pubkey[32],
+                               uint64_t period, uint64_t *used_out,
+                               char key_hex[65], char *doc_hex,
+                               size_t doc_size, char *path, size_t path_size)
+{
+    uint8_t record_key[32];
+    zendp_record_key(record_key, pubkey, period);
+    zec_hex32(record_key, key_hex);
+    bool found = zec_read_record(datadir, key_hex, doc_hex, doc_size, path,
+                                 path_size);
+    *used_out = period;
+    if (!found && period > 0) {
+        *used_out = zdesc_period_prev(period);
+        zendp_record_key(record_key, pubkey, *used_out);
+        zec_hex32(record_key, key_hex);
+        found = zec_read_record(datadir, key_hex, doc_hex, doc_size, path,
+                                path_size);
+    }
+    return found;
+}
+
+/* The anchor the directory holds for this key, or an empty one. */
+static struct zendp_anchor zec_resolve_anchor(const uint8_t pk[32])
+{
+    const struct zendp_entry *entry = NULL;
+    struct zendp_anchor anchor = {0};
+    if (zendp_directory_find(&g_cli_dir, pk, &entry) && entry)
+        anchor = entry->anchor;
+    return anchor;
+}
+
 void zcl_native_handle_zendp_resolve(const struct zcl_command_request *request,
                                      struct zcl_command_reply *reply)
 {
@@ -1267,24 +1404,13 @@ void zcl_native_handle_zendp_resolve(const struct zcl_command_request *request,
     if (now <= 0)
         now = platform_time_wall_unix();
 
-    /* THE BOUNDARY RULE: current period first, then the one before, so a
-     * publisher on the other side of midnight is still findable. */
     uint64_t period = zdesc_period_at((uint64_t)now);
     uint64_t used = period;
-    uint8_t record_key[32];
     char key_hex[65], path[1200];
     static char doc_hex[ZID_DOC_MAX * 2 + 2];
-    zendp_record_key(record_key, pubkey, period);
-    zec_hex32(record_key, key_hex);
-    bool found = zec_read_record(datadir, key_hex, doc_hex, sizeof(doc_hex),
-                                 path, sizeof(path));
-    if (!found && period > 0) {
-        used = zdesc_period_prev(period);
-        zendp_record_key(record_key, pubkey, used);
-        zec_hex32(record_key, key_hex);
-        found = zec_read_record(datadir, key_hex, doc_hex, sizeof(doc_hex),
-                                path, sizeof(path));
-    }
+    bool found = zec_resolve_locate(datadir, pubkey, period, &used, key_hex,
+                                    doc_hex, sizeof(doc_hex), path,
+                                    sizeof(path));
     if (!found) {
         zec_fail_result(reply, ZENDP_ERR_ABSENT, cmd);
         return;
@@ -1321,10 +1447,7 @@ void zcl_native_handle_zendp_resolve(const struct zcl_command_request *request,
                  "the record verified but would not re-decode", path);
         return;
     }
-    const struct zendp_entry *entry = NULL;
-    struct zendp_anchor anchor = {0};
-    if (zendp_directory_find(&g_cli_dir, got_pk, &entry) && entry)
-        anchor = entry->anchor;
+    struct zendp_anchor anchor = zec_resolve_anchor(got_pk);
 
     json_push_kv_bool(&reply->data, "valid", true);
     json_push_kv_int(&reply->data, "now", now);
@@ -1343,6 +1466,51 @@ void zcl_native_handle_zendp_resolve(const struct zcl_command_request *request,
 }
 
 /* ── zcode.endpoint.list ───────────────────────────────────────────── */
+
+/* One row's refusal: the reason it is unusable. The caller adds any
+ * further detail after it, so the key order in each row never changes. */
+static void zec_list_refuse(struct json_value *row, const char *reason)
+{
+    json_push_kv_bool(row, "usable", false);
+    json_push_kv_str(row, "reason", reason);
+}
+
+/* Fill one row for one filed record. Returns true when the record is
+ * usable. Every refusal leaves the row at its reason, as it always has. */
+static bool zec_list_fill(const char *datadir, const char *key_hex,
+                          int64_t now, struct json_value *row)
+{
+    static char hex[ZID_DOC_MAX * 2 + 2];
+    char path[1200];
+    if (!zec_read_record(datadir, key_hex, hex, sizeof(hex), path,
+                         sizeof(path))) {
+        zec_list_refuse(row, "the file could not be read");
+        return false;
+    }
+    uint8_t wire[ZID_DOC_MAX];
+    size_t wire_len = zec_hex_to_wire(hex, wire, sizeof(wire));
+    if (wire_len == 0) {
+        zec_list_refuse(row, "the file does not hold even-length hex");
+        return false;
+    }
+    struct zendp ep;
+    uint8_t pubkey[32];
+    enum zendp_result r = zendp_accept(&g_cli_dir, wire, wire_len,
+                                       (uint64_t)now, &ep, pubkey);
+    if (r != ZENDP_OK) {
+        zec_list_refuse(row, zendp_result_string(r));
+        json_push_kv_str(row, "outcome",
+                         "discarded — this record will not be "
+                         "loaded and will not be dialed");
+        return false;
+    }
+    char pk_hex[65];
+    zec_hex32(pubkey, pk_hex);
+    json_push_kv_bool(row, "usable", true);
+    json_push_kv_str(row, "master_pubkey", pk_hex);
+    zec_push_endpoint_into(row, &ep);
+    return true;
+}
 
 /* Every filed record, each re-verified against the chain right now.
  * This is the same work engine/composition/src/boot_endpoint_records.c does at node
@@ -1398,52 +1566,14 @@ void zcl_native_handle_zendp_list(const struct zcl_command_request *request,
             memcpy(key_hex, de->d_name, 64);
             key_hex[64] = '\0';
 
-            static char hex[ZID_DOC_MAX * 2 + 2];
-            char path[1200];
             struct json_value row;
             json_init(&row);
             json_set_object(&row);
             json_push_kv_str(&row, "record_key", key_hex);
-
-            if (!zec_read_record(datadir, key_hex, hex, sizeof(hex), path,
-                                 sizeof(path))) {
-                json_push_kv_bool(&row, "usable", false);
-                json_push_kv_str(&row, "reason", "the file could not be read");
-                unusable++;
-                json_push_back(&rows, &row);
-                json_free(&row);
-                continue;
-            }
-            uint8_t wire[ZID_DOC_MAX];
-            size_t wire_len = zec_hex_to_wire(hex, wire, sizeof(wire));
-            if (wire_len == 0) {
-                json_push_kv_bool(&row, "usable", false);
-                json_push_kv_str(&row, "reason",
-                                 "the file does not hold even-length hex");
-                unusable++;
-                json_push_back(&rows, &row);
-                json_free(&row);
-                continue;
-            }
-            struct zendp ep;
-            uint8_t pubkey[32];
-            enum zendp_result r = zendp_accept(&g_cli_dir, wire, wire_len,
-                                               (uint64_t)now, &ep, pubkey);
-            if (r != ZENDP_OK) {
-                json_push_kv_bool(&row, "usable", false);
-                json_push_kv_str(&row, "reason", zendp_result_string(r));
-                json_push_kv_str(&row, "outcome",
-                                 "discarded — this record will not be "
-                                 "loaded and will not be dialed");
-                unusable++;
-            } else {
-                char pk_hex[65];
-                zec_hex32(pubkey, pk_hex);
-                json_push_kv_bool(&row, "usable", true);
-                json_push_kv_str(&row, "master_pubkey", pk_hex);
-                zec_push_endpoint_into(&row, &ep);
+            if (zec_list_fill(datadir, key_hex, now, &row))
                 usable++;
-            }
+            else
+                unusable++;
             json_push_back(&rows, &row);
             json_free(&row);
         }

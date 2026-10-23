@@ -3388,12 +3388,6 @@ tools/command/native_zdesc_command.c:zdc_load_doc_wire:17
 tools/command/native_zdesc_command.c:zdc_read_seed:16
 tools/command/native_zdesc_command.c:zdc_write_record:25
 tools/command/native_zdir_command.c:zcl_native_handle_core_zdir_list:17
-tools/command/native_zendp_command.c:zcl_native_handle_zendp_list:16
-tools/command/native_zendp_command.c:zcl_native_handle_zendp_publish:23
-tools/command/native_zendp_command.c:zcl_native_handle_zendp_resolve:18
-tools/command/native_zendp_command.c:zec_build_endpoint:22
-tools/command/native_zendp_command.c:zec_fail_result:21
-tools/command/native_zendp_command.c:zec_write_record:22
 tools/command/native_zses_command.c:zcl_native_handle_zses_invite_accept:16
 tools/command/native_zses_command.c:zcl_native_handle_zses_invite_create:28
 tools/command/rom_compile_offline.c:rom_compile_offline_compose:16
