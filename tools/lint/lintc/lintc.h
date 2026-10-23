@@ -525,5 +525,7 @@ int check_no_wallclock_assertion_run(int argc, char **argv);
 int check_no_wallclock_assertion_selftest(void);
 int check_no_stale_pinned_facts_run(int argc, char **argv);
 int check_no_stale_pinned_facts_selftest(void);
+int check_doc_no_false_deleted_run(int argc, char **argv);
+int check_doc_no_false_deleted_selftest(void);
 
 #endif

@@ -6633,6 +6633,8 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_tor_provenance_selftest.c \
     tools/lint/lintc/gate_no_stale_pinned_facts.c \
     tools/lint/lintc/gate_no_stale_pinned_facts_selftest.c \
+    tools/lint/lintc/gate_doc_no_false_deleted.c \
+    tools/lint/lintc/gate_doc_no_false_deleted_selftest.c \
     $(LINTC_PREMISE_SRCS) \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
@@ -14499,9 +14501,9 @@ check-route-command-parity: $(LINTC_TOOL)
 # Antipoison ratchets (2026-06-18) — keep the docs honest + the node standing
 # alone + reorgs safe. Each PASSES on the current tree and only fails on a
 # regression. See docs/agent/HANDOFF.md for why these exist.
-check-doc-no-false-deleted:
+check-doc-no-false-deleted: $(LINTC_TOOL)
 	@echo "══ LINT: doc no-false-deleted ══"
-	@./tools/lint/gate_doc_no_false_deleted.sh .
+	@./build/bin/z23-lint check-doc-no-false-deleted --selftest && ./build/bin/z23-lint check-doc-no-false-deleted .
 
 check-zclassicd-reach-allowlist: $(LINTC_TOOL)
 	@echo "══ LINT: zclassicd reach allowlist (node stands alone) ══"
