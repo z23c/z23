@@ -1672,17 +1672,21 @@ int test_fleet_objectives(void)
                        ZCL_CLI_RELEASE_DATADIR);
         ASSERT(fox_mkdir(home));
         ASSERT(fox_mkdir(rel));
+        /* No ASSERT while HOME is faked: a failing ASSERT jumps past the
+         * restore and would leave the fake HOME for every later group. */
         (void)setenv("HOME", home, 1);
+        struct zcl_objective_value absent =
+            zcl_objectives_measure(&o, "node_warm_restart_s");
+        bool beacon = fox_boot_beacon(rel, BOOT_STAGE_READY, 104);
         struct zcl_objective_value v =
             zcl_objectives_measure(&o, "node_warm_restart_s");
-        ASSERT(!v.measured);
-        ASSERT(v.reason[0] != '\0');
-        ASSERT(fox_boot_beacon(rel, BOOT_STAGE_READY, 104));
-        v = zcl_objectives_measure(&o, "node_warm_restart_s");
         if (old_home)
             (void)setenv("HOME", saved, 1);
         else
             (void)unsetenv("HOME");
+        ASSERT(!absent.measured);
+        ASSERT(absent.reason[0] != '\0');
+        ASSERT(beacon);
         ASSERT(v.measured);
         ASSERT_EQ(v.value, (int64_t)104);
         PASS();
