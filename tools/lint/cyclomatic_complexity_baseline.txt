@@ -873,10 +873,6 @@ contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_ceremony_seller_build_p
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_ceremony_seller_verify_assembly:61
 contexts/market/modules/zswap/src/zswap_ceremony.c:zswap_partial_decode:20
 contexts/market/modules/zswap/src/zswap_yardsale.c:zswap_yardsale_ingest_wire:16
-contexts/market/services/src/file_market_content_service.c:file_market_content_load_chunk:18
-contexts/market/services/src/file_market_content_service.c:file_market_content_manifest_build:18
-contexts/market/services/src/file_market_content_service.c:file_market_content_register_planned:21
-contexts/market/services/src/file_market_content_service.c:market_content_plan_snapshot:16
 contexts/market/services/src/file_market_offer_service.c:file_market_offer_commit:23
 contexts/market/services/src/file_market_payment_service.c:market_payment_reconcile_record:22
 contexts/market/services/src/file_market_purchase_service.c:market_purchase_commit:41

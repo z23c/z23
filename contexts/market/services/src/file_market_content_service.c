@@ -47,6 +47,22 @@ static bool market_content_snapshot_equal(
            a->changed_nanoseconds == b->changed_nanoseconds;
 }
 
+static bool market_content_snapshot_stable(
+    const struct platform_positioned_file *file,
+    const struct platform_positioned_file_snapshot *before,
+    struct platform_positioned_file_snapshot *after)
+{
+    return platform_positioned_file_snapshot(file, after) &&
+           market_content_snapshot_equal(before, after);
+}
+
+static bool market_content_refs_present(const struct node_db *ndb,
+                                        const uint8_t offer_id[32],
+                                        const char *content_path)
+{
+    return ndb && ndb->open && offer_id && content_path && content_path[0];
+}
+
 #ifdef ZCL_TESTING
 static file_market_content_precommit_test_hook_fn g_precommit_test_hook;
 static void *g_precommit_test_hook_ctx;
@@ -125,13 +141,21 @@ static bool market_content_open_canonical(
     return platform_positioned_file_open_beneath(file, root, slash + 1);
 }
 
+static bool market_content_manifest_args_ok(
+    const char *content_path, char canonical_out[MARKET_CONTENT_PATH_MAX],
+    uint64_t *size_out, uint32_t *chunks_out, uint8_t root_out[32])
+{
+    return content_path && content_path[0] && canonical_out && size_out &&
+           chunks_out && root_out;
+}
+
 struct zcl_result file_market_content_manifest_build(
     const char *content_path, char canonical_out[MARKET_CONTENT_PATH_MAX],
     uint8_t **hashes_out, uint64_t *size_out, uint32_t *chunks_out,
     uint8_t root_out[32])
 {
-    if (!content_path || !content_path[0] || !canonical_out || !size_out ||
-        !chunks_out || !root_out)
+    if (!market_content_manifest_args_ok(content_path, canonical_out, size_out,
+                                         chunks_out, root_out))
         return ZCL_ERR(MARKET_CONTENT_ERR_ARGS,
                        "content reference and manifest outputs are required");
 
@@ -179,8 +203,7 @@ struct zcl_result file_market_content_manifest_build(
     bool hashed = market_content_manifest(&file, size_bytes, num_chunks,
                                           hashes, root);
     struct platform_positioned_file_snapshot after;
-    bool stable = platform_positioned_file_snapshot(&file, &after) &&
-                  market_content_snapshot_equal(&before, &after);
+    bool stable = market_content_snapshot_stable(&file, &before, &after);
     platform_positioned_file_close(&file);
     if (!hashed || !stable) {
         free(hashes);
@@ -205,8 +228,7 @@ static struct zcl_result market_content_plan_snapshot(
     char state_out[MARKET_CONTENT_REGISTRATION_STATE_MAX],
     struct file_offer *offer_out)
 {
-    if (!ndb || !ndb->open || !offer_id || !content_path ||
-        !content_path[0] ||
+    if (!market_content_refs_present(ndb, offer_id, content_path) ||
         strnlen(content_path, MARKET_CONTENT_PATH_MAX) >=
             MARKET_CONTENT_PATH_MAX ||
         !token_out || !state_out)
@@ -302,12 +324,25 @@ static void market_content_public_fill(
     out->registered_at = record->registered_at;
 }
 
+static struct zcl_result market_content_check_offer_manifest(
+    const struct file_offer *offer, uint64_t size_bytes, uint32_t num_chunks,
+    const uint8_t root[32])
+{
+    if (size_bytes != offer->size_bytes || num_chunks != offer->num_chunks)
+        return ZCL_ERR(MARKET_CONTENT_ERR_SIZE,
+                       "content size does not match the signed offer");
+    if (memcmp(root, offer->root_hash, 32) != 0)
+        return ZCL_ERR(MARKET_CONTENT_ERR_ROOT,
+                       "content manifest root does not match the signed offer");
+    return ZCL_OK;
+}
+
 struct zcl_result file_market_content_register(
     struct node_db *ndb, const uint8_t offer_id[32], const char *content_path,
     int64_t now_unix, struct market_content_public_record *out)
 {
-    if (!ndb || !ndb->open || !offer_id || !content_path ||
-        !content_path[0] || !out || now_unix <= 0)
+    if (!market_content_refs_present(ndb, offer_id, content_path) ||
+        !out || now_unix <= 0)
         return ZCL_ERR(MARKET_CONTENT_ERR_ARGS,
                        "database, offer id, content reference, time, and output are required");
     memset(out, 0, sizeof(*out));
@@ -326,15 +361,11 @@ struct zcl_result file_market_content_register(
         content_path, canonical, &hashes, &size_bytes, &num_chunks, root);
     if (!manifest.ok)
         return manifest;
-    if (size_bytes != offer.size_bytes || num_chunks != offer.num_chunks) {
+    struct zcl_result match = market_content_check_offer_manifest(
+        &offer, size_bytes, num_chunks, root);
+    if (!match.ok) {
         free(hashes);
-        return ZCL_ERR(MARKET_CONTENT_ERR_SIZE,
-                       "content size does not match the signed offer");
-    }
-    if (memcmp(root, offer.root_hash, 32) != 0) {
-        free(hashes);
-        return ZCL_ERR(MARKET_CONTENT_ERR_ROOT,
-                       "content manifest root does not match the signed offer");
+        return match;
     }
 
     struct market_content_record record;
@@ -352,13 +383,36 @@ struct zcl_result file_market_content_register(
     return ZCL_OK;
 }
 
+static struct zcl_result market_content_planned_verify(
+    struct node_db *ndb, const uint8_t offer_id[32], const char *content_path,
+    const uint8_t plan_token[32], uint64_t size_bytes, uint32_t num_chunks,
+    const uint8_t root[32], struct file_offer *current_offer)
+{
+    uint8_t current_token[32];
+    char current_state[MARKET_CONTENT_REGISTRATION_STATE_MAX];
+    struct zcl_result snapshot = market_content_plan_snapshot(
+        ndb, offer_id, content_path, current_token, current_state,
+        current_offer);
+    if (!snapshot.ok)
+        return snapshot;
+    uint8_t difference = 0;
+    for (size_t i = 0; i < 32; i++)
+        difference |= current_token[i] ^ plan_token[i];
+    if (difference)
+        return ZCL_ERR(
+            MARKET_CONTENT_ERR_STALE,
+            "STALE_PLAN: the signed offer, registration, or target path moved after planning");
+    return market_content_check_offer_manifest(current_offer, size_bytes,
+                                               num_chunks, root);
+}
+
 struct zcl_result file_market_content_register_planned(
     struct node_db *ndb, const uint8_t offer_id[32], const char *content_path,
     const uint8_t plan_token[32], int64_t now_unix,
     struct market_content_public_record *out)
 {
-    if (!ndb || !ndb->open || !offer_id || !content_path ||
-        !content_path[0] || !plan_token || !out || now_unix <= 0)
+    if (!market_content_refs_present(ndb, offer_id, content_path) ||
+        !plan_token || !out || now_unix <= 0)
         return ZCL_ERR(MARKET_CONTENT_ERR_ARGS,
                        "database, offer id, content reference, plan token, time, and output are required");
     memset(out, 0, sizeof(*out));
@@ -385,34 +439,12 @@ struct zcl_result file_market_content_register_planned(
     if (!node_db_begin_immediate(ndb))
         goto done;
 
-    uint8_t current_token[32];
-    char current_state[MARKET_CONTENT_REGISTRATION_STATE_MAX];
     struct file_offer current_offer;
-    struct zcl_result snapshot = market_content_plan_snapshot(
-        ndb, offer_id, content_path, current_token, current_state,
+    struct zcl_result verified = market_content_planned_verify(
+        ndb, offer_id, content_path, plan_token, size_bytes, num_chunks, root,
         &current_offer);
-    if (!snapshot.ok) {
-        result = snapshot;
-        goto rollback;
-    }
-    uint8_t difference = 0;
-    for (size_t i = 0; i < 32; i++)
-        difference |= current_token[i] ^ plan_token[i];
-    if (difference) {
-        result = ZCL_ERR(
-            MARKET_CONTENT_ERR_STALE,
-            "STALE_PLAN: the signed offer, registration, or target path moved after planning");
-        goto rollback;
-    }
-    if (size_bytes != current_offer.size_bytes ||
-        num_chunks != current_offer.num_chunks) {
-        result = ZCL_ERR(MARKET_CONTENT_ERR_SIZE,
-                         "content size does not match the signed offer");
-        goto rollback;
-    }
-    if (memcmp(root, current_offer.root_hash, 32) != 0) {
-        result = ZCL_ERR(MARKET_CONTENT_ERR_ROOT,
-                         "content manifest root does not match the signed offer");
+    if (!verified.ok) {
+        result = verified;
         goto rollback;
     }
 
@@ -544,6 +576,16 @@ static void content_digest_store(const uint8_t offer_id[32],
     pthread_mutex_unlock(&g_content_digests_mutex);
 }
 
+static bool market_content_open_registered(
+    const struct market_content_chunk_record *record,
+    struct platform_positioned_file *file,
+    struct platform_positioned_file_snapshot *before)
+{
+    return market_content_open_canonical(record->private_path, file) &&
+           platform_positioned_file_snapshot(file, before) &&
+           before->size != 0 && before->size == record->content.size_bytes;
+}
+
 struct zcl_result file_market_content_load_chunk(
     struct node_db *ndb, const uint8_t offer_id[32], uint32_t chunk_index,
     struct file_market_delivery_chunk *out)
@@ -561,9 +603,7 @@ struct zcl_result file_market_content_load_chunk(
     struct platform_positioned_file file;
     platform_positioned_file_init(&file);
     struct platform_positioned_file_snapshot before;
-    if (!market_content_open_canonical(record.private_path, &file) ||
-        !platform_positioned_file_snapshot(&file, &before) ||
-        before.size == 0 || before.size != record.content.size_bytes) {
+    if (!market_content_open_registered(&record, &file, &before)) {
         platform_positioned_file_close(&file);
         return ZCL_ERR(MARKET_CONTENT_ERR_OPEN,
                        "registered private content is unavailable or changed");
@@ -581,8 +621,7 @@ struct zcl_result file_market_content_load_chunk(
     }
     bool read_ok = market_content_read_exact(&file, data, want, offset);
     struct platform_positioned_file_snapshot after;
-    bool stable = platform_positioned_file_snapshot(&file, &after) &&
-                  market_content_snapshot_equal(&before, &after);
+    bool stable = market_content_snapshot_stable(&file, &before, &after);
     platform_positioned_file_close(&file);
     uint8_t digest[32];
     if (!read_ok || !stable) {
