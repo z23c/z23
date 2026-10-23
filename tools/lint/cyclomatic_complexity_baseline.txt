@@ -1291,7 +1291,7 @@ engine/composition/src/boot_mesh_terminal_rpc.c:rpc_mesh_terminal_open:16
 engine/composition/src/boot_mint_anchor.c:boot_mint_anchor_run:50
 engine/composition/src/boot_mint_anchor_bundle_export.c:boot_mint_anchor_export_bundle:18
 engine/composition/src/boot_mint_anchor_log.c:boot_mint_anchor_progress_log_tick:20
-engine/composition/src/boot_mint_anchor_preflight.c:boot_mint_anchor_normal_boot_preflight#2:41
+engine/composition/src/boot_mint_anchor_preflight.c:boot_mint_anchor_normal_boot_preflight#2:20
 engine/composition/src/boot_mint_anchor_preflight.c:boot_mint_anchor_preflight_run_all#2:16
 engine/composition/src/boot_mint_anchor_preflight.c:copy_exact_file:16
 engine/composition/src/boot_mint_anchor_preflight.c:windows_family_preflight:48

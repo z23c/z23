@@ -20,11 +20,13 @@
 #include "config/boot.h"
 #include "json/json.h"
 #include "models/database.h"
+#include "config/mint_anchor_progress.h"
 #include "services/disk_monitor.h"
 
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -260,6 +262,184 @@ static int test_preflight_dumpstate_reflects_last_run(void)
     return failures;
 }
 
+
+#if !defined(_WIN32)
+
+/* ---- normal-boot producer preflight: live read-only path ---------------- */
+
+struct map_file_state {
+    bool exists;
+    struct stat st;
+    uint64_t hash;
+};
+
+static uint64_t map_hash_file(const char *path)
+{
+    uint64_t h = 1469598103934665603ull;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    uint8_t buf[8192];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        for (size_t i = 0; i < n; i++)
+            h = (h ^ buf[i]) * 1099511628211ull;
+    fclose(f);
+    return h;
+}
+
+static void map_capture(const char *dir, const char *suffix, struct map_file_state *out)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/consensus.db%s", dir, suffix);
+    out->exists = lstat(path, &out->st) == 0;
+    out->hash = out->exists ? map_hash_file(path) : 0;
+}
+
+static bool map_state_same(const struct map_file_state *a, const struct map_file_state *b)
+{
+    if (a->exists != b->exists)
+        return false;
+    return !a->exists ||
+           (a->hash == b->hash && a->st.st_ino == b->st.st_ino && a->st.st_size == b->st.st_size &&
+            a->st.st_mtim.tv_sec == b->st.st_mtim.tv_sec && a->st.st_mtim.tv_nsec == b->st.st_mtim.tv_nsec &&
+            a->st.st_ctim.tv_sec == b->st.st_ctim.tv_sec && a->st.st_ctim.tv_nsec == b->st.st_ctim.tv_nsec);
+}
+
+static sqlite3 *map_open_kernel(const char *dir, bool autocheckpoint)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/consensus.db", dir);
+    sqlite3 *db = NULL;
+    if (sqlite3_open(path, &db) != SQLITE_OK ||
+        sqlite3_exec(db, "PRAGMA journal_mode=WAL", NULL, NULL, NULL) != SQLITE_OK ||
+        sqlite3_exec(db, autocheckpoint ? "PRAGMA wal_autocheckpoint=1000" : "PRAGMA wal_autocheckpoint=0", NULL, NULL,
+                     NULL) != SQLITE_OK ||
+        sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS progress_meta(key TEXT PRIMARY KEY,value BLOB NOT NULL)", NULL, NULL,
+                     NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return NULL;
+    }
+    return db;
+}
+
+static bool map_put_marker(sqlite3 *db, const char *key, const char *hex_value)
+{
+    char sql[300];
+    snprintf(sql, sizeof(sql), "INSERT OR REPLACE INTO progress_meta(key,value) VALUES('%s',X'%s')", key, hex_value);
+    return sqlite3_exec(db, sql, NULL, NULL, NULL) == SQLITE_OK;
+}
+
+/* Run the preflight and report whether every family file kept its exact
+ * bytes, inode, size and mtime/ctime, and no file appeared. */
+static bool map_preflight_untouched(const char *dir, bool *verdict)
+{
+    static const char *const suffixes[] = {"", "-wal", "-shm", "-journal"};
+    struct map_file_state before[4], after[4];
+    for (size_t i = 0; i < 4; i++)
+        map_capture(dir, suffixes[i], &before[i]);
+    *verdict = boot_mint_anchor_normal_boot_preflight(dir);
+    bool same = true;
+    for (size_t i = 0; i < 4; i++) {
+        map_capture(dir, suffixes[i], &after[i]);
+        same = same && map_state_same(&before[i], &after[i]);
+    }
+    return same;
+}
+
+static int test_normal_preflight_live_verdicts(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_fmt_tmpdir(dir, sizeof(dir), "mint_anchor_preflight", "live_verdicts");
+    mkdir_p("./test-tmp");
+    mkdir_p(dir);
+    bool verdict = false;
+
+    /* Clean: checkpointed, closed, no -wal/-shm left behind. */
+    sqlite3 *db = map_open_kernel(dir, true);
+    MAP_CHECK("live: clean fixture builds", db && map_put_marker(db, "ordinary_serving_marker", "01"));
+    if (db)
+        sqlite3_close(db);
+    MAP_CHECK("live: clean datadir is allowed and no byte/mtime changes",
+              map_preflight_untouched(dir, &verdict) && verdict);
+
+    /* Empty -wal beside a clean main file takes the live path too. */
+    char wal[600];
+    snprintf(wal, sizeof(wal), "%s/consensus.db-wal", dir);
+    int fd = open(wal, O_CREAT | O_WRONLY, 0600);
+    MAP_CHECK("live: empty wal fixture", fd >= 0);
+    if (fd >= 0)
+        close(fd);
+    MAP_CHECK("live: empty wal is allowed and untouched", map_preflight_untouched(dir, &verdict) && verdict);
+    unlink(wal);
+
+    /* Marker checkpointed into the main file. */
+    db = map_open_kernel(dir, true);
+    MAP_CHECK("live: in-progress marker written", db && map_put_marker(db, MINT_ANCHOR_IN_PROGRESS_KEY, "5a414d31"));
+    if (db)
+        sqlite3_close(db);
+    MAP_CHECK("live: in-progress marker is refused and nothing changes",
+              map_preflight_untouched(dir, &verdict) && !verdict);
+
+    /* Lane binding instead of the marker. */
+    db = map_open_kernel(dir, true);
+    MAP_CHECK("live: marker removed, lane bound",
+              db && sqlite3_exec(db, "DELETE FROM progress_meta WHERE key='" MINT_ANCHOR_IN_PROGRESS_KEY "'", NULL, NULL,
+                                 NULL) == SQLITE_OK &&
+                  map_put_marker(db, MINT_ANCHOR_PRODUCER_LANE_KEY, "02"));
+    if (db)
+        sqlite3_close(db);
+    MAP_CHECK("live: bound producer lane is refused and nothing changes",
+              map_preflight_untouched(dir, &verdict) && !verdict);
+
+    /* Orphan WAL without a main database (no consensus.db, so the kernel name
+     * resolves to the legacy progress.kv family). */
+    char main_path[600], orphan[600];
+    snprintf(main_path, sizeof(main_path), "%s/consensus.db", dir);
+    snprintf(orphan, sizeof(orphan), "%s/progress.kv-wal", dir);
+    unlink(main_path);
+    unlink(wal);
+    fd = open(orphan, O_CREAT | O_WRONLY, 0600);
+    MAP_CHECK("live: orphan wal fixture", fd >= 0);
+    if (fd >= 0)
+        close(fd);
+    MAP_CHECK("live: orphan wal without main db is refused", !boot_mint_anchor_normal_boot_preflight(dir));
+    unlink(orphan);
+    map_cleanup_dir(dir);
+    return failures;
+}
+
+/* The case that makes the live read-only open unsafe without its guard: the
+ * marker is committed only in the -wal (autocheckpoint off, connection still
+ * open, so -wal and -shm both exist and the main file has not seen it). */
+static int test_normal_preflight_marker_only_in_wal(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_fmt_tmpdir(dir, sizeof(dir), "mint_anchor_preflight", "wal_only");
+    mkdir_p("./test-tmp");
+    mkdir_p(dir);
+    bool verdict = true;
+
+    sqlite3 *db = map_open_kernel(dir, false);
+    bool seeded = db && sqlite3_exec(db, "PRAGMA wal_checkpoint(TRUNCATE)", NULL, NULL, NULL) == SQLITE_OK &&
+                  map_put_marker(db, MINT_ANCHOR_IN_PROGRESS_KEY, "5a414d31");
+    MAP_CHECK("wal-only: marker committed to the WAL", seeded);
+    struct map_file_state wal_state;
+    map_capture(dir, "-wal", &wal_state);
+    MAP_CHECK("wal-only: -wal holds frames, main file does not have the marker", wal_state.exists && wal_state.st.st_size > 0);
+    MAP_CHECK("wal-only: marker seen in the WAL is refused, nothing changes",
+              map_preflight_untouched(dir, &verdict) && !verdict);
+    if (db)
+        sqlite3_close(db);
+    map_cleanup_dir(dir);
+    return failures;
+}
+
+
+#endif /* !_WIN32 */
+
 int test_mint_anchor_preflight(void);
 int test_mint_anchor_preflight(void)
 {
@@ -271,6 +451,10 @@ int test_mint_anchor_preflight(void)
     failures += test_preflight_passing_datadir_all_ok();
     failures += test_preflight_every_entry_has_remedy();
     failures += test_preflight_dumpstate_reflects_last_run();
+#if !defined(_WIN32)
+    failures += test_normal_preflight_live_verdicts();
+    failures += test_normal_preflight_marker_only_in_wal();
+#endif
 
     printf("=== test_mint_anchor_preflight complete: %d failure(s) ===\n",
            failures);

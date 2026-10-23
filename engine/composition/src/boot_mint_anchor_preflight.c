@@ -485,6 +485,110 @@ static void preflight_kernel_basename(const char *datadir, char *out, size_t cap
     (void)snprintf(out, cap, "%s", CONSENSUS_DB_LEGACY_KERNEL_FILENAME);
 }
 
+static bool datadir_is_not_tmp(int dirfd) {
+    struct stat datadir_identity;
+    struct stat tmp_identity;
+    if (fstat(dirfd, &datadir_identity) != 0 || stat("/tmp", &tmp_identity) != 0 ||
+        (datadir_identity.st_dev == tmp_identity.st_dev && datadir_identity.st_ino == tmp_identity.st_ino)) {
+        LOG_WARN(PREFLIGHT_SUBSYS, "preflight disposable root cannot be the node datadir");
+        return false;
+    }
+    return true;
+}
+
+/* Copy path: snapshot the whole family into a private /tmp directory, inspect
+ * the copy, and delete it. Used whenever the WAL holds frames, because only a
+ * WAL-aware open can see committed state that has not been checkpointed. */
+static bool copy_family_stable(int dirfd, const char *temp_dir, const char *kbase, struct preflight_source_file files[3],
+                               char main_copy[2304]) {
+    char wal_copy[2304];
+    int n1 = snprintf(main_copy, 2304, "%s/%s", temp_dir, kbase);
+    int n2 = snprintf(wal_copy, sizeof(wal_copy), "%s/%s-wal", temp_dir, kbase);
+    if (n1 <= 0 || n1 >= 2304 || n2 <= 0 || (size_t)n2 >= sizeof(wal_copy))
+        return false;
+    if (!copy_exact_file(&files[0], main_copy) || !copy_exact_file(&files[1], wal_copy))
+        return false;
+    for (size_t i = 0; i < 3; i++)
+        if (!source_unchanged(dirfd, &files[i]))
+            return false;
+    return true;
+}
+
+static bool inspect_via_copy(int dirfd, const char *kbase, struct preflight_source_file files[3], char *reason, size_t reason_size) {
+    char temp_dir[] = "/tmp/zcl-preflight-XXXXXX";
+    char main_copy[2304] = {0};
+    bool ok = mkdtemp(temp_dir) != NULL;
+    if (ok)
+        ok = copy_family_stable(dirfd, temp_dir, kbase, files, main_copy);
+    if (ok)
+        ok = inspect_snapshot(main_copy, reason, reason_size);
+    for (size_t i = 0; ok && i < 3; i++)
+        ok = source_unchanged(dirfd, &files[i]);
+    bool cleanup_ok = temp_dir[0] && access(temp_dir, F_OK) == 0 ? remove_temp_family(temp_dir, main_copy) : true;
+    return ok && cleanup_ok;
+}
+
+/* The live read-only path is only sound when the WAL cannot hold committed
+ * frames: SQLite's immutable=1 open never looks at the -wal or -shm, so a
+ * non-empty WAL (kill -9, unclean stop) must take the copy path instead. */
+static bool live_inspect_eligible(const struct preflight_source_file *wal) {
+    return !wal->exists || wal->identity.st_size == 0;
+}
+
+/* Append the percent-escaped path to a SQLite file: URI (escapes % ? # and
+ * every byte outside a conservative safe set). */
+static bool uri_char_plain(unsigned char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '.' || c == '_' || c == '-';
+}
+
+static bool live_uri_build(const char *datadir, const char *kbase, char *out, size_t cap) {
+    size_t len = (size_t)snprintf(out, cap, "file:");
+    char raw[PATH_MAX + 128];
+    int n = snprintf(raw, sizeof(raw), "%s/%s", datadir, kbase);
+    if (n <= 0 || (size_t)n >= sizeof(raw))
+        return false;
+    for (const char *p = raw; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        bool plain = uri_char_plain(c);
+        if (len + 4 >= cap)
+            return false;
+        if (plain)
+            out[len++] = (char)c;
+        else {
+            (void)snprintf(out + len, 4, "%%%02X", c);
+            len += 3;
+        }
+    }
+    int tail = snprintf(out + len, cap - len, "?immutable=1");
+    return tail > 0 && (size_t)tail < cap - len;
+}
+
+static bool inspect_live_immutable(const char *datadir, const char *kbase, char *reason, size_t reason_size) {
+    char uri[PATH_MAX * 3 + 256];
+    if (!live_uri_build(datadir, kbase, uri, sizeof(uri)))
+        return false;
+    sqlite3 *db = NULL;
+    int rc = sqlite3_open_v2(uri, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX, NULL);
+    bool ok = rc == SQLITE_OK && sqlite3_exec(db, "PRAGMA query_only=ON", NULL, NULL, NULL) == SQLITE_OK;
+    if (ok)
+        ok = mint_anchor_normal_boot_allowed(db, reason, reason_size);
+    if (db && sqlite3_close(db) != SQLITE_OK)
+        ok = false;
+    return ok;
+}
+
+static bool inspect_family(const char *datadir, int dirfd, const char *kbase, struct preflight_source_file files[3], char *reason,
+                           size_t reason_size) {
+    if (!datadir_is_not_tmp(dirfd))
+        return false;
+    if (!live_inspect_eligible(&files[1]))
+        return inspect_via_copy(dirfd, kbase, files, reason, reason_size);
+    bool ok = inspect_live_immutable(datadir, kbase, reason, reason_size);
+    for (size_t i = 0; ok && i < 3; i++)
+        ok = source_unchanged(dirfd, &files[i]);
+    return ok;
+}
+
 bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
     if (!datadir || !datadir[0])
         LOG_FAIL(PREFLIGHT_SUBSYS, "normal boot preflight: missing datadir");
@@ -520,38 +624,13 @@ bool boot_mint_anchor_normal_boot_preflight(const char *datadir) {
                 kbase);
         return false;
     }
-    struct stat datadir_identity;
-    struct stat tmp_identity;
-    if (ok && (fstat(dirfd, &datadir_identity) != 0 || stat("/tmp", &tmp_identity) != 0 ||
-               (datadir_identity.st_dev == tmp_identity.st_dev && datadir_identity.st_ino == tmp_identity.st_ino))) {
-        LOG_WARN(PREFLIGHT_SUBSYS, "preflight disposable root cannot be the node datadir");
-        ok = false;
-    }
-    char temp_dir[] = "/tmp/zcl-preflight-XXXXXX";
-    if (ok && !mkdtemp(temp_dir))
-        ok = false;
-    char main_copy[2304];
-    char wal_copy[2304];
-    int n1 = snprintf(main_copy, sizeof(main_copy), "%s/%s", temp_dir, kbase);
-    int n2 = snprintf(wal_copy, sizeof(wal_copy), "%s/%s-wal", temp_dir, kbase);
-    if (ok && (n1 <= 0 || (size_t)n1 >= sizeof(main_copy) || n2 <= 0 || (size_t)n2 >= sizeof(wal_copy)))
-        ok = false;
-    if (ok)
-        ok = copy_exact_file(&files[0], main_copy) && copy_exact_file(&files[1], wal_copy);
-    for (size_t i = 0; ok && i < sizeof(files) / sizeof(files[0]); i++)
-        ok = source_unchanged(dirfd, &files[i]);
     char reason[512] = {0};
     if (ok)
-        ok = inspect_snapshot(main_copy, reason, sizeof(reason));
-    for (size_t i = 0; ok && i < sizeof(files) / sizeof(files[0]); i++)
-        ok = source_unchanged(dirfd, &files[i]);
-    bool cleanup_ok = temp_dir[0] && access(temp_dir, F_OK) == 0 ? remove_temp_family(temp_dir, main_copy) : true;
+        ok = inspect_family(datadir, dirfd, kbase, files, reason, sizeof(reason));
     for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++)
         if (files[i].fd >= 0 && close(files[i].fd) != 0)
             ok = false;
     if (close(dirfd) != 0)
-        ok = false;
-    if (!cleanup_ok)
         ok = false;
     if (!ok) {
         fprintf(stderr, "FATAL: normal node boot refused before datadir mutation: %s\n",
