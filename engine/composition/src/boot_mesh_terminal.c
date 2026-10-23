@@ -113,6 +113,25 @@ struct mesh_terminal_seen_open {
 static struct mesh_terminal_seen_open
     g_seen_opens[MESH_TERMINAL_OPEN_ADMIT_MAX];
 
+/* A used entry older than the admit window, or stamped after now (the clock
+ * stepped back), frees its slot. */
+static bool terminal_open_seen_stale(const struct mesh_terminal_seen_open *seen,
+                                     uint64_t now_mono_ms)
+{
+    return seen->used &&
+           (now_mono_ms < seen->seen_mono_ms ||
+            now_mono_ms - seen->seen_mono_ms >= MESH_TERMINAL_OPEN_ADMIT_MS);
+}
+
+/* An entry admitted within the last second counts toward the session's
+ * per-second cadence. */
+static bool terminal_open_seen_recent(const struct mesh_terminal_seen_open *seen,
+                                      uint64_t now_mono_ms)
+{
+    return now_mono_ms >= seen->seen_mono_ms &&
+           now_mono_ms - seen->seen_mono_ms < UINT64_C(1000);
+}
+
 /* Application replay/rate gate for OPEN frames. Noise record counters stop
  * ciphertext replay, but an authenticated requester can still resend a
  * decoded open in a new record, and every OPEN that survives to the spawn
@@ -132,9 +151,7 @@ static bool terminal_open_admit(const struct mesh_terminal_open_v1 *open,
     size_t recent = 0;
     for (size_t i = 0; i < MESH_TERMINAL_OPEN_ADMIT_MAX; i++) {
         struct mesh_terminal_seen_open *seen = &g_seen_opens[i];
-        if (seen->used &&
-            (now_mono_ms < seen->seen_mono_ms ||
-             now_mono_ms - seen->seen_mono_ms >= MESH_TERMINAL_OPEN_ADMIT_MS))
+        if (terminal_open_seen_stale(seen, now_mono_ms))
             memset(seen, 0, sizeof(*seen));
         if (!seen->used) {
             if (!slot)
@@ -151,8 +168,7 @@ static bool terminal_open_admit(const struct mesh_terminal_open_v1 *open,
             atomic_fetch_add(&g_term_opens_replayed, 1);
             return false;
         }
-        if (now_mono_ms >= seen->seen_mono_ms &&
-            now_mono_ms - seen->seen_mono_ms < UINT64_C(1000))
+        if (terminal_open_seen_recent(seen, now_mono_ms))
             recent++;
     }
     if (!slot || recent >= MESH_TERMINAL_OPEN_RATE_PER_SECOND) {
@@ -179,51 +195,57 @@ bool boot_mesh_terminal_test_open_admit(
 
 /* ── Pure decision ───────────────────────────────────────────────────── */
 
+/* Receipt verdict for each pairing verdict. A pairing is genesis-bound: a
+ * foreign-genesis request names no authority this node holds. A reason with
+ * no row here is an internal verdict. */
+static const struct {
+    enum mesh_pairing_reason reason;
+    enum mesh_terminal_receipt_status status;
+} g_terminal_pairing_verdicts[] = {
+    { MESH_PAIRING_OK, MESH_TERMINAL_RECEIPT_OK },
+    { MESH_PAIRING_NOT_FOUND, MESH_TERMINAL_RECEIPT_NOT_PAIRED },
+    { MESH_PAIRING_NETWORK_MISMATCH, MESH_TERMINAL_RECEIPT_NOT_PAIRED },
+    { MESH_PAIRING_ALREADY_REVOKED, MESH_TERMINAL_RECEIPT_REVOKED },
+    { MESH_PAIRING_EXPIRED, MESH_TERMINAL_RECEIPT_EXPIRED },
+    { MESH_PAIRING_SESSION_MISMATCH, MESH_TERMINAL_RECEIPT_SESSION_MISMATCH },
+    { MESH_PAIRING_AUTHORITY_CHANGED, MESH_TERMINAL_RECEIPT_AUTHORITY_CHANGED },
+    { MESH_PAIRING_DELEGATION_INVALID, MESH_TERMINAL_RECEIPT_DELEGATION_INVALID },
+    { MESH_PAIRING_MASTER_INACTIVE, MESH_TERMINAL_RECEIPT_DELEGATION_INVALID },
+    { MESH_PAIRING_BEACON_UNAVAILABLE, MESH_TERMINAL_RECEIPT_DELEGATION_INVALID },
+    { MESH_PAIRING_BEACON_PROVISIONAL, MESH_TERMINAL_RECEIPT_DELEGATION_INVALID },
+    { MESH_PAIRING_CAPABILITY_UNAVAILABLE,
+      MESH_TERMINAL_RECEIPT_CAPABILITY_UNAVAILABLE },
+    { MESH_PAIRING_BAD_ARGUMENT, MESH_TERMINAL_RECEIPT_INTERNAL },
+    { MESH_PAIRING_FINGERPRINT_MISMATCH, MESH_TERMINAL_RECEIPT_INTERNAL },
+    { MESH_PAIRING_WINDOW_INVALID, MESH_TERMINAL_RECEIPT_INTERNAL },
+    { MESH_PAIRING_IDENTITY_COLLISION, MESH_TERMINAL_RECEIPT_INTERNAL },
+    { MESH_PAIRING_PERSIST_FAILED, MESH_TERMINAL_RECEIPT_INTERNAL },
+    /* Revocation-ceremony verdicts; authorize_terminal never produces
+     * them. */
+    { MESH_PAIRING_CONFIRMATION_INVALID, MESH_TERMINAL_RECEIPT_INTERNAL },
+    { MESH_PAIRING_PLAN_EXPIRED, MESH_TERMINAL_RECEIPT_INTERNAL },
+};
+
 static enum mesh_terminal_receipt_status terminal_from_pairing_reason(
     enum mesh_pairing_reason reason)
 {
-    switch (reason) {
-    case MESH_PAIRING_OK: return MESH_TERMINAL_RECEIPT_OK;
-    case MESH_PAIRING_NOT_FOUND: return MESH_TERMINAL_RECEIPT_NOT_PAIRED;
-    /* A pairing is genesis-bound: a foreign-genesis request names no
-     * authority this node holds. */
-    case MESH_PAIRING_NETWORK_MISMATCH: return MESH_TERMINAL_RECEIPT_NOT_PAIRED;
-    case MESH_PAIRING_ALREADY_REVOKED: return MESH_TERMINAL_RECEIPT_REVOKED;
-    case MESH_PAIRING_EXPIRED: return MESH_TERMINAL_RECEIPT_EXPIRED;
-    case MESH_PAIRING_SESSION_MISMATCH:
-        return MESH_TERMINAL_RECEIPT_SESSION_MISMATCH;
-    case MESH_PAIRING_AUTHORITY_CHANGED:
-        return MESH_TERMINAL_RECEIPT_AUTHORITY_CHANGED;
-    case MESH_PAIRING_DELEGATION_INVALID:
-    case MESH_PAIRING_MASTER_INACTIVE:
-    case MESH_PAIRING_BEACON_UNAVAILABLE:
-    case MESH_PAIRING_BEACON_PROVISIONAL:
-        return MESH_TERMINAL_RECEIPT_DELEGATION_INVALID;
-    case MESH_PAIRING_CAPABILITY_UNAVAILABLE:
-        return MESH_TERMINAL_RECEIPT_CAPABILITY_UNAVAILABLE;
-    case MESH_PAIRING_BAD_ARGUMENT:
-    case MESH_PAIRING_FINGERPRINT_MISMATCH:
-    case MESH_PAIRING_WINDOW_INVALID:
-    case MESH_PAIRING_IDENTITY_COLLISION:
-    case MESH_PAIRING_PERSIST_FAILED:
-    /* Revocation-ceremony verdicts; authorize_terminal never produces
-     * them. */
-    case MESH_PAIRING_CONFIRMATION_INVALID:
-    case MESH_PAIRING_PLAN_EXPIRED:
-        return MESH_TERMINAL_RECEIPT_INTERNAL;
+    for (size_t i = 0;
+         i < sizeof(g_terminal_pairing_verdicts) /
+                 sizeof(g_terminal_pairing_verdicts[0]);
+         i++) {
+        if (g_terminal_pairing_verdicts[i].reason == reason)
+            return g_terminal_pairing_verdicts[i].status;
     }
     return MESH_TERMINAL_RECEIPT_INTERNAL;
 }
 
-enum mesh_terminal_receipt_status boot_mesh_terminal_decide(
-    struct node_db *ndb, const struct mesh_terminal_open_v1 *open,
+/* Request checks: the open's shape, capability, validity window. Run before
+ * any session or pairing state is read. */
+static enum mesh_terminal_receipt_status terminal_decide_request_status(
+    const struct mesh_terminal_open_v1 *open,
     const struct noise_transport_snapshot *session,
-    const struct vcs_zcode_dht_delegation *delegations,
-    size_t delegation_count, const uint8_t network_genesis[32],
-    uint64_t now_unix, uint64_t *revocation_generation_out)
+    const uint8_t network_genesis[32], uint64_t now_unix)
 {
-    if (revocation_generation_out)
-        *revocation_generation_out = 0;
     if (!open || !session || !session->established || !network_genesis ||
         now_unix == 0)
         return MESH_TERMINAL_RECEIPT_INTERNAL;
@@ -233,17 +255,32 @@ enum mesh_terminal_receipt_status boot_mesh_terminal_decide(
         return MESH_TERMINAL_RECEIPT_BAD_REQUEST;
     if (now_unix < open->issued_unix || now_unix >= open->expires_unix)
         return MESH_TERMINAL_RECEIPT_EXPIRED;
-    /* Live-session binding: transcript and generation are transcript-
-     * derived and shared by both sides (mesh status). */
+    return MESH_TERMINAL_RECEIPT_OK;
+}
+
+/* Live-session binding: transcript and generation are transcript-derived and
+ * shared by both sides (mesh status). */
+static enum mesh_terminal_receipt_status terminal_decide_binding_status(
+    const struct mesh_terminal_open_v1 *open,
+    const struct noise_transport_snapshot *session,
+    const uint8_t network_genesis[32])
+{
     if (memcmp(open->transcript_hash, session->transcript_hash, 32) != 0 ||
         open->connection_generation != session->connection_generation ||
         memcmp(open->requester_noise_static, session->remote_static, 32) != 0)
         return MESH_TERMINAL_RECEIPT_SESSION_MISMATCH;
     if (memcmp(open->network_genesis, network_genesis, 32) != 0)
         return MESH_TERMINAL_RECEIPT_NOT_PAIRED;
-    if (!ndb || !app_runtime_node_db_handle_open(ndb))
-        return MESH_TERMINAL_RECEIPT_INTERNAL;
+    return MESH_TERMINAL_RECEIPT_OK;
+}
 
+/* The one delegation whose noise key is the session's peer. Zero matches or
+ * several matches are never authority. */
+static enum mesh_terminal_receipt_status terminal_live_delegation(
+    const struct vcs_zcode_dht_delegation *delegations,
+    size_t delegation_count, const struct noise_transport_snapshot *session,
+    const struct vcs_zcode_dht_delegation **live_out)
+{
     const struct vcs_zcode_dht_delegation *live = NULL;
     size_t live_count = 0;
     for (size_t i = 0; i < delegation_count; i++) {
@@ -255,13 +292,21 @@ enum mesh_terminal_receipt_status boot_mesh_terminal_decide(
     }
     if (live_count != 1)
         return MESH_TERMINAL_RECEIPT_DELEGATION_INVALID;
+    *live_out = live;
+    return MESH_TERMINAL_RECEIPT_OK;
+}
 
-    /* Pairing ids are per-side: each node derives its row id from the
-     * PEER's master+noise identity, so the id an open carries names the
-     * requester's own row and can never name ours. The only row that can
-     * authorize this session is the one the live delegation (already
-     * matched to the session's remote static) points at — derive its id. */
-    char pairing_id[MESH_PAIRING_ID_HEX + 1];
+/* Pairing ids are per-side: each node derives its row id from the PEER's
+ * master+noise identity, so the id an open carries names the requester's own
+ * row and can never name ours. The only row that can authorize this session
+ * is the one the live delegation (already matched to the session's remote
+ * static) points at — derive its id. */
+static enum mesh_terminal_receipt_status terminal_authorize_live(
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const struct vcs_zcode_dht_delegation *live,
+    const struct noise_transport_snapshot *session, uint64_t now_unix,
+    char pairing_id[MESH_PAIRING_ID_HEX + 1])
+{
     if (!mesh_pairing_id_derive(network_genesis, live->doc.master_pubkey,
                                 live->noise_static_pubkey, pairing_id))
         return MESH_TERMINAL_RECEIPT_DELEGATION_INVALID;
@@ -271,6 +316,40 @@ enum mesh_terminal_receipt_status boot_mesh_terminal_decide(
             (int64_t)now_unix);
     if (authorized != MESH_PAIRING_OK)
         return terminal_from_pairing_reason(authorized);
+    return MESH_TERMINAL_RECEIPT_OK;
+}
+
+enum mesh_terminal_receipt_status boot_mesh_terminal_decide(
+    struct node_db *ndb, const struct mesh_terminal_open_v1 *open,
+    const struct noise_transport_snapshot *session,
+    const struct vcs_zcode_dht_delegation *delegations,
+    size_t delegation_count, const uint8_t network_genesis[32],
+    uint64_t now_unix, uint64_t *revocation_generation_out)
+{
+    if (revocation_generation_out)
+        *revocation_generation_out = 0;
+    enum mesh_terminal_receipt_status verdict =
+        terminal_decide_request_status(open, session, network_genesis,
+                                       now_unix);
+    if (verdict != MESH_TERMINAL_RECEIPT_OK)
+        return verdict;
+    verdict = terminal_decide_binding_status(open, session, network_genesis);
+    if (verdict != MESH_TERMINAL_RECEIPT_OK)
+        return verdict;
+    if (!ndb || !app_runtime_node_db_handle_open(ndb))
+        return MESH_TERMINAL_RECEIPT_INTERNAL;
+
+    const struct vcs_zcode_dht_delegation *live = NULL;
+    verdict = terminal_live_delegation(delegations, delegation_count, session,
+                                       &live);
+    if (verdict != MESH_TERMINAL_RECEIPT_OK)
+        return verdict;
+
+    char pairing_id[MESH_PAIRING_ID_HEX + 1];
+    verdict = terminal_authorize_live(ndb, network_genesis, live, session,
+                                      now_unix, pairing_id);
+    if (verdict != MESH_TERMINAL_RECEIPT_OK)
+        return verdict;
     /* The pairing row carries the receipt's revocation-generation evidence.
      * A row that vanished or revoked between authorize and this read is an
      * authority change, not an OK. */
@@ -476,6 +555,47 @@ bool boot_mesh_terminal_pairing_lost(
 
 /* ── Pure receipt composition ────────────────────────────────────────── */
 
+/* Open and session inputs: each must be present before any output byte is
+ * written. */
+static bool terminal_compose_open_ok(const struct mesh_terminal_open_v1 *open,
+                                     const struct noise_transport_snapshot *session,
+                                     const uint8_t network_genesis[32],
+                                     uint64_t now_unix)
+{
+    return open && session && session->established && network_genesis &&
+           now_unix != 0;
+}
+
+/* Responder key material and the output buffer. */
+static bool terminal_compose_keys_ok(
+    const uint8_t responder_master_pubkey[32],
+    const uint8_t responder_online_pubkey[32],
+    const uint8_t responder_noise_static[32],
+    const uint8_t responder_online_seed[32],
+    const struct mesh_terminal_receipt_v1 *out)
+{
+    return responder_master_pubkey && responder_online_pubkey &&
+           responder_noise_static && responder_online_seed && out;
+}
+
+/* Validity window. A CLOSED receipt takes the full window: its close evidence
+ * lands long after the open's answer window, and matches_open binds it on
+ * observed >= issued alone, so no clamp here. Any other receipt is clamped to
+ * the open's own expiry and never comes out already expired. */
+static uint64_t terminal_receipt_expiry(
+    const struct mesh_terminal_open_v1 *open,
+    enum mesh_terminal_receipt_status status, uint64_t now_unix)
+{
+    uint64_t expires = now_unix + MESH_TERMINAL_RECEIPT_VALIDITY_SECONDS;
+    if (status == MESH_TERMINAL_RECEIPT_CLOSED)
+        return expires;
+    if (expires > open->expires_unix)
+        expires = open->expires_unix;
+    if (expires <= now_unix)
+        expires = now_unix + 1; /* expired-open refusal stays well-formed */
+    return expires;
+}
+
 bool boot_mesh_terminal_compose_receipt(
     const struct mesh_terminal_open_v1 *open,
     const struct noise_transport_snapshot *session,
@@ -488,10 +608,11 @@ bool boot_mesh_terminal_compose_receipt(
     const uint8_t responder_online_seed[32],
     struct mesh_terminal_receipt_v1 *out)
 {
-    if (!open || !session || !session->established || !network_genesis ||
-        !responder_master_pubkey || !responder_online_pubkey ||
-        !responder_noise_static || !responder_online_seed || !out ||
-        now_unix == 0) {
+    if (!terminal_compose_open_ok(open, session, network_genesis, now_unix) ||
+        !terminal_compose_keys_ok(responder_master_pubkey,
+                                  responder_online_pubkey,
+                                  responder_noise_static,
+                                  responder_online_seed, out)) {
         LOG_ERROR("net.mesh_terminal", "compose: null/unestablished argument");
         return false;
     }
@@ -528,20 +649,7 @@ bool boot_mesh_terminal_compose_receipt(
     out->connection_generation = session->connection_generation;
     out->revocation_generation = revocation_generation;
     out->observed_unix = now_unix;
-    if (status == MESH_TERMINAL_RECEIPT_CLOSED) {
-        /* The close evidence legitimately lands long after the open's
-         * answer window; matches_open binds it on observed >= issued
-         * alone, so no clamp here. */
-        out->expires_unix = now_unix + MESH_TERMINAL_RECEIPT_VALIDITY_SECONDS;
-    } else {
-        uint64_t expires =
-            now_unix + MESH_TERMINAL_RECEIPT_VALIDITY_SECONDS;
-        if (expires > open->expires_unix)
-            expires = open->expires_unix;
-        if (expires <= now_unix)
-            expires = now_unix + 1; /* expired-open refusal stays well-formed */
-        out->expires_unix = expires;
-    }
+    out->expires_unix = terminal_receipt_expiry(open, status, now_unix);
     out->capsule_len = (uint16_t)capsule_len;
     if (capsule_len)
         memcpy(out->capsule, capsule, capsule_len);
@@ -782,6 +890,51 @@ static size_t terminal_compose_reply(
                         out_cap);
 }
 
+/* The message processor the receipt needs, or NULL while boot is incomplete. */
+static struct msg_processor *terminal_ready_processor(
+    const struct boot_svc_ctx *svc)
+{
+    struct msg_processor *mp = svc ? svc->msg_processor : NULL;
+    if (!mp || !mp->params || !mp->net_mgr || !svc->datadir)
+        return NULL;
+    return mp;
+}
+
+/* Spawn the confined worker. Every spawn failure is an honest
+ * CONFINEMENT_UNAVAILABLE: the node never answers OK with no cage. */
+static enum mesh_terminal_receipt_status terminal_spawn_worker(
+    const char *datadir, const struct mesh_terminal_open_v1 *open,
+    uint64_t now, char *workdir, size_t workdir_cap,
+    struct mesh_terminal_worker *worker, bool *spawned)
+{
+    if (!terminal_workdir(datadir, open, workdir, workdir_cap)) {
+        LOG_ERROR("net.mesh_terminal", "terminal workdir unavailable");
+        return MESH_TERMINAL_RECEIPT_CONFINEMENT_UNAVAILABLE;
+    }
+    struct mesh_terminal_worker_config cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.shell_path = g_term_shell;
+    cfg.workdir = workdir;
+    cfg.cols = open->cols;
+    cfg.rows = open->rows;
+    cfg.max_bytes_in = MESH_TERMINAL_SERVICE_MAX_BYTES_IN;
+    cfg.max_bytes_out = boot_mesh_terminal_max_bytes_out();
+    cfg.lifetime_seconds = MESH_TERMINAL_SERVICE_LIFETIME_SECONDS;
+    cfg.idle_seconds = MESH_TERMINAL_SERVICE_IDLE_SECONDS;
+    struct zcl_result r = mesh_terminal_worker_spawn(&cfg, (int64_t)now, worker);
+    if (!r.ok) {
+        LOG_ERROR("net.mesh_terminal",
+                  "confined spawn refused (%s): %s",
+                  mesh_terminal_worker_error_string(
+                      (enum mesh_terminal_worker_error)r.code),
+                  r.message);
+        dir_remove_tree(workdir);
+        return MESH_TERMINAL_RECEIPT_CONFINEMENT_UNAVAILABLE;
+    }
+    *spawned = true;
+    return MESH_TERMINAL_RECEIPT_OK;
+}
+
 /* The service's answer to an inbound stream OPEN. Every refusal is the
  * node's own signed verdict riding the CLOSE; only an OK reserves a
  * confined worker, and only after the cage exists. */
@@ -803,8 +956,8 @@ static enum mesh_stream_refusal terminal_service_open(
                              (uint64_t)platform_time_monotonic_ms()))
         return MESH_STREAM_CLOSED_BY_SERVICE;
     struct boot_svc_ctx *svc = g_term_svc;
-    struct msg_processor *mp = svc ? svc->msg_processor : NULL;
-    if (!mp || !mp->params || !mp->net_mgr || !svc->datadir) {
+    struct msg_processor *mp = terminal_ready_processor(svc);
+    if (!mp) {
         LOG_ERROR("net.mesh_terminal", "respond: composition incomplete");
         return MESH_STREAM_REFUSED_UNAVAILABLE;
     }
@@ -837,40 +990,9 @@ static enum mesh_stream_refusal terminal_service_open(
     struct mesh_terminal_worker worker;
     memset(&worker, 0, sizeof(worker));
     bool spawned = false;
-    if (status == MESH_TERMINAL_RECEIPT_OK) {
-        /* Spawn the confined worker. Every spawn failure is an honest
-         * CONFINEMENT_UNAVAILABLE: the node never answers OK with no
-         * cage. */
-        if (!terminal_workdir(svc->datadir, &open, workdir,
-                              sizeof(workdir))) {
-            LOG_ERROR("net.mesh_terminal", "terminal workdir unavailable");
-            status = MESH_TERMINAL_RECEIPT_CONFINEMENT_UNAVAILABLE;
-        } else {
-            struct mesh_terminal_worker_config cfg;
-            memset(&cfg, 0, sizeof(cfg));
-            cfg.shell_path = g_term_shell;
-            cfg.workdir = workdir;
-            cfg.cols = open.cols;
-            cfg.rows = open.rows;
-            cfg.max_bytes_in = MESH_TERMINAL_SERVICE_MAX_BYTES_IN;
-            cfg.max_bytes_out = boot_mesh_terminal_max_bytes_out();
-            cfg.lifetime_seconds = MESH_TERMINAL_SERVICE_LIFETIME_SECONDS;
-            cfg.idle_seconds = MESH_TERMINAL_SERVICE_IDLE_SECONDS;
-            struct zcl_result r =
-                mesh_terminal_worker_spawn(&cfg, (int64_t)now, &worker);
-            if (!r.ok) {
-                LOG_ERROR("net.mesh_terminal",
-                          "confined spawn refused (%s): %s",
-                          mesh_terminal_worker_error_string(
-                              (enum mesh_terminal_worker_error)r.code),
-                          r.message);
-                dir_remove_tree(workdir);
-                status = MESH_TERMINAL_RECEIPT_CONFINEMENT_UNAVAILABLE;
-            } else {
-                spawned = true;
-            }
-        }
-    }
+    if (status == MESH_TERMINAL_RECEIPT_OK)
+        status = terminal_spawn_worker(svc->datadir, &open, now, workdir,
+                                       sizeof(workdir), &worker, &spawned);
 
     struct mesh_terminal_session *s = NULL;
     if (status == MESH_TERMINAL_RECEIPT_OK) {
