@@ -246,6 +246,21 @@ static bool tg_ends_with(const char *tok, size_t len, const char *suffix)
     return len >= sl && memcmp(tok + len - sl, suffix, sl) == 0;
 }
 
+/* Baseline ledger paths a gate script names: `tools/...baseline...` ending in
+ * .txt or .tsv. The token walk is tg_scan_tokens', so this is only a filter. */
+struct tg_ledger_sink { struct tg_path_list *out; };
+
+static void tg_sink_ledgers(int terr, const char *tok, size_t len, void *user)
+{
+    (void)terr;
+    struct tg_ledger_sink *s = user;
+    if (len < 8 || len >= TERRITORY_PATH_MAX) return;
+    if (memcmp(tok, "tools/", 6) != 0) return;
+    if (!tg_ends_with(tok, len, ".txt") && !tg_ends_with(tok, len, ".tsv")) return;
+    if (!tg_contains(tok, len, "baseline")) return;
+    tg_path_push(s->out, tok, len);
+}
+
 /* Extract every `tools/…` script path named on one gate_command() line. */
 static void tg_line_scripts(const char *line, size_t len,
                             struct tg_path_list *out)
@@ -265,6 +280,12 @@ static void tg_line_scripts(const char *line, size_t len,
     }
 }
 
+/* A byte of a gate name: lowercase letter, digit, or '-'. */
+static bool tg_name_byte(char c)
+{
+    return c == '-' || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9');
+}
+
 /* A gate_command() row: leading whitespace, then `check-<name>)`. */
 static bool tg_gate_row(const char *line, size_t len, char *name, size_t cap)
 {
@@ -272,9 +293,7 @@ static bool tg_gate_row(const char *line, size_t len, char *name, size_t cap)
     while (i < len && (line[i] == ' ' || line[i] == '\t')) i++;
     if (len - i < 7 || memcmp(line + i, "check-", 6) != 0) return false;
     size_t start = i;
-    while (i < len && (line[i] == '-' || (line[i] >= 'a' && line[i] <= 'z') ||
-                       (line[i] >= '0' && line[i] <= '9')))
-        i++;
+    while (i < len && tg_name_byte(line[i])) i++;
     if (i >= len || line[i] != ')') return false;
     size_t nl = i - start;
     if (nl == 0 || nl >= cap) return false;
@@ -293,6 +312,90 @@ void territory_gates_free(struct territory_gates *g)
     free(g->gates);
     free(g->terr);
     free(g);
+}
+
+/* True when a gate of this name is already in the table. */
+static bool tg_gate_known(const struct territory_gates *g, const char *name)
+{
+    for (int i = 0; i < g->count; i++)
+        if (strcmp(g->gates[i].name, name) == 0) return true;
+    return false;
+}
+
+/* The per-gate scope vectors, one slot per territory. A failure frees what
+ * this call allocated and leaves the gate uncounted. */
+static bool tg_gate_alloc_vectors(struct tg_gate *gate, int count)
+{
+    gate->names = count > 0
+        ? zcl_calloc((size_t)count, sizeof(*gate->names), "tg_gate_names")
+        : NULL;
+    gate->baseline = count > 0
+        ? zcl_calloc((size_t)count, sizeof(*gate->baseline), "tg_gate_baseline")
+        : NULL;
+    if (count > 0 && (!gate->names || !gate->baseline)) {
+        free(gate->names); free(gate->baseline);
+        return false;
+    }
+    return true;
+}
+
+/* Pass 3: the ledger rows themselves, counted against this gate. */
+static void tg_gate_count_rows(const char *root, struct territory_gates *g,
+                               struct tg_gate *gate,
+                               const struct tg_path_list *ledgers)
+{
+    for (int b = 0; b < ledgers->count && b < TG_MAX_BASELINE; b++) {
+        size_t blen = 0;
+        char *rows = tg_slurp(root, ledgers->path[b], TG_BASELINE_MAX, &blen);
+        if (!rows) continue;
+        struct tg_baseline_sink bs = { .gate = gate };
+        (void)tg_scan_tokens(rows, blen, g, tg_sink_baseline, &bs);
+        g->baseline_rows += bs.rows;
+        g->baseline_unattributed += bs.unattributed;
+        free(rows);
+    }
+}
+
+/* Pass 2, per gate: read each script it runs, record which territories its
+ * text names, and remember any baseline ledger it points at. */
+static void tg_gate_scan_scripts(const char *root, struct territory_gates *g,
+                                 struct tg_gate *gate,
+                                 const struct tg_path_list *scripts,
+                                 struct tg_path_list *ledgers)
+{
+    for (int s = 0; s < scripts->count; s++) {
+        size_t slen = 0;
+        char *body = tg_slurp(root, scripts->path[s], TG_SCRIPT_MAX, &slen);
+        if (!body) continue;
+        struct tg_name_sink sink = { .gate = gate };
+        (void)tg_scan_tokens(body, slen, g, tg_sink_names, &sink);
+
+        ledgers->count = 0;
+        struct tg_ledger_sink ls = { .out = ledgers };
+        (void)tg_scan_tokens(body, slen, g, tg_sink_ledgers, &ls);
+        free(body);
+        tg_gate_count_rows(root, g, gate, ledgers);
+    }
+}
+
+/* One line of the case table. A line that is not a new gate changes nothing.
+ * False only when the new gate's scope vectors cannot be allocated. */
+static bool tg_gate_add_line(const char *root, struct territory_gates *g,
+                             const char *line, size_t len,
+                             struct tg_path_list *scripts,
+                             struct tg_path_list *ledgers)
+{
+    char gname[TERRITORY_GATE_NAME_MAX];
+    if (!tg_gate_row(line, len, gname, sizeof(gname))) return true;
+    if (tg_gate_known(g, gname)) return true;
+    struct tg_gate *gate = &g->gates[g->count];
+    (void)snprintf(gate->name, sizeof(gate->name), "%s", gname);
+    if (!tg_gate_alloc_vectors(gate, g->terr_count)) return false;
+    scripts->count = 0;
+    tg_line_scripts(line, len, scripts);
+    tg_gate_scan_scripts(root, g, gate, scripts, ledgers);
+    g->count++;
+    return true;
 }
 
 struct territory_gates *territory_gates_open(
@@ -340,77 +443,11 @@ struct territory_gates *territory_gates_open(
     while (pos < lint_len && g->count < TERRITORY_MAX_GATES) {
         const char *nl = memchr(lint + pos, '\n', lint_len - pos);
         size_t line_len = nl ? (size_t)(nl - (lint + pos)) : lint_len - pos;
-        char gname[TERRITORY_GATE_NAME_MAX];
-        if (tg_gate_row(lint + pos, line_len, gname, sizeof(gname))) {
-            bool dup = false;
-            for (int i = 0; i < g->count; i++)
-                if (strcmp(g->gates[i].name, gname) == 0) { dup = true; break; }
-            if (!dup) {
-                struct tg_gate *gate = &g->gates[g->count];
-                (void)snprintf(gate->name, sizeof(gate->name), "%s", gname);
-                gate->names = count > 0
-                    ? zcl_calloc((size_t)count, sizeof(*gate->names),
-                                 "tg_gate_names")
-                    : NULL;
-                gate->baseline = count > 0
-                    ? zcl_calloc((size_t)count, sizeof(*gate->baseline),
-                                 "tg_gate_baseline")
-                    : NULL;
-                if (count > 0 && (!gate->names || !gate->baseline)) {
-                    free(gate->names); free(gate->baseline);
-                    free(scripts); free(ledgers); free(lint);
-                    territory_gates_free(g);
-                    LOG_NULL("territory", "gate scope vectors");
-                }
-                scripts->count = 0;
-                tg_line_scripts(lint + pos, line_len, scripts);
-
-                /* Pass 2, per gate: read each script it runs, record which
-                 * territories its text names, and remember any baseline
-                 * ledger it points at. */
-                for (int s = 0; s < scripts->count; s++) {
-                    size_t slen = 0;
-                    char *body = tg_slurp(root, scripts->path[s],
-                                          TG_SCRIPT_MAX, &slen);
-                    if (!body) continue;
-                    struct tg_name_sink sink = { .gate = gate };
-                    (void)tg_scan_tokens(body, slen, g, tg_sink_names, &sink);
-
-                    ledgers->count = 0;
-                    size_t i = 0;
-                    while (i < slen) {
-                        if (!tg_path_byte(body[i])) { i++; continue; }
-                        size_t st = i;
-                        while (i < slen && tg_path_byte(body[i])) i++;
-                        size_t tl = i - st;
-                        const char *tok = body + st;
-                        tg_normalize(&tok, &tl);
-                        if (tl < 8 || tl >= TERRITORY_PATH_MAX) continue;
-                        if (memcmp(tok, "tools/", 6) != 0) continue;
-                        if (!tg_ends_with(tok, tl, ".txt") &&
-                            !tg_ends_with(tok, tl, ".tsv")) continue;
-                        if (!tg_contains(tok, tl, "baseline")) continue;
-                        tg_path_push(ledgers, tok, tl);
-                    }
-                    free(body);
-
-                    /* Pass 3: the ledger rows themselves. */
-                    for (int b = 0; b < ledgers->count && b < TG_MAX_BASELINE;
-                         b++) {
-                        size_t blen = 0;
-                        char *rows = tg_slurp(root, ledgers->path[b],
-                                              TG_BASELINE_MAX, &blen);
-                        if (!rows) continue;
-                        struct tg_baseline_sink bs = { .gate = gate };
-                        (void)tg_scan_tokens(rows, blen, g, tg_sink_baseline,
-                                             &bs);
-                        g->baseline_rows += bs.rows;
-                        g->baseline_unattributed += bs.unattributed;
-                        free(rows);
-                    }
-                }
-                g->count++;
-            }
+        if (!tg_gate_add_line(root, g, lint + pos, line_len, scripts,
+                              ledgers)) {
+            free(scripts); free(ledgers); free(lint);
+            territory_gates_free(g);
+            LOG_NULL("territory", "gate scope vectors");
         }
         if (!nl) break;
         pos += line_len + 1;
@@ -457,6 +494,61 @@ void territory_brief_free(struct territory_brief *b)
     free(b);
 }
 
+/* Index of this territory in the gate table's territory list, or -1. */
+static int tb_terr_index(const struct territory_gates *gates, const char *name)
+{
+    for (int i = 0; i < gates->terr_count; i++)
+        if (strcmp(gates->terr[i], name) == 0) return i;
+    return -1;
+}
+
+/* Sorts one wired gate into one of the three refusal buckets for this
+ * territory (idx is its index, or -1). */
+static void tb_classify_gate(struct territory_brief *b,
+                             const struct tg_gate *gate, int idx)
+{
+    bool named = idx >= 0 && gate->names && gate->names[idx];
+    int rows = (idx >= 0 && gate->baseline) ? gate->baseline[idx] : 0;
+    if (named || rows > 0) {
+        b->gates_binding++;
+        if (b->refusal_count < TERRITORY_MAX_REFUSALS) {
+            struct territory_refusal *r =
+                &b->refuses[b->refusal_count++];
+            (void)snprintf(r->gate, sizeof(r->gate), "%s", gate->name);
+            r->named_in_gate = named;
+            r->baseline_rows = rows;
+        } else {
+            b->refusals_truncated = true;
+        }
+    } else if (gate->named_any) {
+        /* Names some territory, not this one. NOT "does not bind" —
+         * a tree-wide gate that happens to mention one module in a
+         * baseline row lands here, and calling that a "no" would be
+         * the guess this tool exists to avoid. */
+        b->gates_unknown_named_others++;
+    } else {
+        b->gates_unknown_named_none++;
+    }
+}
+
+/* trusts. A declared hole while the determinism ledger is unlanded: every
+ * routed group reports UNKNOWN, and the source says why. */
+static void tb_trust_tally(struct territory_brief *b,
+                           const struct territory_trust_ledger *trust)
+{
+    territory_trust_fn lookup = trust ? trust->lookup : NULL;
+    for (int i = 0; i < b->report->group_count; i++) {
+        enum territory_trust t = TERRITORY_TRUST_UNKNOWN;
+        if (lookup) t = lookup(b->report->groups[i].name, trust->user);
+        switch (t) {
+        case TERRITORY_TRUST_REPRODUCIBLE:     b->trust_reproducible++; break;
+        case TERRITORY_TRUST_NOT_REPRODUCIBLE: b->trust_not_reproducible++;
+                                               break;
+        case TERRITORY_TRUST_UNKNOWN:          b->trust_unknown++; break;
+        }
+    }
+}
+
 struct territory_brief *territory_brief_build(
     struct codeindex *ci, const char *root, const char *name,
     const struct territory_reach_set *rs,
@@ -478,49 +570,12 @@ struct territory_brief *territory_brief_build(
     b->gates_total = territory_gates_total(gates);
     b->gates_us = territory_gates_build_us(gates);
     if (gates && gates->count > 0) {
-        int idx = -1;
-        for (int i = 0; i < gates->terr_count; i++)
-            if (strcmp(gates->terr[i], b->report->name) == 0) { idx = i; break; }
-        for (int i = 0; i < gates->count; i++) {
-            const struct tg_gate *gate = &gates->gates[i];
-            bool named = idx >= 0 && gate->names && gate->names[idx];
-            int rows = (idx >= 0 && gate->baseline) ? gate->baseline[idx] : 0;
-            if (named || rows > 0) {
-                b->gates_binding++;
-                if (b->refusal_count < TERRITORY_MAX_REFUSALS) {
-                    struct territory_refusal *r =
-                        &b->refuses[b->refusal_count++];
-                    (void)snprintf(r->gate, sizeof(r->gate), "%s", gate->name);
-                    r->named_in_gate = named;
-                    r->baseline_rows = rows;
-                } else {
-                    b->refusals_truncated = true;
-                }
-            } else if (gate->named_any) {
-                /* Names some territory, not this one. NOT "does not bind" —
-                 * a tree-wide gate that happens to mention one module in a
-                 * baseline row lands here, and calling that a "no" would be
-                 * the guess this tool exists to avoid. */
-                b->gates_unknown_named_others++;
-            } else {
-                b->gates_unknown_named_none++;
-            }
-        }
+        int idx = tb_terr_index(gates, b->report->name);
+        for (int i = 0; i < gates->count; i++)
+            tb_classify_gate(b, &gates->gates[i], idx);
     }
 
-    /* trusts. A declared hole while the determinism ledger is unlanded: every
-     * routed group reports UNKNOWN, and the source says why. */
-    territory_trust_fn lookup = trust ? trust->lookup : NULL;
-    for (int i = 0; i < b->report->group_count; i++) {
-        enum territory_trust t = TERRITORY_TRUST_UNKNOWN;
-        if (lookup) t = lookup(b->report->groups[i].name, trust->user);
-        switch (t) {
-        case TERRITORY_TRUST_REPRODUCIBLE:     b->trust_reproducible++; break;
-        case TERRITORY_TRUST_NOT_REPRODUCIBLE: b->trust_not_reproducible++;
-                                               break;
-        case TERRITORY_TRUST_UNKNOWN:          b->trust_unknown++; break;
-        }
-    }
+    tb_trust_tally(b, trust);
     (void)snprintf(b->trust_source, sizeof(b->trust_source), "%s",
                    (trust && trust->source && trust->source[0])
                        ? trust->source
@@ -575,79 +630,114 @@ static size_t tu_payload(const struct territory_rollup *r, const uint8_t **p)
     return offsetof(struct territory_rollup, from_cache);
 }
 
-static bool tu_cache_load(const char *root, const uint8_t gen[32],
-                          struct territory_rollup *out)
-{
+/* The memo, open for reading: the stream on POSIX, and on Win32 the cache
+ * directory's transaction and the memo child with its checked size. */
+struct tu_cache_file {
 #if defined(_WIN32)
-    char directory_path[TERRITORY_PATH_MAX + 32];
     struct platform_directory_transaction directory;
     struct platform_directory_child child;
     struct platform_directory_child_info info;
-    platform_directory_transaction_init(&directory);
-    platform_directory_child_init(&child);
+#else
+    FILE *f;
+#endif
+};
+
+/* False leaves nothing open. */
+static bool tu_cache_open(const char *root, struct tu_cache_file *file)
+{
+#if defined(_WIN32)
+    char directory_path[TERRITORY_PATH_MAX + 32];
+    platform_directory_transaction_init(&file->directory);
+    platform_directory_child_init(&file->child);
     if (!tu_cache_directory(directory_path, sizeof(directory_path), root) ||
-        !platform_directory_transaction_open(&directory, directory_path) ||
-        !platform_directory_child_open(&directory, "territory_rollup.v1",
-                                       &child) ||
-        !platform_directory_child_info(&child, &info) ||
-        info.link_count != 1 || !info.current_user_only) {
-        platform_directory_child_close(&child);
-        platform_directory_transaction_close(&directory);
+        !platform_directory_transaction_open(&file->directory, directory_path) ||
+        !platform_directory_child_open(&file->directory, "territory_rollup.v1",
+                                       &file->child) ||
+        !platform_directory_child_info(&file->child, &file->info) ||
+        file->info.link_count != 1 || !file->info.current_user_only) {
+        platform_directory_child_close(&file->child);
+        platform_directory_transaction_close(&file->directory);
         return false;
     }
+    return true;
 #else
     char path[TERRITORY_PATH_MAX + 64];
     int n = tu_cache_path(path, sizeof(path), root);
     if (n < 0 || (size_t)n >= sizeof(path)) return false;
-    FILE *f = fopen(path, "rb");
-    if (!f) return false;
+    file->f = fopen(path, "rb");
+    return file->f != NULL;
 #endif
-    uint8_t hdr[TU_HDR_SIZE];
+}
+
+static void tu_cache_close(struct tu_cache_file *file)
+{
 #if defined(_WIN32)
-    if (!platform_directory_child_read_exact(&child, hdr, sizeof(hdr), 0)) {
-        platform_directory_child_close(&child);
-        platform_directory_transaction_close(&directory);
-        return false;
-    }
+    platform_directory_child_close(&file->child);
+    platform_directory_transaction_close(&file->directory);
 #else
-    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) {
-        fclose(f);
+    fclose(file->f);
+#endif
+}
+
+static bool tu_cache_read_header(struct tu_cache_file *file,
+                                 uint8_t hdr[TU_HDR_SIZE])
+{
+#if defined(_WIN32)
+    return platform_directory_child_read_exact(&file->child, hdr,
+                                               TU_HDR_SIZE, 0);
+#else
+    return fread(hdr, 1, TU_HDR_SIZE, file->f) == TU_HDR_SIZE;
+#endif
+}
+
+/* The payload follows the header in the stream; on Win32 it is also checked
+ * against the size the memo child reported when it was opened. */
+static bool tu_cache_read_payload(struct tu_cache_file *file, uint8_t *body,
+                                  size_t len)
+{
+#if defined(_WIN32)
+    return file->info.size == TU_HDR_SIZE + len &&
+        platform_directory_child_read_exact(&file->child, body, len,
+                                            TU_HDR_SIZE);
+#else
+    return fread(body, 1, len, file->f) == len;
+#endif
+}
+
+static bool tu_cache_header_ok(const uint8_t hdr[TU_HDR_SIZE],
+                               const uint8_t gen[32], size_t payload)
+{
+    uint32_t stored = zcl_read_u32_le(hdr + TU_HDR_LEN);
+    return memcmp(hdr + TU_HDR_MAGIC, TU_MAGIC, 8) == 0 &&
+        zcl_read_u32_le(hdr + TU_HDR_VERSION) == TU_VERSION &&
+        stored == (uint32_t)payload &&
+        memcmp(hdr + TU_HDR_ROOT, gen, 32) == 0;
+}
+
+static bool tu_cache_load(const char *root, const uint8_t gen[32],
+                          struct territory_rollup *out)
+{
+    struct tu_cache_file file;
+    if (!tu_cache_open(root, &file)) return false;
+    uint8_t hdr[TU_HDR_SIZE];
+    if (!tu_cache_read_header(&file, hdr)) {
+        tu_cache_close(&file);
         return false;
     }
-#endif
     const uint8_t *unused = NULL;
     size_t head = tu_payload(out, &unused);
     size_t tail = sizeof(*out) - offsetof(struct territory_rollup, ranks);
-    uint32_t stored = zcl_read_u32_le(hdr + TU_HDR_LEN);
-    if (memcmp(hdr + TU_HDR_MAGIC, TU_MAGIC, 8) != 0 ||
-        zcl_read_u32_le(hdr + TU_HDR_VERSION) != TU_VERSION ||
-        stored != (uint32_t)(head + tail) ||
-        memcmp(hdr + TU_HDR_ROOT, gen, 32) != 0) {
-#if defined(_WIN32)
-        platform_directory_child_close(&child);
-        platform_directory_transaction_close(&directory);
-#else
-        fclose(f);
-#endif
+    if (!tu_cache_header_ok(hdr, gen, head + tail)) {
+        tu_cache_close(&file);
         return false;
     }
     uint8_t *body = zcl_malloc(head + tail, "tu_cache_body");
-#if defined(_WIN32)
     if (!body) {
-        platform_directory_child_close(&child);
-        platform_directory_transaction_close(&directory);
+        tu_cache_close(&file);
         LOG_RETURN(false, "territory", "rollup memo buffer");
     }
-    bool ok = info.size == TU_HDR_SIZE + head + tail &&
-        platform_directory_child_read_exact(&child, body, head + tail,
-                                            TU_HDR_SIZE);
-    platform_directory_child_close(&child);
-    platform_directory_transaction_close(&directory);
-#else
-    if (!body) { fclose(f); LOG_RETURN(false, "territory", "rollup memo buffer"); }
-    bool ok = fread(body, 1, head + tail, f) == head + tail;
-    fclose(f);
-#endif
+    bool ok = tu_cache_read_payload(&file, body, head + tail);
+    tu_cache_close(&file);
     if (!ok) { free(body); return false; }
 
     uint8_t got[32];
@@ -673,6 +763,116 @@ static bool tu_cache_load(const char *root, const uint8_t gen[32],
     return true;
 }
 
+/* The memo to write: the header, then the payload in two runs (the bytes
+ * before `ranks`, then the ranks themselves). */
+struct tu_cache_image {
+    uint8_t hdr[TU_HDR_SIZE];
+    const uint8_t *base;
+    size_t head;
+    const uint8_t *ranks;
+    size_t tail;
+};
+
+static void tu_cache_seal(struct tu_cache_image *img, const uint8_t gen[32])
+{
+    memset(img->hdr, 0, sizeof(img->hdr));
+    memcpy(img->hdr + TU_HDR_MAGIC, TU_MAGIC, 8);
+    zcl_write_u32_le(img->hdr + TU_HDR_VERSION, TU_VERSION);
+    zcl_write_u32_le(img->hdr + TU_HDR_LEN, (uint32_t)(img->head + img->tail));
+    memcpy(img->hdr + TU_HDR_ROOT, gen, 32);
+    struct sha3_256_ctx c;
+    sha3_256_init(&c);
+    sha3_256_write(&c, (const unsigned char *)img->base, img->head);
+    sha3_256_write(&c, (const unsigned char *)img->ranks, img->tail);
+    sha3_256_finalize(&c, img->hdr + TU_HDR_DIGEST);
+}
+
+#if defined(_WIN32)
+/* Creates the staging child under a fresh name. False when no name lands. */
+static bool tu_cache_stage_create(struct platform_directory_transaction *dir,
+                                  char *stage_name, size_t cap,
+                                  struct platform_directory_child *stage)
+{
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 32 && !created; attempt++) {
+        uint64_t seq = atomic_fetch_add_explicit(&g_tu_cache_sequence, 1,
+                                                 memory_order_relaxed);
+        int n = snprintf(stage_name, cap, "territory_rollup.v1.tmp.%llu",
+                         (unsigned long long)seq);
+        if (n <= 0 || (size_t)n >= cap) break;
+        created = platform_directory_child_create(dir, stage_name, stage);
+    }
+    return created;
+}
+
+static bool tu_cache_stage_fill(struct platform_directory_child *stage,
+                                const struct tu_cache_image *img)
+{
+    return platform_directory_child_write_exact(stage, img->hdr,
+                                                TU_HDR_SIZE, 0) &&
+        platform_directory_child_write_exact(stage, img->base, img->head,
+                                             TU_HDR_SIZE) &&
+        platform_directory_child_write_exact(stage, img->ranks, img->tail,
+                                             TU_HDR_SIZE + img->head) &&
+        platform_directory_child_truncate(stage,
+                                          TU_HDR_SIZE + img->head + img->tail) &&
+        platform_directory_child_flush(stage);
+}
+
+static bool tu_cache_stage_sound(struct platform_directory_child *stage,
+                                 size_t size)
+{
+    struct platform_directory_child_info info;
+    return platform_directory_child_info(stage, &info) &&
+        info.size == size && info.link_count == 1 && info.current_user_only;
+}
+
+static bool tu_cache_publish_win(const char *root,
+                                 const struct tu_cache_image *img)
+{
+    char directory_path[TERRITORY_PATH_MAX + 32];
+    struct platform_directory_transaction directory;
+    struct platform_directory_child stage;
+    platform_directory_transaction_init(&directory);
+    platform_directory_child_init(&stage);
+    if (!tu_cache_directory(directory_path, sizeof(directory_path), root) ||
+        !platform_directory_transaction_open(&directory, directory_path))
+        return false;
+    char stage_name[96] = "";
+    bool created = tu_cache_stage_create(&directory, stage_name,
+                                         sizeof(stage_name), &stage);
+    bool stage_named = created;
+    bool ok = created && tu_cache_stage_fill(&stage, img);
+    ok = ok && tu_cache_stage_sound(&stage,
+                                    TU_HDR_SIZE + img->head + img->tail);
+    enum platform_directory_result published = PLATFORM_DIRECTORY_IO;
+    if (ok)
+        published = platform_directory_child_move_between(
+            &directory, &stage, &directory, "territory_rollup.v1", false);
+    if (published == PLATFORM_DIRECTORY_OK ||
+        published == PLATFORM_DIRECTORY_OUTCOME_UNKNOWN)
+        stage_named = false;
+    platform_directory_child_close(&stage);
+    if (stage_named)
+        (void)platform_directory_child_unlink(&directory, stage_name, true);
+    platform_directory_transaction_close(&directory);
+    return published == PLATFORM_DIRECTORY_OK;
+}
+#else
+static bool tu_cache_publish_posix(const char *path, const char *tmp,
+                                   const struct tu_cache_image *img)
+{
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return false;  /* a read-only checkout is a normal state */
+    bool ok = fwrite(img->hdr, 1, TU_HDR_SIZE, f) == TU_HDR_SIZE &&
+              fwrite(img->base, 1, img->head, f) == img->head &&
+              fwrite(img->ranks, 1, img->tail, f) == img->tail;
+    if (fclose(f) != 0) ok = false;
+    if (!ok || rename(tmp, path) != 0) { (void)unlink(tmp); return false; }
+    return true;
+}
+#endif
+
 static void tu_cache_store(const char *root, const uint8_t gen[32],
                            const struct territory_rollup *r, bool *wrote)
 {
@@ -686,79 +886,15 @@ static void tu_cache_store(const char *root, const uint8_t gen[32],
     if (n < 0 || (size_t)n >= sizeof(tmp)) return;
 #endif
 
-    const uint8_t *base = NULL;
-    size_t head = tu_payload(r, &base);
-    const uint8_t *ranks =
-        (const uint8_t *)r + offsetof(struct territory_rollup, ranks);
-    size_t tail = sizeof(*r) - offsetof(struct territory_rollup, ranks);
-
-    uint8_t hdr[TU_HDR_SIZE];
-    memset(hdr, 0, sizeof(hdr));
-    memcpy(hdr + TU_HDR_MAGIC, TU_MAGIC, 8);
-    zcl_write_u32_le(hdr + TU_HDR_VERSION, TU_VERSION);
-    zcl_write_u32_le(hdr + TU_HDR_LEN, (uint32_t)(head + tail));
-    memcpy(hdr + TU_HDR_ROOT, gen, 32);
-    struct sha3_256_ctx c;
-    sha3_256_init(&c);
-    sha3_256_write(&c, (const unsigned char *)base, head);
-    sha3_256_write(&c, (const unsigned char *)ranks, tail);
-    sha3_256_finalize(&c, hdr + TU_HDR_DIGEST);
-
+    struct tu_cache_image img;
+    img.head = tu_payload(r, &img.base);
+    img.ranks = (const uint8_t *)r + offsetof(struct territory_rollup, ranks);
+    img.tail = sizeof(*r) - offsetof(struct territory_rollup, ranks);
+    tu_cache_seal(&img, gen);
 #if defined(_WIN32)
-    char directory_path[TERRITORY_PATH_MAX + 32];
-    struct platform_directory_transaction directory;
-    struct platform_directory_child stage;
-    platform_directory_transaction_init(&directory);
-    platform_directory_child_init(&stage);
-    if (!tu_cache_directory(directory_path, sizeof(directory_path), root) ||
-        !platform_directory_transaction_open(&directory, directory_path))
-        return;
-    char stage_name[96] = "";
-    bool created = false;
-    for (unsigned int attempt = 0; attempt < 32 && !created; attempt++) {
-        uint64_t seq = atomic_fetch_add_explicit(&g_tu_cache_sequence, 1,
-                                                 memory_order_relaxed);
-        n = snprintf(stage_name, sizeof(stage_name),
-                     "territory_rollup.v1.tmp.%llu",
-                     (unsigned long long)seq);
-        if (n <= 0 || (size_t)n >= sizeof(stage_name)) break;
-        created = platform_directory_child_create(&directory, stage_name,
-                                                  &stage);
-    }
-    bool stage_named = created;
-    bool ok = created &&
-        platform_directory_child_write_exact(&stage, hdr, sizeof(hdr), 0) &&
-        platform_directory_child_write_exact(&stage, base, head,
-                                             sizeof(hdr)) &&
-        platform_directory_child_write_exact(&stage, ranks, tail,
-                                             sizeof(hdr) + head) &&
-        platform_directory_child_truncate(&stage, sizeof(hdr) + head + tail) &&
-        platform_directory_child_flush(&stage);
-    struct platform_directory_child_info info;
-    ok = ok && platform_directory_child_info(&stage, &info) &&
-         info.size == sizeof(hdr) + head + tail && info.link_count == 1 &&
-         info.current_user_only;
-    enum platform_directory_result published = PLATFORM_DIRECTORY_IO;
-    if (ok)
-        published = platform_directory_child_move_between(
-            &directory, &stage, &directory, "territory_rollup.v1", false);
-    if (published == PLATFORM_DIRECTORY_OK ||
-        published == PLATFORM_DIRECTORY_OUTCOME_UNKNOWN)
-        stage_named = false;
-    platform_directory_child_close(&stage);
-    if (stage_named)
-        (void)platform_directory_child_unlink(&directory, stage_name, true);
-    platform_directory_transaction_close(&directory);
-    *wrote = published == PLATFORM_DIRECTORY_OK;
+    *wrote = tu_cache_publish_win(root, &img);
 #else
-    FILE *f = fopen(tmp, "wb");
-    if (!f) return;  /* a read-only checkout is a normal state */
-    bool ok = fwrite(hdr, 1, sizeof(hdr), f) == sizeof(hdr) &&
-              fwrite(base, 1, head, f) == head &&
-              fwrite(ranks, 1, tail, f) == tail;
-    if (fclose(f) != 0) ok = false;
-    if (!ok || rename(tmp, path) != 0) { (void)unlink(tmp); return; }
-    *wrote = true;
+    *wrote = tu_cache_publish_posix(path, tmp, &img);
 #endif
 }
 
