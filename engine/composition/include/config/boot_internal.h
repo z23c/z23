@@ -364,6 +364,15 @@ struct zcl_service_spec boot_frontend_rpc_http_spec(struct boot_svc_ctx *svc);
  * preflight, so a node that has not opted in advertises nothing new and
  * answers none of the beta6 messages. */
 struct zcl_service_spec boot_beta6_bootstrap_spec(struct boot_svc_ctx *svc);
+#ifdef ZCL_TESTING
+/* Hold the background arming thread before it hashes while `*hold` is true
+ * (NULL clears). Test-only; release builds carry neither symbol. */
+void boot_beta6_bootstrap_test_set_hold(const _Atomic bool *hold);
+bool boot_beta6_bootstrap_test_published(void);
+/* Join the arming thread without uninstalling anything, so a test can read the
+ * settled state. */
+void boot_beta6_bootstrap_test_join(void);
+#endif
 
 /* The node.db-writing store payment worker spec. Runtime registration starts
  * it only after running=true and reverse-order runtime shutdown joins it before

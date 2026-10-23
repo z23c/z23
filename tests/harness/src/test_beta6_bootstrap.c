@@ -28,9 +28,12 @@
 #include "net/net.h"
 #include "net/protocol.h"
 #include "net/version.h"
+#include "config/boot_internal.h"
 #include "util/sync.h"
 
+#include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -240,6 +243,78 @@ static void seam_drain(struct p2p_node *node)
     }
     node->send_tail = NULL;
     node->send_size = 0;
+}
+
+/* ── background arming fixtures ──────────────────────────────────────
+ * The composition service is driven through its real spec (start/stop) with a
+ * hand-built boot context, so the hooks under test are the installed ones. */
+
+struct bg_rig {
+    struct chain_params params;
+    struct app_context app;
+    struct net_manager nm;
+    struct msg_processor mp;
+    struct p2p_node node;
+    struct boot_svc_ctx svc;
+    struct zcl_service_spec spec;
+};
+
+static void bg_rig_init(struct bg_rig *rig)
+{
+    static const unsigned char magic[4] = { 0x24, 0xe9, 0x27, 0x64 };
+    memset(rig, 0, sizeof(*rig));
+    memcpy(rig->params.pchMessageStart, magic, sizeof(magic));
+    snprintf(rig->params.strNetworkID, sizeof(rig->params.strNetworkID), "main");
+    net_manager_init(&rig->nm);
+    rig->nm.local_host_nonce = 7;
+    rig->mp.net_mgr = &rig->nm;
+    rig->mp.params = &rig->params;
+    rig->node.version = PROTOCOL_VERSION;
+    rig->node.socket = ZCL_INVALID_SOCKET;
+    zcl_mutex_init(&rig->node.cs_send);
+    seam_addr_loopback(&rig->node.addr);
+    rig->app.params_dir = "";
+    rig->svc.msg_processor = &rig->mp;
+    rig->svc.app_ctx = &rig->app;
+    rig->svc.params = &rig->params;
+    rig->spec = boot_beta6_bootstrap_spec(&rig->svc);
+}
+
+static void bg_rig_free(struct bg_rig *rig)
+{
+    seam_drain(&rig->node);
+    zcl_mutex_destroy(&rig->node.cs_send);
+    net_manager_free(&rig->nm);
+}
+
+static bool bg_advertises(struct bg_rig *rig)
+{
+    struct version_message ver;
+    msg_version_build(&ver, &rig->mp, &rig->node, 1);
+    return (ver.services & NODE_BOOTSTRAP) != 0;
+}
+
+/* Ask for the manifest through the real dispatch table. Returns the number of
+ * bytes the node queued (0 = nothing, i.e. silently dropped), copied into
+ * `out` for byte comparison. */
+static size_t bg_capture(struct bg_rig *rig, unsigned char *out, size_t cap)
+{
+    if (!rig->node.send_head)
+        return 0;
+    size_t size = rig->node.send_head->size;
+    if (size > cap)
+        return (size_t)-1;
+    memcpy(out, rig->node.send_head->data, size);
+    seam_drain(&rig->node);
+    return size;
+}
+
+static size_t bg_ask_manifest(struct bg_rig *rig, unsigned char *out, size_t cap)
+{
+    seam_drain(&rig->node);
+    if (!seam_dispatch(&rig->mp, &rig->node, "getbsman", NULL, 0))
+        return (size_t)-1;
+    return bg_capture(rig, out, cap);
 }
 
 int test_beta6_bootstrap(void);
@@ -672,6 +747,130 @@ int test_beta6_bootstrap(void)
         beta6_bs_inband_disarm();
         ASSERT(!beta6_bs_inband_params_status().ok);
         beta6_bs_disarm();
+        test_rm_rf(dir);
+        PASS();
+    }
+
+    /* ───────── background arming: the node boots without the hash pass ─────── */
+
+    TEST("a cancelled arm leaves nothing armed and an uncancelled arm still works") {
+        char dir[512];
+        test_make_tmpdir(dir, sizeof(dir), "beta6_bootstrap", "cancel_direct");
+        ASSERT(fixture_build(dir));
+        _Atomic bool cancel = true;
+        struct zcl_result stopped = beta6_bs_arm_cancellable(dir, "main", &cancel);
+        ASSERT(!stopped.ok);
+        ASSERT(strstr(stopped.message, "cancelled") != NULL);
+        ASSERT(!beta6_bs_status().ok);
+        ASSERT(beta6_bs_manifest() == NULL);
+        struct beta6_bs_manifest scanned;
+        beta6_bs_manifest_init(&scanned);
+        ASSERT(!beta6_bs_collect_files_cancellable(dir, &scanned, &cancel).ok);
+        cancel = false;
+        ASSERT(beta6_bs_collect_files_cancellable(dir, &scanned, &cancel).ok);
+        ASSERT_EQ((int)scanned.file_count, 3);
+        beta6_bs_manifest_free(&scanned);
+        ASSERT(beta6_bs_arm_cancellable(dir, "main", &cancel).ok);
+        ASSERT_EQ((int)beta6_bs_manifest()->file_count, 3);
+        beta6_bs_disarm();
+        test_rm_rf(dir);
+        PASS();
+    }
+
+    TEST("start returns while arming is held; hooks are inert until published; then identical") {
+        char dir[512];
+        unsigned char want[4096];
+        unsigned char got[4096];
+        static struct bg_rig rig;
+        _Atomic bool hold = true;
+
+        test_make_tmpdir(dir, sizeof(dir), "beta6_bootstrap", "bg_arm");
+        ASSERT(fixture_build(dir));
+
+        /* The old synchronous arm on the same fixture is the reference. */
+        bg_rig_init(&rig);
+        ASSERT(beta6_bs_arm(dir, "main").ok);
+        ASSERT(beta6_bs_inband_arm("main", "").ok);
+        ASSERT(beta6_bs_inband_serve(&rig.mp, &rig.node, "getbsman", NULL, 0).ok);
+        size_t want_len = bg_capture(&rig, want, sizeof(want));
+        ASSERT(want_len > 24 && want_len != (size_t)-1);
+        beta6_bs_inband_disarm();
+        beta6_bs_disarm();
+
+        ASSERT(setenv("ZCL_BETA6_BOOTSTRAP_SOURCE", dir, 1) == 0);
+        boot_beta6_bootstrap_test_set_hold(&hold);
+        /* (a) start returns although arming cannot have begun: the thread is
+         * parked on the hold, so this is not a timing claim. */
+        ASSERT(rig.spec.start(rig.spec.ctx));
+        ASSERT(!boot_beta6_bootstrap_test_published());
+        ASSERT(!beta6_bs_status().ok);
+        /* (b) hooks are installed but the node behaves as if they were not. */
+        ASSERT(rig.mp.beta6_armed != NULL);
+        ASSERT(!rig.mp.beta6_armed());
+        ASSERT(!bg_advertises(&rig));
+        ASSERT_EQ((int)bg_ask_manifest(&rig, got, sizeof(got)), 0);
+
+        /* (c) release, let the thread finish, compare with the sync arm. */
+        hold = false;
+        boot_beta6_bootstrap_test_join();
+        ASSERT(boot_beta6_bootstrap_test_published());
+        ASSERT(rig.mp.beta6_armed());
+        ASSERT(bg_advertises(&rig));
+        size_t got_len = bg_ask_manifest(&rig, got, sizeof(got));
+        ASSERT_EQ((int)got_len, (int)want_len);
+        ASSERT(memcmp(got, want, want_len) == 0);
+
+        rig.spec.stop(rig.spec.ctx);
+        ASSERT(rig.mp.beta6_armed == NULL);
+        ASSERT(!boot_beta6_bootstrap_test_published());
+        ASSERT(!beta6_bs_status().ok);
+        ASSERT(!beta6_bs_inband_status().ok);
+        boot_beta6_bootstrap_test_set_hold(NULL);
+        unsetenv("ZCL_BETA6_BOOTSTRAP_SOURCE");
+        bg_rig_free(&rig);
+        test_rm_rf(dir);
+        PASS();
+    }
+
+    TEST("a failed background arm leaves the unwired behaviour") {
+        static struct bg_rig rig;
+        unsigned char got[4096];
+        bg_rig_init(&rig);
+        ASSERT(setenv("ZCL_BETA6_BOOTSTRAP_SOURCE", "/nonexistent-beta6-serve-dir", 1) == 0);
+        boot_beta6_bootstrap_test_set_hold(NULL);
+        ASSERT(rig.spec.start(rig.spec.ctx));
+        boot_beta6_bootstrap_test_join();
+        ASSERT(!boot_beta6_bootstrap_test_published());
+        ASSERT(!rig.mp.beta6_armed());
+        ASSERT(!bg_advertises(&rig));
+        ASSERT_EQ((int)bg_ask_manifest(&rig, got, sizeof(got)), 0);
+        ASSERT(!beta6_bs_status().ok);
+        rig.spec.stop(rig.spec.ctx);
+        unsetenv("ZCL_BETA6_BOOTSTRAP_SOURCE");
+        bg_rig_free(&rig);
+        PASS();
+    }
+
+    TEST("stop during background arming cancels promptly and leaves nothing armed") {
+        char dir[512];
+        static struct bg_rig rig;
+        _Atomic bool hold = true;
+        test_make_tmpdir(dir, sizeof(dir), "beta6_bootstrap", "bg_stop");
+        ASSERT(fixture_build(dir));
+        bg_rig_init(&rig);
+        ASSERT(setenv("ZCL_BETA6_BOOTSTRAP_SOURCE", dir, 1) == 0);
+        boot_beta6_bootstrap_test_set_hold(&hold);
+        ASSERT(rig.spec.start(rig.spec.ctx));
+        /* The hold is never released: only stop's cancel can end the thread,
+         * and the cancelled arm must then refuse before hashing a byte. Stop returning at all is the proof: the cancel reached the thread. */
+        rig.spec.stop(rig.spec.ctx);
+        ASSERT(rig.mp.beta6_armed == NULL);
+        ASSERT(!boot_beta6_bootstrap_test_published());
+        ASSERT(!beta6_bs_status().ok);
+        ASSERT(!beta6_bs_inband_status().ok);
+        boot_beta6_bootstrap_test_set_hold(NULL);
+        unsetenv("ZCL_BETA6_BOOTSTRAP_SOURCE");
+        bg_rig_free(&rig);
         test_rm_rf(dir);
         PASS();
     }

@@ -39,8 +39,14 @@ struct beta6_scan {
     size_t capacity;
     uint64_t total_bytes;
     unsigned char *buffer;
+    const _Atomic bool *cancel;
     struct zcl_result failure;
 };
+
+static bool scan_cancelled(const struct beta6_scan *scan)
+{
+    return scan->cancel && atomic_load_explicit(scan->cancel, memory_order_acquire);
+}
 
 static bool scan_fail(struct beta6_scan *scan, const char *fmt, const char *arg)
 {
@@ -57,6 +63,8 @@ static bool hash_file(struct beta6_scan *scan, const struct platform_positioned_
     sha256_init(&ctx);
     uint64_t offset = 0;
     while (offset < size) {
+        if (scan_cancelled(scan))
+            return false;
         size_t want = BETA6_HASH_BUFFER_BYTES;
         if (size - offset < (uint64_t)want)
             want = (size_t)(size - offset);
@@ -120,6 +128,8 @@ static bool scan_record_file(struct beta6_scan *scan, const char *relative)
     if (ok)
         ok = hash_file(scan, &file, size, &entry->sha256);
     platform_positioned_file_close(&file);
+    if (!ok && scan_cancelled(scan))
+        return scan_fail(scan, "beta6 bootstrap arming was cancelled at: %s", relative);
     if (!ok)
         return scan_fail(scan, "error reading beta6 bootstrap snapshot file: %s",
                          relative);
@@ -149,6 +159,9 @@ static bool scan_children(struct beta6_scan *scan, const char *relative_prefix,
 {
     char relative[BETA6_BS_MAX_PATH_LEN];
     for (size_t i = 0; i < list->count; i++) {
+        if (scan_cancelled(scan))
+            return scan_fail(scan, "beta6 bootstrap arming was cancelled under: %s",
+                             relative_prefix);
         if (!join_relative(relative, sizeof(relative), relative_prefix,
                            list->entries[i].name))
             return scan_fail(scan, "beta6 bootstrap source path is too long under: %s",
@@ -203,6 +216,16 @@ static int compare_files(const void *lhs, const void *rhs)
 struct zcl_result beta6_bs_collect_files(const char *source_dir,
                                          struct beta6_bs_manifest *manifest)
 {
+    return beta6_bs_collect_files_cancellable(source_dir, manifest, NULL);
+}
+
+/* The same scan, abandoned when *cancel turns true (NULL never cancels): read
+ * between 1 MiB reads and directory entries, so a shutdown during a multi-GiB
+ * hash returns within about a second with a named refusal and nothing built. */
+struct zcl_result beta6_bs_collect_files_cancellable(const char *source_dir,
+                                                     struct beta6_bs_manifest *manifest,
+                                                     const _Atomic bool *cancel)
+{
     if (!source_dir || !manifest)
         return ZCL_ERR(BETA6_BS_ERR_REFUSED,
                        "beta6 bootstrap collect needs a source directory and a manifest");
@@ -210,7 +233,7 @@ struct zcl_result beta6_bs_collect_files(const char *source_dir,
     if (!present.ok)
         return present;
 
-    struct beta6_scan scan = { .root = source_dir, .failure = ZCL_OK };
+    struct beta6_scan scan = { .root = source_dir, .cancel = cancel, .failure = ZCL_OK };
     scan.buffer = zcl_malloc(BETA6_HASH_BUFFER_BYTES, "beta6 bootstrap hash buffer");
     if (!scan.buffer)
         return ZCL_ERR(BETA6_BS_ERR_REFUSED,

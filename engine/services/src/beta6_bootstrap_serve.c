@@ -152,7 +152,8 @@ static struct zcl_result preflight_manifest(const struct beta6_bs_manifest *mani
 }
 
 static struct zcl_result build_manifest(const char *source_dir, const char *network,
-                                        struct beta6_bs_manifest *manifest)
+                                        struct beta6_bs_manifest *manifest,
+                                        const _Atomic bool *cancel)
 {
     beta6_bs_manifest_init(manifest);
     snprintf(manifest->network, sizeof(manifest->network), "%s", network);
@@ -166,7 +167,7 @@ static struct zcl_result build_manifest(const char *source_dir, const char *netw
         apply_anchor(manifest, anchor);
         apply_block_tip(source_dir, manifest, anchor);
     }
-    struct zcl_result collected = beta6_bs_collect_files(source_dir, manifest);
+    struct zcl_result collected = beta6_bs_collect_files_cancellable(source_dir, manifest, cancel);
     if (!collected.ok)
         return collected;
     struct zcl_result flown = preflight_manifest(manifest);
@@ -176,6 +177,12 @@ static struct zcl_result build_manifest(const char *source_dir, const char *netw
 }
 
 struct zcl_result beta6_bs_arm(const char *source_dir, const char *network)
+{
+    return beta6_bs_arm_cancellable(source_dir, network, NULL);
+}
+
+struct zcl_result beta6_bs_arm_cancellable(const char *source_dir, const char *network,
+                                           const _Atomic bool *cancel)
 {
     if (!source_dir || source_dir[0] == '\0')
         return ZCL_ERR(BETA6_BS_ERR_REFUSED, "beta6 bootstrap source directory is empty");
@@ -195,7 +202,7 @@ struct zcl_result beta6_bs_arm(const char *source_dir, const char *network)
                        present.message);
 
     struct beta6_bs_manifest built;
-    struct zcl_result made = build_manifest(source_dir, network, &built);
+    struct zcl_result made = build_manifest(source_dir, network, &built, cancel);
     if (!made.ok)
         return made;
 

@@ -31,6 +31,7 @@
 #include "core/serialize.h"
 #include "core/uint256.h"
 
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -157,6 +158,9 @@ void beta6_bs_manifest_free(struct beta6_bs_manifest *manifest);
  * from a request path. */
 struct zcl_result beta6_bs_collect_files(const char *source_dir,
                                          struct beta6_bs_manifest *manifest);
+struct zcl_result beta6_bs_collect_files_cancellable(const char *source_dir,
+                                                     struct beta6_bs_manifest *manifest,
+                                                     const _Atomic bool *cancel);
 
 /* ── Serve state ─────────────────────────────────────────────────────── */
 
@@ -166,6 +170,10 @@ struct zcl_result beta6_bs_collect_files(const char *source_dir,
  * Idempotent for a repeated identical source. A non-ok result names the
  * reason and leaves the service disarmed. */
 struct zcl_result beta6_bs_arm(const char *source_dir, const char *network);
+/* beta6_bs_arm with a cancel flag (see beta6_bs_collect_files_cancellable). A
+ * cancelled arm leaves the service exactly as it was found. */
+struct zcl_result beta6_bs_arm_cancellable(const char *source_dir, const char *network,
+                                           const _Atomic bool *cancel);
 void beta6_bs_disarm(void);
 /* ok while a snapshot is armed; otherwise a named refusal. */
 struct zcl_result beta6_bs_status(void);
