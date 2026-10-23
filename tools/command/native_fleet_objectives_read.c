@@ -1603,6 +1603,15 @@ static struct zcl_objective_value obj_fresh_node_sync_eta_s(
                        (long long)age_h, n.verdict);
         return v;
     }
+    /* Fail closed: a run that did not pass (fail, seam, skip) timed
+     * something other than a completed sync, whatever its wall clock. */
+    if (strcmp(n.verdict, "pass") != 0) {
+        (void)snprintf(v.reason, sizeof(v.reason),
+                       "newest stopwatch run did not pass (verdict %s, "
+                       "wall %lld s, age %lld h)",
+                       n.verdict, (long long)n.wall_s, (long long)age_h);
+        return v;
+    }
     /* Fail closed: a local-peer run is a proxy, never a stranger's sync. It
      * stays unmeasured until a real-network run exists. */
     if (obj_sync_loopback(n.peer)) {

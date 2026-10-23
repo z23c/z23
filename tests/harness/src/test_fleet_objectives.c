@@ -1082,6 +1082,28 @@ static int fox_case_sync(void)
         PASS();
     }
 
+    TEST("objectives: a fresh run that did not pass is unmeasured, however "
+         "short its wall clock") {
+        (void)unlink(path);
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 3600, "467",
+                               FOX_SYNC_REMOTE, "pass"));
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 600, "12",
+                               FOX_SYNC_REMOTE, "seam"));
+        v = fox_sync_measure(path, FOX_SYNC_NOW);
+        ASSERT(!v.measured);
+        ASSERT_STR_EQ(v.reason, "newest stopwatch run did not pass (verdict "
+                                "seam, wall 12 s, age 0 h)");
+        (void)unlink(path);
+        ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 600, "30",
+                               FOX_SYNC_REMOTE, "fail"));
+        v = fox_sync_measure(path, FOX_SYNC_NOW);
+        ASSERT(!v.measured);
+        fox_sync_status(&v, status, sizeof(status));
+        ASSERT_STR_EQ(status, "unmeasured(newest stopwatch run did not pass "
+                              "(verdict fail, wall 30 s, age 0 h))");
+        PASS();
+    }
+
     TEST("objectives: a fresh non-loopback run of 5000 s is unmet") {
         (void)unlink(path);
         ASSERT(fox_sync_append(path, FOX_SYNC_NOW - 3600, "5000",
