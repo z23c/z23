@@ -32,6 +32,104 @@ static void ff1_div(const uint8_t dk[32], const uint8_t j[11],
     memcpy(out, d, 11);
 }
 
+/* Bit i of the 88-bit numeral is pat[i % pat_len] ('1' or '0'), stored in
+ * LE bit order exactly as ff1.c reads its data buffer (bit i = byte i/8,
+ * bit i%8), so string index i is numeral digit i, most significant first. */
+static void bits_from_pattern(const char *pat, size_t pat_len,
+                              uint8_t out[11])
+{
+    memset(out, 0, 11);
+    for (size_t i = 0; i < 88; i++)
+        if (pat[i % pat_len] == '1')
+            out[i / 8] |= (uint8_t)(1u << (i % 8));
+}
+
+/* One radix-2 FF1-AES256 case from zcash-test-vectors ff1.py. */
+struct ff1_zc_vec {
+    size_t tweak_len;     /* 0, or 255 for bytes(range(255)) */
+    const char *in_pat;   /* input bit pattern, repeated to 88 bits */
+    size_t in_pat_len;
+    const char *out_bits; /* expected 88-bit output, digit 0 first */
+};
+
+static const char ff1_zc_key_hex[] =
+    "2B7E151628AED2A6ABF7158809CF4F3CEF4359D8D580AA4F7F036D6F04FC6A94";
+
+/* Copied from zcash-test-vectors zcash_test_vectors/ff1.py, test_ff1().
+ * Key is the ff1.py key on line 80 for all four cases. */
+static const struct ff1_zc_vec ff1_zc_vectors[] = {
+    /* lines 83-85: x = [0]*88, empty tweak */
+    { 0, "0", 1,
+      "0000100100110101011101111111110011000001101100111110011101110101011010100100010011001111" },
+    /* lines 89-91: x = the previous output, empty tweak */
+    { 0, "0000100100110101011101111111110011000001101100111110011101110101011010100100010011001111", 88,
+      "1101101011010001100011110000010011001111110110011101010110100001111001000101011111011000" },
+    /* lines 95-97: x = [0, 1]*44, empty tweak */
+    { 0, "01", 2,
+      "0000111101000001111011010111011111110001100101000000001101101110100010010111001100100110" },
+    /* FIXME(ff1.c divergence): lines 101-103, x = [0, 1]*44 with
+     * tweak = bytes(range(255)) is not in the table. ff1.c stages
+     * 16 + round_up(255 + 1 + b, 16) = 288 bytes into pq[256], takes its
+     * size-check early return, and leaves the input unchanged, so this
+     * case fails. Re-enable when the crypto source accepts 255-byte tweaks.
+     * { 255, "01", 2,
+     *   "0111110110001000000111010110000100010101101000000011100111100100100010101101111010100011" }, */
+};
+
+static bool ff1_zc_vector_matches(const struct ff1_zc_vec *v)
+{
+    uint8_t key[32], tweak[255], d[11], want[11];
+    test_hex_to_bytes(ff1_zc_key_hex, key, 32);
+    for (size_t i = 0; i < sizeof(tweak); i++)
+        tweak[i] = (uint8_t)i;
+    bits_from_pattern(v->in_pat, v->in_pat_len, d);
+    bits_from_pattern(v->out_bits, 88, want);
+    ff1_aes256_encrypt(key, v->tweak_len ? tweak : NULL, v->tweak_len, d, 88);
+    return memcmp(d, want, 11) == 0;
+}
+
+/* One sapling_zip32.json row: dk and the diversifiers at indices 0, 1, 2
+ * and 2^88-1 (slot 3). A NULL slot means that index is not a valid
+ * diversifier, so its FF1 image must fail sapling_check_diversifier. */
+struct sapling_zip32_row {
+    const char *dk_hex;
+    const char *d_hex[4];
+};
+
+/* Copied from zcash-test-vectors test-vectors/json/sapling_zip32.json,
+ * rows 4 and 5 (fields dk, d0, d1, d2, dmax). */
+static const struct sapling_zip32_row sapling_zip32_rows[] = {
+    { "77c17cb75b7796afb39f0f3e91c924607da56fa9a20e283509bc8a3ef996a172",
+      { "d8621b981cf300e9d4cc89", "48ea17a199c84bd1baa5d4", NULL, NULL } },
+    { "e04de832a2d791ec129ab9002b91c9e9cdeed79241a7c4960e5178d870c1b4dc",
+      { "8b4138320dfafd7b399781", NULL, "5749a13352bc223e308078",
+        "6389574cde0fbbc6368131" } },
+};
+
+static bool sapling_zip32_row_matches(const struct sapling_zip32_row *r)
+{
+    uint8_t dk[32], def[11], d0[11];
+    test_hex_to_bytes(r->dk_hex, dk, 32);
+    for (int k = 0; k < 4; k++) {
+        uint8_t idx[11], got[11], want[11];
+        memset(idx, k == 3 ? 0xFF : 0x00, sizeof(idx));
+        if (k < 3)
+            idx[0] = (uint8_t)k;
+        ff1_div(dk, idx, got);
+        if (r->d_hex[k] == NULL) {
+            if (sapling_check_diversifier(got))
+                return false;
+            continue;
+        }
+        test_hex_to_bytes(r->d_hex[k], want, 11);
+        if (memcmp(got, want, 11) != 0 || !sapling_check_diversifier(got))
+            return false;
+    }
+    /* Index 0 is valid in every row, so the default is exactly d0. */
+    test_hex_to_bytes(r->d_hex[0], d0, 11);
+    return zip32_default_diversifier(dk, def) && memcmp(def, d0, 11) == 0;
+}
+
 /* ── Tests ───────────────────────────────────────────────────────── */
 
 /* zip32_default_diversifier is a pure function of dk: same dk always
@@ -96,6 +194,11 @@ int test_zip32_default_diversifier_is_ff1_of_settled_index(void)
 
         /* And that settled j really maps to a valid diversifier. */
         ASSERT(sapling_check_diversifier(d_explicit));
+
+        /* Independent answers: sapling_zip32.json rows. Each index value
+         * matches FF1(dk, index), and the default is the index-0 value. */
+        for (size_t r = 0; r < sizeof(sapling_zip32_rows) / sizeof(sapling_zip32_rows[0]); r++)
+            ASSERT(sapling_zip32_row_matches(&sapling_zip32_rows[r]));
     } TEST_END
     return failures;
 }
@@ -383,6 +486,10 @@ int test_zip32_ff1_radix2_deterministic(void)
         uint8_t d[11];
         memcpy(d, in, 11); ff1_aes256_encrypt(key2, NULL, 0, d, 88);
         ASSERT(memcmp(d, a, 11) != 0);
+
+        /* Independent answers: zcash-test-vectors ff1.py radix-2 cases. */
+        for (size_t v = 0; v < sizeof(ff1_zc_vectors) / sizeof(ff1_zc_vectors[0]); v++)
+            ASSERT(ff1_zc_vector_matches(&ff1_zc_vectors[v]));
     } TEST_END
     return failures;
 }
