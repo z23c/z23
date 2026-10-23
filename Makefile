@@ -6631,6 +6631,8 @@ LINTC_SRCS = $(LINTC_LIVE_DATADIR_SRCS) tools/lint/lintc/lib.c tools/lint/lintc/
     tools/lint/lintc/gate_no_csr_lock_on_finalize_drive.c \
     tools/lint/lintc/gate_no_csr_lock_on_finalize_drive_selftest.c \
     tools/lint/lintc/gate_tor_provenance_selftest.c \
+    tools/lint/lintc/gate_no_stale_pinned_facts.c \
+    tools/lint/lintc/gate_no_stale_pinned_facts_selftest.c \
     $(LINTC_PREMISE_SRCS) \
     tools/lint/lintc/main.c
 LINTC_OBJS = $(LINTC_SRCS:tools/lint/lintc/%.c=build/lintc-obj/%.o)
@@ -14805,9 +14807,9 @@ check-no-real-clock-test-deadline: $(LINTC_TOOL)
 # tools/lint/stale_pinned_facts_baseline.txt). Per-line escape hatch: a trailing
 # `<!-- stale-ok: <reason> -->` marker. Owner directive 2026-07-17: numeric
 # facts with a live source are DERIVED or GATED, never hand-pinned.
-check-no-stale-pinned-facts:
+check-no-stale-pinned-facts: $(LINTC_TOOL)
 	@echo "══ LINT: no stale pinned facts (binary size / live-state height) ══"
-	@./tools/lint/check_no_stale_pinned_facts.sh
+	@./build/bin/z23-lint check-no-stale-pinned-facts --selftest && ./build/bin/z23-lint check-no-stale-pinned-facts .
 
 # No UNCITED victory claim in the one live-state page (HARD). This repo shipped
 # 9+ "cured / at tip / fully synced" claims in six weeks, every one later false

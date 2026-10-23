@@ -314,6 +314,8 @@ static const struct lint_gate k_gates[] = {
     { "check-no-csr-lock-on-finalize-drive",
       check_no_csr_lock_on_finalize_drive_run,
       check_no_csr_lock_on_finalize_drive_selftest },
+    { "check-no-stale-pinned-facts", check_no_stale_pinned_facts_run,
+      check_no_stale_pinned_facts_selftest },
 };
 
 /* Premise-selection subcommands; they are tools, not gates, so --list and

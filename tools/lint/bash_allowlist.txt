@@ -172,7 +172,6 @@ tools/lint/check_hotswap_service_islands.sh
 tools/lint/check_identity_parser_single.sh
 tools/lint/check_no_adx_overclaim.sh
 tools/lint/check_no_operator_paths.sh
-tools/lint/check_no_stale_pinned_facts.sh
 tools/lint/check_outparam_init_before_return.sh
 tools/lint/check_package_anatomy.sh
 tools/lint/check_pipefail_status_pipe.sh

@@ -523,5 +523,7 @@ int check_accel_oracle_pinned_run(int argc, char **argv);
 int check_accel_oracle_pinned_selftest(void);
 int check_no_wallclock_assertion_run(int argc, char **argv);
 int check_no_wallclock_assertion_selftest(void);
+int check_no_stale_pinned_facts_run(int argc, char **argv);
+int check_no_stale_pinned_facts_selftest(void);
 
 #endif

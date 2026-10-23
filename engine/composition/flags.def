@@ -2358,9 +2358,9 @@ Z23_FLAG("ZCL_SQLITE_CHILD_DB", "env_test", "-", "-",
 Z23_FLAG("ZCL_STAGE_STALL_ESCALATE_WINDOWS", "env_runtime", "-", "-",
           "undocumented; first use engine/supervisors/src/staged_sync_supervisor.c:auto")
 Z23_FLAG("ZCL_STALE_FACTS_EMIT_BASELINE", "env_build", "0", "-",
-          "undocumented; first use tools/lint/check_no_stale_pinned_facts.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_no_stale_pinned_facts.c:auto")
 Z23_FLAG("ZCL_STALE_FACTS_SCAN_FILES", "env_build", "-", "-",
-          "undocumented; first use tools/lint/check_no_stale_pinned_facts.sh:auto")
+          "undocumented; first use tools/lint/lintc/gate_no_stale_pinned_facts.c:auto")
 Z23_FLAG("ZCL_STATUS_DEADLINE_MS", "env_runtime", "-", "-",
           "undocumented; first use engine/controllers/src/status_brief_native_handler.c:auto")
 Z23_FLAG("ZCL_STATUS_REASON_GATE_BASELINE", "env_build", "-", "-",

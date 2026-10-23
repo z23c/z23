@@ -250,7 +250,7 @@ gate_command() {
         check-doc-accuracy)                echo './tools/scripts/check_doc_accuracy.sh' ;;
         check-doc-counts)                  echo './tools/scripts/check_doc_counts.sh' ;;
         check-orient-facts)                echo './build/bin/z23-lint check-orient-facts --selftest && ./build/bin/z23-lint check-orient-facts' ;;
-        check-no-stale-pinned-facts)       echo './tools/lint/check_no_stale_pinned_facts.sh' ;;
+        check-no-stale-pinned-facts)       echo './build/bin/z23-lint check-no-stale-pinned-facts --selftest && ./build/bin/z23-lint check-no-stale-pinned-facts .' ;;
         check-no-uncited-victory)          echo './tools/scripts/check_no_uncited_victory.sh' ;;
         check-doc-claims)                  echo './tools/lint/check_doc_claims.sh' ;;
         check-error-doc-refs)              echo './build/bin/z23-lint check-error-doc-refs' ;;
