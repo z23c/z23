@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Crypto hash tests: SHA-256, SHA-512, SHA-1, RIPEMD-160, HMAC-SHA256,
- * BLAKE2b, Hash256, Hash160. */
+ * BLAKE2b, Hash256, Hash160, X25519 (RFC 7748). */
 
 #include "test/test_core.h"
 #include "crypto/sha1.h"
@@ -9,8 +9,192 @@
 #include "crypto/blake2b.h"
 #include "core/hash.h"
 #include "crypto/ed25519.h"
+#include "crypto/curve25519.h"
+#include "crypto/x25519_safe.h"
 #include "platform/time_compat.h"
 #include "util/safe_alloc.h"
+
+/* X25519 vectors. Every hex string is copied verbatim from the published
+ * source named beside it; none is recalled. */
+struct x25519_vector {
+    const char *scalar;
+    const char *u;
+    const char *out;
+};
+
+/* RFC 7748 Section 5.2, scalar multiplication test vectors 1 and 2. */
+static const struct x25519_vector k_rfc7748_vectors[] = {
+    {
+        "a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4",
+        "e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c",
+        "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552",
+    },
+    {
+        "4b66e9d4d1b4673c5ad22691957d6af5c11b6421e0ea01d42ca4169e7918ba0d",
+        "e5210f12786811d3f4b7959d0538ae2c31dbe7106fc03c3efc4cd549c715a493",
+        "95cbde9476e8907d7aade45cb4b873f88b595a68799fa152e6f8f7647aac7957",
+    },
+};
+
+/* RFC 7748 Section 6.1: Alice and Bob keys and the shared secret K. */
+static const char k_dh_alice_priv[] =
+    "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a";
+static const char k_dh_alice_pub[] =
+    "8520f0098930a754748b7ddcb43ef75a0dbf3a0d26381af4eba4a98eaa9b4e6a";
+static const char k_dh_bob_priv[] =
+    "5dab087e624a8a4b79e17f8b83800ee66f3bb1292618b6fd1c2f8b27ff88e0eb";
+static const char k_dh_bob_pub[] =
+    "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f";
+static const char k_dh_shared[] =
+    "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742";
+
+/* Low-order u-coordinates: the 7-entry blocklist of libsodium
+ * src/libsodium/crypto_scalarmult/curve25519/ref10/x25519_ref10.c
+ * (has_small_order). Covers orders 1, 2, 4 and 8 and the non-canonical
+ * encodings p-1, p and p+1 for p = 2^255-19. The two order-8 entries were
+ * cross-checked against their decimal values in the same comments. */
+static const char *const k_x25519_small_order_u[] = {
+    "0000000000000000000000000000000000000000000000000000000000000000", /* 0, order 4 */
+    "0100000000000000000000000000000000000000000000000000000000000000", /* 1, order 1 */
+    "e0eb7a7c3b41b8ae1656e3faf19fc46ada098deb9c32b1fd866205165f49b800", /* order 8 */
+    "5f9c95bca3508c24b1d0b1559c83ef5b04445cc4581c8e86d8224eddd09f1157", /* order 8 */
+    "ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", /* p-1, order 2 */
+    "edffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", /* p, non-canonical 0 */
+    "eeffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f", /* p+1, non-canonical 1 */
+};
+
+static bool x25519_bytes_zero(const uint8_t *b, size_t len)
+{
+    uint8_t acc = 0;
+    for (size_t i = 0; i < len; i++)
+        acc |= b[i];
+    return acc == 0;
+}
+
+/* RFC 7748 Section 5.2: each vector through curve25519_scalarmult and
+ * x25519_safe (the two agree on a non-zero, contributory result). */
+static int x25519_check_rfc7748_vectors(void)
+{
+    int failures = 0;
+    uint8_t scalar[32], u[32], got[32];
+    for (size_t i = 0; i < sizeof k_rfc7748_vectors / sizeof k_rfc7748_vectors[0]; i++) {
+        const struct x25519_vector *v = &k_rfc7748_vectors[i];
+        test_hex_to_bytes(v->scalar, scalar, 32);
+        test_hex_to_bytes(v->u, u, 32);
+        printf("X25519 RFC 7748 Section 5.2 vector %zu (scalarmult)... ", i + 1);
+        if (!curve25519_scalarmult(got, scalar, u)) {
+            printf("FAIL (scalarmult returned false)\n");
+            failures++;
+            continue;
+        }
+        failures += check_hex(got, 32, v->out);
+        printf("X25519 RFC 7748 Section 5.2 vector %zu (x25519_safe)... ", i + 1);
+        if (!x25519_safe(got, scalar, u)) {
+            printf("FAIL (x25519_safe rejected a usable point)\n");
+            failures++;
+            continue;
+        }
+        failures += check_hex(got, 32, v->out);
+    }
+    return failures;
+}
+
+/* RFC 7748 Section 5.2 iterated test: starting from k = u = 9, each step is
+ * (k, u) = (X25519(k, u), k). Checked after 1 and after 1,000 iterations. */
+static int x25519_check_iterated(void)
+{
+    static const struct {
+        int iters;
+        const char *want;
+    } rows[] = {
+        /* RFC 7748 Section 5.2, after one iteration. */
+        { 1, "422c8e7a6227d7bca1350b3e2bb7279f7897b87bb6854b783c60e80311ae3079" },
+        /* RFC 7748 Section 5.2, after 1,000 iterations. */
+        { 1000, "684cf59ba83309552800ef566f2f4d3c1c3887c49360e3875f2eb94d99532c51" },
+    };
+    int failures = 0;
+    for (size_t r = 0; r < sizeof rows / sizeof rows[0]; r++) {
+        uint8_t k[32] = {9}, u[32] = {9}, next[32];
+        bool ok = true;
+        for (int i = 0; ok && i < rows[r].iters; i++) {
+            ok = curve25519_scalarmult(next, k, u);
+            memcpy(u, k, 32);
+            memcpy(k, next, 32);
+        }
+        printf("X25519 RFC 7748 Section 5.2 iterated, %d iteration(s)... ", rows[r].iters);
+        if (!ok) {
+            printf("FAIL (scalarmult returned false)\n");
+            failures++;
+            continue;
+        }
+        failures += check_hex(k, 32, rows[r].want);
+    }
+    return failures;
+}
+
+/* RFC 7748 Section 6.1: public keys are X25519(priv, 9); both sides derive K. */
+static int x25519_check_dh_keys(uint8_t a[32], uint8_t b[32], uint8_t pa[32], uint8_t pb[32])
+{
+    int failures = 0;
+    test_hex_to_bytes(k_dh_alice_priv, a, 32);
+    test_hex_to_bytes(k_dh_bob_priv, b, 32);
+    printf("X25519 RFC 7748 Section 6.1 Alice public key... ");
+    if (!curve25519_scalarmult_base(pa, a)) failures++;
+    failures += check_hex(pa, 32, k_dh_alice_pub);
+    printf("X25519 RFC 7748 Section 6.1 Bob public key... ");
+    if (!curve25519_scalarmult_base(pb, b)) failures++;
+    failures += check_hex(pb, 32, k_dh_bob_pub);
+    return failures;
+}
+
+static int x25519_check_dh_example(void)
+{
+    uint8_t a[32], b[32], pa[32], pb[32], shared[32];
+    int failures = x25519_check_dh_keys(a, b, pa, pb);
+
+    printf("X25519 RFC 7748 Section 6.1 shared secret (Alice side)... ");
+    if (!x25519_safe(shared, a, pb)) failures++;
+    failures += check_hex(shared, 32, k_dh_shared);
+
+    printf("X25519 RFC 7748 Section 6.1 shared secret (Bob side)... ");
+    if (!x25519_safe(shared, b, pa)) failures++;
+    failures += check_hex(shared, 32, k_dh_shared);
+    return failures;
+}
+
+/* One low-order u-coordinate: x25519_safe must refuse it and zeroize its
+ * output. The raw curve25519_scalarmult returns true (it documents no
+ * low-order rejection) and yields the all-zero secret that the guard catches. */
+static int x25519_check_small_order_one(const char *u_hex, size_t index)
+{
+    uint8_t scalar[32], u[32], raw[32], safe[32];
+    test_hex_to_bytes(k_dh_alice_priv, scalar, 32);
+    test_hex_to_bytes(u_hex, u, 32);
+    printf("X25519 small-order u[%zu] raw scalarmult... ", index);
+    bool raw_ok = curve25519_scalarmult(raw, scalar, u);
+    if (!raw_ok || !x25519_bytes_zero(raw, 32)) {
+        printf("FAIL (raw result %s, zero=%d)\n", raw_ok ? "true" : "false",
+               x25519_bytes_zero(raw, 32));
+        return 1;
+    }
+    printf("OK\n");
+    printf("X25519 small-order u[%zu] refused by x25519_safe... ", index);
+    memset(safe, 0xa5, sizeof safe);
+    if (x25519_safe(safe, scalar, u) || !x25519_bytes_zero(safe, 32)) {
+        printf("FAIL (accepted or left non-zero output)\n");
+        return 1;
+    }
+    printf("OK\n");
+    return 0;
+}
+
+static int x25519_check_all_small_order(void)
+{
+    int failures = 0;
+    for (size_t i = 0; i < sizeof k_x25519_small_order_u / sizeof k_x25519_small_order_u[0]; i++)
+        failures += x25519_check_small_order_one(k_x25519_small_order_u[i], i);
+    return failures;
+}
 
 int test_crypto(void)
 {
@@ -243,6 +427,13 @@ int test_crypto(void)
         failures += check_hex(dk, 40,
             "348c89dbcbd32b2f32d814b8116e84cf2b17347ebc1800181c4e2a1fb8dd53e1c635518c7dac47e9");
     }
+
+    /* X25519 — RFC 7748 vectors, iterated test, Diffie-Hellman example,
+     * and refusal of the low-order blocklist. */
+    failures += x25519_check_rfc7748_vectors();
+    failures += x25519_check_iterated();
+    failures += x25519_check_dh_example();
+    failures += x25519_check_all_small_order();
 
     /* Benchmark: SHA-256 throughput */
     printf("SHA-256 benchmark (%s)... ", sha256_implementation());
