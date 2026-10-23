@@ -25,6 +25,7 @@
  * on-disk sqlite DBs, public API only). */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "chain/chain.h"
 #include "jobs/reducer_frontier.h"
@@ -477,7 +478,7 @@ static bool fc_chain_build(struct fc_chain *sc, struct main_state *ms)
         sc->blocks[i].nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
         arith_uint256_set_u64(&sc->blocks[i].nChainWork, (uint64_t)i + 1);
         if (i > 0) sc->blocks[i].pprev = &sc->blocks[i - 1];
-        if (!block_map_insert(&ms->map_block_index, sc->blocks[i].phashBlock,
+        if (!test_block_map_insert(&ms->map_block_index, sc->blocks[i].phashBlock,
                               &sc->blocks[i]))
             return false;
     }

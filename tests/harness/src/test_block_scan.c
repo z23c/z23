@@ -3,6 +3,7 @@
  * BLOCK_FAILED_CHILD propagation. */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "storage/coins_view_sqlite.h"
 #include "chain/chain.h"
 #include "chain/chainparams.h"
@@ -750,7 +751,7 @@ static struct block_index *gap_add(struct main_state *ms, int height,
     h.data[1] = (uint8_t)(*serial >> 8);
     h.data[2] = (uint8_t)(*serial >> 16);
     (*serial)++;
-    if (!block_map_insert(&ms->map_block_index, &h, b)) {
+    if (!test_block_map_insert(&ms->map_block_index, &h, b)) {
         free(b);
         return NULL;
     }

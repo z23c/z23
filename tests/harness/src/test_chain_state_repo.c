@@ -9,6 +9,7 @@
  * count. The top-level test_chain_state_repo() aggregates them. */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "config/db_service.h"
 #include "services/chain_state_service.h"
 #include "validation/chainstate.h"
@@ -136,7 +137,7 @@ static struct block_index *csr_fix_add(struct csr_fixture *f, uint8_t seed)
     f->blocks[idx].nHeight = idx;
     f->blocks[idx].pprev = (idx > 0) ? &f->blocks[idx - 1] : NULL;
 
-    block_map_insert(&f->bm, &f->hashes[idx], &f->blocks[idx]);
+    test_block_map_insert(&f->bm, &f->hashes[idx], &f->blocks[idx]);
     /* block_map_insert keeps the index pointer but a future grow
      * could relocate the bucket; re-point phashBlock so identity
      * stays stable across rehashes. */

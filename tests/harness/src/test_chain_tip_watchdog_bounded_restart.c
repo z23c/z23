@@ -20,6 +20,7 @@
  *       carries, the cap still bites; outside the margin is a new episode. */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "config/boot_background_workers.h"
 #include "services/chain_tip_watchdog.h"
@@ -88,7 +89,7 @@ static struct block_index *wd_mk_idx(struct main_state *ms, int height,
     bi->nTx = 1;
     bi->nChainTx = prev ? prev->nChainTx + 1 : 1;
     arith_uint256_set_u64(&bi->nChainWork, work);
-    if (!block_map_insert(&ms->map_block_index, hp, bi)) {
+    if (!test_block_map_insert(&ms->map_block_index, hp, bi)) {
         free((void *)(uintptr_t)bi->phashBlock);
         free(bi);
         return NULL;

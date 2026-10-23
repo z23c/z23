@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "consensus/upgrades.h"
 #include "util/timedata.h"
 #include "bloom/merkle.h"
@@ -218,8 +219,8 @@ int test_chain(void)
         block_index_init(bi2);
         bi2->nHeight = 200;
 
-        block_map_insert(&bm, &h1, bi1);
-        block_map_insert(&bm, &h2, bi2);
+        test_block_map_insert(&bm, &h1, bi1);
+        test_block_map_insert(&bm, &h2, bi2);
 
         struct block_index *found = block_map_find(&bm, &h1);
         if (found && found->nHeight == 100 && block_map_count(&bm) == 2)
@@ -1667,10 +1668,10 @@ int test_chain(void)
         struct uint256 fake_hash;
         memset(fake_hash.data, 0xAB, 32); /* definitely not genesis */
 
-        struct block_index *bi = zcl_calloc(1, sizeof(struct block_index), "test_block_index");
+        struct block_index *bi = zcl_malloc_or_die(sizeof(struct block_index), "test_block_index");
         block_index_init(bi);
         bi->nHeight = 0;  /* wrong! should be e.g. 3,056,896 */
-        block_map_insert(&bm, &fake_hash, bi);
+        test_block_map_insert(&bm, &fake_hash, bi);
 
         struct block_index *found = block_map_find(&bm, &fake_hash);
         bool is_mismatch = found && found->nHeight == 0;
@@ -1701,10 +1702,10 @@ int test_chain(void)
         const struct chain_params *p = chain_params_get();
         struct uint256 genesis = p->consensus.hashGenesisBlock;
 
-        struct block_index *bi = zcl_calloc(1, sizeof(struct block_index), "test_block_index");
+        struct block_index *bi = zcl_malloc_or_die(sizeof(struct block_index), "test_block_index");
         block_index_init(bi);
         bi->nHeight = 0;  /* correct for genesis */
-        block_map_insert(&bm, &genesis, bi);
+        test_block_map_insert(&bm, &genesis, bi);
 
         struct block_index *found = block_map_find(&bm, &genesis);
         bool is_genesis = uint256_eq(&genesis,
@@ -1731,10 +1732,10 @@ int test_chain(void)
         struct uint256 tip_hash;
         memset(tip_hash.data, 0xCD, 32);
 
-        struct block_index *bi = zcl_calloc(1, sizeof(struct block_index), "test_block_index");
+        struct block_index *bi = zcl_malloc_or_die(sizeof(struct block_index), "test_block_index");
         block_index_init(bi);
         bi->nHeight = 3056896;  /* correct mapping */
-        block_map_insert(&bm, &tip_hash, bi);
+        test_block_map_insert(&bm, &tip_hash, bi);
 
         struct block_index *found = block_map_find(&bm, &tip_hash);
         bool would_trigger_fallback = found && found->nHeight == 0;

@@ -58,10 +58,13 @@ static inline void disk_tx_pos_init(struct disk_tx_pos *p)
     p->nTxOffset = 0;
 }
 
+/* Keyless bucket: the 32-byte key is index->hashBlock (written before the
+ * insert, never changed), the tag is its first 8 bytes (block_map_hash) so a
+ * probe compares 8 bytes before it touches the node. index == NULL is an
+ * empty bucket. */
 struct block_map_entry {
-    struct uint256 hash;
+    uint64_t tag;
     struct block_index *index;
-    bool occupied;
 };
 
 struct block_map {
@@ -75,6 +78,8 @@ void block_map_init(struct block_map *m);
 void block_map_free(struct block_map *m);
 struct block_index *block_map_find(const struct block_map *m,
                                     const struct uint256 *hash);
+/* index must be non-NULL and *hash must equal index->hashBlock (already
+ * written; it is the stored key). Violations fail closed. */
 bool block_map_insert(struct block_map *m, const struct uint256 *hash,
                       struct block_index *index);
 bool block_map_reserve(struct block_map *m, size_t expected_count);

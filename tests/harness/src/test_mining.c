@@ -2,6 +2,7 @@
  * Mining controller unit tests — RPC registration, edge cases. */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "controllers/mining_controller.h"
 #include "controllers/sovereignty_controller.h"
 #include "chain/chainparams.h"
@@ -103,7 +104,7 @@ static int mining_template_time_cases(void)
         ancestors[h].nBits = arith_uint256_get_compact(&limit, false);
         ancestors[h].nTime = future_time;
         ancestors[h].pprev = h ? &ancestors[h - 1] : NULL;
-        block_map_insert(&ms.map_block_index, ancestors[h].phashBlock, &ancestors[h]);
+        test_block_map_insert(&ms.map_block_index, ancestors[h].phashBlock, &ancestors[h]);
     }
     active_chain_move_window_tip(&ms.chain_active, &ancestors[10]);
     rpc_mining_set_state(&ms, &pool, &cache);

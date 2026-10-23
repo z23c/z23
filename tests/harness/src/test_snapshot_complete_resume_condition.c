@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "framework/condition.h"
 #include "net/snapshot_sync_contract.h"
@@ -74,8 +75,8 @@ int test_snapshot_complete_resume_condition(void)
         snap.phashBlock = &h1;
         snap.nHeight = 2000;
         snap.pprev = &genesis;
-        block_map_insert(&ms.map_block_index, &h0, &genesis);
-        block_map_insert(&ms.map_block_index, &h1, &snap);
+        test_block_map_insert(&ms.map_block_index, &h0, &genesis);
+        test_block_map_insert(&ms.map_block_index, &h1, &snap);
 
         svc.state = SNAPSYNC_COMPLETE;
         svc.offered_height = 2000;

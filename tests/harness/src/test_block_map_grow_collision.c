@@ -78,7 +78,10 @@ int test_block_map_grow_collision(void)
         ASSERT(memcmp(c0.data, c1.data, 8) == 0);
         ASSERT(!uint256_eq(&c0, &c1));
 
+        nodes[0]->hashBlock = hashes[0];
+
         ASSERT(block_map_insert(&bm, &hashes[0], nodes[0]));
+        nodes[1]->hashBlock = hashes[1];
         ASSERT(block_map_insert(&bm, &hashes[1], nodes[1]));
 
         /* Both colliding keys resolve correctly even before any grow: the
@@ -97,6 +100,7 @@ int test_block_map_grow_collision(void)
             h.data[20] = 0x5A;                    /* sentinel, keeps non-null */
             hashes[i] = h;
             nodes[i] = make_index(800000 + i);
+            nodes[i]->hashBlock = hashes[i];
             ASSERT(block_map_insert(&bm, &hashes[i], nodes[i]));
         }
 

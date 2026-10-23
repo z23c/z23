@@ -4,6 +4,7 @@
  */
 
 #include "test/syncdiag_rpc_fixture.h"
+#include "test/test_block_map.h"
 
 static int test_operator_snapshot_unavailable_capture(void)
 {
@@ -605,7 +606,7 @@ int syncdiag_cases_agent_status(void)
         tip.nTime = (uint32_t)platform_time_wall_time_t();
         tip.nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
         arith_uint256_set_u64(&tip.nChainWork, 100);
-        ok = ok && block_map_insert(&ms.map_block_index, tip.phashBlock,
+        ok = ok && test_block_map_insert(&ms.map_block_index, tip.phashBlock,
                                     &tip);
         ok = ok && active_chain_move_window_tip(&ms.chain_active, &tip);
         ms.pindex_best_header = &tip;

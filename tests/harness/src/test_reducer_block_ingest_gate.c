@@ -33,6 +33,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "bloom/merkle.h"
 #include "chain/chainparams.h"
@@ -290,7 +291,7 @@ static int rbi_context_intake_case(void)
         parents[h].nBits = arith_uint256_get_compact(&limit, false);
         parents[h].nStatus = BLOCK_VALID_TREE;
         parents[h].pprev = h ? &parents[h - 1] : NULL;
-        block_map_insert(&ms.map_block_index, parents[h].phashBlock, &parents[h]);
+        test_block_map_insert(&ms.map_block_index, parents[h].phashBlock, &parents[h]);
     }
     active_chain_move_window_tip(&ms.chain_active, &parents[28]);
     ms.pindex_best_header = &parents[28];

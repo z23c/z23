@@ -1511,6 +1511,7 @@ int main(int argc, char **argv)
     /* Subsection 5/6 finish-drive: defensive + consensus unit-test gaps. */
     failures += test_block_locator_bounds();
     failures += test_block_map_grow_collision();
+    failures += test_block_map_keyless();
     failures += test_connect_node_locked();
     failures += test_stream_read_no_overflow();
     failures += test_transaction_deserialize_count_amplification();

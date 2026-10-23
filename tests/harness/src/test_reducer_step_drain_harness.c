@@ -15,6 +15,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "test/test_timing_budget.h"
 
 #include "bloom/merkle.h"
@@ -345,7 +346,7 @@ int test_reducer_step_drain_harness(void)
             fcand->nTx = 1;
             fcand->nChainTx = 1;
             arith_uint256_set_u64(&fcand->nChainWork, 1);
-            fixture_ok = block_map_insert(&fault_ms.map_block_index, fh, fcand);
+            fixture_ok = test_block_map_insert(&fault_ms.map_block_index, fh, fcand);
         }
         SD_CHECK("window-extend fault: fixture candidate inserted", fixture_ok);
 
@@ -391,8 +392,8 @@ int test_reducer_step_drain_harness(void)
             fc2.pprev = &fc1;
             fc2.nStatus = BLOCK_VALID_TREE;
             bool headers_ok =
-                block_map_insert(&fault_ms.map_block_index, &fh1, &fc1) &&
-                block_map_insert(&fault_ms.map_block_index, &fh2, &fc2);
+                test_block_map_insert(&fault_ms.map_block_index, &fh1, &fc1) &&
+                test_block_map_insert(&fault_ms.map_block_index, &fh2, &fc2);
             fault_ms.pindex_best_header = &fc2;
             SD_CHECK("window-extend H+1 gate: headers inserted", headers_ok);
 

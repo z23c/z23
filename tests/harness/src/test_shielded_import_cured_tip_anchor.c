@@ -24,6 +24,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "chain/chain.h"
 #include "chain/checkpoints.h"
@@ -307,7 +308,7 @@ int test_shielded_import_cured_tip_anchor(void)
                            i > 0 ? &blocks[i - 1] : NULL, 0x40);
             if (i == 0 && cp)
                 memcpy(blocks[0].hashBlock.data, cp->block_hash, 32);
-            block_map_insert(&ms.map_block_index, &blocks[i].hashBlock,
+            test_block_map_insert(&ms.map_block_index, &blocks[i].hashBlock,
                              &blocks[i]);
         }
         struct block_index *tip = &blocks[CHAIN - 1];
@@ -362,7 +363,7 @@ int test_shielded_import_cured_tip_anchor(void)
         for (int i = 0; i < CHAIN; i++) {
             cta_make_block(&blocks[i], anchor + 1 + i,
                            i > 0 ? &blocks[i - 1] : NULL, 0x41);
-            block_map_insert(&ms.map_block_index, &blocks[i].hashBlock,
+            test_block_map_insert(&ms.map_block_index, &blocks[i].hashBlock,
                              &blocks[i]);
         }
         struct block_index *tip = &blocks[CHAIN - 1];
@@ -410,7 +411,7 @@ int test_shielded_import_cured_tip_anchor(void)
                            i > 0 ? &blocks[i - 1] : NULL, 0x42);
             if (i == 0 && cp)
                 memcpy(blocks[0].hashBlock.data, cp->block_hash, 32);
-            block_map_insert(&ms.map_block_index, &blocks[i].hashBlock,
+            test_block_map_insert(&ms.map_block_index, &blocks[i].hashBlock,
                              &blocks[i]);
         }
         struct block_index *tip = &blocks[CHAIN - 1];
@@ -445,7 +446,7 @@ int test_shielded_import_cured_tip_anchor(void)
             for (int i = 0; i < CHAIN; i++) {
                 cta_make_block(&blocks[i], anchor + i,
                                i > 0 ? &blocks[i - 1] : NULL, 0x43);
-                block_map_insert(&ms.map_block_index, &blocks[i].hashBlock,
+                test_block_map_insert(&ms.map_block_index, &blocks[i].hashBlock,
                                  &blocks[i]);
             }   /* blocks[0] keeps a synthetic hash != cp->block_hash */
             struct block_index *tip = &blocks[CHAIN - 1];

@@ -2,6 +2,7 @@
  * Unit tests for Wave S S-8 utxo_apply stage. */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "test/block_fixtures.h"
 
 #include "bloom/merkle.h"
@@ -1299,7 +1300,7 @@ static int inverse_order_missing_lower_delta_v(const char *label,
         UV_CHECK(chk, exec_sql(db, ok_sql));
     }
     snprintf(chk, sizeof(chk), "%s: old tip hash-addressable and FAILED", label);
-    UV_CHECK(chk, block_map_insert(&ms.map_block_index, sc.blocks[N - 1].phashBlock,
+    UV_CHECK(chk, test_block_map_insert(&ms.map_block_index, sc.blocks[N - 1].phashBlock,
                                    &sc.blocks[N - 1]));
     sc.blocks[N - 1].nStatus |= BLOCK_FAILED_VALID;
     snprintf(chk, sizeof(chk), "%s: retract active window to genesis", label);
@@ -1665,7 +1666,7 @@ int test_utxo_apply_stage(void)
                  active_chain_move_window_tip(&ms.chain_active,
                                               &sc.blocks[0]));
         UV_CHECK("hash_fallback: block_map has h1 by hash",
-                 block_map_insert(&ms.map_block_index, sc.blocks[1].phashBlock,
+                 test_block_map_insert(&ms.map_block_index, sc.blocks[1].phashBlock,
                                   &sc.blocks[1]));
         UV_CHECK("hash_fallback: seed h1 script hash verdict",
                  seed_script_validate_row(progress_store_db(), 1, 1,
@@ -1708,7 +1709,7 @@ int test_utxo_apply_stage(void)
                  seed_script_validate_row(progress_store_db(), 1, 1,
                                           sc.blocks[1].phashBlock));
         UV_CHECK("hash_fallback_stale_data_bit: block_map has h1 by hash",
-                 block_map_insert(&ms.map_block_index, sc.blocks[1].phashBlock,
+                 test_block_map_insert(&ms.map_block_index, sc.blocks[1].phashBlock,
                                   &sc.blocks[1]));
         UV_CHECK("hash_fallback_stale_data_bit: h1 body on disk",
                  uv_write_body_to_disk(&sc, 1));
@@ -1746,7 +1747,7 @@ int test_utxo_apply_stage(void)
                  seed_script_validate_row(progress_store_db(), 1, 1,
                                           sc.blocks[1].phashBlock));
         UV_CHECK("hash_fallback_durable_parent: block_map has h1 by hash",
-                 block_map_insert(&ms.map_block_index, sc.blocks[1].phashBlock,
+                 test_block_map_insert(&ms.map_block_index, sc.blocks[1].phashBlock,
                                   &sc.blocks[1]));
         UV_CHECK("hash_fallback_durable_parent: h0 applies",
                  utxo_apply_stage_step_once() == JOB_ADVANCED);
@@ -1787,7 +1788,7 @@ int test_utxo_apply_stage(void)
                  seed_script_validate_row(progress_store_db(), 1, 1,
                                           sc.blocks[1].phashBlock));
         UV_CHECK("hash_fallback_trusted_base: block_map has h1 by hash",
-                 block_map_insert(&ms.map_block_index, sc.blocks[1].phashBlock,
+                 test_block_map_insert(&ms.map_block_index, sc.blocks[1].phashBlock,
                                   &sc.blocks[1]));
         UV_CHECK("hash_fallback_trusted_base: h0 applies",
                  utxo_apply_stage_step_once() == JOB_ADVANCED);

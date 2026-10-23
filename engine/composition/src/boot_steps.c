@@ -81,11 +81,9 @@ static void boot_zcd_reseed_hash_pointers(struct main_state *st)
      * into the reallocatable bucket array. */
     size_t iter2 = 0;
     struct block_index *pi2;
-    const struct uint256 *hash2;
     while (block_map_next(&st->map_block_index,
-                          &iter2, &hash2, &pi2))
-        if (pi2 && hash2) {
-            pi2->hashBlock = *hash2;
+                          &iter2, NULL, &pi2))
+        if (pi2) {
             pi2->phashBlock = &pi2->hashBlock;
         }
 }

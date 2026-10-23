@@ -3,6 +3,7 @@
 
 #include "platform/time_compat.h"
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "config/db_service.h"
 #include "config/runtime.h"
 #include "coins/coins_view.h"
@@ -1291,7 +1292,7 @@ int test_node_health_service(void)
         ms.pindex_best_header = &tip;
         header_tip = &tip;
         coins_view_cache_set_best_block(&coins_tip, &tip_hash);
-        block_map_insert(&ms.map_block_index, &tip_hash, &tip);
+        test_block_map_insert(&ms.map_block_index, &tip_hash, &tip);
         const struct block_index *canon =
             block_map_find(&ms.map_block_index, &tip_hash);
         if (canon)

@@ -11,6 +11,7 @@
  */
 
 #include "test/syncdiag_rpc_fixture.h"
+#include "test/test_block_map.h"
 #include "test/test_syncdiag_agent_projection_priv.h"
 
 /* Fixture for the one-block-lookahead diagnose narrative: a tip at
@@ -64,7 +65,7 @@ static bool sd_diag_lookahead_setup(struct sd_diag_lookahead_ctx *ctx)
     ctx->tip.nHeight = ctx->target_height;
     ctx->tip.nTime = (uint32_t)platform_time_wall_time_t();
     ctx->tip.nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_TREE;
-    ok = ok && block_map_insert(&ctx->ms.map_block_index,
+    ok = ok && test_block_map_insert(&ctx->ms.map_block_index,
                                 ctx->tip.phashBlock, &ctx->tip);
     ok = ok && active_chain_move_window_tip(&ctx->ms.chain_active,
                                             &ctx->tip);

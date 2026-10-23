@@ -481,6 +481,7 @@ int test_key_hostile_wif(void);
 /* Subsection 5/6 finish-drive: defensive + consensus unit-test gaps. */
 int test_block_locator_bounds(void);
 int test_block_map_grow_collision(void);
+int test_block_map_keyless(void);
 int test_connect_node_locked(void);
 int test_stream_read_no_overflow(void);
 int test_transaction_deserialize_count_amplification(void);

@@ -1299,9 +1299,9 @@ int test_block_index_loader(void)
         /* phashBlock must point at per-node storage (the canonical-terminus
          * memcmp reads node->phashBlock->data). */
         {
-            size_t it = 0; struct block_index *pi; const struct uint256 *hp;
-            while (block_map_next(&ms.map_block_index, &it, &hp, &pi)) {
-                if (pi && hp) { pi->hashBlock = *hp; pi->phashBlock = &pi->hashBlock; }
+            size_t it = 0; struct block_index *pi;
+            while (block_map_next(&ms.map_block_index, &it, NULL, &pi)) {
+                if (pi) { pi->phashBlock = &pi->hashBlock; }
             }
         }
         struct block_index *tipN = block_map_find(&ms.map_block_index, &hashes[N]);
@@ -2246,9 +2246,8 @@ static bool bil_fill_map_to_capacity(struct main_state *ms, uint8_t tag,
         pi->hashBlock.data[3] = tag;
         pi->phashBlock = &pi->hashBlock;
         pi->nHeight = (int32_t)i;
-        bm->buckets[i].hash = pi->hashBlock;
+        memcpy(&bm->buckets[i].tag, pi->hashBlock.data, 8);
         bm->buckets[i].index = pi;
-        bm->buckets[i].occupied = true;
     }
     bm->size = bm->capacity - vacant;
     *arena_out = arena;

@@ -18,6 +18,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "bloom/merkle.h"
 #include "chain/chain.h"
@@ -575,7 +576,7 @@ static struct block_index *install_branch(struct rie_env *e,
                                           struct rie_branch *br)
 {
     for (int h = 0; h < br->n; h++)
-        block_map_insert(&e->ms.map_block_index, br->blocks[h].phashBlock,
+        test_block_map_insert(&e->ms.map_block_index, br->blocks[h].phashBlock,
                          &br->blocks[h]);
     active_chain_move_window_tip(&e->ms.chain_active, &br->blocks[br->n - 1]);
     return &br->blocks[br->n - 1];
@@ -811,7 +812,7 @@ int test_reducer_ingest_e2e(void)
                  * reducer must unwind L and apply W. */
                 e.ctx.active = &W;
                 for (int h = 1; h < W.n; h++)  /* h0 shared genesis already in */
-                    block_map_insert(&e.ms.map_block_index,
+                    test_block_map_insert(&e.ms.map_block_index,
                                      W.blocks[h].phashBlock, &W.blocks[h]);
                 /* Make W heavier than L at its tip. */
                 for (int h = 0; h < W.n; h++)

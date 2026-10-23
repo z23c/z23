@@ -1881,7 +1881,7 @@ engine/services/src/block_index_integrity.c:block_index_repair_heights_range:43
 engine/services/src/block_index_integrity.c:block_index_repair_pprev:44
 engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_from_cold_import:33
 engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_tip_from_finalized:33
-engine/services/src/block_index_loader_rebuild.c:load_block_index_from_projection:18
+engine/services/src/block_index_loader_rebuild.c:load_block_index_from_projection:17
 engine/services/src/block_index_loader_topup.c:block_index_node_db_topup_with:40
 engine/services/src/block_index_loader_topup.c:block_index_projection_topup_with:33
 engine/services/src/block_index_loader_topup.c:topup_row_cb:20
@@ -2264,7 +2264,7 @@ tests/harness/src/test_bip44.c:test_bip44:75
 tests/harness/src/test_blake2b_batch_parity.c:test_blake2b_batch_parity:22
 tests/harness/src/test_blake3_kat.c:test_blake3_kat:17
 tests/harness/src/test_blob_read_bounds.c:test_blob_read_bounds:24
-tests/harness/src/test_block_index_loader.c:test_block_index_loader:300
+tests/harness/src/test_block_index_loader.c:test_block_index_loader:299
 tests/harness/src/test_block_index_node_db_topup.c:test_block_index_node_db_topup:42
 tests/harness/src/test_block_index_projection.c:run_bound_dirty_delta:22
 tests/harness/src/test_block_index_rebuild.c:run_rebuild_n_headers:19
@@ -2319,7 +2319,7 @@ tests/harness/src/test_bundle_staleness.c:test_bundle_staleness:22
 tests/harness/src/test_byte_order_codec.c:test_byte_order_codec:22
 tests/harness/src/test_canary_sentinel_watch.c:test_canary_sentinel_watch:99
 tests/harness/src/test_catalog_completeness.c:test_catalog_completeness:42
-tests/harness/src/test_chacha20_isa_parity.c:test_chacha20_isa_parity:45
+tests/harness/src/test_chacha20_isa_parity.c:test_chacha20_isa_parity:37
 tests/harness/src/test_chain.c:test_chain:319
 tests/harness/src/test_chain_evidence_live_advance.c:test_durable_frontier_one_row_skew_is_not_hash_mismatch:18
 tests/harness/src/test_chain_evidence_live_advance.c:test_live_advance_clears_active_tip_hash_mismatch:16
@@ -3587,7 +3587,7 @@ tools/sim/chaos.c:write_failure_artifacts:18
 tools/sim/simnet_trace_query.c:main:20
 tools/sim/simperf.c:main:28
 tools/simd_bench.c:bench_chacha_aead_row:32
-tools/simd_bench.c:main:28
+tools/simd_bench.c:main:26
 tools/snapshot_from_coinskv.c:main:17
 tools/tor_provenance.c:run_selftest:19
 tools/verify_anchor_completeness.c:count_chainstate:16

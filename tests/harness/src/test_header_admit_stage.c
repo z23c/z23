@@ -11,6 +11,7 @@
  *   - replay across progress_store close/reopen: cursor + log persist */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "json/json.h"
 
 #include "chain/chain.h"
@@ -314,7 +315,7 @@ static int ha_deferred_context_case(void)
     msg.height = -1; msg.has_header = true; msg.header = candidate.header; msg.hash = invalid_hash;
     HA_CHECK("context: unknown-parent candidate queued", mailbox_header_admit_push(&msg));
     HA_CHECK("context: missing parent remains pending", header_admit_stage_step_once() == JOB_IDLE && header_admit_stage_cursor() == 29);
-    for (int h = 0; h < sc.n; h++) block_map_insert(&ms.map_block_index, &sc.hashes[h], &sc.blocks[h]);
+    for (int h = 0; h < sc.n; h++) test_block_map_insert(&ms.map_block_index, &sc.hashes[h], &sc.blocks[h]);
     active_chain_move_window_tip(&ms.chain_active, &sc.blocks[28]);
     ms.pindex_best_header = &sc.blocks[28];
     failures += ha_context_policy_controls(&ms, &sc.blocks[28], &candidate.header);

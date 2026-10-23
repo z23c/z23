@@ -2,6 +2,7 @@
  * Tests for snapshot sync service policy helpers. */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "models/database.h"
 #include "net/snapshot_sync_contract.h"
 #include "services/snapshot_manifest.h"
@@ -692,8 +693,8 @@ static int test_snapshot_sync_service_contains_tip_activation(void)
         snap.nHeight = 1;
         snap.pprev = &genesis;
 
-        block_map_insert(&ms.map_block_index, &h0, &genesis);
-        block_map_insert(&ms.map_block_index, &h1, &snap);
+        test_block_map_insert(&ms.map_block_index, &h0, &genesis);
+        test_block_map_insert(&ms.map_block_index, &h1, &snap);
         memcpy(svc.offered_block_hash, h1.data, 32);
         svc.offered_height = 1;
         svc.offered_peer_tip_height = 11;
@@ -762,10 +763,10 @@ static int test_snapshot_sync_service_contains_fallback_tip(void)
         too_high.nChainTx = 1;
         too_high.pprev = &indexed;
 
-        block_map_insert(&ms.map_block_index, &h0, &genesis);
-        block_map_insert(&ms.map_block_index, &h1, &indexed);
-        block_map_insert(&ms.map_block_index, &h2, &unindexed);
-        block_map_insert(&ms.map_block_index, &h3, &too_high);
+        test_block_map_insert(&ms.map_block_index, &h0, &genesis);
+        test_block_map_insert(&ms.map_block_index, &h1, &indexed);
+        test_block_map_insert(&ms.map_block_index, &h2, &unindexed);
+        test_block_map_insert(&ms.map_block_index, &h3, &too_high);
 
         memcpy(svc.offered_block_hash, missing.data, 32);
         svc.offered_height = 2000;

@@ -6,6 +6,7 @@
 #include "platform/time_compat.h"
 #include "platform/private_directory.h"
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "services/block_index_integrity.h"
 #include "services/chain_restore_boot_activation.h"
 #include "services/chain_restore_boot_snapshot.h"
@@ -356,11 +357,11 @@ static int test_execute_found_in_index(void) {
         /* Pre-insert a block_index */
         struct uint256 hash;
         uint256_set_hex(&hash, "0000abcdef1234567890");
-        struct block_index *existing = zcl_calloc(1, sizeof(struct block_index), "test_block_index");
+        struct block_index *existing = zcl_malloc_or_die(sizeof(struct block_index), "test_block_index");
         block_index_init(existing);
         existing->nHeight = 300000;
         existing->nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
-        block_map_insert(&ms.map_block_index, &hash, existing);
+        test_block_map_insert(&ms.map_block_index, &hash, existing);
         existing->hashBlock = hash;
         existing->phashBlock = &existing->hashBlock;
 

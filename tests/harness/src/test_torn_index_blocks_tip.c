@@ -32,6 +32,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "services/chain_evidence_authority_service.h"
 #include "validation/process_block.h"
@@ -75,7 +76,7 @@ static bool torn_fixture_init(struct torn_fixture *f)
         f->blocks[i].pprev = i ? &f->blocks[i - 1] : NULL;
         f->blocks[i].nStatus = BLOCK_VALID_TREE;
         arith_uint256_set_u64(&f->blocks[i].nChainWork, (uint64_t)i + 1);
-        block_map_insert(&f->bm, &f->hashes[i], &f->blocks[i]);
+        test_block_map_insert(&f->bm, &f->hashes[i], &f->blocks[i]);
         const struct block_index *canon =
             block_map_find(&f->bm, &f->hashes[i]);
         if (canon)
@@ -277,7 +278,7 @@ static int test_tip_is_best_work_predicate(void)
         main_blk[i].pprev = i ? &main_blk[i - 1] : NULL;
         main_blk[i].nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
         arith_uint256_set_u64(&main_blk[i].nChainWork, (uint64_t)(i + 1));
-        block_map_insert(&ms.map_block_index, &h[i], &main_blk[i]);
+        test_block_map_insert(&ms.map_block_index, &h[i], &main_blk[i]);
     }
     struct block_index *tip = &main_blk[2];
 
@@ -299,7 +300,7 @@ static int test_tip_is_best_work_predicate(void)
     torn_fork.pprev = NULL;                 /* TORN: ancestry unresolvable */
     torn_fork.nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
     arith_uint256_set_u64(&torn_fork.nChainWork, 99); /* > tip work (3) */
-    block_map_insert(&ms.map_block_index, &torn_hash, &torn_fork);
+    test_block_map_insert(&ms.map_block_index, &torn_hash, &torn_fork);
 
     /* Sanity: the ancestry really is unresolvable to tip height. */
     if (block_index_get_ancestor(&torn_fork, tip->nHeight) != NULL)
@@ -329,8 +330,8 @@ static int test_tip_is_best_work_predicate(void)
     fork_blk[1].pprev = &fork_blk[0];
     fork_blk[1].nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
     arith_uint256_set_u64(&fork_blk[1].nChainWork, 50); /* > tip work (3) */
-    block_map_insert(&ms.map_block_index, &fh[0], &fork_blk[0]);
-    block_map_insert(&ms.map_block_index, &fh[1], &fork_blk[1]);
+    test_block_map_insert(&ms.map_block_index, &fh[0], &fork_blk[0]);
+    test_block_map_insert(&ms.map_block_index, &fh[1], &fork_blk[1]);
 
     /* Sanity: the genuine fork's ancestry resolves to a real, non-tip
      * block at tip height. */

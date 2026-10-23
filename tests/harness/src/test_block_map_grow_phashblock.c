@@ -72,7 +72,7 @@ int test_block_map_grow_phashblock(void)
             ASSERT(uint256_eq(&copy, &hashes[i]));
         }
 
-        /* Lookups still work, keyed off the bucket's own .hash. */
+        /* Lookups still work, keyed off the node hashBlock. */
         for (int i = 0; i < N; i += 1000) {
             ASSERT(block_map_find(&cs.map_block_index, &hashes[i]) == nodes[i]);
             ASSERT(block_map_find(&cs.map_block_index,

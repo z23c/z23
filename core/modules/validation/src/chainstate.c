@@ -92,10 +92,11 @@ struct block_index *block_map_find(const struct block_map *m,
     struct block_index *result = NULL;
     for (size_t i = 0; i < m->capacity; i++) {
         size_t slot = (idx + i) & (m->capacity - 1);
-        if (!m->buckets[slot].occupied)
+        const struct block_map_entry *e = &m->buckets[slot];
+        if (!e->index)
             break;
-        if (uint256_eq(&m->buckets[slot].hash, hash)) {
-            result = m->buckets[slot].index;
+        if (e->tag == h && uint256_eq(&e->index->hashBlock, hash)) {
+            result = e->index;
             break;
         }
     }
@@ -103,21 +104,21 @@ struct block_index *block_map_find(const struct block_map *m,
     return result;
 }
 
-static bool block_map_insert_internal(struct block_map *m,
-                                       const struct uint256 *hash,
+/* Place one entry (tag = block_map_hash of its key). The key is
+ * index->hashBlock, so the duplicate test reads the resident node. */
+static bool block_map_insert_internal(struct block_map *m, uint64_t h,
                                        struct block_index *index)
 {
-    uint64_t h = block_map_hash(hash);
     size_t idx = h & (m->capacity - 1);
     for (size_t i = 0; i < m->capacity; i++) {
         size_t slot = (idx + i) & (m->capacity - 1);
-        if (!m->buckets[slot].occupied) {
-            m->buckets[slot].hash = *hash;
-            m->buckets[slot].index = index;
-            m->buckets[slot].occupied = true;
+        struct block_map_entry *e = &m->buckets[slot];
+        if (!e->index) {
+            e->tag = h;
+            e->index = index;
             return true;
         }
-        if (uint256_eq(&m->buckets[slot].hash, hash))
+        if (e->tag == h && uint256_eq(&e->index->hashBlock, &index->hashBlock))
             LOG_FAIL("chainstate", "block_map_insert_internal: duplicate hash in slot %zu", slot);
     }
     LOG_FAIL("chainstate", "block_map_insert_internal: hash table full (capacity=%zu)", m->capacity);
@@ -145,13 +146,13 @@ bool block_map_reserve(struct block_map *m, size_t expected_count)
     m->capacity = cap;
 
     for (size_t i = 0; i < old_cap; i++) {
-        if (old[i].occupied)
-            block_map_insert_internal(m, &old[i].hash, old[i].index);
+        if (old[i].index)
+            block_map_insert_internal(m, old[i].tag, old[i].index);
     }
     free(old);
     /* Option A: phashBlock points at per-node block_index.hashBlock
      * (never-freed), so reallocating the bucket array does not
-     * invalidate it. The bucket .hash keys are re-seeded by
+     * invalidate it. Bucket tags are carried over by
      * block_map_insert_internal above; no phashBlock repoint needed. */
     pthread_rwlock_unlock(&m->rwlock);
     return true;
@@ -171,8 +172,8 @@ static bool block_map_grow(struct block_map *m)
     m->capacity = new_cap;
 
     for (size_t i = 0; i < old_cap; i++) {
-        if (old[i].occupied)
-            block_map_insert_internal(m, &old[i].hash, old[i].index);
+        if (old[i].index)
+            block_map_insert_internal(m, old[i].tag, old[i].index);
     }
     free(old);
 
@@ -182,8 +183,8 @@ static bool block_map_grow(struct block_map *m)
      * no repoint loop is needed here. This removes the UAF: lock-free
      * readers (push_getheaders_from, syncsvc_build_locator_from_index,
      * block_index_get_ancestor) deref *walk->phashBlock against stable
-     * per-node storage that this free() never touches. Bucket .hash
-     * keys are re-seeded by block_map_insert_internal above. */
+     * per-node storage that this free() never touches. Bucket
+     * tags are carried over by block_map_insert_internal above. */
 
     return true;
 }
@@ -191,6 +192,10 @@ static bool block_map_grow(struct block_map *m)
 bool block_map_insert(struct block_map *m, const struct uint256 *hash,
                       struct block_index *index)
 {
+    if (!index)
+        LOG_FAIL("chainstate", "block_map_insert: NULL index");
+    if (!hash || !uint256_eq(hash, &index->hashBlock))
+        LOG_FAIL("chainstate", "block_map_insert: key differs from index->hashBlock");
     pthread_rwlock_wrlock(&m->rwlock);
     if (m->size * 4 >= m->capacity * 3) {
         if (!block_map_grow(m)) {
@@ -198,7 +203,7 @@ bool block_map_insert(struct block_map *m, const struct uint256 *hash,
             LOG_FAIL("chainstate", "block_map_insert: grow failed (size=%zu)", m->size);
         }
     }
-    if (!block_map_insert_internal(m, hash, index)) {
+    if (!block_map_insert_internal(m, block_map_hash(hash), index)) {
         pthread_rwlock_unlock(&m->rwlock);
         LOG_FAIL("chainstate", "block_map_insert: duplicate block hash (size=%zu)", m->size);
     }
@@ -219,8 +224,8 @@ bool block_map_next(const struct block_map *m, size_t *iter,
     pthread_rwlock_rdlock((pthread_rwlock_t *)&m->rwlock);
     while (*iter < m->capacity) {
         size_t i = (*iter)++;
-        if (m->buckets[i].occupied) {
-            if (hash_out) *hash_out = &m->buckets[i].hash;
+        if (m->buckets[i].index) {
+            if (hash_out) *hash_out = &m->buckets[i].index->hashBlock;
             if (index_out) *index_out = m->buckets[i].index;
             pthread_rwlock_unlock((pthread_rwlock_t *)&m->rwlock);
             return true;
@@ -267,7 +272,7 @@ bool block_map_snapshot_indices(const struct block_map *m,
 
     size_t count = 0;
     for (size_t i = 0; i < m->capacity; i++) {
-        if (!m->buckets[i].occupied)
+        if (!m->buckets[i].index)
             continue;
         if (count >= expected) {
             free(indices);

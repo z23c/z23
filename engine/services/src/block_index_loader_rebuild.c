@@ -361,10 +361,8 @@ struct zcl_result load_block_index_from_projection(struct main_state *ms,
     {
         size_t iter = 0;
         struct block_index *pi;
-        const struct uint256 *hash;
-        while (block_map_next(&ms->map_block_index, &iter, &hash, &pi)) {
-            if (pi && hash) {
-                pi->hashBlock = *hash;
+        while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
+            if (pi) {
                 pi->phashBlock = &pi->hashBlock;
             }
         }

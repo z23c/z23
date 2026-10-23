@@ -253,7 +253,7 @@ enum bil_flat_admit {
  * (rebuild-from-log) populated the map and then failed without clearing it,
  * and an uncapped probe over a full table with no duplicate never
  * terminates — the boot watchdog kills every retry and the node never
- * serves. CLAIMED writes the bucket (key, index, occupied, size++). */
+ * serves. CLAIMED writes the key into the node and the bucket (tag, index, size++). */
 static enum bil_flat_admit bil_flat_probe_claim(struct block_map *bm,
                                                 const uint8_t hash[32],
                                                 struct block_index *pindex)
@@ -262,14 +262,17 @@ static enum bil_flat_admit bil_flat_probe_claim(struct block_map *bm,
     memcpy(&h, hash, 8);
     size_t slot = h & (bm->capacity - 1);
     for (size_t probe = 0; probe < bm->capacity; probe++) {
-        if (!bm->buckets[slot].occupied) {
-            memcpy(bm->buckets[slot].hash.data, hash, 32);
+        if (!bm->buckets[slot].index) {
+            /* The key lives in the node: write it before the claim so the
+             * next probe that reaches this bucket can compare it. */
+            memcpy(pindex->hashBlock.data, hash, 32);
+            bm->buckets[slot].tag = h;
             bm->buckets[slot].index = pindex;
-            bm->buckets[slot].occupied = true;
             bm->size++;
             return BIL_FLAT_ADMIT_CLAIMED;
         }
-        if (uint256_eq(&bm->buckets[slot].hash,
+        if (bm->buckets[slot].tag == h &&
+            uint256_eq(&bm->buckets[slot].index->hashBlock,
                        (const struct uint256 *)hash))
             return BIL_FLAT_ADMIT_DUPLICATE;
         slot = (slot + 1) & (bm->capacity - 1);
@@ -278,7 +281,7 @@ static enum bil_flat_admit bil_flat_probe_claim(struct block_map *bm,
 }
 
 /* Copy one flat row into its arena block_index (Option A: phashBlock points
- * at per-node storage; the bucket keeps its own key copy). */
+ * at per-node storage; the bucket key is that per-node hashBlock). */
 static void bil_flat_fill_pindex(struct block_index *pindex,
                                  const struct block_index_flat *row)
 {
@@ -395,7 +398,7 @@ static void bil_flat_rollback(struct block_map *bm,
     size_t bytes = (size_t)count * sizeof(*arena);
     for (size_t slot = 0; slot < bm->capacity; slot++) {
         uintptr_t index = (uintptr_t)bm->buckets[slot].index;
-        if (bm->buckets[slot].occupied && index >= start &&
+        if (bm->buckets[slot].index && index >= start &&
             index - start < bytes) {
             bm->buckets[slot] = (struct block_map_entry){0};
             bm->size--;
@@ -728,10 +731,8 @@ struct zcl_result load_block_index(struct main_state *ms,
     {
         size_t iter = 0;
         struct block_index *pi;
-        const struct uint256 *hash;
-        while (block_map_next(&ms->map_block_index, &iter, &hash, &pi)) {
-            if (pi && hash) {
-                pi->hashBlock = *hash;
+        while (block_map_next(&ms->map_block_index, &iter, NULL, &pi)) {
+            if (pi) {
                 pi->phashBlock = &pi->hashBlock;
             }
         }

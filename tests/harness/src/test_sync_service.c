@@ -3,6 +3,7 @@
 
 #include "platform/time_compat.h"
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "net/net.h"
 #include "net/header_corroboration.h"
 #include "controllers/diagnostics_controller.h"
@@ -1882,11 +1883,11 @@ static int test_sync_service_builds_alt_recovery_plan(void)
         alt2.phashBlock = &h2; alt2.nHeight = 2; alt2.pprev = &b1;
         alt3.phashBlock = &h3; alt3.nHeight = 3; alt3.pprev = &alt2;
         fork2.phashBlock = &h4; fork2.nHeight = 2; fork2.pprev = &g;
-        block_map_insert(&ms.map_block_index, &hg, &g);
-        block_map_insert(&ms.map_block_index, &h1, &b1);
-        block_map_insert(&ms.map_block_index, &h2, &alt2);
-        block_map_insert(&ms.map_block_index, &h3, &alt3);
-        block_map_insert(&ms.map_block_index, &h4, &fork2);
+        test_block_map_insert(&ms.map_block_index, &hg, &g);
+        test_block_map_insert(&ms.map_block_index, &h1, &b1);
+        test_block_map_insert(&ms.map_block_index, &h2, &alt2);
+        test_block_map_insert(&ms.map_block_index, &h3, &alt3);
+        test_block_map_insert(&ms.map_block_index, &h4, &fork2);
         ASSERT(active_chain_move_window_tip(&ms.chain_active, &b1));
 
         node.state = PEER_SYNCING_BLOCKS;
@@ -1940,7 +1941,7 @@ static int test_sync_service_recovery_ignores_map_order(void)
                 entries[i].phashBlock = &hashes[i];
                 entries[i].nHeight = scenario == 2 ? 101 : 102;
                 entries[i].pprev = scenario == 1 ? &entries[ENTRY_COUNT - 1] : &fork;
-                ASSERT(block_map_insert(&ms.map_block_index, &hashes[i], &entries[i]));
+                ASSERT(test_block_map_insert(&ms.map_block_index, &hashes[i], &entries[i]));
             }
             struct block_index *needed = &entries[ENTRY_COUNT - 1];
             needed->nHeight = scenario == 2 ? 102 : 101;
@@ -2012,8 +2013,8 @@ static int test_sync_service_at_tip_recovery_skips_scan(void)
         tip.nHeight = 100;
         tip.pprev = &parent;
         ASSERT(active_chain_move_window_tip(&ms.chain_active, &tip));
-        ASSERT(block_map_insert(&ms.map_block_index, &parent_hash, &parent));
-        ASSERT(block_map_insert(&ms.map_block_index, &tip_hash, &tip));
+        ASSERT(test_block_map_insert(&ms.map_block_index, &parent_hash, &parent));
+        ASSERT(test_block_map_insert(&ms.map_block_index, &tip_hash, &tip));
         ms.pindex_best_header = &tip; /* tracking exists; nothing above tip */
 
         node.state = PEER_SYNCING_BLOCKS;
@@ -2070,8 +2071,8 @@ static int test_sync_service_recovery_fires_for_real_deficit(void)
         ahead.phashBlock = &ahead_hash; ahead.nHeight = 101;
         ahead.pprev = &tip;
         ASSERT(active_chain_move_window_tip(&ms.chain_active, &tip));
-        ASSERT(block_map_insert(&ms.map_block_index, &tip_hash, &tip));
-        ASSERT(block_map_insert(&ms.map_block_index, &ahead_hash, &ahead));
+        ASSERT(test_block_map_insert(&ms.map_block_index, &tip_hash, &tip));
+        ASSERT(test_block_map_insert(&ms.map_block_index, &ahead_hash, &ahead));
         ms.pindex_best_header = &ahead; /* a known header above the tip */
 
         node.state = PEER_SYNCING_BLOCKS;
@@ -2125,7 +2126,7 @@ static int test_sync_service_at_tip_recovery_fires_under_corroboration_hold(void
             main[i].phashBlock = &hashes[i];
             main[i].nHeight = i;
             main[i].pprev = i ? &main[i - 1] : NULL;
-            ASSERT(block_map_insert(&ms.map_block_index, &hashes[i],
+            ASSERT(test_block_map_insert(&ms.map_block_index, &hashes[i],
                                     &main[i]));
         }
         for (int i = 0; i < FORK_COUNT; i++) {
@@ -2135,7 +2136,7 @@ static int test_sync_service_at_tip_recovery_fires_under_corroboration_hold(void
             fork[i].phashBlock = &hashes[MAIN + i];
             fork[i].nHeight = FORK_BASE + i;
             fork[i].pprev = i ? &fork[i - 1] : &main[FORK_BASE - 1];
-            ASSERT(block_map_insert(&ms.map_block_index,
+            ASSERT(test_block_map_insert(&ms.map_block_index,
                                     &hashes[MAIN + i], &fork[i]));
         }
         ASSERT(active_chain_move_window_tip(&ms.chain_active,
@@ -2200,9 +2201,9 @@ static int test_sync_service_requests_reset_when_no_alts(void)
         b1.phashBlock = &h1; b1.nHeight = 1; b1.pprev = &g;
         bad2.phashBlock = &h2; bad2.nHeight = 2; bad2.pprev = &b1;
         bad2.nStatus = BLOCK_HAVE_DATA | BLOCK_FAILED_VALID;
-        block_map_insert(&ms.map_block_index, &hg, &g);
-        block_map_insert(&ms.map_block_index, &h1, &b1);
-        block_map_insert(&ms.map_block_index, &h2, &bad2);
+        test_block_map_insert(&ms.map_block_index, &hg, &g);
+        test_block_map_insert(&ms.map_block_index, &h1, &b1);
+        test_block_map_insert(&ms.map_block_index, &h2, &bad2);
         ASSERT(active_chain_move_window_tip(&ms.chain_active, &b1));
 
         node.state = PEER_SYNCING_BLOCKS;
@@ -2291,9 +2292,9 @@ static int test_sync_service_applies_reset_recovery(void)
         b1.phashBlock = &h1; b1.nHeight = 1; b1.pprev = &g;
         stuck2.phashBlock = &h2; stuck2.nHeight = 2; stuck2.pprev = &b1;
         stuck2.nStatus = BLOCK_HAVE_DATA | BLOCK_FAILED_VALID;
-        block_map_insert(&ms.map_block_index, &hg, &g);
-        block_map_insert(&ms.map_block_index, &h1, &b1);
-        block_map_insert(&ms.map_block_index, &h2, &stuck2);
+        test_block_map_insert(&ms.map_block_index, &hg, &g);
+        test_block_map_insert(&ms.map_block_index, &h1, &b1);
+        test_block_map_insert(&ms.map_block_index, &h2, &stuck2);
 
         recovery.should_reset_tip_next = true;
         recovery.next_height = 2;

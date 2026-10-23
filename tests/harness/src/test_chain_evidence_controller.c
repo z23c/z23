@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "services/chain_evidence_authority_service.h"
 #include "coins/coins_view.h"
@@ -44,7 +45,7 @@ static bool auth_fixture_init(struct auth_fixture *f)
         f->blocks[i].pprev = i ? &f->blocks[i - 1] : NULL;
         f->blocks[i].nStatus = BLOCK_VALID_TREE;
         arith_uint256_set_u64(&f->blocks[i].nChainWork, (uint64_t)i + 1);
-        block_map_insert(&f->bm, &f->hashes[i], &f->blocks[i]);
+        test_block_map_insert(&f->bm, &f->hashes[i], &f->blocks[i]);
         const struct block_index *canon =
             block_map_find(&f->bm, &f->hashes[i]);
         if (canon)

@@ -24,6 +24,7 @@
  * height-not-found contract). */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "chain/chain.h"
 #include "validation/chainstate.h"
@@ -111,7 +112,7 @@ int test_process_block_revalidate(void)
         struct uint256 *hp = malloc(sizeof(struct uint256));
         *hp = h;
         pi->phashBlock = hp;
-        block_map_insert(&ms.map_block_index, &h, pi);
+        test_block_map_insert(&ms.map_block_index, &h, pi);
 
         PBR_CHECK("pindex without FAILED_VALID → HEIGHT_NOT_FOUND",
                   process_block_revalidate(100, &ms, &dummy_hash) ==

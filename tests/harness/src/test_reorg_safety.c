@@ -30,6 +30,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "validation/connect_block.h"
 #include "validation/update_coins.h"
 #include "coins/coins_view.h"
@@ -310,9 +311,9 @@ int test_reorg_safety(void)
         block_map_init(&bm);
         active_chain_init(&chain);
 
-        block_map_insert(&bm, &a_hashes[0], &a_idx[0]);
+        test_block_map_insert(&bm, &a_hashes[0], &a_idx[0]);
         for (int h = 1; h <= CHAIN_LEN; h++)
-            block_map_insert(&bm, &b_hashes[h], &b_idx[h]);
+            test_block_map_insert(&bm, &b_hashes[h], &b_idx[h]);
 
         active_chain_move_window_tip(&chain, &b_idx[CHAIN_LEN]);
         cache.hash_block = *b_idx[CHAIN_LEN].phashBlock;
@@ -467,8 +468,8 @@ int test_reorg_safety(void)
         block_map_init(&bm);
         active_chain_init(&chain);
 
-        block_map_insert(&bm, &a_hashes[0], &a_idx[0]);
-        block_map_insert(&bm, &a_hashes[CHAIN_LEN], &a_idx[CHAIN_LEN]);
+        test_block_map_insert(&bm, &a_hashes[0], &a_idx[0]);
+        test_block_map_insert(&bm, &a_hashes[CHAIN_LEN], &a_idx[CHAIN_LEN]);
         active_chain_move_window_tip(&chain, &a_idx[CHAIN_LEN]);
 
         struct chain_state_repository csr;

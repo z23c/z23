@@ -11,6 +11,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "validation/process_block.h"
 #include "validation/chainstate.h"
 #include "chain/chain.h"
@@ -42,7 +43,7 @@ static void p146_fixture_init(struct p146_fixture *fx)
         fx->blocks[h].pprev = (h == 0) ? NULL : &fx->blocks[h - 1];
         /* Unique per-height hash: 0xA0..0xA4 filled. */
         memset(fx->hashes[h].data, 0xA0 + h, sizeof(fx->hashes[h].data));
-        block_map_insert(&fx->map, &fx->hashes[h], &fx->blocks[h]);
+        test_block_map_insert(&fx->map, &fx->hashes[h], &fx->blocks[h]);
         /* Option A: phashBlock references stable per-node hashBlock
          * storage (never relocated by a bucket-array grow). */
         fx->blocks[h].hashBlock = fx->hashes[h];

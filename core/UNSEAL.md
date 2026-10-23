@@ -272,3 +272,7 @@ later lane flips it HARD.
 - 2026-10-23T15:04:26Z — REASON: BLS12-381 final exponentiation: Granger-Scott cyclotomic squaring inside exp-by-x (behaviour-preserving, frozen-oracle parity); lead unseal under owner grant 2026-10-19
   old ROOT: 8a374a230643da484419e06ad703a6c429c7e971b812d01be0b87432a220b78e
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-23T16:20:03Z — REASON: block_map buckets drop the duplicated 32-byte key (compare against index->hashBlock): about -320 MB node memory, same slots, same iteration order, no consensus logic change
+  old ROOT: 6c26eea8b8ada9f6784757204ac27576890e7b35ea6f93245c47c238455895bf
+  by: owner unseal ritual (make core-unseal)

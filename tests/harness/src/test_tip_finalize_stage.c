@@ -2,6 +2,7 @@
  * Unit tests for Wave S S-9 tip_finalize stage. */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "chain/chain.h"
 #include "json/json.h"
@@ -574,7 +575,7 @@ static int tf_setup(const char *tag, int log_rows,
     main_state_init(ms);
     if (!synth_chain_tf_build(sc, log_rows + 1)) return 2;
     for (int i = 0; i <= log_rows; i++) {
-        if (!block_map_insert(&ms->map_block_index, sc->blocks[i].phashBlock,
+        if (!test_block_map_insert(&ms->map_block_index, sc->blocks[i].phashBlock,
                               &sc->blocks[i]))
             return 2;
     }
@@ -688,7 +689,7 @@ static int fold_restart_and_check(struct main_state *ms,
 static bool fold_admit_block(struct main_state *ms, struct synth_chain_tf *sc,
                              int nb)
 {
-    return block_map_insert(&ms->map_block_index, sc->blocks[nb].phashBlock,
+    return test_block_map_insert(&ms->map_block_index, sc->blocks[nb].phashBlock,
                             &sc->blocks[nb]) &&
            active_chain_move_window_tip(&ms->chain_active, &sc->blocks[nb]) &&
            seed_utxo_apply(progress_store_db(), nb, -1) &&
@@ -711,7 +712,7 @@ static int case_rung_install_fold_advances_hstar(void)
     /* The install: chain known through BASE+1, folded through BASE, anchor at
      * BASE, then the first transition BASE->BASE+1 finalized. */
     for (int i = 0; ok && i <= BASE + 1; i++)
-        ok = block_map_insert(&ms.map_block_index, sc.blocks[i].phashBlock,
+        ok = test_block_map_insert(&ms.map_block_index, sc.blocks[i].phashBlock,
                               &sc.blocks[i]);
     ok = ok && active_chain_move_window_tip(&ms.chain_active,
                                             &sc.blocks[BASE + 1]);
@@ -841,7 +842,7 @@ int test_tip_finalize_stage(void)
         main_state_init(&ms);
         ok_setup = ok_setup && synth_chain_tf_build(&sc, 6);
         for (int i = 0; ok_setup && i <= 5; i++)
-            ok_setup = block_map_insert(&ms.map_block_index,
+            ok_setup = test_block_map_insert(&ms.map_block_index,
                                         sc.blocks[i].phashBlock,
                                         &sc.blocks[i]);
         ok_setup = ok_setup &&
@@ -1144,7 +1145,7 @@ int test_tip_finalize_stage(void)
         /* Block 4 exists in the synth chain but has NOT "arrived" yet —
          * keep it out of the map so the most-work candidate is the tip. */
         for (int i = 0; ok_setup && i <= 3; i++)
-            ok_setup = block_map_insert(&ms.map_block_index,
+            ok_setup = test_block_map_insert(&ms.map_block_index,
                                         sc.blocks[i].phashBlock,
                                         &sc.blocks[i]);
         ok_setup = ok_setup &&
@@ -1172,7 +1173,7 @@ int test_tip_finalize_stage(void)
                  tip_finalize_stage_step_once() == JOB_IDLE);
 
         /* (b) Successor arrives: map + utxo witness, ONE step publishes it. */
-        ok_setup = block_map_insert(&ms.map_block_index,
+        ok_setup = test_block_map_insert(&ms.map_block_index,
                                     sc.blocks[4].phashBlock, &sc.blocks[4]);
         ok_setup = ok_setup && seed_utxo_apply(progress_store_db(), 4, -1);
         ok_setup = ok_setup &&
@@ -1291,7 +1292,7 @@ int test_tip_finalize_stage(void)
         main_state_init(&ms);
         ok_setup = ok_setup && synth_chain_tf_build(&sc, 5);
         for (int i = 0; ok_setup && i <= 4; i++)
-            ok_setup = block_map_insert(&ms.map_block_index,
+            ok_setup = test_block_map_insert(&ms.map_block_index,
                                         sc.blocks[i].phashBlock,
                                         &sc.blocks[i]);
         ok_setup = ok_setup &&
@@ -1416,7 +1417,7 @@ int test_tip_finalize_stage(void)
         /* Blocks 0..3 are the good, pprev-linked chain; block 4 (severed) lives
          * in the map as the ONLY candidate for the height-4 lookahead. */
         for (int i = 0; ok_setup && i <= 4; i++)
-            ok_setup = block_map_insert(&ms.map_block_index,
+            ok_setup = test_block_map_insert(&ms.map_block_index,
                                         sc.blocks[i].phashBlock,
                                         &sc.blocks[i]);
         ok_setup = ok_setup &&
@@ -1497,7 +1498,7 @@ int test_tip_finalize_stage(void)
         main_state_init(&ms);
         ok_setup = ok_setup && synth_chain_tf_build(&sc, 4);
         for (int i = 0; ok_setup && i <= 3; i++)
-            ok_setup = block_map_insert(&ms.map_block_index,
+            ok_setup = test_block_map_insert(&ms.map_block_index,
                                         sc.blocks[i].phashBlock,
                                         &sc.blocks[i]);
         ok_setup = ok_setup &&
@@ -2146,7 +2147,7 @@ int test_tip_finalize_stage(void)
          * arrived yet (kept out of the map until the second phase). */
         ok_setup = ok_setup && synth_chain_tf_build(&sc, 5);
         for (int i = 0; ok_setup && i <= 3; i++)
-            ok_setup = block_map_insert(&ms.map_block_index,
+            ok_setup = test_block_map_insert(&ms.map_block_index,
                                         sc.blocks[i].phashBlock,
                                         &sc.blocks[i]);
         ok_setup = ok_setup &&
@@ -2200,7 +2201,7 @@ int test_tip_finalize_stage(void)
          * cursor it publishes on the FIRST step — no late block. Under the old
          * H+1 stamp the cursor would already be 4 and this transition skipped,
          * so block 4 would wait for block 5. */
-        ok_setup = block_map_insert(&ms.map_block_index,
+        ok_setup = test_block_map_insert(&ms.map_block_index,
                                     sc.blocks[4].phashBlock, &sc.blocks[4]);
         ok_setup = ok_setup && seed_utxo_apply(progress_store_db(), 5, -1);
         TF_CHECK("seed_no_late_block: successor arrival setup", ok_setup);
@@ -2233,7 +2234,7 @@ int test_tip_finalize_stage(void)
         main_state_init(&ms);
         ok_setup = ok_setup && synth_chain_tf_build(&sc, 5);
         for (int i = 0; ok_setup && i <= 3; i++)
-            ok_setup = block_map_insert(&ms.map_block_index,
+            ok_setup = test_block_map_insert(&ms.map_block_index,
                                         sc.blocks[i].phashBlock,
                                         &sc.blocks[i]);
         ok_setup = ok_setup &&
@@ -2278,7 +2279,7 @@ int test_tip_finalize_stage(void)
         /* The first live block H+1 (=4) arrives: index entry + its OWN
          * apply verdict row + cursor → 5 (exactly what the live reducer
          * writes). The stage must publish it on the FIRST step. */
-        ok_setup = block_map_insert(&ms.map_block_index,
+        ok_setup = test_block_map_insert(&ms.map_block_index,
                                     sc.blocks[4].phashBlock, &sc.blocks[4]);
         /* added-spent must equal the counter's count-after(5)==5: the seed
          * anchor row at 3 contributes (0,0), so this live row carries the

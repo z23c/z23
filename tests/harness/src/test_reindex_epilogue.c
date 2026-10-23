@@ -15,6 +15,7 @@
  * coins_applied as the precondition tear, then assert the post-state. */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "chain/chain.h"
 #include "coins/utxo_commitment.h"
@@ -75,7 +76,7 @@ static bool re_build_chain(struct re_chain *sc, struct main_state *ms, int tip_h
     sc->tip.nBits = 0x1f07ffff;
     sc->tip.nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
     arith_uint256_set_u64(&sc->tip.nChainWork, (uint64_t)tip_h + 1);
-    if (!block_map_insert(&ms->map_block_index, sc->tip.phashBlock, &sc->tip))
+    if (!test_block_map_insert(&ms->map_block_index, sc->tip.phashBlock, &sc->tip))
         return false;
     return active_chain_install_tip_slot(&ms->chain_active, &sc->tip);
 }

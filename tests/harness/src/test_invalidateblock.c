@@ -21,6 +21,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "chain/chain.h"
 #include "core/arith_uint256.h"
@@ -96,7 +97,7 @@ static struct block_index *mk_idx(struct main_state *ms, int height,
     bi->nTx = 1;
     bi->nChainTx = prev ? prev->nChainTx + 1 : 1;
     arith_uint256_set_u64(&bi->nChainWork, work);
-    block_map_insert(&ms->map_block_index, hp, bi);
+    test_block_map_insert(&ms->map_block_index, hp, bi);
     return bi;
 }
 

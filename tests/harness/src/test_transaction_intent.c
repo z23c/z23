@@ -2,6 +2,7 @@
  * Durable intent idempotency, expiry, raw-tx recovery, and ciphertext proof. */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "controllers/wallet_helpers.h"
 #include "controllers/sync_controller.h"
@@ -546,7 +547,7 @@ static int ti_validation_cases(void)
             hashes[i].data[0] = (uint8_t)(i + 1);
             blocks[i].nHeight = i;
             blocks[i].pprev = i > 0 ? &blocks[i - 1] : NULL;
-            built = built && block_map_insert(&ms.map_block_index,
+            built = built && test_block_map_insert(&ms.map_block_index,
                                                &hashes[i], &blocks[i]);
         }
         built = built && active_chain_move_window_tip(&ms.chain_active,
@@ -567,7 +568,7 @@ static int ti_validation_cases(void)
         fork_hash.data[0] = 0xf2;
         fork.nHeight = 2;
         fork.pprev = &blocks[1];
-        ASSERT(block_map_insert(&ms.map_block_index, &fork_hash, &fork));
+        ASSERT(test_block_map_insert(&ms.map_block_index, &fork_hash, &fork));
         ASSERT(!vault_intent_chain_confirmation(&ms, fork_hash.data,
                                                  &height, &confirmations));
         main_state_free(&ms);
@@ -667,7 +668,7 @@ static int ti_validation_cases(void)
                 hashes[i] = body_hash;
             blocks[i].nHeight = i;
             blocks[i].pprev = i > 0 ? &blocks[i - 1] : NULL;
-            built = built && block_map_insert(&ms.map_block_index,
+            built = built && test_block_map_insert(&ms.map_block_index,
                                                &hashes[i], &blocks[i]);
         }
         blocks[2].nFile = pos.nFile;

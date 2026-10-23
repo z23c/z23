@@ -9,6 +9,7 @@
  */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "json/json.h"
 
 #include "services/block_index_integrity.h"
@@ -496,7 +497,7 @@ static int t_height_repair(void)
         /* Scramble heights: give wrong values */
         blocks[i].nHeight = (i * 37) % 100;
         blocks[i].nBits = 0x2007ffff;  /* valid difficulty for GetBlockProof */
-        block_map_insert(&ms.map_block_index, &hashes[i], &blocks[i]);
+        test_block_map_insert(&ms.map_block_index, &hashes[i], &blocks[i]);
     }
 
     /* The root must be the REAL genesis (by hash): repair only anchors
@@ -576,7 +577,7 @@ static int t_height_repair_cycle(void)
         blocks[i].pprev = (i > 0) ? &blocks[i - 1] : NULL;
         blocks[i].nHeight = i * 5; /* wrong heights */
         blocks[i].nBits = 0x2007ffff;
-        block_map_insert(&ms.map_block_index, &hashes[i], &blocks[i]);
+        test_block_map_insert(&ms.map_block_index, &hashes[i], &blocks[i]);
     }
 
     /* Create cycle: block[4]->block[3]->block[2]->block[1]->block[4] */
@@ -611,7 +612,7 @@ static int t_height_repair_single(void)
     genesis.pprev = NULL;
     genesis.nHeight = 99; /* wrong */
     genesis.nBits = 0x2007ffff;
-    block_map_insert(&ms.map_block_index, &hash, &genesis);
+    test_block_map_insert(&ms.map_block_index, &hash, &genesis);
 
     /* A parentless NON-genesis entry must keep its stored height: it is
      * a detached root, not genesis (a positional-only genesis test can
@@ -625,7 +626,7 @@ static int t_height_repair_single(void)
     stray.pprev = NULL;
     stray.nHeight = 1234;
     stray.nBits = 0x2007ffff;
-    block_map_insert(&ms.map_block_index, &stray_hash, &stray);
+    test_block_map_insert(&ms.map_block_index, &stray_hash, &stray);
 
     int repaired = block_index_repair_heights(&ms);
 
@@ -673,11 +674,11 @@ static int t_height_repair_detached_subtree(void)
     h4.phashBlock = &h4h; h4.pprev = &h3; h4.nHeight = 4;
     h4.nBits = 0x2007ffff;
 
-    block_map_insert(&ms.map_block_index, &gh, &g);
-    block_map_insert(&ms.map_block_index, &h1h, &h1);
-    block_map_insert(&ms.map_block_index, &h2h, &h2);
-    block_map_insert(&ms.map_block_index, &h3h, &h3);
-    block_map_insert(&ms.map_block_index, &h4h, &h4);
+    test_block_map_insert(&ms.map_block_index, &gh, &g);
+    test_block_map_insert(&ms.map_block_index, &h1h, &h1);
+    test_block_map_insert(&ms.map_block_index, &h2h, &h2);
+    test_block_map_insert(&ms.map_block_index, &h3h, &h3);
+    test_block_map_insert(&ms.map_block_index, &h4h, &h4);
 
     (void)block_index_repair_heights(&ms);
     BII_RUN("bii: detached subtree keeps canonical descendant labels",
@@ -746,7 +747,7 @@ static int t_pprev_repair_cursor_skip(void)
         blocks[i].nStatus = BLOCK_HAVE_DATA;  /* would be selected but for the cursor */
         blocks[i].nFile = 0;
         blocks[i].nDataPos = 8;
-        block_map_insert(&ms.map_block_index, &hashes[i], &blocks[i]);
+        test_block_map_insert(&ms.map_block_index, &hashes[i], &blocks[i]);
     }
 
     /* Cursor at the tip (min_height = N-1): every block is already covered. */
@@ -779,7 +780,7 @@ static void bcs_build_chain(struct main_state *ms, struct block_index *blocks,
         blocks[i].nBits = 0x2007ffff;
         blocks[i].nTx = 1;
         blocks[i].nChainTx = (unsigned)(i + 1);
-        block_map_insert(&ms->map_block_index, &hashes[i], &blocks[i]);
+        test_block_map_insert(&ms->map_block_index, &hashes[i], &blocks[i]);
     }
     hashes[0] = chain_params_get()->consensus.hashGenesisBlock;
 }

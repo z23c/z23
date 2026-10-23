@@ -2,6 +2,7 @@
  * Validation pipeline tests: check_transaction, check_block, consensus rules. */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 #include "validation/check_transaction.h"
 #include "validation/sigops.h"
 #include "validation/contextual_check_tx.h"
@@ -1741,8 +1742,8 @@ int test_validation(void)
         bi1->nHeight = 100;
         bi2->nHeight = 200;
 
-        bool ok = block_map_insert(&m, &h1, bi1);
-        ok = ok && block_map_insert(&m, &h2, bi2);
+        bool ok = test_block_map_insert(&m, &h1, bi1);
+        ok = ok && test_block_map_insert(&m, &h2, bi2);
         ok = ok && (block_map_count(&m) == 2);
         ok = ok && (block_map_find(&m, &h1) == bi1);
         ok = ok && (block_map_find(&m, &h2) == bi2);
@@ -1764,8 +1765,8 @@ int test_validation(void)
         struct block_index *bi1 = zcl_calloc(1, sizeof(struct block_index), "test_block_index");
         struct block_index *bi2 = zcl_calloc(1, sizeof(struct block_index), "test_block_index");
 
-        block_map_insert(&m, &h1, bi1);
-        block_map_insert(&m, &h2, bi2);
+        test_block_map_insert(&m, &h1, bi1);
+        test_block_map_insert(&m, &h2, bi2);
 
         size_t iter = 0;
         const struct uint256 *hash_out;
@@ -1792,8 +1793,8 @@ int test_validation(void)
             1, sizeof(struct block_index), "test_block_index");
         struct block_index *bi2 = zcl_calloc(
             1, sizeof(struct block_index), "test_block_index");
-        bool ok = bi1 && bi2 && block_map_insert(&m, &h1, bi1) &&
-                  block_map_insert(&m, &h2, bi2);
+        bool ok = bi1 && bi2 && test_block_map_insert(&m, &h1, bi1) &&
+                  test_block_map_insert(&m, &h2, bi2);
 
         struct block_index **snapshot = NULL;
         size_t snapshot_count = 0;

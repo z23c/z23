@@ -27,6 +27,7 @@
  * (the closest existing reducer fixture). */
 
 #include "test/test_core.h"
+#include "test/test_block_map.h"
 
 #include "bloom/merkle.h"
 #include "chain/chain.h"
@@ -633,7 +634,7 @@ int test_coins_applied_frontier(void)
               * the old applied height C-1. That absence must drive the same
               * inverse-delta path as a same-height competing winner. */
             CAF_CHECK("short disconnect: old tip is hash-addressable",
-                      block_map_insert(&ms.map_block_index,
+                      test_block_map_insert(&ms.map_block_index,
                                        L.blocks[L.n - 1].phashBlock,
                                        &L.blocks[L.n - 1]));
             L.blocks[L.n - 1].nStatus |= BLOCK_FAILED_VALID;
