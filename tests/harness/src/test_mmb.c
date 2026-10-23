@@ -5,6 +5,9 @@
 #include "chain/mmb.h"
 #include "models/mmb_leaf_store.h"
 #include "crypto/sha3.h"
+#include "storage/coins_kv.h"
+#include "storage/progress_store.h"
+#include "test/mmb_chain_fixture.h"
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -247,6 +250,76 @@ static int test_mmb_leaf_store_append_extends_mapped_file(void)
 
         mmb_leaf_store_close(&store);
         unlink(path);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* ── Incremental leaf store ───────────────────────────────── */
+
+static bool mmb_open_fresh_store(struct mmb_leaf_store *s, const char *dir,
+                                 const char *name)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s", dir, name);
+    unlink(path);
+    return mmb_leaf_store_open(s, path);
+}
+
+static int test_mmb_leaf_store_extend_equals_rebuild(void)
+{
+    int failures = 0;
+    TEST("mmb leaf store: extend N->N+K equals full rebuild byte for byte") {
+        char dir[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "mmb_extend", "dir");
+        ASSERT(progress_store_open(dir));
+        /* Boundary 100 has a utxo_root row, boundary 200 has none (zero
+         * sentinel); the extension spans both. */
+        uint8_t root[32];
+        memset(root, 0xa7, sizeof(root));
+        ASSERT(coins_kv_boundary_root_set(progress_store_db(), 100, root));
+
+        struct mmb_chain_fixture fx;
+        ASSERT(mmb_chain_fixture_init(&fx, 250));
+        struct mmb_leaf_store full, part;
+        ASSERT(mmb_open_fresh_store(&full, dir, "full.bin"));
+        ASSERT(mmb_open_fresh_store(&part, dir, "part.bin"));
+        ASSERT(mmb_leaf_store_rebuild(&full, &fx.chain) == 250);
+
+        /* Warm prefix of 90 leaves, then extend across both boundaries. */
+        for (int h = 0; h < 90; h++) {
+            uint8_t hash[32];
+            ASSERT(mmb_leaf_store_hash_at(&fx.chain, h, hash));
+            ASSERT(mmb_leaf_store_append(&part, hash));
+        }
+        ASSERT(mmb_leaf_store_extend(&part, &fx.chain, 90) == 160);
+        ASSERT(part.num_leaves == 250 && full.num_leaves == 250);
+        ASSERT(memcmp(mmb_leaf_store_get(&part, 0),
+                      mmb_leaf_store_get(&full, 0), 250u * 32u) == 0);
+
+        /* The stamped root is really in the boundary leaf. */
+        uint8_t with_root[32];
+        ASSERT(mmb_leaf_store_hash_at(&fx.chain, 100, with_root));
+        ASSERT(memcmp(with_root, mmb_leaf_store_get(&part, 100), 32) == 0);
+        struct mmb_leaf zl;
+        mmb_leaf_from_block(&zl, fx.bi[100].phashBlock->data, 100,
+                            fx.bi[100].nTime, fx.bi[100].nBits,
+                            fx.bi[100].hashFinalSaplingRoot.data,
+                            (const uint8_t *)fx.bi[100].nChainWork.pn,
+                            (const uint8_t[32]){0});
+        uint8_t zero_root_hash[32];
+        mmb_hash_leaf(&zl, zero_root_hash);
+        ASSERT(memcmp(with_root, zero_root_hash, 32) != 0);
+
+        /* Extending past the tip or from a negative height adds nothing. */
+        ASSERT(mmb_leaf_store_extend(&part, &fx.chain, 250) == 0);
+        ASSERT(mmb_leaf_store_extend(&part, &fx.chain, -1) == 0);
+
+        mmb_leaf_store_close(&part);
+        mmb_leaf_store_close(&full);
+        mmb_chain_fixture_free(&fx);
+        progress_store_close();
+        test_cleanup_tmpdir(dir);
         PASS();
     } _test_next:;
     return failures;
@@ -796,6 +869,7 @@ int test_mmb(void)
     failures += test_mmb_deterministic();
     failures += test_mmb_serialize_roundtrip();
     failures += test_mmb_leaf_store_append_extends_mapped_file();
+    failures += test_mmb_leaf_store_extend_equals_rebuild();
 
     /* Rich leaf */
     failures += test_mmb_leaf_deterministic();

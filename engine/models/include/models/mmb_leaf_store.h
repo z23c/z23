@@ -73,4 +73,14 @@ const uint8_t (*mmb_leaf_store_all(const struct mmb_leaf_store *store))[32];
 uint64_t mmb_leaf_store_rebuild(struct mmb_leaf_store *store,
                                 const void *chain_active);
 
+/* Leaf hash for one active-chain height, the single construction shared by
+ * rebuild and extend. False when the height has no block index or hash. */
+bool mmb_leaf_store_hash_at(const void *chain_active, int height,
+                            uint8_t out[32]);
+
+/* Append leaves for heights [from_height, tip] to a store whose existing
+ * content is a valid prefix. Returns the number of leaves appended. */
+uint64_t mmb_leaf_store_extend(struct mmb_leaf_store *store,
+                               const void *chain_active, int from_height);
+
 #endif

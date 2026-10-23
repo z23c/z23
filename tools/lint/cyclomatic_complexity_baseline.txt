@@ -1709,7 +1709,6 @@ engine/models/src/mesh_capability_grant.c:capability_immutable_equal:19
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_complete:16
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_insert:16
 engine/models/src/mesh_capability_grant.c:db_mesh_capability_grant_validate:23
-engine/models/src/mmb_leaf_store.c:mmb_leaf_store_rebuild:16
 engine/models/src/query_builder.c:qb_prepare_db:17
 engine/models/src/query_builder.c:qb_where_lead:16
 engine/models/src/schema_migration.c:schema_migration_rollback_last:16

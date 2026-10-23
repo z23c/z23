@@ -199,6 +199,69 @@ static bool boot_mmb_leaf_store_repair_prefix_legacy(
     return true;
 }
 
+/* A stored leaf is trusted only if the active chain reproduces it. Checks the
+ * last leaf plus older samples (last-1, last-100, last-2048) when present. */
+static bool boot_mmb_leaf_store_prefix_matches(
+    const struct mmb_leaf_store *store, const struct active_chain *chain)
+{
+    static const uint64_t back[] = {0, 1, 100, 2048};
+    for (size_t i = 0; i < sizeof(back) / sizeof(back[0]); i++) {
+        if (store->num_leaves <= back[i]) continue;
+        uint64_t idx = store->num_leaves - 1 - back[i];
+        uint8_t want[32];
+        const uint8_t *have = mmb_leaf_store_get(store, idx);
+        if (!have || idx > (uint64_t)INT32_MAX ||
+            !mmb_leaf_store_hash_at(chain, (int)idx, want) ||
+            memcmp(have, want, 32) != 0)
+            return false;
+    }
+    return true;
+}
+
+/* Bring the leaf store to the active chain with the least work: append only the
+ * missing tail when the stored prefix still matches the chain, else rebuild. */
+bool boot_reconcile_mmb_leaf_store(struct mmb_leaf_store *store,
+                                   const struct active_chain *chain,
+                                   uint64_t mmb_leaves)
+{
+    int tip_h = active_chain_height(chain);
+    if (!store || !store->open || tip_h < 0) return false;
+    uint64_t chain_leaves = (uint64_t)tip_h + 1;
+    uint64_t target = mmb_leaves < chain_leaves ? mmb_leaves : chain_leaves;
+    uint64_t have = store->num_leaves;
+    if (mmb_leaves > chain_leaves)
+        printf("[FlyClient] MMB state %llu leaves ahead of active chain; "
+               "store follows the chain (state %llu, chain %llu)\n",
+               (unsigned long long)(mmb_leaves - chain_leaves),
+               (unsigned long long)mmb_leaves,
+               (unsigned long long)chain_leaves);
+
+    const char *reason = NULL;
+    if (have > chain_leaves)
+        reason = "store longer than chain";
+    else if (have >= target)
+        return true;
+    else if (have == 0)
+        reason = "store empty";
+    else if (!boot_mmb_leaf_store_prefix_matches(store, chain))
+        reason = "stored prefix does not match chain";
+
+    if (!reason) {
+        uint64_t added = mmb_leaf_store_extend(store, chain, (int)have);
+        if (have + added == chain_leaves) {
+            printf("[FlyClient] MMB leaf store: extended %llu leaves from "
+                   "h=%llu\n", (unsigned long long)added,
+                   (unsigned long long)have);
+            return true;
+        }
+        reason = "extend fell short";
+    }
+    printf("[FlyClient] MMB leaf store: full rebuild (%s; %llu -> %llu)\n",
+           reason, (unsigned long long)have, (unsigned long long)target);
+    mmb_leaf_store_rebuild(store, chain);
+    return true;
+}
+
 bool boot_prepare_mmb_leaf_store(struct boot_svc_ctx *svc,
                                  const char *datadir,
                                  boot_mmb_leaf_loader_fn legacy_loader)
@@ -217,13 +280,9 @@ bool boot_prepare_mmb_leaf_store(struct boot_svc_ctx *svc,
     mmb_leaf_store_open(&g_mmb_leaf_store, leaf_path);
     uint64_t mmb_leaves = 0;
     rpc_blockchain_mmb_snapshot(NULL, &mmb_leaves, NULL);
-    if (g_mmb_leaf_store.num_leaves < mmb_leaves) {
-        printf("[FlyClient] Rebuilding MMB leaf store (%llu -> %llu)...\n",
-               (unsigned long long)g_mmb_leaf_store.num_leaves,
-               (unsigned long long)mmb_leaves);
-        mmb_leaf_store_rebuild(&g_mmb_leaf_store,
-                               &svc->state->chain_active);
-    }
+    (void)boot_reconcile_mmb_leaf_store(&g_mmb_leaf_store,
+                                        &svc->state->chain_active,
+                                        mmb_leaves);
 
     int tip_h = active_chain_height(&svc->state->chain_active);
     if (tip_h >= 0 && g_mmb_leaf_store.num_leaves < (uint64_t)tip_h + 1) {

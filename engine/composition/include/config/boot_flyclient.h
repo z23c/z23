@@ -52,6 +52,16 @@ bool boot_prepare_mmb_leaf_store(struct boot_svc_ctx *svc,
                                  const char *datadir,
                                  boot_mmb_leaf_loader_fn legacy_loader);
 
+/* Reconcile the open leaf store with the active chain: append only the missing
+ * tail when the stored prefix (last leaf and sampled older leaves) matches the
+ * chain, otherwise fall back to mmb_leaf_store_rebuild. The target is clamped
+ * to the leaves the chain can produce. Exposed for tests. */
+struct mmb_leaf_store;
+struct active_chain;
+bool boot_reconcile_mmb_leaf_store(struct mmb_leaf_store *store,
+                                   const struct active_chain *chain,
+                                   uint64_t mmb_leaves);
+
 #ifdef __cplusplus
 }
 #endif

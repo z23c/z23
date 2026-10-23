@@ -210,6 +210,80 @@ const uint8_t (*mmb_leaf_store_all(const struct mmb_leaf_store *store))[32]
     return (const uint8_t (*)[32])store->map;
 }
 
+/* The single construction of one MMB leaf hash from the active chain.
+ *
+ * The same leaf is also built by rpc_blockchain_mmb_catchup
+ * (blockchain_controller.c) and by tip_finalize_post_step.c; coins_kv.h
+ * requires all of them to stamp the IDENTICAL boundary utxo_root. Those two
+ * keep their own copies; if this construction changes, change them too.
+ *
+ * Returns false (nothing written to out) when the height has no block index or
+ * no hash: the caller skips it, so a store index is NOT always the height. */
+bool mmb_leaf_store_hash_at(const void *chain_active_ptr, int height,
+                            uint8_t out[32])
+{
+    if (!chain_active_ptr || !out || height < 0) return false;
+    const struct active_chain *chain =
+        (const struct active_chain *)chain_active_ptr;
+    const struct block_index *bi = active_chain_at(chain, height);
+    if (!bi || !bi->phashBlock) return false;
+
+    /* Reproduce the boundary utxo_root the live connect path recorded so a
+     * rebuilt leaf hash is byte-identical to it (the store keeps only the
+     * 32-byte hash, not the root). A missing boundary entry → zero
+     * sentinel: that height's hash matches what the live path produced
+     * before it had a root, never a forged binding. */
+    uint8_t utxo_root[32] = {0};
+    sqlite3 *pdb = progress_store_db();
+    if (pdb && bi->nHeight > 0 &&
+        bi->nHeight % MMR_COMMITMENT_INTERVAL == 0) {
+        bool found = false;
+        coins_kv_boundary_root_get(pdb, bi->nHeight, utxo_root, &found);
+        if (!found) memset(utxo_root, 0, 32);
+    }
+
+    struct mmb_leaf leaf;
+    mmb_leaf_from_block(&leaf,
+        bi->phashBlock->data,
+        bi->nHeight, bi->nTime, bi->nBits,
+        bi->hashFinalSaplingRoot.data,
+        (const uint8_t *)bi->nChainWork.pn,
+        utxo_root);
+    mmb_hash_leaf(&leaf, out);
+    return true;
+}
+
+/* Append the leaves for heights [from_height, tip] to the open store. The
+ * caller guarantees the existing store is a valid prefix. Returns the number
+ * of leaves appended (heights without a block index are skipped). */
+uint64_t mmb_leaf_store_extend(struct mmb_leaf_store *store,
+                               const void *chain_active_ptr,
+                               int from_height)
+{
+    if (!store || !store->open || store->fd < 0 || !chain_active_ptr ||
+        from_height < 0)
+        return 0;
+    int height = active_chain_height(
+        (const struct active_chain *)chain_active_ptr);
+    if (height < from_height) return 0;
+
+    mmb_leaf_store_unmap(store);
+    uint64_t count = 0;
+    for (int h = from_height; h <= height; h++) {
+        uint8_t hash[32];
+        if (!mmb_leaf_store_hash_at(chain_active_ptr, h, hash)) continue;
+        if (!mmb_leaf_store_append(store, hash)) {
+            LOG_ERROR("mmb_leaf_store", "extend: append failed at h=%d (%s)",
+                      h, store->path);
+            break;
+        }
+        count++;
+    }
+    /* The remap boundary is also the durability boundary for the extension. */
+    if (count > 0) (void)mmb_leaf_store_remap(store);
+    return count;
+}
+
 uint64_t mmb_leaf_store_rebuild(struct mmb_leaf_store *store,
                                 const void *chain_active_ptr)
 {
@@ -232,34 +306,9 @@ uint64_t mmb_leaf_store_rebuild(struct mmb_leaf_store *store,
     uint64_t count = 0;
     int64_t t0 = platform_time_monotonic_us();
 
-    sqlite3 *pdb = progress_store_db();
     for (int h = 0; h <= height; h++) {
-        const struct block_index *bi = active_chain_at(chain, h);
-        if (!bi || !bi->phashBlock) continue;
-
-        /* Reproduce the boundary utxo_root the live connect path recorded so a
-         * rebuilt leaf hash is byte-identical to it (the store keeps only the
-         * 32-byte hash, not the root). A missing boundary entry → zero
-         * sentinel: that height's hash matches what the live path produced
-         * before it had a root, never a forged binding. */
-        uint8_t utxo_root[32] = {0};
-        if (pdb && bi->nHeight > 0 &&
-            bi->nHeight % MMR_COMMITMENT_INTERVAL == 0) {
-            bool found = false;
-            coins_kv_boundary_root_get(pdb, bi->nHeight, utxo_root, &found);
-            if (!found) memset(utxo_root, 0, 32);
-        }
-
-        struct mmb_leaf leaf;
-        mmb_leaf_from_block(&leaf,
-            bi->phashBlock->data,
-            bi->nHeight, bi->nTime, bi->nBits,
-            bi->hashFinalSaplingRoot.data,
-            (const uint8_t *)bi->nChainWork.pn,
-            utxo_root);
-
         uint8_t hash[32];
-        mmb_hash_leaf(&leaf, hash);
+        if (!mmb_leaf_store_hash_at(chain, h, hash)) continue;
 
         if (!mmb_leaf_store_append(store, hash))
             break;
