@@ -49,6 +49,59 @@ static bool rx_bounded_text(const char *text, size_t maximum,
     return true;
 }
 
+static bool rx_feature_active(const struct zcl_retrieval_profile_v1 *profile,
+                              size_t feature)
+{
+    return (profile->feature_mask & ZCL_RETRIEVAL_FEATURE_BIT(feature)) != 0;
+}
+
+static bool rx_gated_value_ok(bool active, uint64_t value, uint64_t maximum)
+{
+    if (!active) return value == 0;
+    return value != 0 && value <= maximum;
+}
+
+static bool rx_profile_weights_valid(
+    const struct zcl_retrieval_profile_v1 *profile)
+{
+    for (size_t i = 0; i < ZCL_RETRIEVAL_PROFILE_FEATURE_COUNT; i++) {
+        bool active = rx_feature_active(profile, i);
+        if (active != (profile->weight_bp[i] != 0) ||
+            profile->weight_bp[i] > ZCL_RETRIEVAL_PROFILE_WEIGHT_MAX)
+            return false;
+    }
+    return true;
+}
+
+static bool rx_profile_features_valid(
+    const struct zcl_retrieval_profile_v1 *profile)
+{
+    bool rarity = rx_feature_active(
+        profile, ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY);
+    bool graph = rx_feature_active(
+        profile, ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY);
+    bool context = rx_feature_active(
+        profile, ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES);
+    if (!rx_gated_value_ok(rarity, profile->identifier_df_max,
+                           ZCL_RETRIEVAL_EVAL_RANK_MAX))
+        return false;
+    if (!rx_gated_value_ok(graph, profile->graph_depth,
+                           ZCL_RETRIEVAL_PROFILE_GRAPH_DEPTH_MAX))
+        return false;
+    return context == (profile->context_byte_scale != 0);
+}
+
+static bool rx_profile_window_valid(
+    const struct zcl_retrieval_profile_v1 *profile)
+{
+    if (profile->rerank_window == 0 ||
+        profile->rerank_window > ZCL_RETRIEVAL_PROFILE_WINDOW_MAX)
+        return false;
+    return profile->top_k != 0 &&
+           profile->top_k <= ZCL_RETRIEVAL_EXPERIMENT_TOP &&
+           profile->top_k <= profile->rerank_window;
+}
+
 void zcl_retrieval_profile_init(struct zcl_retrieval_profile_v1 *profile)
 {
     if (!profile) return;
@@ -65,32 +118,10 @@ enum zcl_retrieval_experiment_error zcl_retrieval_profile_validate(
     if (profile->feature_mask == 0 ||
         (profile->feature_mask & ~ZCL_RETRIEVAL_FEATURE_MASK_ALL) != 0)
         return ZCL_RETRIEVAL_EXPERIMENT_PARAMETER;
-    for (size_t i = 0; i < ZCL_RETRIEVAL_PROFILE_FEATURE_COUNT; i++) {
-        bool active = (profile->feature_mask &
-                       ZCL_RETRIEVAL_FEATURE_BIT(i)) != 0;
-        if (active != (profile->weight_bp[i] != 0) ||
-            profile->weight_bp[i] > ZCL_RETRIEVAL_PROFILE_WEIGHT_MAX)
-            return ZCL_RETRIEVAL_EXPERIMENT_PARAMETER;
-    }
-    bool rarity = (profile->feature_mask & ZCL_RETRIEVAL_FEATURE_BIT(
-        ZCL_RETRIEVAL_FEATURE_IDENTIFIER_RARITY)) != 0;
-    bool graph = (profile->feature_mask & ZCL_RETRIEVAL_FEATURE_BIT(
-        ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY)) != 0;
-    bool context = (profile->feature_mask & ZCL_RETRIEVAL_FEATURE_BIT(
-        ZCL_RETRIEVAL_FEATURE_CONTEXT_BYTES)) != 0;
-    if ((rarity && (profile->identifier_df_max == 0 ||
-                    profile->identifier_df_max >
-                        ZCL_RETRIEVAL_EVAL_RANK_MAX)) ||
-        (!rarity && profile->identifier_df_max != 0) ||
-        (graph && (profile->graph_depth == 0 ||
-                   profile->graph_depth >
-                       ZCL_RETRIEVAL_PROFILE_GRAPH_DEPTH_MAX)) ||
-        (!graph && profile->graph_depth != 0) ||
-        (context != (profile->context_byte_scale != 0)) ||
-        profile->rerank_window == 0 ||
-        profile->rerank_window > ZCL_RETRIEVAL_PROFILE_WINDOW_MAX ||
-        profile->top_k == 0 || profile->top_k > ZCL_RETRIEVAL_EXPERIMENT_TOP ||
-        profile->top_k > profile->rerank_window)
+    if (!rx_profile_weights_valid(profile))
+        return ZCL_RETRIEVAL_EXPERIMENT_PARAMETER;
+    if (!rx_profile_features_valid(profile) ||
+        !rx_profile_window_valid(profile))
         return ZCL_RETRIEVAL_EXPERIMENT_PARAMETER;
     if (profile->reserved != 0 || profile->reserved_tail != 0)
         return ZCL_RETRIEVAL_EXPERIMENT_RESERVED;
@@ -204,6 +235,13 @@ static size_t rx_find(const struct zcl_retrieval_ranked_file *rows,
     return count;
 }
 
+static bool rx_row_distinct(const struct zcl_retrieval_ranked_file *rows,
+                            size_t index)
+{
+    return rows[index].path && rows[index].path[0] &&
+           rx_find(rows, index, rows[index].path) == index;
+}
+
 static enum zcl_retrieval_experiment_error rx_validate_pair(
     const struct zcl_retrieval_ranked_file *bm25, size_t bm25_count,
     bool bm25_complete,
@@ -214,10 +252,7 @@ static enum zcl_retrieval_experiment_error rx_validate_pair(
         bm25_count > ZCL_RETRIEVAL_EVAL_RANK_MAX)
         return ZCL_RETRIEVAL_EXPERIMENT_SHAPE;
     for (size_t i = 0; i < bm25_count; i++) {
-        if (!bm25[i].path || !bm25[i].path[0] ||
-            rx_find(bm25, i, bm25[i].path) != i ||
-            !parent[i].path || !parent[i].path[0] ||
-            rx_find(parent, i, parent[i].path) != i)
+        if (!rx_row_distinct(bm25, i) || !rx_row_distinct(parent, i))
             return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
         size_t peer = rx_find(parent, parent_count, bm25[i].path);
         if (peer == parent_count ||
@@ -232,13 +267,15 @@ static enum zcl_retrieval_experiment_error rx_validate_pair(
     return ZCL_RETRIEVAL_EXPERIMENT_OK;
 }
 
-enum zcl_retrieval_experiment_error zcl_retrieval_experiment_project(
+/* Argument guard for zcl_retrieval_experiment_project: NULL, parameter,
+ * shape and capacity checks, in that order. Never writes to report. */
+static enum zcl_retrieval_experiment_error rx_project_guard(
     const struct zcl_retrieval_ranked_file *bm25, size_t bm25_count,
     bool bm25_complete,
     const struct zcl_retrieval_ranked_file *parent, size_t parent_count,
     bool parent_complete, uint8_t bm25_prefix,
-    struct zcl_retrieval_ranked_file *out, size_t out_capacity,
-    struct zcl_retrieval_experiment_report *report)
+    const struct zcl_retrieval_ranked_file *out, size_t out_capacity,
+    const struct zcl_retrieval_experiment_report *report)
 {
     if ((!bm25 && bm25_count) || (!parent && parent_count) || !out || !report)
         return ZCL_RETRIEVAL_EXPERIMENT_NULL;
@@ -251,6 +288,15 @@ enum zcl_retrieval_experiment_error zcl_retrieval_experiment_project(
         return ZCL_RETRIEVAL_EXPERIMENT_SHAPE;
     if (out_capacity < bm25_count)
         return ZCL_RETRIEVAL_EXPERIMENT_CAPACITY;
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+static enum zcl_retrieval_experiment_error rx_project_alias_guard(
+    const struct zcl_retrieval_ranked_file *bm25, size_t bm25_count,
+    const struct zcl_retrieval_ranked_file *parent,
+    const struct zcl_retrieval_ranked_file *out,
+    const struct zcl_retrieval_experiment_report *report)
+{
     size_t row_bytes = bm25_count * sizeof(*out);
     if ((bm25_count &&
          (rx_memory_overlaps(out, row_bytes, bm25, row_bytes) ||
@@ -259,10 +305,133 @@ enum zcl_retrieval_experiment_error zcl_retrieval_experiment_project(
           rx_memory_overlaps(report, sizeof(*report), parent, row_bytes))) ||
         rx_memory_overlaps(report, sizeof(*report), out, row_bytes))
         return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
-    memset(report, 0, sizeof(*report));
-    enum zcl_retrieval_experiment_error error = rx_validate_pair(
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+/* Working state for one projection; out, used and bytes are the only
+ * fields the branch helpers change. */
+struct rx_projection {
+    const struct zcl_retrieval_ranked_file *bm25;
+    size_t bm25_count;
+    const struct zcl_retrieval_ranked_file *parent;
+    size_t parent_count;
+    struct zcl_retrieval_ranked_file *out;
+    struct zcl_retrieval_experiment_report *report;
+    size_t target;
+    size_t used;
+    uint64_t bytes;
+    uint64_t ceiling;
+};
+
+static void rx_project_fallback(struct rx_projection *plan)
+{
+    for (size_t i = 0; i < plan->bm25_count; i++)
+        plan->out[i] = plan->bm25[i];
+    plan->used = plan->bm25_count;
+    plan->bytes = plan->ceiling;
+    plan->report->used_bm25_fallback = true;
+}
+
+static enum zcl_retrieval_experiment_error rx_project_parent_only(
+    struct rx_projection *plan)
+{
+    for (size_t i = 0; i < plan->bm25_count; i++)
+        plan->out[i] = plan->parent[i];
+    if (!rx_sum_top(plan->out, plan->bm25_count, &plan->bytes))
+        return ZCL_RETRIEVAL_EXPERIMENT_OVERFLOW;
+    plan->used = plan->bm25_count;
+    if (plan->bytes > plan->ceiling) rx_project_fallback(plan);
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+static enum zcl_retrieval_experiment_error rx_project_take_prefix(
+    struct rx_projection *plan, size_t prefix, bool *selected)
+{
+    for (size_t i = 0; i < prefix; i++) {
+        if (UINT64_MAX - plan->bytes < plan->bm25[i].context_bytes)
+            return ZCL_RETRIEVAL_EXPERIMENT_OVERFLOW;
+        plan->out[plan->used++] = plan->bm25[i];
+        selected[i] = true;
+        plan->bytes += plan->bm25[i].context_bytes;
+    }
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+static void rx_project_fill_from_parent(struct rx_projection *plan,
+                                        bool *selected)
+{
+    size_t window = plan->parent_count < ZCL_RETRIEVAL_EXPERIMENT_WINDOW
+        ? plan->parent_count : ZCL_RETRIEVAL_EXPERIMENT_WINDOW;
+    for (size_t i = 0; i < window && plan->used < plan->target; i++) {
+        size_t original = rx_find(plan->bm25, plan->bm25_count,
+                                  plan->parent[i].path);
+        if (selected[original] ||
+            UINT64_MAX - plan->bytes < plan->parent[i].context_bytes ||
+            plan->bytes + plan->parent[i].context_bytes > plan->ceiling)
+            continue;
+        plan->out[plan->used++] = plan->parent[i];
+        selected[original] = true;
+        plan->bytes += plan->parent[i].context_bytes;
+    }
+}
+
+static void rx_project_append_parent(struct rx_projection *plan,
+                                     bool *selected)
+{
+    for (size_t i = 0; i < plan->parent_count; i++) {
+        size_t original = rx_find(plan->bm25, plan->bm25_count,
+                                  plan->parent[i].path);
+        if (!selected[original]) plan->out[plan->used++] = plan->parent[i];
+    }
+}
+
+static enum zcl_retrieval_experiment_error rx_project_prefix_plan(
+    struct rx_projection *plan, size_t prefix)
+{
+    bool selected[ZCL_RETRIEVAL_EVAL_RANK_MAX] = {false};
+    enum zcl_retrieval_experiment_error error =
+        rx_project_take_prefix(plan, prefix, selected);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    rx_project_fill_from_parent(plan, selected);
+    if (plan->used != plan->target)
+        rx_project_fallback(plan);
+    else
+        rx_project_append_parent(plan, selected);
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+static void rx_project_finish(const struct rx_projection *plan)
+{
+    for (size_t i = 0; i < plan->used; i++) {
+        plan->out[i].in_scope = false;
+        plan->out[i].in_scope_available = false;
+    }
+    plan->report->ranked_count = plan->used;
+    plan->report->bm25_context_bytes_at_5 = plan->ceiling;
+    plan->report->candidate_context_bytes_at_5 = plan->bytes;
+    plan->report->top20_membership_preserved = true;
+    for (size_t i = 0; i < plan->target; i++)
+        if (strcmp(plan->out[i].path, plan->parent[i].path) != 0)
+            plan->report->changed_positions_at_5++;
+}
+
+enum zcl_retrieval_experiment_error zcl_retrieval_experiment_project(
+    const struct zcl_retrieval_ranked_file *bm25, size_t bm25_count,
+    bool bm25_complete,
+    const struct zcl_retrieval_ranked_file *parent, size_t parent_count,
+    bool parent_complete, uint8_t bm25_prefix,
+    struct zcl_retrieval_ranked_file *out, size_t out_capacity,
+    struct zcl_retrieval_experiment_report *report)
+{
+    enum zcl_retrieval_experiment_error error = rx_project_guard(
         bm25, bm25_count, bm25_complete, parent, parent_count,
-        parent_complete);
+        parent_complete, bm25_prefix, out, out_capacity, report);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    error = rx_project_alias_guard(bm25, bm25_count, parent, out, report);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    memset(report, 0, sizeof(*report));
+    error = rx_validate_pair(bm25, bm25_count, bm25_complete, parent,
+                             parent_count, parent_complete);
     if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
 
     uint64_t ceiling = 0;
@@ -271,63 +440,24 @@ enum zcl_retrieval_experiment_error zcl_retrieval_experiment_project(
     const size_t target = bm25_count < ZCL_RETRIEVAL_EXPERIMENT_TOP
         ? bm25_count : ZCL_RETRIEVAL_EXPERIMENT_TOP;
     const size_t prefix = bm25_prefix < target ? bm25_prefix : target;
-    bool selected[ZCL_RETRIEVAL_EVAL_RANK_MAX] = {false};
-    size_t used = 0;
-    uint64_t bytes = 0;
-
-    if (bm25_prefix == 0) {
-        for (size_t i = 0; i < bm25_count; i++) out[i] = parent[i];
-        if (!rx_sum_top(out, bm25_count, &bytes))
-            return ZCL_RETRIEVAL_EXPERIMENT_OVERFLOW;
-        used = bm25_count;
-        if (bytes > ceiling) {
-            for (size_t i = 0; i < bm25_count; i++) out[i] = bm25[i];
-            bytes = ceiling;
-            report->used_bm25_fallback = true;
-        }
-    } else {
-        for (size_t i = 0; i < prefix; i++) {
-            if (UINT64_MAX - bytes < bm25[i].context_bytes)
-                return ZCL_RETRIEVAL_EXPERIMENT_OVERFLOW;
-            out[used++] = bm25[i];
-            selected[i] = true;
-            bytes += bm25[i].context_bytes;
-        }
-        size_t window = parent_count < ZCL_RETRIEVAL_EXPERIMENT_WINDOW
-            ? parent_count : ZCL_RETRIEVAL_EXPERIMENT_WINDOW;
-        for (size_t i = 0; i < window && used < target; i++) {
-            size_t original = rx_find(bm25, bm25_count, parent[i].path);
-            if (selected[original] ||
-                UINT64_MAX - bytes < parent[i].context_bytes ||
-                bytes + parent[i].context_bytes > ceiling)
-                continue;
-            out[used++] = parent[i];
-            selected[original] = true;
-            bytes += parent[i].context_bytes;
-        }
-        if (used != target) {
-            for (size_t i = 0; i < bm25_count; i++) out[i] = bm25[i];
-            used = bm25_count;
-            bytes = ceiling;
-            report->used_bm25_fallback = true;
-        } else {
-            for (size_t i = 0; i < parent_count; i++) {
-                size_t original = rx_find(bm25, bm25_count, parent[i].path);
-                if (!selected[original]) out[used++] = parent[i];
-            }
-        }
-    }
-    for (size_t i = 0; i < used; i++) {
-        out[i].in_scope = false;
-        out[i].in_scope_available = false;
-    }
-    report->ranked_count = used;
-    report->bm25_context_bytes_at_5 = ceiling;
-    report->candidate_context_bytes_at_5 = bytes;
-    report->top20_membership_preserved = true;
-    for (size_t i = 0; i < target; i++)
-        if (strcmp(out[i].path, parent[i].path) != 0)
-            report->changed_positions_at_5++;
+    struct rx_projection plan = {
+        .bm25 = bm25,
+        .bm25_count = bm25_count,
+        .parent = parent,
+        .parent_count = parent_count,
+        .out = out,
+        .report = report,
+        .target = target,
+        .used = 0,
+        .bytes = 0,
+        .ceiling = ceiling,
+    };
+    if (bm25_prefix == 0)
+        error = rx_project_parent_only(&plan);
+    else
+        error = rx_project_prefix_plan(&plan, prefix);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    rx_project_finish(&plan);
     return ZCL_RETRIEVAL_EXPERIMENT_OK;
 }
 
@@ -502,6 +632,24 @@ static void rx_write_text(struct sha3_256_ctx *sha, const char *text,
     sha3_256_write(sha, (const uint8_t *)text, length);
 }
 
+/* Null and all-zero checks for a list of 32-byte roots. Every root is
+ * checked for NULL before any root is read. */
+static bool rx_proposal_roots_valid(const uint8_t *const *roots, size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (!roots[i]) return false;
+    for (size_t i = 0; i < count; i++)
+        if (!rx_root_any(roots[i])) return false;
+    return true;
+}
+
+static bool rx_task_text_valid(const char *task_id, const char *query,
+                               size_t *task_id_length, size_t *query_length)
+{
+    if (!rx_bounded_text(task_id, 128u, task_id_length)) return false;
+    return rx_bounded_text(query, 4096u, query_length);
+}
+
 bool zcl_retrieval_experiment_proposal_input_root(
     const uint8_t source_root[32],
     const uint8_t retrieval_projection_root[32],
@@ -514,18 +662,14 @@ bool zcl_retrieval_experiment_proposal_input_root(
     static const char domain[] = "zcl.retrieval_experiment_proposal_input.v2";
     if (!out) return false;
     size_t task_id_length = 0, query_length = 0;
-    if (!source_root || !retrieval_projection_root || !task_id ||
-        !task_id[0] ||
-        !query || !query[0] || !bm25_ranking_root || !parent_ranking_root ||
-        bm25_prefix > ZCL_RETRIEVAL_EXPERIMENT_TOP || !study_root ||
-        !preregistration_root || !evaluator_root ||
-        !rx_root_any(source_root) ||
-        !rx_root_any(retrieval_projection_root) ||
-        !rx_root_any(bm25_ranking_root) ||
-        !rx_root_any(parent_ranking_root) || !rx_root_any(study_root) ||
-        !rx_root_any(preregistration_root) || !rx_root_any(evaluator_root) ||
-        !rx_bounded_text(task_id, 128u, &task_id_length) ||
-        !rx_bounded_text(query, 4096u, &query_length))
+    const uint8_t *const roots[] = {
+        source_root, retrieval_projection_root, bm25_ranking_root,
+        parent_ranking_root, study_root, preregistration_root,
+        evaluator_root,
+    };
+    if (bm25_prefix > ZCL_RETRIEVAL_EXPERIMENT_TOP ||
+        !rx_proposal_roots_valid(roots, sizeof(roots) / sizeof(roots[0])) ||
+        !rx_task_text_valid(task_id, query, &task_id_length, &query_length))
         return false;
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
@@ -564,19 +708,14 @@ bool zcl_retrieval_profile_proposal_input_root(
         "zcl.retrieval_profile_proposal_input.v1";
     if (!out) return false;
     size_t task_id_length = 0, query_length = 0;
-    if (!source_root || !codeindex_source_root ||
-        !retrieval_projection_root || !task_id || !query ||
-        !baseline_ranking_root || !profile_root || !feature_snapshot_root ||
-        !candidate_ranking_root || !study_root || !preregistration_root ||
-        !evaluator_root || !rx_root_any(source_root) ||
-        !rx_root_any(codeindex_source_root) ||
-        !rx_root_any(retrieval_projection_root) ||
-        !rx_root_any(baseline_ranking_root) || !rx_root_any(profile_root) ||
-        !rx_root_any(feature_snapshot_root) ||
-        !rx_root_any(candidate_ranking_root) || !rx_root_any(study_root) ||
-        !rx_root_any(preregistration_root) || !rx_root_any(evaluator_root) ||
-        !rx_bounded_text(task_id, 128u, &task_id_length) ||
-        !rx_bounded_text(query, 4096u, &query_length))
+    const uint8_t *const roots[] = {
+        source_root, codeindex_source_root, retrieval_projection_root,
+        baseline_ranking_root, profile_root, feature_snapshot_root,
+        candidate_ranking_root, study_root, preregistration_root,
+        evaluator_root,
+    };
+    if (!rx_proposal_roots_valid(roots, sizeof(roots) / sizeof(roots[0])) ||
+        !rx_task_text_valid(task_id, query, &task_id_length, &query_length))
         return false;
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);

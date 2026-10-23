@@ -153,11 +153,6 @@ cognition/modules/retrieval/src/retrieval_evaluation_batch.c:peb_arm_root:20
 cognition/modules/retrieval/src/retrieval_evaluation_batch.c:peb_paired_evaluate:29
 cognition/modules/retrieval/src/retrieval_evaluation_batch.c:peb_validate_workload:19
 cognition/modules/retrieval/src/retrieval_evaluation_batch.c:zcl_retrieval_evaluation_workload_root:17
-cognition/modules/retrieval/src/retrieval_experiment.c:rx_validate_pair:16
-cognition/modules/retrieval/src/retrieval_experiment.c:zcl_retrieval_experiment_project:43
-cognition/modules/retrieval/src/retrieval_experiment.c:zcl_retrieval_experiment_proposal_input_root:23
-cognition/modules/retrieval/src/retrieval_experiment.c:zcl_retrieval_profile_proposal_input_root:26
-cognition/modules/retrieval/src/retrieval_experiment.c:zcl_retrieval_profile_validate:26
 cognition/modules/retrieval/src/retrieval_pair_observation.c:zcl_retrieval_pair_observation_validate:28
 cognition/modules/retrieval/src/retrieval_pair_observation.c:zcl_retrieval_pair_observation_verify:37
 cognition/modules/science/src/ecosystem.c:science_ecosystem_collect:19
