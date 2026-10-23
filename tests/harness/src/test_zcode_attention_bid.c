@@ -4,6 +4,7 @@
 
 #include "test/test_core.h"
 #include "vcs/vcs_object.h"
+#include "crypto/sha3.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -187,6 +188,166 @@ static void ab_improve_axis(struct vcs_zcode_attention_bid_v1 *bid,
     case 8: bid->expected_cost_milliunits--; break;
     default: break;
     }
+}
+
+/* Golden wire pins, generated at e1b05d3a1 from the code below. A symmetric
+ * field reorder in serialize and parse changes these bytes and fails here. */
+static const char ab_golden_heuristic_sha3[] =
+    "6be749c2af06c331b913002924b0711a9e404f8c7b02c5223c066e8dc5d50ce0";
+static const char ab_golden_bid_hex[] =
+    "5a434154544e310a010002000000000051515151515151515151515151515151"
+    "5151515151515151515151515151515152525252525252525252525252525252"
+    "5252525252525252525252525252525253535353535353535353535353535353"
+    "5353535353535353535353535353535354545454545454545454545454545454"
+    "5454545454545454545454545454545455555555555555555555555555555555"
+    "5555555555555555555555555555555556565656565656565656565656565656"
+    "5656565656565656565656565656565657575757575757575757575757575757"
+    "57575757575757575757575757575757" "2923421f5b1b74178d13a60fbf0bff01"
+    "0807060504030201" "8877665544332211";
+
+static void ab_hex(const uint8_t *bytes, size_t count, char *out)
+{
+    static const char digits[] = "0123456789abcdef";
+    for (size_t i = 0; i < count; i++) {
+        out[2 * i] = digits[bytes[i] >> 4];
+        out[2 * i + 1] = digits[bytes[i] & 0x0fu];
+    }
+    out[2 * count] = '\0';
+}
+
+static bool ab_unhex(const char *hex, uint8_t *out, size_t count)
+{
+    if (strlen(hex) != 2 * count) return false;
+    for (size_t i = 0; i < count; i++) {
+        unsigned value = 0;
+        for (size_t j = 0; j < 2; j++) {
+            char c = hex[2 * i + j];
+            if (c >= '0' && c <= '9') {
+                value = (value << 4) | (unsigned)(c - '0');
+            } else if (c >= 'a' && c <= 'f') {
+                value = (value << 4) | (unsigned)(c - 'a' + 10);
+            } else {
+                return false;
+            }
+        }
+        out[i] = (uint8_t)value;
+    }
+    return true;
+}
+
+static void ab_golden_heuristic(struct vcs_zcode_heuristic_v1 *heuristic)
+{
+    vcs_zcode_heuristic_init(heuristic);
+    heuristic->derivation = VCS_ZCODE_HEURISTIC_COMPOSE;
+    heuristic->evaluator_count = 3;
+    heuristic->parent_count = 2;
+    ab_root(heuristic->task_root, 0x41);
+    ab_root(heuristic->source_root, 0x42);
+    ab_root(heuristic->agent_context_root, 0x43);
+    ab_root(heuristic->ontology_context_root, 0x44);
+    ab_root(heuristic->applicability_root, 0x45);
+    ab_root(heuristic->observed_features_root, 0x46);
+    ab_root(heuristic->proposed_rule_root, 0x47);
+    ab_root(heuristic->expected_effect_root, 0x48);
+    ab_root(heuristic->proposal_input_root, 0x49);
+    ab_root(heuristic->study_root, 0x4a);
+    ab_root(heuristic->preregistration_root, 0x4b);
+    ab_root(heuristic->provenance_root, 0x4c);
+    ab_root(heuristic->evaluator_roots[0], 0x71);
+    ab_root(heuristic->evaluator_roots[1], 0x72);
+    ab_root(heuristic->evaluator_roots[2], 0x73);
+    ab_root(heuristic->parent_roots[0], 0xa1);
+    ab_root(heuristic->parent_roots[1], 0xa2);
+    heuristic->requested_cpu_seconds = 3600;
+    heuristic->requested_processes = 37;
+    heuristic->requested_memory_bytes = UINT64_C(1073741824) + 12345u;
+    heuristic->requested_context_bytes = 1048576u + 99u;
+    heuristic->requested_output_bytes = UINT64_C(536870912) + 7u;
+}
+
+static void ab_golden_bid(struct vcs_zcode_attention_bid_v1 *bid)
+{
+    vcs_zcode_attention_bid_init(bid);
+    bid->priority_class = VCS_ZCODE_ATTENTION_P1_USER_JOURNEY;
+    ab_root(bid->focus_root, 0x51);
+    ab_root(bid->task_root, 0x52);
+    ab_root(bid->source_root, 0x53);
+    ab_root(bid->heuristic_root, 0x54);
+    ab_root(bid->priority_policy_root, 0x55);
+    ab_root(bid->bid_evaluator_root, 0x56);
+    ab_root(bid->evidence_root, 0x57);
+    bid->expected_user_value_bp = 9001;
+    bid->information_gain_bp = 8002;
+    bid->blocker_relief_bp = 7003;
+    bid->reuse_potential_bp = 6004;
+    bid->evidence_strength_bp = 5005;
+    bid->risk_bp = 4006;
+    bid->overlap_bp = 3007;
+    bid->observed_metrics = VCS_ZCODE_ATTENTION_METRIC_REQUIRED;
+    bid->expected_latency_us = UINT64_C(0x0102030405060708);
+    bid->expected_cost_milliunits = UINT64_C(0x1122334455667788);
+}
+
+static void ab_swap_u16le(uint8_t *left, uint8_t *right)
+{
+    uint8_t tmp[2];
+    memcpy(tmp, left, 2);
+    memcpy(left, right, 2);
+    memcpy(right, tmp, 2);
+}
+
+static int ab_golden_heuristic_wire(void)
+{
+    int failures = 0;
+    struct vcs_zcode_heuristic_v1 heuristic, parsed;
+    uint8_t wire[VCS_ZCODE_HEURISTIC_WIRE_BYTES];
+    uint8_t digest[32];
+    char digest_hex[65];
+    ab_golden_heuristic(&heuristic);
+    enum vcs_zcode_attention_error rc =
+        vcs_zcode_heuristic_serialize(&heuristic, wire);
+    zcl_sha3_256(wire, sizeof(wire), digest);
+    ab_hex(digest, sizeof(digest), digest_hex);
+    AB_CHECK("golden-heuristic-serialize-digest",
+             rc == VCS_ZCODE_ATTENTION_OK &&
+             strcmp(digest_hex, ab_golden_heuristic_sha3) == 0);
+    AB_CHECK("golden-heuristic-parse-round-trip",
+             vcs_zcode_heuristic_parse(wire, sizeof(wire), &parsed) ==
+                 VCS_ZCODE_ATTENTION_OK &&
+             memcmp(&parsed, &heuristic, sizeof(heuristic)) == 0);
+    return failures;
+}
+
+static int ab_golden_bid_wire(void)
+{
+    int failures = 0;
+    struct vcs_zcode_attention_bid_v1 bid, parsed, moved;
+    uint8_t wire[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES];
+    uint8_t golden[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES];
+    char wire_hex[2 * VCS_ZCODE_ATTENTION_BID_WIRE_BYTES + 1];
+    ab_golden_bid(&bid);
+    enum vcs_zcode_attention_error rc =
+        vcs_zcode_attention_bid_serialize(&bid, wire);
+    ab_hex(wire, sizeof(wire), wire_hex);
+    AB_CHECK("golden-bid-serialize-exact-bytes",
+             rc == VCS_ZCODE_ATTENTION_OK &&
+             strcmp(wire_hex, ab_golden_bid_hex) == 0);
+    AB_CHECK("golden-bid-decode-literal",
+             ab_unhex(ab_golden_bid_hex, golden, sizeof(golden)));
+    AB_CHECK("golden-bid-parse-round-trip",
+             vcs_zcode_attention_bid_parse(golden, sizeof(golden), &parsed) ==
+                 VCS_ZCODE_ATTENTION_OK &&
+             memcmp(&parsed, &bid, sizeof(bid)) == 0);
+    /* Swap the expected_user_value_bp and information_gain_bp slots. */
+    uint8_t moved_wire[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES];
+    memcpy(moved_wire, golden, sizeof(golden));
+    ab_swap_u16le(moved_wire + 240, moved_wire + 242);
+    AB_CHECK("golden-bid-moved-field-differs",
+             vcs_zcode_attention_bid_parse(moved_wire, sizeof(moved_wire),
+                                           &moved) !=
+                 VCS_ZCODE_ATTENTION_OK ||
+             moved.expected_user_value_bp != bid.expected_user_value_bp);
+    return failures;
 }
 
 int test_zcode_attention_bid(void)
@@ -979,5 +1140,7 @@ int test_zcode_attention_bid(void)
              auto_empty.selected_priority_class ==
                  VCS_ZCODE_ATTENTION_PRIORITY_AUTO);
 
+    failures += ab_golden_heuristic_wire();
+    failures += ab_golden_bid_wire();
     return failures;
 }
