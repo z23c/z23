@@ -122,6 +122,7 @@ test_simnet_wallet_import_backup	7
 test_simnet_perf	14
 test_stage_anchor	7
 test_projection_adoption	31
+test_projection_receipt	4
 test_progress_store	16
 test_wallet_projection	31
 test_small_projections	7

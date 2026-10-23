@@ -1799,6 +1799,7 @@ int main(int argc, char **argv)
     failures += test_mailbox_adoption();
     failures += test_projection();
     failures += test_projection_adoption();
+    failures += test_projection_receipt();
     failures += test_projection_consumer();
     failures += test_progress_store();
     failures += test_coins_kv_read_snapshot();

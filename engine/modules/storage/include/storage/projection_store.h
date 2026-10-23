@@ -134,6 +134,14 @@ void projection_store_close(void);
  * reader-blocked path (PASSIVE drain, then the close and the receipt
  * writer's own checks) can be driven without racing a real reader. */
 void projection_store_force_checkpoint_busy_for_test(void);
+/* Receipt digest seams (POSIX only, where the receipt exists). The digest is
+ * chunked; a test shrinks the chunk and varies the worker count, and reads the
+ * digest of a file directly. out is 65 bytes (64 hex + NUL). */
+#if !defined(_WIN32)
+void projection_store_receipt_chunk_bytes_for_test(uint64_t bytes);
+void projection_store_receipt_workers_for_test(int workers);
+bool projection_store_receipt_digest_for_test(const char *path, char out[65]);
+#endif
 #endif
 
 /* For `z23 dumpstate projection_store` (dump-state convention). `out` is

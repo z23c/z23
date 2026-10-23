@@ -819,6 +819,7 @@ int test_mailbox(void);
 int test_mailbox_adoption(void);
 int test_projection(void);
 int test_projection_adoption(void);
+int test_projection_receipt(void);
 int test_projection_consumer(void);
 int test_progress_store(void);
 int test_coins_kv_read_snapshot(void);

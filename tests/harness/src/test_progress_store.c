@@ -14,6 +14,7 @@
 #include "platform/positioned_file.h"
 #include "crypto/sha3.h"
 #include "base/hex.h"
+#include "base/serialize_le.h"
 
 #include "config/boot_fast_restart.h"
 #include "json/json.h"
@@ -86,20 +87,31 @@ static bool ps_align_receipt_metadata(const char *path, const char *receipt,
     return fclose(fp) == 0 && ok;
 }
 
+/* Independent reference for the v3 receipt digest of a fixture smaller than
+ * one 64 MiB chunk: the chunk digest is the plain SHA3-256 of the file and the
+ * receipt value hashes the domain tag, both sizes and that single digest. */
 static bool ps_receipt_digest_matches(const char *path, const char *receipt)
 {
     FILE *fp = fopen(path, "rb");
     if (!fp) return false;
     struct sha3_256_ctx hash;
     sha3_256_init(&hash);
-    unsigned char chunk[777], digest[32];
+    unsigned char chunk[777], chunk_digest[32], digest[32], wire[8];
     size_t got, total = 0;
     while ((got = fread(chunk, 1, sizeof(chunk), fp)) != 0) {
         sha3_256_write(&hash, chunk, got);
         total += got;
     }
-    bool ok = !ferror(fp) && total > 4096;
+    bool ok = !ferror(fp) && total > 4096 && total < (64u << 20);
     fclose(fp);
+    sha3_256_finalize(&hash, chunk_digest);
+    sha3_256_init(&hash);
+    sha3_256_write(&hash, (const unsigned char *)"z23.projection.clean_receipt.v3", 32);
+    zcl_write_u64_le(wire, total);
+    sha3_256_write(&hash, wire, sizeof(wire));
+    zcl_write_u64_le(wire, 64ull << 20);
+    sha3_256_write(&hash, wire, sizeof(wire));
+    sha3_256_write(&hash, chunk_digest, sizeof(chunk_digest));
     sha3_256_finalize(&hash, digest);
     char expected[80] = "content_sha3=";
     zcl_hex_encode(digest, sizeof(digest), expected + 13);
@@ -108,7 +120,7 @@ static bool ps_receipt_digest_matches(const char *path, const char *receipt)
     if (!fp) return false;
     got = fread(text, 1, sizeof(text) - 1, fp);
     ok = ok && !ferror(fp) && got > 0 && strstr(text, expected) &&
-         strstr(text, "version=2\n");
+         strstr(text, "version=3\n");
     fclose(fp);
     return ok;
 }
@@ -1091,7 +1103,7 @@ int test_progress_store(void)
      *   (b) a page-garbled store is detected, quarantined, and reopens as a
      *       fresh, queryable, EMPTY store,
      *   (c) it is auto-terminating (one quarantine, not a loop). */
-    for (unsigned receipt_version = 1; receipt_version <= 2; receipt_version++) {
+    for (unsigned receipt_version = 1; receipt_version <= 3; receipt_version++) {
         char dir[256];
         test_make_tmpdir(dir, sizeof(dir), "progress_store", "proj_quarantine");
         char fpath[512];
