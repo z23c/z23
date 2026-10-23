@@ -1215,18 +1215,23 @@ static bool boot_seq_prologue(struct app_context *ctx, struct boot_seq *s)
     /* ── Move 5 boot checklist: prologue steps ───────────────────
      * Each step is a named static above. Failing steps return false
      * and the process exits non-zero — never partial-init state. */
+    int64_t t_sub = s->t_boot_start;
     if (!boot_step_init_observability())
         return false;
     /* Register the declarative boot-stage boundary records before any
      * sysinit_run_stage() call below advances the stage machine. */
     boot_sysinit_register_all();
+    t_sub = boot_submark("prologue.observability", t_sub);
     if (!boot_step_select_chain_and_datadir(ctx))
         return false;
+    t_sub = boot_submark("prologue.select_chain", t_sub);
     if (!ctx->mint_anchor && !ctx->ratify_mint_anchor &&
         !ctx->export_consensus_bundle && !ctx->verify_consensus_bundle &&
         !ctx->verify_rom && !boot_mint_anchor_normal_boot_preflight(ctx->datadir))
         return false;
+    t_sub = boot_submark("prologue.mint_anchor_preflight", t_sub);
     if (!boot_refold_staged_preflight(ctx->refold_staged)) return false;
+    t_sub = boot_submark("prologue.refold_preflight", t_sub);
     const struct chain_params *params = chain_params_get();
     s->params = params;
     boot_postmortem_start(ctx->datadir);
@@ -1234,9 +1239,12 @@ static bool boot_seq_prologue(struct app_context *ctx, struct boot_seq *s)
     /* Tier-2 fast restart: arm node_db_open's quick_check-skip probe BEFORE
      * node.db opens (consumes the binding detect_unclean just cached). */
     boot_fast_restart_arm_quick_check_skip_probe();
+    t_sub = boot_submark("prologue.postmortem_probe", t_sub);
     boot_step_start_disk_and_ibd_guards(ctx->datadir);
+    t_sub = boot_submark("prologue.disk_ibd_guards", t_sub);
     if (!boot_step_init_crypto_and_state(ctx, params))
         return false;
+    t_sub = boot_submark("prologue.crypto_state", t_sub);
     /* Timing only: the boot prologue (observability, chain/datadir select,
      * postmortem, unclean-shutdown detect, disk/IBD guards, crypto+state
      * init) as a named phase. */
@@ -1864,7 +1872,9 @@ static bool boot_step_bind_coins_read_view(struct app_context *ctx)
      * the coins read view + the other projections bind. FATAL only if
      * progress.kv (the coins_kv home) is not open — coins_view_kv binds
      * progress_store_db() lazily at read time. */
+    int64_t t_bind = boot_clock_ms();
     (void)boot_ensure_event_log(ctx->datadir);
+    t_bind = boot_submark("coins.bind_event_log", t_bind);
     if (!progress_store_db() ||
         !coins_view_kv_init(&g_coins_read_view)) {
         fprintf(stderr,
@@ -1897,7 +1907,9 @@ static bool boot_step_bind_coins_read_view(struct app_context *ctx)
 /* Wire the process-lifetime chain_state_repository and the UTXO commitment. */
 static void boot_step_wire_repository(struct app_context *ctx)
 {
+    int64_t t_wire = boot_clock_ms();
     coins_view_cache_init(&g_coins_tip, &g_coins_read_view.view);
+    t_wire = boot_submark("coins.wire_coins_cache", t_wire);
     /* Hoist the block_index_projection open next to the event-log open
      * so load_block_index_from_projection (under -rebuildfromlog) has the
      * caught-up projection available BEFORE the block-index load below.
@@ -1906,6 +1918,7 @@ static void boot_step_wire_repository(struct app_context *ctx)
      * Non-fatal if it cannot open: -rebuildfromlog simply falls through to
      * the legacy loaders. */
     (void)boot_ensure_block_index_projection(ctx->datadir);
+    t_wire = boot_submark("coins.wire_blkidx_projection", t_wire);
     /* Wire the process-lifetime chain_state_repository singleton now
      * that g_coins_tip is alive. From this point on, call-site
      * migrations can go through csr_commit_tip() and get all six
@@ -1957,13 +1970,15 @@ static bool boot_seq_open_coins_state(struct app_context *ctx, struct boot_seq *
         return false;
     t_sub = boot_submark("coins.view_open_gate", t_sub);
     if (!s->replay_pending) boot_step_check_coins_best_cache(ctx);
+    t_sub = boot_submark("coins.best_cache", t_sub);
     if (!boot_step_bind_coins_read_view(ctx))
         return false;
+    t_sub = boot_submark("coins.bind_read_view", t_sub);
     boot_step_wire_repository(ctx);
     /* Block index is now cached in SQLite (load_block_index_sqlite).
      * The full index is saved on shutdown/save, enabling instant restart
      * without the 10-15s LevelDB scan. */
-    t_sub = boot_submark("coins.readview_csr", t_sub);
+    t_sub = boot_submark("coins.wire_repository", t_sub);
     /* OOM protection: estimate block index memory before loading.
      * Warn if it would exceed 50% of system RAM. */
     {
