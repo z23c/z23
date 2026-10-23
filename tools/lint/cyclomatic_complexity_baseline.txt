@@ -512,10 +512,6 @@ contexts/commons/modules/vcs/src/zcode_dht_record_store.c:vcs_zcode_dht_record_s
 contexts/commons/modules/vcs/src/zcode_dht_record_store.c:vcs_zcode_dht_record_store_put:29
 contexts/commons/modules/vcs/src/zcode_dht_record_store.c:vcs_zcode_dht_record_store_result_string:16
 contexts/commons/modules/vcs/src/zcode_dht_record_store.c:vcs_zcode_dht_record_store_save:18
-contexts/commons/modules/vcs/src/zcode_dht_service.c:vcs_zcode_dht_service_create:20
-contexts/commons/modules/vcs/src/zcode_dht_service.c:vcs_zcode_dht_service_handle_frame:57
-contexts/commons/modules/vcs/src/zcode_dht_service.c:vcs_zcode_dht_service_query_finish:18
-contexts/commons/modules/vcs/src/zcode_dht_service.c:vcs_zcode_dht_service_tick:39
 contexts/commons/modules/vcs/src/zcode_dht_service_discovery.c:discovery_drive_children:26
 contexts/commons/modules/vcs/src/zcode_dht_service_lookup.c:vcs_zcode_dht_lookup_insert:18
 contexts/commons/modules/vcs/src/zcode_dht_service_lookup.c:vcs_zcode_dht_lookup_schedule:19
