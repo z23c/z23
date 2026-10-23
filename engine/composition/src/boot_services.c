@@ -247,6 +247,17 @@ static int64_t svc_clock_ms(void)
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
+/* One svc.init_wallet sub-stage mark on its own clock (the parent's t_svc is
+ * untouched). boot_mark_step enters the next step, which clears the step's
+ * evidence probe, so the thread-io probe is re-installed right after it. */
+static int64_t svc_init_wallet_submark(int64_t t_iw, const char *done,
+                                       const char *next)
+{
+    int64_t now = boot_mark_step(t_iw, done, next);
+    boot_step_set_thread_io_evidence_probe();
+    return now;
+}
+
 static bool boot_connman_start(void *ctx)
 {
     struct boot_svc_ctx *svc = ctx;
@@ -639,7 +650,10 @@ bool app_init_services(struct app_context *ctx,
 
     /* Projection storage fan-out. Opens the append-only event log and the
      * reducer read-model projections used by runtime services. */
+    int64_t t_iw = svc_clock_ms();
     boot_start_projection_storage(ctx->datadir);
+    t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.projection_storage",
+                                   "svc.init_wallet.mempool_load");
 
     /* ── Register sync state observer ──────────────────────────── *
      * Logs every sync state transition via the event system.
@@ -654,11 +668,17 @@ bool app_init_services(struct app_context *ctx,
     if (boot_node_db(svc))
         node_db_sync_mempool_load(boot_node_db(svc), svc->mempool,
                                   svc->coins_tip, svc->state, svc->params);
+    t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.mempool_load",
+                                   "svc.init_wallet.wallet_catch_up");
 
     (void)boot_wallet_catch_up(svc->wallet, &svc->state->chain_active,
                                ctx->datadir, NULL);
+    t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.wallet_catch_up",
+                                   "svc.init_wallet.verify_utxos");
 
     wallet_verify_utxos(svc->wallet, svc->coins_tip);
+    t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.verify_utxos",
+                                   "svc.init_wallet.utxo_probe");
 
     /* Rebuild wallet_utxos from ground truth ONLY if empty */
     {
@@ -728,6 +748,8 @@ bool app_init_services(struct app_context *ctx,
         }
     }
 
+    t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.utxo_probe",
+                                   "svc.init_wallet.scrub_plaintext");
     /* STATE G: wrap legacy plaintext rows into WKS1 envelopes; fail loud. */
     if (svc->wallet_sqlite->open) {
         struct zcl_result scrub_r =
@@ -739,6 +761,8 @@ bool app_init_services(struct app_context *ctx,
             exit(1);
         }
     }
+    t_iw = svc_init_wallet_submark(t_iw, "svc.init_wallet.scrub_plaintext",
+                                   "svc.init_wallet");
     /* Pass base datadir; msg_processor_init re-resolves NET-SPECIFIC. */
     msg_processor_init(svc->msg_processor, svc->state, svc->mempool,
                        svc->coins_tip, params, ctx->datadir,
@@ -1108,11 +1132,17 @@ bool app_init_services(struct app_context *ctx,
     rpc_blockchain_set_state(svc->state, svc->mempool, body_datadir);
     rpc_blockchain_set_coins_db(NULL, svc->coins_tip);
     rpc_blockchain_set_node_db(boot_node_db(svc));
+    int64_t t_mm = svc_clock_ms();
     rpc_blockchain_mmr_init_from_state(boot_node_db(svc));
+    t_mm = boot_mark_step(t_mm, "svc.mmr.init", "svc.mmr.catchup");
     rpc_blockchain_mmr_catchup(svc->state);
+    t_mm = boot_mark_step(t_mm, "svc.mmr.catchup", "svc.mmb.init");
     rpc_blockchain_mmb_init_from_state(boot_node_db(svc));
+    t_mm = boot_mark_step(t_mm, "svc.mmb.init", "svc.mmb.catchup");
     rpc_blockchain_mmb_catchup(svc->state);
+    t_mm = boot_mark_step(t_mm, "svc.mmb.catchup", "svc.mmb.leaf_store");
     boot_prepare_mmb_leaf_store(svc, ctx->datadir, legacy_chain_rpc_get_mmb_leaf);
+    t_mm = boot_mark_step(t_mm, "svc.mmb.leaf_store", "svc.commitment_mmr");
     rpc_blockchain_commitment_mmr_init_from_state(boot_node_db(svc));
     /* Bootstrap commitment MMR if empty but chain is at height.
      * After legacy import, we have the UTXO set at tip but no
@@ -1159,6 +1189,7 @@ bool app_init_services(struct app_context *ctx,
             }
         }
     }
+    t_mm = boot_mark_step(t_mm, "svc.commitment_mmr", "svc.mmr_mmb_catchup");
     t_svc = boot_mark_step(t_svc, "svc.mmr_mmb_catchup",
                            "svc.register_rpc_cmds");
 

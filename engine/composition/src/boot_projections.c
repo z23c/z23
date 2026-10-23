@@ -30,6 +30,8 @@
 #include "storage/wallet_projection.h"
 #include "storage/small_projections.h"
 #include "storage/topology_store.h"
+#include "config/boot_flight_recorder.h"
+#include "boot_timing_marks_internal.h"
 #include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -93,6 +95,7 @@ bool boot_ensure_event_log(const char *datadir)
         return false;
     }
 
+    int64_t t_open = boot_clock_ms();
     g_phase4_event_log = event_log_open(event_path);
     if (!g_phase4_event_log) {
         fprintf(stderr,  // obs-ok:phase4-storage
@@ -100,6 +103,8 @@ bool boot_ensure_event_log(const char *datadir)
         return false;
     }
     event_log_set_singleton(g_phase4_event_log);
+    int64_t t_rebuild = boot_mark_step(t_open, "coins.event_log_open",
+                                       "coins.kv_boot_rebuild");
 
     /* Stamp the coins_kv migration marker on existing forward-built datadirs so
      * the read path is recognised as canonical. No-op before progress.kv opens
@@ -107,6 +112,7 @@ bool boot_ensure_event_log(const char *datadir)
      * re-derives from block bodies via the normal fold (pre-1.0: legacy
      * datadirs may re-derive). */
     boot_rebuild_coins_without_pending_replay();
+    (void)boot_mark_step(t_rebuild, "coins.kv_boot_rebuild", NULL);
     return true;
 }
 
