@@ -412,15 +412,32 @@ static uint32_t bil_selected_genesis_bits(const struct chain_params *cp)
 
 /* Legacy fresh loaders persisted mainnet bits on every network. Correct only
  * the compiled genesis identity; the ordinary PoW admission still runs. */
-static uint32_t bil_flat_effective_bits(const struct block_index_flat *row,
-                                      const struct chain_params *cp)
+static uint32_t bil_effective_bits(int32_t height, const uint8_t hash[32],
+                                   const uint8_t prev_hash[32], uint32_t n_bits,
+                                   const struct chain_params *cp)
 {
     static const uint8_t zero[32] = {0};
-    if (cp && row->height == 0 &&
-        memcmp(row->hash, cp->consensus.hashGenesisBlock.data, 32) == 0 &&
-        memcmp(row->prev_hash, zero, 32) == 0)
+    if (cp && height == 0 &&
+        memcmp(hash, cp->consensus.hashGenesisBlock.data, 32) == 0 &&
+        memcmp(prev_hash, zero, 32) == 0)
         return bil_selected_genesis_bits(cp);
-    return row->n_bits;
+    return n_bits;
+}
+
+bool block_index_row_admit(int32_t height, const uint8_t hash[32],
+                           const uint8_t prev_hash[32], uint32_t n_bits,
+                           const struct chain_params *cp,
+                           int64_t *bad_count, uint32_t *effective_bits)
+{
+    uint32_t bits = bil_effective_bits(height, hash, prev_hash, n_bits, cp);
+    if (effective_bits)
+        *effective_bits = bits;
+    if (cp && block_row_verify(hash, bits, NULL, cp, false) !=
+                  BLOCK_ROW_VERIFY_OK) {
+        flat_quarantine_row(height, hash, bad_count);
+        return false;
+    }
+    return true;
 }
 
 static struct zcl_result bil_flat_insert_rows(
@@ -453,13 +470,11 @@ static struct zcl_result bil_flat_insert_rows(
          * per-row (not inserted → header sync + body_fetch re-supply it) rather
          * than admitted below PoW strength. Skipped when cp is NULL (see above)
          * so it can never drop every row on a missing params table. */
-        uint32_t effective_bits = bil_flat_effective_bits(&entries[i], cp);
-        if (cp && block_row_verify(entries[i].hash, effective_bits, NULL,
-                                   cp, false) != BLOCK_ROW_VERIFY_OK) {
-            flat_quarantine_row(entries[i].height, entries[i].hash,
-                                &flat_bad_count);
+        uint32_t effective_bits;
+        if (!block_index_row_admit(entries[i].height, entries[i].hash,
+                                   entries[i].prev_hash, entries[i].n_bits, cp,
+                                   &flat_bad_count, &effective_bits))
             continue;
-        }
 
         struct block_index *pindex = &arena[i];
         enum bil_flat_admit admit =

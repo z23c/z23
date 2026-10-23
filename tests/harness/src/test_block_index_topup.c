@@ -38,6 +38,7 @@
 #include "validation/main_state.h"
 #include "validation/chainstate.h"
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "core/uint256.h"
 #include "core/arith_uint256.h"
 #include "primitives/block.h"
@@ -62,7 +63,7 @@ static void topup_hash_for(int h, struct uint256 *out)
     memset(out->data, 0, 32);
     out->data[0] = (uint8_t)(h & 0xFF);
     out->data[1] = (uint8_t)((h >> 8) & 0xFF);
-    out->data[31] = 0x77;
+    out->data[2] = 0x77;  /* low bytes only: the hash must meet its target */
 }
 
 /* Append one EV_BLOCK_HEADER event for the projection to fold. */
@@ -377,6 +378,53 @@ static int run_undo_insert_seal_cases(void)
     return failures;
 }
 
+/* A projection row whose hash exceeds its own PoW target is refused by the
+ * same gate the flat loader applies (block_index_row_admit): it is not
+ * inserted, the flat-row quarantine counter moves, and a good row in the same
+ * top-up still goes in. */
+static int run_admission_gate_cases(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "topup", "gate");
+    char log_path[320], db_path[320];
+    snprintf(log_path, sizeof(log_path), "%s/events", dir);
+    snprintf(db_path, sizeof(db_path), "%s/projection.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *bip = log
+        ? block_index_projection_open(db_path, log) : NULL;
+    struct main_state ms;
+    main_state_init(&ms);
+    struct uint256 good, bad;
+    memset(&good, 0, sizeof(good));
+    memset(&bad, 0, sizeof(bad));
+    good.data[0] = 0x21;
+    bad.data[0] = 0x22;
+    bad.data[31] = 0xFF;  /* far above the 0x2000ffff target */
+    const uint32_t st = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    bool ready = log && bip &&
+        topup_emit_row(log, &good, NULL, 120, st, 2, 100, 1) &&
+        topup_emit_row(log, &bad, NULL, 121, st, 2, 200, 1);
+    TOPUP_CHECK("gate: fixture ready", ready);
+    int64_t q0 = block_index_flat_row_quarantined();
+    size_t n0 = block_map_count(&ms.map_block_index);
+    TOPUP_CHECK("gate: topup returns ok",
+                ready && block_index_projection_topup_with(bip, &ms, dir));
+    TOPUP_CHECK("gate: good row inserted",
+                block_map_find(&ms.map_block_index, &good) != NULL);
+    TOPUP_CHECK("gate: over-target row NOT inserted",
+                block_map_find(&ms.map_block_index, &bad) == NULL);
+    TOPUP_CHECK("gate: map grew by the good row only",
+                block_map_count(&ms.map_block_index) == n0 + 1);
+    TOPUP_CHECK("gate: quarantine counter incremented once",
+                block_index_flat_row_quarantined() - q0 == 1);
+    if (bip) block_index_projection_close(bip);
+    if (log) event_log_close(log);
+    main_state_free(&ms);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 static int run_bound_topup_integration(void)
 {
     int failures = 0;
@@ -498,6 +546,9 @@ static int run_bound_topup_integration(void)
 int test_block_index_topup(void)
 {
     int failures = 0;
+    /* Rows pass the shared PoW gate: regtest params admit the 0x2000ffff
+     * fixture bits. Restored on every return. */
+    chain_params_select(CHAIN_REGTEST);
 
     char dir[256];
     snprintf(dir, sizeof(dir), "./test-tmp/topup_%d", (int)getpid());
@@ -599,6 +650,7 @@ int test_block_index_topup(void)
         if (bip) block_index_projection_close(bip);
         if (log) event_log_close(log);
         main_state_free(&ms);
+        chain_params_select(CHAIN_MAIN);
         return failures + 1;
     }
 
@@ -715,7 +767,10 @@ int test_block_index_topup(void)
     block_index_projection_close(bip);
     event_log_close(log);
     main_state_free(&ms);
-    return failures + run_bound_topup_integration() + run_undo_topup_cases()
-                    + run_undo_changed_file_cases()
-                    + run_undo_insert_seal_cases();
+    failures += run_bound_topup_integration() + run_undo_topup_cases()
+                + run_undo_changed_file_cases()
+                + run_undo_insert_seal_cases()
+                + run_admission_gate_cases();
+    chain_params_select(CHAIN_MAIN);
+    return failures;
 }

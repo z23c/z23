@@ -33,6 +33,7 @@
 
 #include "services/block_index_loader.h"
 #include "chain/chain.h"
+#include "chain/chainparams.h"
 #include "chain/pow.h"
 #include "core/arith_uint256.h"
 #include "core/uint256.h"
@@ -116,6 +117,7 @@ struct topup_ctx {
     size_t valid_raised;
     size_t height_conflicts;
     size_t stubs_hydrated;
+    int64_t quarantined;  /* rows refused by the shared admission gate */
     /* Inserted entries, collected for the bounded chainwork pass. */
     struct block_index **new_entries;
     size_t new_count;
@@ -244,6 +246,63 @@ static bool topup_track_inserted(struct topup_ctx *c,
     return true;
 }
 
+/* The flat loader's own admission gate (block_index_row_admit): a row it
+ * would quarantine must not enter the map by this path either. */
+static bool topup_row_admitted(struct topup_ctx *c, const uint8_t hash[32],
+                               const struct disk_block_index *dbi)
+{
+    return block_index_row_admit(dbi->nHeight, hash, dbi->hashPrev.data,
+                                 dbi->nBits, chain_params_get(),
+                                 &c->quarantined, NULL);
+}
+
+/* Insert a row the loaders never saw, behind the shared admission gate.
+ * Returns false only on a hard failure (c->failed set); a quarantined row is
+ * skipped and the top-up continues. */
+static bool topup_insert_new(struct topup_ctx *c, const struct uint256 *h,
+                             const uint8_t hash[32],
+                             const struct disk_block_index *dbi)
+{
+    struct block_index *bi;
+    if (!topup_row_admitted(c, hash, dbi))
+        return true;  /* quarantined: not inserted, top-up continues */
+    /* The loaders never saw this block (connected after the last
+     * flat save). Insert it with the projection's full record —
+     * the position is an exact payload offset written by this node. */
+    bi = chainstate_insert_block_index((struct chainstate *)c->ms, h);
+    if (!bi) {
+        c->failed = true;
+        return false;
+    }
+    bi->nHeight              = dbi->nHeight;
+    bi->nFile                = dbi->nFile;
+    bi->nDataPos             = dbi->nDataPos;
+    bi->nUndoPos             = dbi->nUndoPos;
+    bi->nVersion             = dbi->nVersion;
+    bi->hashMerkleRoot       = dbi->hashMerkleRoot;
+    bi->hashFinalSaplingRoot = dbi->hashFinalSaplingRoot;
+    bi->nTime                = dbi->nTime;
+    bi->nBits                = dbi->nBits;
+    bi->nNonce               = dbi->nNonce;
+    bi->nSolution            = NULL;  /* not retained in RAM */
+    bi->nSolutionSize        = 0;
+    bi->nStatus              = dbi->nStatus & ~BLOCK_FAILED_MASK;
+    bi->nCachedBranchId      = dbi->nCachedBranchId;
+    bi->nTx                  = dbi->nTx;
+    if (dbi->has_sprout_value) {
+        bi->nSproutValue     = dbi->nSproutValue;
+        bi->has_sprout_value = true;
+    }
+    bi->nSaplingValue        = dbi->nSaplingValue;
+    topup_seal_undo_bit(bi);
+    c->inserted++;
+    if (!topup_track_inserted(c, bi)) {
+        c->failed = true;
+        return false;
+    }
+    return true;
+}
+
 /* Fold one projection row into the map, raise-only. */
 static bool topup_row_cb(const uint8_t hash[32],
                          const struct disk_block_index *dbi,
@@ -259,41 +318,7 @@ static bool topup_row_cb(const uint8_t hash[32],
 
     struct block_index *bi = block_map_find(&c->ms->map_block_index, &h);
     if (!bi) {
-        /* The loaders never saw this block (connected after the last
-         * flat save). Insert it with the projection's full record —
-         * the position is an exact payload offset written by this node. */
-        bi = chainstate_insert_block_index((struct chainstate *)c->ms, &h);
-        if (!bi) {
-            c->failed = true;
-            return false;
-        }
-        bi->nHeight              = dbi->nHeight;
-        bi->nFile                = dbi->nFile;
-        bi->nDataPos             = dbi->nDataPos;
-        bi->nUndoPos             = dbi->nUndoPos;
-        bi->nVersion             = dbi->nVersion;
-        bi->hashMerkleRoot       = dbi->hashMerkleRoot;
-        bi->hashFinalSaplingRoot = dbi->hashFinalSaplingRoot;
-        bi->nTime                = dbi->nTime;
-        bi->nBits                = dbi->nBits;
-        bi->nNonce               = dbi->nNonce;
-        bi->nSolution            = NULL;  /* not retained in RAM */
-        bi->nSolutionSize        = 0;
-        bi->nStatus              = dbi->nStatus & ~BLOCK_FAILED_MASK;
-        bi->nCachedBranchId      = dbi->nCachedBranchId;
-        bi->nTx                  = dbi->nTx;
-        if (dbi->has_sprout_value) {
-            bi->nSproutValue     = dbi->nSproutValue;
-            bi->has_sprout_value = true;
-        }
-        bi->nSaplingValue        = dbi->nSaplingValue;
-        topup_seal_undo_bit(bi);
-        c->inserted++;
-        if (!topup_track_inserted(c, bi)) {
-            c->failed = true;
-            return false;
-        }
-        return true;
+        return topup_insert_new(c, &h, hash, dbi);
     }
 
     /* Same hash at a different recorded height: usually a label conflict
@@ -312,7 +337,8 @@ static bool topup_row_cb(const uint8_t hash[32],
                     !(bi->nStatus & BLOCK_HAVE_DATA) &&
                     bi->nTx == 0;
         bool row_real = dbi->nHeight > 0 && dbi->nBits != 0;
-        if (stub && row_real) {
+        if (stub && row_real &&
+            topup_row_admitted(c, hash, dbi)) {
             int stub_h = bi->nHeight;
             bi->nHeight              = dbi->nHeight;
             bi->nFile                = dbi->nFile;
@@ -621,7 +647,7 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
                "ntx_applied=%zu "
                "valid_raised=%zu ntx_recovered_from_disk=%zu "
                "ntx_unreadable=%zu height_conflicts=%zu "
-               "stubs_hydrated=%zu\n",
+               "stubs_hydrated=%zu quarantined=%lld\n",
                ctx.rows, ctx.inserted, ctx.data_applied, ctx.undo.applied,
                ctx.undo.cleared,
                ctx.undo.refused_have + topup_undo_unusable(&ctx.undo),
@@ -629,7 +655,8 @@ bool block_index_projection_topup_with(struct block_index_projection *bip,
                ctx.undo.refused_status, ctx.undo.refused_file,
                ctx.ntx_applied,
                ctx.valid_raised, ntx_recovered, ntx_unreadable,
-               ctx.height_conflicts, ctx.stubs_hydrated);
+               ctx.height_conflicts, ctx.stubs_hydrated,
+               (long long)ctx.quarantined);
         if (ntx_capped > 0)
             LOG_WARN("block_index",
                      "topup: nTx disk recovery CAPPED at %d reads — "

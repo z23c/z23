@@ -229,6 +229,18 @@ int64_t block_index_blocks_hydrate_quarantined(void);
  * re-supply it). Surfaced by diag_block_index_dump_state_json. Reentrant. */
 int64_t block_index_flat_row_quarantined(void);
 
+/* THE per-row admission gate, shared by the flat loader and the projection
+ * top-up so a row one drops can never re-enter via the other: effective
+ * bits (legacy genesis correction) then block_row_verify (hash vs target,
+ * header==NULL). cp==NULL skips the check (admits). A failing row bumps the
+ * flat-row quarantine counter + blocker + throttled WARN and returns false;
+ * the caller skips it. *effective_bits (optional) gets the bits to store. */
+struct chain_params;
+bool block_index_row_admit(int32_t height, const uint8_t hash[32],
+                           const uint8_t prev_hash[32], uint32_t n_bits,
+                           const struct chain_params *cp,
+                           int64_t *bad_count, uint32_t *effective_bits);
+
 /* ── LevelDB block tree ──────────────────────────────────── */
 
 /* Load block_index from LevelDB block tree database.
