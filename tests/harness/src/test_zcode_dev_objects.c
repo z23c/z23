@@ -4366,8 +4366,21 @@ static int test_zd_improve_command(void)
                       action_id);
         zcl_command_reply_free(&legacy_reply);
         json_set_str((struct json_value *)json_get(&input, "mode"), "admit");
+        /* Own temp dir: the captured workspace tree must stay unchanged. */
+        char fixed_dir[256], fixed_real[4096];
+        char outside_fixed[4352], outside_link[4352];
+        test_make_tmpdir(fixed_dir, sizeof(fixed_dir), "zcode_dev",
+                         "fixed_outside");
+        ASSERT(platform_directory_canonical_real(fixed_dir, fixed_real,
+                                                 sizeof(fixed_real)));
+        (void)snprintf(outside_fixed, sizeof(outside_fixed),
+                       "%s/fixed_outside.bin", fixed_real);
+        ASSERT(zd_write_text(outside_fixed, "fixed input outside\n"));
+        (void)snprintf(outside_link, sizeof(outside_link),
+                       "%s/fixed_link.bin", fixed_real);
+        ASSERT(symlink(outside_fixed, outside_link) == 0);
         json_set_str((struct json_value *)json_get(
-                         &input, "fixed_input_path"), "/usr/bin/true");
+                         &input, "fixed_input_path"), outside_fixed);
         struct zcl_command_reply detached_input_reply;
         zcl_command_reply_init(&detached_input_reply,
                                "zcl.zcode_improve.v1");
@@ -4376,6 +4389,17 @@ static int test_zd_improve_command(void)
         ASSERT_STR_EQ(detached_input_reply.error.code,
                       "FIXED_INPUT_OUTSIDE_CANDIDATE");
         zcl_command_reply_free(&detached_input_reply);
+        json_set_str((struct json_value *)json_get(
+                         &input, "fixed_input_path"), outside_link);
+        struct zcl_command_reply symlink_input_reply;
+        zcl_command_reply_init(&symlink_input_reply,
+                               "zcl.zcode_improve.v1");
+        zcl_native_handle_zcode_improve(&request, &symlink_input_reply);
+        ASSERT_EQ(symlink_input_reply.exit_code, ZCL_COMMAND_EXIT_INVALID);
+        ASSERT_STR_EQ(symlink_input_reply.error.code, "BAD_FIXED_INPUT");
+        zcl_command_reply_free(&symlink_input_reply);
+        ASSERT(unlink(outside_link) == 0);
+        ASSERT(unlink(outside_fixed) == 0);
         json_set_str((struct json_value *)json_get(
                          &input, "fixed_input_path"), candidate_input_path);
         json_set_str((struct json_value *)json_get(&input, "patch_root"), "");
