@@ -149,8 +149,14 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives)
 
+/* The lab-loop leaves hang under their own branch: the `fleet` menu is at
+ * ZCL_COMMAND_BRANCH_BUDGET. Paths stay fleet.objectives.*. */
+ZCL_COMMAND_BRANCH("fleet.loop", "fleet",
+                   "Lab-loop reads: work cards and landing verdicts",
+                   ZCL_COMMAND_LAYER_OPS)
+
 ZCL_COMMAND_READY_READ(
-    "fleet.objectives.brief", "fleet", "",
+    "fleet.objectives.brief", "fleet.loop", "",
     "A work card for the objective z23 should work on next",
     "Picks the objective `fleet objectives` would pick as `next` (the "
     "measured unmet row with the largest gap, product before lab) and prints "
@@ -179,7 +185,7 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives_brief)
 
 ZCL_COMMAND_READY_READ(
-    "fleet.objectives.verdict", "fleet", "",
+    "fleet.objectives.verdict", "fleet.loop", "",
     "Did a landing move an objective: compare two objectives snapshot rows",
     "Reads <state>/land/objectives.jsonl, the zcl.objectives_snapshot.v1 line "
     "the land queue appends after each landing, and compares two rows: by "

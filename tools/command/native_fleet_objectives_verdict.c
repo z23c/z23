@@ -24,6 +24,7 @@
 
 #include "command/native_command.h"
 
+#include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/state_root.h"
 #include "util/log_macros.h"
@@ -185,7 +186,7 @@ static void fvd_line_take(struct fvd_scan *sc, const char *line, size_t len)
 /* Streams the file. False on a read error (errno set). */
 static bool fvd_scan_file(FILE *f, struct fvd_scan *sc)
 {
-    char *line = malloc(FVD_LINE_MAX + 1u);
+    char *line = zcl_malloc(FVD_LINE_MAX + 1u, "verdict line");
     enum fvd_line st;
     size_t len;
     if (!line) {
@@ -592,7 +593,7 @@ static bool fvd_fill(struct json_value *data, const struct fvd_scan *sc,
 {
     struct json_value entries;
     struct fvd_counts c = {0, 0, 0, 0};
-    char *screen = malloc(FVD_SCREEN_MAX);
+    char *screen = zcl_malloc(FVD_SCREEN_MAX, "verdict screen");
     bool ok = screen != NULL;
     json_init(&entries);
     json_set_array(&entries);
