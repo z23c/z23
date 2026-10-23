@@ -171,6 +171,26 @@ static char emit_unescape(char e)
     }
 }
 
+/* Index just past the slash-star comment that opens at src[j]; advances *line
+ * over any newlines inside it. An unclosed comment runs to n. */
+static size_t emit_skip_block_comment(const char *src, size_t n, size_t j, int *line)
+{
+    j += 2;
+    while (j + 1 < n && !(src[j] == '*' && src[j + 1] == '/')) {
+        if (src[j] == '\n') (*line)++;
+        j++;
+    }
+    return (j + 1 < n) ? j + 2 : n;
+}
+
+/* Index of the newline that ends the double-slash comment opening at src[j]
+ * (or n). The newline itself is left for the caller to count. */
+static size_t emit_skip_line_comment(const char *src, size_t n, size_t j)
+{
+    while (j < n && src[j] != '\n') j++;
+    return j;
+}
+
 /* Skip whitespace and comments starting at src[j]; returns the new index and
  * advances *line over any newlines crossed. */
 static size_t emit_skip_gap(const char *src, size_t n, size_t j, int *line)
@@ -179,16 +199,11 @@ static size_t emit_skip_gap(const char *src, size_t n, size_t j, int *line)
         if (j < n && (src[j] == ' ' || src[j] == '\t' || src[j] == '\r')) { j++; continue; }
         if (j < n && src[j] == '\n') { (*line)++; j++; continue; }
         if (j + 1 < n && src[j] == '/' && src[j + 1] == '*') {
-            j += 2;
-            while (j + 1 < n && !(src[j] == '*' && src[j + 1] == '/')) {
-                if (src[j] == '\n') (*line)++;
-                j++;
-            }
-            j = (j + 1 < n) ? j + 2 : n;
+            j = emit_skip_block_comment(src, n, j, line);
             continue;
         }
         if (j + 1 < n && src[j] == '/' && src[j + 1] == '/') {
-            while (j < n && src[j] != '\n') j++;
+            j = emit_skip_line_comment(src, n, j);
             continue;
         }
         return j;
@@ -198,6 +213,62 @@ static size_t emit_skip_gap(const char *src, size_t n, size_t j, int *line)
 /* Fill b->lit / b->runs from one file's bytes. Comments and character literals
  * are skipped; adjacent string literals separated only by whitespace/comments
  * become one run, which is what makes a wrapped format string searchable. */
+/* Append one byte to the run buffer, dropping it once the buffer is full. */
+static void emit_put_lit(struct emit_buf *b, char c)
+{
+    if (b->lit_len + 2 < b->lit_cap)
+        b->lit[b->lit_len++] = c;
+}
+
+/* Index just past the character literal whose opening quote is at src[i]. */
+static size_t emit_skip_char_literal(const char *src, size_t n, size_t i, int *line)
+{
+    i++;
+    while (i < n && src[i] != '\'') {
+        if (src[i] == '\\' && i + 1 < n) i++;
+        if (i < n && src[i] == '\n') (*line)++;
+        i++;
+    }
+    if (i < n) i++;
+    return i;
+}
+
+/* Copy one string literal's body into the run buffer. `i` is its open quote;
+ * returns the index just past its close quote (or n when unterminated). */
+static size_t emit_string_body(struct emit_buf *b, const char *src, size_t n,
+                               size_t i, int *line)
+{
+    i++;                                               /* past the open quote */
+    while (i < n && src[i] != '"') {
+        if (src[i] == '\\' && i + 1 < n) {
+            if (src[i + 1] == '\n') { (*line)++; i += 2; continue; }
+            emit_put_lit(b, emit_unescape(src[i + 1]));
+            i += 2;
+            continue;
+        }
+        if (src[i] == '\n') (*line)++;                  /* unterminated: defensive */
+        emit_put_lit(b, src[i]);
+        i++;
+    }
+    if (i < n) i++;                                    /* past the close quote */
+    return i;
+}
+
+/* Consume one concatenated run: the string literal at src[i] plus every
+ * further literal that follows it across whitespace and comments. Returns the
+ * index just past the last one; *line tracks the source line. */
+static size_t emit_string_run(struct emit_buf *b, const char *src, size_t n,
+                              size_t i, int *line)
+{
+    for (;;) {
+        i = emit_string_body(b, src, n, i, line);
+        int peek_line = *line;
+        size_t j = emit_skip_gap(src, n, i, &peek_line);
+        if (j < n && src[j] == '"') { i = j; *line = peek_line; continue; }
+        return i;
+    }
+}
+
 static void emit_collect_literals(struct emit_buf *b, const char *src, size_t n)
 {
     b->lit_len = 0;
@@ -212,13 +283,7 @@ static void emit_collect_literals(struct emit_buf *b, const char *src, size_t n)
             continue;
         }
         if (c == '\'') {
-            i++;
-            while (i < n && src[i] != '\'') {
-                if (src[i] == '\\' && i + 1 < n) i++;
-                if (i < n && src[i] == '\n') line++;
-                i++;
-            }
-            if (i < n) i++;
+            i = emit_skip_char_literal(src, n, i, &line);
             continue;
         }
         if (c != '"') { i++; continue; }
@@ -226,27 +291,7 @@ static void emit_collect_literals(struct emit_buf *b, const char *src, size_t n)
         int run_line = line;
         size_t start = b->lit_len;
         size_t src_start = i;
-        for (;;) {
-            i++;                                       /* past the open quote */
-            while (i < n && src[i] != '"') {
-                if (src[i] == '\\' && i + 1 < n) {
-                    if (src[i + 1] == '\n') { line++; i += 2; continue; }
-                    if (b->lit_len + 2 < b->lit_cap)
-                        b->lit[b->lit_len++] = emit_unescape(src[i + 1]);
-                    i += 2;
-                    continue;
-                }
-                if (src[i] == '\n') line++;             /* unterminated: defensive */
-                if (b->lit_len + 2 < b->lit_cap)
-                    b->lit[b->lit_len++] = src[i];
-                i++;
-            }
-            if (i < n) i++;                            /* past the close quote */
-            int peek_line = line;
-            size_t j = emit_skip_gap(src, n, i, &peek_line);
-            if (j < n && src[j] == '"') { i = j; line = peek_line; continue; }
-            break;
-        }
+        i = emit_string_run(b, src, n, i, &line);
         if (b->lit_len + 1 < b->lit_cap && b->runs_len < b->runs_cap) {
             b->lit[b->lit_len++] = '\0';
             b->runs[b->runs_len].off = start;
@@ -261,18 +306,29 @@ static void emit_collect_literals(struct emit_buf *b, const char *src, size_t n)
 
 /* Length of the printf conversion specifier at s[i] (which must be '%'), or 0
  * when it is not one (including "%%", a literal percent). */
+/* Index of the first byte at or after s[j] that is not in `set`. */
+static size_t emit_skip_set(const char *s, size_t j, const char *set)
+{
+    while (s[j] && strchr(set, s[j])) j++;
+    return j;
+}
+
+/* Index past a printf width or precision: digits and '*' alike. */
+static size_t emit_skip_width(const char *s, size_t j)
+{
+    while (s[j] && (isdigit((unsigned char)s[j]) || s[j] == '*')) j++;
+    return j;
+}
+
 static size_t emit_conv_len(const char *s, size_t i)
 {
     if (s[i] != '%') return 0;
     size_t j = i + 1;
     if (s[j] == '%' || s[j] == '\0') return 0;
-    while (s[j] && strchr("-+ #0'", s[j])) j++;
-    while (s[j] && (isdigit((unsigned char)s[j]) || s[j] == '*')) j++;
-    if (s[j] == '.') {
-        j++;
-        while (s[j] && (isdigit((unsigned char)s[j]) || s[j] == '*')) j++;
-    }
-    while (s[j] && strchr("hlLqjzt", s[j])) j++;
+    j = emit_skip_set(s, j, "-+ #0'");
+    j = emit_skip_width(s, j);
+    if (s[j] == '.') j = emit_skip_width(s, j + 1);
+    j = emit_skip_set(s, j, "hlLqjzt");
     if (s[j] && strchr("diouxXeEfgGaAcspn", s[j])) return j + 1 - i;
     return 0;
 }
@@ -365,23 +421,30 @@ static int emit_cmp(const void *a, const void *b)
  * bounded — a '(' inside an earlier literal or comment can mislead it — but it
  * is the difference between blocker_init() and blocker_clear() at two sites
  * that carry byte-identical evidence, which nothing else here can see. */
-static void emit_call_context(const char *src, size_t quote, char *out, size_t cap)
+/* Index of the innermost unclosed '(' before src[quote], searching no further
+ * back than floor_off. Returns false when there is none. */
+static bool emit_find_open_paren(const char *src, size_t quote, size_t floor_off,
+                                 size_t *paren)
 {
-    if (cap == 0) return;
-    out[0] = '\0';
-    size_t floor_off = quote > 480 ? quote - 480 : 0;
     size_t i = quote;
     int depth = 0;
-    bool found = false;
     while (i > floor_off) {
         i--;
         if (src[i] == ')') { depth++; continue; }
         if (src[i] != '(') continue;
-        if (depth == 0) { found = true; break; }
+        if (depth == 0) { *paren = i; return true; }
         depth--;
     }
-    if (!found) return;
-    size_t end = i;
+    return false;
+}
+
+/* Copy the identifier that ends just before the '(' at src[paren] (blanks
+ * between them skipped) into out. Leaves out empty when there is none, or
+ * when it would not fit in cap. */
+static void emit_callee_name(const char *src, size_t paren, size_t floor_off,
+                             char *out, size_t cap)
+{
+    size_t end = paren;
     while (end > floor_off && (src[end - 1] == ' ' || src[end - 1] == '\t' ||
                                src[end - 1] == '\n'))
         end--;
@@ -393,6 +456,16 @@ static void emit_call_context(const char *src, size_t quote, char *out, size_t c
     if (len == 0 || len >= cap) return;
     memcpy(out, src + start, len);
     out[len] = '\0';
+}
+
+static void emit_call_context(const char *src, size_t quote, char *out, size_t cap)
+{
+    if (cap == 0) return;
+    out[0] = '\0';
+    size_t floor_off = quote > 480 ? quote - 480 : 0;
+    size_t paren = 0;
+    if (!emit_find_open_paren(src, quote, floor_off, &paren)) return;
+    emit_callee_name(src, paren, floor_off, out, cap);
 }
 
 static void emit_note(struct emit_scan *sc, const char *path, int line,
@@ -429,6 +502,20 @@ static void emit_note(struct emit_scan *sc, const char *path, int line,
     if (emit_cmp(&s, &sc->cand[weakest]) < 0) sc->cand[weakest] = s;
 }
 
+/* Read the marker pattern that follows the tag at src[j] (blanks skipped) into
+ * pat; returns its length. pat is always NUL-terminated. */
+static size_t emit_read_marker_pattern(const char *src, size_t n, size_t j,
+                                       char *pat, size_t cap)
+{
+    while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
+    size_t k = 0;
+    while (j < n && k + 1 < cap &&
+           (isalnum((unsigned char)src[j]) || strchr("_.*-", src[j])))
+        pat[k++] = src[j++];
+    pat[k] = '\0';
+    return k;
+}
+
 /* `blocker-id: <pattern>` markers in one file's raw text. */
 static void emit_scan_markers(struct emit_scan *sc, const char *relpath,
                               const char *src, size_t n)
@@ -440,14 +527,8 @@ static void emit_scan_markers(struct emit_scan *sc, const char *relpath,
         if (src[i] != 'b' || i + tag > n) continue;
         if (memcmp(src + i, k_marker_tag, tag) != 0) continue;
         sc->report.markers_seen++;
-        size_t j = i + tag;
-        while (j < n && (src[j] == ' ' || src[j] == '\t')) j++;
         char pat[EMIT_MARKER_PAT_MAX];
-        size_t k = 0;
-        while (j < n && k + 1 < sizeof(pat) &&
-               (isalnum((unsigned char)src[j]) || strchr("_.*-", src[j])))
-            pat[k++] = src[j++];
-        pat[k] = '\0';
+        size_t k = emit_read_marker_pattern(src, n, i + tag, pat, sizeof(pat));
         if (k == 0 || strchr(pat, '*') == NULL) continue;
         if (!codeindex_emit_glob_match(pat, sc->query)) continue;
         char ev[CI_EMIT_EVIDENCE_MAX];
@@ -603,13 +684,45 @@ static void emit_attribute(struct codeindex *ci, struct ci_emit_site *s)
     free(syms);
 }
 
+static bool emit_args_ok(const struct codeindex *ci, const char *query,
+                         const struct ci_emit_site *out, int cap)
+{
+    return ci && query && query[0] && out && cap > 0;
+}
+
+/* Walk every source file the index rebuild walks, feeding each to
+ * emit_file_cb. A walk that stops early without a buffer failure is recorded
+ * as a partial enumeration. */
+static void emit_walk_sources(struct emit_scan *sc)
+{
+    bool walked = ci_enumerate_sources(sc->ci->root, emit_file_cb, sc);
+    if (!walked && !sc->failed)
+        sc->report.enumeration_incomplete = true;   /* partial enumeration */
+}
+
+/* Rank the candidate pool, then copy up to cap of them to out, attributing
+ * each to its enclosing function. Returns the count copied; 0 after a failed
+ * scan. */
+static int emit_export_sites(struct codeindex *ci, struct emit_scan *sc,
+                             struct ci_emit_site *out, int cap)
+{
+    if (sc->failed) return 0;
+    qsort(sc->cand, (size_t)sc->n_cand, sizeof(sc->cand[0]), emit_cmp);
+    int n = sc->n_cand < cap ? sc->n_cand : cap;
+    for (int i = 0; i < n; i++) {
+        out[i] = sc->cand[i];
+        emit_attribute(ci, &out[i]);
+    }
+    return n;
+}
+
 int codeindex_emitter_sites(struct codeindex *ci, const char *query,
                             const char *prefer_path,
                             struct ci_emit_site *out, int cap,
                             struct ci_emit_scan_report *report)
 {
     if (report) *report = (struct ci_emit_scan_report){0};
-    if (!ci || !query || !query[0] || !out || cap <= 0)
+    if (!emit_args_ok(ci, query, out, cap))
         LOG_RETURN(-1, "codeindex", "emitter_sites: bad arguments");
 
     struct emit_scan *sc = zcl_malloc(sizeof(*sc), "ci_emit_scan");
@@ -620,19 +733,8 @@ int codeindex_emitter_sites(struct codeindex *ci, const char *query,
     sc->prefer_path = (prefer_path && prefer_path[0]) ? prefer_path : NULL;
     sc->query_len = strlen(query);
 
-    bool walked = ci_enumerate_sources(ci->root, emit_file_cb, sc);
-    if (!walked && !sc->failed)
-        sc->report.enumeration_incomplete = true;   /* partial enumeration */
-
-    int n = 0;
-    if (!sc->failed) {
-        qsort(sc->cand, (size_t)sc->n_cand, sizeof(sc->cand[0]), emit_cmp);
-        n = sc->n_cand < cap ? sc->n_cand : cap;
-        for (int i = 0; i < n; i++) {
-            out[i] = sc->cand[i];
-            emit_attribute(ci, &out[i]);
-        }
-    }
+    emit_walk_sources(sc);
+    int n = emit_export_sites(ci, sc, out, cap);
     if (report) *report = sc->report;
     emit_buf_free(&sc->buf);
     bool failed = sc->failed;

@@ -54,12 +54,6 @@ cognition/modules/codeindex/src/codeindex_capability.c:codeindex_capabilities:45
 cognition/modules/codeindex/src/codeindex_deps.c:codeindex_depfile_graph:19
 cognition/modules/codeindex/src/codeindex_deps.c:epoch_current_dir:27
 cognition/modules/codeindex/src/codeindex_deps.c:scan_one_depfile:21
-cognition/modules/codeindex/src/codeindex_emitter.c:codeindex_emitter_sites:17
-cognition/modules/codeindex/src/codeindex_emitter.c:emit_call_context:17
-cognition/modules/codeindex/src/codeindex_emitter.c:emit_collect_literals:30
-cognition/modules/codeindex/src/codeindex_emitter.c:emit_conv_len:17
-cognition/modules/codeindex/src/codeindex_emitter.c:emit_scan_markers:16
-cognition/modules/codeindex/src/codeindex_emitter.c:emit_skip_gap:21
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_copy_image:23
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_install_posix:61
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_open_image:18
