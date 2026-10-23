@@ -16,6 +16,9 @@
  *     equivalent for random headers
  *   - wrapper passthrough: check_equihash_solution returns the domain
  *     function's `valid`.
+ *   - (96,5) reject branches: nine published invalid vectors (collision,
+ *     out-of-order, duplicate index) plus one derived duplicate-leaf mutant
+ *     are refused by equihash_is_valid_solution.
  */
 
 #include "test/test_core.h"
@@ -81,6 +84,135 @@ static void legacy_shape_feed(struct blake2b_ctx *state,
     blake2b_update(state, buf, 4);
 
     blake2b_update(state, h->nNonce.data, 32);
+}
+
+/* Published reject vectors: zcash/librustzcash, components/equihash/src/
+ * test_vectors/invalid.rs (main, fetched 2026-10-23). Every entry uses the
+ * (96,5) input and nonce {1, 0, ...} of the witness above; each comment names
+ * the upstream entry and its error kind. The C verifier returns only a bool,
+ * so the reason is documented here, not asserted. */
+struct eh_reject_vector {
+    const char *name;
+    eh_index indices[32];
+};
+
+static const struct eh_reject_vector kRejectVectors_96_5[] = {
+    /* invalid.rs entry 0 "Change one index": Kind::Collision */
+    { "change one index", {
+        2262, 15185, 36112, 104243, 23779, 118390, 118332, 130041,
+        32642, 69878, 76925, 80080, 45858, 116805, 92842, 111026,
+        15972, 115059, 85191, 90330, 68190, 122819, 81830, 91132,
+        23460, 49807, 52426, 80391, 69567, 114474, 104973, 122568,
+    } },
+    /* invalid.rs entry 1 "Swap two arbitrary indices": Kind::Collision */
+    { "swap two arbitrary indices", {
+        45858, 15185, 36112, 104243, 23779, 118390, 118332, 130041,
+        32642, 69878, 76925, 80080, 2261, 116805, 92842, 111026,
+        15972, 115059, 85191, 90330, 68190, 122819, 81830, 91132,
+        23460, 49807, 52426, 80391, 69567, 114474, 104973, 122568,
+    } },
+    /* invalid.rs entry 2 "Reverse the first pair of indices": Kind::OutOfOrder */
+    { "reverse the first pair", {
+        15185, 2261, 36112, 104243, 23779, 118390, 118332, 130041,
+        32642, 69878, 76925, 80080, 45858, 116805, 92842, 111026,
+        15972, 115059, 85191, 90330, 68190, 122819, 81830, 91132,
+        23460, 49807, 52426, 80391, 69567, 114474, 104973, 122568,
+    } },
+    /* invalid.rs entry 3 "Swap the first and second pairs of indices": Kind::OutOfOrder */
+    { "swap the first and second pairs", {
+        36112, 104243, 2261, 15185, 23779, 118390, 118332, 130041,
+        32642, 69878, 76925, 80080, 45858, 116805, 92842, 111026,
+        15972, 115059, 85191, 90330, 68190, 122819, 81830, 91132,
+        23460, 49807, 52426, 80391, 69567, 114474, 104973, 122568,
+    } },
+    /* invalid.rs entry 4 "Swap the second-to-last and last pairs of indices": Kind::OutOfOrder */
+    { "swap the second-to-last and last pairs", {
+        2261, 15185, 36112, 104243, 23779, 118390, 118332, 130041,
+        32642, 69878, 76925, 80080, 45858, 116805, 92842, 111026,
+        15972, 115059, 85191, 90330, 68190, 122819, 81830, 91132,
+        23460, 49807, 52426, 80391, 104973, 122568, 69567, 114474,
+    } },
+    /* invalid.rs entry 5 "Swap the first half and second half": Kind::OutOfOrder */
+    { "swap the first half and second half", {
+        15972, 115059, 85191, 90330, 68190, 122819, 81830, 91132,
+        23460, 49807, 52426, 80391, 69567, 114474, 104973, 122568,
+        2261, 15185, 36112, 104243, 23779, 118390, 118332, 130041,
+        32642, 69878, 76925, 80080, 45858, 116805, 92842, 111026,
+    } },
+    /* invalid.rs entry 6 "Sort the indices": Kind::Collision */
+    { "sort the indices", {
+        2261, 15185, 15972, 23460, 23779, 32642, 36112, 45858,
+        49807, 52426, 68190, 69567, 69878, 76925, 80080, 80391,
+        81830, 85191, 90330, 91132, 92842, 104243, 104973, 111026,
+        114474, 115059, 116805, 118332, 118390, 122568, 122819, 130041,
+    } },
+    /* invalid.rs entry 7 "Duplicate indices": Kind::DuplicateIdxs */
+    { "duplicate indices", {
+        2261, 2261, 15185, 15185, 36112, 36112, 104243, 104243,
+        23779, 23779, 118390, 118390, 118332, 118332, 130041, 130041,
+        32642, 32642, 69878, 69878, 76925, 76925, 80080, 80080,
+        45858, 45858, 116805, 116805, 92842, 92842, 111026, 111026,
+    } },
+    /* invalid.rs entry 8 "Duplicate first half": Kind::DuplicateIdxs */
+    { "duplicate first half", {
+        2261, 15185, 36112, 104243, 23779, 118390, 118332, 130041,
+        32642, 69878, 76925, 80080, 45858, 116805, 92842, 111026,
+        2261, 15185, 36112, 104243, 23779, 118390, 118332, 130041,
+        32642, 69878, 76925, 80080, 45858, 116805, 92842, 111026,
+    } },
+};
+
+/* Packs the indices into the 68-byte (96,5) solution and verifies it against
+ * the witness challenge (input + nonce {1, 0, ...}). */
+static bool eh_indices_accepted(const struct equihash_params *ep,
+                                const eh_index *indices)
+{
+    const char *input = "Equihash is an asymmetric PoW based on the Generalised Birthday problem.";
+    unsigned char nonce[32] = {0};
+    unsigned char soln[68];
+    struct blake2b_ctx state;
+
+    nonce[0] = 1;
+    size_t soln_len = eh_get_minimal_from_indices(indices, 32,
+            ep->collision_bit_length, soln, sizeof(soln));
+    equihash_initialise_state(ep, &state);
+    blake2b_update(&state, (const unsigned char *)input, strlen(input));
+    blake2b_update(&state, nonce, 32);
+    return soln_len == sizeof(soln) &&
+           equihash_is_valid_solution(ep, &state, soln, soln_len);
+}
+
+/* Witness must verify (else every reject below is vacuous); each published
+ * reject vector and one derived duplicate-leaf-pair mutant must be refused. */
+static int eh_reject_vector_failures(void)
+{
+    int failures = 0;
+    struct equihash_params ep;
+    equihash_params_init(&ep, 96, 5);
+
+    DEH_CHECK("(96,5) witness indices verify through the packed solution",
+              eh_indices_accepted(&ep, kValidIndices_96_5));
+
+    bool all_rejected = true;
+    size_t n = sizeof(kRejectVectors_96_5) / sizeof(kRejectVectors_96_5[0]);
+    for (size_t i = 0; i < n; i++) {
+        if (eh_indices_accepted(&ep, kRejectVectors_96_5[i].indices)) {
+            printf("\n  reject vector '%s' was accepted\n",
+                   kRejectVectors_96_5[i].name);
+            all_rejected = false;
+        }
+    }
+    DEH_CHECK("published invalid.rs vectors 0-8 are all rejected", all_rejected);
+
+    /* Derived mutant (not published): the last leaf pair holds one index
+     * twice, so only the distinct-index check at level 0 can refuse it. */
+    eh_index dup_last[32];
+    memcpy(dup_last, kValidIndices_96_5, sizeof(dup_last));
+    dup_last[31] = dup_last[30];
+    DEH_CHECK("derived duplicate in last leaf pair is rejected",
+              !eh_indices_accepted(&ep, dup_last));
+
+    return failures;
 }
 
 int test_domain_consensus_equihash(void)
@@ -259,6 +391,8 @@ int test_domain_consensus_equihash(void)
         DEH_CHECK("wrapper returns false on bad solution size",
                   !wrapper_valid);
     }
+
+    failures += eh_reject_vector_failures();
 
     return failures;
 }
