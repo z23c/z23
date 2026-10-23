@@ -5,6 +5,7 @@
  * best-effort release). Split from boot_services.c along the
  * app_shutdown_svc seam. */
 #include "config/boot_internal.h"
+#include "boot_timing_marks_internal.h"
 #include "config/boot_rpc_retry.h"
 #include "config/boot_background_workers.h"
 #include "config/boot_snapshot_offer.h"
@@ -57,6 +58,33 @@ static void shutdown_stop_frontend_services(struct boot_svc_ctx *svc)
     printf("[shutdown] frontend services stopped\n");
 }
 
+/* One indented shutdown sub-stage line, same shape as the [boot] sub-marks. */
+static int64_t shutdown_submark(const char *name, int64_t since)
+{
+    int64_t ms = boot_clock_ms() - since;
+    printf("[shutdown]   %-28s %lldms\n", name, (long long)ms);
+    return boot_clock_ms();
+}
+
+/* Bind the saved flat snapshot to the projection and time it with the row
+ * count and throughput (rows/s). */
+static void shutdown_bind_saved_flat_timed(
+    block_index_projection_t *bip, const struct block_index_flat_identity *id,
+    struct main_state *state)
+{
+    int64_t t0 = boot_clock_ms();
+    bool bound = block_index_projection_bind_saved_flat_state(bip, id, state);
+    int64_t ms = boot_clock_ms() - t0;
+    printf("[shutdown]   %-28s %lldms rows=%llu rows/s=%llu\n",
+           "shutdown.flat_bind", (long long)ms,
+           (unsigned long long)id->row_count,
+           (unsigned long long)(ms > 0
+               ? id->row_count * 1000ULL / (uint64_t)ms : id->row_count));
+    if (!bound)
+        LOG_WARN("shutdown", "block index flat/projection bind refused; "
+                 "next boot will use the full integrity scan");
+}
+
 static void shutdown_persist_fast_restart_state(struct boot_svc_ctx *svc)
 {
     printf("[shutdown] persisting fast restart state\n");
@@ -66,17 +94,17 @@ static void shutdown_persist_fast_restart_state(struct boot_svc_ctx *svc)
                svc->state->map_block_index.size);
         block_index_projection_t *bip = block_index_projection_singleton();
         struct block_index_flat_identity identity;
+        int64_t t_sub = boot_clock_ms();
         uint64_t covered = bip ? block_index_projection_catch_up(bip) : 0;
+        t_sub = shutdown_submark("shutdown.projection_catch_up", t_sub);
         struct zcl_result saved = save_block_index_flat_identity(
             svc->datadir, svc->state, &identity);
+        (void)shutdown_submark("shutdown.flat_save", t_sub);
         if (bip && covered == UINT64_MAX)
             LOG_WARN("shutdown", "projection catch-up failed; flat saved "
                      "without binding so next boot uses the full scan");
-        if (saved.ok && bip && covered != UINT64_MAX &&
-            !block_index_projection_bind_saved_flat_state(
-                bip, &identity, svc->state))
-            LOG_WARN("shutdown", "block index flat/projection bind refused; "
-                     "next boot will use the full integrity scan");
+        if (saved.ok && bip && covered != UINT64_MAX)
+            shutdown_bind_saved_flat_timed(bip, &identity, svc->state);
     }
     printf("[shutdown] fast restart state persisted\n");
 }

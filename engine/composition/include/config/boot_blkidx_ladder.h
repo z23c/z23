@@ -11,6 +11,7 @@
 #define CONFIG_BOOT_BLKIDX_LADDER_H
 
 #include <stdbool.h>
+#include <stdint.h>
 
 struct app_context;
 struct main_state;
@@ -49,6 +50,11 @@ struct boot_blkidx_load_ctx {
  * inline if/else chain did, and bumping that rung's fire counter. All context
  * mutation happens through `c`; the caller reads back c->rebuilt_from_log. */
 void boot_blkidx_run_ladder(struct boot_blkidx_load_ctx *c);
+
+/* The timed post-ladder steps (projection top-up, node.db top-up, nChainTx
+ * propagation) plus a load_rest mark; t_load is the phase start clock. */
+void boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
+                            bool rebuilt_from_log, int64_t t_load);
 
 /* dump_state entry: per-rung fire counters + last-run outcome flags. */
 bool boot_blkidx_rungs_dump_state_json(struct json_value *out, const char *key);

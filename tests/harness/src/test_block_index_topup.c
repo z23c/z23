@@ -492,6 +492,114 @@ static int run_bind_excludes_refused_row_case(void)
     return failures;
 }
 
+struct bindorder_fx {
+    char dir[256];
+    event_log_t *log;
+    block_index_projection_t *bip;
+    struct main_state src;
+    bool ready;
+};
+
+static void bindorder_open(struct bindorder_fx *fx)
+{
+    memset(fx, 0, sizeof(*fx));
+    test_make_tmpdir(fx->dir, sizeof(fx->dir), "topup", "bindorder");
+    char log_path[320], db_path[320];
+    snprintf(log_path, sizeof(log_path), "%s/events", fx->dir);
+    snprintf(db_path, sizeof(db_path), "%s/projection.db", fx->dir);
+    fx->log = event_log_open(log_path);
+    fx->bip = fx->log ? block_index_projection_open(db_path, fx->log) : NULL;
+    main_state_init(&fx->src);
+    /* Flat-only rows: flat count must be >= projection count. */
+    for (int i = 0; i < 3; i++) {
+        struct uint256 pad = {0};
+        pad.data[0] = (uint8_t)(0x50 + i);
+        (void)topup_insert_entry(&fx->src, &pad, 120 + i);
+    }
+    fx->ready = fx->bip != NULL;
+}
+
+static void bindorder_close(struct bindorder_fx *fx)
+{
+    if (fx->bip) block_index_projection_close(fx->bip);
+    if (fx->log) event_log_close(fx->log);
+    main_state_free(&fx->src);
+    test_cleanup_tmpdir(fx->dir);
+}
+
+static bool bindorder_try(struct bindorder_fx *fx)
+{
+    struct block_index_flat_identity identity;
+    return block_index_projection_catch_up(fx->bip) != UINT64_MAX &&
+           save_block_index_flat_identity(fx->dir, &fx->src, &identity).ok &&
+           block_index_projection_bind_saved_flat_state(fx->bip, &identity,
+                                                        &fx->src);
+}
+
+/* Emit a projection row and (optionally) a map entry for it. */
+static struct block_index *bindorder_row(struct bindorder_fx *fx, uint8_t tag,
+                                         bool high_hash, int row_height,
+                                         int map_height)
+{
+    const uint32_t st = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    struct uint256 h = {0};
+    h.data[0] = tag;
+    if (high_hash)
+        h.data[31] = 0xFF;  /* far above the 0x2000ffff target */
+    struct block_index *bi = map_height >= 0
+        ? topup_insert_entry(&fx->src, &h, map_height) : NULL;
+    if (bi) { bi->nStatus = st; bi->nFile = 2; bi->nDataPos = 100; bi->nTx = 1; }
+    fx->ready = fx->ready && (map_height < 0 || bi) &&
+        topup_emit_row(fx->log, &h, NULL, row_height, st, 2, 100, 1);
+    return bi;
+}
+
+/* The coverage predicate is "row inadmissible OR row matched by the map".
+ * The match is evaluated first now; the verdict must not depend on the
+ * order. Rows the map accepts: matched, and inadmissible (high hash) both
+ * absent from the map and present at a mismatching height (where only the
+ * inadmissibility term can accept it). */
+static int run_bind_term_order_accepts(void)
+{
+    int failures = 0;
+    struct bindorder_fx fx;
+    bindorder_open(&fx);
+    (void)bindorder_row(&fx, 0x41, false, 140, 140);
+    TOPUP_CHECK("bindorder: matched row binds", fx.ready && bindorder_try(&fx));
+    (void)bindorder_row(&fx, 0x42, true, 141, -1);
+    TOPUP_CHECK("bindorder: inadmissible row absent from the map binds",
+                fx.ready && bindorder_try(&fx));
+    (void)bindorder_row(&fx, 0x43, true, 142, 99);
+    TOPUP_CHECK("bindorder: inadmissible row present at another height binds",
+                fx.ready && bindorder_try(&fx));
+    bindorder_close(&fx);
+    return failures;
+}
+
+/* Admissible rows the map does not cover must still refuse the bind:
+ * mismatched height, validity behind the row, and absent. */
+static int run_bind_term_order_refuses(void)
+{
+    int failures = 0;
+    struct bindorder_fx fx;
+    bindorder_open(&fx);
+    struct block_index *mm = bindorder_row(&fx, 0x44, false, 143, 150);
+    TOPUP_CHECK("bindorder: admissible height mismatch refuses",
+                fx.ready && mm && !bindorder_try(&fx));
+    if (mm) mm->nHeight = 143;
+    if (mm) mm->nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
+    TOPUP_CHECK("bindorder: admissible validity behind the row refuses",
+                fx.ready && mm && !bindorder_try(&fx));
+    if (mm) mm->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+    TOPUP_CHECK("bindorder: corrected mismatch row binds",
+                fx.ready && mm && bindorder_try(&fx));
+    (void)bindorder_row(&fx, 0x45, false, 144, -1);
+    TOPUP_CHECK("bindorder: admissible row missing from the map refuses",
+                fx.ready && !bindorder_try(&fx));
+    bindorder_close(&fx);
+    return failures;
+}
+
 static int run_bound_topup_integration(void)
 {
     int failures = 0;
@@ -838,7 +946,9 @@ int test_block_index_topup(void)
                 + run_undo_changed_file_cases()
                 + run_undo_insert_seal_cases()
                 + run_admission_gate_cases()
-                + run_bind_excludes_refused_row_case();
+                + run_bind_excludes_refused_row_case()
+                + run_bind_term_order_accepts()
+                + run_bind_term_order_refuses();
     chain_params_select(CHAIN_MAIN);
     return failures;
 }

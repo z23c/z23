@@ -22,6 +22,9 @@
 #include "event/event.h"                       /* event_emitf, EV_BOOT_BLOCK_INDEX */
 #include "platform/time_compat.h"              /* platform_time_wall_time_t */
 #include "json/json.h"
+#include "config/boot_cursor_state.h"          /* boot_cursor_propagate_nchaintx */
+#include "util/log_macros.h"                   /* LOG_WARN */
+#include "boot_timing_marks_internal.h"       /* boot_clock_ms, boot_submark */
 
 #include <stdatomic.h>
 #include <stdint.h>
@@ -328,4 +331,52 @@ bool boot_blkidx_rungs_dump_state_json(struct json_value *out, const char *key)
                       atomic_load_explicit(&g_last_flat_union_tainted,
                                            memory_order_relaxed));
     return true;
+}
+
+/* The post-ladder steps of block_index_load, each timed so the parts sum to
+ * the block_index_load phase: projection top-up, node.db top-up, nChainTx
+ * propagation, and load_rest (ladder + legacy pull + recent save + file
+ * links, everything the three timed steps do not cover). `t_load` is the
+ * boot clock reading taken when the whole phase started. */
+void boot_blkidx_run_topups(struct boot_blkidx_load_ctx *c,
+                            bool rebuilt_from_log, int64_t t_load)
+{
+    /* Projection top-up: fold the event-log block_index_projection over
+     * the loaded map raise-only so a restart keeps the connected extent
+     * instead of dropping to the stale flat floor. Runs BEFORE the
+     * nChainTx propagation below; skipped on -rebuildfromlog. Non-fatal
+     * (re-synced from peers), but a silent false drops to the flat floor.
+     * Full contract: block_index_loader_topup.c. */
+    int64_t t_part = boot_clock_ms();
+    if (!rebuilt_from_log &&
+        !block_index_projection_topup(c->st, c->ctx->datadir))
+        LOG_WARN("boot",
+                 "[boot] block_index projection top-up FAILED — the "
+                 "connected extent may regress to the last flat-file "
+                 "save; expect a window re-chase (see node.log above)");
+    int64_t t_next = boot_submark("blkidx.projection_topup", t_part);
+    int64_t timed_ms = t_next - t_part;
+    t_part = t_next;
+    /* node.db forward-extent top-up (cold-import restart fragility): folds
+     * the body-backed window above a cold-import seed anchor into the map
+     * so the anchor stops being a DETACHED orphan tip and the tip does not
+     * drop to genesis. Contract + STRICT no-op: block_index_loader_topup.c. */
+    if (!rebuilt_from_log &&
+        !block_index_node_db_topup(c->st, c->ndb, c->ctx->datadir))
+        LOG_WARN("boot", "[boot] block_index node.db forward-extent top-up "
+                 "FAILED — a cold-import restart may regress (node.log above)");
+    t_next = boot_submark("blkidx.nodedb_topup", t_part);
+    timed_ms += t_next - t_part;
+    t_part = t_next;
+    /* Propagate nChainTx for all blocks in the index (OS-S2 #2).
+     * Without it, find_most_work_chain() skips blocks with nChainTx=0,
+     * causing "tip=X most_work=Y" with Y << X. Cursor-gated
+     * (BOOT_CUR_NCHAINTX): a warm boot only re-checks entries above the
+     * persisted high-water and skips the O(n log n) rebuild entirely when
+     * they are contiguous-complete. Full body: boot_cursor_state.c. */
+    boot_cursor_propagate_nchaintx(c->st, c->ndb);
+    t_next = boot_submark("blkidx.propagate_nchaintx", t_part);
+    timed_ms += t_next - t_part;
+    (void)boot_submark("blkidx.load_rest",
+                       boot_clock_ms() - ((t_next - t_load) - timed_ms));
 }

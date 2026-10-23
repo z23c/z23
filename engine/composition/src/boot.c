@@ -1997,6 +1997,7 @@ static void boot_step_load_block_index_ladder(struct app_context *ctx,
                                               const struct chain_params *params,
                                               struct boot_seq *s)
 {
+    const int64_t t_load = boot_clock_ms();
     bool rebuilt_from_log = false;
     struct boot_blkidx_load_ctx blkidx = {
         .ctx = ctx, .st = &g_state, .ndb = &g_node_db, .params = params,
@@ -2047,33 +2048,7 @@ static void boot_step_load_block_index_ladder(struct app_context *ctx,
             printf("Linked %d block files from zclassicd\n",
                    link_files.linked);
     }
-    /* Projection top-up: fold the event-log block_index_projection over
-     * the loaded map raise-only so a restart keeps the connected extent
-     * instead of dropping to the stale flat floor. Runs BEFORE the
-     * nChainTx propagation below; skipped on -rebuildfromlog. Non-fatal
-     * (re-synced from peers), but a silent false drops to the flat floor.
-     * Full contract: block_index_loader_topup.c. */
-    if (!rebuilt_from_log &&
-        !block_index_projection_topup(&g_state, ctx->datadir))
-        LOG_WARN("boot",
-                 "[boot] block_index projection top-up FAILED — the "
-                 "connected extent may regress to the last flat-file "
-                 "save; expect a window re-chase (see node.log above)");
-    /* node.db forward-extent top-up (cold-import restart fragility): folds
-     * the body-backed window above a cold-import seed anchor into the map
-     * so the anchor stops being a DETACHED orphan tip and the tip does not
-     * drop to genesis. Contract + STRICT no-op: block_index_loader_topup.c. */
-    if (!rebuilt_from_log &&
-        !block_index_node_db_topup(&g_state, &g_node_db, ctx->datadir))
-        LOG_WARN("boot", "[boot] block_index node.db forward-extent top-up "
-                 "FAILED — a cold-import restart may regress (node.log above)");
-    /* Propagate nChainTx for all blocks in the index (OS-S2 #2).
-     * Without it, find_most_work_chain() skips blocks with nChainTx=0,
-     * causing "tip=X most_work=Y" with Y << X. Cursor-gated
-     * (BOOT_CUR_NCHAINTX): a warm boot only re-checks entries above the
-     * persisted high-water and skips the O(n log n) rebuild entirely when
-     * they are contiguous-complete. Full body: boot_cursor_state.c. */
-    boot_cursor_propagate_nchaintx(&g_state, &g_node_db);
+    boot_blkidx_run_topups(&blkidx, rebuilt_from_log, t_load);
     s->rebuilt_from_log = rebuilt_from_log;
 }
 
