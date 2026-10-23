@@ -268,9 +268,6 @@ cognition/services/src/zcode_science_service.c:zcode_science_work_plan:18
 cognition/services/src/zcode_science_service.c:zcode_science_work_receipt:17
 contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_handle_request:18
 contexts/commons/controllers/src/metaverse_site_controller.c:ms_space_scan:21
-contexts/commons/controllers/src/zcode_site_controller.c:zcode_site_handle_request:27
-contexts/commons/controllers/src/zcode_site_controller.c:zs_handle_package:23
-contexts/commons/controllers/src/zcode_site_controller.c:zs_handle_publisher:16
 contexts/commons/modules/commons_demo/src/demo.c:commons_demo_render:20
 contexts/commons/modules/metaverse/src/adapter_content.c:content_list:19
 contexts/commons/modules/metaverse/src/adapter_zcode.c:zcode_fill:30

@@ -219,6 +219,76 @@ static size_t zs_handle_packages(const char *zcode_dir, const char *query,
     return n;
 }
 
+/* One attestation wire file under the attestations dir: true when it parses
+ * and names the package root. The bounded scan in zs_scan_attestations owns
+ * the counting; *a is written only when the file is read. */
+static bool zs_attest_names_root(const char *dir, const char *name,
+                                 const uint8_t root[32],
+                                 struct vcs_package_attest *a)
+{
+    char apath[4800];
+    int an = snprintf(apath, sizeof(apath), "%s/%s", dir, name);
+    if (an < 0 || (size_t)an >= sizeof(apath))
+        return false;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    bool parsed = false;
+    if (zs_read_object(apath, VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES, &wire,
+                       &wire_len)) {
+        parsed = vcs_package_attest_parse(wire, wire_len, a) ==
+                 VCS_PACKAGE_ATTEST_OK;
+        free(wire);
+    }
+    return parsed && memcmp(a->package_root, root, 32) == 0;
+}
+
+/* Verifier attestations naming this root (bounded scan; parse, filter by
+ * package root — quorum evaluation stays with zcode.package.verify, this
+ * page lists the attestation facts). The caller zeroes the three counters;
+ * at most ZCODE_VIEW_MAX_ATTESTS matches are kept in attests. */
+static void zs_scan_attestations(const char *zcode_dir,
+                                 const uint8_t root[32],
+                                 struct vcs_package_attest *attests,
+                                 size_t *shown, size_t *matching,
+                                 size_t *scanned)
+{
+    char path[4500];
+    snprintf(path, sizeof(path), "%s/attestations", zcode_dir);
+    DIR *dir = opendir(path);
+    if (!dir)
+        return;
+    struct dirent *ent;
+    while ((ent = readdir(dir)) != NULL) {
+        uint8_t scratch[32];
+        if (!zcl_hex_decode_lower(ent->d_name, scratch, 32))
+            continue;
+        if (*scanned == ZS_ATTEST_MAX_SCAN)
+            break;
+        (*scanned)++;
+        struct vcs_package_attest a;
+        if (!zs_attest_names_root(path, ent->d_name, root, &a))
+            continue;
+        (*matching)++;
+        if (*shown < ZCODE_VIEW_MAX_ATTESTS)
+            attests[(*shown)++] = a;
+    }
+    closedir(dir);
+}
+
+/* The local swarm view: how many peers currently advertise the root; -1
+ * when no swarm engine runs or it has no status for the root. */
+static long zs_swarm_advertisers(const uint8_t root[32])
+{
+    long advertisers = -1;
+    struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
+    if (engine) {
+        struct vcs_swarm_download_status st;
+        if (vcs_swarm_engine_download_status(engine, root, &st))
+            advertisers = (long)st.advertisers;
+    }
+    return advertisers;
+}
+
 /* ── /zcode/package/<root> ──────────────────────────────────────────── */
 
 static size_t zs_handle_package(const char *zcode_dir, const char *root_hex,
@@ -275,54 +345,12 @@ static size_t zs_handle_package(const char *zcode_dir, const char *root_hex,
         }
     }
 
-    /* Verifier attestations naming this root (bounded scan; parse, filter
-     * by package root — quorum evaluation stays with zcode.package.verify,
-     * this page lists the attestation facts). */
+    /* Verifier attestations and the local swarm view (see the helpers). */
     struct vcs_package_attest attests[ZCODE_VIEW_MAX_ATTESTS];
     size_t attest_shown = 0, attest_matching = 0, attest_scanned = 0;
-    snprintf(path, sizeof(path), "%s/attestations", zcode_dir);
-    DIR *dir = opendir(path);
-    if (dir) {
-        struct dirent *ent;
-        while ((ent = readdir(dir)) != NULL) {
-            uint8_t scratch[32];
-            if (!zcl_hex_decode_lower(ent->d_name, scratch, 32))
-                continue;
-            if (attest_scanned == ZS_ATTEST_MAX_SCAN)
-                break;
-            attest_scanned++;
-            char apath[4800];
-            int an = snprintf(apath, sizeof(apath), "%s/%s", path,
-                              ent->d_name);
-            if (an < 0 || (size_t)an >= sizeof(apath))
-                continue;
-            wire = NULL;
-            wire_len = 0;
-            struct vcs_package_attest a;
-            bool parsed = false;
-            if (zs_read_object(apath, VCS_PACKAGE_ATTEST_MAX_WIRE_BYTES,
-                               &wire, &wire_len)) {
-                parsed = vcs_package_attest_parse(wire, wire_len, &a) ==
-                         VCS_PACKAGE_ATTEST_OK;
-                free(wire);
-            }
-            if (!parsed || memcmp(a.package_root, root, 32) != 0)
-                continue;
-            attest_matching++;
-            if (attest_shown < ZCODE_VIEW_MAX_ATTESTS)
-                attests[attest_shown++] = a;
-        }
-        closedir(dir);
-    }
-
-    /* The local swarm view: how many peers currently advertise the root. */
-    long advertisers = -1;
-    struct vcs_swarm_engine *engine = vcs_swarm_engine_global();
-    if (engine) {
-        struct vcs_swarm_download_status st;
-        if (vcs_swarm_engine_download_status(engine, root, &st))
-            advertisers = (long)st.advertisers;
-    }
+    zs_scan_attestations(zcode_dir, root, attests, &attest_shown,
+                         &attest_matching, &attest_scanned);
+    long advertisers = zs_swarm_advertisers(root);
 
     struct zcode_view_package_input in = {
         .entry = &entry_copy,
@@ -341,6 +369,30 @@ static size_t zs_handle_package(const char *zcode_dir, const char *root_hex,
     size_t n = zcode_view_package(&in, resp, max);
     vcs_package_manifest_free(&manifest);
     return n;
+}
+
+/* Earned badges for one publisher (the operator policy lens when
+ * configured). *total counts every earned badge, *shown the rows written to
+ * badges[]. Returns whether the policy lens applied. */
+static bool zs_publisher_badges(const char *zcode_dir,
+                                const uint8_t pubkey[33],
+                                struct vcs_badge badges[ZCODE_VIEW_MAX_ROWS],
+                                size_t *shown, size_t *total)
+{
+    bool policy_ok = false;
+    *total = 0;
+    *shown = 0;
+    struct vcs_badge_store *bstore = vcs_badge_store_load(zcode_dir);
+    if (bstore) {
+        struct vcs_badge_policy policy;
+        policy_ok = vcs_badge_policy_load(zcode_dir, &policy);
+        *total = vcs_badge_store_contributor_badges(
+            bstore, policy_ok ? &policy : NULL, pubkey, badges,
+            ZCODE_VIEW_MAX_ROWS);
+        *shown = *total < ZCODE_VIEW_MAX_ROWS ? *total : ZCODE_VIEW_MAX_ROWS;
+        vcs_badge_store_free(bstore);
+    }
+    return policy_ok;
 }
 
 /* ── /zcode/publisher/<pubkey> ──────────────────────────────────────── */
@@ -415,18 +467,8 @@ static size_t zs_handle_publisher(const char *zcode_dir,
     /* Earned badges (the operator policy lens when configured). */
     struct vcs_badge badges[ZCODE_VIEW_MAX_ROWS];
     size_t badges_total = 0, badges_shown = 0;
-    bool policy_ok = false;
-    struct vcs_badge_store *bstore = vcs_badge_store_load(zcode_dir);
-    if (bstore) {
-        struct vcs_badge_policy policy;
-        policy_ok = vcs_badge_policy_load(zcode_dir, &policy);
-        badges_total = vcs_badge_store_contributor_badges(
-            bstore, policy_ok ? &policy : NULL, pubkey, badges,
-            ZCODE_VIEW_MAX_ROWS);
-        badges_shown = badges_total < ZCODE_VIEW_MAX_ROWS
-            ? badges_total : ZCODE_VIEW_MAX_ROWS;
-        vcs_badge_store_free(bstore);
-    }
+    bool policy_ok = zs_publisher_badges(zcode_dir, pubkey, badges,
+                                         &badges_shown, &badges_total);
 
     struct zcode_view_publisher_input in = {
         .contributor = &contributor,
@@ -684,6 +726,87 @@ static size_t zs_handle_download(const char *zcode_dir, const char *rest,
                              resp, max);
 }
 
+/* Split the route from the query string (bounded copy into route). Returns
+ * the query after '?', or NULL when the path carries none. */
+static const char *zs_split_route(const char *path, char *route,
+                                  size_t route_max)
+{
+    size_t rlen = 0;
+    while (path[rlen] && path[rlen] != '?' && rlen < route_max - 1) {
+        route[rlen] = path[rlen];
+        rlen++;
+    }
+    route[rlen] = '\0';
+    return path[rlen] == '?' ? path + rlen + 1 : NULL;
+}
+
+/* The index, the package list, one package and one publisher. Sets *n and
+ * returns true when the route is one of these. */
+static bool zs_route_catalog(const char *zcode_dir, const char *route,
+                             const char *query, uint8_t *resp, size_t max,
+                             size_t *n)
+{
+    if (zs_path_eq(route, "/zcode") || zs_path_eq(route, "/zcode/")) {
+        *n = zs_handle_index(zcode_dir, resp, max);
+        return true;
+    }
+    if (zs_path_eq(route, "/zcode/packages") ||
+        zs_path_eq(route, "/zcode/contexts/commons/packages/")) {
+        *n = zs_handle_packages(zcode_dir, query, resp, max);
+        return true;
+    }
+    if (strncmp(route, "/zcode/package/", 15) == 0) {
+        const char *root_hex = route + 15;
+        char rh[80];
+        if (!zs_copy_route_segment(rh, sizeof(rh), root_hex))
+            *n = zcode_view_package_not_found("invalid", resp, max);
+        else
+            *n = zs_handle_package(zcode_dir, rh, resp, max);
+        return true;
+    }
+    if (strncmp(route, "/zcode/publisher/", 17) == 0) {
+        const char *pub_hex = route + 17;
+        char ph[80];
+        if (!zs_copy_route_segment(ph, sizeof(ph), pub_hex))
+            *n = zcode_view_route_not_found(route, resp, max);
+        else
+            *n = zs_handle_publisher(zcode_dir, ph, resp, max);
+        return true;
+    }
+    return false;
+}
+
+/* The leaderboard, the badges and the downloads. Sets *n and returns true
+ * when the route is one of these. */
+static bool zs_route_scores(const char *zcode_dir, const char *route,
+                            uint8_t *resp, size_t max, size_t *n)
+{
+    if (zs_path_eq(route, "/zcode/leaderboard") ||
+        zs_path_eq(route, "/zcode/leaderboard/")) {
+        *n = zcode_view_leaderboard_index(resp, max);
+        return true;
+    }
+    if (strncmp(route, "/zcode/leaderboard/", 19) == 0) {
+        const char *period = route + 19;
+        char ps[24];
+        if (!zs_copy_route_segment(ps, sizeof(ps), period))
+            *n = zcode_view_route_not_found(route, resp, max);
+        else
+            *n = zs_handle_leaderboard(zcode_dir, ps, resp, max);
+        return true;
+    }
+    if (zs_path_eq(route, "/zcode/badges") ||
+        zs_path_eq(route, "/zcode/badges/")) {
+        *n = zs_handle_badges(zcode_dir, resp, max);
+        return true;
+    }
+    if (strncmp(route, "/zcode/download/", 16) == 0) {
+        *n = zs_handle_download(zcode_dir, route + 16, resp, max);
+        return true;
+    }
+    return false;
+}
+
 /* ── router ─────────────────────────────────────────────────────────── */
 
 size_t zcode_site_handle_request(const char *method, const char *path,
@@ -699,13 +822,7 @@ size_t zcode_site_handle_request(const char *method, const char *path,
 
     /* Split the route from the query string (bounded copy). */
     char route[1024];
-    size_t rlen = 0;
-    while (path[rlen] && path[rlen] != '?' && rlen < sizeof(route) - 1) {
-        route[rlen] = path[rlen];
-        rlen++;
-    }
-    route[rlen] = '\0';
-    const char *query = path[rlen] == '?' ? path + rlen + 1 : NULL;
+    const char *query = zs_split_route(path, route, sizeof(route));
 
     /* Public onboarding is compiled content, independent of private stores. */
     if (zs_path_eq(route, "/zcode/develop") ||
@@ -726,41 +843,11 @@ size_t zcode_site_handle_request(const char *method, const char *path,
                                "the datadir path exceeds the route budget",
                                response, response_max);
 
-    if (zs_path_eq(route, "/zcode") || zs_path_eq(route, "/zcode/"))
-        return zs_handle_index(zcode_dir, response, response_max);
-    if (zs_path_eq(route, "/zcode/packages") ||
-        zs_path_eq(route, "/zcode/contexts/commons/packages/"))
-        return zs_handle_packages(zcode_dir, query, response, response_max);
-    if (strncmp(route, "/zcode/package/", 15) == 0) {
-        const char *root_hex = route + 15;
-        char rh[80];
-        if (!zs_copy_route_segment(rh, sizeof(rh), root_hex))
-            return zcode_view_package_not_found("invalid", response,
-                                                response_max);
-        return zs_handle_package(zcode_dir, rh, response, response_max);
-    }
-    if (strncmp(route, "/zcode/publisher/", 17) == 0) {
-        const char *pub_hex = route + 17;
-        char ph[80];
-        if (!zs_copy_route_segment(ph, sizeof(ph), pub_hex))
-            return zcode_view_route_not_found(route, response, response_max);
-        return zs_handle_publisher(zcode_dir, ph, response, response_max);
-    }
-    if (zs_path_eq(route, "/zcode/leaderboard") ||
-        zs_path_eq(route, "/zcode/leaderboard/"))
-        return zcode_view_leaderboard_index(response, response_max);
-    if (strncmp(route, "/zcode/leaderboard/", 19) == 0) {
-        const char *period = route + 19;
-        char ps[24];
-        if (!zs_copy_route_segment(ps, sizeof(ps), period))
-            return zcode_view_route_not_found(route, response, response_max);
-        return zs_handle_leaderboard(zcode_dir, ps, response, response_max);
-    }
-    if (zs_path_eq(route, "/zcode/badges") ||
-        zs_path_eq(route, "/zcode/badges/"))
-        return zs_handle_badges(zcode_dir, response, response_max);
-    if (strncmp(route, "/zcode/download/", 16) == 0)
-        return zs_handle_download(zcode_dir, route + 16, response,
-                                  response_max);
+    size_t n = 0;
+    if (zs_route_catalog(zcode_dir, route, query, response, response_max,
+                         &n))
+        return n;
+    if (zs_route_scores(zcode_dir, route, response, response_max, &n))
+        return n;
     return zcode_view_route_not_found(route, response, response_max);
 }
