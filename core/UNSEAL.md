@@ -256,3 +256,7 @@ later lane flips it HARD.
 - 2026-10-23T11:11:32Z — REASON: ff1: stream the CBC-MAC over P||Q so a tweak longer than the fixed 256-byte staging buffer is encrypted instead of silently returned unchanged; ZIP 32 (empty tweak, 88 bits) output byte-identical
   old ROOT: 1611ae4fe96c2add865ebf0c0d4d90491530af7bb41912b7efd205bc8d3585c0
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-23T10:48:37Z — REASON: Ed25519/X25519 speed: replace the 16x16-bit TweetNaCl field with a radix-2^51 field (and faster double-scalar mult) without changing any accept/reject result; proven against the frozen-oracle differential test. Owner crypto+AVX directive 2026-10-23.
+  old ROOT: 8f5d93d9c5349a95f231bb681368c44f59a343444b47ad8075a98f2299e3fb86
+  by: owner unseal ritual (make core-unseal)

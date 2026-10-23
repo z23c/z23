@@ -23,9 +23,12 @@
  *   4. 4096 random (sig, pk, msg) triples: reject must agree.
  *   5. Edge cases: identity pk, S = L, L-1, L+1, non-canonical y encodings
  *      (y = p, p+1, 2^255-1), sign bit set on an x = 0 point, and all eight
+ *      low-order points.
  *   6. Published corpora: the 12 ed25519-speccheck cases and the 139
  *      Wycheproof vectors with a 64-byte signature. Each row is pinned to
- *      the ORACLE verdict, not to the published one (see the table comment). */
+ *      the ORACLE verdict, not to the published one (see the table comment).
+ *   7. Shipped keypair/sign byte-equal to the reference; every bit of R and
+ *      of A flipped once; 16384 more random triples. */
 
 #include "test/test_core.h"
 #include "crypto/ed25519.h"
@@ -899,6 +902,46 @@ static void corpus_section(void)
     printf("%s\n", g_failures > before ? "FAIL" : "OK");
 }
 
+/* Section 7: shipped keypair/sign byte-equal to the reference, every single-bit
+ * flip of R and A agrees, and extra random triples. */
+static void section7_sign_and_bitflips(void)
+{
+    printf("keypair/sign byte-identical, R/A bit flips agree... ");
+    int before = g_failures;
+    for (int iter = 0; iter < 8; iter++) {
+        uint8_t seed[32], pk[32], pk2[32], sk2[32], sig[64], sig2[64];
+        uint8_t msg[32];
+        rng_bytes(seed, 32);
+        rng_bytes(msg, sizeof(msg));
+        ref_keypair(pk, seed);
+        zcl_ed25519_keypair(pk2, sk2, seed);
+        ref_sign(sig, msg, sizeof(msg), seed, pk);
+        zcl_ed25519_sign(sig2, msg, sizeof(msg), sk2, pk2);
+        if (memcmp(pk, pk2, 32) != 0 || memcmp(sig, sig2, 64) != 0) {
+            printf("FAIL (keypair/sign differ from reference)\n");
+            g_failures++;
+        }
+        for (int bit = 0; bit < 256; bit++) {
+            uint8_t bad[64], bpk[32];
+            memcpy(bad, sig, 64);
+            bad[bit >> 3] ^= (uint8_t)(1u << (bit & 7));
+            expect_agree_and(bad, msg, sizeof(msg), pk, false, "R bit flip");
+            memcpy(bpk, pk, 32);
+            bpk[bit >> 3] ^= (uint8_t)(1u << (bit & 7));
+            expect_agree(sig, msg, sizeof(msg), bpk, "A bit flip");
+        }
+    }
+    for (int iter = 0; iter < 16384; iter++) {
+        uint8_t sig[64], pk[32], msg[8];
+        rng_bytes(sig, 64);
+        rng_bytes(pk, 32);
+        rng_bytes(msg, sizeof(msg));
+        sig[63] &= 0x0f;
+        expect_agree(sig, msg, sizeof(msg), pk, "extra random triple");
+    }
+    printf("%s\n", g_failures > before ? "FAIL" : "OK");
+}
+
 int test_ed25519_differential(void)
 {
     g_failures = 0;
@@ -1147,6 +1190,9 @@ int test_ed25519_differential(void)
     g_published_diffs = 0;
     corpus_section();
     printf("published-vs-oracle notes: %u (information only)\n", g_published_diffs);
+
+    /* ── 7. Signing and bit flips (separate function) ── */
+    section7_sign_and_bitflips();
 
     printf("ed25519_differential: %u agreeing comparisons, %d failure(s)\n",
            g_agreements, g_failures);

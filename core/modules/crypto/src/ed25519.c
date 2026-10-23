@@ -48,31 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef int64_t gf[16];
-
-static const gf gf0 = {0};
-static const gf gf1 = {1};
-
-static const gf D = {
-    0x78a3, 0x1359, 0x4dca, 0x75eb,
-    0xd8ab, 0x4141, 0x0a4d, 0x0070,
-    0xe898, 0x7779, 0x4079, 0x8cc7,
-    0xfe73, 0x2b6f, 0x6cee, 0x5203
-};
-
-static const gf D2 = {
-    0xf159, 0x26b2, 0x9b94, 0xebd6,
-    0xb156, 0x8283, 0x149a, 0x00e0,
-    0xd130, 0xeef3, 0x80f2, 0x198e,
-    0xfce7, 0x56df, 0xd9dc, 0x2406
-};
-
-static const gf I = {
-    0xa0b0, 0x4a0e, 0x1b27, 0xc4ee,
-    0xe478, 0xad2f, 0x1806, 0x2f43,
-    0xd7a7, 0x3dfb, 0x0099, 0x2b4d,
-    0xdf0b, 0x4fc1, 0x2480, 0x2b83
-};
+#include "ed25519_fe51.h"
 
 static const uint8_t BASE_POINT[32] = {
     0x58, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
@@ -81,120 +57,6 @@ static const uint8_t BASE_POINT[32] = {
     0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66
 };
 
-static void car25519(gf o)
-{
-    for (int i = 0; i < 16; i++) {
-        o[i] += (1LL << 16);
-        int64_t c = o[i] >> 16;
-        o[(i + 1) * (i < 15)] += c - 1 + 37 * (c - 1) * (i == 15);
-        o[i] -= c * (1LL << 16);
-    }
-}
-
-static void sel25519(gf p, gf q, int b)
-{
-    int64_t c = ~(b - 1);
-    for (int i = 0; i < 16; i++) {
-        int64_t t = c & (p[i] ^ q[i]);
-        p[i] ^= t;
-        q[i] ^= t;
-    }
-}
-
-static void pack25519(uint8_t o[32], const gf n)
-{
-    gf m, t;
-    memcpy(t, n, sizeof(gf));
-    car25519(t);
-    car25519(t);
-    car25519(t);
-    for (int j = 0; j < 2; j++) {
-        m[0] = t[0] - 0xffed;
-        for (int i = 1; i < 15; i++) {
-            m[i] = t[i] - 0xffff - ((m[i - 1] >> 16) & 1);
-            m[i - 1] &= 0xffff;
-        }
-        m[15] = t[15] - 0x7fff - ((m[14] >> 16) & 1);
-        int64_t b = (m[15] >> 16) & 1;
-        m[14] &= 0xffff;
-        sel25519(t, m, (int)(1 - b));
-    }
-    for (int i = 0; i < 16; i++) {
-        o[2 * i] = (uint8_t)(t[i] & 0xff);
-        o[2 * i + 1] = (uint8_t)(t[i] >> 8);
-    }
-}
-
-static void unpack25519(gf o, const uint8_t n[32])
-{
-    for (int i = 0; i < 16; i++)
-        o[i] = n[2 * i] + ((int64_t)n[2 * i + 1] << 8);
-    o[15] &= 0x7fff; /* mask sign bit (bit 255) */
-}
-
-static void A(gf o, const gf a, const gf b)
-{
-    for (int i = 0; i < 16; i++) o[i] = a[i] + b[i];
-}
-
-static void Z(gf o, const gf a, const gf b)
-{
-    for (int i = 0; i < 16; i++) o[i] = a[i] - b[i];
-}
-
-static void M(gf o, const gf a, const gf b)
-{
-    int64_t t[31] = {0};
-    for (int i = 0; i < 16; i++)
-        for (int j = 0; j < 16; j++)
-            t[i + j] += a[i] * b[j];
-    for (int i = 0; i < 15; i++)
-        t[i] += 38 * t[i + 16];
-    memcpy(o, t, sizeof(gf));
-    car25519(o);
-    car25519(o);
-}
-
-static void S(gf o, const gf a) { M(o, a, a); }
-
-static void inv25519(gf o, const gf a)
-{
-    gf c;
-    memcpy(c, a, sizeof(gf));
-    for (int i = 253; i >= 0; i--) {
-        S(c, c);
-        if (i != 2 && i != 4) M(c, c, a);
-    }
-    memcpy(o, c, sizeof(gf));
-}
-
-static void pow2523(gf o, const gf a)
-{
-    gf c;
-    memcpy(c, a, sizeof(gf));
-    for (int i = 250; i >= 0; i--) {
-        S(c, c);
-        if (i != 1) M(c, c, a);
-    }
-    memcpy(o, c, sizeof(gf));
-}
-
-static int par25519(const gf a)
-{
-    uint8_t d[32];
-    pack25519(d, a);
-    return d[0] & 1;
-}
-
-static int neq25519(const gf a, const gf b)
-{
-    uint8_t c[32], d[32];
-    pack25519(c, a);
-    pack25519(d, b);
-    int v = 0;
-    for (int i = 0; i < 32; i++) v |= c[i] ^ d[i];
-    return v != 0;
-}
 
 /* Extended coordinates: (X, Y, Z, T) where x=X/Z, y=Y/Z, T=X*Y/Z */
 typedef gf gep[4];
@@ -228,6 +90,32 @@ static void point_add(gep p, const gep q)
     M(p[1], h, g);
     M(p[2], g, f);
     M(p[3], e, h);
+}
+
+/* p = [2]p (dbl-2008-hwcd, a = -1). Same group element as point_add(p, p);
+ * only the projective representative differs, and every consumer either
+ * adds, doubles or canonically packs. Subtraction operands are arranged so
+ * every limb handed to M stays below 2^54 (see ed25519_fe51.h). Reads
+ * X, Y, Z; T of the input is not needed. */
+static void point_dbl(gep p)
+{
+    gf a, b, c, ab, e, f, g, h, t;
+    S(a, p[0]);
+    S(b, p[1]);
+    S(c, p[2]);
+    A(c, c, c);
+    A(t, p[0], p[1]);
+    S(t, t);
+    A(ab, a, b);
+    Z(e, t, ab);
+    Z(g, b, a);
+    A(t, a, c);
+    Z(f, b, t);
+    Z(h, gf0, ab);
+    M(p[0], e, f);
+    M(p[1], g, h);
+    M(p[3], e, h);
+    M(p[2], f, g);
 }
 
 static void cswap(gep p, gep q, int b)
@@ -744,7 +632,7 @@ static void point_mul_scalar(gep out, const gep base, const uint8_t s[32])
     set_identity(out);
     for (int w = MX_WINDOWS - 1; w >= 0; w--) {
         for (int k = 0; k < MX_W; k++)
-            point_add(out, out);
+            point_dbl(out);
         unsigned d = mx_digit(s, w);
         if (d != 0u)
             point_add(out, tab[d]);
@@ -776,7 +664,7 @@ static void point_mul_double(gep out, const gep p1, const uint8_t s1[32],
     set_identity(out);
     for (int w = MX_WINDOWS - 1; w >= 0; w--) {
         for (int k = 0; k < MX_W; k++)
-            point_add(out, out);
+            point_dbl(out);
         unsigned d1 = mx_digit(s1, w);
         if (d1 != 0u)
             point_add(out, t1[d1]);
@@ -795,7 +683,7 @@ static void mx_accumulate(gep acc, const struct ed_batch_ws *ws, size_t m)
     set_identity(sum);
     for (int w = MX_WINDOWS - 1; w >= 0; w--) {
         for (int k = 0; k < MX_W; k++)
-            point_add(sum, sum);
+            point_dbl(sum);
         for (size_t j = 0; j < m; j++) {
             unsigned d = mx_digit(ws->scal[j], w);
             if (d != 0u)
