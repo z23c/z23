@@ -12,28 +12,49 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The release lane's unflagged target: what `z23 status` reads. The dev
+ * lane keeps its own default below, but a tool that must measure the
+ * canonical node (fleet objectives) names the release target through these. */
+#define ZCL_CLI_RELEASE_DATADIR ".zclassic-c23"
+#define ZCL_CLI_RELEASE_RPC_PORT 18232
+
 #ifdef ZCL_DEV_BUILD
 #define ZCL_CLI_DEFAULT_DATADIR ".zclassic-c23-dev"
 #define ZCL_CLI_DEFAULT_RPC_PORT 18252
 #define ZCL_CLI_DEFAULT_UNIT "zcl23-dev"
 #else
-#define ZCL_CLI_DEFAULT_DATADIR ".zclassic-c23"
-#define ZCL_CLI_DEFAULT_RPC_PORT 18232
+#define ZCL_CLI_DEFAULT_DATADIR ZCL_CLI_RELEASE_DATADIR
+#define ZCL_CLI_DEFAULT_RPC_PORT ZCL_CLI_RELEASE_RPC_PORT
 #define ZCL_CLI_DEFAULT_UNIT "z23-node"
 #endif
 
-static inline bool zcl_cli_lane_default_datadir(char *out, size_t out_size,
-                                                 const char *home)
+static inline bool zcl_cli_lane_named_datadir(char *out, size_t out_size,
+                                              const char *home,
+                                              const char *name)
 {
     int n;
     if (home)
-        n = snprintf(out, out_size, "%s/%s", home,
-                     ZCL_CLI_DEFAULT_DATADIR);
+        n = snprintf(out, out_size, "%s/%s", home, name);
     else
-        n = snprintf(out, out_size, "%s", ZCL_CLI_DEFAULT_DATADIR);
+        n = snprintf(out, out_size, "%s", name);
     /* false when the path did not fit: out holds a truncated prefix that
      * can name another node's directory and must not be used. */
     return n >= 0 && (size_t)n < out_size;
+}
+
+static inline bool zcl_cli_lane_default_datadir(char *out, size_t out_size,
+                                                const char *home)
+{
+    return zcl_cli_lane_named_datadir(out, out_size, home,
+                                      ZCL_CLI_DEFAULT_DATADIR);
+}
+
+/* The release lane's HOME-derived target, whichever lane this binary is. */
+static inline bool zcl_cli_release_default_datadir(char *out, size_t out_size,
+                                                    const char *home)
+{
+    return zcl_cli_lane_named_datadir(out, out_size, home,
+                                      ZCL_CLI_RELEASE_DATADIR);
 }
 
 /* Settle the operator-target datadir once the argv flags are parsed. An

@@ -14,6 +14,7 @@
 
 #include "command/native_command.h"
 #include "command/native_fleet_objectives.h"
+#include "config/cli_lane_defaults.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
@@ -1654,6 +1655,36 @@ int test_fleet_objectives(void)
         v = fox_measure(FOX_NO_BRIEF, dd, "node_warm_restart_s");
         ASSERT(!v.measured);
         ASSERT(strstr(v.reason, "not reached serving") != NULL);
+        PASS();
+    }
+
+    TEST("objectives: with no datadir named the node rows read the release "
+         "default under HOME, as z23 status does, and a missing node stays "
+         "unmeasured") {
+        char home[1024], rel[1100];
+        const char *old_home = getenv("HOME");
+        char saved[1024] = "";
+        struct zcl_objectives_options o = {0};
+        if (old_home)
+            (void)snprintf(saved, sizeof(saved), "%s", old_home);
+        (void)snprintf(home, sizeof(home), "%s/homefix", root);
+        (void)snprintf(rel, sizeof(rel), "%s/%s", home,
+                       ZCL_CLI_RELEASE_DATADIR);
+        ASSERT(fox_mkdir(home));
+        ASSERT(fox_mkdir(rel));
+        (void)setenv("HOME", home, 1);
+        struct zcl_objective_value v =
+            zcl_objectives_measure(&o, "node_warm_restart_s");
+        ASSERT(!v.measured);
+        ASSERT(v.reason[0] != '\0');
+        ASSERT(fox_boot_beacon(rel, BOOT_STAGE_READY, 104));
+        v = zcl_objectives_measure(&o, "node_warm_restart_s");
+        if (old_home)
+            (void)setenv("HOME", saved, 1);
+        else
+            (void)unsetenv("HOME");
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)104);
         PASS();
     }
 

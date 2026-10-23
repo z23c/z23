@@ -14,6 +14,7 @@
 #include "native_fleet_objectives.h"
 
 #include "base/safe_alloc.h"
+#include "config/cli_lane_defaults.h"
 #include "controllers/native_handler_body.h"
 #include "controllers/status_native_handlers.h"
 #include "json/json.h"
@@ -58,6 +59,32 @@ static char *obj_node_read_file(const char *path, size_t *len_out)
     return buf;
 }
 
+/* The datadir the node rows read. An explicit one (options->datadir, or the
+ * process's -datadir/ZCL_DATADIR) wins. With none, the product's own default
+ * stands: this binary's lane default (the dev lane's own, when no node runs
+ * there, is not the canonical node) is replaced by the release default
+ * `z23 status` reads, through the same cli_lane_defaults.h resolver. A
+ * datadir the process resolved some other way is kept. `buf` holds the path
+ * when one is built; the result is NULL when nothing resolves. */
+static const char *obj_node_target(const struct zcl_objectives_options *options,
+                                   char *buf, size_t cap)
+{
+    const char *bound = zcl_native_command_datadir();
+    const char *home = getenv("HOME");
+    char lane[512];
+    if (options && options->datadir && options->datadir[0])
+        return options->datadir;
+    if (zcl_native_command_datadir_is_explicit())
+        return bound;
+    if (!home || !home[0])
+        return bound;
+    if (bound && bound[0] &&
+        !(zcl_cli_lane_default_datadir(lane, sizeof(lane), home) &&
+          strcmp(bound, lane) == 0))
+        return bound;
+    return zcl_cli_release_default_datadir(buf, cap, home) ? buf : NULL;
+}
+
 /* The status brief's raw text, a malloc'd string: from options->brief when
  * named, else from the node through the same body `z23 status` runs, within
  * options->node_budget_ms when one is set. NULL, with the reason in v, when
@@ -73,11 +100,25 @@ static char *obj_node_fetch(const struct zcl_objectives_options *options,
             obj_node_reason(v, "cannot read the status brief", options->brief);
     } else {
         struct zcl_native_body_err err;
+        char target_buf[512], bound[512];
+        const char *target = obj_node_target(options, target_buf,
+                                             sizeof(target_buf));
+        const char *now = zcl_native_command_datadir();
+        int bound_port = zcl_native_command_rpc_port();
+        bool rebind = target && target[0] && strcmp(target, now) != 0 &&
+                      !(options && options->datadir);
         memset(&err, 0, sizeof(err));
+        /* The call is synchronous: bind the target for it, then give the
+         * process back the target it had, so no other row sees the change. */
+        (void)snprintf(bound, sizeof(bound), "%s", now);
+        if (rebind)
+            zcl_native_bridge_bind_rpc(target, ZCL_CLI_RELEASE_RPC_PORT);
         raw = (options && options->node_budget_ms > 0)
                   ? zcl_native_status_brief_body_within(
                         options->node_budget_ms, &err)
                   : zcl_native_status_brief_body(NULL, &err);
+        if (rebind)
+            zcl_native_bridge_bind_rpc(bound, bound_port);
         if (!raw)
             obj_node_reason(v, "no node answered the status brief", "");
     }
@@ -206,9 +247,9 @@ struct zcl_objective_value zcl_objectives_node_warm_restart_s(
     struct zcl_objective_value v = {0};
     struct boot_status_snapshot snap;
     char why[192];
-    const char *datadir = options && options->datadir
-                              ? options->datadir
-                              : zcl_native_command_datadir();
+    char target_buf[512];
+    const char *datadir = obj_node_target(options, target_buf,
+                                          sizeof(target_buf));
     if (!datadir || !datadir[0]) {
         obj_node_reason(&v, "no datadir to read the boot beacon from", "");
         return v;
