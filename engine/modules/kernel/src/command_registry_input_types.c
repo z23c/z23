@@ -198,6 +198,9 @@ static const struct cr_int_bound *cr_find_int_bound(const char *key)
         { "window_hours", 1, 168 },
         /* dev.factory report window in hours. */
         { "hours", 1, 720 },
+        /* fleet.objectives.verdict: the snapshot row seqs to compare. */
+        { "before_seq", 0, INT64_MAX },
+        { "after_seq", 0, INT64_MAX },
         { "height", 0, INT64_MAX },
         { "start_height", 0, INT64_MAX },
         { "after", 0, INT64_MAX },
@@ -926,7 +929,8 @@ bool zcl_command_registry_input_descriptor(
 {
     static const char *const strings[] = { "path", "query", "side" };
     static const char *const integers[] = {
-        "after", "after_epoch", "timeout_ms", "heartbeat_ms"
+        "after", "after_epoch", "timeout_ms", "heartbeat_ms",
+        "before_seq", "after_seq"
     };
     if (!out)
         return false;

@@ -179,6 +179,35 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives_brief)
 
 ZCL_COMMAND_READY_READ(
+    "fleet.objectives.verdict", "fleet", "",
+    "Did a landing move an objective: compare two objectives snapshot rows",
+    "Reads <state>/land/objectives.jsonl, the zcl.objectives_snapshot.v1 line "
+    "the land queue appends after each landing, and compares two rows: by "
+    "default the second-newest and newest, or the rows named by before_seq "
+    "and after_seq (a seq the file does not hold is refused by name). Per "
+    "objective it reports before, after, delta, direction, target, met_before, "
+    "met_after and a verdict of improved (the value moved in the objective's "
+    "direction: lower for min, higher for max), regressed, unchanged or "
+    "unmeasured (either side null, or the id in only one row, with the "
+    "reason). id narrows to one objective; an id in neither row is refused by "
+    "name. The result also carries the improved, regressed, unchanged and "
+    "unmeasured counts, a `regressions` array of ids, `skipped` (overlong, "
+    "malformed or other-schema lines, which are ignored) and a plain `screen`. "
+    "snapshot overrides the file path. The file is streamed once with a "
+    "bounded line reader, so it may grow; the leaf writes nothing.",
+    32768,
+    "fleet,objectives,verdict,snapshot,regression,landing,runner",
+    "zcl.fleet_objectives_verdict_input.v1", "zcl.fleet_objectives_verdict.v1",
+    "snapshot,before_seq,after_seq,id", "",
+    "z23-dev fleet objectives verdict",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,
+    ZCL_COMMAND_COST_LOW, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_objectives_verdict)
+
+ZCL_COMMAND_READY_READ(
     "fleet.goals", "fleet", "",
     "The live fleet report card: goals G1-G13, criteria C1-C8, milestones D1-D8",
     "Prints one row per id in the closed catalog "
