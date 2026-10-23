@@ -442,13 +442,6 @@ contexts/commons/modules/vcs/src/zcode_agent_context.c:context_measure:31
 contexts/commons/modules/vcs/src/zcode_agent_context.c:vcs_zcode_agent_context_parse:25
 contexts/commons/modules/vcs/src/zcode_agent_context.c:vcs_zcode_agent_context_validate_for_task:16
 contexts/commons/modules/vcs/src/zcode_app_run_observation.c:vcs_zcode_app_run_observation_v1_validate:21
-contexts/commons/modules/vcs/src/zcode_attention_bid.c:vcs_zcode_attention_bid_parse:23
-contexts/commons/modules/vcs/src/zcode_attention_bid.c:vcs_zcode_attention_bid_serialize:21
-contexts/commons/modules/vcs/src/zcode_attention_bid.c:vcs_zcode_attention_error_string:20
-contexts/commons/modules/vcs/src/zcode_attention_bid.c:vcs_zcode_attention_store_pair:46
-contexts/commons/modules/vcs/src/zcode_attention_bid.c:vcs_zcode_heuristic_parse:24
-contexts/commons/modules/vcs/src/zcode_attention_bid.c:vcs_zcode_heuristic_serialize:22
-contexts/commons/modules/vcs/src/zcode_attention_bid.c:vcs_zcode_heuristic_validate:35
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_bid_dominates:18
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_choose:45
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_project:79

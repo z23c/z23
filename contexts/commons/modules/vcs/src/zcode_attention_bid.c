@@ -60,31 +60,43 @@ static bool priority_valid(uint8_t priority_class)
            priority_class <= VCS_ZCODE_ATTENTION_P3_RESEARCH;
 }
 
+struct attention_error_name {
+    enum vcs_zcode_attention_error error;
+    const char *name;
+};
+
+static const struct attention_error_name attention_error_names[] = {
+    {VCS_ZCODE_ATTENTION_OK, "ok"},
+    {VCS_ZCODE_ATTENTION_NULL, "null"},
+    {VCS_ZCODE_ATTENTION_ALIAS, "alias"},
+    {VCS_ZCODE_ATTENTION_WIRE_SIZE, "wire-size"},
+    {VCS_ZCODE_ATTENTION_MAGIC, "magic"},
+    {VCS_ZCODE_ATTENTION_VERSION, "version"},
+    {VCS_ZCODE_ATTENTION_RESERVED, "reserved"},
+    {VCS_ZCODE_ATTENTION_DERIVATION, "derivation"},
+    {VCS_ZCODE_ATTENTION_COUNT, "count"},
+    {VCS_ZCODE_ATTENTION_ORDER, "order"},
+    {VCS_ZCODE_ATTENTION_ROOT, "root"},
+    {VCS_ZCODE_ATTENTION_BUDGET, "budget"},
+    {VCS_ZCODE_ATTENTION_PRIORITY, "priority"},
+    {VCS_ZCODE_ATTENTION_METRIC, "metric"},
+    {VCS_ZCODE_ATTENTION_BINDING, "binding"},
+    {VCS_ZCODE_ATTENTION_DUPLICATE, "duplicate"},
+    {VCS_ZCODE_ATTENTION_CAPACITY, "capacity"},
+    {VCS_ZCODE_ATTENTION_CAS, "cas"},
+    {VCS_ZCODE_ATTENTION_EVIDENCE, "evidence"},
+};
+
 const char *vcs_zcode_attention_error_string(
     enum vcs_zcode_attention_error error)
 {
-    switch (error) {
-    case VCS_ZCODE_ATTENTION_OK: return "ok";
-    case VCS_ZCODE_ATTENTION_NULL: return "null";
-    case VCS_ZCODE_ATTENTION_ALIAS: return "alias";
-    case VCS_ZCODE_ATTENTION_WIRE_SIZE: return "wire-size";
-    case VCS_ZCODE_ATTENTION_MAGIC: return "magic";
-    case VCS_ZCODE_ATTENTION_VERSION: return "version";
-    case VCS_ZCODE_ATTENTION_RESERVED: return "reserved";
-    case VCS_ZCODE_ATTENTION_DERIVATION: return "derivation";
-    case VCS_ZCODE_ATTENTION_COUNT: return "count";
-    case VCS_ZCODE_ATTENTION_ORDER: return "order";
-    case VCS_ZCODE_ATTENTION_ROOT: return "root";
-    case VCS_ZCODE_ATTENTION_BUDGET: return "budget";
-    case VCS_ZCODE_ATTENTION_PRIORITY: return "priority";
-    case VCS_ZCODE_ATTENTION_METRIC: return "metric";
-    case VCS_ZCODE_ATTENTION_BINDING: return "binding";
-    case VCS_ZCODE_ATTENTION_DUPLICATE: return "duplicate";
-    case VCS_ZCODE_ATTENTION_CAPACITY: return "capacity";
-    case VCS_ZCODE_ATTENTION_CAS: return "cas";
-    case VCS_ZCODE_ATTENTION_EVIDENCE: return "evidence";
-    default: return "unknown";
+    for (size_t i = 0;
+         i < sizeof(attention_error_names) / sizeof(attention_error_names[0]);
+         i++) {
+        if (attention_error_names[i].error == error)
+            return attention_error_names[i].name;
     }
+    return "unknown";
 }
 
 void vcs_zcode_heuristic_init(struct vcs_zcode_heuristic_v1 *heuristic)
@@ -95,19 +107,30 @@ void vcs_zcode_heuristic_init(struct vcs_zcode_heuristic_v1 *heuristic)
     heuristic->derivation = VCS_ZCODE_HEURISTIC_SEED;
 }
 
-enum vcs_zcode_attention_error vcs_zcode_heuristic_validate(
+static enum vcs_zcode_attention_error heuristic_identity_error(
     const struct vcs_zcode_heuristic_v1 *heuristic)
 {
-    if (!heuristic) return VCS_ZCODE_ATTENTION_NULL;
     if (heuristic->schema_version != VCS_ZCODE_HEURISTIC_VERSION)
         return VCS_ZCODE_ATTENTION_VERSION;
     if (heuristic->derivation < VCS_ZCODE_HEURISTIC_SEED ||
         heuristic->derivation > VCS_ZCODE_HEURISTIC_REPAIR)
         return VCS_ZCODE_ATTENTION_DERIVATION;
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static enum vcs_zcode_attention_error heuristic_count_error(
+    const struct vcs_zcode_heuristic_v1 *heuristic)
+{
     if (heuristic->evaluator_count == 0 ||
         heuristic->evaluator_count > VCS_ZCODE_HEURISTIC_MAX_EVALUATORS ||
         heuristic->parent_count > VCS_ZCODE_HEURISTIC_MAX_PARENTS)
         return VCS_ZCODE_ATTENTION_COUNT;
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static enum vcs_zcode_attention_error heuristic_shape_error(
+    const struct vcs_zcode_heuristic_v1 *heuristic)
+{
     if ((heuristic->derivation == VCS_ZCODE_HEURISTIC_SEED &&
          heuristic->parent_count != 0) ||
         (heuristic->derivation == VCS_ZCODE_HEURISTIC_COMPOSE &&
@@ -116,6 +139,12 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_validate(
          heuristic->derivation != VCS_ZCODE_HEURISTIC_COMPOSE &&
          heuristic->parent_count != 1))
         return VCS_ZCODE_ATTENTION_DERIVATION;
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static enum vcs_zcode_attention_error heuristic_fixed_roots_error(
+    const struct vcs_zcode_heuristic_v1 *heuristic)
+{
     const uint8_t *const roots[] = {
         heuristic->task_root, heuristic->source_root,
         heuristic->agent_context_root, heuristic->ontology_context_root,
@@ -127,6 +156,12 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_validate(
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++) {
         if (root_is_zero(roots[i])) return VCS_ZCODE_ATTENTION_ROOT;
     }
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static enum vcs_zcode_attention_error heuristic_listed_roots_error(
+    const struct vcs_zcode_heuristic_v1 *heuristic)
+{
     for (size_t i = 0; i < heuristic->evaluator_count; i++) {
         if (root_is_zero(heuristic->evaluator_roots[i]))
             return VCS_ZCODE_ATTENTION_ROOT;
@@ -135,6 +170,12 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_validate(
         if (root_is_zero(heuristic->parent_roots[i]))
             return VCS_ZCODE_ATTENTION_ROOT;
     }
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static enum vcs_zcode_attention_error heuristic_order_error(
+    const struct vcs_zcode_heuristic_v1 *heuristic)
+{
     if (!roots_are_sorted_unique(heuristic->evaluator_roots,
                                  heuristic->evaluator_count) ||
         !roots_are_sorted_unique(heuristic->parent_roots,
@@ -147,6 +188,12 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_validate(
                                  heuristic->parent_count,
                                  VCS_ZCODE_HEURISTIC_MAX_PARENTS))
         return VCS_ZCODE_ATTENTION_RESERVED;
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static enum vcs_zcode_attention_error heuristic_budget_error(
+    const struct vcs_zcode_heuristic_v1 *heuristic)
+{
     if (heuristic->requested_cpu_seconds == 0 ||
         heuristic->requested_cpu_seconds >
             VCS_ZCODE_HEURISTIC_MAX_CPU_SECONDS ||
@@ -164,6 +211,26 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_validate(
             VCS_ZCODE_HEURISTIC_MAX_OUTPUT_BYTES)
         return VCS_ZCODE_ATTENTION_BUDGET;
     return VCS_ZCODE_ATTENTION_OK;
+}
+
+enum vcs_zcode_attention_error vcs_zcode_heuristic_validate(
+    const struct vcs_zcode_heuristic_v1 *heuristic)
+{
+    if (!heuristic) return VCS_ZCODE_ATTENTION_NULL;
+    enum vcs_zcode_attention_error error =
+        heuristic_identity_error(heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    error = heuristic_count_error(heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    error = heuristic_shape_error(heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    error = heuristic_fixed_roots_error(heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    error = heuristic_listed_roots_error(heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    error = heuristic_order_error(heuristic);
+    if (error != VCS_ZCODE_ATTENTION_OK) return error;
+    return heuristic_budget_error(heuristic);
 }
 
 static bool heuristic_lineage_boundary_equal(
@@ -211,6 +278,100 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_validate_derivation(
     return VCS_ZCODE_ATTENTION_OK;
 }
 
+static bool heuristic_write_header(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_heuristic_v1 *heuristic)
+{
+    return zcl_codec_write_bytes(writer, heuristic_magic, 8) &&
+        zcl_codec_write_u16le(writer, heuristic->schema_version) &&
+        zcl_codec_write_u8(writer, heuristic->derivation) &&
+        zcl_codec_write_u8(writer, heuristic->evaluator_count) &&
+        zcl_codec_write_u8(writer, heuristic->parent_count) &&
+        zcl_codec_write_bytes(writer, (const uint8_t[3]){0}, 3);
+}
+
+static bool heuristic_write_bytes(void *io, uint8_t *bytes, size_t len)
+{
+    return zcl_codec_write_bytes(io, bytes, len);
+}
+
+static bool heuristic_write_u32(void *io, uint32_t *value)
+{
+    return zcl_codec_write_u32le(io, *value);
+}
+
+static bool heuristic_write_u64(void *io, uint64_t *value)
+{
+    return zcl_codec_write_u64le(io, *value);
+}
+
+static bool heuristic_read_bytes(void *io, uint8_t *bytes, size_t len)
+{
+    return zcl_codec_read_bytes(io, bytes, len);
+}
+
+static bool heuristic_read_u32(void *io, uint32_t *value)
+{
+    return zcl_codec_read_u32le(io, value);
+}
+
+static bool heuristic_read_u64(void *io, uint64_t *value)
+{
+    return zcl_codec_read_u64le(io, value);
+}
+
+/* One field walker serves both directions. The ops decide whether each
+ * field is written from or read into the struct; the wire order is shared. */
+struct heuristic_wire_ops {
+    bool (*bytes)(void *io, uint8_t *bytes, size_t len);
+    bool (*u32)(void *io, uint32_t *value);
+    bool (*u64)(void *io, uint64_t *value);
+};
+
+static const struct heuristic_wire_ops heuristic_wire_write = {
+    heuristic_write_bytes, heuristic_write_u32, heuristic_write_u64,
+};
+
+static const struct heuristic_wire_ops heuristic_wire_read = {
+    heuristic_read_bytes, heuristic_read_u32, heuristic_read_u64,
+};
+
+static bool heuristic_walk_roots(void *io, const struct heuristic_wire_ops *ops,
+                                 struct vcs_zcode_heuristic_v1 *h)
+{
+    return ops->bytes(io, h->task_root, 32) &&
+        ops->bytes(io, h->source_root, 32) &&
+        ops->bytes(io, h->agent_context_root, 32) &&
+        ops->bytes(io, h->ontology_context_root, 32) &&
+        ops->bytes(io, h->applicability_root, 32) &&
+        ops->bytes(io, h->observed_features_root, 32) &&
+        ops->bytes(io, h->proposed_rule_root, 32) &&
+        ops->bytes(io, h->expected_effect_root, 32) &&
+        ops->bytes(io, h->proposal_input_root, 32) &&
+        ops->bytes(io, h->study_root, 32) &&
+        ops->bytes(io, h->preregistration_root, 32) &&
+        ops->bytes(io, h->provenance_root, 32);
+}
+
+static bool heuristic_walk_lists_and_budget(
+    void *io, const struct heuristic_wire_ops *ops,
+    struct vcs_zcode_heuristic_v1 *h)
+{
+    for (size_t i = 0; i < VCS_ZCODE_HEURISTIC_MAX_EVALUATORS; i++) {
+        if (!ops->bytes(io, h->evaluator_roots[i], 32))
+            return false;
+    }
+    for (size_t i = 0; i < VCS_ZCODE_HEURISTIC_MAX_PARENTS; i++) {
+        if (!ops->bytes(io, h->parent_roots[i], 32))
+            return false;
+    }
+    return ops->u32(io, &h->requested_cpu_seconds) &&
+        ops->u32(io, &h->requested_processes) &&
+        ops->u64(io, &h->requested_memory_bytes) &&
+        ops->u64(io, &h->requested_context_bytes) &&
+        ops->u64(io, &h->requested_output_bytes);
+}
+
 enum vcs_zcode_attention_error vcs_zcode_heuristic_serialize(
     const struct vcs_zcode_heuristic_v1 *heuristic,
     uint8_t out[VCS_ZCODE_HEURISTIC_WIRE_BYTES])
@@ -229,45 +390,40 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_serialize(
     if (error != VCS_ZCODE_ATTENTION_OK) return error;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_ZCODE_HEURISTIC_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, heuristic_magic, 8) &&
-        zcl_codec_write_u16le(&writer, heuristic->schema_version) &&
-        zcl_codec_write_u8(&writer, heuristic->derivation) &&
-        zcl_codec_write_u8(&writer, heuristic->evaluator_count) &&
-        zcl_codec_write_u8(&writer, heuristic->parent_count) &&
-        zcl_codec_write_bytes(&writer, (const uint8_t[3]){0}, 3);
-#define WRITE_ROOT(field_) \
-    do { ok = ok && zcl_codec_write_bytes(&writer, heuristic->field_, 32); } while (0)
-    WRITE_ROOT(task_root);
-    WRITE_ROOT(source_root);
-    WRITE_ROOT(agent_context_root);
-    WRITE_ROOT(ontology_context_root);
-    WRITE_ROOT(applicability_root);
-    WRITE_ROOT(observed_features_root);
-    WRITE_ROOT(proposed_rule_root);
-    WRITE_ROOT(expected_effect_root);
-    WRITE_ROOT(proposal_input_root);
-    WRITE_ROOT(study_root);
-    WRITE_ROOT(preregistration_root);
-    WRITE_ROOT(provenance_root);
-#undef WRITE_ROOT
-    for (size_t i = 0; i < VCS_ZCODE_HEURISTIC_MAX_EVALUATORS; i++)
-        ok = ok && zcl_codec_write_bytes(&writer,
-                                         heuristic->evaluator_roots[i], 32);
-    for (size_t i = 0; i < VCS_ZCODE_HEURISTIC_MAX_PARENTS; i++)
-        ok = ok && zcl_codec_write_bytes(&writer,
-                                         heuristic->parent_roots[i], 32);
-    ok = ok &&
-        zcl_codec_write_u32le(&writer, heuristic->requested_cpu_seconds) &&
-        zcl_codec_write_u32le(&writer, heuristic->requested_processes) &&
-        zcl_codec_write_u64le(&writer, heuristic->requested_memory_bytes) &&
-        zcl_codec_write_u64le(&writer, heuristic->requested_context_bytes) &&
-        zcl_codec_write_u64le(&writer, heuristic->requested_output_bytes);
+    /* The write ops take non-const field addresses; this copy is only read. */
+    struct vcs_zcode_heuristic_v1 wire;
+    memcpy(&wire, heuristic, sizeof(wire));
+    bool ok = heuristic_write_header(&writer, heuristic) &&
+        heuristic_walk_roots(&writer, &heuristic_wire_write, &wire) &&
+        heuristic_walk_lists_and_budget(&writer, &heuristic_wire_write, &wire);
     size_t written = 0;
     if (!ok || !zcl_codec_writer_finish(&writer, &written) ||
         written != VCS_ZCODE_HEURISTIC_WIRE_BYTES) {
         memset(out, 0, VCS_ZCODE_HEURISTIC_WIRE_BYTES);
         return VCS_ZCODE_ATTENTION_WIRE_SIZE;
     }
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static bool heuristic_read_header(
+    struct zcl_codec_reader *reader, struct vcs_zcode_heuristic_v1 *out,
+    uint8_t magic[8], uint8_t reserved[3])
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u8(reader, &out->derivation) &&
+        zcl_codec_read_u8(reader, &out->evaluator_count) &&
+        zcl_codec_read_u8(reader, &out->parent_count) &&
+        zcl_codec_read_bytes(reader, reserved, 3);
+}
+
+static enum vcs_zcode_attention_error heuristic_tags_error(
+    const uint8_t magic[8], const uint8_t reserved[3])
+{
+    if (memcmp(magic, heuristic_magic, 8) != 0)
+        return VCS_ZCODE_ATTENTION_MAGIC;
+    if (memcmp(reserved, (const uint8_t[3]){0}, 3) != 0)
+        return VCS_ZCODE_ATTENTION_RESERVED;
     return VCS_ZCODE_ATTENTION_OK;
 }
 
@@ -290,51 +446,21 @@ enum vcs_zcode_attention_error vcs_zcode_heuristic_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8], reserved[3];
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u8(&reader, &out->derivation) &&
-        zcl_codec_read_u8(&reader, &out->evaluator_count) &&
-        zcl_codec_read_u8(&reader, &out->parent_count) &&
-        zcl_codec_read_bytes(&reader, reserved, 3);
-#define READ_ROOT(field_) \
-    do { ok = ok && zcl_codec_read_bytes(&reader, out->field_, 32); } while (0)
-    READ_ROOT(task_root);
-    READ_ROOT(source_root);
-    READ_ROOT(agent_context_root);
-    READ_ROOT(ontology_context_root);
-    READ_ROOT(applicability_root);
-    READ_ROOT(observed_features_root);
-    READ_ROOT(proposed_rule_root);
-    READ_ROOT(expected_effect_root);
-    READ_ROOT(proposal_input_root);
-    READ_ROOT(study_root);
-    READ_ROOT(preregistration_root);
-    READ_ROOT(provenance_root);
-#undef READ_ROOT
-    for (size_t i = 0; i < VCS_ZCODE_HEURISTIC_MAX_EVALUATORS; i++)
-        ok = ok && zcl_codec_read_bytes(&reader, out->evaluator_roots[i], 32);
-    for (size_t i = 0; i < VCS_ZCODE_HEURISTIC_MAX_PARENTS; i++)
-        ok = ok && zcl_codec_read_bytes(&reader, out->parent_roots[i], 32);
-    ok = ok &&
-        zcl_codec_read_u32le(&reader, &out->requested_cpu_seconds) &&
-        zcl_codec_read_u32le(&reader, &out->requested_processes) &&
-        zcl_codec_read_u64le(&reader, &out->requested_memory_bytes) &&
-        zcl_codec_read_u64le(&reader, &out->requested_context_bytes) &&
-        zcl_codec_read_u64le(&reader, &out->requested_output_bytes) &&
+    bool ok = heuristic_read_header(&reader, out, magic, reserved) &&
+        heuristic_walk_roots(&reader, &heuristic_wire_read, out) &&
+        heuristic_walk_lists_and_budget(&reader, &heuristic_wire_read, out) &&
         zcl_codec_reader_finish(&reader);
     if (!ok) {
         memset(out, 0, sizeof(*out));
         return VCS_ZCODE_ATTENTION_WIRE_SIZE;
     }
-    if (memcmp(magic, heuristic_magic, 8) != 0) {
+    enum vcs_zcode_attention_error error =
+        heuristic_tags_error(magic, reserved);
+    if (error != VCS_ZCODE_ATTENTION_OK) {
         memset(out, 0, sizeof(*out));
-        return VCS_ZCODE_ATTENTION_MAGIC;
+        return error;
     }
-    if (memcmp(reserved, (const uint8_t[3]){0}, 3) != 0) {
-        memset(out, 0, sizeof(*out));
-        return VCS_ZCODE_ATTENTION_RESERVED;
-    }
-    enum vcs_zcode_attention_error error = vcs_zcode_heuristic_validate(out);
+    error = vcs_zcode_heuristic_validate(out);
     if (error != VCS_ZCODE_ATTENTION_OK) memset(out, 0, sizeof(*out));
     return error;
 }
@@ -489,6 +615,50 @@ vcs_zcode_attention_bid_validate_focus_binding(
     return VCS_ZCODE_ATTENTION_OK;
 }
 
+static bool attention_bid_write_header(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_attention_bid_v1 *bid)
+{
+    return zcl_codec_write_bytes(writer, attention_bid_magic, 8) &&
+        zcl_codec_write_u16le(writer, bid->schema_version) &&
+        zcl_codec_write_u8(writer, bid->priority_class) &&
+        zcl_codec_write_bytes(writer, (const uint8_t[5]){0}, 5);
+}
+
+static bool attention_bid_write_roots(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_attention_bid_v1 *bid)
+{
+    bool ok = true;
+#define WRITE_ROOT(field_) \
+    do { ok = ok && zcl_codec_write_bytes(writer, bid->field_, 32); } while (0)
+    WRITE_ROOT(focus_root);
+    WRITE_ROOT(task_root);
+    WRITE_ROOT(source_root);
+    WRITE_ROOT(heuristic_root);
+    WRITE_ROOT(priority_policy_root);
+    WRITE_ROOT(bid_evaluator_root);
+    WRITE_ROOT(evidence_root);
+#undef WRITE_ROOT
+    return ok;
+}
+
+static bool attention_bid_write_metrics(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_attention_bid_v1 *bid)
+{
+    return zcl_codec_write_u16le(writer, bid->expected_user_value_bp) &&
+        zcl_codec_write_u16le(writer, bid->information_gain_bp) &&
+        zcl_codec_write_u16le(writer, bid->blocker_relief_bp) &&
+        zcl_codec_write_u16le(writer, bid->reuse_potential_bp) &&
+        zcl_codec_write_u16le(writer, bid->evidence_strength_bp) &&
+        zcl_codec_write_u16le(writer, bid->risk_bp) &&
+        zcl_codec_write_u16le(writer, bid->overlap_bp) &&
+        zcl_codec_write_u16le(writer, bid->observed_metrics) &&
+        zcl_codec_write_u64le(writer, bid->expected_latency_us) &&
+        zcl_codec_write_u64le(writer, bid->expected_cost_milliunits);
+}
+
 enum vcs_zcode_attention_error vcs_zcode_attention_bid_serialize(
     const struct vcs_zcode_attention_bid_v1 *bid,
     uint8_t out[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES])
@@ -507,37 +677,67 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_serialize(
     if (error != VCS_ZCODE_ATTENTION_OK) return error;
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out, VCS_ZCODE_ATTENTION_BID_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, attention_bid_magic, 8) &&
-        zcl_codec_write_u16le(&writer, bid->schema_version) &&
-        zcl_codec_write_u8(&writer, bid->priority_class) &&
-        zcl_codec_write_bytes(&writer, (const uint8_t[5]){0}, 5);
-#define WRITE_ROOT(field_) \
-    do { ok = ok && zcl_codec_write_bytes(&writer, bid->field_, 32); } while (0)
-    WRITE_ROOT(focus_root);
-    WRITE_ROOT(task_root);
-    WRITE_ROOT(source_root);
-    WRITE_ROOT(heuristic_root);
-    WRITE_ROOT(priority_policy_root);
-    WRITE_ROOT(bid_evaluator_root);
-    WRITE_ROOT(evidence_root);
-#undef WRITE_ROOT
-    ok = ok &&
-        zcl_codec_write_u16le(&writer, bid->expected_user_value_bp) &&
-        zcl_codec_write_u16le(&writer, bid->information_gain_bp) &&
-        zcl_codec_write_u16le(&writer, bid->blocker_relief_bp) &&
-        zcl_codec_write_u16le(&writer, bid->reuse_potential_bp) &&
-        zcl_codec_write_u16le(&writer, bid->evidence_strength_bp) &&
-        zcl_codec_write_u16le(&writer, bid->risk_bp) &&
-        zcl_codec_write_u16le(&writer, bid->overlap_bp) &&
-        zcl_codec_write_u16le(&writer, bid->observed_metrics) &&
-        zcl_codec_write_u64le(&writer, bid->expected_latency_us) &&
-        zcl_codec_write_u64le(&writer, bid->expected_cost_milliunits);
+    bool ok = attention_bid_write_header(&writer, bid) &&
+        attention_bid_write_roots(&writer, bid) &&
+        attention_bid_write_metrics(&writer, bid);
     size_t written = 0;
     if (!ok || !zcl_codec_writer_finish(&writer, &written) ||
         written != VCS_ZCODE_ATTENTION_BID_WIRE_BYTES) {
         memset(out, 0, VCS_ZCODE_ATTENTION_BID_WIRE_BYTES);
         return VCS_ZCODE_ATTENTION_WIRE_SIZE;
     }
+    return VCS_ZCODE_ATTENTION_OK;
+}
+
+static bool attention_bid_read_header(struct zcl_codec_reader *reader,
+                                      struct vcs_zcode_attention_bid_v1 *out,
+                                      uint8_t magic[8], uint8_t reserved[5])
+{
+    return zcl_codec_read_bytes(reader, magic, 8) &&
+        zcl_codec_read_u16le(reader, &out->schema_version) &&
+        zcl_codec_read_u8(reader, &out->priority_class) &&
+        zcl_codec_read_bytes(reader, reserved, 5);
+}
+
+static bool attention_bid_read_roots(struct zcl_codec_reader *reader,
+                                     struct vcs_zcode_attention_bid_v1 *out)
+{
+    bool ok = true;
+#define READ_ROOT(field_) \
+    do { ok = ok && zcl_codec_read_bytes(reader, out->field_, 32); } while (0)
+    READ_ROOT(focus_root);
+    READ_ROOT(task_root);
+    READ_ROOT(source_root);
+    READ_ROOT(heuristic_root);
+    READ_ROOT(priority_policy_root);
+    READ_ROOT(bid_evaluator_root);
+    READ_ROOT(evidence_root);
+#undef READ_ROOT
+    return ok;
+}
+
+static bool attention_bid_read_metrics(struct zcl_codec_reader *reader,
+                                       struct vcs_zcode_attention_bid_v1 *out)
+{
+    return zcl_codec_read_u16le(reader, &out->expected_user_value_bp) &&
+        zcl_codec_read_u16le(reader, &out->information_gain_bp) &&
+        zcl_codec_read_u16le(reader, &out->blocker_relief_bp) &&
+        zcl_codec_read_u16le(reader, &out->reuse_potential_bp) &&
+        zcl_codec_read_u16le(reader, &out->evidence_strength_bp) &&
+        zcl_codec_read_u16le(reader, &out->risk_bp) &&
+        zcl_codec_read_u16le(reader, &out->overlap_bp) &&
+        zcl_codec_read_u16le(reader, &out->observed_metrics) &&
+        zcl_codec_read_u64le(reader, &out->expected_latency_us) &&
+        zcl_codec_read_u64le(reader, &out->expected_cost_milliunits);
+}
+
+static enum vcs_zcode_attention_error attention_bid_tags_error(
+    const uint8_t magic[8], const uint8_t reserved[5])
+{
+    if (memcmp(magic, attention_bid_magic, 8) != 0)
+        return VCS_ZCODE_ATTENTION_MAGIC;
+    if (memcmp(reserved, (const uint8_t[5]){0}, 5) != 0)
+        return VCS_ZCODE_ATTENTION_RESERVED;
     return VCS_ZCODE_ATTENTION_OK;
 }
 
@@ -560,46 +760,21 @@ enum vcs_zcode_attention_error vcs_zcode_attention_bid_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8], reserved[5];
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, 8) &&
-        zcl_codec_read_u16le(&reader, &out->schema_version) &&
-        zcl_codec_read_u8(&reader, &out->priority_class) &&
-        zcl_codec_read_bytes(&reader, reserved, 5);
-#define READ_ROOT(field_) \
-    do { ok = ok && zcl_codec_read_bytes(&reader, out->field_, 32); } while (0)
-    READ_ROOT(focus_root);
-    READ_ROOT(task_root);
-    READ_ROOT(source_root);
-    READ_ROOT(heuristic_root);
-    READ_ROOT(priority_policy_root);
-    READ_ROOT(bid_evaluator_root);
-    READ_ROOT(evidence_root);
-#undef READ_ROOT
-    ok = ok &&
-        zcl_codec_read_u16le(&reader, &out->expected_user_value_bp) &&
-        zcl_codec_read_u16le(&reader, &out->information_gain_bp) &&
-        zcl_codec_read_u16le(&reader, &out->blocker_relief_bp) &&
-        zcl_codec_read_u16le(&reader, &out->reuse_potential_bp) &&
-        zcl_codec_read_u16le(&reader, &out->evidence_strength_bp) &&
-        zcl_codec_read_u16le(&reader, &out->risk_bp) &&
-        zcl_codec_read_u16le(&reader, &out->overlap_bp) &&
-        zcl_codec_read_u16le(&reader, &out->observed_metrics) &&
-        zcl_codec_read_u64le(&reader, &out->expected_latency_us) &&
-        zcl_codec_read_u64le(&reader, &out->expected_cost_milliunits) &&
+    bool ok = attention_bid_read_header(&reader, out, magic, reserved) &&
+        attention_bid_read_roots(&reader, out) &&
+        attention_bid_read_metrics(&reader, out) &&
         zcl_codec_reader_finish(&reader);
     if (!ok) {
         memset(out, 0, sizeof(*out));
         return VCS_ZCODE_ATTENTION_WIRE_SIZE;
     }
-    if (memcmp(magic, attention_bid_magic, 8) != 0) {
-        memset(out, 0, sizeof(*out));
-        return VCS_ZCODE_ATTENTION_MAGIC;
-    }
-    if (memcmp(reserved, (const uint8_t[5]){0}, 5) != 0) {
-        memset(out, 0, sizeof(*out));
-        return VCS_ZCODE_ATTENTION_RESERVED;
-    }
     enum vcs_zcode_attention_error error =
-        vcs_zcode_attention_bid_validate(out);
+        attention_bid_tags_error(magic, reserved);
+    if (error != VCS_ZCODE_ATTENTION_OK) {
+        memset(out, 0, sizeof(*out));
+        return error;
+    }
+    error = vcs_zcode_attention_bid_validate(out);
     if (error != VCS_ZCODE_ATTENTION_OK) memset(out, 0, sizeof(*out));
     return error;
 }
@@ -695,34 +870,116 @@ static bool bid_readback_exact(
     return ok;
 }
 
+static bool root_overlaps(const uint8_t *root_out, const void *input,
+                          size_t input_size)
+{
+    return root_out && input &&
+        memory_overlaps(root_out, 32, input, input_size);
+}
+
+static bool store_pair_aliases(const char *workspace,
+                               const struct vcs_zcode_heuristic_v1 *heuristic,
+                               const struct vcs_zcode_attention_bid_v1 *bid,
+                               uint8_t heuristic_root_out[32],
+                               uint8_t bid_root_out[32])
+{
+    size_t workspace_bytes = workspace ? strlen(workspace) + 1u : 0u;
+    if (heuristic_root_out && bid_root_out &&
+        memory_overlaps(heuristic_root_out, 32, bid_root_out, 32))
+        return true;
+    return root_overlaps(heuristic_root_out, heuristic, sizeof(*heuristic)) ||
+        root_overlaps(heuristic_root_out, bid, sizeof(*bid)) ||
+        root_overlaps(heuristic_root_out, workspace, workspace_bytes) ||
+        root_overlaps(bid_root_out, heuristic, sizeof(*heuristic)) ||
+        root_overlaps(bid_root_out, bid, sizeof(*bid)) ||
+        root_overlaps(bid_root_out, workspace, workspace_bytes);
+}
+
+static bool store_pair_args_missing(
+    const char *workspace,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    const uint8_t heuristic_root_out[32],
+    const uint8_t bid_root_out[32])
+{
+    return !heuristic_root_out || !bid_root_out || !workspace || !heuristic ||
+        !bid;
+}
+
+static bool store_pair_load_parents(
+    const char *workspace,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    struct vcs_zcode_heuristic_v1 parents[])
+{
+    for (size_t i = 0; i < heuristic->parent_count; i++) {
+        if (!heuristic_load_exact(
+                workspace, heuristic->parent_roots[i], &parents[i]))
+            return false;
+    }
+    return true;
+}
+
+static enum vcs_zcode_attention_error store_pair_binding_error(
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_heuristic_v1 *parents, size_t parent_count)
+{
+    if (heuristic->derivation == VCS_ZCODE_HEURISTIC_SEED)
+        return vcs_zcode_attention_bid_validate_for_heuristic(bid, heuristic);
+    return vcs_zcode_attention_bid_validate_for_derivation(
+        bid, heuristic, parents, parent_count);
+}
+
+static enum vcs_zcode_attention_error store_pair_encode(
+    const struct vcs_zcode_heuristic_v1 *heuristic,
+    const struct vcs_zcode_attention_bid_v1 *bid,
+    uint8_t heuristic_wire[VCS_ZCODE_HEURISTIC_WIRE_BYTES],
+    uint8_t bid_wire[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES],
+    uint8_t heuristic_root[32], uint8_t bid_root[32])
+{
+    enum vcs_zcode_attention_error error =
+        vcs_zcode_heuristic_serialize(heuristic, heuristic_wire);
+    if (error == VCS_ZCODE_ATTENTION_OK)
+        error = vcs_zcode_attention_bid_serialize(bid, bid_wire);
+    if (error == VCS_ZCODE_ATTENTION_OK)
+        error = vcs_zcode_heuristic_root(heuristic, heuristic_root);
+    if (error == VCS_ZCODE_ATTENTION_OK)
+        error = vcs_zcode_attention_bid_root(bid, bid_root);
+    return error;
+}
+
+static bool store_pair_put_heuristic(
+    const char *workspace, const uint8_t root[32],
+    const uint8_t wire[VCS_ZCODE_HEURISTIC_WIRE_BYTES],
+    struct vcs_zcode_heuristic_v1 *checked)
+{
+    return vcs_object_store_init(workspace) &&
+        vcs_object_put_addressed(workspace, root, wire,
+                                 VCS_ZCODE_HEURISTIC_WIRE_BYTES) &&
+        heuristic_readback_exact(workspace, root, wire, checked);
+}
+
+static bool store_pair_put_bid(
+    const char *workspace, const uint8_t root[32],
+    const uint8_t wire[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES],
+    struct vcs_zcode_attention_bid_v1 *checked)
+{
+    return vcs_object_put_addressed(workspace, root, wire,
+                                    VCS_ZCODE_ATTENTION_BID_WIRE_BYTES) &&
+        bid_readback_exact(workspace, root, wire, checked);
+}
+
 enum vcs_zcode_attention_error vcs_zcode_attention_store_pair(
     const char *workspace,
     const struct vcs_zcode_heuristic_v1 *heuristic,
     const struct vcs_zcode_attention_bid_v1 *bid,
     uint8_t heuristic_root_out[32], uint8_t bid_root_out[32])
 {
-    size_t workspace_bytes = workspace ? strlen(workspace) + 1u : 0u;
-    bool alias = heuristic_root_out && bid_root_out &&
-            memory_overlaps(heuristic_root_out, 32, bid_root_out, 32);
-    alias = alias || (heuristic_root_out && heuristic &&
-            memory_overlaps(heuristic_root_out, 32, heuristic,
-                            sizeof(*heuristic))) ||
-        (heuristic_root_out && bid &&
-            memory_overlaps(heuristic_root_out, 32, bid, sizeof(*bid))) ||
-        (heuristic_root_out && workspace &&
-            memory_overlaps(heuristic_root_out, 32, workspace,
-                            workspace_bytes)) ||
-        (bid_root_out && heuristic &&
-            memory_overlaps(bid_root_out, 32, heuristic,
-                            sizeof(*heuristic))) ||
-        (bid_root_out && bid &&
-            memory_overlaps(bid_root_out, 32, bid, sizeof(*bid))) ||
-        (bid_root_out && workspace &&
-            memory_overlaps(bid_root_out, 32, workspace, workspace_bytes));
-    if (alias)
+    if (store_pair_aliases(workspace, heuristic, bid,
+                           heuristic_root_out, bid_root_out))
         return VCS_ZCODE_ATTENTION_ALIAS;
-    if (!heuristic_root_out || !bid_root_out || !workspace || !heuristic ||
-        !bid) {
+    if (store_pair_args_missing(workspace, heuristic, bid,
+                                heuristic_root_out, bid_root_out)) {
         if (heuristic_root_out) memset(heuristic_root_out, 0, 32);
         if (bid_root_out) memset(bid_root_out, 0, 32);
         return VCS_ZCODE_ATTENTION_NULL;
@@ -736,56 +993,28 @@ enum vcs_zcode_attention_error vcs_zcode_attention_store_pair(
     struct vcs_zcode_heuristic_v1
         parents[VCS_ZCODE_HEURISTIC_MAX_PARENTS];
     memset(parents, 0, sizeof(parents));
-    for (size_t i = 0; i < heuristic->parent_count; i++) {
-        if (!heuristic_load_exact(
-                workspace, heuristic->parent_roots[i], &parents[i]))
-            return VCS_ZCODE_ATTENTION_CAS;
-    }
-    if (heuristic->derivation == VCS_ZCODE_HEURISTIC_SEED) {
-        error = vcs_zcode_attention_bid_validate_for_heuristic(
-            bid, heuristic);
-    } else {
-        error = vcs_zcode_attention_bid_validate_for_derivation(
-            bid, heuristic, parents, heuristic->parent_count);
-    }
+    if (!store_pair_load_parents(workspace, heuristic, parents))
+        return VCS_ZCODE_ATTENTION_CAS;
+    error = store_pair_binding_error(bid, heuristic, parents,
+                                     heuristic->parent_count);
     if (error != VCS_ZCODE_ATTENTION_OK) return error;
 
     uint8_t heuristic_wire[VCS_ZCODE_HEURISTIC_WIRE_BYTES];
     uint8_t bid_wire[VCS_ZCODE_ATTENTION_BID_WIRE_BYTES];
     uint8_t heuristic_root[32], bid_root[32];
-    error = vcs_zcode_heuristic_serialize(heuristic, heuristic_wire);
-    if (error == VCS_ZCODE_ATTENTION_OK)
-        error = vcs_zcode_attention_bid_serialize(bid, bid_wire);
-    if (error == VCS_ZCODE_ATTENTION_OK)
-        error = vcs_zcode_heuristic_root(heuristic, heuristic_root);
-    if (error == VCS_ZCODE_ATTENTION_OK)
-        error = vcs_zcode_attention_bid_root(bid, bid_root);
+    error = store_pair_encode(heuristic, bid, heuristic_wire, bid_wire,
+                              heuristic_root, bid_root);
     if (error != VCS_ZCODE_ATTENTION_OK) return error;
 
-    if (!vcs_object_store_init(workspace) ||
-        !vcs_object_put_addressed(
-            workspace, heuristic_root, heuristic_wire,
-            sizeof(heuristic_wire)))
-        return VCS_ZCODE_ATTENTION_CAS;
     struct vcs_zcode_heuristic_v1 checked_heuristic;
-    if (!heuristic_readback_exact(
-            workspace, heuristic_root, heuristic_wire, &checked_heuristic))
-        return VCS_ZCODE_ATTENTION_CAS;
-
-    if (!vcs_object_put_addressed(
-            workspace, bid_root, bid_wire, sizeof(bid_wire)))
+    if (!store_pair_put_heuristic(workspace, heuristic_root, heuristic_wire,
+                                  &checked_heuristic))
         return VCS_ZCODE_ATTENTION_CAS;
     struct vcs_zcode_attention_bid_v1 checked_bid;
-    if (!bid_readback_exact(workspace, bid_root, bid_wire, &checked_bid))
+    if (!store_pair_put_bid(workspace, bid_root, bid_wire, &checked_bid))
         return VCS_ZCODE_ATTENTION_CAS;
-    if (checked_heuristic.derivation == VCS_ZCODE_HEURISTIC_SEED) {
-        error = vcs_zcode_attention_bid_validate_for_heuristic(
-            &checked_bid, &checked_heuristic);
-    } else {
-        error = vcs_zcode_attention_bid_validate_for_derivation(
-            &checked_bid, &checked_heuristic, parents,
-            checked_heuristic.parent_count);
-    }
+    error = store_pair_binding_error(&checked_bid, &checked_heuristic, parents,
+                                     checked_heuristic.parent_count);
     if (error != VCS_ZCODE_ATTENTION_OK) return VCS_ZCODE_ATTENTION_CAS;
 
     memcpy(heuristic_root_out, heuristic_root, 32);
