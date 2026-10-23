@@ -352,6 +352,7 @@ int test_activerecord_query_builder(void);
 int test_sapling_crypto(void);
 int test_groth16_msm_parity(void);
 int test_bls12_381_fp_addsub_parity(void);
+int test_bls12_381_final_exp_parity(void);
 int test_groth16_r1cs_oracle(void);
 int test_native_spend_proof(void);
 int test_sapling_tree(void);

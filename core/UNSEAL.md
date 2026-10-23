@@ -268,3 +268,7 @@ later lane flips it HARD.
 - 2026-10-23T12:43:41Z — REASON: perf(sapling): branch-free BLS12-381 fp_add/fp_sub/fp_neg (behaviour-preserving; differential vs frozen oracle)
   old ROOT: eb01e833cccbf2862b1bdb172b12a8548a40575b9c741605914915dc44b186cb
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-23T15:04:26Z — REASON: BLS12-381 final exponentiation: Granger-Scott cyclotomic squaring inside exp-by-x (behaviour-preserving, frozen-oracle parity); lead unseal under owner grant 2026-10-19
+  old ROOT: 8a374a230643da484419e06ad703a6c429c7e971b812d01be0b87432a220b78e
+  by: owner unseal ritual (make core-unseal)

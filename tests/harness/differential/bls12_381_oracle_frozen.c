@@ -80,3 +80,86 @@ static void oracle_fp_neg(struct fp *r, const struct fp *a)
     else
         oracle_fp_sub_noborrow(r->d, ORACLE_FP_Q, a->d);
 }
+
+/* ---- Final exponentiation exactly as at d8225b30f (generic fp12_sq inside
+ * exp-by-x), before the cyclotomic-squaring rewrite. Verbatim, oracle_
+ * prefix; the fp12 field ops it calls are the public ones. Included by
+ * tests/harness/src/test_bls12_381_final_exp_parity.c. NEVER EDIT. */
+#ifdef ORACLE_WITH_FINAL_EXP
+#define ORACLE_BLS_X 0xd201000000010000ULL
+
+static void oracle_fp12_pow_u64(struct fp12 *r, const struct fp12 *a, uint64_t exp)
+{
+    struct fp12 result;
+    fp12_one(&result);
+    struct fp12 base = *a;
+
+    while (exp > 0) {
+        if (exp & 1)
+            fp12_mul(&result, &result, &base);
+        fp12_sq(&base, &base);
+        exp >>= 1;
+    }
+    *r = result;
+}
+
+static void oracle_bls12_381_final_exp(struct fp12 *result, const struct fp12 *f_in)
+{
+    struct fp12 f = *f_in;
+
+    struct fp12 f1 = f;
+    fp12_conjugate(&f1);
+
+    struct fp12 f2;
+    fp12_inv(&f2, &f);
+    fp12_mul(&f, &f1, &f2);
+    f2 = f;
+    fp12_frobenius_map(&f, 2);
+    fp12_mul(&f, &f, &f2);
+
+    struct fp12 y0, y1, y2, y3;
+
+    struct fp12 r_save = f;
+
+    fp12_sq(&y0, &f);
+
+    oracle_fp12_pow_u64(&y1, &y0, ORACLE_BLS_X);
+    fp12_conjugate(&y1);
+
+    oracle_fp12_pow_u64(&y2, &y1, ORACLE_BLS_X >> 1);
+    fp12_conjugate(&y2);
+
+    y3 = r_save;
+    fp12_conjugate(&y3);
+    fp12_mul(&y1, &y1, &y3);
+    fp12_conjugate(&y1);
+    fp12_mul(&y1, &y1, &y2);
+
+    oracle_fp12_pow_u64(&y2, &y1, ORACLE_BLS_X);
+    fp12_conjugate(&y2);
+
+    oracle_fp12_pow_u64(&y3, &y2, ORACLE_BLS_X);
+    fp12_conjugate(&y3);
+
+    fp12_conjugate(&y1);
+    fp12_mul(&y3, &y3, &y1);
+
+    fp12_conjugate(&y1);
+    fp12_frobenius_map(&y1, 3);
+
+    fp12_frobenius_map(&y2, 2);
+    fp12_mul(&y1, &y1, &y2);
+
+    oracle_fp12_pow_u64(&y2, &y3, ORACLE_BLS_X);
+    fp12_conjugate(&y2);
+    fp12_mul(&y2, &y2, &y0);
+    fp12_mul(&y2, &y2, &r_save);
+    fp12_mul(&y1, &y1, &y2);
+
+    y2 = y3;
+    fp12_frobenius_map(&y2, 1);
+    fp12_mul(&y1, &y1, &y2);
+
+    *result = y1;
+}
+#endif /* ORACLE_WITH_FINAL_EXP */

@@ -858,7 +858,7 @@ void fp12_mul_by_014(struct fp12 *f, const struct fp2 *c0, const struct fp2 *c1,
     fp6_add(&f->c0, &bb_nr, &aa);
 }
 
-static void fp12_pow_u64(struct fp12 *r, const struct fp12 *a, uint64_t exp)
+void fp12_pow_u64(struct fp12 *r, const struct fp12 *a, uint64_t exp)
 {
     struct fp12 result;
     fp12_one(&result);
@@ -871,6 +871,71 @@ static void fp12_pow_u64(struct fp12 *r, const struct fp12 *a, uint64_t exp)
         exp >>= 1;
     }
     *r = result;
+}
+
+/* Fp4 squaring helper for Granger-Scott: (a + b*s)^2 with s^2 = v-nonresidue. */
+static void fp4_square(struct fp2 *c0, struct fp2 *c1, const struct fp2 *a, const struct fp2 *b)
+{
+    struct fp2 t0, t1, t2;
+    fp2_sq(&t0, a);
+    fp2_sq(&t1, b);
+    fp2_mul_by_nonresidue(&t2, &t1);
+    fp2_add(c0, &t2, &t0);
+    fp2_add(&t2, a, b);
+    fp2_sq(&t2, &t2);
+    fp2_sub(&t2, &t2, &t0);
+    fp2_sub(c1, &t2, &t1);
+}
+
+/* z = 3*t - 2*z (the "minus" lane) or 3*t + 2*z (the "plus" lane). */
+static void gs_lane(struct fp2 *z, const struct fp2 *t, bool minus)
+{
+    struct fp2 u;
+    if (minus)
+        fp2_sub(&u, t, z);
+    else
+        fp2_add(&u, t, z);
+    fp2_add(&u, &u, &u);
+    fp2_add(z, &u, t);
+}
+
+/* Granger-Scott squaring. Valid ONLY for a in the cyclotomic subgroup
+ * (norm to Fp6 is 1), where it equals fp12_sq(a). Public-constant callers
+ * only: no secret-dependent control flow. */
+void fp12_cyclotomic_sq(struct fp12 *r, const struct fp12 *a)
+{
+    struct fp2 z0 = a->c0.c0, z4 = a->c0.c1, z3 = a->c0.c2;
+    struct fp2 z2 = a->c1.c0, z1 = a->c1.c1, z5 = a->c1.c2;
+    struct fp2 t0, t1, t2, t3, t;
+
+    fp4_square(&t0, &t1, &z0, &z1);
+    gs_lane(&z0, &t0, true);
+    gs_lane(&z1, &t1, false);
+
+    fp4_square(&t0, &t1, &z2, &z3);
+    fp4_square(&t2, &t3, &z4, &z5);
+    gs_lane(&z4, &t0, true);
+    gs_lane(&z5, &t1, false);
+
+    fp2_mul_by_nonresidue(&t, &t3);
+    gs_lane(&z2, &t, false);
+    gs_lane(&z3, &t2, true);
+
+    r->c0.c0 = z0; r->c0.c1 = z4; r->c0.c2 = z3;
+    r->c1.c0 = z2; r->c1.c1 = z1; r->c1.c2 = z5;
+}
+
+/* a^BLS_X-style exponentiation for a in the cyclotomic subgroup: MSB-first
+ * square-and-multiply with cyclotomic squaring. exp is a public constant. */
+static void fp12_cyclotomic_exp(struct fp12 *r, const struct fp12 *a, uint64_t exp)
+{
+    struct fp12 acc = *a;
+    for (int i = 62 - __builtin_clzll(exp); i >= 0; i--) {
+        fp12_cyclotomic_sq(&acc, &acc);
+        if ((exp >> i) & 1)
+            fp12_mul(&acc, &acc, a);
+    }
+    *r = acc;
 }
 
 /* ===== G1 point operations (Jacobian, y^2 = x^3 + 4) ===== */
@@ -1455,7 +1520,7 @@ static void ell(struct fp12 *f, const struct fp2 *c0_coeff, const struct fp2 *c1
 
 /* Miller loop only (no final exponentiation).
  * Returns the Miller loop result f for pairing(P, Q). */
-static void bls12_381_miller_loop(struct fp12 *result, const struct g1_point *p, const struct g2_point *q)
+void bls12_381_miller_loop(struct fp12 *result, const struct g1_point *p, const struct g2_point *q)
 {
     if (g1_is_identity(p) || g2_is_identity(q)) {
         fp12_one(result);
@@ -1515,7 +1580,7 @@ static void bls12_381_miller_loop(struct fp12 *result, const struct g1_point *p,
 }
 
 /* Final exponentiation: f^((q^12 - 1) / r) */
-static void bls12_381_final_exp(struct fp12 *result, const struct fp12 *f_in)
+void bls12_381_final_exp(struct fp12 *result, const struct fp12 *f_in)
 {
     struct fp12 f = *f_in;
 
@@ -1538,10 +1603,10 @@ static void bls12_381_final_exp(struct fp12 *result, const struct fp12 *f_in)
 
     fp12_sq(&y0, &f);
 
-    fp12_pow_u64(&y1, &y0, BLS_X);
+    fp12_cyclotomic_exp(&y1, &y0, BLS_X);
     fp12_conjugate(&y1); /* exp_by_x conjugates since BLS_X_IS_NEGATIVE */
 
-    fp12_pow_u64(&y2, &y1, BLS_X >> 1);
+    fp12_cyclotomic_exp(&y2, &y1, BLS_X >> 1);
     fp12_conjugate(&y2);
 
     y3 = r_save;
@@ -1550,10 +1615,10 @@ static void bls12_381_final_exp(struct fp12 *result, const struct fp12 *f_in)
     fp12_conjugate(&y1);
     fp12_mul(&y1, &y1, &y2);
 
-    fp12_pow_u64(&y2, &y1, BLS_X);
+    fp12_cyclotomic_exp(&y2, &y1, BLS_X);
     fp12_conjugate(&y2);
 
-    fp12_pow_u64(&y3, &y2, BLS_X);
+    fp12_cyclotomic_exp(&y3, &y2, BLS_X);
     fp12_conjugate(&y3);
 
     fp12_conjugate(&y1);
@@ -1565,7 +1630,7 @@ static void bls12_381_final_exp(struct fp12 *result, const struct fp12 *f_in)
     fp12_frobenius_map(&y2, 2);
     fp12_mul(&y1, &y1, &y2);
 
-    fp12_pow_u64(&y2, &y3, BLS_X);
+    fp12_cyclotomic_exp(&y2, &y3, BLS_X);
     fp12_conjugate(&y2);
     fp12_mul(&y2, &y2, &y0);
     fp12_mul(&y2, &y2, &r_save);

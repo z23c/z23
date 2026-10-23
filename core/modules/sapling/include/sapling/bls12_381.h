@@ -90,6 +90,9 @@ void fp12_inv(struct fp12 *r, const struct fp12 *a);
 void fp12_conjugate(struct fp12 *a);
 void fp12_frobenius_map(struct fp12 *a, int power);
 void fp12_mul_by_014(struct fp12 *a, const struct fp2 *c0, const struct fp2 *c1, const struct fp2 *c4);
+void fp12_pow_u64(struct fp12 *r, const struct fp12 *a, uint64_t exp);
+/* Granger-Scott squaring: valid only for elements of the cyclotomic subgroup. */
+void fp12_cyclotomic_sq(struct fp12 *r, const struct fp12 *a);
 
 /* G1: y^2 = x^3 + 4 over Fp (Jacobian coordinates) */
 struct g1_point {
@@ -130,6 +133,9 @@ void g2_to_affine(struct fp2 *ax, struct fp2 *ay, const struct g2_point *p);
 bool g2_in_subgroup(const struct g2_point *p);
 
 /* Optimal Ate pairing */
+void bls12_381_miller_loop(struct fp12 *result, const struct g1_point *p, const struct g2_point *q);
+void bls12_381_final_exp(struct fp12 *result, const struct fp12 *f_in);
+
 void bls12_381_pairing(struct fp12 *result,
                         const struct g1_point *p,
                         const struct g2_point *q);
