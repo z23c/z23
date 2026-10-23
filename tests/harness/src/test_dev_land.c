@@ -13184,16 +13184,20 @@ _test_next:;
  *
  * The lint precheck submit runs before it queues. The fixture lane carries
  * its own build/bin/z23-lint, a shell script that answers --list from
- * build/precheck-known, fails the gate named in build/precheck-fail, and logs
- * each gate it ran to build/precheck-ran. Every file is read relative to the
- * cwd the script was started in, so a precheck that ran in the wrong
- * directory finds nothing and the tests fail. */
+ * build/precheck-known, fails (exit 1, a violation) the gate named in
+ * build/precheck-fail, reports it cannot decide (exit 2) for the gate named in
+ * build/precheck-unproven, and logs each gate it ran to build/precheck-ran.
+ * Every file is read relative to the cwd the script was started in, so a
+ * precheck that ran in the wrong directory finds nothing and the tests fail. */
 #define DLX_PC_SCRIPT                                                        \
     "#!/bin/sh\n"                                                            \
     "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"    \
     "echo \"$1\" >> build/precheck-ran\n"                                    \
     "if [ -f build/precheck-fail ] && [ \"$1\" = \"$(cat build/precheck-fail)\" ]; then\n" \
-    "  echo \"first line of $1\"; echo \"second line\"; echo \"stderr line\" >&2; exit 2\n" \
+    "  echo \"first line of $1\"; echo \"second line\"; echo \"stderr line\" >&2; exit 1\n" \
+    "fi\n"                                                                   \
+    "if [ -f build/precheck-unproven ] && [ \"$1\" = \"$(cat build/precheck-unproven)\" ]; then\n" \
+    "  echo \"cannot decide $1 here\"; exit 2\n"                             \
     "fi\n"                                                                   \
     "exit 0\n"
 
@@ -13371,6 +13375,34 @@ static bool dlx_pc_failing_gate_refused(void)
     ok = ok && dlx_queue_empty() && dlx_pc_outcomes_size() == before &&
          dlx_git_out(rig.clone, rev, head, sizeof(head)) == 0 &&
          strcmp(head, rig.tip) == 0;
+    dlx_restore();
+    return ok;
+}
+
+/* A gate exiting 2 cannot decide here: it is skipped and named, the gates
+ * after it still run, and the submit still queues. */
+static bool dlx_pc_unproven_gate_skipped(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (!dlx_pc_rig(&rig, "precheck_unproven", true,
+                    "check-file-size-ceiling\ncheck-cyclomatic-complexity\n"
+                    "check-core-seal\ncheck-arm-symbol-single\n") ||
+        !dlx_pc_file(&rig, "precheck-unproven", "check-cyclomatic-complexity"))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, "u");
+    ok = dlx_run(&c) && dlx_ok(&c) && dlx_int(&c, "seq") == 1 &&
+         dlx_pc_has(dlx_arr(&c, "precheck_skipped"),
+                    "check-cyclomatic-complexity") &&
+         !dlx_pc_has(dlx_arr(&c, "precheck_ran"),
+                     "check-cyclomatic-complexity") &&
+         dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-arm-symbol-single") &&
+         strstr(dlx_str(&c, "precheck_unproven"),
+                "check-cyclomatic-complexity: cannot decide") != NULL;
+    dlx_end(&c);
+    ok = ok && dlx_queue_has_one() && dlx_pc_ran(&rig, "check-core-seal") &&
+         dlx_pc_ran(&rig, "check-arm-symbol-single");
     dlx_restore();
     return ok;
 }
@@ -13605,6 +13637,10 @@ static int dlx_case_precheck(void)
     int failures = 0;
     TEST("land: submit refuses a lane whose precheck gate fails and queues nothing") {
         ASSERT(dlx_pc_failing_gate_refused());
+        PASS();
+    }
+    TEST("land: precheck skips a gate that cannot decide (exit 2) and queues") {
+        ASSERT(dlx_pc_unproven_gate_skipped());
         PASS();
     }
     TEST("land: submit queues a lane whose precheck gates are clean") {

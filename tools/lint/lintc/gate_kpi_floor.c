@@ -177,6 +177,22 @@ static int kfg_tighten(const char *path, const struct kpi_floor *fl,
     return 0;
 }
 
+/* True when every miss is an unavailable metric and none regressed. The
+ * caller has seen at least one miss; more misses than the buffer holds fail
+ * closed as a regression. */
+static bool kfg_only_unavailable(const struct kpi_floor *fl,
+                                 const struct kpi_frame *cur)
+{
+    struct kpi_miss miss[KFG_MISS_MAX];
+    size_t n = kpi_floor_check(fl, cur, miss, KFG_MISS_MAX);
+    if (n > KFG_MISS_MAX)
+        return false;
+    for (size_t i = 0; i < n; i++)
+        if (miss[i].kind != KPI_MISS_UNAVAILABLE)
+            return false;
+    return true;
+}
+
 int check_kpi_floor_run(int argc, char **argv)
 {
     int tighten = argc == 1 && strcmp(argv[0], "--tighten-baseline") == 0;
@@ -201,8 +217,10 @@ int check_kpi_floor_run(int argc, char **argv)
     kpi_collect_files(root, KPI_GROUP_ALL, &cur);
     if (tighten)
         return kfg_tighten(path, &fl, &cur, stdout, stderr);
+    /* 1: a metric regressed. 2: only unavailable metrics (no input here, e.g.
+     * the capability inventory is not generated); nothing regressed. */
     if (kfg_report(&fl, &cur, stderr) > 0)
-        return 1;
+        return kfg_only_unavailable(&fl, &cur) ? 2 : 1;
     printf("check-kpi-floor: clean — %u metrics at or better than their floor\n",
            fl.count);
     return 0;
@@ -457,9 +475,38 @@ static int kfg_tighten_selftest(void)
     return bad;
 }
 
+/* (e) Only unavailable misses are unproven; one regression beside them is
+ * a violation. */
+static int kfg_exit_case(void)
+{
+    struct kpi_floor fl;
+    struct kpi_frame f;
+    memset(&fl, 0, sizeof fl);
+    memset(&f, 0, sizeof f);
+    fl.count = 2;
+    snprintf(fl.id[0], sizeof fl.id[0], "%s", "cmd.tested");
+    fl.value[0] = 700;
+    snprintf(fl.id[1], sizeof fl.id[1], "%s", "code.shell_scripts");
+    fl.value[1] = 491;
+    f.count = 2;
+    snprintf(f.metric[0].id, sizeof f.metric[0].id, "%s", "cmd.tested");
+    f.metric[0].state = KPI_STATE_UNAVAILABLE;
+    snprintf(f.metric[1].id, sizeof f.metric[1].id, "%s",
+             "code.shell_scripts");
+    f.metric[1].state = KPI_STATE_PRESENT;
+    f.metric[1].value = 396;
+    int rc = kfg_check("only unavailable misses must be unproven",
+                       kfg_only_unavailable(&fl, &f));
+    f.metric[1].value = 500;
+    rc |= kfg_check("a regression beside an unavailable metric must refuse",
+                    !kfg_only_unavailable(&fl, &f));
+    return rc;
+}
+
 int check_kpi_floor_selftest(void)
 {
     int rc = 0;
+    rc |= kfg_exit_case();
     rc |= kfg_case("code.size_debt", 5, KPI_STATE_PRESENT, 5, 0);
     rc |= kfg_case("code.size_debt", 5, KPI_STATE_PRESENT, 4, 0);
     rc |= kfg_case("code.size_debt", 5, KPI_STATE_PRESENT, 6, 1);

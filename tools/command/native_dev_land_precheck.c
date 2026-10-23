@@ -303,6 +303,10 @@ static bool pc_known(const char *list, const char *gate)
     return false;
 }
 
+/* A gate that exits PC_EXIT_UNPROVEN cannot decide here: an input is absent
+ * or the environment is incomplete. It is skipped, not refused. */
+#define PC_EXIT_UNPROVEN 2
+
 struct pc_run {
     const char *leaf, *wt;
     char bin[4096 + 32];
@@ -310,8 +314,36 @@ struct pc_run {
     int64_t deadline;
     const char *skipped[ZCL_LAND_PRECHECK_MAX_GATES];
     const char *ran[ZCL_LAND_PRECHECK_MAX_GATES];
+    char unproven[PC_EVIDENCE_CAP];
     size_t nskipped, nran;
 };
+
+/* Appends "gate: first output line" for an unproven gate to r->unproven and
+ * counts the gate as skipped. Both writes are bounded; a full buffer drops
+ * the reason but never the skip. */
+static void pc_note_unproven(struct pc_run *r, const char *gate)
+{
+    char line[160];
+    size_t used = strlen(r->unproven), n = strcspn(r->out, "\r\n");
+    if (n >= sizeof(line))
+        n = sizeof(line) - 1;
+    memcpy(line, r->out, n);
+    line[n] = '\0';
+    if (used > 0 && used + 2 < sizeof(r->unproven))
+        (void)snprintf(r->unproven + used, sizeof(r->unproven) - used, "; ");
+    used = strlen(r->unproven);
+    if (used < sizeof(r->unproven))
+        (void)snprintf(r->unproven + used, sizeof(r->unproven) - used,
+                       "%s: %s", gate, line);
+    r->skipped[r->nskipped++] = gate;
+}
+
+static void pc_push_unproven(const struct pc_run *r,
+                             struct zcl_command_reply *reply)
+{
+    if (r->unproven[0])
+        (void)json_push_kv_str(&reply->data, "precheck_unproven", r->unproven);
+}
 
 static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
                            struct zcl_command_reply *reply)
@@ -332,6 +364,7 @@ static void pc_gate_failed(struct pc_run *r, const char *gate, int rc,
     (void)json_push_kv_str(&reply->data, "gate", gate);
     (void)json_push_kv_str(&reply->data, "hint", "fix and resubmit");
     pc_push_names(reply, "precheck_skipped", r->skipped, r->nskipped);
+    pc_push_unproven(r, reply);
     pc_fail(reply, r->leaf, "PRECHECK_FAILED", msg, ev[0] ? ev : gate);
 }
 
@@ -355,6 +388,10 @@ static bool pc_gates_run(struct pc_run *r,
             continue;
         }
         rc = pc_run(r->wt, r->bin, g->name[i], r->deadline, r->out, PC_OUT_CAP);
+        if (rc == PC_EXIT_UNPROVEN) {
+            pc_note_unproven(r, g->name[i]);
+            continue;
+        }
         if (rc != 0) {
             pc_gate_failed(r, g->name[i], rc, reply);
             return false;
@@ -447,6 +484,7 @@ static bool pc_run_gates(const char *leaf, const char *wt,
     if (ok) {
         pc_push_names(reply, "precheck_ran", r->ran, r->nran);
         pc_push_names(reply, "precheck_skipped", r->skipped, r->nskipped);
+        pc_push_unproven(r, reply);
     }
     free(r->out);
     free(g);

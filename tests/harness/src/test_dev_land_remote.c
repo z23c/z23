@@ -245,7 +245,7 @@ static void dlt_send(struct dlt_call *c, const struct dlt_rig *r,
     "if [ \"$1\" = --list ]; then printf 'check-file-size-ceiling\\n"        \
     "check-cyclomatic-complexity\\ncheck-core-seal\\ncheck-arm-symbol-single\\n'; exit 0; fi\n" \
     "if [ -f build/precheck-fail ] && [ \"$1\" = \"$(cat build/precheck-fail)\" ]; then\n" \
-    "  echo \"gate $1 failed\"; exit 2\n"                                    \
+    "  echo \"gate $1 failed\"; exit 1\n"                                    \
     "fi\n"                                                                   \
     "exit 0\n"
 
