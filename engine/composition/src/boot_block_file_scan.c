@@ -352,14 +352,19 @@ int scan_compute_contiguous_data_height(struct block_index *best_header,
 {
     if (!best_header) return -1;
     struct block_index *walk = best_header;
+    struct block_index *bottom = NULL;
     int guard = 0;
     int limit = (int)map_size;
     if (limit < 1) limit = 1;
-    while (walk && (walk->nStatus & BLOCK_HAVE_DATA) && guard++ < limit)
+    while (walk && (walk->nStatus & BLOCK_HAVE_DATA) && guard++ < limit) {
+        bottom = walk;
         walk = walk->pprev;
+    }
     if (walk && walk->pprev && (walk->pprev->nStatus & BLOCK_HAVE_DATA))
         return walk->pprev->nHeight;
-    if (!walk) return 0; /* genesis has data and walk fell off the chain */
+    if (!walk) /* every entry from the tip down has data: no hole when the
+                * bottom is genesis (height 0); an orphan bottom stays 0 */
+        return bottom->nHeight == 0 ? best_header->nHeight : 0;
     return -1;
 }
 /* Pass 0: enumerate the block files on disk into `files` and return how

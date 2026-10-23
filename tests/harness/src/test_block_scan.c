@@ -17,6 +17,7 @@
 #include "models/database.h"
 #include "models/wallet_tx.h"
 #include "config/boot_cursor_state.h"
+#include "config/boot_internal.h"
 #include "util/storage_pacing.h"
 #include "util/safe_alloc.h"
 #include "util/thread_registry.h"
@@ -811,6 +812,70 @@ static int test_chain_gap_walk(void)
     return 1;
 }
 
+/* ── contiguous data height: a complete chain has no hole ───────── */
+
+#define CONTIG_N 1500
+
+static void contiguous_chain_link(struct block_index *chain, int n)
+{
+    for (int i = 0; i < n; i++) {
+        block_index_init(&chain[i]);
+        chain[i].nHeight = i;
+        chain[i].pprev = i > 0 ? &chain[i - 1] : NULL;
+        chain[i].nStatus = BLOCK_HAVE_DATA;
+    }
+}
+
+static int contiguous_expect(struct block_index *best, int expect,
+                             const char *what)
+{
+    int got = scan_compute_contiguous_data_height(best, CONTIG_N);
+    if (got == expect)
+        return 0;
+    printf("\n  %s: got %d, want %d ", what, got, expect);
+    return 1;
+}
+
+static int test_contiguous_data_height(void)
+{
+    printf("GIVEN chains with and without holes WHEN the contiguous data "
+           "height is computed THEN a complete chain reports its tip, a hole "
+           "reports the height below it, and a NULL header reports -1... ");
+    int failures = 0;
+    struct block_index *chain =
+        zcl_calloc(CONTIG_N, sizeof(struct block_index), "test.contig.bi");
+    if (!chain) {
+        printf("FAIL (alloc)\n");
+        return 1;
+    }
+    contiguous_chain_link(chain, CONTIG_N);
+    /* (a) complete chain: the walk falls off genesis. Predicate:
+     * 1499 + 1000 < 1499 is false, so no full scan. */
+    failures += contiguous_expect(&chain[1499], 1499, "complete chain");
+    /* (b) hole at 200: walk stops at 200, pprev 199 has data. Predicate:
+     * 199 + 1000 = 1199 < 1499 is true, so the scan runs. */
+    chain[200].nStatus = 0;
+    failures += contiguous_expect(&chain[1499], 199, "hole at 200");
+    chain[200].nStatus = BLOCK_HAVE_DATA;
+    /* (c) hole at 1000: 999 + 1000 = 1999 < 1499 is false, no scan. */
+    chain[1000].nStatus = 0;
+    failures += contiguous_expect(&chain[1499], 999, "hole at 1000");
+    chain[1000].nStatus = BLOCK_HAVE_DATA;
+    /* (d) no best header. */
+    failures += contiguous_expect(NULL, -1, "NULL best header");
+    /* (e) genesis itself lacks data: a real hole at genesis, unchanged. */
+    chain[0].nStatus = 0;
+    failures += contiguous_expect(&chain[1499], -1, "genesis without data");
+    chain[0].nStatus = BLOCK_HAVE_DATA;
+    /* (f) orphan bottom at height 5 (no pprev, not genesis): unchanged 0. */
+    chain[5].pprev = NULL;
+    failures += contiguous_expect(&chain[1499], 0, "orphan bottom at 5");
+    free(chain);
+    if (failures == 0) { printf("OK\n"); return 0; }
+    printf("FAIL (%d)\n", failures);
+    return 1;
+}
+
 int test_block_scan(void)
 {
     int failures = 0;
@@ -821,6 +886,7 @@ int test_block_scan(void)
     failures += test_scan_storage_concurrency();
     failures += test_cmp_height();
     failures += test_chain_gap_walk();
+    failures += test_contiguous_data_height();
     failures += test_failed_child_propagation();
     failures += test_nchaintx_propagation();
     failures += test_block_magic();
