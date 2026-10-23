@@ -160,12 +160,6 @@ cognition/modules/retrieval/src/retrieval_experiment.c:zcl_retrieval_profile_pro
 cognition/modules/retrieval/src/retrieval_experiment.c:zcl_retrieval_profile_validate:26
 cognition/modules/retrieval/src/retrieval_pair_observation.c:zcl_retrieval_pair_observation_validate:28
 cognition/modules/retrieval/src/retrieval_pair_observation.c:zcl_retrieval_pair_observation_verify:37
-cognition/modules/retrieval/src/retrieval_profile.c:rx_canonical_path:20
-cognition/modules/retrieval/src/retrieval_profile.c:rx_profile_project_core:23
-cognition/modules/retrieval/src/retrieval_profile.c:rx_snapshot_validate:37
-cognition/modules/retrieval/src/retrieval_profile.c:zcl_retrieval_context_feature_snapshot:33
-cognition/modules/retrieval/src/retrieval_profile.c:zcl_retrieval_profile_project:29
-cognition/modules/retrieval/src/retrieval_profile.c:zcl_retrieval_profile_replay_project:48
 cognition/modules/science/src/ecosystem.c:science_ecosystem_collect:19
 cognition/modules/science/src/science_claim.c:science_refusal_name:28
 cognition/modules/science/src/science_claim.c:validate_receipt:37
