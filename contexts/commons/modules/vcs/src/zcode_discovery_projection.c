@@ -390,6 +390,399 @@ void vcs_zcode_discovery_scan_free(struct vcs_zcode_discovery_scan_v1 *scan)
     free(scan);
 }
 
+/* Pass 1 of the scan: every allowlisted study opens a lineage whose first
+ * members are its study root and source root. */
+static bool zdp_scan_open_studies(const struct vcs_zcode_science_index *index,
+                                  size_t study_total,
+                                  const uint8_t (*study_allowlist)[32],
+                                  size_t allowlist_count, struct zdp_uf *uf,
+                                  struct zdp_root_list *study_members)
+{
+    for (size_t i = 0; i < study_total; i++) {
+        const struct vcs_zcode_science_index_study_entry *se =
+            vcs_zcode_science_index_study_at(index, i);
+        uint8_t study_root[32], source_root[32];
+        if (!zcl_hex_decode_lower(se->study_root_hex, study_root, 32) ||
+            !zcl_hex_decode_lower(se->source_root_hex, source_root, 32))
+            continue;
+        if (!zdp_allowlisted(study_allowlist, allowlist_count, study_root))
+            continue;
+        size_t s = zdp_uf_add(uf, study_root);
+        size_t src = zdp_uf_add(uf, source_root);
+        if (s == SIZE_MAX || src == SIZE_MAX)
+            return false;
+        zdp_uf_union(uf, s, src);
+        if (!zdp_root_list_add(&study_members[i], study_root))
+            return false;
+    }
+    return true;
+}
+
+/* Pass 2: projected results of allowlisted studies pull their candidate's
+ * base/candidate source roots into the same lineage. */
+static bool zdp_scan_absorb_results(const char *workspace,
+                                    const struct vcs_zcode_science_index *index,
+                                    const uint8_t (*study_allowlist)[32],
+                                    size_t allowlist_count, struct zdp_uf *uf)
+{
+    size_t result_total = vcs_zcode_science_index_result_count(index);
+    for (size_t i = 0; i < result_total; i++) {
+        const struct vcs_zcode_science_index_result_entry *re =
+            vcs_zcode_science_index_result_at(index, i);
+        uint8_t study_root[32], candidate_root[32];
+        if (!zcl_hex_decode_lower(re->study_root_hex, study_root, 32) ||
+            !zcl_hex_decode_lower(re->candidate_root_hex, candidate_root, 32))
+            continue;
+        if (!zdp_allowlisted(study_allowlist, allowlist_count, study_root))
+            continue;
+        if (!zdp_absorb_candidate_lineage(workspace, candidate_root,
+                                          study_root, uf))
+            return false;
+    }
+    return true;
+}
+
+/* Open a lineage for each union-find set that holds an allowlisted study.
+ * lineage_of_set maps a set representative to its lineage index. */
+static bool zdp_scan_open_lineages(struct vcs_zcode_discovery_scan_v1 *scan,
+                                   struct zdp_uf *uf, size_t *lineage_of_set,
+                                   const struct zdp_root_list *study_members,
+                                   size_t study_total)
+{
+    for (size_t i = 0; i < study_total; i++) {
+        if (study_members[i].count == 0)
+            continue;
+        uint8_t study_root[32];
+        memcpy(study_root, study_members[i].roots[0], 32);
+        size_t idx = zdp_uf_add(uf, study_root);
+        if (idx == SIZE_MAX)
+            return false;
+        size_t rep = zdp_uf_find(uf, idx);
+        if (lineage_of_set[rep] == SIZE_MAX) {
+            size_t li = scan->lineage_count;
+            struct vcs_zcode_discovery_lineage_v1 *grown = zcl_realloc(
+                scan->lineages, (li + 1u) * sizeof(*scan->lineages),
+                "zdp_lineages");
+            if (!grown) {
+                LOG_ERROR(ZDP_LOG, "lineages grow");
+                return false;
+            }
+            scan->lineages = grown;
+            memset(&scan->lineages[li], 0, sizeof(*scan->lineages));
+            lineage_of_set[rep] = li;
+            scan->lineage_count++;
+        }
+        scan->lineages[lineage_of_set[rep]].study_count++;
+    }
+    return true;
+}
+
+/* Absorb every union-find member into the lineage of its set. */
+static bool zdp_scan_absorb_members(struct vcs_zcode_discovery_scan_v1 *scan,
+                                    struct zdp_uf *uf,
+                                    const size_t *lineage_of_set,
+                                    size_t set_count)
+{
+    for (size_t i = 0; i < set_count; i++) {
+        size_t rep = zdp_uf_find(uf, i);
+        if (rep >= set_count || lineage_of_set[rep] == SIZE_MAX)
+            continue;
+        struct vcs_zcode_discovery_lineage_v1 *lin =
+            &scan->lineages[lineage_of_set[rep]];
+        struct zdp_root_list tmp = {
+            .roots = (uint8_t(*)[32])lin->members,
+            .count = lin->member_count,
+            .capacity = lin->member_count,
+        };
+        bool added = zdp_root_list_add(&tmp, uf->roots[i]);
+        lin->members = tmp.roots;
+        lin->member_count = tmp.count;
+        if (!added)
+            return false;
+    }
+    return true;
+}
+
+/* Group members into lineages by union-find representative, in member
+ * (scan) order; each lineage's representative root is its smallest
+ * member. */
+static bool zdp_scan_group_lineages(struct vcs_zcode_discovery_scan_v1 *scan,
+                                    struct zdp_uf *uf,
+                                    const struct zdp_root_list *study_members,
+                                    size_t study_total)
+{
+    size_t set_count = uf->count;
+    size_t *lineage_of_set = zcl_calloc(set_count ? set_count : 1,
+                                        sizeof(*lineage_of_set),
+                                        "zdp_lineage_of_set");
+    if (!lineage_of_set) {
+        LOG_ERROR(ZDP_LOG, "lineage map alloc");
+        return false;
+    }
+    for (size_t i = 0; i < set_count; i++)
+        lineage_of_set[i] = SIZE_MAX;
+    /* Only sets containing an allowlisted study become lineages. */
+    if (!zdp_scan_open_lineages(scan, uf, lineage_of_set, study_members,
+                                study_total)) {
+        free(lineage_of_set);
+        return false;
+    }
+    bool ok = zdp_scan_absorb_members(scan, uf, lineage_of_set, set_count);
+    free(lineage_of_set);
+    return ok;
+}
+
+/* Append the canonical citation targets of one lineage's study members. */
+static bool zdp_scan_absorb_lineage_citations(
+    const char *workspace, const struct vcs_zcode_discovery_lineage_v1 *lin,
+    struct zdp_root_list *citations)
+{
+    for (size_t m = 0; m < lin->member_count; m++) {
+        /* Citation sets attach to STUDY roots only; source/candidate
+         * members are not study wires and simply fail the load. */
+        uint8_t citations_root[32];
+        if (!zdp_study_citations_root(workspace, lin->members[m],
+                                      citations_root))
+            continue;
+        if (!zdp_absorb_citations(workspace, citations_root, citations))
+            return false;
+    }
+    return true;
+}
+
+/* Per lineage: sorted members (node root = smallest member) and the
+ * canonical citation targets of its studies. */
+static bool zdp_scan_lineage_citations(const char *workspace,
+                                       struct vcs_zcode_discovery_lineage_v1 *lin)
+{
+    struct zdp_root_list members = {
+        .roots = lin->members, .count = lin->member_count,
+        .capacity = lin->member_count,
+    };
+    zdp_root_list_sort(&members);
+    struct zdp_root_list citations = { .roots = NULL };
+    if (!zdp_scan_absorb_lineage_citations(workspace, lin, &citations)) {
+        free(citations.roots);
+        return false;
+    }
+    zdp_root_list_sort(&citations);
+    lin->citations = citations.roots;
+    lin->citation_count = citations.count;
+    return true;
+}
+
+static bool zdp_scan_attach_citations(const char *workspace,
+                                      struct vcs_zcode_discovery_scan_v1 *scan)
+{
+    for (size_t li = 0; li < scan->lineage_count; li++)
+        if (!zdp_scan_lineage_citations(workspace, &scan->lineages[li]))
+            return false;
+    return true;
+}
+
+/* Sort lineages by representative (smallest member) root ascending:
+ * sort (root, index) pairs, then permute. */
+static bool zdp_scan_sort_lineages(struct vcs_zcode_discovery_scan_v1 *scan)
+{
+    if (scan->lineage_count <= 1)
+        return true;
+    struct zdp_lineage_order {
+        uint8_t root[32];
+        size_t index;
+    } *order = zcl_calloc(scan->lineage_count, sizeof(*order),
+                          "zdp_lineage_order");
+    struct vcs_zcode_discovery_lineage_v1 *sorted = zcl_calloc(
+        scan->lineage_count, sizeof(*sorted), "zdp_lineages_sorted");
+    if (!order || !sorted) {
+        free(sorted);
+        free(order);
+        return false;
+    }
+    for (size_t i = 0; i < scan->lineage_count; i++) {
+        memcpy(order[i].root, scan->lineages[i].members[0], 32);
+        order[i].index = i;
+    }
+    qsort(order, scan->lineage_count, sizeof(*order), zdp_root_cmp);
+    for (size_t i = 0; i < scan->lineage_count; i++)
+        sorted[i] = scan->lineages[order[i].index];
+    free(scan->lineages);
+    scan->lineages = sorted;
+    free(order);
+    return true;
+}
+
+/* One vote's identity as decoded from the index row. */
+struct zdp_vote_ids {
+    uint8_t vote_id[32];
+    uint8_t voter[32];
+    uint8_t property[32];
+};
+
+/* One voter's accepted slot: voter, sequence and the lineage it weighted. */
+struct zdp_vote_seen {
+    uint8_t voter[32];
+    uint64_t sequence;
+    size_t lineage;
+};
+
+/* Only unexpired, positive-signal votes in a network can seed weight; FLAG
+ * and unknown signals are never seeds. */
+static bool zdp_vote_is_seed_signal(
+    const struct vcs_zcode_science_index_vote_entry *ve,
+    const uint8_t *network_genesis)
+{
+    if (ve->expired)
+        return false;
+    if (ve->signal != VCS_ZCODE_CURATION_USEFUL &&
+        ve->signal != VCS_ZCODE_CURATION_INTERESTING)
+        return false;
+    return network_genesis != NULL;
+}
+
+static bool zdp_vote_decode_ids(
+    const struct vcs_zcode_science_index_vote_entry *ve,
+    struct zdp_vote_ids *ids)
+{
+    return zcl_hex_decode_lower(ve->vote_id_hex, ids->vote_id, 32) &&
+        zcl_hex_decode_lower(ve->voter_zid_root_hex, ids->voter, 32) &&
+        zcl_hex_decode_lower(ve->property_root_hex, ids->property, 32);
+}
+
+/* Load the vote wire addressed by vote_id; true only when it parses, its
+ * rederived id matches the address, and it verifies at now_unix. */
+static bool zdp_vote_load_verified(const char *workspace,
+                                   const uint8_t vote_id[32],
+                                   const uint8_t *network_genesis,
+                                   int64_t now_unix)
+{
+    uint8_t *wire = NULL;
+    size_t len = 0;
+    struct vcs_zcode_curation_vote_v1 vote;
+    uint8_t rederived_id[32];
+    bool verified = zdp_cas_load(workspace, vote_id, &wire, &len) &&
+        vcs_zcode_curation_vote_parse(wire, len, &vote) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_curation_vote_id(&vote, rederived_id) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        memcmp(rederived_id, vote_id, 32) == 0 &&
+        vcs_zcode_curation_vote_verify(&vote, network_genesis,
+                                       vote.voter_zid_root,
+                                       vote.signer_pubkey,
+                                       now_unix) == VCS_ZCODE_SCIENCE_OK;
+    free(wire);
+    return verified;
+}
+
+/* The first admitted lineage (scan order) whose members contain property,
+ * or SIZE_MAX when the property is outside the filter. */
+static size_t zdp_lineage_of_property(
+    const struct vcs_zcode_discovery_scan_v1 *scan, const uint8_t property[32])
+{
+    for (size_t li = 0; li < scan->lineage_count; li++) {
+        const struct vcs_zcode_discovery_lineage_v1 *lin = &scan->lineages[li];
+        size_t lo = 0, hi = lin->member_count;
+        while (lo < hi) {
+            size_t mid = lo + (hi - lo) / 2;
+            int cmp = memcmp(property, lin->members[mid], 32);
+            if (cmp == 0)
+                return li;
+            if (cmp < 0)
+                hi = mid;
+            else
+                lo = mid + 1;
+        }
+    }
+    return SIZE_MAX;
+}
+
+static bool zdp_vote_is_replay(const struct zdp_vote_seen *seen,
+                               size_t seen_count, const uint8_t voter[32],
+                               uint64_t sequence, size_t lineage)
+{
+    for (size_t s = 0; s < seen_count; s++)
+        if (memcmp(seen[s].voter, voter, 32) == 0 &&
+            (seen[s].lineage == lineage || seen[s].sequence == sequence))
+            return true;
+    return false;
+}
+
+/* Record one accepted vote slot. On allocation failure *seen is left as it
+ * was, so the caller frees it. */
+static bool zdp_vote_remember(struct zdp_vote_seen **seen, size_t *seen_count,
+                              const uint8_t voter[32], uint64_t sequence,
+                              size_t lineage)
+{
+    struct zdp_vote_seen *grown = zcl_realloc(
+        *seen, (*seen_count + 1u) * sizeof(**seen), "zdp_vote_seen");
+    if (!grown) {
+        LOG_ERROR(ZDP_LOG, "vote-seen grow");
+        return false;
+    }
+    *seen = grown;
+    memcpy((*seen)[*seen_count].voter, voter, 32);
+    (*seen)[*seen_count].sequence = sequence;
+    (*seen)[*seen_count].lineage = lineage;
+    (*seen_count)++;
+    return true;
+}
+
+/* Votes: only signature-valid, non-expired, in-network, non-replay,
+ * positive-signal votes become seed weight — verified here, one vote
+ * per voter per lineage and one vote per voter+sequence. Processed in
+ * the index's vote-id order, so arrival order never changes the
+ * outcome and the first VALID vote in that order wins the voter's
+ * sequence slot (a later same-voter+sequence entry is the replay). */
+static bool zdp_scan_absorb_votes(const char *workspace,
+                                  const struct vcs_zcode_science_index *index,
+                                  const uint8_t *network_genesis,
+                                  int64_t now_unix,
+                                  struct vcs_zcode_discovery_scan_v1 *scan)
+{
+    struct zdp_vote_seen *seen = NULL;
+    size_t seen_count = 0;
+    size_t vote_total = vcs_zcode_science_index_vote_count(index);
+    for (size_t i = 0; i < vote_total; i++) {
+        const struct vcs_zcode_science_index_vote_entry *ve =
+            vcs_zcode_science_index_vote_at(index, i);
+        scan->votes_considered++;
+        if (!zdp_vote_is_seed_signal(ve, network_genesis))
+            continue;
+        struct zdp_vote_ids ids;
+        if (!zdp_vote_decode_ids(ve, &ids))
+            continue;
+        if (!zdp_vote_load_verified(workspace, ids.vote_id, network_genesis,
+                                    now_unix))
+            continue;
+        /* Resolve the voted property onto an admitted lineage. */
+        size_t lineage = zdp_lineage_of_property(scan, ids.property);
+        if (lineage == SIZE_MAX)
+            continue; /* a vote on something outside the filter */
+        if (zdp_vote_is_replay(seen, seen_count, ids.voter, ve->sequence,
+                               lineage))
+            continue; /* one vote per voter per lineage and per sequence */
+        if (!zdp_vote_remember(&seen, &seen_count, ids.voter, ve->sequence,
+                               lineage)) {
+            free(seen);
+            return false;
+        }
+        scan->lineages[lineage].seed_weight +=
+            ve->signal == VCS_ZCODE_CURATION_USEFUL
+                ? VCS_ZCODE_DISCOVERY_PROJECTION_WEIGHT_USEFUL
+                : VCS_ZCODE_DISCOVERY_PROJECTION_WEIGHT_INTERESTING;
+        scan->votes_accepted++;
+    }
+    free(seen);
+    return true;
+}
+
+static void zdp_scan_free_study_members(struct zdp_root_list *study_members,
+                                        size_t study_total)
+{
+    for (size_t i = 0; i < study_total; i++)
+        free(study_members[i].roots);
+    free(study_members);
+}
+
 struct vcs_zcode_discovery_scan_v1 *vcs_zcode_discovery_projection_scan(
     const char *workspace,
     const struct vcs_zcode_science_index *index,
@@ -418,278 +811,25 @@ struct vcs_zcode_discovery_scan_v1 *vcs_zcode_discovery_projection_scan(
         LOG_ERROR(ZDP_LOG, "study member lists alloc");
         goto done;
     }
-
-    /* Pass 1: every allowlisted study opens a lineage: study root +
-     * source root are the first members. */
-    for (size_t i = 0; i < study_total; i++) {
-        const struct vcs_zcode_science_index_study_entry *se =
-            vcs_zcode_science_index_study_at(index, i);
-        uint8_t study_root[32], source_root[32];
-        if (!zcl_hex_decode_lower(se->study_root_hex, study_root, 32) ||
-            !zcl_hex_decode_lower(se->source_root_hex, source_root, 32))
-            continue;
-        if (!zdp_allowlisted(study_allowlist, allowlist_count, study_root))
-            continue;
-        size_t s = zdp_uf_add(&uf, study_root);
-        size_t src = zdp_uf_add(&uf, source_root);
-        if (s == SIZE_MAX || src == SIZE_MAX)
-            goto done;
-        zdp_uf_union(&uf, s, src);
-        if (!zdp_root_list_add(&study_members[i], study_root))
-            goto done;
-    }
-
-    /* Pass 2: projected results of allowlisted studies pull their
-     * candidate's base/candidate source roots into the same lineage — one
-     * version chain or fork set collapses to one property. */
-    size_t result_total = vcs_zcode_science_index_result_count(index);
-    for (size_t i = 0; i < result_total; i++) {
-        const struct vcs_zcode_science_index_result_entry *re =
-            vcs_zcode_science_index_result_at(index, i);
-        uint8_t study_root[32], candidate_root[32];
-        if (!zcl_hex_decode_lower(re->study_root_hex, study_root, 32) ||
-            !zcl_hex_decode_lower(re->candidate_root_hex, candidate_root, 32))
-            continue;
-        if (!zdp_allowlisted(study_allowlist, allowlist_count, study_root))
-            continue;
-        if (!zdp_absorb_candidate_lineage(workspace, candidate_root,
-                                          study_root, &uf))
-            goto done;
-    }
-
-    /* Group members into lineages by union-find representative, in member
-     * (scan) order; each lineage's representative root is its smallest
-     * member. */
-    size_t *lineage_of_set = NULL;
-    {
-        size_t set_count = uf.count;
-        lineage_of_set = zcl_calloc(set_count ? set_count : 1,
-                                    sizeof(*lineage_of_set),
-                                    "zdp_lineage_of_set");
-        if (!lineage_of_set) {
-            LOG_ERROR(ZDP_LOG, "lineage map alloc");
-            goto done;
-        }
-        for (size_t i = 0; i < set_count; i++)
-            lineage_of_set[i] = SIZE_MAX;
-        /* Only sets containing an allowlisted study become lineages. */
-        for (size_t i = 0; i < study_total; i++) {
-            if (study_members[i].count == 0)
-                continue;
-            uint8_t study_root[32];
-            memcpy(study_root, study_members[i].roots[0], 32);
-            size_t idx = zdp_uf_add(&uf, study_root);
-            if (idx == SIZE_MAX) {
-                free(lineage_of_set);
-                goto done;
-            }
-            size_t rep = zdp_uf_find(&uf, idx);
-            if (lineage_of_set[rep] == SIZE_MAX) {
-                size_t li = scan->lineage_count;
-                struct vcs_zcode_discovery_lineage_v1 *grown = zcl_realloc(
-                    scan->lineages, (li + 1u) * sizeof(*scan->lineages),
-                    "zdp_lineages");
-                if (!grown) {
-                    LOG_ERROR(ZDP_LOG, "lineages grow");
-                    free(lineage_of_set);
-                    goto done;
-                }
-                scan->lineages = grown;
-                memset(&scan->lineages[li], 0, sizeof(*scan->lineages));
-                lineage_of_set[rep] = li;
-                scan->lineage_count++;
-            }
-            scan->lineages[lineage_of_set[rep]].study_count++;
-        }
-        /* Absorb every union-find member into its lineage. */
-        for (size_t i = 0; i < set_count; i++) {
-            size_t rep = zdp_uf_find(&uf, i);
-            if (rep >= set_count || lineage_of_set[rep] == SIZE_MAX)
-                continue;
-            struct vcs_zcode_discovery_lineage_v1 *lin =
-                &scan->lineages[lineage_of_set[rep]];
-            struct zdp_root_list tmp = {
-                .roots = (uint8_t(*)[32])lin->members,
-                .count = lin->member_count,
-                .capacity = lin->member_count,
-            };
-            if (!zdp_root_list_add(&tmp, uf.roots[i])) {
-                lin->members = tmp.roots;
-                lin->member_count = tmp.count;
-                free(lineage_of_set);
-                goto done;
-            }
-            lin->members = tmp.roots;
-            lin->member_count = tmp.count;
-        }
-        free(lineage_of_set);
-    }
-
-    /* Per lineage: sorted members (node root = smallest member) and the
-     * canonical citation targets of its studies. */
-    for (size_t li = 0; li < scan->lineage_count; li++) {
-        struct vcs_zcode_discovery_lineage_v1 *lin = &scan->lineages[li];
-        struct zdp_root_list members = {
-            .roots = lin->members, .count = lin->member_count,
-            .capacity = lin->member_count,
-        };
-        zdp_root_list_sort(&members);
-        struct zdp_root_list citations = { .roots = NULL };
-        for (size_t m = 0; m < lin->member_count; m++) {
-            /* Citation sets attach to STUDY roots only; source/candidate
-             * members are not study wires and simply fail the load. */
-            uint8_t citations_root[32];
-            if (!zdp_study_citations_root(workspace, lin->members[m],
-                                          citations_root))
-                continue;
-            if (!zdp_absorb_citations(workspace, citations_root, &citations)) {
-                free(citations.roots);
-                goto done;
-            }
-        }
-        zdp_root_list_sort(&citations);
-        lin->citations = citations.roots;
-        lin->citation_count = citations.count;
-    }
-
-    /* Sort lineages by representative (smallest member) root ascending:
-     * sort (root, index) pairs, then permute. */
-    if (scan->lineage_count > 1) {
-        struct zdp_lineage_order {
-            uint8_t root[32];
-            size_t index;
-        } *order = zcl_calloc(scan->lineage_count, sizeof(*order),
-                              "zdp_lineage_order");
-        struct vcs_zcode_discovery_lineage_v1 *sorted = zcl_calloc(
-            scan->lineage_count, sizeof(*sorted), "zdp_lineages_sorted");
-        if (!order || !sorted) {
-            free(sorted);
-            free(order);
-            goto done;
-        }
-        for (size_t i = 0; i < scan->lineage_count; i++) {
-            memcpy(order[i].root, scan->lineages[i].members[0], 32);
-            order[i].index = i;
-        }
-        qsort(order, scan->lineage_count, sizeof(*order), zdp_root_cmp);
-        for (size_t i = 0; i < scan->lineage_count; i++)
-            sorted[i] = scan->lineages[order[i].index];
-        free(scan->lineages);
-        scan->lineages = sorted;
-        free(order);
-    }
-
-    /* Votes: only signature-valid, non-expired, in-network, non-replay,
-     * positive-signal votes become seed weight — verified here, one vote
-     * per voter per lineage and one vote per voter+sequence. Processed in
-     * the index's vote-id order, so arrival order never changes the
-     * outcome and the first VALID vote in that order wins the voter's
-     * sequence slot (a later same-voter+sequence entry is the replay). */
-    {
-        struct {
-            uint8_t voter[32];
-            uint64_t sequence;
-            size_t lineage;
-        } *seen = NULL;
-        size_t seen_count = 0;
-        size_t vote_total = vcs_zcode_science_index_vote_count(index);
-        for (size_t i = 0; i < vote_total; i++) {
-            const struct vcs_zcode_science_index_vote_entry *ve =
-                vcs_zcode_science_index_vote_at(index, i);
-            scan->votes_considered++;
-            if (ve->expired)
-                continue;
-            if (ve->signal != VCS_ZCODE_CURATION_USEFUL &&
-                ve->signal != VCS_ZCODE_CURATION_INTERESTING)
-                continue; /* FLAG and unknown signals are never seeds */
-            if (!network_genesis)
-                continue;
-            uint8_t vote_id[32], voter[32], property[32];
-            if (!zcl_hex_decode_lower(ve->vote_id_hex, vote_id, 32) ||
-                !zcl_hex_decode_lower(ve->voter_zid_root_hex, voter, 32) ||
-                !zcl_hex_decode_lower(ve->property_root_hex, property, 32))
-                continue;
-            uint8_t *wire = NULL;
-            size_t len = 0;
-            struct vcs_zcode_curation_vote_v1 vote;
-            uint8_t rederived_id[32];
-            bool verified = zdp_cas_load(workspace, vote_id, &wire, &len) &&
-                vcs_zcode_curation_vote_parse(wire, len, &vote) ==
-                    VCS_ZCODE_SCIENCE_OK &&
-                vcs_zcode_curation_vote_id(&vote, rederived_id) ==
-                    VCS_ZCODE_SCIENCE_OK &&
-                memcmp(rederived_id, vote_id, 32) == 0 &&
-                vcs_zcode_curation_vote_verify(&vote, network_genesis,
-                                               vote.voter_zid_root,
-                                               vote.signer_pubkey,
-                                               now_unix) ==
-                    VCS_ZCODE_SCIENCE_OK;
-            free(wire);
-            if (!verified)
-                continue;
-            /* Resolve the voted property onto an admitted lineage. */
-            size_t lineage = SIZE_MAX;
-            for (size_t li = 0; li < scan->lineage_count; li++) {
-                const struct vcs_zcode_discovery_lineage_v1 *lin =
-                    &scan->lineages[li];
-                size_t lo = 0, hi = lin->member_count;
-                while (lo < hi) {
-                    size_t mid = lo + (hi - lo) / 2;
-                    int cmp = memcmp(property, lin->members[mid], 32);
-                    if (cmp == 0) {
-                        lineage = li;
-                        break;
-                    }
-                    if (cmp < 0)
-                        hi = mid;
-                    else
-                        lo = mid + 1;
-                }
-                if (lineage != SIZE_MAX)
-                    break;
-            }
-            if (lineage == SIZE_MAX)
-                continue; /* a vote on something outside the filter */
-            bool replayed = false;
-            for (size_t s = 0; s < seen_count; s++)
-                if (memcmp(seen[s].voter, voter, 32) == 0 &&
-                    (seen[s].lineage == lineage ||
-                     seen[s].sequence == ve->sequence)) {
-                    replayed = true;
-                    break;
-                }
-            if (replayed)
-                continue; /* one vote per voter per lineage and per sequence */
-            {
-                void *grown = zcl_realloc(seen, (seen_count + 1u) *
-                                          sizeof(*seen), "zdp_vote_seen");
-                if (!grown) {
-                    LOG_ERROR(ZDP_LOG, "vote-seen grow");
-                    free(seen);
-                    goto done;
-                }
-                seen = grown;
-                memcpy(seen[seen_count].voter, voter, 32);
-                seen[seen_count].sequence = ve->sequence;
-                seen[seen_count].lineage = lineage;
-                seen_count++;
-            }
-            scan->lineages[lineage].seed_weight +=
-                ve->signal == VCS_ZCODE_CURATION_USEFUL
-                    ? VCS_ZCODE_DISCOVERY_PROJECTION_WEIGHT_USEFUL
-                    : VCS_ZCODE_DISCOVERY_PROJECTION_WEIGHT_INTERESTING;
-            scan->votes_accepted++;
-        }
-        free(seen);
-    }
-
+    if (!zdp_scan_open_studies(index, study_total, study_allowlist,
+                               allowlist_count, &uf, study_members))
+        goto done;
+    if (!zdp_scan_absorb_results(workspace, index, study_allowlist,
+                                 allowlist_count, &uf))
+        goto done;
+    if (!zdp_scan_group_lineages(scan, &uf, study_members, study_total))
+        goto done;
+    if (!zdp_scan_attach_citations(workspace, scan))
+        goto done;
+    if (!zdp_scan_sort_lineages(scan))
+        goto done;
+    if (!zdp_scan_absorb_votes(workspace, index, network_genesis, now_unix,
+                               scan))
+        goto done;
     ok = true;
 done:
-    if (study_members) {
-        for (size_t i = 0; i < study_total; i++)
-            free(study_members[i].roots);
-        free(study_members);
-    }
+    if (study_members)
+        zdp_scan_free_study_members(study_members, study_total);
     free(uf.roots);
     free(uf.parent);
     if (!ok) {
@@ -744,27 +884,21 @@ static bool zdp_node_of_member(const struct zdp_member_ref *refs,
     return false;
 }
 
-enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_projection_assemble(
-    const struct vcs_zcode_discovery_scan_v1 *scan,
-    struct vcs_zcode_discovery_graph_v1 *out)
+/* A memberless lineage refuses the whole graph. */
+static bool zdp_assemble_has_memberless(
+    const struct vcs_zcode_discovery_scan_v1 *scan)
 {
-    if (!scan || !out)
-        return VCS_ZCODE_DISCOVERY_RANK_ERR_NULL;
-    memset(out, 0, sizeof(*out));
     for (size_t i = 0; i < scan->lineage_count; i++)
         if (scan->lineages[i].member_count == 0 ||
             !scan->lineages[i].members)
-            return VCS_ZCODE_DISCOVERY_RANK_ERR_LIMIT; /* memberless lineage */
-    size_t admitted = scan->lineage_count;
-    if (admitted > VCS_ZCODE_DISCOVERY_RANK_MAX_NODES) {
-        out->omitted_node_count =
-            (uint32_t)(admitted - VCS_ZCODE_DISCOVERY_RANK_MAX_NODES);
-        admitted = VCS_ZCODE_DISCOVERY_RANK_MAX_NODES;
-    }
-    out->node_count = admitted;
-    if (admitted == 0)
-        return VCS_ZCODE_DISCOVERY_RANK_OK; /* the empty corpus */
+            return true;
+    return false;
+}
 
+static enum vcs_zcode_discovery_rank_error zdp_assemble_alloc_nodes(
+    const struct vcs_zcode_discovery_scan_v1 *scan,
+    struct vcs_zcode_discovery_graph_v1 *out, size_t admitted)
+{
     out->nodes = zcl_calloc(admitted, sizeof(*out->nodes), "zdp_nodes");
     out->in_degree = zcl_calloc(admitted, sizeof(*out->in_degree),
                                 "zdp_in_degree");
@@ -778,8 +912,18 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_projection_assemble(
     for (size_t i = 0; i < admitted; i++)
         memcpy(out->nodes[i].property_root, scan->lineages[i].members[0],
                32);
+    return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
 
-    /* member root -> node index, for citation and seed resolution. */
+/* Member root -> node index, for citation and seed resolution: every
+ * admitted lineage's members, sorted, with later duplicates dropped. */
+static enum vcs_zcode_discovery_rank_error zdp_assemble_member_refs(
+    const struct vcs_zcode_discovery_scan_v1 *scan,
+    struct vcs_zcode_discovery_graph_v1 *out, size_t admitted,
+    struct zdp_member_ref **refs_out, size_t *ref_count_out)
+{
+    *refs_out = NULL;
+    *ref_count_out = 0;
     size_t ref_count = 0;
     for (size_t i = 0; i < admitted; i++)
         ref_count += scan->lineages[i].member_count;
@@ -807,10 +951,85 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_projection_assemble(
             continue;
         refs[kept++] = refs[i];
     }
-    ref_count = kept;
+    *refs_out = refs;
+    *ref_count_out = kept;
+    return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
 
-    /* Edges: per citing node, resolve citation targets onto admitted
-     * nodes, dedupe, keep the first MAX_NODE_CITATIONS ascending. */
+/* Resolve one node's citation targets onto admitted nodes, deduped, in
+ * citation order up to the per-node set bound. Returns the target count. */
+static size_t zdp_assemble_collect_targets(
+    const struct vcs_zcode_discovery_lineage_v1 *lin, size_t self,
+    const struct zdp_member_ref *refs, size_t ref_count, size_t *targets)
+{
+    size_t target_count = 0;
+    for (size_t c = 0; c < lin->citation_count; c++) {
+        size_t node;
+        if (!zdp_node_of_member(refs, ref_count, lin->citations[c], &node))
+            continue; /* cites outside the filtered corpus */
+        if (node == self)
+            continue; /* a self-citation is never an edge */
+        bool duplicate = false;
+        for (size_t t = 0; t < target_count; t++)
+            if (targets[t] == node) {
+                duplicate = true;
+                break;
+            }
+        if (!duplicate && target_count <
+            VCS_ZCODE_DISCOVERY_PROJECTION_MAX_CITATION_SET)
+            targets[target_count++] = node;
+    }
+    return target_count;
+}
+
+/* Emit one node's sorted targets as edges, within the per-node cap and the
+ * global edge bound; whatever is dropped is counted as omitted. */
+static void zdp_assemble_emit_edges(struct vcs_zcode_discovery_graph_v1 *out,
+                                    size_t node, const size_t *targets,
+                                    size_t target_count)
+{
+    size_t keep = target_count;
+    if (keep > VCS_ZCODE_DISCOVERY_PROJECTION_MAX_NODE_CITATIONS) {
+        out->omitted_edge_count +=
+            (uint32_t)(keep -
+                       VCS_ZCODE_DISCOVERY_PROJECTION_MAX_NODE_CITATIONS);
+        keep = VCS_ZCODE_DISCOVERY_PROJECTION_MAX_NODE_CITATIONS;
+    }
+    for (size_t t = 0; t < keep; t++) {
+        if (out->edge_count >= VCS_ZCODE_DISCOVERY_RANK_MAX_EDGES) {
+            out->omitted_edge_count += (uint32_t)(keep - t);
+            break; /* the global edge bound: rest omitted ascending */
+        }
+        struct vcs_zcode_discovery_edge_v1 *edge =
+            &out->edges[out->edge_count++];
+        memcpy(edge->citing_property_root, out->nodes[node].property_root,
+               32);
+        memcpy(edge->cited_property_root,
+               out->nodes[targets[t]].property_root, 32);
+        out->in_degree[targets[t]]++;
+    }
+}
+
+static void zdp_assemble_node_edges(
+    const struct vcs_zcode_discovery_scan_v1 *scan,
+    struct vcs_zcode_discovery_graph_v1 *out, size_t node,
+    const struct zdp_member_ref *refs, size_t ref_count, size_t *targets)
+{
+    size_t target_count = zdp_assemble_collect_targets(
+        &scan->lineages[node], node, refs, ref_count, targets);
+    if (target_count > 1)
+        qsort(targets, target_count, sizeof(*targets), zdp_size_cmp);
+    zdp_assemble_emit_edges(out, node, targets, target_count);
+}
+
+/* Edges: per citing node, resolve citation targets onto admitted nodes,
+ * dedupe, keep the first MAX_NODE_CITATIONS ascending. Takes ownership of
+ * refs and frees it on every path. */
+static enum vcs_zcode_discovery_rank_error zdp_assemble_edges(
+    const struct vcs_zcode_discovery_scan_v1 *scan,
+    struct vcs_zcode_discovery_graph_v1 *out, size_t admitted,
+    struct zdp_member_ref *refs, size_t ref_count)
+{
     size_t edge_capacity = admitted *
                            VCS_ZCODE_DISCOVERY_PROJECTION_MAX_NODE_CITATIONS;
     if (edge_capacity > VCS_ZCODE_DISCOVERY_RANK_MAX_EDGES)
@@ -826,54 +1045,18 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_projection_assemble(
         vcs_zcode_discovery_graph_free(out);
         return VCS_ZCODE_DISCOVERY_RANK_ERR_ALLOCATION;
     }
-    for (size_t i = 0; i < admitted; i++) {
-        const struct vcs_zcode_discovery_lineage_v1 *lin =
-            &scan->lineages[i];
-        size_t target_count = 0;
-        for (size_t c = 0; c < lin->citation_count; c++) {
-            size_t node;
-            if (!zdp_node_of_member(refs, ref_count, lin->citations[c],
-                                    &node))
-                continue; /* cites outside the filtered corpus */
-            if (node == i)
-                continue; /* a self-citation is never an edge */
-            bool duplicate = false;
-            for (size_t t = 0; t < target_count; t++)
-                if (targets[t] == node) {
-                    duplicate = true;
-                    break;
-                }
-            if (!duplicate && target_count <
-                VCS_ZCODE_DISCOVERY_PROJECTION_MAX_CITATION_SET)
-                targets[target_count++] = node;
-        }
-        if (target_count > 1)
-            qsort(targets, target_count, sizeof(*targets), zdp_size_cmp);
-        size_t keep = target_count;
-        if (keep > VCS_ZCODE_DISCOVERY_PROJECTION_MAX_NODE_CITATIONS) {
-            out->omitted_edge_count +=
-                (uint32_t)(keep -
-                           VCS_ZCODE_DISCOVERY_PROJECTION_MAX_NODE_CITATIONS);
-            keep = VCS_ZCODE_DISCOVERY_PROJECTION_MAX_NODE_CITATIONS;
-        }
-        for (size_t t = 0; t < keep; t++) {
-            if (out->edge_count >= VCS_ZCODE_DISCOVERY_RANK_MAX_EDGES) {
-                out->omitted_edge_count += (uint32_t)(keep - t);
-                break; /* the global edge bound: rest omitted ascending */
-            }
-            struct vcs_zcode_discovery_edge_v1 *edge =
-                &out->edges[out->edge_count++];
-            memcpy(edge->citing_property_root, out->nodes[i].property_root,
-                   32);
-            memcpy(edge->cited_property_root,
-                   out->nodes[targets[t]].property_root, 32);
-            out->in_degree[targets[t]]++;
-        }
-    }
+    for (size_t i = 0; i < admitted; i++)
+        zdp_assemble_node_edges(scan, out, i, refs, ref_count, targets);
     free(targets);
     free(refs);
+    return VCS_ZCODE_DISCOVERY_RANK_OK;
+}
 
-    /* Seeds: capped aggregate weights, in node order. */
+/* Seeds: capped aggregate weights, in node order. */
+static enum vcs_zcode_discovery_rank_error zdp_assemble_seeds(
+    const struct vcs_zcode_discovery_scan_v1 *scan,
+    struct vcs_zcode_discovery_graph_v1 *out, size_t admitted)
+{
     out->seeds = zcl_calloc(admitted, sizeof(*out->seeds), "zdp_seeds");
     if (!out->seeds) {
         vcs_zcode_discovery_graph_free(out);
@@ -894,6 +1077,40 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_projection_assemble(
     return VCS_ZCODE_DISCOVERY_RANK_OK;
 }
 
+enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_projection_assemble(
+    const struct vcs_zcode_discovery_scan_v1 *scan,
+    struct vcs_zcode_discovery_graph_v1 *out)
+{
+    if (!scan || !out)
+        return VCS_ZCODE_DISCOVERY_RANK_ERR_NULL;
+    memset(out, 0, sizeof(*out));
+    if (zdp_assemble_has_memberless(scan))
+        return VCS_ZCODE_DISCOVERY_RANK_ERR_LIMIT; /* memberless lineage */
+    size_t admitted = scan->lineage_count;
+    if (admitted > VCS_ZCODE_DISCOVERY_RANK_MAX_NODES) {
+        out->omitted_node_count =
+            (uint32_t)(admitted - VCS_ZCODE_DISCOVERY_RANK_MAX_NODES);
+        admitted = VCS_ZCODE_DISCOVERY_RANK_MAX_NODES;
+    }
+    out->node_count = admitted;
+    if (admitted == 0)
+        return VCS_ZCODE_DISCOVERY_RANK_OK; /* the empty corpus */
+
+    enum vcs_zcode_discovery_rank_error err =
+        zdp_assemble_alloc_nodes(scan, out, admitted);
+    if (err != VCS_ZCODE_DISCOVERY_RANK_OK)
+        return err;
+    struct zdp_member_ref *refs = NULL;
+    size_t ref_count = 0;
+    err = zdp_assemble_member_refs(scan, out, admitted, &refs, &ref_count);
+    if (err != VCS_ZCODE_DISCOVERY_RANK_OK)
+        return err;
+    err = zdp_assemble_edges(scan, out, admitted, refs, ref_count);
+    if (err != VCS_ZCODE_DISCOVERY_RANK_OK)
+        return err;
+    return zdp_assemble_seeds(scan, out, admitted);
+}
+
 /* ── compute + convergence residual ──────────────────────────────── */
 
 struct zdp_step_graph {
@@ -905,6 +1122,10 @@ struct zdp_step_graph {
     uint32_t *seed_weight;
     size_t seed_count;
     uint64_t seed_weight_total;
+    /* the fixed-v1 iteration's working vectors, one slot per node */
+    uint64_t *current;
+    uint64_t *next;
+    uint64_t *budgets;
 };
 
 /* Mirror of the pure core's personalization: seeds in node order, empty
@@ -929,6 +1150,164 @@ static void zdp_add_personalization(const struct zdp_step_graph *graph,
     uint64_t remainder = amount - assigned;
     for (size_t i = 0; i < (size_t)remainder; i++)
         destination[graph->seed_node[i]]++;
+}
+
+/* Binary search of the graph's sorted nodes for root. True with the node
+ * index when present; the index is written only on a match. */
+static bool zdp_graph_node_index(const struct vcs_zcode_discovery_graph_v1 *graph,
+                                 const uint8_t root[32], size_t *index_out)
+{
+    size_t lo = 0, hi = graph->node_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        int cmp = memcmp(root, graph->nodes[mid].property_root, 32);
+        if (cmp == 0) {
+            *index_out = mid;
+            return true;
+        }
+        if (cmp < 0)
+            hi = mid;
+        else
+            lo = mid + 1;
+    }
+    return false;
+}
+
+/* Allocate the step arrays. Every pointer is stored before the check, so the
+ * caller's zdp_step_free releases whatever did succeed. */
+static bool zdp_step_alloc(struct zdp_step_graph *step)
+{
+    step->edge_from = zcl_calloc(step->edge_count ? step->edge_count : 1,
+                                 sizeof(*step->edge_from), "zdp_step_ef");
+    step->edge_to = zcl_calloc(step->edge_count ? step->edge_count : 1,
+                               sizeof(*step->edge_to), "zdp_step_et");
+    step->seed_node = zcl_calloc(step->seed_count ? step->seed_count : 1,
+                                 sizeof(*step->seed_node), "zdp_step_sn");
+    step->seed_weight = zcl_calloc(step->seed_count ? step->seed_count : 1,
+                                   sizeof(*step->seed_weight), "zdp_step_sw");
+    step->current = zcl_calloc(step->node_count, sizeof(*step->current),
+                               "zdp_step_current");
+    step->next = zcl_calloc(step->node_count, sizeof(*step->next),
+                            "zdp_step_next");
+    step->budgets = zcl_calloc(step->node_count, sizeof(*step->budgets),
+                               "zdp_step_budgets");
+    return step->edge_from && step->edge_to && step->seed_node &&
+        step->seed_weight && step->current && step->next && step->budgets;
+}
+
+static void zdp_step_free(struct zdp_step_graph *step)
+{
+    free(step->budgets);
+    free(step->next);
+    free(step->current);
+    free(step->seed_weight);
+    free(step->seed_node);
+    free(step->edge_to);
+    free(step->edge_from);
+}
+
+/* Node index of each edge's endpoints. An endpoint that is not an admitted
+ * node keeps the zeroed index. */
+static void zdp_step_index_edges(const struct vcs_zcode_discovery_graph_v1 *graph,
+                                 struct zdp_step_graph *step)
+{
+    for (size_t i = 0; i < step->edge_count; i++) {
+        size_t idx;
+        if (zdp_graph_node_index(graph, graph->edges[i].citing_property_root,
+                                 &idx))
+            step->edge_from[i] = (uint32_t)idx;
+        if (zdp_graph_node_index(graph, graph->edges[i].cited_property_root,
+                                 &idx))
+            step->edge_to[i] = (uint32_t)idx;
+    }
+}
+
+static void zdp_step_index_seeds(const struct vcs_zcode_discovery_graph_v1 *graph,
+                                 struct zdp_step_graph *step)
+{
+    for (size_t i = 0; i < step->seed_count; i++) {
+        size_t idx;
+        if (zdp_graph_node_index(graph, graph->seeds[i].property_root, &idx))
+            step->seed_node[i] = (uint32_t)idx;
+        step->seed_weight[i] = graph->seeds[i].weight;
+        step->seed_weight_total += graph->seeds[i].weight;
+    }
+}
+
+/* Result entries are ordered by mass; scatter mass back to node order. */
+static void zdp_step_scatter_mass(
+    const struct vcs_zcode_discovery_graph_v1 *graph,
+    const struct vcs_zcode_discovery_rank_result_v1 *result,
+    struct zdp_step_graph *step)
+{
+    for (size_t i = 0; i < result->entry_count; i++) {
+        size_t idx;
+        if (zdp_graph_node_index(graph, result->entries[i].property_root, &idx))
+            step->current[idx] = result->entries[i].mass;
+    }
+}
+
+/* Each node's damped budget from its current mass; the link-mass remainder
+ * lands on the earliest nodes. */
+static void zdp_step_budgets(struct zdp_step_graph *step, uint64_t link_mass)
+{
+    uint64_t budget_sum = 0;
+    for (size_t i = 0; i < step->node_count; i++) {
+        step->budgets[i] = step->current[i] *
+                           VCS_ZCODE_DISCOVERY_RANK_DAMPING_NUMERATOR /
+                           VCS_ZCODE_DISCOVERY_RANK_DAMPING_DENOMINATOR;
+        budget_sum += step->budgets[i];
+    }
+    uint64_t source_remainder = link_mass - budget_sum;
+    for (size_t i = 0; i < (size_t)source_remainder &&
+                        i < step->node_count; i++)
+        step->budgets[i]++;
+}
+
+/* Spread each node's budget evenly over its out-edges; a node with none
+ * returns its budget to the personalization vector. */
+static void zdp_step_spread(struct zdp_step_graph *step)
+{
+    size_t cursor = 0;
+    for (size_t i = 0; i < step->node_count; i++) {
+        size_t out_start = cursor;
+        while (cursor < step->edge_count && step->edge_from[cursor] == i)
+            cursor++;
+        size_t out_count = cursor - out_start;
+        if (out_count == 0) {
+            zdp_add_personalization(step, step->budgets[i], step->next);
+            continue;
+        }
+        uint64_t each = step->budgets[i] / out_count;
+        uint64_t remainder = step->budgets[i] % out_count;
+        for (size_t j = 0; j < out_count; j++)
+            step->next[step->edge_to[out_start + j]] +=
+                each + (j < remainder ? 1u : 0u);
+    }
+}
+
+/* One fixed-v1 iteration from current into next: teleport, budgets, spread. */
+static void zdp_step_iterate(struct zdp_step_graph *step)
+{
+    const uint64_t teleport_mass =
+        VCS_ZCODE_DISCOVERY_RANK_MASS *
+        (VCS_ZCODE_DISCOVERY_RANK_DAMPING_DENOMINATOR -
+         VCS_ZCODE_DISCOVERY_RANK_DAMPING_NUMERATOR) /
+        VCS_ZCODE_DISCOVERY_RANK_DAMPING_DENOMINATOR;
+    const uint64_t link_mass = VCS_ZCODE_DISCOVERY_RANK_MASS - teleport_mass;
+    zdp_add_personalization(step, teleport_mass, step->next);
+    zdp_step_budgets(step, link_mass);
+    zdp_step_spread(step);
+}
+
+/* The exact integer L1 movement between the mass vector and its next step. */
+static void zdp_step_residual(const struct zdp_step_graph *step,
+                              uint64_t *residual_out)
+{
+    for (size_t i = 0; i < step->node_count; i++)
+        *residual_out += step->next[i] > step->current[i]
+                             ? step->next[i] - step->current[i]
+                             : step->current[i] - step->next[i];
 }
 
 enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_projection_compute(
@@ -961,143 +1340,17 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_projection_compute(
     step.node_count = graph->node_count;
     step.edge_count = graph->edge_count;
     step.seed_count = graph->seed_count;
-    step.edge_from = zcl_calloc(step.edge_count ? step.edge_count : 1,
-                                sizeof(*step.edge_from), "zdp_step_ef");
-    step.edge_to = zcl_calloc(step.edge_count ? step.edge_count : 1,
-                              sizeof(*step.edge_to), "zdp_step_et");
-    step.seed_node = zcl_calloc(step.seed_count ? step.seed_count : 1,
-                                sizeof(*step.seed_node), "zdp_step_sn");
-    step.seed_weight = zcl_calloc(step.seed_count ? step.seed_count : 1,
-                                  sizeof(*step.seed_weight), "zdp_step_sw");
-    uint64_t *current = zcl_calloc(step.node_count, sizeof(*current),
-                                   "zdp_step_current");
-    uint64_t *next = zcl_calloc(step.node_count, sizeof(*next),
-                                "zdp_step_next");
-    uint64_t *budgets = zcl_calloc(step.node_count, sizeof(*budgets),
-                                   "zdp_step_budgets");
-    if (!step.edge_from || !step.edge_to || !step.seed_node ||
-        !step.seed_weight || !current || !next || !budgets) {
+    if (!zdp_step_alloc(&step)) {
         error = VCS_ZCODE_DISCOVERY_RANK_ERR_ALLOCATION;
         goto done;
     }
-    for (size_t i = 0; i < step.edge_count; i++) {
-        /* nodes are sorted ascending: binary search both endpoints */
-        size_t lo, hi;
-        lo = 0;
-        hi = step.node_count;
-        while (lo < hi) {
-            size_t mid = lo + (hi - lo) / 2;
-            int cmp = memcmp(graph->edges[i].citing_property_root,
-                             graph->nodes[mid].property_root, 32);
-            if (cmp == 0) {
-                step.edge_from[i] = (uint32_t)mid;
-                break;
-            }
-            if (cmp < 0)
-                hi = mid;
-            else
-                lo = mid + 1;
-        }
-        lo = 0;
-        hi = step.node_count;
-        while (lo < hi) {
-            size_t mid = lo + (hi - lo) / 2;
-            int cmp = memcmp(graph->edges[i].cited_property_root,
-                             graph->nodes[mid].property_root, 32);
-            if (cmp == 0) {
-                step.edge_to[i] = (uint32_t)mid;
-                break;
-            }
-            if (cmp < 0)
-                hi = mid;
-            else
-                lo = mid + 1;
-        }
-    }
-    for (size_t i = 0; i < step.seed_count; i++) {
-        size_t lo = 0, hi = step.node_count;
-        while (lo < hi) {
-            size_t mid = lo + (hi - lo) / 2;
-            int cmp = memcmp(graph->seeds[i].property_root,
-                             graph->nodes[mid].property_root, 32);
-            if (cmp == 0) {
-                step.seed_node[i] = (uint32_t)mid;
-                break;
-            }
-            if (cmp < 0)
-                hi = mid;
-            else
-                lo = mid + 1;
-        }
-        step.seed_weight[i] = graph->seeds[i].weight;
-        step.seed_weight_total += graph->seeds[i].weight;
-    }
-    /* Result entries are ordered by mass; scatter mass back to node order. */
-    for (size_t i = 0; i < result->entry_count; i++) {
-        size_t lo = 0, hi = step.node_count;
-        while (lo < hi) {
-            size_t mid = lo + (hi - lo) / 2;
-            int cmp = memcmp(result->entries[i].property_root,
-                             graph->nodes[mid].property_root, 32);
-            if (cmp == 0) {
-                current[mid] = result->entries[i].mass;
-                break;
-            }
-            if (cmp < 0)
-                hi = mid;
-            else
-                lo = mid + 1;
-        }
-    }
-
-    const uint64_t teleport_mass =
-        VCS_ZCODE_DISCOVERY_RANK_MASS *
-        (VCS_ZCODE_DISCOVERY_RANK_DAMPING_DENOMINATOR -
-         VCS_ZCODE_DISCOVERY_RANK_DAMPING_NUMERATOR) /
-        VCS_ZCODE_DISCOVERY_RANK_DAMPING_DENOMINATOR;
-    const uint64_t link_mass =
-        VCS_ZCODE_DISCOVERY_RANK_MASS - teleport_mass;
-    zdp_add_personalization(&step, teleport_mass, next);
-    uint64_t budget_sum = 0;
-    for (size_t i = 0; i < step.node_count; i++) {
-        budgets[i] = current[i] *
-                     VCS_ZCODE_DISCOVERY_RANK_DAMPING_NUMERATOR /
-                     VCS_ZCODE_DISCOVERY_RANK_DAMPING_DENOMINATOR;
-        budget_sum += budgets[i];
-    }
-    uint64_t source_remainder = link_mass - budget_sum;
-    for (size_t i = 0; i < (size_t)source_remainder &&
-                        i < step.node_count; i++)
-        budgets[i]++;
-    {
-        size_t cursor = 0;
-        for (size_t i = 0; i < step.node_count; i++) {
-            size_t out_start = cursor;
-            while (cursor < step.edge_count && step.edge_from[cursor] == i)
-                cursor++;
-            size_t out_count = cursor - out_start;
-            if (out_count == 0) {
-                zdp_add_personalization(&step, budgets[i], next);
-                continue;
-            }
-            uint64_t each = budgets[i] / out_count;
-            uint64_t remainder = budgets[i] % out_count;
-            for (size_t j = 0; j < out_count; j++)
-                next[step.edge_to[out_start + j]] +=
-                    each + (j < remainder ? 1u : 0u);
-        }
-    }
-    for (size_t i = 0; i < step.node_count; i++)
-        *residual_out += next[i] > current[i] ? next[i] - current[i]
-                                              : current[i] - next[i];
+    zdp_step_index_edges(graph, &step);
+    zdp_step_index_seeds(graph, &step);
+    zdp_step_scatter_mass(graph, result, &step);
+    zdp_step_iterate(&step);
+    zdp_step_residual(&step, residual_out);
 
 done:
-    free(budgets);
-    free(next);
-    free(current);
-    free(step.seed_weight);
-    free(step.seed_node);
-    free(step.edge_to);
-    free(step.edge_from);
+    zdp_step_free(&step);
     return error;
 }

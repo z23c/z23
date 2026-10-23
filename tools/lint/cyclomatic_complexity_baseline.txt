@@ -534,9 +534,6 @@ contexts/commons/modules/vcs/src/zcode_dht_service_view.c:vcs_zcode_dht_service_
 contexts/commons/modules/vcs/src/zcode_dht_service_view.c:vcs_zcode_dht_service_peers:19
 contexts/commons/modules/vcs/src/zcode_dht_service_view.c:vcs_zcode_dht_service_revalidate:19
 contexts/commons/modules/vcs/src/zcode_dht_service_view.c:vcs_zcode_dht_service_status:21
-contexts/commons/modules/vcs/src/zcode_discovery_projection.c:vcs_zcode_discovery_projection_assemble:41
-contexts/commons/modules/vcs/src/zcode_discovery_projection.c:vcs_zcode_discovery_projection_compute:45
-contexts/commons/modules/vcs/src/zcode_discovery_projection.c:vcs_zcode_discovery_projection_scan:69
 contexts/commons/modules/vcs/src/zcode_discovery_rank.c:rank_normalize:38
 contexts/commons/modules/vcs/src/zcode_discovery_rank.c:vcs_zcode_discovery_rank_compute:30
 contexts/commons/modules/vcs/src/zcode_discovery_rank.c:vcs_zcode_discovery_rank_error_string:18
