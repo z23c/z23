@@ -191,11 +191,63 @@ static enum vcs_source_package_checkout_result source_checkout_manifest(
     return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
 }
 
-static enum vcs_source_package_checkout_result source_checkout_load_fixed(
+/* Parses the lane receipt, requires the PROVEN lane and derives its id. When
+ * source_root is given it must match the receipt between those two checks,
+ * so every caller fails on the same first check. */
+static bool source_checkout_lane_receipt(
+    const uint8_t *lane_wire, size_t lane_wire_len,
+    const uint8_t *source_root, struct vcs_zcode_lane_receipt_v1 *receipt,
+    uint8_t lane_root[32])
+{
+    if (vcs_zcode_lane_receipt_parse(lane_wire, lane_wire_len, receipt) !=
+            VCS_ZCODE_DEV_OK ||
+        receipt->lane != VCS_ZCODE_LANE_PROVEN)
+        return false;
+    if (source_root && memcmp(receipt->source_root, source_root, 32) != 0)
+        return false;
+    return vcs_zcode_lane_receipt_id(receipt, lane_root) == VCS_ZCODE_DEV_OK;
+}
+
+/* An accepted-work carrier is authorised by its lane root; otherwise the
+ * expected signer must verify the receipt. */
+static bool source_checkout_lane_authorised(
+    const struct vcs_zcode_lane_receipt_v1 *receipt,
+    const uint8_t lane_root[32], const uint8_t expected_signer[32],
+    const uint8_t accepted_work_root[32])
+{
+    if (accepted_work_root)
+        return memcmp(lane_root, accepted_work_root, 32) == 0;
+    return expected_signer &&
+        vcs_zcode_lane_receipt_verify(receipt, expected_signer) ==
+            VCS_ZCODE_DEV_OK;
+}
+
+/* Reads the lane carrier and proves it; the wire bytes are released here. */
+static bool source_checkout_lane_proven(
     struct vcs_package_store *store, const uint8_t package_root[32],
-    const uint8_t source_root[32], const uint8_t expected_signer[32],
-    const uint8_t accepted_work_root[32],
-    struct source_checkout_loaded *loaded)
+    const struct vcs_package_manifest *package, int lane_index,
+    const uint8_t expected_signer[32], const uint8_t accepted_work_root[32],
+    struct vcs_zcode_lane_receipt_v1 *receipt)
+{
+    uint8_t *lane_wire = NULL;
+    size_t lane_wire_len = 0;
+    uint8_t lane_root[32];
+    bool proven = source_checkout_read_file(
+            store, package_root, package, (size_t)lane_index,
+            &lane_wire, &lane_wire_len) &&
+        source_checkout_lane_receipt(
+            lane_wire, lane_wire_len, NULL, receipt, lane_root) &&
+        source_checkout_lane_authorised(
+            receipt, lane_root, expected_signer, accepted_work_root);
+    free(lane_wire);
+    return proven;
+}
+
+/* Every fixed carrier must be present, and the authority carrier exactly
+ * when accepted work is being checked. */
+static enum vcs_source_package_checkout_result source_checkout_fixed_shape(
+    const struct vcs_package_manifest *package,
+    const uint8_t accepted_work_root[32])
 {
     const char *fixed[] = {
         VCS_SOURCE_PACKAGE_LICENSE_PATH,
@@ -204,14 +256,21 @@ static enum vcs_source_package_checkout_result source_checkout_load_fixed(
         VCS_SOURCE_PACKAGE_MARKER_PATH,
     };
     for (size_t i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++)
-        if (source_checkout_file_index(&loaded->package, fixed[i]) < 0)
+        if (source_checkout_file_index(package, fixed[i]) < 0)
             return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
     int authority_index = source_checkout_file_index(
-        &loaded->package, VCS_SOURCE_PACKAGE_AUTHORITY_PATH);
+        package, VCS_SOURCE_PACKAGE_AUTHORITY_PATH);
     if (accepted_work_root && authority_index < 0)
         return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
     if (!accepted_work_root && authority_index >= 0)
         return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
+    return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
+}
+
+static enum vcs_source_package_checkout_result source_checkout_fixed_files(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    struct source_checkout_loaded *loaded)
+{
     int manifest_index = source_checkout_file_index(
         &loaded->package, VCS_SOURCE_PACKAGE_MANIFEST_PATH);
     if (!source_checkout_read_file(
@@ -228,31 +287,35 @@ static enum vcs_source_package_checkout_result source_checkout_load_fixed(
     if (!vcs_package_release_license_text_allowed(
             loaded->license, loaded->license_len))
         return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
+    return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
+}
+
+static enum vcs_source_package_checkout_result source_checkout_fixed_lane(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const uint8_t source_root[32], const uint8_t expected_signer[32],
+    const uint8_t accepted_work_root[32],
+    struct source_checkout_loaded *loaded)
+{
     int lane_index = source_checkout_file_index(
         &loaded->package, VCS_SOURCE_PACKAGE_LANE_PATH);
     const struct vcs_package_file *lane = &loaded->package.files[lane_index];
     if (lane->size != VCS_ZCODE_LANE_WIRE_BYTES ||
         lane->size > SOURCE_CHECKOUT_AUTHORITY_MAX)
         return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
-    uint8_t *lane_wire = NULL;
-    size_t lane_wire_len = 0;
     struct vcs_zcode_lane_receipt_v1 receipt;
-    uint8_t lane_root[32];
-    bool proven = source_checkout_read_file(
-            store, package_root, &loaded->package, (size_t)lane_index,
-            &lane_wire, &lane_wire_len) &&
-        vcs_zcode_lane_receipt_parse(lane_wire, lane_wire_len, &receipt) ==
-            VCS_ZCODE_DEV_OK && receipt.lane == VCS_ZCODE_LANE_PROVEN &&
-        vcs_zcode_lane_receipt_id(&receipt, lane_root) == VCS_ZCODE_DEV_OK &&
-        ((!accepted_work_root && expected_signer &&
-          vcs_zcode_lane_receipt_verify(&receipt, expected_signer) ==
-              VCS_ZCODE_DEV_OK) ||
-         (accepted_work_root &&
-          memcmp(lane_root, accepted_work_root, 32) == 0));
-    free(lane_wire);
-    if (!proven) return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
+    if (!source_checkout_lane_proven(
+            store, package_root, &loaded->package, lane_index,
+            expected_signer, accepted_work_root, &receipt))
+        return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
     if (memcmp(receipt.source_root, source_root, 32) != 0)
         return VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE;
+    return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
+}
+
+static enum vcs_source_package_checkout_result source_checkout_fixed_marker(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    struct source_checkout_loaded *loaded)
+{
     int marker_index = source_checkout_file_index(
         &loaded->package, VCS_SOURCE_PACKAGE_MARKER_PATH);
     uint8_t *marker = NULL;
@@ -264,14 +327,75 @@ static enum vcs_source_package_checkout_result source_checkout_load_fixed(
             &marker, &marker_len) && marker_len == expected_marker_len &&
         memcmp(marker, expected_marker, marker_len) == 0;
     free(marker);
-    if (!marker_ok) return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
-    if (accepted_work_root &&
+    return marker_ok ? VCS_SOURCE_PACKAGE_CHECKOUT_OK
+                     : VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
+}
+
+static enum vcs_source_package_checkout_result source_checkout_load_fixed(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const uint8_t source_root[32], const uint8_t expected_signer[32],
+    const uint8_t accepted_work_root[32],
+    struct source_checkout_loaded *loaded)
+{
+    enum vcs_source_package_checkout_result result =
+        source_checkout_fixed_shape(&loaded->package, accepted_work_root);
+    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        result = source_checkout_fixed_files(store, package_root, loaded);
+    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        result = source_checkout_fixed_lane(
+            store, package_root, source_root, expected_signer,
+            accepted_work_root, loaded);
+    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        result = source_checkout_fixed_marker(store, package_root, loaded);
+    int authority_index = source_checkout_file_index(
+        &loaded->package, VCS_SOURCE_PACKAGE_AUTHORITY_PATH);
+    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK && accepted_work_root &&
         !source_checkout_read_file(
             store, package_root, &loaded->package,
             (size_t)authority_index, &loaded->authority,
             &loaded->authority_len))
+        result = VCS_SOURCE_PACKAGE_CHECKOUT_CHUNK;
+    return result;
+}
+
+/* A shard carrier must claim its index first and must read cleanly. */
+static enum vcs_source_package_checkout_result
+source_checkout_load_shard_file(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    struct source_checkout_loaded *loaded, size_t index, uint16_t shard,
+    bool seen_shards[256])
+{
+    if (seen_shards[shard] || loaded->source.shard_count >= 256u)
+        return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
+    seen_shards[shard] = true;
+    struct vcs_source_bundle_shard *part =
+        &loaded->source.shards[loaded->source.shard_count];
+    part->index = shard;
+    if (!source_checkout_read_file(
+            store, package_root, &loaded->package, index,
+            &part->wire, &part->wire_len))
         return VCS_SOURCE_PACKAGE_CHECKOUT_CHUNK;
+    loaded->source.shard_count++;
     return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
+}
+
+/* Offline inputs are all-or-nothing, and every carrier must be recognised. */
+static enum vcs_source_package_checkout_result
+source_checkout_load_variable_finish(
+    struct source_checkout_loaded *loaded, size_t offline_count,
+    size_t recognized,
+    const bool seen_offline[VCS_SOURCE_PACKAGE_OFFLINE_INPUT_MAX])
+{
+    size_t expected_offline = vcs_source_package_offline_input_count();
+    if (offline_count != 0 && offline_count != expected_offline)
+        return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
+    for (size_t i = 0; offline_count > 0 && i < expected_offline; i++)
+        if (!seen_offline[i]) return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
+    loaded->offline_count = offline_count;
+    return recognized == loaded->package.count &&
+           loaded->source.shard_count > 0
+        ? VCS_SOURCE_PACKAGE_CHECKOUT_OK
+        : VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
 }
 
 static enum vcs_source_package_checkout_result source_checkout_load_variable(
@@ -287,18 +411,11 @@ static enum vcs_source_package_checkout_result source_checkout_load_variable(
         uint16_t shard = 0;
         int offline = source_checkout_offline_index(path);
         if (source_checkout_shard_index(path, &shard)) {
-            if (seen_shards[shard] ||
-                loaded->source.shard_count >= 256u)
-                return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
-            seen_shards[shard] = true;
-            struct vcs_source_bundle_shard *part =
-                &loaded->source.shards[loaded->source.shard_count];
-            part->index = shard;
-            if (!source_checkout_read_file(
-                    store, package_root, &loaded->package, i,
-                    &part->wire, &part->wire_len))
-                return VCS_SOURCE_PACKAGE_CHECKOUT_CHUNK;
-            loaded->source.shard_count++;
+            enum vcs_source_package_checkout_result result =
+                source_checkout_load_shard_file(
+                    store, package_root, loaded, i, shard, seen_shards);
+            if (result != VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+                return result;
             recognized++;
         } else if (offline >= 0) {
             if (seen_offline[offline] ||
@@ -312,16 +429,8 @@ static enum vcs_source_package_checkout_result source_checkout_load_variable(
             recognized++;
         }
     }
-    size_t expected_offline = vcs_source_package_offline_input_count();
-    if (offline_count != 0 && offline_count != expected_offline)
-        return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
-    for (size_t i = 0; offline_count > 0 && i < expected_offline; i++)
-        if (!seen_offline[i]) return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
-    loaded->offline_count = offline_count;
-    return recognized == loaded->package.count &&
-           loaded->source.shard_count > 0
-        ? VCS_SOURCE_PACKAGE_CHECKOUT_OK
-        : VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
+    return source_checkout_load_variable_finish(
+        loaded, offline_count, recognized, seen_offline);
 }
 
 #if defined(_WIN32)
@@ -382,6 +491,50 @@ static void source_checkout_windows_entries_free(
     memset(entries, 0, sizeof(*entries));
 }
 
+static bool source_checkout_windows_skip_name(const FILE_ID_BOTH_DIR_INFO *entry)
+{
+    size_t chars = entry->FileNameLength / sizeof(wchar_t);
+    bool dot = chars == 1u && entry->FileName[0] == L'.';
+    bool dotdot = chars == 2u && entry->FileName[0] == L'.' &&
+        entry->FileName[1] == L'.';
+    return dot || dotdot;
+}
+
+/* On failure the new name is freed and out is left for the caller to free. */
+static bool source_checkout_windows_entry_append(
+    struct source_checkout_windows_entries *out,
+    const FILE_ID_BOTH_DIR_INFO *entry)
+{
+    size_t chars = entry->FileNameLength / sizeof(wchar_t);
+    int needed = WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, entry->FileName,
+        (int)chars, NULL, 0, NULL, NULL);
+    char *name = needed > 0
+        ? zcl_malloc((size_t)needed + 1u,
+                     "vcs.source_checkout.windows_name")
+        : NULL;
+    struct source_checkout_windows_entry *items = name
+        ? zcl_realloc(
+              out->items,
+              (out->count + 1u) * sizeof(*out->items),
+              "vcs.source_checkout.windows_entries")
+        : NULL;
+    if (!items || WideCharToMultiByte(
+            CP_UTF8, WC_ERR_INVALID_CHARS, entry->FileName,
+            (int)chars, name, needed, NULL, NULL) != needed) {
+        free(name);
+        return false;
+    }
+    name[needed] = '\0';
+    out->items = items;
+    out->items[out->count++] =
+        (struct source_checkout_windows_entry){
+            .name = name,
+            .attributes = entry->FileAttributes,
+        };
+    return true;
+}
+
 static bool source_checkout_windows_entries_read(
     struct platform_directory_transaction *directory,
     struct source_checkout_windows_entries *out)
@@ -403,38 +556,10 @@ static bool source_checkout_windows_entries_read(
         restart = false;
         FILE_ID_BOTH_DIR_INFO *entry = (FILE_ID_BOTH_DIR_INFO *)buffer;
         for (;;) {
-            size_t chars = entry->FileNameLength / sizeof(wchar_t);
-            bool dot = chars == 1u && entry->FileName[0] == L'.';
-            bool dotdot = chars == 2u && entry->FileName[0] == L'.' &&
-                entry->FileName[1] == L'.';
-            if (!dot && !dotdot) {
-                int needed = WideCharToMultiByte(
-                    CP_UTF8, WC_ERR_INVALID_CHARS, entry->FileName,
-                    (int)chars, NULL, 0, NULL, NULL);
-                char *name = needed > 0
-                    ? zcl_malloc((size_t)needed + 1u,
-                                 "vcs.source_checkout.windows_name")
-                    : NULL;
-                struct source_checkout_windows_entry *items = name
-                    ? zcl_realloc(
-                          out->items,
-                          (out->count + 1u) * sizeof(*out->items),
-                          "vcs.source_checkout.windows_entries")
-                    : NULL;
-                if (!items || WideCharToMultiByte(
-                        CP_UTF8, WC_ERR_INVALID_CHARS, entry->FileName,
-                        (int)chars, name, needed, NULL, NULL) != needed) {
-                    free(name);
-                    source_checkout_windows_entries_free(out);
-                    return false;
-                }
-                name[needed] = '\0';
-                out->items = items;
-                out->items[out->count++] =
-                    (struct source_checkout_windows_entry){
-                        .name = name,
-                        .attributes = entry->FileAttributes,
-                    };
+            if (!source_checkout_windows_skip_name(entry) &&
+                !source_checkout_windows_entry_append(out, entry)) {
+                source_checkout_windows_entries_free(out);
+                return false;
             }
             if (entry->NextEntryOffset == 0) break;
             entry = (FILE_ID_BOTH_DIR_INFO *)(
@@ -587,17 +712,11 @@ static bool source_checkout_write(const char *path, const uint8_t *bytes,
 }
 #endif
 
-static bool source_checkout_write_offline(
+#if defined(_WIN32)
+static bool source_checkout_write_offline_files(
     const char *destination, const struct source_checkout_loaded *loaded,
     uint64_t *bytes_out)
 {
-#if defined(_WIN32)
-    if (loaded->offline_count == 0) {
-        *bytes_out = 0;
-        return true;
-    }
-    if (loaded->offline_count != vcs_source_package_offline_input_count())
-        return false;
     struct platform_directory_transaction root;
     platform_directory_transaction_init(&root);
     bool ok = source_checkout_windows_open_directory(destination, &root);
@@ -616,13 +735,12 @@ static bool source_checkout_write_offline(
     if (!ok) return false;
     *bytes_out = total;
     return true;
+}
 #else
-    if (loaded->offline_count == 0) {
-        *bytes_out = 0;
-        return true;
-    }
-    if (loaded->offline_count != vcs_source_package_offline_input_count())
-        return false;
+static bool source_checkout_write_offline_files(
+    const char *destination, const struct source_checkout_loaded *loaded,
+    uint64_t *bytes_out)
+{
     char cache[SOURCE_CHECKOUT_PATH_MAX];
     int n = snprintf(cache, sizeof(cache), "%s/vendor/.cache", destination);
     if (n <= 0 || (size_t)n >= sizeof(cache) ||
@@ -642,7 +760,44 @@ static bool source_checkout_write_offline(
     }
     *bytes_out = total;
     return true;
+}
 #endif
+
+static bool source_checkout_write_offline(
+    const char *destination, const struct source_checkout_loaded *loaded,
+    uint64_t *bytes_out)
+{
+    if (loaded->offline_count == 0) {
+        *bytes_out = 0;
+        return true;
+    }
+    if (loaded->offline_count != vcs_source_package_offline_input_count())
+        return false;
+    return source_checkout_write_offline_files(destination, loaded, bytes_out);
+}
+
+/* Parses the manifest, then requires the lane and authority carriers that
+ * the discovery functions read. */
+static enum vcs_source_package_checkout_result source_checkout_discover_manifest(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    struct source_checkout_loaded *loaded)
+{
+    enum vcs_source_package_checkout_result result =
+        source_checkout_manifest(store, package_root, loaded);
+    if (result != VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        return result;
+    int lane_index = source_checkout_file_index(
+        &loaded->package, VCS_SOURCE_PACKAGE_LANE_PATH);
+    int authority_index = source_checkout_file_index(
+        &loaded->package, VCS_SOURCE_PACKAGE_AUTHORITY_PATH);
+    if (lane_index < 0 || authority_index < 0 ||
+        loaded->package.files[lane_index].size !=
+            VCS_ZCODE_LANE_WIRE_BYTES ||
+        loaded->package.files[authority_index].size == 0 ||
+        loaded->package.files[authority_index].size >
+            VCS_ZCODE_ACCEPTED_WORK_BUNDLE_MAX_BYTES)
+        return VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
+    return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
 }
 
 enum vcs_source_package_checkout_result
@@ -661,21 +816,10 @@ vcs_source_package_accepted_work_discover(
     struct source_checkout_loaded loaded;
     source_checkout_loaded_init(&loaded);
     enum vcs_source_package_checkout_result result =
-        source_checkout_manifest(store, package_root, &loaded);
-    int lane_index = -1;
-    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK) {
-        lane_index = source_checkout_file_index(
-            &loaded.package, VCS_SOURCE_PACKAGE_LANE_PATH);
-        int authority_index = source_checkout_file_index(
-            &loaded.package, VCS_SOURCE_PACKAGE_AUTHORITY_PATH);
-        if (lane_index < 0 || authority_index < 0 ||
-            loaded.package.files[lane_index].size !=
-                VCS_ZCODE_LANE_WIRE_BYTES ||
-            loaded.package.files[authority_index].size == 0 ||
-            loaded.package.files[authority_index].size >
-                VCS_ZCODE_ACCEPTED_WORK_BUNDLE_MAX_BYTES)
-            result = VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
-    }
+        source_checkout_discover_manifest(store, package_root, &loaded);
+    int lane_index = result == VCS_SOURCE_PACKAGE_CHECKOUT_OK
+        ? source_checkout_file_index(
+              &loaded.package, VCS_SOURCE_PACKAGE_LANE_PATH) : -1;
     uint8_t *lane_wire = NULL;
     size_t lane_wire_len = 0;
     if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
@@ -686,18 +830,101 @@ vcs_source_package_accepted_work_discover(
     struct vcs_zcode_lane_receipt_v1 receipt;
     uint8_t discovered[32];
     if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
-        (vcs_zcode_lane_receipt_parse(
-             lane_wire, lane_wire_len, &receipt) != VCS_ZCODE_DEV_OK ||
-         receipt.lane != VCS_ZCODE_LANE_PROVEN ||
-         memcmp(receipt.source_root, source_root, 32) != 0 ||
-         vcs_zcode_lane_receipt_id(&receipt, discovered) !=
-             VCS_ZCODE_DEV_OK))
+        !source_checkout_lane_receipt(
+            lane_wire, lane_wire_len, source_root, &receipt, discovered))
         result = VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE;
     if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
         memcpy(accepted_work_root, discovered, 32);
     free(lane_wire);
     source_checkout_loaded_free(&loaded);
     return result;
+}
+
+static bool source_checkout_common_args_invalid(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const uint8_t source_root[32], const uint8_t expected_signer[32],
+    const uint8_t accepted_work_root[32], const char *workspace,
+    const char *destination)
+{
+    return !store || !package_root || !source_root ||
+        (!expected_signer && !accepted_work_root) ||
+        (expected_signer && accepted_work_root) || !workspace || !destination;
+}
+
+static enum vcs_source_package_checkout_result source_checkout_load_package(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const uint8_t source_root[32], const uint8_t expected_signer[32],
+    const uint8_t accepted_work_root[32],
+    struct source_checkout_loaded *loaded)
+{
+    enum vcs_source_package_checkout_result result =
+        source_checkout_manifest(store, package_root, loaded);
+    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        result = source_checkout_load_fixed(
+            store, package_root, source_root, expected_signer,
+            accepted_work_root, loaded);
+    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        result = source_checkout_load_variable(
+            store, package_root, accepted_work_root != NULL, loaded);
+    return result;
+}
+
+static enum vcs_source_package_checkout_result source_checkout_verify_import(
+    struct source_checkout_loaded *loaded, const uint8_t source_root[32],
+    const char *workspace, struct vcs_source_bundle_metrics *source_metrics)
+{
+    if (vcs_source_bundle_sharded_verify(
+            &loaded->source, source_root, source_metrics) !=
+            VCS_SOURCE_BUNDLE_OK)
+        return VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE;
+    if (vcs_source_bundle_sharded_import(
+            &loaded->source, source_root, workspace, source_metrics) !=
+            VCS_SOURCE_BUNDLE_OK)
+        return VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE;
+    return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
+}
+
+static enum vcs_source_package_checkout_result source_checkout_import_accepted(
+    const char *workspace, const uint8_t accepted_work_root[32],
+    const uint8_t source_root[32], struct source_checkout_loaded *loaded,
+    struct vcs_zcode_accepted_work_v1 *accepted,
+    uint32_t *authority_objects, uint32_t *work_receipts)
+{
+    if (!accepted_work_root)
+        return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
+    if (vcs_zcode_accepted_work_bundle_import(
+            workspace, accepted_work_root, source_root,
+            loaded->authority, loaded->authority_len, accepted,
+            authority_objects, work_receipts) !=
+                VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK)
+        return VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE;
+    return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
+}
+
+static enum vcs_source_package_checkout_result source_checkout_materialize(
+    const char *workspace, const uint8_t source_root[32],
+    const char *destination, struct source_checkout_loaded *loaded,
+    uint64_t *offline_bytes)
+{
+    if (vcs_tree_materialize(
+            workspace, source_root, destination,
+            VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) != VCS_OK)
+        return VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
+    if (!source_checkout_write_offline(destination, loaded, offline_bytes))
+        return VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
+    return VCS_SOURCE_PACKAGE_CHECKOUT_OK;
+}
+
+static void source_checkout_fill_accepted_metrics(
+    struct vcs_source_package_checkout_metrics *metrics,
+    const struct vcs_zcode_accepted_work_v1 *accepted)
+{
+    memcpy(metrics->accepted_signer, accepted->expected_signer, 32);
+    memcpy(metrics->task_root, accepted->task_root, 32);
+    memcpy(metrics->candidate_root, accepted->candidate_root, 32);
+    memcpy(metrics->proof_policy_root, accepted->proof_policy_root, 32);
+    memcpy(metrics->toolchain_capsule_root,
+           accepted->task.toolchain_capsule_root, 32);
 }
 
 static enum vcs_source_package_checkout_result source_package_checkout_common(
@@ -709,9 +936,9 @@ static enum vcs_source_package_checkout_result source_package_checkout_common(
     struct vcs_source_package_checkout_metrics *metrics)
 {
     if (metrics) memset(metrics, 0, sizeof(*metrics));
-    if (!store || !package_root || !source_root ||
-        (!expected_signer && !accepted_work_root) ||
-        (expected_signer && accepted_work_root) || !workspace || !destination)
+    if (source_checkout_common_args_invalid(
+            store, package_root, source_root, expected_signer,
+            accepted_work_root, workspace, destination))
         return VCS_SOURCE_PACKAGE_CHECKOUT_NULL;
     if (!source_checkout_empty_dir(destination))
         return VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
@@ -722,44 +949,23 @@ static enum vcs_source_package_checkout_result source_package_checkout_common(
     struct source_checkout_loaded loaded;
     source_checkout_loaded_init(&loaded);
     enum vcs_source_package_checkout_result result =
-        source_checkout_manifest(store, package_root, &loaded);
-    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
-        result = source_checkout_load_fixed(
+        source_checkout_load_package(
             store, package_root, source_root, expected_signer,
             accepted_work_root, &loaded);
-    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
-        result = source_checkout_load_variable(
-            store, package_root, accepted_work_root != NULL, &loaded);
     struct vcs_source_bundle_metrics source_metrics;
-    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
-        vcs_source_bundle_sharded_verify(
-            &loaded.source, source_root, &source_metrics) !=
-            VCS_SOURCE_BUNDLE_OK)
-        result = VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE;
-    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
-        vcs_source_bundle_sharded_import(
-            &loaded.source, source_root, workspace, &source_metrics) !=
-            VCS_SOURCE_BUNDLE_OK)
-        result = VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE;
+    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        result = source_checkout_verify_import(
+            &loaded, source_root, workspace, &source_metrics);
     struct vcs_zcode_accepted_work_v1 accepted;
     uint32_t authority_objects = 0, work_receipts = 0;
-    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK && accepted_work_root &&
-        vcs_zcode_accepted_work_bundle_import(
-            workspace, accepted_work_root, source_root,
-            loaded.authority, loaded.authority_len, &accepted,
-            &authority_objects, &work_receipts) !=
-                VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK)
-        result = VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE;
+    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        result = source_checkout_import_accepted(
+            workspace, accepted_work_root, source_root, &loaded,
+            &accepted, &authority_objects, &work_receipts);
     uint64_t offline_bytes = 0;
-    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
-        vcs_tree_materialize(
-            workspace, source_root, destination,
-            VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) != VCS_OK)
-        result = VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
-    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
-        !source_checkout_write_offline(
-            destination, &loaded, &offline_bytes))
-        result = VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
+    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+        result = source_checkout_materialize(
+            workspace, source_root, destination, &loaded, &offline_bytes);
     if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK && metrics) {
         metrics->source = source_metrics;
         metrics->offline_input_bytes = offline_bytes;
@@ -768,16 +974,8 @@ static enum vcs_source_package_checkout_result source_package_checkout_common(
         metrics->carrier_files = (uint32_t)loaded.package.count;
         metrics->authority_objects = authority_objects;
         metrics->work_receipts = work_receipts;
-        if (accepted_work_root) {
-            memcpy(metrics->accepted_signer,
-                   accepted.expected_signer, 32);
-            memcpy(metrics->task_root, accepted.task_root, 32);
-            memcpy(metrics->candidate_root, accepted.candidate_root, 32);
-            memcpy(metrics->proof_policy_root, accepted.proof_policy_root,
-                   32);
-            memcpy(metrics->toolchain_capsule_root,
-                   accepted.task.toolchain_capsule_root, 32);
-        }
+        if (accepted_work_root)
+            source_checkout_fill_accepted_metrics(metrics, &accepted);
     }
     source_checkout_loaded_free(&loaded);
     return result;
@@ -820,20 +1018,10 @@ source_package_identity_discover(
     struct source_checkout_loaded loaded;
     source_checkout_loaded_init(&loaded);
     enum vcs_source_package_checkout_result result =
-        source_checkout_manifest(store, package_root, &loaded);
+        source_checkout_discover_manifest(store, package_root, &loaded);
     int lane_index = result == VCS_SOURCE_PACKAGE_CHECKOUT_OK
         ? source_checkout_file_index(
               &loaded.package, VCS_SOURCE_PACKAGE_LANE_PATH) : -1;
-    int authority_index = result == VCS_SOURCE_PACKAGE_CHECKOUT_OK
-        ? source_checkout_file_index(
-              &loaded.package, VCS_SOURCE_PACKAGE_AUTHORITY_PATH) : -1;
-    if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
-        (lane_index < 0 || authority_index < 0 ||
-         loaded.package.files[lane_index].size != VCS_ZCODE_LANE_WIRE_BYTES ||
-         loaded.package.files[authority_index].size == 0 ||
-         loaded.package.files[authority_index].size >
-             VCS_ZCODE_ACCEPTED_WORK_BUNDLE_MAX_BYTES))
-        result = VCS_SOURCE_PACKAGE_CHECKOUT_SHAPE;
     uint8_t *lane_wire = NULL;
     size_t lane_wire_len = 0;
     if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
@@ -843,11 +1031,8 @@ source_package_identity_discover(
         result = VCS_SOURCE_PACKAGE_CHECKOUT_CHUNK;
     struct vcs_zcode_lane_receipt_v1 lane;
     if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK &&
-        (vcs_zcode_lane_receipt_parse(lane_wire, lane_wire_len, &lane) !=
-             VCS_ZCODE_DEV_OK ||
-         lane.lane != VCS_ZCODE_LANE_PROVEN ||
-         vcs_zcode_lane_receipt_id(&lane, accepted_work_root) !=
-             VCS_ZCODE_DEV_OK))
+        !source_checkout_lane_receipt(
+            lane_wire, lane_wire_len, NULL, &lane, accepted_work_root))
         result = VCS_SOURCE_PACKAGE_CHECKOUT_SOURCE;
     if (result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
         memcpy(source_root, lane.source_root, 32);
@@ -859,6 +1044,85 @@ source_package_identity_discover(
     source_checkout_loaded_free(&loaded);
     return result;
 }
+
+#if defined(_WIN32)
+static bool source_checkout_scratch_create(char *scratch, size_t capacity)
+{
+    return platform_temp_directory_create(
+        "zcl-source-reconstruct-", scratch, capacity);
+}
+#else
+static bool source_checkout_scratch_create(char *scratch, size_t capacity)
+{
+    static const char template_path[] = "/tmp/zcl-source-reconstruct.XXXXXX";
+    if (capacity < sizeof(template_path))
+        return false;
+    memcpy(scratch, template_path, sizeof(template_path));
+    return mkdtemp(scratch) != NULL;
+}
+#endif
+
+#if defined(_WIN32)
+static bool source_checkout_scratch_dirs(
+    const char *scratch, const char *workspace, const char *destination)
+{
+    (void)workspace;
+    (void)destination;
+    struct platform_directory_transaction scratch_directory;
+    struct platform_directory_transaction workspace_directory;
+    struct platform_directory_transaction source_directory;
+    platform_directory_transaction_init(&scratch_directory);
+    platform_directory_transaction_init(&workspace_directory);
+    platform_directory_transaction_init(&source_directory);
+    bool dirs = source_checkout_windows_open_directory(
+            scratch, &scratch_directory) &&
+        platform_directory_transaction_open_child(
+            &scratch_directory, "zvcs", true, &workspace_directory) ==
+            PLATFORM_DIRECTORY_OK &&
+        platform_directory_transaction_open_child(
+            &scratch_directory, "source", true, &source_directory) ==
+            PLATFORM_DIRECTORY_OK;
+    platform_directory_transaction_close(&source_directory);
+    platform_directory_transaction_close(&workspace_directory);
+    platform_directory_transaction_close(&scratch_directory);
+    return dirs;
+}
+#else
+static bool source_checkout_scratch_dirs(
+    const char *scratch, const char *workspace, const char *destination)
+{
+    (void)scratch;
+    return zcl_mkdir_p(workspace, 0700).ok &&
+        zcl_mkdir_p(destination, 0700).ok;
+}
+#endif
+
+/* Builds the workspace and destination paths under scratch, then creates
+ * both directories; the directories are made only when the paths fit. */
+static bool source_checkout_scratch_ready(
+    const char *scratch, char workspace[SOURCE_CHECKOUT_PATH_MAX],
+    char destination[SOURCE_CHECKOUT_PATH_MAX])
+{
+    int wn = snprintf(workspace, SOURCE_CHECKOUT_PATH_MAX, "%s/zvcs", scratch);
+    int dn = snprintf(destination, SOURCE_CHECKOUT_PATH_MAX, "%s/source",
+                      scratch);
+    bool paths = wn > 0 && (size_t)wn < SOURCE_CHECKOUT_PATH_MAX &&
+        dn > 0 && (size_t)dn < SOURCE_CHECKOUT_PATH_MAX;
+    return paths &&
+        source_checkout_scratch_dirs(scratch, workspace, destination);
+}
+
+#if defined(_WIN32)
+static bool source_checkout_scratch_remove(const char *scratch)
+{
+    return source_checkout_windows_remove_tree(scratch);
+}
+#else
+static bool source_checkout_scratch_remove(const char *scratch)
+{
+    return zcl_tree_remove(scratch).ok;
+}
+#endif
 
 enum vcs_source_package_checkout_result
 vcs_source_package_reconstruct_verify(
@@ -878,62 +1142,23 @@ vcs_source_package_reconstruct_verify(
             store, package_root, source_root, accepted_work_root);
     if (result != VCS_SOURCE_PACKAGE_CHECKOUT_OK)
         return result;
-
-#if defined(_WIN32)
     char scratch[PLATFORM_TEMP_PATH_MAX];
-    if (!platform_temp_directory_create(
-            "zcl-source-reconstruct-", scratch, sizeof(scratch)))
+    if (!source_checkout_scratch_create(scratch, sizeof(scratch)))
         return VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
-#else
-    char scratch[] = "/tmp/zcl-source-reconstruct.XXXXXX";
-    if (!mkdtemp(scratch))
-        return VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
-#endif
     char workspace[SOURCE_CHECKOUT_PATH_MAX];
     char destination[SOURCE_CHECKOUT_PATH_MAX];
-    int wn = snprintf(workspace, sizeof(workspace), "%s/zvcs", scratch);
-    int dn = snprintf(destination, sizeof(destination), "%s/source", scratch);
-#if defined(_WIN32)
-    struct platform_directory_transaction scratch_directory;
-    struct platform_directory_transaction workspace_directory;
-    struct platform_directory_transaction source_directory;
-    platform_directory_transaction_init(&scratch_directory);
-    platform_directory_transaction_init(&workspace_directory);
-    platform_directory_transaction_init(&source_directory);
-    bool dirs = wn > 0 && (size_t)wn < sizeof(workspace) &&
-        dn > 0 && (size_t)dn < sizeof(destination) &&
-        source_checkout_windows_open_directory(scratch, &scratch_directory) &&
-        platform_directory_transaction_open_child(
-            &scratch_directory, "zvcs", true, &workspace_directory) ==
-            PLATFORM_DIRECTORY_OK &&
-        platform_directory_transaction_open_child(
-            &scratch_directory, "source", true, &source_directory) ==
-            PLATFORM_DIRECTORY_OK;
-    platform_directory_transaction_close(&source_directory);
-    platform_directory_transaction_close(&workspace_directory);
-    platform_directory_transaction_close(&scratch_directory);
-#else
-    bool dirs = wn > 0 && (size_t)wn < sizeof(workspace) &&
-        dn > 0 && (size_t)dn < sizeof(destination) &&
-        zcl_mkdir_p(workspace, 0700).ok &&
-        zcl_mkdir_p(destination, 0700).ok;
-#endif
+    bool ready = source_checkout_scratch_ready(
+        scratch, workspace, destination);
     struct vcs_source_package_checkout_metrics checked;
-    if (dirs)
+    if (ready)
         result = vcs_source_package_checkout_accepted(
             store, package_root, source_root, accepted_work_root,
             workspace, destination, &checked);
     else
         result = VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
-#if defined(_WIN32)
-    bool removed = source_checkout_windows_remove_tree(scratch);
-    if (!removed && result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
+    if (!source_checkout_scratch_remove(scratch) &&
+        result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
         result = VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
-#else
-    struct zcl_result removed = zcl_tree_remove(scratch);
-    if (!removed.ok && result == VCS_SOURCE_PACKAGE_CHECKOUT_OK)
-        result = VCS_SOURCE_PACKAGE_CHECKOUT_DESTINATION;
-#endif
     if (result != VCS_SOURCE_PACKAGE_CHECKOUT_OK)
         return result;
     memcpy(source_root_out, source_root, 32);
