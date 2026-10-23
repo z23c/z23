@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #define BBF_SUBSYS "boot_bundle_fetch"
 /* The manifest commitment (a /directory.json body) is small + auditable; cap
  * the read well above a realistic ROM directory (a few artifacts). */
@@ -170,6 +171,62 @@ bool boot_bundle_fetch_should_run(const char *datadir,
  * boot_bundle_pick_header_seed_manifest) lives in
  * engine/composition/src/boot_bundle_manifest_pick.c. */
 /* ── Verified download into <datadir>/bundles/ ──────────────────────────── */
+/* Register a landed, content-verified bundle with rom_seed so this node serves
+ * it to the swarm. Non-fatal: the next rom_seed scan picks it up otherwise. */
+static void bbf_reseed_landed(const char *datadir,
+                              const struct rom_fetch_manifest *m)
+{
+    char reseed_name[ROM_SEED_NAME_MAX];
+    int rnn = snprintf(reseed_name, sizeof(reseed_name), "%s/%s",
+                       ROM_SEED_BUNDLES_SUBDIR, m->filename);
+    if (rnn > 0 && (size_t)rnn < sizeof(reseed_name)) {
+        enum rom_register_result rrc =
+            rom_seed_register(datadir, reseed_name, m->whole_sha3, NULL);
+        if (rrc == ROM_REG_OK)
+            LOG_INFO(BBF_SUBSYS,
+                     "reseed: registered fetched bundle '%s' with rom_seed — "
+                     "this node now serves it to the swarm", reseed_name);
+        else
+            LOG_WARN(BBF_SUBSYS,
+                     "reseed: could not register fetched bundle '%s' (rc=%d) "
+                     "— the next rom_seed scan will pick it up", reseed_name,
+                     (int)rrc);
+    } else {
+        LOG_WARN(BBF_SUBSYS,
+                 "reseed: bundle relative name overflow — the next rom_seed "
+                 "scan will pick it up");
+    }
+}
+
+/* Warm-boot short-circuit: the final <bundles>/<filename> is already on disk
+ * and equals the committed manifest (size, chunk fold and whole-file SHA3, one
+ * bounded streaming pass in rom_fetch_verify_file). Absent file or any
+ * mismatch/read error returns false and the caller downloads as before. Never
+ * installs and never touches the install marker, any .failed marker or the
+ * autodetect gate. */
+static bool bbf_already_landed(const char *datadir, const char *bundles,
+                               const struct rom_fetch_manifest *m)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s", bundles, m->filename);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return false;
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return false; /* cold boot: nothing there, no noise */
+    if (!rom_fetch_verify_file(path, m)) {
+        LOG_WARN(BBF_SUBSYS,
+                 "bundle fetch: %s present but does not match the committed "
+                 "manifest (or unreadable) — downloading", m->filename);
+        return false;
+    }
+    LOG_INFO(BBF_SUBSYS,
+             "bundle fetch: %s already present and verified, skipping download",
+             m->filename);
+    bbf_reseed_landed(datadir, m);
+    return true;
+}
+
 bool boot_bundle_fetch_download(const char *datadir,
                                 const struct rom_fetch_peer *peers,
                                 size_t npeers,
@@ -188,6 +245,8 @@ bool boot_bundle_fetch_download(const char *datadir,
     if (!platform_private_directory_ensure(bundles))
         LOG_FAIL(BBF_SUBSYS, "private bundles directory %s refused: %s",
                  bundles, strerror(errno));
+    if (bbf_already_landed(datadir, bundles, m))
+        return true;
     /* Prefer the per-chunk-verified swarm path (rom_fetch_download_verified_
      * parallel): probe reachable seeders for the artifact's "RMF" manifest and,
      * on the first that serves one matching the committed num_chunks, run the
@@ -286,26 +345,7 @@ bool boot_bundle_fetch_download(const char *datadir,
      * the next time it runs: this same boot's own rom_seed_start_scan (which
      * starts moments later, once the frontend services init), or a later
      * boot if seeding was disabled this run. */
-    char reseed_name[ROM_SEED_NAME_MAX];
-    int rnn = snprintf(reseed_name, sizeof(reseed_name), "%s/%s",
-                       ROM_SEED_BUNDLES_SUBDIR, m->filename);
-    if (rnn > 0 && (size_t)rnn < sizeof(reseed_name)) {
-        enum rom_register_result rrc =
-            rom_seed_register(datadir, reseed_name, m->whole_sha3, NULL);
-        if (rrc == ROM_REG_OK)
-            LOG_INFO(BBF_SUBSYS,
-                     "reseed: registered fetched bundle '%s' with rom_seed — "
-                     "this node now serves it to the swarm", reseed_name);
-        else
-            LOG_WARN(BBF_SUBSYS,
-                     "reseed: could not register fetched bundle '%s' (rc=%d) "
-                     "— the next rom_seed scan will pick it up", reseed_name,
-                     (int)rrc);
-    } else {
-        LOG_WARN(BBF_SUBSYS,
-                 "reseed: bundle relative name overflow — the next rom_seed "
-                 "scan will pick it up");
-    }
+    bbf_reseed_landed(datadir, m);
     return true;
 }
 /* ── Production entry: assemble seeds, read the manifest hint, download ──── */

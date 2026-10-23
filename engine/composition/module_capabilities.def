@@ -570,7 +570,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_block_file_scan.c", CAP_FS_RE
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_block_index_ancestry.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_block_index_apply.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_blocktree_cleanup.c", CAP_FS_READ|CAP_FS_WRITE, "")
-ZCL_MODULE_CAPABILITY("engine/composition/src/boot_bundle_fetch.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_bundle_fetch.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_bundle_fetch_probe.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_cold_start_driver.c", CAP_FS_WRITE|CAP_PROCESS|CAP_FS_READ, "layer 2 of `-cold-start`: re-execs the node into its live boot process and reads the staged driver's handoff state")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_consensus_bundle_marker.c", CAP_CLOCK|CAP_FS_READ, "reads the install marker height back so the from-anchor reset guard can refuse a reset on a rung-installed datadir")

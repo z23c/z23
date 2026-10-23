@@ -559,6 +559,119 @@ static int case_e2e(void)
     return failures;
 }
 
+/* ── (f) Warm boot: a landed, verified bundle is not downloaded again ───── */
+
+static bool bbf_reseeded(const struct rom_fetch_manifest *m)
+{
+    char want[ROM_SEED_NAME_MAX];
+    snprintf(want, sizeof(want), "%s/%s", ROM_SEED_BUNDLES_SUBDIR, m->filename);
+    struct rom_artifact cat[ROM_SEED_MAX_ARTIFACTS];
+    int cn = rom_seed_list(cat, ROM_SEED_MAX_ARTIFACTS);
+    for (int i = 0; i < cn; i++)
+        if (strcmp(cat[i].filename, want) == 0)
+            return true;
+    return false;
+}
+
+/* Land `content` (possibly truncated/flipped) as <cdir>/bundles/<name> and run
+ * the download against `peers`; returns the download verdict. */
+static bool bbf_download_with_staged(const char *cdir, const uint8_t *content,
+                                     size_t len,
+                                     const struct rom_fetch_peer *peers,
+                                     const struct rom_fetch_manifest *m)
+{
+    char b[400];
+    snprintf(b, sizeof(b), "%s/bundles", cdir);
+    if (mkdir(b, 0700) != 0 || !bbf_write_file(b, m->filename, content, len))
+        return false;
+    return boot_bundle_fetch_download(cdir, peers, 1, m);
+}
+
+static int case_warm_landed(void)
+{
+    int failures = 0;
+    TEST("boot_bundle_fetch: verified landed bundle skips the download") {
+        rom_seed_reset();
+        rom_seed_set_peer_bps_cap(1ull << 30);
+        rom_seed_set_global_bps_cap(1ull << 30);
+        char sroot[PATH_MAX];
+        char *sdir = test_mkdtemp(sroot, sizeof(sroot), "zcl_bbf_wsrv");
+        ASSERT(sdir != NULL);
+        size_t size = (size_t)ROM_SEED_CHUNK_SIZE + 4096;
+        uint8_t *content = malloc(size);
+        ASSERT(content != NULL);
+        bbf_gen_content(content, size);
+        ASSERT(bbf_write_file(sdir, "consensus-state-bundle-3056758.sqlite",
+                              content, size));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(sdir, "consensus-state-bundle-3056758.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        char dirjson[3072];
+        bbf_directory_json(dirjson, sizeof(dirjson));
+        struct rom_fetch_manifest m;
+        memset(&m, 0, sizeof(m));
+        ASSERT(boot_bundle_pick_manifest(dirjson, &m));
+        rom_seed_reset(); /* drop the server-side registration */
+
+        /* (a) Matching final file + a peer nobody listens on: any network
+         * attempt would fail, so success proves zero network use. */
+        struct rom_fetch_peer dead[1];
+        memset(dead, 0, sizeof(dead));
+        snprintf(dead[0].addr, sizeof(dead[0].addr), "%s", "127.0.0.1");
+        dead[0].port = 1;
+        char r1[PATH_MAX];
+        char *c1 = test_mkdtemp(r1, sizeof(r1), "zcl_bbf_w1");
+        ASSERT(c1 != NULL);
+        ASSERT(bbf_download_with_staged(c1, content, size, dead, &m));
+        ASSERT(bbf_reseeded(&m));
+        ASSERT(!boot_consensus_bundle_marker_exists(c1));
+        rom_seed_reset();
+
+        /* (b)/(c) same-size flipped byte, and wrong size: must download. */
+        fs_server_start(sdir, 0);
+        for (int w = 0; w < 40 && !fs_server_is_running(); w++)
+            platform_sleep_ms(50);
+        ASSERT(fs_server_is_running() && fs_server_get_port() != 0);
+        ASSERT(rom_seed_register(sdir, "consensus-state-bundle-3056758.sqlite",
+                                 NULL, &art) == ROM_REG_OK);
+        struct rom_fetch_peer live[1];
+        memset(live, 0, sizeof(live));
+        snprintf(live[0].addr, sizeof(live[0].addr), "%s", "127.0.0.1");
+        live[0].port = fs_server_get_port();
+
+        uint8_t *bad = malloc(size);
+        ASSERT(bad != NULL);
+        memcpy(bad, content, size);
+        bad[size / 2] ^= 0x01;
+        char r2[PATH_MAX];
+        char *c2 = test_mkdtemp(r2, sizeof(r2), "zcl_bbf_w2");
+        ASSERT(c2 != NULL);
+        ASSERT(bbf_download_with_staged(c2, bad, size, live, &m));
+        char p2[1200];
+        snprintf(p2, sizeof(p2), "%s/bundles/%s", c2, m.filename);
+        ASSERT(rom_fetch_verify_file(p2, &m)); /* replaced by the real bytes */
+
+        char r3[PATH_MAX];
+        char *c3 = test_mkdtemp(r3, sizeof(r3), "zcl_bbf_w3");
+        ASSERT(c3 != NULL);
+        ASSERT(bbf_download_with_staged(c3, content, size - 1, live, &m));
+        char p3[1200];
+        snprintf(p3, sizeof(p3), "%s/bundles/%s", c3, m.filename);
+        ASSERT(rom_fetch_verify_file(p3, &m));
+
+        fs_server_stop();
+        free(bad);
+        free(content);
+        test_rm_rf_recursive(c1);
+        test_rm_rf_recursive(c2);
+        test_rm_rf_recursive(c3);
+        rmdir(sdir);
+        rom_seed_reset();
+    } _test_next:;
+    return failures;
+}
+
+
 /* ── (e) Baked-facts cross-check + quorum decision (pure) ────────────────── */
 
 static int case_baked_facts(void)
@@ -1539,6 +1652,7 @@ int test_boot_bundle_fetch(void)
     failures += case_pick();
     failures += case_pick_kinds();
     failures += case_e2e();
+    failures += case_warm_landed();
     failures += case_baked_facts();
     failures += case_pick_newest();
     failures += case_pick_rung_over_keystone();
