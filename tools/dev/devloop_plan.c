@@ -849,11 +849,11 @@ static bool plan_fold_reached_file(struct zcl_devloop_plan *plan,
 {
     char leaf_group[ZCL_TEST_GROUP_FULL_MAX];
     struct agent_impact_acc acc = {0};
-    /* A reached semantic leaf contributes its own group AND still folds the
-     * rule groups the reached file matches: the leaf row only removes the
-     * runner fanout, never the proof the path rules demand. Slot 0 of the
-     * walk is the leaf group; slots 1.. are acc.groups. */
-    size_t first = plan_semantic_leaf_group(reached, leaf_group) ? 0 : 1;
+    /* A reached test file naming a catalog group contributes that group AND
+     * still folds the rule groups the file matches, leaf or not: a file that
+     * stops being a leaf must not drop its own group. Slot 0 is that group;
+     * slots 1.. are acc.groups. */
+    size_t first = plan_named_test_group(reached, leaf_group) ? 0 : 1;
     (void)agent_impact_apply_shared_rules(reached, &acc);
     for (size_t g = first; g <= acc.groups_len; g++) {
         const char *group = g == 0 ? leaf_group : acc.groups[g - 1];
@@ -1000,13 +1000,13 @@ static void plan_owner_memo_init(struct plan_owner_memo *memo)
                                "plan proof owner memo");
 }
 
+/* A registered leaf is never a boundary by itself: only a rule owner stops the
+ * walk, so production selections cannot shrink. */
 static bool plan_uncached_proof_owner(const char *path)
 {
 #if defined(ZCL_TESTING)
     zcl_devloop_test_owner_evaluations++;
 #endif
-    if (zcl_test_group_source_is_semantic_leaf(path))
-        return true;
     return agent_impact_apply_shared_rules(path, NULL);
 }
 

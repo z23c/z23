@@ -8,9 +8,8 @@
  * referenced by nothing but runner plumbing (test.c, test_parallel.c) and
  * `int test_<group>(void);` declarations. The group must also be registered in
  * test_group_catalog.def or dispatched by test.c.
- * A reached leaf is a terminal of the reverse-caller walk, so a row is only
- * kept when production selections measured against the prior registry lost no
- * group (rows whose termination cut off the runner's groups were dropped).
+ * A reached leaf adds its own group but never ends the reverse-caller walk,
+ * so a row cannot shrink any production selection.
  * Include with ZCL_TEST_SEMANTIC_LEAF(name) defined. */
 
 ZCL_TEST_SEMANTIC_LEAF(stage_repair_coin_backfill)
@@ -907,3 +906,9 @@ ZCL_TEST_SEMANTIC_LEAF(zslp_store_port)
 ZCL_TEST_SEMANTIC_LEAF(zswap_ceremony)
 ZCL_TEST_SEMANTIC_LEAF(zswap_quote)
 ZCL_TEST_SEMANTIC_LEAF(zswap_yardsale)
+ZCL_TEST_SEMANTIC_LEAF(address_index)
+ZCL_TEST_SEMANTIC_LEAF(header_probe_poll)
+ZCL_TEST_SEMANTIC_LEAF(supervisor_domains)
+ZCL_TEST_SEMANTIC_LEAF(supervisor_progress_policy)
+ZCL_TEST_SEMANTIC_LEAF(txindex_projection)
+ZCL_TEST_SEMANTIC_LEAF(zendp_revocation)

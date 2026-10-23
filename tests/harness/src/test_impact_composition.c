@@ -556,6 +556,20 @@ static bool ic_prod_keeps_groups_witness(void)
     return a && b && c;
 }
 
+/* A reached leaf must not end the reverse-caller walk: supervisor.c reaches
+ * unowned leaf files (supervisor_domains, ...) and still has to climb to the
+ * runner groups. */
+static bool ic_supervisor_keeps_boot_groups(void)
+{
+    static const char *const want[] = {
+        "boot_shutdown_marker", "boot_shutdown_marker_persistence",
+        "test_test_group_selector" };
+    static const char *const dev[] = { "test_dev_platform" };
+    return ic_file_selects("platform/modules/util/src/supervisor.c", want,
+                           sizeof(want) / sizeof(want[0])) &&
+           ic_file_selects("tools/dev/devloop_watch.c", dev, 1);
+}
+
 /* Union membership across BOTH group arrays — the composed plan. */
 static bool ic_planned(const struct zcl_devloop_plan *p, const char *g)
 {
@@ -1918,6 +1932,7 @@ static int test_ic_dimension_applicability_and_exact_execution(void)
             ASSERT(ic_leaf_exact_witness());
             ASSERT(ic_leaf_fold_keeps_rule_groups());
             ASSERT(ic_prod_keeps_groups_witness());
+            ASSERT(ic_supervisor_keeps_boot_groups());
         }
 
         /* Pure C23 service islands are product code, not harness internals.
