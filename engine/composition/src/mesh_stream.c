@@ -86,27 +86,32 @@ static void stream_lock(void)
     zcl_mutex_lock(&g_stream_lock);
 }
 
+/* One stable token per refusal, indexed by the enum. A value the table
+ * does not name reads as "stream_malformed". */
+static const char *const g_refusal_tokens[] = {
+    [MESH_STREAM_OK] = "stream_ok",
+    [MESH_STREAM_REFUSED_LINK_NOT_NOISE] = "stream_link_not_noise",
+    [MESH_STREAM_REFUSED_PEER_UNPAIRED] = "stream_peer_unpaired",
+    [MESH_STREAM_REFUSED_SERVICE_UNKNOWN] = "stream_service_unknown",
+    [MESH_STREAM_REFUSED_CAP] = "stream_cap",
+    [MESH_STREAM_REFUSED_CREDIT_EXCEEDED] = "stream_credit_exceeded",
+    [MESH_STREAM_REFUSED_MALFORMED] = "stream_malformed",
+    [MESH_STREAM_REFUSED_ID_PARITY] = "stream_id_parity",
+    [MESH_STREAM_REFUSED_ID_IN_USE] = "stream_id_in_use",
+    [MESH_STREAM_REFUSED_RATE] = "stream_open_rate",
+    [MESH_STREAM_REFUSED_UNAVAILABLE] = "stream_unavailable",
+    [MESH_STREAM_REFUSED_PEER_NOT_CONNECTED] = "stream_peer_not_connected",
+    [MESH_STREAM_ENDED_IDLE] = "stream_idle_timeout",
+    [MESH_STREAM_ENDED_SESSION_LOST] = "stream_session_lost",
+    [MESH_STREAM_ENDED_SHUTDOWN] = "stream_shutdown",
+    [MESH_STREAM_CLOSED_BY_SERVICE] = "stream_closed_by_service",
+};
+
 const char *mesh_stream_refusal_string(enum mesh_stream_refusal reason)
 {
-    switch (reason) {
-    case MESH_STREAM_OK: return "stream_ok";
-    case MESH_STREAM_REFUSED_LINK_NOT_NOISE: return "stream_link_not_noise";
-    case MESH_STREAM_REFUSED_PEER_UNPAIRED: return "stream_peer_unpaired";
-    case MESH_STREAM_REFUSED_SERVICE_UNKNOWN: return "stream_service_unknown";
-    case MESH_STREAM_REFUSED_CAP: return "stream_cap";
-    case MESH_STREAM_REFUSED_CREDIT_EXCEEDED: return "stream_credit_exceeded";
-    case MESH_STREAM_REFUSED_MALFORMED: return "stream_malformed";
-    case MESH_STREAM_REFUSED_ID_PARITY: return "stream_id_parity";
-    case MESH_STREAM_REFUSED_ID_IN_USE: return "stream_id_in_use";
-    case MESH_STREAM_REFUSED_RATE: return "stream_open_rate";
-    case MESH_STREAM_REFUSED_UNAVAILABLE: return "stream_unavailable";
-    case MESH_STREAM_REFUSED_PEER_NOT_CONNECTED:
-        return "stream_peer_not_connected";
-    case MESH_STREAM_ENDED_IDLE: return "stream_idle_timeout";
-    case MESH_STREAM_ENDED_SESSION_LOST: return "stream_session_lost";
-    case MESH_STREAM_ENDED_SHUTDOWN: return "stream_shutdown";
-    case MESH_STREAM_CLOSED_BY_SERVICE: return "stream_closed_by_service";
-    }
+    size_t count = sizeof(g_refusal_tokens) / sizeof(g_refusal_tokens[0]);
+    if ((size_t)reason < count && g_refusal_tokens[reason])
+        return g_refusal_tokens[reason];
     return "stream_malformed";
 }
 
@@ -126,6 +131,19 @@ static int stream_service_index_locked(const char *name, size_t name_len)
     return -1;
 }
 
+/* Every byte of a service name is lowercase, a digit, '_' or '.'. */
+static bool stream_service_name_chars_ok(const char *name, size_t name_len)
+{
+    for (size_t i = 0; i < name_len; i++) {
+        char c = name[i];
+        bool printable = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+                         c == '_' || c == '.';
+        if (!printable)
+            return false;
+    }
+    return true;
+}
+
 bool mesh_stream_service_register(const struct mesh_stream_service *service)
 {
     if (!service || !service->name)
@@ -134,15 +152,10 @@ bool mesh_stream_service_register(const struct mesh_stream_service *service)
     if (name_len == 0 || name_len > MESH_STREAM_SERVICE_NAME_MAX)
         LOG_FAIL("net.mesh_stream", "register: name length %zu out of bounds",
                  name_len);
-    for (size_t i = 0; i < name_len; i++) {
-        char c = service->name[i];
-        bool printable = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
-                         c == '_' || c == '.';
-        if (!printable)
-            LOG_FAIL("net.mesh_stream",
-                     "register: service name must be lowercase, digits, "
-                     "'_' or '.'");
-    }
+    if (!stream_service_name_chars_ok(service->name, name_len))
+        LOG_FAIL("net.mesh_stream",
+                 "register: service name must be lowercase, digits, "
+                 "'_' or '.'");
     stream_lock();
     if (stream_service_index_locked(service->name, name_len) >= 0) {
         zcl_mutex_unlock(&g_stream_lock);
@@ -242,6 +255,15 @@ static size_t stream_peer_count_locked(const uint8_t peer_static[32])
     return n;
 }
 
+/* A peer may open another stream only while it holds fewer than the
+ * per-peer cap and the table has a free slot. */
+static bool stream_has_room_locked(const uint8_t peer_static[32])
+{
+    return stream_peer_count_locked(peer_static) <
+               MESH_STREAM_PER_PEER_MAX &&
+           stream_free_slot_locked() != NULL;
+}
+
 /* Bounded per-peer OPEN cadence, evaluated before any service admission
  * work. A peer with no slot left evicts the oldest expired window. */
 static bool stream_open_admit_locked(const uint8_t peer_static[32],
@@ -306,6 +328,81 @@ static bool stream_peer_pairing_allows(uint64_t capability, int64_t now_unix,
             return true;
     }
     return false;
+}
+
+/* A decoded inbound OPEN body. The name and payload borrow the frame. */
+struct stream_open_body {
+    uint32_t initial_window;
+    const char *name;
+    size_t name_len;
+    const uint8_t *payload;
+    size_t payload_len;
+};
+
+/* Decode an OPEN body: window, service name and payload, each bounded by
+ * the frame it arrived in. Every field of `out` is set on every path. */
+static bool stream_open_body_decode(const uint8_t *body, size_t body_len,
+                                    struct stream_open_body *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (body_len < 4u + 1u)
+        return false;
+    size_t name_len = body[4];
+    if (name_len == 0 || name_len > MESH_STREAM_SERVICE_NAME_MAX ||
+        body_len < 4u + 1u + name_len + 2u)
+        return false;
+    size_t payload_len = zcl_read_u16_le(body + 5 + name_len);
+    if (body_len != 4u + 1u + name_len + 2u + payload_len ||
+        payload_len > MESH_STREAM_PAYLOAD_MAX)
+        return false;
+    out->initial_window = zcl_read_u32_le(body);
+    out->name = (const char *)(body + 5);
+    out->name_len = name_len;
+    out->payload = body + 5 + name_len + 2;
+    out->payload_len = payload_len;
+    return true;
+}
+
+/* Inbound OPEN admission, lane lock held. Each refusal returns before the
+ * next check runs, so the cadence window is only spent by an OPEN that
+ * passed the checks before it. */
+static enum mesh_stream_refusal stream_open_gate_locked(
+    const struct p2p_node *node, uint64_t id,
+    const struct noise_transport_snapshot *snap, int64_t now,
+    uint32_t initial_window)
+{
+    /* An inbound OPEN must carry the PEER's parity, never ours. */
+    uint64_t peer_parity = 1u - stream_local_parity(node);
+    if ((id & 1u) != peer_parity)
+        return MESH_STREAM_REFUSED_ID_PARITY;
+    if (stream_find_locked(id, snap) != NULL)
+        return MESH_STREAM_REFUSED_ID_IN_USE;
+    if (!stream_open_admit_locked(snap->remote_static, now))
+        return MESH_STREAM_REFUSED_RATE;
+    if (!stream_has_room_locked(snap->remote_static))
+        return MESH_STREAM_REFUSED_CAP;
+    if (initial_window == 0 || initial_window > MESH_STREAM_INITIAL_WINDOW)
+        return MESH_STREAM_REFUSED_CREDIT_EXCEEDED;
+    return MESH_STREAM_OK;
+}
+
+/* The inbound OPEN's service: a registered name whose pairing requirement
+ * the peer meets. `*index_out` stays -1 unless the service is admitted. */
+static enum mesh_stream_refusal stream_open_service_locked(
+    const struct stream_open_body *open_body,
+    const struct noise_transport_snapshot *snap, int64_t now, int *index_out)
+{
+    *index_out = -1;
+    int index = stream_service_index_locked(open_body->name,
+                                            open_body->name_len);
+    if (index < 0)
+        return MESH_STREAM_REFUSED_SERVICE_UNKNOWN;
+    if (!stream_peer_pairing_allows(
+            g_services[index].required_pairing_capability, now,
+            snap->remote_static))
+        return MESH_STREAM_REFUSED_PEER_UNPAIRED;
+    *index_out = index;
+    return MESH_STREAM_OK;
 }
 
 /* ── Frame send ──────────────────────────────────────────────────────── */
@@ -522,19 +619,55 @@ void mesh_stream_release(struct mesh_stream *st)
 
 /* ── Initiator ───────────────────────────────────────────────────────── */
 
-enum mesh_stream_refusal mesh_stream_open(
+/* Initiator arguments refused before any lock is taken: a missing name or
+ * peer, an oversized payload, a window above the ceiling. Zero is never a
+ * refusal here, because zero asks for the default window. */
+static enum mesh_stream_refusal stream_open_args_refusal(
     const char *service_name, const uint8_t peer_noise_static[32],
-    uint32_t initial_window, const uint8_t *payload, size_t payload_len,
-    void *service_state, uint64_t *stream_id_out)
+    uint32_t initial_window, const uint8_t *payload, size_t payload_len)
 {
     if (!service_name || !peer_noise_static || (!payload && payload_len))
         return MESH_STREAM_REFUSED_MALFORMED;
     if (payload_len > MESH_STREAM_PAYLOAD_MAX)
         return MESH_STREAM_REFUSED_MALFORMED;
-    if (initial_window == 0)
-        initial_window = MESH_STREAM_INITIAL_WINDOW;
     if (initial_window > MESH_STREAM_INITIAL_WINDOW)
         return MESH_STREAM_REFUSED_CREDIT_EXCEEDED;
+    return MESH_STREAM_OK;
+}
+
+/* The lowest free id of our own parity toward this peer. The per-peer cap
+ * bounds the search. Returns false when every candidate is live, so the
+ * caller refuses by name rather than reuse a live id. Lane lock held. */
+static bool stream_pick_local_id_locked(uint64_t parity,
+                                        const uint8_t peer_static[32],
+                                        uint64_t *id_out)
+{
+    *id_out = 0;
+    for (size_t step = 0; step <= MESH_STREAM_PER_PEER_MAX; step++) {
+        uint64_t candidate = parity + 2u * (uint64_t)step;
+        bool taken = false;
+        for (size_t i = 0; i < MESH_STREAM_TABLE_MAX && !taken; i++)
+            taken = g_streams[i].used && g_streams[i].id == candidate &&
+                    memcmp(g_streams[i].peer_static, peer_static, 32) == 0;
+        if (!taken) {
+            *id_out = candidate;
+            return true;
+        }
+    }
+    return false;
+}
+
+enum mesh_stream_refusal mesh_stream_open(
+    const char *service_name, const uint8_t peer_noise_static[32],
+    uint32_t initial_window, const uint8_t *payload, size_t payload_len,
+    void *service_state, uint64_t *stream_id_out)
+{
+    enum mesh_stream_refusal args = stream_open_args_refusal(
+        service_name, peer_noise_static, initial_window, payload, payload_len);
+    if (args != MESH_STREAM_OK)
+        return args;
+    if (initial_window == 0)
+        initial_window = MESH_STREAM_INITIAL_WINDOW;
     int64_t now = (int64_t)platform_time_wall_time_t();
     if (now <= 0)
         return MESH_STREAM_REFUSED_UNAVAILABLE;
@@ -564,8 +697,7 @@ enum mesh_stream_refusal mesh_stream_open(
         zcl_mutex_unlock(&g_stream_lock);
         return MESH_STREAM_REFUSED_LINK_NOT_NOISE;
     }
-    if (stream_peer_count_locked(snap.remote_static) >=
-        MESH_STREAM_PER_PEER_MAX) {
+    if (!stream_has_room_locked(snap.remote_static)) {
         p2p_node_release(peer);
         zcl_mutex_unlock(&g_stream_lock);
         return MESH_STREAM_REFUSED_CAP;
@@ -577,26 +709,9 @@ enum mesh_stream_refusal mesh_stream_open(
         return MESH_STREAM_REFUSED_CAP;
     }
 
-    /* The lowest free id of our own parity on this peer. The per-peer cap
-     * bounds the search; a table that cannot answer refuses by name
-     * rather than reuse a live id. */
     uint64_t id = 0;
-    bool have_id = false;
-    uint64_t parity = stream_local_parity(peer);
-    for (size_t step = 0; step <= MESH_STREAM_PER_PEER_MAX && !have_id;
-         step++) {
-        uint64_t candidate = parity + 2u * (uint64_t)step;
-        bool taken = false;
-        for (size_t i = 0; i < MESH_STREAM_TABLE_MAX && !taken; i++)
-            taken = g_streams[i].used && g_streams[i].id == candidate &&
-                    memcmp(g_streams[i].peer_static, snap.remote_static,
-                           32) == 0;
-        if (!taken) {
-            id = candidate;
-            have_id = true;
-        }
-    }
-    if (!have_id) {
+    if (!stream_pick_local_id_locked(stream_local_parity(peer),
+                                     snap.remote_static, &id)) {
         p2p_node_release(peer);
         zcl_mutex_unlock(&g_stream_lock);
         return MESH_STREAM_REFUSED_ID_IN_USE;
@@ -664,24 +779,10 @@ static void stream_receive_open(struct msg_processor *mp,
                                 uint64_t id, const uint8_t *body,
                                 size_t body_len)
 {
-    if (!mp || body_len < 4u + 1u) {
-        /* No composition context means no honest answer exists; a refusal
-         * we cannot send is not a refusal. */
-        atomic_fetch_add(&g_dropped_malformed, 1);
-        return;
-    }
-    uint32_t initial_window = zcl_read_u32_le(body);
-    size_t name_len = body[4];
-    if (name_len == 0 || name_len > MESH_STREAM_SERVICE_NAME_MAX ||
-        body_len < 4u + 1u + name_len + 2u) {
-        atomic_fetch_add(&g_dropped_malformed, 1);
-        return;
-    }
-    const char *name = (const char *)(body + 5);
-    size_t payload_len = zcl_read_u16_le(body + 5 + name_len);
-    const uint8_t *payload = body + 5 + name_len + 2;
-    if (body_len != 4u + 1u + name_len + 2u + payload_len ||
-        payload_len > MESH_STREAM_PAYLOAD_MAX) {
+    struct stream_open_body open_body;
+    /* No composition context means no honest answer exists; a refusal
+     * we cannot send is not a refusal. */
+    if (!mp || !stream_open_body_decode(body, body_len, &open_body)) {
         atomic_fetch_add(&g_dropped_malformed, 1);
         return;
     }
@@ -689,36 +790,12 @@ static void stream_receive_open(struct msg_processor *mp,
     if (now <= 0)
         return;
 
-    /* An inbound OPEN must carry the PEER's parity, never ours. */
-    uint64_t peer_parity = 1u - stream_local_parity(node);
-    enum mesh_stream_refusal refusal = MESH_STREAM_OK;
-    if ((id & 1u) != peer_parity)
-        refusal = MESH_STREAM_REFUSED_ID_PARITY;
-
     stream_lock();
     int index = -1;
-    if (refusal == MESH_STREAM_OK && stream_find_locked(id, snap) != NULL)
-        refusal = MESH_STREAM_REFUSED_ID_IN_USE;
-    if (refusal == MESH_STREAM_OK &&
-        !stream_open_admit_locked(snap->remote_static, now))
-        refusal = MESH_STREAM_REFUSED_RATE;
-    if (refusal == MESH_STREAM_OK &&
-        (stream_peer_count_locked(snap->remote_static) >=
-             MESH_STREAM_PER_PEER_MAX ||
-         stream_free_slot_locked() == NULL))
-        refusal = MESH_STREAM_REFUSED_CAP;
-    if (refusal == MESH_STREAM_OK &&
-        (initial_window == 0 || initial_window > MESH_STREAM_INITIAL_WINDOW))
-        refusal = MESH_STREAM_REFUSED_CREDIT_EXCEEDED;
-    if (refusal == MESH_STREAM_OK) {
-        index = stream_service_index_locked(name, name_len);
-        if (index < 0)
-            refusal = MESH_STREAM_REFUSED_SERVICE_UNKNOWN;
-        else if (!stream_peer_pairing_allows(
-                     g_services[index].required_pairing_capability, now,
-                     snap->remote_static))
-            refusal = MESH_STREAM_REFUSED_PEER_UNPAIRED;
-    }
+    enum mesh_stream_refusal refusal = stream_open_gate_locked(
+        node, id, snap, now, open_body.initial_window);
+    if (refusal == MESH_STREAM_OK)
+        refusal = stream_open_service_locked(&open_body, snap, now, &index);
     if (refusal != MESH_STREAM_OK || index < 0) {
         zcl_mutex_unlock(&g_stream_lock);
         atomic_fetch_add(&g_opens_refused, 1);
@@ -745,8 +822,8 @@ static void stream_receive_open(struct msg_processor *mp,
     memcpy(slot->peer_static, snap->remote_static, 32);
     memcpy(slot->transcript_hash, snap->transcript_hash, 32);
     slot->connection_generation = snap->connection_generation;
-    slot->send_credit = initial_window;
-    slot->recv_credit = initial_window;
+    slot->send_credit = open_body.initial_window;
+    slot->recv_credit = open_body.initial_window;
     slot->opened_unix = now;
     slot->last_activity_unix = now;
 
@@ -755,8 +832,9 @@ static void stream_receive_open(struct msg_processor *mp,
     const struct mesh_stream_service *service = &g_services[index];
     enum mesh_stream_refusal verdict =
         service->on_open
-            ? service->on_open(slot, payload, payload_len, reply,
-                               sizeof(reply), &reply_len, service->ctx)
+            ? service->on_open(slot, open_body.payload,
+                               open_body.payload_len, reply, sizeof(reply),
+                               &reply_len, service->ctx)
             : MESH_STREAM_OK;
     if (reply_len > sizeof(reply))
         reply_len = 0; /* a service can never widen its own reply bound */
@@ -939,6 +1017,41 @@ bool mesh_stream_frame(struct msg_processor *mp, struct p2p_node *node,
  * still be there, the idle mark must not have passed, and then the
  * service moves whatever it has into DATA within the credit it holds. No
  * service keeps a pump of its own. */
+/* Whether a slot has been quiet for at least `seconds`. A clock that did
+ * not move forward is never quiet. */
+static bool stream_quiet_for(const struct mesh_stream *st, int64_t now,
+                             int64_t seconds)
+{
+    return now > st->last_activity_unix &&
+           now - st->last_activity_unix >= seconds;
+}
+
+/* One slot on the pump tick, lane lock held. */
+static void stream_tick_slot_locked(struct mesh_stream *st, int64_t now)
+{
+    /* A half-closed slot is a verdict waiting to be read: reap it at the
+     * linger mark, never tick it. */
+    if (st->ended) {
+        if (stream_quiet_for(st, now, MESH_STREAM_LINGER_SECONDS))
+            mesh_stream_release(st);
+        return;
+    }
+    struct p2p_node *peer = stream_bound_peer_locked(st, NULL);
+    if (!peer) {
+        stream_close_locked(st, MESH_STREAM_ENDED_SESSION_LOST, NULL, 0);
+        return;
+    }
+    p2p_node_release(peer);
+    if (stream_quiet_for(st, now, MESH_STREAM_IDLE_SECONDS)) {
+        stream_close_locked(st, MESH_STREAM_ENDED_IDLE, NULL, 0);
+        return;
+    }
+    const struct mesh_stream_service *service =
+        g_service_used[st->service] ? &g_services[st->service] : NULL;
+    if (service && service->on_tick)
+        service->on_tick(st, now, service->ctx);
+}
+
 static void stream_pump_tick(struct liveness_contract *contract)
 {
     (void)contract;
@@ -958,30 +1071,9 @@ static void stream_pump_tick(struct liveness_contract *contract)
         struct mesh_stream *st = &g_streams[i];
         if (!st->used)
             continue;
-        /* A half-closed slot is a verdict waiting to be read: reap it at
-         * the linger mark, never tick it. */
-        if (st->ended) {
-            if (now > st->last_activity_unix &&
-                now - st->last_activity_unix >= MESH_STREAM_LINGER_SECONDS)
-                mesh_stream_release(st);
-            continue;
-        }
-        any_live = true;
-        struct p2p_node *peer = stream_bound_peer_locked(st, NULL);
-        if (!peer) {
-            stream_close_locked(st, MESH_STREAM_ENDED_SESSION_LOST, NULL, 0);
-            continue;
-        }
-        p2p_node_release(peer);
-        if (now > st->last_activity_unix &&
-            now - st->last_activity_unix >= MESH_STREAM_IDLE_SECONDS) {
-            stream_close_locked(st, MESH_STREAM_ENDED_IDLE, NULL, 0);
-            continue;
-        }
-        const struct mesh_stream_service *service =
-            g_service_used[st->service] ? &g_services[st->service] : NULL;
-        if (service && service->on_tick)
-            service->on_tick(st, now, service->ctx);
+        if (!st->ended)
+            any_live = true;
+        stream_tick_slot_locked(st, now);
     }
     if (!any_live)
         supervisor_progress_idle(g_stream_child);
