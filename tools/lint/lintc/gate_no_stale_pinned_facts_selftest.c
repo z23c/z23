@@ -6,7 +6,7 @@
  * a clean doc passes; a binary size before or after the word binary fails;
  * a size beside an unrelated binary mention passes; a height pin fails; a
  * baselined pin passes; a stale-ok marker exempts a line; a file that cannot
- * be read fails closed; the scan set excludes HANDOFF.md and the archive.
+ * be read fails closed; the scan set keeps HANDOFF.md and the archive in.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -116,14 +116,14 @@ static int snfs_missing_fails_closed(const char *dir)
     return 1;
 }
 
-/* The scan set keeps the live-state page and the archive out. */
+/* The scan set keeps every docs path, the live-state page and the archive too. */
 static int snfs_scope(void)
 {
     int bad = 0;
-    if (snf_keep_path("docs/HANDOFF.md") // error-doc-ref-ok:selftest fixture
-        || snf_keep_path("docs/work/archive/x.md")) { // error-doc-ref-ok:selftest fixture
-        fprintf(stderr, "check-no-stale-pinned-facts: FAIL — scope kept an "
-                        "exempt path\n");
+    if (!snf_keep_path("docs/HANDOFF.md") // error-doc-ref-ok:selftest fixture
+        || !snf_keep_path("docs/work/archive/x.md")) { // error-doc-ref-ok:selftest fixture
+        fprintf(stderr, "check-no-stale-pinned-facts: FAIL — scope dropped a "
+                        "docs path\n");
         bad++;
     }
     if (!snf_keep_path("docs/adr/0001-x.md") || !snf_keep_path("CLAUDE.md")) { // error-doc-ref-ok:selftest fixture

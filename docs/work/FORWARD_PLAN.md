@@ -63,19 +63,19 @@ through `dev land submit`. A dev-tooling item names the number it moves, with
 before and after values.
 
 1. **The node restarts in seconds.** `fleet objectives` names
-   `node_warm_restart_s` (104 s against 10 s on 2026-10-23) as the biggest
-   gap. The boot timers split it: the landed bundle downloaded again
-   (about 34 s), the coins read view (22.5 s), the prologue (15.5 s). Fix the
-   largest step, read the next boot beacon, repeat. Resident memory
-   (`node_rss_mb`, 4,033 MB against 1,024) comes next.
+   `node_warm_restart_s` as the biggest gap; read the live card, not this
+   file. The boot timers split it: the landed bundle downloaded again, the
+   coins read view, the prologue. Fix the largest step, read the next boot
+   beacon, repeat. Resident memory (`node_rss_mb`) comes next.
 2. **Whole-suite proofs pass the first time.** A group that fails only under
    load gets a root-cause fix (a private path, a CPU budget instead of a wall
    clock), never a rerun or a weaker assertion. Next: the two-row train case
    in `dev_land` that failed once under load.
 3. **Plugins end to end.** Attest, fetch and run plugins, with host calls;
    then the bundled apps ship as plugins ([`PLUGIN_APPS.md`](../commons/PLUGIN_APPS.md)).
-4. **Functions under the complexity cap.** 3,825 functions were over the cap
-   of 15 on 2026-10-23. Split product-room functions first,
+4. **Functions under the complexity cap.** The baseline file
+   `tools/lint/cyclomatic_complexity_baseline.txt` lists every function over
+   the cap of 15. Split product-room functions first,
    behaviour-preserving, and lower each pin.
 5. **The strict test suite is green.** `make test` builds every binary its
    groups need, and every group passes under the `-Werror -O3` test profile.

@@ -10,6 +10,7 @@ This is a curated map, not an inventory. The documentation hierarchy is:
 2. [`../AGENTS.md`](../AGENTS.md) — model-neutral entry point for maintainers and fleet agents. Public volunteers start at [`../.github/CONTRIBUTING.md`](../.github/CONTRIBUTING.md).
 3. [`work/FORWARD_PLAN.md`](work/FORWARD_PLAN.md) — current ordered work.
 3a. [`THE_Z23_WAY.md`](THE_Z23_WAY.md) — the one standard loop for Claude, Codex and humans: lane, brief, verify, review, land.
+3b. [`START_HERE.md`](agent/START_HERE.md): the maintainer route through AGENTS.md and THE_Z23_WAY.md
 4. [`DEVELOPING.md`](dev/DEVELOPING.md) — detailed developer procedure.
 5. [`HANDOFF.md`](agent/HANDOFF.md) — current state of the maintainer's hosted node
    only.
@@ -34,7 +35,7 @@ reusable packages, dependency graphs, bounded builds, independent
 reproduction, local policy, distribution, release history, and preservation.
 Documentation here should keep complexity hidden but inspectable, and give the
 reader one obvious next action. The durable statement of this is
-[`../AGENTS.md`](../AGENTS.md#north-star). How Z23 itself is developed toward
+[`../AGENTS.md`](../AGENTS.md). How Z23 itself is developed toward
 it, by people and agents, is [`agent/VISION.md`](agent/VISION.md).
 
 ### The shape of it

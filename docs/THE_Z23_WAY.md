@@ -29,9 +29,10 @@ identity and independent reproduction.
 
 ## The loop
 
-1. **Get a lane.** On a maintainer host run `devworker prepare z23 NAME <sha>`,
-   which runs `build/bin/z23-dev dev lane new` and gives you a private
-   worktree at the exact base. Volunteers use a plain clone and follow
+1. **Get a lane.** On a maintainer host run `devworker prepare z23 NAME <sha>`, the
+   maintainer-host wrapper, which runs `build/bin/z23-dev dev lane new` and
+   gives you a private worktree at the exact base. Elsewhere run
+   `build/bin/z23-dev dev lane new --path=<dir> --base=<sha>` directly. Volunteers use a plain clone and follow
    [CONTRIBUTING.md](../.github/CONTRIBUTING.md). Never edit another
    worker's checkout. Run heavy builds through `devbuild --wait` where a host
    has it; elsewhere run `make` directly. Build first with `make dev-bin`.
@@ -75,9 +76,10 @@ Source access, builds and isolated tests never permit:
   is not reviewed and landed; one host at a time, never two deploys at once.
 - **Secrets.** No keys, grants or tokens in logs, argv, commits or messages.
 
-Stop and escalate only for these, a destructive production action or an
-assertion that would need weakening. Decide everything else, record it and
-continue. Verify, do not trust: a hash identifies bytes, a signature identifies
+Escalate only for consensus or custody risk, a destructive production action
+(datadir delete or reindex), a spend, or an assertion that would need weakening
+(see [AGENTS.md](../AGENTS.md), Authority and safety). Decide everything else,
+record it and continue. Verify, do not trust: a hash identifies bytes, a signature identifies
 a key, a receipt binds an observation; none alone proves correctness. P0 is
 always consensus, custody and public-node health.
 

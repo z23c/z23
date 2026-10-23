@@ -1592,7 +1592,7 @@ Verify HEAD, status and the owned files afterwards, preserve the evidence,
 then [release this worktree's claims](#release-your-own-file-claims).
 
 A resident loop lands the same way through the native async queue
-(`z23 dev land submit|status|step|drive|cancel`, nested leaves under the `dev land` branch;
+(`build/bin/z23-dev dev land submit|status|step|drive|cancel`, nested leaves under the `dev land` branch;
 `tools/command/native_dev_land.c`; `z23 dev land --help` lists every verb):
 one driver steps that queue at a time, since `step` holds a per-queue lock for
 its whole run and a second driver that finds it held gets `STEP_BUSY`
@@ -1650,7 +1650,7 @@ development build of a checkout (`make dev-bin`); the product build lists them
 and answers `COMMAND_COMPAT_ONLY`.
 
 ```bash
-devbuild --wait z23 dev land submit --worktree=PATH --qualify
+devbuild --wait build/bin/z23-dev dev land submit --worktree=<path> --qualify
 devbuild --wait z23 dev land drive --seq=N
 ```
 

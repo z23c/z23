@@ -840,8 +840,8 @@ assert green).
 ### Framework refactor gates (#18–#22)
 
 - **Gate #18: `check-framework-shape`** (RATCHET, was WARN) —
-  `tools/lint/lintc/gate_framework_shape.c`. Every `.c` under `app/` must live in
-  one shape folder: `controllers`, `services`, `models`, `jobs`, `supervisors`,
+  `tools/lint/lintc/gate_framework_shape.c`. Every `.c` under `engine/`, `cognition/`
+  or `contexts/<room>/` must live in one shape folder: `controllers`, `services`, `models`, `jobs`, `supervisors`,
   `conditions`, `events`, `views`. Baseline
   `tools/lint/framework_shape_allowlist.txt` (empty). Fix: move the file or
   split mixed responsibilities.

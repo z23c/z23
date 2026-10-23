@@ -10,9 +10,8 @@
  * hand-pinned into prose. A stale "~15 MB binary" claim survived long after
  * the real binary grew.
  *
- * WHAT IS SCANNED: CLAUDE.md, README.md and every git-tracked docs/ tree .md files
- * except docs/HANDOFF.md (the live-state page) and docs/work/archive/ tree
- * (frozen history). A listed file that is missing is dropped; fewer than 3
+ * WHAT IS SCANNED: CLAUDE.md, README.md and every git-tracked docs/ tree .md
+ * file, with no exemptions. A listed file that is missing is dropped; fewer than 3
  * survivors (1 under the selftest override) is FATAL (exit 2), never a clean
  * pass off a hollow scan. A listed file that cannot be read is FATAL too.
  *
@@ -184,8 +183,7 @@ static int snf_list_add(struct snf_list *l, const char *path)
 
 int snf_keep_path(const char *path)
 {
-    return strcmp(path, "docs/HANDOFF.md") != 0 && // error-doc-ref-ok:exempt path, kept from the shell gate
-           strncmp(path, "docs/work/archive/", 18) != 0;
+    return path != NULL;
 }
 
 static int snf_git_cb(const char *path, void *ctx)
