@@ -50,88 +50,117 @@ static int hodl_survival_y(const struct hodl_survival_row *row,
     return pt + ph - (int)((double)pct / 100000.0 * ph);
 }
 
-void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
-                              const char *datadir,
-                              const char *datadir_key,
-                              const struct hodl_wave_snapshot *hodl)
+/* Shared percent gridlines for both charts: five rules at 0/25/50/75/100%,
+ * spaced over height pixels above y_base and spanning width from x0. */
+static void hodl_emit_pct_grid(size_t *off, uint8_t *r, size_t max, int x0,
+                               int width, int y_base, int height)
 {
-    sqlite3 *db = NULL;
-    struct hodl_survival_row *rows = NULL;
+    for (int g = 0; g <= 4; g++) {
+        int pct = g * 25;
+        int y = y_base - height * g / 4;
+        APPEND(*off, r, max,
+            "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#253642' "
+            "opacity='0.56'/>"
+            "<text x='%d' y='%d' fill='#8d96a0' font-size='12' "
+            "text-anchor='end'>%d%%</text>",
+            x0, y, x0 + width, y, x0 - 8, y + 4, pct);
+    }
+}
+
+/* Survival-chart frame: the plot box and the scale that maps block heights
+ * and percentages into SVG units. Filled once per emit. */
+struct hodl_survival_frame {
+    int W;
+    int H;
+    int pl;
+    int pr;
+    int pt;
+    int pb;
+    int pw;
+    int ph;
+    int64_t h_min;
+    int64_t h_max;
+};
+
+static void hodl_survival_frame_init(struct hodl_survival_frame *f,
+                                     const struct hodl_survival_row *rows,
+                                     int n)
+{
+    f->W = 1000;
+    f->H = 410;
+    f->pl = 72;
+    f->pr = 134;
+    f->pt = 26;
+    f->pb = 74;
+    f->pw = f->W - f->pl - f->pr;
+    f->ph = f->H - f->pt - f->pb;
+    f->h_min = rows[0].height;
+    f->h_max = rows[n - 1].height;
+    if (f->h_max <= f->h_min)
+        f->h_max = f->h_min + 1;
+}
+
+/* Cohort fallback: rebuild the survival rows from the current surviving set.
+ * Returns false, leaving rows and *n untouched, when no rows are usable. */
+static bool hodl_survival_cohort_rows(sqlite3 *db,
+                                      const struct hodl_wave_snapshot *hodl,
+                                      const char *datadir_key,
+                                      const char *tip_hash,
+                                      struct hodl_survival_row *rows, int *n)
+{
     struct hodl_survival_row *fallback_rows = NULL;
-    int n = 0;
-    char tip_hash[HODL_VIEW_CACHE_HASH_MAX];
-    bool history_backed = false;
-    bool have_history_rows = false;
     bool have_fallback_rows = false;
+    bool cached_history = false;
+    int fallback_n = 0;
 
-    if (!off || !r || !datadir || !datadir_key || !hodl)
-        return;
-    rows = zcl_calloc(HODL_SURVIVAL_MAX_ROWS, sizeof(*rows),
-                      "hodl_survival_rows");
-    if (!rows)
-        return;
-    if (!explorer_open_readonly_db(datadir, &db)) {
-        free(rows);
-        return;
-    }
-    hodl_view_tip_hash(db, hodl->tip_height, tip_hash);
-    have_history_rows = hodl_load_history_wave_rows(db, hodl, rows, &n);
-    if (have_history_rows && hodl_history_wave_rows_graphable(rows, n)) {
-        history_backed = true;
+    fallback_rows = zcl_calloc(HODL_SURVIVAL_MAX_ROWS,
+                               sizeof(*fallback_rows),
+                               "hodl_survival_fallback_rows");
+    if (!fallback_rows)
+        return false;
+    have_fallback_rows =
+        hodl_survival_cache_get(datadir_key, hodl->tip_height, tip_hash,
+                                fallback_rows, &fallback_n,
+                                &cached_history) && !cached_history;
+    if (!have_fallback_rows &&
+        hodl_build_survival_rows(db, hodl, fallback_rows, &fallback_n)) {
         hodl_survival_cache_put(datadir_key, hodl->tip_height, tip_hash,
-                                rows, n, true);
-    } else {
-        history_backed = false;
-        fallback_rows = zcl_calloc(HODL_SURVIVAL_MAX_ROWS,
-                                   sizeof(*fallback_rows),
-                                   "hodl_survival_fallback_rows");
-        if (fallback_rows) {
-            bool cached_history = false;
-            int fallback_n = 0;
-            have_fallback_rows =
-                hodl_survival_cache_get(datadir_key, hodl->tip_height,
-                                        tip_hash, fallback_rows, &fallback_n,
-                                        &cached_history) && !cached_history;
-            if (!have_fallback_rows &&
-                hodl_build_survival_rows(db, hodl, fallback_rows,
-                                         &fallback_n)) {
-                hodl_survival_cache_put(datadir_key, hodl->tip_height,
-                                        tip_hash, fallback_rows,
-                                        fallback_n, false);
-                have_fallback_rows = true;
-            }
-            if (have_fallback_rows) {
-                memcpy(rows, fallback_rows,
-                       (size_t)fallback_n * sizeof(*fallback_rows));
-                n = fallback_n;
-            }
-            free(fallback_rows);
-        }
-        if (!have_fallback_rows && !have_history_rows)
-            n = 0;
-        if (!have_fallback_rows && have_history_rows)
-            history_backed = true;
+                                fallback_rows, fallback_n, false);
+        have_fallback_rows = true;
     }
-    sqlite3_close(db);
-
-    if (n < 2) {
-        free(rows);
-        return;
+    if (have_fallback_rows) {
+        memcpy(rows, fallback_rows,
+               (size_t)fallback_n * sizeof(*fallback_rows));
+        *n = fallback_n;
     }
+    free(fallback_rows);
+    return have_fallback_rows;
+}
 
-    int W = 1000;
-    int H = 410;
-    int pl = 72;
-    int pr = 134;
-    int pt = 26;
-    int pb = 74;
-    int pw = W - pl - pr;
-    int ph = H - pt - pb;
-    int64_t h_min = rows[0].height;
-    int64_t h_max = rows[n - 1].height;
-    if (h_max <= h_min)
-        h_max = h_min + 1;
+/* Fills rows and *n from the historical wave when it is graphable, otherwise
+ * from the cohort fallback. Returns whether the rows are history-backed. */
+static bool hodl_survival_load_rows(sqlite3 *db,
+                                    const struct hodl_wave_snapshot *hodl,
+                                    const char *datadir_key,
+                                    const char *tip_hash,
+                                    struct hodl_survival_row *rows, int *n)
+{
+    bool have_history_rows = hodl_load_history_wave_rows(db, hodl, rows, n);
+    if (have_history_rows && hodl_history_wave_rows_graphable(rows, *n)) {
+        hodl_survival_cache_put(datadir_key, hodl->tip_height, tip_hash,
+                                rows, *n, true);
+        return true;
+    }
+    bool have_fallback_rows =
+        hodl_survival_cohort_rows(db, hodl, datadir_key, tip_hash, rows, n);
+    if (!have_fallback_rows && !have_history_rows)
+        *n = 0;
+    return !have_fallback_rows && have_history_rows;
+}
 
+static void hodl_survival_emit_head(size_t *off, uint8_t *r, size_t max,
+                                    int n, bool history_backed)
+{
     char sample_meta[96];
     snprintf(sample_meta, sizeof(sample_meta), "%d %s samples", n,
              history_backed ? "verified" : "cohort");
@@ -141,9 +170,6 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
     const char *chart_subtitle = history_backed
         ? "Share of transparent UTXO value alive at each sample and older than each threshold"
         : "Current unspent transparent value grouped by the age each coin would have at past dates";
-    const char *chart_source = history_backed
-        ? "historical UTXO snapshots"
-        : "current surviving transparent UTXO set while history backfills";
 
     APPEND(*off, r, max,
         "<section id='hodl-survival-wrap' "
@@ -161,16 +187,24 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
             "style='background:%s'></span>%s</span>",
             HODL_THRESHOLDS[t].color, HODL_THRESHOLDS[t].label);
     }
+}
 
+static void hodl_survival_emit_chips(size_t *off, uint8_t *r, size_t max,
+                                     const struct hodl_survival_row *last)
+{
     APPEND(*off, r, max, "</div><div class='hodl-current-strip'>");
     for (int t = 0; t < HODL_SURVIVAL_THRESHOLDS; t++) {
-        double pct = (double)rows[n - 1].pct_x1000[t] / 1000.0;
+        double pct = (double)last->pct_x1000[t] / 1000.0;
         APPEND(*off, r, max,
             "<div class='hodl-current-chip' style='--c:%s'>"
             "<span>%s current</span><strong>%.1f%%</strong></div>",
             HODL_THRESHOLDS[t].color, HODL_THRESHOLDS[t].label, pct);
     }
+}
 
+static void hodl_survival_emit_svg_open(size_t *off, uint8_t *r, size_t max,
+                                        const struct hodl_survival_frame *f)
+{
     APPEND(*off, r, max,
         "</div><div id='hodl-survival-canvas' class='hodl-chart-canvas'>"
         "<svg id='hodl-survival-wave' viewBox='0 0 %d %d' "
@@ -192,33 +226,32 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
         "<feMerge><feMergeNode in='blur'/><feMergeNode in='SourceGraphic'/></feMerge>"
         "</filter>"
         "</defs>",
-        W, H);
+        f->W, f->H);
+}
 
+static void hodl_survival_emit_plot(size_t *off, uint8_t *r, size_t max,
+                                    const struct hodl_survival_frame *f)
+{
     APPEND(*off, r, max,
         "<rect x='%d' y='%d' width='%d' height='%d' rx='7' "
         "fill='url(#hodl-survival-bg)' stroke='#314655'/>",
-        pl, pt, pw, ph);
+        f->pl, f->pt, f->pw, f->ph);
     APPEND(*off, r, max,
         "<text class='hodl-axis-title' x='%d' y='%d' "
         "text-anchor='middle'>Share of transparent value</text>"
         "<text class='hodl-axis-title' x='%d' y='%d' "
         "text-anchor='middle'>Block height</text>",
-        pl + pw / 2, pt - 9, pl + pw / 2, pt + ph + 48);
+        f->pl + f->pw / 2, f->pt - 9, f->pl + f->pw / 2, f->pt + f->ph + 48);
+    hodl_emit_pct_grid(off, r, max, f->pl, f->pw, f->pt + f->ph, f->ph);
+}
 
+static void hodl_survival_emit_time_ticks(size_t *off, uint8_t *r,
+                                          size_t max,
+                                          const struct hodl_survival_frame *f)
+{
     for (int g = 0; g <= 4; g++) {
-        int pct = g * 25;
-        int y = pt + ph - ph * g / 4;
-        APPEND(*off, r, max,
-            "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#253642' "
-            "opacity='0.56'/>"
-            "<text x='%d' y='%d' fill='#8d96a0' font-size='12' "
-            "text-anchor='end'>%d%%</text>",
-            pl, y, pl + pw, y, pl - 8, y + 4, pct);
-    }
-
-    for (int g = 0; g <= 4; g++) {
-        int64_t hval = h_min + (h_max - h_min) * g / 4;
-        int x = pl + pw * g / 4;
+        int64_t hval = f->h_min + (f->h_max - f->h_min) * g / 4;
+        int x = f->pl + f->pw * g / 4;
         time_t tt = (time_t)hodl_estimated_block_time(hval);
         char dbuf[16];
         hodl_month_label(tt, dbuf);
@@ -227,20 +260,34 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
             "opacity='0.46'/>"
             "<text class='hodl-x-tick' x='%d' y='%d' fill='#8d96a0' font-size='12' "
             "text-anchor='middle'>%s</text>",
-            x, pt, x, pt + ph, x, pt + ph + 20, dbuf);
+            x, f->pt, x, f->pt + f->ph, x, f->pt + f->ph + 20, dbuf);
     }
+}
 
+static void hodl_survival_emit_area(size_t *off, uint8_t *r, size_t max,
+                                    const struct hodl_survival_row *rows,
+                                    int n,
+                                    const struct hodl_survival_frame *f)
+{
     APPEND(*off, r, max,
-        "<path d='M%d,%d", hodl_survival_x(&rows[0], pl, pw, h_min, h_max),
-        pt + ph);
+        "<path d='M%d,%d", hodl_survival_x(&rows[0], f->pl, f->pw,
+                                           f->h_min, f->h_max),
+        f->pt + f->ph);
     for (int i = 0; i < n; i++) {
-        int x = hodl_survival_x(&rows[i], pl, pw, h_min, h_max);
-        int y = hodl_survival_y(&rows[i], 1, pt, ph);
+        int x = hodl_survival_x(&rows[i], f->pl, f->pw, f->h_min, f->h_max);
+        int y = hodl_survival_y(&rows[i], 1, f->pt, f->ph);
         APPEND(*off, r, max, " L%d,%d", x, y);
     }
     APPEND(*off, r, max, " L%d,%d Z' fill='url(#hodl-survival-area)'/>",
-           hodl_survival_x(&rows[n - 1], pl, pw, h_min, h_max), pt + ph);
+           hodl_survival_x(&rows[n - 1], f->pl, f->pw, f->h_min, f->h_max),
+           f->pt + f->ph);
+}
 
+static void hodl_survival_emit_series(size_t *off, uint8_t *r, size_t max,
+                                      const struct hodl_survival_row *rows,
+                                      int n,
+                                      const struct hodl_survival_frame *f)
+{
     for (int t = 0; t < HODL_SURVIVAL_THRESHOLDS; t++) {
         APPEND(*off, r, max,
             "<polyline fill='none' stroke='%s' stroke-width='%d' "
@@ -249,29 +296,39 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
             "vector-effect='non-scaling-stroke' points='",
             HODL_THRESHOLDS[t].color, t == 1 ? 4 : 3);
         for (int i = 0; i < n; i++) {
-            int x = hodl_survival_x(&rows[i], pl, pw, h_min, h_max);
-            int y = hodl_survival_y(&rows[i], t, pt, ph);
+            int x = hodl_survival_x(&rows[i], f->pl, f->pw, f->h_min, f->h_max);
+            int y = hodl_survival_y(&rows[i], t, f->pt, f->ph);
             APPEND(*off, r, max, "%s%d,%d", i ? " " : "", x, y);
         }
         APPEND(*off, r, max, "'/>");
     }
+}
 
+static void hodl_survival_emit_last_dots(size_t *off, uint8_t *r, size_t max,
+                                         const struct hodl_survival_row *last,
+                                         const struct hodl_survival_frame *f)
+{
     for (int t = 0; t < HODL_SURVIVAL_THRESHOLDS; t++) {
-        int x = hodl_survival_x(&rows[n - 1], pl, pw, h_min, h_max);
-        int y = hodl_survival_y(&rows[n - 1], t, pt, ph);
+        int x = hodl_survival_x(last, f->pl, f->pw, f->h_min, f->h_max);
+        int y = hodl_survival_y(last, t, f->pt, f->ph);
         APPEND(*off, r, max,
             "<circle class='hodl-hover-dot' cx='%d' cy='%d' r='%d' fill='%s' stroke='#071015' "
             "stroke-width='2'/>",
             x, y, t == 1 ? 5 : 4, HODL_THRESHOLDS[t].color);
     }
+}
 
-    int label_y[HODL_SURVIVAL_THRESHOLDS];
-    int label_x = pl + pw + 14;
-    int label_top = pt + 12;
-    int label_bottom = pt + ph - 8;
+/* End-label y positions: each label sits at its line's end, pushed down to
+ * keep 17px spacing, then shifted up when the stack runs past the plot. */
+static void hodl_survival_label_ys(const struct hodl_survival_row *last,
+                                   const struct hodl_survival_frame *f,
+                                   int label_y[HODL_SURVIVAL_THRESHOLDS])
+{
+    int label_top = f->pt + 12;
+    int label_bottom = f->pt + f->ph - 8;
     int last_y = label_top - 17;
     for (int t = 0; t < HODL_SURVIVAL_THRESHOLDS; t++) {
-        int y = hodl_survival_y(&rows[n - 1], t, pt, ph);
+        int y = hodl_survival_y(last, t, f->pt, f->ph);
         if (y < last_y + 17)
             y = last_y + 17;
         label_y[t] = y;
@@ -285,10 +342,20 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
                 label_y[t] = label_top;
         }
     }
+}
+
+static void hodl_survival_emit_end_labels(size_t *off, uint8_t *r,
+                                          size_t max,
+                                          const struct hodl_survival_row *last,
+                                          const struct hodl_survival_frame *f)
+{
+    int label_y[HODL_SURVIVAL_THRESHOLDS];
+    int label_x = f->pl + f->pw + 14;
+    hodl_survival_label_ys(last, f, label_y);
     for (int t = 0; t < HODL_SURVIVAL_THRESHOLDS; t++) {
-        int x = hodl_survival_x(&rows[n - 1], pl, pw, h_min, h_max);
-        int y = hodl_survival_y(&rows[n - 1], t, pt, ph);
-        double pct = (double)rows[n - 1].pct_x1000[t] / 1000.0;
+        int x = hodl_survival_x(last, f->pl, f->pw, f->h_min, f->h_max);
+        int y = hodl_survival_y(last, t, f->pt, f->ph);
+        double pct = (double)last->pct_x1000[t] / 1000.0;
         APPEND(*off, r, max,
             "<path d='M%d,%d L%d,%d L%d,%d' fill='none' stroke='%s' "
             "stroke-width='1.2' opacity='0.68'/>"
@@ -299,12 +366,16 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
             label_x, label_y[t] + 4, HODL_THRESHOLDS[t].color,
             HODL_THRESHOLDS[t].label, pct);
     }
+}
 
+static void hodl_survival_emit_hover(size_t *off, uint8_t *r, size_t max,
+                                     const struct hodl_survival_frame *f)
+{
     APPEND(*off, r, max,
         "<line id='hodl-survival-xhair' x1='0' y1='%d' x2='0' y2='%d' "
         "stroke='#f5f7fa' stroke-dasharray='2,4' stroke-width='1' "
         "opacity='0.62' style='display:none;pointer-events:none'/>",
-        pt, pt + ph);
+        f->pt, f->pt + f->ph);
     for (int t = 0; t < HODL_SURVIVAL_THRESHOLDS; t++) {
         APPEND(*off, r, max,
             "<circle id='hodl-survival-dot-%d' class='hodl-hover-dot' "
@@ -313,6 +384,10 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
             "style='display:none;pointer-events:none'/>",
             t, HODL_THRESHOLDS[t].color);
     }
+}
+
+static void hodl_survival_emit_tip(size_t *off, uint8_t *r, size_t max)
+{
     APPEND(*off, r, max,
         "<g id='hodl-survival-tip' style='display:none;pointer-events:none'>"
         "<rect id='hodl-survival-tip-bg' x='0' y='0' width='330' "
@@ -331,6 +406,12 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
             "font-size='12'>-</text>",
             y - 9, HODL_THRESHOLDS[t].color, t, y);
     }
+}
+
+static void hodl_survival_emit_footer(size_t *off, uint8_t *r, size_t max,
+                                      const struct hodl_survival_frame *f,
+                                      bool history_backed)
+{
     APPEND(*off, r, max,
         "</g>"
         "<text x='%d' y='%d' fill='#566371' font-size='11' "
@@ -339,7 +420,16 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
         "</svg></div></section>"
         "<script>(function(){"
         "var data=[",
-        W - 30, H - 21, chart_source);
+        f->W - 30, f->H - 21,
+        history_backed
+            ? "historical UTXO snapshots"
+            : "current surviving transparent UTXO set while history backfills");
+}
+
+static void hodl_survival_emit_data(size_t *off, uint8_t *r, size_t max,
+                                    const struct hodl_survival_row *rows,
+                                    int n)
+{
     for (int i = 0; i < n; i++) {
         APPEND(*off, r, max,
             "%s[%" PRId64 ",%" PRId64 ",%" PRId64,
@@ -350,6 +440,12 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
             APPEND(*off, r, max, ",%" PRId64, rows[i].older_zat[t]);
         APPEND(*off, r, max, "]");
     }
+}
+
+static void hodl_survival_emit_script_tail(size_t *off, uint8_t *r,
+                                           size_t max,
+                                           const struct hodl_survival_frame *f)
+{
     APPEND(*off, r, max, "];var series=[");
     for (int t = 0; t < HODL_SURVIVAL_THRESHOLDS; t++) {
         APPEND(*off, r, max, "%s['%s','%s']",
@@ -426,27 +522,107 @@ void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
         "render(pl+(data[i][0]-hmin)/(hmax-hmin)*pw);});"
         "requestAnimationFrame(maybeScrollLatest);"
         "})();</script>",
-        W, pl, pr, pt, pb, ph, h_min, h_max);
+        f->W, f->pl, f->pr, f->pt, f->pb, f->ph, f->h_min, f->h_max);
+}
+
+void hodl_emit_survival_chart(size_t *off, uint8_t *r, size_t max,
+                              const char *datadir,
+                              const char *datadir_key,
+                              const struct hodl_wave_snapshot *hodl)
+{
+    sqlite3 *db = NULL;
+    struct hodl_survival_row *rows = NULL;
+    struct hodl_survival_frame f;
+    int n = 0;
+    char tip_hash[HODL_VIEW_CACHE_HASH_MAX];
+    bool history_backed = false;
+
+    if (!off || !r || !datadir || !datadir_key || !hodl)
+        return;
+    rows = zcl_calloc(HODL_SURVIVAL_MAX_ROWS, sizeof(*rows),
+                      "hodl_survival_rows");
+    if (!rows)
+        return;
+    if (!explorer_open_readonly_db(datadir, &db)) {
+        free(rows);
+        return;
+    }
+    hodl_view_tip_hash(db, hodl->tip_height, tip_hash);
+    history_backed = hodl_survival_load_rows(db, hodl, datadir_key,
+                                             tip_hash, rows, &n);
+    sqlite3_close(db);
+
+    if (n < 2) {
+        free(rows);
+        return;
+    }
+
+    hodl_survival_frame_init(&f, rows, n);
+    hodl_survival_emit_head(off, r, max, n, history_backed);
+    hodl_survival_emit_chips(off, r, max, &rows[n - 1]);
+    hodl_survival_emit_svg_open(off, r, max, &f);
+    hodl_survival_emit_plot(off, r, max, &f);
+    hodl_survival_emit_time_ticks(off, r, max, &f);
+    hodl_survival_emit_area(off, r, max, rows, n, &f);
+    hodl_survival_emit_series(off, r, max, rows, n, &f);
+    hodl_survival_emit_last_dots(off, r, max, &rows[n - 1], &f);
+    hodl_survival_emit_end_labels(off, r, max, &rows[n - 1], &f);
+    hodl_survival_emit_hover(off, r, max, &f);
+    hodl_survival_emit_tip(off, r, max);
+    hodl_survival_emit_footer(off, r, max, &f, history_backed);
+    hodl_survival_emit_data(off, r, max, rows, n);
+    hodl_survival_emit_script_tail(off, r, max, &f);
 
     free(rows);
 }
 
-void hodl_emit_age_distribution_chart(size_t *off, uint8_t *r,
-                                      size_t max,
-                                      const struct hodl_wave_snapshot *h,
-                                      bool cached_snapshot)
-{
-    if (!off || !r || !h)
-        return;
+/* Age-chart layout: the bar strip and the plot box it sits in. */
+struct hodl_age_layout {
+    int W;
+    int H;
+    int x0;
+    int y0;
+    int chart_w;
+    int chart_h;
+    int bar_gap;
+    int bar_w;
+};
 
+static struct hodl_age_layout hodl_age_layout_make(void)
+{
+    struct hodl_age_layout lay;
+    lay.W = 1000;
+    lay.H = 408;
+    lay.x0 = 76;
+    lay.y0 = 304;
+    lay.chart_w = 850;
+    lay.chart_h = 230;
+    lay.bar_gap = 10;
+    lay.bar_w = (lay.chart_w - lay.bar_gap * (HODL_WAVE_BUCKETS - 1)) /
+                HODL_WAVE_BUCKETS;
+    return lay;
+}
+
+static int hodl_age_selected(const struct hodl_wave_snapshot *h)
+{
     int selected = 0;
     for (int i = 1; i < HODL_WAVE_BUCKETS; i++) {
         if (h->buckets[i].value > h->buckets[selected].value)
             selected = i;
     }
+    return selected;
+}
 
-    int W = 1000;
-    int H = 408;
+static double hodl_age_bucket_pct(const struct hodl_wave_snapshot *h, int b)
+{
+    return h->total_value > 0
+        ? (double)h->buckets[b].value / (double)h->total_value * 100.0
+        : 0.0;
+}
+
+static void hodl_age_emit_open(size_t *off, uint8_t *r, size_t max,
+                               const struct hodl_age_layout *lay)
+{
     APPEND(*off, r, max,
         "<section id='hodl-age-wrap' class='hodl-chart-wrap hodl-wave-interactive'>"
         "<div class='hodl-chart-head'><div>"
@@ -468,31 +644,29 @@ void hodl_emit_age_distribution_chart(size_t *off, uint8_t *r,
         "<stop offset='100%%' stop-color='#35d07f' stop-opacity='0.02'/>"
         "</linearGradient>"
         "</defs>",
-        W, H);
+        lay->W, lay->H);
+}
 
-    int x0 = 76, y0 = 304, chart_w = 850, chart_h = 230;
+static void hodl_age_emit_frame(size_t *off, uint8_t *r, size_t max,
+                                const struct hodl_age_layout *lay)
+{
     APPEND(*off, r, max,
         "<rect x='%d' y='%d' width='%d' height='%d' rx='7' "
         "fill='url(#hodl-age-bg)' stroke='#314655'/>",
-        x0, y0 - chart_h, chart_w, chart_h);
+        lay->x0, lay->y0 - lay->chart_h, lay->chart_w, lay->chart_h);
     APPEND(*off, r, max,
         "<text class='hodl-axis-title' x='%d' y='%d' "
         "text-anchor='middle'>Share of transparent value</text>",
-        x0 + chart_w / 2, y0 - chart_h - 31);
-    for (int g = 0; g <= 4; g++) {
-        int y = y0 - chart_h * g / 4;
-        APPEND(*off, r, max,
-            "<line x1='%d' y1='%d' x2='%d' y2='%d' stroke='#253642' "
-            "opacity='0.56'/>"
-            "<text x='%d' y='%d' fill='#8d96a0' font-size='12' "
-            "text-anchor='end'>%d%%</text>",
-            x0, y, x0 + chart_w, y, x0 - 8, y + 4, g * 25);
-    }
+        lay->x0 + lay->chart_w / 2, lay->y0 - lay->chart_h - 31);
+    hodl_emit_pct_grid(off, r, max, lay->x0, lay->chart_w, lay->y0,
+                       lay->chart_h);
+}
 
-    int bar_gap = 10;
-    int bar_w = (chart_w - bar_gap * (HODL_WAVE_BUCKETS - 1)) /
-                HODL_WAVE_BUCKETS;
-    int threshold_x = x0 + 6 * (bar_w + bar_gap) - bar_gap / 2;
+static void hodl_age_emit_threshold(size_t *off, uint8_t *r, size_t max,
+                                    const struct hodl_age_layout *lay)
+{
+    int threshold_x = lay->x0 + 6 * (lay->bar_w + lay->bar_gap) -
+                      lay->bar_gap / 2;
     APPEND(*off, r, max,
         "<rect x='%d' y='%d' width='%d' height='%d' fill='#35d07f' "
         "opacity='0.055'/>"
@@ -500,34 +674,41 @@ void hodl_emit_age_distribution_chart(size_t *off, uint8_t *r,
         "stroke-width='1.2' stroke-dasharray='4,4' opacity='0.72'/>"
         "<text x='%d' y='%d' fill='#8fffc3' font-size='11' "
         "text-anchor='middle'>1 year+</text>",
-        threshold_x, y0 - chart_h, x0 + chart_w - threshold_x, chart_h,
-        threshold_x, y0 - chart_h, threshold_x, y0,
-        threshold_x, y0 - chart_h - 8);
+        threshold_x, lay->y0 - lay->chart_h, lay->x0 + lay->chart_w - threshold_x,
+        lay->chart_h,
+        threshold_x, lay->y0 - lay->chart_h, threshold_x, lay->y0,
+        threshold_x, lay->y0 - lay->chart_h - 8);
+}
 
-    APPEND(*off, r, max,
-        "<path d='M%d,%d", x0, y0);
+static void hodl_age_emit_path(size_t *off, uint8_t *r, size_t max,
+                               const struct hodl_wave_snapshot *h,
+                               const struct hodl_age_layout *lay)
+{
+    APPEND(*off, r, max, "<path d='M%d,%d", lay->x0, lay->y0);
     for (int b = 0; b < HODL_WAVE_BUCKETS; b++) {
-        double pct = h->total_value > 0
-            ? (double)h->buckets[b].value / (double)h->total_value * 100.0
-            : 0.0;
-        int bh = (int)(pct / 100.0 * chart_h);
-        int x = x0 + b * (bar_w + bar_gap) + bar_w / 2;
-        int y = y0 - bh;
+        double pct = hodl_age_bucket_pct(h, b);
+        int bh = (int)(pct / 100.0 * lay->chart_h);
+        int x = lay->x0 + b * (lay->bar_w + lay->bar_gap) + lay->bar_w / 2;
+        int y = lay->y0 - bh;
         APPEND(*off, r, max, " L%d,%d", x, y);
     }
     APPEND(*off, r, max,
         " L%d,%d Z' fill='url(#hodl-age-glow)' stroke='#35d07f' "
         "stroke-width='1' opacity='0.72'/>",
-        x0 + chart_w, y0);
+        lay->x0 + lay->chart_w, lay->y0);
+}
 
+static void hodl_age_emit_bars(size_t *off, uint8_t *r, size_t max,
+                               const struct hodl_wave_snapshot *h,
+                               const struct hodl_age_layout *lay,
+                               int selected)
+{
     for (int b = 0; b < HODL_WAVE_BUCKETS; b++) {
-        double pct = h->total_value > 0
-            ? (double)h->buckets[b].value / (double)h->total_value * 100.0
-            : 0.0;
-        int bh = (int)(pct / 100.0 * chart_h);
+        double pct = hodl_age_bucket_pct(h, b);
+        int bh = (int)(pct / 100.0 * lay->chart_h);
         int draw_h = bh > 3 ? bh : 3;
-        int x = x0 + b * (bar_w + bar_gap);
-        int y = y0 - draw_h;
+        int x = lay->x0 + b * (lay->bar_w + lay->bar_gap);
+        int y = lay->y0 - draw_h;
         char val_fmt[64];
         zcl_format_zcl(val_fmt, sizeof(val_fmt), h->buckets[b].value);
         APPEND(*off, r, max,
@@ -541,23 +722,28 @@ void hodl_emit_age_distribution_chart(size_t *off, uint8_t *r,
             "</rect>"
             "<text x='%d' y='%d' fill='#aaa' font-size='11' "
             "text-anchor='middle' transform='rotate(-35,%d,%d)'>%s</text>",
-            b, x, y, bar_w, draw_h, h->buckets[b].color,
+            b, x, y, lay->bar_w, draw_h, h->buckets[b].color,
             b == selected ? "1" : "0.82",
             b == selected ? "#fff" : h->buckets[b].color,
             b == selected ? 2 : 1,
-            b, x, y0 - chart_h, bar_w, chart_h,
+            b, x, lay->y0 - lay->chart_h, lay->bar_w, lay->chart_h,
             h->buckets[b].html_label, pct, val_fmt, h->buckets[b].count,
             h->buckets[b].html_label, pct, val_fmt, h->buckets[b].count,
-            x + bar_w / 2, y0 + 26, x + bar_w / 2, y0 + 26,
+            x + lay->bar_w / 2, lay->y0 + 26, x + lay->bar_w / 2, lay->y0 + 26,
             h->buckets[b].html_label);
         if (pct >= 1.0 || b == selected) {
             APPEND(*off, r, max,
                 "<text x='%d' y='%d' fill='#eee' font-size='12' "
                 "text-anchor='middle'>%.2f%%</text>",
-                x + bar_w / 2, y - 6, pct);
+                x + lay->bar_w / 2, y - 6, pct);
         }
     }
+}
 
+static void hodl_age_emit_tip_footer(size_t *off, uint8_t *r, size_t max,
+                                     const struct hodl_age_layout *lay,
+                                     bool cached_snapshot)
+{
     APPEND(*off, r, max,
         "<g id='hodl-age-tip' style='display:none;pointer-events:none'>"
         "<rect id='hodl-age-tip-bg' x='0' y='0' width='300' height='102' "
@@ -578,18 +764,26 @@ void hodl_emit_age_distribution_chart(size_t *off, uint8_t *r,
         "if(!svg)return;"
         "var wrap=document.getElementById('hodl-age-canvas');"
         "var data=[",
-        W - 30, H - 17,
+        lay->W - 30, lay->H - 17,
         cached_snapshot ? "verified cached transparent UTXO set" :
                           "current transparent UTXO set");
+}
+
+static void hodl_age_emit_data(size_t *off, uint8_t *r, size_t max,
+                               const struct hodl_wave_snapshot *h)
+{
     for (int b = 0; b < HODL_WAVE_BUCKETS; b++) {
-        double pct = h->total_value > 0
-            ? (double)h->buckets[b].value / (double)h->total_value * 100.0
-            : 0.0;
+        double pct = hodl_age_bucket_pct(h, b);
         APPEND(*off, r, max,
             "%s{label:'%s',pct:%d,value:%" PRId64 ",count:%" PRId64 "}",
             b ? "," : "", h->buckets[b].label, (int)(pct * 1000.0),
             h->buckets[b].value, h->buckets[b].count);
     }
+}
+
+static void hodl_age_emit_script_tail(size_t *off, uint8_t *r, size_t max,
+                                      int selected)
+{
     APPEND(*off, r, max,
         "];"
         "var selected=%d;"
@@ -642,4 +836,24 @@ void hodl_emit_age_distribution_chart(size_t *off, uint8_t *r,
         "requestAnimationFrame(maybeScrollSelected);"
         "})();</script>",
         selected);
+}
+
+void hodl_emit_age_distribution_chart(size_t *off, uint8_t *r,
+                                      size_t max,
+                                      const struct hodl_wave_snapshot *h,
+                                      bool cached_snapshot)
+{
+    if (!off || !r || !h)
+        return;
+
+    struct hodl_age_layout lay = hodl_age_layout_make();
+    int selected = hodl_age_selected(h);
+    hodl_age_emit_open(off, r, max, &lay);
+    hodl_age_emit_frame(off, r, max, &lay);
+    hodl_age_emit_threshold(off, r, max, &lay);
+    hodl_age_emit_path(off, r, max, h, &lay);
+    hodl_age_emit_bars(off, r, max, h, &lay, selected);
+    hodl_age_emit_tip_footer(off, r, max, &lay, cached_snapshot);
+    hodl_age_emit_data(off, r, max, h);
+    hodl_age_emit_script_tail(off, r, max, selected);
 }
