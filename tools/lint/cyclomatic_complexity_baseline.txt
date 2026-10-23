@@ -3154,12 +3154,6 @@ tools/acme/tls_client.c:tls_client_url_parse:33
 tools/arena_frame.c:main:28
 tools/arena_hud.c:arena_hud_compose:24
 tools/arena_present.c:main:42
-tools/arena_product_journey_c23.c:attack_deltas:25
-tools/arena_product_journey_c23.c:burst_proof:27
-tools/arena_product_journey_c23.c:cold_proof:23
-tools/arena_product_journey_c23.c:find_check:20
-tools/arena_product_journey_c23.c:main:22
-tools/arena_product_journey_c23.c:sparse_proof:20
 tools/arena_runner.c:ar_run_match:23
 tools/arena_runner.c:ar_verify_replay:19
 tools/arena_runner.c:main:35

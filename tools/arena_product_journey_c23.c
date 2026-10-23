@@ -100,8 +100,9 @@ static int json_get_mode(int argc,char **argv)
     if (!x && argc>=4) { puts(argv[3]); ok=true; } else ok=print_value(x);
     json_free(&v); return ok?0:1;
 }
-static int rpc_result(void)
+static int rpc_result(int argc,char **argv)
 {
+    (void)argc;(void)argv;
     struct json_value v; if(!parse_stdin(&v))return 1;
     const struct json_value *e=json_get(&v,"error"),*r=json_get(&v,"result");
     bool ok=e&&e->type==JSON_NULL&&print_value(r); json_free(&v); return ok?0:2;
@@ -207,13 +208,27 @@ static int chain_loaded(int argc,char **argv)
     json_free(&v);puts(ok?"True":"False");return 0;
 }
 static bool load_json_arg(const char*s,struct json_value*v){return parse_text(s,v);}
+static const struct json_value *find_rows(const struct json_value *v)
+{
+    bool yes=false;const struct json_value *rows=path_get(v,"data.node_ids");
+    return get_b(v,"ok",&yes)&&yes&&rows&&rows->type==JSON_ARR&&rows->num_children==2?rows:NULL;
+}
+static bool find_hex_args(char **argv,uint8_t t[32],uint8_t a[32],uint8_t b[32])
+{
+    return hex32(argv[3],t)&&hex32(argv[4],a)&&hex32(argv[5],b);
+}
+static bool find_pair_ok(const struct json_value *rows,const char *lo,const char *hi,const uint8_t t[32])
+{
+    const char*x=get_s(rows,"0"),*y=get_s(rows,"1");uint8_t hx[32],hy[32];
+    bool ok=x&&y&&((strcmp(x,lo)==0&&strcmp(y,hi)==0)||(strcmp(x,hi)==0&&strcmp(y,lo)==0));
+    return ok&&hex32(x,hx)&&hex32(y,hy)&&xor_cmp(hx,hy,t)<=0;
+}
 static int find_check(int argc,char **argv)
 {
     if(argc!=6)return 2;
-    struct json_value v;if(!load_json_arg(argv[2],&v))return 1;bool ok=false;const struct json_value*rows=path_get(&v,"data.node_ids");bool yes=false;uint8_t t[32],a[32],b[32];
-    if(get_b(&v,"ok",&yes)&&yes&&rows&&rows->type==JSON_ARR&&rows->num_children==2&&hex32(argv[3],t)&&hex32(argv[4],a)&&hex32(argv[5],b)){
-        const char*x=get_s(rows,"0"),*y=get_s(rows,"1");ok=x&&y&&((strcmp(x,argv[4])==0&&strcmp(y,argv[5])==0)||(strcmp(x,argv[5])==0&&strcmp(y,argv[4])==0));
-        uint8_t hx[32],hy[32];ok=ok&&hex32(x,hx)&&hex32(y,hy)&&xor_cmp(hx,hy,t)<=0;}
+    struct json_value v;if(!load_json_arg(argv[2],&v))return 1;uint8_t t[32],a[32],b[32];
+    const struct json_value *rows=find_rows(&v);
+    bool ok=rows&&find_hex_args(argv,t,a,b)&&find_pair_ok(rows,argv[4],argv[5],t);
     json_free(&v);return ok?0:1;
 }
 static int contacts_check(int argc,char **argv)
@@ -240,45 +255,109 @@ static int array_match_get(int argc,char **argv)
 }
 static bool array_has_string(const struct json_value *a,const char *s)
 {if(!a||a->type!=JSON_ARR)return false;for(size_t i=0;i<a->num_children;i++)if(a->children[i].type==JSON_STR&&!strcmp(a->children[i].val.s,s))return true;return false;}
+static const char *const attack_keys[6]={"malformed","identity","replay","unsolicited","expired","poisoned-contacts"};
+static const int64_t attack_want[6]={2,1,1,1,1,1};
+static bool attack_named_deltas(const struct json_value *b,const struct json_value *a)
+{
+    bool ok=true;
+    for(size_t i=0;i<6;i++){char p[128];int64_t x=0,y=0;snprintf(p,sizeof(p),"data.frames_rejected.%s",attack_keys[i]);ok=ok&&get_i(b,p,&x)&&get_i(a,p,&y)&&y-x==attack_want[i];}
+    return ok;
+}
+static bool attack_entry_ok(const struct json_value *bo,const struct json_value *ao,size_t i)
+{
+    const struct json_value *bv=json_get(bo,ao->keys[i]);
+    bool named=false;for(size_t j=0;j<6;j++)if(!strcmp(ao->keys[i],attack_keys[j]))named=true;
+    return bv&&bv->type==JSON_INT&&ao->children[i].type==JSON_INT&&(named||ao->children[i].val.i-bv->val.i==0);
+}
+static bool attack_rejected_ok(const struct json_value *b,const struct json_value *a)
+{
+    const struct json_value *bo=path_get(b,"data.frames_rejected"),*ao=path_get(a,"data.frames_rejected");
+    bool ok=bo&&ao&&bo->type==JSON_OBJ&&ao->type==JSON_OBJ&&bo->num_children==ao->num_children;
+    for(size_t i=0;ok&&i<ao->num_children;i++)ok=attack_entry_ok(bo,ao,i);
+    return ok;
+}
 static int attack_deltas(int argc,char **argv)
 {
     if(argc!=4)return 2;
     struct json_value b,a;if(!parse_text(argv[2],&b)||!parse_text(argv[3],&a))return 1;
-    const char*keys[]={"malformed","identity","replay","unsolicited","expired","poisoned-contacts"};int64_t want[]={2,1,1,1,1,1};bool ok=true;
-    for(size_t i=0;i<6;i++){char p[128];int64_t x=0,y=0;snprintf(p,sizeof(p),"data.frames_rejected.%s",keys[i]);ok=ok&&get_i(&b,p,&x)&&get_i(&a,p,&y)&&y-x==want[i];}
-    const struct json_value *bo=path_get(&b,"data.frames_rejected"),
-        *ao=path_get(&a,"data.frames_rejected");
-    ok=ok&&bo&&ao&&bo->type==JSON_OBJ&&ao->type==JSON_OBJ&&
-        bo->num_children==ao->num_children;
-    for(size_t i=0;ok&&i<ao->num_children;i++){
-        const struct json_value *bv=json_get(bo,ao->keys[i]);
-        bool named=false;for(size_t j=0;j<6;j++)if(!strcmp(ao->keys[i],keys[j]))named=true;
-        ok=bv&&bv->type==JSON_INT&&ao->children[i].type==JSON_INT&&
-            (named||ao->children[i].val.i-bv->val.i==0);
-    }
+    bool ok=attack_named_deltas(&b,&a)&&attack_rejected_ok(&b,&a);
     int64_t x=0,y=0;ok=ok&&get_i(&b,"data.frames_accepted",&x)&&get_i(&a,"data.frames_accepted",&y)&&y-x>=1;json_free(&b);json_free(&a);return ok?0:1;
+}
+static bool journey_target_ok(const struct json_value *r,const char *target,int64_t min_rounds)
+{
+    bool yes=false;int64_t rounds=0;const char*t=get_s(r,"data.termination");const struct json_value*ids=path_get(r,"data.node_ids");
+    return get_b(r,"ok",&yes)&&yes&&t&&!strcmp(t,"target_authenticated")&&get_i(r,"data.rounds",&rounds)&&rounds>=min_rounds&&array_has_string(ids,target);
+}
+static bool sparse_progress_ok(const struct json_value *r)
+{
+    int64_t progress=0;
+    return get_i(r,"data.xor_progress",&progress)&&progress>=3;
+}
+static bool sparse_traffic_ok(const struct json_value *b,const struct json_value *a)
+{
+    int64_t bs=0,as=0,bf=0,af=0;
+    return get_i(b,"data.find_node_sent",&bs)&&get_i(a,"data.find_node_sent",&as)&&as-bs<=24&&get_i(b,"data.frames_accepted",&bf)&&get_i(a,"data.frames_accepted",&af)&&af-bf<=64;
 }
 static int sparse_proof(int argc,char **argv)
 {
     if(argc!=6)return 2;
-    struct json_value r,b,a;if(!parse_text(argv[2],&r)||!parse_text(argv[3],&b)||!parse_text(argv[4],&a))return 1;bool yes=false;int64_t rounds=0,progress=0,bs=0,as=0,bf=0,af=0;const char*t=get_s(&r,"data.termination");const struct json_value*ids=path_get(&r,"data.node_ids");
-    bool ok=get_b(&r,"ok",&yes)&&yes&&t&&!strcmp(t,"target_authenticated")&&get_i(&r,"data.rounds",&rounds)&&rounds>=3&&get_i(&r,"data.xor_progress",&progress)&&progress>=3&&array_has_string(ids,argv[5])&&get_i(&b,"data.find_node_sent",&bs)&&get_i(&a,"data.find_node_sent",&as)&&as-bs<=24&&get_i(&b,"data.frames_accepted",&bf)&&get_i(&a,"data.frames_accepted",&af)&&af-bf<=64;
+    struct json_value r,b,a;if(!parse_text(argv[2],&r)||!parse_text(argv[3],&b)||!parse_text(argv[4],&a))return 1;
+    bool ok=journey_target_ok(&r,argv[5],3)&&sparse_progress_ok(&r)&&sparse_traffic_ok(&b,&a);
     json_free(&r);json_free(&b);json_free(&a);return ok?0:1;
 }
 static int begin_fields(int argc,char **argv)
 {if(argc!=3)return 2;uint8_t*p=NULL;size_t n=0;if(!read_file(argv[2],&p,&n))return 1;struct json_value v;json_init(&v);bool ok=json_read(&v,(char*)p,n);free(p);if(!ok)return 1;const char*x=get_s(&v,"data.lookup_id"),*y=get_s(&v,"data.owner_token");if(x&&y)printf("%s %s\n",x,y);else ok=false;json_free(&v);return ok?0:1;}
+static bool burst_copy_begin(const struct json_value *v,char id[64],char owner[64])
+{
+    bool yes=false;
+    const char *state=get_s(v,"data.state"),*lookup=get_s(v,"data.lookup_id"),*token=get_s(v,"data.owner_token");
+    bool ok=get_b(v,"ok",&yes)&&yes&&state&&!strcmp(state,"pending")&&lookup&&token&&strlen(lookup)<64&&strlen(token)<64;
+    if(ok){strcpy(id,lookup);strcpy(owner,token);}
+    return ok;
+}
+static bool burst_load_begin(const char *dir,int index,char id[64],char owner[64])
+{
+    char path[4096];uint8_t*p=NULL;size_t n=0;struct json_value v;
+    snprintf(path,sizeof(path),"%s/%d.begin.json",dir,index+1);json_init(&v);
+    if(!read_file(path,&p,&n))return false;
+    bool parsed=json_read(&v,(char*)p,n);free(p);
+    bool ok=parsed&&burst_copy_begin(&v,id,owner);
+    json_free(&v);return ok;
+}
+static bool burst_unique_at(char ids[8][64],char owners[8][64],int i)
+{
+    for(int j=0;j<i;j++)if(!strcmp(ids[i],ids[j])||!strcmp(owners[i],owners[j]))return false;
+    return true;
+}
+static bool burst_begins_ok(const char *dir)
+{
+    char ids[8][64],owners[8][64];
+    for(int i=0;i<8;i++)if(!burst_load_begin(dir,i,ids[i],owners[i])||!burst_unique_at(ids,owners,i))return false;
+    return true;
+}
+static bool burst_queue_ok(const char *text)
+{
+    struct json_value s;int64_t q=0,a=0;
+    if(!parse_text(text,&s))return false;
+    bool ok=get_i(&s,"data.queued_lookups",&q)&&q==8&&get_i(&s,"data.active_queries",&a)&&a==3;
+    json_free(&s);
+    return ok;
+}
 static int burst_proof(int argc,char **argv)
 {
     if(argc!=4)return 2;
-    char path[4096];char ids[8][64],owners[8][64];bool ok=true;
-    for(int i=0;i<8;i++){snprintf(path,sizeof(path),"%s/%d.begin.json",argv[2],i+1);uint8_t*p=NULL;size_t n=0;struct json_value v;json_init(&v);if(!read_file(path,&p,&n)){ok=false;break;}bool parsed=json_read(&v,(char*)p,n);free(p);bool yes=false;const char*state=parsed?get_s(&v,"data.state"):NULL,*id=parsed?get_s(&v,"data.lookup_id"):NULL,*owner=parsed?get_s(&v,"data.owner_token"):NULL;ok=parsed&&get_b(&v,"ok",&yes)&&yes&&state&&!strcmp(state,"pending")&&id&&owner&&strlen(id)<64&&strlen(owner)<64;if(ok){strcpy(ids[i],id);strcpy(owners[i],owner);for(int j=0;j<i;j++)if(!strcmp(ids[i],ids[j])||!strcmp(owners[i],owners[j]))ok=false;}json_free(&v);if(!ok)break;}
-    struct json_value s;if(ok)ok=parse_text(argv[3],&s);int64_t q=0,a=0;if(ok)ok=get_i(&s,"data.queued_lookups",&q)&&q==8&&get_i(&s,"data.active_queries",&a)&&a==3;if(ok)json_free(&s);return ok?0:1;
+    return burst_begins_ok(argv[2])&&burst_queue_ok(argv[3])?0:1;
+}
+static bool cold_reach_ok(const struct json_value *b,const struct json_value *a)
+{
+    int64_t entries=0,br=0,ar=0,bd=0,ad=0,auth=0;
+    return get_i(a,"data.reachability.entries",&entries)&&entries>=6&&get_i(b,"data.reachability.requests_enqueued",&br)&&get_i(a,"data.reachability.requests_enqueued",&ar)&&get_i(b,"data.reachability.dials_queued",&bd)&&get_i(a,"data.reachability.dials_queued",&ad)&&ad-bd>=2&&ad-bd<=entries-1&&ar-br==ad-bd&&get_i(a,"data.connected_authenticated",&auth)&&auth>=1;
 }
 static int cold_proof(int argc,char **argv)
 {
     if(argc!=6)return 2;
-    struct json_value r,b,a;if(!parse_text(argv[2],&r)||!parse_text(argv[3],&b)||!parse_text(argv[4],&a))return 1;bool yes=false;int64_t rounds=0,entries=0,br=0,ar=0,bd=0,ad=0;const char*t=get_s(&r,"data.termination");const struct json_value*ids=path_get(&r,"data.node_ids");
-    int64_t auth=0;bool ok=get_b(&r,"ok",&yes)&&yes&&t&&!strcmp(t,"target_authenticated")&&get_i(&r,"data.rounds",&rounds)&&rounds>=2&&array_has_string(ids,argv[5])&&get_i(&a,"data.reachability.entries",&entries)&&entries>=6&&get_i(&b,"data.reachability.requests_enqueued",&br)&&get_i(&a,"data.reachability.requests_enqueued",&ar)&&get_i(&b,"data.reachability.dials_queued",&bd)&&get_i(&a,"data.reachability.dials_queued",&ad)&&ad-bd>=2&&ad-bd<=entries-1&&ar-br==ad-bd&&get_i(&a,"data.connected_authenticated",&auth)&&auth>=1;
+    struct json_value r,b,a;if(!parse_text(argv[2],&r)||!parse_text(argv[3],&b)||!parse_text(argv[4],&a))return 1;
+    bool ok=journey_target_ok(&r,argv[5],2)&&cold_reach_ok(&b,&a);
     json_free(&r);json_free(&b);json_free(&a);return ok?0:1;
 }
 static int evidence_check(int argc,char **argv)
@@ -309,28 +388,20 @@ static int flip_byte(int argc,char **argv)
 {if(argc!=4)return 2;int fd=open(argv[2],O_RDWR|O_CLOEXEC|O_NOFOLLOW);if(fd<0)return 1;struct stat st;if(fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_size<1){close(fd);return 1;}off_t off=!strcmp(argv[3],"last")?st.st_size-1:(off_t)strtoll(argv[3],NULL,10);uint8_t b;if(off<0||off>=st.st_size||pread(fd,&b,1,off)!=1){close(fd);return 1;}b^=1;bool ok=pwrite(fd,&b,1,off)==1&&fsync(fd)==0&&close(fd)==0;return ok?0:1;}
 
 static int usage(const char*p){fprintf(stderr,"usage: %s MODE ...\n",p);return 2;}
+struct journey_mode { const char *name; int (*run)(int argc,char **argv); };
+static const struct journey_mode journey_modes[]={
+    {"json-get",json_get_mode},{"rpc-result",rpc_result},{"ids-distinct",ids_distinct},
+    {"xor-order",xor_order},{"ports-rebind",ports_rebind},{"listen-report",listen_report},
+    {"chain-loaded",chain_loaded},{"find-check",find_check},{"contacts-check",contacts_check},
+    {"contact-reduce",contact_reduce},{"array-match-get",array_match_get},{"attack-deltas",attack_deltas},
+    {"sparse-proof",sparse_proof},{"begin-fields",begin_fields},{"burst-proof",burst_proof},
+    {"cold-proof",cold_proof},{"evidence-check",evidence_check},{"zdogace-correct",zdogace_correct},
+    {"zdogace-tamper",zdogace_tamper},{"flip-byte",flip_byte},
+};
 int main(int argc,char **argv)
 {
     if(argc<2)return usage(argv[0]);
-    if(!strcmp(argv[1],"json-get"))return json_get_mode(argc,argv);
-    if(!strcmp(argv[1],"rpc-result"))return rpc_result();
-    if(!strcmp(argv[1],"ids-distinct"))return ids_distinct(argc,argv);
-    if(!strcmp(argv[1],"xor-order"))return xor_order(argc,argv);
-    if(!strcmp(argv[1],"ports-rebind"))return ports_rebind(argc,argv);
-    if(!strcmp(argv[1],"listen-report"))return listen_report(argc,argv);
-    if(!strcmp(argv[1],"chain-loaded"))return chain_loaded(argc,argv);
-    if(!strcmp(argv[1],"find-check"))return find_check(argc,argv);
-    if(!strcmp(argv[1],"contacts-check"))return contacts_check(argc,argv);
-    if(!strcmp(argv[1],"contact-reduce"))return contact_reduce(argc,argv);
-    if(!strcmp(argv[1],"array-match-get"))return array_match_get(argc,argv);
-    if(!strcmp(argv[1],"attack-deltas"))return attack_deltas(argc,argv);
-    if(!strcmp(argv[1],"sparse-proof"))return sparse_proof(argc,argv);
-    if(!strcmp(argv[1],"begin-fields"))return begin_fields(argc,argv);
-    if(!strcmp(argv[1],"burst-proof"))return burst_proof(argc,argv);
-    if(!strcmp(argv[1],"cold-proof"))return cold_proof(argc,argv);
-    if(!strcmp(argv[1],"evidence-check"))return evidence_check(argc,argv);
-    if(!strcmp(argv[1],"zdogace-correct"))return zdogace_correct(argc,argv);
-    if(!strcmp(argv[1],"zdogace-tamper"))return zdogace_tamper(argc,argv);
-    if(!strcmp(argv[1],"flip-byte"))return flip_byte(argc,argv);
+    for(size_t i=0;i<sizeof(journey_modes)/sizeof(journey_modes[0]);i++)
+        if(!strcmp(argv[1],journey_modes[i].name))return journey_modes[i].run(argc,argv);
     return usage(argv[0]);
 }
