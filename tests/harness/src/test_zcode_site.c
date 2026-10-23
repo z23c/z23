@@ -891,6 +891,25 @@ static int t_not_found(const char *dd)
     return failures;
 }
 
+/* An error page reports exactly the bytes it copied: the declared
+ * Content-Length matches the body sent and both fit the response buffer.
+ * This guards the unknown-route 404 (zcode_view_route_not_found). The
+ * zs_simple_error clamp has no reachable truncating input today, so no
+ * test drives it; it only bounds a future longer page. */
+static int t_error_length(const char *dd)
+{
+    int failures = 0;
+    size_t len = 0;
+    const char *r = zs_get(dd, "/zcode/definitely-not-a-route", &len);
+    const char *sep = strstr(r, "\r\n\r\n");
+    const char *cl = strstr(r, "Content-Length: ");
+    size_t declared = cl ? (size_t)strtoul(cl + 16, NULL, 10) : 0;
+    ZS_CHECK("error length: Content-Length matches bytes sent, within buffer",
+             sep && cl && len > 0 && len < ZS_RESP_CAP &&
+             declared == len - (size_t)(sep - r) - 4);
+    return failures;
+}
+
 /* ══ 7. swarm advertisers on the package page ════════════════════════ */
 
 /* A pseudo-key peer resolves to zero earned score, whose frozen tier
@@ -1030,6 +1049,7 @@ int test_zcode_site(void)
     }
     failures += t_escaping(dd);
     failures += t_not_found(dd);
+    failures += t_error_length(dd);
 
     const char *dd2 = "./test-tmp/zcode_site_bounded";
     test_rm_rf_recursive(dd2);

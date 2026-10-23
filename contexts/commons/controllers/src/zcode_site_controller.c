@@ -149,6 +149,9 @@ static size_t zs_simple_error(const char *status, const char *title,
         safe_title, safe_title, safe_detail);
     if (n < 0)
         n = 0;
+    /* snprintf returns the would-be length; clamp to the bytes stored. */
+    if (n >= (int)sizeof(body))
+        n = (int)sizeof(body) - 1;
     return zcode_error_response(status, body, (size_t)n, resp, max);
 }
 

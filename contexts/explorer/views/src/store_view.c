@@ -456,9 +456,7 @@ size_t serve_order_index(sqlite3 *db, uint8_t *resp, size_t max)
     int n = html_body_start(body, sizeof(body), "Orders");
     if (n > 0) off = (size_t)n;
 
-    n = snprintf(body + off, sizeof(body) - off,
-        "<h1>Recent Orders</h1>");
-    if (n > 0) off += (size_t)n;
+    SITE_APPEND(off, body, sizeof(body), "<h1>Recent Orders</h1>");
 
     int count = db_store_order_list_recent(&ndb, orders,
         sizeof(orders) / sizeof(orders[0]));
@@ -468,7 +466,7 @@ size_t serve_order_index(sqlite3 *db, uint8_t *resp, size_t max)
                     orders[i].product_name[0] ? orders[i].product_name
                                               : "Unknown Product");
         format_zcl_price(price_str, sizeof(price_str), orders[i].amount_zatoshi);
-        n = snprintf(body + off, sizeof(body) - off,
+        SITE_APPEND(off, body, sizeof(body),
             "<div class='product'>"
             "<h3><a href='/store/orders/%lld'>Order #%lld</a></h3>"
             "<p>%s</p>"
@@ -477,14 +475,10 @@ size_t serve_order_index(sqlite3 *db, uint8_t *resp, size_t max)
             "</div>",
             (long long)orders[i].id, (long long)orders[i].id,
             safe_product, price_str, store_order_status_text(orders[i].status));
-        if (n > 0) off += (size_t)n;
     }
 
-    if (count == 0) {
-        n = snprintf(body + off, sizeof(body) - off,
-            "<p class='muted'>No orders yet.</p>");
-        if (n > 0) off += (size_t)n;
-    }
+    if (count == 0)
+        SITE_APPEND(off, body, sizeof(body), "<p class='muted'>No orders yet.</p>");
 
     n = html_body_end(body + off, sizeof(body) - off);
     if (n > 0) off += (size_t)n;
@@ -501,9 +495,7 @@ size_t serve_product_list(sqlite3 *db, uint8_t *resp, size_t max)
     int n = html_body_start(body, sizeof(body), "ZCL Store");
     if (n > 0) off = (size_t)n;
 
-    n = snprintf(body + off, sizeof(body) - off,
-        "<h1>Products</h1>");
-    if (n > 0) off += (size_t)n;
+    SITE_APPEND(off, body, sizeof(body), "<h1>Products</h1>");
 
     int count = db_store_product_list_active(&ndb, products,
         sizeof(products) / sizeof(products[0]));
@@ -528,10 +520,9 @@ size_t serve_product_list(sqlite3 *db, uint8_t *resp, size_t max)
     }
 
     if (count == 0) {
-        n = snprintf(body + off, sizeof(body) - off,
+        SITE_APPEND(off, body, sizeof(body),
             "<p class='muted'>No products yet. "
             "Add products to the SQLite database.</p>");
-        if (n > 0) off += (size_t)n;
     }
 
     n = html_body_end(body + off, sizeof(body) - off);
@@ -640,7 +631,7 @@ size_t serve_product_detail(sqlite3 *db, int64_t product_id,
     store_pow_challenge(product_id, &pow_ch);
     int64_t pow_ts = pow_ch.server_time;
 
-    n = snprintf(body + off, sizeof(body) - off,
+    SITE_APPEND(off, body, sizeof(body),
         "<h1>%s</h1>"
         "<div class='product' data-token-id='%s' data-content-hash='%s'>"
         "<p>%s</p>"
@@ -695,7 +686,6 @@ size_t serve_product_detail(sqlite3 *db, int64_t product_id,
         pow_ch.token_hex,
         STORE_ORDER_POW_JS_1,
         STORE_ORDER_POW_JS_2);
-    if (n > 0) off += (size_t)n;
 
     n = html_body_end(body + off, sizeof(body) - off);
     if (n > 0) off += (size_t)n;
@@ -755,9 +745,8 @@ size_t serve_order_status(sqlite3 *db, int64_t order_id,
 
     /* Auto-refresh while pending */
     if (order.status == STORE_ORDER_PENDING) {
-        n = snprintf(body + off, sizeof(body) - off,
+        SITE_APPEND(off, body, sizeof(body),
             "<meta http-equiv='refresh' content='15'>");
-        if (n > 0) off += (size_t)n;
     }
 
     char safe_pay[256], safe_cust[256];
@@ -779,7 +768,7 @@ size_t serve_order_status(sqlite3 *db, int64_t order_id,
     store_order_txid_row(mint_row, sizeof(mint_row), "Mint", safe_mtxid,
                          order.mint_txid[0] != '\0');
 
-    n = snprintf(body + off, sizeof(body) - off,
+    SITE_APPEND(off, body, sizeof(body),
         "<h1>Order #%lld</h1>"
         "<div class='product'>"
         "<h3>%s</h3>"
@@ -801,7 +790,6 @@ size_t serve_order_status(sqlite3 *db, int64_t order_id,
         pay_row,
         mint_row,
         (long long)order_id);
-    if (n > 0) off += (size_t)n;
 
     n = html_body_end(body + off, sizeof(body) - off);
     if (n > 0) off += (size_t)n;
@@ -819,7 +807,7 @@ static size_t store_gated_denied_response(uint64_t required, uint64_t balance,
     size_t off = 0;
     int n = html_body_start(body, sizeof(body), "Access Denied");
     if (n > 0) off = (size_t)n;
-    n = snprintf(body + off, sizeof(body) - off,
+    SITE_APPEND(off, body, sizeof(body),
         "<h1>Access Denied</h1>"
         "<div class='card'>"
         "<p>This service requires %llu %s tokens.</p>"
@@ -828,7 +816,6 @@ static size_t store_gated_denied_response(uint64_t required, uint64_t balance,
         "</div>",
         (unsigned long long)required, safe_token,
         (unsigned long long)balance);
-    if (n > 0) off += (size_t)n;
     n = html_body_end(body + off, sizeof(body) - off);
     if (n > 0) off += (size_t)n;
     return store_error_response("403 Forbidden", body, off, resp, max);
@@ -845,7 +832,7 @@ static size_t store_gated_oversize_response(const char *hex, int64_t blob_size,
     size_t boff = 0;
     int bn = html_body_start(big_body, sizeof(big_body), "Premium Content");
     if (bn > 0) boff = (size_t)bn;
-    bn = snprintf(big_body + boff, sizeof(big_body) - boff,
+    SITE_APPEND(boff, big_body, sizeof(big_body),
         "<h1>Premium Content</h1>"
         "<div class='card'>"
         "<p>Welcome, %s</p>"
@@ -859,7 +846,6 @@ static size_t store_gated_oversize_response(const char *hex, int64_t blob_size,
         (long long)blob_size,
         STORE_BLOB_INLINE_MAX,
         hex);
-    if (bn > 0) boff += (size_t)bn;
     bn = html_body_end(big_body + boff, sizeof(big_body) - boff);
     if (bn > 0) boff += (size_t)bn;
     return store_html_response(big_body, boff, resp, max);
@@ -875,7 +861,7 @@ static size_t store_gated_granted_response(uint64_t balance,
     size_t off = 0;
     int n = html_body_start(body, sizeof(body), "Premium Service");
     if (n > 0) off = (size_t)n;
-    n = snprintf(body + off, sizeof(body) - off,
+    SITE_APPEND(off, body, sizeof(body),
         "<h1>Premium Service</h1>"
         "<div class='card'>"
         "<p>Welcome, %s</p>"
@@ -886,7 +872,6 @@ static size_t store_gated_granted_response(uint64_t balance,
         safe_addr,
         (unsigned long long)balance,
         safe_token);
-    if (n > 0) off += (size_t)n;
     n = html_body_end(body + off, sizeof(body) - off);
     if (n > 0) off += (size_t)n;
     return store_html_response(body, off, resp, max);
