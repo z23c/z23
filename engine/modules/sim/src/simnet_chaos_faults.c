@@ -118,6 +118,47 @@ static struct uint256 chaos_chain_hash(const struct uint256 *genesis, int h)
     return hh;
 }
 
+/* Insert genesis..N as one contiguous HAVE_DATA + VALID_SCRIPTS chain and
+ * hand the tip at N back through *tip_out. Stops at the first failed insert,
+ * after noting it. */
+static bool chaos_seed_full_block_index(struct main_state *ms,
+                                        const struct uint256 *gen, int N,
+                                        struct block_index **tip_out,
+                                        struct chaos_fault_result *out)
+{
+    for (int h = 0; h <= N; h++) {
+        struct uint256 hh = chaos_chain_hash(gen, h);
+        struct block_index *pi = chainstate_insert_block_index(
+            (struct chainstate *)ms, &hh);
+        if (!pi) {
+            chaos_note(out, "block_map insert failed at h=%d", h);
+            return false;
+        }
+        pi->nHeight = h;
+        pi->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
+        pi->nTx = 1;
+        pi->nBits = 0x200f0f0f;
+        pi->hashBlock = hh;
+        pi->phashBlock = &pi->hashBlock;
+        if (h > 0) {
+            struct uint256 prev_hash = chaos_chain_hash(gen, h - 1);
+            struct block_index *prev = block_map_find(&ms->map_block_index,
+                                                       &prev_hash);
+            pi->pprev = prev;
+            if (prev) {
+                struct arith_uint256 proof = GetBlockProof(pi);
+                arith_uint256_add(&pi->nChainWork, &prev->nChainWork, &proof);
+                pi->nChainTx = prev->nChainTx + pi->nTx;
+            }
+        } else {
+            pi->nChainWork = GetBlockProof(pi);
+            pi->nChainTx = 1;
+        }
+        if (h == N) *tip_out = pi;
+    }
+    return true;
+}
+
 bool chaos_fault_empty_active_chain_window(int gap_height,
                                            struct chaos_fault_result *out)
 {
@@ -154,36 +195,8 @@ bool chaos_fault_empty_active_chain_window(int gap_height,
     /* Build the FULL block index: genesis..N, contiguous, HAVE_DATA +
      * VALID_SCRIPTS — "the block-index map is full". */
     struct block_index *tipN = NULL;
-    for (int h = 0; h <= N; h++) {
-        struct uint256 hh = chaos_chain_hash(&gen, h);
-        struct block_index *pi = chainstate_insert_block_index(
-            (struct chainstate *)&ms, &hh);
-        if (!pi) {
-            chaos_note(out, "block_map insert failed at h=%d", h);
-            goto cleanup;
-        }
-        pi->nHeight = h;
-        pi->nStatus = BLOCK_VALID_SCRIPTS | BLOCK_HAVE_DATA;
-        pi->nTx = 1;
-        pi->nBits = 0x200f0f0f;
-        pi->hashBlock = hh;
-        pi->phashBlock = &pi->hashBlock;
-        if (h > 0) {
-            struct uint256 prev_hash = chaos_chain_hash(&gen, h - 1);
-            struct block_index *prev = block_map_find(&ms.map_block_index,
-                                                       &prev_hash);
-            pi->pprev = prev;
-            if (prev) {
-                struct arith_uint256 proof = GetBlockProof(pi);
-                arith_uint256_add(&pi->nChainWork, &prev->nChainWork, &proof);
-                pi->nChainTx = prev->nChainTx + pi->nTx;
-            }
-        } else {
-            pi->nChainWork = GetBlockProof(pi);
-            pi->nChainTx = 1;
-        }
-        if (h == N) tipN = pi;
-    }
+    if (!chaos_seed_full_block_index(&ms, &gen, N, &tipN, out))
+        goto cleanup;
 
     bool tf_init = tip_finalize_stage_init(&ms);
     bool anchor_ok = tf_init &&
@@ -319,6 +332,40 @@ static bool chaos_tiny_body(void *user, uint32_t h, uint8_t **bytes,
     return true;
 }
 
+/* THE FAULT helper: flip one byte in the second segment's block-data region
+ * (past the 32B header + 7*48B index). False when the file cannot be opened. */
+static bool chaos_tamper_sealed_segment(const char *dir)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/seg-500-7.dat", dir);
+    chmod(path, 0644);
+    FILE *f = fopen(path, "r+b");
+    if (!f)
+        return false;
+    long off = 32 + 7 * 48 + 3;
+    fseek(f, off, SEEK_SET); int c = fgetc(f);
+    fseek(f, off, SEEK_SET); fputc(c ^ 0xff, f);
+    fclose(f);
+    return true;
+}
+
+/* WITNESS helper: reopen the store after the remedy. The corrupt range must
+ * be gone while the survivor still verifies clean. */
+static bool chaos_witness_repaired_store(const char *dir, char *err,
+                                         size_t err_len)
+{
+    struct chain_segment_store *store = NULL;
+    enum cseg_status ost = chain_segment_store_open(dir, &store, err, err_len);
+    bool witnessed = ost == CSEG_OK && store &&
+                     !chain_segment_store_covers(store, 500) &&
+                     chain_segment_store_covers(store, 0) &&
+                     chain_segment_store_segment_count(store) == 1 &&
+                     chain_segment_store_verify_index(store, 0, err,
+                                                      err_len) == CSEG_OK;
+    if (store) chain_segment_store_close(store);
+    return witnessed;
+}
+
 bool chaos_fault_corrupt_sealed_segment(struct chaos_fault_result *out)
 {
     chaos_result_init(out);
@@ -336,20 +383,8 @@ bool chaos_fault_corrupt_sealed_segment(struct chaos_fault_result *out)
         return false;
     }
 
-    /* THE FAULT: tamper one byte in the second segment's block-data region
-     * (past the 32B header + 7*48B index). */
-    char path[512];
-    snprintf(path, sizeof(path), "%s/seg-500-7.dat", dir);
-    chmod(path, 0644);
-    FILE *f = fopen(path, "r+b");
-    bool tampered = false;
-    if (f) {
-        long off = 32 + 7 * 48 + 3;
-        fseek(f, off, SEEK_SET); int c = fgetc(f);
-        fseek(f, off, SEEK_SET); fputc(c ^ 0xff, f);
-        fclose(f); tampered = true;
-    }
-    if (!tampered) {
+    /* THE FAULT: tamper one byte in the second segment's block-data region. */
+    if (!chaos_tamper_sealed_segment(dir)) {
         chaos_note(out, "tamper write failed");
         test_rm_rf_recursive(dir);
         return false;
@@ -373,18 +408,8 @@ bool chaos_fault_corrupt_sealed_segment(struct chaos_fault_result *out)
      * corrupt (it's gone) while the survivor still verifies clean — reads
      * fall back to blk*.dat instead of ever serving bad bytes. */
     bool witnessed = false;
-    if (remedy == CSEG_OK) {
-        struct chain_segment_store *store = NULL;
-        enum cseg_status ost = chain_segment_store_open(dir, &store, err,
-                                                        sizeof(err));
-        witnessed = ost == CSEG_OK && store &&
-                   !chain_segment_store_covers(store, 500) &&
-                   chain_segment_store_covers(store, 0) &&
-                   chain_segment_store_segment_count(store) == 1 &&
-                   chain_segment_store_verify_index(store, 0, err,
-                                                    sizeof(err)) == CSEG_OK;
-        if (store) chain_segment_store_close(store);
-    }
+    if (remedy == CSEG_OK)
+        witnessed = chaos_witness_repaired_store(dir, err, sizeof(err));
 
     out->ok = detected && remedy == CSEG_OK;
     out->recovered = witnessed;
@@ -626,6 +651,37 @@ bool chaos_fault_stall_single_stage(struct chaos_fault_result *out)
  * test/test_helpers.h) are used below — no ZCL_TESTING guard needed, same
  * as (a)/(b) (see the comment on (c) for why some faults DO need one). */
 
+/* One store handle's read of the recovery frontiers: H* with its served
+ * cursor, and the coins-applied height with whether it was found. */
+struct chaos_frontier_probe {
+    int32_t hstar;
+    int32_t served;
+    int32_t coins;
+    bool coins_found;
+};
+
+/* Both reads always run (no short circuit between them). A NULL handle reads
+ * nothing and leaves the caller's defaults in place. */
+static bool chaos_probe_frontiers(sqlite3 *db, struct chaos_frontier_probe *p)
+{
+    if (!db)
+        return false;
+    bool hstar_ok = reducer_frontier_compute_hstar(db, &p->hstar, &p->served);
+    bool coins_ok = coins_kv_get_applied_height(db, &p->coins, &p->coins_found);
+    return hstar_ok && coins_ok;
+}
+
+/* The window pinned H* at hole-1 and the coins frontier at hole on both sides
+ * of the kill, with the coins frontier FOUND both times. */
+static bool chaos_mid_recovery_pinned(const struct chaos_frontier_probe *mid,
+                                      const struct chaos_frontier_probe *after,
+                                      int32_t hole)
+{
+    return after->hstar == mid->hstar && after->hstar == hole - 1 &&
+           mid->coins_found && after->coins_found &&
+           mid->coins == hole && after->coins == hole;
+}
+
 bool chaos_fault_kill_restart_mid_recovery(struct chaos_fault_result *out)
 {
     chaos_result_init(out);
@@ -672,12 +728,9 @@ bool chaos_fault_kill_restart_mid_recovery(struct chaos_fault_result *out)
         return false;
     }
 
-    int32_t hstar_mid = -1, served_mid = -1;
-    bool ok_mid = reducer_frontier_compute_hstar(db, &hstar_mid, &served_mid);
-    int32_t coins_mid = -1;
-    bool coins_found_mid = false;
-    bool coins_ok_mid =
-        coins_kv_get_applied_height(db, &coins_mid, &coins_found_mid);
+    struct chaos_frontier_probe mid = {
+        .hstar = -1, .served = -1, .coins = -1, .coins_found = false };
+    bool ok_mid = chaos_probe_frontiers(db, &mid);
 
     /* THE FAULT: kill -9 INSIDE the open recovery window — abrupt close
      * (nothing further ever committed) then the restart (fresh reopen; no
@@ -687,14 +740,9 @@ bool chaos_fault_kill_restart_mid_recovery(struct chaos_fault_result *out)
     bool reopened = progress_store_open(dir);
     sqlite3 *db2 = reopened ? progress_store_db() : NULL;
 
-    int32_t hstar_after = -1, served_after = -1;
-    bool ok_after = db2 && reducer_frontier_compute_hstar(db2, &hstar_after,
-                                                           &served_after);
-    int32_t coins_after = -1;
-    bool coins_found_after = false;
-    bool coins_ok_after =
-        db2 && coins_kv_get_applied_height(db2, &coins_after,
-                                           &coins_found_after);
+    struct chaos_frontier_probe after = {
+        .hstar = -1, .served = -1, .coins = -1, .coins_found = false };
+    bool ok_after = chaos_probe_frontiers(db2, &after);
 
     /* CONVERGES: the next boot pass calls the SAME primitive over the SAME
      * range again — it must succeed idempotently (no error, no duplicate
@@ -703,9 +751,9 @@ bool chaos_fault_kill_restart_mid_recovery(struct chaos_fault_result *out)
     struct stage_rederive_range_result rr2;
     bool resumed = db2 && stage_rederive_range(db2, NULL, HOLE, HOLE, &rr2);
 
-    out->ok = ok_mid && coins_ok_mid && reopened && ok_after && coins_ok_after;
-    out->hstar_before = hstar_mid;
-    out->hstar_after = hstar_after;
+    out->ok = ok_mid && reopened && ok_after;
+    out->hstar_before = mid.hstar;
+    out->hstar_after = after.hstar;
     /* NEVER a silent stall: hstar_after names the exact rewound height
      * (HOLE-1) identically before/after the kill — never undefined, never a
      * value ABOVE HOLE-1 (which would mean the log silently re-served rows
@@ -714,14 +762,12 @@ bool chaos_fault_kill_restart_mid_recovery(struct chaos_fault_result *out)
      * back HOLE identically before/after the kill. resumed+rr2.ok is the
      * "next boot converges" proof. */
     out->recovered = out->ok && resumed && rr2.ok &&
-                     hstar_after == hstar_mid && hstar_after == HOLE - 1 &&
-                     coins_found_mid && coins_found_after &&
-                     coins_mid == HOLE && coins_after == HOLE;
+                     chaos_mid_recovery_pinned(&mid, &after, HOLE);
     chaos_note(out,
         "kill mid-recovery: H* mid=%d after=%d (want %d) coins mid=%d "
         "after=%d (want %d, found mid=%d after=%d) resumed=%d — %s",
-        hstar_mid, hstar_after, HOLE - 1, coins_mid, coins_after, HOLE,
-        coins_found_mid, coins_found_after, resumed,
+        mid.hstar, after.hstar, HOLE - 1, mid.coins, after.coins, HOLE,
+        mid.coins_found, after.coins_found, resumed,
         out->recovered
             ? "converges — cursor + coins frontier survive the kill "
               "identically, next pass resumes cleanly"
@@ -761,6 +807,43 @@ static bool chaos_copy_file(const char *src, const char *dst)
     fclose(out);
     fclose(in);
     return ok;
+}
+
+/* Hot-copy the live progress db and WAL into the torn sibling dir. The store
+ * owns its file name, so it is asked for it. False when the store path is
+ * unknown or either copy fails. */
+static bool chaos_hot_copy_store(const char *torn, char *dst_db,
+                                 size_t dst_db_len, char *dst_wal,
+                                 size_t dst_wal_len)
+{
+    char src_db[PROGRESS_STORE_PATH_MAX];
+    char src_wal[PROGRESS_STORE_PATH_MAX + 8];
+    if (!progress_store_path(src_db, sizeof(src_db)))
+        return false;
+    const char *base = strrchr(src_db, '/');
+    base = base ? base + 1 : src_db;
+    snprintf(src_wal, sizeof(src_wal), "%s-wal", src_db);
+    snprintf(dst_db, dst_db_len, "%.255s/%.767s", torn, base);
+    snprintf(dst_wal, dst_wal_len, "%s-wal", dst_db);
+    return chaos_copy_file(src_db, dst_db) && chaos_copy_file(src_wal, dst_wal);
+}
+
+/* THE FAULT helper: cut the copied WAL to its header plus about half of its
+ * frames. False when the WAL is absent or too small, or the truncate fails. */
+static bool chaos_tear_copied_wal(const char *wal, struct stat *sb)
+{
+    if (stat(wal, sb) != 0 || sb->st_size <= 40)
+        return false;
+    off_t keep = 32 + (sb->st_size - 32) / 2;  /* header + ~half the frames */
+    return truncate(wal, keep) == 0;
+}
+
+/* The restarted H* must sit on a consistent prefix: at or above the
+ * checkpointed floor, never above the last commit. */
+static bool chaos_torn_frontier_ok(int32_t before, int32_t after,
+                                   int32_t lo, int32_t hi)
+{
+    return after >= lo && after <= hi && before == hi;
 }
 
 bool chaos_fault_torn_progress_wal(struct chaos_fault_result *out)
@@ -811,20 +894,10 @@ bool chaos_fault_torn_progress_wal(struct chaos_fault_result *out)
      * dir while the handle is open — the page cache is coherent for a same-host
      * copy, so the copy captures every committed frame. The store owns its own
      * file name, so ask it rather than hardcoding one. */
-    char src_db[PROGRESS_STORE_PATH_MAX];
-    char src_wal[PROGRESS_STORE_PATH_MAX + 8];
     char dst_db[PROGRESS_STORE_PATH_MAX];
     char dst_wal[PROGRESS_STORE_PATH_MAX + 8];
-    bool copied = false;
-    if (progress_store_path(src_db, sizeof(src_db))) {
-        const char *base = strrchr(src_db, '/');
-        base = base ? base + 1 : src_db;
-        snprintf(src_wal, sizeof(src_wal), "%s-wal", src_db);
-        snprintf(dst_db, sizeof(dst_db), "%.255s/%.767s", torn, base);
-        snprintf(dst_wal, sizeof(dst_wal), "%s-wal", dst_db);
-        copied = chaos_copy_file(src_db, dst_db) &&
-                 chaos_copy_file(src_wal, dst_wal);
-    }
+    bool copied = chaos_hot_copy_store(torn, dst_db, sizeof(dst_db),
+                                       dst_wal, sizeof(dst_wal));
     progress_store_close();  /* the original truncates its WAL; the copy is torn */
     if (!copied) {
         chaos_note(out, "hot-copy of db+wal failed");
@@ -837,11 +910,7 @@ bool chaos_fault_torn_progress_wal(struct chaos_fault_result *out)
      * frame from the first incomplete/absent one onward, exactly the recovery a
      * kill -9 between commits leaves. */
     struct stat sb;
-    bool torn_ok = false;
-    if (stat(dst_wal, &sb) == 0 && sb.st_size > 40) {
-        off_t keep = 32 + (sb.st_size - 32) / 2;  /* header + ~half the frames */
-        torn_ok = truncate(dst_wal, keep) == 0;
-    }
+    bool torn_ok = chaos_tear_copied_wal(dst_wal, &sb);
     if (!torn_ok) {
         chaos_note(out, "WAL truncation failed (size=%lld)",
                    (long long)(stat(dst_wal, &sb) == 0 ? sb.st_size : -1));
@@ -862,8 +931,8 @@ bool chaos_fault_torn_progress_wal(struct chaos_fault_result *out)
     out->ok = ok1 && reopened && ok2;
     out->hstar_before = hstar_before;
     out->hstar_after = hstar_after;
-    out->recovered = out->ok && hstar_after >= BASE && hstar_after <= K &&
-                     hstar_before == K;
+    out->recovered = out->ok &&
+                     chaos_torn_frontier_ok(hstar_before, hstar_after, BASE, K);
     chaos_note(out,
         "torn WAL: H* before=%d after=%d (checkpointed floor=%d, WAL tip=%d) — "
         "%s", hstar_before, hstar_after, BASE, K,
@@ -1042,6 +1111,34 @@ static bool chaos_put_body_fetch_ok(sqlite3 *db, int32_t h)
     return ok;
 }
 
+/* Seed headers validated [0,V] and bodies observed [0,HOLE-1] only, then park
+ * the cursors: validate_headers at V+1, body_fetch on the hole. */
+static bool chaos_seed_have_data_hole(sqlite3 *db, int32_t V, int32_t HOLE)
+{
+    bool seeded = true;
+    for (int32_t h = 0; seeded && h <= V; h++) {
+        uint8_t hh[32];
+        chaos_synth_hash(hh, h);
+        seeded = chaos_put_validate_headers(db, h, hh);
+    }
+    for (int32_t h = 0; seeded && h < HOLE; h++)
+        seeded = chaos_put_body_fetch_ok(db, h);
+    return seeded &&
+           stage_set_named_cursor(db, "validate_headers", (uint64_t)(V + 1)) &&
+           stage_set_named_cursor(db, "body_fetch", (uint64_t)HOLE);
+}
+
+/* DETECT predicate: the gap named the hole at HOLE, with the validate cursor
+ * at V+1 and body_fetch parked on the hole, and no body observed there. */
+static bool chaos_hole_named_correctly(bool named,
+                                       const struct stage_repair_body_fetch_gap *gap,
+                                       int32_t V, int32_t HOLE)
+{
+    return named && gap->ready && gap->target_height == HOLE &&
+           gap->validate_cursor == V + 1 &&
+           gap->body_fetch_cursor == HOLE && !gap->body_observed;
+}
+
 bool chaos_fault_cleared_have_data_hole(struct chaos_fault_result *out)
 {
     chaos_result_init(out);
@@ -1071,17 +1168,7 @@ bool chaos_fault_cleared_have_data_hole(struct chaos_fault_result *out)
     /* Headers validated [0,V]; bodies observed [0,HOLE-1] only — the row at
      * HOLE is ABSENT (the vanished / never-re-fetched body). Cursors: headers
      * ran ahead (V+1), body_fetch stalled AT the hole. */
-    bool seeded = true;
-    for (int32_t h = 0; seeded && h <= V; h++) {
-        uint8_t hh[32];
-        chaos_synth_hash(hh, h);
-        seeded = chaos_put_validate_headers(db, h, hh);
-    }
-    for (int32_t h = 0; seeded && h < HOLE; h++)
-        seeded = chaos_put_body_fetch_ok(db, h);
-    seeded = seeded &&
-             stage_set_named_cursor(db, "validate_headers", (uint64_t)(V + 1)) &&
-             stage_set_named_cursor(db, "body_fetch", (uint64_t)HOLE);
+    bool seeded = chaos_seed_have_data_hole(db, V, HOLE);
     if (!seeded) {
         chaos_note(out, "fixture row/cursor seed failed");
         progress_store_close();
@@ -1094,10 +1181,7 @@ bool chaos_fault_cleared_have_data_hole(struct chaos_fault_result *out)
     struct stage_repair_body_fetch_gap gap;
     bool named = stage_repair_body_fetch_missing_have_data_candidate(db, HOLE,
                                                                      &gap);
-    bool named_correctly = named && gap.ready && gap.target_height == HOLE &&
-                           gap.validate_cursor == V + 1 &&
-                           gap.body_fetch_cursor == HOLE &&
-                           !gap.body_observed;
+    bool named_correctly = chaos_hole_named_correctly(named, &gap, V, HOLE);
 
     /* REMEDY: the body is re-fetched (row written, cursor advances past the
      * hole). The gap must then be GONE — no silent forever-stall. */

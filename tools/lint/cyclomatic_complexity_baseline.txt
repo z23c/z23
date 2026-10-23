@@ -1752,11 +1752,6 @@ engine/modules/sim/src/postmortem_inventory.c:postmortem_capsule_list:20
 engine/modules/sim/src/postmortem_inventory.c:postmortem_capsule_prune:19
 engine/modules/sim/src/seed_tape.c:seed_tape_load_from_memory:24
 engine/modules/sim/src/simnet.c:sim_mint_block:29
-engine/modules/sim/src/simnet_chaos_faults.c:chaos_fault_cleared_have_data_hole:21
-engine/modules/sim/src/simnet_chaos_faults.c:chaos_fault_corrupt_sealed_segment:17
-engine/modules/sim/src/simnet_chaos_faults.c:chaos_fault_empty_active_chain_window:18
-engine/modules/sim/src/simnet_chaos_faults.c:chaos_fault_kill_restart_mid_recovery:23
-engine/modules/sim/src/simnet_chaos_faults.c:chaos_fault_torn_progress_wal:21
 engine/modules/sim/src/simnet_chaos_faults_download.c:chaos_fault_peer_disconnect_mid_body_download:29
 engine/modules/sim/src/simnet_chaos_faults_rom.c:chaos_fault_conflicting_chunk_peers:34
 engine/modules/sim/src/simnet_chaos_faults_rom.c:chaos_fault_journal_commit_enospc:17
