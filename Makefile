@@ -2687,6 +2687,7 @@ GUI_APP_HOST_LIBS := -static-libgcc -Wl,-Bstatic -l:libwinpthread.a \
     -Wl,-Bdynamic -Wl,--no-insert-timestamp -lgdi32 -luser32 -lshell32 -lole32
 endif
 GUI_APP_CFLAGS := -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(REPRO_CFLAGS) \
 	$(ZCL_WARN_STRINGOP_OVERFLOW) $(GUI_APP_HOST_CPPFLAGS) \
 	$(ZCL_PLATFORM_CPPFLAGS) -Ivendor/rgfw \
 	-Iplatform/modules/util/include -Iplatform/modules/base/include
@@ -3718,7 +3719,7 @@ endif
 
 $(BIN_DIR)/inspect_html: tools/inspect_html.c platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra \
 	    -Iplatform/modules/base/include -Iplatform/modules/util/include -o $@ $^
 
 # These two run on EVERY make invocation (they are prerequisites of the
@@ -4646,7 +4647,7 @@ AGENT_SHA3_SRCS := tools/agent/agent_sha3.c platform/modules/sha3/src/sha3.c
 agent-sha3: $(BIN_DIR)/agent_sha3
 $(BIN_DIR)/agent_sha3: $(AGENT_SHA3_SRCS)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror $(HARDEN_CFLAGS) \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror $(HARDEN_CFLAGS) \
 	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/support/include -Iplatform/modules/base/include \
 	    -o $@ $(AGENT_SHA3_SRCS) $(HARDEN_LDFLAGS)
 
@@ -4668,7 +4669,7 @@ GATE_RECEIPT_SRCS := tools/agent/gate_receipt.c tools/agent/gate_receipt_proc.c 
 gate-receipt-bin: $(BIN_DIR)/gate_receipt
 $(BIN_DIR)/gate_receipt: $(GATE_RECEIPT_SRCS) tools/agent/gate_receipt.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \
 	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/base/include \
 	    -o $@ $(GATE_RECEIPT_SRCS) $(HARDEN_LDFLAGS)
 
@@ -4844,7 +4845,7 @@ endif
 $(BIN_DIR)/z23_bounded_run: tools/dev/z23_bounded_run.c \
 		platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Iplatform/modules/base/include \
 	    $(Z23_BOUNDED_RUN_PLATFORM_FLAGS) -o $@ $^
 
@@ -4855,7 +4856,7 @@ $(BIN_DIR)/z23_bounded_run: tools/dev/z23_bounded_run.c \
 $(BIN_DIR)/z23-fleet-observe: tools/dev/fleet_observe.c \
 		tools/dev/fleet_observe_main.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
 	    -Itools/dev -o $@ $^
 
 # test-group-weights: regenerates tools/dev/test_group_weights.tsv, the
@@ -4915,7 +4916,7 @@ $(SEM_REPLAY_BIN): $(SEM_REPLAY_SRCS) tools/dev/sem_replay.h \
 		platform/modules/platform/src/clock.c \
 		platform/modules/base/src/safe_alloc.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror $(ZCL_WARN_FORMAT_TRUNCATION) \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror $(ZCL_WARN_FORMAT_TRUNCATION) \
 	    $(ZCL_PLATFORM_CPPFLAGS) -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE \
 	    -Itools/dev -Icontexts/commons/packages/zjsonp/include \
 	    -Icontexts/commons/packages/zutf8/include \
@@ -4963,7 +4964,7 @@ $(ZCODE_PACKAGE_REGISTRY_CHECK_BIN): tools/zcode_package_registry_check.c \
 z23-package-sign: $(BIN_DIR)/z23-package-sign
 $(BIN_DIR)/z23-package-sign: FORCE tools/zcode_dev_signer.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Iplatform/modules/base/include -Ivendor/include -o $@ $(filter-out FORCE,$^) \
 	    -Lvendor/lib $(NODE_SECP_ARCHIVE) -lpthread -lm
 
@@ -6955,7 +6956,7 @@ bot: $(BIN_DIR)/bot
 mock_rpc: $(BIN_DIR)/mock_rpc
 $(BIN_DIR)/mock_rpc: tools/mock_rpc.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pthread -o $@ $<
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pthread -o $@ $<
 
 # ── The certificate worker ────────────────────────────────────────────────
 # `z23-acme` is the ONLY program in this tree that is a TLS client and
@@ -7102,7 +7103,7 @@ INSTALL_SELFTEST_BIN = $(BIN_DIR)/install_selftest
 install-selftest: $(INSTALL_SELFTEST_BIN)
 $(INSTALL_SELFTEST_BIN): $(INSTALL_SELFTEST_SRCS) tools/install/install_selftest.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
 	    $(HARDEN_CFLAGS) $(ZCL_PLATFORM_CPPFLAGS) $(Z23_BOOTSTRAP_INCLUDES) \
 	    -o $@ $(INSTALL_SELFTEST_SRCS) $(HARDEN_LDFLAGS)
 
@@ -7385,7 +7386,7 @@ $(ZCLASSIC_CLI_BIN): $(BUILD_IDENTITY_STAMP) engine/entry/cli.c $(CLI_SRCS) plat
 tools/wal_checkpoint: $(WAL_CHECKPOINT_BIN)
 $(WAL_CHECKPOINT_BIN): tools/wal_checkpoint.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include -o $@ $< \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include -o $@ $< \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 
 $(eval $(call BUILD_NODE_TOOL,wallet-wireframes,tools/wallet_wireframes.c))
@@ -7417,7 +7418,7 @@ $(PROCESS_GROUP_EXEC_BIN): tools/process_group_exec.c
 zcl-portfwd: $(BIN_DIR)/zcl-portfwd
 $(BIN_DIR)/zcl-portfwd: tools/zcl_portfwd.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -o $@ $<
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -o $@ $<
 
 # ── fbsh: vendored FreeBSD /bin/sh (ash lineage) ─────────────────────
 # vendor/freebsd-sh holds FreeBSD releng/14.2 bin/sh byte-identical
@@ -7560,7 +7561,7 @@ $(FBSH_OBJ_DIR)/compat.o: $(FBSH_SRC_DIR)/compat/compat.c \
 
 $(BIN_DIR)/fbsh: $(FBSH_OBJS)
 	@mkdir -p $(@D)
-	$(CC) -std=c23 -O2 $(FBSH_LINK_MODE) -o $@ $(FBSH_OBJS)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 $(FBSH_LINK_MODE) -o $@ $(FBSH_OBJS)
 
 # gen_sha3_windows: one-shot tool that queries a fully-synced reference
 # node and overwrites core/modules/chain/{include/chain,src}/sha3_windows.{h,c}
@@ -7574,7 +7575,7 @@ $(BIN_DIR)/gen_sha3_windows: tools/gen_sha3_windows.c \
 		platform/modules/json/src/json.c platform/modules/platform/src/clock.c \
 		platform/modules/base/src/safe_alloc.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O3 -march=native -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O3 -march=native -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Icore/modules/chain/include -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/encoding/include \
 	    -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
@@ -7624,7 +7625,7 @@ $(BIN_DIR)/corpus-census: tools/corpus_census.c \
 	@mkdir -p $(dir $@)
 	# --gc-sections: ed25519's batch-verify path (never called here) pulls
 	# zcl_random_secret_bytes -> sealed-tree random.c; the collector drops it.
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
@@ -7685,7 +7686,7 @@ $(BIN_DIR)/package-factory: tools/package_factory.c \
 		platform/modules/codec/src/cursor.c platform/modules/json/src/json.c \
 		platform/modules/platform/src/rng.c platform/modules/platform/src/clock.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
@@ -7708,7 +7709,7 @@ $(BIN_DIR)/arena_product_journey_c23: tools/arena_product_journey_c23.c \
 		platform/modules/json/src/json.c platform/modules/base/src/safe_alloc.c \
 		platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Iplatform/modules/json/include -Iplatform/modules/base/include -o $@ $^ -lpthread -lm
 $(BIN_DIR)/arena_runner: tools/arena_runner.c \
@@ -7719,7 +7720,7 @@ $(BIN_DIR)/arena_runner: tools/arena_runner.c \
 		platform/modules/base/src/safe_alloc.c \
 		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
@@ -7742,7 +7743,7 @@ $(BIN_DIR)/arena_present: tools/arena_present.c \
 		platform/modules/base/src/safe_alloc.c \
 		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
@@ -7769,7 +7770,7 @@ $(BIN_DIR)/test_zdogfight: contexts/commons/packages/zdogfight/tests/test_zdogfi
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
 		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zdogfight/include -Icontexts/commons/packages/zprng/include \
@@ -7780,7 +7781,7 @@ $(BIN_DIR)/test_zdogace: contexts/commons/packages/zdogace/tests/test_zdogace.c 
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
 		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zdogace/include -Icontexts/commons/packages/zdogfight/include \
@@ -7791,7 +7792,7 @@ $(BIN_DIR)/test_zdogdrone: contexts/commons/packages/zdogdrone/tests/test_zdogdr
 		contexts/commons/packages/zdogdrone/src/zdogdrone.c \
 		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zdogdrone/include -Icontexts/commons/packages/zdogfight/include \
@@ -7803,7 +7804,7 @@ $(BIN_DIR)/test_zdogview: contexts/commons/packages/zdogview/tests/test_zdogview
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
 		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zdogview/include -Icontexts/commons/packages/zdogfight/include \
@@ -7817,7 +7818,7 @@ $(BIN_DIR)/zdogview: contexts/commons/packages/zdogview/app/main.c \
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
 		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zdogview/include -Icontexts/commons/packages/zdogfight/include \
@@ -7847,7 +7848,7 @@ $(BIN_DIR)/pilot_zdogace: contexts/commons/packages/zdogace/app/main.c \
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
 		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
-	$(CC) $(ARENA_PILOT_CFLAGS) \
+	$(CC) $(REPRO_CFLAGS) $(ARENA_PILOT_CFLAGS) \
 	    -Icontexts/commons/packages/zdogace/include -Icontexts/commons/packages/zdogfight/include \
 	    -Icontexts/commons/packages/zprng/include \
 	    -o $@ $^ -lm
@@ -7857,7 +7858,7 @@ $(BIN_DIR)/pilot_zdogdrone: contexts/commons/packages/zdogdrone/app/main.c \
 		contexts/commons/packages/zdogfight/src/zdogfight.c contexts/commons/packages/zdogfight/src/zdogfix.c \
 		contexts/commons/packages/zprng/src/zprng.c
 	@mkdir -p $(dir $@)
-	$(CC) $(ARENA_PILOT_CFLAGS) \
+	$(CC) $(REPRO_CFLAGS) $(ARENA_PILOT_CFLAGS) \
 	    -Icontexts/commons/packages/zdogdrone/include -Icontexts/commons/packages/zdogfight/include \
 	    -Icontexts/commons/packages/zprng/include \
 	    -o $@ $^ -lm
@@ -7872,7 +7873,7 @@ $(BIN_DIR)/arena_svg: tools/arena_svg.c \
 		platform/modules/base/src/safe_alloc.c \
 		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
@@ -8079,7 +8080,7 @@ $(BIN_DIR)/z23-clang-manifest-root-fixture $(BIN_DIR)/z23-clang-manifest: $(CLAN
 	rm -f $$probe $$probe.c; \
 	echo "clang-manifest: clang_getTypePrettyPrinted exported: $$pretty"; \
 	echo "$(CC) -DCM_TYPE_PRETTY_PRINTED=$$pretty ... -o $@"; \
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic $(HARDEN_CFLAGS) \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) -DCM_TYPE_PRETTY_PRINTED=$$pretty \
 	    $(CLANG_MANIFEST_RESOURCE_CPPFLAG) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
@@ -8210,7 +8211,7 @@ $(BIN_DIR)/arena_frame: tools/arena_frame.c tools/arena_hud.c \
 		platform/modules/base/src/safe_alloc.c \
 		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -ffunction-sections -fdata-sections $(ZCL_GC_SECTIONS_LDFLAG) \
@@ -8340,7 +8341,7 @@ $(BIN_DIR)/gen_utxo_root_ladder: tools/gen_utxo_root_ladder.c \
 		core/modules/chain/src/mmb.c platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/cleanse.c \
 		platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Icore/modules/chain/include -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/support/include \
 	    -Iplatform/modules/base/include -Iplatform/modules/util/include -Ivendor/include \
@@ -8359,7 +8360,7 @@ tools/rom_two_builder_compare: $(BIN_DIR)/rom_two_builder_compare
 $(BIN_DIR)/rom_two_builder_compare: tools/rom_two_builder_compare.c \
 		platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/support/include -Iplatform/modules/base/include \
 	    -Ivendor/include \
@@ -8380,7 +8381,7 @@ $(BIN_DIR)/checkpoint_rung_export: tools/checkpoint_rung_export.c \
 		engine/modules/storage/src/checkpoint_rung.c platform/modules/base/src/log_level.c \
 		platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Iengine/modules/storage/include -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -Iplatform/modules/support/include -Ivendor/include \
@@ -8412,7 +8413,7 @@ $(BIN_DIR)/consensus_rule_sweep: tools/consensus_rule_sweep.c \
 		platform/modules/base/src/result.c platform/modules/base/src/log_level.c \
 		platform/modules/sha3/src/sha3.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Itools -Icore/chainparams/include -Icore/params/include \
 	    -Icore/consensus/include -Icore/math/include \
@@ -8434,7 +8435,7 @@ tools/rom_bundle_sha3: $(BIN_DIR)/rom_bundle_sha3
 $(BIN_DIR)/rom_bundle_sha3: tools/rom_bundle_sha3.c \
 		platform/modules/sha3/src/sha3.c core/modules/crypto/src/keccak_x4.c core/modules/crypto/src/simd_dispatch.c platform/modules/base/src/cleanse.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Iplatform/modules/support/include -Iplatform/modules/base/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
@@ -8464,7 +8465,7 @@ $(BIN_DIR)/fs_handshake_probe: tools/fs_handshake_probe.c \
 		core/modules/crypto/src/simd_dispatch.c \
 		platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_WARN_STRINGOP_OVERFLOW) \
 	    -Icore/modules/net/include -Icore/modules/crypto/include -Icore/modules/core/include \
 	    -Icore/math/include \
@@ -8527,7 +8528,7 @@ $(ZCL_NODECTL_BIN): tools/zcl-nodectl.c platform/modules/util/include/util/rpc_p
 		platform/modules/platform/src/os_binary_slots.c platform/modules/platform/src/clock.c \
 		platform/modules/base/src/log_level.c $(C23_PORTABLE_RELINK)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror \
 	    -Iplatform/modules/base/include -Iplatform/modules/util/include -Iplatform/modules/platform/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -o $@ \
 	    tools/zcl-nodectl.c platform/modules/platform/src/os_binary_slots.c \
@@ -8538,7 +8539,7 @@ export_snapshot: $(BIN_DIR)/export_snapshot
 $(BIN_DIR)/export_snapshot: tools/export_snapshot.c \
 		platform/modules/platform/src/clock.c platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include \
 	    -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -lm \
@@ -8553,7 +8554,7 @@ $(BIN_DIR)/export_snapshot: tools/export_snapshot.c \
 verify_anchor_completeness: $(BIN_DIR)/verify_anchor_completeness
 $(BIN_DIR)/verify_anchor_completeness: tools/verify_anchor_completeness.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include -o $@ $< -Lvendor/lib vendor/lib/libleveldb.a vendor/lib/libsqlite3.a -lstdc++ -lpthread -lm -ldl
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -Ivendor/include -o $@ $< -Lvendor/lib vendor/lib/libleveldb.a vendor/lib/libsqlite3.a -lstdc++ -lpthread -lm -ldl
 
 # ldb_verify_c23: differential proof that the C23 read-only LevelDB reader
 # (engine/modules/storage/src/ldb_reader_*.c) returns byte-identical data to the
@@ -8574,7 +8575,7 @@ $(BIN_DIR)/ldb_verify_c23: tools/ldb_verify_c23.c \
 		platform/modules/platform/src/positioned_file.c \
 		platform/modules/platform/src/read_mapping.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Ivendor/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -Iengine/modules/storage/include -Iplatform/modules/platform/include \
@@ -8662,7 +8663,7 @@ $(BIN_DIR)/simnet_trace_query: tools/sim/simnet_trace_query.c \
 		platform/modules/base/src/cleanse.c platform/modules/base/src/safe_alloc.c \
 		platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Iplatform/modules/json/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -o $@ $^ -lpthread -lm
@@ -8903,7 +8904,7 @@ check-wire-harness-security-gate: $(LINTC_TOOL)
 p2_invariant_check: $(P2_INVARIANT_CHECK_BIN)
 $(P2_INVARIANT_CHECK_BIN): tools/p2_invariant_check.c vendor/include/sqlite3.h vendor/lib/libsqlite3.a
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/include \
 	    -o $@ tools/p2_invariant_check.c \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
@@ -8916,7 +8917,7 @@ SQLQ_BIN = $(BIN_DIR)/sqlq
 sqlq: $(SQLQ_BIN)
 $(SQLQ_BIN): tools/sqlq.c vendor/include/sqlite3.h vendor/lib/libsqlite3.a
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/include \
 	    -o $@ tools/sqlq.c \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
@@ -8931,7 +8932,7 @@ $(JSONQ_BIN): tools/jsonq.c \
     contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h \
     contexts/commons/packages/zutf8/include/zutf8/zutf8.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zjsonp/include -Icontexts/commons/packages/zutf8/include \
 	    -o $@ tools/jsonq.c contexts/commons/packages/zjsonp/src/zjsonp.c \
@@ -8957,7 +8958,7 @@ $(BIN_DIR)/z23-fx: tools/z23_fx.c \
     platform/modules/platform/include/platform/time_compat.h \
     platform/modules/platform/include/platform/clock.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Iplatform/modules/base/include \
 	    -Iplatform/modules/json/include -Iplatform/modules/platform/include \
@@ -8982,7 +8983,7 @@ $(BIN_DIR)/fleet-board-bridge: tools/fleet_board_bridge.c \
     platform/modules/platform/include/platform/time_compat.h \
     platform/modules/platform/include/platform/clock.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Iplatform/modules/base/include \
 	    -Iplatform/modules/json/include -Iplatform/modules/platform/include \
@@ -9014,7 +9015,7 @@ $(FLEET_GATEWAY_BIN): tools/fleet_gateway.c \
     platform/modules/util/include/util/log_macros.h \
     core/modules/crypto/include/crypto/sha256.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Iplatform/modules/base/include \
 	    -Iplatform/modules/json/include \
@@ -9045,7 +9046,7 @@ $(RETRIEVAL_EVAL_BIN): tools/retrieval_eval.c \
     platform/modules/sha3/src/sha3.c platform/modules/sha3/include/sha3/sha3.h \
     platform/modules/base/include/base/hex.h platform/modules/base/include/base/serialize_le.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra -Werror -pedantic \
 	    -Icognition/modules/retrieval/include -Iplatform/modules/base/include -Iplatform/modules/sha3/include -o $@ \
 	    tools/retrieval_eval.c cognition/modules/retrieval/src/retrieval_eval.c \
 	    cognition/modules/retrieval/src/retrieval_eval_result.c \
@@ -9156,7 +9157,7 @@ determinism-scan: $(DETERMINISM_SCAN_BIN)
 $(DETERMINISM_SCAN_BIN): tools/determinism_scan.c $(DETERMINISM_LIB_SRCS) \
     $(DETERMINISM_DEP_SRCS) tools/dev/test_group_catalog.def
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    $(DETERMINISM_CPPFLAGS) -o $@ tools/determinism_scan.c \
 	    $(DETERMINISM_LIB_SRCS) $(DETERMINISM_DEP_SRCS)
@@ -9227,7 +9228,7 @@ $(FPSCAN_BIN): $(FP_SRCS) \
     cognition/modules/fingerprint/include/fingerprint/fingerprint.h \
     cognition/modules/fingerprint/include/fingerprint/fp_runtime.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icognition/modules/fingerprint/include -Iplatform/modules/base/include -o $@ $(FP_SRCS)
 
@@ -9299,7 +9300,7 @@ NATIVE_UI_DRIVER_BIN = $(BIN_DIR)/native_ui_driver
 native-ui-driver: $(NATIVE_UI_DRIVER_BIN)
 $(NATIVE_UI_DRIVER_BIN): tools/native_ui_driver.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/x11/include \
 	    -o $@ $< -Wl,-l:libX11.so.6
 
@@ -10873,7 +10874,7 @@ $(SOAK_RUNNER_BIN): tools/soak/main.c tests/harness/src/soak_harness.c \
                         platform/modules/platform/src/clock.c \
                         tests/harness/include/test/soak_harness.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Itests/harness/include -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include -o $@ \
 	    tools/soak/main.c tests/harness/src/soak_harness.c platform/modules/platform/src/clock.c
@@ -10903,7 +10904,7 @@ bench_fresh_sync: $(BIN_DIR)/bench_fresh_sync
 $(BIN_DIR)/bench_fresh_sync: tools/bench_fresh_sync.c \
 		platform/modules/platform/src/clock.c platform/modules/base/src/log_level.c
 	@mkdir -p $(dir $@)
-	$(CC) -O2 -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
+	$(CC) $(REPRO_CFLAGS) -O2 -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -D_DEFAULT_SOURCE -o $@ $^
 
 # Per-ISA-tier crypto microbenchmark (tools/simd_bench.c). Drives the SAME
@@ -10930,7 +10931,7 @@ SIMD_BENCH_SRCS = tools/simd_bench.c \
 simd_bench: $(BIN_DIR)/simd_bench
 $(BIN_DIR)/simd_bench: $(SIMD_BENCH_SRCS)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O3 $(ZCL_ARCH_CFLAGS) \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O3 $(ZCL_ARCH_CFLAGS) \
 	    -Wall -Wextra -Werror -pedantic -pthread \
 	    -Iplatform/modules/sha3/include -Icore/modules/crypto/include -Icore/modules/sapling/include -Iplatform/modules/base/include \
 	    -Iplatform/modules/util/include -Iplatform/modules/platform/include -Iplatform/modules/support/include \
@@ -10974,7 +10975,7 @@ SERIAL_BENCH_SRCS = tools/serial_bench.c \
 serial_bench: $(BIN_DIR)/serial_bench
 $(BIN_DIR)/serial_bench: $(SERIAL_BENCH_SRCS)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O3 $(ZCL_ARCH_CFLAGS) \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O3 $(ZCL_ARCH_CFLAGS) \
 	    -Wall -Wextra -Werror -pedantic \
 	    -Icore/modules/primitives/include -Icore/modules/script/include -Icore/modules/bloom/include \
 	    -Icore/modules/crypto/include -Iplatform/modules/encoding/include -Iplatform/modules/base/include \
@@ -11033,10 +11034,10 @@ PARITY_ORACLE_BIN = $(BIN_DIR)/run-parity-oracle
 PARITY_ORACLE_SELFTEST_BIN = $(BIN_DIR)/run-parity-oracle-selftest
 $(PARITY_ORACLE_BIN): $(PARITY_ORACLE_DIR)/run_parity_oracle.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -Wall -Wextra -Werror -pedantic $(ZCL_PLATFORM_CPPFLAGS) -DPARITY_DIR=\"$(PARITY_ORACLE_DIR)\" -o $@ $<
+	$(CC) $(REPRO_CFLAGS) -std=c23 -Wall -Wextra -Werror -pedantic $(ZCL_PLATFORM_CPPFLAGS) -DPARITY_DIR=\"$(PARITY_ORACLE_DIR)\" -o $@ $<
 $(PARITY_ORACLE_SELFTEST_BIN): $(PARITY_ORACLE_DIR)/run_parity_oracle_selftest.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -Wall -Wextra -Werror -pedantic $(ZCL_PLATFORM_CPPFLAGS) -o $@ $<
+	$(CC) $(REPRO_CFLAGS) -std=c23 -Wall -Wextra -Werror -pedantic $(ZCL_PLATFORM_CPPFLAGS) -o $@ $<
 
 .PHONY: run-parity-oracle-selftest
 run-parity-oracle-selftest: $(PARITY_ORACLE_BIN) $(PARITY_ORACLE_SELFTEST_BIN)
@@ -13003,7 +13004,7 @@ HARDLINK_SEEDING_SRCS = tools/check_no_hardlink_seeding.c \
 $(BIN_DIR)/check_no_hardlink_seeding: $(HARDLINK_SEEDING_SRCS) \
 	tools/dev/dependency_links.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -DZCL_TESTING \
 	    -Itools/dev -Iplatform/modules/platform/include \
 	    -Iplatform/modules/base/include -Iplatform/modules/util/include \
@@ -13045,7 +13046,7 @@ FILE_SIZE_POLICY_SRCS = tools/file_size_policy.c \
 tools/file_size_policy: $(FILE_SIZE_POLICY_BIN)
 $(FILE_SIZE_POLICY_BIN): $(FILE_SIZE_POLICY_SRCS)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Iplatform/modules/platform/include -Iplatform/modules/base/include \
 	    -o $@ $(FILE_SIZE_POLICY_SRCS)
@@ -13078,7 +13079,7 @@ MUTATION_CAMPAIGN_SRCS = tools/dev/mutation_campaign.c $(MUTATION_LIB_SRCS) \
 mutation-campaign: $(MUTATION_CAMPAIGN_BIN)
 $(MUTATION_CAMPAIGN_BIN): $(MUTATION_CAMPAIGN_SRCS)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Itools -Itools/dev -Iplatform/modules/base/include -Iplatform/modules/sha3/include \
 	    -Icore/modules/crypto/include -Iplatform/modules/support/include -Itests/harness/include \
@@ -13149,7 +13150,7 @@ $(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS) \
     engine/composition/prompt_templates.def \
     engine/modules/engine/include/engine/prompt_sections.def
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
 	    $(BUILD_IDENTITY_CPPFLAGS) \
 	    $(ENGINE_UNIT_INCLUDES) \
@@ -14743,7 +14744,7 @@ $(API_REFERENCE_TOOL): tools/gen_api_reference.c \
                        $(wildcard engine/composition/commands/*.def) \
                        $(wildcard engine/composition/commands/*/*.def)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Iengine/modules/kernel/include -Iplatform/modules/json/include \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Iengine/modules/kernel/include -Iplatform/modules/json/include \
 	    -Iplatform/modules/base/include \
 	    -o $@ tools/gen_api_reference.c
 
@@ -14829,7 +14830,7 @@ check-generated-artifact-contradictions: $(LINTC_TOOL) docs-capability-inventory
 # `make docs-equihash-params`, never by editing the generated page.
 $(EQUIHASH_FACT_TOOL): $(EQUIHASH_FACT_SRCS)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icore/chainparams/include -Icore/params/include -Icore/math/include \
 	    -Icore/consensus/include -Icore/modules/chain/include -Iplatform/modules/base/include \
@@ -15093,11 +15094,11 @@ test-guest-ssh-fixture:
 guest-ssh-fixture-testbin: $(BIN_DIR)/test-guest-ssh-fixture $(BIN_DIR)/guest-ssh-fixture
 $(BIN_DIR)/guest-ssh-fixture: tools/guest_ssh_fixture.c $(wildcard tools/guest_port.h)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -o $@ tools/guest_ssh_fixture.c
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -o $@ tools/guest_ssh_fixture.c
 $(BIN_DIR)/test-guest-ssh-fixture: tools/tests/test_guest_ssh_fixture.c tools/guest_ssh_fixture.c \
         $(wildcard tools/guest_port.h)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -o $@ tools/tests/test_guest_ssh_fixture.c
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -o $@ tools/tests/test_guest_ssh_fixture.c
 
 check-host-gc-selftest:
 	@echo "══ LINT: host garbage collector fixture regression ══"
@@ -15263,7 +15264,7 @@ TOR_PROVENANCE_HEADERS = tools/tor_compiler_id.h \
     platform/modules/platform/src/windows_path_internal.h
 $(TOR_PROVENANCE_BIN): $(TOR_PROVENANCE_SRCS) $(TOR_PROVENANCE_HEADERS) Makefile
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zsha256/include \
 	    -Iplatform/modules/base/include \
@@ -15927,7 +15928,7 @@ $(BIN_DIR)/postmortem_to_scenario: tools/postmortem_to_scenario.c \
 		platform/modules/base/src/log_level.c \
 		platform/modules/json/src/json.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -Wno-format-truncation \
 	    -Iengine/modules/sim/include -Iplatform/modules/platform/include -Iplatform/modules/base/include -Iplatform/modules/util/include \
 	    -Iplatform/modules/json/include \
@@ -16173,7 +16174,7 @@ $(BIN_DIR)/z23-machine-volume-fixture: Makefile tests/harness/fixtures/machine_v
         $(wildcard platform/modules/platform/include/platform/*.h) \
         $(wildcard platform/modules/base/include/base/*.h)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
 	    $(ZCL_PLATFORM_CPPFLAGS) -Iengine/composition/include -Iplatform/modules/rvmachine/include \
 	    -Iplatform/modules/rvemu/include -Iplatform/modules/rvplat/include \
 	    -Iplatform/modules/rvvirtio/include \
@@ -16208,7 +16209,7 @@ $(BIN_DIR)/z23-machine-geli-volume: Makefile tests/harness/fixtures/machine_geli
         $(wildcard core/modules/crypto/include/crypto/*.h) \
         platform/modules/util/include/util/log_macros.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
 	    $(ZCL_PLATFORM_CPPFLAGS) -Iengine/composition/include -Iplatform/modules/rvmachine/include \
 	    -Iplatform/modules/rvemu/include -Iplatform/modules/rvplat/include \
 	    -Iplatform/modules/rvvirtio/include -Iplatform/modules/fdt/include \
@@ -16225,7 +16226,7 @@ $(BIN_DIR)/z23-machine-freebsd-ssh: Makefile tests/harness/fixtures/machine_free
         platform/modules/util/include/util/log_macros.h \
         $(wildcard platform/modules/base/include/base/*.h)
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
 	    $(ZCL_PLATFORM_CPPFLAGS) -Iplatform/modules/platform/include \
 	    -Iplatform/modules/util/include -Iplatform/modules/base/include -o $@ $(filter %.c,$^) \
 	    $(LDFLAGS) $(ZCL_PLATFORM_NODE_LIBS)
@@ -16254,7 +16255,7 @@ $(BIN_DIR)/z23-machine-freebsd-ports: Makefile tests/harness/fixtures/machine_fr
         $(wildcard core/modules/crypto/include/crypto/*.h) \
         platform/modules/util/include/util/log_macros.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -D_POSIX_C_SOURCE=200809L \
 	    $(ZCL_PLATFORM_CPPFLAGS) -Iplatform/modules/rvmachine/include \
 	    -Iplatform/modules/rvemu/include -Iplatform/modules/rvplat/include \
 	    -Iplatform/modules/rvvirtio/include -Iplatform/modules/fdt/include \
@@ -16270,7 +16271,7 @@ c3-speed-bench: $(BIN_DIR)/c3-mutex-probe.so
 c3-mutex-probe: $(BIN_DIR)/c3-mutex-probe.so
 $(BIN_DIR)/c3-mutex-probe.so: tests/harness/fixtures/c3_mutex_probe.c tools/dev/c3_mutex_probe.h
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -fPIC -shared \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -fPIC -shared \
 	  -o $@ tests/harness/fixtures/c3_mutex_probe.c -ldl -pthread
 
 .PHONY: c3-tip-seam
@@ -16280,7 +16281,7 @@ c3-tip-seam: $(BIN_DIR)/c3-tip-seam-probe.o
 	  C3_TIP_LINK='$(abspath $(BIN_DIR)/c3-tip-seam-probe.o) -Xlinker --wrap=progress_store_tx_lock -Xlinker --wrap=progress_store_tx_unlock -Xlinker --wrap=tip_finalize_reconcile_visible_cursor_body -Xlinker --wrap=tip_finalize_run_post_finalize -Xlinker --wrap=test_tip_finalize_stage -Xlinker --wrap=test_tip_finalize_post_step'
 $(BIN_DIR)/c3-tip-seam-probe.o: tests/harness/fixtures/c3_tip_seam_probe.c
 	@mkdir -p $(dir $@)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -c $< -o $@
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic -c $< -o $@
 # The resident ff ladder already holds the checkout lock and compiled the
 # source inventory. Reuse this Make parse for its tests and fast lint. This
 # dependency is scoped to the explicit ff-test-lint goal; ordinary lint-fast
@@ -16323,7 +16324,7 @@ z23kernel-identity: $(BIN_DIR)/z23kernel.identity
 NATIVE_TUNNEL_SRCS := $(shell awk -F '"' '/^ZCL_TUNNEL_SOURCE/ {print $$2}' tools/native_tunnel_sources.def)
 NATIVE_TUNNEL_HEADERS := $(shell awk -F '"' '/^ZCL_TUNNEL_(HEADER|INTERNAL)/ {print $$2}' tools/native_tunnel_sources.def)
 NATIVE_TUNNEL_INCLUDES := $(sort $(shell awk -F '"' '/^ZCL_TUNNEL_HEADER/ {p=$$2; sub(/\/include\/.*/, "/include", p); print p}' tools/native_tunnel_sources.def))
-NATIVE_TUNNEL_FLAGS = -std=c23 -O1 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(addprefix -I,$(NATIVE_TUNNEL_INCLUDES))
+NATIVE_TUNNEL_FLAGS = -std=c23 $(REPRO_CFLAGS) -O1 -Wall -Wextra -Werror -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) $(addprefix -I,$(NATIVE_TUNNEL_INCLUDES))
 $(BIN_DIR)/tunnel: tools/native_tunnel.c tools/native_tunnel_sources.def $(NATIVE_TUNNEL_SRCS) $(NATIVE_TUNNEL_HEADERS) Makefile | $(BIN_DIR)
 	$(CC) $(NATIVE_TUNNEL_FLAGS) tools/native_tunnel.c $(NATIVE_TUNNEL_SRCS) -o $@
 $(BIN_DIR)/tunnel-static: tools/native_tunnel.c tools/native_tunnel_sources.def $(NATIVE_TUNNEL_SRCS) $(NATIVE_TUNNEL_HEADERS) Makefile | $(BIN_DIR)
@@ -16378,7 +16379,7 @@ TUNNEL_EXPORT_HELPER_HEADERS = platform/modules/base/include/base/safe_alloc.h \
  platform/modules/platform/include/platform/directory_transaction.h \
  contexts/commons/packages/zsha256/include/zsha256/zsha256.h
 $(BIN_DIR)/native-tunnel-export: $(TUNNEL_EXPORT_HELPER_SRCS) $(TUNNEL_EXPORT_HELPER_HEADERS) tools/native_tunnel_sources.def Makefile | $(BIN_DIR)
-	$(CC) -std=c23 -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -D_GNU_SOURCE \
 	 -Itools -Iplatform/modules/platform/include -Iplatform/modules/base/include \
 	 -Icontexts/commons/packages/zsha256/include $(TUNNEL_EXPORT_HELPER_SRCS) -o $@
 export-native-tunnel: $(BIN_DIR)/native-tunnel-export
