@@ -3080,6 +3080,39 @@ static void dl_submit_loaded(const struct dl_dirs *d, struct dl_row *r,
     reply->exit_code = 0;
 }
 
+/* Before the precheck: a retry of a tip already live in the queue attaches to
+ * its row and never runs or refuses the precheck (the worktree may have moved
+ * on since). Builds qpath. True when the reply is final (attached, or a
+ * failure to resolve the queue path); any lock or read trouble falls through
+ * to the locked lookup in dl_submit_loaded, which reports it. */
+static bool dl_submit_prelookup(const struct dl_dirs *d, const char *root,
+                                const char *tip, char *qpath, size_t cap,
+                                struct zcl_command_reply *reply)
+{
+    struct dl_row *rows = NULL;
+    size_t nrows = 0;
+    char why[128] = {0};
+    bool done;
+    int lock;
+    if (snprintf(qpath, cap, "%s/queue.jsonl", d->land) >= (int)cap) {
+        dl_fail(reply, "QUEUE_WRITE_FAILED", "submit",
+                "the queue path does not fit its buffer",
+                "platform_state_root too long");
+        return true;
+    }
+    lock = dl_rows_lock(d->land);
+    if (lock < 0)
+        return false;
+    if (!dl_load_rows(qpath, &rows, &nrows, why, sizeof(why))) {
+        dl_unlock(lock);
+        return false;
+    }
+    done = dl_submit_live_duplicate(d, rows, nrows, tip, root, reply);
+    free(rows);
+    dl_unlock(lock);
+    return done;
+}
+
 static const char *const DL_SUBMIT_MARKS[] = { "rebase-merge", "rebase-apply",
     "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer" };
 enum { DL_SUBMIT_MARK_COUNT = sizeof(DL_SUBMIT_MARKS) / sizeof(DL_SUBMIT_MARKS[0]),
@@ -3248,6 +3281,35 @@ static void dl_qualify_refuse(struct zcl_command_reply *reply,
             qr->detail[0] ? qr->detail : qr->log);
 }
 
+#if defined(ZCL_TESTING)
+/* Test seam: stand in for a passed --qualify run, qualifying the worktree's
+ * HEAD without the gates, so the precheck's qualified path is reachable
+ * without the heavy qualify rig. */
+static _Thread_local bool dl_test_qualify_head;
+void zcl_native_dev_land_test_qualify_head(bool on);
+void zcl_native_dev_land_test_qualify_head(bool on)
+{
+    dl_test_qualify_head = on;
+}
+#endif
+
+static bool dl_qualify_run(const char *worktree, bool exempt,
+                           struct zcl_land_qualify *qr)
+{
+#if defined(ZCL_TESTING)
+    if (dl_test_qualify_head) {
+        const char *args[] = { "rev-parse", "HEAD", NULL };
+        char head[64];
+        if (dl_git(worktree, args, head, sizeof(head), DL_GIT_TIMEOUT_MS) != 0)
+            return false;
+        dl_trim(head);
+        (void)snprintf(qr->tip, sizeof(qr->tip), "%s", head);
+        return true;
+    }
+#endif
+    return zcl_dev_land_qualify(worktree, exempt, qr);
+}
+
 /* submit --qualify: run the pre-submit gates in the lane's worktree and
  * bind the submission to the tip they qualified. */
 static const char *dl_submit_qualify(const struct zcl_command_request *req,
@@ -3264,7 +3326,7 @@ static const char *dl_submit_qualify(const struct zcl_command_request *req,
                 "input.worktree missing or input.tip present");
         return NULL;
     }
-    if (!zcl_dev_land_qualify(worktree, exempt, qr)) {
+    if (!dl_qualify_run(worktree, exempt, qr)) {
         dl_qualify_refuse(reply, qr);
         return NULL;
     }
@@ -3426,6 +3488,8 @@ static void dl_submit(const struct zcl_command_request *req,
                 "input.note over the row budget");
         return;
     }
+    if (dl_submit_prelookup(&d, root, full, qpath, sizeof(qpath), reply))
+        return;
     if (!dl_submit_precheck(req, &d, root, full,
                             sender_checked, &qr, note_buf, sizeof(note_buf),
                             reply))
@@ -3438,13 +3502,6 @@ static void dl_submit(const struct zcl_command_request *req,
     (void)snprintf(r.state, sizeof(r.state), "queued");
     dl_now_iso(ts);
     (void)snprintf(r.ts, sizeof(r.ts), "%s", ts);
-    if (snprintf(qpath, sizeof(qpath), "%s/queue.jsonl", d.land) >=
-        (int)sizeof(qpath)) {
-        dl_fail(reply, "QUEUE_WRITE_FAILED", "submit",
-                "the queue path does not fit its buffer",
-                "platform_state_root too long");
-        return;
-    }
     /* The lock covers seq assignment plus the append, so a step rewriting
      * the file cannot drop this row. The critical section is local file IO
      * only — never a git call, never a proof. */

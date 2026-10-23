@@ -13514,6 +13514,92 @@ static bool dlx_pc_tip_not_head_refused(void)
     return ok;
 }
 
+void zcl_native_dev_land_test_qualify_head(bool on);
+void zcl_native_dev_land_submit_received(const struct zcl_command_request *request,
+                                         struct zcl_command_reply *reply);
+
+static const char *const DLX_PC_ALL_GATES =
+    "check-file-size-ceiling\ncheck-cyclomatic-complexity\n"
+    "check-core-seal\ncheck-arm-symbol-single\n";
+
+/* --qualify (stood in for by the test seam, which qualifies HEAD) does not
+ * re-run the gates, yet still validates the mode and marks a skip. */
+static bool dlx_pc_qualify_modes(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (!dlx_pc_rig(&rig, "precheck_qualify", true, DLX_PC_ALL_GATES) ||
+        !dlx_pc_file(&rig, "precheck-fail", "check-core-seal"))
+        return false;
+    zcl_native_dev_land_test_qualify_head(true);
+    for (int pass = 0; pass < 2; pass++) {
+        dlx_begin(&c, NULL);
+        (void)json_push_kv_str(&c.input, "action", "submit");
+        (void)json_push_kv_str(&c.input, "worktree", rig.clone);
+        (void)json_push_kv_bool(&c.input, "qualify", true);
+        (void)json_push_kv_str(&c.input, "precheck", pass ? "skip" : "bogus");
+        (void)json_push_kv_str(&c.input, "note", "q");
+        if (pass == 0) {
+            ok = dlx_run(&c) && strcmp(dlx_err_code(&c), "BAD_INPUT") == 0;
+            dlx_end(&c);
+            ok = ok && dlx_queue_empty();
+        } else {
+            ok = ok && dlx_run(&c) && dlx_ok(&c);
+            dlx_end(&c);
+        }
+        if (!ok)
+            break;
+    }
+    zcl_native_dev_land_test_qualify_head(false);
+    ok = ok && dlx_pc_queued_note("q [precheck skipped]") &&
+         !dlx_pc_ran(&rig, "check-core-seal");
+    dlx_restore();
+    return ok;
+}
+
+/* The receive entry queues without running a gate that would fail. */
+static bool dlx_pc_received_skips_gates(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (!dlx_pc_rig(&rig, "precheck_received", true, DLX_PC_ALL_GATES) ||
+        !dlx_pc_file(&rig, "precheck-fail", "check-core-seal"))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, "r");
+    zcl_native_dev_land_submit_received(&c.request, &c.reply);
+    ok = dlx_ok(&c);
+    dlx_end(&c);
+    ok = ok && dlx_queue_has_one() && dlx_pc_queued_note("r") &&
+         !dlx_pc_ran(&rig, "check-core-seal");
+    dlx_restore();
+    return ok;
+}
+
+/* Re-submitting an already queued tip after the worktree moved on attaches
+ * to its live row; the precheck neither runs nor refuses. */
+static bool dlx_pc_retry_attaches(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char newer[64];
+    bool ok;
+    if (!dlx_pc_rig(&rig, "precheck_retry", true, DLX_PC_ALL_GATES))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    ok = ok && dlx_commit(rig.clone, "moved.txt", "moved\n", newer) &&
+         strcmp(newer, rig.tip) != 0;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = ok && dlx_run(&c) && dlx_ok(&c) && dlx_int(&c, "seq") == 1;
+    dlx_end(&c);
+    ok = ok && dlx_queue_has_one();
+    dlx_restore();
+    return ok;
+}
+
 static int dlx_case_precheck(void)
 {
     int failures = 0;
@@ -13543,6 +13629,18 @@ static int dlx_case_precheck(void)
     }
     TEST("land: precheck refuses a tip that is not the worktree HEAD") {
         ASSERT(dlx_pc_tip_not_head_refused());
+        PASS();
+    }
+    TEST("land: qualify validates the precheck mode and marks a skip") {
+        ASSERT(dlx_pc_qualify_modes());
+        PASS();
+    }
+    TEST("land: the receive entry queues without running a failing gate") {
+        ASSERT(dlx_pc_received_skips_gates());
+        PASS();
+    }
+    TEST("land: a retry of a queued tip attaches though the worktree moved on") {
+        ASSERT(dlx_pc_retry_attaches());
         PASS();
     }
 _test_next:;
