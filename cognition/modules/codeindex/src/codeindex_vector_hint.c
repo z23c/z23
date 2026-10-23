@@ -214,6 +214,24 @@ enum zcl_code_vector_hint_error zcl_code_concept_card_v1_root(
     return ZCL_CODE_VECTOR_HINT_OK;
 }
 
+static bool card_manifest_binding_matches(
+    const struct zcl_code_concept_card_v1 *card,
+    const struct zcl_ontology_manifest_v1 *manifest,
+    const struct zcl_source_universe_v1 *universe,
+    const struct zcl_ontology_manifest_inputs_v1 *inputs)
+{
+    uint8_t ontology_root[32];
+    return zcl_ontology_manifest_v1_validate(manifest, universe, inputs) &&
+           zcl_ontology_manifest_v1_root(manifest, ontology_root) &&
+           memcmp(card->source_root, manifest->source_root, 32) == 0 &&
+           memcmp(card->universe_root, manifest->universe_root, 32) == 0 &&
+           memcmp(card->ontology_root, ontology_root, 32) == 0 &&
+           memcmp(card->fact_manifest_root,
+                  manifest->assertion_set_root, 32) == 0 &&
+           memcmp(card->coverage_root, manifest->coverage_set_root, 32) == 0 &&
+           memcmp(card->extractor_root, manifest->extractor_root, 32) == 0;
+}
+
 enum zcl_code_vector_hint_error zcl_code_concept_card_v1_validate_ontology(
     const struct zcl_code_concept_card_v1 *card,
     const struct zcl_ontology_manifest_v1 *manifest,
@@ -225,16 +243,7 @@ enum zcl_code_vector_hint_error zcl_code_concept_card_v1_validate_ontology(
     if (error != ZCL_CODE_VECTOR_HINT_OK) return error;
     if (!manifest || !universe || !inputs)
         return ZCL_CODE_VECTOR_HINT_ERR_NULL;
-    uint8_t ontology_root[32];
-    if (!zcl_ontology_manifest_v1_validate(manifest, universe, inputs) ||
-        !zcl_ontology_manifest_v1_root(manifest, ontology_root) ||
-        memcmp(card->source_root, manifest->source_root, 32) != 0 ||
-        memcmp(card->universe_root, manifest->universe_root, 32) != 0 ||
-        memcmp(card->ontology_root, ontology_root, 32) != 0 ||
-        memcmp(card->fact_manifest_root,
-               manifest->assertion_set_root, 32) != 0 ||
-        memcmp(card->coverage_root, manifest->coverage_set_root, 32) != 0 ||
-        memcmp(card->extractor_root, manifest->extractor_root, 32) != 0)
+    if (!card_manifest_binding_matches(card, manifest, universe, inputs))
         return ZCL_CODE_VECTOR_HINT_ERR_CARD_BINDING;
     bool context_found = false, subject_found = false;
     for (size_t i = 0; i < inputs->context_count; i++) {
@@ -480,10 +489,9 @@ enum zcl_code_vector_hint_error zcl_code_embedding_payload_v1_root(
     return ZCL_CODE_VECTOR_HINT_OK;
 }
 
-static enum zcl_code_vector_hint_error segment_shape(
-    const struct zcl_code_embedding_segment_v1 *segment, size_t *wire_size)
+static enum zcl_code_vector_hint_error segment_header_fields_validate(
+    const struct zcl_code_embedding_segment_v1 *segment)
 {
-    if (!segment) return ZCL_CODE_VECTOR_HINT_ERR_NULL;
     if (segment->schema_version != ZCL_CODE_EMBEDDING_SEGMENT_VERSION)
         return ZCL_CODE_VECTOR_HINT_ERR_VERSION;
     if (!hint_fields_valid(segment->evidence_kind, segment->metric,
@@ -492,6 +500,16 @@ static enum zcl_code_vector_hint_error segment_shape(
     if (segment->flags != 0 || segment->reserved_byte != 0 ||
         segment->reserved != 0)
         return ZCL_CODE_VECTOR_HINT_ERR_FLAGS;
+    return ZCL_CODE_VECTOR_HINT_OK;
+}
+
+static enum zcl_code_vector_hint_error segment_shape(
+    const struct zcl_code_embedding_segment_v1 *segment, size_t *wire_size)
+{
+    if (!segment) return ZCL_CODE_VECTOR_HINT_ERR_NULL;
+    enum zcl_code_vector_hint_error fields_error =
+        segment_header_fields_validate(segment);
+    if (fields_error != ZCL_CODE_VECTOR_HINT_OK) return fields_error;
     if (segment->dimension == 0 ||
         segment->dimension > ZCL_CODE_EMBEDDING_DIMENSION_MAX ||
         segment->vector_count == 0)
@@ -606,21 +624,26 @@ static const struct zcl_code_concept_card_v1 *card_find(
     return NULL;
 }
 
-enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_validate_cards(
+static enum zcl_code_vector_hint_error card_scratch_args_check(
     const struct zcl_code_embedding_segment_v1 *segment,
-    const struct zcl_code_embedding_profile_v1 *profile,
     const struct zcl_code_concept_card_v1 *cards, size_t card_count,
     uint8_t (*root_scratch)[32], size_t scratch_capacity)
 {
-    enum zcl_code_vector_hint_error error =
-        zcl_code_embedding_segment_v1_validate_profile(segment, profile);
-    if (error != ZCL_CODE_VECTOR_HINT_OK) return error;
     if (!cards || !root_scratch) return ZCL_CODE_VECTOR_HINT_ERR_NULL;
     if (segment->vector_count != (uint64_t)card_count ||
         scratch_capacity < card_count || card_count == 0 ||
         card_count > SIZE_MAX / sizeof(*cards) ||
         card_count > SIZE_MAX / sizeof(*root_scratch))
         return ZCL_CODE_VECTOR_HINT_ERR_SCRATCH;
+    return ZCL_CODE_VECTOR_HINT_OK;
+}
+
+static enum zcl_code_vector_hint_error card_scratch_overlap_check(
+    const struct zcl_code_embedding_segment_v1 *segment,
+    const struct zcl_code_embedding_profile_v1 *profile,
+    const struct zcl_code_concept_card_v1 *cards, size_t card_count,
+    uint8_t (*root_scratch)[32])
+{
     size_t card_bytes = card_count * sizeof(*cards);
     size_t scratch_bytes = card_count * sizeof(*root_scratch);
     if (ranges_overlap(segment, sizeof(*segment), root_scratch,
@@ -636,18 +659,14 @@ enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_validate_cards(
         if (ranges_overlap(segment->vectors[i].values, segment->dimension,
                            root_scratch, scratch_bytes))
             return ZCL_CODE_VECTOR_HINT_ERR_OVERLAP;
-    for (size_t i = 0; i < card_count; i++) {
-        error = zcl_code_concept_card_v1_root(&cards[i], root_scratch[i]);
-        if (error != ZCL_CODE_VECTOR_HINT_OK) return error;
-        if (i != 0 && memcmp(root_scratch[i - 1u], root_scratch[i], 32) >= 0)
-            return ZCL_CODE_VECTOR_HINT_ERR_ORDER;
-    }
-    uint8_t set_root[32];
-    if (!zcl_ontology_object_set_v1_root(
-            ZCL_ONTOLOGY_OBJECT_CONCEPT_CARD,
-            (const uint8_t (*)[32])root_scratch, card_count, set_root) ||
-        memcmp(set_root, segment->concept_card_set_root, 32) != 0)
-        return ZCL_CODE_VECTOR_HINT_ERR_CARD_SET_ROOT;
+    return ZCL_CODE_VECTOR_HINT_OK;
+}
+
+static enum zcl_code_vector_hint_error card_binding_check(
+    const struct zcl_code_embedding_segment_v1 *segment,
+    const struct zcl_code_concept_card_v1 *cards, size_t card_count,
+    uint8_t (*root_scratch)[32])
+{
     for (size_t i = 0; i < card_count; i++) {
         const struct zcl_code_embedding_vector_v1 *vector =
             &segment->vectors[i];
@@ -661,9 +680,13 @@ enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_validate_cards(
             memcmp(card->coverage_root, segment->coverage_root, 32) != 0)
             return ZCL_CODE_VECTOR_HINT_ERR_CARD_BINDING;
     }
-    for (size_t i = 0; i < card_count; i++)
-        memcpy(root_scratch[i], segment->vectors[i].concept_card_root, 32);
-    card_roots_sort(root_scratch, card_count);
+    return ZCL_CODE_VECTOR_HINT_OK;
+}
+
+static enum zcl_code_vector_hint_error card_scratch_order_check(
+    const struct zcl_code_concept_card_v1 *cards,
+    uint8_t (*root_scratch)[32], size_t card_count)
+{
     for (size_t i = 0; i < card_count; i++) {
         uint8_t card_root[32];
         if ((i != 0 &&
@@ -674,6 +697,41 @@ enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_validate_cards(
             return ZCL_CODE_VECTOR_HINT_ERR_CARD_BINDING;
     }
     return ZCL_CODE_VECTOR_HINT_OK;
+}
+
+enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_validate_cards(
+    const struct zcl_code_embedding_segment_v1 *segment,
+    const struct zcl_code_embedding_profile_v1 *profile,
+    const struct zcl_code_concept_card_v1 *cards, size_t card_count,
+    uint8_t (*root_scratch)[32], size_t scratch_capacity)
+{
+    enum zcl_code_vector_hint_error error =
+        zcl_code_embedding_segment_v1_validate_profile(segment, profile);
+    if (error != ZCL_CODE_VECTOR_HINT_OK) return error;
+    error = card_scratch_args_check(segment, cards, card_count, root_scratch,
+                                    scratch_capacity);
+    if (error != ZCL_CODE_VECTOR_HINT_OK) return error;
+    error = card_scratch_overlap_check(segment, profile, cards, card_count,
+                                       root_scratch);
+    if (error != ZCL_CODE_VECTOR_HINT_OK) return error;
+    for (size_t i = 0; i < card_count; i++) {
+        error = zcl_code_concept_card_v1_root(&cards[i], root_scratch[i]);
+        if (error != ZCL_CODE_VECTOR_HINT_OK) return error;
+        if (i != 0 && memcmp(root_scratch[i - 1u], root_scratch[i], 32) >= 0)
+            return ZCL_CODE_VECTOR_HINT_ERR_ORDER;
+    }
+    uint8_t set_root[32];
+    if (!zcl_ontology_object_set_v1_root(
+            ZCL_ONTOLOGY_OBJECT_CONCEPT_CARD,
+            (const uint8_t (*)[32])root_scratch, card_count, set_root) ||
+        memcmp(set_root, segment->concept_card_set_root, 32) != 0)
+        return ZCL_CODE_VECTOR_HINT_ERR_CARD_SET_ROOT;
+    error = card_binding_check(segment, cards, card_count, root_scratch);
+    if (error != ZCL_CODE_VECTOR_HINT_OK) return error;
+    for (size_t i = 0; i < card_count; i++)
+        memcpy(root_scratch[i], segment->vectors[i].concept_card_root, 32);
+    card_roots_sort(root_scratch, card_count);
+    return card_scratch_order_check(cards, root_scratch, card_count);
 }
 
 static bool segment_output_overlaps(
@@ -768,14 +826,9 @@ static bool segment_output_overlaps(
 static enum zcl_code_vector_hint_error segment_wire_header_validate(
     const struct zcl_code_embedding_segment_v1 *segment)
 {
-    if (segment->schema_version != ZCL_CODE_EMBEDDING_SEGMENT_VERSION)
-        return ZCL_CODE_VECTOR_HINT_ERR_VERSION;
-    if (!hint_fields_valid(segment->evidence_kind, segment->metric,
-                           segment->quantizer))
-        return ZCL_CODE_VECTOR_HINT_ERR_ENUM;
-    if (segment->flags != 0 || segment->reserved_byte != 0 ||
-        segment->reserved != 0)
-        return ZCL_CODE_VECTOR_HINT_ERR_FLAGS;
+    enum zcl_code_vector_hint_error fields_error =
+        segment_header_fields_validate(segment);
+    if (fields_error != ZCL_CODE_VECTOR_HINT_OK) return fields_error;
     const uint8_t *roots[] = {
         segment->corpus_root, segment->source_root, segment->universe_root,
         segment->concept_card_set_root, segment->context_root,
@@ -844,26 +897,24 @@ enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_encode(
     return ZCL_CODE_VECTOR_HINT_OK;
 }
 
-enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_parse(
+static bool segment_parse_outputs_alias(
     const uint8_t *wire, size_t wire_len,
-    struct zcl_code_embedding_segment_v1 *out,
-    struct zcl_code_embedding_vector_v1 *vector_storage,
-    size_t vector_capacity, size_t *required_vectors)
+    const struct zcl_code_embedding_segment_v1 *out,
+    const size_t *required_vectors)
 {
-    if (!out || !required_vectors) return ZCL_CODE_VECTOR_HINT_ERR_NULL;
-    if (!wire) {
-        memset(out, 0, sizeof(*out));
-        *required_vectors = 0;
-        return ZCL_CODE_VECTOR_HINT_ERR_NULL;
-    }
-    if (ranges_overlap(wire, wire_len, out, sizeof(*out)))
-        return ZCL_CODE_VECTOR_HINT_ERR_OVERLAP;
-    if (ranges_overlap(wire, wire_len, required_vectors,
-                       sizeof(*required_vectors)) ||
-        ranges_overlap(out, sizeof(*out), required_vectors,
-                       sizeof(*required_vectors)))
-        return ZCL_CODE_VECTOR_HINT_ERR_OVERLAP;
-    *required_vectors = 0;
+    return ranges_overlap(wire, wire_len, out, sizeof(*out)) ||
+           ranges_overlap(wire, wire_len, required_vectors,
+                          sizeof(*required_vectors)) ||
+           ranges_overlap(out, sizeof(*out), required_vectors,
+                          sizeof(*required_vectors));
+}
+
+static enum zcl_code_vector_hint_error segment_parse_storage_check(
+    const uint8_t *wire, size_t wire_len,
+    struct zcl_code_embedding_segment_v1 *out, size_t vector_capacity,
+    struct zcl_code_embedding_vector_v1 *vector_storage,
+    const size_t *required_vectors)
+{
     if (vector_capacity > SIZE_MAX / sizeof(*vector_storage)) {
         if (vector_storage &&
             ranges_overlap(out, sizeof(*out), vector_storage,
@@ -883,6 +934,85 @@ enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_parse(
                        sizeof(*required_vectors)))
         return ZCL_CODE_VECTOR_HINT_ERR_OVERLAP;
     memset(out, 0, sizeof(*out));
+    return ZCL_CODE_VECTOR_HINT_OK;
+}
+
+/* Header-shape refusals for a parsed segment, in the order the parser
+ * always checked them. The caller clears out on any refusal. */
+static enum zcl_code_vector_hint_error segment_parse_shape_check(
+    const struct zcl_code_embedding_segment_v1 *out, size_t off,
+    size_t wire_len)
+{
+    if (off != ZCL_CODE_EMBEDDING_SEGMENT_HEADER_BYTES)
+        return ZCL_CODE_VECTOR_HINT_ERR_WIRE_SIZE;
+    if (out->vector_count > (uint64_t)SIZE_MAX)
+        return ZCL_CODE_VECTOR_HINT_ERR_OVERFLOW;
+    if (out->dimension == 0 ||
+        out->dimension > ZCL_CODE_EMBEDDING_DIMENSION_MAX ||
+        out->vector_count == 0)
+        return ZCL_CODE_VECTOR_HINT_ERR_LIMIT;
+    uint64_t expected_row = ZCL_CODE_EMBEDDING_ROW_ROOT_BYTES +
+                            (uint64_t)out->dimension;
+    if (out->row_bytes != expected_row ||
+        out->vector_count > UINT64_MAX / expected_row)
+        return ZCL_CODE_VECTOR_HINT_ERR_OVERFLOW;
+    uint64_t expected_payload = out->vector_count * expected_row;
+    if (out->payload_bytes != expected_payload ||
+        expected_payload > SIZE_MAX - off ||
+        (size_t)expected_payload + off != wire_len)
+        return ZCL_CODE_VECTOR_HINT_ERR_WIRE_SIZE;
+    return ZCL_CODE_VECTOR_HINT_OK;
+}
+
+/* Copies the rows into caller storage and runs the full validator. The
+ * capacity check comes after the wire checks, as it always has. */
+static enum zcl_code_vector_hint_error segment_parse_commit(
+    const uint8_t *wire, size_t wire_len, size_t off,
+    struct zcl_code_embedding_segment_v1 *out, size_t vector_capacity,
+    struct zcl_code_embedding_vector_v1 *vector_storage)
+{
+    if (out->vector_count > (uint64_t)vector_capacity || !vector_storage) {
+        memset(out, 0, sizeof(*out));
+        return ZCL_CODE_VECTOR_HINT_ERR_CAPACITY;
+    }
+    for (uint64_t i = 0; i < out->vector_count; i++) {
+        struct zcl_code_embedding_vector_v1 *vector = &vector_storage[i];
+        memcpy(vector->entity_root, wire + off, 32); off += 32;
+        memcpy(vector->concept_card_root, wire + off, 32); off += 32;
+        memcpy(vector->span_root, wire + off, 32); off += 32;
+        vector->values = (const int8_t *)(wire + off);
+        off += out->dimension;
+    }
+    out->vectors = vector_storage;
+    enum zcl_code_vector_hint_error error =
+        zcl_code_embedding_segment_v1_validate(out);
+    if (error == ZCL_CODE_VECTOR_HINT_OK && off == wire_len) return error;
+    memset(vector_storage, 0,
+           (size_t)out->vector_count * sizeof(*vector_storage));
+    memset(out, 0, sizeof(*out));
+    return error == ZCL_CODE_VECTOR_HINT_OK
+               ? ZCL_CODE_VECTOR_HINT_ERR_WIRE_SIZE : error;
+}
+
+enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_parse(
+    const uint8_t *wire, size_t wire_len,
+    struct zcl_code_embedding_segment_v1 *out,
+    struct zcl_code_embedding_vector_v1 *vector_storage,
+    size_t vector_capacity, size_t *required_vectors)
+{
+    if (!out || !required_vectors) return ZCL_CODE_VECTOR_HINT_ERR_NULL;
+    if (!wire) {
+        memset(out, 0, sizeof(*out));
+        *required_vectors = 0;
+        return ZCL_CODE_VECTOR_HINT_ERR_NULL;
+    }
+    if (segment_parse_outputs_alias(wire, wire_len, out, required_vectors))
+        return ZCL_CODE_VECTOR_HINT_ERR_OVERLAP;
+    *required_vectors = 0;
+    enum zcl_code_vector_hint_error storage_error =
+        segment_parse_storage_check(wire, wire_len, out, vector_capacity,
+                                    vector_storage, required_vectors);
+    if (storage_error != ZCL_CODE_VECTOR_HINT_OK) return storage_error;
     if (wire_len < ZCL_CODE_EMBEDDING_SEGMENT_HEADER_BYTES ||
         wire_len > ZCL_CODE_EMBEDDING_SEGMENT_WIRE_MAX)
         return ZCL_CODE_VECTOR_HINT_ERR_WIRE_SIZE;
@@ -906,22 +1036,12 @@ enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_parse(
         out->profile_root, out->payload_root,
     };
     off = roots_copy_in(wire, off, roots, sizeof(roots) / sizeof(roots[0]));
-    if (off != ZCL_CODE_EMBEDDING_SEGMENT_HEADER_BYTES) goto wire_fail;
-    if (out->vector_count > (uint64_t)SIZE_MAX) goto shape_fail;
-    if (out->dimension == 0 ||
-        out->dimension > ZCL_CODE_EMBEDDING_DIMENSION_MAX ||
-        out->vector_count == 0)
-        goto limit_fail;
-    uint64_t expected_row = ZCL_CODE_EMBEDDING_ROW_ROOT_BYTES +
-                            (uint64_t)out->dimension;
-    if (out->row_bytes != expected_row ||
-        out->vector_count > UINT64_MAX / expected_row)
-        goto shape_fail;
-    uint64_t expected_payload = out->vector_count * expected_row;
-    if (out->payload_bytes != expected_payload ||
-        expected_payload > SIZE_MAX - off ||
-        (size_t)expected_payload + off != wire_len)
-        goto wire_fail;
+    enum zcl_code_vector_hint_error shape_error =
+        segment_parse_shape_check(out, off, wire_len);
+    if (shape_error != ZCL_CODE_VECTOR_HINT_OK) {
+        memset(out, 0, sizeof(*out));
+        return shape_error;
+    }
     enum zcl_code_vector_hint_error wire_error =
         segment_wire_header_validate(out);
     if (wire_error == ZCL_CODE_VECTOR_HINT_OK)
@@ -931,39 +1051,8 @@ enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_parse(
         return wire_error;
     }
     *required_vectors = (size_t)out->vector_count;
-    if (out->vector_count > (uint64_t)vector_capacity || !vector_storage) {
-        memset(out, 0, sizeof(*out));
-        return ZCL_CODE_VECTOR_HINT_ERR_CAPACITY;
-    }
-    for (uint64_t i = 0; i < out->vector_count; i++) {
-        struct zcl_code_embedding_vector_v1 *vector = &vector_storage[i];
-        memcpy(vector->entity_root, wire + off, 32); off += 32;
-        memcpy(vector->concept_card_root, wire + off, 32); off += 32;
-        memcpy(vector->span_root, wire + off, 32); off += 32;
-        vector->values = (const int8_t *)(wire + off);
-        off += out->dimension;
-    }
-    out->vectors = vector_storage;
-    {
-        enum zcl_code_vector_hint_error error =
-            zcl_code_embedding_segment_v1_validate(out);
-        if (error == ZCL_CODE_VECTOR_HINT_OK && off == wire_len) return error;
-        memset(vector_storage, 0,
-               (size_t)out->vector_count * sizeof(*vector_storage));
-        memset(out, 0, sizeof(*out));
-        return error == ZCL_CODE_VECTOR_HINT_OK
-                   ? ZCL_CODE_VECTOR_HINT_ERR_WIRE_SIZE : error;
-    }
-
-shape_fail:
-    memset(out, 0, sizeof(*out));
-    return ZCL_CODE_VECTOR_HINT_ERR_OVERFLOW;
-limit_fail:
-    memset(out, 0, sizeof(*out));
-    return ZCL_CODE_VECTOR_HINT_ERR_LIMIT;
-wire_fail:
-    memset(out, 0, sizeof(*out));
-    return ZCL_CODE_VECTOR_HINT_ERR_WIRE_SIZE;
+    return segment_parse_commit(wire, wire_len, off, out, vector_capacity,
+                                vector_storage);
 }
 
 enum zcl_code_vector_hint_error zcl_code_embedding_segment_v1_root(
