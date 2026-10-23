@@ -437,10 +437,6 @@ contexts/commons/modules/vcs/src/zcode_app_run_observation.c:vcs_zcode_app_run_o
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_bid_dominates:18
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_choose:45
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_project:79
-contexts/commons/modules/vcs/src/zcode_attention_verified.c:av_frontier_next_verified:50
-contexts/commons/modules/vcs/src/zcode_attention_verified.c:av_verify_statement:19
-contexts/commons/modules/vcs/src/zcode_attention_verified.c:vcs_zcode_attention_frontier_next_verified_with_lifecycle_and_replication:80
-contexts/commons/modules/vcs/src/zcode_attention_verified.c:vcs_zcode_attention_frontier_next_verified_with_lineage_and_lifecycle:68
 contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_census_assemble:27
 contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_census_process_scope:56
 contexts/commons/modules/vcs/src/zcode_c23_corpus_checkpoint.c:checkpoint_shape:54
