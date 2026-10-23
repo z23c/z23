@@ -519,6 +519,11 @@ static bool source_checkout_windows_entry_append(
               (out->count + 1u) * sizeof(*out->items),
               "vcs.source_checkout.windows_entries")
         : NULL;
+    /* realloc may have moved and freed the old block: adopt the new one
+     * before the conversion can fail, or entries_free would free the old
+     * pointer again and leak this one. */
+    if (items)
+        out->items = items;
     if (!items || WideCharToMultiByte(
             CP_UTF8, WC_ERR_INVALID_CHARS, entry->FileName,
             (int)chars, name, needed, NULL, NULL) != needed) {
@@ -526,7 +531,6 @@ static bool source_checkout_windows_entry_append(
         return false;
     }
     name[needed] = '\0';
-    out->items = items;
     out->items[out->count++] =
         (struct source_checkout_windows_entry){
             .name = name,
