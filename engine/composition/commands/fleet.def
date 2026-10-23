@@ -171,11 +171,15 @@ ZCL_COMMAND_READY_READ(
     "or unmeasured has nothing to brief. The card carries no base: take it "
     "from origin/main. outcomes, attempts_dir, repo, lintc_dir, baseline and "
     "brief override the paths the measurement reads, as for `fleet "
-    "objectives`. It asks only the local node, no peer, and writes nothing.",
+    "objectives`. The complexity card is narrowed to one file chosen from the "
+    "baseline (the target_file and its pins); exclude is a comma list of "
+    "paths to skip, for files already in flight. It asks only the local "
+    "node, no peer, and writes nothing.",
     32768,
     "fleet,objectives,brief,work,card,next,runner",
     "zcl.fleet_objectives_brief_input.v1", "zcl.work_card.v1",
-    "id,runner_ok_only,outcomes,attempts_dir,repo,lintc_dir,baseline,brief", "",
+    "id,runner_ok_only,outcomes,attempts_dir,repo,lintc_dir,baseline,brief,"
+    "exclude", "",
     "z23-dev fleet objectives brief",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,

@@ -18,7 +18,16 @@
  *                contexts/wallet/, consensus storage (coins, event log,
  *                block index, nullifiers) or the land driver
  *                (tools/command/native_dev_land*). 0 hands the objective to
- *                a human-supervised lane. An unattended runner may take only
+ *                a human-supervised lane. It is also 0 when the work would
+ *                edit what grades the runner: the objectives leaves and
+ *                catalogs (tools/command/native_fleet_objectives*,
+ *                objective_work.def, objectives.def, commands/fleet.def),
+ *                the lint gates (the tools/lint/lintc tree), the
+ *                platform/deploy tree
+ *                or a pinned Commons package root (the registry in
+ *                zcode_package_registry.def). The brief forbids all of
+ *                these on every card and narrows functions_over_complexity_cap
+ *                to one file. An unattended runner may take only
  *                runner_ok=1 rows.
  *   owned_paths_ a short comma list, no spaces, of repo globs where the fix
  *                lives.
@@ -58,7 +67,7 @@ Z23_OBJECTIVE_WORK("commits_landed_today", 0,
                    "the count can only rise by landing more work, which is "
                    "the loop's output and not a file to edit")
 
-Z23_OBJECTIVE_WORK("lint_families_over_ceiling", 1,
+Z23_OBJECTIVE_WORK("lint_families_over_ceiling", 0,
                    "tools/lint/lintc/**",
                    "z23-dev fleet objectives",
                    "a split would change what a gate accepts, or any file "
@@ -66,20 +75,20 @@ Z23_OBJECTIVE_WORK("lint_families_over_ceiling", 1,
 
 Z23_OBJECTIVE_WORK("functions_over_complexity_cap", 1,
                    "apps/**,platform/**,engine/composition/**,contexts/commons/**,"
-                   "contexts/explorer/**,tools/lint/lintc/**,"
+                   "contexts/explorer/**,"
                    "tools/lint/cyclomatic_complexity_baseline.txt",
                    "z23-dev fleet objectives",
                    "the function sits in core/, engine/reducer/, "
                    "contexts/wallet/, consensus storage or the land driver, "
                    "or a split would change behaviour")
 
-Z23_OBJECTIVE_WORK("fresh_node_sync_eta_s", 1,
+Z23_OBJECTIVE_WORK("fresh_node_sync_eta_s", 0,
                    "tools/command/native_fleet_objectives*.c,engine/composition/objectives.def",
                    "z23-dev fleet objectives",
                    "measuring it needs a change to sync code or to a "
                    "consensus store, or a real fresh-node run")
 
-Z23_OBJECTIVE_WORK("tokens_per_landed_commit", 1,
+Z23_OBJECTIVE_WORK("tokens_per_landed_commit", 0,
                    "tools/command/native_fleet_objectives*.c,engine/composition/objectives.def",
                    "z23-dev fleet objectives",
                    "the token count has no ledger to read without a new "

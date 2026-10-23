@@ -18,6 +18,7 @@
 #include "json/json.h"
 #include "kernel/command_registry.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,22 +70,53 @@ struct fob_paths {
     char brief[600];
     char lintc[600];
     char baseline[600];
+    char repo[600];
+    char exclude[300];
 };
 
+/* Writes repo/<rel> with `lines` lines, making the parent directories. */
+static bool fob_repo_file(const struct fob_paths *p, const char *rel, int lines)
+{
+    char path[1300], dir[1300];
+    char *slash;
+    (void)snprintf(path, sizeof(path), "%s/%s", p->repo, rel);
+    (void)snprintf(dir, sizeof(dir), "%s", path);
+    slash = strrchr(dir, '/');
+    if (!slash)
+        return false;
+    for (char *c = dir + strlen(p->repo) + 1; c <= slash; c++) {
+        char keep = *c;
+        if (*c != '/' && c != slash)
+            continue;
+        *c = '\0';
+        if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+            return false;
+        *c = keep;
+    }
+    return fob_write_n_lines(path, lines);
+}
+
 /* A node at 2200 MB (a product row over its 1024 target), one oversized lint
- * file, and three cyclomatic pin rows. Everything else is unmeasured. */
+ * file, and three cyclomatic pin rows in three small repo files. Everything
+ * else is unmeasured. */
 static bool fob_fixture(const char *root, struct fob_paths *p)
 {
     char file[700];
     (void)snprintf(p->brief, sizeof(p->brief), "%s/brief.json", root);
     (void)snprintf(p->lintc, sizeof(p->lintc), "%s/lintc", root);
     (void)snprintf(p->baseline, sizeof(p->baseline), "%s/baseline.txt", root);
+    (void)snprintf(p->repo, sizeof(p->repo), "%s/repo", root);
+    p->exclude[0] = '\0';
     (void)snprintf(file, sizeof(file), "%s/big.c", p->lintc);
-    return mkdir(p->lintc, 0700) == 0 &&
+    return mkdir(p->lintc, 0700) == 0 && mkdir(p->repo, 0700) == 0 &&
            fob_write(p->brief, "{\"hstar\":1000,\"gap\":0,\"rss_mb\":2200,"
                                "\"serving\":true}") &&
            fob_write_n_lines(file, 1600) &&
-           fob_write(p->baseline, "a/x.c:f:16\na/y.c:g:17\na/z.c:h:18\n");
+           fob_repo_file(p, "apps/x.c", 10) &&
+           fob_repo_file(p, "apps/y.c", 10) &&
+           fob_repo_file(p, "apps/z.c", 10) &&
+           fob_write(p->baseline,
+                     "apps/x.c:f:16\napps/y.c:g:17\napps/z.c:h:18\n");
 }
 
 struct fob_call {
@@ -104,7 +136,9 @@ static void fob_begin(struct fob_call *c, const char *path,
     (void)json_push_kv_str(&c->input, "baseline", p->baseline);
     (void)json_push_kv_str(&c->input, "outcomes", FOB_NOWHERE "/o.jsonl");
     (void)json_push_kv_str(&c->input, "attempts_dir", FOB_NOWHERE "/a");
-    (void)json_push_kv_str(&c->input, "repo", FOB_NOWHERE "/repo");
+    (void)json_push_kv_str(&c->input, "repo", p->repo);
+    if (p->exclude[0])
+        (void)json_push_kv_str(&c->input, "exclude", p->exclude);
     if (id)
         (void)json_push_kv_str(&c->input, "id", id);
     if (runner_only)
@@ -364,6 +398,197 @@ _test_next:;
     return failures;
 }
 
+/* What grades the runner or pins Commons: literal prefixes (a path ending in
+ * '/' is a tree) every card must forbid and no runner_ok row may own inside. */
+static const char *const k_fob_protected[] = {
+    "tools/command/native_fleet_objectives",
+    "engine/composition/objective_work.def",
+    "engine/composition/objectives.def",
+    "engine/composition/commands/fleet.def",
+    "tools/lint/lintc/",
+    "platform/deploy/",
+#define ZCODE_PACKAGE(name_, dir_, ...) dir_ "/",
+#include "../../../engine/composition/zcode_package_registry.def"
+#undef ZCODE_PACKAGE
+};
+#define FOB_PROTECTED_COUNT \
+    (sizeof(k_fob_protected) / sizeof(k_fob_protected[0]))
+
+/* True when a token of the comma list `csv` starts inside a protected path. */
+static bool fob_owned_inside_protected(const char *csv)
+{
+    const char *at = csv;
+    while (*at) {
+        size_t len = strcspn(at, ",");
+        for (size_t i = 0; i < FOB_PROTECTED_COUNT; i++)
+            if (strncmp(at, k_fob_protected[i],
+                        strlen(k_fob_protected[i])) == 0)
+                return true;
+        at += len;
+        if (*at)
+            at++;
+    }
+    return false;
+}
+
+/* True when a forbidden-list token is a prefix of `path` (a trailing '*'
+ * ends the literal part). */
+static bool fob_card_refuses(const struct json_value *forbidden,
+                             const char *path)
+{
+    for (size_t i = 0; forbidden && i < json_size(forbidden); i++) {
+        const char *tok = json_get_str(json_at(forbidden, i));
+        if (strncmp(path, tok, strcspn(tok, "*")) == 0)
+            return true;
+    }
+    return false;
+}
+
+static int fob_case_protected(const struct fob_paths *p)
+{
+    int failures = 0;
+    struct fob_call c;
+    char path[300];
+    TEST("brief: the card forbids every runner-grading path and every path "
+         "under a pinned Commons root") {
+        ASSERT(fob_brief(&c, p, NULL, true));
+        for (size_t i = 0; i < FOB_PROTECTED_COUNT; i++) {
+            const char *pre = k_fob_protected[i];
+            bool tree = pre[strlen(pre) - 1] == '/';
+            bool leaf = strstr(pre, ".def") != NULL;
+            (void)snprintf(path, sizeof(path), "%s%s", pre,
+                           leaf ? "" : (tree ? "src/x.c" : "_x.c"));
+            if (!fob_card_refuses(json_get(&c.reply.data, "forbidden"), path))
+                printf("  not forbidden: %s\n", path);
+            ASSERT(fob_card_refuses(json_get(&c.reply.data, "forbidden"),
+                                    path));
+        }
+        ASSERT(fob_card_refuses(json_get(&c.reply.data, "forbidden"),
+                                "platform/modules/base/src/x.c"));
+        ASSERT(fob_card_refuses(json_get(&c.reply.data, "forbidden"),
+                                "contexts/commons/modules/vcs/src/x.c"));
+        ASSERT(!fob_card_refuses(json_get(&c.reply.data, "forbidden"),
+                                 "apps/x.c"));
+        fob_end(&c);
+        PASS();
+    }
+    TEST("brief: no runner_ok row owns a path inside a protected path") {
+        for (size_t j = 0; j < FOB_WORK_COUNT; j++)
+            if (k_fob_work[j].runner_ok)
+                ASSERT(!fob_owned_inside_protected(k_fob_work[j].owned));
+        ASSERT(fob_owned_inside_protected("tools/lint/lintc/**"));
+        ASSERT(fob_owned_inside_protected(
+            "tools/command/native_fleet_objectives*.c"));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+/* A repo of pinned files for the narrowing: a pinned-root file, a test file,
+ * an over-1300-line file, an excluded-by-name file, and eligible apps files
+ * a (2 pins), c and d (4 pins each, max M 17). */
+static bool fob_narrow_fixture(const char *root, struct fob_paths *p)
+{
+    (void)snprintf(p->baseline, sizeof(p->baseline), "%s/narrow.txt", root);
+    p->exclude[0] = '\0';
+    return fob_repo_file(p, "platform/modules/base/src/p.c", 10) &&
+           fob_repo_file(p, "tests/harness/src/t.c", 10) &&
+           fob_repo_file(p, "apps/big.c", 1400) &&
+           fob_repo_file(p, "apps/ex.c", 10) &&
+           fob_repo_file(p, "apps/a.c", 10) &&
+           fob_repo_file(p, "apps/c.c", 10) &&
+           fob_repo_file(p, "apps/d.c", 10) &&
+           fob_write(p->baseline,
+                     "platform/modules/base/src/p.c:f:16\n"
+                     "platform/modules/base/src/p.c:g:16\n"
+                     "platform/modules/base/src/p.c:h:16\n"
+                     "tests/harness/src/t.c:f:16\n"
+                     "apps/big.c:f:16\napps/big.c:g:16\napps/big.c:h:16\n"
+                     "apps/ex.c:f:16\napps/ex.c:g:16\napps/ex.c:h:16\n"
+                     "apps/gone.c:f:16\napps/gone.c:g:16\napps/gone.c:h:16\n"
+                     "apps/a.c:f:16\napps/a.c:g:16\n"
+                     "apps/c.c:f:17\napps/c.c:g:16\napps/c.c:h:16\n"
+                     "apps/c.c:i#2:16\n"
+                     "apps/d.c:f:17\napps/d.c:g:16\napps/d.c:h:16\n"
+                     "apps/d.c:i:16\n");
+}
+
+/* Briefs the complexity card with `exclude` and checks the chosen file. */
+static bool fob_narrow_picks(struct fob_paths *p, const char *exclude,
+                             const char *want_file)
+{
+    struct fob_call c;
+    bool ok;
+    (void)snprintf(p->exclude, sizeof(p->exclude), "apps/ex.c%s%s",
+                   exclude[0] ? "," : "", exclude);
+    ok = fob_brief(&c, p, NULL, true) &&
+         c.reply.status == ZCL_COMMAND_STATUS_PASSED;
+    if (ok && want_file) {
+        const struct json_value *owned = json_get(&c.reply.data, "owned");
+        ok = strcmp(json_get_str(json_get(&c.reply.data, "target_file")),
+                    want_file) == 0 &&
+             json_size(owned) == 2 &&
+             strcmp(json_get_str(json_at(owned, 0)), want_file) == 0 &&
+             strcmp(json_get_str(json_at(owned, 1)),
+                    "tools/lint/cyclomatic_complexity_baseline.txt") == 0;
+    } else if (ok) {
+        ok = json_get(&c.reply.data, "owned") == NULL &&
+             strcmp(json_get_str(json_get(&c.reply.data, "reason")),
+                    "NO_ELIGIBLE_FILE") == 0;
+    }
+    fob_end(&c);
+    return ok;
+}
+
+static int fob_case_narrow(const char *root, struct fob_paths *p)
+{
+    int failures = 0;
+    struct fob_call c;
+    TEST("brief: the complexity card narrows to the one file with 3-6 pins, "
+         "the lowest max M, then path order") {
+        ASSERT(fob_narrow_fixture(root, p));
+        ASSERT(fob_narrow_picks(p, "", "apps/c.c"));
+        ASSERT(fob_brief(&c, p, NULL, true));
+        ASSERT(json_get(&c.reply.data, "pins") != NULL);
+        ASSERT_EQ(json_size(json_get(&c.reply.data, "pins")), (size_t)4);
+        ASSERT_STR_EQ(json_get_str(json_get(json_at(json_get(&c.reply.data,
+                                                             "pins"), 0),
+                                            "function")), "f");
+        ASSERT_EQ(json_get_int(json_get(json_at(json_get(&c.reply.data,
+                                                         "pins"), 0), "m")), 17);
+        ASSERT(strstr(json_get_str(json_get(&c.reply.data, "outcome")),
+                      "Bring 4 functions in apps/c.c to cyclomatic "
+                      "complexity <= 15 by behaviour-preserving "
+                      "extraction.") != NULL);
+        fob_end(&c);
+        PASS();
+    }
+    TEST("brief: exclude skips files in flight, and a file-less answer is a "
+         "typed no-card") {
+        p->exclude[0] = '\0';
+        ASSERT(fob_brief(&c, p, NULL, true));
+        ASSERT_STR_EQ(json_get_str(json_get(&c.reply.data, "target_file")),
+                      "apps/ex.c");
+        fob_end(&c);
+        ASSERT(fob_narrow_picks(p, "apps/c.c", "apps/d.c"));
+        ASSERT(fob_narrow_picks(p, "apps/zzz.c,apps/c.c", "apps/d.c"));
+        ASSERT(fob_narrow_picks(p, "apps/c.c,apps/d.c", "apps/a.c"));
+        ASSERT(fob_narrow_picks(p, "apps/c.c,apps/d.c,apps/a.c", NULL));
+        PASS();
+    }
+    TEST("brief: other objectives' cards are not narrowed") {
+        p->exclude[0] = '\0';
+        ASSERT(fob_brief(&c, p, "node_rss_mb", false));
+        ASSERT(json_get(&c.reply.data, "target_file") == NULL);
+        ASSERT(json_get(&c.reply.data, "pins") == NULL);
+        fob_end(&c);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 int test_fleet_objectives_brief(void);
 int test_fleet_objectives_brief(void)
 {
@@ -381,6 +606,8 @@ int test_fleet_objectives_brief(void)
         failures += fob_case_pick(&paths);
         failures += fob_case_card(&paths);
         failures += fob_case_refusals(&paths);
+        failures += fob_case_protected(&paths);
+        failures += fob_case_narrow(root, &paths);
     }
     (void)unsetenv("ZCL_LAND_OBJECTIVES_DATADIR");
     (void)test_rm_rf_recursive(root);
