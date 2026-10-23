@@ -219,9 +219,12 @@ void boot_start_projection_storage(const char *datadir)
      * + tx lock so their BEGIN IMMEDIATE never serialises on the reducer drive's
      * kernel tx lock. Non-fatal — a projection fold that finds no handle just
      * idles its tick; the kernel fold is unaffected. */
+    /* proj.* sub-marks time each segment below; print-only, no step change. */
+    int64_t t_seg = boot_clock_ms();
     if (!projection_store_open(datadir))
         fprintf(stderr,  // obs-ok:phase4-storage
                 "[phase4] projection_store unavailable; projection folds idle\n");
+    t_seg = boot_submark("proj.store_open", t_seg);
 
     char mempool_path[PATH_MAX];
     char peers_path[PATH_MAX];
@@ -243,6 +246,7 @@ void boot_start_projection_storage(const char *datadir)
                 "[phase4] event log unavailable; projections disabled\n");
         return;
     }
+    t_seg = boot_submark("proj.event_log", t_seg);
 
     mempool_projection_set_event_log(g_phase4_event_log);
     g_phase4_mempool_projection =
@@ -262,6 +266,7 @@ void boot_start_projection_storage(const char *datadir)
                     (unsigned long long)off);
         }
     }
+    t_seg = boot_submark("proj.mempool", t_seg);
 
     peers_projection_set_event_log(g_phase4_event_log);
     g_phase4_peers_projection =
@@ -280,6 +285,7 @@ void boot_start_projection_storage(const char *datadir)
                 "[phase4] peers_projection caught up to offset=%llu\n",
                 (unsigned long long)off);
     }
+    t_seg = boot_submark("proj.peers", t_seg);
 
     /* topology_store: the addr-gossip / crawler-result GRAPH ("who
      * advertises whom"). Its own dedicated file, no event log — best-effort,
@@ -287,6 +293,7 @@ void boot_start_projection_storage(const char *datadir)
     if (!topology_store_open(datadir))
         fprintf(stderr,  // obs-ok:phase4-storage
                 "[phase4] topology_store unavailable; graph disabled\n");
+    t_seg = boot_submark("proj.topology", t_seg);
 
     /* The canonical UTXO set is the kernel coins store (coins_kv), read live
      * through coins_view_kv and authored in-txn by the utxo_apply stage; there
@@ -299,6 +306,7 @@ void boot_start_projection_storage(const char *datadir)
                 "[phase4] block_index_projection unavailable\n");
         return;
     }
+    t_seg = boot_submark("proj.block_index", t_seg);
 
     /* ZNAM projection replay. */
     char znam_path[PATH_MAX];
@@ -326,6 +334,7 @@ void boot_start_projection_storage(const char *datadir)
                 "[phase4] znam_projection caught up to offset=%llu\n",
                 (unsigned long long)zoff);
     }
+    t_seg = boot_submark("proj.znam", t_seg);
 
     /* Wallet-view projection replay. Set the event-log emitter only after
      * initial replay so boot catch-up cannot race new wallet view events. */
@@ -433,6 +442,7 @@ void boot_start_projection_storage(const char *datadir)
                     (unsigned long long)hoff);
         }
     }
+    (void)boot_submark("proj.rest", t_seg);
 }
 
 void boot_stop_projection_storage(void)
