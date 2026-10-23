@@ -70,11 +70,6 @@ cognition/modules/codeindex/src/codeindex_impact.c:codeindex_reverse_includes:17
 cognition/modules/codeindex/src/codeindex_impact.c:impact_closure_impl:26
 cognition/modules/codeindex/src/codeindex_incremental.c:ci_store_diff_merkle_leaves:21
 cognition/modules/codeindex/src/codeindex_incremental.c:incremental_replace_file:18
-cognition/modules/codeindex/src/codeindex_inventory.c:inv_body_for_occurrence:16
-cognition/modules/codeindex/src/codeindex_inventory.c:inv_build_capabilities:51
-cognition/modules/codeindex/src/codeindex_inventory.c:inv_derive_duplicates:18
-cognition/modules/codeindex/src/codeindex_inventory.c:inv_derive_invariants:25
-cognition/modules/codeindex/src/codeindex_inventory.c:inv_invariant_push:23
 cognition/modules/codeindex/src/codeindex_inventory_evidence.c:inv_count_uses:44
 cognition/modules/codeindex/src/codeindex_inventory_evidence.c:inv_registered_reachability:42
 cognition/modules/codeindex/src/codeindex_inventory_scan.c:inv_collect_dir:20
