@@ -75,11 +75,12 @@ static void shutdown_bind_saved_flat_timed(
     int64_t t0 = boot_clock_ms();
     bool bound = block_index_projection_bind_saved_flat_state(bip, id, state);
     int64_t ms = boot_clock_ms() - t0;
-    printf("[shutdown]   %-28s %lldms rows=%llu rows/s=%llu\n",
+    printf("[shutdown]   %-28s %lldms rows=%llu rows/s=%llu threads=%u\n",
            "shutdown.flat_bind", (long long)ms,
            (unsigned long long)id->row_count,
            (unsigned long long)(ms > 0
-               ? id->row_count * 1000ULL / (uint64_t)ms : id->row_count));
+               ? id->row_count * 1000ULL / (uint64_t)ms : id->row_count),
+           block_index_projection_last_bind_threads(bip));
     if (!bound)
         LOG_WARN("shutdown", "block index flat/projection bind refused; "
                  "next boot will use the full integrity scan");

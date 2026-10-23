@@ -44,6 +44,7 @@
 #include "primitives/block.h"
 #include "core/amount.h"
 
+#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -718,6 +719,203 @@ static int run_bound_topup_integration(void)
     return failures;
 }
 
+
+/* ---- Parallel flat bind: the verdict does not depend on the worker count -- */
+
+#define BINDPAR_ROWS 4000u
+
+struct bindpar_ctx {
+    uint8_t refuse[32];
+    bool use_refuse;
+};
+
+static bool bindpar_cb(const uint8_t hash[32],
+                       const struct disk_block_index *idx, void *user)
+{
+    const struct bindpar_ctx *c = user;
+    (void)idx;
+    return !(c->use_refuse && memcmp(hash, c->refuse, 32) == 0);
+}
+
+/* Spread hashes over the whole first-byte space so every range has rows. */
+static void bindpar_hash(unsigned i, struct uint256 *out)
+{
+    uint64_t x = (uint64_t)i * 0x9E3779B97F4A7C15ULL + 12345u;
+    memset(out, 0, sizeof(*out));
+    for (size_t b = 0; b < 32; b++) {
+        x ^= x >> 29; x *= 0xBF58476D1CE4E5B9ULL; x ^= x >> 32;
+        out->data[b] = (uint8_t)x;
+    }
+}
+
+static bool bindpar_sql(const char *path, const char *sql)
+{
+    sqlite3 *raw = NULL;
+    bool ok = sqlite3_open_v2(path, &raw, SQLITE_OPEN_READWRITE, NULL) ==
+              SQLITE_OK &&
+              sqlite3_exec(raw, sql, NULL, NULL, NULL) == SQLITE_OK;
+    if (raw) sqlite3_close(raw);
+    return ok;
+}
+
+static int64_t bindpar_scalar(const char *path, const char *sql)
+{
+    sqlite3 *raw = NULL;
+    sqlite3_stmt *stmt = NULL;
+    int64_t v = -1;
+    if (sqlite3_open_v2(path, &raw, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(raw, sql, -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW) // raw-sql-ok:test-fixture-read
+        v = sqlite3_column_int64(stmt, 0);
+    sqlite3_finalize(stmt);
+    if (raw) sqlite3_close(raw);
+    return v;
+}
+
+/* Meta fingerprint: the four flat_* keys joined, plus the dirty row count. */
+static int64_t bindpar_meta_sum(const char *path)
+{
+    return bindpar_scalar(path,
+        "SELECT (SELECT COUNT(*) FROM projection_meta WHERE k LIKE 'flat_%')"
+        "*1000000 + (SELECT COUNT(*) FROM block_index_dirty)");
+}
+
+static bool bindpar_meta_text(const char *path, char *out, size_t cap)
+{
+    sqlite3 *raw = NULL;
+    sqlite3_stmt *stmt = NULL;
+    bool ok = false;
+    if (sqlite3_open_v2(path, &raw, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK &&
+        sqlite3_prepare_v2(raw, "SELECT group_concat(k||'='||v,';') FROM "
+            "(SELECT k,v FROM projection_meta WHERE k LIKE 'flat_%' "
+            "ORDER BY k)", -1, &stmt, NULL) == SQLITE_OK &&
+        sqlite3_step(stmt) == SQLITE_ROW) { // raw-sql-ok:test-fixture-read
+        const unsigned char *t = sqlite3_column_text(stmt, 0);
+        ok = t && snprintf(out, cap, "%s", (const char *)t) < (int)cap;
+    }
+    sqlite3_finalize(stmt);
+    if (raw) sqlite3_close(raw);
+    return ok;
+}
+
+static bool bindpar_fixture(block_index_projection_t *bip, event_log_t *log,
+                            struct uint256 *first, struct uint256 *mid,
+                            struct uint256 *last)
+{
+    struct uint256 lo, hi, h;
+    memset(&lo, 0xFF, sizeof(lo));
+    memset(&hi, 0, sizeof(hi));
+    for (unsigned i = 0; i < BINDPAR_ROWS; i++) {
+        bindpar_hash(i, &h);
+        if (!topup_emit_row(log, &h, NULL, (int)i + 1, BLOCK_VALID_SCRIPTS,
+                            0, 0, 1))
+            return false;
+        if (memcmp(h.data, lo.data, 32) < 0) lo = h;
+        if (memcmp(h.data, hi.data, 32) > 0) hi = h;
+    }
+    *first = lo; *last = hi;
+    bindpar_hash(BINDPAR_ROWS / 2, mid);
+    return block_index_projection_catch_up(bip) != UINT64_MAX;
+}
+
+/* Refuse one row in a given range with several workers: the bind must fail
+ * and leave projection_meta and block_index_dirty as they were. */
+static int bindpar_refuse_case(block_index_projection_t *bip,
+                               const char *db_path, const uint8_t digest[32],
+                               const struct uint256 *row, const char *name)
+{
+    int failures = 0;
+    char before[512] = "", after[512] = "";
+    int64_t sum0 = bindpar_meta_sum(db_path);
+    bool got0 = bindpar_meta_text(db_path, before, sizeof(before));
+    struct bindpar_ctx c = { .use_refuse = true };
+    memcpy(c.refuse, row->data, 32);
+    block_index_projection_bind_workers_for_test(8);
+    bool bound = block_index_projection_bind_flat_if_covered(
+        bip, digest, 777, BINDPAR_ROWS, bindpar_cb, &c);
+    block_index_projection_bind_workers_for_test(0);
+    bool got1 = bindpar_meta_text(db_path, after, sizeof(after));
+    TOPUP_CHECK(name, !bound && got0 && got1 && strcmp(before, after) == 0 &&
+                bindpar_meta_sum(db_path) == sum0 && sum0 % 1000000 > 0);
+    return failures;
+}
+
+/* Commit with 1, 3 and 8 workers; the meta must be identical each time. */
+static int bindpar_commit_cases(block_index_projection_t *bip,
+                                const char *db_path, const uint8_t digest[32],
+                                char want[512])
+{
+    int failures = 0;
+    const unsigned workers[] = {1, 3, 8};
+    char got[512] = "";
+    struct bindpar_ctx all = { .use_refuse = false };
+    for (size_t i = 0; i < 3; i++) {
+        /* A dirty row so the clear is observable. */
+        bool dirty = bindpar_sql(db_path, "INSERT OR IGNORE INTO "
+            "block_index_dirty(hash) VALUES(x'01')");
+        block_index_projection_bind_workers_for_test(workers[i]);
+        bool bound = block_index_projection_bind_flat_if_covered(
+            bip, digest, 777, BINDPAR_ROWS, bindpar_cb, &all);
+        block_index_projection_bind_workers_for_test(0);
+        bool meta = bindpar_meta_text(db_path, i == 0 ? want : got, 512);
+        TOPUP_CHECK("bindpar: bind commits with 1, 3 and 8 workers",
+                    dirty && bound && meta &&
+                    block_index_projection_last_bind_threads(bip) ==
+                        workers[i] &&
+                    bindpar_scalar(db_path,
+                        "SELECT COUNT(*) FROM block_index_dirty") == 0 &&
+                    (i == 0 || strcmp(want, got) == 0));
+    }
+    return failures;
+}
+
+static int run_bind_parallel_cases(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "topup", "bindpar");
+    char log_path[320], db_path[320];
+    snprintf(log_path, sizeof(log_path), "%s/events", dir);
+    snprintf(db_path, sizeof(db_path), "%s/projection.db", dir);
+    event_log_t *log = event_log_open(log_path);
+    block_index_projection_t *bip = log
+        ? block_index_projection_open(db_path, log) : NULL;
+    struct uint256 first, mid, last;
+    bool ready = bip && bindpar_fixture(bip, log, &first, &mid, &last) &&
+        bindpar_scalar(db_path, "SELECT COUNT(*) FROM block_index") ==
+            (int64_t)BINDPAR_ROWS;
+    TOPUP_CHECK("bindpar: fixture ready", ready);
+    uint8_t digest[32], other[32];
+    memset(digest, 0x6b, sizeof(digest));
+    memset(other, 0x7c, sizeof(other));
+    char want[512] = "";
+    if (ready)
+        failures += bindpar_commit_cases(bip, db_path, digest, want);
+    TOPUP_CHECK("bindpar: committed meta carries the flat identity",
+                ready && strstr(want, "flat_row_count=4000") != NULL &&
+                strstr(want, "flat_payload_size=777") != NULL);
+    if (ready) {
+        (void)bindpar_sql(db_path, "INSERT OR IGNORE INTO "
+            "block_index_dirty(hash) VALUES(x'02')");
+        failures += bindpar_refuse_case(bip, db_path, other, &first,
+        "bindpar: uncovered row in the first range refuses, meta unchanged");
+        failures += bindpar_refuse_case(bip, db_path, other, &mid,
+        "bindpar: uncovered row in a middle range refuses, meta unchanged");
+        failures += bindpar_refuse_case(bip, db_path, other, &last,
+        "bindpar: uncovered row in the last range refuses, meta unchanged");
+    }
+    struct bindpar_ctx all = { .use_refuse = false };
+    block_index_projection_bind_workers_for_test(3);
+    TOPUP_CHECK("bindpar: a flat row count below the projection refuses",
+                ready && !block_index_projection_bind_flat_if_covered(
+                    bip, other, 777, BINDPAR_ROWS - 1, bindpar_cb, &all));
+    block_index_projection_bind_workers_for_test(0);
+    if (bip) block_index_projection_close(bip);
+    if (log) event_log_close(log);
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_block_index_topup(void)
 {
     int failures = 0;
@@ -948,7 +1146,8 @@ int test_block_index_topup(void)
                 + run_admission_gate_cases()
                 + run_bind_excludes_refused_row_case()
                 + run_bind_term_order_accepts()
-                + run_bind_term_order_refuses();
+                + run_bind_term_order_refuses()
+                + run_bind_parallel_cases();
     chain_params_select(CHAIN_MAIN);
     return failures;
 }

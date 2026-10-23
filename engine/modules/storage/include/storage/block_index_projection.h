@@ -119,6 +119,15 @@ bool block_index_projection_bind_flat_if_covered(
     uint64_t payload_size, uint64_t row_count,
     block_index_projection_cb covered, void *user);
 
+/* Threads the last covered bind used to verify rows (1 = single pass). The
+ * `covered` callback of block_index_projection_bind_flat_if_covered runs on up
+ * to 8 threads at once, so it must be thread-safe and side-effect free. */
+unsigned block_index_projection_last_bind_threads(block_index_projection_t *p);
+
+#ifdef ZCL_TESTING
+void block_index_projection_bind_workers_for_test(unsigned workers);
+#endif
+
 /* Iterate only hashes replaced after the bound flat snapshot. Returns 1 when
  * the exact identity matched, 0 when the caller must use the full scan, and
  * -1 on a storage error. */
