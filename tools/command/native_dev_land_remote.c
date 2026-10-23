@@ -27,6 +27,7 @@
  */
 
 #include "command/native_command.h"
+#include "command/native_dev_land_precheck.h"
 #include "command/native_devagent.h"
 
 #include "base/safe_alloc.h"
@@ -312,6 +313,8 @@ static void dlr_recv_submit(const struct dlr_recv *r,
     json_init(&in);
     json_set_object(&in);
     (void)json_push_kv_str(&in, "tip", r->sha);
+    /* The sender ran the precheck in the lane it bundled. */
+    (void)json_push_kv_str(&in, "precheck", "sent");
     (void)json_push_kv_str(&in, "worktree", r->wt);
     if (note)
         (void)json_push_kv_str(&in, "note", note);
@@ -378,6 +381,7 @@ struct dlr_send {
     char remote[DLR_PATH];
     char dest[DLR_PATH + 160];
     long ahead;
+    char note_buf[DLR_NOTE_MAX + 1];
 };
 
 static void dlr_send_fail(struct zcl_command_reply *reply, const char *code,
@@ -562,6 +566,23 @@ static void dlr_send_relay(const char *out, int rc,
                       rc < 0 ? "ssh could not be launched" : "ssh exit nonzero");
 }
 
+/* The local lint precheck, before the bundle is made; --precheck=skip
+ * appends its marker to the note that travels to the queue host. */
+static bool dlr_send_precheck(struct dlr_send *s,
+                              const struct zcl_command_request *req,
+                              struct zcl_command_reply *reply)
+{
+    (void)snprintf(s->note_buf, sizeof(s->note_buf), "%s",
+                   s->note ? s->note : "");
+    if (!zcl_dev_land_precheck("dev.land.send", s->root, NULL,
+                               dlr_str(req, "precheck"), s->note_buf,
+                               sizeof(s->note_buf), reply))
+        return false;
+    if (s->note_buf[0])
+        s->note = s->note_buf;
+    return true;
+}
+
 static void dlr_send_receive(const struct dlr_send *s,
                              struct zcl_command_reply *reply)
 {
@@ -604,7 +625,8 @@ static void dlr_send(const struct zcl_command_request *req,
 {
     struct dlr_send *s = zcl_calloc(1, sizeof(*s), "dev_land_remote.send");
     if (dlr_send_args(req, s, reply) && dlr_send_prepare(s, reply) &&
-        dlr_send_bundle(s, reply) && dlr_send_copy(s, reply))
+        dlr_send_precheck(s, req, reply) && dlr_send_bundle(s, reply) &&
+        dlr_send_copy(s, reply))
         dlr_send_receive(s, reply);
     if (s->bundle[0])
         (void)remove(s->bundle);

@@ -25,6 +25,7 @@
 #include "command/native_dev_land_prepare.h"
 #include "command/native_fleet_objectives.h"
 #include "command/native_dev_land_qualify.h"
+#include "command/native_dev_land_precheck.h"
 #include "controllers/agent_impact_rules.h"
 #include "command/native_dev_land_attestation.h"
 #include "platform/logical_cpu.h"
@@ -13179,6 +13180,344 @@ _test_next:;
     return failures;
 }
 
+/* ── dev land precheck ────────────────────────────────────────────────────
+ *
+ * The lint precheck submit runs before it queues. The fixture lane carries
+ * its own build/bin/z23-lint, a shell script that answers --list from
+ * build/precheck-known, fails the gate named in build/precheck-fail, and logs
+ * each gate it ran to build/precheck-ran. Every file is read relative to the
+ * cwd the script was started in, so a precheck that ran in the wrong
+ * directory finds nothing and the tests fail. */
+#define DLX_PC_SCRIPT                                                        \
+    "#!/bin/sh\n"                                                            \
+    "if [ \"$1\" = --list ]; then cat build/precheck-known; exit 0; fi\n"    \
+    "echo \"$1\" >> build/precheck-ran\n"                                    \
+    "if [ -f build/precheck-fail ] && [ \"$1\" = \"$(cat build/precheck-fail)\" ]; then\n" \
+    "  echo \"first line of $1\"; echo \"second line\"; echo \"stderr line\" >&2; exit 2\n" \
+    "fi\n"                                                                   \
+    "exit 0\n"
+
+static bool dlx_pc_file(const struct dlx_rig *rig, const char *name,
+                        const char *text)
+{
+    char path[1400];
+    (void)snprintf(path, sizeof(path), "%s/build", rig->clone);
+    (void)dlx_mkdir_p(path);
+    (void)snprintf(path, sizeof(path), "%s/build/bin", rig->clone);
+    (void)dlx_mkdir_p(path);
+    (void)snprintf(path, sizeof(path), "%s/build/%s", rig->clone, name);
+    return dlx_write(path, text);
+}
+
+static bool dlx_pc_rig(struct dlx_rig *rig, const char *tag, bool with_lint,
+                       const char *known)
+{
+    char path[1400];
+    dlx_isolate(tag);
+    if (!dlx_rig_make(rig, tag))
+        return false;
+    setenv("ZCL_LAND_PROOF_STUB", "running", 1);
+    setenv("ZCL_LAND_ALLOW_UNSIGNED", "1", 1);
+    zcl_dev_land_precheck_test_force(true);
+    if (!dlx_pc_file(rig, "precheck-known", known))
+        return false;
+    if (!with_lint)
+        return true;
+    (void)snprintf(path, sizeof(path), "%s/build/bin/z23-lint", rig->clone);
+    return dlx_write(path, DLX_PC_SCRIPT) && chmod(path, 0755) == 0;
+}
+
+/* submit through the in-process path, where `precheck` is an ordinary key. */
+static void dlx_pc_submit(struct dlx_call *c, const struct dlx_rig *rig,
+                          const char *mode, const char *note)
+{
+    dlx_begin(c, NULL);
+    (void)json_push_kv_str(&c->input, "action", "submit");
+    (void)json_push_kv_str(&c->input, "tip", rig->tip);
+    (void)json_push_kv_str(&c->input, "worktree", rig->clone);
+    if (mode)
+        (void)json_push_kv_str(&c->input, "precheck", mode);
+    if (note)
+        (void)json_push_kv_str(&c->input, "note", note);
+}
+
+static bool dlx_pc_has(const struct json_value *arr, const char *name)
+{
+    for (size_t i = 0; arr && i < arr->num_children; i++) {
+        if (arr->children[i].type == JSON_STR &&
+            strcmp(json_get_str(&arr->children[i]), name) == 0)
+            return true;
+    }
+    return false;
+}
+
+static bool dlx_pc_ran(const struct dlx_rig *rig, const char *gate)
+{
+    char path[1400], text[1024] = "";
+    FILE *f;
+    (void)snprintf(path, sizeof(path), "%s/build/precheck-ran", rig->clone);
+    f = fopen(path, "rb");
+    if (f) {
+        size_t n = fread(text, 1, sizeof(text) - 1, f);
+        text[n] = '\0';
+        (void)fclose(f);
+    }
+    return strstr(text, gate) != NULL;
+}
+
+/* Seed <land state>/outcomes.jsonl; false when it cannot be written. */
+static bool dlx_pc_outcomes(const char *rows)
+{
+    char root[512], dir[640], path[704];
+    if (!platform_state_root(root, sizeof(root)))
+        return false;
+    (void)snprintf(dir, sizeof(dir), "%s/land", root);
+    (void)dlx_mkdir_p(dir);
+    (void)snprintf(path, sizeof(path), "%s/outcomes.jsonl", dir);
+    return dlx_write(path, rows);
+}
+
+static long dlx_pc_outcomes_size(void)
+{
+    char root[512], path[704];
+    struct stat st;
+    if (!platform_state_root(root, sizeof(root)))
+        return -2;
+    (void)snprintf(path, sizeof(path), "%s/land/outcomes.jsonl", root);
+    return stat(path, &st) == 0 ? (long)st.st_size : -1;
+}
+
+/* A ledger row dated `days_ago`, as outcomes.jsonl carries it. */
+static void dlx_pc_row(char *out, size_t cap, int seq, const char *state,
+                       const char *dim, int days_ago, const char *detail)
+{
+    char ts[64];
+    time_t t = time(NULL) - (time_t)days_ago * 86400;
+    struct tm tm_utc;
+    (void)gmtime_r(&t, &tm_utc);
+    (void)strftime(ts, sizeof(ts), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+    (void)snprintf(out, cap,
+                   "{\"seq\":%d,\"ts\":\"%s\",\"state\":\"%s\","
+                   "\"tip\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"attempt\":1,"
+                   "\"dimension\":\"%s\",\"detail\":\"%s\",\"note\":\"\"}\n",
+                   seq, ts, state, dim, detail);
+}
+
+static bool dlx_pc_gate_set_learns(void)
+{
+    char rows[2048], one[512];
+    char path[704], root[512];
+    struct zcl_land_precheck_gates g;
+    bool ok;
+    dlx_isolate("precheck_gate_set");
+    if (!platform_state_root(root, sizeof(root)))
+        return false;
+    rows[0] = '\0';
+    dlx_pc_row(one, sizeof(one), 1, "failed", "lint", 1,
+               "check-learned-one failed [x]");
+    (void)strcat(rows, one);
+    dlx_pc_row(one, sizeof(one), 2, "failed", "lint", 30,
+               "check-too-old failed");
+    (void)strcat(rows, one);
+    dlx_pc_row(one, sizeof(one), 3, "failed", "lint", 1,
+               "check-superseded failed");
+    (void)strcat(rows, one);
+    dlx_pc_row(one, sizeof(one), 3, "landed", "", 1, "");
+    (void)strcat(rows, one);
+    dlx_pc_row(one, sizeof(one), 4, "failed", "proof", 1,
+               "check-wrong-dimension failed");
+    (void)strcat(rows, one);
+    if (!dlx_pc_outcomes(rows))
+        return false;
+    (void)snprintf(path, sizeof(path), "%s/land/outcomes.jsonl", root);
+    zcl_land_precheck_gate_set(path, (int64_t)time(NULL), &g);
+    ok = g.count == 5;
+    for (size_t i = 0; i < g.count; i++) {
+        ok = ok && strcmp(g.name[i], "check-too-old") != 0 &&
+             strcmp(g.name[i], "check-superseded") != 0 &&
+             strcmp(g.name[i], "check-wrong-dimension") != 0;
+    }
+    ok = ok && g.count == 5 && strcmp(g.name[0], "check-file-size-ceiling") == 0 &&
+         strcmp(g.name[4], "check-learned-one") == 0;
+    zcl_land_precheck_gate_set("/nonexistent/outcomes.jsonl",
+                               (int64_t)time(NULL), &g);
+    ok = ok && g.count == 4;
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_failing_gate_refused(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char head[64];
+    const char *rev[] = { "rev-parse", "HEAD", NULL };
+    bool ok;
+    if (!dlx_pc_rig(&rig, "precheck_fail", true,
+                    "check-file-size-ceiling\ncheck-cyclomatic-complexity\n"
+                    "check-core-seal\ncheck-arm-symbol-single\n") ||
+        !dlx_pc_file(&rig, "precheck-fail", "check-core-seal"))
+        return false;
+    long before = dlx_pc_outcomes_size();
+    dlx_pc_submit(&c, &rig, NULL, "n");
+    ok = dlx_run(&c) && !dlx_ok(&c) &&
+         strcmp(dlx_err_code(&c), "PRECHECK_FAILED") == 0 &&
+         strstr(c.reply.error.message, "check-core-seal") != NULL &&
+         strstr(c.reply.error.message, "fix and resubmit") != NULL &&
+         strstr(c.reply.error.evidence, "first line of check-core-seal") &&
+         strstr(c.reply.error.evidence, "stderr line") != NULL &&
+         strcmp(dlx_str(&c, "gate"), "check-core-seal") == 0;
+    dlx_end(&c);
+    ok = ok && dlx_queue_empty() && dlx_pc_outcomes_size() == before &&
+         dlx_git_out(rig.clone, rev, head, sizeof(head)) == 0 &&
+         strcmp(head, rig.tip) == 0;
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_clean_lane_queued(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (!dlx_pc_rig(&rig, "precheck_clean", true,
+                    "check-file-size-ceiling\ncheck-cyclomatic-complexity\n"
+                    "check-core-seal\ncheck-arm-symbol-single\n"))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = dlx_run(&c) && dlx_ok(&c) && dlx_int(&c, "seq") == 1 &&
+         dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-arm-symbol-single") &&
+         dlx_arr(&c, "precheck_skipped") &&
+         dlx_arr(&c, "precheck_skipped")->num_children == 0;
+    dlx_end(&c);
+    ok = ok && dlx_queue_has_one() && dlx_pc_ran(&rig, "check-core-seal");
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_queued_note(const char *want)
+{
+    struct dlx_call c;
+    bool ok;
+    dlx_begin(&c, "status");
+    (void)json_push_kv_bool(&c.input, "json", true);
+    ok = dlx_run(&c) && dlx_ok(&c);
+    const struct json_value *rows = dlx_arr(&c, "queued");
+    const struct json_value *n =
+        rows && rows->num_children == 1 ? json_get(&rows->children[0], "note")
+                                        : NULL;
+    ok = ok && n && n->type == JSON_STR && strcmp(json_get_str(n), want) == 0;
+    dlx_end(&c);
+    return ok;
+}
+
+static bool dlx_pc_skip_marks_note(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char longnote[520];
+    bool ok;
+    if (!dlx_pc_rig(&rig, "precheck_skip", true, "check-core-seal\n") ||
+        !dlx_pc_file(&rig, "precheck-fail", "check-core-seal"))
+        return false;
+    memset(longnote, 'n', 500);
+    longnote[500] = '\0';
+    dlx_pc_submit(&c, &rig, "skip", longnote);
+    ok = dlx_run(&c) && !dlx_ok(&c) &&
+         strcmp(dlx_err_code(&c), "PRECHECK_NOTE_TOO_LONG") == 0;
+    dlx_end(&c);
+    dlx_pc_submit(&c, &rig, "bogus", NULL);
+    ok = ok && dlx_run(&c) && strcmp(dlx_err_code(&c), "BAD_INPUT") == 0;
+    dlx_end(&c);
+    ok = ok && dlx_queue_empty();
+    dlx_pc_submit(&c, &rig, "skip", "why");
+    ok = ok && dlx_run(&c) && dlx_ok(&c);
+    dlx_end(&c);
+    ok = ok && dlx_pc_queued_note("why [precheck skipped]") &&
+         !dlx_pc_ran(&rig, "check-core-seal");
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_unknown_gate_skipped(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char rows[1024], one[512];
+    bool ok;
+    if (!dlx_pc_rig(&rig, "precheck_unknown", true,
+                    "check-file-size-ceiling\ncheck-core-seal\n"
+                    "check-learned-one\n"))
+        return false;
+    rows[0] = '\0';
+    dlx_pc_row(one, sizeof(one), 1, "failed", "lint", 1,
+               "check-learned-one and check-gone-gate failed");
+    (void)strcat(rows, one);
+    if (!dlx_pc_outcomes(rows))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = dlx_run(&c) && dlx_ok(&c) &&
+         dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-learned-one") &&
+         dlx_pc_has(dlx_arr(&c, "precheck_skipped"), "check-gone-gate") &&
+         dlx_pc_has(dlx_arr(&c, "precheck_skipped"),
+                    "check-arm-symbol-single") &&
+         !dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-gone-gate");
+    dlx_end(&c);
+    ok = ok && dlx_pc_ran(&rig, "check-learned-one") &&
+         !dlx_pc_ran(&rig, "check-gone-gate");
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_missing_lint_refused(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    bool ok;
+    if (!dlx_pc_rig(&rig, "precheck_nolint", false, ""))
+        return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    ok = dlx_run(&c) && !dlx_ok(&c) &&
+         strcmp(dlx_err_code(&c), "PRECHECK_UNAVAILABLE") == 0 &&
+         strstr(c.reply.error.message, "make worktree-prime") != NULL;
+    dlx_end(&c);
+    ok = ok && dlx_queue_empty();
+    dlx_restore();
+    return ok;
+}
+
+static int dlx_case_precheck(void)
+{
+    int failures = 0;
+    TEST("land: submit refuses a lane whose precheck gate fails and queues nothing") {
+        ASSERT(dlx_pc_failing_gate_refused());
+        PASS();
+    }
+    TEST("land: submit queues a lane whose precheck gates are clean") {
+        ASSERT(dlx_pc_clean_lane_queued());
+        PASS();
+    }
+    TEST("land: precheck=skip queues with the note marker and refuses overflow") {
+        ASSERT(dlx_pc_skip_marks_note());
+        PASS();
+    }
+    TEST("land: the precheck gate set learns check-* names from failed lint rows") {
+        ASSERT(dlx_pc_gate_set_learns());
+        PASS();
+    }
+    TEST("land: precheck skips and reports a gate the lane lint does not know") {
+        ASSERT(dlx_pc_unknown_gate_skipped());
+        PASS();
+    }
+    TEST("land: precheck without a lane z23-lint refuses with the prime hint") {
+        ASSERT(dlx_pc_missing_lint_refused());
+        PASS();
+    }
+_test_next:;
+    zcl_dev_land_precheck_test_force(false);
+    return failures;
+}
+
 static int dlx_case_empty_step(void)
 {
     int failures = 0;
@@ -16177,6 +16516,8 @@ static const struct dlx_shard_case g_dlx_shard_cases[] = {
      dlx_case_submit_status, 1u},
     {"dlx_case_duplicate_submit()",
      dlx_case_duplicate_submit, 1u},
+    {"dlx_case_precheck()",
+     dlx_case_precheck, 1u},
     {"dlx_case_empty_step()",
      dlx_case_empty_step, 1u},
     {"dlx_case_step_lock()",
@@ -16483,6 +16824,7 @@ static const char *const g_dlx_original_calls[] = {
     "dlx_case_checkout_location()",
     "dlx_case_submit_status()",
     "dlx_case_duplicate_submit()",
+    "dlx_case_precheck()",
     "dlx_case_empty_step()",
     "dlx_case_step_lock()",
     "dlx_case_starts_proof()",

@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_dev_land_precheck.c", CAP_FS_READ|CAP_FS_WRITE, "reads the tail of the land state's outcomes.jsonl and probes the lane worktree's build/bin/z23-lint; every gate runs as a child through the spawn seam with an argv, the lane worktree as cwd and a total 180 s budget; writes no file (the read-only fopen of the ledger tail counts as FS_WRITE to the closure classifier)")

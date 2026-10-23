@@ -20,6 +20,11 @@
  *   worktree  submit only, optional: the checkout that holds the tip.
  *             Default: the checkout root above the current directory.
  *   note      submit only, optional free text carried into the outcome row.
+ *   precheck  submit only, optional: `skip` queues without the local lint
+ *             precheck (core gates plus every check-* gate a lint row named in
+ *             the last 7 days of outcomes.jsonl, run through the lane's
+ *             build/bin/z23-lint) and appends " [precheck skipped]" to the note.
+ *             A failing gate refuses PRECHECK_FAILED and queues nothing.
  *   seq       cancel: required. attach and attach_publish: optional; omitted,
  *             they target the ONE
  *             live PASS row lacking intent, else ATTACH_TARGET_NONE|AMBIGUOUS.
@@ -144,6 +149,7 @@
 #include "command/native_dev_land_attestation.h"
 #include "command/native_dev_land_window.h"
 #include "command/native_dev_land_internal.h"
+#include "command/native_dev_land_precheck.h"
 #include "util/clientversion.h"
 #include "command/native_devagent.h"
 #include "command/native_dev_agents.h"
@@ -3317,6 +3323,22 @@ static void dl_submit_report_groups(struct zcl_command_reply *reply,
     json_free(&list);
 }
 
+/* The local lint precheck, before anything is queued; --qualify already ran
+ * full lint. note_buf holds the note the row will carry. */
+static bool dl_submit_precheck(const struct zcl_command_request *req,
+                               const struct dl_dirs *d, const char *root,
+                               const struct zcl_land_qualify *qr,
+                               char *note_buf, size_t cap,
+                               struct zcl_command_reply *reply)
+{
+    const char *note = dl_str(req, "note");
+    (void)snprintf(note_buf, cap, "%s", note ? note : "");
+    if (qr->tip[0])
+        return true;
+    return zcl_dev_land_precheck(DL_LEAF, root, d->land,
+                                 dl_str(req, "precheck"), note_buf, cap, reply);
+}
+
 static void dl_submit(const struct zcl_command_request *req,
                       struct zcl_command_reply *reply)
 {
@@ -3326,6 +3348,7 @@ static void dl_submit(const struct zcl_command_request *req,
     size_t nrows = 0;
     char qpath[4096 + 32];
     char root[4096], sig[64], full[80], ts[64], tip_buf[64];
+    char note_buf[DL_NOTE_MAX + 1];
     const char *tip, *worktree, *note;
     const char *allow_unsigned = dl_allow_unsigned();
     int lock = -1;
@@ -3398,12 +3421,14 @@ static void dl_submit(const struct zcl_command_request *req,
                 "input.note over the row budget");
         return;
     }
+    if (!dl_submit_precheck(req, &d, root, &qr, note_buf, sizeof(note_buf),
+                            reply))
+        return;
     memset(&r, 0, sizeof(r));
     r.attempt = 1;
     (void)snprintf(r.tip, sizeof(r.tip), "%s", full);
     (void)snprintf(r.worktree, sizeof(r.worktree), "%s", root);
-    if (note)
-        (void)snprintf(r.note, sizeof(r.note), "%s", note);
+    (void)snprintf(r.note, sizeof(r.note), "%s", note_buf);
     (void)snprintf(r.state, sizeof(r.state), "queued");
     dl_now_iso(ts);
     (void)snprintf(r.ts, sizeof(r.ts), "%s", ts);
