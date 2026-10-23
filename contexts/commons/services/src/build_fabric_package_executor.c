@@ -115,6 +115,21 @@ static bool bfp_sha3_file(const char *path, uint8_t out[32],
     return true;
 }
 
+/* True when the receipt output file under dir has the recorded size and
+ * SHA3-256. Any path, stat or hash failure is a mismatch. */
+static bool bfp_output_intact(const char *dir,
+                              const struct vcs_package_build_output *output)
+{
+    char path[BFP_PATH_MAX];
+    uint8_t sha[32];
+    uint64_t bytes = 0;
+    int n = snprintf(path, sizeof(path), "%s/%s", dir, output->path);
+    return n > 0 && (size_t)n < sizeof(path) &&
+           bfp_sha3_file(path, sha, &bytes) &&
+           bytes == output->bytes &&
+           memcmp(sha, output->sha3, 32) == 0;
+}
+
 static struct zcl_result bfp_materialize_tree(
     const char *workspace, const struct vcs_zcode_candidate_v1 *candidate,
     const char *destination)
@@ -146,15 +161,7 @@ static struct zcl_result bfp_verify_dependency(
         !vcs_package_build_installable(&receipt))
         return ZCL_ERR(-1, "dependency-build-report-refused");
     for (size_t i = 0; i < receipt.output_count; i++) {
-        char path[BFP_PATH_MAX];
-        uint8_t sha[32];
-        uint64_t bytes = 0;
-        n = snprintf(path, sizeof(path), "%s/%s", dir,
-                     receipt.outputs[i].path);
-        if (n <= 0 || (size_t)n >= sizeof(path) ||
-            !bfp_sha3_file(path, sha, &bytes) ||
-            bytes != receipt.outputs[i].bytes ||
-            memcmp(sha, receipt.outputs[i].sha3, 32) != 0)
+        if (!bfp_output_intact(dir, &receipt.outputs[i]))
             return ZCL_ERR(-1, "dependency-output-mismatch: %s",
                            receipt.outputs[i].path);
     }
@@ -168,36 +175,42 @@ static void bfp_free_recipe(uint8_t **wire, size_t *wire_len)
     *wire_len = 0;
 }
 
-static struct zcl_result bfp_load_inputs(
-    const char *workspace, const char *datadir,
-    const struct vcs_zcode_task_v1 *task,
-    struct build_fabric_package_execution *out, uint8_t **recipe_wire,
-    size_t *recipe_wire_len, char package_name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u])
+/* Loads and parses the dependency lock object. The wire buffer is freed on
+ * every path; the lock is only trusted when the caller sees true. */
+static bool bfp_load_lock(const char *workspace, const uint8_t root[32],
+                          struct vcs_package_lock *lock)
 {
     uint8_t *lock_wire = NULL;
     size_t lock_wire_len = 0;
-    if (vcs_object_load_raw(workspace, task->dependency_lock_root,
-                            &lock_wire, &lock_wire_len) != 0 ||
-        vcs_package_lock_parse(lock_wire, lock_wire_len, &out->lock) !=
-            VCS_PACKAGE_DEPS_OK) {
-        free(lock_wire);
-        return ZCL_ERR(-1, "package-dependency-lock-cas-miss-or-corrupt");
-    }
+    bool ok = vcs_object_load_raw(workspace, root, &lock_wire,
+                                  &lock_wire_len) == 0 &&
+              vcs_package_lock_parse(lock_wire, lock_wire_len, lock) ==
+                  VCS_PACKAGE_DEPS_OK;
     free(lock_wire);
+    return ok;
+}
+
+/* The lock must be non-empty, hash to root, and end in a named depth-0
+ * target package. */
+static bool bfp_lock_target_ok(struct vcs_package_lock *lock,
+                               const uint8_t root[32])
+{
     uint8_t checked_lock[32];
-    if (out->lock.count == 0 ||
-        vcs_package_lock_root(&out->lock, checked_lock) !=
-            VCS_PACKAGE_DEPS_OK ||
-        memcmp(checked_lock, task->dependency_lock_root, 32) != 0 ||
-        out->lock.nodes[out->lock.count - 1u].depth != 0 ||
-        out->lock.nodes[out->lock.count - 1u].name[0] == '\0')
-        return ZCL_ERR(-1, "package-dependency-lock-target-mismatch");
-    (void)snprintf(package_name, VCS_PACKAGE_RELEASE_NAME_MAX + 1u, "%s",
-                   out->lock.nodes[out->lock.count - 1u].name);
-    if (!package_name[0])
-        return ZCL_ERR(-1, "package-lock-target-name-missing");
-    if (vcs_object_load_raw(workspace, task->acceptance_tests_root,
-                            recipe_wire, recipe_wire_len) != 0)
+    return lock->count != 0 &&
+           vcs_package_lock_root(lock, checked_lock) == VCS_PACKAGE_DEPS_OK &&
+           memcmp(checked_lock, root, 32) == 0 &&
+           lock->nodes[lock->count - 1u].depth == 0 &&
+           lock->nodes[lock->count - 1u].name[0] != '\0';
+}
+
+/* Loads the acceptance recipe object and checks it against root. On failure
+ * the wire buffer is released, except when the object itself is missing. */
+static struct zcl_result bfp_load_recipe(const char *workspace,
+                                         const uint8_t root[32],
+                                         uint8_t **recipe_wire,
+                                         size_t *recipe_wire_len)
+{
+    if (vcs_object_load_raw(workspace, root, recipe_wire, recipe_wire_len) != 0)
         return ZCL_ERR(-1, "package-recipe-cas-miss");
     struct vcs_package_recipe recipe;
     uint8_t checked_recipe[32];
@@ -206,13 +219,51 @@ static struct zcl_result bfp_load_inputs(
     if (parsed != VCS_PACKAGE_RECIPE_OK ||
         vcs_package_recipe_root(&recipe, checked_recipe) !=
             VCS_PACKAGE_RECIPE_OK ||
-        memcmp(checked_recipe, task->acceptance_tests_root, 32) != 0) {
+        memcmp(checked_recipe, root, 32) != 0) {
         if (parsed == VCS_PACKAGE_RECIPE_OK)
             vcs_package_recipe_free(&recipe);
         bfp_free_recipe(recipe_wire, recipe_wire_len);
         return ZCL_ERR(-1, "package-recipe-root-mismatch");
     }
     vcs_package_recipe_free(&recipe);
+    return ZCL_OK;
+}
+
+/* Resolves one locked dependency to its installed directory under the
+ * resolved datadir, and verifies its build report and outputs. */
+static struct zcl_result bfp_resolve_dep(const char *datadir_resolved,
+                                         const uint8_t root[32],
+                                         char resolved[BFP_PATH_MAX])
+{
+    char root_hex[65];
+    char expected[BFP_PATH_MAX];
+    zcl_hex_encode(root, 32, root_hex);
+    int n = snprintf(expected, sizeof(expected), "%s/zcode/installed/%s",
+                     datadir_resolved, root_hex);
+    if (n <= 0 || (size_t)n >= sizeof(expected) ||
+        !realpath(expected, resolved) || strcmp(expected, resolved) != 0)
+        return ZCL_ERR(-1, "locked-dependency-not-installed: %s", root_hex);
+    return bfp_verify_dependency(resolved, root);
+}
+
+static struct zcl_result bfp_load_inputs(
+    const char *workspace, const char *datadir,
+    const struct vcs_zcode_task_v1 *task,
+    struct build_fabric_package_execution *out, uint8_t **recipe_wire,
+    size_t *recipe_wire_len, char package_name[VCS_PACKAGE_RELEASE_NAME_MAX + 1u])
+{
+    if (!bfp_load_lock(workspace, task->dependency_lock_root, &out->lock))
+        return ZCL_ERR(-1, "package-dependency-lock-cas-miss-or-corrupt");
+    if (!bfp_lock_target_ok(&out->lock, task->dependency_lock_root))
+        return ZCL_ERR(-1, "package-dependency-lock-target-mismatch");
+    (void)snprintf(package_name, VCS_PACKAGE_RELEASE_NAME_MAX + 1u, "%s",
+                   out->lock.nodes[out->lock.count - 1u].name);
+    if (!package_name[0])
+        return ZCL_ERR(-1, "package-lock-target-name-missing");
+    struct zcl_result recipe = bfp_load_recipe(
+        workspace, task->acceptance_tests_root, recipe_wire, recipe_wire_len);
+    if (!recipe.ok)
+        return recipe;
     char datadir_resolved[BFP_PATH_MAX];
     if (!realpath(datadir, datadir_resolved)) {
         bfp_free_recipe(recipe_wire, recipe_wire_len);
@@ -220,28 +271,29 @@ static struct zcl_result bfp_load_inputs(
     }
     out->dep_count = out->lock.count - 1u;
     for (size_t i = 0; i < out->dep_count; i++) {
-        char root_hex[65];
-        char expected[BFP_PATH_MAX];
         char resolved[BFP_PATH_MAX];
-        zcl_hex_encode(out->lock.nodes[i].root, 32, root_hex);
-        int n = snprintf(expected, sizeof(expected),
-                         "%s/zcode/installed/%s", datadir_resolved, root_hex);
-        if (n <= 0 || (size_t)n >= sizeof(expected) ||
-            !realpath(expected, resolved) || strcmp(expected, resolved) != 0) {
+        struct zcl_result dep = bfp_resolve_dep(
+            datadir_resolved, out->lock.nodes[i].root, resolved);
+        if (!dep.ok) {
             bfp_free_recipe(recipe_wire, recipe_wire_len);
-            return ZCL_ERR(-1, "locked-dependency-not-installed: %s",
-                           root_hex);
-        }
-        struct zcl_result verified = bfp_verify_dependency(
-            resolved, out->lock.nodes[i].root);
-        if (!verified.ok) {
-            bfp_free_recipe(recipe_wire, recipe_wire_len);
-            return verified;
+            return dep;
         }
         (void)snprintf(out->dep_dirs[i], sizeof(out->dep_dirs[i]), "%s",
                        resolved);
     }
     return ZCL_OK;
+}
+
+/* True when every required input pointer is non-NULL. */
+static bool bfp_prepare_inputs_closed(
+    const char *workspace, const char *datadir, const char *worker,
+    const char *source_dir, const char *emit_dir, const char *recipe_path,
+    const char *profile, const struct vcs_zcode_task_v1 *task,
+    const struct vcs_zcode_candidate_v1 *candidate,
+    const struct build_fabric_package_execution *out)
+{
+    return workspace && datadir && worker && source_dir && emit_dir &&
+           recipe_path && profile && task && candidate && out;
 }
 
 struct zcl_result build_fabric_package_prepare(
@@ -252,8 +304,9 @@ struct zcl_result build_fabric_package_prepare(
     const struct vcs_zcode_candidate_v1 *candidate,
     struct build_fabric_package_execution *out)
 {
-    if (!workspace || !datadir || !worker || !source_dir || !emit_dir ||
-        !recipe_path || !profile || !task || !candidate || !out)
+    if (!bfp_prepare_inputs_closed(workspace, datadir, worker, source_dir,
+                                   emit_dir, recipe_path, profile, task,
+                                   candidate, out))
         return ZCL_ERR(-1, "package execution requires closed inputs");
     bool standard =
         strcmp(profile, VCS_BUILD_PACKAGE_PROFILE_STANDARD_A_V1) == 0 ||
@@ -315,6 +368,42 @@ struct zcl_result build_fabric_package_prepare(
     return ZCL_OK;
 }
 
+/* True when the wire parses as a full-isolation receipt bound to the
+ * candidate source, recipe, lock and dependency count of this execution. */
+static bool bfp_report_bound(const uint8_t *wire, size_t wire_len,
+                             const struct vcs_zcode_task_v1 *task,
+                             const struct vcs_zcode_candidate_v1 *candidate,
+                             const struct build_fabric_package_execution *execution,
+                             struct vcs_package_build_receipt *receipt)
+{
+    return wire && wire_len <= VCS_PACKAGE_BUILD_MAX_WIRE_BYTES &&
+           vcs_package_build_parse(wire, wire_len, receipt) ==
+               VCS_PACKAGE_BUILD_OK &&
+           memcmp(receipt->package_root, candidate->candidate_source_root, 32) ==
+               0 &&
+           memcmp(receipt->recipe_root, task->acceptance_tests_root, 32) == 0 &&
+           memcmp(receipt->lock_root, task->dependency_lock_root, 32) == 0 &&
+           receipt->dep_count == execution->dep_count &&
+           receipt->isolation == VCS_PACKAGE_BUILD_ISOLATION_FULL;
+}
+
+/* True when every locked dependency root appears in the receipt. */
+static bool bfp_report_deps_present(
+    const struct build_fabric_package_execution *execution,
+    const struct vcs_package_build_receipt *receipt)
+{
+    for (size_t i = 0; i < execution->dep_count; i++) {
+        bool found = false;
+        for (size_t j = 0; j < receipt->dep_count; j++)
+            if (memcmp(execution->lock.nodes[i].root,
+                       receipt->dep_roots[j], 32) == 0)
+                found = true;
+        if (!found)
+            return false;
+    }
+    return true;
+}
+
 struct zcl_result build_fabric_package_report_parse(
     const uint8_t *wire, size_t wire_len, const char *emit_dir,
     const struct vcs_zcode_task_v1 *task,
@@ -323,35 +412,13 @@ struct zcl_result build_fabric_package_report_parse(
     uint8_t *work_status, int *exit_status)
 {
     struct vcs_package_build_receipt receipt;
-    if (!wire || wire_len > VCS_PACKAGE_BUILD_MAX_WIRE_BYTES ||
-        vcs_package_build_parse(wire, wire_len, &receipt) !=
-            VCS_PACKAGE_BUILD_OK ||
-        memcmp(receipt.package_root, candidate->candidate_source_root, 32) !=
-            0 ||
-        memcmp(receipt.recipe_root, task->acceptance_tests_root, 32) != 0 ||
-        memcmp(receipt.lock_root, task->dependency_lock_root, 32) != 0 ||
-        receipt.dep_count != execution->dep_count ||
-        receipt.isolation != VCS_PACKAGE_BUILD_ISOLATION_FULL)
+    if (!bfp_report_bound(wire, wire_len, task, candidate, execution,
+                          &receipt))
         return ZCL_ERR(-1, "package-build-report-binding-invalid");
-    for (size_t i = 0; i < execution->dep_count; i++) {
-        bool found = false;
-        for (size_t j = 0; j < receipt.dep_count; j++)
-            if (memcmp(execution->lock.nodes[i].root,
-                       receipt.dep_roots[j], 32) == 0)
-                found = true;
-        if (!found)
-            return ZCL_ERR(-1, "package-build-report-dependency-missing");
-    }
+    if (!bfp_report_deps_present(execution, &receipt))
+        return ZCL_ERR(-1, "package-build-report-dependency-missing");
     for (size_t i = 0; i < receipt.output_count; i++) {
-        char path[BFP_PATH_MAX];
-        uint8_t sha[32];
-        uint64_t bytes = 0;
-        int n = snprintf(path, sizeof(path), "%s/%s", emit_dir,
-                         receipt.outputs[i].path);
-        if (n <= 0 || (size_t)n >= sizeof(path) ||
-            !bfp_sha3_file(path, sha, &bytes) ||
-            bytes != receipt.outputs[i].bytes ||
-            memcmp(sha, receipt.outputs[i].sha3, 32) != 0)
+        if (!bfp_output_intact(emit_dir, &receipt.outputs[i]))
             return ZCL_ERR(-1, "package-build-report-output-mismatch");
     }
     bool passed = vcs_package_build_installable(&receipt);
