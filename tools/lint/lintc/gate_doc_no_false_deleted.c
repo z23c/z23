@@ -72,13 +72,18 @@ struct dfn_row {
     const char *symbol;
 };
 
+/* POSIX ERE has no word-boundary escape. The shell's boundary between
+ * `[^.]*` and the claim word only held when the last character `[^.]*`
+ * consumed was a non-dot non-word character, so it is spelled
+ * `[^.]*[^[:alnum:]_.](word)` here; the trailing boundary becomes
+ * `([^[:alnum:]_]|$)`. Same matches, portable to BSD regcomp. */
 static const struct dfn_row k_dfn_rows[] = {
-    { "legacy[^.]*block-connect engine[^.]*\\b(deleted|removed|no longer exists)\\b",
+    { "legacy[^.]*block-connect engine[^.]*[^[:alnum:]_.](deleted|removed|no longer exists)([^[:alnum:]_]|$)",
       "core/modules/validation/src/connect_block.c",
       { "engine/composition/src/boot_index.c",
         "engine/controllers/src/sync_controller_blocks.c" },
       2, "connect_block" },
-    { "connect_block[^.]*\\b(has been deleted|was deleted|is deleted|removed|no longer exists)\\b",
+    { "connect_block[^.]*[^[:alnum:]_.](has been deleted|was deleted|is deleted|removed|no longer exists)([^[:alnum:]_]|$)",
       "core/modules/validation/src/connect_block.c",
       { "engine/composition/src/boot_index.c" },
       1, "connect_block" },
@@ -254,7 +259,7 @@ static int dfn_live_caller(const struct dfn_row *row, const char **live)
 {
     regex_t re;
     int rc = 0;
-    if (compile_pat(&re, REG_EXTENDED, "\\b", row->symbol, "\\b *\\(", ""))
+    if (compile_pat(&re, REG_EXTENDED, "(^|[^[:alnum:]_])", row->symbol, " *\\(", ""))
         return 2;
     for (int i = 0; i < row->ncallers && rc == 0 && !*live; i++) {
         int hits = 0;

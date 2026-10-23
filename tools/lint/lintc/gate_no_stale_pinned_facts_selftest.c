@@ -120,13 +120,13 @@ static int snfs_missing_fails_closed(const char *dir)
 static int snfs_scope(void)
 {
     int bad = 0;
-    if (snf_keep_path("docs/HANDOFF.md")
-        || snf_keep_path("docs/work/archive/x.md")) {
+    if (snf_keep_path("docs/HANDOFF.md") // error-doc-ref-ok:selftest fixture
+        || snf_keep_path("docs/work/archive/x.md")) { // error-doc-ref-ok:selftest fixture
         fprintf(stderr, "check-no-stale-pinned-facts: FAIL — scope kept an "
                         "exempt path\n");
         bad++;
     }
-    if (!snf_keep_path("docs/adr/0001-x.md") || !snf_keep_path("CLAUDE.md")) {
+    if (!snf_keep_path("docs/adr/0001-x.md") || !snf_keep_path("CLAUDE.md")) { // error-doc-ref-ok:selftest fixture
         fprintf(stderr, "check-no-stale-pinned-facts: FAIL — scope dropped a "
                         "doc path\n");
         bad++;

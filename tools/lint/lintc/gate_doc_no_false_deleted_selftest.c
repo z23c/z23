@@ -81,7 +81,7 @@ static int dfns_bin(const char *dir, long mb)
 static int dfns_fixture(const char *dir, const struct dfns_case *c)
 {
     if (dfns_put(dir, "CLAUDE.md", "compact\n")
-        || dfns_put(dir, "docs/a.md", c->doc))
+        || dfns_put(dir, "docs/a.md", c->doc)) // error-doc-ref-ok:selftest fixture
         return 2;
     if (c->code
         && dfns_put(dir, "core/modules/validation/src/connect_block.c",

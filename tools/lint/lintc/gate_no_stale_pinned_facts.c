@@ -27,7 +27,7 @@
  *   Per-line escape hatch: a trailing <!-- stale-ok: <reason> --> marker.
  *
  * ENV (kept from the shell gate, for the same callers):
- *   ZCL_STALE_FACTS_SCAN_FILES="a.md b.md"  override the scan set (floor 1)
+ *   ZCL_STALE_FACTS_SCAN_FILES="a.md b.md"  override the scan set (floor 1) // error-doc-ref-ok:example value
  *   ZCL_STALE_FACTS_EMIT_BASELINE=1         print the height-pin keys, exit 0
  *
  * SHELL SEMANTICS MIRRORED
@@ -184,7 +184,7 @@ static int snf_list_add(struct snf_list *l, const char *path)
 
 int snf_keep_path(const char *path)
 {
-    return strcmp(path, "docs/HANDOFF.md") != 0 &&
+    return strcmp(path, "docs/HANDOFF.md") != 0 && // error-doc-ref-ok:exempt path, kept from the shell gate
            strncmp(path, "docs/work/archive/", 18) != 0;
 }
 
