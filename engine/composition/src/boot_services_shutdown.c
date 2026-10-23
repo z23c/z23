@@ -19,6 +19,7 @@
 #include "util/log_macros.h"
 #include "health/heartbeat.h"
 #include "supervisors/self_heal.h"
+#include "services/sync_monitor.h"
 #include "supervisors/staged_sync_supervisor.h"
 #include "services/block_index_loader.h"
 #include "services/block_index_flat_anchor.h"
@@ -120,6 +121,14 @@ static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc,
     disk_block_io_quiesce_have_data_hook();
     printf("[shutdown] disk-completion hook drained\n");
 
+    /* LIFETIME RULE: no thread that can dereference connman may still run
+     * when connman_free() runs. The self-heal condition runner is one: its
+     * remedies reach connman through sync_monitor_connman() and one
+     * (connman_kick_onion_seeds) blocks up to 60 s in a Tor fetch, then
+     * saves the addrman. Signal it now (non-blocking) so it winds down while
+     * the flush below runs; it is joined before connman_join(). */
+    self_heal_request_stop();
+
     /* Stop P2P entrypoints before flush; any in-flight reducer sees
      * g_shutdown_requested and returns before mutating coins further. */
     printf("[shutdown] stopping network services\n");
@@ -136,6 +145,10 @@ static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc,
     } else {
         fprintf(stderr, "WARNING: Coins cache flush FAILED during shutdown!\n");
     }
+    /* Join the self-heal runner BEFORE connman_join()/connman_free(). The
+     * coins flush above does not depend on it; main_state and the progress
+     * store are still live, so it still cannot outlive them. */
+    self_heal_stop();
     /* Now join threads — safe, coins already persisted */
     printf("[shutdown] joining connman threads\n");
     connman_join(svc->connman);
@@ -144,6 +157,9 @@ static bool shutdown_quiesce_network_and_flush_coins(struct boot_svc_ctx *svc,
      * late read fail closed instead of retaining a stale process-lifetime
      * pointer. */
     rpc_net_set_connman(NULL);
+    /* Same for the condition-engine handle (sync_monitor_connman()), read by
+     * conditions, catchup cadence, mesh sampling and network monitor. */
+    sync_monitor_clear_connman();
     /* A diagnostics capture that did not drain is still an owned READER of
      * connman. Retaining the allocation costs a process that is about to
      * _exit() nothing; freeing it under a live reader is a use-after-free. */
@@ -195,8 +211,9 @@ static void shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
     /* Stop + join the self-heal condition runner FIRST, while main_state and
      * the progress store are still live: the runner dereferences both inside a
      * condition tick, so it must never outlive them (they are freed in
-     * shutdown_release_owned_resources). The global shutdown flag is already
-     * set, so this joins at most one in-flight tick. */
+     * shutdown_release_owned_resources). It was already joined in the
+     * network-quiesce stage (before connman_free); this idempotent call only
+     * covers paths that skip that stage. */
     self_heal_stop();
     zcl_service_kernel_stop_all(&svc->runtime_kernel);
     /* The base service kernel currently owns mempool_limits. Its stop hook is

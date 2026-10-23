@@ -589,6 +589,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_boot_addrman_persistence_contract),
     S_(t_lib_runtime_gauges_are_callback_injected),
     S_(t_boot_shutdown_persistence_order_contract),
+    S_(t_boot_shutdown_connman_holders_stop_first),
     S_(t_hodl_history_uses_runtime_db_service),
     S_(t_db_service_query_handle_is_canonical),
     S_(t_txindex_releases_node_db_between_batches),

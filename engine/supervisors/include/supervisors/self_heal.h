@@ -34,6 +34,11 @@ void self_heal_register(struct main_state *ms);
  * spawn failure). The thread exits on the global shutdown flag. */
 bool self_heal_start(void);
 
+/* Non-blocking: ask the runner to stop without joining it, so a later
+ * self_heal_stop() waits less. Safe from any thread, idempotent, and a no-op
+ * if the runner never started. */
+void self_heal_request_stop(void);
+
 /* Request the runner thread stop and join it. Idempotent; safe if never
  * started. Used by tests and orderly shutdown. */
 void self_heal_stop(void);

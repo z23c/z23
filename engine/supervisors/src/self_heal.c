@@ -212,6 +212,11 @@ bool self_heal_start(void)
     return true;
 }
 
+void self_heal_request_stop(void)
+{
+    atomic_store(&g_stop_requested, true);
+}
+
 void self_heal_stop(void)
 {
     atomic_store(&g_stop_requested, true);

@@ -67,6 +67,10 @@ void sync_monitor_set_context(struct connman *cm,
  * long-standing condition context setter so isolated condition fixtures do
  * not need to construct a protocol processor. */
 void sync_monitor_set_msg_processor(struct msg_processor *mp);
+/* Revoke the published connman handle at shutdown, before connman_free, so a
+ * late sync_monitor_connman() reader fails closed (NULL) instead of reading a
+ * freed object. Callers must already NULL-check. */
+void sync_monitor_clear_connman(void);
 struct connman *sync_monitor_connman(void);
 struct download_manager *sync_monitor_download_manager(void);
 struct main_state *sync_monitor_main_state(void);

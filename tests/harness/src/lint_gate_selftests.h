@@ -505,6 +505,7 @@ int t_boot_core_liveness_precedes_frontend_contract(void);
 int t_boot_addrman_persistence_contract(void);
 int t_lib_runtime_gauges_are_callback_injected(void);
 int t_boot_shutdown_persistence_order_contract(void);
+int t_boot_shutdown_connman_holders_stop_first(void);
 int t_hodl_history_uses_runtime_db_service(void);
 int t_db_service_query_handle_is_canonical(void);
 int t_txindex_releases_node_db_between_batches(void);

@@ -222,6 +222,42 @@ int t_boot_shutdown_persistence_order_contract(void)
     return failures;
 }
 
+int t_boot_shutdown_connman_holders_stop_first(void)
+{
+    int failures = 0;
+    char *buf = NULL;
+    TEST("no connman holder outlives connman_free in shutdown") {
+        /* The self-heal runner reads connman through sync_monitor_connman()
+         * and a remedy can block ~60 s in a Tor fetch before saving the
+         * addrman. It must be signalled and joined, and the published handle
+         * revoked, before connman_free() (r5 shutdown SEGV). */
+        char path[PATH_MAX];
+        ASSERT(repo_path(path, sizeof(path),
+                         "engine/composition/src/boot_services_shutdown.c") == 0);
+        ASSERT(read_entire_file(path, &buf) == 0);
+        char *request = strstr(buf, "self_heal_request_stop();");
+        char *stop = strstr(buf, "self_heal_stop();");
+        char *join = strstr(buf, "connman_join(svc->connman);");
+        char *clear = strstr(buf, "sync_monitor_clear_connman();");
+        char *rpc_clear = strstr(buf, "rpc_net_set_connman(NULL);");
+        char *freed = strstr(buf, "connman_free(svc->connman);");
+        ASSERT(request != NULL);
+        ASSERT(stop != NULL);
+        ASSERT(join != NULL);
+        ASSERT(clear != NULL);
+        ASSERT(rpc_clear != NULL);
+        ASSERT(freed != NULL);
+        ASSERT(request < stop);
+        ASSERT(stop < join);
+        ASSERT(stop < freed);
+        ASSERT(clear < freed);
+        ASSERT(rpc_clear < freed);
+        PASS();
+    } _test_next:;
+    free(buf);
+    return failures;
+}
+
 int t_hodl_history_uses_runtime_db_service(void)
 {
     int failures = 0;

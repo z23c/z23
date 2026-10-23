@@ -15,12 +15,14 @@
 #include "event/event.h"
 #include "framework/condition.h"
 #include "platform/time_compat.h"
+#include "services/sync_monitor.h"
 #include "supervisors/self_heal.h"
 #include "util/blocker.h"
 #include "util/supervisor.h"
 #include "validation/main_state.h"
 
 #include <stdatomic.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -55,11 +57,13 @@ static void shs_fill_registry(struct liveness_contract pool[SUPERVISOR_CAP])
  *    thread does NOT freeze the root supervisor sweep heartbeat ─────────── */
 static _Atomic bool g_slow_entered;   /* remedy has begun sleeping */
 static _Atomic bool g_slow_stop;      /* ask the remedy to return early */
+static _Atomic int g_slow_calls;      /* remedy entries (passes started) */
 
 static bool shs_slow_detect(void) { return true; }
 
 static enum condition_remedy_result shs_slow_remedy(void)
 {
+    atomic_fetch_add(&g_slow_calls, 1);
     atomic_store(&g_slow_entered, true);
     /* Sleep up to ~1.5s in 50ms slices; return early when the test tears down.
      * This is the "deliberately-slow remedy" the sweep must survive. */
@@ -202,6 +206,56 @@ int test_self_heal_supervisor(void)
     blocker_reset_for_testing();
     self_heal_test_reset();
     condition_engine_reset_for_testing();
+
+    /* ── request_stop is non-blocking; the later join waits only for the
+     *    in-flight remedy, and the published connman handle can be revoked ─
+     * Shutdown signals the runner at the top of network-quiesce and joins it
+     * before connman_free(): a late sync_monitor_connman() reader must see
+     * NULL, and the join must not start another pass. */
+    supervisor_reset_for_testing();
+    blocker_reset_for_testing();
+    self_heal_test_reset();
+    condition_engine_reset_for_testing();
+    atomic_store(&g_slow_entered, false);
+    atomic_store(&g_slow_stop, false);
+    atomic_store(&g_slow_calls, 0);
+
+    {
+        struct main_state ms;
+        main_state_init(&ms);
+        SHS_CHECK("slow-remedy condition registered (request-stop case)",
+                  condition_register(&c_shs_slow));
+        self_heal_register(&ms);
+        SHS_CHECK("self_heal runner started (request-stop case)",
+                  self_heal_start());
+
+        bool entered = false;
+        for (int i = 0; i < 300 && !entered; i++) {
+            entered = atomic_load(&g_slow_entered);
+            struct timespec req = { 0, 10L * 1000000L };
+            nanosleep(&req, NULL); /* real-clock: bounded poll for the runner to enter the remedy */
+        }
+        SHS_CHECK("remedy in flight before request-stop", entered);
+
+        struct connman *fake = (struct connman *)(uintptr_t)0x1000;
+        sync_monitor_set_context(fake, NULL, &ms);
+        SHS_CHECK("sync_monitor_connman publishes the handle",
+                  sync_monitor_connman() == fake);
+        sync_monitor_clear_connman();
+        SHS_CHECK("sync_monitor_connman is NULL after clear (fails closed)",
+                  sync_monitor_connman() == NULL);
+
+        self_heal_request_stop();
+        SHS_CHECK("request_stop returns while the remedy is still blocked",
+                  !atomic_load(&g_slow_stop));
+
+        atomic_store(&g_slow_stop, true);
+        self_heal_stop();
+        SHS_CHECK("no further pass started after request_stop",
+                  atomic_load(&g_slow_calls) == 1);
+        main_state_free(&ms);
+    }
+    sync_monitor_set_context(NULL, NULL, NULL);
 
     printf("=== self_heal_supervisor: %d failure(s) ===\n", failures);
     return failures;

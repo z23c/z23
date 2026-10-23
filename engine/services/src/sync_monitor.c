@@ -56,7 +56,7 @@ static _Atomic uint64_t g_tip_eval_intake_pending;
 static char g_last_recovery_reason[96];
 static char g_last_recovery_trigger[64];
 
-static struct connman *g_condition_cm;
+static struct connman *_Atomic g_condition_cm;
 static struct download_manager *g_condition_dm;
 static struct main_state *g_condition_ms;
 static struct msg_processor *g_condition_mp;
@@ -147,6 +147,11 @@ void sync_monitor_set_context(struct connman *cm,
             atomic_store(&g_last_block_connected_height, height);
         }
     }
+}
+
+void sync_monitor_clear_connman(void)
+{
+    g_condition_cm = NULL;
 }
 
 struct connman *sync_monitor_connman(void)
