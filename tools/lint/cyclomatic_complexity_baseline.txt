@@ -2205,11 +2205,6 @@ tests/harness/src/test_anchor_selfmint.c:test_anchor_selfmint:26
 tests/harness/src/test_api_access.c:api_access_focused_tests:62
 tests/harness/src/test_api_catalogs.c:api_catalog_focused_tests:417
 tests/harness/src/test_api_controller_supervision.c:api_controller_supervision_focused_tests:37
-tests/harness/src/test_api_fixtures.c:api_test_expect_readiness_shape:20
-tests/harness/src/test_api_fixtures.c:api_test_expect_security_posture_shape:22
-tests/harness/src/test_api_fixtures.c:api_test_rest_operation_route_matches:27
-tests/harness/src/test_api_fixtures.c:api_test_rest_service_operations_bound:17
-tests/harness/src/test_api_fixtures.c:api_test_runtime_probes_consistent:21
 tests/harness/src/test_api_health_gates.c:api_health_gate_focused_tests:215
 tests/harness/src/test_api_http_contract.c:api_http_contract_focused_tests:51
 tests/harness/src/test_api_msg_routes.c:api_msg_routes_focused_tests:88

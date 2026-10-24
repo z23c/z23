@@ -165,6 +165,89 @@ const struct json_value *api_test_find_str_field(
     return NULL;
 }
 
+/* True when obj's string field equals expected. The strcmp is the same call
+ * the open-coded checks made, so a NULL field faults exactly as before. */
+static bool api_test_field_str_is(const struct json_value *obj,
+                                  const char *field, const char *expected)
+{
+    return strcmp(json_get_str(json_get(obj, field)), expected) == 0;
+}
+
+/* True when every named field is present on obj. */
+static bool api_test_fields_present(const struct json_value *obj,
+                                    const char *const *fields, size_t count)
+{
+    for (size_t i = 0; i < count; i++) {
+        if (!json_get(obj, fields[i]))
+            return false;
+    }
+    return true;
+}
+
+/* Fields the readiness document must carry: the root object's and the
+ * readiness object's. Presence only; values are checked by the caller. */
+static const char *const api_test_readiness_root_fields[] = {
+    "readiness_status", "chain_serving_ready", "index_projection_ready",
+    "agent_work_ready", "operator_action_required", "readiness_next_action",
+};
+
+static const char *const api_test_readiness_fields[] = {
+    "status", "chain_serving_ready", "index_projection_ready",
+    "agent_work_ready", "operator_action_required", "tip_gap_blocks",
+    "index_gap_blocks", "reducer_log_gap_blocks", "next_action", "semantics",
+};
+
+/* Fields the security posture object must carry. Presence only. */
+static const char *const api_test_security_posture_fields[] = {
+    "status", "review_required", "public_serving_allowed",
+    "bootstrap_model", "snapshot_full_validation_complete",
+    "full_history_validation_complete", "full_history_validation_origin",
+    "full_history_validation_state", "anchor_cursor_known",
+    "anchor_history_complete", "sprout_anchor_activation_cursor",
+    "sapling_anchor_activation_cursor", "anchor_history_state",
+    "nullifier_history_complete", "nullifier_activation_cursor",
+    "nullifier_history_state", "next_action",
+};
+
+/* One runtime probe row must agree with its service's own probe, the route
+ * contract it names and the operation it names. */
+static bool api_test_runtime_probe_row_ok(
+    const struct json_value *probe,
+    const struct json_value *services,
+    const struct json_value *operations,
+    const struct json_value *route_contracts)
+{
+    const char *service = json_get_str(json_get(probe, "service"));
+    const char *route = json_get_str(json_get(probe, "route"));
+    const char *expected_schema =
+        json_get_str(json_get(probe, "expected_schema"));
+    const char *operation_id =
+        json_get_str(json_get(probe, "operation_id"));
+    const struct json_value *svc =
+        api_test_find_named(services, service);
+    const struct json_value *member_probe =
+        svc ? json_get(svc, "runtime_probe") : NULL;
+    const struct json_value *route_contract =
+        api_test_find_contract(route_contracts, route);
+    const struct json_value *operation =
+        api_test_find_str_field(operations, "operation_id", operation_id);
+
+    if (!svc || !member_probe || !route_contract || !operation)
+        return false;
+    if (!api_test_field_str_is(probe, "schema",
+                               "zcl.service_runtime_probe.v1"))
+        return false;
+    if (!api_test_field_str_is(member_probe, "route", route))
+        return false;
+    if (!api_test_field_str_is(member_probe, "operation_id", operation_id))
+        return false;
+    if (!api_test_field_str_is(member_probe, "expected_schema",
+                               expected_schema))
+        return false;
+    return api_test_field_str_is(route_contract, "response_schema",
+                                 expected_schema);
+}
+
 bool api_test_runtime_probes_consistent(
     const struct json_value *catalog,
     const struct json_value *operations,
@@ -188,44 +271,79 @@ bool api_test_runtime_probes_consistent(
         return false;
 
     for (size_t i = 0; i < json_size(probes); i++) {
-        const struct json_value *probe = json_at(probes, i);
-        const char *service = json_get_str(json_get(probe, "service"));
-        const char *route = json_get_str(json_get(probe, "route"));
-        const char *expected_schema =
-            json_get_str(json_get(probe, "expected_schema"));
-        const char *operation_id =
-            json_get_str(json_get(probe, "operation_id"));
-        const struct json_value *svc =
-            api_test_find_named(services, service);
-        const struct json_value *member_probe =
-            svc ? json_get(svc, "runtime_probe") : NULL;
-        const struct json_value *route_contract =
-            api_test_find_contract(route_contracts, route);
-        const struct json_value *operation =
-            api_test_find_str_field(operations, "operation_id",
-                                    operation_id);
-
-        if (!svc || !member_probe || !route_contract || !operation)
-            return false;
-        if (strcmp(json_get_str(json_get(probe, "schema")),
-                   "zcl.service_runtime_probe.v1") != 0)
-            return false;
-        if (strcmp(json_get_str(json_get(member_probe, "route")),
-                   route) != 0)
-            return false;
-        if (strcmp(json_get_str(json_get(member_probe, "operation_id")),
-                   operation_id) != 0)
-            return false;
-        if (strcmp(json_get_str(json_get(member_probe, "expected_schema")),
-                   expected_schema) != 0)
-            return false;
-        if (strcmp(json_get_str(json_get(route_contract,
-                                         "response_schema")),
-                   expected_schema) != 0)
+        if (!api_test_runtime_probe_row_ok(json_at(probes, i), services,
+                                           operations, route_contracts))
             return false;
     }
 
     return true;
+}
+
+/* The operation and its route binding must carry every field the route
+ * check compares. An empty string counts as missing. */
+static bool api_test_rest_operation_fields_present(
+    const struct json_value *operation,
+    const struct json_value *binding)
+{
+    const char *operation_id =
+        json_get_str(json_get(operation, "operation_id"));
+    const char *service = json_get_str(json_get(operation, "service"));
+    const char *rest_method =
+        json_get_str(json_get(operation, "rest_method"));
+    const char *rest_route =
+        json_get_str(json_get(operation, "rest_route"));
+    const char *output_schema =
+        json_get_str(json_get(operation, "output_schema"));
+
+    return operation_id && operation_id[0] && service && service[0] &&
+           rest_method && rest_method[0] && rest_route && rest_route[0] &&
+           output_schema && output_schema[0] && binding;
+}
+
+/* The route contract's own fields must agree with the operation. */
+static bool api_test_route_contract_matches_operation(
+    const struct json_value *operation,
+    const struct json_value *route_contract)
+{
+    if (!api_test_field_str_is(route_contract, "method",
+            json_get_str(json_get(operation, "rest_method"))))
+        return false;
+    if (!api_test_field_str_is(route_contract, "response_schema",
+            json_get_str(json_get(operation, "output_schema"))))
+        return false;
+    if (!api_test_field_str_is(route_contract, "service_contract",
+            json_get_str(json_get(operation, "service"))))
+        return false;
+    if (!api_test_field_str_is(route_contract, "service_catalog_route",
+            json_get_str(json_get(operation, "service_catalog_route"))))
+        return false;
+    if (!api_test_field_str_is(route_contract, "service_operation_id",
+            json_get_str(json_get(operation, "operation_id"))))
+        return false;
+    return api_test_field_str_is(route_contract, "service_operation_route",
+            json_get_str(json_get(operation, "self_route")));
+}
+
+/* The service binding must name the same operation, service, route, schema
+ * and catalog route as the operation. */
+static bool api_test_service_binding_matches_operation(
+    const struct json_value *operation,
+    const struct json_value *binding)
+{
+    if (!api_test_field_str_is(binding, "operation_id",
+            json_get_str(json_get(operation, "operation_id"))))
+        return false;
+    if (!api_test_field_str_is(binding, "service",
+            json_get_str(json_get(operation, "service"))))
+        return false;
+    if (!api_test_field_str_is(binding, "rest_route",
+            json_get_str(json_get(operation, "rest_route"))))
+        return false;
+    if (!api_test_field_str_is(binding, "output_schema",
+            json_get_str(json_get(operation, "output_schema"))))
+        return false;
+    return api_test_field_str_is(binding, "service_catalog_route",
+            json_get_str(json_get(operation, "service_catalog_route")));
 }
 
 bool api_test_rest_operation_route_matches(
@@ -233,70 +351,83 @@ bool api_test_rest_operation_route_matches(
     const struct json_value *route_contract,
     const char *expected_route)
 {
-    const char *operation_id;
-    const char *service;
-    const char *rest_method;
-    const char *rest_route;
-    const char *output_schema;
-    const char *service_route;
-    const char *self_route;
     const struct json_value *binding;
+    const char *rest_route;
 
     if (!operation || !route_contract || !expected_route)
         return false;
 
-    operation_id = json_get_str(json_get(operation, "operation_id"));
-    service = json_get_str(json_get(operation, "service"));
-    rest_method = json_get_str(json_get(operation, "rest_method"));
-    rest_route = json_get_str(json_get(operation, "rest_route"));
-    output_schema = json_get_str(json_get(operation, "output_schema"));
-    service_route = json_get_str(json_get(operation, "service_catalog_route"));
-    self_route = json_get_str(json_get(operation, "self_route"));
     binding = json_get(route_contract, "service_binding");
-
-    if (!operation_id || !operation_id[0] || !service || !service[0] ||
-        !rest_method || !rest_method[0] || !rest_route || !rest_route[0] ||
-        !output_schema || !output_schema[0] || !binding)
+    if (!api_test_rest_operation_fields_present(operation, binding))
         return false;
+    rest_route = json_get_str(json_get(operation, "rest_route"));
     if (strcmp(rest_route, expected_route) != 0)
         return false;
-    if (strcmp(json_get_str(json_get(route_contract, "method")),
-               rest_method) != 0)
-        return false;
-    if (strcmp(json_get_str(json_get(route_contract, "response_schema")),
-               output_schema) != 0)
-        return false;
-    if (strcmp(json_get_str(json_get(route_contract,
-                                     "service_contract")),
-               service) != 0)
-        return false;
-    if (strcmp(json_get_str(json_get(route_contract,
-                                     "service_catalog_route")),
-               service_route) != 0)
-        return false;
-    if (strcmp(json_get_str(json_get(route_contract,
-                                     "service_operation_id")),
-               operation_id) != 0)
-        return false;
-    if (strcmp(json_get_str(json_get(route_contract,
-                                     "service_operation_route")),
-               self_route) != 0)
-        return false;
-    if (strcmp(json_get_str(json_get(binding, "operation_id")),
-               operation_id) != 0)
-        return false;
-    if (strcmp(json_get_str(json_get(binding, "service")), service) != 0)
-        return false;
-    if (strcmp(json_get_str(json_get(binding, "rest_route")),
-               rest_route) != 0)
-        return false;
-    if (strcmp(json_get_str(json_get(binding, "output_schema")),
-               output_schema) != 0)
-        return false;
-    if (strcmp(json_get_str(json_get(binding, "service_catalog_route")),
-               service_route) != 0)
+    if (!api_test_route_contract_matches_operation(operation, route_contract))
         return false;
 
+    return api_test_service_binding_matches_operation(operation, binding);
+}
+
+/* Every REST-callable operation needs a route contract that matches it.
+ * Sets *count to the number of REST-callable operations seen. */
+static bool api_test_rest_operations_routed(
+    const struct json_value *operations,
+    const struct json_value *route_contracts,
+    size_t *count)
+{
+    *count = 0;
+    for (size_t i = 0; i < json_size(operations); i++) {
+        const struct json_value *op = json_at(operations, i);
+        const char *route = json_get_str(json_get(op, "rest_route"));
+        const struct json_value *contract;
+
+        if (!json_get_bool(json_get(op, "rest_callable")))
+            continue;
+
+        (*count)++;
+        contract = api_test_find_contract(route_contracts, route);
+        if (!contract ||
+            !api_test_rest_operation_route_matches(op, contract, route))
+            return false;
+    }
+    return true;
+}
+
+/* Every route contract with a service binding needs a REST-callable
+ * operation that matches it. Sets *count to the number of bindings seen. */
+static bool api_test_route_bindings_matched(
+    const struct json_value *operations,
+    const struct json_value *route_contracts,
+    size_t *count)
+{
+    *count = 0;
+    for (size_t i = 0; i < json_size(route_contracts); i++) {
+        const struct json_value *contract = json_at(route_contracts, i);
+        const struct json_value *binding =
+            json_get(contract, "service_binding");
+        const char *operation_id;
+        const char *path;
+        const char *alias_of;
+        const char *expected_route;
+        const struct json_value *op;
+
+        if (!binding)
+            continue;
+
+        (*count)++;
+        operation_id = json_get_str(json_get(binding, "operation_id"));
+        op = api_test_find_str_field(operations, "operation_id",
+                                     operation_id);
+        path = json_get_str(json_get(contract, "path"));
+        alias_of = json_get_str(json_get(contract, "legacy_alias_of"));
+        expected_route = alias_of && alias_of[0] ? alias_of : path;
+
+        if (!op || !json_get_bool(json_get(op, "rest_callable")) ||
+            !api_test_rest_operation_route_matches(op, contract,
+                                                   expected_route))
+            return false;
+    }
     return true;
 }
 
@@ -311,47 +442,12 @@ bool api_test_rest_service_operations_bound(
         !route_contracts || route_contracts->type != JSON_ARR)
         return false;
 
-    for (size_t i = 0; i < json_size(operations); i++) {
-        const struct json_value *op = json_at(operations, i);
-        const char *route = json_get_str(json_get(op, "rest_route"));
-        const struct json_value *contract;
-
-        if (!json_get_bool(json_get(op, "rest_callable")))
-            continue;
-
-        rest_operation_count++;
-        contract = api_test_find_contract(route_contracts, route);
-        if (!contract ||
-            !api_test_rest_operation_route_matches(op, contract, route))
-            return false;
-    }
-
-    for (size_t i = 0; i < json_size(route_contracts); i++) {
-        const struct json_value *contract = json_at(route_contracts, i);
-        const struct json_value *binding =
-            json_get(contract, "service_binding");
-        const char *operation_id;
-        const char *path;
-        const char *alias_of;
-        const char *expected_route;
-        const struct json_value *op;
-
-        if (!binding)
-            continue;
-
-        route_binding_count++;
-        operation_id = json_get_str(json_get(binding, "operation_id"));
-        op = api_test_find_str_field(operations, "operation_id",
-                                     operation_id);
-        path = json_get_str(json_get(contract, "path"));
-        alias_of = json_get_str(json_get(contract, "legacy_alias_of"));
-        expected_route = alias_of && alias_of[0] ? alias_of : path;
-
-        if (!op || !json_get_bool(json_get(op, "rest_callable")) ||
-            !api_test_rest_operation_route_matches(op, contract,
-                                                   expected_route))
-            return false;
-    }
+    if (!api_test_rest_operations_routed(operations, route_contracts,
+                                         &rest_operation_count))
+        return false;
+    if (!api_test_route_bindings_matched(operations, route_contracts,
+                                         &route_binding_count))
+        return false;
 
     return rest_operation_count > 0 &&
            route_binding_count >= rest_operation_count;
@@ -363,25 +459,19 @@ bool api_test_expect_readiness_shape(const struct json_value *root)
     if (!readiness || readiness->type != JSON_OBJ)
         return false;
 
-    return strcmp(json_get_str(json_get(readiness, "schema")),
-                  "zcl.agent_readiness.v1") == 0 &&
-           json_get(root, "readiness_status") != NULL &&
-           json_get(root, "chain_serving_ready") != NULL &&
-           json_get(root, "index_projection_ready") != NULL &&
-           json_get(root, "agent_work_ready") != NULL &&
-           json_get(root, "operator_action_required") != NULL &&
-           json_get(root, "readiness_next_action") != NULL &&
-           json_get_int(json_get(readiness, "schema_version")) == 1 &&
-           json_get(readiness, "status") != NULL &&
-           json_get(readiness, "chain_serving_ready") != NULL &&
-           json_get(readiness, "index_projection_ready") != NULL &&
-           json_get(readiness, "agent_work_ready") != NULL &&
-           json_get(readiness, "operator_action_required") != NULL &&
-           json_get(readiness, "tip_gap_blocks") != NULL &&
-           json_get(readiness, "index_gap_blocks") != NULL &&
-           json_get(readiness, "reducer_log_gap_blocks") != NULL &&
-           json_get(readiness, "next_action") != NULL &&
-           json_get(readiness, "semantics") != NULL;
+    if (!api_test_field_str_is(readiness, "schema",
+                               "zcl.agent_readiness.v1"))
+        return false;
+    if (!api_test_fields_present(root, api_test_readiness_root_fields,
+            sizeof(api_test_readiness_root_fields) /
+            sizeof(api_test_readiness_root_fields[0])))
+        return false;
+    if (json_get_int(json_get(readiness, "schema_version")) != 1)
+        return false;
+
+    return api_test_fields_present(readiness, api_test_readiness_fields,
+            sizeof(api_test_readiness_fields) /
+            sizeof(api_test_readiness_fields[0]));
 }
 
 bool api_test_expect_security_posture_shape(
@@ -391,27 +481,17 @@ bool api_test_expect_security_posture_shape(
     if (!posture || posture->type != JSON_OBJ)
         return false;
 
-    return strcmp(json_get_str(json_get(posture, "schema")),
-                  "zcl.security_posture.v1") == 0 &&
-           json_get_int(json_get(posture, "schema_version")) == 1 &&
-           json_get(posture, "status") != NULL &&
-           json_get(posture, "review_required") != NULL &&
-           json_get(posture, "public_serving_allowed") != NULL &&
-           json_get(posture, "bootstrap_model") != NULL &&
-           json_get(posture, "snapshot_full_validation_complete") != NULL &&
-           json_get(posture, "full_history_validation_complete") != NULL &&
-           json_get(posture, "full_history_validation_origin") != NULL &&
-           json_get(posture, "full_history_validation_state") != NULL &&
-           json_get(posture, "anchor_cursor_known") != NULL &&
-           json_get(posture, "anchor_history_complete") != NULL &&
-           json_get(posture, "sprout_anchor_activation_cursor") != NULL &&
-           json_get(posture, "sapling_anchor_activation_cursor") != NULL &&
-           json_get(posture, "anchor_history_state") != NULL &&
-           json_get(posture, "nullifier_history_complete") != NULL &&
-           json_get(posture, "nullifier_activation_cursor") != NULL &&
-           json_get(posture, "nullifier_history_state") != NULL &&
-           json_get(posture, "next_action") != NULL &&
-           strstr(json_get_str(json_get(posture, "semantics")),
+    if (!api_test_field_str_is(posture, "schema",
+                               "zcl.security_posture.v1"))
+        return false;
+    if (json_get_int(json_get(posture, "schema_version")) != 1)
+        return false;
+    if (!api_test_fields_present(posture, api_test_security_posture_fields,
+            sizeof(api_test_security_posture_fields) /
+            sizeof(api_test_security_posture_fields[0])))
+        return false;
+
+    return strstr(json_get_str(json_get(posture, "semantics")),
                   "public serving and healthy fail closed") != NULL;
 }
 
