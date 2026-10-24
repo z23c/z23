@@ -2063,6 +2063,7 @@ int main(int argc, char **argv)
     failures += test_wallet_backup_port();
     failures += test_snapshot_store_port();
     failures += test_block_index_sidecar_port();
+    failures += test_block_index_flat_inplace();
     failures += test_wallet_view_port();
     failures += test_bg_hash_verify_store_port();
     failures += test_bg_validation_store_port();

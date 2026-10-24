@@ -61,6 +61,9 @@ struct block_index_flat_identity {
 
 void save_block_index_flat(const char *datadir, struct main_state *ms);
 
+/* Path ("incremental"|"full") and bytes written by the most recent flat save. */
+bool block_index_flat_last_save_stats(const char **path, uint64_t *bytes);
+
 /* Boot-composition seam: boot_steps.c's leaves call through this instead of
  * gaining their own call site into the flat/LevelDB/SQLite header-cache
  * writer, so the Program H0 baseline

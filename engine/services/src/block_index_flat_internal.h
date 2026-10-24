@@ -28,6 +28,21 @@ struct __attribute__((packed)) block_index_flat {
     uint8_t sapling_root[32];
 };
 
+enum bif_inplace {
+    BIF_INPLACE_DONE, BIF_INPLACE_DECLINED, BIF_INPLACE_FAILED,
+    BIF_INPLACE_CRASHED /* ZCL_TESTING fault hook: leave the file as is */
+};
+struct block_index;
+struct block_index_flat;
+void block_index_flat_encode_row(const struct block_index *src,
+                                 struct block_index_flat *out);
+enum bif_inplace block_index_flat_save_inplace(
+    const char *datadir, struct main_state *ms, struct block_index **sorted,
+    size_t n, struct block_index_flat_identity *ident, uint64_t *rewritten);
+#ifdef ZCL_TESTING
+extern int g_block_index_flat_inplace_fault;
+#endif
+
 void block_index_flat_identity_remember(
     const char *datadir, const struct block_index_flat_identity *identity);
 void block_index_flat_identity_forget(void);

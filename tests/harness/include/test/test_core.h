@@ -936,6 +936,7 @@ int test_db_maintenance_port(void);
 int test_wallet_backup_port(void);
 int test_snapshot_store_port(void);
 int test_block_index_sidecar_port(void);
+int test_block_index_flat_inplace(void);
 int test_wallet_view_port(void);
 int test_bg_hash_verify_store_port(void);
 int test_bg_validation_store_port(void);

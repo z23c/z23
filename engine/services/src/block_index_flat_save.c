@@ -57,6 +57,24 @@ struct emit_ctx {
     struct block_index_flat_identity identity;
 };
 
+void block_index_flat_encode_row(const struct block_index *src,
+                                  struct block_index_flat *out)
+{
+    struct block_index_flat row = {0};
+    if (src->phashBlock) memcpy(row.hash, src->phashBlock->data, 32);
+    if (src->pprev && src->pprev->phashBlock)
+        memcpy(row.prev_hash, src->pprev->phashBlock->data, 32);
+    row.height = src->nHeight; row.n_bits = src->nBits;
+    row.n_time = src->nTime; row.n_version = src->nVersion;
+    row.n_status = src->nStatus; row.n_file = src->nFile;
+    row.n_data_pos = src->nDataPos; row.n_undo_pos = src->nUndoPos;
+    row.n_tx = src->nTx; row.n_chain_tx = src->nChainTx;
+    memcpy(row.chain_work, src->nChainWork.pn, 32);
+    row.n_cached_branch_id = (uint32_t)src->nCachedBranchId;
+    memcpy(row.sapling_root, src->hashFinalSaplingRoot.data, 32);
+    *out = row;
+}
+
 static bool emit_payload(FILE *file, void *user, uint64_t *size_out,
                          uint8_t sha3_out[32])
 {
@@ -71,19 +89,8 @@ static bool emit_payload(FILE *file, void *user, uint64_t *size_out,
     sha3_256_write(&sha3, (const uint8_t *)&count, 4);
     uint64_t bytes = 8;
     for (size_t i = 0; i < ctx->count; i++) {
-        struct block_index *src = ctx->sorted[i];
-        struct block_index_flat row = {0};
-        if (src->phashBlock) memcpy(row.hash, src->phashBlock->data, 32);
-        if (src->pprev && src->pprev->phashBlock)
-            memcpy(row.prev_hash, src->pprev->phashBlock->data, 32);
-        row.height = src->nHeight; row.n_bits = src->nBits;
-        row.n_time = src->nTime; row.n_version = src->nVersion;
-        row.n_status = src->nStatus; row.n_file = src->nFile;
-        row.n_data_pos = src->nDataPos; row.n_undo_pos = src->nUndoPos;
-        row.n_tx = src->nTx; row.n_chain_tx = src->nChainTx;
-        memcpy(row.chain_work, src->nChainWork.pn, 32);
-        row.n_cached_branch_id = (uint32_t)src->nCachedBranchId;
-        memcpy(row.sapling_root, src->hashFinalSaplingRoot.data, 32);
+        struct block_index_flat row;
+        block_index_flat_encode_row(ctx->sorted[i], &row);
         if (fwrite(&row, sizeof(row), 1, file) != 1) // disk-io-lock: private-fd
             LOG_FAIL("block_index_flat", "flat row write failed at %zu: %s",
                      i, strerror(errno));
@@ -112,6 +119,36 @@ static int save_height_cmp(const void *a, const void *b)
     return aa->nHeight < bb->nHeight ? -1 : aa->nHeight > bb->nHeight;
 }
 
+static const char *g_last_path = "none";
+static uint64_t g_last_bytes;
+
+bool block_index_flat_last_save_stats(const char **path, uint64_t *bytes)
+{
+    if (!path || !bytes) return false;
+    *path = g_last_path; *bytes = g_last_bytes;
+    return true;
+}
+
+/* Incremental in-place save first (see block_index_flat_inplace.c); the full
+ * atomic tmp+rename rewrite is the fallback and the reference encoding. */
+static struct zcl_result flat_save_publish(
+    const char *datadir, struct main_state *ms, struct emit_ctx *ctx)
+{
+    uint64_t rewritten = 0;
+    enum bif_inplace v = block_index_flat_save_inplace(
+        datadir, ms, ctx->sorted, ctx->count, &ctx->identity, &rewritten);
+    if (v == BIF_INPLACE_DONE) {
+        g_last_path = "incremental"; g_last_bytes = rewritten;
+        return ZCL_OK;
+    }
+    if (v == BIF_INPLACE_CRASHED)
+        return ZCL_ERR(-10, "block index flat write: simulated crash");
+    struct zcl_result r = bii_write_embedded(datadir, emit_payload, ctx);
+    g_last_path = "full";
+    g_last_bytes = ctx->identity.payload_size + 48u;
+    return r;
+}
+
 struct zcl_result block_index_flat_write_identity(
     const char *datadir, struct main_state *ms,
     struct block_index_flat_identity *out)
@@ -130,14 +167,14 @@ struct zcl_result block_index_flat_write_identity(
     qsort(sorted, n, sizeof(*sorted), save_height_cmp);
     int64_t started = (int64_t)platform_time_wall_time_t();
     struct emit_ctx ctx = { .ms = ms, .sorted = sorted, .count = n };
-    struct zcl_result written = bii_write_embedded(datadir, emit_payload, &ctx);
+    struct zcl_result written = flat_save_publish(datadir, ms, &ctx);
     free(sorted);
     if (!written.ok)
         return written;
     block_index_flat_identity_remember(datadir, &ctx.identity);
     if (out) *out = ctx.identity;
     LOG_INFO("block_index_flat", "Block index flat file: %zu entries, "
-             "%zuMB (%llds)", n, n * sizeof(struct block_index_flat) /
-             (1024 * 1024), (long long)((int64_t)platform_time_wall_time_t() - started));
+             "%zuMB (%llds) path=%s", n, n * sizeof(struct block_index_flat) /
+             (1024 * 1024), (long long)((int64_t)platform_time_wall_time_t() - started), g_last_path);
     return ZCL_OK;
 }

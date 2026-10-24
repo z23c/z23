@@ -59,11 +59,28 @@ static void shutdown_stop_frontend_services(struct boot_svc_ctx *svc)
 }
 
 /* One indented shutdown sub-stage line, same shape as the [boot] sub-marks. */
-static int64_t shutdown_submark(const char *name, int64_t since)
+static int64_t shutdown_submark_ex(const char *name, int64_t since,
+                                   const char *suffix)
 {
     int64_t ms = boot_clock_ms() - since;
-    printf("[shutdown]   %-28s %lldms\n", name, (long long)ms);
+    printf("[shutdown]   %-28s %lldms%s\n", name, (long long)ms, suffix);
     return boot_clock_ms();
+}
+
+static int64_t shutdown_submark(const char *name, int64_t since)
+{
+    return shutdown_submark_ex(name, since, "");
+}
+
+/* flat_save also reports which save path ran and how many bytes it wrote. */
+static void shutdown_flat_save_mark(int64_t since)
+{
+    const char *path = "none"; uint64_t bytes = 0;
+    char suffix[96] = "";
+    if (block_index_flat_last_save_stats(&path, &bytes))
+        snprintf(suffix, sizeof(suffix), " path=%s rewritten_bytes=%llu",
+                 path, (unsigned long long)bytes);
+    (void)shutdown_submark_ex("shutdown.flat_save", since, suffix);
 }
 
 /* Bind the saved flat snapshot to the projection and time it with the row
@@ -100,7 +117,7 @@ static void shutdown_persist_fast_restart_state(struct boot_svc_ctx *svc)
         t_sub = shutdown_submark("shutdown.projection_catch_up", t_sub);
         struct zcl_result saved = save_block_index_flat_identity(
             svc->datadir, svc->state, &identity);
-        (void)shutdown_submark("shutdown.flat_save", t_sub);
+        shutdown_flat_save_mark(t_sub);
         if (bip && covered == UINT64_MAX)
             LOG_WARN("shutdown", "projection catch-up failed; flat saved "
                      "without binding so next boot uses the full scan");
