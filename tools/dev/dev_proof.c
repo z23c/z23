@@ -6830,7 +6830,55 @@ static bool dp_test_needs_scan(const char *groups, const char **argv,
     return true;
 }
 
+/* Append one Make target the argv does not already name, unless the proof
+ * already provides it. Refuses an argv with no room, like dp_test_need_add. */
+static bool dp_test_need_add_target(const char *target, const char *value,
+                                    const char **argv, const char **values,
+                                    size_t argv_cap, size_t *n)
+{
+    if (zcl_dev_proof_need_already_provided(target, value) ||
+        dp_argv_names(argv, *n, target))
+        return true;
+    if (*n + 1 >= argv_cap) return false;
+    values[*n] = value;
+    argv[(*n)++] = target;
+    return true;
+}
+
+static bool dp_path_has_prefix(const char *path, const char *prefix)
+{
+    return strncmp(path, prefix, strlen(prefix)) == 0;
+}
+
+/* Is `path` a source the release node binary can compile? The tests, their
+ * fixtures and the lint gates build into other binaries; every other C
+ * source or header (the Makefile's NODE_C23_SRCS plus what they include)
+ * reaches build/bin/z23. Over-approximating costs one link; missing one
+ * lets a release-only error (LTO, -O3 -Werror) reach main. */
+static bool dp_path_links_release(const char *path)
+{
+    size_t len = strlen(path);
+    if (len < 2 || (strcmp(path + len - 2, ".c") != 0 &&
+                    strcmp(path + len - 2, ".h") != 0))
+        return false;
+    return !dp_path_has_prefix(path, "tests/") &&
+           !dp_path_has_prefix(path, "tools/lint/") &&
+           !dp_path_has_prefix(path, "docs/");
+}
+
+/* Does the changed set touch a source the release z23 links? The dev and
+ * test builds use DEV_CFLAGS (no LTO, -Wno-maybe-uninitialized), so only
+ * linking build/bin/z23 itself shows the release flags' errors. */
+static bool dp_changed_links_release(
+    const struct zcl_dev_proof_changed_set *changed)
+{
+    for (size_t i = 0; changed && changed->files && i < changed->count; i++)
+        if (dp_path_links_release(changed->files[i])) return true;
+    return false;
+}
+
 static bool proof_test_needs_argv(const char *jobs, const char *groups,
+                                  const struct zcl_dev_proof_changed_set *changed,
                                   const char **argv, const char **values,
                                   size_t argv_cap, size_t *targets)
 {
@@ -6842,6 +6890,10 @@ static bool proof_test_needs_argv(const char *jobs, const char *groups,
     argv[n++] = "--no-print-directory";
     argv[n++] = jobs;
     if (!dp_test_needs_scan(groups, argv, values, argv_cap, &n)) return false;
+    if (dp_changed_links_release(changed) &&
+        !dp_test_need_add_target("z23", "build/bin/z23", argv, values,
+                                 argv_cap, &n))
+        return false;
     *targets = n - 3;
     argv[*targets ? n : 0] = NULL;
     return true;
@@ -6863,7 +6915,24 @@ bool zcl_dev_proof_test_needs_argv(const char *jobs, const char *groups,
 {
     const char *values[PROOF_TEST_NEEDS_ARGV_CAP];
     if (argv_cap > PROOF_TEST_NEEDS_ARGV_CAP) argv_cap = PROOF_TEST_NEEDS_ARGV_CAP;
-    return proof_test_needs_argv(jobs, groups, argv, values, argv_cap,
+    return proof_test_needs_argv(jobs, groups, NULL, argv, values, argv_cap,
+                                 targets);
+}
+
+/* The same seam for a proof whose changed set is `files`: a source the
+ * release z23 links adds the z23 target beside the groups' needs. */
+bool zcl_dev_proof_test_needs_argv_for_files(const char *jobs,
+                                             const char *groups,
+                                             const char *const *files,
+                                             size_t count, const char **argv,
+                                             size_t argv_cap, size_t *targets)
+{
+    const char *values[PROOF_TEST_NEEDS_ARGV_CAP];
+    struct zcl_dev_proof_changed_set set = {0};
+    set.files = (const char **)files;
+    set.count = count;
+    if (argv_cap > PROOF_TEST_NEEDS_ARGV_CAP) argv_cap = PROOF_TEST_NEEDS_ARGV_CAP;
+    return proof_test_needs_argv(jobs, groups, &set, argv, values, argv_cap,
                                  targets);
 }
 #endif
@@ -9305,6 +9374,65 @@ static bool dp_test_need_clear(const char *generation, const char *value)
 
 #define PROOF_TEST_NEEDS_DEFAULT_MS 600000
 
+/* Read the last 16 KB of `log` into tail (NUL-terminated); false when it
+ * cannot be opened. The failing make line is the last one, so a long log
+ * is read from its end. */
+static bool dp_log_tail(const char *log, char *tail, size_t cap)
+{
+    FILE *f = fopen(log, "r");
+    if (!f) return false;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long size = ftell(f);
+        long from = size > (long)(cap - 1) ? size - (long)(cap - 1) : 0;
+        if (size < 0 || fseek(f, from, SEEK_SET) != 0) rewind(f);
+    }
+    size_t got = fread(tail, 1, cap - 1, f);
+    (void)fclose(f);
+    tail[got] = '\0';
+    return true;
+}
+
+/* The target of the last "*** [Makefile:N: target]" (or "*** [target]") in
+ * text, NUL-terminated in place; NULL when there is none. */
+static char *dp_make_failed_target(char *text)
+{
+    char *hit = NULL;
+    for (char *p = text; (p = strstr(p, "*** [")) != NULL; p += 5) hit = p + 5;
+    char *rb = hit ? strchr(hit, ']') : NULL;
+    if (!rb) return NULL;
+    *rb = '\0';
+    char *name = hit;
+    for (char *c = hit; (c = strstr(c, ": ")) != NULL; c += 2) name = c + 2;
+    return name;
+}
+
+/* The need whose make target failed, read from the last make
+ * "*** [Makefile:N: target]" line of the step log; NULL when the log names
+ * none of them. The proof then blames that need, not the first in argv. */
+static const char *dp_failed_need(const char *log, const char **argv,
+                                  const char **values, size_t targets)
+{
+    char tail[16384];
+    if (!dp_log_tail(log, tail, sizeof(tail))) return NULL;
+    const char *name = dp_make_failed_target(tail);
+    if (!name) return NULL;
+    for (size_t i = 3; i < 3 + targets; i++)
+        if (strcmp(name, argv[i]) == 0 || strcmp(name, values[i]) == 0)
+            return argv[i];
+    return NULL;
+}
+
+#if defined(ZCL_TESTING)
+/* Seam: which need (argv[3..3+targets)) the make failure line in `log`
+ * names, or NULL. */
+const char *zcl_dev_proof_test_failed_need(const char *log, const char **argv,
+                                           const char **values,
+                                           size_t targets)
+{
+    return dp_failed_need(log, argv, values, targets);
+}
+#endif
+
 /* Build, in the generation and from its own sources, every Make target a
  * selected group declares as a BUILD need (test_group_host_needs.def), alone
  * and before the fork like the prefork step. A tool never copied in from
@@ -9317,8 +9445,8 @@ static bool dp_worker_test_needs(struct dp_worker *w, char *why,
     const char *argv[PROOF_TEST_NEEDS_ARGV_CAP];
     const char *values[PROOF_TEST_NEEDS_ARGV_CAP];
     size_t targets = 0;
-    if (!proof_test_needs_argv(w->make_jobs, w->groups, argv, values,
-                               PROOF_TEST_NEEDS_ARGV_CAP, &targets)) {
+    if (!proof_test_needs_argv(w->make_jobs, w->groups, w->changed, argv,
+                               values, PROOF_TEST_NEEDS_ARGV_CAP, &targets)) {
         proof_why(why, why_len, "proof_test_needs_argv_invalid");
         return false;
     }
@@ -9336,10 +9464,13 @@ static bool dp_worker_test_needs(struct dp_worker *w, char *why,
         w->paths, "test-needs", PROOF_TEST_NEEDS_DEFAULT_MS);
     int rc = run_step(w->paths, w->generation, w->paths->test_needs_log, argv,
                       "test-needs", &budget, NULL);
+    const char *failed = rc != 0 ? dp_failed_need(w->paths->test_needs_log,
+                                                  argv, values, targets)
+                                : NULL;
     for (size_t i = 3; i < 3 + targets; i++) {
         if (rc == 0 && dp_test_need_present(w->generation, values[i]))
             continue;
-        dp_test_need_unbuildable(w, argv[i], why, why_len);
+        dp_test_need_unbuildable(w, failed ? failed : argv[i], why, why_len);
         return false;
     }
     return true;
@@ -9356,8 +9487,8 @@ static bool dp_test_needs_bind(const struct dp_worker *w,
     const char *argv[PROOF_TEST_NEEDS_ARGV_CAP];
     const char *values[PROOF_TEST_NEEDS_ARGV_CAP];
     size_t targets = 0;
-    if (!proof_test_needs_argv(w->make_jobs, w->groups, argv, values,
-                               PROOF_TEST_NEEDS_ARGV_CAP, &targets)) {
+    if (!proof_test_needs_argv(w->make_jobs, w->groups, w->changed, argv,
+                               values, PROOF_TEST_NEEDS_ARGV_CAP, &targets)) {
         proof_why(why, why_len, "proof_test_needs_argv_invalid");
         return false;
     }

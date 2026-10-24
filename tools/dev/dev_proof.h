@@ -729,6 +729,21 @@ bool zcl_dev_proof_test_prefork_argv(const char *jobs, bool lint_full,
 bool zcl_dev_proof_test_needs_argv(const char *jobs, const char *groups,
                                    const char **argv, size_t argv_cap,
                                    size_t *targets);
+/* Same, for a proof whose changed set is `files`: a changed C source or
+ * header the release z23 links also names the `z23` target, so a
+ * release-only error (LTO, -O3 -Werror) fails the change that causes it. */
+bool zcl_dev_proof_test_needs_argv_for_files(const char *jobs,
+                                             const char *groups,
+                                             const char *const *files,
+                                             size_t count, const char **argv,
+                                             size_t argv_cap, size_t *targets);
+/* Seam for the test-needs failure attribution: the need among
+ * argv[3..3+targets) (values[] the produced paths) that the last make
+ * "*** [Makefile:N: target]" line in the last 16 KB of `log` names, or NULL
+ * when the log names none of them. */
+const char *zcl_dev_proof_test_failed_need(const char *log, const char **argv,
+                                           const char **values,
+                                           size_t targets);
 /* Seam for the docs-tools build step: the exact make argv generation_prepare()
  * runs inside the sealed generation before the docs-fresh verification, so a
  * test can prove the freshness gate's checker binaries are provisioned

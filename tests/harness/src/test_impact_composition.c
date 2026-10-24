@@ -8921,6 +8921,94 @@ static int test_ic_proof_test_needs_leave_provided_tools(void)
     return failures;
 }
 
+/* A changed source the release z23 links must make the proof link it with
+ * the release flags: the dev and test builds cannot see an LTO or -O3
+ * -Werror error, so without the target the change reaches main and breaks
+ * every later proof that does build build/bin/z23. */
+static int test_ic_proof_test_needs_release_link_for_source(void)
+{
+    int failures = 0;
+    TEST("proof test needs: a changed release source also builds the "
+         "release z23; tests, lint and docs do not") {
+        const char *argv[PROOF_TEST_NEEDS_ARGV_CAP];
+        size_t targets = 99;
+        const char *src[] = {
+            "cognition/modules/retrieval/src/retrieval_evaluation_batch.c"};
+        const char *tests[] = {"tests/harness/src/test_impact_composition.c",
+                               "tools/lint/lintc/x.c", "docs/a.md"};
+
+        ASSERT(zcl_dev_proof_test_needs_argv_for_files(
+            "-j4", "test_impact_composition", src, 1, argv,
+            PROOF_TEST_NEEDS_ARGV_CAP, &targets));
+        ASSERT(targets == 1);
+        ASSERT(ic_argv_has(argv, "z23"));
+        ASSERT(argv[4] == NULL);
+
+        targets = 99;
+        ASSERT(zcl_dev_proof_test_needs_argv_for_files(
+            "-j4", "test_impact_composition", tests, 3, argv,
+            PROOF_TEST_NEEDS_ARGV_CAP, &targets));
+        ASSERT(targets == 0);
+        ASSERT(argv[0] == NULL);
+
+        /* A group that already needs z23 still names it once. */
+        targets = 99;
+        ASSERT(zcl_dev_proof_test_needs_argv_for_files(
+            "-j4", "test_device_command", src, 1, argv,
+            PROOF_TEST_NEEDS_ARGV_CAP, &targets));
+        ASSERT(targets == 1);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Write `filler_lines` of 64-byte filler then `tail` to root/name; the
+ * path of the log is returned in out. */
+static bool ic_make_log(const char *root, const char *name, int filler_lines,
+                        const char *tail, char out[4096])
+{
+    snprintf(out, 4096, "%s/%s", root, name);
+    FILE *f = fopen(out, "w");
+    if (!f) return false;
+    for (int i = 0; i < filler_lines; i++)
+        fputs("cc -O3 -c some/object/file.c -o build/obj/some_file.o #####\n",
+              f);
+    fputs(tail, f);
+    return fclose(f) == 0;
+}
+
+/* The proof blames the need whose make target failed, read from the LAST
+ * make line of a log that can be longer than the 16 KB window, with or
+ * without the "Makefile:N: " prefix. */
+static int test_ic_proof_test_needs_failed_need_parses_make_line(void)
+{
+    int failures = 0;
+    TEST("proof test needs: the failed need is the last make line's target, "
+         "from the log's tail, with or without Makefile:N") {
+        char root[4096], log[4096];
+        const char *argv[5] = {"make", "-j4", "-s", "other", "z23"};
+        const char *values[5] = {NULL, NULL, NULL, "build/bin/other",
+                                 "build/bin/z23"};
+        ASSERT(test_mkdtemp(root, sizeof(root), "failed_need") != NULL);
+
+        ASSERT(ic_make_log(root, "long.log", 600,
+                           "make: *** [Makefile:3936: build/bin/z23] "
+                           "Error 2\n", log));
+        const char *got = zcl_dev_proof_test_failed_need(log, argv, values, 2);
+        ASSERT(got != NULL && strcmp(got, "z23") == 0);
+
+        ASSERT(ic_make_log(root, "bare.log", 2,
+                           "make: *** [build/bin/z23] Error 2\n", log));
+        got = zcl_dev_proof_test_failed_need(log, argv, values, 2);
+        ASSERT(got != NULL && strcmp(got, "z23") == 0);
+
+        ASSERT(ic_make_log(root, "none.log", 2, "all fine\n", log));
+        ASSERT(zcl_dev_proof_test_failed_need(log, argv, values, 2) == NULL);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* Is `target` among needs[0..n)? */
 static bool ic_needs_have(const struct zcl_test_group_host_need *needs,
                           size_t n, const char *target, const char *value)
@@ -13576,6 +13664,8 @@ int test_impact_composition(void)
     failures += test_ic_proof_lint_and_test_share_admitted_executables();
     failures += test_ic_proof_test_needs_build_the_sensor();
     failures += test_ic_proof_test_needs_leave_provided_tools();
+    failures += test_ic_proof_test_needs_release_link_for_source();
+    failures += test_ic_proof_test_needs_failed_need_parses_make_line();
     failures += test_ic_proof_test_needs_whole_catalog();
     failures += test_ic_build_need_umbrella_fold();
     failures += test_ic_metaverse_view_state_routes();
