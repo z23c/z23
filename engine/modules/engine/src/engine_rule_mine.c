@@ -21,6 +21,18 @@ static void mine_copy(char *dst, size_t cap, const char *src)
     dst[n] = '\0';
 }
 
+static bool mine_has_earlier_failure(const struct zcl_rule_receipt_log *log,
+                                      uint32_t i,
+                                      const struct zcl_rule_receipt *f)
+{
+    bool earlier_fail = false;
+    for (uint32_t k = 0; k < i; k++)
+        if (!log->r[k].gate_pass &&
+            strcmp(log->r[k].task_sha3, f->task_sha3) == 0)
+            { earlier_fail = true; break; }
+    return earlier_fail;
+}
+
 uint32_t zcl_rule_mine_pairs(const struct zcl_rule_receipt_log *log,
                              struct zcl_rule_mine_pair *out, uint32_t cap)
 {
@@ -38,11 +50,7 @@ uint32_t zcl_rule_mine_pairs(const struct zcl_rule_receipt_log *log,
          * earlier FAILURE counts: an earlier PASS of the same task is not a
          * lesson this failure would duplicate — the triple pass, fail, pass
          * still yields its one pair. */
-        bool earlier_fail = false;
-        for (uint32_t k = 0; k < i; k++)
-            if (!log->r[k].gate_pass &&
-                strcmp(log->r[k].task_sha3, f->task_sha3) == 0)
-                { earlier_fail = true; break; }
+        bool earlier_fail = mine_has_earlier_failure(log, i, f);
         if (earlier_fail) continue;
 
         const struct zcl_rule_receipt *p = NULL;
@@ -81,13 +89,35 @@ size_t zcl_rule_mine_diff_command(const struct zcl_rule_mine_pair *p,
     return (size_t)n;
 }
 
-bool zcl_rule_mine_candidate(const struct zcl_rule_mine_pair *p,
-                             const char *diff, size_t len,
-                             struct zcl_rule_candidate *out)
+static void mine_collect_path(const char *line, size_t llen,
+                                struct zcl_rule_candidate *out)
 {
-    if (!p || !out) return false;
-    memset(out, 0, sizeof *out);
+    /* The `+++ b/<path>` side names the file AS IT IS AFTER the fix, which
+     * is the file a later executor should open. The `---` side would name
+     * a path that a rename has already made wrong. */
+    static const char kPlus[] = "+++ b/";
+    if (llen <= sizeof kPlus - 1) return;
+    if (memcmp(line, kPlus, sizeof kPlus - 1) != 0) return;
+    const char *path = line + sizeof kPlus - 1;
+    size_t plen = llen - (sizeof kPlus - 1);
+    while (plen && (path[plen - 1] == '\r' || path[plen - 1] == ' ')) plen--;
+    if (!plen) return;
+    if (out->file_count >= ZCL_RULE_MINE_FILE_MAX) return;
+    char tmp[ZCL_RULE_MINE_PATH_MAX];
+    size_t c = plen < sizeof tmp - 1 ? plen : sizeof tmp - 1;
+    memcpy(tmp, path, c);
+    tmp[c] = '\0';
+    bool dup = false;
+    for (uint32_t k = 0; k < out->file_count; k++)
+        if (strcmp(out->files[k], tmp) == 0) { dup = true; break; }
+    if (dup) return;
+    mine_copy(out->files[out->file_count], ZCL_RULE_MINE_PATH_MAX, tmp);
+    out->file_count++;
+}
 
+static void mine_collect_paths(const char *diff, size_t len,
+                                 struct zcl_rule_candidate *out)
+{
     uint32_t lines = 0;
     size_t i = 0;
     while (i < (diff ? len : 0) && lines < ZCL_RULE_MINE_DIFF_LINES) {
@@ -98,38 +128,14 @@ bool zcl_rule_mine_candidate(const struct zcl_rule_mine_pair *p,
         lines++;
         i = (eol < len) ? eol + 1 : eol;
 
-        /* The `+++ b/<path>` side names the file AS IT IS AFTER the fix, which
-         * is the file a later executor should open. The `---` side would name
-         * a path that a rename has already made wrong. */
-        static const char kPlus[] = "+++ b/";
-        if (llen <= sizeof kPlus - 1) continue;
-        if (memcmp(line, kPlus, sizeof kPlus - 1) != 0) continue;
-        const char *path = line + sizeof kPlus - 1;
-        size_t plen = llen - (sizeof kPlus - 1);
-        while (plen && (path[plen - 1] == '\r' || path[plen - 1] == ' ')) plen--;
-        if (!plen) continue;
-        if (out->file_count >= ZCL_RULE_MINE_FILE_MAX) continue;
-        char tmp[ZCL_RULE_MINE_PATH_MAX];
-        size_t c = plen < sizeof tmp - 1 ? plen : sizeof tmp - 1;
-        memcpy(tmp, path, c);
-        tmp[c] = '\0';
-        bool dup = false;
-        for (uint32_t k = 0; k < out->file_count; k++)
-            if (strcmp(out->files[k], tmp) == 0) { dup = true; break; }
-        if (dup) continue;
-        mine_copy(out->files[out->file_count], ZCL_RULE_MINE_PATH_MAX, tmp);
-        out->file_count++;
+        mine_collect_path(line, llen, out);
     }
 
-    /* A fix that names no file is not evidence about anything a later executor
-     * could open. Refuse rather than emit a rule that says "check ". */
-    if (out->file_count == 0) return false;
+}
 
-    mine_copy(out->evidence_fail, sizeof out->evidence_fail, p->fail_unit);
-    mine_copy(out->evidence_pass, sizeof out->evidence_pass, p->pass_unit);
-    mine_copy(out->gate, sizeof out->gate, p->gate);
-    mine_copy(out->group, sizeof out->group, p->group);
-
+static void mine_candidate_id(const struct zcl_rule_mine_pair *p,
+                                struct zcl_rule_candidate *out)
+{
     /* The id is a slug of the gate and the group, so two failures of the same
      * gate on the same group land on ONE candidate rather than accumulating a
      * candidate per run. */
@@ -147,6 +153,28 @@ bool zcl_rule_mine_candidate(const struct zcl_rule_mine_pair *p,
     }
     slug[w] = '\0';
     (void)snprintf(out->id, sizeof out->id, "mined:%s", slug);
+
+}
+
+bool zcl_rule_mine_candidate(const struct zcl_rule_mine_pair *p,
+                             const char *diff, size_t len,
+                             struct zcl_rule_candidate *out)
+{
+    if (!p || !out) return false;
+    memset(out, 0, sizeof *out);
+
+    mine_collect_paths(diff, len, out);
+
+    /* A fix that names no file is not evidence about anything a later executor
+     * could open. Refuse rather than emit a rule that says "check ". */
+    if (out->file_count == 0) return false;
+
+    mine_copy(out->evidence_fail, sizeof out->evidence_fail, p->fail_unit);
+    mine_copy(out->evidence_pass, sizeof out->evidence_pass, p->pass_unit);
+    mine_copy(out->gate, sizeof out->gate, p->gate);
+    mine_copy(out->group, sizeof out->group, p->group);
+
+    mine_candidate_id(p, out);
 
     size_t at = 0;
     int n = snprintf(out->text, sizeof out->text,
