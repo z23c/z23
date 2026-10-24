@@ -15,7 +15,16 @@
  * is retired; held lanes at --max-held stop the tick before the step. A failed
  * agent-verify is rerun once on r1 (a passing rerun submits with its note, a
  * failing one holds); the lint-land log keeps the stderr a build wrote; an
- * empty --sign-flag is refused unless --allow-unsigned 1 is given. */
+ * empty --sign-flag is refused unless --allow-unsigned 1 is given.
+ *
+ * Finish mode (--finish/--target/--credit): a committed one-commit lane is
+ * adopted and submitted with the data-built land note; an out-of-scope
+ * committed path, a grown baseline, no removed function, a dirty tracked tree,
+ * two commits ahead and a HOLD review each exit 1 with the HOLD line; missing
+ * --target exits 2; a held hourly-tick lock does not block a finish and a held
+ * same-lane finish lock skips. Both modes build the land note with one bounded
+ * builder: a long pins list is clipped (fixed tail intact), a note that cannot
+ * fit 500 bytes HOLDs and is never submitted, and a submit without data.seq HOLDs. */
 
 #include "test/test_core.h"
 
@@ -197,21 +206,39 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
                "git -C '%s/main' worktree remove --force \"$1\"", e->d, e->d);
 }
 
+/* The fixture step document: note prefix, target file and pins list given;
+ * npins 0 is the one default pin fn_a(22), else npins padded pin names. */
+static bool lt_step_doc(const struct lt_env *e, const char *action,
+                        const char *engine, const char *prefix,
+                        const char *target, int npins)
+{
+    static char pins[8192], doc[16384];
+    char path[900];
+    (void)snprintf(path, sizeof(path), "%s/step.json", e->d);
+    size_t used = 0;
+    pins[0] = '\0';
+    if (npins == 0)
+        (void)snprintf(pins, sizeof(pins), "{\"function\":\"fn_a\",\"m\":22}");
+    for (int i = 0; i < npins; i++)
+        used += (size_t)snprintf(pins + used, sizeof(pins) - used,
+                                 "%s{\"function\":\"pinned_function_%03d\",\"m\":22}",
+                                 i ? "," : "", i);
+    (void)snprintf(doc, sizeof(doc),
+        "{\"data\":{\"action\":\"%s\",\"reason\":\"fixture reason\","
+        "\"dispatch\":{\"lane\":\"loop-t1\",\"note_prefix\":\"%s\","
+        "\"engine\":\"%s\",\"task_text\":\"do the unit\"},"
+        "\"next\":{\"objective\":\"functions_over_complexity_cap\","
+        "\"brief\":{\"target_file\":\"%s\","
+        "\"owned\":[\"%s\",\"tools/lint/cyclomatic_complexity_baseline.txt\"],"
+        "\"pins\":[%s]}}}}",
+        action, prefix, engine, target, target, pins);
+    return lt_wf(path, doc);
+}
+
 static bool lt_step_json(const struct lt_env *e, const char *action,
                          const char *engine)
 {
-    char path[900], doc[2048];
-    (void)snprintf(path, sizeof(path), "%s/step.json", e->d);
-    (void)snprintf(doc, sizeof(doc),
-        "{\"data\":{\"action\":\"%s\",\"reason\":\"fixture reason\","
-        "\"dispatch\":{\"lane\":\"loop-t1\",\"note_prefix\":\"loop:obj1:\","
-        "\"engine\":\"%s\",\"task_text\":\"do the unit\"},"
-        "\"next\":{\"objective\":\"functions_over_complexity_cap\","
-        "\"brief\":{\"target_file\":\"owned.c\","
-        "\"owned\":[\"owned.c\",\"tools/lint/cyclomatic_complexity_baseline.txt\"],"
-        "\"pins\":[{\"function\":\"fn_a\",\"m\":22}]}}}}",
-        action, engine);
-    return lt_wf(path, doc);
+    return lt_step_doc(e, action, engine, "loop:obj1:", "owned.c", 0);
 }
 
 static bool lt_setup(struct lt_env *e, const char *tag, const struct lt_cfg *c,
@@ -224,18 +251,20 @@ static bool lt_setup(struct lt_env *e, const char *tag, const struct lt_cfg *c,
     return lt_repo(e) && lt_fakes(e, c) && lt_step_json(e, action, engine);
 }
 
-/* One tick; returns the tool's exit status, output in out. */
-static int lt_tick(const struct lt_env *e, const char *extra_flag,
-                   const char *extra_value, char *out, size_t cap)
+/* One tool run with any number of extra argv words (NULL-terminated), last
+ * one wins for a repeated option; returns the exit status, output in out. */
+static int lt_tool(const struct lt_env *e, const char *const extra[], char *out,
+                   size_t cap)
 {
-    char a[12][700];
+    char a[14][700], lock[700];
+    (void)snprintf(lock, sizeof(lock), "%s/haiku.lock", e->d);
     const char *names[] = { "--main", "--lanes", "--state-dir", "--scratch-dir",
                             "--dev", "--engine-unit", "--zgate", "--retire-script",
                             "--devbuild", "--claude", "--lint-bin" };
     const char *rels[] = { "main", "lanes", "state", "scratch", "bin/dev", "bin/eu",
                            "bin/zgate", "bin/retire", "bin/devbuild", "bin/claude",
                            "bin/lint" };
-    const char *argv[48] = { "env", "GIT_AUTHOR_NAME=fixture",
+    const char *argv[64] = { "env", "GIT_AUTHOR_NAME=fixture",
         "GIT_AUTHOR_EMAIL=f@example.invalid", "GIT_COMMITTER_NAME=fixture",
         "GIT_COMMITTER_EMAIL=f@example.invalid", LT_BIN };
     size_t n = 6;
@@ -249,10 +278,10 @@ static int lt_tick(const struct lt_env *e, const char *extra_flag,
         "--engine-timeout-s", "30", "--review-timeout-s", "30" };
     for (size_t i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++)
         argv[n++] = fixed[i];
-    if (extra_flag) {
-        argv[n++] = extra_flag;
-        argv[n++] = extra_value;
-    }
+    argv[n++] = "--haiku-lock";
+    argv[n++] = lock;
+    for (size_t i = 0; extra && extra[i] && n < 62; i++)
+        argv[n++] = extra[i];
     argv[n] = NULL;
     /* merged: the refusal text is on stderr, the tool's own lines on stdout */
     char scratch[8192];
@@ -260,6 +289,14 @@ static int lt_tick(const struct lt_env *e, const char *extra_flag,
     return zcl_spawn_capture_merged_observed(argv, out ? out : scratch,
                                              out ? cap : sizeof(scratch),
                                              120000, &timed_out);
+}
+
+/* One tick; returns the tool's exit status, output in out. */
+static int lt_tick(const struct lt_env *e, const char *extra_flag,
+                   const char *extra_value, char *out, size_t cap)
+{
+    const char *const extra[] = { extra_flag, extra_value, NULL };
+    return lt_tool(e, extra, out, cap);
 }
 
 static bool lt_has(const char *path, const char *needle)
@@ -279,6 +316,15 @@ static int lt_commits_ahead(const struct lt_env *e)
 {
     char lane[900], out[64] = "";
     (void)snprintf(lane, sizeof(lane), "%s/lanes/loop-t1", e->d);
+    const char *const argv[] = { "git", "-C", lane, "rev-list", "--count",
+                                 "origin/main..HEAD", NULL };
+    return lt_run(argv, out, sizeof(out), NULL) ? atoi(out) : -1;
+}
+
+static int lt_ahead(const struct lt_env *e, const char *name)
+{
+    char lane[900], out[64] = "";
+    (void)snprintf(lane, sizeof(lane), "%s/lanes/%s", e->d, name);
     const char *const argv[] = { "git", "-C", lane, "rev-list", "--count",
                                  "origin/main..HEAD", NULL };
     return lt_run(argv, out, sizeof(out), NULL) ? atoi(out) : -1;
@@ -583,6 +629,441 @@ static int case_retire_and_held(void)
     return failures;
 }
 
+/* ── finish mode: an existing committed lane through the loop's stages ── */
+
+static bool lt_commit(const char *dir, const char *msg)
+{
+    return lt_git(dir, "add", "-A", NULL) &&
+           lt_git(dir, "-c", "user.name=fixture", "-c", "user.email=f@example.invalid",
+                  "-c", "commit.gpgsign=false", "commit", "-q", "-m", msg, NULL);
+}
+
+/* A lane worktree "fin1" off origin/main holding one commit of the given kind:
+ * ok (target edit, first baseline row deleted), scope (also other.c), grow (a
+ * new row), none (target edit only), dirty (ok plus an uncommitted tracked
+ * edit), two (ok plus a second commit). */
+static bool lt_make_lane_for(const struct lt_env *e, const char *kind,
+                             const char *name, const char *file)
+{
+    char main_[700], lane[700], f[900], br[128];
+    (void)snprintf(main_, sizeof(main_), "%s/main", e->d);
+    (void)snprintf(lane, sizeof(lane), "%s/lanes/%s", e->d, name);
+    (void)snprintf(br, sizeof(br), "lane/%s", name);
+    if (!lt_git(main_, "worktree", "add", "-q", "-b", br, lane, "origin/main", NULL))
+        return false;
+    (void)snprintf(f, sizeof(f), "%s/%s", lane, file);
+    bool ok = lt_wf(f, "int owned;\nint split;\n");
+    if (strcmp(kind, "scope") == 0) {
+        (void)snprintf(f, sizeof(f), "%s/other.c", lane);
+        ok = ok && lt_wf(f, "int other;\nint stray;\n");
+    }
+    if (strcmp(kind, "space") == 0) {
+        (void)snprintf(f, sizeof(f), "%s/owned.c extra", lane);
+        ok = ok && lt_wf(f, "int stray;\n");
+    }
+    if (strcmp(kind, "none") != 0) {
+        (void)snprintf(f, sizeof(f), "%s/tools/lint/cyclomatic_complexity_baseline.txt", lane);
+        ok = ok && lt_wf(f, strcmp(kind, "grow") == 0
+                                ? "a.c:f1:20\na.c:f2:21\na.c:f3:22\na.c:f9:30\n"
+                                : "a.c:f2:21\na.c:f3:22\n");
+    }
+    ok = ok && lt_commit(lane, "split");
+    if (strcmp(kind, "two") == 0) {
+        (void)snprintf(f, sizeof(f), "%s/owned.c", lane);
+        ok = ok && lt_wf(f, "int owned;\nint split;\nint more;\n") && lt_commit(lane, "more");
+    }
+    if (strcmp(kind, "dirty") == 0) {
+        (void)snprintf(f, sizeof(f), "%s/owned.c", lane);
+        ok = ok && lt_wf(f, "int owned;\nint dirty;\n");
+    }
+    return ok;
+}
+
+static bool lt_make_lane(const struct lt_env *e, const char *kind)
+{
+    return lt_make_lane_for(e, kind, "fin1", "owned.c");
+}
+
+static int lt_finish_for(const struct lt_env *e, const char *name, const char *target,
+                         const char *const extra[], char *out, size_t cap)
+{
+    char lane[800];
+    (void)snprintf(lane, sizeof(lane), "%s/lanes/%s", e->d, name);
+    const char *argv[16] = { "--finish", lane, "--target", target };
+    size_t n = 4;
+    for (size_t i = 0; extra && extra[i] && n < 14; i++)
+        argv[n++] = extra[i];
+    argv[n] = NULL;
+    return lt_tool(e, argv, out, cap);
+}
+
+static int lt_finish(const struct lt_env *e, const char *const extra[], char *out,
+                     size_t cap)
+{
+    return lt_finish_for(e, "fin1", "owned.c", extra, out, cap);
+}
+
+static int case_finish_submits(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192] = "";
+    const bool ready = lt_setup(&e, "finish", &c, "none", "claude-haiku") &&
+                       lt_make_lane(&e, "ok");
+    LT_CHECK("the finish scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const char *const extra[] = { "--credit", "Mac sol 6.1 low via board post 1256ab1c", NULL };
+    const int rc = lt_finish(&e, extra, out, sizeof(out));
+    LT_CHECK("a clean finish exits 0", rc == 0);
+    LT_CHECK("the last stdout line names the lane and the sequence",
+             strstr(out, "finish fin1 submitted seq=7\n") != NULL);
+    LT_CHECK("tick.log gets the same line",
+             lt_file_has(&e, "state/tick.log", "finish fin1 submitted seq=7"));
+    LT_CHECK("it submits the adopted lane worktree",
+             lt_file_has(&e, "submit.txt", "dev land submit --worktree=") &&
+             lt_file_has(&e, "submit.txt", "/lanes/fin1"));
+    LT_CHECK("the land note is built from data and names the credit",
+             lt_file_has(&e, "submit.txt",
+                 "--note=fin1: split 1 over-cap function(s) in owned.c under the complexity cap; "
+                 "Mac sol 6.1 low via board post 1256ab1c; baseline only shrank; "
+                 "lint-land + zgate both rc=0; read-only Haiku review LAND (z23-loop-tick --finish)."));
+    LT_CHECK("it made no commit of its own", lt_ahead(&e, "fin1") == 1);
+    LT_CHECK("it wrote no HOLD", !lt_exists("%s/%s", e.d, "state/fin1.HOLD"));
+    LT_CHECK("it ran no engine, step or housekeeping",
+             !lt_exists("%s/scratch/%s", e.d, "loop-t1") && !lt_file_has(&e, "state/tick.log", "step:"));
+    return failures;
+}
+
+struct lt_hold_case {
+    const char *tag, *kind, *verdict, *want;
+};
+
+static int case_finish_holds(void)
+{
+    static const struct lt_hold_case cases[] = {
+        { "fscope", "scope", "VERDICT: LAND", "finish fin1 HOLD out-of-scope edit: other.c" },
+        { "fgrow", "grow", "VERDICT: LAND", "finish fin1 HOLD baseline grew: 1 new or higher row(s)" },
+        { "fnone", "none", "VERDICT: LAND", "finish fin1 HOLD no function left the baseline" },
+        { "fspace", "space", "VERDICT: LAND", "finish fin1 HOLD out-of-scope edit: owned.c extra" },
+        { "fdirty", "dirty", "VERDICT: LAND", "finish fin1 HOLD tracked changes in the lane" },
+        { "ftwo", "two", "VERDICT: LAND", "finish fin1 HOLD expected exactly one commit ahead of origin/main, found 2" },
+        { "freview", "ok", "VERDICT: HOLD owned.c:1 bad split", "finish fin1 HOLD review VERDICT: HOLD owned.c:1 bad split" },
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        struct lt_env e;
+        char out[8192] = "", name[160];
+        const struct lt_cfg c = { NULL, "shrink", cases[i].verdict, "rc=0", NULL };
+        const bool ready = lt_setup(&e, cases[i].tag, &c, "none", "claude-haiku") &&
+                           lt_make_lane(&e, cases[i].kind);
+        (void)snprintf(name, sizeof(name), "the %s fixtures are written", cases[i].tag);
+        LT_CHECK(name, ready);
+        if (!ready) {
+            failures++;
+            continue;
+        }
+        const int rc = lt_finish(&e, NULL, out, sizeof(out));
+        (void)snprintf(name, sizeof(name), "%s: exits 1 with the HOLD line", cases[i].tag);
+        LT_CHECK(name, rc == 1 && strstr(out, cases[i].want) != NULL);
+        (void)snprintf(name, sizeof(name), "%s: submits nothing", cases[i].tag);
+        LT_CHECK(name, !lt_exists("%s/%s", e.d, "submit.txt"));
+        (void)snprintf(name, sizeof(name), "%s: leaves a HOLD file", cases[i].tag);
+        LT_CHECK(name, lt_exists("%s/%s", e.d, "state/fin1.HOLD"));
+    }
+    return failures;
+}
+
+static int case_finish_usage(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[4096] = "";
+    char lane[800];
+    const bool ready = lt_setup(&e, "fusage", &c, "none", "claude-haiku");
+    LT_CHECK("the usage scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    (void)snprintf(lane, sizeof(lane), "%s/lanes/fin1", e.d);
+    const char *const no_target[] = { "--finish", lane, NULL };
+    const char *const no_finish[] = { "--target", "owned.c", NULL };
+    const char *const rel_dir[] = { "--finish", "lanes/fin1", "--target", "owned.c", NULL };
+    LT_CHECK("--finish without --target exits 2", lt_tool(&e, no_target, out, sizeof(out)) == 2);
+    LT_CHECK("--target without --finish exits 2", lt_tool(&e, no_finish, out, sizeof(out)) == 2);
+    LT_CHECK("a relative --finish directory exits 2", lt_tool(&e, rel_dir, out, sizeof(out)) == 2);
+    return failures;
+}
+
+static int case_finish_locks(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192] = "", state[900], lock[900];
+    const bool ready = lt_setup(&e, "flock", &c, "none", "claude-haiku") &&
+                       lt_make_lane(&e, "ok");
+    LT_CHECK("the finish lock scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    (void)snprintf(state, sizeof(state), "%s/state", e.d);
+    const char *const mk[] = { "mkdir", "-p", state, NULL };
+    (void)lt_run(mk, NULL, 0, NULL);
+    (void)snprintf(lock, sizeof(lock), "%s/lock", state);
+    const int tick_fd = open(lock, O_CREAT | O_RDWR, 0600);
+    LT_CHECK("the test holds the hourly tick lock",
+             tick_fd >= 0 && flock(tick_fd, LOCK_EX | LOCK_NB) == 0);
+    (void)snprintf(lock, sizeof(lock), "%s/finish-fin1.lock", state);
+    const int fin_fd = open(lock, O_CREAT | O_RDWR, 0600);
+    LT_CHECK("the test holds the fin1 finish lock",
+             fin_fd >= 0 && flock(fin_fd, LOCK_EX | LOCK_NB) == 0);
+    int rc = lt_finish(&e, NULL, out, sizeof(out));
+    LT_CHECK("a held finish lock of the same lane skips with exit 1",
+             rc == 1 && strstr(out, "finish fin1 HOLD already finishing") != NULL);
+    LT_CHECK("the skipped finish submitted nothing", !lt_exists("%s/%s", e.d, "submit.txt"));
+    if (fin_fd >= 0)
+        (void)close(fin_fd);
+    rc = lt_finish(&e, NULL, out, sizeof(out));
+    LT_CHECK("a held hourly-tick lock does not block a finish",
+             rc == 0 && strstr(out, "finish fin1 submitted seq=7\n") != NULL);
+    LT_CHECK("with no credit the note says author unknown",
+             lt_file_has(&e, "submit.txt", "complexity cap; author unknown; baseline only shrank"));
+    if (tick_fd >= 0)
+        (void)close(tick_fd);
+    return failures;
+}
+
+/* ── repairs: rebase conflict, haiku lock, whole paths, long credit ───── */
+
+/* A second commit on origin/main that edits owned.c against the lane's own
+ * edit, so the finish rebase conflicts. */
+static bool lt_push_conflict(const struct lt_env *e)
+{
+    char main_[700], f[900];
+    (void)snprintf(main_, sizeof(main_), "%s/main", e->d);
+    (void)snprintf(f, sizeof(f), "%s/owned.c", main_);
+    return lt_wf(f, "int owned;\nint theirs;\n") && lt_commit(main_, "theirs") &&
+           lt_git(main_, "push", "-q", "origin", "main", NULL);
+}
+
+static int case_finish_rebase_conflict(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192] = "", lane[800], gitdir[900] = "", p[1100], tracked[256] = "x";
+    const bool ready = lt_setup(&e, "frebase", &c, "none", "claude-haiku") &&
+                       lt_make_lane(&e, "ok") && lt_push_conflict(&e);
+    LT_CHECK("the rebase conflict fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_finish(&e, NULL, out, sizeof(out));
+    LT_CHECK("a conflicting lane exits 1 with a rebase conflict HOLD",
+             rc == 1 && strstr(out, "finish fin1 HOLD rebase conflict") != NULL);
+    (void)snprintf(lane, sizeof(lane), "%s/lanes/fin1", e.d);
+    const char *const gd[] = { "git", "-C", lane, "rev-parse", "--absolute-git-dir", NULL };
+    (void)lt_run(gd, gitdir, sizeof(gitdir), NULL);
+    gitdir[strcspn(gitdir, "\n")] = '\0';
+    (void)snprintf(p, sizeof(p), "%s/rebase-merge", gitdir);
+    LT_CHECK("no rebase-merge directory is left", *gitdir && !lt_exists("%s%s", p, ""));
+    (void)snprintf(p, sizeof(p), "%s/rebase-apply", gitdir);
+    LT_CHECK("no rebase-apply directory is left", *gitdir && !lt_exists("%s%s", p, ""));
+    const char *const st[] = { "git", "-C", lane, "status", "--porcelain", "-uno", NULL };
+    (void)lt_run(st, tracked, sizeof(tracked), NULL);
+    LT_CHECK("the tracked tree is clean after the abort", tracked[0] == '\0');
+    LT_CHECK("the lane is still one commit ahead", lt_ahead(&e, "fin1") == 1);
+    LT_CHECK("submit was never called", !lt_exists("%s/%s", e.d, "submit.txt"));
+    return failures;
+}
+
+/* The reviewer stub records whether the --haiku-lock is held by another open
+ * file description at the moment the model call runs. */
+static bool lt_lock_stub(const struct lt_env *e)
+{
+    return lt_script(e, "claude",
+        "if flock -n '%s/haiku.lock' true; then echo free > '%s/lockstate.txt';"
+        " else echo held > '%s/lockstate.txt'; fi\n"
+        "printf '%%s\\n' '{\"result\":\"reviewed\\nVERDICT: LAND\"}'",
+        e->d, e->d, e->d);
+}
+
+static int case_haiku_lock_held(void)
+{
+    int failures = 0;
+    struct lt_env e, f;
+    const struct lt_cfg ct = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const struct lt_cfg cf = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192] = "";
+    const bool ready = lt_setup(&e, "hlocktick", &ct, "run", "claude-haiku") &&
+                       lt_lock_stub(&e) &&
+                       lt_setup(&f, "hlockfin", &cf, "none", "claude-haiku") &&
+                       lt_make_lane(&f, "ok") && lt_lock_stub(&f);
+    LT_CHECK("the haiku lock fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    LT_CHECK("the tick submits", lt_tick(&e, NULL, NULL, out, sizeof(out)) == 0);
+    LT_CHECK("tick mode holds the haiku lock while the model runs",
+             lt_file_has(&e, "lockstate.txt", "held"));
+    LT_CHECK("the finish submits", lt_finish(&f, NULL, out, sizeof(out)) == 0);
+    LT_CHECK("finish mode holds the haiku lock while the model runs",
+             lt_file_has(&f, "lockstate.txt", "held"));
+    return failures;
+}
+
+static int case_finish_long_credit(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192] = "", credit[400] = "x", want[800];
+    const bool ready = lt_setup(&e, "fcredit", &c, "none", "claude-haiku") &&
+                       lt_make_lane(&e, "ok");
+    LT_CHECK("the long credit fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    /* 1 + 3*60 = 181 bytes: byte 150 falls inside the 50th euro sign */
+    for (int i = 0; i < 60; i++)
+        (void)strcat(credit, "\xE2\x82\xAC");
+    const char *const extra[] = { "--credit", credit, NULL };
+    const int rc = lt_finish(&e, extra, out, sizeof(out));
+    LT_CHECK("a long credit still submits", rc == 0);
+    char kept[200] = "x";
+    for (int i = 0; i < 49; i++)
+        (void)strcat(kept, "\xE2\x82\xAC");
+    (void)snprintf(want, sizeof(want), "complexity cap; %s; baseline only shrank;", kept);
+    LT_CHECK("the credit is cut on a character boundary at 148 bytes",
+             lt_file_has(&e, "submit.txt", want));
+    LT_CHECK("the fixed review tail survives",
+             lt_file_has(&e, "submit.txt",
+                         "read-only Haiku review LAND (z23-loop-tick --finish)."));
+    return failures;
+}
+
+/* The byte length of the --note= value the fake dev recorded, -1 if none. */
+static long lt_note_len(const struct lt_env *e)
+{
+    static char text[1 << 14];
+    char p[900];
+    (void)snprintf(p, sizeof(p), "%s/submit.txt", e->d);
+    if (!lt_slurp(p, text, sizeof(text)))
+        return -1;
+    const char *note = strstr(text, "--note=");
+    if (!note)
+        return -1;
+    note += strlen("--note=");
+    const char *nl = strchr(note, '\n');
+    return nl ? (long)(nl - note) : (long)strlen(note);
+}
+
+/* A new file on main, committed and pushed, so a lane cut from origin/main has it. */
+static bool lt_main_file(const struct lt_env *e, const char *name)
+{
+    char main_[700], f[1100];
+    (void)snprintf(main_, sizeof(main_), "%s/main", e->d);
+    (void)snprintf(f, sizeof(f), "%s/%s", main_, name);
+    return lt_wf(f, "int longname;\n") && lt_commit(main_, "add the long-named file") &&
+           lt_git(main_, "push", "-q", "origin", "main", NULL) &&
+           lt_git(main_, "fetch", "-q", "origin", "main", NULL);
+}
+
+static int case_tick_long_pins(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192];
+    const bool ready = lt_setup(&e, "tlong", &c, "run", "claude-haiku") &&
+                       lt_step_doc(&e, "run", "claude-haiku", "loop:obj1:", "owned.c", 80);
+    LT_CHECK("the long-pins fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_tick(&e, NULL, NULL, out, sizeof(out));
+    const long len = lt_note_len(&e);
+    LT_CHECK("a tick with a long pins list still submits", rc == 0 && len > 0);
+    LT_CHECK("the tick land note stays within 500 bytes", len > 0 && len <= 500);
+    LT_CHECK("the pins list is clipped, not the fixed tail",
+             lt_file_has(&e, "submit.txt", "pinned_function_000(22) ") &&
+             !lt_file_has(&e, "submit.txt", "pinned_function_079"));
+    LT_CHECK("the fixed tail survives intact in tick mode",
+             lt_file_has(&e, "submit.txt",
+                         ") under the complexity cap; claude-haiku via z23-engine-unit, "
+                         "baseline only shrank, zgate agent-verify+lint rc=0, "
+                         "read-only Haiku review LAND.\n"));
+    LT_CHECK("no HOLD for a clipped note", !lt_exists("%s/%s", e.d, "state/loop-t1.HOLD"));
+    return failures;
+}
+
+static int case_tick_note_cannot_fit(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    char name[300], prefix[200];
+    (void)snprintf(name, sizeof(name), "%0240d.c", 0);
+    memset(name, 'x', 240);
+    memset(prefix, 'p', 159);
+    prefix[159] = '\0';
+    const struct lt_cfg c = { name, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192];
+    const bool ready = lt_setup(&e, "tfit", &c, "run", "claude-haiku") &&
+                       lt_main_file(&e, name) &&
+                       lt_step_doc(&e, "run", "claude-haiku", prefix, name, 0);
+    LT_CHECK("the unfittable tick fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    (void)lt_tick(&e, NULL, NULL, out, sizeof(out));
+    LT_CHECK("a note that cannot fit holds with a reason",
+             lt_file_has(&e, "state/loop-t1.HOLD", "the land note cannot fit 500 bytes"));
+    LT_CHECK("a note that cannot fit is never submitted",
+             !lt_exists("%s/%s", e.d, "submit.txt"));
+    return failures;
+}
+
+static int case_tick_no_sequence(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192];
+    const bool ready = lt_setup(&e, "tseq", &c, "run", "claude-haiku") &&
+                       lt_script(&e, "dev",
+                           "case \"$1\" in\n fleet) cat '%s/step.json' ;;\n"
+                           " dev) echo \"$@\" > '%s/submit.txt'; echo '{\"data\":{}}' ;;\nesac",
+                           e.d, e.d);
+    LT_CHECK("the no-sequence tick fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    (void)lt_tick(&e, NULL, NULL, out, sizeof(out));
+    LT_CHECK("a tick submit without data.seq holds",
+             lt_file_has(&e, "state/loop-t1.HOLD", "submit gave no sequence"));
+    LT_CHECK("it does not log a submission as #?",
+             !lt_file_has(&e, "state/tick.log", "submitted loop-t1 as #?"));
+    return failures;
+}
+
+static int case_finish_note_cannot_fit(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    char lane[80], target[260];
+    (void)snprintf(lane, sizeof(lane), "fin-%060d", 0);
+    memset(lane + 4, 'x', 60);
+    memset(target, 'y', 240);
+    (void)snprintf(target + 240, sizeof(target) - 240, ".c");
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=1", "0" };
+    char out[8192] = "";
+    const bool ready = lt_setup(&e, "ffit", &c, "none", "claude-haiku") &&
+                       lt_make_lane_for(&e, "ok", lane, target);
+    LT_CHECK("the unfittable finish fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_finish_for(&e, lane, target, NULL, out, sizeof(out));
+    LT_CHECK("a finish whose note cannot fit exits 1 with the reason",
+             rc == 1 && strstr(out, "HOLD the land note cannot fit 500 bytes") != NULL);
+    LT_CHECK("it is never submitted", !lt_exists("%s/%s", e.d, "submit.txt"));
+    return failures;
+}
+
 int test_loop_tick(void)
 {
     int failures = 0;
@@ -603,5 +1084,16 @@ int test_loop_tick(void)
     failures += case_no_lane_actions();
     failures += case_lock();
     failures += case_retire_and_held();
+    failures += case_finish_submits();
+    failures += case_finish_holds();
+    failures += case_finish_usage();
+    failures += case_finish_locks();
+    failures += case_finish_rebase_conflict();
+    failures += case_haiku_lock_held();
+    failures += case_finish_long_credit();
+    failures += case_tick_long_pins();
+    failures += case_tick_note_cannot_fit();
+    failures += case_tick_no_sequence();
+    failures += case_finish_note_cannot_fit();
     return failures;
 }

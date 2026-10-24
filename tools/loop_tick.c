@@ -18,6 +18,18 @@
  * default is the bridge's value, so a test runs a whole tick against a temp
  * git repo with fake programs.
  *
+ * Finish mode (--finish=<lane dir> --target=<path> [--credit=<text>]) adopts a
+ * lane that already holds ONE committed split (written by a helper machine or
+ * a model chain) and runs only the guard, gate, review and submit stages on the
+ * committed range origin/main..HEAD: adopt (worktree of --main, tracked tree
+ * clean, fetch, rebase, exactly one commit ahead), scope (target + complexity
+ * baseline only), baseline (no growth, at least one function gone), gates,
+ * review, submit. It takes a per-lane lock (STATE/finish-<lane>.lock), so
+ * finishes run in parallel and beside the hourly tick. Its last stdout line is
+ * "finish <lane> submitted seq=<n>" (exit 0) or "finish <lane> HOLD <reason>"
+ * (exit 1); usage errors exit 2. Both modes hold --haiku-lock (a blocking
+ * flock) around the one-shot review call, so model calls never stack.
+ *
  * Guards, in order: one tick at a time (flock on STATE/lock); at most
  * --max-held held loop lanes; the step's own in-flight and pause rules;
  * engine claude-haiku and lane names loop-* only; every changed path must be
@@ -34,6 +46,9 @@
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
+#endif
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE /* realpath: declared only through the fortify inline otherwise */
 #endif
 
 #include "base/safe_alloc.h"
@@ -58,6 +73,7 @@ enum {
     LT_PATH = 1024,
     LT_NAME = 160,
     LT_BUF = 4 << 20,
+    LT_NOTE_MAX = 500, /* the land queue limit is 512 bytes */
     LT_OWNED_MAX = 32,
     LT_SHOW_MAX = 90000,
     LT_BUILD_TIMEOUT_MS = 6 * 3600 * 1000,
@@ -93,7 +109,11 @@ enum {
     X(ENGINE_TIMEOUT, "--engine-timeout-s", "1800")                          \
     X(REVIEW_TIMEOUT, "--review-timeout-s", "1200")                          \
     X(GATE_WAIT, "--gate-wait-s", "7200")                                    \
-    X(POLL, "--poll-ms", "30000")
+    X(POLL, "--poll-ms", "30000")                                            \
+    X(FINISH, "--finish", "")                                                \
+    X(TARGET, "--target", "")                                                \
+    X(CREDIT, "--credit", "")                                                \
+    X(HAIKU_LOCK, "--haiku-lock", "~/.local/state/z23-haiku-oneshot.lock")
 
 enum lt_opt {
 #define X(id, flag, dflt) LT_O_##id,
@@ -128,6 +148,7 @@ struct tick {
     size_t owned_n;
     long removed;
     char gatenote[160]; /* the land note's gate text, as the gates actually ran */
+    bool finish;        /* --finish mode: adopt a committed lane, judge origin/main..HEAD */
 };
 
 static const char *O(const struct tick *t, enum lt_opt o) { return t->opt[o]; }
@@ -231,6 +252,30 @@ static void say(const struct tick *t, const char *f, ...)
     (void)write_file(t->log_path, line, len, "a");
 }
 
+/* Finish mode's one final line: bare on stdout, stamped in tick.log. */
+__attribute__((format(printf, 2, 3))) static void
+finish_line(const struct tick *t, const char *f, ...)
+{
+    char msg[1700];
+    va_list ap;
+    va_start(ap, f);
+    (void)vsnprintf(msg, sizeof(msg), f, ap);
+    va_end(ap);
+    printf("%s\n", msg);
+    (void)fflush(stdout);
+    char line[1800];
+    const int n = snprintf(line, sizeof(line), "%s\n", msg);
+    if (n > 0) {
+        char stamp[40];
+        const time_t now = (time_t)(clock_now_wall_ms() / 1000);
+        struct tm tm;
+        gmtime_r(&now, &tm);
+        (void)strftime(stamp, sizeof(stamp), "%Y-%m-%dT%H:%M:%SZ ", &tm);
+        (void)write_file(t->log_path, stamp, strlen(stamp), "a");
+        (void)write_file(t->log_path, line, strlen(line), "a");
+    }
+}
+
 /* The bridge's hold(): record why, say so, and end the tick with exit 0. */
 __attribute__((format(printf, 3, 4))) static int
 hold(const struct tick *t, const char *lane, const char *f, ...)
@@ -248,7 +293,10 @@ hold(const struct tick *t, const char *lane, const char *f, ...)
                     strerror(errno));
     }
     say(t, "HOLD %s: %s", lane, reason);
-    return 0;
+    if (!t->finish)
+        return 0;
+    finish_line(t, "finish %s HOLD %s", lane, reason);
+    return 1;
 }
 
 static int skip(const struct tick *t, const char *reason)
@@ -627,9 +675,9 @@ static bool is_owned(const struct tick *t, const char *path)
 static bool porcelain_path(const char *line, char *out, size_t cap)
 {
     const char *p = line + strspn(line, " ");
-    p += strcspn(p, " \n");
-    p += strspn(p, " ");
-    const size_t n = strcspn(p, " \n");
+    p += strcspn(p, " \t\n");
+    p += strspn(p, " \t");
+    const size_t n = strcspn(p, " \t\n");
     if (n == 0 || n >= cap)
         return false;
     memcpy(out, p, n);
@@ -637,8 +685,68 @@ static bool porcelain_path(const char *line, char *out, size_t cap)
     return true;
 }
 
+/* Finish mode: the paths the adopted commit changed, as `-z` name-status
+ * records ("STATUS\0PATH\0", renames split so both sides are judged). The
+ * capture is binary because the records hold NULs; t->buf receives the bytes
+ * and *len their count. False when git failed or the output was cut off. */
+static bool scope_range(struct tick *t, size_t *len)
+{
+    const char *const diff[] = { O(t, LT_O_GIT), "-C", t->dir, "diff", "-z",
+                                 "--name-status", "--no-renames", "origin/main",
+                                 "HEAD", NULL };
+    struct zcl_spawn_binary_observation ob;
+    memset(&ob, 0, sizeof(ob));
+    t->buf[0] = '\0';
+    const struct zcl_result r = zcl_spawn_capture_binary(
+        diff, t->buf, LT_BUF - 1, LT_SHORT_TIMEOUT_MS, &ob);
+    if (!r.ok || ob.overflow || !ob.eof || ob.timed_out)
+        return false;
+    t->buf[ob.output_len] = '\0';
+    *len = ob.output_len;
+    return true;
+}
+
+/* Judge every whole path of the -z records; a record that does not parse
+ * (bad status, empty path, no closing NUL) is a HOLD. */
+static int scope_judge_z(struct tick *t, const char *buf, size_t len)
+{
+    size_t i = 0;
+    while (i < len) {
+        const char *st = buf + i;
+        const size_t sl = strnlen(st, len - i);
+        i += sl + 1;
+        if (sl != 1 || strchr("ADMTUXB", st[0]) == NULL || i >= len)
+            return hold(t, t->lane, "the committed paths did not parse");
+        const char *path = buf + i;
+        const size_t pl = strnlen(path, len - i);
+        if (pl == 0 || i + pl >= len)
+            return hold(t, t->lane, "the committed paths did not parse");
+        i += pl + 1;
+        if (!is_owned(t, path))
+            return hold(t, t->lane, "out-of-scope edit: %s", path);
+    }
+    return LT_GO;
+}
+
+static int stage_scope_finish(struct tick *t)
+{
+    size_t len = 0;
+    if (!scope_range(t, &len))
+        return hold(t, t->lane, "the committed paths could not be read");
+    char *copy = zcl_malloc(len + 1, "loop_tick_scope");
+    if (!copy)
+        return hold(t, t->lane, "cannot allocate the scope check");
+    memcpy(copy, t->buf, len);
+    copy[len] = '\0';
+    const int rc = scope_judge_z(t, copy, len);
+    free(copy);
+    return rc;
+}
+
 static int stage_scope(struct tick *t)
 {
+    if (t->finish)
+        return stage_scope_finish(t);
     char *status = zcl_strdup(t->buf, "loop_tick_status");
     if (!status)
         return hold(t, t->lane, "cannot allocate the scope check");
@@ -767,10 +875,11 @@ static void count_baseline(const struct base_diff *d, long *grown, long *removed
 
 static int judge_baseline(struct tick *t)
 {
-    const char *const diff[] = { O(t, LT_O_GIT), "diff", "-U0", "--",
-                                 "tools/lint/cyclomatic_complexity_baseline.txt",
-                                 NULL };
-    const int rc = run(t, t->dir, diff, LT_SHORT_TIMEOUT_MS);
+    static const char file[] = "tools/lint/cyclomatic_complexity_baseline.txt";
+    const char *const work[] = { O(t, LT_O_GIT), "diff", "-U0", "--", file, NULL };
+    const char *const range[] = { O(t, LT_O_GIT), "diff", "-U0", "origin/main",
+                                  "HEAD", "--", file, NULL };
+    const int rc = run(t, t->dir, t->finish ? range : work, LT_SHORT_TIMEOUT_MS);
     if (rc != 0)
         return hold(t, t->lane, "baseline diff could not be judged (git diff rc=%d)", rc);
     if (strlen(t->buf) >= LT_BUF - 1)
@@ -803,6 +912,8 @@ static int stage_baseline(struct tick *t)
 {
     if (strcmp(t->objective, "functions_over_complexity_cap") != 0)
         return LT_GO;
+    if (t->finish)
+        return judge_baseline(t); /* already committed: judge, never regenerate */
     char log[LT_PATH], binlog[LT_PATH];
     (void)fmt(log, sizeof(log), "%s/baseline.log", t->unit);
     (void)fmt(binlog, sizeof(binlog), "%s/lintbin.log", t->unit);
@@ -1056,6 +1167,33 @@ static char *review_text(const struct tick *t)
     return out;
 }
 
+/* The one-shot model call, serialised across every finish and the hourly tick
+ * by a blocking flock on --haiku-lock. False when the lock cannot be taken. */
+static bool review_call(struct tick *t, const char *prompt)
+{
+    char dir[LT_PATH];
+    (void)fmt(dir, sizeof(dir), "%s", O(t, LT_O_HAIKU_LOCK));
+    char *slash = strrchr(dir, '/');
+    if (slash && slash != dir) {
+        *slash = '\0';
+        (void)mkdirs(dir);
+    }
+    const int fd = open(O(t, LT_O_HAIKU_LOCK), O_CREAT | O_RDWR, 0600);
+    if (fd < 0 || flock(fd, LOCK_EX) != 0) {
+        if (fd >= 0)
+            (void)close(fd);
+        return false;
+    }
+    const char *const argv[] = { O(t, LT_O_CLAUDE), "-p", prompt, "--model",
+                                 "claude-haiku-5-5", "--output-format", "json",
+                                 "--no-session-persistence", "--setting-sources=",
+                                 "--tools", "Read,Grep,Glob", NULL };
+    /* stdout only: it is the review's JSON, parsed by the caller */
+    (void)run(t, t->dir, argv, oms(t, LT_O_REVIEW_TIMEOUT));
+    (void)close(fd);
+    return true;
+}
+
 static int stage_review(struct tick *t)
 {
     char pp[LT_PATH], rj[LT_PATH], rt[LT_PATH], verdict[512] = "";
@@ -1067,14 +1205,12 @@ static int stage_review(struct tick *t)
     char *prompt = read_file(pp, LT_SHOW_MAX + 6144);
     if (!prompt)
         return hold(t, t->lane, "cannot build the review prompt (%s)", pp);
-    const char *const argv[] = { O(t, LT_O_CLAUDE), "-p", prompt, "--model",
-                                 "claude-haiku-5-5", "--output-format", "json",
-                                 "--no-session-persistence", "--setting-sources=",
-                                 "--tools", "Read,Grep,Glob", NULL };
-    /* stdout only: it is the review's JSON, parsed below */
-    (void)run(t, t->dir, argv, oms(t, LT_O_REVIEW_TIMEOUT));
-    (void)write_file(rj, t->buf, strlen(t->buf), "w");
+    const bool locked = review_call(t, prompt);
     free(prompt);
+    if (!locked)
+        return hold(t, t->lane, "cannot take the haiku lock (%s)",
+                    O(t, LT_O_HAIKU_LOCK));
+    (void)write_file(rj, t->buf, strlen(t->buf), "w");
     char *review = review_text(t);
     if (review) {
         (void)write_file(rt, review, strlen(review), "w");
@@ -1094,11 +1230,194 @@ static int stage_review(struct tick *t)
     return LT_GO;
 }
 
+/* ── finish mode: adopt an existing committed lane ───────────────────── */
+
+/* True when dir is one of --main's registered worktrees. */
+static bool worktree_of_main(struct tick *t, const char *dir)
+{
+    char real[PATH_MAX], want[PATH_MAX + 16];
+    const char *const list[] = { O(t, LT_O_GIT), "-C", O(t, LT_O_MAIN),
+                                 "worktree", "list", "--porcelain", NULL };
+    if (!realpath(dir, real) || !fmt(want, sizeof(want), "worktree %s", real) ||
+        run(t, NULL, list, LT_SHORT_TIMEOUT_MS) != 0)
+        return false;
+    const size_t n = strlen(want);
+    for (const char *p = t->buf; p && *p; p = strchr(p, '\n') ? strchr(p, '\n') + 1 : NULL)
+        if (strncmp(p, want, n) == 0 && (p[n] == '\n' || p[n] == '\0'))
+            return true;
+    return false;
+}
+
+/* Fetch origin main and rebase the lane onto it; a conflict aborts. */
+static int adopt_sync(struct tick *t)
+{
+    const char *const fetch[] = { O(t, LT_O_GIT), "fetch", "-q", "origin", "main",
+                                  NULL };
+    const char *const reb_sign[] = { O(t, LT_O_GIT), "rebase", O(t, LT_O_SIGN),
+                                     "origin/main", NULL };
+    const char *const reb_plain[] = { O(t, LT_O_GIT), "rebase", "origin/main",
+                                      NULL };
+    const char *const abort_[] = { O(t, LT_O_GIT), "rebase", "--abort", NULL };
+    if (run(t, t->dir, fetch, LT_SHORT_TIMEOUT_MS) != 0)
+        return hold(t, t->lane, "git fetch failed");
+    if (run(t, t->dir, *O(t, LT_O_SIGN) ? reb_sign : reb_plain,
+            LT_SHORT_TIMEOUT_MS) != 0) {
+        (void)run(t, t->dir, abort_, LT_SHORT_TIMEOUT_MS);
+        return hold(t, t->lane, "rebase conflict");
+    }
+    return LT_GO;
+}
+
+/* owned = {target, the complexity baseline}, as the loop's brief names them. */
+static void adopt_owned(struct tick *t)
+{
+    static const char base[] = "tools/lint/cyclomatic_complexity_baseline.txt";
+    const size_t n = strlen(t->target) + 1;
+    memcpy(t->owned_store, t->target, n);
+    memcpy(t->owned_store + n, base, sizeof(base));
+    t->owned_v[0] = t->owned_store;
+    t->owned_v[1] = t->owned_store + n;
+    t->owned_n = 2;
+    (void)fmt(t->owned, sizeof(t->owned), "%s %s", t->target, base);
+}
+
+static int stage_adopt(struct tick *t)
+{
+    const char *dir = O(t, LT_O_FINISH);
+    if (!is_dir(dir))
+        return hold(t, t->lane, "lane directory %s does not exist", dir);
+    if (!fmt(t->dir, sizeof(t->dir), "%s", dir) ||
+        !fmt(t->target, sizeof(t->target), "%s", O(t, LT_O_TARGET)) ||
+        !fmt(t->unit, sizeof(t->unit), "%s/%s", O(t, LT_O_SCRATCH), t->lane) ||
+        !mkdirs(t->unit))
+        return hold(t, t->lane, "cannot prepare the unit scratch directory");
+    if (!worktree_of_main(t, dir))
+        return hold(t, t->lane, "%s is not a worktree of %s", dir, O(t, LT_O_MAIN));
+    const char *const status[] = { O(t, LT_O_GIT), "status", "--porcelain", NULL };
+    if (git_count(t, dir, status, line_tracked) != 0)
+        return hold(t, t->lane, "tracked changes in the lane");
+    int rc = adopt_sync(t);
+    if (rc != LT_GO)
+        return rc;
+    const char *const ahead[] = { O(t, LT_O_GIT), "rev-list", "--count",
+                                  "origin/main..HEAD", NULL };
+    (void)run(t, dir, ahead, LT_SHORT_TIMEOUT_MS);
+    trim(t->buf);
+    if (strcmp(t->buf, "1") != 0)
+        return hold(t, t->lane,
+                    "expected exactly one commit ahead of origin/main, found %s",
+                    *t->buf ? t->buf : "?");
+    const char *const head[] = { O(t, LT_O_GIT), "rev-parse", "HEAD", NULL };
+    (void)run(t, dir, head, LT_SHORT_TIMEOUT_MS);
+    trim(t->buf);
+    (void)fmt(t->sha, sizeof(t->sha), "%s", t->buf);
+    (void)fmt(t->objective, sizeof(t->objective), "functions_over_complexity_cap");
+    adopt_owned(t);
+    say(t, "finish %s: adopted %s at %s", t->lane, dir, t->sha);
+    return LT_GO;
+}
+
 /* ── step 9: prep and submit ─────────────────────────────────────────── */
+
+/* Cut s to at most max bytes without splitting a UTF-8 sequence. */
+static void utf8_clip(char *s, size_t max)
+{
+    if (strlen(s) <= max)
+        return;
+    size_t n = max;
+    while (n > 0 && ((unsigned char)s[n] & 0xC0) == 0x80)
+        n--;
+    s[n] = '\0';
+}
+
+/* One printable line: control bytes become spaces, so no model or board text
+ * can break the note into lines. */
+static void clean_line(const char *c, char *out, size_t cap)
+{
+    size_t n = 0;
+    for (; *c && n + 1 < cap; c++)
+        out[n++] = ((unsigned char)*c < 0x20 || *c == 0x7f) ? ' ' : *c;
+    out[n] = '\0';
+}
+
+/* The credit as one printable line of at most 150 bytes; "author unknown" when
+ * none was given. */
+static void credit_text(const struct tick *t, char *out, size_t cap)
+{
+    clean_line(O(t, LT_O_CREDIT), out, cap);
+    utf8_clip(out, 150);
+    trim(out);
+    if (!*out)
+        (void)fmt(out, cap, "author unknown");
+}
+
+/* Render the note around a variable part (the credit in finish mode, the pins
+ * list in tick mode); the fixed text is the same for any variable part. */
+static int note_render(const struct tick *t, const char *base, const char *var,
+                       const char *gate, char *note, size_t cap)
+{
+    if (t->finish)
+        return snprintf(note, cap,
+                        "%s: split %ld over-cap function(s) in %s under the complexity cap; "
+                        "%s; baseline only shrank; %s; "
+                        "read-only Haiku review LAND (z23-loop-tick --finish).",
+                        t->lane, t->removed, base, var, gate);
+    return snprintf(note, cap,
+                    "%s split %ld over-cap function(s) in %s (%s) under the complexity cap; "
+                    "claude-haiku via z23-engine-unit, baseline only shrank, %s, "
+                    "read-only Haiku review LAND.",
+                    t->prefix, t->removed, base, var, gate);
+}
+
+/* The land note, in both modes, from data only (lane, counts, credit or pins,
+ * gate verdicts). The fixed tail always survives the queue's note limit: only
+ * the variable part is clipped, on a UTF-8 boundary, and a note that still
+ * cannot fit LT_NOTE_MAX bytes is refused (the caller HOLDs). */
+static bool land_note(const struct tick *t, const char *base, char *note, size_t cap)
+{
+    char var[LT_PATH * 2];
+    const char *gate = (t->finish && !strstr(t->gatenote, "rerun"))
+                           ? "lint-land + zgate both rc=0" : t->gatenote;
+    if (t->finish)
+        credit_text(t, var, sizeof(var));
+    else
+        clean_line(t->pins, var, sizeof(var));
+    const int fixed = note_render(t, base, "", gate, note, cap);
+    const int need = t->finish ? (int)sizeof("author unknown") - 1 : 0;
+    if (fixed < 0 || (size_t)fixed >= cap || LT_NOTE_MAX - fixed < need)
+        return false;
+    const size_t room = (size_t)(LT_NOTE_MAX - fixed);
+    const bool clipped = strlen(var) > room;
+    utf8_clip(var, room);
+    if (t->finish || clipped)
+        trim(var);
+    if (t->finish && !*var)
+        (void)fmt(var, sizeof(var), "author unknown");
+    const int n = note_render(t, base, var, gate, note, cap);
+    return n >= 0 && (size_t)n <= LT_NOTE_MAX;
+}
+
+/* The sequence data.seq of the submit reply; false when it names none. */
+static bool submit_seq(const struct tick *t, char *seq, size_t cap)
+{
+    struct json_value doc;
+    json_init(&doc);
+    bool have = false;
+    if (json_read(&doc, t->buf, strlen(t->buf)) && jpath(&doc, "data.seq")) {
+        (void)fmt(seq, cap, "%lld", (long long)json_get_int(jpath(&doc, "data.seq")));
+        have = true;
+    }
+    json_free(&doc);
+    return have;
+}
+
+/* "--note=" plus a note of at most LT_NOTE_MAX bytes and the NUL. */
+enum { LT_FLAG_NOTE = sizeof("--note=") + LT_NOTE_MAX };
+static_assert(LT_FLAG_NOTE >= 7 + LT_NOTE_MAX + 1, "the note flag must hold a full note");
 
 static int stage_submit(struct tick *t)
 {
-    char log[LT_PATH], note[1024], flag_wt[LT_PATH + 16], flag_note[640];
+    char log[LT_PATH], note[1024], flag_wt[LT_PATH + 16], flag_note[LT_FLAG_NOTE];
     const char *slash = strrchr(t->target, '/');
     const char *base = slash ? slash + 1 : t->target;
     const char *const prep[] = { O(t, LT_O_DEVBUILD), "--wait", "make",
@@ -1107,24 +1426,20 @@ static int stage_submit(struct tick *t)
     (void)fmt(log, sizeof(log), "%s/prep.log", t->unit);
     if (run_logged(t, t->dir, prep, LT_BUILD_TIMEOUT_MS, log) != 0)
         return hold(t, t->lane, "prep failed (%s)", log);
-    (void)fmt(note, sizeof(note),
-              "%s split %ld over-cap function(s) in %s (%s) under the complexity cap; "
-              "claude-haiku via z23-engine-unit, baseline only shrank, %s, "
-              "read-only Haiku review LAND.",
-              t->prefix, t->removed, base, t->pins, t->gatenote);
+    if (!land_note(t, base, note, sizeof(note)))
+        return hold(t, t->lane, "the land note cannot fit %d bytes", LT_NOTE_MAX);
     (void)fmt(flag_wt, sizeof(flag_wt), "--worktree=%s", t->dir);
-    (void)fmt(flag_note, sizeof(flag_note), "--note=%.500s", note);
+    if (!fmt(flag_note, sizeof(flag_note), "--note=%s", note))
+        return hold(t, t->lane, "the land note flag was cut");
     const char *const submit[] = { O(t, LT_O_DEV), "dev", "land", "submit",
                                    flag_wt, flag_note, NULL };
     (void)run(t, NULL, submit, LT_SHORT_TIMEOUT_MS);
-    struct json_value doc;
-    json_init(&doc);
     char seq[32] = "?";
-    if (json_read(&doc, t->buf, strlen(t->buf)))
-        (void)fmt(seq, sizeof(seq), "%lld",
-                  (long long)json_get_int(jpath(&doc, "data.seq")));
-    json_free(&doc);
+    if (!submit_seq(t, seq, sizeof(seq)))
+        return hold(t, t->lane, "submit gave no sequence");
     say(t, "submitted %s as #%s", t->lane, seq);
+    if (t->finish)
+        finish_line(t, "finish %s submitted seq=%s", t->lane, seq);
     return 0;
 }
 
@@ -1148,6 +1463,51 @@ static bool expand_default(struct tick *t, enum lt_opt o)
     return fmt(t->dflt[o], LT_PATH, "%s", d);
 }
 
+static bool lane_name_ok(const char *s)
+{
+    const size_t n = strlen(s);
+    if (n == 0 || n > 64 || s[0] == '.')
+        return false;
+    for (size_t i = 0; i < n; i++)
+        if (!((s[i] >= 'a' && s[i] <= 'z') || (s[i] >= 'A' && s[i] <= 'Z') ||
+              (s[i] >= '0' && s[i] <= '9') || s[i] == '-' || s[i] == '_' ||
+              s[i] == '.'))
+            return false;
+    return true;
+}
+
+/* A repo-relative path: no leading slash, no empty or ".." component. */
+static bool target_ok(const char *s)
+{
+    if (!*s || s[0] == '/')
+        return false;
+    for (const char *p = s; *p;) {
+        const size_t n = strcspn(p, "/");
+        if (n == 0 || (n == 2 && p[0] == '.' && p[1] == '.') || (n == 1 && p[0] == '.'))
+            return false;
+        p += n + (p[n] == '/' ? 1 : 0);
+    }
+    return s[strlen(s) - 1] != '/';
+}
+
+/* --finish and --target go together; the lane is the directory's basename. */
+static int finish_args(struct tick *t)
+{
+    const char *dir = O(t, LT_O_FINISH), *target = O(t, LT_O_TARGET);
+    if (!*dir && !*target)
+        return LT_GO;
+    const char *slash = strrchr(dir, '/');
+    if (!*dir || !*target || dir[0] != '/' || !slash || !slash[1] ||
+        !lane_name_ok(slash + 1) || !target_ok(target)) {
+        fprintf(stderr, "loop-tick: --finish needs an absolute lane directory and "
+                "--target a repo-relative path, both together\n");
+        return 2;
+    }
+    t->finish = true;
+    (void)fmt(t->lane, sizeof(t->lane), "%s", slash + 1);
+    return LT_GO;
+}
+
 static int parse_args(struct tick *t, int argc, char **argv)
 {
     for (int i = 1; i < argc; i++) {
@@ -1157,7 +1517,8 @@ static int parse_args(struct tick *t, int argc, char **argv)
                 o = (enum lt_opt)k;
         if (o == LT_O_COUNT || i + 1 >= argc) {
             fprintf(stderr, "loop-tick: %s option '%s'\nusage: z23-loop-tick "
-                    "[--<option> VALUE]... (see tools/loop_tick.c)\n",
+                    "[--<option> VALUE]... [--finish LANE_DIR --target PATH "
+                    "[--credit TEXT]] (see tools/loop_tick.c)\n",
                     o == LT_O_COUNT ? "unknown" : "missing value for", argv[i]);
             return 2;
         }
@@ -1177,13 +1538,16 @@ static int parse_args(struct tick *t, int argc, char **argv)
                 "signed (--allow-unsigned 1 is for tests only)\n");
         return 2;
     }
-    return LT_GO;
+    return finish_args(t);
 }
 
+/* Tick mode: the one hourly lock. Finish mode: a lock per lane, so several
+ * finishes run in parallel and beside the hourly tick. */
 static int open_lock(const struct tick *t)
 {
     char path[LT_PATH];
-    if (!fmt(path, sizeof(path), "%s/lock", O(t, LT_O_STATE)))
+    if (!(t->finish ? fmt(path, sizeof(path), "%s/finish-%s.lock", O(t, LT_O_STATE), t->lane)
+                    : fmt(path, sizeof(path), "%s/lock", O(t, LT_O_STATE))))
         return -1;
     const int fd = open(path, O_CREAT | O_RDWR, 0600);
     if (fd < 0)
@@ -1195,19 +1559,34 @@ static int open_lock(const struct tick *t)
     return fd;
 }
 
-static int tick_stages(struct tick *t)
+static int run_stages(struct tick *t, int (*const stages[])(struct tick *),
+                      size_t count)
 {
-    int (*const stages[])(struct tick *) = {
-        stage_housekeeping, stage_step, stage_lane, stage_engine, stage_scope,
-        stage_baseline, stage_commit, stage_gates, stage_review, stage_submit
-    };
     int rc = LT_GO;
-    for (size_t i = 0; i < sizeof(stages) / sizeof(stages[0]) && rc == LT_GO; i++) {
+    for (size_t i = 0; i < count && rc == LT_GO; i++) {
         rc = stages[i](t);
         if (rc == LT_GO && stages[i] == stage_gates && !lane_at_sha(t))
             rc = hold(t, t->lane, "lane moved during the gates");
     }
     return rc;
+}
+
+static int tick_stages(struct tick *t)
+{
+    static int (*const stages[])(struct tick *) = {
+        stage_housekeeping, stage_step, stage_lane, stage_engine, stage_scope,
+        stage_baseline, stage_commit, stage_gates, stage_review, stage_submit
+    };
+    return run_stages(t, stages, sizeof(stages) / sizeof(stages[0]));
+}
+
+static int finish_stages(struct tick *t)
+{
+    static int (*const stages[])(struct tick *) = {
+        stage_adopt, stage_scope, stage_baseline, stage_gates, stage_review,
+        stage_submit
+    };
+    return run_stages(t, stages, sizeof(stages) / sizeof(stages[0]));
 }
 
 int main(int argc, char **argv)
@@ -1222,6 +1601,10 @@ int main(int argc, char **argv)
         return 1;
     }
     const int lock = open_lock(&t);
+    if (lock == -2 && t.finish) {
+        finish_line(&t, "finish %s HOLD already finishing", t.lane);
+        return 1;
+    }
     if (lock == -2)
         return skip(&t, "another tick is running");
     if (lock < 0) {
@@ -1234,7 +1617,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "loop-tick: cannot allocate the capture buffer\n");
         return 1;
     }
-    rc = tick_stages(&t);
+    rc = t.finish ? finish_stages(&t) : tick_stages(&t);
     run_free(&t);
     free(t.buf);
     (void)close(lock);
