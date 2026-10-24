@@ -174,6 +174,30 @@ static struct wallet_tx *zslp_command_find_wallet_tx(
     return NULL;
 }
 
+/* Refuse when an input names an output past the end of a wallet
+ * transaction it spends. Runs before prepare rewrites wtx, so a refusal
+ * leaves wtx untouched. */
+static bool zslp_command_prevouts_in_range(struct wallet *wallet,
+                                           const struct wallet_tx *wtx)
+{
+    bool in_range = true;
+
+    zcl_mutex_lock(&wallet->cs);
+    for (size_t i = 0; in_range && i < wtx->tx.num_vin; i++) {
+        const struct wallet_tx *prev = zslp_command_find_wallet_tx(
+            wallet, &wtx->tx.vin[i].prevout.hash);
+
+        if (prev && wtx->tx.vin[i].prevout.n >= prev->tx.num_vout) {
+            LOG_FAIL("zslp_cmd", "prepare: input %zu names output %u of a transaction with %zu outputs",
+                     i, (unsigned int)wtx->tx.vin[i].prevout.n,
+                     prev->tx.num_vout);
+            in_range = false;
+        }
+    }
+    zcl_mutex_unlock(&wallet->cs);
+    return in_range;
+}
+
 /* Sign input i of wtx when the wallet holds its key; other inputs are
  * left untouched. */
 static void zslp_command_sign_input(struct wallet *wallet,
@@ -195,6 +219,8 @@ static void zslp_command_sign_input(struct wallet *wallet,
     prev_wtx = zslp_command_find_wallet_tx(wallet,
                                            &wtx->tx.vin[i].prevout.hash);
     if (!prev_wtx)
+        return;
+    if (wtx->tx.vin[i].prevout.n >= prev_wtx->tx.num_vout)
         return;
 
     prev_out = &prev_wtx->tx.vout[wtx->tx.vin[i].prevout.n];
@@ -250,6 +276,8 @@ struct zcl_result zslp_command_prepare_with_op_return(
     if (!wallet || !wtx || !op_script || script_len == 0 ||
         script_len > MAX_SCRIPT_SIZE)
         return ZCL_ERR(-1, "prepare_with_op_return: NULL argument or empty script");
+    if (!zslp_command_prevouts_in_range(wallet, wtx))
+        return ZCL_ERR(-4, "prepare_with_op_return: input prevout past the previous transaction's outputs");
 
     old_nout = wtx->tx.num_vout;
     if (old_nout == SIZE_MAX)

@@ -16,6 +16,78 @@ static bool test_slp_coin_reserved(const struct transaction *tx,
     return slp_classify_tx_output(tx, vout, &meta);
 }
 
+/* A wallet-held input whose prevout index is past the previous
+ * transaction's outputs must be refused before the output array is
+ * rewritten or the out-of-range output is read. */
+static bool test_slp_prepare_refuses_prevout_past_outputs(void)
+{
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "test-wallet");
+    uint8_t seed[32];
+    uint8_t op_return[2] = { 0x6a, 0x00 };
+    char address[128];
+    struct key_id kid = {0};
+    struct wallet_tx prev, spend;
+    struct zcl_result r;
+    struct uint256 prev_hash;
+    size_t before;
+    bool ok;
+
+    if (!w)
+        return false;
+    memset(seed, 0x5a, sizeof(seed));
+    wallet_init(w);
+    ok = wallet_init_hd(w, seed, sizeof(seed));
+    ok = ok && wallet_get_new_address_with_key_id(w, address,
+                                                  sizeof(address), &kid);
+    ok = ok && wallet_top_up_key_pool(w, 4);
+    wallet_key_pool_mark_persisted_through(
+        w, wallet_key_pool_generation_ceiling(w));
+    struct tx_destination owner = { .type = DEST_KEY_ID, .id.key = kid };
+
+    memset(&prev, 0, sizeof(prev));
+    transaction_init(&prev.tx);
+    ok = ok && transaction_alloc(&prev.tx, 0, 1);
+    if (ok) {
+        prev.tx.vout[0].value = 100000;
+        script_for_destination(&prev.tx.vout[0].script_pub_key, &owner);
+        transaction_compute_hash(&prev.tx);
+        prev.confirms = 10;
+        prev_hash = prev.tx.hash;
+        ok = wallet_add_to_wallet(w, &prev);
+    }
+    transaction_free(&prev.tx);
+
+    memset(&spend, 0, sizeof(spend));
+    transaction_init(&spend.tx);
+    ok = ok && transaction_alloc(&spend.tx, 1, 1);
+    if (ok) {
+        spend.tx.vin[0].prevout.hash = prev_hash;
+        spend.tx.vin[0].prevout.n = 5; /* the previous tx has one output */
+        spend.tx.vout[0].value = 1000;
+        script_for_destination(&spend.tx.vout[0].script_pub_key, &owner);
+        transaction_compute_hash(&spend.tx);
+        before = spend.tx.num_vout;
+        r = zslp_command_prepare_with_op_return(w, &spend, op_return,
+                                                sizeof(op_return));
+        ok = !r.ok && spend.tx.num_vout == before;
+    }
+    transaction_free(&spend.tx);
+    wallet_free(w);
+    free(w);
+    return ok;
+}
+
+static int test_slp_prepare_refuses_prevout_past_outputs_report(void)
+{
+    printf("zslp prepare refuses a prevout index past the previous outputs... ");
+    if (test_slp_prepare_refuses_prevout_past_outputs()) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
 int test_slp(void)
 {
     int failures = 0;
@@ -599,6 +671,8 @@ int test_slp(void)
         wallet_free(w); free(w);
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
+
+    failures += test_slp_prepare_refuses_prevout_past_outputs_report();
 
     return failures;
 }
