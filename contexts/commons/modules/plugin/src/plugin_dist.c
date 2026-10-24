@@ -580,6 +580,12 @@ static enum plugin_dist_status pd_commit_check(
                   "the release root differs from the root recomputed from the plugin files");
         return PLUGIN_DIST_ERR_RELEASE;
     }
+    /* The signature is checked here, so a forged release writes nothing. */
+    if (vcs_package_release_verify(r) != VCS_PACKAGE_RELEASE_OK) {
+        pd_detail(out->detail, sizeof(out->detail), "%s",
+                  "the release signature does not verify");
+        return PLUGIN_DIST_ERR_RELEASE;
+    }
     return PLUGIN_DIST_OK;
 }
 
@@ -618,6 +624,10 @@ static enum plugin_dist_status pd_commit(
                   "the root was stored and signed but could not be pinned");
         return PLUGIN_DIST_ERR_STORE;
     }
+    pd_pub_fill(prep, out);
+    out->bytes = 0;
+    for (int i = 0; i < 4; i++)
+        out->bytes += prep->mem[i].size;
     return PLUGIN_DIST_OK;
 }
 

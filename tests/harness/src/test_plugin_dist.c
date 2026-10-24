@@ -475,6 +475,62 @@ static int pd_split(void)
     return failures;
 }
 
+/* ---- 10. commit checks the release before any write -------------------- */
+static int pd_commit_checks(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    struct plugin_dist_prepared *prep = NULL;
+    uint8_t *wire = NULL, *bad = NULL;
+    size_t wire_len = 0, bad_len = 0;
+    TEST("plugin dist: commit refuses a forged signature or another name before any write and fills its result") {
+        struct plugin_pack_result v1;
+        struct plugin_dist_published pub, got;
+        struct plugin_dist_publish_request rq;
+        struct vcs_package_store_summary sums[8];
+        struct vcs_package_release rel;
+        char dir1[1400];
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &v1));
+        ASSERT(pd_path(dir1, sizeof(dir1), f.base, "packed1"));
+        ASSERT(pd_split_rq(&f, dir1, &rq));
+        ASSERT_EQ(plugin_dist_prepare(&rq, &prep, &pub), PLUGIN_DIST_OK);
+        ASSERT_EQ(plugin_dist_sign_release(prep, &rq, &wire, &wire_len, &pub), PLUGIN_DIST_OK);
+        ASSERT_EQ(vcs_package_release_parse(wire, wire_len, &rel), VCS_PACKAGE_RELEASE_OK);
+        /* a flipped signature bit: refused before the manifest or a chunk is written */
+        rel.signature[0] ^= 1u;
+        ASSERT_EQ(vcs_package_release_serialize(&rel, &bad, &bad_len), VCS_PACKAGE_RELEASE_OK);
+        ASSERT_EQ(plugin_dist_commit(f.publisher.store, prep, bad, bad_len, &got),
+                  PLUGIN_DIST_ERR_RELEASE);
+        ASSERT(strstr(got.detail, "signature") != NULL);
+        ASSERT_EQ(vcs_package_store_list_summaries(f.publisher.store, false, sums, 8), 0);
+        free(bad);
+        bad = NULL;
+        /* another plugin's name */
+        rel.signature[0] ^= 1u;
+        snprintf(rel.name, sizeof(rel.name), "plugin/other");
+        ASSERT_EQ(vcs_package_release_serialize(&rel, &bad, &bad_len), VCS_PACKAGE_RELEASE_OK);
+        ASSERT_EQ(plugin_dist_commit(f.publisher.store, prep, bad, bad_len, &got),
+                  PLUGIN_DIST_ERR_RELEASE);
+        ASSERT(strstr(got.detail, "different package") != NULL);
+        ASSERT_EQ(vcs_package_store_list_summaries(f.publisher.store, false, sums, 8), 0);
+        /* success fills the result from the prepared package */
+        memset(&got, 0, sizeof(got));
+        ASSERT_EQ(plugin_dist_commit(f.publisher.store, prep, wire, wire_len, &got), PLUGIN_DIST_OK);
+        ASSERT(memcmp(got.root, pub.root, 32) == 0);
+        ASSERT(strcmp(got.name, "demo") == 0);
+        ASSERT_EQ(got.files, 4u);
+        ASSERT(got.bytes > 0);
+        ASSERT(strlen(got.generation) == PLUGIN_HEX_SHA3_512);
+        PASS();
+    } _test_next:;
+    free(bad);
+    free(wire);
+    plugin_dist_prepared_free(prep);
+    pd_close(&f);
+    return failures;
+}
+
 int test_plugin_dist(void)
 {
     int failures = 0;
@@ -490,6 +546,7 @@ int test_plugin_dist(void)
     failures += pd_refuse_publish();
     failures += pd_refuse_big_and_link();
     failures += pd_split();
+    failures += pd_commit_checks();
     /* Every case has ended (pass or fail); drop this run's RAM trees. */
     test_shm_reap_own("zcode_swarm-test-tmp_");
     return failures;
