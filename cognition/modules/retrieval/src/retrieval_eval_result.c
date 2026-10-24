@@ -28,18 +28,9 @@ static bool rer_memory_overlaps(const void *left, size_t left_size,
            right_address < left_address + left_size;
 }
 
-enum zcl_retrieval_experiment_error
-zcl_retrieval_experiment_eval_result_validate(
-    const struct zcl_retrieval_experiment_eval_result_v1 *result)
+static enum zcl_retrieval_experiment_error
+rer_validate_metrics(const struct zcl_retrieval_experiment_eval_result_v1 *result)
 {
-    if (!result) return ZCL_RETRIEVAL_EXPERIMENT_NULL;
-    if (result->schema_version != ZCL_RETRIEVAL_EVAL_RESULT_VERSION)
-        return ZCL_RETRIEVAL_EXPERIMENT_VERSION;
-    if ((result->flags & ~ZCL_RETRIEVAL_EVAL_RESULT_FLAGS_ALL) != 0)
-        return ZCL_RETRIEVAL_EXPERIMENT_RESERVED;
-    if (result->tasks == 0 ||
-        result->tasks > ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX)
-        return ZCL_RETRIEVAL_EXPERIMENT_SHAPE;
     const uint32_t metric_values[] = {
         result->recall_at_5_bp, result->recall_at_20_bp,
         result->mrr_bp, result->wrong_scope_at_5_bp,
@@ -56,12 +47,24 @@ zcl_retrieval_experiment_eval_result_validate(
              metric_values[i] != 0))
             return ZCL_RETRIEVAL_EXPERIMENT_EVALUATION;
     }
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+static enum zcl_retrieval_experiment_error
+rer_validate_counts(const struct zcl_retrieval_experiment_eval_result_v1 *result)
+{
     uint32_t selected_max = result->tasks * ZCL_RETRIEVAL_EXPERIMENT_TOP;
     if (result->unique_files_at_5 > selected_max ||
         result->changed_positions_at_5 > selected_max ||
         result->fallback_tasks > result->tasks ||
         result->context_bytes_at_5 > UINT64_MAX - 3u)
         return ZCL_RETRIEVAL_EXPERIMENT_EVALUATION;
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+static enum zcl_retrieval_experiment_error
+rer_validate_wrong_scope(const struct zcl_retrieval_experiment_eval_result_v1 *result)
+{
     bool scope_available = (result->flags &
         ZCL_RETRIEVAL_EVAL_RESULT_WRONG_SCOPE_AVAILABLE) != 0;
     if ((!scope_available && result->wrong_scope_files_at_5 != 0) ||
@@ -73,6 +76,12 @@ zcl_retrieval_experiment_eval_result_validate(
                   ZCL_RETRIEVAL_EVAL_BASIS_POINTS /
                   result->unique_files_at_5))))
         return ZCL_RETRIEVAL_EXPERIMENT_EVALUATION;
+    return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+static enum zcl_retrieval_experiment_error
+rer_validate_roots(const struct zcl_retrieval_experiment_eval_result_v1 *result)
+{
     const uint8_t *const roots[] = {
         result->subject_root, result->proposal_input_root,
         result->evaluation_input_root, result->evaluator_root,
@@ -81,6 +90,80 @@ zcl_retrieval_experiment_eval_result_validate(
         if (!rer_root_any(roots[i]))
             return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
     return ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+enum zcl_retrieval_experiment_error
+zcl_retrieval_experiment_eval_result_validate(
+    const struct zcl_retrieval_experiment_eval_result_v1 *result)
+{
+    if (!result) return ZCL_RETRIEVAL_EXPERIMENT_NULL;
+    if (result->schema_version != ZCL_RETRIEVAL_EVAL_RESULT_VERSION)
+        return ZCL_RETRIEVAL_EXPERIMENT_VERSION;
+    if ((result->flags & ~ZCL_RETRIEVAL_EVAL_RESULT_FLAGS_ALL) != 0)
+        return ZCL_RETRIEVAL_EXPERIMENT_RESERVED;
+    if (result->tasks == 0 ||
+        result->tasks > ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX)
+        return ZCL_RETRIEVAL_EXPERIMENT_SHAPE;
+    enum zcl_retrieval_experiment_error error =
+        rer_validate_metrics(result);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    error = rer_validate_counts(result);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    error = rer_validate_wrong_scope(result);
+    if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
+    return rer_validate_roots(result);
+}
+
+static bool rer_init_aliases(
+    const struct zcl_retrieval_experiment_eval_result_v1 *out,
+    const struct zcl_retrieval_experiment_eval_report *report,
+    const uint8_t subject_root[32],
+    const uint8_t proposal_input_root[32],
+    const uint8_t evaluation_input_root[32],
+    const uint8_t evaluator_root[32])
+{
+    return rer_memory_overlaps(out, sizeof(*out), report, sizeof(*report)) ||
+        rer_memory_overlaps(out, sizeof(*out), subject_root, 32u) ||
+        rer_memory_overlaps(out, sizeof(*out), proposal_input_root, 32u) ||
+        rer_memory_overlaps(out, sizeof(*out), evaluation_input_root, 32u) ||
+        rer_memory_overlaps(out, sizeof(*out), evaluator_root, 32u);
+}
+
+static bool rer_init_metrics_valid(
+    const struct zcl_retrieval_experiment_eval_report *report)
+{
+    const struct zcl_retrieval_eval_metrics *metrics = &report->metrics;
+    if (metrics->unique_files_at_5 > UINT32_MAX ||
+        metrics->wrong_scope_files_at_5 > UINT32_MAX ||
+        report->changed_positions_at_5 > UINT32_MAX ||
+        report->fallback_tasks > UINT32_MAX ||
+        metrics->context_bytes_at_5 > UINT64_MAX - 3u ||
+        metrics->approximate_tokens_at_5 !=
+            (metrics->context_bytes_at_5 + 3u) / 4u)
+        return false;
+    return true;
+}
+
+static uint16_t rer_init_flags(
+    const struct zcl_retrieval_eval_metrics *metrics,
+    const struct zcl_retrieval_experiment_eval_report *report)
+{
+    uint16_t flags = 0;
+    if (metrics->recall_at_5_available)
+        flags |= ZCL_RETRIEVAL_EVAL_RESULT_RECALL_5_AVAILABLE;
+    if (metrics->recall_at_20_available)
+        flags |= ZCL_RETRIEVAL_EVAL_RESULT_RECALL_20_AVAILABLE;
+    if (metrics->mrr_available)
+        flags |= ZCL_RETRIEVAL_EVAL_RESULT_MRR_AVAILABLE;
+    if (metrics->wrong_scope_at_5_available)
+        flags |= ZCL_RETRIEVAL_EVAL_RESULT_WRONG_SCOPE_AVAILABLE;
+    if (report->top20_membership_preserved)
+        flags |= ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED;
+    if (report->full_retained_set_preserved)
+        flags |= ZCL_RETRIEVAL_EVAL_RESULT_RETAINED_SET_PRESERVED;
+    if (report->context_ceiling_preserved)
+        flags |= ZCL_RETRIEVAL_EVAL_RESULT_CONTEXT_CEILING_PRESERVED;
+    return flags;
 }
 
 enum zcl_retrieval_experiment_error
@@ -95,21 +178,12 @@ zcl_retrieval_experiment_eval_result_init(
     if (!out || !report || !subject_root || !proposal_input_root ||
         !evaluation_input_root || !evaluator_root)
         return ZCL_RETRIEVAL_EXPERIMENT_NULL;
-    if (rer_memory_overlaps(out, sizeof(*out), report, sizeof(*report)) ||
-        rer_memory_overlaps(out, sizeof(*out), subject_root, 32u) ||
-        rer_memory_overlaps(out, sizeof(*out), proposal_input_root, 32u) ||
-        rer_memory_overlaps(out, sizeof(*out), evaluation_input_root, 32u) ||
-        rer_memory_overlaps(out, sizeof(*out), evaluator_root, 32u))
+    if (rer_init_aliases(out, report, subject_root, proposal_input_root,
+                         evaluation_input_root, evaluator_root))
         return ZCL_RETRIEVAL_EXPERIMENT_ALIAS;
-    const struct zcl_retrieval_eval_metrics *metrics = &report->metrics;
-    if (metrics->unique_files_at_5 > UINT32_MAX ||
-        metrics->wrong_scope_files_at_5 > UINT32_MAX ||
-        report->changed_positions_at_5 > UINT32_MAX ||
-        report->fallback_tasks > UINT32_MAX ||
-        metrics->context_bytes_at_5 > UINT64_MAX - 3u ||
-        metrics->approximate_tokens_at_5 !=
-            (metrics->context_bytes_at_5 + 3u) / 4u)
+    if (!rer_init_metrics_valid(report))
         return ZCL_RETRIEVAL_EXPERIMENT_EVALUATION;
+    const struct zcl_retrieval_eval_metrics *metrics = &report->metrics;
     struct zcl_retrieval_experiment_eval_result_v1 result = {
         .schema_version = ZCL_RETRIEVAL_EVAL_RESULT_VERSION,
         .tasks = metrics->tasks,
@@ -124,21 +198,8 @@ zcl_retrieval_experiment_eval_result_init(
             (uint32_t)report->changed_positions_at_5,
         .fallback_tasks = (uint32_t)report->fallback_tasks,
         .context_bytes_at_5 = metrics->context_bytes_at_5,
+        .flags = rer_init_flags(metrics, report),
     };
-    if (metrics->recall_at_5_available)
-        result.flags |= ZCL_RETRIEVAL_EVAL_RESULT_RECALL_5_AVAILABLE;
-    if (metrics->recall_at_20_available)
-        result.flags |= ZCL_RETRIEVAL_EVAL_RESULT_RECALL_20_AVAILABLE;
-    if (metrics->mrr_available)
-        result.flags |= ZCL_RETRIEVAL_EVAL_RESULT_MRR_AVAILABLE;
-    if (metrics->wrong_scope_at_5_available)
-        result.flags |= ZCL_RETRIEVAL_EVAL_RESULT_WRONG_SCOPE_AVAILABLE;
-    if (report->top20_membership_preserved)
-        result.flags |= ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED;
-    if (report->full_retained_set_preserved)
-        result.flags |= ZCL_RETRIEVAL_EVAL_RESULT_RETAINED_SET_PRESERVED;
-    if (report->context_ceiling_preserved)
-        result.flags |= ZCL_RETRIEVAL_EVAL_RESULT_CONTEXT_CEILING_PRESERVED;
     memcpy(result.subject_root, subject_root, 32u);
     memcpy(result.proposal_input_root, proposal_input_root, 32u);
     memcpy(result.evaluation_input_root, evaluation_input_root, 32u);
@@ -245,6 +306,35 @@ zcl_retrieval_experiment_eval_result_root(
     return ZCL_RETRIEVAL_EXPERIMENT_OK;
 }
 
+static bool rer_expected_roots_present(
+    const uint8_t expected_subject_root[32],
+    const uint8_t expected_proposal_input_root[32],
+    const uint8_t expected_evaluation_input_root[32],
+    const uint8_t expected_evaluator_root[32],
+    const uint8_t expected_result_root[32])
+{
+    return rer_root_any(expected_subject_root) &&
+        rer_root_any(expected_proposal_input_root) &&
+        rer_root_any(expected_evaluation_input_root) &&
+        rer_root_any(expected_evaluator_root) &&
+        rer_root_any(expected_result_root);
+}
+
+static bool rer_result_roots_match(
+    const struct zcl_retrieval_experiment_eval_result_v1 *result,
+    const uint8_t expected_subject_root[32],
+    const uint8_t expected_proposal_input_root[32],
+    const uint8_t expected_evaluation_input_root[32],
+    const uint8_t expected_evaluator_root[32])
+{
+    return memcmp(result->subject_root, expected_subject_root, 32u) == 0 &&
+        memcmp(result->proposal_input_root,
+               expected_proposal_input_root, 32u) == 0 &&
+        memcmp(result->evaluation_input_root,
+               expected_evaluation_input_root, 32u) == 0 &&
+        memcmp(result->evaluator_root, expected_evaluator_root, 32u) == 0;
+}
+
 enum zcl_retrieval_experiment_error
 zcl_retrieval_experiment_eval_result_verify_binding(
     const struct zcl_retrieval_experiment_eval_result_v1 *result,
@@ -262,17 +352,16 @@ zcl_retrieval_experiment_eval_result_verify_binding(
     enum zcl_retrieval_experiment_error error =
         zcl_retrieval_experiment_eval_result_root(result, result_root);
     if (error != ZCL_RETRIEVAL_EXPERIMENT_OK) return error;
-    if (!rer_root_any(expected_subject_root) ||
-        !rer_root_any(expected_proposal_input_root) ||
-        !rer_root_any(expected_evaluation_input_root) ||
-        !rer_root_any(expected_evaluator_root) ||
-        !rer_root_any(expected_result_root) ||
-        memcmp(result->subject_root, expected_subject_root, 32u) != 0 ||
-        memcmp(result->proposal_input_root,
-               expected_proposal_input_root, 32u) != 0 ||
-        memcmp(result->evaluation_input_root,
-               expected_evaluation_input_root, 32u) != 0 ||
-        memcmp(result->evaluator_root, expected_evaluator_root, 32u) != 0 ||
+    if (!rer_expected_roots_present(expected_subject_root,
+                                    expected_proposal_input_root,
+                                    expected_evaluation_input_root,
+                                    expected_evaluator_root,
+                                    expected_result_root))
+        return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
+    if (!rer_result_roots_match(result, expected_subject_root,
+                                expected_proposal_input_root,
+                                expected_evaluation_input_root,
+                                expected_evaluator_root) ||
         memcmp(result_root, expected_result_root, 32u) != 0)
         return ZCL_RETRIEVAL_EXPERIMENT_BINDING;
     return ZCL_RETRIEVAL_EXPERIMENT_OK;
