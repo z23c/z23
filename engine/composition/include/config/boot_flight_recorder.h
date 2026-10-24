@@ -34,9 +34,10 @@ struct json_value;
  * always proceeds regardless of what this module finds. */
 
 /* Cap on distinct stage marks buffered per boot; a stage beyond this many
- * distinct names is dropped (a single WARN, not a crash) — generous
- * headroom over boot.c's current ~20 named phases/sub-phases. */
-#define BOOT_FLIGHT_RECORDER_MAX_STAGES 64
+ * distinct names is dropped (a single WARN, not a crash). r1's 10-24 boot
+ * already emitted 63 distinct marks and the progress-store sub-marks add 8,
+ * so 64 would drop the late ones (including "total"); 128 x 48 B is 6 KiB. */
+#define BOOT_FLIGHT_RECORDER_MAX_STAGES 128
 
 /* How many most-recent boots' timings the durable table retains
  * (pruned by boot_epoch on every boot_flight_recorder_finish()). */
