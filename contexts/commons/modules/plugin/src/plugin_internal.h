@@ -83,8 +83,8 @@ void plugin_domain_digest(const unsigned char *domain, size_t domain_len,
 /* Per-plugin mutation lock (plugdir/.lock, plus the waiter gate
  * plugdir/.lock.q that keeps a returning holder from starving a waiter) held
  * across the whole read-verify-modify of install, switch and rollback. Waits
- * until a monotonic deadline PLUGIN_LOCK_WAIT_MS after the call, then refuses
- * PLUGIN_ERR_BUSY. Readers never take it. A leftover unlocked .lock.q is
+ * until a monotonic deadline PLUGIN_LOCK_WAIT_MS after the call that restarts each
+ * time the lock changes hands, then refuses PLUGIN_ERR_BUSY. Readers never take it. A leftover unlocked .lock.q is
  * harmless. */
 enum { PLUGIN_LOCK_WAIT_MS = 5000 };
 struct plugin_lock {
@@ -92,6 +92,12 @@ struct plugin_lock {
 };
 enum plugin_status plugin_lock_acquire(const char *plugdir, struct plugin_lock *lock);
 void plugin_lock_release(struct plugin_lock *lock);
+#ifdef ZCL_TESTING
+/* Test seam: override the lock wait budget and add a pause inside every hold,
+ * modelling a loaded host where holds are long against the budget. A budget
+ * <= 0 restores PLUGIN_LOCK_WAIT_MS; a pause <= 0 removes the pause. */
+void plugin_lock_test_timing(int64_t budget_ms, int64_t hold_pause_ms);
+#endif
 /* Create one new owner-private directory; false if it exists. */
 bool plugin_mkdir_new(const char *path);
 bool plugin_join(char *out, size_t cap, const char *a, const char *b,

@@ -1550,6 +1550,44 @@ static bool pst_plugdir_clean(const struct pst_fx *fx)
     return clean;
 }
 
+static enum plugin_status pst_short_flip_worker(struct pst_fx *fx, const struct pst_trio *t)
+{
+    for (int i = 0; i < 2; i++) {
+        enum plugin_status st = plugin_store_switch(fx->root, "hello", t->b);
+        if (st == PLUGIN_OK)
+            st = plugin_store_switch(fx->root, "hello", t->c);
+        if (st != PLUGIN_OK)
+            return st;
+    }
+    return PLUGIN_OK;
+}
+
+/* A loaded host makes every hold long against the wait budget. The seam sets
+ * that ratio directly: 400 ms holds, 2 s budget, 8 contenders, so a waiter
+ * needs more than the budget in wall time yet the lock keeps changing hands.
+ * That is progress, not a stuck holder, and must not answer PLUGIN_BUSY. */
+static int pst_case_slow_holds(void)
+{
+    int failures = 0;
+    TEST_CASE("eight switchers with holds long against the wait budget never see PLUGIN_BUSY while the lock keeps moving") {
+        enum { KIDS = 8 };
+        struct pst_fx fx;
+        struct pst_trio t;
+        pid_t pids[KIDS];
+        ASSERT(pst_three_generations(&fx, &t));
+        ASSERT_EQ(plugin_store_switch(fx.root, "hello", t.a), PLUGIN_OK);
+        plugin_lock_test_timing(2000, 400);
+        for (int i = 0; i < KIDS; i++)
+            pids[i] = pst_spawn(pst_short_flip_worker, &fx, &t);
+        plugin_lock_test_timing(0, 0);
+        for (int i = 0; i < KIDS; i++)
+            ASSERT_EQ(pst_reap(pids[i]), (int)PLUGIN_OK);
+        ASSERT(pst_plugdir_clean(&fx));
+        pst_fx_close(&fx);
+    } TEST_END
+    return failures;
+}
+
 static int pst_case_concurrent_switch(void)
 {
     int failures = 0;
@@ -1990,6 +2028,7 @@ int test_plugin_store(void)
 #if !defined(_WIN32)
     failures += pst_case_concurrent_switch();
     failures += pst_case_lock_exclusion();
+    failures += pst_case_slow_holds();
     failures += pst_case_lock_fairness();
     failures += pst_case_lock_budget();
     failures += pst_case_lock_gate_leftover();

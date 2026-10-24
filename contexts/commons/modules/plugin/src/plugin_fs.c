@@ -527,12 +527,34 @@ enum plugin_status plugin_keys_load(const char *path, char **bytes, size_t *len)
  * other race among themselves. Both locks are flocks, so a crashed process
  * releases them and a leftover (unlocked) ".lock.q" file is harmless.
  *
- * The budget is a monotonic-clock deadline equal to the old wall budget, not
- * a step count: a slow sleep or a loaded machine cannot stretch or shrink it.
- * A lock held past the deadline still answers PLUGIN_ERR_BUSY. */
+ * The budget is a monotonic-clock deadline, not a step count, and it bounds
+ * time without progress: each new holder stamps a counter in ".lock", and a
+ * waiter that sees the stamp change restarts its budget, because the lock is
+ * moving and a loaded host only makes each hold longer. A lock that does not
+ * change hands for a whole budget still answers PLUGIN_ERR_BUSY. */
 enum { PLUGIN_LOCK_STEP_MS = 1 };
 
+#ifdef ZCL_TESTING
+static int64_t g_lock_budget_ms;
+static int64_t g_lock_hold_pause_ms;
+
+void plugin_lock_test_timing(int64_t budget_ms, int64_t hold_pause_ms)
+{
+    g_lock_budget_ms = budget_ms;
+    g_lock_hold_pause_ms = hold_pause_ms;
+}
+#endif
+
 #if !defined(_WIN32)
+static int64_t plugin_lock_budget_ms(void)
+{
+#ifdef ZCL_TESTING
+    if (g_lock_budget_ms > 0)
+        return g_lock_budget_ms;
+#endif
+    return PLUGIN_LOCK_WAIT_MS;
+}
+
 /* Open one lock file and require a regular file owned by this user. */
 static enum plugin_status plugin_lock_open(const char *plugdir, const char *name, int *fd_out)
 {
@@ -564,9 +586,47 @@ static int plugin_flock_try(int fd, int op)
     return (errno == EWOULDBLOCK || errno == EINTR) ? 1 : -1;
 }
 
-/* Poll until the deadline; true when the lock is taken. *st is set to BUSY
- * on timeout or IO on error. */
-static bool plugin_flock_poll(int fd, int op, int64_t deadline, enum plugin_status *st)
+/* One acquirer's wait. The deadline is a no-progress bound: every time the
+ * holder of ".lock" changes (the holder stamps a counter in the file on each
+ * take) the deadline restarts, so a waiter is refused only after a full budget
+ * in which the lock did not change hands. Under load holds get long and a
+ * waiter may need many of them; that is the lock moving, not a stuck holder. */
+struct plugin_wait {
+    int fd;            /* ".lock", read for the stamp */
+    int64_t deadline;  /* monotonic ms */
+    uint64_t seen;     /* last stamp observed */
+};
+
+static uint64_t plugin_lock_stamp_read(int fd)
+{
+    uint64_t v = 0;
+    return pread(fd, &v, sizeof(v), 0) == (ssize_t)sizeof(v) ? v : 0;
+}
+
+/* Called by the new holder, under the lock, so the read-modify-write is safe. */
+static void plugin_lock_stamp(int fd)
+{
+    uint64_t v = plugin_lock_stamp_read(fd) + 1;
+    if (pwrite(fd, &v, sizeof(v), 0) != (ssize_t)sizeof(v)) {
+        /* best effort: without a stamp the wait degrades to a fixed deadline */
+    }
+}
+
+/* True when the budget is spent with no handover since the last check. */
+static bool plugin_wait_expired(struct plugin_wait *w)
+{
+    int64_t now = platform_time_monotonic_ms();
+    uint64_t stamp = plugin_lock_stamp_read(w->fd);
+    if (stamp != w->seen) {
+        w->seen = stamp;
+        w->deadline = now + plugin_lock_budget_ms();
+        return false;
+    }
+    return now >= w->deadline;
+}
+
+/* Poll until the lock is taken; *st is BUSY on a spent budget, IO on error. */
+static bool plugin_flock_poll(int fd, int op, struct plugin_wait *w, enum plugin_status *st)
 {
     for (;;) {
         int r = plugin_flock_try(fd, op);
@@ -576,7 +636,7 @@ static bool plugin_flock_poll(int fd, int op, int64_t deadline, enum plugin_stat
             *st = PLUGIN_ERR_IO;
             return false;
         }
-        if (platform_time_monotonic_ms() >= deadline) {
+        if (plugin_wait_expired(w)) {
             *st = PLUGIN_ERR_BUSY;
             return false;
         }
@@ -586,31 +646,20 @@ static bool plugin_flock_poll(int fd, int op, int64_t deadline, enum plugin_stat
 
 /* Pass the waiter gate: true when no waiter is announced. A newcomer yields
  * (holding nothing) while one is. */
-static bool plugin_gate_pass(int qfd, int64_t deadline, enum plugin_status *st)
+static bool plugin_gate_pass(int qfd, struct plugin_wait *w, enum plugin_status *st)
 {
-    for (;;) {
-        int r = plugin_flock_try(qfd, LOCK_EX);
-        if (r == 0) {
-            flock(qfd, LOCK_UN);
-            return true;
-        }
-        if (r < 0) {
-            *st = PLUGIN_ERR_IO;
-            return false;
-        }
-        if (platform_time_monotonic_ms() >= deadline) {
-            *st = PLUGIN_ERR_BUSY;
-            return false;
-        }
-        platform_sleep_ms(PLUGIN_LOCK_STEP_MS);
-    }
+    if (!plugin_flock_poll(qfd, LOCK_EX, w, st))
+        return false;
+    flock(qfd, LOCK_UN);
+    return true;
 }
 
 /* Take ".lock" with qfd and fd open; see the comment above. */
 static enum plugin_status plugin_lock_take(int qfd, int fd, int64_t deadline)
 {
+    struct plugin_wait w = { fd, deadline, plugin_lock_stamp_read(fd) };
     enum plugin_status st = PLUGIN_OK;
-    if (!plugin_gate_pass(qfd, deadline, &st))
+    if (!plugin_gate_pass(qfd, &w, &st))
         return st;
     int r = plugin_flock_try(fd, LOCK_EX);
     if (r == 0)
@@ -618,9 +667,9 @@ static enum plugin_status plugin_lock_take(int qfd, int fd, int64_t deadline)
     if (r < 0)
         return PLUGIN_ERR_IO;
     /* Held: announce as a waiter, then poll. Closing qfd later withdraws it. */
-    if (!plugin_flock_poll(qfd, LOCK_SH, deadline, &st))
+    if (!plugin_flock_poll(qfd, LOCK_SH, &w, &st))
         return st;
-    if (!plugin_flock_poll(fd, LOCK_EX, deadline, &st))
+    if (!plugin_flock_poll(fd, LOCK_EX, &w, &st))
         return st;
     return PLUGIN_OK;
 }
@@ -638,7 +687,7 @@ enum plugin_status plugin_lock_acquire(const char *plugdir, struct plugin_lock *
 #else
 
     int qfd = -1, fd = -1;
-    int64_t deadline = platform_time_monotonic_ms() + PLUGIN_LOCK_WAIT_MS;
+    int64_t deadline = platform_time_monotonic_ms() + plugin_lock_budget_ms();
     enum plugin_status st = plugin_lock_open(plugdir, ".lock.q", &qfd);
     if (st != PLUGIN_OK)
         return st;
@@ -651,6 +700,11 @@ enum plugin_status plugin_lock_acquire(const char *plugdir, struct plugin_lock *
             close(fd);
         return st;
     }
+    plugin_lock_stamp(fd); /* tell the waiters the lock changed hands */
+#ifdef ZCL_TESTING
+    if (g_lock_hold_pause_ms > 0)
+        platform_sleep_ms((int)g_lock_hold_pause_ms);
+#endif
     lock->fd = fd;
     return PLUGIN_OK;
 
