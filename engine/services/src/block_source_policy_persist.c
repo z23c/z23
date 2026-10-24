@@ -92,12 +92,10 @@ static void restore_source_int(struct node_db *ndb,
         *out = v;
 }
 
-static void persist_source_snapshot(struct node_db *ndb,
-                                    enum bsp_source source,
-                                    const struct bsp_source_status *s)
+static void persist_source_text(struct node_db *ndb,
+                                enum bsp_source source,
+                                const struct bsp_source_status *s)
 {
-    if (!ndb || !s || source <= BSP_SOURCE_NONE || source >= BSP_SOURCE_NUM)
-        return;
     char key[96];
     if (source_field_key(key, sizeof(key), source, "state"))
         (void)persist_text(ndb, key, s->state);
@@ -107,6 +105,15 @@ static void persist_source_snapshot(struct node_db *ndb,
         (void)persist_text(ndb, key, s->reason);
     if (source_field_key(key, sizeof(key), source, "blocker"))
         (void)persist_text(ndb, key, s->blocker);
+}
+
+static void persist_source_snapshot(struct node_db *ndb,
+                                    enum bsp_source source,
+                                    const struct bsp_source_status *s)
+{
+    if (!ndb || !s || source <= BSP_SOURCE_NONE || source >= BSP_SOURCE_NUM)
+        return;
+    persist_source_text(ndb, source, s);
     persist_source_int(ndb, source, "height", (int64_t)s->height);
     persist_source_int(ndb, source, "score", (int64_t)s->score);
     persist_source_int(ndb, source, "score_base", s->score_base);
@@ -267,6 +274,23 @@ static void restore_source_snapshot(struct node_db *ndb,
     restore_source_int(ndb, source, "serving_peer_id", &s->serving_peer_id);
 }
 
+static void persist_selected_source(struct node_db *ndb,
+                                     const struct bsp_decision *d)
+{
+    const struct bsp_source_status *s = &d->sources[d->selected_source];
+    (void)persist_text(ndb, BSP_KEY_SOURCE_STATE, s->state);
+    (void)persist_text(ndb, BSP_KEY_SOURCE_REASON, s->reason);
+    (void)persist_text(ndb, BSP_KEY_SOURCE_BLOCKER, s->blocker);
+    (void)node_db_state_set_int(ndb, BSP_KEY_SOURCE_HEIGHT,
+                                (int64_t)s->height);
+    (void)node_db_state_set_int(ndb, BSP_KEY_SOURCE_HEALTHY,
+                                s->healthy ? 1 : 0);
+    (void)node_db_state_set_int(ndb, BSP_KEY_SOURCE_AVAILABLE,
+                                s->available ? 1 : 0);
+    (void)node_db_state_set_int(ndb, BSP_KEY_SOURCE_BLOCKED,
+                                s->blocked ? 1 : 0);
+}
+
 struct zcl_result bsp_persist_decision(struct node_db *ndb,
                                        const char *op,
                                        const struct bsp_decision *d,
@@ -308,18 +332,7 @@ struct zcl_result bsp_persist_decision(struct node_db *ndb,
 
     if (d->selected_source > BSP_SOURCE_NONE &&
         d->selected_source < BSP_SOURCE_NUM) {
-        const struct bsp_source_status *s = &d->sources[d->selected_source];
-        (void)persist_text(ndb, BSP_KEY_SOURCE_STATE, s->state);
-        (void)persist_text(ndb, BSP_KEY_SOURCE_REASON, s->reason);
-        (void)persist_text(ndb, BSP_KEY_SOURCE_BLOCKER, s->blocker);
-        (void)node_db_state_set_int(ndb, BSP_KEY_SOURCE_HEIGHT,
-                                    (int64_t)s->height);
-        (void)node_db_state_set_int(ndb, BSP_KEY_SOURCE_HEALTHY,
-                                    s->healthy ? 1 : 0);
-        (void)node_db_state_set_int(ndb, BSP_KEY_SOURCE_AVAILABLE,
-                                    s->available ? 1 : 0);
-        (void)node_db_state_set_int(ndb, BSP_KEY_SOURCE_BLOCKED,
-                                    s->blocked ? 1 : 0);
+        persist_selected_source(ndb, d);
     }
 
     if (!ok)
@@ -328,6 +341,39 @@ struct zcl_result bsp_persist_decision(struct node_db *ndb,
                        "op=%s (decision kept in memory)",
                        op ? op : "unknown");
     return ZCL_OK;
+}
+
+static void restore_selected_source(struct node_db *ndb,
+                                     struct bsp_decision *d)
+{
+    char source_state[sizeof(d->sources[0].state)] = {0};
+    char source_reason[sizeof(d->sources[0].reason)] = {0};
+    char source_block_text[sizeof(d->sources[0].blocker)] = {0};
+    size_t len = 0;
+    int64_t v = 0;
+    if (d->selected_source > BSP_SOURCE_NONE &&
+        d->selected_source < BSP_SOURCE_NUM) {
+        struct bsp_source_status *s = &d->sources[d->selected_source];
+        s->source = d->selected_source;
+        s->score = d->selected_score;
+        if (node_db_state_get(ndb, BSP_KEY_SOURCE_STATE, source_state,
+                              sizeof(source_state) - 1, &len))
+            bsp_copy_text(s->state, sizeof(s->state), source_state);
+        if (node_db_state_get(ndb, BSP_KEY_SOURCE_REASON, source_reason,
+                              sizeof(source_reason) - 1, &len))
+            bsp_copy_text(s->reason, sizeof(s->reason), source_reason);
+        if (node_db_state_get(ndb, BSP_KEY_SOURCE_BLOCKER, source_block_text,
+                              sizeof(source_block_text) - 1, &len))
+            bsp_copy_text(s->blocker, sizeof(s->blocker), source_block_text);
+        if (node_db_state_get_int(ndb, BSP_KEY_SOURCE_HEIGHT, &v))
+            s->height = (int)v;
+        if (node_db_state_get_int(ndb, BSP_KEY_SOURCE_HEALTHY, &v))
+            s->healthy = v != 0;
+        if (node_db_state_get_int(ndb, BSP_KEY_SOURCE_AVAILABLE, &v))
+            s->available = v != 0;
+        if (node_db_state_get_int(ndb, BSP_KEY_SOURCE_BLOCKED, &v))
+            s->blocked = v != 0;
+    }
 }
 
 struct zcl_result bsp_restore_decision(struct node_db *ndb)
@@ -340,9 +386,6 @@ struct zcl_result bsp_restore_decision(struct node_db *ndb)
     char op[32] = {0};
     char reason[sizeof(d.reason)] = {0};
     char blocker[sizeof(d.blocker)] = {0};
-    char source_state[sizeof(d.sources[0].state)] = {0};
-    char source_reason[sizeof(d.sources[0].reason)] = {0};
-    char source_block_text[sizeof(d.sources[0].blocker)] = {0};
     size_t len = 0;
     int64_t v = 0;
     int64_t total = 0;
@@ -378,29 +421,7 @@ struct zcl_result bsp_restore_decision(struct node_db *ndb)
         d.target_height = (int)v;
     for (int i = 1; i < BSP_SOURCE_NUM; i++)
         restore_source_snapshot(ndb, (enum bsp_source)i, &d.sources[i]);
-    if (d.selected_source > BSP_SOURCE_NONE &&
-        d.selected_source < BSP_SOURCE_NUM) {
-        struct bsp_source_status *s = &d.sources[d.selected_source];
-        s->source = d.selected_source;
-        s->score = d.selected_score;
-        if (node_db_state_get(ndb, BSP_KEY_SOURCE_STATE, source_state,
-                              sizeof(source_state) - 1, &len))
-            bsp_copy_text(s->state, sizeof(s->state), source_state);
-        if (node_db_state_get(ndb, BSP_KEY_SOURCE_REASON, source_reason,
-                              sizeof(source_reason) - 1, &len))
-            bsp_copy_text(s->reason, sizeof(s->reason), source_reason);
-        if (node_db_state_get(ndb, BSP_KEY_SOURCE_BLOCKER, source_block_text,
-                              sizeof(source_block_text) - 1, &len))
-            bsp_copy_text(s->blocker, sizeof(s->blocker), source_block_text);
-        if (node_db_state_get_int(ndb, BSP_KEY_SOURCE_HEIGHT, &v))
-            s->height = (int)v;
-        if (node_db_state_get_int(ndb, BSP_KEY_SOURCE_HEALTHY, &v))
-            s->healthy = v != 0;
-        if (node_db_state_get_int(ndb, BSP_KEY_SOURCE_AVAILABLE, &v))
-            s->available = v != 0;
-        if (node_db_state_get_int(ndb, BSP_KEY_SOURCE_BLOCKED, &v))
-            s->blocked = v != 0;
-    }
+    restore_selected_source(ndb, &d);
     (void)node_db_state_get_int(ndb, BSP_KEY_LAST_TIME, &when);
     (void)node_db_state_get_int(ndb, BSP_KEY_DECISIONS_TOTAL, &total);
 
