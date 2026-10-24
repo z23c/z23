@@ -44,9 +44,30 @@ static bool mah_parse_u64(const char *text, uint64_t *out)
     return true;
 }
 
+static bool mah_amount_text_ok(const char *text)
+{
+    return text && text[0] && text[0] != '-' && text[0] != '+';
+}
+
+static bool mah_amount_whole_digit(int64_t *whole, int digit)
+{
+    if (*whole > (INT64_MAX - digit) / 10) return false;
+    *whole = *whole * 10 + digit;
+    return true;
+}
+
+static bool mah_amount_finish(int64_t whole, int64_t fraction,
+                              unsigned decimals, int64_t *out)
+{
+    while (decimals++ < 8u) fraction *= 10;
+    if (whole > (INT64_MAX - fraction) / 100000000LL) return false;
+    *out = whole * 100000000LL + fraction;
+    return true;
+}
+
 static bool mah_amount_zat(const char *text, int64_t *out)
 {
-    if (!text || !text[0] || text[0] == '-' || text[0] == '+') return false;
+    if (!mah_amount_text_ok(text)) return false;
     int64_t whole = 0, fraction = 0;
     unsigned decimals = 0;
     bool dot = false;
@@ -55,18 +76,14 @@ static bool mah_amount_zat(const char *text, int64_t *out)
         if (*p < '0' || *p > '9') return false;
         int digit = *p - '0';
         if (!dot) {
-            if (whole > (INT64_MAX - digit) / 10) return false;
-            whole = whole * 10 + digit;
+            if (!mah_amount_whole_digit(&whole, digit)) return false;
         } else {
             if (++decimals > 8u) return false;
             fraction = fraction * 10 + digit;
         }
     }
     if (dot && decimals == 0u) return false;
-    while (decimals++ < 8u) fraction *= 10;
-    if (whole > (INT64_MAX - fraction) / 100000000LL) return false;
-    *out = whole * 100000000LL + fraction;
-    return true;
+    return mah_amount_finish(whole, fraction, decimals, out);
 }
 
 static bool mah_read_stdin(char **raw_out, size_t *bytes_out)
@@ -139,6 +156,19 @@ static bool mah_int(const struct json_value *object, const char *key,
     return true;
 }
 
+static bool mah_int_equal(const struct json_value *object, const char *key,
+                          int64_t expected)
+{
+    int64_t got = 0;
+    return mah_int(object, key, &got) && got == expected;
+}
+
+static bool mah_int_positive(const struct json_value *object, const char *key)
+{
+    int64_t got = 0;
+    return mah_int(object, key, &got) && got > 0;
+}
+
 static bool mah_hex64(const char *text)
 {
     if (!text || strlen(text) != 64u) return false;
@@ -204,6 +234,43 @@ static bool mah_write_all(int fd, const uint8_t *bytes, size_t size)
     return true;
 }
 
+static bool mah_fixture_write_chunk(int fd, uint8_t *block, uint32_t index,
+                                    uint8_t digest[32])
+{
+    for (size_t i = 0; i < MAH_BLOCK_BYTES; i++)
+        block[i] = (uint8_t)((index * 131u + i * 7u) & 0xffu);
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    bool ok = true;
+    for (size_t offset = 0; ok && offset < MAH_CHUNK_BYTES;
+         offset += MAH_BLOCK_BYTES) {
+        ok = mah_write_all(fd, block, MAH_BLOCK_BYTES);
+        if (ok) sha3_256_write(&sha, block, MAH_BLOCK_BYTES);
+    }
+    if (ok) sha3_256_finalize(&sha, digest);
+    return ok;
+}
+
+static bool mah_fixture_write_tail(int fd, uint8_t *block, uint64_t tail,
+                                   uint8_t digest[32])
+{
+    struct sha3_256_ctx sha;
+    sha3_256_init(&sha);
+    bool ok = true;
+    uint64_t offset = 0;
+    while (ok && offset < tail) {
+        size_t take = tail - offset > MAH_BLOCK_BYTES
+            ? MAH_BLOCK_BYTES : (size_t)(tail - offset);
+        for (size_t i = 0; i < take; i++)
+            block[i] = (uint8_t)((5u + (offset + i) * 11u) & 0xffu);
+        ok = mah_write_all(fd, block, take);
+        if (ok) sha3_256_write(&sha, block, take);
+        offset += take;
+    }
+    if (ok) sha3_256_finalize(&sha, digest);
+    return ok;
+}
+
 static bool mah_fixture_create(const char *path, uint64_t price,
                                uint64_t tail, uint64_t *size_out,
                                char root_out[65], uint64_t *total_out)
@@ -219,33 +286,9 @@ static bool mah_fixture_create(const char *path, uint64_t price,
     uint8_t *block = zcl_malloc(MAH_BLOCK_BYTES, "market_helper.fixture");
     uint8_t digests[3][32];
     bool ok = block != NULL;
-    for (uint32_t index = 0; ok && index < 2u; index++) {
-        for (size_t i = 0; i < MAH_BLOCK_BYTES; i++)
-            block[i] = (uint8_t)((index * 131u + i * 7u) & 0xffu);
-        struct sha3_256_ctx sha;
-        sha3_256_init(&sha);
-        for (size_t offset = 0; ok && offset < MAH_CHUNK_BYTES;
-             offset += MAH_BLOCK_BYTES) {
-            ok = mah_write_all(fd, block, MAH_BLOCK_BYTES);
-            if (ok) sha3_256_write(&sha, block, MAH_BLOCK_BYTES);
-        }
-        if (ok) sha3_256_finalize(&sha, digests[index]);
-    }
-    if (ok) {
-        struct sha3_256_ctx sha;
-        sha3_256_init(&sha);
-        uint64_t offset = 0;
-        while (ok && offset < tail) {
-            size_t take = tail - offset > MAH_BLOCK_BYTES
-                ? MAH_BLOCK_BYTES : (size_t)(tail - offset);
-            for (size_t i = 0; i < take; i++)
-                block[i] = (uint8_t)((5u + (offset + i) * 11u) & 0xffu);
-            ok = mah_write_all(fd, block, take);
-            if (ok) sha3_256_write(&sha, block, take);
-            offset += take;
-        }
-        if (ok) sha3_256_finalize(&sha, digests[2]);
-    }
+    for (uint32_t index = 0; ok && index < 2u; index++)
+        ok = mah_fixture_write_chunk(fd, block, index, digests[index]);
+    if (ok) ok = mah_fixture_write_tail(fd, block, tail, digests[2]);
     if (ok && fsync(fd) != 0) ok = false;
     if (close(fd) != 0) ok = false;
     free(block);
@@ -261,6 +304,36 @@ static bool mah_fixture_create(const char *path, uint64_t price,
     return true;
 }
 
+static bool mah_manifest_close_chunk(struct sha3_256_ctx *sha,
+                                     uint8_t *digests, size_t *chunks)
+{
+    if (*chunks == MAH_MANIFEST_CHUNKS_MAX) return false;
+    sha3_256_finalize(sha, digests + *chunks * 32u);
+    (*chunks)++;
+    return true;
+}
+
+static bool mah_manifest_read_chunks(int fd, uint8_t *buffer, uint8_t *digests,
+                                     size_t *chunks, size_t *in_chunk,
+                                     struct sha3_256_ctx *sha)
+{
+    while (true) {
+        size_t remaining = MAH_CHUNK_BYTES - *in_chunk;
+        size_t want = remaining < MAH_BLOCK_BYTES ? remaining : MAH_BLOCK_BYTES;
+        ssize_t got = read(fd, buffer, want);
+        if (got < 0 && errno == EINTR) continue;
+        if (got < 0) return false;
+        if (got == 0) return true;
+        sha3_256_write(sha, buffer, (size_t)got);
+        *in_chunk += (size_t)got;
+        if (*in_chunk == MAH_CHUNK_BYTES) {
+            if (!mah_manifest_close_chunk(sha, digests, chunks)) return false;
+            *in_chunk = 0;
+            sha3_256_init(sha);
+        }
+    }
+}
+
 static bool mah_file_manifest_root(const char *path, char root_out[65])
 {
     int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -272,30 +345,10 @@ static bool mah_file_manifest_root(const char *path, char root_out[65])
     size_t chunks = 0, in_chunk = 0;
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
-    while (ok) {
-        size_t remaining = MAH_CHUNK_BYTES - in_chunk;
-        size_t want = remaining < MAH_BLOCK_BYTES ? remaining : MAH_BLOCK_BYTES;
-        ssize_t got = read(fd, buffer, want);
-        if (got < 0 && errno == EINTR) continue;
-        if (got < 0) { ok = false; break; }
-        if (got == 0) break;
-        sha3_256_write(&sha, buffer, (size_t)got);
-        in_chunk += (size_t)got;
-        if (in_chunk == MAH_CHUNK_BYTES) {
-            if (chunks == MAH_MANIFEST_CHUNKS_MAX) { ok = false; break; }
-            sha3_256_finalize(&sha, digests + chunks * 32u);
-            chunks++;
-            in_chunk = 0;
-            sha3_256_init(&sha);
-        }
-    }
-    if (ok && in_chunk > 0) {
-        if (chunks == MAH_MANIFEST_CHUNKS_MAX) ok = false;
-        else {
-            sha3_256_finalize(&sha, digests + chunks * 32u);
-            chunks++;
-        }
-    }
+    if (ok) ok = mah_manifest_read_chunks(fd, buffer, digests, &chunks,
+                                          &in_chunk, &sha);
+    if (ok && in_chunk > 0)
+        ok = mah_manifest_close_chunk(&sha, digests, &chunks);
     if (close(fd) != 0) ok = false;
     if (ok && chunks == 0) ok = false;
     if (ok) {
@@ -352,20 +405,26 @@ static bool mah_print_value(const struct json_value *value)
     return false;
 }
 
+static bool mah_offer_plan_sizes_ok(const struct json_value *data,
+                                    int64_t size, int64_t chunks,
+                                    int64_t total)
+{
+    return mah_int_equal(data, "size_bytes", size) &&
+        mah_int_equal(data, "num_chunks", chunks) &&
+        mah_int_equal(data, "total_zat", total) &&
+        mah_int_positive(data, "price_per_mb_zat");
+}
+
 static bool mah_expect_offer_plan(const struct json_value *doc,
                                   const char *root, int64_t size,
                                   int64_t chunks, int64_t total)
 {
     const struct json_value *data = mah_data(doc);
-    int64_t got_size = 0, got_chunks = 0, got_total = 0, price = 0;
     return data && mah_streq(data, "stage", "plan") &&
         mah_bool(data, "committed", false) &&
         mah_bool(data, "spends_funds", false) &&
         mah_streq(data, "root_hash", root) &&
-        mah_int(data, "size_bytes", &got_size) && got_size == size &&
-        mah_int(data, "num_chunks", &got_chunks) && got_chunks == chunks &&
-        mah_int(data, "total_zat", &got_total) && got_total == total &&
-        mah_int(data, "price_per_mb_zat", &price) && price > 0 &&
+        mah_offer_plan_sizes_ok(data, size, chunks, total) &&
         mah_member(data, "commit_input") && !mah_member(data, "offer_id") &&
         !mah_member(data, "seller_pubkey");
 }
@@ -384,35 +443,68 @@ static const char *mah_expect_offer_commit(const struct json_value *doc,
         mah_hex64(offer) && seller && strlen(seller) == 64u ? offer : NULL;
 }
 
+static bool mah_offer_view_header(const struct json_value *view,
+                                  const char *profile, bool override,
+                                  int64_t *offer_count, int64_t *hidden_count)
+{
+    return view && mah_streq(view, "profile", profile) &&
+        mah_bool(view, "profile_override", override) &&
+        mah_int(view, "offer_count", offer_count) &&
+        mah_int(view, "hidden_count", hidden_count);
+}
+
+static const struct json_value *mah_offer_rows(const struct json_value *view,
+                                               int64_t offer_count)
+{
+    const struct json_value *rows = mah_member(view, "offers");
+    return rows && rows->type == JSON_ARR &&
+        (uint64_t)offer_count == rows->num_children ? rows : NULL;
+}
+
+/* Counts the rows whose offer_id equals `offer`; `match`, when set, receives
+ * the last such row. */
+static size_t mah_count_offer_rows(const struct json_value *rows,
+                                   const char *offer,
+                                   const struct json_value **match)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < rows->num_children; i++) {
+        const struct json_value *row = json_at(rows, i);
+        const char *id = mah_string(row, "offer_id");
+        if (id && strcmp(id, offer) == 0) {
+            if (match) *match = row;
+            count++;
+        }
+    }
+    return count;
+}
+
+static bool mah_buyer_row_ok(const struct json_value *match, const char *root,
+                             int64_t price, int64_t chunks, int64_t total)
+{
+    return match && mah_streq(match, "root_hash", root) &&
+        mah_int_equal(match, "price_per_mb_zat", price) &&
+        mah_int_equal(match, "num_chunks", chunks) &&
+        mah_int_equal(match, "total_cost_zat", total) &&
+        mah_bool(match, "authenticated", true) &&
+        mah_int_positive(match, "peer_port");
+}
+
 static bool mah_expect_buyer_entry(const struct json_value *doc,
                                    const char *offer, const char *root,
                                    int64_t price, int64_t chunks, int64_t total)
 {
     const struct json_value *view = mah_data(doc);
     int64_t offer_count = -1, hidden_count = -1;
-    if (!view || !mah_streq(view, "profile", "open-view") ||
-        !mah_bool(view, "profile_override", true) ||
-        !mah_int(view, "offer_count", &offer_count) || offer_count < 1 ||
-        !mah_int(view, "hidden_count", &hidden_count) || hidden_count != 0)
+    if (!mah_offer_view_header(view, "open-view", true, &offer_count,
+                               &hidden_count) ||
+        offer_count < 1 || hidden_count != 0)
         return false;
-    const struct json_value *rows = mah_member(view, "offers");
-    if (!rows || rows->type != JSON_ARR ||
-        (uint64_t)offer_count != rows->num_children)
-        return false;
+    const struct json_value *rows = mah_offer_rows(view, offer_count);
+    if (!rows) return false;
     const struct json_value *match = NULL;
-    size_t count = 0;
-    for (size_t i = 0; i < rows->num_children; i++) {
-        const struct json_value *row = json_at(rows, i);
-        const char *id = mah_string(row, "offer_id");
-        if (id && strcmp(id, offer) == 0) { match = row; count++; }
-    }
-    int64_t got_price = 0, got_chunks = 0, got_total = 0, peer_port = 0;
-    return count == 1 && match && mah_streq(match, "root_hash", root) &&
-        mah_int(match, "price_per_mb_zat", &got_price) && got_price == price &&
-        mah_int(match, "num_chunks", &got_chunks) && got_chunks == chunks &&
-        mah_int(match, "total_cost_zat", &got_total) && got_total == total &&
-        mah_bool(match, "authenticated", true) &&
-        mah_int(match, "peer_port", &peer_port) && peer_port > 0;
+    size_t count = mah_count_offer_rows(rows, offer, &match);
+    return count == 1 && mah_buyer_row_ok(match, root, price, chunks, total);
 }
 
 static bool mah_expect_market_hidden(const struct json_value *doc,
@@ -420,21 +512,12 @@ static bool mah_expect_market_hidden(const struct json_value *doc,
 {
     const struct json_value *view = mah_data(doc);
     int64_t offer_count = -1, hidden_count = -1;
-    if (!view || !mah_streq(view, "profile", "general-audience.v1") ||
-        !mah_bool(view, "profile_override", false) ||
-        !mah_int(view, "offer_count", &offer_count) || offer_count < 0 ||
-        !mah_int(view, "hidden_count", &hidden_count) || hidden_count < 1)
+    if (!mah_offer_view_header(view, "general-audience.v1", false,
+                               &offer_count, &hidden_count) ||
+        offer_count < 0 || hidden_count < 1)
         return false;
-    const struct json_value *rows = mah_member(view, "offers");
-    if (!rows || rows->type != JSON_ARR ||
-        (uint64_t)offer_count != rows->num_children)
-        return false;
-    for (size_t i = 0; i < rows->num_children; i++) {
-        const struct json_value *row = json_at(rows, i);
-        const char *id = mah_string(row, "offer_id");
-        if (id && strcmp(id, offer) == 0) return false;
-    }
-    return true;
+    const struct json_value *rows = mah_offer_rows(view, offer_count);
+    return rows && mah_count_offer_rows(rows, offer, NULL) == 0;
 }
 
 static bool mah_expect_market_empty(const struct json_value *doc)
@@ -448,24 +531,36 @@ static bool mah_expect_market_empty(const struct json_value *doc)
         mah_int(doc, "hidden_count", &hidden) && hidden == 0;
 }
 
+static bool mah_purchase_plan_flags_ok(const struct json_value *data,
+                                       const char *offer)
+{
+    return mah_streq(data, "stage", "plan") &&
+        mah_bool(data, "committed", false) &&
+        mah_bool(data, "spends_funds", false) &&
+        mah_streq(data, "offer_id", offer) &&
+        mah_streq(data, "state", "planned") &&
+        mah_bool(data, "idempotent_replay", false) &&
+        mah_member(data, "commit_input");
+}
+
+static bool mah_purchase_plan_amounts_ok(const struct json_value *data,
+                                         int64_t total)
+{
+    int64_t amount = 0, fee = 0, reserved = 0;
+    return mah_int(data, "amount_zat", &amount) && amount == total &&
+        mah_int(data, "maximum_fee_zat", &fee) && fee > 0 &&
+        mah_int(data, "reserved_zat", &reserved) && reserved == amount + fee;
+}
+
 static const char *mah_expect_purchase_plan(const struct json_value *doc,
                                             const char *offer, int64_t total)
 {
     const struct json_value *data = mah_data(doc);
-    int64_t amount = 0, fee = 0, reserved = 0, start = -1, paid = 0;
     const char *plan = mah_string(data, "plan_id");
-    return data && mah_streq(data, "stage", "plan") &&
-        mah_bool(data, "committed", false) &&
-        mah_bool(data, "spends_funds", false) &&
-        mah_streq(data, "offer_id", offer) &&
-        mah_int(data, "amount_zat", &amount) && amount == total &&
-        mah_int(data, "maximum_fee_zat", &fee) && fee > 0 &&
-        mah_int(data, "reserved_zat", &reserved) && reserved == amount + fee &&
-        mah_int(data, "chunk_start", &start) && start == 0 &&
-        mah_int(data, "chunks_paid", &paid) && paid > 0 &&
-        mah_streq(data, "state", "planned") &&
-        mah_bool(data, "idempotent_replay", false) &&
-        mah_member(data, "commit_input") && mah_hex64(plan) ? plan : NULL;
+    return data && mah_purchase_plan_flags_ok(data, offer) &&
+        mah_purchase_plan_amounts_ok(data, total) &&
+        mah_int_equal(data, "chunk_start", 0) &&
+        mah_int_positive(data, "chunks_paid") && mah_hex64(plan) ? plan : NULL;
 }
 
 static const char *mah_expect_purchase_commit(const struct json_value *doc)
@@ -514,9 +609,10 @@ static bool mah_expect_retrieve(const struct json_value *doc,
         mah_int(data, "size_bytes", &size_bytes) && size_bytes == size;
 }
 
-static bool mah_expect_claim(const struct json_value *doc, int64_t want_height)
+static bool mah_claim_row(const struct json_value *data,
+                          const struct json_value **columns_out,
+                          const struct json_value **row_out)
 {
-    const struct json_value *data = mah_data(doc);
     const struct json_value *columns = mah_member(data, "columns");
     const struct json_value *rows = mah_member(data, "rows");
     if (!columns || columns->type != JSON_ARR || !rows || rows->type != JSON_ARR ||
@@ -524,19 +620,47 @@ static bool mah_expect_claim(const struct json_value *doc, int64_t want_height)
     const struct json_value *row = json_at(rows, 0);
     if (!row || row->type != JSON_ARR || row->num_children != columns->num_children)
         return false;
-    const struct json_value *status = NULL, *confirmations = NULL, *height = NULL;
+    *columns_out = columns;
+    *row_out = row;
+    return true;
+}
+
+static bool mah_claim_locate(const struct json_value *columns,
+                             const struct json_value *row,
+                             const struct json_value **status,
+                             const struct json_value **confirmations,
+                             const struct json_value **height)
+{
     for (size_t i = 0; i < columns->num_children; i++) {
         const char *name = json_get_str(json_at(columns, i));
         if (!name) return false;
-        if (strcmp(name, "status") == 0) status = json_at(row, i);
-        else if (strcmp(name, "confirmations") == 0) confirmations = json_at(row, i);
-        else if (strcmp(name, "block_height") == 0) height = json_at(row, i);
+        if (strcmp(name, "status") == 0) *status = json_at(row, i);
+        else if (strcmp(name, "confirmations") == 0) *confirmations = json_at(row, i);
+        else if (strcmp(name, "block_height") == 0) *height = json_at(row, i);
     }
+    return true;
+}
+
+static bool mah_claim_values_ok(const struct json_value *status,
+                                const struct json_value *confirmations,
+                                const struct json_value *height,
+                                int64_t want_height)
+{
     return status && status->type == JSON_STR &&
         strcmp(json_get_str(status), "CONFIRMED") == 0 &&
         confirmations && confirmations->type == JSON_INT &&
         json_get_int(confirmations) >= 1 && height && height->type == JSON_INT &&
         json_get_int(height) == want_height;
+}
+
+static bool mah_expect_claim(const struct json_value *doc, int64_t want_height)
+{
+    const struct json_value *data = mah_data(doc);
+    const struct json_value *columns = NULL, *row = NULL;
+    const struct json_value *status = NULL, *confirmations = NULL, *height = NULL;
+    return mah_claim_row(data, &columns, &row) &&
+        mah_claim_locate(columns, row, &status, &confirmations, &height) &&
+        mah_claim_values_ok(status, confirmations, height, want_height);
 }
 
 static bool mah_expect_replay(const struct json_value *doc,
@@ -557,53 +681,82 @@ static bool mah_address_shape(const char *address, bool shielded)
     return shielded ? address[0] == 'z' : address[0] != 'z';
 }
 
+static bool mah_intent_plan_head_ok(const struct json_value *data,
+                                    const char *route, bool replay)
+{
+    return data && mah_bool(data, "ok", true) &&
+        mah_streq(data, "state", "planned") &&
+        mah_streq(data, "wallet_scope", "dev") &&
+        mah_streq(data, "route", route) &&
+        mah_bool(data, "idempotent_plan", replay) &&
+        mah_hex64(mah_string(data, "plan_id")) &&
+        mah_hex64(mah_string(data, "digest")) &&
+        mah_hex64(mah_string(data, "money_snapshot_root"));
+}
+
+static bool mah_amount_positive(const char *text, int64_t *out)
+{
+    return mah_amount_zat(text, out) && *out > 0;
+}
+
+static bool mah_intent_plan_amounts_ok(const struct json_value *data,
+                                       const char *expected_amount)
+{
+    const char *recipient = mah_string(data, "recipient_value");
+    const char *fee = mah_string(data, "maximum_fee");
+    const char *reserved = mah_string(data, "reserved");
+    int64_t recipient_zat = 0, fee_zat = 0, reserved_zat = 0;
+    return mah_streq(data, "recipient_value", expected_amount) &&
+        recipient && fee && reserved &&
+        mah_amount_positive(recipient, &recipient_zat) &&
+        mah_amount_positive(fee, &fee_zat) &&
+        mah_amount_zat(reserved, &reserved_zat) &&
+        recipient_zat <= INT64_MAX - fee_zat &&
+        reserved_zat == recipient_zat + fee_zat;
+}
+
+static bool mah_intent_plan_effect(const struct json_value *data,
+                                   const char *expected_amount,
+                                   const char **to_out)
+{
+    const struct json_value *effects = mah_member(data, "effects");
+    if (!effects || effects->type != JSON_ARR || effects->num_children != 1u)
+        return false;
+    const struct json_value *effect = json_at(effects, 0);
+    *to_out = mah_string(effect, "to");
+    return mah_streq(effect, "asset", "ZCL") &&
+        mah_streq(effect, "amount", expected_amount);
+}
+
+static bool mah_intent_route_ok(const char *route, const char *from,
+                                const char *to)
+{
+    bool source_z = from && mah_address_shape(from, true);
+    bool recipient_z = mah_address_shape(to, true);
+    if (strcmp(route, "transparent") == 0)
+        return !(from || source_z || recipient_z);
+    if (strcmp(route, "shield") == 0)
+        return from && !source_z && recipient_z;
+    if (strcmp(route, "private") == 0)
+        return source_z && recipient_z;
+    if (strcmp(route, "unshield") == 0)
+        return source_z && !recipient_z;
+    return true;
+}
+
 static const char *mah_expect_intent_plan(const struct json_value *doc,
                                           const char *route,
                                           const char *expected_amount,
                                           bool replay)
 {
     const struct json_value *data = mah_data(doc);
-    const char *plan = mah_string(data, "plan_id");
-    const char *recipient = mah_string(data, "recipient_value");
-    const char *fee = mah_string(data, "maximum_fee");
-    const char *reserved = mah_string(data, "reserved");
-    const struct json_value *effects = mah_member(data, "effects");
-    int64_t recipient_zat = 0, fee_zat = 0, reserved_zat = 0;
-    if (!data || !mah_bool(data, "ok", true) ||
-        !mah_streq(data, "state", "planned") ||
-        !mah_streq(data, "wallet_scope", "dev") ||
-        !mah_streq(data, "route", route) ||
-        !mah_bool(data, "idempotent_plan", replay) ||
-        !mah_hex64(plan) || !mah_hex64(mah_string(data, "digest")) ||
-        !mah_hex64(mah_string(data, "money_snapshot_root")) ||
-        !mah_streq(data, "recipient_value", expected_amount) ||
-        !recipient || !fee || !reserved ||
-        !mah_amount_zat(recipient, &recipient_zat) || recipient_zat <= 0 ||
-        !mah_amount_zat(fee, &fee_zat) || fee_zat <= 0 ||
-        !mah_amount_zat(reserved, &reserved_zat) ||
-        recipient_zat > INT64_MAX - fee_zat ||
-        reserved_zat != recipient_zat + fee_zat ||
-        !effects || effects->type != JSON_ARR ||
-        effects->num_children != 1u)
+    const char *to = NULL;
+    if (!mah_intent_plan_head_ok(data, route, replay) ||
+        !mah_intent_plan_amounts_ok(data, expected_amount) ||
+        !mah_intent_plan_effect(data, expected_amount, &to) ||
+        !mah_intent_route_ok(route, mah_string(data, "from"), to))
         return NULL;
-    const struct json_value *effect = json_at(effects, 0);
-    const char *to = mah_string(effect, "to");
-    if (!mah_streq(effect, "asset", "ZCL") ||
-        !mah_streq(effect, "amount", expected_amount))
-        return NULL;
-    const char *from = mah_string(data, "from");
-    bool source_z = from && mah_address_shape(from, true);
-    bool recipient_z = mah_address_shape(to, true);
-    if ((strcmp(route, "transparent") == 0 &&
-         (from || source_z || recipient_z)) ||
-        (strcmp(route, "shield") == 0 &&
-         (!from || source_z || !recipient_z)) ||
-        (strcmp(route, "private") == 0 &&
-         (!source_z || !recipient_z)) ||
-        (strcmp(route, "unshield") == 0 &&
-         (!source_z || recipient_z)))
-        return NULL;
-    return plan;
+    return mah_string(data, "plan_id");
 }
 
 static const char *mah_expect_intent_commit(const struct json_value *doc,
@@ -939,19 +1092,34 @@ static int mah_selftest(void)
     return 0;
 }
 
+static int mah_fixture_command(char **argv)
+{
+    uint64_t price = 0, tail = 0, size = 0, total = 0;
+    char root[65];
+    if (!mah_parse_u64(argv[3], &price) || !mah_parse_u64(argv[4], &tail) ||
+        !mah_fixture_create(argv[2], price, tail, &size, root, &total))
+        return mah_fail("fixture creation failed");
+    printf("%" PRIu64 " %s %" PRIu64 "\n", size, root, total);
+    return 0;
+}
+
+static int mah_reverse_hex_command(const char *text)
+{
+    if (!mah_hex64(text)) return mah_fail("invalid 64-byte-order hex");
+    for (int i = 62; i >= 0; i -= 2) {
+        putchar(text[i]);
+        putchar(text[i + 1]);
+    }
+    putchar('\n');
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc == 2 && strcmp(argv[1], "--selftest") == 0)
         return mah_selftest();
-    if (argc == 5 && strcmp(argv[1], "fixture-create") == 0) {
-        uint64_t price = 0, tail = 0, size = 0, total = 0;
-        char root[65];
-        if (!mah_parse_u64(argv[3], &price) || !mah_parse_u64(argv[4], &tail) ||
-            !mah_fixture_create(argv[2], price, tail, &size, root, &total))
-            return mah_fail("fixture creation failed");
-        printf("%" PRIu64 " %s %" PRIu64 "\n", size, root, total);
-        return 0;
-    }
+    if (argc == 5 && strcmp(argv[1], "fixture-create") == 0)
+        return mah_fixture_command(argv);
     if (argc == 3 && strcmp(argv[1], "file-root") == 0) {
         char root[65];
         if (!mah_file_manifest_root(argv[2], root))
@@ -959,15 +1127,8 @@ int main(int argc, char **argv)
         printf("%s\n", root);
         return 0;
     }
-    if (argc == 3 && strcmp(argv[1], "reverse-hex") == 0) {
-        if (!mah_hex64(argv[2])) return mah_fail("invalid 64-byte-order hex");
-        for (int i = 62; i >= 0; i -= 2) {
-            putchar(argv[2][i]);
-            putchar(argv[2][i + 1]);
-        }
-        putchar('\n');
-        return 0;
-    }
+    if (argc == 3 && strcmp(argv[1], "reverse-hex") == 0)
+        return mah_reverse_hex_command(argv[2]);
     if (argc >= 2) return mah_json_command(argc, argv);
     return mah_fail("command required");
 }
