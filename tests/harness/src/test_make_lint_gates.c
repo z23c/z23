@@ -602,6 +602,7 @@ static const struct lint_gate_entry g_lint_gate_entries[] = {
     S_(t_fast_sync_uses_lib_sqlite_helpers),
     S_(t_framework_reexport_headers_stay_deleted),
     S_(t_utxo_reimport_flag_is_storage_owned),
+    S_(t_boot_progress_store_step_is_timed),
     S_(t_net_sync_planners_are_lib_owned),
     S_(t_header_peer_votes_are_callback_injected),
     S_(t_process_block_node_db_access_is_runtime_owned),

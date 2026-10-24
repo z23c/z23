@@ -796,6 +796,36 @@ int t_utxo_reimport_flag_is_storage_owned(void)
     return failures;
 }
 
+/* The progress-store step is the ~6 s of boot that no timer named before:
+ * every phase must emit its progress.* sub-mark and the step total must be a
+ * top-level [boot] mark. Source pin, red before the sub-marks existed. */
+int t_boot_progress_store_step_is_timed(void)
+{
+    int failures = 0;
+    char *buf = NULL;
+    TEST("boot progress-store step is timed by named sub-marks") {
+        static const char *const marks[] = {
+            "boot_submark(\"progress.tor_start_early\"",
+            "boot_submark(\"progress.store_open\"",
+            "boot_submark(\"progress.install_gate\"",
+            "boot_submark(\"progress.finalize_flip\"",
+            "boot_submark(\"progress.mint_anchor_gate\"",
+            "boot_submark(\"progress.service_state_restore\"",
+            "boot_submark(\"progress.refold_staged_init\"",
+            "boot_topmark(\"progress_store_open\"",
+        };
+        char path[PATH_MAX];
+
+        ASSERT(repo_path(path, sizeof(path), "engine/composition/src/boot.c") == 0);
+        ASSERT(read_entire_file(path, &buf) == 0);
+        for (size_t i = 0; i < sizeof(marks) / sizeof(marks[0]); i++)
+            ASSERT(strstr(buf, marks[i]) != NULL);
+        PASS();
+    } _test_next:;
+    free(buf);
+    return failures;
+}
+
 int t_net_sync_planners_are_lib_owned(void)
 {
     int failures = 0;

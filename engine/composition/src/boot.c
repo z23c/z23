@@ -1565,14 +1565,22 @@ static bool boot_seq_load_wallet(struct app_context *ctx, struct boot_seq *s)
 }
 
 /* Open progress.kv, finalize the consensus.db flip and restore the prior
- * operational mode. */
+ * operational mode. Each phase emits a progress.* sub-mark as it finishes.
+ * The step total is a top-level mark on the success path only: on the
+ * mint-anchor gate refusal (return false) no total and no gate sub-mark are
+ * emitted; the sub-marks measured before the refusal were already printed. */
 static bool boot_step_open_progress_store(struct app_context *ctx)
 {
+    int64_t t_step = boot_clock_ms();
+    int64_t t = t_step;
     /* Upload the onion descriptor in parallel with block-index hydration. */
     if (!ctx->no_services) (void)boot_onion_tor_start_early(ctx);
+    t = boot_submark("progress.tor_start_early", t);
     /* Keep staged-sync cursors in progress.kv, independent of node.db. */
     bool progress_open = progress_store_open(ctx->datadir);
+    t = boot_submark("progress.store_open", t);
     boot_snapshot_install_gate_boot(progress_open, ctx->load_snapshot_at_own_height);
+    t = boot_submark("progress.install_gate", t);
     if (progress_open) {
         /* Wave A3 flip, second half: progress_store_open() already migrated a
          * legacy progress.kv kernel into consensus.db and opened it. Prune the
@@ -1585,19 +1593,24 @@ static bool boot_step_open_progress_store(struct app_context *ctx)
             fprintf(stderr,  // obs-ok:helper-context-logged
                     "[boot] consensus.db flip finalize deferred: %s\n",
                     flip_err[0] ? flip_err : "(no message)");
+        t = boot_submark("progress.finalize_flip", t);
         if (!ctx->mint_anchor && !ctx->ratify_mint_anchor &&
             !ctx->export_consensus_bundle && !ctx->verify_consensus_bundle &&
             !ctx->verify_rom && !boot_mint_anchor_normal_boot_gate(progress_store_db()))
             return false;
+        t = boot_submark("progress.mint_anchor_gate", t);
         /* Restore the prior operational mode (non-fatal; boot overwrites below). */
         (void)service_state_restore_from_progress_store();
+        t = boot_submark("progress.service_state_restore", t);
         /* Refresh BOTH refold caches (refold_in_progress + refold_from_anchor,
          * B2) from the durable progress.kv keys — a mid-fold restart resumes the
          * correct floor without re-running the reset. mark_started here is the
          * from-GENESIS arm only (refold_staged); the from-ANCHOR mark is set
          * inside boot_refold_from_anchor_reset below. */
         boot_refold_staged_init(ctx->refold_staged);  /* cache refold_in_progress + refold_from_anchor */
+        t = boot_submark("progress.refold_staged_init", t);
     }
+    boot_topmark("progress_store_open", t_step);
     return true;
 }
 

@@ -518,6 +518,7 @@ int t_flyclient_proof_builder_is_callback_injected(void);
 int t_fast_sync_uses_lib_sqlite_helpers(void);
 int t_framework_reexport_headers_stay_deleted(void);
 int t_utxo_reimport_flag_is_storage_owned(void);
+int t_boot_progress_store_step_is_timed(void);
 int t_net_sync_planners_are_lib_owned(void);
 int t_header_peer_votes_are_callback_injected(void);
 int t_process_block_node_db_access_is_runtime_owned(void);
