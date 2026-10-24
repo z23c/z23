@@ -288,3 +288,7 @@ later lane flips it HARD.
 - 2026-10-23T21:41:38Z — REASON: bls12-381 groth16 verify: precomputed G2 lines for fixed VK points and a shared-f multi-Miller loop (speed only, GT result bit-identical)
   old ROOT: 5acb8dd0ba8959a3dfb47502c3e875e2599e7768657dd6028b143d85658e6d9e
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-24T02:22:51Z — REASON: bls12-381 subgroup membership: endomorphism tests psi(P)==[x]P on G2 and phi(P)==-[x^2]P on G1 replace [r]P==O (exact membership tests, verdicts identical, speed only)
+  old ROOT: 2ac9589bcb3e6b5b28fe2ce70434a6ebf4bf98b6c053a2b9a7f95f3eb8731b03
+  by: owner unseal ritual (make core-unseal)

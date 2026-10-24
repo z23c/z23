@@ -109,10 +109,13 @@ bool g1_from_uncompressed(struct g1_point *p, const uint8_t in[96]);
 void g1_to_affine(struct fp *ax, struct fp *ay, const struct g1_point *p);
 void g1_scalar_mul(struct g1_point *r, const struct g1_point *p, const uint64_t scalar[4]);
 
-/* Prime-order subgroup membership: true iff [r]P == O. G1/G2 have large
- * cofactors, so an on-curve point may carry a torsion component; the Groth16
- * verifier requires every proof point to lie in the prime-order-r subgroup
- * (a soundness requirement). The identity passes ([r]O == O). */
+/* Prime-order subgroup membership (exact: true iff [r]P == O for every curve
+ * point). G1/G2 have large cofactors, so an on-curve point may carry a torsion
+ * component; the Groth16 verifier requires every proof point to lie in the
+ * prime-order-r subgroup (a soundness requirement). Implemented with the
+ * phi/psi endomorphism tests (one 64-bit multiplication by the BLS parameter
+ * for G2, two for G1; eprint 2021/1130, 2022/352) instead of a 255-bit [r]P.
+ * The identity passes. */
 bool g1_in_subgroup(const struct g1_point *p);
 
 /* G2: y^2 = x^3 + 4(u+1) over Fp2 (Jacobian coordinates) */
@@ -131,6 +134,12 @@ void g2_to_affine(struct fp2 *ax, struct fp2 *ay, const struct g2_point *p);
 
 /* G2 prime-order subgroup membership (see g1_in_subgroup above). */
 bool g2_in_subgroup(const struct g2_point *p);
+
+#ifdef ZCL_TESTING
+/* The endomorphism constants the membership tests use (test-only accessor). */
+void bls12_381_endo_consts_for_test(struct fp *beta, struct fp2 *cx,
+                                    struct fp2 *cy);
+#endif
 
 /* Optimal Ate pairing */
 void bls12_381_miller_loop(struct fp12 *result, const struct g1_point *p, const struct g2_point *q);

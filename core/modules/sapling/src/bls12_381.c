@@ -2040,65 +2040,184 @@ bool groth16_vk_build_combs(struct groth16_vk *vk)
     return true;
 }
 
-/* G2 scalar multiplication: r = scalar * p (double-and-add, 256 bits).
+/* ===== Prime-order subgroup membership via the endomorphism tests =====
  *
- * Unlike g1_scalar_mul, this is NOT constant-time: its only caller is the
- * subgroup membership check below, whose input is the PUBLIC proof point
- * (no secret material), so a side channel reveals nothing. Keeping it
- * branch-on-bit makes the [r]P==O check trivially auditable. */
-static void g2_scalar_mul(struct g2_point *r, const struct g2_point *p,
-                          const uint64_t scalar[4])
-{
-    struct g2_point result;
-    g2_identity(&result);
-    struct g2_point base = *p;
+ * G1/G2 have large cofactors, so an on-curve point can carry a torsion
+ * (non-prime-order) component that the pairing accepts: a Groth16 soundness
+ * gap. P lies in the order-r subgroup iff [r]P == O; for BLS12-381 there are
+ * equivalent EXACT tests that need only 64-bit multiplications by the curve
+ * parameter instead of a 255-bit one:
+ *   Scott, "A note on group membership tests for G1, G2 and GT on BLS
+ *   pairing-friendly curves", eprint 2021/1130 (section 4 G2, section 6 G1);
+ *   proofs corrected in El Housni, Guillevic, Piellard, eprint 2022/352.
+ * zkcrypto bls12_381 (>= 0.7, Zcash consensus) uses the same two tests as
+ * is_torsion_free. Both are membership iff-tests for every curve point, so
+ * the verdict equals [r]P == O on every input (tests/harness/src/
+ * test_bls12_381_subgroup_parity.c checks it against the [r]P oracle).
+ *
+ * The parameter is x = -0xd201000000010000, so [x]P = -[|x|]P.
+ *   G2: psi(P) == [x]P, psi the untwist-Frobenius-twist endomorphism
+ *       psi(X,Y,Z) = (conj(X)*c_x, conj(Y)*c_y, conj(Z)) in Jacobian form,
+ *       c_x = 1/(1+u)^((p-1)/3), c_y = 1/(1+u)^((p-1)/2), conj = fp2 Frobenius.
+ *   G1: phi(P) == -[x^2]P = -[|x|]([|x|]P), phi(X,Y,Z) = (beta*X, Y, Z) with
+ *       beta a primitive cube root of unity in Fp. Exactly one of the two
+ *       (beta, beta^2) satisfies the relation on G1; it is
+ *       beta = 2^((p-1)/3) = 0x5f19672f...fffefffe, chosen by checking the
+ *       generator and multiples of it (the other root, ...aaac, fails).
+ * The constants are re-derived from field arithmetic and compared in the test.
+ *
+ * Multiplication by |x| is variable-time double-and-add: the inputs are the
+ * PUBLIC proof points, so a side channel reveals nothing (as the old
+ * g2_scalar_mul). g1/g2_add handle a == b (doubling, lines "u1==u2 && s1==s2")
+ * and a == -b (h == 0 so z3 = 0, the identity) correctly, which small-order
+ * torsion inputs can hit inside the chain. The identity passes: psi(O) = O,
+ * phi(O) = O, [|x|]O = O. */
+static const uint64_t BLS_X_ABS = 0xd201000000010000ULL;
 
-    for (int i = 0; i < 4; i++) {
-        for (int bit = 0; bit < 64; bit++) {
-            if ((scalar[i] >> bit) & 1ULL) {
-                struct g2_point sum;
-                g2_add(&sum, &result, &base);
-                result = sum;
-            }
-            struct g2_point dbl;
-            g2_double(&dbl, &base);
-            base = dbl;
-        }
-    }
-    *r = result;
-}
-
-/* BLS12-381 subgroup order r (little-endian 64-bit limbs):
- * r = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001
- * (matches FR_MODULUS in fr.c / fr_avx512.c). */
-static const uint64_t BLS12_381_R[4] = {
-    0xffffffff00000001ULL, 0x53bda402fffe5bfeULL,
-    0x3339d80809a1d805ULL, 0x73eda753299d7d48ULL
+/* Canonical big-endian field encodings of the endomorphism constants. */
+static const uint8_t ENDO_BETA_BE[48] = {
+    0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x5f,0x19,0x67,0x2f,
+    0xdf,0x76,0xce,0x51,0xba,0x69,0xc6,0x07,0x6a,0x0f,0x77,0xea,
+    0xdd,0xb3,0xa9,0x3b,0xe6,0xf8,0x96,0x88,0xde,0x17,0xd8,0x13,
+    0x62,0x0a,0x00,0x02,0x2e,0x01,0xff,0xff,0xff,0xfe,0xff,0xfe
+};
+static const uint8_t ENDO_CX_C1_BE[48] = {
+    0x1a,0x01,0x11,0xea,0x39,0x7f,0xe6,0x99,0xec,0x02,0x40,0x86,
+    0x63,0xd4,0xde,0x85,0xaa,0x0d,0x85,0x7d,0x89,0x75,0x9a,0xd4,
+    0x89,0x7d,0x29,0x65,0x0f,0xb8,0x5f,0x9b,0x40,0x94,0x27,0xeb,
+    0x4f,0x49,0xff,0xfd,0x8b,0xfd,0x00,0x00,0x00,0x00,0xaa,0xad
+};
+static const uint8_t ENDO_CY_C0_BE[48] = {
+    0x13,0x52,0x03,0xe6,0x01,0x80,0xa6,0x8e,0xe2,0xe9,0xc4,0x48,
+    0xd7,0x7a,0x2c,0xd9,0x1c,0x3d,0xed,0xd9,0x30,0xb1,0xcf,0x60,
+    0xef,0x39,0x64,0x89,0xf6,0x1e,0xb4,0x5e,0x30,0x44,0x66,0xcf,
+    0x3e,0x67,0xfa,0x0a,0xf1,0xee,0x7b,0x04,0x12,0x1b,0xde,0xa2
+};
+static const uint8_t ENDO_CY_C1_BE[48] = {
+    0x06,0xaf,0x0e,0x04,0x37,0xff,0x40,0x0b,0x68,0x31,0xe3,0x6d,
+    0x6b,0xd1,0x7f,0xfe,0x48,0x39,0x5d,0xab,0xc2,0xd3,0x43,0x5e,
+    0x77,0xf7,0x6e,0x17,0x00,0x92,0x41,0xc5,0xee,0x67,0x99,0x2f,
+    0x72,0xec,0x05,0xf4,0xc8,0x10,0x84,0xfb,0xed,0xe3,0xcc,0x09
 };
 
-/* Subgroup membership: G1/G2 have large cofactors, so an on-curve point can
- * still carry a torsion (non-prime-order) component that the pairing accepts —
- * a Groth16 soundness gap (a prover could forge an accepting "proof").  A point
- * P lies in the prime-order-r subgroup iff [r]P == O.  These checks ADD ONLY
- * rejections: they cannot accept anything the on-curve check already rejected,
- * and cannot cause a UAF/split.
- *
- * The identity (point at infinity) IS in the subgroup and MUST pass:
- * [r]O == O.  Callers must never feed the identity branch of
- * g1/g2_from_compressed through anything that would reject it — but [r]O==O
- * holds here regardless, so the function is correct for the identity too. */
+struct endo_consts {
+    struct fp beta;
+    struct fp2 cx, cy;
+};
+
+static void endo_consts_load(struct endo_consts *k)
+{
+    /* All encodings are < q constants, so fp_from_bytes cannot fail. */
+    (void)fp_from_bytes(&k->beta, ENDO_BETA_BE);
+    fp2_zero(&k->cx);
+    (void)fp_from_bytes(&k->cx.c1, ENDO_CX_C1_BE);
+    (void)fp_from_bytes(&k->cy.c0, ENDO_CY_C0_BE);
+    (void)fp_from_bytes(&k->cy.c1, ENDO_CY_C1_BE);
+}
+
+#ifdef ZCL_TESTING
+void bls12_381_endo_consts_for_test(struct fp *beta, struct fp2 *cx,
+                                    struct fp2 *cy)
+{
+    struct endo_consts k;
+    endo_consts_load(&k);
+    *beta = k.beta;
+    *cx = k.cx;
+    *cy = k.cy;
+}
+#endif
+
+/* r = [|x|]p, variable-time MSB-first double-and-add over the public 64-bit
+ * constant (top bit is bit 63). */
+static void g1_mul_abs_x(struct g1_point *r, const struct g1_point *p)
+{
+    struct g1_point acc = *p;
+    for (int bit = 62; bit >= 0; bit--) {
+        g1_double(&acc, &acc);
+        if ((BLS_X_ABS >> bit) & 1ULL)
+            g1_add(&acc, &acc, p);
+    }
+    *r = acc;
+}
+
+static void g2_mul_abs_x(struct g2_point *r, const struct g2_point *p)
+{
+    struct g2_point acc = *p;
+    for (int bit = 62; bit >= 0; bit--) {
+        g2_double(&acc, &acc);
+        if ((BLS_X_ABS >> bit) & 1ULL)
+            g2_add(&acc, &acc, p);
+    }
+    *r = acc;
+}
+
+/* Jacobian equality without inversion: both identity, or neither and
+ * X1*Z2^2 == X2*Z1^2 and Y1*Z2^3 == Y2*Z1^3. */
+static bool g1_jac_eq(const struct g1_point *a, const struct g1_point *b)
+{
+    bool ia = g1_is_identity(a), ib = g1_is_identity(b);
+    if (ia || ib)
+        return ia && ib;
+    struct fp z1z1, z2z2, l, r;
+    fp_sq(&z1z1, &a->z);
+    fp_sq(&z2z2, &b->z);
+    fp_mul(&l, &a->x, &z2z2);
+    fp_mul(&r, &b->x, &z1z1);
+    if (!fp_eq(&l, &r))
+        return false;
+    fp_mul(&l, &a->y, &z2z2);
+    fp_mul(&l, &l, &b->z);
+    fp_mul(&r, &b->y, &z1z1);
+    fp_mul(&r, &r, &a->z);
+    return fp_eq(&l, &r);
+}
+
+static bool g2_jac_eq(const struct g2_point *a, const struct g2_point *b)
+{
+    bool ia = g2_is_identity(a), ib = g2_is_identity(b);
+    if (ia || ib)
+        return ia && ib;
+    struct fp2 z1z1, z2z2, l, r;
+    fp2_sq(&z1z1, &a->z);
+    fp2_sq(&z2z2, &b->z);
+    fp2_mul(&l, &a->x, &z2z2);
+    fp2_mul(&r, &b->x, &z1z1);
+    if (!fp2_eq(&l, &r))
+        return false;
+    fp2_mul(&l, &a->y, &z2z2);
+    fp2_mul(&l, &l, &b->z);
+    fp2_mul(&r, &b->y, &z1z1);
+    fp2_mul(&r, &r, &a->z);
+    return fp2_eq(&l, &r);
+}
+
 bool g1_in_subgroup(const struct g1_point *p)
 {
-    struct g1_point rp;
-    g1_scalar_mul(&rp, p, BLS12_381_R);
-    return g1_is_identity(&rp);
+    struct endo_consts k;
+    endo_consts_load(&k);
+    struct g1_point phi = *p;
+    fp_mul(&phi.x, &p->x, &k.beta);                /* phi(P) = (beta*X, Y, Z) */
+    struct g1_point t, rhs;
+    g1_mul_abs_x(&t, p);
+    g1_mul_abs_x(&rhs, &t);
+    g1_neg(&rhs, &rhs);                            /* -[x^2]P                 */
+    return g1_jac_eq(&phi, &rhs);
 }
 
 bool g2_in_subgroup(const struct g2_point *p)
 {
-    struct g2_point rp;
-    g2_scalar_mul(&rp, p, BLS12_381_R);
-    return g2_is_identity(&rp);
+    struct endo_consts k;
+    endo_consts_load(&k);
+    struct g2_point psi = *p;                      /* psi(P) = (conj(X)*c_x,  */
+    fp2_frobenius_map(&psi.x, 1);                  /*  conj(Y)*c_y, conj(Z))  */
+    fp2_frobenius_map(&psi.y, 1);
+    fp2_frobenius_map(&psi.z, 1);
+    fp2_mul(&psi.x, &psi.x, &k.cx);
+    fp2_mul(&psi.y, &psi.y, &k.cy);
+    struct g2_point rhs;
+    g2_mul_abs_x(&rhs, p);
+    g2_neg(&rhs, &rhs);                            /* [x]P = -[|x|]P          */
+    return g2_jac_eq(&psi, &rhs);
 }
 
 /* Groth16 proof deserialization: A (G1, 48B) + B (G2, 96B) + C (G1, 48B) = 192B.
