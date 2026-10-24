@@ -93,17 +93,19 @@ const char *zmime_to_extension(const char *mime, size_t len) {
 
 /* ---------- Content-Type parsing ------------------------------------ */
 
+static int is_alnum_ascii(int c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9');
+}
+
+/* RFC 9110 tchar punctuation. The NUL guard matters: strchr() would
+ * otherwise match the terminator for c == 0. */
+static int is_tchar_punct(int c) {
+  return c != 0 && strchr("!#$%&'*+-.^_`|~", c) != NULL;
+}
+
 static int is_token_char(int c) {
-  if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-      (c >= '0' && c <= '9'))
-    return 1;
-  switch (c) {
-  case '!': case '#': case '$': case '%': case '&': case '\'':
-  case '*': case '+': case '-': case '.': case '^': case '_':
-  case '`': case '|': case '~':
-    return 1;
-  }
-  return 0;
+  return is_alnum_ascii(c) || is_tchar_punct(c);
 }
 
 typedef struct {
@@ -139,46 +141,92 @@ static int quoted_byte_valid(char ch) {
   return c >= 0x20 && c != 0x7F;
 }
 
-/* Parse a parameter value: token or quoted-string. */
-static int take_value(cur *c, char *buf, size_t cap) {
+/* HTAB is allowed inside quoted-string as well. */
+static int quoted_char_ok(char ch) {
+  return quoted_byte_valid(ch) || ch == '\t';
+}
+
+/* Parse a quoted-string; c->p points at the opening quote. */
+static int take_quoted(cur *c, char *buf, size_t cap) {
   size_t n = 0;
-  if (c->n > 0 && *c->p == '"') {
+  c->p++;
+  c->n--;
+  for (;;) {
+    char ch;
+    if (c->n == 0) return 0; /* unterminated */
+    ch = *c->p;
+    if (ch == '"') {
+      c->p++;
+      c->n--;
+      break;
+    }
+    if (ch == '\\') {
+      c->p++;
+      c->n--;
+      if (c->n == 0) return 0;
+      ch = *c->p;
+    }
+    if (!quoted_char_ok(ch)) return 0;
+    if (n + 1 >= cap) return 0;
+    buf[n++] = ch;
     c->p++;
     c->n--;
-    for (;;) {
-      char ch;
-      if (c->n == 0) return 0; /* unterminated */
-      ch = *c->p;
-      if (ch == '"') {
-        c->p++;
-        c->n--;
-        break;
-      }
-      if (ch == '\\') {
-        c->p++;
-        c->n--;
-        if (c->n == 0) return 0;
-        ch = *c->p;
-        if (!quoted_byte_valid(ch) && ch != '\t') return 0;
-      } else if (!quoted_byte_valid(ch) && ch != '\t') {
-        return 0;
-      }
-      if (n + 1 >= cap) return 0;
-      buf[n++] = ch;
-      c->p++;
-      c->n--;
-    }
-  } else {
-    while (c->n > 0 && is_token_char((unsigned char)*c->p)) {
-      if (n + 1 >= cap) return 0;
-      buf[n++] = *c->p;
-      c->p++;
-      c->n--;
-    }
-    if (n == 0) return 0;
   }
   buf[n] = '\0';
   return 1;
+}
+
+/* Parse a bare token parameter value. */
+static int take_bare_value(cur *c, char *buf, size_t cap) {
+  size_t n = 0;
+  while (c->n > 0 && is_token_char((unsigned char)*c->p)) {
+    if (n + 1 >= cap) return 0;
+    buf[n++] = *c->p;
+    c->p++;
+    c->n--;
+  }
+  if (n == 0) return 0;
+  buf[n] = '\0';
+  return 1;
+}
+
+/* Parse a parameter value: token or quoted-string. */
+static int take_value(cur *c, char *buf, size_t cap) {
+  if (c->n > 0 && *c->p == '"') return take_quoted(c, buf, cap);
+  return take_bare_value(c, buf, cap);
+}
+
+/* type "/" subtype, with optional leading whitespace. */
+static int take_type_subtype(cur *c, zmime_content_type *r) {
+  skip_ows(c);
+  if (!take_token(c, r->type, sizeof r->type)) return 0;
+  if (c->n == 0 || *c->p != '/') return 0;
+  c->p++;
+  c->n--;
+  return take_token(c, r->subtype, sizeof r->subtype);
+}
+
+/* One ";" name "=" value parameter, c->p at the ';'. */
+static int take_param(cur *c, char *name, size_t name_cap, char *value,
+                      size_t value_cap) {
+  if (c->n == 0 || *c->p != ';') return 0;
+  c->p++;
+  c->n--;
+  skip_ows(c);
+  if (!take_token(c, name, name_cap)) return 0;
+  skip_ows(c);
+  if (c->n == 0 || *c->p != '=') return 0;
+  c->p++;
+  c->n--;
+  skip_ows(c);
+  return take_value(c, value, value_cap);
+}
+
+static void store_charset(zmime_content_type *r, const char *value) {
+  size_t i;
+  for (i = 0; value[i] && i + 1 < sizeof r->charset; i++)
+    r->charset[i] = (char)ascii_lower((unsigned char)value[i]);
+  r->charset[i] = '\0';
 }
 
 int zmime_parse_content_type(const char *s, size_t len,
@@ -190,38 +238,18 @@ int zmime_parse_content_type(const char *s, size_t len,
   memset(&r, 0, sizeof r);
   c.p = s;
   c.n = len;
-  skip_ows(&c);
-  if (!take_token(&c, r.type, sizeof r.type)) return 0;
-  if (c.n == 0 || *c.p != '/') return 0;
-  c.p++;
-  c.n--;
-  if (!take_token(&c, r.subtype, sizeof r.subtype)) return 0;
+  if (!take_type_subtype(&c, &r)) return 0;
   for (;;) {
     char name[32];
     char value[64];
     skip_ows(&c);
     if (c.n == 0) break;
-    if (*c.p != ';') return 0;
-    c.p++;
-    c.n--;
-    skip_ows(&c);
-    if (!take_token(&c, name, sizeof name)) return 0;
-    skip_ows(&c);
-    if (c.n == 0 || *c.p != '=') return 0;
-    c.p++;
-    c.n--;
-    skip_ows(&c);
-    if (!take_value(&c, value, sizeof value)) return 0;
+    if (!take_param(&c, name, sizeof name, value, sizeof value)) return 0;
     if (total_params < sizeof r.params / sizeof r.params[0]) {
       memcpy(r.params[total_params].name, name, strlen(name) + 1);
       memcpy(r.params[total_params].value, value, strlen(value) + 1);
     }
-    if (strcmp(name, "charset") == 0) {
-      size_t i;
-      for (i = 0; value[i] && i + 1 < sizeof r.charset; i++)
-        r.charset[i] = (char)ascii_lower((unsigned char)value[i]);
-      r.charset[i] = '\0';
-    }
+    if (strcmp(name, "charset") == 0) store_charset(&r, value);
     total_params++;
   }
   r.nparams = total_params;
