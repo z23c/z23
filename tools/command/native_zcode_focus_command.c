@@ -33,6 +33,14 @@ struct zfocus_claim_row {
     struct vcs_zcode_work_admission_v1 admission;
 };
 
+struct zfocus_claim_input {
+    uint8_t situation[32];
+    uint8_t request_root[32];
+    struct vcs_zcode_write_scope_v1 scope;
+    struct vcs_zcode_work_request_v1 work_request;
+    struct vcs_zcode_work_admission_v1 admission;
+};
+
 static const char *zfocus_string(const struct json_value *input,
                                  const char *key)
 {
@@ -210,6 +218,66 @@ static bool zfocus_store_claim_set(
     return ok;
 }
 
+static bool zfocus_store_set_and_focus(
+    const char *workspace, const uint8_t (*roots)[32], size_t count,
+    const struct vcs_zcode_focus_v1 *focus, uint8_t set_root[32],
+    uint8_t focus_root[32])
+{
+    return vcs_object_store_init(workspace) &&
+        zfocus_store_claim_set(workspace, roots, count, set_root) &&
+        memcmp(set_root, focus->claim_set_root, 32) == 0 &&
+        zfocus_store_focus(workspace, focus, focus_root);
+}
+
+static bool zfocus_load_task_context(const char *workspace,
+                                     struct zfocus_base *base,
+                                     uint8_t context_root[32])
+{
+    return story_load_task(workspace, &base->loaded, &base->task) &&
+        zfocus_root_text(base->loaded.task_root, base->task_root) &&
+        story_load_agent_context(workspace, &base->loaded, &base->context) ==
+            STORY_CONTEXT_PROVED &&
+        vcs_zcode_agent_context_root(
+            &base->context, (size_t)base->task.max_context_bytes,
+            context_root) == VCS_ZCODE_AGENT_CONTEXT_OK;
+}
+
+static bool zfocus_verify_source_scope(const char *workspace,
+                                       struct zfocus_base *base)
+{
+    uint8_t current_source[32];
+    return story_workspace_source_root(workspace, current_source) &&
+        memcmp(current_source, base->task.source_root, 32) == 0 &&
+        zfocus_load_scope(workspace, base->task.write_scope_root,
+                          &base->task_scope);
+}
+
+static bool zfocus_compose_empty(struct zfocus_base *base,
+                                 const uint8_t context_root[32])
+{
+    return vcs_zcode_focus_compose(
+            &base->task, base->task_root, context_root,
+            base->loaded.show.story_root, base->loaded.show.status,
+            (base->context.flags & VCS_ZCODE_AGENT_CONTEXT_TRUNCATED) != 0
+                ? VCS_ZCODE_FOCUS_CONTEXT_TRUNCATED : 0,
+            NULL, 0, &base->empty_focus) == VCS_ZCODE_FOCUS_OK &&
+        vcs_zcode_focus_root(&base->empty_focus, base->empty_focus_root) ==
+            VCS_ZCODE_FOCUS_OK &&
+        vcs_zcode_focus_situation_root(
+            &base->empty_focus, base->situation_root) == VCS_ZCODE_FOCUS_OK;
+}
+
+static bool zfocus_compose_claims(struct zfocus_base *base,
+                                  const uint8_t (*roots)[32], size_t count,
+                                  struct vcs_zcode_focus_v1 *focus)
+{
+    return vcs_zcode_focus_compose(
+               &base->task, base->task_root, base->empty_focus.context_root,
+               base->loaded.show.story_root, base->loaded.show.status,
+               base->empty_focus.flags, roots, count, focus) ==
+           VCS_ZCODE_FOCUS_OK;
+}
+
 static bool zfocus_load_base(
     const struct zcl_command_request *request, const char *workspace,
     const char *work, struct zfocus_base *base,
@@ -225,28 +293,10 @@ static bool zfocus_load_base(
     if (!story_load_work(request, workspace, work, NULL,
                          &base->loaded, reply))
         return false;
-    uint8_t current_source[32], context_root[32];
-    bool ok = story_load_task(workspace, &base->loaded, &base->task) &&
-        zfocus_root_text(base->loaded.task_root, base->task_root) &&
-        story_load_agent_context(workspace, &base->loaded, &base->context) ==
-            STORY_CONTEXT_PROVED &&
-        vcs_zcode_agent_context_root(
-            &base->context, (size_t)base->task.max_context_bytes,
-            context_root) == VCS_ZCODE_AGENT_CONTEXT_OK &&
-        story_workspace_source_root(workspace, current_source) &&
-        memcmp(current_source, base->task.source_root, 32) == 0 &&
-        zfocus_load_scope(workspace, base->task.write_scope_root,
-                          &base->task_scope) &&
-        vcs_zcode_focus_compose(
-            &base->task, base->task_root, context_root,
-            base->loaded.show.story_root, base->loaded.show.status,
-            (base->context.flags & VCS_ZCODE_AGENT_CONTEXT_TRUNCATED) != 0
-                ? VCS_ZCODE_FOCUS_CONTEXT_TRUNCATED : 0,
-            NULL, 0, &base->empty_focus) == VCS_ZCODE_FOCUS_OK &&
-        vcs_zcode_focus_root(&base->empty_focus, base->empty_focus_root) ==
-            VCS_ZCODE_FOCUS_OK &&
-        vcs_zcode_focus_situation_root(
-            &base->empty_focus, base->situation_root) == VCS_ZCODE_FOCUS_OK;
+    uint8_t context_root[32];
+    bool ok = zfocus_load_task_context(workspace, base, context_root) &&
+        zfocus_verify_source_scope(workspace, base) &&
+        zfocus_compose_empty(base, context_root);
     if (!ok)
         zfocus_fail(reply, "FOCUS_BASE_INCOMPLETE", "verify",
                     "task, context, source generation, StoryGraph or task scope could not be reverified");
@@ -277,6 +327,45 @@ static int zfocus_row_compare(const void *left, const void *right)
                   ((const struct zfocus_claim_row *)right)->root, 32);
 }
 
+static bool zfocus_rows_shape(const struct json_value *claims,
+                              const struct json_value *admissions, size_t *n)
+{
+    size_t count = claims && claims->type == JSON_ARR ? json_size(claims) : 0;
+    if (count == 0 || count > VCS_ZCODE_FOCUS_MAX_CLAIMS || !admissions ||
+        admissions->type != JSON_ARR || json_size(admissions) != count)
+        return false;
+    *n = count;
+    return true;
+}
+
+static bool zfocus_load_row(const char *workspace,
+                            const struct json_value *claim,
+                            const struct json_value *admission,
+                            struct zfocus_claim_row *row)
+{
+    uint8_t admission_root[32];
+    if (!claim || claim->type != JSON_STR || !admission ||
+        admission->type != JSON_STR ||
+        !zfocus_root_text(json_get_str(claim), row->root) ||
+        !zfocus_root_text(json_get_str(admission), admission_root))
+        return false;
+    return zfocus_load_claim(workspace, row->root, &row->claim) &&
+        zfocus_load_scope(workspace, row->claim.write_scope_root,
+                          &row->scope) &&
+        zfocus_load_request(workspace, row->claim.intent_root,
+                            &row->request) &&
+        zfocus_load_admission(workspace, admission_root, &row->admission);
+}
+
+static bool zfocus_rows_distinct(const struct zfocus_claim_row *rows,
+                                 size_t count)
+{
+    for (size_t i = 1; i < count; i++)
+        if (memcmp(rows[i - 1u].root, rows[i].root, 32) == 0)
+            return false;
+    return true;
+}
+
 static bool zfocus_load_rows(
     const struct json_value *input, const char *workspace,
     struct zfocus_claim_row rows[VCS_ZCODE_FOCUS_MAX_CLAIMS], size_t *count)
@@ -284,32 +373,15 @@ static bool zfocus_load_rows(
     const struct json_value *claims = json_get(input, "claim_roots");
     const struct json_value *admissions = json_get(
         input, "work_admission_carrier_roots");
-    size_t n = claims && claims->type == JSON_ARR ? json_size(claims) : 0;
-    if (n == 0 || n > VCS_ZCODE_FOCUS_MAX_CLAIMS || !admissions ||
-        admissions->type != JSON_ARR || json_size(admissions) != n)
-        return false;
+    size_t n = 0;
+    if (!zfocus_rows_shape(claims, admissions, &n)) return false;
     memset(rows, 0, sizeof(*rows) * VCS_ZCODE_FOCUS_MAX_CLAIMS);
-    for (size_t i = 0; i < n; i++) {
-        const struct json_value *claim = json_at(claims, i);
-        const struct json_value *admission = json_at(admissions, i);
-        uint8_t admission_root[32];
-        if (!claim || claim->type != JSON_STR || !admission ||
-            admission->type != JSON_STR ||
-            !zfocus_root_text(json_get_str(claim), rows[i].root) ||
-            !zfocus_root_text(json_get_str(admission), admission_root) ||
-            !zfocus_load_claim(workspace, rows[i].root, &rows[i].claim) ||
-            !zfocus_load_scope(workspace, rows[i].claim.write_scope_root,
-                               &rows[i].scope) ||
-            !zfocus_load_request(workspace, rows[i].claim.intent_root,
-                                 &rows[i].request) ||
-            !zfocus_load_admission(workspace, admission_root,
-                                   &rows[i].admission))
+    for (size_t i = 0; i < n; i++)
+        if (!zfocus_load_row(workspace, json_at(claims, i),
+                             json_at(admissions, i), &rows[i]))
             return false;
-    }
     qsort(rows, n, sizeof(rows[0]), zfocus_row_compare);
-    for (size_t i = 1; i < n; i++)
-        if (memcmp(rows[i - 1u].root, rows[i].root, 32) == 0)
-            return false;
+    if (!zfocus_rows_distinct(rows, n)) return false;
     *count = n;
     return true;
 }
@@ -318,11 +390,136 @@ static bool zfocus_store_empty(struct zfocus_base *base,
                                const char *workspace)
 {
     uint8_t set_root[32], focus_root[32];
-    return vcs_object_store_init(workspace) &&
-        zfocus_store_claim_set(workspace, NULL, 0, set_root) &&
-        memcmp(set_root, base->empty_focus.claim_set_root, 32) == 0 &&
-        zfocus_store_focus(workspace, &base->empty_focus, focus_root) &&
+    return zfocus_store_set_and_focus(workspace, NULL, 0, &base->empty_focus,
+                                      set_root, focus_root) &&
         memcmp(focus_root, base->empty_focus_root, 32) == 0;
+}
+
+static bool zfocus_claim_input_ok(const struct json_value *input,
+                                  const char *workspace,
+                                  struct zfocus_base *base,
+                                  struct zfocus_claim_input *in)
+{
+    uint8_t admission_root[32];
+    return zfocus_root_text(zfocus_string(input, "situation_root"),
+                            in->situation) &&
+        zfocus_root_text(zfocus_string(input, "work_request_root"),
+                         in->request_root) &&
+        zfocus_root_text(zfocus_string(input, "work_admission_carrier_root"),
+                         admission_root) &&
+        zfocus_scope_from_input(input, &in->scope) &&
+        zfocus_load_request(workspace, in->request_root, &in->work_request) &&
+        zfocus_load_admission(workspace, admission_root, &in->admission) &&
+        memcmp(in->situation, base->situation_root, 32) == 0;
+}
+
+static int64_t zfocus_claim_expiry(const struct zfocus_base *base,
+                                   const struct zfocus_claim_input *in)
+{
+    int64_t expires = base->task.expires_unix;
+    if (in->work_request.deadline_unix < expires)
+        expires = in->work_request.deadline_unix;
+    if (in->admission.deadline_unix < expires)
+        expires = in->admission.deadline_unix;
+    return expires;
+}
+
+static bool zfocus_claim_roots(struct zfocus_claim_input *in, int64_t now,
+                               int64_t expires,
+                               struct vcs_zcode_focus_claim_v1 *claim,
+                               uint8_t scope_root[32], uint8_t claim_root[32])
+{
+    *claim = (struct vcs_zcode_focus_claim_v1){
+        .schema_version = VCS_ZCODE_FOCUS_VERSION,
+        .created_unix = now,
+        .expires_unix = expires,
+    };
+    memcpy(claim->situation_root, in->situation, 32);
+    memcpy(claim->claimant_root, in->admission.worker_signer, 32);
+    memcpy(claim->intent_root, in->request_root, 32);
+    memcpy(claim->evidence_plan_root, in->work_request.proof_policy_root, 32);
+    bool proved = now > 0 && now < expires &&
+        vcs_zcode_write_scope_root(&in->scope, scope_root) ==
+            VCS_ZCODE_WRITE_SCOPE_OK;
+    memcpy(claim->write_scope_root, scope_root, 32);
+    return proved && vcs_zcode_focus_claim_root(claim, claim_root) ==
+        VCS_ZCODE_FOCUS_OK;
+}
+
+static bool zfocus_claim_admitted(struct zfocus_base *base,
+                                  struct zfocus_claim_input *in,
+                                  struct vcs_zcode_focus_claim_v1 *claim,
+                                  const uint8_t claim_root[32], int64_t now)
+{
+    uint8_t one_root[1][32];
+    struct vcs_zcode_focus_v1 claimed_focus;
+    memcpy(one_root[0], claim_root, 32);
+    return zfocus_compose_claims(base, one_root, 1, &claimed_focus) &&
+        vcs_zcode_focus_claim_work_status(
+            &claimed_focus, &base->task, &base->task_scope, claim, &in->scope,
+            one_root, 1, &in->work_request, &in->admission, now) ==
+            ZCL_ONTOLOGY_PROVED;
+}
+
+static bool zfocus_push_admitted_tail(struct json_value *data)
+{
+    return json_push_kv_str(data, "admitted_work_status", "PROVED") &&
+        json_push_kv_bool(data, "persisted", true) &&
+        json_push_kv_bool(data, "may_execute", false) &&
+        json_push_kv_bool(data, "may_accept", false) &&
+        json_push_kv_bool(data, "may_deploy", false);
+}
+
+static bool zfocus_claim_render(struct zcl_command_reply *reply,
+                                const struct zfocus_base *base,
+                                const struct vcs_zcode_focus_claim_v1 *claim,
+                                const uint8_t scope_root[32],
+                                const uint8_t claim_root[32])
+{
+    return zfocus_push_root(&reply->data, "focus_root",
+                            base->empty_focus_root) &&
+        zfocus_push_root(&reply->data, "situation_root",
+                         claim->situation_root) &&
+        zfocus_push_root(&reply->data, "write_scope_root", scope_root) &&
+        zfocus_push_root(&reply->data, "claim_root", claim_root) &&
+        json_push_kv_int(&reply->data, "created_unix", claim->created_unix) &&
+        json_push_kv_int(&reply->data, "expires_unix", claim->expires_unix) &&
+        zfocus_push_admitted_tail(&reply->data);
+}
+
+static void zfocus_claim_publish(const struct zcl_command_request *request,
+                                 const char *workspace,
+                                 struct zfocus_base *base,
+                                 struct zcl_command_reply *reply)
+{
+    struct zfocus_claim_input in;
+    struct vcs_zcode_focus_claim_v1 claim;
+    uint8_t scope_root[32], claim_root[32];
+    if (!zfocus_claim_input_ok(request->input, workspace, base, &in)) {
+        zfocus_fail(reply, "FOCUS_CLAIM_INPUT_INCOMPLETE", "verify",
+                    "situation, scope, signed request or admission could not be reverified");
+        return;
+    }
+    int64_t now = (int64_t)platform_time_wall_unix();
+    int64_t expires = zfocus_claim_expiry(base, &in);
+    bool proved = zfocus_claim_roots(&in, now, expires, &claim, scope_root,
+                                     claim_root) &&
+        zfocus_claim_admitted(base, &in, &claim, claim_root, now);
+    if (!proved) {
+        zfocus_fail(reply, "FOCUS_CLAIM_DISPROVED", "authorize",
+                    "signed work authority does not admit this active scope claim");
+        return;
+    }
+    if (!zfocus_store_empty(base, workspace) ||
+        !zfocus_store_scope(workspace, &in.scope, scope_root) ||
+        !zfocus_store_claim(workspace, &claim, claim_root)) {
+        zfocus_fail(reply, "FOCUS_CLAIM_STORE_FAILED", "persist",
+                    "canonical focus claim failed addressed CAS readback verification");
+        return;
+    }
+    if (!zfocus_claim_render(reply, base, &claim, scope_root, claim_root))
+        zfocus_fail(reply, "FOCUS_CLAIM_OUTPUT_FAILED", "render",
+                    "published focus claim could not be rendered");
 }
 
 void zcl_native_handle_zcode_focus_claim_publish(
@@ -333,83 +530,7 @@ void zcl_native_handle_zcode_focus_claim_publish(
     const char *work = zfocus_string(request->input, "work");
     struct zfocus_base base;
     if (!zfocus_load_base(request, workspace, work, &base, reply)) return;
-    uint8_t situation[32], request_root[32], admission_root[32];
-    struct vcs_zcode_write_scope_v1 scope;
-    struct vcs_zcode_work_request_v1 work_request;
-    struct vcs_zcode_work_admission_v1 admission;
-    bool input_ok = zfocus_root_text(
-            zfocus_string(request->input, "situation_root"), situation) &&
-        zfocus_root_text(zfocus_string(request->input, "work_request_root"),
-                         request_root) &&
-        zfocus_root_text(zfocus_string(
-            request->input, "work_admission_carrier_root"), admission_root) &&
-        zfocus_scope_from_input(request->input, &scope) &&
-        zfocus_load_request(workspace, request_root, &work_request) &&
-        zfocus_load_admission(workspace, admission_root, &admission);
-    if (!input_ok || memcmp(situation, base.situation_root, 32) != 0) {
-        zfocus_fail(reply, "FOCUS_CLAIM_INPUT_INCOMPLETE", "verify",
-                    "situation, scope, signed request or admission could not be reverified");
-        goto cleanup;
-    }
-    int64_t now = (int64_t)platform_time_wall_unix();
-    int64_t expires = base.task.expires_unix;
-    if (work_request.deadline_unix < expires) expires = work_request.deadline_unix;
-    if (admission.deadline_unix < expires) expires = admission.deadline_unix;
-    uint8_t scope_root[32], claim_root[32], one_root[1][32];
-    struct vcs_zcode_focus_claim_v1 claim = {
-        .schema_version = VCS_ZCODE_FOCUS_VERSION,
-        .created_unix = now,
-        .expires_unix = expires,
-    };
-    memcpy(claim.situation_root, situation, 32);
-    memcpy(claim.claimant_root, admission.worker_signer, 32);
-    memcpy(claim.intent_root, request_root, 32);
-    memcpy(claim.evidence_plan_root, work_request.proof_policy_root, 32);
-    bool proved = now > 0 && now < expires &&
-        vcs_zcode_write_scope_root(&scope, scope_root) ==
-            VCS_ZCODE_WRITE_SCOPE_OK;
-    memcpy(claim.write_scope_root, scope_root, 32);
-    proved = proved && vcs_zcode_focus_claim_root(&claim, claim_root) ==
-        VCS_ZCODE_FOCUS_OK;
-    memcpy(one_root[0], claim_root, 32);
-    struct vcs_zcode_focus_v1 claimed_focus;
-    proved = proved && vcs_zcode_focus_compose(
-        &base.task, base.task_root, base.empty_focus.context_root,
-        base.loaded.show.story_root, base.loaded.show.status,
-        base.empty_focus.flags, one_root, 1,
-        &claimed_focus) == VCS_ZCODE_FOCUS_OK &&
-        vcs_zcode_focus_claim_work_status(
-            &claimed_focus, &base.task, &base.task_scope, &claim, &scope,
-            one_root, 1, &work_request,
-            &admission, now) == ZCL_ONTOLOGY_PROVED;
-    if (!proved) {
-        zfocus_fail(reply, "FOCUS_CLAIM_DISPROVED", "authorize",
-                    "signed work authority does not admit this active scope claim");
-        goto cleanup;
-    }
-    if (!zfocus_store_empty(&base, workspace) ||
-        !zfocus_store_scope(workspace, &scope, scope_root) ||
-        !zfocus_store_claim(workspace, &claim, claim_root)) {
-        zfocus_fail(reply, "FOCUS_CLAIM_STORE_FAILED", "persist",
-                    "canonical focus claim failed addressed CAS readback verification");
-        goto cleanup;
-    }
-    bool rendered = zfocus_push_root(&reply->data, "focus_root",
-                                     base.empty_focus_root) &&
-        zfocus_push_root(&reply->data, "situation_root", situation) &&
-        zfocus_push_root(&reply->data, "write_scope_root", scope_root) &&
-        zfocus_push_root(&reply->data, "claim_root", claim_root) &&
-        json_push_kv_int(&reply->data, "created_unix", now) &&
-        json_push_kv_int(&reply->data, "expires_unix", expires) &&
-        json_push_kv_str(&reply->data, "admitted_work_status", "PROVED") &&
-        json_push_kv_bool(&reply->data, "persisted", true) &&
-        json_push_kv_bool(&reply->data, "may_execute", false) &&
-        json_push_kv_bool(&reply->data, "may_accept", false) &&
-        json_push_kv_bool(&reply->data, "may_deploy", false);
-    if (!rendered)
-        zfocus_fail(reply, "FOCUS_CLAIM_OUTPUT_FAILED", "render",
-                    "published focus claim could not be rendered");
-cleanup:
+    zfocus_claim_publish(request, workspace, &base, reply);
     vcs_zcode_agent_context_free(&base.context);
 }
 
@@ -431,19 +552,63 @@ static bool zfocus_push_claim_roots(
     return ok;
 }
 
-void zcl_native_handle_zcode_focus_snapshot_publish(
-    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+static bool zfocus_snapshot_focus_ok(
+    struct zfocus_base *base, const uint8_t (*roots)[32],
+    struct vcs_zcode_focus_claim_v1 *claims,
+    struct vcs_zcode_write_scope_v1 *scopes, size_t count, int64_t now,
+    struct vcs_zcode_focus_v1 *focus)
 {
-    if (!request || !reply) return;
-    const char *workspace = zfocus_string(request->input, "workspace");
-    const char *work = zfocus_string(request->input, "work");
-    struct zfocus_base base;
-    if (!zfocus_load_base(request, workspace, work, &base, reply)) return;
+    return now > 0 && zfocus_compose_claims(base, roots, count, focus) &&
+        vcs_zcode_focus_validate_for_context(
+            focus, &base->task, &base->context, roots, count, true) ==
+            VCS_ZCODE_FOCUS_OK &&
+        vcs_zcode_focus_claim_set_status(focus, claims, scopes, count, now) ==
+            ZCL_ONTOLOGY_PROVED;
+}
+
+static bool zfocus_snapshot_claims_ok(
+    struct zfocus_base *base, struct zfocus_claim_row *rows,
+    const uint8_t (*roots)[32], struct vcs_zcode_focus_claim_v1 *claims,
+    struct vcs_zcode_write_scope_v1 *scopes, size_t count,
+    struct vcs_zcode_focus_v1 *focus, int64_t now)
+{
+    bool proved = true;
+    for (size_t i = 0; proved && i < count; i++)
+        proved = memcmp(claims[i].situation_root, base->situation_root,
+                        32) == 0 &&
+            vcs_zcode_focus_claim_work_status(
+                focus, &base->task, &base->task_scope, &claims[i], &scopes[i],
+                roots, count, &rows[i].request, &rows[i].admission, now) ==
+                ZCL_ONTOLOGY_PROVED;
+    return proved;
+}
+
+static bool zfocus_snapshot_render(struct zcl_command_reply *reply,
+                                   const struct zfocus_base *base,
+                                   const struct zfocus_claim_row *rows,
+                                   size_t count, const uint8_t focus_root[32],
+                                   const uint8_t claim_set_root[32])
+{
+    return zfocus_push_root(&reply->data, "focus_root", focus_root) &&
+        zfocus_push_root(&reply->data, "situation_root",
+                         base->situation_root) &&
+        zfocus_push_root(&reply->data, "claim_set_root", claim_set_root) &&
+        zfocus_push_claim_roots(&reply->data, rows, count) &&
+        json_push_kv_int(&reply->data, "claim_count", (int64_t)count) &&
+        json_push_kv_str(&reply->data, "scope_overlap", "DISPROVED") &&
+        zfocus_push_admitted_tail(&reply->data);
+}
+
+static void zfocus_snapshot_publish(const struct json_value *input,
+                                    const char *workspace,
+                                    struct zfocus_base *base,
+                                    struct zcl_command_reply *reply)
+{
     struct zfocus_claim_row rows[VCS_ZCODE_FOCUS_MAX_CLAIMS]; size_t count = 0;
-    if (!zfocus_load_rows(request->input, workspace, rows, &count)) {
+    if (!zfocus_load_rows(input, workspace, rows, &count)) {
         zfocus_fail(reply, "FOCUS_SNAPSHOT_INPUT_INCOMPLETE", "verify",
                     "claim, scope, signed request or admission roots could not be reverified");
-        goto cleanup;
+        return;
     }
     uint8_t roots[VCS_ZCODE_FOCUS_MAX_CLAIMS][32];
     struct vcs_zcode_focus_claim_v1 claims[VCS_ZCODE_FOCUS_MAX_CLAIMS];
@@ -454,50 +619,35 @@ void zcl_native_handle_zcode_focus_snapshot_publish(
     }
     struct vcs_zcode_focus_v1 focus;
     int64_t now = (int64_t)platform_time_wall_unix();
-    bool proved = now > 0 && vcs_zcode_focus_compose(
-        &base.task, base.task_root, base.empty_focus.context_root,
-        base.loaded.show.story_root, base.loaded.show.status,
-        base.empty_focus.flags, roots, count, &focus) == VCS_ZCODE_FOCUS_OK &&
-        vcs_zcode_focus_validate_for_context(
-            &focus, &base.task, &base.context, roots, count, true) ==
-            VCS_ZCODE_FOCUS_OK &&
-        vcs_zcode_focus_claim_set_status(
-            &focus, claims, scopes, count, now) == ZCL_ONTOLOGY_PROVED;
-    for (size_t i = 0; proved && i < count; i++)
-        proved = memcmp(claims[i].situation_root,
-                        base.situation_root, 32) == 0 &&
-            vcs_zcode_focus_claim_work_status(
-                &focus, &base.task, &base.task_scope, &claims[i], &scopes[i],
-                roots, count, &rows[i].request, &rows[i].admission,
-                now) == ZCL_ONTOLOGY_PROVED;
-    if (!proved) {
+    if (!zfocus_snapshot_focus_ok(base, roots, claims, scopes, count, now,
+                                  &focus) ||
+        !zfocus_snapshot_claims_ok(base, rows, roots, claims, scopes, count,
+                                   &focus, now)) {
         zfocus_fail(reply, "FOCUS_SNAPSHOT_DISPROVED", "authorize",
                     "active claims are stale, overlapping, out of scope or not admitted by signed work facts");
-        goto cleanup;
+        return;
     }
     uint8_t claim_set_root[32], focus_root[32];
-    if (!vcs_object_store_init(workspace) ||
-        !zfocus_store_claim_set(workspace, roots, count, claim_set_root) ||
-        memcmp(claim_set_root, focus.claim_set_root, 32) != 0 ||
-        !zfocus_store_focus(workspace, &focus, focus_root)) {
+    if (!zfocus_store_set_and_focus(workspace, roots, count, &focus,
+                                    claim_set_root, focus_root)) {
         zfocus_fail(reply, "FOCUS_SNAPSHOT_STORE_FAILED", "persist",
                     "canonical claim set or focus failed addressed CAS readback verification");
-        goto cleanup;
+        return;
     }
-    bool rendered = zfocus_push_root(&reply->data, "focus_root", focus_root) &&
-        zfocus_push_root(&reply->data, "situation_root", base.situation_root) &&
-        zfocus_push_root(&reply->data, "claim_set_root", claim_set_root) &&
-        zfocus_push_claim_roots(&reply->data, rows, count) &&
-        json_push_kv_int(&reply->data, "claim_count", (int64_t)count) &&
-        json_push_kv_str(&reply->data, "scope_overlap", "DISPROVED") &&
-        json_push_kv_str(&reply->data, "admitted_work_status", "PROVED") &&
-        json_push_kv_bool(&reply->data, "persisted", true) &&
-        json_push_kv_bool(&reply->data, "may_execute", false) &&
-        json_push_kv_bool(&reply->data, "may_accept", false) &&
-        json_push_kv_bool(&reply->data, "may_deploy", false);
-    if (!rendered)
+    if (!zfocus_snapshot_render(reply, base, rows, count, focus_root,
+                                claim_set_root))
         zfocus_fail(reply, "FOCUS_SNAPSHOT_OUTPUT_FAILED", "render",
                     "published focus snapshot could not be rendered");
-cleanup:
+}
+
+void zcl_native_handle_zcode_focus_snapshot_publish(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply)
+{
+    if (!request || !reply) return;
+    const char *workspace = zfocus_string(request->input, "workspace");
+    const char *work = zfocus_string(request->input, "work");
+    struct zfocus_base base;
+    if (!zfocus_load_base(request, workspace, work, &base, reply)) return;
+    zfocus_snapshot_publish(request->input, workspace, &base, reply);
     vcs_zcode_agent_context_free(&base.context);
 }
