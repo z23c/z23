@@ -483,14 +483,14 @@ static int fgl_case_receipt_none(void)
     int failures = 0;
     struct zcl_goals_options o;
     fgl_options(&o);
-    TEST("C1 C2 C4 C5 C7 name the missing receipt producer; C8 names the "
+    TEST("C1 C2 C4 C5 C7 skip the host receipts in a fixture run; C8 names the "
          "observation it lacks; fixtures never read the host ledgers") {
         static const char *const ids[] = {"C1", "C2", "C4", "C5", "C7"};
         struct zcl_goal_result r;
         for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
             r = zcl_goals_measure(&o, ids[i]);
             ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
-            ASSERT(fgl_has(r.evidence, "no receipt producer"));
+            ASSERT(fgl_has(r.evidence, "receipt probe skipped"));
         }
         r = zcl_goals_measure(&o, "C8");
         ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
@@ -1103,6 +1103,175 @@ static int fgl_case_g3(const char *root)
     return failures;
 }
 
+static bool fgl_receipt_line(const char *dir, const char *item, const char *line)
+{
+    char path[640];
+    (void)snprintf(path, sizeof(path), "%s/%s.jsonl", dir, item);
+    return fgl_write(path, line);
+}
+
+static int fgl_case_receipt_items(const char *root)
+{
+    int failures = 0;
+    char dir[600];
+    struct zcl_goals_options o;
+    fgl_options(&o);
+    (void)snprintf(dir, sizeof(dir), "%s/receipts", root);
+    (void)mkdir(dir, 0700);
+    o.receipts_dir = dir;
+    TEST("C7 is graded from the newest line of its receipt file: pass, fail, "
+         "skip, stale and missing; C1 C2 C4 C5 stay unmeasured") {
+        static const char *const others[] = {"C1", "C2", "C4", "C5"};
+        struct zcl_goal_result r = zcl_goals_measure(&o, "C7");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "no receipt yet: run make test-crash-bootstrap"));
+        ASSERT(fgl_receipt_line(dir, "C7",
+            "{\"ts\":1799990000,\"item\":\"C7\",\"verdict\":\"fail\","
+            "\"wall_s\":9,\"build_commit\":\"old\"}\n"
+            "{\"ts\":1799996400,\"item\":\"C7\",\"verdict\":\"pass\","
+            "\"wall_s\":95,\"build_commit\":\"abc123def456\","
+            "\"host\":\"h\",\"detail\":\"\"}\n"));
+        r = zcl_goals_measure(&o, "C7");
+        ASSERT(r.grade == ZCL_GOAL_PASS);
+        ASSERT(fgl_has(r.evidence, "ts 1799996400"));
+        ASSERT(fgl_has(r.evidence, "wall_s 95"));
+        ASSERT(fgl_has(r.evidence, "build_commit abc123def456"));
+        ASSERT(fgl_has(r.evidence, "age 1 h of 24 h"));
+        ASSERT(fgl_receipt_line(dir, "C7",
+            "{\"ts\":1799996400,\"item\":\"C7\",\"verdict\":\"pass\"}\n"
+            "{\"ts\":1799996500,\"item\":\"C7\",\"verdict\":\"fail\","
+            "\"wall_s\":3,\"build_commit\":\"abc123def456\"}\n"));
+        r = zcl_goals_measure(&o, "C7");
+        ASSERT(r.grade == ZCL_GOAL_FAIL);
+        ASSERT(fgl_receipt_line(dir, "C7",
+            "{\"ts\":1799996400,\"item\":\"C7\",\"verdict\":\"skip\","
+            "\"detail\":\"no params\"}\n"));
+        r = zcl_goals_measure(&o, "C7");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "is skip"));
+        ASSERT(fgl_receipt_line(dir, "C7",
+            "{\"ts\":1799800000,\"item\":\"C7\",\"verdict\":\"pass\"}\n"));
+        r = zcl_goals_measure(&o, "C7");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "stale"));
+        ASSERT(fgl_has(r.evidence, "window 24 h"));
+        ASSERT(fgl_receipt_line(dir, "C7", "not json\n"));
+        r = zcl_goals_measure(&o, "C7");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "is not a receipt"));
+        for (size_t i = 0; i < sizeof(others) / sizeof(others[0]); i++) {
+            r = zcl_goals_measure(&o, others[i]);
+            ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+            ASSERT(fgl_has(r.evidence, "no receipt yet"));
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool fgl_input(struct json_value *in, const char *item,
+                      const char *verdict, const char *wall,
+                      const char *detail)
+{
+    json_init(in);
+    json_set_object(in);
+    return (!item || json_push_kv_str(in, "item", item)) &&
+           (!verdict || json_push_kv_str(in, "verdict", verdict)) &&
+           (!wall || json_push_kv_str(in, "wall_s", wall)) &&
+           (!detail || json_push_kv_str(in, "detail", detail));
+}
+
+static const char *fgl_append(const char *item, const char *verdict,
+                              const char *wall, const char *detail,
+                              struct zcl_command_reply *reply)
+{
+    struct json_value in;
+    struct zcl_command_request request;
+    memset(&request, 0, sizeof(request));
+    if (!fgl_input(&in, item, verdict, wall, detail))
+        return "input";
+    request.input = &in;
+    zcl_native_handle_fleet_receipt_append(&request, reply);
+    json_free(&in);
+    return reply->status == ZCL_COMMAND_STATUS_PASSED
+               ? "ok"
+               : reply->error.code;
+}
+
+static int fgl_case_receipt_append(const char *root)
+{
+    int failures = 0;
+    char state[600], file[700], text[4096];
+    const char *old = getenv("XDG_STATE_HOME");
+    char saved[600] = "";
+    if (old)
+        (void)snprintf(saved, sizeof(saved), "%s", old);
+    (void)snprintf(state, sizeof(state), "%s/xdg", root);
+    (void)setenv("XDG_STATE_HOME", state, 1);
+    (void)snprintf(file, sizeof(file), "%s/zclassic23-receipts/C4.jsonl", state);
+    TEST("append: creates the 0700 directory and the file, writes one line "
+         "per call, and refuses an unknown item or verdict") {
+        struct zcl_command_reply reply;
+        struct json_value row;
+        struct stat st;
+        char long_detail[400];
+        FILE *f;
+        size_t n;
+        zcl_command_reply_init(&reply, "x");
+        ASSERT_STR_EQ(fgl_append("C9", "pass", NULL, NULL, &reply),
+                      "RECEIPT_ITEM_UNKNOWN");
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "x");
+        ASSERT_STR_EQ(fgl_append("C4", "maybe", NULL, NULL, &reply),
+                      "RECEIPT_VERDICT_UNKNOWN");
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "x");
+        ASSERT_STR_EQ(fgl_append("C4", "pass", "-3", NULL, &reply),
+                      "RECEIPT_WALL_INVALID");
+        zcl_command_reply_free(&reply);
+        ASSERT(access(file, F_OK) != 0);
+        memset(long_detail, 'd', sizeof(long_detail) - 1);
+        long_detail[sizeof(long_detail) - 1] = '\0';
+        zcl_command_reply_init(&reply, "x");
+        ASSERT_STR_EQ(fgl_append("C4", "skip", NULL, "first", &reply), "ok");
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "x");
+        ASSERT_STR_EQ(fgl_append("C4", "pass", "42", long_detail, &reply),
+                      "ok");
+        zcl_command_reply_free(&reply);
+        ASSERT(stat(file, &st) == 0 && (st.st_mode & 0777) == 0600);
+        (void)snprintf(text, sizeof(text), "%s/zclassic23-receipts", state);
+        ASSERT(stat(text, &st) == 0 && (st.st_mode & 0777) == 0700);
+        f = fopen(file, "rb");
+        ASSERT(f != NULL);
+        n = fread(text, 1, sizeof(text) - 1, f);
+        (void)fclose(f);
+        text[n] = '\0';
+        ASSERT(strchr(text, '\n') != strrchr(text, '\n'));
+        ASSERT(strstr(text, "\"detail\":\"first\"") != NULL);
+        *strrchr(text, '\n') = '\0';
+        {
+            char *last = strrchr(text, '\n');
+            json_init(&row);
+            ASSERT(json_read(&row, last + 1, strlen(last + 1)));
+        }
+        ASSERT(json_get_int(json_get(&row, "ts")) > 1700000000);
+        ASSERT_STR_EQ(json_get_str(json_get(&row, "item")), "C4");
+        ASSERT_STR_EQ(json_get_str(json_get(&row, "verdict")), "pass");
+        ASSERT(json_get_int(json_get(&row, "wall_s")) == 42);
+        ASSERT(strlen(json_get_str(json_get(&row, "build_commit"))) <= 12);
+        ASSERT(json_get(&row, "host") != NULL);
+        ASSERT(strlen(json_get_str(json_get(&row, "detail"))) == 256);
+        json_free(&row);
+        PASS();
+    } _test_next:;
+    if (old)
+        (void)setenv("XDG_STATE_HOME", saved, 1);
+    else
+        (void)unsetenv("XDG_STATE_HOME");
+    return failures;
+}
+
 int test_fleet_goals(void);
 int test_fleet_goals(void)
 {
@@ -1121,6 +1290,8 @@ int test_fleet_goals(void)
     failures += fgl_case_receipt_c3(root);
     failures += fgl_case_receipt_c6(root);
     failures += fgl_case_receipt_none();
+    failures += fgl_case_receipt_items(root);
+    failures += fgl_case_receipt_append(root);
     failures += fgl_case_hosts();
     failures += fgl_case_g1(root);
     failures += fgl_case_g3(root);

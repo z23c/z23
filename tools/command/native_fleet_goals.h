@@ -79,6 +79,8 @@ struct zcl_goals_options {
     const char *shell_routes;   /* G3: directory of <host>.json shell routes */
     const char *experiments;    /* D5: experiment ledger rows.tsv; NULL = the
                                  * default $XDG_STATE_HOME path */
+    const char *receipts_dir;   /* C1 C2 C4 C5 C7: directory of <item>.jsonl
+                                 * receipts; NULL = the default state dir */
 };
 
 const char *zcl_goal_grade_name(enum zcl_goal_grade grade);
@@ -113,6 +115,21 @@ const char *zcl_goals_state_path(const char *given, const char *env_name,
  * (native_fleet_goals_receipts.c). False when the id has no receipt reader. */
 bool zcl_goals_receipt_measure(const struct zcl_goals_options *options,
                                const char *id, struct zcl_goal_result *out);
+
+/* The make target that produces the receipt of one of C1 C2 C4 C5 C7, or NULL
+ * for any other id. */
+const char *zcl_goals_receipt_target(const char *item);
+
+/* Receipt file of one item: <dir>/<item>.jsonl, where dir is the explicit
+ * directory, else $XDG_STATE_HOME/zclassic23-receipts, else
+ * $HOME/.local/state/zclassic23-receipts. False when no directory resolves
+ * (a fixture run with skip, no HOME) or the path does not fit. */
+bool zcl_goals_receipt_path(const char *dir_given, bool skip, const char *item,
+                            char *buf, size_t cap);
+
+/* The bound leaf: fleet.receipt.append. */
+void zcl_native_handle_fleet_receipt_append(
+    const struct zcl_command_request *request, struct zcl_command_reply *reply);
 
 /* Grades one catalog row by id. An unknown id yields unmeasured naming it. */
 struct zcl_goal_result zcl_goals_measure(

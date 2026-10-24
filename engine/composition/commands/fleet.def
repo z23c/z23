@@ -294,6 +294,31 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_goals)
 
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.receipt.append", "fleet.loop", "",
+    "Append one receipt line for C1, C2, C4, C5 or C7",
+    "Appends one JSON line {ts,item,verdict,wall_s,build_commit,host,detail} "
+    "to $XDG_STATE_HOME (default $HOME/.local/state)/zclassic23-receipts/"
+    "<item>.jsonl, creating the directory 0700, so `fleet goals` can grade "
+    "that item from its newest line like C3. item is one of C1, C2, C4, C5, "
+    "C7 and verdict one of pass, fail, skip; anything else is refused by "
+    "name and nothing is written. wall_s is whole seconds and optional; "
+    "detail is cut at 256 bytes. build_commit is the first 12 hex digits of "
+    "the running binary's source id. It writes nothing else and contacts no "
+    "peer.", 0,
+    "fleet,receipt,append,goals,producer",
+    "zcl.fleet_receipt_append.input.v1", "zcl.fleet_receipt_append.v1",
+    "item,verdict,wall_s,detail",
+    "item,verdict",
+    "z23-dev fleet receipt append --item=C7 --verdict=pass --wall_s=95",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW, ZCL_COMMAND_CONFIRM_NONE,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_WRITE,
+    ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_receipt_append)
+
 ZCL_COMMAND_BRANCH("fleet.experiment", "fleet",
                    "Record and query delegation experiments",
                    ZCL_COMMAND_LAYER_OPS)

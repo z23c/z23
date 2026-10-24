@@ -9359,6 +9359,16 @@ test-crash: crash_recovery_test zclassic23 zcl-rpc
 	 fi; \
 	 ZCL_CRASH_DATADIR="$$dd" $(CRASH_RECOVERY_TEST_BIN) --iterations=10
 
+# receipt_run: run body target $(2) and append the C-item $(1) receipt with
+# its verdict and wall time as the LAST step; the exit status is the body's.
+# The producer targets of the fleet report card (z23 fleet goals) use it.
+define receipt_run
+@t0=$$(date +%s); if $(MAKE) --no-print-directory $(2); then rc=0; v=pass; else rc=$$?; v=fail; fi; \
+ $(Z23_DEV_BIN) fleet receipt append --item=$(1) --verdict=$$v --wall_s=$$(( $$(date +%s) - t0 )) >/dev/null || echo "receipt: could not record the $(1) receipt" >&2; \
+ exit $$rc
+endef
+
+
 # ── Opt-in, node-spawning harnesses (NOT in `make ci`) ─────────────
 #
 # test-crash-bootstrap and soak-ci both SPAWN a real (isolated regtest)
@@ -9378,7 +9388,11 @@ test-crash: crash_recovery_test zclassic23 zcl-rpc
 # The recipe runs under bash (NOT the default /bin/sh=dash) because
 # isolated_node_env.sh relies on `set -o pipefail`. The whole body is one
 # bash invocation so the sourced trap stays armed for the harness run.
-test-crash-bootstrap: crash_recovery_test zclassic23 zcl-rpc jsonq process-group-exec
+.PHONY: test-crash-bootstrap-run
+test-crash-bootstrap: $(Z23_DEV_BIN)
+	$(call receipt_run,C7,test-crash-bootstrap-run)
+
+test-crash-bootstrap-run: crash_recovery_test zclassic23 zcl-rpc jsonq process-group-exec
 	@$(CRASH_RECOVERY_TEST_BIN) --selftest
 	@bash -c 'set -euo pipefail; \
 	 export ISO_KIND=crash ISO_PORT_BASE=39030 ZCL_CRASH_REQUIRE_TEETH=1; \
@@ -10027,16 +10041,20 @@ test-e2e: zclassic23 test_zcl
 # Sapling proving params loaded from ~/.zcash-params. The target skips on
 # hosts that do not have the proving/verifying params installed so CI can
 # call it unconditionally without creating false negatives on clean workers.
-test-shielded-payment: test_zcl
+test-shielded-payment: test_zcl $(Z23_DEV_BIN)
 	@set -eu; \
 	params_dir="$$HOME/.zcash-params"; \
 	for f in sapling-spend.params sapling-output.params sprout-groth16.params sprout-verifying.key; do \
 		if [ ! -r "$$params_dir/$$f" ]; then \
 			echo "test-shielded-payment: SKIP ($$params_dir/$$f missing)"; \
+			$(Z23_DEV_BIN) fleet receipt append --item=C4 --verdict=skip --detail="sapling params missing" >/dev/null || echo "receipt: could not record the C4 receipt" >&2; \
 			exit 0; \
 		fi; \
 	done; \
-	ZCL_STRESS_TESTS=1 ZCL_TEST_ONLY=shielded_payment $(TEST_ZCL_BIN)
+	t0=$$(date +%s); \
+	if ZCL_STRESS_TESTS=1 ZCL_TEST_ONLY=shielded_payment $(TEST_ZCL_BIN); then rc=0; v=pass; else rc=$$?; v=fail; fi; \
+	$(Z23_DEV_BIN) fleet receipt append --item=C4 --verdict=$$v --wall_s=$$(( $$(date +%s) - t0 )) >/dev/null || echo "receipt: could not record the C4 receipt" >&2; \
+	exit $$rc
 
 # P11.5 store end-to-end gate.
 #
@@ -10109,7 +10127,11 @@ define mvp_gate
 endef
 
 .PHONY: ci-mvp-gates ci-stress
-ci-mvp-gates: test_zcl
+ci-mvp-gates: $(Z23_DEV_BIN)
+	$(call receipt_run,C5,ci-mvp-gates-run)
+
+.PHONY: ci-mvp-gates-run
+ci-mvp-gates-run: test_zcl
 	$(call mvp_gate,MVP gate 3: cold-start sync FSM (hermetic),cold_start,=== Cold-start subset complete:)
 	$(call mvp_gate,MVP gate 5: store end-to-end (hermetic),store_e2e,=== store e2e subset complete:)
 	$(call mvp_gate,MVP gate 5b: store SHIELDED real ivk-decrypt + memo-bound (hermetic),store_e2e_shielded,=== store e2e shielded subset complete:)
@@ -10218,8 +10240,10 @@ ci-install: zclassic23 zcl-rpc z23-package-verify z23-package-sign
 # (exit 2 -> 0) where there is no systemd --user session. A mvp-verify member;
 # out of hermetic `make ci` (spawns a real service).
 .PHONY: ci-install-linger
-ci-install-linger: zclassic23 zcl-rpc
-	@bash -c 'bash tools/scripts/ci_install_linger_gate.sh; rc=$$?; \
+ci-install-linger: zclassic23 zcl-rpc $(Z23_DEV_BIN)
+	@bash -c 't0=$$(date +%s); bash tools/scripts/ci_install_linger_gate.sh; rc=$$?; \
+	 if [ "$$rc" -eq 2 ]; then v=skip; elif [ "$$rc" -eq 0 ]; then v=pass; else v=fail; fi; \
+	 $(Z23_DEV_BIN) fleet receipt append --item=C1 --verdict=$$v --wall_s=$$(( $$(date +%s) - t0 )) >/dev/null || echo "receipt: could not record the C1 receipt" >&2; \
 	 if [ "$$rc" -eq 2 ]; then echo "ci-install-linger: SKIP (no systemd --user session)"; exit 0; fi; exit $$rc'
 
 # ── mvp-onion-local (C2 real <60s bootstrap, Tor-egress-gated) ─
@@ -10238,11 +10262,12 @@ ci-install-linger: zclassic23 zcl-rpc
 # test-shielded-payment. Locally-verified, network-gated; NOT a hermetic-✅
 # gate.
 .PHONY: mvp-onion-local
-mvp-onion-local: test_zcl
+mvp-onion-local: test_zcl $(Z23_DEV_BIN)
 	@bash -c 'set -uo pipefail; \
 	 echo "══ MVP C2 (real): onion bootstrap <60s over Tor (egress-gated) ══"; \
 	 if [ -z "$(TOR_FULL)" ]; then \
 	     echo "mvp-onion-local: SKIP (binary links the offline Tor stub — vendor/tor not built; run make tor-full to enable the real embedded onion claim)"; \
+	     $(Z23_DEV_BIN) fleet receipt append --item=C2 --verdict=skip --detail="offline Tor stub" >/dev/null || echo "receipt: could not record the C2 receipt" >&2; \
 	     exit 0; \
 	 fi; \
 	 reachable=0; \
@@ -10252,10 +10277,15 @@ mvp-onion-local: test_zcl
 	 done; \
 	 if [ "$$reachable" != "1" ]; then \
 	     echo "mvp-onion-local: SKIP (no Tor network egress detected — run on a host where Tor egress is allowed)"; \
+	     $(Z23_DEV_BIN) fleet receipt append --item=C2 --verdict=skip --detail="no Tor egress" >/dev/null || echo "receipt: could not record the C2 receipt" >&2; \
 	     exit 0; \
 	 fi; \
 	 echo "mvp-onion-local: Tor egress present — running the real timed onion bootstrap"; \
-	 ZCL_STRESS_TESTS=1 ZCL_TEST_ONLY=onion $(TEST_ZCL_BIN)'
+	 t0=$$(date +%s); \
+	 ZCL_STRESS_TESTS=1 ZCL_TEST_ONLY=onion $(TEST_ZCL_BIN); rc=$$?; \
+	 if [ "$$rc" -eq 0 ]; then v=pass; else v=fail; fi; \
+	 $(Z23_DEV_BIN) fleet receipt append --item=C2 --verdict=$$v --wall_s=$$(( $$(date +%s) - t0 )) >/dev/null || echo "receipt: could not record the C2 receipt" >&2; \
+	 exit $$rc'
 
 # ── mvp-coldstart-local (C3 real snapshot-first cold boot, fixture-gated) ─
 #

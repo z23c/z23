@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Grades the public-node rows C3 and C6 of `fleet.goals` from the
+ * purpose: Grades the public-node rows C1 C2 C3 C4 C5 C6 C7 of `fleet.goals` from the
  *          newest durable receipt each already has: the cold-start
  *          stopwatch ledger and the soak evidence ledger.
  *
@@ -228,6 +228,142 @@ static struct zcl_goal_result rc_c6(const struct zcl_goals_options *o)
     return rc_c6_grade(&j, file);
 }
 
+/* ── C1 C2 C4 C5 C7: the newest line of <item>.jsonl ─────────────────── */
+
+static const struct {
+    const char *id;
+    const char *target;
+} k_receipt_items[] = {
+    {"C1", "make ci-install-linger"},
+    {"C2", "make mvp-onion-local"},
+    {"C4", "make test-shielded-payment"},
+    {"C5", "make ci-mvp-gates"},
+    {"C7", "make test-crash-bootstrap"},
+};
+
+const char *zcl_goals_receipt_target(const char *item)
+{
+    size_t n = sizeof(k_receipt_items) / sizeof(k_receipt_items[0]);
+    for (size_t i = 0; item && i < n; i++)
+        if (strcmp(k_receipt_items[i].id, item) == 0)
+            return k_receipt_items[i].target;
+    return NULL;
+}
+
+bool zcl_goals_receipt_path(const char *dir_given, bool skip, const char *item,
+                            char *buf, size_t cap)
+{
+    const char *xdg = getenv("XDG_STATE_HOME");
+    const char *home = getenv("HOME");
+    int n;
+    if (!item || !buf)
+        return false;
+    if (dir_given)
+        n = snprintf(buf, cap, "%s/%s.jsonl", dir_given, item);
+    else if (skip)
+        return false;
+    else if (xdg && xdg[0] == '/')
+        n = snprintf(buf, cap, "%s/zclassic23-receipts/%s.jsonl", xdg, item);
+    else if (home && home[0])
+        n = snprintf(buf, cap,
+                     "%s/.local/state/zclassic23-receipts/%s.jsonl", home,
+                     item);
+    else
+        return false;
+    return n > 0 && (size_t)n < cap;
+}
+
+/* The last non-empty line of the file, NUL-terminated in buf; false if the
+ * file is unreadable or empty. A receipt line is far shorter than the tail
+ * read. */
+static bool rc_last_line(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    long size;
+    size_t n, end;
+    if (!f)
+        return false;
+    if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0 ||
+        fseek(f, size > (long)(cap - 1) ? size - (long)(cap - 1) : 0,
+              SEEK_SET) != 0) {
+        (void)fclose(f);
+        return false;
+    }
+    n = fread(buf, 1, cap - 1, f);
+    (void)fclose(f);
+    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r'))
+        n--;
+    buf[n] = '\0';
+    end = n;
+    while (n > 0 && buf[n - 1] != '\n')
+        n--;
+    if (end == n)
+        return false;
+    memmove(buf, buf + n, end - n + 1);
+    return true;
+}
+
+static struct zcl_goal_result rc_item_grade(const struct json_value *row,
+                                            const char *path, const char *next,
+                                            int64_t now)
+{
+    int64_t ts = json_get_int(json_get(row, "ts"));
+    const char *verdict = json_get_str(json_get(row, "verdict"));
+    long long wall = (long long)json_get_int(json_get(row, "wall_s"));
+    const char *commit = json_get_str(json_get(row, "build_commit"));
+    long long age = (long long)rc_age_h(now, ts);
+
+    if (!commit || !commit[0])
+        commit = "unknown";
+    if (!verdict || !verdict[0] || ts <= 0)
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                             "newest line of %s has no ts and verdict", path);
+    if (now - ts > RC_C3_WINDOW_S)
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                             "stale: newest receipt is %lld h old, window 24 h; "
+                             "receipt %s",
+                             age, path);
+    if (strcmp(verdict, "pass") == 0 || strcmp(verdict, "fail") == 0)
+        return zcl_goal_make(verdict[0] == 'p' ? ZCL_GOAL_PASS : ZCL_GOAL_FAIL,
+                             next,
+                             "%s receipt ts %lld, wall_s %lld, build_commit "
+                             "%s, age %lld h of 24 h; receipt %s",
+                             verdict[0] == 'p' ? "PASS" : "FAIL",
+                             (long long)ts, wall, commit, age, path);
+    return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                         "newest receipt, age %lld h, is %s, not a "
+                         "measurement; receipt %s",
+                         age, verdict, path);
+}
+
+static struct zcl_goal_result rc_item(const struct zcl_goals_options *o,
+                                      const char *id, const char *target)
+{
+    char path[RC_PATH_MAX];
+    static char line[RC_TAIL_MAX];
+    struct json_value row;
+    struct zcl_goal_result res;
+    int64_t now = o && o->now_unix > 0 ? o->now_unix
+                                       : (int64_t)platform_time_wall_time_t();
+    if (!zcl_goals_receipt_path(o ? o->receipts_dir : NULL,
+                                o && o->skip_probes, id, path, sizeof(path)))
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, target,
+                             "receipt probe skipped");
+    if (!rc_last_line(path, line, sizeof(line)))
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, target,
+                             "no receipt yet: run %s; it appends one line to "
+                             "%s",
+                             target, path);
+    json_init(&row);
+    if (!json_read(&row, line, strlen(line)) || row.type != JSON_OBJ)
+        res = zcl_goal_make(ZCL_GOAL_UNMEASURED, target,
+                            "newest line of %s is not a receipt", path);
+    else
+        res = rc_item_grade(&row, path, target, now);
+    json_free(&row);
+    return res;
+}
+
 bool zcl_goals_receipt_measure(const struct zcl_goals_options *options,
                                const char *id, struct zcl_goal_result *out)
 {
@@ -237,6 +373,8 @@ bool zcl_goals_receipt_measure(const struct zcl_goals_options *options,
         *out = rc_c3(options);
     else if (strcmp(id, "C6") == 0)
         *out = rc_c6(options);
+    else if (zcl_goals_receipt_target(id))
+        *out = rc_item(options, id, zcl_goals_receipt_target(id));
     else
         return false;
     return true;

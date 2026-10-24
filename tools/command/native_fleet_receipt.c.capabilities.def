@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_receipt.c", CAP_FS_READ|CAP_FS_WRITE, "appends one JSON line to the per-item receipts file under the state directory with open(path, O_APPEND) after making the directory 0700; it writes nothing else and reads only the environment for the state directory")

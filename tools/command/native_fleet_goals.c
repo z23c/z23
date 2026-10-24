@@ -297,21 +297,6 @@ static const struct gr_static k_static[] = {
      "run `z23 status` on each node host and post the result as a receipt"},
     {"G11", false, "no spend ledger summary is read by this card",
      "card: report `fleet usage` totals as ZCL spent"},
-    {"C1", false, "no receipt producer: `make mvp` and ci-install-linger "
-                  "record nothing durable",
-     "card: write a C1 install receipt"},
-    {"C2", false, "no receipt producer: mvp-onion-local records nothing "
-                  "durable",
-     "card: write a C2 bootstrap receipt"},
-    {"C4", false, "no receipt producer: test-shielded-payment records "
-                  "nothing durable",
-     "card: write a C4 payment receipt"},
-    {"C5", false, "no receipt producer: ci-mvp-gates records nothing "
-                  "durable",
-     "card: write a C5 store sale receipt"},
-    {"C7", false, "no receipt producer: test-crash-bootstrap records "
-                  "nothing durable",
-     "card: write a C7 recovery receipt"},
     {"C8", false, "needs 168 h of observation, have 0 h: no producer "
                   "persists a parity mismatch count",
      "card: write parity samples to a ledger"},
