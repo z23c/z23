@@ -129,39 +129,23 @@ static bool skip_name(const unsigned char *msg, size_t len, size_t *off)
     }
 }
 
-enum fd_dns_status fd_dns_txt_parse(const unsigned char *msg, size_t len,
-                                    uint16_t id, struct fd_dns_txt *out)
+static bool fd_dns_skip_questions(const unsigned char *msg, size_t len,
+                                  uint16_t qdcount, size_t *off)
 {
-    if (!out)
-        return FD_DNS_MALFORMED;
-    memset(out, 0, sizeof *out);
-    if (!msg || len < DNS_HEADER_LEN)
-        return FD_DNS_MALFORMED;
-
-    /* An answer to a question we did not ask is not our answer. This is the
-     * only cheap off-path-spoofing check plain DNS offers, and dropping it
-     * would let anything that can guess the port write our pin channel. */
-    if (rd16(msg) != id)
-        return FD_DNS_MALFORMED;
-    const uint16_t flags = rd16(msg + 2);
-    if ((flags & 0x8000u) == 0)
-        return FD_DNS_MALFORMED;  /* not a response */
-    if (flags & 0x0200u)
-        return FD_DNS_TRUNCATED;  /* TC: the answer did not fit a datagram */
-    if ((flags & 0x000fu) != 0)
-        return FD_DNS_NO_ANSWER;  /* NXDOMAIN, SERVFAIL, REFUSED, ... */
-
-    const uint16_t qdcount = rd16(msg + 4);
-    const uint16_t ancount = rd16(msg + 6);
-    size_t off = DNS_HEADER_LEN;
     for (uint16_t i = 0; i < qdcount; i++) {
-        if (!skip_name(msg, len, &off))
-            return FD_DNS_MALFORMED;
-        if (off + 4 > len)
-            return FD_DNS_MALFORMED;
-        off += 4;
+        if (!skip_name(msg, len, off))
+            return false;
+        if (*off + 4 > len)
+            return false;
+        *off += 4;
     }
+    return true;
+}
 
+static enum fd_dns_status fd_dns_parse_answers(
+    const unsigned char *msg, size_t len, uint16_t ancount, size_t off,
+    struct fd_dns_txt *out)
+{
     for (uint16_t i = 0; i < ancount; i++) {
         if (!skip_name(msg, len, &off))
             return FD_DNS_MALFORMED;
@@ -188,7 +172,8 @@ enum fd_dns_status fd_dns_txt_parse(const unsigned char *msg, size_t len,
             p++;
             if (p + slen > rdata + rdlength)
                 return FD_DNS_MALFORMED;
-            if (out->count < FD_DNS_MAX_STRINGS && slen < FD_DNS_STRING_MAX) {
+            if (out->count < FD_DNS_MAX_STRINGS &&
+                slen < FD_DNS_STRING_MAX) {
                 memcpy(out->s[out->count], msg + p, slen);
                 out->s[out->count][slen] = '\0';
                 out->count++;
@@ -198,4 +183,34 @@ enum fd_dns_status fd_dns_txt_parse(const unsigned char *msg, size_t len,
     }
 
     return out->count > 0 ? FD_DNS_OK : FD_DNS_NO_ANSWER;
+}
+
+enum fd_dns_status fd_dns_txt_parse(const unsigned char *msg, size_t len,
+                                    uint16_t id, struct fd_dns_txt *out)
+{
+    if (!out)
+        return FD_DNS_MALFORMED;
+    memset(out, 0, sizeof *out);
+    if (!msg || len < DNS_HEADER_LEN)
+        return FD_DNS_MALFORMED;
+
+    /* An answer to a question we did not ask is not our answer. This is the
+     * only cheap off-path-spoofing check plain DNS offers, and dropping it
+     * would let anything that can guess the port write our pin channel. */
+    if (rd16(msg) != id)
+        return FD_DNS_MALFORMED;
+    const uint16_t flags = rd16(msg + 2);
+    if ((flags & 0x8000u) == 0)
+        return FD_DNS_MALFORMED;  /* not a response */
+    if (flags & 0x0200u)
+        return FD_DNS_TRUNCATED;  /* TC: the answer did not fit a datagram */
+    if ((flags & 0x000fu) != 0)
+        return FD_DNS_NO_ANSWER;  /* NXDOMAIN, SERVFAIL, REFUSED, ... */
+
+    const uint16_t qdcount = rd16(msg + 4);
+    const uint16_t ancount = rd16(msg + 6);
+    size_t off = DNS_HEADER_LEN;
+    if (!fd_dns_skip_questions(msg, len, qdcount, &off))
+        return FD_DNS_MALFORMED;
+    return fd_dns_parse_answers(msg, len, ancount, off, out);
 }
