@@ -14,6 +14,8 @@
 
 #include "command/native_command.h"
 
+#include "command/native_dev_bounded_wait.h"
+
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/directory_watcher.h"
@@ -154,10 +156,10 @@ static void wait_timed_out(const struct json_value *input,
 /* Sleep until the mail dir changes, the poll interval passes, or the
  * deadline does; re-arms the watcher when it is not open. */
 static void wait_sleep(struct platform_directory_watcher *w, bool *armed,
-                       const char *dir, bool have_dir, int64_t remaining_ms)
+                       const char *dir, bool have_dir,
+                       const struct zcl_bounded_wait *bw)
 {
-    uint32_t slice = (uint32_t)(remaining_ms < WAIT_POLL_MS ? remaining_ms
-                                                            : WAIT_POLL_MS);
+    uint32_t slice = (uint32_t)zcl_bounded_wait_slice(bw, WAIT_POLL_MS);
     if (!*armed && have_dir)
         *armed = platform_directory_watcher_open(w, dir);
     if (*armed) {
@@ -180,7 +182,8 @@ void zcl_native_handle_dev_agent_mail_wait(
     struct zcl_command_reply found;
     struct json_value pull;
     char dir[4096];
-    int64_t timeout_ms, deadline_ms;
+    int64_t timeout_ms;
+    struct zcl_bounded_wait bw;
     bool armed = false, done = false;
 
     if (!reply)
@@ -198,7 +201,7 @@ void zcl_native_handle_dev_agent_mail_wait(
         return;
     }
     platform_directory_watcher_init(&watcher);
-    deadline_ms = platform_time_monotonic_ms() + timeout_ms;
+    zcl_bounded_wait_begin(&bw, timeout_ms);
 
     for (;;) {
         int64_t remaining;
@@ -211,10 +214,10 @@ void zcl_native_handle_dev_agent_mail_wait(
             done = true;
             break;
         }
-        remaining = deadline_ms - platform_time_monotonic_ms();
+        remaining = (int64_t)zcl_bounded_wait_remaining(&bw);
         if (remaining <= 0)
             break;
-        wait_sleep(&watcher, &armed, dir, have_dir, remaining);
+        wait_sleep(&watcher, &armed, dir, have_dir, &bw);
     }
     if (!done)
         wait_timed_out(request->input, reply);

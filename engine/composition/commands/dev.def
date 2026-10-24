@@ -2662,6 +2662,78 @@ ZCL_COMMAND_DEV_READ(
     "agent mail waiting is a development-lane coordination surface",
     "z23-dev dev agent mail wait")
 
+/* ── dev.loop.job.start / .wait / .exec ──────────────────
+ * Start a long job detached and wait for it in slices of at most 230 s, so
+ * an agent never blocks a tool call past the prompt-cache TTL
+ * (tools/command/native_dev_job.c, native_dev_job_wait.c,
+ * native_dev_job_exec.c). The detached child runs the argv through the host
+ * build queue, so admission stays with the scheduler. No remote permit row:
+ * dev-only, not node-reachable. */
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.loop.job.start", "dev.loop", "",
+    "Start a long job detached and return a handle",
+    "Launches argv (argv[0] one of make, devbuild, z23-dev, z23 or an "
+    "absolute zgate path) detached in cwd, which must be a registered git "
+    "worktree (default: the current directory), and returns at once with "
+    "{job_id, state started|attached, log, pid, started_unix}. The child "
+    "runs through the host build queue (devbuild or ops host build), so "
+    "admission and queueing stay with the scheduler. dedupe (default true) "
+    "attaches to a running job with the same cwd, HEAD and argv instead of "
+    "starting a second. The job directory under the state root holds only "
+    "pointer files; the output lands in <cwd>/build/scratch/job-<id>.log "
+    "when the job ends. Wait with dev.loop.job.wait.", 4096,
+    "job,launch,detached,wait,build,test", "zcl.dev_job_start_input.v1",
+    "zcl.dev_job.v1", "argv,cwd,label,dedupe", "argv",
+    "z23-dev dev loop job start --input='{\"argv\":[\"make\",\"t-fast\",\"ONLY=x\"]}'",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_FAST, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE | ZCL_COMMAND_CAP_PROCESS_EXEC,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_job_start,
+    "detached dev jobs are a development-lane surface",
+    "z23-dev dev loop job start")
+
+ZCL_COMMAND_DEV_READ(
+    "dev.loop.job.wait", "dev.loop", "",
+    "Wait up to 230 s for a started job",
+    "Blocks at most timeout_s (clamped to 1..230, default 60) on a job from "
+    "dev.loop.job.start, or on an external log that ends in an rc= line such as a "
+    "zgate --detach log. Returns state running at the bound (not an error: "
+    "call again), or passed, failed or lost (the child is gone with no rc "
+    "line) with rc, elapsed_s, a tail of at most tail_lines (default 12, max "
+    "40) lines and the FAIL / error: lines.", 8192,
+    "job,wait,bounded,verdict", "zcl.dev_job_wait_input.v1",
+    "zcl.dev_job.v1", "job_id,log,timeout_s,tail_lines", "",
+    "z23-dev dev loop job wait --job_id=<id> --timeout_s=200",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_PERSISTENT, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_job_wait,
+    "bounded job waiting is a development-lane surface",
+    "z23-dev dev loop job wait")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.loop.job.exec", "dev.loop", "",
+    "Internal: run one started job and write its rc line",
+    "Hidden child of dev.loop.job.start; agents never call it. Reads the job "
+    "handle, writes the pid pointer, runs the argv in the handle's cwd "
+    "through the host build queue and appends the terminal rc=<n> line to "
+    "the job log.", 1024,
+    "job,exec,internal", "zcl.dev_job_exec_input.v1", "zcl.dev_job.v1",
+    "job_id", "job_id", "z23-dev dev loop job exec --job_id=<id>",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_MAINTENANCE,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_DEV_STATE_WRITE | ZCL_COMMAND_CAP_PROCESS_EXEC,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_job_exec,
+    "the job child is a development-lane surface",
+    "z23-dev dev loop job exec")
+
 /* ── dev.test.fast_plan ────────────────────────────────────────────────────
  * Native plan-json of tools/agent_fast_ci.sh (tools/command/native_dev_fast_plan.c).
  * Maps the changed-file set to focused test groups and the next command,

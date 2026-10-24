@@ -56,6 +56,7 @@ static bool cr_files_descriptor(const char *key,
                                  struct zcl_command_input_descriptor *out)
 {
     if (strcmp(key, "files") != 0 && strcmp(key, "symbols") != 0 &&
+        strcmp(key, "argv") != 0 &&
         strcmp(key, "paths") != 0)
         return false;
     out->type = JSON_ARR;
@@ -96,7 +97,7 @@ static bool cr_bool_key(const char *key)
         "all",               "allow_high_fees",   "exact",
         "restore",           "release",           "once",
         "dry_run",           "require_existing_watcher", "allow_external",
-        "runner_ok_only",
+        "runner_ok_only",    "dedupe",
     };
     return cr_key_in(key, keys, sizeof(keys) / sizeof(keys[0])) ||
            command_registry_devagent_input_extra_bool_key(key);
@@ -464,13 +465,28 @@ static bool cr_match_fleet_bundle_ints(const char *path, const char *key,
     return true;
 }
 
+/* dev.loop.job.wait: timeout_s and tail_lines are clamped by the handler
+ * (1..230 s, 1..40 lines) and reported back; the transport admits any
+ * positive integer so an over-long request is clamped, not refused. */
+static bool cr_match_job_wait_ints(const char *path, const char *key,
+                                   const struct json_value *value,
+                                   bool *type_ok)
+{
+    if (strcmp(path, "dev.loop.job.wait") != 0 ||
+        (strcmp(key, "timeout_s") != 0 && strcmp(key, "tail_lines") != 0))
+        return false;
+    *type_ok = cr_int_range(value, 1, 1000000);
+    return true;
+}
+
 static bool cr_match_scoped_ints(const char *path, const char *key,
                                  const struct json_value *value, bool *type_ok)
 {
     return cr_match_wallet_unlock(path, key, value, type_ok) ||
            cr_match_wiki_chunk_ints(path, key, value, type_ok) ||
            cr_match_vanity_ints(path, key, value, type_ok) ||
-           cr_match_fleet_bundle_ints(path, key, value, type_ok);
+           cr_match_fleet_bundle_ints(path, key, value, type_ok) ||
+           cr_match_job_wait_ints(path, key, value, type_ok);
 }
 
 static bool cr_match_leaf_ints(const char *path, const char *key,
@@ -704,6 +720,14 @@ static bool cr_docs_path_key(const char *path, const char *key)
            (strcmp(path, "discover.wiki") == 0 && strcmp(key, "topic") == 0);
 }
 
+static const struct cr_int_bound *cr_job_wait_bound(const char *path,
+                                                   const char *key)
+{
+    static const struct cr_int_bound job_wait = { "job_wait", 1, 1000000 };
+    bool ints = strcmp(key, "timeout_s") == 0 || strcmp(key, "tail_lines") == 0;
+    return ints && strcmp(path, "dev.loop.job.wait") == 0 ? &job_wait : NULL;
+}
+
 static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
                                                    const char *key)
 {
@@ -719,6 +743,8 @@ static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
         static const struct cr_int_bound threshold = { "threshold", 1, 256 };
         return &threshold;
     }
+    const struct cr_int_bound *job = cr_job_wait_bound(path, key);
+    if (job) return job;
     const struct cr_int_bound *lab = cr_lab_bound(path, key);
     if (lab) return lab;
     const struct cr_int_bound *docs = cr_docs_read_bound(path, key);
