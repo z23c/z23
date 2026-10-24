@@ -539,7 +539,7 @@ static enum zcl_retrieval_experiment_error peb_paired_evaluate(
     memcpy(result.retrieval_projection_root, retrieval_projection_root, 32u);
 
     struct zcl_retrieval_evaluation_workload_task_v1
-        workload[ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX];
+        workload[ZCL_RETRIEVAL_EXPERIMENT_TASK_MAX] = {0};
     peb_paired_build_workload(tasks, task_count, workload);
     error = peb_preflight_workload_aliases(
         workload, task_count, out, sizeof(*out));
