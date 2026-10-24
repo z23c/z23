@@ -1772,3 +1772,9 @@ ZCL_TEST_GROUP(wiki_docs_install)
  * failure and resumes the stage; status flags a wrong binary and shared
  * ports. */
 ZCL_TEST_GROUP(legacy_seed)
+/* z23-agent-guard PreToolUse hook (tools/agent_guard.c -> build/bin/
+ * z23-agent-guard): table of ALLOW/REFUSE verdicts for the never-do list
+ * (datadirs, reindex flag, Python, git identity, spend/key export, host
+ * config, git push, devbuild --help) plus the hook exit-code contract. The
+ * binary is required through the declared BUILD need. */
+ZCL_TEST_GROUP(agent_guard)

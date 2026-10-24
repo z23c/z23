@@ -8938,6 +8938,23 @@ $(JSONQ_BIN): tools/jsonq.c \
 	    -o $@ tools/jsonq.c contexts/commons/packages/zjsonp/src/zjsonp.c \
 	    contexts/commons/packages/zutf8/src/zutf8.c
 
+# PreToolUse hook for Claude Code: refuses the never-do list (datadirs,
+# reindex flag, Python, git identity, spend/key export, host config, git
+# push). Same zjsonp parser as jsonq; see tools/agent_guard.c.
+AGENT_GUARD_BIN = $(BIN_DIR)/z23-agent-guard
+.PHONY: z23-agent-guard
+z23-agent-guard: $(AGENT_GUARD_BIN)
+$(AGENT_GUARD_BIN): tools/agent_guard.c tools/agent_guard_rules.c tools/agent_guard_rules.h \
+    contexts/commons/packages/zjsonp/src/zjsonp.c contexts/commons/packages/zutf8/src/zutf8.c \
+    contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h \
+    contexts/commons/packages/zutf8/include/zutf8/zutf8.h
+	@mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
+	    -Icontexts/commons/packages/zjsonp/include -Icontexts/commons/packages/zutf8/include \
+	    -o $@ tools/agent_guard.c tools/agent_guard_rules.c contexts/commons/packages/zjsonp/src/zjsonp.c \
+	    contexts/commons/packages/zutf8/src/zutf8.c
+
 # Maintainer fleet command runner: one SSH command on one or all machines
 # named in ~/.config/z23/fleet.json (docs/fleet-dev/README.md). POSIX only.
 .PHONY: z23-fx

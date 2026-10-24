@@ -348,6 +348,7 @@ ZCL_TEST_GROUP_BUILD_NEED("test_p2_invariant_check",
 
 /* The registered fixture executes this exact host artifact; absence fails. */
 ZCL_TEST_GROUP_BUILD_NEED("test_jsonq", "build/bin/jsonq", "jsonq")
+ZCL_TEST_GROUP_BUILD_NEED("test_agent_guard", "build/bin/z23-agent-guard", "z23-agent-guard")
 ZCL_TEST_GROUP_BUILD_NEED("test_replay_canary_verdict", "build/bin/jsonq", "jsonq")
 ZCL_TEST_GROUP_BUILD_NEED("test_mvp_c8_judge", "build/bin/jsonq", "jsonq")
 
