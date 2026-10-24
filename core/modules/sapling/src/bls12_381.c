@@ -1679,6 +1679,177 @@ bool bls12_381_multi_pairing_check(const struct g1_point *a_pts, const struct g2
     return memcmp(&result, &one, sizeof(struct fp12)) == 0;
 }
 
+
+/* ===== Shared-f multi-Miller loop with precomputed G2 lines ===== */
+
+/* Line coefficients (c0,c1,c2) of one fixed G2 point, in Miller-loop order:
+ * per bit of BLS_X>>1 below the leading one a doubling line then, on a set
+ * bit, an addition line; then the final doubling line. These are exactly the
+ * values doubling_step/addition_step hand to ell() for that point. */
+/* 62 doublings + 5 additions (popcount(BLS_X>>1) - 1) + the final doubling. */
+#define ML_MAX_LINES 68
+
+struct g2_lines {
+    size_t n;
+    struct fp2 c[ML_MAX_LINES][3];
+};
+
+/* 62 loop doublings (leading bit is bit 62) + the final one + one addition per
+ * remaining set bit: the table must hold them all or the build overruns it. */
+static_assert(63 + __builtin_popcountll(BLS_X >> 1) - 1 <= ML_MAX_LINES,
+              "g2_lines table too small for the Miller schedule");
+
+struct g2_lines *bls12_381_g2_lines_new(const struct g2_point *q)
+{
+    if (!q)
+        LOG_NULL("bls12_381", "g2_lines_new: NULL point");
+    struct g2_lines *ln = zcl_calloc(1, sizeof(*ln), "bls12_381_g2_lines");
+    if (!ln)
+        LOG_NULL("bls12_381", "g2_lines_new: zcl_calloc failed (%zu bytes)",
+                 sizeof(*ln));
+    if (g2_is_identity(q))
+        return ln;                      /* n == 0: pairs with it are skipped */
+
+    struct fp2 qx, qy;
+    g2_to_affine(&qx, &qy, q);
+    struct g2_point r;
+    r.x = qx;
+    r.y = qy;
+    fp2_one(&r.z);
+
+    uint64_t x_half = BLS_X >> 1;
+    bool found_one = false;
+    for (int i = 63; i >= 0; i--) {
+        bool bit = (x_half >> i) & 1;
+        if (!found_one) {
+            found_one = bit;
+            continue;
+        }
+        doubling_step(&r, &ln->c[ln->n][0], &ln->c[ln->n][1], &ln->c[ln->n][2]);
+        ln->n++;
+        if (bit) {
+            addition_step(&r, &qx, &qy, &ln->c[ln->n][0], &ln->c[ln->n][1],
+                          &ln->c[ln->n][2]);
+            ln->n++;
+        }
+    }
+    doubling_step(&r, &ln->c[ln->n][0], &ln->c[ln->n][1], &ln->c[ln->n][2]);
+    ln->n++;
+    return ln;
+}
+
+void bls12_381_g2_lines_free(struct g2_lines *ln)
+{
+    free(ln);
+}
+
+#define ML_MAX_PAIRS 8
+
+/* One live pair of the shared loop. lines != NULL reads the table, else the
+ * point is stepped on the fly from r (starting at Q). */
+struct ml_pair {
+    struct fp px, py;
+    const struct g2_lines *lines;
+    struct g2_point r;
+    struct fp2 qx, qy;
+};
+
+static void ml_pair_init(struct ml_pair *mp, const struct g1_point *p,
+                         const struct g2_point *q, const struct g2_lines *lines)
+{
+    g1_to_affine(&mp->px, &mp->py, p);
+    mp->lines = lines;
+    if (lines)
+        return;
+    g2_to_affine(&mp->qx, &mp->qy, q);
+    mp->r.x = mp->qx;
+    mp->r.y = mp->qy;
+    fp2_one(&mp->r.z);
+}
+
+/* Multiply the pair's step number idx (doubling or addition) into f. */
+static void ml_pair_step(struct fp12 *f, struct ml_pair *mp, size_t idx, bool add)
+{
+    struct fp2 c0, c1, c2;
+    if (mp->lines) {
+        c0 = mp->lines->c[idx][0];
+        c1 = mp->lines->c[idx][1];
+        c2 = mp->lines->c[idx][2];
+    } else if (add) {
+        addition_step(&mp->r, &mp->qx, &mp->qy, &c0, &c1, &c2);
+    } else {
+        doubling_step(&mp->r, &c0, &c1, &c2);
+    }
+    ell(f, &c0, &c1, &c2, &mp->px, &mp->py);
+}
+
+/* Product over pairs of bls12_381_miller_loop, computed with ONE f. The
+ * per-pair loop is f <- (f * l_dbl [* l_add])^2 ending with f * l_dbl, then a
+ * conjugate; with f = prod f_i that recurrence factors exactly, and Fp12
+ * arithmetic is exact, so the result equals the product of the separate loops
+ * bit for bit. lines[i] may be NULL (step on the fly) or the table of q[i].
+ * Pairs with an identity point are skipped as multi_pairing_check does. */
+bool bls12_381_multi_miller_shared(struct fp12 *result, const struct g1_point *p,
+                                   const struct g2_point *q,
+                                   const struct g2_lines *const *lines, size_t n)
+{
+    if (n > ML_MAX_PAIRS)
+        LOG_FAIL("bls12_381", "multi_miller_shared: %zu pairs > cap %d", n,
+                 ML_MAX_PAIRS);
+    struct ml_pair mp[ML_MAX_PAIRS];
+    size_t live = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (g1_is_identity(&p[i]) || g2_is_identity(&q[i]))
+            continue;
+        const struct g2_lines *ln = lines ? lines[i] : NULL;
+        if (ln && ln->n == 0)
+            ln = NULL;                  /* defensive: empty table, step live */
+        ml_pair_init(&mp[live++], &p[i], &q[i], ln);
+    }
+
+    struct fp12 f;
+    fp12_one(&f);
+    uint64_t x_half = BLS_X >> 1;
+    bool found_one = false;
+    size_t idx = 0;
+    for (int i = 63; i >= 0; i--) {
+        bool bit = (x_half >> i) & 1;
+        if (!found_one) {
+            found_one = bit;
+            continue;
+        }
+        for (size_t k = 0; k < live; k++)
+            ml_pair_step(&f, &mp[k], idx, false);
+        idx++;
+        if (bit) {
+            for (size_t k = 0; k < live; k++)
+                ml_pair_step(&f, &mp[k], idx, true);
+            idx++;
+        }
+        fp12_sq(&f, &f);
+    }
+    for (size_t k = 0; k < live; k++)
+        ml_pair_step(&f, &mp[k], idx, false);
+
+    fp12_conjugate(&f);
+    *result = f;
+    return true;
+}
+
+/* Pairing check through the shared loop; same verdict as
+ * bls12_381_multi_pairing_check. */
+static bool multi_pairing_check_shared(const struct g1_point *p,
+                                       const struct g2_point *q,
+                                       const struct g2_lines *const *lines,
+                                       size_t n)
+{
+    struct fp12 ml, result, one;
+    if (!bls12_381_multi_miller_shared(&ml, p, q, lines, n))
+        return false;
+    bls12_381_final_exp(&result, &ml);
+    fp12_one(&one);
+    return memcmp(&result, &one, sizeof(struct fp12)) == 0;
+}
 /* Constant-time conditional move for Fp.  If mask == all-ones,
  * dst = src; if mask == 0, dst is unchanged.  No branches, no
  * secret-dependent memory access. */
@@ -1810,12 +1981,38 @@ static inline void groth16_ic_term(struct g1_point *term,
         g1_scalar_mul(term, &vk->ic[i + 1], scalar);
 }
 
+static void groth16_vk_free_lines(struct groth16_vk *vk)
+{
+    for (int i = 0; i < 3; i++) {
+        bls12_381_g2_lines_free(vk->g2_lines[i]);
+        vk->g2_lines[i] = NULL;
+    }
+}
+
 void groth16_vk_free_combs(struct groth16_vk *vk)
 {
-    if (!vk || !vk->ic_combs)
+    if (!vk)
         return;
     free(vk->ic_combs);
     vk->ic_combs = NULL;
+    groth16_vk_free_lines(vk);
+}
+
+/* Lines for beta, -gamma, -delta (the fixed G2 points of groth16_verify). */
+static bool groth16_vk_build_lines(struct groth16_vk *vk)
+{
+    struct g2_point neg_gamma, neg_delta;
+    g2_neg(&neg_gamma, &vk->gamma_g2);
+    g2_neg(&neg_delta, &vk->delta_g2);
+    const struct g2_point *fixed[3] = { &vk->beta_g2, &neg_gamma, &neg_delta };
+    for (int i = 0; i < 3; i++) {
+        vk->g2_lines[i] = bls12_381_g2_lines_new(fixed[i]);
+        if (!vk->g2_lines[i]) {
+            groth16_vk_free_lines(vk);
+            LOG_FAIL("groth16_vk", "build_lines: line table %d alloc failed", i);
+        }
+    }
+    return true;
 }
 
 bool groth16_vk_build_combs(struct groth16_vk *vk)
@@ -1825,6 +2022,8 @@ bool groth16_vk_build_combs(struct groth16_vk *vk)
     /* Rebuild from scratch so a second call cannot leak or reuse tables built
      * over different bases. */
     groth16_vk_free_combs(vk);
+    if (!groth16_vk_build_lines(vk))
+        return false;
     if (vk->ic_len < 2 || !vk->ic)
         return true;                    /* no scalar-mul'd IC points -> nothing */
 
@@ -2053,6 +2252,13 @@ bool groth16_verify(const struct groth16_vk *vk,
     struct g1_point pts[4] = { proof->a, vk_x, proof->c, neg_alpha };
     struct g2_point qts[4] = { proof->b, neg_gamma, neg_delta, vk->beta_g2 };
 
+    /* Fixed-VK points carry precomputed lines when built: one shared Miller
+     * loop, same GT value. Without them, the per-pair loops of old. */
+    if (vk->g2_lines[0] && vk->g2_lines[1] && vk->g2_lines[2]) {
+        const struct g2_lines *lines[4] = { NULL, vk->g2_lines[1],
+                                            vk->g2_lines[2], vk->g2_lines[0] };
+        return multi_pairing_check_shared(pts, qts, lines, 4);
+    }
     return bls12_381_multi_pairing_check(pts, qts, 4);
 }
 
@@ -2240,6 +2446,8 @@ bool groth16_vk_read_raw(struct groth16_vk *vk, const uint8_t *data, size_t len)
      * a fresh struct (same contract as vk->ic, which is overwritten too), so
      * clear rather than free. Re-precompute with groth16_vk_build_combs. */
     vk->ic_combs = NULL;
+    for (int i = 0; i < 3; i++)
+        vk->g2_lines[i] = NULL;
 
     struct g1_point beta_g1, delta_g1;
     if (!read_g1_uncompressed(&vk->alpha_g1, &data, &len))

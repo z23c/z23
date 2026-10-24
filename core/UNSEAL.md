@@ -284,3 +284,7 @@ later lane flips it HARD.
 - 2026-10-23T22:58:42Z — REASON: tor_fetch: the blocking onion fetch wait returns as soon as process shutdown is requested instead of polling out its full timeout (shutdown latency; no consensus effect)
   old ROOT: 5acb8dd0ba8959a3dfb47502c3e875e2599e7768657dd6028b143d85658e6d9e
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-23T21:41:38Z — REASON: bls12-381 groth16 verify: precomputed G2 lines for fixed VK points and a shared-f multi-Miller loop (speed only, GT result bit-identical)
+  old ROOT: 5acb8dd0ba8959a3dfb47502c3e875e2599e7768657dd6028b143d85658e6d9e
+  by: owner unseal ritual (make core-unseal)

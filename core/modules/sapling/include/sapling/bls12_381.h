@@ -145,6 +145,17 @@ bool bls12_381_multi_pairing_check(
     const struct g1_point *a_pts, const struct g2_point *b_pts,
     size_t n_pairs);
 
+/* Line table of one G2 point and its release; consumed by the shared loop. */
+struct g2_lines *bls12_381_g2_lines_new(const struct g2_point *q);
+void bls12_381_g2_lines_free(struct g2_lines *ln);
+
+/* Shared-f multi-Miller loop: result = prod_i bls12_381_miller_loop(p[i], q[i])
+ * bit-identically, one f for all pairs. lines may be NULL or have NULL
+ * entries (step that pair on the fly); n <= 8. */
+bool bls12_381_multi_miller_shared(struct fp12 *result, const struct g1_point *p,
+                                   const struct g2_point *q,
+                                   const struct g2_lines *const *lines, size_t n);
+
 /* Groth16 proof verification */
 struct groth16_proof {
     struct g1_point a;
@@ -159,6 +170,9 @@ struct groth16_proof {
  * the two paths produce the same group element, so verdicts never differ. */
 struct g1_comb;
 
+/* Opaque precomputed (c0,c1,c2) line coefficients of one G2 point. */
+struct g2_lines;
+
 struct groth16_vk {
     struct g1_point alpha_g1;
     struct g2_point beta_g2;
@@ -171,6 +185,11 @@ struct groth16_vk {
      * (`struct groth16_vk vk = {0};`) — a stale or garbage pointer here would
      * multiply against the wrong bases. */
     struct g1_comb *ic_combs;
+    /* Optional precomputed Miller lines for the three fixed G2 points the
+     * verifier pairs: [0] = beta, [1] = -gamma, [2] = -delta. NULL unless
+     * groth16_vk_build_combs() built them; same zero-init rule as ic_combs.
+     * A VK without lines verifies through the on-the-fly path, same verdict. */
+    struct g2_lines *g2_lines[3];
 };
 
 /* Precompute the windowed tables over vk->ic[1..], turning each per-verify
