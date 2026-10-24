@@ -13158,6 +13158,23 @@ $(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS) \
 	    vendor/lib/libssl.a vendor/lib/libcrypto.a -lpthread -lm \
 	    $(if $(ZCL_HOST_WINDOWS),-lws2_32 -lbcrypt -lcrypt32 -ladvapi32 -luserenv -lshell32,)
 
+# ── z23-loop-tick: the self-improving loop's hourly tick ────────────────────
+# A standalone tool, compiled straight from source like z23-engine-unit above
+# and for the same reasons (tools launch programs, the node never does). It
+# needs no TLS: it only runs z23-dev, z23-engine-unit, zgate, git and claude
+# through zcl_spawn_capture, so it links no vendor library. flock(2) is the
+# single-instance lock, so the rule does not exist on a Windows host.
+ifeq ($(ZCL_HOST_WINDOWS),)
+LOOP_TICK_BIN = $(BIN_DIR)/z23-loop-tick
+LOOP_TICK_SRCS = tools/loop_tick.c 	platform/modules/json/src/json.c 	platform/modules/util/src/spawn.c 	platform/modules/base/src/cleanse.c 	platform/modules/base/src/log_level.c 	platform/modules/base/src/result.c 	platform/modules/base/src/safe_alloc.c 	platform/modules/platform/src/clock.c 	platform/modules/platform/src/os_proc.c
+LOOP_TICK_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include 	-Iplatform/modules/platform/include -Iplatform/modules/util/include
+.PHONY: loop-tick
+loop-tick: $(LOOP_TICK_BIN)
+$(LOOP_TICK_BIN): $(LOOP_TICK_SRCS)
+	@mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) 	    $(BUILD_IDENTITY_CPPFLAGS) 	    $(LOOP_TICK_INCLUDES) 	    -o $@ $(LOOP_TICK_SRCS) -lpthread
+endif
+
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core_seal is a tiny build-time C tool (no external deps: it links the in-tree
 # FIPS-202 SHA3-256 + memory_cleanse) that reads the file list on stdin

@@ -1151,6 +1151,7 @@ int main(int argc, char **argv)
     { extern int test_engine_rules(void); failures += test_engine_rules(); }
     { extern int test_engine_escalate(void); failures += test_engine_escalate(); }
     { extern int test_engine_claude(void); failures += test_engine_claude(); }
+    { extern int test_loop_tick(void); failures += test_loop_tick(); }
     failures += test_validation();
     { extern int test_consensus_parity(void); failures += test_consensus_parity(); }
     { extern int test_rom_state_checkpoint(void); failures += test_rom_state_checkpoint(); }

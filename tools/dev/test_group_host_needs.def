@@ -222,6 +222,7 @@ ZCL_TEST_GROUP_NEED("test_self_folded_anchor_heavy", ZCL_HOST_NEED_ENV,
                     "ZCL_SELF_FOLD_ANCHOR_FIXTURE")
 
 /* Only engine's end-to-end cases need this executable fixture. */
+ZCL_TEST_GROUP_BUILD_NEED("test_loop_tick", "build/bin/z23-loop-tick", "loop-tick")
 ZCL_TEST_GROUP_BUILD_NEED("test_engine", "build/bin/z23-engine-unit",
                          "engine-unit")
 
