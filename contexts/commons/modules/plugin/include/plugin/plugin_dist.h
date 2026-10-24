@@ -90,6 +90,33 @@ enum plugin_dist_status plugin_dist_publish(
     const struct plugin_dist_publish_request *request,
     struct plugin_dist_published *out);
 
+/* Publish in three steps so a resident node can commit what a CLI signed.
+ * prepare hashes the plugin files and computes the package root; it needs no
+ * store. sign_release loads the key file, signs the prepared root and returns
+ * the serialized release (caller frees); the key bytes never leave it. commit
+ * writes the manifest, the chunks, the release and the pin into a GIVEN store,
+ * and refuses before any write when the release names another root or
+ * another plugin than the prepared one. plugin_dist_publish is the three in
+ * order. */
+struct plugin_dist_prepared;
+
+enum plugin_dist_status plugin_dist_prepare(
+    const struct plugin_dist_publish_request *request,
+    struct plugin_dist_prepared **prepared_out,
+    struct plugin_dist_published *out);
+void plugin_dist_prepared_free(struct plugin_dist_prepared *prepared);
+
+enum plugin_dist_status plugin_dist_sign_release(
+    const struct plugin_dist_prepared *prepared,
+    const struct plugin_dist_publish_request *request,
+    uint8_t **release_wire_out, size_t *release_len_out,
+    struct plugin_dist_published *out);
+
+enum plugin_dist_status plugin_dist_commit(
+    struct vcs_package_store *store, const struct plugin_dist_prepared *prepared,
+    const uint8_t *release_wire, size_t release_len,
+    struct plugin_dist_published *out);
+
 struct plugin_dist_receive_request {
     struct vcs_package_store *store;
     uint8_t requested_root[32];

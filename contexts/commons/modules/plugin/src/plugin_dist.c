@@ -336,60 +336,27 @@ static bool pd_release_fill(struct vcs_package_release *r,
     return ok && vcs_package_accept_chain_id(r->chain_id, sizeof(r->chain_id));
 }
 
-static enum plugin_dist_status pd_sign_release(
-    struct vcs_package_store *store, const struct plugin_dist_publish_request *rq,
-    const struct plugin_manifest *m, const uint8_t root[32],
-    struct plugin_dist_published *out)
-{
-    struct privkey sk;
-    struct pubkey pk;
-    enum plugin_dist_status ds = pd_release_key(rq->release_key, &sk, &pk, out);
-    if (ds != PLUGIN_DIST_OK)
-        return ds;
-    struct vcs_package_release r;
-    uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
-    bool ok = pd_release_fill(&r, rq, m, root, &pk) &&
-              vcs_package_release_id(&r, id) == VCS_PACKAGE_RELEASE_OK;
-    struct uint256 hash;
-    unsigned char compact[COMPACT_SIGNATURE_SIZE];
-    memcpy(hash.data, id, 32);
-    ok = ok && privkey_sign_compact(&sk, &hash, compact);
-    memset(&sk, 0, sizeof(sk));
-    if (!ok) {
-        pd_detail(out->detail, sizeof(out->detail), "%s",
-                  "release refused: the plugin version must be semver and the chain id available");
-        return PLUGIN_DIST_ERR_RELEASE;
-    }
-    memcpy(r.signature, compact + 1, VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
-    enum vcs_package_accept_result ar = VCS_PACKAGE_ACCEPT_ERR_NULL;
-    enum vcs_package_store_result sr = vcs_package_store_put_release(store, &r, &ar);
-    if (sr != VCS_PACKAGE_STORE_OK ||
-        (ar != VCS_PACKAGE_ACCEPT_OK && ar != VCS_PACKAGE_ACCEPT_DUPLICATE)) {
-        pd_detail(out->detail, sizeof(out->detail),
-                  "release not accepted by the store (%s); use a new --sequence",
-                  vcs_package_store_result_string(sr));
-        return PLUGIN_DIST_ERR_RELEASE;
-    }
-    return PLUGIN_DIST_OK;
-}
-
-struct pd_pub {
+struct plugin_dist_prepared {
     struct pd_member mem[4]; /* LICENSE, image, manifest, signature */
     char *manifest_bytes, *sig_bytes, *license;
     size_t manifest_len, sig_len, license_len;
     struct plugin_manifest m;
+    uint8_t root[32];
+    uint8_t *wire; /* serialized package manifest */
+    size_t wire_len;
 };
 
-static void pd_pub_free(struct pd_pub *p)
+static void pd_pub_free(struct plugin_dist_prepared *p)
 {
     for (int i = 0; i < 4; i++)
         free(p->mem[i].digests);
     free(p->manifest_bytes);
     free(p->sig_bytes);
     free(p->license);
+    free(p->wire);
 }
 
-static bool pd_pub_members(struct pd_pub *p, const struct plugin_dist_publish_request *rq,
+static bool pd_pub_members(struct plugin_dist_prepared *p, const struct plugin_dist_publish_request *rq,
                            const char *dir)
 {
     memset(p->mem, 0, sizeof(p->mem));
@@ -407,7 +374,7 @@ static bool pd_pub_members(struct pd_pub *p, const struct plugin_dist_publish_re
 }
 
 /* The three generation files must agree before they are offered. */
-static enum plugin_dist_status pd_pub_source(struct pd_pub *p,
+static enum plugin_dist_status pd_pub_source(struct plugin_dist_prepared *p,
                                              const struct plugin_dist_publish_request *rq,
                                              const char *dir,
                                              struct plugin_dist_published *out)
@@ -451,8 +418,7 @@ static enum plugin_dist_status pd_pub_source(struct pd_pub *p,
     return PLUGIN_DIST_OK;
 }
 
-static bool pd_pub_store(struct pd_pub *p, struct vcs_package_store *store,
-                         struct plugin_dist_published *out)
+static bool pd_pub_hash(struct plugin_dist_prepared *p, struct plugin_dist_published *out)
 {
     struct vcs_package_manifest pm;
     vcs_package_manifest_init(&pm);
@@ -465,20 +431,27 @@ static bool pd_pub_store(struct pd_pub *p, struct vcs_package_store *store,
         if (ok)
             out->bytes += mem->size;
     }
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    ok = ok && vcs_package_manifest_serialize(&pm, &wire, &wire_len) &&
-         vcs_package_store_put_manifest(store, wire, wire_len, out->root) ==
-             VCS_PACKAGE_STORE_OK;
-    for (int i = 0; ok && i < 4; i++)
-        ok = pd_put_member_chunks(store, out->root, &p->mem[i]);
-    free(wire);
+    ok = ok && vcs_package_manifest_serialize(&pm, &p->wire, &p->wire_len) &&
+         vcs_package_manifest_root(&pm, p->root);
     vcs_package_manifest_free(&pm);
     return ok;
 }
 
-static void pd_pub_fill(const struct pd_pub *p, struct plugin_dist_published *out)
+/* manifest first, then every chunk: the store checks each against the root. */
+static bool pd_pub_write(const struct plugin_dist_prepared *p, struct vcs_package_store *store)
 {
+    uint8_t stored[32];
+    bool ok = vcs_package_store_put_manifest(store, p->wire, p->wire_len, stored) ==
+                  VCS_PACKAGE_STORE_OK &&
+              memcmp(stored, p->root, 32) == 0;
+    for (int i = 0; ok && i < 4; i++)
+        ok = pd_put_member_chunks(store, p->root, &p->mem[i]);
+    return ok;
+}
+
+static void pd_pub_fill(const struct plugin_dist_prepared *p, struct plugin_dist_published *out)
+{
+    memcpy(out->root, p->root, 32);
     zcl_hex_encode(out->root, 32, out->root_hex);
     snprintf(out->name, sizeof(out->name), "%s", p->m.name);
     snprintf(out->version, sizeof(out->version), "%s", p->m.version);
@@ -491,15 +464,24 @@ static void pd_pub_fill(const struct pd_pub *p, struct plugin_dist_published *ou
     zcl_hex_encode(md, PLUGIN_DIGEST_BYTES, out->generation);
 }
 
-static enum plugin_dist_status pd_publish(
-    struct vcs_package_store *store,
+static void pd_prepared_free(struct plugin_dist_prepared *prep)
+{
+    if (!prep)
+        return;
+    pd_pub_free(prep);
+    free(prep);
+}
+
+static enum plugin_dist_status pd_prepare(
     const struct plugin_dist_publish_request *rq,
-    struct plugin_dist_published *out)
+    struct plugin_dist_prepared **prep_out, struct plugin_dist_published *out)
 {
     if (!out)
         return PLUGIN_DIST_ERR_ARGUMENT;
     memset(out, 0, sizeof(*out));
-    if (!store || !rq || !rq->name || !plugin_name_valid(rq->name) || !rq->license_file) {
+    if (prep_out)
+        *prep_out = NULL;
+    if (!prep_out || !rq || !rq->name || !plugin_name_valid(rq->name) || !rq->license_file) {
         snprintf(out->detail, sizeof(out->detail),
                  "store, a valid plugin name and --license-file are required");
         return PLUGIN_DIST_ERR_ARGUMENT;
@@ -508,28 +490,160 @@ static enum plugin_dist_status pd_publish(
     enum plugin_dist_status ds = pd_source(rq, dir, out);
     if (ds != PLUGIN_DIST_OK)
         return ds;
-    struct pd_pub p;
-    memset(&p, 0, sizeof(p));
-    if (!pd_pub_members(&p, rq, dir))
-        return PLUGIN_DIST_ERR_ARGUMENT;
-    ds = pd_pub_source(&p, rq, dir, out);
-    if (ds == PLUGIN_DIST_OK && !pd_pub_store(&p, store, out)) {
+    struct plugin_dist_prepared *p = zcl_calloc(1, sizeof(*p), "plugin_dist_prepared");
+    if (!p)
+        return PLUGIN_DIST_ERR_STORE;
+    ds = pd_pub_members(p, rq, dir) ? pd_pub_source(p, rq, dir, out)
+                                    : PLUGIN_DIST_ERR_ARGUMENT;
+    if (ds == PLUGIN_DIST_OK && !pd_pub_hash(p, out)) {
         pd_detail(out->detail, sizeof(out->detail), "%s",
                   "the package store refused the manifest or a chunk");
         ds = PLUGIN_DIST_ERR_STORE;
     }
-    if (ds == PLUGIN_DIST_OK)
-        ds = pd_sign_release(store, rq, &p.m, out->root, out);
+    if (ds != PLUGIN_DIST_OK) {
+        pd_prepared_free(p);
+        return ds;
+    }
+    pd_pub_fill(p, out);
+    *prep_out = p;
+    return PLUGIN_DIST_OK;
+}
+
+/* Sign the release id with the loaded key. */
+static bool pd_sign_with_key(const struct privkey *sk, const struct pubkey *pk,
+                             const struct plugin_dist_publish_request *rq,
+                             const struct plugin_dist_prepared *p, struct vcs_package_release *r)
+{
+    uint8_t id[VCS_PACKAGE_RELEASE_ID_BYTES];
+    struct uint256 hash;
+    unsigned char compact[COMPACT_SIGNATURE_SIZE];
+    if (!pd_release_fill(r, rq, &p->m, p->root, pk) ||
+        vcs_package_release_id(r, id) != VCS_PACKAGE_RELEASE_OK)
+        return false;
+    memcpy(hash.data, id, 32);
+    if (!privkey_sign_compact(sk, &hash, compact))
+        return false;
+    memcpy(r->signature, compact + 1, VCS_PACKAGE_RELEASE_SIGNATURE_BYTES);
+    return true;
+}
+
+static enum plugin_dist_status pd_sign_release(
+    const struct plugin_dist_prepared *prep,
+    const struct plugin_dist_publish_request *rq, uint8_t **wire_out,
+    size_t *wire_len_out, struct plugin_dist_published *out)
+{
+    if (!out)
+        return PLUGIN_DIST_ERR_ARGUMENT;
+    if (!prep || !rq || !wire_out || !wire_len_out) {
+        snprintf(out->detail, sizeof(out->detail), "a prepared package and a request are required");
+        return PLUGIN_DIST_ERR_ARGUMENT;
+    }
+    *wire_out = NULL;
+    *wire_len_out = 0;
+    struct privkey sk;
+    struct pubkey pk;
+    enum plugin_dist_status ds = pd_release_key(rq->release_key, &sk, &pk, out);
+    if (ds != PLUGIN_DIST_OK)
+        return ds;
+    struct vcs_package_release r;
+    bool ok = pd_sign_with_key(&sk, &pk, rq, prep, &r);
+    memset(&sk, 0, sizeof(sk));
+    ok = ok && vcs_package_release_serialize(&r, wire_out, wire_len_out) ==
+                   VCS_PACKAGE_RELEASE_OK;
+    if (!ok) {
+        pd_detail(out->detail, sizeof(out->detail), "%s",
+                  "release refused: the plugin version must be semver and the chain id available");
+        return PLUGIN_DIST_ERR_RELEASE;
+    }
+    return PLUGIN_DIST_OK;
+}
+
+/* The release must name exactly the prepared package, checked before any write. */
+static enum plugin_dist_status pd_commit_check(
+    const struct plugin_dist_prepared *p, const uint8_t *wire, size_t wire_len,
+    struct vcs_package_release *r, struct plugin_dist_published *out)
+{
+    char want[sizeof(r->name)];
+    if (vcs_package_release_parse(wire, wire_len, r) != VCS_PACKAGE_RELEASE_OK) {
+        pd_detail(out->detail, sizeof(out->detail), "%s",
+                  "the release is not a valid release envelope");
+        return PLUGIN_DIST_ERR_RELEASE;
+    }
+    if (snprintf(want, sizeof(want), "plugin/%s", p->m.name) <= 0 ||
+        strcmp(r->name, want) != 0) {
+        pd_detail(out->detail, sizeof(out->detail), "%s",
+                  "the release names a different package than the prepared plugin");
+        return PLUGIN_DIST_ERR_RELEASE;
+    }
+    if (memcmp(r->package_root, p->root, 32) != 0) {
+        pd_detail(out->detail, sizeof(out->detail), "%s",
+                  "the release root differs from the root recomputed from the plugin files");
+        return PLUGIN_DIST_ERR_RELEASE;
+    }
+    return PLUGIN_DIST_OK;
+}
+
+static enum plugin_dist_status pd_commit(
+    struct vcs_package_store *store, const struct plugin_dist_prepared *prep,
+    const uint8_t *release_wire, size_t release_len,
+    struct plugin_dist_published *out)
+{
+    if (!out)
+        return PLUGIN_DIST_ERR_ARGUMENT;
+    if (!store || !prep || !release_wire) {
+        snprintf(out->detail, sizeof(out->detail), "a store, a prepared package and a release are required");
+        return PLUGIN_DIST_ERR_ARGUMENT;
+    }
+    struct vcs_package_release r;
+    enum plugin_dist_status ds = pd_commit_check(prep, release_wire, release_len, &r, out);
+    if (ds != PLUGIN_DIST_OK)
+        return ds;
+    if (!pd_pub_write(prep, store)) {
+        pd_detail(out->detail, sizeof(out->detail), "%s",
+                  "the package store refused the manifest or a chunk");
+        return PLUGIN_DIST_ERR_STORE;
+    }
+    enum vcs_package_accept_result ar = VCS_PACKAGE_ACCEPT_ERR_NULL;
+    enum vcs_package_store_result sr = vcs_package_store_put_release(store, &r, &ar);
+    if (sr != VCS_PACKAGE_STORE_OK ||
+        (ar != VCS_PACKAGE_ACCEPT_OK && ar != VCS_PACKAGE_ACCEPT_DUPLICATE)) {
+        pd_detail(out->detail, sizeof(out->detail),
+                  "release not accepted by the store (%s); use a new --sequence",
+                  vcs_package_store_result_string(sr));
+        return PLUGIN_DIST_ERR_RELEASE;
+    }
     /* Pinned roots are never evicted, so the offer outlives pool pressure. */
-    if (ds == PLUGIN_DIST_OK &&
-        vcs_package_store_pin(store, out->root, true) != VCS_PACKAGE_STORE_OK) {
+    if (vcs_package_store_pin(store, prep->root, true) != VCS_PACKAGE_STORE_OK) {
         pd_detail(out->detail, sizeof(out->detail), "%s",
                   "the root was stored and signed but could not be pinned");
-        ds = PLUGIN_DIST_ERR_STORE;
+        return PLUGIN_DIST_ERR_STORE;
     }
+    return PLUGIN_DIST_OK;
+}
+
+static enum plugin_dist_status pd_publish(
+    struct vcs_package_store *store,
+    const struct plugin_dist_publish_request *rq,
+    struct plugin_dist_published *out)
+{
+    if (!out)
+        return PLUGIN_DIST_ERR_ARGUMENT;
+    if (!store) {
+        memset(out, 0, sizeof(*out));
+        snprintf(out->detail, sizeof(out->detail),
+                 "store, a valid plugin name and --license-file are required");
+        return PLUGIN_DIST_ERR_ARGUMENT;
+    }
+    struct plugin_dist_prepared *prep = NULL;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    enum plugin_dist_status ds = pd_prepare(rq, &prep, out);
     if (ds == PLUGIN_DIST_OK)
-        pd_pub_fill(&p, out);
-    pd_pub_free(&p);
+        ds = pd_sign_release(prep, rq, &wire, &wire_len, out);
+    if (ds == PLUGIN_DIST_OK)
+        ds = pd_commit(store, prep, wire, wire_len, out);
+    free(wire);
+    pd_prepared_free(prep);
     return ds;
 }
 
@@ -845,5 +959,65 @@ enum plugin_dist_status plugin_dist_receive(
     return PLUGIN_DIST_ERR_ARGUMENT;
 #else
     return pd_receive(request, out);
+#endif
+}
+
+void plugin_dist_prepared_free(struct plugin_dist_prepared *prepared)
+{
+#if !defined(_WIN32)
+    pd_prepared_free(prepared);
+#else
+    (void)prepared;
+#endif
+}
+
+enum plugin_dist_status plugin_dist_prepare(
+    const struct plugin_dist_publish_request *request,
+    struct plugin_dist_prepared **prepared_out, struct plugin_dist_published *out)
+{
+#if defined(_WIN32)
+    (void)request;
+    if (prepared_out)
+        *prepared_out = NULL;
+    if (out) {
+        memset(out, 0, sizeof(*out));
+        snprintf(out->detail, sizeof(out->detail), "needs POSIX file semantics");
+    }
+    return PLUGIN_DIST_ERR_ARGUMENT;
+#else
+    return pd_prepare(request, prepared_out, out);
+#endif
+}
+
+enum plugin_dist_status plugin_dist_sign_release(
+    const struct plugin_dist_prepared *prepared,
+    const struct plugin_dist_publish_request *request, uint8_t **release_wire_out,
+    size_t *release_len_out, struct plugin_dist_published *out)
+{
+#if defined(_WIN32)
+    (void)prepared;
+    (void)request;
+    (void)release_wire_out;
+    (void)release_len_out;
+    (void)out;
+    return PLUGIN_DIST_ERR_ARGUMENT;
+#else
+    return pd_sign_release(prepared, request, release_wire_out, release_len_out, out);
+#endif
+}
+
+enum plugin_dist_status plugin_dist_commit(
+    struct vcs_package_store *store, const struct plugin_dist_prepared *prepared,
+    const uint8_t *release_wire, size_t release_len, struct plugin_dist_published *out)
+{
+#if defined(_WIN32)
+    (void)store;
+    (void)prepared;
+    (void)release_wire;
+    (void)release_len;
+    (void)out;
+    return PLUGIN_DIST_ERR_ARGUMENT;
+#else
+    return pd_commit(store, prepared, release_wire, release_len, out);
 #endif
 }

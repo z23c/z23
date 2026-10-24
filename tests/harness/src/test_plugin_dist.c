@@ -411,6 +411,70 @@ static int pd_refuse_big_and_link(void)
     return failures;
 }
 
+/* ---- 9. publish split into prepare, sign and commit --------------------- */
+static bool pd_split_rq(const struct pd_fixture *f, const char *dir,
+                        struct plugin_dist_publish_request *rq)
+{
+    memset(rq, 0, sizeof(*rq));
+    rq->name = "demo";
+    rq->src_dir = dir;
+    rq->license_file = f->license;
+    rq->spdx = "MIT";
+    rq->release_key = f->release_key;
+    rq->sequence = 1;
+    return true;
+}
+
+static int pd_split(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    struct plugin_dist_prepared *prep1 = NULL, *prep2 = NULL;
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    TEST("plugin dist: prepare, sign and commit match publish and refuse a foreign root first") {
+        struct plugin_pack_result v1, v2;
+        struct plugin_dist_published pub, p1, p2;
+        struct plugin_dist_publish_request rq1, rq2;
+        struct vcs_package_store_summary sums[8];
+        char dir1[1400], dir2[1400];
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &v1));
+        ASSERT(pd_pack(&f, "packed2", "2.0.0", &v2));
+        ASSERT(pd_write(f.license, TEST_LICENSE_TEXT_MIT, strlen(TEST_LICENSE_TEXT_MIT), 0644));
+        ASSERT(pd_path(dir1, sizeof(dir1), f.base, "packed1"));
+        ASSERT(pd_path(dir2, sizeof(dir2), f.base, "packed2"));
+        ASSERT(pd_split_rq(&f, dir1, &rq1));
+        rq1.sequence = 2;
+        ASSERT(pd_split_rq(&f, dir2, &rq2));
+        ASSERT_EQ(plugin_dist_prepare(&rq1, &prep1, &p1), PLUGIN_DIST_OK);
+        ASSERT_EQ(plugin_dist_prepare(&rq2, &prep2, &p2), PLUGIN_DIST_OK);
+        /* sign: the output verifies as a release for the prepared root */
+        ASSERT_EQ(plugin_dist_sign_release(prep1, &rq1, &wire, &wire_len, &pub), PLUGIN_DIST_OK);
+        struct vcs_package_release rel;
+        ASSERT_EQ(vcs_package_release_parse(wire, wire_len, &rel), VCS_PACKAGE_RELEASE_OK);
+        ASSERT_EQ(vcs_package_release_verify(&rel), VCS_PACKAGE_RELEASE_OK);
+        ASSERT(memcmp(rel.package_root, p1.root, 32) == 0);
+        /* commit: another package's release refuses before any write */
+        ASSERT_EQ(plugin_dist_commit(f.publisher.store, prep2, wire, wire_len, &pub),
+                  PLUGIN_DIST_ERR_RELEASE);
+        ASSERT_EQ(vcs_package_store_list_summaries(f.publisher.store, false, sums, 8), 0);
+        /* prepare's root is the root publish reports */
+        ASSERT_EQ(pd_publish(&f, "packed2", 1, &pub), PLUGIN_DIST_OK);
+        ASSERT(memcmp(pub.root, p2.root, 32) == 0);
+        ASSERT_EQ(vcs_package_store_list_summaries(f.publisher.store, false, sums, 8), 1);
+        ASSERT_EQ(plugin_dist_commit(f.publisher.store, prep1, wire, wire_len, &pub),
+                  PLUGIN_DIST_OK);
+        ASSERT_EQ(vcs_package_store_list_summaries(f.publisher.store, false, sums, 8), 2);
+        PASS();
+    } _test_next:;
+    free(wire);
+    plugin_dist_prepared_free(prep1);
+    plugin_dist_prepared_free(prep2);
+    pd_close(&f);
+    return failures;
+}
+
 int test_plugin_dist(void)
 {
     int failures = 0;
@@ -425,6 +489,7 @@ int test_plugin_dist(void)
     failures += pd_refuse_downgrade();
     failures += pd_refuse_publish();
     failures += pd_refuse_big_and_link();
+    failures += pd_split();
     /* Every case has ended (pass or fail); drop this run's RAM trees. */
     test_shm_reap_own("zcode_swarm-test-tmp_");
     return failures;
