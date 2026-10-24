@@ -758,8 +758,8 @@ void state_offer_service_tick(void)
     int64_t now_ms = sosvc_now_ms();
     state_offer_store_note_first_peer(now_ms);
     /* Producer side: make sure a node that HOLDS a bundle can actually say so.
-     * One-shot in practice — it returns on the first branch once the identity
-     * is in hand. */
+     * It also refreshes the artifact snapshot every SOSVC_SNAPSHOT_TTL_S (a
+     * cache hit for an unchanged bundle); the identity itself is set once. */
     sosvc_ensure_offering_identity(reducer_frontier_external_tip_height());
 
     if (g_fetch_running)
