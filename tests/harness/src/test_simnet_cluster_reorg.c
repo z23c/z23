@@ -69,6 +69,34 @@ static bool scr_relay_subset(struct simnet_cluster *cluster, size_t from_node,
     return true;
 }
 
+/* Both branches broadcast from their origin nodes, then the pending queue is
+ * delivered once. */
+static bool scr_broadcast_pair_and_deliver(struct simnet_cluster *cluster,
+                                           size_t node_a,
+                                           const struct uint256 *a,
+                                           size_t a_count,
+                                           size_t node_b,
+                                           const struct uint256 *b,
+                                           size_t b_count)
+{
+    return scr_broadcast(cluster, node_a, a, a_count) &&
+           scr_broadcast(cluster, node_b, b, b_count) &&
+           simnet_cluster_deliver_pending(cluster);
+}
+
+/* A subset relay from one origin node, then one pending-queue delivery. */
+static bool scr_relay_subset_and_deliver(struct simnet_cluster *cluster,
+                                         size_t from_node,
+                                         const struct uint256 *hashes,
+                                         size_t count,
+                                         const size_t *targets,
+                                         size_t target_count)
+{
+    return scr_relay_subset(cluster, from_node, hashes, count,
+                            targets, target_count) &&
+           simnet_cluster_deliver_pending(cluster);
+}
+
 static bool scr_same_tip_and_digest(struct simnet_cluster *cluster,
                                     size_t a, size_t b)
 {
@@ -92,6 +120,15 @@ static bool scr_all_converge(struct simnet_cluster *cluster, size_t node_count)
     return true;
 }
 
+/* Tip hash, then coins digest, of one node. */
+static bool scr_read_tip_and_digest(struct simnet_cluster *cluster,
+                                    size_t node_id, struct uint256 *tip,
+                                    struct utxo_commitment *digest)
+{
+    return simnet_cluster_tip_hash(cluster, node_id, tip) &&
+           simnet_cluster_coins_digest(cluster, node_id, digest);
+}
+
 /* Direct forward build of `count` blocks on `node_id` of a fresh same-seed,
  * same-shape cluster. Node tags are seed-derived, so the winning origin node
  * reproduces byte-identical blocks — the reference the reorged nodes must
@@ -111,6 +148,49 @@ static bool scr_direct_build(uint64_t seed, size_t node_count, size_t node_id,
               simnet_cluster_coins_digest(direct, node_id, out_digest);
     simnet_cluster_free(direct);
     return ok;
+}
+
+/* The reorged tip and coins of a scenario must equal the direct forward build
+ * of the same winning chain. */
+static bool scr_matches_direct_build(uint64_t seed, size_t node_count,
+                                     size_t node_id, size_t count,
+                                     const struct uint256 *tip,
+                                     const struct utxo_commitment *digest)
+{
+    struct uint256 ref_tip;
+    struct utxo_commitment ref_digest;
+    return scr_direct_build(seed, node_count, node_id, count,
+                            &ref_tip, &ref_digest) &&
+           uint256_eq(tip, &ref_tip) &&
+           utxo_commitment_equal(digest, &ref_digest);
+}
+
+/* Partition sides must be on distinct tips while split. */
+static bool scr_partition_tips_split(struct simnet_cluster *cluster,
+                                     struct uint256 *l_tip,
+                                     struct uint256 *r_tip)
+{
+    return simnet_cluster_tip_hash(cluster, 0, l_tip) &&
+           simnet_cluster_tip_hash(cluster, 2, r_tip) &&
+           !uint256_eq(l_tip, r_tip);
+}
+
+/* Accept the two equal-first_seen blocks into the forward and reverse chains
+ * (each in its own order) and read both tips back. */
+static bool scr_tie_accept_both_orders(struct simnet_chain *fwd,
+                                       struct simnet_chain *rev,
+                                       const struct block *bx,
+                                       const struct block *by,
+                                       struct uint256 *tip_fwd,
+                                       struct uint256 *tip_rev)
+{
+    return fwd && rev &&
+           simnet_chain_accept_block(fwd, bx, 100) &&
+           simnet_chain_accept_block(fwd, by, 100) &&
+           simnet_chain_accept_block(rev, by, 100) &&
+           simnet_chain_accept_block(rev, bx, 100) &&
+           simnet_chain_tip_hash(fwd, tip_fwd) &&
+           simnet_chain_tip_hash(rev, tip_rev);
 }
 
 /* (1) DEEP reorg (12 vs 14) across a 4-node cluster: the loser's whole branch
@@ -141,9 +221,8 @@ static int scr_deep_reorg(void)
     SCR_CHECK("deep-reorg: loser holds its own branch pre-delivery", pre_ok);
 
     bool relayed = pre_ok &&
-                   scr_broadcast(cluster, 0, losing, LOSE) &&
-                   scr_broadcast(cluster, 1, winning, WIN) &&
-                   simnet_cluster_deliver_pending(cluster);
+                   scr_broadcast_pair_and_deliver(cluster, 0, losing, LOSE,
+                                                  1, winning, WIN);
     SCR_CHECK("deep-reorg: both branches relay to all nodes", relayed);
 
     struct uint256 win_tip;
@@ -172,17 +251,14 @@ static int scr_deep_reorg(void)
     simnet_cluster_free(cluster);
 
     /* Independent forward reference: a fresh same-seed cluster minting only
-     * the 14-block winner must produce the identical tip + coins set. */
-    struct uint256 ref_tip;
-    struct utxo_commitment ref_digest;
+     * the 14-block winner must produce the identical tip + coins set. The
+     * loser's post digest equals the winner's digest (checked here), which
+     * is itself checked against the direct build. */
     bool ref_ok = win_dig &&
-                  scr_direct_build(scenario_seed, N, 1, WIN,
-                                   &ref_tip, &ref_digest);
-    SCR_CHECK("deep-reorg: reorged coins equal a direct winning build",
-              ref_ok &&
-              uint256_eq(&win_tip, &ref_tip) &&
-              utxo_commitment_equal(&win_digest, &ref_digest) &&
-              utxo_commitment_equal(&lose_digest_post, &ref_digest));
+                  scr_matches_direct_build(scenario_seed, N, 1, WIN,
+                                           &win_tip, &win_digest) &&
+                  utxo_commitment_equal(&lose_digest_post, &win_digest);
+    SCR_CHECK("deep-reorg: reorged coins equal a direct winning build", ref_ok);
     return failures;
 }
 
@@ -271,13 +347,9 @@ static int scr_tie_break_hash(void)
     struct simnet_chain *ref_fwd = simnet_chain_create(0xC3);
     struct simnet_chain *ref_rev = simnet_chain_create(0xC3);
     struct uint256 tip_fwd, tip_rev;
-    bool ok = minted && bx && by && ref_fwd && ref_rev &&
-              simnet_chain_accept_block(ref_fwd, bx, 100) &&
-              simnet_chain_accept_block(ref_fwd, by, 100) &&
-              simnet_chain_accept_block(ref_rev, by, 100) &&
-              simnet_chain_accept_block(ref_rev, bx, 100) &&
-              simnet_chain_tip_hash(ref_fwd, &tip_fwd) &&
-              simnet_chain_tip_hash(ref_rev, &tip_rev);
+    bool ok = minted && bx && by &&
+              scr_tie_accept_both_orders(ref_fwd, ref_rev, bx, by,
+                                         &tip_fwd, &tip_rev);
     SCR_CHECK("tie-break-hash: equal-first_seen tie resolves to lower hash",
               ok && uint256_eq(&tip_fwd, &expected));
     SCR_CHECK("tie-break-hash: winner is accept-order independent",
@@ -309,9 +381,8 @@ static int scr_partition_heal(void)
     /* Side L = {0,1}: node 0 builds, delivers only within L. */
     struct uint256 lchain[6];
     bool l_ok = scr_mint_chain(cluster, 0, lchain, LEFT_LEN) &&
-                scr_relay_subset(cluster, 0, lchain, LEFT_LEN,
-                                 left_side, 1) &&
-                simnet_cluster_deliver_pending(cluster);
+                scr_relay_subset_and_deliver(cluster, 0, lchain, LEFT_LEN,
+                                             left_side, 1);
     SCR_CHECK("partition: side L extends and syncs internally",
               l_ok && scr_same_tip_and_digest(cluster, 0, 1));
 
@@ -320,46 +391,36 @@ static int scr_partition_heal(void)
     struct uint256 rchain[8];
     bool r_ok = l_ok &&
                 scr_mint_chain(cluster, 2, rchain, RIGHT_LEN) &&
-                scr_relay_subset(cluster, 2, rchain, RIGHT_LEN,
-                                 right_side, 1) &&
-                simnet_cluster_deliver_pending(cluster);
+                scr_relay_subset_and_deliver(cluster, 2, rchain, RIGHT_LEN,
+                                             right_side, 1);
     SCR_CHECK("partition: side R extends and syncs internally",
               r_ok && scr_same_tip_and_digest(cluster, 2, 3));
 
     struct uint256 l_tip, r_tip;
     SCR_CHECK("partition: the two sides are on distinct tips while split",
-              r_ok &&
-              simnet_cluster_tip_hash(cluster, 0, &l_tip) &&
-              simnet_cluster_tip_hash(cluster, 2, &r_tip) &&
-              !uint256_eq(&l_tip, &r_tip));
+              r_ok && scr_partition_tips_split(cluster, &l_tip, &r_tip));
 
     /* HEAL: cross-deliver each side's chain to the other side. */
     bool healed = r_ok &&
-                  scr_broadcast(cluster, 0, lchain, LEFT_LEN) &&
-                  scr_broadcast(cluster, 2, rchain, RIGHT_LEN) &&
-                  simnet_cluster_deliver_pending(cluster);
+                  scr_broadcast_pair_and_deliver(cluster, 0, lchain, LEFT_LEN,
+                                                 2, rchain, RIGHT_LEN);
     SCR_CHECK("partition: heal delivers both branches cluster-wide", healed);
 
     struct uint256 heal_tip;
     struct utxo_commitment heal_digest;
     bool converged = healed &&
                      scr_all_converge(cluster, N) &&
-                     simnet_cluster_tip_hash(cluster, 0, &heal_tip) &&
-                     simnet_cluster_coins_digest(cluster, 0, &heal_digest);
+                     scr_read_tip_and_digest(cluster, 0, &heal_tip,
+                                             &heal_digest);
     /* Minority side L must have abandoned its 6-block branch for R's 8. */
     SCR_CHECK("partition: whole cluster converges on the heavier chain",
               converged && uint256_eq(&heal_tip, &r_tip));
     simnet_cluster_free(cluster);
 
-    struct uint256 ref_tip;
-    struct utxo_commitment ref_digest;
     bool ref_ok = converged &&
-                  scr_direct_build(scenario_seed, N, 2, RIGHT_LEN,
-                                   &ref_tip, &ref_digest);
-    SCR_CHECK("partition: healed coins equal a direct heavier build",
-              ref_ok &&
-              uint256_eq(&heal_tip, &ref_tip) &&
-              utxo_commitment_equal(&heal_digest, &ref_digest));
+                  scr_matches_direct_build(scenario_seed, N, 2, RIGHT_LEN,
+                                           &heal_tip, &heal_digest);
+    SCR_CHECK("partition: healed coins equal a direct heavier build", ref_ok);
     return failures;
 }
 
@@ -391,50 +452,40 @@ static int scr_reorg_rereorg(void)
 
     /* Stage 1: observer adopts A from base. */
     bool s1 = built &&
-              scr_relay_subset(cluster, 0, a, LA, obs, 1) &&
-              simnet_cluster_deliver_pending(cluster);
+              scr_relay_subset_and_deliver(cluster, 0, a, LA, obs, 1);
     SCR_CHECK("re-reorg: observer adopts A (base -> A)",
               s1 && scr_same_tip_and_digest(cluster, 3, 0));
 
     /* Stage 2: heavier B arrives -> first reorg A -> B. */
     bool s2 = s1 &&
-              scr_relay_subset(cluster, 1, b, LB, obs, 1) &&
-              simnet_cluster_deliver_pending(cluster);
+              scr_relay_subset_and_deliver(cluster, 1, b, LB, obs, 1);
     SCR_CHECK("re-reorg: observer reorgs A -> B on heavier work",
               s2 && scr_same_tip_and_digest(cluster, 3, 1));
 
     /* Stage 3: even-heavier C arrives -> second reorg B -> C. */
     bool s3 = s2 &&
-              scr_relay_subset(cluster, 2, c, LC, obs, 1) &&
-              simnet_cluster_deliver_pending(cluster);
+              scr_relay_subset_and_deliver(cluster, 2, c, LC, obs, 1);
     SCR_CHECK("re-reorg: observer re-reorgs B -> C on heaviest work",
               s3 && scr_same_tip_and_digest(cluster, 3, 2));
 
     /* Re-delivering the now-worse A is a no-op: the observer stays on C. */
     bool idem = s3 &&
-                scr_relay_subset(cluster, 0, a, LA, obs, 1) &&
-                simnet_cluster_deliver_pending(cluster);
+                scr_relay_subset_and_deliver(cluster, 0, a, LA, obs, 1);
     SCR_CHECK("re-reorg: redundant worse delivery is idempotent",
               idem && scr_same_tip_and_digest(cluster, 3, 2));
 
     struct uint256 obs_tip;
     struct utxo_commitment obs_digest;
     bool cap = idem &&
-               simnet_cluster_tip_hash(cluster, 3, &obs_tip) &&
-               simnet_cluster_coins_digest(cluster, 3, &obs_digest);
+               scr_read_tip_and_digest(cluster, 3, &obs_tip, &obs_digest);
     simnet_cluster_free(cluster);
 
     /* Undo/redo symmetry: after base->A->B->C churn, the observer's coins must
      * equal a fresh forward-only build of C. */
-    struct uint256 ref_tip;
-    struct utxo_commitment ref_digest;
     bool ref_ok = cap &&
-                  scr_direct_build(scenario_seed, N, 2, LC,
-                                   &ref_tip, &ref_digest);
-    SCR_CHECK("re-reorg: churned coins return to the direct C build",
-              ref_ok &&
-              uint256_eq(&obs_tip, &ref_tip) &&
-              utxo_commitment_equal(&obs_digest, &ref_digest));
+                  scr_matches_direct_build(scenario_seed, N, 2, LC,
+                                           &obs_tip, &obs_digest);
+    SCR_CHECK("re-reorg: churned coins return to the direct C build", ref_ok);
     return failures;
 }
 

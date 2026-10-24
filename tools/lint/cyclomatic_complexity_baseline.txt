@@ -2753,10 +2753,6 @@ tests/harness/src/test_sighash_malleability.c:test_sighash_malleability:55
 tests/harness/src/test_simd_os_support.c:test_simd_os_support:18
 tests/harness/src/test_simnet.c:test_simnet:245
 tests/harness/src/test_simnet_cluster.c:test_simnet_cluster:36
-tests/harness/src/test_simnet_cluster_reorg.c:scr_deep_reorg:18
-tests/harness/src/test_simnet_cluster_reorg.c:scr_partition_heal:22
-tests/harness/src/test_simnet_cluster_reorg.c:scr_reorg_rereorg:21
-tests/harness/src/test_simnet_cluster_reorg.c:scr_tie_break_hash:21
 tests/harness/src/test_simnet_contract.c:run_contract_scenario:20
 tests/harness/src/test_simnet_fuzz.c:fz_byz_wide:52
 tests/harness/src/test_simnet_fuzz.c:fz_perf_scenario:28
