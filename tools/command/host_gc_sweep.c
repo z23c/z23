@@ -53,6 +53,8 @@ struct hg_cand {
     bool locked;
     bool occupied;
     bool donor;       /* kept: newest complete generation of its identity */
+    bool disposable;  /* its pool is a disposable gate-copy pool */
+    bool orphan;      /* unregistered directory with the gate-copy shape */
     int dirty;        /* lines of `git status`; -1 unknown */
 };
 
@@ -62,6 +64,7 @@ struct hg_scan {
     size_t cap;
     bool truncated;
     bool process_inventory_complete;
+    bool foreign_ok;  /* every pool is closed to other uids (hg_pool_closed) */
 };
 
 static int hg_git(const char *dir, const char *const args[], char *out,
@@ -225,24 +228,28 @@ static bool hg_locked_on_disk(const char *wt)
            stat(marker, &st) == 0;
 }
 
-static void hg_push_cand(struct hg_scan *scan, size_t cls, const char *path,
-                         bool detached, bool locked)
+static struct hg_cand *hg_push_cand(struct hg_scan *scan, size_t cls,
+                                    const char *path, bool detached,
+                                    bool locked)
 {
     struct hg_cand *c;
     if (scan->n >= scan->cap) {
         scan->truncated = true;
-        return;
+        return NULL;
     }
     c = &scan->cands[scan->n];
     if (!hg_copy(c->path, sizeof(c->path), path))
-        return;
+        return NULL;
     c->cls = cls;
     c->detached = detached;
     c->locked = locked || hg_locked_on_disk(path);
     c->occupied = false;
     c->donor = false;
+    c->disposable = false;
+    c->orphan = false;
     c->dirty = 0;
     scan->n++;
+    return c;
 }
 
 /* One porcelain record. Only a worktree strictly UNDER the pool is ever a
@@ -281,6 +288,33 @@ static void hg_parse_worktrees(struct hg_scan *scan, size_t cls,
         line = next;
     }
     hg_take_record(scan, cls, pool, path, detached, locked, registered);
+}
+
+/* A disposable pool also holds gate copies git no longer registers: the
+ * gate-copy shape (see hg_orphan_shape) is the only thing that makes such a
+ * directory a candidate, and it is then classified and removed under the
+ * same lock, idle and protection rules as a registered one. */
+static void hg_push_orphans(struct hg_scan *scan, size_t cls, const char *pool,
+                            struct host_gc_class *out)
+{
+    DIR *d = opendir(pool);
+    struct dirent *e;
+    struct hg_cand *c;
+    char child[HOST_GC_PATH_CAP];
+    if (!d)
+        return;
+    while ((e = readdir(d)) != NULL) {
+        if (e->d_name[0] == '.' ||
+            !zcl_path_join(child, sizeof(child), pool, e->d_name) ||
+            !hg_orphan_shape(child))
+            continue;
+        out->registered++;
+        out->orphaned++;
+        c = hg_push_cand(scan, cls, child, false, false);
+        if (c)
+            c->orphan = true;
+    }
+    (void)closedir(d);
 }
 
 /* ------------------------------------------------------- occupancy pass */
@@ -341,8 +375,12 @@ static bool hg_mark_process(struct hg_scan *scan, const char *procdir)
 #if !defined(_WIN32)
     struct stat st;
     /* A vanished process cannot retain a live cwd/fd; all other failures
-     * remain unknown, including permissions and partial inventories. */
+     * remain unknown, including permissions and partial inventories. A
+     * process whose every uid is neither root nor ours cannot open files
+     * under a pool closed to other uids, so its unreadable entries are not
+     * a gap; one of our own uid, or root, still is. */
     if (!complete && lstat(procdir, &st) != 0 && errno == ENOENT) return true;
+    if (!complete && scan->foreign_ok && hg_proc_foreign(procdir)) return true;
 #endif
     return complete;
 }
@@ -354,9 +392,18 @@ static void hg_native_path(const char *path, void *opaque)
 }
 #endif
 
+static bool hg_pools_closed(const struct host_gc_request *req)
+{
+    for (size_t i = 0; i < req->npools && i < HOST_GC_MAX_POOLS; i++)
+        if (!hg_pool_closed(req->pools[i].path))
+            return false;
+    return req->npools > 0;
+}
+
 static void hg_mark_occupied(const struct host_gc_request *req,
                              struct hg_scan *scan)
 {
+    scan->foreign_ok = hg_pools_closed(req);
 #if defined(__APPLE__)
     if (!req->proc_root[0]) {
         scan->process_inventory_complete = os_proc_visit_paths(hg_native_path, scan);
@@ -548,13 +595,16 @@ static void hg_mark_donors(struct hg_scan *scan, size_t nclasses)
 /* ------------------------------------------------------- classification */
 
 /* Lines `git status` reports: tracked changes and every untracked file,
- * which includes an untracked nested repository. 0 is clean; -1 is unknown
+ * which includes an untracked nested repository. `shallow` (disposable
+ * pools, where the count is only reported and a gate copy carries huge
+ * untracked build trees) lists an untracked directory once instead of
+ * walking it, which bounds the cost of a 400-copy pool. 0 is clean; -1 is unknown
  * and is never clean. */
-static int hg_dirty_count(const char *wt)
+static int hg_dirty_count(const char *wt, bool shallow)
 {
-    static const char *const args[] = { "--no-optional-locks", "status",
-                                        "--porcelain",
-                                        "--untracked-files=all", NULL };
+    const char *args[] = { "--no-optional-locks", "status", "--porcelain",
+                           shallow ? "--untracked-files=normal"
+                                   : "--untracked-files=all", NULL };
     char *out = zcl_malloc(HG_DIRTY_CAP, "host_gc status");
     int n = 0;
     if (!out)
@@ -786,6 +836,17 @@ static void hg_mark_units(const struct host_gc_request *req,
     free(text);
 }
 
+/* True when the sibling flock <path>.lock is held by another process (or
+ * cannot be probed). The probe releases at once; hg_act re-takes and holds
+ * it across the removal. */
+static bool hg_lock_busy(const char *path)
+{
+    int fd;
+    bool busy = hg_lock_acquire(path, &fd) == HG_LOCK_BUSY;
+    hg_lock_release(fd);
+    return busy;
+}
+
 enum hg_verdict {
     HG_KEEP_LOCKED,
     HG_KEEP_IN_USE,
@@ -798,12 +859,16 @@ enum hg_verdict {
 
 /* A clean detached worktree is reapable when its HEAD lives elsewhere, and
  * when it does not, only with age_days on and idle that long (its HEAD is
- * then pinned first). Anything dirty is kept and recorded for a human. */
+ * then pinned first). Anything dirty is kept and recorded for a human,
+ * except in a disposable pool, where dirt is build output and the copy is
+ * classified like a clean one. An orphan has no HEAD and nothing to pin. */
 static enum hg_verdict hg_classify_content(const struct host_gc_request *req,
                                            struct hg_cand *c, int64_t now)
 {
-    c->dirty = hg_dirty_count(c->path);
-    if (c->dirty != 0 || !c->detached)
+    if (c->orphan)
+        return HG_REAPABLE;
+    c->dirty = hg_dirty_count(c->path, c->disposable);
+    if (c->dirty < 0 || !c->detached || (c->dirty > 0 && !c->disposable))
         return HG_KEEP_NEEDS_REVIEW;
     if (!hg_head_unique(c->path))
         return HG_REAPABLE;
@@ -823,6 +888,8 @@ static enum hg_verdict hg_classify(const struct host_gc_request *req,
     int64_t floor_s =
         (int64_t)(req->floor_hours > 0 ? req->floor_hours : 0) * 3600;
     if (c->locked)
+        return HG_KEEP_LOCKED;
+    if (c->disposable && hg_lock_busy(c->path))
         return HG_KEEP_LOCKED;
     if (c->occupied)
         return HG_KEEP_IN_USE;
@@ -926,34 +993,65 @@ static bool hg_finish_removal(const struct host_gc_request *req,
     return false;
 }
 
-static void hg_act(const struct host_gc_request *req,
-                   struct host_gc_report *report, struct host_gc_class *cls,
-                   const struct hg_cand *c, enum hg_verdict v)
+/* Pin (when unique), then remove one candidate. An orphan has no registration
+ * for git to remove, so it goes straight to the engine's own finishing step.
+ * Returns true when the directory is gone; the counters are settled here. */
+static bool hg_remove_cand(const struct host_gc_request *req,
+                           struct host_gc_report *report,
+                           struct host_gc_class *cls, const struct hg_cand *c,
+                           enum hg_verdict v)
 {
-    uint64_t bytes = hg_dir_bytes(c->path);
     bool gone;
-    cls->bytes_reclaimable += bytes;
-    if (!req->apply)
-        return;
     if (v == HG_ARCHIVE_UNIQUE && !hg_pin_head(req, cls->repo, c->path)) {
         cls->unique_archived--;
         cls->kept_on_failure++;
         cls->reapable--;
         cls->need_review++;
-        return;
+        return false;
     }
-    gone = hg_reap(cls->repo, c->path) && !hg_exists(c->path);
+    gone = !c->orphan && hg_reap(cls->repo, c->path) && !hg_exists(c->path);
     if (!gone)
         gone = hg_finish_removal(req, report, cls, c->path);
-    if (gone) {
-        cls->bytes_reclaimed += bytes;
+    if (!gone) {
+        /* Nothing moved, and the refusal says why. The generation stands;
+         * report it as needing a human rather than counting a reclaim that
+         * never happened. */
+        cls->reapable--;
+        cls->need_review++;
+    }
+    return gone;
+}
+
+/* The copy's gate took its lock between classification and now: keep it. */
+static void hg_became_locked(struct host_gc_class *cls, enum hg_verdict v)
+{
+    if (v == HG_ARCHIVE_UNIQUE)
+        cls->unique_archived--;
+    cls->reapable--;
+    cls->locked++;
+}
+
+static void hg_act(const struct host_gc_request *req,
+                   struct host_gc_report *report, struct host_gc_class *cls,
+                   const struct hg_cand *c, enum hg_verdict v)
+{
+    uint64_t bytes = hg_dir_bytes(c->path);
+    int lock_fd = -1;
+    cls->bytes_reclaimable += bytes;
+    if (!req->apply)
+        return;
+    /* A disposable copy is removed while this process holds its sibling
+     * flock, so a gate cannot start on it mid-removal. */
+    if (c->disposable && hg_lock_acquire(c->path, &lock_fd) == HG_LOCK_BUSY) {
+        hg_became_locked(cls, v);
         return;
     }
-    /* Nothing moved, and the refusal above says why. The generation stands;
-     * report it as needing a human rather than counting a reclaim that
-     * never happened. */
-    cls->reapable--;
-    cls->need_review++;
+    if (hg_remove_cand(req, report, cls, c, v)) {
+        cls->bytes_reclaimed += bytes;
+        if (c->disposable)
+            cls->bytes_reclaimed += hg_remove_siblings(c->path);
+    }
+    hg_lock_release(lock_fd);
 }
 
 /* A dirty worktree is never touched; it is listed so a person decides. */
@@ -1013,6 +1111,7 @@ static void hg_settle(const struct host_gc_request *req,
         struct host_gc_class *cls = &report->classes[c->cls];
         char reason[HOST_GC_REASON_CAP];
         enum hg_verdict v;
+        c->disposable = cls->disposable;
         if (host_gc_path_protected(req, cls->repo, c->path, reason,
                                    sizeof(reason))) {
             hg_refuse(report, c->path, reason);
@@ -1042,6 +1141,7 @@ static void hg_seed_classes(const struct host_gc_request *req,
                       sizeof(report->classes[i].name), req->pools[i].name);
         (void)hg_copy(report->classes[i].path,
                       sizeof(report->classes[i].path), req->pools[i].path);
+        report->classes[i].disposable = req->pools[i].disposable;
     }
 }
 
@@ -1067,8 +1167,11 @@ bool host_gc_run(const struct host_gc_request *req,
     hg_seed_classes(req, report);
     for (size_t i = 0; i < report->nclasses; i++) {
         struct host_gc_class *cls = &report->classes[i];
-        if (hg_pool_open(req, report, cls, buf, HG_LIST_CAP))
-            hg_parse_worktrees(&scan, i, cls->path, buf, &cls->registered);
+        if (!hg_pool_open(req, report, cls, buf, HG_LIST_CAP))
+            continue;
+        hg_parse_worktrees(&scan, i, cls->path, buf, &cls->registered);
+        if (cls->disposable)
+            hg_push_orphans(&scan, i, cls->path, cls);
     }
     hg_mark_occupied(req, &scan);
     hg_mark_donors(&scan, report->nclasses);

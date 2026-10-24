@@ -46,6 +46,19 @@
  * The lock and in-use tests run BEFORE the age floor deliberately: all four
  * are keeps, and an operator reading "in use" learns more than "too young".
  *
+ * DISPOSABLE POOLS. A pool the caller marks `disposable` (an explicit roots
+ * entry only; no default pool is) holds remote-gate lane copies, which are
+ * build outputs of commits that live elsewhere. There a dirty worktree is
+ * classified by idle time like a clean one (its dirty_count is still
+ * reported); a copy whose sibling flock <path>.lock another process holds is
+ * kept as `locked`, and the removal itself runs holding that flock; an
+ * unregistered directory with the gate-copy shape (a .git FILE naming a
+ * worktree administrative directory that is gone, plus a sibling .lock) is
+ * `orphaned`, counted in `registered`, and removed under the same rules; and
+ * <path>.bundle, <path>.prime.log and <path>.lock are unlinked with the copy
+ * (regular files only, never through a symlink). Locks, in-use, protected
+ * paths and unique-HEAD archive pinning are unchanged.
+ *
  * REFUSALS ARE NAMED. A protected path (a canonical datadir by name, a
  * directory that actually holds chain data, the checkout itself, $HOME, /)
  * is never swept and never silently skipped: it is refused by name into
@@ -76,6 +89,7 @@ enum {
 struct host_gc_pool {
     char name[HOST_GC_NAME_CAP];
     char path[HOST_GC_PATH_CAP];
+    bool disposable;   /* gate-copy pool: dirty idle copies are reapable (see below) */
 };
 
 /* Per-class outcome. registered is the number of worktrees of the pool's own
@@ -86,12 +100,14 @@ struct host_gc_class {
     char path[HOST_GC_PATH_CAP];
     char repo[HOST_GC_PATH_CAP];
     bool present;
+    bool disposable;
     int registered;
     int reapable;
     int too_young;
     int in_use;
     int locked;
     int need_review;
+    int orphaned;           /* unregistered gate-copy dirs (counted in registered) */
     int unique_archived;    /* HEAD pinned under refs/archive/wt, then removed */
     int kept_on_failure;    /* the pin failed: worktree stands */
     uint64_t bytes_reclaimable;

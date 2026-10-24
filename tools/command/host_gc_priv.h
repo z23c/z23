@@ -35,4 +35,32 @@ uint64_t hg_dir_bytes(const char *path);
  * a real directory found by lstat() is ever chmod()ed, never a symlink. */
 void hg_grant_write(const char *path);
 
+/* ---- host_gc_disposable.c: disposable gate-copy pools ---- */
+
+enum { HG_LOCK_FREE = 0, HG_LOCK_BUSY = 1 };
+
+/* Probe (and keep) the sibling flock <wt>.lock with a non-blocking flock.
+ * HG_LOCK_FREE: nobody holds it; *fd is the held descriptor, or -1 when the
+ * file is absent. HG_LOCK_BUSY: another process holds it, or it could not be
+ * opened or is not a regular file (fail closed). */
+int hg_lock_acquire(const char *wt, int *fd);
+void hg_lock_release(int fd);
+
+/* Unlink <wt>.bundle, <wt>.prime.log and <wt>.lock, in that order, each only
+ * when it is a regular file (lstat; a symlink is left alone). Returns bytes. */
+uint64_t hg_remove_siblings(const char *wt);
+
+/* True for a directory git does not register but that has the gate-copy
+ * shape: a .git FILE naming a missing .../.git/worktrees/<n> and a sibling
+ * regular <dir>.lock. */
+bool hg_orphan_shape(const char *dir);
+
+/* True when <procdir>/status names only uids that are neither root nor ours
+ * (real, effective, saved, fs). Unreadable or malformed reads as false. */
+bool hg_proc_foreign(const char *procdir);
+
+/* True when `pool` or an ancestor is a directory of our uid closed to group
+ * and other, so a process of another uid cannot open anything under it. */
+bool hg_pool_closed(const char *pool);
+
 #endif /* ZCL_TOOLS_HOST_GC_PRIV_H */

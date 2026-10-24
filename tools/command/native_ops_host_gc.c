@@ -41,15 +41,19 @@ static void ohg_fail(struct zcl_command_reply *reply, const char *code,
 }
 
 static bool ohg_object_root(const struct json_value *el,
-                             const char **path, const char **name)
+                             const char **path, const char **name,
+                             bool *disposable)
 {
     *path = NULL;
     *name = NULL;
     const struct json_value *value = json_get(el, "path");
     const struct json_value *label = json_get(el, "class");
+    const struct json_value *flag = json_get(el, "disposable");
     if (!value || value->type != JSON_STR ||
-        (label && label->type != JSON_STR))
+        (label && label->type != JSON_STR) ||
+        (flag && flag->type != JSON_BOOL))
         return false;
+    *disposable = flag && json_get_bool_or(el, "disposable", false);
     *path = json_get_str(value);
     if (label) *name = json_get_str(label);
     return true;
@@ -64,10 +68,11 @@ static bool ohg_take_root(const struct json_value *el,
     const char *path;
     const char *name = NULL;
     const char *slash;
+    pool->disposable = false;
     if (el && el->type == JSON_STR) {
         path = json_get_str(el);
     } else if (el && el->type == JSON_OBJ) {
-        if (!ohg_object_root(el, &path, &name))
+        if (!ohg_object_root(el, &path, &name, &pool->disposable))
             return false;
     } else {
         return false;
@@ -108,12 +113,14 @@ static void ohg_push_class(struct json_value *arr,
     (void)json_push_kv_str(&row, "path", cls->path);
     (void)json_push_kv_str(&row, "repo", cls->repo);
     (void)json_push_kv_bool(&row, "present", cls->present);
+    (void)json_push_kv_bool(&row, "disposable", cls->disposable);
     (void)json_push_kv_int(&row, "registered", cls->registered);
     (void)json_push_kv_int(&row, "reapable", cls->reapable);
     (void)json_push_kv_int(&row, "too_young", cls->too_young);
     (void)json_push_kv_int(&row, "in_use", cls->in_use);
     (void)json_push_kv_int(&row, "locked", cls->locked);
     (void)json_push_kv_int(&row, "need_review", cls->need_review);
+    (void)json_push_kv_int(&row, "orphaned", cls->orphaned);
     (void)json_push_kv_int(&row, "unique_archived", cls->unique_archived);
     (void)json_push_kv_int(&row, "kept_on_failure", cls->kept_on_failure);
     (void)json_push_kv_int(&row, "bytes_reclaimable",
@@ -240,7 +247,7 @@ void zcl_native_handle_ops_host_gc(const struct zcl_command_request *request,
     if (roots && !ohg_take_roots(roots, &req)) {
         ohg_fail(reply, "host_gc.roots_invalid", "validate",
                  "roots must be 1..8 entries, each an absolute pool "
-                 "directory (a string, or {\"class\",\"path\"})", "roots");
+                 "directory (a string, or {\"class\",\"path\",\"disposable\"})", "roots");
         return;
     }
     if (!host_gc_run(&req, &report)) {

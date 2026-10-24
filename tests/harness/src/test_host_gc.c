@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <sys/wait.h>
@@ -764,6 +765,273 @@ _test_next:;
     return failures;
 }
 
+/* ------------------------------------------------ disposable gate-copy pools */
+
+/* A child process holding an exclusive flock on `lockfile`, like r2gate while
+ * a gate runs. Parked until killed by its exact pid. */
+static pid_t hgt_hold_flock(const char *lockfile)
+{
+    int ready[2];
+    if (pipe(ready) != 0) return -1;
+    pid_t pid = fork();
+    if (pid == 0) {
+        close(ready[0]);
+        int fd = open(lockfile, O_RDWR | O_CREAT, 0600);
+        if (fd < 0 || flock(fd, LOCK_EX | LOCK_NB) != 0) _exit(2);
+        if (write(ready[1], "R", 1) != 1) _exit(3);
+        close(ready[1]);
+        for (;;) pause();
+    }
+    close(ready[1]);
+    bool ok = hgt_child_ready(ready[0]);
+    if (pid > 0 && ok) return pid;
+    if (pid > 0) { kill(pid, SIGKILL); waitpid(pid, NULL, 0); }
+    return -1;
+}
+
+struct hgt_disp {
+    struct hgt_arch a;
+    char plain_pool[HGT_PATH];
+    char reap[HGT_PATH], held[HGT_PATH], young[HGT_PATH], sym[HGT_PATH];
+    char orph[HGT_PATH], plain[HGT_PATH], target[HGT_PATH];
+    pid_t holder;
+};
+
+static bool hgt_sibling(const char *wt, const char *suffix, const char *text)
+{
+    char path[HGT_PATH + 32];
+    (void)snprintf(path, sizeof(path), "%s%s", wt, suffix);
+    return hgt_write(path, text);
+}
+
+static bool hgt_sibling_exists(const char *wt, const char *suffix)
+{
+    char path[HGT_PATH + 32];
+    struct stat st;
+    (void)snprintf(path, sizeof(path), "%s%s", wt, suffix);
+    return lstat(path, &st) == 0;
+}
+
+/* A unique-HEAD generation made dirty with an untracked file after its
+ * commit, optionally aged past every floor, with the three r2gate siblings. */
+static bool hgt_disp_gen(const struct hgt_arch *a, const char *name, char *wt,
+                         bool old)
+{
+    char file[HGT_PATH + 32];
+    if (!hgt_unique_gen(a, name, wt, HGT_PATH))
+        return false;
+    (void)snprintf(file, sizeof(file), "%s/dirty.txt", wt);
+    if (!hgt_write(file, "dirty\n") || (old && !hgt_age(a, name, wt)))
+        return false;
+    return hgt_sibling(wt, ".bundle", "bundle\n") &&
+           hgt_sibling(wt, ".prime.log", "log\n") &&
+           hgt_sibling(wt, ".lock", "");
+}
+
+/* A gate copy git no longer registers: a .git file naming a worktree
+ * administrative directory that is gone, and a sibling .lock. */
+static bool hgt_disp_orphan(struct hgt_disp *d)
+{
+    char dotgit[HGT_PATH + 32], body[HGT_PATH + 64];
+    (void)snprintf(d->orph, sizeof(d->orph), "%s/orph", d->a.pool);
+    (void)snprintf(dotgit, sizeof(dotgit), "%s/.git", d->orph);
+    (void)snprintf(body, sizeof(body), "gitdir: %s/.git/worktrees/gone\n",
+                   d->a.repo);
+    return mkdir(d->orph, 0700) == 0 && hgt_write(dotgit, body) &&
+           hgt_sibling(d->orph, ".lock", "") &&
+           hgt_backdate(d->orph, HGT_OLD_HOURS);
+}
+
+static bool hgt_disp_symlinked(struct hgt_disp *d)
+{
+    char link[HGT_PATH + 32];
+    (void)snprintf(link, sizeof(link), "%s.bundle", d->sym);
+    return unlink(link) == 0 && symlink(d->target, link) == 0;
+}
+
+static bool hgt_disp_build(struct hgt_disp *d, const char *tmp)
+{
+    char lockfile[HGT_PATH + 32];
+    struct hgt_arch *a = &d->a;
+    struct hgt_arch pl;
+    (void)snprintf(a->root, sizeof(a->root), "%s/disp", tmp);
+    (void)snprintf(a->repo, sizeof(a->repo), "%s/repo", a->root);
+    (void)snprintf(a->pool, sizeof(a->pool), "%s/pool", a->root);
+    (void)snprintf(d->plain_pool, sizeof(d->plain_pool), "%s/plain", a->root);
+    (void)snprintf(d->target, sizeof(d->target), "%s/target.bundle", a->root);
+    if (mkdir(a->root, 0700) != 0 || mkdir(a->pool, 0700) != 0 ||
+        mkdir(d->plain_pool, 0700) != 0 || !hgt_make_repo(a->repo) ||
+        !hgt_write(d->target, "precious\n"))
+        return false;
+    if (!hgt_disp_gen(a, "reap", d->reap, true) ||
+        !hgt_disp_gen(a, "held", d->held, true) ||
+        !hgt_disp_gen(a, "sym", d->sym, true) || !hgt_disp_symlinked(d))
+        return false;
+    if (!hgt_add_gen(a->repo, a->pool, "young", d->young, HGT_PATH) ||
+        !hgt_sibling(d->young, "/dirty.txt", "dirty\n") ||
+        !hgt_sibling(d->young, ".lock", ""))
+        return false;
+    pl = *a;
+    (void)snprintf(pl.pool, sizeof(pl.pool), "%s", d->plain_pool);
+    if (!hgt_disp_gen(&pl, "plain", d->plain, true))
+        return false;
+    (void)snprintf(lockfile, sizeof(lockfile), "%s.lock", d->held);
+    d->holder = hgt_hold_flock(lockfile);
+    return d->holder > 0 && hgt_disp_orphan(d);
+}
+
+static void hgt_disp_request(const struct hgt_disp *d,
+                             struct host_gc_request *req, bool apply)
+{
+    hgt_seed_request(req, d->a.pool);
+    (void)snprintf(req->home, sizeof(req->home), "%s", d->a.root);
+    (void)snprintf(req->pools[0].name, sizeof(req->pools[0].name), "gate");
+    req->pools[0].disposable = true;
+    (void)snprintf(req->pools[1].name, sizeof(req->pools[1].name), "plain");
+    (void)snprintf(req->pools[1].path, sizeof(req->pools[1].path), "%s",
+                   d->plain_pool);
+    req->npools = 2;
+    req->floor_hours = 24;
+    req->age_days = 1;
+    req->apply = apply;
+}
+
+/* A fixture inventory entry for a process that cannot be read whole (no fd
+ * directory, no cwd) with a status file naming its uid. */
+static bool hgt_fake_proc(const char *proc_root, const char *pid,
+                          unsigned uid)
+{
+    char dir[HGT_PATH + 16], file[HGT_PATH + 32], body[96];
+    (void)snprintf(dir, sizeof(dir), "%s/%s", proc_root, pid);
+    (void)snprintf(file, sizeof(file), "%s/status", dir);
+    (void)snprintf(body, sizeof(body), "Name:\tx\nUid:\t%u\t%u\t%u\t%u\n", uid,
+                   uid, uid, uid);
+    return (mkdir(dir, 0700) == 0 || errno == EEXIST) && hgt_write(file, body);
+}
+
+static int hgt_disp_dry(struct hgt_disp *d)
+{
+    struct host_gc_request req;
+    struct host_gc_report report;
+    const struct host_gc_class *cls, *plain;
+    int failures = 0;
+
+    TEST("host gc disposable: a dry run classifies idle dirty copies and removes nothing") {
+        hgt_disp_request(d, &req, false);
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "gate");
+        plain = hgt_class(&report, "plain");
+        ASSERT(cls != NULL && plain != NULL);
+        ASSERT(cls->disposable && !plain->disposable);
+        ASSERT_EQ(cls->registered, 5);
+        ASSERT_EQ(cls->orphaned, 1);
+        ASSERT_EQ(cls->reapable, 3);
+        ASSERT_EQ(cls->unique_archived, 2);
+        ASSERT_EQ(cls->locked, 1);
+        ASSERT_EQ(cls->too_young, 1);
+        ASSERT_EQ(cls->need_review, 0);
+        ASSERT_EQ(plain->need_review, 1);
+        ASSERT_EQ(plain->reapable, 0);
+        ASSERT(hgt_listed(&report, d->plain, 1));
+        ASSERT(hgt_exists(d->reap) && hgt_exists(d->held) &&
+               hgt_exists(d->young) && hgt_exists(d->sym) &&
+               hgt_exists(d->orph) && hgt_exists(d->plain));
+        ASSERT(hgt_sibling_exists(d->reap, ".bundle"));
+        ASSERT_EQ(hgt_count_refs(d->a.repo, "refs/archive"), 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int hgt_disp_inventory(struct hgt_disp *d)
+{
+    struct host_gc_request req;
+    struct host_gc_report report;
+    const struct host_gc_class *cls;
+    const char *reason;
+    char status[HGT_PATH + 32], dir[HGT_PATH + 16];
+    int failures = 0;
+
+    TEST("host gc disposable: an unreadable process of another non-root uid is ignored, ours or root's is not") {
+        hgt_disp_request(d, &req, false);
+        ASSERT(hgt_fake_proc(req.proc_root, "2", (unsigned)geteuid() + 4242u));
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "gate");
+        ASSERT(cls != NULL && cls->reapable == 3);
+        ASSERT(hgt_refusal(&report, d->reap) == NULL);
+        ASSERT(hgt_fake_proc(req.proc_root, "2", (unsigned)geteuid()));
+        ASSERT(host_gc_run(&req, &report));
+        reason = hgt_refusal(&report, d->reap);
+        ASSERT(reason != NULL && strcmp(reason, "process_inventory_incomplete") == 0);
+        ASSERT(hgt_fake_proc(req.proc_root, "2", 0));
+        ASSERT(host_gc_run(&req, &report));
+        reason = hgt_refusal(&report, d->reap);
+        ASSERT(reason != NULL && strcmp(reason, "process_inventory_incomplete") == 0);
+        (void)snprintf(status, sizeof(status), "%s/2/status", req.proc_root);
+        (void)snprintf(dir, sizeof(dir), "%s/2", req.proc_root);
+        ASSERT(unlink(status) == 0 && rmdir(dir) == 0);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int hgt_disp_apply(struct hgt_disp *d)
+{
+    struct host_gc_request req;
+    struct host_gc_report report;
+    const struct host_gc_class *cls;
+    int failures = 0;
+
+    TEST("host gc disposable: apply reaps idle dirty copies with their siblings, pinning first") {
+        hgt_disp_request(d, &req, true);
+        ASSERT(host_gc_run(&req, &report));
+        cls = hgt_class(&report, "gate");
+        ASSERT(cls != NULL);
+        ASSERT_EQ(cls->kept_on_failure, 0);
+        ASSERT(cls->bytes_reclaimed > 0);
+        ASSERT(!hgt_exists(d->reap) && !hgt_exists(d->orph) && !hgt_exists(d->sym));
+        ASSERT(!hgt_sibling_exists(d->reap, ".bundle"));
+        ASSERT(!hgt_sibling_exists(d->reap, ".prime.log"));
+        ASSERT(!hgt_sibling_exists(d->reap, ".lock"));
+        ASSERT(!hgt_sibling_exists(d->orph, ".lock"));
+        ASSERT_EQ(hgt_count_refs(d->a.repo, "refs/archive/wt"), 2);
+        /* a symlinked sibling is not followed, and not unlinked either */
+        ASSERT(hgt_exists(d->target));
+        ASSERT(hgt_sibling_exists(d->sym, ".bundle"));
+        /* flock-held and too-young copies, and the non-disposable one, stand */
+        ASSERT(hgt_exists(d->held) && hgt_sibling_exists(d->held, ".lock"));
+        ASSERT(hgt_sibling_exists(d->held, ".bundle"));
+        ASSERT(hgt_exists(d->young) && hgt_exists(d->plain));
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int hgt_disposable_tests(const char *tmp)
+{
+    struct hgt_disp d;
+    int failures = 0;
+
+    memset(&d, 0, sizeof(d));
+    d.holder = -1;
+    TEST("host gc disposable: the gate-copy fixture builds") {
+        ASSERT(hgt_disp_build(&d, tmp));
+        PASS();
+    }
+    failures += hgt_disp_dry(&d);
+    failures += hgt_disp_inventory(&d);
+    failures += hgt_disp_apply(&d);
+_test_next:;
+    if (d.holder > 0) {
+        (void)kill(d.holder, SIGKILL);
+        (void)waitpid(d.holder, NULL, 0);
+    }
+    return failures;
+}
+
 int test_host_gc(void)
 {
     int failures = 0;
@@ -1047,6 +1315,7 @@ int test_host_gc(void)
     }
 
     failures += hgt_archive_tests(tmp);
+    failures += hgt_disposable_tests(tmp);
 
 _test_next:;
     /* Restore both read-only fixture directories so the recursive cleanup can run. */
