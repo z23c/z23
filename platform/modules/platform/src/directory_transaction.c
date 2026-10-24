@@ -22,16 +22,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool valid_leaf(const char *leaf)
-{
-    if (!leaf || !leaf[0] || strlen(leaf) > PLATFORM_DIRECTORY_CHILD_LEAF_MAX ||
-        !strcmp(leaf, ".") || !strcmp(leaf, "..") || strchr(leaf, '/') ||
-        strchr(leaf, '\\') || strchr(leaf, ':'))
-        return false;
-    size_t n = strlen(leaf);
-    if (leaf[n - 1] == '.' || leaf[n - 1] == ' ')
-        return false;
 #if defined(_WIN32)
+/* True for the reserved device stems CON, PRN, AUX, NUL, COM1-9 and LPT1-9,
+ * matched case-insensitively before the first dot. */
+static bool windows_reserved_stem(const char *leaf)
+{
     char stem[16]; size_t stem_len = strcspn(leaf, ".");
     if (stem_len >= sizeof(stem)) stem_len = sizeof(stem) - 1;
     for (size_t i = 0; i < stem_len; ++i) {
@@ -39,10 +34,33 @@ static bool valid_leaf(const char *leaf)
         stem[i] = (char)(c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c);
     }
     stem[stem_len] = 0;
-    if (!strcmp(stem,"CON") || !strcmp(stem,"PRN") || !strcmp(stem,"AUX") ||
-        !strcmp(stem,"NUL") ||
-        (stem_len == 4 && (!memcmp(stem,"COM",3) || !memcmp(stem,"LPT",3)) &&
-         stem[3] >= '1' && stem[3] <= '9')) return false;
+    return !strcmp(stem,"CON") || !strcmp(stem,"PRN") || !strcmp(stem,"AUX") ||
+           !strcmp(stem,"NUL") ||
+           (stem_len == 4 && (!memcmp(stem,"COM",3) || !memcmp(stem,"LPT",3)) &&
+            stem[3] >= '1' && stem[3] <= '9');
+}
+#endif
+
+/* Rejects names that are empty, too long, or could escape or alias the
+ * directory on any platform (separators, colons, `.` and `..`). */
+static bool leaf_name_escapes(const char *leaf)
+{
+    return !leaf || !leaf[0] ||
+           strlen(leaf) > PLATFORM_DIRECTORY_CHILD_LEAF_MAX ||
+           !strcmp(leaf, ".") || !strcmp(leaf, "..") || strchr(leaf, '/') ||
+           strchr(leaf, '\\') || strchr(leaf, ':');
+}
+
+static bool valid_leaf(const char *leaf)
+{
+    if (leaf_name_escapes(leaf))
+        return false;
+    size_t n = strlen(leaf);
+    if (leaf[n - 1] == '.' || leaf[n - 1] == ' ')
+        return false;
+#if defined(_WIN32)
+    if (windows_reserved_stem(leaf))
+        return false;
 #endif
     return true;
 }
@@ -105,6 +123,93 @@ static bool child_identity_equal(
     return left && right && left->volume == right->volume &&
            left->file_low == right->file_low &&
            left->file_high == right->file_high;
+}
+
+static bool directory_volume(struct platform_directory_transaction *directory,
+                             uint64_t *volume);
+
+/* Refuses the move unless source and destination share one volume and the
+ * source is a private, single-link file; fills *before with its identity. */
+static enum platform_directory_result move_source_identity(
+    struct platform_directory_transaction *source_dir,
+    struct platform_directory_transaction *destination_dir,
+    struct platform_directory_child *source,
+    struct platform_directory_child_info *before)
+{
+    uint64_t source_volume = 0, destination_volume = 0;
+    if (!directory_volume(source_dir, &source_volume) ||
+        !directory_volume(destination_dir, &destination_volume) ||
+        !platform_directory_child_info(source, before))
+        return PLATFORM_DIRECTORY_REFUSED;
+    if (source_volume != destination_volume ||
+        before->volume != source_volume || before->link_count != 1 ||
+        !before->current_user_only)
+        return PLATFORM_DIRECTORY_REFUSED;
+    return PLATFORM_DIRECTORY_OK;
+}
+
+/* Opens leaf under dir and, when that open succeeds, reads its identity into
+ * *info; *info_ok reports whether the identity read succeeded. */
+static enum platform_directory_result move_named_info(
+    struct platform_directory_transaction *dir, const char *leaf,
+    struct platform_directory_child_info *info, bool *info_ok)
+{
+    struct platform_directory_child named;
+    platform_directory_child_init(&named);
+    enum platform_directory_result opened =
+        platform_directory_child_open_result(dir, leaf, false, false, &named,
+                                             NULL);
+    if (opened == PLATFORM_DIRECTORY_OK) {
+        *info_ok = platform_directory_child_info(&named, info);
+        platform_directory_child_close(&named);
+    }
+    return opened;
+}
+
+/* The source leaf must still name the identity captured before the move. */
+static enum platform_directory_result move_source_bound(
+    struct platform_directory_transaction *source_dir,
+    struct platform_directory_child *source,
+    const struct platform_directory_child_info *before)
+{
+    struct platform_directory_child_info named_before;
+    bool named_ok = false;
+    enum platform_directory_result opened =
+        move_named_info(source_dir, source->leaf, &named_before, &named_ok);
+    if (opened != PLATFORM_DIRECTORY_OK)
+        return opened;
+    if (!named_ok || !child_identity_equal(before, &named_before))
+        return PLATFORM_DIRECTORY_REFUSED;
+    return PLATFORM_DIRECTORY_OK;
+}
+
+/* After the rename, destination_leaf must name the same single-link file. */
+static bool move_destination_bound(
+    struct platform_directory_transaction *destination_dir,
+    const char *destination_leaf,
+    const struct platform_directory_child_info *before)
+{
+    struct platform_directory_child_info after;
+    bool after_ok = false;
+    enum platform_directory_result opened =
+        move_named_info(destination_dir, destination_leaf, &after, &after_ok);
+    return opened == PLATFORM_DIRECTORY_OK && after_ok &&
+           child_identity_equal(before, &after) && after.link_count == 1 &&
+           after.current_user_only;
+}
+
+/* Publication is durable only when the destination still names the moved
+ * file and both parent directories flush. */
+static bool move_publication_durable(
+    struct platform_directory_transaction *source_dir,
+    struct platform_directory_transaction *destination_dir,
+    const char *destination_leaf,
+    const struct platform_directory_child_info *before)
+{
+    return move_destination_bound(destination_dir, destination_leaf, before) &&
+           !move_test_consume_durability_failure() &&
+           platform_directory_transaction_flush(destination_dir) &&
+           platform_directory_transaction_flush(source_dir);
 }
 
 #if defined(_WIN32)
@@ -279,13 +384,38 @@ bool platform_directory_transaction_open(struct platform_directory_transaction *
 }
 void platform_directory_transaction_close(struct platform_directory_transaction *d)
 { if (d && d->native != UINTPTR_MAX) { platform_private_directory_close(d->native); d->native = UINTPTR_MAX; } }
+/* A directory is plain when it is a directory and not a reparse point. */
+static bool directory_plain_info(const BY_HANDLE_FILE_INFORMATION *info)
+{
+    return (info->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+           (info->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
+
+static bool directory_identity_equal(const BY_HANDLE_FILE_INFORMATION *left,
+                                     const BY_HANDLE_FILE_INFORMATION *right)
+{
+    return left->dwVolumeSerialNumber == right->dwVolumeSerialNumber &&
+           left->nFileIndexHigh == right->nFileIndexHigh &&
+           left->nFileIndexLow == right->nFileIndexLow;
+}
+
+/* Proves the reopened handle is the same plain directory, then flushes it. */
+static bool directory_reopen_flushed(HANDLE durable,
+                                     const BY_HANDLE_FILE_INFORMATION *before,
+                                     BY_HANDLE_FILE_INFORMATION *reopened)
+{
+    return durable != INVALID_HANDLE_VALUE &&
+           GetFileInformationByHandle(durable, reopened) &&
+           directory_identity_equal(before, reopened) &&
+           directory_plain_info(reopened) && FlushFileBuffers(durable);
+}
+
 bool platform_directory_transaction_flush(struct platform_directory_transaction *d)
 {
     if (!d || d->native == UINTPTR_MAX) return false;
     BY_HANDLE_FILE_INFORMATION before = {0}, reopened = {0}, after = {0};
     if (!GetFileInformationByHandle(dh(d), &before) ||
-        (before.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
-        (before.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+        !directory_plain_info(&before))
         return false;
 
     /* The retained RootDirectory stays traverse-only so NT's relative rename
@@ -312,14 +442,7 @@ bool platform_directory_transaction_flush(struct platform_directory_transaction 
                 (unsigned long)GetLastError());
         return false;
     }
-    bool ok = durable != INVALID_HANDLE_VALUE &&
-              GetFileInformationByHandle(durable, &reopened) &&
-              before.dwVolumeSerialNumber == reopened.dwVolumeSerialNumber &&
-              before.nFileIndexHigh == reopened.nFileIndexHigh &&
-              before.nFileIndexLow == reopened.nFileIndexLow &&
-              (reopened.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-              (reopened.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
-              FlushFileBuffers(durable);
+    bool ok = directory_reopen_flushed(durable, &before, &reopened);
     DWORD durability_error = ok ? NO_ERROR : GetLastError();
     if (durable != INVALID_HANDLE_VALUE)
         CloseHandle(durable);
@@ -331,11 +454,8 @@ bool platform_directory_transaction_flush(struct platform_directory_transaction 
         return false;
     }
     ok = GetFileInformationByHandle(dh(d), &after) &&
-           before.dwVolumeSerialNumber == after.dwVolumeSerialNumber &&
-           before.nFileIndexHigh == after.nFileIndexHigh &&
-           before.nFileIndexLow == after.nFileIndexLow &&
-           (after.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
-           (after.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+         directory_identity_equal(&before, &after) &&
+         directory_plain_info(&after);
     if (!ok)
         fprintf(stderr,  // obs-ok:directory-transaction-flush
                 "[directory_transaction] retained directory changed after "
@@ -475,54 +595,14 @@ static bool directory_volume(struct platform_directory_transaction *directory,
     return true;
 }
 
-static enum platform_directory_result directory_child_move_between_platform(
-    struct platform_directory_transaction *source_dir,
+/* Renames the retained source to destination_leaf through NT set-information.
+ * Once this returns OK the old leaf is no longer authoritative. */
+static enum platform_directory_result directory_rename_retained(
+    nt_set_information_file_fn set_info,
     struct platform_directory_child *source,
     struct platform_directory_transaction *destination_dir,
-    const char *destination_leaf, bool no_clobber)
+    const char *destination_leaf, const wchar_t *wide, bool no_clobber)
 {
-    wchar_t wide[260]; UNICODE_STRING ignored;
-    nt_set_information_file_fn set_info = resolve_nt_set_information_file();
-    if (!set_info || !source_dir || !source || !destination_dir ||
-        source->native == UINTPTR_MAX || !valid_leaf(source->leaf) ||
-        !wide_leaf(destination_leaf, wide, &ignored))
-        return PLATFORM_DIRECTORY_INVALID;
-
-    uint64_t source_volume = 0, destination_volume = 0;
-    struct platform_directory_child_info before;
-    if (!directory_volume(source_dir, &source_volume) ||
-        !directory_volume(destination_dir, &destination_volume) ||
-        !platform_directory_child_info(source, &before))
-        return PLATFORM_DIRECTORY_REFUSED;
-    if (source_volume != destination_volume || before.volume != source_volume ||
-        before.link_count != 1 || !before.current_user_only)
-        return PLATFORM_DIRECTORY_REFUSED;
-
-    struct platform_directory_child named_source;
-    platform_directory_child_init(&named_source);
-    enum platform_directory_result opened = platform_directory_child_open_result(
-        source_dir, source->leaf, false, false, &named_source, NULL);
-    if (opened != PLATFORM_DIRECTORY_OK)
-        return opened;
-    struct platform_directory_child_info named_before;
-    bool source_bound = platform_directory_child_info(&named_source,
-                                                       &named_before) &&
-                        child_identity_equal(&before, &named_before);
-    platform_directory_child_close(&named_source);
-    if (!source_bound)
-        return PLATFORM_DIRECTORY_REFUSED;
-
-    /* Publication is the commit point.  Make the content durable while the
-     * retained source identity is still authoritative; callers must never
-     * have to remember this ordering themselves. */
-    if (!platform_directory_child_flush(source)) {
-        fprintf(stderr,  // obs-ok:directory-transaction-move-failure
-                "[directory_transaction] retained source flush before move "
-                "failed for %s: win32=%lu\n", source->leaf,
-                (unsigned long)GetLastError());
-        return PLATFORM_DIRECTORY_IO;
-    }
-
     size_t name_bytes = wcslen(wide) * sizeof(wchar_t);
     struct rename_ex { ULONG flags; HANDLE root; ULONG length; WCHAR name[1]; };
     size_t bytes = offsetof(struct rename_ex, name) + name_bytes;
@@ -544,6 +624,47 @@ static enum platform_directory_result directory_child_move_between_platform(
                 (unsigned long)moved);
         return nt_result(moved);
     }
+    return PLATFORM_DIRECTORY_OK;
+}
+
+static enum platform_directory_result directory_child_move_between_platform(
+    struct platform_directory_transaction *source_dir,
+    struct platform_directory_child *source,
+    struct platform_directory_transaction *destination_dir,
+    const char *destination_leaf, bool no_clobber)
+{
+    wchar_t wide[260]; UNICODE_STRING ignored;
+    nt_set_information_file_fn set_info = resolve_nt_set_information_file();
+    if (!set_info || !source_dir || !source || !destination_dir ||
+        source->native == UINTPTR_MAX || !valid_leaf(source->leaf) ||
+        !wide_leaf(destination_leaf, wide, &ignored))
+        return PLATFORM_DIRECTORY_INVALID;
+
+    struct platform_directory_child_info before;
+    enum platform_directory_result identity =
+        move_source_identity(source_dir, destination_dir, source, &before);
+    if (identity != PLATFORM_DIRECTORY_OK)
+        return identity;
+    enum platform_directory_result bound =
+        move_source_bound(source_dir, source, &before);
+    if (bound != PLATFORM_DIRECTORY_OK)
+        return bound;
+
+    /* Publication is the commit point.  Make the content durable while the
+     * retained source identity is still authoritative; callers must never
+     * have to remember this ordering themselves. */
+    if (!platform_directory_child_flush(source)) {
+        fprintf(stderr,  // obs-ok:directory-transaction-move-failure
+                "[directory_transaction] retained source flush before move "
+                "failed for %s: win32=%lu\n", source->leaf,
+                (unsigned long)GetLastError());
+        return PLATFORM_DIRECTORY_IO;
+    }
+
+    enum platform_directory_result renamed = directory_rename_retained(
+        set_info, source, destination_dir, destination_leaf, wide, no_clobber);
+    if (renamed != PLATFORM_DIRECTORY_OK)
+        return renamed;
 
     /* From this instruction onward the old name is no longer authoritative,
      * even if a later flush/revalidation fails. Preserve that fact for callers
@@ -551,20 +672,8 @@ static enum platform_directory_result directory_child_move_between_platform(
     (void)snprintf(source->leaf, sizeof(source->leaf), "%s",
                    destination_leaf);
 
-    struct platform_directory_child named_destination;
-    platform_directory_child_init(&named_destination);
-    opened = platform_directory_child_open_result(
-        destination_dir, destination_leaf, false, false, &named_destination,
-        NULL);
-    struct platform_directory_child_info after;
-    bool destination_bound = opened == PLATFORM_DIRECTORY_OK &&
-        platform_directory_child_info(&named_destination, &after) &&
-        child_identity_equal(&before, &after) && after.link_count == 1 &&
-        after.current_user_only;
-    platform_directory_child_close(&named_destination);
-    if (!destination_bound || move_test_consume_durability_failure() ||
-        !platform_directory_transaction_flush(destination_dir) ||
-        !platform_directory_transaction_flush(source_dir))
+    if (!move_publication_durable(source_dir, destination_dir, destination_leaf,
+                                  &before))
         return PLATFORM_DIRECTORY_OUTCOME_UNKNOWN;
     return PLATFORM_DIRECTORY_OK;
 }
@@ -718,12 +827,49 @@ void platform_directory_transaction_close(struct platform_directory_transaction 
 { if (d && d->native != UINTPTR_MAX) { close(dd(d)); d->native = UINTPTR_MAX; } }
 bool platform_directory_transaction_flush(struct platform_directory_transaction *d)
 { return d && fsync(dd(d)) == 0; }
-enum platform_directory_result platform_directory_transaction_open_child(struct platform_directory_transaction*p,const char*l,bool create,struct platform_directory_transaction*c){if(!p||!c||!valid_leaf(l))return PLATFORM_DIRECTORY_INVALID;if(create&&mkdirat(dd(p),l,0700)!=0&&errno!=EEXIST){if(errno==EACCES||errno==EPERM||errno==ELOOP)return PLATFORM_DIRECTORY_REFUSED;return PLATFORM_DIRECTORY_IO;}int fd=openat(dd(p),l,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);if(fd<0){if(errno==ENOENT)return PLATFORM_DIRECTORY_MISSING;if(errno==EACCES||errno==EPERM||errno==ELOOP)return PLATFORM_DIRECTORY_REFUSED;return PLATFORM_DIRECTORY_IO;}struct stat s;if(fstat(fd,&s)||!S_ISDIR(s.st_mode)||s.st_uid!=geteuid()||(s.st_mode&077)!=0){close(fd);return PLATFORM_DIRECTORY_REFUSED;}platform_directory_transaction_close(c);c->native=(uintptr_t)fd;return PLATFORM_DIRECTORY_OK;}
+static bool errno_open_refused(int error)
+{
+    return error == EACCES || error == EPERM || error == ELOOP;
+}
+
+/* True when fd is a directory owned by the effective user with no group or
+ * other permission bits. */
+static bool directory_fd_private(int fd)
+{
+    struct stat s;
+    return !fstat(fd, &s) && S_ISDIR(s.st_mode) && s.st_uid == geteuid() &&
+           (s.st_mode & 077) == 0;
+}
+
+enum platform_directory_result platform_directory_transaction_open_child(struct platform_directory_transaction*p,const char*l,bool create,struct platform_directory_transaction*c){
+    if(!p||!c||!valid_leaf(l))return PLATFORM_DIRECTORY_INVALID;
+    if(create&&mkdirat(dd(p),l,0700)!=0&&errno!=EEXIST){
+        if(errno_open_refused(errno))return PLATFORM_DIRECTORY_REFUSED;
+        return PLATFORM_DIRECTORY_IO;
+    }
+    int fd=openat(dd(p),l,O_RDONLY|O_DIRECTORY|O_CLOEXEC|O_NOFOLLOW);
+    if(fd<0){
+        if(errno==ENOENT)return PLATFORM_DIRECTORY_MISSING;
+        if(errno_open_refused(errno))return PLATFORM_DIRECTORY_REFUSED;
+        return PLATFORM_DIRECTORY_IO;
+    }
+    if(!directory_fd_private(fd)){close(fd);return PLATFORM_DIRECTORY_REFUSED;}
+    platform_directory_transaction_close(c);
+    c->native=(uintptr_t)fd;
+    return PLATFORM_DIRECTORY_OK;
+}
 static bool child_at(struct platform_directory_transaction *d, const char *leaf,
                      int flags, struct platform_directory_child *f)
 { if (!d || !f || !valid_leaf(leaf) || strlen(leaf) > PLATFORM_DIRECTORY_CHILD_LEAF_MAX) return false; int fd = openat(dd(d), leaf, flags|O_CLOEXEC|O_NOFOLLOW, 0600); if (fd < 0) return false; struct stat st; if (fstat(fd,&st)||!S_ISREG(st.st_mode)||st.st_uid!=geteuid()||st.st_nlink!=1||(st.st_mode&077)!=0){close(fd);errno=EACCES;return false;} f->native=(uintptr_t)fd; memcpy(f->leaf,leaf,strlen(leaf)+1u); return true; }
 bool platform_directory_child_open(struct platform_directory_transaction *d,const char *l,struct platform_directory_child *f){return child_at(d,l,O_RDWR,f);}
 bool platform_directory_child_create(struct platform_directory_transaction *d,const char *l,struct platform_directory_child *f){return child_at(d,l,O_RDWR|O_CREAT|O_EXCL,f);}
+static enum platform_directory_result child_open_errno_result(const char *l)
+{
+    if(errno==ENOENT||errno==ENOTDIR)return PLATFORM_DIRECTORY_MISSING;
+    if(errno==EEXIST)return PLATFORM_DIRECTORY_EXISTS;
+    if(errno_open_refused(errno))return PLATFORM_DIRECTORY_REFUSED;
+    return valid_leaf(l)?PLATFORM_DIRECTORY_IO:PLATFORM_DIRECTORY_INVALID;
+}
 enum platform_directory_result platform_directory_child_open_result(
     struct platform_directory_transaction *d,const char*l,bool create,
     bool open_existing,struct platform_directory_child*f,bool*created)
@@ -733,10 +879,7 @@ enum platform_directory_result platform_directory_child_open_result(
     if(child_at(d,l,flags,f)){if(created)*created=create;return PLATFORM_DIRECTORY_OK;}
     if(create&&open_existing&&errno==EEXIST&&child_at(d,l,O_RDWR,f))
         return PLATFORM_DIRECTORY_OK;
-    if(errno==ENOENT||errno==ENOTDIR)return PLATFORM_DIRECTORY_MISSING;
-    if(errno==EEXIST)return PLATFORM_DIRECTORY_EXISTS;
-    if(errno==EACCES||errno==EPERM||errno==ELOOP)return PLATFORM_DIRECTORY_REFUSED;
-    return valid_leaf(l)?PLATFORM_DIRECTORY_IO:PLATFORM_DIRECTORY_INVALID;
+    return child_open_errno_result(l);
 }
 void platform_directory_child_close(struct platform_directory_child *f){if(f&&f->native!=UINTPTR_MAX){close(ff(f));platform_directory_child_init(f);}}
 bool platform_directory_child_info(struct platform_directory_child *f,
@@ -803,28 +946,15 @@ static enum platform_directory_result directory_child_move_between_platform(
         !valid_leaf(destination_leaf))
         return PLATFORM_DIRECTORY_INVALID;
 
-    uint64_t source_volume = 0, destination_volume = 0;
     struct platform_directory_child_info before;
-    if (!directory_volume(source_dir, &source_volume) ||
-        !directory_volume(destination_dir, &destination_volume) ||
-        !platform_directory_child_info(source, &before))
-        return PLATFORM_DIRECTORY_REFUSED;
-    if (source_volume != destination_volume || before.volume != source_volume ||
-        before.link_count != 1 || !before.current_user_only)
-        return PLATFORM_DIRECTORY_REFUSED;
-
-    struct platform_directory_child named;
-    platform_directory_child_init(&named);
-    enum platform_directory_result opened = platform_directory_child_open_result(
-        source_dir, source->leaf, false, false, &named, NULL);
-    if (opened != PLATFORM_DIRECTORY_OK)
-        return opened;
-    struct platform_directory_child_info named_before;
-    bool source_bound = platform_directory_child_info(&named, &named_before) &&
-                        child_identity_equal(&before, &named_before);
-    platform_directory_child_close(&named);
-    if (!source_bound)
-        return PLATFORM_DIRECTORY_REFUSED;
+    enum platform_directory_result identity =
+        move_source_identity(source_dir, destination_dir, source, &before);
+    if (identity != PLATFORM_DIRECTORY_OK)
+        return identity;
+    enum platform_directory_result bound =
+        move_source_bound(source_dir, source, &before);
+    if (bound != PLATFORM_DIRECTORY_OK)
+        return bound;
 
     /* fsync-before-rename is part of the move seam, not a caller convention. */
     if (!platform_directory_child_flush(source)) {
@@ -843,18 +973,8 @@ static enum platform_directory_result directory_child_move_between_platform(
         return move_errno_result(errno);
 
     memcpy(source->leaf, destination_leaf, strlen(destination_leaf) + 1u);
-    platform_directory_child_init(&named);
-    opened = platform_directory_child_open_result(
-        destination_dir, destination_leaf, false, false, &named, NULL);
-    struct platform_directory_child_info after;
-    bool destination_bound = opened == PLATFORM_DIRECTORY_OK &&
-        platform_directory_child_info(&named, &after) &&
-        child_identity_equal(&before, &after) && after.link_count == 1 &&
-        after.current_user_only;
-    platform_directory_child_close(&named);
-    if (!destination_bound || move_test_consume_durability_failure() ||
-        !platform_directory_transaction_flush(destination_dir) ||
-        !platform_directory_transaction_flush(source_dir))
+    if (!move_publication_durable(source_dir, destination_dir, destination_leaf,
+                                  &before))
         return PLATFORM_DIRECTORY_OUTCOME_UNKNOWN;
     return PLATFORM_DIRECTORY_OK;
 }

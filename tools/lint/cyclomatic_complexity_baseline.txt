@@ -2039,12 +2039,6 @@ platform/modules/platform/src/current_identity.c:platform_current_identity_nativ
 platform/modules/platform/src/directory_compat.c:platform_directory_canonical_real:19
 platform/modules/platform/src/directory_compat.c:platform_directory_list_children_sorted_impl:44
 platform/modules/platform/src/directory_compat.c:platform_directory_list_real_sorted:25
-platform/modules/platform/src/directory_transaction.c:directory_child_move_between_platform:30
-platform/modules/platform/src/directory_transaction.c:directory_child_move_between_platform#2:28
-platform/modules/platform/src/directory_transaction.c:platform_directory_child_open_result#2:17
-platform/modules/platform/src/directory_transaction.c:platform_directory_transaction_flush:23
-platform/modules/platform/src/directory_transaction.c:platform_directory_transaction_open_child#2:19
-platform/modules/platform/src/directory_transaction.c:valid_leaf:24
 platform/modules/platform/src/directory_watcher.c:platform_directory_watcher_wait#2:27
 platform/modules/platform/src/directory_watcher.c:platform_directory_watcher_wait#3:19
 platform/modules/platform/src/directory_watcher.c:rescan_children:19
