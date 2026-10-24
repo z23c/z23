@@ -50,6 +50,7 @@
 #include "util/util.h"                  /* ParseParameters */
 #include "util/sd_notify.h"             /* -sandbox=steady NOTIFY_SOCKET check */
 #include "util/clientversion.h"         /* exact executable source admission */
+#include "platform/allocator_compat.h"
 #include "platform/directory_compat.h"
 #include "platform/environment_compat.h"
 /* The fleet role checker the two signed-bytes ingress points ask. It lives
@@ -844,8 +845,19 @@ static void main_run_service_loop(const struct app_context *ctx,
     if (show_metrics) app_stop_metrics();
 }
 
+static void main_log_malloc_arena_cap(int cap)
+{
+    if (cap > 0)
+        printf("[boot] malloc arenas: capped at %d (MALLOC_ARENA_MAX unset)\n",
+               cap);
+    else
+        printf("[boot] malloc arenas: operator setting kept\n");
+}
+
 int main(int argc, char **argv)
 {
+    /* Before any thread exists: glibc arenas are created per contending thread. */
+    const int malloc_arena_cap = platform_allocator_cap_arenas();
     zcl_native_device_host_runtime_exit_if_requested(argc, argv);
     int rc = 0;
     if (main_dispatch_dev_ui_modes(argc, argv, &rc))
@@ -931,6 +943,7 @@ int main(int argc, char **argv)
     }
 
     printf("z23 starting (datadir=%s)...\n", ctx.datadir);
+    main_log_malloc_arena_cap(malloc_arena_cap);
     /* Fleet ROLES. The catalog and the signed grant store live in tools/dev
      * and the two ingress points that consult them live under engine/,
      * which may not include a tools/ header — so this is the one place that

@@ -19,9 +19,12 @@
  *     after the digits, so a status read truncated mid-number fails closed
  *     instead of returning a short-read digit prefix
  *   - os_proc_self_maps_read() returns the whole mapping table or refuses
+ *   - platform_allocator_arena_cap() picks the default glibc arena cap of 4
+ *     unless the operator set MALLOC_ARENA_MAX or a glibc.malloc.arena_max tunable
  */
 
 #include "test/test_core.h"
+#include "platform/allocator_compat.h"
 #include "platform/os_proc.h"
 
 #include <stdint.h>
@@ -653,6 +656,23 @@ int test_os_proc(void)
         OSPROC_CHECK("a NULL out is refused",
                      !os_proc_thread_work_read(self, NULL));
     }
+
+    /* ── default glibc arena cap: pure decision ───────────────────────── */
+    OSPROC_CHECK("arena cap defaults to 4 with nothing set",
+                 platform_allocator_arena_cap(NULL, NULL) == 4);
+    OSPROC_CHECK("an unrelated GLIBC_TUNABLES keeps the default cap",
+                 platform_allocator_arena_cap(NULL,
+                                              "glibc.malloc.tcache_count=0") == 4);
+    OSPROC_CHECK("MALLOC_ARENA_MAX set is the operator's choice",
+                 platform_allocator_arena_cap("8", NULL) == 0);
+    OSPROC_CHECK("MALLOC_ARENA_MAX set empty is still the operator's choice",
+                 platform_allocator_arena_cap("", NULL) == 0);
+    OSPROC_CHECK("GLIBC_TUNABLES arena_max is the operator's choice",
+                 platform_allocator_arena_cap(NULL,
+                                              "glibc.malloc.arena_max=2") == 0);
+    OSPROC_CHECK("arena_max among several tunables is the operator's choice",
+                 platform_allocator_arena_cap(
+                     NULL, "glibc.malloc.check=0:glibc.malloc.arena_max=16") == 0);
 
     /* Final defensive reset so later tests in the same process never see a
      * stuck override. */
