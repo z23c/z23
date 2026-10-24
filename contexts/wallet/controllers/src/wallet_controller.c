@@ -224,8 +224,12 @@ static bool rpc_walletunlock(const struct json_value *params, bool help,
                              "(wrong passphrase or no encrypted keys)");
         LOG_FAIL("wallet", "walletunlock: code=%d", r.code);
     }
+    /* Preserve full-width rejection before narrowing; zero uses the timer's
+     * existing range-error path, including its fail-closed relock. */
+    uint32_t bounded_timeout = timeout < 0 || timeout > UINT32_MAX
+                                   ? 0 : (uint32_t)timeout;
     struct zcl_result armed =
-        wallet_lock_arm_timeout(ctx->wallet, (uint32_t)timeout);
+        wallet_lock_arm_timeout(ctx->wallet, bounded_timeout);
     if (!armed.ok) {
         json_set_str(result, "Error: wallet unlock timeout invalid");
         LOG_FAIL("wallet", "walletunlock: timer code=%d", armed.code);

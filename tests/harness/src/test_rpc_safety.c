@@ -14,6 +14,7 @@
 #include "controllers/transaction_controller.h"
 #include "controllers/wallet_diagnostic_controller.h"
 #include "controllers/wallet_helpers.h"
+#include "controllers/wallet_controller.h"
 #include "controllers/wallet_rescan_controller.h"
 #include "controllers/vault_intent_controller.h"
 #include "base/hex.h"
@@ -36,6 +37,8 @@
 #include "validation/main_state.h"
 #include "validation/txmempool.h"
 #include "wallet/wallet.h"
+#include "wallet/wallet_lock.h"
+#include <stdint.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,6 +49,85 @@ static void ensure_rpc_warmup_finished_once(void)
     char status[32];
     if (rpc_is_in_warmup(status, sizeof(status)))
         set_rpc_warmup_finished();
+}
+
+static bool rs_unlock_timeout_case(struct rpc_table *tbl, struct wallet *w,
+                                   int64_t timeout, bool present, bool valid)
+{
+    struct json_value params, value, result;
+    json_init(&params);
+    json_set_array(&params);
+    json_init(&value);
+    json_init(&result);
+    json_set_str(&value, "public-rpc-timeout-fixture");
+    bool built = json_push_back(&params, &value);
+    if (present) {
+        json_set_int(&value, timeout);
+        built = json_push_back(&params, &value) && built;
+    }
+    wallet_lock_lock(w);
+    bool accepted = built && rpc_table_execute(tbl, "walletunlock", &params,
+                                               &result);
+    bool ok = built && accepted == valid;
+    if (valid)
+        ok = ok && json_get_int(json_get(&result, "auto_lock_seconds")) ==
+                        (present ? timeout : 300);
+    else
+        ok = ok && !wallet_lock_is_unlocked() &&
+             wallet_lock_effective_passphrase() == NULL &&
+             !wallet_lock_spend_guard().ok;
+    wallet_lock_lock(w);
+    json_free(&params);
+    json_free(&value);
+    json_free(&result);
+    if (!ok)
+        printf("rpc_safety: walletunlock timeout=%lld present=%d accepted=%d FAIL\n",
+               (long long)timeout, present, accepted);
+    return ok;
+}
+
+/* Register-only unlock: no database, datadir, persisted keys or network. */
+static int rs_unlock_timeout_width(void)
+{
+    static const struct {
+        int64_t timeout;
+        bool present;
+        bool valid;
+    } cases[] = {
+        {0, false, true}, {300, true, true}, {3600, true, true},
+        {0, true, false}, {3601, true, false}, {UINT32_MAX, true, false},
+        {INT64_C(4294970896), true, false},
+        {-INT64_C(4294963696), true, false},
+        {INT64_C(8589938192), true, false},
+        {INT64_MIN + INT64_C(3600), true, false},
+    };
+    struct wallet *w = zcl_calloc(1, sizeof(*w), "RPC timeout fixture wallet");
+    struct rpc_table *tbl = zcl_calloc(1, sizeof(*tbl), "RPC timeout fixture table");
+    if (!w || !tbl) {
+        free(w);
+        free(tbl);
+        printf("rpc_safety: walletunlock fixture allocation FAIL\n");
+        return 1;
+    }
+    wallet_init(w);
+    rpc_table_init(tbl);
+    register_wallet_rpc_commands(tbl);
+    rpc_wallet_set_state(w, NULL, NULL, NULL, NULL, NULL);
+    wallet_lock_reset_for_test();
+    wallet_lock_note_encrypted_at_rest();
+    ensure_rpc_warmup_finished_once();
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
+        failures += !rs_unlock_timeout_case(tbl, w, cases[i].timeout,
+                                            cases[i].present, cases[i].valid);
+    wallet_lock_lock(w);
+    wallet_lock_reset_for_test();
+    rpc_wallet_set_state(NULL, NULL, NULL, NULL, NULL, NULL);
+    wallet_free(w);
+    free(w);
+    free(tbl);
+    printf("rpc_safety: walletunlock full-width timeout: %d failures\n", failures);
+    return failures;
 }
 
 static void build_unresolved_tip_state(struct main_state *ms, int tip_height)
@@ -1744,6 +1826,7 @@ int test_rpc_safety(void)
 
     /* parse_amount arithmetic guards: see rs_check_parse_amount_guards. */
     failures += rs_check_parse_amount_guards();
+    failures += rs_unlock_timeout_width();
 
     return failures;
 }
