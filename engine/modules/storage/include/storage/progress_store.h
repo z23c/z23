@@ -111,6 +111,13 @@ void progress_store_tx_unlock(void);
  * not open. Takes progress_store_tx_lock internally. */
 bool progress_store_set_sync_mode(bool ibd);
 
+/* Apply the folding (steady == false) or steady memory profile to the open
+ * consensus.db handle under progress_store_tx_lock (see storage/memory_profile.h).
+ * PRAGMA-only. Returns 1 applied, 0 store not open, -1 PRAGMA failed; on 1 the
+ * applied mmap bytes / cache KiB are written to the (nullable) outputs. */
+int progress_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
+                                        int64_t *cache_kib_out);
+
 /* Checkpoint+truncate the WAL on the open consensus.db handle NOW, returning
  * the WAL file's high-water bytes to the filesystem WITHOUT closing the
  * connection. The disk_full reclaim path calls this so a near-full disk can

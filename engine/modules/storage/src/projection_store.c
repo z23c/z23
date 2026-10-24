@@ -23,6 +23,7 @@
 #include "base/hex.h"
 #include "crypto/sha3.h"
 #include "storage/projection_store.h"
+#include "storage/memory_profile.h"
 #include "storage/progress_store.h"
 #include "progress_store_directory.h"
 #ifdef _WIN32
@@ -748,6 +749,39 @@ void projection_store_integrity_scan_result(bool ok)
  * file. */
 #define PROJECTION_STORE_CACHE_KIB   (64 * 1024)             /* 64 MiB */
 #define PROJECTION_STORE_MMAP_BYTES  (256LL * 1024 * 1024)   /* 256 MiB */
+
+/* Folding <-> steady switch for the open projection handle. PRAGMA-only:
+ * cache_size and mmap_size change how SQLite holds and reads pages, never
+ * which bytes are read or written, transaction boundaries or durability.
+ * Issued under projection_store_tx_lock, the lock that owns this connection.
+ * The steady profile never raises a value above the folding one. */
+int projection_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
+                                          int64_t *cache_kib_out)
+{
+    int64_t cache_kib = PROJECTION_STORE_CACHE_KIB;
+    int64_t mmap_bytes = PROJECTION_STORE_MMAP_BYTES;
+    if (steady) {
+        cache_kib = storage_memory_profile_steady_cache_kib(cache_kib);
+        mmap_bytes = storage_memory_profile_steady_mmap(mmap_bytes);
+    }
+    char cp[64], mp[64];
+    snprintf(cp, sizeof(cp), "PRAGMA cache_size=-%lld", (long long)cache_kib);
+    snprintf(mp, sizeof(mp), "PRAGMA mmap_size=%lld", (long long)mmap_bytes);
+
+    projection_store_tx_lock();
+    sqlite3 *db = projection_store_db();
+    int rc = SQLITE_OK;
+    if (db) {
+        rc = sqlite3_exec(db, cp, NULL, NULL, NULL);
+        if (rc == SQLITE_OK) rc = sqlite3_exec(db, mp, NULL, NULL, NULL);
+    }
+    projection_store_tx_unlock();
+    if (!db) return 0;
+    if (rc != SQLITE_OK) return -1;
+    if (mmap_bytes_out) *mmap_bytes_out = mmap_bytes;
+    if (cache_kib_out) *cache_kib_out = cache_kib;
+    return 1;
+}
 
 static bool apply_pragmas(sqlite3 *db)
 {

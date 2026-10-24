@@ -17,6 +17,7 @@
 
 #include "sqlite_integrity_gate.h"
 #include "storage/consensus_db.h"
+#include "storage/memory_profile.h"
 #ifdef _WIN32
 #include "storage/sqlite_vfs_dir.h"
 #endif
@@ -133,14 +134,56 @@ static bool progress_store_candidate_state(sqlite3 *db, bool *contained)
 
 /* Apply WAL + reasonable durability/recovery pragmas. Errors here are
  * fatal for the open (caller will close & fail). */
-static bool apply_pragmas(sqlite3 *db)
+/* The folding-history (open-time) sizing for this host. */
+static void progress_store_folding_sizing(int64_t *cache_kib,
+                                          int64_t *mmap_bytes)
 {
     hw_profile_init(NULL);
     int64_t ram = hw_profile_ram_bytes();
-    int64_t cache_kib = hw_profile_sqlite_cache_kib(
+    *cache_kib = hw_profile_sqlite_cache_kib(
         ram, PROGRESS_STORE_CACHE_FLOOR_KIB, PROGRESS_STORE_CACHE_CEIL_KIB);
-    int64_t mmap_bytes = hw_profile_sqlite_mmap_bytes(
+    *mmap_bytes = hw_profile_sqlite_mmap_bytes(
         ram, PROGRESS_STORE_MMAP_FLOOR_BYTES, PROGRESS_STORE_MMAP_CEIL_BYTES);
+}
+
+/* Switch the open consensus.db handle between the folding sizing and the
+ * steady (tip-following) one.  PRAGMA-only: cache_size and mmap_size change
+ * how SQLite holds and reads pages, never which bytes are read or written,
+ * transaction boundaries or durability.  Issued under progress_store_tx_lock,
+ * the lock that owns this connection.  Returns 1 applied, 0 store not open,
+ * -1 a PRAGMA failed. */
+int progress_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
+                                        int64_t *cache_kib_out)
+{
+    int64_t cache_kib, mmap_bytes;
+    progress_store_folding_sizing(&cache_kib, &mmap_bytes);
+    if (steady) {
+        cache_kib = storage_memory_profile_steady_cache_kib(cache_kib);
+        mmap_bytes = storage_memory_profile_steady_mmap(mmap_bytes);
+    }
+    char cp[64], mp[64];
+    snprintf(cp, sizeof(cp), "PRAGMA cache_size=-%lld", (long long)cache_kib);
+    snprintf(mp, sizeof(mp), "PRAGMA mmap_size=%lld", (long long)mmap_bytes);
+
+    progress_store_tx_lock();
+    sqlite3 *db = progress_store_db();
+    int rc = SQLITE_OK;
+    if (db) {
+        rc = sqlite3_exec(db, cp, NULL, NULL, NULL);
+        if (rc == SQLITE_OK) rc = sqlite3_exec(db, mp, NULL, NULL, NULL);
+    }
+    progress_store_tx_unlock();
+    if (!db) return 0;
+    if (rc != SQLITE_OK) return -1;
+    if (mmap_bytes_out) *mmap_bytes_out = mmap_bytes;
+    if (cache_kib_out) *cache_kib_out = cache_kib;
+    return 1;
+}
+
+static bool apply_pragmas(sqlite3 *db)
+{
+    int64_t cache_kib, mmap_bytes;
+    progress_store_folding_sizing(&cache_kib, &mmap_bytes);
 
     char cache_pragma[64], mmap_pragma[64];
     snprintf(cache_pragma, sizeof(cache_pragma), "PRAGMA cache_size=-%lld",

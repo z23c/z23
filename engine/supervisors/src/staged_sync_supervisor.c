@@ -29,6 +29,7 @@
 
 #include "platform/time_compat.h"  /* platform_time_monotonic_us */
 #include "util/supervisor.h"
+#include "storage/memory_profile.h"
 #include "jobs/refold_cadence.h"   /* accelerated drain batch + tick, mint/refold only */
 #include "jobs/catchup_cadence.h"  /* accelerated drain batch, live catch-up only */
 #include "jobs/header_admit_stage.h"
@@ -261,6 +262,25 @@ static void staged_sync_apply_progress_durability(struct main_state *ms)
         atomic_store(&g_progress_sync_ibd, want);
 }
 
+/* SQLite memory profile gate. Follows the tip (steady: 64 MiB mmap / 128 MiB
+ * cache) only when the node is neither in initial block download nor in a
+ * refold / mint fold (refold_cadence_active()); any of those, and the snapshot
+ * install that runs under IBD, restores the folding sizing. Reuses the same
+ * is_initial_block_download() signal as the durability gate above and applies
+ * only on a transition. PRAGMA-only: no byte read or written changes. -1 = not
+ * yet applied. */
+static _Atomic int g_memory_profile_steady = -1;
+
+static void staged_sync_apply_memory_profile(struct main_state *ms)
+{
+    if (!ms) return;
+    int want = (!is_initial_block_download(ms) && !refold_cadence_active())
+                   ? 1 : 0;
+    if (atomic_load(&g_memory_profile_steady) == want) return;
+    if (storage_memory_profile_set(want != 0))
+        atomic_store(&g_memory_profile_steady, want);
+}
+
 /* Strip the "staged." domain prefix off a stage's dotted supervisor name
  * ("staged.body_persist" -> "body_persist"), for compact blocker ids and
  * reason text. */
@@ -423,6 +443,7 @@ static void staged_stage_tick(struct liveness_contract *c)
     /* Keep progress.kv's durability mode tracking the IBD/at-tip signal.
      * Cheap: only flips the PRAGMA on an actual IBD<->at-tip transition. */
     staged_sync_apply_progress_durability(d->ms);
+    staged_sync_apply_memory_profile(d->ms);
     /* Yield to an in-flight SYNCHRONOUS reducer drive (reducer_ingest_block on
      * the mining/submitblock/rebuild thread). The stages share the active-chain
      * window, which is not under the per-stage progress.kv lock, so draining a

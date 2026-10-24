@@ -124,6 +124,14 @@ void projection_store_tx_lock(void);
 bool projection_store_tx_trylock(void);
 void projection_store_tx_unlock(void);
 
+/* Apply the folding (steady == false) or steady memory profile to the open
+ * projection handle under projection_store_tx_lock (see
+ * storage/memory_profile.h). PRAGMA-only. Returns 1 applied, 0 not open or
+ * condemned, -1 PRAGMA failed; on 1 the applied values are written to the
+ * (nullable) outputs. */
+int projection_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
+                                          int64_t *cache_kib_out);
+
 /* Graceful close: checkpoint+close of this projection handle and its own WAL.
  * Safe to call repeatedly and from shutdown paths. The kernel store has a
  * separate file, handle, and WAL lifecycle. */

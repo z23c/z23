@@ -1804,6 +1804,8 @@ int main(int argc, char **argv)
     failures += test_projection_receipt();
     failures += test_projection_consumer();
     failures += test_progress_store();
+    { extern int test_storage_memory_profile(void);
+      failures += test_storage_memory_profile(); }
     failures += test_coins_kv_read_snapshot();
     failures += test_event_log();
     failures += test_event_log_kill9();
