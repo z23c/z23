@@ -31,17 +31,6 @@ enum {
     BFC_RECEIPT_SCAN_CAP = 257,
 };
 
-const char *build_fabric_cache_disposition_string(
-    enum build_fabric_cache_disposition disposition)
-{
-    switch (disposition) {
-    case BUILD_FABRIC_CACHE_MISS: return "miss";
-    case BUILD_FABRIC_CACHE_HIT: return "hit";
-    case BUILD_FABRIC_CACHE_CORRUPT: return "corrupt";
-    }
-    return "corrupt";
-}
-
 static bool bfc_job_same(const struct db_build_job *a,
                          const struct db_build_job *b)
 {

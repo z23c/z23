@@ -254,40 +254,6 @@ int64_t body_coverage_total_covered(const struct body_coverage_map *m)
     return total;
 }
 
-int64_t body_coverage_covered_in_window(const struct body_coverage_map *m,
-                                        int64_t lo, int64_t hi)
-{
-    if (!m || lo < 0 || lo > hi)
-        return 0;
-    int64_t total = 0;
-    for (size_t i = 0; i < m->count; i++) {
-        int64_t rlo = m->ranges[i].lo;
-        int64_t rhi = m->ranges[i].hi;
-        if (rhi < lo)
-            continue;
-        if (rlo > hi)
-            break; /* sorted: nothing further can overlap */
-        if (rlo < lo)
-            rlo = lo;
-        if (rhi > hi)
-            rhi = hi;
-        total = bc_add_saturated(total, bc_range_width_saturated(rlo, rhi));
-    }
-    return total;
-}
-
-bool body_coverage_union_into(struct body_coverage_map *dst,
-                              const struct body_coverage_map *src)
-{
-    if (!dst || !src)
-        LOG_FAIL("body_coverage", "union_into: null dst or src");
-    for (size_t i = 0; i < src->count; i++) {
-        if (!body_coverage_insert(dst, src->ranges[i].lo, src->ranges[i].hi))
-            LOG_FAIL("body_coverage", "union_into: insert %zu failed", i);
-    }
-    return true;
-}
-
 size_t body_coverage_range_count(const struct body_coverage_map *m)
 {
     return m ? m->count : 0;

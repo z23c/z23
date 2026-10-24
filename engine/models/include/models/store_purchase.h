@@ -122,11 +122,4 @@ bool db_store_purchase_find_by_order(struct node_db *ndb, int64_t order_id,
 int db_store_purchase_list(struct node_db *ndb, struct db_store_purchase *out,
                            size_t max);
 
-/* Purchases that owe the buyer something: stage in (CREATED, PAYING, PAID).
- * This is the "nothing silently vanished" counter — a non-zero answer means
- * there is unfinished business a resume pass can act on. Returns 0 on error,
- * which is indistinguishable from "nothing outstanding" ON PURPOSE only for
- * display; the resume path lists rows rather than trusting this count. */
-int db_store_purchase_count_unfinished(struct node_db *ndb);
-
 #endif /* ZCL_DB_MODEL_STORE_PURCHASE_H */

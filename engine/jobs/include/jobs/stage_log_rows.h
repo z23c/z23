@@ -45,10 +45,6 @@ void stage_log_rows_note_insert(const char *table);
  * from the DELETE). Negative/zero is ignored; the counter floors at 0. */
 void stage_log_rows_note_delete(const char *table, int64_t removed);
 
-/* Lock-free read of the published row count for `table` (-1 if untracked or
- * never seeded). */
-int64_t stage_log_rows_value(const char *table);
-
 /* Dumper side: push out[count_key] = the published row count (lock-free), plus
  * out["<count_key>_snapshot"] = the uniform staleness label. No blocking, no
  * COUNT(*). No-op when `table` is untracked. */

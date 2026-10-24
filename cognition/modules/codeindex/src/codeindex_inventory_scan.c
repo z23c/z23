@@ -612,47 +612,6 @@ void inv_scan_release(struct inv_scan *s)
     memset(s, 0, sizeof(*s));
 }
 
-bool codeindex_inventory_stat_root(const char *root, uint8_t out[32])
-{
-    if (!root || !root[0] || !out) return false;
-    struct inv_scan scan = { .root = root };
-    if (!inv_collect_paths(&scan)) { inv_scan_release(&scan); return false; }
-    struct sha3_256_ctx sha;
-    static const char domain[] = "zcl.code_capability_inventory.stat.v1";
-    sha3_256_init(&sha);
-    sha3_256_write(&sha, (const unsigned char *)domain, sizeof(domain));
-    for (int i = 0; i < scan.path_count; i++) {
-        const struct inv_path *p = &scan.paths[i];
-        sha3_256_write(&sha, (const unsigned char *)p->path,
-                       strlen(p->path) + 1);
-        inv_sha_u64(&sha, p->device);
-        inv_sha_u64(&sha, p->inode);
-        inv_sha_u64(&sha, (uint64_t)p->size);
-        inv_sha_u64(&sha, (uint64_t)p->mtime_ns);
-        inv_sha_u64(&sha, (uint64_t)p->ctime_ns);
-    }
-    static const char *const extras[] = {
-        "tools/dev/test_group_catalog.def",
-        "tools/lint/arm_symbol_single_baseline.txt",
-    };
-    bool ok = true;
-    for (size_t i = 0; ok && i < sizeof(extras) / sizeof(extras[0]); i++) {
-        char path[INV_PATH_MAX];
-        int n = snprintf(path, sizeof(path), "%s/%s", root, extras[i]);
-        struct stat st;
-        ok = n > 0 && (size_t)n < sizeof(path) && stat(path, &st) == 0;
-        if (!ok) break;
-        sha3_256_write(&sha, (const unsigned char *)extras[i],
-                       strlen(extras[i]) + 1);
-        inv_sha_u64(&sha, (uint64_t)st.st_size);
-        inv_sha_u64(&sha, (uint64_t)INV_MTIME_SEC(st));
-        inv_sha_u64(&sha, (uint64_t)INV_MTIME_NSEC(st));
-    }
-    if (ok) sha3_256_finalize(&sha, out);
-    inv_scan_release(&scan);
-    return ok;
-}
-
 const char *codeindex_inventory_duplicate_kind_name(
     enum ci_inventory_duplicate_kind kind)
 {

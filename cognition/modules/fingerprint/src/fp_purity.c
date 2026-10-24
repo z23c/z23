@@ -241,11 +241,6 @@ static void fp_note_cause(struct fp_index *ix, const char *s, size_t n)
     ix->cause[n] = '\0';
 }
 
-const char *fp_index_last_cause(const struct fp_index *ix)
-{
-    return ix->cause;
-}
-
 static enum fp_verdict fp_scan_text(struct fp_index *ix, int file, size_t off,
                                     size_t len, int depth, int macro_depth,
                                     int self);

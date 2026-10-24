@@ -77,8 +77,6 @@ enum directlink_status {
     DIRECTLINK_ERR_CACHE_FULL    /* replay cache has no free slot */
 };
 
-const char *directlink_status_label(enum directlink_status status);
-
 struct directlink_observed {
     enum directlink_proto proto;
     struct directlink_addr addr;

@@ -115,14 +115,6 @@ void stage_log_rows_note_delete(const char *table, int64_t removed)
     publish(e, rows);
 }
 
-int64_t stage_log_rows_value(const char *table)
-{
-    struct log_rows_entry *e = entry_for(table);
-    if (!e)
-        return -1;  // raw-return-ok:untracked-table-sentinel-not-an-error
-    return atomic_load_explicit(&e->rows, memory_order_relaxed);
-}
-
 void stage_log_rows_emit(struct json_value *out, const char *table,
                          const char *count_key)
 {

@@ -40,8 +40,6 @@ enum boot_mesh_route_observation {
     BOOT_MESH_ROUTE_OBS_PLAINTEXT,
 };
 
-const char *boot_mesh_route_result_string(enum boot_mesh_route_result result);
-
 /* Acquire a direct route for one still-active pairing. Endpoint bytes are only
  * hints: ACQUIRED requires an established Noise session whose remote static
  * exactly matches the pairing. The caller owns the returned peer reference.

@@ -112,9 +112,6 @@ bool astro_exact_pack(struct astro_exact *out, const struct astro_mag *m,
 /* Trig table setup, owned by astro_trig.c and idempotent. Returns false if
  * the tables could not be built, which poisons every trig call. */
 bool astro_trig_tables_ready(void);
-const struct astro_exact *astro_trig_pi(void);
-const struct astro_exact *astro_trig_two_pi(void);
-const struct astro_exact *astro_trig_half_pi(void);
 
 /* ── the planetary theory (src/astro_ephemeris.c) ────────────────────────
  * Heliocentric ecliptic polar coordinates, treated as coplanar with the

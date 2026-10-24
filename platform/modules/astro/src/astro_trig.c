@@ -183,21 +183,6 @@ bool astro_trig_tables_ready(void)
     return true;
 }
 
-const struct astro_exact *astro_trig_pi(void)
-{
-    return astro_trig_tables_ready() ? &g_pi : NULL;
-}
-
-const struct astro_exact *astro_trig_two_pi(void)
-{
-    return astro_trig_tables_ready() ? &g_two_pi : NULL;
-}
-
-const struct astro_exact *astro_trig_half_pi(void)
-{
-    return astro_trig_tables_ready() ? &g_half_pi : NULL;
-}
-
 bool astro_prepare(void) { return astro_trig_tables_ready(); }
 
 struct astro_exact astro_exact_pi(void)

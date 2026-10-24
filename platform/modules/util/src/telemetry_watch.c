@@ -106,14 +106,6 @@ uint64_t telemetry_watch_last_sequence(void)
     return s;
 }
 
-uint64_t telemetry_watch_published_total(void)
-{
-    pthread_mutex_lock(&g_lock);
-    uint64_t t = g_published_total;
-    pthread_mutex_unlock(&g_lock);
-    return t;
-}
-
 uint64_t telemetry_watch_publish(const struct telemetry_watch_record *rec)
 {
     if (!rec)

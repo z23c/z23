@@ -113,26 +113,6 @@ bool configured_sync_peer_forget(const struct net_service *target)
     return removed;
 }
 
-bool configured_sync_peer_ip_matches(const struct net_addr *ip)
-{
-    if (!configured_address_usable(ip))
-        return false;  // raw-return-ok:unusable-address-never-matches
-    bool match = false;
-    pthread_mutex_lock(&g_configured_lock);
-    for (size_t i = 0; i < g_configured_count && !match; i++)
-        match = net_addr_eq(&g_configured[i].svc.addr, ip);
-    pthread_mutex_unlock(&g_configured_lock);
-    return match;
-}
-
-size_t configured_sync_peer_count(void)
-{
-    pthread_mutex_lock(&g_configured_lock);
-    size_t n = g_configured_count;
-    pthread_mutex_unlock(&g_configured_lock);
-    return n;
-}
-
 void configured_sync_peer_record_identity(const struct net_service *target,
                                           const uint8_t remote_static[32])
 {

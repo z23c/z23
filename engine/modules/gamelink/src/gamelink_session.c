@@ -303,18 +303,6 @@ enum gamelink_status gamelink_open_ops(struct gamelink *link,
     return GAMELINK_OK;
 }
 
-enum gamelink_status gamelink_set_peer(struct gamelink *link,
-                                       const uint8_t addr[4], uint16_t port)
-{
-    if (!link || !addr || port == 0)
-        return GAMELINK_ARGUMENT;
-    if (!gamelink_is_live(link))
-        return GAMELINK_CLOSED;
-    memcpy(link->peer_addr, addr, 4);
-    link->peer_port = port;
-    return GAMELINK_OK;
-}
-
 void gamelink_close(struct gamelink *link)
 {
     if (!link)

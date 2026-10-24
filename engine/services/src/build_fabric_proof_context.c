@@ -430,12 +430,6 @@ const struct vcs_proof_receiver *build_fabric_proof_context_receiver(
     return ctx ? ctx->receiver : NULL;
 }
 
-struct vcs_package_store *build_fabric_proof_context_store(
-    const struct build_fabric_proof_context *ctx)
-{
-    return ctx ? ctx->store : NULL;
-}
-
 static uint64_t bfpc_load(const _Atomic uint64_t *slot)
 {
     return atomic_load((_Atomic uint64_t *)slot);

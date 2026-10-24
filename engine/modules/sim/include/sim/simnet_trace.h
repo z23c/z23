@@ -69,8 +69,6 @@ struct simnet_trace_writer {
 bool simnet_trace_writer_open(struct simnet_trace_writer *w,
                               const char *path);
 
-bool simnet_trace_writer_is_open(const struct simnet_trace_writer *w);
-
 /* Snapshot every node in [0, node_count) of `cluster` and append one NDJSON
  * line per node to `w` (flushed before returning). `event` is a short label
  * (e.g. "simnet_mint", "simnet_deliver", "simnet_partition", "simnet_heal");

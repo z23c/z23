@@ -36,9 +36,6 @@ struct mesh_private_object_admission {
     uint64_t grant_revocation_generation;
 };
 
-const char *mesh_private_object_admission_reason_string(
-    enum mesh_private_object_admission_reason reason);
-
 /* Validate one already decoded signed offer against the authenticated Noise
  * session, active source delegation, target-local identities, pairing, and
  * exact durable grant. NEW/RESUME atomically claims the grant for the derived

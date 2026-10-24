@@ -50,17 +50,6 @@
 
 #define FP_SEED_STRIDE 0xA24BAED4963EE407ull
 
-size_t fp_emit_group_of(const struct fp_candidate *cands, size_t n_cands,
-                        size_t index)
-{
-    size_t g = 0;
-    size_t i;
-    for (i = 1; i <= index && i < n_cands; i++)
-        if (strcmp(cands[i].include, cands[i - 1].include) != 0)
-            g++;
-    return g;
-}
-
 /* Index of an earlier parameter slot with the identical kind and identical
  * written type, or -1. Two such slots are what an equality, comparison or
  * "does A supersede B" function is made of, and independent random fills

@@ -168,11 +168,6 @@ void boot_service_declaration_divergence_raise(const char *scope)
              SERVICE_DECLARATION_DIVERGED_BLOCKER_ID);
 }
 
-void boot_config_reload_divergence_clear(void)
-{
-    blocker_clear(CONFIG_RELOAD_DIVERGED_BLOCKER_ID);
-}
-
 void boot_service_declaration_divergence_clear(void)
 {
     blocker_clear(SERVICE_DECLARATION_DIVERGED_BLOCKER_ID);

@@ -340,26 +340,6 @@ void sovereign_promotion_service_register(void)
     }
 }
 
-void sovereign_promotion_service_stop(void)
-{
-    pthread_t th;
-    bool joinable = false;
-    supervisor_child_id id = atomic_load(&g_sp.supervisor_id);
-    if (id != SUPERVISOR_INVALID_ID)
-        supervisor_set_deadline(id, 0);
-    pthread_mutex_lock(&g_sp.lock);
-    if (g_sp.thread_running) {
-        g_sp.stop_requested = true;
-        th = g_sp.thread;
-        joinable = true;
-        g_sp.thread_running = false;
-    }
-    pthread_mutex_unlock(&g_sp.lock);
-    if (joinable)
-        (void)pthread_join(th, NULL);
-    atomic_store(&g_sp.running, false);
-}
-
 bool sovereign_promotion_dump_state_json(struct json_value *out, const char *key)
 {
     (void)key;

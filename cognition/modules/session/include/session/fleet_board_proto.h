@@ -195,9 +195,6 @@ bool fleet_board_room_valid(const char *room);
  * a legacy post that predates rooms. Never NULL. */
 const char *fleet_board_room_name(const struct fleet_board_post *post);
 
-/* True when this kind opens a request that a claim or result can close. */
-bool fleet_board_kind_is_open_question(uint8_t kind);
-
 /* The largest signed text this kind may carry. */
 uint32_t fleet_board_text_max(uint8_t kind);
 

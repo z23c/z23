@@ -10,33 +10,6 @@
 #include <limits.h>
 #include <string.h>
 
-const char *mesh_private_object_admission_reason_string(
-    enum mesh_private_object_admission_reason reason)
-{
-    switch (reason) {
-    case MESH_PRIVATE_OBJECT_ADMISSION_NEW: return "new";
-    case MESH_PRIVATE_OBJECT_ADMISSION_RESUME: return "resume";
-    case MESH_PRIVATE_OBJECT_ADMISSION_BAD_ARGUMENT: return "bad_argument";
-    case MESH_PRIVATE_OBJECT_ADMISSION_OFFER_INVALID: return "offer_invalid";
-    case MESH_PRIVATE_OBJECT_ADMISSION_SESSION_MISMATCH:
-        return "session_mismatch";
-    case MESH_PRIVATE_OBJECT_ADMISSION_DELEGATION_INVALID:
-        return "delegation_invalid";
-    case MESH_PRIVATE_OBJECT_ADMISSION_PAIRING_INVALID:
-        return "pairing_invalid";
-    case MESH_PRIVATE_OBJECT_ADMISSION_GRANT_INVALID: return "grant_invalid";
-    case MESH_PRIVATE_OBJECT_ADMISSION_TARGET_MISMATCH:
-        return "target_mismatch";
-    case MESH_PRIVATE_OBJECT_ADMISSION_LIMIT_MISMATCH:
-        return "limit_mismatch";
-    case MESH_PRIVATE_OBJECT_ADMISSION_TIME_MISMATCH: return "time_mismatch";
-    case MESH_PRIVATE_OBJECT_ADMISSION_NONCE_MISMATCH:
-        return "nonce_mismatch";
-    case MESH_PRIVATE_OBJECT_ADMISSION_CLAIM_REFUSED: return "claim_refused";
-    }
-    return "bad_argument";
-}
-
 static struct zcl_result admission_refuse(
     struct mesh_private_object_admission *out,
     enum mesh_private_object_admission_reason reason)

@@ -105,8 +105,6 @@ void ldbr_write(ldbr_t *db, const ldbr_writeoptions_t *options,
                 ldbr_writebatch_t *batch, char **errptr);
 void ldbr_destroy_db(const ldbr_options_t *options, const char *name,
                      char **errptr);
-void ldbr_compact_range(ldbr_t *db, const char *start_key, size_t start_len,
-                        const char *limit_key, size_t limit_len);
 
 /* ── iteration (forward only) ───────────────────────────────────────── */
 
@@ -133,8 +131,6 @@ void ldbr_release_snapshot(ldbr_t *db, const ldbr_snapshot_t *snapshot);
 ldbr_options_t *ldbr_options_create(void);
 void ldbr_options_destroy(ldbr_options_t *options);
 void ldbr_options_set_create_if_missing(ldbr_options_t *o, unsigned char v);
-void ldbr_options_set_error_if_exists(ldbr_options_t *o, unsigned char v);
-void ldbr_options_set_paranoid_checks(ldbr_options_t *o, unsigned char v);
 void ldbr_options_set_compression(ldbr_options_t *o, int v);
 void ldbr_options_set_max_open_files(ldbr_options_t *o, int n);
 void ldbr_options_set_cache(ldbr_options_t *o, ldbr_cache_t *c);

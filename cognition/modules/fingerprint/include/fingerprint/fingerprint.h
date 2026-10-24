@@ -252,9 +252,4 @@ bool fp_emit_harness(const struct fp_candidate *cands, size_t n_cands,
                      const char *work_dir, const unsigned char *disabled,
                      size_t *groups_out);
 
-/* Which emitted group a candidate landed in (groups are contiguous runs of
- * candidates sharing a `group` string). */
-size_t fp_emit_group_of(const struct fp_candidate *cands, size_t n_cands,
-                        size_t index);
-
 #endif /* ZCL_FINGERPRINT_H */

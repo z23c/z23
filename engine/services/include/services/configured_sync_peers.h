@@ -75,11 +75,6 @@ bool configured_sync_peer_note(const struct net_service *target);
 /* Forget one operator-named target (`addnode remove`), with its identity. */
 bool configured_sync_peer_forget(const struct net_service *target);
 
-/* True when `ip` is the IP of at least one recorded target. */
-bool configured_sync_peer_ip_matches(const struct net_addr *ip);
-
-size_t configured_sync_peer_count(void);
-
 /* Record the identity this node authenticated on its OWN outbound
  * connection to the exact configured address `target`. */
 void configured_sync_peer_record_identity(const struct net_service *target,

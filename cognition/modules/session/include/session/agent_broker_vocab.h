@@ -110,7 +110,6 @@ bool mvap_verb_row_query(const struct mvap_verb_row *r,
  * split. */
 bool mvap_verb_is_query(uint32_t wire);
 bool mvap_verb_is_action(uint32_t wire);
-bool mvap_verb_mints_receipt(uint32_t wire);
 
 /* Wire verb <-> canonical operation, by wire value. Both directions are the
  * same table read two ways.

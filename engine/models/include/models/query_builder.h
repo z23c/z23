@@ -248,10 +248,8 @@ void qb_conflict_set_increment(struct qb *q, enum qb_column c, int64_t delta);
 /* ── UPDATE assignments ──────────────────────────────────────────────── */
 
 void qb_set_int(struct qb *q, enum qb_column c, int64_t v);
-void qb_set_double(struct qb *q, enum qb_column c, double v);
 void qb_set_text(struct qb *q, enum qb_column c, const char *v);
 void qb_set_blob(struct qb *q, enum qb_column c, const void *p, size_t n);
-void qb_set_null(struct qb *q, enum qb_column c);
 /* c = c + ? — the delta is BOUND, not pasted. */
 void qb_set_increment(struct qb *q, enum qb_column c, int64_t delta);
 /* c = strftime('%s','now') — a fixed SQL function, no caller input. */
@@ -260,7 +258,6 @@ void qb_set_unix_now(struct qb *q, enum qb_column c);
 /* ── WHERE ───────────────────────────────────────────────────────────── */
 
 void qb_where_int(struct qb *q, enum qb_column c, enum qb_op op, int64_t v);
-void qb_where_double(struct qb *q, enum qb_column c, enum qb_op op, double v);
 void qb_where_text(struct qb *q, enum qb_column c, enum qb_op op,
                    const char *v);
 void qb_where_blob(struct qb *q, enum qb_column c, enum qb_op op,
@@ -291,7 +288,6 @@ void qb_order_by(struct qb *q, enum qb_column c, enum qb_dir d);
 void qb_limit(struct qb *q, int64_t n);
 void qb_offset(struct qb *q, int64_t n);
 void qb_returning(struct qb *q, enum qb_column c);
-void qb_returning_one(struct qb *q);
 
 /* ── Terminals ───────────────────────────────────────────────────────── */
 

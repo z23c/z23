@@ -202,11 +202,6 @@ static void qb_bind_i(struct qb *q, int64_t v)
     qb_bind(q, (struct qb_bind){ .kind = QB_BIND_INT, .i = v });
 }
 
-static void qb_bind_d(struct qb *q, double v)
-{
-    qb_bind(q, (struct qb_bind){ .kind = QB_BIND_DOUBLE, .d = v });
-}
-
 static void qb_bind_t(struct qb *q, const char *v)
 {
     if (!v) {
@@ -699,12 +694,6 @@ void qb_set_int(struct qb *q, enum qb_column c, int64_t v)
         qb_bind_i(q, v);
 }
 
-void qb_set_double(struct qb *q, enum qb_column c, double v)
-{
-    if (qb_set_slot(q, c))
-        qb_bind_d(q, v);
-}
-
 void qb_set_text(struct qb *q, enum qb_column c, const char *v)
 {
     if (qb_set_slot(q, c))
@@ -715,12 +704,6 @@ void qb_set_blob(struct qb *q, enum qb_column c, const void *p, size_t n)
 {
     if (qb_set_slot(q, c))
         qb_bind_b(q, p, n);
-}
-
-void qb_set_null(struct qb *q, enum qb_column c)
-{
-    if (qb_set_slot(q, c))
-        qb_puts(q, "NULL");
 }
 
 void qb_set_increment(struct qb *q, enum qb_column c, int64_t delta)
@@ -803,12 +786,6 @@ void qb_where_int(struct qb *q, enum qb_column c, enum qb_op op, int64_t v)
 {
     if (qb_where_col_op(q, c, op))
         qb_bind_i(q, v);
-}
-
-void qb_where_double(struct qb *q, enum qb_column c, enum qb_op op, double v)
-{
-    if (qb_where_col_op(q, c, op))
-        qb_bind_d(q, v);
 }
 
 void qb_where_text(struct qb *q, enum qb_column c, enum qb_op op,
@@ -1065,13 +1042,6 @@ void qb_returning(struct qb *q, enum qb_column c)
     qb_returning_lead(q);
     if (!q->failed)
         (void)qb_ident(q, c);
-}
-
-void qb_returning_one(struct qb *q)
-{
-    qb_returning_lead(q);
-    if (!q->failed)
-        qb_puts(q, "1");
 }
 
 /* ── Terminals ───────────────────────────────────────────────────────── */

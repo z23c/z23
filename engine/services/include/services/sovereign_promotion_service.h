@@ -96,7 +96,6 @@ bool sovereign_promotion_duty_admits(uint64_t tick);
 /* Register + start the supervised background child "sync.sovereign_promotion".
  * Idempotent. */
 void sovereign_promotion_service_register(void);
-void sovereign_promotion_service_stop(void);
 
 /* State introspection dumper (engine/controllers/src/diagnostics_registry.c
  * g_dumpers). `out` is caller-initialized. `key` is unused. */

@@ -37,9 +37,6 @@ typedef bool (*mesh_private_object_request_emit_fn)(
     const struct mesh_private_object_chunk_request_v1 *request,
     void *context);
 
-const char *mesh_private_object_receiver_result_string(
-    enum mesh_private_object_receiver_result result);
-
 struct zcl_result mesh_private_object_receiver_create(
     const char *private_root,
     const uint8_t target_noise_static_secret[32],

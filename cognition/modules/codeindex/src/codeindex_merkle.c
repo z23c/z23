@@ -1150,26 +1150,6 @@ bool ci_merkle_leaf(const struct ci_merkle *m, const char *filepath,
     return true;
 }
 
-int ci_merkle_changed_leaves(const struct ci_merkle *m,
-                             struct ci_merkle_leaf *out, int cap)
-{
-    if (!m || cap < 0 || (cap > 0 && !out))
-        LOG_ERR("codeindex", "bad arg to merkle_changed_leaves");
-    int n = 0;
-    for (uint32_t i = 0; i < m->nleaves; i++) {
-        if (!m->leaves[i].dirty) continue;
-        if (n < cap) {
-            memset(&out[n], 0, sizeof(out[n]));
-            ci_cpy(out[n].path, sizeof(out[n].path), m->leaves[i].path);
-            out[n].digest = m->leaves[i].digest;
-            out[n].content_digest = m->leaves[i].content_digest;
-            out[n].size = m->leaves[i].size;
-        }
-        n++;
-    }
-    return n;
-}
-
 int ci_merkle_leaves(const struct ci_merkle *m,
                      struct ci_merkle_leaf *out, int cap)
 {

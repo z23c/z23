@@ -132,8 +132,6 @@ const struct telemetry_field *telemetry_field_at(size_t idx);
 /* Exact (subsystem, path) match, or NULL. */
 const struct telemetry_field *telemetry_field_lookup(const char *subsystem,
                                                      const char *path);
-size_t telemetry_alias_count(void);
-const struct telemetry_alias *telemetry_alias_at(size_t idx);
 size_t telemetry_question_count(void);
 const struct telemetry_question *telemetry_question_at(size_t idx);
 

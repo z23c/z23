@@ -156,7 +156,6 @@ void telemetry_watch_restart(void);
 
 uint64_t telemetry_watch_epoch(void);
 uint64_t telemetry_watch_last_sequence(void);
-uint64_t telemetry_watch_published_total(void);
 
 /* Append one record. `rec->sequence` and `rec->dropped_count` are IGNORED on
  * input and assigned here; everything else is copied verbatim. Returns the

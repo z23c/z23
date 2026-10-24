@@ -282,20 +282,3 @@ int db_store_purchase_list(struct node_db *ndb, struct db_store_purchase *out,
     return count;
 }
 
-int db_store_purchase_count_unfinished(struct node_db *ndb)
-{
-    sqlite3_stmt *s = NULL;
-    int count = 0;
-
-    if (!ndb || !ndb->open)
-        return 0;
-    AR_PREPARE_RET(ndb, s,
-        "SELECT COUNT(*) FROM store_purchases WHERE stage IN (?,?,?)", 0);
-    AR_BIND_INT(s, 1, STORE_PURCHASE_CREATED);
-    AR_BIND_INT(s, 2, STORE_PURCHASE_PAYING);
-    AR_BIND_INT(s, 3, STORE_PURCHASE_PAID);
-    if (AR_STEP_ROW(s))
-        count = (int)AR_COL_INT(s, 0);
-    AR_FINALIZE(s);
-    return count;
-}

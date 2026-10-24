@@ -64,9 +64,6 @@ enum boot_mesh_pairing_plan_result {
     MESH_PAIR_PLAN_DELEGATION_UNAVAILABLE,
 };
 
-const char *boot_mesh_pairing_plan_result_string(
-    enum boot_mesh_pairing_plan_result result);
-
 enum boot_mesh_pairing_commit_result {
     MESH_PAIR_COMMIT_OK = 0,
     MESH_PAIR_COMMIT_BAD_ARGUMENT, /* includes out-of-range days */
@@ -77,9 +74,6 @@ enum boot_mesh_pairing_commit_result {
     MESH_PAIR_COMMIT_DELEGATION_UNAVAILABLE,
     MESH_PAIR_COMMIT_SERVICE_REFUSED, /* service_reason_out carries why */
 };
-
-const char *boot_mesh_pairing_commit_result_string(
-    enum boot_mesh_pairing_commit_result result);
 
 /* ── Pure helpers (no sockets, no db, no locks) ──────────────────────── */
 

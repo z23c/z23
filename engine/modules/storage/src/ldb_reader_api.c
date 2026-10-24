@@ -183,15 +183,6 @@ void ldbr_destroy_db(const ldbr_options_t *options, const char *name,
     set_err(errptr, LDBR_READ_ONLY_MSG);
 }
 
-void ldbr_compact_range(ldbr_t *db, const char *start_key, size_t start_len,
-                        const char *limit_key, size_t limit_len)
-{
-    /* Compaction is a writer's concern; a read-only view has nothing to
-     * reorganize, and leveldb_compact_range has no failure channel. */
-    (void)db; (void)start_key; (void)start_len; (void)limit_key;
-    (void)limit_len;
-}
-
 /* ── options ────────────────────────────────────────────────────────── */
 
 ldbr_options_t *ldbr_options_create(void)
@@ -211,18 +202,6 @@ void ldbr_options_destroy(ldbr_options_t *o) { free(o); }
 void ldbr_options_set_create_if_missing(ldbr_options_t *o, unsigned char v)
 {
     if (o) o->create_if_missing = v != 0;
-}
-
-void ldbr_options_set_error_if_exists(ldbr_options_t *o, unsigned char v)
-{
-    if (o) o->error_if_exists = v != 0;
-}
-
-void ldbr_options_set_paranoid_checks(ldbr_options_t *o, unsigned char v)
-{
-    /* Recorded for symmetry only: this reader always verifies every block
-     * and record checksum, which is strictly stronger. */
-    if (o) o->paranoid_checks = v != 0;
 }
 
 void ldbr_options_set_compression(ldbr_options_t *o, int v)

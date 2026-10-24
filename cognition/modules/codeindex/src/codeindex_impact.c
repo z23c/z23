@@ -697,21 +697,6 @@ int codeindex_impact_closure_with_terminal(
                                out, cap, truncated, false);
 }
 
-int codeindex_impact_closure_overlay_with_terminal(
-    struct codeindex *ci, const char *root,
-    const char (*changed_files)[256], int n_changed, int max_depth,
-    codeindex_impact_terminal_fn terminal, void *terminal_user,
-    char (*out)[256], int cap, bool *truncated)
-{
-    if (!root || !root[0] || !terminal) {
-        if (truncated) *truncated = false;
-        LOG_ERR("codeindex", "overlay terminal closure input is empty");
-    }
-    return impact_closure_impl(ci, root, changed_files, n_changed, max_depth,
-                               terminal, terminal_user,
-                               out, cap, truncated, false);
-}
-
 int codeindex_impact_closure_bounded(
     struct codeindex *ci, const char *root,
     const char (*changed_files)[256], int n_changed, int max_depth,

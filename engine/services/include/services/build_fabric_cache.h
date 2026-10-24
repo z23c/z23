@@ -26,9 +26,6 @@ struct build_fabric_cache_report {
     char output_root_sha3[BUILD_FABRIC_ID_HEX + 1];
 };
 
-const char *build_fabric_cache_disposition_string(
-    enum build_fabric_cache_disposition disposition);
-
 /* Restore one locally accepted compile output without queueing, leasing,
  * executing, minting evidence, or changing the durable lifecycle. The caller
  * supplies the immutable plan; its source manifest, canonical ids, authority,

@@ -263,15 +263,6 @@ bool slo_probe_collect(const struct slo_probe_config *cfg,
     return ok;
 }
 
-void slo_probe_instance_names(const struct slo_probe_config *cfg, char *out,
-                              size_t cap)
-{
-    struct slo_text t;
-    slo_text_init(&t, out, cap);
-    for (size_t i = 0; cfg && i < cfg->ninst; i++)
-        slo_text_addf(&t, "%s%s", i ? "," : "", cfg->inst[i].name);
-}
-
 static const char *last_argv_segment(const char *line, const char *eol)
 {
     const char *seg = NULL;

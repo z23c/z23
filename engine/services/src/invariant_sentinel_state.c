@@ -66,11 +66,6 @@ void invariant_sentinel_note_locator(int first_div_h)
         atomic_store(&g_locator_first_div_h, first_div_h);
 }
 
-void invariant_sentinel_note_loader_height_fallback(void)
-{
-    atomic_fetch_add(&g_loader_height_fallbacks, 1);
-}
-
 bool invariant_sentinel_dump_state_json(struct json_value *out,
                                         const char *key)
 {

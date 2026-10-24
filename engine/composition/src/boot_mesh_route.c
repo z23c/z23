@@ -54,23 +54,6 @@ static void route_lock(void)
     zcl_mutex_lock(&g_route_lock);
 }
 
-const char *boot_mesh_route_result_string(enum boot_mesh_route_result result)
-{
-    switch (result) {
-    case BOOT_MESH_ROUTE_ACQUIRED: return "acquired";
-    case BOOT_MESH_ROUTE_PENDING: return "pending";
-    case BOOT_MESH_ROUTE_RESOURCE_DEFERRED: return "resource_deferred";
-    case BOOT_MESH_ROUTE_NO_ENDPOINT: return "no_endpoint";
-    case BOOT_MESH_ROUTE_AMBIGUOUS_ENDPOINT: return "ambiguous_endpoint";
-    case BOOT_MESH_ROUTE_BUSY: return "busy";
-    case BOOT_MESH_ROUTE_IDENTITY_MISMATCH: return "identity_mismatch";
-    case BOOT_MESH_ROUTE_DOWNGRADE: return "plaintext_downgrade";
-    case BOOT_MESH_ROUTE_EXHAUSTED: return "exhausted";
-    case BOOT_MESH_ROUTE_UNAVAILABLE: return "unavailable";
-    }
-    return "unavailable";
-}
-
 static struct mesh_route_slot *route_slot(const char *pairing_id,
                                           const struct net_address *endpoint,
                                           uint64_t now_ms)

@@ -233,11 +233,6 @@ enum gamelink_status gamelink_open_ops(struct gamelink *link,
                                        const struct gamelink_ops *ops,
                                        const clock_iface_t *clock);
 
-/* Re-point the peer after the caller confirmed a better path. Refused on a
- * closed session or a zero port. */
-enum gamelink_status gamelink_set_peer(struct gamelink *link,
-                                       const uint8_t addr[4], uint16_t port);
-
 /* Send one datagram. `len` <= GAMELINK_MAX_PAYLOAD. The sequence number used
  * is returned through `out_seq` when it is not NULL. Refuses rather than
  * wrapping the nonce, and refuses when the byte cap is exhausted. */
@@ -286,8 +281,5 @@ size_t gamelink_probe_serve(struct gamelink *echo);
  * added at the end. Writes one row per known statistic and returns how many
  * rows were appended, 0 when nothing is known yet or the ledger refused. */
 struct zcl_fleet_ledger;
-size_t gamelink_probe_write_vitals(const struct gamelink *link,
-                                   struct zcl_fleet_ledger *ledger,
-                                   const uint8_t seed[32]);
 
 #endif /* ZCL_GAMELINK_H */

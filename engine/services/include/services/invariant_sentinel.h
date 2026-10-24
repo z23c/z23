@@ -160,7 +160,6 @@ bool invariant_sentinel_healthy(char *detail, int detail_cap);
  * block_index_loader by-height fallback). */
 void invariant_sentinel_note_seed_gate(bool refused);
 void invariant_sentinel_note_locator(int first_div_h);
-void invariant_sentinel_note_loader_height_fallback(void);
 
 #ifdef ZCL_TESTING
 void invariant_sentinel_reset_for_testing(void);

@@ -138,37 +138,6 @@ const char *boot_mesh_pairing_reason_code(enum mesh_pairing_reason reason)
     return "BAD_ARGUMENT";
 }
 
-const char *boot_mesh_pairing_plan_result_string(
-    enum boot_mesh_pairing_plan_result result)
-{
-    switch (result) {
-    case MESH_PAIR_PLAN_OK: return "ok";
-    case MESH_PAIR_PLAN_BAD_ARGUMENT: return "bad_argument";
-    case MESH_PAIR_PLAN_UNAVAILABLE: return "unavailable";
-    case MESH_PAIR_PLAN_NOISE_DISABLED: return "noise_transport_disabled";
-    case MESH_PAIR_PLAN_PEER_NOT_CONNECTED: return "peer_not_connected";
-    case MESH_PAIR_PLAN_AMBIGUOUS_PEER: return "ambiguous_peer";
-    case MESH_PAIR_PLAN_DELEGATION_UNAVAILABLE: return "delegation_unavailable";
-    }
-    return "bad_argument";
-}
-
-const char *boot_mesh_pairing_commit_result_string(
-    enum boot_mesh_pairing_commit_result result)
-{
-    switch (result) {
-    case MESH_PAIR_COMMIT_OK: return "ok";
-    case MESH_PAIR_COMMIT_BAD_ARGUMENT: return "bad_argument";
-    case MESH_PAIR_COMMIT_UNAVAILABLE: return "unavailable";
-    case MESH_PAIR_COMMIT_NOISE_DISABLED: return "noise_transport_disabled";
-    case MESH_PAIR_COMMIT_PEER_NOT_CONNECTED: return "peer_not_connected";
-    case MESH_PAIR_COMMIT_AMBIGUOUS_PEER: return "ambiguous_peer";
-    case MESH_PAIR_COMMIT_DELEGATION_UNAVAILABLE: return "delegation_unavailable";
-    case MESH_PAIR_COMMIT_SERVICE_REFUSED: return "service_refused";
-    }
-    return "bad_argument";
-}
-
 /* ── Live peer pick + held-delegation lookup ─────────────────────────── */
 
 /* Snapshot connected peers under cs_nodes, keep those with an established

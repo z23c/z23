@@ -717,11 +717,6 @@ uint64_t header_admit_stage_reorg_audit_total(void)
     return atomic_load(&g_reorg_audit_total);
 }
 
-uint64_t header_admit_stage_reorg_audit_height_checks(void)
-{
-    return atomic_load(&g_reorg_audit_height_checks);
-}
-
 uint64_t header_admit_stage_produced_total(void)
 {
     return atomic_load(&g_produced_total);

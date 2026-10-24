@@ -100,22 +100,6 @@ bool body_coverage_find_first_hole(const struct body_coverage_map *m,
 /* Sum of covered heights across all ranges. */
 int64_t body_coverage_total_covered(const struct body_coverage_map *m);
 
-/* Sum of covered heights inside the closed window [lo, hi]. 0 for an empty
- * or invalid window. The windowed counterpart of total_covered. */
-int64_t body_coverage_covered_in_window(const struct body_coverage_map *m,
-                                        int64_t lo, int64_t hi);
-
-/* Merge every range of `src` into `dst`. Returns false only on allocation
- * failure, in which case `dst` may hold a partial union — callers that need
- * all-or-nothing must union into a scratch map.
- *
- * Currently unused. Do not union this map (what the node claims to hold,
- * restored from progress.kv at boot) into storage/body_history.h's `measured`
- * map (what the census probed this boot): coverage is a projection and a
- * claim, never evidence that anything was checked. */
-bool body_coverage_union_into(struct body_coverage_map *dst,
-                              const struct body_coverage_map *src);
-
 /* Number of disjoint ranges (hole count within any window is derivable
  * via find_first_hole; this is the fragmentation measure). */
 size_t body_coverage_range_count(const struct body_coverage_map *m);

@@ -102,8 +102,6 @@ void boot_declaration_drift_set_reconciler(enum declaration_drift_kind kind,
 void boot_config_reload_divergence_raise(const char *scope);
 void boot_service_declaration_divergence_raise(const char *scope);
 
-/* Clear on convergence. Idempotent; safe when nothing is raised. */
-void boot_config_reload_divergence_clear(void);
 void boot_service_declaration_divergence_clear(void);
 
 /* Last scope recorded for `kind`, or "" if none. Returns a pointer to

@@ -112,11 +112,6 @@ bool fleet_board_kind_from_name(const char *name, uint8_t *out)
     return false;
 }
 
-bool fleet_board_kind_is_open_question(uint8_t kind)
-{
-    return kind == FLEET_BOARD_KIND_PROBLEM || kind == FLEET_BOARD_KIND_NEED;
-}
-
 uint32_t fleet_board_text_max(uint8_t kind)
 {
     return kind == FLEET_BOARD_KIND_WIKI ? (uint32_t)FLEET_BOARD_WIKI_TEXT_MAX

@@ -112,13 +112,6 @@ bool mvap_verb_is_action(uint32_t wire)
     return r && r->verb_class == MVAP_VERB_CLASS_ACTION;
 }
 
-/* An ACTION runs PLAN -> COMMIT and is recorded; a QUERY does neither. There
- * is no third rule here that could disagree with the class column. */
-bool mvap_verb_mints_receipt(uint32_t wire)
-{
-    return mvap_verb_is_action(wire);
-}
-
 /* Declared in agent_broker_proto.h, where callers look for verb facts; defined
  * HERE because the answer is the class column and nothing else. */
 bool mvap_verb_is_mutation(uint32_t wire)

@@ -28,28 +28,6 @@ struct mesh_private_object_receiver {
         slots[MESH_PRIVATE_OBJECT_RECEIVER_MAX_TRANSFERS];
 };
 
-const char *mesh_private_object_receiver_result_string(
-    enum mesh_private_object_receiver_result result)
-{
-    switch (result) {
-    case MESH_PRIVATE_OBJECT_RECEIVER_OK: return "ok";
-    case MESH_PRIVATE_OBJECT_RECEIVER_RESUME: return "resume";
-    case MESH_PRIVATE_OBJECT_RECEIVER_WAIT: return "wait";
-    case MESH_PRIVATE_OBJECT_RECEIVER_STAGED: return "staged";
-    case MESH_PRIVATE_OBJECT_RECEIVER_EXHAUSTED: return "exhausted";
-    case MESH_PRIVATE_OBJECT_RECEIVER_CANCELLED: return "cancelled";
-    case MESH_PRIVATE_OBJECT_RECEIVER_NOT_FOUND: return "not_found";
-    case MESH_PRIVATE_OBJECT_RECEIVER_BUSY: return "busy";
-    case MESH_PRIVATE_OBJECT_RECEIVER_BACKPRESSURE: return "backpressure";
-    case MESH_PRIVATE_OBJECT_RECEIVER_BINDING: return "binding";
-    case MESH_PRIVATE_OBJECT_RECEIVER_CORRELATION: return "correlation";
-    case MESH_PRIVATE_OBJECT_RECEIVER_AUTH: return "auth";
-    case MESH_PRIVATE_OBJECT_RECEIVER_CORRUPT: return "corrupt";
-    case MESH_PRIVATE_OBJECT_RECEIVER_INVALID: return "invalid";
-    }
-    return "invalid";
-}
-
 static struct zcl_result receiver_reply(
     enum mesh_private_object_receiver_result *out,
     enum mesh_private_object_receiver_result result)

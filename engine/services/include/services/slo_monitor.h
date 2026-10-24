@@ -148,10 +148,6 @@ bool slo_probe_collect(const struct slo_probe_config *cfg,
                        const struct slo_probe_io *io,
                        struct slo_probe_result *out);
 
-/* Names of the instances the prober owns, comma separated. */
-void slo_probe_instance_names(const struct slo_probe_config *cfg, char *out,
-                              size_t cap);
-
 /* Value of the single `-key=value` token inside the argv[] segment of a
  * systemd ExecStart property; false when absent or duplicated. */
 bool slo_unit_exec_arg(const char *show, const char *key, char *out,

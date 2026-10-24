@@ -173,11 +173,6 @@ struct ci_inventory_include_work {
 struct ci_inventory_include_work codeindex_inventory_test_include_work(void);
 #endif
 
-/* Exact stat-bound freshness root over the same file universe.  This reads no
- * source bytes and exists only as a process-local memo key; report identity is
- * always source_root_sha3 above. */
-bool codeindex_inventory_stat_root(const char *root, uint8_t out[32]);
-
 const char *codeindex_inventory_duplicate_kind_name(
     enum ci_inventory_duplicate_kind kind);
 const char *codeindex_inventory_test_evidence_name(

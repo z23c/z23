@@ -173,14 +173,6 @@ bool legacy_mirror_sync_blocker_should_surface(
 bool legacy_mirror_sync_dump_state_json(struct json_value *out,
                                         const char *key);
 
-/* Re-read env-tunable mirror knobs (cadence, max blocks per tick, lag SLA
- * thresholds) into the running service. Safe to call any time after
- * legacy_mirror_sync_init; takes g_lms.lock briefly. Breach latches are
- * NOT cleared — if a tighter threshold should fire, the next tick's
- * evaluator will see the still-elevated lag and emit. If a looser
- * threshold now puts lag under, the natural reset path clears the latch. */
-void legacy_mirror_sync_reload_from_env(void);
-
 void legacy_mirror_sync_reset_for_test(void);
 #ifdef ZCL_TESTING
 void legacy_mirror_sync_test_set_stats(

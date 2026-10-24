@@ -142,13 +142,6 @@ const struct telemetry_field *telemetry_field_lookup(const char *subsystem,
     return NULL;
 }
 
-size_t telemetry_alias_count(void) { return ALIAS_COUNT; }
-
-const struct telemetry_alias *telemetry_alias_at(size_t idx)
-{
-    return idx < ALIAS_COUNT ? &g_aliases[idx] : NULL;
-}
-
 size_t telemetry_question_count(void) { return QUESTION_COUNT; }
 
 const struct telemetry_question *telemetry_question_at(size_t idx)

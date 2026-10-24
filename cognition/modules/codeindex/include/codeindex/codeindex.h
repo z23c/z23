@@ -519,11 +519,6 @@ int codeindex_impact_closure_with_terminal(
     struct codeindex *ci, const char (*changed_files)[256], int n_changed,
     int max_depth, codeindex_impact_terminal_fn terminal, void *terminal_user,
     char (*out)[256], int cap, bool *truncated);
-int codeindex_impact_closure_overlay_with_terminal(
-    struct codeindex *ci, const char *root,
-    const char (*changed_files)[256], int n_changed, int max_depth,
-    codeindex_impact_terminal_fn terminal, void *terminal_user,
-    char (*out)[256], int cap, bool *truncated);
 
 /* One entry point covering both variants above plus an early exit. `root` is
  * NULL for the store-only walk and a repo root for the overlay walk. When

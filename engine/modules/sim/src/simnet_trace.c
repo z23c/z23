@@ -32,11 +32,6 @@ bool simnet_trace_writer_open(struct simnet_trace_writer *w,
     return true;
 }
 
-bool simnet_trace_writer_is_open(const struct simnet_trace_writer *w)
-{
-    return w && w->fp != NULL;
-}
-
 /* Fills `out` with one node's chain/coins/cluster snapshot. Returns false if
  * any simnet_cluster accessor fails for this node_id (still leaves *out a
  * valid, freeable JSON object reporting what it could). */

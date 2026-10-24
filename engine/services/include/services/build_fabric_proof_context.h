@@ -113,8 +113,6 @@ struct zcl_result build_fabric_proof_context_set_quorum(
     struct build_fabric_proof_context *ctx, uint32_t quorum);
 const struct vcs_proof_receiver *build_fabric_proof_context_receiver(
     const struct build_fabric_proof_context *ctx);
-struct vcs_package_store *build_fabric_proof_context_store(
-    const struct build_fabric_proof_context *ctx);
 
 /* The component proof key of one plain fixed compile, derived from this
  * host's current tool bytes exactly as the executor key publishes it. */

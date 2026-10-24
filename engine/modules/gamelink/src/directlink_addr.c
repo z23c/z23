@@ -9,26 +9,6 @@
 
 #include <string.h>
 
-const char *directlink_status_label(enum directlink_status status)
-{
-    switch (status) {
-    case DIRECTLINK_OK: return "ok";
-    case DIRECTLINK_ERR_ARGUMENT: return "argument";
-    case DIRECTLINK_ERR_CAPACITY: return "capacity";
-    case DIRECTLINK_ERR_TRUNCATED: return "truncated";
-    case DIRECTLINK_ERR_TRAILING: return "trailing";
-    case DIRECTLINK_ERR_VERSION: return "version";
-    case DIRECTLINK_ERR_FIELD: return "field";
-    case DIRECTLINK_ERR_PORT: return "port";
-    case DIRECTLINK_ERR_ADDRESS: return "address";
-    case DIRECTLINK_ERR_POLICY: return "policy";
-    case DIRECTLINK_ERR_SCOPE: return "scope";
-    case DIRECTLINK_ERR_REPLAY: return "replay";
-    case DIRECTLINK_ERR_CACHE_FULL: return "cache_full";
-    }
-    return "unknown";
-}
-
 static size_t addr_bytes(uint8_t family)
 {
     return family == DIRECTLINK_V4 ? 4u : family == DIRECTLINK_V6 ? 16u : 0u;

@@ -137,12 +137,6 @@ struct ci_merkle_leaf {
     uint64_t               size;
 };
 
-/* Content-changed leaves from the snapshot used by the last refresh, in
- * canonical path order. A metadata-only touch is not a content change. The
- * return value is the complete count and may exceed `cap`; callers that cannot
- * hold the whole set must fall back to a cold rebuild. */
-int ci_merkle_changed_leaves(const struct ci_merkle *m,
-                             struct ci_merkle_leaf *out, int cap);
 int ci_merkle_leaves(const struct ci_merkle *m,
                      struct ci_merkle_leaf *out, int cap);
 
