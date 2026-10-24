@@ -312,6 +312,57 @@ static const char *zr_failure_rule(const struct zcl_command_reply *reply,
 }
 
 /* ── 1: codec roundtrip + root stability ────────────────────────────── */
+/* The scalar and count fields of a roundtripped recipe. */
+static bool zr_codec_counts(struct vcs_package_recipe *back)
+{
+    return back->public_headers.count == 1 && back->sources.count == 1 &&
+           back->test_sources.count == 1 && back->include_dirs.count == 1 &&
+           back->defines.count == 1 && back->library_count == 3 &&
+           back->expected_test_exit_code == 0 &&
+           back->maximum_test_seconds == 120 &&
+           back->maximum_memory_bytes == UINT64_C(1024) * 1024u * 1024u;
+}
+
+/* The list items and library ids of a roundtripped recipe. */
+static bool zr_codec_items(struct vcs_package_recipe *back)
+{
+    return strcmp(back->public_headers.items[0], "include/ring.h") == 0 &&
+           strcmp(back->sources.items[0], "src/ring.c") == 0 &&
+           strcmp(back->test_sources.items[0], "tests/ring_test.c") == 0 &&
+           strcmp(back->include_dirs.items[0], "include") == 0 &&
+           strcmp(back->defines.items[0], "RING_CAP=64") == 0 &&
+           back->libraries[0] == VCS_PACKAGE_RECIPE_LIB_LIBC &&
+           back->libraries[1] == VCS_PACKAGE_RECIPE_LIB_LIBM &&
+           back->libraries[2] == VCS_PACKAGE_RECIPE_LIB_PTHREAD;
+}
+
+/* The fixture's root and its roundtrip's root agree, and the KAT pins it. */
+static int zr_codec_roots(struct vcs_package_recipe *r,
+                          struct vcs_package_recipe *back)
+{
+    int failures = 0;
+    uint8_t root_a[32];
+    uint8_t root_b[32];
+    ZR_CHECK("codec: roots compute",
+             vcs_package_recipe_root(r, root_a) == VCS_PACKAGE_RECIPE_OK &&
+             vcs_package_recipe_root(back, root_b) ==
+                 VCS_PACKAGE_RECIPE_OK);
+    ZR_CHECK("codec: root stable across the roundtrip",
+             memcmp(root_a, root_b, 32) == 0);
+
+    /* Frozen KAT: the fixture recipe's root pins the canonical encoding
+     * (magic, field order, widths, the domain string). Any drift in the
+     * wire format moves this hash — that is a deliberate, reviewable
+     * break, never a silent one. */
+    char root_hex[65];
+    zr_hex32(root_a, root_hex);
+    ZR_CHECK("codec: KAT root pins the encoding",
+             strcmp(root_hex,
+                    "6cf44ed4a51741fecc967207acd88ba1198220bc6013149be475de"
+                    "dbef263053") == 0);
+    return failures;
+}
+
 static int t_codec(void)
 {
     int failures = 0;
@@ -329,43 +380,12 @@ static int t_codec(void)
     ZR_CHECK("codec: parses back",
              vcs_package_recipe_parse(wire, wire_len, &back) ==
                  VCS_PACKAGE_RECIPE_OK);
-    bool same =
-        back.public_headers.count == 1 && back.sources.count == 1 &&
-        back.test_sources.count == 1 && back.include_dirs.count == 1 &&
-        back.defines.count == 1 && back.library_count == 3 &&
-        back.expected_test_exit_code == 0 &&
-        back.maximum_test_seconds == 120 &&
-        back.maximum_memory_bytes == UINT64_C(1024) * 1024u * 1024u;
+    bool same = zr_codec_counts(&back);
     if (same)
-        same = strcmp(back.public_headers.items[0], "include/ring.h") == 0 &&
-               strcmp(back.sources.items[0], "src/ring.c") == 0 &&
-               strcmp(back.test_sources.items[0], "tests/ring_test.c") == 0 &&
-               strcmp(back.include_dirs.items[0], "include") == 0 &&
-               strcmp(back.defines.items[0], "RING_CAP=64") == 0 &&
-               back.libraries[0] == VCS_PACKAGE_RECIPE_LIB_LIBC &&
-               back.libraries[1] == VCS_PACKAGE_RECIPE_LIB_LIBM &&
-               back.libraries[2] == VCS_PACKAGE_RECIPE_LIB_PTHREAD;
+        same = zr_codec_items(&back);
     ZR_CHECK("codec: roundtrip field for field", same);
 
-    uint8_t root_a[32];
-    uint8_t root_b[32];
-    ZR_CHECK("codec: roots compute",
-             vcs_package_recipe_root(&r, root_a) == VCS_PACKAGE_RECIPE_OK &&
-             vcs_package_recipe_root(&back, root_b) ==
-                 VCS_PACKAGE_RECIPE_OK);
-    ZR_CHECK("codec: root stable across the roundtrip",
-             memcmp(root_a, root_b, 32) == 0);
-
-    /* Frozen KAT: the fixture recipe's root pins the canonical encoding
-     * (magic, field order, widths, the domain string). Any drift in the
-     * wire format moves this hash — that is a deliberate, reviewable
-     * break, never a silent one. */
-    char root_hex[65];
-    zr_hex32(root_a, root_hex);
-    ZR_CHECK("codec: KAT root pins the encoding",
-             strcmp(root_hex,
-                    "6cf44ed4a51741fecc967207acd88ba1198220bc6013149be475de"
-                    "dbef263053") == 0);
+    failures += zr_codec_roots(&r, &back);
 
     vcs_package_recipe_free(&back);
     vcs_package_recipe_free(&r);
@@ -428,42 +448,45 @@ static bool zr_manifest_without_app(struct vcs_package_manifest *m)
     return true;
 }
 
-static int t_programs(void)
+/* The schema-2 fields of a roundtripped recipe. */
+static bool zr_programs_fields(struct vcs_package_recipe *back)
+{
+    return back->schema_version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS &&
+           back->programs.count == 2 &&
+           strcmp(back->programs.items[0], "app/main.c") == 0 &&
+           strcmp(back->programs.items[1], "app/tool.c") == 0 &&
+           back->public_headers.count == 1 && back->sources.count == 1 &&
+           back->test_sources.count == 1 && back->include_dirs.count == 1 &&
+           back->defines.count == 1 && back->library_count == 3;
+}
+
+/* Roundtrip: the fixture recipe plus two programs. */
+static int zr_programs_roundtrip(struct vcs_package_recipe *r)
 {
     int failures = 0;
-    enum vcs_package_recipe_error err = VCS_PACKAGE_RECIPE_OK;
-
-    /* Roundtrip: the fixture recipe plus two programs. */
-    struct vcs_package_recipe r;
     ZR_CHECK("programs: schema-2 fixture builds",
-             zr_recipe(&r) &&
-             vcs_package_recipe_add_program(&r, "app/main.c", NULL) &&
-             vcs_package_recipe_add_program(&r, "app/tool.c", NULL));
+             zr_recipe(r) &&
+             vcs_package_recipe_add_program(r, "app/main.c", NULL) &&
+             vcs_package_recipe_add_program(r, "app/tool.c", NULL));
     ZR_CHECK("programs: a program raises the recipe to schema 2",
-             r.schema_version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS);
+             r->schema_version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS);
     ZR_CHECK("programs: schema-2 fixture validates",
-             vcs_package_recipe_validate(&r) == VCS_PACKAGE_RECIPE_OK);
+             vcs_package_recipe_validate(r) == VCS_PACKAGE_RECIPE_OK);
 
     uint8_t *wire2 = NULL;
     size_t wire2_len = 0;
     ZR_CHECK("programs: schema-2 recipe serializes",
-             vcs_package_recipe_serialize(&r, &wire2, &wire2_len) ==
+             vcs_package_recipe_serialize(r, &wire2, &wire2_len) ==
                  VCS_PACKAGE_RECIPE_OK && wire2 && wire2_len > 0);
     struct vcs_package_recipe back;
     ZR_CHECK("programs: schema-2 wire parses back",
              vcs_package_recipe_parse(wire2, wire2_len, &back) ==
                  VCS_PACKAGE_RECIPE_OK);
     ZR_CHECK("programs: roundtrip field for field",
-             back.schema_version == VCS_PACKAGE_RECIPE_VERSION_PROGRAMS &&
-             back.programs.count == 2 &&
-             strcmp(back.programs.items[0], "app/main.c") == 0 &&
-             strcmp(back.programs.items[1], "app/tool.c") == 0 &&
-             back.public_headers.count == 1 && back.sources.count == 1 &&
-             back.test_sources.count == 1 && back.include_dirs.count == 1 &&
-             back.defines.count == 1 && back.library_count == 3);
+             zr_programs_fields(&back));
     uint8_t root_a[32], root_b[32];
     ZR_CHECK("programs: schema-2 roots compute",
-             vcs_package_recipe_root(&r, root_a) == VCS_PACKAGE_RECIPE_OK &&
+             vcs_package_recipe_root(r, root_a) == VCS_PACKAGE_RECIPE_OK &&
              vcs_package_recipe_root(&back, root_b) ==
                  VCS_PACKAGE_RECIPE_OK);
     ZR_CHECK("programs: schema-2 root stable across the roundtrip",
@@ -479,8 +502,15 @@ static int t_programs(void)
     ZR_CHECK("programs: schema-2 KAT root pins the encoding",
              strcmp(root_hex, ZR_SCHEMA2_KAT) == 0);
     vcs_package_recipe_free(&back);
+    free(wire2);
+    return failures;
+}
 
-    /* Builder rejections: the program grammar is exactly `app/<stem>.c`. */
+/* Builder rejections: the program grammar is exactly `app/<stem>.c`. */
+static int zr_programs_rejects(struct vcs_package_recipe *r)
+{
+    int failures = 0;
+    enum vcs_package_recipe_error err = VCS_PACKAGE_RECIPE_OK;
     static const char *const not_programs[] = {
         "src/x.c", "app/a/b.c", "app/x.h", "app/.c", "tests/t.c",
     };
@@ -501,10 +531,15 @@ static int t_programs(void)
     }
     err = VCS_PACKAGE_RECIPE_OK;
     ZR_CHECK("programs: a repeated program names the order rule",
-             !vcs_package_recipe_add_program(&r, "app/main.c", &err) &&
+             !vcs_package_recipe_add_program(r, "app/main.c", &err) &&
              err == VCS_PACKAGE_RECIPE_ERR_LIST_ORDER);
+    return failures;
+}
 
-    /* A schema-1 struct carrying a program has no legal encoding. */
+/* A schema-1 struct carrying a program has no legal encoding. */
+static int zr_programs_forged(void)
+{
+    int failures = 0;
     struct vcs_package_recipe forged;
     ZR_CHECK("programs: schema-1 struct with a program builds",
              zr_recipe(&forged) &&
@@ -514,10 +549,15 @@ static int t_programs(void)
              vcs_package_recipe_validate(&forged) ==
                  VCS_PACKAGE_RECIPE_ERR_PROGRAM);
     vcs_package_recipe_free(&forged);
+    return failures;
+}
 
-    /* Hand-built wires. The schema-1 encoding of the same recipe is the
-     * base; every variant below differs from it only in the version field
-     * and the trailing bytes. */
+/* Hand-built wires. The schema-1 encoding of the same recipe is the
+ * base; every variant below differs from it only in the version field
+ * and the trailing bytes. */
+static int zr_programs_wires(void)
+{
+    int failures = 0;
     struct vcs_package_recipe plain;
     (void)zr_recipe(&plain);
     uint8_t *wire1 = NULL;
@@ -573,9 +613,14 @@ static int t_programs(void)
     free(forged_wire);
     free(wire1);
     vcs_package_recipe_free(&plain);
+    return failures;
+}
 
-    /* Install outputs: app/main.c carries the package's name, every other
-     * stem carries its own. */
+/* Install outputs: app/main.c carries the package's name, every other
+ * stem carries its own. */
+static int zr_programs_outputs(void)
+{
+    int failures = 0;
     char output[VCS_PACKAGE_PATH_MAX];
     ZR_CHECK("programs: app/main.c installs under the package short name",
              vcs_package_recipe_program_output("app/main.c", "wordcount",
@@ -597,6 +642,18 @@ static int t_programs(void)
              !vcs_package_recipe_program_output("app/main.c", "wordcount",
                                                 output, 8u) &&
              output[0] == '\0');
+    return failures;
+}
+
+static int t_programs(void)
+{
+    int failures = 0;
+    struct vcs_package_recipe r;
+    failures += zr_programs_roundtrip(&r);
+    failures += zr_programs_rejects(&r);
+    failures += zr_programs_forged();
+    failures += zr_programs_wires();
+    failures += zr_programs_outputs();
 
     /* Publication membership: a declared program must be a package file. */
     struct vcs_package_manifest m;
@@ -611,16 +668,13 @@ static int t_programs(void)
     vcs_package_manifest_free(&m);
 
     vcs_package_recipe_free(&r);
-    free(wire2);
     return failures;
 }
 /* ── 2: bounds + closed grammar ─────────────────────────────────────── */
-static int t_bounds(void)
+/* List count bound: 257 sources. */
+static int zr_bounds_count(enum vcs_package_recipe_error *err)
 {
     int failures = 0;
-    enum vcs_package_recipe_error err = VCS_PACKAGE_RECIPE_OK;
-
-    /* List count bound: 257 sources. */
     struct vcs_package_recipe r;
     vcs_package_recipe_init(&r);
     bool ok = true;
@@ -630,83 +684,109 @@ static int t_bounds(void)
         ok = vcs_package_recipe_add_source(&r, path, NULL);
     }
     ZR_CHECK("bounds: 256 sources accepted", ok && r.sources.count == 256);
-    err = VCS_PACKAGE_RECIPE_OK;
+    *err = VCS_PACKAGE_RECIPE_OK;
     ZR_CHECK("bounds: 257th source names the count bound",
-             !vcs_package_recipe_add_source(&r, "src/f256.c", &err) &&
-             err == VCS_PACKAGE_RECIPE_ERR_COUNT_BOUND);
+             !vcs_package_recipe_add_source(&r, "src/f256.c", err) &&
+             *err == VCS_PACKAGE_RECIPE_ERR_COUNT_BOUND);
     vcs_package_recipe_free(&r);
+    return failures;
+}
+
+/* String bound, extensions and define grammar. */
+static int zr_bounds_names(enum vcs_package_recipe_error *err)
+{
+    int failures = 0;
+    struct vcs_package_recipe r;
 
     /* String bound: a 1025-char path fails the path grammar. */
     vcs_package_recipe_init(&r);
     char long_path[1100];
     memset(long_path, 'a', sizeof(long_path) - 3);
     memcpy(long_path + sizeof(long_path) - 3, ".c", 3);
-    err = VCS_PACKAGE_RECIPE_OK;
+    *err = VCS_PACKAGE_RECIPE_OK;
     ZR_CHECK("bounds: overlong path rejected",
-             !vcs_package_recipe_add_source(&r, long_path, &err) &&
-             err == VCS_PACKAGE_RECIPE_ERR_PATH);
+             !vcs_package_recipe_add_source(&r, long_path, err) &&
+             *err == VCS_PACKAGE_RECIPE_ERR_PATH);
     vcs_package_recipe_free(&r);
 
     /* Extensions: a header must end .h, a source must end .c. */
     vcs_package_recipe_init(&r);
     ZR_CHECK("bounds: header extension enforced",
-             !vcs_package_recipe_add_header(&r, "include/ring.txt", &err) &&
-             err == VCS_PACKAGE_RECIPE_ERR_PATH &&
-             !vcs_package_recipe_add_source(&r, "src/ring.h", &err) &&
-             err == VCS_PACKAGE_RECIPE_ERR_PATH);
+             !vcs_package_recipe_add_header(&r, "include/ring.txt", err) &&
+             *err == VCS_PACKAGE_RECIPE_ERR_PATH &&
+             !vcs_package_recipe_add_source(&r, "src/ring.h", err) &&
+             *err == VCS_PACKAGE_RECIPE_ERR_PATH);
     vcs_package_recipe_free(&r);
 
     /* Define grammar: leading digit, embedded space, overlong. */
     vcs_package_recipe_init(&r);
     ZR_CHECK("bounds: define grammar enforced",
-             !vcs_package_recipe_add_define(&r, "1BAD", &err) &&
-             err == VCS_PACKAGE_RECIPE_ERR_DEFINE &&
-             !vcs_package_recipe_add_define(&r, "HAS SPACE=1", &err) &&
-             err == VCS_PACKAGE_RECIPE_ERR_DEFINE &&
+             !vcs_package_recipe_add_define(&r, "1BAD", err) &&
+             *err == VCS_PACKAGE_RECIPE_ERR_DEFINE &&
+             !vcs_package_recipe_add_define(&r, "HAS SPACE=1", err) &&
+             *err == VCS_PACKAGE_RECIPE_ERR_DEFINE &&
              vcs_package_recipe_add_define(&r, "OK_NAME=1", NULL));
     vcs_package_recipe_free(&r);
+    return failures;
+}
 
-    /* Library allowlist: unknown name/id rejected; duplicates rejected. */
+/* Library allowlist: unknown name/id rejected; duplicates rejected. */
+static int zr_bounds_libraries(enum vcs_package_recipe_error *err)
+{
+    int failures = 0;
+    struct vcs_package_recipe r;
     ZR_CHECK("bounds: libssl is not on the allowlist",
              vcs_package_recipe_library_id("libssl") == 0);
     vcs_package_recipe_init(&r);
     ZR_CHECK("bounds: unknown library id rejected",
-             !vcs_package_recipe_add_library(&r, 9, &err) &&
-             err == VCS_PACKAGE_RECIPE_ERR_LIBRARY &&
+             !vcs_package_recipe_add_library(&r, 9, err) &&
+             *err == VCS_PACKAGE_RECIPE_ERR_LIBRARY &&
              vcs_package_recipe_add_library(&r, VCS_PACKAGE_RECIPE_LIB_LIBM,
                                             NULL) &&
              !vcs_package_recipe_add_library(&r, VCS_PACKAGE_RECIPE_LIB_LIBM,
-                                             &err) &&
-             err == VCS_PACKAGE_RECIPE_ERR_LIST_ORDER);
+                                             err) &&
+             *err == VCS_PACKAGE_RECIPE_ERR_LIST_ORDER);
     vcs_package_recipe_free(&r);
 
     /* Duplicate + unsorted list entries. */
     vcs_package_recipe_init(&r);
     ZR_CHECK("bounds: duplicate entry rejected",
              vcs_package_recipe_add_source(&r, "src/a.c", NULL) &&
-             !vcs_package_recipe_add_source(&r, "src/a.c", &err) &&
-             err == VCS_PACKAGE_RECIPE_ERR_LIST_ORDER);
+             !vcs_package_recipe_add_source(&r, "src/a.c", err) &&
+             *err == VCS_PACKAGE_RECIPE_ERR_LIST_ORDER);
     vcs_package_recipe_free(&r);
+    return failures;
+}
 
-    /* Hostile paths inside recipe fields. */
+/* Hostile paths inside recipe fields. */
+static int zr_bounds_hostile(enum vcs_package_recipe_error *err)
+{
+    int failures = 0;
+    struct vcs_package_recipe r;
     static const char *const hostile[] = {
         "/etc/passwd.c", "../evil.c", "src/../evil.c", "src\\win.c",
         "src//evil.c", "./evil.c",
     };
     for (size_t i = 0; i < sizeof(hostile) / sizeof(hostile[0]); i++) {
         vcs_package_recipe_init(&r);
-        err = VCS_PACKAGE_RECIPE_OK;
+        *err = VCS_PACKAGE_RECIPE_OK;
         bool rejected = !vcs_package_recipe_add_source(&r, hostile[i],
-                                                       &err) &&
-                        err == VCS_PACKAGE_RECIPE_ERR_PATH;
+                                                       err) &&
+                        *err == VCS_PACKAGE_RECIPE_ERR_PATH;
         char name[96];
         snprintf(name, sizeof(name), "bounds: hostile path %s", hostile[i]);
         ZR_CHECK(name, rejected);
         vcs_package_recipe_free(&r);
     }
+    return failures;
+}
 
-    /* Scalar bounds through validate: seconds 0 / 3601, memory low/high,
-     * empty sources. */
+/* Scalar bounds through validate: seconds 0 / 3601, memory low/high,
+ * empty sources. */
+static int zr_bounds_scalars(void)
+{
+    int failures = 0;
+    struct vcs_package_recipe r;
     vcs_package_recipe_init(&r);
     (void)vcs_package_recipe_add_source(&r, "src/a.c", NULL);
     vcs_package_recipe_set_test_limits(&r, 0, 0,
@@ -736,9 +816,14 @@ static int t_bounds(void)
              vcs_package_recipe_validate(&r) ==
                  VCS_PACKAGE_RECIPE_ERR_SOURCES_EMPTY);
     vcs_package_recipe_free(&r);
+    return failures;
+}
 
-    /* Closed grammar on the wire: bad magic, unknown version, trailing
-     * bytes, unknown library id, unsorted wire list, truncated wire. */
+/* Closed grammar on the wire: bad magic, unknown version, trailing
+ * bytes, unknown library id, unsorted wire list, truncated wire. */
+static int zr_bounds_wire(void)
+{
+    int failures = 0;
     struct vcs_package_recipe good;
     (void)zr_recipe(&good);
     uint8_t *wire = NULL;
@@ -772,43 +857,80 @@ static int t_bounds(void)
     return failures;
 }
 
+static int t_bounds(void)
+{
+    int failures = 0;
+    enum vcs_package_recipe_error err = VCS_PACKAGE_RECIPE_OK;
+    failures += zr_bounds_count(&err);
+    failures += zr_bounds_names(&err);
+    failures += zr_bounds_libraries(&err);
+    failures += zr_bounds_hostile(&err);
+    failures += zr_bounds_scalars();
+    failures += zr_bounds_wire();
+    return failures;
+}
+
 /* ── 3: publish integration ─────────────────────────────────────────── */
-static int t_publish(void)
+/* One package fixture shared by the publish and command sections. */
+struct zr_fix {
+    char dd[256];
+    char pkgdir[512];
+    char path[512];
+    struct zr_pkg p;
+    struct vcs_package_recipe r;
+    uint8_t recipe_root[32];
+    char *recipe_hex;
+    char *release_hex;
+    char *manifest_hex;
+};
+
+static void zr_fix_free(struct zr_fix *s)
+{
+    free(s->recipe_hex);
+    free(s->release_hex);
+    free(s->manifest_hex);
+    vcs_package_recipe_free(&s->r);
+    zr_pkg_free(&s->p);
+    test_rm_rf_recursive(s->dd);
+}
+
+static int zr_pub_setup(struct zr_fix *s)
 {
     int failures = 0;
     chain_params_select(CHAIN_MAIN);
-    char dd[256];
-    test_make_tmpdir(dd, sizeof(dd), "zcode_recipe", "publish");
-    char pkgdir[512];
-    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
-    struct zr_pkg p;
-    ZR_CHECK("publish: package fixture builds", zr_make_package(&p, pkgdir));
-    struct vcs_package_recipe r;
-    ZR_CHECK("publish: recipe fixture builds", zr_recipe(&r));
-    uint8_t recipe_root[32];
-    char *recipe_hex = zr_recipe_hex(&r, recipe_root);
-    ZR_CHECK("publish: recipe encodes", recipe_hex != NULL);
+    test_make_tmpdir(s->dd, sizeof(s->dd), "zcode_recipe", "publish");
+    snprintf(s->pkgdir, sizeof(s->pkgdir), "%s/pkg", s->dd);
+    ZR_CHECK("publish: package fixture builds",
+             zr_make_package(&s->p, s->pkgdir));
+    ZR_CHECK("publish: recipe fixture builds", zr_recipe(&s->r));
+    s->recipe_hex = zr_recipe_hex(&s->r, s->recipe_root);
+    ZR_CHECK("publish: recipe encodes", s->recipe_hex != NULL);
     struct vcs_package_release rel;
     ZR_CHECK("publish: release signs",
-             zr_release(&rel, 0x11, 1u, "rhett/ring-buffer", p.root,
-                        recipe_root));
-    char *release_hex = zr_release_hex(&rel);
-    char *manifest_hex = zr_hex(p.wire, p.wire_len);
+             zr_release(&rel, 0x11, 1u, "rhett/ring-buffer", s->p.root,
+                        s->recipe_root));
+    s->release_hex = zr_release_hex(&rel);
+    s->manifest_hex = zr_hex(s->p.wire, s->p.wire_len);
+    return failures;
+}
 
-    /* Happy path: plan valid + recipe summary present. */
+/* Happy path: plan valid + recipe summary present. */
+static int zr_pub_happy(struct zr_fix *s)
+{
+    int failures = 0;
     struct zr_cmd c;
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    (void)json_push_kv_str(&c.input, "recipe_hex", recipe_hex);
-    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
+    (void)json_push_kv_str(&c.input, "release_hex", s->release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", s->manifest_hex);
+    (void)json_push_kv_str(&c.input, "recipe_hex", s->recipe_hex);
+    (void)json_push_kv_str(&c.input, "dir", s->pkgdir);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
     const struct json_value *rcp = json_get(&c.reply.data, "recipe");
     const char *rc_root =
         rcp ? json_get_str(json_get(rcp, "recipe_root")) : NULL;
     char expect_root[65];
-    zr_hex32(recipe_root, expect_root);
+    zr_hex32(s->recipe_root, expect_root);
     ZR_CHECK("publish: valid candidate passes with the recipe summary",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
              json_get_bool(json_get(&c.reply.data, "valid")) &&
@@ -819,14 +941,20 @@ static int t_publish(void)
              json_get_int(json_get(rcp, "test_sources")) == 1 &&
              json_get_int(json_get(rcp, "maximum_test_seconds")) == 120);
     zr_cmd_free(&c);
+    return failures;
+}
 
-    /* Missing recipe: plan failure names recipe-missing; commit fails with
-     * the same code. */
+/* Missing recipe: plan failure names recipe-missing; commit fails with
+ * the same code. */
+static int zr_pub_missing(struct zr_fix *s)
+{
+    int failures = 0;
+    struct zr_cmd c;
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
+    (void)json_push_kv_str(&c.input, "release_hex", s->release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", s->manifest_hex);
+    (void)json_push_kv_str(&c.input, "dir", s->pkgdir);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
     ZR_CHECK("publish: missing recipe rejected naming the rule",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
@@ -835,21 +963,27 @@ static int t_publish(void)
              strcmp(zr_failure_rule(&c.reply, 0), "recipe-missing") == 0);
     zr_cmd_free(&c);
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
+    (void)json_push_kv_str(&c.input, "release_hex", s->release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", s->manifest_hex);
+    (void)json_push_kv_str(&c.input, "dir", s->pkgdir);
     zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
     ZR_CHECK("publish: commit without recipe names the rule",
              c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
              strcmp(c.reply.error.code, "recipe-missing") == 0);
     zr_cmd_free(&c);
+    return failures;
+}
 
-    /* Non-canonical recipe wire. */
+/* Non-canonical recipe wire. */
+static int zr_pub_bad_wire(struct zr_fix *s)
+{
+    int failures = 0;
+    struct zr_cmd c;
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
+    (void)json_push_kv_str(&c.input, "release_hex", s->release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", s->manifest_hex);
     (void)json_push_kv_str(&c.input, "recipe_hex", "deadbeef");
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
     ZR_CHECK("publish: bad recipe wire rejected naming the rule",
@@ -858,9 +992,14 @@ static int t_publish(void)
              strcmp(zr_failure_rule(&c.reply, 0),
                     "recipe-wire-not-canonical") == 0);
     zr_cmd_free(&c);
+    return failures;
+}
 
-    /* Root mismatch: a valid recipe whose root the envelope does NOT
-     * commit (the envelope names the fixture recipe's root). */
+/* Root mismatch: a valid recipe whose root the envelope does NOT
+ * commit (the envelope names the fixture recipe's root). */
+static int zr_pub_root_mismatch(struct zr_fix *s)
+{
+    int failures = 0;
     struct vcs_package_recipe other;
     vcs_package_recipe_init(&other);
     ZR_CHECK("publish: foreign recipe builds",
@@ -870,11 +1009,12 @@ static int t_publish(void)
     uint8_t other_root[32];
     char *other_hex = zr_recipe_hex(&other, other_root);
     ZR_CHECK("publish: foreign recipe encodes",
-             other_hex && memcmp(other_root, recipe_root, 32) != 0);
+             other_hex && memcmp(other_root, s->recipe_root, 32) != 0);
+    struct zr_cmd c;
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
+    (void)json_push_kv_str(&c.input, "release_hex", s->release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", s->manifest_hex);
     (void)json_push_kv_str(&c.input, "recipe_hex", other_hex);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
     ZR_CHECK("publish: root mismatch rejected naming the rule",
@@ -884,11 +1024,11 @@ static int t_publish(void)
                     "recipe-root-mismatch") == 0);
     zr_cmd_free(&c);
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
+    (void)json_push_kv_str(&c.input, "release_hex", s->release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", s->manifest_hex);
     (void)json_push_kv_str(&c.input, "recipe_hex", other_hex);
-    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    (void)json_push_kv_str(&c.input, "dir", s->pkgdir);
     zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
     ZR_CHECK("publish: commit of a mismatched recipe names the rule",
              c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
@@ -896,9 +1036,14 @@ static int t_publish(void)
     zr_cmd_free(&c);
     free(other_hex);
     vcs_package_recipe_free(&other);
+    return failures;
+}
 
-    /* Path not in the manifest: the envelope commits THIS recipe's root,
-     * so the release must be re-signed over the ghost recipe's root. */
+/* Path not in the manifest: the envelope commits THIS recipe's root,
+ * so the release must be re-signed over the ghost recipe's root. */
+static int zr_pub_ghost(struct zr_fix *s)
+{
+    int failures = 0;
     struct vcs_package_recipe ghost;
     vcs_package_recipe_init(&ghost);
     ZR_CHECK("publish: ghost recipe builds",
@@ -910,13 +1055,14 @@ static int t_publish(void)
     struct vcs_package_release rel2;
     ZR_CHECK("publish: ghost release signs",
              ghost_hex &&
-             zr_release(&rel2, 0x11, 1u, "rhett/ring-buffer", p.root,
+             zr_release(&rel2, 0x11, 1u, "rhett/ring-buffer", s->p.root,
                         ghost_root));
     char *release2_hex = zr_release_hex(&rel2);
+    struct zr_cmd c;
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
     (void)json_push_kv_str(&c.input, "release_hex", release2_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", s->manifest_hex);
     (void)json_push_kv_str(&c.input, "recipe_hex", ghost_hex);
     zcl_native_handle_zcode_package_publish_plan(&c.request, &c.reply);
     const struct json_value *f0 =
@@ -932,46 +1078,49 @@ static int t_publish(void)
     free(ghost_hex);
     free(release2_hex);
     vcs_package_recipe_free(&ghost);
+    return failures;
+}
 
-    free(recipe_hex);
-    free(release_hex);
-    free(manifest_hex);
-    vcs_package_recipe_free(&r);
-    zr_pkg_free(&p);
-    test_rm_rf_recursive(dd);
+static int t_publish(void)
+{
+    int failures = 0;
+    struct zr_fix s;
+    failures += zr_pub_setup(&s);
+    failures += zr_pub_happy(&s);
+    failures += zr_pub_missing(&s);
+    failures += zr_pub_bad_wire(&s);
+    failures += zr_pub_root_mismatch(&s);
+    failures += zr_pub_ghost(&s);
+    zr_fix_free(&s);
     return failures;
 }
 
 /* ── 4: zcode package recipe command ────────────────────────────────── */
-static int t_command(void)
+static int zr_cmd_setup(struct zr_fix *s)
 {
     int failures = 0;
     chain_params_select(CHAIN_MAIN);
-    char dd[256];
-    test_make_tmpdir(dd, sizeof(dd), "zcode_recipe", "command");
-    char pkgdir[512];
-    snprintf(pkgdir, sizeof(pkgdir), "%s/pkg", dd);
-    struct zr_pkg p;
-    ZR_CHECK("command: package fixture builds", zr_make_package(&p, pkgdir));
-    struct vcs_package_recipe r;
-    ZR_CHECK("command: recipe fixture builds", zr_recipe(&r));
-    uint8_t recipe_root[32];
-    char *recipe_hex = zr_recipe_hex(&r, recipe_root);
+    test_make_tmpdir(s->dd, sizeof(s->dd), "zcode_recipe", "command");
+    snprintf(s->pkgdir, sizeof(s->pkgdir), "%s/pkg", s->dd);
+    ZR_CHECK("command: package fixture builds",
+             zr_make_package(&s->p, s->pkgdir));
+    ZR_CHECK("command: recipe fixture builds", zr_recipe(&s->r));
+    s->recipe_hex = zr_recipe_hex(&s->r, s->recipe_root);
     struct vcs_package_release rel;
     ZR_CHECK("command: release signs",
-             recipe_hex &&
-             zr_release(&rel, 0x11, 1u, "rhett/ring-buffer", p.root,
-                        recipe_root));
-    char *release_hex = zr_release_hex(&rel);
-    char *manifest_hex = zr_hex(p.wire, p.wire_len);
+             s->recipe_hex &&
+             zr_release(&rel, 0x11, 1u, "rhett/ring-buffer", s->p.root,
+                        s->recipe_root));
+    s->release_hex = zr_release_hex(&rel);
+    s->manifest_hex = zr_hex(s->p.wire, s->p.wire_len);
 
     struct zr_cmd c;
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "release_hex", release_hex);
-    (void)json_push_kv_str(&c.input, "manifest_hex", manifest_hex);
-    (void)json_push_kv_str(&c.input, "recipe_hex", recipe_hex);
-    (void)json_push_kv_str(&c.input, "dir", pkgdir);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
+    (void)json_push_kv_str(&c.input, "release_hex", s->release_hex);
+    (void)json_push_kv_str(&c.input, "manifest_hex", s->manifest_hex);
+    (void)json_push_kv_str(&c.input, "recipe_hex", s->recipe_hex);
+    (void)json_push_kv_str(&c.input, "dir", s->pkgdir);
     zcl_native_handle_zcode_package_publish_commit(&c.request, &c.reply);
     ZR_CHECK("command: package with recipe commits locally",
              c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
@@ -980,19 +1129,28 @@ static int t_command(void)
                     "committed") == 0);
     zr_cmd_free(&c);
     char recipe_root_hex[65];
-    zr_hex32(recipe_root, recipe_root_hex);
-    char path[512];
-    snprintf(path, sizeof(path), "%s/zcode/recipes/%s", dd,
+    zr_hex32(s->recipe_root, recipe_root_hex);
+    snprintf(s->path, sizeof(s->path), "%s/zcode/recipes/%s", s->dd,
              recipe_root_hex);
     struct stat st;
-    ZR_CHECK("command: recipe wire persisted", stat(path, &st) == 0);
+    ZR_CHECK("command: recipe wire persisted", stat(s->path, &st) == 0);
+    return failures;
+}
 
-    /* Decode it back through the command. */
-    zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "root", p.root_hex);
-    zcl_native_handle_zcode_package_recipe(&c.request, &c.reply);
-    const struct json_value *rcp = json_get(&c.reply.data, "recipe");
+/* The schema-1 limits of a decoded recipe. */
+static bool zr_cmd_limits_ok(const struct json_value *rcp)
+{
+    return json_get_int(json_get(rcp, "expected_test_exit_code")) == 0 &&
+           json_get_int(json_get(rcp, "maximum_test_seconds")) == 120 &&
+           json_get_int(json_get(rcp, "maximum_memory_bytes")) ==
+               (int64_t)(UINT64_C(1024) * 1024u * 1024u);
+}
+
+/* Decode it back through the command: the recipe's fields. */
+static int zr_cmd_decode_check(struct zr_cmd *c)
+{
+    int failures = 0;
+    const struct json_value *rcp = json_get(&c->reply.data, "recipe");
     const struct json_value *srcs = rcp ? json_get(rcp, "sources") : NULL;
     const struct json_value *libs =
         rcp ? json_get(rcp, "allowed_system_libraries") : NULL;
@@ -1000,43 +1158,75 @@ static int t_command(void)
         srcs ? json_get_str(json_at(srcs, 0)) : NULL;
     const char *lib2 = libs ? json_get_str(json_at(libs, 2)) : NULL;
     ZR_CHECK("command: recipe decodes from the canonical wire",
-             c.reply.status == ZCL_COMMAND_STATUS_PASSED && rcp && src0 &&
+             c->reply.status == ZCL_COMMAND_STATUS_PASSED && rcp && src0 &&
              strcmp(src0, "src/ring.c") == 0 && libs &&
              json_size(libs) == 3 && lib2 && strcmp(lib2, "pthread") == 0 &&
-             json_get_int(json_get(rcp, "expected_test_exit_code")) == 0 &&
-             json_get_int(json_get(rcp, "maximum_test_seconds")) == 120 &&
-             json_get_int(json_get(rcp, "maximum_memory_bytes")) ==
-                 (int64_t)(UINT64_C(1024) * 1024u * 1024u));
-    const char *nm = json_get_str(json_get(&c.reply.data, "name"));
-    const char *rr = json_get_str(json_get(&c.reply.data, "recipe_root"));
-    const char *src = json_get_str(json_get(&c.reply.data, "source"));
+             zr_cmd_limits_ok(rcp));
+    return failures;
+}
+
+/* Decode it back through the command: the signed identity and lists. */
+static int zr_cmd_identity_check(struct zr_fix *s, struct zr_cmd *c)
+{
+    int failures = 0;
+    char recipe_root_hex[65];
+    zr_hex32(s->recipe_root, recipe_root_hex);
+    const struct json_value *rcp = json_get(&c->reply.data, "recipe");
+    const char *nm = json_get_str(json_get(&c->reply.data, "name"));
+    const char *rr = json_get_str(json_get(&c->reply.data, "recipe_root"));
+    const char *src = json_get_str(json_get(&c->reply.data, "source"));
     ZR_CHECK("command: identity from the signed envelope",
              nm && strcmp(nm, "rhett/ring-buffer") == 0 && rr &&
              strcmp(rr, recipe_root_hex) == 0 && src &&
              strcmp(src, "canonical-recipe-wire") == 0 &&
-             json_get_str(json_get(&c.reply.data, "execution_note")));
+             json_get_str(json_get(&c->reply.data, "execution_note")));
     ZR_CHECK("command: short lists not flagged truncated",
              !json_get_bool(json_get(rcp, "sources_truncated")));
-    zr_cmd_free(&c);
+    return failures;
+}
 
-    /* The wire vanishes -> RECIPE_NOT_HOSTED (the store never invents a
-     * recipe). */
-    ZR_CHECK("command: recipe wire removed", remove(path) == 0);
+static int zr_cmd_decode(struct zr_fix *s)
+{
+    int failures = 0;
+    struct zr_cmd c;
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
-    (void)json_push_kv_str(&c.input, "root", p.root_hex);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
+    (void)json_push_kv_str(&c.input, "root", s->p.root_hex);
+    zcl_native_handle_zcode_package_recipe(&c.request, &c.reply);
+    failures += zr_cmd_decode_check(&c);
+    failures += zr_cmd_identity_check(s, &c);
+    zr_cmd_free(&c);
+    return failures;
+}
+
+/* The wire vanishes -> RECIPE_NOT_HOSTED (the store never invents a
+ * recipe). */
+static int zr_cmd_removed(struct zr_fix *s)
+{
+    int failures = 0;
+    ZR_CHECK("command: recipe wire removed", remove(s->path) == 0);
+    struct zr_cmd c;
+    zr_cmd_init(&c);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
+    (void)json_push_kv_str(&c.input, "root", s->p.root_hex);
     zcl_native_handle_zcode_package_recipe(&c.request, &c.reply);
     ZR_CHECK("command: absent recipe wire named",
              c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
              strcmp(c.reply.error.code, "RECIPE_NOT_HOSTED") == 0);
     zr_cmd_free(&c);
+    return failures;
+}
 
-    /* Unknown root / malformed root. */
+/* Unknown root / malformed root. */
+static int zr_cmd_bad_roots(struct zr_fix *s)
+{
+    int failures = 0;
     char unknown[65];
     memset(unknown, '9', 64);
     unknown[64] = '\0';
+    struct zr_cmd c;
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
     (void)json_push_kv_str(&c.input, "root", unknown);
     zcl_native_handle_zcode_package_recipe(&c.request, &c.reply);
     ZR_CHECK("command: unknown root rejected",
@@ -1044,20 +1234,25 @@ static int t_command(void)
              strcmp(c.reply.error.code, "UNKNOWN_PACKAGE") == 0);
     zr_cmd_free(&c);
     zr_cmd_init(&c);
-    (void)json_push_kv_str(&c.input, "datadir", dd);
+    (void)json_push_kv_str(&c.input, "datadir", s->dd);
     (void)json_push_kv_str(&c.input, "root", "xyz");
     zcl_native_handle_zcode_package_recipe(&c.request, &c.reply);
     ZR_CHECK("command: bad root hex rejected",
              c.reply.status == ZCL_COMMAND_STATUS_FAILED &&
              strcmp(c.reply.error.code, "BAD_ROOT") == 0);
     zr_cmd_free(&c);
+    return failures;
+}
 
-    free(recipe_hex);
-    free(release_hex);
-    free(manifest_hex);
-    vcs_package_recipe_free(&r);
-    zr_pkg_free(&p);
-    test_rm_rf_recursive(dd);
+static int t_command(void)
+{
+    int failures = 0;
+    struct zr_fix s;
+    failures += zr_cmd_setup(&s);
+    failures += zr_cmd_decode(&s);
+    failures += zr_cmd_removed(&s);
+    failures += zr_cmd_bad_roots(&s);
+    zr_fix_free(&s);
     return failures;
 }
 

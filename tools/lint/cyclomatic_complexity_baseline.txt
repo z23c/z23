@@ -2905,11 +2905,6 @@ tests/harness/src/test_zcode_rank.c:t_commands:58
 tests/harness/src/test_zcode_rank.c:t_period_boundaries:29
 tests/harness/src/test_zcode_rank.c:t_projection:35
 tests/harness/src/test_zcode_rank.c:t_windows:59
-tests/harness/src/test_zcode_recipe.c:t_bounds:22
-tests/harness/src/test_zcode_recipe.c:t_codec:20
-tests/harness/src/test_zcode_recipe.c:t_command:27
-tests/harness/src/test_zcode_recipe.c:t_programs:30
-tests/harness/src/test_zcode_recipe.c:t_publish:27
 tests/harness/src/test_zcode_release.c:test_zr_batch_load:23
 tests/harness/src/test_zcode_release.c:test_zr_mined_anchor:38
 tests/harness/src/test_zcode_release.c:test_zr_prove_verify:65
