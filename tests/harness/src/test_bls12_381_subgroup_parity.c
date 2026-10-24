@@ -12,7 +12,8 @@
  * Inputs (deterministic, counter-seeded, no clock): generators, the identity,
  * negations, raw on-curve points (almost all NON-members), members ([k]G and
  * cofactor-cleared raw G1 points), pure torsion [r]Q, member+torsion sums,
- * order-3 G1 torsion (0, +-2), and Jacobian representations with Z != 1. The
+ * order-3 G1 torsion (0, +-2), G2 cofactor-cleared raw points, G2 member +
+ * small-order (13, 23) torsion sums, and Jacobian representations with Z != 1. The
  * accepted and rejected counts are each asserted >= 200 per group so the
  * test cannot pass vacuously. */
 
@@ -34,6 +35,21 @@ static const uint64_t SP_R[4] = {
 };
 /* G1 cofactor h1 = 0x396c8c005555e1568c00aaab0000aaab */
 static const uint64_t SP_H1[4] = { 0x8c00aaab0000aaabULL, 0x396c8c005555e156ULL, 0, 0 };
+/* G2 cofactor h2 (507 bits, little-endian 64-bit limbs), h2 = 13^2 * 23^2 * m
+ * with 13 and 23 exact. The Sylow subgroups are not cyclic, so [h2/13] and
+ * [h2/23] annihilate them: the order-13 and order-23 torsion comes from the
+ * full prime-power divisors 169 and 529. The cofactor is checked by
+ * [r]([h2]Q) == O on every cleared point. */
+#define SP_H2_LIMBS 8
+static const uint64_t SP_H2[SP_H2_LIMBS] = {
+    0xCF1C38E31C7238E5ULL, 0x1616EC6E786F0C70ULL, 0x21537E293A6691AEULL,
+    0xA628F1CB4D9E82EFULL, 0xA68A205B2E5A7DDFULL, 0xCD91DE4547085ABAULL,
+    0x091D50792876A202ULL, 0x05D543A95414E7F1ULL
+};
+/* Torsion scalars: [r * (h2 / D)]Q has order dividing P, for (D, P) pairs. */
+#define SP_TORQ_N 2
+static const uint64_t SP_TORQ_D[SP_TORQ_N] = { 169, 529 };
+static const uint64_t SP_TORQ_P[SP_TORQ_N] = { 13, 23 };
 /* p - 1 (little-endian limbs) */
 static const uint64_t SP_PM1[6] = {
     0xb9feffffffffaaaaULL, 0x1eabfffeb153ffffULL, 0x6730d2a0f6b0f624ULL,
@@ -155,17 +171,22 @@ static bool ref_g1(const struct g1_point *p)
     return g1_is_identity(&rp);
 }
 
-static void g2_mul(struct g2_point *r, const struct g2_point *p, const uint64_t s[4])
+static void g2_mul_n(struct g2_point *r, const struct g2_point *p, const uint64_t *s, size_t n)
 {
     struct g2_point acc, base = *p, t;
     g2_identity(&acc);
-    for (int i = 0; i < 4; i++)
+    for (size_t i = 0; i < n; i++)
         for (int b = 0; b < 64; b++) {
             if ((s[i] >> b) & 1) { g2_add(&t, &acc, &base); acc = t; }
             g2_double(&t, &base);
             base = t;
         }
     *r = acc;
+}
+
+static void g2_mul(struct g2_point *r, const struct g2_point *p, const uint64_t s[4])
+{
+    g2_mul_n(r, p, s, 4);
 }
 
 static bool ref_g2(const struct g2_point *p)
@@ -175,9 +196,45 @@ static bool ref_g2(const struct g2_point *p)
     return g2_is_identity(&rp);
 }
 
+/* Divides the little-endian bignum in[] by d into out[]; returns in mod d. */
+static uint64_t sp_div_n(uint64_t *out, const uint64_t *in, size_t n, uint64_t d)
+{
+    unsigned __int128 rem = 0;
+    for (size_t i = n; i-- > 0;) {
+        unsigned __int128 cur = (rem << 64) | in[i];
+        out[i] = (uint64_t)(cur / d);
+        rem = cur % d;
+    }
+    return (uint64_t)rem;
+}
+
+/* [h2]Q: maps any on-curve point into the order-r subgroup. */
+static void g2_clear_cofactor(struct g2_point *r, const struct g2_point *q)
+{
+    g2_mul_n(r, q, SP_H2, SP_H2_LIMBS);
+}
+
+/* Torsion T = [r * (h2 / d)]Q for d | h2; the caller checks its prime order. */
+static bool g2_small_torsion(struct g2_point *r, const struct g2_point *q, uint64_t d)
+{
+    uint64_t hd[SP_H2_LIMBS];
+    if (sp_div_n(hd, SP_H2, SP_H2_LIMBS, d) != 0) return false;
+    struct g2_point t;
+    g2_mul_n(&t, q, hd, SP_H2_LIMBS);
+    g2_mul(r, &t, SP_R);
+    return true;
+}
+
+static bool g2_order_divides(const struct g2_point *p, uint64_t d)
+{
+    struct g2_point t;
+    g2_mul_n(&t, p, &d, 1);
+    return g2_is_identity(&t);
+}
+
 /* ---- counting checker ---- */
 
-struct tally { int acc, rej, bad; };
+struct tally { int acc, rej, bad, cleared, tor; };
 
 static void chk1(struct tally *t, const struct g1_point *p)
 {
@@ -307,6 +364,28 @@ static bool run_g1(struct tally *t, const struct g1_point *gen)
     return t->bad == 0 && t->acc >= SP_MIN_SIDE && t->rej >= SP_MIN_SIDE;
 }
 
+/* Cofactor-cleared Q, then member+torsion sums m + [r(h2/d)]Q for each small
+ * divisor d of h2. Every point goes through chk2_all (negated, Z-rescaled). */
+static void g2_cofactor_case(struct tally *t, const struct g2_point *q, const struct g2_point *m)
+{
+    struct g2_point c, tor, s;
+    g2_clear_cofactor(&c, q);
+    if (!ref_g2(&c)) t->bad++;            /* [r]([h2]Q) == O pins the constant */
+    t->cleared++;
+    chk2_all(t, &c);
+    for (int i = 0; i < SP_TORQ_N; i++) {
+        if (!g2_small_torsion(&tor, q, SP_TORQ_D[i])) {
+            t->bad++;                     /* a listed divisor must divide h2 */
+            continue;
+        }
+        if (!g2_order_divides(&tor, SP_TORQ_P[i])) t->bad++;
+        if (!g2_is_identity(&tor)) t->tor++;
+        chk2_all(t, &tor);
+        g2_add(&s, m, &tor);              /* member + small-order torsion */
+        chk2_all(t, &s);
+    }
+}
+
 static bool run_g2(struct tally *t, const struct g2_point *gen)
 {
     struct g2_point id, m, q, s, tor;
@@ -325,8 +404,10 @@ static bool run_g2(struct tally *t, const struct g2_point *gen)
         chk2_all(t, &m);
         g2_add(&s, &m, &tor);
         chk2_all(t, &s);
+        if (n <= SP_MEMBERS) g2_cofactor_case(t, &q, &m);
     }
-    return t->bad == 0 && t->acc >= SP_MIN_SIDE && t->rej >= SP_MIN_SIDE;
+    return t->bad == 0 && t->acc >= SP_MIN_SIDE && t->rej >= SP_MIN_SIDE &&
+           t->cleared >= SP_MEMBERS && t->tor >= SP_MIN_SIDE;
 }
 
 int test_bls12_381_subgroup_parity(void);
@@ -345,7 +426,7 @@ int test_bls12_381_subgroup_parity(void)
         return failures + 1;
     }
 
-    struct tally t1 = {0, 0, 0}, t2 = {0, 0, 0};
+    struct tally t1 = {0, 0, 0, 0, 0}, t2 = {0, 0, 0, 0, 0};
     bool ok1 = run_g1(&t1, &g1);
     printf("bls12_381_subgroup_parity: G1 vs [r]P (accepted %d, rejected %d, mismatches %d)... ",
            t1.acc, t1.rej, t1.bad);
@@ -357,5 +438,7 @@ int test_bls12_381_subgroup_parity(void)
            t2.acc, t2.rej, t2.bad);
     if (ok2) printf("PASS\n");
     else { printf("FAIL\n"); failures++; }
+    printf("bls12_381_subgroup_parity: G2 cofactor-cleared %d, nonidentity small torsion %d\n",
+           t2.cleared, t2.tor);
     return failures;
 }
