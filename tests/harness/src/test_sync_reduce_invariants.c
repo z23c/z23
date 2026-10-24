@@ -46,20 +46,24 @@ static struct sync_event mk_event(uint64_t sid, enum sync_event_kind k,
 
 /* Legal successor table — the ONLY phases sync_reduce may return from a given
  * phase. Kept independent of the reducer's source so a wrong jump is caught. */
+static bool legal_active_next(enum sync_phase to, enum sync_phase current,
+                              enum sync_phase next)
+{
+    return to == current || to == next ||
+           to == SYNC_PHASE_FAILED || to == SYNC_PHASE_IDLE;
+}
+
 static bool legal_next(enum sync_phase from, enum sync_phase to)
 {
     switch (from) {
     case SYNC_PHASE_IDLE:
         return to == SYNC_PHASE_IDLE || to == SYNC_PHASE_NEGOTIATING;
     case SYNC_PHASE_NEGOTIATING:
-        return to == SYNC_PHASE_NEGOTIATING || to == SYNC_PHASE_RECEIVING ||
-               to == SYNC_PHASE_FAILED || to == SYNC_PHASE_IDLE;
+        return legal_active_next(to, SYNC_PHASE_NEGOTIATING, SYNC_PHASE_RECEIVING);
     case SYNC_PHASE_RECEIVING:
-        return to == SYNC_PHASE_RECEIVING || to == SYNC_PHASE_VERIFYING ||
-               to == SYNC_PHASE_FAILED || to == SYNC_PHASE_IDLE;
+        return legal_active_next(to, SYNC_PHASE_RECEIVING, SYNC_PHASE_VERIFYING);
     case SYNC_PHASE_VERIFYING:
-        return to == SYNC_PHASE_VERIFYING || to == SYNC_PHASE_STAGED ||
-               to == SYNC_PHASE_FAILED || to == SYNC_PHASE_IDLE;
+        return legal_active_next(to, SYNC_PHASE_VERIFYING, SYNC_PHASE_STAGED);
     case SYNC_PHASE_STAGED:
         return to == SYNC_PHASE_STAGED ||
                to == SYNC_PHASE_ACTIVATION_CONTAINED || to == SYNC_PHASE_IDLE;
