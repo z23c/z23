@@ -644,6 +644,13 @@ int test_proof_ticket_reuse(void);
 int test_proof_ticket_reuse(void)
 {
     int failures = 0;
+    /* The store-backed cases write thousands of throwaway CAS objects into
+     * test-tmp stores that are discarded whole; the per-write fsync barrier
+     * (8192 of them in the 4096-object page-conflict fixture alone) proves
+     * nothing here, since no case simulates power loss. Content-address
+     * verification and temp+rename are unchanged by deferred mode. */
+    bool prior_sync = vcs_package_store_deferred_sync_enabled();
+    vcs_package_store_set_deferred_sync(true);
     failures += ptt_case_roundtrip();
     failures += ptt_case_ticket_refusals();
     failures += ptt_case_other_refusals();
@@ -673,6 +680,7 @@ int test_proof_ticket_reuse(void)
     failures += ptf_history_cases();
     failures += ptf_isolation_cases();
     failures += ptf_branch_work_cases();
+    vcs_package_store_set_deferred_sync(prior_sync);
     ptf_free(&g_f);
     return failures;
 }
