@@ -18,6 +18,16 @@
  * deterministically falls back to one. */
 uint32_t platform_logical_cpu_count(void);
 
+/* Parse a cgroup v2 cpu.max line "<quota> <period>" into whole CPUs
+ * (ceil(quota / period), at least 1). True and *cpus_out set only for a
+ * well-formed finite quota; false (cpus_out untouched) for "max ...", empty,
+ * malformed, zero period or quota, a negative number, or overflow. Pure. */
+bool platform_cpu_max_parse(const char *text, uint32_t *cpus_out);
+
+/* The tightest cgroup v2 CPU quota over this process's cgroup and its
+ * ancestors, in whole CPUs; UINT32_MAX when none applies or off Linux. */
+uint32_t platform_cpu_quota_limit(void);
+
 /* Count the logical processors this PROCESS is actually allowed to run on.
  *
  * platform_logical_cpu_count() answers "how big is the host", which is the
@@ -27,7 +37,9 @@ uint32_t platform_logical_cpu_count(void);
  * the subset in its affinity mask. Sizing a job pool from the host count
  * oversubscribes exactly the cores that were deliberately withheld.
  *
- * On Linux the answer is CPU_COUNT() of sched_getaffinity(0, ...). Everywhere
+ * On Linux the answer is CPU_COUNT() of sched_getaffinity(0, ...), lowered to
+ * the tightest cgroup v2 cpu.max (own cgroup and every ancestor, rounded up to
+ * whole CPUs, at least 1; an unreadable or "max" level is no limit). Everywhere
  * else -- including Windows -- this delegates to platform_logical_cpu_count():
  * Win32 has no process-wide equivalent (SetProcessAffinityMask's companion
  * getter reports a mask this codebase never sets, and real placement control

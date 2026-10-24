@@ -17,6 +17,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #if defined(__linux__)
 /* Ahead of the platform split below because platform_available_cpu_count()
@@ -82,6 +83,93 @@ uint32_t platform_logical_cpu_count(void)
 
 #endif
 
+/* Parse a run of decimal digits at *p into *out, advancing *p. False when
+ * there is no digit or the value overflows uint64. */
+static bool cpu_max_digits(const char **p, uint64_t *out)
+{
+    const char *s = *p;
+    uint64_t v = 0;
+    for (; *s >= '0' && *s <= '9'; s++) {
+        uint64_t d = (uint64_t)(*s - '0');
+        if (v > (UINT64_MAX - d) / 10) return false;
+        v = v * 10 + d;
+    }
+    if (s == *p) return false;
+    *p = s;
+    *out = v;
+    return true;
+}
+
+/* "<quota> <period>" from a cgroup v2 cpu.max: whole CPUs, rounded up. */
+bool platform_cpu_max_parse(const char *text, uint32_t *cpus_out)
+{
+    if (!text || !cpus_out) return false;
+    uint64_t quota = 0;
+    uint64_t period = 0;
+    const char *p = text;
+    if (!cpu_max_digits(&p, &quota) || *p != ' ') return false;
+    while (*p == ' ') p++;
+    if (!cpu_max_digits(&p, &period)) return false;
+    if (quota == 0 || period == 0) return false;
+    if (*p != '\0' && *p != '\n' && *p != ' ') return false;
+    uint64_t cpus = quota / period + (quota % period != 0 ? 1 : 0);
+    if (cpus > UINT32_MAX) return false;
+    *cpus_out = (uint32_t)cpus;
+    return true;
+}
+
+#if defined(__linux__)
+/* Same root os_proc_cgroup_dir() resolves under (os_proc_mem.c). */
+#define CPU_QUOTA_CGROUP_ROOT "/sys/fs/cgroup"
+
+/* The CPU count one cgroup directory's cpu.max allows, or UINT32_MAX when it
+ * names no limit or cannot be read: never smaller, never zero. */
+static uint32_t cpu_quota_at(const char *dir)
+{
+    char path[640];
+    char text[128];
+    if (snprintf(path, sizeof path, "%s/cpu.max", dir) >= (int)sizeof path)
+        return UINT32_MAX;
+    FILE *f = fopen(path, "r");
+    if (!f) return UINT32_MAX;
+    bool got = fgets(text, sizeof text, f) != NULL;
+    fclose(f);
+    uint32_t cpus = 0;
+    if (!got || !platform_cpu_max_parse(text, &cpus)) return UINT32_MAX;
+    return cpus;
+}
+
+/* Tightest cpu.max from this process's cgroup up to the cgroup root: a
+ * parent's limit binds its children. UINT32_MAX when none applies. */
+static uint32_t cpu_quota_limit(void)
+{
+    char dir[512];
+    if (!os_proc_cgroup_dir(dir, sizeof dir)) return UINT32_MAX;
+    uint32_t best = UINT32_MAX;
+    for (;;) {
+        uint32_t here = cpu_quota_at(dir);
+        if (here < best) best = here;
+        if (strcmp(dir, CPU_QUOTA_CGROUP_ROOT) == 0) break;
+        char *slash = strrchr(dir, '/');
+        if (!slash || slash == dir) break;
+        *slash = '\0';
+        if (strlen(dir) < strlen(CPU_QUOTA_CGROUP_ROOT)) break;
+    }
+    return best;
+}
+#endif
+
+/* One definition for every platform (check-arm-symbol-single), like the
+ * availability count below. */
+uint32_t platform_cpu_quota_limit(void)
+{
+#if defined(__linux__)
+    return cpu_quota_limit();
+#else
+    return UINT32_MAX;
+#endif
+}
+
 /* ONE definition for every platform, deliberately outside the split above:
  * check-arm-symbol-single refuses a non-static function defined once per
  * #if arm, and the strictest semantics of every arm here is the same
@@ -103,7 +191,13 @@ uint32_t platform_available_cpu_count(void)
         /* A zero or negative count means the mask said nothing usable, which
          * is not a number to size a pool from; fall through to the host count
          * rather than clamp it to one and serialise the caller. */
-        if (count >= 1) return (uint32_t)count;
+        if (count >= 1) {
+            /* A cgroup v2 CPU quota (systemd CPUQuota=, docker --cpus, k8s
+             * limits) leaves the mask wide but caps the CPU time: workers
+             * past the quota only add memory. */
+            uint32_t quota = cpu_quota_limit();
+            return quota < (uint32_t)count ? quota : (uint32_t)count;
+        }
     }
     /* sched_getaffinity fails when the mask is wider than cpu_set_t (more than
      * CPU_SETSIZE=1024 processors) or under a seccomp policy that denies it.

@@ -29,6 +29,7 @@
 #include "util/cpu_topology.h"
 #include "json/json.h"
 #include "platform/logical_cpu.h"
+#include "platform/os_proc.h"
 
 #include <pthread.h>
 #include <stdio.h>
@@ -50,6 +51,16 @@
  * build-job sizer read. Its own function rather than a block inside
  * test_cpu_topology so the branch-heavy mask manipulation below does not
  * push that function past its complexity pin. */
+#if defined(__linux__)
+/* The answer the seam must give for a mask of `mask` CPUs: the mask, capped
+ * by this process's cgroup CPU quota when one applies. */
+static uint32_t cpt_expected(uint32_t mask)
+{
+    const uint32_t quota = platform_cpu_quota_limit();
+    return quota < mask ? quota : mask;
+}
+#endif
+
 static int cpt_available_cpu_count_checks(void)
 {
     int failures = 0;
@@ -63,9 +74,12 @@ static int cpt_available_cpu_count_checks(void)
         printf("cpu_topology: sched_getaffinity oracle unavailable... FAIL\n");
         return failures + 1;
     }
-    /* Exact equality against the oracle read the same way, not a bound. */
-    CPT_CHECK("available_cpu_count equals the live affinity mask",
-              available == (uint32_t)CPU_COUNT(&saved));
+    /* A cgroup CPU quota may lower the answer below the mask (the live clause
+     * in cpt_cpu_quota_live_checks pins that), so the mask is the ceiling. */
+    /* Exact equality against the oracle read the same way, not a bound: the
+     * mask, lowered only by a finite cgroup quota. */
+    CPT_CHECK("available_cpu_count equals the live affinity mask (quota-capped)",
+              available == cpt_expected((uint32_t)CPU_COUNT(&saved)));
 
     /* Narrow the mask to one processor and confirm the seam follows it: under
      * taskset or a systemd scope's AllowedCPUs only the mask tells the truth. */
@@ -90,8 +104,9 @@ static int cpt_available_cpu_count_checks(void)
               platform_logical_cpu_count() == online);
     CPT_CHECK("the saved mask restores",
               sched_setaffinity(0, sizeof saved, &saved) == 0);
-    CPT_CHECK("available_cpu_count is back to the wide mask",
-              platform_available_cpu_count() == (uint32_t)CPU_COUNT(&saved));
+    CPT_CHECK("available_cpu_count is back to the wide mask (quota-capped)",
+              platform_available_cpu_count() ==
+                  cpt_expected((uint32_t)CPU_COUNT(&saved)));
 #else
     /* Everywhere without sched_getaffinity the header promises the two seams
      * agree exactly, so assert that rather than a bound. */
@@ -100,6 +115,74 @@ static int cpt_available_cpu_count_checks(void)
 #endif
     return failures;
 }
+
+/* The pure cpu.max parser: "<quota> <period>" microseconds, or "max ...". */
+static int cpt_cpu_max_parse_checks(void)
+{
+    int failures = 0;
+    uint32_t n = 0;
+    CPT_CHECK("cpu_max 800000/100000 is 8",
+              platform_cpu_max_parse("800000 100000\n", &n) && n == 8);
+    CPT_CHECK("cpu_max 150000/100000 rounds up to 2",
+              platform_cpu_max_parse("150000 100000", &n) && n == 2);
+    CPT_CHECK("cpu_max 50000/100000 is at least 1",
+              platform_cpu_max_parse("50000 100000", &n) && n == 1);
+    CPT_CHECK("cpu_max 100000/100000 is 1",
+              platform_cpu_max_parse("100000 100000", &n) && n == 1);
+    n = 77;
+    CPT_CHECK("cpu_max max is no limit",
+              !platform_cpu_max_parse("max 100000", &n) && n == 77);
+    CPT_CHECK("cpu_max empty refused", !platform_cpu_max_parse("", &n));
+    CPT_CHECK("cpu_max NULL refused", !platform_cpu_max_parse(NULL, &n));
+    CPT_CHECK("cpu_max garbage refused",
+              !platform_cpu_max_parse("abc 100000", &n));
+    CPT_CHECK("cpu_max zero period refused",
+              !platform_cpu_max_parse("800000 0", &n));
+    CPT_CHECK("cpu_max negative quota refused",
+              !platform_cpu_max_parse("-1 100000", &n));
+    CPT_CHECK("cpu_max zero quota refused",
+              !platform_cpu_max_parse("0 100000", &n));
+    CPT_CHECK("cpu_max missing period refused",
+              !platform_cpu_max_parse("800000", &n));
+    CPT_CHECK("cpu_max overflow refused",
+              !platform_cpu_max_parse("99999999999999999999 1", &n));
+    CPT_CHECK("cpu_max result above uint32 refused",
+              !platform_cpu_max_parse("9999999999 1", &n));
+    return failures;
+}
+
+#if defined(__linux__)
+/* The live answer never exceeds the affinity count, nor this process's own
+ * cgroup cpu.max when that is a finite quota. */
+static int cpt_cpu_quota_live_checks(void)
+{
+    int failures = 0;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    uint32_t available = platform_available_cpu_count();
+    if (sched_getaffinity(0, sizeof set, &set) == 0)
+        CPT_CHECK("available_cpu_count <= affinity count",
+                  available >= 1 && available <= (uint32_t)CPU_COUNT(&set));
+    char dir[512];
+    char path[600];
+    char text[128] = "";
+    FILE *f = NULL;
+    if (os_proc_cgroup_dir(dir, sizeof dir) &&
+        snprintf(path, sizeof path, "%s/cpu.max", dir) > 0)
+        f = fopen(path, "r");
+    if (f) {
+        if (!fgets(text, sizeof text, f)) text[0] = '\0';
+        fclose(f);
+    }
+    uint32_t quota = 0;
+    if (platform_cpu_max_parse(text, &quota))
+        CPT_CHECK("available_cpu_count <= own cgroup cpu.max",
+                  available <= quota);
+    else
+        printf("cpu_topology: own cgroup cpu.max absent or max; quota clause skipped\n");
+    return failures;
+}
+#endif
 
 /* The build-job derivation, graded through the PURE function so no particular
  * host CPU count or memory grant is needed. */
@@ -168,6 +251,8 @@ static int cpt_build_job_count_checks(void)
                   strcmp(arg, expect) == 0);
         /* And it is a real job count, never "-j0". */
         CPT_CHECK("build_jobs_arg is never -j0", strcmp(arg, "-j0") != 0);
+        CPT_CHECK("build_jobs_arg is -jN with N >= 1",
+                  strncmp(arg, "-j", 2) == 0 && atoi(arg + 2) >= 1);
     }
 
     /* The host's own budget is either a real number or an honest -1; a zero
@@ -188,6 +273,10 @@ int test_cpu_topology(void)
      * thread bound to domain 0, and these assertions own the mask while they
      * run and hand back exactly what they found. */
     failures += cpt_available_cpu_count_checks();
+    failures += cpt_cpu_max_parse_checks();
+#if defined(__linux__)
+    failures += cpt_cpu_quota_live_checks();
+#endif
     failures += cpt_build_job_count_checks();
 
     /* ── real /sys scan (or whatever this box/container actually has) ── */

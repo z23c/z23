@@ -1,0 +1,3 @@
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
+ * Source-owned capability declaration for the logical CPU count. */
+ZCL_MODULE_CAPABILITY("platform/modules/platform/src/logical_cpu.c", CAP_FS_READ, "reads the cgroup v2 cpu.max files under /sys/fs/cgroup so the CPU count honours a CPU quota; nothing is written")
