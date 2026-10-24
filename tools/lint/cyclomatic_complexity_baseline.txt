@@ -670,9 +670,6 @@ contexts/commons/packages/zutf8/tests/test_zutf8.c:test_encode_kats:23
 contexts/commons/packages/zwalk/src/zwalk.c:visit_node:24
 contexts/commons/packages/zwrap/src/zwrap.c:zwrap:23
 contexts/commons/packages/zxml/app/main.c:main:24
-contexts/commons/packages/zxml/src/zxml.c:name_valid:20
-contexts/commons/packages/zxml/src/zxml.c:zxml_comment:17
-contexts/commons/packages/zxml/src/zxml.c:zxml_elem_open:16
 contexts/commons/services/src/metaverse_space_scout_service.c:metaverse_space_scout_run:35
 contexts/commons/services/src/package_lifecycle.c:package_lifecycle_plan:22
 contexts/commons/services/src/package_lifecycle_install.c:package_lifecycle_installed_programs:21

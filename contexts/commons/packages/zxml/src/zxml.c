@@ -32,20 +32,27 @@ static zxml_status newline_indent(zxml *x, size_t depth) {
   return emit(x, k_spaces, 2 * depth);
 }
 
+/* XML Name production, ASCII subset: first char is a letter or '_'; later
+ * chars may also be a digit, '-', '.', or ':'. */
+static bool name_start_char(unsigned char c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+}
+
+static bool name_cont_char(unsigned char c) {
+  return name_start_char(c) || (c >= '0' && c <= '9') || c == '-' ||
+         c == '.' || c == ':';
+}
+
 static bool name_valid(const char *name) {
   if (!name)
     return false;
   size_t len = strlen(name);
   if (len == 0 || len > ZXML_MAX_NAME)
     return false;
-  unsigned char c = (unsigned char)name[0];
-  if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_'))
+  if (!name_start_char((unsigned char)name[0]))
     return false;
   for (size_t i = 1; i < len; i++) {
-    c = (unsigned char)name[i];
-    if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-          (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.' ||
-          c == ':'))
+    if (!name_cont_char((unsigned char)name[i]))
       return false;
   }
   return true;
@@ -125,6 +132,17 @@ static zxml_status close_tag(zxml *x) {
   return st;
 }
 
+/* Prepare for a new markup item (element or comment) at the current depth:
+ * close any pending start tag, then break the line in pretty mode. */
+static zxml_status open_markup(zxml *x) {
+  zxml_status st = close_tag(x);
+  if (st != ZXML_OK)
+    return st;
+  if ((x->flags & ZXML_PRETTY) && x->wrote_any)
+    return newline_indent(x, x->depth);
+  return ZXML_OK;
+}
+
 void zxml_open(zxml *x, zxml_write_fn fn, void *ctx, unsigned flags) {
   if (!x)
     return;
@@ -146,11 +164,8 @@ zxml_status zxml_decl(zxml *x) {
   return emit(x, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>", 38);
 }
 
-zxml_status zxml_elem_open(zxml *x, const char *name) {
-  if (!x)
-    return ZXML_ERR_STATE;
-  if (x->err != ZXML_OK)
-    return x->err;
+/* Element-open preconditions; a failure latches into x->err. */
+static zxml_status elem_open_check(zxml *x, const char *name) {
   if (x->closed)
     return (x->err = ZXML_ERR_STATE);
   if (!name_valid(name))
@@ -159,14 +174,20 @@ zxml_status zxml_elem_open(zxml *x, const char *name) {
     return (x->err = ZXML_ERR_STATE); /* exactly one root */
   if (x->depth >= ZXML_MAX_DEPTH)
     return (x->err = ZXML_ERR_DEPTH);
-  zxml_status st = close_tag(x);
+  return ZXML_OK;
+}
+
+zxml_status zxml_elem_open(zxml *x, const char *name) {
+  if (!x)
+    return ZXML_ERR_STATE;
+  if (x->err != ZXML_OK)
+    return x->err;
+  zxml_status st = elem_open_check(x, name);
   if (st != ZXML_OK)
     return st;
-  if ((x->flags & ZXML_PRETTY) && x->wrote_any) {
-    st = newline_indent(x, x->depth);
-    if (st != ZXML_OK)
-      return st;
-  }
+  st = open_markup(x);
+  if (st != ZXML_OK)
+    return st;
   st = emit(x, "<", 1);
   if (st == ZXML_OK)
     st = emit(x, name, strlen(name));
@@ -241,11 +262,8 @@ static bool comment_invalid(const char *text) {
   return strstr(text, "--") != NULL || (len != 0 && text[len - 1] == '-');
 }
 
-zxml_status zxml_comment(zxml *x, const char *text) {
-  if (!x)
-    return ZXML_ERR_STATE;
-  if (x->err != ZXML_OK)
-    return x->err;
+/* Comment preconditions; a failure latches into x->err. */
+static zxml_status comment_check(zxml *x, const char *text) {
   if (x->closed || (x->depth == 0 && x->wrote_root))
     return (x->err = ZXML_ERR_STATE); /* no comments after the root */
   if (!text)
@@ -255,14 +273,20 @@ zxml_status zxml_comment(zxml *x, const char *text) {
     return (x->err = st);
   if (comment_invalid(text))
     return (x->err = ZXML_ERR_TEXT); /* internal or delimiter-adjacent "--" */
-  st = close_tag(x);
+  return ZXML_OK;
+}
+
+zxml_status zxml_comment(zxml *x, const char *text) {
+  if (!x)
+    return ZXML_ERR_STATE;
+  if (x->err != ZXML_OK)
+    return x->err;
+  zxml_status st = comment_check(x, text);
   if (st != ZXML_OK)
     return st;
-  if ((x->flags & ZXML_PRETTY) && x->wrote_any) {
-    st = newline_indent(x, x->depth);
-    if (st != ZXML_OK)
-      return st;
-  }
+  st = open_markup(x);
+  if (st != ZXML_OK)
+    return st;
   st = emit(x, "<!--", 4);
   if (st == ZXML_OK)
     st = emit(x, text, strlen(text));
