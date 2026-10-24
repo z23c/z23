@@ -840,6 +840,38 @@ static int bindpar_refuse_case(block_index_projection_t *bip,
     return failures;
 }
 
+/* A key no range can see (an INTEGER sorts below every blob) makes the rows
+ * verified fall short of COUNT(*): the bind must refuse on the sum check, with
+ * the flat row count raised so the pre-scan gate passes, and leave the meta
+ * unchanged. */
+static int bindpar_mismatch_case(block_index_projection_t *bip,
+                                 const char *db_path, const uint8_t digest[32])
+{
+    int failures = 0;
+    char before[512] = "", after[512] = "";
+    bool got0 = bindpar_meta_text(db_path, before, sizeof(before));
+    bool added = bindpar_sql(db_path, "INSERT INTO block_index(hash,height,"
+        "n_status,n_file,n_data_pos,n_undo_pos,n_time,n_bits,n_version,n_tx,"
+        "blob) VALUES(42,0,0,0,0,0,0,0,0,0,x'00')");
+    struct bindpar_ctx all = { .use_refuse = false };
+    const unsigned workers[] = {1, 8};
+    for (size_t i = 0; i < 2; i++) {
+        block_index_projection_bind_workers_for_test(workers[i]);
+        bool bound = block_index_projection_bind_flat_if_covered(
+            bip, digest, 777, BINDPAR_ROWS + 1, bindpar_cb, &all);
+        block_index_projection_bind_workers_for_test(0);
+        bool got1 = bindpar_meta_text(db_path, after, sizeof(after));
+        TOPUP_CHECK("bindpar: rows verified short of COUNT(*) refuses with "
+                    "1 and 8 workers, meta unchanged",
+                    added && !bound && got0 && got1 &&
+                    strcmp(before, after) == 0);
+    }
+    TOPUP_CHECK("bindpar: mismatch fixture row removed",
+                bindpar_sql(db_path,
+                            "DELETE FROM block_index WHERE hash=42"));
+    return failures;
+}
+
 /* Commit with 1, 3 and 8 workers; the meta must be identical each time. */
 static int bindpar_commit_cases(block_index_projection_t *bip,
                                 const char *db_path, const uint8_t digest[32],
@@ -910,6 +942,8 @@ static int run_bind_parallel_cases(void)
                 ready && !block_index_projection_bind_flat_if_covered(
                     bip, other, 777, BINDPAR_ROWS - 1, bindpar_cb, &all));
     block_index_projection_bind_workers_for_test(0);
+    if (ready)
+        failures += bindpar_mismatch_case(bip, db_path, other);
     if (bip) block_index_projection_close(bip);
     if (log) event_log_close(log);
     test_cleanup_tmpdir(dir);
