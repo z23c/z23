@@ -13222,6 +13222,27 @@ $(LOOP_TICK_BIN): $(LOOP_TICK_SRCS)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic 	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) 	    $(BUILD_IDENTITY_CPPFLAGS) 	    $(LOOP_TICK_INCLUDES) 	    -o $@ $(LOOP_TICK_SRCS) -lpthread
 endif
 
+# ── z23-contrib-inbox: answer new outside posts in the public contrib room ──
+# A standalone host tool, compiled straight from source like z23-loop-tick
+# above. It runs z23 fleet board, z23-engine-unit and git through
+# zcl_spawn_capture, so it links no vendor library and no shell. flock(2) is
+# the single-pass lock and the Haiku one-shot lock, so the rule does not exist
+# on a Windows host.
+ifeq ($(ZCL_HOST_WINDOWS),)
+CONTRIB_INBOX_BIN = $(BIN_DIR)/z23-contrib-inbox
+CONTRIB_INBOX_SRCS = tools/contrib_inbox.c platform/modules/json/src/json.c platform/modules/util/src/spawn.c platform/modules/base/src/cleanse.c platform/modules/base/src/log_level.c platform/modules/base/src/result.c platform/modules/base/src/safe_alloc.c platform/modules/platform/src/clock.c platform/modules/platform/src/os_proc.c
+CONTRIB_INBOX_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include -Iplatform/modules/platform/include -Iplatform/modules/util/include
+.PHONY: contrib-inbox
+contrib-inbox: $(CONTRIB_INBOX_BIN)
+$(CONTRIB_INBOX_BIN): $(CONTRIB_INBOX_SRCS)
+	mkdir -p $(dir $@)
+	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
+	    -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE $(ZCL_PLATFORM_CPPFLAGS) \
+	    $(BUILD_IDENTITY_CPPFLAGS) \
+	    $(CONTRIB_INBOX_INCLUDES) \
+	    -o $@ $(CONTRIB_INBOX_SRCS) -lpthread
+endif
+
 # ── Sealed consensus core (Wave 1.1 / W0) ───────────────────────────────────
 # core_seal is a tiny build-time C tool (no external deps: it links the in-tree
 # FIPS-202 SHA3-256 + memory_cleanse) that reads the file list on stdin

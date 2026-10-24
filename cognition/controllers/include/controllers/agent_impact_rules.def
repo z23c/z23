@@ -3466,3 +3466,4 @@ AGENT_IMPACT_RULE("tests/harness/src/test_skycombat_macho_vm.c", "skycombat_mach
 AGENT_IMPACT_RULE("tests/harness/src/test_sync_throughput_index.c", "sync_throughput")
 AGENT_IMPACT_RULE("tests/harness/src/test_zcode_store_quarantine.c", "zcode_store")
 AGENT_IMPACT_RULE("tests/harness/src/test_zip32_diversifier_derivation.c", "zip32_default_diversifier_deterministic zip32_default_diversifier_is_ff1_of_settled_index zip32_diversifier_advances_index_in_place zip32_diversifier_distinct_keys_distinct_output zip32_diversifier_index_boundaries zip32_diversifier_skips_invalid_indices zip32_ff1_radix2_deterministic")
+AGENT_IMPACT_RULE("tools/contrib_inbox.c|tests/harness/src/test_contrib_inbox.c", "contrib_inbox make_lint_gates")
