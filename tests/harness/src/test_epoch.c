@@ -223,6 +223,43 @@ static void ep_hex32(uint8_t fill, char out[65])
     HexStr(buf, 32, false, out, 65);
 }
 
+/* One report line per check: prints OK or FAIL and returns the failure
+ * count for that line. */
+static int ep_report(bool ok)
+{
+    if (ok) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+/* Plant `count` anchors labelled "<prefix>@<label_base + i>", each with its
+ * own seed and height. Stops at the first failed write. */
+static bool ep_put_run(struct ep_fixture *f, bool ok, const char *prefix,
+                       uint32_t label_base, uint32_t seed_base,
+                       int32_t height_base, uint8_t fill, uint32_t count)
+{
+    for (uint32_t i = 0; i < count && ok; i++) {
+        char label[64];
+        snprintf(label, sizeof(label), "%s@%u", prefix, label_base + i);
+        ok = ep_put_anchor(f, seed_base + i, height_base + (int32_t)i, fill,
+                           label);
+    }
+    return ok;
+}
+
+/* Run `core epoch verify --height` against the fixture's datadir. */
+static void ep_verify_run(struct ep_fixture *f, int32_t height,
+                          struct ep_cmd *c)
+{
+    ep_cmd_init(c);
+    (void)json_push_kv_str(&c->input, "datadir", f->datadir);
+    (void)json_push_kv_int(&c->input, "height", height);
+    zcl_native_handle_core_epoch_verify(&c->request, &c->reply);
+}
+
 /* ── 1. datadir resolution ─────────────────────────────────────────── */
 
 static int test_epoch_datadir(void)
@@ -384,6 +421,17 @@ static int test_epoch_blockers(void)
 
 /* ── 3. declared range round-trip ──────────────────────────────────── */
 
+/* The declared-range fields every `core epoch` reply publishes, in the
+ * order the checks read them. */
+static bool ep_range_common_ok(const struct zcl_command_reply *r,
+                               int32_t base, const char *base_hex)
+{
+    return r->status == ZCL_COMMAND_STATUS_PASSED &&
+           ep_int(r, "base_height", -1) == base &&
+           ep_str_is(r, "base_digest", base_hex) &&
+           ep_bool(r, "partial_coverage") == 1;
+}
+
 static int test_epoch_declared_range(void)
 {
     int failures = 0;
@@ -407,13 +455,11 @@ static int test_epoch_declared_range(void)
         ep_cmd_init(&c);
         (void)json_push_kv_str(&c.input, "datadir", f.datadir);
         zcl_native_handle_core_epoch_status(&c.request, &c.reply);
-        bool ok = planted && c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                  ep_int(&c.reply, "base_height", -1) == base &&
-                  ep_str_is(&c.reply, "base_digest", want_base_hex) &&
-                  ep_bool(&c.reply, "partial_coverage") == 1 &&
+        bool ok = planted &&
+                  ep_range_common_ok(&c.reply, base, want_base_hex) &&
                   ep_int(&c.reply, "tip_height", -1) == head &&
                   ep_str_is(&c.reply, "catalog_digest", want_digest_hex);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        failures += ep_report(ok);
         ep_cmd_free(&c);
     }
 
@@ -424,12 +470,9 @@ static int test_epoch_declared_range(void)
         ep_cmd_init(&c);
         (void)json_push_kv_str(&c.input, "datadir", f.datadir);
         zcl_native_handle_core_epoch_anchor(&c.request, &c.reply);
-        bool ok = c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                  ep_int(&c.reply, "base_height", -1) == base &&
-                  ep_str_is(&c.reply, "base_digest", want_base_hex) &&
-                  ep_bool(&c.reply, "partial_coverage") == 1 &&
+        bool ok = ep_range_common_ok(&c.reply, base, want_base_hex) &&
                   ep_str_is(&c.reply, "digest", want_digest_hex);
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        failures += ep_report(ok);
         ep_cmd_free(&c);
     }
 
@@ -440,11 +483,8 @@ static int test_epoch_declared_range(void)
         ep_cmd_init(&c);
         (void)json_push_kv_str(&c.input, "datadir", f.datadir);
         zcl_native_handle_core_epoch_verify(&c.request, &c.reply);
-        bool ok = c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-                  ep_int(&c.reply, "base_height", -1) == base &&
-                  ep_str_is(&c.reply, "base_digest", want_base_hex) &&
-                  ep_bool(&c.reply, "partial_coverage") == 1;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        bool ok = ep_range_common_ok(&c.reply, base, want_base_hex);
+        failures += ep_report(ok);
         ep_cmd_free(&c);
     }
 
@@ -461,7 +501,7 @@ static int test_epoch_declared_range(void)
         zcl_native_handle_core_epoch_status(&c.request, &c.reply);
         ok = ok && ep_int(&c.reply, "base_height", -1) == 0 &&
              ep_bool(&c.reply, "partial_coverage") == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        failures += ep_report(ok);
         ep_cmd_free(&c);
     }
 
@@ -601,6 +641,27 @@ static int test_epoch_verify_height(void)
 
 /* ── 5. paging: an anchor buried under >100 newer anchors ──────────── */
 
+/* The verify reply for the buried epoch anchor: found, the only match, and
+ * the scan read just that one row. */
+static bool ep_paging_first_ok(const struct zcl_command_reply *r)
+{
+    return ep_bool(r, "anchored") == 1 &&
+           ep_int(r, "anchor_count", -1) == 1 &&
+           ep_str_is(r, "comparison", "match") &&
+           /* The scan is label-filtered: it walks the epoch anchors,
+            * not all 151 rows. */
+           ep_int(r, "anchors_scanned", -1) == 1 &&
+           ep_bool(r, "truncated") == -1;
+}
+
+/* The label of the anchor `status` reports, or NULL when there is none. */
+static const char *ep_reply_anchor_label(const struct zcl_command_reply *r)
+{
+    const struct json_value *a = json_get(&r->data, "anchor");
+    const struct json_value *lv = a ? json_get(a, "label") : NULL;
+    return (lv && lv->type == JSON_STR) ? json_get_str(lv) : NULL;
+}
+
 static int test_epoch_paging(void)
 {
     int failures = 0;
@@ -614,12 +675,7 @@ static int test_epoch_paging(void)
      * unrelated anchors above it; it must still be found. */
     const int32_t epoch_h = 7000;
     bool planted = ep_put_anchor(&f, 9001, 10, 0xD7, "zepoch@7000");
-    for (uint32_t i = 0; i < 150 && planted; i++) {
-        char label[64];
-        snprintf(label, sizeof(label), "zslp@%u", i);
-        planted = ep_put_anchor(&f, 20000 + i, 1000 + (int32_t)i, 0x40,
-                                label);
-    }
+    planted = ep_put_run(&f, planted, "zslp", 0, 20000, 1000, 0x40, 150);
     planted = planted && ep_set_cursor(&f, 0, 0x00, epoch_h, 0xD7);
     ep_fixture_seal(&f);
 
@@ -627,18 +683,9 @@ static int test_epoch_paging(void)
            "anchor from verify --height... ");
     {
         struct ep_cmd c;
-        ep_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_int(&c.input, "height", epoch_h);
-        zcl_native_handle_core_epoch_verify(&c.request, &c.reply);
-        bool ok = planted && ep_bool(&c.reply, "anchored") == 1 &&
-                  ep_int(&c.reply, "anchor_count", -1) == 1 &&
-                  ep_str_is(&c.reply, "comparison", "match") &&
-                  /* The scan is label-filtered: it walks the epoch anchors,
-                   * not all 151 rows. */
-                  ep_int(&c.reply, "anchors_scanned", -1) == 1 &&
-                  ep_bool(&c.reply, "truncated") == -1;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        ep_verify_run(&f, epoch_h, &c);
+        bool ok = planted && ep_paging_first_ok(&c.reply);
+        failures += ep_report(ok);
         ep_cmd_free(&c);
     }
 
@@ -650,7 +697,7 @@ static int test_epoch_paging(void)
         zcl_native_handle_core_epoch_status(&c.request, &c.reply);
         bool ok = ep_bool(&c.reply, "anchored") == 1 &&
                   ep_bool(&c.reply, "digest_match") == 1;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        failures += ep_report(ok);
         ep_cmd_free(&c);
     }
 
@@ -660,23 +707,16 @@ static int test_epoch_paging(void)
            "(151 epoch anchors, the oldest still found)... ");
     {
         bool ok = ep_fixture_reopen(&f);
-        for (uint32_t i = 0; i < 150 && ok; i++) {
-            char label[64];
-            snprintf(label, sizeof(label), "zepoch@%u", 8000 + i);
-            ok = ep_put_anchor(&f, 30000 + i, 2000 + (int32_t)i, 0x50, label);
-        }
+        ok = ep_put_run(&f, ok, "zepoch", 8000, 30000, 2000, 0x50, 150);
         ep_fixture_seal(&f);
 
         struct ep_cmd c;
-        ep_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_int(&c.input, "height", epoch_h);
-        zcl_native_handle_core_epoch_verify(&c.request, &c.reply);
+        ep_verify_run(&f, epoch_h, &c);
         ok = ok && ep_bool(&c.reply, "anchored") == 1 &&
              ep_int(&c.reply, "anchor_count", -1) == 1 &&
              ep_int(&c.reply, "anchors_scanned", -1) == 151 &&
              ep_str_is(&c.reply, "comparison", "match");
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        failures += ep_report(ok);
         ep_cmd_free(&c);
     }
 
@@ -692,14 +732,11 @@ static int test_epoch_paging(void)
         ep_cmd_init(&c);
         (void)json_push_kv_str(&c.input, "datadir", f.datadir);
         zcl_native_handle_core_epoch_status(&c.request, &c.reply);
-        const struct json_value *a = json_get(&c.reply.data, "anchor");
-        const struct json_value *lv = a ? json_get(a, "label") : NULL;
-        const char *label = (lv && lv->type == JSON_STR) ? json_get_str(lv)
-                                                         : NULL;
+        const char *label = ep_reply_anchor_label(&c.reply);
         ok = ok && ep_bool(&c.reply, "anchored") == 1 && label &&
              strcmp(label, "zepoch@8149") == 0 &&
              ep_int(&c.reply, "epoch", -1) == 8;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        failures += ep_report(ok);
         ep_cmd_free(&c);
     }
 
@@ -708,6 +745,86 @@ static int test_epoch_paging(void)
 }
 
 /* ── 6. cross-operator agreement ───────────────────────────────────── */
+
+/* Two anchors of the same digest: one root, and both agree. */
+static bool ep_check_one_root(const struct zcl_command_reply *r)
+{
+    return r->status == ZCL_COMMAND_STATUS_PASSED &&
+           ep_int(r, "anchor_count", -1) == 2 &&
+           ep_int(r, "distinct_roots", -1) == 1 &&
+           ep_int(r, "agree_count", -1) == 2 &&
+           ep_bool(r, "disagreement") == 0;
+}
+
+/* Two different digests: a finding with a failed envelope, and the report
+ * survives it. */
+static bool ep_check_finding(const struct zcl_command_reply *r)
+{
+    return ep_failed_with(r, ZCL_COMMAND_STATUS_FAILED,
+                          ZCL_COMMAND_EXIT_FAILED,
+                          "EPOCH_DIGEST_DISAGREEMENT") &&
+           ep_int(r, "anchor_count", -1) == 3 &&
+           ep_int(r, "distinct_roots", -1) == 2 &&
+           ep_bool(r, "disagreement") == 1 &&
+           /* The report survives the failure envelope. */
+           ep_int(r, "agree_count", -1) == 2 &&
+           ep_int(r, "disagree_count", -1) == 1;
+}
+
+static bool ep_plant_incomparable_local(struct ep_fixture *g)
+{
+    return ep_put_anchor(g, 51, 9400, 0x11, "zepoch@5000");
+}
+
+static bool ep_plant_incomparable_conflict(struct ep_fixture *g)
+{
+    return ep_put_anchor(g, 61, 9400, 0x11, "zepoch@5000") &&
+           ep_put_anchor(g, 62, 9500, 0x99, "zepoch@5000");
+}
+
+/* A local base ABOVE the height: incomparable, not disagreeing. */
+static bool ep_check_incomparable(const struct zcl_command_reply *r)
+{
+    return r->status == ZCL_COMMAND_STATUS_PASSED &&
+           r->exit_code == ZCL_COMMAND_EXIT_OK &&
+           ep_int(r, "anchor_count", -1) == 1 &&
+           ep_str_is(r, "comparison", "incomparable") &&
+           ep_str_is(r, "local_digest_reason", "local_base_above_height") &&
+           ep_int(r, "incomparable_count", -1) == 1 &&
+           ep_int(r, "disagree_count", -1) == 0 &&
+           ep_bool(r, "disagreement") == 0;
+}
+
+/* Operator-vs-operator conflict the node cannot adjudicate: still a finding. */
+static bool ep_check_incomparable_conflict(const struct zcl_command_reply *r)
+{
+    return ep_failed_with(r, ZCL_COMMAND_STATUS_FAILED,
+                          ZCL_COMMAND_EXIT_FAILED,
+                          "EPOCH_DIGEST_DISAGREEMENT") &&
+           ep_int(r, "distinct_roots", -1) == 2 &&
+           ep_int(r, "incomparable_count", -1) == 2 &&
+           ep_int(r, "disagree_count", -1) == 0;
+}
+
+/* Verify at height 5000 on a node whose declared range [6000, 9999] sits
+ * above it, with the anchors `plant` writes. The declared base is in every
+ * preimage, so the digests commit to different ranges: incomparable. */
+static int ep_agree_incomparable(const char *tag,
+                                 bool (*plant)(struct ep_fixture *),
+                                 bool (*check)(const struct zcl_command_reply *))
+{
+    struct ep_fixture g;
+    bool ok = ep_fixture_init(&g, tag);
+    ok = ok && plant(&g) && ep_set_cursor(&g, 6000, 0xB6, 9999, 0x22);
+    ep_fixture_seal(&g);
+    struct ep_cmd c;
+    ep_verify_run(&g, 5000, &c);
+    ok = ok && check(&c.reply);
+    int failures = ep_report(ok);
+    ep_cmd_free(&c);
+    ep_fixture_free(&g);
+    return failures;
+}
 
 static int test_epoch_agreement(void)
 {
@@ -726,16 +843,9 @@ static int test_epoch_agreement(void)
                   ep_set_cursor(&f, 0, 0x00, 8999, 0xC3);
         ep_fixture_seal(&f);
         struct ep_cmd c;
-        ep_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_int(&c.input, "height", 8999);
-        zcl_native_handle_core_epoch_verify(&c.request, &c.reply);
-        ok = ok && c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             ep_int(&c.reply, "anchor_count", -1) == 2 &&
-             ep_int(&c.reply, "distinct_roots", -1) == 1 &&
-             ep_int(&c.reply, "agree_count", -1) == 2 &&
-             ep_bool(&c.reply, "disagreement") == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        ep_verify_run(&f, 8999, &c);
+        ok = ok && ep_check_one_root(&c.reply);
+        failures += ep_report(ok);
         ep_cmd_free(&c);
     }
 
@@ -746,20 +856,9 @@ static int test_epoch_agreement(void)
                   ep_put_anchor(&f, 43, 9300, 0x77, "zepoch@8999");
         ep_fixture_seal(&f);
         struct ep_cmd c;
-        ep_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", f.datadir);
-        (void)json_push_kv_int(&c.input, "height", 8999);
-        zcl_native_handle_core_epoch_verify(&c.request, &c.reply);
-        ok = ok && ep_failed_with(&c.reply, ZCL_COMMAND_STATUS_FAILED,
-                                  ZCL_COMMAND_EXIT_FAILED,
-                                  "EPOCH_DIGEST_DISAGREEMENT") &&
-             ep_int(&c.reply, "anchor_count", -1) == 3 &&
-             ep_int(&c.reply, "distinct_roots", -1) == 2 &&
-             ep_bool(&c.reply, "disagreement") == 1 &&
-             /* The report survives the failure envelope. */
-             ep_int(&c.reply, "agree_count", -1) == 2 &&
-             ep_int(&c.reply, "disagree_count", -1) == 1;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        ep_verify_run(&f, 8999, &c);
+        ok = ok && ep_check_finding(&c.reply);
+        failures += ep_report(ok);
         ep_cmd_free(&c);
     }
 
@@ -771,63 +870,84 @@ static int test_epoch_agreement(void)
      * disagreeing. */
     printf("epoch agree: a local base ABOVE the height is incomparable, not "
            "disagreeing... ");
-    {
-        struct ep_fixture g;
-        bool ok = ep_fixture_init(&g, "incomp");
-        ok = ok && ep_put_anchor(&g, 51, 9400, 0x11, "zepoch@5000") &&
-             /* declared range [6000, 9999] — 5000 is below the base. */
-             ep_set_cursor(&g, 6000, 0xB6, 9999, 0x22);
-        ep_fixture_seal(&g);
-        struct ep_cmd c;
-        ep_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", g.datadir);
-        (void)json_push_kv_int(&c.input, "height", 5000);
-        zcl_native_handle_core_epoch_verify(&c.request, &c.reply);
-        ok = ok && c.reply.status == ZCL_COMMAND_STATUS_PASSED &&
-             c.reply.exit_code == ZCL_COMMAND_EXIT_OK &&
-             ep_int(&c.reply, "anchor_count", -1) == 1 &&
-             ep_str_is(&c.reply, "comparison", "incomparable") &&
-             ep_str_is(&c.reply, "local_digest_reason",
-                       "local_base_above_height") &&
-             ep_int(&c.reply, "incomparable_count", -1) == 1 &&
-             ep_int(&c.reply, "disagree_count", -1) == 0 &&
-             ep_bool(&c.reply, "disagreement") == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-        ep_cmd_free(&c);
-        ep_fixture_free(&g);
-    }
+    failures += ep_agree_incomparable("incomp", ep_plant_incomparable_local,
+                                      ep_check_incomparable);
 
     /* ...but an operator-vs-operator conflict is still a finding even when
      * this node cannot take a side. */
     printf("epoch agree: conflicting anchors are a finding even when this "
            "node cannot adjudicate them... ");
-    {
-        struct ep_fixture g;
-        bool ok = ep_fixture_init(&g, "incomp2");
-        ok = ok && ep_put_anchor(&g, 61, 9400, 0x11, "zepoch@5000") &&
-             ep_put_anchor(&g, 62, 9500, 0x99, "zepoch@5000") &&
-             ep_set_cursor(&g, 6000, 0xB6, 9999, 0x22);
-        ep_fixture_seal(&g);
-        struct ep_cmd c;
-        ep_cmd_init(&c);
-        (void)json_push_kv_str(&c.input, "datadir", g.datadir);
-        (void)json_push_kv_int(&c.input, "height", 5000);
-        zcl_native_handle_core_epoch_verify(&c.request, &c.reply);
-        ok = ok && ep_failed_with(&c.reply, ZCL_COMMAND_STATUS_FAILED,
-                                  ZCL_COMMAND_EXIT_FAILED,
-                                  "EPOCH_DIGEST_DISAGREEMENT") &&
-             ep_int(&c.reply, "distinct_roots", -1) == 2 &&
-             ep_int(&c.reply, "incomparable_count", -1) == 2 &&
-             ep_int(&c.reply, "disagree_count", -1) == 0;
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
-        ep_cmd_free(&c);
-        ep_fixture_free(&g);
-    }
+    failures += ep_agree_incomparable("incomp2",
+                                      ep_plant_incomparable_conflict,
+                                      ep_check_incomparable_conflict);
 
     return failures;
 }
 
 /* ── 7. offline op_return_hex round-trip ───────────────────────────── */
+
+/* The op_return script parses as a ZANC message over the expected digest
+ * and label. */
+static bool ep_offline_parse_ok(const uint8_t *script, size_t n,
+                                struct zanc_message *msg,
+                                const uint8_t want_digest[32])
+{
+    return n > 0 && zanc_parse(script, n, msg) &&
+           msg->hash_type == ZANC_HASH_SHA3_256 &&
+           memcmp(msg->digest, want_digest, 32) == 0 &&
+           strcmp(msg->label, "zepoch@1234567") == 0;
+}
+
+/* The reply's own fields must agree with the bytes; nothing was broadcast,
+ * so there is no txid anywhere. */
+static bool ep_offline_fields_ok(const struct zcl_command_reply *r,
+                                 int32_t head, const char *want_digest_hex,
+                                 size_t n)
+{
+    return ep_str_is(r, "digest", want_digest_hex) &&
+           ep_str_is(r, "label", "zepoch@1234567") &&
+           ep_str_is(r, "hash_type", "sha3") &&
+           ep_int(r, "catalog_height", -1) == head &&
+           ep_int(r, "op_return_size", -1) == (int64_t)n &&
+           ep_str_is(r, "status", "ready") &&
+           !ep_has(r, "txid");
+}
+
+/* The exact command bytes enter a block through connect_block, and the
+ * mined block rebuilds the epoch ZANC projection. */
+static int ep_offline_mine_and_project(const uint8_t *script, size_t n,
+                                       bool command_ok,
+                                       const uint8_t want_digest[32])
+{
+    struct transaction_lab_simnet_receipt mined;
+    bool mined_ok = command_ok && transaction_lab_simnet_mine_op_return(
+        script, n, &mined);
+    printf("epoch offline: exact command bytes enter a block through "
+           "connect_block... ");
+    int failures = ep_report(mined_ok && mined.transaction.num_vout == 2 &&
+                             mined.change_zat == 800000);
+
+    struct node_db projection_db;
+    memset(&projection_db, 0, sizeof(projection_db));
+    bool projection_open = node_db_open(&projection_db, ":memory:");
+    bool projected = projection_open && mined_ok &&
+        transaction_lab_simnet_project(&projection_db, &mined);
+    struct zanc_anchor anchor;
+    memset(&anchor, 0, sizeof(anchor));
+    bool found = projected && db_zanc_find_by_digest(
+        &projection_db, ZANC_HASH_SHA3_256, want_digest, &anchor);
+    printf("epoch offline: mined bytes rebuild the exact epoch ZANC "
+           "projection... ");
+    failures += ep_report(found && anchor.height == mined.mined_height &&
+                          memcmp(anchor.txid, mined.txid.data,
+                                 sizeof(anchor.txid)) == 0 &&
+                          strcmp(anchor.label, "zepoch@1234567") == 0);
+    if (projection_open)
+        node_db_close(&projection_db);
+    if (mined_ok)
+        transaction_lab_simnet_receipt_free(&mined);
+    return failures;
+}
 
 static int test_epoch_offline_anchor(void)
 {
@@ -866,52 +986,11 @@ static int test_epoch_offline_anchor(void)
                   /* the live path WAS attempted, and refused */
                   g_epoch_rpc_calls == calls_before + 1 &&
                   ep_has(&c.reply, "node_rpc_error") &&
-                  n > 0 && zanc_parse(script, n, &msg) &&
-                  msg.hash_type == ZANC_HASH_SHA3_256 &&
-                  memcmp(msg.digest, want_digest, 32) == 0 &&
-                  strcmp(msg.label, "zepoch@1234567") == 0 &&
-                  /* the reply's own fields must agree with the bytes */
-                  ep_str_is(&c.reply, "digest", want_digest_hex) &&
-                  ep_str_is(&c.reply, "label", "zepoch@1234567") &&
-                  ep_str_is(&c.reply, "hash_type", "sha3") &&
-                  ep_int(&c.reply, "catalog_height", -1) == head &&
-                  ep_int(&c.reply, "op_return_size", -1) == (int64_t)n &&
-                  ep_str_is(&c.reply, "status", "ready") &&
-                  /* nothing was broadcast: no txid anywhere */
-                  !ep_has(&c.reply, "txid");
-        if (command_ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-
-        struct transaction_lab_simnet_receipt mined;
-        bool mined_ok = command_ok && transaction_lab_simnet_mine_op_return(
-            script, n, &mined);
-        printf("epoch offline: exact command bytes enter a block through "
-               "connect_block... ");
-        if (mined_ok && mined.transaction.num_vout == 2 &&
-            mined.change_zat == 800000)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-
-        struct node_db projection_db;
-        memset(&projection_db, 0, sizeof(projection_db));
-        bool projection_open = node_db_open(&projection_db, ":memory:");
-        bool projected = projection_open && mined_ok &&
-            transaction_lab_simnet_project(&projection_db, &mined);
-        struct zanc_anchor anchor;
-        memset(&anchor, 0, sizeof(anchor));
-        bool found = projected && db_zanc_find_by_digest(
-            &projection_db, ZANC_HASH_SHA3_256, want_digest, &anchor);
-        printf("epoch offline: mined bytes rebuild the exact epoch ZANC "
-               "projection... ");
-        if (found && anchor.height == mined.mined_height &&
-            memcmp(anchor.txid, mined.txid.data, sizeof(anchor.txid)) == 0 &&
-            strcmp(anchor.label, "zepoch@1234567") == 0)
-            printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-        if (projection_open)
-            node_db_close(&projection_db);
-        if (mined_ok)
-            transaction_lab_simnet_receipt_free(&mined);
+                  ep_offline_parse_ok(script, n, &msg, want_digest) &&
+                  ep_offline_fields_ok(&c.reply, head, want_digest_hex, n);
+        failures += ep_report(command_ok);
+        failures += ep_offline_mine_and_project(script, n, command_ok,
+                                                want_digest);
         ep_cmd_free(&c);
     }
 
@@ -920,6 +999,26 @@ static int test_epoch_offline_anchor(void)
 }
 
 /* ── 8. epoch arithmetic agrees with dumpstate zepoch ──────────────── */
+
+/* The `core epoch status` reply agrees with the dumper's epoch fields at
+ * height `h`: epoch = h/1000 and the dump names the same epoch and tip. */
+static bool ep_arith_agrees(const struct zcl_command_reply *r,
+                            const struct json_value *dump, int32_t h)
+{
+    const struct json_value *de = json_get(dump, "epoch");
+    const struct json_value *ds = json_get(dump, "epoch_start");
+    const struct json_value *dt = json_get(dump, "tip_height");
+    const struct json_value *dd = json_get(dump, "catalog_digest");
+    return de && ds && dt && dd &&
+           ep_int(r, "epoch", -1) == (int64_t)(h / 1000) &&
+           ep_int(r, "epoch_start", -1) == (int64_t)(h / 1000) * 1000 &&
+           ep_int(r, "blocks_into_epoch", -1) ==
+               (int64_t)h - (int64_t)(h / 1000) * 1000 &&
+           json_get_int(de) == ep_int(r, "epoch", -1) &&
+           json_get_int(ds) == ep_int(r, "epoch_start", -1) &&
+           json_get_int(dt) == ep_int(r, "tip_height", -1) &&
+           ep_str_is(r, "catalog_digest", json_get_str(dd));
+}
 
 static int test_epoch_arithmetic(void)
 {
@@ -956,21 +1055,8 @@ static int test_epoch_arithmetic(void)
             g_op_return_backfill_test_ndb = NULL;
             node_db_close(&dump_ndb);
         }
-        const struct json_value *de = json_get(&dump, "epoch");
-        const struct json_value *ds = json_get(&dump, "epoch_start");
-        const struct json_value *dt = json_get(&dump, "tip_height");
-        const struct json_value *dd = json_get(&dump, "catalog_digest");
-
-        ok = ok && dumped && de && ds && dt && dd &&
-             ep_int(&c.reply, "epoch", -1) == (int64_t)(h / 1000) &&
-             ep_int(&c.reply, "epoch_start", -1) == (int64_t)(h / 1000) * 1000 &&
-             ep_int(&c.reply, "blocks_into_epoch", -1) ==
-                 (int64_t)h - (int64_t)(h / 1000) * 1000 &&
-             json_get_int(de) == ep_int(&c.reply, "epoch", -1) &&
-             json_get_int(ds) == ep_int(&c.reply, "epoch_start", -1) &&
-             json_get_int(dt) == ep_int(&c.reply, "tip_height", -1) &&
-             ep_str_is(&c.reply, "catalog_digest", json_get_str(dd));
-        if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
+        ok = ok && dumped && ep_arith_agrees(&c.reply, &dump, h);
+        failures += ep_report(ok);
         json_free(&dump);
         ep_cmd_free(&c);
     }

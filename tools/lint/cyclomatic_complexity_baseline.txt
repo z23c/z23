@@ -2414,11 +2414,6 @@ tests/harness/src/test_engine.c:case_receipt_chain:74
 tests/harness/src/test_engine.c:case_state:19
 tests/harness/src/test_engine_rules.c:case_decisions:38
 tests/harness/src/test_engine_rules.c:case_miner:19
-tests/harness/src/test_epoch.c:test_epoch_agreement:37
-tests/harness/src/test_epoch.c:test_epoch_arithmetic:18
-tests/harness/src/test_epoch.c:test_epoch_declared_range:22
-tests/harness/src/test_epoch.c:test_epoch_offline_anchor:32
-tests/harness/src/test_epoch.c:test_epoch_paging:29
 tests/harness/src/test_explorer.c:test_explorer:362
 tests/harness/src/test_explorer_index.c:test_explorer_index:33
 tests/harness/src/test_fact_writers.c:fw_case_command_evidence_ceiling:21
