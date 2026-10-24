@@ -2646,12 +2646,6 @@ tests/harness/src/test_read_leaf_no_datadir_write.c:t_wal_snapshot_writer_arrive
 tests/harness/src/test_reducer_block_ingest_gate.c:test_reducer_block_ingest_gate:37
 tests/harness/src/test_reducer_drive_watchdog.c:test_reducer_drive_watchdog:74
 tests/harness/src/test_reducer_forward_progress_gate.c:test_reducer_forward_progress_gate:96
-tests/harness/src/test_reducer_frontier.c:case_body_read_repair_note:42
-tests/harness/src/test_reducer_frontier.c:case_derived_stage_cursor_equivalence:30
-tests/harness/src/test_reducer_frontier.c:case_dump_ignores_tip_finalize_pending_edge:16
-tests/harness/src/test_reducer_frontier.c:case_dump_marks_run_ahead_stage_cursors:21
-tests/harness/src/test_reducer_frontier.c:case_dump_reports_tip_finalize_real_hole:16
-tests/harness/src/test_reducer_frontier.c:case_torn:21
 tests/harness/src/test_reducer_frontier_reconcile_light.c:make_fixture_block_readable:20
 tests/harness/src/test_reducer_frontier_reconcile_light.c:test_reducer_frontier_reconcile_light:369
 tests/harness/src/test_reducer_ingest_e2e.c:seed_proof_validate:20

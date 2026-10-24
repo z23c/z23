@@ -314,6 +314,16 @@ static bool put_consistent_height(sqlite3 *db, int32_t h)
         && put_log_row(db, "tip_finalize_log", NULL, h, 1, NULL, "ok");
 }
 
+/* put_consistent_height for every height in [lo, hi], stopping at the first
+ * height that fails to write. */
+static bool put_consistent_range(sqlite3 *db, int32_t lo, int32_t hi)
+{
+    bool built = true;
+    for (int32_t h = lo; h <= hi; h++)
+        built = built && put_consistent_height(db, h);
+    return built;
+}
+
 static bool put_validate_failure(sqlite3 *db, int32_t h, const char *reason)
 {
     uint8_t hh[32];
@@ -398,6 +408,56 @@ static bool set_all_cursors(sqlite3 *db, int64_t c)
         && set_cursor(db, "script_validate", c)
         && set_cursor(db, "utxo_apply", c)
         && set_cursor(db, "tip_finalize", c);
+}
+
+/* Set each of the `n` named cursors to `value`, in list order, stopping at the
+ * first failed write. */
+static bool set_cursor_list(sqlite3 *db, const char *const *names, size_t n,
+                            int64_t value)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (!set_cursor(db, names[i], value))
+            return false;
+    }
+    return true;
+}
+
+/* Derived-stage fixtures: the upstream stages at `upstream_value` (next-height
+ * frame), then tip_finalize at `tip_value` (served-tip frame). */
+static bool set_derived_cursors(sqlite3 *db, const char *const *upstream,
+                                size_t n, int64_t upstream_value,
+                                int64_t tip_value)
+{
+    return set_cursor_list(db, upstream, n, upstream_value)
+        && set_cursor(db, "tip_finalize", tip_value);
+}
+
+/* Upstream stages the tip_finalize edge fixture sets, in fixture order. */
+static const char *const tipfin_upstream_stages[] = {
+    "validate_headers", "body_fetch", "body_persist", "script_validate",
+    "proof_validate", "utxo_apply",
+};
+
+/* The five stages the run-ahead fixture pushes past the verified height. */
+static const char *const runahead_five_stages[] = {
+    "validate_headers", "body_fetch", "body_persist", "script_validate",
+    "proof_validate",
+};
+
+static bool set_tipfin_upstream_cursors(sqlite3 *db, int64_t value)
+{
+    return set_cursor_list(db, tipfin_upstream_stages,
+                           sizeof(tipfin_upstream_stages) /
+                               sizeof(tipfin_upstream_stages[0]),
+                           value);
+}
+
+static bool set_runahead_five_cursors(sqlite3 *db, int64_t value)
+{
+    return set_cursor_list(db, runahead_five_stages,
+                           sizeof(runahead_five_stages) /
+                               sizeof(runahead_five_stages[0]),
+                           value);
 }
 
 /* ── cases ───────────────────────────────────────────────────────────── */
@@ -589,24 +649,13 @@ static int case_validation_evidence_contained(void)
  * laggard at A+4. The contiguous-prefix MIN caps H* at A+3. tip_finalize has
  * stale ok=0 debris above A+3 and a fresh ok=1 at A+3, so served_floor is
  * A+3. */
-static int case_torn(void)
+
+/* Rows above A+3: a script_validate laggard at A+4 that the other logs do not
+ * share, utxo_apply forged forward past it, and stale tip_finalize debris. */
+static bool put_torn_fault_rows(sqlite3 *db)
 {
-    int failures = 0;
-    sqlite3 *db = NULL;
-    if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
-    RF_CHECK("torn: schema", build_schema(db));
-    RF_CHECK("torn: proven authority", stamp_proven_authority(db, A + 1));
-
-    bool built = true;
-    /* A+1..A+3 fully consistent and finalized. */
-    for (int32_t h = A + 1; h <= A + 3; h++)
-        built = built && put_consistent_height(db, h);
-
-    /* script_validate fails at A+4; the other logs are ok=1 there, so the
-     * MIN over logs caps the prefix at A+3. */
     uint8_t h4[32]; synth_hash(h4, A + 4, 0);
-    built = built
-        && put_log_row(db, "validate_headers_log", "hash", A + 4, 1, h4, NULL)
+    return put_log_row(db, "validate_headers_log", "hash", A + 4, 1, h4, NULL)
         && put_log_row(db, "script_validate_log", "block_hash", A + 4, 0, NULL,
                        "not_script_valid")
         && put_log_row(db, "body_persist_log", NULL, A + 4, 1, NULL, NULL)
@@ -618,18 +667,38 @@ static int case_torn(void)
         /* stale ok=0 debris above A+3 must NOT raise served_floor. */
         && put_log_row(db, "tip_finalize_log", NULL, A + 4, 0, NULL, "stale")
         && put_log_row(db, "tip_finalize_log", NULL, A + 5, 0, NULL, "stale");
+}
+
+/* Cursors: validate_headers far ahead, utxo_apply ahead, tip_finalize lagging
+ * at the failure. */
+static bool set_torn_cursors(sqlite3 *db)
+{
+    return set_cursor(db, "validate_headers", A + 7)
+        && set_cursor(db, "body_fetch", A + 7)
+        && set_cursor(db, "body_persist", A + 7)
+        && set_cursor(db, "proof_validate", A + 7)
+        && set_cursor(db, "script_validate", A + 5)
+        && set_cursor(db, "utxo_apply", A + 7)
+        && set_cursor(db, "tip_finalize", A + 5);
+}
+
+static int case_torn(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    if (sqlite3_open(":memory:", &db) != SQLITE_OK) { return 1; }
+    RF_CHECK("torn: schema", build_schema(db));
+    RF_CHECK("torn: proven authority", stamp_proven_authority(db, A + 1));
+
+    /* A+1..A+3 fully consistent and finalized. */
+    bool built = put_consistent_range(db, A + 1, A + 3);
+    /* script_validate fails at A+4; the other logs are ok=1 there, so the
+     * MIN over logs caps the prefix at A+3. */
+    built = built && put_torn_fault_rows(db);
     RF_CHECK("torn: rows built", built);
     RF_CHECK("torn: vh hash", true);
 
-    /* Cursors: validate_headers far ahead, utxo_apply ahead, tip_finalize
-     * lagging at the failure. */
-    bool cur = set_cursor(db, "validate_headers", A + 7)
-            && set_cursor(db, "body_fetch", A + 7)
-            && set_cursor(db, "body_persist", A + 7)
-            && set_cursor(db, "proof_validate", A + 7)
-            && set_cursor(db, "script_validate", A + 5)
-            && set_cursor(db, "utxo_apply", A + 7)
-            && set_cursor(db, "tip_finalize", A + 5);
+    bool cur = set_torn_cursors(db);
     RF_CHECK("torn: cursors", cur);
 
     /* coins_applied ahead of H* (the live "coins consistent, flag drift"
@@ -1144,6 +1213,100 @@ static const struct json_value *dumped_cursor(const struct json_value *out,
     return NULL;
 }
 
+/* Dump checks for the run-ahead fixture: the verified height does not move,
+ * the run-ahead cursor is marked unproven, the level cursor is marked within
+ * the verified height, and the wire text carries both markings. */
+static int runahead_check_dump(struct json_value *out, int64_t hstar)
+{
+    int failures = 0;
+    RF_CHECK("runahead: cursor moves did not move hstar",
+             json_get_int(json_get(out, "hstar")) == hstar);
+
+    const struct json_value *ahead = dumped_cursor(out, "body_fetch");
+    RF_CHECK("runahead: run-ahead cursor is serialized", ahead != NULL);
+    if (ahead) {
+        RF_CHECK("runahead: run-ahead cursor marked above hstar",
+                 json_get_bool(json_get(ahead, "above_hstar")));
+        RF_CHECK("runahead: run-ahead depth is 7 heights",
+                 json_get_int(json_get(ahead, "heights_above_hstar"))
+                     == 7);
+        RF_CHECK("runahead: run-ahead consumed height is hstar+7",
+                 json_get_int(json_get(ahead, "consumed_height"))
+                     == hstar + 7);
+        RF_CHECK("runahead: run-ahead trust says it may be wrong",
+                 strcmp(json_get_str(json_get(ahead, "trust")),
+                        "unproven_may_be_wrong") == 0);
+    }
+
+    const struct json_value *level = dumped_cursor(out, "header_admit");
+    RF_CHECK("runahead: level cursor is serialized", level != NULL);
+    if (level) {
+        RF_CHECK("runahead: level cursor NOT marked above hstar",
+                 !json_get_bool(json_get(level, "above_hstar")));
+        RF_CHECK("runahead: level cursor depth is zero",
+                 json_get_int(json_get(level, "heights_above_hstar"))
+                     == 0);
+        RF_CHECK("runahead: level cursor consumed height is hstar",
+                 json_get_int(json_get(level, "consumed_height"))
+                     == hstar);
+        RF_CHECK("runahead: level cursor trust is within-verified",
+                 strcmp(json_get_str(json_get(level, "trust")),
+                        "within_verified_hstar") == 0);
+    }
+
+    RF_CHECK("runahead: exactly one cursor counted above hstar",
+             json_get_int(json_get(out,
+                 "stage_cursors_above_hstar_count")) == 1);
+    RF_CHECK("runahead: deepest run-ahead reported",
+             json_get_int(json_get(out,
+                 "stage_cursors_above_hstar_max_depth")) == 7);
+    RF_CHECK("runahead: note names hstar as the only proven height",
+             strstr(json_get_str(json_get(out,
+                        "stage_cursors_trust_note")),
+                    "only proven height") != NULL);
+
+    /* Pin the wire text via json_write, the dumpstate reply's writer. */
+    static char wire[32768];
+    size_t need = json_write(out, wire, sizeof(wire));
+    RF_CHECK("runahead: serialized dump not truncated",
+             need < sizeof(wire));
+    RF_CHECK("runahead: wire carries the unproven marking",
+             strstr(wire, "\"trust\":\"unproven_may_be_wrong\"") != NULL);
+    RF_CHECK("runahead: wire carries the run-ahead depth",
+             strstr(wire, "\"heights_above_hstar\":7") != NULL);
+    RF_CHECK("runahead: wire carries the within-verified marking",
+             strstr(wire, "\"trust\":\"within_verified_hstar\"") != NULL);
+    RF_CHECK("runahead: wire carries the run-ahead count",
+             strstr(wire, "\"stage_cursors_above_hstar_count\":1") != NULL);
+    return failures;
+}
+
+/* Five cursors run ahead together while the verified height does not move;
+ * the aggregate must count all five and leave the sixth cursor unmarked. */
+static int runahead_check_five(int64_t hstar)
+{
+    int failures = 0;
+    struct json_value five;
+    json_init(&five);
+    bool dumped_five = reducer_frontier_dump_state_json(&five, NULL);
+    RF_CHECK("runahead-five: returns true", dumped_five);
+    if (dumped_five) {
+        RF_CHECK("runahead-five: verified height did not move",
+                 json_get_int(json_get(&five, "hstar")) == hstar);
+        RF_CHECK("runahead-five: five cursors counted above hstar",
+                 json_get_int(json_get(&five,
+                     "stage_cursors_above_hstar_count")) == 5);
+        RF_CHECK("runahead-five: deepest run-ahead is 7 heights",
+                 json_get_int(json_get(&five,
+                     "stage_cursors_above_hstar_max_depth")) == 7);
+        const struct json_value *utxo = dumped_cursor(&five, "utxo_apply");
+        RF_CHECK("runahead-five: the cursor left behind is not marked",
+                 utxo && !json_get_bool(json_get(utxo, "above_hstar")));
+    }
+    json_free(&five);
+    return failures;
+}
+
 /* Run-ahead visibility: a stage cursor above H* has consumed heights nothing
  * verified, and the dump must report it as unproven, while a cursor level
  * with H* is not. header_admit and body_fetch sit outside the H*-bearing log
@@ -1168,9 +1331,7 @@ static int case_dump_marks_run_ahead_stage_cursors(void)
     RF_CHECK("runahead: proven authority", db && stamp_proven_authority(db, A + 1));
 
     const int32_t tip = A + 3;
-    bool built = db != NULL;
-    for (int32_t h = A + 1; h <= tip; h++)
-        built = built && put_consistent_height(db, h);
+    bool built = db != NULL && put_consistent_range(db, A + 1, tip);
     RF_CHECK("runahead: rows built", built);
     RF_CHECK("runahead: log cursors", db && set_all_cursors(db, tip + 1));
     RF_CHECK("runahead: header_admit cursor",
@@ -1193,97 +1354,15 @@ static int case_dump_marks_run_ahead_stage_cursors(void)
     json_init(&out);
     bool dumped = reducer_frontier_dump_state_json(&out, NULL);
     RF_CHECK("runahead: returns true", dumped);
-    if (dumped) {
-        RF_CHECK("runahead: cursor moves did not move hstar",
-                 json_get_int(json_get(&out, "hstar")) == hstar);
-
-        const struct json_value *ahead = dumped_cursor(&out, "body_fetch");
-        RF_CHECK("runahead: run-ahead cursor is serialized", ahead != NULL);
-        if (ahead) {
-            RF_CHECK("runahead: run-ahead cursor marked above hstar",
-                     json_get_bool(json_get(ahead, "above_hstar")));
-            RF_CHECK("runahead: run-ahead depth is 7 heights",
-                     json_get_int(json_get(ahead, "heights_above_hstar"))
-                         == 7);
-            RF_CHECK("runahead: run-ahead consumed height is hstar+7",
-                     json_get_int(json_get(ahead, "consumed_height"))
-                         == hstar + 7);
-            RF_CHECK("runahead: run-ahead trust says it may be wrong",
-                     strcmp(json_get_str(json_get(ahead, "trust")),
-                            "unproven_may_be_wrong") == 0);
-        }
-
-        const struct json_value *level = dumped_cursor(&out, "header_admit");
-        RF_CHECK("runahead: level cursor is serialized", level != NULL);
-        if (level) {
-            RF_CHECK("runahead: level cursor NOT marked above hstar",
-                     !json_get_bool(json_get(level, "above_hstar")));
-            RF_CHECK("runahead: level cursor depth is zero",
-                     json_get_int(json_get(level, "heights_above_hstar"))
-                         == 0);
-            RF_CHECK("runahead: level cursor consumed height is hstar",
-                     json_get_int(json_get(level, "consumed_height"))
-                         == hstar);
-            RF_CHECK("runahead: level cursor trust is within-verified",
-                     strcmp(json_get_str(json_get(level, "trust")),
-                            "within_verified_hstar") == 0);
-        }
-
-        RF_CHECK("runahead: exactly one cursor counted above hstar",
-                 json_get_int(json_get(&out,
-                     "stage_cursors_above_hstar_count")) == 1);
-        RF_CHECK("runahead: deepest run-ahead reported",
-                 json_get_int(json_get(&out,
-                     "stage_cursors_above_hstar_max_depth")) == 7);
-        RF_CHECK("runahead: note names hstar as the only proven height",
-                 strstr(json_get_str(json_get(&out,
-                            "stage_cursors_trust_note")),
-                        "only proven height") != NULL);
-
-        /* Pin the wire text via json_write, the dumpstate reply's writer. */
-        static char wire[32768];
-        size_t need = json_write(&out, wire, sizeof(wire));
-        RF_CHECK("runahead: serialized dump not truncated",
-                 need < sizeof(wire));
-        RF_CHECK("runahead: wire carries the unproven marking",
-                 strstr(wire, "\"trust\":\"unproven_may_be_wrong\"") != NULL);
-        RF_CHECK("runahead: wire carries the run-ahead depth",
-                 strstr(wire, "\"heights_above_hstar\":7") != NULL);
-        RF_CHECK("runahead: wire carries the within-verified marking",
-                 strstr(wire, "\"trust\":\"within_verified_hstar\"") != NULL);
-        RF_CHECK("runahead: wire carries the run-ahead count",
-                 strstr(wire, "\"stage_cursors_above_hstar_count\":1") != NULL);
-    }
+    if (dumped)
+        failures += runahead_check_dump(&out, hstar);
     json_free(&out);
 
     /* Five cursors run ahead together while the verified height does not
      * move; the aggregate must count all five. */
-    bool ran_ahead = db != NULL
-        && set_cursor(db, "validate_headers", hstar + 8)
-        && set_cursor(db, "body_fetch", hstar + 8)
-        && set_cursor(db, "body_persist", hstar + 8)
-        && set_cursor(db, "script_validate", hstar + 8)
-        && set_cursor(db, "proof_validate", hstar + 8);
+    bool ran_ahead = db != NULL && set_runahead_five_cursors(db, hstar + 8);
     RF_CHECK("runahead: five cursors run ahead", ran_ahead);
-
-    struct json_value five;
-    json_init(&five);
-    bool dumped_five = reducer_frontier_dump_state_json(&five, NULL);
-    RF_CHECK("runahead-five: returns true", dumped_five);
-    if (dumped_five) {
-        RF_CHECK("runahead-five: verified height did not move",
-                 json_get_int(json_get(&five, "hstar")) == hstar);
-        RF_CHECK("runahead-five: five cursors counted above hstar",
-                 json_get_int(json_get(&five,
-                     "stage_cursors_above_hstar_count")) == 5);
-        RF_CHECK("runahead-five: deepest run-ahead is 7 heights",
-                 json_get_int(json_get(&five,
-                     "stage_cursors_above_hstar_max_depth")) == 7);
-        const struct json_value *utxo = dumped_cursor(&five, "utxo_apply");
-        RF_CHECK("runahead-five: the cursor left behind is not marked",
-                 utxo && !json_get_bool(json_get(utxo, "above_hstar")));
-    }
-    json_free(&five);
+    failures += runahead_check_five(hstar);
 
     progress_store_close();
     test_cleanup_tmpdir(dir);
@@ -1510,6 +1589,22 @@ static int case_dump_reports_hstar_hash_split(void)
     return failures;
 }
 
+/* Tip-finalize edge fixture: consistent heights through A+2, then one full
+ * ok=1 row set at `h` across every upstream log. */
+static bool put_tipfin_edge_rows(sqlite3 *db, int32_t h)
+{
+    bool built = put_consistent_height(db, A + 1)
+              && put_consistent_height(db, A + 2);
+    uint8_t hh[32];
+    synth_hash(hh, h, 0);
+    return built
+        && put_log_row(db, "validate_headers_log", "hash", h, 1, hh, NULL)
+        && put_log_row(db, "script_validate_log", "block_hash", h, 1, hh, "ok")
+        && put_log_row(db, "body_persist_log", NULL, h, 1, NULL, NULL)
+        && put_log_row(db, "proof_validate_log", NULL, h, 1, NULL, NULL)
+        && put_log_row(db, "utxo_apply_log", NULL, h, 1, NULL, NULL);
+}
+
 static int case_dump_ignores_tip_finalize_pending_edge(void)
 {
     int failures = 0;
@@ -1530,26 +1625,10 @@ static int case_dump_ignores_tip_finalize_pending_edge(void)
              db && stamp_proven_authority(db, A + 4));
 
     const int32_t pending_h = A + 3;
-    bool built = put_consistent_height(db, A + 1)
-              && put_consistent_height(db, A + 2);
-    uint8_t hh[32];
-    synth_hash(hh, pending_h, 0);
-    built = built
-        && put_log_row(db, "validate_headers_log", "hash", pending_h, 1,
-                       hh, NULL)
-        && put_log_row(db, "script_validate_log", "block_hash", pending_h, 1,
-                       hh, "ok")
-        && put_log_row(db, "body_persist_log", NULL, pending_h, 1, NULL, NULL)
-        && put_log_row(db, "proof_validate_log", NULL, pending_h, 1, NULL, NULL)
-        && put_log_row(db, "utxo_apply_log", NULL, pending_h, 1, NULL, NULL);
+    bool built = put_tipfin_edge_rows(db, pending_h);
     RF_CHECK("dump-tipfin-edge: rows built", built);
     RF_CHECK("dump-tipfin-edge: upstream cursors",
-             set_cursor(db, "validate_headers", pending_h + 1) &&
-             set_cursor(db, "body_fetch", pending_h + 1) &&
-             set_cursor(db, "body_persist", pending_h + 1) &&
-             set_cursor(db, "script_validate", pending_h + 1) &&
-             set_cursor(db, "proof_validate", pending_h + 1) &&
-             set_cursor(db, "utxo_apply", pending_h + 1));
+             set_tipfin_upstream_cursors(db, pending_h + 1));
     RF_CHECK("dump-tipfin-edge: tip_finalize cursor",
              set_cursor(db, "tip_finalize", pending_h));
 
@@ -1615,26 +1694,10 @@ static int case_dump_reports_tip_finalize_real_hole(void)
              db && stamp_proven_authority(db, A + 4));
 
     const int32_t hole_h = A + 3;
-    bool built = put_consistent_height(db, A + 1)
-              && put_consistent_height(db, A + 2);
-    uint8_t hh[32];
-    synth_hash(hh, hole_h, 0);
-    built = built
-        && put_log_row(db, "validate_headers_log", "hash", hole_h, 1,
-                       hh, NULL)
-        && put_log_row(db, "script_validate_log", "block_hash", hole_h, 1,
-                       hh, "ok")
-        && put_log_row(db, "body_persist_log", NULL, hole_h, 1, NULL, NULL)
-        && put_log_row(db, "proof_validate_log", NULL, hole_h, 1, NULL, NULL)
-        && put_log_row(db, "utxo_apply_log", NULL, hole_h, 1, NULL, NULL);
+    bool built = put_tipfin_edge_rows(db, hole_h);
     RF_CHECK("dump-tipfin-hole: rows built", built);
     RF_CHECK("dump-tipfin-hole: upstream cursors",
-             set_cursor(db, "validate_headers", hole_h + 1) &&
-             set_cursor(db, "body_fetch", hole_h + 1) &&
-             set_cursor(db, "body_persist", hole_h + 1) &&
-             set_cursor(db, "script_validate", hole_h + 1) &&
-             set_cursor(db, "proof_validate", hole_h + 1) &&
-             set_cursor(db, "utxo_apply", hole_h + 1));
+             set_tipfin_upstream_cursors(db, hole_h + 1));
     RF_CHECK("dump-tipfin-hole: tip_finalize cursor beyond hole",
              set_cursor(db, "tip_finalize", hole_h + 1));
 
@@ -1972,16 +2035,12 @@ static int case_sovereign_base_ignores_borrowed_higher_stamp(void)
  * stage_repair_read_active_block_checked records when a HAVE_DATA body cannot
  * be read, and the clear-on-successful-read path. The end-to-end refetch
  * chain is in test_have_data_unreadable.c. */
-static int case_body_read_repair_note(void)
+/* Quarantine: a note below the bound records no blocker, the bound raises one
+ * typed TRANSIENT blocker, and a matching clear retires both. */
+static int body_note_check_quarantine(void)
 {
     int failures = 0;
-    blocker_module_init();
-    blocker_reset_for_testing();
-    blocker_set_rate_limit_ms_for_testing(0); /* re-sets always replace */
-    reducer_frontier_body_read_note_reset_for_testing();
     struct uint256 hash_a = {{1}};
-    struct uint256 hash_low = {{2}};
-    struct uint256 hash_high = {{3}};
 
     RF_CHECK("body_read_note: inactive at start",
              !reducer_frontier_body_read_note_active() &&
@@ -2033,9 +2092,17 @@ static int case_body_read_repair_note(void)
     RF_CHECK("body_read_note: matching clear retires note + blocker",
              !reducer_frontier_body_read_note_active() &&
              !blocker_exists("reducer_frontier.body_read_torn"));
+    return failures;
+}
 
-    /* A lower failing height supersedes and restarts the count; a higher
-     * one never displaces a lower pending one. */
+/* A lower failing height supersedes and restarts the count; a higher one never
+ * displaces a lower pending one. A clear for a stale identity is rejected. */
+static int body_note_check_same_height_reorg(void)
+{
+    int failures = 0;
+    struct uint256 hash_low = {{2}};
+    struct uint256 hash_high = {{3}};
+
     reducer_frontier_body_read_note_record(
         3100000, 7, 42, REDUCER_FRONTIER_BODY_READ_WRONG, &hash_low);
     RF_CHECK("body_read_note: fresh lower note counts from 1",
@@ -2069,15 +2136,27 @@ static int case_body_read_repair_note(void)
         (void)reducer_frontier_body_read_note_clear_if(&wrong_note);
     RF_CHECK("body_read_note: clear_at(non-noted height) is a no-op",
              reducer_frontier_body_read_note_height() == 3100000);
+    return failures;
+}
 
+/* True when the noted record was published by writer `w`: its file, position
+ * and reason, and one of the two hashes it writes. */
+static bool body_note_from_writer(
+    const struct reducer_frontier_body_read_note *note,
+    const struct body_note_writer_args *w)
+{
+    return note->file == w->file && note->pos == w->pos &&
+           note->reason == w->reason &&
+           (uint256_eq(&note->block_hash, &w->hashes[0]) ||
+            uint256_eq(&note->block_hash, &w->hashes[1]));
+}
+
+/* Two writers race on the note; the published record must come whole from
+ * exactly one of them. */
+static int body_note_check_concurrent_writers(struct body_note_writer_args *wa)
+{
+    int failures = 0;
     reducer_frontier_body_read_note_reset_for_testing();
-    struct body_note_writer_args wa = {
-        .hashes = {{{0x11}}, {{0x12}}},
-        .file = 11,
-        .pos = 111,
-        .reason = REDUCER_FRONTIER_BODY_READ_DISK,
-        .alternate_hashes = true,
-    };
     struct body_note_writer_args wb = {
         .hashes = {{{0x21}}, {{0x22}}},
         .file = 22,
@@ -2088,7 +2167,7 @@ static int case_body_read_repair_note(void)
     pthread_t ta;
     pthread_t tb;
     atomic_store(&g_body_note_threads_go, false);
-    bool ta_started = pthread_create(&ta, NULL, body_note_writer, &wa) == 0;
+    bool ta_started = pthread_create(&ta, NULL, body_note_writer, wa) == 0;
     bool tb_started = pthread_create(&tb, NULL, body_note_writer, &wb) == 0;
     atomic_store(&g_body_note_threads_go, true);
     if (ta_started)
@@ -2099,19 +2178,19 @@ static int case_body_read_repair_note(void)
     struct reducer_frontier_body_read_note concurrent_note;
     bool coherent = threads &&
         reducer_frontier_body_read_note_snapshot(&concurrent_note);
-    bool from_a = concurrent_note.file == wa.file &&
-        concurrent_note.pos == wa.pos && concurrent_note.reason == wa.reason &&
-        (uint256_eq(&concurrent_note.block_hash, &wa.hashes[0]) ||
-         uint256_eq(&concurrent_note.block_hash, &wa.hashes[1]));
-    bool from_b = concurrent_note.file == wb.file &&
-        concurrent_note.pos == wb.pos && concurrent_note.reason == wb.reason &&
-        (uint256_eq(&concurrent_note.block_hash, &wb.hashes[0]) ||
-         uint256_eq(&concurrent_note.block_hash, &wb.hashes[1]));
+    bool from_a = body_note_from_writer(&concurrent_note, wa);
+    bool from_b = body_note_from_writer(&concurrent_note, &wb);
     RF_CHECK("body_read_note: concurrent writers publish one coherent record",
              coherent && (from_a || from_b));
+    return failures;
+}
 
+/* A set racing a clear keeps the blocker generation coherent with the note. */
+static int body_note_check_concurrent_clear(const struct body_note_writer_args *wa)
+{
+    int failures = 0;
     reducer_frontier_body_read_note_reset_for_testing();
-    struct body_note_writer_args wc = wa;
+    struct body_note_writer_args wc = *wa;
     wc.alternate_hashes = false;
     reducer_frontier_body_read_note_record(
         42, wc.file, wc.pos, wc.reason, &wc.hashes[0]);
@@ -2145,6 +2224,28 @@ static int case_body_read_repair_note(void)
                ((final_note.count >=
                  REDUCER_FRONTIER_BODY_READ_QUARANTINE_MAX) ==
                 final_blocker))));
+    return failures;
+}
+
+static int case_body_read_repair_note(void)
+{
+    int failures = 0;
+    blocker_module_init();
+    blocker_reset_for_testing();
+    blocker_set_rate_limit_ms_for_testing(0); /* re-sets always replace */
+    reducer_frontier_body_read_note_reset_for_testing();
+    struct body_note_writer_args wa = {
+        .hashes = {{{0x11}}, {{0x12}}},
+        .file = 11,
+        .pos = 111,
+        .reason = REDUCER_FRONTIER_BODY_READ_DISK,
+        .alternate_hashes = true,
+    };
+
+    failures += body_note_check_quarantine();
+    failures += body_note_check_same_height_reorg();
+    failures += body_note_check_concurrent_writers(&wa);
+    failures += body_note_check_concurrent_clear(&wa);
 
     reducer_frontier_body_read_note_reset_for_testing();
     blocker_reset_for_testing();
@@ -2210,16 +2311,11 @@ static int case_derived_stage_cursor_equivalence(void)
         RF_CHECK("derived-equiv: consistent proven authority",
                  stamp_proven_authority(db, A + 1));
         const int32_t tip = A + 5;
-        bool built = true;
-        for (int32_t h = A + 1; h <= tip; h++)
-            built = built && put_consistent_height(db, h);
+        bool built = put_consistent_range(db, A + 1, tip);
         RF_CHECK("derived-equiv: consistent rows", built);
         /* Upstream cursors name the next height (tip+1); tip_finalize uses the
          * served-tip frame (tip). */
-        bool cur = true;
-        for (size_t i = 0; i < n_up; i++)
-            cur = cur && set_cursor(db, upstream[i], tip + 1);
-        cur = cur && set_cursor(db, "tip_finalize", tip);
+        bool cur = set_derived_cursors(db, upstream, n_up, tip + 1, tip);
         RF_CHECK("derived-equiv: consistent cursors", cur);
 
         for (size_t i = 0; i < n_up; i++) {
@@ -2244,14 +2340,9 @@ static int case_derived_stage_cursor_equivalence(void)
         RF_CHECK("derived-equiv: torn proven authority",
                  stamp_proven_authority(db, A + 1));
         const int32_t tip = A + 5;
-        bool built = true;
-        for (int32_t h = A + 1; h <= tip; h++)
-            built = built && put_consistent_height(db, h);
+        bool built = put_consistent_range(db, A + 1, tip);
         RF_CHECK("derived-equiv: torn rows", built);
-        bool cur = true;
-        for (size_t i = 0; i < n_up; i++)
-            cur = cur && set_cursor(db, upstream[i], tip + 1);
-        cur = cur && set_cursor(db, "tip_finalize", tip);
+        bool cur = set_derived_cursors(db, upstream, n_up, tip + 1, tip);
         RF_CHECK("derived-equiv: torn cursors", cur);
         /* Delete script_validate_log's row at A+3 so its prefix stops at A+2
          * while its cursor stays tip+1. */
@@ -2292,10 +2383,7 @@ static int case_derived_stage_cursor_equivalence(void)
                  put_int64_le_meta(db, REDUCER_TRUSTED_BASE_HEIGHT_KEY, base));
         /* No log rows above `base`; force cursors as
          * consensus_state_snapshot_install_activate does. */
-        bool cur = true;
-        for (size_t i = 0; i < n_up; i++)
-            cur = cur && set_cursor(db, upstream[i], base + 1);
-        cur = cur && set_cursor(db, "tip_finalize", base);
+        bool cur = set_derived_cursors(db, upstream, n_up, base + 1, base);
         RF_CHECK("derived-equiv: install cursors", cur);
 
         for (size_t i = 0; i < n_up; i++) {
@@ -2335,14 +2423,9 @@ static int case_derived_stage_cursor_equivalence(void)
         RF_CHECK("derived-heal: proven authority",
                  stamp_proven_authority(db, A + 1));
         const int32_t tip = A + 5;
-        bool built = true;
-        for (int32_t h = A + 1; h <= tip; h++)
-            built = built && put_consistent_height(db, h);
+        bool built = put_consistent_range(db, A + 1, tip);
         RF_CHECK("derived-heal: rows", built);
-        bool cur = true;
-        for (size_t i = 0; i < n_up; i++)
-            cur = cur && set_cursor(db, upstream[i], tip + 1);
-        cur = cur && set_cursor(db, "tip_finalize", tip);
+        bool cur = set_derived_cursors(db, upstream, n_up, tip + 1, tip);
         RF_CHECK("derived-heal: cursors", cur);
         /* An ok=0 validate verdict below the static cursor. */
         char fail_sql[160];
