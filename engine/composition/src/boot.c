@@ -2078,6 +2078,7 @@ static void boot_step_repair_block_index(struct app_context *ctx,
     /* Log block index memory usage */
     boot_block_index_memory_log_loaded(g_state.map_block_index.size,
                                        g_state.map_block_index.capacity);
+    boot_block_index_log_shape(&g_state.map_block_index);
     /* Bulk height repair: fix scrambled nHeight values from LDB import.
      * This must run AFTER block index is loaded but BEFORE header sync.
      * Without this, header processing fixes heights 160-at-a-time which

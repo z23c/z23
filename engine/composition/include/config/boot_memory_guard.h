@@ -24,6 +24,10 @@ bool boot_block_index_memory_should_warn(size_t estimate_bytes,
 void boot_block_index_memory_warn(int64_t persisted_height);
 void boot_block_index_memory_log_loaded(size_t entry_count,
                                         size_t map_capacity);
+/* One INFO line at flat load: distinct Sapling root count and the maximum
+ * nChainWork bit length (log only). */
+struct block_map;
+void boot_block_index_log_shape(const struct block_map *m);
 bool boot_reindex_cache_should_flush(int height, size_t entry_count,
                                      size_t memory_bytes);
 

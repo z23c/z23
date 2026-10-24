@@ -271,6 +271,7 @@ test_group	test_block_deserialize_txcount_amplification	59	17
 test_group	test_block_index_integrity	1260	50
 test_group	test_block_index_loader	10804	46
 test_group	test_block_index_node_db_topup	3600	20
+test_group	test_block_index_parity_dump	3000	17
 test_group	test_block_index_projection	116083	36
 test_group	test_block_index_rebuild	8636	44
 test_group	test_block_index_sidecar_port	353	17
