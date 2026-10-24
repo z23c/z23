@@ -78,6 +78,25 @@ static bool read_fixed_text(struct zcl_codec_reader *rd, char *out,
     return true;
 }
 
+static bool write_receipt_fields(struct zcl_codec_writer *w,
+                                 const struct zcl_det_receipt *r)
+{
+    bool ok = zcl_codec_write_bytes(w, k_magic, sizeof(k_magic));
+    ok = ok && zcl_codec_write_u16le(w, r->version);
+    ok = ok && zcl_codec_write_bytes(w, r->commit, sizeof(r->commit));
+    ok = ok && write_fixed_text(w, r->group, ZCL_DET_GROUP_MAX);
+    ok = ok && zcl_codec_write_bytes(w, r->toolchain, sizeof(r->toolchain));
+    ok = ok && zcl_codec_write_bytes(w, r->env_class, sizeof(r->env_class));
+    ok = ok && zcl_codec_write_u8(w, r->verdict);
+    ok = ok && zcl_codec_write_u8(w, r->reason);
+    ok = ok && zcl_codec_write_u16le(w, r->perturbations);
+    ok = ok && zcl_codec_write_u32le(w, r->split_mask);
+    ok = ok && zcl_codec_write_u32le(w, r->check_count);
+    ok = ok && zcl_codec_write_bytes(w, r->vector, sizeof(r->vector));
+    ok = ok && zcl_codec_write_bytes(w, r->producer, sizeof(r->producer));
+    return ok;
+}
+
 bool zcl_det_receipt_encode(const struct zcl_det_receipt *r, uint8_t *out,
                             size_t out_cap, size_t *out_len)
 {
@@ -89,19 +108,7 @@ bool zcl_det_receipt_encode(const struct zcl_det_receipt *r, uint8_t *out,
     struct zcl_codec_writer w;
     zcl_codec_writer_init(&w, out, ZCL_DET_RECEIPT_SIZE);
 
-    bool ok = zcl_codec_write_bytes(&w, k_magic, sizeof(k_magic));
-    ok = ok && zcl_codec_write_u16le(&w, r->version);
-    ok = ok && zcl_codec_write_bytes(&w, r->commit, sizeof(r->commit));
-    ok = ok && write_fixed_text(&w, r->group, ZCL_DET_GROUP_MAX);
-    ok = ok && zcl_codec_write_bytes(&w, r->toolchain, sizeof(r->toolchain));
-    ok = ok && zcl_codec_write_bytes(&w, r->env_class, sizeof(r->env_class));
-    ok = ok && zcl_codec_write_u8(&w, r->verdict);
-    ok = ok && zcl_codec_write_u8(&w, r->reason);
-    ok = ok && zcl_codec_write_u16le(&w, r->perturbations);
-    ok = ok && zcl_codec_write_u32le(&w, r->split_mask);
-    ok = ok && zcl_codec_write_u32le(&w, r->check_count);
-    ok = ok && zcl_codec_write_bytes(&w, r->vector, sizeof(r->vector));
-    ok = ok && zcl_codec_write_bytes(&w, r->producer, sizeof(r->producer));
+    bool ok = write_receipt_fields(&w, r);
     if (!ok) LOG_FAIL("determinism", "receipt encode: %s",
                       zcl_codec_error_string(w.error));
 
@@ -113,6 +120,59 @@ bool zcl_det_receipt_encode(const struct zcl_det_receipt *r, uint8_t *out,
                  "receipt encoded %zu bytes, the pinned layout is %u", written,
                  ZCL_DET_RECEIPT_SIZE);
     if (out_len) *out_len = written;
+    return true;
+}
+
+static bool read_receipt_fields(struct zcl_codec_reader *rd,
+                                struct zcl_det_receipt *r)
+{
+    bool ok = zcl_codec_read_bytes(rd, r->commit, sizeof(r->commit));
+    ok = ok && read_fixed_text(rd, r->group, ZCL_DET_GROUP_MAX);
+    ok = ok && zcl_codec_read_bytes(rd, r->toolchain, sizeof(r->toolchain));
+    ok = ok && zcl_codec_read_bytes(rd, r->env_class, sizeof(r->env_class));
+    ok = ok && zcl_codec_read_u8(rd, &r->verdict);
+    ok = ok && zcl_codec_read_u8(rd, &r->reason);
+    ok = ok && zcl_codec_read_u16le(rd, &r->perturbations);
+    ok = ok && zcl_codec_read_u32le(rd, &r->split_mask);
+    ok = ok && zcl_codec_read_u32le(rd, &r->check_count);
+    ok = ok && zcl_codec_read_bytes(rd, r->vector, sizeof(r->vector));
+    ok = ok && zcl_codec_read_bytes(rd, r->producer, sizeof(r->producer));
+    return ok;
+}
+
+static bool receipt_verdict_valid(const struct zcl_det_receipt *r)
+{
+    if (r->verdict < ZCL_DET_CLASS_DETERMINISTIC ||
+        r->verdict > ZCL_DET_CLASS_TIMING_SENSITIVE)
+        LOG_FAIL("determinism", "receipt verdict %u out of range",
+                 (unsigned)r->verdict);
+    if (r->reason > ZCL_DET_UNKNOWN_PARTIAL)
+        LOG_FAIL("determinism", "receipt reason %u out of range",
+                 (unsigned)r->reason);
+    /* A measured verdict may not carry an unknown-reason, and an UNKNOWN
+     * verdict must carry one. Otherwise the record could say two things. */
+    if (r->verdict == ZCL_DET_CLASS_UNKNOWN) {
+        if (r->reason == ZCL_DET_UNKNOWN_NONE)
+            LOG_FAIL("determinism", "UNKNOWN receipt with no reason");
+    } else if (r->reason != ZCL_DET_UNKNOWN_NONE) {
+        LOG_FAIL("determinism", "measured receipt carries an unknown-reason");
+    }
+    /* Exactly the two verdicts that mean "it varied" may name a splitting
+     * perturbation, and both MUST name one. A DETERMINISTIC or UNKNOWN
+     * receipt carrying a cause, or a varying receipt carrying none, is a
+     * record that says two things at once. */
+    const bool names_a_cause =
+        (r->verdict == ZCL_DET_CLASS_NONDETERMINISTIC ||
+         r->verdict == ZCL_DET_CLASS_TIMING_SENSITIVE);
+    if (!names_a_cause && r->split_mask != 0)
+        LOG_FAIL("determinism", "non-empty split mask on a %s receipt",
+                 zcl_det_class_name((enum zcl_det_class)r->verdict));
+    if (names_a_cause && r->split_mask == 0)
+        LOG_FAIL("determinism",
+                 "%s receipt names no perturbation; "
+                 "\"it varies\" is not a finding",
+                 zcl_det_class_name((enum zcl_det_class)r->verdict));
+
     return true;
 }
 
@@ -142,50 +202,11 @@ bool zcl_det_receipt_decode(const uint8_t *bytes, size_t len,
         LOG_FAIL("determinism", "receipt version %u, this build speaks %u",
                  (unsigned)r.version, ZCL_DET_RECEIPT_VERSION);
 
-    ok = zcl_codec_read_bytes(&rd, r.commit, sizeof(r.commit));
-    ok = ok && read_fixed_text(&rd, r.group, ZCL_DET_GROUP_MAX);
-    ok = ok && zcl_codec_read_bytes(&rd, r.toolchain, sizeof(r.toolchain));
-    ok = ok && zcl_codec_read_bytes(&rd, r.env_class, sizeof(r.env_class));
-    ok = ok && zcl_codec_read_u8(&rd, &r.verdict);
-    ok = ok && zcl_codec_read_u8(&rd, &r.reason);
-    ok = ok && zcl_codec_read_u16le(&rd, &r.perturbations);
-    ok = ok && zcl_codec_read_u32le(&rd, &r.split_mask);
-    ok = ok && zcl_codec_read_u32le(&rd, &r.check_count);
-    ok = ok && zcl_codec_read_bytes(&rd, r.vector, sizeof(r.vector));
-    ok = ok && zcl_codec_read_bytes(&rd, r.producer, sizeof(r.producer));
+    ok = read_receipt_fields(&rd, &r);
     if (!ok) LOG_FAIL("determinism", "receipt decode: %s",
                       zcl_codec_error_string(rd.error));
 
-    if (r.verdict < ZCL_DET_CLASS_DETERMINISTIC ||
-        r.verdict > ZCL_DET_CLASS_TIMING_SENSITIVE)
-        LOG_FAIL("determinism", "receipt verdict %u out of range",
-                 (unsigned)r.verdict);
-    if (r.reason > ZCL_DET_UNKNOWN_PARTIAL)
-        LOG_FAIL("determinism", "receipt reason %u out of range",
-                 (unsigned)r.reason);
-    /* A measured verdict may not carry an unknown-reason, and an UNKNOWN
-     * verdict must carry one. Otherwise the record could say two things. */
-    if (r.verdict == ZCL_DET_CLASS_UNKNOWN) {
-        if (r.reason == ZCL_DET_UNKNOWN_NONE)
-            LOG_FAIL("determinism", "UNKNOWN receipt with no reason");
-    } else if (r.reason != ZCL_DET_UNKNOWN_NONE) {
-        LOG_FAIL("determinism", "measured receipt carries an unknown-reason");
-    }
-    /* Exactly the two verdicts that mean "it varied" may name a splitting
-     * perturbation, and both MUST name one. A DETERMINISTIC or UNKNOWN
-     * receipt carrying a cause, or a varying receipt carrying none, is a
-     * record that says two things at once. */
-    const bool names_a_cause =
-        (r.verdict == ZCL_DET_CLASS_NONDETERMINISTIC ||
-         r.verdict == ZCL_DET_CLASS_TIMING_SENSITIVE);
-    if (!names_a_cause && r.split_mask != 0)
-        LOG_FAIL("determinism", "non-empty split mask on a %s receipt",
-                 zcl_det_class_name((enum zcl_det_class)r.verdict));
-    if (names_a_cause && r.split_mask == 0)
-        LOG_FAIL("determinism",
-                 "%s receipt names no perturbation; "
-                 "\"it varies\" is not a finding",
-                 zcl_det_class_name((enum zcl_det_class)r.verdict));
+    if (!receipt_verdict_valid(&r)) return false;
 
     if (!zcl_codec_reader_finish(&rd))
         LOG_FAIL("determinism", "trailing bytes after the receipt");
@@ -200,6 +221,37 @@ static void say(char *why, size_t cap, const char *msg)
     snprintf(why, cap, "%s", msg);
 }
 
+static bool receipt_identity_matches(
+    const struct zcl_det_receipt *claim, const struct zcl_det_receipt *fresh,
+    char *why, size_t why_cap)
+{
+    if (claim->version != fresh->version) {
+        say(why, why_cap, "receipt versions differ");
+        return false;
+    }
+    if (strncmp(claim->group, fresh->group, ZCL_DET_GROUP_MAX) != 0) {
+        say(why, why_cap, "the receipts are about different groups");
+        return false;
+    }
+    if (memcmp(claim->commit, fresh->commit, sizeof(claim->commit)) != 0) {
+        say(why, why_cap,
+            "the commit the claim names is not the commit that was run");
+        return false;
+    }
+    if (memcmp(claim->toolchain, fresh->toolchain,
+               sizeof(claim->toolchain)) != 0) {
+        say(why, why_cap,
+            "the toolchain the claim names is not available here");
+        return false;
+    }
+    if (memcmp(claim->env_class, fresh->env_class,
+               sizeof(claim->env_class)) != 0) {
+        say(why, why_cap, "the environment classes differ");
+        return false;
+    }
+    return true;
+}
+
 enum zcl_det_corroboration zcl_det_receipt_check(
     const struct zcl_det_receipt *claim, const struct zcl_det_receipt *fresh,
     char *why, size_t why_cap)
@@ -211,30 +263,8 @@ enum zcl_det_corroboration zcl_det_receipt_check(
         say(why, why_cap, "a receipt was absent");
         return ZCL_DET_INDETERMINATE;
     }
-    if (claim->version != fresh->version) {
-        say(why, why_cap, "receipt versions differ");
+    if (!receipt_identity_matches(claim, fresh, why, why_cap))
         return ZCL_DET_INDETERMINATE;
-    }
-    if (strncmp(claim->group, fresh->group, ZCL_DET_GROUP_MAX) != 0) {
-        say(why, why_cap, "the receipts are about different groups");
-        return ZCL_DET_INDETERMINATE;
-    }
-    if (memcmp(claim->commit, fresh->commit, sizeof(claim->commit)) != 0) {
-        say(why, why_cap,
-            "the commit the claim names is not the commit that was run");
-        return ZCL_DET_INDETERMINATE;
-    }
-    if (memcmp(claim->toolchain, fresh->toolchain,
-               sizeof(claim->toolchain)) != 0) {
-        say(why, why_cap,
-            "the toolchain the claim names is not available here");
-        return ZCL_DET_INDETERMINATE;
-    }
-    if (memcmp(claim->env_class, fresh->env_class,
-               sizeof(claim->env_class)) != 0) {
-        say(why, why_cap, "the environment classes differ");
-        return ZCL_DET_INDETERMINATE;
-    }
     if (claim->verdict == ZCL_DET_CLASS_UNKNOWN ||
         fresh->verdict == ZCL_DET_CLASS_UNKNOWN) {
         say(why, why_cap,
