@@ -274,6 +274,21 @@ static int case_metric_closed(void)
 
 /* ── 3. the sample floor comes before the effect ──────────────────────── */
 
+/* Record `rounds` copies of a control trial and a treatment trial, control
+ * first. Stops at the first refusal, so no later round is attempted. */
+static bool record_pair_rounds(struct science_register *reg,
+                               const uint8_t id[32], int rounds,
+                               struct science_receipt control,
+                               struct science_receipt treatment)
+{
+    for (int i = 0; i < rounds; i++) {
+        if (science_trial_record(reg, id, &control) != SCIENCE_OK ||
+            science_trial_record(reg, id, &treatment) != SCIENCE_OK)
+            return false;
+    }
+    return true;
+}
+
 static int case_sample_floor_first(void)
 {
     int failures = 0;
@@ -295,17 +310,12 @@ static int case_sample_floor_first(void)
     /* As lopsided as it gets: control never passes, treatment always does.
      * The effect is 1000 milli against a floor of 100. It is still UNTESTED,
      * because three trials an arm is three trials an arm. */
-    bool recorded = true;
-    for (int i = 0; i < 3; i++) {
-        struct science_receipt c = trial("alice", SCIENCE_ARM_CONTROL,
-                                         ENGINE_VERDICT_FAIL, 2, 100);
-        struct science_receipt t = trial("bob", SCIENCE_ARM_TREATMENT,
-                                         ENGINE_VERDICT_PASS, 2, 100);
-        recorded = recorded &&
-                   science_trial_record(reg, id, &c) == SCIENCE_OK &&
-                   science_trial_record(reg, id, &t) == SCIENCE_OK;
-    }
-    SC_CHECK("six trials record", recorded);
+    SC_CHECK("six trials record",
+             record_pair_rounds(reg, id, 3,
+                                trial("alice", SCIENCE_ARM_CONTROL,
+                                      ENGINE_VERDICT_FAIL, 2, 100),
+                                trial("bob", SCIENCE_ARM_TREATMENT,
+                                      ENGINE_VERDICT_PASS, 2, 100)));
 
     struct science_reading r;
     SC_CHECK("the claim reads", science_claim_read(reg, id, &r) == SCIENCE_OK);
@@ -318,16 +328,12 @@ static int case_sample_floor_first(void)
              r.effect_readable == false);
 
     /* Two more per arm reaches the floor and the verdict becomes readable. */
-    bool more = true;
-    for (int i = 0; i < 2; i++) {
-        struct science_receipt c = trial("alice", SCIENCE_ARM_CONTROL,
-                                         ENGINE_VERDICT_FAIL, 2, 100);
-        struct science_receipt t = trial("bob", SCIENCE_ARM_TREATMENT,
-                                         ENGINE_VERDICT_PASS, 2, 100);
-        more = more && science_trial_record(reg, id, &c) == SCIENCE_OK &&
-               science_trial_record(reg, id, &t) == SCIENCE_OK;
-    }
-    SC_CHECK("four more trials record", more);
+    SC_CHECK("four more trials record",
+             record_pair_rounds(reg, id, 2,
+                                trial("alice", SCIENCE_ARM_CONTROL,
+                                      ENGINE_VERDICT_FAIL, 2, 100),
+                                trial("bob", SCIENCE_ARM_TREATMENT,
+                                      ENGINE_VERDICT_PASS, 2, 100)));
     SC_CHECK("the claim reads again",
              science_claim_read(reg, id, &r) == SCIENCE_OK);
     SC_CHECK("at the sample floor the same evidence reads SUPPORTED",
@@ -375,6 +381,15 @@ static bool fill(struct science_register *reg, const uint8_t id[32],
     return true;
 }
 
+/* Record `n` trials into each arm: `control_passes` passing control runs and
+ * `treatment_passes` passing treatment runs. */
+static bool fill_both_arms(struct science_register *reg, const uint8_t id[32],
+                           int n, int control_passes, int treatment_passes)
+{
+    return fill(reg, id, SCIENCE_ARM_CONTROL, "alice", n, control_passes) &&
+           fill(reg, id, SCIENCE_ARM_TREATMENT, "bob", n, treatment_passes);
+}
+
 static int case_three_verdicts(void)
 {
     int failures = 0;
@@ -394,9 +409,7 @@ static int case_three_verdicts(void)
     uint8_t up_id[32];
     SC_CHECK("the up claim registers",
              science_claim_register(reg, &up, up_id) == SCIENCE_OK);
-    SC_CHECK("its trials record",
-             fill(reg, up_id, SCIENCE_ARM_CONTROL, "alice", 5, 1) &&
-                 fill(reg, up_id, SCIENCE_ARM_TREATMENT, "bob", 5, 4));
+    SC_CHECK("its trials record", fill_both_arms(reg, up_id, 5, 1, 4));
     SC_CHECK("a rise past the floor on an up claim is SUPPORTED",
              science_claim_read(reg, up_id, &r) == SCIENCE_OK &&
                  r.status == SCIENCE_SUPPORTED && r.effect_milli == 600);
@@ -409,9 +422,7 @@ static int case_three_verdicts(void)
     uint8_t bad_id[32];
     SC_CHECK("the refuted-to-be claim registers",
              science_claim_register(reg, &up_bad, bad_id) == SCIENCE_OK);
-    SC_CHECK("its trials record",
-             fill(reg, bad_id, SCIENCE_ARM_CONTROL, "alice", 5, 4) &&
-                 fill(reg, bad_id, SCIENCE_ARM_TREATMENT, "bob", 5, 1));
+    SC_CHECK("its trials record", fill_both_arms(reg, bad_id, 5, 4, 1));
     SC_CHECK("a fall past the floor on an up claim is REFUTED",
              science_claim_read(reg, bad_id, &r) == SCIENCE_OK &&
                  r.status == SCIENCE_REFUTED && r.effect_milli == -600);
@@ -431,18 +442,12 @@ static int case_three_verdicts(void)
     uint8_t down_id[32];
     SC_CHECK("the down claim registers",
              science_claim_register(reg, &down, down_id) == SCIENCE_OK);
-    bool ok = true;
-    for (int i = 0; i < 4; i++) {
-        struct science_receipt c = receipt("alice", SCIENCE_ARM_CONTROL,
-                                           ENGINE_VERDICT_PASS);
-        c.completion_tokens = 1000;
-        struct science_receipt t = receipt("bob", SCIENCE_ARM_TREATMENT,
-                                           ENGINE_VERDICT_PASS);
-        t.completion_tokens = 4000; /* the treatment made it WORSE */
-        ok = ok && science_trial_record(reg, down_id, &c) == SCIENCE_OK &&
-             science_trial_record(reg, down_id, &t) == SCIENCE_OK;
-    }
-    SC_CHECK("the down claim's trials record", ok);
+    SC_CHECK("the down claim's trials record",
+             record_pair_rounds(reg, down_id, 4,
+                                trial("alice", SCIENCE_ARM_CONTROL,
+                                      ENGINE_VERDICT_PASS, 3, 1000),
+                                trial("bob", SCIENCE_ARM_TREATMENT,
+                                      ENGINE_VERDICT_PASS, 3, 4000))); /* the treatment made it WORSE */
     SC_CHECK("a rise on a down claim is REFUTED",
              science_claim_read(reg, down_id, &r) == SCIENCE_OK &&
                  r.status == SCIENCE_REFUTED);
@@ -455,9 +460,7 @@ static int case_three_verdicts(void)
     uint8_t small_id[32];
     SC_CHECK("the small-effect claim registers",
              science_claim_register(reg, &small, small_id) == SCIENCE_OK);
-    SC_CHECK("its trials record",
-             fill(reg, small_id, SCIENCE_ARM_CONTROL, "alice", 5, 2) &&
-                 fill(reg, small_id, SCIENCE_ARM_TREATMENT, "bob", 5, 3));
+    SC_CHECK("its trials record", fill_both_arms(reg, small_id, 5, 2, 3));
     SC_CHECK("an effect inside the floor is INCONCLUSIVE, not SUPPORTED",
              science_claim_read(reg, small_id, &r) == SCIENCE_OK &&
                  r.status == SCIENCE_INCONCLUSIVE && r.effect_milli == 200);
@@ -471,9 +474,7 @@ static int case_three_verdicts(void)
     uint8_t edge_id[32];
     SC_CHECK("the edge claim registers",
              science_claim_register(reg, &edge, edge_id) == SCIENCE_OK);
-    SC_CHECK("its trials record",
-             fill(reg, edge_id, SCIENCE_ARM_CONTROL, "alice", 5, 2) &&
-                 fill(reg, edge_id, SCIENCE_ARM_TREATMENT, "bob", 5, 3));
+    SC_CHECK("its trials record", fill_both_arms(reg, edge_id, 5, 2, 3));
     SC_CHECK("an effect exactly at the floor is SUPPORTED",
              science_claim_read(reg, edge_id, &r) == SCIENCE_OK &&
                  r.status == SCIENCE_SUPPORTED && r.effect_milli == 200);
@@ -511,16 +512,12 @@ static int case_hollow_and_ratio(void)
     uint8_t hid[32];
     SC_CHECK("the hollow claim registers",
              science_claim_register(reg, &hollow, hid) == SCIENCE_OK);
-    bool ok = true;
-    for (int i = 0; i < 4; i++) {
-        struct science_receipt c =
-            receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_PASS);
-        struct science_receipt t =
-            receipt("bob", SCIENCE_ARM_TREATMENT, ENGINE_VERDICT_HOLLOW);
-        ok = ok && science_trial_record(reg, hid, &c) == SCIENCE_OK &&
-             science_trial_record(reg, hid, &t) == SCIENCE_OK;
-    }
-    SC_CHECK("the hollow claim's trials record", ok);
+    SC_CHECK("the hollow claim's trials record",
+             record_pair_rounds(reg, hid, 4,
+                                receipt("alice", SCIENCE_ARM_CONTROL,
+                                        ENGINE_VERDICT_PASS),
+                                receipt("bob", SCIENCE_ARM_TREATMENT,
+                                        ENGINE_VERDICT_HOLLOW)));
     SC_CHECK("every treatment run hollow and no control run hollow is "
              "SUPPORTED at 1000 milli",
              science_claim_read(reg, hid, &r) == SCIENCE_OK &&
@@ -541,20 +538,12 @@ static int case_hollow_and_ratio(void)
     uint8_t eid[32];
     SC_CHECK("the efficiency claim registers",
              science_claim_register(reg, &eff, eid) == SCIENCE_OK);
-    ok = true;
-    for (int i = 0; i < 2; i++) {
-        struct science_receipt c =
-            receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_PASS);
-        c.files_changed = 1;
-        c.completion_tokens = 500;
-        struct science_receipt t =
-            receipt("bob", SCIENCE_ARM_TREATMENT, ENGINE_VERDICT_PASS);
-        t.files_changed = 5;
-        t.completion_tokens = 500;
-        ok = ok && science_trial_record(reg, eid, &c) == SCIENCE_OK &&
-             science_trial_record(reg, eid, &t) == SCIENCE_OK;
-    }
-    SC_CHECK("the efficiency claim's trials record", ok);
+    SC_CHECK("the efficiency claim's trials record",
+             record_pair_rounds(reg, eid, 2,
+                                trial("alice", SCIENCE_ARM_CONTROL,
+                                      ENGINE_VERDICT_PASS, 1, 500),
+                                trial("bob", SCIENCE_ARM_TREATMENT,
+                                      ENGINE_VERDICT_PASS, 5, 500)));
     SC_CHECK("the ratio is over arm TOTALS: 1000/2 vs 1000/10",
              science_claim_read(reg, eid, &r) == SCIENCE_OK &&
                  r.control.value_milli == 500 * SCIENCE_MILLI &&
@@ -570,20 +559,13 @@ static int case_hollow_and_ratio(void)
     uint8_t nid[32];
     SC_CHECK("the lands-nothing claim registers",
              science_claim_register(reg, &none, nid) == SCIENCE_OK);
-    ok = true;
-    for (int i = 0; i < 2; i++) {
-        struct science_receipt c =
-            receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_PASS);
-        c.files_changed = 4;
-        c.completion_tokens = 400;
-        struct science_receipt t =
-            receipt("bob", SCIENCE_ARM_TREATMENT, ENGINE_VERDICT_NO_CHANGE);
-        t.files_changed = 0; /* spent tokens, landed nothing */
-        t.completion_tokens = 9000;
-        ok = ok && science_trial_record(reg, nid, &c) == SCIENCE_OK &&
-             science_trial_record(reg, nid, &t) == SCIENCE_OK;
-    }
-    SC_CHECK("the lands-nothing trials record", ok);
+    SC_CHECK("the lands-nothing trials record",
+             record_pair_rounds(reg, nid, 2,
+                                trial("alice", SCIENCE_ARM_CONTROL,
+                                      ENGINE_VERDICT_PASS, 4, 400),
+                                /* spent tokens, landed nothing */
+                                trial("bob", SCIENCE_ARM_TREATMENT,
+                                      ENGINE_VERDICT_NO_CHANGE, 0, 9000)));
     SC_CHECK("an arm that landed nothing is INCONCLUSIVE, never a great score",
              science_claim_read(reg, nid, &r) == SCIENCE_OK &&
                  r.status == SCIENCE_INCONCLUSIVE);
@@ -629,6 +611,60 @@ static char *slurp(const char *path, size_t *len)
     return buf;
 }
 
+/* True for a header line that is prose or a comment, not a declaration: its
+ * first non-blank text is a comment opener or a block-comment continuation. */
+static bool header_line_is_comment(const char *line, size_t n)
+{
+    const char *p = line;
+    while ((size_t)(p - line) < n && (*p == ' ' || *p == '\t'))
+        p++;
+    return (size_t)(p - line) < n &&
+           (*p == '*' || (*p == '/' && p[1] == '*'));
+}
+
+/* Tallies one non-comment header line that takes an `enum science_status`,
+ * clearing *only_name_lookup if that line is anything but the name lookup. */
+static void tally_status_decl(const char *line, size_t n, int *status_params,
+                              bool *only_name_lookup)
+{
+    char buf[512];
+    const size_t take = n < sizeof buf - 1u ? n : sizeof buf - 1u;
+    memcpy(buf, line, take);
+    buf[take] = '\0';
+    if (strstr(buf, "enum science_status") && strchr(buf, '(')) {
+        (*status_params)++;
+        if (!strstr(buf, "science_status_name"))
+            *only_name_lookup = false;
+    }
+}
+
+/* Walks every line of the public header, comments skipped. */
+static void scan_status_decls(const char *hdr, int *status_params,
+                              bool *only_name_lookup)
+{
+    for (const char *line = hdr; line && *line;) {
+        const char *end = strchr(line, '\n');
+        const size_t n = end ? (size_t)(end - line) : strlen(line);
+        if (!header_line_is_comment(line, n))
+            tally_status_decl(line, n, status_params, only_name_lookup);
+        line = end ? end + 1 : NULL;
+    }
+}
+
+/* True when the text of the spec struct in [spec, spec_end) names no status. */
+static bool spec_text_has_no_status(const char *spec, const char *spec_end)
+{
+    char *body = zcl_malloc((size_t)(spec_end - spec) + 1u,
+                            "test_science_spec");
+    if (!body)
+        return false;
+    memcpy(body, spec, (size_t)(spec_end - spec));
+    body[spec_end - spec] = '\0';
+    const bool clean = strstr(body, "status") == NULL;
+    free(body);
+    return clean;
+}
+
 static int case_no_status_setter(void)
 {
     int failures = 0;
@@ -652,27 +688,7 @@ static int case_no_status_setter(void)
      * rule without breaking it. */
     int status_params = 0;
     bool only_name_lookup = true;
-    for (const char *line = hdr; line && *line;) {
-        const char *end = strchr(line, '\n');
-        const size_t n = end ? (size_t)(end - line) : strlen(line);
-        const char *p = line;
-        while ((size_t)(p - line) < n && (*p == ' ' || *p == '\t'))
-            p++;
-        const bool comment = (size_t)(p - line) < n &&
-                             (*p == '*' || (*p == '/' && p[1] == '*'));
-        if (!comment) {
-            char buf[512];
-            const size_t take = n < sizeof buf - 1u ? n : sizeof buf - 1u;
-            memcpy(buf, line, take);
-            buf[take] = '\0';
-            if (strstr(buf, "enum science_status") && strchr(buf, '(')) {
-                status_params++;
-                if (!strstr(buf, "science_status_name"))
-                    only_name_lookup = false;
-            }
-        }
-        line = end ? end + 1 : NULL;
-    }
+    scan_status_decls(hdr, &status_params, &only_name_lookup);
     SC_CHECK("exactly one declaration takes an `enum science_status`",
              status_params == 1);
     SC_CHECK("and it is the pure name lookup, which stores nothing",
@@ -682,19 +698,8 @@ static int case_no_status_setter(void)
 
     const char *spec = strstr(hdr, "struct science_claim_spec {");
     const char *spec_end = spec ? strstr(spec, "};") : NULL;
-    bool spec_clean = spec && spec_end;
-    if (spec_clean) {
-        char *body = zcl_malloc((size_t)(spec_end - spec) + 1u,
-                                "test_science_spec");
-        if (body) {
-            memcpy(body, spec, (size_t)(spec_end - spec));
-            body[spec_end - spec] = '\0';
-            spec_clean = strstr(body, "status") == NULL;
-            free(body);
-        } else {
-            spec_clean = false;
-        }
-    }
+    const bool spec_clean =
+        spec && spec_end && spec_text_has_no_status(spec, spec_end);
     SC_CHECK("the caller-supplied spec has no status member anywhere in it",
              spec_clean);
 
@@ -918,6 +923,107 @@ static int case_canonical(void)
 
 /* ── 9. it survives a close and reopen ────────────────────────────────── */
 
+/* The first session: register a claim, record its trials, read it, close. */
+static int durable_write_session(struct science_register *reg, uint8_t id[32],
+                                 int64_t *effect_before)
+{
+    int failures = 0;
+    struct science_claim_spec s = good_spec();
+    s.sample_floor = 3;
+    SC_CHECK("a claim registers",
+             science_claim_register(reg, &s, id) == SCIENCE_OK);
+    SC_CHECK("trials record", fill_both_arms(reg, id, 3, 0, 3));
+    struct science_reading r;
+    SC_CHECK("it reads SUPPORTED before the close",
+             science_claim_read(reg, id, &r) == SCIENCE_OK &&
+                 r.status == SCIENCE_SUPPORTED);
+    *effect_before = r.effect_milli;
+    science_close(reg);
+    return failures;
+}
+
+/* The claim's spec survives verbatim: a falsifier that came back different
+ * would mean the register replayed a different claim. */
+static int durable_spec_survives(struct science_register *reg)
+{
+    int failures = 0;
+    struct science_claim_spec back = {0};
+    char statement[SCIENCE_STATEMENT_MAX], treatment[SCIENCE_TREATMENT_MAX];
+    char source[SCIENCE_SOURCE_MAX];
+    SC_CHECK("the spec reads back",
+             science_claim_spec_at(reg, 0, &back, statement, treatment,
+                                   source));
+    const struct science_claim_spec want = good_spec();
+    SC_CHECK("with the same statement and treatment",
+             strcmp(back.statement, want.statement) == 0 &&
+                 strcmp(back.treatment, want.treatment) == 0);
+    SC_CHECK("and the same falsifier",
+             back.metric == want.metric &&
+                 back.direction == want.direction &&
+                 back.effect_floor_milli == want.effect_floor_milli &&
+                 back.sample_floor == 3);
+    return failures;
+}
+
+/* The second session: the replay found everything the first one wrote. */
+static int durable_reopen_session(struct science_register *reg,
+                                  const struct science_open_report *rep,
+                                  uint8_t id[32], int64_t effect_before)
+{
+    int failures = 0;
+    SC_CHECK("the replay found one claim and six trials",
+             rep->claims == 1 && rep->trials == 6 && rep->frames == 7);
+    SC_CHECK("nothing was torn", rep->torn_bytes == 0);
+    SC_CHECK("the claim is still there by its content id",
+             science_claim_count(reg) == 1);
+
+    struct science_reading r;
+    SC_CHECK("and reads the same status from the replayed trials",
+             science_claim_read(reg, id, &r) == SCIENCE_OK &&
+                 r.status == SCIENCE_SUPPORTED &&
+                 r.effect_milli == effect_before && r.trials == 6);
+    SC_CHECK("the producers survived the round trip",
+             r.producers == 2 && !r.single_producer);
+
+    failures += durable_spec_survives(reg);
+
+    uint8_t id_at[32];
+    SC_CHECK("the enumerated id matches the registered one",
+             science_claim_id_at(reg, 0, id_at) &&
+                 memcmp(id_at, id, 32) == 0);
+    SC_CHECK("there is no claim at index 1",
+             !science_claim_id_at(reg, 1, id_at));
+
+    /* Appending after a reopen continues the same history. */
+    SC_CHECK("a further trial records after the reopen",
+             fill(reg, id, SCIENCE_ARM_CONTROL, "cara", 1, 0));
+    SC_CHECK("and is counted",
+             science_claim_read(reg, id, &r) == SCIENCE_OK &&
+                 r.trials == 7 && r.producers == 3);
+    science_close(reg);
+    return failures;
+}
+
+/* A trial for a claim nobody registered is refused, not filed under a claim
+ * that happens to exist. */
+static int durable_unknown_claim(struct science_register *reg)
+{
+    int failures = 0;
+    uint8_t bogus[32];
+    memset(bogus, 0x5A, sizeof bogus);
+    struct science_receipt rc =
+        receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_PASS);
+    SC_CHECK("a trial for an unregistered claim is refused",
+             science_trial_record(reg, bogus, &rc) ==
+                 SCIENCE_REFUSED_UNKNOWN_CLAIM);
+    struct science_reading r;
+    SC_CHECK("and reading an unregistered claim is refused too",
+             science_claim_read(reg, bogus, &r) ==
+                 SCIENCE_REFUSED_UNKNOWN_CLAIM);
+    science_close(reg);
+    return failures;
+}
+
 static int case_durability(void)
 {
     int failures = 0;
@@ -937,19 +1043,7 @@ static int case_durability(void)
             test_cleanup_tmpdir(dir);
             return failures;
         }
-        struct science_claim_spec s = good_spec();
-        s.sample_floor = 3;
-        SC_CHECK("a claim registers",
-                 science_claim_register(reg, &s, id) == SCIENCE_OK);
-        SC_CHECK("trials record",
-                 fill(reg, id, SCIENCE_ARM_CONTROL, "alice", 3, 0) &&
-                     fill(reg, id, SCIENCE_ARM_TREATMENT, "bob", 3, 3));
-        struct science_reading r;
-        SC_CHECK("it reads SUPPORTED before the close",
-                 science_claim_read(reg, id, &r) == SCIENCE_OK &&
-                     r.status == SCIENCE_SUPPORTED);
-        effect_before = r.effect_milli;
-        science_close(reg);
+        failures += durable_write_session(reg, id, &effect_before);
     }
     {
         struct science_open_report rep;
@@ -959,52 +1053,7 @@ static int case_durability(void)
             test_cleanup_tmpdir(dir);
             return failures;
         }
-        SC_CHECK("the replay found one claim and six trials",
-                 rep.claims == 1 && rep.trials == 6 && rep.frames == 7);
-        SC_CHECK("nothing was torn", rep.torn_bytes == 0);
-        SC_CHECK("the claim is still there by its content id",
-                 science_claim_count(reg) == 1);
-
-        struct science_reading r;
-        SC_CHECK("and reads the same status from the replayed trials",
-                 science_claim_read(reg, id, &r) == SCIENCE_OK &&
-                     r.status == SCIENCE_SUPPORTED &&
-                     r.effect_milli == effect_before && r.trials == 6);
-        SC_CHECK("the producers survived the round trip",
-                 r.producers == 2 && !r.single_producer);
-
-        /* The claim's spec survives verbatim: a falsifier that came back
-         * different would mean the register replayed a different claim. */
-        struct science_claim_spec back = {0};
-        char statement[SCIENCE_STATEMENT_MAX], treatment[SCIENCE_TREATMENT_MAX];
-        char source[SCIENCE_SOURCE_MAX];
-        SC_CHECK("the spec reads back",
-                 science_claim_spec_at(reg, 0, &back, statement, treatment,
-                                       source));
-        const struct science_claim_spec want = good_spec();
-        SC_CHECK("with the same statement and treatment",
-                 strcmp(back.statement, want.statement) == 0 &&
-                     strcmp(back.treatment, want.treatment) == 0);
-        SC_CHECK("and the same falsifier",
-                 back.metric == want.metric &&
-                     back.direction == want.direction &&
-                     back.effect_floor_milli == want.effect_floor_milli &&
-                     back.sample_floor == 3);
-
-        uint8_t id_at[32];
-        SC_CHECK("the enumerated id matches the registered one",
-                 science_claim_id_at(reg, 0, id_at) &&
-                     memcmp(id_at, id, sizeof id) == 0);
-        SC_CHECK("there is no claim at index 1",
-                 !science_claim_id_at(reg, 1, id_at));
-
-        /* Appending after a reopen continues the same history. */
-        SC_CHECK("a further trial records after the reopen",
-                 fill(reg, id, SCIENCE_ARM_CONTROL, "cara", 1, 0));
-        SC_CHECK("and is counted",
-                 science_claim_read(reg, id, &r) == SCIENCE_OK &&
-                     r.trials == 7 && r.producers == 3);
-        science_close(reg);
+        failures += durable_reopen_session(reg, &rep, id, effect_before);
     }
     {
         struct science_open_report rep;
@@ -1020,18 +1069,7 @@ static int case_durability(void)
         struct science_open_report rep;
         struct science_register *reg = science_open(path, &rep);
         if (reg) {
-            uint8_t bogus[32];
-            memset(bogus, 0x5A, sizeof bogus);
-            struct science_receipt rc =
-                receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_PASS);
-            SC_CHECK("a trial for an unregistered claim is refused",
-                     science_trial_record(reg, bogus, &rc) ==
-                         SCIENCE_REFUSED_UNKNOWN_CLAIM);
-            struct science_reading r;
-            SC_CHECK("and reading an unregistered claim is refused too",
-                     science_claim_read(reg, bogus, &r) ==
-                         SCIENCE_REFUSED_UNKNOWN_CLAIM);
-            science_close(reg);
+            failures += durable_unknown_claim(reg);
         } else {
             SC_CHECK("the register reopens for the unknown-claim case", false);
         }
@@ -1328,6 +1366,102 @@ static int case_falsifier_immutable(void)
 
 /* ── 12. seeded claims start UNTESTED, citation and all ───────────────── */
 
+/* True when a seeded claim's falsifier is real: a positive floor on each axis
+ * and a stated direction. */
+static bool seed_is_falsifiable(const struct science_reading *r)
+{
+    return r->effect_floor_milli > 0 && r->sample_floor > 0 &&
+           (r->direction == SCIENCE_DIRECTION_UP ||
+            r->direction == SCIENCE_DIRECTION_DOWN);
+}
+
+/* True when seed `i` names where it came from. */
+static bool seed_names_source(struct science_register *reg, uint32_t i)
+{
+    struct science_claim_spec spec;
+    char st[SCIENCE_STATEMENT_MAX], tr[SCIENCE_TREATMENT_MAX];
+    char src[SCIENCE_SOURCE_MAX];
+    return science_claim_spec_at(reg, i, &spec, st, tr, src) &&
+           src[0] != '\0';
+}
+
+/* Walks every seed once. A seed the register cannot read ends the walk. */
+static void check_seed_claims(struct science_register *reg,
+                              bool *all_untested, bool *all_cited,
+                              bool *all_falsifiable)
+{
+    for (uint32_t i = 0; i < science_claim_count(reg); i++) {
+        uint8_t id[32];
+        struct science_reading r;
+        if (!science_claim_id_at(reg, i, id) ||
+            science_claim_read(reg, id, &r) != SCIENCE_OK) {
+            *all_untested = false;
+            break;
+        }
+        *all_untested = *all_untested && r.status == SCIENCE_UNTESTED &&
+                        r.trials == 0 && r.producers == 0 &&
+                        !r.effect_readable;
+        *all_falsifiable = *all_falsifiable && seed_is_falsifiable(&r);
+        *all_cited = *all_cited && seed_names_source(reg, i);
+    }
+}
+
+/* Notes whether the prompt-prose and harness-structure claims are seeded. */
+static void find_named_seeds(struct science_register *reg, bool *saw_prompt,
+                             bool *saw_structure)
+{
+    for (uint32_t i = 0; i < science_claim_count(reg); i++) {
+        struct science_claim_spec spec;
+        char st[SCIENCE_STATEMENT_MAX], tr[SCIENCE_TREATMENT_MAX];
+        char src[SCIENCE_SOURCE_MAX];
+        if (!science_claim_spec_at(reg, i, &spec, st, tr, src))
+            continue;
+        if (strstr(st, "system prompt") != NULL)
+            *saw_prompt = true;
+        if (strstr(st, "retrieval tool") != NULL)
+            *saw_structure = true;
+    }
+}
+
+/* A citation buys a seed nothing on the way to a verdict: it still needs its
+ * full sample floor in each arm. Driving one all the way to a status is
+ * case_refutation_is_a_result()'s job — it takes a seeded claim to REFUTED —
+ * so this only proves the floor is not shortened for a cited claim. */
+static int seed_floor_is_not_shortened(struct science_register *reg)
+{
+    int failures = 0;
+    uint8_t first[32];
+    struct science_reading r;
+    SC_CHECK("the first seed is readable",
+             science_claim_id_at(reg, 0, first) &&
+                 science_claim_read(reg, first, &r) == SCIENCE_OK &&
+                 r.status == SCIENCE_UNTESTED && r.sample_floor == 20);
+    SC_CHECK("a lopsided handful of trials leaves a cited claim UNTESTED",
+             fill_both_arms(reg, first, 3, 0, 3) &&
+                 science_claim_read(reg, first, &r) == SCIENCE_OK &&
+                 r.status == SCIENCE_UNTESTED && r.trials == 6);
+    return failures;
+}
+
+/* A seed reads back out of the register with its citation intact. */
+static int seed_reads_back_verbatim(struct science_register *reg)
+{
+    int failures = 0;
+    struct science_claim_spec spec, seed;
+    char st[SCIENCE_STATEMENT_MAX], tr[SCIENCE_TREATMENT_MAX];
+    char src[SCIENCE_SOURCE_MAX];
+    SC_CHECK("the first seed survives verbatim",
+             science_seed_at(0, &seed) &&
+                 science_claim_spec_at(reg, 0, &spec, st, tr, src) &&
+                 strcmp(spec.statement, seed.statement) == 0 &&
+                 strcmp(spec.treatment, seed.treatment) == 0 &&
+                 strcmp(spec.source, seed.source) == 0 &&
+                 spec.effect_floor_milli == seed.effect_floor_milli);
+    SC_CHECK("an out-of-range seed index refuses",
+             !science_seed_at(science_seed_count(), &seed));
+    return failures;
+}
+
 static int case_seeds(void)
 {
     int failures = 0;
@@ -1351,27 +1485,7 @@ static int case_seeds(void)
     /* THE POINT: a citation is provenance, never evidence. A paper's result
      * is a fact about the tree the authors measured. */
     bool all_untested = true, all_cited = true, all_falsifiable = true;
-    for (uint32_t i = 0; i < science_claim_count(reg); i++) {
-        uint8_t id[32];
-        struct science_reading r;
-        if (!science_claim_id_at(reg, i, id) ||
-            science_claim_read(reg, id, &r) != SCIENCE_OK) {
-            all_untested = false;
-            break;
-        }
-        all_untested = all_untested && r.status == SCIENCE_UNTESTED &&
-                       r.trials == 0 && r.producers == 0 && !r.effect_readable;
-        all_falsifiable = all_falsifiable && r.effect_floor_milli > 0 &&
-                          r.sample_floor > 0 &&
-                          (r.direction == SCIENCE_DIRECTION_UP ||
-                           r.direction == SCIENCE_DIRECTION_DOWN);
-        struct science_claim_spec spec;
-        char st[SCIENCE_STATEMENT_MAX], tr[SCIENCE_TREATMENT_MAX];
-        char src[SCIENCE_SOURCE_MAX];
-        all_cited = all_cited &&
-                    science_claim_spec_at(reg, i, &spec, st, tr, src) &&
-                    src[0] != '\0';
-    }
+    check_seed_claims(reg, &all_untested, &all_cited, &all_falsifiable);
     SC_CHECK("every seeded claim starts UNTESTED, citation and all",
              all_untested);
     SC_CHECK("every seeded claim names where it came from", all_cited);
@@ -1380,17 +1494,7 @@ static int case_seeds(void)
     /* The claim that points away from where effort naturally goes is present
      * by name, so nobody can quietly drop it. */
     bool saw_prompt_claim = false, saw_structure_claim = false;
-    for (uint32_t i = 0; i < science_claim_count(reg); i++) {
-        struct science_claim_spec spec;
-        char st[SCIENCE_STATEMENT_MAX], tr[SCIENCE_TREATMENT_MAX];
-        char src[SCIENCE_SOURCE_MAX];
-        if (!science_claim_spec_at(reg, i, &spec, st, tr, src))
-            continue;
-        if (strstr(st, "system prompt") != NULL)
-            saw_prompt_claim = true;
-        if (strstr(st, "retrieval tool") != NULL)
-            saw_structure_claim = true;
-    }
+    find_named_seeds(reg, &saw_prompt_claim, &saw_structure_claim);
     SC_CHECK("the prompt-prose claim the ablation contradicts is seeded",
              saw_prompt_claim);
     SC_CHECK("and the harness-structure claim beside it", saw_structure_claim);
@@ -1402,22 +1506,7 @@ static int case_seeds(void)
                  added == 0 && already == science_seed_count() &&
                  science_claim_count(reg) == science_seed_count());
 
-    /* A citation buys a seed nothing on the way to a verdict: it still needs
-     * its full sample floor in each arm. Driving one all the way to a status
-     * is case_refutation_is_a_result()'s job — it takes a seeded claim to
-     * REFUTED — so this only proves the floor is not shortened for a cited
-     * claim. */
-    uint8_t first[32];
-    struct science_reading r;
-    SC_CHECK("the first seed is readable",
-             science_claim_id_at(reg, 0, first) &&
-                 science_claim_read(reg, first, &r) == SCIENCE_OK &&
-                 r.status == SCIENCE_UNTESTED && r.sample_floor == 20);
-    SC_CHECK("a lopsided handful of trials leaves a cited claim UNTESTED",
-             fill(reg, first, SCIENCE_ARM_CONTROL, "alice", 3, 0) &&
-                 fill(reg, first, SCIENCE_ARM_TREATMENT, "bob", 3, 3) &&
-                 science_claim_read(reg, first, &r) == SCIENCE_OK &&
-                 r.status == SCIENCE_UNTESTED && r.trials == 6);
+    failures += seed_floor_is_not_shortened(reg);
 
     /* And a seed reads back out of the register with its citation intact. */
     science_close(reg);
@@ -1426,18 +1515,7 @@ static int case_seeds(void)
     SC_CHECK("the seeded register reopens",
              reg != NULL && rep.claims == science_seed_count());
     if (reg) {
-        struct science_claim_spec spec, seed;
-        char st[SCIENCE_STATEMENT_MAX], tr[SCIENCE_TREATMENT_MAX];
-        char src[SCIENCE_SOURCE_MAX];
-        SC_CHECK("the first seed survives verbatim",
-                 science_seed_at(0, &seed) &&
-                     science_claim_spec_at(reg, 0, &spec, st, tr, src) &&
-                     strcmp(spec.statement, seed.statement) == 0 &&
-                     strcmp(spec.treatment, seed.treatment) == 0 &&
-                     strcmp(spec.source, seed.source) == 0 &&
-                     spec.effect_floor_milli == seed.effect_floor_milli);
-        SC_CHECK("an out-of-range seed index refuses",
-                 !science_seed_at(science_seed_count(), &seed));
+        failures += seed_reads_back_verbatim(reg);
         science_close(reg);
     }
 
@@ -1626,6 +1704,61 @@ static int case_data_not_summary(void)
  * and float-free form. Any build at any optimisation level that produces
  * different bytes fails here, which is the only honest way one binary can
  * assert that -O0 and -O2 agree. */
+/* Mutate ANY byte and the record must stop verifying or change its id. Every
+ * byte is load-bearing or it is a byte an attacker can use. */
+static bool every_bit_load_bearing(const uint8_t *got, size_t n,
+                                   const uint8_t id[32])
+{
+    bool every_byte_matters = true;
+    for (size_t i = 0; i < n && every_byte_matters; i++) {
+        for (unsigned bit = 0; bit < 8 && every_byte_matters; bit++) {
+            uint8_t mutant[4096];
+            memcpy(mutant, got, n);
+            mutant[i] ^= (uint8_t)(1u << bit);
+            uint8_t mid[32];
+            if (!science_claim_verify(mutant, n, mid))
+                continue; /* refused outright: also a detection */
+            every_byte_matters = memcmp(mid, id, 32) != 0;
+        }
+    }
+    return every_byte_matters;
+}
+
+/* Mutating any one recorded field of a trial must move its content address.
+ * Each MOVES line changes one field of a copy of `won`. */
+static bool trial_fields_move_id(const uint8_t claim_id[32],
+                                 const struct science_receipt *won,
+                                 const uint8_t tid[32])
+{
+    struct science_receipt v;
+    bool all_move = true;
+#define MOVES(mutate)                                                     \
+    do {                                                                  \
+        v = *won;                                                         \
+        mutate;                                                           \
+        uint8_t vid[32];                                                  \
+        all_move = all_move && science_trial_id(claim_id, &v, vid) &&     \
+                   memcmp(vid, tid, sizeof vid) != 0;                     \
+    } while (0)
+    MOVES(v.repro.command = "something else");
+    MOVES(v.repro.commit = "1111111111111111111111111111111111111111");
+    MOVES(v.repro.input = "another seed");
+    MOVES(v.repro.compiler = "other-cc 2.0.0");
+    MOVES(v.repro.optimisation = "-O0");
+    MOVES(v.repro.nproc = 16);
+    MOVES(v.repro.stress_tests = true);
+    MOVES(v.observed.n = 10);
+    MOVES(v.observed.unit = "us");
+    MOVES(v.observed.min_milli = 1);
+    MOVES(v.observed.median_milli = 7032);
+    MOVES(v.observed.p95_milli = 7401);
+    MOVES(v.observed.max_milli = 7901);
+    MOVES(v.verdict = ENGINE_VERDICT_HOLLOW);
+    MOVES(v.files_changed = 99);
+#undef MOVES
+    return all_move;
+}
+
 static int case_peer_verifiable(void)
 {
     int failures = 0;
@@ -1665,20 +1798,8 @@ static int case_peer_verifiable(void)
 
     /* Mutate ANY byte and the record must stop verifying or change its id.
      * Every byte is load-bearing or it is a byte an attacker can use. */
-    bool every_byte_matters = true;
-    for (size_t i = 0; i < n && every_byte_matters; i++) {
-        for (unsigned bit = 0; bit < 8 && every_byte_matters; bit++) {
-            uint8_t mutant[4096];
-            memcpy(mutant, got, n);
-            mutant[i] ^= (uint8_t)(1u << bit);
-            uint8_t mid[32];
-            if (!science_claim_verify(mutant, n, mid))
-                continue; /* refused outright: also a detection */
-            every_byte_matters = memcmp(mid, id, sizeof id) != 0;
-        }
-    }
     SC_CHECK("every single bit of a claim frame is load-bearing",
-             every_byte_matters);
+             every_bit_load_bearing(got, n, id));
     SC_CHECK("a truncated frame is refused, not read short",
              !science_claim_verify(got, n - 1, NULL));
     SC_CHECK("trailing bytes are refused, so one fact has one address",
@@ -1717,34 +1838,8 @@ static int case_peer_verifiable(void)
     /* Mutating a trial's fields must move its id. Bit-sweeping a 1.4KB frame
      * is slower than it is worth; the fields are swept instead, which is the
      * same claim at the granularity a forger would work at. */
-    struct science_receipt v;
-    bool all_move = true;
-#define MOVES(mutate)                                                     \
-    do {                                                                  \
-        v = won;                                                          \
-        mutate;                                                           \
-        uint8_t vid[32];                                                  \
-        all_move = all_move && science_trial_id(claim_id, &v, vid) &&     \
-                   memcmp(vid, tid, sizeof vid) != 0;                     \
-    } while (0)
-    MOVES(v.repro.command = "something else");
-    MOVES(v.repro.commit = "1111111111111111111111111111111111111111");
-    MOVES(v.repro.input = "another seed");
-    MOVES(v.repro.compiler = "other-cc 2.0.0");
-    MOVES(v.repro.optimisation = "-O0");
-    MOVES(v.repro.nproc = 16);
-    MOVES(v.repro.stress_tests = true);
-    MOVES(v.observed.n = 10);
-    MOVES(v.observed.unit = "us");
-    MOVES(v.observed.min_milli = 1);
-    MOVES(v.observed.median_milli = 7032);
-    MOVES(v.observed.p95_milli = 7401);
-    MOVES(v.observed.max_milli = 7901);
-    MOVES(v.verdict = ENGINE_VERDICT_HOLLOW);
-    MOVES(v.files_changed = 99);
-#undef MOVES
     SC_CHECK("changing any recorded field changes the trial's content address",
-             all_move);
+             trial_fields_move_id(claim_id, &won, tid));
 
     /* A record whose reproduction block is incomplete does not verify, no
      * matter who sent it. A peer applies the same bar we do. */
@@ -1820,7 +1915,9 @@ static int case_refutation_is_a_result(void)
 
 /* ── 17. the refusal and status vocabularies name themselves ──────────── */
 
-static int case_surface(void)
+/* The refusal and status vocabularies name themselves, and so do the arms
+ * and directions. */
+static int surface_vocabulary_names(void)
 {
     int failures = 0;
     SC_CHECK("every status names itself",
@@ -1849,6 +1946,59 @@ static int case_surface(void)
                  strcmp(science_arm_name(SCIENCE_ARM_CONTROL), "control") == 0 &&
                  strcmp(science_arm_name(SCIENCE_ARM_TREATMENT),
                         "treatment") == 0);
+    return failures;
+}
+
+/* Out-of-range receipt numbers are refused, never clamped: a clamped value
+ * would be a measurement nobody took. Takes a register that is open. */
+static int surface_receipt_bounds(struct science_register *reg)
+{
+    int failures = 0;
+    struct science_claim_spec s = good_spec();
+    uint8_t id[32];
+    (void)science_claim_register(reg, &s, id);
+    struct science_receipt rc =
+        receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_PASS);
+    rc.completion_tokens = -1;
+    SC_CHECK("a negative token count is refused",
+             science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_FIELD);
+    rc.completion_tokens = SCIENCE_TOKENS_MAX + 1;
+    SC_CHECK("an absurd token count is refused, not clamped",
+             science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_FIELD);
+    rc = receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_PASS);
+    rc.files_changed = SCIENCE_FILES_MAX + 1u;
+    SC_CHECK("an absurd file count is refused",
+             science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_FIELD);
+    rc = receipt("alice", SCIENCE_ARM_CONTROL, (enum engine_verdict)42);
+    SC_CHECK("a verdict outside the engine's enum is refused",
+             science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_VERDICT);
+    rc = receipt("alice", SCIENCE_ARM_CONTROL,
+                 (enum engine_verdict)(ENGINE_VERDICT_REPORT_EDITED + 1));
+    SC_CHECK("the first value past the enum is refused",
+             science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_VERDICT);
+    struct science_reading r;
+    SC_CHECK("none of the refused receipts entered the register",
+             science_claim_read(reg, id, &r) == SCIENCE_OK &&
+                 r.trials == 0 && r.status == SCIENCE_UNTESTED);
+    /* The two report verdicts are accepted. A report that changed nothing
+     * is REPORTED, so its files_changed is 0; one that changed files is
+     * REPORT_EDITED. */
+    rc = receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_REPORTED);
+    rc.files_changed = 0;
+    SC_CHECK("a REPORTED receipt is accepted",
+             science_trial_record(reg, id, &rc) == SCIENCE_OK);
+    rc = receipt("alice", SCIENCE_ARM_CONTROL,
+                 ENGINE_VERDICT_REPORT_EDITED);
+    SC_CHECK("a REPORT_EDITED receipt is accepted",
+             science_trial_record(reg, id, &rc) == SCIENCE_OK);
+    science_close(reg);
+    return failures;
+}
+
+static int case_surface(void)
+{
+    int failures = 0;
+    failures += surface_vocabulary_names();
 
     /* A register needs a caller-supplied path. It never picks a directory of
      * its own, which is what keeps it out of a node datadir. */
@@ -1863,50 +2013,11 @@ static int case_surface(void)
     SC_CHECK("counting a NULL register is zero",
              science_claim_count(NULL) == 0);
 
-    /* Out-of-range receipt numbers are refused, never clamped: a clamped
-     * value would be a measurement nobody took. */
     char dir[512], path[640];
     struct science_register *reg = open_fresh(dir, sizeof dir, "surface", path,
                                               sizeof path);
     if (reg) {
-        struct science_claim_spec s = good_spec();
-        uint8_t id[32];
-        (void)science_claim_register(reg, &s, id);
-        struct science_receipt rc =
-            receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_PASS);
-        rc.completion_tokens = -1;
-        SC_CHECK("a negative token count is refused",
-                 science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_FIELD);
-        rc.completion_tokens = SCIENCE_TOKENS_MAX + 1;
-        SC_CHECK("an absurd token count is refused, not clamped",
-                 science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_FIELD);
-        rc = receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_PASS);
-        rc.files_changed = SCIENCE_FILES_MAX + 1u;
-        SC_CHECK("an absurd file count is refused",
-                 science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_FIELD);
-        rc = receipt("alice", SCIENCE_ARM_CONTROL, (enum engine_verdict)42);
-        SC_CHECK("a verdict outside the engine's enum is refused",
-                 science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_VERDICT);
-        rc = receipt("alice", SCIENCE_ARM_CONTROL,
-                     (enum engine_verdict)(ENGINE_VERDICT_REPORT_EDITED + 1));
-        SC_CHECK("the first value past the enum is refused",
-                 science_trial_record(reg, id, &rc) == SCIENCE_REFUSED_VERDICT);
-        struct science_reading r;
-        SC_CHECK("none of the refused receipts entered the register",
-                 science_claim_read(reg, id, &r) == SCIENCE_OK &&
-                     r.trials == 0 && r.status == SCIENCE_UNTESTED);
-        /* The two report verdicts are accepted. A report that changed nothing
-         * is REPORTED, so its files_changed is 0; one that changed files is
-         * REPORT_EDITED. */
-        rc = receipt("alice", SCIENCE_ARM_CONTROL, ENGINE_VERDICT_REPORTED);
-        rc.files_changed = 0;
-        SC_CHECK("a REPORTED receipt is accepted",
-                 science_trial_record(reg, id, &rc) == SCIENCE_OK);
-        rc = receipt("alice", SCIENCE_ARM_CONTROL,
-                     ENGINE_VERDICT_REPORT_EDITED);
-        SC_CHECK("a REPORT_EDITED receipt is accepted",
-                 science_trial_record(reg, id, &rc) == SCIENCE_OK);
-        science_close(reg);
+        failures += surface_receipt_bounds(reg);
     } else {
         SC_CHECK("the register opens", false);
     }
