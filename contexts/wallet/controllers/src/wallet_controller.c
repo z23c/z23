@@ -220,6 +220,8 @@ static bool rpc_walletunlock(const struct json_value *params, bool help,
     /* Refuse an out-of-range timeout before wallet_lock_unlock decrypts any
      * key. The timer's fail-closed relock below still covers its own failures. */
     if (!wallet_lock_timeout_valid(timeout)) {
+        /* The refusal re-locks, as wallet_lock_arm_timeout's own range refusal does. */
+        wallet_lock_lock(ctx->wallet);
         json_set_str(result, "Error: wallet unlock timeout invalid");
         LOG_FAIL("wallet", "walletunlock: timeout_seconds outside 1..3600");
     }

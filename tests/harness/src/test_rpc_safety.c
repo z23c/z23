@@ -88,6 +88,53 @@ static bool rs_unlock_timeout_case(struct rpc_table *tbl, struct wallet *w,
     return ok;
 }
 
+static bool rs_build_unlock_params(struct json_value *params, int64_t timeout)
+{
+    struct json_value value;
+    json_init(params);
+    json_set_array(params);
+    json_init(&value);
+    json_set_str(&value, "public-rpc-timeout-fixture");
+    bool built = json_push_back(params, &value);
+    json_set_int(&value, timeout);
+    built = json_push_back(params, &value) && built;
+    json_free(&value);
+    return built;
+}
+
+/* A refused out-of-range timeout must end locked, even from an unlocked
+ * wallet: the refusal re-locks, as the range refusal in arm_timeout does. */
+static bool rs_refused_unlock_relocks_case(struct rpc_table *tbl,
+                                           struct wallet *w, int64_t timeout)
+{
+    struct json_value params, result;
+    json_init(&result);
+    bool built = rs_build_unlock_params(&params, 300);
+    wallet_lock_lock(w);
+    bool ok = built && rpc_table_execute(tbl, "walletunlock", &params,
+                                         &result) &&
+              wallet_lock_is_unlocked();
+    json_free(&params);
+    json_free(&result);
+
+    json_init(&result);
+    built = rs_build_unlock_params(&params, timeout);
+    uint32_t entries_before = wallet_lock_unlock_entries_for_test();
+    bool accepted = built && rpc_table_execute(tbl, "walletunlock", &params,
+                                               &result);
+    uint32_t entries = wallet_lock_unlock_entries_for_test() - entries_before;
+    ok = ok && built && !accepted && entries == 0 && !wallet_lock_is_unlocked() &&
+         wallet_lock_effective_passphrase() == NULL &&
+         !wallet_lock_spend_guard().ok;
+    wallet_lock_lock(w);
+    json_free(&params);
+    json_free(&result);
+    if (!ok)
+        printf("rpc_safety: refused walletunlock timeout=%lld left wallet unlocked FAIL\n",
+               (long long)timeout);
+    return ok;
+}
+
 /* Register-only unlock: no database, datadir, persisted keys or network. */
 static int rs_unlock_timeout_width(void)
 {
@@ -123,6 +170,8 @@ static int rs_unlock_timeout_width(void)
     for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i)
         failures += !rs_unlock_timeout_case(tbl, w, cases[i].timeout,
                                             cases[i].present, cases[i].valid);
+    failures += !rs_refused_unlock_relocks_case(tbl, w, 0);
+    failures += !rs_refused_unlock_relocks_case(tbl, w, 3601);
     wallet_lock_lock(w);
     wallet_lock_reset_for_test();
     rpc_wallet_set_state(NULL, NULL, NULL, NULL, NULL, NULL);
