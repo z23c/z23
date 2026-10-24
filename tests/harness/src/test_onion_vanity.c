@@ -354,16 +354,21 @@ static int t_pk_bits_match_address_string(void)
 
 static atomic_bool g_ovt_done;
 
-/* Raises SIGINT every 100 ms until the search has returned. Signals sent
- * before the leaf installs its handler are ignored by the test's SIG_IGN, so
- * the first one that counts is the first after the search is running. */
+/* Raises SIGINT in bursts of three every 100 ms until the search has
+ * returned. Signals sent before the leaf installs its handler are ignored by
+ * the test's SIG_IGN, so the first burst that counts is the first after the
+ * search is running. A burst delivers the second and third signal while the
+ * leaf's handler is still the disposition in force: the leaf must keep its
+ * handler across repeated signals (a one-shot handler resets to SIG_DFL after
+ * the first, and the second then kills the process). */
 static void *ovt_interrupt_repeatedly(void *arg)
 {
     (void)arg;
     struct timespec ts = { .tv_sec = 0, .tv_nsec = 100 * 1000 * 1000 };
     while (!atomic_load(&g_ovt_done)) {
         nanosleep(&ts, NULL);
-        raise(SIGINT);
+        for (int i = 0; i < 3; i++)
+            raise(SIGINT);
     }
     return NULL;
 }

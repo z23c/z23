@@ -41,6 +41,43 @@ static void ov_on_signal(int signo)
     g_ov_interrupt = 1;
 }
 
+/* Installs ov_on_signal for `signo` and saves what was in force. sigaction,
+ * not signal(): this tree builds with -D_POSIX_C_SOURCE and -std=c23, where
+ * glibc maps signal() to the System V one-shot form (SA_RESETHAND), so the
+ * first signal would reset the disposition to SIG_DFL and a second SIGINT
+ * before the restore would kill the process. Windows has no sigaction; its
+ * CRT signal() is the only install there. */
+#if !defined(_WIN32)
+typedef struct sigaction ov_sig_saved;
+
+static bool ov_signal_hold(int signo, ov_sig_saved *prev)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = ov_on_signal;
+    sigemptyset(&sa.sa_mask);
+    return sigaction(signo, &sa, prev) == 0;
+}
+
+static void ov_signal_restore(int signo, const ov_sig_saved *prev)
+{
+    (void)sigaction(signo, prev, NULL);
+}
+#else
+typedef void (*ov_sig_saved)(int);
+
+static bool ov_signal_hold(int signo, ov_sig_saved *prev)
+{
+    *prev = signal(signo, ov_on_signal); // signal-oneshot-ok: no sigaction on Windows
+    return *prev != SIG_ERR;
+}
+
+static void ov_signal_restore(int signo, const ov_sig_saved *prev)
+{
+    (void)signal(signo, *prev); // signal-oneshot-ok: no sigaction on Windows
+}
+#endif
+
 struct ov_request {
     struct onion_vanity_target target;
     char out[OV_PATH_MAX];
@@ -391,9 +428,12 @@ void zcl_native_handle_core_network_onion_vanity(
     if (!ov_parse_request(request->input, &req, reply))
         return;
     g_ov_interrupt = 0;
-    void (*prev_int)(int) = signal(SIGINT, ov_on_signal);
-    void (*prev_term)(int) = signal(SIGTERM, ov_on_signal);
+    ov_sig_saved prev_int, prev_term;
+    bool have_int = ov_signal_hold(SIGINT, &prev_int);
+    bool have_term = ov_signal_hold(SIGTERM, &prev_term);
     ov_run(&req, reply);
-    (void)signal(SIGINT, prev_int);
-    (void)signal(SIGTERM, prev_term);
+    if (have_int)
+        ov_signal_restore(SIGINT, &prev_int);
+    if (have_term)
+        ov_signal_restore(SIGTERM, &prev_term);
 }
