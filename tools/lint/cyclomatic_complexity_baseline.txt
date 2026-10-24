@@ -2560,10 +2560,6 @@ tests/harness/src/test_peers_projection.c:t_payload_roundtrip:28
 tests/harness/src/test_phgr13_fix.c:test_phgr13_fix:23
 tests/harness/src/test_platform_toolchain.c:test_platform_toolchain:22
 tests/harness/src/test_policy.c:test_policy:50
-tests/harness/src/test_postmortem.c:test_boot_postmortem_install:18
-tests/harness/src/test_postmortem.c:test_boot_postmortem_restart_compresses_prior_sigsegv:27
-tests/harness/src/test_postmortem.c:test_capsule_compress:17
-tests/harness/src/test_postmortem.c:test_signal_handler_capsule:16
 tests/harness/src/test_pprev_walk.c:test_pprev_walk:21
 tests/harness/src/test_primitives.c:test_primitives:77
 tests/harness/src/test_process_headers_adversarial.c:test_process_headers_adversarial:55

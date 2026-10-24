@@ -96,6 +96,95 @@ static bool crash_time_is_after(int rc, size_t count,
     return rc == 0 && count == 1 && e[0].crash_unix >= (int64_t)floor_unix;
 }
 
+static int check_proc_status(const char *entry_path, const char *ok_name,
+                             const char *limit_name)
+{
+    int failures = 0;
+    char proc_path[576];
+    snprintf(proc_path, sizeof(proc_path), "%s/procstatus.txt", entry_path);
+#if defined(__linux__)
+    (void)limit_name;
+    PM_CHECK(ok_name, file_contains(proc_path, "Name:"));
+#else
+    (void)ok_name;
+    PM_CHECK(limit_name,
+             file_contains(proc_path,
+                           OS_SANDBOX_PROC_SELF_STATUS_PATH
+                           " is Linux-only"));
+#endif
+    return failures;
+}
+
+static int check_boot_event_replay(seed_tape_t *loaded, const char *name)
+{
+    int failures = 0;
+    uint8_t type = 0;
+    char payload[64];
+    size_t payload_len = 0;
+    int ev_rc = seed_tape_next_event(loaded, &type, payload,
+                                     sizeof(payload), &payload_len);
+    PM_CHECK(name,
+             ev_rc == 0 && type == 1 &&
+             payload_len == strlen("boot-postmortem-installed") &&
+             memcmp(payload, "boot-postmortem-installed",
+                    payload_len) == 0);
+    return failures;
+}
+
+static int signal_entry_checks(const char *entry_path)
+{
+    int failures = 0;
+    failures += check_proc_status(entry_path,
+                                  "signal capsule captures proc status",
+                                  "signal capsule records proc status limitation");
+    char manifest_path[576];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json",
+             entry_path);
+    PM_CHECK("signal manifest records build id",
+             file_contains(manifest_path, "\"build_id\":"));
+    PM_CHECK("signal manifest records clock count",
+             file_contains(manifest_path, "\"clock_advance_count\": 1"));
+    PM_CHECK("signal manifest records inject count",
+             file_contains(manifest_path, "\"inject_count\": 1"));
+    char regs_path[576];
+    snprintf(regs_path, sizeof(regs_path), "%s/registers.txt", entry_path);
+    PM_CHECK("signal capsule captures register context",
+             file_contains(regs_path, "signal: 6") &&
+             file_contains(regs_path, "fault_addr:"));
+    seed_tape_t *loaded = postmortem_capsule_load_tape(entry_path);
+    PM_CHECK("signal capsule tape loads", loaded != NULL);
+    if (loaded) {
+        PM_CHECK("signal capsule preserves event",
+                 seed_tape_inject_count(loaded) == 1);
+        seed_tape_close(loaded);
+    }
+    return failures;
+}
+
+static int signal_child_checks(pid_t pid, const char *dir,
+                               time_t t_before_fork)
+{
+    int failures = 0;
+    int status = 0;
+    pid_t got = waitpid(pid, &status, 0);
+    PM_CHECK("wait signal child", got == pid);
+    PM_CHECK("child terminated by SIGABRT",
+             got == pid && WIFSIGNALED(status) &&
+             WTERMSIG(status) == SIGABRT);
+
+    struct postmortem_capsule_entry entries[1];
+    size_t count = 0;
+    int rc = postmortem_capsule_list(dir, entries, 1, &count);
+    PM_CHECK("signal capsule listed", rc == 0 && count == 1);
+    PM_CHECK("signal capsule records signal",
+             rc == 0 && count == 1 && entries[0].crash_signal == SIGABRT);
+    PM_CHECK("signal capsule crash_unix is the crash time, not install",
+             crash_time_is_after(rc, count, entries, t_before_fork + 2));
+    if (rc == 0 && count == 1)
+        failures += signal_entry_checks(entries[0].path);
+    return failures;
+}
+
 static int test_signal_handler_capsule(void)
 {
     int failures = 0;
@@ -127,62 +216,54 @@ static int test_signal_handler_capsule(void)
         PM_CHECK("fork signal child", false);
     } else {
         PM_CHECK("fork signal child", true);
-        int status = 0;
-        pid_t got = waitpid(pid, &status, 0);
-        PM_CHECK("wait signal child", got == pid);
-        PM_CHECK("child terminated by SIGABRT",
-                 got == pid && WIFSIGNALED(status) &&
-                 WTERMSIG(status) == SIGABRT);
-
-        struct postmortem_capsule_entry entries[1];
-        size_t count = 0;
-        int rc = postmortem_capsule_list(dir, entries, 1, &count);
-        PM_CHECK("signal capsule listed", rc == 0 && count == 1);
-        PM_CHECK("signal capsule records signal",
-                 rc == 0 && count == 1 && entries[0].crash_signal == SIGABRT);
-        PM_CHECK("signal capsule crash_unix is the crash time, not install",
-                 crash_time_is_after(rc, count, entries, t_before_fork + 2));
-        if (rc == 0 && count == 1) {
-            char proc_path[576];
-            snprintf(proc_path, sizeof(proc_path), "%s/procstatus.txt",
-                     entries[0].path);
-#if defined(__linux__)
-            PM_CHECK("signal capsule captures proc status",
-                     file_contains(proc_path, "Name:"));
-#else
-            PM_CHECK("signal capsule records proc status limitation",
-                      file_contains(proc_path,
-                                    OS_SANDBOX_PROC_SELF_STATUS_PATH
-                                    " is Linux-only"));
-#endif
-            char manifest_path[576];
-            snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.json",
-                     entries[0].path);
-            PM_CHECK("signal manifest records build id",
-                     file_contains(manifest_path, "\"build_id\":"));
-            PM_CHECK("signal manifest records clock count",
-                     file_contains(manifest_path,
-                                   "\"clock_advance_count\": 1"));
-            PM_CHECK("signal manifest records inject count",
-                     file_contains(manifest_path, "\"inject_count\": 1"));
-            char regs_path[576];
-            snprintf(regs_path, sizeof(regs_path), "%s/registers.txt",
-                     entries[0].path);
-            PM_CHECK("signal capsule captures register context",
-                     file_contains(regs_path, "signal: 6") &&
-                     file_contains(regs_path, "fault_addr:"));
-            seed_tape_t *loaded = postmortem_capsule_load_tape(entries[0].path);
-            PM_CHECK("signal capsule tape loads", loaded != NULL);
-            if (loaded) {
-                PM_CHECK("signal capsule preserves event",
-                         seed_tape_inject_count(loaded) == 1);
-                seed_tape_close(loaded);
-            }
-        }
+        failures += signal_child_checks(pid, dir, t_before_fork);
     }
 
     seed_tape_close(tape);
     test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int boot_install_entry_checks(const char *entry_path)
+{
+    int failures = 0;
+    failures += check_proc_status(entry_path,
+                                  "boot postmortem proc status captured",
+                                  "boot postmortem proc status limitation recorded");
+    char log_path[576];
+    snprintf(log_path, sizeof(log_path), "%s/log.txt", entry_path);
+    PM_CHECK("boot postmortem log captured",
+             file_contains(log_path, "boot fatal breadcrumb"));
+    seed_tape_t *loaded = postmortem_capsule_load_tape(entry_path);
+    PM_CHECK("boot postmortem tape loads", loaded != NULL);
+    if (loaded) {
+        PM_CHECK("boot postmortem records boot event",
+                 seed_tape_inject_count(loaded) == 1);
+        failures += check_boot_event_replay(
+            loaded, "boot postmortem replays boot event");
+        seed_tape_close(loaded);
+    }
+    return failures;
+}
+
+static int boot_install_child_checks(pid_t pid, const char *pm_dir)
+{
+    int failures = 0;
+    int status = 0;
+    pid_t got = waitpid(pid, &status, 0);
+    PM_CHECK("boot postmortem wait child", got == pid);
+    PM_CHECK("boot postmortem child SIGABRT",
+             got == pid && WIFSIGNALED(status) &&
+             WTERMSIG(status) == SIGABRT);
+
+    struct postmortem_capsule_entry entries[1];
+    size_t count = 0;
+    int rc = postmortem_capsule_list(pm_dir, entries, 1, &count);
+    PM_CHECK("boot postmortem capsule listed", rc == 0 && count == 1);
+    PM_CHECK("boot postmortem signal recorded",
+             rc == 0 && count == 1 && entries[0].crash_signal == SIGABRT);
+    if (rc == 0 && count == 1)
+        failures += boot_install_entry_checks(entries[0].path);
     return failures;
 }
 
@@ -217,60 +298,74 @@ static int test_boot_postmortem_install(void)
         PM_CHECK("boot postmortem fork", false);
     } else {
         PM_CHECK("boot postmortem fork", true);
-        int status = 0;
-        pid_t got = waitpid(pid, &status, 0);
-        PM_CHECK("boot postmortem wait child", got == pid);
-        PM_CHECK("boot postmortem child SIGABRT",
-                 got == pid && WIFSIGNALED(status) &&
-                 WTERMSIG(status) == SIGABRT);
-
-        struct postmortem_capsule_entry entries[1];
-        size_t count = 0;
-        int rc = postmortem_capsule_list(pm_dir, entries, 1, &count);
-        PM_CHECK("boot postmortem capsule listed", rc == 0 && count == 1);
-        PM_CHECK("boot postmortem signal recorded",
-                 rc == 0 && count == 1 && entries[0].crash_signal == SIGABRT);
-        if (rc == 0 && count == 1) {
-            char proc_path[576];
-            snprintf(proc_path, sizeof(proc_path), "%s/procstatus.txt",
-                     entries[0].path);
-#if defined(__linux__)
-            PM_CHECK("boot postmortem proc status captured",
-                     file_contains(proc_path, "Name:"));
-#else
-            PM_CHECK("boot postmortem proc status limitation recorded",
-                      file_contains(proc_path,
-                                    OS_SANDBOX_PROC_SELF_STATUS_PATH
-                                    " is Linux-only"));
-#endif
-            char log_path[576];
-            snprintf(log_path, sizeof(log_path), "%s/log.txt",
-                     entries[0].path);
-            PM_CHECK("boot postmortem log captured",
-                     file_contains(log_path, "boot fatal breadcrumb"));
-            seed_tape_t *loaded = postmortem_capsule_load_tape(entries[0].path);
-            PM_CHECK("boot postmortem tape loads", loaded != NULL);
-            if (loaded) {
-                PM_CHECK("boot postmortem records boot event",
-                         seed_tape_inject_count(loaded) == 1);
-                uint8_t type = 0;
-                char payload[64];
-                size_t payload_len = 0;
-                int ev_rc = seed_tape_next_event(loaded, &type, payload,
-                                                 sizeof(payload),
-                                                 &payload_len);
-                PM_CHECK("boot postmortem replays boot event",
-                         ev_rc == 0 && type == 1 &&
-                         payload_len == strlen("boot-postmortem-installed") &&
-                         memcmp(payload, "boot-postmortem-installed",
-                                payload_len) == 0);
-                seed_tape_close(loaded);
-            }
-        }
+        failures += boot_install_child_checks(pid, pm_dir);
     }
 
     boot_postmortem_shutdown_for_testing();
     test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int restart_child_exit_checks(pid_t pid)
+{
+    int failures = 0;
+    PM_CHECK("boot restart fork", true);
+    int status = 0;
+    pid_t got = waitpid(pid, &status, 0);
+    PM_CHECK("boot restart wait child", got == pid);
+    PM_CHECK("boot restart child SIGSEGV",
+             got == pid && WIFSIGNALED(status) &&
+             WTERMSIG(status) == SIGSEGV);
+    return failures;
+}
+
+static int restart_prior_capsule_checks(const char *pm_dir_copy)
+{
+    int failures = 0;
+    struct postmortem_capsule_entry entries[1];
+    size_t count = 0;
+    int rc = postmortem_capsule_list(pm_dir_copy, entries, 1, &count);
+    PM_CHECK("boot restart prior capsule listed", rc == 0 && count == 1);
+    PM_CHECK("boot restart prior capsule unpacked",
+             rc == 0 && count == 1 &&
+             strstr(entries[0].name, ".cap") != NULL &&
+             strstr(entries[0].name, ".cap.gz") == NULL);
+    if (rc == 0 && count == 1) {
+        failures += check_proc_status(
+            entries[0].path, "boot restart proc status captured",
+            "boot restart proc status limitation recorded");
+        char log_path[576];
+        snprintf(log_path, sizeof(log_path), "%s/log.txt",
+                 entries[0].path);
+        PM_CHECK("boot restart log captured",
+                 file_contains(log_path, "restart fatal breadcrumb"));
+    }
+    return failures;
+}
+
+static int restart_compressed_checks(const char *pm_dir_copy)
+{
+    int failures = 0;
+    struct postmortem_capsule_entry entries[1];
+    size_t count = 0;
+    int rc = postmortem_capsule_list(pm_dir_copy, entries, 1, &count);
+    PM_CHECK("boot restart compressed capsule listed",
+             rc == 0 && count == 1);
+    PM_CHECK("boot restart compressed capsule",
+             rc == 0 && count == 1 &&
+             strstr(entries[0].name, ".cap.gz") != NULL &&
+             entries[0].crash_signal == SIGSEGV);
+    if (rc == 0 && count == 1) {
+        seed_tape_t *loaded = postmortem_capsule_load_tape(entries[0].path);
+        PM_CHECK("boot restart compressed tape loads", loaded != NULL);
+        if (loaded) {
+            PM_CHECK("boot restart compressed tape has boot event",
+                     seed_tape_inject_count(loaded) == 1);
+            failures += check_boot_event_replay(
+                loaded, "boot restart compressed replays boot event");
+            seed_tape_close(loaded);
+        }
+    }
     return failures;
 }
 
@@ -311,74 +406,17 @@ static int test_boot_postmortem_restart_compresses_prior_sigsegv(void)
     if (pid < 0) {
         PM_CHECK("boot restart fork", false);
     } else {
-        PM_CHECK("boot restart fork", true);
-        int status = 0;
-        pid_t got = waitpid(pid, &status, 0);
-        PM_CHECK("boot restart wait child", got == pid);
-        PM_CHECK("boot restart child SIGSEGV",
-                 got == pid && WIFSIGNALED(status) &&
-                 WTERMSIG(status) == SIGSEGV);
+        failures += restart_child_exit_checks(pid);
     }
 
-    struct postmortem_capsule_entry entries[1];
-    size_t count = 0;
-    int rc = postmortem_capsule_list(pm_dir_copy, entries, 1, &count);
-    PM_CHECK("boot restart prior capsule listed", rc == 0 && count == 1);
-    PM_CHECK("boot restart prior capsule unpacked",
-             rc == 0 && count == 1 &&
-             strstr(entries[0].name, ".cap") != NULL &&
-             strstr(entries[0].name, ".cap.gz") == NULL);
-    if (rc == 0 && count == 1) {
-        char proc_path[576];
-        snprintf(proc_path, sizeof(proc_path), "%s/procstatus.txt",
-                 entries[0].path);
-#if defined(__linux__)
-        PM_CHECK("boot restart proc status captured",
-                 file_contains(proc_path, "Name:"));
-#else
-        PM_CHECK("boot restart proc status limitation recorded",
-                  file_contains(proc_path,
-                                OS_SANDBOX_PROC_SELF_STATUS_PATH
-                                " is Linux-only"));
-#endif
-        char log_path[576];
-        snprintf(log_path, sizeof(log_path), "%s/log.txt",
-                 entries[0].path);
-        PM_CHECK("boot restart log captured",
-                 file_contains(log_path, "restart fatal breadcrumb"));
-    }
+    failures += restart_prior_capsule_checks(pm_dir_copy);
 
     boot_postmortem_shutdown_for_testing();
 
     ok = boot_postmortem_init_for_testing(dir);
     pm_dir = boot_postmortem_dir_for_testing();
     PM_CHECK("boot restart second init", ok && pm_dir != NULL);
-    rc = postmortem_capsule_list(pm_dir_copy, entries, 1, &count);
-    PM_CHECK("boot restart compressed capsule listed",
-             rc == 0 && count == 1);
-    PM_CHECK("boot restart compressed capsule",
-             rc == 0 && count == 1 &&
-             strstr(entries[0].name, ".cap.gz") != NULL &&
-             entries[0].crash_signal == SIGSEGV);
-    if (rc == 0 && count == 1) {
-        seed_tape_t *loaded = postmortem_capsule_load_tape(entries[0].path);
-        PM_CHECK("boot restart compressed tape loads", loaded != NULL);
-        if (loaded) {
-            PM_CHECK("boot restart compressed tape has boot event",
-                     seed_tape_inject_count(loaded) == 1);
-            uint8_t type = 0;
-            char payload[64];
-            size_t payload_len = 0;
-            int ev_rc = seed_tape_next_event(loaded, &type, payload,
-                                             sizeof(payload), &payload_len);
-            PM_CHECK("boot restart compressed replays boot event",
-                     ev_rc == 0 && type == 1 &&
-                     payload_len == strlen("boot-postmortem-installed") &&
-                     memcmp(payload, "boot-postmortem-installed",
-                            payload_len) == 0);
-            seed_tape_close(loaded);
-        }
-    }
+    failures += restart_compressed_checks(pm_dir_copy);
 
     boot_postmortem_shutdown_for_testing();
     test_rm_rf_recursive(dir);
@@ -446,6 +484,72 @@ static int test_capsule_prune(void)
     return failures;
 }
 
+static int compress_archive_checks(const char *cap_path, const char *gz_path,
+                                   int rc)
+{
+    int failures = 0;
+    PM_CHECK("compress returns 0", rc == 0);
+    PM_CHECK("compress writes .cap.gz",
+             rc == 0 && strstr(gz_path, ".cap.gz") != NULL);
+    struct stat st;
+    PM_CHECK("compress removes unpacked dir", stat(cap_path, &st) != 0);
+    PM_CHECK("compress leaves archive",
+             rc == 0 && stat(gz_path, &st) == 0 && S_ISREG(st.st_mode));
+    PM_CHECK("compressed capsule validates",
+             rc == 0 && postmortem_capsule_validate(gz_path));
+    return failures;
+}
+
+static int compress_loaded_tape_checks(const char *gz_path, int rc)
+{
+    int failures = 0;
+    seed_tape_t *loaded = rc == 0 ? postmortem_capsule_load_tape(gz_path)
+                                  : NULL;
+    PM_CHECK("compressed tape loads", loaded != NULL);
+    if (loaded) {
+        PM_CHECK("compressed tape preserves inject count",
+                 seed_tape_inject_count(loaded) == 1);
+        seed_tape_close(loaded);
+    }
+    return failures;
+}
+
+static int compress_list_checks(const char *dir, seed_tape_t *tape)
+{
+    int failures = 0;
+    struct postmortem_capsule_entry entries[1];
+    size_t count = 0;
+    int rc = postmortem_capsule_list(dir, entries, 1, &count);
+    PM_CHECK("compressed capsule listed", rc == 0 && count == 1);
+    PM_CHECK("compressed list metadata",
+             rc == 0 && count == 1 &&
+             strstr(entries[0].name, ".cap.gz") != NULL &&
+             entries[0].crash_signal == 11 &&
+             entries[0].tape_size_bytes == seed_tape_size_bytes(tape));
+    return failures;
+}
+
+static int compress_unpacked_checks(const char *dir,
+                                    struct postmortem_capture_opts *opts,
+                                    char *cap_path, size_t cap_len)
+{
+    int failures = 0;
+    int rc = postmortem_capture_write(opts, cap_path, cap_len);
+    PM_CHECK("compress-unpacked seed capture", rc == 0);
+    size_t compressed = 0;
+    rc = postmortem_capsule_compress_unpacked(dir, &compressed);
+    PM_CHECK("compress-unpacked returns 0", rc == 0);
+    PM_CHECK("compress-unpacked archives one", compressed == 1);
+    size_t count = 0;
+    struct postmortem_capsule_entry two_entries[2];
+    rc = postmortem_capsule_list(dir, two_entries, 2, &count);
+    PM_CHECK("compress-unpacked list sees two archives",
+             rc == 0 && count == 2 &&
+             strstr(two_entries[0].name, ".cap.gz") != NULL &&
+             strstr(two_entries[1].name, ".cap.gz") != NULL);
+    return failures;
+}
+
 static int test_capsule_compress(void)
 {
     int failures = 0;
@@ -479,49 +583,13 @@ static int test_capsule_compress(void)
 
     char gz_path[576];
     rc = postmortem_capsule_compress(cap_path, gz_path, sizeof(gz_path));
-    PM_CHECK("compress returns 0", rc == 0);
-    PM_CHECK("compress writes .cap.gz",
-             rc == 0 && strstr(gz_path, ".cap.gz") != NULL);
-    struct stat st;
-    PM_CHECK("compress removes unpacked dir", stat(cap_path, &st) != 0);
-    PM_CHECK("compress leaves archive",
-             rc == 0 && stat(gz_path, &st) == 0 && S_ISREG(st.st_mode));
-    PM_CHECK("compressed capsule validates",
-             rc == 0 && postmortem_capsule_validate(gz_path));
-
-    seed_tape_t *loaded = rc == 0 ? postmortem_capsule_load_tape(gz_path)
-                                  : NULL;
-    PM_CHECK("compressed tape loads", loaded != NULL);
-    if (loaded) {
-        PM_CHECK("compressed tape preserves inject count",
-                 seed_tape_inject_count(loaded) == 1);
-        seed_tape_close(loaded);
-    }
-
-    struct postmortem_capsule_entry entries[1];
-    size_t count = 0;
-    rc = postmortem_capsule_list(dir, entries, 1, &count);
-    PM_CHECK("compressed capsule listed", rc == 0 && count == 1);
-    PM_CHECK("compressed list metadata",
-             rc == 0 && count == 1 &&
-             strstr(entries[0].name, ".cap.gz") != NULL &&
-             entries[0].crash_signal == 11 &&
-             entries[0].tape_size_bytes == seed_tape_size_bytes(tape));
+    failures += compress_archive_checks(cap_path, gz_path, rc);
+    failures += compress_loaded_tape_checks(gz_path, rc);
+    failures += compress_list_checks(dir, tape);
 
     opts.crash_unix = 1779667124;
-    rc = postmortem_capture_write(&opts, cap_path, sizeof(cap_path));
-    PM_CHECK("compress-unpacked seed capture", rc == 0);
-    size_t compressed = 0;
-    rc = postmortem_capsule_compress_unpacked(dir, &compressed);
-    PM_CHECK("compress-unpacked returns 0", rc == 0);
-    PM_CHECK("compress-unpacked archives one", compressed == 1);
-    count = 0;
-    struct postmortem_capsule_entry two_entries[2];
-    rc = postmortem_capsule_list(dir, two_entries, 2, &count);
-    PM_CHECK("compress-unpacked list sees two archives",
-             rc == 0 && count == 2 &&
-             strstr(two_entries[0].name, ".cap.gz") != NULL &&
-             strstr(two_entries[1].name, ".cap.gz") != NULL);
+    failures += compress_unpacked_checks(dir, &opts, cap_path,
+                                         sizeof(cap_path));
 
     size_t pruned = 0;
     rc = postmortem_capsule_prune(dir, 1779668000, 1, 100, &pruned);
