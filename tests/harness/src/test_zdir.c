@@ -69,59 +69,196 @@ static void mk_host(char *out, size_t n, char c)
 
 /* ── (1) codec ────────────────────────────────────────────────────── */
 
+/* Print the verdict for one check ("OK" or "FAIL") and return 1 on a failure,
+ * so a caller can write `failures += zdir_verdict(ok)`. */
+static int zdir_verdict(bool ok)
+{
+    if (ok) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+static bool zdir_rt_fixture_ok(const char *host)
+{
+    return strlen(host) == ZDIR_HOSTNAME_LEN && onion_hostname_valid(host);
+}
+
+static bool zdir_rt_register_unbound(const char *host)
+{
+    uint8_t buf[256];
+    struct zdir_message m;
+    size_t n = zdir_build_register(buf, sizeof(buf), host, NULL);
+    return n > 0 && zdir_parse(buf, n, &m) &&
+           m.version == ZDIR_VERSION &&
+           m.command == ZDIR_CMD_REGISTER &&
+           strcmp(m.hostname, host) == 0 && !m.has_pubkey;
+}
+
+/* Prints its own verdict: a failure reports the encoded length. */
+static int zdir_rt_register_bound(const char *host)
+{
+    uint8_t buf[256], key[ZDIR_PUBKEY_LEN];
+    struct zdir_message m;
+    memset(key, 0x5c, sizeof(key));
+    size_t n = zdir_build_register(buf, sizeof(buf), host, key);
+    bool ok = n > 0 && n <= ZDIR_SCRIPT_MAX && n <= MAX_OP_RETURN_RELAY &&
+              zdir_parse(buf, n, &m) &&
+              m.command == ZDIR_CMD_REGISTER && m.has_pubkey &&
+              memcmp(m.pubkey, key, ZDIR_PUBKEY_LEN) == 0;
+    if (ok) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (len=%zu)\n", n);
+    return 1;
+}
+
+static bool zdir_rt_deregister(const char *host)
+{
+    uint8_t buf[256];
+    struct zdir_message m;
+    size_t n = zdir_build_deregister(buf, sizeof(buf), host);
+    return n > 0 && zdir_parse(buf, n, &m) &&
+           m.command == ZDIR_CMD_DEREGISTER && !m.has_pubkey;
+}
+
+static bool zdir_rt_command_names(void)
+{
+    return zdir_command_valid(ZDIR_CMD_REGISTER) &&
+           zdir_command_valid(ZDIR_CMD_DEREGISTER) &&
+           !zdir_command_valid(ZDIR_CMD_INVALID) &&
+           !zdir_command_valid(3) &&      /* RESERVED for TRANSFER */
+           !zdir_command_valid(255) &&
+           strcmp(zdir_command_name(ZDIR_CMD_REGISTER),
+                  "register") == 0 &&
+           strcmp(zdir_command_name(ZDIR_CMD_DEREGISTER),
+                  "deregister") == 0 &&
+           strcmp(zdir_command_name(3), "unknown") == 0;
+}
+
 static int zdir_codec_roundtrip(void)
 {
     int failures = 0;
     char host[64];
-    uint8_t buf[256];
-    struct zdir_message m;
 
     mk_host(host, sizeof(host), 'a');
 
     printf("zdir: the hostname fixture passes the node's v3 rule... ");
-    { bool ok = strlen(host) == ZDIR_HOSTNAME_LEN &&
-                onion_hostname_valid(host);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_rt_fixture_ok(host));
 
     printf("zdir: REGISTER (unbound) round-trips... ");
-    { size_t n = zdir_build_register(buf, sizeof(buf), host, NULL);
-      bool ok = n > 0 && zdir_parse(buf, n, &m) &&
-                m.version == ZDIR_VERSION &&
-                m.command == ZDIR_CMD_REGISTER &&
-                strcmp(m.hostname, host) == 0 && !m.has_pubkey;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_rt_register_unbound(host));
 
     printf("zdir: REGISTER (key-bound) round-trips... ");
-    { uint8_t key[ZDIR_PUBKEY_LEN];
-      memset(key, 0x5c, sizeof(key));
-      size_t n = zdir_build_register(buf, sizeof(buf), host, key);
-      bool ok = n > 0 && n <= ZDIR_SCRIPT_MAX && n <= MAX_OP_RETURN_RELAY &&
-                zdir_parse(buf, n, &m) &&
-                m.command == ZDIR_CMD_REGISTER && m.has_pubkey &&
-                memcmp(m.pubkey, key, ZDIR_PUBKEY_LEN) == 0;
-      if (ok) printf("OK\n");
-      else { printf("FAIL (len=%zu)\n", n); failures++; } }
+    failures += zdir_rt_register_bound(host);
 
     printf("zdir: DEREGISTER round-trips and carries no key... ");
-    { size_t n = zdir_build_deregister(buf, sizeof(buf), host);
-      bool ok = n > 0 && zdir_parse(buf, n, &m) &&
-                m.command == ZDIR_CMD_DEREGISTER && !m.has_pubkey;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_rt_deregister(host));
 
     printf("zdir: command names + validity map... ");
-    { bool ok = zdir_command_valid(ZDIR_CMD_REGISTER) &&
-                zdir_command_valid(ZDIR_CMD_DEREGISTER) &&
-                !zdir_command_valid(ZDIR_CMD_INVALID) &&
-                !zdir_command_valid(3) &&      /* RESERVED for TRANSFER */
-                !zdir_command_valid(255) &&
-                strcmp(zdir_command_name(ZDIR_CMD_REGISTER),
-                       "register") == 0 &&
-                strcmp(zdir_command_name(ZDIR_CMD_DEREGISTER),
-                       "deregister") == 0 &&
-                strcmp(zdir_command_name(3), "unknown") == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_rt_command_names());
 
     return failures;
+}
+
+/* The builder refuses every malformed hostname: NULL, empty, short, uppercase,
+ * digits outside base32, and a wrong suffix. */
+static bool zdir_rej_hostnames(void)
+{
+    char bad[80];
+    uint8_t o[256];
+    bool ok = zdir_build_register(o, sizeof(o), NULL, NULL) == 0 &&
+              zdir_build_register(o, sizeof(o), "", NULL) == 0 &&
+              zdir_build_register(o, sizeof(o), "short.onion", NULL) == 0;
+    mk_host(bad, sizeof(bad), 'A');            /* uppercase */
+    ok = ok && zdir_build_register(o, sizeof(o), bad, NULL) == 0;
+    mk_host(bad, sizeof(bad), '1');            /* not in base32 a-z2-7 */
+    ok = ok && zdir_build_register(o, sizeof(o), bad, NULL) == 0;
+    mk_host(bad, sizeof(bad), '8');            /* not in base32 a-z2-7 */
+    ok = ok && zdir_build_register(o, sizeof(o), bad, NULL) == 0;
+    mk_host(bad, sizeof(bad), 'a');
+    memcpy(bad + 56, ".union", 6);             /* wrong suffix */
+    ok = ok && zdir_build_register(o, sizeof(o), bad, NULL) == 0;
+    return ok;
+}
+
+/* The builder refuses an all-zero key and a buffer too small for the script. */
+static bool zdir_rej_builder_args(const char *host, uint8_t *buf, size_t cap)
+{
+    uint8_t zero[ZDIR_PUBKEY_LEN] = {0};
+    uint8_t small[8];
+    return zdir_build_register(buf, cap, host, zero) == 0 &&
+           zdir_build_register(small, sizeof(small), host, NULL) == 0 &&
+           zdir_build_register(NULL, 64, host, NULL) == 0;
+}
+
+static bool zdir_rej_parser_args(const uint8_t *buf, size_t base)
+{
+    struct zdir_message m;
+    uint8_t nots[8] = {0x76, 0x04, 'Z', 'D', 'I', 'R'};
+    return !zdir_parse(buf, base, NULL) &&
+           !zdir_parse(NULL, base, &m) &&
+           !zdir_parse(buf, 0, &m) &&
+           !zdir_parse(nots, sizeof(nots), &m);
+}
+
+/* Copy the first `base` bytes of a valid script, set one byte to `byte`, and
+ * report whether the parser refuses the first `len` bytes of that copy. */
+static bool zdir_mutant_refused(const uint8_t *buf, size_t base, size_t off,
+                                uint8_t byte, size_t len)
+{
+    struct zdir_message m;
+    uint8_t bad[256];
+    memcpy(bad, buf, base);
+    bad[off] = byte;
+    return !zdir_parse(bad, len, &m);
+}
+
+static bool zdir_rej_truncations(const uint8_t *buf, size_t base)
+{
+    struct zdir_message m;
+    bool ok = true;
+    for (size_t cut = 1; cut < base; cut++)
+        ok = ok && !zdir_parse(buf, cut, &m);
+    return ok;
+}
+
+/* `base` ends with the canonical EMPTY key push (one 0x00 byte). Swapping
+ * that last byte for a sized push is how these cases are built. */
+static bool zdir_rej_key_sizes(const uint8_t *buf, size_t base)
+{
+    struct zdir_message m;
+    uint8_t bad[256];
+    size_t n = base - 1;
+    memcpy(bad, buf, n);
+    bad[n++] = 31;                    /* 31 bytes is neither 0 nor 32 */
+    memset(bad + n, 0x11, 31);
+    n += 31;
+    bool ok = !zdir_parse(bad, n, &m);
+
+    n = base - 1;
+    memcpy(bad, buf, n);
+    bad[n++] = 32;                    /* all-zero 32-byte key is not a key */
+    memset(bad + n, 0x00, 32);
+    n += 32;
+    ok = ok && !zdir_parse(bad, n, &m);
+    return ok;
+}
+
+static bool zdir_rej_dereg_key(const char *host)
+{
+    struct zdir_message m;
+    uint8_t d[256], bad[256];
+    size_t dn = zdir_build_deregister(d, sizeof(d), host);
+    size_t n = dn - 1;
+    memcpy(bad, d, n);
+    bad[n++] = 32;
+    memset(bad + n, 0x42, 32);
+    n += 32;
+    return dn > 0 && !zdir_parse(bad, n, &m);
 }
 
 static int zdir_codec_rejections(void)
@@ -129,121 +266,50 @@ static int zdir_codec_rejections(void)
     int failures = 0;
     char host[64];
     uint8_t buf[256];
-    struct zdir_message m;
 
     mk_host(host, sizeof(host), 'a');
     size_t base = zdir_build_register(buf, sizeof(buf), host, NULL);
 
     printf("zdir: builder refuses every malformed hostname... ");
-    { char bad[80];
-      uint8_t o[256];
-      bool ok = zdir_build_register(o, sizeof(o), NULL, NULL) == 0 &&
-                zdir_build_register(o, sizeof(o), "", NULL) == 0 &&
-                zdir_build_register(o, sizeof(o), "short.onion", NULL) == 0;
-      mk_host(bad, sizeof(bad), 'A');            /* uppercase */
-      ok = ok && zdir_build_register(o, sizeof(o), bad, NULL) == 0;
-      mk_host(bad, sizeof(bad), '1');            /* not in base32 a-z2-7 */
-      ok = ok && zdir_build_register(o, sizeof(o), bad, NULL) == 0;
-      mk_host(bad, sizeof(bad), '8');            /* not in base32 a-z2-7 */
-      ok = ok && zdir_build_register(o, sizeof(o), bad, NULL) == 0;
-      mk_host(bad, sizeof(bad), 'a');
-      memcpy(bad + 56, ".union", 6);             /* wrong suffix */
-      ok = ok && zdir_build_register(o, sizeof(o), bad, NULL) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_rej_hostnames());
 
     printf("zdir: builder refuses an all-zero key and a tiny buffer... ");
-    { uint8_t zero[ZDIR_PUBKEY_LEN] = {0};
-      uint8_t small[8];
-      bool ok = zdir_build_register(buf, sizeof(buf), host, zero) == 0 &&
-                zdir_build_register(small, sizeof(small), host, NULL) == 0 &&
-                zdir_build_register(NULL, 64, host, NULL) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_rej_builder_args(host, buf, sizeof(buf)));
 
     printf("zdir: parser refuses NULL args and a non-OP_RETURN script... ");
-    { uint8_t nots[8] = {0x76, 0x04, 'Z', 'D', 'I', 'R'};
-      bool ok = !zdir_parse(buf, base, NULL) &&
-                !zdir_parse(NULL, base, &m) &&
-                !zdir_parse(buf, 0, &m) &&
-                !zdir_parse(nots, sizeof(nots), &m);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_rej_parser_args(buf, base));
 
     printf("zdir: parser refuses a foreign lokad... ");
-    { uint8_t bad[256];
-      memcpy(bad, buf, base);
-      bad[2] = 'Y';                              /* "YDIR" */
-      bool ok = !zdir_parse(bad, base, &m);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_mutant_refused(buf, base, 2, 'Y', base));
 
     printf("zdir: parser refuses a wrong version byte... ");
-    { uint8_t bad[256];
-      memcpy(bad, buf, base);
-      bad[7] = ZDIR_VERSION + 1;                 /* [0x6a][01 4 lokad][01 v] */
-      bool ok = !zdir_parse(bad, base, &m);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_mutant_refused(buf, base, 7,
+                                                 (uint8_t)(ZDIR_VERSION + 1),
+                                                 base));
 
     printf("zdir: parser refuses the RESERVED command byte 3 (TRANSFER)... ");
-    { uint8_t bad[256];
-      memcpy(bad, buf, base);
-      bad[9] = 3;
-      bool ok = !zdir_parse(bad, base, &m);
-      bad[9] = 0;
-      ok = ok && !zdir_parse(bad, base, &m);
-      bad[9] = 200;
-      ok = ok && !zdir_parse(bad, base, &m);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(
+        zdir_mutant_refused(buf, base, 9, 3, base) &&
+        zdir_mutant_refused(buf, base, 9, 0, base) &&
+        zdir_mutant_refused(buf, base, 9, 200, base));
 
     printf("zdir: parser refuses a hostname that fails the v3 rule... ");
-    { uint8_t bad[256];
-      memcpy(bad, buf, base);
-      bad[11] = 'A';           /* first hostname byte, uppercase */
-      bool ok = !zdir_parse(bad, base, &m);
-      memcpy(bad, buf, base);
-      bad[11] = '1';           /* outside a-z2-7 */
-      ok = ok && !zdir_parse(bad, base, &m);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(
+        zdir_mutant_refused(buf, base, 11, 'A', base) &&   /* uppercase */
+        zdir_mutant_refused(buf, base, 11, '1', base));    /* outside a-z2-7 */
 
     printf("zdir: parser refuses a truncated script... ");
-    { bool ok = true;
-      for (size_t cut = 1; cut < base; cut++)
-          ok = ok && !zdir_parse(buf, cut, &m);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_rej_truncations(buf, base));
 
     printf("zdir: parser refuses trailing bytes... ");
-    { uint8_t bad[256];
-      memcpy(bad, buf, base);
-      bad[base] = 0x00;
-      bool ok = !zdir_parse(bad, base + 1, &m);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_mutant_refused(buf, base, base, 0x00,
+                                                 base + 1));
 
-    /* `base` ends with the canonical EMPTY key push (one 0x00 byte). Swapping
-     * that last byte for a sized push is how these cases are built. */
     printf("zdir: parser refuses a mis-sized / zero key push... ");
-    { uint8_t bad[256];
-      size_t n = base - 1;
-      memcpy(bad, buf, n);
-      bad[n++] = 31;                    /* 31 bytes is neither 0 nor 32 */
-      memset(bad + n, 0x11, 31);
-      n += 31;
-      bool ok = !zdir_parse(bad, n, &m);
-
-      n = base - 1;
-      memcpy(bad, buf, n);
-      bad[n++] = 32;                    /* all-zero 32-byte key is not a key */
-      memset(bad + n, 0x00, 32);
-      n += 32;
-      ok = ok && !zdir_parse(bad, n, &m);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_rej_key_sizes(buf, base));
 
     printf("zdir: parser refuses a key push on DEREGISTER... ");
-    { uint8_t d[256], bad[256];
-      size_t dn = zdir_build_deregister(d, sizeof(d), host);
-      size_t n = dn - 1;
-      memcpy(bad, d, n);
-      bad[n++] = 32;
-      memset(bad + n, 0x42, 32);
-      n += 32;
-      bool ok = dn > 0 && !zdir_parse(bad, n, &m);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_verdict(zdir_rej_dereg_key(host));
 
     return failures;
 }
@@ -261,6 +327,124 @@ static void mk_row(struct db_onion_directory *r, char c, int32_t height,
     snprintf(r->status, sizeof(r->status), "%s", status);
     if (owner) snprintf(r->owner_address, sizeof(r->owner_address), "%s",
                         owner);
+}
+
+/* Save then find one full row: every column comes back, including the key. */
+static int zdir_model_save_find(struct node_db *ndb)
+{
+    struct db_onion_directory r;
+    mk_row(&r, 'b', 900, ONION_DIRECTORY_STATUS_ACTIVE,
+           "t1KpuGw6vqrARbCsRWcxNBQGGXpiCDeqZuS");
+    memset(r.master_pubkey, 0x7e, 32);
+    r.has_pubkey = true;
+    r.updated_height = 950;
+
+    printf("zdir: save + find round-trips every field... ");
+    struct db_onion_directory got;
+    memset(&got, 0xff, sizeof(got));
+    bool ok = db_onion_directory_save(ndb, &r) &&
+              db_onion_directory_find(ndb, r.hostname, &got) &&
+              strcmp(got.hostname, r.hostname) == 0 &&
+              memcmp(got.txid, r.txid, 32) == 0 &&
+              got.height == 900 && got.updated_height == 950 &&
+              strcmp(got.owner_address, r.owner_address) == 0 &&
+              got.has_pubkey &&
+              memcmp(got.master_pubkey, r.master_pubkey, 32) == 0 &&
+              strcmp(got.status, ONION_DIRECTORY_STATUS_ACTIVE) == 0;
+    return zdir_verdict(ok);
+}
+
+static int zdir_model_null_columns(struct node_db *ndb)
+{
+    printf("zdir: the NULL-column form (no owner, no key) round-trips... ");
+    struct db_onion_directory n, got;
+    mk_row(&n, 'c', 100, ONION_DIRECTORY_STATUS_ACTIVE, NULL);
+    memset(&got, 0xff, sizeof(got));
+    bool ok = db_onion_directory_save(ndb, &n) &&
+              db_onion_directory_find(ndb, n.hostname, &got) &&
+              got.owner_address[0] == '\0' && !got.has_pubkey;
+    return zdir_verdict(ok);
+}
+
+static int zdir_model_find_misses(struct node_db *ndb)
+{
+    printf("zdir: find misses on an unknown hostname... ");
+    struct db_onion_directory got;
+    char other[64];
+    mk_host(other, sizeof(other), 'd');
+    bool ok = !db_onion_directory_find(ndb, other, &got) &&
+              !db_onion_directory_find(ndb, "", &got) &&
+              !db_onion_directory_find(ndb, NULL, &got);
+    return zdir_verdict(ok);
+}
+
+static int zdir_model_validator(struct node_db *ndb)
+{
+    printf("zdir: validator rejects a bad hostname / status / key / height"
+           "... ");
+    int64_t before = db_onion_directory_count(ndb);
+    struct db_onion_directory bad;
+
+    mk_row(&bad, 'e', 10, ONION_DIRECTORY_STATUS_ACTIVE, NULL);
+    snprintf(bad.hostname, sizeof(bad.hostname), "nope.onion");
+    bool ok = !db_onion_directory_save(ndb, &bad);
+
+    mk_row(&bad, 'e', 10, "gone", NULL);        /* unknown status */
+    ok = ok && !db_onion_directory_save(ndb, &bad);
+
+    mk_row(&bad, 'e', 10, ONION_DIRECTORY_STATUS_ACTIVE, NULL);
+    bad.has_pubkey = true;                      /* present but all-zero */
+    ok = ok && !db_onion_directory_save(ndb, &bad);
+
+    mk_row(&bad, 'e', -1, ONION_DIRECTORY_STATUS_ACTIVE, NULL);
+    ok = ok && !db_onion_directory_save(ndb, &bad);
+
+    ok = ok && !db_onion_directory_save(ndb, NULL);
+    ok = ok && db_onion_directory_count(ndb) == before;
+    return zdir_verdict(ok);
+}
+
+static int zdir_model_list_active(struct node_db *ndb)
+{
+    printf("zdir: list_active skips retired rows, MOST SENIOR first... ");
+    struct db_onion_directory dead;
+    mk_row(&dead, 'f', 5000, ONION_DIRECTORY_STATUS_RETIRED, NULL);
+    struct db_onion_directory page[8];
+    memset(page, 0, sizeof(page));
+    int n = 0;
+    bool ok = db_onion_directory_save(ndb, &dead);
+    n = db_onion_directory_list_active(ndb, page, 8, 0);
+    /* 'b' at h=900 and 'c' at h=100 are active; 'f' at h=5000 is not.
+     * `height` is the REGISTRATION height, i.e. the seniority signal, so
+     * the senior row (h=100) comes first. This used to assert DESC —
+     * newest-first — which, on a bounded page the caller intends to dial,
+     * let a burst of cheap fresh registrations take every slot and evict
+     * every long-standing node. */
+    ok = ok && n == 2 && page[0].height == 100 && page[1].height == 900;
+    ok = ok && db_onion_directory_list_active(ndb, page, 1, 0) == 1 &&
+               page[0].height == 100;
+    ok = ok && db_onion_directory_list_active(ndb, page, 8, 1) == 1 &&
+               page[0].height == 900;
+    ok = ok && db_onion_directory_list_active(ndb, page, 0, 0) == 0;
+    ok = ok && db_onion_directory_list_active(ndb, page, 8, -1) == 0;
+    ok = ok && db_onion_directory_list_active(ndb, NULL, 8, 0) == 0;
+    if (ok) printf("OK\n");
+    else { printf("FAIL (n=%d)\n", n); return 1; }
+    return 0;
+}
+
+static int zdir_model_counts(struct node_db *ndb)
+{
+    printf("zdir: counts by status, then truncate empties the table... ");
+    bool ok = db_onion_directory_count(ndb) == 3 &&
+              db_onion_directory_count_by_status(
+                  ndb, ONION_DIRECTORY_STATUS_ACTIVE) == 2 &&
+              db_onion_directory_count_by_status(
+                  ndb, ONION_DIRECTORY_STATUS_RETIRED) == 1 &&
+              db_onion_directory_count_by_status(ndb, "") == 0 &&
+              db_onion_directory_truncate(ndb) &&
+              db_onion_directory_count(ndb) == 0;
+    return zdir_verdict(ok);
 }
 
 static int zdir_schema_and_model(void)
@@ -289,103 +473,12 @@ static int zdir_schema_and_model(void)
       if (t == 1 && i == 1) printf("OK\n");
       else { printf("FAIL (table=%d index=%d)\n", t, i); failures++; } }
 
-    struct db_onion_directory r;
-    mk_row(&r, 'b', 900, ONION_DIRECTORY_STATUS_ACTIVE,
-           "t1KpuGw6vqrARbCsRWcxNBQGGXpiCDeqZuS");
-    memset(r.master_pubkey, 0x7e, 32);
-    r.has_pubkey = true;
-    r.updated_height = 950;
-
-    printf("zdir: save + find round-trips every field... ");
-    { struct db_onion_directory got;
-      memset(&got, 0xff, sizeof(got));
-      bool ok = db_onion_directory_save(&ndb, &r) &&
-                db_onion_directory_find(&ndb, r.hostname, &got) &&
-                strcmp(got.hostname, r.hostname) == 0 &&
-                memcmp(got.txid, r.txid, 32) == 0 &&
-                got.height == 900 && got.updated_height == 950 &&
-                strcmp(got.owner_address, r.owner_address) == 0 &&
-                got.has_pubkey &&
-                memcmp(got.master_pubkey, r.master_pubkey, 32) == 0 &&
-                strcmp(got.status, ONION_DIRECTORY_STATUS_ACTIVE) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir: the NULL-column form (no owner, no key) round-trips... ");
-    { struct db_onion_directory n, got;
-      mk_row(&n, 'c', 100, ONION_DIRECTORY_STATUS_ACTIVE, NULL);
-      memset(&got, 0xff, sizeof(got));
-      bool ok = db_onion_directory_save(&ndb, &n) &&
-                db_onion_directory_find(&ndb, n.hostname, &got) &&
-                got.owner_address[0] == '\0' && !got.has_pubkey;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir: find misses on an unknown hostname... ");
-    { struct db_onion_directory got;
-      char other[64];
-      mk_host(other, sizeof(other), 'd');
-      bool ok = !db_onion_directory_find(&ndb, other, &got) &&
-                !db_onion_directory_find(&ndb, "", &got) &&
-                !db_onion_directory_find(&ndb, NULL, &got);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir: validator rejects a bad hostname / status / key / height"
-           "... ");
-    { int64_t before = db_onion_directory_count(&ndb);
-      struct db_onion_directory bad;
-
-      mk_row(&bad, 'e', 10, ONION_DIRECTORY_STATUS_ACTIVE, NULL);
-      snprintf(bad.hostname, sizeof(bad.hostname), "nope.onion");
-      bool ok = !db_onion_directory_save(&ndb, &bad);
-
-      mk_row(&bad, 'e', 10, "gone", NULL);        /* unknown status */
-      ok = ok && !db_onion_directory_save(&ndb, &bad);
-
-      mk_row(&bad, 'e', 10, ONION_DIRECTORY_STATUS_ACTIVE, NULL);
-      bad.has_pubkey = true;                      /* present but all-zero */
-      ok = ok && !db_onion_directory_save(&ndb, &bad);
-
-      mk_row(&bad, 'e', -1, ONION_DIRECTORY_STATUS_ACTIVE, NULL);
-      ok = ok && !db_onion_directory_save(&ndb, &bad);
-
-      ok = ok && !db_onion_directory_save(&ndb, NULL);
-      ok = ok && db_onion_directory_count(&ndb) == before;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir: list_active skips retired rows, MOST SENIOR first... ");
-    { struct db_onion_directory dead;
-      mk_row(&dead, 'f', 5000, ONION_DIRECTORY_STATUS_RETIRED, NULL);
-      struct db_onion_directory page[8];
-      memset(page, 0, sizeof(page));
-      int n = 0;
-      bool ok = db_onion_directory_save(&ndb, &dead);
-      n = db_onion_directory_list_active(&ndb, page, 8, 0);
-      /* 'b' at h=900 and 'c' at h=100 are active; 'f' at h=5000 is not.
-       * `height` is the REGISTRATION height, i.e. the seniority signal, so
-       * the senior row (h=100) comes first. This used to assert DESC —
-       * newest-first — which, on a bounded page the caller intends to dial,
-       * let a burst of cheap fresh registrations take every slot and evict
-       * every long-standing node. */
-      ok = ok && n == 2 && page[0].height == 100 && page[1].height == 900;
-      ok = ok && db_onion_directory_list_active(&ndb, page, 1, 0) == 1 &&
-                 page[0].height == 100;
-      ok = ok && db_onion_directory_list_active(&ndb, page, 8, 1) == 1 &&
-                 page[0].height == 900;
-      ok = ok && db_onion_directory_list_active(&ndb, page, 0, 0) == 0;
-      ok = ok && db_onion_directory_list_active(&ndb, page, 8, -1) == 0;
-      ok = ok && db_onion_directory_list_active(&ndb, NULL, 8, 0) == 0;
-      if (ok) printf("OK\n");
-      else { printf("FAIL (n=%d)\n", n); failures++; } }
-
-    printf("zdir: counts by status, then truncate empties the table... ");
-    { bool ok = db_onion_directory_count(&ndb) == 3 &&
-                db_onion_directory_count_by_status(
-                    &ndb, ONION_DIRECTORY_STATUS_ACTIVE) == 2 &&
-                db_onion_directory_count_by_status(
-                    &ndb, ONION_DIRECTORY_STATUS_RETIRED) == 1 &&
-                db_onion_directory_count_by_status(&ndb, "") == 0 &&
-                db_onion_directory_truncate(&ndb) &&
-                db_onion_directory_count(&ndb) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_model_save_find(&ndb);
+    failures += zdir_model_null_columns(&ndb);
+    failures += zdir_model_find_misses(&ndb);
+    failures += zdir_model_validator(&ndb);
+    failures += zdir_model_list_active(&ndb);
+    failures += zdir_model_counts(&ndb);
 
     node_db_close(&ndb);
     return failures;
@@ -461,6 +554,124 @@ static int zdir_registry_adoption(void)
     return failures;
 }
 
+/* Two spendable outputs per signer lets each later transaction resolve its
+ * signer: 8 outpoints owned by `owner`, 4 by `stranger`. */
+static void zdir_ingest_seed(struct node_db *ndb)
+{
+    uint8_t owner[20], stranger[20];
+    memset(owner, 0x41, 20);
+    memset(stranger, 0x42, 20);
+    for (uint8_t i = 0; i < 8; i++)
+        seed_owner_utxo(ndb, (uint8_t)(0xA0 + i), 0, owner, 10);
+    for (uint8_t i = 0; i < 4; i++)
+        seed_owner_utxo(ndb, (uint8_t)(0xB0 + i), 0, stranger, 10);
+}
+
+static int zdir_ingest_register_lands(struct node_db *ndb, const char *host,
+                                      const uint8_t *key,
+                                      const uint8_t *reg_script,
+                                      size_t reg_len)
+{
+    printf("zdir ingest: a ZDIR REGISTER in a block lands one active row... ");
+    run_op(ndb, reg_script, reg_len, 0xA0, 500);
+    struct db_onion_directory got;
+    bool ok = db_onion_directory_count(ndb) == 1 &&
+              db_onion_directory_find(ndb, host, &got) &&
+              got.height == 500 && got.updated_height == 500 &&
+              got.has_pubkey &&
+              memcmp(got.master_pubkey, key, 32) == 0 &&
+              got.owner_address[0] != '\0' &&
+              strcmp(got.status, ONION_DIRECTORY_STATUS_ACTIVE) == 0;
+    return zdir_verdict(ok);
+}
+
+static int zdir_ingest_stranger_register(struct node_db *ndb, const char *host,
+                                         const uint8_t *reg_script,
+                                         size_t reg_len)
+{
+    printf("zdir ingest: a stranger cannot re-register the hostname... ");
+    struct db_onion_directory before, after;
+    db_onion_directory_find(ndb, host, &before);
+    run_op(ndb, reg_script, reg_len, 0xB0, 501);
+    bool ok = db_onion_directory_find(ndb, host, &after) &&
+              memcmp(&before, &after, sizeof(before)) == 0;
+    return zdir_verdict(ok);
+}
+
+static int zdir_ingest_stranger_deregister(struct node_db *ndb,
+                                           const char *host,
+                                           const uint8_t *dereg_script,
+                                           size_t dereg_len)
+{
+    printf("zdir ingest: a stranger cannot deregister the hostname... ");
+    run_op(ndb, dereg_script, dereg_len, 0xB1, 502);
+    struct db_onion_directory got;
+    bool ok = db_onion_directory_find(ndb, host, &got) &&
+              strcmp(got.status, ONION_DIRECTORY_STATUS_ACTIVE) == 0;
+    return zdir_verdict(ok);
+}
+
+static int zdir_ingest_owner_reregister(struct node_db *ndb, const char *host)
+{
+    printf("zdir ingest: the owner's re-register keeps seniority... ");
+    uint8_t k2[ZDIR_PUBKEY_LEN];
+    memset(k2, 0x44, sizeof(k2));
+    uint8_t s2[256];
+    size_t n2 = zdir_build_register(s2, sizeof(s2), host, k2);
+    run_op(ndb, s2, n2, 0xA1, 600);
+    struct db_onion_directory got;
+    bool ok = db_onion_directory_find(ndb, host, &got) &&
+              got.height == 500 &&          /* seniority is not resettable */
+              got.updated_height == 600 &&
+              memcmp(got.master_pubkey, k2, 32) == 0;
+    return zdir_verdict(ok);
+}
+
+static int zdir_ingest_owner_deregister(struct node_db *ndb, const char *host,
+                                        const uint8_t *dereg_script,
+                                        size_t dereg_len)
+{
+    printf("zdir ingest: the owner's DEREGISTER retires the row... ");
+    run_op(ndb, dereg_script, dereg_len, 0xA2, 700);
+    struct db_onion_directory got;
+    struct db_onion_directory page[4];
+    bool ok = db_onion_directory_find(ndb, host, &got) &&
+              strcmp(got.status, ONION_DIRECTORY_STATUS_RETIRED) == 0 &&
+              got.updated_height == 700 && got.height == 500 &&
+              db_onion_directory_list_active(ndb, page, 4, 0) == 0;
+    return zdir_verdict(ok);
+}
+
+static int zdir_ingest_unregistered_deregister(struct node_db *ndb)
+{
+    printf("zdir ingest: DEREGISTER of an unregistered host is a no-op... ");
+    char other[64];
+    mk_host(other, sizeof(other), 'h');
+    uint8_t s[256];
+    size_t n = zdir_build_deregister(s, sizeof(s), other);
+    int64_t before = db_onion_directory_count(ndb);
+    struct db_onion_directory sink;
+    run_op(ndb, s, n, 0xA3, 701);
+    bool ok = db_onion_directory_count(ndb) == before &&
+              !db_onion_directory_find(ndb, other, &sink);
+    return zdir_verdict(ok);
+}
+
+static int zdir_ingest_garbage_body(struct node_db *ndb)
+{
+    printf("zdir ingest: a ZDIR lokad with a garbage body is a clean"
+           " no-op... ");
+    uint8_t garbage[16] = {0x6a, 0x04, 'Z', 'D', 'I', 'R',
+                           0x01, 0x01, 0x01, 0x09, 0x02, 'h', 'i'};
+    int before_or = count_rows(ndb, "SELECT COUNT(*) FROM op_returns");
+    int64_t before = db_onion_directory_count(ndb);
+    run_op(ndb, garbage, 13, 0xA4, 702);
+    bool ok = db_onion_directory_count(ndb) == before &&
+              count_rows(ndb, "SELECT COUNT(*) FROM op_returns")
+                  == before_or + 1;
+    return zdir_verdict(ok);
+}
+
 static int zdir_ingest(void)
 {
     int failures = 0;
@@ -471,13 +682,7 @@ static int zdir_ingest(void)
         return 1;
     }
 
-    uint8_t owner[20], stranger[20];
-    memset(owner, 0x41, 20);
-    memset(stranger, 0x42, 20);
-    for (uint8_t i = 0; i < 8; i++)
-        seed_owner_utxo(&ndb, (uint8_t)(0xA0 + i), 0, owner, 10);
-    for (uint8_t i = 0; i < 4; i++)
-        seed_owner_utxo(&ndb, (uint8_t)(0xB0 + i), 0, stranger, 10);
+    zdir_ingest_seed(&ndb);
 
     char host[64];
     mk_host(host, sizeof(host), 'g');
@@ -490,79 +695,17 @@ static int zdir_ingest(void)
     size_t dereg_len = zdir_build_deregister(dereg_script,
                                              sizeof(dereg_script), host);
 
-    printf("zdir ingest: a ZDIR REGISTER in a block lands one active row... ");
-    { run_op(&ndb, reg_script, reg_len, 0xA0, 500);
-      struct db_onion_directory got;
-      bool ok = db_onion_directory_count(&ndb) == 1 &&
-                db_onion_directory_find(&ndb, host, &got) &&
-                got.height == 500 && got.updated_height == 500 &&
-                got.has_pubkey &&
-                memcmp(got.master_pubkey, key, 32) == 0 &&
-                got.owner_address[0] != '\0' &&
-                strcmp(got.status, ONION_DIRECTORY_STATUS_ACTIVE) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir ingest: a stranger cannot re-register the hostname... ");
-    { struct db_onion_directory before, after;
-      db_onion_directory_find(&ndb, host, &before);
-      run_op(&ndb, reg_script, reg_len, 0xB0, 501);
-      bool ok = db_onion_directory_find(&ndb, host, &after) &&
-                memcmp(&before, &after, sizeof(before)) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir ingest: a stranger cannot deregister the hostname... ");
-    { run_op(&ndb, dereg_script, dereg_len, 0xB1, 502);
-      struct db_onion_directory got;
-      bool ok = db_onion_directory_find(&ndb, host, &got) &&
-                strcmp(got.status, ONION_DIRECTORY_STATUS_ACTIVE) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir ingest: the owner's re-register keeps seniority... ");
-    { uint8_t k2[ZDIR_PUBKEY_LEN];
-      memset(k2, 0x44, sizeof(k2));
-      uint8_t s2[256];
-      size_t n2 = zdir_build_register(s2, sizeof(s2), host, k2);
-      run_op(&ndb, s2, n2, 0xA1, 600);
-      struct db_onion_directory got;
-      bool ok = db_onion_directory_find(&ndb, host, &got) &&
-                got.height == 500 &&          /* seniority is not resettable */
-                got.updated_height == 600 &&
-                memcmp(got.master_pubkey, k2, 32) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir ingest: the owner's DEREGISTER retires the row... ");
-    { run_op(&ndb, dereg_script, dereg_len, 0xA2, 700);
-      struct db_onion_directory got;
-      struct db_onion_directory page[4];
-      bool ok = db_onion_directory_find(&ndb, host, &got) &&
-                strcmp(got.status, ONION_DIRECTORY_STATUS_RETIRED) == 0 &&
-                got.updated_height == 700 && got.height == 500 &&
-                db_onion_directory_list_active(&ndb, page, 4, 0) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir ingest: DEREGISTER of an unregistered host is a no-op... ");
-    { char other[64];
-      mk_host(other, sizeof(other), 'h');
-      uint8_t s[256];
-      size_t n = zdir_build_deregister(s, sizeof(s), other);
-      int64_t before = db_onion_directory_count(&ndb);
-      struct db_onion_directory sink;
-      run_op(&ndb, s, n, 0xA3, 701);
-      bool ok = db_onion_directory_count(&ndb) == before &&
-                !db_onion_directory_find(&ndb, other, &sink);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir ingest: a ZDIR lokad with a garbage body is a clean"
-           " no-op... ");
-    { uint8_t garbage[16] = {0x6a, 0x04, 'Z', 'D', 'I', 'R',
-                             0x01, 0x01, 0x01, 0x09, 0x02, 'h', 'i'};
-      int before_or = count_rows(&ndb, "SELECT COUNT(*) FROM op_returns");
-      int64_t before = db_onion_directory_count(&ndb);
-      run_op(&ndb, garbage, 13, 0xA4, 702);
-      bool ok = db_onion_directory_count(&ndb) == before &&
-                count_rows(&ndb, "SELECT COUNT(*) FROM op_returns")
-                    == before_or + 1;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_ingest_register_lands(&ndb, host, key, reg_script,
+                                           reg_len);
+    failures += zdir_ingest_stranger_register(&ndb, host, reg_script,
+                                              reg_len);
+    failures += zdir_ingest_stranger_deregister(&ndb, host, dereg_script,
+                                                dereg_len);
+    failures += zdir_ingest_owner_reregister(&ndb, host);
+    failures += zdir_ingest_owner_deregister(&ndb, host, dereg_script,
+                                             dereg_len);
+    failures += zdir_ingest_unregistered_deregister(&ndb);
+    failures += zdir_ingest_garbage_body(&ndb);
 
     node_db_close(&ndb);
     return failures;
@@ -718,6 +861,80 @@ static int zdir_collect_reservation(void)
 
 /* ── (6) discovery: the chain source, merged ALONGSIDE the scrape ─── */
 
+static int zdir_disc_chain_rows(const char *dir, const char *h1,
+                                const char *h2)
+{
+    printf("zdir discovery: the chain source reads active rows only... ");
+    struct onion_peer peers[8];
+    memset(peers, 0, sizeof(peers));
+    int n = blog_discover_onion_peers_chain(dir, peers, 8);
+    /* Seniority order: h1 registered at 200, h2 at 300. */
+    bool ok = n == 2 &&
+              strcmp(peers[0].hostname, h1) == 0 && peers[0].height == 200 &&
+              strcmp(peers[1].hostname, h2) == 0 && peers[1].height == 300;
+    if (ok) printf("OK\n");
+    else { printf("FAIL (n=%d)\n", n); return 1; }
+    return 0;
+}
+
+static int zdir_disc_chain_guards(const char *dir)
+{
+    printf("zdir discovery: the chain source guards its arguments... ");
+    struct onion_peer peers[4];
+    return zdir_verdict(blog_discover_onion_peers_chain(NULL, peers, 4) == 0 &&
+                        blog_discover_onion_peers_chain(dir, NULL, 4) == 0 &&
+                        blog_discover_onion_peers_chain(dir, peers, 0) == 0);
+}
+
+static int zdir_disc_chain_clamp(const char *dir, const char *h1)
+{
+    printf("zdir discovery: max clamps the chain source... ");
+    struct onion_peer peers[4];
+    memset(peers, 0, sizeof(peers));
+    int n = blog_discover_onion_peers_chain(dir, peers, 1);
+    bool ok = n == 1 && strcmp(peers[0].hostname, h1) == 0;
+    if (ok) printf("OK\n");
+    else { printf("FAIL (n=%d)\n", n); return 1; }
+    return 0;
+}
+
+static int zdir_disc_merged(const char *dir, const char *h1, const char *h2)
+{
+    printf("zdir discovery: the merged source ADDS the chain rows, and the"
+           " wallet scrape stays wired... ");
+    struct onion_peer peers[8];
+    memset(peers, 0, sizeof(peers));
+    int chain_only = blog_discover_onion_peers_chain(dir, peers, 8);
+    memset(peers, 0, sizeof(peers));
+    int merged = blog_discover_onion_peers(dir, peers, 8);
+    int chain = -1, wallet = -1, rejected = -1;
+    blog_onion_discovery_counts(&chain, &wallet, &rejected);
+    /* The merge may only ever GROW the candidate set: a directory can add
+     * a peer, never remove one. This empty-wallet datadir also pins the
+     * defect being fixed — the wallet scrape contributes 0 here, which is
+     * exactly what it contributes on every node with an empty wallet. */
+    bool ok = merged >= chain_only && merged == 2 &&
+              chain == 2 && wallet == 0 && rejected == 0 &&
+              strcmp(peers[0].hostname, h1) == 0 &&
+              strcmp(peers[1].hostname, h2) == 0;
+    if (ok) printf("OK\n");
+    else { printf("FAIL (merged=%d chain=%d wallet=%d rej=%d)\n",
+                  merged, chain, wallet, rejected); return 1; }
+    return 0;
+}
+
+static int zdir_disc_hostnames(const char *dir)
+{
+    printf("zdir discovery: every hostname handed out passes the v3 rule... ");
+    struct onion_peer peers[8];
+    memset(peers, 0, sizeof(peers));
+    int n = blog_discover_onion_peers(dir, peers, 8);
+    bool ok = n > 0;
+    for (int i = 0; i < n; i++)
+        ok = ok && onion_hostname_valid(peers[i].hostname);
+    return zdir_verdict(ok);
+}
+
 static int zdir_discovery(void)
 {
     int failures = 0;
@@ -749,60 +966,11 @@ static int zdir_discovery(void)
     db_onion_directory_save(&ndb, &r);
     node_db_close(&ndb);
 
-    printf("zdir discovery: the chain source reads active rows only... ");
-    { struct onion_peer peers[8];
-      memset(peers, 0, sizeof(peers));
-      int n = blog_discover_onion_peers_chain(dir, peers, 8);
-      /* Seniority order: h1 registered at 200, h2 at 300. */
-      bool ok = n == 2 &&
-                strcmp(peers[0].hostname, h1) == 0 && peers[0].height == 200 &&
-                strcmp(peers[1].hostname, h2) == 0 && peers[1].height == 300;
-      if (ok) printf("OK\n");
-      else { printf("FAIL (n=%d)\n", n); failures++; } }
-
-    printf("zdir discovery: the chain source guards its arguments... ");
-    { struct onion_peer peers[4];
-      bool ok = blog_discover_onion_peers_chain(NULL, peers, 4) == 0 &&
-                blog_discover_onion_peers_chain(dir, NULL, 4) == 0 &&
-                blog_discover_onion_peers_chain(dir, peers, 0) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
-
-    printf("zdir discovery: max clamps the chain source... ");
-    { struct onion_peer peers[4];
-      memset(peers, 0, sizeof(peers));
-      int n = blog_discover_onion_peers_chain(dir, peers, 1);
-      bool ok = n == 1 && strcmp(peers[0].hostname, h1) == 0;
-      if (ok) printf("OK\n"); else { printf("FAIL (n=%d)\n", n); failures++; } }
-
-    printf("zdir discovery: the merged source ADDS the chain rows, and the"
-           " wallet scrape stays wired... ");
-    { struct onion_peer peers[8];
-      memset(peers, 0, sizeof(peers));
-      int chain_only = blog_discover_onion_peers_chain(dir, peers, 8);
-      memset(peers, 0, sizeof(peers));
-      int merged = blog_discover_onion_peers(dir, peers, 8);
-      int chain = -1, wallet = -1, rejected = -1;
-      blog_onion_discovery_counts(&chain, &wallet, &rejected);
-      /* The merge may only ever GROW the candidate set: a directory can add
-       * a peer, never remove one. This empty-wallet datadir also pins the
-       * defect being fixed — the wallet scrape contributes 0 here, which is
-       * exactly what it contributes on every node with an empty wallet. */
-      bool ok = merged >= chain_only && merged == 2 &&
-                chain == 2 && wallet == 0 && rejected == 0 &&
-                strcmp(peers[0].hostname, h1) == 0 &&
-                strcmp(peers[1].hostname, h2) == 0;
-      if (ok) printf("OK\n");
-      else { printf("FAIL (merged=%d chain=%d wallet=%d rej=%d)\n",
-                    merged, chain, wallet, rejected); failures++; } }
-
-    printf("zdir discovery: every hostname handed out passes the v3 rule... ");
-    { struct onion_peer peers[8];
-      memset(peers, 0, sizeof(peers));
-      int n = blog_discover_onion_peers(dir, peers, 8);
-      bool ok = n > 0;
-      for (int i = 0; i < n; i++)
-          ok = ok && onion_hostname_valid(peers[i].hostname);
-      if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; } }
+    failures += zdir_disc_chain_rows(dir, h1, h2);
+    failures += zdir_disc_chain_guards(dir);
+    failures += zdir_disc_chain_clamp(dir, h1);
+    failures += zdir_disc_merged(dir, h1, h2);
+    failures += zdir_disc_hostnames(dir);
 
     test_cleanup_tmpdir(dir);
     return failures;
