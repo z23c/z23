@@ -93,40 +93,52 @@ struct ci_store *ci_store_open_path(const char *dbpath)
     return s;
 }
 
-struct ci_store *ci_store_open(const char *root)
-{
-    if (!root || !root[0])
-        LOG_NULL("codeindex", "null root");
 #if defined(_WIN32)
-    struct platform_positioned_file file;
+/* Maps the published Windows index image and proves it is a private, bounded
+ * file that did not change while it was mapped. On success the caller owns
+ * file and mapping; on failure both are already closed. */
+static bool ci_store_open_windows_image(const char *root,
+                                        struct platform_positioned_file *file,
+                                        struct platform_read_mapping *mapping,
+                                        uint64_t *image_size)
+{
     struct platform_positioned_file_snapshot before, after;
-    platform_positioned_file_init(&file);
+    platform_positioned_file_init(file);
     if (!platform_positioned_file_open_beneath(
-            &file, root, ".codeindex/index.kv"))
-        return NULL;
-    uint64_t image_size = 0;
-    if (!platform_positioned_file_is_private(&file) ||
-        !platform_positioned_file_snapshot(&file, &before) ||
-        !platform_positioned_file_size(&file, &image_size) || image_size == 0 ||
-        image_size > INT64_MAX || image_size > (uint64_t)SIZE_MAX) {
-        platform_positioned_file_close(&file);
-        LOG_NULL("codeindex", "published Windows index is not a private bounded file");
+            file, root, ".codeindex/index.kv"))
+        return false;
+    if (!platform_positioned_file_is_private(file) ||
+        !platform_positioned_file_snapshot(file, &before) ||
+        !platform_positioned_file_size(file, image_size) ||
+        *image_size == 0 || *image_size > INT64_MAX ||
+        *image_size > (uint64_t)SIZE_MAX) {
+        platform_positioned_file_close(file);
+        LOG_FAIL("codeindex", "published Windows index is not a private bounded file");
     }
-    struct platform_read_mapping mapping;
-    platform_read_mapping_init(&mapping);
+    platform_read_mapping_init(mapping);
     if (!platform_read_mapping_open_positioned(
-            &mapping, &file, (size_t)image_size)) {
-        platform_positioned_file_close(&file);
-        LOG_NULL("codeindex", "map published Windows index image size=%llu",
-                 (unsigned long long)image_size);
+            mapping, file, (size_t)*image_size)) {
+        platform_positioned_file_close(file);
+        LOG_FAIL("codeindex", "map published Windows index image size=%llu",
+                 (unsigned long long)*image_size);
     }
-    bool stable = platform_positioned_file_snapshot(&file, &after) &&
+    bool stable = platform_positioned_file_snapshot(file, &after) &&
         platform_positioned_file_snapshot_equal(&before, &after);
     if (!stable) {
-        platform_read_mapping_close(&mapping);
-        platform_positioned_file_close(&file);
-        LOG_NULL("codeindex", "published Windows index changed while reading");
+        platform_read_mapping_close(mapping);
+        platform_positioned_file_close(file);
+        LOG_FAIL("codeindex", "published Windows index changed while reading");
     }
+    return true;
+}
+
+static struct ci_store *ci_store_open_windows(const char *root)
+{
+    struct platform_positioned_file file;
+    struct platform_read_mapping mapping;
+    uint64_t image_size = 0;
+    if (!ci_store_open_windows_image(root, &file, &mapping, &image_size))
+        return NULL;
     struct ci_store *s = zcl_calloc(1, sizeof(*s), "ci_store_readonly");
     if (!s) {
         platform_read_mapping_close(&mapping);
@@ -167,24 +179,38 @@ struct ci_store *ci_store_open(const char *root)
     }
     (void)sqlite3_busy_timeout(s->db, 5000);
     return s;
-#else
+}
+#endif
+
+#if !defined(_WIN32)
+/* A file is owner-controlled when the effective uid owns it and neither group
+ * nor other can write it. */
+static bool ci_owner_controlled(const struct stat *st)
+{
+    return st->st_uid == geteuid() && !(st->st_mode & (S_IWGRP | S_IWOTH));
+}
+
+/* Opens <root>/.codeindex/index.kv through the owner-controlled directory
+ * capability and returns its descriptor. Returns -1 when the generation is
+ * absent (silently) or after a refusal has been logged. */
+static int ci_open_canonical_index_fd(const char *root)
+{
     char dir[CI_PATH_MAX];
     int dn = snprintf(dir, sizeof(dir), "%s/.codeindex", root);
     if (dn <= 0 || (size_t)dn >= sizeof(dir))
-        LOG_NULL("codeindex", "root too long");
+        LOG_ERR("codeindex", "root too long");
     int dirfd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
     if (dirfd < 0) {
-        if (errno == ENOENT) return NULL;
-        LOG_NULL("codeindex", "open canonical directory failed: %s",
-                 strerror(errno));
+        if (errno == ENOENT) return -1;
+        LOG_ERR("codeindex", "open canonical directory failed: %s",
+                strerror(errno));
     }
     struct stat dir_st;
     if (fstat(dirfd, &dir_st) != 0 || !S_ISDIR(dir_st.st_mode) ||
-        dir_st.st_uid != geteuid() ||
-        (dir_st.st_mode & (S_IWGRP | S_IWOTH))) {
+        !ci_owner_controlled(&dir_st)) {
         close(dirfd);
-        LOG_NULL("codeindex",
-                 "canonical directory is not an owner-controlled capability");
+        LOG_ERR("codeindex",
+                "canonical directory is not an owner-controlled capability");
     }
 
     /* Open relative to the validated directory and bind SQLite to this exact
@@ -195,17 +221,31 @@ struct ci_store *ci_store_open(const char *root)
     int open_saved = errno;
     close(dirfd);
     if (fd < 0) {
-        if (open_saved == ENOENT) return NULL;
-        LOG_NULL("codeindex", "open canonical index failed: %s",
-                 strerror(open_saved));
+        if (open_saved == ENOENT) return -1;
+        LOG_ERR("codeindex", "open canonical index failed: %s",
+                strerror(open_saved));
     }
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_nlink != 1 ||
-        st.st_uid != geteuid() || (st.st_mode & (S_IWGRP | S_IWOTH))) {
+        !ci_owner_controlled(&st)) {
         close(fd);
-        LOG_NULL("codeindex",
-                 "canonical index is not a private owner-controlled inode");
+        LOG_ERR("codeindex",
+                "canonical index is not a private owner-controlled inode");
     }
+    return fd;
+}
+#endif
+
+struct ci_store *ci_store_open(const char *root)
+{
+    if (!root || !root[0])
+        LOG_NULL("codeindex", "null root");
+#if defined(_WIN32)
+    return ci_store_open_windows(root);
+#else
+    int fd = ci_open_canonical_index_fd(root);
+    if (fd < 0)
+        return NULL;
     return ci_store_open_readonly_fd(fd);
 #endif
 }
@@ -263,6 +303,53 @@ struct ci_store *ci_store_open_readonly_fd(int fd)
 }
 #endif
 
+#if !defined(_WIN32)
+/* Sets the length of fd; on failure returns false with *saved set to errno. */
+static bool ci_set_fd_length(int fd, off_t length, int *saved)
+{
+    if (ftruncate(fd, length) != 0) {
+        *saved = errno;
+        return false;
+    }
+    return true;
+}
+
+/* Writes data[0..len) at file offset, retrying EINTR and short writes. On
+ * failure returns false with *saved set (EIO for a zero-length write). */
+static bool ci_pwrite_all(int fd, const unsigned char *data, size_t len,
+                          off_t offset, int *saved)
+{
+    size_t done = 0;
+    while (done < len) {
+        ssize_t put = pwrite(fd, data + done, len - done,
+                             offset + (off_t)done);
+        if (put < 0 && errno == EINTR) continue;
+        if (put <= 0) {
+            *saved = put < 0 ? errno : EIO;
+            return false;
+        }
+        done += (size_t)put;
+    }
+    return true;
+}
+
+/* Writes the serialized image at offset 0 in 1 MiB chunks. */
+static bool ci_write_image_bytes(int fd, const unsigned char *image,
+                                 sqlite3_int64 image_size, int *saved)
+{
+    sqlite3_int64 offset = 0;
+    while (offset < image_size) {
+        sqlite3_int64 left = image_size - offset;
+        size_t chunk = left > INT64_C(1048576)
+            ? (size_t)INT64_C(1048576) : (size_t)left;
+        if (!ci_pwrite_all(fd, image + offset, chunk, (off_t)offset, saved))
+            return false;
+        offset += (sqlite3_int64)chunk;
+    }
+    return true;
+}
+#endif
+
 bool ci_store_write_image_fd(struct ci_store *s, int fd)
 {
     if (!s || fd < 0)
@@ -280,29 +367,9 @@ bool ci_store_write_image_fd(struct ci_store *s, int fd)
               (sqlite3_int64)(off_t)image_size == image_size;
     int saved = ok ? 0 : EOVERFLOW;
 
-    if (ok && ftruncate(fd, 0) != 0) {
-        ok = false;
-        saved = errno;
-    }
-    sqlite3_int64 offset = 0;
-    while (ok && offset < image_size) {
-        sqlite3_int64 left = image_size - offset;
-        size_t chunk = left > INT64_C(1048576)
-            ? (size_t)INT64_C(1048576) : (size_t)left;
-        ssize_t wrote = pwrite(fd, image + offset, chunk, (off_t)offset);
-        if (wrote < 0 && errno == EINTR)
-            continue;
-        if (wrote <= 0) {
-            ok = false;
-            saved = wrote < 0 ? errno : EIO;
-            break;
-        }
-        offset += wrote;
-    }
-    if (ok && ftruncate(fd, (off_t)image_size) != 0) {
-        ok = false;
-        saved = errno;
-    }
+    if (ok) ok = ci_set_fd_length(fd, 0, &saved);
+    if (ok) ok = ci_write_image_bytes(fd, image, image_size, &saved);
+    if (ok) ok = ci_set_fd_length(fd, (off_t)image_size, &saved);
     if (image) sqlite3_free(image);
     pthread_mutex_unlock(&s->lock);
 
@@ -312,6 +379,65 @@ bool ci_store_write_image_fd(struct ci_store *s, int fd)
     return true;
 #endif
 }
+
+#if !defined(_WIN32)
+enum { COPY_CHUNK_BYTES = 1024 * 1024 };
+
+#if defined(__linux__)
+/* Kernel-side clone of the source generation. Sets *cloned when every byte was
+ * cloned; returns false after logging a refusal. A partial kernel clone is
+ * refused, and a clone that moved no bytes falls back to the copy loop. */
+static bool ci_clone_kernel_image(int source_fd, int fd, off_t size,
+                                  bool *cloned)
+{
+    off_t input_offset = 0, output_offset = 0;
+    bool kernel_copy = true;
+    *cloned = false;
+    while (output_offset < size) {
+        size_t want = size - output_offset < (off_t)(16 * 1024 * 1024)
+            ? (size_t)(size - output_offset) : (size_t)(16 * 1024 * 1024);
+        ssize_t copied = copy_file_range(source_fd, &input_offset, fd,
+                                         &output_offset, want, 0);
+        if (copied < 0 && errno == EINTR) continue;
+        if (copied <= 0) {
+            kernel_copy = false;
+            break;
+        }
+    }
+    if (kernel_copy && output_offset == size) {
+        if (ftruncate(fd, size) != 0)
+            LOG_FAIL("codeindex", "truncate kernel-cloned generation");
+        *cloned = true;
+        return true;
+    }
+    if (output_offset != 0)
+        LOG_FAIL("codeindex", "partial kernel generation clone");
+    return true;
+}
+#endif
+
+/* Userspace copy of source_fd into fd through buf. Returns NULL on success,
+ * otherwise the failing step's text with *saved set. */
+static const char *ci_copy_image_buffered(int source_fd, int fd, off_t size,
+                                          unsigned char *buf, int *saved)
+{
+    off_t offset = 0;
+    while (offset < size) {
+        size_t want = (size - offset) < (off_t)COPY_CHUNK_BYTES
+            ? (size_t)(size - offset) : COPY_CHUNK_BYTES;
+        ssize_t got = pread(source_fd, buf, want, offset);
+        if (got < 0 && errno == EINTR) continue;
+        if (got <= 0) {
+            *saved = got < 0 ? errno : EIO;
+            return "read source generation for clone";
+        }
+        if (!ci_pwrite_all(fd, buf, (size_t)got, offset, saved))
+            return "write staging generation clone";
+        offset += got;
+    }
+    return NULL;
+}
+#endif
 
 /* One statement of "make `fd` hold the same bytes as `source_fd`". Both the
  * staging clone below and the pre-materialized spare in codeindex_spare.c go
@@ -329,64 +455,21 @@ bool ci_copy_image_fd(int source_fd, int fd)
     if (fstat(source_fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0)
         LOG_FAIL("codeindex", "inspect source generation for clone");
 #if defined(__linux__)
-    off_t input_offset = 0, output_offset = 0;
-    bool kernel_copy = true;
-    while (output_offset < st.st_size) {
-        size_t want = st.st_size - output_offset < (off_t)(16 * 1024 * 1024)
-            ? (size_t)(st.st_size - output_offset) : (size_t)(16 * 1024 * 1024);
-        ssize_t copied = copy_file_range(source_fd, &input_offset, fd,
-                                         &output_offset, want, 0);
-        if (copied < 0 && errno == EINTR) continue;
-        if (copied <= 0) {
-            kernel_copy = false;
-            break;
-        }
-    }
-    if (kernel_copy && output_offset == st.st_size) {
-        if (ftruncate(fd, st.st_size) != 0)
-            LOG_FAIL("codeindex", "truncate kernel-cloned generation");
+    bool cloned = false;
+    if (!ci_clone_kernel_image(source_fd, fd, st.st_size, &cloned))
+        return false;
+    if (cloned)
         return true;
-    }
-    if (output_offset != 0)
-        LOG_FAIL("codeindex", "partial kernel generation clone");
 #endif
-    enum { COPY_CHUNK_BYTES = 1024 * 1024 };
     unsigned char *buf = zcl_malloc(COPY_CHUNK_BYTES,
                                     "codeindex_store_copy");
     if (!buf)
         LOG_FAIL("codeindex", "allocate generation clone buffer");
-    const char *failure = NULL;
     int saved = 0;
-    off_t offset = 0;
-    while (offset < st.st_size) {
-        size_t want = (st.st_size - offset) < (off_t)COPY_CHUNK_BYTES
-            ? (size_t)(st.st_size - offset) : COPY_CHUNK_BYTES;
-        ssize_t got = pread(source_fd, buf, want, offset);
-        if (got < 0 && errno == EINTR) continue;
-        if (got <= 0) {
-            failure = "read source generation for clone";
-            saved = got < 0 ? errno : EIO;
-            break;
-        }
-        size_t done = 0;
-        while (done < (size_t)got) {
-            ssize_t put = pwrite(fd, buf + done, (size_t)got - done,
-                                 offset + (off_t)done);
-            if (put < 0 && errno == EINTR) continue;
-            if (put <= 0) {
-                failure = "write staging generation clone";
-                saved = put < 0 ? errno : EIO;
-                break;
-            }
-            done += (size_t)put;
-        }
-        if (failure) break;
-        offset += got;
-    }
-    if (!failure && ftruncate(fd, st.st_size) != 0) {
+    const char *failure = ci_copy_image_buffered(source_fd, fd, st.st_size,
+                                                 buf, &saved);
+    if (!failure && !ci_set_fd_length(fd, st.st_size, &saved))
         failure = "truncate staging generation clone";
-        saved = errno;
-    }
     free(buf);
     if (failure)
         LOG_FAIL("codeindex", "%s: %s", failure, strerror(saved));
