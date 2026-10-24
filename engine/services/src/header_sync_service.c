@@ -32,6 +32,24 @@ static _Atomic int64_t g_stale_window_min = 0;
 static _Atomic int64_t g_stale_window_max = 0;
 #define STALE_SUMMARY_WINDOW_SECS ((int64_t)60)
 
+static bool syncsvc_locator_grow(struct block_locator *loc, size_t *alloc,
+                                 const char *realloc_label)
+{
+    if (*alloc >= MAX_LOCATOR_HASHES)
+        return false;
+    size_t next_alloc = *alloc * 2;
+    if (next_alloc > MAX_LOCATOR_HASHES)
+        next_alloc = MAX_LOCATOR_HASHES;
+    struct uint256 *nv = zcl_realloc(loc->vhave,
+                                 next_alloc * sizeof(struct uint256),
+                                 realloc_label);
+    if (!nv)
+        return false;
+    loc->vhave = nv;
+    *alloc = next_alloc;
+    return true;
+}
+
 static void syncsvc_build_locator_from_tip(struct block_locator *loc,
                                            const struct block_index *tip,
                                            const char *alloc_label,
@@ -54,18 +72,8 @@ static void syncsvc_build_locator_from_tip(struct block_locator *loc,
 
     while (walk && walk->phashBlock && idx < MAX_LOCATOR_HASHES) {
         if (idx == alloc) {
-            if (alloc >= MAX_LOCATOR_HASHES)
+            if (!syncsvc_locator_grow(loc, &alloc, realloc_label))
                 break;
-            size_t next_alloc = alloc * 2;
-            if (next_alloc > MAX_LOCATOR_HASHES)
-                next_alloc = MAX_LOCATOR_HASHES;
-            struct uint256 *nv = zcl_realloc(loc->vhave,
-                                         next_alloc * sizeof(struct uint256),
-                                         realloc_label);
-            if (!nv)
-                break;
-            loc->vhave = nv;
-            alloc = next_alloc;
         }
         loc->vhave[idx++] = *walk->phashBlock;
 
@@ -234,6 +242,40 @@ bool syncsvc_is_initial_block_download(const struct p2p_node *node,
             our_height < node->starting_height - 144);
 }
 
+static void syncsvc_note_stale_interval(int64_t base)
+{
+    /* Fold this backoff into the window (cheap relaxed atomics, no
+     * per-peer line), then emit one summary when the window rolls over. */
+    const memory_order rx = memory_order_relaxed;
+    int64_t now = platform_time_wall_unix();
+    int64_t window_start = atomic_load_explicit(&g_stale_window_start_unix, rx);
+    if (window_start == 0) {
+        atomic_store_explicit(&g_stale_window_start_unix, now, rx);
+        window_start = now;
+    }
+    if (atomic_fetch_add_explicit(&g_stale_window_count, 1, rx) == 0) {
+        atomic_store_explicit(&g_stale_window_min, base, rx);
+        atomic_store_explicit(&g_stale_window_max, base, rx);
+    } else {
+        if (base < atomic_load_explicit(&g_stale_window_min, rx))
+            atomic_store_explicit(&g_stale_window_min, base, rx);
+        if (base > atomic_load_explicit(&g_stale_window_max, rx))
+            atomic_store_explicit(&g_stale_window_max, base, rx);
+    }
+    if (now - window_start >= STALE_SUMMARY_WINDOW_SECS) {
+        /* count is per-probe fold events (a backed-off peer is probed
+         * repeatedly inside one window) — an over-estimate of distinct
+         * peers, so labelled "observations". min/max bound the intervals. */
+        printf("[headers] %d stale-interval observations "
+               "(intervals %llds-%llds)\n",
+               atomic_load_explicit(&g_stale_window_count, rx),
+               (long long)atomic_load_explicit(&g_stale_window_min, rx),
+               (long long)atomic_load_explicit(&g_stale_window_max, rx));
+        atomic_store_explicit(&g_stale_window_count, 0, rx);
+        atomic_store_explicit(&g_stale_window_start_unix, now, rx);
+    }
+}
+
 /* Compute getheaders interval with exponential backoff for stale peers.
  * Base interval depends on sync phase; each consecutive empty header
  * response doubles the interval up to a cap of 600s.
@@ -278,36 +320,7 @@ static int64_t syncsvc_getheaders_interval(const struct p2p_node *node,
         base = 600;
 
     if (base > 60) {
-        /* Fold this backoff into the window (cheap relaxed atomics, no
-         * per-peer line), then emit one summary when the window rolls over. */
-        const memory_order rx = memory_order_relaxed;
-        int64_t now = platform_time_wall_unix();
-        int64_t window_start = atomic_load_explicit(&g_stale_window_start_unix, rx);
-        if (window_start == 0) {
-            atomic_store_explicit(&g_stale_window_start_unix, now, rx);
-            window_start = now;
-        }
-        if (atomic_fetch_add_explicit(&g_stale_window_count, 1, rx) == 0) {
-            atomic_store_explicit(&g_stale_window_min, base, rx);
-            atomic_store_explicit(&g_stale_window_max, base, rx);
-        } else {
-            if (base < atomic_load_explicit(&g_stale_window_min, rx))
-                atomic_store_explicit(&g_stale_window_min, base, rx);
-            if (base > atomic_load_explicit(&g_stale_window_max, rx))
-                atomic_store_explicit(&g_stale_window_max, base, rx);
-        }
-        if (now - window_start >= STALE_SUMMARY_WINDOW_SECS) {
-            /* count is per-probe fold events (a backed-off peer is probed
-             * repeatedly inside one window) — an over-estimate of distinct
-             * peers, so labelled "observations". min/max bound the intervals. */
-            printf("[headers] %d stale-interval observations "
-                   "(intervals %llds-%llds)\n",
-                   atomic_load_explicit(&g_stale_window_count, rx),
-                   (long long)atomic_load_explicit(&g_stale_window_min, rx),
-                   (long long)atomic_load_explicit(&g_stale_window_max, rx));
-            atomic_store_explicit(&g_stale_window_count, 0, rx);
-            atomic_store_explicit(&g_stale_window_start_unix, now, rx);
-        }
+        syncsvc_note_stale_interval(base);
     }
 
     return base;
@@ -521,6 +534,22 @@ bool syncsvc_should_begin_blocks_download(enum sync_state sync_state,
             sync_state == SYNC_BLOCKS_DOWNLOAD);
 }
 
+static bool syncsvc_header_walk_matches_tip(
+    const struct block_index *verify, const struct block_index *tip)
+{
+    if (verify == tip)
+        return true;
+    if (verify && tip && verify->nHeight == tip->nHeight &&
+        verify->phashBlock && tip->phashBlock &&
+        uint256_eq(verify->phashBlock, tip->phashBlock)) {
+        return true;
+    }
+    if (verify && tip && verify->nHeight == tip->nHeight)
+        return true;
+
+    return false;
+}
+
 bool syncsvc_headers_chain_from_tip(const struct block_index *candidate,
                                     const struct block_index *tip,
                                     int our_height)
@@ -533,14 +562,7 @@ bool syncsvc_headers_chain_from_tip(const struct block_index *candidate,
         verify = verify->pprev;
     }
 
-    if (verify == tip)
-        return true;
-    if (verify && tip && verify->nHeight == tip->nHeight &&
-        verify->phashBlock && tip->phashBlock &&
-        uint256_eq(verify->phashBlock, tip->phashBlock)) {
-        return true;
-    }
-    if (verify && tip && verify->nHeight == tip->nHeight)
+    if (syncsvc_header_walk_matches_tip(verify, tip))
         return true;
 
     /* After snapshot sync, the chain walks back to the snapshot anchor
@@ -568,6 +590,26 @@ bool syncsvc_headers_chain_from_tip(const struct block_index *candidate,
 
     return false;
 }
+
+static bool syncsvc_candidate_has_pprev_gap(
+    const struct block_index *candidate, int our_height)
+{
+    bool has_pprev_gap = false;
+    if (candidate->nHeight > our_height) {
+        const struct block_index *w = candidate;
+        while (w && w->nHeight > our_height)
+            w = w->pprev;
+        has_pprev_gap = (w == NULL);
+    }
+    return has_pprev_gap;
+}
+
+static bool syncsvc_header_needs_block(const struct block_index *walk)
+{
+    return !(walk->nStatus & BLOCK_HAVE_DATA) &&
+           !(walk->nStatus & BLOCK_FAILED_MASK) && walk->phashBlock;
+}
+
 void syncsvc_collect_needed_blocks(struct sync_needed_blocks *result,
                                    const struct block_index *candidate,
                                    const struct block_index *tip,
@@ -595,13 +637,7 @@ void syncsvc_collect_needed_blocks(struct sync_needed_blocks *result,
          * Allow download in that case since connect_block validates fully.
          * But if the walk reached a real block at/below our_height that
          * isn't the tip, this is a genuine fork — reject it. */
-        bool has_pprev_gap = false;
-        if (candidate->nHeight > our_height) {
-            const struct block_index *w = candidate;
-            while (w && w->nHeight > our_height)
-                w = w->pprev;
-            has_pprev_gap = (w == NULL);
-        }
+        bool has_pprev_gap = syncsvc_candidate_has_pprev_gap(candidate, our_height);
         if (has_pprev_gap) {
             result->chains_from_tip = true; /* override — allow download */
         } else {
@@ -612,9 +648,7 @@ void syncsvc_collect_needed_blocks(struct sync_needed_blocks *result,
     walk = (struct block_index *)candidate;
     while (walk && walk->nHeight > our_height &&
            result->count < max_collect && walk_steps < 2048) {
-        if (!(walk->nStatus & BLOCK_HAVE_DATA) &&
-            !(walk->nStatus & BLOCK_FAILED_MASK) &&
-            walk->phashBlock) {
+        if (syncsvc_header_needs_block(walk)) {
             hashes[result->count] = *walk->phashBlock;
             heights[result->count] = walk->nHeight;
             result->count++;

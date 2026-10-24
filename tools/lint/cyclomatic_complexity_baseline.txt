@@ -1898,10 +1898,6 @@ engine/services/src/consensus_state_publication_frontier.c:consensus_state_publi
 engine/services/src/gap_fill_service.c:gap_fill_pass:27
 engine/services/src/header_band_service.c:syncsvc_header_band_after_batch:17
 engine/services/src/header_probe.c:header_probe_pull_range:34
-engine/services/src/header_sync_service.c:syncsvc_build_locator_from_tip:17
-engine/services/src/header_sync_service.c:syncsvc_collect_needed_blocks:20
-engine/services/src/header_sync_service.c:syncsvc_getheaders_interval:17
-engine/services/src/header_sync_service.c:syncsvc_headers_chain_from_tip:23
 engine/services/src/legacy_balance_observer.c:decimal_zat:16
 engine/services/src/legacy_balance_observer.c:parse_result_object:16
 engine/services/src/legacy_import_service.c:legacy_import_service_run:66
