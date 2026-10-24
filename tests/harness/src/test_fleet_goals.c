@@ -1272,6 +1272,64 @@ static int fgl_case_receipt_append(const char *root)
     return failures;
 }
 
+/* The old static placeholder text for the rows the readers now grade. */
+static const struct {
+    const char *id;
+    const char *placeholder;
+} k_fgl_placeholders[] = {
+    {"G5", "no peer-fetch and atomic-install receipt reader exists"},
+    {"G10", "node liveness needs the canonical datadirs"},
+    {"G11", "no spend ledger summary is read by this card"},
+    {"D1", "no reader counts finished runs with complete provider"},
+    {"D2", "requests per accepted change are not aggregated"},
+    {"D4", "first-time acceptance is not recorded per delivery"},
+};
+
+static int fgl_case_wired(const char *root)
+{
+    int failures = 0;
+    struct zcl_goals_options o;
+    struct zcl_goals_host hosts[2];
+    char rows_tsv[600], outcomes[600], agents[600], saved[600] = "";
+    const char *old = getenv("Z23_AGENT_META_ROOT");
+    bool had = old != NULL;
+    if (had)
+        (void)snprintf(saved, sizeof(saved), "%s", old);
+    fgl_options(&o);
+    memset(hosts, 0, sizeof(hosts));
+    (void)snprintf(hosts[0].name, sizeof(hosts[0].name), "alpha");
+    (void)snprintf(hosts[1].name, sizeof(hosts[1].name), "beta");
+    o.hosts = hosts;
+    o.host_count = 2;
+    /* Absent fixture ledgers and agent root: the delivery rows read neither
+     * this host's state root nor its Claude projects root. */
+    (void)snprintf(rows_tsv, sizeof(rows_tsv), "%s/wired/rows.tsv", root);
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/wired/outcomes.jsonl",
+                   root);
+    (void)snprintf(agents, sizeof(agents), "%s/wired/agents", root);
+    (void)setenv("Z23_AGENT_META_ROOT", agents, 1);
+    o.experiments = rows_tsv;
+    o.outcomes = outcomes;
+    TEST("wired readers: the card runs G5, G10, G11, D1, D2 and D4 through "
+         "their readers, each with a grade and no placeholder evidence") {
+        for (size_t j = 0; j < sizeof(k_fgl_placeholders) /
+                                   sizeof(k_fgl_placeholders[0]); j++) {
+            struct zcl_goal_result r =
+                zcl_goals_measure(&o, k_fgl_placeholders[j].id);
+            ASSERT((int)r.grade >= ZCL_GOAL_PASS &&
+                   (int)r.grade <= ZCL_GOAL_UNMEASURED);
+            ASSERT(r.evidence[0] != '\0');
+            ASSERT(!fgl_has(r.evidence, k_fgl_placeholders[j].placeholder));
+        }
+        PASS();
+    } _test_next:;
+    if (had)
+        (void)setenv("Z23_AGENT_META_ROOT", saved, 1);
+    else
+        (void)unsetenv("Z23_AGENT_META_ROOT");
+    return failures;
+}
+
 int test_fleet_goals(void);
 int test_fleet_goals(void)
 {
@@ -1302,6 +1360,7 @@ int test_fleet_goals(void)
     failures += fgl_case_wiki_target(root);
     failures += fgl_case_handler(root);
     failures += fgl_case_checkout(root);
+    failures += fgl_case_wired(root);
     (void)test_rm_rf_recursive(root);
     if (failures == 0)
         printf("test_fleet_goals: all passed\n");

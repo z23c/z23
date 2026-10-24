@@ -159,6 +159,12 @@ bool zcl_objectives_parse_iso8601(const char *s, int64_t *out);
 bool zcl_objectives_outcomes_path(const struct zcl_objectives_options *options,
                                   char *buf, size_t cap, const char **out);
 
+/* The experiment ledger rows.tsv: options->experiments, else
+ * $XDG_STATE_HOME/zclassic23/experiments/rows.tsv, else ~/.local/state. */
+bool zcl_objectives_experiments_path(
+    const struct zcl_objectives_options *options, char *buf, size_t cap,
+    const char **out);
+
 /* Calls `row` for every JSON-object line of a ledger file. False, with the
  * reason, when the file is missing or any line is unreadable. */
 bool zcl_objectives_ledger_walk(const char *path,

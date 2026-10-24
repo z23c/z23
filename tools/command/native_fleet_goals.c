@@ -10,7 +10,11 @@
 
 #include "native_fleet_goals.h"
 
+#include "native_fleet_goals_delivery.h"
 #include "native_fleet_goals_feedback.h"
+#include "native_fleet_goals_node.h"
+#include "native_fleet_goals_slots.h"
+#include "native_fleet_goals_spend.h"
 #include "native_fleet_objectives.h"
 
 #include "command/native_command.h"
@@ -291,25 +295,11 @@ static const struct gr_static k_static[] = {
     {"G2", false, "no k-of-n hybrid signing probe exists in the tree",
      "card: a signing-quorum status leaf reporting hosts and last signed "
      "release"},
-    {"G5", true, "no peer-fetch and atomic-install receipt reader exists",
-     "card: a plugin swarm status leaf listing per-host installs"},
-    {"G10", false, "node liveness needs the canonical datadirs, which this "
-                   "card never opens",
-     "run `z23 status` on each node host and post the result as a receipt"},
-    {"G11", false, "no spend ledger summary is read by this card",
-     "card: report `fleet usage` totals as ZCL spent"},
     {"C8", false, "needs 168 h of observation, have 0 h: no producer "
                   "persists a parity mismatch count",
      "card: write parity samples to a ledger"},
-    {"D1", false, "no reader counts finished runs with complete provider "
-                  "counters across hosts",
-     "card: report recorded-run share per host from the experiment ledger"},
-    {"D2", false, "requests per accepted change are not aggregated",
-     "card: aggregate provider requests per landed change"},
     {"D3", false, "no known-answer review set with seeded defects exists",
      "card: build the seeded-defect review set"},
-    {"D4", false, "first-time acceptance is not recorded per delivery",
-     "card: record review verdicts per delivery"},
 };
 
 static const struct gr_static *gr_find_static(const char *id)
@@ -1251,6 +1241,94 @@ static struct zcl_goal_result gr_d6(const struct zcl_goals_options *o)
     return zcl_goals_feedback_d6(o);
 }
 
+/* ── readers in their own files: G5, G10, G11, D1, D2, D4 ─────────────── */
+
+/* Admitted host count for a reader, 0 when the roster does not load. */
+static size_t gr_admitted(const struct zcl_goals_options *o)
+{
+    struct gr_roster roster;
+    gr_roster_load(o, &roster);
+    return roster.ok ? roster.count : 0;
+}
+
+/* G5 is host-set: without a roster it is unmeasured with the reason. */
+static struct zcl_goal_result gr_g5(const struct zcl_goals_options *o)
+{
+    struct gr_roster roster;
+    struct zcl_goals_slots_in in;
+    memset(&in, 0, sizeof(in));
+    gr_roster_load(o, &roster);
+    if (!roster.ok)
+        return gr_no_roster(&roster);
+    in.admitted_hosts = roster.count;
+    in.skip = o && o->skip_probes;
+    return zcl_goals_slots_measure(&in);
+}
+
+static struct zcl_goal_result gr_g10(const struct zcl_goals_options *o)
+{
+    struct zcl_goals_node_in in;
+    memset(&in, 0, sizeof(in));
+    in.node_budget_ms = 2000;
+    in.skip = o && o->skip_probes;
+    return zcl_goals_node_measure(&in);
+}
+
+static struct zcl_goal_result gr_g11(const struct zcl_goals_options *o)
+{
+    (void)o;
+    return zcl_goals_spend_measure(zcl_command_catalog());
+}
+
+/* The D1, D2 and D4 inputs, with the ledger paths resolved the way D5 and
+ * D6 resolve them (the given path, else the default state path); a path
+ * that cannot be resolved stays NULL and the reader names it missing. */
+struct gr_delivery {
+    struct zcl_goals_delivery_in in;
+    char rows[512];
+    char outcomes[512];
+};
+
+static void gr_delivery_in(const struct zcl_goals_options *o,
+                           struct gr_delivery *d)
+{
+    struct zcl_objectives_options oo;
+    const char *use = NULL;
+    memset(d, 0, sizeof(*d));
+    memset(&oo, 0, sizeof(oo));
+    oo.experiments = o ? o->experiments : NULL;
+    oo.outcomes = o ? o->outcomes : NULL;
+    if (zcl_objectives_experiments_path(&oo, d->rows, sizeof(d->rows), &use))
+        d->in.rows_tsv = use;
+    use = NULL;
+    if (zcl_objectives_outcomes_path(&oo, d->outcomes, sizeof(d->outcomes),
+                                     &use))
+        d->in.outcomes = use;
+    d->in.now = gr_now(o);
+    d->in.admitted_hosts = gr_admitted(o);
+}
+
+static struct zcl_goal_result gr_d1(const struct zcl_goals_options *o)
+{
+    struct gr_delivery d;
+    gr_delivery_in(o, &d);
+    return zcl_goals_delivery_d1(&d.in);
+}
+
+static struct zcl_goal_result gr_d2(const struct zcl_goals_options *o)
+{
+    struct gr_delivery d;
+    gr_delivery_in(o, &d);
+    return zcl_goals_delivery_d2(&d.in);
+}
+
+static struct zcl_goal_result gr_d4(const struct zcl_goals_options *o)
+{
+    struct gr_delivery d;
+    gr_delivery_in(o, &d);
+    return zcl_goals_delivery_d4(&d.in);
+}
+
 /* ── dispatch ─────────────────────────────────────────────────────────── */
 
 typedef struct zcl_goal_result (*gr_fn)(const struct zcl_goals_options *);
@@ -1259,10 +1337,11 @@ static const struct {
     const char *id;
     gr_fn fn;
 } k_producers[] = {
-    {"G1", gr_g1},   {"G3", gr_g3},   {"G4", gr_g4},   {"G6", gr_g6},
-    {"G7", gr_g7},   {"G8", gr_g8},
-    {"G9", gr_g9},   {"G12", gr_g12}, {"G13", gr_g13}, {"D7", gr_d7},
-    {"D8", gr_d8},   {"D5", gr_d5},  {"D6", gr_d6},
+    {"G1", gr_g1},   {"G3", gr_g3},   {"G4", gr_g4},   {"G5", gr_g5},
+    {"G6", gr_g6},   {"G7", gr_g7},   {"G8", gr_g8},   {"G9", gr_g9},
+    {"G10", gr_g10}, {"G11", gr_g11}, {"G12", gr_g12}, {"G13", gr_g13},
+    {"D1", gr_d1},   {"D2", gr_d2},   {"D4", gr_d4},   {"D7", gr_d7},
+    {"D8", gr_d8},   {"D5", gr_d5},   {"D6", gr_d6},
 };
 
 struct zcl_goal_result zcl_goals_measure(

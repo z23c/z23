@@ -85,6 +85,13 @@ static bool tpc_resolve_ledger(const struct zcl_objectives_options *options,
     return true;
 }
 
+bool zcl_objectives_experiments_path(
+    const struct zcl_objectives_options *options, char *buf, size_t cap,
+    const char **out)
+{
+    return tpc_resolve_ledger(options, buf, cap, out);
+}
+
 /* Reads one physical line into `buf` (NUL-terminated, at most cap - 1 bytes
  * kept). 1 = a line, 2 = a line that overflowed the cap (drained to its end),
  * 0 = end of file, -1 = a read error. */
