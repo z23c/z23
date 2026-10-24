@@ -1308,9 +1308,6 @@ engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_admit:23
 engine/composition/src/boot_zcode_swarm.c:boot_zcode_work_publish_results:20
 engine/composition/src/boot_zcode_swarm_dht.c:boot_zcode_swarm_discovery_tick:27
 engine/composition/src/boot_zcode_swarm_receipt.c:boot_zcode_swarm_receipt_frame:16
-engine/composition/src/bundle_exporter.c:bundle_exporter_start#2:21
-engine/composition/src/bundle_exporter.c:bx_recover_session:18
-engine/composition/src/bundle_exporter.c:bx_try_export_once:20
 engine/composition/src/consensus_state_bundle_validate.c:validate_nullifiers:20
 engine/composition/src/consensus_state_bundle_validate_schema.c:consensus_state_bundle_validate_canonical_schema:26
 engine/composition/src/consensus_state_install_runtime.c:consensus_state_install_from_bundle#2:64

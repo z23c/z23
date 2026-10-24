@@ -446,6 +446,73 @@ static bool bx_stamped_epoch_is_this_build(sqlite3 *pdb)
         return false;
     return bx_epoch_adoptable(stamped, current);
 }
+/* Publish an open producer session into g_bx (the caller has already
+ * succeeded at begin()). Takes g_bx.lock itself; the caller must not hold it. */
+static void bx_recover_mark_open(void)
+{
+    pthread_mutex_lock(&g_bx.lock);
+    g_bx.session_open = true;
+    g_bx.qualified = true;
+    pthread_mutex_unlock(&g_bx.lock);
+}
+
+/* Outcome of the qualify-then-begin step of one recovery attempt. */
+enum bx_open_state {
+    BX_OPEN_REFUSED = 0, /* begin() refused: err holds the cause, re-derive may run */
+    BX_OPEN_OPENED,      /* session open and accounted as a success */
+    BX_OPEN_ACCOUNTED    /* qualification refused and accounted as a failure */
+};
+
+/* Re-qualify, then try to begin the producer session as it stands. */
+static enum bx_open_state bx_recover_open_once(sqlite3 *pdb, char *err,
+                                               size_t cap)
+{
+    char reason[256] = "";
+    if (!bx_qualified(pdb, reason, sizeof reason)) {
+        bx_attempt_failed(reason[0] ? reason : "provenance does not qualify");
+        return BX_OPEN_ACCOUNTED;
+    }
+    if (consensus_state_producer_receipt_begin(
+            pdb, CONSENSUS_STATE_VALIDATION_FULL, err, cap)) {
+        bx_recover_mark_open();
+        bx_attempt_succeeded();
+        return BX_OPEN_OPENED;
+    }
+    return BX_OPEN_REFUSED;
+}
+
+/* begin() refused. Re-derive ONLY when the epoch on disk is this build's:
+ * retire the foreign row and begin again from this running binary. Returns
+ * true iff a session is open afterwards (accounted as a success). On false,
+ * `err` holds the literal cause when one was learned. */
+static bool bx_recover_rederive(sqlite3 *pdb, char *err, size_t cap)
+{
+    if (!bx_stamped_epoch_is_this_build(pdb))
+        return false;
+    char rerr[256] = "";
+    enum consensus_state_producer_session_retire_result rc =
+        consensus_state_producer_session_retire(pdb, NULL, rerr, sizeof rerr);
+    if (rc == CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_RETIRED ||
+        rc == CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT) {
+        char err2[256] = "";
+        if (consensus_state_producer_receipt_begin(
+                pdb, CONSENSUS_STATE_VALIDATION_FULL, err2, sizeof err2)) {
+            LOG_INFO("bundle_exporter",
+                     "producer session re-derived from this running "
+                     "binary (same source epoch); minting resumes");
+            bx_recover_mark_open();
+            bx_attempt_succeeded();
+            return true;
+        }
+        snprintf(err, cap, "%s",
+                 err2[0] ? err2 : "producer session refused after re-derive");
+    } else if (rc == CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ERROR) {
+        snprintf(err, cap, "%s",
+                 rerr[0] ? rerr : "producer session retire failed");
+    }
+    return false;
+}
+
 /* One recovery attempt: re-qualify, re-open the producer session, and — only
  * when the stamped epoch says it is a rubber stamp — retire the foreign
  * session row and re-derive one from this running binary. Returns true iff a
@@ -469,59 +536,20 @@ static bool bx_recover_session(bool force)
     if (!force && next_us > 0 && GetTimeMicros() < next_us)
         return false; /* inside the backoff window: no attempt, no accounting */
     char err[256] = "";
+    enum bx_open_state st = BX_OPEN_REFUSED;
 #ifdef ZCL_TESTING
-    if (inject) {
+    if (inject)
         snprintf(err, sizeof err, "%s",
                  inject_err[0] ? inject_err : "injected session refusal");
-    } else
+    else
 #endif
-    {
-        char reason[256] = "";
-        if (!bx_qualified(pdb, reason, sizeof reason)) {
-            bx_attempt_failed(reason[0] ? reason
-                                        : "provenance does not qualify");
-            return false;
-        }
-        if (consensus_state_producer_receipt_begin(
-                pdb, CONSENSUS_STATE_VALIDATION_FULL, err, sizeof err)) {
-            pthread_mutex_lock(&g_bx.lock);
-            g_bx.session_open = true;
-            g_bx.qualified = true;
-            pthread_mutex_unlock(&g_bx.lock);
-            bx_attempt_succeeded();
-            return true;
-        }
-    }
-    /* begin() refused. Re-derive ONLY when the epoch on disk is ours. */
-    if (bx_stamped_epoch_is_this_build(pdb)) {
-        char rerr[256] = "";
-        enum consensus_state_producer_session_retire_result rc =
-            consensus_state_producer_session_retire(pdb, NULL, rerr,
-                                                    sizeof rerr);
-        if (rc == CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_RETIRED ||
-            rc == CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ABSENT) {
-            char err2[256] = "";
-            if (consensus_state_producer_receipt_begin(
-                    pdb, CONSENSUS_STATE_VALIDATION_FULL, err2,
-                    sizeof err2)) {
-                LOG_INFO("bundle_exporter",
-                         "producer session re-derived from this running "
-                         "binary (same source epoch); minting resumes");
-                pthread_mutex_lock(&g_bx.lock);
-                g_bx.session_open = true;
-                g_bx.qualified = true;
-                pthread_mutex_unlock(&g_bx.lock);
-                bx_attempt_succeeded();
-                return true;
-            }
-            snprintf(err, sizeof err, "%s",
-                     err2[0] ? err2 : "producer session refused after "
-                                      "re-derive");
-        } else if (rc == CONSENSUS_STATE_PRODUCER_SESSION_RETIRE_ERROR) {
-            snprintf(err, sizeof err, "%s",
-                     rerr[0] ? rerr : "producer session retire failed");
-        }
-    }
+        st = bx_recover_open_once(pdb, err, sizeof err);
+    if (st == BX_OPEN_OPENED)
+        return true;
+    if (st == BX_OPEN_ACCOUNTED)
+        return false;
+    if (bx_recover_rederive(pdb, err, sizeof err))
+        return true;
     bx_attempt_failed(err[0] ? err : "producer session refused");
     return false;
 }
@@ -628,44 +656,32 @@ static void bx_reseed_fresh(const char *datadir, const char *name)
                      "rom_seed scan will pick it up", rel, (int)rrc);
     }
 }
-static void bx_try_export_once(void)
+/* The durable-tip read touches the shared singleton handle and does NOT
+ * self-lock; serialize it with the reducer's batches. Brief: two indexed
+ * lookups. (The receipt finalize + the snapshot pin below each take the
+ * lock themselves.) Returns false, after recording the refusal, when no
+ * durable tip is available. */
+static bool bx_resolve_tip(sqlite3 *pdb, int *h, uint8_t *hash)
 {
-    pthread_mutex_lock(&g_bx.lock);
-    sqlite3 *pdb = g_bx.pdb;
-    int64_t every = g_bx.every_blocks;
-    int64_t every_secs = g_bx.every_secs;
-    int64_t min_secs = g_bx.min_secs;
-    int64_t max_tip_gap = g_bx.max_tip_gap;
-    int keep = g_bx.keep;
-    char bundles_dir[1100];
-    char datadir[1024];
-    snprintf(bundles_dir, sizeof bundles_dir, "%s", g_bx.bundles_dir);
-    snprintf(datadir, sizeof datadir, "%s", g_bx.datadir);
-    pthread_mutex_unlock(&g_bx.lock);
-    /* Belt+braces: the proof independently refuses while the overlay is live,
-     * but never even finalize the receipt against a mutable in-RAM view. */
-    if (coins_ram_active()) {
-        bx_note_refusal("in-RAM overlay active");
-        return;
-    }
-    /* The durable-tip read touches the shared singleton handle and does NOT
-     * self-lock; serialize it with the reducer's batches. Brief: two indexed
-     * lookups. (The receipt finalize + the snapshot pin below each take the
-     * lock themselves.) */
-    int h = -1;
-    uint8_t hash[32];
     progress_store_tx_lock();
-    bool tip_ok = tip_finalize_stage_resolve_durable_tip(pdb, &h, hash);
+    bool tip_ok = tip_finalize_stage_resolve_durable_tip(pdb, h, hash);
     progress_store_tx_unlock();
-    if (!tip_ok || h < 0) {
+    if (!tip_ok || *h < 0) {
         bx_note_refusal("durable tip unavailable");
-        return;
+        return false;
     }
-    /* GAP-1b — time + block cadence. elapsed is measured from the last export's
-     * wall-clock time (seeded from the newest on-disk generation's mtime at
-     * start, so both cadences survive a restart). A zero/absent last-time means
-     * "no prior generation" → treat elapsed as unbounded so the first export is
-     * governed by the block ceiling / the floor passes. */
+    return true;
+}
+
+/* GAP-1b — time + block cadence for the tip height `h`. elapsed is measured
+ * from the last export's wall-clock time (seeded from the newest on-disk
+ * generation's mtime at start, so both cadences survive a restart). A
+ * zero/absent last-time means "no prior generation" → treat elapsed as
+ * unbounded so the first export is governed by the block ceiling / the floor
+ * passes. */
+static bool bx_export_cadence_due(int h, int64_t every, int64_t every_secs,
+                                  int64_t min_secs)
+{
     int32_t last = atomic_load(&g_bx_last_export_height);
     int64_t last_time_us = atomic_load(&g_bx_last_export_time_us);
     int64_t now_us = GetTimeMicros();
@@ -676,44 +692,86 @@ static void bx_try_export_once(void)
         elapsed_secs = 0; /* clock skew → fail the floor, fail-safe */
     else
         elapsed_secs = (now_us - last_time_us) / 1000000;
-    if (!bx_export_due((int64_t)h, (int64_t)last, elapsed_secs, every,
-                       every_secs, min_secs))
-        return; /* not due yet (block ceiling / time ceiling / min-secs floor) */
-    /* GAP-1a — at-tip gate. A STARTER bundle must be near the network tip so a
-     * fresh consumer lands there; a still-catching-up node would mint a stale
-     * generation. node_health_collect(NULL,NULL) self-resolves the runtime
-     * singletons (same call the soak/healthcheck background paths use); it is
-     * invoked here holding NO progress_store_tx_lock, so its internal locks
-     * never nest with this module's. Refusal is observable via last_refusal /
-     * dumpstate. */
+    return bx_export_due((int64_t)h, (int64_t)last, elapsed_secs, every,
+                         every_secs, min_secs);
+}
+
+/* GAP-1a — at-tip gate. A STARTER bundle must be near the network tip so a
+ * fresh consumer lands there; a still-catching-up node would mint a stale
+ * generation. node_health_collect(NULL,NULL) self-resolves the runtime
+ * singletons (same call the soak/healthcheck background paths use); it is
+ * invoked here holding NO progress_store_tx_lock, so its internal locks
+ * never nest with this module's. Refusal is observable via last_refusal /
+ * dumpstate. */
+static bool bx_at_tip_gate(int64_t max_tip_gap)
+{
     struct node_health_snapshot snap;
     node_health_collect(&snap, NULL, NULL);
-    if (!bx_at_tip_ok(snap.synced, snap.log_head_gap, max_tip_gap)) {
-        bx_note_refusal("not at tip: synced=%d log_head_gap=%d > max_tip_gap=%lld",
-                        snap.synced ? 1 : 0, snap.log_head_gap,
-                        (long long)max_tip_gap);
-        return;
-    }
-    char name[128];
-    snprintf(name, sizeof name, BX_BUNDLE_PREFIX "%d" BX_BUNDLE_SUFFIX, h);
-    /* Already exported this generation? Treat as done. */
-    char full[1300];
-    snprintf(full, sizeof full, "%s/%s", bundles_dir, name);
-    struct stat stx;
-    if (stat(full, &stx) == 0) {
-        atomic_store(&g_bx_last_export_height, h);
-        return;
-    }
-    /* Roll the source receipt forward to the current durable tip. Monotonic:
-     * an equal height is idempotent, a lower one is refused inside finalize. */
+    if (bx_at_tip_ok(snap.synced, snap.log_head_gap, max_tip_gap))
+        return true;
+    bx_note_refusal("not at tip: synced=%d log_head_gap=%d > max_tip_gap=%lld",
+                    snap.synced ? 1 : 0, snap.log_head_gap,
+                    (long long)max_tip_gap);
+    return false;
+}
+
+/* Roll the source receipt forward to the current durable tip. Monotonic:
+ * an equal height is idempotent, a lower one is refused inside finalize. */
+static bool bx_finalize_receipt(sqlite3 *pdb, int h, uint8_t *hash)
+{
     char err[256] = "";
-    if (!consensus_state_producer_receipt_finalize(pdb, h, hash,
-                                                   err, sizeof err)) {
-        bx_note_refusal("%s", err[0] ? err : "receipt finalize failed");
-        atomic_fetch_add(&g_bx_exports_failed, 1);
-        bx_attempt_failed(err[0] ? err : "receipt finalize failed");
-        return;
-    }
+    if (consensus_state_producer_receipt_finalize(pdb, h, hash,
+                                                  err, sizeof err))
+        return true;
+    bx_note_refusal("%s", err[0] ? err : "receipt finalize failed");
+    atomic_fetch_add(&g_bx_exports_failed, 1);
+    bx_attempt_failed(err[0] ? err : "receipt finalize failed");
+    return false;
+}
+
+/* A minted generation: publish the height/time/duration, clear the refusal,
+ * reseed it, rotate the directory, and record the success. */
+static void bx_export_succeeded(const char *name, int h, int64_t dur,
+                                const char *datadir, const char *bundles_dir,
+                                int keep)
+{
+    atomic_store(&g_bx_last_export_height, h);
+    atomic_store(&g_bx_last_export_time_us, GetTimeMicros());
+    atomic_store(&g_bx_last_export_duration_us, dur);
+    atomic_fetch_add(&g_bx_exports_ok, 1);
+    pthread_mutex_lock(&g_bx.lock);
+    g_bx.last_refusal[0] = '\0';
+    pthread_mutex_unlock(&g_bx.lock);
+    LOG_INFO("bundle_exporter",
+             "exported %s height=%d duration_us=%lld",
+             name, h, (long long)dur);
+    bx_reseed_fresh(datadir, name);
+    bx_rotate(bundles_dir, keep, datadir);
+    /* A minted generation is the definition of "not degraded": the record
+     * and the failure streak both go. */
+    bx_attempt_succeeded();
+}
+
+/* A refused export (not a shutdown abort): counted, logged, and a failed
+ * attempt toward the degradation streak. */
+static void bx_export_refused(int h,
+                              const struct consensus_state_export_result *res)
+{
+    bx_note_refusal("%s", res->reason[0] ? res->reason : "export refused");
+    atomic_fetch_add(&g_bx_exports_failed, 1);
+    LOG_WARN("bundle_exporter",
+             "export refused height=%d status=%d reason=%s",
+             h, (int)res->status,
+             res->reason[0] ? res->reason : "(none)");
+    bx_attempt_failed(res->reason[0] ? res->reason : "export refused");
+}
+
+/* Mint the generation at height h: open the bundles directory, run the
+ * snapshot export into it, and account the outcome. */
+static void bx_run_export(const char *name, int h, uint8_t *hash,
+                          const char *datadir, const char *bundles_dir,
+                          int keep)
+{
     int dir_fd = open(bundles_dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (dir_fd < 0) {
         bx_note_refusal("open bundles dir failed: %s", strerror(errno));
@@ -741,21 +799,7 @@ static void bx_try_export_once(void)
     close(dir_fd);
     int64_t dur = GetTimeMicros() - t0;
     if (ok && res.status == CONSENSUS_EXPORT_EXPORTED) {
-        atomic_store(&g_bx_last_export_height, h);
-        atomic_store(&g_bx_last_export_time_us, GetTimeMicros());
-        atomic_store(&g_bx_last_export_duration_us, dur);
-        atomic_fetch_add(&g_bx_exports_ok, 1);
-        pthread_mutex_lock(&g_bx.lock);
-        g_bx.last_refusal[0] = '\0';
-        pthread_mutex_unlock(&g_bx.lock);
-        LOG_INFO("bundle_exporter",
-                 "exported %s height=%d duration_us=%lld",
-                 name, h, (long long)dur);
-        bx_reseed_fresh(datadir, name);
-        bx_rotate(bundles_dir, keep, datadir);
-        /* A minted generation is the definition of "not degraded": the record
-         * and the failure streak both go. */
-        bx_attempt_succeeded();
+        bx_export_succeeded(name, h, dur, datadir, bundles_dir, keep);
     } else if (res.status == CONSENSUS_EXPORT_CANCELLED) {
         /* A shutdown abort is not an export outage: no failure streak, no
          * backoff, no degradation blocker — and nothing was published. The
@@ -765,14 +809,51 @@ static void bx_try_export_once(void)
                  "export cancelled by shutdown at height=%d after %lldus",
                  h, (long long)dur);
     } else {
-        bx_note_refusal("%s", res.reason[0] ? res.reason : "export refused");
-        atomic_fetch_add(&g_bx_exports_failed, 1);
-        LOG_WARN("bundle_exporter",
-                 "export refused height=%d status=%d reason=%s",
-                 h, (int)res.status,
-                 res.reason[0] ? res.reason : "(none)");
-        bx_attempt_failed(res.reason[0] ? res.reason : "export refused");
+        bx_export_refused(h, &res);
     }
+}
+
+static void bx_try_export_once(void)
+{
+    pthread_mutex_lock(&g_bx.lock);
+    sqlite3 *pdb = g_bx.pdb;
+    int64_t every = g_bx.every_blocks;
+    int64_t every_secs = g_bx.every_secs;
+    int64_t min_secs = g_bx.min_secs;
+    int64_t max_tip_gap = g_bx.max_tip_gap;
+    int keep = g_bx.keep;
+    char bundles_dir[1100];
+    char datadir[1024];
+    snprintf(bundles_dir, sizeof bundles_dir, "%s", g_bx.bundles_dir);
+    snprintf(datadir, sizeof datadir, "%s", g_bx.datadir);
+    pthread_mutex_unlock(&g_bx.lock);
+    /* Belt+braces: the proof independently refuses while the overlay is live,
+     * but never even finalize the receipt against a mutable in-RAM view. */
+    if (coins_ram_active()) {
+        bx_note_refusal("in-RAM overlay active");
+        return;
+    }
+    int h = -1;
+    uint8_t hash[32];
+    if (!bx_resolve_tip(pdb, &h, hash))
+        return;
+    if (!bx_export_cadence_due(h, every, every_secs, min_secs))
+        return; /* not due yet (block ceiling / time ceiling / min-secs floor) */
+    if (!bx_at_tip_gate(max_tip_gap))
+        return;
+    char name[128];
+    snprintf(name, sizeof name, BX_BUNDLE_PREFIX "%d" BX_BUNDLE_SUFFIX, h);
+    /* Already exported this generation? Treat as done. */
+    char full[1300];
+    snprintf(full, sizeof full, "%s/%s", bundles_dir, name);
+    struct stat stx;
+    if (stat(full, &stx) == 0) {
+        atomic_store(&g_bx_last_export_height, h);
+        return;
+    }
+    if (!bx_finalize_receipt(pdb, h, hash))
+        return;
+    bx_run_export(name, h, hash, datadir, bundles_dir, keep);
 }
 /* ── Worker loop ────────────────────────────────────────────────── */
 static void *bx_worker_main(void *arg)
@@ -812,19 +893,10 @@ static void *bx_worker_main(void *arg)
     return NULL;
 }
 /* ── Lifecycle ──────────────────────────────────────────────────── */
-bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
+/* Read the cadence / tip-gap / keep / tick knobs into g_bx, clamped to their
+ * floors. Caller holds g_bx.lock. */
+static void bx_load_config_locked(void)
 {
-    if (!pdb || !datadir || !*datadir)
-        LOG_FAIL("bundle_exporter",
-                 "start: NULL progress handle or datadir — not armed");
-    pthread_mutex_lock(&g_bx.lock);
-    if (atomic_load(&g_bx_running)) {
-        pthread_mutex_unlock(&g_bx.lock);
-        return true; /* idempotent */
-    }
-    g_bx.pdb = pdb;
-    snprintf(g_bx.datadir, sizeof g_bx.datadir, "%s", datadir);
-    snprintf(g_bx.bundles_dir, sizeof g_bx.bundles_dir, "%s/bundles", datadir);
     g_bx.every_blocks = bx_env_i64("ZCL_BUNDLE_EXPORT_EVERY_BLOCKS", 5000);
     if (g_bx.every_blocks < 1)
         g_bx.every_blocks = 1;
@@ -847,6 +919,73 @@ bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
     g_bx.tick_secs = bx_env_i64("ZCL_BUNDLE_EXPORT_TICK_SECS", 30);
     if (g_bx.tick_secs < 1)
         g_bx.tick_secs = 1;
+}
+
+/* Qualify and (maybe) open the producer session at arm time. Runs OUTSIDE
+ * g_bx.lock (see bundle_exporter_start). Returns true iff the session is open;
+ * otherwise `degradation` names the first failing rung and the arm stays up. */
+static bool bx_arm_open_session(sqlite3 *pdb, int64_t every, int keep,
+                                int64_t tick, char *degradation, size_t cap)
+{
+    char reason[256] = "";
+    if (!bx_qualified(pdb, reason, sizeof reason)) {
+        snprintf(degradation, cap, "%s", reason);
+        LOG_WARN("bundle_exporter",
+                 "not qualified: %s (degraded, still armed)", reason);
+        return false;
+    }
+    char err[256] = "";
+    if (consensus_state_producer_receipt_begin(
+            pdb, CONSENSUS_STATE_VALIDATION_FULL, err, sizeof err)) {
+        LOG_INFO("bundle_exporter",
+                 "producer session opened (qualified); standing exporter "
+                 "armed every=%lld keep=%d tick=%llds",
+                 (long long)every, keep, (long long)tick);
+        return true;
+    }
+    snprintf(degradation, cap, "%s",
+             err[0] ? err : "producer session refused");
+    LOG_WARN("bundle_exporter",
+             "producer session refused: %s (degraded, still armed)",
+             degradation);
+    return false;
+}
+
+/* Register the supervised (best-effort, no-stall) liveness contract. A failed
+ * supervisor_start is logged; the exporter then runs unsupervised. */
+static void bx_arm_supervisor(void)
+{
+    if (supervisor_start()) {
+        liveness_contract_init(&g_bx_contract, "ops.bundle_exporter");
+        atomic_store(&g_bx_contract.period_secs, 0);
+        atomic_store(&g_bx_contract.deadline_secs, 0);
+        atomic_store(&g_bx_contract.progress_max_quiet_us, 0);
+        supervisor_domains_init();
+        supervisor_child_id id =
+            supervisor_register_in_domain(g_op_sup, &g_bx_contract);
+        atomic_store(&g_bx_supervisor_id, id);
+        if (id != SUPERVISOR_INVALID_ID)
+            supervisor_tick(id);
+    } else {
+        LOG_WARN("bundle_exporter",
+                 "supervisor_start failed; exporter runs unsupervised");
+    }
+}
+
+bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
+{
+    if (!pdb || !datadir || !*datadir)
+        LOG_FAIL("bundle_exporter",
+                 "start: NULL progress handle or datadir — not armed");
+    pthread_mutex_lock(&g_bx.lock);
+    if (atomic_load(&g_bx_running)) {
+        pthread_mutex_unlock(&g_bx.lock);
+        return true; /* idempotent */
+    }
+    g_bx.pdb = pdb;
+    snprintf(g_bx.datadir, sizeof g_bx.datadir, "%s", datadir);
+    snprintf(g_bx.bundles_dir, sizeof g_bx.bundles_dir, "%s/bundles", datadir);
+    bx_load_config_locked();
     /* A fresh arm starts a fresh streak. */
     g_bx.consecutive_failures = 0;
     g_bx.recover_backoff_secs = 0;
@@ -866,35 +1005,14 @@ bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
      * so no lock-order edge). Single-threaded here: the worker is not spawned
      * yet and g_bx_running is still false, so the fields written below cannot
      * be observed concurrently. NEVER fail here. */
-    bool session_open = false;
-    bool qualified = false;
     char degradation[256] = "";
-    char reason[256] = "";
-    if (bx_qualified(pdb, reason, sizeof reason)) {
-        char err[256] = "";
-        if (consensus_state_producer_receipt_begin(
-                pdb, CONSENSUS_STATE_VALIDATION_FULL, err, sizeof err)) {
-            session_open = true;
-            qualified = true;
-            LOG_INFO("bundle_exporter",
-                     "producer session opened (qualified); standing exporter "
-                     "armed every=%lld keep=%d tick=%llds",
-                     (long long)every, keep, (long long)tick);
-        } else {
-            snprintf(degradation, sizeof degradation, "%s",
-                     err[0] ? err : "producer session refused");
-            LOG_WARN("bundle_exporter",
-                     "producer session refused: %s (degraded, still armed)",
-                     degradation);
-        }
-    } else {
-        snprintf(degradation, sizeof degradation, "%s", reason);
-        LOG_WARN("bundle_exporter",
-                 "not qualified: %s (degraded, still armed)", reason);
-    }
+    bool session_open = bx_arm_open_session(pdb, every, keep, tick,
+                                            degradation, sizeof degradation);
+    /* qualified and session_open are set together in every arm: a session is
+     * open iff this boot qualified, so one flag carries both. */
     pthread_mutex_lock(&g_bx.lock);
     g_bx.session_open = session_open;
-    g_bx.qualified = qualified;
+    g_bx.qualified = session_open;
     snprintf(g_bx.degradation_reason, sizeof g_bx.degradation_reason, "%s",
              degradation);
     pthread_mutex_unlock(&g_bx.lock);
@@ -911,22 +1029,7 @@ bool bundle_exporter_start(sqlite3 *pdb, const char *datadir)
     if (!session_open)
         bx_attempt_failed(degradation[0] ? degradation
                                          : "producer session not open");
-    /* Register the supervised (best-effort, no-stall) contract. */
-    if (supervisor_start()) {
-        liveness_contract_init(&g_bx_contract, "ops.bundle_exporter");
-        atomic_store(&g_bx_contract.period_secs, 0);
-        atomic_store(&g_bx_contract.deadline_secs, 0);
-        atomic_store(&g_bx_contract.progress_max_quiet_us, 0);
-        supervisor_domains_init();
-        supervisor_child_id id =
-            supervisor_register_in_domain(g_op_sup, &g_bx_contract);
-        atomic_store(&g_bx_supervisor_id, id);
-        if (id != SUPERVISOR_INVALID_ID)
-            supervisor_tick(id);
-    } else {
-        LOG_WARN("bundle_exporter",
-                 "supervisor_start failed; exporter runs unsupervised");
-    }
+    bx_arm_supervisor();
     atomic_store(&g_bx_cancel, false);
     atomic_store(&g_bx_running, true);
     int rc = thread_registry_spawn("zcl_bundle_exp", bx_worker_main, NULL,
