@@ -69,6 +69,26 @@ bool rr_fail(struct consensus_state_replay_result *out, const char *fmt,
     LOG_WARN(RR_SUBSYS, "%s", reason);
     return false;
 }
+
+/* Stream exactly `size` bytes of `file` into `ctx`; false on any short read. */
+static bool rr_hash_positioned_file(struct platform_positioned_file *file,
+                                    uint64_t size, struct sha3_256_ctx *ctx)
+{
+    uint8_t buffer[32768];
+    uint64_t offset = 0;
+    while (offset < size) {
+        size_t want = size - offset < sizeof(buffer)
+                          ? (size_t)(size - offset)
+                          : sizeof(buffer);
+        int64_t n = platform_positioned_file_read(file, buffer, want, offset);
+        if (n != (int64_t)want)
+            return false;
+        sha3_256_write(ctx, buffer, want);
+        offset += want;
+    }
+    return true;
+}
+
 /* SHA3-256 of the running executable image — the race-free /proc/self/exe idiom
  * (matches consensus_state_producer_receipt.c's running_binary_digest).
  *
@@ -96,29 +116,9 @@ static bool rr_verifier_binary_digest(uint8_t out[32])
     }
     struct sha3_256_ctx ctx;
     sha3_256_init(&ctx);
-    uint8_t buffer[32768];
-    bool ok = true;
-    uint64_t offset = 0;
-    while (offset < before.size) {
-        size_t want = before.size - offset < sizeof(buffer)
-                          ? (size_t)(before.size - offset)
-                          : sizeof(buffer);
-        int64_t n = platform_positioned_file_read(&file, buffer, want, offset);
-        if (n != (int64_t)want) {
-            ok = false;
-            break;
-        }
-        sha3_256_write(&ctx, buffer, want);
-        offset += want;
-    }
-    ok = ok && platform_positioned_file_snapshot(&file, &after) &&
-         before.size == after.size && before.volume == after.volume &&
-         before.file_low == after.file_low &&
-         before.file_high == after.file_high &&
-         before.modified_seconds == after.modified_seconds &&
-         before.modified_nanoseconds == after.modified_nanoseconds &&
-         before.changed_seconds == after.changed_seconds &&
-         before.changed_nanoseconds == after.changed_nanoseconds;
+    bool ok = rr_hash_positioned_file(&file, before.size, &ctx) &&
+              platform_positioned_file_snapshot(&file, &after) &&
+              platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     if (ok)
         sha3_256_finalize(&ctx, out);
@@ -253,13 +253,7 @@ static bool rr_read_root(const char *trusted_root, struct rr_receipt *r)
               platform_positioned_file_read(&file, buf, sizeof(buf), 0) ==
                   (int64_t)sizeof(buf) &&
               platform_positioned_file_snapshot(&file, &after) &&
-              before.size == after.size && before.volume == after.volume &&
-              before.file_low == after.file_low &&
-              before.file_high == after.file_high &&
-              before.modified_seconds == after.modified_seconds &&
-              before.modified_nanoseconds == after.modified_nanoseconds &&
-              before.changed_seconds == after.changed_seconds &&
-              before.changed_nanoseconds == after.changed_nanoseconds;
+              platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
     return ok && rr_deserialize(buf, r);
 }
@@ -287,6 +281,95 @@ static bool rr_components_match(const struct consensus_state_bundle_manifest *m,
     return true;
 }
 
+/* (1) Admit + strictly validate the immutable bundle read-only, and copy its
+ * manifest and whole-file digest out of the evidence handle. On success the
+ * caller owns `*evidence`. Best-effort directory capability for the
+ * install-verify receipt only; a failed open here just means every replay
+ * verify runs the full content scan (fail-soft, same as passing -1). */
+static bool rr_admit_bundle(const char *bundle_path, const char *datadir,
+                            struct consensus_state_artifact_evidence **evidence,
+                            struct consensus_state_bundle_manifest *m,
+                            struct rr_receipt *r,
+                            struct consensus_state_replay_result *out)
+{
+    int datadir_fd = -1;
+#ifndef _WIN32
+    datadir_fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+#endif
+    struct zcl_result admitted =
+        consensus_state_artifact_evidence_open(bundle_path, datadir_fd,
+                                               evidence);
+    if (datadir_fd >= 0) {
+#ifndef _WIN32
+        (void)close(datadir_fd);
+#endif
+    }
+    if (!admitted.ok)
+        return rr_fail(out, "bundle admission/validation failed: %s",
+                       admitted.message);
+
+    bool ok = consensus_state_artifact_evidence_manifest_copy(*evidence, m) &&
+              consensus_state_artifact_evidence_file_digest(
+                  *evidence, r->bundle_file_digest);
+    if (!ok) {
+        consensus_state_artifact_evidence_free(*evidence);
+        return rr_fail(out, "artifact evidence became stale after admission");
+    }
+    return true;
+}
+
+/* (2) A complete genesis-derived history bundle — the same anti-mixed-
+ *     provenance contract ACTIVATE enforces. */
+static bool rr_is_genesis_history(const struct consensus_state_bundle_manifest *m)
+{
+    return m->history_complete && m->activation_boundary == 0 &&
+           m->sprout_source_cursor == 0 && m->sapling_source_cursor == 0 &&
+           m->nullifier_source_cursor == 0 &&
+           m->source_fold_cursor == (int64_t)m->height + 1;
+}
+
+/* (3+4) Independently derive from the datadir's own tables and compare. The
+ * evidence handle is released on every path; the comparison reads only the
+ * manifest copy, never the handle. */
+static bool rr_derive_and_compare(sqlite3 *progress_db,
+                                  struct consensus_state_artifact_evidence *evidence,
+                                  struct consensus_state_bundle_manifest *m,
+                                  struct rr_receipt *r,
+                                  struct consensus_state_replay_result *out)
+{
+    bool ok = rr_derive_from_datadir(progress_db, m, r, out) &&
+              rr_components_match(m, r, out);
+    consensus_state_artifact_evidence_free(evidence);
+    return ok;
+}
+
+/* Publish the verified outcome onto `out` (when present) and log it. */
+static void rr_publish_verified(struct consensus_state_replay_result *out,
+                                const struct consensus_state_bundle_manifest *m,
+                                const struct rr_receipt *r,
+                                const char *final_path)
+{
+    if (out) {
+        out->verified = true;
+        out->height = m->height;
+        out->utxo_count = r->utxo_count;
+        out->total_supply = r->total_supply;
+        out->anchor_count = r->anchor_count;
+        out->nullifier_count = r->nullifier_count;
+        memcpy(out->bundle_file_digest, r->bundle_file_digest, 32);
+        memcpy(out->verifier_binary_digest, r->verifier_binary_digest, 32);
+        snprintf(out->receipt_path, sizeof(out->receipt_path), "%s",
+                 final_path);
+        snprintf(out->reason, sizeof(out->reason),
+                 "replay-verified height=%d utxo=%llu anchors=%llu "
+                 "nullifiers=%llu; receipt at %.80s", m->height,
+                 (unsigned long long)r->utxo_count,
+                 (unsigned long long)r->anchor_count,
+                 (unsigned long long)r->nullifier_count, final_path);
+    }
+    LOG_INFO(RR_SUBSYS, "%s", out ? out->reason : "replay-verified");
+}
+
 bool consensus_state_replay_verify_and_write_receipt(
     sqlite3 *progress_db, const char *bundle_path, const char *datadir,
     struct consensus_state_replay_result *out)
@@ -297,44 +380,14 @@ bool consensus_state_replay_verify_and_write_receipt(
         !datadir[0])
         return rr_fail(out, "NULL progress_db/bundle_path/datadir");
 
-    /* (1) Admit + strictly validate the immutable bundle read-only. Best-
-     * effort directory capability for the install-verify receipt only; a
-     * failed open here just means every replay verify runs the full content
-     * scan (fail-soft, same as passing -1). */
-    int datadir_fd = -1;
-#ifndef _WIN32
-    datadir_fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-#endif
     struct consensus_state_artifact_evidence *evidence = NULL;
-    struct zcl_result admitted =
-        consensus_state_artifact_evidence_open(bundle_path, datadir_fd,
-                                               &evidence);
-    if (datadir_fd >= 0) {
-#ifndef _WIN32
-        (void)close(datadir_fd);
-#endif
-    }
-    if (!admitted.ok)
-        return rr_fail(out, "bundle admission/validation failed: %s",
-                       admitted.message);
-
     struct rr_receipt r;
     memset(&r, 0, sizeof(r));
     struct consensus_state_bundle_manifest m;
-    bool ok = consensus_state_artifact_evidence_manifest_copy(evidence, &m) &&
-              consensus_state_artifact_evidence_file_digest(
-                  evidence, r.bundle_file_digest);
-    if (!ok) {
-        consensus_state_artifact_evidence_free(evidence);
-        return rr_fail(out, "artifact evidence became stale after admission");
-    }
+    if (!rr_admit_bundle(bundle_path, datadir, &evidence, &m, &r, out))
+        return false;
 
-    /* (2) A complete genesis-derived history bundle — the same anti-mixed-
-     *     provenance contract ACTIVATE enforces. */
-    if (!m.history_complete || m.activation_boundary != 0 ||
-        m.sprout_source_cursor != 0 || m.sapling_source_cursor != 0 ||
-        m.nullifier_source_cursor != 0 ||
-        m.source_fold_cursor != (int64_t)m.height + 1) {
+    if (!rr_is_genesis_history(&m)) {
         consensus_state_artifact_evidence_free(evidence);
         return rr_fail(out, "bundle is not a complete genesis-derived history "
                             "(mixed provenance); replay verification refuses");
@@ -344,13 +397,8 @@ bool consensus_state_replay_verify_and_write_receipt(
     memcpy(r.block_hash, m.block_hash, 32);
     r.height = m.height;
 
-    /* (3+4) Independently derive from the datadir's own tables and compare. */
-    if (!rr_derive_from_datadir(progress_db, &m, &r, out) ||
-        !rr_components_match(&m, &r, out)) {
-        consensus_state_artifact_evidence_free(evidence);
+    if (!rr_derive_and_compare(progress_db, evidence, &m, &r, out))
         return false;
-    }
-    consensus_state_artifact_evidence_free(evidence);
 
     /* (5) Bind the verifying binary and persist the receipt. */
     if (!rr_verifier_binary_digest(r.verifier_binary_digest))
@@ -363,26 +411,34 @@ bool consensus_state_replay_verify_and_write_receipt(
             datadir, buf, sizeof(buf), final_path, sizeof(final_path)))
         return rr_fail(out, "receipt persist (fsync'd) failed");
 
-    if (out) {
-        out->verified = true;
-        out->height = m.height;
-        out->utxo_count = r.utxo_count;
-        out->total_supply = r.total_supply;
-        out->anchor_count = r.anchor_count;
-        out->nullifier_count = r.nullifier_count;
-        memcpy(out->bundle_file_digest, r.bundle_file_digest, 32);
-        memcpy(out->verifier_binary_digest, r.verifier_binary_digest, 32);
-        snprintf(out->receipt_path, sizeof(out->receipt_path), "%s",
-                 final_path);
-        snprintf(out->reason, sizeof(out->reason),
-                 "replay-verified height=%d utxo=%llu anchors=%llu "
-                 "nullifiers=%llu; receipt at %.80s", m.height,
-                 (unsigned long long)r.utxo_count,
-                 (unsigned long long)r.anchor_count,
-                 (unsigned long long)r.nullifier_count, final_path);
-    }
-    LOG_INFO(RR_SUBSYS, "%s", out ? out->reason : "replay-verified");
+    rr_publish_verified(out, &m, &r, final_path);
     return true;
+}
+
+/* True when the running executable digests to `expected`. */
+static bool rr_running_binary_is(const uint8_t expected[32])
+{
+    uint8_t running[32];
+    return rr_verifier_binary_digest(running) &&
+           memcmp(running, expected, 32) == 0;
+}
+
+/* True when the receipt binds THIS bundle file and every manifest component. */
+static bool rr_receipt_binds_bundle(
+    const struct rr_receipt *r, const uint8_t bundle_file_digest[32],
+    const struct consensus_state_bundle_manifest *manifest)
+{
+    return memcmp(r->bundle_file_digest, bundle_file_digest, 32) == 0 &&
+           memcmp(r->artifact_digest, manifest->artifact_digest, 32) == 0 &&
+           r->height == manifest->height &&
+           memcmp(r->block_hash, manifest->block_hash, 32) == 0 &&
+           r->utxo_count == manifest->utxo_count &&
+           r->total_supply == manifest->total_supply &&
+           memcmp(r->utxo_root, manifest->utxo_root, 32) == 0 &&
+           r->anchor_count == manifest->anchor_count &&
+           memcmp(r->anchor_digest, manifest->anchor_digest, 32) == 0 &&
+           r->nullifier_count == manifest->nullifier_count &&
+           memcmp(r->nullifier_digest, manifest->nullifier_digest, 32) == 0;
 }
 
 bool consensus_state_replay_receipt_authority_available(
@@ -402,26 +458,13 @@ bool consensus_state_replay_receipt_authority_available(
     }
 
     /* The activating binary must be the exact image that verified. */
-    uint8_t running[32];
-    if (!rr_verifier_binary_digest(running) ||
-        memcmp(running, r.verifier_binary_digest, 32) != 0) {
+    if (!rr_running_binary_is(r.verifier_binary_digest)) {
         LOG_WARN(RR_SUBSYS, "replay receipt was written by a different binary "
                             "image; ACTIVATE stays contained");
         return false;
     }
 
-    bool bound = memcmp(r.bundle_file_digest, bundle_file_digest, 32) == 0 &&
-                 memcmp(r.artifact_digest, manifest->artifact_digest, 32) == 0 &&
-                 r.height == manifest->height &&
-                 memcmp(r.block_hash, manifest->block_hash, 32) == 0 &&
-                 r.utxo_count == manifest->utxo_count &&
-                 r.total_supply == manifest->total_supply &&
-                 memcmp(r.utxo_root, manifest->utxo_root, 32) == 0 &&
-                 r.anchor_count == manifest->anchor_count &&
-                 memcmp(r.anchor_digest, manifest->anchor_digest, 32) == 0 &&
-                 r.nullifier_count == manifest->nullifier_count &&
-                 memcmp(r.nullifier_digest, manifest->nullifier_digest, 32) == 0;
-    if (!bound) {
+    if (!rr_receipt_binds_bundle(&r, bundle_file_digest, manifest)) {
         LOG_WARN(RR_SUBSYS, "replay receipt does not bind THIS bundle/anchor/"
                             "component digests; ACTIVATE stays contained");
         return false;
@@ -437,22 +480,10 @@ bool consensus_state_replay_receipt_authority_available_root(
         return false;
     struct rr_receipt r;
     memset(&r, 0, sizeof(r));
-    uint8_t running[32];
     if (!rr_read_root(trusted_root, &r) ||
-        !rr_verifier_binary_digest(running) ||
-        memcmp(running, r.verifier_binary_digest, 32) != 0)
+        !rr_running_binary_is(r.verifier_binary_digest))
         return false;
-    return memcmp(r.bundle_file_digest, bundle_file_digest, 32) == 0 &&
-           memcmp(r.artifact_digest, manifest->artifact_digest, 32) == 0 &&
-           r.height == manifest->height &&
-           memcmp(r.block_hash, manifest->block_hash, 32) == 0 &&
-           r.utxo_count == manifest->utxo_count &&
-           r.total_supply == manifest->total_supply &&
-           memcmp(r.utxo_root, manifest->utxo_root, 32) == 0 &&
-           r.anchor_count == manifest->anchor_count &&
-           memcmp(r.anchor_digest, manifest->anchor_digest, 32) == 0 &&
-           r.nullifier_count == manifest->nullifier_count &&
-           memcmp(r.nullifier_digest, manifest->nullifier_digest, 32) == 0;
+    return rr_receipt_binds_bundle(&r, bundle_file_digest, manifest);
 }
 
 /* ── Bundle-binding-only reader (ROM catalog admission) ─────────────────── */
