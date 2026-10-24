@@ -39,6 +39,36 @@
 #define AUDIT_TAG "agent.audit"
 #define AUDIT_FILE_MAX (64u << 20)
 
+/* Open the file and snapshot it, refusing one larger than `cap`. A refusal
+ * closes the handle here, so the caller only has to return. */
+static bool audit_open_bounded(struct platform_positioned_file *file,
+                               const char *path, size_t cap,
+                               struct platform_positioned_file_snapshot *before)
+{
+    if (!platform_positioned_file_open(file, path) ||
+        !platform_positioned_file_snapshot(file, before) ||
+        before->size > cap || before->size > SIZE_MAX - 1) {
+        platform_positioned_file_close(file);
+        return false;
+    }
+    return true;
+}
+
+/* Read up to `size` bytes from offset 0; a short read ends the copy early and
+ * the caller's snapshot comparison rejects the short count. */
+static size_t audit_read_fully(struct platform_positioned_file *file,
+                               char *data, size_t size)
+{
+    size_t done = 0;
+    while (done < size) {
+        int64_t got = platform_positioned_file_read(
+            file, data + done, size - done, done);
+        if (got <= 0) break;
+        done += (size_t)got;
+    }
+    return done;
+}
+
 static bool audit_read_stable(const char *path, size_t cap, char **out,
                               size_t *out_size)
 {
@@ -47,24 +77,14 @@ static bool audit_read_stable(const char *path, size_t cap, char **out,
     platform_positioned_file_init(&file);
     *out = NULL;
     *out_size = 0;
-    if (!platform_positioned_file_open(&file, path) ||
-        !platform_positioned_file_snapshot(&file, &before) ||
-        before.size > cap || before.size > SIZE_MAX - 1) {
-        platform_positioned_file_close(&file);
+    if (!audit_open_bounded(&file, path, cap, &before))
         return false;
-    }
     char *data = zcl_malloc((size_t)before.size + 1, "agent_audit_read");
     if (!data) {
         platform_positioned_file_close(&file);
         return false;
     }
-    size_t done = 0;
-    while (done < before.size) {
-        int64_t got = platform_positioned_file_read(
-            &file, data + done, (size_t)before.size - done, done);
-        if (got <= 0) break;
-        done += (size_t)got;
-    }
+    size_t done = audit_read_fully(&file, data, (size_t)before.size);
     bool stable = done == before.size &&
         platform_positioned_file_snapshot(&file, &after) &&
         before.size == after.size && before.volume == after.volume &&
@@ -182,6 +202,39 @@ static size_t receipt_render_line(const struct agent_receipt *r, char *out,
     return (size_t)n;
 }
 
+/* A required hex field: missing and malformed both count as failure. */
+static bool receipt_parse_hex(const struct json_value *v, const char *key,
+                              uint8_t *out, size_t len)
+{
+    const char *s = json_get_str(json_get(v, key));
+    return s && zcl_hex_decode(s, out, len);
+}
+
+/* An optional string field: an absent key leaves the destination untouched. */
+static void receipt_parse_optional_str(const struct json_value *v,
+                                       const char *key, char *dst, size_t cap)
+{
+    const char *s = json_get_str(json_get(v, key));
+    if (s)
+        snprintf(dst, cap, "%s", s);
+}
+
+/* The v3 money snapshot: a status string and the root it commits to. */
+static bool receipt_parse_money_snapshot(const struct json_value *v,
+                                         struct agent_receipt *r)
+{
+    bool ok = true;
+    const char *s = json_get_str(json_get(v, "money_snapshot_status"));
+    if (!s || !s[0] || strlen(s) >= sizeof(r->money_snapshot_status))
+        ok = false;
+    else
+        snprintf(r->money_snapshot_status,
+                 sizeof(r->money_snapshot_status), "%s", s);
+    if (!receipt_parse_hex(v, "money_snapshot_root", r->money_snapshot_root, 32))
+        ok = false;
+    return ok;
+}
+
 /* Rebuild a receipt from a rendered line. Returns false when a required field
  * is missing or malformed — counted as `malformed`, never silently skipped. */
 static bool receipt_parse_line(const char *line, size_t len,
@@ -215,40 +268,27 @@ static bool receipt_parse_line(const char *line, size_t len,
     if (r.verb == MVAP_VERB_NONE)
         ok = false;
 
-    const char *s;
-    if (!(s = json_get_str(json_get(&v, "prev"))) || !zcl_hex_decode(s, r.prev, 32))
+    if (!receipt_parse_hex(&v, "prev", r.prev, 32))
         ok = false;
-    if (!(s = json_get_str(json_get(&v, "id"))) || !zcl_hex_decode(s, r.id, 32))
+    if (!receipt_parse_hex(&v, "id", r.id, 32))
         ok = false;
-    if (!(s = json_get_str(json_get(&v, "sig"))) || !zcl_hex_decode(s, r.sig, 64))
+    if (!receipt_parse_hex(&v, "sig", r.sig, 64))
         ok = false;
-    if (!(s = json_get_str(json_get(&v, "property_id"))) ||
-        !zcl_hex_decode(s, r.property_id, MVAP_PROPERTY_ID_LEN))
+    if (!receipt_parse_hex(&v, "property_id", r.property_id, MVAP_PROPERTY_ID_LEN))
         ok = false;
     /* Required, not optional: a row that omits the binding is malformed, so a
      * verifier cannot be handed a truncated line and told the digest matched
      * because the missing field defaulted to zero. */
-    if (!(s = json_get_str(json_get(&v, "action_receipt_id"))) ||
-        !zcl_hex_decode(s, r.action_receipt_id, 32))
+    if (!receipt_parse_hex(&v, "action_receipt_id", r.action_receipt_id, 32))
         ok = false;
     if (r.receipt_version >= 3) {
-        s = json_get_str(json_get(&v, "money_snapshot_status"));
-        if (!s || !s[0] || strlen(s) >= sizeof(r.money_snapshot_status))
-            ok = false;
-        else
-            snprintf(r.money_snapshot_status,
-                     sizeof(r.money_snapshot_status), "%s", s);
-        if (!(s = json_get_str(json_get(&v, "money_snapshot_root"))) ||
-            !zcl_hex_decode(s, r.money_snapshot_root, 32))
+        if (!receipt_parse_money_snapshot(&v, &r))
             ok = false;
     }
 
-    if ((s = json_get_str(json_get(&v, "principal"))))
-        snprintf(r.principal, sizeof(r.principal), "%s", s);
-    if ((s = json_get_str(json_get(&v, "grant_id"))))
-        snprintf(r.grant_id, sizeof(r.grant_id), "%s", s);
-    if ((s = json_get_str(json_get(&v, "detail"))))
-        snprintf(r.detail, sizeof(r.detail), "%s", s);
+    receipt_parse_optional_str(&v, "principal", r.principal, sizeof(r.principal));
+    receipt_parse_optional_str(&v, "grant_id", r.grant_id, sizeof(r.grant_id));
+    receipt_parse_optional_str(&v, "detail", r.detail, sizeof(r.detail));
 
     json_free(&v);
     if (!ok)
@@ -293,6 +333,29 @@ static bool audit_replay_head(struct agent_audit_log *log)
     return true;
 }
 
+/* A key file is one line of hex, optionally ending in CR and/or LF. */
+static bool audit_decode_pub_key(const char *contents, size_t size,
+                                 uint8_t pk[32])
+{
+    char buf[80] = { 0 };
+    if (size >= sizeof(buf))
+        return false;
+    memcpy(buf, contents, size);
+    size_t bl = strnlen(buf, sizeof(buf));
+    while (bl && (buf[bl - 1] == '\n' || buf[bl - 1] == '\r'))
+        buf[--bl] = '\0';
+    return zcl_hex_decode(buf, pk, 32);
+}
+
+/* Write one formatted line at offset 0 of the public-key file and flush it. */
+static bool audit_pub_line_durable(struct platform_private_file *pub,
+                                   const char *line, int n)
+{
+    return n > 0 &&
+        platform_private_file_write_at(pub, line, (size_t)n, 0) &&
+        platform_private_file_flush(pub);
+}
+
 bool agent_audit_open(struct agent_audit_log *log, const char *dir)
 {
     if (!log || !dir || !dir[0])
@@ -318,14 +381,10 @@ bool agent_audit_open(struct agent_audit_log *log, const char *dir)
     char *existing = NULL;
     size_t existing_size = 0;
     if (audit_read_stable(log->pub_path, 79, &existing, &existing_size)) {
-        char buf[80] = { 0 };
-        memcpy(buf, existing, existing_size);
+        bool decoded = existing_size != 0 &&
+            audit_decode_pub_key(existing, existing_size, log->pk);
         free(existing);
-        bool got = existing_size != 0;
-        size_t bl = strnlen(buf, sizeof(buf));
-        while (bl && (buf[bl - 1] == '\n' || buf[bl - 1] == '\r'))
-            buf[--bl] = '\0';
-        if (!got || !zcl_hex_decode(buf, log->pk, 32))
+        if (!decoded)
             LOG_FAIL(AUDIT_TAG, "existing %s is not a 32-byte hex key",
                      log->pub_path);
         /* We hold no matching secret: this broker can VERIFY the old rows but
@@ -344,9 +403,7 @@ bool agent_audit_open(struct agent_audit_log *log, const char *dir)
         LOG_FAIL(AUDIT_TAG, "exclusive private create %s failed", log->pub_path);
     char pline[80];
     int pn = snprintf(pline, sizeof(pline), "%s\n", pub_hex);
-    bool wrote = pn > 0 &&
-        platform_private_file_write_at(&pub, pline, (size_t)pn, 0) &&
-        platform_private_file_flush(&pub);
+    bool wrote = audit_pub_line_durable(&pub, pline, pn);
     platform_private_file_close(&pub);
     if (!wrote)
         LOG_FAIL(AUDIT_TAG, "durable write %s failed", log->pub_path);
@@ -413,18 +470,32 @@ static bool audit_read_pubkey(const char *dir, uint8_t pk[32])
     size_t contents_size = 0;
     if (!audit_read_stable(path, 79, &contents, &contents_size))
         LOG_FAIL(AUDIT_TAG, "stable open of %s failed", path);
-    char buf[80] = { 0 };
-    memcpy(buf, contents, contents_size);
+    bool decoded = contents_size != 0 &&
+        audit_decode_pub_key(contents, contents_size, pk);
     free(contents);
-    bool got = contents_size != 0;
-    if (!got)
+    if (contents_size == 0)
         LOG_FAIL(AUDIT_TAG, "%s is empty", path);
-    size_t bl = strnlen(buf, sizeof(buf));
-    while (bl && (buf[bl - 1] == '\n' || buf[bl - 1] == '\r'))
-        buf[--bl] = '\0';
-    if (!zcl_hex_decode(buf, pk, 32))
+    if (!decoded)
         LOG_FAIL(AUDIT_TAG, "%s is not 32-byte hex", path);
     return true;
+}
+
+/* Check one parsed row against the chain state so far and the public key.
+ * An edited field lands in the digest check, not the signature check. */
+static void audit_verify_row(struct agent_receipt *r, uint8_t pk[32],
+                             const uint8_t prev[32], uint64_t expect_seq,
+                             struct agent_audit_verdict *out)
+{
+    /* Recompute the id from the row's own fields. */
+    uint8_t want[32];
+    receipt_digest(r, want);
+    if (memcmp(want, r->id, 32) != 0)
+        out->chain_breaks++;
+    else if (r->seq != expect_seq || memcmp(r->prev, prev, 32) != 0)
+        out->chain_breaks++;
+
+    if (!ed25519_verify(r->sig, r->id, 32, pk))
+        out->bad_signatures++;
 }
 
 bool agent_audit_verify_dir(const char *dir, struct agent_audit_verdict *out)
@@ -466,19 +537,7 @@ bool agent_audit_verify_dir(const char *dir, struct agent_audit_verdict *out)
             continue;
         }
         out->rows++;
-
-        /* Recompute the id from the row's own fields: an edited field lands
-         * here, not in the signature check. */
-        uint8_t want[32];
-        receipt_digest(&r, want);
-        if (memcmp(want, r.id, 32) != 0)
-            out->chain_breaks++;
-        else if (r.seq != expect_seq || memcmp(r.prev, prev, 32) != 0)
-            out->chain_breaks++;
-
-        if (!ed25519_verify(r.sig, r.id, 32, pk))
-            out->bad_signatures++;
-
+        audit_verify_row(&r, pk, prev, expect_seq, out);
         memcpy(prev, r.id, 32);
         expect_seq = r.seq + 1;
     }
