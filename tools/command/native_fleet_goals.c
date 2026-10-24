@@ -13,6 +13,7 @@
 #include "native_fleet_objectives.h"
 
 #include "command/native_command.h"
+#include "config/cli_lane_defaults.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "platform/time_compat.h"
@@ -621,10 +622,57 @@ static void gr_own_host(char *out, size_t cap)
     json_free(&input);
 }
 
+/* The board RPC is aimed at the datadir this process bound. A process with
+ * nothing bound, or only the dev lane's default bound, reaches no node there.
+ * Like the objectives node rows, G4 aims its synchronous calls at the release
+ * node datadir (the one `z23 status` reads) unless the operator named one,
+ * then gives the process its own binding back. */
+struct gr_rpc_target {
+    bool rebound;
+    char saved[512];
+    int saved_port;
+};
+
+static bool gr_rpc_target_free(const char *bound, const char *home)
+{
+    char lane[512];
+    if (zcl_native_command_datadir_is_explicit())
+        return false;
+    if (!bound[0])
+        return true;
+    return zcl_cli_lane_default_datadir(lane, sizeof(lane), home) &&
+           strcmp(bound, lane) == 0;
+}
+
+static void gr_rpc_target_enter(struct gr_rpc_target *t)
+{
+    char release[512];
+    const char *home = getenv("HOME");
+    const char *bound = zcl_native_command_datadir();
+    t->rebound = false;
+    t->saved_port = zcl_native_command_rpc_port();
+    (void)snprintf(t->saved, sizeof(t->saved), "%s", bound);
+    if (!home || !home[0] || !gr_rpc_target_free(bound, home) ||
+        !zcl_cli_release_default_datadir(release, sizeof(release), home))
+        return;
+    /* Initialize first so chain params are selected; a bind alone marks the
+     * bridge ready and would skip that. */
+    zcl_native_bridge_ensure_rpc();
+    zcl_native_bridge_bind_rpc(release, ZCL_CLI_RELEASE_RPC_PORT);
+    t->rebound = true;
+}
+
+static void gr_rpc_target_leave(const struct gr_rpc_target *t)
+{
+    if (t->rebound)
+        zcl_native_bridge_bind_rpc(t->saved, t->saved_port);
+}
+
 static struct zcl_goal_result gr_g4(const struct zcl_goals_options *o)
 {
     struct json_value input;
     struct zcl_command_reply reply;
+    struct gr_rpc_target target;
     char why[256] = "", own[65] = "";
     int64_t t0, ms;
     bool answered;
@@ -635,6 +683,7 @@ static struct zcl_goal_result gr_g4(const struct zcl_goals_options *o)
         return gr_unmeasured(next, "wiki probe skipped");
     json_init(&input);
     json_set_object(&input);
+    gr_rpc_target_enter(&target);
     t0 = platform_time_monotonic_ms();
     answered = gr_call("fleet.wiki.list", &input, &reply);
     ms = platform_time_monotonic_ms() - t0;
@@ -642,6 +691,7 @@ static struct zcl_goal_result gr_g4(const struct zcl_goals_options *o)
         gr_reason(&reply, why, sizeof(why));
     else
         gr_own_host(own, sizeof(own));
+    gr_rpc_target_leave(&target);
     r = zcl_goals_wiki_grade(answered, why, &reply.data, own, gr_now(o), ms);
     zcl_command_reply_free(&reply);
     json_free(&input);

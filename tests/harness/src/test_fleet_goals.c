@@ -12,6 +12,8 @@
 
 #include "command/native_command.h"
 #include "command/native_fleet_goals.h"
+#include "config/cli_lane_defaults.h"
+#include "controllers/rpc_client.h"
 #include "config/command_catalog.h"
 #include "json/json.h"
 #include "base/hex.h"
@@ -595,6 +597,50 @@ static int fgl_case_bound(void)
     return failures;
 }
 
+static char g_fgl_seen_datadir[512];
+
+/* Records the datadir the board RPC is aimed at, then answers nothing. */
+static char *fgl_wiki_hook(const char *method, const char *params_json)
+{
+    (void)params_json;
+    if (strcmp(method, "fleet_board") == 0)
+        (void)snprintf(g_fgl_seen_datadir, sizeof(g_fgl_seen_datadir), "%s",
+                       zcl_native_command_datadir());
+    return NULL;
+}
+
+static int fgl_case_wiki_target(const char *root)
+{
+    int failures = 0;
+    char want[512] = "", saved_home[512] = "";
+    const char *old_home = getenv("HOME");
+    struct zcl_goals_options o;
+    struct zcl_goal_result r;
+    bool want_ok = false;
+    TEST("G4: with no datadir named, the wiki probe aims at the release node "
+         "datadir and reports the refusal, never the dev lane") {
+        if (old_home)
+            (void)snprintf(saved_home, sizeof(saved_home), "%s", old_home);
+        ASSERT(setenv("HOME", root, 1) == 0);
+        want_ok = zcl_cli_release_default_datadir(want, sizeof(want), root);
+        g_fgl_seen_datadir[0] = '\0';
+        fgl_options(&o);
+        o.skip_probes = false;
+        node_rpc_client_set_test_hook(fgl_wiki_hook);
+        r = zcl_goals_measure(&o, "G4");
+        node_rpc_client_set_test_hook(NULL);
+        if (old_home)
+            (void)setenv("HOME", saved_home, 1);
+        else
+            (void)unsetenv("HOME");
+        ASSERT(want_ok);
+        ASSERT(strcmp(g_fgl_seen_datadir, want) == 0);
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "NODE_UNAVAILABLE"));
+    } _test_next:;
+    return failures;
+}
+
 static int fgl_case_handler(const char *root)
 {
     int failures = 0;
@@ -1082,6 +1128,7 @@ int test_fleet_goals(void)
     failures += fgl_case_render();
     failures += fgl_case_bound();
     failures += fgl_case_wiki();
+    failures += fgl_case_wiki_target(root);
     failures += fgl_case_handler(root);
     failures += fgl_case_checkout(root);
     (void)test_rm_rf_recursive(root);
