@@ -191,6 +191,36 @@ static void r2_print_root(const uint8_t root[32])
     putchar('\n');
 }
 
+static void r2_policy_mutate(struct zcl_retrieval_comparison_policy_v2 *changed,
+                             size_t mutation)
+{
+    switch (mutation) {
+    case 0: changed->metric = ZCL_RETRIEVAL_COMPARISON_MRR_BP; break;
+    case 1:
+        changed->direction = ZCL_RETRIEVAL_COMPARISON_LOWER_BY_AT_LEAST;
+        break;
+    case 2:
+        changed->required_guards &= (uint16_t)~
+            ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED;
+        break;
+    case 3: changed->threshold_bp++; break;
+    case 4: changed->expected_tasks++; break;
+    case 5: changed->workload_root[0] ^= 1u; break;
+    default: changed->evaluator_root[0] ^= 1u; break;
+    }
+}
+
+static bool r2_policy_mutation_moves_root(const struct r2_fixture *fixture,
+                                          size_t mutation)
+{
+    struct zcl_retrieval_comparison_policy_v2 changed = fixture->policy;
+    uint8_t changed_root[32];
+    r2_policy_mutate(&changed, mutation);
+    return zcl_retrieval_comparison_policy_v2_root(
+               &changed, changed_root) == ZCL_RETRIEVAL_COMPARISON_OK &&
+           memcmp(changed_root, fixture->policy_root, 32u) != 0;
+}
+
 static int case_v2_policy_kat(void)
 {
     int failures = 0;
@@ -228,26 +258,7 @@ static int case_v2_policy_kat(void)
 
     bool mutations = exact;
     for (size_t mutation = 0; mutation < 7u && mutations; mutation++) {
-        struct zcl_retrieval_comparison_policy_v2 changed = fixture.policy;
-        switch (mutation) {
-        case 0: changed.metric = ZCL_RETRIEVAL_COMPARISON_MRR_BP; break;
-        case 1:
-            changed.direction = ZCL_RETRIEVAL_COMPARISON_LOWER_BY_AT_LEAST;
-            break;
-        case 2:
-            changed.required_guards &= (uint16_t)~
-                ZCL_RETRIEVAL_EVAL_RESULT_TOP20_PRESERVED;
-            break;
-        case 3: changed.threshold_bp++; break;
-        case 4: changed.expected_tasks++; break;
-        case 5: changed.workload_root[0] ^= 1u; break;
-        default: changed.evaluator_root[0] ^= 1u; break;
-        }
-        uint8_t changed_root[32];
-        mutations = zcl_retrieval_comparison_policy_v2_root(
-                        &changed, changed_root) ==
-                        ZCL_RETRIEVAL_COMPARISON_OK &&
-                    memcmp(changed_root, fixture.policy_root, 32u) != 0;
+        mutations = r2_policy_mutation_moves_root(&fixture, mutation);
     }
     R2_CHECK("every variable v2 policy field changes the root", mutations);
     return failures;
@@ -260,6 +271,95 @@ static bool r2_v2_parse_error(const uint8_t *wire, size_t size,
     memset(&out, 0xa5, sizeof(out));
     return zcl_retrieval_comparison_policy_v2_parse(wire, size, &out) ==
             expected && r2_zero(&out, sizeof(out));
+}
+
+static bool r2_v2_mutant_error(const uint8_t *v2_wire, size_t index,
+                               uint8_t value,
+                               enum zcl_retrieval_comparison_error expected)
+{
+    uint8_t changed[ZCL_RETRIEVAL_COMPARISON_POLICY_V2_WIRE_BYTES];
+    memcpy(changed, v2_wire, sizeof(changed));
+    changed[index] = value;
+    return r2_v2_parse_error(changed, sizeof(changed), expected);
+}
+
+static bool r2_v1_v2_cross_refuses(const uint8_t *v1_wire,
+                                   const uint8_t *v2_wire)
+{
+    struct zcl_retrieval_comparison_policy_v1 parsed_v1;
+    memset(&parsed_v1, 0xa5, sizeof(parsed_v1));
+    return r2_v2_parse_error(
+               v1_wire, ZCL_RETRIEVAL_COMPARISON_POLICY_WIRE_BYTES,
+               ZCL_RETRIEVAL_COMPARISON_WIRE) &&
+        zcl_retrieval_comparison_policy_parse(
+            v2_wire, ZCL_RETRIEVAL_COMPARISON_POLICY_V2_WIRE_BYTES,
+            &parsed_v1) == ZCL_RETRIEVAL_COMPARISON_WIRE &&
+        r2_zero(&parsed_v1, sizeof(parsed_v1));
+}
+
+static bool r2_v2_wire_refusals(const uint8_t *v2_wire)
+{
+    uint8_t changed[ZCL_RETRIEVAL_COMPARISON_POLICY_V2_WIRE_BYTES];
+    memcpy(changed, v2_wire, sizeof(changed)); changed[0] ^= 1u;
+    bool magic = r2_v2_parse_error(
+        changed, sizeof(changed), ZCL_RETRIEVAL_COMPARISON_WIRE);
+    bool version = r2_v2_mutant_error(
+        v2_wire, 8u, 1u, ZCL_RETRIEVAL_COMPARISON_VERSION);
+    bool size = r2_v2_parse_error(
+        v2_wire, ZCL_RETRIEVAL_COMPARISON_POLICY_V2_WIRE_BYTES - 1u,
+        ZCL_RETRIEVAL_COMPARISON_WIRE);
+    bool reserved = r2_v2_mutant_error(
+        v2_wire, 18u, 1u, ZCL_RETRIEVAL_COMPARISON_RESERVED);
+    bool kind = r2_v2_mutant_error(
+        v2_wire, 14u, 2u, ZCL_RETRIEVAL_COMPARISON_PARAMETER);
+    return magic && version && size && reserved && kind;
+}
+
+static bool r2_policy_v2_invariants(
+    const struct zcl_retrieval_comparison_policy_v2 *policy)
+{
+    struct zcl_retrieval_comparison_policy_v2 invalid = *policy;
+    memset(invalid.workload_root, 0, 32u);
+    bool zero_workload = zcl_retrieval_comparison_policy_v2_validate(
+        &invalid) == ZCL_RETRIEVAL_COMPARISON_ROOT;
+    invalid = *policy; memset(invalid.evaluator_root, 0, 32u);
+    bool zero_evaluator = zcl_retrieval_comparison_policy_v2_validate(
+        &invalid) == ZCL_RETRIEVAL_COMPARISON_ROOT;
+    invalid = *policy; invalid.schema_version++;
+    bool object_version = zcl_retrieval_comparison_policy_v2_validate(
+        &invalid) == ZCL_RETRIEVAL_COMPARISON_VERSION;
+    invalid = *policy; invalid.reserved_threshold = 1u;
+    bool object_reserved = zcl_retrieval_comparison_policy_v2_validate(
+        &invalid) == ZCL_RETRIEVAL_COMPARISON_RESERVED;
+    invalid = *policy; invalid.evaluation_kind++;
+    bool object_kind = zcl_retrieval_comparison_policy_v2_validate(
+        &invalid) == ZCL_RETRIEVAL_COMPARISON_PARAMETER;
+    return zero_workload && zero_evaluator && object_version &&
+        object_reserved && object_kind;
+}
+
+static bool r2_policy_v2_alias_refusals(
+    const struct zcl_retrieval_comparison_policy_v2 *policy,
+    const uint8_t *v2_wire)
+{
+    union r2_codec_alias {
+        struct zcl_retrieval_comparison_policy_v2 policy;
+        uint8_t wire[ZCL_RETRIEVAL_COMPARISON_POLICY_V2_WIRE_BYTES];
+    } alias, before;
+    alias.policy = *policy; before = alias;
+    bool serialize_alias = zcl_retrieval_comparison_policy_v2_serialize(
+        &alias.policy, alias.wire) == ZCL_RETRIEVAL_COMPARISON_ALIAS &&
+        memcmp(&alias, &before, sizeof(alias)) == 0;
+    memcpy(alias.wire, v2_wire, sizeof(alias.wire)); before = alias;
+    bool parse_alias = zcl_retrieval_comparison_policy_v2_parse(
+        alias.wire, sizeof(alias.wire), &alias.policy) ==
+            ZCL_RETRIEVAL_COMPARISON_ALIAS &&
+        memcmp(&alias, &before, sizeof(alias)) == 0;
+    alias.policy = *policy; before = alias;
+    bool root_alias = zcl_retrieval_comparison_policy_v2_root(
+        &alias.policy, alias.wire) == ZCL_RETRIEVAL_COMPARISON_ALIAS &&
+        memcmp(&alias, &before, sizeof(alias)) == 0;
+    return serialize_alias && parse_alias && root_alias;
 }
 
 static int case_wire_refusals_and_v1(void)
@@ -291,85 +391,24 @@ static int case_wire_refusals_and_v1(void)
             ZCL_RETRIEVAL_COMPARISON_OK &&
         zcl_retrieval_comparison_policy_v2_serialize(
             &fixture.policy, v2_wire) == ZCL_RETRIEVAL_COMPARISON_OK;
-    struct zcl_retrieval_comparison_policy_v1 parsed_v1;
-    memset(&parsed_v1, 0xa5, sizeof(parsed_v1));
-    bool cross = ready &&
-        r2_v2_parse_error(v1_wire, sizeof(v1_wire),
-                          ZCL_RETRIEVAL_COMPARISON_WIRE) &&
-        zcl_retrieval_comparison_policy_parse(
-            v2_wire, sizeof(v2_wire), &parsed_v1) ==
-            ZCL_RETRIEVAL_COMPARISON_WIRE &&
-        r2_zero(&parsed_v1, sizeof(parsed_v1));
+    bool cross = ready && r2_v1_v2_cross_refuses(v1_wire, v2_wire);
     R2_CHECK("v1 and v2 wires cross-refuse and raw v1 stays pinned",
              cross && memcmp(v1_wire, "ZCRCMP1\n", 8u) == 0 &&
              memcmp(v1_root, raw_v1_root, 32u) == 0);
 
-    uint8_t changed[ZCL_RETRIEVAL_COMPARISON_POLICY_V2_WIRE_BYTES];
-    memcpy(changed, v2_wire, sizeof(changed)); changed[0] ^= 1u;
-    bool magic = r2_v2_parse_error(
-        changed, sizeof(changed), ZCL_RETRIEVAL_COMPARISON_WIRE);
-    memcpy(changed, v2_wire, sizeof(changed)); changed[8] = 1u;
-    bool version = r2_v2_parse_error(
-        changed, sizeof(changed), ZCL_RETRIEVAL_COMPARISON_VERSION);
-    bool size = r2_v2_parse_error(
-        v2_wire, sizeof(v2_wire) - 1u, ZCL_RETRIEVAL_COMPARISON_WIRE);
-    memcpy(changed, v2_wire, sizeof(changed)); changed[18] = 1u;
-    bool reserved = r2_v2_parse_error(
-        changed, sizeof(changed), ZCL_RETRIEVAL_COMPARISON_RESERVED);
-    memcpy(changed, v2_wire, sizeof(changed)); changed[14] = 2u;
-    bool kind = r2_v2_parse_error(
-        changed, sizeof(changed), ZCL_RETRIEVAL_COMPARISON_PARAMETER);
     R2_CHECK("v2 magic version size reserved and kind refuse exactly",
-             magic && version && size && reserved && kind);
+             r2_v2_wire_refusals(v2_wire));
 
-    struct zcl_retrieval_comparison_policy_v2 invalid = fixture.policy;
-    memset(invalid.workload_root, 0, 32u);
-    bool zero_workload = zcl_retrieval_comparison_policy_v2_validate(
-        &invalid) == ZCL_RETRIEVAL_COMPARISON_ROOT;
-    invalid = fixture.policy; memset(invalid.evaluator_root, 0, 32u);
-    bool zero_evaluator = zcl_retrieval_comparison_policy_v2_validate(
-        &invalid) == ZCL_RETRIEVAL_COMPARISON_ROOT;
-    invalid = fixture.policy; invalid.schema_version++;
-    bool object_version = zcl_retrieval_comparison_policy_v2_validate(
-        &invalid) == ZCL_RETRIEVAL_COMPARISON_VERSION;
-    invalid = fixture.policy; invalid.reserved_threshold = 1u;
-    bool object_reserved = zcl_retrieval_comparison_policy_v2_validate(
-        &invalid) == ZCL_RETRIEVAL_COMPARISON_RESERVED;
-    invalid = fixture.policy; invalid.evaluation_kind++;
-    bool object_kind = zcl_retrieval_comparison_policy_v2_validate(
-        &invalid) == ZCL_RETRIEVAL_COMPARISON_PARAMETER;
     R2_CHECK("v2 invariant fields and zero roots refuse exactly",
-             zero_workload && zero_evaluator && object_version &&
-             object_reserved && object_kind);
+             r2_policy_v2_invariants(&fixture.policy));
 
-    union r2_codec_alias {
-        struct zcl_retrieval_comparison_policy_v2 policy;
-        uint8_t wire[ZCL_RETRIEVAL_COMPARISON_POLICY_V2_WIRE_BYTES];
-    } alias, before;
-    alias.policy = fixture.policy; before = alias;
-    bool serialize_alias = zcl_retrieval_comparison_policy_v2_serialize(
-        &alias.policy, alias.wire) == ZCL_RETRIEVAL_COMPARISON_ALIAS &&
-        memcmp(&alias, &before, sizeof(alias)) == 0;
-    memcpy(alias.wire, v2_wire, sizeof(alias.wire)); before = alias;
-    bool parse_alias = zcl_retrieval_comparison_policy_v2_parse(
-        alias.wire, sizeof(alias.wire), &alias.policy) ==
-            ZCL_RETRIEVAL_COMPARISON_ALIAS &&
-        memcmp(&alias, &before, sizeof(alias)) == 0;
-    alias.policy = fixture.policy; before = alias;
-    bool root_alias = zcl_retrieval_comparison_policy_v2_root(
-        &alias.policy, alias.wire) == ZCL_RETRIEVAL_COMPARISON_ALIAS &&
-        memcmp(&alias, &before, sizeof(alias)) == 0;
     R2_CHECK("v2 codec aliases refuse atomically",
-             serialize_alias && parse_alias && root_alias);
+             r2_policy_v2_alias_refusals(&fixture.policy, v2_wire));
     return failures;
 }
 
-static int case_observer_positive_and_bindings(void)
+static bool r2_pair_helper_ok(struct r2_fixture *fixture, bool initialized)
 {
-    int failures = 0;
-    struct r2_fixture fixture, changed;
-    struct zcl_retrieval_comparison_report_v2 report;
-    bool initialized = r2_fixture_init(&fixture);
     const uint8_t pair_kat[32] = {
         0x43,0x2f,0x40,0xb7,0xeb,0x01,0x34,0xad,
         0x2d,0x0b,0xb0,0x2d,0xa5,0x70,0xfd,0x1e,
@@ -379,90 +418,90 @@ static int case_observer_positive_and_bindings(void)
     uint8_t pair[32], swapped[32];
     bool pair_helper = initialized &&
         zcl_retrieval_paired_evaluation_input_root(
-            fixture.paired.workload_root, fixture.paired.parent_arm_root,
-            fixture.paired.child_arm_root, pair) ==
+            fixture->paired.workload_root, fixture->paired.parent_arm_root,
+            fixture->paired.child_arm_root, pair) ==
             ZCL_RETRIEVAL_EXPERIMENT_OK &&
         zcl_retrieval_paired_evaluation_input_root(
-            fixture.paired.workload_root, fixture.paired.child_arm_root,
-            fixture.paired.parent_arm_root, swapped) ==
+            fixture->paired.workload_root, fixture->paired.child_arm_root,
+            fixture->paired.parent_arm_root, swapped) ==
             ZCL_RETRIEVAL_EXPERIMENT_OK &&
         memcmp(pair, pair_kat, 32u) == 0 &&
-        memcmp(pair, fixture.paired.evaluation_input_root, 32u) == 0 &&
+        memcmp(pair, fixture->paired.evaluation_input_root, 32u) == 0 &&
         memcmp(pair, swapped, 32u) != 0;
     uint8_t zero[32] = {0}, unchanged[32], before_root[32];
     memset(unchanged, 0xa5, sizeof(unchanged));
     memcpy(before_root, unchanged, sizeof(before_root));
     bool zero_refusal = zcl_retrieval_paired_evaluation_input_root(
-            zero, fixture.paired.parent_arm_root,
-            fixture.paired.child_arm_root, unchanged) ==
+            zero, fixture->paired.parent_arm_root,
+            fixture->paired.child_arm_root, unchanged) ==
             ZCL_RETRIEVAL_EXPERIMENT_BINDING &&
         memcmp(unchanged, before_root, 32u) == 0;
-    memcpy(unchanged, fixture.paired.workload_root, 32u);
+    memcpy(unchanged, fixture->paired.workload_root, 32u);
     memcpy(before_root, unchanged, sizeof(before_root));
     bool alias_refusal = zcl_retrieval_paired_evaluation_input_root(
-            unchanged, fixture.paired.parent_arm_root,
-            fixture.paired.child_arm_root, unchanged) ==
+            unchanged, fixture->paired.parent_arm_root,
+            fixture->paired.child_arm_root, unchanged) ==
             ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
         memcmp(unchanged, before_root, 32u) == 0;
-    R2_CHECK("canonical ordered pair helper KAT and refusals",
-             pair_helper && zero_refusal && alias_refusal);
-    bool observed = initialized && r2_observe(&fixture, &report) ==
+    return pair_helper && zero_refusal && alias_refusal;
+}
+
+static bool r2_exact_threshold_observed(struct r2_fixture *fixture,
+                                        bool initialized)
+{
+    struct zcl_retrieval_comparison_report_v2 report;
+    bool observed = initialized && r2_observe(fixture, &report) ==
         ZCL_RETRIEVAL_COMPARISON_OK;
-    R2_CHECK("v2 exact threshold observes the bound pair only",
-             observed && report.observation.status ==
-                 ZCL_RETRIEVAL_COMPARISON_SATISFIED &&
-             report.observation.directional_delta_bp == 100 &&
-             memcmp(report.observation.policy_root,
-                    fixture.policy_root, 32u) == 0 &&
-             memcmp(report.workload_root,
-                    fixture.paired.workload_root, 32u) == 0 &&
-             memcmp(report.evaluation_input_root,
-                    fixture.paired.evaluation_input_root, 32u) == 0);
+    return observed &&
+        report.observation.status == ZCL_RETRIEVAL_COMPARISON_SATISFIED &&
+        report.observation.directional_delta_bp == 100 &&
+        memcmp(report.observation.policy_root,
+               fixture->policy_root, 32u) == 0 &&
+        memcmp(report.workload_root,
+               fixture->paired.workload_root, 32u) == 0 &&
+        memcmp(report.evaluation_input_root,
+               fixture->paired.evaluation_input_root, 32u) == 0;
+}
 
-    bool bindings = initialized;
-    for (size_t mutation = 0; mutation < 7u && bindings; mutation++) {
-        changed = fixture;
-        switch (mutation) {
-        case 0:
-            changed.policy.workload_root[0] ^= 1u;
-            bindings = zcl_retrieval_comparison_policy_v2_root(
-                &changed.policy, changed.policy_root) ==
-                ZCL_RETRIEVAL_COMPARISON_OK;
-            break;
-        case 1: changed.paired.task_count++; break;
-        case 2:
-            changed.child.evaluation_input_root[0] ^= 1u;
-            bindings = r2_refresh_result(
-                &changed.child, &changed.child_binding);
-            break;
-        case 3:
-            changed.child.evaluator_root[0] ^= 1u;
-            bindings = r2_refresh_result(
-                &changed.child, &changed.child_binding);
-            break;
-        case 4: changed.child_binding.result_root[0] ^= 1u; break;
-        case 5: changed.child_binding.subject_root[0] ^= 1u; break;
-        default: changed.child_binding.proposal_input_root[0] ^= 1u; break;
-        }
-        bindings = bindings && r2_refuses(
-            &changed, ZCL_RETRIEVAL_COMPARISON_BINDING);
+static bool r2_binding_mutate(struct r2_fixture *changed, size_t mutation)
+{
+    switch (mutation) {
+    case 0:
+        changed->policy.workload_root[0] ^= 1u;
+        return zcl_retrieval_comparison_policy_v2_root(
+                   &changed->policy, changed->policy_root) ==
+               ZCL_RETRIEVAL_COMPARISON_OK;
+    case 1: changed->paired.task_count++; break;
+    case 2:
+        changed->child.evaluation_input_root[0] ^= 1u;
+        return r2_refresh_result(&changed->child, &changed->child_binding);
+    case 3:
+        changed->child.evaluator_root[0] ^= 1u;
+        return r2_refresh_result(&changed->child, &changed->child_binding);
+    case 4: changed->child_binding.result_root[0] ^= 1u; break;
+    case 5: changed->child_binding.subject_root[0] ^= 1u; break;
+    default: changed->child_binding.proposal_input_root[0] ^= 1u; break;
     }
-    R2_CHECK("workload task pair evaluator result subject proposal bind",
-             bindings);
+    return true;
+}
 
+static bool r2_runtime_pair_refuses(const struct r2_fixture *fixture)
+{
     uint8_t wrong_runtime_pair[32];
-    memcpy(wrong_runtime_pair, fixture.paired.evaluation_input_root, 32u);
+    memcpy(wrong_runtime_pair, fixture->paired.evaluation_input_root, 32u);
     wrong_runtime_pair[0] ^= 1u;
-    struct zcl_retrieval_comparison_report_v2 report_before;
+    struct zcl_retrieval_comparison_report_v2 report, report_before;
     memset(&report, 0xa5, sizeof(report)); report_before = report;
-    bool runtime_pair = r2_observe_inputs(
-        &fixture, wrong_runtime_pair, &fixture.parent,
-        &fixture.parent_binding, &fixture.child, &fixture.child_binding,
+    return r2_observe_inputs(
+        fixture, wrong_runtime_pair, &fixture->parent,
+        &fixture->parent_binding, &fixture->child, &fixture->child_binding,
         &report) == ZCL_RETRIEVAL_COMPARISON_BINDING &&
         memcmp(&report, &report_before, sizeof(report)) == 0;
-    R2_CHECK("runtime pair identity mismatch refuses atomically", runtime_pair);
+}
 
-    changed = fixture;
+static bool r2_swapped_arms_refuse(const struct r2_fixture *fixture)
+{
+    struct r2_fixture changed = *fixture;
     uint8_t swap_root[32];
     memcpy(swap_root, changed.paired.parent_arm_root, 32u);
     memcpy(changed.paired.parent_arm_root,
@@ -470,31 +509,79 @@ static int case_observer_positive_and_bindings(void)
     memcpy(changed.paired.child_arm_root, swap_root, 32u);
     bool swapped_pair = r2_refuses(
         &changed, ZCL_RETRIEVAL_COMPARISON_RESULT);
-    struct zcl_retrieval_comparison_report_v2 before;
+    struct zcl_retrieval_comparison_report_v2 report, before;
     memset(&report, 0xa5, sizeof(report)); before = report;
     bool swapped_results = r2_observe_inputs(
-        &fixture, fixture.paired.evaluation_input_root,
-        &fixture.child, &fixture.child_binding,
-        &fixture.parent, &fixture.parent_binding, &report) ==
+        fixture, fixture->paired.evaluation_input_root,
+        &fixture->child, &fixture->child_binding,
+        &fixture->parent, &fixture->parent_binding, &report) ==
             ZCL_RETRIEVAL_COMPARISON_BINDING &&
         memcmp(&report, &before, sizeof(report)) == 0;
-    R2_CHECK("swapped arms and results cannot reuse the ordered pair",
-             swapped_pair && swapped_results);
+    return swapped_pair && swapped_results;
+}
 
+static bool r2_observer_alias_refuses(const struct r2_fixture *fixture)
+{
     union r2_observer_alias {
         struct zcl_retrieval_comparison_policy_v2 policy;
         struct zcl_retrieval_comparison_report_v2 report;
     } alias, alias_before;
-    memset(&alias, 0, sizeof(alias)); alias.policy = fixture.policy;
+    memset(&alias, 0, sizeof(alias)); alias.policy = fixture->policy;
     alias_before = alias;
-    bool observer_alias = zcl_retrieval_comparison_observe_v2(
-        &alias.policy, fixture.policy_root, &fixture.paired,
-        fixture.paired.evaluation_input_root, &fixture.parent,
-        &fixture.parent_binding, &fixture.child, &fixture.child_binding,
+    return zcl_retrieval_comparison_observe_v2(
+        &alias.policy, fixture->policy_root, &fixture->paired,
+        fixture->paired.evaluation_input_root, &fixture->parent,
+        &fixture->parent_binding, &fixture->child, &fixture->child_binding,
         &alias.report) == ZCL_RETRIEVAL_COMPARISON_ALIAS &&
         memcmp(&alias, &alias_before, sizeof(alias)) == 0;
-    R2_CHECK("v2 observer alias refuses atomically", observer_alias);
+}
+
+static int case_observer_positive_and_bindings(void)
+{
+    int failures = 0;
+    struct r2_fixture fixture, changed;
+    bool initialized = r2_fixture_init(&fixture);
+    R2_CHECK("canonical ordered pair helper KAT and refusals",
+             r2_pair_helper_ok(&fixture, initialized));
+    R2_CHECK("v2 exact threshold observes the bound pair only",
+             r2_exact_threshold_observed(&fixture, initialized));
+
+    bool bindings = initialized;
+    for (size_t mutation = 0; mutation < 7u && bindings; mutation++) {
+        changed = fixture;
+        bindings = r2_binding_mutate(&changed, mutation) &&
+            r2_refuses(&changed, ZCL_RETRIEVAL_COMPARISON_BINDING);
+    }
+    R2_CHECK("workload task pair evaluator result subject proposal bind",
+             bindings);
+
+    R2_CHECK("runtime pair identity mismatch refuses atomically",
+             r2_runtime_pair_refuses(&fixture));
+    R2_CHECK("swapped arms and results cannot reuse the ordered pair",
+             r2_swapped_arms_refuse(&fixture));
+    R2_CHECK("v2 observer alias refuses atomically",
+             r2_observer_alias_refuses(&fixture));
     return failures;
+}
+
+static void r2_metric_mutate(struct zcl_retrieval_eval_metrics *m,
+                             size_t mutation)
+{
+    switch (mutation) {
+    case 0: m->tasks++; break;
+    case 1: m->recall_at_5_bp++; break;
+    case 2: m->recall_at_20_bp++; break;
+    case 3: m->mrr_bp++; break;
+    case 4: m->wrong_scope_at_5_bp++; break;
+    case 5: m->recall_at_5_available = false; break;
+    case 6: m->recall_at_20_available = false; break;
+    case 7: m->mrr_available = false; break;
+    case 8: m->wrong_scope_at_5_available = false; break;
+    case 9: m->unique_files_at_5++; break;
+    case 10: m->wrong_scope_files_at_5++; break;
+    case 11: m->context_bytes_at_5++; break;
+    default: m->approximate_tokens_at_5++; break;
+    }
 }
 
 static int case_metric_binding_and_precedence(void)
@@ -504,22 +591,7 @@ static int case_metric_binding_and_precedence(void)
     bool initialized = r2_fixture_init(&fixture), metrics = initialized;
     for (size_t mutation = 0; mutation < 13u && metrics; mutation++) {
         changed = fixture;
-        struct zcl_retrieval_eval_metrics *m = &changed.paired.parent_metrics;
-        switch (mutation) {
-        case 0: m->tasks++; break;
-        case 1: m->recall_at_5_bp++; break;
-        case 2: m->recall_at_20_bp++; break;
-        case 3: m->mrr_bp++; break;
-        case 4: m->wrong_scope_at_5_bp++; break;
-        case 5: m->recall_at_5_available = false; break;
-        case 6: m->recall_at_20_available = false; break;
-        case 7: m->mrr_available = false; break;
-        case 8: m->wrong_scope_at_5_available = false; break;
-        case 9: m->unique_files_at_5++; break;
-        case 10: m->wrong_scope_files_at_5++; break;
-        case 11: m->context_bytes_at_5++; break;
-        default: m->approximate_tokens_at_5++; break;
-        }
+        r2_metric_mutate(&changed.paired.parent_metrics, mutation);
         metrics = r2_refuses(&changed, ZCL_RETRIEVAL_COMPARISON_BINDING);
     }
     changed = fixture; changed.paired.child_metrics.recall_at_5_bp++;
