@@ -850,8 +850,11 @@ static void main_log_malloc_arena_cap(int cap)
     if (cap > 0)
         printf("[boot] malloc arenas: capped at %d (MALLOC_ARENA_MAX unset)\n",
                cap);
-    else
+    else if (platform_allocator_arena_cap(getenv("MALLOC_ARENA_MAX"),
+                                          getenv("GLIBC_TUNABLES")) == 0)
         printf("[boot] malloc arenas: operator setting kept\n");
+    else
+        printf("[boot] malloc arenas: not capped (not glibc, or mallopt refused)\n");
 }
 
 int main(int argc, char **argv)
