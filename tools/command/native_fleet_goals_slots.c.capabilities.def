@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_goals_slots.c", CAP_FS_READ, "lists the binary slot root with opendir and readdir and reads each slot's install record and binary through native_slot_common.c, read-only")
