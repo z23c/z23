@@ -94,12 +94,26 @@ static bool cs_sheet_zeroed(const struct character_sheet *s)
 
 /* ── 1. refusals, and what they leave behind ────────────────────────────── */
 
+static void cs_refuse_zeroed_seed(void)
+{
+    struct character_sheet sheet;
+    /* A zeroed struct must be invalid: month 0 is not a month, so a caller
+     * who forgot to initialise cannot get a plausible character. */
+    {
+        struct character_seed wiped;
+        memset(&wiped, 0, sizeof wiped);
+        CS_CHECK("a zeroed seed reads invalid", !character_seed_valid(&wiped));
+        CS_CHECK("a zeroed seed derives nothing",
+                 !character_sheet_derive(&wiped, &sheet) &&
+                     cs_sheet_zeroed(&sheet));
+    }
+}
+
 static void t_refusals(void)
 {
     struct astro_instant good = cs_when(1987, 3, 14, 9, 26, 0);
     struct astro_place here = cs_where(47606200, -122332100);
     struct character_seed s;
-    struct character_sheet sheet;
 
     CS_CHECK("a well-formed seed is accepted",
              character_seed_make("Roan Ashgrove", &good, &here, &s) &&
@@ -122,16 +136,7 @@ static void t_refusals(void)
     CS_CHECK("a NULL sheet output is refused",
              !character_sheet_derive(&s, NULL));
 
-    /* A zeroed struct must be invalid: month 0 is not a month, so a caller
-     * who forgot to initialise cannot get a plausible character. */
-    {
-        struct character_seed wiped;
-        memset(&wiped, 0, sizeof wiped);
-        CS_CHECK("a zeroed seed reads invalid", !character_seed_valid(&wiped));
-        CS_CHECK("a zeroed seed derives nothing",
-                 !character_sheet_derive(&wiped, &sheet) &&
-                     cs_sheet_zeroed(&sheet));
-    }
+    cs_refuse_zeroed_seed();
 
     /* Names the text form could not spell unambiguously. */
     {
@@ -305,6 +310,35 @@ static bool cs_sweep_seed(unsigned n, struct character_seed *out)
     return character_seed_make("Sweep", &when, &where, out);
 }
 
+static void cs_sweep_attributes(const struct character_sheet *sheet,
+                                struct cs_sweep_stats *st)
+{
+    unsigned total = 0;
+    unsigned lo = CHARACTER_ATTRIBUTE_MAX;
+    unsigned hi = CHARACTER_ATTRIBUTE_MIN;
+    for (unsigned i = 0; i < CHARACTER_ATTRIBUTE_COUNT; i++) {
+        unsigned v = sheet->attribute[i];
+        total += v;
+        if (v < CHARACTER_ATTRIBUTE_MIN || v > CHARACTER_ATTRIBUTE_MAX)
+            st->bad_range++;
+        if (v < lo)
+            lo = v;
+        if (v > hi)
+            hi = v;
+        if (sheet->modifier[i] != (int8_t)character_ability_modifier((uint8_t)v))
+            st->bad_range++;
+    }
+    if (total != CHARACTER_ATTRIBUTE_TOTAL)
+        st->bad_total++;
+    if (sheet->rules_rev != CHARACTER_SHEET_RULES_REV)
+        st->bad_rev++;
+    if (!metaverse_property_id_valid(&sheet->id) ||
+        sheet->id.kind != METAVERSE_KIND_CHARACTER_SHEET)
+        st->bad_id++;
+    if (hi >= lo && hi - lo < CS_SWEEP_SPREAD_BUCKETS)
+        st->spread[hi - lo]++;
+}
+
 /* ONE pass over the seed space that answers every per-seed question. */
 static void cs_sweep(unsigned count, struct cs_sweep_stats *st)
 {
@@ -312,9 +346,6 @@ static void cs_sweep(unsigned count, struct cs_sweep_stats *st)
     for (unsigned n = 0; n < count; n++) {
         struct character_seed seed;
         struct character_sheet sheet;
-        unsigned total = 0;
-        unsigned lo = CHARACTER_ATTRIBUTE_MAX;
-        unsigned hi = CHARACTER_ATTRIBUTE_MIN;
 
         if (!cs_sweep_seed(n, &seed)) {
             st->refused++;
@@ -344,27 +375,7 @@ static void cs_sweep(unsigned count, struct cs_sweep_stats *st)
                    CHARACTER_ATTRIBUTE_COUNT);
             st->sampled++;
         }
-        for (unsigned i = 0; i < CHARACTER_ATTRIBUTE_COUNT; i++) {
-            unsigned v = sheet.attribute[i];
-            total += v;
-            if (v < CHARACTER_ATTRIBUTE_MIN || v > CHARACTER_ATTRIBUTE_MAX)
-                st->bad_range++;
-            if (v < lo)
-                lo = v;
-            if (v > hi)
-                hi = v;
-            if (sheet.modifier[i] != (int8_t)character_ability_modifier((uint8_t)v))
-                st->bad_range++;
-        }
-        if (total != CHARACTER_ATTRIBUTE_TOTAL)
-            st->bad_total++;
-        if (sheet.rules_rev != CHARACTER_SHEET_RULES_REV)
-            st->bad_rev++;
-        if (!metaverse_property_id_valid(&sheet.id) ||
-            sheet.id.kind != METAVERSE_KIND_CHARACTER_SHEET)
-            st->bad_id++;
-        if (hi >= lo && hi - lo < CS_SWEEP_SPREAD_BUCKETS)
-            st->spread[hi - lo]++;
+        cs_sweep_attributes(&sheet, st);
     }
 }
 
@@ -447,6 +458,28 @@ static void t_fixed_total(void)
  * character_apportion() over the whole weight space (all zero, all equal, one
  * enormous and five tiny, saturated 32-bit values, a wide pseudo-random
  * spread): no weights whatsoever can break the total. */
+static void cs_random_weights(unsigned n, uint32_t *w, uint32_t *x)
+{
+    for (unsigned i = 0; i < CHARACTER_ATTRIBUTE_COUNT; i++) {
+        *x ^= *x << 13; *x ^= *x >> 17; *x ^= *x << 5;
+        /* Four magnitudes, so tiny and enormous weights meet (a naive
+         * largest-remainder split overflows its cap). */
+        switch (n & 3u) {
+        case 0: w[i] = *x % 256u; break;
+        case 1: w[i] = *x % 4096u; break;
+        case 2: w[i] = *x; break;
+        default: w[i] = (i & 1u) ? (*x % 8u) : *x; break;
+        }
+    }
+}
+
+static void cs_extreme_weights(unsigned k, uint32_t *w,
+                                uint32_t selected, uint32_t other)
+{
+    for (unsigned i = 0; i < CHARACTER_ATTRIBUTE_COUNT; i++)
+        w[i] = (i == k) ? selected : other;
+}
+
 static void t_total_is_structural(void)
 {
     unsigned bad_total = 0, bad_range = 0;
@@ -482,11 +515,9 @@ static void t_total_is_structural(void)
         w[i] = UINT32_MAX;
     CS_JUDGE(); /* every weight saturated */
     for (unsigned k = 0; k < CHARACTER_ATTRIBUTE_COUNT; k++) {
-        for (unsigned i = 0; i < CHARACTER_ATTRIBUTE_COUNT; i++)
-            w[i] = (i == k) ? UINT32_MAX : 0u;
+        cs_extreme_weights(k, w, UINT32_MAX, 0u);
         CS_JUDGE(); /* one attribute claims everything, five claim nothing */
-        for (unsigned i = 0; i < CHARACTER_ATTRIBUTE_COUNT; i++)
-            w[i] = (i == k) ? 0u : UINT32_MAX;
+        cs_extreme_weights(k, w, 0u, UINT32_MAX);
         CS_JUDGE(); /* the inverse */
     }
 
@@ -500,17 +531,7 @@ static void t_total_is_structural(void)
 
     /* A wide pseudo-random field; xorshift32 keeps it portable and fixed. */
     for (unsigned n = 0; n < 250000u; n++) {
-        for (unsigned i = 0; i < CHARACTER_ATTRIBUTE_COUNT; i++) {
-            x ^= x << 13; x ^= x >> 17; x ^= x << 5;
-            /* Four magnitudes, so tiny and enormous weights meet (a naive
-             * largest-remainder split overflows its cap). */
-            switch (n & 3u) {
-            case 0: w[i] = x % 256u; break;
-            case 1: w[i] = x % 4096u; break;
-            case 2: w[i] = x; break;
-            default: w[i] = (i & 1u) ? (x % 8u) : x; break;
-            }
-        }
+        cs_random_weights(n, w, &x);
         CS_JUDGE();
     }
 #undef CS_JUDGE
@@ -726,30 +747,8 @@ static void t_root(void)
 
 /* ── 6. the text form ───────────────────────────────────────────────────── */
 
-static void t_text_form(void)
+static void cs_text_sweep(void)
 {
-    struct astro_instant when = cs_when(1987, 3, 14, 9, 26, 0);
-    struct astro_place where = cs_where(47606200, -122332100);
-    struct character_seed base, back;
-    char text[CHARACTER_SEED_TEXT_MAX], again[CHARACTER_SEED_TEXT_MAX];
-
-    if (!character_seed_make("Roan Ashgrove", &when, &where, &base)) {
-        CS_CHECK("the text fixture builds", false);
-        return;
-    }
-    CS_CHECK("a seed renders",
-             character_seed_format(&base, text, sizeof text));
-    CS_CHECK("the rendering is the documented shape",
-             strcmp(text,
-                    "Roan Ashgrove|1987-03-14T09:26:00Z|47606200|-122332100") ==
-                 0);
-    CS_CHECK("it parses back to the same seed",
-             character_seed_parse(text, &back) &&
-                 character_seed_equal(&base, &back));
-    CS_CHECK("and renders back to the same string",
-             character_seed_format(&back, again, sizeof again) &&
-                 strcmp(text, again) == 0);
-
     /* Round-trip the whole sweep, not one example: an escape-free form is
      * only safe if EVERY value it can hold has exactly one spelling. */
     {
@@ -770,30 +769,10 @@ static void t_text_form(void)
         CS_CHECK("every seed in the sweep round-trips exactly",
                  n >= 1500u && broken == 0u);
     }
+}
 
-    /* Negative years and year zero, which is where a lazy four-digit format
-     * would silently lose the sign or the padding. */
-    {
-        struct astro_instant bc = cs_when(-44, 3, 15, 12, 0, 0);
-        struct astro_instant zero = cs_when(0, 1, 1, 0, 0, 0);
-        struct character_seed s, r;
-
-        CS_CHECK("a negative year round-trips",
-                 character_seed_make("Roan", &bc, &where, &s) &&
-                     character_seed_format(&s, text, sizeof text) &&
-                     strcmp(text, "Roan|-0044-03-15T12:00:00Z|47606200|"
-                                  "-122332100") == 0 &&
-                     character_seed_parse(text, &r) &&
-                     character_seed_equal(&s, &r));
-        CS_CHECK("year zero round-trips",
-                 character_seed_make("Roan", &zero, &where, &s) &&
-                     character_seed_format(&s, text, sizeof text) &&
-                     strcmp(text, "Roan|0000-01-01T00:00:00Z|47606200|"
-                                  "-122332100") == 0 &&
-                     character_seed_parse(text, &r) &&
-                     character_seed_equal(&s, &r));
-    }
-
+static void cs_text_refusals(void)
+{
     /* One value, one spelling. Every rejected form below is a SECOND way of
      * writing something the canonical form already spells, or a string with
      * bytes the canonical form would never emit. Accepting any of them would
@@ -837,7 +816,10 @@ static void t_text_form(void)
                  "leaving nothing behind",
                  all_refused);
     }
+}
 
+static void cs_text_buffers(struct character_seed base, const char *text)
+{
     /* A short buffer must fail closed, not emit a truncated seed that parses
      * as a DIFFERENT character. Every length from 1 to just under the exact
      * fit is tried. */
@@ -880,9 +862,63 @@ static void t_text_form(void)
     }
 }
 
+static void t_text_form(void)
+{
+    struct astro_instant when = cs_when(1987, 3, 14, 9, 26, 0);
+    struct astro_place where = cs_where(47606200, -122332100);
+    struct character_seed base, back;
+    char text[CHARACTER_SEED_TEXT_MAX], again[CHARACTER_SEED_TEXT_MAX];
+
+    if (!character_seed_make("Roan Ashgrove", &when, &where, &base)) {
+        CS_CHECK("the text fixture builds", false);
+        return;
+    }
+    CS_CHECK("a seed renders",
+             character_seed_format(&base, text, sizeof text));
+    CS_CHECK("the rendering is the documented shape",
+             strcmp(text,
+                    "Roan Ashgrove|1987-03-14T09:26:00Z|47606200|-122332100") ==
+                 0);
+    CS_CHECK("it parses back to the same seed",
+             character_seed_parse(text, &back) &&
+                 character_seed_equal(&base, &back));
+    CS_CHECK("and renders back to the same string",
+             character_seed_format(&back, again, sizeof again) &&
+                 strcmp(text, again) == 0);
+
+    cs_text_sweep();
+
+    /* Negative years and year zero, which is where a lazy four-digit format
+     * would silently lose the sign or the padding. */
+    {
+        struct astro_instant bc = cs_when(-44, 3, 15, 12, 0, 0);
+        struct astro_instant zero = cs_when(0, 1, 1, 0, 0, 0);
+        struct character_seed s, r;
+
+        CS_CHECK("a negative year round-trips",
+                 character_seed_make("Roan", &bc, &where, &s) &&
+                     character_seed_format(&s, text, sizeof text) &&
+                     strcmp(text, "Roan|-0044-03-15T12:00:00Z|47606200|"
+                                  "-122332100") == 0 &&
+                     character_seed_parse(text, &r) &&
+                     character_seed_equal(&s, &r));
+        CS_CHECK("year zero round-trips",
+                 character_seed_make("Roan", &zero, &where, &s) &&
+                     character_seed_format(&s, text, sizeof text) &&
+                     strcmp(text, "Roan|0000-01-01T00:00:00Z|47606200|"
+                                  "-122332100") == 0 &&
+                     character_seed_parse(text, &r) &&
+                     character_seed_equal(&s, &r));
+    }
+
+    cs_text_refusals();
+
+    cs_text_buffers(base, text);
+}
+
 /* ── 7. the SRD 5.1 modifier rule, and the derivation's fixed tables ────── */
 
-static void t_rules(void)
+static void cs_modifier_rules(void)
 {
     /* floor((score - 10) / 2), NOT (score - 10) / 2: C truncates toward zero
      * and would give -1 where the SRD's table says -2 for a score of 7. The
@@ -914,7 +950,10 @@ static void t_rules(void)
         }
         CS_CHECK("the modifier never decreases as the score rises", monotone);
     }
+}
 
+static void cs_significator_rules(void)
+{
     /* Six distinct significators, none of them the Sun. The Sun governs how
      * evenly the points spread, not any one ability, so finding it here would
      * mean the derivation had quietly changed shape. */
@@ -939,76 +978,10 @@ static void t_rules(void)
                  character_attribute_significator(
                      (enum character_attribute)99) == ASTRO_BODY_COUNT);
     }
+}
 
-    /* Dignity is the traditional scheme, so the STRUCTURE is checkable
-     * without transcribing a 7x12 grid: whatever a body rules, it is in
-     * detriment in the opposite sign; wherever it is exalted, it falls in the
-     * opposite sign. Asserting the relation catches a table edit that a
-     * spot-check of individual cells would miss. */
-    {
-        static const enum astro_body traditional[] = {
-            ASTRO_BODY_SUN,     ASTRO_BODY_MOON,    ASTRO_BODY_MERCURY,
-            ASTRO_BODY_VENUS,   ASTRO_BODY_MARS,    ASTRO_BODY_JUPITER,
-            ASTRO_BODY_SATURN,
-        };
-        bool structured = true;
-        for (size_t i = 0; i < sizeof traditional / sizeof traditional[0];
-             i++) {
-            enum astro_body b = traditional[i];
-            unsigned rules = 0, exalts = 0, detriments = 0, falls = 0;
-            for (unsigned s = 0; s < ASTRO_SIGN_COUNT; s++) {
-                unsigned d = character_dignity(b, (enum astro_sign)s);
-                unsigned o = character_dignity(
-                    b, (enum astro_sign)((s + 6u) % ASTRO_SIGN_COUNT));
-                if (d == CHARACTER_DIGNITY_RULERSHIP) {
-                    rules++;
-                    /* Opposite a rulership is detriment — unless the body
-                     * also FALLS there, in which case the worse claim wins,
-                     * which is Mercury in Pisces. */
-                    if (o != CHARACTER_DIGNITY_DETRIMENT &&
-                        o != CHARACTER_DIGNITY_FALL)
-                        structured = false;
-                }
-                if (d == CHARACTER_DIGNITY_EXALTATION) {
-                    exalts++;
-                    if (o != CHARACTER_DIGNITY_FALL)
-                        structured = false;
-                }
-                if (d == CHARACTER_DIGNITY_DETRIMENT)
-                    detriments++;
-                if (d == CHARACTER_DIGNITY_FALL)
-                    falls++;
-                if (d > CHARACTER_DIGNITY_MAX)
-                    structured = false;
-            }
-            /* One or two rulerships; exactly one exaltation. Mercury's
-             * exaltation coincides with a rulership, so `exalts` may be 0. */
-            if (rules < 1u || rules > 2u || exalts > 1u || falls > 1u ||
-                detriments > 2u)
-                structured = false;
-        }
-        CS_CHECK("dignity keeps the traditional opposition structure",
-                 structured);
-        CS_CHECK("rulership outranks exaltation where they coincide",
-                 character_dignity(ASTRO_BODY_MERCURY, ASTRO_SIGN_VIRGO) ==
-                     CHARACTER_DIGNITY_RULERSHIP);
-        CS_CHECK("the worse debility wins where two coincide",
-                 character_dignity(ASTRO_BODY_MERCURY, ASTRO_SIGN_PISCES) ==
-                     CHARACTER_DIGNITY_FALL);
-        CS_CHECK("a body the scheme is silent about is peregrine, not zero",
-                 character_dignity(ASTRO_BODY_URANUS, ASTRO_SIGN_AQUARIUS) ==
-                         CHARACTER_DIGNITY_PEREGRINE &&
-                     character_dignity(ASTRO_BODY_NEPTUNE,
-                                       ASTRO_SIGN_PISCES) ==
-                         CHARACTER_DIGNITY_PEREGRINE);
-        CS_CHECK("an out-of-range argument is peregrine, not indexed past",
-                 character_dignity((enum astro_body)99, ASTRO_SIGN_ARIES) ==
-                         CHARACTER_DIGNITY_PEREGRINE &&
-                     character_dignity(ASTRO_BODY_MARS,
-                                       (enum astro_sign)99) ==
-                         CHARACTER_DIGNITY_PEREGRINE);
-    }
-
+static void cs_attribute_names(void)
+{
     /* Names are a wire form: present, distinct, and safe out of range. */
     {
         bool named = true, distinct = true;
@@ -1035,6 +1008,95 @@ static void t_rules(void)
                                 (enum character_attribute)99),
                             "???") == 0);
     }
+}
+
+static bool cs_dignity_body(enum astro_body b, bool structured)
+{
+    unsigned rules = 0, exalts = 0, detriments = 0, falls = 0;
+    for (unsigned s = 0; s < ASTRO_SIGN_COUNT; s++) {
+        unsigned d = character_dignity(b, (enum astro_sign)s);
+        unsigned o = character_dignity(
+            b, (enum astro_sign)((s + 6u) % ASTRO_SIGN_COUNT));
+        if (d == CHARACTER_DIGNITY_RULERSHIP) {
+            rules++;
+            /* Opposite a rulership is detriment — unless the body
+             * also FALLS there, in which case the worse claim wins,
+             * which is Mercury in Pisces. */
+            if (o != CHARACTER_DIGNITY_DETRIMENT &&
+                o != CHARACTER_DIGNITY_FALL)
+                structured = false;
+        }
+        if (d == CHARACTER_DIGNITY_EXALTATION) {
+            exalts++;
+            if (o != CHARACTER_DIGNITY_FALL)
+                structured = false;
+        }
+        if (d == CHARACTER_DIGNITY_DETRIMENT)
+            detriments++;
+        if (d == CHARACTER_DIGNITY_FALL)
+            falls++;
+        if (d > CHARACTER_DIGNITY_MAX)
+            structured = false;
+    }
+    /* One or two rulerships; exactly one exaltation. Mercury's
+     * exaltation coincides with a rulership, so `exalts` may be 0. */
+    if (rules < 1u || rules > 2u || exalts > 1u || falls > 1u ||
+        detriments > 2u)
+        structured = false;
+    return structured;
+}
+
+static void cs_dignity_rules(void)
+{
+    /* Dignity is the traditional scheme, so the STRUCTURE is checkable
+     * without transcribing a 7x12 grid: whatever a body rules, it is in
+     * detriment in the opposite sign; wherever it is exalted, it falls in the
+     * opposite sign. Asserting the relation catches a table edit that a
+     * spot-check of individual cells would miss. */
+    {
+        static const enum astro_body traditional[] = {
+            ASTRO_BODY_SUN,     ASTRO_BODY_MOON,    ASTRO_BODY_MERCURY,
+            ASTRO_BODY_VENUS,   ASTRO_BODY_MARS,    ASTRO_BODY_JUPITER,
+            ASTRO_BODY_SATURN,
+        };
+        bool structured = true;
+        for (size_t i = 0; i < sizeof traditional / sizeof traditional[0];
+             i++) {
+            enum astro_body b = traditional[i];
+            structured = cs_dignity_body(b, structured);
+        }
+        CS_CHECK("dignity keeps the traditional opposition structure",
+                 structured);
+        CS_CHECK("rulership outranks exaltation where they coincide",
+                 character_dignity(ASTRO_BODY_MERCURY, ASTRO_SIGN_VIRGO) ==
+                     CHARACTER_DIGNITY_RULERSHIP);
+        CS_CHECK("the worse debility wins where two coincide",
+                 character_dignity(ASTRO_BODY_MERCURY, ASTRO_SIGN_PISCES) ==
+                     CHARACTER_DIGNITY_FALL);
+        CS_CHECK("a body the scheme is silent about is peregrine, not zero",
+                 character_dignity(ASTRO_BODY_URANUS, ASTRO_SIGN_AQUARIUS) ==
+                         CHARACTER_DIGNITY_PEREGRINE &&
+                     character_dignity(ASTRO_BODY_NEPTUNE,
+                                       ASTRO_SIGN_PISCES) ==
+                         CHARACTER_DIGNITY_PEREGRINE);
+        CS_CHECK("an out-of-range argument is peregrine, not indexed past",
+                 character_dignity((enum astro_body)99, ASTRO_SIGN_ARIES) ==
+                         CHARACTER_DIGNITY_PEREGRINE &&
+                     character_dignity(ASTRO_BODY_MARS,
+                                       (enum astro_sign)99) ==
+                         CHARACTER_DIGNITY_PEREGRINE);
+    }
+}
+
+static void t_rules(void)
+{
+    cs_modifier_rules();
+
+    cs_significator_rules();
+
+    cs_dignity_rules();
+
+    cs_attribute_names();
 }
 
 /* ── 8. one character, printed ───────────────────────────────────────────

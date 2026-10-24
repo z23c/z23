@@ -2200,11 +2200,6 @@ tests/harness/src/test_chainlog.c:case_roundtrip:17
 tests/harness/src/test_chainstate_legacy_reader.c:run_bulk_iter_tests:36
 tests/harness/src/test_chainstate_legacy_reader.c:test_chainstate_legacy_reader:18
 tests/harness/src/test_chaos_harness.c:test_chaos_harness:67
-tests/harness/src/test_character_sheet.c:cs_sweep:20
-tests/harness/src/test_character_sheet.c:t_refusals:16
-tests/harness/src/test_character_sheet.c:t_rules:38
-tests/harness/src/test_character_sheet.c:t_text_form:31
-tests/harness/src/test_character_sheet.c:t_total_is_structural:22
 tests/harness/src/test_check_block_edge.c:test_check_block_edge:35
 tests/harness/src/test_check_tx_edge.c:test_check_tx_edge:16
 tests/harness/src/test_checkpoint.c:test_checkpoint:37
