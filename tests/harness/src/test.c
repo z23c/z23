@@ -1741,6 +1741,8 @@ int main(int argc, char **argv)
       failures += test_sticky_conditions(); }
     { extern int test_mem_pressure(void);
       failures += test_mem_pressure(); }
+    { extern int test_rss_trim(void);
+      failures += test_rss_trim(); }
     { extern int test_validation_pack_conditions(void);
       failures += test_validation_pack_conditions(); }
     { extern int test_sticky_escalator(void);

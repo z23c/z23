@@ -396,3 +396,28 @@ bool os_proc_mem_read(struct os_proc_mem *out)
     return out->rss_bytes >= 0;
 #endif
 }
+
+/* Resident set in KiB. Linux reads field 2 of /proc/self/statm (pages, no
+ * cgroup or meminfo work, so cheap enough to call twice around a trim); other
+ * hosts fall back to os_proc_mem_read(). -1 on failure. */
+int64_t os_proc_resident_kib(void)
+{
+#if defined(__linux__)
+    if (!atomic_load(&g_override_active)) {
+        FILE *f = fopen("/proc/self/statm", "r");
+        if (f) {
+            long long size = 0, res = 0;
+            int n = fscanf(f, "%lld %lld", &size, &res);
+            fclose(f);
+            long ps = sysconf(_SC_PAGESIZE);
+            if (n == 2 && res >= 0 && ps > 0)
+                return (int64_t)res * ((int64_t)ps / 1024);
+        }
+        return -1;
+    }
+#endif
+    struct os_proc_mem m;
+    if (!os_proc_mem_read(&m) || m.rss_bytes < 0)
+        return -1;
+    return m.rss_bytes / 1024;
+}

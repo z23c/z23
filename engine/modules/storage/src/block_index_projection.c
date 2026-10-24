@@ -92,7 +92,7 @@ static void checkpoint_wal(sqlite3 *db, const char *when)
     if (err) sqlite3_free(err);
 }
 
-static long bip_page_cache_kib(void)
+long bip_page_cache_kib(void)
 {
     const char *e = getenv("ZCL_BIP_PAGE_CACHE_KIB");
     if (!e)

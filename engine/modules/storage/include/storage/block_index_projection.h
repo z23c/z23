@@ -159,4 +159,10 @@ bool block_index_projection_dump_state_json(struct json_value *out,
 block_index_projection_t *block_index_projection_singleton(void);
 void block_index_projection_set_singleton(block_index_projection_t *p);
 
+/* After catch-up: lower the connection page cache to the steady baseline and
+ * release its clean pages. Returns the page-cache bytes released (>= 0), or -1
+ * if the connection is busy (try again later) or p is NULL. Takes p->mu with a
+ * trylock, so it never blocks behind a reader or the catch-up writer. */
+int64_t block_index_projection_release_cache(block_index_projection_t *p);
+
 #endif /* ZCL_STORAGE_BLOCK_INDEX_PROJECTION_H */

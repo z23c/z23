@@ -1199,6 +1199,8 @@ ZCL_CAPABILITY_SYMBOL("sqlite3_create_function_v2", CAP_HARMLESS,
 ZCL_CAPABILITY_SYMBOL("sqlite3_db_handle", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_db_mutex", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_db_readonly", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("sqlite3_db_release_memory", CAP_HARMLESS, "")
+ZCL_CAPABILITY_SYMBOL("sqlite3_db_status", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_errcode", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_errmsg", CAP_HARMLESS, "")
 ZCL_CAPABILITY_SYMBOL("sqlite3_errstr", CAP_HARMLESS, "")

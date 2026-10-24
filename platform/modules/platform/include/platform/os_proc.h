@@ -146,6 +146,9 @@ const char *os_proc_environment_string(enum os_proc_environment environment);
  * installed, returns a copy of it and always true. */
 bool os_proc_mem_read(struct os_proc_mem *out);
 
+/* Resident set in KiB (Linux: /proc/self/statm), -1 on failure. */
+int64_t os_proc_resident_kib(void);
+
 /* Process age in seconds: system uptime minus this process's start time.
  * -1 on any read/parse failure. */
 int64_t os_proc_uptime_seconds(void);

@@ -116,3 +116,26 @@ void block_index_projection_cache_prepare(sqlite3 *db)
              "sequential prefetch finished bytes=%" PRIu64 "/%" PRId64,
              warmed, (int64_t)bytes);
 }
+
+int64_t block_index_projection_release_cache(block_index_projection_t *p)
+{
+    if (!p || !p->db || pthread_mutex_trylock(&p->mu) != 0)
+        return -1;
+    int cur = 0, hi = 0;
+    int64_t before = 0, after = 0;
+    if (sqlite3_db_status(p->db, SQLITE_DBSTATUS_CACHE_USED, &cur, &hi, 0) ==
+        SQLITE_OK)
+        before = cur;
+    char pragma[64];
+    snprintf(pragma, sizeof(pragma), "PRAGMA cache_size=-%ld",
+             bip_page_cache_kib());
+    if (sqlite3_exec(p->db, pragma, NULL, NULL, NULL) != SQLITE_OK)
+        LOG_WARN("block_index_projection", "steady cache sizing failed: %s",
+                 sqlite3_errmsg(p->db));
+    (void)sqlite3_db_release_memory(p->db);
+    if (sqlite3_db_status(p->db, SQLITE_DBSTATUS_CACHE_USED, &cur, &hi, 0) ==
+        SQLITE_OK)
+        after = cur;
+    pthread_mutex_unlock(&p->mu);
+    return before > after ? before - after : 0;
+}

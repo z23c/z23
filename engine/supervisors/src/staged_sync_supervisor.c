@@ -30,6 +30,8 @@
 #include "platform/time_compat.h"  /* platform_time_monotonic_us */
 #include "util/supervisor.h"
 #include "storage/memory_profile.h"
+#include "storage/block_index_projection.h"
+#include "util/rss_trim.h"
 #include "jobs/refold_cadence.h"   /* accelerated drain batch + tick, mint/refold only */
 #include "jobs/catchup_cadence.h"  /* accelerated drain batch, live catch-up only */
 #include "jobs/header_admit_stage.h"
@@ -284,6 +286,47 @@ static void staged_sync_apply_memory_profile(struct main_state *ms)
     atomic_store(&g_memory_profile_steady, want);
 }
 
+/* Steady-node RSS discipline (util/rss_trim.h). Same is_initial_block_download()
+ * signal as the gates above: the first at-tip tick after catch-up lowers the
+ * block-index projection page cache to its steady size and releases its pages
+ * (once per transition); an at-tip node also hands freed glibc arena pages back
+ * at most once per 10 minutes. Runs at the top of the stage tick, before any
+ * drain, so no cs_main, reducer lock or store lock is held (the supervisor
+ * thread is not a signal handler). */
+static bool staged_rss_in_sync(void *ctx)
+{
+    return is_initial_block_download((struct main_state *)ctx);
+}
+
+static enum rss_trim_release staged_rss_release_cache(void *ctx, int64_t *bytes)
+{
+    (void)ctx;
+    block_index_projection_t *p = block_index_projection_singleton();
+    if (!p) return RSS_TRIM_RELEASE_NONE;
+    int64_t n = block_index_projection_release_cache(p);
+    if (n < 0) return RSS_TRIM_RELEASE_RETRY;
+    *bytes = n;
+    return RSS_TRIM_RELEASE_DONE;
+}
+
+static struct rss_trim_policy g_rss_trim_policy;
+static atomic_flag g_rss_trim_init = ATOMIC_FLAG_INIT;
+static _Atomic bool g_rss_trim_ready;
+
+static void staged_sync_apply_rss_trim(struct main_state *ms)
+{
+    if (!ms) return;
+    if (!atomic_flag_test_and_set(&g_rss_trim_init)) {
+        rss_trim_policy_init(&g_rss_trim_policy, RSS_TRIM_INTERVAL_US);
+        atomic_store(&g_rss_trim_ready, true);
+    }
+    if (!atomic_load(&g_rss_trim_ready)) return;
+    struct rss_trim_ops ops;
+    rss_trim_production_ops(&ops, ms, staged_rss_in_sync,
+                            staged_rss_release_cache);
+    rss_trim_tick(&g_rss_trim_policy, &ops);
+}
+
 /* Strip the "staged." domain prefix off a stage's dotted supervisor name
  * ("staged.body_persist" -> "body_persist"), for compact blocker ids and
  * reason text. */
@@ -447,6 +490,7 @@ static void staged_stage_tick(struct liveness_contract *c)
      * Cheap: only flips the PRAGMA on an actual IBD<->at-tip transition. */
     staged_sync_apply_progress_durability(d->ms);
     staged_sync_apply_memory_profile(d->ms);
+    staged_sync_apply_rss_trim(d->ms);
     /* Yield to an in-flight SYNCHRONOUS reducer drive (reducer_ingest_block on
      * the mining/submitblock/rebuild thread). The stages share the active-chain
      * window, which is not under the per-stage progress.kv lock, so draining a

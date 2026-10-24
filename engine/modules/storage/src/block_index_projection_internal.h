@@ -77,6 +77,7 @@ uint64_t block_index_projection_cache_budget(uint64_t bytes,
                                              const struct os_proc_mem *mem);
 uint64_t block_index_projection_cache_warm(sqlite3_file *file, uint64_t bytes);
 void block_index_projection_cache_prepare(sqlite3 *db);
+long bip_page_cache_kib(void);   /* steady page-cache KiB (env-overridable) */
 
 struct block_index_projection {
     sqlite3       *db;
