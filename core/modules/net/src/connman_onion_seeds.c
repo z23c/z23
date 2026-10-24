@@ -30,6 +30,7 @@
 #include "net/connman.h"
 #include "net/addrman.h"
 #include "net/net.h"
+#include "net/netbase.h"
 #include "net/onion_discovery.h"
 #include "net/onion_peer_merge.h"
 #include "net/onion_seed_race.h"
@@ -102,6 +103,14 @@ static int apply_onion_seed_directory(struct connman *cm, const char *onion,
                                       const uint8_t *body, size_t body_len,
                                       int depth, bool pin_endpoints);
 
+/* -onlynet=onion: the clearnet endpoints of a directory are never imported
+ * (the onion harvest after the scan still runs). An empty scan string makes
+ * the clearnet loop a no-op. */
+static const char *onion_seed_clearnet_scan_start(const uint8_t *body)
+{
+    return netbase_onlynet_onion() ? "" : (const char *)body;
+}
+
 /* Race admission is stricter than HTTP success: below the peer floor this
  * pass can use only a concrete clearnet endpoint, so an empty/irrelevant 200
  * response must not suppress another seed. Parsing remains side-effect free;
@@ -132,6 +141,16 @@ static bool onion_seed_directory_has_endpoint(const uint8_t *body,
             return true;
     }
     return false;
+}
+
+/* -onlynet=onion: a clearnet endpoint is useless, so any non-empty 200 body
+ * is a usable door (its onion hints are harvested). */
+static bool onion_seed_directory_usable(const uint8_t *body, size_t body_len,
+                                        void *ctx)
+{
+    if (netbase_onlynet_onion())
+        return body && body_len > 0;
+    return onion_seed_directory_has_endpoint(body, body_len, ctx);
 }
 
 static int try_onion_seed_fetch_depth(struct connman *cm, const char *onion,
@@ -191,7 +210,7 @@ static int apply_onion_seed_directory(struct connman *cm, const char *onion,
                                 : 8033;
 
     /* Parse minimal JSON: extract clearnet_ip and clearnet_port fields */
-    const char *p = (const char *)body;
+    const char *p = onion_seed_clearnet_scan_start(body);
     int added = 0;
     while ((p = strstr(p, "\"clearnet_ip\":\"")) != NULL) {
         p += 15; /* skip "clearnet_ip":" */
@@ -468,7 +487,7 @@ void connman_run_onion_seed_pass(struct connman *cm)
     struct onion_seed_race_join *join = NULL;
     int rc = onion_seed_race_first_usable(hostptrs, (size_t)seen.n,
                                           onion_seed_pass_fetch, NULL,
-                                          onion_seed_directory_has_endpoint,
+                                          onion_seed_directory_usable,
                                           NULL,
                                           60, &g_stop,
                                           &winner, &winner_index, &join);
@@ -495,4 +514,12 @@ void connman_kick_onion_seeds(struct connman *cm)
     /* Persist whatever clearnet hosts we just harvested so a subsequent
      * crash/restart before the periodic flush does not lose them. */
     connman_save_addrman(cm);
+}
+
+int connman_apply_onion_seed_directory_for_test(struct connman *cm,
+                                                const char *onion,
+                                                const uint8_t *body,
+                                                size_t body_len)
+{
+    return apply_onion_seed_directory(cm, onion, body, body_len, 0, false);
 }

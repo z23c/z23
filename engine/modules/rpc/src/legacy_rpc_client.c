@@ -12,6 +12,7 @@
 #include "base/cleanse.h"
 #include "encoding/utilstrencodings.h"
 #include "json/json.h"
+#include "net/netbase.h"
 #include "platform/socket_compat.h"
 #include "rpc/zclassicd_port.h"
 #include "util/safe_alloc.h"
@@ -218,6 +219,28 @@ static void lrc_free_req(char *req, size_t cap)
     free(req);
 }
 
+/* The numeric IPv4 target. Under -onlynet=onion a non-loopback host is
+ * refused here, before any connect. */
+static bool lrc_dial_target(const char *host, int port,
+                            struct sockaddr_in *sa, char *err, size_t err_sz)
+{
+    memset(sa, 0, sizeof(*sa));
+    sa->sin_family = AF_INET;
+    sa->sin_port   = htons((uint16_t)port);
+    if (platform_socket_parse_address(AF_INET, host, &sa->sin_addr) != 1) {
+        snprintf(err, err_sz, "bad host: %s", host);
+        return false;
+    }
+    if (!netbase_sockaddr_dial_allowed((const struct sockaddr *)sa,
+                                       sizeof(*sa))) {
+        snprintf(err, err_sz,
+                 "refused %s: -onlynet=onion allows only onion and loopback "
+                 "hosts", host);
+        return false;
+    }
+    return true;
+}
+
 bool legacy_rpc_call_with_timeout(const char *host, int port,
                                   const char *user, const char *pass,
                                   const char *body_json,
@@ -244,12 +267,9 @@ bool legacy_rpc_call_with_timeout(const char *host, int port,
     (void)platform_socket_set_receive_timeout(sock, timeout_ms);
     (void)platform_socket_set_send_timeout(sock, timeout_ms);
 
-    struct sockaddr_in sa = {0};
-    sa.sin_family = AF_INET;
-    sa.sin_port   = htons((uint16_t)port);
-    if (platform_socket_parse_address(AF_INET, host, &sa.sin_addr) != 1) {
+    struct sockaddr_in sa;
+    if (!lrc_dial_target(host, port, &sa, err, err_sz)) {
         platform_socket_close(sock);
-        snprintf(err, err_sz, "bad host: %s", host);
         return false;
     }
     if (platform_socket_connect(sock, (struct sockaddr *)&sa,

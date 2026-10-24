@@ -208,6 +208,30 @@ with `-onion-persist`. The command does not install the seed for you. If an
 identity already exists there, `-onion-rotate` archives it; the old address
 is lost to peers.
 
+## Private review node
+
+A contributor who only wants the public review board, without disclosing an
+IP address or hardware, runs a separate node with two switches (both default
+off; without them behaviour is unchanged):
+
+```sh
+z23 -datadir=$HOME/.z23-review -onlynet=onion -bind=127.0.0.1 -observation=0 \
+    -addnode=<56 chars>.onion:8033
+```
+
+- `-onlynet=onion`: no clearnet P2P dial of any kind (no addrman clearnet
+  candidates, no DNS seeds, no fixed seeds, no feelers), and the onion-seed
+  walk keeps harvesting onion names but imports no clearnet endpoint from a
+  `/directory.json`. Onion peers still dial through Tor. Refused at startup
+  with `-no-tor`, on a `tor: stub` build, with a clearnet `-addnode=` or
+  `-connect=`, or without `-bind=127.0.0.1` (the onion service forwards to
+  the local port, so a loopback listener accepts no inbound clearnet).
+- `-observation=0`: `/observation.json` on the onion answers 404
+  (`disabled by operator (-observation=0)`), so OS, cores, RAM, disk type,
+  hardware fingerprint and peer edges are not published.
+- Use a dedicated `-datadir`; do not reuse a datadir that holds fleet or
+  wallet material.
+
 ## What this is not
 
 - Not a consensus fork. Do not SHA3 block hashes or Equihash.

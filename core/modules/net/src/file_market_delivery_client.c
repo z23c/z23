@@ -11,6 +11,7 @@
 
 #include "net/file_market.h"
 #include "net/file_service.h"
+#include "net/netbase.h"
 #include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "support/cleanse.h"
@@ -138,7 +139,7 @@ static platform_socket_t delivery_connect_endpoint(const uint8_t peer_ip[16],
     addr.sin6_family = AF_INET6;
     addr.sin6_port = htons(peer_port);
     memcpy(&addr.sin6_addr, peer_ip, 16);
-    int rc = platform_socket_connect(fd, (struct sockaddr *)&addr,
+    int rc = netbase_connect_guarded(fd, (struct sockaddr *)&addr,
                                      sizeof(addr));
     int connect_error = rc == 0 ? 0 : platform_socket_last_error();
     if (rc != 0 && platform_socket_error_in_progress(connect_error)) {

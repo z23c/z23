@@ -12,11 +12,16 @@
 
 #include "base/log_level.h"
 #include "net/nat.h"
+#include "net/netbase.h"
 
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
+/* nat.c asks whether -onlynet=onion is set before any port mapping or public-IP
+ * probe; netbase.c pulls the whole resolver in, so this program keeps the
+ * default (off). Gateway discovery itself never consults it. */
+bool netbase_onlynet_onion(void) { return false; }
 enum zcl_log_level zcl_log_level_get(void) { return ZCL_LOG_OFF; }
 void zcl_log_emit_at(enum zcl_log_level level, const char *fmt, ...)
 {

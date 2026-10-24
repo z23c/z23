@@ -66,6 +66,8 @@
 #include "util/blocker.h"
 #include "util/util.h"
 #include "net/connman.h"
+#include "net/netbase.h"
+#include "services/mesh_observation.h"
 #include "config/boot_snapshot_import.h"
 #include "storage/disk_block_io.h"
 #include "storage/event_log.h"
@@ -826,6 +828,10 @@ bool app_init_services(struct app_context *ctx,
         .finalize_node = NULL,
         .ctx = svc->msg_processor,
     };
+    /* Operator privacy switches (both default off): set BEFORE any dial or
+     * onion route can run. */
+    netbase_set_onlynet_onion(ctx->onlynet_onion);
+    mesh_observation_set_public_disabled(ctx->observation_off);
     connman_init(svc->connman, params, &signals);
     svc->connman->datadir = ctx->datadir;
     connman_set_onion_peer_discovery(svc->connman, ctx->datadir,

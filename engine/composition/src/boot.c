@@ -112,6 +112,7 @@
 #include "validation/process_block.h"
 #include "validation/contextual_check_tx.h"
 #include "net/connman.h"
+#include "net/netbase.h"
 #include "keys/key_io.h"
 #include "mining/gen.h"
 #include "script/standard.h"
@@ -3625,6 +3626,9 @@ bool app_init(struct app_context *ctx)
 {
     chain_restore_boot_snapshot_begin_boot();
     g_boot_app_ctx = ctx;
+    /* -onlynet=onion must bind BEFORE the first fetch or dial (the boot bundle
+     * fetch runs ahead of app_init_services). */
+    netbase_set_onlynet_onion(ctx->onlynet_onion);
     struct boot_seq seq = {
         .t_boot_start = boot_clock_ms(),
         .boot_restored_authority_height = -1,

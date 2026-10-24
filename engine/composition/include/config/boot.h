@@ -233,6 +233,12 @@ struct app_context {
                                   * a network-serving operator lane
                                   * (canonical/soak/standby) — see
                                   * app_tor_policy_refusal_code(). */
+    bool onlynet_onion;          /* -onlynet=onion : no clearnet P2P dials, no
+                                  * clearnet endpoints imported from onion
+                                  * directories, loopback-only listener.
+                                  * Default OFF. See app_onlynet_onion_refusal(). */
+    bool observation_off;        /* -observation=0 : /observation.json answers
+                                  * 404 on the onion. Default OFF (served). */
     bool allow_tor_stub_dev;     /* -allow-tor-stub-dev : let a stub-linked
                                   * binary boot even though Tor was asked
                                   * for, for offline unit tests that need no
@@ -266,6 +272,7 @@ struct app_context {
     const char *defer_proof_validation_below;  /* block hash: defer Groth16 at/below this height */
     bool no_services;          /* skip P2P, RPC, Tor — boot only (speedrun) */
     const char *file_service_peer; /* -fileservice=addr : download from this peer */
+    const char *filesync_peer;   /* -filesync=HOST : recorded so -onlynet=onion can refuse it */
     bool connect_only;         /* -connect= mode: only connect to addnodes, no seeds */
     /* The raw `-connect=HOST[:PORT]` values, in command-line order (argv-owned
      * pointers; never freed). Used by the instant-on weld
@@ -521,6 +528,14 @@ bool app_tor_should_start(bool real_tor_linked, bool no_tor);
 #define APP_TOR_REFUSE_STUB_ESCAPE_ON_SERVING_LANE \
     "BOOT_TOR_STUB_ESCAPE_LANE_REFUSED"
 #define APP_TOR_REFUSE_STUB_BUILD_ASKED_FOR_TOR "BOOT_TOR_STUB_BUILD_REFUSED"
+
+/* -onlynet=onion admission, pure. NULL when the argv may boot, else a short
+ * operator-facing reason. Refused: -no-tor, a Tor-stub build (even with
+ * -allow-tor-stub-dev), any clearnet -addnode=/-connect= target, and a
+ * missing or non-loopback -bind= (the onion service forwards to the local
+ * port; a public listener would accept inbound clearnet connections). */
+const char *app_onlynet_onion_refusal(const struct app_context *ctx,
+                                    bool real_tor_linked);
 
 /* The whole fail-closed Tor admission decision, in one pure function.
  * Returns NULL when this argv may boot, or the stable boot_error code the

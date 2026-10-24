@@ -13,6 +13,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <stdatomic.h>
 
 static _Atomic int g_p2p_socket_requested_receive = 0;
@@ -130,6 +131,8 @@ bool lookup_host(const char *name, struct net_addr *results,
         LOG_FAIL("net", "lookup_host: invalid arguments");
 
     *num_results = 0;
+    if (allow_lookup && !netbase_host_dial_allowed(name))
+        LOG_FAIL("net", "lookup_host: DNS refused by -onlynet=onion");
 
     if (max_results > SIZE_MAX / 16)
         return false;
@@ -240,10 +243,149 @@ static bool net_service_get_sockaddr(const struct net_service *svc,
     return true;
 }
 
+static _Atomic bool g_onlynet_onion;
+
+void netbase_set_onlynet_onion(bool on)
+{
+    atomic_store_explicit(&g_onlynet_onion, on, memory_order_relaxed);
+}
+
+bool netbase_onlynet_onion(void)
+{
+    return atomic_load_explicit(&g_onlynet_onion, memory_order_relaxed);
+}
+
+/* -onlynet=onion outbound census (re-derive with
+ *   git grep -n 'getaddrinfo\|connect(' -- core engine contexts platform).
+ * Goal: with the flag on the node issues ZERO clearnet DNS lookups and ZERO
+ * clearnet TCP connects of its own. Loopback and the LAN gateway are the only
+ * exceptions. Each path is one of: gated, refused, loopback-only, LAN-only,
+ * not reachable. Rows name functions, not line numbers, so they do not rot.
+ *   GATED      netbase.c connect_socket_start       P2P dialer/connect_node/probe
+ *   GATED      netbase.c lookup_host                every DNS lookup (allow_lookup)
+ *   GATED      connman.c dns_seed_resolve           DNS seeds skipped
+ *   GATED      connman.c connman_add_seed_node      host check before getaddrinfo
+ *   GATED      boot_node_utilities.c app_open_node  host check before resolve
+ *   GATED      rom_fetch_transport.c rf_connect_route  host check before
+ *              getaddrinfo (+ boot_bundle_fetch_seeds.c: no clearnet seed list,
+ *              and no peer-discovered seed at all under the flag, onion ones
+ *              included: over-conservative, never a leak)
+ *   GATED      file_service.c fs_client_sync        host check before getaddrinfo;
+ *              fs_connect_resolved_until and the range worker re-check the
+ *              resolved sockaddr (defence in depth)
+ *   REFUSED    -fileservice=HOST, -filesync=HOST, -allow-clearnet-snapshot-fetch
+ *              (app_context.c app_onlynet_onion_refusal)
+ *   GATED      file_market_delivery_client.c        delivery dial (peer IP)
+ *   GATED      legacy_rpc_client.c legacy_rpc_call  the legacy zclassicd RPC
+ *              (mirror sync, UTXO parity): numeric host, no DNS; a non-loopback
+ *              host is refused before connect
+ *   GATED      nat.c (UPnP/NAT-PMP, LAN gateway only): nat_add_port_mapping
+ *              and nat_discover_public_ip return before any probe
+ *   LOOPBACK   mesh_tunnel.c                        tunnel_loopback_v4 only
+ *   LOOPBACK   device_host_bridge.c                 INADDR_LOOPBACK only
+ *   LOOPBACK   main_cli_modes.c                     CLI probes of 127.0.0.1
+ *   LOOPBACK   socket_compat.h socketpair fallback  loopback self-pair
+ *   NOT REACHABLE device_host_runtime.c runtime_dial: operator CLI command
+ *              (`ops mesh device-host ...`) in its own process, never started by
+ *              the node; the route address is an operator-typed literal
+ *   LOOPBACK   explorer_controller.c, wallet_view_helpers.c, api_controller.c,
+ *              rpc client.c, entry/cli.c: node RPC on INADDR_LOOPBACK
+ *   LOCAL-ONLY ui_present_host_transport.c          AF_UNIX socket, no network
+ *              (no IP at all)
+ *   TOR        onion_stream_connect rides Tor, not DNS. The embedded Tor
+ *              itself connects to Tor relays over clearnet: that is the
+ *              transport, and the only clearnet egress the flag leaves. */
+bool netbase_clearnet_dial_allowed(const struct net_service *addr)
+{
+    if (!addr)
+        return false;
+    if (!netbase_onlynet_onion())
+        return true;
+    return net_addr_is_tor(&addr->addr) ||
+           net_addr_is_operator_local(&addr->addr);
+}
+
+/* ::1 or a v4-mapped 127/8 address. */
+static bool netbase_in6_is_loopback(const struct in6_addr *a)
+{
+    return IN6_IS_ADDR_LOOPBACK(a) ||
+           (IN6_IS_ADDR_V4MAPPED(a) && a->s6_addr[12] == 127);
+}
+
+/* Host-string form of the same policy, for code that resolves a NAME before it
+ * has an address: allowed when the flag is off, or the host is a .onion name,
+ * "localhost" or a numeric loopback literal. Nothing is resolved here. */
+bool netbase_host_dial_allowed(const char *host)
+{
+    if (!netbase_onlynet_onion())
+        return true;
+    if (!host || host[0] == '\0')
+        return false;
+    if (net_name_is_onion(host))
+        return true;
+    char bare[256];
+    int port = 0;
+    split_host_port(host, bare, sizeof(bare), &port);
+    if (strcmp(bare, "localhost") == 0)
+        return true;
+    struct in_addr v4;
+    struct in6_addr v6;
+    if (inet_pton(AF_INET, bare, &v4) == 1)
+        return (ntohl(v4.s_addr) >> 24) == 127;
+    if (inet_pton(AF_INET6, bare, &v6) == 1)
+        return netbase_in6_is_loopback(&v6);
+    return false;
+}
+
+/* Already-resolved form (range workers, resolved-peer connects). */
+bool netbase_sockaddr_dial_allowed(const struct sockaddr *sa, size_t len)
+{
+    if (!netbase_onlynet_onion())
+        return true;
+    if (!sa)
+        return false;
+    if (sa->sa_family == AF_INET && len >= sizeof(struct sockaddr_in))
+        return (ntohl(((const struct sockaddr_in *)sa)->sin_addr.s_addr) >>
+                24) == 127;
+    if (sa->sa_family == AF_INET6 && len >= sizeof(struct sockaddr_in6))
+        return netbase_in6_is_loopback(
+            &((const struct sockaddr_in6 *)sa)->sin6_addr);
+    return false;
+}
+
+/* Guarded syscall wrappers: drop-in for getaddrinfo()/connect() where the
+ * target is operator- or peer-supplied. With -onlynet=onion a non-onion,
+ * non-loopback target is refused BEFORE any resolve or connect (EAI_FAIL /
+ * EACCES); with the flag off they are the plain calls. */
+int netbase_getaddrinfo_guarded(const char *host, const char *service,
+                                const struct addrinfo *hints,
+                                struct addrinfo **res)
+{
+    if (!netbase_host_dial_allowed(host))
+        return EAI_FAIL;
+    return getaddrinfo(host, service, hints, res);
+}
+
+int netbase_connect_guarded(zcl_socket_t fd, const struct sockaddr *sa,
+                           size_t len)
+{
+    if (!netbase_sockaddr_dial_allowed(sa, len)) {
+        errno = EACCES;
+        return -1;
+    }
+    return platform_socket_connect(fd, sa, len);
+}
+
 enum zcl_connect_start connect_socket_start(const struct net_service *addr,
                                             zcl_socket_t *sock_out)
 {
     *sock_out = ZCL_INVALID_SOCKET;
+
+    if (!netbase_clearnet_dial_allowed(addr)) {
+        LOG_RETURN(ZCL_CONNECT_START_ERROR, "net",
+                   "connect_socket_start: clearnet dial refused by "
+                   "-onlynet=onion");
+    }
 
     /* Fail closed: a torv3 service has no sockaddr. Onion dials route
      * through onion_stream_connect (raw dynhost stream over the embedded

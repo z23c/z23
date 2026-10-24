@@ -189,6 +189,25 @@ static bool bbf_add_connect_seed(struct rom_fetch_peer *peers, size_t *np,
     return false;
 }
 
+/* -onlynet=onion: every hardcoded or peer-discovered file-service seed is a
+ * numeric clearnet address, so none of them may be offered. */
+static bool bbf_clearnet_allowed(const struct app_context *ctx)
+{
+    return !(ctx && ctx->onlynet_onion);
+}
+
+/* The hardcoded clearnet seeds. Under -onlynet=onion the whole list is
+ * skipped: only onion seeds (operator -addnode, discovered peers) remain. */
+static void bbf_add_clearnet_seeds(const struct app_context *ctx,
+                                   struct rom_fetch_peer *peers, size_t *np,
+                                   size_t cap)
+{
+    if (!bbf_clearnet_allowed(ctx))
+        return;
+    for (int i = 0; ZCL_BUNDLE_FETCH_CLEARNET_SEEDS[i]; i++)
+        bbf_add_peer(peers, np, cap, ZCL_BUNDLE_FETCH_CLEARNET_SEEDS[i]);
+}
+
 size_t bbf_assemble_seeds(const struct app_context *ctx,
                           struct rom_fetch_peer *peers, size_t cap,
                           bool *out_explicit_first)
@@ -207,8 +226,7 @@ size_t bbf_assemble_seeds(const struct app_context *ctx,
         for (int i = 0; i < ctx->n_connect_peers; i++)
             (void)bbf_add_connect_seed(peers, &np, cap, ctx->connect_peers[i]);
     } else {
-        for (int i = 0; ZCL_BUNDLE_FETCH_CLEARNET_SEEDS[i]; i++)
-            bbf_add_peer(peers, &np, cap, ZCL_BUNDLE_FETCH_CLEARNET_SEEDS[i]);
+        bbf_add_clearnet_seeds(ctx, peers, &np, cap);
     }
 
     /* Operator -addnode peers are also usable as file-service snapshot seeds:
@@ -247,7 +265,7 @@ size_t bbf_assemble_seeds(const struct app_context *ctx,
      * identical transport-MAC + per-chunk SHA3 + whole-file SHA3 path an
      * operator-named seed rides, and the install still binds to the compiled
      * checkpoint. */
-    if (g_peer_source) {
+    if (g_peer_source && bbf_clearnet_allowed(ctx)) {
         struct boot_bundle_peer_seed found[BBF_PEER_SOURCE_MAX];
         memset(found, 0, sizeof(found));
         size_t n = g_peer_source(g_peer_source_ctx, found,

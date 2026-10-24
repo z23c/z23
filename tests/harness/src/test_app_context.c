@@ -4,8 +4,20 @@
 
 #include "config/boot.h"
 #include "config/args.h"
+#include "controllers/observation_site_controller.h"
+#include "net/addrman.h"
+#include "net/connman.h"
+#include "net/netbase.h"
+#include "net/nat.h"
+#include "net/rom_fetch.h"
+#include "net/file_service.h"
+#include "config/boot_bundle_fetch.h"
+#include "net/onion_service.h"
+#include "rpc/legacy_rpc_client.h"
+#include "services/mesh_observation.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define APPCTX_CHECK(name, expr) do {                                  \
@@ -237,6 +249,327 @@ static int test_nonmainnet_legacy_import_default(void)
     return failures;
 }
 
+/* ── -onlynet=onion / -observation=0 (private review node) ─────────── */
+#define ONLYNET_ONION_A \
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion"
+#define ONLYNET_ONION_B \
+    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.onion"
+
+static int onlynet_parse(char **argv, int argc, struct app_context *ctx)
+{
+    bool show_metrics = false;
+    app_context_defaults(ctx);
+    return args_parse_node_options(argc, argv, ctx, &show_metrics);
+}
+
+static int test_onlynet_onion_args(void)
+{
+    int failures = 0;
+    struct app_context ctx;
+    char *a_ok[] = { "z23", "-onlynet=onion", "-bind=127.0.0.1",
+                     "-observation=0" };
+    char *a_bad[] = { "z23", "-onlynet=clearnet" };
+    char *a_obs[] = { "z23", "-observation=0" };
+    char *a_def[] = { "z23" };
+
+    int rc = onlynet_parse(a_ok, 4, &ctx);
+    if (app_tor_real_build_linked())
+        APPCTX_CHECK("-onlynet=onion -observation=0 parses",
+                     rc == -1 && ctx.onlynet_onion && ctx.observation_off);
+    else
+        APPCTX_CHECK("-onlynet=onion is refused on a tor-stub build",
+                     rc == 1);
+    APPCTX_CHECK("an unknown -onlynet value is refused",
+                 onlynet_parse(a_bad, 2, &ctx) == 1);
+    APPCTX_CHECK("-observation=0 alone parses",
+                 onlynet_parse(a_obs, 2, &ctx) == -1 &&
+                 ctx.observation_off && !ctx.onlynet_onion);
+    APPCTX_CHECK("both switches default off",
+                 onlynet_parse(a_def, 1, &ctx) == -1 &&
+                 !ctx.observation_off && !ctx.onlynet_onion);
+
+    /* The pure admission, with the Tor identity injected. */
+    app_context_defaults(&ctx);
+    APPCTX_CHECK("flag off: nothing to refuse",
+                 app_onlynet_onion_refusal(&ctx, false) == NULL);
+    ctx.onlynet_onion = true;
+    ctx.p2p_bind_address = "127.0.0.1";
+    APPCTX_CHECK("-onlynet=onion + loopback bind + real tor is accepted",
+                 app_onlynet_onion_refusal(&ctx, true) == NULL);
+    APPCTX_CHECK("-onlynet=onion on a tor-stub build is refused",
+                 app_onlynet_onion_refusal(&ctx, false) != NULL);
+    ctx.no_tor = true;
+    APPCTX_CHECK("-onlynet=onion with -no-tor is refused",
+                 app_onlynet_onion_refusal(&ctx, true) != NULL);
+    ctx.no_tor = false;
+    ctx.addnode_peers[ctx.n_addnode_peers++] = "1.2.3.4:8033";
+    APPCTX_CHECK("-onlynet=onion with a clearnet -addnode is refused",
+                 app_onlynet_onion_refusal(&ctx, true) != NULL);
+    ctx.addnode_peers[0] = ONLYNET_ONION_A ":8033";
+    APPCTX_CHECK("-onlynet=onion with an .onion -addnode is accepted",
+                 app_onlynet_onion_refusal(&ctx, true) == NULL);
+    ctx.p2p_bind_address = NULL;
+    APPCTX_CHECK("-onlynet=onion without -bind is refused (no inbound)",
+                 app_onlynet_onion_refusal(&ctx, true) != NULL);
+    ctx.p2p_bind_address = "0.0.0.0";
+    APPCTX_CHECK("-onlynet=onion with a public bind is refused",
+                 app_onlynet_onion_refusal(&ctx, true) != NULL);
+    return failures;
+}
+
+static int onlynet_addrman_count(struct connman *cm)
+{
+    zcl_mutex_lock(&cm->manager.addrman.cs);
+    size_t n = addrman_size(&cm->manager.addrman);
+    zcl_mutex_unlock(&cm->manager.addrman.cs);
+    return (int)n;
+}
+
+static int test_onlynet_onion_dial_and_seed_walk(void)
+{
+    int failures = 0;
+    static const char dir[] =
+        "{\"nodes\":[{\"onion\":\"" ONLYNET_ONION_B "\",\"port\":8033,"
+        "\"clearnet_ip\":\"93.184.216.34\",\"clearnet_port\":8033},"
+        "{\"clearnet_ip\":\"1.1.1.1\",\"clearnet_port\":8033}]}";
+    struct onion_relay_hint hints[4];
+    memset(hints, 0, sizeof(hints));
+    APPCTX_CHECK("fixture directory carries an onion hint to harvest",
+                 onion_directory_parse_relay_hints(dir, NULL, hints, 4) == 1);
+
+    chain_params_select(CHAIN_MAIN);
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    bool ok = connman_init(&cm, chain_params_get(), &sigs);
+    APPCTX_CHECK("connman_init for the seed-walk fixture", ok);
+    if (!ok)
+        return failures;
+
+    netbase_set_onlynet_onion(false);
+    int before = onlynet_addrman_count(&cm);
+    int added = connman_apply_onion_seed_directory_for_test(
+        &cm, ONLYNET_ONION_A, (const uint8_t *)dir, sizeof(dir) - 1);
+    APPCTX_CHECK("flag off: the walk imports clearnet endpoints (unchanged)",
+                 added == 2 && onlynet_addrman_count(&cm) == before + 2);
+    connman_free(&cm);
+
+    if (!connman_init(&cm, chain_params_get(), &sigs))
+        return failures + 1;
+    netbase_set_onlynet_onion(true);
+    before = onlynet_addrman_count(&cm);
+    added = connman_apply_onion_seed_directory_for_test(
+        &cm, ONLYNET_ONION_A, (const uint8_t *)dir, sizeof(dir) - 1);
+    APPCTX_CHECK("-onlynet=onion: the walk adds zero clearnet endpoints",
+                 added == 0 && onlynet_addrman_count(&cm) == before);
+
+    struct net_service clear, loop;
+    net_service_init(&clear);
+    net_service_init(&loop);
+    const unsigned char clear_ip[4] = { 93, 184, 216, 34 };
+    const unsigned char loop_ip[4] = { 127, 0, 0, 1 };
+    net_addr_set_ipv4(&clear.addr, clear_ip);
+    net_addr_set_ipv4(&loop.addr, loop_ip);
+    clear.port = loop.port = 8033;
+    APPCTX_CHECK("-onlynet=onion: the dialer admits no clearnet candidate",
+                 !netbase_clearnet_dial_allowed(&clear) &&
+                 netbase_clearnet_dial_allowed(&loop));
+    zcl_socket_t s = ZCL_INVALID_SOCKET;
+    APPCTX_CHECK("-onlynet=onion: connect_socket_start refuses clearnet",
+                 connect_socket_start(&clear, &s) ==
+                     ZCL_CONNECT_START_ERROR && s == ZCL_INVALID_SOCKET);
+    struct net_address caddr;
+    net_address_init(&caddr);
+    caddr.svc = clear;
+    connman_open_connection(&cm, &caddr);
+    APPCTX_CHECK("-onlynet=onion: a clearnet addnode is not queued",
+                 cm.num_addnodes == 0);
+    netbase_set_onlynet_onion(false);
+    APPCTX_CHECK("flag off: every dial is admitted again",
+                 netbase_clearnet_dial_allowed(&clear));
+    connman_free(&cm);
+    return failures;
+}
+
+static size_t onlynet_test_peer_source(void *ctx,
+                                       struct boot_bundle_peer_seed *out,
+                                       size_t max)
+{
+    (void)ctx;
+    if (max < 1)
+        return 0;
+    memset(&out[0], 0, sizeof(out[0]));
+    snprintf(out[0].host, sizeof(out[0].host), "203.0.113.5");
+    out[0].port = 18034;
+    return 1;
+}
+
+/* ── -onlynet=onion review fixes: boot fetch, operator flags, DNS, NAT ─ */
+static int test_onlynet_clearnet_leaks_closed(void)
+{
+    int failures = 0;
+    struct app_context ctx;
+
+    /* 1. boot bundle fetch: no hardcoded clearnet seed with the flag. */
+    boot_bundle_fetch_set_peer_source(onlynet_test_peer_source, NULL);
+    app_context_defaults(&ctx);
+    size_t open_seeds = boot_bundle_fetch_seed_count(&ctx);
+    ctx.onlynet_onion = true;
+    APPCTX_CHECK("default: the bundle fetch offers a discovered clearnet peer",
+                 open_seeds == 1);
+    APPCTX_CHECK("-onlynet=onion: the bundle fetch seed list holds no "
+                 "clearnet seed", boot_bundle_fetch_seed_count(&ctx) == 0);
+    boot_bundle_fetch_set_peer_source(NULL, NULL);
+
+    /* 1b. the rom fetch transport refuses a clearnet host before resolving. */
+    char buf[256];
+    unsigned before = rom_fetch_resolve_count_for_test();
+    netbase_set_onlynet_onion(true);
+    APPCTX_CHECK("-onlynet=onion: rom fetch to a clearnet host fails",
+                 !rom_fetch_get_directory("example.com", 18034, buf,
+                                          sizeof(buf)));
+    APPCTX_CHECK("-onlynet=onion: ... and never reached getaddrinfo",
+                 rom_fetch_resolve_count_for_test() == before);
+    netbase_set_onlynet_onion(false);
+    (void)rom_fetch_get_directory("localhost", 1, buf, sizeof(buf));
+    APPCTX_CHECK("default: the rom fetch route still resolves",
+                 rom_fetch_resolve_count_for_test() == before + 1);
+
+    /* 2. operator flags that reach fs_client_sync are refused. */
+    const char *const flag_cases[] = { "-fileservice=203.0.113.9",
+                                       "-filesync=203.0.113.9",
+                                       "-allow-clearnet-snapshot-fetch" };
+    for (size_t i = 0; i < sizeof(flag_cases) / sizeof(flag_cases[0]); i++) {
+        char *argv[] = { "z23", "-onlynet=onion", "-bind=127.0.0.1",
+                         (char *)flag_cases[i] };
+        APPCTX_CHECK(flag_cases[i],
+                     ((void)onlynet_parse(argv, 4, &ctx), ctx.onlynet_onion &&
+                      app_onlynet_onion_refusal(&ctx, true) != NULL));
+    }
+    app_context_defaults(&ctx);
+    ctx.onlynet_onion = true;
+    ctx.p2p_bind_address = "127.0.0.1";
+    APPCTX_CHECK("none of those flags: accepted",
+                 app_onlynet_onion_refusal(&ctx, true) == NULL);
+
+    /* defence in depth: the client and the sockaddr gate refuse clearnet. */
+    netbase_set_onlynet_onion(true);
+    struct sockaddr_in pub = { .sin_family = AF_INET };
+    struct sockaddr_in lo = { .sin_family = AF_INET };
+    pub.sin_addr.s_addr = htonl(0xCB007109u);
+    lo.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    APPCTX_CHECK("-onlynet=onion: fs_client_sync refuses a clearnet host",
+                 !fs_client_sync("203.0.113.9", 18034, "build", NULL));
+    APPCTX_CHECK("-onlynet=onion: a public sockaddr is refused",
+                 !netbase_sockaddr_dial_allowed((struct sockaddr *)&pub,
+                                                sizeof(pub)));
+    APPCTX_CHECK("-onlynet=onion: a loopback sockaddr is allowed",
+                 netbase_sockaddr_dial_allowed((struct sockaddr *)&lo,
+                                               sizeof(lo)));
+    APPCTX_CHECK("-onlynet=onion: host strings",
+                 !netbase_host_dial_allowed("example.com") &&
+                 !netbase_host_dial_allowed("203.0.113.9:8033") &&
+                 netbase_host_dial_allowed("127.0.0.1:8033") &&
+                 netbase_host_dial_allowed("localhost") &&
+                 netbase_host_dial_allowed(ONLYNET_ONION_A ":8033"));
+
+    /* 4a. a clearnet DNS name never resolves (lookup_host chokepoint). */
+    struct net_addr res[1];
+    size_t nres = 0;
+    APPCTX_CHECK("-onlynet=onion: lookup_host refuses a DNS name",
+                 !lookup_host("example.com", res, 1, &nres, true));
+
+    /* 3. NAT / UPnP is never probed. */
+    unsigned probes = nat_probe_count_for_test();
+    uint8_t ip[4];
+    APPCTX_CHECK("-onlynet=onion: port mapping is skipped",
+                 !nat_add_port_mapping(8033, 8033, 60, "TCP", ip) &&
+                 !nat_discover_public_ip(ip) &&
+                 nat_probe_count_for_test() == probes);
+    netbase_set_onlynet_onion(false);
+    (void)nat_discover_public_ip(ip);
+    APPCTX_CHECK("default: the NAT probe still runs",
+                 nat_probe_count_for_test() == probes + 1);
+
+    /* 4b. connman_add_seed_node refuses a clearnet host before resolving. */
+    struct connman cm;
+    struct node_signals sigs;
+    memset(&sigs, 0, sizeof(sigs));
+    chain_params_select(CHAIN_MAIN);
+    if (!connman_init(&cm, chain_params_get(), &sigs)) {
+        APPCTX_CHECK("connman_init for the seed-node fixture", false);
+        return failures;
+    }
+    netbase_set_onlynet_onion(true);
+    int addrs = onlynet_addrman_count(&cm);
+    connman_add_seed_node(&cm, "8.8.8.8", 8033);
+    APPCTX_CHECK("-onlynet=onion: a clearnet seed node is not added",
+                 onlynet_addrman_count(&cm) == addrs);
+    netbase_set_onlynet_onion(false);
+    connman_add_seed_node(&cm, "8.8.8.8", 8033);
+    APPCTX_CHECK("default: the same seed node is added",
+                 onlynet_addrman_count(&cm) == addrs + 1);
+    connman_free(&cm);
+    return failures;
+}
+
+/* A response buffer under 1 KiB must not fall through to the telemetry. */
+/* The legacy zclassicd RPC client (mirror sync, UTXO parity) dials a numeric
+ * host: under -onlynet=onion a non-loopback one is refused before connect.
+ * 192.0.2.1 is TEST-NET-1, never routed. */
+static int test_onlynet_legacy_rpc(void)
+{
+    int failures = 0;
+    char err[160] = {0};
+    char *resp = NULL;
+    netbase_set_onlynet_onion(true);
+    bool ok = legacy_rpc_call("192.0.2.1", 8023, "u", "p", "{}", &resp,
+                              err, sizeof(err));
+    netbase_set_onlynet_onion(false);
+    free(resp);
+    APPCTX_CHECK("-onlynet=onion: the legacy RPC refuses a clearnet host "
+                 "before connect", !ok && strstr(err, "refused") != NULL);
+    return failures;
+}
+
+static int test_observation_small_buffer(void)
+{
+    int failures = 0;
+    uint8_t resp[512];
+    memset(resp, 'X', sizeof(resp));
+    mesh_observation_set_public_disabled(true);
+    size_t n = observation_site_handle_request("GET", "/observation.json",
+                                               NULL, 0, resp, sizeof(resp));
+    APPCTX_CHECK("-observation=0 with a 512-byte buffer: 404, no telemetry",
+                 n > 0 && n < sizeof(resp) &&
+                 memcmp(resp, "HTTP/1.1 404", 12) == 0);
+    mesh_observation_set_public_disabled(false);
+    return failures;
+}
+
+static int test_observation_switch(void)
+{
+    int failures = 0;
+    uint8_t resp[4096];
+    mesh_observation_set_public_disabled(true);
+    size_t n = observation_site_handle_request("GET", "/observation.json",
+                                               NULL, 0, resp,
+                                               sizeof(resp) - 1);
+    resp[n < sizeof(resp) ? n : sizeof(resp) - 1] = 0;
+    APPCTX_CHECK("-observation=0: 404 with the operator reason",
+                 n > 0 && strstr((char *)resp, "404 Not Found") &&
+                 strstr((char *)resp,
+                        "disabled by operator (-observation=0)"));
+    mesh_observation_set_public_disabled(false);
+    n = observation_site_handle_request("GET", "/observation.json", NULL, 0,
+                                        resp, sizeof(resp) - 1);
+    resp[n < sizeof(resp) ? n : sizeof(resp) - 1] = 0;
+    APPCTX_CHECK("default: /observation.json is not disabled",
+                 n == 0 || (!strstr((char *)resp, "404 Not Found") &&
+                            !strstr((char *)resp, "disabled by operator")));
+    return failures;
+}
+
 int test_app_context(void)
 {
     int failures = 0;
@@ -385,6 +718,12 @@ int test_app_context(void)
 
     failures += test_app_context_tor_policy();
     failures += test_nonmainnet_legacy_import_default();
+    failures += test_onlynet_onion_args();
+    failures += test_onlynet_onion_dial_and_seed_walk();
+    failures += test_observation_switch();
+    failures += test_onlynet_clearnet_leaks_closed();
+    failures += test_observation_small_buffer();
+    failures += test_onlynet_legacy_rpc();
 
     return failures;
 }

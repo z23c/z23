@@ -32,6 +32,12 @@ bool nat_discover_public_ip(uint8_t ip_out[4]);
  * order; NAT-PMP copies the 4 bytes straight into sockaddr_in::sin_addr. */
 bool nat_get_gateway(uint8_t gw_out[4]);
 
+#ifdef ZCL_TESTING
+/* Number of times nat_add_port_mapping/nat_discover_public_ip got past the
+ * -onlynet=onion gate and began a gateway probe. */
+unsigned nat_probe_count_for_test(void);
+#endif
+
 /* ── BSD/Darwin routing-table dump (core/modules/net/src/nat_route_dump.c) ─────
  * macOS has no /proc/net/route; the routing table is read with
  * sysctl({CTL_NET, PF_ROUTE, 0, AF_INET, NET_RT_DUMP, 0}), which returns a

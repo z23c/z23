@@ -1420,7 +1420,7 @@ static int fs_connect_resolved_until(const struct sockaddr_storage *address,
     int rc = ops
         ? ops->connect_fd(ops->opaque, fd,
                           (const struct sockaddr *)address, address_len)
-        : connect(fd, (const struct sockaddr *)address, address_len);
+        : netbase_connect_guarded(fd, (const struct sockaddr *)address, address_len);
     if (rc < 0 && errno != EINPROGRESS && errno != EWOULDBLOCK) {
         failure = "connect failed";
         goto failed;
@@ -1871,7 +1871,7 @@ static void *range_worker_fn(void *arg)
         goto done;
     }
 
-    int connect_rc = connect(wfd, (struct sockaddr *)&w->peer_sockaddr,
+    int connect_rc = netbase_connect_guarded(wfd, (struct sockaddr *)&w->peer_sockaddr,
                              w->peer_sockaddr_len);
     if (connect_rc < 0 && errno != EINPROGRESS && errno != EWOULDBLOCK) {
         LOG_ERROR("filesvc", "worker %d: connect failed: %s",
@@ -2062,7 +2062,7 @@ bool fs_client_sync(const char *peer_addr, uint16_t port,
     char port_str[8];
     snprintf(port_str, sizeof(port_str), "%d", port);
 
-    if (getaddrinfo(peer_addr, port_str, &hints, &res) != 0)
+    if (netbase_getaddrinfo_guarded(peer_addr, port_str, &hints, &res) != 0)
         LOG_FAIL("filesvc", "client_sync: resolve failed for %s", peer_addr);
 
     struct sockaddr_storage resolved_peer;

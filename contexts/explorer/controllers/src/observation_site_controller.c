@@ -19,9 +19,23 @@
 #include <stdio.h>
 #include <string.h>
 
-size_t observation_site_handle_request(const char *method, const char *path,
-                                       const uint8_t *body, size_t body_len,
-                                       uint8_t *response, size_t response_max)
+/* -observation=0: a short 404, nothing about the node. */
+static size_t observation_disabled_response(bool head_only, uint8_t *response,
+                                            size_t response_max)
+{
+    static const char off[] = "disabled by operator (-observation=0)\n";
+    return (size_t)snprintf((char *)response, response_max,
+        "HTTP/1.1 404 Not Found\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %zu\r\n"
+        "Cache-Control: no-store\r\n"
+        "Connection: close\r\n\r\n%s",
+        sizeof(off) - 1, head_only ? "" : off);
+}
+
+static size_t observation_site_serve(const char *method, const char *path,
+                                     const uint8_t *body, size_t body_len,
+                                     uint8_t *response, size_t response_max)
 {
     (void)body;
     (void)body_len;
@@ -84,4 +98,22 @@ size_t observation_site_handle_request(const char *method, const char *path,
     if (wrote != need)
         return 0;
     return (size_t)hdr + wrote;
+}
+
+size_t observation_site_handle_request(const char *method, const char *path,
+                                       const uint8_t *body, size_t body_len,
+                                       uint8_t *response, size_t response_max)
+{
+    /* The disabled answer comes first and does not depend on the buffer: a
+     * small buffer must not fall through to the full telemetry handler. A
+     * buffer too small for even the 404 gets 0 (no response), never data. */
+    if (mesh_observation_public_disabled()) {
+        if (!method || !response || response_max < 1)
+            return 0;
+        size_t n = observation_disabled_response(strcmp(method, "HEAD") == 0,
+                                                 response, response_max);
+        return n < response_max ? n : 0;
+    }
+    return observation_site_serve(method, path, body, body_len, response,
+                                  response_max);
 }

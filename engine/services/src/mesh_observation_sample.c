@@ -525,6 +525,20 @@ publish:
     zcl_mutex_unlock(&g_mo.lock);
 }
 
+static _Atomic bool g_mo_public_disabled;
+
+void mesh_observation_set_public_disabled(bool disabled)
+{
+    atomic_store_explicit(&g_mo_public_disabled, disabled,
+                          memory_order_relaxed);
+}
+
+bool mesh_observation_public_disabled(void)
+{
+    return atomic_load_explicit(&g_mo_public_disabled,
+                                memory_order_relaxed);
+}
+
 bool mesh_observation_snapshot(struct mesh_observation *out)
 {
     if (!out)

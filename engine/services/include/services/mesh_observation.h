@@ -405,4 +405,10 @@ void mesh_observation_compose(const struct mesh_obs_slot *slots, size_t n,
                               int64_t now_unix,
                               struct mesh_conclusion *out);
 
+/* -observation=0: operator switch (default ON). When off, the onion route
+ * /observation.json answers 404 and discloses nothing; the local sampler and
+ * the local diagnostics RPC are untouched. */
+void mesh_observation_set_public_disabled(bool disabled);
+bool mesh_observation_public_disabled(void);
+
 #endif /* ZCL_SERVICES_MESH_OBSERVATION_H */

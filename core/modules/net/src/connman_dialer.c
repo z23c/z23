@@ -160,6 +160,8 @@ static bool connman_candidate_addr_dialable(struct connman *cm,
 {
     if (!cm || !addr)
         return false;
+    if (!netbase_clearnet_dial_allowed(&addr->svc))
+        return false;                      /* -onlynet=onion */
     /* The public-port policy constrains learned addresses.  An explicit
      * addnode is an operator-authorized endpoint and the direct addnode RPC
      * already permits its non-zero port; persistent redial must preserve that
@@ -183,6 +185,8 @@ static bool connman_dht_hint_dialable(struct connman *cm,
         !zcl_net_port_is_reachable_candidate(addr->svc.port) ||
         connman_addr_is_connected(cm, addr))
         return false;
+    if (!netbase_clearnet_dial_allowed(&addr->svc))
+        return false;                      /* -onlynet=onion */
     /* Same-host acceptance nodes legitimately publish 127/8 endpoints. The
      * signed identity still cannot promote until the remote Noise static and
      * delegation match; a dishonest loopback hint costs one bounded attempt.

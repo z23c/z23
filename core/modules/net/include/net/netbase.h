@@ -60,6 +60,26 @@ bool net_name_is_onion(const char *name);
 bool lookup_onion(const char *name, struct net_service *result,
                   uint16_t default_port);
 
+/* -onlynet=onion: process-wide operator switch, default OFF. When set, no
+ * clearnet P2P connect(2) is ever issued: connect_socket_start() refuses every
+ * non-onion, non-loopback target, so the dialer, connect_node, the crawler
+ * probe and configured sync peers all fail closed through one chokepoint.
+ * Onion targets never reach connect(2) (they ride onion_stream_connect). */
+void netbase_set_onlynet_onion(bool on);
+bool netbase_onlynet_onion(void);
+/* True when a clearnet dial to `addr` may proceed under the current policy. */
+bool netbase_clearnet_dial_allowed(const struct net_service *addr);
+bool netbase_host_dial_allowed(const char *host);
+bool netbase_sockaddr_dial_allowed(const struct sockaddr *sa, size_t len);
+/* Drop-in getaddrinfo()/connect() that refuse a clearnet target under
+ * -onlynet=onion before any resolve or connect (EAI_FAIL / EACCES). */
+struct addrinfo;
+int netbase_getaddrinfo_guarded(const char *host, const char *service,
+                                const struct addrinfo *hints,
+                                struct addrinfo **res);
+int netbase_connect_guarded(zcl_socket_t fd, const struct sockaddr *sa,
+                            size_t len);
+
 bool connect_socket_directly(const struct net_service *addr,
                              zcl_socket_t *sock_out,
                              int timeout_ms);

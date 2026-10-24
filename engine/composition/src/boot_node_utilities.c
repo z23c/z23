@@ -229,6 +229,12 @@ static void app_open_node(const char *host, int port, bool operator_named)
         return;
     }
 
+    if (!netbase_host_dial_allowed(hostbuf)) {
+        printf("Refused addnode %s: -onlynet=onion (never resolved)\n",
+               hostbuf);
+        return;
+    }
+
     if (platform_socket_resolve_ip(hostbuf, addr.svc.addr.ip)) {
         printf("Connecting to addnode %s:%u\n", hostbuf, use_port);
         if (operator_named) {

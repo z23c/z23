@@ -234,7 +234,8 @@ static void dns_seed_resolve(struct connman *cm)
         LOG_WARN("connman", "socket runtime initialization failed");
         return;
     }
-    for (size_t i = 0; i < cm->params->nSeeds; i++) {
+    for (size_t i = 0; i < cm->params->nSeeds &&
+                       !netbase_onlynet_onion(); i++) {
         const char *host = cm->params->vSeeds[i].host;
         if (host[0] == '\0') continue;
 
@@ -285,7 +286,7 @@ static void dns_seed_resolve(struct connman *cm)
 static void seed_from_fixed(struct connman *cm)
 {
     const struct chain_params *p = cm->params;
-    for (size_t i = 0; i < p->nFixedSeeds && !g_stop; i++) {
+    for (size_t i = 0; i < p->nFixedSeeds && !g_stop && !netbase_onlynet_onion(); i++) {
         struct net_address addr;
         net_address_init(&addr);
         memcpy(addr.svc.addr.ip, p->vFixedSeeds[i].addr, 16);
@@ -295,7 +296,7 @@ static void seed_from_fixed(struct connman *cm)
         net_addr_init(&src);
         addrman_add(&cm->manager.addrman, &addr, &src, 0);
     }
-    if (p->nFixedSeeds > 0)
+    if (p->nFixedSeeds > 0 && !netbase_onlynet_onion())
         printf("Added %zu hardcoded seed nodes\n", p->nFixedSeeds);
 }
 
@@ -2681,6 +2682,9 @@ void connman_add_seed_node(struct connman *cm, const char *host,
         return;
     }
 
+    if (!netbase_host_dial_allowed(host))
+        return; /* -onlynet=onion: never resolve a clearnet name */
+
     struct addrinfo hints;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
@@ -2705,6 +2709,7 @@ void connman_add_seed_node(struct connman *cm, const char *host,
 void connman_open_connection(struct connman *cm,
                               const struct net_address *addr)
 {
+    if (!addr || !netbase_clearnet_dial_allowed(&addr->svc)) return;
     /* Store in persistent addnode list for automatic reconnection */
     if (cm->num_addnodes < MAX_ADDNODES) {
         /* Avoid duplicates */

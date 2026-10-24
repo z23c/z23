@@ -319,6 +319,9 @@ bool rom_fetch_download_verified_parallel(const struct rom_fetch_peer *peers,
 void rom_fetch_set_directory_io_timeout_ms_for_test(int ms);
 int  rom_fetch_directory_io_timeout_ms_for_test(void);
 int  rom_fetch_directory_io_timeout_default_ms_for_test(void);
+/* getaddrinfo calls the clearnet route has issued (a -onlynet=onion refusal
+ * must leave it unchanged). */
+unsigned rom_fetch_resolve_count_for_test(void);
 
 /* ── Transport seam (test-only) ──────────────────────────────────────────
  *

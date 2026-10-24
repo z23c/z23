@@ -17,7 +17,9 @@
 #if !defined(_WIN32)
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <stdatomic.h>
 #include "net/nat.h"
+#include "net/netbase.h"
 #include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "util/log_json.h"
@@ -586,10 +588,25 @@ static bool upnp_discover_and_map(uint16_t external, uint16_t internal,
  *  Public API
  * ════════════════════════════════════════════════════════════════ */
 
+#ifdef ZCL_TESTING
+static _Atomic unsigned g_nat_probe_count;
+unsigned nat_probe_count_for_test(void)
+{
+    return atomic_load(&g_nat_probe_count);
+}
+#define NAT_NOTE_PROBE() atomic_fetch_add(&g_nat_probe_count, 1u)
+#else
+#define NAT_NOTE_PROBE() ((void)0)
+#endif
+
 bool nat_add_port_mapping(uint16_t external_port, uint16_t internal_port,
                            uint32_t lifetime, const char *protocol,
                            uint8_t public_ip_out[4])
 {
+    /* -onlynet=onion: no gateway probe, no port mapping (nothing to expose). */
+    if (netbase_onlynet_onion())
+        LOG_FAIL("nat", "port mapping skipped by -onlynet=onion");
+    NAT_NOTE_PROBE();
     uint8_t gw[4];
     if (!nat_get_gateway(gw))
         LOG_FAIL("nat", "no gateway for port mapping: ext=%u int=%u",
@@ -618,6 +635,9 @@ bool nat_add_port_mapping(uint16_t external_port, uint16_t internal_port,
 
 bool nat_discover_public_ip(uint8_t ip_out[4])
 {
+    if (netbase_onlynet_onion())
+        LOG_FAIL("nat", "public IP discovery skipped by -onlynet=onion");
+    NAT_NOTE_PROBE();
     uint8_t gw[4];
     if (!nat_get_gateway(gw))
         LOG_FAIL("nat", "no gateway for public IP discovery");

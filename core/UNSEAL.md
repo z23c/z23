@@ -300,3 +300,7 @@ later lane flips it HARD.
 - 2026-10-24T06:54:13Z — REASON: sha256 arm: load only the 64-byte input block (Mac 1498aa303, owner-authorized patch 49e873ab)
   old ROOT: f83556b599fe9da3b18f21ade88a2a6805c1a18bf69a9651489f32ab9976a85d
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-24T08:04:37Z — REASON: privacy switches for contributor nodes: -onlynet=onion makes no clearnet P2P dials and imports no clearnet endpoints from onion directories (default off, unchanged behaviour without it); P2P dial policy only, no consensus predicate
+  old ROOT: 11c7929713c61c213e23d09fd7c2e2d2d741ce99bebbfd6b60c8e114f5f71e9f
+  by: owner unseal ritual (make core-unseal)

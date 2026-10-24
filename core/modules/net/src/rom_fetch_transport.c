@@ -195,12 +195,27 @@ static platform_socket_t rf_connect_onion(const char *peer_addr, uint16_t port)
     return fd;
 }
 
+#ifdef ZCL_TESTING
+static _Atomic unsigned g_rf_resolve_count;
+unsigned rom_fetch_resolve_count_for_test(void)
+{
+    return atomic_load(&g_rf_resolve_count);
+}
+#define RF_NOTE_RESOLVE() atomic_fetch_add(&g_rf_resolve_count, 1u)
+#else
+#define RF_NOTE_RESOLVE() ((void)0)
+#endif
+
 static platform_socket_t rf_connect_route(const char *peer_addr, uint16_t port)
 {
     /* Route by address family, not by preference: an onion name has exactly
      * one route and never reaches the resolver below. */
     if (net_name_is_onion(peer_addr))
         return rf_connect_onion(peer_addr, port);
+
+    /* -onlynet=onion: refuse before any resolve or connect. */
+    if (!netbase_host_dial_allowed(peer_addr))
+        LOG_ERR(RF_SUBSYS, "chunk: clearnet host refused by -onlynet=onion");
 
     char port_text[8];
     snprintf(port_text, sizeof(port_text), "%u", (unsigned)port);
@@ -209,6 +224,7 @@ static platform_socket_t rf_connect_route(const char *peer_addr, uint16_t port)
     struct addrinfo *addresses = NULL;
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
+    RF_NOTE_RESOLVE();
     if (getaddrinfo(peer_addr, port_text, &hints, &addresses) != 0 ||
         !addresses)
         LOG_ERR(RF_SUBSYS, "chunk: resolve failed for %s", peer_addr);

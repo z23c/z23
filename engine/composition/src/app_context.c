@@ -384,3 +384,64 @@ void wallet_at_rest_boot_report(enum wallet_boot_wallet_action action,
         break;
     }
 }
+
+static bool onlynet_peer_is_onion(const char *peer)
+{
+    if (!peer)
+        return false;
+    const char *colon = strchr(peer, ':');
+    size_t n = colon ? (size_t)(colon - peer) : strlen(peer);
+    static const char suffix[] = ".onion";
+    return n > sizeof(suffix) - 1 &&
+           memcmp(peer + n - (sizeof(suffix) - 1), suffix,
+                  sizeof(suffix) - 1) == 0;
+}
+
+static bool onlynet_bind_is_loopback(const char *bind)
+{
+    return bind && (strcmp(bind, "127.0.0.1") == 0 ||
+                    strcmp(bind, "::1") == 0);
+}
+
+/* -onlynet=onion: the operator flags that make the node dial a clearnet
+ * file-service host (fs_client_sync: getaddrinfo + connect). */
+static const char *onlynet_clearnet_flag_refusal(const struct app_context *ctx)
+{
+    if ((ctx->file_service_peer && ctx->file_service_peer[0]) ||
+        (ctx->filesync_peer && ctx->filesync_peer[0]))
+        return "-onlynet=onion refuses -fileservice=HOST and -filesync=HOST "
+               "(a bulk clearnet file-service dial would disclose this IP)";
+    if (ctx->allow_clearnet_snapshot_fetch)
+        return "-onlynet=onion refuses -allow-clearnet-snapshot-fetch "
+               "(hardcoded clearnet snapshot seeds would be dialled)";
+    return NULL;
+}
+
+const char *app_onlynet_onion_refusal(const struct app_context *ctx,
+                                      bool real_tor_linked)
+{
+    if (!ctx || !ctx->onlynet_onion)
+        return NULL;
+    if (ctx->no_tor)
+        return "-onlynet=onion cannot be combined with -no-tor (Tor is the "
+               "only transport it allows)";
+    if (!real_tor_linked)
+        return "-onlynet=onion needs a real-Tor build, but this binary "
+               "linked the Tor stub (`--version` prints `tor: stub`)";
+    const char *flag_refusal = onlynet_clearnet_flag_refusal(ctx);
+    if (flag_refusal)
+        return flag_refusal;
+    for (int i = 0; i < ctx->n_addnode_peers; i++)
+        if (!onlynet_peer_is_onion(ctx->addnode_peers[i]))
+            return "-onlynet=onion refuses a clearnet -addnode= target; "
+                   "use -addnode=<56 chars>.onion:8033";
+    for (int i = 0; i < ctx->n_connect_peers; i++)
+        if (!onlynet_peer_is_onion(ctx->connect_peers[i]))
+            return "-onlynet=onion refuses a clearnet -connect= target; "
+                   "use -connect=<56 chars>.onion:8033";
+    if (!onlynet_bind_is_loopback(ctx->p2p_bind_address))
+        return "-onlynet=onion needs -bind=127.0.0.1 (or ::1) so no "
+               "inbound clearnet connection is accepted; the onion service "
+               "forwards to the local port";
+    return NULL;
+}
