@@ -488,6 +488,8 @@ struct rcv_beat_stats {
     long long board_in;       /* rows carried in from the fleet board */
     long long board_out;      /* rows posted to the fleet board */
     long long board_deferred; /* carriage or admission waiting on the node */
+    long long wakes_by_event;   /* waits the mail watch ended with an event */
+    long long wakes_by_timeout; /* waits that ran to the wait_ms ceiling */
 };
 
 /* ── board-carried mail (native_devagent_boardmail.c) ─────────────────────

@@ -687,6 +687,9 @@ struct rtx_mailbox_probe {
     bool delivered;
     int64_t sent_ms;
     int64_t resumed_ms;
+    const struct rcv_beat_stats *stats; /* the drive's live counters */
+    long long events_at_resume;  /* waits 1 and 2 woken by the watch */
+    long long timeouts_at_resume; /* waits that ran to the ceiling */
 };
 
 static void rtx_mailbox_step(void *arg)
@@ -704,6 +707,8 @@ static void rtx_mailbox_step(void *arg)
         p->delivered = rtx_deliver("chatgpt", "box-a", "job-after", body, 2);
     } else if (p->phase == 2) {
         p->resumed_ms = platform_time_monotonic_ms();
+        p->events_at_resume = p->stats->wakes_by_event;
+        p->timeouts_at_resume = p->stats->wakes_by_timeout;
     }
     p->phase++;
 }
@@ -2241,6 +2246,7 @@ int test_devagent_receive(void)
         opts.deadline_s = 15;
         opts.wait_ms = 2000;
         memset(&st, 0, sizeof(st));
+        probe.stats = &st;
         zcl_devagent_receive_test_before_wait(rtx_mailbox_step, &probe);
         result = zcl_devagent_receive_drive(&opts, &st);
         zcl_devagent_receive_test_before_wait(NULL, NULL);
@@ -2250,8 +2256,11 @@ int test_devagent_receive(void)
         ASSERT_EQ(probe.created, 0);
         ASSERT(probe.delivered);
         ASSERT(probe.resumed_ms >= probe.sent_ms);
-        /* A stale watch sleeps to the 2000 ms ceiling; re-arming wakes promptly. */
-        ASSERT(probe.resumed_ms - probe.sent_ms < 1200);
+        /* Cause, not elapsed time: a stale watch never sees the delivery, so the
+         * wait before the resume point would run to its 2000 ms ceiling and
+         * count a timeout. Re-armed, both waits ended on a watch event. */
+        ASSERT_EQ(probe.timeouts_at_resume, 0);
+        ASSERT_EQ(probe.events_at_resume, 2);
         ASSERT_EQ(rtx_queue_count("queued", "job-keep"), 1);
         ASSERT_EQ(rtx_queue_count("queued", "job-after"), 1);
         ASSERT_EQ(rtx_answers("job-after", "state=accepted"), 1);

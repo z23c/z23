@@ -2510,7 +2510,8 @@ static bool rcv_watch_rearm(struct platform_directory_watcher *w,
  * times out and beats anyway. There is no fallback that returns without
  * waiting, because that fallback would be a busy poll. */
 static bool rcv_wait(struct platform_directory_watcher *w,
-                     uint32_t wait_ms, bool *watch_lost)
+                     uint32_t wait_ms, bool *watch_lost,
+                     struct rcv_beat_stats *st)
 {
     enum platform_directory_watch_result r;
 #ifdef ZCL_TESTING
@@ -2525,6 +2526,13 @@ static bool rcv_wait(struct platform_directory_watcher *w,
     r = platform_directory_watcher_wait(w, wait_ms, rcv_stop, NULL);
     if (r == PLATFORM_DIRECTORY_WATCH_STOPPED)
         return false;
+    /* Why the wait returned, so a caller can tell an event wake from a wait
+     * that ran to its ceiling. Counting only; no behaviour depends on it. */
+    if (st && r == PLATFORM_DIRECTORY_WATCH_TIMEOUT)
+        st->wakes_by_timeout++;
+    else if (st && (r == PLATFORM_DIRECTORY_WATCH_CHANGED ||
+                    r == PLATFORM_DIRECTORY_WATCH_OVERFLOW))
+        st->wakes_by_event++;
     if (r == PLATFORM_DIRECTORY_WATCH_ERROR)
         *watch_lost = true;
     return !g_rcv_term;
@@ -2574,7 +2582,7 @@ static long long rcv_drive_posix(const struct rcv_drive_opts *opts,
     }
     rcv_beat(&c);
     while (rcv_loop_live(opts, st, t0)) {
-        if (!rcv_wait(&watcher, (uint32_t)opts->wait_ms, &watch_lost))
+        if (!rcv_wait(&watcher, (uint32_t)opts->wait_ms, &watch_lost, st))
             break;
         if (watch_lost) {
             /* Losing the watch removes the only bounded wait this loop has,
