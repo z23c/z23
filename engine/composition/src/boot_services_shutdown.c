@@ -280,6 +280,8 @@ static void shutdown_stop_runtime_and_drain_workers(struct boot_svc_ctx *svc)
     boot_join_offer_service(svc);
     boot_join_projection_backfill_service(svc);
     boot_join_catchup_service(svc);
+    /* Warm-up opens projection stores: join it before anything can close them. */
+    boot_projection_warmup_stop();
 
     /* Diagnostic timeout first, then retain ownership until every remaining
      * CONSUMER exits. The DB worker/checkpointer are dependency providers for
@@ -666,6 +668,7 @@ bool boot_offline_persist_runtime(struct node_db *ndb)
 {
     bool ok = true;
     shutdown_stagewatch_enter("offline-persist", 45, true, true);
+    boot_projection_warmup_stop();
     if (progress_store_db()) {
         if (!progress_store_set_sync_mode(false) ||
             !progress_store_checkpoint()) {

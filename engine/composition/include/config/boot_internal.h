@@ -658,6 +658,21 @@ void boot_start_projection_storage(const char *datadir);
 void boot_start_projection_bg_quick_check(void);
 void boot_stop_projection_storage(void);
 
+/* Projection warm-up: boot_start_projection_storage keeps the event log and
+ * block_index_projection synchronous and arms the rest; the warm-up thread
+ * (started right after the network kernel) opens the second progress.kv handle
+ * and the mempool/peers/topology/znam/wallet/contacts/onion/hodl projections.
+ * Until it finishes projection_store_db() is NULL (idle contract) and
+ * RPC_READY_PROJECTION is clear. Stop joins it (bounded) before any store
+ * closes; publish_rpc re-clears the bit after set_rpc_warmup_finished. */
+void boot_start_projection_warmup(void);
+void boot_projection_warmup_stop(void);
+void boot_projection_warmup_publish_rpc(void);
+#ifdef ZCL_TESTING
+void boot_projection_warmup_test_hold(bool hold);
+bool boot_projection_warmup_test_done(void);
+#endif
+
 /* Idempotent open of the append-only event_log. Called early from app_init so
  * the event-log singleton is published before the coins_tip read view
  * (coins_view_kv) and the other per-domain projections bind, then again (no-op

@@ -1118,6 +1118,7 @@ bool app_init_services(struct app_context *ctx,
         return boot_step_fail("p2p_threads");
     }
     sync_set_state(SYNC_FINDING_PEERS, "P2P started");
+    boot_start_projection_warmup();
 
     t_svc = boot_mark_step(t_svc, "svc.network_start", "svc.mmr_mmb_catchup");
 

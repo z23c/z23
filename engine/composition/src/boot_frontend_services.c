@@ -151,6 +151,7 @@ static bool boot_rpc_http_start(void *ctx)
 
     /* Readiness follows the listening workers: warmup clears only after bind. */
     set_rpc_warmup_finished();
+    boot_projection_warmup_publish_rpc();
     return true;
 }
 

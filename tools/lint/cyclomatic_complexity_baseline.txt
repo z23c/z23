@@ -1264,7 +1264,6 @@ engine/composition/src/boot_mint_anchor_reset.c:boot_mint_anchor_genesis_reset:3
 engine/composition/src/boot_mint_anchor_rom_keystone.c:rom_keystone_fold_anchors:19
 engine/composition/src/boot_node_utilities.c:boot_metrics_external_gauges:16
 engine/composition/src/boot_params_gate.c:boot_params_gate_evaluate:16
-engine/composition/src/boot_projections.c:boot_start_projection_storage:35
 engine/composition/src/boot_ratify_mint_anchor.c:ratify_seam_core:18
 engine/composition/src/boot_refold_staged.c:boot_autodetect_bundle_snapshot:24
 engine/composition/src/boot_refold_staged.c:boot_load_snapshot_at_own_height_reset:113

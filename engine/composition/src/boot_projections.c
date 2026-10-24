@@ -1,4 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
+// supervisor-ok:bounded-projection-warmup — one-shot thread, joined at shutdown; no resident service
  *
  * Boot projection storage — the event_log + reducer read-model projections.
  *
@@ -30,8 +31,14 @@
 #include "storage/wallet_projection.h"
 #include "storage/small_projections.h"
 #include "storage/topology_store.h"
+#include "config/boot_background_workers.h"
+#include "platform/time_compat.h"
+#include "rpc/server.h"
+#include "util/thread_registry.h"
 #include "boot_timing_marks_internal.h"
 #include <limits.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -180,7 +187,7 @@ static void boot_projection_scan_result(bool ok, void *ctx)
     projection_store_integrity_scan_result(ok);
 }
 
-void boot_start_projection_bg_quick_check(void)
+static void boot_projection_quick_check_now(void)
 {
     char path[PROJECTION_STORE_PATH_MAX];
     if (!projection_store_integrity_pending(path, sizeof(path)))
@@ -203,6 +210,276 @@ void boot_start_projection_bg_quick_check(void)
                 "runs again on the next start\n", path);
 }
 
+/* ── Projection warm-up (off the restart critical path) ───────────────────
+ *
+ * What stays synchronous (consensus / serving inputs, opened by boot.c before
+ * the block-index load and merely re-ensured here): the event log and the
+ * block_index_projection. Their readers are the block-index loaders, the
+ * header-by-hash lookup the reducer and header serving use, the flat-cache
+ * bind at shutdown, and event emission from block validation.
+ *
+ * What moves to one tracked warm-up thread, started right after the network
+ * kernel: the second progress.kv handle and the mempool / peers / topology /
+ * znam / wallet / contacts / onion / hodl projections. Every reader of those
+ * goes through a singleton or projection_store_db() and treats NULL as idle
+ * (peer reputation, crawler, explorer RPCs, index services, hodl history). None
+ * feeds block validation, the reducer, chain selection, header or block
+ * serving, or mempool acceptance (acceptance only appends to the event log,
+ * which stays synchronous and is replayed by each projection's catch-up).
+ *
+ * The RPC_READY_PROJECTION bit stays clear until the thread finishes. */
+enum warm_state { WARM_IDLE = 0, WARM_PENDING, WARM_DONE };
+
+static pthread_mutex_t g_warm_mu = PTHREAD_MUTEX_INITIALIZER;
+static enum warm_state g_warm_state = WARM_IDLE;   /* under g_warm_mu */
+static bool g_warm_qc_wanted = false;              /* under g_warm_mu */
+static bool g_warm_thread_started = false;
+static pthread_t g_warm_thread;
+static atomic_bool g_warm_stop = false;
+static size_t g_warm_stage_limit = 0;
+static char g_warm_datadir[PATH_MAX];
+#ifdef ZCL_TESTING
+static atomic_bool g_warm_hold = false;
+#endif
+
+static void warm_catch_up_log(const char *name, uint64_t off)
+{
+    if (off == UINT64_MAX)
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] %s catch_up failed\n", name);
+    else
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] %s caught up to offset=%llu\n", name,
+                (unsigned long long)off);
+}
+
+static bool warm_path(char *out, size_t cap, const char *datadir,
+                      const char *file, const char *what)
+{
+    int n = snprintf(out, cap, "%s/%s", datadir, file);
+    if (n > 0 && (size_t)n < cap)
+        return true;
+    fprintf(stderr,  // obs-ok:phase4-storage
+            "[phase4] %s path too long\n", what);
+    return false;
+}
+
+/* Each stage returns false to end the sequence early (the same points where
+ * the old synchronous fan-out returned). */
+static bool warm_store_open(const char *datadir)
+{
+    /* Second handle to the already-open progress.kv for the address_index /
+     * txindex / created_outputs co-writers (own connection + tx lock). A
+     * fold that finds no handle idles its tick. */
+    if (!projection_store_open(datadir))
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] projection_store unavailable; projection folds idle\n");
+    return true;
+}
+
+static bool warm_mempool(const char *datadir)
+{
+    char path[PATH_MAX];
+    if (!warm_path(path, sizeof(path), datadir, "mempool_projection.db",
+                   "projection storage"))
+        return false;
+    g_phase4_mempool_projection =
+        mempool_projection_open(path, g_phase4_event_log);
+    if (!g_phase4_mempool_projection)
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] mempool_projection unavailable; projection disabled\n");
+    else
+        warm_catch_up_log("mempool_projection",
+                          mempool_projection_catch_up(g_phase4_mempool_projection));
+    return true;
+}
+
+static bool warm_peers(const char *datadir)
+{
+    char path[PATH_MAX];
+    if (!warm_path(path, sizeof(path), datadir, "peers_projection.db",
+                   "projection storage"))
+        return false;
+    g_phase4_peers_projection =
+        peers_projection_open(path, g_phase4_event_log);
+    if (!g_phase4_peers_projection) {
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] peers_projection unavailable; projection disabled\n");
+        return false;
+    }
+    warm_catch_up_log("peers_projection",
+                      peers_projection_catch_up(g_phase4_peers_projection));
+    return true;
+}
+
+/* topology_store: the addr-gossip / crawler-result GRAPH ("who advertises
+ * whom"). Its own file, no event log — best-effort. */
+static bool warm_topology(const char *datadir)
+{
+    if (!topology_store_open(datadir))
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] topology_store unavailable; graph disabled\n");
+    return true;
+}
+
+static bool warm_znam(const char *datadir)
+{
+    char path[PATH_MAX];
+    if (!warm_path(path, sizeof(path), datadir, "znam_projection.db",
+                   "znam_projection"))
+        return false;
+    g_phase4_znam_projection = znam_projection_open(path, g_phase4_event_log);
+    if (!g_phase4_znam_projection) {
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] znam_projection unavailable; projection disabled\n");
+        return false;
+    }
+    warm_catch_up_log("znam_projection",
+                      znam_projection_catch_up(g_phase4_znam_projection));
+    return true;
+}
+
+/* Wallet-view projection replay. The event-log emitter is set only after the
+ * initial replay so boot catch-up cannot race new wallet view events. */
+static bool warm_wallet(const char *datadir)
+{
+    char path[PATH_MAX];
+    if (!warm_path(path, sizeof(path), datadir, "wallet_projection.db",
+                   "wallet_projection"))
+        return false;
+    g_phase4_wallet_projection =
+        wallet_projection_open(path, g_phase4_event_log);
+    if (!g_phase4_wallet_projection) {
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] wallet_projection unavailable; projection disabled\n");
+        return false;
+    }
+    warm_catch_up_log("wallet_projection",
+                      wallet_projection_catch_up(g_phase4_wallet_projection));
+    wallet_projection_set_event_log(g_phase4_event_log);
+    return true;
+}
+
+static bool warm_contacts(const char *datadir)
+{
+    char path[PATH_MAX];
+    if (!warm_path(path, sizeof(path), datadir, "contacts_projection.db",
+                   "small projections"))
+        return true;
+    g_phase4_contacts_projection =
+        contacts_projection_open(path, g_phase4_event_log);
+    if (!g_phase4_contacts_projection)
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] contacts_projection unavailable; projection disabled\n");
+    else
+        warm_catch_up_log("contacts_projection",
+                          contacts_projection_catch_up(g_phase4_contacts_projection));
+    return true;
+}
+
+static bool warm_onion_ann(const char *datadir)
+{
+    char path[PATH_MAX];
+    if (!warm_path(path, sizeof(path), datadir,
+                   "onion_announcements_projection.db", "small projections"))
+        return true;
+    g_phase4_onion_ann_projection =
+        onion_ann_projection_open(path, g_phase4_event_log);
+    if (!g_phase4_onion_ann_projection)
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] onion_announcements_projection unavailable; "
+                "projection disabled\n");
+    else
+        warm_catch_up_log("onion_announcements_projection",
+                          onion_ann_projection_catch_up(g_phase4_onion_ann_projection));
+    return true;
+}
+
+static bool warm_hodl_history(const char *datadir)
+{
+    char path[PATH_MAX];
+    if (!warm_path(path, sizeof(path), datadir, "hodl_history_projection.db",
+                   "small projections"))
+        return true;
+    g_phase4_hodl_history_projection =
+        hodl_history_projection_open(path, g_phase4_event_log);
+    if (!g_phase4_hodl_history_projection)
+        fprintf(stderr,  // obs-ok:phase4-storage
+                "[phase4] hodl_history_projection unavailable; "
+                "projection disabled\n");
+    else
+        warm_catch_up_log("hodl_history_projection",
+                          hodl_history_projection_catch_up(g_phase4_hodl_history_projection));
+    return true;
+}
+
+struct warm_stage {
+    const char *name;
+    bool (*run)(const char *datadir);
+};
+
+static const struct warm_stage g_warm_stages[] = {
+    { "proj.store_open", warm_store_open },
+    { "proj.mempool",    warm_mempool },
+    { "proj.peers",      warm_peers },
+    { "proj.topology",   warm_topology },
+    { "proj.znam",       warm_znam },
+    { "proj.wallet",     warm_wallet },
+    { "proj.contacts",   warm_contacts },
+    { "proj.onion_ann",  warm_onion_ann },
+    { "proj.hodl",       warm_hodl_history },
+};
+#define WARM_STAGE_COUNT (sizeof(g_warm_stages) / sizeof(g_warm_stages[0]))
+#define WARM_STAGES_BEFORE_BIP 4u /* store_open .. topology */
+
+/* Run the stages in order. false when a stop request interrupted the walk. */
+static bool warm_run_stages(const char *datadir)
+{
+    for (size_t i = 0; i < g_warm_stage_limit; i++) {
+        if (atomic_load(&g_warm_stop))
+            return false;
+        int64_t t = boot_clock_ms();
+        bool go = g_warm_stages[i].run(datadir);
+        printf("[boot]   %-28s %lldms (background)\n", g_warm_stages[i].name,
+               (long long)(boot_clock_ms() - t));
+        if (!go)
+            break;
+    }
+    return true;
+}
+
+static void warm_finish(bool completed, int64_t t0)
+{
+    pthread_mutex_lock(&g_warm_mu);
+    g_warm_state = WARM_DONE;
+    bool qc = g_warm_qc_wanted;
+    g_warm_qc_wanted = false;
+    if (completed)
+        rpc_ready_set(RPC_READY_PROJECTION, true);
+    pthread_mutex_unlock(&g_warm_mu);
+    if (!completed)
+        return;
+    printf("[boot] projections ready after %lld ms (background)\n",
+           (long long)(boot_clock_ms() - t0));
+    /* The deferred scan was requested at READY while we were still opening;
+     * it runs now, against an open store, never a NULL one. */
+    if (qc)
+        boot_projection_quick_check_now();
+}
+
+static void *warm_thread_main(void *arg)
+{
+    (void)arg;
+    int64_t t0 = boot_clock_ms();
+#ifdef ZCL_TESTING
+    while (atomic_load(&g_warm_hold) && !atomic_load(&g_warm_stop))
+        platform_sleep_ms(2);
+#endif
+    bool completed = warm_run_stages(g_warm_datadir);
+    warm_finish(completed, t0);
+    return NULL;
+}
+
 void boot_start_projection_storage(const char *datadir)
 {
     if (!datadir || !datadir[0])
@@ -213,240 +490,110 @@ void boot_start_projection_storage(const char *datadir)
     projection_store_set_quick_check_defer_probe(
         boot_projection_defer_quick_check);
 
-    /* Wave A2 (D4) split: open the SECOND handle to the already-open
-     * progress.kv (progress_store opened it back in app_init), giving the
-     * address_index / txindex / created_outputs co-writers their OWN connection
-     * + tx lock so their BEGIN IMMEDIATE never serialises on the reducer drive's
-     * kernel tx lock. Non-fatal — a projection fold that finds no handle just
-     * idles its tick; the kernel fold is unaffected. */
-    /* proj.* sub-marks time each segment below; print-only, no step change. */
-    int64_t t_seg = boot_clock_ms();
-    if (!projection_store_open(datadir))
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] projection_store unavailable; projection folds idle\n");
-    t_seg = boot_submark("proj.store_open", t_seg);
-
-    char mempool_path[PATH_MAX];
-    char peers_path[PATH_MAX];
-    int n2 = snprintf(mempool_path, sizeof(mempool_path),
-                      "%s/mempool_projection.db", datadir);
-    int n3 = snprintf(peers_path, sizeof(peers_path),
-                      "%s/peers_projection.db", datadir);
-    if (n2 <= 0 || (size_t)n2 >= sizeof(mempool_path) ||
-        n3 <= 0 || (size_t)n3 >= sizeof(peers_path)) {
+    if (snprintf(g_warm_datadir, sizeof(g_warm_datadir), "%s", datadir) >=
+        (int)sizeof(g_warm_datadir)) {
         fprintf(stderr,  // obs-ok:phase4-storage
                 "[phase4] projection storage paths too long\n");
         return;
     }
-
-    /* Open (or reuse, if boot.c already opened it for the coins read view) the
-     * event_log. After this g_phase4_event_log is published. */
+    size_t limit = WARM_STAGE_COUNT;
+    /* Consensus / serving inputs stay synchronous, in the old order. */
     if (!boot_ensure_event_log(datadir)) {
         fprintf(stderr,  // obs-ok:phase4-storage
                 "[phase4] event log unavailable; projections disabled\n");
-        return;
-    }
-    t_seg = boot_submark("proj.event_log", t_seg);
-
-    mempool_projection_set_event_log(g_phase4_event_log);
-    g_phase4_mempool_projection =
-        mempool_projection_open(mempool_path, g_phase4_event_log);
-    if (!g_phase4_mempool_projection) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] mempool_projection unavailable; projection disabled\n");
+        limit = 1;
     } else {
-        uint64_t off =
-            mempool_projection_catch_up(g_phase4_mempool_projection);
-        if (off == UINT64_MAX) {
+        mempool_projection_set_event_log(g_phase4_event_log);
+        peers_projection_set_event_log(g_phase4_event_log);
+        znam_projection_set_event_log(g_phase4_event_log);
+        contacts_projection_set_event_log(g_phase4_event_log);
+        onion_ann_projection_set_event_log(g_phase4_event_log);
+        hodl_history_projection_set_event_log(g_phase4_event_log);
+        if (!boot_ensure_block_index_projection(datadir)) {
             fprintf(stderr,  // obs-ok:phase4-storage
-                    "[phase4] mempool_projection catch_up failed\n");
-        } else {
-            fprintf(stderr,  // obs-ok:phase4-storage
-                    "[phase4] mempool_projection caught up to offset=%llu\n",
-                    (unsigned long long)off);
+                    "[phase4] block_index_projection unavailable\n");
+            limit = WARM_STAGES_BEFORE_BIP;
         }
     }
-    t_seg = boot_submark("proj.mempool", t_seg);
-
-    peers_projection_set_event_log(g_phase4_event_log);
-    g_phase4_peers_projection =
-        peers_projection_open(peers_path, g_phase4_event_log);
-    if (!g_phase4_peers_projection) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] peers_projection unavailable; projection disabled\n");
-        return;
-    }
-    uint64_t off = peers_projection_catch_up(g_phase4_peers_projection);
-    if (off == UINT64_MAX) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] peers_projection catch_up failed\n");
-    } else {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] peers_projection caught up to offset=%llu\n",
-                (unsigned long long)off);
-    }
-    t_seg = boot_submark("proj.peers", t_seg);
-
-    /* topology_store: the addr-gossip / crawler-result GRAPH ("who
-     * advertises whom"). Its own dedicated file, no event log — best-effort,
-     * never blocks the rest of projection setup. */
-    if (!topology_store_open(datadir))
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] topology_store unavailable; graph disabled\n");
-    t_seg = boot_submark("proj.topology", t_seg);
-
-    /* The canonical UTXO set is the kernel coins store (coins_kv), read live
-     * through coins_view_kv and authored in-txn by the utxo_apply stage; there
-     * is no separate event-log-fed UTXO projection to open or anchor-seed. */
-
-    /* block_index_projection is opened or reused via the hoisted helper;
-     * first opener wins when boot.c already opened it for -rebuildfromlog. */
-    if (!boot_ensure_block_index_projection(datadir)) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] block_index_projection unavailable\n");
-        return;
-    }
-    t_seg = boot_submark("proj.block_index", t_seg);
-
-    /* ZNAM projection replay. */
-    char znam_path[PATH_MAX];
-    int n6 = snprintf(znam_path, sizeof(znam_path),
-                      "%s/znam_projection.db", datadir);
-    if (n6 <= 0 || (size_t)n6 >= sizeof(znam_path)) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] znam_projection path too long\n");
-        return;
-    }
-    znam_projection_set_event_log(g_phase4_event_log);
-    g_phase4_znam_projection =
-        znam_projection_open(znam_path, g_phase4_event_log);
-    if (!g_phase4_znam_projection) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] znam_projection unavailable; projection disabled\n");
-        return;
-    }
-    uint64_t zoff = znam_projection_catch_up(g_phase4_znam_projection);
-    if (zoff == UINT64_MAX) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] znam_projection catch_up failed\n");
-    } else {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] znam_projection caught up to offset=%llu\n",
-                (unsigned long long)zoff);
-    }
-    t_seg = boot_submark("proj.znam", t_seg);
-
-    /* Wallet-view projection replay. Set the event-log emitter only after
-     * initial replay so boot catch-up cannot race new wallet view events. */
-    char wallet_path[PATH_MAX];
-    int n7 = snprintf(wallet_path, sizeof(wallet_path),
-                      "%s/wallet_projection.db", datadir);
-    if (n7 <= 0 || (size_t)n7 >= sizeof(wallet_path)) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] wallet_projection path too long\n");
-        return;
-    }
-    g_phase4_wallet_projection =
-        wallet_projection_open(wallet_path, g_phase4_event_log);
-    if (!g_phase4_wallet_projection) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] wallet_projection unavailable; projection disabled\n");
-        return;
-    }
-    uint64_t woff = wallet_projection_catch_up(g_phase4_wallet_projection);
-    if (woff == UINT64_MAX) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] wallet_projection catch_up failed\n");
-    } else {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] wallet_projection caught up to offset=%llu\n",
-                (unsigned long long)woff);
-    }
-    wallet_projection_set_event_log(g_phase4_event_log);
-
-    /* Small-batch projection replay. */
-    char contacts_path[PATH_MAX];
-    char onion_ann_path[PATH_MAX];
-    char hodl_history_path[PATH_MAX];
-    int n8 = snprintf(contacts_path, sizeof(contacts_path),
-                      "%s/contacts_projection.db", datadir);
-    int n9 = snprintf(onion_ann_path, sizeof(onion_ann_path),
-                      "%s/onion_announcements_projection.db", datadir);
-    int n10 = snprintf(hodl_history_path, sizeof(hodl_history_path),
-                       "%s/hodl_history_projection.db", datadir);
-    if (n8 <= 0 || (size_t)n8 >= sizeof(contacts_path) ||
-        n9 <= 0 || (size_t)n9 >= sizeof(onion_ann_path) ||
-        n10 <= 0 || (size_t)n10 >= sizeof(hodl_history_path)) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] small projection paths too long\n");
-        return;
-    }
-
-    contacts_projection_set_event_log(g_phase4_event_log);
-    g_phase4_contacts_projection =
-        contacts_projection_open(contacts_path, g_phase4_event_log);
-    if (!g_phase4_contacts_projection) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] contacts_projection unavailable; projection disabled\n");
-    } else {
-        uint64_t coff =
-            contacts_projection_catch_up(g_phase4_contacts_projection);
-        if (coff == UINT64_MAX) {
-            fprintf(stderr,  // obs-ok:phase4-storage
-                    "[phase4] contacts_projection catch_up failed\n");
-        } else {
-            fprintf(stderr,  // obs-ok:phase4-storage
-                    "[phase4] contacts_projection caught up to offset=%llu\n",
-                    (unsigned long long)coff);
-        }
-    }
-
-    onion_ann_projection_set_event_log(g_phase4_event_log);
-    g_phase4_onion_ann_projection =
-        onion_ann_projection_open(onion_ann_path, g_phase4_event_log);
-    if (!g_phase4_onion_ann_projection) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] onion_announcements_projection unavailable; "
-                "projection disabled\n");
-    } else {
-        uint64_t aoff =
-            onion_ann_projection_catch_up(g_phase4_onion_ann_projection);
-        if (aoff == UINT64_MAX) {
-            fprintf(stderr,  // obs-ok:phase4-storage
-                    "[phase4] onion_announcements_projection catch_up failed\n");
-        } else {
-            fprintf(stderr,  // obs-ok:phase4-storage
-                    "[phase4] onion_announcements_projection caught up to "
-                    "offset=%llu\n",
-                    (unsigned long long)aoff);
-        }
-    }
-
-    hodl_history_projection_set_event_log(g_phase4_event_log);
-    g_phase4_hodl_history_projection =
-        hodl_history_projection_open(hodl_history_path, g_phase4_event_log);
-    if (!g_phase4_hodl_history_projection) {
-        fprintf(stderr,  // obs-ok:phase4-storage
-                "[phase4] hodl_history_projection unavailable; "
-                "projection disabled\n");
-    } else {
-        uint64_t hoff =
-            hodl_history_projection_catch_up(g_phase4_hodl_history_projection);
-        if (hoff == UINT64_MAX) {
-            fprintf(stderr,  // obs-ok:phase4-storage
-                    "[phase4] hodl_history_projection catch_up failed\n");
-        } else {
-            fprintf(stderr,  // obs-ok:phase4-storage
-                    "[phase4] hodl_history_projection caught up to "
-                    "offset=%llu\n",
-                    (unsigned long long)hoff);
-        }
-    }
-    (void)boot_submark("proj.rest", t_seg);
+    g_warm_stage_limit = limit;
+    atomic_store(&g_warm_stop, false);
+    pthread_mutex_lock(&g_warm_mu);
+    g_warm_state = WARM_PENDING;
+    g_warm_qc_wanted = false;
+    pthread_mutex_unlock(&g_warm_mu);
 }
+
+void boot_start_projection_warmup(void)
+{
+    pthread_mutex_lock(&g_warm_mu);
+    bool pending = g_warm_state == WARM_PENDING && !g_warm_thread_started;
+    pthread_mutex_unlock(&g_warm_mu);
+    if (!pending)
+        return;
+    // thread-supervision-ok: one warm-up thread, joined by boot_projection_warmup_stop before any store closes
+    if (thread_registry_spawn("zcl_proj_warm", warm_thread_main, NULL,
+                              &g_warm_thread) == 0) {
+        g_warm_thread_started = true;
+        return;
+    }
+    fprintf(stderr,  // obs-ok:phase4-storage
+            "[phase4] projection warm-up thread failed to start; opening "
+            "projections inline\n");
+    (void)warm_thread_main(NULL);
+}
+
+void boot_projection_warmup_stop(void)
+{
+    atomic_store(&g_warm_stop, true);
+    if (!g_warm_thread_started)
+        return;
+    /* Bounded wait, then a final join: the stores must not close under the
+     * thread. The stagewatch deadline is the outer bound. */
+    (void)boot_join_thread_bounded(g_warm_thread, "projection warm-up", 30);
+    g_warm_thread_started = false;
+}
+
+void boot_projection_warmup_publish_rpc(void)
+{
+    pthread_mutex_lock(&g_warm_mu);
+    if (g_warm_state == WARM_PENDING)
+        rpc_ready_set(RPC_READY_PROJECTION, false);
+    pthread_mutex_unlock(&g_warm_mu);
+}
+
+void boot_start_projection_bg_quick_check(void)
+{
+    pthread_mutex_lock(&g_warm_mu);
+    if (g_warm_state == WARM_PENDING) {
+        g_warm_qc_wanted = true;
+        pthread_mutex_unlock(&g_warm_mu);
+        return;
+    }
+    pthread_mutex_unlock(&g_warm_mu);
+    boot_projection_quick_check_now();
+}
+
+#ifdef ZCL_TESTING
+void boot_projection_warmup_test_hold(bool hold)
+{
+    atomic_store(&g_warm_hold, hold);
+}
+
+bool boot_projection_warmup_test_done(void)
+{
+    pthread_mutex_lock(&g_warm_mu);
+    bool done = g_warm_state == WARM_DONE;
+    pthread_mutex_unlock(&g_warm_mu);
+    return done;
+}
+#endif
 
 void boot_stop_projection_storage(void)
 {
+    /* The warm-up thread opens and folds these stores: it is joined before any
+     * of them (or the event log) closes. Idempotent when shutdown already
+     * stopped it in worker-drain. */
+    boot_projection_warmup_stop();
     /* Order: detach emitters before closing the projections so no
      * in-flight emit lands on a stale handle. Then close projections
      * before the event log they point to. */
@@ -499,4 +646,8 @@ void boot_stop_projection_storage(void)
     /* Close the Wave A2 projection handle to progress.kv (no-op if unopened).
      * progress_store's own close still owns the WAL checkpoint of the file. */
     projection_store_close();
+    pthread_mutex_lock(&g_warm_mu);
+    g_warm_state = WARM_IDLE;
+    g_warm_qc_wanted = false;
+    pthread_mutex_unlock(&g_warm_mu);
 }
