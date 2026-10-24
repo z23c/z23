@@ -1051,6 +1051,37 @@ static int t_line_key_is_per_leaf(void)
     return failures;
 }
 
+/* `out` is a measured token count on fleet.experiment.result and an output
+ * path on fleet.bundle.fetch. A global integer rule refused every
+ * `--out=/abs/path`, so a bundle could not be fetched from a shell. */
+static int t_out_key_is_per_leaf(void)
+{
+    int failures = 0;
+    char why[192];
+
+    CIB_CHECK("bundle fetch accepts a STRING output path",
+              cib_accepts("fleet.bundle.fetch", "out", 40, why, sizeof(why)));
+    CIB_CHECK("bundle fetch refuses a NUMBER for its output path",
+              !cib_accepts_int_why("fleet.bundle.fetch", "out", 7, why,
+                                   sizeof(why)) &&
+              cib_type_refusal(why, "out"));
+    CIB_CHECK("experiment result still accepts a count for out",
+              cib_accepts_int("fleet.experiment.result", "out", 1200));
+    CIB_CHECK("experiment result still refuses a STRING for out",
+              !cib_accepts("fleet.experiment.result", "out", 4, why,
+                           sizeof(why)) &&
+              cib_type_refusal(why, "out"));
+    CIB_CHECK("experiment result still refuses a negative out",
+              !cib_accepts_int("fleet.experiment.result", "out", -1));
+    CIB_CHECK("experiment predict still types tokens as a count",
+              cib_accepts_int("fleet.experiment.predict", "tokens", 1200) &&
+              !cib_accepts("fleet.experiment.predict", "tokens", 4, why,
+                           sizeof(why)));
+    CIB_CHECK("receipt append still accepts a count for wall_s",
+              cib_accepts_int("fleet.receipt.append", "wall_s", 30));
+    return failures;
+}
+
 /* cr_match_chunks_and_lines, fourth key: `max_lines` is a tail size — it
  * shares `line`'s low bound but stops a thousand times earlier, so its own
  * high edge has to be held down separately. */
@@ -1560,6 +1591,7 @@ int test_command_input_bounds(void)
     failures += t_moved_chunk_start_bounds();
     failures += t_moved_line_bounds();
     failures += t_line_key_is_per_leaf();
+    failures += t_out_key_is_per_leaf();
     failures += t_moved_max_lines_bounds();
     failures += t_moved_required_discovery();
     failures += t_resident_execution_grant();

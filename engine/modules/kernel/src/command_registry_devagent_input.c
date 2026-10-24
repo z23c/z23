@@ -167,8 +167,10 @@ static bool devagent_budget_bytes(const char *key,
  * `--tokens=1200` types as an integer, so the default string branch would
  * make the leaves uninvokable from a shell. The handler owns presence
  * versus absence; the transport only admits a non-negative integer shape.
- * These names are unique to those leaves today. */
-static bool devagent_experiment_quantity(const char *key,
+ * Scoped to the leaves that declare these names as counts: `out` is
+ * fleet.bundle.fetch's output path, so a global rule made that leaf
+ * uninvokable. */
+static bool devagent_experiment_quantity(const char *path, const char *key,
                                         const struct json_value *value,
                                         bool *type_ok)
 {
@@ -176,6 +178,13 @@ static bool devagent_experiment_quantity(const char *key,
         "tokens", "wall_s", "in", "out", "cache", "reasoning", "tool_uses",
         "turns", "added", "removed", "defects",
     };
+    static const char *const leaves[] = {
+        "fleet.experiment.predict", "fleet.experiment.result",
+        "fleet.receipt.append",
+    };
+    if (path && !devagent_key_in_set(path, leaves,
+                                     sizeof leaves / sizeof leaves[0]))
+        return false;
     if (!devagent_key_in_set(key, keys, sizeof keys / sizeof keys[0]))
         return false;
     *type_ok = value->type == JSON_INT && json_get_int(value) >= 0;
@@ -436,7 +445,7 @@ bool zcl_command_registry_devagent_input_ok(const char *path, const char *key,
         return true;
     if (devagent_budget_bytes(key, value, type_ok))
         return true;
-    if (devagent_experiment_quantity(key, value, type_ok))
+    if (devagent_experiment_quantity(path, key, value, type_ok))
         return true;
     if (devagent_scoped_bool(path, key, value, type_ok))
         return true;
