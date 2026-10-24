@@ -218,6 +218,11 @@ void vcs_package_store_close(struct vcs_package_store *store);
  * CAS under the store process lock. A failed rebuild retains the old catalog
  * and refuses the caller; page continuations still report STALE. */
 bool vcs_package_store_refresh(struct vcs_package_store *store);
+/* True when the datadir's on-disk store generation differs from this handle's
+ * (another writer advanced it); the on-disk value goes to *disk_generation
+ * when it is non-NULL. A cheap 8-byte read; it never rebuilds. */
+bool vcs_package_store_generation_moved(struct vcs_package_store *store,
+                                        uint64_t *disk_generation);
 
 /* The directory this handle owns, exactly as it was built: "<datadir>/zcode".
  * A caller that must decide whether the resident store already covers the

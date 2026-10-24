@@ -139,6 +139,12 @@ struct vcs_swarm_engine {
     size_t outq_count;
     uint64_t last_tick;
     bool ticked;
+    /* Touched only by the tick: the disk generation whose catalog refresh was
+     * last refused and when, so a persistent refusal is retried once a minute
+     * (or as soon as the disk moves again) instead of on every tick. */
+    uint64_t refresh_refused_generation;
+    uint64_t refresh_refused_at;
+    bool refresh_refused;
     /* Single-entry serve cache: the last manifest parsed for serving
      * inbound chunk WANTs, and the public-hosting verdict for that same
      * root. Both are keyed by the store's mutation generation, so a
@@ -200,5 +206,11 @@ enum vcs_swarm_fetch_result vcs_swarm_restricted_precheck(
     struct vcs_swarm_engine *engine, const uint8_t package_root[32],
     const uint64_t *provider_peers, size_t provider_count,
     uint64_t maximum_package_bytes);
+
+/* Lock NOT held. Implemented in package_swarm_refresh.c. Rebuilds the store
+ * catalog when another writer advanced the on-disk generation; a refused
+ * refresh is retried once a minute or when the generation moves again. */
+void vcs_swarm_refresh_moved_store(struct vcs_swarm_engine *engine,
+                                   uint64_t now);
 
 #endif /* ZCL_VCS_PACKAGE_SWARM_PRIV_H */

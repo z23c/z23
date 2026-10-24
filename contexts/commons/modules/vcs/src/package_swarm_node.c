@@ -1832,6 +1832,7 @@ void vcs_swarm_engine_tick(struct vcs_swarm_engine *engine, int64_t day,
 {
     if (!engine)
         return;
+    vcs_swarm_refresh_moved_store(engine, now);
     pthread_mutex_lock(&engine->lock);
     if (engine->ticked && engine->last_tick == now) {
         pthread_mutex_unlock(&engine->lock);

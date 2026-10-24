@@ -402,6 +402,20 @@ enum vcs_package_store_page_result store_catalog_validate_disk(
     return store_catalog_names_match(store, false);
 }
 
+bool vcs_package_store_generation_moved(struct vcs_package_store *store,
+                                        uint64_t *disk_generation_out)
+{
+    if (!store) return false;
+    uint64_t disk_generation = 0;
+    pthread_mutex_lock(&store->lock);
+    bool read = store_generation_read(store, &disk_generation);
+    bool moved = read && disk_generation != store->shared_generation;
+    pthread_mutex_unlock(&store->lock);
+    if (moved && disk_generation_out)
+        *disk_generation_out = disk_generation;
+    return moved;
+}
+
 bool vcs_package_store_refresh(struct vcs_package_store *store)
 {
     if (!store) return false;

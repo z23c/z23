@@ -8628,6 +8628,55 @@ static int zwn_t_component_tcp_unavailable(const struct chain_params *params)
 }
 #endif
 
+/* A resident hosting handle must follow a one-shot writer that advanced the
+ * datadir's store generation. Before the swarm tick it is stale: the foreign
+ * root is not listed and its next write is refused. The tick refreshes it, so
+ * the root is listed and the resident accepts its own write. A tick with an
+ * unchanged generation leaves the handle as it was. */
+static int zwn_t_hosting_refresh_foreign_writer(
+    const struct chain_params *params)
+{
+    (void)params;
+    int failures = 0;
+    char dd[256], zcode_dir[320];
+    test_make_tmpdir(dd, sizeof(dd), "zcode_swarm_net", "hosting-refresh");
+    snprintf(zcode_dir, sizeof(zcode_dir), "%s/zcode", dd);
+    struct vcs_package_store *a =
+        vcs_package_store_open(dd, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+    struct vcs_service_book *book = vcs_service_book_load(zcode_dir);
+    struct vcs_swarm_engine *engine = (a && book) ?
+        vcs_swarm_engine_create(a, book, zcode_dir, zwn_score, NULL) : NULL;
+    struct vcs_package_store *b = NULL;
+    static const uint8_t foreign[] = "hosting refresh foreign writer root";
+    static const uint8_t resident[] = "hosting refresh resident write";
+    uint8_t foreign_root[32] = {0}, resident_root[32] = {0};
+    struct vcs_package_store_status status;
+    TEST("hosting refresh: foreign writer is refreshed by the resident tick") {
+        ASSERT(engine != NULL);
+        b = vcs_package_store_open(dd, VCS_PACKAGE_STORE_DEFAULT_QUOTA_BYTES);
+        ASSERT(b != NULL);
+        ASSERT(vcs_blob_put_to(b, foreign, sizeof(foreign) - 1u,
+                               foreign_root) == VCS_BLOB_OK);
+        ASSERT(!(vcs_package_store_package_status(a, foreign_root, &status) &&
+                 status.complete));
+        vcs_swarm_engine_tick(engine, 0, 1000u);
+        ASSERT(vcs_package_store_package_status(a, foreign_root, &status) &&
+               status.complete);
+        ASSERT(vcs_blob_put_to(a, resident, sizeof(resident) - 1u,
+                               resident_root) == VCS_BLOB_OK);
+        vcs_swarm_engine_tick(engine, 0, 2000u);
+        ASSERT(vcs_package_store_package_status(a, resident_root, &status) &&
+               status.complete);
+        PASS();
+    } _test_next:
+    vcs_swarm_engine_free(engine);
+    vcs_service_book_free(book);
+    vcs_package_store_close(b);
+    vcs_package_store_close(a);
+    test_rm_rf_recursive(dd);
+    return failures;
+}
+
 struct zwn_case {
     const char *name;
     int (*run)(const struct chain_params *params);
@@ -8636,6 +8685,7 @@ struct zwn_case {
 #define ZWN_CASE(fn, owner) {#fn, fn, owner}
 static const struct zwn_case g_zwn_cases[] = {
     ZWN_CASE(zwn_t_fixture_abort_reacquire, 4),
+    ZWN_CASE(zwn_t_hosting_refresh_foreign_writer, 0),
 #if defined(__linux__) && defined(__x86_64__) && defined(ZCL_TESTING)
     ZWN_CASE(zwn_t_component_tcp, 0),
     ZWN_CASE(zwn_t_component_tcp_corrupt, 0),
@@ -8678,7 +8728,8 @@ static const struct zwn_case g_zwn_cases[] = {
  * table: a row dropped from the table, or a sub-suite added to it without an
  * owner, fails the partition instead of silently going unrun. */
 static const char *const g_zwn_original[] = {
-    "zwn_t_fixture_abort_reacquire", "zwn_t_golden_plain",
+    "zwn_t_fixture_abort_reacquire", "zwn_t_hosting_refresh_foreign_writer",
+    "zwn_t_golden_plain",
 #if defined(__linux__) && defined(__x86_64__) && defined(ZCL_TESTING)
     "zwn_t_component_tcp", "zwn_t_component_tcp_corrupt",
 #else
