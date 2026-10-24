@@ -127,7 +127,6 @@ cognition/modules/retrieval/src/retrieval_eval_result.c:zcl_retrieval_experiment
 cognition/modules/retrieval/src/retrieval_eval_result.c:zcl_retrieval_experiment_eval_result_verify_binding:18
 cognition/modules/science/src/ecosystem.c:science_ecosystem_collect:19
 cognition/modules/science/src/science_claim.c:science_refusal_name:28
-cognition/modules/science/src/science_claim.c:validate_receipt:37
 cognition/modules/science/src/science_corpus.c:walk_dir:20
 cognition/modules/session/src/agent_audit.c:agent_audit_open:17
 cognition/modules/session/src/agent_audit.c:agent_audit_verify_dir:18

@@ -330,17 +330,9 @@ static bool verdict_known(enum engine_verdict v)
     return false;
 }
 
-static enum science_refusal validate_receipt(const struct science_receipt *r)
+static enum science_refusal validate_receipt_fields(
+    const struct science_receipt *r)
 {
-    if (!r)
-        return SCIENCE_REFUSED_ARGUMENT;
-    /* An unattributed trial cannot be counted toward distinct producers, and
-     * the distinct-producer figure is what keeps a self-confirmed claim
-     * visible. So there is no anonymous trial. */
-    if (!str_within(r->producer, SCIENCE_PRODUCER_MAX))
-        return SCIENCE_REFUSED_PRODUCER;
-    if (r->arm != SCIENCE_ARM_CONTROL && r->arm != SCIENCE_ARM_TREATMENT)
-        return SCIENCE_REFUSED_ARM;
     if (!str_optional_within(r->engine, SCIENCE_FIELD_MAX) ||
         !str_optional_within(r->model, SCIENCE_FIELD_MAX) ||
         !str_optional_within(r->territory, SCIENCE_FIELD_MAX) ||
@@ -354,6 +346,12 @@ static enum science_refusal validate_receipt(const struct science_receipt *r)
     if (!verdict_known(r->verdict))
         return SCIENCE_REFUSED_VERDICT;
 
+    return SCIENCE_OK;
+}
+
+static enum science_refusal validate_receipt_reproduction(
+    const struct science_receipt *r)
+{
     /* REPRODUCTION. Every field required, each with its own refusal, because
      * "invalid trial" tells a caller nothing about which hole to fill. */
     if (!str_within(r->repro.command, SCIENCE_COMMAND_MAX))
@@ -370,35 +368,70 @@ static enum science_refusal validate_receipt(const struct science_receipt *r)
     if (r->repro.nproc == 0)
         return SCIENCE_REFUSED_NPROC;
 
+    return SCIENCE_OK;
+}
+
+static enum science_refusal validate_observed(const struct science_receipt *r)
+{
+    /* n = 0 with numbers filled in is a summary pretending to be data. */
+    if (r->observed.n == 0 || !str_within(r->observed.unit,
+                                          SCIENCE_UNIT_MAX))
+        return SCIENCE_REFUSED_SAMPLES;
+    if (r->observed.min_milli > r->observed.median_milli ||
+        r->observed.median_milli > r->observed.p95_milli ||
+        r->observed.p95_milli > r->observed.max_milli)
+        return SCIENCE_REFUSED_SAMPLES;
+    if (!str_optional_within(r->observed.reason, SCIENCE_REASON_MAX))
+        return SCIENCE_REFUSED_REASON;
+    return SCIENCE_OK;
+}
+
+static enum science_refusal validate_unavailable(const struct science_receipt *r)
+{
+    /* UNAVAILABLE must say why. Otherwise a reader has no way to tell a
+     * measurement that could not be taken from one nobody tried to take,
+     * and both would end up read as zero. */
+    if (!str_within(r->observed.reason, SCIENCE_REASON_MAX))
+        return SCIENCE_REFUSED_REASON;
+    if (r->observed.n != 0 || r->observed.min_milli != 0 ||
+        r->observed.median_milli != 0 || r->observed.p95_milli != 0 ||
+        r->observed.max_milli != 0)
+        return SCIENCE_REFUSED_SAMPLES;
+    if (!str_optional_within(r->observed.unit, SCIENCE_UNIT_MAX))
+        return SCIENCE_REFUSED_SAMPLES;
+    return SCIENCE_OK;
+}
+
+static enum science_refusal validate_receipt_observation(
+    const struct science_receipt *r)
+{
     /* OBSERVATION. */
     if (r->observed.availability != SCIENCE_OBSERVED &&
         r->observed.availability != SCIENCE_UNAVAILABLE)
         return SCIENCE_REFUSED_AVAILABILITY;
-    if (r->observed.availability == SCIENCE_OBSERVED) {
-        /* n = 0 with numbers filled in is a summary pretending to be data. */
-        if (r->observed.n == 0 || !str_within(r->observed.unit,
-                                              SCIENCE_UNIT_MAX))
-            return SCIENCE_REFUSED_SAMPLES;
-        if (r->observed.min_milli > r->observed.median_milli ||
-            r->observed.median_milli > r->observed.p95_milli ||
-            r->observed.p95_milli > r->observed.max_milli)
-            return SCIENCE_REFUSED_SAMPLES;
-        if (!str_optional_within(r->observed.reason, SCIENCE_REASON_MAX))
-            return SCIENCE_REFUSED_REASON;
-    } else {
-        /* UNAVAILABLE must say why. Otherwise a reader has no way to tell a
-         * measurement that could not be taken from one nobody tried to take,
-         * and both would end up read as zero. */
-        if (!str_within(r->observed.reason, SCIENCE_REASON_MAX))
-            return SCIENCE_REFUSED_REASON;
-        if (r->observed.n != 0 || r->observed.min_milli != 0 ||
-            r->observed.median_milli != 0 || r->observed.p95_milli != 0 ||
-            r->observed.max_milli != 0)
-            return SCIENCE_REFUSED_SAMPLES;
-        if (!str_optional_within(r->observed.unit, SCIENCE_UNIT_MAX))
-            return SCIENCE_REFUSED_SAMPLES;
-    }
-    return SCIENCE_OK;
+    if (r->observed.availability == SCIENCE_OBSERVED)
+        return validate_observed(r);
+    return validate_unavailable(r);
+}
+
+static enum science_refusal validate_receipt(const struct science_receipt *r)
+{
+    if (!r)
+        return SCIENCE_REFUSED_ARGUMENT;
+    /* An unattributed trial cannot be counted toward distinct producers, and
+     * the distinct-producer figure is what keeps a self-confirmed claim
+     * visible. So there is no anonymous trial. */
+    if (!str_within(r->producer, SCIENCE_PRODUCER_MAX))
+        return SCIENCE_REFUSED_PRODUCER;
+    if (r->arm != SCIENCE_ARM_CONTROL && r->arm != SCIENCE_ARM_TREATMENT)
+        return SCIENCE_REFUSED_ARM;
+    enum science_refusal bad = validate_receipt_fields(r);
+    if (bad != SCIENCE_OK)
+        return bad;
+    bad = validate_receipt_reproduction(r);
+    if (bad != SCIENCE_OK)
+        return bad;
+    return validate_receipt_observation(r);
 }
 
 /* ── public canonical bytes ──────────────────────────────────────────── */
