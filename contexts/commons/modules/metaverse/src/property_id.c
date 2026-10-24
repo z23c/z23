@@ -119,35 +119,6 @@ enum metaverse_kind metaverse_kind_from_name(const char *name)
     return METAVERSE_KIND_UNKNOWN;
 }
 
-/* Broker wire value <-> kind, from the table's fifth column. Exhaustive
- * switches with no default, for the same reason metaverse_kind_settlement's
- * is: a kind added anywhere but the table is a -Wswitch error here rather
- * than a silent "any kind" on the agent socket. */
-uint32_t metaverse_kind_wire(enum metaverse_kind kind)
-{
-    switch (kind) {
-#define METAVERSE_KIND_WIRE_CASE(id_, name_, authority_, settle_, wire_)     \
-    case METAVERSE_KIND_##id_: return (wire_);
-    METAVERSE_KIND_TABLE(METAVERSE_KIND_WIRE_CASE)
-#undef METAVERSE_KIND_WIRE_CASE
-    case METAVERSE_KIND_UNKNOWN:
-    case METAVERSE_KIND_COUNT:
-        break;
-    }
-    return 0u;
-}
-
-enum metaverse_kind metaverse_kind_from_wire(uint32_t wire)
-{
-    if (wire == 0u)
-        return METAVERSE_KIND_UNKNOWN;
-#define METAVERSE_KIND_FROM_WIRE_CASE(id_, name_, authority_, settle_, wire_) \
-    if (wire == (wire_)) return METAVERSE_KIND_##id_;
-    METAVERSE_KIND_TABLE(METAVERSE_KIND_FROM_WIRE_CASE)
-#undef METAVERSE_KIND_FROM_WIRE_CASE
-    return METAVERSE_KIND_UNKNOWN;
-}
-
 bool metaverse_kind_valid(enum metaverse_kind kind)
 {
     return kind > METAVERSE_KIND_UNKNOWN && kind < METAVERSE_KIND_COUNT;

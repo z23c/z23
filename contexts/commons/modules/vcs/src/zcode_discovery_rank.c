@@ -542,17 +542,6 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_result_validate(
     return VCS_ZCODE_DISCOVERY_RANK_OK;
 }
 
-size_t vcs_zcode_discovery_rank_result_wire_size(
-    const struct vcs_zcode_discovery_rank_result_v1 *result)
-{
-    if (vcs_zcode_discovery_rank_result_validate(result) !=
-        VCS_ZCODE_DISCOVERY_RANK_OK)
-        return 0;
-    return VCS_ZCODE_DISCOVERY_RANK_RESULT_HEADER_BYTES +
-           (size_t)result->entry_count *
-               VCS_ZCODE_DISCOVERY_RANK_ENTRY_WIRE_BYTES;
-}
-
 enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_result_serialize(
     const struct vcs_zcode_discovery_rank_result_v1 *result,
     uint8_t *wire, size_t wire_capacity, size_t *wire_len_out)

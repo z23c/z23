@@ -35,11 +35,6 @@ struct zcl_result zslp_command_build_genesis_base_tx(struct wallet *wallet,
                                         struct wallet_tx *wtx,
                                         int64_t *fee_paid,
                                         const char **tx_error);
-struct zcl_result zslp_command_build_send_base_tx(struct wallet *wallet,
-                                     const char *to_addr,
-                                     struct wallet_tx *wtx,
-                                     int64_t *fee_paid,
-                                     const char **tx_error);
 
 /* Custody-correct ZSLP builders. SEND consumes confirmed wallet-owned token
  * outputs and returns token change; MINT consumes the wallet-owned mint baton

@@ -135,26 +135,6 @@ const char *vcs_package_attest_detail_string(uint8_t detail_code)
     return "unknown";
 }
 
-const char *vcs_package_attest_outcome_string(uint8_t outcome)
-{
-    switch (outcome) {
-    case VCS_PACKAGE_ATTEST_OUTCOME_PASS: return "pass";
-    case VCS_PACKAGE_ATTEST_OUTCOME_FAIL: return "fail";
-    case VCS_PACKAGE_ATTEST_OUTCOME_UNAVAILABLE: return "unavailable";
-    }
-    return "unknown";
-}
-
-const char *vcs_package_attest_sanitizer_outcome_string(uint8_t outcome)
-{
-    switch (outcome) {
-    case VCS_PACKAGE_ATTEST_OUTCOME_PASS: return "clean";
-    case VCS_PACKAGE_ATTEST_OUTCOME_FAIL: return "findings";
-    case VCS_PACKAGE_ATTEST_OUTCOME_UNAVAILABLE: return "unavailable";
-    }
-    return "unknown";
-}
-
 const char *vcs_package_attest_isolation_string(uint8_t isolation)
 {
     switch (isolation) {

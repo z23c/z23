@@ -135,27 +135,6 @@ enum vcs_zcode_commons_error vcs_zcode_quality_profile_v1_validate(
     return VCS_ZCODE_COMMONS_OK;
 }
 
-enum vcs_zcode_commons_error vcs_zcode_quality_profile_v1_root(
-    const struct vcs_zcode_quality_profile_v1 *profile, uint8_t out[32])
-{
-    if (out) memset(out, 0, 32);
-    if (!profile || !out) return VCS_ZCODE_COMMONS_NULL;
-    enum vcs_zcode_commons_error error =
-        vcs_zcode_quality_profile_v1_validate(profile);
-    if (error != VCS_ZCODE_COMMONS_OK) return error;
-    struct sha3_256_ctx sha;
-    workspace_hash_start(&sha, VCS_ZCODE_QUALITY_PROFILE_V1_DOMAIN);
-    workspace_hash_u16(&sha, profile->schema_version);
-    workspace_hash_u16(&sha, profile->flags);
-    workspace_hash_u16(&sha, profile->field);
-    workspace_hash_u16(&sha, profile->reserved);
-    workspace_hash_u64(&sha, profile->required_check_mask);
-    sha3_256_write(&sha, profile->universal_profile_root, 32);
-    sha3_256_write(&sha, profile->additive_rules_root, 32);
-    sha3_256_finalize(&sha, out);
-    return VCS_ZCODE_COMMONS_OK;
-}
-
 static enum vcs_zcode_commons_error passport_shape(
     const struct vcs_zcode_module_passport_v1 *passport,
     bool require_signature)
@@ -763,26 +742,6 @@ enum vcs_zcode_commons_error vcs_zcode_mission_v1_validate(
     return VCS_ZCODE_COMMONS_OK;
 }
 
-enum vcs_zcode_commons_error vcs_zcode_mission_v1_root(
-    const struct vcs_zcode_mission_v1 *mission, uint8_t out[32])
-{
-    if (out) memset(out, 0, 32);
-    if (!mission || !out) return VCS_ZCODE_COMMONS_NULL;
-    enum vcs_zcode_commons_error error =
-        vcs_zcode_mission_v1_validate(mission);
-    if (error != VCS_ZCODE_COMMONS_OK) return error;
-    struct sha3_256_ctx sha;
-    workspace_hash_start(&sha, VCS_ZCODE_MISSION_V1_DOMAIN);
-    workspace_hash_u16(&sha, mission->schema_version);
-    workspace_hash_u16(&sha, mission->flags);
-    sha3_256_write(&sha, mission->publisher_binding_root, 32u * 4u);
-    workspace_hash_u64(&sha, mission->created_height);
-    workspace_hash_u64(&sha, (uint64_t)mission->created_mtp);
-    sha3_256_write(&sha, mission->signature, 64);
-    sha3_256_finalize(&sha, out);
-    return VCS_ZCODE_COMMONS_OK;
-}
-
 enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_validate(
     const struct vcs_zcode_contribution_split_v1 *split)
 {
@@ -814,26 +773,3 @@ enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_validate(
         ? VCS_ZCODE_COMMONS_OK : VCS_ZCODE_COMMONS_AMOUNT;
 }
 
-enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_root(
-    const struct vcs_zcode_contribution_split_v1 *split, uint8_t out[32])
-{
-    if (out) memset(out, 0, 32);
-    if (!split || !out) return VCS_ZCODE_COMMONS_NULL;
-    enum vcs_zcode_commons_error error =
-        vcs_zcode_contribution_split_v1_validate(split);
-    if (error != VCS_ZCODE_COMMONS_OK) return error;
-    struct sha3_256_ctx sha;
-    workspace_hash_start(&sha, VCS_ZCODE_CONTRIBUTION_SPLIT_V1_DOMAIN);
-    workspace_hash_u16(&sha, split->schema_version);
-    workspace_hash_u16(&sha, split->flags);
-    sha3_256_write(&sha, split->claim_root, 32);
-    workspace_hash_u64(&sha, split->total_award_atoms);
-    workspace_hash_u64(&sha, split->entry_count);
-    for (size_t i = 0; i < split->entry_count; i++) {
-        sha3_256_write(&sha, split->entries[i].recipient_binding_root, 32);
-        workspace_hash_u64(&sha, split->entries[i].award_atoms);
-        sha3_256_write(&sha, split->entries[i].signature, 64);
-    }
-    sha3_256_finalize(&sha, out);
-    return VCS_ZCODE_COMMONS_OK;
-}

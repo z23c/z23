@@ -261,13 +261,6 @@ vcs_zcode_family_access_service_set_active(
     return VCS_ZCODE_FAMILY_ADMISSION_OK;
 }
 
-uint64_t vcs_zcode_family_access_service_generation(
-    const struct vcs_zcode_family_access_service *service)
-{
-    return service ? atomic_load_explicit(&service->generation,
-                                           memory_order_acquire) : 0;
-}
-
 bool vcs_zcode_family_access_service_active(
     const struct vcs_zcode_family_access_service *service)
 {

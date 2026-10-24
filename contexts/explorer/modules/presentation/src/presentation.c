@@ -1441,23 +1441,6 @@ bool zcl_present_window_run_v1(
         request, 0, NULL, NULL, &event, error, error_cap);
 }
 
-bool zcl_present_window_run_hover_v1(
-    const struct zcl_present_window_v1 *request,
-    const struct zcl_present_window_hover_v1 *hover,
-    char *error, size_t error_cap)
-{
-    struct zcl_present_window_pages_v1 pages = {
-        .struct_size = sizeof(pages),
-        .abi_version = ZCL_PRESENT_ABI_V1,
-        .pages = request,
-        .page_count = 1u,
-    };
-    struct zcl_present_window_event_v1 event;
-    return present_run_pages_actions(
-        &pages, 0, NULL, NULL, hover, false, 0u, NULL, NULL, NULL,
-        NULL, &event, error, error_cap);
-}
-
 bool zcl_present_window_run_pages_first_hover_v1(
     const struct zcl_present_window_pages_v1 *pages,
     const struct zcl_present_window_hover_v1 *hover,

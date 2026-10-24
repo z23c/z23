@@ -151,20 +151,12 @@ size_t vcs_zcode_science_index_findings_count(
 const struct vcs_zcode_science_index_findings_entry *
 vcs_zcode_science_index_findings_at(
     const struct vcs_zcode_science_index *index, size_t i);
-const struct vcs_zcode_science_index_findings_entry *
-vcs_zcode_science_index_find_findings(
-    const struct vcs_zcode_science_index *index,
-    const uint8_t findings_root[32]);
 
 size_t vcs_zcode_science_index_vote_count(
     const struct vcs_zcode_science_index *index);
 const struct vcs_zcode_science_index_vote_entry *
 vcs_zcode_science_index_vote_at(
     const struct vcs_zcode_science_index *index, size_t i);
-/* Look up one vote entry by its canonical vote id (32 bytes). */
-const struct vcs_zcode_science_index_vote_entry *
-vcs_zcode_science_index_find_vote(
-    const struct vcs_zcode_science_index *index, const uint8_t vote_id[32]);
 /* True when a DIFFERENT vote id already carries this voter+sequence — the
  * replay shape the projection rejects at admission. */
 bool vcs_zcode_science_index_vote_sequence_seen(
@@ -177,9 +169,5 @@ size_t vcs_zcode_science_index_review_count(
 const struct vcs_zcode_science_index_review_entry *
 vcs_zcode_science_index_review_at(
     const struct vcs_zcode_science_index *index, size_t i);
-const struct vcs_zcode_science_index_review_entry *
-vcs_zcode_science_index_find_review(
-    const struct vcs_zcode_science_index *index,
-    const uint8_t review_root[32]);
 
 #endif /* ZCL_VCS_ZCODE_SCIENCE_INDEX_H */

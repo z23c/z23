@@ -402,11 +402,6 @@ size_t vcs_zcode_dht_service_record_local_query(
     const struct vcs_zcode_dht_service *service, uint64_t now_unix,
     const struct vcs_zcode_dht_record_selector *selector,
     struct vcs_zcode_dht_record *out, size_t out_capacity);
-size_t vcs_zcode_dht_service_record_local_query_page(
-    const struct vcs_zcode_dht_service *service, uint64_t now_unix,
-    const struct vcs_zcode_dht_record_selector *selector,
-    uint8_t page_offset, struct vcs_zcode_dht_record *out,
-    size_t out_capacity, uint8_t *next_offset_out);
 
 /* Namespace-wide local listing for a board view: every live record of
  * `kind` the store holds in `namespace_name`, sovereignty-filtered for

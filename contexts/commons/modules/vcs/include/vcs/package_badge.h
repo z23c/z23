@@ -257,10 +257,6 @@ bool vcs_badge_store_truncated(const struct vcs_badge_store *s);
 const struct vcs_badge *vcs_badge_store_at(const struct vcs_badge_store *s,
                                            size_t index);
 
-/* The badge id of the badge at `index` (computed once at load). */
-void vcs_badge_store_id_at(const struct vcs_badge_store *s, size_t index,
-                           uint8_t out[32]);
-
 const struct vcs_badge *vcs_badge_store_find(
     const struct vcs_badge_store *s, const uint8_t badge_id[32]);
 

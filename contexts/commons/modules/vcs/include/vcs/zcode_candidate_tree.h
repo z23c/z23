@@ -25,9 +25,6 @@ enum vcs_zcode_candidate_tree_result {
 struct vcs_package_manifest;
 struct vcs_package_store;
 
-const char *vcs_zcode_candidate_tree_result_string(
-    enum vcs_zcode_candidate_tree_result result);
-
 /* Add every regular candidate-tree entry to an existing content.v2
  * manifest under candidate/. Blob bytes come only from the verified ZVCS
  * CAS. max_bytes bounds their combined payload. Refusal leaves the existing

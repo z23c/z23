@@ -120,33 +120,3 @@ size_t vcs_zcode_dht_service_record_local_scan(
   return copied;
 }
 
-size_t vcs_zcode_dht_service_record_local_query_page(
-    const struct vcs_zcode_dht_service *service, uint64_t now_unix,
-    const struct vcs_zcode_dht_record_selector *selector,
-    uint8_t page_offset, struct vcs_zcode_dht_record *out,
-    size_t out_capacity, uint8_t *next_offset_out)
-{
-  if (next_offset_out)
-    *next_offset_out = 0;
-  if (!out || !out_capacity || !next_offset_out ||
-      page_offset >= VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT ||
-      page_offset % VCS_ZCODE_DHT_RECORDS_PER_FRAME != 0)
-    return 0;
-  struct vcs_zcode_dht_record ordered[
-      VCS_ZCODE_DHT_RECORD_STORE_MAX_PER_ROOT];
-  size_t total = records_local_order(service, now_unix, selector, ordered);
-  if (page_offset >= total)
-    return 0;
-  size_t count = total - page_offset;
-  if (count > VCS_ZCODE_DHT_RECORDS_PER_FRAME)
-    count = VCS_ZCODE_DHT_RECORDS_PER_FRAME;
-  if (count > out_capacity)
-    count = out_capacity;
-  memcpy(out, ordered + page_offset, count * sizeof(*out));
-  qsort(out, count, sizeof(*out),
-        vcs_zcode_dht_records_canonical_compare);
-  if (count == VCS_ZCODE_DHT_RECORDS_PER_FRAME &&
-      page_offset + count < total)
-    *next_offset_out = (uint8_t)(page_offset + count);
-  return count;
-}

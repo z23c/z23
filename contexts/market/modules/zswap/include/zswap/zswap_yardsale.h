@@ -96,10 +96,6 @@ enum zswap_yardsale_ingest zswap_yardsale_ingest_wire(
 /* Current cache occupancy (expired entries pruned lazily first). */
 int zswap_yardsale_count(int64_t now_unix);
 
-/* Evict every ad whose validity window has closed (expires_unix <= now).
- * Returns the number pruned. Called lazily by count/query/ingest. */
-int zswap_yardsale_prune(int64_t now_unix);
-
 /* Browse the yardsale: the best CURRENT signs for one token — ads still
  * inside [issued, expires) at now_unix — sorted by ascending unit price
  * (zswap_quote_unit_price_cmp), bounded to max results. Expired ads stay in

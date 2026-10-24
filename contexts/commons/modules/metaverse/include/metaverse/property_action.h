@@ -387,11 +387,9 @@ static inline metaverse_query_set metaverse_query_bit(enum metaverse_query q)
     return metaverse_query_valid(q) ? (metaverse_query_set)q : 0u;
 }
 
-const char *metaverse_query_name(enum metaverse_query q);
 enum metaverse_query metaverse_query_from_name(const char *name);
 uint32_t metaverse_query_at(size_t i);
 bool metaverse_query_mask_valid(uint32_t mask);
-bool metaverse_query_mask_format(uint32_t mask, char *out, size_t cap);
 bool metaverse_query_set_parse(const char *csv, metaverse_query_set *out);
 bool metaverse_query_allows_zero_property_id(enum metaverse_query q);
 
@@ -425,11 +423,6 @@ struct metaverse_operation {
  * verb this version cannot express. `version` 0 means "current". */
 bool metaverse_operation_from_wire(uint32_t wire, uint32_t version,
                                    struct metaverse_operation *out);
-
-/* Encode an operation as its broker verb value, or 0 when `op` names
- * nothing. 0 is the wire's own "no verb" value, so a caller cannot mistake
- * a refusal for a legal verb. */
-uint32_t metaverse_operation_wire(const struct metaverse_operation *op);
 
 /* Direct action <-> broker wire, for callers that already know which
  * vocabulary they hold. 0 / METAVERSE_ACTION_NONE on no match. */
@@ -465,8 +458,5 @@ struct metaverse_wire_golden {
     bool is_query;              /* true = it is a read in the split model */
     const char *canonical_name; /* what it decodes to now */
 };
-
-size_t metaverse_wire_golden_count(void);
-const struct metaverse_wire_golden *metaverse_wire_golden_at(size_t i);
 
 #endif /* ZCL_METAVERSE_PROPERTY_ACTION_H */

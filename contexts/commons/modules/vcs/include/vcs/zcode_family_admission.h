@@ -231,8 +231,6 @@ vcs_zcode_family_access_service_publish(
 enum vcs_zcode_family_admission_error
 vcs_zcode_family_access_service_set_active(
     struct vcs_zcode_family_access_service *service, bool active);
-uint64_t vcs_zcode_family_access_service_generation(
-    const struct vcs_zcode_family_access_service *service);
 bool vcs_zcode_family_access_service_active(
     const struct vcs_zcode_family_access_service *service);
 struct vcs_zcode_family_access_decision_v1 vcs_zcode_family_access_decide_v1(

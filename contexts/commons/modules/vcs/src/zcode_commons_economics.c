@@ -158,22 +158,6 @@ static enum vcs_zcode_commons_error claim_shape(
     return VCS_ZCODE_COMMONS_OK;
 }
 
-enum vcs_zcode_commons_error vcs_zcode_creation_claim_v2_validate(
-    const struct vcs_zcode_creation_claim_v2 *claim,
-    const struct vcs_zcode_policy_candidate_v2 *policy)
-{
-    enum vcs_zcode_commons_error error = claim_shape(claim);
-    if (error != VCS_ZCODE_COMMONS_OK) return error;
-    error = vcs_zcode_policy_candidate_v2_validate(policy);
-    if (error != VCS_ZCODE_COMMONS_OK) return error;
-    if ((claim->flags & VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS) !=
-            VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS ||
-        (claim->flags & VCS_ZCODE_CLAIM_V2_INVALIDATING_FLAGS) != 0)
-        return VCS_ZCODE_COMMONS_FLAGS;
-    return policy->award_atoms[claim->category] != 0
-        ? VCS_ZCODE_COMMONS_OK : VCS_ZCODE_COMMONS_AMOUNT;
-}
-
 struct cv2_ranked_claim {
     size_t input_index;
     const struct vcs_zcode_creation_claim_v2 *claim;

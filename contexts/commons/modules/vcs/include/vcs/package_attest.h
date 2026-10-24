@@ -227,8 +227,6 @@ const char *vcs_package_attest_error_string(
     enum vcs_package_attest_error error);
 const char *vcs_package_attest_result_string(uint8_t result_class);
 const char *vcs_package_attest_detail_string(uint8_t detail_code);
-const char *vcs_package_attest_outcome_string(uint8_t outcome);
-const char *vcs_package_attest_sanitizer_outcome_string(uint8_t outcome);
 const char *vcs_package_attest_isolation_string(uint8_t isolation);
 
 /* True when the class is a positive verdict (build-pass or test-pass). */

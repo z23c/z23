@@ -119,8 +119,6 @@ enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_compute(
 
 enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_result_validate(
     const struct vcs_zcode_discovery_rank_result_v1 *result);
-size_t vcs_zcode_discovery_rank_result_wire_size(
-    const struct vcs_zcode_discovery_rank_result_v1 *result);
 enum vcs_zcode_discovery_rank_error vcs_zcode_discovery_rank_result_serialize(
     const struct vcs_zcode_discovery_rank_result_v1 *result,
     uint8_t *wire, size_t wire_capacity, size_t *wire_len_out);

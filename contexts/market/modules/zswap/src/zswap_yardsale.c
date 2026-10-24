@@ -93,14 +93,6 @@ static int yardsale_prune_locked(int64_t now_unix)
     return pruned;
 }
 
-int zswap_yardsale_prune(int64_t now_unix)
-{
-    pthread_mutex_lock(&g_yardsale_mutex);
-    int pruned = yardsale_prune_locked(now_unix);
-    pthread_mutex_unlock(&g_yardsale_mutex);
-    return pruned;
-}
-
 int zswap_yardsale_count(int64_t now_unix)
 {
     pthread_mutex_lock(&g_yardsale_mutex);

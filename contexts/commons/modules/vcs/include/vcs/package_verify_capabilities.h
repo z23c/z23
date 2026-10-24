@@ -243,8 +243,6 @@ enum vcs_pkgcap_rule {
     VCS_PKGCAP_RULE_CLAIM_NOT_REACHED,
 };
 
-const char *vcs_pkgcap_verdict_string(enum vcs_pkgcap_verdict verdict);
-const char *vcs_pkgcap_rule_string(enum vcs_pkgcap_rule rule);
 
 /* One reach the scan found: the class, and exactly where it came from. A
  * REFUSED without this is an accusation without evidence. */

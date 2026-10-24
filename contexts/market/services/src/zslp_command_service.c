@@ -218,26 +218,6 @@ struct zcl_result zslp_command_build_genesis_base_tx(struct wallet *wallet,
     return ZCL_OK;
 }
 
-struct zcl_result zslp_command_build_send_base_tx(struct wallet *wallet,
-                                     const char *to_addr,
-                                     struct wallet_tx *wtx,
-                                     int64_t *fee_paid,
-                                     const char **tx_error)
-{
-    struct tx_destination dest;
-    int64_t vals[1] = { 546 };
-
-    if (!wallet || !to_addr || !wtx || !fee_paid)
-        return ZCL_ERR(-1, "build_send_base_tx: NULL argument");
-    if (!zslp_service_decode_transparent_destination(to_addr, &dest).ok)
-        return ZCL_ERR(-2, "build_send_base_tx: invalid address %s", to_addr);
-    if (!wallet_create_transaction_multi(wallet, &dest, vals, 1, wtx,
-                                         fee_paid, tx_error))
-        return ZCL_ERR(-3, "build_send_base_tx: %s",
-                 (tx_error && *tx_error) ? *tx_error : "wallet_create_transaction_multi failed");
-    return ZCL_OK;
-}
-
 struct zcl_result zslp_command_build_token_send_tx(
     struct wallet *wallet, const uint8_t token_id[32], const char *to_addr,
     uint64_t amount, struct wallet_tx *wtx, int64_t *fee_paid,

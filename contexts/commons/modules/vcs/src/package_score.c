@@ -17,17 +17,6 @@
 
 /* ── strings ────────────────────────────────────────────────────────── */
 
-const char *vcs_score_line_class_string(enum vcs_score_line_class cls)
-{
-    switch (cls) {
-    case VCS_SCORE_LINE_SEMANTIC: return "semantic";
-    case VCS_SCORE_LINE_BLANK: return "blank";
-    case VCS_SCORE_LINE_COMMENT_ONLY: return "comment-only";
-    case VCS_SCORE_LINE_BRACE_ONLY: return "brace-only";
-    }
-    return "unknown";
-}
-
 const char *vcs_score_file_kind_string(enum vcs_score_file_kind kind)
 {
     switch (kind) {

@@ -32,8 +32,6 @@ struct vcs_zcode_write_scope_v1 {
               [VCS_ZCODE_WRITE_SCOPE_PATH_MAX + 1u];
 };
 
-const char *vcs_zcode_write_scope_result_string(
-    enum vcs_zcode_write_scope_result result);
 void vcs_zcode_write_scope_init(struct vcs_zcode_write_scope_v1 *scope);
 enum vcs_zcode_write_scope_result vcs_zcode_write_scope_add(
     struct vcs_zcode_write_scope_v1 *scope, const char *path_prefix);

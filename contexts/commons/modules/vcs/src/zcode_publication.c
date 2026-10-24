@@ -123,12 +123,6 @@ static enum vcs_zcode_dev_error publication_fields(
     return VCS_ZCODE_DEV_OK;
 }
 
-enum vcs_zcode_dev_error vcs_zcode_publication_validate(
-    const struct vcs_zcode_publication_v1 *intent)
-{
-    return publication_fields(intent, true);
-}
-
 static enum vcs_zcode_dev_error publication_body(
     const struct vcs_zcode_publication_v1 *p, uint8_t out[376])
 {
@@ -262,12 +256,6 @@ static enum vcs_zcode_dev_error publication_attachment_fields(
     if (signature && !zcl_bytes_any_set(a->signature, 64))
         return VCS_ZCODE_DEV_ERR_SIGNATURE;
     return VCS_ZCODE_DEV_OK;
-}
-
-enum vcs_zcode_dev_error vcs_zcode_publication_attachment_validate(
-    const struct vcs_zcode_publication_attachment_v1 *a)
-{
-    return publication_attachment_fields(a, true);
 }
 
 static enum vcs_zcode_dev_error publication_attachment_body(
@@ -673,12 +661,6 @@ static enum vcs_zcode_dev_error remote_receipt_fields(
     if (signature && !zcl_bytes_any_set(r->signature, 64))
         return VCS_ZCODE_DEV_ERR_SIGNATURE;
     return VCS_ZCODE_DEV_OK;
-}
-
-enum vcs_zcode_dev_error vcs_zcode_remote_receipt_validate(
-    const struct vcs_zcode_remote_receipt_v1 *receipt)
-{
-    return remote_receipt_fields(receipt, true);
 }
 
 static enum vcs_zcode_dev_error remote_receipt_body(

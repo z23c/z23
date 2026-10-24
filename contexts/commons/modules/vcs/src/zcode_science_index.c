@@ -620,21 +620,6 @@ vcs_zcode_science_index_findings_at(
     return &index->findings[i];
 }
 
-const struct vcs_zcode_science_index_findings_entry *
-vcs_zcode_science_index_find_findings(
-    const struct vcs_zcode_science_index *index,
-    const uint8_t findings_root[32])
-{
-    if (!index || !findings_root)
-        return NULL;
-    char root_hex[65];
-    zcl_hex_encode(findings_root, 32, root_hex);
-    for (size_t i = 0; i < index->findings_count; i++)
-        if (strcmp(index->findings[i].findings_root_hex, root_hex) == 0)
-            return &index->findings[i];
-    return NULL;
-}
-
 size_t vcs_zcode_science_index_vote_count(
     const struct vcs_zcode_science_index *index)
 {
@@ -648,20 +633,6 @@ vcs_zcode_science_index_vote_at(
     if (!index || i >= index->vote_count)
         return NULL;
     return &index->votes[i];
-}
-
-const struct vcs_zcode_science_index_vote_entry *
-vcs_zcode_science_index_find_vote(
-    const struct vcs_zcode_science_index *index, const uint8_t vote_id[32])
-{
-    if (!index || !vote_id)
-        return NULL;
-    char id_hex[65];
-    zcl_hex_encode(vote_id, 32, id_hex);
-    for (size_t i = 0; i < index->vote_count; i++)
-        if (strcmp(index->votes[i].vote_id_hex, id_hex) == 0)
-            return &index->votes[i];
-    return NULL;
 }
 
 bool vcs_zcode_science_index_vote_sequence_seen(
@@ -699,17 +670,3 @@ vcs_zcode_science_index_review_at(
     return &index->reviews[i];
 }
 
-const struct vcs_zcode_science_index_review_entry *
-vcs_zcode_science_index_find_review(
-    const struct vcs_zcode_science_index *index,
-    const uint8_t review_root[32])
-{
-    if (!index || !review_root)
-        return NULL;
-    char root_hex[65];
-    zcl_hex_encode(review_root, 32, root_hex);
-    for (size_t i = 0; i < index->review_count; i++)
-        if (strcmp(index->reviews[i].review_root_hex, root_hex) == 0)
-            return &index->reviews[i];
-    return NULL;
-}

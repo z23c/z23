@@ -304,15 +304,6 @@ struct zcl_result metaverse_space_transport_root(
   return ZCL_OK;
 }
 
-struct zcl_result metaverse_space_blob_inspect(
-    struct vcs_package_store *store, const char *blob_root,
-    struct metaverse_space_object *out)
-{
-  size_t ignored = 0;
-  return metaverse_space_blob_inspect_bounded(
-      store, blob_root, VCS_BLOB_MAX_BYTES, out, &ignored);
-}
-
 struct zcl_result metaverse_space_blob_inspect_bounded(
     struct vcs_package_store *store, const char *blob_root,
     size_t maximum_wire_bytes, struct metaverse_space_object *out,

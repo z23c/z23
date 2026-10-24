@@ -35,30 +35,6 @@ const char *zcl_moderation_verdict_string(
     return "unknown";
 }
 
-const char *zcl_moderation_reason_string(enum zcl_moderation_reason_v1 reason)
-{
-    switch (reason) {
-    case ZCL_MODERATION_REASON_UNREVIEWED:
-        return "no attestation reaches this reader; unreviewed is not served";
-    case ZCL_MODERATION_REASON_SELF_HIDDEN:
-        return "this node's own sign-off hides it; local policy is final";
-    case ZCL_MODERATION_REASON_SELF_OK:
-        return "this node's own sign-off is reviewed_ok";
-    case ZCL_MODERATION_REASON_LOCAL_TRUST_DISABLED:
-        return "no local trust threshold configured; remote sign-off counts "
-               "for nothing here";
-    case ZCL_MODERATION_REASON_TRUSTED_VETO:
-        return "a locally trusted reviewer says hidden";
-    case ZCL_MODERATION_REASON_TRUSTED_QUORUM:
-        return "locally configured threshold of trusted reviewers say "
-               "reviewed_ok";
-    case ZCL_MODERATION_REASON_NO_QUORUM:
-        return "fewer trusted reviewers than the locally configured threshold";
-    case ZCL_MODERATION_REASON_COUNT: break;
-    }
-    return "unknown-moderation-reason";
-}
-
 static enum zcl_moderation_error attest_literal_root(
     const char *domain, size_t domain_len, const char *literal,
     size_t literal_len, uint8_t out[32])

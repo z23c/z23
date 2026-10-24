@@ -187,13 +187,6 @@ size_t name_html_response(const char *body, size_t body_len,
     return name_wrap_response(body, body_len, "200 OK", resp, max);
 }
 
-size_t name_error_response(const char *status_code,
-                           const char *body, size_t body_len,
-                           uint8_t *resp, size_t max)
-{
-    return name_wrap_response(body, body_len, status_code, resp, max);
-}
-
 /* ── Page shell ─────────────────────────────────────────────────── */
 
 /* Shared document open: design-system head (site_css inlined — one round

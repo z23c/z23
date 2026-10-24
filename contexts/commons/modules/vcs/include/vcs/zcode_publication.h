@@ -43,10 +43,6 @@ struct vcs_zcode_publication_v1 {
     uint8_t signature[64];
 };
 
-/* Validate and parse check structure only; verify authenticates the pinned
- * signer. Neither establishes grants, ancestry, proof eligibility or storage. */
-enum vcs_zcode_dev_error vcs_zcode_publication_validate(
-    const struct vcs_zcode_publication_v1 *intent);
 enum vcs_zcode_dev_error vcs_zcode_publication_serialize(
     const struct vcs_zcode_publication_v1 *intent,
     uint8_t out[VCS_ZCODE_PUBLICATION_WIRE_BYTES]);
@@ -102,8 +98,6 @@ struct vcs_zcode_publication_attachment_v1 {
     uint8_t signature[64];
 };
 
-enum vcs_zcode_dev_error vcs_zcode_publication_attachment_validate(
-    const struct vcs_zcode_publication_attachment_v1 *attachment);
 enum vcs_zcode_dev_error vcs_zcode_publication_attachment_serialize(
     const struct vcs_zcode_publication_attachment_v1 *attachment,
     uint8_t out[VCS_ZCODE_PUBLICATION_ATTACHMENT_WIRE_BYTES]);
@@ -212,8 +206,6 @@ struct vcs_zcode_remote_receipt_v1 {
     uint8_t signature[64];
 };
 
-enum vcs_zcode_dev_error vcs_zcode_remote_receipt_validate(
-    const struct vcs_zcode_remote_receipt_v1 *receipt);
 enum vcs_zcode_dev_error vcs_zcode_remote_receipt_serialize(
     const struct vcs_zcode_remote_receipt_v1 *receipt,
     uint8_t out[VCS_ZCODE_REMOTE_RECEIPT_WIRE_BYTES]);

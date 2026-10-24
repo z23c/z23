@@ -229,12 +229,6 @@ bool metaverse_settlement_work_measurable(enum metaverse_settlement s);
  * (including NULL, "", and "unknown" itself). */
 enum metaverse_kind metaverse_kind_from_name(const char *name);
 
-/* The kind's BROKER WIRE VALUE and back, straight out of the table's fifth
- * column. 0 / METAVERSE_KIND_UNKNOWN for an invalid kind or an unrecognized
- * wire value — 0 is the protocol's own "any kind" sentinel, so a caller
- * cannot mistake a refusal for a real kind. */
-uint32_t metaverse_kind_wire(enum metaverse_kind kind);
-enum metaverse_kind metaverse_kind_from_wire(uint32_t wire);
 
 /* True for a real kind (not UNKNOWN, not >= COUNT). */
 bool metaverse_kind_valid(enum metaverse_kind kind);

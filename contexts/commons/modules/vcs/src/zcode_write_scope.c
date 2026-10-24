@@ -16,19 +16,6 @@ static const uint8_t scope_magic[8] = {
     'Z', 'C', 'S', 'C', 'O', 'P', 'E', '\n'
 };
 
-const char *vcs_zcode_write_scope_result_string(
-    enum vcs_zcode_write_scope_result result)
-{
-    switch (result) {
-    case VCS_ZCODE_WRITE_SCOPE_OK: return "ok";
-    case VCS_ZCODE_WRITE_SCOPE_NULL: return "null-argument";
-    case VCS_ZCODE_WRITE_SCOPE_SHAPE: return "noncanonical-scope";
-    case VCS_ZCODE_WRITE_SCOPE_LIMIT: return "scope-limit";
-    case VCS_ZCODE_WRITE_SCOPE_ALLOC: return "allocation-failed";
-    }
-    return "unknown";
-}
-
 void vcs_zcode_write_scope_init(struct vcs_zcode_write_scope_v1 *scope)
 {
     if (scope) memset(scope, 0, sizeof(*scope));

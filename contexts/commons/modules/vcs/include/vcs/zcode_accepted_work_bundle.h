@@ -25,9 +25,6 @@ enum vcs_zcode_accepted_work_bundle_result {
     VCS_ZCODE_ACCEPTED_WORK_BUNDLE_ALLOC,
 };
 
-const char *vcs_zcode_accepted_work_bundle_result_string(
-    enum vcs_zcode_accepted_work_bundle_result result);
-
 /* Export every immutable object needed by accepted_work_resolve(), plus the
  * task's existing lock/recipe authority bundle. */
 enum vcs_zcode_accepted_work_bundle_result

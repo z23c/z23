@@ -172,8 +172,5 @@ bool vcs_zcode_work_node_peek_result(
 bool vcs_zcode_work_node_next_progress(
     struct vcs_zcode_work_node *node, uint64_t *peer_out,
     struct vcs_zcode_work_progress_v1 *out);
-bool vcs_zcode_work_node_peek_progress(
-    struct vcs_zcode_work_node *node, uint64_t *peer_out,
-    struct vcs_zcode_work_progress_v1 *out);
 
 #endif /* ZCL_VCS_ZCODE_WORK_NODE_H */

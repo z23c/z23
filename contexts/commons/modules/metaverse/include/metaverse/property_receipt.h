@@ -102,8 +102,6 @@ enum metaverse_receipt_status {
     METAVERSE_RECEIPT_STATUS_COUNT
 };
 
-const char *metaverse_receipt_status_token(enum metaverse_receipt_status s);
-
 /* Serialize the canonical body of `r` into `out` (needs
  * METAVERSE_RECEIPT_BODY_LEN bytes). Covers every semantic field and the
  * prev_chain_hash; it does NOT cover body_hash, chain_hash, or the signature,
@@ -138,9 +136,5 @@ enum metaverse_receipt_status metaverse_receipt_chain_verify(
     const struct metaverse_receipt *chain, size_t count,
     const uint8_t expected_signer[METAVERSE_PUBKEY_LEN],
     size_t *out_bad_index);
-
-/* Lowercase hex of a 32-byte hash into `out` (needs 65 bytes). */
-bool metaverse_hash_hex(const uint8_t h[METAVERSE_HASH_LEN],
-                       char *out, size_t out_cap);
 
 #endif /* ZCL_METAVERSE_PROPERTY_RECEIPT_H */

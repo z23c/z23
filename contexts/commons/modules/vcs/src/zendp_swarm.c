@@ -323,20 +323,6 @@ void zendp_directory_init(struct zendp_directory *dir)
     pthread_mutex_unlock(&g_lock);
 }
 
-bool zendp_directory_lookup(const struct zendp_directory *dir,
-                            const uint8_t record_key[32],
-                            const struct zendp_entry **out)
-{
-    if (!dir || !record_key)
-        LOG_FAIL(ZEP_LOG, "directory_lookup: NULL argument");
-    pthread_mutex_lock(&g_lock);
-    const struct zendp_entry *e = dir_by_key_locked(dir, record_key);
-    if (e && out)
-        *out = e;
-    pthread_mutex_unlock(&g_lock);
-    return e != NULL;
-}
-
 bool zendp_directory_find(const struct zendp_directory *dir,
                           const uint8_t master_pubkey[32],
                           const struct zendp_entry **out)
@@ -701,31 +687,3 @@ enum zendp_result zendp_fetch_from(struct vcs_package_store *store,
     return ZENDP_OK;
 }
 
-enum zendp_result zendp_swarm_fetch(struct vcs_swarm_engine *engine,
-                                    const struct zendp_directory *dir,
-                                    const uint8_t master_pubkey[32],
-                                    int64_t day, uint64_t now_unix)
-{
-    if (!engine || !dir || !master_pubkey)
-        LOG_RETURN(ZENDP_ERR_NULL, ZEP_LOG,
-                   "swarm_fetch: NULL argument (engine=%p dir=%p pk=%p)",
-                   (void *)engine, (const void *)dir,
-                   (const void *)master_pubkey);
-
-    struct zendp_entry entry;
-    pthread_mutex_lock(&g_lock);
-    bool found = zendp_resolve_locked(dir, master_pubkey, now_unix, &entry);
-    pthread_mutex_unlock(&g_lock);
-    if (!found)
-        LOG_RETURN(ZENDP_ERR_ABSENT, ZEP_LOG,
-                   "swarm_fetch: no local witness maps this record key to a "
-                   "blob root — the record_key->root mapping has no "
-                   "distribution mechanism yet");
-
-    enum vcs_blob_result br =
-        vcs_blob_fetch_via(engine, entry.root, day, now_unix);
-    if (br != VCS_BLOB_OK)
-        LOG_RETURN(ZENDP_ERR_FETCH, ZEP_LOG, "swarm_fetch: refused: %s",
-                   vcs_blob_result_string(br));
-    return ZENDP_OK;
-}

@@ -24,9 +24,6 @@ enum vcs_zcode_candidate_bundle_result {
     VCS_ZCODE_CANDIDATE_BUNDLE_ALLOC,
 };
 
-const char *vcs_zcode_candidate_bundle_result_string(
-    enum vcs_zcode_candidate_bundle_result result);
-
 /* Export the exact scope, patch, base/candidate manifests, and every unique
  * added/modified blob from the requester's existing ZVCS CAS. Clear available
  * outputs on every refusal so retry callers cannot reuse a stale bundle. */

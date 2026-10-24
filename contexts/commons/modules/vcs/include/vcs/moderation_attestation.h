@@ -270,8 +270,6 @@ enum zcl_moderation_reason_v1 {
     ZCL_MODERATION_REASON_COUNT,
 };
 
-const char *zcl_moderation_reason_string(enum zcl_moderation_reason_v1 reason);
-
 /* One signer's EFFECTIVE position after supersession, equivocation and
  * window checks. This is the "who said what" the reader composes from. */
 struct zcl_moderation_signer_verdict_v1 {

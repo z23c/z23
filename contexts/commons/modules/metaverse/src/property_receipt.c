@@ -21,23 +21,6 @@ static const uint8_t k_receipt_domain[8] = {
     'Z', 'C', 'L', 'R', 'C', 'P', 'T', '1'
 };
 
-static const char *const k_status_tokens[METAVERSE_RECEIPT_STATUS_COUNT] = {
-    "OK",
-    "RECEIPT_BAD_ARGS",
-    "RECEIPT_BODY_HASH_MISMATCH",
-    "RECEIPT_CHAIN_BROKEN",
-    "RECEIPT_CHAIN_HASH_MISMATCH",
-    "RECEIPT_SEQ_OUT_OF_ORDER",
-    "RECEIPT_SIGNER_UNEXPECTED",
-    "RECEIPT_SIGNATURE_INVALID",
-};
-
-const char *metaverse_receipt_status_token(enum metaverse_receipt_status s)
-{
-    if (s < 0 || s >= METAVERSE_RECEIPT_STATUS_COUNT) return "UNKNOWN_STATUS";
-    return k_status_tokens[s];
-}
-
 /* ── Canonical body ─────────────────────────────────────────────────────── */
 
 /* Every writer below advances `*off`; the static assert on the total is what
@@ -234,11 +217,3 @@ enum metaverse_receipt_status metaverse_receipt_chain_verify(
     return METAVERSE_RECEIPT_OK;
 }
 
-bool metaverse_hash_hex(const uint8_t h[METAVERSE_HASH_LEN],
-                       char *out, size_t out_cap)
-{
-    if (!h || !out || out_cap < (METAVERSE_HASH_LEN * 2 + 1))
-        LOG_FAIL(RECEIPT_LOG, "hash hex: NULL arg or buffer too small");
-    zcl_hex_encode(h, METAVERSE_HASH_LEN, out);
-    return true;
-}

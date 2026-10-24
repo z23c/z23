@@ -23,23 +23,6 @@ struct candidate_tree_blob {
     size_t len;
 };
 
-const char *vcs_zcode_candidate_tree_result_string(
-    enum vcs_zcode_candidate_tree_result result)
-{
-    switch (result) {
-    case VCS_ZCODE_CANDIDATE_TREE_OK: return "ok";
-    case VCS_ZCODE_CANDIDATE_TREE_NULL: return "null-argument";
-    case VCS_ZCODE_CANDIDATE_TREE_AUTHORITY:
-        return "candidate-tree-authority";
-    case VCS_ZCODE_CANDIDATE_TREE_SHAPE: return "candidate-tree-shape";
-    case VCS_ZCODE_CANDIDATE_TREE_LIMIT: return "candidate-tree-limit";
-    case VCS_ZCODE_CANDIDATE_TREE_CAS: return "candidate-tree-cas";
-    case VCS_ZCODE_CANDIDATE_TREE_STORE: return "candidate-tree-store";
-    case VCS_ZCODE_CANDIDATE_TREE_ALLOC: return "allocation-failed";
-    }
-    return "unknown";
-}
-
 static uint32_t candidate_tree_mode(uint32_t mode)
 {
     return (mode & 0111u) != 0 ? VCS_PACKAGE_MODE_EXECUTABLE

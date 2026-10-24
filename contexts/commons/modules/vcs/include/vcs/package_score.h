@@ -98,8 +98,6 @@ enum vcs_score_line_class {
     VCS_SCORE_LINE_BRACE_ONLY,   /* only { } and whitespace */
 };
 
-const char *vcs_score_line_class_string(enum vcs_score_line_class cls);
-
 struct vcs_score_line_tally {
     uint32_t semantic;
     uint32_t blank;

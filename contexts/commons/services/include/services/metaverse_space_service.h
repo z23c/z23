@@ -78,9 +78,6 @@ struct zcl_result metaverse_space_publish(
 struct zcl_result metaverse_space_transport_root(
     const char *workspace, const char *object_root,
     char out_blob_root[65], enum metaverse_space_object_kind *kind_out);
-struct zcl_result metaverse_space_blob_inspect(
-    struct vcs_package_store *store, const char *blob_root,
-    struct metaverse_space_object *out);
 struct zcl_result metaverse_space_blob_inspect_bounded(
     struct vcs_package_store *store, const char *blob_root,
     size_t maximum_wire_bytes, struct metaverse_space_object *out,

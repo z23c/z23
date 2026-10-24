@@ -22,9 +22,6 @@
 /* Shared HTTP wrappers (Content-Length-bearing). */
 size_t name_html_response(const char *body, size_t body_len,
                           uint8_t *resp, size_t max);
-size_t name_error_response(const char *status_code,
-                           const char *body, size_t body_len,
-                           uint8_t *resp, size_t max);
 
 /* Shared page close (</main> + site footer). Exposed so sibling name views
  * (the onion gateway) close a page exactly the way this one does. */

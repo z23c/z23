@@ -215,43 +215,6 @@ static bool pkgcap_verdict(struct vcs_pkgcap_report *out,
     return verdict == VCS_PKGCAP_VERIFIED;
 }
 
-const char *vcs_pkgcap_verdict_string(enum vcs_pkgcap_verdict verdict)
-{
-    switch (verdict) {
-    case VCS_PKGCAP_UNPROVEN: return "UNPROVEN";
-    case VCS_PKGCAP_REFUSED: return "REFUSED";
-    case VCS_PKGCAP_VERIFIED: return "VERIFIED";
-    }
-    return "UNPROVEN";
-}
-
-const char *vcs_pkgcap_rule_string(enum vcs_pkgcap_rule rule)
-{
-    /* One name per rule, indexed by the enum value. A value outside the enum
-     * reads as the unknown-rule name. */
-    static const char *const k_rule_names[] = {
-        [VCS_PKGCAP_RULE_MATCH] = "match",
-        [VCS_PKGCAP_RULE_REACH_EXCEEDS_CLAIM] = "reach-exceeds-claim",
-        [VCS_PKGCAP_RULE_NULL_ARGUMENT] = "null-argument",
-        [VCS_PKGCAP_RULE_NO_TABLE] = "no-capability-table",
-        [VCS_PKGCAP_RULE_TABLE_HOLLOW] = "capability-table-hollow",
-        [VCS_PKGCAP_RULE_TABLE_UNSOUND] = "capability-table-unsound",
-        [VCS_PKGCAP_RULE_TABLE_DIGEST_MISMATCH] =
-            "capability-table-digest-mismatch",
-        [VCS_PKGCAP_RULE_NO_MANIFEST] = "no-manifest",
-        [VCS_PKGCAP_RULE_MANIFEST_UNPARSEABLE] = "manifest-unparseable",
-        [VCS_PKGCAP_RULE_CLAIM_ABSENT] = "claim-absent",
-        [VCS_PKGCAP_RULE_CLAIM_MALFORMED] = "claim-malformed",
-        [VCS_PKGCAP_RULE_NO_SHIPPED_SOURCES] = "no-shipped-sources",
-        [VCS_PKGCAP_RULE_SOURCE_UNREADABLE] = "source-unreadable",
-        [VCS_PKGCAP_RULE_LIMIT_EXCEEDED] = "limit-exceeded",
-        [VCS_PKGCAP_RULE_CLAIM_NOT_REACHED] = "claim-not-reached",
-    };
-    if ((size_t)rule < sizeof(k_rule_names) / sizeof(k_rule_names[0]))
-        return k_rule_names[rule];
-    return "unknown-rule";
-}
-
 /* ── class sets ──────────────────────────────────────────────────── */
 
 static bool pkgcap_set_has(const struct vcs_pkgcap_class_set *set,

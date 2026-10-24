@@ -71,9 +71,6 @@ enum vcs_zcode_dht_add_result {
     VCS_ZCODE_DHT_ADD_REJECTED_PENDING_CAP,
 };
 
-const char *vcs_zcode_dht_add_result_string(
-    enum vcs_zcode_dht_add_result result);
-
 /* Only directly authenticated Noise sessions may construct contacts. The
  * canonical delegation bytes are retained so persistence can reverify them;
  * last_success and failures are local observations and never come from NODES. */
@@ -168,11 +165,6 @@ bool vcs_zcode_dht_table_probe_discard(
     enum vcs_zcode_dht_probe_state terminal_state);
 size_t vcs_zcode_dht_table_expire_probes(struct vcs_zcode_dht_table *table,
                                          int64_t now_mono);
-/* Drop a pending candidate without evicting its incumbent. Used when the
- * candidate's signed delegation or chain status went stale while the
- * incumbent probe was in flight. */
-bool vcs_zcode_dht_table_discard_candidate(
-    struct vcs_zcode_dht_table *table, const uint8_t victim_node_id[32]);
 size_t vcs_zcode_dht_table_pending_count(
     const struct vcs_zcode_dht_table *table);
 

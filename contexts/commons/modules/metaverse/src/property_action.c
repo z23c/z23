@@ -77,14 +77,6 @@ _Static_assert(sizeof(k_queries) / sizeof(k_queries[0]) ==
                    (size_t)METAVERSE_QUERY_COUNT,
                "the query row table and METAVERSE_QUERY_COUNT disagree");
 
-static const struct metaverse_wire_golden k_golden[] = { /* hotswap-static-ok: immutable leaf registration tables */
-#define MV_GOLDEN_ROW(wire_, v1_, isq_, canon_)                               \
-    { .wire = (wire_), .v1_name = (v1_), .is_query = (isq_) != 0,             \
-      .canonical_name = (canon_) },
-    METAVERSE_WIRE_V1_TABLE(MV_GOLDEN_ROW)
-#undef MV_GOLDEN_ROW
-};
-
 /* ── Row lookup ─────────────────────────────────────────────────────────── */
 
 static const struct mv_action_row *action_row(enum metaverse_action a)
@@ -319,22 +311,6 @@ bool metaverse_action_changes_state(enum metaverse_action a)
 
 /* ── Queries ────────────────────────────────────────────────────────────── */
 
-const char *metaverse_query_name(enum metaverse_query q)
-{
-    const struct mv_query_row *r = query_row(q);
-
-    return r ? r->name : "unknown";
-}
-
-/* The renderer's namer: NULL (not "unknown") for a bit that names nothing,
- * so a malformed mask refuses instead of rendering a placeholder. */
-static const char *query_name_of_bit(uint32_t bit)
-{
-    const struct mv_query_row *r = query_row((enum metaverse_query)bit);
-
-    return r ? r->name : NULL;
-}
-
 enum metaverse_query metaverse_query_from_name(const char *name)
 {
     if (!name || !*name)
@@ -356,17 +332,6 @@ uint32_t metaverse_query_at(size_t i)
 bool metaverse_query_mask_valid(uint32_t mask)
 {
     return (mask & ~(uint32_t)METAVERSE_QUERY_ALL) == 0;
-}
-
-bool metaverse_query_mask_format(uint32_t mask, char *out, size_t cap)
-{
-    if (!out || cap == 0)
-        return false;
-    out[0] = '\0';
-    if (!metaverse_query_mask_valid(mask))
-        return false;
-    return mask_format(sizeof(k_queries) / sizeof(k_queries[0]),
-                       metaverse_query_at, query_name_of_bit, mask, out, cap);
 }
 
 static uint32_t query_bit_from_name(const char *name)
@@ -464,25 +429,3 @@ bool metaverse_operation_from_wire(uint32_t wire, uint32_t version,
     return false;
 }
 
-uint32_t metaverse_operation_wire(const struct metaverse_operation *op)
-{
-    if (!op)
-        return 0u;
-    if (op->kind == METAVERSE_OP_QUERY)
-        return metaverse_query_wire(op->query);
-    if (op->kind == METAVERSE_OP_ACTION)
-        return metaverse_action_wire(op->action);
-    return 0u;
-}
-
-size_t metaverse_wire_golden_count(void)
-{
-    return sizeof(k_golden) / sizeof(k_golden[0]);
-}
-
-const struct metaverse_wire_golden *metaverse_wire_golden_at(size_t i)
-{
-    if (i >= metaverse_wire_golden_count())
-        return NULL;
-    return &k_golden[i];
-}

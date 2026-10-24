@@ -465,8 +465,6 @@ enum vcs_zcode_commons_error vcs_zcode_typed_asset_manifest_v1_root(
     const struct vcs_zcode_typed_asset_manifest_v1 *asset, uint8_t out[32]);
 enum vcs_zcode_commons_error vcs_zcode_quality_profile_v1_validate(
     const struct vcs_zcode_quality_profile_v1 *profile);
-enum vcs_zcode_commons_error vcs_zcode_quality_profile_v1_root(
-    const struct vcs_zcode_quality_profile_v1 *profile, uint8_t out[32]);
 enum vcs_zcode_commons_error vcs_zcode_module_passport_v1_validate(
     const struct vcs_zcode_module_passport_v1 *passport);
 enum vcs_zcode_commons_error vcs_zcode_module_passport_v1_signing_payload(
@@ -515,12 +513,8 @@ enum vcs_zcode_commons_error vcs_zcode_workspace_manifest_v1_root(
     uint8_t out[32]);
 enum vcs_zcode_commons_error vcs_zcode_mission_v1_validate(
     const struct vcs_zcode_mission_v1 *mission);
-enum vcs_zcode_commons_error vcs_zcode_mission_v1_root(
-    const struct vcs_zcode_mission_v1 *mission, uint8_t out[32]);
 enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_validate(
     const struct vcs_zcode_contribution_split_v1 *split);
-enum vcs_zcode_commons_error vcs_zcode_contribution_split_v1_root(
-    const struct vcs_zcode_contribution_split_v1 *split, uint8_t out[32]);
 
 void vcs_zcode_policy_candidate_v2_init(
     struct vcs_zcode_policy_candidate_v2 *policy,
@@ -534,9 +528,6 @@ enum vcs_zcode_commons_error vcs_zcode_policy_candidate_v2_root(
     const struct vcs_zcode_policy_candidate_v2 *policy, uint8_t out[32]);
 uint64_t vcs_zcode_creation_award_atoms_v2(uint16_t category);
 
-enum vcs_zcode_commons_error vcs_zcode_creation_claim_v2_validate(
-    const struct vcs_zcode_creation_claim_v2 *claim,
-    const struct vcs_zcode_policy_candidate_v2 *policy);
 enum vcs_zcode_commons_error vcs_zcode_epoch_select_v2(
     const struct vcs_zcode_epoch_selection_v2 *input,
     const struct vcs_zcode_policy_candidate_v2 *policy,

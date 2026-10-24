@@ -176,13 +176,6 @@ bool zcl_present_window_run_v1(
     const struct zcl_present_window_v1 *request,
     char *error, size_t error_cap);
 
-/* Native bitmap window with exact source-space navigation columns. Escape/Q
- * and window-close dismiss it. */
-bool zcl_present_window_run_hover_v1(
-    const struct zcl_present_window_v1 *request,
-    const struct zcl_present_window_hover_v1 *hover,
-    char *error, size_t error_cap);
-
 /* Same display-only navigation over a bounded set of alternate renderings.
  * Plus/Equals selects the next rendering and Minus selects the previous one;
  * the exact selected item remains stable across rendering changes. */

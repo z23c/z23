@@ -39,24 +39,6 @@ const char *vcs_zcode_dht_error_string(enum vcs_zcode_dht_error e)
     return "unknown";
 }
 
-const char *vcs_zcode_dht_add_result_string(enum vcs_zcode_dht_add_result r)
-{
-    switch (r) {
-    case VCS_ZCODE_DHT_ADD_ADDED: return "added";
-    case VCS_ZCODE_DHT_ADD_REFRESHED: return "refreshed";
-    case VCS_ZCODE_DHT_ADD_PENDING_PROBE: return "pending-probe";
-    case VCS_ZCODE_DHT_ADD_REJECTED_SELF: return "rejected-self";
-    case VCS_ZCODE_DHT_ADD_REJECTED_ZERO_ID: return "rejected-zero-id";
-    case VCS_ZCODE_DHT_ADD_REJECTED_ZERO_KEY: return "rejected-zero-key";
-    case VCS_ZCODE_DHT_ADD_REJECTED_STALE: return "rejected-stale";
-    case VCS_ZCODE_DHT_ADD_REJECTED_BINDING: return "rejected-binding";
-    case VCS_ZCODE_DHT_ADD_REJECTED_TIMESTAMP: return "rejected-timestamp";
-    case VCS_ZCODE_DHT_ADD_REJECTED_PENDING: return "rejected-pending";
-    case VCS_ZCODE_DHT_ADD_REJECTED_PENDING_CAP: return "rejected-pending-cap";
-    }
-    return "unknown";
-}
-
 bool vcs_zcode_dht_node_id(uint8_t out[32], const uint8_t genesis[32],
                            const uint8_t master[32], const uint8_t beacon[32])
 {
@@ -405,17 +387,6 @@ size_t vcs_zcode_dht_table_expire_probes(struct vcs_zcode_dht_table *t,
 
 size_t vcs_zcode_dht_table_pending_count(const struct vcs_zcode_dht_table *t)
 { return t ? t->pending_count : 0; }
-
-bool vcs_zcode_dht_table_discard_candidate(struct vcs_zcode_dht_table *t,
-                                            const uint8_t victim[32])
-{
-    if (!t || !victim) return false;
-    struct vcs_zcode_dht_pending *p = pending_for(t, victim);
-    if (!p) return false;
-    memset(p, 0, sizeof(*p));
-    t->pending_count--;
-    return true;
-}
 
 bool vcs_zcode_dht_table_touch(struct vcs_zcode_dht_table *t,
                                const uint8_t id[32], int64_t seen)

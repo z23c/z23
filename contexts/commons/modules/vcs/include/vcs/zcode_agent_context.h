@@ -52,8 +52,6 @@ struct vcs_zcode_agent_context_v1 {
         files[VCS_ZCODE_AGENT_CONTEXT_MAX_FILES];
 };
 
-const char *vcs_zcode_agent_context_result_string(
-    enum vcs_zcode_agent_context_result result);
 void vcs_zcode_agent_context_init(struct vcs_zcode_agent_context_v1 *context);
 void vcs_zcode_agent_context_free(struct vcs_zcode_agent_context_v1 *context);
 enum vcs_zcode_agent_context_result vcs_zcode_agent_context_validate(

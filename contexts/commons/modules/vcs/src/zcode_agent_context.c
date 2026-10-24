@@ -17,22 +17,6 @@ static const uint8_t agent_context_magic[8] = {
     'Z', 'C', 'A', 'C', 'T', 'X', '\r', '\n'
 };
 
-const char *vcs_zcode_agent_context_result_string(
-    enum vcs_zcode_agent_context_result result)
-{
-    switch (result) {
-    case VCS_ZCODE_AGENT_CONTEXT_OK: return "ok";
-    case VCS_ZCODE_AGENT_CONTEXT_NULL: return "null-argument";
-    case VCS_ZCODE_AGENT_CONTEXT_SHAPE: return "noncanonical-context";
-    case VCS_ZCODE_AGENT_CONTEXT_LIMIT: return "context-limit";
-    case VCS_ZCODE_AGENT_CONTEXT_ROOT: return "context-root-mismatch";
-    case VCS_ZCODE_AGENT_CONTEXT_BINDING: return "context-binding-mismatch";
-    case VCS_ZCODE_AGENT_CONTEXT_INCOMPLETE: return "context-incomplete";
-    case VCS_ZCODE_AGENT_CONTEXT_ALLOC: return "allocation-failed";
-    }
-    return "unknown";
-}
-
 void vcs_zcode_agent_context_init(struct vcs_zcode_agent_context_v1 *context)
 {
     if (context) memset(context, 0, sizeof(*context));

@@ -795,17 +795,6 @@ const struct vcs_badge *vcs_badge_store_at(const struct vcs_badge_store *s,
     return &s->badges[index].badge;
 }
 
-void vcs_badge_store_id_at(const struct vcs_badge_store *s, size_t index,
-                           uint8_t out[32])
-{
-    if (!s || !out || index >= s->badge_count) {
-        if (out)
-            memset(out, 0, 32);
-        return;
-    }
-    memcpy(out, s->badges[index].id, 32);
-}
-
 const struct vcs_badge *vcs_badge_store_find(
     const struct vcs_badge_store *s, const uint8_t badge_id[32])
 {

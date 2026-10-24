@@ -35,22 +35,6 @@ struct accepted_bundle_view {
     size_t len;
 };
 
-const char *vcs_zcode_accepted_work_bundle_result_string(
-    enum vcs_zcode_accepted_work_bundle_result result)
-{
-    switch (result) {
-    case VCS_ZCODE_ACCEPTED_WORK_BUNDLE_OK: return "ok";
-    case VCS_ZCODE_ACCEPTED_WORK_BUNDLE_NULL: return "null-argument";
-    case VCS_ZCODE_ACCEPTED_WORK_BUNDLE_SHAPE: return "noncanonical-bundle";
-    case VCS_ZCODE_ACCEPTED_WORK_BUNDLE_LIMIT: return "bundle-limit";
-    case VCS_ZCODE_ACCEPTED_WORK_BUNDLE_CAS: return "cas-miss-or-corrupt";
-    case VCS_ZCODE_ACCEPTED_WORK_BUNDLE_AUTHORITY:
-        return "accepted-work-authority-mismatch";
-    case VCS_ZCODE_ACCEPTED_WORK_BUNDLE_ALLOC: return "allocation-failed";
-    }
-    return "unknown";
-}
-
 static void accepted_objects_free(struct accepted_bundle_object *objects,
                                   size_t count)
 {

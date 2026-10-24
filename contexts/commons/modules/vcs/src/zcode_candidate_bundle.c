@@ -38,22 +38,6 @@ struct bundle_parts {
     uint32_t blob_count;
 };
 
-const char *vcs_zcode_candidate_bundle_result_string(
-    enum vcs_zcode_candidate_bundle_result result)
-{
-    switch (result) {
-    case VCS_ZCODE_CANDIDATE_BUNDLE_OK: return "ok";
-    case VCS_ZCODE_CANDIDATE_BUNDLE_NULL: return "null-argument";
-    case VCS_ZCODE_CANDIDATE_BUNDLE_SHAPE: return "noncanonical-bundle";
-    case VCS_ZCODE_CANDIDATE_BUNDLE_LIMIT: return "bundle-limit";
-    case VCS_ZCODE_CANDIDATE_BUNDLE_CAS: return "cas-miss-or-corrupt";
-    case VCS_ZCODE_CANDIDATE_BUNDLE_AUTHORITY:
-        return "candidate-authority-mismatch";
-    case VCS_ZCODE_CANDIDATE_BUNDLE_ALLOC: return "allocation-failed";
-    }
-    return "unknown";
-}
-
 static void bundle_blobs_free(struct bundle_blob *blobs, size_t count)
 {
     if (!blobs) return;

@@ -1362,5 +1362,3 @@ bool vcs_zcode_work_node_outbound_request(
 }
 WORK_PEEK(vcs_zcode_work_node_peek_result, result, results,
           struct vcs_zcode_work_result_v1)
-WORK_PEEK(vcs_zcode_work_node_peek_progress, progress, progresses,
-          struct vcs_zcode_work_progress_v1)

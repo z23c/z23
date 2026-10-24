@@ -176,11 +176,6 @@ struct zendp_record_view {
 
 void zendp_directory_init(struct zendp_directory *dir);
 
-/* Find by the blinded record key — the anti-enumeration address. */
-bool zendp_directory_lookup(const struct zendp_directory *dir,
-                            const uint8_t record_key[32],
-                            const struct zendp_entry **out);
-
 /* Find by identity. */
 bool zendp_directory_find(const struct zendp_directory *dir,
                           const uint8_t master_pubkey[32],
@@ -302,12 +297,5 @@ enum zendp_result zendp_fetch_from(struct vcs_package_store *store,
                                    const uint8_t master_pubkey[32],
                                    uint64_t now_unix, struct zendp *ep_out);
 
-/* Schedule a swarm download of the identity's record blob. Requires a
- * local witness for the record key -> root mapping (the same open edge
- * zdesc_swarm has); without one this is ZENDP_ERR_ABSENT, by name. */
-enum zendp_result zendp_swarm_fetch(struct vcs_swarm_engine *engine,
-                                    const struct zendp_directory *dir,
-                                    const uint8_t master_pubkey[32],
-                                    int64_t day, uint64_t now_unix);
 
 #endif /* ZCL_VCS_ZENDP_SWARM_H */
