@@ -10,6 +10,7 @@
 
 #include "native_fleet_goals.h"
 
+#include "native_fleet_goals_feedback.h"
 #include "native_fleet_objectives.h"
 
 #include "command/native_command.h"
@@ -309,8 +310,6 @@ static const struct gr_static k_static[] = {
      "card: build the seeded-defect review set"},
     {"D4", false, "first-time acceptance is not recorded per delivery",
      "card: record review verdicts per delivery"},
-    {"D6", false, "delivery-to-verdict time is not recorded",
-     "card: stamp delivery and verdict times in the test lane"},
 };
 
 static const struct gr_static *gr_find_static(const char *id)
@@ -1245,6 +1244,13 @@ static struct zcl_goal_result gr_d8(const struct zcl_goals_options *o)
                          (long long)n);
 }
 
+/* ── D6: delivery-to-verdict time, in native_fleet_goals_feedback.c ───── */
+
+static struct zcl_goal_result gr_d6(const struct zcl_goals_options *o)
+{
+    return zcl_goals_feedback_d6(o);
+}
+
 /* ── dispatch ─────────────────────────────────────────────────────────── */
 
 typedef struct zcl_goal_result (*gr_fn)(const struct zcl_goals_options *);
@@ -1256,7 +1262,7 @@ static const struct {
     {"G1", gr_g1},   {"G3", gr_g3},   {"G4", gr_g4},   {"G6", gr_g6},
     {"G7", gr_g7},   {"G8", gr_g8},
     {"G9", gr_g9},   {"G12", gr_g12}, {"G13", gr_g13}, {"D7", gr_d7},
-    {"D8", gr_d8},   {"D5", gr_d5},
+    {"D8", gr_d8},   {"D5", gr_d5},  {"D6", gr_d6},
 };
 
 struct zcl_goal_result zcl_goals_measure(

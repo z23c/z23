@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_goals_feedback.c", CAP_NONE, "reads the landing outcomes ledger only through the shared zcl_objectives_ledger_walk, whose own object holds the file read; this object opens nothing itself")
