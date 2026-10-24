@@ -510,7 +510,7 @@ static void stp_put(struct stp_buf *b, const char *fmt, ...)
  * specification and weakening it to get green is the one forbidden outcome. */
 #define STP_TASK_KIND "fix-gate"
 #define STP_TASK_CAP 8192u
-#define STP_ENGINE_BIN "build/bin/engine_unit"
+#define STP_ENGINE_BIN "build/bin/z23-engine-unit"
 #define STP_COMPLEXITY_ID "functions_over_complexity_cap"
 
 /* "label: a, b, c\n" for a string array; nothing for an empty or absent one. */
@@ -616,6 +616,19 @@ static bool stp_pick_group(const char *acceptance, char *group, size_t cap,
     return true;
 }
 
+/* The judge flags. Without a group the verdict is a measurement, which the
+ * engine's round loop can never mark verified, so it gets one round: a
+ * second or third round re-dispatches the same finished edit. */
+static bool stp_push_judge_argv(struct json_value *argv, const char *group)
+{
+    if (group[0])
+        return stp_push_str_item(argv, "--group") &&
+               stp_push_str_item(argv, group);
+    return stp_push_str_item(argv, "--no-group") &&
+           stp_push_str_item(argv, "--rounds") &&
+           stp_push_str_item(argv, "1");
+}
+
 static bool stp_push_argv(struct json_value *disp, const char *engine,
                           const char *file, const char *group)
 {
@@ -627,9 +640,7 @@ static bool stp_push_argv(struct json_value *disp, const char *engine,
          stp_push_str_item(&argv, "--engine") &&
          stp_push_str_item(&argv, engine) &&
          stp_push_str_item(&argv, "--task") && stp_push_str_item(&argv, file) &&
-         (group[0] ? stp_push_str_item(&argv, "--group") &&
-                         stp_push_str_item(&argv, group)
-                   : stp_push_str_item(&argv, "--no-group")) &&
+         stp_push_judge_argv(&argv, group) &&
          json_push_kv(disp, "argv", &argv);
     json_free(&argv);
     return ok;

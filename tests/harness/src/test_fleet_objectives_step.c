@@ -429,7 +429,7 @@ static int fst_case_none_and_skips(void)
         const char *task;
         struct engine_contract ct;
         char why[ENGINE_CONTRACT_REASON_BYTES];
-        bool has_task = false, has_nogroup = false;
+        bool has_task = false, has_nogroup = false, has_rounds = false;
         ASSERT(fst_world(&w, "dispatch", 100));
         fst_file(&w, "outcomes.jsonl", "");
         fst_file(&w, "queue.jsonl", "");
@@ -453,13 +453,16 @@ static int fst_case_none_and_skips(void)
         ASSERT(strstr(task, "Target file: apps/") != NULL);
         argv = json_get(dp, "argv");
         ASSERT(json_size(argv) >= 6);
+        ASSERT_STR_EQ(json_get_str(json_at(argv, 0)), "build/bin/z23-engine-unit");
         for (size_t i = 0; i < json_size(argv); i++) {
             const char *a = json_get_str(json_at(argv, i));
             ASSERT(strcmp(a, "--yes-dispatch") != 0);
             has_task = has_task || strcmp(a, "--task") == 0;
             has_nogroup = has_nogroup || strcmp(a, "--no-group") == 0;
+            if (strcmp(a, "--rounds") == 0 && i + 1 < json_size(argv))
+                has_rounds = strcmp(json_get_str(json_at(argv, i + 1)), "1") == 0;
         }
-        ASSERT(has_task && has_nogroup);
+        ASSERT(has_task && has_nogroup && has_rounds);
         ASSERT(strstr(fst_str(&c, "screen"), "--yes-dispatch") != NULL);
         fst_end(&c);
         fst_restore(&w);
