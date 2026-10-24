@@ -715,8 +715,6 @@ contexts/explorer/views/src/explorer_pages_hodl_snapshot.c:hodl_view_disk_cache_
 contexts/explorer/views/src/explorer_stats_gather.c:gather_deep_chain_data:17
 contexts/explorer/views/src/explorer_stats_gather.c:gather_economy_data:22
 contexts/explorer/views/src/explorer_stats_sections.c:emit_section_6_utxo_distribution:20
-contexts/explorer/views/src/explorer_stats_view.c:explorer_stats_build:35
-contexts/explorer/views/src/explorer_stats_view.c:render_shielded_section:25
 contexts/explorer/views/src/explorer_tx_view.c:explorer_view_tx:27
 contexts/explorer/views/src/name_gateway_view.c:gw_escape_append:17
 contexts/explorer/views/src/qr_popup.c:qr_popup_card_render:18

@@ -103,6 +103,99 @@ static void query_shielded_stats(sqlite3 *db, const char *col,
     }
 }
 
+static void render_shielded_years(char *r, size_t max, size_t *off,
+                                    sqlite3 *db, const char *col, int start_year,
+                                    bool pos_is_shielding)
+{
+    /* Yearly breakdown — single query with GROUP BY */
+    APPEND(*off, r, max,
+        "<h3>Activity by Year</h3>"
+        "<table><tr><th>Year</th><th>Blocks</th>"
+        "<th>Shielded (t&rarr;z)</th><th>Unshielded (z&rarr;t)</th>"
+        "<th>Net Change</th></tr>");
+    {
+        char sql[512];
+        snprintf(sql, sizeof(sql),
+            "SELECT CAST(strftime('%%Y', time, 'unixepoch') AS INTEGER) AS yr, "
+            "count(*), "
+            "COALESCE(SUM(CASE WHEN %s>0 THEN %s ELSE 0 END),0), "
+            "COALESCE(SUM(CASE WHEN %s<0 THEN %s ELSE 0 END),0) "
+            "FROM blocks WHERE %s != 0 AND time > 0 "
+            "GROUP BY yr ORDER BY yr",
+            col, col, col, col, col);
+        sqlite3_stmt *s = NULL;
+        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
+            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+                int year = sqlite3_column_int(s, 0);
+                int64_t cnt = sqlite3_column_int64(s, 1);
+                int64_t shield = sqlite3_column_int64(s, 2);
+                int64_t unshield = sqlite3_column_int64(s, 3);
+                if (cnt > 0 && year >= start_year) {
+                    char sh[32], un[32], nt[32];
+                    int64_t yr_shield, yr_unshield;
+                    if (pos_is_shielding) {
+                        yr_shield = shield;
+                        yr_unshield = unshield < 0 ? -unshield : unshield;
+                    } else {
+                        yr_shield = unshield < 0 ? -unshield : unshield;
+                        yr_unshield = shield;
+                    }
+                    zcl_format_zcl(sh, sizeof(sh), yr_shield);
+                    zcl_format_zcl(un, sizeof(un), yr_unshield);
+                    zcl_format_zcl(nt, sizeof(nt), yr_shield - yr_unshield);
+                    APPEND(*off, r, max,
+                        "<tr><td>%d</td><td>%" PRId64 "</td>"
+                        "<td class='amount'>%s</td>"
+                        "<td class='amount'>%s</td>"
+                        "<td class='amount'>%s</td></tr>",
+                        year, cnt, sh, un, nt);
+                }
+            }
+            sqlite3_finalize(s);
+        }
+    }
+    APPEND(*off, r, max, "</table>");
+}
+
+static void render_shielded_largest(char *r, size_t max, size_t *off,
+                                    sqlite3 *db, const char *col,
+                                    bool pos_is_shielding)
+{
+    /* Top 20 by absolute value */
+    APPEND(*off, r, max,
+        "<h3>Top 20 Largest Transactions (by block)</h3>"
+        "<table><tr><th>Block</th><th>Time</th><th>Value</th>"
+        "<th>Direction</th></tr>");
+    {
+        char sql[256];
+        snprintf(sql, sizeof(sql),
+            "SELECT height, time, %s FROM blocks "
+            "WHERE %s != 0 ORDER BY ABS(%s) DESC LIMIT 20",
+            col, col, col);
+        sqlite3_stmt *s = NULL;
+        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
+            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+                int64_t h = sqlite3_column_int64(s, 0);
+                int64_t t = sqlite3_column_int64(s, 1);
+                int64_t v = sqlite3_column_int64(s, 2);
+                char ts[32], vs[32];
+                explorer_format_time(ts, sizeof(ts), (uint32_t)t);
+                zcl_format_zcl(vs, sizeof(vs), v < 0 ? -v : v);
+                APPEND(*off, r, max,
+                    "<tr><td><a href='/explorer/block/%" PRId64 "'>%" PRId64 "</a></td>"
+                    "<td>%s</td><td class='amount'>%s ZCL</td>"
+                    "<td>%s</td></tr>",
+                    h, h, ts, vs,
+                    (pos_is_shielding ? v > 0 : v < 0)
+                        ? "<span style='color:#33ff99'>Shielding</span>"
+                        : "<span style='color:#ff6666'>Unshielding</span>");
+            }
+            sqlite3_finalize(s);
+        }
+    }
+    APPEND(*off, r, max, "</table>");
+}
+
 /* Render shielded section HTML (sprout or sapling).
  * pos_is_shielding: true for Sprout (positive sprout_value = shielding),
  *                   false for Sapling (positive value_balance = unshielding). */
@@ -192,88 +285,9 @@ static void render_shielded_section(char *r, size_t max, size_t *off,
     }
     APPEND(*off, r, max, "</div></div>");
 
-    /* Yearly breakdown — single query with GROUP BY */
-    APPEND(*off, r, max,
-        "<h3>Activity by Year</h3>"
-        "<table><tr><th>Year</th><th>Blocks</th>"
-        "<th>Shielded (t&rarr;z)</th><th>Unshielded (z&rarr;t)</th>"
-        "<th>Net Change</th></tr>");
-    {
-        char sql[512];
-        snprintf(sql, sizeof(sql),
-            "SELECT CAST(strftime('%%Y', time, 'unixepoch') AS INTEGER) AS yr, "
-            "count(*), "
-            "COALESCE(SUM(CASE WHEN %s>0 THEN %s ELSE 0 END),0), "
-            "COALESCE(SUM(CASE WHEN %s<0 THEN %s ELSE 0 END),0) "
-            "FROM blocks WHERE %s != 0 AND time > 0 "
-            "GROUP BY yr ORDER BY yr",
-            col, col, col, col, col);
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int year = sqlite3_column_int(s, 0);
-                int64_t cnt = sqlite3_column_int64(s, 1);
-                int64_t shield = sqlite3_column_int64(s, 2);
-                int64_t unshield = sqlite3_column_int64(s, 3);
-                if (cnt > 0 && year >= start_year) {
-                    char sh[32], un[32], nt[32];
-                    int64_t yr_shield, yr_unshield;
-                    if (pos_is_shielding) {
-                        yr_shield = shield;
-                        yr_unshield = unshield < 0 ? -unshield : unshield;
-                    } else {
-                        yr_shield = unshield < 0 ? -unshield : unshield;
-                        yr_unshield = shield;
-                    }
-                    zcl_format_zcl(sh, sizeof(sh), yr_shield);
-                    zcl_format_zcl(un, sizeof(un), yr_unshield);
-                    zcl_format_zcl(nt, sizeof(nt), yr_shield - yr_unshield);
-                    APPEND(*off, r, max,
-                        "<tr><td>%d</td><td>%" PRId64 "</td>"
-                        "<td class='amount'>%s</td>"
-                        "<td class='amount'>%s</td>"
-                        "<td class='amount'>%s</td></tr>",
-                        year, cnt, sh, un, nt);
-                }
-            }
-            sqlite3_finalize(s);
-        }
-    }
-    APPEND(*off, r, max, "</table>");
+    render_shielded_years(r, max, off, db, col, start_year, pos_is_shielding);
+    render_shielded_largest(r, max, off, db, col, pos_is_shielding);
 
-    /* Top 20 by absolute value */
-    APPEND(*off, r, max,
-        "<h3>Top 20 Largest Transactions (by block)</h3>"
-        "<table><tr><th>Block</th><th>Time</th><th>Value</th>"
-        "<th>Direction</th></tr>");
-    {
-        char sql[256];
-        snprintf(sql, sizeof(sql),
-            "SELECT height, time, %s FROM blocks "
-            "WHERE %s != 0 ORDER BY ABS(%s) DESC LIMIT 20",
-            col, col, col);
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) == SQLITE_OK && s) {
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                int64_t h = sqlite3_column_int64(s, 0);
-                int64_t t = sqlite3_column_int64(s, 1);
-                int64_t v = sqlite3_column_int64(s, 2);
-                char ts[32], vs[32];
-                explorer_format_time(ts, sizeof(ts), (uint32_t)t);
-                zcl_format_zcl(vs, sizeof(vs), v < 0 ? -v : v);
-                APPEND(*off, r, max,
-                    "<tr><td><a href='/explorer/block/%" PRId64 "'>%" PRId64 "</a></td>"
-                    "<td>%s</td><td class='amount'>%s ZCL</td>"
-                    "<td>%s</td></tr>",
-                    h, h, ts, vs,
-                    (pos_is_shielding ? v > 0 : v < 0)
-                        ? "<span style='color:#33ff99'>Shielding</span>"
-                        : "<span style='color:#ff6666'>Unshielding</span>");
-            }
-            sqlite3_finalize(s);
-        }
-    }
-    APPEND(*off, r, max, "</table>");
 }
 
 /* Emit a tabbed chart set */
@@ -364,6 +378,151 @@ static size_t explorer_stats_build_verified_summary(uint8_t *r, size_t max,
 
 
 
+static void gather_stats_tip(sqlite3 *db, int *tip, double *diff,
+                              int64_t *tip_time)
+{
+    sqlite3_stmt *s = NULL;
+    int prep_rc = sqlite3_prepare_v2(db,
+            "SELECT height, bits, time FROM blocks ORDER BY height DESC LIMIT 1",
+            -1, &s, NULL);
+    if (prep_rc == SQLITE_OK && s) {
+        int step_rc = AR_STEP_ROW_READONLY(s);
+        if (step_rc == SQLITE_ROW) {
+            *tip = sqlite3_column_int(s, 0);
+            uint32_t bits = (uint32_t)sqlite3_column_int(s, 1);
+            *tip_time = sqlite3_column_int64(s, 2);
+            if (bits > 0)
+                *diff = explorer_difficulty_from_bits(bits);
+        } else {
+            LOG_WARN("explorer",
+                     "Stats: tip query step failed: rc=%d %s",
+                     step_rc, sqlite3_errmsg(db));
+        }
+        sqlite3_finalize(s);
+    } else {
+        LOG_WARN("explorer",
+                 "Stats: tip query prepare failed: rc=%d %s",
+                 prep_rc, sqlite3_errmsg(db));
+    }
+}
+
+static void gather_stats_block_aggregates(sqlite3 *db, struct stats_ctx *out)
+{
+    sqlite3_stmt *s = NULL;
+    /* Consolidated: count, sum(num_tx), count(empty), max(num_tx) */
+    if (sqlite3_prepare_v2(db,
+            "SELECT count(*), COALESCE(SUM(num_tx),0), "
+            "SUM(CASE WHEN num_tx<=1 THEN 1 ELSE 0 END), "
+            "MAX(num_tx) "
+            "FROM blocks",
+            -1, &s, NULL) == SQLITE_OK && s) {
+        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            out->total_blocks    = sqlite3_column_int64(s, 0);
+            out->total_block_txs = sqlite3_column_int64(s, 1);
+            out->empty_blocks    = sqlite3_column_int64(s, 2);
+            out->max_tx_count    = sqlite3_column_int64(s, 3);
+        }
+        sqlite3_finalize(s);
+    }
+    /* Block with most txs */
+    out->max_tx_block = stats_q_i64(db,
+        "SELECT height FROM blocks ORDER BY num_tx DESC LIMIT 1");
+    /* Difficulty extremes (bits DESC = lowest diff, bits ASC = highest diff) */
+    s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT height, bits FROM blocks WHERE bits > 0 "
+            "ORDER BY bits DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK && s) {
+        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            out->min_bits_height = sqlite3_column_int64(s, 0);
+            out->min_bits = (uint32_t)sqlite3_column_int(s, 1);
+        }
+        sqlite3_finalize(s);
+    }
+    s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT height, bits FROM blocks WHERE bits > 0 AND height > 0 "
+            "ORDER BY bits ASC LIMIT 1", -1, &s, NULL) == SQLITE_OK && s) {
+        if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+            out->max_bits_height = sqlite3_column_int64(s, 0);
+            out->max_bits = (uint32_t)sqlite3_column_int(s, 1);
+        }
+        sqlite3_finalize(s);
+    }
+}
+
+static void gather_stats_derived(int tip, double diff, int64_t tip_time,
+                                  int64_t total_supply,
+                                  int64_t genesis_time, struct stats_ctx *ctx,
+                                  char *hr_str, size_t hr_size,
+                                  char *supply_str, size_t supply_size)
+{
+    /* ── Derived values ── */
+    /* Equihash measures SOLUTIONS, not hashes, at every (N,K). The estimate uses
+     * the ACTIVE target spacing (75s post-Buttercup, 150s before) — the old
+     * hard-coded /150 under-reported the live rate ~2x. */
+    double solrate = explorer_solrate_from_diff(diff, tip);
+    explorer_format_solrate(hr_str, hr_size, solrate);
+
+    zcl_format_zcl(supply_str, supply_size, total_supply);
+
+    int64_t chain_age_days = 0;
+    if (genesis_time > 0 && tip_time > genesis_time)
+        chain_age_days = (tip_time - genesis_time) / 86400;
+
+    /* Buttercup-aware halving calculation */
+    int halvings;
+    int next_halving;
+    int blocks_until_halving;
+    int64_t current_subsidy;
+    if (tip >= BUTTERCUP_ACTIVATION_HEIGHT) {
+        int era = (int)(((int64_t)tip - 1 - BUTTERCUP_ACTIVATION_HEIGHT) / POST_BC_HALVING);
+        halvings = era + 3;
+        current_subsidy = (BASE_SUBSIDY_SAT / 2) >> halvings;
+        next_halving = (int)(BUTTERCUP_ACTIVATION_HEIGHT + 1 +
+                             ((int64_t)(era + 1)) * POST_BC_HALVING);
+        blocks_until_halving = next_halving - tip;
+    } else {
+        halvings = tip / PRE_BC_HALVING;
+        next_halving = (halvings + 1) * PRE_BC_HALVING;
+        blocks_until_halving = next_halving - tip;
+        current_subsidy = BASE_SUBSIDY_SAT >> halvings;
+    }
+    /* Correct max supply using Buttercup-aware computation */
+    int64_t max_supply_sat = zcl_total_supply_zatoshi(100000000LL);
+    double pct_mined = (max_supply_sat > 0)
+        ? (double)total_supply / (double)max_supply_sat * 100.0 : 0.0;
+
+    /* ── Economy & emission derived factoids ── */
+    int64_t mined_supply = zcl_total_supply_zatoshi(tip);
+    double pct_of_cap = (max_supply_sat > 0)
+        ? (double)mined_supply / (double)max_supply_sat * 100.0 : 0.0;
+    double daily_issuance_zcl = (double)current_subsidy / 1e8
+        * 86400.0 / (double)explorer_target_spacing(tip);
+    double annual_inflation = mined_supply > 0
+        ? daily_issuance_zcl * 365.25 / ((double)mined_supply / 1e8) * 100.0 : 0.0;
+    int64_t halving_eta_secs =
+        (ctx->recent_avg_interval > 0 && blocks_until_halving > 0)
+            ? (int64_t)((double)blocks_until_halving * ctx->recent_avg_interval)
+            : 0;
+    int64_t now_wall = (int64_t)platform_time_wall_time_t();
+    int64_t tip_age_secs = (now_wall > tip_time) ? now_wall - tip_time : 0;
+
+    ctx->chain_age_days = chain_age_days;
+    ctx->halvings = halvings;
+    ctx->next_halving = next_halving;
+    ctx->blocks_until_halving = blocks_until_halving;
+    ctx->current_subsidy = current_subsidy;
+    ctx->pct_mined = pct_mined;
+    ctx->mined_supply = mined_supply;
+    ctx->max_supply_sat = max_supply_sat;
+    ctx->pct_of_cap = pct_of_cap;
+    ctx->solrate = solrate;
+    ctx->daily_issuance_zcl = daily_issuance_zcl;
+    ctx->annual_inflation = annual_inflation;
+    ctx->halving_eta_secs = halving_eta_secs;
+    ctx->tip_age_secs = tip_age_secs;
+}
+
 /* ── Main stats builder ──────────────────────────────────── */
 
 size_t explorer_stats_build(uint8_t *r, size_t buf_max, const char *datadir)
@@ -401,31 +560,7 @@ size_t explorer_stats_build(uint8_t *r, size_t buf_max, const char *datadir)
     int tip = 0;
     double diff = 0;
     int64_t tip_time = 0;
-    {
-        sqlite3_stmt *s = NULL;
-        int prep_rc = sqlite3_prepare_v2(db,
-                "SELECT height, bits, time FROM blocks ORDER BY height DESC LIMIT 1",
-                -1, &s, NULL);
-        if (prep_rc == SQLITE_OK && s) {
-            int step_rc = AR_STEP_ROW_READONLY(s);
-            if (step_rc == SQLITE_ROW) {
-                tip = sqlite3_column_int(s, 0);
-                uint32_t bits = (uint32_t)sqlite3_column_int(s, 1);
-                tip_time = sqlite3_column_int64(s, 2);
-                if (bits > 0)
-                    diff = explorer_difficulty_from_bits(bits);
-            } else {
-                LOG_WARN("explorer",
-                         "Stats: tip query step failed: rc=%d %s",
-                         step_rc, sqlite3_errmsg(db));
-            }
-            sqlite3_finalize(s);
-        } else {
-            LOG_WARN("explorer",
-                     "Stats: tip query prepare failed: rc=%d %s",
-                     prep_rc, sqlite3_errmsg(db));
-        }
-    }
+    gather_stats_tip(db, &tip, &diff, &tip_time);
     if (tip <= 0) {
         LOG_WARN("explorer", "Stats: no blocks (tip=%d, db=%s)", tip, db_path);
         sqlite3_close(db);
@@ -437,6 +572,7 @@ size_t explorer_stats_build(uint8_t *r, size_t buf_max, const char *datadir)
         return len;
     }
 
+    struct stats_ctx ctx = {0};
     /* ── 1b: Single-pass block aggregates ── */
     int64_t total_blocks = 0, total_block_txs = 0, empty_blocks = 0;
     int64_t max_tx_count = 0, max_tx_block = 0;
@@ -444,48 +580,16 @@ size_t explorer_stats_build(uint8_t *r, size_t buf_max, const char *datadir)
     int64_t genesis_time = 1478403829;
     uint32_t min_bits = 0, max_bits = 0;
     int64_t min_bits_height = 0, max_bits_height = 0;
-    {
-        sqlite3_stmt *s = NULL;
-        /* Consolidated: count, sum(num_tx), count(empty), max(num_tx) */
-        if (sqlite3_prepare_v2(db,
-                "SELECT count(*), COALESCE(SUM(num_tx),0), "
-                "SUM(CASE WHEN num_tx<=1 THEN 1 ELSE 0 END), "
-                "MAX(num_tx) "
-                "FROM blocks",
-                -1, &s, NULL) == SQLITE_OK && s) {
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                total_blocks    = sqlite3_column_int64(s, 0);
-                total_block_txs = sqlite3_column_int64(s, 1);
-                empty_blocks    = sqlite3_column_int64(s, 2);
-                max_tx_count    = sqlite3_column_int64(s, 3);
-            }
-            sqlite3_finalize(s);
-        }
-        /* Block with most txs */
-        max_tx_block = stats_q_i64(db,
-            "SELECT height FROM blocks ORDER BY num_tx DESC LIMIT 1");
-        /* Difficulty extremes (bits DESC = lowest diff, bits ASC = highest diff) */
-        s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT height, bits FROM blocks WHERE bits > 0 "
-                "ORDER BY bits DESC LIMIT 1", -1, &s, NULL) == SQLITE_OK && s) {
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                min_bits_height = sqlite3_column_int64(s, 0);
-                min_bits = (uint32_t)sqlite3_column_int(s, 1);
-            }
-            sqlite3_finalize(s);
-        }
-        s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT height, bits FROM blocks WHERE bits > 0 AND height > 0 "
-                "ORDER BY bits ASC LIMIT 1", -1, &s, NULL) == SQLITE_OK && s) {
-            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                max_bits_height = sqlite3_column_int64(s, 0);
-                max_bits = (uint32_t)sqlite3_column_int(s, 1);
-            }
-            sqlite3_finalize(s);
-        }
-    }
+    gather_stats_block_aggregates(db, &ctx);
+    total_blocks = ctx.total_blocks;
+    total_block_txs = ctx.total_block_txs;
+    empty_blocks = ctx.empty_blocks;
+    max_tx_count = ctx.max_tx_count;
+    max_tx_block = ctx.max_tx_block;
+    min_bits = ctx.min_bits;
+    max_bits = ctx.max_bits;
+    min_bits_height = ctx.min_bits_height;
+    max_bits_height = ctx.max_bits_height;
     double min_diff = explorer_difficulty_from_bits(min_bits);
     double max_diff = explorer_difficulty_from_bits(max_bits);
     double avg_tx_per_block = total_blocks > 0
@@ -561,66 +665,16 @@ size_t explorer_stats_build(uint8_t *r, size_t buf_max, const char *datadir)
     int64_t zslp_transfer_count = stats_q_i64(db, "SELECT count(*) FROM zslp_transfers");
 
     /* ── 1h + 1i ── filled into ctx / chart_data by helpers below.
-     * Declare ctx + chart_data here so the gather helpers can write
-     * directly into them; PHASE 2 builds on top of these structures. */
-    struct stats_ctx ctx = {0};
+     * The gather helpers write into the existing ctx and chart_data;
+     * PHASE 2 builds on top of these structures. */
     struct stats_chart_data chart_data;
     gather_deep_chain_data(db, &ctx);
     gather_chart_data(db, tip, diff, &chart_data);
     gather_economy_data(db, tip, tip_time, &ctx);
 
-    /* ── Derived values ── */
-    /* Equihash measures SOLUTIONS, not hashes, at every (N,K). The estimate uses
-     * the ACTIVE target spacing (75s post-Buttercup, 150s before) — the old
-     * hard-coded /150 under-reported the live rate ~2x. */
-    double solrate = explorer_solrate_from_diff(diff, tip);
-    char hr_str[64];
-    explorer_format_solrate(hr_str, sizeof(hr_str), solrate);
-
-    char supply_str[32];
-    zcl_format_zcl(supply_str, sizeof(supply_str), total_supply);
-
-    int64_t chain_age_days = 0;
-    if (genesis_time > 0 && tip_time > genesis_time)
-        chain_age_days = (tip_time - genesis_time) / 86400;
-
-    /* Buttercup-aware halving calculation */
-    int halvings;
-    int next_halving;
-    int blocks_until_halving;
-    int64_t current_subsidy;
-    if (tip >= BUTTERCUP_ACTIVATION_HEIGHT) {
-        int era = (int)(((int64_t)tip - 1 - BUTTERCUP_ACTIVATION_HEIGHT) / POST_BC_HALVING);
-        halvings = era + 3;
-        current_subsidy = (BASE_SUBSIDY_SAT / 2) >> halvings;
-        next_halving = (int)(BUTTERCUP_ACTIVATION_HEIGHT + 1 +
-                             ((int64_t)(era + 1)) * POST_BC_HALVING);
-        blocks_until_halving = next_halving - tip;
-    } else {
-        halvings = tip / PRE_BC_HALVING;
-        next_halving = (halvings + 1) * PRE_BC_HALVING;
-        blocks_until_halving = next_halving - tip;
-        current_subsidy = BASE_SUBSIDY_SAT >> halvings;
-    }
-    /* Correct max supply using Buttercup-aware computation */
-    int64_t max_supply_sat = zcl_total_supply_zatoshi(100000000LL);
-    double pct_mined = (max_supply_sat > 0)
-        ? (double)total_supply / (double)max_supply_sat * 100.0 : 0.0;
-
-    /* ── Economy & emission derived factoids ── */
-    int64_t mined_supply = zcl_total_supply_zatoshi(tip);
-    double pct_of_cap = (max_supply_sat > 0)
-        ? (double)mined_supply / (double)max_supply_sat * 100.0 : 0.0;
-    double daily_issuance_zcl = (double)current_subsidy / 1e8
-        * 86400.0 / (double)explorer_target_spacing(tip);
-    double annual_inflation = mined_supply > 0
-        ? daily_issuance_zcl * 365.25 / ((double)mined_supply / 1e8) * 100.0 : 0.0;
-    int64_t halving_eta_secs =
-        (ctx.recent_avg_interval > 0 && blocks_until_halving > 0)
-            ? (int64_t)((double)blocks_until_halving * ctx.recent_avg_interval)
-            : 0;
-    int64_t now_wall = (int64_t)platform_time_wall_time_t();
-    int64_t tip_age_secs = (now_wall > tip_time) ? now_wall - tip_time : 0;
+    char hr_str[64], supply_str[32];
+    gather_stats_derived(tip, diff, tip_time, total_supply, genesis_time, &ctx,
+                         hr_str, sizeof(hr_str), supply_str, sizeof(supply_str));
 
     int64_t t_query_ms = (int64_t)platform_time_wall_time_t() - t_start_ms;
     LOG_INFO("explorer", "Stats: phase 1 complete in %llds, building HTML...",
@@ -634,7 +688,7 @@ size_t explorer_stats_build(uint8_t *r, size_t buf_max, const char *datadir)
      * group (tx I/O, joinsplits, sapling, integrity, firsts/records)
      * was filled in PHASE 1 by gather_deep_chain_data(). */
     ctx.tip = tip; ctx.diff = diff; ctx.tip_time = tip_time;
-    ctx.genesis_time = genesis_time; ctx.chain_age_days = chain_age_days;
+    ctx.genesis_time = genesis_time;
     ctx.total_blocks = total_blocks; ctx.total_block_txs = total_block_txs;
     ctx.empty_blocks = empty_blocks;
     ctx.max_tx_count = max_tx_count; ctx.max_tx_block = max_tx_block;
@@ -658,24 +712,9 @@ size_t explorer_stats_build(uint8_t *r, size_t buf_max, const char *datadir)
     ctx.opret_count = opret_count; ctx.slp_opret_count = slp_opret_count;
     ctx.zslp_token_count = zslp_token_count;
     ctx.zslp_transfer_count = zslp_transfer_count;
-    ctx.halvings = halvings; ctx.next_halving = next_halving;
-    ctx.blocks_until_halving = blocks_until_halving;
-    ctx.current_subsidy = current_subsidy;
-    ctx.pct_mined = pct_mined;
     ctx.t_query_ms = t_query_ms;
-    /* Economy & emission (recent-window aggregates already gathered into
-     * ctx by gather_economy_data; here we add the derived scalars). */
-    ctx.mined_supply = mined_supply;
-    ctx.max_supply_sat = max_supply_sat;
-    ctx.pct_of_cap = pct_of_cap;
-    ctx.solrate = solrate;
-    ctx.daily_issuance_zcl = daily_issuance_zcl;
-    ctx.annual_inflation = annual_inflation;
-    ctx.halving_eta_secs = halving_eta_secs;
-    ctx.tip_age_secs = tip_age_secs;
     snprintf(ctx.hr_str, sizeof(ctx.hr_str), "%s", hr_str);
     snprintf(ctx.supply_str, sizeof(ctx.supply_str), "%s", supply_str);
-
     off = emit_stats_header(r, max, off, &ctx);
     off = emit_section_1_network(r, max, off, &ctx);
     off = emit_section_1b_economy(r, max, off, &ctx);
