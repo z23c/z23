@@ -129,6 +129,11 @@ bool progress_store_set_sync_mode(bool ibd);
 int progress_store_apply_memory_profile(bool steady, int64_t *mmap_bytes_out,
                                         int64_t *cache_kib_out);
 
+/* The open-time integrity gate on a caller-owned connection (test seam): sizes
+ * the connection's page cache / mmap window, then runs PRAGMA quick_check.
+ * Returns true only when quick_check reports exactly "ok". */
+bool progress_store_quick_check_for_test(sqlite3 *db);
+
 /* Checkpoint+truncate the WAL on the open consensus.db handle NOW, returning
  * the WAL file's high-water bytes to the filesystem WITHOUT closing the
  * connection. The disk_full reclaim path calls this so a near-full disk can

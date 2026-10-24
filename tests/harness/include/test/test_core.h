@@ -826,6 +826,7 @@ int test_projection_adoption(void);
 int test_projection_receipt(void);
 int test_projection_consumer(void);
 int test_progress_store(void);
+int test_progress_store_open_sizing(void);
 int test_coins_kv_read_snapshot(void);
 int test_event_log(void);
 int test_event_log_kill9(void);

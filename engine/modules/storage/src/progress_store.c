@@ -224,7 +224,26 @@ static bool apply_pragmas(sqlite3 *db)
  * treated as NOT ok so the caller quarantines. */
 static bool progress_store_quick_check_ok(sqlite3 *db)
 {
+    /* The scan below walks every b-tree page of a multi-hundred-MB file.  On a
+     * fresh connection SQLite defaults to a 2 MiB cache and no mmap, so the
+     * walk issues one 4 KiB pread per page in key order (scattered on disk) and
+     * runs at cold-disk random-read speed.  Size the connection first: the same
+     * pages are read and judged, only the access path changes (mmap lets the
+     * kernel read ahead).  Best effort: a failure here is re-reported fatally
+     * by apply_pragmas() right after, so ignoring it cannot change a verdict. */
+    int64_t cache_kib, mmap_bytes;
+    progress_store_folding_sizing(&cache_kib, &mmap_bytes);
+    char cp[64], mp[64];
+    snprintf(cp, sizeof(cp), "PRAGMA cache_size=-%lld", (long long)cache_kib);
+    snprintf(mp, sizeof(mp), "PRAGMA mmap_size=%lld", (long long)mmap_bytes);
+    (void)sqlite3_exec(db, cp, NULL, NULL, NULL);
+    (void)sqlite3_exec(db, mp, NULL, NULL, NULL);
     return sqlite_integrity_quick_check_ok(db, "progress_store");
+}
+
+bool progress_store_quick_check_for_test(sqlite3 *db)
+{
+    return progress_store_quick_check_ok(db);
 }
 
 /* Move the corrupt consensus.db (+ -wal/-shm) aside so the reopen creates a
