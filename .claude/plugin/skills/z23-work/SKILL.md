@@ -23,9 +23,13 @@ and stop rules. Do exactly one card. Follow these steps in order.
    generated files, unless the card lists them.
 4. Run the card's acceptance command with Bash, exactly as written. Copy the
    result line.
-5. Commit on a new branch and open a pull request titled `card: <name>`.
-   Put the card id, the acceptance command and its result line in the
-   description. (When `work.submit` exists, call it with `z23_run` instead.)
+5. Commit once on top of `origin/main` and hand the commit over as a bundle,
+   as the Submit section of `.github/CONTRIBUTING.md` describes: write it with
+   `z23-dev dev land send --commit=<sha> --bundle_out=<absolute path>`, offer
+   it with `z23 fleet bundle offer`, and post a `need` in board room `contrib`
+   with the card id, the acceptance command and its result line. Never push a
+   branch; the pre-push hook refuses it. (When `work.submit` exists, call it
+   with `z23_run` instead.)
 6. Stop.
 
 ## Stop rules

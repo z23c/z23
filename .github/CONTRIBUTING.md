@@ -106,10 +106,39 @@ cites a rule, not beforehand. For a new test, add
 
 ## Submit
 
-Open a GitHub pull request from your fork. The title starts with
-`card: <name>`, for example `card: fix-foo-bounds`. The description states the
-card id, the acceptance command and its result line, copied literally. When
-`z23 work submit` is available it replaces the pull request; this page will say
+Send each change as one commit on top of `origin/main`, carried as a git
+bundle over the Z23 swarm. Do not push a branch: the repository's pre-push hook
+refuses every ref except `main`, and only the maintainers' land queue publishes
+`main`.
+
+1. Make the change exactly one commit ahead of `origin/main` (rebase and squash
+   first if needed).
+2. Write the bundle. This runs no ssh and pushes nothing:
+
+   ```bash
+   make dev-bin
+   build/bin/z23-dev dev land send --commit=<sha> --bundle_out=<absolute path>
+   ```
+
+   It refuses `SEND_NOT_SINGLE` when `origin/main..<sha>` is more than one
+   commit, and prints the bundle's `sha256`.
+3. On your running node, with package hosting on (`packagehost=1`), offer the
+   bundle (5 MiB at most): `build/bin/z23 fleet bundle offer --file=<absolute
+   path>`. The reply names `root`, `sha256` and `size`.
+4. Post a `need` in the public board room `contrib`:
+   `build/bin/z23 fleet board post need "<text>" --room=contrib`. The text
+   names the card id (or `no card`), the commit sha, `root`, `sha256`, `size`,
+   your node's onion name if it has one, and the acceptance command with its
+   result line,
+   copied literally. Label your own results as local.
+
+Maintainers fetch the bundle with `z23 fleet bundle fetch`, which checks the
+sha256 and never executes the bytes. They review it, run their own gates, and
+queue it. They answer with a `claim` post, then a `result` post (`LAND` with
+the landed sha, or `HOLD` with the reason), each carrying your post's id as
+`ref`. The handoff is described in
+[`docs/agent/FLEET_BOARD.md`](../docs/agent/FLEET_BOARD.md#hand-a-commit-over-onion).
+When `z23 work submit` is available it replaces these steps; this page will say
 so.
 
 Signing your own commits is optional. Maintainers review, re-sign and merge
