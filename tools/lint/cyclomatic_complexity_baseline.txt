@@ -66,10 +66,6 @@ cognition/modules/codeindex/src/codeindex_incremental.c:ci_store_diff_merkle_lea
 cognition/modules/codeindex/src/codeindex_incremental.c:incremental_replace_file:18
 cognition/modules/codeindex/src/codeindex_inventory_evidence.c:inv_count_uses:44
 cognition/modules/codeindex/src/codeindex_inventory_evidence.c:inv_registered_reachability:42
-cognition/modules/codeindex/src/codeindex_inventory_scan.c:inv_collect_dir:20
-cognition/modules/codeindex/src/codeindex_inventory_scan.c:inv_collect_dir#2:22
-cognition/modules/codeindex/src/codeindex_inventory_scan.c:inv_read_arm_symbol_baseline:36
-cognition/modules/codeindex/src/codeindex_inventory_scan.c:inv_read_stable:40
 cognition/modules/codeindex/src/codeindex_merkle.c:ci_merkle_proof_verify:38
 cognition/modules/codeindex/src/codeindex_merkle.c:ci_merkle_prove:18
 cognition/modules/codeindex/src/codeindex_merkle.c:merkle_file_key_cb:17

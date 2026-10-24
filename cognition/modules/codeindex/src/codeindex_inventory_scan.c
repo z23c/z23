@@ -198,6 +198,27 @@ static bool inv_snapshot_push(
 #endif
 
 #if !defined(_WIN32)
+static bool inv_collect_dir(struct inv_scan *s, const char *rel);
+
+static bool inv_collect_entry(
+    struct inv_scan *s, const char *rel, const struct dirent *entry)
+{
+    char child[INV_PATH_MAX];
+    int n = snprintf(child, sizeof(child), "%s/%s", rel, entry->d_name);
+    if (n <= 0 || (size_t)n >= sizeof(child)) return false;
+    char child_full[INV_PATH_MAX];
+    n = snprintf(child_full, sizeof(child_full), "%s/%s", s->root, child);
+    if (n <= 0 || (size_t)n >= sizeof(child_full)) return false;
+    struct stat st;
+    if (lstat(child_full, &st) != 0) return false;
+    if (S_ISDIR(st.st_mode)) {
+        if (!inv_prune_dir(entry->d_name)) return inv_collect_dir(s, child);
+    } else if (S_ISREG(st.st_mode) && inv_source_name(entry->d_name)) {
+        return inv_path_push(s, child, &st);
+    }
+    return true;
+}
+
 static bool inv_collect_dir(struct inv_scan *s, const char *rel)
 {
     char full[INV_PATH_MAX];
@@ -209,19 +230,7 @@ static bool inv_collect_dir(struct inv_scan *s, const char *rel)
     struct dirent *entry;
     while (ok && (entry = readdir(dir)) != NULL) {
         if (entry->d_name[0] == '.') continue;
-        char child[INV_PATH_MAX];
-        n = snprintf(child, sizeof(child), "%s/%s", rel, entry->d_name);
-        if (n <= 0 || (size_t)n >= sizeof(child)) { ok = false; break; }
-        char child_full[INV_PATH_MAX];
-        n = snprintf(child_full, sizeof(child_full), "%s/%s", s->root, child);
-        if (n <= 0 || (size_t)n >= sizeof(child_full)) { ok = false; break; }
-        struct stat st;
-        if (lstat(child_full, &st) != 0) { ok = false; break; }
-        if (S_ISDIR(st.st_mode)) {
-            if (!inv_prune_dir(entry->d_name)) ok = inv_collect_dir(s, child);
-        } else if (S_ISREG(st.st_mode) && inv_source_name(entry->d_name)) {
-            ok = inv_path_push(s, child, &st);
-        }
+        ok = inv_collect_entry(s, rel, entry);
     }
     int saved = errno;
     if (closedir(dir) != 0 && ok) { ok = false; saved = errno; }
@@ -231,6 +240,25 @@ static bool inv_collect_dir(struct inv_scan *s, const char *rel)
 #endif
 
 #if defined(_WIN32)
+static bool inv_collect_file(
+    struct inv_scan *s, const char *rel, const char *name)
+{
+    char child[INV_PATH_MAX];
+    int n = snprintf(child, sizeof(child), "%s/%s", rel, name);
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot before, after;
+    platform_positioned_file_init(&file);
+    bool ok = n > 0 && (size_t)n < sizeof(child) &&
+         platform_positioned_file_open_beneath(&file, s->root, child) &&
+         platform_positioned_file_snapshot(&file, &before) &&
+         platform_positioned_file_snapshot(&file, &after) &&
+         platform_positioned_file_snapshot_equal(&before, &after) &&
+         before.size <= INT64_MAX &&
+         inv_snapshot_push(s, child, &after);
+    platform_positioned_file_close(&file);
+    return ok;
+}
+
 static bool inv_collect_dir(struct inv_scan *s, const char *rel)
 {
     char full[INV_PATH_MAX];
@@ -260,19 +288,7 @@ static bool inv_collect_dir(struct inv_scan *s, const char *rel)
     for (size_t i = 0; ok && i < files.count; i++) {
         const char *name = files.entries[i].name;
         if (!inv_source_name(name)) continue;
-        char child[INV_PATH_MAX];
-        n = snprintf(child, sizeof(child), "%s/%s", rel, name);
-        struct platform_positioned_file file;
-        struct platform_positioned_file_snapshot before, after;
-        platform_positioned_file_init(&file);
-        ok = n > 0 && (size_t)n < sizeof(child) &&
-             platform_positioned_file_open_beneath(&file, s->root, child) &&
-             platform_positioned_file_snapshot(&file, &before) &&
-             platform_positioned_file_snapshot(&file, &after) &&
-             platform_positioned_file_snapshot_equal(&before, &after) &&
-             before.size <= INT64_MAX &&
-             inv_snapshot_push(s, child, &after);
-        platform_positioned_file_close(&file);
+        ok = inv_collect_file(s, rel, name);
     }
     platform_directory_list_free(&directories);
     platform_directory_list_free(&files);
@@ -312,14 +328,25 @@ bool inv_collect_paths(struct inv_scan *s)
     return s->path_count > 0;
 }
 
-bool inv_read_stable(const struct inv_scan *s, int file_index,
-                     char **out, size_t *out_len)
-{
-    if (out) *out = NULL;
-    if (out_len) *out_len = 0;
-    if (!s || file_index < 0 || file_index >= s->path_count || !out || !out_len)
-        return false;
 #if defined(_WIN32)
+static bool inv_read_positioned_bytes(
+    struct platform_positioned_file *file, char *buf, size_t len)
+{
+    size_t offset = 0;
+    bool ok = true;
+    while (offset < len) {
+        size_t wanted = len - offset < 64 * 1024 ? len - offset : 64 * 1024;
+        int64_t got = platform_positioned_file_read(
+            file, buf + offset, wanted, (uint64_t)offset);
+        if (got <= 0) { ok = false; break; }
+        offset += (size_t)got;
+    }
+    return ok && offset == len;
+}
+
+static bool inv_read_stable_file(
+    const struct inv_scan *s, int file_index, char **out, size_t *out_len)
+{
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before, after;
     platform_positioned_file_init(&file);
@@ -333,16 +360,8 @@ bool inv_read_stable(const struct inv_scan *s, int file_index,
     size_t len = (size_t)before.size;
     char *buf = zcl_malloc(len ? len : 1, "ci_inventory_source");
     if (!buf) { platform_positioned_file_close(&file); return false; }
-    size_t offset = 0;
-    bool ok = true;
-    while (offset < len) {
-        size_t wanted = len - offset < 64 * 1024 ? len - offset : 64 * 1024;
-        int64_t got = platform_positioned_file_read(
-            &file, buf + offset, wanted, (uint64_t)offset);
-        if (got <= 0) { ok = false; break; }
-        offset += (size_t)got;
-    }
-    ok = ok && offset == len &&
+    bool ok = inv_read_positioned_bytes(&file, buf, len);
+    ok = ok &&
          platform_positioned_file_snapshot(&file, &after) &&
          platform_positioned_file_snapshot_equal(&before, &after);
     platform_positioned_file_close(&file);
@@ -350,7 +369,21 @@ bool inv_read_stable(const struct inv_scan *s, int file_index,
     *out = buf;
     *out_len = len;
     return true;
+}
 #else
+static bool inv_stat_equal(const struct stat *before, const struct stat *after)
+{
+    return before->st_dev == after->st_dev && before->st_ino == after->st_ino &&
+        before->st_size == after->st_size &&
+        INV_MTIME_SEC((*before)) == INV_MTIME_SEC((*after)) &&
+        INV_MTIME_NSEC((*before)) == INV_MTIME_NSEC((*after)) &&
+        INV_CTIME_SEC((*before)) == INV_CTIME_SEC((*after)) &&
+        INV_CTIME_NSEC((*before)) == INV_CTIME_NSEC((*after));
+}
+
+static bool inv_read_stable_file(
+    const struct inv_scan *s, int file_index, char **out, size_t *out_len)
+{
     char full[INV_PATH_MAX];
     int n = snprintf(full, sizeof(full), "%s/%s", s->root,
                      s->paths[file_index].path);
@@ -368,18 +401,23 @@ bool inv_read_stable(const struct inv_scan *s, int file_index,
     if (!buf) { fclose(f); return false; }
     size_t got = len ? fread(buf, 1, len, f) : 0;
     bool ok = got == len && !ferror(f) && fstat(fileno(f), &after) == 0 &&
-        before.st_dev == after.st_dev && before.st_ino == after.st_ino &&
-        before.st_size == after.st_size &&
-        INV_MTIME_SEC(before) == INV_MTIME_SEC(after) &&
-        INV_MTIME_NSEC(before) == INV_MTIME_NSEC(after) &&
-        INV_CTIME_SEC(before) == INV_CTIME_SEC(after) &&
-        INV_CTIME_NSEC(before) == INV_CTIME_NSEC(after);
+        inv_stat_equal(&before, &after);
     fclose(f);
     if (!ok) { free(buf); return false; }
     *out = buf;
     *out_len = len;
     return true;
+}
 #endif
+
+bool inv_read_stable(const struct inv_scan *s, int file_index,
+                     char **out, size_t *out_len)
+{
+    if (out) *out = NULL;
+    if (out_len) *out_len = 0;
+    if (!s || file_index < 0 || file_index >= s->path_count || !out || !out_len)
+        return false;
+    return inv_read_stable_file(s, file_index, out, out_len);
 }
 
 static bool inv_file_push(struct inv_scan *s, int index, const char *purpose)
@@ -476,6 +514,75 @@ static bool inv_hash_extra(struct inv_scan *s, struct sha3_256_ctx *sha,
     return ok;
 }
 
+struct inv_arm_header {
+    bool schema, artifact, assertion, generated_by, regenerate;
+};
+
+static bool inv_arm_header_complete(const struct inv_arm_header *header)
+{
+    return header->schema && header->artifact && header->assertion &&
+           header->generated_by && header->regenerate;
+}
+
+static void inv_arm_header_note(struct inv_arm_header *header, const char *line)
+{
+    if (strcmp(line,
+               "# z23-generated-artifact: zcl.generated_artifact.v1") == 0)
+        header->schema = true;
+    else if (strcmp(line,
+                    "# artifact-id: zcl.arm_symbol_single_baseline.v1") == 0)
+        header->artifact = true;
+    else if (strcmp(line,
+                    "# asserts: multi_arm_definition(path,symbol)") == 0)
+        header->assertion = true;
+    else if (strcmp(line,
+                    "# generated-by: build/bin/z23-lint check-arm-symbol-single") == 0)
+        header->generated_by = true;
+    else if (strcmp(line,
+                    "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single") == 0)
+        header->regenerate = true;
+}
+
+static bool inv_arm_symbol_push(struct inv_scan *s, char *line)
+{
+    char *tab = strchr(line, '\t');
+    if (!tab || tab == line || !tab[1] || strchr(tab + 1, '\t')) {
+        return false;
+    }
+    *tab++ = '\0';
+    bool unique = true;
+    for (int i = 0; i < s->arm_symbol_count; i++)
+        if (strcmp(s->arm_symbols[i].path, line) == 0 &&
+            strcmp(s->arm_symbols[i].name, tab) == 0)
+            unique = false;
+    if (!unique) return false;
+    if (s->arm_symbol_count == s->arm_symbol_cap) {
+        int cap = s->arm_symbol_cap ? s->arm_symbol_cap * 2 : 256;
+        void *p = zcl_realloc(s->arm_symbols,
+                              (size_t)cap * sizeof(*s->arm_symbols),
+                              "ci_inventory_arm_symbols");
+        if (!p) return false;
+        s->arm_symbols = p;
+        s->arm_symbol_cap = cap;
+    }
+    struct inv_arm_symbol *row = &s->arm_symbols[s->arm_symbol_count++];
+    memset(row, 0, sizeof(*row));
+    inv_cpy(row->path, sizeof(row->path), line);
+    inv_cpy(row->name, sizeof(row->name), tab);
+    return true;
+}
+
+static bool inv_arm_line_trim(char *line, size_t cap)
+{
+    size_t len = strlen(line);
+    if (len == cap - 1 && line[len - 1] != '\n') {
+        return false;
+    }
+    while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        line[--len] = '\0';
+    return true;
+}
+
 bool inv_read_arm_symbol_baseline(struct inv_scan *s)
 {
     char path[INV_PATH_MAX];
@@ -489,61 +596,21 @@ bool inv_read_arm_symbol_baseline(struct inv_scan *s)
                   path);
         return false;
     }
-    bool schema = false, artifact = false, assertion = false;
-    bool generated_by = false, regenerate = false, ok = true;
+    struct inv_arm_header header = {0};
+    bool ok = true;
     char line[768];
     while (ok && fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        if (len == sizeof(line) - 1 && line[len - 1] != '\n') {
+        if (!inv_arm_line_trim(line, sizeof(line))) {
             ok = false;
             break;
         }
-        while (len && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-            line[--len] = '\0';
-        if (strcmp(line,
-                   "# z23-generated-artifact: zcl.generated_artifact.v1") == 0)
-            schema = true;
-        else if (strcmp(line,
-                        "# artifact-id: zcl.arm_symbol_single_baseline.v1") == 0)
-            artifact = true;
-        else if (strcmp(line,
-                        "# asserts: multi_arm_definition(path,symbol)") == 0)
-            assertion = true;
-        else if (strcmp(line,
-                        "# generated-by: build/bin/z23-lint check-arm-symbol-single") == 0)
-            generated_by = true;
-        else if (strcmp(line,
-                        "# regenerate: ZCL_LINT_MODE=UPDATE build/bin/z23-lint check-arm-symbol-single") == 0)
-            regenerate = true;
+        inv_arm_header_note(&header, line);
         if (!line[0] || line[0] == '#') continue;
-        char *tab = strchr(line, '\t');
-        if (!tab || tab == line || !tab[1] || strchr(tab + 1, '\t')) {
-            ok = false;
-            break;
-        }
-        *tab++ = '\0';
-        for (int i = 0; i < s->arm_symbol_count; i++)
-            if (strcmp(s->arm_symbols[i].path, line) == 0 &&
-                strcmp(s->arm_symbols[i].name, tab) == 0)
-                ok = false;
-        if (!ok) break;
-        if (s->arm_symbol_count == s->arm_symbol_cap) {
-            int cap = s->arm_symbol_cap ? s->arm_symbol_cap * 2 : 256;
-            void *p = zcl_realloc(s->arm_symbols,
-                                  (size_t)cap * sizeof(*s->arm_symbols),
-                                  "ci_inventory_arm_symbols");
-            if (!p) { ok = false; break; }
-            s->arm_symbols = p;
-            s->arm_symbol_cap = cap;
-        }
-        struct inv_arm_symbol *row = &s->arm_symbols[s->arm_symbol_count++];
-        memset(row, 0, sizeof(*row));
-        inv_cpy(row->path, sizeof(row->path), line);
-        inv_cpy(row->name, sizeof(row->name), tab);
+        ok = inv_arm_symbol_push(s, line);
     }
     if (ferror(f)) ok = false;
     fclose(f);
-    if (!schema || !artifact || !assertion || !generated_by || !regenerate) {
+    if (!inv_arm_header_complete(&header)) {
         LOG_ERROR("codeindex.inventory",
                   "arm-symbol artifact lacks self-describing generated header; claims UNPROVEN");
         ok = false;
