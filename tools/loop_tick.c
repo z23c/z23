@@ -26,10 +26,11 @@
  * exits 0; the lead looks at the HOLD files. Output is one line per event on
  * stdout and in STATE/tick.log.
  *
- * Capture note: the spawn layer discards the child's stderr unless it merges
- * it, and has no merged form that also takes a cwd. Programs run in a lane
- * (devbuild, git add/commit, lint) therefore log stdout only; the gate logs
- * and the review text are the evidence a lead reads.
+ * Capture note: a program whose output lands in a log (devbuild, git add and
+ * commit, lint, prep, the engine) runs through zcl_spawn_capture_merged_in_dir_
+ * observed, so the log holds stderr too (compiler errors). A program whose
+ * stdout is parsed (the step, zgate's log path, the review JSON, the submit
+ * JSON, git status and rev-parse) stays stdout-only.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -83,6 +84,7 @@ enum {
     X(CLAUDE, "--claude", "claude")                                          \
     X(LINT_BIN, "--lint-bin", "build/bin/z23-lint")                          \
     X(SIGN, "--sign-flag", "-S")                                             \
+    X(ALLOW_UNSIGNED, "--allow-unsigned", "0")                               \
     X(TRAILER, "--trailer",                                                  \
       "Co-Authored-By: Claude Haiku 5.5 <noreply@anthropic.com>")            \
     X(MAX_HELD, "--max-held", "2")                                           \
@@ -124,6 +126,7 @@ struct tick {
     const char *owned_v[LT_OWNED_MAX];
     size_t owned_n;
     long removed;
+    char gatenote[160]; /* the land note's gate text, as the gates actually ran */
 };
 
 static const char *O(const struct tick *t, enum lt_opt o) { return t->opt[o]; }
@@ -265,13 +268,17 @@ static int run(struct tick *t, const char *cwd, const char *const argv[],
     return timed_out ? 124 : rc;
 }
 
+/* Stdout and stderr both land in the log; the exit status is the result. */
 static int run_logged(struct tick *t, const char *cwd,
                       const char *const argv[], int timeout_ms,
                       const char *log)
 {
-    const int rc = run(t, cwd, argv, timeout_ms);
+    bool timed_out = false;
+    t->buf[0] = '\0';
+    const int rc = zcl_spawn_capture_merged_in_dir_observed(
+        argv, cwd, t->buf, LT_BUF, timeout_ms, &timed_out);
     (void)write_file(log, t->buf, strlen(t->buf), "w");
-    return rc;
+    return timed_out ? 124 : rc;
 }
 
 static void trim(char *s)
@@ -721,14 +728,17 @@ static int stage_commit(struct tick *t)
     for (size_t i = 0; i < t->owned_n; i++)
         argv[n++] = t->owned_v[i];
     argv[n] = NULL;
-    const bool added = run(t, t->dir, argv, LT_SHORT_TIMEOUT_MS) == 0;
+    char alog[LT_PATH], clog[LT_PATH];
+    (void)fmt(alog, sizeof(alog), "%s/add.log", t->unit);
+    (void)fmt(clog, sizeof(clog), "%s/commit.log", t->unit);
+    const bool added = run_logged(t, t->dir, argv, LT_SHORT_TIMEOUT_MS, alog) == 0;
     const char *const commit_sign[] = { O(t, LT_O_GIT), "commit", "-q",
                                         O(t, LT_O_SIGN), "-F", msgp, NULL };
     const char *const commit_plain[] = { O(t, LT_O_GIT), "commit", "-q", "-F",
                                          msgp, NULL };
     const char *const *commit = *O(t, LT_O_SIGN) ? commit_sign : commit_plain;
-    if (!added || run(t, t->dir, commit, LT_SHORT_TIMEOUT_MS) != 0)
-        return hold(t, t->lane, "commit failed");
+    if (!added || run_logged(t, t->dir, commit, LT_SHORT_TIMEOUT_MS, clog) != 0)
+        return hold(t, t->lane, "commit failed (%s)", clog);
     const char *const head[] = { O(t, LT_O_GIT), "rev-parse", "HEAD", NULL };
     (void)run(t, t->dir, head, LT_SHORT_TIMEOUT_MS);
     trim(t->buf);
@@ -804,11 +814,31 @@ static bool wait_gates(struct tick *t, const char *l1, const char *l2,
     }
 }
 
+/* One rerun of agent-verify in the lane on r1, before a gate failure holds:
+ * a single group failing on a loaded gate host is often load. The land note
+ * then names both runs, so the lead reads what was actually proved. */
+static int gate_rerun(struct tick *t, const char *rc1, const char *l1)
+{
+    char log[LT_PATH];
+    (void)fmt(log, sizeof(log), "%s/av-rerun.log", t->unit);
+    const char *const av[] = { O(t, LT_O_DEVBUILD), "--wait", "make",
+                               "agent-verify", "ONLY=@changed", NULL };
+    say(t, "agent-verify %s on the gate host; rerunning once on r1 (%s)", rc1, l1);
+    if (run_logged(t, t->dir, av, LT_BUILD_TIMEOUT_MS, log) != 0)
+        return hold(t, t->lane, "agent-verify %s (%s); the r1 rerun failed (%s)",
+                    rc1, l1, log);
+    say(t, "agent-verify rerun on r1 rc=0");
+    (void)fmt(t->gatenote, sizeof(t->gatenote),
+              "zgate agent-verify %s then r1 rerun rc=0, lint rc=0", rc1);
+    return LT_GO;
+}
+
 static int stage_gates(struct tick *t)
 {
     char log[LT_PATH], l1[LT_PATH], l2[LT_PATH], rc1[256], rc2[256];
     const char *const quick[] = { O(t, LT_O_DEVBUILD), "--wait", "make",
                                   "lint-land", "lint-preflight", NULL };
+    (void)fmt(t->gatenote, sizeof(t->gatenote), "zgate agent-verify+lint rc=0");
     (void)fmt(log, sizeof(log), "%s/lintland.log", t->unit);
     if (run_logged(t, t->dir, quick, LT_BUILD_TIMEOUT_MS, log) != 0)
         return hold(t, t->lane, "lint-land failed (%s)", log);
@@ -820,8 +850,11 @@ static int stage_gates(struct tick *t)
         return hold(t, t->lane, "gates did not finish in %ld h (%s %s)",
                     oint(t, LT_O_GATE_WAIT) / 3600, l1, l2);
     say(t, "gates: agent-verify %s / lint %s", rc1, rc2);
-    if (strncmp(rc1, "rc=0", 4) != 0)
-        return hold(t, t->lane, "agent-verify %s (%s)", rc1, l1);
+    if (strncmp(rc1, "rc=0", 4) != 0) {
+        const int rr = gate_rerun(t, rc1, l1);
+        if (rr != LT_GO)
+            return rr;
+    }
     if (strncmp(rc2, "rc=0", 4) != 0)
         return hold(t, t->lane, "lint %s (%s)", rc2, l2);
     return LT_GO;
@@ -909,7 +942,9 @@ static int stage_review(struct tick *t)
                                  "claude-haiku-5-5", "--output-format", "json",
                                  "--no-session-persistence", "--setting-sources=",
                                  "--tools", "Read,Grep,Glob", NULL };
-    (void)run_logged(t, t->dir, argv, oms(t, LT_O_REVIEW_TIMEOUT), rj);
+    /* stdout only: it is the review's JSON, parsed below */
+    (void)run(t, t->dir, argv, oms(t, LT_O_REVIEW_TIMEOUT));
+    (void)write_file(rj, t->buf, strlen(t->buf), "w");
     free(prompt);
     char *review = review_text(t);
     if (review) {
@@ -945,9 +980,9 @@ static int stage_submit(struct tick *t)
         return hold(t, t->lane, "prep failed (%s)", log);
     (void)fmt(note, sizeof(note),
               "%s split %ld over-cap function(s) in %s (%s) under the complexity cap; "
-              "claude-haiku via z23-engine-unit, baseline only shrank, zgate "
-              "agent-verify+lint rc=0, read-only Haiku review LAND.",
-              t->prefix, t->removed, base, t->pins);
+              "claude-haiku via z23-engine-unit, baseline only shrank, %s, "
+              "read-only Haiku review LAND.",
+              t->prefix, t->removed, base, t->pins, t->gatenote);
     (void)fmt(flag_wt, sizeof(flag_wt), "--worktree=%s", t->dir);
     (void)fmt(flag_note, sizeof(flag_note), "--note=%.500s", note);
     const char *const submit[] = { O(t, LT_O_DEV), "dev", "land", "submit",
@@ -1006,6 +1041,12 @@ static int parse_args(struct tick *t, int argc, char **argv)
         }
         if (!t->opt[k])
             t->opt[k] = t->dflt[k];
+    }
+    /* An unsigned commit lands only under the test-only option. */
+    if (!*O(t, LT_O_SIGN) && strcmp(O(t, LT_O_ALLOW_UNSIGNED), "1") != 0) {
+        fprintf(stderr, "loop-tick: refusing an empty --sign-flag: commits must be "
+                "signed (--allow-unsigned 1 is for tests only)\n");
+        return 2;
     }
     return LT_GO;
 }

@@ -1090,6 +1090,24 @@ int zcl_spawn_capture_in_dir_observed(const char *const argv[], const char *cwd,
 #endif
 }
 
+int zcl_spawn_capture_merged_in_dir_observed(const char *const argv[],
+                                             const char *cwd, char *buf,
+                                             size_t cap, int timeout_ms,
+                                             bool *timed_out)
+{
+    if (!cwd)
+        return zcl_spawn_capture_merged_observed(argv, buf, cap, timeout_ms,
+                                                 timed_out);
+#ifdef _WIN32
+    if (buf && cap > 0) buf[0] = '\0';
+    if (timed_out) *timed_out = false;
+    return -1; /* no directory-scoped launch here: refuse, never run elsewhere */
+#else
+    return spawn_capture_impl_cwd(argv, buf, cap, timeout_ms, NULL, NULL,
+                                  NULL, timed_out, true, NULL, -1, NULL, cwd);
+#endif
+}
+
 int zcl_spawn_capture_merged_observed(const char *const argv[], char *buf,
                                       size_t cap, int timeout_ms,
                                       bool *timed_out)

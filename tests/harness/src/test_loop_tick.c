@@ -12,7 +12,10 @@
  * baseline that grows and a non-LAND review each write a HOLD (the first two
  * without a commit); the step actions wait, paused and none, and a non-haiku
  * engine, create no lane; a second instance exits on the lock; a landed lane
- * is retired; held lanes at --max-held stop the tick before the step. */
+ * is retired; held lanes at --max-held stop the tick before the step. A failed
+ * agent-verify is rerun once on r1 (a passing rerun submits with its note, a
+ * failing one holds); the lint-land log keeps the stderr a build wrote; an
+ * empty --sign-flag is refused unless --allow-unsigned 1 is given. */
 
 #include "test/test_core.h"
 
@@ -39,7 +42,8 @@ struct lt_cfg {
     const char *edit;    /* file the fake engine appends to, or NULL */
     const char *lint;    /* "shrink" or "grow" */
     const char *verdict; /* the review's last line */
-    const char *gate_rc; /* what both fake gates print */
+    const char *gate_rc; /* what the fake agent-verify gate prints (lint prints rc=0) */
+    const char *rerun;   /* exit status of the r1 agent-verify rerun, NULL = 0 */
 };
 
 struct lt_env {
@@ -155,14 +159,18 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
            lt_script(e, "eu",
                "while [ $# -gt 0 ]; do [ \"$1\" = --worktree ] && wt=$2; shift; done\n"
                "[ -n '%s' ] || exit 0\ncd \"$wt\" && echo edit >> '%s'", edit, edit) &&
-           lt_script(e, "devbuild", "exit 0") &&
+           lt_script(e, "devbuild",
+               "case \"$*\" in\n *lint-land*) echo lint-land-stderr-marker >&2 ;;\n"
+               " *agent-verify*) exit %s ;;\nesac\nexit 0",
+               c->rerun ? c->rerun : "0") &&
            lt_script(e, "lint", grow
                ? "echo f9:99 >> tools/lint/cyclomatic_complexity_baseline.txt"
                : "f=tools/lint/cyclomatic_complexity_baseline.txt\n"
                  "tail -n +2 $f > $f.new && mv $f.new $f") &&
            lt_script(e, "zgate",
-               "l='%s'/zgate.$$.log\necho '%s' > \"$l\"\necho \"log: $l\"", e->d,
-               c->gate_rc) &&
+               "l='%s'/zgate.$$.log\n"
+               "case \"$*\" in *agent-verify*) r='%s' ;; *) r='rc=0' ;; esac\n"
+               "echo \"$r\" > \"$l\"\necho \"log: $l\"", e->d, c->gate_rc) &&
            lt_script(e, "claude",
                "printf '%%s\\n' '{\"result\":\"reviewed\\n%s\"}'", c->verdict) &&
            lt_script(e, "retire",
@@ -217,9 +225,9 @@ static int lt_tick(const struct lt_env *e, const char *extra_flag,
         argv[n++] = names[i];
         argv[n++] = a[i];
     }
-    const char *const fixed[] = { "--sign-flag", "", "--poll-ms", "50",
-        "--gate-wait-s", "10", "--step-timeout-s", "30", "--engine-timeout-s",
-        "30", "--review-timeout-s", "30" };
+    const char *const fixed[] = { "--sign-flag", "", "--allow-unsigned", "1",
+        "--poll-ms", "50", "--gate-wait-s", "10", "--step-timeout-s", "30",
+        "--engine-timeout-s", "30", "--review-timeout-s", "30" };
     for (size_t i = 0; i < sizeof(fixed) / sizeof(fixed[0]); i++)
         argv[n++] = fixed[i];
     if (extra_flag) {
@@ -227,9 +235,12 @@ static int lt_tick(const struct lt_env *e, const char *extra_flag,
         argv[n++] = extra_value;
     }
     argv[n] = NULL;
-    int rc = -1;
-    (void)lt_run(argv, out, cap, &rc);
-    return rc;
+    /* merged: the refusal text is on stderr, the tool's own lines on stdout */
+    char scratch[8192];
+    bool timed_out = false;
+    return zcl_spawn_capture_merged_observed(argv, out ? out : scratch,
+                                             out ? cap : sizeof(scratch),
+                                             120000, &timed_out);
 }
 
 static bool lt_has(const char *path, const char *needle)
@@ -258,7 +269,7 @@ static int case_run_submits(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0" };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
     char out[8192];
     const bool ready = lt_setup(&e, "run", &c, "run", "claude-haiku");
     LT_CHECK("the run scenario fixtures are written", ready);
@@ -276,6 +287,8 @@ static int case_run_submits(void)
              lt_file_has(&e, "state/tick.log", "gates: agent-verify rc=0 / lint rc=0"));
     LT_CHECK("it logs a LAND review",
              lt_file_has(&e, "state/tick.log", "review: VERDICT: LAND"));
+    LT_CHECK("the lint-land log keeps the stderr the build wrote",
+             lt_file_has(&e, "scratch/loop-t1/lintland.log", "lint-land-stderr-marker"));
     LT_CHECK("it made exactly one commit in the lane", lt_commits_ahead(&e) == 1);
     LT_CHECK("the baseline lost its first row in the commit",
              lt_file_has(&e, "lanes/loop-t1/tools/lint/cyclomatic_complexity_baseline.txt", "a.c:f2:21") &&
@@ -296,7 +309,7 @@ static int case_scope_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "other.c", "shrink", "VERDICT: LAND", "rc=0" };
+    const struct lt_cfg c = { "other.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
     const bool ready = lt_setup(&e, "scope", &c, "run", "claude-haiku");
     LT_CHECK("the scope scenario fixtures are written", ready);
     if (!ready)
@@ -315,7 +328,7 @@ static int case_baseline_growth_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "grow", "VERDICT: LAND", "rc=0" };
+    const struct lt_cfg c = { "owned.c", "grow", "VERDICT: LAND", "rc=0", NULL };
     const bool ready = lt_setup(&e, "grow", &c, "run", "claude-haiku");
     LT_CHECK("the growth scenario fixtures are written", ready);
     if (!ready)
@@ -333,7 +346,7 @@ static int case_review_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: HOLD owned.c:1 bad split", "rc=0" };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: HOLD owned.c:1 bad split", "rc=0", NULL };
     const bool ready = lt_setup(&e, "review", &c, "run", "claude-haiku");
     LT_CHECK("the review scenario fixtures are written", ready);
     if (!ready)
@@ -350,14 +363,54 @@ static int case_gate_failure_hold(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=1" };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=1", "1" };
     const bool ready = lt_setup(&e, "gate", &c, "run", "claude-haiku");
     LT_CHECK("the gate scenario fixtures are written", ready);
     if (!ready)
         return failures + 1;
     (void)lt_tick(&e, NULL, NULL, NULL, 0);
     LT_CHECK("a failing gate holds", lt_file_has(&e, "state/loop-t1.HOLD", "agent-verify rc=1"));
+    LT_CHECK("the failing r1 rerun is what holds it",
+             lt_file_has(&e, "state/loop-t1.HOLD", "the r1 rerun failed"));
     LT_CHECK("it does not submit", !lt_exists("%s/%s", e.d, "submit.txt"));
+    return failures;
+}
+
+static int case_rerun_pass(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=1", "0" };
+    char out[8192] = "";
+    const bool ready = lt_setup(&e, "rerun", &c, "run", "claude-haiku");
+    LT_CHECK("the rerun scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_tick(&e, NULL, NULL, out, sizeof(out));
+    LT_CHECK("a failed agent-verify with a passing r1 rerun exits 0", rc == 0);
+    LT_CHECK("it logs the passing r1 rerun",
+             lt_file_has(&e, "state/tick.log", "agent-verify rerun on r1 rc=0"));
+    LT_CHECK("it writes no HOLD", !lt_exists("%s/%s", e.d, "state/loop-t1.HOLD"));
+    LT_CHECK("it submits", lt_file_has(&e, "submit.txt", "dev land submit --worktree="));
+    LT_CHECK("it submits with the rerun gate note",
+             lt_file_has(&e, "submit.txt", "zgate agent-verify rc=1 then r1 rerun rc=0, lint rc=0"));
+    return failures;
+}
+
+static int case_unsigned_refused(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192] = "";
+    const bool ready = lt_setup(&e, "unsigned", &c, "run", "claude-haiku");
+    LT_CHECK("the unsigned scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_tick(&e, "--allow-unsigned", "0", out, sizeof(out));
+    LT_CHECK("an empty --sign-flag without --allow-unsigned 1 exits 2", rc == 2);
+    LT_CHECK("it names the refusal", strstr(out, "refusing an empty --sign-flag") != NULL);
+    LT_CHECK("it creates no lane", !lt_exists("%s/lanes/%s", e.d, "loop-t1"));
     return failures;
 }
 
@@ -365,7 +418,7 @@ static int case_no_lane_actions(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0" };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
     static const char *const actions[] = { "wait", "paused", "none" };
     bool ready = lt_setup(&e, "wait", &c, "wait", "claude-haiku");
     LT_CHECK("the no-lane scenario fixtures are written", ready);
@@ -393,7 +446,7 @@ static int case_lock(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0" };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
     char lock[900], state[900];
     const bool ready = lt_setup(&e, "lock", &c, "run", "claude-haiku");
     LT_CHECK("the lock scenario fixtures are written", ready);
@@ -420,7 +473,7 @@ static int case_retire_and_held(void)
 {
     int failures = 0;
     struct lt_env e;
-    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0" };
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
     char main_[700], lane[900], hold_a[900], hold_b[900], out[1024];
     const bool ready = lt_setup(&e, "retire", &c, "none", "claude-haiku");
     LT_CHECK("the retire scenario fixtures are written", ready);
@@ -478,6 +531,8 @@ int test_loop_tick(void)
     failures += case_baseline_growth_hold();
     failures += case_review_hold();
     failures += case_gate_failure_hold();
+    failures += case_rerun_pass();
+    failures += case_unsigned_refused();
     failures += case_no_lane_actions();
     failures += case_lock();
     failures += case_retire_and_held();

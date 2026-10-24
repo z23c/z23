@@ -167,6 +167,14 @@ int zcl_spawn_capture_in_dir_observed(const char *const argv[], const char *cwd,
                                      char *buf, size_t cap, int timeout_ms,
                                      bool *timed_out);
 
+/* The same as zcl_spawn_capture_in_dir_observed(), with stderr merged into
+ * stdout as zcl_spawn_capture_merged_observed() does. A NULL `cwd` is exactly
+ * zcl_spawn_capture_merged_observed(). Windows refuses a non-NULL `cwd`. */
+int zcl_spawn_capture_merged_in_dir_observed(const char *const argv[],
+                                             const char *cwd, char *buf,
+                                             size_t cap, int timeout_ms,
+                                             bool *timed_out);
+
 /* The same bounded, no-shell capture, except the child's stderr is
  * interleaved into the SAME pipe as stdout instead of being discarded to
  * /dev/null. Use this — not zcl_spawn_capture()/zcl_spawn_capture_observed()
