@@ -153,6 +153,14 @@ bool boot_bundle_fetch_download(const char *datadir,
                                 size_t npeers,
                                 const struct rom_fetch_manifest *m);
 
+/* The warm-boot rom_seed registration of an already-landed bundle runs on a
+ * tracked background thread. Block until every such registration finished
+ * (tests; shutdown reaps the thread through thread_registry_join_all). */
+void boot_bundle_fetch_reseed_wait(void);
+/* Test latch: while held the background registration waits, so a test can
+ * observe that the boot call returned first and nothing is served yet. */
+void boot_bundle_fetch_reseed_test_hold(bool hold);
+
 /* The production entry point wired into boot_select_state_source (before the
  * autodetect+install). Runs boot_bundle_fetch_should_run; assembles the
  * file-service seed set from ctx (ctx->file_service_peer, which may carry a

@@ -9,6 +9,8 @@
 #include "config/boot_bundle_fetch.h"
 #include "boot_bundle_fetch_seeds_internal.h"    /* bbf_assemble_seeds/_add_peer */
 #include "boot_bundle_fetch_probe_internal.h"
+#include "boot_bundle_fetch_landed_internal.h"
+#include "boot_timing_marks_internal.h"
 #include "config/boot.h"                       /* struct app_context */
 #include "config/boot_consensus_bundle_marker.h"
 #include "config/consensus_state_install_runtime.h" /* boot_autodetect_consensus_bundle */
@@ -171,39 +173,16 @@ bool boot_bundle_fetch_should_run(const char *datadir,
  * boot_bundle_pick_header_seed_manifest) lives in
  * engine/composition/src/boot_bundle_manifest_pick.c. */
 /* ── Verified download into <datadir>/bundles/ ──────────────────────────── */
-/* Register a landed, content-verified bundle with rom_seed so this node serves
- * it to the swarm. Non-fatal: the next rom_seed scan picks it up otherwise. */
-static void bbf_reseed_landed(const char *datadir,
-                              const struct rom_fetch_manifest *m)
-{
-    char reseed_name[ROM_SEED_NAME_MAX];
-    int rnn = snprintf(reseed_name, sizeof(reseed_name), "%s/%s",
-                       ROM_SEED_BUNDLES_SUBDIR, m->filename);
-    if (rnn > 0 && (size_t)rnn < sizeof(reseed_name)) {
-        enum rom_register_result rrc =
-            rom_seed_register(datadir, reseed_name, m->whole_sha3, NULL);
-        if (rrc == ROM_REG_OK)
-            LOG_INFO(BBF_SUBSYS,
-                     "reseed: registered fetched bundle '%s' with rom_seed — "
-                     "this node now serves it to the swarm", reseed_name);
-        else
-            LOG_WARN(BBF_SUBSYS,
-                     "reseed: could not register fetched bundle '%s' (rc=%d) "
-                     "— the next rom_seed scan will pick it up", reseed_name,
-                     (int)rrc);
-    } else {
-        LOG_WARN(BBF_SUBSYS,
-                 "reseed: bundle relative name overflow — the next rom_seed "
-                 "scan will pick it up");
-    }
-}
-
 /* Warm-boot short-circuit: the final <bundles>/<filename> is already on disk
  * and equals the committed manifest (size, chunk fold and whole-file SHA3, one
- * bounded streaming pass in rom_fetch_verify_file). Absent file or any
- * mismatch/read error returns false and the caller downloads as before. Never
- * installs and never touches the install marker, any .failed marker or the
- * autodetect gate. */
+ * bounded streaming pass in rom_fetch_verify_file). A stamp recorded after the
+ * last successful full verify (size, mtime, inode, chunk root) stands in for
+ * that pass while the file is unchanged. Absent file or any mismatch/read
+ * error returns false and the caller downloads as before. Never installs and
+ * never touches the install marker, any .failed marker or the autodetect gate.
+ * The rom_seed registration (a second whole-file hash) runs on a tracked
+ * background thread; it registers only if the bytes match the manifest's
+ * whole-file digest, so a corrupt bundle is never served. */
 static bool bbf_already_landed(const char *datadir, const char *bundles,
                                const struct rom_fetch_manifest *m)
 {
@@ -214,16 +193,26 @@ static bool bbf_already_landed(const char *datadir, const char *bundles,
     struct stat st;
     if (stat(path, &st) != 0)
         return false; /* cold boot: nothing there, no noise */
-    if (!rom_fetch_verify_file(path, m)) {
+    int64_t t0 = boot_clock_ms();
+    /* A stamp hit (size, mtime, inode, root unchanged since the last full
+     * verify) skips only this first hash pass. It is a hint, not a gate:
+     * rom_seed_register re-hashes the bytes before serving them, and the
+     * install path checks the compiled SHA3/CHECKPOINT_ROM authority. */
+    bool stamped = bbf_landed_stamp_matches(path, &st, m);
+    if (!stamped && !rom_fetch_verify_file(path, m)) {
         LOG_WARN(BBF_SUBSYS,
                  "bundle fetch: %s present but does not match the committed "
                  "manifest (or unreadable) — downloading", m->filename);
         return false;
     }
+    if (!stamped)
+        bbf_landed_stamp_write(path, &st, m);
     LOG_INFO(BBF_SUBSYS,
-             "bundle fetch: %s already present and verified, skipping download",
-             m->filename);
-    bbf_reseed_landed(datadir, m);
+             "bundle fetch: %s already present and verified (%s), skipping "
+             "download", m->filename,
+             stamped ? "stamp matches" : "full hash");
+    bbf_reseed_landed_async(datadir, m);
+    (void)boot_submark("bundle.landed_verify", t0);
     return true;
 }
 

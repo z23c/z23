@@ -754,6 +754,7 @@ int test_rpc_service_restart(void);
 int test_rpc_readiness_classes(void);
 int test_projection_warmup(void);
 int test_frontend_async(void);
+int test_boot_bundle_landed(void);
 int test_failed_child_cap(void);
 int test_power_node_contract_spec(void);
 int test_boot_phase(void);

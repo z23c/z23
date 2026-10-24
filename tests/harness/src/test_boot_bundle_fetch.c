@@ -624,6 +624,7 @@ static int case_warm_landed(void)
         char *c1 = test_mkdtemp(r1, sizeof(r1), "zcl_bbf_w1");
         ASSERT(c1 != NULL);
         ASSERT(bbf_download_with_staged(c1, content, size, dead, &m));
+        boot_bundle_fetch_reseed_wait(); /* warm-boot reseed is a background job */
         ASSERT(bbf_reseeded(&m));
         ASSERT(!boot_consensus_bundle_marker_exists(c1));
         rom_seed_reset();
