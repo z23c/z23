@@ -362,6 +362,105 @@ static bool tsc_reply_ok(const char *out, size_t n)
     return ok;
 }
 
+static int tsc_check_stage_next(const struct json_value *rd,
+                                const char *const *k_rungs, size_t i)
+{
+    int failures = 0;
+    char label[192];
+    /* No next[] entry may point back at this same leaf. */
+    const struct json_value *nx = json_get(rd, "next");
+    bool self = false;
+    for (size_t j = 0; nx && j < nx->num_children; j++) {
+        const char *c = json_get_str(json_get(json_at(nx, j),
+                                              "command"));
+        if (c && strcmp(c, "ops.telemetry.sync.stage") == 0)
+            self = true;
+    }
+    (void)snprintf(label, sizeof label,
+                   "[stage] --stage=%s emits no self-referential "
+                   "next[]", k_rungs[i]);
+    TSC_CHECK(label, !self);
+    return failures;
+}
+
+static int tsc_check_stage_reply(const char *out, size_t n,
+                                 const char *const *k_rungs, size_t i)
+{
+    int failures = 0;
+    char label[192];
+    /* An ok envelope is not enough: assert the rung the caller ASKED for
+     * is the rung that came back, and that a bounded rung states its
+     * upstream. Without this, a handler that answered every name with the
+     * same row would still be green above. */
+    struct json_value rd;
+    if (json_read(&rd, out, n)) {
+        const struct json_value *d = json_get(&rd, "data");
+        const struct json_value *rows = d ? json_get(d, "stages") : NULL;
+        const char *got = rows ? json_get_str(
+            json_get(json_at(rows, 0), "stage")) : NULL;
+        (void)snprintf(label, sizeof label,
+                       "[stage] --stage=%s returns that rung, not another",
+                       k_rungs[i]);
+        TSC_CHECK(label, got && strcmp(got, k_rungs[i]) == 0);
+
+        const char *up = d ? json_get_str(json_get(d, "upstream_stage"))
+                           : NULL;
+        (void)snprintf(label, sizeof label,
+                       "[stage] --stage=%s names %s as its upstream",
+                       k_rungs[i], i ? k_rungs[i - 1] : "(none)");
+        TSC_CHECK(label, up && strcmp(up, i ? k_rungs[i - 1] : "") == 0);
+
+        /* The upstream drill-down must be reachable as DATA. It cannot be
+         * a next[] step — the registry refuses a self-referential next[]
+         * and answers the whole call with an empty document — so its
+         * presence here is what keeps the link from silently vanishing. */
+        const char *inv = d ? json_get_str(
+            json_get(d, "upstream_invocation")) : NULL;
+        (void)snprintf(label, sizeof label,
+                       "[stage] --stage=%s carries a runnable upstream "
+                       "invocation", k_rungs[i]);
+        /* json_get_str() answers a missing key with "", never NULL. */
+        TSC_CHECK(label, i == 0 ? (inv && inv[0] == 0)
+                                : (inv && strstr(inv, k_rungs[i - 1])));
+
+        failures += tsc_check_stage_next(&rd, k_rungs, i);
+        json_free(&rd);
+    }
+    return failures;
+}
+
+static int tsc_check_unknown_stage(const struct zcl_command_registry *reg,
+                                   char *out, size_t out_size)
+{
+    int failures = 0;
+    size_t n;
+
+    /* An unknown rung is a TYPED refusal naming the valid set — never an empty
+     * reply, and never a plausible empty stage row. */
+    n = tsc_exec(reg, "ops.telemetry.sync.stage", "normal", "nonsense", out,
+                 out_size);
+    TSC_CHECK("[budget] an unknown stage still writes a reply", n > 0);
+    struct json_value doc;
+    bool parsed = n > 0 && json_read(&doc, out, n);
+    TSC_CHECK("[stage] an unknown stage reply parses", parsed);
+    if (parsed) {
+        const struct json_value *err = json_get(&doc, "error");
+        const char *code = err ? json_get_str(json_get(err, "code")) : NULL;
+        TSC_CHECK("[stage] an unknown stage is UNKNOWN_STAGE, not an empty "
+                  "result", code && strcmp(code, "UNKNOWN_STAGE") == 0);
+        const char *evidence = err ? json_get_str(json_get(err, "evidence"))
+                                   : NULL;
+        TSC_CHECK("[stage] the refusal names the valid set",
+                  evidence && strstr(evidence, "tip_finalize") != NULL &&
+                      strstr(evidence, "header_admit") != NULL);
+        TSC_CHECK("[stage] the refusal carries no data document",
+                  json_get(&doc, "data") == NULL);
+    }
+    if (parsed)
+        json_free(&doc);
+    return failures;
+}
+
 static int check_the_leaves_fit_the_wire(void)
 {
     int failures = 0;
@@ -403,82 +502,9 @@ static int check_the_leaves_fit_the_wire(void)
                        (unsigned)ZCL_COMMAND_LIST_BUDGET);
         TSC_CHECK(label, tsc_reply_ok(out, n));
 
-        /* An ok envelope is not enough: assert the rung the caller ASKED for
-         * is the rung that came back, and that a bounded rung states its
-         * upstream. Without this, a handler that answered every name with the
-         * same row would still be green above. */
-        struct json_value rd;
-        if (json_read(&rd, out, n)) {
-            const struct json_value *d = json_get(&rd, "data");
-            const struct json_value *rows = d ? json_get(d, "stages") : NULL;
-            const char *got = rows ? json_get_str(
-                json_get(json_at(rows, 0), "stage")) : NULL;
-            (void)snprintf(label, sizeof label,
-                           "[stage] --stage=%s returns that rung, not another",
-                           k_rungs[i]);
-            TSC_CHECK(label, got && strcmp(got, k_rungs[i]) == 0);
-
-            const char *up = d ? json_get_str(json_get(d, "upstream_stage"))
-                               : NULL;
-            (void)snprintf(label, sizeof label,
-                           "[stage] --stage=%s names %s as its upstream",
-                           k_rungs[i], i ? k_rungs[i - 1] : "(none)");
-            TSC_CHECK(label, up && strcmp(up, i ? k_rungs[i - 1] : "") == 0);
-
-            /* The upstream drill-down must be reachable as DATA. It cannot be
-             * a next[] step — the registry refuses a self-referential next[]
-             * and answers the whole call with an empty document — so its
-             * presence here is what keeps the link from silently vanishing. */
-            const char *inv = d ? json_get_str(
-                json_get(d, "upstream_invocation")) : NULL;
-            (void)snprintf(label, sizeof label,
-                           "[stage] --stage=%s carries a runnable upstream "
-                           "invocation", k_rungs[i]);
-            /* json_get_str() answers a missing key with "", never NULL. */
-            TSC_CHECK(label, i == 0 ? (inv && inv[0] == 0)
-                                    : (inv && strstr(inv, k_rungs[i - 1])));
-
-            /* No next[] entry may point back at this same leaf. */
-            const struct json_value *nx = json_get(&rd, "next");
-            bool self = false;
-            for (size_t j = 0; nx && j < nx->num_children; j++) {
-                const char *c = json_get_str(json_get(json_at(nx, j),
-                                                      "command"));
-                if (c && strcmp(c, "ops.telemetry.sync.stage") == 0)
-                    self = true;
-            }
-            (void)snprintf(label, sizeof label,
-                           "[stage] --stage=%s emits no self-referential "
-                           "next[]", k_rungs[i]);
-            TSC_CHECK(label, !self);
-            json_free(&rd);
-        }
+        failures += tsc_check_stage_reply(out, n, k_rungs, i);
     }
-    size_t n;
-
-    /* An unknown rung is a TYPED refusal naming the valid set — never an empty
-     * reply, and never a plausible empty stage row. */
-    n = tsc_exec(reg, "ops.telemetry.sync.stage", "normal", "nonsense", out,
-                 sizeof out);
-    TSC_CHECK("[budget] an unknown stage still writes a reply", n > 0);
-    struct json_value doc;
-    bool parsed = n > 0 && json_read(&doc, out, n);
-    TSC_CHECK("[stage] an unknown stage reply parses", parsed);
-    if (parsed) {
-        const struct json_value *err = json_get(&doc, "error");
-        const char *code = err ? json_get_str(json_get(err, "code")) : NULL;
-        TSC_CHECK("[stage] an unknown stage is UNKNOWN_STAGE, not an empty "
-                  "result", code && strcmp(code, "UNKNOWN_STAGE") == 0);
-        const char *evidence = err ? json_get_str(json_get(err, "evidence"))
-                                   : NULL;
-        TSC_CHECK("[stage] the refusal names the valid set",
-                  evidence && strstr(evidence, "tip_finalize") != NULL &&
-                      strstr(evidence, "header_admit") != NULL);
-        TSC_CHECK("[stage] the refusal carries no data document",
-                  json_get(&doc, "data") == NULL);
-    }
-    if (parsed)
-        json_free(&doc);
+    failures += tsc_check_unknown_stage(reg, out, sizeof out);
     return failures;
 }
 
@@ -487,6 +513,34 @@ static int check_the_leaves_fit_the_wire(void)
  * it would send an operator to the wrong subsystem, which is worse than
  * saying nothing — so the two are asserted to agree, at every view, including
  * the case where nothing is nameable (then next[] must go to `stages`). */
+static int tsc_check_summary_next(const struct json_value *doc,
+                                  const char *stage)
+{
+    int failures = 0;
+    const struct json_value *next = json_get(doc, "next");
+    TSC_CHECK("[summary] the reply always carries a next step",
+              next && next->type == JSON_ARR && next->num_children >= 1);
+    if (next && next->type == JSON_ARR && next->num_children >= 1) {
+        const struct json_value *first = &next->children[0];
+        const char *cmd = json_get_str(json_get(first, "command"));
+        const char *in = json_get_str(json_get(first, "input"));
+        if (stage && stage[0]) {
+            char want[192];
+            (void)snprintf(want, sizeof want, "\"stage\":\"%s\"", stage);
+            TSC_CHECK("[summary] next[] drills into the sync stage leaf",
+                      cmd && strcmp(cmd, "ops.telemetry.sync.stage") == 0);
+            TSC_CHECK("[summary] next[] names the SAME rung the bottleneck "
+                      "block did, not a generic link",
+                      in && strstr(in, want) != NULL);
+        } else {
+            TSC_CHECK("[summary] with no nameable rung, next[] lists the whole "
+                      "ladder", cmd &&
+                      strcmp(cmd, "ops.telemetry.sync.stages") == 0);
+        }
+    }
+    return failures;
+}
+
 static int check_summary_names_a_bottleneck(void)
 {
     int failures = 0;
@@ -520,27 +574,7 @@ static int check_summary_names_a_bottleneck(void)
     TSC_CHECK("[summary] a nameless bottleneck carries a reason token",
               (stage && stage[0]) || (reason && reason[0]));
 
-    const struct json_value *next = json_get(&doc, "next");
-    TSC_CHECK("[summary] the reply always carries a next step",
-              next && next->type == JSON_ARR && next->num_children >= 1);
-    if (next && next->type == JSON_ARR && next->num_children >= 1) {
-        const struct json_value *first = &next->children[0];
-        const char *cmd = json_get_str(json_get(first, "command"));
-        const char *in = json_get_str(json_get(first, "input"));
-        if (stage && stage[0]) {
-            char want[192];
-            (void)snprintf(want, sizeof want, "\"stage\":\"%s\"", stage);
-            TSC_CHECK("[summary] next[] drills into the sync stage leaf",
-                      cmd && strcmp(cmd, "ops.telemetry.sync.stage") == 0);
-            TSC_CHECK("[summary] next[] names the SAME rung the bottleneck "
-                      "block did, not a generic link",
-                      in && strstr(in, want) != NULL);
-        } else {
-            TSC_CHECK("[summary] with no nameable rung, next[] lists the whole "
-                      "ladder", cmd &&
-                      strcmp(cmd, "ops.telemetry.sync.stages") == 0);
-        }
-    }
+    failures += tsc_check_summary_next(&doc, stage);
     json_free(&doc);
     return failures;
 }
@@ -548,6 +582,29 @@ static int check_summary_names_a_bottleneck(void)
 /* The stage set is derived from the field table, not listed anywhere. Prove
  * it resolved to the real ladder, so a derivation that silently found nothing
  * cannot pass as "no rungs to check". */
+static int tsc_check_persist_row(const struct json_value *rows)
+{
+    int failures = 0;
+    bool saw_persist = false;
+    if (rows && rows->type == JSON_ARR) {
+        for (size_t i = 0; i < rows->num_children; i++) {
+            const char *nm = json_get_str(json_get(&rows->children[i],
+                                                   "stage"));
+            if (nm && strcmp(nm, "body_persist") == 0) {
+                saw_persist = true;
+                const struct json_value *f = json_get(&rows->children[i],
+                                                      "fields");
+                TSC_CHECK("[stages] a rung row carries its own fields, keyed "
+                          "by the field table's own leaf keys",
+                          f && f->type == JSON_OBJ &&
+                              json_get(f, "body_persist_cursor") != NULL);
+            }
+        }
+    }
+    TSC_CHECK("[stages] the ladder includes body_persist", saw_persist);
+    return failures;
+}
+
 static int check_the_ladder_is_enumerated(void)
 {
     int failures = 0;
@@ -568,23 +625,7 @@ static int check_the_ladder_is_enumerated(void)
     TSC_CHECK("[stages] the rung set was not truncated",
               data && json_get(data, "stage_set_truncated") &&
                   !json_get_bool(json_get(data, "stage_set_truncated")));
-    bool saw_persist = false;
-    if (rows && rows->type == JSON_ARR) {
-        for (size_t i = 0; i < rows->num_children; i++) {
-            const char *nm = json_get_str(json_get(&rows->children[i],
-                                                   "stage"));
-            if (nm && strcmp(nm, "body_persist") == 0) {
-                saw_persist = true;
-                const struct json_value *f = json_get(&rows->children[i],
-                                                      "fields");
-                TSC_CHECK("[stages] a rung row carries its own fields, keyed "
-                          "by the field table's own leaf keys",
-                          f && f->type == JSON_OBJ &&
-                              json_get(f, "body_persist_cursor") != NULL);
-            }
-        }
-    }
-    TSC_CHECK("[stages] the ladder includes body_persist", saw_persist);
+    failures += tsc_check_persist_row(rows);
     /* No leaf in this branch may be a dead end for a caller walking next[]. */
     const struct json_value *nx = json_get(&doc, "next");
     TSC_CHECK("[stages] the reply always carries a next step",
