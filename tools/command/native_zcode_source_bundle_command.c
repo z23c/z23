@@ -13,6 +13,7 @@
 #include "platform/positioned_file.h"
 #include "platform/private_file.h"
 #include "util/safe_alloc.h"
+#include "util/write_all.h"
 #include "net/rom_fetch.h"
 #include "services/source_bundle_fetch.h"
 #include "vcs/source_bundle.h"
@@ -110,52 +111,6 @@ static uint8_t *zsb_read(const char *path, size_t *len_out)
     return bytes;
 }
 
-static bool zsb_write_exclusive(const char *path, const uint8_t *bytes,
-                                size_t len)
-{
-#if defined(_WIN32)
-    char resolved[ZSB_PATH_MAX], parent[ZSB_PATH_MAX];
-    if (!path || !bytes || !platform_private_path_resolve(
-            path, resolved, sizeof(resolved), parent, sizeof(parent)))
-        return false;
-    const char *slash = strrchr(resolved, '\\');
-    if (!slash) slash = strrchr(resolved, '/');
-    const char *leaf = slash ? slash + 1 : NULL;
-    struct platform_directory_transaction directory;
-    struct platform_directory_child file;
-    platform_directory_transaction_init(&directory);
-    platform_directory_child_init(&file);
-    bool created = leaf && leaf[0] &&
-        platform_directory_transaction_open(&directory, parent) &&
-        platform_directory_child_create(&directory, leaf, &file);
-    bool ok = created &&
-        platform_directory_child_write_exact(&file, bytes, len, 0) &&
-        platform_directory_child_flush(&file) &&
-        platform_directory_transaction_flush(&directory);
-    platform_directory_child_close(&file);
-    if (created && !ok)
-        (void)platform_directory_child_unlink(&directory, leaf, true);
-    platform_directory_transaction_close(&directory);
-    return ok;
-#else
-    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
-                  0400);
-    if (fd < 0) return false;
-    size_t off = 0;
-    while (off < len) {
-        ssize_t wrote = write(fd, bytes + off, len - off);
-        if (wrote < 0 && errno == EINTR) continue;
-        if (wrote <= 0) break;
-        off += (size_t)wrote;
-    }
-    bool ok = off == len;
-    if (ok && fsync(fd) != 0) ok = false;
-    if (close(fd) != 0) ok = false;
-    if (!ok) (void)unlink(path);
-    return ok;
-#endif
-}
-
 static bool zsb_write_child_exclusive(
     struct platform_directory_transaction *directory, const char *leaf,
     const uint8_t *bytes, size_t len)
@@ -172,6 +127,45 @@ static bool zsb_write_child_exclusive(
         (void)platform_directory_child_unlink(directory, leaf, true);
     return ok;
 }
+
+#if defined(_WIN32)
+static bool zsb_write_exclusive(const char *path, const uint8_t *bytes,
+                                size_t len)
+{
+    char resolved[ZSB_PATH_MAX], parent[ZSB_PATH_MAX];
+    if (!path || !bytes || !platform_private_path_resolve(
+            path, resolved, sizeof(resolved), parent, sizeof(parent)))
+        return false;
+    const char *slash = strrchr(resolved, '\\');
+    if (!slash) slash = strrchr(resolved, '/');
+    const char *leaf = slash ? slash + 1 : NULL;
+    struct platform_directory_transaction directory;
+    platform_directory_transaction_init(&directory);
+    bool ok = leaf && leaf[0] &&
+        platform_directory_transaction_open(&directory, parent) &&
+        zsb_write_child_exclusive(&directory, leaf, bytes, len);
+    platform_directory_transaction_close(&directory);
+    return ok;
+}
+#else
+static bool zsb_sync_close(int fd, bool ok)
+{
+    if (ok && fsync(fd) != 0) ok = false;
+    if (close(fd) != 0) ok = false;
+    return ok;
+}
+
+static bool zsb_write_exclusive(const char *path, const uint8_t *bytes,
+                                size_t len)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW,
+                  0400);
+    if (fd < 0) return false;
+    bool ok = zsb_sync_close(fd, zcl_write_all(fd, bytes, len));
+    if (!ok) (void)unlink(path);
+    return ok;
+}
+#endif
 
 static bool zsb_empty_dir(const char *path)
 {
@@ -357,6 +351,49 @@ void zcl_native_handle_zcode_source_bundle_import(
     (void)json_push_kv_bool(&reply->data, "imported", true);
 }
 
+static bool zsb_checkout_inputs(const struct json_value *input,
+                                const char *bundle, const char *workspace,
+                                const char *destination, uint8_t root[32],
+                                char workspace_real[ZSB_PATH_MAX],
+                                char destination_real[ZSB_PATH_MAX])
+{
+    return bundle && workspace && destination &&
+        zsb_root(input, root) &&
+        zcl_native_zcode_workspace_is_explicit_scratch(workspace) &&
+        zcl_native_zcode_workspace_is_explicit_scratch(destination) &&
+        platform_directory_canonical_real(
+            workspace, workspace_real, ZSB_PATH_MAX) &&
+        platform_directory_canonical_real(
+            destination, destination_real, ZSB_PATH_MAX) &&
+        strcmp(workspace_real, destination_real) != 0 &&
+        zsb_empty_dir(destination_real);
+}
+
+static enum vcs_source_bundle_result zsb_checkout_import(
+    const char *bundle, const uint8_t root[32], const char *workspace_real,
+    struct vcs_source_bundle_metrics *metrics)
+{
+    size_t wire_len = 0;
+    uint8_t *wire = zsb_read(bundle, &wire_len);
+    enum vcs_source_bundle_result result = wire
+        ? vcs_source_bundle_import(wire, wire_len, root, workspace_real,
+                                   metrics)
+        : VCS_SOURCE_BUNDLE_ERR_WIRE;
+    free(wire);
+    return result;
+}
+
+static void zsb_checkout_refuse(struct zcl_command_reply *reply,
+                                enum vcs_source_bundle_result result)
+{
+    zsb_fail(reply, result == VCS_SOURCE_BUNDLE_OK
+                        ? "SOURCE_BUNDLE_MATERIALIZE_REFUSED"
+                        : "SOURCE_BUNDLE_IMPORT_REFUSED",
+             "checkout", result == VCS_SOURCE_BUNDLE_OK
+                ? "verified ZVCS source could not be materialized into the empty destination"
+                : vcs_source_bundle_result_string(result));
+}
+
 void zcl_native_handle_zcode_source_bundle_checkout(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -367,37 +404,19 @@ void zcl_native_handle_zcode_source_bundle_checkout(
     char workspace_real[ZSB_PATH_MAX];
     char destination_real[ZSB_PATH_MAX];
     uint8_t root[32];
-    if (!bundle || !workspace || !destination ||
-        !zsb_root(request->input, root) ||
-        !zcl_native_zcode_workspace_is_explicit_scratch(workspace) ||
-        !zcl_native_zcode_workspace_is_explicit_scratch(destination) ||
-        !platform_directory_canonical_real(
-            workspace, workspace_real, sizeof(workspace_real)) ||
-        !platform_directory_canonical_real(
-            destination, destination_real, sizeof(destination_real)) ||
-        strcmp(workspace_real, destination_real) == 0 ||
-        !zsb_empty_dir(destination_real)) {
+    if (!zsb_checkout_inputs(request->input, bundle, workspace, destination,
+                             root, workspace_real, destination_real)) {
         zsb_fail(reply, "BAD_SOURCE_BUNDLE_CHECKOUT_INPUT", "validate",
                  "bundle, source_root, a separate scratch CAS workspace, and an existing empty scratch destination are required");
         return;
     }
-    size_t wire_len = 0;
-    uint8_t *wire = zsb_read(bundle, &wire_len);
     struct vcs_source_bundle_metrics metrics;
-    enum vcs_source_bundle_result result = wire
-        ? vcs_source_bundle_import(wire, wire_len, root, workspace_real,
-                                   &metrics)
-        : VCS_SOURCE_BUNDLE_ERR_WIRE;
-    free(wire);
+    enum vcs_source_bundle_result result =
+        zsb_checkout_import(bundle, root, workspace_real, &metrics);
     if (result != VCS_SOURCE_BUNDLE_OK ||
         vcs_tree_materialize(workspace_real, root, destination_real,
                              VCS_SOURCE_BUNDLE_MAX_SOURCE_BYTES, 0) != VCS_OK) {
-        zsb_fail(reply, result == VCS_SOURCE_BUNDLE_OK
-                            ? "SOURCE_BUNDLE_MATERIALIZE_REFUSED"
-                            : "SOURCE_BUNDLE_IMPORT_REFUSED",
-                 "checkout", result == VCS_SOURCE_BUNDLE_OK
-                    ? "verified ZVCS source could not be materialized into the empty destination"
-                    : vcs_source_bundle_result_string(result));
+        zsb_checkout_refuse(reply, result);
         return;
     }
     zsb_render(&reply->data, root, &metrics);
@@ -416,6 +435,20 @@ void zcl_native_handle_zcode_source_bundle_checkout(
  * write `create` uses, so a fetch can no more overwrite an existing file or
  * follow a symlink than a create can. */
 
+/* Parse the decimal digits of a port into 1..65535; any other byte refuses. */
+static bool zsb_parse_port(const char *digits, uint16_t *out)
+{
+    long port = 0;
+    for (const char *p = digits; *p; p++) {
+        if (*p < '0' || *p > '9') return false;
+        port = port * 10 + (*p - '0');
+        if (port > 65535) return false;
+    }
+    if (port <= 0) return false;
+    *out = (uint16_t)port;
+    return true;
+}
+
 /* Split "host:port" (or "[v6]:port") into a rom_fetch_peer. Rejects an empty
  * host, an over-length host, a missing/zero/out-of-range port, and anything
  * with no ':' at all — a peer entry is never guessed at, because guessing a
@@ -433,17 +466,12 @@ static bool zsb_parse_peer(const char *text, struct rom_fetch_peer *out)
         host_len -= 2;
     }
     if (host_len == 0 || host_len >= sizeof(out->addr)) return false;
-    long port = 0;
-    for (const char *p = colon + 1; *p; p++) {
-        if (*p < '0' || *p > '9') return false;
-        port = port * 10 + (*p - '0');
-        if (port > 65535) return false;
-    }
-    if (port <= 0) return false;
+    uint16_t port = 0;
+    if (!zsb_parse_port(colon + 1, &port)) return false;
     memset(out, 0, sizeof(*out));
     memcpy(out->addr, host, host_len);
     out->addr[host_len] = '\0';
-    out->port = (uint16_t)port;
+    out->port = port;
     return true;
 }
 
@@ -773,6 +801,27 @@ void zcl_native_handle_zcode_source_bundle_publish(
     reply->error.mutated = true;
 }
 
+static bool zsb_package_checkout_inputs(
+    const struct json_value *input, const char *datadir,
+    const char *workspace, const char *destination,
+    uint8_t package_root[32], uint8_t source_root[32],
+    uint8_t accepted_work_root[32], char workspace_real[ZSB_PATH_MAX],
+    char destination_real[ZSB_PATH_MAX])
+{
+    return datadir && workspace && destination &&
+        zsb_named_root(input, "package_root", package_root) &&
+        zsb_named_root(input, "accepted_work_root", accepted_work_root) &&
+        zsb_root(input, source_root) &&
+        zcl_native_zcode_workspace_is_explicit_scratch(workspace) &&
+        zcl_native_zcode_workspace_is_explicit_scratch(destination) &&
+        platform_directory_canonical_real(
+            workspace, workspace_real, ZSB_PATH_MAX) &&
+        platform_directory_canonical_real(
+            destination, destination_real, ZSB_PATH_MAX) &&
+        zsb_paths_disjoint(workspace_real, destination_real) &&
+        zsb_empty_dir(destination_real);
+}
+
 void zcl_native_handle_zcode_source_package_checkout(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -782,20 +831,10 @@ void zcl_native_handle_zcode_source_package_checkout(
     const char *destination = zsb_str(request->input, "destination");
     char workspace_real[ZSB_PATH_MAX], destination_real[ZSB_PATH_MAX];
     uint8_t package_root[32], source_root[32], accepted_work_root[32];
-    bool valid = datadir && workspace && destination &&
-        zsb_named_root(request->input, "package_root", package_root) &&
-        zsb_named_root(request->input, "accepted_work_root",
-                       accepted_work_root) &&
-        zsb_root(request->input, source_root) &&
-        zcl_native_zcode_workspace_is_explicit_scratch(workspace) &&
-        zcl_native_zcode_workspace_is_explicit_scratch(destination) &&
-        platform_directory_canonical_real(
-            workspace, workspace_real, sizeof(workspace_real)) &&
-        platform_directory_canonical_real(
-            destination, destination_real, sizeof(destination_real)) &&
-        zsb_paths_disjoint(workspace_real, destination_real) &&
-        zsb_empty_dir(destination_real);
-    if (!valid) {
+    if (!zsb_package_checkout_inputs(request->input, datadir, workspace,
+                                     destination, package_root, source_root,
+                                     accepted_work_root, workspace_real,
+                                     destination_real)) {
         zsb_fail(reply, "BAD_SOURCE_PACKAGE_CHECKOUT_INPUT", "validate",
                  "datadir, package_root, source_root, accepted_work_root, a separate scratch CAS workspace, and an existing empty scratch destination are required");
         return;
