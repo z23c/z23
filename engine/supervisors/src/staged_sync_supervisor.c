@@ -277,8 +277,11 @@ static void staged_sync_apply_memory_profile(struct main_state *ms)
     int want = (!is_initial_block_download(ms) && !refold_cadence_active())
                    ? 1 : 0;
     if (atomic_load(&g_memory_profile_steady) == want) return;
-    if (storage_memory_profile_set(want != 0))
-        atomic_store(&g_memory_profile_steady, want);
+    /* Record the transition even when a PRAGMA failed: the setter already
+     * logged it, the effect is memory-only, and retrying every tick would
+     * repeat the log line until the next real transition. */
+    (void)storage_memory_profile_set(want != 0);
+    atomic_store(&g_memory_profile_steady, want);
 }
 
 /* Strip the "staged." domain prefix off a stage's dotted supervisor name
