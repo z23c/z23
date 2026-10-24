@@ -1033,7 +1033,7 @@ core/modules/net/src/msg_blocks.c:process_getdata:17
 core/modules/net/src/msg_blocks.c:self_suspicion_record:17
 core/modules/net/src/msg_compact.c:process_cmpctblock:19
 core/modules/net/src/msg_headers.c:exec_getheaders_action:20
-core/modules/net/src/msg_headers.c:getheaders_index_header_servable:26
+core/modules/net/src/msg_headers.c:getheaders_index_header_servable:25
 core/modules/net/src/msg_headers.c:headers_start_from_locator:17
 core/modules/net/src/msg_headers.c:msg_try_range_parallel_getheaders:35
 core/modules/net/src/msg_headers.c:process_getheaders:19
@@ -2236,7 +2236,7 @@ tests/harness/src/test_byte_order_codec.c:test_byte_order_codec:22
 tests/harness/src/test_canary_sentinel_watch.c:test_canary_sentinel_watch:99
 tests/harness/src/test_catalog_completeness.c:test_catalog_completeness:42
 tests/harness/src/test_chacha20_isa_parity.c:test_chacha20_isa_parity:37
-tests/harness/src/test_chain.c:test_chain:319
+tests/harness/src/test_chain.c:test_chain:318
 tests/harness/src/test_chain_evidence_live_advance.c:test_durable_frontier_one_row_skew_is_not_hash_mismatch:18
 tests/harness/src/test_chain_evidence_live_advance.c:test_live_advance_clears_active_tip_hash_mismatch:16
 tests/harness/src/test_chain_integrity_failed_condition.c:test_chain_integrity_failed_condition:66
@@ -2772,7 +2772,6 @@ tests/harness/src/test_sync_watchdog_conditions.c:test_sync_watchdog_conditions:
 tests/harness/src/test_syncdiag_agent_codemap.c:syncdiag_cases_agent_codemap:84
 tests/harness/src/test_syncdiag_agent_contracts.c:syncdiag_cases_agent_contracts:170
 tests/harness/src/test_syncdiag_agent_interface.c:syncdiag_cases_agent_interface:357
-tests/harness/src/test_syncdiag_agent_status.c:syncdiag_cases_agent_status:396
 tests/harness/src/test_syncdiag_anchorstatus.c:syncdiag_cases_anchorstatus:213
 tests/harness/src/test_syncdiag_api_catalog.c:syncdiag_cases_api_catalog:163
 tests/harness/src/test_syncdiag_health.c:syncdiag_cases_health:314
