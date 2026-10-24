@@ -18,6 +18,7 @@
 #include "platform/state_root.h"
 #endif
 #include "json/json.h"
+#include "platform/clock.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -117,7 +118,8 @@ static const char *proof_execution_state(const struct zcl_dev_proof_status *stat
     if (strcmp(status->detail, "resident_proof_request_queued") == 0)
         return "queued";
     if (strcmp(status->detail, "background_verification_running") == 0 &&
-        status->worker_id > 1 && status->started_unix > 0)
+        status->worker_id > 1 && status->started_unix > 0 &&
+        status->started_unix <= clock_now_wall_ms() / 1000)
         return "executing";
     return "unknown";
 }

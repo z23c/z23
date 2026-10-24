@@ -3021,7 +3021,7 @@ static bool ic_reap_proof_child(int hold, pid_t child, const char *path)
 }
 
 static bool ic_live_proof_status_reply(const char *root, const char *local,
-                                       const char *base,
+                                       const char *base, int64_t started_unix,
                                        struct zcl_command_reply *reply)
 {
     char state[4096], relative[256], path[4096], body[160];
@@ -3043,7 +3043,7 @@ static bool ic_live_proof_status_reply(const char *root, const char *local,
     if (child < 0) { (void)close(hold[1]); return false; }
     struct zcl_dev_proof_status status = {0};
     bool ok = (size_t)snprintf(body, sizeof(body), "fixture %ld %lld\n",
-        (long)child, (long long)time(NULL)) < sizeof(body) &&
+        (long)child, (long long)started_unix) < sizeof(body) &&
         ic_proof_private_write(state, relative, body) &&
         zcl_dev_proof_status_read(root, local, base, &status) &&
         status.worker_id == child &&
@@ -3085,12 +3085,23 @@ static int test_ic_proof_status_execution_projection(void)
         ASSERT(ic_bytes_equal(path, body, strlen(body)));
         zcl_command_reply_free(&reply);
         zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
-        ASSERT(ic_live_proof_status_reply(root, local, base, &reply));
+        ASSERT(ic_live_proof_status_reply(root, local, base, time(NULL), &reply));
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "execution_state")), "executing");
         ASSERT(json_get_int(json_get(&reply.data, "worker_id")) > 1);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "local_commit")), local);
         ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "remote_base")), base);
         ASSERT(json_get(&reply.data, "request_age_s") == NULL);
+        ASSERT(ic_bytes_equal(path, body, strlen(body)));
+        zcl_command_reply_free(&reply);
+        zcl_command_reply_init(&reply, "zcl.dev_proof_status.v1");
+        ASSERT(ic_live_proof_status_reply(root, local, base,
+                                          time(NULL) + 3600, &reply));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "status")), "running");
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "execution_state")), "unknown");
+        ASSERT(json_get_int(json_get(&reply.data, "worker_id")) > 1);
+        ASSERT(json_get_int(json_get(&reply.data, "started_unix")) > time(NULL));
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "local_commit")), local);
+        ASSERT_STR_EQ(json_get_str(json_get(&reply.data, "remote_base")), base);
         ASSERT(ic_bytes_equal(path, body, strlen(body)));
         zcl_command_reply_free(&reply);
         status.detail[0] = 0;
