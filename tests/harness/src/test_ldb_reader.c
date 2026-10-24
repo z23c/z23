@@ -53,6 +53,45 @@ static void lr_value(char *buf, size_t n, int i, int generation)
     buf[23] = (char)('0' + (i % 10));
 }
 
+static bool lr_build_unflushed(leveldb_t *db, leveldb_writeoptions_t *wo,
+                                char *value, bool ok)
+{
+    char *err = NULL;
+    /* Pass 2 — left UNFLUSHED: these writes exist only in the write-ahead
+     * log, and its tombstones must hide values that ARE in a table. */
+    for (int i = 0; i < LR_RECORDS / 4 && ok; i++) {
+        char k[32];
+        lr_key(k, sizeof(k), i);
+        lr_value(value, LR_VALUE_BYTES, i, 2);
+        leveldb_put(db, wo, k, strlen(k), value, LR_VALUE_BYTES, &err);
+        if (err) {
+            leveldb_free(err);
+            ok = false;
+        }
+    }
+    for (int i = 1; i < LR_RECORDS && ok; i += LR_DELETE_EVERY * 3) {
+        char k[32];
+        lr_key(k, sizeof(k), i);
+        leveldb_delete(db, wo, k, strlen(k), &err);
+        if (err) {
+            leveldb_free(err);
+            ok = false;
+        }
+    }
+    for (int i = 0; i < 64 && ok; i++) {
+        char k[32];
+        snprintf(k, sizeof(k), "z-unflushed-%04d", i);
+        lr_value(value, LR_VALUE_BYTES, i, 9);
+        leveldb_put(db, wo, k, strlen(k), value, LR_VALUE_BYTES, &err);
+        if (err) {
+            leveldb_free(err);
+            ok = false;
+        }
+    }
+
+    return ok;
+}
+
 /* Build a fixture whose visible content exercises overwrite + tombstone
  * resolution, and leave the last writes unflushed in the .log. */
 static bool lr_build_fixture(const char *dir)
@@ -120,37 +159,7 @@ static bool lr_build_fixture(const char *dir)
     if (ok)
         leveldb_compact_range(db, NULL, 0, NULL, 0);
 
-    /* Pass 2 — left UNFLUSHED: these writes exist only in the write-ahead
-     * log, and its tombstones must hide values that ARE in a table. */
-    for (int i = 0; i < LR_RECORDS / 4 && ok; i++) {
-        char k[32];
-        lr_key(k, sizeof(k), i);
-        lr_value(value, LR_VALUE_BYTES, i, 2);
-        leveldb_put(db, wo, k, strlen(k), value, LR_VALUE_BYTES, &err);
-        if (err) {
-            leveldb_free(err);
-            ok = false;
-        }
-    }
-    for (int i = 1; i < LR_RECORDS && ok; i += LR_DELETE_EVERY * 3) {
-        char k[32];
-        lr_key(k, sizeof(k), i);
-        leveldb_delete(db, wo, k, strlen(k), &err);
-        if (err) {
-            leveldb_free(err);
-            ok = false;
-        }
-    }
-    for (int i = 0; i < 64 && ok; i++) {
-        char k[32];
-        snprintf(k, sizeof(k), "z-unflushed-%04d", i);
-        lr_value(value, LR_VALUE_BYTES, i, 9);
-        leveldb_put(db, wo, k, strlen(k), value, LR_VALUE_BYTES, &err);
-        if (err) {
-            leveldb_free(err);
-            ok = false;
-        }
-    }
+    ok = lr_build_unflushed(db, wo, value, ok);
 
     leveldb_writeoptions_destroy(wo);
     free(value);
@@ -158,36 +167,9 @@ static bool lr_build_fixture(const char *dir)
     return ok;
 }
 
-/* Compare the whole ordered stream and every point read. Returns the
- * number of records compared, or -1 on any difference. */
-static long lr_compare(const char *cxx_dir, const char *c23_dir)
+static long lr_compare_stream(leveldb_t *cdb, leveldb_readoptions_t *cro,
+                                ldbr_t *rdb, ldbr_readoptions_t *rro)
 {
-    char *err = NULL;
-    leveldb_options_t *copts = leveldb_options_create();
-    leveldb_options_set_create_if_missing(copts, 0);
-    leveldb_t *cdb = leveldb_open(copts, cxx_dir, &err);
-    leveldb_options_destroy(copts);
-    if (!cdb) {
-        printf("FAIL (cxx open: %s)\n", err ? err : "null");
-        leveldb_free(err);
-        return -1;
-    }
-    leveldb_readoptions_t *cro = leveldb_readoptions_create();
-    leveldb_readoptions_set_verify_checksums(cro, 1);
-
-    ldbr_options_t *ropts = ldbr_options_create();
-    ldbr_options_set_create_if_missing(ropts, 0);
-    ldbr_t *rdb = ldbr_open(ropts, c23_dir, &err);
-    ldbr_options_destroy(ropts);
-    if (!rdb) {
-        printf("FAIL (c23 open: %s)\n", err ? err : "null");
-        free(err);
-        leveldb_readoptions_destroy(cro);
-        leveldb_close(cdb);
-        return -1;
-    }
-    ldbr_readoptions_t *rro = ldbr_readoptions_create();
-
     leveldb_iterator_t *ci = leveldb_create_iterator(cdb, cro);
     ldbr_iterator_t *ri = ldbr_create_iterator(rdb, rro);
     leveldb_iter_seek_to_first(ci);
@@ -238,8 +220,13 @@ static long lr_compare(const char *cxx_dir, const char *c23_dir)
     leveldb_iter_destroy(ci);
     ldbr_iter_destroy(ri);
 
-    /* Point reads: every fixture key, including the deleted ones (which
-     * must be absent on BOTH sides) and keys that never existed. */
+    return bad ? -1 : n;
+}
+
+static bool lr_compare_points(leveldb_t *cdb, leveldb_readoptions_t *cro,
+                                ldbr_t *rdb, ldbr_readoptions_t *rro,
+                                bool bad)
+{
     for (int i = 0; !bad && i < LR_RECORDS; i++) {
         char k[32];
         lr_key(k, sizeof(k), i);
@@ -258,6 +245,45 @@ static long lr_compare(const char *cxx_dir, const char *c23_dir)
         leveldb_free(ce);
         free(re);
     }
+    return bad;
+}
+
+/* Compare the whole ordered stream and every point read. Returns the
+ * number of records compared, or -1 on any difference. */
+static long lr_compare(const char *cxx_dir, const char *c23_dir)
+{
+    char *err = NULL;
+    leveldb_options_t *copts = leveldb_options_create();
+    leveldb_options_set_create_if_missing(copts, 0);
+    leveldb_t *cdb = leveldb_open(copts, cxx_dir, &err);
+    leveldb_options_destroy(copts);
+    if (!cdb) {
+        printf("FAIL (cxx open: %s)\n", err ? err : "null");
+        leveldb_free(err);
+        return -1;
+    }
+    leveldb_readoptions_t *cro = leveldb_readoptions_create();
+    leveldb_readoptions_set_verify_checksums(cro, 1);
+
+    ldbr_options_t *ropts = ldbr_options_create();
+    ldbr_options_set_create_if_missing(ropts, 0);
+    ldbr_t *rdb = ldbr_open(ropts, c23_dir, &err);
+    ldbr_options_destroy(ropts);
+    if (!rdb) {
+        printf("FAIL (c23 open: %s)\n", err ? err : "null");
+        free(err);
+        leveldb_readoptions_destroy(cro);
+        leveldb_close(cdb);
+        return -1;
+    }
+    ldbr_readoptions_t *rro = ldbr_readoptions_create();
+
+    long n = lr_compare_stream(cdb, cro, rdb, rro);
+    bool bad = n < 0;
+
+    /* Point reads: every fixture key, including the deleted ones (which
+     * must be absent on BOTH sides) and keys that never existed. */
+    bad = lr_compare_points(cdb, cro, rdb, rro, bad);
     for (int i = 0; !bad && i < 64; i++) {
         char k[48];
         snprintf(k, sizeof(k), "never-written-%04d", i);
