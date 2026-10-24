@@ -357,6 +357,72 @@ static bool sb_scrape_order_id(const char *page, int64_t *out)
     return true;
 }
 
+static struct zcl_result sb_record_local_purchase(
+    const char *datadir, int64_t product_id, int64_t order_id,
+    const struct db_store_product *product, const char *customer_addr,
+    const char *output_path, struct store_buyer_order *out)
+{
+    struct node_db ndb;
+    struct db_store_order_view order_view;
+    struct db_store_purchase purchase;
+    struct zcl_result r;
+
+    r = sb_open_db(datadir, &ndb, "store_buyer.order_record");
+    if (!r.ok)
+        return r;
+    if (!db_store_order_find_view(&ndb, order_id, &order_view)) {
+        node_db_close(&ndb);
+        return SB_FAILF(STORE_BUYER_ERR_ORDER_CREATE_FAILED,
+                        "the store answered with order %lld but no such "
+                        "order row exists", (long long)order_id);
+    }
+
+    /* Idempotent by merchant order id: if this order already has a buyer
+     * row, update that one rather than minting a second obligation. */
+    if (!db_store_purchase_find_by_order(&ndb, order_id, &purchase))
+        memset(&purchase, 0, sizeof(purchase));
+
+    purchase.order_id = order_id;
+    purchase.product_id = product_id;
+    (void)snprintf(purchase.product_name, sizeof(purchase.product_name), "%s",
+                   product->name);
+    (void)snprintf(purchase.token_id, sizeof(purchase.token_id), "%s",
+                   product->token_id);
+    (void)snprintf(purchase.payment_addr, sizeof(purchase.payment_addr), "%s",
+                   order_view.payment_addr);
+    (void)snprintf(purchase.customer_addr, sizeof(purchase.customer_addr),
+                   "%s", customer_addr);
+    (void)snprintf(purchase.memo, sizeof(purchase.memo), "ZCL23ORDER:%lld",
+                   (long long)order_id);
+    purchase.amount_zatoshi = order_view.amount_zatoshi;
+    purchase.has_content_hash = product->has_content;
+    if (product->has_content)
+        memcpy(purchase.content_hash, product->content_hash,
+               sizeof(purchase.content_hash));
+    if (output_path && output_path[0])
+        (void)snprintf(purchase.output_path, sizeof(purchase.output_path),
+                       "%s", output_path);
+    if (purchase.id == 0)
+        purchase.stage = STORE_PURCHASE_CREATED;
+    purchase.last_error[0] = '\0';
+
+    bool saved = db_store_purchase_save(&ndb, &purchase);
+    node_db_close(&ndb);
+    if (!saved)
+        return SB_FAILF(STORE_BUYER_ERR_DB,
+                        "created merchant order %lld but could not record "
+                        "the buyer purchase row", (long long)order_id);
+
+    out->purchase_id = purchase.id;
+    out->order_id = order_id;
+    (void)snprintf(out->payment_addr, sizeof(out->payment_addr), "%s",
+                   purchase.payment_addr);
+    (void)snprintf(out->memo, sizeof(out->memo), "%s", purchase.memo);
+    out->amount_zatoshi = purchase.amount_zatoshi;
+    r = ZCL_OK;
+    return r;
+}
+
 struct zcl_result store_buyer_order(const char *datadir, int64_t product_id,
                                     const char *customer_addr,
                                     const char *output_path,
@@ -365,8 +431,6 @@ struct zcl_result store_buyer_order(const char *datadir, int64_t product_id,
 {
     struct node_db ndb;
     struct db_store_product product;
-    struct db_store_order_view order_view;
-    struct db_store_purchase purchase;
     char csrf[80] = "", pow_ts[32] = "", pow_nonce[32] = "";
     char body[512];
     uint8_t *resp = NULL;
@@ -428,60 +492,8 @@ struct zcl_result store_buyer_order(const char *datadir, int64_t product_id,
     }
     free(resp);
 
-    r = sb_open_db(datadir, &ndb, "store_buyer.order_record");
-    if (!r.ok)
-        return r;
-    if (!db_store_order_find_view(&ndb, order_id, &order_view)) {
-        node_db_close(&ndb);
-        return SB_FAILF(STORE_BUYER_ERR_ORDER_CREATE_FAILED,
-                        "the store answered with order %lld but no such "
-                        "order row exists", (long long)order_id);
-    }
-
-    /* Idempotent by merchant order id: if this order already has a buyer
-     * row, update that one rather than minting a second obligation. */
-    if (!db_store_purchase_find_by_order(&ndb, order_id, &purchase))
-        memset(&purchase, 0, sizeof(purchase));
-
-    purchase.order_id = order_id;
-    purchase.product_id = product_id;
-    (void)snprintf(purchase.product_name, sizeof(purchase.product_name), "%s",
-                   product.name);
-    (void)snprintf(purchase.token_id, sizeof(purchase.token_id), "%s",
-                   product.token_id);
-    (void)snprintf(purchase.payment_addr, sizeof(purchase.payment_addr), "%s",
-                   order_view.payment_addr);
-    (void)snprintf(purchase.customer_addr, sizeof(purchase.customer_addr),
-                   "%s", customer_addr);
-    (void)snprintf(purchase.memo, sizeof(purchase.memo), "ZCL23ORDER:%lld",
-                   (long long)order_id);
-    purchase.amount_zatoshi = order_view.amount_zatoshi;
-    purchase.has_content_hash = product.has_content;
-    if (product.has_content)
-        memcpy(purchase.content_hash, product.content_hash,
-               sizeof(purchase.content_hash));
-    if (output_path && output_path[0])
-        (void)snprintf(purchase.output_path, sizeof(purchase.output_path),
-                       "%s", output_path);
-    if (purchase.id == 0)
-        purchase.stage = STORE_PURCHASE_CREATED;
-    purchase.last_error[0] = '\0';
-
-    bool saved = db_store_purchase_save(&ndb, &purchase);
-    node_db_close(&ndb);
-    if (!saved)
-        return SB_FAILF(STORE_BUYER_ERR_DB,
-                        "created merchant order %lld but could not record "
-                        "the buyer purchase row", (long long)order_id);
-
-    out->purchase_id = purchase.id;
-    out->order_id = order_id;
-    (void)snprintf(out->payment_addr, sizeof(out->payment_addr), "%s",
-                   purchase.payment_addr);
-    (void)snprintf(out->memo, sizeof(out->memo), "%s", purchase.memo);
-    out->amount_zatoshi = purchase.amount_zatoshi;
-    r = ZCL_OK;
-    return r;
+    return sb_record_local_purchase(datadir, product_id, order_id, &product,
+                                     customer_addr, output_path, out);
 }
 
 /* ── remote order: the same buyer, across Tor ───────────────────────── */

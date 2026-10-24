@@ -779,7 +779,6 @@ contexts/market/services/src/market_moderation_service.c:mm_policy_paths:17
 contexts/market/services/src/shop_reputation_view_service.c:render:17
 contexts/market/services/src/shop_status_view_service.c:render:29
 contexts/market/services/src/shop_want_view_service.c:render:17
-contexts/market/services/src/store_buyer.c:store_buyer_order:23
 contexts/market/services/src/store_buyer.c:store_buyer_status_code:17
 contexts/market/services/src/store_buyer.c:store_buyer_status_message:17
 contexts/market/services/src/store_buyer_pay.c:sb_write_atomic:16
