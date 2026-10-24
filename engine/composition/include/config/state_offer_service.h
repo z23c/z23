@@ -48,6 +48,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+struct state_offer_batch_v1;
+
 struct msg_processor;
 struct node_db;
 
@@ -75,6 +77,25 @@ bool state_offer_service_advertising(void);
 void state_offer_service_tick(void);
 
 #ifdef ZCL_TESTING
+/* Replace the bundle-manifest reader (default NULL: the real
+ * consensus_state_artifact_evidence_open path) so a test can drive the
+ * manifest cache with cheap fixture files. Same contract as the real reader:
+ * fill height, block hash, receipt id; false means "does not open". */
+typedef bool (*state_offer_service_test_reader_fn)(const char *path,
+                                                   int32_t *out_height,
+                                                   uint8_t out_block_hash[32],
+                                                   uint8_t out_receipt_id[32]);
+void state_offer_service_test_set_manifest_reader(
+    state_offer_service_test_reader_fn fn);
+/* How many times the snapshot refresh went to open a bundle manifest (cache
+ * misses, including failed opens) since the process started. */
+uint32_t state_offer_service_test_manifest_opens(void);
+/* Make the snapshot look older than SOSVC_SNAPSHOT_TTL_S. */
+void state_offer_service_test_expire_ttl(void);
+/* The send-site provider's body with an injected tip: composes offers from the
+ * current snapshot and must never open a bundle. */
+uint32_t state_offer_service_test_provide(struct state_offer_batch_v1 *out,
+                                          int32_t tip);
 /* Rebuild the cached artifact snapshot on the next provider call. */
 void state_offer_service_test_invalidate(void);
 /* Pretend this node holds one registered bundle at `bundle_height`, so the

@@ -36,11 +36,13 @@
 #include "net/state_offer.h"
 #include "storage/consensus_state_bundle_codec.h"
 #include "util/log_macros.h"
+#include "util/thread_registry.h"
 #include "vcs/zcode_dht_identity.h"
 
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <string.h>
 
 #define SOSVC_SUBSYS "state_offer"
@@ -116,12 +118,22 @@ static bool sosvc_mmb_peaks_digest(uint8_t out[32])
     return false;
 }
 
+#ifdef ZCL_TESTING
+static _Atomic uint32_t g_test_opens;
+static state_offer_service_test_reader_fn g_test_reader;
+#endif
+
 /* Read the height, block hash and mint identity out of one bundle file. This is
  * the only reason the producer touches disk, and why the result is cached. */
 static bool sosvc_read_manifest(const char *path, int32_t *out_height,
                                 uint8_t out_block_hash[32],
                                 uint8_t out_receipt_id[32])
 {
+#ifdef ZCL_TESTING
+    atomic_fetch_add(&g_test_opens, 1);
+    if (g_test_reader)
+        return g_test_reader(path, out_height, out_block_hash, out_receipt_id);
+#endif
     struct consensus_state_artifact_evidence *evidence = NULL;
     struct zcl_result r =
         consensus_state_artifact_evidence_open(path, -1, &evidence);
@@ -161,37 +173,172 @@ static bool sosvc_artifact_path(char *out, size_t out_sz, const char *filename)
     int n = snprintf(out, out_sz, "%s/%s", g_datadir, filename);
     return n > 0 && (size_t)n < out_sz;
 }
+/* The part of stat() that says "this is still the same file, unmodified". */
+struct sosvc_file_id {
+    uint64_t dev;
+    uint64_t ino;
+    int64_t size;
+    int64_t mtime_sec;
+    int64_t mtime_nsec;
+};
 
-/* Snapshot what this node holds and could offer. Caller holds g_lock. */
-static void sosvc_refresh_snapshot_locked(void)
+static bool sosvc_file_id_read(const char *path, struct sosvc_file_id *id)
 {
-    struct rom_artifact artifacts[ROM_SEED_MAX_ARTIFACTS];
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return false;
+    id->dev = (uint64_t)st.st_dev;
+    id->ino = (uint64_t)st.st_ino;
+    id->size = (int64_t)st.st_size;
+    id->mtime_sec = (int64_t)st.st_mtime;
+#ifdef _WIN32
+    id->mtime_nsec = 0;
+#else
+    id->mtime_nsec = (int64_t)st.st_mtim.tv_nsec;
+#endif
+    return true;
+}
+
+
+/* One artifact whose bundle manifest this file already opened and validated.
+ * The key is everything that can change while the answer stays the same:
+ * the catalog identity rom_seed hashed at registration (filename, whole-file
+ * SHA3, size, chunk root) plus the file's own stat identity, so a replaced or
+ * rewritten file misses and is validated again. Only successful opens are
+ * cached; a failed open is retried on every refresh (it logs, and it is the
+ * rare case). Touched only by the single refresher (g_refreshing), never under
+ * g_lock. */
+struct sosvc_manifest_cache {
+    bool used;
+    char filename[ROM_SEED_NAME_MAX];
+    uint8_t whole_sha3[32];
+    uint8_t chunk_root[32];
+    uint64_t size_bytes;
+    struct sosvc_file_id id;
+    int32_t height;
+    uint8_t block_hash[32];
+    uint8_t receipt_id[32];
+};
+
+static struct sosvc_manifest_cache g_mcache[STATE_OFFER_MAX_PER_PEER];
+static struct sosvc_manifest_cache g_mcache_next[STATE_OFFER_MAX_PER_PEER];
+static struct sosvc_artifact g_build[STATE_OFFER_MAX_PER_PEER];
+static bool g_refreshing;
+
+static bool sosvc_cache_key_matches(const struct sosvc_manifest_cache *c,
+                                    const struct rom_artifact *a,
+                                    const struct sosvc_file_id *id)
+{
+    return c->used && strcmp(c->filename, a->filename) == 0 &&
+           memcmp(c->whole_sha3, a->whole_sha3, 32) == 0 &&
+           memcmp(c->chunk_root, a->chunk_root, 32) == 0 &&
+           c->size_bytes == a->size_bytes && c->id.dev == id->dev &&
+           c->id.ino == id->ino && c->id.size == id->size &&
+           c->id.mtime_sec == id->mtime_sec &&
+           c->id.mtime_nsec == id->mtime_nsec;
+}
+
+static const struct sosvc_manifest_cache *
+sosvc_cache_find(const struct rom_artifact *a, const struct sosvc_file_id *id)
+{
+    for (size_t i = 0; i < STATE_OFFER_MAX_PER_PEER; i++)
+        if (sosvc_cache_key_matches(&g_mcache[i], a, id))
+            return &g_mcache[i];
+    return NULL;
+}
+
+/* Is this registered artifact something the offer path could ever describe? */
+static bool sosvc_artifact_eligible(const struct rom_artifact *a)
+{
+    return a->used && a->kind == ROM_ARTIFACT_CONSENSUS_BUNDLE &&
+           a->chunk_size == ROM_SEED_CHUNK_SIZE && a->num_chunks != 0 &&
+           a->filename[0] != '\0' &&
+           strlen(a->filename) < STATE_OFFER_NAME_MAX;
+}
+
+enum sosvc_resolve { SOSVC_RESOLVE_FAILED, SOSVC_RESOLVE_CACHED,
+                     SOSVC_RESOLVE_OPENED, SOSVC_RESOLVE_ABORT };
+
+/* Height, block hash and receipt id of one artifact: from the cache when the
+ * key still matches, else by opening and validating the bundle. The open is
+ * skipped (ABORT) once shutdown has been asked for, so shutdown never waits on
+ * a fresh validation. On a cache hit or an open, `*next` is the entry to carry
+ * into the next cache generation. */
+static enum sosvc_resolve sosvc_resolve_manifest(
+    const struct rom_artifact *a, const char *path,
+    struct sosvc_manifest_cache *next)
+{
+    struct sosvc_file_id id;
+    bool have_stat = sosvc_file_id_read(path, &id);
+    const struct sosvc_manifest_cache *hit =
+        have_stat ? sosvc_cache_find(a, &id) : NULL;
+    if (hit) {
+        *next = *hit;
+        return SOSVC_RESOLVE_CACHED;
+    }
+    if (thread_registry_shutdown_requested())
+        return SOSVC_RESOLVE_ABORT;
+    memset(next, 0, sizeof(*next));
+    if (!sosvc_read_manifest(path, &next->height, next->block_hash,
+                             next->receipt_id))
+        return SOSVC_RESOLVE_FAILED;
+    next->used = have_stat;
+    snprintf(next->filename, sizeof(next->filename), "%s", a->filename);
+    memcpy(next->whole_sha3, a->whole_sha3, 32);
+    memcpy(next->chunk_root, a->chunk_root, 32);
+    next->size_bytes = a->size_bytes;
+    if (have_stat)
+        next->id = id;
+    return SOSVC_RESOLVE_OPENED;
+}
+
+static void sosvc_fill_artifact(struct sosvc_artifact *s,
+                                const struct rom_artifact *a,
+                                const struct sosvc_manifest_cache *m)
+{
+    memset(s, 0, sizeof(*s));
+    s->used = true;
+    s->bundle_height = m->height;
+    memcpy(s->header_hash, m->block_hash, 32);
+    memcpy(s->content_digest, a->whole_sha3, 32);
+    memcpy(s->chunk_root, a->chunk_root, 32);
+    memcpy(s->producer_receipt_id, m->receipt_id, 32);
+    s->content_bytes = a->size_bytes;
+    s->num_chunks = a->num_chunks;
+    s->chunk_size = a->chunk_size;
+    s->filename_len = (uint16_t)strlen(a->filename);
+    memcpy(s->filename, a->filename, s->filename_len);
+}
+
+struct sosvc_refresh_tally {
+    uint32_t built;
+    uint32_t opened;
+    uint32_t cached;
+    bool aborted;
+};
+
+/* Build the offerable set into g_build / g_mcache_next. Takes no lock and may
+ * open bundles; only the one refresher (g_refreshing) runs it. */
+static int sosvc_build_snapshot(struct sosvc_refresh_tally *t)
+{
+    static struct rom_artifact artifacts[ROM_SEED_MAX_ARTIFACTS];
     memset(artifacts, 0, sizeof(artifacts));
-    memset(g_artifacts, 0, sizeof(g_artifacts));
-    g_artifact_count = 0;
-    g_snapshot_unix = sosvc_now_unix();
-    g_snapshot_valid = true;
-
+    memset(g_build, 0, sizeof(g_build));
+    memset(g_mcache_next, 0, sizeof(g_mcache_next));
     int n = rom_seed_list(artifacts, ROM_SEED_MAX_ARTIFACTS);
-    if (n <= 0)
-        return;
-
-    for (int i = 0; i < n && g_artifact_count < STATE_OFFER_MAX_PER_PEER; i++) {
+    for (int i = 0; i < n && t->built < STATE_OFFER_MAX_PER_PEER; i++) {
         const struct rom_artifact *a = &artifacts[i];
-        if (!a->used || a->kind != ROM_ARTIFACT_CONSENSUS_BUNDLE)
-            continue;
-        if (a->chunk_size != ROM_SEED_CHUNK_SIZE || a->num_chunks == 0)
-            continue;
-        if (a->filename[0] == '\0' ||
-            strlen(a->filename) >= STATE_OFFER_NAME_MAX)
-            continue;
-
         char path[1024];
-        if (!sosvc_artifact_path(path, sizeof(path), a->filename))
+        if (!sosvc_artifact_eligible(a) ||
+            !sosvc_artifact_path(path, sizeof(path), a->filename))
             continue;
-        int32_t height = 0;
-        uint8_t block_hash[32], receipt_id[32];
-        if (!sosvc_read_manifest(path, &height, block_hash, receipt_id)) {
+        struct sosvc_manifest_cache *next = &g_mcache_next[t->built];
+        enum sosvc_resolve r = sosvc_resolve_manifest(a, path, next);
+        if (r == SOSVC_RESOLVE_ABORT) {
+            t->aborted = true;
+            break;
+        }
+        if (r == SOSVC_RESOLVE_FAILED) {
             /* Named, once per refresh (this loop runs on the snapshot TTL,
              * never per peer) — say the exact path tried so a missing or
              * unreadable bundle is diagnosable from this one line. */
@@ -201,23 +348,57 @@ static void sosvc_refresh_snapshot_locked(void)
                      "one we must not advertise)", a->filename, path);
             continue;
         }
-
-        struct sosvc_artifact *s = &g_artifacts[g_artifact_count];
-        s->used = true;
-        s->bundle_height = height;
-        memcpy(s->header_hash, block_hash, 32);
-        memcpy(s->content_digest, a->whole_sha3, 32);
-        memcpy(s->chunk_root, a->chunk_root, 32);
-        memcpy(s->producer_receipt_id, receipt_id, 32);
-        s->content_bytes = a->size_bytes;
-        s->num_chunks = a->num_chunks;
-        s->chunk_size = a->chunk_size;
-        s->filename_len = (uint16_t)strlen(a->filename);
-        memcpy(s->filename, a->filename, s->filename_len);
-        g_artifact_count++;
+        sosvc_fill_artifact(&g_build[t->built], a, next);
+        t->built++;
+        if (r == SOSVC_RESOLVE_CACHED)
+            t->cached++;
+        else
+            t->opened++;
     }
-    LOG_INFO(SOSVC_SUBSYS, "offerable bundles: %u of %d registered artifacts",
-             g_artifact_count, n);
+    return n;
+}
+
+/* Is a snapshot rebuild due? Caller holds g_lock. */
+static bool sosvc_refresh_due_locked(void)
+{
+    return !g_snapshot_valid ||
+           sosvc_now_unix() - g_snapshot_unix >= SOSVC_SNAPSHOT_TTL_S;
+}
+
+/* Rebuild the snapshot WITHOUT holding g_lock while bundles are opened, then
+ * take it only to swap the result in. `force` ignores the TTL (test hook). If
+ * another refresh is already running this returns at once and the caller keeps
+ * using the current snapshot. Called from the peer-link tick only (and the
+ * test hook): sosvc_provide, on the same message thread, never refreshes. */
+static void sosvc_refresh_snapshot(bool force)
+{
+    pthread_mutex_lock(&g_lock);
+    if (g_refreshing || (!force && !sosvc_refresh_due_locked())) {
+        pthread_mutex_unlock(&g_lock);
+        return;
+    }
+    g_refreshing = true;
+    pthread_mutex_unlock(&g_lock);
+
+    int64_t t0 = sosvc_now_ms();
+    struct sosvc_refresh_tally t = {0};
+    int n = sosvc_build_snapshot(&t);
+
+    pthread_mutex_lock(&g_lock);
+    if (!t.aborted) {
+        memcpy(g_artifacts, g_build, sizeof(g_artifacts));
+        g_artifact_count = t.built;
+        g_snapshot_unix = sosvc_now_unix();
+        g_snapshot_valid = true;
+        memcpy(g_mcache, g_mcache_next, sizeof(g_mcache));
+    }
+    g_refreshing = false;
+    pthread_mutex_unlock(&g_lock);
+    if (!t.aborted)
+        LOG_INFO(SOSVC_SUBSYS,
+                 "offerable bundles: %u of %d registered artifacts "
+                 "(opened=%u cached=%u, %lld ms)", t.built, n, t.opened,
+                 t.cached, (long long)(sosvc_now_ms() - t0));
 }
 
 /* Does this node hold something it would actually offer at `tip`? Caller holds
@@ -255,21 +436,21 @@ static bool sosvc_has_offerable_artifact_locked(int32_t tip)
  * SHA3, and the installer's CHECKPOINT_ROM re-derivation against the compiled
  * checkpoint.
  *
- * WHERE IT RUNS. On the peer-link tick, not the offer send path, and the
- * snapshot refresh it may drive is the same bounded one sosvc_provide already
- * drives on that thread, rate-limited by SOSVC_SNAPSHOT_TTL_S. */
+ * WHERE IT RUNS. On the peer-link tick, not the offer send path. The tick is
+ * also the ONLY place the artifact snapshot is refreshed (every
+ * SOSVC_SNAPSHOT_TTL_S, and cheaply: an unchanged bundle is a cache hit, see
+ * sosvc_refresh_snapshot), so the send path never opens a bundle. */
 static void sosvc_ensure_offering_identity(int32_t tip)
 {
-    if (g_have_identity || !g_datadir[0] || tip <= 0)
+    if (!g_datadir[0] || tip <= 0)
         return;
+    sosvc_refresh_snapshot(false);
 
     pthread_mutex_lock(&g_lock);
-    if (!g_snapshot_valid ||
-        sosvc_now_unix() - g_snapshot_unix >= SOSVC_SNAPSHOT_TTL_S)
-        sosvc_refresh_snapshot_locked();
-    bool offerable = sosvc_has_offerable_artifact_locked(tip);
+    bool have = g_have_identity;
+    bool offerable = !have && sosvc_has_offerable_artifact_locked(tip);
     pthread_mutex_unlock(&g_lock);
-    if (!offerable)
+    if (have || !offerable)
         return; /* nothing to advertise — mint nothing, write nothing */
 
     uint8_t seed[32], pubkey[32];
@@ -309,20 +490,16 @@ bool state_offer_service_advertising(void)
     return advertising;
 }
 
-/* The provider net calls at the "zfileaddr" send site. */
-static uint32_t sosvc_provide(struct state_offer_batch_v1 *out, void *ctx)
+/* Compose the batch from the CURRENT snapshot. It never refreshes it and never
+ * opens a bundle: the snapshot is rebuilt on the peer-link tick, which runs on
+ * the same message thread as the send site, so one more refresh trigger here
+ * would only add a second place that could stall that thread. An expired TTL
+ * means the offers are built from a snapshot at most one tick older than it
+ * would otherwise be, and every offer is signed with the tip of the moment. */
+static uint32_t sosvc_provide_from_snapshot(struct state_offer_batch_v1 *out,
+                                            int32_t tip,
+                                            const uint8_t peaks[32])
 {
-    (void)ctx;
-    if (!out)
-        return 0;
-
-    int32_t tip = reducer_frontier_external_tip_height();
-    if (tip <= 0)
-        return 0;
-    uint8_t peaks[32];
-    if (!sosvc_mmb_peaks_digest(peaks))
-        return 0; /* nothing to anchor a work proof to — say nothing */
-
     pthread_mutex_lock(&g_lock);
     /* Read the identity flag under the same lock the tick sets it under: the
      * offering identity is minted on the peer-link tick (see
@@ -332,10 +509,6 @@ static uint32_t sosvc_provide(struct state_offer_batch_v1 *out, void *ctx)
         pthread_mutex_unlock(&g_lock);
         return 0;
     }
-    if (!g_snapshot_valid ||
-        sosvc_now_unix() - g_snapshot_unix >= SOSVC_SNAPSHOT_TTL_S)
-        sosvc_refresh_snapshot_locked();
-
     out->version = STATE_OFFER_VERSION;
     out->flags = STATE_OFFER_FLAGS_NONE;
     out->offerer_tip_height = tip;
@@ -378,6 +551,22 @@ static uint32_t sosvc_provide(struct state_offer_batch_v1 *out, void *ctx)
     }
     pthread_mutex_unlock(&g_lock);
     return count;
+}
+
+/* The provider net calls at the "zfileaddr" send site. */
+static uint32_t sosvc_provide(struct state_offer_batch_v1 *out, void *ctx)
+{
+    (void)ctx;
+    if (!out)
+        return 0;
+
+    int32_t tip = reducer_frontier_external_tip_height();
+    if (tip <= 0)
+        return 0;
+    uint8_t peaks[32];
+    if (!sosvc_mmb_peaks_digest(peaks))
+        return 0; /* nothing to anchor a work proof to — say nothing */
+    return sosvc_provide_from_snapshot(out, tip, peaks);
 }
 
 /* The sink net calls for each verified offer that arrives. */
@@ -530,6 +719,8 @@ void state_offer_service_start(const char *datadir, struct node_db *ndb)
     snprintf(g_datadir, sizeof(g_datadir), "%s", datadir);
     g_ndb = ndb;
     g_snapshot_valid = false;
+    memset(g_mcache, 0, sizeof(g_mcache));
+    g_refreshing = false;
     g_artifact_count = 0;
     g_fetch_started = false;
     g_fetch_running = false;
@@ -656,11 +847,37 @@ bool state_offer_service_test_have_identity(void)
 
 uint32_t state_offer_service_test_refresh_and_count(void)
 {
+    sosvc_refresh_snapshot(true);
     pthread_mutex_lock(&g_lock);
-    sosvc_refresh_snapshot_locked();
     uint32_t n = g_artifact_count;
     pthread_mutex_unlock(&g_lock);
     return n;
+}
+
+void state_offer_service_test_set_manifest_reader(
+    state_offer_service_test_reader_fn fn)
+{
+    g_test_reader = fn;
+}
+
+uint32_t state_offer_service_test_manifest_opens(void)
+{
+    return atomic_load(&g_test_opens);
+}
+
+void state_offer_service_test_expire_ttl(void)
+{
+    pthread_mutex_lock(&g_lock);
+    g_snapshot_unix = 0;
+    pthread_mutex_unlock(&g_lock);
+}
+
+uint32_t state_offer_service_test_provide(struct state_offer_batch_v1 *out,
+                                          int32_t tip)
+{
+    uint8_t peaks[32];
+    memset(peaks, 0x5a, sizeof(peaks));
+    return out ? sosvc_provide_from_snapshot(out, tip, peaks) : 0;
 }
 
 bool state_offer_service_test_compose_path(const char *filename, char *out,

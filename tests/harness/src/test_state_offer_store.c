@@ -17,9 +17,11 @@
 #include "config/state_offer_store.h"
 #include "chain/checkpoints.h"
 #include "net/rom_seed.h"
+#include "net/state_offer.h"
 #include "vcs/zcode_dht_identity.h"
 
 #include <fcntl.h>
+#include <time.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -800,6 +802,95 @@ static int missing_bundle_file_fails_closed_with_named_log(void)
     return failures;
 }
 
+/* ── Manifest cache ──────────────────────────────────────────────────────
+ * The 5-minute snapshot refresh used to fully validate every registered
+ * bundle every time, with g_lock held, on the message thread (4-9 s each).
+ * A fixture reader stands in for the validating open so the cache can be
+ * driven with cheap files; the counter says how often a refresh went to it. */
+static int32_t g_cache_reader_height;
+
+static bool cache_fixture_reader(const char *path, int32_t *out_height,
+                                 uint8_t out_block_hash[32],
+                                 uint8_t out_receipt_id[32])
+{
+    if (access(path, R_OK) != 0)
+        return false;
+    *out_height = g_cache_reader_height;
+    memset(out_block_hash, 0x21, 32);
+    memset(out_receipt_id, 0x37, 32);
+    return true;
+}
+
+static bool bump_mtime(const char *path, int seconds)
+{
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return false;
+    struct timespec ts[2] = {st.st_atim, st.st_mtim};
+    ts[1].tv_sec += seconds;
+    return utimensat(AT_FDCWD, path, ts, 0) == 0;
+}
+
+static int manifest_cache_skips_unchanged_bundles(void)
+{
+    int failures = 0;
+    TEST_CASE("an unchanged bundle is not re-opened by the refresh; a changed "
+              "one is; the send path never opens; a removed one drops out") {
+        char dir[PATH_MAX], file[PATH_MAX];
+        test_make_tmpdir(dir, sizeof(dir), "state_offer_cache", "refresh");
+        snprintf(file, sizeof(file), "%s/consensus-state-bundle-780.sqlite",
+                 dir);
+        uint8_t content[64 * 1024];
+        gen_bundle_content(content, sizeof(content));
+        ASSERT(write_bundle_file(dir, "consensus-state-bundle-780.sqlite",
+                                 content, sizeof(content)));
+        struct rom_artifact art;
+        ASSERT(rom_seed_register(dir, "consensus-state-bundle-780.sqlite", NULL,
+                                 &art) == ROM_REG_OK);
+
+        const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+        ASSERT(cp != NULL);
+        g_cache_reader_height = cp ? cp->height : 1;
+        int32_t tip = g_cache_reader_height + 100000;
+        state_offer_service_test_set_manifest_reader(cache_fixture_reader);
+        state_offer_service_start(dir, NULL);
+        uint32_t base = state_offer_service_test_manifest_opens();
+
+        /* First refresh (driven by the tick's identity step) opens it once. */
+        state_offer_service_test_ensure_identity(tip);
+        ASSERT(state_offer_service_test_have_identity());
+        ASSERT_EQ(state_offer_service_test_manifest_opens(), base + 1);
+
+        /* Second refresh: same snapshot, nothing opened. */
+        ASSERT_EQ(state_offer_service_test_refresh_and_count(), 1u);
+        ASSERT_EQ(state_offer_service_test_manifest_opens(), base + 1);
+
+        /* A rewritten file (new mtime) misses and is opened again. */
+        ASSERT(bump_mtime(file, 10));
+        ASSERT_EQ(state_offer_service_test_refresh_and_count(), 1u);
+        ASSERT_EQ(state_offer_service_test_manifest_opens(), base + 2);
+
+        /* The send path after TTL expiry composes offers from the snapshot and
+         * opens nothing, even though the file changed again. */
+        ASSERT(bump_mtime(file, 20));
+        state_offer_service_test_expire_ttl();
+        struct state_offer_batch_v1 batch;
+        memset(&batch, 0, sizeof(batch));
+        ASSERT_EQ(state_offer_service_test_provide(&batch, tip), 1u);
+        ASSERT_EQ(state_offer_service_test_manifest_opens(), base + 2);
+
+        /* An artifact gone from rom_seed_list drops out of the snapshot. */
+        rom_seed_reset();
+        ASSERT_EQ(state_offer_service_test_refresh_and_count(), 0u);
+        ASSERT_EQ(state_offer_service_test_manifest_opens(), base + 2);
+
+        state_offer_service_test_set_manifest_reader(NULL);
+        state_offer_service_shutdown();
+        test_rm_rf_recursive(dir);
+    } TEST_END
+    return failures;
+}
+
 int test_state_offer_store(void)
 {
     int failures = 0;
@@ -819,6 +910,7 @@ int test_state_offer_store(void)
     failures += catalog_bundles_prefix_resolves();
     failures += catalog_bare_basename_resolves();
     failures += missing_bundle_file_fails_closed_with_named_log();
+    failures += manifest_cache_skips_unchanged_bundles();
     state_offer_store_reset();
     return failures;
 }
