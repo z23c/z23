@@ -77,11 +77,12 @@ Z23_OBJECTIVE("fresh_node_sync_eta_s", "product", "unmeasured", "min", 3600, "s"
 Z23_OBJECTIVE("tokens_per_landed_commit", "lab", "rows.tsv",
              "min", 200000, "tokens",
              "the cost of one landed commit is what the whole delegation "
-             "loop is spending to make progress; it is tokens_in+tokens_out "
-             "of the ledger's result rows (cache reads excluded) over the "
-             "landed outcomes rows, 7 days, and the ledger producer "
-             "over-counted 3-4.5x before 2026-10-23 18:05Z, so the 7-day "
-             "value is mixed until 2026-10-30")
+             "loop is spending to make progress; it is the median, over "
+             "lanes landed in the last 7 days, of tokens_in+tokens_out "
+             "(cache reads excluded) summed over the worker agents labelled "
+             "with that lane; the ledger producer over-counted 3-4.5x "
+             "before 2026-10-23 18:05Z, so the value is mixed until "
+             "2026-10-30")
 
 Z23_OBJECTIVE("proof_wall_s", "lab", "phases.txt", "min", 900, "s",
              "the whole proof, from first phase to the end of lint and "

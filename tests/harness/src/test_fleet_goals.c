@@ -961,14 +961,27 @@ static int fgl_case_d5(const char *root)
     }
     TEST("D5: a measured tokens_per_landed_commit grades PARTIAL with its "
          "value, not PASS") {
+        char meta_root[700], meta_dir[760], meta[800];
+        (void)snprintf(meta_root, sizeof(meta_root), "%s/d5_meta", root);
+        (void)snprintf(meta_dir, sizeof(meta_dir), "%s/subagents", meta_root);
+        (void)snprintf(meta, sizeof(meta), "%s/agent-d5agent.meta.json",
+                       meta_dir);
+        (void)mkdir(meta_root, 0700);
+        (void)mkdir(meta_dir, 0700);
+        ASSERT(fgl_write(meta, "{\"description\":\"write:d5lane\"}\n"));
+        ASSERT(setenv("Z23_AGENT_META_ROOT", meta_root, 1) == 0);
+        ASSERT(fgl_write(outcomes,
+                         "{\"seq\":1,\"ts\":\"2027-01-13T10:00:00Z\","
+                         "\"state\":\"landed\",\"note\":\"d5lane: x\"}\n"));
         ASSERT(fgl_write(ledger,
                          "ts\tkind\n"
-                         "2027-01-14T10:00:00Z\tresult\tnode1\tid\tverify\t"
+                         "2027-01-14T10:00:00Z\tresult\tnode1\td5agent\tverify\t"
                          "unknown\tclaude-opus\tagent-tool\tm\tmedium\t1000\t"
                          "200\t0\t0\t0\t0\t0\tunknown\t0\t0\t0\tfixture\n"));
         r = zcl_goals_measure(&o, "D5");
         ASSERT(r.grade == ZCL_GOAL_PARTIAL);
         ASSERT(fgl_has(r.evidence, "1200 tokens per landed commit"));
+        (void)unsetenv("Z23_AGENT_META_ROOT");
         PASS();
     }
 _test_next:;

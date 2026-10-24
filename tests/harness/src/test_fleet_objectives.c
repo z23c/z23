@@ -1170,41 +1170,50 @@ _test_next:;
     "tool_uses\tturns\twall_s\toutcome\tlines_added\tlines_removed\t"        \
     "defects\tnote\n"
 
-/* One 22-column experiment ledger row with the given token columns (the
- * 11th, 12th and 13th) and note (the 22nd); the rest is a closed-vocabulary
+/* One 22-column experiment ledger row for agent `id` with the given token
+ * columns (the 11th, 12th and 13th); the rest is a closed-vocabulary
  * filler. */
-static bool fox_tok_row_full(FILE *f, const char *ts, const char *kind,
-                             const char *tin, const char *tout,
-                             const char *cache, const char *note)
+static bool fox_tok_row(FILE *f, const char *kind, const char *id,
+                        const char *tin, const char *tout, const char *cache)
 {
     return fprintf(f,
-                   "%s\t%s\tnode1\tid\tverify\tunknown\tclaude-opus\t"
+                   "%s\t%s\tnode1\t%s\tverify\tunknown\tclaude-opus\t"
                    "agent-tool\tm\tmedium\t%s\t%s\t%s\t0\t0\t0\t0\tunknown\t"
-                   "0\t0\t0\t%s\n",
-                   ts, kind, tin, tout, cache, note) > 0;
+                   "0\t0\t0\tfixture\n",
+                   FOX_TOK_IN_A, kind, id, tin, tout, cache) > 0;
 }
 
-static bool fox_tok_row(FILE *f, const char *ts, const char *kind,
-                        const char *tin, const char *tout)
+/* One outcomes.jsonl row: a landed/failed attempt whose note starts
+ * `<lane>:`. */
+static bool fox_tok_outcome(FILE *f, const char *ts, const char *state,
+                            const char *lane)
 {
-    return fox_tok_row_full(f, ts, kind, tin, tout, "0", "fixture");
+    return fprintf(f,
+                   "{\"seq\":1,\"ts\":\"%s\",\"state\":\"%s\","
+                   "\"note\":\"%s: split a file\"}\n",
+                   ts, state, lane) > 0;
 }
 
-/* A valid in-window result row well past the old 1023-byte line cap (its
- * note is 2000 bytes). */
-static bool fox_tok_long_row(FILE *f, const char *ts)
+/* One agent-<id>.meta.json under <root>/s/subagents/workflows/r. */
+static bool fox_tok_meta(const char *root, const char *id, const char *label)
 {
-    static char note[2001];
-    memset(note, 'x', sizeof(note) - 1u);
-    note[sizeof(note) - 1u] = '\0';
-    return fox_tok_row_full(f, ts, "result", "100", "0", "0", note);
-}
-
-/* One outcomes.jsonl row with the given ts and state. */
-static bool fox_tok_landed(FILE *f, const char *ts, const char *state)
-{
-    return fprintf(f, "{\"seq\":1,\"ts\":\"%s\",\"state\":\"%s\"}\n", ts,
-                   state) > 0;
+    char dir[512], path[640];
+    FILE *f;
+    bool ok;
+    (void)snprintf(dir, sizeof(dir), "%s/s", root);
+    (void)mkdir(dir, 0700);
+    (void)snprintf(dir, sizeof(dir), "%s/s/subagents", root);
+    (void)mkdir(dir, 0700);
+    (void)snprintf(dir, sizeof(dir), "%s/s/subagents/workflows", root);
+    (void)mkdir(dir, 0700);
+    (void)snprintf(dir, sizeof(dir), "%s/s/subagents/workflows/r", root);
+    (void)mkdir(dir, 0700);
+    (void)snprintf(path, sizeof(path), "%s/agent-%s.meta.json", dir, id);
+    f = fopen(path, "wb");
+    if (!f)
+        return false;
+    ok = fprintf(f, "{\"agentType\":\"x\",\"description\":\"%s\"}\n", label) > 0;
+    return fclose(f) == 0 && ok;
 }
 
 static struct zcl_objective_value fox_tok_measure(const char *ledger,
@@ -1218,11 +1227,11 @@ static struct zcl_objective_value fox_tok_measure(const char *ledger,
     return zcl_objectives_measure(&o, "tokens_per_landed_commit");
 }
 
-/* A ledger whose window holds 2100 result tokens (1200 + 800 + 100), one
- * predict row and one out-of-window result that must not count, and two
- * malformed rows (a short row and a non-numeric token column) that are
- * skipped. The first in-window row carries a 999999 tokens_cache, which is
- * not billed and must not move the sum; the 2000-byte row must be counted. */
+/* Agents: alpha has a writer (1000 + 200) and a reviewer (300 + 500) = 2000;
+ * beta has one fixer (5000 + 1000) = 6000; delta (a failed land) has a
+ * writer of 1000000; r1 is research, an unlabeled agent that must not join.
+ * The ledger also holds a predict row, a malformed row, and cache reads of
+ * 5000 + 100 (alpha) and 300 (beta). */
 static bool fox_tok_write_ledger(const char *path)
 {
     FILE *f = fopen(path, "wb");
@@ -1230,30 +1239,39 @@ static bool fox_tok_write_ledger(const char *path)
     if (!f)
         return false;
     ok = fputs(FOX_TOK_HEAD, f) >= 0 &&
-         fox_tok_row_full(f, FOX_TOK_IN_A, "result", "1000", "200", "999999",
-                          "fixture") &&
-         fox_tok_row(f, FOX_TOK_IN_B, "result", "300", "500") &&
-         fox_tok_long_row(f, FOX_TOK_IN_B) &&
-         fox_tok_row(f, FOX_TOK_IN_A, "predict", "9999", "9999") &&
-         fox_tok_row(f, FOX_TOK_OLD, "result", "50000", "50000") &&
-         fputs("2026-10-22T10:00:00Z\tresult\tnode1\tshort\n", f) >= 0 &&
-         fox_tok_row(f, FOX_TOK_IN_A, "result", "12x", "5");
+         fox_tok_row(f, "result", "a1", "1000", "200", "5000") &&
+         fox_tok_row(f, "result", "a2", "300", "500", "100") &&
+         fox_tok_row(f, "result", "b1", "5000", "1000", "300") &&
+         fox_tok_row(f, "result", "d1", "900000", "100000", "0") &&
+         fox_tok_row(f, "result", "r1", "7777777", "1", "0") &&
+         fox_tok_row(f, "predict", "a1", "9999", "9999", "0") &&
+         fox_tok_row(f, "result", "a1", "12x", "5", "0") &&
+         fputs("2026-10-22T10:00:00Z\tresult\tnode1\tshort\n", f) >= 0;
     return fclose(f) == 0 && ok;
 }
 
-/* Three landed rows in the window (one failed and one old landed row must
- * not count): 2100 / 3 rounds down to 700. */
+static bool fox_tok_write_meta(const char *root)
+{
+    return fox_tok_meta(root, "a1", "write:alpha") &&
+           fox_tok_meta(root, "a2", "review:alpha") &&
+           fox_tok_meta(root, "b1", "fix:beta") &&
+           fox_tok_meta(root, "d1", "write:delta") &&
+           fox_tok_meta(root, "r1", "Fix inbound body re-fetch gap");
+}
+
+/* Landed in the window: alpha, beta and gamma (no agent). delta failed, and
+ * old landed long before the window. */
 static bool fox_tok_write_outcomes(const char *path)
 {
     FILE *f = fopen(path, "wb");
     bool ok;
     if (!f)
         return false;
-    ok = fox_tok_landed(f, "2026-10-21T10:00:00Z", "landed") &&
-         fox_tok_landed(f, FOX_TOK_IN_A, "landed") &&
-         fox_tok_landed(f, FOX_TOK_IN_B, "landed") &&
-         fox_tok_landed(f, FOX_TOK_IN_A, "failed") &&
-         fox_tok_landed(f, FOX_TOK_OLD, "landed");
+    ok = fox_tok_outcome(f, FOX_TOK_IN_A, "landed", "alpha") &&
+         fox_tok_outcome(f, FOX_TOK_IN_B, "landed", "beta") &&
+         fox_tok_outcome(f, FOX_TOK_IN_B, "landed", "gamma") &&
+         fox_tok_outcome(f, FOX_TOK_IN_A, "failed", "delta") &&
+         fox_tok_outcome(f, FOX_TOK_OLD, "landed", "old");
     return fclose(f) == 0 && ok;
 }
 
@@ -1264,15 +1282,21 @@ static int fox_case_tokens_measure(const char *root)
     struct zcl_objective_value v;
     (void)snprintf(ledger, sizeof(ledger), "%s/rows.tsv", root);
     (void)snprintf(outcomes, sizeof(outcomes), "%s/tok_outcomes.jsonl", root);
-    TEST("objectives: tokens_per_landed_commit is measured: result tokens in "
-         "the window over landed rows, rounded down, malformed lines skipped "
-         "and counted") {
+    TEST("objectives: tokens_per_landed_commit is the median over landed "
+         "lanes of their agents' uncached input + output") {
         ASSERT(fox_tok_write_ledger(ledger));
         ASSERT(fox_tok_write_outcomes(outcomes));
+        ASSERT(fox_tok_write_meta(root));
+        ASSERT(setenv("Z23_AGENT_META_ROOT", root, 1) == 0);
         v = fox_tok_measure(ledger, outcomes);
         ASSERT(v.measured);
-        ASSERT_EQ(v.value, (int64_t)700);
-        ASSERT(strstr(v.note, "3 result rows") != NULL);
+        /* alpha 2000, beta 6000: the median is their mean. */
+        ASSERT_EQ(v.value, (int64_t)4000);
+        ASSERT(strstr(v.note, "2 landed lanes joined") != NULL);
+        ASSERT(strstr(v.note, "1 landed without an agent") != NULL);
+        ASSERT(strstr(v.note, "p90 6000") != NULL);
+        /* cache reads: alpha 5100, beta 300, median 2700. */
+        ASSERT(strstr(v.note, "cache-read median 2700") != NULL);
         ASSERT(strstr(v.note, "2 malformed") != NULL);
         PASS();
     }
@@ -1297,18 +1321,17 @@ static int fox_case_tokens_refuse(const char *root)
         ASSERT(strstr(v.reason, "missing experiment ledger") != NULL);
         PASS();
     }
-    TEST("objectives: tokens_per_landed_commit is unmeasured when the window "
-         "has no result row") {
-        ASSERT(fox_tok_write_outcomes(outcomes));
-        f = fopen(ledger, "wb");
+    TEST("objectives: tokens_per_landed_commit is unmeasured when no landed "
+         "lane joins an agent") {
+        ASSERT(fox_tok_write_ledger(ledger));
+        f = fopen(outcomes, "wb");
         ASSERT(f != NULL);
-        ASSERT(fputs(FOX_TOK_HEAD, f) >= 0);
-        ASSERT(fox_tok_row(f, FOX_TOK_IN_A, "predict", "5", "5"));
-        ASSERT(fox_tok_row(f, FOX_TOK_OLD, "result", "5", "5"));
+        ASSERT(fox_tok_outcome(f, FOX_TOK_IN_A, "landed", "gamma"));
+        ASSERT(fox_tok_outcome(f, FOX_TOK_IN_A, "landed", "r1"));
         ASSERT(fclose(f) == 0);
         v = fox_tok_measure(ledger, outcomes);
         ASSERT(!v.measured);
-        ASSERT(strstr(v.reason, "no experiment ledger result row") != NULL);
+        ASSERT(strstr(v.reason, "no landed lane joins") != NULL);
         PASS();
     }
     TEST("objectives: tokens_per_landed_commit is unmeasured when the window "
@@ -1316,8 +1339,8 @@ static int fox_case_tokens_refuse(const char *root)
         ASSERT(fox_tok_write_ledger(ledger));
         f = fopen(outcomes, "wb");
         ASSERT(f != NULL);
-        ASSERT(fox_tok_landed(f, FOX_TOK_IN_A, "failed"));
-        ASSERT(fox_tok_landed(f, FOX_TOK_OLD, "landed"));
+        ASSERT(fox_tok_outcome(f, FOX_TOK_IN_A, "failed", "alpha"));
+        ASSERT(fox_tok_outcome(f, FOX_TOK_OLD, "landed", "alpha"));
         ASSERT(fclose(f) == 0);
         v = fox_tok_measure(ledger, outcomes);
         ASSERT(!v.measured);
@@ -1335,6 +1358,7 @@ static int fox_case_tokens(void)
     test_make_tmpdir(root, sizeof(root), "fleet_objectives", "tokens");
     failures += fox_case_tokens_measure(root);
     failures += fox_case_tokens_refuse(root);
+    (void)unsetenv("Z23_AGENT_META_ROOT");
     (void)test_rm_rf_recursive(root);
     return failures;
 }

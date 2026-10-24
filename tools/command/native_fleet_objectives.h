@@ -90,9 +90,34 @@ struct zcl_objective_value zcl_objectives_node_tip_lag_blocks(
 struct zcl_objective_value zcl_objectives_node_warm_restart_s(
     const struct zcl_objectives_options *options);
 
-/* The experiment-ledger producer (native_fleet_objectives_tokens.c). */
+/* The experiment-ledger producer (native_fleet_objectives_tokens.c): the
+ * median, over lanes landed in the last 7 days, of the lane's worker agents'
+ * uncached input + output tokens. */
 struct zcl_objective_value zcl_objectives_tokens_per_landed_commit(
     const struct zcl_objectives_options *options);
+
+
+/* The agent-to-lane index (native_fleet_objectives_lanes.c): worker agent
+ * id -> lane, from the agent-<id>.meta.json job labels under the Claude
+ * projects root ($Z23_AGENT_META_ROOT, else ~/.claude/projects). */
+#define ZCL_AGENT_INDEX_FILE_CAP 20000u
+struct zcl_agent_lane {
+    char id[48];
+    char lane[104];
+};
+struct zcl_agent_index {
+    struct zcl_agent_lane *items; /* sorted by id after build */
+    size_t n;
+    size_t cap;
+    size_t files;  /* meta files read */
+    bool capped;   /* the file cap stopped the scan */
+    bool oom;
+};
+/* False only on an allocation failure. A missing root yields an empty index. */
+bool zcl_objectives_agent_index_build(struct zcl_agent_index *ix);
+const char *zcl_objectives_agent_lane(const struct zcl_agent_index *ix,
+                                      const char *id);
+void zcl_objectives_agent_index_free(struct zcl_agent_index *ix);
 
 /* "met", "unmet", or "unmeasured(<reason>)", written into `out` (always
  * NUL-terminated, truncated to fit). */
