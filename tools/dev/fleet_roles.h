@@ -50,6 +50,7 @@ enum zcl_role_id {
  * every catalog role even though it is never itself declared in the .def. */
 
 const char *zcl_role_name(uint8_t role);
+
 bool zcl_role_from_name(const char *name, uint8_t *role_out);
 size_t zcl_role_count(void); /* catalog roles only; excludes operator */
 const char *zcl_role_at(size_t index);
@@ -150,6 +151,13 @@ bool zcl_role_store_has_role(const struct zcl_role_store *store,
                              const uint8_t fp[ZCL_ROLE_FP_BYTES],
                              uint8_t role);
 
+/* Has the store EVER recorded (fp, role): a grant or a revoke row? True when
+ * it has; `active_out` (optional) then says whether the newest state is a
+ * grant. Read-only. Automatic paths use it so they never override a revoke. */
+bool zcl_role_store_known(const struct zcl_role_store *store,
+                          const uint8_t fp[ZCL_ROLE_FP_BYTES], uint8_t role,
+                          bool *active_out);
+
 /* Every (fingerprint, role) pair the store has ever seen, active or not,
  * newest state per pair. Returns the count written, capped at `cap`. */
 size_t zcl_role_store_list(const struct zcl_role_store *store,
@@ -187,7 +195,16 @@ bool zcl_fleet_roles_grant_worker(const char *datadir,
                                   const uint8_t pubkey[32], int64_t now,
                                   const char **why);
 
-/* Grant `worker` to every key in `keys` that does not already hold it, in
+/* The AUTOMATIC twin of the above, for the boot-time grandfather path: it
+ * mints `worker` only for a key the store has never recorded for that role.
+ * A key with any grant or revoke row is left alone, so an operator's revoke
+ * survives a restart; only the explicit call above re-admits it. True when
+ * the key holds `worker` afterwards. */
+bool zcl_fleet_roles_grandfather_worker(const char *datadir,
+                                        const uint8_t pubkey[32],
+                                        const char *origin, int64_t now);
+
+/* Grant `worker` to every key in `keys` the store has never recorded, in
  * one store open. Returns how many rows were minted (zero when they all
  * held it already, which is what makes running this at every boot safe).
  * The explicit key list is what makes this testable without a roster. */

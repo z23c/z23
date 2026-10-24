@@ -607,6 +607,24 @@ bool zcl_role_store_has_role(const struct zcl_role_store *store,
     return false;
 }
 
+bool zcl_role_store_known(const struct zcl_role_store *store,
+                          const uint8_t fp[ZCL_ROLE_FP_BYTES], uint8_t role,
+                          bool *active_out)
+{
+    if (active_out)
+        *active_out = false;
+    if (!store || !fp)
+        return false;
+    for (size_t i = 0; i < store->table_n; i++)
+        if (store->table[i].role == role &&
+            memcmp(store->table[i].fp, fp, ZCL_ROLE_FP_BYTES) == 0) {
+            if (active_out)
+                *active_out = store->table[i].active;
+            return true;
+        }
+    return false;
+}
+
 size_t zcl_role_store_list(const struct zcl_role_store *store,
                            struct zcl_role_entry *out, size_t cap)
 {

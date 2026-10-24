@@ -100,9 +100,9 @@ static bool re_gate_allow(const uint8_t key[32], const char *leaf,
 static bool re_gate_grandfather(const uint8_t key[32], const char *origin,
                                 void *ctx)
 {
-    (void)origin;
     (void)ctx;
-    return zcl_fleet_roles_grant_worker(g_re_gate_dir, key, RE_ROW_NOW, NULL);
+    return zcl_fleet_roles_grandfather_worker(g_re_gate_dir, key, origin,
+                                              RE_ROW_NOW);
 }
 
 static void re_gate_install(const char *datadir)
@@ -196,13 +196,20 @@ static size_t re_rows_of(struct re_box *b, uint8_t *out, size_t cap)
 
 /* ── one board post ──────────────────────────────────────────────────── */
 
-static enum fleet_board_result re_post(struct node_db *db, const uint8_t seed[32],
-                                       const uint8_t pub[32], uint8_t kind,
-                                       const char *text)
+/* A post in one scope. A public post names a room; legacy and fleet posts
+ * name none. */
+static enum fleet_board_result re_post_scoped(struct node_db *db,
+                                              const uint8_t seed[32],
+                                              const uint8_t pub[32],
+                                              uint8_t kind, uint8_t scope,
+                                              const char *text)
 {
     struct fleet_board_post post;
     memset(&post, 0, sizeof post);
     post.kind = kind;
+    post.scope = scope;
+    if (scope == FLEET_BOARD_SCOPE_PUBLIC)
+        (void)snprintf(post.room, sizeof post.room, "%s", "general");
     post.created_at = (uint64_t)RE_POST_NOW;
     post.ttl = 3600;
     (void)snprintf(post.agent, sizeof post.agent, "%s", "role-lane");
@@ -214,6 +221,16 @@ static enum fleet_board_result re_post(struct node_db *db, const uint8_t seed[32
     if (r != FLEET_BOARD_OK)
         return r;
     return db_fleet_board_post_ingest(db, &post, RE_POST_NOW, NULL);
+}
+
+/* A legacy-scope post: the pre-scope shape, which the role gate checks at
+ * ingest like a fleet post. */
+static enum fleet_board_result re_post(struct node_db *db, const uint8_t seed[32],
+                                       const uint8_t pub[32], uint8_t kind,
+                                       const char *text)
+{
+    return re_post_scoped(db, seed, pub, kind, FLEET_BOARD_SCOPE_LEGACY_PUBLIC,
+                          text);
 }
 
 /* ── an operator identity on disk ────────────────────────────────────── */
@@ -618,6 +635,176 @@ int test_fleet_role_enforcement(void)
 
         node_db_close(&db);
         test_rm_rf_recursive(gb_dir);
+        PASS();
+    }
+
+    TEST("fleet roles: a public post never earns a role at boot; a fleet or "
+         "legacy post does, and a newer public post cannot stand in for it") {
+        char pb_dir[256];
+        test_make_tmpdir(pb_dir, sizeof(pb_dir), "fleet_role_enforcement",
+                         "gf_public");
+        ASSERT(re_file_identity(pb_dir));
+
+        uint8_t s_pub[32], s_seed[32], s_sk[32];
+        uint8_t f_pub[32], f_seed[32], f_sk[32];
+        uint8_t l_pub[32], l_seed[32], l_sk[32];
+        uint8_t m_pub[32], m_seed[32], m_sk[32];
+        re_key(0x64, s_pub, s_seed, s_sk);
+        re_key(0x65, f_pub, f_seed, f_sk);
+        re_key(0x66, l_pub, l_seed, l_sk);
+        re_key(0x67, m_pub, m_seed, m_sk);
+
+        struct node_db db;
+        memset(&db, 0, sizeof db);
+        ASSERT(node_db_open(&db, ":memory:"));
+
+        /* A stranger who posted only in a public room (stored with no role
+         * check, by design); a fleet host; a legacy-scope host; and a key
+         * whose fleet post is followed by a NEWER public post. */
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        ASSERT_EQ(re_post_scoped(&db, s_sk, s_pub, FLEET_BOARD_KIND_NOTE,
+                                 FLEET_BOARD_SCOPE_PUBLIC,
+                                 "a stranger in a public room"),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(re_post_scoped(&db, f_sk, f_pub, FLEET_BOARD_KIND_NOTE,
+                                 FLEET_BOARD_SCOPE_FLEET, "fleet host"),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(re_post(&db, l_sk, l_pub, FLEET_BOARD_KIND_NOTE,
+                          "legacy host"),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(re_post_scoped(&db, m_sk, m_pub, FLEET_BOARD_KIND_NOTE,
+                                 FLEET_BOARD_SCOPE_FLEET, "fleet first"),
+                  FLEET_BOARD_OK);
+        ASSERT_EQ(re_post_scoped(&db, m_sk, m_pub, FLEET_BOARD_KIND_NOTE,
+                                 FLEET_BOARD_SCOPE_PUBLIC,
+                                 "then a newer public post"),
+                  FLEET_BOARD_OK);
+
+        re_gate_install(pb_dir);
+        ASSERT_EQ(boot_fleet_board_grandfather(&db), (size_t)3);
+
+        char why[ZCL_FLEET_ROLE_WHY_MAX];
+        ASSERT(!zcl_fleet_role_allows(s_pub, ZCL_FLEET_LEAF_BOARD_POST, "note",
+                                      why, sizeof why));
+        ASSERT(zcl_fleet_role_allows(f_pub, ZCL_FLEET_LEAF_BOARD_POST, "note",
+                                     why, sizeof why));
+        ASSERT(zcl_fleet_role_allows(l_pub, ZCL_FLEET_LEAF_BOARD_POST, "note",
+                                     why, sizeof why));
+        ASSERT(zcl_fleet_role_allows(m_pub, ZCL_FLEET_LEAF_BOARD_POST, "note",
+                                     why, sizeof why));
+        ASSERT_EQ((int)re_store_rows(pb_dir), 3);
+
+        node_db_close(&db);
+        test_rm_rf_recursive(pb_dir);
+        PASS();
+    }
+
+    TEST("fleet roles: a revoke survives restart; grandfathering never "
+         "re-grants a revoked key, only an explicit grant re-admits it") {
+        char rv_dir[256];
+        test_make_tmpdir(rv_dir, sizeof(rv_dir), "fleet_role_enforcement",
+                         "gf_revoke");
+        ASSERT(re_file_identity(rv_dir));
+
+        uint8_t k_pub[32], k_seed[32], k_sk[32];
+        uint8_t n_pub[32], n_seed[32], n_sk[32];
+        uint8_t e_pub[32], e_seed[32], e_sk[32];
+        re_key(0x68, k_pub, k_seed, k_sk);
+        re_key(0x69, n_pub, n_seed, n_sk);
+        re_key(0x6a, e_pub, e_seed, e_sk);
+
+        struct node_db db;
+        memset(&db, 0, sizeof db);
+        ASSERT(node_db_open(&db, ":memory:"));
+        re_gate_install(rv_dir);
+
+        /* The old build wrongly gave K worker; K then posted at fleet
+         * scope while authorized, and this node stored the post. */
+        ASSERT(zcl_fleet_roles_grant_worker(rv_dir, k_pub, RE_ROW_NOW, NULL));
+        ASSERT_EQ(re_post_scoped(&db, k_sk, k_pub, FLEET_BOARD_KIND_NOTE,
+                                 FLEET_BOARD_SCOPE_FLEET, "while authorized"),
+                  FLEET_BOARD_OK);
+
+        /* After the upgrade the operator revokes K. */
+        uint8_t op_pub[32], op_seed[32];
+        char err[160];
+        ASSERT(vcs_zcode_dht_online_key_load(rv_dir, op_seed, op_pub, err,
+                                             sizeof err));
+        uint8_t fp[ZCL_ROLE_FP_BYTES];
+        struct zcl_role_report report;
+        struct zcl_role_store *s = zcl_role_store_open(rv_dir, &report);
+        ASSERT(s != NULL);
+        zcl_role_fingerprint(k_pub, fp);
+        ASSERT_EQ((int)zcl_role_store_revoke(s, fp, ZCL_ROLE_worker, op_pub,
+                                             op_seed, RE_ROW_NOW + 1, NULL),
+                  (int)ZCL_ROLE_OK);
+        zcl_role_store_close(s);
+        memset(op_seed, 0, sizeof op_seed);
+
+        char why[ZCL_FLEET_ROLE_WHY_MAX];
+        ASSERT(!zcl_fleet_role_allows(k_pub, ZCL_FLEET_LEAF_BOARD_POST, "note",
+                                      why, sizeof why));
+        uint64_t rows = re_store_rows(rv_dir);
+
+        /* Restart, twice: K stays refused, nothing is held or written. */
+        ASSERT_EQ(boot_fleet_board_grandfather(&db), (size_t)0);
+        ASSERT_EQ(boot_fleet_board_grandfather(&db), (size_t)0);
+        ASSERT(!zcl_fleet_role_allows(k_pub, ZCL_FLEET_LEAF_BOARD_POST, "note",
+                                      why, sizeof why));
+        ASSERT_EQ((int)re_store_rows(rv_dir), (int)rows);
+
+        /* A revoked ENROLLED key stays revoked across the bootstrap too. */
+        uint8_t keys[1][32];
+        memcpy(keys[0], k_pub, 32);
+        ASSERT_EQ(zcl_fleet_roles_bootstrap_keys(rv_dir, keys, 1,
+                                                 RE_ROW_NOW + 2, NULL),
+                  (size_t)0);
+        ASSERT(!zcl_fleet_role_allows(k_pub, ZCL_FLEET_LEAF_BOARD_POST, "note",
+                                      why, sizeof why));
+        ASSERT_EQ((int)re_store_rows(rv_dir), (int)rows);
+
+        /* Only an explicit grant re-admits it. */
+        ASSERT(zcl_fleet_roles_grant_worker(rv_dir, k_pub, RE_ROW_NOW + 3,
+                                            NULL));
+        ASSERT(zcl_fleet_role_allows(k_pub, ZCL_FLEET_LEAF_BOARD_POST, "note",
+                                     why, sizeof why));
+
+        /* A never-seen key with a stored fleet post is grandfathered as
+         * before; K, holding worker again, is simply found. */
+        zcl_fleet_role_checker_install_permissive_for_testing();
+        ASSERT_EQ(re_post_scoped(&db, n_sk, n_pub, FLEET_BOARD_KIND_NOTE,
+                                 FLEET_BOARD_SCOPE_FLEET, "never seen"),
+                  FLEET_BOARD_OK);
+        re_gate_install(rv_dir);
+        ASSERT_EQ(boot_fleet_board_grandfather(&db), (size_t)2);
+        ASSERT(zcl_fleet_role_allows(n_pub, ZCL_FLEET_LEAF_BOARD_POST, "note",
+                                     why, sizeof why));
+
+        /* Enrolment: a never-recorded key is minted, a revoked one is not. */
+        uint8_t ek[1][32];
+        memcpy(ek[0], e_pub, 32);
+        ASSERT_EQ(zcl_fleet_roles_bootstrap_keys(rv_dir, ek, 1,
+                                                 RE_ROW_NOW + 4, NULL),
+                  (size_t)1);
+        zcl_role_fingerprint(e_pub, fp);
+        s = zcl_role_store_open(rv_dir, &report);
+        ASSERT(s != NULL);
+        memset(op_seed, 0, sizeof op_seed);
+        ASSERT(vcs_zcode_dht_online_key_load(rv_dir, op_seed, op_pub, err,
+                                             sizeof err));
+        ASSERT_EQ((int)zcl_role_store_revoke(s, fp, ZCL_ROLE_worker, op_pub,
+                                             op_seed, RE_ROW_NOW + 5, NULL),
+                  (int)ZCL_ROLE_OK);
+        zcl_role_store_close(s);
+        memset(op_seed, 0, sizeof op_seed);
+        ASSERT_EQ(zcl_fleet_roles_bootstrap_keys(rv_dir, ek, 1,
+                                                 RE_ROW_NOW + 6, NULL),
+                  (size_t)0);
+        ASSERT(!zcl_fleet_role_allows(e_pub, ZCL_FLEET_LEAF_BOARD_POST, "note",
+                                      why, sizeof why));
+
+        node_db_close(&db);
+        test_rm_rf_recursive(rv_dir);
         PASS();
     }
 

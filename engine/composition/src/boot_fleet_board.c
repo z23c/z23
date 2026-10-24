@@ -89,12 +89,15 @@ void boot_fleet_board_wire(struct boot_svc_ctx *svc)
                  " posts from hold the worker role", held);
 }
 
-/* Grandfathering. Every key this node is already storing posts from gets
- * the role that storing them implied, so a fleet that was gossiping happily
- * yesterday does not stall on a gate that did not exist when those posts
- * arrived. Nothing here decides anything: the seam's installed checker mints
- * the grant and logs each fingerprint, and a node with no checker (or no
- * operator key to sign with) mints nothing and keeps refusing. */
+/* Grandfathering. Every key this node is already storing fleet- or
+ * legacy-scope posts from (never public-scope ones, which no role gate
+ * admitted) gets the role that storing them implied, so a fleet that was
+ * gossiping happily yesterday does not stall on a gate that did not exist
+ * when those posts arrived. A key the operator revoked keeps no role: the
+ * checker's automatic path never re-grants a key its role store already
+ * recorded. Nothing here decides anything: the seam's installed checker
+ * mints the grant and logs each fingerprint, and a node with no checker (or
+ * no operator key to sign with) mints nothing and keeps refusing. */
 size_t boot_fleet_board_grandfather(struct node_db *ndb)
 {
     uint8_t hosts[FLEET_BOARD_HOST_LIST_MAX][32];

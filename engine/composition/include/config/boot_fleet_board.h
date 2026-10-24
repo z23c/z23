@@ -71,8 +71,9 @@ void boot_fleet_board_tick(struct msg_processor *mp, struct p2p_node *node,
 /* Record the composition context. Safe before the store opens. */
 void boot_fleet_board_wire(struct boot_svc_ctx *svc);
 
-/* Grant the worker role to every key this node is ALREADY storing posts
- * from, through the role seam (util/fleet_role_check.h). Called once at
+/* Grant the worker role to every key this node is ALREADY storing fleet- or
+ * legacy-scope posts from (never public-scope ones, which no role gate
+ * admitted), through the role seam (util/fleet_role_check.h). Called once at
  * wire, and safe to call again: a key that already holds the role is not
  * granted twice. Returns how many of those keys hold the role afterwards;
  * zero on a node with no checker installed, which keeps refusing. */

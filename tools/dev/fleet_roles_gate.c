@@ -113,8 +113,12 @@ static bool gate_allow(const uint8_t key[32], const char *leaf,
 /* ── grants ──────────────────────────────────────────────────────────── */
 
 /* One grant against an already-open store and an already-loaded identity.
- * Returns true when the key holds `worker` afterwards. */
+ * `automatic` (boot grandfather, enrolment bootstrap) never overrides an
+ * operator decision: a key with any recorded worker row is left as it is,
+ * so a revoked key stays revoked. Returns true when the key holds `worker`
+ * afterwards. */
 static bool gate_grant_one(struct zcl_role_store *store, const char *origin,
+                           bool automatic,
                            const uint8_t pubkey[32],
                            const uint8_t op_pub[32], const uint8_t op_seed[32],
                            int64_t now, bool *minted)
@@ -122,6 +126,19 @@ static bool gate_grant_one(struct zcl_role_store *store, const char *origin,
     uint8_t fp[ZCL_ROLE_FP_BYTES];
     char fp8[9];
     zcl_role_fingerprint(pubkey, fp);
+    if (automatic) {
+        bool active = false;
+        if (zcl_role_store_known(store, fp, ZCL_ROLE_worker, &active)) {
+            if (!active) {
+                zcl_role_fingerprint_short(fp, fp8);
+                LOG_INFO(ROLE_GATE_DOMAIN,
+                         "not re-granting worker to %s key %s: the operator "
+                         "revoked it (only `fleet roles grant` re-admits)",
+                         origin, fp8);
+            }
+            return active;
+        }
+    }
     if (zcl_role_store_has_role(store, fp, ZCL_ROLE_worker))
         return true;
     enum zcl_role_status st = zcl_role_store_grant(store, fp, ZCL_ROLE_worker,
@@ -158,8 +175,8 @@ size_t zcl_fleet_roles_bootstrap_keys(const char *datadir,
     size_t minted = 0;
     for (size_t i = 0; i < count; i++) {
         bool one = false;
-        (void)gate_grant_one(store, "enrolled", keys[i], op_pub, op_seed, now,
-                             &one);
+        (void)gate_grant_one(store, "enrolled", true, keys[i], op_pub,
+                             op_seed, now, &one);
         if (one)
             minted++;
     }
@@ -169,6 +186,7 @@ size_t zcl_fleet_roles_bootstrap_keys(const char *datadir,
 }
 
 static bool gate_grant_named(const char *datadir, const char *origin,
+                             bool automatic,
                              const uint8_t pubkey[32], int64_t now,
                              const char **why)
 {
@@ -185,8 +203,8 @@ static bool gate_grant_named(const char *datadir, const char *origin,
             *why = zcl_role_status_label(report.status);
         return false;
     }
-    bool held = gate_grant_one(store, origin, pubkey, op_pub, op_seed, now,
-                               NULL);
+    bool held = gate_grant_one(store, origin, automatic, pubkey, op_pub,
+                               op_seed, now, NULL);
     memset(op_seed, 0, sizeof op_seed);
     zcl_role_store_close(store);
     if (!held && why)
@@ -198,22 +216,30 @@ bool zcl_fleet_roles_grant_worker(const char *datadir,
                                   const uint8_t pubkey[32], int64_t now,
                                   const char **why)
 {
-    return gate_grant_named(datadir, "admitted", pubkey, now, why);
+    return gate_grant_named(datadir, "admitted", false, pubkey, now, why);
+}
+
+bool zcl_fleet_roles_grandfather_worker(const char *datadir,
+                                        const uint8_t pubkey[32],
+                                        const char *origin, int64_t now)
+{
+    return gate_grant_named(datadir, origin, true, pubkey, now, NULL);
 }
 
 /* The grandfather half of the checker: a key whose row or post this node
  * already stored gets the standing that storing it implied. Nothing here
  * widens what a key may do — `worker` is the same role the enrolment
  * bootstrap mints — and no key that is not already in one of this node's
- * stores can reach this call. */
+ * stores can reach this call. It is the AUTOMATIC path: a key the role store
+ * has ever recorded (granted or revoked) is left exactly as it is. */
 static bool gate_grandfather(const uint8_t key[32], const char *origin,
                              void *ctx)
 {
     (void)ctx;
     if (g_have_self && memcmp(key, g_self_pub, 32) == 0)
         return true; /* our own key: `operator`, never a stored grant */
-    return gate_grant_named(g_datadir, origin, key,
-                            (int64_t)platform_time_wall_time_t(), NULL);
+    return zcl_fleet_roles_grandfather_worker(g_datadir, key, origin,
+                                              (int64_t)platform_time_wall_time_t());
 }
 
 /* ── the enrolment bootstrap ─────────────────────────────────────────── */

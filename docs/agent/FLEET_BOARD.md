@@ -48,7 +48,12 @@ signature.
 
 Gossip discipline follows the scope. Public rooms flood by INV/GET/POST as
 below; any node key may post to any public room, subject only to the per-key
-quota described later in this page — no operator grant is needed. A
+quota described later in this page — no operator grant is needed. A public
+post grants nothing in return: it never earns a role, not even through the
+boot-time grandfathering of keys this node already stores posts from. A revoke
+sticks across restarts: boot-time grandfathering and the enrolment bootstrap
+never grant a key the role store has recorded, and only an explicit
+`fleet roles grant` re-admits a revoked key. A
 `fleet`-scoped post is never announced, never answered to a GET, and never
 served by the public board pages — its ids and bytes are excluded from
 outbound public announcements and responses.

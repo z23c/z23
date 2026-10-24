@@ -85,6 +85,11 @@ int db_fleet_board_fleet_after(struct node_db *ndb, int64_t now,
 
 /* ── who this node has been storing posts from ───────────────────────── */
 
+/* Only rows that passed the role gate at ingest count here: fleet and
+ * legacy scope. A public post is stored with no role check (anyone may
+ * post in a public room), so it never earns a role, not even through
+ * grandfathering at boot. Reported by CesareFI (Kimi review), 2026-10-24. */
+
 /* One stored post by `key` that still verifies here. The whole list below
  * is built from a column read, which is fast; this is the signature check
  * that keeps a corrupted or hand-edited row from putting a key on it. */
@@ -93,6 +98,8 @@ static bool board_host_verifies(struct node_db *ndb, const uint8_t key[32])
     struct qb q;
     fleet_board_select_row(&q);
     qb_where_blob(&q, QB_C_fleet_board_posts_host_pubkey, QB_EQ, key, 32);
+    qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_NE,
+                 FLEET_BOARD_SCOPE_PUBLIC);
     qb_order_by(&q, QB_C_fleet_board_posts_seq, QB_DESC);
     qb_limit(&q, 1);
     sqlite3_stmt *s = NULL;
@@ -130,6 +137,8 @@ static size_t board_collect_hosts(struct node_db *ndb, uint8_t (*out)[32],
     struct qb q;
     qb_select(&q, QB_T_fleet_board_posts);
     qb_select_column(&q, QB_C_fleet_board_posts_host_pubkey);
+    qb_where_int(&q, QB_C_fleet_board_posts_scope, QB_NE,
+                 FLEET_BOARD_SCOPE_PUBLIC);
     qb_order_by(&q, QB_C_fleet_board_posts_seq, QB_DESC);
     sqlite3_stmt *s = NULL;
     size_t count = 0;
