@@ -139,6 +139,131 @@ static bool fto_filter(const char *name, bool is_dir, void *ctx)
 
 /* ── cases ───────────────────────────────────────────────────────── */
 
+/* Populate `src` with the signature fixture: a nested dir and three files,
+ * each with an explicit mtime_ns, so PRESERVE_TIMES has something non-default
+ * to reproduce. */
+static bool fto_make_sig_tree(const char *src)
+{
+    char sub[1024], a[1024], b[1024], cfile[1024];
+    snprintf(sub, sizeof(sub), "%s/nested", src);
+    snprintf(a, sizeof(a), "%s/one.txt", src);
+    snprintf(b, sizeof(b), "%s/two.dat", src);
+    snprintf(cfile, sizeof(cfile), "%s/deep.bin", sub);
+
+    bool ok = mkdir(src, 0755) == 0;
+    ok = ok && mkdir(sub, 0755) == 0;
+    ok = ok && fto_write(a, "alpha");
+    ok = ok && fto_write(b, "beta-bytes-0123456789");
+    ok = ok && fto_write(cfile, "deep-content");
+    ok = ok && fto_set_mtime(a, 1600000000, 123456789L);
+    ok = ok && fto_set_mtime(b, 1600000100, 987654321L);
+    ok = ok && fto_set_mtime(cfile, 1600000200, 424242424L);
+    ok = ok && fto_set_mtime(sub, 1600000300, 111222333L);
+    ok = ok && fto_set_mtime(src, 1600000400, 444555666L);
+    return ok;
+}
+
+/* UPDATE_ONLY fixture: newer.txt is OLDER in src than the pre-existing dst
+ * (keep dst); older.txt is NEWER in src than dst (overwrite). */
+static bool fto_make_update_fixture(const char *src, const char *dst)
+{
+    char s_new[1024], s_old[1024], d_new[1024], d_old[1024];
+    snprintf(s_new, sizeof(s_new), "%s/newer.txt", src);
+    snprintf(s_old, sizeof(s_old), "%s/older.txt", src);
+    snprintf(d_new, sizeof(d_new), "%s/newer.txt", dst);
+    snprintf(d_old, sizeof(d_old), "%s/older.txt", dst);
+
+    bool ok = mkdir(src, 0755) == 0;
+    ok = ok && mkdir(dst, 0755) == 0;
+    ok = ok && fto_write(s_new, "SRC-new");
+    ok = ok && fto_write(d_new, "DST-keep");
+    ok = ok && fto_set_mtime(s_new, 1600000000, 0);
+    ok = ok && fto_set_mtime(d_new, 1700000000, 0);   /* dst newer */
+    ok = ok && fto_write(s_old, "SRC-overwrite");
+    ok = ok && fto_write(d_old, "DST-stale");
+    ok = ok && fto_set_mtime(s_old, 1700000000, 0);   /* src newer */
+    ok = ok && fto_set_mtime(d_old, 1600000000, 0);
+    return ok;
+}
+
+/* True when the file at `path` reads back exactly `want`. */
+static bool fto_content_is(const char *path, const char *want)
+{
+    char buf[64];
+    return fto_read(path, buf, sizeof(buf)) && strcmp(buf, want) == 0;
+}
+
+/* Copy src -> dst with no flags. True when the copy is refused with a
+ * populated message; the copy runs even when `ok` is already false. */
+static bool fto_copy_refused(const char *src, const char *dst, bool ok)
+{
+    struct zcl_result r = zcl_tree_copy(src, dst, 0, NULL, NULL);
+    ok = ok && !r.ok;                        /* refused */
+    ok = ok && r.message[0] != '\0';         /* populated context */
+    return ok;
+}
+
+/* (a) a symlink ROOT is refused. */
+static bool fto_symlink_root_refused(const char *dir, bool ok)
+{
+    const char *base = dir ? dir : "";
+    char realfile[1024], link_root[1024], dst1[1024];
+    snprintf(realfile, sizeof(realfile), "%s/real.txt", base);
+    snprintf(link_root, sizeof(link_root), "%s/link.txt", base);
+    snprintf(dst1, sizeof(dst1), "%s/copy1.txt", base);
+    ok = ok && fto_write(realfile, "real");
+    ok = ok && symlink(realfile, link_root) == 0;
+    return fto_copy_refused(link_root, dst1, ok);
+}
+
+/* (b) a symlink ENTRY inside a tree is refused. */
+static bool fto_symlink_entry_refused(const char *dir, bool ok)
+{
+    const char *base = dir ? dir : "";
+    char src[1024], inner_target[1024], inner_link[1024], dst2[1024];
+    snprintf(src, sizeof(src), "%s/tree", base);
+    snprintf(inner_target, sizeof(inner_target), "%s/target.txt", src);
+    snprintf(inner_link, sizeof(inner_link), "%s/alias.txt", src);
+    snprintf(dst2, sizeof(dst2), "%s/tree_copy", base);
+    ok = ok && mkdir(src, 0755) == 0;
+    ok = ok && fto_write(inner_target, "target");
+    ok = ok && symlink(inner_target, inner_link) == 0;
+    return fto_copy_refused(src, dst2, ok);
+}
+
+/* Create `src` plus ZCL_TREE_MAX_DEPTH + 4 nested "d" levels below it, so
+ * the walker must descend past its cap. */
+static bool fto_make_deep_tree(const char *src)
+{
+    if (mkdir(src, 0755) != 0)
+        return false;
+    char path[8192];
+    int off = snprintf(path, sizeof(path), "%s", src);
+    for (int i = 0; i < ZCL_TREE_MAX_DEPTH + 4; i++) {
+        int n = snprintf(path + off, sizeof(path) - (size_t)off, "/d");
+        off += n;
+        if ((size_t)off >= sizeof(path))
+            return false;
+        if (mkdir(path, 0755) != 0)
+            return false;
+    }
+    return true;
+}
+
+/* Manual bottom-up teardown of a deep chain under `root`: src and the
+ * partial dst exceed ZCL_TREE_MAX_DEPTH, so zcl_tree_remove would trip the
+ * cap. rmdir is best-effort; ENOENT/ENOTEMPTY are ignored. */
+static void fto_rmdir_deep_chain(const char *root)
+{
+    for (int k = ZCL_TREE_MAX_DEPTH + 6; k >= 0; k--) {
+        char p[8192];
+        int o = snprintf(p, sizeof(p), "%s", root);
+        for (int i = 0; i < k && (size_t)o < sizeof(p); i++)
+            o += snprintf(p + o, sizeof(p) - (size_t)o, "/d");
+        rmdir(p);
+    }
+}
+
 static int test_copy_null_source(void)
 {
     int failures = 0;
@@ -222,30 +347,14 @@ static int test_nested_copy_signature_parity(void)
     TEST("file_tree_ops nested copy preserves bytes + mtime_ns (signature)") {
         char root[] = "/tmp/zcl_fto_sig_XXXXXX";
         char *dir = mkdtemp(root);
-        char src[1024], dst[1024], sub[1024], a[1024], b[1024], cfile[1024];
-        char copied[1024], buf[64];
+        char src[1024], dst[1024], copied[1024], buf[64];
         bool ok = dir != NULL;
 
         snprintf(src, sizeof(src), "%s/src", dir ? dir : "");
         snprintf(dst, sizeof(dst), "%s/dst", dir ? dir : "");
-        snprintf(sub, sizeof(sub), "%s/nested", src);
-        snprintf(a, sizeof(a), "%s/one.txt", src);
-        snprintf(b, sizeof(b), "%s/two.dat", src);
-        snprintf(cfile, sizeof(cfile), "%s/deep.bin", sub);
         snprintf(copied, sizeof(copied), "%s/nested/deep.bin", dst);
 
-        ok = ok && mkdir(src, 0755) == 0;
-        ok = ok && mkdir(sub, 0755) == 0;
-        ok = ok && fto_write(a, "alpha");
-        ok = ok && fto_write(b, "beta-bytes-0123456789");
-        ok = ok && fto_write(cfile, "deep-content");
-        /* Pin explicit mtimes (with nsec) so PRESERVE_TIMES has something
-         * non-default to reproduce. */
-        ok = ok && fto_set_mtime(a, 1600000000, 123456789L);
-        ok = ok && fto_set_mtime(b, 1600000100, 987654321L);
-        ok = ok && fto_set_mtime(cfile, 1600000200, 424242424L);
-        ok = ok && fto_set_mtime(sub, 1600000300, 111222333L);
-        ok = ok && fto_set_mtime(src, 1600000400, 444555666L);
+        ok = ok && fto_make_sig_tree(src);
 
         uint64_t src_sig = ok ? fto_signature(src) : 0;
 
@@ -315,42 +424,24 @@ static int test_update_only(void)
     TEST("file_tree_ops UPDATE_ONLY skips newer dst, copies older dst") {
         char root[] = "/tmp/zcl_fto_upd_XXXXXX";
         char *dir = mkdtemp(root);
-        char src[1024], dst[1024];
-        char s_new[1024], s_old[1024], d_new[1024], d_old[1024], buf[64];
+        char src[1024], dst[1024], d_new[1024], d_old[1024];
         bool ok = dir != NULL;
 
         snprintf(src, sizeof(src), "%s/src", dir ? dir : "");
         snprintf(dst, sizeof(dst), "%s/dst", dir ? dir : "");
-        snprintf(s_new, sizeof(s_new), "%s/newer.txt", src);
-        snprintf(s_old, sizeof(s_old), "%s/older.txt", src);
         snprintf(d_new, sizeof(d_new), "%s/newer.txt", dst);
         snprintf(d_old, sizeof(d_old), "%s/older.txt", dst);
 
-        ok = ok && mkdir(src, 0755) == 0;
-        ok = ok && mkdir(dst, 0755) == 0;
-
-        /* newer.txt: SOURCE is OLDER than the pre-existing dst -> keep dst. */
-        ok = ok && fto_write(s_new, "SRC-new");
-        ok = ok && fto_write(d_new, "DST-keep");
-        ok = ok && fto_set_mtime(s_new, 1600000000, 0);
-        ok = ok && fto_set_mtime(d_new, 1700000000, 0);   /* dst newer */
-
-        /* older.txt: SOURCE is NEWER than the pre-existing dst -> overwrite. */
-        ok = ok && fto_write(s_old, "SRC-overwrite");
-        ok = ok && fto_write(d_old, "DST-stale");
-        ok = ok && fto_set_mtime(s_old, 1700000000, 0);   /* src newer */
-        ok = ok && fto_set_mtime(d_old, 1600000000, 0);
+        ok = ok && fto_make_update_fixture(src, dst);
 
         struct zcl_result r =
             zcl_tree_copy(src, dst, ZCL_COPY_UPDATE_ONLY, NULL, NULL);
         ok = ok && r.ok;
 
         /* dst newer -> untouched. */
-        ok = ok && fto_read(d_new, buf, sizeof(buf));
-        ok = ok && strcmp(buf, "DST-keep") == 0;
+        ok = ok && fto_content_is(d_new, "DST-keep");
         /* dst older -> replaced by source content. */
-        ok = ok && fto_read(d_old, buf, sizeof(buf));
-        ok = ok && strcmp(buf, "SRC-overwrite") == 0;
+        ok = ok && fto_content_is(d_old, "SRC-overwrite");
 
         if (dir) {
             struct zcl_result rr = zcl_tree_remove(dir);
@@ -418,31 +509,13 @@ static int test_symlink_refuse(void)
     TEST("file_tree_ops refuses symlink root and symlink entries") {
         char root[] = "/tmp/zcl_fto_lnk_XXXXXX";
         char *dir = mkdtemp(root);
-        char realfile[1024], link_root[1024], dst1[1024];
-        char src[1024], inner_target[1024], inner_link[1024], dst2[1024];
         bool ok = dir != NULL;
 
-        /* (a) symlink ROOT is refused. */
-        snprintf(realfile, sizeof(realfile), "%s/real.txt", dir ? dir : "");
-        snprintf(link_root, sizeof(link_root), "%s/link.txt", dir ? dir : "");
-        snprintf(dst1, sizeof(dst1), "%s/copy1.txt", dir ? dir : "");
-        ok = ok && fto_write(realfile, "real");
-        ok = ok && symlink(realfile, link_root) == 0;
-        struct zcl_result r1 = zcl_tree_copy(link_root, dst1, 0, NULL, NULL);
-        ok = ok && !r1.ok;                       /* refused */
-        ok = ok && r1.message[0] != '\0';        /* populated context */
-
-        /* (b) symlink ENTRY inside a tree is refused. */
-        snprintf(src, sizeof(src), "%s/tree", dir ? dir : "");
-        snprintf(inner_target, sizeof(inner_target), "%s/target.txt", src);
-        snprintf(inner_link, sizeof(inner_link), "%s/alias.txt", src);
-        snprintf(dst2, sizeof(dst2), "%s/tree_copy", dir ? dir : "");
-        ok = ok && mkdir(src, 0755) == 0;
-        ok = ok && fto_write(inner_target, "target");
-        ok = ok && symlink(inner_target, inner_link) == 0;
-        struct zcl_result r2 = zcl_tree_copy(src, dst2, 0, NULL, NULL);
-        ok = ok && !r2.ok;                       /* refused */
-        ok = ok && r2.message[0] != '\0';
+        /* (a) symlink ROOT is refused; (b) symlink ENTRY inside a tree is
+         * refused. Each step keeps the running ok so later writes stay
+         * skipped after an earlier failure. */
+        ok = fto_symlink_root_refused(dir, ok);
+        ok = fto_symlink_entry_refused(dir, ok);
 
         if (dir) {
             struct zcl_result rr = zcl_tree_remove(dir);
@@ -549,35 +622,15 @@ static int test_depth_bound(void)
         snprintf(src, sizeof(src), "%s/src", dir ? dir : "");
         snprintf(dst, sizeof(dst), "%s/dst", dir ? dir : "");
 
-        /* Build src + (ZCL_TREE_MAX_DEPTH + 4) nested levels below it, so the
-         * walker must descend past its cap. */
-        ok = ok && mkdir(src, 0755) == 0;
-        char path[8192];
-        int off = snprintf(path, sizeof(path), "%s", src);
-        for (int i = 0; ok && i < ZCL_TREE_MAX_DEPTH + 4; i++) {
-            int n = snprintf(path + off, sizeof(path) - (size_t)off, "/d");
-            off += n;
-            if ((size_t)off >= sizeof(path)) { ok = false; break; }
-            if (mkdir(path, 0755) != 0) { ok = false; break; }
-        }
+        ok = ok && fto_make_deep_tree(src);
 
         struct zcl_result r = zcl_tree_copy(src, dst, 0, NULL, NULL);
         ok = ok && !r.ok;                        /* depth cap tripped */
         ok = ok && r.message[0] != '\0';
 
-        /* Manual bottom-up teardown: src and the partial dst exceed
-         * ZCL_TREE_MAX_DEPTH, so zcl_tree_remove would trip the cap. */
         if (dir) {
-            const char *roots[2] = { src, dst };
-            for (int base = 0; base < 2; base++) {
-                for (int k = ZCL_TREE_MAX_DEPTH + 6; k >= 0; k--) {
-                    char p[8192];
-                    int o = snprintf(p, sizeof(p), "%s", roots[base]);
-                    for (int i = 0; i < k && (size_t)o < sizeof(p); i++)
-                        o += snprintf(p + o, sizeof(p) - (size_t)o, "/d");
-                    rmdir(p);   /* best-effort; ENOENT/ENOTEMPTY ignored */
-                }
-            }
+            fto_rmdir_deep_chain(src);
+            fto_rmdir_deep_chain(dst);
             struct zcl_result rr = zcl_tree_remove(dir);
             ok = ok && rr.ok;                    /* dir now shallow + empty */
         }

@@ -2450,10 +2450,6 @@ tests/harness/src/test_file_market_payment.c:file_market_payment_tests:69
 tests/harness/src/test_file_market_purchase.c:file_market_purchase_tests:103
 tests/harness/src/test_file_market_purchase.c:purchase_fetch:17
 tests/harness/src/test_file_market_purchase.c:purchase_send:18
-tests/harness/src/test_file_tree_ops.c:test_depth_bound:16
-tests/harness/src/test_file_tree_ops.c:test_nested_copy_signature_parity:22
-tests/harness/src/test_file_tree_ops.c:test_symlink_refuse:17
-tests/harness/src/test_file_tree_ops.c:test_update_only:20
 tests/harness/src/test_fingerprint.c:test_fingerprint:53
 tests/harness/src/test_fleet_board.c:fb_rpc_verify_item:17
 tests/harness/src/test_fleet_board.c:test_fleet_board_rpc_verification:31
