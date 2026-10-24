@@ -141,23 +141,10 @@ static bool sfe_hash_regular(const char *path, uint64_t expected_size,
     return true;
 }
 
-struct zcl_result shop_fulfill_artifact_verify(
-    const char *datadir, const uint8_t content_root[32],
+static struct zcl_result sfe_artifact_manifest_verify(
+    const char *manifest_path, const uint8_t content_root[32],
     const uint8_t artifact_root[32], struct shop_fulfill_artifact_fact *out)
 {
-    if (out) memset(out, 0, sizeof(*out));
-    if (!datadir || !datadir[0] || !zcl_bytes_any_set(content_root, 32) ||
-        !zcl_bytes_any_set(artifact_root, 32) || !out)
-        return artifact_fail(out, "invalid-artifact-proof-input");
-
-    char content_hex[65], artifact_hex[65], manifest_path[SFE_PATH_MAX];
-    zcl_hex_encode(content_root, 32, content_hex);
-    zcl_hex_encode(artifact_root, 32, artifact_hex);
-    int n = snprintf(manifest_path, sizeof(manifest_path),
-                     "%s/zcode/manifests/%s", datadir, content_hex);
-    if (n < 0 || (size_t)n >= sizeof(manifest_path))
-        return artifact_fail(out, "artifact-manifest-path-too-long");
-
     uint8_t *wire = NULL;
     size_t wire_len = 0;
     if (!sfe_read_bounded(manifest_path,
@@ -188,6 +175,30 @@ struct zcl_result shop_fulfill_artifact_verify(
     }
     out->size_bytes = manifest.files[0].size;
     vcs_package_manifest_free(&manifest);
+
+    return ZCL_OK;
+}
+
+struct zcl_result shop_fulfill_artifact_verify(
+    const char *datadir, const uint8_t content_root[32],
+    const uint8_t artifact_root[32], struct shop_fulfill_artifact_fact *out)
+{
+    if (out) memset(out, 0, sizeof(*out));
+    if (!datadir || !datadir[0] || !zcl_bytes_any_set(content_root, 32) ||
+        !zcl_bytes_any_set(artifact_root, 32) || !out)
+        return artifact_fail(out, "invalid-artifact-proof-input");
+
+    char content_hex[65], artifact_hex[65], manifest_path[SFE_PATH_MAX];
+    zcl_hex_encode(content_root, 32, content_hex);
+    zcl_hex_encode(artifact_root, 32, artifact_hex);
+    int n = snprintf(manifest_path, sizeof(manifest_path),
+                     "%s/zcode/manifests/%s", datadir, content_hex);
+    if (n < 0 || (size_t)n >= sizeof(manifest_path))
+        return artifact_fail(out, "artifact-manifest-path-too-long");
+
+    struct zcl_result manifest = sfe_artifact_manifest_verify(
+        manifest_path, content_root, artifact_root, out);
+    if (!manifest.ok) return manifest;
 
     char cas_path[SFE_PATH_MAX];
     n = snprintf(cas_path, sizeof(cas_path), "%s/zcode/cas/sha3/%.2s/%s",
@@ -283,14 +294,85 @@ static struct zcl_result sfe_zcode_benchmark_verify(
     return ZCL_OK;
 }
 
+static struct zcl_result sfe_receipt_binding_verify(
+    const struct db_build_receipt *receipt,
+    const struct db_build_action *action, const struct db_build_job *job,
+    enum shop_fulfill_receipt_kind expected_kind, const char *receipt_hex,
+    struct shop_fulfill_receipt_fact *out)
+{
+    char canonical_action[65], canonical_job[65];
+    if (!build_fabric_action_id(job, action, canonical_action).ok ||
+        strcmp(canonical_action, action->action_id) != 0 ||
+        !build_fabric_job_id(job, canonical_action, canonical_job).ok ||
+        strcmp(canonical_job, job->job_id) != 0)
+        return receipt_fail(out, "receipt-action-id-invalid");
+    if (!sfe_kind_matches(expected_kind, action->kind))
+        return receipt_fail(out, "receipt-kind-mismatch");
+
+    char canonical[65];
+    out->canonical_id_valid =
+        build_fabric_receipt_id(receipt, canonical).ok &&
+        strcmp(canonical, receipt_hex) == 0;
+    if (!out->canonical_id_valid)
+        return receipt_fail(out, "receipt-id-invalid");
+
+    out->action_binding_valid =
+        strcmp(receipt->job_id, action->job_id) == 0 &&
+        strcmp(receipt->action_sha3, action->action_id) == 0 &&
+        strcmp(receipt->worker_id, action->worker_id) == 0 &&
+        strcmp(receipt->lease_id, action->lease_id) == 0 &&
+        strcmp(action->state, "ACCEPTED") == 0;
+    if (!out->action_binding_valid)
+        return receipt_fail(out, "receipt-action-binding-invalid");
+
+    return ZCL_OK;
+}
+
+static struct zcl_result sfe_receipt_signature_verify(
+    const struct db_build_receipt *receipt, const struct db_build_worker *worker,
+    const uint8_t receipt_id[32], int64_t now_unix,
+    struct shop_fulfill_receipt_fact *out)
+{
+    if (!worker->approved || worker->revoked ||
+        (worker->expires_at != 0 && now_unix >= worker->expires_at))
+        return receipt_fail(out, "receipt-signer-not-currently-approved");
+    /* Promoted remote work receipts use a different canonical id/signature
+     * codec. Never run the local outer-receipt proof over that type. */
+    if (strcmp(receipt->trust_state, "LOCAL_ACCEPTED") != 0)
+        return receipt_fail(out, "receipt-not-local-outer-authority");
+
+    uint8_t signature[64], pubkey[32];
+    out->signature_valid =
+        zcl_hex_decode_lower(receipt->signature, signature, sizeof(signature)) &&
+        zcl_hex_decode_lower(worker->signer_pubkey, pubkey, sizeof(pubkey)) &&
+        ed25519_verify(signature, receipt_id, 32, pubkey);
+    if (!out->signature_valid)
+        return receipt_fail(out, "receipt-signature-invalid");
+
+    out->passed = receipt->exit_status == 0;
+    if (!out->passed)
+        return receipt_fail(out, "receipt-reports-failure");
+    out->artifact_binding_valid = false;
+    (void)snprintf(out->reason, sizeof(out->reason),
+                   "verified; artifact-link seller-bound only");
+    return ZCL_OK;
+}
+
+static bool sfe_receipt_input_invalid(
+    const struct node_db *ndb, const char *datadir, const uint8_t receipt_id[32],
+    int64_t now_unix, const struct shop_fulfill_receipt_fact *out)
+{
+    return !ndb || !ndb->open || !datadir || !datadir[0] || !receipt_id ||
+        !out || !zcl_bytes_any_set(receipt_id, 32) || now_unix <= 0;
+}
+
 struct zcl_result shop_fulfill_receipt_verify(
     struct node_db *ndb, const char *datadir, const uint8_t receipt_id[32],
     enum shop_fulfill_receipt_kind expected_kind,
     int64_t now_unix, struct shop_fulfill_receipt_fact *out)
 {
     if (out) memset(out, 0, sizeof(*out));
-    if (!ndb || !ndb->open || !datadir || !datadir[0] || !receipt_id ||
-        !out || !zcl_bytes_any_set(receipt_id, 32) || now_unix <= 0)
+    if (sfe_receipt_input_invalid(ndb, datadir, receipt_id, now_unix, out))
         return receipt_fail(out, "invalid-receipt-proof-input");
     char receipt_hex[65];
     zcl_hex_encode(receipt_id, 32, receipt_hex);
@@ -316,52 +398,10 @@ struct zcl_result shop_fulfill_receipt_verify(
                    action.kind);
     (void)snprintf(out->signer_pubkey, sizeof(out->signer_pubkey), "%s",
                    worker.signer_pubkey);
-    char canonical_action[65], canonical_job[65];
-    if (!build_fabric_action_id(&job, &action, canonical_action).ok ||
-        strcmp(canonical_action, action.action_id) != 0 ||
-        !build_fabric_job_id(&job, canonical_action, canonical_job).ok ||
-        strcmp(canonical_job, job.job_id) != 0)
-        return receipt_fail(out, "receipt-action-id-invalid");
-    if (!sfe_kind_matches(expected_kind, action.kind))
-        return receipt_fail(out, "receipt-kind-mismatch");
+    struct zcl_result binding = sfe_receipt_binding_verify(
+        &receipt, &action, &job, expected_kind, receipt_hex, out);
+    if (!binding.ok) return binding;
 
-    char canonical[65];
-    out->canonical_id_valid =
-        build_fabric_receipt_id(&receipt, canonical).ok &&
-        strcmp(canonical, receipt_hex) == 0;
-    if (!out->canonical_id_valid)
-        return receipt_fail(out, "receipt-id-invalid");
-
-    out->action_binding_valid =
-        strcmp(receipt.job_id, action.job_id) == 0 &&
-        strcmp(receipt.action_sha3, action.action_id) == 0 &&
-        strcmp(receipt.worker_id, action.worker_id) == 0 &&
-        strcmp(receipt.lease_id, action.lease_id) == 0 &&
-        strcmp(action.state, "ACCEPTED") == 0;
-    if (!out->action_binding_valid)
-        return receipt_fail(out, "receipt-action-binding-invalid");
-
-    if (!worker.approved || worker.revoked ||
-        (worker.expires_at != 0 && now_unix >= worker.expires_at))
-        return receipt_fail(out, "receipt-signer-not-currently-approved");
-    /* Promoted remote work receipts use a different canonical id/signature
-     * codec. Never run the local outer-receipt proof over that type. */
-    if (strcmp(receipt.trust_state, "LOCAL_ACCEPTED") != 0)
-        return receipt_fail(out, "receipt-not-local-outer-authority");
-
-    uint8_t signature[64], pubkey[32];
-    out->signature_valid =
-        zcl_hex_decode_lower(receipt.signature, signature, sizeof(signature)) &&
-        zcl_hex_decode_lower(worker.signer_pubkey, pubkey, sizeof(pubkey)) &&
-        ed25519_verify(signature, receipt_id, 32, pubkey);
-    if (!out->signature_valid)
-        return receipt_fail(out, "receipt-signature-invalid");
-
-    out->passed = receipt.exit_status == 0;
-    if (!out->passed)
-        return receipt_fail(out, "receipt-reports-failure");
-    out->artifact_binding_valid = false;
-    (void)snprintf(out->reason, sizeof(out->reason),
-                   "verified; artifact-link seller-bound only");
-    return ZCL_OK;
+    return sfe_receipt_signature_verify(
+        &receipt, &worker, receipt_id, now_unix, out);
 }
