@@ -40,7 +40,8 @@ bool stage_repair_read_validate_row(struct sqlite3 *db, int height,
                                     struct validate_row *out);
 
 /* Read the `cursor` for stage `name` from stage_cursor (or -1 if absent).
- * Caller holds the progress_store tx lock. Returns false on SQL error.
+ * Caller holds the progress_store tx lock. Returns false on SQL error or
+ * a stored cursor that is not an INTEGER representable as int; out stays -1.
  * Defined in stage_repair_body_fetch.c. */
 bool stage_repair_cursor_at_unlocked(struct sqlite3 *db, const char *name,
                                      int *out);

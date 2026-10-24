@@ -3,12 +3,14 @@
 #include "test/test_core.h"
 
 #include "jobs/stage_repair.h"
+#include "jobs/stage_repair_internal.h"
 #include "primitives/block.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
 #include "util/stage.h"
 
 #include <sqlite3.h>
+#include <limits.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -302,10 +304,61 @@ static int case_boot_clamp_trusted_base(void)
     return failures;
 }
 
+static int case_cursor_width(void)
+{
+    int failures = 0;
+    char dir[256];
+    sqlite3 *db = NULL;
+    bool seeded = setup_case("cursor_width", dir, sizeof(dir), &db);
+    seeded = seeded && seed_cursors(db, 5, 2) && seed_downstream_poison(db, 2);
+    if (!seeded) {
+        STR_CHECK("cursor-width fixture setup", false);
+        teardown_case(dir);
+        return failures;
+    }
+    static const struct {
+        const char *literal;
+        bool valid;
+        int cursor;
+    } cases[] = {
+        {"-1", true, -1}, {"0", true, 0}, {"2", true, 2},
+        {"2147483647", true, INT_MAX}, {"-2147483648", true, INT_MIN},
+        {"2147483648", false, -1}, {"-2147483649", false, -1},
+        {"4294967298", false, -1}, {"-4294967294", false, -1},
+        {"9223372036854775807", false, -1},
+        {"-9223372036854775808", false, -1},
+        {"'broken'", false, -1}, {"2.5", false, -1}, {"X'02'", false, -1},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char sql[160];
+        snprintf(sql, sizeof(sql),
+                 "UPDATE stage_cursor SET cursor=%s WHERE name='body_fetch'",
+                 cases[i].literal);
+        bool ok = exec_sql(db, sql);
+        int cursor = 123;
+        progress_store_tx_lock();
+        bool read = stage_repair_cursor_at_unlocked(db, "body_fetch", &cursor);
+        progress_store_tx_unlock();
+        ok = ok && read == cases[i].valid && cursor == cases[i].cursor;
+        struct stage_repair_body_fetch_gap gap;
+        bool ready = stage_repair_body_fetch_missing_have_data_candidate(db, 2, &gap);
+        ok = ok && ready == (cases[i].valid && cases[i].cursor == 2);
+        STR_CHECK(cases[i].literal, ok);
+    }
+    int absent = 123;
+    progress_store_tx_lock();
+    bool read = stage_repair_cursor_at_unlocked(db, "absent_stage", &absent);
+    progress_store_tx_unlock();
+    STR_CHECK("missing stage keeps the absent cursor contract", read && absent == -1);
+    teardown_case(dir);
+    return failures;
+}
+
 int test_stage_repair(void)
 {
     printf("\n=== stage_repair poison-rewind safety guard tests ===\n");
     int failures = 0;
+    failures += case_cursor_width();
 
     /* --- Guard 1: ok=1 row AT the frontier refuses the whole rewind. ---
      * This is the regression guard: a finalized (ok=1) row at/above the
