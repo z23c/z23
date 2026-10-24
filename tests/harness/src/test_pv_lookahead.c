@@ -17,6 +17,7 @@
  * must still heal, and the reset triggers (successful read, HAVE_DATA clear)
  * must re-admit a capped height. */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 #include "test/block_fixtures.h"
 
@@ -134,7 +135,7 @@ static bool la_chain_build(struct la_chain *sc, int n, bool plain_first)
         block_header_get_hash(&sc->bodies[i].header, &sc->hashes[i]);
         block_index_init(&sc->blocks[i]);
         sc->blocks[i].phashBlock = &sc->hashes[i];
-        sc->blocks[i].hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
+        tbi_ext(&sc->blocks[i])->hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
         sc->blocks[i].nHeight = i;
         sc->blocks[i].nVersion = sc->bodies[i].header.nVersion;
         sc->blocks[i].nTime = sc->bodies[i].header.nTime;

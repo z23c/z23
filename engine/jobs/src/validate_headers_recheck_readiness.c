@@ -31,7 +31,8 @@ bool validate_headers_recheck_ready(struct sqlite3 *db, int height,
      * doing exactly that.  Admit it only when the canonical index carries
      * solution bytes or the repair authority has a hash-bound full header.
      * The unchanged validator still decides PoW/Equihash after this predicate. */
-    if (bi->nSolution && bi->nSolutionSize > 0)
+    size_t sol_len = 0;
+    if (block_index_solution(bi, &sol_len) && sol_len > 0)
         return true;
     return stage_repair_header_solution_available(db, height,
                                                   bi->phashBlock);

@@ -135,7 +135,8 @@ static bool rpc_chainview(const struct json_value *params, bool help,
         json_push_kv_str(&entry, "hash", hash_hex);
 
         char mr_hex[65], sr_hex[65];
-        uint256_get_hex(&bi->hashMerkleRoot, mr_hex);
+        struct uint256 bi_merkle = block_index_merkle_root(bi);
+        uint256_get_hex(&bi_merkle, mr_hex);
         uint256_get_hex(&bi->hashFinalSaplingRoot, sr_hex);
         json_push_kv_str(&entry, "merkleroot", mr_hex);
         json_push_kv_str(&entry, "saplingroot", sr_hex);

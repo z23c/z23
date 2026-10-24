@@ -39,6 +39,7 @@
  *
  * make t-fast ONLY=block_status_event_restart_proof */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 
 #include "chain/chain.h"
@@ -145,11 +146,11 @@ static void rp_make_block_index(struct block_index *bi, struct block_index *prev
     bi->nVersion = 4;
     bi->nTime = 1700200000u + (uint32_t)h;
     bi->nBits = 0x1f07ffffu;
-    bi->hashMerkleRoot = c->blocks[h].merkle_root;
+    tbi_ext(bi)->hashMerkleRoot = c->blocks[h].merkle_root;
     bi->hashFinalSaplingRoot = c->blocks[h].sapling_root;
-    bi->nNonce = c->blocks[h].nonce;
-    bi->nSolution = c->blocks[h].solution;
-    bi->nSolutionSize = RP_SOLUTION_LEN;
+    tbi_ext(bi)->nNonce = c->blocks[h].nonce;
+    tbi_ext(bi)->nSolution = c->blocks[h].solution;
+    tbi_ext(bi)->nSolutionSize = RP_SOLUTION_LEN;
     bi->nStatus = BLOCK_VALID_HEADER;
 }
 

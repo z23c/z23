@@ -91,13 +91,15 @@ static bool projection_fold_cb(const uint8_t hash[32],
     pindex->nDataPos             = dbi->nDataPos;
     pindex->nUndoPos             = dbi->nUndoPos;
     pindex->nVersion             = dbi->nVersion;
-    pindex->hashMerkleRoot       = dbi->hashMerkleRoot;
     pindex->hashFinalSaplingRoot = dbi->hashFinalSaplingRoot;
     pindex->nTime                = dbi->nTime;
     pindex->nBits                = dbi->nBits;
-    pindex->nNonce               = dbi->nNonce;
-    pindex->nSolution            = NULL;  /* not retained in RAM */
-    pindex->nSolutionSize        = 0;
+    if (!block_index_set_merkle_nonce(pindex, &dbi->hashMerkleRoot,
+                                      &dbi->nNonce)) {
+        c->failed = true;
+        return false;  /* stop iteration on OOM */
+    }
+    (void)block_index_set_solution(pindex, NULL, 0);  /* not retained in RAM */
     pindex->nStatus              = dbi->nStatus;
     pindex->nCachedBranchId      = dbi->nCachedBranchId;
     pindex->nTx                  = dbi->nTx;

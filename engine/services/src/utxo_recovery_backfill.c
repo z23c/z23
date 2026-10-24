@@ -240,6 +240,10 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
                  * block_index (real solution/chain_work/undo_pos/sapling_root),
                  * so the computed value is preserved instead of silently lost. */
                 sqlite3_reset(ins);
+                const struct uint256 bi_merkle = block_index_merkle_root(bi);
+                const struct uint256 bi_nonce = block_index_nonce(bi);
+                size_t bi_sol_len = 0;
+                const unsigned char *bi_sol = block_index_solution(bi, &bi_sol_len);
                 sqlite3_bind_blob(ins, 1, bi->phashBlock->data, 32, SQLITE_STATIC);
                 sqlite3_bind_int(ins, 2, bi->nHeight);
                 sqlite3_bind_blob(ins, 3,
@@ -247,14 +251,14 @@ static bool backfill_shielded_write(struct node_db *ndb, void *ctx_ptr)
                               : (const uint8_t[32]){0},
                     32, SQLITE_STATIC);
                 sqlite3_bind_int(ins, 4, bi->nVersion);
-                sqlite3_bind_blob(ins, 5, bi->hashMerkleRoot.data, 32,
+                sqlite3_bind_blob(ins, 5, bi_merkle.data, 32,
                                   SQLITE_STATIC);
                 sqlite3_bind_int64(ins, 6, bi->nTime);
                 sqlite3_bind_int(ins, 7, (int)bi->nBits);
-                sqlite3_bind_blob(ins, 8, bi->nNonce.data, 32, SQLITE_STATIC);
+                sqlite3_bind_blob(ins, 8, bi_nonce.data, 32, SQLITE_STATIC);
                 sqlite3_bind_blob(ins, 9,
-                    bi->nSolution ? (const void *)bi->nSolution : (const void *)"",
-                    bi->nSolution ? (int)bi->nSolutionSize : 0, SQLITE_STATIC);
+                    bi_sol ? (const void *)bi_sol : (const void *)"",
+                    bi_sol ? (int)bi_sol_len : 0, SQLITE_STATIC);
                 sqlite3_bind_blob(ins, 10, bi->nChainWork.pn, 32, SQLITE_STATIC);
                 sqlite3_bind_int(ins, 11, bi->nStatus);
                 sqlite3_bind_int(ins, 12, bi->nFile);

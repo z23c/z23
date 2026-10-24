@@ -281,14 +281,17 @@ static void vh_job_bind_block(sqlite3 *db, struct vh_job *job,
     job->had_repair_row = true;
     job->snapshot = *bi;
     job->snapshot.nVersion = repaired.nVersion;
-    job->snapshot.hashMerkleRoot = repaired.hashMerkleRoot;
     job->snapshot.hashFinalSaplingRoot = repaired.hashFinalSaplingRoot;
     job->snapshot.nTime = repaired.nTime;
     job->snapshot.nBits = repaired.nBits;
-    job->snapshot.nNonce = repaired.nNonce;
     memcpy(job->solution, repaired.nSolution, repaired.nSolutionSize);
-    job->snapshot.nSolution = job->solution;
-    job->snapshot.nSolutionSize = repaired.nSolutionSize;
+    /* The snapshot copy shares bi->ext; point it at the job-owned extension
+     * so the repaired fields never write through to the live entry. */
+    job->snapshot_ext.hashMerkleRoot = repaired.hashMerkleRoot;
+    job->snapshot_ext.nNonce = repaired.nNonce;
+    job->snapshot_ext.nSolution = job->solution;
+    job->snapshot_ext.nSolutionSize = repaired.nSolutionSize;
+    job->snapshot.ext = &job->snapshot_ext;
     job->bi = &job->snapshot;
 }
 

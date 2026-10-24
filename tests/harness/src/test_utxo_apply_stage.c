@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Unit tests for Wave S S-8 utxo_apply stage. */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 #include "test/test_block_map.h"
 #include "test/block_fixtures.h"
@@ -215,7 +216,7 @@ static bool uv_make_block_coinbase_only(struct synth_chain_uv *sc, int h)
     blk->num_vtx = 1;
     blk->header.hashMerkleRoot = blk->vtx[0].hash;
     block_header_get_hash(&blk->header, &sc->hashes[h]);
-    sc->blocks[h].hashMerkleRoot = blk->header.hashMerkleRoot;
+    tbi_ext(&sc->blocks[h])->hashMerkleRoot = blk->header.hashMerkleRoot;
     return true;
 }
 
@@ -239,7 +240,7 @@ static bool synth_chain_uv_build(struct synth_chain_uv *sc, int n)
         block_header_get_hash(&sc->bodies[i].header, &sc->hashes[i]);
         block_index_init(&sc->blocks[i]);
         sc->blocks[i].phashBlock = &sc->hashes[i];
-        sc->blocks[i].hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
+        tbi_ext(&sc->blocks[i])->hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
         sc->blocks[i].nHeight = i;
         sc->blocks[i].nVersion = sc->bodies[i].header.nVersion;
         sc->blocks[i].nTime = sc->bodies[i].header.nTime;
@@ -1162,7 +1163,7 @@ static bool ifw_rebuild_body(struct synth_chain_uv *sc, sqlite3 *db, int H)
     struct uint256 txids[3] = { v[0].hash, v[1].hash, v[2].hash };
     b->header.hashMerkleRoot = compute_merkle_root(txids, 3);
     block_header_get_hash(&b->header, &sc->hashes[H]);
-    sc->blocks[H].hashMerkleRoot = b->header.hashMerkleRoot;
+    tbi_ext(&sc->blocks[H])->hashMerkleRoot = b->header.hashMerkleRoot;
     return seed_proof_validate(db, sc, sc->n, -1) &&
            seed_script_validate_row(db, H, 1, &sc->hashes[H]);
 }

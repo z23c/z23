@@ -49,9 +49,13 @@ static inline bool block_index_emit_header_event(
         return false;
     }
 
-    if (bi->nSolutionSize > EV_BLOCK_HEADER_MAX_SOLUTION) {
+    size_t sol_len = 0;
+    const unsigned char *sol = block_index_solution(bi, &sol_len);
+    const struct uint256 bi_nonce = block_index_nonce(bi);
+    const struct uint256 bi_merkle = block_index_merkle_root(bi);
+    if (sol_len > EV_BLOCK_HEADER_MAX_SOLUTION) {
         LOG_WARN(tag, "[%s] header emit: solution size %zu > max %u for h=%d; "
-                 "skipping", tag, bi->nSolutionSize,
+                 "skipping", tag, sol_len,
                  (unsigned)EV_BLOCK_HEADER_MAX_SOLUTION, bi->nHeight);
         if (emit_fail)
             atomic_fetch_add_explicit(emit_fail, 1, memory_order_relaxed);
@@ -71,12 +75,12 @@ static inline bool block_index_emit_header_event(
     h.nUndoPos      = block_index_undo_pos_load(bi);
     h.nTime         = bi->nTime;
     h.nBits         = bi->nBits;
-    memcpy(h.nNonce, bi->nNonce.data, 32);
-    memcpy(h.hashMerkleRoot, bi->hashMerkleRoot.data, 32);
+    memcpy(h.nNonce, bi_nonce.data, 32);
+    memcpy(h.hashMerkleRoot, bi_merkle.data, 32);
     memcpy(h.hashFinalSaplingRoot, bi->hashFinalSaplingRoot.data, 32);
     h.nVersion      = bi->nVersion;
     h.nTx           = bi->nTx;
-    h.nSolutionSize = (uint16_t)bi->nSolutionSize;
+    h.nSolutionSize = (uint16_t)sol_len;
 
     size_t bufcap = ev_block_header_wire_size(h.nSolutionSize);
     uint8_t stackbuf[256 + 1344];  /* fixed 200 + max solution 1344 */
@@ -86,7 +90,7 @@ static inline bool block_index_emit_header_event(
         return false;
     }
     size_t written = 0;
-    if (!ev_block_header_serialize(&h, bi->nSolution, stackbuf, bufcap,
+    if (!ev_block_header_serialize(&h, sol, stackbuf, bufcap,
                                    &written)) {
         LOG_WARN(tag, "[%s] header emit: serialize failed h=%d",
                  tag, bi->nHeight);

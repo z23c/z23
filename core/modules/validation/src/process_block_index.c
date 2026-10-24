@@ -70,26 +70,17 @@ void block_index_refresh_header(struct block_index *pindex,
         return;
 
     pindex->nVersion = header->nVersion;
-    pindex->hashMerkleRoot = header->hashMerkleRoot;
     pindex->hashFinalSaplingRoot = header->hashFinalSaplingRoot;
     pindex->nTime = header->nTime;
     pindex->nBits = header->nBits;
-    pindex->nNonce = header->nNonce;
 
-    if (pindex->nSolution) {
-        free(pindex->nSolution);
-        pindex->nSolution = NULL;
-        pindex->nSolutionSize = 0;
+    if (!block_index_set_merkle_nonce(pindex, &header->hashMerkleRoot,
+                                      &header->nNonce)) {
+        fprintf(stderr, "block_index_refresh_header: header extension allocation failed\n");
+        return;
     }
-    if (header->nSolutionSize == 0)
-        return;
-
-    pindex->nSolution = zcl_malloc(header->nSolutionSize,
-                                   "block_solution_refresh");
-    if (!pindex->nSolution)
-        return;
-    memcpy(pindex->nSolution, header->nSolution, header->nSolutionSize);
-    pindex->nSolutionSize = header->nSolutionSize;
+    (void)block_index_set_solution(pindex, header->nSolution,
+                                   header->nSolutionSize);
 }
 
 void block_index_snapshot_for_persist(struct disk_block_index *dbi,
@@ -112,14 +103,16 @@ void block_index_snapshot_for_persist(struct disk_block_index *dbi,
     dbi->nUndoPos = pindex->nUndoPos;
     dbi->nCachedBranchId = pindex->nCachedBranchId;
     dbi->nVersion = pindex->nVersion;
-    dbi->hashMerkleRoot = pindex->hashMerkleRoot;
+    dbi->hashMerkleRoot = block_index_merkle_root(pindex);
     dbi->hashFinalSaplingRoot = pindex->hashFinalSaplingRoot;
     dbi->nTime = pindex->nTime;
     dbi->nBits = pindex->nBits;
-    dbi->nNonce = pindex->nNonce;
-    if (pindex->nSolution && pindex->nSolutionSize > 0)
-        memcpy(dbi->nSolution, pindex->nSolution, pindex->nSolutionSize);
-    dbi->nSolutionSize = pindex->nSolutionSize;
+    dbi->nNonce = block_index_nonce(pindex);
+    size_t sol_len = 0;
+    const unsigned char *sol = block_index_solution(pindex, &sol_len);
+    if (sol && sol_len > 0)
+        memcpy(dbi->nSolution, sol, sol_len);
+    dbi->nSolutionSize = sol_len;
 }
 
 bool block_index_hydrate_from_disk(struct block_index *pindex,

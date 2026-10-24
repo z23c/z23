@@ -11,6 +11,7 @@
  *       cursor advances monotonically to tip.
  */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 
 #include "services/utxo_recovery_service.h"
@@ -56,7 +57,7 @@ static struct block_index *sbf_install(struct main_state *ms, int h,
     bi->nVersion = 4;
     bi->nBits = 0x2000ffffu;
     bi->nTime = 1700000000u + (uint32_t)h;
-    memset(bi->hashMerkleRoot.data, 0x11, 32);
+    memset(tbi_ext(bi)->hashMerkleRoot.data, 0x11, 32);
     bi->nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
     bi->nFile = 1;
     bi->nDataPos = 1000 + h;

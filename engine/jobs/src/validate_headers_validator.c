@@ -165,11 +165,11 @@ static bool header_from_node_db_solution(const struct block_index *bi,
         out->hashPrevBlock = *bi->pprev->phashBlock;
     else
         memset(out->hashPrevBlock.data, 0, sizeof(out->hashPrevBlock.data));
-    out->hashMerkleRoot = bi->hashMerkleRoot;
+    out->hashMerkleRoot = block_index_merkle_root(bi);
     out->hashFinalSaplingRoot = bi->hashFinalSaplingRoot;
     out->nTime = bi->nTime;
     out->nBits = bi->nBits;
-    out->nNonce = bi->nNonce;
+    out->nNonce = block_index_nonce(bi);
     memcpy(out->nSolution, sol, sol_len);
     out->nSolutionSize = sol_len;
     return true;
@@ -300,11 +300,13 @@ static bool header_from_block_index(const struct block_index *bi,
         snprintf(out_reason, out_reason_size, "null-block-index");
         return false;
     }
-    if (!bi->nSolution || bi->nSolutionSize == 0) {
+    size_t bi_sol_len = 0;
+    const unsigned char *bi_sol = block_index_solution(bi, &bi_sol_len);
+    if (!bi_sol || bi_sol_len == 0) {
         snprintf(out_reason, out_reason_size, "no-header-solution");
         return false;
     }
-    if (bi->nSolutionSize > sizeof(out->nSolution)) {
+    if (bi_sol_len > sizeof(out->nSolution)) {
         snprintf(out_reason, out_reason_size, "solution-too-large");
         return false;
     }
@@ -319,13 +321,13 @@ static bool header_from_block_index(const struct block_index *bi,
         out->hashPrevBlock = *bi->pprev->phashBlock;
     else
         memset(out->hashPrevBlock.data, 0, sizeof(out->hashPrevBlock.data));
-    out->hashMerkleRoot = bi->hashMerkleRoot;
+    out->hashMerkleRoot = block_index_merkle_root(bi);
     out->hashFinalSaplingRoot = bi->hashFinalSaplingRoot;
     out->nTime = bi->nTime;
     out->nBits = bi->nBits;
-    out->nNonce = bi->nNonce;
-    memcpy(out->nSolution, bi->nSolution, bi->nSolutionSize);
-    out->nSolutionSize = bi->nSolutionSize;
+    out->nNonce = block_index_nonce(bi);
+    memcpy(out->nSolution, bi_sol, bi_sol_len);
+    out->nSolutionSize = bi_sol_len;
     return true;
 }
 

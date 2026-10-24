@@ -36,6 +36,21 @@ static bool test_eh_cancel(void *ctx)
     return *(const bool *)ctx;
 }
 
+/* A fresh entry has no header extension; the accessors read zero. */
+static bool block_index_fresh_has_no_ext(void)
+{
+    struct block_index bi;
+    block_index_init(&bi);
+    size_t sol_len = 99;
+    struct uint256 zero_u;
+    memset(&zero_u, 0, sizeof(zero_u));
+    struct uint256 got_m = block_index_merkle_root(&bi);
+    struct uint256 got_n = block_index_nonce(&bi);
+    return bi.ext == NULL && block_index_solution(&bi, &sol_len) == NULL &&
+           sol_len == 0 && memcmp(&got_m, &zero_u, sizeof(zero_u)) == 0 &&
+           memcmp(&got_n, &zero_u, sizeof(zero_u)) == 0;
+}
+
 int test_chain(void)
 {
     int failures = 0;
@@ -2104,16 +2119,10 @@ int test_chain(void)
     {
         size_t sz = sizeof(struct block_index);
         printf("(%zu bytes) ", sz);
-        /* Struct should be <=288 bytes after removing Sprout anchor/root
-         * and reordering fields to eliminate padding. If someone adds a
-         * large field without realizing the memory cost, this will catch
-         * it: 3M entries * 288 = 864MB which is acceptable. */
-        bool ok = (sz <= 288);
-        /* Verify nSolution pointer is NULL after init */
-        struct block_index bi;
-        block_index_init(&bi);
-        ok = ok && (bi.nSolution == NULL);
-        ok = ok && (bi.nSolutionSize == 0);
+        /* hashMerkleRoot, nNonce and the Equihash solution live in the
+         * optional block_index_hdrext, so the resident entry is 216 bytes
+         * (288 before): 3.3M entries * 216 = 713 MB instead of 950 MB. */
+        bool ok = (sz == 216) && block_index_fresh_has_no_ext();
         if (ok) printf("OK\n"); else { printf("FAIL (sz=%zu)\n", sz); failures++; }
     }
 

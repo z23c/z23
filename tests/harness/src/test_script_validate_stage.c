@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Unit tests for Wave S S-6 script_validate stage. */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 #include "util/util.h"
 #include "test/block_fixtures.h"
@@ -146,7 +147,7 @@ static bool synth_chain_sv_build(struct synth_chain_sv *sc, int n)
         block_header_get_hash(&sc->bodies[i].header, &sc->hashes[i]);
         block_index_init(&sc->blocks[i]);
         sc->blocks[i].phashBlock = &sc->hashes[i];
-        sc->blocks[i].hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
+        tbi_ext(&sc->blocks[i])->hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
         sc->blocks[i].nHeight = i;
         sc->blocks[i].nVersion = sc->bodies[i].header.nVersion;
         sc->blocks[i].nTime = sc->bodies[i].header.nTime;
@@ -218,7 +219,7 @@ static bool retarget_spend(struct synth_chain_sv *sc, int spend_h,
     struct uint256 txids[2] = { b->vtx[0].hash, b->vtx[1].hash };
     b->header.hashMerkleRoot = compute_merkle_root(txids, 2);
     block_header_get_hash(&b->header, &sc->hashes[spend_h]);
-    sc->blocks[spend_h].hashMerkleRoot = b->header.hashMerkleRoot;
+    tbi_ext(&sc->blocks[spend_h])->hashMerkleRoot = b->header.hashMerkleRoot;
     return true;
 }
 

@@ -30,20 +30,22 @@ static bool g_prepared = false;
 static bool bifa_header_from_index(const struct block_index *bi,
                                    struct block_header *out)
 {
-    if (!bi || !bi->phashBlock || !bi->nSolution || bi->nSolutionSize == 0 ||
-        bi->nSolutionSize > MAX_SOLUTION_SIZE)
+    size_t sol_len = 0;
+    const unsigned char *sol = bi ? block_index_solution(bi, &sol_len) : NULL;
+    if (!bi || !bi->phashBlock || !sol || sol_len == 0 ||
+        sol_len > MAX_SOLUTION_SIZE)
         return false;
     block_header_init(out);
     out->nVersion = bi->nVersion;
     if (bi->pprev && bi->pprev->phashBlock)
         out->hashPrevBlock = *bi->pprev->phashBlock;
-    out->hashMerkleRoot = bi->hashMerkleRoot;
+    out->hashMerkleRoot = block_index_merkle_root(bi);
     out->hashFinalSaplingRoot = bi->hashFinalSaplingRoot;
     out->nTime = bi->nTime;
     out->nBits = bi->nBits;
-    out->nNonce = bi->nNonce;
-    memcpy(out->nSolution, bi->nSolution, bi->nSolutionSize);
-    out->nSolutionSize = bi->nSolutionSize;
+    out->nNonce = block_index_nonce(bi);
+    memcpy(out->nSolution, sol, sol_len);
+    out->nSolutionSize = sol_len;
 
     struct uint256 got;
     block_header_get_hash(out, &got);
@@ -64,7 +66,7 @@ static struct block_index *bifa_select(struct main_state *ms,
     }
     for (size_t i = count; i > 0; i--) {
         struct block_index *bi = sorted[i - 1];
-        if (bi && bi->nSolution && bi->nSolutionSize > 0)
+        if (bi && block_index_has_solution(bi))
             return bi;
     }
     if (g_prepared) {
@@ -91,7 +93,7 @@ static struct block_index *bifa_select_for_prepare(struct main_state *ms)
     size_t iter = 0;
     struct block_index *bi = NULL;
     while (block_map_next(&ms->map_block_index, &iter, NULL, &bi)) {
-        if (bi && bi->nSolution && bi->nSolutionSize > 0 &&
+        if (bi && block_index_has_solution(bi) &&
             (!best || bi->nHeight > best->nHeight))
             best = bi;
     }
@@ -259,23 +261,17 @@ struct zcl_result block_index_flat_anchor_apply(
         return ZCL_ERR(-14, "flat anchor apply: parent mismatch h=%d", height);
     }
 
-    uint8_t *solution = zcl_malloc(hdr.nSolutionSize, "flat anchor solution");
-    if (!solution) {
+    if (!block_index_set_hdrext(bi, &hdr.hashMerkleRoot, &hdr.nNonce,
+                                hdr.nSolution, hdr.nSolutionSize)) {
         LOG_WARN(BIFA_SUBSYS,
                  "anchor trailer apply failed h=%d: solution allocation", height);
         return ZCL_ERR(-15, "flat anchor apply: allocation failed h=%d",
                        height);
     }
-    memcpy(solution, hdr.nSolution, hdr.nSolutionSize);
-    free(bi->nSolution);
-    bi->nSolution = solution;
-    bi->nSolutionSize = hdr.nSolutionSize;
     bi->nVersion = hdr.nVersion;
-    bi->hashMerkleRoot = hdr.hashMerkleRoot;
     bi->hashFinalSaplingRoot = hdr.hashFinalSaplingRoot;
     bi->nTime = hdr.nTime;
     bi->nBits = hdr.nBits;
-    bi->nNonce = hdr.nNonce;
     LOG_INFO(BIFA_SUBSYS,
              "restored complete hash-bound anchor header h=%d solution=%zu",
              height, hdr.nSolutionSize);

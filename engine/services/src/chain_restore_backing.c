@@ -32,7 +32,7 @@ bool chain_restore_block_is_consensus_backed(
         return false;
     if (tip->nTx == 0 || tip->nChainTx == 0)
         return false;
-    if (uint256_is_null(&tip->hashMerkleRoot))
+    if (block_index_merkle_is_null(tip))
         return false;
     return true;
 }
@@ -133,12 +133,13 @@ bool chain_restore_block_is_consensus_backed_on_disk_seeded(
         }
     }
 
-    if (ok && !uint256_is_null(&tip->hashMerkleRoot) &&
-        uint256_cmp(&blk.header.hashMerkleRoot, &tip->hashMerkleRoot) != 0) {
+    const struct uint256 tip_merkle = block_index_merkle_root(tip);
+    if (ok && !block_index_merkle_is_null(tip) &&
+        uint256_cmp(&blk.header.hashMerkleRoot, &tip_merkle) != 0) {
         char got[65] = {0};
         char want[65] = {0};
         uint256_get_hex(&blk.header.hashMerkleRoot, got);
-        uint256_get_hex(&tip->hashMerkleRoot, want);
+        uint256_get_hex(&tip_merkle, want);
         LOG_WARN("chain",
                  "[chain-restore] disk merkle mismatch at h=%d got=%s want=%s",
                  tip->nHeight, got, want);

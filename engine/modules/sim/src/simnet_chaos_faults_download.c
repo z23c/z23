@@ -333,7 +333,10 @@ bool chaos_fault_invalid_tail_block(uint64_t seed,
     idx.nVersion = c.block.header.nVersion;
     idx.nTime = c.block.header.nTime;
     idx.nBits = c.block.header.nBits;
-    idx.hashMerkleRoot = c.block.header.hashMerkleRoot;
+    struct block_index_hdrext idx_ext;
+    memset(&idx_ext, 0, sizeof(idx_ext));
+    idx_ext.hashMerkleRoot = c.block.header.hashMerkleRoot;
+    idx.ext = &idx_ext;
 
     struct validation_state vs;
     validation_state_init(&vs);

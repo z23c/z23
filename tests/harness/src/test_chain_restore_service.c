@@ -3,6 +3,7 @@
  * Tests for chain_restore_service — planning pattern tests.
  * Each test exercises the pure plan() function with struct inputs. */
 
+#include "test/block_index_ext_fixture.h"
 #include "platform/time_compat.h"
 #include "platform/private_directory.h"
 #include "test/test_core.h"
@@ -1717,7 +1718,7 @@ static int test_finalize_quarantine_preserves_served_floor(void) {
             idx[h]->nDataPos = 1;
             idx[h]->nTx = 1;
             idx[h]->nChainTx = (unsigned)(h + 1);
-            idx[h]->hashMerkleRoot.data[0] = (uint8_t)(0xA0 + h);
+            tbi_ext(idx[h])->hashMerkleRoot.data[0] = (uint8_t)(0xA0 + h);
             arith_uint256_set_u64(&idx[h]->nChainWork, (uint64_t)(h + 1));
         }
 

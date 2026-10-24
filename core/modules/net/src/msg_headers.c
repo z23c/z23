@@ -467,22 +467,22 @@ static const char *headers_fill_header_from_index(struct msg_processor *mp,
         hdr->hashPrevBlock = *iter->pprev->phashBlock;
     else
         memset(&hdr->hashPrevBlock, 0, sizeof(hdr->hashPrevBlock));
-    hdr->hashMerkleRoot = iter->hashMerkleRoot;
+    hdr->hashMerkleRoot = block_index_merkle_root(iter);
     hdr->hashFinalSaplingRoot = iter->hashFinalSaplingRoot;
     hdr->nTime = iter->nTime;
     hdr->nBits = iter->nBits;
-    hdr->nNonce = iter->nNonce;
-
-    if (!iter->nSolution || iter->nSolutionSize == 0)
+    hdr->nNonce = block_index_nonce(iter);
+    const struct block_index_hdrext *x = block_index_hdrext_peek(iter);
+    if (!x || !x->nSolution || x->nSolutionSize == 0)
         return HDR_REASON_NO_INDEX_SOLUTION;
-    if (iter->nSolutionSize > sizeof(hdr->nSolution)) {
+    if (x->nSolutionSize > sizeof(hdr->nSolution)) {
         LOG_WARN("headers",
                  "getheaders: oversized in-memory solution h=%d size=%zu",
-                 iter->nHeight, iter->nSolutionSize);
+                 iter->nHeight, x->nSolutionSize);
         return HDR_REASON_OVERSIZED_SOLUTION;
     }
-    memcpy(hdr->nSolution, iter->nSolution, iter->nSolutionSize);
-    hdr->nSolutionSize = iter->nSolutionSize;
+    memcpy(hdr->nSolution, x->nSolution, x->nSolutionSize);
+    hdr->nSolutionSize = x->nSolutionSize;
     return NULL;
 }
 
@@ -685,18 +685,21 @@ static bool headers_refresh_index_from_header(struct block_index *iter,
         return false;
 
     iter->nVersion = hdr->nVersion;
-    iter->hashMerkleRoot = hdr->hashMerkleRoot;
     iter->hashFinalSaplingRoot = hdr->hashFinalSaplingRoot;
     iter->nTime = hdr->nTime;
     iter->nBits = hdr->nBits;
-    iter->nNonce = hdr->nNonce;
+    struct block_index_hdrext *ext = block_index_hdrext_get_or_alloc(iter);
+    if (!ext)
+        return false;
+    ext->hashMerkleRoot = hdr->hashMerkleRoot;
+    ext->nNonce = hdr->nNonce;
 
     if (hdr->nSolutionSize > 0) {
         /* Already holding a same-sized buffer: refresh in place. No new
          * allocation, so the budget does not move — and no free(), so a
          * concurrent reader of this entry cannot see a dangling pointer. */
-        if (iter->nSolution && iter->nSolutionSize == hdr->nSolutionSize) {
-            memcpy(iter->nSolution, hdr->nSolution, hdr->nSolutionSize);
+        if (ext->nSolution && ext->nSolutionSize == hdr->nSolutionSize) {
+            memcpy(ext->nSolution, hdr->nSolution, hdr->nSolutionSize);
             return true;
         }
 
@@ -732,9 +735,9 @@ static bool headers_refresh_index_from_header(struct block_index *iter,
             return false;
         }
         memcpy(sol, hdr->nSolution, hdr->nSolutionSize);
-        free(iter->nSolution);
-        iter->nSolution = sol;
-        iter->nSolutionSize = hdr->nSolutionSize;
+        free(ext->nSolution);
+        ext->nSolution = sol;
+        ext->nSolutionSize = hdr->nSolutionSize;
         return true;
     }
     return false;
@@ -941,8 +944,8 @@ bool getheaders_index_header_servable(struct msg_processor *mp,
 
     if (hdr_out)
         *hdr_out = hdr;
-    if (header_serve_repair_wants(iter) && iter->nSolution &&
-        iter->nSolutionSize == hdr.nSolutionSize)
+    if (header_serve_repair_wants(iter) &&
+        block_index_solution_is_len(iter, hdr.nSolutionSize))
         header_serve_repair_note_cached(iter);
     return true;
 }

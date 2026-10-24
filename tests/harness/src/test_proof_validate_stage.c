@@ -1,6 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Unit tests for Wave S S-7 proof_validate stage. */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 #include "test/block_fixtures.h"
 
@@ -110,7 +111,7 @@ static bool synth_chain_pv_build(struct synth_chain_pv *sc, int n)
         block_header_get_hash(&sc->bodies[i].header, &sc->hashes[i]);
         block_index_init(&sc->blocks[i]);
         sc->blocks[i].phashBlock = &sc->hashes[i];
-        sc->blocks[i].hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
+        tbi_ext(&sc->blocks[i])->hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
         sc->blocks[i].nHeight = i;
         sc->blocks[i].nVersion = sc->bodies[i].header.nVersion;
         sc->blocks[i].nTime = sc->bodies[i].header.nTime;

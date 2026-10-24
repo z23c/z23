@@ -421,7 +421,10 @@ bool simnet_wire_byzantine_submit_block(struct block *block,
     idx.nVersion = block->header.nVersion;
     idx.nTime = block->header.nTime;
     idx.nBits = block->header.nBits;
-    idx.hashMerkleRoot = block->header.hashMerkleRoot;
+    struct block_index_hdrext idx_ext;
+    memset(&idx_ext, 0, sizeof(idx_ext));
+    idx_ext.hashMerkleRoot = block->header.hashMerkleRoot;
+    idx.ext = &idx_ext;
     idx.has_chain_sprout_value = false;
     idx.has_chain_sapling_value = false;
 

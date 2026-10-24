@@ -428,6 +428,16 @@ int chain_restore_rebuild_active_chain(struct main_state *ms,
 
     return populated;
 }
+/* Store the repaired merkle root and nonce. An allocation failure leaves the
+ * entry's old values in place; nBits and the rest of the repair still apply. */
+static void chain_restore_repair_store_hdr(struct block_index *p,
+                                           const struct block_header *h)
+{
+    if (!block_index_set_merkle_nonce(p, &h->hashMerkleRoot, &h->nNonce))
+        LOG_WARN("chain", "[nbits-backfill] header extension alloc failed h=%d",
+                 p->nHeight);
+}
+
 
 static bool chain_restore_backfill_args_ok(const struct main_state *ms,
                                            const char *datadir)
@@ -502,11 +512,10 @@ int chain_restore_backfill_nbits_from_disk(struct main_state *ms,
                 continue;
             }
             p->nVersion = blk.header.nVersion;
-            p->hashMerkleRoot = blk.header.hashMerkleRoot;
             p->hashFinalSaplingRoot = blk.header.hashFinalSaplingRoot;
             p->nTime = blk.header.nTime;
             p->nBits = blk.header.nBits;
-            p->nNonce = blk.header.nNonce;
+            chain_restore_repair_store_hdr(p, &blk.header);
             fixed++;
         }
         block_free(&blk);

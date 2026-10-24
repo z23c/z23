@@ -35,6 +35,7 @@ struct simnet_block_entry {
     struct block block;
     struct block_undo undo;
     struct block_index index;
+    struct block_index_hdrext index_ext;
     struct uint256 hash;
     struct uint256 parent_hash;
     struct simnet_block_entry *parent;
@@ -277,6 +278,7 @@ static bool simnet_chain_capture_undo(const struct block *block,
 }
 
 static void simnet_chain_fill_index(struct block_index *idx,
+                                    struct block_index_hdrext *ext,
                                     const struct block *block,
                                     const struct uint256 *hash,
                                     struct block_index *parent,
@@ -287,9 +289,11 @@ static void simnet_chain_fill_index(struct block_index *idx,
     idx->hashBlock = *hash;
     idx->phashBlock = &idx->hashBlock;
     idx->pprev = parent;
-    idx->hashMerkleRoot = block->header.hashMerkleRoot;
     idx->hashFinalSaplingRoot = block->header.hashFinalSaplingRoot;
-    idx->nNonce = block->header.nNonce;
+    memset(ext, 0, sizeof(*ext));
+    ext->hashMerkleRoot = block->header.hashMerkleRoot;
+    ext->nNonce = block->header.nNonce;
+    idx->ext = ext;
     idx->nHeight = height;
     idx->nVersion = block->header.nVersion;
     idx->nTime = block->header.nTime;
@@ -332,6 +336,10 @@ static struct simnet_block_entry *simnet_chain_store_entry(
     entry->undo = *undo;
     block_undo_init(undo);
     entry->index = *idx;
+    if (idx->ext) {
+        entry->index_ext = *idx->ext;
+        entry->index.ext = &entry->index_ext;
+    }
     entry->index.phashBlock = &entry->index.hashBlock;
     entry->hash = *hash;
     entry->parent_hash = *parent_hash;
@@ -582,7 +590,8 @@ static struct simnet_block_entry *connect_retained(
 
     int height = parent_idx->nHeight + 1;
     struct block_index idx;
-    simnet_chain_fill_index(&idx, block, &hash, parent_idx, height,
+    struct block_index_hdrext idx_ext;
+    simnet_chain_fill_index(&idx, &idx_ext, block, &hash, parent_idx, height,
                             first_seen);
 
     struct coins_view scratch_null;

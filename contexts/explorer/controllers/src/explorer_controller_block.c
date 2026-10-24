@@ -174,9 +174,11 @@ size_t serve_block(const char *param, uint8_t *r, size_t max)
         uint256_get_hex(&blk.header.hashFinalSaplingRoot, d.sapling_root);
         uint256_get_hex(&blk.header.nNonce, d.nonce);
     } else {
-        uint256_get_hex(&bi->hashMerkleRoot, d.merkle);
+        struct uint256 bi_merkle = block_index_merkle_root(bi);
+        struct uint256 bi_nonce = block_index_nonce(bi);
+        uint256_get_hex(&bi_merkle, d.merkle);
         uint256_get_hex(&bi->hashFinalSaplingRoot, d.sapling_root);
-        uint256_get_hex(&bi->nNonce, d.nonce);
+        uint256_get_hex(&bi_nonce, d.nonce);
     }
 
     format_time(d.ts, sizeof(d.ts), bi->nTime);

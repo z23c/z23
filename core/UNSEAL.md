@@ -292,3 +292,7 @@ later lane flips it HARD.
 - 2026-10-24T02:22:51Z — REASON: bls12-381 subgroup membership: endomorphism tests psi(P)==[x]P on G2 and phi(P)==-[x^2]P on G1 replace [r]P==O (exact membership tests, verdicts identical, speed only)
   old ROOT: 2ac9589bcb3e6b5b28fe2ce70434a6ebf4bf98b6c053a2b9a7f95f3eb8731b03
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-24T04:34:44Z — REASON: block_index memory: move hashMerkleRoot, nNonce and nSolution into an optional header extension (288 -> 216 B per entry, ~238 MB at 3.3 M entries); behaviour-preserving accessors
+  old ROOT: 8444fcd78413a251d62790a796df372366d80b5ca0961dcf9c4ebed364fb66ec
+  by: owner unseal ritual (make core-unseal)

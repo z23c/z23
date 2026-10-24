@@ -255,8 +255,8 @@ void block_header_to_json(const struct block_index *bi,
      * P2P header-serve path uses — so the RPC never renders zeros for a
      * block the node can prove. The port hash-binds its bytes to phashBlock;
      * when no authority answers, fall back to the index values as before. */
-    struct uint256 merkle_root = bi->hashMerkleRoot;
-    struct uint256 nonce = bi->nNonce;
+    struct uint256 merkle_root = block_index_merkle_root(bi);
+    struct uint256 nonce = block_index_nonce(bi);
     if (uint256_is_null(&merkle_root)) {
         struct block_header hdr;
         if (node_db_runtime_load_header_by_hash_height(

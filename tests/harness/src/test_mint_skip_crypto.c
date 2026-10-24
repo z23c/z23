@@ -15,6 +15,7 @@
  * Equivalence floor: Run A verified inputs (inputs_verified_total > 0), Run B
  * did not (== 0), so a normal boot runs full crypto. */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 #include "test/block_fixtures.h"
 
@@ -176,7 +177,7 @@ static bool synth_chain_build(struct synth_chain *sc, int n)
         block_header_get_hash(&sc->bodies[i].header, &sc->hashes[i]);
         block_index_init(&sc->blocks[i]);
         sc->blocks[i].phashBlock = &sc->hashes[i];
-        sc->blocks[i].hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
+        tbi_ext(&sc->blocks[i])->hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
         sc->blocks[i].nHeight = i;
         sc->blocks[i].nVersion = sc->bodies[i].header.nVersion;
         sc->blocks[i].nTime = sc->bodies[i].header.nTime;

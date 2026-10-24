@@ -534,11 +534,11 @@ int chain_restore_rebuild_active_chain_from_block_files(
         cur->nDataPos = pos->pos;
         cur->nStatus |= BLOCK_HAVE_DATA;
         cur->nVersion = hdr.nVersion;
-        cur->hashMerkleRoot = hdr.hashMerkleRoot;
         cur->hashFinalSaplingRoot = hdr.hashFinalSaplingRoot;
         cur->nTime = hdr.nTime;
         cur->nBits = hdr.nBits;
-        cur->nNonce = hdr.nNonce;
+        if (!block_index_set_merkle_nonce(cur, &hdr.hashMerkleRoot, &hdr.nNonce))
+            break;
         cur->pskip = NULL;
         cur->pprev = NULL;
         if (child) {

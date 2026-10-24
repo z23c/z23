@@ -21,6 +21,7 @@ struct vh_job {
     const struct block_index *bi;       /* in: validation input */
     struct block_index       *mark_bi;  /* in: real index to mark on pass */
     struct block_index        snapshot; /* in: optional repaired-header copy */
+    struct block_index_hdrext snapshot_ext; /* backs snapshot.ext when repaired */
     unsigned char             solution[MAX_SOLUTION_SIZE];
     int                       height;   /* in: convenience for logging */
     bool                      had_repair_row; /* in: a hash-bound header_solution_repair

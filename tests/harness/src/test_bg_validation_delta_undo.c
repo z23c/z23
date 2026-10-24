@@ -17,6 +17,7 @@
  *     its undo and no unapplied height with one, and the restarted fold
  *     completes the record. */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 #include "test/block_fixtures.h"
 
@@ -146,7 +147,7 @@ static bool du_chain_build(struct du_chain *c, const struct chain_params *cp)
         struct block_index *bi = &c->idx[h];
         block_index_init(bi);
         bi->phashBlock = &c->hash[h];
-        bi->hashMerkleRoot = c->body[h].header.hashMerkleRoot;
+        tbi_ext(bi)->hashMerkleRoot = c->body[h].header.hashMerkleRoot;
         bi->nHeight = h;
         bi->nVersion = c->body[h].header.nVersion;
         bi->nTime = c->body[h].header.nTime;

@@ -340,14 +340,16 @@ bool block_tree_db_load_block_index_guts(struct block_tree_db *btdb,
         pindex->nUndoPos = dbi.nUndoPos;
         /* hashSproutAnchor not stored in block_index (Sprout deprecated) */
         pindex->nVersion = dbi.nVersion;
-        pindex->hashMerkleRoot = dbi.hashMerkleRoot;
         pindex->hashFinalSaplingRoot = dbi.hashFinalSaplingRoot;
         pindex->nTime = dbi.nTime;
         pindex->nBits = dbi.nBits;
-        pindex->nNonce = dbi.nNonce;
         /* Don't store solution in block_index to save RAM */
-        pindex->nSolution = NULL;
-        pindex->nSolutionSize = 0;
+        /* On allocation failure the merkle root and nonce stay zero, as on a
+         * flat-loaded entry, and every other field is still filled. */
+        if (!block_index_set_merkle_nonce(pindex, &dbi.hashMerkleRoot,
+                                          &dbi.nNonce))
+            fprintf(stderr, "block_index_db: header extension alloc failed; merkle root and nonce left zero\n"); // obs-ok:block-index-db-deserialize
+        (void)block_index_set_solution(pindex, NULL, 0);
         pindex->nStatus = dbi.nStatus;
         pindex->nCachedBranchId = dbi.nCachedBranchId;
         pindex->nTx = dbi.nTx;

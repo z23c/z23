@@ -135,6 +135,18 @@ static unsigned int topup_row_undo_pos(int row_undo_pos)
     return row_undo_pos > 0 ? (unsigned int)row_undo_pos : 0u;
 }
 
+/* Store merkle root and nonce on a top-up entry. An allocation failure leaves
+ * the entry as a flat-loaded one is (zero fields): the row itself is still
+ * admitted and hydration can fill the fields later. */
+static void topup_store_hdr(struct block_index *bi,
+                            const struct uint256 *merkle,
+                            const struct uint256 *nonce)
+{
+    if (!block_index_set_merkle_nonce(bi, merkle, nonce))
+        LOG_WARN("block_index", "topup: header extension alloc failed h=%d",
+                 bi->nHeight);
+}
+
 /* HAVE_UNDO only with a usable position. Every path that copies a stored
  * status onto an entry verbatim must end here: a row claiming the bit with
  * nUndoPos 0 would otherwise publish (nFile, 0) as a rev address, which the
@@ -279,13 +291,11 @@ static bool topup_insert_new(struct topup_ctx *c, const struct uint256 *h,
     bi->nDataPos             = dbi->nDataPos;
     bi->nUndoPos             = dbi->nUndoPos;
     bi->nVersion             = dbi->nVersion;
-    bi->hashMerkleRoot       = dbi->hashMerkleRoot;
     bi->hashFinalSaplingRoot = dbi->hashFinalSaplingRoot;
     bi->nTime                = dbi->nTime;
     bi->nBits                = dbi->nBits;
-    bi->nNonce               = dbi->nNonce;
-    bi->nSolution            = NULL;  /* not retained in RAM */
-    bi->nSolutionSize        = 0;
+    topup_store_hdr(bi, &dbi->hashMerkleRoot, &dbi->nNonce);
+    (void)block_index_set_solution(bi, NULL, 0);  /* not retained in RAM */
     bi->nStatus              = dbi->nStatus & ~BLOCK_FAILED_MASK;
     bi->nCachedBranchId      = dbi->nCachedBranchId;
     bi->nTx                  = dbi->nTx;
@@ -345,11 +355,10 @@ static bool topup_row_cb(const uint8_t hash[32],
             bi->nDataPos             = dbi->nDataPos;
             bi->nUndoPos             = dbi->nUndoPos;
             bi->nVersion             = dbi->nVersion;
-            bi->hashMerkleRoot       = dbi->hashMerkleRoot;
             bi->hashFinalSaplingRoot = dbi->hashFinalSaplingRoot;
             bi->nTime                = dbi->nTime;
             bi->nBits                = dbi->nBits;
-            bi->nNonce               = dbi->nNonce;
+            topup_store_hdr(bi, &dbi->hashMerkleRoot, &dbi->nNonce);
             bi->nStatus              = dbi->nStatus & ~BLOCK_FAILED_MASK;
             bi->nCachedBranchId      = dbi->nCachedBranchId;
             bi->nTx                  = dbi->nTx;
@@ -735,13 +744,14 @@ static void node_db_topup_fill_new(struct block_index *bi,
     bi->nDataPos       = (unsigned int)blk->data_pos;
     bi->nUndoPos       = topup_row_undo_pos(blk->undo_pos);
     bi->nVersion       = blk->version;
-    memcpy(bi->hashMerkleRoot.data, blk->merkle_root, 32);
     memcpy(bi->hashFinalSaplingRoot.data, blk->sapling_root, 32);
     bi->nTime          = blk->time;
     bi->nBits          = blk->bits;
-    memcpy(bi->nNonce.data, blk->nonce, 32);
-    bi->nSolution      = NULL;  /* not retained in RAM */
-    bi->nSolutionSize  = 0;
+    struct uint256 db_merkle, db_nonce;
+    memcpy(db_merkle.data, blk->merkle_root, 32);
+    memcpy(db_nonce.data, blk->nonce, 32);
+    topup_store_hdr(bi, &db_merkle, &db_nonce);
+    (void)block_index_set_solution(bi, NULL, 0);  /* not retained in RAM */
     /* status>=3 == connected; carry VALID bits + data availability, never a
      * FAILED bit. The block is body-backed on disk (file_num/data_pos), so
      * HAVE_DATA is asserted explicitly rather than trusted from the stored

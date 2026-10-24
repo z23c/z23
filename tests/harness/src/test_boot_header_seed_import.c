@@ -25,6 +25,7 @@
  * synthetic index uses regtest params (easy PoW target) so honest rows pass the
  * loader's frozen CheckProofOfWork gate and a crafted max-hash row fails it. */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 
 #include "config/boot_header_seed_import.h"
@@ -133,17 +134,17 @@ static void hsi_build_chain(struct main_state *ms, int n, int bad_row_at,
                 pi->nHeight = n - 1;
                 pi->pprev = prev;
                 pi->nVersion = blk.header.nVersion;
-                pi->hashMerkleRoot = blk.header.hashMerkleRoot;
+                tbi_ext(pi)->hashMerkleRoot = blk.header.hashMerkleRoot;
                 pi->hashFinalSaplingRoot = blk.header.hashFinalSaplingRoot;
                 pi->nTime = blk.header.nTime;
                 pi->nBits = blk.header.nBits;
-                pi->nNonce = blk.header.nNonce;
-                pi->nSolution = zcl_malloc(blk.header.nSolutionSize,
+                tbi_ext(pi)->nNonce = blk.header.nNonce;
+                tbi_ext(pi)->nSolution = zcl_malloc(blk.header.nSolutionSize,
                                            "header seed test solution");
-                if (pi->nSolution) {
-                    memcpy(pi->nSolution, blk.header.nSolution,
+                if (tbi_ext(pi)->nSolution) {
+                    memcpy(tbi_ext(pi)->nSolution, blk.header.nSolution,
                            blk.header.nSolutionSize);
-                    pi->nSolutionSize = blk.header.nSolutionSize;
+                    tbi_ext(pi)->nSolutionSize = blk.header.nSolutionSize;
                 }
                 pi->nStatus = BLOCK_VALID_TREE;
                 pi->nTx = 1;
@@ -195,9 +196,9 @@ static bool hsi_seed_artifact(const char *sdir, int n, int bad_row_at,
         size_t iter = 0;
         while (block_map_next(&ms.map_block_index, &iter, NULL, &tip)) {
             if (tip && tip->nHeight == n - 1) {
-                free(tip->nSolution);
-                tip->nSolution = NULL;
-                tip->nSolutionSize = 0;
+                free(tbi_ext(tip)->nSolution);
+                tbi_ext(tip)->nSolution = NULL;
+                tbi_ext(tip)->nSolutionSize = 0;
                 break;
             }
         }
@@ -265,22 +266,22 @@ static int case_import_roundtrip(void)
         ASSERT(cms.map_block_index.size == 100);
         ASSERT(cms.pindex_best_header != NULL);
         ASSERT(cms.pindex_best_header->nHeight == 99);
-        ASSERT(cms.pindex_best_header->nSolution != NULL);
-        ASSERT(cms.pindex_best_header->nSolutionSize > 0);
+        ASSERT(tbi_ext(cms.pindex_best_header)->nSolution != NULL);
+        ASSERT(tbi_ext(cms.pindex_best_header)->nSolutionSize > 0);
 
         struct block_header restored;
         block_header_init(&restored);
         restored.nVersion = cms.pindex_best_header->nVersion;
         restored.hashPrevBlock = *cms.pindex_best_header->pprev->phashBlock;
-        restored.hashMerkleRoot = cms.pindex_best_header->hashMerkleRoot;
+        restored.hashMerkleRoot = tbi_ext(cms.pindex_best_header)->hashMerkleRoot;
         restored.hashFinalSaplingRoot =
             cms.pindex_best_header->hashFinalSaplingRoot;
         restored.nTime = cms.pindex_best_header->nTime;
         restored.nBits = cms.pindex_best_header->nBits;
-        restored.nNonce = cms.pindex_best_header->nNonce;
-        memcpy(restored.nSolution, cms.pindex_best_header->nSolution,
-               cms.pindex_best_header->nSolutionSize);
-        restored.nSolutionSize = cms.pindex_best_header->nSolutionSize;
+        restored.nNonce = tbi_ext(cms.pindex_best_header)->nNonce;
+        memcpy(restored.nSolution, tbi_ext(cms.pindex_best_header)->nSolution,
+               tbi_ext(cms.pindex_best_header)->nSolutionSize);
+        restored.nSolutionSize = tbi_ext(cms.pindex_best_header)->nSolutionSize;
         struct uint256 restored_hash;
         block_header_get_hash(&restored, &restored_hash);
         ASSERT(uint256_eq(&restored_hash,

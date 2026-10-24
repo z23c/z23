@@ -125,9 +125,13 @@ static bool xck_build_index(sqlite3 *cdb, int64_t checkpoint,
     *nodes_out = NULL;
     *count_out = 0;
     size_t count = (size_t)checkpoint + 1u;
-    struct block_index *nodes = zcl_calloc(count, sizeof(*nodes), "xck_index");
+    /* One allocation: count block_index entries followed by count header
+     * extensions (merkle root), so the single free(nodes) releases both. */
+    struct block_index *nodes = zcl_calloc(
+        count, sizeof(*nodes) + sizeof(struct block_index_hdrext), "xck_index");
     if (!nodes)
         return false;
+    struct block_index_hdrext *exts = (struct block_index_hdrext *)(nodes + count);
 
     sqlite3_stmt *st = NULL;
     if (sqlite3_prepare_v2(cdb,
@@ -165,7 +169,8 @@ static bool xck_build_index(sqlite3 *cdb, int64_t checkpoint,
         block_index_init(bi);
         memcpy(bi->hashBlock.data, hash, 32);
         bi->phashBlock = &bi->hashBlock;
-        memcpy(bi->hashMerkleRoot.data, merkle, 32);
+        memcpy(exts[h].hashMerkleRoot.data, merkle, 32);
+        bi->ext = &exts[h];
         bi->nHeight = (int)h;
         bi->nFile = sqlite3_column_int(st, 3);
         bi->nDataPos = (unsigned int)sqlite3_column_int64(st, 4);

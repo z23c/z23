@@ -40,6 +40,7 @@
  * nStatus.
  */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 
 #include "chain/chainparams.h"
@@ -139,11 +140,11 @@ static struct block_index *gsf_seed_index(struct main_state *ms,
         return NULL;
     bi->nHeight = height;
     bi->nVersion = h->nVersion;
-    bi->hashMerkleRoot = h->hashMerkleRoot;
+    tbi_ext(bi)->hashMerkleRoot = h->hashMerkleRoot;
     bi->hashFinalSaplingRoot = h->hashFinalSaplingRoot;
     bi->nTime = h->nTime;
     bi->nBits = h->nBits;
-    bi->nNonce = h->nNonce;
+    tbi_ext(bi)->nNonce = h->nNonce;
     bi->nStatus = BLOCK_VALID_TREE;
     bi->pprev = prev;
     return bi;
@@ -261,7 +262,7 @@ int test_getheaders_serve_fallback(void)
                   memcmp(out.nSolution, hb.nSolution,
                          hb.nSolutionSize) == 0);
         GSF_CHECK("index entry healed with the stored solution",
-                  ok && bi_b->nSolutionSize == hb.nSolutionSize);
+                  ok && tbi_ext(bi_b)->nSolutionSize == hb.nSolutionSize);
         GSF_CHECK("served entry keeps its validity bits",
                   ok && bi_b->nStatus == BLOCK_VALID_TREE);
     }
@@ -278,7 +279,7 @@ int test_getheaders_serve_fallback(void)
         GSF_CHECK("refusal does NOT mark BLOCK_FAILED_VALID",
                   !ok && bi_a->nStatus == BLOCK_VALID_TREE);
         GSF_CHECK("refusal fabricates no in-memory solution",
-                  !ok && bi_a->nSolutionSize == 0);
+                  !ok && tbi_ext(bi_a)->nSolutionSize == 0);
         /* 2b. ATTRIBUTION. This refusal is data availability (no store holds
          *     the bytes) and must be named and counted as that, not relabelled
          *     "header-hash-mismatch". Every height below a bundle/snapshot
@@ -345,7 +346,7 @@ int test_getheaders_serve_fallback(void)
                   memcmp(out.nSolution, ha.nSolution,
                          ha.nSolutionSize) == 0);
         GSF_CHECK("repair-row fallback heals the in-memory entry",
-                  ok && bi_a->nSolutionSize == ha.nSolutionSize);
+                  ok && tbi_ext(bi_a)->nSolutionSize == ha.nSolutionSize);
     }
 
     /* 5. No local store retains D. A refusal arms one header-only peer fetch;
@@ -365,7 +366,7 @@ int test_getheaders_serve_fallback(void)
             getheaders_cache_repair_candidate(&mp, bi_d, &forged_d);
         GSF_CHECK("wrong-hash peer repair candidate remains inert",
                   !forged_cached && header_serve_repair_test_armed() &&
-                  bi_d->nSolutionSize == 0);
+                  tbi_ext(bi_d)->nSolutionSize == 0);
         bool cached = getheaders_cache_repair_candidate(&mp, bi_d, &hd);
         GSF_CHECK("peer repair candidate passes independent full verification",
                   cached);
@@ -416,11 +417,11 @@ int test_getheaders_serve_fallback(void)
         if (bi_x) {
             bi_x->nHeight = 2;
             bi_x->nVersion = hb.nVersion;
-            bi_x->hashMerkleRoot = hb.hashMerkleRoot;
+            tbi_ext(bi_x)->hashMerkleRoot = hb.hashMerkleRoot;
             bi_x->hashFinalSaplingRoot = hb.hashFinalSaplingRoot;
             bi_x->nTime = hb.nTime;
             bi_x->nBits = hb.nBits;
-            bi_x->nNonce = hb.nNonce;
+            tbi_ext(bi_x)->nNonce = hb.nNonce;
             bi_x->nStatus = BLOCK_VALID_TREE;
             bi_x->pprev = bi_a;   /* reassembles to exactly hb */
 
@@ -428,8 +429,8 @@ int test_getheaders_serve_fallback(void)
             GSF_CHECK("wrong-hash fixture solution allocated", sol != NULL);
             if (sol) {
                 memcpy(sol, hb.nSolution, hb.nSolutionSize);
-                bi_x->nSolution = sol;
-                bi_x->nSolutionSize = hb.nSolutionSize;
+                tbi_ext(bi_x)->nSolution = sol;
+                tbi_ext(bi_x)->nSolutionSize = hb.nSolutionSize;
 
                 /* Sanity: the assembled header is valid on its own terms, so
                  * a pass below cannot come from a malformed fixture. */
@@ -500,11 +501,11 @@ int test_getheaders_serve_fallback(void)
             if (bi_y) {
                 bi_y->nHeight = 2;
                 bi_y->nVersion = hy.nVersion;
-                bi_y->hashMerkleRoot = hy.hashMerkleRoot;
+                tbi_ext(bi_y)->hashMerkleRoot = hy.hashMerkleRoot;
                 bi_y->hashFinalSaplingRoot = hy.hashFinalSaplingRoot;
                 bi_y->nTime = hy.nTime;
                 bi_y->nBits = hy.nBits;
-                bi_y->nNonce = hy.nNonce;
+                tbi_ext(bi_y)->nNonce = hy.nNonce;
                 bi_y->nStatus = BLOCK_VALID_TREE;   /* the hydrate/loader
                                                      * strength, no more */
                 bi_y->pprev = bi_a;
@@ -514,8 +515,8 @@ int test_getheaders_serve_fallback(void)
                 GSF_CHECK("F1 fixture solution allocated", ysol != NULL);
                 if (ysol) {
                     memcpy(ysol, hy.nSolution, hy.nSolutionSize);
-                    bi_y->nSolution = ysol;
-                    bi_y->nSolutionSize = hy.nSolutionSize;
+                    tbi_ext(bi_y)->nSolution = ysol;
+                    tbi_ext(bi_y)->nSolutionSize = hy.nSolutionSize;
 
                     /* This entry hash-binds, so the refusal can only come
                      * from the Equihash check. */
@@ -523,11 +524,11 @@ int test_getheaders_serve_fallback(void)
                     block_header_init(&rebuilt);
                     rebuilt.nVersion = bi_y->nVersion;
                     rebuilt.hashPrevBlock = hash_a;
-                    rebuilt.hashMerkleRoot = bi_y->hashMerkleRoot;
+                    rebuilt.hashMerkleRoot = tbi_ext(bi_y)->hashMerkleRoot;
                     rebuilt.hashFinalSaplingRoot = bi_y->hashFinalSaplingRoot;
                     rebuilt.nTime = bi_y->nTime;
                     rebuilt.nBits = bi_y->nBits;
-                    rebuilt.nNonce = bi_y->nNonce;
+                    rebuilt.nNonce = tbi_ext(bi_y)->nNonce;
                     memcpy(rebuilt.nSolution, hy.nSolution, hy.nSolutionSize);
                     rebuilt.nSolutionSize = hy.nSolutionSize;
                     struct uint256 rebuilt_hash;

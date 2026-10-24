@@ -4,6 +4,7 @@
  * must be populate-only: it reuses utxo_apply_check_and_insert_nullifiers()
  * and leaves the consensus check path unchanged. */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 #include "test/block_fixtures.h"
 
@@ -127,7 +128,7 @@ static bool nbf_chain_init_variant(struct nbf_chain *ch, int salt_base)
         ch->indices[i].phashBlock = &ch->indices[i].hashBlock;
         ch->indices[i].pprev = i > 0 ? &ch->indices[i - 1] : NULL;
         ch->indices[i].nHeight = i;
-        ch->indices[i].hashMerkleRoot =
+        tbi_ext(&ch->indices[i])->hashMerkleRoot =
             ch->bodies[i].header.hashMerkleRoot;
         ch->indices[i].nStatus = BLOCK_VALID_TREE | BLOCK_HAVE_DATA;
         block_index_build_skip(&ch->indices[i]);

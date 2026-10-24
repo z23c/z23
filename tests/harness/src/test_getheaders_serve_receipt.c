@@ -66,6 +66,7 @@
  * E. Keep all five.
  */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 
 #include "chain/chainparams.h"
@@ -138,11 +139,11 @@ static struct block_index *rc_seed_index(struct main_state *ms,
         return NULL;
     bi->nHeight = height;
     bi->nVersion = h->nVersion;
-    bi->hashMerkleRoot = h->hashMerkleRoot;
+    tbi_ext(bi)->hashMerkleRoot = h->hashMerkleRoot;
     bi->hashFinalSaplingRoot = h->hashFinalSaplingRoot;
     bi->nTime = h->nTime;
     bi->nBits = h->nBits;
-    bi->nNonce = h->nNonce;
+    tbi_ext(bi)->nNonce = h->nNonce;
     bi->nStatus = BLOCK_VALID_TREE;
     bi->pprev = prev;
     return bi;
@@ -158,8 +159,8 @@ static bool rc_pin_solution(struct block_index *bi,
     if (!sol)
         return false;
     memcpy(sol, h->nSolution, h->nSolutionSize);
-    bi->nSolution = sol;
-    bi->nSolutionSize = h->nSolutionSize;
+    tbi_ext(bi)->nSolution = sol;
+    tbi_ext(bi)->nSolutionSize = h->nSolutionSize;
     return true;
 }
 

@@ -159,20 +159,17 @@ struct block_index *add_to_block_index(struct main_state *ms,
     block_index_init(pindex);
 
     pindex->nVersion = header->nVersion;
-    pindex->hashMerkleRoot = header->hashMerkleRoot;
     pindex->hashFinalSaplingRoot = header->hashFinalSaplingRoot;
     pindex->nTime = header->nTime;
     pindex->nBits = header->nBits;
-    pindex->nNonce = header->nNonce;
-    if (header->nSolutionSize > 0) {
-        pindex->nSolution = zcl_malloc(header->nSolutionSize, "block_solution");
-        if (pindex->nSolution)
-            memcpy(pindex->nSolution, header->nSolution, header->nSolutionSize);
-        pindex->nSolutionSize = pindex->nSolution ? header->nSolutionSize : 0;
-    } else {
-        pindex->nSolution = NULL;
-        pindex->nSolutionSize = 0;
+    if (!block_index_set_merkle_nonce(pindex, &header->hashMerkleRoot,
+                                      &header->nNonce)) {
+        block_index_hdrext_free(pindex);
+        free(pindex);
+        LOG_NULL("validation", "add_to_block_index: header extension allocation failed");
     }
+    (void)block_index_set_solution(pindex, header->nSolution,
+                                   header->nSolutionSize);
 
     /* Option A: stable per-node hash storage, written before publishing
      * pindex into the map so concurrent lock-free locator builds never
@@ -181,7 +178,7 @@ struct block_index *add_to_block_index(struct main_state *ms,
     pindex->phashBlock = &pindex->hashBlock;
 
     if (!block_map_insert(&ms->map_block_index, &hash, pindex)) {
-        free(pindex->nSolution);
+        block_index_hdrext_free(pindex);
         free(pindex);
         return block_map_find(&ms->map_block_index, &hash);
     }

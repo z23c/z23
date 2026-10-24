@@ -540,12 +540,14 @@ static bool rpc_safety_save_projected_block(struct node_db *ndb,
         memcpy(b.prev_hash, bi->pprev->phashBlock->data, sizeof(b.prev_hash));
     b.height = bi->nHeight;
     b.version = bi->nVersion;
-    memcpy(b.merkle_root, bi->hashMerkleRoot.data, sizeof(b.merkle_root));
+    struct uint256 rp_merkle = block_index_merkle_root(bi);
+    memcpy(b.merkle_root, rp_merkle.data, sizeof(b.merkle_root));
     if (memcmp(b.merkle_root, (uint8_t[32]){0}, sizeof(b.merkle_root)) == 0)
         b.merkle_root[0] = 0x4d;
     b.time = bi->nTime;
     b.bits = bi->nBits;
-    memcpy(b.nonce, bi->nNonce.data, sizeof(b.nonce));
+    struct uint256 rp_nonce = block_index_nonce(bi);
+    memcpy(b.nonce, rp_nonce.data, sizeof(b.nonce));
     if (memcmp(b.nonce, (uint8_t[32]){0}, sizeof(b.nonce)) == 0)
         b.nonce[0] = 0x4e;
     b.solution = solution;

@@ -481,7 +481,10 @@ static bool connect_on_scratch(struct simnet *sim,
     idx.nVersion = c->block.header.nVersion;
     idx.nTime = c->block.header.nTime;
     idx.nBits = c->block.header.nBits;
-    idx.hashMerkleRoot = c->block.header.hashMerkleRoot;
+    struct block_index_hdrext idx_ext;
+    memset(&idx_ext, 0, sizeof(idx_ext));
+    idx_ext.hashMerkleRoot = c->block.header.hashMerkleRoot;
+    idx.ext = &idx_ext;
     idx.has_chain_sprout_value = false;
     idx.has_chain_sapling_value = false;
 

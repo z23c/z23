@@ -38,6 +38,7 @@
  * UN-gated (no ZCL_STRESS_TESTS): ~10 kill cycles + one full drain of
  * UCR_BLOCKS synthetic blocks measures low single-digit seconds. */
 
+#include "test/block_index_ext_fixture.h"
 #include "platform/time_compat.h"
 #include "test/test_core.h"
 #include "test/block_fixtures.h"
@@ -179,7 +180,7 @@ static bool ucr_chain_build_mode(struct ucr_chain *cc, int n, bool hz)
         block_header_get_hash(&cc->bodies[i].header, &cc->hashes[i]);
         block_index_init(&cc->blocks[i]);
         cc->blocks[i].phashBlock = &cc->hashes[i];
-        cc->blocks[i].hashMerkleRoot = cc->bodies[i].header.hashMerkleRoot;
+        tbi_ext(&cc->blocks[i])->hashMerkleRoot = cc->bodies[i].header.hashMerkleRoot;
         cc->blocks[i].nHeight = i;
         cc->blocks[i].nVersion = cc->bodies[i].header.nVersion;
         cc->blocks[i].nTime = cc->bodies[i].header.nTime;

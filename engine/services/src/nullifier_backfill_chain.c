@@ -210,9 +210,10 @@ struct zcl_result nbf_chain_body_verify(
                        (long long)height);
     }
     block_get_hash(blk, &block_hash);
+    const struct uint256 expected_merkle = block_index_merkle_root(expected);
     if (!uint256_eq(&block_hash, expected->phashBlock) ||
         !uint256_eq(&blk->header.hashMerkleRoot,
-                    &expected->hashMerkleRoot)) {
+                    &expected_merkle)) {
         LOG_WARN(NBF_CHAIN_SUBSYS,
                  "verify_selected_body: header/hash mismatch h=%lld",
                  (long long)height);

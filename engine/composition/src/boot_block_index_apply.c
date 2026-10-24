@@ -43,15 +43,16 @@ static struct block_index *create_block_index_fast(
     block_index_init(pindex);
 
     pindex->nVersion = meta->nVersion;
-    pindex->hashMerkleRoot = meta->hashMerkleRoot;
     pindex->hashFinalSaplingRoot = meta->hashFinalSaplingRoot;
     pindex->nTime = meta->nTime;
     pindex->nBits = meta->nBits;
-    pindex->nNonce = meta->nNonce;
+    if (!block_index_set_merkle_nonce(pindex, &meta->hashMerkleRoot,
+                                      &meta->nNonce)) {
+        free(pindex);
+        return NULL;
+    }
     /* Don't store solution in block_index — saves 1.3KB per entry
      * (4GB total for 3M entries). Read from disk when needed. */
-    pindex->nSolution = NULL;
-    pindex->nSolutionSize = 0;
 
     /* Option A: stable per-node hash storage (never freed by bucket
      * realloc), seeded before publishing pindex into the map. */
@@ -59,6 +60,7 @@ static struct block_index *create_block_index_fast(
     pindex->phashBlock = &pindex->hashBlock;
 
     if (!block_map_insert(&ms->map_block_index, &meta->hash, pindex)) {
+        block_index_hdrext_free(pindex);
         free(pindex);
         return block_map_find(&ms->map_block_index, &meta->hash);
     }
@@ -105,12 +107,11 @@ struct boot_scan_apply_counts scan_apply_one_file(
 
         if (bi->nVersion == 0 || bi->nTime == 0 || bi->nBits == 0) {
             bi->nVersion = meta->nVersion;
-            bi->hashMerkleRoot = meta->hashMerkleRoot;
             bi->hashFinalSaplingRoot = meta->hashFinalSaplingRoot;
             bi->nTime = meta->nTime;
             bi->nBits = meta->nBits;
-            bi->nNonce = meta->nNonce;
-            counts.header_fixed++;
+            counts.header_fixed += block_index_set_merkle_nonce(
+                bi, &meta->hashMerkleRoot, &meta->nNonce);
         }
 
         if (!bi->pprev && bi->nHeight == 0 && params) {

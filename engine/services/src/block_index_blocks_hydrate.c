@@ -166,6 +166,17 @@ enum {
     "SELECT hash,prev_hash,version,merkle_root,sapling_root,time,bits," \
     "nonce,solution,status,num_tx,height FROM blocks ORDER BY height"
 
+/* Store merkle root and nonce; an allocation failure leaves the entry the way
+ * a flat-loaded one is (zero fields), which later hydration can still fill. */
+static void hyd_store_merkle_nonce(struct block_index *bi,
+                                   const struct uint256 *merkle,
+                                   const struct uint256 *nonce)
+{
+    if (!block_index_set_merkle_nonce(bi, merkle, nonce))
+        LOG_WARN("block_index_hydrate", "header extension alloc failed h=%d",
+                 bi->nHeight);
+}
+
 /* Reconstruct the canonical block_header from a BLOCKS_HYDRATE_SEL row so its
  * PoW hash can be recomputed and compared to the stored `hash` column (the
  * same hash-bind test engine/models/src/block.c performs on a stored row). Returns
@@ -475,15 +486,18 @@ struct zcl_result load_block_index_from_blocks_table(struct node_db *ndb,
                 bi->nTx = (unsigned int)nt;
         }
 
+        struct uint256 hyd_merkle = block_index_merkle_root(bi);
+        struct uint256 hyd_nonce = block_index_nonce(bi);
         const void *mr = sqlite3_column_blob(sel, BHC_MERKLE);
         if (mr && sqlite3_column_bytes(sel, BHC_MERKLE) >= 32)
-            memcpy(bi->hashMerkleRoot.data, mr, 32);
+            memcpy(hyd_merkle.data, mr, 32);
         const void *sr = sqlite3_column_blob(sel, BHC_SAPLING);
         if (sr && sqlite3_column_bytes(sel, BHC_SAPLING) >= 32)
             memcpy(bi->hashFinalSaplingRoot.data, sr, 32);
         const void *nn = sqlite3_column_blob(sel, BHC_NONCE);
         if (nn && sqlite3_column_bytes(sel, BHC_NONCE) >= 32)
-            memcpy(bi->nNonce.data, nn, 32);
+            memcpy(hyd_nonce.data, nn, 32);
+        hyd_store_merkle_nonce(bi, &hyd_merkle, &hyd_nonce);
 
         /* HONEST validity for what THIS table owns: we verified the header
          * hash-binds (and the link pass verifies parent linkage), but the

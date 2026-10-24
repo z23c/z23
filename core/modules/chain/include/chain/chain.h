@@ -10,6 +10,7 @@
 #include "core/arith_uint256.h"
 #include "primitives/block.h"
 #include "core/uint256.h"
+#include "base/safe_alloc.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -88,6 +89,16 @@ static inline void disk_block_pos_init(struct disk_block_pos *p)
 
 #define OPTIONAL_NONE (-1)
 
+/* Header fields that the flat block-index file does not carry. Allocated
+ * lazily (live header accept, DB top-up, cold import); NULL means all-zero
+ * merkle root and nonce and no solution. */
+struct block_index_hdrext {
+    struct uint256 hashMerkleRoot;
+    struct uint256 nNonce;
+    unsigned char *nSolution;      /* heap-allocated, NULL if not loaded */
+    size_t nSolutionSize;
+};
+
 struct block_index {
     /* --- 8-byte aligned pointers first --- */
     const struct uint256 *phashBlock;
@@ -97,9 +108,7 @@ struct block_index {
     /* --- 32-byte fields --- */
     struct uint256 hashBlock;  /* Stable storage for phashBlock */
     struct arith_uint256 nChainWork;
-    struct uint256 hashMerkleRoot;
     struct uint256 hashFinalSaplingRoot;
-    struct uint256 nNonce;
 
     /* --- 8-byte fields --- */
     int64_t nCachedBranchId;
@@ -107,8 +116,7 @@ struct block_index {
     int64_t nChainSproutValue;
     int64_t nSaplingValue;
     int64_t nChainSaplingValue;
-    unsigned char *nSolution;      /* heap-allocated, NULL if not loaded */
-    size_t nSolutionSize;
+    struct block_index_hdrext *ext; /* optional header extension, NULL for flat-loaded entries */
 
     /* --- 4-byte fields --- */
     int nHeight;
@@ -129,6 +137,158 @@ struct block_index {
     bool has_chain_sapling_value;
     /* 5 bytes padding to 8-byte boundary — struct ends here */
 };
+
+_Static_assert(sizeof(struct block_index) == 216,
+               "struct block_index must stay 216 bytes (header fields live in block_index_hdrext)");
+
+/* Current extension or NULL (acquire load, pairs with the release publish
+ * in block_index_hdrext_get_or_alloc). */
+static inline struct block_index_hdrext *block_index_hdrext_peek(const struct block_index *bi)
+{
+    return __atomic_load_n(&bi->ext, __ATOMIC_ACQUIRE);
+}
+
+static inline struct uint256 block_index_merkle_root(const struct block_index *bi)
+{
+    struct uint256 z;
+    const struct block_index_hdrext *e = block_index_hdrext_peek(bi);
+    if (e)
+        return e->hashMerkleRoot;
+    memset(&z, 0, sizeof(z));
+    return z;
+}
+
+/* True when the merkle root is unset (no extension, or all-zero). */
+static inline bool block_index_merkle_is_null(const struct block_index *bi)
+{
+    struct uint256 m = block_index_merkle_root(bi);
+    return uint256_is_null(&m);
+}
+
+static inline struct uint256 block_index_nonce(const struct block_index *bi)
+{
+    struct uint256 z;
+    const struct block_index_hdrext *e = block_index_hdrext_peek(bi);
+    if (e)
+        return e->nNonce;
+    memset(&z, 0, sizeof(z));
+    return z;
+}
+
+/* Returns the solution bytes (NULL if none) and stores their length. */
+static inline const unsigned char *block_index_solution(const struct block_index *bi,
+                                                        size_t *len)
+{
+    const struct block_index_hdrext *e = block_index_hdrext_peek(bi);
+    if (!e) {
+        if (len)
+            *len = 0;
+        return NULL;
+    }
+    if (len)
+        *len = e->nSolutionSize;
+    return e->nSolution;
+}
+
+/* True when the entry carries a non-empty solution. */
+static inline bool block_index_has_solution(const struct block_index *bi)
+{
+    size_t n = 0;
+    return block_index_solution(bi, &n) != NULL && n > 0;
+}
+
+/* True when the entry holds a solution of exactly `len` bytes. */
+static inline bool block_index_solution_is_len(const struct block_index *bi, size_t len)
+{
+    size_t n = 0;
+    return block_index_solution(bi, &n) != NULL && n == len;
+}
+
+/* Allocate the extension on first use. NULL on allocation failure. */
+static inline struct block_index_hdrext *block_index_hdrext_get_or_alloc(struct block_index *bi)
+{
+    struct block_index_hdrext *e = block_index_hdrext_peek(bi);
+    struct block_index_hdrext *expect = NULL;
+    if (e)
+        return e;
+    e = zcl_calloc(1, sizeof(*e), "block_index_hdrext");
+    if (!e)
+        return NULL;
+    /* Publish race-safely: a concurrent first writer keeps its extension. */
+    if (!__atomic_compare_exchange_n(&bi->ext, &expect, e, false,
+                                     __ATOMIC_RELEASE, __ATOMIC_ACQUIRE)) {
+        free(e);
+        return expect;
+    }
+    return e;
+}
+
+/* Store merkle root and nonce. An all-zero pair on an entry without an
+ * extension stores nothing (the accessors already read zero). Returns false
+ * on allocation failure. */
+static inline bool block_index_set_merkle_nonce(struct block_index *bi,
+                                                const struct uint256 *merkle,
+                                                const struct uint256 *nonce)
+{
+    struct block_index_hdrext *e;
+    if (!block_index_hdrext_peek(bi) && uint256_is_null(merkle) && uint256_is_null(nonce))
+        return true;
+    e = block_index_hdrext_get_or_alloc(bi);
+    if (!e)
+        return false;
+    e->hashMerkleRoot = *merkle;
+    e->nNonce = *nonce;
+    return true;
+}
+
+/* Replace the solution with a heap copy of (src, len); len 0 clears it.
+ * Returns false on allocation failure (solution cleared). */
+static inline bool block_index_set_solution(struct block_index *bi,
+                                            const unsigned char *src, size_t len)
+{
+    unsigned char *copy = NULL;
+    struct block_index_hdrext *e;
+    if (len == 0 && !block_index_hdrext_peek(bi))
+        return true;
+    e = block_index_hdrext_get_or_alloc(bi);
+    if (!e)
+        return false;
+    if (len > 0) {
+        copy = zcl_malloc(len, "block_solution");
+        if (!copy) {
+            free(e->nSolution);
+            e->nSolution = NULL;
+            e->nSolutionSize = 0;
+            return false;
+        }
+        memcpy(copy, src, len);
+    }
+    free(e->nSolution);
+    e->nSolution = copy;
+    e->nSolutionSize = len;
+    return true;
+}
+
+/* merkle root, nonce and solution in one step (false on allocation failure). */
+static inline bool block_index_set_hdrext(struct block_index *bi,
+                                          const struct uint256 *merkle,
+                                          const struct uint256 *nonce,
+                                          const unsigned char *sol, size_t sol_len)
+{
+    return block_index_set_merkle_nonce(bi, merkle, nonce) &&
+           block_index_set_solution(bi, sol, sol_len);
+}
+
+/* Release the extension and its solution. Safe when ext is NULL. */
+static inline void block_index_hdrext_free(struct block_index *bi)
+{
+    struct block_index_hdrext *e = bi->ext;
+    if (!e)
+        return;
+    bi->ext = NULL;
+    free(e->nSolution);
+    free(e);
+}
 
 static inline void block_index_init(struct block_index *bi)
 {

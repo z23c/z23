@@ -648,7 +648,7 @@ struct chain_restore_result utxo_recovery_restore_chain_tip(
         {
             char best_hex[65] = {0};
             char prev_hex[65] = {0};
-            bool merkle_null = uint256_is_null(&best->hashMerkleRoot);
+            bool merkle_null = block_index_merkle_is_null(best);
             if (best->phashBlock)
                 uint256_get_hex(best->phashBlock, best_hex);
             if (best->pprev && best->pprev->phashBlock)

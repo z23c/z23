@@ -40,6 +40,7 @@
  * (the `self_check` block): a fabricated "advanced but cursor didn't move"
  * observation must be flagged. */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 #include "bloom/merkle.h"
 
@@ -229,7 +230,7 @@ static bool synth_build(struct synth *sc, int n, bool with_bodies)
         if (with_bodies) {
             if (!make_body(&sc->bodies[i], i)) return false;
             block_header_get_hash(&sc->bodies[i].header, &sc->hashes[i]);
-            sc->blocks[i].hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
+            tbi_ext(&sc->blocks[i])->hashMerkleRoot = sc->bodies[i].header.hashMerkleRoot;
             sc->blocks[i].nVersion = sc->bodies[i].header.nVersion;
             sc->blocks[i].nTime    = sc->bodies[i].header.nTime;
             sc->blocks[i].nBits    = sc->bodies[i].header.nBits;

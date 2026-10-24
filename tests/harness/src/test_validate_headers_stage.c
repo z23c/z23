@@ -13,6 +13,7 @@
  *   - replay across progress_store reopen: cursor + log persist
  *   - pre-init guards */
 
+#include "test/block_index_ext_fixture.h"
 #include "test/test_core.h"
 #include "util/util.h"
 #include "storage/boot_auto_reindex.h"
@@ -117,11 +118,11 @@ static bool vh_header_from_bi_solution(const struct block_index *bi,
     out->nVersion = bi->nVersion;
     if (bi->pprev && bi->pprev->phashBlock)
         out->hashPrevBlock = *bi->pprev->phashBlock;
-    out->hashMerkleRoot = bi->hashMerkleRoot;
+    out->hashMerkleRoot = block_index_merkle_root(bi);
     out->hashFinalSaplingRoot = bi->hashFinalSaplingRoot;
     out->nTime = bi->nTime;
     out->nBits = bi->nBits;
-    out->nNonce = bi->nNonce;
+    out->nNonce = block_index_nonce(bi);
     if (sol_len > 0) {
         memcpy(out->nSolution, sol, sol_len);
         out->nSolutionSize = sol_len;
@@ -251,9 +252,9 @@ static void synth_chain_vh_free(struct synth_chain_vh *sc)
 {
     if (sc->blocks) {
         for (int i = 0; i < sc->n; i++) {
-            free(sc->blocks[i].nSolution);
-            sc->blocks[i].nSolution = NULL;
-            sc->blocks[i].nSolutionSize = 0;
+            free(tbi_ext(&sc->blocks[i])->nSolution);
+            tbi_ext(&sc->blocks[i])->nSolution = NULL;
+            tbi_ext(&sc->blocks[i])->nSolutionSize = 0;
         }
     }
     free(sc->blocks);
@@ -737,17 +738,17 @@ int test_validate_headers_stage(void)
         VH_CHECK("index-header: setup default validator",
                  vh_setup("index_header", 1, NULL, NULL,
                           dir, sizeof(dir), &ms, &sc) == 0);
-        sc.blocks[0].nSolutionSize = 36;
-        sc.blocks[0].nSolution = zcl_malloc(sc.blocks[0].nSolutionSize,
+        tbi_ext(&sc.blocks[0])->nSolutionSize = 36;
+        tbi_ext(&sc.blocks[0])->nSolution = zcl_malloc(tbi_ext(&sc.blocks[0])->nSolutionSize,
                                             "vh_test_solution");
         VH_CHECK("index-header: alloc solution",
-                 sc.blocks[0].nSolution != NULL);
-        if (sc.blocks[0].nSolution)
-            memset(sc.blocks[0].nSolution, 0, sc.blocks[0].nSolutionSize);
+                 tbi_ext(&sc.blocks[0])->nSolution != NULL);
+        if (tbi_ext(&sc.blocks[0])->nSolution)
+            memset(tbi_ext(&sc.blocks[0])->nSolution, 0, tbi_ext(&sc.blocks[0])->nSolutionSize);
         VH_CHECK("index-header: bind phashBlock to index header",
                  vh_set_bi_hash_for_solution(&sc.blocks[0], &sc.hashes[0],
-                                             sc.blocks[0].nSolution,
-                                             sc.blocks[0].nSolutionSize));
+                                             tbi_ext(&sc.blocks[0])->nSolution,
+                                             tbi_ext(&sc.blocks[0])->nSolutionSize));
 
         header_admit_stage_drain(10);
         VH_CHECK("index-header: validate one row",
@@ -779,11 +780,11 @@ int test_validate_headers_stage(void)
         dbi.nHeight = 0;
         dbi.nStatus = BLOCK_VALID_HEADER;
         dbi.nVersion = sc.blocks[0].nVersion;
-        dbi.hashMerkleRoot = sc.blocks[0].hashMerkleRoot;
+        dbi.hashMerkleRoot = tbi_ext(&sc.blocks[0])->hashMerkleRoot;
         dbi.hashFinalSaplingRoot = sc.blocks[0].hashFinalSaplingRoot;
         dbi.nTime = sc.blocks[0].nTime;
         dbi.nBits = sc.blocks[0].nBits;
-        dbi.nNonce = sc.blocks[0].nNonce;
+        dbi.nNonce = tbi_ext(&sc.blocks[0])->nNonce;
         dbi.nSolutionSize = 36;
         memset(dbi.nSolution, 0, dbi.nSolutionSize);
         disk_block_index_get_hash(&dbi, &sc.hashes[0]);
@@ -1005,15 +1006,15 @@ int test_validate_headers_stage(void)
         sc.hashes[0] = hash;
         sc.blocks[0].phashBlock = &sc.hashes[0];
         sc.blocks[0].nBits = 0x1f07ffff;
-        sc.blocks[0].nNonce.data[0] ^= 0x7f;
-        sc.blocks[0].nSolutionSize = 36;
-        sc.blocks[0].nSolution = zcl_malloc(sc.blocks[0].nSolutionSize,
+        tbi_ext(&sc.blocks[0])->nNonce.data[0] ^= 0x7f;
+        tbi_ext(&sc.blocks[0])->nSolutionSize = 36;
+        tbi_ext(&sc.blocks[0])->nSolution = zcl_malloc(tbi_ext(&sc.blocks[0])->nSolutionSize,
                                             "vh_stale_index_solution");
         VH_CHECK("node-db-header: alloc stale index solution",
-                 sc.blocks[0].nSolution != NULL);
-        if (sc.blocks[0].nSolution)
-            memset(sc.blocks[0].nSolution, 0xEE,
-                   sc.blocks[0].nSolutionSize);
+                 tbi_ext(&sc.blocks[0])->nSolution != NULL);
+        if (tbi_ext(&sc.blocks[0])->nSolution)
+            memset(tbi_ext(&sc.blocks[0])->nSolution, 0xEE,
+                   tbi_ext(&sc.blocks[0])->nSolutionSize);
 
         validate_headers_validator_set_node_db(&ndb);
         char reason[VH_MAX_REASON] = {0};
@@ -1069,7 +1070,7 @@ int test_validate_headers_stage(void)
         sc.hashes[0] = hash;
         sc.blocks[0].phashBlock = &sc.hashes[0];
         sc.blocks[0].nBits = 0x1f07ffff;
-        sc.blocks[0].nNonce.data[0] ^= 0x7f;
+        tbi_ext(&sc.blocks[0])->nNonce.data[0] ^= 0x7f;
 
         validate_headers_validator_set_node_db(&ndb);
         char reason[VH_MAX_REASON] = {0};
@@ -1116,10 +1117,10 @@ int test_validate_headers_stage(void)
         /* Force earlier index/SQL sources to be unusable; the disk block is
          * the only source carrying bytes that hash-bind to phashBlock. */
         sc.blocks[0].nBits = 0x1f07ffff;
-        sc.blocks[0].nNonce.data[0] ^= 0x9b;
-        free(sc.blocks[0].nSolution);
-        sc.blocks[0].nSolution = NULL;
-        sc.blocks[0].nSolutionSize = 0;
+        tbi_ext(&sc.blocks[0])->nNonce.data[0] ^= 0x9b;
+        free(tbi_ext(&sc.blocks[0])->nSolution);
+        tbi_ext(&sc.blocks[0])->nSolution = NULL;
+        tbi_ext(&sc.blocks[0])->nSolutionSize = 0;
         validate_headers_validator_set_node_db(&ndb);
 
         char reason[VH_MAX_REASON] = {0};
