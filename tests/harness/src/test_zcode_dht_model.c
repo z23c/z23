@@ -62,39 +62,54 @@ static void model_contact(struct vcs_zcode_dht_contact *contact,
   contact->last_success_unix = 1;
 }
 
+static bool model_service_table_fits(const struct vcs_zcode_dht_service *s) {
+  if (!s || !s->table ||
+      s->table->contact_count > VCS_ZCODE_DHT_MAX_CONTACTS ||
+      s->table->pending_count > VCS_ZCODE_DHT_MAX_PENDING ||
+      s->outbound_count > VCS_ZCODE_DHT_SERVICE_MAX_OUTBOUND)
+    return false;
+  return true;
+}
+
+static bool model_service_pools_fit(const struct vcs_zcode_dht_service *s) {
+  size_t peers = 0, lookups = 0, queries = 0;
+  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++)
+    peers += s->peers[i].used;
+  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS; i++) {
+    lookups += s->lookups[i].used;
+    if (s->lookups[i].candidate_count >
+        VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES)
+      return false;
+  }
+  for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++)
+    queries += s->queries[i].used;
+  if (peers > VCS_ZCODE_DHT_SERVICE_MAX_PEERS ||
+      lookups > VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS ||
+      queries > VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES)
+    return false;
+  return true;
+}
+
+static bool model_peer_ids_distinct(const struct vcs_zcode_dht_service *s) {
+  for (size_t p = 0; p < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; p++) {
+    const struct service_peer *peer = &s->peers[p];
+    if (!peer->used)
+      continue;
+    for (size_t q = p + 1; q < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; q++)
+      if (s->peers[q].used && peer->authenticated &&
+          s->peers[q].authenticated &&
+          memcmp(peer->node_id, s->peers[q].node_id, 32) == 0)
+        return false;
+  }
+  return true;
+}
+
 static bool model_caps_hold(const struct model_node nodes[MODEL_NODES]) {
   for (size_t n = 0; n < MODEL_NODES; n++) {
     const struct vcs_zcode_dht_service *s = nodes[n].service;
-    if (!s || !s->table ||
-        s->table->contact_count > VCS_ZCODE_DHT_MAX_CONTACTS ||
-        s->table->pending_count > VCS_ZCODE_DHT_MAX_PENDING ||
-        s->outbound_count > VCS_ZCODE_DHT_SERVICE_MAX_OUTBOUND)
+    if (!model_service_table_fits(s) || !model_service_pools_fit(s) ||
+        !model_peer_ids_distinct(s))
       return false;
-    size_t peers = 0, lookups = 0, queries = 0;
-    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; i++)
-      peers += s->peers[i].used;
-    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS; i++) {
-      lookups += s->lookups[i].used;
-      if (s->lookups[i].candidate_count >
-          VCS_ZCODE_DHT_SERVICE_MAX_CANDIDATES)
-        return false;
-    }
-    for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES; i++)
-      queries += s->queries[i].used;
-    if (peers > VCS_ZCODE_DHT_SERVICE_MAX_PEERS ||
-        lookups > VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS ||
-        queries > VCS_ZCODE_DHT_SERVICE_MAX_ACTIVE_QUERIES)
-      return false;
-    for (size_t p = 0; p < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; p++) {
-      const struct service_peer *peer = &s->peers[p];
-      if (!peer->used)
-        continue;
-      for (size_t q = p + 1; q < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; q++)
-        if (s->peers[q].used && peer->authenticated &&
-            s->peers[q].authenticated &&
-            memcmp(peer->node_id, s->peers[q].node_id, 32) == 0)
-          return false;
-    }
   }
   return true;
 }
@@ -200,6 +215,202 @@ static bool model_persistence_corruption(uint32_t node) {
          VCS_ZCODE_DHT_ERR_WIRE_MAGIC;
 }
 
+/* One drawn transition: the random word fixes the node, the lookup slot and
+ * the operation, exactly as the model always did. */
+struct model_step {
+  uint64_t draw;
+  uint32_t step, n, lookup_index, op;
+};
+
+static void model_op_insert_unverified(struct model_node *node,
+                                       const struct model_step *m) {
+  struct service_lookup *lookup =
+      &node->service->lookups[m->lookup_index];
+  uint8_t id[32];
+  model_id(id, m->n, 0xf0000000u + m->step);
+  (void)vcs_zcode_dht_lookup_insert(
+      lookup, id, VCS_ZCODE_DHT_CANDIDATE_UNVERIFIED, 0);
+}
+
+static void model_op_mark_unreachable(struct model_node *node,
+                                      const struct model_step *m) {
+  struct service_lookup *lookup =
+      &node->service->lookups[m->lookup_index];
+  uint32_t at = (uint32_t)((m->draw >> 24) % lookup->candidate_count);
+  if (lookup->candidates[at].state == VCS_ZCODE_DHT_CANDIDATE_UNVERIFIED)
+    lookup->candidates[at].state = VCS_ZCODE_DHT_CANDIDATE_UNREACHABLE;
+}
+
+static void model_op_toggle_peer(struct model_node *node,
+                                 const struct model_step *m) {
+  struct vcs_zcode_dht_service *s = node->service;
+  uint32_t peer = (uint32_t)((m->draw >> 24) % 4);
+  s->peers[peer].connected = !s->peers[peer].connected;
+  node->links[(m->n + peer + 1) % MODEL_NODES] = s->peers[peer].connected;
+}
+
+static bool model_op_reseed_lookup(struct model_node *node,
+                                   const struct model_step *m) {
+  struct vcs_zcode_dht_service *s = node->service;
+  struct service_lookup *lookup = &s->lookups[m->lookup_index];
+  (void)vcs_zcode_dht_service_lookup_cancel(s, lookup->id);
+  return model_seed_lookup(s, lookup, m->n, m->lookup_index, m->step + 2);
+}
+
+static bool model_op_rotate_session(struct model_node *node,
+                                    const struct model_step *m) {
+  struct vcs_zcode_dht_service *s = node->service;
+  /* Duplicate identity and key-rotation churn: the higher local serial
+   * survives, independent of transcript generation ordering. */
+  struct service_peer *old = &s->peers[0], *fresh = &s->peers[4];
+  old->connected = true;
+  old->authenticated = true;
+  *fresh = *old;
+  fresh->peer_id = 1000 + m->step;
+  fresh->session.connection_serial = old->session.connection_serial + 1;
+  fresh->session.generation ^= UINT64_C(0xfedcba9876543210);
+  if (!vcs_zcode_dht_service_retain_unique_node_session(
+          s, fresh,
+          (struct vcs_zcode_dht_time){node->wall, node->monotonic}) ||
+      old->used || !fresh->used)
+    return false;
+  *old = *fresh;
+  old->peer_id = 1;
+  memset(fresh, 0, sizeof(*fresh));
+  return true;
+}
+
+static void model_op_replay_churn(struct model_node *node,
+                                  const struct model_step *m) {
+  /* Ledger churn; production namespace admission is checked below. */
+  struct service_peer *peer = &node->service->peers[0];
+  memset(peer->request_replay[0].id, (int)(m->step & 0xff), 16);
+  peer->request_replay[0].used = true;
+  peer->request_replay[0].seen_mono = node->monotonic;
+  if (peer->response_replay[0].used &&
+      memcmp(peer->request_replay[0].id,
+             peer->response_replay[0].id, 16) == 0)
+    memset(&peer->response_replay[0], 0,
+           sizeof(peer->response_replay[0]));
+}
+
+static bool model_pending_victim(const struct vcs_zcode_dht_table *table,
+                                 uint8_t victim[32]) {
+  for (size_t p = 0; p < VCS_ZCODE_DHT_MAX_PENDING; p++)
+    if (table->pending[p].active) {
+      memcpy(victim, table->pending[p].victim_node_id, 32);
+      return true;
+    }
+  return false;
+}
+
+static bool model_pending_probe(struct model_node *node) {
+  struct vcs_zcode_dht_service *s = node->service;
+  uint8_t victim[32] = {0};
+  if (!model_pending_victim(s->table, victim))
+    return false;
+  return vcs_zcode_dht_table_probe_started(s->table, victim,
+                                           (int64_t)node->monotonic) &&
+         vcs_zcode_dht_table_probe_complete(
+             s->table, victim, VCS_ZCODE_DHT_PROBE_FAILED, true,
+             (int64_t)node->wall);
+}
+
+static bool model_op_add_contact(struct model_node *node,
+                                 const struct model_step *m) {
+  struct vcs_zcode_dht_service *s = node->service;
+  uint8_t candidate_id[32];
+  model_id(candidate_id, (m->n + 1) % MODEL_NODES, 0xe0000000u + m->step);
+  struct vcs_zcode_dht_contact candidate;
+  model_contact(&candidate, candidate_id, (uint8_t)(m->n + 33), m->step + 2);
+  enum vcs_zcode_dht_add_result added =
+      vcs_zcode_dht_table_add_contact(s->table, &candidate,
+                                      (int64_t)node->monotonic);
+  if (added == VCS_ZCODE_DHT_ADD_PENDING_PROBE)
+    return model_pending_probe(node);
+  return true;
+}
+
+static void model_op_clock_jump(struct model_node *node,
+                                const struct model_step *m) {
+  node->wall = (m->draw & 1) ? node->wall + UINT64_C(86400) * 365
+                             : (node->wall > 500 ? node->wall - 500 : 0);
+  node->monotonic++;
+}
+
+static bool model_result_authenticated(
+    const struct vcs_zcode_dht_service *s,
+    const struct vcs_zcode_dht_lookup_result *result) {
+  for (uint32_t i = 0; i < result->count; i++) {
+    bool authenticated = memcmp(result->node_ids[i], s->self_id, 32) == 0;
+    for (size_t p = 0; !authenticated &&
+                       p < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; p++)
+      authenticated = s->peers[p].used && s->peers[p].authenticated &&
+                      memcmp(result->node_ids[i], s->peers[p].node_id,
+                             32) == 0;
+    if (!authenticated)
+      return false;
+  }
+  return true;
+}
+
+static bool model_op_poll_lookup(struct model_node *node,
+                                 const struct model_step *m) {
+  struct vcs_zcode_dht_service *s = node->service;
+  struct service_lookup *lookup = &s->lookups[m->lookup_index];
+  lookup->completed = true;
+  lookup->termination = VCS_ZCODE_DHT_TERMINATION_SHORTLIST_STABLE;
+  struct vcs_zcode_dht_lookup_result result;
+  uint64_t id = lookup->id;
+  if (!vcs_zcode_dht_service_lookup_poll(
+          s, id, (struct vcs_zcode_dht_time){node->wall, node->monotonic},
+          &result))
+    return false;
+  if (!model_result_authenticated(s, &result))
+    return false;
+  return model_seed_lookup(s, lookup, m->n, m->lookup_index, m->step + 2);
+}
+
+static bool model_apply_op(struct model_node *node,
+                           const struct model_step *m) {
+  switch (m->op) {
+  case 0:
+    model_op_insert_unverified(node, m);
+    return true;
+  case 1:
+    model_op_mark_unreachable(node, m);
+    return true;
+  case 2:
+    model_op_toggle_peer(node, m);
+    return true;
+  case 3:
+    return model_op_reseed_lookup(node, m);
+  case 4:
+    return model_op_rotate_session(node, m);
+  case 5:
+    model_op_replay_churn(node, m);
+    return true;
+  case 6:
+    return model_op_add_contact(node, m);
+  case 7:
+    return model_persistence_corruption(m->n);
+  case 8:
+    model_op_clock_jump(node, m);
+    return true;
+  case 9:
+    return model_op_poll_lookup(node, m);
+  }
+  return false; /* op is drawn modulo 10, so this is unreachable */
+}
+
+static void model_free_nodes(const struct model_node nodes[MODEL_NODES]) {
+  for (size_t n = 0; n < MODEL_NODES; n++)
+    if (nodes[n].service) {
+      free(nodes[n].service->table);
+      free(nodes[n].service);
+    }
+}
+
 static bool run_model(void) {
   struct model_node nodes[MODEL_NODES];
   uint32_t failed_step = UINT32_MAX;
@@ -216,150 +427,29 @@ static bool run_model(void) {
   uint64_t random = UINT64_C(0x6a09e667f3bcc909);
   for (uint32_t step = 0; step < MODEL_TRANSITIONS; step++) {
     uint64_t draw = model_random(&random);
-    uint32_t n = (uint32_t)(draw % MODEL_NODES);
-    struct model_node *node = &nodes[n];
-    struct vcs_zcode_dht_service *s = node->service;
-    uint32_t lookup_index = (uint32_t)((draw >> 8) %
-                                       VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS);
-    struct service_lookup *lookup = &s->lookups[lookup_index];
+    struct model_step m = {
+        .draw = draw,
+        .step = step,
+        .n = (uint32_t)(draw % MODEL_NODES),
+        .lookup_index =
+            (uint32_t)((draw >> 8) % VCS_ZCODE_DHT_SERVICE_MAX_LOOKUPS),
+        .op = (uint32_t)((draw >> 16) % 10),
+    };
+    struct model_node *node = &nodes[m.n];
     failed_step = step;
-    failed_op = (uint32_t)((draw >> 16) % 10);
-    switch (failed_op) {
-    case 0: {
-      uint8_t id[32];
-      model_id(id, n, 0xf0000000u + step);
-      (void)vcs_zcode_dht_lookup_insert(
-          lookup, id, VCS_ZCODE_DHT_CANDIDATE_UNVERIFIED, 0);
-      break;
-    }
-    case 1: {
-      uint32_t at = (uint32_t)((draw >> 24) % lookup->candidate_count);
-      if (lookup->candidates[at].state ==
-          VCS_ZCODE_DHT_CANDIDATE_UNVERIFIED)
-        lookup->candidates[at].state = VCS_ZCODE_DHT_CANDIDATE_UNREACHABLE;
-      break;
-    }
-    case 2: {
-      uint32_t peer = (uint32_t)((draw >> 24) % 4);
-      s->peers[peer].connected = !s->peers[peer].connected;
-      node->links[(n + peer + 1) % MODEL_NODES] = s->peers[peer].connected;
-      break;
-    }
-    case 3: {
-      (void)vcs_zcode_dht_service_lookup_cancel(s, lookup->id);
-      if (!model_seed_lookup(s, lookup, n, lookup_index, step + 2))
-        goto fail;
-      break;
-    }
-    case 4: {
-      /* Duplicate identity and key-rotation churn: the higher local serial
-       * survives, independent of transcript generation ordering. */
-      struct service_peer *old = &s->peers[0], *fresh = &s->peers[4];
-      old->connected = true;
-      old->authenticated = true;
-      *fresh = *old;
-      fresh->peer_id = 1000 + step;
-      fresh->session.connection_serial = old->session.connection_serial + 1;
-      fresh->session.generation ^= UINT64_C(0xfedcba9876543210);
-      if (!vcs_zcode_dht_service_retain_unique_node_session(
-              s, fresh,
-              (struct vcs_zcode_dht_time){node->wall, node->monotonic}) ||
-          old->used || !fresh->used)
-        goto fail;
-      *old = *fresh;
-      old->peer_id = 1;
-      memset(fresh, 0, sizeof(*fresh));
-      break;
-    }
-    case 5: {
-      /* Ledger churn; production namespace admission is checked below. */
-      struct service_peer *peer = &s->peers[0];
-      memset(peer->request_replay[0].id, (int)(step & 0xff), 16);
-      peer->request_replay[0].used = true;
-      peer->request_replay[0].seen_mono = node->monotonic;
-      if (peer->response_replay[0].used &&
-          memcmp(peer->request_replay[0].id,
-                 peer->response_replay[0].id, 16) == 0)
-        memset(&peer->response_replay[0], 0,
-               sizeof(peer->response_replay[0]));
-      break;
-    }
-    case 6: {
-      uint8_t candidate_id[32];
-      model_id(candidate_id, (n + 1) % MODEL_NODES, 0xe0000000u + step);
-      struct vcs_zcode_dht_contact candidate;
-      model_contact(&candidate, candidate_id, (uint8_t)(n + 33), step + 2);
-      enum vcs_zcode_dht_add_result added =
-          vcs_zcode_dht_table_add_contact(s->table, &candidate,
-                                          (int64_t)node->monotonic);
-      if (added == VCS_ZCODE_DHT_ADD_PENDING_PROBE) {
-        uint8_t victim[32] = {0};
-        bool found = false;
-        for (size_t p = 0; p < VCS_ZCODE_DHT_MAX_PENDING; p++)
-          if (s->table->pending[p].active) {
-            memcpy(victim, s->table->pending[p].victim_node_id, 32);
-            found = true;
-            break;
-          }
-        if (!found || !vcs_zcode_dht_table_probe_started(
-                          s->table, victim, (int64_t)node->monotonic) ||
-            !vcs_zcode_dht_table_probe_complete(
-                s->table, victim, VCS_ZCODE_DHT_PROBE_FAILED, true,
-                (int64_t)node->wall))
-          goto fail;
-      }
-      break;
-    }
-    case 7:
-      if (!model_persistence_corruption(n))
-        goto fail;
-      break;
-    case 8:
-      node->wall = (draw & 1) ? node->wall + UINT64_C(86400) * 365
-                              : (node->wall > 500 ? node->wall - 500 : 0);
-      node->monotonic++;
-      break;
-    case 9: {
-      lookup->completed = true;
-      lookup->termination = VCS_ZCODE_DHT_TERMINATION_SHORTLIST_STABLE;
-      struct vcs_zcode_dht_lookup_result result;
-      uint64_t id = lookup->id;
-      if (!vcs_zcode_dht_service_lookup_poll(
-              s, id, (struct vcs_zcode_dht_time){node->wall, node->monotonic},
-              &result))
-        goto fail;
-      for (uint32_t i = 0; i < result.count; i++) {
-        bool authenticated = memcmp(result.node_ids[i], s->self_id, 32) == 0;
-        for (size_t p = 0; !authenticated &&
-                           p < VCS_ZCODE_DHT_SERVICE_MAX_PEERS; p++)
-          authenticated = s->peers[p].used && s->peers[p].authenticated &&
-                          memcmp(result.node_ids[i], s->peers[p].node_id,
-                                 32) == 0;
-        if (!authenticated)
-          goto fail;
-      }
-      if (!model_seed_lookup(s, lookup, n, lookup_index, step + 2))
-        goto fail;
-      break;
-    }
-    }
+    failed_op = m.op;
+    if (!model_apply_op(node, &m))
+      goto fail;
     node->monotonic++;
     if (!model_caps_hold(nodes))
       goto fail;
   }
-  for (size_t n = 0; n < MODEL_NODES; n++) {
-    free(nodes[n].service->table);
-    free(nodes[n].service);
-  }
+  model_free_nodes(nodes);
   return true;
 fail:
   if (failed_step != UINT32_MAX)
     printf("model failure step=%u op=%u\n", failed_step, failed_op);
-  for (size_t n = 0; n < MODEL_NODES; n++)
-    if (nodes[n].service) {
-      free(nodes[n].service->table);
-      free(nodes[n].service);
-    }
+  model_free_nodes(nodes);
   return false;
 }
 
@@ -395,65 +485,105 @@ static void lock_stress_count(struct lock_stress *shared,
                             memory_order_relaxed);
 }
 
+/* True once every FRAME..REFRESH role has completed at least minimum passes. */
+static bool lock_stress_ops_reached(struct lock_stress *shared,
+                                    uint32_t minimum) {
+  bool ready = true;
+  for (int role = LOCK_STRESS_FRAME; role <= LOCK_STRESS_REFRESH; role++)
+    ready = ready && atomic_load_explicit(&shared->operations[role],
+                                          memory_order_relaxed) >= minimum;
+  return ready;
+}
+
+static void lock_stress_save(struct lock_stress *shared,
+                             enum lock_stress_role role) {
+  pthread_mutex_lock(&shared->lock);
+  struct vcs_zcode_dht_service *service = shared->service;
+  service->persistence_dirty = true;
+  service->persistence_generation++;
+  struct vcs_zcode_dht_persistence_snapshot *snapshot =
+      vcs_zcode_dht_service_persistence_snapshot(service, 1000, true);
+  uint64_t generation = shared->generation;
+  pthread_mutex_unlock(&shared->lock);
+  atomic_store_explicit(&shared->snapshot_ready, true,
+                        memory_order_release);
+  while (!atomic_load_explicit(&shared->shutdown_started,
+                               memory_order_acquire))
+    sched_yield();
+  if (!snapshot) {
+    lock_stress_count(shared, role);
+    return;
+  }
+  bool written = vcs_zcode_dht_persistence_snapshot_write(snapshot);
+  pthread_mutex_lock(&shared->lock);
+  if (shared->service == service && shared->generation == generation)
+    vcs_zcode_dht_service_persistence_commit(service, snapshot, written);
+  pthread_mutex_unlock(&shared->lock);
+  vcs_zcode_dht_persistence_snapshot_free(snapshot);
+  atomic_store_explicit(&shared->writer_ok, written, memory_order_release);
+  lock_stress_count(shared, role);
+}
+
+static void lock_stress_shutdown(struct lock_stress *shared,
+                                 enum lock_stress_role role) {
+  while (!atomic_load_explicit(&shared->snapshot_ready,
+                               memory_order_acquire))
+    sched_yield();
+  while (!lock_stress_ops_reached(shared, 32))
+    sched_yield();
+  pthread_mutex_lock(&shared->lock);
+  struct vcs_zcode_dht_service *retired = shared->service;
+  shared->service = NULL;
+  shared->generation++;
+  pthread_mutex_unlock(&shared->lock);
+  atomic_store_explicit(&shared->shutdown_started, true,
+                        memory_order_release);
+  /* Retirement is deliberately outside the service lock and overlaps the
+   * detached snapshot writer above. */
+  vcs_zcode_dht_service_free(retired,
+                             (struct vcs_zcode_dht_time){1000, 1000});
+  lock_stress_count(shared, role);
+}
+
+/* Caller holds shared->lock. */
+static void lock_stress_service_op(struct lock_stress *shared,
+                                   enum lock_stress_role role) {
+  struct vcs_zcode_dht_service *service = shared->service;
+  if (service && role == LOCK_STRESS_FRAME) {
+    const uint8_t malformed[] = "ZCDHTM";
+    enum vcs_zcode_dht_reject_reason rejected;
+    (void)vcs_zcode_dht_service_handle_frame(
+        service, 1, malformed, sizeof(malformed) - 1,
+        (struct vcs_zcode_dht_time){1000, 1000}, &rejected);
+  } else if (service && role == LOCK_STRESS_POLL) {
+    struct vcs_zcode_dht_lookup_result result;
+    (void)vcs_zcode_dht_service_lookup_poll(
+        service, service->lookups[0].id,
+        (struct vcs_zcode_dht_time){1000, 1000}, &result);
+  } else if (service && role == LOCK_STRESS_RECONCILE) {
+    struct vcs_zcode_dht_live_session live[4];
+    for (size_t i = 0; i < 4; i++)
+      live[i] = (struct vcs_zcode_dht_live_session){
+          .peer_id = service->peers[i].peer_id,
+          .generation = service->peers[i].session.generation,
+          .connection_serial =
+              service->peers[i].session.connection_serial};
+    vcs_zcode_dht_service_sessions_reconcile(
+        service, live, 4, (struct vcs_zcode_dht_time){1000, 1000});
+  }
+}
+
 static void *lock_stress_worker(void *opaque) {
   struct lock_stress_arg *arg = opaque;
   struct lock_stress *shared = arg->shared;
   (void)zcl_barrier_wait(&shared->start);
 
   if (arg->role == LOCK_STRESS_SAVE) {
-    pthread_mutex_lock(&shared->lock);
-    struct vcs_zcode_dht_service *service = shared->service;
-    service->persistence_dirty = true;
-    service->persistence_generation++;
-    struct vcs_zcode_dht_persistence_snapshot *snapshot =
-        vcs_zcode_dht_service_persistence_snapshot(service, 1000, true);
-    uint64_t generation = shared->generation;
-    pthread_mutex_unlock(&shared->lock);
-    atomic_store_explicit(&shared->snapshot_ready, true,
-                          memory_order_release);
-    while (!atomic_load_explicit(&shared->shutdown_started,
-                                 memory_order_acquire))
-      sched_yield();
-    if (!snapshot) {
-      lock_stress_count(shared, arg->role);
-      return NULL;
-    }
-    bool written = vcs_zcode_dht_persistence_snapshot_write(snapshot);
-    pthread_mutex_lock(&shared->lock);
-    if (shared->service == service && shared->generation == generation)
-      vcs_zcode_dht_service_persistence_commit(service, snapshot, written);
-    pthread_mutex_unlock(&shared->lock);
-    vcs_zcode_dht_persistence_snapshot_free(snapshot);
-    atomic_store_explicit(&shared->writer_ok, written, memory_order_release);
-    lock_stress_count(shared, arg->role);
+    lock_stress_save(shared, arg->role);
     return NULL;
   }
-
   if (arg->role == LOCK_STRESS_SHUTDOWN) {
-    while (!atomic_load_explicit(&shared->snapshot_ready,
-                                 memory_order_acquire))
-      sched_yield();
-    for (;;) {
-      bool ready = true;
-      for (int role = LOCK_STRESS_FRAME; role <= LOCK_STRESS_REFRESH; role++)
-        ready = ready && atomic_load_explicit(&shared->operations[role],
-                                              memory_order_relaxed) >= 32;
-      if (ready)
-        break;
-      sched_yield();
-    }
-    pthread_mutex_lock(&shared->lock);
-    struct vcs_zcode_dht_service *retired = shared->service;
-    shared->service = NULL;
-    shared->generation++;
-    pthread_mutex_unlock(&shared->lock);
-    atomic_store_explicit(&shared->shutdown_started, true,
-                          memory_order_release);
-    /* Retirement is deliberately outside the service lock and overlaps the
-     * detached snapshot writer above. */
-    vcs_zcode_dht_service_free(retired,
-                               (struct vcs_zcode_dht_time){1000, 1000});
-    lock_stress_count(shared, arg->role);
+    lock_stress_shutdown(shared, arg->role);
     return NULL;
   }
 
@@ -466,33 +596,72 @@ static void *lock_stress_worker(void *opaque) {
       continue;
     }
     pthread_mutex_lock(&shared->lock);
-    struct vcs_zcode_dht_service *service = shared->service;
-    if (service && arg->role == LOCK_STRESS_FRAME) {
-      const uint8_t malformed[] = "ZCDHTM";
-      enum vcs_zcode_dht_reject_reason rejected;
-      (void)vcs_zcode_dht_service_handle_frame(
-          service, 1, malformed, sizeof(malformed) - 1,
-          (struct vcs_zcode_dht_time){1000, 1000}, &rejected);
-    } else if (service && arg->role == LOCK_STRESS_POLL) {
-      struct vcs_zcode_dht_lookup_result result;
-      (void)vcs_zcode_dht_service_lookup_poll(
-          service, service->lookups[0].id,
-          (struct vcs_zcode_dht_time){1000, 1000}, &result);
-    } else if (service && arg->role == LOCK_STRESS_RECONCILE) {
-      struct vcs_zcode_dht_live_session live[4];
-      for (size_t i = 0; i < 4; i++)
-        live[i] = (struct vcs_zcode_dht_live_session){
-            .peer_id = service->peers[i].peer_id,
-            .generation = service->peers[i].session.generation,
-            .connection_serial =
-                service->peers[i].session.connection_serial};
-      vcs_zcode_dht_service_sessions_reconcile(
-          service, live, 4, (struct vcs_zcode_dht_time){1000, 1000});
-    }
+    lock_stress_service_op(shared, arg->role);
     pthread_mutex_unlock(&shared->lock);
     lock_stress_count(shared, arg->role);
   }
   return NULL;
+}
+
+static bool lock_stress_open_service(struct lock_stress *shared,
+                                     const char *dir) {
+  shared->service = model_service(0);
+  if (!shared->service)
+    return false;
+  (void)snprintf(shared->service->datadir, sizeof(shared->service->datadir),
+                 "%s", dir);
+  /* The scale model's contacts are deliberately hostile/incomplete.  The
+   * lock test needs a valid persistence payload, so start its service table
+   * empty while retaining the synthetic sessions and lookups. */
+  return vcs_zcode_dht_table_init(shared->service->table,
+                                  shared->service->self_id);
+}
+
+static bool lock_stress_init_sync(struct lock_stress *shared) {
+  if (pthread_mutex_init(&shared->lock, NULL) != 0)
+    return false;
+  if (zcl_barrier_init(&shared->start, LOCK_STRESS_ROLE_COUNT) != 0) {
+    pthread_mutex_destroy(&shared->lock);
+    return false;
+  }
+  return true;
+}
+
+static size_t lock_stress_spawn(struct lock_stress *shared,
+                                pthread_t threads[LOCK_STRESS_ROLE_COUNT],
+                                struct lock_stress_arg args[LOCK_STRESS_ROLE_COUNT]) {
+  size_t started = 0;
+  for (int role = 0; role < LOCK_STRESS_ROLE_COUNT; role++) {
+    args[role] = (struct lock_stress_arg){shared, role};
+    if (pthread_create(&threads[role], NULL, lock_stress_worker,
+                       &args[role]) != 0)
+      break;
+    started++;
+  }
+  return started;
+}
+
+static bool lock_stress_join_all(const pthread_t threads[LOCK_STRESS_ROLE_COUNT],
+                                 size_t started) {
+  /* A partial barrier cannot be released safely; thread creation failure is
+   * fatal infrastructure on this test host, so do not pretend it was a model
+   * verdict. */
+  if (started != LOCK_STRESS_ROLE_COUNT)
+    abort();
+  bool ok = true;
+  for (size_t i = 0; i < started; i++)
+    ok = pthread_join(threads[i], NULL) == 0 && ok;
+  return ok;
+}
+
+static bool lock_stress_verdict(struct lock_stress *shared) {
+  return shared->service == NULL &&
+         atomic_load_explicit(&shared->writer_ok, memory_order_acquire) &&
+         atomic_load_explicit(&shared->operations[LOCK_STRESS_SAVE],
+                              memory_order_relaxed) == 1 &&
+         atomic_load_explicit(&shared->operations[LOCK_STRESS_SHUTDOWN],
+                              memory_order_relaxed) == 1 &&
+         lock_stress_ops_reached(shared, 32);
 }
 
 static bool run_lock_stress(void) {
@@ -506,59 +675,23 @@ static bool run_lock_stress(void) {
   bool ok = mkdir(zcode, 0700) == 0 && mkdir(dht, 0700) == 0;
   struct lock_stress shared;
   memset(&shared, 0, sizeof(shared));
-  shared.service = ok ? model_service(0) : NULL;
   shared.generation = 1;
   shared.genesis[0] = 1;
-  if (!shared.service)
-    ok = false;
   if (ok)
-    (void)snprintf(shared.service->datadir, sizeof(shared.service->datadir),
-                   "%s", dir);
-  /* The scale model's contacts are deliberately hostile/incomplete.  The
-   * lock test needs a valid persistence payload, so start its service table
-   * empty while retaining the synthetic sessions and lookups. */
-  if (ok && !vcs_zcode_dht_table_init(shared.service->table,
-                                      shared.service->self_id))
-    ok = false;
-  if (ok && pthread_mutex_init(&shared.lock, NULL) != 0)
-    ok = false;
-  if (ok && zcl_barrier_init(&shared.start,
-                             LOCK_STRESS_ROLE_COUNT) != 0) {
-    pthread_mutex_destroy(&shared.lock);
-    ok = false;
-  }
+    ok = lock_stress_open_service(&shared, dir);
+  if (ok)
+    ok = lock_stress_init_sync(&shared);
   pthread_t threads[LOCK_STRESS_ROLE_COUNT];
   struct lock_stress_arg args[LOCK_STRESS_ROLE_COUNT];
-  size_t started = 0;
-  for (int role = 0; ok && role < LOCK_STRESS_ROLE_COUNT; role++) {
-    args[role] = (struct lock_stress_arg){&shared, role};
-    if (pthread_create(&threads[role], NULL, lock_stress_worker,
-                       &args[role]) != 0)
-      ok = false;
-    else
-      started++;
-  }
-  /* A partial barrier cannot be released safely; thread creation failure is
-   * fatal infrastructure on this test host, so do not pretend it was a model
-   * verdict. */
-  if (started == LOCK_STRESS_ROLE_COUNT)
-    for (size_t i = 0; i < started; i++)
-      ok = pthread_join(threads[i], NULL) == 0 && ok;
-  else
-    abort();
+  size_t started = ok ? lock_stress_spawn(&shared, threads, args) : 0;
+  if (started != LOCK_STRESS_ROLE_COUNT)
+    ok = false;
+  ok = lock_stress_join_all(threads, started) && ok;
   if (started == LOCK_STRESS_ROLE_COUNT) {
     zcl_barrier_destroy(&shared.start);
     pthread_mutex_destroy(&shared.lock);
   }
-  ok = ok && shared.service == NULL &&
-       atomic_load_explicit(&shared.writer_ok, memory_order_acquire) &&
-       atomic_load_explicit(&shared.operations[LOCK_STRESS_SAVE],
-                            memory_order_relaxed) == 1 &&
-       atomic_load_explicit(&shared.operations[LOCK_STRESS_SHUTDOWN],
-                            memory_order_relaxed) == 1;
-  for (int role = LOCK_STRESS_FRAME; role <= LOCK_STRESS_REFRESH; role++)
-    ok = ok && atomic_load_explicit(&shared.operations[role],
-                                    memory_order_relaxed) >= 32;
+  ok = ok && lock_stress_verdict(&shared);
   boot_zcode_dht_reachability_reset();
   (void)unlink(contacts);
   (void)rmdir(dht);

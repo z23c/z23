@@ -2974,10 +2974,6 @@ tests/harness/src/test_zcode_contributor.c:zc4_commit_one:22
 tests/harness/src/test_zcode_dev_objects.c:test_zd_improve_command:53
 tests/harness/src/test_zcode_dev_objects.c:test_zd_task_index:20
 tests/harness/src/test_zcode_dev_objects.c:zd_collect_rpc_hook:16
-tests/harness/src/test_zcode_dht_model.c:lock_stress_worker:21
-tests/harness/src/test_zcode_dht_model.c:model_caps_hold:21
-tests/harness/src/test_zcode_dht_model.c:run_lock_stress:25
-tests/harness/src/test_zcode_dht_model.c:run_model:43
 tests/harness/src/test_zcode_dht_service.c:multi_drive:22
 tests/harness/src/test_zcode_dht_service.c:multi_drive_one:22
 tests/harness/src/test_zcode_dht_service.c:space16_observe:16
