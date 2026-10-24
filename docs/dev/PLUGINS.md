@@ -438,6 +438,57 @@ from its swarm peers (or `--peer_id=N`) and installs through the same checks as 
 new generation, with at most two jobs, a byte cap (`--max-bytes`) and a deadline
 (`--timeout`); it never stops the node and never switches.
 
+## Publish a plugin to the Z23 swarm
+
+Every step is local or a read, and none pays a fee, registers a name or ZID, or
+touches a wallet. Do not use `zcode publish` for this: it is the reward-address
+path. Registered test: `make t-fast ONLY=plugin_dist` (publisher serves a third
+node over the real swarm engines; a fetch-only node is refused by rule
+`no-verified-release`).
+
+1. Make two fresh key files, never real ones. The first signs the plugin, the
+   second signs the swarm release (32 bytes, mode 0600). Pass paths only; no
+   key bytes ever go in argv.
+   ```sh
+   z23 plugin keygen ./publisher.key      # prints the plugin public key (64 hex)
+   z23 plugin keygen ./release.key
+   ```
+2. Pack a built C23 executable (needs a license file with the real text of its
+   SPDX id, for example MIT):
+   ```sh
+   z23 plugin pack ./hello --name=hello --version=1.0.0 --key=./publisher.key --cap=fs.read,clock --dir=./dist
+   ```
+3. Publish on the hosting node's datadir (run on each node that should host it;
+   a node that only fetched the bytes holds no verified release and refuses to
+   re-serve them):
+   ```sh
+   z23 plugin publish hello --datadir=DD --dir=./dist --license-file=./LICENSE --spdx=MIT --release-key=./release.key --sequence=1
+   ```
+   The reply carries `root` (64 hex). A reused `--sequence` with another root
+   is refused as publisher-equivocation: bump it for each new version.
+4. Check the host serves it (read-only, on the running hosting node started
+   with `-packagehost=1`):
+   ```sh
+   z23 dumpstate zcode_store <root>
+   z23 dumpstate zcode_swarm
+   ```
+5. On the fetching node, trust the publisher key, then fetch:
+   ```sh
+   z23 plugin publisher <64-hex-plugin-public-key>
+   z23 plugin fetch_remote --root=<root> --name=hello --wait=60
+   z23 dumpstate zcode_store <root>      # poll until complete
+   ```
+   This installs a new generation and never switches to it or runs it.
+6. Install check and switch (the owner's explicit step):
+   ```sh
+   z23 plugin list
+   z23 plugin switch hello <128-hex generation>
+   ```
+
+Never: pass a key's bytes on a command line; reuse a real wallet, node or
+release key; run `zcode publish` or anything that names a reward address; point
+`--datadir` at a live node's directory from a second process.
+
 ## Showing installed plugins in mesh status
 
 Off by default. With `-meshstatusplugins`, the signed capsule that `z23 ops
@@ -624,4 +675,5 @@ make CC=gcc-14 t-fast-exact ONLY=plugin_store
 make CC=gcc-14 t-fast-exact ONLY=plugin_run
 make CC=gcc-14 t-fast-exact ONLY=plugin_call
 make CC=gcc-14 t-fast-exact ONLY=plugin_attest
+make CC=gcc-14 t-fast-exact ONLY=plugin_dist
 ```

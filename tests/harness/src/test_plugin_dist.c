@@ -52,6 +52,98 @@ static int pd_journey(void)
     return failures;
 }
 
+
+/* ---- 1c. publisher (hosting) -> fetcher; a fetch-only node does not re-serve - */
+static bool pd_relay_pump(struct vcs_swarm_engine *from, uint64_t to_id,
+                          struct vcs_swarm_engine *to, uint64_t from_id, uint64_t now)
+{
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    uint64_t target = 0;
+    size_t length = 0;
+    unsigned frames = 0;
+    vcs_swarm_engine_tick(from, SW_DAY, now);
+    while (vcs_swarm_engine_next_outbound(from, to_id, &target, frame, &length)) {
+        if (++frames > 64)
+            return false;
+        struct vcs_swarm_frame_result served =
+            vcs_swarm_engine_handle_frame(to, from_id, frame, length, SW_DAY, now);
+        if (served.reply && served.reply_len) {
+            struct vcs_swarm_frame_result got = vcs_swarm_engine_handle_frame(
+                from, to_id, served.reply, served.reply_len, SW_DAY, now);
+            free(got.reply);
+        }
+        free(served.reply);
+    }
+    return true;
+}
+
+static bool pd_relay_fetch(struct vcs_swarm_engine *server, struct sw_node *fetcher,
+                           uint8_t seed, const uint8_t root[32])
+{
+    uint8_t hk[33], fk[33];
+    const uint64_t provider = 21;
+    sw_key(seed, hk);
+    sw_key((uint8_t)(seed + 1), fk);
+    if (!vcs_swarm_engine_peer_add(fetcher->engine, provider, hk) ||
+        !vcs_swarm_engine_peer_add(server, 23, fk) ||
+        vcs_swarm_engine_fetch_from_bounded(fetcher->engine, root, SW_DAY, 1, &provider, 1,
+                                            4u * PD_CAP) != VCS_SWARM_FETCH_OK)
+        return false;
+    for (uint64_t now = 2; now < 34; now++) {
+        struct vcs_swarm_download_status st;
+        if (!pd_relay_pump(fetcher->engine, provider, server, 23, now))
+            return false;
+        if (vcs_swarm_engine_download_status(fetcher->engine, root, &st) &&
+            st.state == VCS_SWARM_DL_COMPLETE)
+            return true;
+    }
+    return false;
+}
+
+static int pd_relay(void)
+{
+    int failures = 0;
+    struct pd_fixture f = {0};
+    struct sw_node via_pub = {0}, via_host = {0};
+    char plugins[1300], scratch[1300];
+    TEST("plugin dist: a hosting publisher serves a third node; a fetch-only node cannot re-serve") {
+        struct plugin_pack_result packed;
+        struct plugin_dist_published pub;
+        struct plugin_dist_received got;
+        ASSERT(pd_open(&f));
+        ASSERT(pd_pack(&f, "packed1", "1.0.0", &packed));
+        ASSERT_EQ(pd_publish(&f, "packed1", 1, &pub), PLUGIN_DIST_OK);
+        ASSERT(pd_transfer(&f, pub.root, 0, true)); /* publisher -> second node */
+        ASSERT(sw_node_open(&via_host, "plugin-dist-via-host", sw_score_contributor));
+        ASSERT(sw_node_open(&via_pub, "plugin-dist-via-pub", sw_score_contributor));
+        /* The second node holds the bytes but no verified release record
+         * (the release is not part of the chunk transfer), so it refuses to
+         * host them: operators publish on each hosting node. */
+        ASSERT(!pd_relay_fetch(f.receiver.engine, &via_host, 83, pub.root));
+        ASSERT(pd_relay_fetch(f.publisher.engine, &via_pub, 85, pub.root));
+        ASSERT(pd_path(plugins, sizeof(plugins), f.base, "fetcher-plugins"));
+        ASSERT(pd_path(scratch, sizeof(scratch), f.base, "fetcher-scratch"));
+        ASSERT(mkdir(plugins, 0700) == 0 && mkdir(scratch, 0700) == 0);
+        ASSERT(pd_keys(plugins, packed.public_key));
+        struct plugin_dist_receive_request rq = {
+            .store = via_pub.store, .delivered_root = pub.root, .name = "demo",
+            .plugins_dir = plugins, .scratch_dir = scratch
+        };
+        memcpy(rq.requested_root, pub.root, 32);
+        ASSERT_EQ(plugin_dist_receive(&rq, &got), PLUGIN_DIST_OK);
+        ASSERT(strcmp(got.generation, packed.generation) == 0);
+        ASSERT(!got.already_present);
+        PASS();
+    } _test_next:;
+    sw_node_close(&via_host);
+    sw_node_close(&via_pub);
+    if (via_host.datadir[0])
+        (void)test_rm_rf_recursive(via_host.datadir);
+    if (via_pub.datadir[0])
+        (void)test_rm_rf_recursive(via_pub.datadir);
+    pd_close(&f);
+    return failures;
+}
 /* ---- 1b. publish by name from an installed generation ----------------- */
 static int pd_installed_publish(void)
 {
@@ -324,6 +416,7 @@ int test_plugin_dist(void)
     int failures = 0;
     failures += pd_versions();
     failures += pd_journey();
+    failures += pd_relay();
     failures += pd_installed_publish();
     failures += pd_refuse_root();
     failures += pd_refuse_unpinned();
