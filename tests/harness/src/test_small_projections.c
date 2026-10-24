@@ -247,6 +247,69 @@ static bool test_column_equal(sqlite3_stmt *a, sqlite3_stmt *b, int col)
     return strcmp(av ? av : "", bv ? bv : "") == 0;
 }
 
+static bool test_projection_args_valid(
+    const char *projection_path,
+    sqlite3 *legacy_db,
+    const char *count_sql,
+    const char *row_sql,
+    int columns,
+    int64_t *projection_count,
+    int64_t *legacy_count,
+    char *first_diff,
+    size_t first_diff_len)
+{
+    return projection_path && legacy_db && count_sql && row_sql &&
+           columns > 0 && projection_count && legacy_count &&
+           first_diff && first_diff_len > 0;
+}
+
+static bool test_projection_open_counts(
+    const char *projection_path,
+    sqlite3 **projection_db,
+    sqlite3 *legacy_db,
+    const char *count_sql,
+    int64_t *projection_count,
+    int64_t *legacy_count)
+{
+    if (sqlite3_open_v2(projection_path, projection_db,
+                        SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
+        return false;
+    return test_query_i64(*projection_db, count_sql, projection_count) &&
+           test_query_i64(legacy_db, count_sql, legacy_count);
+}
+
+static bool test_projection_prepare_pair(sqlite3 *projection_db,
+                                         sqlite3 *legacy_db,
+                                         const char *row_sql,
+                                         sqlite3_stmt **ps,
+                                         sqlite3_stmt **ls)
+{
+    return sqlite3_prepare_v2(projection_db, row_sql, -1, ps, NULL) ==
+               SQLITE_OK &&
+           sqlite3_prepare_v2(legacy_db, row_sql, -1, ls, NULL) == SQLITE_OK;
+}
+
+static void test_projection_write_key(sqlite3_stmt *s, char *first_diff,
+                                      size_t first_diff_len)
+{
+    char key[128];
+    snprintf(first_diff, first_diff_len, "%s",
+             test_stmt_key(s, key, sizeof(key)));
+}
+
+static bool test_projection_row_matches(sqlite3_stmt *ps, sqlite3_stmt *ls,
+                                        int columns, char *first_diff,
+                                        size_t first_diff_len)
+{
+    for (int i = 0; i < columns; i++) {
+        if (!test_column_equal(ps, ls, i)) {
+            test_projection_write_key(ps, first_diff, first_diff_len);
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool test_projection_db_matches_legacy(
     const char *projection_path,
     sqlite3 *legacy_db,
@@ -262,20 +325,17 @@ static bool test_projection_db_matches_legacy(
     sqlite3_stmt *ps = NULL;
     sqlite3_stmt *ls = NULL;
     bool ok = false;
-    if (!projection_path || !legacy_db || !count_sql || !row_sql ||
-        columns <= 0 || !projection_count || !legacy_count ||
-        !first_diff || first_diff_len == 0)
+    if (!test_projection_args_valid(projection_path, legacy_db, count_sql,
+                                    row_sql, columns, projection_count,
+                                    legacy_count, first_diff, first_diff_len))
         return false;
     first_diff[0] = '\0';
-    if (sqlite3_open_v2(projection_path, &projection_db,
-                        SQLITE_OPEN_READONLY, NULL) != SQLITE_OK)
+    if (!test_projection_open_counts(projection_path, &projection_db,
+                                     legacy_db, count_sql, projection_count,
+                                     legacy_count))
         goto done;
-    if (!test_query_i64(projection_db, count_sql, projection_count) ||
-        !test_query_i64(legacy_db, count_sql, legacy_count))
-        goto done;
-    if (sqlite3_prepare_v2(projection_db, row_sql, -1, &ps, NULL) !=
-        SQLITE_OK ||
-        sqlite3_prepare_v2(legacy_db, row_sql, -1, &ls, NULL) != SQLITE_OK)
+    if (!test_projection_prepare_pair(projection_db, legacy_db, row_sql,
+                                      &ps, &ls))
         goto done;
     ok = true;
     for (;;) {
@@ -284,22 +344,14 @@ static bool test_projection_db_matches_legacy(
         if (prc == SQLITE_DONE && lrc == SQLITE_DONE)
             break;
         if (prc != SQLITE_ROW || lrc != SQLITE_ROW) {
-            char key[128];
-            sqlite3_stmt *source = prc == SQLITE_ROW ? ps : ls;
-            snprintf(first_diff, first_diff_len, "%s",
-                     test_stmt_key(source, key, sizeof(key)));
+            test_projection_write_key(prc == SQLITE_ROW ? ps : ls,
+                                      first_diff, first_diff_len);
             break;
         }
-        for (int i = 0; i < columns; i++) {
-            if (!test_column_equal(ps, ls, i)) {
-                char key[128];
-                snprintf(first_diff, first_diff_len, "%s",
-                         test_stmt_key(ps, key, sizeof(key)));
-                goto done_compare;
-            }
-        }
+        if (!test_projection_row_matches(ps, ls, columns, first_diff,
+                                         first_diff_len))
+            break;
     }
-done_compare:
 done:
     if (ps) sqlite3_finalize(ps);
     if (ls) sqlite3_finalize(ls);
@@ -475,6 +527,126 @@ static bool append_hodl_snapshot_event(event_log_t *log, int32_t height)
            UINT64_MAX;
 }
 
+static bool mixed_append_events(event_log_t *log)
+{
+    const uint8_t unrelated[] = {1, 2, 3, 4};
+    const char *onion =
+        "bcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefg.onion";
+    return append_contact_set_event(log, "t1MixedAlice", "Alice") &&
+        event_log_append(log, EV_BLOCK_BODY, unrelated, sizeof(unrelated)) !=
+            UINT64_MAX &&
+        append_onion_announcement_event(log, onion, "6a045a434c23",
+                                        1761234567u) &&
+        append_contact_set_event(log, "t1MixedBob", "Bob") &&
+        append_contact_touched_event(log, "t1MixedAlice", 1762222222u) &&
+        append_hodl_snapshot_event(log, 100) &&
+        append_contact_delete_event(log, "t1MixedBob") &&
+        append_hodl_snapshot_event(log, 101);
+}
+
+static int mixed_check_catchup(contacts_projection_t *contacts,
+                               onion_ann_projection_t *onion_p,
+                               hodl_history_projection_t *hodl,
+                               uint64_t end_offset)
+{
+    int failures = 0;
+    SP_CHECK("contacts catchup mixed",
+             contacts && contacts_projection_catch_up(contacts) == end_offset);
+    SP_CHECK("onion catchup mixed",
+             onion_p && onion_ann_projection_catch_up(onion_p) == end_offset);
+    SP_CHECK("hodl catchup mixed",
+             hodl && hodl_history_projection_catch_up(hodl) == end_offset);
+    SP_CHECK("contacts mixed count",
+             contacts && contacts_projection_count(contacts) == 1);
+    SP_CHECK("onion mixed count",
+             onion_p && onion_ann_projection_count(onion_p) == 1);
+    SP_CHECK("hodl mixed count",
+             hodl && hodl_history_projection_count(hodl) == 2);
+    return failures;
+}
+
+static int mixed_check_dumps(contacts_projection_t *contacts,
+                             onion_ann_projection_t *onion_p,
+                             hodl_history_projection_t *hodl)
+{
+    int failures = 0;
+    struct json_value dump = {0};
+    SP_CHECK("contacts dump",
+             contacts_projection_dump_state_json(&dump, NULL));
+    SP_CHECK("contacts dump count",
+             json_get_int(json_get(&dump, "count")) == 1);
+    SP_CHECK("contacts dump table count",
+             json_get_int(json_get(&dump, "contacts_count")) == 1);
+    SP_CHECK("contacts dump consumed",
+             json_get_int(json_get(&dump, "events_consumed_total")) == 4);
+    SP_CHECK("contacts dump set events",
+             json_get_int(json_get(&dump, "contact_set_total")) == 2);
+    SP_CHECK("contacts dump touch events",
+             json_get_int(json_get(&dump, "contact_touched_total")) == 1);
+    SP_CHECK("contacts dump delete events",
+             json_get_int(json_get(&dump, "contact_delete_total")) == 1);
+    json_free(&dump);
+
+    memset(&dump, 0, sizeof(dump));
+    SP_CHECK("onion dump",
+             onion_ann_projection_dump_state_json(&dump, NULL));
+    SP_CHECK("onion dump count",
+             json_get_int(json_get(&dump, "count")) == 1);
+    SP_CHECK("onion dump table count",
+             json_get_int(json_get(&dump, "onion_announcements_count")) == 1);
+    SP_CHECK("onion dump consumed",
+             json_get_int(json_get(&dump, "events_consumed_total")) == 1);
+    SP_CHECK("onion dump announcement events",
+             json_get_int(json_get(&dump, "announcement_total")) == 1);
+    json_free(&dump);
+
+    memset(&dump, 0, sizeof(dump));
+    SP_CHECK("hodl dump",
+             hodl_history_projection_dump_state_json(&dump, NULL));
+    SP_CHECK("hodl dump count",
+             json_get_int(json_get(&dump, "count")) == 2);
+    SP_CHECK("hodl dump table count",
+             json_get_int(json_get(&dump, "hodl_history_count")) == 2);
+    SP_CHECK("hodl dump consumed",
+             json_get_int(json_get(&dump, "events_consumed_total")) == 2);
+    SP_CHECK("hodl dump snapshot events",
+             json_get_int(json_get(&dump, "snapshot_total")) == 2);
+    json_free(&dump);
+    return failures;
+}
+
+static int mixed_check_reopen(const char *contacts_path,
+                              const char *onion_path,
+                              const char *hodl_path,
+                              event_log_t *log,
+                              uint64_t end_offset)
+{
+    int failures = 0;
+    contacts_projection_t *contacts =
+        contacts_projection_open(contacts_path, log);
+    onion_ann_projection_t *onion_p =
+        onion_ann_projection_open(onion_path, log);
+    hodl_history_projection_t *hodl =
+        hodl_history_projection_open(hodl_path, log);
+    SP_CHECK("contacts mixed offset persisted",
+             contacts && contacts_projection_catch_up(contacts) == end_offset);
+    SP_CHECK("onion mixed offset persisted",
+             onion_p && onion_ann_projection_catch_up(onion_p) == end_offset);
+    SP_CHECK("hodl mixed offset persisted",
+             hodl && hodl_history_projection_catch_up(hodl) == end_offset);
+    SP_CHECK("contacts mixed reopen count",
+             contacts && contacts_projection_count(contacts) == 1);
+    SP_CHECK("onion mixed reopen count",
+             onion_p && onion_ann_projection_count(onion_p) == 1);
+    SP_CHECK("hodl mixed reopen count",
+             hodl && hodl_history_projection_count(hodl) == 2);
+
+    contacts_projection_close(contacts);
+    onion_ann_projection_close(onion_p);
+    hodl_history_projection_close(hodl);
+    return failures;
+}
+
 static int t_projection_catchup_mixed(void)
 {
     int failures = 0;
@@ -497,20 +669,7 @@ static int t_projection_catchup_mixed(void)
         return failures;
     }
 
-    const uint8_t unrelated[] = {1, 2, 3, 4};
-    const char *onion =
-        "bcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefg.onion";
-    bool appended =
-        append_contact_set_event(log, "t1MixedAlice", "Alice") &&
-        event_log_append(log, EV_BLOCK_BODY, unrelated, sizeof(unrelated)) !=
-            UINT64_MAX &&
-        append_onion_announcement_event(log, onion, "6a045a434c23",
-                                        1761234567u) &&
-        append_contact_set_event(log, "t1MixedBob", "Bob") &&
-        append_contact_touched_event(log, "t1MixedAlice", 1762222222u) &&
-        append_hodl_snapshot_event(log, 100) &&
-        append_contact_delete_event(log, "t1MixedBob") &&
-        append_hodl_snapshot_event(log, 101);
+    bool appended = mixed_append_events(log);
     SP_CHECK("mixed append events", appended);
 
     contacts_projection_t *contacts =
@@ -524,87 +683,15 @@ static int t_projection_catchup_mixed(void)
     SP_CHECK("mixed hodl open", hodl != NULL);
 
     uint64_t end_offset = event_log_size(log);
-    SP_CHECK("contacts catchup mixed",
-             contacts && contacts_projection_catch_up(contacts) == end_offset);
-    SP_CHECK("onion catchup mixed",
-             onion_p && onion_ann_projection_catch_up(onion_p) == end_offset);
-    SP_CHECK("hodl catchup mixed",
-             hodl && hodl_history_projection_catch_up(hodl) == end_offset);
-    SP_CHECK("contacts mixed count",
-             contacts && contacts_projection_count(contacts) == 1);
-    SP_CHECK("onion mixed count",
-             onion_p && onion_ann_projection_count(onion_p) == 1);
-    SP_CHECK("hodl mixed count",
-             hodl && hodl_history_projection_count(hodl) == 2);
-
-    {
-        struct json_value dump = {0};
-        SP_CHECK("contacts dump",
-                 contacts_projection_dump_state_json(&dump, NULL));
-        SP_CHECK("contacts dump count",
-                 json_get_int(json_get(&dump, "count")) == 1);
-        SP_CHECK("contacts dump table count",
-                 json_get_int(json_get(&dump, "contacts_count")) == 1);
-        SP_CHECK("contacts dump consumed",
-                 json_get_int(json_get(&dump, "events_consumed_total")) == 4);
-        SP_CHECK("contacts dump set events",
-                 json_get_int(json_get(&dump, "contact_set_total")) == 2);
-        SP_CHECK("contacts dump touch events",
-                 json_get_int(json_get(&dump, "contact_touched_total")) == 1);
-        SP_CHECK("contacts dump delete events",
-                 json_get_int(json_get(&dump, "contact_delete_total")) == 1);
-        json_free(&dump);
-
-        memset(&dump, 0, sizeof(dump));
-        SP_CHECK("onion dump",
-                 onion_ann_projection_dump_state_json(&dump, NULL));
-        SP_CHECK("onion dump count",
-                 json_get_int(json_get(&dump, "count")) == 1);
-        SP_CHECK("onion dump table count",
-                 json_get_int(json_get(&dump, "onion_announcements_count")) == 1);
-        SP_CHECK("onion dump consumed",
-                 json_get_int(json_get(&dump, "events_consumed_total")) == 1);
-        SP_CHECK("onion dump announcement events",
-                 json_get_int(json_get(&dump, "announcement_total")) == 1);
-        json_free(&dump);
-
-        memset(&dump, 0, sizeof(dump));
-        SP_CHECK("hodl dump",
-                 hodl_history_projection_dump_state_json(&dump, NULL));
-        SP_CHECK("hodl dump count",
-                 json_get_int(json_get(&dump, "count")) == 2);
-        SP_CHECK("hodl dump table count",
-                 json_get_int(json_get(&dump, "hodl_history_count")) == 2);
-        SP_CHECK("hodl dump consumed",
-                 json_get_int(json_get(&dump, "events_consumed_total")) == 2);
-        SP_CHECK("hodl dump snapshot events",
-                 json_get_int(json_get(&dump, "snapshot_total")) == 2);
-        json_free(&dump);
-    }
+    failures += mixed_check_catchup(contacts, onion_p, hodl, end_offset);
+    failures += mixed_check_dumps(contacts, onion_p, hodl);
 
     contacts_projection_close(contacts);
     onion_ann_projection_close(onion_p);
     hodl_history_projection_close(hodl);
 
-    contacts = contacts_projection_open(contacts_path, log);
-    onion_p = onion_ann_projection_open(onion_path, log);
-    hodl = hodl_history_projection_open(hodl_path, log);
-    SP_CHECK("contacts mixed offset persisted",
-             contacts && contacts_projection_catch_up(contacts) == end_offset);
-    SP_CHECK("onion mixed offset persisted",
-             onion_p && onion_ann_projection_catch_up(onion_p) == end_offset);
-    SP_CHECK("hodl mixed offset persisted",
-             hodl && hodl_history_projection_catch_up(hodl) == end_offset);
-    SP_CHECK("contacts mixed reopen count",
-             contacts && contacts_projection_count(contacts) == 1);
-    SP_CHECK("onion mixed reopen count",
-             onion_p && onion_ann_projection_count(onion_p) == 1);
-    SP_CHECK("hodl mixed reopen count",
-             hodl && hodl_history_projection_count(hodl) == 2);
-
-    contacts_projection_close(contacts);
-    onion_ann_projection_close(onion_p);
-    hodl_history_projection_close(hodl);
+    failures += mixed_check_reopen(contacts_path, onion_path, hodl_path, log,
+                                   end_offset);
     event_log_close(log);
     test_cleanup_tmpdir(dir);
     return failures;
@@ -672,6 +759,79 @@ static int t_projection_rollback_restores_cached_offsets(void)
     hodl_history_projection_close(hodl);
     event_log_close(log);
     test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+static bool emit_legacy_seed(sqlite3 *legacy)
+{
+    return exec_test_sql(legacy,
+               "CREATE TABLE contacts(address TEXT PRIMARY KEY,"
+               "name TEXT NOT NULL,last_used INTEGER NOT NULL)") &&
+           exec_test_sql(legacy,
+               "INSERT INTO contacts VALUES"
+               "('t1EmitAlice','Alice',1763333333)") &&
+           exec_test_sql(legacy,
+               "CREATE TABLE onion_announcements("
+               "onion_address TEXT PRIMARY KEY,"
+               "announced_at INTEGER NOT NULL,"
+               "script_hex TEXT NOT NULL DEFAULT '')") &&
+           exec_test_sql(legacy,
+               "INSERT INTO onion_announcements VALUES"
+               "('cdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefgh.onion',"
+               "1763333334,'6a045a434c2301')") &&
+           exec_test_sql(legacy,
+               "CREATE TABLE hodl_history(height INTEGER PRIMARY KEY,"
+               "time INTEGER NOT NULL,total_zat INTEGER NOT NULL,"
+               "older_1y_zat INTEGER NOT NULL,older_1y_pct REAL NOT NULL)") &&
+           exec_test_sql(legacy,
+               "INSERT INTO hodl_history VALUES"
+               "(200,1763333335,123456789,12345,0.01)");
+}
+
+static int emit_check_legacy_tables(const char *contacts_path,
+                                    const char *onion_path,
+                                    const char *hodl_path,
+                                    sqlite3 *legacy)
+{
+    int failures = 0;
+    int64_t pc = 0;
+    int64_t lc = 0;
+    char first_diff[256] = {0};
+    SP_CHECK("emit contacts table match",
+             test_projection_db_matches_legacy(
+                 contacts_path, legacy,
+                 "SELECT COUNT(*) FROM contacts",
+                 "SELECT address,name,last_used "
+                 "FROM contacts ORDER BY address ASC",
+                 3, &pc, &lc, first_diff, sizeof(first_diff)) &&
+             pc == 1 && lc == 1 && first_diff[0] == '\0');
+    SP_CHECK("emit onion table match",
+             test_projection_db_matches_legacy(
+                 onion_path, legacy,
+                 "SELECT COUNT(*) FROM onion_announcements",
+                 "SELECT onion_address,announced_at,script_hex "
+                 "FROM onion_announcements ORDER BY onion_address ASC",
+                 3, &pc, &lc, first_diff, sizeof(first_diff)) &&
+             pc == 1 && lc == 1 && first_diff[0] == '\0');
+    SP_CHECK("emit hodl table match",
+             test_projection_db_matches_legacy(
+                 hodl_path, legacy,
+                 "SELECT COUNT(*) FROM hodl_history",
+                 "SELECT height,time,total_zat,older_1y_zat,"
+                 "older_1y_pct FROM hodl_history ORDER BY height ASC",
+                 5, &pc, &lc, first_diff, sizeof(first_diff)) &&
+             pc == 1 && lc == 1 && first_diff[0] == '\0');
+    SP_CHECK("emit contacts first diff",
+             exec_test_sql(legacy,
+                 "UPDATE contacts SET name='Alicia' "
+                 "WHERE address='t1EmitAlice'") &&
+             test_projection_db_matches_legacy(
+                 contacts_path, legacy,
+                 "SELECT COUNT(*) FROM contacts",
+                 "SELECT address,name,last_used "
+                 "FROM contacts ORDER BY address ASC",
+                 3, &pc, &lc, first_diff, sizeof(first_diff)) &&
+             strcmp(first_diff, "t1EmitAlice") == 0);
     return failures;
 }
 
@@ -772,69 +932,10 @@ static int t_projection_emit_helpers(void)
     SP_CHECK("emit legacy db open",
              sqlite3_open(legacy_path, &legacy) == SQLITE_OK && legacy);
     if (legacy) {
-        bool ok =
-            exec_test_sql(legacy,
-                "CREATE TABLE contacts(address TEXT PRIMARY KEY,"
-                "name TEXT NOT NULL,last_used INTEGER NOT NULL)") &&
-            exec_test_sql(legacy,
-                "INSERT INTO contacts VALUES"
-                "('t1EmitAlice','Alice',1763333333)") &&
-            exec_test_sql(legacy,
-                "CREATE TABLE onion_announcements("
-                "onion_address TEXT PRIMARY KEY,"
-                "announced_at INTEGER NOT NULL,"
-                "script_hex TEXT NOT NULL DEFAULT '')") &&
-            exec_test_sql(legacy,
-                "INSERT INTO onion_announcements VALUES"
-                "('cdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefgh.onion',"
-                "1763333334,'6a045a434c2301')") &&
-            exec_test_sql(legacy,
-                "CREATE TABLE hodl_history(height INTEGER PRIMARY KEY,"
-                "time INTEGER NOT NULL,total_zat INTEGER NOT NULL,"
-                "older_1y_zat INTEGER NOT NULL,older_1y_pct REAL NOT NULL)") &&
-            exec_test_sql(legacy,
-                "INSERT INTO hodl_history VALUES"
-                "(200,1763333335,123456789,12345,0.01)");
+        bool ok = emit_legacy_seed(legacy);
         SP_CHECK("emit legacy seed", ok);
-
-        int64_t pc = 0;
-        int64_t lc = 0;
-        char first_diff[256] = {0};
-        SP_CHECK("emit contacts table match",
-                 test_projection_db_matches_legacy(
-                     contacts_path, legacy,
-                     "SELECT COUNT(*) FROM contacts",
-                     "SELECT address,name,last_used "
-                     "FROM contacts ORDER BY address ASC",
-                     3, &pc, &lc, first_diff, sizeof(first_diff)) &&
-                 pc == 1 && lc == 1 && first_diff[0] == '\0');
-        SP_CHECK("emit onion table match",
-                 test_projection_db_matches_legacy(
-                     onion_path, legacy,
-                     "SELECT COUNT(*) FROM onion_announcements",
-                     "SELECT onion_address,announced_at,script_hex "
-                     "FROM onion_announcements ORDER BY onion_address ASC",
-                     3, &pc, &lc, first_diff, sizeof(first_diff)) &&
-                 pc == 1 && lc == 1 && first_diff[0] == '\0');
-        SP_CHECK("emit hodl table match",
-                 test_projection_db_matches_legacy(
-                     hodl_path, legacy,
-                     "SELECT COUNT(*) FROM hodl_history",
-                     "SELECT height,time,total_zat,older_1y_zat,"
-                     "older_1y_pct FROM hodl_history ORDER BY height ASC",
-                     5, &pc, &lc, first_diff, sizeof(first_diff)) &&
-                 pc == 1 && lc == 1 && first_diff[0] == '\0');
-        SP_CHECK("emit contacts first diff",
-                 exec_test_sql(legacy,
-                     "UPDATE contacts SET name='Alicia' "
-                     "WHERE address='t1EmitAlice'") &&
-                 test_projection_db_matches_legacy(
-                     contacts_path, legacy,
-                     "SELECT COUNT(*) FROM contacts",
-                     "SELECT address,name,last_used "
-                     "FROM contacts ORDER BY address ASC",
-                     3, &pc, &lc, first_diff, sizeof(first_diff)) &&
-                 strcmp(first_diff, "t1EmitAlice") == 0);
+        failures += emit_check_legacy_tables(contacts_path, onion_path,
+                                             hodl_path, legacy);
         sqlite3_close(legacy);
     }
 
