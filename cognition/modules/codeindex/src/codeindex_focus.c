@@ -312,10 +312,8 @@ static bool focus_is_path_char(unsigned char c)
     return isalnum(c) || c == '_' || c == '.' || c == '/' || c == '-';
 }
 
-static bool focus_looks_like_path(const char *s, size_t n)
+static bool focus_path_chars_ok(const char *s, size_t n)
 {
-    if (n < 3 || n >= SPECIALIST_PATH_MAX)
-        return false;
     bool slash = false;
     for (size_t i = 0; i < n; i++) {
         if (!focus_is_path_char((unsigned char)s[i]))
@@ -323,8 +321,11 @@ static bool focus_looks_like_path(const char *s, size_t n)
         if (s[i] == '/')
             slash = true;
     }
-    if (!slash)
-        return false;
+    return slash;
+}
+
+static bool focus_path_source_ext(const char *s, size_t n)
+{
     if (n >= 2 && s[n - 2] == '.' &&
         (s[n - 1] == 'c' || s[n - 1] == 'h'))
         return true;
@@ -333,6 +334,15 @@ static bool focus_looks_like_path(const char *s, size_t n)
          (s[n - 3] == 's' && s[n - 2] == 'h')))
         return true;
     return false;
+}
+
+static bool focus_looks_like_path(const char *s, size_t n)
+{
+    if (n < 3 || n >= SPECIALIST_PATH_MAX)
+        return false;
+    if (!focus_path_chars_ok(s, n))
+        return false;
+    return focus_path_source_ext(s, n);
 }
 
 static bool focus_line_is_open(const char *line)
@@ -373,6 +383,31 @@ static bool focus_add_binding(struct specialist_focus_binding *rows,
     return true;
 }
 
+static bool focus_scan_line_paths(const char *line, size_t linelen,
+                                  struct specialist_focus_binding *rows,
+                                  size_t *count, size_t cap,
+                                  const char *source)
+{
+    for (size_t i = 0; i < linelen; ) {
+        while (i < linelen &&
+               (line[i] == '`' || line[i] == '"' ||
+                !focus_is_path_char((unsigned char)line[i])))
+            i++;
+        size_t start = i;
+        while (i < linelen &&
+               focus_is_path_char((unsigned char)line[i]))
+            i++;
+        if (focus_looks_like_path(line + start, i - start)) {
+            char path[SPECIALIST_PATH_MAX];
+            memcpy(path, line + start, i - start);
+            path[i - start] = '\0';
+            if (!focus_add_binding(rows, count, cap, path, source))
+                return false;
+        }
+    }
+    return true;
+}
+
 static bool focus_scan_paths(const char *text, bool require_open,
                              struct specialist_focus_binding *rows,
                              size_t *count, size_t cap, const char *source)
@@ -384,23 +419,9 @@ static bool focus_scan_paths(const char *text, bool require_open,
         const char *eol = strchr(line, '\n');
         size_t linelen = eol ? (size_t)(eol - line) : strlen(line);
         if (!require_open || focus_line_is_open(line)) {
-            for (size_t i = 0; i < linelen; ) {
-                while (i < linelen &&
-                       (line[i] == '`' || line[i] == '"' ||
-                        !focus_is_path_char((unsigned char)line[i])))
-                    i++;
-                size_t start = i;
-                while (i < linelen &&
-                       focus_is_path_char((unsigned char)line[i]))
-                    i++;
-                if (focus_looks_like_path(line + start, i - start)) {
-                    char path[SPECIALIST_PATH_MAX];
-                    memcpy(path, line + start, i - start);
-                    path[i - start] = '\0';
-                    if (!focus_add_binding(rows, count, cap, path, source))
-                        return false;
-                }
-            }
+            if (!focus_scan_line_paths(line, linelen, rows, count, cap,
+                                       source))
+                return false;
         }
         line = eol ? eol + 1 : line + linelen;
     }
@@ -441,6 +462,25 @@ static bool focus_ci_issue_name(const char *path)
     return strstr(lower, "issue") != NULL;
 }
 
+static bool focus_load_issue_body(const char *root, const char *rel,
+                                  struct specialist_focus_evidence *ev)
+{
+    char full[4096];
+    if (!focus_join(full, sizeof(full), root, rel))
+        return false;
+    char *raw = NULL;
+    size_t len = 0;
+    int st = focus_read_file(full, FOCUS_FILE_CAP, &raw, &len);
+    if (st == FOCUS_READ_ERR)
+        return false;
+    if (!raw)
+        return true;
+    bool ok = focus_scan_paths(raw, true, ev->issues, &ev->issues_count,
+                               SPECIALIST_FOCUS_ISSUE_CAP, rel);
+    free(raw);
+    return ok;
+}
+
 bool specialist_focus_load_issues(const char *root,
                                   struct specialist_focus_evidence *ev)
 {
@@ -465,33 +505,36 @@ bool specialist_focus_load_issues(const char *root,
         size_t n = strlen(p);
         if (n && p[n - 1] == '\r')
             p[n - 1] = '\0';
-        if (p[0] && focus_ci_issue_name(p)) {
-            char full[4096];
-            if (!focus_join(full, sizeof(full), root, p)) {
-                ok = false;
-                break;
-            }
-            char *raw = NULL;
-            size_t len = 0;
-            int st = focus_read_file(full, FOCUS_FILE_CAP, &raw, &len);
-            if (st == FOCUS_READ_ERR) {
-                ok = false;
-                break;
-            }
-            if (raw) {
-                ok = focus_scan_paths(raw, true, ev->issues,
-                                      &ev->issues_count,
-                                      SPECIALIST_FOCUS_ISSUE_CAP, p);
-                free(raw);
-            }
-        }
-        if (!eol)
+        if (p[0] && focus_ci_issue_name(p))
+            ok = focus_load_issue_body(root, p, ev);
+        if (!ok || !eol)
             break;
         p = eol + 1;
     }
     free(buf);
     if (!ok)
         LOG_FAIL(FOCUS_TAG, "issue body load failed");
+    return true;
+}
+
+static bool focus_add_churn_path(struct specialist_focus_evidence *ev,
+                                 const char *path, int commit)
+{
+    for (size_t i = 0; i < ev->churn_count; i++) {
+        if (strcmp(ev->churn[i].path, path) == 0)
+            return true;
+    }
+    int w = snprintf(ev->churn[ev->churn_count].path, SPECIALIST_PATH_MAX,
+                     "%s", path);
+    if (w < 0 || (size_t)w >= SPECIALIST_PATH_MAX) {
+        LOG_ERROR(FOCUS_TAG, "churn path too long: %s", path);
+        return false;
+    }
+    int rec = FOCUS_CHURN_MAX - commit;
+    if (rec < 1)
+        rec = 1;
+    ev->churn[ev->churn_count].recency = (uint32_t)rec;
+    ev->churn_count++;
     return true;
 }
 
@@ -528,26 +571,9 @@ bool specialist_focus_load_churn(const char *root,
             commit++;
         } else if (p[0] && commit >= 0 &&
                    ev->churn_count < SPECIALIST_FOCUS_CHURN_CAP) {
-            bool seen = false;
-            for (size_t i = 0; i < ev->churn_count; i++) {
-                if (strcmp(ev->churn[i].path, p) == 0) {
-                    seen = true;
-                    break;
-                }
-            }
-            if (!seen) {
-                int w = snprintf(ev->churn[ev->churn_count].path,
-                                 SPECIALIST_PATH_MAX, "%s", p);
-                if (w < 0 || (size_t)w >= SPECIALIST_PATH_MAX) {
-                    LOG_ERROR(FOCUS_TAG, "churn path too long: %s", p);
-                    free(buf);
-                    LOG_FAIL(FOCUS_TAG, "churn path");
-                }
-                int rec = FOCUS_CHURN_MAX - commit;
-                if (rec < 1)
-                    rec = 1;
-                ev->churn[ev->churn_count].recency = (uint32_t)rec;
-                ev->churn_count++;
+            if (!focus_add_churn_path(ev, p, commit)) {
+                free(buf);
+                LOG_FAIL(FOCUS_TAG, "churn path");
             }
         }
         if (!eol)
