@@ -1583,9 +1583,6 @@ engine/modules/determinism/src/receipt.c:zcl_det_receipt_encode:20
 engine/modules/determinism/src/verdict.c:zcl_det_parse_check_line:16
 engine/modules/determinism/src/verdict.c:zcl_det_transcript_scan:17
 engine/modules/engine/src/engine_cli.c:engine_cli_argv_build:29
-engine/modules/engine/src/engine_patch.c:engine_patch_parse:16
-engine/modules/engine/src/engine_patch.c:engine_patch_path_ok:31
-engine/modules/engine/src/engine_patch.c:strip_markdown_fence:17
 engine/modules/engine/src/engine_prompt.c:engine_prompt_audit_text:17
 engine/modules/engine/src/engine_prompt.c:engine_prompt_kind_from_header:21
 engine/modules/engine/src/engine_rule_mine.c:zcl_rule_mine_candidate:39

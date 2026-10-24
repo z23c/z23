@@ -26,20 +26,8 @@ void engine_patch_free(struct engine_patch *p)
     memset(p, 0, sizeof(*p));
 }
 
-bool engine_patch_path_ok(const char *path)
+static bool path_segments_ok(const char *path, size_t n)
 {
-    if (!path || !path[0])
-        return false;
-    const size_t n = strlen(path);
-    if (n >= ENGINE_PATCH_MAX_PATH)
-        return false;
-    if (path[0] == '/' || path[0] == '-' || path[0] == '.')
-        return false;                       /* absolute, flag-like, or hidden */
-    if (strncmp(path, ".git/", 5) == 0 || strstr(path, "/.git/") != NULL)
-        return false;
-    if (path[n - 1] == '/')
-        return false;
-
     /* Segment walk: no empty segment (which is `//`), no `.` or `..`. */
     const char *seg = path;
     for (size_t i = 0; i <= n; i++) {
@@ -54,15 +42,38 @@ bool engine_patch_path_ok(const char *path)
             return false;
         seg = &path[i] + 1;
     }
+    return true;
+}
+
+static bool path_byte_ok(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+           || (c >= '0' && c <= '9') || c == '.' || c == '_'
+           || c == '/' || c == '+' || c == '-';
+}
+
+bool engine_patch_path_ok(const char *path)
+{
+    if (!path || !path[0])
+        return false;
+    const size_t n = strlen(path);
+    if (n >= ENGINE_PATCH_MAX_PATH)
+        return false;
+    if (path[0] == '/' || path[0] == '-' || path[0] == '.')
+        return false;                       /* absolute, flag-like, or hidden */
+    if (strncmp(path, ".git/", 5) == 0 || strstr(path, "/.git/") != NULL)
+        return false;
+    if (path[n - 1] == '/')
+        return false;
+    if (!path_segments_ok(path, n))
+        return false;
 
     /* A deliberately narrow byte set. Everything this harness writes is
      * source, and source path names live inside it; anything else is either a
      * mistake or an attempt to reach somewhere. */
     for (size_t i = 0; i < n; i++) {
         const char c = path[i];
-        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
-                        || (c >= '0' && c <= '9') || c == '.' || c == '_'
-                        || c == '/' || c == '+' || c == '-';
+        const bool ok = path_byte_ok(c);
         if (!ok)
             return false;
     }
@@ -139,17 +150,8 @@ static bool is_fence_line(const char *s, size_t n)
     return true;
 }
 
-/* Trim one bare fence line, if present, from each end of [*body, *end). Each
- * end is checked and stripped independently: a body may open with a fence
- * and close normally (or vice versa) when a reply was cut and resumed. A
- * fence line found anywhere else in the body is real content and is left
- * alone — a Markdown file the unit is writing may legitimately contain
- * one. */
-static void strip_markdown_fence(const char **body, const char **end)
+static const char *strip_leading_fence(const char *b, const char *e)
 {
-    const char *b = *body;
-    const char *e = *end;
-
     if (e > b) {
         const char *nl = memchr(b, '\n', (size_t)(e - b));
         const char *line_end = nl ? nl : e;
@@ -159,6 +161,11 @@ static void strip_markdown_fence(const char **body, const char **end)
         if (is_fence_line(b, n) && nl)
             b = nl + 1;
     }
+    return b;
+}
+
+static const char *strip_trailing_fence(const char *b, const char *e)
+{
     if (e > b) {
         /* Find the start of the last line: scan back from e-1 (e points one
          * past the final byte, which is the newline that ends the last
@@ -180,6 +187,19 @@ static void strip_markdown_fence(const char **body, const char **end)
                 e = line_start;
         }
     }
+    return e;
+}
+
+/* Trim one bare fence line, if present, from each end of [*body, *end). Each
+ * end is checked and stripped independently: a body may open with a fence
+ * and close normally (or vice versa) when a reply was cut and resumed. A
+ * fence line found anywhere else in the body is real content and is left
+ * alone — a Markdown file the unit is writing may legitimately contain
+ * one. */
+static void strip_markdown_fence(const char **body, const char **end)
+{
+    const char *b = strip_leading_fence(*body, *end);
+    const char *e = strip_trailing_fence(b, *end);
     *body = b;
     *end = e;
 }
@@ -302,6 +322,25 @@ static bool scan_line(struct engine_patch *p, struct patch_scan *st,
     return true;
 }
 
+static bool scan_next_line(struct engine_patch *p, struct patch_scan *st,
+                           const char **cursor, const char *end)
+{
+    const char *cur = *cursor;
+    const char *nl = memchr(cur, '\n', (size_t)(end - cur));
+    const char *line_end = nl ? nl : end;
+    size_t vis = (size_t)(line_end - cur);
+    if (vis > 0 && cur[vis - 1] == '\r')
+        vis--;                                /* tolerate CRLF transcripts */
+    const struct line_view l = { .p = cur, .len = vis };
+
+    const bool ok = scan_line(p, st, &l, cur);
+    cur = nl ? nl + 1 : end;
+    if (ok && st->open && st->body == NULL)
+        st->body = cur;                        /* body starts after BEGIN */
+    *cursor = cur;
+    return ok;
+}
+
 bool engine_patch_parse(const char *text, size_t len, struct engine_patch *p)
 {
     if (!p)
@@ -318,17 +357,7 @@ bool engine_patch_parse(const char *text, size_t len, struct engine_patch *p)
     bool ok = true;
 
     while (cur < end && ok) {
-        const char *nl = memchr(cur, '\n', (size_t)(end - cur));
-        const char *line_end = nl ? nl : end;
-        size_t vis = (size_t)(line_end - cur);
-        if (vis > 0 && cur[vis - 1] == '\r')
-            vis--;                                /* tolerate CRLF transcripts */
-        const struct line_view l = { .p = cur, .len = vis };
-
-        ok = scan_line(p, &st, &l, cur);
-        cur = nl ? nl + 1 : end;
-        if (ok && st.open && st.body == NULL)
-            st.body = cur;                        /* body starts after BEGIN */
+        ok = scan_next_line(p, &st, &cur, end);
     }
 
     if (ok && st.open) {
