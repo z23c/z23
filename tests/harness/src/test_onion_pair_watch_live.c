@@ -28,8 +28,8 @@
  *     CIRCUIT_NOT_READY, P2P_FRAMING_NOT_SEEN)
  *   exit 1 with ENV_MISSING_BINARY                    -> UNOBSERVED: the
  *     (build/bin/z23, z23 or zcl-rpc absent)      environment has no
- *     runtime binaries (a proof generation builds only z23-dev and the
- *     test runner).
+ *     runtime binaries; a land proof builds z23 and zcl-rpc for this group
+ *     (BUILD rows in tools/dev/test_group_host_needs.def).
  *   any other nonzero exit, or a wedge                -> FAIL, with the
  *     (PORT_QUAD_EXHAUSTED, SPAWN_A_FAILED,              script's last 20
  *     RPC_A_NOT_READY, SPAWN_B_FAILED, RPC_B_NOT_READY,  lines
@@ -91,8 +91,8 @@ static bool opw_is_timeout_verdict(const char *tail)
     return false;
 }
 
-/* The script found no build/bin/z23, z23 or zcl-rpc to spawn. A proof
- * generation never builds them, so the pairing cannot be observed there:
+/* The script found no build/bin/z23, zclassic23 or zcl-rpc to spawn (a tree
+ * that skipped the BUILD rows), so the pairing cannot be observed there:
  * mapped UNOBSERVED (never FAIL, never SKIP) and never cached as green. */
 static bool opw_is_missing_binary_verdict(const char *tail)
 {
@@ -276,8 +276,8 @@ int test_onion_pair_watch_live(void)
     } else if (opw_is_missing_binary_verdict(tail)) {
         printf("UNOBSERVED (this environment carries no z23/zclassic23/zcl-rpc "
                "runtime binaries, so the two-node pairing cannot be exercised "
-               "here — PAIR_PROBE=ENV_MISSING_BINARY; a proof generation never "
-               "builds them; run `make` on a dev box to observe it)\n");
+               "here — PAIR_PROBE=ENV_MISSING_BINARY; build them with "
+               "`make z23 zcl-rpc` to observe it)\n");
         printf("  %s", tail);
     } else {
         printf("FAIL (exit=%d; last %d lines of %s:)\n", rc, 20, out_path);

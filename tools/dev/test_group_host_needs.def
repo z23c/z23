@@ -208,12 +208,21 @@ ZCL_TEST_GROUP_NEED("test_onion_persistence",
                     ZCL_HOST_NEED_FILE,
                     "vendor/tor/src/ext/keccak-tiny/libkeccak-tiny.a")
 
-/* tests/harness/src/test_onion_pair_watch_live.c reports
- * PAIR_PROBE=ENV_MISSING_BINARY (UNOBSERVED) when the tree it runs in has no
- * z23/zclassic23/zcl-rpc runtime binary to pair. A proof generation never
- * builds those, by design. */
+/* tests/harness/src/test_onion_pair_watch_live.c execs the runtime binaries
+ * tools/scripts/onion_pair_watch.sh needs: build/bin/z23 (ZCL_CLI),
+ * build/bin/jsonq (ZCL_JSONQ, built by the zcl-rpc target),
+ * build/bin/zclassic23 (ISO_NODE_BIN) and build/bin/zcl-rpc (ISO_RPC_BIN).
+ * zclassic23 is admitted content-checked by the proof from build/bin/z23-dev
+ * (proof_admitted_executables), so it is left as provided. z23 and zcl-rpc
+ * are not, so a selected run would print PAIR_PROBE=ENV_MISSING_BINARY
+ * (UNOBSERVED) and refuse the land proof. The BUILD rows make the proof and
+ * the local t-fast build them. The FILE gate keeps universal selection as it
+ * was: a tree without build/bin/z23 still gates the group out. */
 ZCL_TEST_GROUP_NEED("test_onion_pair_watch_live",
                     ZCL_HOST_NEED_FILE, "build/bin/z23")
+ZCL_TEST_GROUP_BUILD_NEED("test_onion_pair_watch_live", "build/bin/z23", "z23")
+ZCL_TEST_GROUP_BUILD_NEED("test_onion_pair_watch_live", "build/bin/zcl-rpc",
+                          "zcl-rpc")
 
 /* tests/harness/src/test_self_folded_anchor.c's heavy leg prints SKIP unless
  * ZCL_SELF_FOLD_ANCHOR_FIXTURE names a real `-mint-anchor` artifact. Nothing
