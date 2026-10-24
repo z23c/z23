@@ -32,6 +32,36 @@ static bool sw_stats_monitors_ok(const struct simnet_wire_stats *st)
            !st->monitor_failed;
 }
 
+/* Snapshot the wire stats into *st (zeroed first) and copy the outputs.
+ * Returns false when the snapshot could not be taken. */
+static bool sw_capture_stats(struct simnet_wire *wire,
+                             struct simnet_wire_stats *st,
+                             uint64_t *out_fp,
+                             struct simnet_wire_stats *out_stats)
+{
+    memset(st, 0, sizeof(*st));
+    if (!simnet_wire_get_stats(wire, st))
+        return false;
+    if (out_stats)
+        *out_stats = *st;
+    if (out_fp)
+        *out_fp = st->fingerprint;
+    return true;
+}
+
+static bool sw_loopback_stats_ok(const struct simnet_wire_stats *st)
+{
+    return st->handshake_complete &&
+           st->pong_received &&
+           !st->nut_disconnected &&
+           st->pending_events == 0 &&
+           st->to_nut_bytes == 0 &&
+           st->to_peer_bytes == 0 &&
+           st->delivered_to_nut_bytes > 0 &&
+           st->delivered_to_peer_bytes > 0 &&
+           st->fingerprint != 0;
+}
+
 static bool sw_run_loopback(uint64_t seed, uint64_t nonce,
                             uint64_t *out_fp,
                             struct simnet_wire_stats *out_stats)
@@ -48,23 +78,8 @@ static bool sw_run_loopback(uint64_t seed, uint64_t nonce,
               simnet_wire_peer_pong_received(wire, 0, nonce);
 
     struct simnet_wire_stats st;
-    memset(&st, 0, sizeof(st));
-    if (simnet_wire_get_stats(wire, &st)) {
-        if (out_stats)
-            *out_stats = st;
-        if (out_fp)
-            *out_fp = st.fingerprint;
-    }
-    ok = ok &&
-         st.handshake_complete &&
-         st.pong_received &&
-         !st.nut_disconnected &&
-         st.pending_events == 0 &&
-         st.to_nut_bytes == 0 &&
-         st.to_peer_bytes == 0 &&
-         st.delivered_to_nut_bytes > 0 &&
-         st.delivered_to_peer_bytes > 0 &&
-         st.fingerprint != 0;
+    sw_capture_stats(wire, &st, out_fp, out_stats);
+    ok = ok && sw_loopback_stats_ok(&st);
 
     simnet_wire_free(wire);
     return ok;
@@ -389,6 +404,15 @@ static bool sw_run_reorder(uint64_t seed, uint64_t *out_fp,
     return ok;
 }
 
+static bool sw_byz_expected_reason_ok(
+    enum simnet_byzantine_class kind,
+    const struct simnet_wire_byzantine_observation *obs)
+{
+    return obs->expected_reason_observed &&
+           strcmp(obs->reject_reason,
+                  simnet_byzantine_expected_reason(kind)) == 0;
+}
+
 static bool sw_byz_reason_ok(
     enum simnet_byzantine_class kind,
     const struct simnet_wire_byzantine_observation *obs)
@@ -399,9 +423,59 @@ static bool sw_byz_reason_ok(
         return obs->expected_reject_path_observed &&
                strcmp(obs->reject_reason, "oversized block msg") == 0;
     }
-    return obs->expected_reason_observed &&
-           strcmp(obs->reject_reason,
-                  simnet_byzantine_expected_reason(kind)) == 0;
+    return sw_byz_expected_reason_ok(kind, obs);
+}
+
+/* Checks shared by both byzantine injection tiers: the stats and the
+ * observation were read, the right class was injected on the right tier,
+ * and the NUT rejected it. */
+static bool sw_byz_observed_ok(
+    enum simnet_byzantine_class kind,
+    enum simnet_byzantine_tier tier,
+    bool got_stats, bool got_obs,
+    const struct simnet_wire_stats *st,
+    const struct simnet_wire_byzantine_observation *obs)
+{
+    return got_stats &&
+           got_obs &&
+           sw_stats_monitors_ok(st) &&
+           obs->kind == kind &&
+           obs->tier == tier &&
+           obs->injected &&
+           obs->rejected;
+}
+
+static bool sw_byz_settled_ok(
+    const struct simnet_wire_byzantine_observation *obs)
+{
+    return obs->expected_blocker_observed &&
+           obs->tip_unchanged &&
+           obs->coins_unchanged &&
+           obs->peer_misbehaved;
+}
+
+static bool sw_byz_block_tail_ok(
+    const struct simnet_wire_stats *st,
+    const struct simnet_wire_byzantine_observation *obs)
+{
+    return obs->peer_banned &&
+           obs->peer_disconnected &&
+           obs->honest_after_accepted &&
+           obs->honest_tip_after > obs->tip_after &&
+           st->peer_misbehave_events > 0 &&
+           st->peer_banned_events > 0 &&
+           st->nut_banned &&
+           st->nut_disconnected &&
+           st->not_implemented_peers == 0;
+}
+
+static bool sw_byz_header_tail_ok(
+    const struct simnet_wire_stats *st,
+    const struct simnet_wire_byzantine_observation *obs)
+{
+    return !obs->peer_banned &&
+           st->peer_misbehave_events > 0 &&
+           st->not_implemented_peers == 0;
 }
 
 static bool sw_run_invalid_block(
@@ -419,42 +493,19 @@ static bool sw_run_invalid_block(
               simnet_wire_run(wire, 8192, 512);
 
     struct simnet_wire_stats st;
-    memset(&st, 0, sizeof(st));
     struct simnet_wire_byzantine_observation obs;
     memset(&obs, 0, sizeof(obs));
-    bool got_stats = simnet_wire_get_stats(wire, &st);
+    bool got_stats = sw_capture_stats(wire, &st, out_fp, out_stats);
     bool got_obs = simnet_wire_get_byzantine_observation(wire, &obs);
-    if (got_stats) {
-        if (out_stats)
-            *out_stats = st;
-        if (out_fp)
-            *out_fp = st.fingerprint;
-    }
     if (got_obs && out_obs)
         *out_obs = obs;
 
     ok = ok &&
-         got_stats &&
-         got_obs &&
-         sw_stats_monitors_ok(&st) &&
-         obs.kind == kind &&
-         obs.tier == SIMNET_BYZ_TIER_CONNECT_BLOCK &&
-         obs.injected &&
-         obs.rejected &&
+         sw_byz_observed_ok(kind, SIMNET_BYZ_TIER_CONNECT_BLOCK,
+                            got_stats, got_obs, &st, &obs) &&
          sw_byz_reason_ok(kind, &obs) &&
-         obs.expected_blocker_observed &&
-         obs.tip_unchanged &&
-         obs.coins_unchanged &&
-         obs.peer_misbehaved &&
-         obs.peer_banned &&
-         obs.peer_disconnected &&
-         obs.honest_after_accepted &&
-         obs.honest_tip_after > obs.tip_after &&
-         st.peer_misbehave_events > 0 &&
-         st.peer_banned_events > 0 &&
-         st.nut_banned &&
-         st.nut_disconnected &&
-         st.not_implemented_peers == 0;
+         sw_byz_settled_ok(&obs) &&
+         sw_byz_block_tail_ok(&st, &obs);
 
     simnet_wire_free(wire);
     return ok;
@@ -475,41 +526,46 @@ static bool sw_run_invalid_header(
               simnet_wire_run(wire, 8192, 512);
 
     struct simnet_wire_stats st;
-    memset(&st, 0, sizeof(st));
     struct simnet_wire_byzantine_observation obs;
     memset(&obs, 0, sizeof(obs));
-    bool got_stats = simnet_wire_get_stats(wire, &st);
+    bool got_stats = sw_capture_stats(wire, &st, out_fp, out_stats);
     bool got_obs = simnet_wire_get_byzantine_observation(wire, &obs);
-    if (got_stats) {
-        if (out_stats)
-            *out_stats = st;
-        if (out_fp)
-            *out_fp = st.fingerprint;
-    }
     if (got_obs && out_obs)
         *out_obs = obs;
 
     ok = ok &&
-         got_stats &&
-         got_obs &&
-         sw_stats_monitors_ok(&st) &&
-         obs.kind == kind &&
-         obs.tier == SIMNET_BYZ_TIER_HEADER_ADMISSION &&
-         obs.injected &&
-         obs.rejected &&
-         obs.expected_reason_observed &&
-         strcmp(obs.reject_reason,
-                simnet_byzantine_expected_reason(kind)) == 0 &&
-         obs.expected_blocker_observed &&
-         obs.tip_unchanged &&
-         obs.coins_unchanged &&
-         obs.peer_misbehaved &&
-         !obs.peer_banned &&
-         st.peer_misbehave_events > 0 &&
-         st.not_implemented_peers == 0;
+         sw_byz_observed_ok(kind, SIMNET_BYZ_TIER_HEADER_ADMISSION,
+                            got_stats, got_obs, &st, &obs) &&
+         sw_byz_expected_reason_ok(kind, &obs) &&
+         sw_byz_settled_ok(&obs) &&
+         sw_byz_header_tail_ok(&st, &obs);
 
     simnet_wire_free(wire);
     return ok;
+}
+
+static bool sw_recovery_outage_ok(struct simnet_wire *wire)
+{
+    return simnet_wire_partition_peer(wire, 0, true) &&
+           simnet_wire_run(wire, 256, 0);
+}
+
+static bool sw_recovery_mid_ok(struct simnet_wire *wire)
+{
+    struct simnet_wire_stats mid;
+    return sw_capture_stats(wire, &mid, NULL, NULL) &&
+           mid.no_unexpected_permanent_blocker && !mid.monitor_failed &&
+           mid.peers_open == 1; /* only the attacker's link remains open */
+}
+
+static bool sw_recovery_reopen_ok(struct simnet_wire *wire,
+                                  uint64_t nonce_after)
+{
+    return simnet_wire_partition_peer(wire, 0, false) &&
+           simnet_wire_run(wire, 256, 0) &&
+           simnet_wire_peer_send_ping(wire, 0, nonce_after) &&
+           simnet_wire_run(wire, 512, 128) &&
+           simnet_wire_peer_pong_received(wire, 0, nonce_after);
 }
 
 /* Step D1 — per-link partition/recovery. Models "the NUT loses its
@@ -558,34 +614,19 @@ static bool sw_run_partition_recovery(uint64_t seed, uint64_t *out_fp,
      * untouched). Frames the NUT still queues for peer 0 are silently
      * dropped by the closed link (simnet_wire_drain_nut_send), matching
      * a real network partition rather than a buffered outage. */
-    ok = ok && simnet_wire_partition_peer(wire, 0, true);
-    ok = ok && simnet_wire_run(wire, 256, 0);
+    ok = ok && sw_recovery_outage_ok(wire);
 
     /* No-silent-halt check: the typed blocker registry
      * (simnet_wire_monitor_blockers, run every tick via
      * simnet_wire_monitor_after_tick) must show no unexpected PERMANENT
      * blocker while the honest link is down. */
-    struct simnet_wire_stats mid;
-    memset(&mid, 0, sizeof(mid));
-    ok = ok && simnet_wire_get_stats(wire, &mid) &&
-         mid.no_unexpected_permanent_blocker && !mid.monitor_failed &&
-         mid.peers_open == 1; /* only the attacker's link remains open */
+    ok = ok && sw_recovery_mid_ok(wire);
 
     /* Reopen peer 0 and prove recovery with a fresh ping/pong. */
-    ok = ok && simnet_wire_partition_peer(wire, 0, false);
-    ok = ok && simnet_wire_run(wire, 256, 0) &&
-         simnet_wire_peer_send_ping(wire, 0, nonce_after) &&
-         simnet_wire_run(wire, 512, 128) &&
-         simnet_wire_peer_pong_received(wire, 0, nonce_after);
+    ok = ok && sw_recovery_reopen_ok(wire, nonce_after);
 
     struct simnet_wire_stats st;
-    memset(&st, 0, sizeof(st));
-    if (simnet_wire_get_stats(wire, &st)) {
-        if (out_stats)
-            *out_stats = st;
-        if (out_fp)
-            *out_fp = st.fingerprint;
-    }
+    sw_capture_stats(wire, &st, out_fp, out_stats);
     ok = ok &&
          sw_stats_monitors_ok(&st) &&
          st.max_recv_msg_count <= MAX_RECV_MESSAGES &&
@@ -665,13 +706,7 @@ static bool sw_run_partition_survivor(uint64_t seed, uint64_t *out_fp,
          simnet_wire_peer_pong_received(wire, 0, nonce);
 
     struct simnet_wire_stats st;
-    memset(&st, 0, sizeof(st));
-    if (simnet_wire_get_stats(wire, &st)) {
-        if (out_stats)
-            *out_stats = st;
-        if (out_fp)
-            *out_fp = st.fingerprint;
-    }
+    sw_capture_stats(wire, &st, out_fp, out_stats);
     ok = ok &&
          sw_stats_monitors_ok(&st) &&
          !st.nut_disconnected &&
@@ -680,6 +715,64 @@ static bool sw_run_partition_survivor(uint64_t seed, uint64_t *out_fp,
 
     simnet_wire_free(wire);
     return ok;
+}
+
+/* Both honest peers ping and both must get their pong back. */
+static bool sw_eclipse_ping_ok(struct simnet_wire *wire, uint64_t nonce0,
+                               uint64_t nonce1)
+{
+    return simnet_wire_peer_send_ping(wire, 0, nonce0) &&
+           simnet_wire_peer_send_ping(wire, 1, nonce1) &&
+           simnet_wire_run(wire, 1024, 128) &&
+           simnet_wire_peer_pong_received(wire, 0, nonce0) &&
+           simnet_wire_peer_pong_received(wire, 1, nonce1);
+}
+
+static bool sw_eclipse_base_ok(struct simnet_wire *wire)
+{
+    struct simnet_wire_stats base;
+    return sw_capture_stats(wire, &base, NULL, NULL) &&
+           base.consensus_unchanged &&
+           base.backpressure_reject_events > 0 && /* attackers fed garbage */
+           base.peers_open == 4;
+}
+
+static bool sw_eclipse_cut_ok(struct simnet_wire *wire)
+{
+    return simnet_wire_partition_peer(wire, 0, true) &&
+           simnet_wire_partition_peer(wire, 1, true) &&
+           simnet_wire_run(wire, 512, 0);
+}
+
+static bool sw_eclipse_mid_ok(struct simnet_wire *wire)
+{
+    struct simnet_wire_stats mid;
+    return sw_capture_stats(wire, &mid, NULL, NULL) &&
+           mid.no_unexpected_permanent_blocker && /* no silent halt */
+           !mid.monitor_failed &&
+           mid.consensus_unchanged && /* never adopted an attacker tip */
+           !mid.nut_disconnected && /* honest node 0 still alive */
+           simnet_wire_peer_handshake_complete(wire, 1) && /* honest 1 alive */
+           mid.peers_open == 2; /* only the two attacker links remain open */
+}
+
+static bool sw_eclipse_reopen_ok(struct simnet_wire *wire, uint64_t nonce0,
+                                 uint64_t nonce1)
+{
+    return simnet_wire_partition_peer(wire, 0, false) &&
+           simnet_wire_partition_peer(wire, 1, false) &&
+           simnet_wire_run(wire, 512, 0) &&
+           sw_eclipse_ping_ok(wire, nonce0, nonce1);
+}
+
+static bool sw_eclipse_final_ok(const struct simnet_wire_stats *st)
+{
+    return sw_stats_monitors_ok(st) &&
+           st->consensus_unchanged &&
+           !st->nut_disconnected &&
+           st->peers_open == 4 && /* every link back up after recovery */
+           st->max_recv_msg_count <= MAX_RECV_MESSAGES &&
+           st->pong_received;
 }
 
 /* Step D2 — true multi-connection eclipse. Each wire_peer slot is now an
@@ -747,64 +840,21 @@ static bool sw_run_eclipse(uint64_t seed, uint64_t *out_fp,
               simnet_wire_peer_handshake_complete(wire, 3);
 
     /* Both honest peers round-trip a ping before the eclipse. */
-    ok = ok &&
-         simnet_wire_peer_send_ping(wire, 0, nb0) &&
-         simnet_wire_peer_send_ping(wire, 1, nb1) &&
-         simnet_wire_run(wire, 1024, 128) &&
-         simnet_wire_peer_pong_received(wire, 0, nb0) &&
-         simnet_wire_peer_pong_received(wire, 1, nb1);
-
-    struct simnet_wire_stats base;
-    memset(&base, 0, sizeof(base));
-    ok = ok && simnet_wire_get_stats(wire, &base) &&
-         base.consensus_unchanged &&
-         base.backpressure_reject_events > 0 && /* attackers fed garbage */
-         base.peers_open == 4;
+    ok = ok && sw_eclipse_ping_ok(wire, nb0, nb1);
+    ok = ok && sw_eclipse_base_ok(wire);
 
     /* Phase 2: eclipse — cut BOTH honest links; the attacker links stay
      * open. The NUT is now reachable only by attacker connections. */
-    ok = ok &&
-         simnet_wire_partition_peer(wire, 0, true) &&
-         simnet_wire_partition_peer(wire, 1, true) &&
-         simnet_wire_run(wire, 512, 0);
-
-    struct simnet_wire_stats mid;
-    memset(&mid, 0, sizeof(mid));
-    ok = ok && simnet_wire_get_stats(wire, &mid) &&
-         mid.no_unexpected_permanent_blocker && /* no silent halt */
-         !mid.monitor_failed &&
-         mid.consensus_unchanged && /* never adopted an attacker tip */
-         !mid.nut_disconnected && /* honest node 0 still alive */
-         simnet_wire_peer_handshake_complete(wire, 1) && /* honest 1 alive */
-         mid.peers_open == 2; /* only the two attacker links remain open */
+    ok = ok && sw_eclipse_cut_ok(wire);
+    ok = ok && sw_eclipse_mid_ok(wire);
 
     /* Phase 3: reopen the honest links and prove convergence — both honest
      * peers round-trip a fresh ping/pong. */
-    ok = ok &&
-         simnet_wire_partition_peer(wire, 0, false) &&
-         simnet_wire_partition_peer(wire, 1, false) &&
-         simnet_wire_run(wire, 512, 0) &&
-         simnet_wire_peer_send_ping(wire, 0, na0) &&
-         simnet_wire_peer_send_ping(wire, 1, na1) &&
-         simnet_wire_run(wire, 1024, 128) &&
-         simnet_wire_peer_pong_received(wire, 0, na0) &&
-         simnet_wire_peer_pong_received(wire, 1, na1);
+    ok = ok && sw_eclipse_reopen_ok(wire, na0, na1);
 
     struct simnet_wire_stats st;
-    memset(&st, 0, sizeof(st));
-    if (simnet_wire_get_stats(wire, &st)) {
-        if (out_stats)
-            *out_stats = st;
-        if (out_fp)
-            *out_fp = st.fingerprint;
-    }
-    ok = ok &&
-         sw_stats_monitors_ok(&st) &&
-         st.consensus_unchanged &&
-         !st.nut_disconnected &&
-         st.peers_open == 4 && /* every link back up after recovery */
-         st.max_recv_msg_count <= MAX_RECV_MESSAGES &&
-         st.pong_received;
+    sw_capture_stats(wire, &st, out_fp, out_stats);
+    ok = ok && sw_eclipse_final_ok(&st);
 
     simnet_wire_free(wire);
     return ok;

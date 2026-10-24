@@ -2770,12 +2770,6 @@ tests/harness/src/test_simnet_trace.c:test_simnet_trace:20
 tests/harness/src/test_simnet_txkit.c:test_simnet_txkit:38
 tests/harness/src/test_simnet_txkit.c:txk_build_multisig_spend:18
 tests/harness/src/test_simnet_wallet_import_backup.c:part1_import_rescan_spend:52
-tests/harness/src/test_simnet_wire.c:sw_run_eclipse:42
-tests/harness/src/test_simnet_wire.c:sw_run_invalid_block:29
-tests/harness/src/test_simnet_wire.c:sw_run_invalid_header:24
-tests/harness/src/test_simnet_wire.c:sw_run_loopback:19
-tests/harness/src/test_simnet_wire.c:sw_run_partition_recovery:24
-tests/harness/src/test_simnet_wire.c:sw_run_partition_survivor:16
 tests/harness/src/test_simnet_wire_ibd.c:swi_run_malformed_body:18
 tests/harness/src/test_simnet_zmsg_onchain.c:test_simnet_zmsg_onchain:33
 tests/harness/src/test_site_routes.c:test_site_routes:79
