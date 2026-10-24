@@ -706,6 +706,15 @@ static int shop_rep_populated_rows(void)
 }
 
 /* ── 4. forbidden vocabulary never appears in the reply ─────────────── */
+static void sr_blank_path(char *text, const char *path)
+{
+    const size_t len = strlen(path);
+    if (len == 0)
+        return;
+    for (char *p = strstr(text, path); p; p = strstr(p + len, path))
+        memset(p, '_', len);
+}
+
 static int shop_rep_forbidden_vocabulary(void)
 {
     int failures = 0;
@@ -762,14 +771,25 @@ static int shop_rep_forbidden_vocabulary(void)
         "reliable",
         "reputable",
     };
+    /* The reply echoes the fixture datadir, which is the caller's path: a
+     * checkout named "restart-..." contains "star". Blank each copy of that
+     * path so only the text the leaf writes is graded. */
+    char *scan = strdup(out);
+    SR_CHECK("the reply copies for the vocabulary scan", scan != NULL);
+    if (!scan) {
+        test_rm_rf(dir);
+        return failures;
+    }
+    sr_blank_path(scan, dir);
     bool clean = true;
     for (size_t i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); i++) {
-        if (strstr(out, forbidden[i]) != NULL) {
+        if (strstr(scan, forbidden[i]) != NULL) {
             printf("  (forbidden vocabulary present: \"%s\")\n",
                    forbidden[i]);
             clean = false;
         }
     }
+    free(scan);
     SR_CHECK("no inferred-reputation vocabulary in the reply", clean);
 
     struct json_value doc;
