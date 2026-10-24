@@ -120,6 +120,11 @@ static bool lower_name_valid(const char *value, size_t max_len, bool underscore)
     return true;
 }
 
+static bool topic_separator(unsigned char c)
+{
+    return c == '.' || c == '-' || c == '_';
+}
+
 static bool topic_valid(const char *value)
 {
     size_t len = value ? strlen(value) : 0;
@@ -129,13 +134,27 @@ static bool topic_valid(const char *value)
         return false;
     for (size_t i = 1; i + 1 < len; i++) {
         unsigned char c = (unsigned char)value[i];
-        if (!ascii_alnum_lower(c) && c != '.' && c != '-' && c != '_')
+        unsigned char prev = (unsigned char)value[i - 1];
+        if (!ascii_alnum_lower(c) && !topic_separator(c))
             return false;
-        if ((c == '.' || c == '-' || c == '_') &&
-            (value[i - 1] == '.' || value[i - 1] == '-' || value[i - 1] == '_'))
+        if (topic_separator(c) && topic_separator(prev))
             return false;
     }
     return true;
+}
+
+static bool mount_char_valid(unsigned char c)
+{
+    return ascii_alnum_lower(c) || c == '-' || c == '_';
+}
+
+static bool mount_segment_valid(const char *value, size_t start, size_t end)
+{
+    size_t segment_len = end - start;
+    return segment_len != 0 &&
+           !(segment_len == 1 && value[start] == '.') &&
+           !(segment_len == 2 && value[start] == '.' &&
+             value[start + 1] == '.');
 }
 
 static bool mount_valid(const char *value)
@@ -150,17 +169,12 @@ static bool mount_valid(const char *value)
     size_t segment_start = 1;
     for (size_t i = 1; i <= len; i++) {
         if (i == len || value[i] == '/') {
-            size_t segment_len = i - segment_start;
-            if (segment_len == 0 ||
-                (segment_len == 1 && value[segment_start] == '.') ||
-                (segment_len == 2 && value[segment_start] == '.' &&
-                 value[segment_start + 1] == '.'))
+            if (!mount_segment_valid(value, segment_start, i))
                 return false;
             segment_start = i + 1;
             continue;
         }
-        unsigned char c = (unsigned char)value[i];
-        if (!ascii_alnum_lower(c) && c != '-' && c != '_')
+        if (!mount_char_valid((unsigned char)value[i]))
             return false;
     }
     return true;
@@ -243,6 +257,40 @@ static void parser_advance(struct app_definition_parser *parser)
     }
 }
 
+static void parser_skip_line_comment(struct app_definition_parser *parser)
+{
+    parser_advance(parser);
+    parser_advance(parser);
+    while (parser->offset < parser->source_len &&
+           parser->source[parser->offset] != '\n')
+        parser_advance(parser);
+}
+
+static struct zcl_result parser_skip_block_comment(
+    struct app_definition_parser *parser)
+{
+    size_t start_line = parser->line;
+    parser_advance(parser);
+    parser_advance(parser);
+    bool closed = false;
+    while (parser->offset < parser->source_len) {
+        if (parser->source[parser->offset] == '*' &&
+            parser->offset + 1 < parser->source_len &&
+            parser->source[parser->offset + 1] == '/') {
+            parser_advance(parser);
+            parser_advance(parser);
+            closed = true;
+            break;
+        }
+        parser_advance(parser);
+    }
+    if (!closed)
+        return parser_error(parser, APP_DEF_SYNTAX,
+                            "unterminated comment opened on line %zu",
+                            start_line);
+    return ZCL_OK;
+}
+
 static struct zcl_result parser_skip_trivia(struct app_definition_parser *parser)
 {
     while (parser->offset < parser->source_len) {
@@ -255,34 +303,14 @@ static struct zcl_result parser_skip_trivia(struct app_definition_parser *parser
             return ZCL_OK;
         char next = parser->source[parser->offset + 1];
         if (next == '/') {
-            parser_advance(parser);
-            parser_advance(parser);
-            while (parser->offset < parser->source_len &&
-                   parser->source[parser->offset] != '\n')
-                parser_advance(parser);
+            parser_skip_line_comment(parser);
             continue;
         }
         if (next != '*')
             return ZCL_OK;
-        size_t start_line = parser->line;
-        parser_advance(parser);
-        parser_advance(parser);
-        bool closed = false;
-        while (parser->offset < parser->source_len) {
-            if (parser->source[parser->offset] == '*' &&
-                parser->offset + 1 < parser->source_len &&
-                parser->source[parser->offset + 1] == '/') {
-                parser_advance(parser);
-                parser_advance(parser);
-                closed = true;
-                break;
-            }
-            parser_advance(parser);
-        }
-        if (!closed)
-            return parser_error(parser, APP_DEF_SYNTAX,
-                                "unterminated comment opened on line %zu",
-                                start_line);
+        struct zcl_result result = parser_skip_block_comment(parser);
+        if (!result.ok)
+            return result;
     }
     return ZCL_OK;
 }
@@ -670,19 +698,10 @@ static struct zcl_result parse_directive(struct app_definition_compile *compile,
                         "unknown directive '%s'", directive);
 }
 
-static struct zcl_result definition_semantic_validate(
-    struct app_definition_compile *compile)
+static struct zcl_result definition_check_state(
+    const struct zcl_app_definition_v1 *definition,
+    struct app_definition_parser *parser, uint64_t caps)
 {
-    struct zcl_app_definition_v1 *definition = &compile->definition;
-    struct app_definition_parser *parser = &compile->parser;
-    uint64_t caps = definition->required_capabilities;
-    if (!compile->app_seen)
-        return parser_error(parser, APP_DEF_SEMANTIC,
-                            "missing ZCL_APP directive");
-    if (caps == 0)
-        return parser_error(parser, APP_DEF_SEMANTIC,
-                            "app declares no capabilities");
-
     bool resident = (caps & ZCL_APP_CAP_RESIDENT_STATE) != 0;
     if (definition->resource_count > 0 && !resident)
         return parser_error(parser, APP_DEF_SEMANTIC,
@@ -697,7 +716,13 @@ static struct zcl_result definition_semantic_validate(
                      definition->resource_count == 0))
         return parser_error(parser, APP_DEF_SEMANTIC,
                             "RESIDENT_STATE requires schema and resources");
+    return ZCL_OK;
+}
 
+static struct zcl_result definition_check_routes(
+    const struct zcl_app_definition_v1 *definition,
+    struct app_definition_parser *parser, uint64_t caps)
+{
     bool web = (caps & ZCL_APP_CAP_WEB_ROUTES) != 0;
     if (definition->mount_count > 0 && !web)
         return parser_error(parser, APP_DEF_SEMANTIC,
@@ -714,7 +739,13 @@ static struct zcl_result definition_semantic_validate(
     if (onion && (!definition->onion_declared || !definition->onion_enabled))
         return parser_error(parser, APP_DEF_SEMANTIC,
                             "ONION_BINDING capability conflicts with disabled binding");
+    return ZCL_OK;
+}
 
+static struct zcl_result definition_check_znam(
+    const struct zcl_app_definition_v1 *definition,
+    struct app_definition_parser *parser, uint64_t caps)
+{
     bool znam = (caps & ZCL_APP_CAP_ZNAM_BINDING) != 0;
     if (definition->znam_declared && !znam)
         return parser_error(parser, APP_DEF_SEMANTIC,
@@ -722,7 +753,13 @@ static struct zcl_result definition_semantic_validate(
     if (znam && !definition->znam_declared)
         return parser_error(parser, APP_DEF_SEMANTIC,
                             "ZNAM_BINDING capability lacks a ZNAM binding");
+    return ZCL_OK;
+}
 
+static struct zcl_result definition_check_topics(
+    const struct zcl_app_definition_v1 *definition,
+    struct app_definition_parser *parser, uint64_t caps)
+{
     bool p2p = (caps & ZCL_APP_CAP_P2P_TOPICS) != 0;
     if (definition->topic_count > 0 && !p2p)
         return parser_error(parser, APP_DEF_SEMANTIC,
@@ -735,6 +772,31 @@ static struct zcl_result definition_semantic_validate(
         return parser_error(parser, APP_DEF_SEMANTIC,
                             "P2P topics require SIGNED_EVENTS capability");
     return ZCL_OK;
+}
+
+static struct zcl_result definition_semantic_validate(
+    struct app_definition_compile *compile)
+{
+    struct zcl_app_definition_v1 *definition = &compile->definition;
+    struct app_definition_parser *parser = &compile->parser;
+    uint64_t caps = definition->required_capabilities;
+    if (!compile->app_seen)
+        return parser_error(parser, APP_DEF_SEMANTIC,
+                            "missing ZCL_APP directive");
+    if (caps == 0)
+        return parser_error(parser, APP_DEF_SEMANTIC,
+                            "app declares no capabilities");
+
+    struct zcl_result result = definition_check_state(definition, parser, caps);
+    if (!result.ok)
+        return result;
+    result = definition_check_routes(definition, parser, caps);
+    if (!result.ok)
+        return result;
+    result = definition_check_znam(definition, parser, caps);
+    if (!result.ok)
+        return result;
+    return definition_check_topics(definition, parser, caps);
 }
 
 struct zcl_result zcl_app_definition_parse_v1(
