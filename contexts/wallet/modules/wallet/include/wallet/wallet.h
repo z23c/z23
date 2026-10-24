@@ -183,6 +183,10 @@ struct wallet {
 };
 
 void wallet_init(struct wallet *w);
+/* Like wallet_init, but skips zero-filling map_wallet and key_pool (about
+ * 65 MiB). Precondition: *w is freshly zeroed storage (static bss or
+ * calloc/anonymous mmap). Never call on reused or malloc storage. */
+void wallet_init_zeroed(struct wallet *w);
 void wallet_rebuild_spent_set(struct wallet *w);
 struct coins_view_cache;
 void wallet_verify_utxos(struct wallet *w, struct coins_view_cache *coins_tip);

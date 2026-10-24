@@ -501,5 +501,8 @@ skip_sap_snap:;
         if (ok) printf("OK\n"); else { printf("FAIL\n"); failures++; }
     }
 
+    { extern int test_wallet_init_zeroed_checks(void);
+      failures += test_wallet_init_zeroed_checks(); }
+
     return failures;
 }

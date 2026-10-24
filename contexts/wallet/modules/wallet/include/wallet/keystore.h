@@ -53,6 +53,9 @@ struct basic_keystore {
 /* Zero all entry arrays/counts and initialise ks->cs. Call once before
  * any other keystore op. ks must be non-NULL (not checked). */
 void keystore_init(struct basic_keystore *ks);
+/* As keystore_init but leaves the entry arrays untouched. Precondition:
+ * *ks is freshly zeroed storage (static bss or calloc). */
+void keystore_init_zeroed(struct basic_keystore *ks);
 /* Wipe key material (memory_cleanse over the key array), zero the counts,
  * and destroy ks->cs. Does not free ks itself. ks must be non-NULL
  * (not checked). */

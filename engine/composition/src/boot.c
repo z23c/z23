@@ -1304,7 +1304,7 @@ static void boot_wallet_open_persistence(struct app_context *ctx,
                                          int64_t *out_key_rows,
                                          bool *out_sqlite_open)
 {
-    wallet_init(&g_wallet);
+    wallet_init_zeroed(&g_wallet); /* static bss: already zero, do not fault 65 MiB */
     boot_wallet_credential_register_or_die();
     /* OS-S2: bind the boot cursors to the tip_finalize reorg-rewind chokepoint
      * so a live reorg clamps them down (next boot re-derives above the fork). */

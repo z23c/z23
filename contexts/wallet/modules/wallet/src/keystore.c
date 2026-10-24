@@ -21,10 +21,15 @@ static bool key_id_eq(const struct key_id *a, const struct key_id *b)
 
 void keystore_init(struct basic_keystore *ks)
 {
-    zcl_mutex_init(&ks->cs);
     memset(ks->keys, 0, sizeof(ks->keys));
     memset(ks->scripts, 0, sizeof(ks->scripts));
     memset(ks->watching, 0, sizeof(ks->watching));
+    keystore_init_zeroed(ks);
+}
+
+void keystore_init_zeroed(struct basic_keystore *ks)
+{
+    zcl_mutex_init(&ks->cs);
     ks->num_keys = 0;
     ks->num_scripts = 0;
     ks->num_watching = 0;
