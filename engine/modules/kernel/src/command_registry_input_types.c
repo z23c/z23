@@ -447,14 +447,36 @@ static bool cr_match_wallet_unlock(const char *path, const char *key,
     return true;
 }
 
+/* fleet.bundle.fetch: the package size (1 B to the 5 MiB bundle cap) and the
+ * bounded wait. Leaf-scoped because `size` and `timeout_s` are generic. */
+static bool cr_match_fleet_bundle_ints(const char *path, const char *key,
+                                       const struct json_value *value,
+                                       bool *type_ok)
+{
+    if (strcmp(path, "fleet.bundle.fetch") != 0)
+        return false;
+    if (strcmp(key, "size") == 0)
+        *type_ok = cr_int_range(value, 1, 5242880);
+    else if (strcmp(key, "timeout_s") == 0)
+        *type_ok = cr_int_range(value, 1, 1800);
+    else
+        return false;
+    return true;
+}
+
+static bool cr_match_scoped_ints(const char *path, const char *key,
+                                 const struct json_value *value, bool *type_ok)
+{
+    return cr_match_wallet_unlock(path, key, value, type_ok) ||
+           cr_match_wiki_chunk_ints(path, key, value, type_ok) ||
+           cr_match_vanity_ints(path, key, value, type_ok) ||
+           cr_match_fleet_bundle_ints(path, key, value, type_ok);
+}
+
 static bool cr_match_leaf_ints(const char *path, const char *key,
                                const struct json_value *value, bool *type_ok)
 {
-    if (cr_match_wallet_unlock(path, key, value, type_ok))
-        return true;
-    if (cr_match_wiki_chunk_ints(path, key, value, type_ok))
-        return true;
-    if (cr_match_vanity_ints(path, key, value, type_ok))
+    if (cr_match_scoped_ints(path, key, value, type_ok))
         return true;
     if (strcmp(path, "dev.land.attach_publish") == 0 && strcmp(key, "wait_ms") == 0) {
         *type_ok = cr_int_range(value, 1, 900000);

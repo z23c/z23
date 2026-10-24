@@ -607,6 +607,7 @@ int test_zcode_swarm(void)
     failures += t_swarm_receipt_session();
     failures += t_swarm_disconnect_threshold();
     failures += t_swarm_blob_transfer();
+    failures += t_swarm_bundle_transfer();
     failures += t_swarm_provider_restricted();
     failures += t_swarm_bounded_provider();
     failures += t_swarm_legacy_record();

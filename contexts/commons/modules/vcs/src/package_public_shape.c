@@ -9,6 +9,7 @@
 #include "base/safe_alloc.h"
 #include "platform/positioned_file.h"
 #include "vcs/blob_store.h"
+#include "vcs/bundle_carry.h"
 #include "vcs/fastobj_carrier.h"
 #include "vcs/package_deps.h"
 #include "vcs/package_manifest.h"
@@ -61,6 +62,7 @@ const char *vcs_package_public_shape_string(
     case VCS_PACKAGE_PUBLIC_RELEASE: return "release";
     case VCS_PACKAGE_PUBLIC_SOURCE_BUNDLE: return "source-bundle";
     case VCS_PACKAGE_PUBLIC_BLOB: return "blob";
+    case VCS_PACKAGE_PUBLIC_BUNDLE: return "bundle";
     case VCS_PACKAGE_PUBLIC_WORK_CONTEXT: return "work-context";
     case VCS_PACKAGE_PUBLIC_WORK_OUTPUT: return "work-output";
     case VCS_PACKAGE_PUBLIC_TASK_CONTEXT: return "task-context";
@@ -431,6 +433,17 @@ static bool shape_is_blob(const struct vcs_package_manifest *m)
            m->files[0].size <= (uint64_t)VCS_BLOB_MAX_BYTES;
 }
 
+/* The two bytes-only one-file shapes: the 8 KiB blob and the 5 MiB bundle. */
+static enum vcs_package_public_shape shape_bytes_only(
+    const struct vcs_package_manifest *m)
+{
+    if (shape_is_blob(m))
+        return VCS_PACKAGE_PUBLIC_BLOB;
+    if (vcs_bundle_manifest_is_bundle(m))
+        return VCS_PACKAGE_PUBLIC_BUNDLE;
+    return VCS_PACKAGE_PUBLIC_REFUSED;
+}
+
 static bool shape_is_work_output(const struct vcs_package_manifest *m)
 {
     return m->count == 2 &&
@@ -501,6 +514,7 @@ static void shape_eval_local(struct vcs_package_store *store,
     }
 
     char license[VCS_PACKAGE_RELEASE_LICENSE_MAX + 1u];
+    enum vcs_package_public_shape bytes_shape = shape_bytes_only(&m);
     long release_index = shape_find(&m, VCS_PACKAGE_TRANSPORT_RELEASE_PATH);
     if (release_index >= 0) {
         out->rule = "release-unverified";
@@ -511,8 +525,8 @@ static void shape_eval_local(struct vcs_package_store *store,
         out->rule = "source-bundle-authority-missing";
         if (shape_source_bundle(store, root, &m, &out->rule))
             out->shape = VCS_PACKAGE_PUBLIC_SOURCE_BUNDLE;
-    } else if (shape_is_blob(&m)) {
-        out->shape = VCS_PACKAGE_PUBLIC_BLOB;
+    } else if (bytes_shape != VCS_PACKAGE_PUBLIC_REFUSED) {
+        out->shape = bytes_shape;
     } else if (shape_find(&m, VCS_ZCODE_WORK_CONTEXT_PATH) >= 0) {
         out->shape = VCS_PACKAGE_PUBLIC_WORK_CONTEXT;
     } else if (shape_is_work_output(&m)) {

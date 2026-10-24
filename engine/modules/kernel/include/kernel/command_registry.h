@@ -139,7 +139,7 @@ enum zcl_command_latency {
  * this at compile time (size guard). */
 /* Sized above the declarative catalog with deliberate growth room. The config
  * catalog has a compile-time assertion against this fixed side table. */
-#define ZCL_COMMAND_LATENCY_TABLE_MAX 1024U
+#define ZCL_COMMAND_LATENCY_TABLE_MAX 1280U
 
 /* Maps a leaf's declared `latency` enum to its dispatch budget in ms. Pure,
  * total: an out-of-range value falls back to the PERSISTENT/900ms ceiling,

@@ -1963,6 +1963,10 @@ path exists), runs no `ssh` or `scp`, needs no `--host`, and returns
 `READY <lane> <commit> bundle_sha256=<hex>` line that names no local path. Carry the file to the queue host and run
 `dev land receive --bundle=PATH --lane=NAME` there.
 
+No ssh between the machines, or a contributor with no access? Hand the bundle
+over onion instead: `z23 fleet bundle offer` then `fleet bundle fetch` (see
+"Hand a commit over onion" in docs/agent/FLEET_BOARD.md), then `receive --bundle`.
+
 ## 7. Continue while deep proof runs
 
 After a push, fetch current upstream and continue to the next unfinished item.

@@ -601,6 +601,31 @@ board exists to remove.
 so existing agent scripts keep working. A non-empty explicit argument wins;
 an empty argument still uses the environment default.
 
+### Hand a commit over onion
+
+A board post carries only a pointer (2048 bytes at most), so a commit travels as
+a git bundle file (1 byte to 5 MiB) over the package swarm the nodes already
+share, not over scp and ssh. Nothing here needs ssh between machines.
+
+1. On the sending node, `z23 fleet bundle offer --file=<abs path>` stores the
+   file pinned (it never evicts another package) and announces it. The reply
+   names `root`, `sha256` (of the file bytes), `size` and, if the node has one,
+   its own onion name.
+2. Post a READY note naming `root`, `sha256` and `size`, signed as any board
+   post is. The operator posts it by hand for now.
+3. On the receiving node, `z23 fleet bundle fetch --root=<hex> --sha256=<hex>
+   --size=<n> --out=<abs path> [--peer=<name>.onion] [--timeout_s=N]` fetches
+   the root (default wait 300 s, at most 1800), recomputes the sha256, and only
+   on a match creates `--out` with mode 0600. `--out` must not exist. A
+   mismatch writes nothing. `--peer` accepts an onion name only; an IP address
+   is refused.
+4. `z23-dev dev land receive --bundle=<out>` is unchanged. The fetch never
+   executes the bytes.
+
+The carrier is an unsigned content.v2 package with one file named `bundle`; it
+proves bytes only, so the sha256 in the signed post is what binds it to the
+sender's intent.
+
 ### Triggers posting to the board
 
 `fleet.triggers.check`'s `board_post` action (see [FLEET_TRIGGERS.md](FLEET_TRIGGERS.md))

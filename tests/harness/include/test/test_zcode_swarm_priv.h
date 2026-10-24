@@ -136,6 +136,10 @@ int t_swarm_serving_and_allowance(void);
 int t_swarm_disconnect_threshold(void);
 int t_swarm_blob_transfer(void);
 
+/* test_zcode_swarm_bundle.c — fleet bundle offer/fetch round trips over
+ * the unchanged swarm wire, sha256 verification and the refusals. */
+int t_swarm_bundle_transfer(void);
+
 /* test_zcode_swarm_provider_and_receipts.c — provider-directed
  * downloads, the bounded-provider/legacy-record/event-driven-schedule
  * paths, dual-signed receipt exchange and session, and peer_offer. */

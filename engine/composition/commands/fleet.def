@@ -963,6 +963,63 @@ ZCL_COMMAND_READY_READ(
     ZCL_COMMAND_CAP_DEV_STATE_READ, ZCL_COMMAND_TRAIT_IDEMPOTENT,
     ZCL_COMMAND_TRANSPORT_NATIVE, zcl_native_handle_fleet_mission_board)
 
+/* Hand a bounded file (a git bundle) to another node over the package
+ * swarm instead of scp+ssh. The carrier is an unsigned content.v2 package
+ * (vcs/bundle_carry.h); the land identity is the file's sha256, which the
+ * fetching side recomputes. Neither leaf executes the bytes. Both run in
+ * the node (its store and swarm engine), so the CLI forwards over RPC. */
+ZCL_COMMAND_BRANCH("fleet.bundle", "fleet",
+                   "Hand a file to a node",
+                   ZCL_COMMAND_LAYER_OPS)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.bundle.offer", "fleet.bundle", "",
+    "Offer a bundle file to the swarm and name its root and sha256",
+    "Puts one file (1 byte to 5 MiB) into this node's package store as an "
+    "unsigned bundle package, pinned and never evicting anything, and "
+    "announces it to the swarm peers. Returns the package root, the sha256 "
+    "of the file bytes, the size and, when the node has one, its own onion "
+    "name. A missing or unreadable file, one over 5 MiB, a store quota or "
+    "eviction pressure, and package hosting being disabled are each "
+    "refused by name. Post root, sha256 and size on the board; the "
+    "receiver runs `fleet bundle fetch`.",
+    0,
+    "fleet,bundle,offer,swarm,onion,land,git,share,pointer",
+    "zcl.fleet_bundle_offer.input.v1", "zcl.fleet_bundle_offer.v1",
+    "file", "file",
+    "z23 fleet bundle offer --file=/abs/path/change.bundle",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_IDEMPOTENT,
+    zcl_native_handle_fleet_bundle_offer)
+
+ZCL_COMMAND_READY_COMMAND(
+    "fleet.bundle.fetch", "fleet.bundle", "",
+    "Fetch an offered bundle by root and verify its sha256",
+    "Asks the swarm for one package root, waits up to timeout_s (default "
+    "300, at most 1800), recomputes the sha256 of the received file and, "
+    "only on a match with the sha256 named, creates `out` (mode 0600, "
+    "never overwriting). A sha256 mismatch writes nothing. out must not "
+    "exist; size must be 1 to 5242880 and equal the package's size; an "
+    "optional peer must be a v3 .onion name (an IP address is refused) and "
+    "is added through the node's addnode path. The bytes are never "
+    "executed: run `dev land receive --bundle=<out>` next.",
+    0,
+    "fleet,bundle,fetch,swarm,onion,land,git,sha256,verify",
+    "zcl.fleet_bundle_fetch.input.v1", "zcl.fleet_bundle_fetch.v1",
+    "root,sha256,size,out,peer,timeout_s", "root,sha256,size,out",
+    "z23 fleet bundle fetch --root=<64hex> --sha256=<64hex> --size=1234 --out=/abs/new.bundle",
+    ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
+    ZCL_COMMAND_RISK_APP_WRITE, ZCL_COMMAND_SCOPE_NODE,
+    ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,
+    ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_MODERATE,
+    ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_NONE, ZCL_COMMAND_TRAIT_NONE,
+    zcl_native_handle_fleet_bundle_fetch)
+
 /* z23-toolgen:begin commands - generated, do not edit */
 ZCL_COMMAND_BRANCH("fleet.nodes", "fleet",
     "Inspect the recorded peers",

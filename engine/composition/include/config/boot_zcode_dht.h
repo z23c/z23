@@ -172,5 +172,6 @@ bool boot_zcode_dht_publication_snapshot_rpc(
     const struct json_value *params, bool help, struct json_value *result);
 void boot_zcode_dht_register_rpc(struct rpc_table *table);
 void boot_zcode_package_register_rpc(struct rpc_table *table);
+void boot_fleet_bundle_register_rpc(struct rpc_table *table);
 
 #endif /* ZCL_CONFIG_BOOT_ZCODE_DHT_H */

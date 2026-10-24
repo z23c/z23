@@ -419,4 +419,5 @@ void boot_zcode_package_register_rpc(struct rpc_table *table)
     };
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); i++)
         rpc_table_must_append(table, &commands[i]);
+    boot_fleet_bundle_register_rpc(table);
 }
