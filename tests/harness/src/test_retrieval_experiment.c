@@ -526,7 +526,9 @@ static int case_integer_profile_identity(void)
     return failures;
 }
 
-static int case_feature_snapshot_and_projection(void)
+static int rx_feature_root_identity(
+    struct zcl_retrieval_feature_snapshot_v1 *snapshot,
+    struct zcl_retrieval_feature_row_v1 rows[4], bool fixture)
 {
     int failures = 0;
     static const uint8_t expected_root[32] = {
@@ -535,55 +537,75 @@ static int case_feature_snapshot_and_projection(void)
         0x63, 0x0f, 0x8f, 0x43, 0x98, 0x65, 0xde, 0x78,
         0x5c, 0x6e, 0x7f, 0xfb, 0x33, 0x7b, 0x24, 0xba,
     };
-    struct zcl_retrieval_profile_v1 profile;
-    struct zcl_retrieval_feature_snapshot_v1 snapshot;
-    struct zcl_retrieval_feature_row_v1 rows[4];
-    bool fixture = rx_feature_fixture(&snapshot, rows);
-    rx_profile_fixture(&profile);
     uint8_t root[32], changed[32];
     enum zcl_retrieval_experiment_error error =
-        zcl_retrieval_feature_snapshot_root(&snapshot, rows, root);
+        zcl_retrieval_feature_snapshot_root(snapshot, rows, root);
     RX_CHECK("snapshot root matches fixed canonical SHA3 vector",
              fixture && error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
              memcmp(root, expected_root, sizeof(root)) == 0);
     rows[2].feature_bp[ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY]++;
     bool rerooted = zcl_retrieval_feature_snapshot_root(
-        &snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+        snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
     RX_CHECK("feature observation changes snapshot root",
              fixture && error == ZCL_RETRIEVAL_EXPERIMENT_OK && rerooted &&
              memcmp(root, changed, 32u) != 0);
     rows[2].feature_bp[ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY]--;
-    size_t indices[4] = {99u, 99u, 99u, 99u};
-    struct zcl_retrieval_profile_report report;
-    error = zcl_retrieval_profile_project(
-        &profile, &snapshot, rows, indices, 4u, &report);
+    return failures;
+}
+
+static int rx_feature_rank_and_package(
+    struct zcl_retrieval_profile_v1 *profile,
+    struct zcl_retrieval_feature_snapshot_v1 *snapshot,
+    struct zcl_retrieval_feature_row_v1 rows[4], size_t indices[4],
+    struct zcl_retrieval_profile_report *report)
+{
+    int failures = 0;
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_project(
+            profile, snapshot, rows, indices, 4u, report);
     RX_CHECK("integer profile deterministically reranks the bounded window",
              error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
              indices[0] == 1u && indices[1] == 2u &&
-             report.changed_positions_at_top == 2u &&
-             report.baseline_context_bytes_at_top == 200u &&
-             report.candidate_context_bytes_at_top == 200u &&
-             report.retained_set_preserved &&
-             !report.used_baseline_fallback);
+             report->changed_positions_at_top == 2u &&
+             report->baseline_context_bytes_at_top == 200u &&
+             report->candidate_context_bytes_at_top == 200u &&
+             report->retained_set_preserved &&
+             !report->used_baseline_fallback);
 
     const uint16_t package = ZCL_RETRIEVAL_FEATURE_BIT(
         ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP);
-    profile.feature_mask |= package;
-    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP] = 7u;
-    snapshot.available_features |= package;
+    profile->feature_mask |= package;
+    profile->weight_bp[ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP] = 7u;
+    snapshot->available_features |= package;
     for (size_t i = 0; i < 4u; i++) rows[i].observed_features |= package;
     rows[3].feature_bp[ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP] = 10000u;
     error = zcl_retrieval_profile_project(
-        &profile, &snapshot, rows, indices, 4u, &report);
+        profile, snapshot, rows, indices, 4u, report);
     RX_CHECK("benefit after context penalty uses checked signed arithmetic",
              error == ZCL_RETRIEVAL_EXPERIMENT_OK && indices[0] == 1u);
-    profile.feature_mask &= (uint16_t)~package;
-    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP] = 0u;
-    snapshot.available_features &= (uint16_t)~package;
+    profile->feature_mask &= (uint16_t)~package;
+    profile->weight_bp[ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP] = 0u;
+    snapshot->available_features &= (uint16_t)~package;
     for (size_t i = 0; i < 4u; i++) {
         rows[i].observed_features &= (uint16_t)~package;
         rows[i].feature_bp[ZCL_RETRIEVAL_FEATURE_PACKAGE_OWNERSHIP] = 0u;
     }
+    return failures;
+}
+
+static int case_feature_snapshot_and_projection(void)
+{
+    int failures = 0;
+    struct zcl_retrieval_profile_v1 profile;
+    struct zcl_retrieval_feature_snapshot_v1 snapshot;
+    struct zcl_retrieval_feature_row_v1 rows[4];
+    bool fixture = rx_feature_fixture(&snapshot, rows);
+    rx_profile_fixture(&profile);
+    failures += rx_feature_root_identity(&snapshot, rows, fixture);
+    size_t indices[4] = {99u, 99u, 99u, 99u};
+    struct zcl_retrieval_profile_report report;
+    failures += rx_feature_rank_and_package(
+        &profile, &snapshot, rows, indices, &report);
 
     struct zcl_retrieval_profile_report sentinel;
     memset(&sentinel, 0x6d, sizeof(sentinel));
@@ -597,8 +619,9 @@ static int case_feature_snapshot_and_projection(void)
     }
     snapshot.available_features &= (uint16_t)~graph;
     snapshot.saturated_features = graph;
-    error = zcl_retrieval_profile_project(
-        &profile, &snapshot, rows, untouched, 4u, &report);
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_project(
+            &profile, &snapshot, rows, untouched, 4u, &report);
     RX_CHECK("saturated required evidence is incomplete and atomic",
              error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
              untouched[0] == 91u &&
@@ -617,9 +640,109 @@ static int case_feature_snapshot_and_projection(void)
              report.used_baseline_fallback &&
              indices[0] == 0u && indices[1] == 1u);
     rows[0].path = "../escape.c";
+    uint8_t changed[32];
     RX_CHECK("noncanonical feature path is refused",
-             zcl_retrieval_feature_snapshot_root(&snapshot, rows, changed) ==
+             zcl_retrieval_feature_snapshot_root(
+                 &snapshot, rows, changed) ==
                  ZCL_RETRIEVAL_EXPERIMENT_BINDING);
+    return failures;
+}
+
+static int rx_refusal_scope_checks(
+    struct zcl_retrieval_profile_v1 *profile,
+    struct zcl_retrieval_feature_snapshot_v1 *snapshot,
+    struct zcl_retrieval_feature_row_v1 rows[4], size_t indices[4],
+    struct zcl_retrieval_profile_report *report,
+    const struct zcl_retrieval_profile_report *sentinel)
+{
+    int failures = 0;
+    bool fixture = rx_feature_fixture(snapshot, rows);
+    uint8_t root[32], changed[32];
+    bool rooted = zcl_retrieval_feature_snapshot_root(
+        snapshot, rows, root) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+
+    snapshot->identifier_df_max++;
+    bool rerooted = zcl_retrieval_feature_snapshot_root(
+        snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_project(
+            profile, snapshot, rows, indices, 4u, report);
+    RX_CHECK("rarity extraction scope is rooted and must match profile",
+             fixture && rooted && rerooted &&
+             memcmp(root, changed, sizeof(root)) != 0 &&
+             error == ZCL_RETRIEVAL_EXPERIMENT_BINDING &&
+             indices[0] == 81u &&
+             memcmp(report, sentinel, sizeof(*report)) == 0);
+
+    snapshot->identifier_df_max--;
+    snapshot->graph_depth++;
+    error = zcl_retrieval_profile_project(
+        profile, snapshot, rows, indices, 4u, report);
+    RX_CHECK("graph extraction scope must match profile",
+             error == ZCL_RETRIEVAL_EXPERIMENT_BINDING &&
+             indices[0] == 81u &&
+             memcmp(report, sentinel, sizeof(*report)) == 0);
+
+    (void)rx_feature_fixture(snapshot, rows);
+    rows[2].original_bm25_rank++;
+    error = zcl_retrieval_profile_project(
+        profile, snapshot, rows, indices, 4u, report);
+    RX_CHECK("declared rank must equal exact baseline row order",
+             error == ZCL_RETRIEVAL_EXPERIMENT_BINDING &&
+             indices[0] == 81u &&
+             memcmp(report, sentinel, sizeof(*report)) == 0);
+    return failures;
+}
+
+static int rx_refusal_missing_checks(
+    struct zcl_retrieval_profile_v1 *profile,
+    struct zcl_retrieval_feature_snapshot_v1 *snapshot,
+    struct zcl_retrieval_feature_row_v1 rows[4], size_t indices[4],
+    struct zcl_retrieval_profile_report *report,
+    const struct zcl_retrieval_profile_report *sentinel)
+{
+    int failures = 0;
+    uint8_t root[32], changed[32];
+    (void)rx_feature_fixture(snapshot, rows);
+    bool complete_rooted = zcl_retrieval_feature_snapshot_root(
+        snapshot, rows, root) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    snapshot->ranking_complete = false;
+    bool rebound = rx_rebind_baseline(snapshot, rows);
+    bool incomplete_rooted = zcl_retrieval_feature_snapshot_root(
+        snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    RX_CHECK("ranking truth state changes snapshot identity",
+             complete_rooted && rebound && incomplete_rooted &&
+             memcmp(root, changed, sizeof(root)) != 0);
+
+    (void)rx_feature_fixture(snapshot, rows);
+    const uint16_t graph = ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY);
+    snapshot->available_features &= (uint16_t)~graph;
+    snapshot->graph_depth = 0u;
+    for (size_t i = 0; i < 4u; i++) {
+        rows[i].observed_features &= (uint16_t)~graph;
+        rows[i].feature_bp[ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY] = 0u;
+    }
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_project(
+            profile, snapshot, rows, indices, 4u, report);
+    bool missing_rooted = zcl_retrieval_feature_snapshot_root(
+        snapshot, rows, root) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    RX_CHECK("missing required evidence remains incomplete and atomic",
+             missing_rooted && error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
+             indices[0] == 81u &&
+             memcmp(report, sentinel, sizeof(*report)) == 0);
+    snapshot->saturated_features = graph;
+    snapshot->graph_depth = 1u;
+    bool saturated_rooted = zcl_retrieval_feature_snapshot_root(
+        snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
+    error = zcl_retrieval_profile_project(
+        profile, snapshot, rows, indices, 4u, report);
+    RX_CHECK("missing and saturated evidence have distinct identities",
+             saturated_rooted && error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
+             memcmp(root, changed, sizeof(root)) != 0 &&
+             indices[0] == 81u &&
+             memcmp(report, sentinel, sizeof(*report)) == 0);
     return failures;
 }
 
@@ -630,85 +753,16 @@ static int case_feature_refusals_and_aliases(void)
     struct zcl_retrieval_feature_snapshot_v1 snapshot;
     struct zcl_retrieval_feature_row_v1 rows[4];
     rx_profile_fixture(&profile);
-    bool fixture = rx_feature_fixture(&snapshot, rows);
-    uint8_t root[32], changed[32];
-    bool rooted = zcl_retrieval_feature_snapshot_root(
-        &snapshot, rows, root) == ZCL_RETRIEVAL_EXPERIMENT_OK;
-
-    snapshot.identifier_df_max++;
-    bool rerooted = zcl_retrieval_feature_snapshot_root(
-        &snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
     size_t indices[4] = {81u, 82u, 83u, 84u};
     struct zcl_retrieval_profile_report report, sentinel;
     memset(&sentinel, 0x6d, sizeof(sentinel));
     report = sentinel;
-    enum zcl_retrieval_experiment_error error = zcl_retrieval_profile_project(
-        &profile, &snapshot, rows, indices, 4u, &report);
-    RX_CHECK("rarity extraction scope is rooted and must match profile",
-             fixture && rooted && rerooted &&
-             memcmp(root, changed, sizeof(root)) != 0 &&
-             error == ZCL_RETRIEVAL_EXPERIMENT_BINDING &&
-             indices[0] == 81u &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
+    failures += rx_refusal_scope_checks(
+        &profile, &snapshot, rows, indices, &report, &sentinel);
+    failures += rx_refusal_missing_checks(
+        &profile, &snapshot, rows, indices, &report, &sentinel);
 
-    snapshot.identifier_df_max--;
-    snapshot.graph_depth++;
-    error = zcl_retrieval_profile_project(
-        &profile, &snapshot, rows, indices, 4u, &report);
-    RX_CHECK("graph extraction scope must match profile",
-             error == ZCL_RETRIEVAL_EXPERIMENT_BINDING &&
-             indices[0] == 81u &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
-
-    (void)rx_feature_fixture(&snapshot, rows);
-    rows[2].original_bm25_rank++;
-    error = zcl_retrieval_profile_project(
-        &profile, &snapshot, rows, indices, 4u, &report);
-    RX_CHECK("declared rank must equal exact baseline row order",
-             error == ZCL_RETRIEVAL_EXPERIMENT_BINDING &&
-             indices[0] == 81u &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
-
-    (void)rx_feature_fixture(&snapshot, rows);
-    bool complete_rooted = zcl_retrieval_feature_snapshot_root(
-        &snapshot, rows, root) == ZCL_RETRIEVAL_EXPERIMENT_OK;
-    snapshot.ranking_complete = false;
-    bool rebound = rx_rebind_baseline(&snapshot, rows);
-    bool incomplete_rooted = zcl_retrieval_feature_snapshot_root(
-        &snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
-    RX_CHECK("ranking truth state changes snapshot identity",
-             complete_rooted && rebound && incomplete_rooted &&
-             memcmp(root, changed, sizeof(root)) != 0);
-
-    (void)rx_feature_fixture(&snapshot, rows);
-    const uint16_t graph = ZCL_RETRIEVAL_FEATURE_BIT(
-        ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY);
-    snapshot.available_features &= (uint16_t)~graph;
-    snapshot.graph_depth = 0u;
-    for (size_t i = 0; i < 4u; i++) {
-        rows[i].observed_features &= (uint16_t)~graph;
-        rows[i].feature_bp[ZCL_RETRIEVAL_FEATURE_GRAPH_PROXIMITY] = 0u;
-    }
-    error = zcl_retrieval_profile_project(
-        &profile, &snapshot, rows, indices, 4u, &report);
-    bool missing_rooted = zcl_retrieval_feature_snapshot_root(
-        &snapshot, rows, root) == ZCL_RETRIEVAL_EXPERIMENT_OK;
-    RX_CHECK("missing required evidence remains incomplete and atomic",
-             missing_rooted && error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
-             indices[0] == 81u &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
-    snapshot.saturated_features = graph;
-    snapshot.graph_depth = 1u;
-    bool saturated_rooted = zcl_retrieval_feature_snapshot_root(
-        &snapshot, rows, changed) == ZCL_RETRIEVAL_EXPERIMENT_OK;
-    error = zcl_retrieval_profile_project(
-        &profile, &snapshot, rows, indices, 4u, &report);
-    RX_CHECK("missing and saturated evidence have distinct identities",
-             saturated_rooted && error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
-             memcmp(root, changed, sizeof(root)) != 0 &&
-             indices[0] == 81u &&
-             memcmp(&report, &sentinel, sizeof(report)) == 0);
-
+    uint8_t changed[32];
     (void)rx_feature_fixture(&snapshot, rows);
     rows[1].path = rows[0].path;
     RX_CHECK("duplicate snapshot paths are refused",
@@ -730,10 +784,11 @@ static int case_feature_refusals_and_aliases(void)
     (void)rx_feature_fixture(&snapshot, rows);
     (void)snprintf(index_alias.path, sizeof(index_alias.path), "lib/a.c");
     rows[0].path = index_alias.path;
-    rebound = rx_rebind_baseline(&snapshot, rows);
+    bool rebound = rx_rebind_baseline(&snapshot, rows);
     report = sentinel;
-    error = zcl_retrieval_profile_project(
-        &profile, &snapshot, rows, index_alias.indices, 4u, &report);
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_project(
+            &profile, &snapshot, rows, index_alias.indices, 4u, &report);
     RX_CHECK("index output cannot overwrite indirect path storage",
              rebound && error == ZCL_RETRIEVAL_EXPERIMENT_ALIAS &&
              strcmp(index_alias.path, "lib/a.c") == 0 &&
@@ -851,6 +906,125 @@ static int case_context_snapshot_and_profile_proposal(void)
     return failures;
 }
 
+static int rx_replay_first_and_repeat(
+    const struct zcl_retrieval_profile_v1 *profile,
+    const struct zcl_retrieval_profile_replay_task_v1 *task,
+    struct zcl_retrieval_profile_replay_candidate_v1 *first,
+    struct zcl_retrieval_profile_replay_candidate_v1 *second,
+    struct zcl_retrieval_profile_replay_report_v1 *report,
+    struct zcl_retrieval_profile_replay_report_v1 *repeated)
+{
+    int failures = 0;
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_replay_project(
+            profile, task, 1u, first, 1u, report);
+    RX_CHECK("frozen replay reranks only the sealed BM25 rows",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             report->schema_version == ZCL_RETRIEVAL_PROFILE_REPLAY_VERSION &&
+             report->task_count == 1u &&
+             strcmp(first->ranked[0].path, "f05.c") == 0 &&
+             report->changed_positions_at_5 == 5u &&
+             report->fallback_tasks == 0u &&
+             report->top20_membership_preserved &&
+             report->full_retained_set_preserved &&
+             report->context_ceiling_preserved);
+    RX_CHECK("frozen replay erases proposer scope labels",
+             !first->ranked[0].in_scope_available &&
+             !first->ranked[1].in_scope_available);
+    error = zcl_retrieval_profile_replay_project(
+        profile, task, 1u, second, 1u, repeated);
+    RX_CHECK("frozen replay roots and ranking are deterministic",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             memcmp(report->replay_hypothesis_root,
+                    repeated->replay_hypothesis_root, 32u) == 0 &&
+             memcmp(report->candidate_batch_root,
+                    repeated->candidate_batch_root, 32u) == 0 &&
+             same_order(first->ranked, second->ranked, 6u));
+    return failures;
+}
+
+static int rx_replay_mutation_and_refusals(
+    struct zcl_retrieval_ranked_file baseline[6],
+    struct zcl_retrieval_profile_v1 *profile,
+    struct zcl_retrieval_profile_replay_task_v1 *task,
+    struct zcl_retrieval_profile_replay_candidate_v1 *first,
+    struct zcl_retrieval_profile_replay_candidate_v1 *second,
+    struct zcl_retrieval_profile_replay_report_v1 *report,
+    struct zcl_retrieval_profile_replay_report_v1 *repeated)
+{
+    int failures = 0;
+    uint8_t original_hypothesis[32];
+    memcpy(original_hypothesis, report->replay_hypothesis_root, 32u);
+    baseline[5].context_bytes++;
+    enum zcl_retrieval_experiment_error error =
+        zcl_retrieval_profile_replay_project(
+            profile, task, 1u, second, 1u, repeated);
+    RX_CHECK("baseline evidence mutation moves replay hypothesis",
+             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
+             memcmp(original_hypothesis,
+                    repeated->replay_hypothesis_root, 32u) != 0);
+    baseline[5].context_bytes--;
+
+    struct zcl_retrieval_profile_replay_candidate_v1 candidate_sentinel;
+    struct zcl_retrieval_profile_replay_report_v1 report_sentinel;
+    memset(&candidate_sentinel, 0xa5, sizeof(candidate_sentinel));
+    memset(&report_sentinel, 0x5a, sizeof(report_sentinel));
+    *first = candidate_sentinel;
+    *report = report_sentinel;
+    profile->top_k = 4u;
+    error = zcl_retrieval_profile_replay_project(
+        profile, task, 1u, first, 1u, report);
+    RX_CHECK("fixed at-five evidence refuses another top-k atomically",
+             error == ZCL_RETRIEVAL_EXPERIMENT_PARAMETER &&
+             memcmp(first, &candidate_sentinel, sizeof(*first)) == 0 &&
+             memcmp(report, &report_sentinel, sizeof(*report)) == 0);
+    profile->top_k = 5u;
+    profile->feature_mask |= ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_PATH);
+    profile->weight_bp[ZCL_RETRIEVAL_FEATURE_PATH] = 1u;
+    error = zcl_retrieval_profile_replay_project(
+        profile, task, 1u, first, 1u, report);
+    RX_CHECK("unavailable frozen feature evidence refuses atomically",
+             error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
+             memcmp(first, &candidate_sentinel, sizeof(*first)) == 0 &&
+             memcmp(report, &report_sentinel, sizeof(*report)) == 0);
+    profile->feature_mask &= (uint16_t)~ZCL_RETRIEVAL_FEATURE_BIT(
+        ZCL_RETRIEVAL_FEATURE_PATH);
+    profile->weight_bp[ZCL_RETRIEVAL_FEATURE_PATH] = 0u;
+    task->baseline_count = 4u;
+    error = zcl_retrieval_profile_replay_project(
+        profile, task, 1u, first, 1u, report);
+    RX_CHECK("fewer than five replay rows cannot claim at-five evidence",
+             error == ZCL_RETRIEVAL_EXPERIMENT_SHAPE &&
+             memcmp(first, &candidate_sentinel, sizeof(*first)) == 0 &&
+             memcmp(report, &report_sentinel, sizeof(*report)) == 0);
+    task->baseline_count = 6u;
+    task->task_id = "_hidden";
+    error = zcl_retrieval_profile_replay_project(
+        profile, task, 1u, first, 1u, report);
+    RX_CHECK("noncanonical replay task identity is refused atomically",
+             error == ZCL_RETRIEVAL_EXPERIMENT_SHAPE &&
+             memcmp(first, &candidate_sentinel, sizeof(*first)) == 0 &&
+             memcmp(report, &report_sentinel, sizeof(*report)) == 0);
+
+    struct zcl_retrieval_profile_replay_task_v1 pair[2] = {*task, *task};
+    pair[0].task_id = "first";
+    pair[1].task_id = "_late_invalid";
+    struct zcl_retrieval_profile_replay_candidate_v1 pair_candidates[2];
+    struct zcl_retrieval_profile_replay_candidate_v1 pair_sentinel[2];
+    memset(pair_sentinel, 0x3c, sizeof(pair_sentinel));
+    memcpy(pair_candidates, pair_sentinel, sizeof(pair_candidates));
+    *report = report_sentinel;
+    error = zcl_retrieval_profile_replay_project(
+        profile, pair, 2u, pair_candidates, 2u, report);
+    RX_CHECK("late second-task refusal preserves every output atomically",
+             error == ZCL_RETRIEVAL_EXPERIMENT_SHAPE &&
+             memcmp(pair_candidates, pair_sentinel,
+                    sizeof(pair_candidates)) == 0 &&
+             memcmp(report, &report_sentinel, sizeof(*report)) == 0);
+    return failures;
+}
+
 static int case_frozen_profile_replay(void)
 {
     int failures = 0;
@@ -876,100 +1050,10 @@ static int case_frozen_profile_replay(void)
     };
     struct zcl_retrieval_profile_replay_candidate_v1 first, second;
     struct zcl_retrieval_profile_replay_report_v1 report, repeated;
-    enum zcl_retrieval_experiment_error error =
-        zcl_retrieval_profile_replay_project(
-            &profile, &task, 1u, &first, 1u, &report);
-    RX_CHECK("frozen replay reranks only the sealed BM25 rows",
-             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
-             report.schema_version == ZCL_RETRIEVAL_PROFILE_REPLAY_VERSION &&
-             report.task_count == 1u &&
-             strcmp(first.ranked[0].path, "f05.c") == 0 &&
-             report.changed_positions_at_5 == 5u &&
-             report.fallback_tasks == 0u &&
-             report.top20_membership_preserved &&
-             report.full_retained_set_preserved &&
-             report.context_ceiling_preserved);
-    RX_CHECK("frozen replay erases proposer scope labels",
-             !first.ranked[0].in_scope_available &&
-             !first.ranked[1].in_scope_available);
-    error = zcl_retrieval_profile_replay_project(
-        &profile, &task, 1u, &second, 1u, &repeated);
-    RX_CHECK("frozen replay roots and ranking are deterministic",
-             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
-             memcmp(report.replay_hypothesis_root,
-                    repeated.replay_hypothesis_root, 32u) == 0 &&
-             memcmp(report.candidate_batch_root,
-                    repeated.candidate_batch_root, 32u) == 0 &&
-             same_order(first.ranked, second.ranked, 6u));
-
-    uint8_t original_hypothesis[32];
-    memcpy(original_hypothesis, report.replay_hypothesis_root, 32u);
-    baseline[5].context_bytes++;
-    error = zcl_retrieval_profile_replay_project(
-        &profile, &task, 1u, &second, 1u, &repeated);
-    RX_CHECK("baseline evidence mutation moves replay hypothesis",
-             error == ZCL_RETRIEVAL_EXPERIMENT_OK &&
-             memcmp(original_hypothesis,
-                    repeated.replay_hypothesis_root, 32u) != 0);
-    baseline[5].context_bytes--;
-
-    struct zcl_retrieval_profile_replay_candidate_v1 candidate_sentinel;
-    struct zcl_retrieval_profile_replay_report_v1 report_sentinel;
-    memset(&candidate_sentinel, 0xa5, sizeof(candidate_sentinel));
-    memset(&report_sentinel, 0x5a, sizeof(report_sentinel));
-    first = candidate_sentinel;
-    report = report_sentinel;
-    profile.top_k = 4u;
-    error = zcl_retrieval_profile_replay_project(
-        &profile, &task, 1u, &first, 1u, &report);
-    RX_CHECK("fixed at-five evidence refuses another top-k atomically",
-             error == ZCL_RETRIEVAL_EXPERIMENT_PARAMETER &&
-             memcmp(&first, &candidate_sentinel, sizeof(first)) == 0 &&
-             memcmp(&report, &report_sentinel, sizeof(report)) == 0);
-    profile.top_k = 5u;
-    profile.feature_mask |= ZCL_RETRIEVAL_FEATURE_BIT(
-        ZCL_RETRIEVAL_FEATURE_PATH);
-    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PATH] = 1u;
-    error = zcl_retrieval_profile_replay_project(
-        &profile, &task, 1u, &first, 1u, &report);
-    RX_CHECK("unavailable frozen feature evidence refuses atomically",
-             error == ZCL_RETRIEVAL_EXPERIMENT_INCOMPLETE &&
-             memcmp(&first, &candidate_sentinel, sizeof(first)) == 0 &&
-             memcmp(&report, &report_sentinel, sizeof(report)) == 0);
-    profile.feature_mask &= (uint16_t)~ZCL_RETRIEVAL_FEATURE_BIT(
-        ZCL_RETRIEVAL_FEATURE_PATH);
-    profile.weight_bp[ZCL_RETRIEVAL_FEATURE_PATH] = 0u;
-    task.baseline_count = 4u;
-    error = zcl_retrieval_profile_replay_project(
-        &profile, &task, 1u, &first, 1u, &report);
-    RX_CHECK("fewer than five replay rows cannot claim at-five evidence",
-             error == ZCL_RETRIEVAL_EXPERIMENT_SHAPE &&
-             memcmp(&first, &candidate_sentinel, sizeof(first)) == 0 &&
-             memcmp(&report, &report_sentinel, sizeof(report)) == 0);
-    task.baseline_count = 6u;
-    task.task_id = "_hidden";
-    error = zcl_retrieval_profile_replay_project(
-        &profile, &task, 1u, &first, 1u, &report);
-    RX_CHECK("noncanonical replay task identity is refused atomically",
-             error == ZCL_RETRIEVAL_EXPERIMENT_SHAPE &&
-             memcmp(&first, &candidate_sentinel, sizeof(first)) == 0 &&
-             memcmp(&report, &report_sentinel, sizeof(report)) == 0);
-
-    struct zcl_retrieval_profile_replay_task_v1 pair[2] = {task, task};
-    pair[0].task_id = "first";
-    pair[1].task_id = "_late_invalid";
-    struct zcl_retrieval_profile_replay_candidate_v1 pair_candidates[2];
-    struct zcl_retrieval_profile_replay_candidate_v1 pair_sentinel[2];
-    memset(pair_sentinel, 0x3c, sizeof(pair_sentinel));
-    memcpy(pair_candidates, pair_sentinel, sizeof(pair_candidates));
-    report = report_sentinel;
-    error = zcl_retrieval_profile_replay_project(
-        &profile, pair, 2u, pair_candidates, 2u, &report);
-    RX_CHECK("late second-task refusal preserves every output atomically",
-             error == ZCL_RETRIEVAL_EXPERIMENT_SHAPE &&
-             memcmp(pair_candidates, pair_sentinel,
-                    sizeof(pair_candidates)) == 0 &&
-             memcmp(&report, &report_sentinel, sizeof(report)) == 0);
+    failures += rx_replay_first_and_repeat(
+        &profile, &task, &first, &second, &report, &repeated);
+    failures += rx_replay_mutation_and_refusals(
+        baseline, &profile, &task, &first, &second, &report, &repeated);
     return failures;
 }
 

@@ -2559,9 +2559,6 @@ tests/harness/src/test_retrieval.c:case_tokenizer:17
 tests/harness/src/test_retrieval_attention_evidence.c:test_retrieval_attention_evidence:18
 tests/harness/src/test_retrieval_comparison.c:case_incomplete_and_guards:26
 tests/harness/src/test_retrieval_comparison.c:case_policy_kat:24
-tests/harness/src/test_retrieval_experiment.c:case_feature_refusals_and_aliases:30
-tests/harness/src/test_retrieval_experiment.c:case_feature_snapshot_and_projection:22
-tests/harness/src/test_retrieval_experiment.c:case_frozen_profile_replay:25
 tests/harness/src/test_retrieval_generation.c:case_aba_generation_join:25
 tests/harness/src/test_retrieval_generation.c:case_projection_binding:77
 tests/harness/src/test_retrieval_paired_evaluation.c:case_root_only_workload:29
