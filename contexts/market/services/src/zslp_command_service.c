@@ -24,6 +24,32 @@
 #define ZSLP_DUST_ZAT 546
 #define ZSLP_MAX_WALLET_COINS 4096
 
+/* Error codes and texts for zslp_command_select_token_inputs. */
+struct zslp_token_pick_errors {
+    int overflow_code;
+    const char *overflow_msg;
+    int no_dest_code;
+    const char *no_dest_msg;
+    int add_code;
+    const char *add_msg;
+    int short_code;
+    const char *short_msg;
+};
+
+static const struct zslp_token_pick_errors ZSLP_SEND_PICK_ERRORS = {
+    -3, "build_token_send_tx: token input overflow",
+    -4, "build_token_send_tx: token input has no address",
+    -5, "build_token_send_tx: selection failed",
+    -6, "build_token_send_tx: insufficient confirmed token balance",
+};
+
+static const struct zslp_token_pick_errors ZSLP_BURN_PICK_ERRORS = {
+    -2, "build_token_burn_tx: token input overflow",
+    -3, "build_token_burn_tx: token input has no change address",
+    -4, "build_token_burn_tx: selection failed",
+    -5, "build_token_burn_tx: insufficient confirmed token balance",
+};
+
 static void zslp_command_token_id_wire(const uint8_t internal[32],
                                        struct uint256 *wire)
 {
@@ -65,6 +91,142 @@ static struct zcl_result zslp_command_add_fee_inputs(
     if (*selected_value < target)
         return ZCL_ERR(-2, "add_fee_inputs: insufficient non-token ZCL for fee");
     return ZCL_OK;
+}
+
+/* True when the coin is spendable, classifies as an SLP output with the
+ * wanted role, and belongs to token_id. */
+static bool zslp_command_is_token_coin(const struct coin_entry *coin,
+                                       const uint8_t token_id[32],
+                                       enum slp_output_role role,
+                                       struct slp_output_metadata *meta)
+{
+    return coin->spendable &&
+           slp_classify_tx_output(&coin->wtx->tx, (uint32_t)coin->i, meta) &&
+           meta->role == role &&
+           memcmp(meta->token_id, token_id, 32) == 0;
+}
+
+/* Shared NULL-argument guard for the send and mint builders. */
+static bool zslp_command_token_amount_args_ok(
+    struct wallet *wallet, const uint8_t token_id[32], const char *to_addr,
+    uint64_t amount, struct wallet_tx *wtx, int64_t *fee_paid,
+    const char **tx_error)
+{
+    return wallet && token_id && to_addr && wtx && fee_paid && tx_error &&
+           amount != 0;
+}
+
+/* True when output_value plus fee would overflow, or the fee is negative. */
+static bool zslp_command_fee_overflows(int64_t output_value, int64_t fee)
+{
+    return fee < 0 || output_value > INT64_MAX - fee;
+}
+
+/* Text for a failed wallet transaction build. */
+static const char *zslp_command_wallet_error_text(const char **tx_error)
+{
+    return *tx_error ? *tx_error : "wallet build failed";
+}
+
+/* Walk the token coins of token_id, adding them to selected until
+ * amount is covered. The first token coin supplies the change address. */
+static struct zcl_result zslp_command_select_token_inputs(
+    const struct coin_entry *available, size_t num_available,
+    const uint8_t token_id[32], uint64_t amount,
+    const struct zslp_token_pick_errors *errs,
+    struct coin_entry *selected, size_t *num_selected, int64_t *selected_zcl,
+    uint64_t *selected_tokens, struct tx_destination *change_dest)
+{
+    bool have_change_dest = false;
+
+    for (size_t i = 0; i < num_available && *selected_tokens < amount; i++) {
+        struct slp_output_metadata meta;
+        if (!zslp_command_is_token_coin(&available[i], token_id,
+                                        SLP_OUTPUT_TOKEN, &meta))
+            continue;
+        if (UINT64_MAX - *selected_tokens < meta.amount)
+            return ZCL_ERR(errs->overflow_code, "%s", errs->overflow_msg);
+        if (!have_change_dest) {
+            const struct tx_out *prev =
+                &available[i].wtx->tx.vout[available[i].i];
+            if (!script_extract_destination(&prev->script_pub_key, change_dest))
+                return ZCL_ERR(errs->no_dest_code, "%s", errs->no_dest_msg);
+            have_change_dest = true;
+        }
+        if (!zslp_command_add_selected(selected, num_selected, &available[i],
+                                       selected_zcl))
+            return ZCL_ERR(errs->add_code, "%s", errs->add_msg);
+        *selected_tokens += meta.amount;
+    }
+    if (*selected_tokens < amount)
+        return ZCL_ERR(errs->short_code, "%s", errs->short_msg);
+    return ZCL_OK;
+}
+
+/* Find the first wallet transaction whose hash matches. */
+static struct wallet_tx *zslp_command_find_wallet_tx(
+    struct wallet *wallet, const struct uint256 *hash)
+{
+    for (size_t j = 0; j < wallet->num_wallet_tx; j++) {
+        if (uint256_eq(&wallet->map_wallet[j].tx.hash, hash))
+            return &wallet->map_wallet[j];
+    }
+    return NULL;
+}
+
+/* Sign input i of wtx when the wallet holds its key; other inputs are
+ * left untouched. */
+static void zslp_command_sign_input(struct wallet *wallet,
+                                    struct wallet_tx *wtx, size_t i,
+                                    uint32_t branch_id)
+{
+    struct wallet_tx *prev_wtx;
+    struct tx_destination prev_dest;
+    struct privkey skey;
+    struct pubkey spk;
+    struct sighash_type ht;
+    struct precomputed_tx_data txdata;
+    struct uint256 sighash;
+    unsigned char sig[SIGNATURE_SIZE + 1];
+    size_t siglen = 0;
+    struct script *ss;
+    const struct tx_out *prev_out;
+
+    prev_wtx = zslp_command_find_wallet_tx(wallet,
+                                           &wtx->tx.vin[i].prevout.hash);
+    if (!prev_wtx)
+        return;
+
+    prev_out = &prev_wtx->tx.vout[wtx->tx.vin[i].prevout.n];
+    if (!script_extract_destination(&prev_out->script_pub_key, &prev_dest))
+        return;
+    if (!keystore_get_key(&wallet->keystore, &prev_dest.id.key, &skey))
+        return;
+
+    privkey_get_pubkey(&skey, &spk);
+    ht.raw = SIGHASH_ALL;
+    precompute_tx_data(&wtx->tx, &txdata);
+    if (!signature_hash(&prev_out->script_pub_key, &wtx->tx,
+                        (unsigned int)i, ht, prev_out->value,
+                        branch_id, &txdata, &sighash)) {
+        memory_cleanse(skey.vch, 32);
+        return;
+    }
+    if (!privkey_sign(&skey, &sighash, sig, &siglen)) {
+        memory_cleanse(skey.vch, 32);
+        return;
+    }
+    sig[siglen++] = 0x01;
+
+    ss = &wtx->tx.vin[i].script_sig;
+    ss->size = 0;
+    ss->data[ss->size++] = (unsigned char)siglen;
+    memcpy(&ss->data[ss->size], sig, siglen);
+    ss->size += siglen;
+    ss->data[ss->size++] = (unsigned char)spk.size;
+    memcpy(&ss->data[ss->size], spk.vch, spk.size);
+    ss->size += spk.size;
+    memory_cleanse(skey.vch, 32);
 }
 
 static void zslp_command_set_opreturn(struct tx_out *out,
@@ -111,60 +273,8 @@ struct zcl_result zslp_command_prepare_with_op_return(
     branch_id = consensus_current_epoch_branch_id(height + 1, &cp->consensus);
 
     zcl_mutex_lock(&wallet->cs);
-    for (size_t i = 0; i < wtx->tx.num_vin; i++) {
-        struct wallet_tx *prev_wtx = NULL;
-        struct tx_destination prev_dest;
-        struct privkey skey;
-        struct pubkey spk;
-        struct sighash_type ht;
-        struct precomputed_tx_data txdata;
-        struct uint256 sighash;
-        unsigned char sig[SIGNATURE_SIZE + 1];
-        size_t siglen = 0;
-        struct script *ss;
-        const struct tx_out *prev_out;
-
-        for (size_t j = 0; j < wallet->num_wallet_tx; j++) {
-            if (uint256_eq(&wallet->map_wallet[j].tx.hash,
-                           &wtx->tx.vin[i].prevout.hash)) {
-                prev_wtx = &wallet->map_wallet[j];
-                break;
-            }
-        }
-        if (!prev_wtx)
-            continue;
-
-        prev_out = &prev_wtx->tx.vout[wtx->tx.vin[i].prevout.n];
-        if (!script_extract_destination(&prev_out->script_pub_key, &prev_dest))
-            continue;
-        if (!keystore_get_key(&wallet->keystore, &prev_dest.id.key, &skey))
-            continue;
-
-        privkey_get_pubkey(&skey, &spk);
-        ht.raw = SIGHASH_ALL;
-        precompute_tx_data(&wtx->tx, &txdata);
-        if (!signature_hash(&prev_out->script_pub_key, &wtx->tx,
-                            (unsigned int)i, ht, prev_out->value,
-                            branch_id, &txdata, &sighash)) {
-            memory_cleanse(skey.vch, 32);
-            continue;
-        }
-        if (!privkey_sign(&skey, &sighash, sig, &siglen)) {
-            memory_cleanse(skey.vch, 32);
-            continue;
-        }
-        sig[siglen++] = 0x01;
-
-        ss = &wtx->tx.vin[i].script_sig;
-        ss->size = 0;
-        ss->data[ss->size++] = (unsigned char)siglen;
-        memcpy(&ss->data[ss->size], sig, siglen);
-        ss->size += siglen;
-        ss->data[ss->size++] = (unsigned char)spk.size;
-        memcpy(&ss->data[ss->size], spk.vch, spk.size);
-        ss->size += spk.size;
-        memory_cleanse(skey.vch, 32);
-    }
+    for (size_t i = 0; i < wtx->tx.num_vin; i++)
+        zslp_command_sign_input(wallet, wtx, i, branch_id);
     zcl_mutex_unlock(&wallet->cs);
 
     transaction_compute_hash(&wtx->tx);
@@ -223,8 +333,8 @@ struct zcl_result zslp_command_build_token_send_tx(
     uint64_t amount, struct wallet_tx *wtx, int64_t *fee_paid,
     const char **tx_error)
 {
-    if (!wallet || !token_id || !to_addr || !wtx || !fee_paid || !tx_error ||
-        amount == 0)
+    if (!zslp_command_token_amount_args_ok(wallet, token_id, to_addr, amount,
+                                           wtx, fee_paid, tx_error))
         return ZCL_ERR(-1, "build_token_send_tx: invalid argument");
 
     struct tx_destination recipient;
@@ -241,33 +351,12 @@ struct zcl_result zslp_command_build_token_send_tx(
     int64_t selected_zcl = 0;
     uint64_t selected_tokens = 0;
     struct tx_destination token_change_dest;
-    bool have_token_change_dest = false;
-
-    for (size_t i = 0; i < num_available && selected_tokens < amount; i++) {
-        struct slp_output_metadata meta;
-        if (!available[i].spendable ||
-            !slp_classify_tx_output(&available[i].wtx->tx,
-                                    (uint32_t)available[i].i, &meta) ||
-            meta.role != SLP_OUTPUT_TOKEN ||
-            memcmp(meta.token_id, token_id, 32) != 0)
-            continue;
-        if (UINT64_MAX - selected_tokens < meta.amount)
-            return ZCL_ERR(-3, "build_token_send_tx: token input overflow");
-        if (!have_token_change_dest) {
-            const struct tx_out *prev =
-                &available[i].wtx->tx.vout[available[i].i];
-            if (!script_extract_destination(&prev->script_pub_key,
-                                            &token_change_dest))
-                return ZCL_ERR(-4, "build_token_send_tx: token input has no address");
-            have_token_change_dest = true;
-        }
-        if (!zslp_command_add_selected(selected, &num_selected, &available[i],
-                                       &selected_zcl))
-            return ZCL_ERR(-5, "build_token_send_tx: selection failed");
-        selected_tokens += meta.amount;
-    }
-    if (selected_tokens < amount)
-        return ZCL_ERR(-6, "build_token_send_tx: insufficient confirmed token balance");
+    struct zcl_result picked = zslp_command_select_token_inputs(
+        available, num_available, token_id, amount, &ZSLP_SEND_PICK_ERRORS,
+        selected, &num_selected, &selected_zcl, &selected_tokens,
+        &token_change_dest);
+    if (!picked.ok)
+        return picked;
 
     uint64_t token_change = selected_tokens - amount;
     struct uint256 wire_token_id;
@@ -295,7 +384,7 @@ struct zcl_result zslp_command_build_token_send_tx(
 
     int64_t output_value = ZSLP_DUST_ZAT * (int64_t)(num_outputs - 1);
     int64_t fee = wallet_default_fee(wallet);
-    if (fee < 0 || output_value > INT64_MAX - fee)
+    if (zslp_command_fee_overflows(output_value, fee))
         return ZCL_ERR(-8, "build_token_send_tx: fee overflow");
     struct zcl_result funded = zslp_command_add_fee_inputs(
         available, num_available, selected, &num_selected, &selected_zcl,
@@ -307,7 +396,7 @@ struct zcl_result zslp_command_build_token_send_tx(
                                              outputs, num_outputs, wtx,
                                              fee_paid, tx_error))
         return ZCL_ERR(-9, "build_token_send_tx: %s",
-                       *tx_error ? *tx_error : "wallet build failed");
+                       zslp_command_wallet_error_text(tx_error));
     return ZCL_OK;
 }
 
@@ -327,33 +416,12 @@ struct zcl_result zslp_command_build_token_burn_tx(
     int64_t selected_zcl = 0;
     uint64_t selected_tokens = 0;
     struct tx_destination change_dest;
-    bool have_change_dest = false;
-
-    for (size_t i = 0; i < num_available && selected_tokens < amount; i++) {
-        struct slp_output_metadata meta;
-        if (!available[i].spendable ||
-            !slp_classify_tx_output(&available[i].wtx->tx,
-                                    (uint32_t)available[i].i, &meta) ||
-            meta.role != SLP_OUTPUT_TOKEN ||
-            memcmp(meta.token_id, token_id, 32) != 0)
-            continue;
-        if (UINT64_MAX - selected_tokens < meta.amount)
-            return ZCL_ERR(-2, "build_token_burn_tx: token input overflow");
-        const struct tx_out *prev =
-            &available[i].wtx->tx.vout[available[i].i];
-        if (!have_change_dest &&
-            !script_extract_destination(&prev->script_pub_key, &change_dest))
-            return ZCL_ERR(-3,
-                "build_token_burn_tx: token input has no change address");
-        have_change_dest = true;
-        if (!zslp_command_add_selected(selected, &num_selected, &available[i],
-                                       &selected_zcl))
-            return ZCL_ERR(-4, "build_token_burn_tx: selection failed");
-        selected_tokens += meta.amount;
-    }
-    if (selected_tokens < amount)
-        return ZCL_ERR(-5,
-            "build_token_burn_tx: insufficient confirmed token balance");
+    struct zcl_result picked = zslp_command_select_token_inputs(
+        available, num_available, token_id, amount, &ZSLP_BURN_PICK_ERRORS,
+        selected, &num_selected, &selected_zcl, &selected_tokens,
+        &change_dest);
+    if (!picked.ok)
+        return picked;
 
     uint64_t token_change = selected_tokens - amount;
     struct uint256 wire_token_id;
@@ -377,7 +445,7 @@ struct zcl_result zslp_command_build_token_burn_tx(
         output_value = ZSLP_DUST_ZAT;
     }
     int64_t fee = wallet_default_fee(wallet);
-    if (fee < 0 || output_value > INT64_MAX - fee)
+    if (zslp_command_fee_overflows(output_value, fee))
         return ZCL_ERR(-7, "build_token_burn_tx: fee overflow");
     struct zcl_result funded = zslp_command_add_fee_inputs(
         available, num_available, selected, &num_selected, &selected_zcl,
@@ -387,7 +455,7 @@ struct zcl_result zslp_command_build_token_burn_tx(
                                              outputs, num_outputs, wtx,
                                              fee_paid, tx_error))
         return ZCL_ERR(-8, "build_token_burn_tx: %s",
-                       *tx_error ? *tx_error : "wallet build failed");
+                       zslp_command_wallet_error_text(tx_error));
     return ZCL_OK;
 }
 
@@ -431,7 +499,7 @@ struct zcl_result zslp_command_build_token_genesis_tx(
     size_t num_selected = 0;
     int64_t selected_zcl = 0;
     int64_t fee = wallet_default_fee(wallet);
-    if (fee < 0 || (int64_t)(2 * ZSLP_DUST_ZAT) > INT64_MAX - fee)
+    if (zslp_command_fee_overflows((int64_t)(2 * ZSLP_DUST_ZAT), fee))
         return ZCL_ERR(-4, "build_token_genesis_tx: fee overflow");
     struct zcl_result funded = zslp_command_add_fee_inputs(
         available, num_available, selected, &num_selected, &selected_zcl,
@@ -442,8 +510,33 @@ struct zcl_result zslp_command_build_token_genesis_tx(
                                              outputs, 3, wtx, fee_paid,
                                              tx_error))
         return ZCL_ERR(-5, "build_token_genesis_tx: %s",
-                       *tx_error ? *tx_error : "wallet build failed");
+                       zslp_command_wallet_error_text(tx_error));
     return ZCL_OK;
+}
+
+/* Select the first confirmed mint baton of token_id. The wallet must
+ * control one; the baton is spent and its address reused for the output. */
+static struct zcl_result zslp_command_select_mint_baton(
+    const struct coin_entry *available, size_t num_available,
+    const uint8_t token_id[32], struct coin_entry *selected,
+    size_t *num_selected, int64_t *selected_zcl,
+    struct tx_destination *baton_dest)
+{
+    for (size_t i = 0; i < num_available; i++) {
+        struct slp_output_metadata meta;
+        if (!zslp_command_is_token_coin(&available[i], token_id,
+                                        SLP_OUTPUT_MINT_BATON, &meta))
+            continue;
+        const struct tx_out *prev =
+            &available[i].wtx->tx.vout[available[i].i];
+        if (!script_extract_destination(&prev->script_pub_key, baton_dest))
+            return ZCL_ERR(-3, "build_token_mint_tx: baton has no address");
+        if (!zslp_command_add_selected(selected, num_selected, &available[i],
+                                       selected_zcl))
+            return ZCL_ERR(-4, "build_token_mint_tx: baton selection failed");
+        return ZCL_OK;
+    }
+    return ZCL_ERR(-5, "build_token_mint_tx: wallet does not control the confirmed mint baton");
 }
 
 struct zcl_result zslp_command_build_token_mint_tx(
@@ -451,8 +544,8 @@ struct zcl_result zslp_command_build_token_mint_tx(
     uint64_t amount, struct wallet_tx *wtx, int64_t *fee_paid,
     const char **tx_error)
 {
-    if (!wallet || !token_id || !to_addr || !wtx || !fee_paid || !tx_error ||
-        amount == 0)
+    if (!zslp_command_token_amount_args_ok(wallet, token_id, to_addr, amount,
+                                           wtx, fee_paid, tx_error))
         return ZCL_ERR(-1, "build_token_mint_tx: invalid argument");
 
     struct tx_destination recipient;
@@ -467,28 +560,11 @@ struct zcl_result zslp_command_build_token_mint_tx(
     size_t num_selected = 0;
     int64_t selected_zcl = 0;
     struct tx_destination baton_dest;
-    bool found_baton = false;
-
-    for (size_t i = 0; i < num_available; i++) {
-        struct slp_output_metadata meta;
-        if (!available[i].spendable ||
-            !slp_classify_tx_output(&available[i].wtx->tx,
-                                    (uint32_t)available[i].i, &meta) ||
-            meta.role != SLP_OUTPUT_MINT_BATON ||
-            memcmp(meta.token_id, token_id, 32) != 0)
-            continue;
-        const struct tx_out *prev =
-            &available[i].wtx->tx.vout[available[i].i];
-        if (!script_extract_destination(&prev->script_pub_key, &baton_dest))
-            return ZCL_ERR(-3, "build_token_mint_tx: baton has no address");
-        if (!zslp_command_add_selected(selected, &num_selected, &available[i],
-                                       &selected_zcl))
-            return ZCL_ERR(-4, "build_token_mint_tx: baton selection failed");
-        found_baton = true;
-        break;
-    }
-    if (!found_baton)
-        return ZCL_ERR(-5, "build_token_mint_tx: wallet does not control the confirmed mint baton");
+    struct zcl_result baton = zslp_command_select_mint_baton(
+        available, num_available, token_id, selected, &num_selected,
+        &selected_zcl, &baton_dest);
+    if (!baton.ok)
+        return baton;
 
     struct uint256 wire_token_id;
     zslp_command_token_id_wire(token_id, &wire_token_id);
@@ -507,7 +583,7 @@ struct zcl_result zslp_command_build_token_mint_tx(
     script_for_destination(&outputs[2].script_pub_key, &baton_dest);
 
     int64_t fee = wallet_default_fee(wallet);
-    if (fee < 0 || (int64_t)(2 * ZSLP_DUST_ZAT) > INT64_MAX - fee)
+    if (zslp_command_fee_overflows((int64_t)(2 * ZSLP_DUST_ZAT), fee))
         return ZCL_ERR(-7, "build_token_mint_tx: fee overflow");
     struct zcl_result funded = zslp_command_add_fee_inputs(
         available, num_available, selected, &num_selected, &selected_zcl,
@@ -519,7 +595,79 @@ struct zcl_result zslp_command_build_token_mint_tx(
                                              outputs, 3, wtx, fee_paid,
                                              tx_error))
         return ZCL_ERR(-8, "build_token_mint_tx: %s",
-                       *tx_error ? *tx_error : "wallet build failed");
+                       zslp_command_wallet_error_text(tx_error));
+    return ZCL_OK;
+}
+
+/* First wallet coin paying owner_dest (P2PKH) with at least 546 + fee. */
+static const struct coin_entry *zslp_command_pick_owner_coin(
+    const struct coin_entry *available, size_t num_available,
+    const struct tx_destination *owner_dest, int64_t fee)
+{
+    for (size_t i = 0; i < num_available; i++) {
+        const struct tx_out *out =
+            &available[i].wtx->tx.vout[available[i].i];
+        struct tx_destination d;
+        if (!script_extract_destination(&out->script_pub_key, &d))
+            continue;
+        if (d.type != DEST_KEY_ID)
+            continue;
+        if (memcmp(d.id.key.id.data, owner_dest->id.key.id.data, 20) != 0)
+            continue;
+        if (out->value < 546 + fee)
+            continue;
+        return &available[i];
+    }
+    return NULL;
+}
+
+/* Clear wtx and set the overwinter or sapling header for the epoch. */
+static void zslp_command_init_owner_tx(struct wallet_tx *wtx, int epoch,
+                                       int height)
+{
+    memset(wtx, 0, sizeof(*wtx));
+    transaction_init(&wtx->tx);
+    if (epoch >= UPGRADE_SAPLING) {
+        wtx->tx.overwintered = true;
+        wtx->tx.version = SAPLING_TX_VERSION;
+        wtx->tx.version_group_id = SAPLING_VERSION_GROUP_ID;
+        wtx->tx.expiry_height = (uint32_t)(height + 20);
+    } else if (epoch >= UPGRADE_OVERWINTER) {
+        wtx->tx.overwintered = true;
+        wtx->tx.version = OVERWINTER_TX_VERSION;
+        wtx->tx.version_group_id = OVERWINTER_VERSION_GROUP_ID;
+        wtx->tx.expiry_height = (uint32_t)(height + 20);
+    }
+}
+
+/* Allocate the owner outputs (name output plus change when due) and spend
+ * picked as the only input. */
+static struct zcl_result zslp_command_fill_owner_tx(
+    struct wallet_tx *wtx, struct tx_destination *owner_dest,
+    const struct coin_entry *picked, int64_t picked_value, int64_t fee,
+    const char **tx_error)
+{
+    int64_t change = picked_value - 546 - fee;
+    size_t num_out = change > 0 ? 2 : 1;
+    if (!transaction_alloc(&wtx->tx, 1, num_out)) {
+        if (tx_error)
+            *tx_error = "transaction allocation failed";
+        return ZCL_ERR(-5, "build_owner_base_tx: transaction_alloc(1,%zu) "
+                            "failed", num_out);
+    }
+
+    struct script dest_script;
+    script_for_destination(&dest_script, owner_dest);
+    wtx->tx.vout[0].value = 546;
+    wtx->tx.vout[0].script_pub_key = dest_script;
+    if (num_out == 2) {
+        wtx->tx.vout[1].value = change;
+        wtx->tx.vout[1].script_pub_key = dest_script;
+    }
+
+    wtx->tx.vin[0].prevout.hash = picked->wtx->tx.hash;
+    wtx->tx.vin[0].prevout.n = picked->i;
+    wtx->tx.vin[0].sequence = UINT32_MAX - 1;
     return ZCL_OK;
 }
 
@@ -562,24 +710,8 @@ struct zcl_result zslp_command_build_owner_base_tx(struct wallet *wallet,
     wallet_available_coins(wallet, available, &num_available, 4096, true,
                            false);
 
-    const struct coin_entry *picked = NULL;
-    int64_t picked_value = 0;
-    for (size_t i = 0; i < num_available; i++) {
-        const struct tx_out *out =
-            &available[i].wtx->tx.vout[available[i].i];
-        struct tx_destination d;
-        if (!script_extract_destination(&out->script_pub_key, &d))
-            continue;
-        if (d.type != DEST_KEY_ID)
-            continue;
-        if (memcmp(d.id.key.id.data, owner_dest.id.key.id.data, 20) != 0)
-            continue;
-        if (out->value < 546 + fee)
-            continue;
-        picked = &available[i];
-        picked_value = out->value;
-        break;
-    }
+    const struct coin_entry *picked = zslp_command_pick_owner_coin(
+        available, num_available, &owner_dest, fee);
     if (!picked) {
         if (tx_error)
             *tx_error = "no spendable coin controlled by the name owner "
@@ -587,45 +719,16 @@ struct zcl_result zslp_command_build_owner_base_tx(struct wallet *wallet,
         return ZCL_ERR(-4, "build_owner_base_tx: no funded coin under "
                             "'%s'", owner_address);
     }
+    int64_t picked_value = picked->wtx->tx.vout[picked->i].value;
 
     const struct chain_params *cp = chain_params_get();
     int epoch = consensus_current_epoch(height, &cp->consensus);
 
-    memset(wtx, 0, sizeof(*wtx));
-    transaction_init(&wtx->tx);
-    if (epoch >= UPGRADE_SAPLING) {
-        wtx->tx.overwintered = true;
-        wtx->tx.version = SAPLING_TX_VERSION;
-        wtx->tx.version_group_id = SAPLING_VERSION_GROUP_ID;
-        wtx->tx.expiry_height = (uint32_t)(height + 20);
-    } else if (epoch >= UPGRADE_OVERWINTER) {
-        wtx->tx.overwintered = true;
-        wtx->tx.version = OVERWINTER_TX_VERSION;
-        wtx->tx.version_group_id = OVERWINTER_VERSION_GROUP_ID;
-        wtx->tx.expiry_height = (uint32_t)(height + 20);
-    }
-
-    int64_t change = picked_value - 546 - fee;
-    size_t num_out = change > 0 ? 2 : 1;
-    if (!transaction_alloc(&wtx->tx, 1, num_out)) {
-        if (tx_error)
-            *tx_error = "transaction allocation failed";
-        return ZCL_ERR(-5, "build_owner_base_tx: transaction_alloc(1,%zu) "
-                            "failed", num_out);
-    }
-
-    struct script dest_script;
-    script_for_destination(&dest_script, &owner_dest);
-    wtx->tx.vout[0].value = 546;
-    wtx->tx.vout[0].script_pub_key = dest_script;
-    if (num_out == 2) {
-        wtx->tx.vout[1].value = change;
-        wtx->tx.vout[1].script_pub_key = dest_script;
-    }
-
-    wtx->tx.vin[0].prevout.hash = picked->wtx->tx.hash;
-    wtx->tx.vin[0].prevout.n = picked->i;
-    wtx->tx.vin[0].sequence = UINT32_MAX - 1;
+    zslp_command_init_owner_tx(wtx, epoch, height);
+    struct zcl_result filled = zslp_command_fill_owner_tx(
+        wtx, &owner_dest, picked, picked_value, fee, tx_error);
+    if (!filled.ok)
+        return filled;
 
     *fee_paid = fee;
     return ZCL_OK;

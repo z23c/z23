@@ -819,12 +819,6 @@ contexts/market/services/src/store_buyer_pay.c:sb_write_atomic:16
 contexts/market/services/src/store_buyer_pay.c:store_buyer_collect:19
 contexts/market/services/src/store_buyer_pay.c:store_buyer_prepare_payment:20
 contexts/market/services/src/yardsale_prevout_service.c:yardsale_prevout_fetch_confirmed:22
-contexts/market/services/src/zslp_command_service.c:zslp_command_build_owner_base_tx:23
-contexts/market/services/src/zslp_command_service.c:zslp_command_build_token_burn_tx:25
-contexts/market/services/src/zslp_command_service.c:zslp_command_build_token_genesis_tx:16
-contexts/market/services/src/zslp_command_service.c:zslp_command_build_token_mint_tx:23
-contexts/market/services/src/zslp_command_service.c:zslp_command_build_token_send_tx:28
-contexts/market/services/src/zslp_command_service.c:zslp_command_prepare_with_op_return:17
 contexts/market/services/src/zslp_transaction_intent_service.c:zslp_transaction_intent_commit:30
 contexts/market/services/src/zslp_transaction_intent_service.c:zslp_transaction_intent_plan:28
 contexts/market/services/src/zslp_transaction_intent_service.c:zti_payload_decode:16
