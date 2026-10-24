@@ -15,7 +15,9 @@
 #include "kernel/command_registry.h"
 #include "platform/state_root.h"
 #include "util/spawn.h"
+#include "zsha256/zsha256.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -546,10 +548,170 @@ _test_next:;
     return failures;
 }
 
+/* dev.land.send --commit and --bundle_out, on a fresh rig. */
+static void dlt_send_x(struct dlt_call *c, const struct dlt_rig *r,
+                       const char *commit, const char *bundle_out, bool host)
+{
+    dlt_begin(c, "dev.land.send");
+    if (host)
+        (void)json_push_kv_str(&c->input, "host", "queue-host");
+    (void)json_push_kv_str(&c->input, "lane", "mac");
+    if (commit)
+        (void)json_push_kv_str(&c->input, "commit", commit);
+    if (bundle_out)
+        (void)json_push_kv_str(&c->input, "bundle_out", bundle_out);
+    dlt_cd(r->sender);
+    zcl_native_handle_dev_land_remote(&c->request, &c->reply);
+}
+
+static bool dlt_sha_file(const char *path, char hex[ZSHA256_HEX_LEN])
+{
+    static uint8_t blob[1 << 20];
+    FILE *f = fopen(path, "rb");
+    size_t n;
+    if (!f)
+        return false;
+    n = fread(blob, 1, sizeof(blob), f);
+    if (fclose(f) != 0 || n == 0 || n == sizeof(blob))
+        return false;
+    zsha256_hex(blob, n, hex);
+    return true;
+}
+
+static int dlt_single_cases(void)
+{
+    int failures = 0;
+    struct dlt_rig r;
+    struct dlt_call c;
+    char one[64], two[64], out[4096], path[900], hex[ZSHA256_HEX_LEN];
+    char copied[900], spec[256], *ref;
+    if (!dlt_rig(&r, "single")) {
+        printf("rig setup FAILED\n");
+        return 1;
+    }
+    ASSERT(dlt_commit(r.sender, "a.txt", "a\n"));
+    ASSERT(dlt_commit(r.sender, "b.txt", "b\n"));
+    ASSERT(DLT_GIT(one, sizeof(one), r.sender, "rev-parse", "HEAD~1") == 0);
+    ASSERT(DLT_GIT(two, sizeof(two), r.sender, "rev-parse", "HEAD") == 0);
+    one[strcspn(one, "\n")] = '\0';
+    two[strcspn(two, "\n")] = '\0';
+    (void)snprintf(copied, sizeof(copied), "%s/mac-%.12s.bundle", r.inbox, one);
+
+    TEST("land.send --commit: the second commit of a mixed branch refuses "
+         "SEND_NOT_SINGLE") {
+        dlt_send_x(&c, &r, two, NULL, true);
+        ASSERT(dlt_refused(&c, "SEND_NOT_SINGLE"));
+        ASSERT(strstr(c.reply.error.message, "cherry-pick") != NULL);
+        dlt_end(&c);
+        ASSERT(access(r.log, F_OK) != 0);
+        PASS();
+    }
+
+    TEST("land.send --commit: an unresolvable or dashed commit refuses "
+         "SEND_BAD_ARGUMENT") {
+        dlt_send_x(&c, &r, "no-such-commit", NULL, true);
+        ASSERT(dlt_refused(&c, "SEND_BAD_ARGUMENT"));
+        dlt_end(&c);
+        dlt_send_x(&c, &r, "-x", NULL, true);
+        ASSERT(dlt_refused(&c, "SEND_BAD_ARGUMENT"));
+        dlt_end(&c);
+        PASS();
+    }
+
+    TEST("land.send --commit: the first commit sends alone, dirty tree and "
+         "all") {
+        char p[900];
+        (void)snprintf(p, sizeof(p), "%s/base.txt", r.sender);
+        ASSERT(dlt_write(p, "dirty\n", 0644));
+        dlt_send_x(&c, &r, one, NULL, true);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, "ahead")), (int64_t)1);
+        ASSERT(strcmp(json_get_str(json_get(&c.reply.data, "commit")), one) == 0);
+        ASSERT(json_get_bool(json_get(json_get(&c.reply.data, "remote"), "ok")));
+        dlt_end(&c);
+        ASSERT(DLT_GIT(NULL, 0, r.sender, "checkout", "--quiet", "--",
+                       "base.txt") == 0);
+        ASSERT(access(copied, F_OK) == 0);
+        ASSERT(DLT_GIT(out, sizeof(out), r.queue, "bundle", "list-heads",
+                       copied) == 0);
+        ASSERT(strncmp(out, one, 40) == 0);
+        ref = strchr(out, ' ');
+        ASSERT(ref != NULL);
+        ref++;
+        ref[strcspn(ref, "\n")] = '\0';
+        (void)snprintf(spec, sizeof(spec), "%s:refs/heads/one", ref);
+        ASSERT(DLT_GIT(NULL, 0, r.queue, "fetch", "--quiet", copied, spec) == 0);
+        ASSERT(DLT_GIT(out, sizeof(out), r.queue, "rev-list", "--count",
+                       "origin/main..refs/heads/one") == 0);
+        ASSERT_STR_EQ(out, "1\n");
+        PASS();
+    }
+
+    TEST("land.send --bundle_out: writes the bundle and its sha256 with no "
+         "ssh or scp") {
+        char b[900];
+        (void)snprintf(b, sizeof(b), "%s/out.bundle", r.base);
+        (void)remove(r.log);
+        dlt_send_x(&c, &r, one, b, false);
+        ASSERT(c.reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT(access(b, F_OK) == 0);
+        ASSERT(access(r.log, F_OK) != 0);
+        ASSERT(strcmp(json_get_str(json_get(&c.reply.data, "bundle")), b) == 0);
+        ASSERT(strcmp(json_get_str(json_get(&c.reply.data, "commit")), one) == 0);
+        ASSERT(strcmp(json_get_str(json_get(&c.reply.data, "lane")), "mac") == 0);
+        ASSERT(dlt_sha_file(b, hex));
+        ASSERT(strcmp(json_get_str(json_get(&c.reply.data, "bundle_sha256")),
+                      hex) == 0);
+        dlt_end(&c);
+        ASSERT(DLT_GIT(out, sizeof(out), r.queue, "bundle", "verify", b) == 0);
+        ASSERT(DLT_GIT(out, sizeof(out), r.queue, "bundle", "list-heads", b) == 0);
+        ASSERT(strncmp(out, one, 40) == 0);
+        PASS();
+    }
+
+    TEST("land.send --bundle_out: an existing path refuses SEND_BUNDLE_EXISTS") {
+        (void)snprintf(path, sizeof(path), "%s/out.bundle", r.base);
+        dlt_send_x(&c, &r, one, path, false);
+        ASSERT(dlt_refused(&c, "SEND_BUNDLE_EXISTS"));
+        dlt_end(&c);
+        ASSERT(access(r.log, F_OK) != 0);
+        PASS();
+    }
+
+    TEST("land.send: no host and no bundle_out refuses SEND_BAD_ARGUMENT, "
+         "and a commit outside the revision characters refuses too") {
+        dlt_send_x(&c, &r, NULL, NULL, false);
+        ASSERT(dlt_refused(&c, "SEND_BAD_ARGUMENT"));
+        dlt_end(&c);
+        dlt_send_x(&c, &r, "abc;def", NULL, true);
+        ASSERT(dlt_refused(&c, "SEND_BAD_ARGUMENT"));
+        dlt_end(&c);
+        ASSERT(access(r.log, F_OK) != 0);
+        PASS();
+    }
+
+    TEST("land.send --commit: a commit already on origin/main refuses "
+         "SEND_NOTHING_AHEAD") {
+        ASSERT(DLT_GIT(NULL, 0, r.sender, "push", "--quiet", "origin",
+                       "HEAD:refs/heads/landed") == 0);
+        ASSERT(DLT_GIT(NULL, 0, r.origin, "update-ref", "refs/heads/main",
+                       one) == 0);
+        dlt_send_x(&c, &r, one, NULL, true);
+        ASSERT(dlt_refused(&c, "SEND_NOTHING_AHEAD"));
+        dlt_end(&c);
+        PASS();
+    }
+
+_test_next:;
+    zcl_dev_land_precheck_test_force(false);
+    dlt_done(&r);
+    return failures;
+}
+
 int test_dev_land_remote(void);
 int test_dev_land_remote(void)
 {
-    int failures = dlt_receive_cases() + dlt_send_cases();
+    int failures = dlt_receive_cases() + dlt_send_cases() + dlt_single_cases();
     if (failures == 0)
         printf("test_dev_land_remote: all passed\n");
     else

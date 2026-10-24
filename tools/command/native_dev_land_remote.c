@@ -13,6 +13,18 @@
  *          data.remote. ssh joins argv into a remote shell string, so every
  *          note, lane, path and host is checked against a closed character
  *          set (SEND_BAD_ARGUMENT) and each remote argument is single-quoted.
+ *          --commit=<sha or ref> sends exactly that commit instead of HEAD:
+ *          origin/main..<commit> must be that one commit (else
+ *          SEND_NOT_SINGLE, whose message gives the command that makes it
+ *          single). The bundle is built from the object store, so a dirty
+ *          working tree is allowed with --commit: its changes cannot leak
+ *          into the bundle. git bundle takes refs, not bare ids, so the
+ *          commit is pinned under refs/z23-send/ for the bundle and that ref
+ *          is removed again. --bundle_out=<absolute path> writes the bundle
+ *          there instead (SEND_BUNDLE_EXISTS when the path exists), runs no
+ *          ssh or scp and needs no --host: data.bundle, data.bundle_sha256,
+ *          data.commit and data.lane, plus a READY line naming the commit and
+ *          sha256, are the handoff to a queue host reached another way.
  * receive  (queue host) verifies the bundle in the checkout that owns the
  *          queue (RECEIVE_BAD_BUNDLE), fetches its single head into
  *          refs/heads/remote/<lane>, readies the detached worktree
@@ -38,6 +50,7 @@
 #include "platform/state_root.h"
 #include "platform/temp_directory.h"
 #include "util/spawn.h"
+#include "crypto/sha256.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -375,12 +388,15 @@ static void dlr_receive(const struct zcl_command_request *req,
 
 struct dlr_send {
     const char *host, *lane, *note, *cmd, *inbox, *checkout;
+    const char *commit, *out;
     char root[DLR_PATH];
     char sha[80];
     char tmpdir[PLATFORM_TEMP_PATH_MAX];
     char bundle[DLR_PATH];
     char remote[DLR_PATH];
     char dest[DLR_PATH + 160];
+    char tmpref[DLR_PATH];
+    char bsha[SHA256_OUTPUT_SIZE * 2 + 1];
     long ahead;
     char note_buf[DLR_NOTE_MAX + 1];
 };
@@ -392,6 +408,38 @@ static void dlr_send_fail(struct zcl_command_reply *reply, const char *code,
     dlr_fail(reply, "dev.land.send", code, phase, msg, evidence);
 }
 
+/* The names that reach ssh. --bundle_out needs no host, so the host may be
+ * absent only then; a host that is present is still checked. */
+static bool dlr_send_names_ok(const struct dlr_send *s)
+{
+    return ((!s->host && s->out) || dlr_host_ok(s->host)) &&
+           dlr_lane_ok(s->lane) && dlr_arg_ok(s->cmd, true) &&
+           dlr_arg_ok(s->inbox, true) && !strchr(s->inbox, ' ') &&
+           (!s->checkout || (s->checkout[0] == '/' &&
+                              dlr_arg_ok(s->checkout, true))) &&
+           (!s->note || (dlr_arg_ok(s->note, false) &&
+                         strlen(s->note) <= DLR_NOTE_MAX));
+}
+
+/* A commit name is a git argument, never a shell word: revision characters
+ * only, and never something that looks like an option. */
+static bool dlr_commit_ok(const char *s)
+{
+    if (!s)
+        return true;
+    size_t n = strlen(s);
+    return n > 0 && n <= 200 && s[0] != '-' &&
+           strspn(s, "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+                     "0123456789._/~^-") == n;
+}
+
+/* An absolute path in the closed character set, short enough for DLR_PATH. */
+static bool dlr_out_ok(const char *p)
+{
+    return !p || (p[0] == '/' && strlen(p) < DLR_PATH &&
+                  dlr_arg_ok(p, true));
+}
+
 static bool dlr_send_args(const struct zcl_command_request *req,
                           struct dlr_send *s, struct zcl_command_reply *reply)
 {
@@ -401,18 +449,37 @@ static bool dlr_send_args(const struct zcl_command_request *req,
     s->cmd = dlr_str(req, "remote_cmd");
     s->inbox = dlr_str(req, "inbox");
     s->checkout = dlr_str(req, "remote_checkout");
+    s->commit = dlr_str(req, "commit");
+    s->out = dlr_str(req, "bundle_out");
     if (!s->cmd)
         s->cmd = DLR_DEFAULT_CMD;
     if (!s->inbox)
         s->inbox = DLR_DEFAULT_INBOX;
-    if (dlr_host_ok(s->host) && dlr_lane_ok(s->lane) &&
-        dlr_arg_ok(s->cmd, true) && dlr_arg_ok(s->inbox, true) &&
-        !strchr(s->inbox, ' ') &&
-        (!s->checkout || (s->checkout[0] == '/' &&
-                           dlr_arg_ok(s->checkout, true))) &&
-        (!s->note || (dlr_arg_ok(s->note, false) &&
-                      strlen(s->note) <= DLR_NOTE_MAX)))
+    if (!s->host && !s->out) {
+        dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
+                      "host is required unless bundle_out is given: send "
+                      "copies the bundle to the queue host over scp and ssh",
+                      "input.host");
+        return false;
+    }
+    if (dlr_send_names_ok(s)) {
+        if (!dlr_commit_ok(s->commit) || !dlr_out_ok(s->out)) {
+            dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
+                          "commit must be 1-200 characters of "
+                          "[A-Za-z0-9._/~^-] not starting with '-'; "
+                          "bundle_out must be an absolute path "
+                          "of [A-Za-z0-9 ._,:/+=-]",
+                          "input.commit or input.bundle_out");
+            return false;
+        }
+        if (s->out && dlr_exists(s->out)) {
+            dlr_send_fail(reply, "SEND_BUNDLE_EXISTS", "bundle",
+                          "bundle_out already exists; it is never overwritten",
+                          s->out);
+            return false;
+        }
         return true;
+    }
     dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
                   "host, lane, note, remote_cmd, inbox and remote_checkout may hold "
                   "only "
@@ -437,22 +504,13 @@ static bool dlr_send_git(struct dlr_send *s, const char *const *args,
     return false;
 }
 
-static bool dlr_send_prepare(struct dlr_send *s,
-                             struct zcl_command_reply *reply)
+/* A bundle carries commits only, so tracked changes refuse the plain send.
+ * --commit skips this: the bundle is made from the object store. */
+static bool dlr_send_clean(struct dlr_send *s, struct zcl_command_reply *reply)
 {
-    const char *top[] = {"rev-parse", "--show-toplevel", NULL};
     const char *dirty[] = {"status", "--porcelain", "--untracked-files=no",
                            NULL};
-    const char *fetch[] = {"fetch", "--quiet", "origin", "main", NULL};
-    const char *count[] = {"rev-list", "--count", "origin/main..HEAD", NULL};
-    const char *head[] = {"rev-parse", "HEAD", NULL};
     char out[2048];
-    if (dlr_git(".", top, s->root, sizeof(s->root)) != 0) {
-        dlr_send_fail(reply, "SEND_NO_CHECKOUT", "checkout",
-                      "run this inside the git checkout to send", "cwd");
-        return false;
-    }
-    dlr_trim(s->root);
     if (!dlr_send_git(s, dirty, out, sizeof(out), "SEND_GIT_FAILED", reply))
         return false;
     if (out[0]) {
@@ -462,8 +520,15 @@ static bool dlr_send_prepare(struct dlr_send *s,
                       s->root);
         return false;
     }
-    if (!dlr_send_git(s, fetch, out, sizeof(out), "SEND_FETCH_FAILED", reply) ||
-        !dlr_send_git(s, count, out, sizeof(out), "SEND_GIT_FAILED", reply))
+    return true;
+}
+
+static bool dlr_send_head(struct dlr_send *s, struct zcl_command_reply *reply)
+{
+    const char *count[] = {"rev-list", "--count", "origin/main..HEAD", NULL};
+    const char *head[] = {"rev-parse", "HEAD", NULL};
+    char out[2048];
+    if (!dlr_send_git(s, count, out, sizeof(out), "SEND_GIT_FAILED", reply))
         return false;
     s->ahead = strtol(out, NULL, 10);
     if (s->ahead <= 0) {
@@ -475,6 +540,83 @@ static bool dlr_send_prepare(struct dlr_send *s,
     }
     return dlr_send_git(s, head, s->sha, sizeof(s->sha), "SEND_GIT_FAILED",
                         reply);
+}
+
+/* --commit=<name> to a full commit id in this checkout (SEND_BAD_ARGUMENT
+ * when it does not resolve). */
+static bool dlr_send_resolve(struct dlr_send *s,
+                             struct zcl_command_reply *reply)
+{
+    char spec[256], out[128];
+    const char *argv[] = {"rev-parse", "--verify", "--quiet", spec, NULL};
+    size_t n = 0;
+    out[0] = '\0';
+    if (snprintf(spec, sizeof(spec), "%s^{commit}", s->commit) >=
+        (int)sizeof(spec))
+        goto bad;
+    if (dlr_git(s->root, argv, out, sizeof(out)) == 0) {
+        dlr_trim(out);
+        if (dlr_sha_ok(out, &n) && out[n] == '\0' &&
+            snprintf(s->sha, sizeof(s->sha), "%s", out) < (int)sizeof(s->sha))
+            return true;
+    }
+bad:
+    dlr_send_fail(reply, "SEND_BAD_ARGUMENT", "input",
+                  "--commit does not name a commit in this checkout",
+                  s->commit);
+    return false;
+}
+
+/* origin/main..<commit> must be exactly that commit. Zero means it has
+ * already landed; more than one would bundle a stack, so refuse with the
+ * one command that makes a single-commit branch. */
+static bool dlr_send_commit(struct dlr_send *s,
+                            struct zcl_command_reply *reply)
+{
+    char out[2048], msg[600];
+    if (!dlr_send_resolve(s, reply))
+        return false;
+    const char *count[] = {"rev-list", "--count", s->sha, "^origin/main",
+                           NULL};
+    if (!dlr_send_git(s, count, out, sizeof(out), "SEND_GIT_FAILED", reply))
+        return false;
+    s->ahead = strtol(out, NULL, 10);
+    if (s->ahead == 0) {
+        dlr_send_fail(reply, "SEND_NOTHING_AHEAD", "tree",
+                      "--commit is already on origin/main; there is nothing "
+                      "to send",
+                      s->commit);
+        return false;
+    }
+    if (s->ahead == 1)
+        return true;
+    (void)snprintf(msg, sizeof(msg),
+                   "--commit is not exactly one commit beyond origin/main; "
+                   "make a single-commit branch with: git switch -c "
+                   "send/%s origin/main && git cherry-pick -S %s, then send "
+                   "the new commit",
+                   s->lane, s->commit);
+    dlr_send_fail(reply, "SEND_NOT_SINGLE", "tree", msg, s->commit);
+    return false;
+}
+
+static bool dlr_send_prepare(struct dlr_send *s,
+                             struct zcl_command_reply *reply)
+{
+    const char *top[] = {"rev-parse", "--show-toplevel", NULL};
+    const char *fetch[] = {"fetch", "--quiet", "origin", "main", NULL};
+    char out[2048];
+    if (dlr_git(".", top, s->root, sizeof(s->root)) != 0) {
+        dlr_send_fail(reply, "SEND_NO_CHECKOUT", "checkout",
+                      "run this inside the git checkout to send", "cwd");
+        return false;
+    }
+    dlr_trim(s->root);
+    if (!s->commit && !dlr_send_clean(s, reply))
+        return false;
+    if (!dlr_send_git(s, fetch, out, sizeof(out), "SEND_FETCH_FAILED", reply))
+        return false;
+    return s->commit ? dlr_send_commit(s, reply) : dlr_send_head(s, reply);
 }
 
 /* Test builds may put one program in front of ssh and scp. */
@@ -506,11 +648,71 @@ static int dlr_xport(const char *prog, const char *const *args, char *out,
     return zcl_spawn_capture(argv, out, cap, DLR_MS);
 }
 
+/* sha256 of a file, streamed in bounded reads, as lowercase hex. */
+static bool dlr_file_sha256(const char *path, char hex[SHA256_OUTPUT_SIZE * 2 + 1])
+{
+    unsigned char buf[8192];
+    unsigned char dig[SHA256_OUTPUT_SIZE];
+    struct sha256_ctx ctx;
+    size_t n;
+    bool ok;
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return false;
+    sha256_init(&ctx);
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        sha256_write(&ctx, buf, n);
+    ok = !ferror(f);
+    if (fclose(f) != 0 || !ok)
+        return false;
+    sha256_finalize(&ctx, dig);
+    for (size_t i = 0; i < sizeof(dig); i++)
+        (void)snprintf(hex + 2 * i, 3, "%02x", dig[i]);
+    return true;
+}
+
+/* git bundle takes refs, not bare ids: --commit pins the commit under a
+ * refs/z23-send/ ref for the bundle. The ref is removed after the send. */
+static bool dlr_send_pin(struct dlr_send *s, struct zcl_command_reply *reply)
+{
+    const char *upd[] = {"update-ref", s->tmpref, s->sha, NULL};
+    char sink[1024];
+    if (snprintf(s->tmpref, sizeof(s->tmpref), "refs/z23-send/%s-%.12s",
+                 s->lane, s->sha) < (int)sizeof(s->tmpref) &&
+        dlr_git(s->root, upd, sink, sizeof(sink)) == 0)
+        return true;
+    dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
+                  "cannot pin the commit for git bundle", s->sha);
+    return false;
+}
+
+static void dlr_send_unpin(const struct dlr_send *s)
+{
+    const char *del[] = {"update-ref", "-d", s->tmpref, NULL};
+    char sink[1024];
+    (void)dlr_git(s->root, del, sink, sizeof(sink));
+}
+
+/* Writes the bundle of origin/main..<tip> to path: HEAD, or the --commit. */
+static bool dlr_send_make(struct dlr_send *s, const char *path,
+                          struct zcl_command_reply *reply)
+{
+    char sink[1024];
+    const char *tip, *mk[] = {"bundle", "create", path, NULL, "^origin/main",
+                              NULL};
+    if (s->commit && !dlr_send_pin(s, reply))
+        return false;
+    tip = s->commit ? s->tmpref : "HEAD";
+    mk[3] = tip;
+    if (dlr_git(s->root, mk, sink, sizeof(sink)) == 0)
+        return true;
+    dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
+                  "git bundle create failed", path);
+    return false;
+}
+
 static bool dlr_send_bundle(struct dlr_send *s, struct zcl_command_reply *reply)
 {
-    const char *mk[] = {"bundle", "create", s->bundle, "HEAD", "^origin/main",
-                        NULL};
-    char sink[1024];
     if (!platform_temp_directory_create("z23-land-send-", s->tmpdir,
                                         sizeof(s->tmpdir)) ||
         snprintf(s->bundle, sizeof(s->bundle), "%s/%s-%.12s.bundle", s->tmpdir,
@@ -524,11 +726,44 @@ static bool dlr_send_bundle(struct dlr_send *s, struct zcl_command_reply *reply)
                       "platform_temp_directory_create");
         return false;
     }
-    if (dlr_git(s->root, mk, sink, sizeof(sink)) == 0)
+    if (!dlr_send_make(s, s->bundle, reply))
+        return false;
+    if (dlr_file_sha256(s->bundle, s->bsha))
         return true;
     dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
-                  "git bundle create failed", s->bundle);
+                  "cannot read back the bundle to hash it", s->bundle);
     return false;
+}
+
+/* --bundle_out: the handoff for a machine with no ssh to the queue host. */
+static void dlr_send_out(struct dlr_send *s, struct zcl_command_reply *reply)
+{
+    char ready[256];
+    /* bundle_out did not exist (dlr_send_args), so any file at it now is
+     * this call's own partial output and is removed on failure. */
+    if (!dlr_send_make(s, s->out, reply)) {
+        (void)remove(s->out);
+        return;
+    }
+    if (!dlr_file_sha256(s->out, s->bsha)) {
+        (void)remove(s->out);
+        dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
+                      "cannot read back the bundle to hash it", s->out);
+        return;
+    }
+    /* The READY line is meant for the board, so it names no local path. */
+    if (snprintf(ready, sizeof(ready), "READY %s %s bundle_sha256=%s",
+                 s->lane, s->sha, s->bsha) >= (int)sizeof(ready)) {
+        dlr_send_fail(reply, "SEND_BUNDLE_FAILED", "bundle",
+                      "the READY line does not fit", s->out);
+        return;
+    }
+    (void)json_push_kv_str(&reply->data, "leaf", "dev.land.send");
+    (void)json_push_kv_str(&reply->data, "bundle", s->out);
+    (void)json_push_kv_str(&reply->data, "bundle_sha256", s->bsha);
+    (void)json_push_kv_str(&reply->data, "commit", s->sha);
+    (void)json_push_kv_str(&reply->data, "lane", s->lane);
+    (void)json_push_kv_str(&reply->data, "ready", ready);
 }
 
 static bool dlr_send_copy(struct dlr_send *s, struct zcl_command_reply *reply)
@@ -617,6 +852,8 @@ static void dlr_send_receive(const struct dlr_send *s,
     (void)json_push_kv_str(&reply->data, "bundle", s->remote);
     (void)json_push_kv_str(&reply->data, "head", s->sha);
     (void)json_push_kv_int(&reply->data, "ahead", s->ahead);
+    (void)json_push_kv_str(&reply->data, "commit", s->sha);
+    (void)json_push_kv_str(&reply->data, "bundle_sha256", s->bsha);
     dlr_send_relay(out, rc, reply);
     free(out);
 }
@@ -626,13 +863,18 @@ static void dlr_send(const struct zcl_command_request *req,
 {
     struct dlr_send *s = zcl_calloc(1, sizeof(*s), "dev_land_remote.send");
     if (dlr_send_args(req, s, reply) && dlr_send_prepare(s, reply) &&
-        dlr_send_precheck(s, req, reply) && dlr_send_bundle(s, reply) &&
-        dlr_send_copy(s, reply))
-        dlr_send_receive(s, reply);
+        dlr_send_precheck(s, req, reply)) {
+        if (s->out)
+            dlr_send_out(s, reply);
+        else if (dlr_send_bundle(s, reply) && dlr_send_copy(s, reply))
+            dlr_send_receive(s, reply);
+    }
     if (s->bundle[0])
         (void)remove(s->bundle);
     if (s->tmpdir[0])
         (void)platform_private_directory_remove_empty(s->tmpdir);
+    if (s->tmpref[0])
+        dlr_send_unpin(s);
     free(s);
 }
 

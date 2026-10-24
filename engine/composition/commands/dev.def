@@ -2369,7 +2369,16 @@ ZCL_COMMAND_DEV_COMMAND(
     "(inbox defaults to .cache/development-scratch/z23/land-inbox under the "
     "remote home) and runs `<remote_cmd> dev land receive` over ssh "
     "(remote_cmd defaults to z23-dev), relaying the remote JSON reply as "
-    "data.remote. Host, lane, note, remote_cmd, inbox and remote_checkout are checked against "
+    "data.remote. commit=<sha or ref> sends exactly that one commit instead "
+    "of HEAD, dirty tracked trees allowed (the bundle comes from the object "
+    "store); origin/main..commit must be that one commit, else SEND_NOT_SINGLE "
+    "with the command that makes it single; an already-landed commit refuses "
+    "SEND_NOTHING_AHEAD. bundle_out=<absolute path> writes the bundle there "
+    "with its sha256 and runs no ssh or scp (no host needed): data.bundle, "
+    "data.bundle_sha256, data.commit, data.lane and a READY line; an existing "
+    "path refuses SEND_BUNDLE_EXISTS. data.commit and data.bundle_sha256 are "
+    "also returned on the scp/ssh path. Host, lane, note, remote_cmd, inbox "
+    "and remote_checkout are checked against "
     "[A-Za-z0-9 ._,:/()+=-] because ssh joins its argv into a remote shell "
     "string (SEND_BAD_ARGUMENT); every remote argument is single-quoted. "
     "remote_checkout (absolute) is forwarded as receive's --checkout, for a "
@@ -2381,7 +2390,7 @@ ZCL_COMMAND_DEV_COMMAND(
     65536,
     "land,send,bundle,remote,ssh",
     "zcl.land_send_input.v1", "zcl.land_send.v1",
-    "host,lane,note,remote_cmd,inbox,remote_checkout,precheck", "host,lane",
+    "host,lane,note,remote_cmd,inbox,remote_checkout,precheck,commit,bundle_out", "lane",
     "z23-dev dev land send --host=queue-host --lane=mac",
     ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,

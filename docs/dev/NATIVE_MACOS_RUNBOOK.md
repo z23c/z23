@@ -289,4 +289,4 @@ OpenSSL/libevent/zlib). What the node links is decided by which archives exist,
 on every host. Build and test instructions are in
 [`docs/node/GETTING_STARTED.md`](../node/GETTING_STARTED.md).
 
-To land from this host without a worktree on the queue host, commit and sign, then run `z23-dev dev land send --host=<queue-host> --lane=NAME` (see `docs/dev/DEVELOPING.md`, "Submit from another machine"); never push to `origin/main` directly.
+To land from this host without a worktree on the queue host, commit and sign, then run `z23-dev dev land send --host=<queue-host> --lane=NAME --commit=<sha>` to send ONE commit (add `--bundle_out=<absolute path>` instead of `--host` when there is no ssh to the queue host); see `docs/dev/DEVELOPING.md`, "Submit from another machine"; never push to `origin/main` directly.

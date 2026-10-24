@@ -1949,6 +1949,20 @@ checkout.
 A lane worktree with tracked changes refuses `RECEIVE_WORKTREE_DIRTY` and is
 never reset. Both leaves are local-operator only.
 
+To send one commit instead of the whole tip, pass `--commit=<sha or ref>`. The
+bundle is built from the object store, so a dirty working tree is allowed with
+it. `origin/main..<commit>` must be exactly that commit; a stack refuses
+`SEND_NOT_SINGLE`, whose message gives the command that makes it single
+(`git switch -c send/NAME origin/main && git cherry-pick -S <commit>`, then send
+the new commit). An already-landed commit refuses `SEND_NOTHING_AHEAD`.
+
+A machine with no ssh to the queue host passes `--bundle_out=<absolute path>`
+instead. `send` writes the bundle there (refusing `SEND_BUNDLE_EXISTS` when the
+path exists), runs no `ssh` or `scp`, needs no `--host`, and returns
+`data.bundle`, `data.bundle_sha256`, `data.commit` and `data.lane` with a board-ready
+`READY <lane> <commit> bundle_sha256=<hex>` line that names no local path. Carry the file to the queue host and run
+`dev land receive --bundle=PATH --lane=NAME` there.
+
 ## 7. Continue while deep proof runs
 
 After a push, fetch current upstream and continue to the next unfinished item.
