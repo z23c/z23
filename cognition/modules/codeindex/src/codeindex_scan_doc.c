@@ -28,6 +28,32 @@
 
 /* ── comment capture ────────────────────────────────────────────────── */
 
+static bool doc_fill(char ch)
+{
+    return ch == ' ' || ch == '\t' || ch == '*' || ch == '\r';
+}
+
+/* Return one trimmed line's bounds, advancing past an empty newline only.
+ * Callers retain their own copying caps and substantive-line policies. */
+static bool doc_line_bounds(const struct scan_ctx *c, size_t *cursor,
+                             size_t end, size_t *line_end, size_t *trim_end)
+{
+    size_t i = *cursor;
+    while (i < end && doc_fill(c->src[i])) i++;
+    *cursor = i;
+    if (i < end && c->src[i] == '\n') {
+        *cursor = i + 1;
+        return false;
+    }
+    size_t j = i;
+    while (j < end && c->src[j] != '\n') j++;
+    size_t e = j;
+    while (e > i && doc_fill(c->src[e - 1])) e--;
+    *line_end = j;
+    *trim_end = e;
+    return true;
+}
+
 void capture_doc(struct scan_ctx *c, size_t content_start, size_t end)
 {
     /* Find the first non-empty textual line inside [content_start,end),
@@ -36,18 +62,8 @@ void capture_doc(struct scan_ctx *c, size_t content_start, size_t end)
     line[0] = '\0';
     size_t i = content_start;
     while (i < end) {
-        /* skip leading whitespace + '*' + '/' fill */
-        while (i < end && (c->src[i] == ' ' || c->src[i] == '\t' ||
-                           c->src[i] == '*' || c->src[i] == '\r'))
-            i++;
-        if (i < end && c->src[i] == '\n') { i++; continue; }
-        size_t j = i;
-        while (j < end && c->src[j] != '\n') j++;
-        /* trim trailing */
-        size_t e = j;
-        while (e > i && (c->src[e - 1] == ' ' || c->src[e - 1] == '\t' ||
-                         c->src[e - 1] == '\r' || c->src[e - 1] == '*'))
-            e--;
+        size_t j, e;
+        if (!doc_line_bounds(c, &i, end, &j, &e)) continue;
         if (e > i) {
             size_t n = e - i;
             if (n > sizeof(line) - 1) n = sizeof(line) - 1;
@@ -111,6 +127,33 @@ static bool purpose_line_is_license(const char *line)
     return false;
 }
 
+static void purpose_stem(const char *relpath, char *stem, size_t stem_cap)
+{
+    const char *base = strrchr(relpath, '/');
+    base = base ? base + 1 : relpath;
+    size_t n = 0;
+    while (base[n] && base[n] != '.' && n + 1 < stem_cap)
+        stem[n] = base[n], n++;
+    stem[n] = '\0';
+}
+
+static const char *purpose_description(const char *line, const char *stem,
+                                       size_t sl)
+{
+    const char *desc = line;
+    if (sl > 0 && strncmp(line, stem, sl) == 0) {
+        const char *p = line + sl;
+        while (*p == ' ') p++;
+        if ((unsigned char)p[0] == 0xE2 && (unsigned char)p[1] == 0x80 &&
+            (unsigned char)p[2] == 0x94) {          /* em-dash — */
+            p += 3; while (*p == ' ') p++; desc = p;
+        } else if (p[0] == ':' || p[0] == '-') {    /* "stem:" / "stem -" */
+            p += 1; while (*p == ' ') p++; desc = p;
+        }
+    }
+    return desc;
+}
+
 /* Derive a file's one-line purpose from its EXISTING leading block comment:
  * the first substantive body line after skipping license boilerplate and blank
  * '*' fill, with a leading "<stem> [—:-] " prefix stripped so the stored
@@ -135,30 +178,15 @@ void ci_file_purpose(const struct scan_ctx *c, char out[CI_FILE_PURPOSE_MAX])
 
     /* file stem = basename minus extension, for prefix stripping */
     char stem[128];
-    {
-        const char *base = strrchr(c->relpath, '/');
-        base = base ? base + 1 : c->relpath;
-        size_t n = 0;
-        while (base[n] && base[n] != '.' && n + 1 < sizeof(stem))
-            stem[n] = base[n], n++;
-        stem[n] = '\0';
-    }
+    purpose_stem(c->relpath, stem, sizeof(stem));
     size_t sl = strlen(stem);
 
     /* walk body lines of [start,end), mirroring capture_doc's fill-stripping */
     size_t i = start;
     char line[CI_FILE_PURPOSE_CAPTURE_MAX];
     while (i < end) {
-        while (i < end && (c->src[i] == ' ' || c->src[i] == '\t' ||
-                           c->src[i] == '*' || c->src[i] == '\r'))
-            i++;
-        if (i < end && c->src[i] == '\n') { i++; continue; }
-        size_t j = i;
-        while (j < end && c->src[j] != '\n') j++;
-        size_t e = j;
-        while (e > i && (c->src[e - 1] == ' ' || c->src[e - 1] == '\t' ||
-                         c->src[e - 1] == '\r' || c->src[e - 1] == '*'))
-            e--;
+        size_t j, e;
+        if (!doc_line_bounds(c, &i, end, &j, &e)) continue;
         if (e > i) {
             size_t n = e - i;
             if (n > sizeof(line) - 1) n = sizeof(line) - 1;
@@ -175,17 +203,7 @@ void ci_file_purpose(const struct scan_ctx *c, char out[CI_FILE_PURPOSE_MAX])
             if (purpose_line_is_license(line)) { i = j + 1; continue; }
 
             /* first substantive line: strip a leading "<stem> [—:-] " prefix */
-            const char *desc = line;
-            if (sl > 0 && strncmp(line, stem, sl) == 0) {
-                const char *p = line + sl;
-                while (*p == ' ') p++;
-                if ((unsigned char)p[0] == 0xE2 && (unsigned char)p[1] == 0x80 &&
-                    (unsigned char)p[2] == 0x94) {          /* em-dash — */
-                    p += 3; while (*p == ' ') p++; desc = p;
-                } else if (p[0] == ':' || p[0] == '-') {    /* "stem:" / "stem -" */
-                    p += 1; while (*p == ' ') p++; desc = p;
-                }
-            }
+            const char *desc = purpose_description(line, stem, sl);
             (void)zcl_text_fit(out, CI_FILE_PURPOSE_MAX, desc, "codeindex", "file_purpose");
             return;
         }
