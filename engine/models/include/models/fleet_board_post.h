@@ -119,6 +119,10 @@ struct fleet_board_filter {
     bool scope_set;
     uint8_t scope;                      /* enum fleet_board_scope */
     char room[FLEET_BOARD_ROOM_MAX + 1];/* empty = any room */
+    /* Exactly one post: id equality, ANDed with every other predicate. Used
+     * by the single-post page so its check is exact, not a window. */
+    bool id_set;
+    uint8_t id[32];
 };
 
 struct fleet_board_status {

@@ -1115,6 +1115,8 @@ static void board_apply_filter(struct qb *q,
     if (filter->host_set)
         qb_where_blob(q, QB_C_fleet_board_posts_host_pubkey, QB_EQ,
                       filter->host_pubkey, 32);
+    if (filter->id_set)
+        qb_where_blob(q, QB_C_fleet_board_posts_id, QB_EQ, filter->id, 32);
     if (filter->since > 0)
         qb_where_int(q, QB_C_fleet_board_posts_created_at, QB_GT,
                      filter->since);

@@ -607,6 +607,223 @@ static int test_board_site_wiki_root_route(void)
     return failures;
 }
 
+/* ── /board/post/<id> — one post, whole ─────────────────────────────── */
+
+#define BSP_LEAD 480
+#define BSP_NOT_FOUND_CAP 16384
+
+static bool bsp_sign_ingest(struct node_db *db, struct fleet_board_post *p,
+                            const uint8_t seed[32], const uint8_t pk[32],
+                            int64_t ingest_now)
+{
+    return fleet_board_post_sign(p, seed, pk) == FLEET_BOARD_OK &&
+           db_fleet_board_post_ingest(db, p, ingest_now, NULL) ==
+               FLEET_BOARD_OK;
+}
+
+/* Copies the current response into saved; false when it does not fit. */
+static bool bsp_save(const char *resp, char *saved, size_t cap)
+{
+    size_t n = strlen(resp);
+    if (n >= cap)
+        return false;
+    memcpy(saved, resp, n + 1);
+    return true;
+}
+
+static int test_board_site_post_page(void)
+{
+    int failures = 0;
+    TEST("board site: /board/post/<id> shows one post whole, same rules") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        bs_identity(2, seed, pk);
+        const int64_t now = (int64_t)platform_time_wall_time_t();
+
+        /* 479 bytes of 'a', then U+00E9 (two bytes) straddling byte 480,
+         * then a tail the preview must not reach, with markup in it. */
+        char longtext[700];
+        memset(longtext, 'a', 479);
+        longtext[479] = '\0';
+        strcat(longtext, "\xC3\xA9 TAIL-MARKER <i>x</i> end");
+        struct fleet_board_post longp, reply, priv, expired, quotes, shortp;
+        bs_compose(&longp, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                   "contrib", "lane-<c>", longtext, (uint64_t)now, 3600);
+        ASSERT(bsp_sign_ingest(&db, &longp, seed, pk, now));
+        bs_compose(&reply, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                   "contrib", "lane-c", "reply body", (uint64_t)now + 1, 3600);
+        memcpy(reply.ref, longp.id, 32);
+        ASSERT(bsp_sign_ingest(&db, &reply, seed, pk, now));
+        bs_compose(&priv, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_FLEET, "",
+                   "lane-c", "PRIVATE-MARKER", (uint64_t)now + 2, 3600);
+        ASSERT(bsp_sign_ingest(&db, &priv, seed, pk, now));
+        /* Virtual time: valid when ingested at t=1000000, long expired by
+         * the real clock the page reads. */
+        bs_compose(&expired, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                   "contrib", "lane-c", "EXPIRED-MARKER", 1000000u, 10);
+        ASSERT(bsp_sign_ingest(&db, &expired, seed, pk, 1000000));
+        bs_compose(&shortp, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                   "contrib", "lane-c", "short post", (uint64_t)now + 3, 3600);
+        ASSERT(bsp_sign_ingest(&db, &shortp, seed, pk, now));
+
+        /* The longest ordinary text, every byte the worst escape. */
+        static char qtext[FLEET_BOARD_TEXT_MAX + 1];
+        memset(qtext, '"', FLEET_BOARD_TEXT_MAX);
+        qtext[FLEET_BOARD_TEXT_MAX] = '\0';
+        bs_compose(&quotes, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                   "contrib", "lane-c", qtext, (uint64_t)now + 4, 3600);
+        ASSERT(bsp_sign_ingest(&db, &quotes, seed, pk, now));
+
+        struct db_service service = {.node_db = &db, .started = true};
+        struct app_runtime_context runtime = {.db_service = &service};
+        app_runtime_set_current(&runtime);
+
+        char id_hex[65], ref_hex[65], host_hex[65], path[128];
+        fleet_board_id_to_hex(longp.id, id_hex);
+        fleet_board_id_to_hex(pk, host_hex);
+        (void)snprintf(path, sizeof(path), "/board/post/%s", id_hex);
+
+        /* Post page: whole text, full id, full key, escaped, room link. */
+        const char *resp = bs_get(path, NULL);
+        ASSERT(bs_has(resp, "200 OK"));
+        ASSERT(bs_has(resp, "\xC3\xA9 TAIL-MARKER &lt;i&gt;x&lt;/i&gt; end"));
+        ASSERT(!bs_has(resp, "<i>x</i>"));
+        ASSERT(bs_has(resp, id_hex));
+        ASSERT(bs_has(resp, host_hex));
+        ASSERT(bs_has(resp, "/board/room/contrib"));
+        ASSERT(bs_has(resp, "lane-&lt;c&gt;"));
+        ASSERT(!bs_has(resp, "lane-<c>"));
+
+        /* The reply names its parent in full, as a link. */
+        fleet_board_id_to_hex(reply.id, ref_hex);
+        (void)snprintf(path, sizeof(path), "/board/post/%s", ref_hex);
+        resp = bs_get(path, NULL);
+        ASSERT(bs_has(resp, "200 OK"));
+        ASSERT(bs_has(resp, "reply body"));
+        char want[160];
+        (void)snprintf(want, sizeof(want), "href='/board/post/%s'", id_hex);
+        ASSERT(bs_has(resp, want));
+
+        /* Room page: preview clipped on a character boundary, a full-post
+         * link, the id linked whole, and a reply marker with a ref link. */
+        resp = bs_get("/board/room/contrib", NULL);
+        ASSERT(bs_has(resp, "200 OK"));
+        ASSERT(!bs_has(resp, "TAIL-MARKER"));
+        ASSERT(!bs_has(resp, "\xC3"));
+        ASSERT(bs_has(resp, "full post"));
+        ASSERT(bs_has(resp, want));
+        char re16[40];
+        (void)snprintf(re16, sizeof(re16), "re %.16s", id_hex);
+        ASSERT(bs_has(resp, re16));
+        ASSERT(bs_has(resp, "short post"));
+        ASSERT(!bs_has(resp, "PRIVATE-MARKER"));
+        ASSERT(!bs_has(resp, "EXPIRED-MARKER"));
+
+        /* The longest ordinary post fits whole: nothing cut. */
+        fleet_board_id_to_hex(quotes.id, ref_hex);
+        (void)snprintf(path, sizeof(path), "/board/post/%s", ref_hex);
+        resp = bs_get(path, NULL);
+        ASSERT(bs_has(resp, "200 OK"));
+        static char allq[FLEET_BOARD_TEXT_MAX * 6 + 8];
+        allq[0] = '\0';
+        for (int i = 0; i < FLEET_BOARD_TEXT_MAX; i++)
+            strcat(allq + i * 6, "&quot;");
+        ASSERT(bs_has(resp, allq));
+        ASSERT(bs_has(resp, "</html>") || bs_has(resp, "</main>"));
+        resp = bs_get("/board/room/contrib", NULL);
+        ASSERT(bs_has(resp, "200 OK"));
+
+        /* Unknown, malformed, fleet-private and expired ids: one 404, the
+         * same bytes, so no page tells them apart. */
+        static char nf[BSP_NOT_FOUND_CAP];
+        resp = bs_get("/board/post/" "00000000000000000000000000000000"
+                      "00000000000000000000000000000000", NULL);
+        ASSERT(bs_has(resp, "404 Not Found"));
+        ASSERT(bsp_save(resp, nf, sizeof(nf)));
+        char bad[256];
+        const char *k_bad[] = {
+            "/board/post/", "/board/post/abc",
+            "/board/post/ABCDEF0123456789ABCDEF0123456789"
+            "ABCDEF0123456789ABCDEF0123456789",
+            "/board/post/zz00000000000000000000000000000000"
+            "00000000000000000000000000000000",
+        };
+        for (size_t i = 0; i < sizeof(k_bad) / sizeof(k_bad[0]); i++) {
+            resp = bs_get(k_bad[i], NULL);
+            ASSERT(strcmp(resp, nf) == 0);
+        }
+        (void)snprintf(bad, sizeof(bad), "/board/post/%s/", id_hex);
+        ASSERT(strcmp(bs_get(bad, NULL), nf) == 0);
+        (void)snprintf(bad, sizeof(bad), "/board/post/%s/x", id_hex);
+        ASSERT(strcmp(bs_get(bad, NULL), nf) == 0);
+        (void)snprintf(bad, sizeof(bad), "/board/post/%s0", id_hex);
+        ASSERT(strcmp(bs_get(bad, NULL), nf) == 0);
+        fleet_board_id_to_hex(priv.id, ref_hex);
+        (void)snprintf(bad, sizeof(bad), "/board/post/%s", ref_hex);
+        ASSERT(strcmp(bs_get(bad, NULL), nf) == 0);
+        fleet_board_id_to_hex(expired.id, ref_hex);
+        (void)snprintf(bad, sizeof(bad), "/board/post/%s", ref_hex);
+        ASSERT(strcmp(bs_get(bad, NULL), nf) == 0);
+        ASSERT(!bs_has(nf, "PRIVATE-MARKER"));
+
+        app_runtime_set_current(NULL);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* One public post, then 70 later posts of the same key, kind and slug. The
+ * old post is still public and unexpired, so its page must stay reachable
+ * however many newer neighbours it has. Ingest times are spread over three
+ * quota windows because a key may post at most
+ * FLEET_BOARD_PUBLIC_QUOTA_WINDOW_MAX per window. */
+static int test_board_site_post_page_old_post(void)
+{
+    int failures = 0;
+    TEST("board site: an old post stays reachable under 70 later same-key posts") {
+        struct node_db db;
+        memset(&db, 0, sizeof(db));
+        ASSERT(node_db_open(&db, ":memory:"));
+        uint8_t seed[32], pk[32];
+        bs_identity(3, seed, pk);
+        /* Virtual time shared with the page, so no reading of a real clock
+         * dates or grades a post. */
+        const int64_t now = 1800000000;
+        board_site_set_now_for_testing(now);
+        struct fleet_board_post first;
+        bs_compose(&first, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                   "contrib", "lane-c", "OLDEST-FULL-TEXT", (uint64_t)now - 1500,
+                   7200);
+        ASSERT(bsp_sign_ingest(&db, &first, seed, pk, now - 1500));
+        for (int i = 0; i < 70; i++) {
+            struct fleet_board_post later;
+            int64_t at = now - 700 + (i < 35 ? i : 700 + i);
+            char text[32];
+            (void)snprintf(text, sizeof(text), "later %d", i);
+            bs_compose(&later, FLEET_BOARD_KIND_NOTE, FLEET_BOARD_SCOPE_PUBLIC,
+                       "contrib", "lane-c", text, (uint64_t)at, 7200);
+            ASSERT(bsp_sign_ingest(&db, &later, seed, pk, at));
+        }
+        struct db_service service = {.node_db = &db, .started = true};
+        struct app_runtime_context runtime = {.db_service = &service};
+        app_runtime_set_current(&runtime);
+        char id_hex[65], path[128];
+        fleet_board_id_to_hex(first.id, id_hex);
+        (void)snprintf(path, sizeof(path), "/board/post/%s", id_hex);
+        const char *resp = bs_get(path, NULL);
+        ASSERT(bs_has(resp, "200 OK"));
+        ASSERT(bs_has(resp, "OLDEST-FULL-TEXT"));
+        app_runtime_set_current(NULL);
+        node_db_close(&db);
+        PASS();
+    } _test_next:;
+    board_site_set_now_for_testing(0);
+    return failures;
+}
+
 int test_board_site(void)
 {
     int failures = 0;
@@ -720,6 +937,8 @@ int test_board_site(void)
         node_db_close(&db);
         PASS();
     } _test_next:;
+    failures += test_board_site_post_page();
+    failures += test_board_site_post_page_old_post();
     failures += test_board_site_wiki();
     failures += test_board_site_wiki_hardening();
     failures += test_board_site_wiki_root_route();

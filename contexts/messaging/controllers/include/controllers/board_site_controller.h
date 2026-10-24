@@ -8,6 +8,8 @@
  * Routes:
  *   /board                room index — the public rooms this node carries
  *   /board/room/<name>    one room, newest first (name is [a-z0-9-])
+ *   /board/post/<id>      one post whole (id is 64 lowercase hex); same
+ *                         visibility as the room pages, else the same 404
  *
  * The scope discipline of ZRC-0009 applies here with full force: the site
  * reads only non-fleet rows, so a fleet-private post, its room, and even its
@@ -31,5 +33,11 @@ size_t board_site_handle_request(const char *method, const char *path,
                                  const uint8_t *body, size_t body_len,
                                  uint8_t *response, size_t response_max,
                                  const char *datadir);
+
+#ifdef ZCL_TESTING
+/* Pin the clock the pages list by (0 restores the real clock), so a test
+ * can date its fixture posts in virtual time. */
+void board_site_set_now_for_testing(int64_t now);
+#endif
 
 #endif /* ZCL_CONTROLLERS_BOARD_SITE_CONTROLLER_H */

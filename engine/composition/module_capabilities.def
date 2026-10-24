@@ -178,6 +178,7 @@ ZCL_MODULE_CAPABILITY("contexts/market/controllers/src/yardsale_site_controller.
 ZCL_MODULE_CAPABILITY("contexts/market/controllers/src/yardsale_site_controller_buy.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/commons/controllers/src/zcode_site_controller.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/messaging/controllers/src/wiki_site_controller.c", CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("contexts/messaging/controllers/src/board_site_controller.c", CAP_FS_WRITE, "the /board/post page looks one post up in the node database (db_fleet_board_post_find); it writes nothing itself")
 ZCL_MODULE_CAPABILITY("contexts/naming/controllers/src/zdir_intent_controller.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/controllers/src/zid_intent_controller.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("contexts/naming/controllers/src/znam_intent_controller.c", CAP_FS_WRITE, "")
