@@ -24,12 +24,10 @@
  * checks its own magic and exact length first. Votes are addressed by
  * vote id (their canonical root form). Returns false for anything that
  * is not a known, valid science wire. */
-static bool science_identify_wire(const uint8_t *wire, size_t len,
-                                  uint8_t root_out[32],
-                                  const char **kind_out)
+static bool science_identify_result(
+    const uint8_t *wire, size_t len, uint8_t root_out[32],
+    const char **kind_out)
 {
-    if (!wire || !root_out || !kind_out)
-        return false;
     if (len == VCS_ZCODE_STUDY_SPEC_WIRE_BYTES) {
         struct vcs_zcode_study_spec_v1 o;
         if (vcs_zcode_study_spec_parse(wire, len, &o) ==
@@ -63,6 +61,13 @@ static bool science_identify_wire(const uint8_t *wire, size_t len,
             return true;
         }
     }
+    return false;
+}
+
+static bool science_identify_evidence(
+    const uint8_t *wire, size_t len, uint8_t root_out[32],
+    const char **kind_out)
+{
     if (len == VCS_ZCODE_REPRODUCTION_WIRE_BYTES) {
         struct vcs_zcode_reproduction_v1 o;
         if (vcs_zcode_reproduction_parse(wire, len, &o) ==
@@ -98,6 +103,13 @@ static bool science_identify_wire(const uint8_t *wire, size_t len,
             return true;
         }
     }
+    return false;
+}
+
+static bool science_identify_review(
+    const uint8_t *wire, size_t len, uint8_t root_out[32],
+    const char **kind_out)
+{
     if (len == VCS_ZCODE_BENCHMARK_METHOD_WIRE_BYTES) {
         struct vcs_zcode_benchmark_method_v1 o;
         if (vcs_zcode_benchmark_method_parse(wire, len, &o) ==
@@ -130,6 +142,18 @@ static bool science_identify_wire(const uint8_t *wire, size_t len,
             return true;
         }
     }
+    return false;
+}
+
+static bool science_identify_wire(const uint8_t *wire, size_t len,
+                                  uint8_t root_out[32],
+                                  const char **kind_out)
+{
+    if (!wire || !root_out || !kind_out)
+        return false;
+    if (science_identify_result(wire, len, root_out, kind_out)) return true;
+    if (science_identify_evidence(wire, len, root_out, kind_out)) return true;
+    if (science_identify_review(wire, len, root_out, kind_out)) return true;
     return false;
 }
 
@@ -171,14 +195,23 @@ struct zcl_result zcode_science_publish(
     return ZCL_OK;
 }
 
+static bool science_admit_inputs_valid(
+    const struct vcs_package_store *store, const struct node_db *ndb,
+    const char *workspace, const char *blob_root_hex,
+    const char *out_science_root, const char *out_kind, const bool *out_new)
+{
+    return !(!store || !ndb || !ndb->open || !workspace || !blob_root_hex ||
+        !out_science_root || !out_kind || !out_new);
+}
+
 struct zcl_result zcode_science_admit(
     struct vcs_package_store *store, struct node_db *ndb,
     const char *workspace, const char *blob_root_hex, int64_t now,
     char out_science_root[65], char out_kind[ZCODE_SCIENCE_KIND_CAP],
     bool *out_new)
 {
-    if (!store || !ndb || !ndb->open || !workspace || !blob_root_hex ||
-        !out_science_root || !out_kind || !out_new)
+    if (!science_admit_inputs_valid(store, ndb, workspace, blob_root_hex,
+                                     out_science_root, out_kind, out_new))
         return ZCL_ERR(-1, "science-admit-input-invalid");
     uint8_t blob_root[32];
     if (strlen(blob_root_hex) != 64u ||
@@ -207,6 +240,18 @@ struct zcl_result zcode_science_admit(
     return ZCL_OK;
 }
 
+static bool science_candidate_inputs_valid(
+    const struct vcs_package_store *store, const struct node_db *ndb,
+    const char *workspace, const char *expected_science_root,
+    const char *const *blob_roots, size_t blob_count, const char *out_blob_root,
+    const char *out_kind, const bool *out_new, const size_t *out_attempts)
+{
+    return !(!store || !ndb || !workspace || !expected_science_root ||
+        !blob_roots || !blob_count || blob_count > VCS_ZCODE_DHT_K ||
+        !out_blob_root ||
+        !out_kind || !out_new || !out_attempts);
+}
+
 struct zcl_result zcode_science_admit_candidates(
     struct vcs_package_store *store, struct node_db *ndb,
     const char *workspace, const char *expected_science_root,
@@ -214,10 +259,9 @@ struct zcl_result zcode_science_admit_candidates(
     char out_blob_root[65], char out_kind[ZCODE_SCIENCE_KIND_CAP],
     bool *out_new, size_t *out_attempts)
 {
-    if (!store || !ndb || !workspace || !expected_science_root ||
-        !blob_roots || !blob_count || blob_count > VCS_ZCODE_DHT_K ||
-        !out_blob_root ||
-        !out_kind || !out_new || !out_attempts)
+    if (!science_candidate_inputs_valid(
+            store, ndb, workspace, expected_science_root, blob_roots, blob_count,
+            out_blob_root, out_kind, out_new, out_attempts))
         return ZCL_ERR(-1, "science-candidates-input-invalid");
     *out_attempts = 0;
     out_blob_root[0] = '\0';
