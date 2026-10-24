@@ -2234,13 +2234,6 @@ tests/harness/src/test_block_index_rebuild.c:run_rebuild_n_headers:19
 tests/harness/src/test_block_index_topup.c:run_bound_topup_integration:42
 tests/harness/src/test_block_index_topup.c:test_block_index_topup:53
 tests/harness/src/test_block_locator_bounds.c:test_block_locator_bounds:28
-tests/harness/src/test_block_parse_cache.c:test_borrowed_contract:26
-tests/harness/src/test_block_parse_cache.c:test_deep_clone_equality:16
-tests/harness/src/test_block_parse_cache.c:test_evict_removes_one_key:16
-tests/harness/src/test_block_parse_cache.c:test_no_cache_on_hash_mismatch:19
-tests/harness/src/test_block_parse_cache.c:test_no_key_collision:19
-tests/harness/src/test_block_parse_cache.c:test_profile_reset:20
-tests/harness/src/test_block_parse_cache.c:test_ring_replacement:25
 tests/harness/src/test_block_pruning.c:test_block_pruning:25
 tests/harness/src/test_block_scan.c:test_legacy_import_clear_rollback:18
 tests/harness/src/test_block_scan.c:test_wallet_scan_empty_replacement:34

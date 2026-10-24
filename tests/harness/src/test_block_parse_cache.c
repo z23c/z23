@@ -132,6 +132,39 @@ static bool make_fixture(struct fixture *fx, const char *datadir,
     return true;
 }
 
+/* Serialize `b` and report whether it is byte-identical to the fixture's
+ * canonical body. The serialized buffer is freed before returning. */
+static bool bpc_body_is_fixture(const struct block *b, const struct fixture *fx)
+{
+    size_t len = 0;
+    unsigned char *s = ser(b, &len);
+    bool same = s && len == fx->len && memcmp(s, fx->bytes, len) == 0;
+    free(s);
+    return same;
+}
+
+/* Copy of `bi` with the disk pointer broken (HAVE_DATA off): a get under it
+ * can only be satisfied by a cache HIT, never by a disk read. */
+static struct block_index bpc_index_without_data(const struct block_index *bi)
+{
+    struct block_index broken = *bi;
+    broken.nStatus &= ~(unsigned int)BLOCK_HAVE_DATA;
+    return broken;
+}
+
+/* Get (height, fx->hash) through `bi` and report whether the returned body is
+ * byte-identical to the fixture. The block is freed before returning. */
+static bool bpc_get_matches_fixture(const struct fixture *fx,
+                                    const struct block_index *bi,
+                                    const char *datadir, int32_t height)
+{
+    struct block g; block_init(&g);
+    bool got = block_parse_cache_get(height, fx->hash.data, bi, datadir, &g);
+    bool same = got && bpc_body_is_fixture(&g, fx);
+    block_free(&g);
+    return same;
+}
+
 /* ── Test (a): deep-clone equality + independence ─────────────── */
 
 static int test_deep_clone_equality(const char *datadir)
@@ -155,12 +188,10 @@ static int test_deep_clone_equality(const char *datadir)
             printf("FAIL (miss get)\n"); failures++;
             block_free(&b_miss); free(fx.bytes); goto done;
         }
-        size_t l1 = 0; unsigned char *s1 = ser(&b_miss, &l1);
-        if (!s1 || l1 != fx.len || memcmp(s1, fx.bytes, l1) != 0) {
+        if (!bpc_body_is_fixture(&b_miss, &fx)) {
             printf("FAIL (miss body != source bytes)\n"); failures++;
-            free(s1); block_free(&b_miss); free(fx.bytes); goto done;
+            block_free(&b_miss); free(fx.bytes); goto done;
         }
-        free(s1);
 
         /* HIT: second get is served from cache; must equal source too. */
         struct block b_hit; block_init(&b_hit);
@@ -168,13 +199,11 @@ static int test_deep_clone_equality(const char *datadir)
             printf("FAIL (hit get)\n"); failures++;
             block_free(&b_miss); block_free(&b_hit); free(fx.bytes); goto done;
         }
-        size_t l2 = 0; unsigned char *s2 = ser(&b_hit, &l2);
-        if (!s2 || l2 != fx.len || memcmp(s2, fx.bytes, l2) != 0) {
+        if (!bpc_body_is_fixture(&b_hit, &fx)) {
             printf("FAIL (hit body != source bytes)\n"); failures++;
-            free(s2); block_free(&b_miss); block_free(&b_hit);
+            block_free(&b_miss); block_free(&b_hit);
             free(fx.bytes); goto done;
         }
-        free(s2);
 
         /* INDEPENDENCE: mutate the miss clone, then free it; the hit clone
          * must be unchanged and a fresh hit must still equal the source. */
@@ -193,9 +222,8 @@ static int test_deep_clone_equality(const char *datadir)
             printf("FAIL (post-mutate hit get)\n"); failures++;
             block_free(&b_hit2); free(fx.bytes); goto done;
         }
-        size_t l3 = 0; unsigned char *s3 = ser(&b_hit2, &l3);
-        bool same = s3 && l3 == fx.len && memcmp(s3, fx.bytes, l3) == 0;
-        free(s3); block_free(&b_hit2);
+        bool same = bpc_body_is_fixture(&b_hit2, &fx);
+        block_free(&b_hit2);
         if (!same) {
             printf("FAIL (cache entry corrupted by consumer mutation/free)\n");
             failures++; free(fx.bytes); goto done;
@@ -248,14 +276,8 @@ static int test_no_key_collision(const char *datadir)
         block_free(&ga); block_free(&gb);
 
         /* Re-get each: must return ITS OWN bytes, not the sibling's. */
-        struct block ra, rb; block_init(&ra); block_init(&rb);
-        block_parse_cache_get(200, fa.hash.data, &fa.bi, datadir, &ra);
-        block_parse_cache_get(200, fb.hash.data, &fb.bi, datadir, &rb);
-        size_t la = 0, lb = 0;
-        unsigned char *sa = ser(&ra, &la), *sb = ser(&rb, &lb);
-        bool a_ok = sa && la == fa.len && memcmp(sa, fa.bytes, la) == 0;
-        bool b_ok = sb && lb == fb.len && memcmp(sb, fb.bytes, lb) == 0;
-        free(sa); free(sb); block_free(&ra); block_free(&rb);
+        bool a_ok = bpc_get_matches_fixture(&fa, &fa.bi, datadir, 200);
+        bool b_ok = bpc_get_matches_fixture(&fb, &fb.bi, datadir, 200);
         if (!a_ok || !b_ok) {
             printf("FAIL (same-height/diff-hash collision: A_ok=%d B_ok=%d)\n",
                    a_ok, b_ok);
@@ -270,15 +292,10 @@ static int test_no_key_collision(const char *datadir)
             printf("FAIL (same-hash/diff-height get)\n"); failures++;
             block_free(&rc); free(fa.bytes); free(fb.bytes); goto done;
         }
-        size_t lc = 0; unsigned char *sc = ser(&rc, &lc);
-        bool c_ok = sc && lc == fa.len && memcmp(sc, fa.bytes, lc) == 0;
-        free(sc); block_free(&rc);
+        bool c_ok = bpc_body_is_fixture(&rc, &fa);
+        block_free(&rc);
 
-        struct block ra2; block_init(&ra2);
-        block_parse_cache_get(200, fa.hash.data, &fa.bi, datadir, &ra2);
-        size_t la2 = 0; unsigned char *sa2 = ser(&ra2, &la2);
-        bool a200_ok = sa2 && la2 == fa.len && memcmp(sa2, fa.bytes, la2) == 0;
-        free(sa2); block_free(&ra2);
+        bool a200_ok = bpc_get_matches_fixture(&fa, &fa.bi, datadir, 200);
 
         if (!c_ok || !a200_ok) {
             printf("FAIL (height component ignored: h201_ok=%d h200_still=%d)\n",
@@ -299,6 +316,55 @@ done:
  * tracks the real capacity boundary. */
 #define BPC_CAP BLOCK_PARSE_CACHE_CAPACITY
 
+/* Build the n ring fixtures (height 300+i) with deferred fdatasync. Returns
+ * false if any setup fails; the caller frees every fxs[i].bytes. */
+static bool bpc_ring_make_fixtures(struct fixture *fxs, int n, const char *datadir)
+{
+    /* Deferred fdatasync: one sync_pending() after the loop instead of N
+     * inline barriers; the previous mode is restored afterwards. */
+    bool prior_deferred = disk_block_io_deferred_sync_enabled();
+    disk_block_io_set_deferred_sync(true);
+    bool setup_ok = true;
+    for (int i = 0; i < n; i++) {
+        struct block src;
+        build_block(&src, (uint32_t)(0x3000 + i), 1 + (i % 4));
+        if (!make_fixture(&fxs[i], datadir, &src, 300 + i)) {
+            setup_ok = false; block_free(&src); break;
+        }
+        block_free(&src);
+        /* Heartbeat: keep the no-output watchdog quiet on a loaded box. */
+        if (i > 0 && i % 512 == 0)
+            printf("... fixtures %d/%d\n", i, n);
+    }
+    disk_block_io_sync_pending();
+    disk_block_io_set_deferred_sync(prior_deferred);
+    return setup_ok;
+}
+
+/* Insert all n fixtures as misses (n disk reads + cache stores). Returns
+ * false after printing the failing index on the first get that fails. */
+static bool bpc_ring_insert_all(const struct fixture *fxs, int n, const char *datadir)
+{
+    for (int i = 0; i < n; i++) {
+        struct block g; block_init(&g);
+        if (!block_parse_cache_get(300 + i, fxs[i].hash.data,
+                                   &fxs[i].bi, datadir, &g)) {
+            printf("FAIL (insert %d)\n", i);
+            block_free(&g);
+            return false;
+        }
+        block_free(&g);
+    }
+    return true;
+}
+
+/* Free every fixture body in the n-entry array, then the array itself. */
+static void bpc_ring_fixtures_free(struct fixture *fxs, int n)
+{
+    for (int j = 0; j < n; j++) free(fxs[j].bytes);
+    free(fxs);
+}
+
 static int test_ring_replacement(const char *datadir)
 {
     int failures = 0;
@@ -311,65 +377,30 @@ static int test_ring_replacement(const char *datadir)
         struct fixture *fxs = calloc((size_t)N, sizeof(*fxs)); // raw-alloc-ok:test
         if (!fxs) { printf("FAIL (alloc)\n"); failures++; goto done; }
 
-        /* Deferred fdatasync: one sync_pending() after the loop instead of N
-         * inline barriers; the previous mode is restored afterwards. */
-        bool prior_deferred = disk_block_io_deferred_sync_enabled();
-        disk_block_io_set_deferred_sync(true);
-        bool setup_ok = true;
-        for (int i = 0; i < N; i++) {
-            struct block src;
-            build_block(&src, (uint32_t)(0x3000 + i), 1 + (i % 4));
-            if (!make_fixture(&fxs[i], datadir, &src, 300 + i)) {
-                setup_ok = false; block_free(&src); break;
-            }
-            block_free(&src);
-            /* Heartbeat: keep the no-output watchdog quiet on a loaded box. */
-            if (i > 0 && i % 512 == 0)
-                printf("... fixtures %d/%d\n", i, N);
-        }
-        disk_block_io_sync_pending();
-        disk_block_io_set_deferred_sync(prior_deferred);
-        if (!setup_ok) {
+        if (!bpc_ring_make_fixtures(fxs, N, datadir)) {
             printf("FAIL (fixtures)\n"); failures++;
-            for (int i = 0; i < N; i++) free(fxs[i].bytes);
-            free(fxs); goto done;
+            bpc_ring_fixtures_free(fxs, N); goto done;
         }
 
-        /* Insert all N as misses (this is N disk reads + cache stores). */
-        for (int i = 0; i < N; i++) {
-            struct block g; block_init(&g);
-            if (!block_parse_cache_get(300 + i, fxs[i].hash.data,
-                                       &fxs[i].bi, datadir, &g)) {
-                printf("FAIL (insert %d)\n", i); failures++;
-                block_free(&g);
-                for (int j = 0; j < N; j++) free(fxs[j].bytes);
-                free(fxs); goto done;
-            }
-            block_free(&g);
+        if (!bpc_ring_insert_all(fxs, N, datadir)) {
+            failures++;
+            bpc_ring_fixtures_free(fxs, N); goto done;
         }
 
         /* Every non-colliding key (1..CAP) must remain byte-correct. */
         bool recents_ok = true;
-        for (int i = 1; i < N; i++) {
-            struct block g; block_init(&g);
-            block_parse_cache_get(300 + i, fxs[i].hash.data,
-                                  &fxs[i].bi, datadir, &g);
-            size_t l = 0; unsigned char *s = ser(&g, &l);
-            if (!s || l != fxs[i].len || memcmp(s, fxs[i].bytes, l) != 0)
+        for (int i = 1; i < N; i++)
+            if (!bpc_get_matches_fixture(&fxs[i], &fxs[i].bi, datadir, 300 + i))
                 recents_ok = false;
-            free(s); block_free(&g);
-        }
         if (!recents_ok) {
             printf("FAIL (a recent key was corrupted/lost)\n"); failures++;
-            for (int j = 0; j < N; j++) free(fxs[j].bytes);
-            free(fxs); goto done;
+            bpc_ring_fixtures_free(fxs, N); goto done;
         }
 
         /* idx 0 should have been replaced. Clear its block_index disk pointer
          * (HAVE_DATA off): a HIT ignores the index, an evicted entry takes the
          * MISS path and fails the HAVE_DATA guard, so get returns false. */
-        struct block_index broken = fxs[0].bi;
-        broken.nStatus &= ~(unsigned int)BLOCK_HAVE_DATA;
+        struct block_index broken = bpc_index_without_data(&fxs[0].bi);
         struct block g0; block_init(&g0);
         bool still_cached = block_parse_cache_get(300 + 0, fxs[0].hash.data,
                                                   &broken, datadir, &g0);
@@ -377,28 +408,18 @@ static int test_ring_replacement(const char *datadir)
         if (still_cached) {
             printf("FAIL (colliding key NOT replaced after %d inserts)\n", N);
             failures++;
-            for (int j = 0; j < N; j++) free(fxs[j].bytes);
-            free(fxs); goto done;
+            bpc_ring_fixtures_free(fxs, N); goto done;
         }
 
         /* And a normal re-get of idx 0 (intact index) re-reads from disk and
          * is still byte-correct. */
-        struct block g0b; block_init(&g0b);
-        bool reread = block_parse_cache_get(300 + 0, fxs[0].hash.data,
-                                            &fxs[0].bi, datadir, &g0b);
-        size_t l0 = 0; unsigned char *s0 = reread ? ser(&g0b, &l0) : NULL;
-        bool reread_ok = s0 && l0 == fxs[0].len &&
-                         memcmp(s0, fxs[0].bytes, l0) == 0;
-        free(s0); block_free(&g0b);
-        if (!reread_ok) {
+        if (!bpc_get_matches_fixture(&fxs[0], &fxs[0].bi, datadir, 300 + 0)) {
             printf("FAIL (re-read of evicted key not byte-correct)\n");
             failures++;
-            for (int j = 0; j < N; j++) free(fxs[j].bytes);
-            free(fxs); goto done;
+            bpc_ring_fixtures_free(fxs, N); goto done;
         }
 
-        for (int j = 0; j < N; j++) free(fxs[j].bytes);
-        free(fxs);
+        bpc_ring_fixtures_free(fxs, N);
         printf("OK\n");
     }
 done:
@@ -457,10 +478,8 @@ static int test_no_cache_on_hash_mismatch(const char *datadir)
         }
         /* The contract still hands back whatever was read (fx_bad's bytes); the
          * caller's gate decides. */
-        size_t l1 = 0; unsigned char *s1 = ser(&out1, &l1);
-        bool out1_is_bad = s1 && l1 == fx_bad.len &&
-                           memcmp(s1, fx_bad.bytes, l1) == 0;
-        free(s1); block_free(&out1);
+        bool out1_is_bad = bpc_body_is_fixture(&out1, &fx_bad);
+        block_free(&out1);
         if (!out1_is_bad) {
             printf("FAIL (mismatched MISS did not return the actually-read bytes)\n");
             failures++; free(fx_bad.bytes); free(fx_good.bytes); goto done;
@@ -477,12 +496,9 @@ static int test_no_cache_on_hash_mismatch(const char *datadir)
             block_free(&out2); free(fx_bad.bytes); free(fx_good.bytes);
             goto done;
         }
-        size_t l2 = 0; unsigned char *s2 = ser(&out2, &l2);
-        bool out2_is_good = s2 && l2 == fx_good.len &&
-                            memcmp(s2, fx_good.bytes, l2) == 0;
-        bool out2_is_poisoned_bad = s2 && l2 == fx_bad.len &&
-                                    memcmp(s2, fx_bad.bytes, l2) == 0;
-        free(s2); block_free(&out2);
+        bool out2_is_good = bpc_body_is_fixture(&out2, &fx_good);
+        bool out2_is_poisoned_bad = bpc_body_is_fixture(&out2, &fx_bad);
+        block_free(&out2);
         if (!out2_is_good || out2_is_poisoned_bad) {
             printf("FAIL (poisoned slot served stale bytes: got_good=%d got_bad=%d)\n",
                    out2_is_good, out2_is_poisoned_bad);
@@ -491,13 +507,7 @@ static int test_no_cache_on_hash_mismatch(const char *datadir)
 
         /* And it is now a real, correctly-keyed cache entry: a third get
          * under the same key hits it and still returns fx_good's bytes. */
-        struct block out3; block_init(&out3);
-        bool ok3 = block_parse_cache_get(H, fx_good.hash.data, &fx_good.bi,
-                                         datadir, &out3);
-        size_t l3 = 0; unsigned char *s3 = ok3 ? ser(&out3, &l3) : NULL;
-        bool out3_ok = s3 && l3 == fx_good.len &&
-                       memcmp(s3, fx_good.bytes, l3) == 0;
-        free(s3); block_free(&out3);
+        bool out3_ok = bpc_get_matches_fixture(&fx_good, &fx_good.bi, datadir, H);
         if (!out3_ok) {
             printf("FAIL (post-fix hit did not serve fx_good bytes)\n");
             failures++; free(fx_bad.bytes); free(fx_good.bytes); goto done;
@@ -554,8 +564,7 @@ static int test_evict_removes_one_key(const char *datadir)
 
         /* Key 2 must now be a MISS: break its index and confirm the get
          * fails (a HIT would ignore the broken index entirely). */
-        struct block_index broken2 = f2.bi;
-        broken2.nStatus &= ~(unsigned int)BLOCK_HAVE_DATA;
+        struct block_index broken2 = bpc_index_without_data(&f2.bi);
         struct block e2; block_init(&e2);
         bool still2 = block_parse_cache_get(601, f2.hash.data, &broken2,
                                             datadir, &e2);
@@ -569,19 +578,11 @@ static int test_evict_removes_one_key(const char *datadir)
         /* Keys 1 and 3 must still be resident HITs: break THEIR indexes too
          * and confirm the get still succeeds and returns the right bytes —
          * only possible if served from the (untouched) cache entry. */
-        struct block_index broken1 = f1.bi, broken3 = f3.bi;
-        broken1.nStatus &= ~(unsigned int)BLOCK_HAVE_DATA;
-        broken3.nStatus &= ~(unsigned int)BLOCK_HAVE_DATA;
+        struct block_index broken1 = bpc_index_without_data(&f1.bi);
+        struct block_index broken3 = bpc_index_without_data(&f3.bi);
 
-        struct block h1, h3; block_init(&h1); block_init(&h3);
-        bool ok1 = block_parse_cache_get(600, f1.hash.data, &broken1, datadir, &h1);
-        bool ok3 = block_parse_cache_get(602, f3.hash.data, &broken3, datadir, &h3);
-        size_t l1 = 0, l3 = 0;
-        unsigned char *s1 = ok1 ? ser(&h1, &l1) : NULL;
-        unsigned char *s3 = ok3 ? ser(&h3, &l3) : NULL;
-        bool sib1_ok = s1 && l1 == f1.len && memcmp(s1, f1.bytes, l1) == 0;
-        bool sib3_ok = s3 && l3 == f3.len && memcmp(s3, f3.bytes, l3) == 0;
-        free(s1); free(s3); block_free(&h1); block_free(&h3);
+        bool sib1_ok = bpc_get_matches_fixture(&f1, &broken1, datadir, 600);
+        bool sib3_ok = bpc_get_matches_fixture(&f3, &broken3, datadir, 602);
         if (!sib1_ok || !sib3_ok) {
             printf("FAIL (evict disturbed a sibling key: sib1_ok=%d sib3_ok=%d)\n",
                    sib1_ok, sib3_ok);
@@ -832,6 +833,111 @@ static void *borrowed_reader(void *arg)
     return NULL;
 }
 
+/* Each borrowed-contract case is its own function so the fixture pair stays
+ * shared while every TEST block keeps its own assertions. */
+static int test_borrowed_pin_survives(struct fixture *fa, struct fixture *fb,
+                                      const char *datadir)
+{
+    int failures = 0;
+    TEST("bpc borrowed: pin survives collision and pressure clear") {
+        block_parse_cache_clear();
+        struct block_parse_handle a, collision;
+        bool ok = block_parse_cache_acquire(1400, fa->hash.data, &fa->bi,
+                                            datadir, &a) &&
+                  block_parse_cache_acquire(
+                      1400 + BLOCK_PARSE_CACHE_CAPACITY, fb->hash.data, &fb->bi,
+                      datadir, &collision);
+        const struct block *held = block_parse_handle_block(&a);
+        block_parse_cache_clear();
+        ok = ok && held && held->vtx[0].num_vout == 3;
+        block_parse_cache_release(&collision);
+        block_parse_cache_release(&a);
+        struct block_index broken = bpc_index_without_data(&fa->bi);
+        struct block after; block_init(&after);
+        bool resident = block_parse_cache_get(1400, fa->hash.data, &broken,
+                                              datadir, &after);
+        block_free(&after);
+        if (!ok || resident) { printf("FAIL (pin/clear)\n"); failures++; }
+        else printf("OK\n");
+    }
+    return failures;
+}
+
+static int test_borrowed_stale_release(struct fixture *fa, struct fixture *fb,
+                                       const char *datadir)
+{
+    int failures = 0;
+    TEST("bpc borrowed: generation makes stale release harmless") {
+        block_parse_cache_clear();
+        struct block_parse_handle a, b;
+        bool ok = block_parse_cache_acquire(1400, fa->hash.data, &fa->bi,
+                                            datadir, &a);
+        struct block_parse_handle stale = a;
+        block_parse_cache_release(&a);
+        ok = ok && block_parse_cache_acquire(
+            1400 + BLOCK_PARSE_CACHE_CAPACITY, fb->hash.data, &fb->bi, datadir,
+            &b);
+        block_parse_cache_release(&stale);
+        block_parse_cache_clear();
+        const struct block *still_pinned = block_parse_handle_block(&b);
+        ok = ok && still_pinned && still_pinned->vtx[0].num_vout == 4;
+        block_parse_cache_release(&b);
+        if (!ok) { printf("FAIL (stale generation)\n"); failures++; }
+        else printf("OK\n");
+    }
+    return failures;
+}
+
+static int test_borrowed_concurrent_readers(const struct fixture *fa,
+                                            const char *datadir)
+{
+    int failures = 0;
+    TEST("bpc borrowed: concurrent readers remain immutable") {
+        block_parse_cache_clear();
+        enum { N = 8 };
+        pthread_t threads[N];
+        struct borrowed_reader_ctx ctx[N];
+        bool spawned[N] = {0};
+        for (int i = 0; i < N; i++) {
+            ctx[i] = (struct borrowed_reader_ctx){ .fx = fa,
+                                                   .datadir = datadir };
+            spawned[i] = pthread_create(&threads[i], NULL, borrowed_reader,
+                                        &ctx[i]) == 0;
+        }
+        bool ok = true;
+        for (int i = 0; i < N; i++) {
+            if (spawned[i]) pthread_join(threads[i], NULL);
+            if (!spawned[i] || ctx[i].failures) ok = false;
+        }
+        if (!ok) { printf("FAIL (concurrent readers)\n"); failures++; }
+        else printf("OK\n");
+    }
+    return failures;
+}
+
+static int test_borrowed_wire_identity(struct fixture *fa, const char *datadir)
+{
+    int failures = 0;
+    TEST("bpc borrowed: borrowed and legacy bytes are identical") {
+        block_parse_cache_clear();
+        struct block_parse_handle h;
+        struct block legacy; block_init(&legacy);
+        bool ok = block_parse_cache_acquire(1400, fa->hash.data, &fa->bi,
+                                            datadir, &h) &&
+                  block_parse_cache_get(1400, fa->hash.data, &fa->bi, datadir,
+                                        &legacy);
+        size_t blen = 0, llen = 0;
+        unsigned char *bb = ok ? ser(block_parse_handle_block(&h), &blen) : NULL;
+        unsigned char *lb = ok ? ser(&legacy, &llen) : NULL;
+        ok = ok && bb && lb && blen == llen && memcmp(bb, lb, blen) == 0;
+        free(bb); free(lb); block_free(&legacy);
+        block_parse_cache_release(&h);
+        if (!ok) { printf("FAIL (wire identity)\n"); failures++; }
+        else printf("OK\n");
+    }
+    return failures;
+}
+
 static int test_borrowed_contract(const char *datadir)
 {
     int failures = 0;
@@ -849,90 +955,21 @@ static int test_borrowed_contract(const char *datadir)
         return 1;
     }
 
-    TEST("bpc borrowed: pin survives collision and pressure clear") {
-        block_parse_cache_clear();
-        struct block_parse_handle a, collision;
-        bool ok = block_parse_cache_acquire(1400, fa.hash.data, &fa.bi,
-                                            datadir, &a) &&
-                  block_parse_cache_acquire(
-                      1400 + BLOCK_PARSE_CACHE_CAPACITY, fb.hash.data, &fb.bi,
-                      datadir, &collision);
-        const struct block *held = block_parse_handle_block(&a);
-        block_parse_cache_clear();
-        ok = ok && held && held->vtx[0].num_vout == 3;
-        block_parse_cache_release(&collision);
-        block_parse_cache_release(&a);
-        struct block_index broken = fa.bi;
-        broken.nStatus &= ~(unsigned int)BLOCK_HAVE_DATA;
-        struct block after; block_init(&after);
-        bool resident = block_parse_cache_get(1400, fa.hash.data, &broken,
-                                              datadir, &after);
-        block_free(&after);
-        if (!ok || resident) { printf("FAIL (pin/clear)\n"); failures++; }
-        else printf("OK\n");
-    }
-
-    TEST("bpc borrowed: generation makes stale release harmless") {
-        block_parse_cache_clear();
-        struct block_parse_handle a, b;
-        bool ok = block_parse_cache_acquire(1400, fa.hash.data, &fa.bi,
-                                            datadir, &a);
-        struct block_parse_handle stale = a;
-        block_parse_cache_release(&a);
-        ok = ok && block_parse_cache_acquire(
-            1400 + BLOCK_PARSE_CACHE_CAPACITY, fb.hash.data, &fb.bi, datadir,
-            &b);
-        block_parse_cache_release(&stale);
-        block_parse_cache_clear();
-        const struct block *still_pinned = block_parse_handle_block(&b);
-        ok = ok && still_pinned && still_pinned->vtx[0].num_vout == 4;
-        block_parse_cache_release(&b);
-        if (!ok) { printf("FAIL (stale generation)\n"); failures++; }
-        else printf("OK\n");
-    }
-
-    TEST("bpc borrowed: concurrent readers remain immutable") {
-        block_parse_cache_clear();
-        enum { N = 8 };
-        pthread_t threads[N];
-        struct borrowed_reader_ctx ctx[N];
-        bool spawned[N] = {0};
-        for (int i = 0; i < N; i++) {
-            ctx[i] = (struct borrowed_reader_ctx){ .fx = &fa,
-                                                   .datadir = datadir };
-            spawned[i] = pthread_create(&threads[i], NULL, borrowed_reader,
-                                        &ctx[i]) == 0;
-        }
-        bool ok = true;
-        for (int i = 0; i < N; i++) {
-            if (spawned[i]) pthread_join(threads[i], NULL);
-            if (!spawned[i] || ctx[i].failures) ok = false;
-        }
-        if (!ok) { printf("FAIL (concurrent readers)\n"); failures++; }
-        else printf("OK\n");
-    }
-
-    TEST("bpc borrowed: borrowed and legacy bytes are identical") {
-        block_parse_cache_clear();
-        struct block_parse_handle h;
-        struct block legacy; block_init(&legacy);
-        bool ok = block_parse_cache_acquire(1400, fa.hash.data, &fa.bi,
-                                            datadir, &h) &&
-                  block_parse_cache_get(1400, fa.hash.data, &fa.bi, datadir,
-                                        &legacy);
-        size_t blen = 0, llen = 0;
-        unsigned char *bb = ok ? ser(block_parse_handle_block(&h), &blen) : NULL;
-        unsigned char *lb = ok ? ser(&legacy, &llen) : NULL;
-        ok = ok && bb && lb && blen == llen && memcmp(bb, lb, blen) == 0;
-        free(bb); free(lb); block_free(&legacy);
-        block_parse_cache_release(&h);
-        if (!ok) { printf("FAIL (wire identity)\n"); failures++; }
-        else printf("OK\n");
-    }
+    failures += test_borrowed_pin_survives(&fa, &fb, datadir);
+    failures += test_borrowed_stale_release(&fa, &fb, datadir);
+    failures += test_borrowed_concurrent_readers(&fa, datadir);
+    failures += test_borrowed_wire_identity(&fa, datadir);
 
     free(fa.bytes); free(fb.bytes);
     block_parse_cache_clear();
     return failures;
+}
+
+/* json_get(v, key) that yields NULL when the parent `v` is absent. */
+static const struct json_value *bpc_json_child(const struct json_value *v,
+                                               const char *key)
+{
+    return v ? json_get(v, key) : NULL;
 }
 
 static int test_profile_reset(void)
@@ -953,18 +990,16 @@ static int test_profile_reset(void)
         json_init(&root);
         bool ok = reducer_stage_profile_dump_state_json(&root, NULL);
         const struct json_value *body = json_get(&root, "body_persist");
-        const struct json_value *cumulative = body ? json_get(body, "cumulative") : NULL;
-        const struct json_value *blocks = cumulative ? json_get(cumulative, "blocks") : NULL;
-        const struct json_value *ctx = cumulative ? json_get(cumulative,
-                                                  "contextual_gate_us") : NULL;
-        const struct json_value *quantiles = cumulative
-            ? json_get(cumulative, "latency_quantiles_us") : NULL;
-        const struct json_value *total_q = quantiles
-            ? json_get(quantiles, "total_us") : NULL;
-        const struct json_value *samples = total_q
-            ? json_get(total_q, "samples") : NULL;
-        const struct json_value *p50 = total_q ? json_get(total_q, "p50") : NULL;
-        const struct json_value *p95 = total_q ? json_get(total_q, "p95") : NULL;
+        const struct json_value *cumulative = bpc_json_child(body, "cumulative");
+        const struct json_value *blocks = bpc_json_child(cumulative, "blocks");
+        const struct json_value *ctx = bpc_json_child(cumulative,
+                                                      "contextual_gate_us");
+        const struct json_value *quantiles =
+            bpc_json_child(cumulative, "latency_quantiles_us");
+        const struct json_value *total_q = bpc_json_child(quantiles, "total_us");
+        const struct json_value *samples = bpc_json_child(total_q, "samples");
+        const struct json_value *p50 = bpc_json_child(total_q, "p50");
+        const struct json_value *p95 = bpc_json_child(total_q, "p95");
         ok = ok && blocks && json_get_int(blocks) == 7 && ctx &&
              json_is_null(ctx) && samples && json_get_int(samples) == 4 &&
              p50 && json_get_int(p50) == 3 && p95 && json_get_int(p95) == 127;
