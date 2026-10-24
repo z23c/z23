@@ -113,6 +113,117 @@ void gate_exec(const char *rel, const char *arg)
         execl(rel, rel, (char *)NULL);
 }
 
+/* Resolves the repo-relative gate script and its per-gate output file. */
+static int gate_resolve_paths(const char *script_rel, char *script,
+                              size_t scriptsz, char *out_path, size_t outsz)
+{
+    if (repo_path(script, scriptsz, script_rel) != 0)
+        return -1;
+    return lint_gate_out_path(out_path, outsz) != 0 ? -1 : 0;
+}
+
+/* One gate child's recipe, resolved in the parent before fork(). */
+struct gate_launch {
+    const char *script;           /* absolute gate path */
+    const char *out_path;         /* per-gate stdout+stderr sink */
+    const char *arg;              /* one argv word, or NULL for none */
+    const char *progress_rel;     /* repo-relative gate for the epoch channel, or NULL */
+    const char *const *names;     /* env overrides; a NULL name or value is skipped */
+    const char *const *values;
+    size_t n;
+};
+
+/* Points stdout and stderr at the per-gate output file. */
+static void gate_child_redirect(const char *out_path)
+{
+    int fd = open(out_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
+    if (fd >= 0) {
+        (void)dup2(fd, STDOUT_FILENO);
+        (void)dup2(fd, STDERR_FILENO);
+        close(fd);
+    }
+}
+
+/* Exports each name=value override; a NULL name or value is skipped. */
+static void gate_child_export(const char *const *names,
+                              const char *const *values, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+        if (names[i] && values[i])
+            (void)setenv(names[i], values[i], 1);
+}
+
+/* Child side of every gate launch: an own process group when watched, the
+ * epoch progress channel when progress_rel is set, the output redirect, the
+ * env overrides, then exec. Never returns. */
+static void gate_child_main(const struct gate_launch *l, int own_pgroup)
+{
+    /* Own process group, so a wedged script's grandchildren (a fixture
+     * node left spinning) go down with it instead of outliving the run. */
+    if (own_pgroup)
+        (void)setpgid(0, 0);
+    if (l->progress_rel)
+        epoch_selftest_progress_channel(l->progress_rel);
+    gate_child_redirect(l->out_path);
+    gate_child_export(l->names, l->values, l->n);
+    gate_exec(l->script, l->arg);
+    _exit(127);
+}
+
+/* Holds SIGCHLD at SIG_DFL for a wait. Returns 1 when the old disposition was
+ * saved and must be restored, 0 when either sigaction call failed. */
+static int gate_sigchld_hold(struct sigaction *old_chld)
+{
+    struct sigaction dfl_chld;
+    memset(old_chld, 0, sizeof(*old_chld));
+    memset(&dfl_chld, 0, sizeof(dfl_chld));
+    dfl_chld.sa_handler = SIG_DFL;
+    sigemptyset(&dfl_chld.sa_mask);
+    return sigaction(SIGCHLD, NULL, old_chld) == 0 &&
+           sigaction(SIGCHLD, &dfl_chld, NULL) == 0;
+}
+
+static void gate_sigchld_release(int restore_chld,
+                                 const struct sigaction *old_chld)
+{
+    if (restore_chld)
+        (void)sigaction(SIGCHLD, old_chld, NULL);
+}
+
+/* Blocks for `pid`, retrying EINTR. Returns the exit status, or -1 when the
+ * child did not exit normally or the wait itself failed. SIGCHLD is restored
+ * on every path. */
+static int gate_wait_exit(pid_t pid, int restore_chld,
+                          const struct sigaction *old_chld)
+{
+    int rc = 0;
+    while (waitpid(pid, &rc, 0) < 0) {
+        if (errno == EINTR)
+            continue;
+        gate_sigchld_release(restore_chld, old_chld);
+        return -1;
+    }
+    gate_sigchld_release(restore_chld, old_chld);
+    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
+    return -1;
+}
+
+/* Forks the gate, waits for it and returns its exit status, or -1. SIGCHLD is
+ * held at SIG_DFL for the wait, as every sibling does. */
+static int gate_run_blocking(const struct gate_launch *l)
+{
+    struct sigaction old_chld;
+    int restore_chld = gate_sigchld_hold(&old_chld);
+    pid_t pid = fork_with_retry();
+    if (pid == 0)
+        gate_child_main(l, 0);
+    if (pid < 0) {
+        gate_sigchld_release(restore_chld, &old_chld);
+        return -1;
+    }
+    return gate_wait_exit(pid, restore_chld, &old_chld);
+}
+
 /* Generalized gate-script runner: fork/exec the script at repo-relative
  * path `script_rel`, optionally with ZCL_LINT_MODE set to `mode` (NULL to
  * leave unset) and optionally one argv word `arg` (NULL for none).
@@ -125,60 +236,22 @@ int run_gate_script_arg(const char *script_rel, const char *mode,
                         const char *arg)
 {
     char script[PATH_MAX];
-    if (repo_path(script, sizeof(script), script_rel) != 0)
-        return -1;
-
     char out_path[PATH_MAX];
-    if (lint_gate_out_path(out_path, sizeof(out_path)) != 0)
+    if (gate_resolve_paths(script_rel, script, sizeof(script), out_path,
+                           sizeof(out_path)) != 0)
         return -1;
-
-    struct sigaction old_chld;
-    struct sigaction dfl_chld;
-    int restore_chld = 0;
-    memset(&old_chld, 0, sizeof(old_chld));
-    memset(&dfl_chld, 0, sizeof(dfl_chld));
-    dfl_chld.sa_handler = SIG_DFL;
-    sigemptyset(&dfl_chld.sa_mask);
-    if (sigaction(SIGCHLD, NULL, &old_chld) == 0 &&
-        sigaction(SIGCHLD, &dfl_chld, NULL) == 0) {
-        restore_chld = 1;
-    }
-
-    pid_t pid = fork_with_retry();
-    if (pid < 0) {
-        if (restore_chld)
-            (void)sigaction(SIGCHLD, &old_chld, NULL);
-        return -1;
-    }
-    if (pid == 0) {
-        epoch_selftest_progress_channel(script_rel);
-        int fd = open(out_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-        if (fd >= 0) {
-            (void)dup2(fd, STDOUT_FILENO);
-            (void)dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        if (mode)
-            (void)setenv("ZCL_LINT_MODE", mode, 1);
-        if (arg)
-            gate_exec(script, arg);
-        else
-            gate_exec(script, NULL);
-        _exit(127);
-    }
-
-    int rc = 0;
-    while (waitpid(pid, &rc, 0) < 0) {
-        if (errno == EINTR)
-            continue;
-        if (restore_chld)
-            (void)sigaction(SIGCHLD, &old_chld, NULL);
-        return -1;
-    }
-    if (restore_chld)
-        (void)sigaction(SIGCHLD, &old_chld, NULL);
-    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
-    return -1;
+    const char *const names[] = {"ZCL_LINT_MODE"};
+    const char *const values[] = {mode};
+    const struct gate_launch launch = {
+        .script = script,
+        .out_path = out_path,
+        .arg = arg,
+        .progress_rel = script_rel,
+        .names = names,
+        .values = values,
+        .n = 1,
+    };
+    return gate_run_blocking(&launch);
 }
 
 int run_gate_script(const char *script_rel, const char *mode)
@@ -216,194 +289,18 @@ int run_gate_script_with_worker_files(const char *script_rel,
     if (lint_gate_out_path(out_path, sizeof(out_path)) != 0)
         return -1;
 
-    struct sigaction old_chld;
-    struct sigaction dfl_chld;
-    int restore_chld = 0;
-    memset(&old_chld, 0, sizeof(old_chld));
-    memset(&dfl_chld, 0, sizeof(dfl_chld));
-    dfl_chld.sa_handler = SIG_DFL;
-    sigemptyset(&dfl_chld.sa_mask);
-    if (sigaction(SIGCHLD, NULL, &old_chld) == 0 &&
-        sigaction(SIGCHLD, &dfl_chld, NULL) == 0) {
-        restore_chld = 1;
-    }
-
-    pid_t pid = fork_with_retry();
-    if (pid < 0) {
-        if (restore_chld)
-            (void)sigaction(SIGCHLD, &old_chld, NULL);
-        return -1;
-    }
-    if (pid == 0) {
-        int fd = open(out_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-        if (fd >= 0) {
-            (void)dup2(fd, STDOUT_FILENO);
-            (void)dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        if (mode)
-            (void)setenv("ZCL_LINT_MODE", mode, 1);
-        if (worker_files_rel)
-            (void)setenv("ZCL_SUPERVISOR_WORKER_FILES", worker_abs, 1);
-        gate_exec(script, NULL);
-        _exit(127);
-    }
-
-    int rc = 0;
-    while (waitpid(pid, &rc, 0) < 0) {
-        if (errno == EINTR)
-            continue;
-        if (restore_chld)
-            (void)sigaction(SIGCHLD, &old_chld, NULL);
-        return -1;
-    }
-    if (restore_chld)
-        (void)sigaction(SIGCHLD, &old_chld, NULL);
-    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
-    return -1;
-}
-
-/* Like run_gate_script but exports ONE arbitrary env var (name=value). Used
- * by the META-GATE, which points each hardened gate at an empty scan dir and
- * asserts exit 2. */
-int run_gate_script_with_env(const char *script_rel,
-                                    const char *env_name,
-                                    const char *env_value)
-{
-    char script[PATH_MAX];
-    if (repo_path(script, sizeof(script), script_rel) != 0)
-        return -1;
-
-    char out_path[PATH_MAX];
-    if (lint_gate_out_path(out_path, sizeof(out_path)) != 0)
-        return -1;
-
-    struct sigaction old_chld;
-    struct sigaction dfl_chld;
-    int restore_chld = 0;
-    memset(&old_chld, 0, sizeof(old_chld));
-    memset(&dfl_chld, 0, sizeof(dfl_chld));
-    dfl_chld.sa_handler = SIG_DFL;
-    sigemptyset(&dfl_chld.sa_mask);
-    if (sigaction(SIGCHLD, NULL, &old_chld) == 0 &&
-        sigaction(SIGCHLD, &dfl_chld, NULL) == 0) {
-        restore_chld = 1;
-    }
-
-    pid_t pid = fork_with_retry();
-    if (pid < 0) {
-        if (restore_chld)
-            (void)sigaction(SIGCHLD, &old_chld, NULL);
-        return -1;
-    }
-    if (pid == 0) {
-        int fd = open(out_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-        if (fd >= 0) {
-            (void)dup2(fd, STDOUT_FILENO);
-            (void)dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        if (env_name && env_value)
-            (void)setenv(env_name, env_value, 1);
-        gate_exec(script, NULL);
-        _exit(127);
-    }
-
-    int rc = 0;
-    while (waitpid(pid, &rc, 0) < 0) {
-        if (errno == EINTR)
-            continue;
-        if (restore_chld)
-            (void)sigaction(SIGCHLD, &old_chld, NULL);
-        return -1;
-    }
-    if (restore_chld)
-        (void)sigaction(SIGCHLD, &old_chld, NULL);
-    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
-    return -1;
-}
-
-/* Like run_gate_script_with_env but exports TWO env vars. Used by the
- * service-result-convergence self-test to isolate both the scan dir and the
- * baseline file. */
-int run_gate_script_with_env2(const char *script_rel,
-                                     const char *env_name1,
-                                     const char *env_value1,
-                                     const char *env_name2,
-                                     const char *env_value2)
-{
-    char script[PATH_MAX];
-    if (repo_path(script, sizeof(script), script_rel) != 0)
-        return -1;
-
-    char out_path[PATH_MAX];
-    if (lint_gate_out_path(out_path, sizeof(out_path)) != 0)
-        return -1;
-
-    struct sigaction old_chld;
-    struct sigaction dfl_chld;
-    int restore_chld = 0;
-    memset(&old_chld, 0, sizeof(old_chld));
-    memset(&dfl_chld, 0, sizeof(dfl_chld));
-    dfl_chld.sa_handler = SIG_DFL;
-    sigemptyset(&dfl_chld.sa_mask);
-    if (sigaction(SIGCHLD, NULL, &old_chld) == 0 &&
-        sigaction(SIGCHLD, &dfl_chld, NULL) == 0) {
-        restore_chld = 1;
-    }
-
-    pid_t pid = fork_with_retry();
-    if (pid < 0) {
-        if (restore_chld)
-            (void)sigaction(SIGCHLD, &old_chld, NULL);
-        return -1;
-    }
-    if (pid == 0) {
-        int fd = open(out_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-        if (fd >= 0) {
-            (void)dup2(fd, STDOUT_FILENO);
-            (void)dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        if (env_name1 && env_value1)
-            (void)setenv(env_name1, env_value1, 1);
-        if (env_name2 && env_value2)
-            (void)setenv(env_name2, env_value2, 1);
-        gate_exec(script, NULL);
-        _exit(127);
-    }
-
-    int rc = 0;
-    while (waitpid(pid, &rc, 0) < 0) {
-        if (errno == EINTR)
-            continue;
-        if (restore_chld)
-            (void)sigaction(SIGCHLD, &old_chld, NULL);
-        return -1;
-    }
-    if (restore_chld)
-        (void)sigaction(SIGCHLD, &old_chld, NULL);
-    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
-    return -1;
-}
-
-/* Child side of run_gate_script_envv: redirect output, export the
- * overrides, exec the gate. Never returns. */
-static void gate_envv_child(const char *script, const char *out_path,
-                            const char *const *names,
-                            const char *const *values, size_t n)
-{
-    int fd = open(out_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-    if (fd >= 0) {
-        (void)dup2(fd, STDOUT_FILENO);
-        (void)dup2(fd, STDERR_FILENO);
-        close(fd);
-    }
-    for (size_t i = 0; i < n; i++)
-        if (names[i] && values[i])
-            (void)setenv(names[i], values[i], 1);
-    gate_exec(script, NULL);
-    _exit(127);
+    const char *const names[] = {"ZCL_LINT_MODE",
+                                 "ZCL_SUPERVISOR_WORKER_FILES"};
+    const char *const values[] = {mode,
+                                  worker_files_rel ? worker_abs : NULL};
+    const struct gate_launch launch = {
+        .script = script,
+        .out_path = out_path,
+        .names = names,
+        .values = values,
+        .n = 2,
+    };
+    return gate_run_blocking(&launch);
 }
 
 /* Runs a gate script with `n` exported env overrides and returns its exit
@@ -413,28 +310,19 @@ static int run_gate_script_envv(const char *script_rel,
                                 const char *const *names,
                                 const char *const *values, size_t n)
 {
-    char script[PATH_MAX], out_path[PATH_MAX];
-    if (repo_path(script, sizeof(script), script_rel) != 0 ||
-        lint_gate_out_path(out_path, sizeof(out_path)) != 0)
+    char script[PATH_MAX];
+    char out_path[PATH_MAX];
+    if (gate_resolve_paths(script_rel, script, sizeof(script), out_path,
+                           sizeof(out_path)) != 0)
         return -1;
-    struct sigaction old_chld, dfl_chld;
-    memset(&old_chld, 0, sizeof(old_chld));
-    memset(&dfl_chld, 0, sizeof(dfl_chld));
-    dfl_chld.sa_handler = SIG_DFL;
-    sigemptyset(&dfl_chld.sa_mask);
-    int restore_chld = sigaction(SIGCHLD, NULL, &old_chld) == 0 &&
-                       sigaction(SIGCHLD, &dfl_chld, NULL) == 0;
-    pid_t pid = fork_with_retry();
-    if (pid == 0)
-        gate_envv_child(script, out_path, names, values, n);
-    int rc = 0;
-    pid_t waited = -1;
-    if (pid > 0)
-        while ((waited = waitpid(pid, &rc, 0)) < 0 && errno == EINTR)
-            ;
-    if (restore_chld)
-        (void)sigaction(SIGCHLD, &old_chld, NULL);
-    return waited == pid && WIFEXITED(rc) ? WEXITSTATUS(rc) : -1;
+    const struct gate_launch launch = {
+        .script = script,
+        .out_path = out_path,
+        .names = names,
+        .values = values,
+        .n = n,
+    };
+    return gate_run_blocking(&launch);
 }
 
 /* Like run_gate_script_with_env2 but exports THREE env vars. Used by the
@@ -449,6 +337,32 @@ int run_gate_script_with_env3(const char *script_rel,
     const char *const names[] = {env_name1, env_name2, env_name3};
     const char *const values[] = {env_value1, env_value2, env_value3};
     return run_gate_script_envv(script_rel, names, values, 3);
+}
+
+/* Like run_gate_script_with_env2 but exports TWO env vars. Used by the
+ * service-result-convergence self-test to isolate both the scan dir and the
+ * baseline file. */
+int run_gate_script_with_env2(const char *script_rel,
+                                     const char *env_name1,
+                                     const char *env_value1,
+                                     const char *env_name2,
+                                     const char *env_value2)
+{
+    const char *const names[] = {env_name1, env_name2};
+    const char *const values[] = {env_value1, env_value2};
+    return run_gate_script_envv(script_rel, names, values, 2);
+}
+
+/* Like run_gate_script but exports ONE arbitrary env var (name=value). Used
+ * by the META-GATE, which points each hardened gate at an empty scan dir and
+ * asserts exit 2. */
+int run_gate_script_with_env(const char *script_rel,
+                                    const char *env_name,
+                                    const char *env_value)
+{
+    const char *const names[] = {env_name};
+    const char *const values[] = {env_value};
+    return run_gate_script_envv(script_rel, names, values, 1);
 }
 
 /* Snapshot the 1/5/15-minute load average into `out`. Best effort: a machine
@@ -487,64 +401,67 @@ void lint_gate_loadavg(char *out, size_t outsz)
  * silence (diagnosed on stderr), or -1 on a harness error.
  * GATE_SCRIPT_WEDGED is deliberately not 1: a hang and a failed assertion
  * never share an exit code. */
-int run_gate_script_watched(const char *script_rel, int max_silent_secs,
+
+/* Prints the WEDGED diagnosis for a gate that went silent. */
+static void gate_report_wedged(const char *script_rel, const char *out_path,
+                               int64_t silent_ns, int64_t started_ns,
+                               int max_silent_secs, const char *why_bound)
+{
+    char load[64];
+    lint_gate_loadavg(load, sizeof(load));
+    long long silent_s = (long long)(silent_ns / 1000000000LL);
+    long long total_s =
+        (long long)((clock_now_monotonic_ns() - started_ns) / 1000000000LL);
+    fprintf(stderr,
+        "\n[gate-watchdog] WEDGED: %s produced no output for %llds.\n"
+        "[gate-watchdog]   measured: %llds of silence; %llds total elapsed;"
+        " loadavg %s.\n"
+        "[gate-watchdog]   bound: %ds of SILENCE (not of runtime). %s\n"
+        "[gate-watchdog]   This is a HANG report, not a failed assertion."
+        " A busy or slow-disk\n"
+        "[gate-watchdog]   box does not land here: it still emits its"
+        " progress lines, just\n"
+        "[gate-watchdog]   further apart, and every line resets this"
+        " bound. Silence for this\n"
+        "[gate-watchdog]   long means the script stopped making progress"
+        " altogether.\n"
+        "[gate-watchdog]   Partial output: %s\n",
+        script_rel, silent_s, silent_s, total_s, load,
+        max_silent_secs, why_bound ? why_bound : "(no derivation given)",
+        out_path);
+}
+
+/* SIGTERM the group first so the script's own EXIT trap runs and tears down
+ * its fixture processes; SIGKILL only as a backstop. Reaps `pid` either way. */
+static void gate_kill_wedged(pid_t pid)
+{
+    int rc = 0;
+    (void)kill(-pid, SIGTERM);
+    for (int i = 0; i < 50; i++) {
+        if (waitpid(pid, &rc, WNOHANG) == pid) return;
+        struct timespec ts = {0, 100 * 1000 * 1000};
+        (void)nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
+    }
+    (void)kill(-pid, SIGKILL);
+    while (waitpid(pid, &rc, 0) < 0 && errno == EINTR) { }
+}
+
+/* Polls `pid` until it exits or goes silent. Returns the exit status,
+ * GATE_SCRIPT_WEDGED after a silence kill, or -1 on a wait error. */
+static int gate_watch_child(pid_t pid, const char *script_rel,
+                            const char *out_path, int max_silent_secs,
                             const char *why_bound)
 {
-    char script[PATH_MAX];
-    if (repo_path(script, sizeof(script), script_rel) != 0)
-        return -1;
-
-    char out_path[PATH_MAX];
-    if (lint_gate_out_path(out_path, sizeof(out_path)) != 0)
-        return -1;
-    if (max_silent_secs <= 0)
-        return -1;
-
-    struct sigaction old_chld;
-    struct sigaction dfl_chld;
-    int restore_chld = 0;
-    memset(&old_chld, 0, sizeof(old_chld));
-    memset(&dfl_chld, 0, sizeof(dfl_chld));
-    dfl_chld.sa_handler = SIG_DFL;
-    sigemptyset(&dfl_chld.sa_mask);
-    if (sigaction(SIGCHLD, NULL, &old_chld) == 0 &&
-        sigaction(SIGCHLD, &dfl_chld, NULL) == 0) {
-        restore_chld = 1;
-    }
-
-    pid_t pid = fork_with_retry();
-    if (pid < 0) {
-        if (restore_chld)
-            (void)sigaction(SIGCHLD, &old_chld, NULL);
-        return -1;
-    }
-    if (pid == 0) {
-        /* Own process group, so a wedged script's grandchildren (a fixture
-         * node left spinning) go down with it instead of outliving the run. */
-        (void)setpgid(0, 0);
-        int fd = open(out_path, O_CREAT | O_WRONLY | O_TRUNC, 0600);
-        if (fd >= 0) {
-            (void)dup2(fd, STDOUT_FILENO);
-            (void)dup2(fd, STDERR_FILENO);
-            close(fd);
-        }
-        gate_exec(script, NULL);
-        _exit(127);
-    }
-    (void)setpgid(pid, pid);  /* race-free: both sides set it */
-
     const int64_t started_ns = clock_now_monotonic_ns();
     int64_t last_progress_ns = started_ns;
     off_t last_size = -1;
     int rc = 0;
-    int wedged = 0;
 
     for (;;) {
         pid_t w = waitpid(pid, &rc, WNOHANG);
         if (w == pid) break;
         if (w < 0) {
             if (errno == EINTR) continue;
-            if (restore_chld) (void)sigaction(SIGCHLD, &old_chld, NULL);
             return -1;
         }
 
@@ -556,52 +473,49 @@ int run_gate_script_watched(const char *script_rel, int max_silent_secs,
 
         int64_t silent_ns = clock_now_monotonic_ns() - last_progress_ns;
         if (silent_ns > (int64_t)max_silent_secs * 1000000000LL) {
-            char load[64];
-            lint_gate_loadavg(load, sizeof(load));
-            long long silent_s = (long long)(silent_ns / 1000000000LL);
-            long long total_s =
-                (long long)((clock_now_monotonic_ns() - started_ns) / 1000000000LL);
-            fprintf(stderr,
-                "\n[gate-watchdog] WEDGED: %s produced no output for %llds.\n"
-                "[gate-watchdog]   measured: %llds of silence; %llds total elapsed;"
-                " loadavg %s.\n"
-                "[gate-watchdog]   bound: %ds of SILENCE (not of runtime). %s\n"
-                "[gate-watchdog]   This is a HANG report, not a failed assertion."
-                " A busy or slow-disk\n"
-                "[gate-watchdog]   box does not land here: it still emits its"
-                " progress lines, just\n"
-                "[gate-watchdog]   further apart, and every line resets this"
-                " bound. Silence for this\n"
-                "[gate-watchdog]   long means the script stopped making progress"
-                " altogether.\n"
-                "[gate-watchdog]   Partial output: %s\n",
-                script_rel, silent_s, silent_s, total_s, load,
-                max_silent_secs, why_bound ? why_bound : "(no derivation given)",
-                out_path);
-            /* SIGTERM the group first so the script's own EXIT trap runs and
-             * tears down its fixture processes; SIGKILL only as a backstop. */
-            (void)kill(-pid, SIGTERM);
-            for (int i = 0; i < 50; i++) {
-                if (waitpid(pid, &rc, WNOHANG) == pid) { wedged = 1; goto done; }
-                struct timespec ts = {0, 100 * 1000 * 1000};
-                (void)nanosleep(&ts, NULL); /* real-clock: pre-existing bounded poll loop, seeded when check_no_real_clock_test_deadline.sh was introduced */
-            }
-            (void)kill(-pid, SIGKILL);
-            while (waitpid(pid, &rc, 0) < 0 && errno == EINTR) { }
-            wedged = 1;
-            goto done;
+            gate_report_wedged(script_rel, out_path, silent_ns, started_ns,
+                               max_silent_secs, why_bound);
+            gate_kill_wedged(pid);
+            return GATE_SCRIPT_WEDGED;
         }
 
         struct timespec ts = {0, 250 * 1000 * 1000};  /* 250 ms poll */
         (void)nanosleep(&ts, NULL);
     }
-
-done:
-    if (restore_chld)
-        (void)sigaction(SIGCHLD, &old_chld, NULL);
-    if (wedged) return GATE_SCRIPT_WEDGED;
     if (WIFEXITED(rc)) return WEXITSTATUS(rc);
     return -1;
+}
+
+int run_gate_script_watched(const char *script_rel, int max_silent_secs,
+                            const char *why_bound)
+{
+    char script[PATH_MAX];
+    char out_path[PATH_MAX];
+    if (gate_resolve_paths(script_rel, script, sizeof(script), out_path,
+                           sizeof(out_path)) != 0)
+        return -1;
+    if (max_silent_secs <= 0)
+        return -1;
+
+    struct sigaction old_chld;
+    int restore_chld = gate_sigchld_hold(&old_chld);
+    const struct gate_launch launch = {
+        .script = script,
+        .out_path = out_path,
+    };
+    pid_t pid = fork_with_retry();
+    if (pid == 0)
+        gate_child_main(&launch, 1);
+    if (pid < 0) {
+        gate_sigchld_release(restore_chld, &old_chld);
+        return -1;
+    }
+    (void)setpgid(pid, pid);  /* race-free: both sides set it */
+
+    int status = gate_watch_child(pid, script_rel, out_path, max_silent_secs,
+                                  why_bound);
+    gate_sigchld_release(restore_chld, &old_chld);
+    return status;
 }
 
 #else  /* !ZCL_TESTING */
