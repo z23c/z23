@@ -158,14 +158,14 @@ static bool rsa_result_reachable_overlaps(
     return rsa_measurement_overlaps(m, output, output_size);
 }
 
-static enum zcode_retrieval_science_adapter_error rsa_boundary_roots(
+/* Study, task, candidate and policy roots, each checked against the pinned
+ * expectation in the order the boundary has always used. */
+static enum zcode_retrieval_science_adapter_error rsa_identity_boundary(
     const struct zcode_retrieval_science_result_request *request,
-    const struct zcode_retrieval_profile_pair_measure_report *measurement,
+    const struct zcode_retrieval_profile_pair_measure_request *m,
     uint8_t study_root[32], uint8_t task_root[32], uint8_t candidate_root[32],
-    uint8_t policy_root[32], uint8_t hardware_root[32])
+    uint8_t policy_root[32])
 {
-    const struct zcode_retrieval_profile_pair_measure_request *m =
-        request->measurement;
     if (vcs_zcode_study_spec_validate(m->study) != VCS_ZCODE_SCIENCE_OK ||
         vcs_zcode_study_spec_root(m->study, study_root) !=
             VCS_ZCODE_SCIENCE_OK ||
@@ -183,6 +183,14 @@ static enum zcode_retrieval_science_adapter_error rsa_boundary_roots(
             ZCL_RETRIEVAL_COMPARISON_OK ||
         memcmp(policy_root, m->expected_policy_root, 32u) != 0)
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_POLICY;
+    return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK;
+}
+
+static enum zcode_retrieval_science_adapter_error rsa_environment_boundary(
+    const struct zcode_retrieval_science_result_request *request,
+    const struct zcode_retrieval_profile_pair_measure_request *m,
+    uint8_t hardware_root[32])
+{
     uint8_t environment_policy_root[32];
     if (vcs_zcode_environment_policy_v1_validate(
             request->environment_policy) != VCS_ZCODE_RECEIPT_OK ||
@@ -199,6 +207,15 @@ static enum zcode_retrieval_science_adapter_error rsa_boundary_roots(
         !vcs_zcode_environment_policy_v1_accepts(
             request->environment_policy, request->hardware_profile))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ENVIRONMENT;
+    return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK;
+}
+
+/* Source, goal, dependency-lock and toolchain bindings of the study. */
+static enum zcode_retrieval_science_adapter_error rsa_study_binding(
+    const struct zcode_retrieval_science_result_request *request,
+    const struct zcode_retrieval_profile_pair_measure_request *m,
+    const uint8_t study_root[32])
+{
     if (memcmp(m->expected_source_root,
                m->expected_snapshot_source_root, 32u) != 0 ||
         memcmp(m->expected_source_root, m->study->source_root, 32u) != 0 ||
@@ -207,8 +224,19 @@ static enum zcode_retrieval_science_adapter_error rsa_boundary_roots(
         memcmp(request->task->dependency_lock_root,
                m->study->dependency_lock_root, 32u) != 0 ||
         memcmp(request->task->toolchain_capsule_root,
-               m->study->toolchain_capsule_root, 32u) != 0 ||
-        memcmp(request->candidate->task_root, task_root, 32u) != 0 ||
+               m->study->toolchain_capsule_root, 32u) != 0)
+        return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_BINDING;
+    return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK;
+}
+
+/* Candidate, patch and preregistration bindings, and the comparison policy. */
+static enum zcode_retrieval_science_adapter_error rsa_candidate_binding(
+    const struct zcode_retrieval_science_result_request *request,
+    const struct zcode_retrieval_profile_pair_measure_request *m,
+    const struct zcode_retrieval_profile_pair_measure_report *measurement,
+    const uint8_t task_root[32], const uint8_t policy_root[32])
+{
+    if (memcmp(request->candidate->task_root, task_root, 32u) != 0 ||
         memcmp(request->candidate->base_source_root,
                request->task->source_root, 32u) != 0 ||
         memcmp(request->candidate->patch_root,
@@ -220,6 +248,67 @@ static enum zcode_retrieval_science_adapter_error rsa_boundary_roots(
                policy_root, 32u) != 0)
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_BINDING;
     return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK;
+}
+
+static enum zcode_retrieval_science_adapter_error rsa_boundary_roots(
+    const struct zcode_retrieval_science_result_request *request,
+    const struct zcode_retrieval_profile_pair_measure_report *measurement,
+    uint8_t study_root[32], uint8_t task_root[32], uint8_t candidate_root[32],
+    uint8_t policy_root[32], uint8_t hardware_root[32])
+{
+    const struct zcode_retrieval_profile_pair_measure_request *m =
+        request->measurement;
+    enum zcode_retrieval_science_adapter_error error =
+        rsa_identity_boundary(request, m, study_root, task_root,
+                              candidate_root, policy_root);
+    if (error != ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK) return error;
+    error = rsa_environment_boundary(request, m, hardware_root);
+    if (error != ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK) return error;
+    error = rsa_study_binding(request, m, study_root);
+    if (error != ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK) return error;
+    return rsa_candidate_binding(request, m, measurement, task_root,
+                                 policy_root);
+}
+
+static bool rsa_action_kind_roots(struct vcs_build_action_v1 *result,
+                                  const char **workdir, const char **output,
+                                  const char **resource)
+{
+    return vcs_build_action_v1_descriptors(
+               VCS_BUILD_ACTION_KIND_BENCHMARK_V1,
+               workdir, output, resource) &&
+           vcs_build_action_v1_fixed_flags_root_for_kind(
+               VCS_BUILD_ACTION_KIND_BENCHMARK_V1, result->flags_sha3) &&
+           vcs_build_action_v1_fixed_environment_root_for_kind(
+               VCS_BUILD_ACTION_KIND_BENCHMARK_V1, result->environment_sha3);
+}
+
+/* A snprintf result that wrote a non-empty string without truncation. */
+static bool rsa_text_fits(int written, size_t size)
+{
+    return written > 0 && (size_t)written < size;
+}
+
+/* Every text field is written before any fit is judged, as it always was. */
+static bool rsa_action_texts(struct vcs_build_action_v1 *result,
+                             const char *workdir, const char *output,
+                             const char *resource)
+{
+    int n1 = snprintf(result->target, sizeof(result->target), "%s",
+                      VCS_BUILD_TARGET_V1);
+    int n2 = snprintf(result->profile, sizeof(result->profile), "%s",
+                      "science");
+    int n3 = snprintf(result->virtual_workdir,
+                      sizeof(result->virtual_workdir), "%s", workdir);
+    int n4 = snprintf(result->declared_outputs,
+                      sizeof(result->declared_outputs), "%s", output);
+    int n5 = snprintf(result->resource_policy,
+                      sizeof(result->resource_policy), "%s", resource);
+    return rsa_text_fits(n1, sizeof(result->target)) &&
+           rsa_text_fits(n2, sizeof(result->profile)) &&
+           rsa_text_fits(n3, sizeof(result->virtual_workdir)) &&
+           rsa_text_fits(n4, sizeof(result->declared_outputs)) &&
+           rsa_text_fits(n5, sizeof(result->resource_policy));
 }
 
 static enum zcode_retrieval_science_adapter_error rsa_action(
@@ -234,13 +323,7 @@ static enum zcode_retrieval_science_adapter_error rsa_action(
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_CANDIDATE;
     const char *workdir = NULL, *output = NULL, *resource = NULL;
     struct vcs_build_action_v1 result = {0};
-    if (!vcs_build_action_v1_descriptors(
-            VCS_BUILD_ACTION_KIND_BENCHMARK_V1,
-            &workdir, &output, &resource) ||
-        !vcs_build_action_v1_fixed_flags_root_for_kind(
-            VCS_BUILD_ACTION_KIND_BENCHMARK_V1, result.flags_sha3) ||
-        !vcs_build_action_v1_fixed_environment_root_for_kind(
-            VCS_BUILD_ACTION_KIND_BENCHMARK_V1, result.environment_sha3))
+    if (!rsa_action_kind_roots(&result, &workdir, &output, &resource))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ACTION;
     vcs_source_manifest_id(candidate_wire, sizeof(candidate_wire),
                            result.source_sha256);
@@ -249,20 +332,7 @@ static enum zcode_retrieval_science_adapter_error rsa_action(
     memcpy(result.input_root_sha3, evaluation_input_root, 32u);
     memcpy(result.toolchain_capsule_sha3,
            request->measurement->study->toolchain_capsule_root, 32u);
-    int n1 = snprintf(result.target, sizeof(result.target), "%s",
-                      VCS_BUILD_TARGET_V1);
-    int n2 = snprintf(result.profile, sizeof(result.profile), "%s", "science");
-    int n3 = snprintf(result.virtual_workdir, sizeof(result.virtual_workdir),
-                      "%s", workdir);
-    int n4 = snprintf(result.declared_outputs, sizeof(result.declared_outputs),
-                      "%s", output);
-    int n5 = snprintf(result.resource_policy, sizeof(result.resource_policy),
-                      "%s", resource);
-    if (n1 <= 0 || (size_t)n1 >= sizeof(result.target) ||
-        n2 <= 0 || (size_t)n2 >= sizeof(result.profile) ||
-        n3 <= 0 || (size_t)n3 >= sizeof(result.virtual_workdir) ||
-        n4 <= 0 || (size_t)n4 >= sizeof(result.declared_outputs) ||
-        n5 <= 0 || (size_t)n5 >= sizeof(result.resource_policy))
+    if (!rsa_action_texts(&result, workdir, output, resource))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ACTION;
     result.sequence = request->action_sequence;
     uint8_t root[32];
@@ -350,23 +420,69 @@ static enum zcode_retrieval_science_adapter_error rsa_observation(
     return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK;
 }
 
+static bool rsa_result_inputs_missing(
+    const struct zcode_retrieval_science_result_request *request,
+    const void *out)
+{
+    return !request || !out || !request->measurement || !request->task ||
+           !request->candidate || !request->environment_policy ||
+           !request->hardware_profile;
+}
+
+static bool rsa_result_parameters_invalid(
+    const struct zcode_retrieval_science_result_request *request)
+{
+    return request->measurement->workload_version !=
+               ZCL_RETRIEVAL_EVALUATION_WORKLOAD_VERSION_V2 ||
+           request->action_sequence == 0 || request->result_sequence == 0 ||
+           request->challenge_block_height == 0 ||
+           !rsa_root_any(request->challenge_block_hash) ||
+           request->started_unix <= 0 ||
+           request->finished_unix < request->started_unix ||
+           request->finished_unix > request->now_unix;
+}
+
+static bool rsa_result_wires(
+    struct zcode_retrieval_science_result_bundle *result)
+{
+    return zcl_retrieval_experiment_eval_result_serialize(
+               &result->measurement.parent_result,
+               result->parent_retrieval_result_wire) ==
+               ZCL_RETRIEVAL_EXPERIMENT_OK &&
+           zcl_retrieval_experiment_eval_result_serialize(
+               &result->measurement.child_result,
+               result->child_retrieval_result_wire) ==
+               ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+/* Status mapping, then validation, serialization and root of the benchmark
+ * result, in that order; stops at the first failure. */
+static bool rsa_benchmark_result_checks(
+    const struct zcode_retrieval_science_result_request *request,
+    struct zcode_retrieval_science_result_bundle *result,
+    struct vcs_zcode_benchmark_result_v1 *science)
+{
+    return rsa_status(
+               (uint8_t)result->measurement.comparison.observation.status,
+               &science->status) &&
+           vcs_zcode_benchmark_result_validate_for_study(
+               request->measurement->study, request->task, request->candidate,
+               &result->action, science, request->now_unix) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_benchmark_result_serialize(
+               science, result->result_wire) == VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_benchmark_result_root(science, result->result_root) ==
+               VCS_ZCODE_SCIENCE_OK;
+}
+
 enum zcode_retrieval_science_adapter_error
 zcode_retrieval_science_result_compose(
     const struct zcode_retrieval_science_result_request *request,
     struct zcode_retrieval_science_result_bundle *out)
 {
-    if (!request || !out || !request->measurement || !request->task ||
-        !request->candidate || !request->environment_policy ||
-        !request->hardware_profile)
+    if (rsa_result_inputs_missing(request, out))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_NULL;
-    if (request->measurement->workload_version !=
-            ZCL_RETRIEVAL_EVALUATION_WORKLOAD_VERSION_V2 ||
-        request->action_sequence == 0 || request->result_sequence == 0 ||
-        request->challenge_block_height == 0 ||
-        !rsa_root_any(request->challenge_block_hash) ||
-        request->started_unix <= 0 ||
-        request->finished_unix < request->started_unix ||
-        request->finished_unix > request->now_unix)
+    if (rsa_result_parameters_invalid(request))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_PARAMETER;
 
     if (rsa_result_reachable_overlaps(request, out, sizeof(*out)))
@@ -388,14 +504,7 @@ zcode_retrieval_science_result_compose(
         &result.action, result.action_root);
     if (error != ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK) return error;
 
-    if (zcl_retrieval_experiment_eval_result_serialize(
-            &result.measurement.parent_result,
-            result.parent_retrieval_result_wire) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK ||
-        zcl_retrieval_experiment_eval_result_serialize(
-            &result.measurement.child_result,
-            result.child_retrieval_result_wire) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK)
+    if (!rsa_result_wires(&result))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OBSERVATION;
 
     error = rsa_observation(
@@ -420,17 +529,7 @@ zcode_retrieval_science_result_compose(
            result.measurement.paired_evaluation.evaluation_input_root, 32u);
     memcpy(science.evidence_root, result.observation_root, 32u);
     memcpy(science.challenge_block_hash, request->challenge_block_hash, 32u);
-    if (!rsa_status(
-            (uint8_t)result.measurement.comparison.observation.status,
-            &science.status) ||
-        vcs_zcode_benchmark_result_validate_for_study(
-            request->measurement->study, request->task, request->candidate,
-            &result.action, &science, request->now_unix) !=
-            VCS_ZCODE_SCIENCE_OK ||
-        vcs_zcode_benchmark_result_serialize(
-            &science, result.result_wire) != VCS_ZCODE_SCIENCE_OK ||
-        vcs_zcode_benchmark_result_root(&science, result.result_root) !=
-            VCS_ZCODE_SCIENCE_OK)
+    if (!rsa_benchmark_result_checks(request, &result, &science))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_RESULT;
     result.result = science;
     *out = result;
@@ -478,6 +577,65 @@ static bool rsa_reproduction_verdict(uint8_t status, uint8_t *verdict)
     return true;
 }
 
+static bool rsa_reproduction_parameters_invalid(
+    const struct zcode_retrieval_science_reproduction_request *request)
+{
+    return !rsa_root_any(request->expected_original_result_root) ||
+           !rsa_root_any(request->expected_reproduced_result_root) ||
+           !rsa_root_any(request->reproducer_pubkey) ||
+           request->reproduction_sequence == 0 ||
+           request->created_unix <= 0 || request->now_unix <= 0;
+}
+
+static bool rsa_reproduction_aliases(
+    const struct zcode_retrieval_science_reproduction_request *request,
+    const struct zcode_retrieval_science_reproduction_bundle *out)
+{
+    return rsa_overlaps(out, sizeof(*out), request, sizeof(*request)) ||
+           rsa_result_reachable_overlaps(&request->original, out,
+                                         sizeof(*out)) ||
+           rsa_result_reachable_overlaps(&request->reproduced, out,
+                                         sizeof(*out));
+}
+
+/* The two results must match their expected roots, differ from each other,
+ * share the boundary and observation, and agree on the observation root. */
+static bool rsa_reproduction_bindings_ok(
+    const struct zcode_retrieval_science_reproduction_request *request,
+    const struct zcode_retrieval_science_reproduction_bundle *result)
+{
+    return memcmp(result->original.result_root,
+                  request->expected_original_result_root, 32u) == 0 &&
+           memcmp(result->reproduced.result_root,
+                  request->expected_reproduced_result_root, 32u) == 0 &&
+           memcmp(result->original.result_root,
+                  result->reproduced.result_root, 32u) != 0 &&
+           rsa_shared_boundary(&result->original, &result->reproduced) &&
+           memcmp(result->original.observation_root,
+                  result->reproduced.observation_root, 32u) == 0;
+}
+
+/* Verdict, then validation, serialization and root of the reproduction, in
+ * that order; stops at the first failure. */
+static bool rsa_reproduction_finish(
+    const struct zcode_retrieval_science_reproduction_request *request,
+    struct zcode_retrieval_science_reproduction_bundle *result,
+    struct vcs_zcode_reproduction_v1 *reproduction)
+{
+    return rsa_reproduction_verdict(result->reproduced.result.status,
+                                    &reproduction->verdict) &&
+           vcs_zcode_reproduction_validate_for_results(
+               request->original.measurement->study,
+               &result->original.result, &result->reproduced.result,
+               reproduction, request->now_unix) == VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_reproduction_serialize(
+               reproduction, result->reproduction_wire) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_reproduction_root(
+               reproduction, result->reproduction_root) ==
+               VCS_ZCODE_SCIENCE_OK;
+}
+
 enum zcode_retrieval_science_adapter_error
 zcode_retrieval_science_reproduction_compose(
     const struct zcode_retrieval_science_reproduction_request *request,
@@ -485,11 +643,7 @@ zcode_retrieval_science_reproduction_compose(
 {
     if (!request || !out)
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_NULL;
-    if (!rsa_root_any(request->expected_original_result_root) ||
-        !rsa_root_any(request->expected_reproduced_result_root) ||
-        !rsa_root_any(request->reproducer_pubkey) ||
-        request->reproduction_sequence == 0 || request->created_unix <= 0 ||
-        request->now_unix <= 0)
+    if (rsa_reproduction_parameters_invalid(request))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_PARAMETER;
     struct zcode_retrieval_science_reproduction_bundle result = {0};
     enum zcode_retrieval_science_adapter_error error =
@@ -499,19 +653,9 @@ zcode_retrieval_science_reproduction_compose(
     error = zcode_retrieval_science_result_compose(&request->reproduced,
                                                    &result.reproduced);
     if (error != ZCODE_RETRIEVAL_SCIENCE_ADAPTER_OK) return error;
-    if (rsa_overlaps(out, sizeof(*out), request, sizeof(*request)) ||
-        rsa_result_reachable_overlaps(&request->original, out, sizeof(*out)) ||
-        rsa_result_reachable_overlaps(&request->reproduced, out, sizeof(*out)))
+    if (rsa_reproduction_aliases(request, out))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ALIAS;
-    if (memcmp(result.original.result_root,
-               request->expected_original_result_root, 32u) != 0 ||
-        memcmp(result.reproduced.result_root,
-               request->expected_reproduced_result_root, 32u) != 0 ||
-        memcmp(result.original.result_root,
-               result.reproduced.result_root, 32u) == 0 ||
-        !rsa_shared_boundary(&result.original, &result.reproduced) ||
-        memcmp(result.original.observation_root,
-               result.reproduced.observation_root, 32u) != 0)
+    if (!rsa_reproduction_bindings_ok(request, &result))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_BINDING;
     if (result.original.result.status != VCS_ZCODE_BENCHMARK_OBSERVED)
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_ANCHOR_INELIGIBLE;
@@ -534,18 +678,7 @@ zcode_retrieval_science_reproduction_compose(
     memcpy(reproduction.reproduced_environment_root,
            result.reproduced.result.achieved_environment_root, 32u);
     memcpy(reproduction.reproducer_pubkey, request->reproducer_pubkey, 32u);
-    if (!rsa_reproduction_verdict(
-            result.reproduced.result.status, &reproduction.verdict) ||
-        vcs_zcode_reproduction_validate_for_results(
-            request->original.measurement->study,
-            &result.original.result, &result.reproduced.result,
-            &reproduction, request->now_unix) != VCS_ZCODE_SCIENCE_OK ||
-        vcs_zcode_reproduction_serialize(
-            &reproduction, result.reproduction_wire) !=
-            VCS_ZCODE_SCIENCE_OK ||
-        vcs_zcode_reproduction_root(
-            &reproduction, result.reproduction_root) !=
-            VCS_ZCODE_SCIENCE_OK)
+    if (!rsa_reproduction_finish(request, &result, &reproduction))
         return ZCODE_RETRIEVAL_SCIENCE_ADAPTER_REPRODUCTION;
     result.reproduction = reproduction;
     *out = result;
