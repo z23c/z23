@@ -255,6 +255,111 @@ static bool rpc_name_list(const struct json_value *params, bool help,
     return name_index_to_json(owner, result);
 }
 
+/* ── shared name RPC helpers ────────────────────────────────────── */
+
+/* Missing-argument, name and type checks shared by name_register,
+ * name_update and name_set_record; the first failing check wins. */
+static bool name_target_args_valid(const char *name, const char *type_str,
+                                   const char *value, uint8_t *target_type,
+                                   struct json_value *result)
+{
+    *target_type = 0;
+    if (!name || !type_str || !value) {
+        json_set_str(result, "Missing arguments");
+        return false;
+    }
+    if (!znam_validate_name(name)) {
+        json_set_str(result, "Invalid name (1-63 chars, lowercase alphanumeric + hyphens)");
+        return false;
+    }
+    *target_type = parse_type(type_str);
+    if (*target_type == 0) {
+        json_set_str(result,
+            "Invalid type (use: onion, zaddr, taddr, btc, ltc, doge, content)");
+        return false;
+    }
+    return true;
+}
+
+/* Looks up a registered name; sets "Name not found" and returns false
+ * when it is absent. */
+static bool name_lookup_registered(const char *name, struct znam_entry *existing,
+                                   struct json_value *result)
+{
+    if (!g_name_ndb || !db_znam_find(g_name_ndb, name, existing)) {
+        json_set_str(result, "Name not found");
+        return false;
+    }
+    return true;
+}
+
+/* Coin-selects from the CURRENT OWNER's own address so the tx's vin[0] is
+ * provably the owner — the projection's authorization check (fail-closed
+ * if the wallet doesn't hold that key or has no funded coin there). */
+static bool name_owner_tx_build(const struct znam_entry *existing,
+                                struct wallet_tx *wtx, int64_t *fee_paid,
+                                struct json_value *result)
+{
+    const char *tx_error = NULL;
+
+    memset(wtx, 0, sizeof(*wtx));
+    *fee_paid = 0;
+    if (!zslp_command_build_owner_base_tx(g_name_wallet,
+                                          existing->owner_address,
+                                          wtx, fee_paid,
+                                          &tx_error).ok) {
+        json_set_str(result, tx_error ? tx_error : "Failed to build transaction");
+        return false;
+    }
+    return true;
+}
+
+/* Commits the owner tx with its OP_RETURN. On failure the error is set in
+ * result and logged under op, and false is returned so the caller returns
+ * that error reply instead of a broadcast object. */
+static bool name_owner_tx_commit(struct wallet_tx *wtx, const uint8_t *script,
+                                 size_t script_len, const char *op,
+                                 struct json_value *result)
+{
+    struct wallet_tx_admission admission = {
+        .mempool = g_name_mempool,
+        .coins_tip = g_name_coins_tip,
+        .main_state = g_name_main_state,
+        .params = chain_params_get(),
+    };
+    struct zcl_result commit = zslp_command_commit_with_op_return(
+        g_name_wallet, wtx, &admission, script, script_len);
+    if (!commit.ok) {
+        json_set_str(result, commit.message);
+        transaction_free(&wtx->tx);
+        LOG_FAIL("znam", "%s: validated commit failed "
+                         "(code=%d): %s", op, commit.code, commit.message);
+    }
+    return true;
+}
+
+static void name_broadcast_tail_json(struct json_value *result,
+                                     const char *txid_hex, int64_t fee_paid)
+{
+    json_push_kv_str(result, "txid", txid_hex);
+    json_push_kv_int(result, "fee", fee_paid);
+    json_push_kv_str(result, "status", "broadcast");
+}
+
+static void name_op_return_tail_json(struct json_value *result,
+                                     const uint8_t *script, size_t script_len,
+                                     const char *note)
+{
+    char hex[1025];
+    size_t hex_bytes = script_len < 512 ? script_len : 512;
+
+    HexStr(script, hex_bytes, false, hex, sizeof(hex));
+    json_push_kv_str(result, "op_return_hex", hex);
+    json_push_kv_int(result, "op_return_size", (int64_t)script_len);
+    json_push_kv_str(result, "status", "ready");
+    json_push_kv_str(result, "note", note);
+}
+
 /* ── name_register ──────────────────────────────────────────────── */
 
 static bool rpc_name_register(const struct json_value *params, bool help,
@@ -277,22 +382,10 @@ static bool rpc_name_register(const struct json_value *params, bool help,
     const char *name = json_get_str(json_at(params, 0));
     const char *type_str = json_get_str(json_at(params, 1));
     const char *value = json_get_str(json_at(params, 2));
+    uint8_t target_type = 0;
 
-    if (!name || !type_str || !value) {
-        json_set_str(result, "Missing arguments");
-        return false;
-    }
-
-    if (!znam_validate_name(name)) {
-        json_set_str(result, "Invalid name (1-63 chars, lowercase alphanumeric + hyphens)");
-        return false;
-    }
-
-    uint8_t target_type = parse_type(type_str);
-    if (target_type == 0) {
-        json_set_str(result,
-            "Invalid type (use: onion, zaddr, taddr, btc, ltc, doge, content)");
-        return false;
+    if (!name_target_args_valid(name, type_str, value, &target_type, result)) {
+        return false; // raw-return-ok: error already set in result
     }
 
     /* Check if name already exists */
@@ -330,9 +423,7 @@ static bool rpc_name_register(const struct json_value *params, bool help,
         json_push_kv_str(result, "name", name);
         json_push_kv_str(result, "type", znam_type_name(target_type));
         json_push_kv_str(result, "value", value);
-        json_push_kv_str(result, "txid", txid_hex);
-        json_push_kv_int(result, "fee", fee_paid);
-        json_push_kv_str(result, "status", "broadcast");
+        name_broadcast_tail_json(result, txid_hex, fee_paid);
 
         printf("znam: registered '%s' -> %s (txid: %s)\n",
                name, value, txid_hex);
@@ -344,14 +435,7 @@ static bool rpc_name_register(const struct json_value *params, bool help,
     json_push_kv_str(result, "name", name);
     json_push_kv_str(result, "type", znam_type_name(target_type));
     json_push_kv_str(result, "value", value);
-
-    char hex[1025];
-    size_t hex_bytes = script_len < 512 ? script_len : 512;
-    HexStr(script, hex_bytes, false, hex, sizeof(hex));
-    json_push_kv_str(result, "op_return_hex", hex);
-    json_push_kv_int(result, "op_return_size", (int64_t)script_len);
-    json_push_kv_str(result, "status", "ready");
-    json_push_kv_str(result, "note",
+    name_op_return_tail_json(result, script, script_len,
         "Wallet not loaded. Include this OP_RETURN as vout[0] manually.");
 
     return true;
@@ -378,20 +462,10 @@ static bool rpc_name_update(const struct json_value *params, bool help,
     const char *name = json_get_str(json_at(params, 0));
     const char *type_str = json_get_str(json_at(params, 1));
     const char *value = json_get_str(json_at(params, 2));
+    uint8_t target_type = 0;
 
-    if (!name || !type_str || !value) {
-        json_set_str(result, "Missing arguments");
-        return false;
-    }
-    if (!znam_validate_name(name)) {
-        json_set_str(result, "Invalid name (1-63 chars, lowercase alphanumeric + hyphens)");
-        return false;
-    }
-    uint8_t target_type = parse_type(type_str);
-    if (target_type == 0) {
-        json_set_str(result,
-            "Invalid type (use: onion, zaddr, taddr, btc, ltc, doge, content)");
-        return false;
+    if (!name_target_args_valid(name, type_str, value, &target_type, result)) {
+        return false; // raw-return-ok: error already set in result
     }
     /* znam_build_update() itself only checks the value fits the caller's
      * OP_RETURN buffer (512 bytes here), not ZNAM_VALUE_MAX — the parser
@@ -404,9 +478,8 @@ static bool rpc_name_update(const struct json_value *params, bool help,
     }
 
     struct znam_entry existing;
-    if (!g_name_ndb || !db_znam_find(g_name_ndb, name, &existing)) {
-        json_set_str(result, "Name not found");
-        return false;
+    if (!name_lookup_registered(name, &existing, result)) {
+        return false; // raw-return-ok: error already set in result
     }
 
     uint8_t script[512];
@@ -419,35 +492,14 @@ static bool rpc_name_update(const struct json_value *params, bool help,
 
     if (g_name_wallet && g_name_mempool) {
         struct wallet_tx wtx;
-        memset(&wtx, 0, sizeof(wtx));
         int64_t fee_paid = 0;
-        const char *tx_error = NULL;
+        char txid_hex[65];
 
-        /* Coin-select from the CURRENT OWNER's own address so the tx's
-         * vin[0] is provably the owner — the projection's authorization
-         * check (fail-closed if the wallet doesn't hold that key or has
-         * no funded coin there). */
-        if (!zslp_command_build_owner_base_tx(g_name_wallet,
-                                              existing.owner_address,
-                                              &wtx, &fee_paid,
-                                              &tx_error).ok) {
-            json_set_str(result, tx_error ? tx_error : "Failed to build transaction");
-            return false;
+        if (!name_owner_tx_build(&existing, &wtx, &fee_paid, result)) {
+            return false; // raw-return-ok: error already set in result
         }
-
-        struct wallet_tx_admission admission = {
-            .mempool = g_name_mempool,
-            .coins_tip = g_name_coins_tip,
-            .main_state = g_name_main_state,
-            .params = chain_params_get(),
-        };
-        struct zcl_result commit = zslp_command_commit_with_op_return(
-            g_name_wallet, &wtx, &admission, script, script_len);
-        if (!commit.ok) {
-            json_set_str(result, commit.message);
-            transaction_free(&wtx.tx);
-            LOG_FAIL("znam", "name_update: validated commit failed "
-                             "(code=%d): %s", commit.code, commit.message);
+        if (!name_owner_tx_commit(&wtx, script, script_len, "name_update", result)) {
+            return false; // raw-return-ok: error already set in result
         }
 
         json_set_object(result);
@@ -455,11 +507,8 @@ static bool rpc_name_update(const struct json_value *params, bool help,
         json_push_kv_str(result, "type", znam_type_name(target_type));
         json_push_kv_str(result, "value", value);
 
-        char txid_hex[65];
         uint256_get_hex(&wtx.tx.hash, txid_hex);
-        json_push_kv_str(result, "txid", txid_hex);
-        json_push_kv_int(result, "fee", fee_paid);
-        json_push_kv_str(result, "status", "broadcast");
+        name_broadcast_tail_json(result, txid_hex, fee_paid);
 
         printf("znam: updated '%s' -> %s (txid: %s)\n",
                name, value, txid_hex);
@@ -470,14 +519,7 @@ static bool rpc_name_update(const struct json_value *params, bool help,
     json_push_kv_str(result, "name", name);
     json_push_kv_str(result, "type", znam_type_name(target_type));
     json_push_kv_str(result, "value", value);
-
-    char hex[1025];
-    size_t hex_bytes = script_len < 512 ? script_len : 512;
-    HexStr(script, hex_bytes, false, hex, sizeof(hex));
-    json_push_kv_str(result, "op_return_hex", hex);
-    json_push_kv_int(result, "op_return_size", (int64_t)script_len);
-    json_push_kv_str(result, "status", "ready");
-    json_push_kv_str(result, "note",
+    name_op_return_tail_json(result, script, script_len,
         "Wallet not loaded. Include this OP_RETURN as vout[0]; the name "
         "projection accepts it only when vin[0] is signed by the current "
         "owner.");
@@ -525,9 +567,8 @@ static bool rpc_name_transfer(const struct json_value *params, bool help,
     }
 
     struct znam_entry existing;
-    if (!g_name_ndb || !db_znam_find(g_name_ndb, name, &existing)) {
-        json_set_str(result, "Name not found");
-        return false;
+    if (!name_lookup_registered(name, &existing, result)) {
+        return false; // raw-return-ok: error already set in result
     }
 
     uint8_t script[512];
@@ -540,42 +581,22 @@ static bool rpc_name_transfer(const struct json_value *params, bool help,
 
     if (g_name_wallet && g_name_mempool) {
         struct wallet_tx wtx;
-        memset(&wtx, 0, sizeof(wtx));
         int64_t fee_paid = 0;
-        const char *tx_error = NULL;
+        char txid_hex[65];
 
-        if (!zslp_command_build_owner_base_tx(g_name_wallet,
-                                              existing.owner_address,
-                                              &wtx, &fee_paid,
-                                              &tx_error).ok) {
-            json_set_str(result, tx_error ? tx_error : "Failed to build transaction");
-            return false;
+        if (!name_owner_tx_build(&existing, &wtx, &fee_paid, result)) {
+            return false; // raw-return-ok: error already set in result
         }
-
-        struct wallet_tx_admission admission = {
-            .mempool = g_name_mempool,
-            .coins_tip = g_name_coins_tip,
-            .main_state = g_name_main_state,
-            .params = chain_params_get(),
-        };
-        struct zcl_result commit = zslp_command_commit_with_op_return(
-            g_name_wallet, &wtx, &admission, script, script_len);
-        if (!commit.ok) {
-            json_set_str(result, commit.message);
-            transaction_free(&wtx.tx);
-            LOG_FAIL("znam", "name_transfer: validated commit failed "
-                             "(code=%d): %s", commit.code, commit.message);
+        if (!name_owner_tx_commit(&wtx, script, script_len, "name_transfer", result)) {
+            return false; // raw-return-ok: error already set in result
         }
 
         json_set_object(result);
         json_push_kv_str(result, "name", name);
         json_push_kv_str(result, "new_owner", new_owner);
 
-        char txid_hex[65];
         uint256_get_hex(&wtx.tx.hash, txid_hex);
-        json_push_kv_str(result, "txid", txid_hex);
-        json_push_kv_int(result, "fee", fee_paid);
-        json_push_kv_str(result, "status", "broadcast");
+        name_broadcast_tail_json(result, txid_hex, fee_paid);
 
         printf("znam: transferred '%s' -> %s (txid: %s)\n",
                name, new_owner, txid_hex);
@@ -585,14 +606,7 @@ static bool rpc_name_transfer(const struct json_value *params, bool help,
     json_set_object(result);
     json_push_kv_str(result, "name", name);
     json_push_kv_str(result, "new_owner", new_owner);
-
-    char hex[1025];
-    size_t hex_bytes = script_len < 512 ? script_len : 512;
-    HexStr(script, hex_bytes, false, hex, sizeof(hex));
-    json_push_kv_str(result, "op_return_hex", hex);
-    json_push_kv_int(result, "op_return_size", (int64_t)script_len);
-    json_push_kv_str(result, "status", "ready");
-    json_push_kv_str(result, "note",
+    name_op_return_tail_json(result, script, script_len,
         "Wallet not loaded. Include this OP_RETURN as vout[0]; the name "
         "projection accepts it only when vin[0] is signed by the current "
         "owner.");
@@ -721,20 +735,10 @@ static bool rpc_name_set_record(const struct json_value *params, bool help,
     const char *name = json_get_str(json_at(params, 0));
     const char *type_str = json_get_str(json_at(params, 1));
     const char *value = json_get_str(json_at(params, 2));
+    uint8_t target_type = 0;
 
-    if (!name || !type_str || !value) {
-        json_set_str(result, "Missing arguments");
-        return false;
-    }
-    if (!znam_validate_name(name)) {
-        json_set_str(result, "Invalid name (1-63 chars, lowercase alphanumeric + hyphens)");
-        return false;
-    }
-    uint8_t target_type = parse_type(type_str);
-    if (target_type == 0) {
-        json_set_str(result,
-            "Invalid type (use: onion, zaddr, taddr, btc, ltc, doge, content)");
-        return false;
+    if (!name_target_args_valid(name, type_str, value, &target_type, result)) {
+        return false; // raw-return-ok: error already set in result
     }
     /* See the matching comment in rpc_name_update: the builder only
      * checks the OP_RETURN buffer size, not ZNAM_VALUE_MAX. */
@@ -744,9 +748,8 @@ static bool rpc_name_set_record(const struct json_value *params, bool help,
     }
 
     struct znam_entry existing;
-    if (!g_name_ndb || !db_znam_find(g_name_ndb, name, &existing)) {
-        json_set_str(result, "Name not found");
-        return false;
+    if (!name_lookup_registered(name, &existing, result)) {
+        return false; // raw-return-ok: error already set in result
     }
 
     uint8_t script[512];
@@ -759,31 +762,14 @@ static bool rpc_name_set_record(const struct json_value *params, bool help,
 
     if (g_name_wallet && g_name_mempool) {
         struct wallet_tx wtx;
-        memset(&wtx, 0, sizeof(wtx));
         int64_t fee_paid = 0;
-        const char *tx_error = NULL;
+        char txid_hex[65];
 
-        if (!zslp_command_build_owner_base_tx(g_name_wallet,
-                                              existing.owner_address,
-                                              &wtx, &fee_paid,
-                                              &tx_error).ok) {
-            json_set_str(result, tx_error ? tx_error : "Failed to build transaction");
-            return false;
+        if (!name_owner_tx_build(&existing, &wtx, &fee_paid, result)) {
+            return false; // raw-return-ok: error already set in result
         }
-
-        struct wallet_tx_admission admission = {
-            .mempool = g_name_mempool,
-            .coins_tip = g_name_coins_tip,
-            .main_state = g_name_main_state,
-            .params = chain_params_get(),
-        };
-        struct zcl_result commit = zslp_command_commit_with_op_return(
-            g_name_wallet, &wtx, &admission, script, script_len);
-        if (!commit.ok) {
-            json_set_str(result, commit.message);
-            transaction_free(&wtx.tx);
-            LOG_FAIL("znam", "name_set_record: validated commit failed "
-                             "(code=%d): %s", commit.code, commit.message);
+        if (!name_owner_tx_commit(&wtx, script, script_len, "name_set_record", result)) {
+            return false; // raw-return-ok: error already set in result
         }
 
         json_set_object(result);
@@ -791,11 +777,8 @@ static bool rpc_name_set_record(const struct json_value *params, bool help,
         json_push_kv_str(result, "type", znam_type_name(target_type));
         json_push_kv_str(result, "value", value);
 
-        char txid_hex[65];
         uint256_get_hex(&wtx.tx.hash, txid_hex);
-        json_push_kv_str(result, "txid", txid_hex);
-        json_push_kv_int(result, "fee", fee_paid);
-        json_push_kv_str(result, "status", "broadcast");
+        name_broadcast_tail_json(result, txid_hex, fee_paid);
 
         printf("znam: set_record '%s' %s -> %s (txid: %s)\n",
                name, type_str, value, txid_hex);
@@ -806,14 +789,7 @@ static bool rpc_name_set_record(const struct json_value *params, bool help,
     json_push_kv_str(result, "name", name);
     json_push_kv_str(result, "type", znam_type_name(target_type));
     json_push_kv_str(result, "value", value);
-
-    char hex[1025];
-    size_t hex_bytes = script_len < 512 ? script_len : 512;
-    HexStr(script, hex_bytes, false, hex, sizeof(hex));
-    json_push_kv_str(result, "op_return_hex", hex);
-    json_push_kv_int(result, "op_return_size", (int64_t)script_len);
-    json_push_kv_str(result, "status", "ready");
-    json_push_kv_str(result, "note",
+    name_op_return_tail_json(result, script, script_len,
         "Wallet not loaded. Include this OP_RETURN as vout[0]; the name "
         "projection accepts it only when vin[0] is signed by the current "
         "owner.");
@@ -858,9 +834,8 @@ static bool rpc_name_set_text(const struct json_value *params, bool help,
     }
 
     struct znam_entry existing;
-    if (!g_name_ndb || !db_znam_find(g_name_ndb, name, &existing)) {
-        json_set_str(result, "Name not found");
-        return false;
+    if (!name_lookup_registered(name, &existing, result)) {
+        return false; // raw-return-ok: error already set in result
     }
 
     uint8_t script[512];
@@ -875,31 +850,14 @@ static bool rpc_name_set_text(const struct json_value *params, bool help,
 
     if (g_name_wallet && g_name_mempool) {
         struct wallet_tx wtx;
-        memset(&wtx, 0, sizeof(wtx));
         int64_t fee_paid = 0;
-        const char *tx_error = NULL;
+        char txid_hex[65];
 
-        if (!zslp_command_build_owner_base_tx(g_name_wallet,
-                                              existing.owner_address,
-                                              &wtx, &fee_paid,
-                                              &tx_error).ok) {
-            json_set_str(result, tx_error ? tx_error : "Failed to build transaction");
-            return false;
+        if (!name_owner_tx_build(&existing, &wtx, &fee_paid, result)) {
+            return false; // raw-return-ok: error already set in result
         }
-
-        struct wallet_tx_admission admission = {
-            .mempool = g_name_mempool,
-            .coins_tip = g_name_coins_tip,
-            .main_state = g_name_main_state,
-            .params = chain_params_get(),
-        };
-        struct zcl_result commit = zslp_command_commit_with_op_return(
-            g_name_wallet, &wtx, &admission, script, script_len);
-        if (!commit.ok) {
-            json_set_str(result, commit.message);
-            transaction_free(&wtx.tx);
-            LOG_FAIL("znam", "name_set_text: validated commit failed "
-                             "(code=%d): %s", commit.code, commit.message);
+        if (!name_owner_tx_commit(&wtx, script, script_len, "name_set_text", result)) {
+            return false; // raw-return-ok: error already set in result
         }
 
         json_set_object(result);
@@ -907,11 +865,8 @@ static bool rpc_name_set_text(const struct json_value *params, bool help,
         json_push_kv_str(result, "key", key);
         json_push_kv_str(result, "value", value);
 
-        char txid_hex[65];
         uint256_get_hex(&wtx.tx.hash, txid_hex);
-        json_push_kv_str(result, "txid", txid_hex);
-        json_push_kv_int(result, "fee", fee_paid);
-        json_push_kv_str(result, "status", "broadcast");
+        name_broadcast_tail_json(result, txid_hex, fee_paid);
 
         printf("znam: set_text '%s' %s -> %s (txid: %s)\n",
                name, key, value, txid_hex);
@@ -922,14 +877,7 @@ static bool rpc_name_set_text(const struct json_value *params, bool help,
     json_push_kv_str(result, "name", name);
     json_push_kv_str(result, "key", key);
     json_push_kv_str(result, "value", value);
-
-    char hex[1025];
-    size_t hex_bytes = script_len < 512 ? script_len : 512;
-    HexStr(script, hex_bytes, false, hex, sizeof(hex));
-    json_push_kv_str(result, "op_return_hex", hex);
-    json_push_kv_int(result, "op_return_size", (int64_t)script_len);
-    json_push_kv_str(result, "status", "ready");
-    json_push_kv_str(result, "note",
+    name_op_return_tail_json(result, script, script_len,
         "Wallet not loaded. Include this OP_RETURN as vout[0]; the name "
         "projection accepts it only when vin[0] is signed by the current "
         "owner.");

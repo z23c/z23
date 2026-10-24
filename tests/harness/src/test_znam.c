@@ -573,6 +573,111 @@ static int test_znam_wallet_sweep(void)
     return failures;
 }
 
+/* ── Commit failure surfaces as the RPC's error reply ──────────────────
+ *
+ * The owner wallet holds the owner key and a funded coin, so the owner tx
+ * builds. That coin is not in the zeroed-tip coins view, so mempool
+ * admission refuses the commit. Every write RPC must then return the error
+ * reply (false + message) and never a success object carrying a txid or a
+ * "broadcast" status. Nothing reaches the network: the mempool refused it. */
+
+struct name_commit_case {
+    const char *method;
+    const char *a0;
+    const char *a1;
+    bool has_a2;
+    const char *a2;
+};
+
+static const struct name_commit_case name_commit_cases[] = {
+    { "name_register",    "bob",   "taddr", true,  "t1bob" },
+    { "name_update",      "alice", "btc",   true,  "1x" },
+    { "name_transfer",    "alice", "t1attacker", false, NULL },
+    { "name_set_record",  "alice", "btc",   true,  "1x" },
+    { "name_set_text",    "alice", "email", true,  "a@b.com" },
+};
+
+static int znam_commit_failure_surfaces_error(void)
+{
+    int failures = 0;
+    printf("\n=== ZNAM RPC commit failure: error reply, not broadcast ===\n");
+
+    sqlite3 *db = NULL;
+    struct node_db ndb = {0};
+    bool opened = open_test_names_db(&db, &ndb);
+    static struct wallet owner_w;
+    static struct tx_mempool mp;
+    static struct main_state ms;
+    static struct coins_view null_view;
+    static struct coins_view_cache cv;
+    init_hd_wallet(&owner_w, 0x77);
+    char owner_addr[128] = {0};
+    struct key_id kid;
+    bool got_addr = opened &&
+        wallet_get_new_address_with_key_id(&owner_w, owner_addr,
+                                           sizeof(owner_addr), &kid);
+    bool funded = got_addr && fund_wallet_key(&owner_w, &kid, 20000) &&
+        wallet_top_up_key_pool(&owner_w, 2);
+    if (!funded) {
+        printf("znam commit-failure fixture: FAIL (setup)\n");
+        failures++;
+        if (opened) sqlite3_close(db);
+        return failures;
+    }
+    /* name_register's genesis tx draws its change key from the persisted key
+     * pool; mark the fixture pool durable as a flush would, so it builds. */
+    wallet_key_pool_mark_persisted_through(
+        &owner_w, wallet_key_pool_generation_ceiling(&owner_w));
+
+    struct znam_entry alice = {0};
+    snprintf(alice.name, sizeof(alice.name), "alice");
+    snprintf(alice.owner_address, sizeof(alice.owner_address), "%s", owner_addr);
+    alice.target_type = ZNAM_TYPE_TADDR;
+    snprintf(alice.target_value, sizeof(alice.target_value), "t1original");
+    memset(alice.reg_txid, 0xEE, 32);
+    alice.reg_height = 700;
+    alice.expiry_height = 700 + ZNAM_REGISTRATION_TERM_BLOCKS;
+    db_znam_save(&ndb, &alice);
+
+    memset(&mp, 0, sizeof(mp));
+    tx_mempool_init(&mp, 0);
+    main_state_init(&ms);
+    memset(&null_view, 0, sizeof(null_view));
+    coins_view_cache_init(&cv, &null_view);
+
+    rpc_name_set_state(&ndb);
+    rpc_name_set_wallet(&owner_w, &mp, &ms, &cv);
+
+    struct rpc_table t;
+    rpc_table_init(&t);
+    register_name_rpc_commands(&t);
+
+    size_t n = sizeof(name_commit_cases) / sizeof(name_commit_cases[0]);
+    for (size_t i = 0; i < n; i++) {
+        const struct name_commit_case *c = &name_commit_cases[i];
+        struct json_value r = {0};
+        printf("%s: commit refusal is an error reply... ", c->method);
+        bool ok = call_name_rpc(&t, c->method, c->a0, c->a1,
+                                c->has_a2, c->a2, &r);
+        const char *msg = json_get_str(&r);
+        if (!ok && strstr(msg, "commit_with_op_return") != NULL)
+            printf("OK\n");
+        else {
+            printf("FAIL (ok=%d msg=%s)\n", ok, msg);
+            failures++;
+        }
+        json_free(&r);
+    }
+
+    rpc_name_set_wallet(NULL, NULL, NULL, NULL);
+    rpc_name_set_state(NULL);
+    coins_view_cache_free(&cv);
+    main_state_free(&ms);
+    tx_mempool_free(&mp);
+    if (opened) sqlite3_close(db);
+    return failures;
+}
+
 int test_znam(void)
 {
     int failures = 0;
@@ -1649,6 +1754,7 @@ int test_znam(void)
         if (opened) sqlite3_close(db);
     }
 
+    failures += znam_commit_failure_surfaces_error();
     failures += test_znam_wallet_sweep();
 
     printf("\n%d ZNAM test(s) failed\n", failures);
