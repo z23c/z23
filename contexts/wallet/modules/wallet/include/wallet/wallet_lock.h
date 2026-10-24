@@ -106,6 +106,14 @@ struct zcl_result wallet_lock_unlock(struct wallet *w, struct wallet_sqlite *ws,
  * consulted here. */
 struct zcl_result wallet_lock_register_boot_credential(void);
 
+/* The auto-lock duration range, in seconds, inclusive. */
+#define WALLET_LOCK_TIMEOUT_MIN_SECONDS 1
+#define WALLET_LOCK_TIMEOUT_MAX_SECONDS 3600
+
+/* True iff `timeout_seconds` is inside the auto-lock range. Pure: callers use
+ * it to refuse a request before any key is decrypted. */
+bool wallet_lock_timeout_valid(int64_t timeout_seconds);
+
 /* Arm automatic lock after a successful unlock. `timeout_seconds` is bounded
  * to 1..3600; expiry scrubs the cached passphrase and resident private keys.
  * Re-arming supersedes the older timer. */
@@ -132,6 +140,10 @@ void wallet_lock_reset_for_test(void);
  * forced locked. 0 (the production state) disables it; reset by
  * wallet_lock_reset_for_test(). Not for production call sites. */
 void wallet_lock_flip_after_unlock_checks_for_test(uint32_t n);
+/* Test-only: how many times wallet_lock_unlock() has been entered since the
+ * last wallet_lock_reset_for_test(). Lets a test prove a refusal happened
+ * before the unlock path (and so before any key was decrypted). */
+uint32_t wallet_lock_unlock_entries_for_test(void);
 #endif
 
 #ifdef __cplusplus

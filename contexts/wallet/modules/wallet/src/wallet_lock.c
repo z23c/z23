@@ -39,6 +39,8 @@ static uint64_t g_timeout_generation;
  * wallet_lock_is_unlocked() call after arming reports unlocked and then
  * forces the wallet locked. */
 static uint32_t g_flip_after_unlock_checks;
+/* Counts wallet_lock_unlock() entries; read only by tests. */
+static uint32_t g_unlock_entries;
 #endif
 
 struct wallet_lock_timer {
@@ -165,6 +167,11 @@ struct zcl_result wallet_lock_spend_guard(void)
 struct zcl_result wallet_lock_unlock(struct wallet *w, struct wallet_sqlite *ws,
                                      const char *passphrase)
 {
+#ifdef ZCL_TESTING
+    pthread_mutex_lock(&g_mu);
+    g_unlock_entries++;
+    pthread_mutex_unlock(&g_mu);
+#endif
     if (!passphrase)
         return ZCL_ERR(WLK_NULL_ARG, "unlock: passphrase is NULL");
     size_t plen = strlen(passphrase);
@@ -291,13 +298,19 @@ struct zcl_result wallet_lock_register_boot_credential(void)
     return registered;
 }
 
+bool wallet_lock_timeout_valid(int64_t timeout_seconds)
+{
+    return timeout_seconds >= WALLET_LOCK_TIMEOUT_MIN_SECONDS &&
+           timeout_seconds <= WALLET_LOCK_TIMEOUT_MAX_SECONDS;
+}
+
 struct zcl_result wallet_lock_arm_timeout(struct wallet *w,
                                           uint32_t timeout_seconds)
 {
     /* Every failure path re-locks before refusing: callers such as the
      * walletunlock RPC handler arm after unlocking, so an unarmed
      * refusal must never leave the wallet unlocked with no timer. */
-    if (timeout_seconds < 1 || timeout_seconds > 3600) {
+    if (!wallet_lock_timeout_valid(timeout_seconds)) {
         wallet_lock_lock(w);
         return ZCL_ERR(WLK_TIMEOUT_RANGE,
                        "unlock timeout must be between 1 and 3600 seconds");
@@ -360,6 +373,14 @@ void wallet_lock_flip_after_unlock_checks_for_test(uint32_t n)
     g_flip_after_unlock_checks = n;
     pthread_mutex_unlock(&g_mu);
 }
+
+uint32_t wallet_lock_unlock_entries_for_test(void)
+{
+    pthread_mutex_lock(&g_mu);
+    uint32_t entries = g_unlock_entries;
+    pthread_mutex_unlock(&g_mu);
+    return entries;
+}
 #endif
 
 void wallet_lock_reset_for_test(void)
@@ -370,6 +391,7 @@ void wallet_lock_reset_for_test(void)
     g_force_locked = false;
 #ifdef ZCL_TESTING
     g_flip_after_unlock_checks = 0;
+    g_unlock_entries = 0;
 #endif
     g_encrypted_at_rest = false;
     g_timeout_generation++;

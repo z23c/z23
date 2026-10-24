@@ -66,14 +66,16 @@ static bool rs_unlock_timeout_case(struct rpc_table *tbl, struct wallet *w,
         built = json_push_back(&params, &value) && built;
     }
     wallet_lock_lock(w);
+    uint32_t entries_before = wallet_lock_unlock_entries_for_test();
     bool accepted = built && rpc_table_execute(tbl, "walletunlock", &params,
                                                &result);
+    uint32_t entries = wallet_lock_unlock_entries_for_test() - entries_before;
     bool ok = built && accepted == valid;
     if (valid)
         ok = ok && json_get_int(json_get(&result, "auto_lock_seconds")) ==
-                        (present ? timeout : 300);
+                        (present ? timeout : 300) && entries == 1;
     else
-        ok = ok && !wallet_lock_is_unlocked() &&
+        ok = ok && entries == 0 && !wallet_lock_is_unlocked() &&
              wallet_lock_effective_passphrase() == NULL &&
              !wallet_lock_spend_guard().ok;
     wallet_lock_lock(w);
@@ -94,8 +96,9 @@ static int rs_unlock_timeout_width(void)
         bool present;
         bool valid;
     } cases[] = {
-        {0, false, true}, {300, true, true}, {3600, true, true},
-        {0, true, false}, {3601, true, false}, {UINT32_MAX, true, false},
+        {0, false, true}, {1, true, true}, {300, true, true},
+        {3600, true, true}, {0, true, false}, {-1, true, false},
+        {3601, true, false}, {UINT32_MAX, true, false},
         {INT64_C(4294970896), true, false},
         {-INT64_C(4294963696), true, false},
         {INT64_C(8589938192), true, false},
