@@ -1433,6 +1433,7 @@ int main(int argc, char **argv)
     failures += test_rpc_service_restart();
     failures += test_rpc_readiness_classes();
     failures += test_projection_warmup();
+    failures += test_frontend_async();
     failures += test_chain_state_repo();
     failures += test_chain_evidence_controller();
     { extern int test_chain_evidence_store_load(void);

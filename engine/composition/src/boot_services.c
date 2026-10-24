@@ -1357,23 +1357,11 @@ bool app_init_services(struct app_context *ctx,
 
     boot_register_core_liveness_and_reducer(svc, params);
     t_svc = boot_mark_step(t_svc, "svc.core_liveness_reducer", "svc.frontend_tor_start");
-    boot_configure_frontend_rpc(svc);
-
-    /* Frontend services (RPC, explorer, zcode store, onion_tor) start below. */
-    /* A frontend failure is not data loss: keep P2P and chain advancement
-     * alive, report DEGRADED_SERVING, and retry a failed RPC bind below.
-     * The retry leaves healthy frontend siblings running. */
-    if (!boot_register_frontend_services(svc) ||
-        !zcl_service_kernel_start_all(&svc->frontend_kernel)) {
-        fprintf(stderr,
-            "WARNING: frontend services failed to start; serving DEGRADED "
-            "(RPC/explorer/Tor may be unavailable)\n");
-        event_emitf(EV_BOOT_ACTIVATE, 0,
-                    "degraded_serving frontend_services_unavailable");
-        service_state_advance(SERVICE_STATE_DEGRADED_SERVING,
-                              "frontend_services_unavailable");
-    }
-    boot_rpc_retry_arm(&svc->frontend_kernel);
+    /* The frontend kernel (rpc_http, explorer, miner, Tor, ...) starts on a
+     * tracked thread joined at shutdown (boot_frontend_async.c): neither P2P
+     * nor the reducer depends on it. RPC answers -28 until it binds; a
+     * failure serves DEGRADED and arms the bind retry, as before. */
+    boot_frontend_async_start(svc);
 
     t_svc = boot_mark_step(t_svc, "svc.frontend_tor_start",
                            "svc.peer_discover_self");
@@ -1490,8 +1478,11 @@ bool app_init_services(struct app_context *ctx,
      * unless we are the fallback slot, promote current -> last-good. Any
      * earlier and a binary that crashes later in boot would promote itself
      * before dying, disarming the fallback. No-op when launched directly
-     * (launcher env unset). */
-    binary_ab_promote_on_ready_env();
+     * (launcher env unset). The frontend start runs on its own thread, so
+     * wait for it first: a crash in frontend start must still block promotion
+     * (a degraded frontend still promotes, as before). */
+    if (boot_frontend_async_gate_ready("A/B promote"))
+        binary_ab_promote_on_ready_env();
 
     return true;
 }

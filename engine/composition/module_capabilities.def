@@ -588,6 +588,7 @@ ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_ledger.c", CAP_FS_WRITE
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_board_fleet.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_fleet_roster.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_flight_recorder.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/composition/src/boot_frontend_async.c", CAP_CLOCK, "bounded wait for the frontend start thread reads the monotonic clock")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_frontend_services.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_full_fold.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/composition/src/boot_header_seed_import.c", CAP_FS_WRITE|CAP_FS_READ, "")

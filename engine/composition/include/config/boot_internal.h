@@ -404,6 +404,25 @@ void boot_register_store_buyer_rpc(struct boot_svc_ctx *svc);
  * Called once from app_init_services before the frontend kernel starts. */
 bool boot_register_frontend_services(struct boot_svc_ctx *svc);
 
+/* Start the frontend kernel (rpc_http, explorer, miner, Tor, ...) on one tracked
+ * thread so P2P and the reducer do not wait for it. RPC answers -28 until the
+ * thread reaches rpc_http. A failure keeps DEGRADED_SERVING and arms the bind
+ * retry. boot_frontend_async_stop joins the thread; call it before the
+ * frontend kernel stops (boot_services_shutdown.c). */
+void boot_frontend_async_start(struct boot_svc_ctx *svc);
+void boot_frontend_async_stop(void);
+bool boot_frontend_async_done(void);
+/* Bounded wait for the start body to finish (success or degraded). False on
+ * timeout or a shutdown request. */
+bool boot_frontend_async_wait_done(int64_t timeout_ms);
+/* The READY / A/B-promote gate: true once the frontend start finished; false
+ * only when a shutdown was requested first (then report neither). */
+bool boot_frontend_async_gate_ready(const char *what);
+#ifdef ZCL_TESTING
+void boot_frontend_async_test_hold(bool hold);
+void boot_frontend_async_test_body(bool (*body)(struct boot_svc_ctx *));
+#endif
+
 /* Start embedded Tor as soon as the datadir and wallet are up, so HSDir
  * descriptor upload runs in parallel with block-index hydrate. Non-blocking
  * and idempotent: the later frontend kernel start is a no-op if this ran. */

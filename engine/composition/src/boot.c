@@ -3613,6 +3613,11 @@ static bool boot_seq_start_services(struct app_context *ctx, struct boot_seq *s)
         struct zcl_result sr =
             sysinit_run_stage(BOOT_STAGE_SERVICES_RUNNING, ctx);
         if (!sr.ok) return false;
+        /* READY maps to phase=serving + rpc_bound: report it only after the
+         * frontend start thread ran (rpc_http bound or degraded), so bootwait
+         * never sees serving with the RPC port closed. A shutdown request
+         * ends the wait; boot then returns and shutdown joins the thread. */
+        if (!boot_frontend_async_gate_ready("READY")) return svc_ok;
         boot_stage_advance_to(BOOT_STAGE_READY);
         /* Deferred quick_checks run now, in the background, fail-closed. */
         boot_fast_restart_start_bg_quick_check(g_datadir);

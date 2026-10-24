@@ -49,10 +49,19 @@ int t_boot_core_liveness_precedes_frontend_contract(void)
 {
     int failures = 0;
     char *buf = NULL;
+    char *abuf = NULL;
     TEST("boot starts reducer liveness before optional frontend services") {
         char path[PATH_MAX];
+        /* The frontend registers on its own tracked thread
+         * (boot_frontend_async.c); boot_services.c starts that thread, and
+         * must not register the frontend directly. */
+        ASSERT(repo_path(path, sizeof(path), "engine/composition/src/boot_frontend_async.c") == 0);
+        ASSERT(read_entire_file(path, &abuf) == 0);
+        ASSERT(strstr(abuf, "boot_register_frontend_services(svc)") != NULL);
         ASSERT(repo_path(path, sizeof(path), "engine/composition/src/boot_services.c") == 0);
         ASSERT(read_entire_file(path, &buf) == 0);
+        ASSERT(count_occurrences(buf, "boot_register_frontend_services(svc)") == 0);
+        ASSERT(count_occurrences(buf, "boot_frontend_async_start(svc);") == 1);
         char *helper = strstr(buf, "static void boot_register_core_liveness_and_reducer(");
         char *helper_end = helper
             ? strstr(helper, "bool app_init_services(struct app_context *ctx,")
@@ -61,7 +70,7 @@ int t_boot_core_liveness_precedes_frontend_contract(void)
             ? strstr(helper, "staged_sync_supervisor_register(svc->state);")
             : NULL;
         char *call = strstr(buf, "boot_register_core_liveness_and_reducer(svc, params);");
-        char *frontend = strstr(buf, "boot_register_frontend_services(svc)");
+        char *frontend = strstr(buf, "boot_frontend_async_start(svc);");
         char *runtime = strstr(buf, "boot_register_runtime_services(svc)");
         ASSERT(helper != NULL);
         ASSERT(helper_end != NULL);
@@ -78,6 +87,7 @@ int t_boot_core_liveness_precedes_frontend_contract(void)
         PASS();
     } _test_next:;
     free(buf);
+    free(abuf);
     return failures;
 }
 

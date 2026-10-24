@@ -53,6 +53,7 @@
 static void shutdown_stop_frontend_services(struct boot_svc_ctx *svc)
 {
     printf("[shutdown] stopping frontend services\n");
+    boot_frontend_async_stop(); /* join the start thread before the kernel stops */
     boot_rpc_retry_disarm(&svc->frontend_kernel);
     zcl_service_kernel_stop_all(&svc->frontend_kernel);
     printf("[shutdown] frontend services stopped\n");
