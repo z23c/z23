@@ -28,6 +28,20 @@ bool json_request_parse(struct json_request *req,
 typedef bool (*rpc_fn)(const struct json_value *params, bool help,
                        struct json_value *result);
 
+/* Readiness class: which boot-time dependency a command needs before it may
+ * answer. The zero value is the STRICTEST (needs every class ready), so a
+ * command that does not declare a class is never exposed by omission.
+ * rpc_table_append() fills an undeclared class from the command category
+ * (rpc_ready_class_default) when it stores the entry; rpc_table_set_ready_class
+ * declares one explicitly. */
+enum rpc_ready_class {
+    RPC_READY_UNCLASSIFIED = 0,
+    RPC_READY_CHAIN,
+    RPC_READY_WALLET,
+    RPC_READY_PROJECTION,
+    RPC_READY_CLASS_COUNT
+};
+
 struct rpc_command {
     const char *category;
     const char *name;
@@ -39,6 +53,10 @@ struct rpc_command {
 
 struct rpc_table {
     struct rpc_command commands[MAX_RPC_COMMANDS];
+    /* Parallel to commands[]: the readiness class of each entry, kept beside
+     * the commands (not in them) so the many positional command initialisers
+     * stay valid. */
+    enum rpc_ready_class ready_class[MAX_RPC_COMMANDS];
     size_t num_commands;
     bool running;
 };
@@ -53,6 +71,10 @@ bool rpc_table_append(struct rpc_table *t, const struct rpc_command *cmd);
 void rpc_table_must_append(struct rpc_table *t, const struct rpc_command *cmd);
 const struct rpc_command *rpc_table_find(const struct rpc_table *t,
                                          const char *name);
+/* Declare a command's readiness class explicitly (overrides the category
+ * default). False when the command is not registered. */
+bool rpc_table_set_ready_class(struct rpc_table *t, const char *name,
+                               enum rpc_ready_class cls);
 /* Execute a method by name. Returns true on success with the handler's
  * value in *result. On failure (server still in warmup, method not found,
  * or the handler itself failing) it returns false AND writes a structured
@@ -81,6 +103,19 @@ void set_rpc_warmup_status(const char *status);
 /* Disarm warmup; methods start answering. */
 void set_rpc_warmup_finished(void);
 bool rpc_is_in_warmup(char *status_out, size_t status_size);
+
+/* ── Per-class readiness, layered under the global warmup flag ────────
+ * While the global flag is armed every method is refused (unchanged).
+ * Once it is disarmed, a method is additionally refused with RPC_IN_WARMUP
+ * and a class reason ("wallet loading", "projections loading") until its
+ * class bit is set. set_rpc_warmup_finished() sets every class bit and
+ * set_rpc_warmup_started() clears them all, so today the classes become
+ * ready together with the flag. UNCLASSIFIED needs every bit. */
+void rpc_ready_set(enum rpc_ready_class cls, bool ready);
+bool rpc_ready_is(enum rpc_ready_class cls);
+const char *rpc_ready_reason(enum rpc_ready_class cls);
+/* Category/name based default for a command that declares no class. */
+enum rpc_ready_class rpc_ready_class_default(const struct rpc_command *cmd);
 
 void value_from_amount(CAmount amount, struct json_value *out);
 

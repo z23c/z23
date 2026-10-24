@@ -12,11 +12,18 @@
 #include <string.h>
 #include <stdio.h>
 #include <inttypes.h>
+#include <stdatomic.h>
 
 static bool rpc_in_warmup = true;
 static char warmup_status[256] = "RPC server started";
 static zcl_mutex_t cs_warmup;
 static bool cs_warmup_inited = false;
+static void rpc_ready_set_all(void);
+static void rpc_ready_clear_all(void);
+
+/* One bit per rpc_ready_class (index 0, UNCLASSIFIED, is derived: it is ready
+ * only when every real class is). All clear until warmup finishes. */
+static atomic_bool class_ready[RPC_READY_CLASS_COUNT];
 
 static void ensure_warmup_mutex(void)
 {
@@ -85,6 +92,7 @@ bool rpc_table_append(struct rpc_table *t, const struct rpc_command *cmd)
         return false;
     if (t->num_commands >= MAX_RPC_COMMANDS)
         return false;
+    t->ready_class[t->num_commands] = rpc_ready_class_default(cmd);
     t->commands[t->num_commands++] = *cmd;
     return true;
 }
@@ -139,6 +147,16 @@ const struct rpc_command *rpc_table_find(const struct rpc_table *t,
     return NULL;
 }
 
+bool rpc_table_set_ready_class(struct rpc_table *t, const char *name,
+                               enum rpc_ready_class cls)
+{
+    const struct rpc_command *cmd = rpc_table_find(t, name);
+    if (!cmd)
+        return false;
+    t->ready_class[cmd - t->commands] = cls;
+    return true;
+}
+
 bool rpc_table_execute(const struct rpc_table *t, const char *method,
                        const struct json_value *params,
                        struct json_value *result)
@@ -152,6 +170,12 @@ bool rpc_table_execute(const struct rpc_table *t, const char *method,
     if (!cmd) {
         json_rpc_error_full(result, RPC_METHOD_NOT_FOUND,
                             "Method not found", method);
+        return false;
+    }
+    enum rpc_ready_class cls = t->ready_class[cmd - t->commands];
+    if (!rpc_ready_is(cls)) {
+        json_rpc_error_full(result, RPC_IN_WARMUP,
+                            rpc_ready_reason(cls), method);
         return false;
     }
     return cmd->actor(params, false, result);
@@ -177,6 +201,7 @@ void set_rpc_warmup_started(const char *status)
     ensure_warmup_mutex();
     zcl_mutex_lock(&cs_warmup);
     rpc_in_warmup = true;
+    rpc_ready_clear_all();
     snprintf(warmup_status, sizeof(warmup_status), "%s",
              (status && status[0]) ? status : "RPC server starting");
     zcl_mutex_unlock(&cs_warmup);
@@ -186,6 +211,7 @@ void set_rpc_warmup_finished(void)
 {
     ensure_warmup_mutex();
     zcl_mutex_lock(&cs_warmup);
+    rpc_ready_set_all();
     rpc_in_warmup = false;
     zcl_mutex_unlock(&cs_warmup);
 }
@@ -214,4 +240,72 @@ void value_from_amount(CAmount amount, struct json_value *out)
              sign ? "-" : "", quotient, remainder);
     json_init(out);
     json_set_str(out, buf);
+}
+
+/* ── Per-class readiness ─────────────────────────────────────────── */
+
+static const char *const class_reason[RPC_READY_CLASS_COUNT] = {
+    [RPC_READY_UNCLASSIFIED] = "node loading",
+    [RPC_READY_CHAIN] = "chain loading",
+    [RPC_READY_WALLET] = "wallet loading",
+    [RPC_READY_PROJECTION] = "projections loading",
+};
+
+void rpc_ready_set(enum rpc_ready_class cls, bool ready)
+{
+    if (cls <= RPC_READY_UNCLASSIFIED || cls >= RPC_READY_CLASS_COUNT)
+        return;
+    atomic_store(&class_ready[cls], ready);
+}
+
+bool rpc_ready_is(enum rpc_ready_class cls)
+{
+    if (cls > RPC_READY_UNCLASSIFIED && cls < RPC_READY_CLASS_COUNT)
+        return atomic_load(&class_ready[cls]);
+    /* UNCLASSIFIED (and any out-of-range value) is the strictest class. */
+    for (int c = RPC_READY_UNCLASSIFIED + 1; c < RPC_READY_CLASS_COUNT; c++)
+        if (!atomic_load(&class_ready[c]))
+            return false;
+    return true;
+}
+
+const char *rpc_ready_reason(enum rpc_ready_class cls)
+{
+    if (cls < RPC_READY_UNCLASSIFIED || cls >= RPC_READY_CLASS_COUNT)
+        cls = RPC_READY_UNCLASSIFIED;
+    return class_reason[cls];
+}
+
+static void rpc_ready_set_all_to(bool ready)
+{
+    for (int c = RPC_READY_UNCLASSIFIED + 1; c < RPC_READY_CLASS_COUNT; c++)
+        atomic_store(&class_ready[c], ready);
+}
+
+static void rpc_ready_set_all(void) { rpc_ready_set_all_to(true); }
+static void rpc_ready_clear_all(void) { rpc_ready_set_all_to(false); }
+
+static bool category_is(const struct rpc_command *cmd, const char *cat)
+{
+    return cmd->category && strcmp(cmd->category, cat) == 0;
+}
+
+enum rpc_ready_class rpc_ready_class_default(const struct rpc_command *cmd)
+{
+    static const char *const chain_cats[] = {
+        "control", "blockchain", "network", "mining", "rawtransactions", "util",
+    };
+    if (!cmd)
+        return RPC_READY_UNCLASSIFIED;
+    if (category_is(cmd, "wallet"))
+        return RPC_READY_WALLET;
+    /* Projection readers: explorer and address-index queries. */
+    if (category_is(cmd, "explorer") ||
+        (cmd->name && strncmp(cmd->name, "getaddress", 10) == 0 &&
+         strcmp(cmd->name, "getaddressesbylabel") != 0))
+        return RPC_READY_PROJECTION;
+    for (size_t i = 0; i < sizeof(chain_cats) / sizeof(chain_cats[0]); i++)
+        if (category_is(cmd, chain_cats[i]))
+            return RPC_READY_CHAIN;
+    return RPC_READY_UNCLASSIFIED;
 }
