@@ -268,89 +268,10 @@ static bool patch_rewrites_in_place(const char *patch, const char *id)
     return p_end && p_end[1] == ' ';
 }
 
-static int case_decisions(void)
+static int check_applied_decisions(const char *vpath, const char *lpath,
+                                   const char *dir, const char *ppath)
 {
     int failures = 0;
-    char tmpl[PATH_MAX];
-    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_engine_rules");
-    ER_CHECK("a temp state directory", dir != NULL);
-    if (!dir) return failures;
-
-    char vpath[512], lpath[512], ppath[512];
-    (void)snprintf(vpath, sizeof vpath, "%s/rule_vocab.def", dir);
-    (void)snprintf(lpath, sizeof lpath, "%s/%s", dir, ZCL_RULE_CHAINLOG_NAME);
-    (void)snprintf(ppath, sizeof ppath, "%s/%s/grok_cand.patch", dir,
-                   ZCL_RULE_PROMOTIONS_DIR);
-
-    size_t len = 0;
-    char *log = fx_chainlog(0, &len);
-    bool wrote = log &&
-        fx_write(vpath, k_fixture_vocab, sizeof k_fixture_vocab - 1) &&
-        fx_write(lpath, log, len);
-    ER_CHECK("the fixture vocabulary and log are on disk", wrote);
-    if (!wrote) { free(log); return failures; }
-
-    /* ---- a read-only run decides nothing on disk ---- */
-    struct zcl_rule_run dry;
-    bool ran = zcl_rule_score_run(vpath, lpath, dir, false, &dry);
-    ER_CHECK("a read-only scoring runs", ran && dry.vocab_ok && dry.log_ok);
-    ER_CHECK("it wrote no retirement", dry.retired_written == 0);
-    ER_CHECK("it wrote no patch", dry.patches_written == 0);
-
-    const struct zcl_rule_score *good = NULL, *bad = NULL, *early = NULL,
-                                *cand = NULL, *never = NULL;
-    for (uint32_t i = 0; i < dry.scoring.rule_count; i++) {
-        const struct zcl_rule_score *s = &dry.scoring.rule[i];
-        if (strcmp(s->id, "grok:good") == 0) good = s;
-        else if (strcmp(s->id, "grok:bad") == 0) bad = s;
-        else if (strcmp(s->id, "grok:early") == 0) early = s;
-        else if (strcmp(s->id, "grok:cand") == 0) cand = s;
-        else if (strcmp(s->id, "grok:never") == 0) never = s;
-    }
-    ER_CHECK("every fixture rule is scored",
-             good && bad && early && cand && never &&
-             dry.scoring.rule_count == 5u);
-    if (!good || !bad || !early || !cand || !never) { free(log); return failures; }
-
-    ER_CHECK("the winning rule has 30 trials and 28 passes",
-             good->trials == 30u && good->passes == 28u);
-    ER_CHECK("and it holds", good->verdict == ZCL_RULE_VERDICT_HOLD);
-
-    ER_CHECK("the losing rule has 20 trials and 0 passes",
-             bad->trials == 20u && bad->passes == 0u);
-    ER_CHECK("shown on 20 failures and no passes, it is retired",
-             bad->verdict == ZCL_RULE_VERDICT_RETIRE);
-    ER_CHECK("and the receipts that killed it are named",
-             bad->killer_count > 0 && bad->killer_total == 20u &&
-             strcmp(bad->killer[0], "u030") == 0);
-
-    /* THE MIN-TRIALS GATE. Twenty straight losses, one run short of the
-     * declared minimum: the floor must not decide yet. */
-    ER_CHECK("the too-early rule has the same 20 losses",
-             early->trials == 20u && early->passes == 0u);
-    ER_CHECK("and a floor short of its min_trials decides nothing",
-             early->verdict == ZCL_RULE_VERDICT_INSUFFICIENT);
-    ER_CHECK("so exactly one retirement is pending, not two",
-             dry.scoring.retire_count == 1u);
-
-    ER_CHECK("a rule no receipt ever showed has no trials",
-             never->trials == 0u);
-    ER_CHECK("and it is untried, not failing",
-             never->verdict == ZCL_RULE_VERDICT_UNTRIED);
-    ER_CHECK("and it stays shadow", never->state == ZCL_RULE_SHADOW);
-
-    ER_CHECK("the measured shadow rule beats the obeyed baseline",
-             cand->verdict == ZCL_RULE_VERDICT_PROMOTABLE);
-
-    /* ---- the same log twice is the same bytes ---- */
-    struct zcl_rule_run again;
-    (void)zcl_rule_score_run(vpath, lpath, dir, false, &again);
-    char r1[16384], r2[16384];
-    size_t n1 = zcl_rule_report_render(&dry.scoring, r1, sizeof r1);
-    size_t n2 = zcl_rule_report_render(&again.scoring, r2, sizeof r2);
-    ER_CHECK("scoring the same log twice renders identical bytes",
-             n1 > 0 && n1 == n2 && memcmp(r1, r2, n1) == 0);
-
     /* ---- now let it apply ---- */
     struct zcl_rule_run wet;
     (void)zcl_rule_score_run(vpath, lpath, dir, true, &wet);
@@ -440,6 +361,125 @@ static int case_decisions(void)
         free(final_def);
     }
 
+    return failures;
+}
+
+static int check_decision_verdicts(const struct zcl_rule_score *good,
+                                   const struct zcl_rule_score *bad,
+                                   const struct zcl_rule_score *early)
+{
+    int failures = 0;
+    ER_CHECK("the winning rule has 30 trials and 28 passes",
+             good->trials == 30u && good->passes == 28u);
+    ER_CHECK("and it holds", good->verdict == ZCL_RULE_VERDICT_HOLD);
+
+    ER_CHECK("the losing rule has 20 trials and 0 passes",
+             bad->trials == 20u && bad->passes == 0u);
+    ER_CHECK("shown on 20 failures and no passes, it is retired",
+             bad->verdict == ZCL_RULE_VERDICT_RETIRE);
+    ER_CHECK("and the receipts that killed it are named",
+             bad->killer_count > 0 && bad->killer_total == 20u &&
+             strcmp(bad->killer[0], "u030") == 0);
+
+    /* THE MIN-TRIALS GATE. Twenty straight losses, one run short of the
+     * declared minimum: the floor must not decide yet. */
+    ER_CHECK("the too-early rule has the same 20 losses",
+             early->trials == 20u && early->passes == 0u);
+    ER_CHECK("and a floor short of its min_trials decides nothing",
+             early->verdict == ZCL_RULE_VERDICT_INSUFFICIENT);
+    return failures;
+}
+
+static void find_decision_scores(const struct zcl_rule_run *dry,
+                                  const struct zcl_rule_score **good,
+                                  const struct zcl_rule_score **bad,
+                                  const struct zcl_rule_score **early,
+                                  const struct zcl_rule_score **cand,
+                                  const struct zcl_rule_score **never)
+{
+    for (uint32_t i = 0; i < dry->scoring.rule_count; i++) {
+        const struct zcl_rule_score *s = &dry->scoring.rule[i];
+        if (strcmp(s->id, "grok:good") == 0) *good = s;
+        else if (strcmp(s->id, "grok:bad") == 0) *bad = s;
+        else if (strcmp(s->id, "grok:early") == 0) *early = s;
+        else if (strcmp(s->id, "grok:cand") == 0) *cand = s;
+        else if (strcmp(s->id, "grok:never") == 0) *never = s;
+    }
+}
+
+static bool decision_scores_missing(const struct zcl_rule_score *good,
+                                    const struct zcl_rule_score *bad,
+                                    const struct zcl_rule_score *early,
+                                    const struct zcl_rule_score *cand,
+                                    const struct zcl_rule_score *never)
+{
+    return !good || !bad || !early || !cand || !never;
+}
+
+static int case_decisions(void)
+{
+    int failures = 0;
+    char tmpl[PATH_MAX];
+    char *dir = test_mkdtemp(tmpl, sizeof(tmpl), "zcl_engine_rules");
+    ER_CHECK("a temp state directory", dir != NULL);
+    if (!dir) return failures;
+
+    char vpath[512], lpath[512], ppath[512];
+    (void)snprintf(vpath, sizeof vpath, "%s/rule_vocab.def", dir);
+    (void)snprintf(lpath, sizeof lpath, "%s/%s", dir, ZCL_RULE_CHAINLOG_NAME);
+    (void)snprintf(ppath, sizeof ppath, "%s/%s/grok_cand.patch", dir,
+                   ZCL_RULE_PROMOTIONS_DIR);
+
+    size_t len = 0;
+    char *log = fx_chainlog(0, &len);
+    bool wrote = log &&
+        fx_write(vpath, k_fixture_vocab, sizeof k_fixture_vocab - 1) &&
+        fx_write(lpath, log, len);
+    ER_CHECK("the fixture vocabulary and log are on disk", wrote);
+    if (!wrote) { free(log); return failures; }
+
+    /* ---- a read-only run decides nothing on disk ---- */
+    struct zcl_rule_run dry;
+    bool ran = zcl_rule_score_run(vpath, lpath, dir, false, &dry);
+    ER_CHECK("a read-only scoring runs", ran && dry.vocab_ok && dry.log_ok);
+    ER_CHECK("it wrote no retirement", dry.retired_written == 0);
+    ER_CHECK("it wrote no patch", dry.patches_written == 0);
+
+    const struct zcl_rule_score *good = NULL, *bad = NULL, *early = NULL,
+                                *cand = NULL, *never = NULL;
+    find_decision_scores(&dry, &good, &bad, &early, &cand, &never);
+    ER_CHECK("every fixture rule is scored",
+             good && bad && early && cand && never &&
+             dry.scoring.rule_count == 5u);
+    if (decision_scores_missing(good, bad, early, cand, never)) {
+        free(log);
+        return failures;
+    }
+
+    failures += check_decision_verdicts(good, bad, early);
+    ER_CHECK("so exactly one retirement is pending, not two",
+             dry.scoring.retire_count == 1u);
+
+    ER_CHECK("a rule no receipt ever showed has no trials",
+             never->trials == 0u);
+    ER_CHECK("and it is untried, not failing",
+             never->verdict == ZCL_RULE_VERDICT_UNTRIED);
+    ER_CHECK("and it stays shadow", never->state == ZCL_RULE_SHADOW);
+
+    ER_CHECK("the measured shadow rule beats the obeyed baseline",
+             cand->verdict == ZCL_RULE_VERDICT_PROMOTABLE);
+
+    /* ---- the same log twice is the same bytes ---- */
+    struct zcl_rule_run again;
+    (void)zcl_rule_score_run(vpath, lpath, dir, false, &again);
+    char r1[16384], r2[16384];
+    size_t n1 = zcl_rule_report_render(&dry.scoring, r1, sizeof r1);
+    size_t n2 = zcl_rule_report_render(&again.scoring, r2, sizeof r2);
+    ER_CHECK("scoring the same log twice renders identical bytes",
+             n1 > 0 && n1 == n2 && memcmp(r1, r2, n1) == 0);
+
+    failures += check_applied_decisions(vpath, lpath, dir, ppath);
+
     free(log);
     return failures;
 }
@@ -455,6 +495,35 @@ static const char k_fixture_diff[] =
 "@@ -10,6 +10,7 @@\n"
 "     if (groups_ran == 0)\n"
 "+        return ENGINE_VERDICT_UNOBSERVED;\n";
+
+static int check_miner_trio(void)
+{
+    int failures = 0;
+    /* Three receipts, one task: pass, fail, pass. The first failure
+     * pairs with the first later pass, leaving exactly one pair. */
+    struct zcl_rule_receipt_log *trio = calloc(1, sizeof *trio);
+    ER_CHECK("the pass-fail-pass trio log allocates", trio != NULL);
+    if (trio) {
+        char task[65];
+        fx_hex(task, 't', 777u);
+        for (int i = 0; i < 3; i++) {
+            struct zcl_rule_receipt *r = &trio->r[i];
+            (void)snprintf(r->unit_id, sizeof r->unit_id, "u50%d", i);
+            memcpy(r->task_sha3, task, sizeof task);
+            r->gate_pass = (i != 1);
+            r->seq = (uint32_t)(i + 1);
+        }
+        trio->count = 3;
+        struct zcl_rule_mine_pair tp[4];
+        uint32_t tn = zcl_rule_mine_pairs(trio, tp, 4);
+        ER_CHECK("a pass before the fail does not eat the pair", tn == 1u);
+        ER_CHECK("the pair is the first fail with the first later pass",
+                 tn == 1u && strcmp(tp[0].fail_unit, "u501") == 0 &&
+                 strcmp(tp[0].pass_unit, "u502") == 0);
+        free(trio);
+    }
+    return failures;
+}
 
 static int case_miner(void)
 {
@@ -531,29 +600,7 @@ static int case_miner(void)
                  !zcl_rule_mine_candidate(&pairs[0], "no files here\n", 14,
                                           &empty));
 
-        /* Three receipts, one task: pass, fail, pass. The first failure
-         * pairs with the first later pass, leaving exactly one pair. */
-        struct zcl_rule_receipt_log *trio = calloc(1, sizeof *trio);
-        ER_CHECK("the pass-fail-pass trio log allocates", trio != NULL);
-        if (trio) {
-            char task[65];
-            fx_hex(task, 't', 777u);
-            for (int i = 0; i < 3; i++) {
-                struct zcl_rule_receipt *r = &trio->r[i];
-                (void)snprintf(r->unit_id, sizeof r->unit_id, "u50%d", i);
-                memcpy(r->task_sha3, task, sizeof task);
-                r->gate_pass = (i != 1);
-                r->seq = (uint32_t)(i + 1);
-            }
-            trio->count = 3;
-            struct zcl_rule_mine_pair tp[4];
-            uint32_t tn = zcl_rule_mine_pairs(trio, tp, 4);
-            ER_CHECK("a pass before the fail does not eat the pair", tn == 1u);
-            ER_CHECK("the pair is the first fail with the first later pass",
-                     tn == 1u && strcmp(tp[0].fail_unit, "u501") == 0 &&
-                     strcmp(tp[0].pass_unit, "u502") == 0);
-            free(trio);
-        }
+        failures += check_miner_trio();
     }
     free(parsed);
     free(log);
