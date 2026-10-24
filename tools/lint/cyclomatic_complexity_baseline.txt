@@ -1855,7 +1855,7 @@ engine/services/src/block_index_integrity.c:block_index_repair_pprev:44
 engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_stages_from_cold_import:33
 engine/services/src/block_index_loader_rebuild.c:block_index_loader_seed_tip_from_finalized:33
 engine/services/src/block_index_loader_rebuild.c:load_block_index_from_projection:17
-engine/services/src/block_index_loader_topup.c:block_index_node_db_topup_with:40
+engine/services/src/block_index_loader_topup.c:block_index_node_db_topup_with:28
 engine/services/src/block_index_loader_topup.c:block_index_projection_topup_with:33
 engine/services/src/block_index_loader_topup.c:topup_row_cb:20
 engine/services/src/block_index_loader_torn_gate.c:block_index_loader_torn_import_detect:20

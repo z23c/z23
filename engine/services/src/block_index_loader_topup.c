@@ -798,6 +798,153 @@ static bool node_db_row_grants_data(const struct db_block *blk,
            !(bi->nStatus & BLOCK_HAVE_DATA);
 }
 
+/* Fold state for the node.db window top-up. */
+struct nodedb_fold {
+    struct main_state *ms;
+    struct node_db *ndb;
+    size_t inserted, data_applied, ntx_applied, valid_raised;
+    struct topup_undo_tally undo;
+    size_t height_conflicts, missing_rows;
+    size_t rows_seen;
+    /* Inserted entries, height-ASC by construction (we visit ascending),
+     * collected for the bounded chainwork + skip pass. */
+    struct block_index **new_entries;
+    size_t new_count, new_cap;
+};
+
+#ifdef ZCL_TESTING
+/* Test oracle: when set, the window is read with one db_block_find_by_height
+ * per height (the pre-range-scan path) instead of the ordered range scan. */
+bool g_node_db_topup_perheight_oracle = false;
+#endif
+
+static bool node_db_fold_record_new(struct nodedb_fold *f,
+                                    struct block_index *bi)
+{
+    if (f->new_count == f->new_cap) {
+        size_t cap = f->new_cap ? f->new_cap * 2 : 256;
+        struct block_index **grown = zcl_realloc(
+            f->new_entries, cap * sizeof(*grown),
+            "node_db_topup.new_entries");
+        if (!grown)
+            LOG_FAIL("block_index",
+                     "node.db topup: realloc failed at %zu entries",
+                     f->new_count);
+        f->new_entries = grown;
+        f->new_cap = cap;
+    }
+    f->new_entries[f->new_count++] = bi;
+    return true;
+}
+
+/* Raise-only fold of one existing entry from its durable row. */
+static void node_db_fold_existing(struct nodedb_fold *f,
+                                  struct block_index *bi,
+                                  const struct db_block *blk)
+{
+    /* Data availability: apply HAVE_DATA + positions the entry lacks,
+     * gated on the row's own status bit — see node_db_row_grants_data. */
+    bool file_adopted = false;
+    if (node_db_row_grants_data(blk, bi)) {
+        file_adopted = bi->nFile != blk->file_num;
+        bi->nFile = blk->file_num;
+        bi->nDataPos = (unsigned int)blk->data_pos;
+        bi->nStatus |= BLOCK_HAVE_DATA;
+        f->data_applied++;
+    }
+    /* Undo availability, independent of HAVE_DATA — same defect and
+     * same fail-closed rules as the projection top-up above. The row
+     * claims undo through its STATUS bit, exactly like the projection
+     * site; file_num >= 0 is a separate sanity term on the address
+     * half, checked inside topup_apply_undo(). */
+    topup_undo_count(&f->undo,
+        topup_apply_undo(bi, file_adopted,
+                         ((unsigned int)blk->status & BLOCK_HAVE_UNDO) != 0,
+                         blk->file_num,
+                         topup_row_undo_pos(blk->undo_pos)));
+    /* nTx: raise from zero only. */
+    if (bi->nTx == 0 && blk->num_tx > 0) {
+        bi->nTx = (unsigned int)blk->num_tx;
+        f->ntx_applied++;
+    }
+    /* Validity level: raise-only, FAILED never copied. */
+    unsigned int cur_lvl = bi->nStatus & BLOCK_VALID_MASK;
+    unsigned int row_lvl = (unsigned int)blk->status & BLOCK_VALID_MASK;
+    if (row_lvl > cur_lvl) {
+        bi->nStatus = (bi->nStatus & ~BLOCK_VALID_MASK) | row_lvl;
+        f->valid_raised++;
+    }
+}
+
+/* Fold one durable row at height h. False only on a hard alloc failure. */
+static bool node_db_fold_row(struct nodedb_fold *f, int h,
+                             const struct db_block *blk)
+{
+    struct uint256 hh;
+    memcpy(hh.data, blk->hash, 32);
+
+    struct block_index *bi = block_map_find(&f->ms->map_block_index, &hh);
+    if (!bi) {
+        bi = chainstate_insert_block_index((struct chainstate *)f->ms, &hh);
+        if (!bi)
+            LOG_FAIL("block_index", "node.db topup: insert failed at h=%d", h);
+        node_db_topup_fill_new(bi, blk, h);
+        f->inserted++;
+        return node_db_fold_record_new(f, bi);
+    }
+
+    /* Same hash at a different recorded height: a label conflict. The
+     * loaded entry wins; surface it, never merge. */
+    if (bi->nHeight != h) {
+        if (f->height_conflicts < 3)
+            LOG_WARN("block_index",
+                     "node.db topup: blocks row height %d != loaded "
+                     "entry height %d for the same hash — refusing merge",
+                     h, bi->nHeight);
+        f->height_conflicts++;
+        return true;
+    }
+    node_db_fold_existing(f, bi, blk);
+    return true;
+}
+
+static bool node_db_fold_range_cb(int height, const struct db_block *row,
+                                  void *ctx)
+{
+    struct nodedb_fold *f = ctx;
+    f->rows_seen++;
+    return node_db_fold_row(f, height, row);
+}
+
+/* Read [lo..hi] from node.db `blocks` and fold it. A height with no
+ * connected row is counted in missing_rows (the window has a hole there). */
+static bool node_db_fold_window(struct nodedb_fold *f, int lo, int hi)
+{
+    const size_t span = (size_t)hi - (size_t)lo + 1;
+#ifdef ZCL_TESTING
+    if (g_node_db_topup_perheight_oracle) {
+        for (int h = lo; h <= hi; h++) {
+            struct db_block blk;
+            if (!db_block_find_by_height(f->ndb, h, &blk)) {
+                f->missing_rows++;
+                continue;
+            }
+            if (!node_db_fold_row(f, h, &blk))
+                return false; // raw-return-ok:node_db_fold_row logs its own failure
+        }
+        return true;
+    }
+#endif
+    if (!db_block_scan_height_range(f->ndb, lo, hi, node_db_fold_range_cb, f)) {
+        /* A callback abort already logged its own failure; a read error
+         * (prepare/step) is reported here. Either way the fold stops. */
+        LOG_FAIL("block_index", "node.db topup: window scan %d..%d failed",
+                 lo, hi);
+    }
+    f->missing_rows = span - f->rows_seen;
+    return true;
+}
+
 bool block_index_node_db_topup_with(struct main_state *ms,
                                     struct node_db *ndb,
                                     struct sqlite3 *progress_db,
@@ -876,101 +1023,22 @@ bool block_index_node_db_topup_with(struct main_state *ms,
      *     raise nTx + the BLOCK_VALID level. db_block_find_by_height filters
      *     status>=3 so a row is body-backed/connected; a missing/non-connected
      *     height is skipped (the window simply has a hole there). */
-    size_t inserted = 0, data_applied = 0, ntx_applied = 0, valid_raised = 0;
-    struct topup_undo_tally undo;
-    memset(&undo, 0, sizeof(undo));
-    size_t height_conflicts = 0, missing_rows = 0;
-
-    /* Inserted entries, height-ASC by construction (we iterate ascending),
-     * collected for the bounded chainwork + skip pass. */
-    struct block_index **new_entries = NULL;
-    size_t new_count = 0, new_cap = 0;
-
-    for (int h = lo; h <= coins_best; h++) {
-        struct db_block blk;
-        if (!db_block_find_by_height(ndb, h, &blk)) {
-            missing_rows++;
-            continue;
-        }
-        struct uint256 hh;
-        memcpy(hh.data, blk.hash, 32);
-
-        struct block_index *bi = block_map_find(&ms->map_block_index, &hh);
-        if (!bi) {
-            bi = chainstate_insert_block_index((struct chainstate *)ms, &hh);
-            if (!bi) {
-                free(new_entries);
-                LOG_FAIL("block_index",
-                         "node.db topup: insert failed at h=%d", h);
-            }
-            node_db_topup_fill_new(bi, &blk, h);
-            inserted++;
-            if (new_count == new_cap) {
-                size_t cap = new_cap ? new_cap * 2 : 256;
-                struct block_index **grown = zcl_realloc(
-                    new_entries, cap * sizeof(*grown),
-                    "node_db_topup.new_entries");
-                if (!grown) {
-                    free(new_entries);
-                    LOG_FAIL("block_index",
-                             "node.db topup: realloc failed at %zu entries",
-                             new_count);
-                }
-                new_entries = grown;
-                new_cap = cap;
-            }
-            new_entries[new_count++] = bi;
-            continue;
-        }
-
-        /* Same hash at a different recorded height: a label conflict. The
-         * loaded entry wins; surface it, never merge. */
-        if (bi->nHeight != h) {
-            if (height_conflicts < 3)
-                LOG_WARN("block_index",
-                         "node.db topup: blocks row height %d != loaded "
-                         "entry height %d for the same hash — refusing merge",
-                         h, bi->nHeight);
-            height_conflicts++;
-            continue;
-        }
-
-        /* Data availability: apply HAVE_DATA + positions the entry lacks,
-         * gated on the row's own status bit — see node_db_row_grants_data. */
-        bool file_adopted = false;
-        if (node_db_row_grants_data(&blk, bi)) {
-            file_adopted = bi->nFile != blk.file_num;
-            bi->nFile = blk.file_num;
-            bi->nDataPos = (unsigned int)blk.data_pos;
-            bi->nStatus |= BLOCK_HAVE_DATA;
-            data_applied++;
-        }
-        /* Undo availability, independent of HAVE_DATA — same defect and
-         * same fail-closed rules as the projection top-up above. The row
-         * claims undo through its STATUS bit, exactly like the projection
-         * site; file_num >= 0 is a separate sanity term on the address
-         * half, checked inside topup_apply_undo(). */
-        topup_undo_count(&undo,
-            topup_apply_undo(bi, file_adopted,
-                             ((unsigned int)blk.status & BLOCK_HAVE_UNDO) != 0,
-                             blk.file_num,
-                             topup_row_undo_pos(blk.undo_pos)));
-        /* nTx: raise from zero only. */
-        if (bi->nTx == 0 && blk.num_tx > 0) {
-            bi->nTx = (unsigned int)blk.num_tx;
-            ntx_applied++;
-        }
-        /* Validity level: raise-only, FAILED never copied. */
-        {
-            unsigned int cur_lvl = bi->nStatus & BLOCK_VALID_MASK;
-            unsigned int row_lvl =
-                (unsigned int)blk.status & BLOCK_VALID_MASK;
-            if (row_lvl > cur_lvl) {
-                bi->nStatus = (bi->nStatus & ~BLOCK_VALID_MASK) | row_lvl;
-                valid_raised++;
-            }
-        }
+    struct nodedb_fold fold;
+    memset(&fold, 0, sizeof(fold));
+    fold.ms = ms;
+    fold.ndb = ndb;
+    if (!node_db_fold_window(&fold, lo, coins_best)) {
+        free(fold.new_entries);
+        return false;
     }
+    struct block_index **new_entries = fold.new_entries;
+    const size_t new_count = fold.new_count;
+    const size_t inserted = fold.inserted, data_applied = fold.data_applied,
+                 ntx_applied = fold.ntx_applied,
+                 valid_raised = fold.valid_raised;
+    const struct topup_undo_tally undo = fold.undo;
+    const size_t height_conflicts = fold.height_conflicts,
+                 missing_rows = fold.missing_rows;
 
     /* (4) Second pass: link pprev for inserted entries (height ASC, so a
      *     parent inserted this run is already in the map), then compute

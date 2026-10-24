@@ -433,6 +433,54 @@ bool db_block_find_by_height(struct node_db *ndb, int height,
     return true;
 }
 
+/* One ordered pass over the connected rows in [lo, hi]. Row-for-row the same
+ * as calling db_block_find_by_height() for each height: same column list,
+ * same status>=3 filter. The tie-break is trivially identical because
+ * idx_blocks_height is UNIQUE over (height) WHERE status>=3, so at most one
+ * row per height qualifies; should a damaged db ever hold two, the first in
+ * rowid order wins (as LIMIT 1 does) and the repeat is skipped. Heights with
+ * no qualifying row are simply not visited. `cb` returns false to abort. */
+bool db_block_scan_height_range(struct node_db *ndb, int lo, int hi,
+                                db_block_range_cb cb, void *ctx)
+{
+    if (!ndb || !ndb->open || !cb || lo > hi)
+        return false;
+    sqlite3_stmt *s = NULL;
+    AR_PREPARE_RET(ndb, s,
+        "SELECT height,hash,prev_hash,version,merkle_root,"
+        "time,bits,nonce,solution,chain_work,status,"
+        "file_num,data_pos,undo_pos,num_tx,"
+        "sapling_root,sprout_root,"
+        "sapling_value,sprout_value"
+        " FROM blocks WHERE height BETWEEN ? AND ?"
+        " AND status>=3 ORDER BY height, rowid",
+        false);
+    AR_BIND_INT(s, 1, lo);
+    AR_BIND_INT(s, 2, hi);
+    bool ok = true;
+    int last_height = lo - 1;
+    while (AR_STEP_ROW(s)) {
+        int height = (int)AR_COL_INT(s, 0);
+        if (height == last_height)
+            continue;
+        last_height = height;
+        struct db_block row;
+        memset(&row, 0, sizeof(row));
+        row.height = height;
+        AR_READ_BLOB(s, 1, row.hash, 32);
+        read_block_cols(s, 2, &row);
+        if (!cb(height, &row, ctx)) {
+            ok = false;
+            break;
+        }
+    }
+    int ec = sqlite3_errcode(ndb->db); /* a failed step leaves its code here */
+    if (ok && ec != SQLITE_OK && ec != SQLITE_DONE && ec != SQLITE_ROW)
+        ok = false;
+    AR_FINALIZE(s);
+    return ok;
+}
+
 /* ── Solution accessor ─────────────────────────────────────────── */
 
 /* Materialise the Equihash solution BLOB for a connected block.

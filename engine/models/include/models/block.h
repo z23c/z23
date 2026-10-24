@@ -48,6 +48,16 @@ bool db_block_find_by_hash(struct node_db *ndb, const uint8_t hash[32],
 bool db_block_find_by_height(struct node_db *ndb, int height,
                              struct db_block *out);
 
+/* Visit every connected (status>=3) row with height in [lo, hi] in ascending
+ * height order with ONE prepared statement. Rows are the same rows
+ * db_block_find_by_height() returns per height; heights with no row are not
+ * visited. `cb` returns false to stop. Returns false on a prepare/step error
+ * or when `cb` stopped the scan. */
+typedef bool (*db_block_range_cb)(int height, const struct db_block *row,
+                                  void *ctx);
+bool db_block_scan_height_range(struct node_db *ndb, int lo, int hi,
+                                db_block_range_cb cb, void *ctx);
+
 /* Load just the Equihash solution BLOB for a connected (status>=3) block
  * at `height` into `out` (up to `max` bytes), setting *out_len. The full
  * read helpers above deliberately drop the solution bytes (only the

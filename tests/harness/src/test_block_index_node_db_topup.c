@@ -47,6 +47,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <time.h>
 #include <unistd.h>
 
 #define NDT_CHECK(name, expr) do { \
@@ -61,6 +63,7 @@ static void ndt_hash_for(int h, struct uint256 *out)
     memset(out->data, 0, 32);
     out->data[0] = (uint8_t)(h & 0xFF);
     out->data[1] = (uint8_t)((h >> 8) & 0xFF);
+    out->data[2] = (uint8_t)((h >> 16) & 0xFF);
     out->data[31] = 0xA5;
 }
 
@@ -290,6 +293,245 @@ static int ndt_undo_topup_cases(const char *dir)
     return failures;
 }
 
+/* ── Range scan == per-height lookup (equivalence + timing) ───────────────
+ * One fixture window of >=100k heights with holes, forks (a second,
+ * non-connected row at the same height with another hash, written before or
+ * after the connected one), rows with/without HAVE_DATA/HAVE_UNDO, undo
+ * offsets, num_tx 0/non-0, and pre-existing map entries (raise-only and
+ * height-conflict shapes). The top-up runs once with the per-height oracle
+ * and once with the ordered range scan on identical maps; the resulting maps
+ * and the printed counter line must be identical. */
+#define NDT_RANGE_SEED 1000
+#define NDT_RANGE_BEST 101200
+
+static int64_t ndt_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+static bool ndt_range_row(struct node_db *ndb, int h, bool fork)
+{
+    static uint8_t sol[1] = {0};
+    struct db_block b;
+    memset(&b, 0, sizeof(b));
+    struct uint256 hh, ph;
+    ndt_hash_for(h, &hh);
+    ndt_hash_for(h - 1, &ph);
+    if (fork)
+        hh.data[5] = 0x77;
+    memcpy(b.hash, hh.data, 32);
+    memcpy(b.prev_hash, ph.data, 32);
+    b.height = h;
+    b.version = 4;
+    memset(b.merkle_root, 0x11 + (h & 7), 32);
+    b.time = 1700000000u + (uint32_t)h;
+    b.bits = 0x2000ffffu;
+    memset(b.nonce, 0x22, 32);
+    b.solution = sol;
+    b.solution_len = sizeof(sol);
+    b.status = fork ? 2 : (3 | ((h % 2) ? BLOCK_HAVE_DATA : 0) |
+                           ((h % 3 == 0) ? BLOCK_HAVE_UNDO : 0));
+    b.file_num = h % 5;
+    b.data_pos = 1000 + h;
+    b.undo_pos = (h % 5) ? 2000 + h : 0;
+    b.num_tx = (h % 4 == 0) ? 0 : 2;
+    b.sapling_value = h % 9;
+    b.sprout_value = (h % 6 == 0) ? 5 : 0;
+    return db_block_save(ndb, &b);
+}
+
+static bool ndt_range_build_db(struct node_db *ndb)
+{
+    bool ok = sqlite3_exec(ndb->db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
+    for (int h = NDT_RANGE_SEED; ok && h <= NDT_RANGE_BEST + 5; h++) {
+        bool fork = (h % 53 == 0);
+        if (fork && (h % 2))
+            ok &= ndt_range_row(ndb, h, true);       /* stale row first  */
+        if (h % 97 != 0 || h == NDT_RANGE_SEED)       /* holes            */
+            ok &= ndt_range_row(ndb, h, false);
+        if (fork && !(h % 2))
+            ok &= ndt_range_row(ndb, h, true);       /* stale row after  */
+    }
+    ok &= sqlite3_exec(ndb->db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+    struct uint256 sh;
+    ndt_hash_for(NDT_RANGE_SEED, &sh);
+    ok &= node_db_state_set_int(ndb, "cold_import_seed_anchor_height",
+                                NDT_RANGE_SEED);
+    ok &= node_db_state_set(ndb, "cold_import_seed_anchor_hash", sh.data, 32);
+    return ok;
+}
+
+static bool ndt_range_fill_map(struct main_state *ms)
+{
+    bool ok = ndt_insert_entry(ms, NDT_RANGE_SEED) != NULL;
+    for (int h = NDT_RANGE_SEED + 1; ok && h <= NDT_RANGE_BEST; h++) {
+        if (h % 13 == 0) {
+            struct block_index *bi = ndt_insert_entry(ms, h);
+            ok = bi != NULL;
+            if (ok && h % 2 == 0) {
+                bi->nStatus |= BLOCK_HAVE_DATA;
+                bi->nFile = 3;
+                bi->nDataPos = 9u;
+                bi->nTx = 1;
+            }
+            if (ok && h % 39 == 0)
+                bi->nUndoPos = 7u, bi->nStatus |= BLOCK_HAVE_UNDO;
+        }
+        if (ok && h % 1009 == 0) {              /* height-label conflict */
+            struct block_index *bi = ndt_insert_entry(ms, h);
+            ok = bi != NULL;
+            if (ok)
+                bi->nHeight = h + 1;
+        }
+    }
+    return ok;
+}
+
+/* Run one top-up with stdout captured; copy the counter line into `line`. */
+static bool ndt_range_run(struct main_state *ms, struct node_db *ndb,
+                          sqlite3 *progress, const char *dir, bool oracle,
+                          char *line, size_t line_cap, int64_t *ms_out)
+{
+    char path[320];
+    snprintf(path, sizeof(path), "%s/stdout_capture.txt", dir);
+    fflush(stdout);
+    int saved = dup(1);
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (saved < 0 || fd < 0)
+        return false;
+    dup2(fd, 1);
+    close(fd);
+    g_node_db_topup_perheight_oracle = oracle;
+    int64_t t0 = ndt_now_ms();
+    bool ok = block_index_node_db_topup_with(ms, ndb, progress, dir);
+    *ms_out = ndt_now_ms() - t0;
+    g_node_db_topup_perheight_oracle = false;
+    fflush(stdout);
+    dup2(saved, 1);
+    close(saved);
+    line[0] = '\0';
+    FILE *fp = fopen(path, "r");
+    if (fp) {
+        while (fgets(line, (int)line_cap, fp) &&
+               !strstr(line, "node.db top-up"))
+            line[0] = '\0';
+        fclose(fp);
+    }
+    return ok;
+}
+
+static bool ndt_entries_equal(const struct block_index *a,
+                              const struct block_index *b)
+{
+    return a->nHeight == b->nHeight && a->nStatus == b->nStatus &&
+           a->nFile == b->nFile && a->nDataPos == b->nDataPos &&
+           a->nUndoPos == b->nUndoPos && a->nTx == b->nTx &&
+           a->nVersion == b->nVersion && a->nTime == b->nTime &&
+           a->nSaplingValue == b->nSaplingValue &&
+           a->nSproutValue == b->nSproutValue &&
+           a->has_sprout_value == b->has_sprout_value &&
+           memcmp(&a->nChainWork, &b->nChainWork, sizeof(a->nChainWork)) == 0 &&
+           (a->pprev == NULL) == (b->pprev == NULL) &&
+           (!a->pprev || a->pprev->nHeight == b->pprev->nHeight);
+}
+
+struct ndt_range_diff {
+    size_t diffs, compared, fork_hits;
+};
+
+static struct ndt_range_diff ndt_range_compare(struct main_state *a,
+                                               struct main_state *b)
+{
+    struct ndt_range_diff d = {0, 0, 0};
+    for (int h = NDT_RANGE_SEED; h <= NDT_RANGE_BEST + 5; h++) {
+        struct uint256 hh, fh;
+        ndt_hash_for(h, &hh);
+        fh = hh;
+        fh.data[5] = 0x77;
+        struct block_index *x = block_map_find(&a->map_block_index, &hh);
+        struct block_index *y = block_map_find(&b->map_block_index, &hh);
+        if ((x == NULL) != (y == NULL) || (x && !ndt_entries_equal(x, y)))
+            d.diffs++;
+        if (block_map_find(&b->map_block_index, &fh))
+            d.fork_hits++;
+        d.compared++;
+    }
+    return d;
+}
+
+static int ndt_range_equivalence_cases(const char *dir)
+{
+    int failures = 0;
+    char ndb_path[320], prog_path[320];
+    snprintf(ndb_path, sizeof(ndb_path), "%s/node_range.db", dir);
+    snprintf(prog_path, sizeof(prog_path), "%s/progress_range.db", dir);
+    struct node_db ndb;
+    memset(&ndb, 0, sizeof(ndb));
+    sqlite3 *progress = NULL;
+    bool ready = node_db_open(&ndb, ndb_path) &&
+                 sqlite3_open(prog_path, &progress) == SQLITE_OK &&
+                 ndt_range_build_db(&ndb) &&
+                 ndt_set_coins_best(progress, NDT_RANGE_BEST);
+    NDT_CHECK("range: fixture db built", ready);
+    struct main_state old_ms, new_ms;
+    main_state_init(&old_ms);
+    main_state_init(&new_ms);
+    if (ready)
+        ready = ndt_range_fill_map(&old_ms) && ndt_range_fill_map(&new_ms);
+    NDT_CHECK("range: maps seeded", ready);
+    if (ready) {
+        char old_line[1024], new_line[1024];
+        int64_t old_ms_t = 0, new_ms_t = 0;
+        bool a = ndt_range_run(&old_ms, &ndb, progress, dir, true,
+                               old_line, sizeof(old_line), &old_ms_t);
+        bool b = ndt_range_run(&new_ms, &ndb, progress, dir, false,
+                               new_line, sizeof(new_line), &new_ms_t);
+        NDT_CHECK("range: both paths return ok", a && b);
+        NDT_CHECK("range: counter line present", old_line[0] != '\0');
+        NDT_CHECK("range: counter lines identical",
+                  strcmp(old_line, new_line) == 0);
+        NDT_CHECK("range: map sizes identical",
+                  old_ms.map_block_index.size == new_ms.map_block_index.size);
+        struct ndt_range_diff d = ndt_range_compare(&old_ms, &new_ms);
+        const size_t diffs = d.diffs, compared = d.compared,
+                     fork_hits = d.fork_hits;
+        NDT_CHECK("range: >=100k heights compared", compared >= 100000);
+        NDT_CHECK("range: every entry identical (hash,height,status,file,"
+                  "pos,undo,nTx,chainwork,pprev)", diffs == 0);
+        NDT_CHECK("range: no stale fork row was ever adopted",
+                  fork_hits == 0);
+        struct uint256 above;
+        ndt_hash_for(NDT_RANGE_BEST + 1, &above);
+        NDT_CHECK("range: window above coins_best untouched",
+                  block_map_find(&new_ms.map_block_index, &above) == NULL);
+        printf("block_index_node_db_topup: range timing: heights=%d "
+               "per_height_ms=%lld range_ms=%lld\n",
+               NDT_RANGE_BEST - NDT_RANGE_SEED, (long long)old_ms_t,
+               (long long)new_ms_t);
+        /* Production shape: a warm boot re-folds a window already in the map
+         * (inserted=0), so the cost is the row reads alone. */
+        int64_t warm_old_ms = 0, warm_new_ms = 0;
+        char warm_old[1024], warm_new[1024];
+        bool wa = ndt_range_run(&new_ms, &ndb, progress, dir, true,
+                                warm_old, sizeof(warm_old), &warm_old_ms);
+        bool wb = ndt_range_run(&new_ms, &ndb, progress, dir, false,
+                                warm_new, sizeof(warm_new), &warm_new_ms);
+        NDT_CHECK("range: warm re-fold counter lines identical",
+                  wa && wb && strcmp(warm_old, warm_new) == 0);
+        printf("block_index_node_db_topup: range timing (warm, inserted=0): "
+               "per_height_ms=%lld range_ms=%lld\n",
+               (long long)warm_old_ms, (long long)warm_new_ms);
+    }
+    main_state_free(&old_ms);
+    main_state_free(&new_ms);
+    if (progress)
+        sqlite3_close(progress);
+    node_db_close(&ndb);
+    return failures;
+}
+
 int test_block_index_node_db_topup(void)
 {
     int failures = 0;
@@ -478,5 +720,6 @@ int test_block_index_node_db_topup(void)
 
     if (progress) sqlite3_close(progress);
     node_db_close(&ndb);
-    return failures + ndt_undo_topup_cases(dir);
+    return failures + ndt_undo_topup_cases(dir) +
+           ndt_range_equivalence_cases(dir);
 }

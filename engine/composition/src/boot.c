@@ -2023,6 +2023,7 @@ static void boot_step_load_block_index_ladder(struct app_context *ctx,
      * (E1 seam); the loader functions are unchanged. Per-rung fire
      * counters: `ops state --subsystem=block_index_load_rungs`. */
     boot_blkidx_run_ladder(&blkidx);
+    int64_t t_rest = boot_submark("blkidx.load_ladder", t_load);
     rebuilt_from_log = blkidx.rebuilt_from_log;
     /* If block index is much smaller than the chain, try loading
      * from zclassicd's LevelDB. This gives us 3M+ entries with
@@ -2032,12 +2033,14 @@ static void boot_step_load_block_index_ladder(struct app_context *ctx,
      * authority there, so no legacy LevelDB read is performed. */
     if (!rebuilt_from_log && !ctx->no_legacy_auto_import)
         boot_blkidx_pull_legacy_zclassicd(ctx, &g_state, &g_node_db);
+    t_rest = boot_submark("blkidx.legacy_pull", t_rest);
     /* Save recent blocks to SQLite (skip for large indexes —
      * the flat file handles 3M+ entries in 1-3s and the SQLite
      * cache path uses 10GB+ RAM causing OOM kills) */
     if (g_node_db.open && g_state.map_block_index.size > 1000
         && g_state.map_block_index.size < 500000)
         save_block_index_recent(&g_node_db, &g_state);
+    t_rest = boot_submark("blkidx.recent_save", t_rest);
     /* Ensure block files from zclassicd are available.
      * Hard-link (instant, same FS) or skip (cross-FS handled above).
      * This runs every boot to catch the case where block_index.bin
@@ -2061,6 +2064,7 @@ static void boot_step_load_block_index_ladder(struct app_context *ctx,
             printf("Linked %d block files from zclassicd\n",
                    link_files.linked);
     }
+    (void)boot_submark("blkidx.link_files", t_rest);
     boot_blkidx_run_topups(&blkidx, rebuilt_from_log, t_load);
     s->rebuilt_from_log = rebuilt_from_log;
 }
