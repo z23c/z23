@@ -285,27 +285,65 @@ struct zcl_result zcl_spawn_detached(const char *const argv[],
     return zcl_spawn_detached_input(argv, NULL, 0, log_path);
 }
 
-struct zcl_result zcl_spawn_detached_input(const char *const argv[],
-                                            const void *input,
-                                            size_t input_len,
-                                            const char *log_path)
+static void spawn_detached_child(const char *const argv[],
+                                 const char *log_path, int errpipe[2],
+                                 int input_pair[2])
 {
-    if (!argv || !argv[0])
-        return ZCL_ERR(-1, "zcl_spawn_detached_input: NULL/empty argv");
-    if ((!input && input_len != 0) || input_len > ZCL_SPAWN_INPUT_MAX)
-        return ZCL_ERR(-1,
-                       "zcl_spawn_detached_input: invalid input length %zu",
-                       input_len);
+    /* First child: become session leader (detach from any controlling
+     * tty), then fork the grandchild that actually execs. Only
+     * async-signal-safe calls from here to _exit()/exec(). */
+    close(errpipe[0]);
+    if (input_pair[0] >= 0) close(input_pair[0]);
+    setsid();
 
-    int input_pair[2] = { -1, -1 };
-    if (input || input_len > 0) {
-        if (socketpair(AF_UNIX, SOCK_STREAM, 0, input_pair) != 0)
-            return ZCL_ERR(-errno,
-                           "zcl_spawn_detached_input: socketpair() failed: %s",
-                           strerror(errno));
+    pid_t child2 = fork();
+    if (child2 < 0) {
+        int e = errno;
+        ssize_t written = write(errpipe[1], &e, sizeof(e));
+        (void)written;
+        _exit(127);
     }
+    if (child2 == 0) {
+        spawn_grandchild_exec(argv, log_path, errpipe[1], input_pair[1]);
+        /* unreachable */
+    }
+    /* Still child1: hand off immediately so the grandchild is
+     * reparented to init/subreaper without delay. Do not wait for
+     * it — that is the entire point of "detached". */
+    close(errpipe[1]);
+    if (input_pair[1] >= 0) close(input_pair[1]);
+    _exit(0);
+}
 
-    int errpipe[2];
+static struct zcl_result spawn_detached_deliver(
+    int input_pair[2], const void *input, size_t input_len)
+{
+    if (input_pair[0] >= 0) {
+        const unsigned char *bytes = input;
+        size_t sent = 0;
+        while (sent < input_len) {
+            ssize_t nw = send(input_pair[0], bytes + sent,
+                              input_len - sent, MSG_NOSIGNAL);
+            if (nw > 0) {
+                sent += (size_t)nw;
+                continue;
+            }
+            if (nw < 0 && errno == EINTR) continue;
+            int e = nw < 0 ? errno : EIO;
+            close(input_pair[0]);
+            return ZCL_ERR(-e,
+                           "zcl_spawn_detached_input: stdin delivery failed: %s",
+                           strerror(e));
+        }
+        (void)shutdown(input_pair[0], SHUT_WR);
+        close(input_pair[0]);
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result spawn_detached_errpipe(
+    int errpipe[2], int input_pair[2])
+{
     if (pipe(errpipe) != 0) {
         int e = errno;
         if (input_pair[0] >= 0) {
@@ -330,50 +368,12 @@ struct zcl_result zcl_spawn_detached_input(const char *const argv[],
                        strerror(e));
     }
 
-    pid_t child1 = fork();
-    if (child1 < 0) {
-        int e = errno;
-        close(errpipe[0]); close(errpipe[1]);
-        if (input_pair[0] >= 0) {
-            close(input_pair[0]);
-            close(input_pair[1]);
-        }
-        return ZCL_ERR(-e, "zcl_spawn_detached_input: fork() failed: %s",
-                       strerror(e));
-    }
+    return ZCL_OK;
+}
 
-    if (child1 == 0) {
-        /* First child: become session leader (detach from any controlling
-         * tty), then fork the grandchild that actually execs. Only
-         * async-signal-safe calls from here to _exit()/exec(). */
-        close(errpipe[0]);
-        if (input_pair[0] >= 0) close(input_pair[0]);
-        setsid();
-
-        pid_t child2 = fork();
-        if (child2 < 0) {
-            int e = errno;
-            ssize_t written = write(errpipe[1], &e, sizeof(e));
-            (void)written;
-            _exit(127);
-        }
-        if (child2 == 0) {
-            spawn_grandchild_exec(argv, log_path, errpipe[1], input_pair[1]);
-            /* unreachable */
-        }
-        /* Still child1: hand off immediately so the grandchild is
-         * reparented to init/subreaper without delay. Do not wait for
-         * it — that is the entire point of "detached". */
-        close(errpipe[1]);
-        if (input_pair[1] >= 0) close(input_pair[1]);
-        _exit(0);
-    }
-
-    /* Parent. */
-    spawn_count_launch();
-    close(errpipe[1]);   /* close our own copy, else read() below never sees EOF */
-    if (input_pair[1] >= 0) close(input_pair[1]);
-
+static struct zcl_result spawn_detached_handshake(
+    pid_t child1, const char *const argv[], int errpipe[2], int input_pair[2])
+{
     int status = 0;
     spawn_reap(child1, &status);   /* reap the intermediate child; ECHILD-tolerant */
 
@@ -399,27 +399,57 @@ struct zcl_result zcl_spawn_detached_input(const char *const argv[],
     }
     /* n == 0: EOF with no error bytes -> the grandchild's exec succeeded
      * (its CLOEXEC copy of the write end closed as part of exec()). */
-    if (input_pair[0] >= 0) {
-        const unsigned char *bytes = input;
-        size_t sent = 0;
-        while (sent < input_len) {
-            ssize_t nw = send(input_pair[0], bytes + sent,
-                              input_len - sent, MSG_NOSIGNAL);
-            if (nw > 0) {
-                sent += (size_t)nw;
-                continue;
-            }
-            if (nw < 0 && errno == EINTR) continue;
-            int e = nw < 0 ? errno : EIO;
-            close(input_pair[0]);
-            return ZCL_ERR(-e,
-                           "zcl_spawn_detached_input: stdin delivery failed: %s",
-                           strerror(e));
-        }
-        (void)shutdown(input_pair[0], SHUT_WR);
-        close(input_pair[0]);
-    }
     return ZCL_OK;
+}
+
+struct zcl_result zcl_spawn_detached_input(const char *const argv[],
+                                            const void *input,
+                                            size_t input_len,
+                                            const char *log_path)
+{
+    if (!argv || !argv[0])
+        return ZCL_ERR(-1, "zcl_spawn_detached_input: NULL/empty argv");
+    if ((!input && input_len != 0) || input_len > ZCL_SPAWN_INPUT_MAX)
+        return ZCL_ERR(-1,
+                       "zcl_spawn_detached_input: invalid input length %zu",
+                       input_len);
+
+    int input_pair[2] = { -1, -1 };
+    if (input || input_len > 0) {
+        if (socketpair(AF_UNIX, SOCK_STREAM, 0, input_pair) != 0)
+            return ZCL_ERR(-errno,
+                           "zcl_spawn_detached_input: socketpair() failed: %s",
+                           strerror(errno));
+    }
+
+    int errpipe[2];
+    struct zcl_result prepared = spawn_detached_errpipe(errpipe, input_pair);
+    if (!prepared.ok) return prepared;
+
+    pid_t child1 = fork();
+    if (child1 < 0) {
+        int e = errno;
+        close(errpipe[0]); close(errpipe[1]);
+        if (input_pair[0] >= 0) {
+            close(input_pair[0]);
+            close(input_pair[1]);
+        }
+        return ZCL_ERR(-e, "zcl_spawn_detached_input: fork() failed: %s",
+                       strerror(e));
+    }
+
+    if (child1 == 0)
+        spawn_detached_child(argv, log_path, errpipe, input_pair);
+
+    /* Parent. */
+    spawn_count_launch();
+    close(errpipe[1]);   /* close our own copy, else read() below never sees EOF */
+    if (input_pair[1] >= 0) close(input_pair[1]);
+
+    struct zcl_result handshake =
+        spawn_detached_handshake(child1, argv, errpipe, input_pair);
+    if (!handshake.ok) return handshake;
+    return spawn_detached_deliver(input_pair, input, input_len);
 }
 
 /* ── zcl_spawn_capture ───────────────────────────────────────────────── */
@@ -575,6 +605,45 @@ static enum spawn_capture_step spawn_capture_io_step(
     return n == 0 ? SPAWN_CAPTURE_EOF : SPAWN_CAPTURE_AGAIN;
 }
 
+static bool spawn_capture_drain_loop(
+    pid_t pid, int output_fd, int timeout_ms, int64_t deadline_ms,
+    zcl_spawn_cancel_fn should_cancel, void *cancel_ctx,
+    bool *was_cancelled, bool *timed_out, bool pty_eio_is_eof,
+    struct spawn_capture_buffer *capture,
+    struct spawn_capture_exit_state *exit_state, int anchor_write_fd)
+{
+    bool eof = false;
+    for (;;) {
+        if (should_cancel && should_cancel(cancel_ctx)) {
+            *was_cancelled = true;
+            break;
+        }
+        /* WNOWAIT keeps the exited child waitable, pinning its original
+         * group while buffered output drains. The anchor covers auto-reap. */
+        if (spawn_capture_exit_observe(pid, exit_state,
+                                       anchor_write_fd >= 0)) break;
+        int poll_timeout = spawn_capture_poll_timeout(
+            timeout_ms, deadline_ms, exit_state, timed_out);
+        if (*timed_out) break;
+        enum spawn_capture_step step = spawn_capture_io_step(
+            pid, output_fd, poll_timeout, pty_eio_is_eof, capture,
+            exit_state, anchor_write_fd >= 0);
+        if (step == SPAWN_CAPTURE_EOF) { eof = true; break; }
+        if (step == SPAWN_CAPTURE_STOP) break;
+    }
+
+    return eof;
+}
+
+static int spawn_capture_status(bool reaped, int status)
+{
+    if (!reaped)
+        return 0;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 0;
+}
+
 /* Parent-side bounded drain shared by pipe and PTY capture. A Linux PTY
  * master reports EIO, rather than zero bytes, when its last slave closes;
  * `pty_eio_is_eof` preserves that platform contract without weakening real
@@ -596,24 +665,10 @@ static int spawn_capture_drain(
     bool was_cancelled = false;
     struct spawn_capture_exit_state exit_state = {.started_ms = -1};
 
-    for (;;) {
-        if (should_cancel && should_cancel(cancel_ctx)) {
-            was_cancelled = true;
-            break;
-        }
-        /* WNOWAIT keeps the exited child waitable, pinning its original
-         * group while buffered output drains. The anchor covers auto-reap. */
-        if (spawn_capture_exit_observe(pid, &exit_state,
-                                       anchor_write_fd >= 0)) break;
-        int poll_timeout = spawn_capture_poll_timeout(
-            timeout_ms, deadline_ms, &exit_state, &timed_out);
-        if (timed_out) break;
-        enum spawn_capture_step step = spawn_capture_io_step(
-            pid, output_fd, poll_timeout, pty_eio_is_eof, &capture,
-            &exit_state, anchor_write_fd >= 0);
-        if (step == SPAWN_CAPTURE_EOF) { eof = true; break; }
-        if (step == SPAWN_CAPTURE_STOP) break;
-    }
+    eof = spawn_capture_drain_loop(
+        pid, output_fd, timeout_ms, deadline_ms, should_cancel, cancel_ctx,
+        &was_cancelled, &timed_out, pty_eio_is_eof, &capture, &exit_state,
+        anchor_write_fd);
 
     /* Kill before closing a PTY master: closing the master first raises
      * SIGHUP in the slave's foreground group and would erase the exact
@@ -635,11 +690,7 @@ static int spawn_capture_drain(
     if (timed_out_out) *timed_out_out = timed_out;
     spawn_capture_observation(&capture, eof, timed_out, reaped, status);
 
-    if (!reaped)
-        return 0;
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-    return 0;
+    return spawn_capture_status(reaped, status);
 }
 
 /* Called only in the fork child. The output pipe may occupy a standard
@@ -879,6 +930,32 @@ static int spawn_capture_merged_observed_platform(
                               timed_out, true, NULL, -1, NULL);
 }
 
+static void spawn_pty_child_exec(
+    const char *const argv[], int master, const char *slave_path)
+{
+    /* Child: no allocator, logger, or other shared-process state before
+     * exec. Failure stages use conventional 126/127 exit status. */
+    close(master);
+    if (setsid() < 0)
+        _exit(126);
+    int slave = open(slave_path, O_RDWR);
+    if (slave < 0)
+        _exit(126);
+    if (ioctl(slave, TIOCSCTTY, 0) < 0)
+        _exit(126);
+    struct winsize ws = { .ws_col = 80, .ws_row = 24 };
+    if (ioctl(slave, TIOCSWINSZ, &ws) < 0)
+        _exit(126);
+    if (dup2(slave, STDIN_FILENO) < 0 ||
+        dup2(slave, STDOUT_FILENO) < 0 ||
+        dup2(slave, STDERR_FILENO) < 0)
+        _exit(126);
+    if (slave > STDERR_FILENO)
+        close(slave);
+    execvp(argv[0], (char *const *)argv);
+    _exit(127);
+}
+
 /* PTY capture is deliberately a transport sibling of pipe capture, not a
  * shell worker. It inherits the exact argv and environment and grants no new
  * authority. The child-side sequence mirrors mesh_terminal_worker: a fresh
@@ -928,29 +1005,8 @@ static int spawn_pty_capture_observed_platform(
         close(master);
         LOG_ERR("spawn", "PTY fork() failed: %s", strerror(saved));
     }
-    if (pid == 0) {
-        /* Child: no allocator, logger, or other shared-process state before
-         * exec. Failure stages use conventional 126/127 exit status. */
-        close(master);
-        if (setsid() < 0)
-            _exit(126);
-        int slave = open(slave_path, O_RDWR);
-        if (slave < 0)
-            _exit(126);
-        if (ioctl(slave, TIOCSCTTY, 0) < 0)
-            _exit(126);
-        struct winsize ws = { .ws_col = 80, .ws_row = 24 };
-        if (ioctl(slave, TIOCSWINSZ, &ws) < 0)
-            _exit(126);
-        if (dup2(slave, STDIN_FILENO) < 0 ||
-            dup2(slave, STDOUT_FILENO) < 0 ||
-            dup2(slave, STDERR_FILENO) < 0)
-            _exit(126);
-        if (slave > STDERR_FILENO)
-            close(slave);
-        execvp(argv[0], (char *const *)argv);
-        _exit(127);
-    }
+    if (pid == 0)
+        spawn_pty_child_exec(argv, master, slave_path);
 
     spawn_count_launch(); /* parent: fork() succeeded */
     return spawn_capture_drain(
@@ -1126,6 +1182,11 @@ int zcl_spawn_pty_capture_observed(const char *const argv[], char *buf,
 
 /* ── zcl_argv_split ──────────────────────────────────────────────────── */
 
+static bool spawn_argv_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
 size_t zcl_argv_split(char *str, const char *argv[], size_t max)
 {
     if (!argv || max == 0)
@@ -1134,10 +1195,10 @@ size_t zcl_argv_split(char *str, const char *argv[], size_t max)
     if (str) {
         char *p = str;
         while (*p && n < max - 1) {
-            while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+            while (spawn_argv_space(*p)) p++;
             if (!*p) break;
             argv[n++] = p;
-            while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n')
+            while (*p && !spawn_argv_space(*p))
                 p++;
             if (*p) *p++ = '\0';
         }

@@ -2048,10 +2048,6 @@ platform/modules/util/src/log_json.c:log_json_escape:23
 platform/modules/util/src/log_rotate.c:log_rotate_if_over:20
 platform/modules/util/src/self_backtrace.c:self_backtrace_dump_all:24
 platform/modules/util/src/shutdown_stagewatch.c:shutdown_stagewatch_read_exit_reason:18
-platform/modules/util/src/spawn.c:spawn_capture_drain:25
-platform/modules/util/src/spawn.c:spawn_pty_capture_observed_platform#2:22
-platform/modules/util/src/spawn.c:zcl_argv_split:17
-platform/modules/util/src/spawn.c:zcl_spawn_detached_input#2:33
 platform/modules/util/src/supervisor.c:sweep_once:18
 platform/modules/util/src/telemetry_ontology.c:telemetry_ontology_annotate:16
 platform/modules/util/src/telemetry_render.c:telemetry_render:22
