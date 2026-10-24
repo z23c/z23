@@ -805,6 +805,10 @@ static bool bindpar_fixture(block_index_projection_t *bip, event_log_t *log,
     struct uint256 lo, hi, h;
     memset(&lo, 0xFF, sizeof(lo));
     memset(&hi, 0, sizeof(hi));
+    /* The 4000 appends are fixture setup: batch them into one fdatasync
+     * (production deferred mode, same on-disk records) instead of two
+     * fsyncs per row. Flushed before the projection reads the log. */
+    event_log_set_deferred_sync(log, true);
     for (unsigned i = 0; i < BINDPAR_ROWS; i++) {
         bindpar_hash(i, &h);
         if (!topup_emit_row(log, &h, NULL, (int)i + 1, BLOCK_VALID_SCRIPTS,
@@ -815,7 +819,9 @@ static bool bindpar_fixture(block_index_projection_t *bip, event_log_t *log,
     }
     *first = lo; *last = hi;
     bindpar_hash(BINDPAR_ROWS / 2, mid);
-    return block_index_projection_catch_up(bip) != UINT64_MAX;
+    bool flushed = event_log_flush(log);
+    event_log_set_deferred_sync(log, false);
+    return flushed && block_index_projection_catch_up(bip) != UINT64_MAX;
 }
 
 /* Refuse one row in a given range with several workers: the bind must fail
