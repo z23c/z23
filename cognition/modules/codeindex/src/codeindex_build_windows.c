@@ -101,6 +101,38 @@ static bool pruned_directory(const char *name)
 }
 
 static bool collect_directory(const char *root, const char *relative,
+                              struct strvec *paths, bool optional);
+
+static bool collect_children(
+    const char *root, const char *relative, struct strvec *paths,
+    const struct platform_directory_list *directories,
+    const struct platform_directory_list *files)
+{
+    bool ok = true;
+    for (size_t i = 0; ok && i < directories->count; i++) {
+        const char *name = directories->entries[i].name;
+        if (pruned_directory(name)) continue;
+        char child[CI_PATH_MAX];
+        int n = relative[0]
+            ? snprintf(child, sizeof(child), "%s/%s", relative, name)
+            : snprintf(child, sizeof(child), "%s", name);
+        ok = n > 0 && (size_t)n < sizeof(child) &&
+             collect_directory(root, child, paths, false);
+    }
+    for (size_t i = 0; ok && i < files->count; i++) {
+        const char *name = files->entries[i].name;
+        if (!source_name(name)) continue;
+        char child[CI_PATH_MAX];
+        int n = relative[0]
+            ? snprintf(child, sizeof(child), "%s/%s", relative, name)
+            : snprintf(child, sizeof(child), "%s", name);
+        ok = n > 0 && (size_t)n < sizeof(child) &&
+             strvec_push(paths, child, &files->entries[i]);
+    }
+    return ok;
+}
+
+static bool collect_directory(const char *root, const char *relative,
                               struct strvec *paths, bool optional)
 {
     char full[CI_PATH_MAX];
@@ -126,27 +158,7 @@ static bool collect_directory(const char *root, const char *relative,
         LOG_FAIL("codeindex", "list Windows source children: %s", full);
     }
 
-    bool ok = true;
-    for (size_t i = 0; ok && i < directories.count; i++) {
-        const char *name = directories.entries[i].name;
-        if (pruned_directory(name)) continue;
-        char child[CI_PATH_MAX];
-        int n = relative[0]
-            ? snprintf(child, sizeof(child), "%s/%s", relative, name)
-            : snprintf(child, sizeof(child), "%s", name);
-        ok = n > 0 && (size_t)n < sizeof(child) &&
-             collect_directory(root, child, paths, false);
-    }
-    for (size_t i = 0; ok && i < files.count; i++) {
-        const char *name = files.entries[i].name;
-        if (!source_name(name)) continue;
-        char child[CI_PATH_MAX];
-        int n = relative[0]
-            ? snprintf(child, sizeof(child), "%s/%s", relative, name)
-            : snprintf(child, sizeof(child), "%s", name);
-        ok = n > 0 && (size_t)n < sizeof(child) &&
-             strvec_push(paths, child, &files.entries[i]);
-    }
+    bool ok = collect_children(root, relative, paths, &directories, &files);
     platform_directory_list_free(&directories);
     platform_directory_list_free(&files);
     return ok;
@@ -575,6 +587,114 @@ static bool windows_source_stats_held(const char *root,
            memcmp(built_dep, dep, 32) == 0;
 }
 
+static bool windows_adopt_fresh_store(struct codeindex *ci)
+{
+    struct ci_store *fresh = ci_store_open(ci->root);
+    if (fresh) {
+        bool stale = true;
+        struct codeindex view = {.store = fresh};
+        (void)snprintf(view.root, sizeof(view.root), "%s", ci->root);
+        if (codeindex_is_stale(&view, &stale) && !stale) {
+            struct ci_store *old = ci->store;
+            ci->store = fresh;
+            if (old) ci_store_close(old);
+            return true;
+        }
+        ci_store_close(fresh);
+    }
+    return false;
+}
+
+static const char *windows_validate_stage(
+    struct platform_directory_child *stage,
+    const struct platform_directory_child_info *identity)
+{
+    struct platform_directory_child_info before_publish;
+    unsigned char journal_versions[2];
+    if (!platform_directory_child_info(stage, &before_publish) ||
+        !child_identity_equal(identity, &before_publish) ||
+        before_publish.link_count != 1 || !before_publish.current_user_only ||
+        !platform_directory_child_read_exact(stage, journal_versions,
+                                             sizeof(journal_versions), 18) ||
+        journal_versions[0] != 1 || journal_versions[1] != 1 ||
+        !platform_directory_child_flush(stage)) {
+        return "Windows staging identity or journal format changed";
+    }
+
+    return NULL;
+}
+
+static const char *windows_publish_stage(
+    struct platform_directory_transaction *directory,
+    struct platform_directory_child *stage,
+    const struct platform_directory_child_info *identity, bool *stage_named)
+{
+    const char *failure = windows_validate_stage(stage, identity);
+    if (failure) return failure;
+
+    test_maybe_crash(CODEINDEX_TEST_CRASH_BEFORE_RENAME);
+    enum platform_directory_result published =
+        platform_directory_child_move_between(directory, stage,
+            directory, "index.kv", false);
+    if (published != PLATFORM_DIRECTORY_OK) {
+        if (published == PLATFORM_DIRECTORY_OUTCOME_UNKNOWN)
+            *stage_named = false;
+        return "atomic Windows staging publication failed";
+    }
+    *stage_named = false;
+    struct platform_directory_child_info after_publish;
+    if (!platform_directory_child_info(stage, &after_publish) ||
+        !child_identity_equal(identity, &after_publish) ||
+        after_publish.link_count != 1 || !after_publish.current_user_only) {
+        return "published Windows index identity changed";
+    }
+    test_maybe_crash(CODEINDEX_TEST_CRASH_AFTER_RENAME);
+    if (!remove_legacy_sidecars(directory) ||
+        !platform_directory_transaction_flush(directory)) {
+        return "Windows legacy sidecar cleanup failed";
+    }
+    platform_directory_child_close(stage);
+
+    return NULL;
+}
+
+static const char *windows_build_stage(
+    struct codeindex *ci, int64_t build_start_ms, struct ci_store **store,
+    struct platform_directory_child *stage)
+{
+    /* Source-view readers accept a store only when its sealed
+     * source_merkle_root_sha3 matches the snapshot. The POSIX publisher
+     * writes that key; without it every Windows `code have` rebuilds. */
+    uint8_t sealed_merkle[32];
+    if (!windows_source_merkle_now(ci->root, sealed_merkle)) {
+        return "Windows source Merkle root failed";
+    }
+
+    uint8_t built_source_stat[32], built_dep_stat[32];
+    if (!ci_build_store_memory(ci->root, build_start_ms, store,
+                               built_source_stat, built_dep_stat) ||
+        !ci_store_meta_set(*store, "source_merkle_root_sha3",
+                           sealed_merkle, sizeof(sealed_merkle))) {
+        return "build or seal Windows staging store failed";
+    }
+
+    if (!windows_source_merkle_held(ci->root, sealed_merkle)) {
+        return "source Merkle root changed during Windows rebuild";
+    }
+    if (!ci_store_write_image_child(*store, stage)) {
+        return "serialize Windows staging store failed";
+    }
+    ci_store_close(*store);
+    *store = NULL;
+
+    if (!windows_source_stats_held(ci->root, built_source_stat,
+                                   built_dep_stat)) {
+        return "source or depfile metadata changed during Windows rebuild";
+    }
+
+    return NULL;
+}
+
 static bool codeindex_rebuild_internal(struct codeindex *ci,
                                        bool coalesce_if_fresh)
 {
@@ -601,21 +721,9 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         failure = "orphan Windows staging cleanup failed";
         goto out;
     }
-    if (coalesce_if_fresh) {
-        struct ci_store *fresh = ci_store_open(ci->root);
-        if (fresh) {
-            bool stale = true;
-            struct codeindex view = {.store = fresh};
-            (void)snprintf(view.root, sizeof(view.root), "%s", ci->root);
-            if (codeindex_is_stale(&view, &stale) && !stale) {
-                struct ci_store *old = ci->store;
-                ci->store = fresh;
-                if (old) ci_store_close(old);
-                success = true;
-                goto out;
-            }
-            ci_store_close(fresh);
-        }
+    if (coalesce_if_fresh && windows_adopt_fresh_store(ci)) {
+        success = true;
+        goto out;
     }
     if (!create_unique_stage(&rebuild.directory, stage_name, &stage,
                              &stage_identity)) {
@@ -628,79 +736,19 @@ static bool codeindex_rebuild_internal(struct codeindex *ci,
         goto out;
     }
 
-    /* Source-view readers accept a store only when its sealed
-     * source_merkle_root_sha3 matches the snapshot. The POSIX publisher
-     * writes that key; without it every Windows `code have` rebuilds. */
-    uint8_t sealed_merkle[32];
-    if (!windows_source_merkle_now(ci->root, sealed_merkle)) {
-        failure = "Windows source Merkle root failed";
+    const char *build_failure = windows_build_stage(
+        ci, build_start_ms, &store, &stage);
+    if (build_failure) {
+        failure = build_failure;
         goto out;
     }
 
-    uint8_t built_source_stat[32], built_dep_stat[32];
-    if (!ci_build_store_memory(ci->root, build_start_ms, &store,
-                               built_source_stat, built_dep_stat) ||
-        !ci_store_meta_set(store, "source_merkle_root_sha3",
-                           sealed_merkle, sizeof(sealed_merkle))) {
-        failure = "build or seal Windows staging store failed";
+    const char *publication_failure = windows_publish_stage(
+        &rebuild.directory, &stage, &stage_identity, &stage_named);
+    if (publication_failure) {
+        failure = publication_failure;
         goto out;
     }
-
-    if (!windows_source_merkle_held(ci->root, sealed_merkle)) {
-        failure = "source Merkle root changed during Windows rebuild";
-        goto out;
-    }
-    if (!ci_store_write_image_child(store, &stage)) {
-        failure = "serialize Windows staging store failed";
-        goto out;
-    }
-    ci_store_close(store);
-    store = NULL;
-
-    if (!windows_source_stats_held(ci->root, built_source_stat,
-                                   built_dep_stat)) {
-        failure = "source or depfile metadata changed during Windows rebuild";
-        goto out;
-    }
-
-    struct platform_directory_child_info before_publish;
-    unsigned char journal_versions[2];
-    if (!platform_directory_child_info(&stage, &before_publish) ||
-        !child_identity_equal(&stage_identity, &before_publish) ||
-        before_publish.link_count != 1 || !before_publish.current_user_only ||
-        !platform_directory_child_read_exact(&stage, journal_versions,
-                                             sizeof(journal_versions), 18) ||
-        journal_versions[0] != 1 || journal_versions[1] != 1 ||
-        !platform_directory_child_flush(&stage)) {
-        failure = "Windows staging identity or journal format changed";
-        goto out;
-    }
-
-    test_maybe_crash(CODEINDEX_TEST_CRASH_BEFORE_RENAME);
-    enum platform_directory_result published =
-        platform_directory_child_move_between(&rebuild.directory, &stage,
-            &rebuild.directory, "index.kv", false);
-    if (published != PLATFORM_DIRECTORY_OK) {
-        if (published == PLATFORM_DIRECTORY_OUTCOME_UNKNOWN)
-            stage_named = false;
-        failure = "atomic Windows staging publication failed";
-        goto out;
-    }
-    stage_named = false;
-    struct platform_directory_child_info after_publish;
-    if (!platform_directory_child_info(&stage, &after_publish) ||
-        !child_identity_equal(&stage_identity, &after_publish) ||
-        after_publish.link_count != 1 || !after_publish.current_user_only) {
-        failure = "published Windows index identity changed";
-        goto out;
-    }
-    test_maybe_crash(CODEINDEX_TEST_CRASH_AFTER_RENAME);
-    if (!remove_legacy_sidecars(&rebuild.directory) ||
-        !platform_directory_transaction_flush(&rebuild.directory)) {
-        failure = "Windows legacy sidecar cleanup failed";
-        goto out;
-    }
-    platform_directory_child_close(&stage);
 
     struct ci_store *next = ci_store_open(ci->root);
     if (!next) {

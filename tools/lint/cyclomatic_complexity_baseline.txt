@@ -44,8 +44,6 @@ cognition/modules/codeindex/src/codeindex_build.c:codeindex_rebuild_internal:61
 cognition/modules/codeindex/src/codeindex_build.c:collect_dir:20
 cognition/modules/codeindex/src/codeindex_build.c:source_file_sha3:21
 cognition/modules/codeindex/src/codeindex_build_store.c:ci_build_store_memory:26
-cognition/modules/codeindex/src/codeindex_build_windows.c:codeindex_rebuild_internal:38
-cognition/modules/codeindex/src/codeindex_build_windows.c:collect_directory:20
 cognition/modules/codeindex/src/codeindex_capability.c:codeindex_capabilities:45
 cognition/modules/codeindex/src/codeindex_deps.c:codeindex_depfile_graph:19
 cognition/modules/codeindex/src/codeindex_deps.c:epoch_current_dir:27
