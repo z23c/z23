@@ -349,6 +349,65 @@ static struct zcl_result science_work_aux(
     return ZCL_OK;
 }
 
+static struct zcl_result science_work_plan_check_v2(
+    const uint8_t *wire, size_t wire_len,
+    const struct vcs_build_action_v1 *action)
+{
+    struct vcs_zcode_benchmark_result_v2 result;
+    if (vcs_zcode_benchmark_result_v2_parse(wire, wire_len, &result) !=
+            VCS_ZCODE_SCIENCE_OK ||
+        vcs_zcode_benchmark_result_v2_validate(&result) !=
+            VCS_ZCODE_SCIENCE_OK)
+        return ZCL_ERR(-1, "science-work-result-invalid");
+    if (!action)
+        return ZCL_ERR(-1, "science-work-action-required");
+    return ZCL_OK;
+}
+
+static struct zcl_result science_work_plan_check_v1(
+    const uint8_t *wire, size_t wire_len,
+    const struct vcs_build_action_v1 *action, size_t method_len,
+    size_t profile_len)
+{
+    struct vcs_zcode_benchmark_result_v1 result;
+    if (vcs_zcode_benchmark_result_parse(wire, wire_len, &result) !=
+            VCS_ZCODE_SCIENCE_OK ||
+        vcs_zcode_benchmark_result_validate(&result) !=
+            VCS_ZCODE_SCIENCE_OK)
+        return ZCL_ERR(-1, "science-work-result-invalid");
+    if (!action)
+        return ZCL_ERR(-1, "science-work-action-required");
+    if (method_len != 0 || profile_len != 0)
+        return ZCL_ERR(-1, "science-work-v1-aux-forbidden");
+    return ZCL_OK;
+}
+
+static struct zcl_result science_work_plan_check_reproduction(
+    const uint8_t *wire, size_t wire_len)
+{
+    struct vcs_zcode_reproduction_v1 reproduction;
+    if (vcs_zcode_reproduction_parse(wire, wire_len, &reproduction) !=
+            VCS_ZCODE_SCIENCE_OK ||
+        vcs_zcode_reproduction_validate(&reproduction) !=
+            VCS_ZCODE_SCIENCE_OK)
+        return ZCL_ERR(-1, "science-work-reproduction-invalid");
+    return ZCL_OK;
+}
+
+/* The method and profile are CAS citizens: store them addressed by their
+ * canonical roots so commit can re-load them. */
+static bool science_work_store_aux(const char *workspace, const uint8_t aux[64],
+                                   const uint8_t *method_wire,
+                                   size_t method_len,
+                                   const uint8_t *profile_wire,
+                                   size_t profile_len)
+{
+    return vcs_object_put_addressed(workspace, aux, method_wire,
+                                    method_len) &&
+           vcs_object_put_addressed(workspace, aux + 32, profile_wire,
+                                    profile_len);
+}
+
 struct zcl_result zcode_science_work_plan(
     struct node_db *ndb, const char *workspace,
     const uint8_t *wire, size_t wire_len,
@@ -362,42 +421,26 @@ struct zcl_result zcode_science_work_plan(
     uint8_t aux[64];
     size_t aux_len = 0;
     if (science_wire_is_result_v2(wire, wire_len)) {
-        struct vcs_zcode_benchmark_result_v2 result;
-        if (vcs_zcode_benchmark_result_v2_parse(wire, wire_len, &result) !=
-                VCS_ZCODE_SCIENCE_OK ||
-            vcs_zcode_benchmark_result_v2_validate(&result) !=
-                VCS_ZCODE_SCIENCE_OK)
-            return ZCL_ERR(-1, "science-work-result-invalid");
-        if (!action)
-            return ZCL_ERR(-1, "science-work-action-required");
+        struct zcl_result chk =
+            science_work_plan_check_v2(wire, wire_len, action);
+        if (!chk.ok)
+            return chk;
         ZCL_CHECK(science_work_aux(method_wire, method_len, profile_wire,
                                    profile_len, aux));
         aux_len = sizeof(aux);
-        /* The method and profile are CAS citizens: store them addressed by
-         * their canonical roots so commit can re-load them. */
-        if (!vcs_object_put_addressed(workspace, aux, method_wire,
-                                      method_len) ||
-            !vcs_object_put_addressed(workspace, aux + 32, profile_wire,
-                                      profile_len))
+        if (!science_work_store_aux(workspace, aux, method_wire, method_len,
+                                    profile_wire, profile_len))
             return ZCL_ERR(-1, "science-work-aux-cas-store-failed");
     } else if (science_wire_is_result_v1(wire, wire_len)) {
-        struct vcs_zcode_benchmark_result_v1 result;
-        if (vcs_zcode_benchmark_result_parse(wire, wire_len, &result) !=
-                VCS_ZCODE_SCIENCE_OK ||
-            vcs_zcode_benchmark_result_validate(&result) !=
-                VCS_ZCODE_SCIENCE_OK)
-            return ZCL_ERR(-1, "science-work-result-invalid");
-        if (!action)
-            return ZCL_ERR(-1, "science-work-action-required");
-        if (method_len != 0 || profile_len != 0)
-            return ZCL_ERR(-1, "science-work-v1-aux-forbidden");
+        struct zcl_result chk = science_work_plan_check_v1(
+            wire, wire_len, action, method_len, profile_len);
+        if (!chk.ok)
+            return chk;
     } else if (science_wire_is_reproduction(wire, wire_len)) {
-        struct vcs_zcode_reproduction_v1 reproduction;
-        if (vcs_zcode_reproduction_parse(wire, wire_len, &reproduction) !=
-                VCS_ZCODE_SCIENCE_OK ||
-            vcs_zcode_reproduction_validate(&reproduction) !=
-                VCS_ZCODE_SCIENCE_OK)
-            return ZCL_ERR(-1, "science-work-reproduction-invalid");
+        struct zcl_result chk =
+            science_work_plan_check_reproduction(wire, wire_len);
+        if (!chk.ok)
+            return chk;
     } else {
         return ZCL_ERR(-1, "science-work-wire-kind-unknown");
     }
@@ -676,6 +719,59 @@ struct zcl_result zcode_science_work_status(
     return ZCL_OK;
 }
 
+static bool science_receipt_verify_v2(const uint8_t *wire, size_t wire_len,
+                                      const uint8_t root[32])
+{
+    struct vcs_zcode_benchmark_result_v2 result;
+    uint8_t checked[32];
+    return vcs_zcode_benchmark_result_v2_parse(wire, wire_len, &result) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_benchmark_result_v2_validate(&result) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_benchmark_result_v2_root(&result, checked) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           memcmp(checked, root, 32) == 0;
+}
+
+static bool science_receipt_verify_v1(const uint8_t *wire, size_t wire_len,
+                                      const uint8_t root[32])
+{
+    struct vcs_zcode_benchmark_result_v1 result;
+    uint8_t checked[32];
+    return vcs_zcode_benchmark_result_parse(wire, wire_len, &result) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_benchmark_result_validate(&result) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_benchmark_result_root(&result, checked) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           memcmp(checked, root, 32) == 0;
+}
+
+static bool science_receipt_verify_result(const uint8_t *wire, size_t wire_len,
+                                          const uint8_t root[32])
+{
+    if (science_wire_is_result_v2(wire, wire_len))
+        return science_receipt_verify_v2(wire, wire_len, root);
+    if (science_wire_is_result_v1(wire, wire_len))
+        return science_receipt_verify_v1(wire, wire_len, root);
+    return false;
+}
+
+static bool science_receipt_verify_reproduction(const uint8_t *wire,
+                                                size_t wire_len,
+                                                const uint8_t root[32])
+{
+    struct vcs_zcode_reproduction_v1 reproduction;
+    uint8_t checked[32];
+    return vcs_zcode_reproduction_parse(wire, wire_len, &reproduction) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_reproduction_validate(&reproduction) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           vcs_zcode_reproduction_root(&reproduction, checked) ==
+               VCS_ZCODE_SCIENCE_OK &&
+           memcmp(checked, root, 32) == 0;
+}
+
 struct zcl_result zcode_science_work_receipt(
     struct node_db *ndb, const char *workspace, const char *root_hex,
     struct db_zcode_science_entry *out, const char **kind)
@@ -695,40 +791,10 @@ struct zcl_result zcode_science_work_receipt(
     /* The receipt re-verifies the canonical wire against its address; the
      * projection row alone is never the proof. */
     bool ok = false;
-    if (strcmp(*kind, "result") == 0) {
-        if (science_wire_is_result_v2(wire, wire_len)) {
-            struct vcs_zcode_benchmark_result_v2 result;
-            uint8_t checked[32];
-            ok = vcs_zcode_benchmark_result_v2_parse(wire, wire_len,
-                                                     &result) ==
-                    VCS_ZCODE_SCIENCE_OK &&
-                vcs_zcode_benchmark_result_v2_validate(&result) ==
-                    VCS_ZCODE_SCIENCE_OK &&
-                vcs_zcode_benchmark_result_v2_root(&result, checked) ==
-                    VCS_ZCODE_SCIENCE_OK &&
-                memcmp(checked, root, 32) == 0;
-        } else if (science_wire_is_result_v1(wire, wire_len)) {
-            struct vcs_zcode_benchmark_result_v1 result;
-            uint8_t checked[32];
-            ok = vcs_zcode_benchmark_result_parse(wire, wire_len, &result) ==
-                    VCS_ZCODE_SCIENCE_OK &&
-                vcs_zcode_benchmark_result_validate(&result) ==
-                    VCS_ZCODE_SCIENCE_OK &&
-                vcs_zcode_benchmark_result_root(&result, checked) ==
-                    VCS_ZCODE_SCIENCE_OK &&
-                memcmp(checked, root, 32) == 0;
-        }
-    } else {
-        struct vcs_zcode_reproduction_v1 reproduction;
-        uint8_t checked[32];
-        ok = vcs_zcode_reproduction_parse(wire, wire_len, &reproduction) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_reproduction_validate(&reproduction) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_reproduction_root(&reproduction, checked) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            memcmp(checked, root, 32) == 0;
-    }
+    if (strcmp(*kind, "result") == 0)
+        ok = science_receipt_verify_result(wire, wire_len, root);
+    else
+        ok = science_receipt_verify_reproduction(wire, wire_len, root);
     free(wire);
     if (!ok)
         return ZCL_ERR(-1, "science-receipt-cas-invalid");
@@ -736,6 +802,29 @@ struct zcl_result zcode_science_work_receipt(
 }
 
 /* ── review ────────────────────────────────────────────────────── */
+
+static struct zcl_result science_review_check_findings(
+    const char *workspace, const struct vcs_zcode_review_v1 *review,
+    struct vcs_zcode_science_findings_v1 *findings)
+{
+    uint8_t *fwire = NULL, checked[32];
+    size_t flen = 0;
+    bool ok = science_cas_load(workspace, review->findings_root, &fwire,
+                               &flen) &&
+        vcs_zcode_science_findings_parse(fwire, flen, findings) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_science_findings_validate(findings) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        vcs_zcode_science_findings_root(findings, checked) ==
+            VCS_ZCODE_SCIENCE_OK &&
+        memcmp(checked, review->findings_root, 32) == 0;
+    free(fwire);
+    if (!ok)
+        return ZCL_ERR(-1, "science-review-findings-not-in-cas");
+    if (review->created_unix < findings->created_unix)
+        return ZCL_ERR(-1, "science-review-predates-findings");
+    return ZCL_OK;
+}
 
 struct zcl_result zcode_science_review_submit(
     struct node_db *ndb, const char *workspace,
@@ -770,24 +859,10 @@ struct zcl_result zcode_science_review_submit(
     /* H1: the findings wire must exist in CAS and the review must not
      * predate it. */
     struct vcs_zcode_science_findings_v1 findings;
-    {
-        uint8_t *fwire = NULL, checked[32];
-        size_t flen = 0;
-        bool ok = science_cas_load(workspace, review.findings_root, &fwire,
-                                   &flen) &&
-            vcs_zcode_science_findings_parse(fwire, flen, &findings) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_science_findings_validate(&findings) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            vcs_zcode_science_findings_root(&findings, checked) ==
-                VCS_ZCODE_SCIENCE_OK &&
-            memcmp(checked, review.findings_root, 32) == 0;
-        free(fwire);
-        if (!ok)
-            return ZCL_ERR(-1, "science-review-findings-not-in-cas");
-    }
-    if (review.created_unix < findings.created_unix)
-        return ZCL_ERR(-1, "science-review-predates-findings");
+    struct zcl_result fchk =
+        science_review_check_findings(workspace, &review, &findings);
+    if (!fchk.ok)
+        return fchk;
     uint8_t root[32];
     if (vcs_zcode_review_root(&review, root) != VCS_ZCODE_DEV_OK)
         return ZCL_ERR(-1, "science-review-root-failed");
@@ -814,6 +889,20 @@ struct zcl_result zcode_science_review_submit(
 
 /* ── vote ──────────────────────────────────────────────────────── */
 
+static bool science_vote_inputs_ok(
+    const char *workspace, const uint8_t *wire, size_t wire_len,
+    const uint8_t expected_network_genesis[32],
+    const uint8_t expected_voter_zid[32],
+    const uint8_t expected_signer[32],
+    const struct zcode_science_plan_out *plan_out,
+    const struct zcode_science_commit_out *commit_out)
+{
+    return workspace && wire &&
+        wire_len == VCS_ZCODE_CURATION_VOTE_WIRE_BYTES &&
+        expected_network_genesis && expected_voter_zid &&
+        expected_signer && plan_out && commit_out;
+}
+
 struct zcl_result zcode_science_vote_submit(
     struct node_db *ndb, const char *workspace,
     const uint8_t *wire, size_t wire_len,
@@ -824,10 +913,9 @@ struct zcl_result zcode_science_vote_submit(
     struct zcode_science_plan_out *plan_out,
     struct zcode_science_commit_out *commit_out)
 {
-    if (!workspace || !wire ||
-        wire_len != VCS_ZCODE_CURATION_VOTE_WIRE_BYTES ||
-        !expected_network_genesis || !expected_voter_zid ||
-        !expected_signer || !plan_out || !commit_out)
+    if (!science_vote_inputs_ok(workspace, wire, wire_len,
+                                expected_network_genesis, expected_voter_zid,
+                                expected_signer, plan_out, commit_out))
         return ZCL_ERR(-1, "science-vote-input-invalid");
     struct vcs_zcode_curation_vote_v1 vote;
     if (vcs_zcode_curation_vote_parse(wire, wire_len, &vote) !=
@@ -918,21 +1006,12 @@ static void entry_from_study(struct db_zcode_science_entry *row,
     row->expires_at = e->expires_unix;
 }
 
-struct zcl_result zcode_science_rebuild(
-    struct node_db *ndb, const char *workspace, int64_t now,
-    struct zcode_science_rebuild_out *out)
+/* Each projection pass saves every row it indexes and never stops early:
+ * a failed save only clears the caller's ok flag. */
+static bool science_rebuild_studies(struct node_db *ndb,
+                                    struct vcs_zcode_science_index *index,
+                                    struct zcode_science_rebuild_out *out)
 {
-    if (!ndb || !ndb->open || !workspace || !out)
-        return ZCL_ERR(-1, "science-rebuild-input-invalid");
-    struct vcs_zcode_science_index *index =
-        vcs_zcode_science_index_build(workspace, now);
-    if (!index)
-        return ZCL_ERR(-1, "science-rebuild-index-failed");
-    if (!db_zcode_science_projection_clear(ndb)) {
-        vcs_zcode_science_index_free(index);
-        return ZCL_ERR(-1, "science-rebuild-clear-failed");
-    }
-    memset(out, 0, sizeof(*out));
     bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_study_count(index); i++) {
         struct db_zcode_science_entry row;
@@ -940,6 +1019,14 @@ struct zcl_result zcode_science_rebuild(
         if (!db_zcode_science_study_save(ndb, &row)) ok = false;
         out->studies++;
     }
+    return ok;
+}
+
+static bool science_rebuild_results(struct node_db *ndb,
+                                    struct vcs_zcode_science_index *index,
+                                    struct zcode_science_rebuild_out *out)
+{
+    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_result_count(index); i++) {
         const struct vcs_zcode_science_index_result_entry *e =
             vcs_zcode_science_index_result_at(index, i);
@@ -960,6 +1047,14 @@ struct zcl_result zcode_science_rebuild(
         if (!db_zcode_science_result_save(ndb, &row)) ok = false;
         out->results++;
     }
+    return ok;
+}
+
+static bool science_rebuild_reproductions(
+    struct node_db *ndb, struct vcs_zcode_science_index *index,
+    struct zcode_science_rebuild_out *out)
+{
+    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_reproduction_count(index);
          i++) {
         const struct vcs_zcode_science_index_reproduction_entry *e =
@@ -982,6 +1077,14 @@ struct zcl_result zcode_science_rebuild(
         if (!db_zcode_science_reproduction_save(ndb, &row)) ok = false;
         out->reproductions++;
     }
+    return ok;
+}
+
+static bool science_rebuild_findings(struct node_db *ndb,
+                                     struct vcs_zcode_science_index *index,
+                                     struct zcode_science_rebuild_out *out)
+{
+    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_findings_count(index);
          i++) {
         const struct vcs_zcode_science_index_findings_entry *e =
@@ -1002,6 +1105,14 @@ struct zcl_result zcode_science_rebuild(
         if (!db_zcode_science_findings_save(ndb, &row)) ok = false;
         out->findings++;
     }
+    return ok;
+}
+
+static bool science_rebuild_votes(struct node_db *ndb,
+                                  struct vcs_zcode_science_index *index,
+                                  struct zcode_science_rebuild_out *out)
+{
+    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_vote_count(index); i++) {
         const struct vcs_zcode_science_index_vote_entry *e =
             vcs_zcode_science_index_vote_at(index, i);
@@ -1026,6 +1137,29 @@ struct zcl_result zcode_science_rebuild(
         if (!db_zcode_science_vote_save(ndb, &row)) ok = false;
         out->votes++;
     }
+    return ok;
+}
+
+/* The findings entry whose root matches, or NULL. */
+static const struct vcs_zcode_science_index_findings_entry *
+science_rebuild_findings_for(struct vcs_zcode_science_index *index,
+                             const char *findings_root_hex)
+{
+    for (size_t f = 0; f < vcs_zcode_science_index_findings_count(index);
+         f++) {
+        const struct vcs_zcode_science_index_findings_entry *cand =
+            vcs_zcode_science_index_findings_at(index, f);
+        if (strcmp(cand->findings_root_hex, findings_root_hex) == 0)
+            return cand;
+    }
+    return NULL;
+}
+
+static bool science_rebuild_reviews(struct node_db *ndb,
+                                    struct vcs_zcode_science_index *index,
+                                    struct zcode_science_rebuild_out *out)
+{
+    bool ok = true;
     for (size_t i = 0; i < vcs_zcode_science_index_review_count(index); i++) {
         const struct vcs_zcode_science_index_review_entry *e =
             vcs_zcode_science_index_review_at(index, i);
@@ -1033,16 +1167,8 @@ struct zcl_result zcode_science_rebuild(
         memset(&row, 0, sizeof(row));
         (void)snprintf(row.root, sizeof(row.root), "%s", e->review_root_hex);
         /* study_root is recovered through the findings row when present. */
-        const struct vcs_zcode_science_index_findings_entry *fe = NULL;
-        for (size_t f = 0; f < vcs_zcode_science_index_findings_count(index);
-             f++) {
-            const struct vcs_zcode_science_index_findings_entry *cand =
-                vcs_zcode_science_index_findings_at(index, f);
-            if (strcmp(cand->findings_root_hex, e->findings_root_hex) == 0) {
-                fe = cand;
-                break;
-            }
-        }
+        const struct vcs_zcode_science_index_findings_entry *fe =
+            science_rebuild_findings_for(index, e->findings_root_hex);
         if (fe)
             (void)snprintf(row.study_root, sizeof(row.study_root), "%s",
                            fe->study_root_hex);
@@ -1056,6 +1182,31 @@ struct zcl_result zcode_science_rebuild(
         if (!db_zcode_science_review_save(ndb, &row)) ok = false;
         out->reviews++;
     }
+    return ok;
+}
+
+struct zcl_result zcode_science_rebuild(
+    struct node_db *ndb, const char *workspace, int64_t now,
+    struct zcode_science_rebuild_out *out)
+{
+    if (!ndb || !ndb->open || !workspace || !out)
+        return ZCL_ERR(-1, "science-rebuild-input-invalid");
+    struct vcs_zcode_science_index *index =
+        vcs_zcode_science_index_build(workspace, now);
+    if (!index)
+        return ZCL_ERR(-1, "science-rebuild-index-failed");
+    if (!db_zcode_science_projection_clear(ndb)) {
+        vcs_zcode_science_index_free(index);
+        return ZCL_ERR(-1, "science-rebuild-clear-failed");
+    }
+    memset(out, 0, sizeof(*out));
+    bool ok = true;
+    if (!science_rebuild_studies(ndb, index, out)) ok = false;
+    if (!science_rebuild_results(ndb, index, out)) ok = false;
+    if (!science_rebuild_reproductions(ndb, index, out)) ok = false;
+    if (!science_rebuild_findings(ndb, index, out)) ok = false;
+    if (!science_rebuild_votes(ndb, index, out)) ok = false;
+    if (!science_rebuild_reviews(ndb, index, out)) ok = false;
     vcs_zcode_science_index_free(index);
     if (!ok)
         return ZCL_ERR(-1, "science-rebuild-projection-save-failed");

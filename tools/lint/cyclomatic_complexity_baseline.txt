@@ -190,11 +190,6 @@ cognition/services/src/zcode_retrieval_profile_evolution_service.c:zcode_retriev
 cognition/services/src/zcode_science_carrier.c:science_identify_wire:39
 cognition/services/src/zcode_science_carrier.c:zcode_science_admit:17
 cognition/services/src/zcode_science_carrier.c:zcode_science_admit_candidates:21
-cognition/services/src/zcode_science_service.c:zcode_science_rebuild:25
-cognition/services/src/zcode_science_service.c:zcode_science_review_submit:19
-cognition/services/src/zcode_science_service.c:zcode_science_vote_submit:19
-cognition/services/src/zcode_science_service.c:zcode_science_work_plan:18
-cognition/services/src/zcode_science_service.c:zcode_science_work_receipt:17
 contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_handle_request:18
 contexts/commons/controllers/src/metaverse_site_controller.c:ms_space_scan:21
 contexts/commons/modules/commons_demo/src/demo.c:commons_demo_render:20
