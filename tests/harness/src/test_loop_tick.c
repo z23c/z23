@@ -143,6 +143,29 @@ static bool lt_repo(const struct lt_env *e)
            lt_git(main_, "fetch", "-q", "origin", "main", NULL);
 }
 
+/* The fake z23-lint --write-baseline body: "shrink" deletes the first row,
+ * "grow" appends a new row, "lower" deletes the first row and lowers the
+ * third row's score, "rise" raises the second row's score. */
+static const char *lt_lint_body(const char *mode)
+{
+    static const char base[] = "tools/lint/cyclomatic_complexity_baseline.txt";
+    static char lower[512], rise[512];
+    if (strcmp(mode, "grow") == 0)
+        return "echo f9:99 >> tools/lint/cyclomatic_complexity_baseline.txt";
+    (void)snprintf(lower, sizeof(lower),
+                   "f=%s\ntail -n +2 $f | sed 's/^a.c:f3:22$/a.c:f3:21/' > $f.new && mv $f.new $f",
+                   base);
+    (void)snprintf(rise, sizeof(rise),
+                   "f=%s\nsed 's/^a.c:f2:21$/a.c:f2:25/' $f > $f.new && mv $f.new $f",
+                   base);
+    if (strcmp(mode, "lower") == 0)
+        return lower;
+    if (strcmp(mode, "rise") == 0)
+        return rise;
+    return "f=tools/lint/cyclomatic_complexity_baseline.txt\n"
+           "tail -n +2 $f > $f.new && mv $f.new $f";
+}
+
 static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
 {
     char bindir[700];
@@ -151,7 +174,6 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
     if (!lt_run(mk, NULL, 0, NULL))
         return false;
     const char *edit = c->edit ? c->edit : "";
-    const bool grow = strcmp(c->lint, "grow") == 0;
     return lt_script(e, "dev",
                "case \"$1\" in\n fleet) cat '%s/step.json' ;;\n"
                " dev) echo \"$@\" > '%s/submit.txt'; echo '{\"data\":{\"seq\":7}}' ;;\nesac",
@@ -163,10 +185,7 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
                "case \"$*\" in\n *lint-land*) echo lint-land-stderr-marker >&2 ;;\n"
                " *agent-verify*) exit %s ;;\nesac\nexit 0",
                c->rerun ? c->rerun : "0") &&
-           lt_script(e, "lint", grow
-               ? "echo f9:99 >> tools/lint/cyclomatic_complexity_baseline.txt"
-               : "f=tools/lint/cyclomatic_complexity_baseline.txt\n"
-                 "tail -n +2 $f > $f.new && mv $f.new $f") &&
+           lt_script(e, "lint", lt_lint_body(c->lint)) &&
            lt_script(e, "zgate",
                "l='%s'/zgate.$$.log\n"
                "case \"$*\" in *agent-verify*) r='%s' ;; *) r='rc=0' ;; esac\n"
@@ -336,7 +355,53 @@ static int case_baseline_growth_hold(void)
     const int rc = lt_tick(&e, NULL, NULL, NULL, 0);
     LT_CHECK("a growing baseline exits 0", rc == 0);
     LT_CHECK("it holds on the grown rows",
-             lt_file_has(&e, "state/loop-t1.HOLD", "baseline grew by 1 rows"));
+             lt_file_has(&e, "state/loop-t1.HOLD", "baseline grew: 1 new or higher row(s)"));
+    LT_CHECK("it does not commit", lt_commits_ahead(&e) == 0);
+    LT_CHECK("it does not submit", !lt_exists("%s/%s", e.d, "submit.txt"));
+    return failures;
+}
+
+/* The regen deletes one row AND lowers another row's score. numstat used to
+ * read the lowered row as one added row and held the unit as growth. */
+static int case_baseline_lower_commits(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "lower", "VERDICT: LAND", "rc=0", NULL };
+    const bool ready = lt_setup(&e, "lower", &c, "run", "claude-haiku");
+    LT_CHECK("the lowered-score scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_tick(&e, NULL, NULL, NULL, 0);
+    LT_CHECK("a lowered-score baseline exits 0", rc == 0);
+    LT_CHECK("it does not hold for growth", !lt_exists("%s/%s", e.d, "state/loop-t1.HOLD"));
+    LT_CHECK("it commits the unit", lt_commits_ahead(&e) == 1);
+    LT_CHECK("the commit keeps the lowered score and drops the removed row",
+             lt_file_has(&e, "lanes/loop-t1/tools/lint/cyclomatic_complexity_baseline.txt", "a.c:f3:21") &&
+             !lt_file_has(&e, "lanes/loop-t1/tools/lint/cyclomatic_complexity_baseline.txt", "a.c:f1:20"));
+    char lane[900], msg[4096] = "";
+    (void)snprintf(lane, sizeof(lane), "%s/lanes/loop-t1", e.d);
+    const char *const show[] = { "git", "-C", lane, "log", "-1", "--format=%B", NULL };
+    (void)lt_run(show, msg, sizeof(msg), NULL);
+    LT_CHECK("the commit records one function left the baseline",
+             strstr(msg, "(lane loop-t1): 1\nfunction(s) in owned.c left the complexity baseline") != NULL);
+    return failures;
+}
+
+/* A row whose score rises is growth, even though its key stays. */
+static int case_baseline_rise_hold(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "rise", "VERDICT: LAND", "rc=0", NULL };
+    const bool ready = lt_setup(&e, "rise", &c, "run", "claude-haiku");
+    LT_CHECK("the rising-score scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_tick(&e, NULL, NULL, NULL, 0);
+    LT_CHECK("a rising-score baseline exits 0", rc == 0);
+    LT_CHECK("it holds on the raised row",
+             lt_file_has(&e, "state/loop-t1.HOLD", "baseline grew"));
     LT_CHECK("it does not commit", lt_commits_ahead(&e) == 0);
     LT_CHECK("it does not submit", !lt_exists("%s/%s", e.d, "submit.txt"));
     return failures;
@@ -529,6 +594,8 @@ int test_loop_tick(void)
     failures += case_run_submits();
     failures += case_scope_hold();
     failures += case_baseline_growth_hold();
+    failures += case_baseline_lower_commits();
+    failures += case_baseline_rise_hold();
     failures += case_review_hold();
     failures += case_gate_failure_hold();
     failures += case_rerun_pass();

@@ -61,7 +61,8 @@ enum {
     LT_OWNED_MAX = 32,
     LT_SHOW_MAX = 90000,
     LT_BUILD_TIMEOUT_MS = 6 * 3600 * 1000,
-    LT_SHORT_TIMEOUT_MS = 600 * 1000
+    LT_SHORT_TIMEOUT_MS = 600 * 1000,
+    LT_BASE_ROWS = 4096 /* changed baseline rows the judgement can hold */
 };
 
 /* X(id, flag, default). "~/" expands to $HOME, "@main/", "@lanes/" and
@@ -659,6 +660,145 @@ static int stage_scope(struct tick *t)
 
 /* ── step 5: the complexity baseline may only shrink ─────────────────── */
 
+/* A baseline row is <file>:<function>:<score>. The key is everything before
+ * the LAST ':' and the score is the decimal after it. Rows point into the
+ * captured diff text, which stays alive until the judgement is done. */
+struct base_row {
+    const char *key;
+    size_t klen;
+    long score;
+};
+
+struct base_diff {
+    struct base_row *old, *neu;
+    size_t nold, nneu;
+};
+
+static bool parse_base_row(const char *s, size_t len, struct base_row *r)
+{
+    size_t colon = len;
+    for (size_t i = len; i-- > 0;) {
+        if (s[i] == ':') {
+            colon = i;
+            break;
+        }
+    }
+    if (colon == len || colon == 0 || colon + 1 >= len || len - colon - 1 > 18)
+        return false;
+    long v = 0;
+    for (size_t i = colon + 1; i < len; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            return false;
+        v = v * 10 + (s[i] - '0');
+    }
+    r->key = s;
+    r->klen = colon;
+    r->score = v;
+    return true;
+}
+
+static bool push_base_row(struct base_row *v, size_t *n, const struct base_row *r,
+                          const char **why)
+{
+    if (*n >= LT_BASE_ROWS) {
+        *why = "too many rows";
+        return false;
+    }
+    v[(*n)++] = *r;
+    return true;
+}
+
+static bool base_diff_line(const char *line, size_t len, struct base_diff *d,
+                           const char **why)
+{
+    if (len == 0 || (line[0] != '-' && line[0] != '+'))
+        return true;
+    if (len >= 3 && (strncmp(line, "---", 3) == 0 || strncmp(line, "+++", 3) == 0))
+        return true;
+    struct base_row r;
+    if (!parse_base_row(line + 1, len - 1, &r)) {
+        *why = "a row does not parse";
+        return false;
+    }
+    if (line[0] == '-')
+        return push_base_row(d->old, &d->nold, &r, why);
+    return push_base_row(d->neu, &d->nneu, &r, why);
+}
+
+static bool split_baseline_diff(const char *text, struct base_diff *d, const char **why)
+{
+    for (const char *p = text; *p;) {
+        const char *nl = strchr(p, '\n');
+        const size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (!base_diff_line(p, len, d, why))
+            return false;
+        if (!nl)
+            break;
+        p = nl + 1;
+    }
+    return true;
+}
+
+static const struct base_row *find_base_row(const struct base_row *v, size_t n,
+                                            const struct base_row *r)
+{
+    for (size_t i = 0; i < n; i++)
+        if (v[i].klen == r->klen && memcmp(v[i].key, r->key, r->klen) == 0)
+            return &v[i];
+    return NULL;
+}
+
+/* grown: a new row whose key is absent from the old rows or whose score
+ * rose. removed: an old row whose key is absent from the new rows. A lowered
+ * score is neither. */
+static void count_baseline(const struct base_diff *d, long *grown, long *removed)
+{
+    *grown = 0;
+    *removed = 0;
+    for (size_t i = 0; i < d->nneu; i++) {
+        const struct base_row *o = find_base_row(d->old, d->nold, &d->neu[i]);
+        if (!o || d->neu[i].score > o->score)
+            (*grown)++;
+    }
+    for (size_t i = 0; i < d->nold; i++)
+        if (!find_base_row(d->neu, d->nneu, &d->old[i]))
+            (*removed)++;
+}
+
+static int judge_baseline(struct tick *t)
+{
+    const char *const diff[] = { O(t, LT_O_GIT), "diff", "-U0", "--",
+                                 "tools/lint/cyclomatic_complexity_baseline.txt",
+                                 NULL };
+    const int rc = run(t, t->dir, diff, LT_SHORT_TIMEOUT_MS);
+    if (rc != 0)
+        return hold(t, t->lane, "baseline diff could not be judged (git diff rc=%d)", rc);
+    if (strlen(t->buf) >= LT_BUF - 1)
+        return hold(t, t->lane, "baseline diff could not be judged (output truncated)");
+    struct base_diff d = { NULL, NULL, 0, 0 };
+    d.old = zcl_malloc(sizeof(struct base_row) * LT_BASE_ROWS, "loop_tick_base_old");
+    d.neu = zcl_malloc(sizeof(struct base_row) * LT_BASE_ROWS, "loop_tick_base_new");
+    if (!d.old || !d.neu) {
+        free(d.old);
+        free(d.neu);
+        return hold(t, t->lane, "baseline diff could not be judged (cannot allocate)");
+    }
+    const char *why = NULL;
+    const bool ok = split_baseline_diff(t->buf, &d, &why);
+    long grown = 0;
+    if (ok)
+        count_baseline(&d, &grown, &t->removed);
+    free(d.old);
+    free(d.neu);
+    if (!ok)
+        return hold(t, t->lane, "baseline diff could not be judged (%s)", why);
+    if (grown > 0)
+        return hold(t, t->lane, "baseline grew: %ld new or higher row(s)", grown);
+    if (t->removed <= 0)
+        return hold(t, t->lane, "no function left the baseline");
+    return LT_GO;
+}
+
 static int stage_baseline(struct tick *t)
 {
     if (strcmp(t->objective, "functions_over_complexity_cap") != 0)
@@ -673,18 +813,7 @@ static int stage_baseline(struct tick *t)
     if (run_logged(t, t->dir, bin, LT_BUILD_TIMEOUT_MS, binlog) != 0 ||
         run_logged(t, t->dir, regen, LT_BUILD_TIMEOUT_MS, log) != 0)
         return hold(t, t->lane, "baseline regen failed (%s)", log);
-    const char *const num[] = { O(t, LT_O_GIT), "diff", "--numstat", "--",
-                                "tools/lint/cyclomatic_complexity_baseline.txt",
-                                NULL };
-    (void)run(t, t->dir, num, LT_SHORT_TIMEOUT_MS);
-    long added = 0;
-    t->removed = 0;
-    (void)sscanf(t->buf, "%ld %ld", &added, &t->removed);
-    if (added != 0)
-        return hold(t, t->lane, "baseline grew by %ld rows", added);
-    if (t->removed <= 0)
-        return hold(t, t->lane, "no function left the baseline");
-    return LT_GO;
+    return judge_baseline(t);
 }
 
 /* ── step 6: the signed commit ───────────────────────────────────────── */
@@ -883,8 +1012,8 @@ static bool build_review_prompt(struct tick *t, const char *path)
         t->buf[LT_SHOW_MAX] = '\0'; /* head -c 90000 */
     const int n = snprintf(p, cap,
         "You are a NON-AUTHOR reviewer of one Z23 commit in the current git worktree. You can only read files (Read, Grep, Glob); you cannot run commands or edit anything.\n"
-        "The commit claims a behaviour-preserving split of over-complexity functions in %s, and a baseline change that only deletes rows.\n"
-        "Check, reading the code at HEAD and the diff below: (1) every extracted helper preserves the original behaviour exactly: same checks in the same order, same early returns and return values, same error/log text, same side effects and short-circuit order; (2) no lookalike duplicate helpers were added where an existing one fits; (3) no function in the diff obviously exceeds cyclomatic complexity 15; (4) only %s changed; (5) the baseline diff only deletes rows; (6) nothing weakens a test, assertion, threshold or refusal; (7) every allocation stays checked.\n"
+        "The commit claims a behaviour-preserving split of over-complexity functions in %s, and a baseline change that only deletes rows or lowers a score.\n"
+        "Check, reading the code at HEAD and the diff below: (1) every extracted helper preserves the original behaviour exactly: same checks in the same order, same early returns and return values, same error/log text, same side effects and short-circuit order; (2) no lookalike duplicate helpers were added where an existing one fits; (3) no function in the diff obviously exceeds cyclomatic complexity 15; (4) only %s changed; (5) the baseline diff only deletes rows or lowers a score; (6) nothing weakens a test, assertion, threshold or refusal; (7) every allocation stays checked.\n"
         "End your reply with exactly one final line: 'VERDICT: LAND' or 'VERDICT: HOLD <reason with file:line>'.\n"
         "\n----- git show HEAD -----\n%s",
         t->target, t->owned, t->buf);
