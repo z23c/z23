@@ -192,6 +192,29 @@ struct zcl_ro_guard {
     bool reported;
 };
 
+static const char *zcl_ro_snapshot_drift(const struct zcl_ro_guard *g)
+{
+    const char *why = NULL;
+    struct platform_positioned_file file;
+    struct platform_positioned_file_snapshot snapshot;
+    platform_positioned_file_init(&file);
+    bool opened = platform_positioned_file_open(&file, g->path);
+    bool snapped = opened && platform_positioned_file_snapshot(&file, &snapshot);
+    platform_positioned_file_close(&file);
+    if (!snapped)
+        why = "it can no longer be opened and snapshotted";
+    else if (snapshot.volume != g->snapshot.volume ||
+             snapshot.file_low != g->snapshot.file_low ||
+             snapshot.file_high != g->snapshot.file_high)
+        why = "it was replaced by a different file";
+    else if (snapshot.size != g->snapshot.size)
+        why = "its length changed";
+    else if (snapshot.modified_seconds != g->snapshot.modified_seconds ||
+             snapshot.modified_nanoseconds != g->snapshot.modified_nanoseconds)
+        why = "it was written to";
+    return why;
+}
+
 /* True while the database still looks exactly as it did when the immutable
  * snapshot was justified.
  *
@@ -217,25 +240,8 @@ static bool zcl_ro_guard_intact(struct zcl_ro_guard *g)
     else if (now.wal_bytes != g->at_open.wal_bytes)
         why = "its write-ahead log changed length";
 
-    if (!why) {
-        struct platform_positioned_file file;
-        struct platform_positioned_file_snapshot snapshot;
-        platform_positioned_file_init(&file);
-        bool opened = platform_positioned_file_open(&file, g->path);
-        bool snapped = opened && platform_positioned_file_snapshot(&file, &snapshot);
-        platform_positioned_file_close(&file);
-        if (!snapped)
-            why = "it can no longer be opened and snapshotted";
-        else if (snapshot.volume != g->snapshot.volume ||
-                 snapshot.file_low != g->snapshot.file_low ||
-                 snapshot.file_high != g->snapshot.file_high)
-            why = "it was replaced by a different file";
-        else if (snapshot.size != g->snapshot.size)
-            why = "its length changed";
-        else if (snapshot.modified_seconds != g->snapshot.modified_seconds ||
-                 snapshot.modified_nanoseconds != g->snapshot.modified_nanoseconds)
-            why = "it was written to";
-    }
+    if (!why)
+        why = zcl_ro_snapshot_drift(g);
     if (!why)
         return true;
 
@@ -354,6 +360,13 @@ static enum zcl_node_db_ro_status zcl_ro_guard_arm(
     return ZCL_NODE_DB_RO_OK;
 }
 
+static bool zcl_ro_uri_unreserved(unsigned char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') || c == '-' || c == '.' ||
+           c == '_' || c == '~' || c == '/';
+}
+
 /* A file: URI over an arbitrary datadir path. A datadir may legitimately hold
  * `?` or `#` — which sqlite would read as the start of the query and the
  * fragment — or `%`, which it would read as an escape, so everything outside
@@ -372,9 +385,7 @@ static bool zcl_ro_immutable_uri(const char *path, char *out, size_t out_size)
     size_t n = plen;
     for (const char *p = path; *p; p++) {
         unsigned char c = (unsigned char)*p;
-        bool unreserved = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-                          (c >= '0' && c <= '9') || c == '-' || c == '.' ||
-                          c == '_' || c == '~' || c == '/';
+        bool unreserved = zcl_ro_uri_unreserved(c);
         size_t need = unreserved ? 1u : 3u;
         if (n + need + slen + 1 > out_size)
             return false;
@@ -442,9 +453,62 @@ static enum zcl_node_db_ro_status zcl_ro_attach(const char *dsn, int flags,
     return ZCL_NODE_DB_RO_OK;
 }
 
+static enum zcl_node_db_ro_status zcl_ro_finish_immutable(
+    const char *path, sqlite3 **db_out)
+{
+    sqlite3 *db = *db_out;
+    bool immutable = true;
+    enum zcl_node_db_ro_status st;
+    /* Fourth, and only on the immutable path: make sure nothing attached to
+     * the database WHILE it was being read. immutable=1 does not consult a
+     * write-ahead log — that is exactly what lets it create no wal-index — so
+     * a writer arriving between the probe above and here would leave this
+     * handle reading the database's pre-log past. A wal-index existing now
+     * says that happened. Retry ONCE through the plain open, which at that
+     * point creates nothing because both sidecars are already there.
+     *
+     * The window is a node attaching to a datadir a read leaf was pointed at
+     * in the same instant, so this almost never fires; it is here because a
+     * silently stale answer is the failure this file cannot ship. */
+    struct zcl_ro_sidecars now;
+    zcl_ro_probe_sidecars(path, &now);
+    if (now.wal && now.shm) {
+        sqlite3_close(db);
+        db = NULL;
+        st = zcl_ro_attach(path, SQLITE_OPEN_READONLY, path, &db);
+        if (st != ZCL_NODE_DB_RO_OK)
+            return st;
+        immutable = false;  /* reading through a live wal-index now */
+    } else if (now.wal && now.wal_bytes > 0) {
+        sqlite3_close(db);
+        LOG_RETURN(ZCL_NODE_DB_RO_UNRECOVERED_LOG, "cmd",
+                   "%s grew a %lld-byte write-ahead log while it was being "
+                   "read and has no wal-index beside it, so this read may "
+                   "be missing its commits: refusing rather than answering "
+                   "from the database's pre-log state",
+                   path, now.wal_bytes);
+    }
+
+    /* Fifth: AND THE FOURTH CHECK IS STILL ONLY ONE INSTANT. The handle
+     * goes back to a leaf that queries it afterwards, so the "no writer is
+     * attached" premise has to hold for the handle's whole life, not just
+     * for the open. Arm the guard that re-checks it at every statement —
+     * see the block comment on struct zcl_ro_guard. */
+    if (immutable) {
+        st = zcl_ro_guard_arm(db, path, &now);
+        if (st != ZCL_NODE_DB_RO_OK) {
+            sqlite3_close(db);
+            return st;
+        }
+    }
+
+    *db_out = db;
+    return ZCL_NODE_DB_RO_OK;
+}
+
 /* The read-only open itself, over a path the caller has already resolved.
  *
- * Everything that makes this safe lives in ONE function so a second store
+ * Everything that makes this safe lives in one read-only open path so a second store
  * cannot drift from the first: there are two databases under a datadir that
  * read leaves are pointed at — node.db and the consensus.db kernel store —
  * and the whole reason both had a boot-ceremony hole is that each open was
@@ -493,49 +557,10 @@ static enum zcl_node_db_ro_status zcl_ro_open_existing(const char *path,
     if (st != ZCL_NODE_DB_RO_OK)
         return st;
 
-    /* Fourth, and only on the immutable path: make sure nothing attached to
-     * the database WHILE it was being read. immutable=1 does not consult a
-     * write-ahead log — that is exactly what lets it create no wal-index — so
-     * a writer arriving between the probe above and here would leave this
-     * handle reading the database's pre-log past. A wal-index existing now
-     * says that happened. Retry ONCE through the plain open, which at that
-     * point creates nothing because both sidecars are already there.
-     *
-     * The window is a node attaching to a datadir a read leaf was pointed at
-     * in the same instant, so this almost never fires; it is here because a
-     * silently stale answer is the failure this file cannot ship. */
     if (immutable) {
-        struct zcl_ro_sidecars now;
-        zcl_ro_probe_sidecars(path, &now);
-        if (now.wal && now.shm) {
-            sqlite3_close(db);
-            db = NULL;
-            st = zcl_ro_attach(path, SQLITE_OPEN_READONLY, path, &db);
-            if (st != ZCL_NODE_DB_RO_OK)
-                return st;
-            immutable = false;  /* reading through a live wal-index now */
-        } else if (now.wal && now.wal_bytes > 0) {
-            sqlite3_close(db);
-            LOG_RETURN(ZCL_NODE_DB_RO_UNRECOVERED_LOG, "cmd",
-                       "%s grew a %lld-byte write-ahead log while it was being "
-                       "read and has no wal-index beside it, so this read may "
-                       "be missing its commits: refusing rather than answering "
-                       "from the database's pre-log state",
-                       path, now.wal_bytes);
-        }
-
-        /* Fifth: AND THE FOURTH CHECK IS STILL ONLY ONE INSTANT. The handle
-         * goes back to a leaf that queries it afterwards, so the "no writer is
-         * attached" premise has to hold for the handle's whole life, not just
-         * for the open. Arm the guard that re-checks it at every statement —
-         * see the block comment on struct zcl_ro_guard. */
-        if (immutable) {
-            st = zcl_ro_guard_arm(db, path, &now);
-            if (st != ZCL_NODE_DB_RO_OK) {
-                sqlite3_close(db);
-                return st;
-            }
-        }
+        st = zcl_ro_finish_immutable(path, &db);
+        if (st != ZCL_NODE_DB_RO_OK)
+            return st;
     }
 
     *db_out = db;
