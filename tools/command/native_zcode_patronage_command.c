@@ -292,6 +292,39 @@ void zcl_native_handle_zcode_patronage_fund_commit(
     zpc_fund(request, reply, true);
 }
 
+static bool zpc_show_intent(uint8_t *wire, size_t wire_len,
+                            struct vcs_zcode_patronage_validation_context *context,
+                            uint8_t root[32], struct zcl_command_reply *reply)
+{
+    struct vcs_zcode_patronage_intent_v1 intent;
+    uint8_t derived[32];
+    bool ok = vcs_zcode_patronage_intent_parse(wire, wire_len, &intent) ==
+                VCS_ZCODE_PATRONAGE_OK &&
+              vcs_zcode_patronage_intent_verify_cas(&intent, context) ==
+                VCS_ZCODE_PATRONAGE_OK &&
+              vcs_zcode_patronage_intent_root(&intent, derived) ==
+                VCS_ZCODE_PATRONAGE_OK && memcmp(root, derived, 32) == 0;
+    if (ok) zpc_render_intent(&reply->data, &intent, root);
+    return ok;
+}
+
+static bool zpc_show_funding(uint8_t *wire, size_t wire_len,
+                             struct vcs_zcode_patronage_validation_context *context,
+                             uint8_t root[32], struct zcl_command_reply *reply)
+{
+    struct vcs_zcode_patronage_funding_v1 funding;
+    uint8_t derived[32];
+    bool ok = vcs_zcode_patronage_funding_parse(wire, wire_len, &funding) ==
+                VCS_ZCODE_PATRONAGE_FUNDING_OK &&
+              vcs_zcode_patronage_funding_verify_cas(&funding, context) ==
+                VCS_ZCODE_PATRONAGE_FUNDING_OK &&
+              vcs_zcode_patronage_funding_root(&funding, derived) ==
+                VCS_ZCODE_PATRONAGE_FUNDING_OK &&
+              memcmp(root, derived, 32) == 0;
+    if (ok) zpc_render_funding(&reply->data, &funding, root);
+    return ok;
+}
+
 void zcl_native_handle_zcode_patronage_show(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -299,7 +332,7 @@ void zcl_native_handle_zcode_patronage_show(
         "workspace", "root", "expected_network_genesis_root", "now_unix",
     };
     if (!request || !reply) return;
-    uint8_t root[32], network[32], derived[32], *wire = NULL;
+    uint8_t root[32], network[32], *wire = NULL;
     size_t wire_len = 0;
     struct vcs_zcode_patronage_validation_context context;
     if (!zpc_keys(request->input, keys, sizeof(keys) / sizeof(keys[0])) ||
@@ -315,24 +348,9 @@ void zcl_native_handle_zcode_patronage_show(
     }
     bool ok = false;
     if (wire_len == VCS_ZCODE_PATRONAGE_INTENT_WIRE_BYTES) {
-        struct vcs_zcode_patronage_intent_v1 intent;
-        ok = vcs_zcode_patronage_intent_parse(wire, wire_len, &intent) ==
-                VCS_ZCODE_PATRONAGE_OK &&
-             vcs_zcode_patronage_intent_verify_cas(&intent, &context) ==
-                VCS_ZCODE_PATRONAGE_OK &&
-             vcs_zcode_patronage_intent_root(&intent, derived) ==
-                VCS_ZCODE_PATRONAGE_OK && memcmp(root, derived, 32) == 0;
-        if (ok) zpc_render_intent(&reply->data, &intent, root);
+        ok = zpc_show_intent(wire, wire_len, &context, root, reply);
     } else if (wire_len == VCS_ZCODE_PATRONAGE_FUNDING_WIRE_BYTES) {
-        struct vcs_zcode_patronage_funding_v1 funding;
-        ok = vcs_zcode_patronage_funding_parse(wire, wire_len, &funding) ==
-                VCS_ZCODE_PATRONAGE_FUNDING_OK &&
-             vcs_zcode_patronage_funding_verify_cas(&funding, &context) ==
-                VCS_ZCODE_PATRONAGE_FUNDING_OK &&
-             vcs_zcode_patronage_funding_root(&funding, derived) ==
-                VCS_ZCODE_PATRONAGE_FUNDING_OK &&
-             memcmp(root, derived, 32) == 0;
-        if (ok) zpc_render_funding(&reply->data, &funding, root);
+        ok = zpc_show_funding(wire, wire_len, &context, root, reply);
     }
     free(wire);
     if (!ok) {
@@ -600,6 +618,77 @@ static bool zpc_u64_pin(const struct json_value *input, const char *key,
     return true;
 }
 
+static bool zpc_bind_read_first(
+    const struct json_value *input, struct zpc_simulation_context *context,
+    uint64_t *epoch, uint64_t *award, uint64_t *active_height,
+    uint64_t *active_mtp)
+{
+    return zpc_hex(input, "expected_network_genesis_root",
+                   context->network_root, 32) &&
+           zpc_hex(input, "expected_zc23_policy_root",
+                   context->policy_root, 32) &&
+           zpc_u64_pin(input, "expected_epoch", epoch) &&
+           zpc_u64_pin(input, "expected_award_atoms", award) &&
+           zpc_u64_pin(input, "active_height", active_height) &&
+           zpc_u64_pin(input, "active_mtp", active_mtp);
+}
+
+static bool zpc_bind_read_anchors(const struct json_value *input,
+                                  struct zpc_simulation_context *context)
+{
+    return zpc_u64_pin(input, "anchor_opening_height",
+                       &context->opening_height) &&
+           zpc_hex(input, "anchor_opening_hash", context->opening_hash, 32) &&
+           zpc_u64_pin(input, "anchor_maturity_height",
+                       &context->maturity_height) &&
+           zpc_hex(input, "anchor_maturity_hash", context->maturity_hash, 32);
+}
+
+static bool zpc_bind_pins_nonzero(const struct zpc_simulation_context *context,
+                                  uint64_t award, uint64_t active_height,
+                                  uint64_t active_mtp)
+{
+    static const uint8_t zero[32] = {0};
+    return award != 0 && active_height != 0 && active_mtp != 0 &&
+           context->opening_height != 0 && context->maturity_height != 0 &&
+           memcmp(context->network_root, zero, 32) != 0 &&
+           memcmp(context->policy_root, zero, 32) != 0 &&
+           memcmp(context->opening_hash, zero, 32) != 0 &&
+           memcmp(context->maturity_hash, zero, 32) != 0;
+}
+
+static void zpc_bind_wire_patronage(struct zpc_simulation_context *context,
+                                    int64_t now)
+{
+    context->patronage.workspace = context->workspace;
+    context->patronage.expected_network_genesis_root = context->network_root;
+    context->patronage.now_unix = now;
+    context->patronage.binding_is_current = zpc_sim_binding_is_current;
+    context->patronage.callback_opaque = context;
+}
+
+static void zpc_bind_wire_creation(struct zpc_simulation_context *context,
+                                   uint64_t epoch, uint64_t award,
+                                   uint64_t active_height, uint64_t active_mtp,
+                                   int64_t now)
+{
+    context->creation.workspace = context->workspace;
+    context->creation.expected_network_genesis_root = context->network_root;
+    context->creation.expected_zc23_policy_root = context->policy_root;
+    context->creation.expected_epoch = epoch;
+    context->creation.expected_award_atoms = award;
+    context->creation.active_height = active_height;
+    context->creation.active_mtp = (int64_t)active_mtp;
+    context->creation.now_unix = now;
+    context->creation.anchor_is_active = zpc_sim_anchor_is_active;
+    context->creation.contribution_is_duplicate =
+        zpc_sim_contribution_is_duplicate;
+    context->creation.binding_is_current = zpc_sim_binding_is_current;
+    context->creation.continuity_is_duplicate =
+        zpc_sim_continuity_is_duplicate;
+    context->creation.callback_opaque = context;
+}
+
 bool zpc_simulation_context_bind(
     const struct json_value *input, struct zpc_simulation_context *context,
     const char **reason)
@@ -612,20 +701,9 @@ bool zpc_simulation_context_bind(
     uint64_t epoch = 0, award = 0, active_height = 0, active_mtp = 0;
     if (!workspace ||
         !zcl_native_zcode_workspace_is_explicit_scratch(workspace) ||
-        !zpc_hex(input, "expected_network_genesis_root",
-                 context->network_root, 32) ||
-        !zpc_hex(input, "expected_zc23_policy_root",
-                 context->policy_root, 32) ||
-        !zpc_u64_pin(input, "expected_epoch", &epoch) ||
-        !zpc_u64_pin(input, "expected_award_atoms", &award) ||
-        !zpc_u64_pin(input, "active_height", &active_height) ||
-        !zpc_u64_pin(input, "active_mtp", &active_mtp) ||
-        !zpc_u64_pin(input, "anchor_opening_height",
-                     &context->opening_height) ||
-        !zpc_hex(input, "anchor_opening_hash", context->opening_hash, 32) ||
-        !zpc_u64_pin(input, "anchor_maturity_height",
-                     &context->maturity_height) ||
-        !zpc_hex(input, "anchor_maturity_hash", context->maturity_hash, 32) ||
+        !zpc_bind_read_first(input, context, &epoch, &award, &active_height,
+                             &active_mtp) ||
+        !zpc_bind_read_anchors(input, context) ||
         !zpc_now(input, &now)) {
         if (reason)
             *reason = "workspace, network/immutable-policy roots, epoch/award,"
@@ -633,13 +711,7 @@ bool zpc_simulation_context_bind(
                       " now are required";
         return false;
     }
-    static const uint8_t zero[32] = {0};
-    if (award == 0 || active_height == 0 || active_mtp == 0 ||
-        context->opening_height == 0 || context->maturity_height == 0 ||
-        memcmp(context->network_root, zero, 32) == 0 ||
-        memcmp(context->policy_root, zero, 32) == 0 ||
-        memcmp(context->opening_hash, zero, 32) == 0 ||
-        memcmp(context->maturity_hash, zero, 32) == 0) {
+    if (!zpc_bind_pins_nonzero(context, award, active_height, active_mtp)) {
         if (reason)
             *reason = "zero or empty network, immutable-policy or anchor pin";
         return false;
@@ -656,26 +728,9 @@ bool zpc_simulation_context_bind(
         return false;
     }
     memcpy(context->workspace, workspace, strlen(workspace) + 1);
-    context->patronage.workspace = context->workspace;
-    context->patronage.expected_network_genesis_root = context->network_root;
-    context->patronage.now_unix = now;
-    context->patronage.binding_is_current = zpc_sim_binding_is_current;
-    context->patronage.callback_opaque = context;
-    context->creation.workspace = context->workspace;
-    context->creation.expected_network_genesis_root = context->network_root;
-    context->creation.expected_zc23_policy_root = context->policy_root;
-    context->creation.expected_epoch = epoch;
-    context->creation.expected_award_atoms = award;
-    context->creation.active_height = active_height;
-    context->creation.active_mtp = (int64_t)active_mtp;
-    context->creation.now_unix = now;
-    context->creation.anchor_is_active = zpc_sim_anchor_is_active;
-    context->creation.contribution_is_duplicate =
-        zpc_sim_contribution_is_duplicate;
-    context->creation.binding_is_current = zpc_sim_binding_is_current;
-    context->creation.continuity_is_duplicate =
-        zpc_sim_continuity_is_duplicate;
-    context->creation.callback_opaque = context;
+    zpc_bind_wire_patronage(context, now);
+    zpc_bind_wire_creation(context, epoch, award, active_height, active_mtp,
+                           now);
     context->settlement.patronage = &context->patronage;
     context->settlement.creation = &context->creation;
     context->settlement.active_height = active_height;
@@ -893,13 +948,9 @@ void zcl_native_handle_zcode_patronage_refund_commit(
     zpc_refund_handle(request, reply, true);
 }
 
-bool zcl_native_zcode_anchor_verify_commons(
-    const struct json_value *input,
-    struct zcl_native_zcode_anchor_report *report)
+static bool zpc_anchor_context_blocked(
+    const struct json_value *input, struct zcl_native_zcode_anchor_report *report)
 {
-    if (!input || !report)
-        return false;
-    memset(report, 0, sizeof(*report));
     static const char *const context_keys[] = {
         "expected_network_genesis_root", "expected_zc23_policy_root",
         "expected_epoch", "expected_award_atoms", "active_height",
@@ -927,14 +978,59 @@ bool zcl_native_zcode_anchor_verify_commons(
                        "missing_simulation_context_pin:%s", missing);
         return true;
     }
-    struct zpc_simulation_context context;
+    return false;
+}
+
+static bool zpc_anchor_bind_refused(
+    const struct json_value *input, struct zpc_simulation_context *context,
+    struct zcl_native_zcode_anchor_report *report)
+{
     const char *reason = NULL;
-    if (!zpc_simulation_context_bind(input, &context, &reason)) {
-        (void)snprintf(report->context_blocker,
-                       sizeof(report->context_blocker), "%s",
-                       reason ? reason : "simulation context refused");
+    if (zpc_simulation_context_bind(input, context, &reason))
+        return false;
+    (void)snprintf(report->context_blocker,
+                   sizeof(report->context_blocker), "%s",
+                   reason ? reason : "simulation context refused");
+    return true;
+}
+
+static bool zpc_anchor_verify_one(
+    struct vcs_zcode_commons_projection *projection,
+    struct zpc_simulation_context *context, size_t index,
+    struct zcl_native_zcode_anchor_report *report)
+{
+    const struct vcs_zcode_commons_creation_entry *entry =
+        vcs_zcode_commons_projection_creation_at(projection, index);
+    struct vcs_zcode_creation_attribution_v1 attribution;
+    enum vcs_zcode_creation_error error =
+        (entry && zpc_sim_load_creation(context->patronage.workspace,
+                                        entry->root, &attribution))
+            ? vcs_zcode_creation_attribution_verify_cas(
+                  &attribution, &context->creation)
+            : VCS_ZCODE_CREATION_CAS;
+    if (error == VCS_ZCODE_CREATION_OK) {
+        report->attributions_checked++;
         return true;
     }
+    if (entry)
+        memcpy(report->first_failure_root, entry->root, 32);
+    (void)snprintf(report->first_failure, sizeof(report->first_failure), "%s",
+                   vcs_zcode_creation_error_string(error));
+    return false;
+}
+
+bool zcl_native_zcode_anchor_verify_commons(
+    const struct json_value *input,
+    struct zcl_native_zcode_anchor_report *report)
+{
+    if (!input || !report)
+        return false;
+    memset(report, 0, sizeof(*report));
+    if (zpc_anchor_context_blocked(input, report))
+        return true;
+    struct zpc_simulation_context context;
+    if (zpc_anchor_bind_refused(input, &context, report))
+        return true;
     report->context_bound = true;
     struct vcs_zcode_commons_projection *projection =
         vcs_zcode_commons_projection_build(context.patronage.workspace);
@@ -954,27 +1050,8 @@ bool zcl_native_zcode_anchor_verify_commons(
                        failure ? failure : "commons-structural-failure");
     }
     size_t count = vcs_zcode_commons_projection_creation_count(projection);
-    for (size_t i = 0; sound && i < count; i++) {
-        const struct vcs_zcode_commons_creation_entry *entry =
-            vcs_zcode_commons_projection_creation_at(projection, i);
-        struct vcs_zcode_creation_attribution_v1 attribution;
-        enum vcs_zcode_creation_error error =
-            (entry && zpc_sim_load_creation(context.patronage.workspace,
-                                            entry->root, &attribution))
-                ? vcs_zcode_creation_attribution_verify_cas(
-                      &attribution, &context.creation)
-                : VCS_ZCODE_CREATION_CAS;
-        if (error != VCS_ZCODE_CREATION_OK) {
-            if (entry)
-                memcpy(report->first_failure_root, entry->root, 32);
-            (void)snprintf(report->first_failure,
-                           sizeof(report->first_failure), "%s",
-                           vcs_zcode_creation_error_string(error));
-            sound = false;
-        } else {
-            report->attributions_checked++;
-        }
-    }
+    for (size_t i = 0; sound && i < count; i++)
+        sound = zpc_anchor_verify_one(projection, &context, i, report);
     report->verified = sound;
     vcs_zcode_commons_projection_free(projection);
     return true;
