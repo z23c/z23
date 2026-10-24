@@ -103,6 +103,53 @@ static void write_c_string(FILE *out, const char *buf, size_t len) {
     fprintf(out, "\"");
 }
 
+/* CSS whitespace, and the structural characters that absorb the whitespace
+ * beside them. */
+static bool css_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static bool css_structural(char c) {
+    return c == '{' || c == '}' || c == ':' || c == ';' || c == ',' || c == '>';
+}
+
+/* True when a block comment opens at src[i]. */
+static bool css_comment_open(const char *src, size_t src_len, size_t i) {
+    return i + 1 < src_len && src[i] == '/' && src[i + 1] == '*';
+}
+
+/* Return the index just past the block comment that opens at src[i]. */
+static size_t skip_css_comment(const char *src, size_t src_len, size_t i) {
+    i += 2;
+    while (i + 1 < src_len && !(src[i] == '*' && src[i + 1] == '/')) i++;
+    if (i + 1 < src_len) i += 2;
+    return i;
+}
+
+/* Update string state for the quote character at src[i]. */
+static void track_css_quote(const char *src, size_t i, bool *in_string,
+                            char *string_char) {
+    if (!*in_string) {
+        *in_string = true;
+        *string_char = src[i];
+    } else if (src[i] == *string_char && (i == 0 || src[i - 1] != '\\')) {
+        *in_string = false;
+    }
+}
+
+/* Collapse the whitespace run at src[i] into at most one space in out.
+ * The space is dropped beside a structural character. Returns the index just
+ * past the run; *w is the output length and is advanced. */
+static size_t collapse_css_space(const char *src, size_t src_len, size_t i,
+                                 char *out, size_t *w) {
+    bool skip = *w > 0 && css_structural(out[*w - 1]);
+    while (i < src_len && css_space(src[i])) i++;
+    if (i < src_len && css_structural(src[i])) skip = true;
+    if (!skip && *w > 0 && i < src_len)
+        out[(*w)++] = ' ';
+    return i;
+}
+
 /* Minify CSS: strip comments, collapse whitespace, remove spaces around
  * structural characters. Output goes to malloc'd buffer. */
 static char *minify_css(const char *src, size_t src_len, size_t *out_len) {
@@ -114,20 +161,13 @@ static char *minify_css(const char *src, size_t src_len, size_t *out_len) {
 
     for (size_t i = 0; i < src_len; ) {
         /* Skip block comments */
-        if (!in_string && i + 1 < src_len && src[i] == '/' && src[i+1] == '*') {
-            i += 2;
-            while (i + 1 < src_len && !(src[i] == '*' && src[i+1] == '/')) i++;
-            if (i + 1 < src_len) i += 2;
+        if (!in_string && css_comment_open(src, src_len, i)) {
+            i = skip_css_comment(src, src_len, i);
             continue;
         }
         /* Track strings to avoid mangling them */
         if (src[i] == '\'' || src[i] == '"') {
-            if (!in_string) {
-                in_string = true;
-                string_char = src[i];
-            } else if (src[i] == string_char && (i == 0 || src[i-1] != '\\')) {
-                in_string = false;
-            }
+            track_css_quote(src, i, &in_string, &string_char);
             out[w++] = src[i++];
             continue;
         }
@@ -136,27 +176,8 @@ static char *minify_css(const char *src, size_t src_len, size_t *out_len) {
             continue;
         }
         /* Collapse whitespace */
-        if (src[i] == ' ' || src[i] == '\t' || src[i] == '\n' || src[i] == '\r') {
-            /* Skip whitespace entirely if adjacent to structural chars */
-            bool skip = false;
-            if (w > 0) {
-                char prev = out[w-1];
-                if (prev == '{' || prev == '}' || prev == ':' ||
-                    prev == ';' || prev == ',' || prev == '>')
-                    skip = true;
-            }
-            /* Skip leading whitespace */
-            while (i < src_len && (src[i] == ' ' || src[i] == '\t' ||
-                                   src[i] == '\n' || src[i] == '\r')) i++;
-            /* Check next char */
-            if (i < src_len) {
-                char next = src[i];
-                if (next == '{' || next == '}' || next == ':' ||
-                    next == ';' || next == ',' || next == '>')
-                    skip = true;
-            }
-            if (!skip && w > 0 && i < src_len)
-                out[w++] = ' ';
+        if (css_space(src[i])) {
+            i = collapse_css_space(src, src_len, i, out, &w);
             continue;
         }
         out[w++] = src[i++];
@@ -268,6 +289,32 @@ static int commit_staged(FILE *out, const char *tmp_path, const char *out_path,
     return 0;
 }
 
+/* Close whichever selftest stages opened and remove their files. */
+static void discard_selftest_stages(FILE *a, const char *stage_a,
+                                    FILE *b, const char *stage_b)
+{
+    if (a) (void)fclose(a);
+    if (b) (void)fclose(b);
+    if (a) (void)remove(stage_a);
+    if (b && (!a || strcmp(stage_a, stage_b) != 0))
+        (void)remove(stage_b);
+}
+
+/* The destination must hold exactly the second stage's bytes, both stages
+ * must have been committed (changed), and neither stage file may survive. */
+static bool selftest_outcome_ok(bool changed_a, bool changed_b,
+                                const char *destination,
+                                const char *stage_a, const char *stage_b)
+{
+    size_t length = 0;
+    char *bytes = read_file(destination, &length);
+    bool ok = changed_a && changed_b && bytes && length == 7u &&
+              memcmp(bytes, "second\n", 7u) == 0;
+    free(bytes);
+    return ok && read_file(stage_a, &length) == NULL &&
+           read_file(stage_b, &length) == NULL;
+}
+
 /* Deterministic KAT for the race that a timing-only parallel test can miss:
  * two stages for one destination must coexist and commit independent bytes.
  * The old `<output>.tmp` implementation fails before either close because the
@@ -289,11 +336,7 @@ static int staging_selftest(void)
     FILE *a = open_staged(destination, stage_a, sizeof(stage_a));
     FILE *b = open_staged(destination, stage_b, sizeof(stage_b));
     if (!a || !b || strcmp(stage_a, stage_b) == 0) {
-        if (a) (void)fclose(a);
-        if (b) (void)fclose(b);
-        if (a) (void)remove(stage_a);
-        if (b && (!a || strcmp(stage_a, stage_b) != 0))
-            (void)remove(stage_b);
+        discard_selftest_stages(a, stage_a, b, stage_b);
         fprintf(stderr, "gen_templates: staging selftest lacks distinct exclusive stages\n");
         return 1;
     }
@@ -313,13 +356,8 @@ static int staging_selftest(void)
         (void)remove(destination);
         return 1;
     }
-    size_t length = 0;
-    char *bytes = read_file(destination, &length);
-    bool ok = changed_a && changed_b && bytes && length == 7u &&
-              memcmp(bytes, "second\n", 7u) == 0;
-    free(bytes);
-    ok = ok && read_file(stage_a, &length) == NULL &&
-         read_file(stage_b, &length) == NULL;
+    bool ok = selftest_outcome_ok(changed_a, changed_b, destination,
+                                  stage_a, stage_b);
     (void)remove(destination);
     fprintf(stderr, "gen_templates: staging selftest %s\n", ok ? "PASS" : "FAIL");
     return ok ? 0 : 1;
@@ -501,26 +539,11 @@ static int name_cmp(const void *a, const void *b)
     return strcmp((const char *)a, (const char *)b);
 }
 
-static int process_dir(const char *dir, const char *ext, const char *prefix,
-                       bool minify, FILE *out) {
-    DIR *d = opendir(dir);
-    if (!d) return 0;
-
-    int count = 0;
+/* Collect the names in dir that end with ext and fit the name buffer, in
+ * readdir order. Exits on overflow of MAX_TEMPLATES. */
+static size_t collect_dir_names(DIR *d, const char *dir, const char *ext,
+                                char (*names)[256]) {
     size_t ext_len = strlen(ext);
-
-    /* Collect the matching names, THEN sort, THEN emit.
-     *
-     * readdir returns entries in filesystem order. That order is not stable
-     * across machines, and not even across two checkouts on one machine —
-     * it follows directory inode layout. This generator writes a TRACKED
-     * header, so an unsorted walk means the first build in a fresh clone
-     * rewrites a committed file with the same 49 templates in a different
-     * order: the tree goes dirty and the build's own source-identity guard
-     * kills the link. That is a fresh clone failing its first `make`, and it
-     * also makes a byte-identical two-builder result impossible by
-     * construction. Sorting is the whole fix. */
-    static char names[MAX_TEMPLATES][256];
     size_t n_names = 0;
     struct dirent *ent;
     while ((ent = readdir(d)) != NULL) {
@@ -542,6 +565,48 @@ static int process_dir(const char *dir, const char *ext, const char *prefix,
         memcpy(names[n_names], ent->d_name, nlen + 1);
         n_names++;
     }
+    return n_names;
+}
+
+/* Record a template for the partial registry. CSS is never tracked, and the
+ * table stops growing at MAX_TEMPLATES. Names are truncated to their slots. */
+static void track_template_name(const char *name_base, const char *name_upper,
+                                bool minify) {
+    if (minify || tmpl_name_count >= MAX_TEMPLATES) return;
+    size_t base_copy = strlen(name_base);
+    size_t upper_copy = strlen(name_upper);
+    if (base_copy >= sizeof(tmpl_names[tmpl_name_count].base))
+        base_copy = sizeof(tmpl_names[tmpl_name_count].base) - 1;
+    if (upper_copy >= sizeof(tmpl_names[tmpl_name_count].upper))
+        upper_copy = sizeof(tmpl_names[tmpl_name_count].upper) - 1;
+    memcpy(tmpl_names[tmpl_name_count].base, name_base, base_copy);
+    tmpl_names[tmpl_name_count].base[base_copy] = '\0';
+    memcpy(tmpl_names[tmpl_name_count].upper, name_upper, upper_copy);
+    tmpl_names[tmpl_name_count].upper[upper_copy] = '\0';
+    tmpl_name_count++;
+}
+
+static int process_dir(const char *dir, const char *ext, const char *prefix,
+                       bool minify, FILE *out) {
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+
+    int count = 0;
+    size_t ext_len = strlen(ext);
+
+    /* Collect the matching names, THEN sort, THEN emit.
+     *
+     * readdir returns entries in filesystem order. That order is not stable
+     * across machines, and not even across two checkouts on one machine —
+     * it follows directory inode layout. This generator writes a TRACKED
+     * header, so an unsorted walk means the first build in a fresh clone
+     * rewrites a committed file with the same 49 templates in a different
+     * order: the tree goes dirty and the build's own source-identity guard
+     * kills the link. That is a fresh clone failing its first `make`, and it
+     * also makes a byte-identical two-builder result impossible by
+     * construction. Sorting is the whole fix. */
+    static char names[MAX_TEMPLATES][256];
+    size_t n_names = collect_dir_names(d, dir, ext, names);
     closedir(d);
     qsort(names, n_names, sizeof(names[0]), name_cmp);
 
@@ -579,19 +644,7 @@ static int process_dir(const char *dir, const char *ext, const char *prefix,
         to_upper_underscore(name_base, name_upper, sizeof(name_upper));
 
         /* Track for partial registry (templates only, not CSS) */
-        if (!minify && tmpl_name_count < MAX_TEMPLATES) {
-            size_t base_copy = strlen(name_base);
-            size_t upper_copy = strlen(name_upper);
-            if (base_copy >= sizeof(tmpl_names[tmpl_name_count].base))
-                base_copy = sizeof(tmpl_names[tmpl_name_count].base) - 1;
-            if (upper_copy >= sizeof(tmpl_names[tmpl_name_count].upper))
-                upper_copy = sizeof(tmpl_names[tmpl_name_count].upper) - 1;
-            memcpy(tmpl_names[tmpl_name_count].base, name_base, base_copy);
-            tmpl_names[tmpl_name_count].base[base_copy] = '\0';
-            memcpy(tmpl_names[tmpl_name_count].upper, name_upper, upper_copy);
-            tmpl_names[tmpl_name_count].upper[upper_copy] = '\0';
-            tmpl_name_count++;
-        }
+        track_template_name(name_base, name_upper, minify);
 
         if (minify) {
             size_t min_len = 0;
@@ -644,27 +697,45 @@ static int process_dir(const char *dir, const char *ext, const char *prefix,
     return count;
 }
 
+/* Single-header modes: argv[1] selects the writer, and its usage tail is
+ * printed when the argument count is wrong. */
+struct single_mode {
+    const char *flag;
+    const char *usage;
+    int (*write)(const char *src, const char *out, const char *symbol,
+                 const char *guard);
+};
+
+static const struct single_mode single_modes[] = {
+    { "--single-css", "--single-css <input.css> <output.h> <symbol> <guard>",
+      write_single_css_header },
+    { "--single-text", "--single-text <input> <output.h> <symbol> <guard>",
+      write_single_text_header },
+};
+
+/* Returns false when argv names no single-header mode, so main falls through
+ * to the directory mode. Otherwise stores the exit code in *rc. */
+static bool run_single_mode(int argc, char **argv, int *rc) {
+    for (size_t i = 0; i < sizeof(single_modes) / sizeof(single_modes[0]); i++) {
+        if (argc < 2 || strcmp(argv[1], single_modes[i].flag) != 0)
+            continue;
+        if (argc != 6) {
+            fprintf(stderr, "Usage: %s %s\n", argv[0], single_modes[i].usage);
+            *rc = 1;
+        } else {
+            *rc = single_modes[i].write(argv[2], argv[3], argv[4], argv[5]);
+        }
+        return true;
+    }
+    return false;
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--selftest-staging") == 0)
         return staging_selftest();
-    if (argc >= 2 && strcmp(argv[1], "--single-css") == 0) {
-        if (argc != 6) {
-            fprintf(stderr,
-                "Usage: %s --single-css <input.css> <output.h> <symbol> <guard>\n",
-                argv[0]);
-            return 1;
-        }
-        return write_single_css_header(argv[2], argv[3], argv[4], argv[5]);
-    }
-    if (argc >= 2 && strcmp(argv[1], "--single-text") == 0) {
-        if (argc != 6) {
-            fprintf(stderr,
-                "Usage: %s --single-text <input> <output.h> <symbol> <guard>\n",
-                argv[0]);
-            return 1;
-        }
-        return write_single_text_header(argv[2], argv[3], argv[4], argv[5]);
-    }
+    int single_rc = 0;
+    if (run_single_mode(argc, argv, &single_rc))
+        return single_rc;
 
     if (argc < 3 || argc > 4) {
         fprintf(stderr, "Usage: %s <template_dir> <output.h> [css_dir]\n",
