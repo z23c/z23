@@ -146,6 +146,103 @@ static bool marker_find_kv(const char *text, size_t len,
     return false;
 }
 
+static bool marker_value_equals(const char *text, size_t len,
+                                const char *key, const char *expected)
+{
+    char value[64];
+    return marker_find_kv(text, len, key, value, sizeof(value)) &&
+           strcmp(value, expected) == 0;
+}
+
+static bool marker_parse_i64(const char *text, size_t len, const char *key,
+                             bool nonnegative, int64_t *out)
+{
+    char value[64];
+    char *end = NULL;
+    if (!marker_find_kv(text, len, key, value, sizeof(value)))
+        return false;
+    errno = 0;
+    long long parsed = strtoll(value, &end, 10);
+    if (errno != 0 || end == value || (nonnegative && parsed < 0))
+        return false;
+    *out = (int64_t)parsed;
+    return true;
+}
+
+static bool marker_parse_u32(const char *text, size_t len, const char *key,
+                             uint32_t *out)
+{
+    char value[64];
+    char *end = NULL;
+    if (!marker_find_kv(text, len, key, value, sizeof(value)))
+        return false;
+    errno = 0;
+    unsigned long parsed = strtoul(value, &end, 10);
+    if (errno != 0 || end == value)
+        return false;
+    *out = (uint32_t)parsed;
+    return true;
+}
+
+static void marker_parse_schema_version(const char *text, size_t len,
+                                        struct shutdown_clean_binding *out)
+{
+    char value[64];
+    char *end = NULL;
+    out->schema_version = -1;
+    if (!marker_find_kv(text, len, "schema_version", value, sizeof(value)))
+        return;
+    errno = 0;
+    long parsed = strtol(value, &end, 10);
+    if (errno == 0 && end != value)
+        out->schema_version = (int)parsed;
+}
+
+static bool marker_parse_hash(const char *text, size_t len, const char *key,
+                              uint8_t out[32])
+{
+    char hex[80];
+    return marker_find_kv(text, len, key, hex, sizeof(hex)) &&
+           strlen(hex) == 64 && zcl_hex_decode(hex, out, 32);
+}
+
+static bool marker_parse_base_binding(const char *text, size_t len,
+                                      struct shutdown_clean_binding *out)
+{
+    if (!marker_value_equals(text, len, "magic", "ZCLSHUT") ||
+        !marker_value_equals(text, len, "version", "2") ||
+        !marker_value_equals(text, len, "wal_checkpointed", "1"))
+        return false;
+    if (!marker_parse_i64(text, len, "node_db_size", true,
+                          &out->node_db_size) ||
+        !marker_parse_u32(text, len, "node_db_change_counter",
+                          &out->change_counter) ||
+        !marker_parse_u32(text, len, "node_db_version_valid_for",
+                          &out->version_valid_for))
+        return false;
+    marker_parse_schema_version(text, len, out);
+    out->valid = true;
+    return true;
+}
+
+static bool marker_parse_fast_restart(const char *text, size_t len,
+                                      struct shutdown_clean_binding *out)
+{
+    return marker_parse_i64(text, len, "fr_tip_height", false,
+                            &out->fr_tip_height) &&
+           marker_parse_hash(text, len, "fr_tip_hash", out->fr_tip_hash) &&
+           marker_parse_i64(text, len, "fr_coins_best_height", false,
+                            &out->fr_coins_best_height) &&
+           marker_parse_hash(text, len, "fr_coins_best_hash",
+                             out->fr_coins_best_hash) &&
+           marker_parse_i64(text, len, "fr_block_index_count", true,
+                            &out->fr_block_index_count) &&
+           marker_parse_i64(text, len, "fr_mmb_leaves", false,
+                            &out->fr_mmb_leaves) &&
+           marker_parse_i64(text, len, "fr_sapling_ckpt_height", false,
+                            &out->fr_sapling_ckpt_height);
+}
+
 bool boot_shutdown_marker_parse(const char *text, size_t len,
                                 struct shutdown_clean_binding *out)
 {
@@ -154,107 +251,14 @@ bool boot_shutdown_marker_parse(const char *text, size_t len,
     memset(out, 0, sizeof(*out));
     if (!text || len == 0)
         return false;
-
-    char v[64];
-
-    if (!marker_find_kv(text, len, "magic", v, sizeof(v)) ||
-        strcmp(v, "ZCLSHUT") != 0)
+    if (!marker_parse_base_binding(text, len, out))
         return false;
-    if (!marker_find_kv(text, len, "version", v, sizeof(v)) ||
-        strcmp(v, "2") != 0)
-        return false;
-    if (!marker_find_kv(text, len, "wal_checkpointed", v, sizeof(v)) ||
-        strcmp(v, "1") != 0)
-        return false;
-
-    if (!marker_find_kv(text, len, "node_db_size", v, sizeof(v)))
-        return false;
-    errno = 0;
-    char *end = NULL;
-    long long sz = strtoll(v, &end, 10);
-    if (errno != 0 || end == v || sz < 0)
-        return false;
-    out->node_db_size = (int64_t)sz;
-
-    if (!marker_find_kv(text, len, "node_db_change_counter", v, sizeof(v)))
-        return false;
-    errno = 0;
-    unsigned long cc = strtoul(v, &end, 10);
-    if (errno != 0 || end == v)
-        return false;
-    out->change_counter = (uint32_t)cc;
-
-    if (!marker_find_kv(text, len, "node_db_version_valid_for", v, sizeof(v)))
-        return false;
-    errno = 0;
-    unsigned long vvf = strtoul(v, &end, 10);
-    if (errno != 0 || end == v)
-        return false;
-    out->version_valid_for = (uint32_t)vvf;
-
-    /* schema_version is advisory; default -1 if absent/garbage. */
-    out->schema_version = -1;
-    if (marker_find_kv(text, len, "schema_version", v, sizeof(v))) {
-        errno = 0;
-        long sv = strtol(v, &end, 10);
-        if (errno == 0 && end != v)
-            out->schema_version = (int)sv;
-    }
-
-    out->valid = true;
 
     /* Tier-2 P2 fast-restart binding (optional). Present iff `fast_restart=1`
      * and every fr_* field parses; otherwise fr_valid stays false and only the
      * v2 quick_check binding above is usable. */
-    if (marker_find_kv(text, len, "fast_restart", v, sizeof(v)) &&
-        strcmp(v, "1") == 0) {
-        char hx[80];
-        bool fr_ok = true;
-
-        if (marker_find_kv(text, len, "fr_tip_height", v, sizeof(v))) {
-            errno = 0; long long x = strtoll(v, &end, 10);
-            if (errno || end == v) fr_ok = false; else out->fr_tip_height = x;
-        } else fr_ok = false;
-
-        if (fr_ok && marker_find_kv(text, len, "fr_tip_hash", hx, sizeof(hx)) &&
-            strlen(hx) == 64 && zcl_hex_decode(hx, out->fr_tip_hash, 32)) {
-            /* ok */
-        } else fr_ok = false;
-
-        if (fr_ok && marker_find_kv(text, len, "fr_coins_best_height",
-                                    v, sizeof(v))) {
-            errno = 0; long long x = strtoll(v, &end, 10);
-            if (errno || end == v) fr_ok = false;
-            else out->fr_coins_best_height = x;
-        } else fr_ok = false;
-
-        if (fr_ok &&
-            marker_find_kv(text, len, "fr_coins_best_hash", hx, sizeof(hx)) &&
-            strlen(hx) == 64 && zcl_hex_decode(hx, out->fr_coins_best_hash, 32)) {
-            /* ok */
-        } else fr_ok = false;
-
-        if (fr_ok && marker_find_kv(text, len, "fr_block_index_count",
-                                    v, sizeof(v))) {
-            errno = 0; long long x = strtoll(v, &end, 10);
-            if (errno || end == v || x < 0) fr_ok = false;
-            else out->fr_block_index_count = x;
-        } else fr_ok = false;
-
-        if (fr_ok && marker_find_kv(text, len, "fr_mmb_leaves", v, sizeof(v))) {
-            errno = 0; long long x = strtoll(v, &end, 10);
-            if (errno || end == v) fr_ok = false; else out->fr_mmb_leaves = x;
-        } else fr_ok = false;
-
-        if (fr_ok && marker_find_kv(text, len, "fr_sapling_ckpt_height",
-                                    v, sizeof(v))) {
-            errno = 0; long long x = strtoll(v, &end, 10);
-            if (errno || end == v) fr_ok = false;
-            else out->fr_sapling_ckpt_height = x;
-        } else fr_ok = false;
-
-        out->fr_valid = fr_ok;
-    }
+    if (marker_value_equals(text, len, "fast_restart", "1"))
+        out->fr_valid = marker_parse_fast_restart(text, len, out);
     return true;
 }
 
@@ -282,6 +286,43 @@ static uint32_t be32(const uint8_t *p)
            ((uint32_t)p[2] << 8) | (uint32_t)p[3];
 }
 
+static bool node_db_header_identity_read(
+    struct platform_positioned_file *file,
+    struct node_db_file_identity *out)
+{
+    struct platform_positioned_file_snapshot before;
+    struct platform_positioned_file_snapshot after;
+    uint8_t header[100];
+    if (!platform_positioned_file_snapshot(file, &before) ||
+        before.size < sizeof(header) || before.size > INT64_MAX)
+        return false;
+    int64_t read_size = platform_positioned_file_read(
+        file, header, sizeof(header), 0);
+    if (read_size != (int64_t)sizeof(header) ||
+        !platform_positioned_file_snapshot(file, &after) ||
+        !marker_snapshot_equal(&before, &after) ||
+        memcmp(header, "SQLite format 3\0", 16) != 0)
+        return false;
+    out->present = true;
+    out->size = (int64_t)before.size;
+    out->change_counter = be32(header + 24);
+    out->version_valid_for = be32(header + 92);
+    return true;
+}
+
+static void node_db_wal_identity_read(
+    const char *node_db_path, struct node_db_file_identity *out)
+{
+    char wal[1200];
+    int n = snprintf(wal, sizeof(wal), "%s-wal", node_db_path);
+    if (n > 0 && (size_t)n < sizeof(wal)) {
+        struct platform_file_metadata metadata;
+        out->wal_present =
+            platform_file_metadata_read(wal, &metadata) ==
+                PLATFORM_FILE_METADATA_OK && metadata.size > 0;
+    }
+}
+
 bool node_db_file_identity_read(const char *node_db_path,
                                 struct node_db_file_identity *out)
 {
@@ -292,41 +333,15 @@ bool node_db_file_identity_read(const char *node_db_path,
         return false;
 
     struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before;
-    struct platform_positioned_file_snapshot after;
     platform_positioned_file_init(&file);
     if (!platform_positioned_file_open(&file, node_db_path))
         return false;
 
-    uint8_t hdr[100];
-    bool ok = false;
-    if (platform_positioned_file_snapshot(&file, &before) &&
-        before.size >= sizeof(hdr) && before.size <= INT64_MAX) {
-        int64_t r = platform_positioned_file_read(&file, hdr, sizeof(hdr), 0);
-        if (r == (int64_t)sizeof(hdr) &&
-            platform_positioned_file_snapshot(&file, &after) &&
-            marker_snapshot_equal(&before, &after) &&
-            memcmp(hdr, "SQLite format 3\0", 16) == 0) {
-            out->present = true;
-            out->size = (int64_t)before.size;
-            out->change_counter = be32(hdr + 24);
-            out->version_valid_for = be32(hdr + 92);
-            ok = true;
-        }
-    }
+    bool ok = node_db_header_identity_read(&file, out);
     platform_positioned_file_close(&file);
 
-    if (ok) {
-        /* WAL present iff <node.db>-wal exists with size > 0. */
-        char wal[1200];
-        int n = snprintf(wal, sizeof(wal), "%s-wal", node_db_path);
-        if (n > 0 && (size_t)n < sizeof(wal)) {
-            struct platform_file_metadata metadata;
-            out->wal_present =
-                platform_file_metadata_read(wal, &metadata) ==
-                    PLATFORM_FILE_METADATA_OK && metadata.size > 0;
-        }
-    }
+    if (ok)
+        node_db_wal_identity_read(node_db_path, out);
     return ok;
 }
 
@@ -410,6 +425,51 @@ bool boot_shutdown_marker_quick_check_probe(const char *node_db_path)
     return false;
 }
 
+static void boot_shutdown_marker_reset_cached_bindings(void)
+{
+    memset(&g_cached_binding, 0, sizeof(g_cached_binding));
+    memset(&g_cached_fr, 0, sizeof(g_cached_fr));
+    atomic_store(&g_quick_check_skipped, false);
+    atomic_store(&g_quick_check_deferred, false);
+    atomic_store(&g_quick_check_probe_consumed, false);
+}
+
+static void boot_shutdown_marker_cache_locked(
+    struct platform_private_file *marker)
+{
+    uint64_t marker_size = 0;
+    char buf[1024];
+    if (!platform_private_file_size(marker, &marker_size) || marker_size == 0 ||
+        marker_size >= sizeof(buf) ||
+        !platform_private_file_read_at(marker, buf, (size_t)marker_size, 0))
+        return;
+    size_t rd = (size_t)marker_size;
+    struct shutdown_clean_binding parsed;
+    if (!boot_shutdown_marker_parse(buf, rd, &parsed))
+        return;
+    g_cached_binding = parsed;
+    if (parsed.fr_valid)
+        g_cached_fr = parsed;
+}
+
+static void boot_shutdown_marker_report_state(
+    bool unclean, bool marker_exists,
+    const struct platform_file_metadata *wal_metadata)
+{
+    if (unclean) {
+        printf("[boot] Unclean shutdown detected (WAL=%lldB, "
+               "clean marker missing)\n",
+               (long long)wal_metadata->size);
+        event_emitf(EV_CRASH_RECOVERY_START, 0,
+                    "wal_size=%lld clean_marker=missing",
+                    (long long)wal_metadata->size);
+    } else if (!marker_exists) {
+        printf("[boot] First boot or marker absent (no WAL)\n");
+    } else {
+        printf("[boot] Clean shutdown marker present\n");
+    }
+}
+
 bool boot_shutdown_marker_detect_unclean(const char *datadir)
 {
     char marker_path[1024];
@@ -441,46 +501,76 @@ bool boot_shutdown_marker_detect_unclean(const char *datadir)
      * node.db to the background recheck instead of blocking listen.
      * The same parse also yields the Tier-2 fast-restart binding (g_cached_fr),
      * kept separate so the quick_check probe's consume does not wipe it. */
-    memset(&g_cached_binding, 0, sizeof(g_cached_binding));
-    memset(&g_cached_fr, 0, sizeof(g_cached_fr));
-    atomic_store(&g_quick_check_skipped, false);
-    atomic_store(&g_quick_check_deferred, false);
-    atomic_store(&g_quick_check_probe_consumed, false);
-    if (marker_exists && !wal_exists) {
-        uint64_t marker_size = 0;
-        char buf[1024];
-        if (platform_private_file_size(&marker, &marker_size) &&
-            marker_size > 0 && marker_size < sizeof(buf) &&
-            platform_private_file_read_at(&marker, buf, (size_t)marker_size,
-                                           0)) {
-            size_t rd = (size_t)marker_size;
-            struct shutdown_clean_binding parsed;
-            if (boot_shutdown_marker_parse(buf, rd, &parsed)) {
-                g_cached_binding = parsed;
-                if (parsed.fr_valid)
-                    g_cached_fr = parsed;
-            }
-        }
-    }
+    boot_shutdown_marker_reset_cached_bindings();
+    if (marker_exists && !wal_exists)
+        boot_shutdown_marker_cache_locked(&marker);
 
-    if (unclean) {
-        printf("[boot] Unclean shutdown detected (WAL=%lldB, "
-               "clean marker missing)\n",
-               (long long)wal_metadata.size);
-        event_emitf(EV_CRASH_RECOVERY_START, 0,
-                    "wal_size=%lld clean_marker=missing",
-                    (long long)wal_metadata.size);
-    } else if (!marker_exists) {
-        printf("[boot] First boot or marker absent (no WAL)\n");
-    } else {
-        printf("[boot] Clean shutdown marker present\n");
-    }
+    boot_shutdown_marker_report_state(unclean, marker_exists, &wal_metadata);
 
     if (marker_exists)
         (void)platform_private_file_retire_if_identity(
             &marker, marker_path, &marker_identity);
     platform_private_file_close(&marker);
     return unclean;
+}
+
+static void boot_shutdown_marker_build_binding(
+    const char *node_db_path, struct shutdown_clean_binding *binding)
+{
+    struct node_db_file_identity identity;
+    memset(binding, 0, sizeof(*binding));
+    if (node_db_file_identity_read(node_db_path, &identity) &&
+        !identity.wal_present) {
+        binding->valid = true;
+        binding->node_db_size = identity.size;
+        binding->change_counter = identity.change_counter;
+        binding->version_valid_for = identity.version_valid_for;
+        binding->schema_version = g_schema_version;
+    }
+    /* Fold in Tier-2 fast-restart facts only with the v2 node.db identity:
+     * a fast restart always verifies node.db cleanliness first. */
+    if (binding->valid && g_fr_facts.valid) {
+        binding->fr_valid = true;
+        binding->fr_tip_height = g_fr_facts.tip_height;
+        memcpy(binding->fr_tip_hash, g_fr_facts.tip_hash, 32);
+        binding->fr_coins_best_height = g_fr_facts.coins_best_height;
+        memcpy(binding->fr_coins_best_hash, g_fr_facts.coins_best_hash, 32);
+        binding->fr_block_index_count = g_fr_facts.block_index_count;
+        binding->fr_mmb_leaves = g_fr_facts.mmb_leaves;
+        binding->fr_sapling_ckpt_height = g_fr_facts.sapling_ckpt_height;
+    }
+}
+
+static bool boot_shutdown_marker_staging_create(
+    const char *resolved, char *tmp, size_t tmp_size,
+    struct platform_private_file *staging)
+{
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 64 && !created; attempt++) {
+        uint64_t nonce = atomic_fetch_add_explicit(
+            &g_marker_nonce, 1, memory_order_relaxed);
+        int n = snprintf(tmp, tmp_size, "%s.tmp.%016llx", resolved,
+                         (unsigned long long)nonce);
+        if (n < 0 || (size_t)n >= tmp_size)
+            return false;
+        created = platform_private_file_create(tmp, staging);
+    }
+    return created;
+}
+
+static bool boot_shutdown_marker_publish(
+    struct platform_private_file *staging, const char *tmp,
+    const char *resolved, const char *parent,
+    const char *content, size_t content_size)
+{
+    bool ok = platform_private_file_write_at(staging, content, content_size, 0) &&
+              platform_private_file_flush(staging) &&
+              platform_private_file_replace(staging, tmp, resolved) &&
+              platform_private_parent_flush(parent);
+    platform_private_file_close(staging);
+    if (!ok)
+        (void)platform_private_file_unlink_missing_ok(tmp);
+    return ok;
 }
 
 bool boot_shutdown_marker_write_clean(const char *datadir)
@@ -502,30 +592,8 @@ bool boot_shutdown_marker_write_clean(const char *datadir)
      * read here is exactly what the next boot will see before it opens the
      * file. If node.db is missing/unreadable we still write a legacy
      * timestamp-only marker (no skip binding) — identical to prior behavior. */
-    struct node_db_file_identity id;
     struct shutdown_clean_binding b;
-    memset(&b, 0, sizeof(b));
-    if (node_db_file_identity_read(node_db_path, &id) && !id.wal_present) {
-        b.valid = true;
-        b.node_db_size = id.size;
-        b.change_counter = id.change_counter;
-        b.version_valid_for = id.version_valid_for;
-        b.schema_version = g_schema_version;
-    }
-
-    /* Fold in the Tier-2 fast-restart facts, if the shutdown path recorded a
-     * complete set. Requires the v2 identity too (b.valid): a fast restart
-     * always verifies node.db cleanliness first. */
-    if (b.valid && g_fr_facts.valid) {
-        b.fr_valid = true;
-        b.fr_tip_height = g_fr_facts.tip_height;
-        memcpy(b.fr_tip_hash, g_fr_facts.tip_hash, 32);
-        b.fr_coins_best_height = g_fr_facts.coins_best_height;
-        memcpy(b.fr_coins_best_hash, g_fr_facts.coins_best_hash, 32);
-        b.fr_block_index_count = g_fr_facts.block_index_count;
-        b.fr_mmb_leaves = g_fr_facts.mmb_leaves;
-        b.fr_sapling_ckpt_height = g_fr_facts.sapling_ckpt_height;
-    }
+    boot_shutdown_marker_build_binding(node_db_path, &b);
 
     char content[1024];
     int clen = boot_shutdown_marker_format(content, sizeof(content),
@@ -541,27 +609,11 @@ bool boot_shutdown_marker_write_clean(const char *datadir)
         return false;
     struct platform_private_file staging;
     platform_private_file_init(&staging);
-    bool created = false;
-    for (unsigned attempt = 0; attempt < 64 && !created; attempt++) {
-        uint64_t nonce = atomic_fetch_add_explicit(
-            &g_marker_nonce, 1, memory_order_relaxed);
-        int tn = snprintf(tmp, sizeof(tmp), "%s.tmp.%016llx", resolved,
-                          (unsigned long long)nonce);
-        if (tn < 0 || (size_t)tn >= sizeof(tmp))
-            return false;
-        created = platform_private_file_create(tmp, &staging);
-    }
-    if (!created)
+    if (!boot_shutdown_marker_staging_create(
+            resolved, tmp, sizeof(tmp), &staging))
         return false;
-    bool ok = platform_private_file_write_at(&staging, content, (size_t)clen,
-                                              0) &&
-              platform_private_file_flush(&staging) &&
-              platform_private_file_replace(&staging, tmp, resolved) &&
-              platform_private_parent_flush(parent);
-    platform_private_file_close(&staging);
-    if (!ok)
-        (void)platform_private_file_unlink_missing_ok(tmp);
-    return ok;
+    return boot_shutdown_marker_publish(
+        &staging, tmp, resolved, parent, content, (size_t)clen);
 }
 
 bool boot_shutdown_marker_remove_clean(const char *datadir)
