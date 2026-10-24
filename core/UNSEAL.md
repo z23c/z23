@@ -296,3 +296,7 @@ later lane flips it HARD.
 - 2026-10-24T04:34:44Z — REASON: block_index memory: move hashMerkleRoot, nNonce and nSolution into an optional header extension (288 -> 216 B per entry, ~238 MB at 3.3 M entries); behaviour-preserving accessors
   old ROOT: 8444fcd78413a251d62790a796df372366d80b5ca0961dcf9c4ebed364fb66ec
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-24T06:54:13Z — REASON: sha256 arm: load only the 64-byte input block (Mac 1498aa303, owner-authorized patch 49e873ab)
+  old ROOT: f83556b599fe9da3b18f21ade88a2a6805c1a18bf69a9651489f32ab9976a85d
+  by: owner unseal ritual (make core-unseal)

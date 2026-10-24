@@ -436,8 +436,9 @@ static void sha256_transform_arm(uint32_t *state, const unsigned char *data)
     int j;
 
     for (j = 0; j < 16; j++) {
-        wq[j] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 16 * j)));
-        if (j >= 4)
+        if (j < 4)
+            wq[j] = vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(data + 16 * j)));
+        else
             wq[j] = vsha256su1q_u32(vsha256su0q_u32(wq[j - 4], wq[j - 3]),
                                     wq[j - 2], wq[j - 1]);
         msg = vaddq_u32(wq[j], vld1q_u32(&sha256_arm_k[4 * j]));

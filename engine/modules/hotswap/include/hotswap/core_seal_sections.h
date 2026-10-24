@@ -36,7 +36,7 @@
 
 /* Root node digest over the whole sealed set (dirpath ""). */
 #define ZCL_CORE_SEAL_TREE \
-    "12e786bc436c3657891ef0e8270ca122feb497d2359622109e927ed155b17074"
+    "9a973d5ddfbaa4499304831e046fecf2ec24fa1716076ca2a1ae4706ec954123"
 
 /* SECTION lines in core/MANIFEST.sha3 at generation time. */
 #define ZCL_CORE_SEAL_SECTION_COUNT 80u
@@ -45,7 +45,7 @@
  * hotswap/hotswap_module.h defines it as an initializer element. */
 #define ZCL_CORE_SEAL_SECTION_ROWS \
     ZCL_HOTSWAP_SECTION_ROW("core", \
-        "f166ee7d166c5f470a56c22f7add7f955d88537d4ebb8a6007257dc20afda4bb") \
+        "d876943b1480da985d5497ea6bfc8d740a8b62aa6c70ca3f008118319eedc446") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams", \
         "6169522647bfed2194c0519612c2d0feeb318858ce714a56550e426c63b44f14") \
     ZCL_HOTSWAP_SECTION_ROW("core/chainparams/include", \
@@ -73,7 +73,7 @@
     ZCL_HOTSWAP_SECTION_ROW("core/math/src", \
         "bed7851826222b99834c6ee74bb3e7ce6155798a5ef78c798fe2f836bbf30862") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules", \
-        "d5bae3f2154d12b4d4901c61ab1834a29bc78fb27c7553759ca5f71a024feb2c") \
+        "9b17d687ec905d7f15f12f55e9c4b1176be5cb085a9561223c95785be2e9a704") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom", \
         "d39a267ed7843199fea7ad58a9c6cbc6d0acd538ff04e13d69147a51924c8648") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/bloom/include", \
@@ -107,13 +107,13 @@
     ZCL_HOTSWAP_SECTION_ROW("core/modules/core/src", \
         "549a6085d3be922026f17bfe86e1192b090ee8b18c8cccd272c941c9007750ab") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/crypto", \
-        "3dcb084663f8dbfcf3213e51a73ac4edd1c376997331b63a09f915be2c4c0a2d") \
+        "a687b15f9fef244fb57c3c4293c1b6783fd075f7aa91e5727ea95716a163d4d0") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/crypto/include", \
         "07ecb83b683b9081461a210996c20897a2f1ef17578840fc33bd59ca44076eb9") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/crypto/include/crypto", \
         "7ab869fb72b0c7e6a656b4636eda55bfc1e595ae0110d649b9b2e4a79a8a3688") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/crypto/src", \
-        "fb608b476c394487ec452851b5e83e9285baa768554e151e7bf9b03561e394ec") \
+        "e147b6eba64012ecc16087af8cdd753d4311c5c2c69175885ba5df97da95f07b") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/crypto/tests", \
         "dfc69c2fd31658d73e5f5669e33138fcc7338b62f805b8682b0f854df9fbb152") \
     ZCL_HOTSWAP_SECTION_ROW("core/modules/crypto_registry", \

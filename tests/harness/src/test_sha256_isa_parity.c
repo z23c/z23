@@ -40,6 +40,9 @@
  * reported, not self-skipped.
  */
 
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 
 #include "crypto/sha256.h"
@@ -50,6 +53,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#if !defined(_WIN32)
+#include <errno.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#else
+#include <windows.h>
+#endif
 
 #if defined(__aarch64__) && defined(__APPLE__)
 #include <sys/sysctl.h>
@@ -126,6 +137,133 @@ static const char *hardware_tier_name(void)
 #endif
 }
 
+/* Both public write paths must consume only the supplied block. Isolate a
+ * regression fault in a child so the registered group reports failure. */
+static int sha256_guarded_child(uint8_t *boundary)
+{
+    uint8_t block[SHA256_BLOCK_SIZE], reference[32], direct[32], buffered[32];
+    for (size_t k = 0; k < sizeof(block); k++)
+        block[k] = (uint8_t)k;
+    sha256_select_impl(SHA256_IMPL_PORTABLE);
+    sha256_oneshot(block, sizeof(block), reference);
+    for (int pass = 0; pass < 2; pass++) {
+        sha256_select_impl(pass == 0 ? SHA256_IMPL_PORTABLE : SHA256_IMPL_SHANI);
+        uint8_t *input = boundary - sizeof(block);
+        memcpy(input, block, sizeof(block));
+        sha256_oneshot(input, sizeof(block), direct);
+        struct sha256_ctx *ctx = (struct sha256_ctx *)(void *)(boundary - sizeof(*ctx));
+        sha256_init(ctx);
+        sha256_write(ctx, block, 1);
+        sha256_write(ctx, block + 1, sizeof(block) - 1);
+        sha256_finalize(ctx, buffered);
+        if (memcmp(reference, direct, sizeof(reference)) != 0 ||
+            memcmp(reference, buffered, sizeof(reference)) != 0) {
+            sha256_select_impl(SHA256_IMPL_AUTO);
+            return 1;
+        }
+    }
+    sha256_select_impl(SHA256_IMPL_AUTO);
+    return 0;
+}
+
+static uint8_t *sha256_guard_mapping(size_t *page_out)
+{
+#if !defined(_WIN32)
+    long native_page = sysconf(_SC_PAGESIZE);
+    if (native_page <= 0 || (uintmax_t)native_page > SIZE_MAX / 2 ||
+        (size_t)native_page < sizeof(struct sha256_ctx)) {
+        fprintf(stderr, "sha256_isa_parity: guard page size unavailable\n");
+        return NULL;
+    }
+    size_t page = (size_t)native_page;
+    uint8_t *region = mmap(NULL, page * 2, PROT_READ | PROT_WRITE,
+                           MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (region == MAP_FAILED) {
+        fprintf(stderr, "sha256_isa_parity: guard mapping failed\n");
+        return NULL;
+    }
+    if (mprotect(region + page, page, PROT_NONE) != 0) {
+        fprintf(stderr, "sha256_isa_parity: guard protection failed\n");
+        (void)munmap(region, page * 2);
+        return NULL;
+    }
+#else
+    SYSTEM_INFO info;
+    GetSystemInfo(&info);
+    size_t page = info.dwPageSize;
+    if (page < sizeof(struct sha256_ctx) || page > SIZE_MAX / 2) {
+        fprintf(stderr, "sha256_isa_parity: guard page size unavailable\n");
+        return NULL;
+    }
+    uint8_t *region = VirtualAlloc(NULL, page * 2, MEM_RESERVE | MEM_COMMIT,
+                                   PAGE_READWRITE);
+    if (region == NULL) {
+        fprintf(stderr, "sha256_isa_parity: guard allocation failed\n");
+        return NULL;
+    }
+    DWORD old_protection;
+    if (!VirtualProtect(region + page, page, PAGE_NOACCESS, &old_protection)) {
+        fprintf(stderr, "sha256_isa_parity: guard protection failed\n");
+        (void)VirtualFree(region, 0, MEM_RELEASE);
+        return NULL;
+    }
+#endif
+    *page_out = page;
+    return region;
+}
+
+static bool sha256_guard_release(uint8_t *region, size_t page)
+{
+#if !defined(_WIN32)
+    bool released = munmap(region, page * 2) == 0;
+#else
+    (void)page;
+    bool released = VirtualFree(region, 0, MEM_RELEASE) != 0;
+#endif
+    if (!released)
+        fprintf(stderr, "sha256_isa_parity: guard release failed\n");
+    return released;
+}
+
+static int sha256_guard_run(uint8_t *boundary)
+{
+#if !defined(_WIN32)
+    pid_t child = fork();
+    if (child == 0) {
+        alarm(10);
+        _exit(sha256_guarded_child(boundary));
+    }
+    int status = 0;
+    pid_t waited = -1;
+    if (child > 0) {
+        do { waited = waitpid(child, &status, 0); }
+        while (waited < 0 && errno == EINTR);
+    }
+    bool ok = child > 0 && waited == child &&
+              WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    if (!ok)
+        fprintf(stderr, "sha256_isa_parity: guarded block child failed (pid %ld, status %d)\n",
+                (long)child, status);
+    return ok ? 0 : 1;
+#else
+    return sha256_guarded_child(boundary);
+#endif
+}
+
+static int sha256_guarded_blocks(void)
+{
+    size_t page = 0;
+    sha256_select_impl(SHA256_IMPL_AUTO);
+    uint8_t *region = sha256_guard_mapping(&page);
+    if (region == NULL)
+        return 1;
+    int result = sha256_guard_run(region + page);
+    if (!sha256_guard_release(region, page))
+        result = 1;
+    sha256_select_impl(SHA256_IMPL_AUTO);
+    return result;
+}
+
 int test_sha256_isa_parity(void)
 {
     printf("\n=== sha256_isa_parity (portable vs native-hardware differential oracle) ===\n");
@@ -161,6 +299,9 @@ int test_sha256_isa_parity(void)
      * sides resolve to portable — still worth running for the geometry. */
     if (hw && !have_shani)
         printf("sha256_isa_parity: NOTE parity legs degrade to portable-vs-portable\n");
+
+    printf("sha256_isa_parity: guarded direct and buffered blocks...\n");
+    failures += sha256_guarded_blocks();
 
     /* ── 2. FIPS-180-4 known-answer vectors through BOTH transforms ──── */
     static const struct { const char *msg; size_t len; const char *want; } kat[] = {
