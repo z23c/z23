@@ -176,6 +176,51 @@ static bool get_cwd(char *out, size_t cap)
 #endif
 }
 
+static bool find_direct_prog(const char *name, char *out, size_t cap)
+{
+    if (path_is_exec(name)) {
+        snprintf(out, cap, "%s", name);
+        return true;
+    }
+#if defined(_WIN32)
+    {
+        char exe[Z23_DOCTOR_PATH_MAX];
+        snprintf(exe, sizeof exe, "%s.exe", name);
+        if (path_is_exec(exe)) {
+            snprintf(out, cap, "%s", exe);
+            return true;
+        }
+    }
+#endif
+    return false;
+}
+
+static bool find_path_prog(const char *name, const char *p, size_t n,
+                           char *out, size_t cap)
+{
+    char cand[Z23_DOCTOR_PATH_MAX];
+    if (n == 0u)
+        snprintf(cand, sizeof cand, "%s", name);
+    else if (n + 1u + strlen(name) + 1u > sizeof cand)
+        cand[0] = 0;
+    else
+        snprintf(cand, sizeof cand, "%.*s/%s", (int)n, p, name);
+    if (cand[0] && path_is_exec(cand)) {
+        snprintf(out, cap, "%s", cand);
+        return true;
+    }
+#if defined(_WIN32)
+    if (n > 0u) {
+        snprintf(cand, sizeof cand, "%.*s/%s.exe", (int)n, p, name);
+        if (path_is_exec(cand)) {
+            snprintf(out, cap, "%s", cand);
+            return true;
+        }
+    }
+#endif
+    return false;
+}
+
 static bool find_prog(const char *name, char *out, size_t cap)
 {
     const char *path;
@@ -193,21 +238,7 @@ static bool find_prog(const char *name, char *out, size_t cap)
         || strchr(name, '\\') != NULL
 #endif
         ) {
-        if (path_is_exec(name)) {
-            snprintf(out, cap, "%s", name);
-            return true;
-        }
-#if defined(_WIN32)
-        {
-            char exe[Z23_DOCTOR_PATH_MAX];
-            snprintf(exe, sizeof exe, "%s.exe", name);
-            if (path_is_exec(exe)) {
-                snprintf(out, cap, "%s", exe);
-                return true;
-            }
-        }
-#endif
-        return false;
+        return find_direct_prog(name, out, cap);
     }
     path = getenv("PATH");
     if (path == NULL || path[0] == 0)
@@ -220,26 +251,8 @@ static bool find_prog(const char *name, char *out, size_t cap)
     for (;;) {
         const char *cut = strchr(p, sep);
         size_t n = cut ? (size_t)(cut - p) : strlen(p);
-        char cand[Z23_DOCTOR_PATH_MAX];
-        if (n == 0u)
-            snprintf(cand, sizeof cand, "%s", name);
-        else if (n + 1u + strlen(name) + 1u > sizeof cand)
-            cand[0] = 0;
-        else
-            snprintf(cand, sizeof cand, "%.*s/%s", (int)n, p, name);
-        if (cand[0] && path_is_exec(cand)) {
-            snprintf(out, cap, "%s", cand);
+        if (find_path_prog(name, p, n, out, cap))
             return true;
-        }
-#if defined(_WIN32)
-        if (n > 0u) {
-            snprintf(cand, sizeof cand, "%.*s/%s.exe", (int)n, p, name);
-            if (path_is_exec(cand)) {
-                snprintf(out, cap, "%s", cand);
-                return true;
-            }
-        }
-#endif
         if (cut == NULL)
             break;
         p = cut + 1;
@@ -309,6 +322,91 @@ static bool cmd_push(char *cmd, size_t cap, size_t *used, const char *arg)
 }
 #endif
 
+#if defined(_WIN32)
+static int run_platform_cmd(char **argv, char *out, size_t cap, int *exit_code)
+{
+    char cmdline[Z23_DOCTOR_PATH_MAX];
+    size_t used = 0;
+    FILE *fp;
+    int i;
+    int rc;
+    cmdline[0] = 0;
+    for (i = 0; argv[i] != NULL; i++) {
+        if (!cmd_push(cmdline, sizeof cmdline, &used, argv[i]))
+            return -1;
+    }
+    fp = _popen(cmdline, "r");
+    if (fp == NULL)
+        return -1;
+    if (out != NULL && cap > 1u) {
+        if (fgets(out, (int)cap, fp) == NULL)
+            out[0] = 0;
+        trim_first_line(out);
+    } else {
+        char sink[256];
+        while (fgets(sink, sizeof sink, fp) != NULL) {
+        }
+    }
+    rc = _pclose(fp);
+    if (exit_code != NULL)
+        *exit_code = rc;
+    return 0;
+}
+#else
+static void capture_cmd_output(int fd, char *out, size_t cap)
+{
+    if (out != NULL && cap > 0u) {
+        size_t n = 0;
+        for (;;) {
+            ssize_t r;
+            if (n + 1u >= cap)
+                break;
+            r = read(fd, out + n, cap - 1u - n);
+            if (r <= 0)
+                break;
+            n += (size_t)r;
+        }
+        out[n] = 0;
+        trim_first_line(out);
+    }
+}
+
+static int run_platform_cmd(char **argv, char *out, size_t cap, int *exit_code)
+{
+    int fds[2];
+    pid_t pid;
+    int st = 0;
+    if (pipe(fds) != 0)
+        return -1;
+    pid = fork();
+    if (pid < 0) {
+        close(fds[0]);
+        close(fds[1]);
+        return -1;
+    }
+    if (pid == 0) {
+        close(fds[0]);
+        if (dup2(fds[1], 1) < 0 || dup2(fds[1], 2) < 0)
+            _exit(127);
+        close(fds[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+    close(fds[1]);
+    capture_cmd_output(fds[0], out, cap);
+    close(fds[0]);
+    if (waitpid(pid, &st, 0) < 0)
+        return -1;
+    if (exit_code != NULL) {
+        if (WIFEXITED(st))
+            *exit_code = WEXITSTATUS(st);
+        else
+            *exit_code = 127;
+    }
+    return 0;
+}
+#endif
+
 /* Run argv. On failure of the launcher itself return -1 and set
  * *exit_code to 127. Captured stdout+stderr is truncated to cap and the
  * first line is kept. */
@@ -320,83 +418,7 @@ static int run_cmd(char **argv, char *out, size_t cap, int *exit_code)
         out[0] = 0;
     if (argv == NULL || argv[0] == NULL)
         return -1;
-#if defined(_WIN32)
-    {
-        char cmdline[Z23_DOCTOR_PATH_MAX];
-        size_t used = 0;
-        FILE *fp;
-        int i;
-        int rc;
-        cmdline[0] = 0;
-        for (i = 0; argv[i] != NULL; i++) {
-            if (!cmd_push(cmdline, sizeof cmdline, &used, argv[i]))
-                return -1;
-        }
-        fp = _popen(cmdline, "r");
-        if (fp == NULL)
-            return -1;
-        if (out != NULL && cap > 1u) {
-            if (fgets(out, (int)cap, fp) == NULL)
-                out[0] = 0;
-            trim_first_line(out);
-        } else {
-            char sink[256];
-            while (fgets(sink, sizeof sink, fp) != NULL) {
-            }
-        }
-        rc = _pclose(fp);
-        if (exit_code != NULL)
-            *exit_code = rc;
-        return 0;
-    }
-#else
-    {
-        int fds[2];
-        pid_t pid;
-        int st = 0;
-        if (pipe(fds) != 0)
-            return -1;
-        pid = fork();
-        if (pid < 0) {
-            close(fds[0]);
-            close(fds[1]);
-            return -1;
-        }
-        if (pid == 0) {
-            close(fds[0]);
-            if (dup2(fds[1], 1) < 0 || dup2(fds[1], 2) < 0)
-                _exit(127);
-            close(fds[1]);
-            execvp(argv[0], argv);
-            _exit(127);
-        }
-        close(fds[1]);
-        if (out != NULL && cap > 0u) {
-            size_t n = 0;
-            for (;;) {
-                ssize_t r;
-                if (n + 1u >= cap)
-                    break;
-                r = read(fds[0], out + n, cap - 1u - n);
-                if (r <= 0)
-                    break;
-                n += (size_t)r;
-            }
-            out[n] = 0;
-            trim_first_line(out);
-        }
-        close(fds[0]);
-        if (waitpid(pid, &st, 0) < 0)
-            return -1;
-        if (exit_code != NULL) {
-            if (WIFEXITED(st))
-                *exit_code = WEXITSTATUS(st);
-            else
-                *exit_code = 127;
-        }
-        return 0;
-    }
-#endif
+    return run_platform_cmd(argv, out, cap, exit_code);
 }
 
 static void compiler_id(char **cc_argv, int cc_n, char *out, size_t cap)
@@ -461,6 +483,41 @@ static void temp_pair(char *src, size_t src_cap, char *obj, size_t obj_cap)
     snprintf(obj, obj_cap, "%s/z23_doctor_%lu.o", tmp, pid);
 }
 
+static void scan_dir_entries(const char *path, bool *nonempty)
+{
+#if defined(_WIN32)
+    char glob[Z23_DOCTOR_PATH_MAX + 4];
+    WIN32_FIND_DATAA fd;
+    HANDLE h;
+    snprintf(glob, sizeof glob, "%s\\*", path);
+    h = FindFirstFileA(glob, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return;
+    do {
+        if (strcmp(fd.cFileName, ".") != 0
+            && strcmp(fd.cFileName, "..") != 0) {
+            *nonempty = true;
+            break;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR *d;
+    struct dirent *ent;
+    d = opendir(path);
+    if (d == NULL)
+        return;
+    while ((ent = readdir(d)) != NULL) {
+        if (strcmp(ent->d_name, ".") != 0
+            && strcmp(ent->d_name, "..") != 0) {
+            *nonempty = true;
+            break;
+        }
+    }
+    closedir(d);
+#endif
+}
+
 static void inspect_dir(const char *path, bool *exists, bool *is_dir,
                         bool *has_git, bool *nonempty)
 {
@@ -474,9 +531,6 @@ static void inspect_dir(const char *path, bool *exists, bool *is_dir,
 #if defined(_WIN32)
     {
         DWORD attr = GetFileAttributesA(path);
-        char glob[Z23_DOCTOR_PATH_MAX + 4];
-        WIN32_FIND_DATAA fd;
-        HANDLE h;
         if (attr == INVALID_FILE_ATTRIBUTES)
             return;
         *exists = true;
@@ -485,24 +539,11 @@ static void inspect_dir(const char *path, bool *exists, bool *is_dir,
             return;
         if (join2(gitp, sizeof gitp, path, ".git"))
             *has_git = GetFileAttributesA(gitp) != INVALID_FILE_ATTRIBUTES;
-        snprintf(glob, sizeof glob, "%s\\*", path);
-        h = FindFirstFileA(glob, &fd);
-        if (h == INVALID_HANDLE_VALUE)
-            return;
-        do {
-            if (strcmp(fd.cFileName, ".") != 0
-                && strcmp(fd.cFileName, "..") != 0) {
-                *nonempty = true;
-                break;
-            }
-        } while (FindNextFileA(h, &fd));
-        FindClose(h);
+        scan_dir_entries(path, nonempty);
     }
 #else
     {
         struct stat st;
-        DIR *d;
-        struct dirent *ent;
         if (stat(path, &st) != 0)
             return;
         *exists = true;
@@ -511,17 +552,7 @@ static void inspect_dir(const char *path, bool *exists, bool *is_dir,
             return;
         if (join2(gitp, sizeof gitp, path, ".git"))
             *has_git = access(gitp, F_OK) == 0;
-        d = opendir(path);
-        if (d == NULL)
-            return;
-        while ((ent = readdir(d)) != NULL) {
-            if (strcmp(ent->d_name, ".") != 0
-                && strcmp(ent->d_name, "..") != 0) {
-                *nonempty = true;
-                break;
-            }
-        }
-        closedir(d);
+        scan_dir_entries(path, nonempty);
     }
 #endif
 }

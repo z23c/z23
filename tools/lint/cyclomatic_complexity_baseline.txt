@@ -3293,9 +3293,6 @@ tools/dev/mutation_run.c:zcl_mut_shell_split:24
 tools/dev/mutation_run.c:zcl_mut_spawn:58
 tools/dev/windows_headless_run.c:append_argument:20
 tools/dev/windows_headless_run.c:wmain:36
-tools/dev/z23_doctor.c:find_prog:20
-tools/dev/z23_doctor.c:inspect_dir:17
-tools/dev/z23_doctor.c:run_cmd:27
 tools/dev/z23_git_hook.c:admit_pair:17
 tools/dev/z23_git_hook.c:child_capture:53
 tools/dev/z23_git_hook.c:child_capture#2:23
