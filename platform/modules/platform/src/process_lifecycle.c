@@ -19,6 +19,23 @@ void platform_process_init(struct platform_process *process)
         *process = (struct platform_process){UINTPTR_MAX, UINTPTR_MAX, 0};
 }
 
+/* A non-empty inherited list needs its pointer, and at most 64 entries. */
+static bool process_inherited_shape_ok(
+    const struct platform_process_options *options)
+{
+    return (!options->inherited_count || options->inherited) &&
+           options->inherited_count <= 64u;
+}
+
+/* The request shape both launch arms refuse before touching any handle. */
+static bool process_start_shape_ok(const struct platform_process *process,
+                                   const struct platform_process_options *options)
+{
+    return process && process->native == UINTPTR_MAX && options &&
+           options->image && options->argv && options->argv[0] &&
+           options->env && process_inherited_shape_ok(options);
+}
+
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -67,31 +84,50 @@ static bool append_char(wchar_t **buffer, size_t *used, size_t *capacity,
     (*buffer)[(*used)++] = value; return true;
 }
 
+static bool append_backslashes(wchar_t **line, size_t *used, size_t *capacity,
+                               size_t count)
+{
+    for (size_t i = 0; i < count; i++)
+        if (!append_char(line, used, capacity, L'\\')) return false;
+    return true;
+}
+
+static bool append_arg_open(wchar_t **line, size_t *used, size_t *capacity,
+                            const wchar_t *arg, bool *quote)
+{
+    if (*used && !append_char(line, used, capacity, L' ')) return false;
+    *quote = !arg[0] || wcspbrk(arg, L" \t\n\v\"") != NULL;
+    return !*quote || append_char(line, used, capacity, L'\"');
+}
+
+static bool append_arg_close(wchar_t **line, size_t *used, size_t *capacity,
+                             bool quote)
+{
+    return (!quote || append_char(line, used, capacity, L'\"')) &&
+           append_char(line, used, capacity, 0);
+}
+
 /* Implements CommandLineToArgvW's backslash-before-quote grammar. */
 static bool append_arg(wchar_t **line, size_t *used, size_t *capacity,
                        const wchar_t *arg)
 {
-    if (*used && !append_char(line, used, capacity, L' ')) return false;
-    bool quote = !arg[0] || wcspbrk(arg, L" \t\n\v\"") != NULL;
-    if (quote && !append_char(line, used, capacity, L'\"')) return false;
+    bool quote = false;
+    if (!append_arg_open(line, used, capacity, arg, &quote)) return false;
     size_t slashes = 0;
     for (const wchar_t *p = arg;; p++) {
         if (*p == L'\\') { slashes++; continue; }
         if (*p == L'\"') {
-            for (size_t i = 0; i < slashes * 2u + 1u; i++)
-                if (!append_char(line, used, capacity, L'\\')) return false;
-            if (!append_char(line, used, capacity, L'\"')) return false;
+            if (!append_backslashes(line, used, capacity, slashes * 2u + 1u) ||
+                !append_char(line, used, capacity, L'\"')) return false;
         } else {
             if (*p == 0 && quote) slashes *= 2u;
-            for (size_t i = 0; i < slashes; i++)
-                if (!append_char(line, used, capacity, L'\\')) return false;
+            if (!append_backslashes(line, used, capacity, slashes)) return false;
             if (*p == 0) break;
             if (!append_char(line, used, capacity, *p)) return false;
         }
         slashes = 0;
     }
-    return (!quote || append_char(line, used, capacity, L'\"')) &&
-           append_char(line, used, capacity, 0);
+    return append_arg_close(line, used, capacity, quote);
 }
 
 static wchar_t *command_line(const char *const *argv)
@@ -115,6 +151,23 @@ static int env_compare(const void *a, const void *b)
     return _wcsicmp(*left, *right);
 }
 
+static bool environment_add_item(const char *entry, wchar_t **item,
+                                 size_t *total)
+{
+    const char *equal = strchr(entry, '=');
+    if (!equal || equal == entry || !utf16(entry, item)) return false;
+    size_t length = wcslen(*item);
+    if (length > 32766u || *total > 32767u - length - 1u) return false;
+    *total += length + 1u;
+    return true;
+}
+
+static void environment_free_items(wchar_t **items, size_t count)
+{
+    for (size_t i = 0; i < count; i++) free(items[i]);
+    free(items);
+}
+
 static wchar_t *environment_block(const char *const *env)
 {
     size_t count = 0;
@@ -123,13 +176,8 @@ static wchar_t *environment_block(const char *const *env)
         ? zcl_calloc(count, sizeof(*items), "process-environment-items") : NULL;
     if (count && !items) return NULL;
     size_t total = 1;
-    for (size_t i = 0; i < count; i++) {
-        const char *equal = strchr(env[i], '=');
-        if (!equal || equal == env[i] || !utf16(env[i], &items[i])) goto fail;
-        size_t length = wcslen(items[i]);
-        if (length > 32766u || total > 32767u - length - 1u) goto fail;
-        total += length + 1u;
-    }
+    for (size_t i = 0; i < count; i++)
+        if (!environment_add_item(env[i], &items[i], &total)) goto fail;
     qsort(items, count, sizeof(*items), env_compare);
     wchar_t *block = zcl_calloc(total + (count == 0), sizeof(*block),
                                 "process-environment-block");
@@ -140,11 +188,11 @@ static wchar_t *environment_block(const char *const *env)
         memcpy(block + offset, items[i], length * sizeof(*block));
         offset += length;
     }
-    for (size_t i = 0; i < count; i++) free(items[i]);
-    free(items); return block;
+    environment_free_items(items, count);
+    return block;
 fail:
-    for (size_t i = 0; i < count; i++) free(items[i]);
-    free(items); return NULL;
+    environment_free_items(items, count);
+    return NULL;
 }
 
 static bool process_inheritable_handle(HANDLE handle)
@@ -171,29 +219,102 @@ static bool process_stdio_handles(HANDLE *handles, HANDLE stdout_handle,
     return ok;
 }
 
+static bool process_real_handle(HANDLE handle)
+{
+    return handle && handle != INVALID_HANDLE_VALUE;
+}
+
+static bool process_inherited_handles(HANDLE *handles,
+                                      const struct platform_process_options *options,
+                                      size_t first, HANDLE stdout_handle,
+                                      HANDLE stdin_handle, bool ok)
+{
+    for (size_t i = 0; i < options->inherited_count; i++) {
+        DWORD flags = 0;
+        handles[first + i] = (HANDLE)options->inherited[i];
+        if (handles[first + i] == stdout_handle ||
+            handles[first + i] == stdin_handle ||
+            !GetHandleInformation(handles[first + i], &flags) ||
+            !(flags & HANDLE_FLAG_INHERIT)) ok = false;
+        for (size_t j = 0; j < i; j++)
+            if (options->inherited[i] == options->inherited[j]) ok = false;
+    }
+    return ok;
+}
+
+static bool process_startup_attributes(STARTUPINFOEXW *startup,
+                                       HANDLE *handles, size_t handle_count,
+                                       bool handles_ok)
+{
+    SIZE_T attribute_size = 0;
+    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
+    startup->lpAttributeList = zcl_malloc(attribute_size,
+                                          "process-attribute-list");
+    return handles_ok && startup->lpAttributeList &&
+           InitializeProcThreadAttributeList(startup->lpAttributeList, 1, 0,
+                                             &attribute_size) &&
+           UpdateProcThreadAttribute(startup->lpAttributeList, 0,
+               PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles,
+               handle_count * sizeof(*handles), NULL, NULL);
+}
+
+static bool process_job_configure(HANDLE job)
+{
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags =
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PRIORITY_CLASS;
+    limits.BasicLimitInformation.PriorityClass = BELOW_NORMAL_PRIORITY_CLASS;
+    return job && SetInformationJobObject(
+        job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+}
+
+static void process_settle_launch(struct platform_process *process,
+                                  HANDLE job,
+                                  const PROCESS_INFORMATION *information,
+                                  bool started, bool resumed)
+{
+    if (resumed) {
+        CloseHandle(information->hThread);
+        process->native = (uintptr_t)information->hProcess;
+        process->containment = (uintptr_t)job;
+        process->pid = information->dwProcessId;
+        return;
+    }
+    if (started) {
+        CloseHandle(information->hThread);
+        CloseHandle(information->hProcess);
+    }
+    if (job) CloseHandle(job);
+}
+
+static bool process_start_strings(
+    const struct platform_process_options *options, wchar_t **image,
+    wchar_t **cwd, wchar_t **line, wchar_t **environment)
+{
+    *line = command_line(options->argv);
+    *environment = environment_block(options->env);
+    return utf16(options->image, image) && absolute_image(*image) && *line &&
+           (!options->cwd ||
+            (utf16(options->cwd, cwd) && absolute_image(*cwd))) &&
+           *environment;
+}
+
 static bool process_start_hidden_with_stdout(
     struct platform_process *process,
     const struct platform_process_options *options, HANDLE stdout_handle,
     HANDLE stdin_handle)
 {
-    if (!process || process->native != UINTPTR_MAX || !options ||
-        !options->image || !options->argv || !options->argv[0] || !options->env ||
-        (options->inherited_count && !options->inherited) ||
-        options->inherited_count > 64u) return false;
-    wchar_t *image = NULL, *cwd = NULL;
-    wchar_t *line = command_line(options->argv);
-    wchar_t *environment = environment_block(options->env);
-    if (!utf16(options->image, &image) || !absolute_image(image) || !line ||
-        (options->cwd &&
-         (!utf16(options->cwd, &cwd) || !absolute_image(cwd))) ||
-        !environment) goto done;
+    if (!process_start_shape_ok(process, options)) return false;
+    wchar_t *image = NULL, *cwd = NULL, *line = NULL, *environment = NULL;
+    if (!process_start_strings(options, &image, &cwd, &line, &environment))
+        goto done;
     SECURITY_ATTRIBUTES security = {
         .nLength = sizeof(security), .bInheritHandle = TRUE};
     HANDLE null_handle = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE,
         FILE_SHARE_READ | FILE_SHARE_WRITE, &security, OPEN_EXISTING, 0, NULL);
     if (null_handle == INVALID_HANDLE_VALUE) goto done;
-    bool capture_stdout = stdout_handle && stdout_handle != INVALID_HANDLE_VALUE;
-    bool file_stdin = stdin_handle && stdin_handle != INVALID_HANDLE_VALUE;
+    bool capture_stdout = process_real_handle(stdout_handle);
+    bool file_stdin = process_real_handle(stdin_handle);
     size_t handle_count = options->inherited_count + 1u + (size_t)file_stdin +
                           (size_t)capture_stdout;
     HANDLE *handles = zcl_calloc(handle_count, sizeof(*handles),
@@ -203,19 +324,9 @@ static bool process_start_hidden_with_stdout(
     bool handles_ok = process_stdio_handles(handles, stdout_handle,
                                             stdin_handle, capture_stdout,
                                             file_stdin);
-    for (size_t i = 0; i < options->inherited_count; i++) {
-        DWORD flags = 0;
-        size_t at = i + 1u + (size_t)capture_stdout + (size_t)file_stdin;
-        handles[at] = (HANDLE)options->inherited[i];
-        if (handles[at] == stdout_handle || handles[at] == stdin_handle ||
-            !GetHandleInformation(handles[at], &flags) ||
-            !(flags & HANDLE_FLAG_INHERIT)) handles_ok = false;
-        for (size_t j = 0; j < i; j++)
-            if (options->inherited[i] == options->inherited[j])
-                handles_ok = false;
-    }
-    SIZE_T attribute_size = 0;
-    (void)InitializeProcThreadAttributeList(NULL, 1, 0, &attribute_size);
+    handles_ok = process_inherited_handles(
+        handles, options, 1u + (size_t)capture_stdout + (size_t)file_stdin,
+        stdout_handle, stdin_handle, handles_ok);
     STARTUPINFOEXW startup = {0};
     startup.StartupInfo.cb = sizeof(startup);
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
@@ -223,24 +334,13 @@ static bool process_start_hidden_with_stdout(
     startup.StartupInfo.hStdInput = file_stdin ? stdin_handle : null_handle;
     startup.StartupInfo.hStdOutput = capture_stdout ? stdout_handle : null_handle;
     startup.StartupInfo.hStdError = null_handle;
-    startup.lpAttributeList = zcl_malloc(attribute_size,
-                                         "process-attribute-list");
-    if (!handles_ok || !startup.lpAttributeList ||
-        !InitializeProcThreadAttributeList(startup.lpAttributeList, 1, 0,
-                                           &attribute_size) ||
-        !UpdateProcThreadAttribute(startup.lpAttributeList, 0,
-            PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles,
-            handle_count * sizeof(*handles), NULL, NULL)) {
+    if (!process_startup_attributes(&startup, handles, handle_count,
+                                    handles_ok)) {
         free(startup.lpAttributeList); free(handles); CloseHandle(null_handle);
         goto done;
     }
     HANDLE job = CreateJobObjectW(NULL, NULL);
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
-    limits.BasicLimitInformation.LimitFlags =
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_PRIORITY_CLASS;
-    limits.BasicLimitInformation.PriorityClass = BELOW_NORMAL_PRIORITY_CLASS;
-    bool job_ok = job && SetInformationJobObject(
-        job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+    bool job_ok = process_job_configure(job);
     PROCESS_INFORMATION information = {0};
     UINT previous_mode = SetErrorMode(
         SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
@@ -260,18 +360,7 @@ static bool process_start_hidden_with_stdout(
         (void)TerminateProcess(information.hProcess, 125u);
     DeleteProcThreadAttributeList(startup.lpAttributeList);
     free(startup.lpAttributeList); free(handles); CloseHandle(null_handle);
-    if (resumed) {
-        CloseHandle(information.hThread);
-        process->native = (uintptr_t)information.hProcess;
-        process->containment = (uintptr_t)job;
-        process->pid = information.dwProcessId;
-    } else {
-        if (started) {
-            CloseHandle(information.hThread);
-            CloseHandle(information.hProcess);
-        }
-        if (job) CloseHandle(job);
-    }
+    process_settle_launch(process, job, &information, started, resumed);
 done:
     free(image); free(cwd); free(line); free(environment);
     return process->native != UINTPTR_MAX;
@@ -377,40 +466,57 @@ static bool fd_allowed(int fd, const struct platform_process_options *options)
     return false;
 }
 
-bool platform_process_start_hidden(struct platform_process *process,
-                                   const struct platform_process_options *options)
+static bool process_inherited_fds_ok(
+    const struct platform_process_options *options)
 {
-    if (!process || process->native != UINTPTR_MAX || !options ||
-        !options->image || options->image[0] != '/' || !options->argv ||
-        !options->argv[0] || !options->env ||
-        (options->inherited_count && !options->inherited) ||
-        options->inherited_count > 64u) return false;
     for (size_t i = 0; i < options->inherited_count; i++) {
         if (options->inherited[i] > INT_MAX || options->inherited[i] <= 2u ||
             fcntl((int)options->inherited[i], F_GETFD) < 0) return false;
         for (size_t j = 0; j < i; j++)
             if (options->inherited[j] == options->inherited[i]) return false;
     }
+    return true;
+}
+
+/* Runs in the forked child: detaches stdio onto /dev/null, exiting 126 on
+ * any failure. */
+static void process_child_null_stdio(void)
+{
+    int null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+    if (null_fd < 0 || dup2(null_fd, STDIN_FILENO) < 0 ||
+        dup2(null_fd, STDOUT_FILENO) < 0 ||
+        dup2(null_fd, STDERR_FILENO) < 0) _exit(126);
+    if (null_fd > STDERR_FILENO) close(null_fd);
+}
+
+/* Runs in the forked child: only the inherited descriptors stay open. */
+static void process_child_prepare_fds(
+    const struct platform_process_options *options)
+{
+    for (size_t i = 0; i < options->inherited_count; i++) {
+        int fd = (int)options->inherited[i];
+        int flags = fcntl(fd, F_GETFD);
+        if (flags < 0 || fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) != 0)
+            _exit(126);
+    }
+    long limit = sysconf(_SC_OPEN_MAX);
+    if (limit < 0) limit = 65536;
+    for (int fd = 3; fd < limit; fd++)
+        if (!fd_allowed(fd, options)) (void)close(fd);
+}
+
+bool platform_process_start_hidden(struct platform_process *process,
+                                   const struct platform_process_options *options)
+{
+    if (!process_start_shape_ok(process, options) || options->image[0] != '/' ||
+        !process_inherited_fds_ok(options)) return false;
     pid_t pid = fork();
     if (pid < 0) return false;
     if (pid == 0) {
         if (setsid() < 0 || (options->cwd && chdir(options->cwd) != 0))
             _exit(126);
-        int null_fd = open("/dev/null", O_RDWR | O_CLOEXEC);
-        if (null_fd < 0 || dup2(null_fd, STDIN_FILENO) < 0 ||
-            dup2(null_fd, STDOUT_FILENO) < 0 ||
-            dup2(null_fd, STDERR_FILENO) < 0) _exit(126);
-        if (null_fd > STDERR_FILENO) close(null_fd);
-        for (size_t i = 0; i < options->inherited_count; i++) {
-            int fd = (int)options->inherited[i];
-            int flags = fcntl(fd, F_GETFD);
-            if (flags < 0 || fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC) != 0)
-                _exit(126);
-        }
-        long limit = sysconf(_SC_OPEN_MAX);
-        if (limit < 0) limit = 65536;
-        for (int fd = 3; fd < limit; fd++)
-            if (!fd_allowed(fd, options)) (void)close(fd);
+        process_child_null_stdio();
+        process_child_prepare_fds(options);
         execve(options->image, (char *const *)options->argv,
                (char *const *)options->env);
         _exit(127);
@@ -465,27 +571,132 @@ void platform_process_close(struct platform_process *process)
  * declared once in process_lifecycle.h and called from other translation
  * units, so each keeps exactly one non-static definition; the platform
  * difference is folded into the body instead of duplicated per arm. */
+/* Clears the caller's buffer and result, then reports whether the capture
+ * request has a buffer, a timeout and a result to fill. */
+static bool process_capture_begin(
+    const struct platform_process_options *options, char *out, size_t out_size,
+    uint32_t timeout_ms, struct platform_process_capture_result *result)
+{
+    if (out && out_size) out[0] = 0;
+    if (result)
+        *result = (struct platform_process_capture_result){0};
+    return options && out && out_size != 0 && timeout_ms != 0 && result;
+}
+
+#if defined(_WIN32)
+static bool process_capture_pipe(HANDLE *read_handle, HANDLE *write_handle)
+{
+    SECURITY_ATTRIBUTES security = {
+        .nLength = sizeof(security), .bInheritHandle = TRUE};
+    *read_handle = NULL;
+    *write_handle = NULL;
+    if (CreatePipe(read_handle, write_handle, &security, 0) &&
+        SetHandleInformation(*read_handle, HANDLE_FLAG_INHERIT, 0)) return true;
+    if (*read_handle) CloseHandle(*read_handle);
+    if (*write_handle) CloseHandle(*write_handle);
+    return false;
+}
+
+/* Reads at most `available` bytes: into the free tail of out while room
+ * remains, otherwise into a discard buffer that marks the output truncated. */
+static bool process_pipe_read(HANDLE read_handle, char *out, size_t out_size,
+                              size_t *used, DWORD available, DWORD *received,
+                              struct platform_process_capture_result *result)
+{
+    char discard[4096];
+    size_t room = *used + 1u < out_size ? out_size - *used - 1u : 0u;
+    char *destination = room ? out + *used : discard;
+    DWORD capacity = room
+        ? (room > UINT32_MAX ? UINT32_MAX : (DWORD)room)
+        : (DWORD)sizeof(discard);
+    DWORD wanted = available < capacity ? available : capacity;
+    *received = 0;
+    if (!ReadFile(read_handle, destination, wanted, received, NULL) ||
+        *received == 0) return false;
+    if (room)
+        *used += *received;
+    else
+        result->output_truncated = true;
+    return true;
+}
+
+static bool process_capture_read_available(
+    HANDLE read_handle, char *out, size_t out_size, size_t *used,
+    DWORD *available, struct platform_process_capture_result *result)
+{
+    while (*available > 0) {
+        DWORD received = 0;
+        if (!process_pipe_read(read_handle, out, out_size, used, *available,
+                               &received, result)) return false;
+        *available -= received;
+    }
+    return true;
+}
+
+/* A closed pipe is recorded and leaves no bytes to read. */
+static bool process_capture_peek(HANDLE read_handle, bool *pipe_closed,
+                                 DWORD *available)
+{
+    *available = 0;
+    if (*pipe_closed ||
+        PeekNamedPipe(read_handle, NULL, 0, NULL, available, NULL)) return true;
+    if (GetLastError() != ERROR_BROKEN_PIPE) return false;
+    *pipe_closed = true;
+    return true;
+}
+
+static void process_capture_stop_containment(struct platform_process *process,
+                                             uint32_t exit_code, bool *stopped)
+{
+    if (*stopped || process->containment == UINTPTR_MAX) return;
+    (void)TerminateJobObject((HANDLE)process->containment, exit_code);
+    *stopped = true;
+}
+
+static bool process_capture_expire(struct platform_process *process,
+                                   struct platform_process_capture_result *result)
+{
+    result->timed_out = true;
+    result->exit_code = 124u;
+    bool terminated = platform_process_terminate(process, 124u);
+    return platform_process_wait(process, 5000u, NULL) ==
+               PLATFORM_PROCESS_WAIT_EXITED && terminated;
+}
+
+static void process_capture_reap(struct platform_process *process,
+                                 bool exited)
+{
+    if (!exited) (void)platform_process_terminate(process, 125u);
+    (void)platform_process_wait(process, 5000u, NULL);
+    platform_process_close(process);
+}
+
+static bool process_capture_drain(HANDLE read_handle, char *out,
+                                  size_t out_size, size_t *used,
+                                  struct platform_process_capture_result *result)
+{
+    for (;;) {
+        DWORD available = 0;
+        if (!PeekNamedPipe(read_handle, NULL, 0, NULL, &available, NULL) ||
+            available == 0) return true;
+        DWORD received = 0;
+        if (!process_pipe_read(read_handle, out, out_size, used, available,
+                               &received, result)) return false;
+    }
+}
+#endif
+
 static bool process_capture_stdout_stdio(
     const struct platform_process_options *options, char *out, size_t out_size,
     uint32_t timeout_ms, struct platform_process_capture_result *result,
     uintptr_t stdin_native)
 {
 #if defined(_WIN32)
-    if (out && out_size) out[0] = 0;
-    if (result)
-        *result = (struct platform_process_capture_result){0};
-    if (!options || !out || out_size == 0 || timeout_ms == 0 || !result)
+    if (!process_capture_begin(options, out, out_size, timeout_ms, result))
         return false;
 
-    SECURITY_ATTRIBUTES security = {
-        .nLength = sizeof(security), .bInheritHandle = TRUE};
     HANDLE read_handle = NULL, write_handle = NULL;
-    if (!CreatePipe(&read_handle, &write_handle, &security, 0) ||
-        !SetHandleInformation(read_handle, HANDLE_FLAG_INHERIT, 0)) {
-        if (read_handle) CloseHandle(read_handle);
-        if (write_handle) CloseHandle(write_handle);
-        return false;
-    }
+    if (!process_capture_pipe(&read_handle, &write_handle)) return false;
 
     struct platform_process process;
     platform_process_init(&process);
@@ -504,37 +715,12 @@ static bool process_capture_stdout_stdio(
     bool pipe_closed = false;
     for (;;) {
         DWORD available = 0;
-        if (!pipe_closed &&
-            !PeekNamedPipe(read_handle, NULL, 0, NULL, &available, NULL)) {
-            DWORD error = GetLastError();
-            if (error == ERROR_BROKEN_PIPE)
-                pipe_closed = true;
-            else {
-                ok = false;
-                break;
-            }
+        if (!process_capture_peek(read_handle, &pipe_closed, &available) ||
+            !process_capture_read_available(read_handle, out, out_size, &used,
+                                            &available, result)) {
+            ok = false;
+            break;
         }
-        while (available > 0) {
-            char discard[4096];
-            size_t room = used + 1u < out_size ? out_size - used - 1u : 0u;
-            char *destination = room ? out + used : discard;
-            DWORD capacity = room
-                ? (room > UINT32_MAX ? UINT32_MAX : (DWORD)room)
-                : (DWORD)sizeof(discard);
-            DWORD wanted = available < capacity ? available : capacity;
-            DWORD received = 0;
-            if (!ReadFile(read_handle, destination, wanted, &received, NULL) ||
-                received == 0) {
-                ok = false;
-                break;
-            }
-            if (room)
-                used += received;
-            else
-                result->output_truncated = true;
-            available -= received;
-        }
-        if (!ok) break;
 
         uint32_t exit_code = 0;
         enum platform_process_wait_result waited =
@@ -549,23 +735,15 @@ static bool process_capture_stdout_stdio(
             /* A trusted query has no authority to leave helpers behind. Stop
              * any process that retained the pipe, then drain bytes already
              * committed by the primary process. */
-            if (!containment_stopped && process.containment != UINTPTR_MAX) {
-                (void)TerminateJobObject((HANDLE)process.containment,
-                                         exit_code);
-                containment_stopped = true;
-            }
+            process_capture_stop_containment(&process, exit_code,
+                                             &containment_stopped);
             if (available == 0 && pipe_closed)
                 break;
         }
 
         ULONGLONG now = GetTickCount64();
         if (now - began >= timeout_ms) {
-            result->timed_out = true;
-            result->exit_code = 124u;
-            if (!platform_process_terminate(&process, 124u)) ok = false;
-            if (platform_process_wait(&process, 5000u, NULL) !=
-                PLATFORM_PROCESS_WAIT_EXITED)
-                ok = false;
+            ok = process_capture_expire(&process, result) && ok;
             exited = true;
             break;
         }
@@ -576,40 +754,14 @@ static bool process_capture_stdout_stdio(
     /* Closing containment is the final fail-closed cleanup even after a pipe
      * or wait failure. Bytes already in the pipe are drained once more so a
      * short-lived child cannot lose its final write between signal and poll. */
-    if (!exited) (void)platform_process_terminate(&process, 125u);
-    (void)platform_process_wait(&process, 5000u, NULL);
-    platform_process_close(&process);
-    for (;;) {
-        DWORD available = 0;
-        if (!PeekNamedPipe(read_handle, NULL, 0, NULL, &available, NULL) ||
-            available == 0)
-            break;
-        char discard[4096];
-        size_t room = used + 1u < out_size ? out_size - used - 1u : 0u;
-        char *destination = room ? out + used : discard;
-        DWORD capacity = room
-            ? (room > UINT32_MAX ? UINT32_MAX : (DWORD)room)
-            : (DWORD)sizeof(discard);
-        DWORD wanted = available < capacity ? available : capacity;
-        DWORD received = 0;
-        if (!ReadFile(read_handle, destination, wanted, &received, NULL) ||
-            received == 0) {
-            ok = false;
-            break;
-        }
-        if (room)
-            used += received;
-        else
-            result->output_truncated = true;
-    }
+    process_capture_reap(&process, exited);
+    ok = process_capture_drain(read_handle, out, out_size, &used, result) && ok;
     out[used] = 0;
     CloseHandle(read_handle);
     return ok;
 #else
-    (void)options; (void)timeout_ms; (void)stdin_native;
-    if (out && out_size) out[0] = 0;
-    if (result)
-        *result = (struct platform_process_capture_result){0};
+    (void)process_capture_begin(options, out, out_size, timeout_ms, result);
+    (void)stdin_native;
     return false;
 #endif
 }

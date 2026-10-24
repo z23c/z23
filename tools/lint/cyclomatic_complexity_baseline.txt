@@ -2072,11 +2072,6 @@ platform/modules/platform/src/private_directory.c:platform_private_directory_cre
 platform/modules/platform/src/private_file.c:platform_private_file_link_no_clobber:22
 platform/modules/platform/src/private_file.c:platform_private_file_link_no_clobber#2:17
 platform/modules/platform/src/private_file.c:platform_private_path_resolve:49
-platform/modules/platform/src/process_lifecycle.c:append_arg:20
-platform/modules/platform/src/process_lifecycle.c:environment_block:16
-platform/modules/platform/src/process_lifecycle.c:platform_process_start_hidden#2:34
-platform/modules/platform/src/process_lifecycle.c:process_capture_stdout_stdio:53
-platform/modules/platform/src/process_lifecycle.c:process_start_hidden_with_stdout:44
 platform/modules/platform/src/ram_scratch.c:platform_ram_scratch_reserve:18
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read:38
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read#2:24
