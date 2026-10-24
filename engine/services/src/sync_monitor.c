@@ -9,6 +9,7 @@
 #include "framework/condition.h"
 #include "net/connman.h"
 #include "net/https_server.h"
+#include "services/https_deferred_start.h"
 #include "net/msgprocessor.h"
 #include "net/tip_watchdog.h"
 #include "net/netaddr.h"
@@ -307,7 +308,7 @@ struct zcl_result sync_monitor_evaluate_tip_state(void)
     /* Preserve the side effects the old synchronous block-acceptance edge
      * owned.  These are operational policy only; no consensus state changes. */
     set_flush_policy(3600, 500000, 100);
-    https_deferred_check();
+    https_deferred_start_check();
     event_emitf(EV_TIP_UPDATED, 0,
                 "AT_TIP periodic local=%d served=%d", local_height,
                 served_height);

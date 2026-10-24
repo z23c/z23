@@ -2065,6 +2065,7 @@ int main(int argc, char **argv)
     failures += test_domain_encoding_bech32();
     failures += test_block_log_file();
     failures += test_block_log_legacy();
+    failures += test_https_deferred_start();
     failures += test_replay_verify();
     failures += test_utxo_snapshot_inmem();
     failures += test_hodl_history_port();

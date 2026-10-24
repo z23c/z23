@@ -27,6 +27,7 @@
 #include "rpc/server.h"
 #include "controllers/strong_params.h"
 #include "services/chain_restore_boot_snapshot.h"
+#include "services/https_deferred_start.h"
 #include "services/block_source_policy.h"
 #include "services/zclassicd_oracle_service.h"
 #include "services/header_probe.h"
@@ -205,7 +206,10 @@ static bool explorer_dump_state_json(struct json_value *out, const char *key)
 
     json_push_kv_bool(out, "https_started", https_server_is_running());
     json_push_kv_int(out, "https_port", (int64_t)https_server_port());
-    json_push_kv_bool(out, "https_deferred", https_deferred_pending());
+    bool https_deferred = false;
+    ZCL_IGNORE_RESULT(https_deferred_start_pending(&https_deferred),
+                      "the query only fails on a NULL out pointer; false is the safe default");
+    json_push_kv_bool(out, "https_deferred", https_deferred);
 
     const char *datadir = diag_datadir();
     char cert_path[1100], key_path[1100];

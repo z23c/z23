@@ -32,6 +32,7 @@
 #include "net/rom_seed.h"
 #include "config/rom_bundle_admission.h"
 #include "net/https_server.h"
+#include "services/https_deferred_start.h"
 #include "net/acme_arm_file.h"
 #include "net/acme_challenge.h"
 #include "net/acme_selfsigned.h"
@@ -440,10 +441,12 @@ static bool boot_https_explorer_start(void *ctx)
         printf("HTTPS: deferred during IBD (chain=%d, headers=%d, "
                "behind=%d). Will start when near tip.\n",
                chain_tip_h, best_header, best_header - chain_tip_h);
-        static char s_cert[1024], s_key[1024];
-        memcpy(s_cert, serve_cert, strlen(serve_cert) + 1u);
-        memcpy(s_key, serve_key, strlen(serve_key) + 1u);
-        https_deferred_set(s_cert, s_key, https_domain);
+        /* The engine copies the paths, and refuses ones too long to keep. */
+        ZCL_IGNORE_RESULT(https_deferred_start_set(serve_cert, serve_key,
+                                                   https_domain,
+                                                   svc->app_ctx->https_port,
+                                                   svc->app_ctx->https_port - 363),
+                          "the set logs its own refusal; boot continues without the deferred start");
     }
     return true;
 }

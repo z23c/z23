@@ -9,6 +9,7 @@
 #include "json/json.h"
 #include "net/file_service.h"
 #include "net/https_server.h"
+#include "services/https_deferred_start.h"
 #include "rpc/httpserver.h"
 #include "util/clientversion.h"
 
@@ -599,6 +600,9 @@ void agent_push_runtime_services_json(struct json_value *out,
     const int https_bound_port = https_server_port();
     const bool fs_running = fs_server_is_running();
     const int fs_bound_port = fs_running ? (int)fs_server_get_port() : 0;
+    bool https_deferred = false;
+    ZCL_IGNORE_RESULT(https_deferred_start_pending(&https_deferred),
+                      "the query only fails on a NULL out pointer; false is the safe default");
     struct json_value svc;
 
     json_init(&svc);
@@ -623,8 +627,7 @@ void agent_push_runtime_services_json(struct json_value *out,
     json_push_kv_bool(&svc, "https_running", https_running);
     json_push_kv_int(&svc, "https_bound_port",
                      https_running ? https_bound_port : 0);
-    json_push_kv_bool(&svc, "https_deferred",
-                      https_deferred_pending());
+    json_push_kv_bool(&svc, "https_deferred", https_deferred);
     json_push_kv_int(&svc, "fs_configured_port", g_agent_runtime.fs_port);
     json_push_kv_bool(&svc, "fs_running", fs_running);
     json_push_kv_int(&svc, "fs_bound_port", fs_bound_port);

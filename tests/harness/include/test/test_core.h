@@ -917,6 +917,7 @@ int test_domain_encoding_base58(void);
 int test_domain_encoding_bech32(void);
 int test_block_log_file(void);
 int test_block_log_legacy(void);
+int test_https_deferred_start(void);
 int test_replay_verify(void);
 int test_utxo_snapshot_inmem(void);
 int test_snapshot_apply_coins_kv(void);

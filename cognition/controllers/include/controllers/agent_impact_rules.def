@@ -2903,22 +2903,13 @@ AGENT_IMPACT_RULE("platform/modules/platform/src/private_destination.c", "store_
  * it, and these three assert on mapped bytes. */
 AGENT_IMPACT_RULE("platform/modules/platform/include/platform/read_mapping.h", "read_mapping_positioned node_db_catchup_service block_index_loader make_lint_gates")
 
-/* Deferred HTTPS activation, split out of https_server.c. NO REGISTERED GROUP
- * EXECUTES IT, so the lint tier alone is the honest answer. Checked, not
- * assumed: https_deferred_set has one caller, boot_frontend_services.c, which
- * no test invokes; https_deferred_check has two, the reached_peer_tip arm of
- * process_block_msg and the periodic AT_TIP commit in sync_monitor.c --
- * test_msg_handlers.c does call process_block_msg, but all five of its cases
- * are unrequested-block scoring and reducer-queueing cases that never make a
- * valid block the new tip, and sync_monitor_evaluate_tip_state appears in no
- * test at all; and https_deferred_pending is read only by two diagnostics
- * dumpers, whose dump function pointers no test invokes -- test_rpc.c's
- * dumpstate catalog case reads the entry METADATA and asserts e->fn != NULL
- * without ever calling it. Closing this needs a case that calls
- * https_deferred_set() and asserts https_deferred_pending() flips true, then
- * drives sync_monitor_evaluate_tip_state() to its AT_TIP commit and asserts
- * it flips back false. */
+/* Deferred HTTPS activation is owned by the engine now
+ * (engine/services/src/https_deferred_start.c, group https_deferred_start),
+ * which replays the configured ports. The sealed core file keeps only a
+ * no-op check that msg_blocks.c still calls; nothing sets its pending flag,
+ * so no registered group reaches it. Removing it is a later core unit. */
 AGENT_IMPACT_RULE("core/modules/net/src/https_deferred.c", "make_lint_gates")
+AGENT_IMPACT_RULE("engine/services/src/https_deferred_start.c|engine/services/include/services/https_deferred_start.h", "https_deferred_start make_lint_gates")
 
 /* Five fail-closed Windows boundary units the merge split out of their
  * POSIX siblings. Every one is a single #if defined(_WIN32) block, so on this
