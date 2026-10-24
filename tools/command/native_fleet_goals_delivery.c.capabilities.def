@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_fleet_goals_delivery.c", CAP_FS_READ|CAP_FS_WRITE, "reads the experiment ledger rows.tsv with fopen(path, \"rb\") one bounded line at a time; the landed lanes come from the shared outcomes reader and the agent index; the only write is the allocation-failure diagnostic to stderr from base/safe_alloc.h, no file is written")

@@ -104,6 +104,7 @@ struct zcl_objective_value zcl_objectives_tokens_per_landed_commit(
 struct zcl_agent_lane {
     char id[48];
     char lane[104];
+    char kind[8]; /* write cx review review1 review2 fix */
 };
 struct zcl_agent_index {
     struct zcl_agent_lane *items; /* sorted by id after build */
@@ -116,6 +117,9 @@ struct zcl_agent_index {
 /* False only on an allocation failure. A missing root yields an empty index. */
 bool zcl_objectives_agent_index_build(struct zcl_agent_index *ix);
 const char *zcl_objectives_agent_lane(const struct zcl_agent_index *ix,
+                                      const char *id);
+/* The job kind of the same agent, or NULL. */
+const char *zcl_objectives_agent_kind(const struct zcl_agent_index *ix,
                                       const char *id);
 void zcl_objectives_agent_index_free(struct zcl_agent_index *ix);
 

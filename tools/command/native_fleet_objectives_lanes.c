@@ -30,15 +30,18 @@ static const char *const lanes_prefixes[] = {"write:", "cx:",      "review:",
                                              "review1:", "review2:", "fix:"};
 
 /* The lane named by a job label, or NULL for a research label. */
-static const char *lanes_of_label(const char *label)
+static const char *lanes_of_label(const char *label, char *kind)
 {
     if (!label)
         return NULL;
     for (size_t i = 0; i < sizeof(lanes_prefixes) / sizeof(lanes_prefixes[0]);
          i++) {
         size_t n = strlen(lanes_prefixes[i]);
-        if (strncmp(label, lanes_prefixes[i], n) == 0 && label[n] != '\0')
+        if (strncmp(label, lanes_prefixes[i], n) == 0 && label[n] != '\0') {
+            memcpy(kind, lanes_prefixes[i], n - 1u);
+            kind[n - 1u] = '\0';
             return label + n;
+        }
     }
     return NULL;
 }
@@ -57,7 +60,7 @@ static bool lanes_meta_id(const char *name, char *id, size_t cap)
 }
 
 static bool lanes_push(struct zcl_agent_index *ix, const char *id,
-                       const char *lane)
+                       const char *lane, const char *kind)
 {
     if (ix->n == ix->cap) {
         size_t cap = ix->cap ? ix->cap * 2u : 1024u;
@@ -72,6 +75,8 @@ static bool lanes_push(struct zcl_agent_index *ix, const char *id,
     (void)snprintf(ix->items[ix->n].id, sizeof(ix->items[ix->n].id), "%s", id);
     (void)snprintf(ix->items[ix->n].lane, sizeof(ix->items[ix->n].lane), "%s",
                    lane);
+    (void)snprintf(ix->items[ix->n].kind, sizeof(ix->items[ix->n].kind), "%s",
+                   kind);
     ix->n++;
     return true;
 }
@@ -85,6 +90,7 @@ static void lanes_read_meta(struct zcl_agent_index *ix, const char *path,
     size_t got;
     struct json_value doc;
     const char *lane;
+    char kind[8] = "";
     if (!buf) {
         ix->oom = true;
         return;
@@ -98,9 +104,9 @@ static void lanes_read_meta(struct zcl_agent_index *ix, const char *path,
     if (got > 0 && got <= LANES_META_BYTES) {
         json_init(&doc);
         if (json_read(&doc, buf, got) && doc.type == JSON_OBJ) {
-            lane = lanes_of_label(json_get_str(json_get(&doc, "description")));
+            lane = lanes_of_label(json_get_str(json_get(&doc, "description")), kind);
             if (lane)
-                (void)lanes_push(ix, id, lane);
+                (void)lanes_push(ix, id, lane, kind);
         }
         json_free(&doc);
     }
@@ -182,6 +188,18 @@ const char *zcl_objectives_agent_lane(const struct zcl_agent_index *ix,
     (void)snprintf(key.id, sizeof(key.id), "%s", id);
     hit = bsearch(&key, ix->items, ix->n, sizeof(*ix->items), lanes_cmp);
     return hit ? hit->lane : NULL;
+}
+
+const char *zcl_objectives_agent_kind(const struct zcl_agent_index *ix,
+                                      const char *id)
+{
+    struct zcl_agent_lane key;
+    const struct zcl_agent_lane *hit;
+    if (!ix->n)
+        return NULL;
+    (void)snprintf(key.id, sizeof(key.id), "%s", id);
+    hit = bsearch(&key, ix->items, ix->n, sizeof(*ix->items), lanes_cmp);
+    return hit ? hit->kind : NULL;
 }
 
 void zcl_objectives_agent_index_free(struct zcl_agent_index *ix)
