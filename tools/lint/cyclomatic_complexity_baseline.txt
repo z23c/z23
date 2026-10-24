@@ -21,10 +21,6 @@ apps/skycombat/src/models/weapons.c:weapons_update:25
 apps/skycombat/src/sky_combat_multiplayer.c:main:64
 apps/skycombat/src/sky_combat_multiplayer_ultimate.c:main:44
 apps/skycombat/src/views/combat_effects.c:effects_update:26
-cognition/controllers/src/agent_anchor_status_controller.c:anchor_meta_blob:17
-cognition/controllers/src/agent_anchor_status_controller.c:anchor_next_diagnosis:16
-cognition/controllers/src/agent_anchor_status_controller.c:anchor_push_utxo_probe_json:19
-cognition/controllers/src/agent_anchor_status_controller.c:anchor_table_stats:16
 cognition/controllers/src/agent_background_quality.c:agent_push_quality_lane:32
 cognition/controllers/src/agent_cure_status_helpers.c:agent_cure_activity_build:17
 cognition/controllers/src/agent_diagnose_controller.c:rpc_agent_diagnose:67

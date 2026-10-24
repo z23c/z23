@@ -165,31 +165,50 @@ static bool anchor_log_row_probe_at(sqlite3 *db, const char *table,
     return rc == SQLITE_ROW || rc == SQLITE_DONE;
 }
 
+/* First failing check of one validate log at the utxo cursor, or NULL when
+ * the row is healthy (or the log is not yet at a failing state). */
+static const char *anchor_log_next_failure(
+        const struct anchor_log_row_probe *lp,
+        const char *unavailable,
+        const char *missing,
+        const char *failed)
+{
+    if (!lp->table_present)
+        return unavailable;
+    if (!lp->row_present)
+        return missing;
+    if (lp->ok_present && lp->ok == 0)
+        return failed;
+    return NULL;
+}
+
 static const char *anchor_next_diagnosis(
         const struct anchor_utxo_probe *p,
         bool utxo_cursor_present,
         bool proof_cursor_present)
 {
+    const char *failure = NULL;
+
     if (!p || !utxo_cursor_present)
         return "utxo_apply_cursor_missing";
     if (!proof_cursor_present)
         return "proof_validate_cursor_missing";
     if (p->next_height >= p->proof_cursor)
         return "utxo_apply_caught_up_to_proof_cursor";
-    if (!p->proof_next.table_present)
-        return "proof_validate_log_unavailable";
-    if (!p->proof_next.row_present)
-        return "proof_validate_log_missing_at_utxo_cursor";
-    if (p->proof_next.ok_present && p->proof_next.ok == 0)
-        return "proof_validate_failed_at_utxo_cursor";
+    failure = anchor_log_next_failure(&p->proof_next,
+                                      "proof_validate_log_unavailable",
+                                      "proof_validate_log_missing_at_utxo_cursor",
+                                      "proof_validate_failed_at_utxo_cursor");
+    if (failure)
+        return failure;
     if (p->utxo_next.row_present)
         return "utxo_apply_row_exists_but_cursor_not_advanced";
-    if (!p->script_next.table_present)
-        return "script_validate_log_unavailable";
-    if (!p->script_next.row_present)
-        return "script_validate_log_missing_at_utxo_cursor";
-    if (p->script_next.ok_present && p->script_next.ok == 0)
-        return "script_validate_failed_at_utxo_cursor";
+    failure = anchor_log_next_failure(&p->script_next,
+                                      "script_validate_log_unavailable",
+                                      "script_validate_log_missing_at_utxo_cursor",
+                                      "script_validate_failed_at_utxo_cursor");
+    if (failure)
+        return failure;
     if (p->proof_next.ok_present && p->proof_next.ok == 1)
         return "utxo_apply_idle_after_validated_row";
     return "utxo_apply_probe_inconclusive";
@@ -311,6 +330,15 @@ static bool anchor_utxo_probe_build(sqlite3 *db,
     return true;
 }
 
+static void anchor_meta_blob_copy(const void *blob, int n,
+                                  uint8_t *buf, size_t cap)
+{
+    if (blob && n > 0 && buf && cap > 0) {
+        size_t copy = (size_t)n < cap ? (size_t)n : cap;
+        memcpy(buf, blob, copy);
+    }
+}
+
 static bool anchor_meta_blob(sqlite3 *db, const char *key,
                              uint8_t *buf, size_t cap, size_t *len_out,
                              bool *found_out)
@@ -336,10 +364,7 @@ static bool anchor_meta_blob(sqlite3 *db, const char *key,
             *found_out = true;
         if (len_out)
             *len_out = n > 0 ? (size_t)n : 0;
-        if (blob && n > 0 && buf && cap > 0) {
-            size_t copy = (size_t)n < cap ? (size_t)n : cap;
-            memcpy(buf, blob, copy);
-        }
+        anchor_meta_blob_copy(blob, n, buf, cap);
     }
     sqlite3_finalize(st);
     return rc == SQLITE_ROW || rc == SQLITE_DONE;
@@ -372,6 +397,20 @@ static bool anchor_stage_cursor(sqlite3 *db, const char *name,
     return rc == SQLITE_ROW || rc == SQLITE_DONE;
 }
 
+static void anchor_table_stats_fill(sqlite3_stmt *st,
+                                    int64_t *count_out, int64_t *min_out,
+                                    int64_t *max_out, bool *present_out)
+{
+    if (present_out)
+        *present_out = true;
+    if (count_out)
+        *count_out = sqlite3_column_int64(st, 0);
+    if (min_out && sqlite3_column_type(st, 1) != SQLITE_NULL)
+        *min_out = sqlite3_column_int64(st, 1);
+    if (max_out && sqlite3_column_type(st, 2) != SQLITE_NULL)
+        *max_out = sqlite3_column_int64(st, 2);
+}
+
 static bool anchor_table_stats(sqlite3 *db, const char *table,
                                int64_t *count_out, int64_t *min_out,
                                int64_t *max_out, bool *present_out)
@@ -394,16 +433,8 @@ static bool anchor_table_stats(sqlite3 *db, const char *table,
     if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) // raw-controller-sql-ok:anchorstatus-progress-kv-readonly
         return true; /* older fixture without this log table */
     int rc = sqlite3_step(st); // raw-sql-ok:read-only-diagnostic-cli
-    if (rc == SQLITE_ROW) {
-        if (present_out)
-            *present_out = true;
-        if (count_out)
-            *count_out = sqlite3_column_int64(st, 0);
-        if (min_out && sqlite3_column_type(st, 1) != SQLITE_NULL)
-            *min_out = sqlite3_column_int64(st, 1);
-        if (max_out && sqlite3_column_type(st, 2) != SQLITE_NULL)
-            *max_out = sqlite3_column_int64(st, 2);
-    }
+    if (rc == SQLITE_ROW)
+        anchor_table_stats_fill(st, count_out, min_out, max_out, present_out);
     sqlite3_finalize(st);
     return rc == SQLITE_ROW || rc == SQLITE_DONE;
 }
@@ -458,6 +489,35 @@ static void anchor_push_row_probe_json(struct json_value *obj,
     json_free(&row);
 }
 
+static void anchor_push_utxo_probe_text(struct json_value *obj,
+                                        const struct anchor_utxo_probe *p)
+{
+    json_push_kv_str(obj, "next_diagnosis",
+                     p && p->next_diagnosis ? p->next_diagnosis
+                                             : "utxo_apply_probe_unavailable");
+    json_push_kv_str(obj, "history_diagnosis",
+                     p && p->history_diagnosis ? p->history_diagnosis
+                                                : "utxo_apply_history_probe_unavailable");
+    json_push_kv_str(obj, "next_action",
+                     p && p->next_action ? p->next_action
+                                          : "inspect_anchorstatus");
+}
+
+static void anchor_push_utxo_probe_rows(struct json_value *obj,
+                                        const struct anchor_utxo_probe *p)
+{
+    anchor_push_row_probe_json(obj, "proof_validate_at_next",
+                               p ? &p->proof_next : NULL);
+    anchor_push_row_probe_json(obj, "script_validate_at_next",
+                               p ? &p->script_next : NULL);
+    anchor_push_row_probe_json(obj, "utxo_apply_at_next",
+                               p ? &p->utxo_next : NULL);
+    anchor_push_row_probe_json(obj, "utxo_apply_at_previous",
+                               p ? &p->utxo_previous : NULL);
+    anchor_push_row_probe_json(obj, "utxo_delta_at_previous",
+                               p ? &p->delta_previous : NULL);
+}
+
 static void anchor_push_utxo_probe_json(struct json_value *result,
                                         const struct anchor_utxo_probe *p)
 {
@@ -474,25 +534,8 @@ static void anchor_push_utxo_probe_json(struct json_value *result,
                       p && p->previous_row_missing_below_coin_frontier);
     json_push_kv_bool(&obj, "previous_delta_missing_below_coin_frontier",
                       p && p->previous_delta_missing_below_coin_frontier);
-    json_push_kv_str(&obj, "next_diagnosis",
-                     p && p->next_diagnosis ? p->next_diagnosis
-                                             : "utxo_apply_probe_unavailable");
-    json_push_kv_str(&obj, "history_diagnosis",
-                     p && p->history_diagnosis ? p->history_diagnosis
-                                                : "utxo_apply_history_probe_unavailable");
-    json_push_kv_str(&obj, "next_action",
-                     p && p->next_action ? p->next_action
-                                          : "inspect_anchorstatus");
-    anchor_push_row_probe_json(&obj, "proof_validate_at_next",
-                               p ? &p->proof_next : NULL);
-    anchor_push_row_probe_json(&obj, "script_validate_at_next",
-                               p ? &p->script_next : NULL);
-    anchor_push_row_probe_json(&obj, "utxo_apply_at_next",
-                               p ? &p->utxo_next : NULL);
-    anchor_push_row_probe_json(&obj, "utxo_apply_at_previous",
-                               p ? &p->utxo_previous : NULL);
-    anchor_push_row_probe_json(&obj, "utxo_delta_at_previous",
-                               p ? &p->delta_previous : NULL);
+    anchor_push_utxo_probe_text(&obj, p);
+    anchor_push_utxo_probe_rows(&obj, p);
     json_push_kv(result, "utxo_apply_probe", &obj);
     json_free(&obj);
 }
