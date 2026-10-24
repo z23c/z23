@@ -493,8 +493,6 @@ static int pr_status(void)
     } TEST_END
     return failures;
 }
-#endif
-
 static int pr_bounds(void)
 {
     int failures = 0;
@@ -527,6 +525,8 @@ static int pr_bounds(void)
     } TEST_END
     return failures;
 }
+
+#endif
 
 int test_pair_renew(void)
 {
