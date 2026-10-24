@@ -1395,9 +1395,6 @@ engine/controllers/src/blog_post_controller.c:rpc_blog_anchor:21
 engine/controllers/src/chain_inspect_controller.c:rpc_chainstats:16
 engine/controllers/src/chain_inspect_controller.c:rpc_scancommitments:21
 engine/controllers/src/chain_inspect_controller.c:rpc_verifychainroots:25
-engine/controllers/src/chain_native_handlers.c:rawtx_state_first:18
-engine/controllers/src/chain_native_handlers.c:zcl_native_getblock_body:18
-engine/controllers/src/chain_native_handlers.c:zcl_native_getrawtransaction_body:28
 engine/controllers/src/dbquery_controller.c:dbquery_execute:35
 engine/controllers/src/diagnostics_block_index.c:diag_header_band_dump_state_json:19
 engine/controllers/src/diagnostics_block_index.c:find_block_index_by_key:18
