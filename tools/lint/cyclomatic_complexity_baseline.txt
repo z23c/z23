@@ -712,8 +712,6 @@ contexts/explorer/views/src/explorer_pages_hodl_rows.c:hodl_build_survival_rows:
 contexts/explorer/views/src/explorer_pages_hodl_rows.c:hodl_load_history_wave_rows:16
 contexts/explorer/views/src/explorer_pages_hodl_snapshot.c:hodl_view_disk_cache_read:33
 contexts/explorer/views/src/explorer_pages_hodl_snapshot.c:hodl_view_disk_cache_save:27
-contexts/explorer/views/src/explorer_pages_view.c:explorer_view_token_detail:35
-contexts/explorer/views/src/explorer_pages_view.c:explorer_view_tokens:24
 contexts/explorer/views/src/explorer_stats_gather.c:gather_deep_chain_data:17
 contexts/explorer/views/src/explorer_stats_gather.c:gather_economy_data:22
 contexts/explorer/views/src/explorer_stats_sections.c:emit_section_6_utxo_distribution:20

@@ -124,6 +124,31 @@ static bool explorer_reverse_hex_lower(const char *hex_in, char *out)
 
 /* ── ZSLP Tokens Page ─────────────────────────────────────── */
 
+static void explorer_format_token_amount(char *out, size_t cap,
+                                          int64_t amount, int decimals)
+{
+    if (decimals > 0 && decimals <= 8) {
+        int64_t divisor = zcl_pow10(decimals);
+        snprintf(out, cap, "%" PRId64 ".%0*" PRId64,
+                 amount / divisor, decimals, amount % divisor);
+    } else {
+        snprintf(out, cap, "%" PRId64, amount);
+    }
+}
+
+static const char *explorer_token_type(int tx_type)
+{
+    return tx_type == 1 ? "GENESIS" :
+           tx_type == 2 ? "MINT" :
+           tx_type == 3 ? "SEND" : "?";
+}
+
+static const char *explorer_token_type_class(int tx_type)
+{
+    return tx_type == 1 ? "tag-cb" :
+           tx_type == 2 ? "tag-shielded" : "tag-slp";
+}
+
 size_t explorer_view_tokens(const char *datadir, uint8_t *r, size_t max)
 {
     if (!datadir || !r) return 0;
@@ -180,13 +205,7 @@ size_t explorer_view_tokens(const char *datadir, uint8_t *r, size_t max)
 
                 /* Format supply with decimals */
                 char supply[64];
-                if (dec > 0 && dec <= 8) {
-                    int64_t divisor = zcl_pow10(dec);
-                    snprintf(supply, sizeof(supply), "%" PRId64 ".%0*" PRId64,
-                             minted / divisor, dec, minted % divisor);
-                } else {
-                    snprintf(supply, sizeof(supply), "%" PRId64, minted);
-                }
+                explorer_format_token_amount(supply, sizeof(supply), minted, dec);
 
                 /* Build linkable token ID (reverse byte order for display) */
                 char tid_link[65] = "";
@@ -227,20 +246,11 @@ size_t explorer_view_tokens(const char *datadir, uint8_t *r, size_t max)
                 const char *ticker = (const char *)sqlite3_column_text(s, 3);
                 int dec = sqlite3_column_int(s, 4);
 
-                const char *type_str = tx_type == 1 ? "GENESIS" :
-                                       tx_type == 2 ? "MINT" :
-                                       tx_type == 3 ? "SEND" : "?";
-                const char *type_class = tx_type == 1 ? "tag-cb" :
-                                         tx_type == 2 ? "tag-shielded" : "tag-slp";
+                const char *type_str = explorer_token_type(tx_type);
+                const char *type_class = explorer_token_type_class(tx_type);
 
                 char amt[64];
-                if (dec > 0 && dec <= 8) {
-                    int64_t divisor = zcl_pow10(dec);
-                    snprintf(amt, sizeof(amt), "%" PRId64 ".%0*" PRId64,
-                             amount / divisor, dec, amount % divisor);
-                } else {
-                    snprintf(amt, sizeof(amt), "%" PRId64, amount);
-                }
+                explorer_format_token_amount(amt, sizeof(amt), amount, dec);
 
                 char safe_ticker[64] = "";
                 html_escape(safe_ticker, sizeof(safe_ticker), ticker ? ticker : "");
@@ -282,6 +292,94 @@ size_t explorer_view_tokens(const char *datadir, uint8_t *r, size_t max)
 
 /* ── ZSLP Token Detail Page ────────────────────────────────── */
 
+struct explorer_token_detail {
+    char ticker[64], name[128], doc_url[256];
+    int decimals, genesis_height;
+    int64_t total_minted;
+};
+
+static bool explorer_lookup_token(sqlite3 *db, const uint8_t token_id[32],
+                                   const uint8_t token_id_rev[32],
+                                   const uint8_t **lookup_id,
+                                   struct explorer_token_detail *detail)
+{
+    bool found = false;
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT ticker, name, decimals, document_url, genesis_height, total_minted "
+            "FROM zslp_tokens WHERE token_id = ?",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_blob(s, 1, token_id, 32, SQLITE_STATIC);
+        bool have_row = (AR_STEP_ROW_READONLY(s) == SQLITE_ROW);
+        if (!have_row) {
+            /* Try reversed */
+            sqlite3_reset(s);
+            sqlite3_bind_blob(s, 1, token_id_rev, 32, SQLITE_STATIC);
+            if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
+                have_row = true;
+                *lookup_id = token_id_rev;
+            }
+        }
+        /* Only read columns when a row is actually current: with no
+         * SQLITE_ROW the column accessors return NULL/garbage. */
+        if (have_row && sqlite3_column_text(s, 0)) {
+            const char *t = (const char *)sqlite3_column_text(s, 0);
+            const char *n = (const char *)sqlite3_column_text(s, 1);
+            const char *u = (const char *)sqlite3_column_text(s, 3);
+            if (t) snprintf(detail->ticker, sizeof(detail->ticker), "%s", t);
+            if (n) snprintf(detail->name, sizeof(detail->name), "%s", n);
+            if (u) snprintf(detail->doc_url, sizeof(detail->doc_url), "%s", u);
+            detail->decimals = sqlite3_column_int(s, 2);
+            detail->genesis_height = sqlite3_column_int(s, 4);
+            detail->total_minted = sqlite3_column_int64(s, 5);
+            found = true;
+        }
+        sqlite3_finalize(s);
+    }
+    return found;
+}
+
+static size_t explorer_token_history(sqlite3 *db, const uint8_t lookup_id[32],
+                                      int decimals, uint8_t *r, size_t max,
+                                      size_t off)
+{
+    sqlite3_stmt *s = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT block_height, tx_type, amount, hex(txid) "
+            "FROM zslp_transfers WHERE token_id = ? "
+            "ORDER BY block_height DESC LIMIT 100",
+            -1, &s, NULL) == SQLITE_OK) {
+        sqlite3_bind_blob(s, 1, lookup_id, 32, SQLITE_STATIC);
+        while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW && off + 512 < max) {
+            int height = sqlite3_column_int(s, 0);
+            int tx_type = sqlite3_column_int(s, 1);
+            int64_t amount = sqlite3_column_int64(s, 2);
+            const char *txid_hex = (const char *)sqlite3_column_text(s, 3);
+
+            const char *type_str = explorer_token_type(tx_type);
+            const char *type_class = explorer_token_type_class(tx_type);
+
+            char amt[64];
+            explorer_format_token_amount(amt, sizeof(amt), amount, decimals);
+
+            /* Reverse txid for display */
+            char txid_disp[65] = "";
+            explorer_reverse_hex_lower(txid_hex, txid_disp);
+            char short_tx[18];
+            snprintf(short_tx, sizeof(short_tx), "%.8s...%.4s",
+                     txid_disp, txid_disp + 60);
+
+            APPEND(off, r, max,
+                "<tr><td><a href='/explorer/block/%d'>%d</a></td>"
+                "<td><span class='tag %s'>%s</span></td>"
+                "<td class='amount'>%s</td></tr>",
+                height, height, type_class, type_str, amt);
+        }
+        sqlite3_finalize(s);
+    }
+    return off;
+}
+
 size_t explorer_view_token_detail(const char *token_id_hex,
                                    const char *datadir,
                                    uint8_t *r, size_t max)
@@ -307,47 +405,12 @@ size_t explorer_view_token_detail(const char *token_id_hex,
         token_id_rev[31 - i] = token_id[i];
 
     /* Look up token — try both byte orders */
-    char ticker[64] = "", name[128] = "", doc_url[256] = "";
-    int decimals = 0, genesis_height = 0;
-    int64_t total_minted = 0;
-    bool found = false;
+    struct explorer_token_detail detail = {0};
 
     /* Try direct byte order first, then reversed */
     const uint8_t *lookup_id = token_id;
-    {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT ticker, name, decimals, document_url, genesis_height, total_minted "
-                "FROM zslp_tokens WHERE token_id = ?",
-                -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_blob(s, 1, token_id, 32, SQLITE_STATIC);
-            bool have_row = (AR_STEP_ROW_READONLY(s) == SQLITE_ROW);
-            if (!have_row) {
-                /* Try reversed */
-                sqlite3_reset(s);
-                sqlite3_bind_blob(s, 1, token_id_rev, 32, SQLITE_STATIC);
-                if (AR_STEP_ROW_READONLY(s) == SQLITE_ROW) {
-                    have_row = true;
-                    lookup_id = token_id_rev;
-                }
-            }
-            /* Only read columns when a row is actually current: with no
-             * SQLITE_ROW the column accessors return NULL/garbage. */
-            if (have_row && sqlite3_column_text(s, 0)) {
-                const char *t = (const char *)sqlite3_column_text(s, 0);
-                const char *n = (const char *)sqlite3_column_text(s, 1);
-                const char *u = (const char *)sqlite3_column_text(s, 3);
-                if (t) snprintf(ticker, sizeof(ticker), "%s", t);
-                if (n) snprintf(name, sizeof(name), "%s", n);
-                if (u) snprintf(doc_url, sizeof(doc_url), "%s", u);
-                decimals = sqlite3_column_int(s, 2);
-                genesis_height = sqlite3_column_int(s, 4);
-                total_minted = sqlite3_column_int64(s, 5);
-                found = true;
-            }
-            sqlite3_finalize(s);
-        }
-    }
+    bool found = explorer_lookup_token(db, token_id, token_id_rev,
+                                       &lookup_id, &detail);
 
     if (!found) {
         sqlite3_close(db);
@@ -357,19 +420,17 @@ size_t explorer_view_token_detail(const char *token_id_hex,
     }
 
     size_t off = 0;
+    const char *ticker = detail.ticker, *name = detail.name;
+    const char *doc_url = detail.doc_url;
+    int decimals = detail.decimals, genesis_height = detail.genesis_height;
+    int64_t total_minted = detail.total_minted;
     char safe_ticker[128], safe_name[256], safe_url[512];
     html_escape(safe_ticker, sizeof(safe_ticker), ticker);
     html_escape(safe_name, sizeof(safe_name), name);
     html_escape(safe_url, sizeof(safe_url), doc_url);
 
     char supply[64];
-    if (decimals > 0 && decimals <= 8) {
-        int64_t divisor = zcl_pow10(decimals);
-        snprintf(supply, sizeof(supply), "%" PRId64 ".%0*" PRId64,
-                 total_minted / divisor, decimals, total_minted % divisor);
-    } else {
-        snprintf(supply, sizeof(supply), "%" PRId64, total_minted);
-    }
+    explorer_format_token_amount(supply, sizeof(supply), total_minted, decimals);
 
     /* Count transfers for this token */
     int64_t xfer_count = 0;
@@ -422,51 +483,7 @@ size_t explorer_view_token_detail(const char *token_id_hex,
         "<h2>Transfer History (%" PRId64 ")</h2>"
         "<table><tr><th>Block</th><th>Type</th><th>Amount</th></tr>",
         xfer_count);
-    {
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db,
-                "SELECT block_height, tx_type, amount, hex(txid) "
-                "FROM zslp_transfers WHERE token_id = ? "
-                "ORDER BY block_height DESC LIMIT 100",
-                -1, &s, NULL) == SQLITE_OK) {
-            sqlite3_bind_blob(s, 1, lookup_id, 32, SQLITE_STATIC);
-            while (AR_STEP_ROW_READONLY(s) == SQLITE_ROW && off + 512 < max) {
-                int height = sqlite3_column_int(s, 0);
-                int tx_type = sqlite3_column_int(s, 1);
-                int64_t amount = sqlite3_column_int64(s, 2);
-                const char *txid_hex = (const char *)sqlite3_column_text(s, 3);
-
-                const char *type_str = tx_type == 1 ? "GENESIS" :
-                                       tx_type == 2 ? "MINT" :
-                                       tx_type == 3 ? "SEND" : "?";
-                const char *type_class = tx_type == 1 ? "tag-cb" :
-                                         tx_type == 2 ? "tag-shielded" : "tag-slp";
-
-                char amt[64];
-                if (decimals > 0 && decimals <= 8) {
-                    int64_t divisor = zcl_pow10(decimals);
-                    snprintf(amt, sizeof(amt), "%" PRId64 ".%0*" PRId64,
-                             amount / divisor, decimals, amount % divisor);
-                } else {
-                    snprintf(amt, sizeof(amt), "%" PRId64, amount);
-                }
-
-                /* Reverse txid for display */
-                char txid_disp[65] = "";
-                explorer_reverse_hex_lower(txid_hex, txid_disp);
-                char short_tx[18];
-                snprintf(short_tx, sizeof(short_tx), "%.8s...%.4s",
-                         txid_disp, txid_disp + 60);
-
-                APPEND(off, r, max,
-                    "<tr><td><a href='/explorer/block/%d'>%d</a></td>"
-                    "<td><span class='tag %s'>%s</span></td>"
-                    "<td class='amount'>%s</td></tr>",
-                    height, height, type_class, type_str, amt);
-            }
-            sqlite3_finalize(s);
-        }
-    }
+    off = explorer_token_history(db, lookup_id, decimals, r, max, off);
     APPEND(off, r, max, "</table>");
 
     APPEND(off, r, max, EXPLORER_FOOTER);
