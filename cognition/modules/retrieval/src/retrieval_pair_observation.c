@@ -50,14 +50,9 @@ void zcl_retrieval_pair_observation_init(
     observation->schema_version = ZCL_RETRIEVAL_PAIR_OBSERVATION_VERSION;
 }
 
-enum zcl_retrieval_pair_observation_error
-zcl_retrieval_pair_observation_validate(
+static bool rpo_parameters_valid(
     const struct zcl_retrieval_pair_observation_v1 *observation)
 {
-    if (!observation) return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_NULL;
-    if (observation->schema_version !=
-            ZCL_RETRIEVAL_PAIR_OBSERVATION_VERSION)
-        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_VERSION;
     if (observation->comparison_status <
             ZCL_RETRIEVAL_COMPARISON_SATISFIED ||
         observation->comparison_status >
@@ -73,7 +68,13 @@ zcl_retrieval_pair_observation_validate(
             -(int32_t)ZCL_RETRIEVAL_EVAL_BASIS_POINTS ||
         observation->directional_delta_bp >
             (int32_t)ZCL_RETRIEVAL_EVAL_BASIS_POINTS)
-        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_PARAMETER;
+        return false;
+    return true;
+}
+
+static bool rpo_status_consistent(
+    const struct zcl_retrieval_pair_observation_v1 *observation)
+{
     if ((observation->failed_guards != 0 &&
          observation->comparison_status !=
              ZCL_RETRIEVAL_COMPARISON_NOT_SATISFIED) ||
@@ -88,20 +89,28 @@ zcl_retrieval_pair_observation_validate(
         ((observation->failed_guards != 0 ||
           observation->missing_arms != 0) &&
          observation->directional_delta_bp != 0))
+        return false;
+    return true;
+}
+
+static void rpo_roots_const(
+    const struct zcl_retrieval_pair_observation_v1 *observation,
+    const uint8_t *roots[18]);
+
+enum zcl_retrieval_pair_observation_error
+zcl_retrieval_pair_observation_validate(
+    const struct zcl_retrieval_pair_observation_v1 *observation)
+{
+    if (!observation) return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_NULL;
+    if (observation->schema_version !=
+            ZCL_RETRIEVAL_PAIR_OBSERVATION_VERSION)
+        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_VERSION;
+    if (!rpo_parameters_valid(observation))
         return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_PARAMETER;
-    const uint8_t *const roots[] = {
-        observation->study_root, observation->task_root,
-        observation->candidate_root, observation->action_root,
-        observation->source_root, observation->snapshot_source_root,
-        observation->retrieval_projection_root,
-        observation->feature_snapshot_root,
-        observation->parent_heuristic_root,
-        observation->child_heuristic_root, observation->policy_root,
-        observation->evaluator_root, observation->workload_root,
-        observation->parent_arm_root, observation->child_arm_root,
-        observation->evaluation_input_root,
-        observation->parent_result_root, observation->child_result_root,
-    };
+    if (!rpo_status_consistent(observation))
+        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_PARAMETER;
+    const uint8_t *roots[18];
+    rpo_roots_const(observation, roots);
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (!rpo_root_any(roots[i]))
             return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_ROOT;
@@ -289,40 +298,14 @@ static void rpo_metrics_from_result(
         ZCL_RETRIEVAL_EVAL_RESULT_WRONG_SCOPE_AVAILABLE) != 0;
 }
 
-enum zcl_retrieval_pair_observation_error
-zcl_retrieval_pair_observation_verify(
+static bool rpo_bindings_match(
     const struct zcl_retrieval_pair_observation_v1 *observation,
     const struct zcl_retrieval_comparison_policy_v2 *policy,
     const struct zcl_retrieval_experiment_eval_result_v1 *parent,
-    const struct zcl_retrieval_experiment_eval_result_v1 *child)
+    const struct zcl_retrieval_experiment_eval_result_v1 *child,
+    const uint8_t policy_root[32], const uint8_t parent_root[32],
+    const uint8_t child_root[32], const uint8_t evaluation_input_root[32])
 {
-    if (!observation || !policy || !parent || !child)
-        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_NULL;
-    enum zcl_retrieval_pair_observation_error error =
-        zcl_retrieval_pair_observation_validate(observation);
-    if (error != ZCL_RETRIEVAL_PAIR_OBSERVATION_OK) return error;
-    if (zcl_retrieval_comparison_policy_v2_validate(policy) !=
-            ZCL_RETRIEVAL_COMPARISON_OK)
-        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_PARAMETER;
-    if (zcl_retrieval_experiment_eval_result_validate(parent) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK ||
-        zcl_retrieval_experiment_eval_result_validate(child) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK)
-        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_RESULT;
-    uint8_t policy_root[32], parent_root[32], child_root[32];
-    if (zcl_retrieval_comparison_policy_v2_root(policy, policy_root) !=
-            ZCL_RETRIEVAL_COMPARISON_OK ||
-        zcl_retrieval_experiment_eval_result_root(parent, parent_root) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK ||
-        zcl_retrieval_experiment_eval_result_root(child, child_root) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK)
-        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_RESULT;
-    uint8_t evaluation_input_root[32];
-    if (zcl_retrieval_paired_evaluation_input_root(
-            observation->workload_root, observation->parent_arm_root,
-            observation->child_arm_root, evaluation_input_root) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK)
-        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_BINDING;
     if (memcmp(policy_root, observation->policy_root, 32u) != 0 ||
         memcmp(policy->evaluator_root, observation->evaluator_root, 32u) != 0 ||
         memcmp(policy->workload_root, observation->workload_root, 32u) != 0 ||
@@ -342,6 +325,81 @@ zcl_retrieval_pair_observation_verify(
                observation->evaluator_root, 32u) != 0 ||
         memcmp(child->evaluator_root,
                observation->evaluator_root, 32u) != 0)
+        return false;
+    return true;
+}
+
+static bool rpo_report_matches(
+    const struct zcl_retrieval_pair_observation_v1 *observation,
+    const struct zcl_retrieval_comparison_report_v2 *report)
+{
+    if ((uint8_t)report->observation.status !=
+            observation->comparison_status ||
+        report->observation.metric != observation->metric ||
+        report->observation.direction != observation->direction ||
+        report->observation.missing_arms != observation->missing_arms ||
+        report->observation.failed_guards != observation->failed_guards ||
+        report->observation.directional_delta_bp !=
+            observation->directional_delta_bp ||
+        memcmp(report->observation.policy_root,
+               observation->policy_root, 32u) != 0 ||
+        memcmp(report->observation.parent_result_root,
+               observation->parent_result_root, 32u) != 0 ||
+        memcmp(report->observation.child_result_root,
+               observation->child_result_root, 32u) != 0 ||
+        memcmp(report->workload_root,
+               observation->workload_root, 32u) != 0 ||
+        memcmp(report->evaluation_input_root,
+               observation->evaluation_input_root, 32u) != 0)
+        return false;
+    return true;
+}
+
+static bool rpo_results_valid(
+    const struct zcl_retrieval_experiment_eval_result_v1 *parent,
+    const struct zcl_retrieval_experiment_eval_result_v1 *child)
+{
+    if (zcl_retrieval_experiment_eval_result_validate(parent) !=
+            ZCL_RETRIEVAL_EXPERIMENT_OK ||
+        zcl_retrieval_experiment_eval_result_validate(child) !=
+            ZCL_RETRIEVAL_EXPERIMENT_OK)
+        return false;
+    return true;
+}
+
+enum zcl_retrieval_pair_observation_error
+zcl_retrieval_pair_observation_verify(
+    const struct zcl_retrieval_pair_observation_v1 *observation,
+    const struct zcl_retrieval_comparison_policy_v2 *policy,
+    const struct zcl_retrieval_experiment_eval_result_v1 *parent,
+    const struct zcl_retrieval_experiment_eval_result_v1 *child)
+{
+    if (!observation || !policy || !parent || !child)
+        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_NULL;
+    enum zcl_retrieval_pair_observation_error error =
+        zcl_retrieval_pair_observation_validate(observation);
+    if (error != ZCL_RETRIEVAL_PAIR_OBSERVATION_OK) return error;
+    if (zcl_retrieval_comparison_policy_v2_validate(policy) !=
+            ZCL_RETRIEVAL_COMPARISON_OK)
+        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_PARAMETER;
+    if (!rpo_results_valid(parent, child))
+        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_RESULT;
+    uint8_t policy_root[32], parent_root[32], child_root[32];
+    if (zcl_retrieval_comparison_policy_v2_root(policy, policy_root) !=
+            ZCL_RETRIEVAL_COMPARISON_OK ||
+        zcl_retrieval_experiment_eval_result_root(parent, parent_root) !=
+            ZCL_RETRIEVAL_EXPERIMENT_OK ||
+        zcl_retrieval_experiment_eval_result_root(child, child_root) !=
+            ZCL_RETRIEVAL_EXPERIMENT_OK)
+        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_RESULT;
+    uint8_t evaluation_input_root[32];
+    if (zcl_retrieval_paired_evaluation_input_root(
+            observation->workload_root, observation->parent_arm_root,
+            observation->child_arm_root, evaluation_input_root) !=
+            ZCL_RETRIEVAL_EXPERIMENT_OK)
+        return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_BINDING;
+    if (!rpo_bindings_match(observation, policy, parent, child, policy_root,
+                            parent_root, child_root, evaluation_input_root))
         return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_BINDING;
 
     struct zcl_retrieval_paired_evaluation_report_v1 paired = {
@@ -378,24 +436,7 @@ zcl_retrieval_pair_observation_verify(
             observation->evaluation_input_root, parent, &parent_binding,
             child, &child_binding, &report) != ZCL_RETRIEVAL_COMPARISON_OK)
         return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_BINDING;
-    if ((uint8_t)report.observation.status !=
-            observation->comparison_status ||
-        report.observation.metric != observation->metric ||
-        report.observation.direction != observation->direction ||
-        report.observation.missing_arms != observation->missing_arms ||
-        report.observation.failed_guards != observation->failed_guards ||
-        report.observation.directional_delta_bp !=
-            observation->directional_delta_bp ||
-        memcmp(report.observation.policy_root,
-               observation->policy_root, 32u) != 0 ||
-        memcmp(report.observation.parent_result_root,
-               observation->parent_result_root, 32u) != 0 ||
-        memcmp(report.observation.child_result_root,
-               observation->child_result_root, 32u) != 0 ||
-        memcmp(report.workload_root,
-               observation->workload_root, 32u) != 0 ||
-        memcmp(report.evaluation_input_root,
-               observation->evaluation_input_root, 32u) != 0)
+    if (!rpo_report_matches(observation, &report))
         return ZCL_RETRIEVAL_PAIR_OBSERVATION_ERR_BINDING;
     return ZCL_RETRIEVAL_PAIR_OBSERVATION_OK;
 }

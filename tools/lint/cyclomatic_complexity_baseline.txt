@@ -125,8 +125,6 @@ cognition/modules/retrieval/src/retrieval_comparison.c:zcl_retrieval_comparison_
 cognition/modules/retrieval/src/retrieval_eval_result.c:zcl_retrieval_experiment_eval_result_init:26
 cognition/modules/retrieval/src/retrieval_eval_result.c:zcl_retrieval_experiment_eval_result_validate:22
 cognition/modules/retrieval/src/retrieval_eval_result.c:zcl_retrieval_experiment_eval_result_verify_binding:18
-cognition/modules/retrieval/src/retrieval_pair_observation.c:zcl_retrieval_pair_observation_validate:28
-cognition/modules/retrieval/src/retrieval_pair_observation.c:zcl_retrieval_pair_observation_verify:37
 cognition/modules/science/src/ecosystem.c:science_ecosystem_collect:19
 cognition/modules/science/src/science_claim.c:science_refusal_name:28
 cognition/modules/science/src/science_claim.c:validate_receipt:37
