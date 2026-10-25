@@ -73,6 +73,9 @@ struct zcl_objectives_options {
     struct zcl_objectives_node_cache *node_cache; /* NULL fetches per row */
     int64_t now;              /* unix seconds the day and window readers
                                * count from; 0 reads the wall clock */
+    const char *session;      /* the lead's Claude Code transcript (.jsonl);
+                               * NULL takes the newest one under this
+                               * checkout's Claude project directory */
 };
 
 /* Measures one catalog row by id. An id this file does not recognize

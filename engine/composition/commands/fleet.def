@@ -272,14 +272,16 @@ ZCL_COMMAND_READY_READ(
     "review, review1, review2, fix, design, check) and model family (haiku, "
     "sonnet, opus, other); each row has the agents, the fresh total, the "
     "median fresh and cache-read tokens per agent and the whole-percent share "
-    "of fresh tokens, largest first. totals count the landed lanes, the lanes "
-    "that joined an agent, the agents and the fresh tokens. skipped counts "
-    "malformed ledger lines. outcomes and experiments point the reader at a "
-    "fixture. Writes nothing; asks no node.",
+    "of fresh tokens, largest first. lead is the lead's own transcript usage "
+    "(session, else the newest in this checkout's Claude project), with its "
+    "share of worker cache reads and outputs, or unmeasured. totals count the "
+    "landed lanes, the lanes that joined an agent, the agents and the fresh "
+    "tokens. skipped counts malformed ledger lines. outcomes, experiments and "
+    "session point the reader at a fixture. Writes nothing; asks no node.",
     16384,
-    "fleet,objectives,value,tokens,spend,role,model,landed,loop",
+    "fleet,objectives,value,tokens,spend,role,model,landed,loop,lead",
     "zcl.fleet_objectives_value_input.v1", "zcl.fleet_objectives_value.v1",
-    "outcomes,experiments", "",
+    "outcomes,experiments,session", "",
     "z23-dev fleet objectives value",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_LATENCY_FOREGROUND,

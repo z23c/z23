@@ -24,10 +24,14 @@
 #include "json/json.h"
 #include "platform/time_compat.h"
 
+#include <dirent.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+#include <unistd.h>
 
 #define TPC_WINDOW_S ((int64_t)7 * 86400)
 #define TPC_LINE_CAP 8192u
@@ -59,6 +63,7 @@ struct tpc_result {
     const char *model; /* the model column, raw */
     int64_t tokens;    /* uncached input + output */
     int64_t cache;     /* cache reads */
+    int64_t out;       /* output tokens, the lead's share detail */
 };
 
 typedef void (*tpc_result_fn)(const struct tpc_result *r, void *user);
@@ -70,6 +75,7 @@ struct tpc_sample {
     uint8_t bucket;
     int64_t tokens;
     int64_t cache;
+    int64_t out;
 };
 
 struct tpc_samples {
@@ -290,6 +296,7 @@ static void tpc_fold_row(const struct tpc_result *r, void *user)
                               tpc_model_index(r->model));
     sample.tokens = r->tokens;
     sample.cache = r->cache;
+    sample.out = r->out;
     (void)tpc_samples_push(f->s, sample);
 }
 
@@ -366,6 +373,7 @@ static bool tpc_row(char *line, tpc_result_fn fn, void *user)
     r.agent = fields[3];
     r.model = fields[8];
     r.tokens = tin + tout;
+    r.out = tout;
     fn(&r, user);
     return true;
 }
@@ -561,6 +569,179 @@ struct zcl_objective_value zcl_objectives_tokens_per_landed_commit(
 #define TPV_LEAF "fleet.objectives.value"
 #define TPV_SCREEN_MAX 8192u
 
+/* The lead's own spend: its Claude Code transcript (one JSON object per
+ * line). A line over TPL_LINE_CAP is skipped and counted, as is a line that
+ * does not parse; an assistant line with a usage object is one call. */
+#define TPL_LINE_CAP ((size_t)8u * 1024u * 1024u)
+#define TPL_PATH_CAP 1024u
+
+struct tpl_sum {
+    int64_t calls, input, creation, cache, output, skipped;
+};
+
+struct tpv_lead {
+    bool measured;
+    char reason[ZCL_OBJECTIVES_REASON_MAX];
+    struct tpl_sum sum;
+};
+
+/* ~/.claude/projects/ plus the checkout's absolute path with every '/'
+ * written as '-'. False when HOME or the working directory is unavailable. */
+static bool tpl_project_dir(char *out, size_t cap)
+{
+    char cwd[TPL_PATH_CAP], name[TPL_PATH_CAP];
+    const char *home = getenv("HOME");
+    size_t i;
+    int n;
+    if (!home || !home[0] || !getcwd(cwd, sizeof(cwd)))
+        return false;
+    for (i = 0; cwd[i] && i + 1u < sizeof(name); i++)
+        name[i] = cwd[i] == '/' ? '-' : cwd[i];
+    if (cwd[i])
+        return false;
+    name[i] = '\0';
+    n = snprintf(out, cap, "%s/.claude/projects/%s", home, name);
+    return n > 0 && (size_t)n < cap;
+}
+
+static bool tpl_jsonl_name(const char *name)
+{
+    size_t n = strlen(name);
+    return n > 6u && strcmp(name + n - 6u, ".jsonl") == 0;
+}
+
+/* The newest regular .jsonl directly under dir, into out. A tie keeps the
+ * first one read. False when the directory or no transcript is there. */
+static bool tpl_newest(const char *dir, char *out, size_t cap)
+{
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    struct stat st;
+    time_t best = 0;
+    bool found = false;
+    char path[TPL_PATH_CAP];
+    if (!d)
+        return false;
+    while ((e = readdir(d)) != NULL) {
+        if (!tpl_jsonl_name(e->d_name) ||
+            snprintf(path, sizeof(path), "%s/%s", dir, e->d_name) >=
+                (int)sizeof(path) ||
+            stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+            continue;
+        if (found && st.st_mtime <= best)
+            continue;
+        if (snprintf(out, cap, "%s", path) >= (int)cap)
+            continue;
+        best = st.st_mtime;
+        found = true;
+    }
+    (void)closedir(d);
+    return found;
+}
+
+/* The transcript to read: the session option when set, else the newest one
+ * under this checkout's project directory. */
+static bool tpl_path(const struct zcl_objectives_options *options, char *buf,
+                     size_t cap, const char **out)
+{
+    char dir[TPL_PATH_CAP];
+    if (options && options->session) {
+        *out = options->session;
+        return true;
+    }
+    if (!tpl_project_dir(dir, sizeof(dir)) || !tpl_newest(dir, buf, cap))
+        return false;
+    *out = buf;
+    return true;
+}
+
+static void tpl_usage(const struct json_value *usage, struct tpl_sum *s)
+{
+    s->calls++;
+    s->input = tpc_add(s->input, json_get_int(json_get(usage, "input_tokens")));
+    s->creation = tpc_add(s->creation,
+                          json_get_int(json_get(usage,
+                                                "cache_creation_input_tokens")));
+    s->cache = tpc_add(s->cache,
+                       json_get_int(json_get(usage,
+                                             "cache_read_input_tokens")));
+    s->output = tpc_add(s->output,
+                        json_get_int(json_get(usage, "output_tokens")));
+}
+
+/* One transcript line: an assistant message with a usage object is one call;
+ * any other line is ignored; a line that does not parse is skipped. */
+static void tpl_line(char *line, size_t len, struct tpl_sum *s)
+{
+    struct json_value v;
+    const struct json_value *usage;
+    json_init(&v);
+    if (!json_read(&v, line, len)) {
+        s->skipped++;
+        json_free(&v);
+        return;
+    }
+    usage = json_get(json_get(&v, "message"), "usage");
+    if (usage && json_size(usage) > 0 &&
+        strcmp(json_get_str(json_get(&v, "type")), "assistant") == 0)
+        tpl_usage(usage, s);
+    json_free(&v);
+}
+
+/* Walks the transcript one bounded line at a time. False, with reason set,
+ * when the file is missing or unreadable. */
+static bool tpl_scan(const char *path, struct tpl_sum *s, char *reason,
+                     size_t cap)
+{
+    char *line = zcl_malloc(TPL_LINE_CAP, "tpl_line");
+    size_t len = 0;
+    int status = 0;
+    FILE *f;
+    if (!line) {
+        (void)snprintf(reason, cap, "out of memory reading the lead transcript");
+        return false;
+    }
+    f = fopen(path, "rb");
+    if (!f) {
+        free(line);
+        (void)snprintf(reason, cap, "missing lead transcript");
+        return false;
+    }
+    while ((status = tpc_read_line(f, line, TPL_LINE_CAP, &len)) > 0) {
+        if (status == 2)
+            s->skipped++;
+        else
+            tpl_line(line, len, s);
+    }
+    free(line);
+    if (fclose(f) != 0 || status < 0) {
+        (void)snprintf(reason, cap, "unreadable lead transcript");
+        return false;
+    }
+    return true;
+}
+
+/* Reads the lead's usage into lead. Never fails the report: an unreadable
+ * transcript leaves the row unmeasured with the reason. */
+static void tpv_lead_read(const struct zcl_objectives_options *options,
+                          struct tpv_lead *lead)
+{
+    char buf[TPL_PATH_CAP];
+    const char *path = NULL;
+    struct tpl_sum s;
+    memset(&s, 0, sizeof(s));
+    lead->measured = false;
+    if (!tpl_path(options, buf, sizeof(buf), &path)) {
+        (void)snprintf(lead->reason, sizeof(lead->reason),
+                       "no lead transcript in this checkout's Claude project");
+        return;
+    }
+    if (!tpl_scan(path, &s, lead->reason, sizeof(lead->reason)))
+        return;
+    lead->measured = true;
+    lead->sum = s;
+}
+
 /* Everything the report reads: the landed lanes, the agent index, the joined
  * samples, the malformed-line count, and the non-empty groups in report
  * order. */
@@ -585,6 +766,9 @@ struct tpv_read {
     int64_t skipped;
     struct tpv_group groups[TPC_BUCKETS];
     struct tpv_role roles[TPC_ROLES];
+    struct tpv_lead lead;
+    int64_t worker_cache; /* cache reads over every joined agent */
+    int64_t worker_out;   /* output tokens over every joined agent */
     size_t n;
     int64_t total;
 };
@@ -711,7 +895,14 @@ static bool tpv_read(const struct zcl_objectives_options *options,
         (void)snprintf(reason, cap, "out of memory joining agent token rows");
         return false;
     }
-    return tpv_groups(rd);
+    if (!tpv_groups(rd))
+        return false;
+    for (size_t i = 0; i < rd->samples.n; i++) {
+        rd->worker_cache = tpc_add(rd->worker_cache, rd->samples.v[i].cache);
+        rd->worker_out = tpc_add(rd->worker_out, rd->samples.v[i].out);
+    }
+    tpv_lead_read(options, &rd->lead);
+    return true;
 }
 
 /* Appends one formatted piece of the screen, never past cap - 1. */
@@ -755,6 +946,33 @@ static void tpv_screen_roles(char *out, size_t cap, size_t *used,
     }
 }
 
+static int64_t tpv_lead_fresh(const struct tpl_sum *s)
+{
+    return tpc_add(tpc_add(s->input, s->creation), s->output);
+}
+
+/* The lead row: its calls and fresh total, and its share of the worker cache
+ * reads and outputs; or unmeasured, with the reason. */
+static void tpv_screen_lead(char *out, size_t cap, size_t *used,
+                            const struct tpv_read *rd)
+{
+    const struct tpl_sum *s = &rd->lead.sum;
+    if (!rd->lead.measured) {
+        tpv_add(out, cap, used, "lead unmeasured: %s\n", rd->lead.reason);
+        return;
+    }
+    tpv_add(out, cap, used,
+            "lead %lld calls, fresh %lld, cache_read %lld (%lld%% of worker "
+            "cache reads), output %lld (%lld%% of worker outputs), %lld "
+            "transcript lines skipped\n",
+            (long long)s->calls, (long long)tpv_lead_fresh(s),
+            (long long)s->cache,
+            (long long)tpv_share(s->cache, tpc_add(s->cache, rd->worker_cache)),
+            (long long)s->output,
+            (long long)tpv_share(s->output, tpc_add(s->output, rd->worker_out)),
+            (long long)s->skipped);
+}
+
 /* The plain-text table: one line per group, the role summary, then the
  * totals line. */
 static void tpv_screen(char *out, size_t cap, const struct tpv_read *rd,
@@ -768,6 +986,7 @@ static void tpv_screen(char *out, size_t cap, const struct tpv_read *rd,
     for (size_t i = 0; i < rd->n; i++)
         tpv_screen_row(out, cap, &used, &rd->groups[i], rd->total);
     tpv_screen_roles(out, cap, &used, rd);
+    tpv_screen_lead(out, cap, &used, rd);
     tpv_add(out, cap, &used,
             "landed %zu, joined %zu, agents %zu, fresh tokens %lld, %lld "
             "malformed lines skipped\n",
@@ -845,6 +1064,52 @@ static bool tpv_push_totals(struct json_value *data, const struct tpv_read *rd,
     return ok;
 }
 
+/* The lead object's counts: calls, the four token columns, the fresh total
+ * (uncached input with cache creation, plus output, as the ledger counts it)
+ * and the skipped lines. */
+static bool tpv_push_lead_counts(struct json_value *o, const struct tpl_sum *s)
+{
+    return json_push_kv_int(o, "calls", s->calls) &&
+           json_push_kv_int(o, "input_tokens", s->input) &&
+           json_push_kv_int(o, "cache_creation_tokens", s->creation) &&
+           json_push_kv_int(o, "cache_read_tokens", s->cache) &&
+           json_push_kv_int(o, "output_tokens", s->output) &&
+           json_push_kv_int(o, "fresh_total", tpv_lead_fresh(s)) &&
+           json_push_kv_int(o, "skipped", s->skipped);
+}
+
+/* The lead's share of the worker cache reads and of the worker outputs. */
+static bool tpv_push_lead_shares(struct json_value *o,
+                                 const struct tpv_read *rd)
+{
+    const struct tpl_sum *s = &rd->lead.sum;
+    return json_push_kv_int(o, "share_cache_read_pct",
+                            tpv_share(s->cache,
+                                      tpc_add(s->cache, rd->worker_cache))) &&
+           json_push_kv_int(o, "share_output_pct",
+                            tpv_share(s->output,
+                                      tpc_add(s->output, rd->worker_out)));
+}
+
+/* The `lead` object: measured with its counts and shares, or unmeasured
+ * with the reason. Either way the report carries it. */
+static bool tpv_push_lead(struct json_value *data, const struct tpv_read *rd)
+{
+    struct json_value o;
+    bool ok;
+    json_init(&o);
+    json_set_object(&o);
+    ok = json_push_kv_bool(&o, "measured", rd->lead.measured);
+    if (!rd->lead.measured)
+        ok = ok && json_push_kv_str(&o, "reason", rd->lead.reason);
+    else
+        ok = ok && tpv_push_lead_counts(&o, &rd->lead.sum) &&
+             tpv_push_lead_shares(&o, rd);
+    ok = ok && json_push_kv(data, "lead", &o);
+    json_free(&o);
+    return ok;
+}
+
 /* Builds the reply data from a finished read. False, with reason set, when
  * the object cannot be built. */
 static bool tpv_build(struct json_value *data, const struct tpv_read *rd,
@@ -860,6 +1125,7 @@ static bool tpv_build(struct json_value *data, const struct tpv_read *rd,
          tpv_push_rows(data, rd) &&
          tpv_push_roles(data, rd) &&
          tpv_push_totals(data, rd, joined, agents) &&
+         tpv_push_lead(data, rd) &&
          json_push_kv_int(data, "skipped", rd->skipped) &&
          json_push_kv_str(data, "screen", screen);
     if (!ok)
@@ -904,6 +1170,7 @@ void zcl_native_handle_fleet_objectives_value(
     memset(&options, 0, sizeof(options));
     options.outcomes = tpv_input_str(request, "outcomes");
     options.experiments = tpv_input_str(request, "experiments");
+    options.session = tpv_input_str(request, "session");
     if (zcl_objectives_value_data(&options, &reply->data, reason,
                                   sizeof(reason))) {
         reply->status = ZCL_COMMAND_STATUS_PASSED;

@@ -372,14 +372,57 @@ static bool fox_val_write_meta(const char *root)
            fox_tok_meta(root, "r1", "Fix inbound body re-fetch gap");
 }
 
-/* Runs the report on the fixture; `data` is an object the caller frees. */
+/* A lead transcript: two assistant lines with usage (input 2+3, creation
+ * 100+200, cache read 1000+3000, output 50+70), a user line and a line that
+ * does not parse. */
+static bool fox_lead_write(const char *path)
+{
+    FILE *f = fopen(path, "wb");
+    bool ok;
+    if (!f)
+        return false;
+    ok = fputs("{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":2,"
+               "\"cache_creation_input_tokens\":100,"
+               "\"cache_read_input_tokens\":1000,\"output_tokens\":50}}}\n",
+               f) >= 0 &&
+         fputs("{\"type\":\"user\",\"message\":{\"content\":\"hi\"}}\n", f) >= 0 &&
+         fputs("{\"type\":\"assistant\",\"message\":{\"usage\":{\"input_tokens\":3,"
+               "\"cache_creation_input_tokens\":200,"
+               "\"cache_read_input_tokens\":3000,\"output_tokens\":70}}}\n",
+               f) >= 0 &&
+         fputs("{\"type\":\"assistant\",\"message\":{\"usage\"\n", f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+/* The lead row on the fixture: 2 calls, fresh 5 + 300 + 120 = 425, cache
+ * reads 4000 of 4000 + 5450 worker reads (42 percent), outputs 120 of
+ * 120 + 1800 (6 percent), one line skipped. */
+static bool fox_lead_is(const struct json_value *data)
+{
+    const struct json_value *l = json_get(data, "lead");
+    return json_get_bool(json_get(l, "measured")) &&
+           json_get_int(json_get(l, "calls")) == 2 &&
+           json_get_int(json_get(l, "input_tokens")) == 5 &&
+           json_get_int(json_get(l, "cache_creation_tokens")) == 300 &&
+           json_get_int(json_get(l, "cache_read_tokens")) == 4000 &&
+           json_get_int(json_get(l, "output_tokens")) == 120 &&
+           json_get_int(json_get(l, "fresh_total")) == 425 &&
+           json_get_int(json_get(l, "skipped")) == 1 &&
+           json_get_int(json_get(l, "share_cache_read_pct")) == 42 &&
+           json_get_int(json_get(l, "share_output_pct")) == 6;
+}
+
+/* Runs the report on the fixture; `data` is an object the caller frees.
+ * `session` is the lead transcript; a missing path leaves the lead unmeasured. */
 static bool fox_val_run(const char *ledger, const char *outcomes,
-                        struct json_value *data, char *reason, size_t cap)
+                        const char *session, struct json_value *data,
+                        char *reason, size_t cap)
 {
     struct zcl_objectives_options o;
     memset(&o, 0, sizeof(o));
     o.experiments = ledger;
     o.outcomes = outcomes;
+    o.session = session;
     o.now = FOX_TOK_NOW;
     json_init(data);
     json_set_object(data);
@@ -469,22 +512,54 @@ static int fox_case_value(const char *root)
 {
     int failures = 0;
     char ledger[1024], outcomes[1024], reason[ZCL_OBJECTIVES_REASON_MAX] = "";
-    char none[1024];
+    char none[1024], session[1024];
     struct json_value data;
     struct zcl_objective_value kpi;
     bool ok;
     (void)snprintf(ledger, sizeof(ledger), "%s/value_rows.tsv", root);
     (void)snprintf(outcomes, sizeof(outcomes), "%s/value_outcomes.jsonl", root);
     (void)snprintf(none, sizeof(none), "%s/no_such_rows.tsv", root);
+    (void)snprintf(session, sizeof(session), "%s/value_lead.jsonl", root);
     TEST("objectives: fleet.objectives.value groups joined agents by role and "
          "model with exact medians, totals and shares") {
         ASSERT(fox_val_write_ledger(ledger));
         ASSERT(fox_tok_write_outcomes(outcomes));
         ASSERT(fox_val_write_meta(root));
         ASSERT(setenv("Z23_AGENT_META_ROOT", root, 1) == 0);
-        ok = fox_val_run(ledger, outcomes, &data, reason, sizeof(reason));
+        ok = fox_val_run(ledger, outcomes, none, &data, reason, sizeof(reason));
         if (ok)
             ok = fox_val_check(&data);
+        json_free(&data);
+        ASSERT(ok);
+        PASS();
+    }
+    TEST("objectives: fleet.objectives.value reads the lead's usage from the "
+         "session transcript, skipping the malformed line") {
+        ASSERT(fox_val_write_ledger(ledger));
+        ASSERT(fox_tok_write_outcomes(outcomes));
+        ASSERT(fox_val_write_meta(root));
+        ASSERT(fox_lead_write(session));
+        ASSERT(setenv("Z23_AGENT_META_ROOT", root, 1) == 0);
+        ok = fox_val_run(ledger, outcomes, session, &data, reason,
+                         sizeof(reason));
+        if (ok)
+            ok = fox_lead_is(&data);
+        json_free(&data);
+        ASSERT(ok);
+        PASS();
+    }
+    TEST("objectives: fleet.objectives.value marks the lead unmeasured, naming "
+         "the cause, when the session transcript is missing") {
+        const struct json_value *l;
+        ASSERT(fox_val_write_ledger(ledger));
+        ASSERT(fox_tok_write_outcomes(outcomes));
+        ASSERT(fox_val_write_meta(root));
+        ASSERT(setenv("Z23_AGENT_META_ROOT", root, 1) == 0);
+        ok = fox_val_run(ledger, outcomes, none, &data, reason, sizeof(reason));
+        l = json_get(&data, "lead");
+        ok = ok && !json_get_bool(json_get(l, "measured")) &&
+             strstr(json_get_str(json_get(l, "reason")),
+                    "missing lead transcript") != NULL;
         json_free(&data);
         ASSERT(ok);
         PASS();
@@ -495,7 +570,7 @@ static int fox_case_value(const char *root)
         ASSERT(fox_tok_write_outcomes(outcomes));
         ASSERT(fox_val_write_meta(root));
         ASSERT(setenv("Z23_AGENT_META_ROOT", root, 1) == 0);
-        ok = fox_val_run(ledger, outcomes, &data, reason, sizeof(reason));
+        ok = fox_val_run(ledger, outcomes, none, &data, reason, sizeof(reason));
         json_free(&data);
         ASSERT(ok);
         /* alpha 2100 (1200 + 800 + 100), beta 6500: the median is their mean. */
@@ -507,7 +582,7 @@ static int fox_case_value(const char *root)
     }
     TEST("objectives: fleet.objectives.value is unmeasured, naming the cause, "
          "when the ledger is missing") {
-        ok = fox_val_run(none, outcomes, &data, reason, sizeof(reason));
+        ok = fox_val_run(none, outcomes, none, &data, reason, sizeof(reason));
         json_free(&data);
         ASSERT(!ok);
         ASSERT(strstr(reason, "missing experiment ledger") != NULL);
