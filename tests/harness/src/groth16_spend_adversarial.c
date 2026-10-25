@@ -212,6 +212,105 @@ static bool bundle_accepts(const struct adv_spend_bundle *b)
 }
 
 /* ── (7) Truncated / bit-flipped proving key: typed refusal, no crash ──── */
+
+/* Truncation: any prefix strictly shorter than the header + query
+ * arrays MUST be refused. Pick cut points well inside the file (the
+ * arrays are megabytes long) so the cut always lands mid-array. */
+static int pk_parser_truncated_prefixes(const uint8_t *out_pk, size_t out_len)
+{
+    int failures = 0;
+    static const double trunc_fracs[] = { 0.0, 0.0001, 0.05, 0.5, 0.9 };
+    for (size_t i = 0; i < sizeof(trunc_fracs) / sizeof(trunc_fracs[0]); i++) {
+        size_t tlen = (size_t)((double)out_len * trunc_fracs[i]);
+        struct groth16_pk pk;
+        bool ok = groth16_pk_read(&pk, out_pk, tlen);
+        char label[96];
+        snprintf(label, sizeof(label),
+                 "pk-parser: truncated to %.4f%% (%zu bytes) refused, no crash",
+                 trunc_fracs[i] * 100.0, tlen);
+        ADV_CHECK(label, !ok);
+        if (ok)
+            groth16_pk_free(&pk);
+    }
+    return failures;
+}
+
+/* Zero-length and single-byte buffers — the smallest possible OOB
+ * probes. */
+static int pk_parser_short_buffers(const uint8_t *out_pk)
+{
+    int failures = 0;
+    {
+        struct groth16_pk pk;
+        bool ok = groth16_pk_read(&pk, out_pk, 0);
+        ADV_CHECK("pk-parser: zero-length buffer refused, no crash", !ok);
+        if (ok) groth16_pk_free(&pk);
+    }
+    {
+        struct groth16_pk pk;
+        bool ok = groth16_pk_read(&pk, out_pk, 1);
+        ADV_CHECK("pk-parser: 1-byte buffer refused, no crash", !ok);
+        if (ok) groth16_pk_free(&pk);
+    }
+    return failures;
+}
+
+/* Bit-flip a length field deep in the file so the array-count read is
+ * garbage; the reader must fail closed rather than run away or crash.
+ * Uses a COPY of the cached params buffer. */
+static int pk_parser_bitflipped_body(const uint8_t *out_pk, size_t out_len)
+{
+    int failures = 0;
+    uint8_t *corrupt = zcl_malloc(out_len, "adv_pk_corrupt_len");
+    ADV_CHECK("pk-parser: corrupt-buffer allocation succeeded",
+             corrupt != NULL);
+    if (corrupt) {
+        memcpy(corrupt, out_pk, out_len);
+        /* Flip a high bit at the 75% mark of the file body. Whether that
+         * lands on a length field or point bytes is data-dependent, so
+         * only the safety property is checked (no crash; a clean refusal
+         * or a safely freeable struct). */
+        size_t flip_off = out_len * 3 / 4;
+        corrupt[flip_off] ^= 0x80;
+        struct groth16_pk pk;
+        bool ok = groth16_pk_read(&pk, corrupt, out_len);
+        ADV_CHECK("pk-parser: bit-flipped body byte — no crash "
+                 "(parses cleanly XOR refuses cleanly)", true);
+        if (ok)
+            groth16_pk_free(&pk);
+        memory_cleanse(corrupt, out_len);
+        free(corrupt);
+    }
+    return failures;
+}
+
+static bool pk_parser_same_structure(const struct groth16_pk *pk1,
+                                      const struct groth16_pk *pk2)
+{
+    return pk1->num_inputs == pk2->num_inputs &&
+        pk1->h_len == pk2->h_len && pk1->l_len == pk2->l_len &&
+        pk1->a_len == pk2->a_len && pk1->b_len == pk2->b_len &&
+        memcmp(&pk1->alpha_g1, &pk2->alpha_g1, sizeof(pk1->alpha_g1)) == 0 &&
+        memcmp(&pk1->vk.gamma_g2, &pk2->vk.gamma_g2,
+              sizeof(pk1->vk.gamma_g2)) == 0;
+}
+
+/* (8) Determinism of the parser itself: two independent parses of the
+ * identical real params bytes must agree on every structural field. */
+static int pk_parser_repeat_parse(const uint8_t *out_pk, size_t out_len)
+{
+    int failures = 0;
+    struct groth16_pk pk1, pk2;
+    bool ok1 = groth16_pk_read(&pk1, out_pk, out_len);
+    bool ok2 = groth16_pk_read(&pk2, out_pk, out_len);
+    bool det = ok1 && ok2 && pk_parser_same_structure(&pk1, &pk2);
+    ADV_CHECK("pk-parser: two parses of identical bytes are "
+             "structurally identical (deterministic)", det);
+    if (ok1) groth16_pk_free(&pk1);
+    if (ok2) groth16_pk_free(&pk2);
+    return failures;
+}
+
 static int pk_parser_adversarial(void)
 {
     int failures = 0;
@@ -226,83 +325,93 @@ static int pk_parser_adversarial(void)
     if (!out_pk || out_len == 0 || !sp_pk || sp_len == 0)
         return failures;
 
-    /* Truncation: any prefix strictly shorter than the header + query
-     * arrays MUST be refused. Pick cut points well inside the file (the
-     * arrays are megabytes long) so the cut always lands mid-array. */
-    static const double trunc_fracs[] = { 0.0, 0.0001, 0.05, 0.5, 0.9 };
-    for (size_t i = 0; i < sizeof(trunc_fracs) / sizeof(trunc_fracs[0]); i++) {
-        size_t tlen = (size_t)((double)out_len * trunc_fracs[i]);
-        struct groth16_pk pk;
-        bool ok = groth16_pk_read(&pk, out_pk, tlen);
-        char label[96];
-        snprintf(label, sizeof(label),
-                 "pk-parser: truncated to %.4f%% (%zu bytes) refused, no crash",
-                 trunc_fracs[i] * 100.0, tlen);
-        ADV_CHECK(label, !ok);
-        if (ok)
-            groth16_pk_free(&pk);
-    }
+    failures += pk_parser_truncated_prefixes(out_pk, out_len);
+    failures += pk_parser_short_buffers(out_pk);
+    failures += pk_parser_bitflipped_body(out_pk, out_len);
+    failures += pk_parser_repeat_parse(out_pk, out_len);
+    return failures;
+}
 
-    /* Zero-length and single-byte buffers — the smallest possible OOB
-     * probes. */
-    {
-        struct groth16_pk pk;
-        bool ok = groth16_pk_read(&pk, out_pk, 0);
-        ADV_CHECK("pk-parser: zero-length buffer refused, no crash", !ok);
-        if (ok) groth16_pk_free(&pk);
-    }
-    {
-        struct groth16_pk pk;
-        bool ok = groth16_pk_read(&pk, out_pk, 1);
-        ADV_CHECK("pk-parser: 1-byte buffer refused, no crash", !ok);
-        if (ok) groth16_pk_free(&pk);
-    }
-
-    /* Bit-flip a length field deep in the file so the array-count read is
-     * garbage; the reader must fail closed rather than run away or crash.
-     * Uses a COPY of the cached params buffer. */
-    {
-        uint8_t *corrupt = zcl_malloc(out_len, "adv_pk_corrupt_len");
-        ADV_CHECK("pk-parser: corrupt-buffer allocation succeeded",
-                 corrupt != NULL);
-        if (corrupt) {
-            memcpy(corrupt, out_pk, out_len);
-            /* Flip a high bit at the 75% mark of the file body. Whether that
-             * lands on a length field or point bytes is data-dependent, so
-             * only the safety property is checked (no crash; a clean refusal
-             * or a safely freeable struct). */
-            size_t flip_off = out_len * 3 / 4;
-            corrupt[flip_off] ^= 0x80;
-            struct groth16_pk pk;
-            bool ok = groth16_pk_read(&pk, corrupt, out_len);
-            ADV_CHECK("pk-parser: bit-flipped body byte — no crash "
-                     "(parses cleanly XOR refuses cleanly)", true);
-            if (ok)
-                groth16_pk_free(&pk);
-            memory_cleanse(corrupt, out_len);
-            free(corrupt);
+/* Exact production cleanse call: sapling_create_spend_proof wipes
+ * cs.witness before cs_free; prove it zeros the secret-bearing
+ * witness vector. */
+static int adv_zeroize_synthesized_witness(const struct adv_spend_bundle *good)
+{
+    int failures = 0;
+    struct constraint_system cs;
+    cs_init(&cs);
+    struct sapling_spend_witness wit;
+    struct sapling_spend_inputs pub;
+    memset(&wit, 0, sizeof(wit));
+    memset(&pub, 0, sizeof(pub));
+    memcpy(wit.ak, good->ak, 32);
+    memcpy(wit.nsk, good->nsk, 32);
+    memcpy(wit.ar, good->ar, 32);
+    memcpy(wit.pk_d, good->pk_d, 32);
+    wit.value = good->value;
+    memcpy(pub.rk, good->rk, 32);
+    memcpy(pub.cv, good->ak, 32); /* any valid point (unbound prefix) */
+    bool synth = sapling_spend_synthesize(&cs, &wit, &pub);
+    ADV_CHECK("(9) zeroize spot-check: partial-prefix synthesis "
+             "succeeded (setup for the cleanse check)", synth);
+    if (synth) {
+        bool had_nonzero = false;
+        for (size_t i = 0; i < cs.num_vars && !had_nonzero; i++) {
+            uint8_t b[32];
+            fr_to_bytes(b, &cs.witness[i]);
+            for (size_t j = 0; j < 32; j++)
+                if (b[j] != 0) { had_nonzero = true; break; }
         }
+        ADV_CHECK("(9) zeroize spot-check: witness vector has secret "
+                 "material before cleanse (sanity: the check below is "
+                 "not vacuous)", had_nonzero);
+
+        memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
+        bool all_zero = true;
+        for (size_t i = 0; i < cs.cap_vars && all_zero; i++) {
+            uint8_t b[32];
+            fr_to_bytes(b, &cs.witness[i]);
+            for (size_t j = 0; j < 32; j++)
+                if (b[j] != 0) { all_zero = false; break; }
+        }
+        ADV_CHECK("(9) zeroize spot-check: memory_cleanse(cs.witness, "
+                 "cap_vars*sizeof(fr)) leaves it all-zero", all_zero);
+    }
+    cs_free(&cs);
+    return failures;
+}
+
+/* sapling_spend_parse_witness output (the auth-path portion of the
+ * secret witness struct) must scrub cleanly, mirroring the
+ * production caller (witness_to_rust in sapling_prover_c23.c). */
+static int adv_zeroize_parsed_witness(void)
+{
+    int failures = 0;
+    uint8_t compact_witness[ADV_COMPACT_WITNESS_LEN];
+    memset(compact_witness, 0, sizeof(compact_witness));
+    compact_witness[0] = SAPLING_MERKLE_DEPTH;
+    for (size_t lvl = 0; lvl < SAPLING_MERKLE_DEPTH; lvl++) {
+        size_t off = 1 + lvl * 33;
+        memset(compact_witness + off, (int)(lvl + 1), 32);
+        compact_witness[off + 32] = (uint8_t)(lvl % 2);
     }
 
-    /* (8) Determinism of the parser itself: two independent parses of the
-     * identical real params bytes must agree on every structural field. */
-    {
-        struct groth16_pk pk1, pk2;
-        bool ok1 = groth16_pk_read(&pk1, out_pk, out_len);
-        bool ok2 = groth16_pk_read(&pk2, out_pk, out_len);
-        bool det = ok1 && ok2 &&
-            pk1.num_inputs == pk2.num_inputs &&
-            pk1.h_len == pk2.h_len && pk1.l_len == pk2.l_len &&
-            pk1.a_len == pk2.a_len && pk1.b_len == pk2.b_len &&
-            memcmp(&pk1.alpha_g1, &pk2.alpha_g1, sizeof(pk1.alpha_g1)) == 0 &&
-            memcmp(&pk1.vk.gamma_g2, &pk2.vk.gamma_g2,
-                  sizeof(pk1.vk.gamma_g2)) == 0;
-        ADV_CHECK("pk-parser: two parses of identical bytes are "
-                 "structurally identical (deterministic)", det);
-        if (ok1) groth16_pk_free(&pk1);
-        if (ok2) groth16_pk_free(&pk2);
-    }
+    struct sapling_spend_witness wit;
+    memset(&wit, 0xAA, sizeof(wit)); /* canary */
+    bool parsed = sapling_spend_parse_witness(
+        compact_witness, sizeof(compact_witness), &wit);
+    ADV_CHECK("(9) zeroize spot-check: sapling_spend_parse_witness "
+             "overwrote the canary auth path", parsed &&
+             wit.auth_path[0][0] == 1 && wit.auth_path_bits[0] == false);
 
+    memory_cleanse(&wit, sizeof(wit));
+    bool wit_zero = true;
+    const uint8_t *raw = (const uint8_t *)&wit;
+    for (size_t i = 0; i < sizeof(wit); i++)
+        if (raw[i] != 0) { wit_zero = false; break; }
+    ADV_CHECK("(9) zeroize spot-check: memory_cleanse(&wit, "
+             "sizeof(wit)) leaves the full spend-witness struct "
+             "all-zero", wit_zero);
     return failures;
 }
 
@@ -453,81 +562,8 @@ int groth16_spend_adversarial_gate(void)
     }
 
     /* ── (9) Zeroization spot-check ─────────────────────────────────────── */
-    {
-        /* Exact production cleanse call: sapling_create_spend_proof wipes
-         * cs.witness before cs_free; prove it zeros the secret-bearing
-         * witness vector. */
-        struct constraint_system cs;
-        cs_init(&cs);
-        struct sapling_spend_witness wit;
-        struct sapling_spend_inputs pub;
-        memset(&wit, 0, sizeof(wit));
-        memset(&pub, 0, sizeof(pub));
-        memcpy(wit.ak, good.ak, 32);
-        memcpy(wit.nsk, good.nsk, 32);
-        memcpy(wit.ar, good.ar, 32);
-        memcpy(wit.pk_d, good.pk_d, 32);
-        wit.value = good.value;
-        memcpy(pub.rk, good.rk, 32);
-        memcpy(pub.cv, good.ak, 32); /* any valid point (unbound prefix) */
-        bool synth = sapling_spend_synthesize(&cs, &wit, &pub);
-        ADV_CHECK("(9) zeroize spot-check: partial-prefix synthesis "
-                 "succeeded (setup for the cleanse check)", synth);
-        if (synth) {
-            bool had_nonzero = false;
-            for (size_t i = 0; i < cs.num_vars && !had_nonzero; i++) {
-                uint8_t b[32];
-                fr_to_bytes(b, &cs.witness[i]);
-                for (size_t j = 0; j < 32; j++)
-                    if (b[j] != 0) { had_nonzero = true; break; }
-            }
-            ADV_CHECK("(9) zeroize spot-check: witness vector has secret "
-                     "material before cleanse (sanity: the check below is "
-                     "not vacuous)", had_nonzero);
-
-            memory_cleanse(cs.witness, cs.cap_vars * sizeof(struct fr));
-            bool all_zero = true;
-            for (size_t i = 0; i < cs.cap_vars && all_zero; i++) {
-                uint8_t b[32];
-                fr_to_bytes(b, &cs.witness[i]);
-                for (size_t j = 0; j < 32; j++)
-                    if (b[j] != 0) { all_zero = false; break; }
-            }
-            ADV_CHECK("(9) zeroize spot-check: memory_cleanse(cs.witness, "
-                     "cap_vars*sizeof(fr)) leaves it all-zero", all_zero);
-        }
-        cs_free(&cs);
-    }
-    {
-        /* sapling_spend_parse_witness output (the auth-path portion of the
-         * secret witness struct) must scrub cleanly, mirroring the
-         * production caller (witness_to_rust in sapling_prover_c23.c). */
-        uint8_t compact_witness[ADV_COMPACT_WITNESS_LEN];
-        memset(compact_witness, 0, sizeof(compact_witness));
-        compact_witness[0] = SAPLING_MERKLE_DEPTH;
-        for (size_t lvl = 0; lvl < SAPLING_MERKLE_DEPTH; lvl++) {
-            size_t off = 1 + lvl * 33;
-            memset(compact_witness + off, (int)(lvl + 1), 32);
-            compact_witness[off + 32] = (uint8_t)(lvl % 2);
-        }
-
-        struct sapling_spend_witness wit;
-        memset(&wit, 0xAA, sizeof(wit)); /* canary */
-        bool parsed = sapling_spend_parse_witness(
-            compact_witness, sizeof(compact_witness), &wit);
-        ADV_CHECK("(9) zeroize spot-check: sapling_spend_parse_witness "
-                 "overwrote the canary auth path", parsed &&
-                 wit.auth_path[0][0] == 1 && wit.auth_path_bits[0] == false);
-
-        memory_cleanse(&wit, sizeof(wit));
-        bool wit_zero = true;
-        const uint8_t *raw = (const uint8_t *)&wit;
-        for (size_t i = 0; i < sizeof(wit); i++)
-            if (raw[i] != 0) { wit_zero = false; break; }
-        ADV_CHECK("(9) zeroize spot-check: memory_cleanse(&wit, "
-                 "sizeof(wit)) leaves the full spend-witness struct "
-                 "all-zero", wit_zero);
-    }
+    failures += adv_zeroize_synthesized_witness(&good);
+    failures += adv_zeroize_parsed_witness();
 
     failures += pk_parser_adversarial();
 

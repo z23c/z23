@@ -2019,8 +2019,6 @@ tests/harness/src/codeindex_freshness_windows_acceptance.c:mutation_acceptance:3
 tests/harness/src/file_ops_copy_windows_acceptance.c:main:24
 tests/harness/src/groth16_merkle_path.c:groth16_merkle_path_gate:30
 tests/harness/src/groth16_merkle_path.c:level_breakdown_gate:32
-tests/harness/src/groth16_spend_adversarial.c:groth16_spend_adversarial_gate:22
-tests/harness/src/groth16_spend_adversarial.c:pk_parser_adversarial:23
 tests/harness/src/groth16_spend_parity.c:groth16_spend_parity_oracle:75
 tests/harness/src/lint_gate_chain_contracts.c:t_no_new_coin_backfill_caller:47
 tests/harness/src/lint_gate_defensive_selftests.c:check_deleted_engine_names_file:17
