@@ -234,9 +234,13 @@ static int ber_record_lit(const char *path, int start, const char *q,
     /* A violation is a violation even when "path:line: literal" does not fit
      * the fixed report slot (a deep checkout path plus a long literal): the
      * text is truncated, never the verdict. Dropping it here once made the
-     * gate report "clean" on a host with a long scratch root. */
+     * gate report "clean" on a host with a long scratch root. The truncation
+     * is named on stderr, as ovf() names its overflows. */
     if (*nv < BER_HIT) {
-        (void)snprintf(viol[*nv], RS_PATH, "%s:%d: \"%s\"", path, start, q);
+        int n = snprintf(viol[*nv], RS_PATH, "%s:%d: \"%s\"", path, start, q);
+        if (n < 0 || (size_t)n >= RS_PATH)
+            (void)die("z23-lint: blocker escape report text truncated: %s\n",
+                      path);
         (*nv)++;
     }
     return 0;

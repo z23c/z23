@@ -615,16 +615,22 @@ int t_sync_state_no_ordinal_gate(void)
 /* The bad fixture again, under a name padded so its absolute path is
  * BLOCKER_ESCAPE_LONG_TARGET_LEN bytes. The gate's "path:line: literal"
  * report slot is fixed-size; a violation that does not fit it must still
- * trip (rc 1), whatever the checkout root's length. Returns the gate's rc,
- * or 1 when the root is already too deep to pad (nothing to prove). */
+ * trip (rc 1), whatever the checkout root's length. Returns the gate's rc.
+ * When the root is already too deep to pad, this proves nothing for the
+ * padded name: it prints a note and returns 1, and the bad fixture (whose
+ * report line overflows the slot on such a root) carries the coverage. */
 static int blocker_escape_long_path_rc(void)
 {
     char probe[PATH_MAX], rel[PATH_MAX], abs_path[PATH_MAX];
     if (repo_path(probe, sizeof(probe), BLOCKER_ESCAPE_LONG_PREFIX ".c") != 0)
         return -1;
     size_t have = strlen(probe);
-    if (have >= BLOCKER_ESCAPE_LONG_TARGET_LEN)
+    if (have >= BLOCKER_ESCAPE_LONG_TARGET_LEN) {
+        fprintf(stderr, "[lint-gate] blocker escape long-path: checkout root "
+                "is %zu bytes (>= %d), padding skipped; deep-root coverage "
+                "is the bad fixture\n", have, BLOCKER_ESCAPE_LONG_TARGET_LEN);
         return 1;
+    }
     size_t pad = BLOCKER_ESCAPE_LONG_TARGET_LEN - have;
     int n = snprintf(rel, sizeof(rel), "%s%.*s.c", BLOCKER_ESCAPE_LONG_PREFIX,
                      (int)pad, "pppppppppppppppppppppppppppppppppppppppp"
@@ -649,6 +655,19 @@ static int blocker_escape_long_path_rc(void)
                                       abs_path);
     unlink_rel(rel);
     return rc;
+}
+
+/* Names every escape-gate rc that differs from its expectation, so a red run
+ * says which sub-check broke. The ASSERTs in the test still decide. */
+static void blocker_escape_report_rcs(int bad_rc, int ok_rc, int cond_rc,
+                                      int phrase_rc, int clean_rc, int long_rc)
+{
+    if (bad_rc == 1 && ok_rc == 0 && cond_rc == 0 && phrase_rc == 0 &&
+        clean_rc == 0 && long_rc == 1)
+        return;
+    fprintf(stderr, "[lint-gate] blocker escape rcs: bad=%d (want 1) ok=%d "
+            "cond=%d phrase=%d (want 0) clean=%d (want 0) long=%d (want 1)\n",
+            bad_rc, ok_rc, cond_rc, phrase_rc, clean_rc, long_rc);
 }
 
 /* Gate #49 — blocker escape-action totality. escape_action is dual-purpose;
@@ -749,11 +768,8 @@ int t_blocker_escape_registered_gate(void)
         : -1;
     int clean_rc = run_gate_script(BLOCKER_ESCAPE_SCRIPT_REL, NULL);
     int long_rc = blocker_escape_long_path_rc();
-    if (bad_rc != 1 || ok_rc != 0 || cond_rc != 0 || phrase_rc != 0 ||
-        clean_rc != 0 || long_rc != 1)
-        fprintf(stderr, "[lint-gate] blocker escape rcs: bad=%d (want 1) ok=%d "
-                "cond=%d phrase=%d (want 0) clean=%d (want 0) long=%d (want 1)\n",
-                bad_rc, ok_rc, cond_rc, phrase_rc, clean_rc, long_rc);
+    blocker_escape_report_rcs(bad_rc, ok_rc, cond_rc, phrase_rc, clean_rc,
+                              long_rc);
 
     unlink_rel(BLOCKER_ESCAPE_BAD_FIXTURE_REL);
     unlink_rel(BLOCKER_ESCAPE_OK_FIXTURE_REL);
