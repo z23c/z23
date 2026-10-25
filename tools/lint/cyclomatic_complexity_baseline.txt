@@ -2063,7 +2063,6 @@ tests/harness/src/test_importblockindex_roundtrip.c:test_importblockindex_roundt
 tests/harness/src/test_invariant_sentinel.c:test_invariant_sentinel:38
 tests/harness/src/test_json.c:test_json:100
 tests/harness/src/test_keys.c:test_keys:27
-tests/harness/src/test_keys_hostile_derive.c:test_keys_hostile_derive:17
 tests/harness/src/test_kill9_recovery.c:p11_7_one_cycle:22
 tests/harness/src/test_kill9_recovery.c:p11_7ib_run_phase:42
 tests/harness/src/test_kill9_recovery.c:p11_7mf_run_phase:60

@@ -53,23 +53,10 @@
 /* Mainnet BIP32 xpub version prefix (0x0488B21E). */
 static const unsigned char KHD_XPUB_VERSION[4] = { 0x04, 0x88, 0xB2, 0x1E };
 
-int test_keys_hostile_derive(void)
+static int check_pubkey_derive_totality(const struct pubkey *parent_pub,
+                                        const struct uint256 *cc)
 {
-    printf("\n=== hostile key-derivation / address-codec tests ===\n");
     int failures = 0;
-
-    /* A real compressed parent key, so the derivation checks below fail for
-     * the reason under test and not because the key is nonsense. */
-    struct privkey parent_priv;
-    privkey_init(&parent_priv);
-    privkey_make_new(&parent_priv, true);
-    struct pubkey parent_pub;
-    bool have_parent = privkey_get_pubkey(&parent_priv, &parent_pub);
-    KHD_CHECK("fixture: compressed parent public key derived",
-              have_parent && parent_pub.size == COMPRESSED_PUBLIC_KEY_SIZE);
-
-    struct uint256 cc;
-    memset(&cc, 0x5A, sizeof(cc));
 
     /* ── 1. pubkey_derive totality ─────────────────────────────────── */
     {
@@ -80,32 +67,40 @@ int test_keys_hostile_derive(void)
          * hardened child, so this is a caller error that a watch-only wallet
          * can reach with an attacker-chosen path. */
         KHD_CHECK("hardened index rejected (no abort)",
-                  !pubkey_derive(&parent_pub, &child, &cc_child,
-                                 0x80000000u, &cc));
+                  !pubkey_derive(parent_pub, &child, &cc_child,
+                                 0x80000000u, cc));
         KHD_CHECK("largest hardened index rejected (no abort)",
-                  !pubkey_derive(&parent_pub, &child, &cc_child,
-                                 0xFFFFFFFFu, &cc));
+                  !pubkey_derive(parent_pub, &child, &cc_child,
+                                 0xFFFFFFFFu, cc));
 
         /* Empty parent: pubkey_is_valid() is false. */
         struct pubkey empty;
         pubkey_init(&empty);
         KHD_CHECK("empty parent key rejected (no abort)",
-                  !pubkey_derive(&empty, &child, &cc_child, 0, &cc));
+                  !pubkey_derive(&empty, &child, &cc_child, 0, cc));
 
         /* Uncompressed 65-byte parent: BIP32 hashes the 33-byte compressed
          * form, so an uncompressed parent has no defined derivation. */
-        struct pubkey uncompressed = parent_pub;
+        struct pubkey uncompressed = *parent_pub;
         KHD_CHECK("fixture: parent decompresses to 65 bytes",
                   pubkey_decompress(&uncompressed) &&
                   uncompressed.size == PUBLIC_KEY_SIZE);
         KHD_CHECK("uncompressed parent key rejected (no abort)",
-                  !pubkey_derive(&uncompressed, &child, &cc_child, 0, &cc));
+                  !pubkey_derive(&uncompressed, &child, &cc_child, 0, cc));
 
         /* The boundary just below hardened must still work. */
         KHD_CHECK("index 0x7FFFFFFF (last non-hardened) still derives",
-                  pubkey_derive(&parent_pub, &child, &cc_child,
-                                0x7FFFFFFFu, &cc));
+                  pubkey_derive(parent_pub, &child, &cc_child,
+                                0x7FFFFFFFu, cc));
     }
+
+    return failures;
+}
+
+static int check_ext_pubkey_encode_guards(const struct pubkey *parent_pub,
+                                          const struct uint256 *cc)
+{
+    int failures = 0;
 
     /* ── 2. ext_pubkey_encode / hd_serialize_xpub on a bad key ─────── */
     {
@@ -113,8 +108,8 @@ int test_keys_hostile_derive(void)
         memset(&epk, 0, sizeof(epk));
         epk.nDepth = 1;
         epk.nChild = 7;
-        epk.chaincode = cc;
-        epk.pubkey = parent_pub;
+        epk.chaincode = *cc;
+        epk.pubkey = *parent_pub;
 
         unsigned char code[BIP32_EXTKEY_SIZE];
         KHD_CHECK("compressed ext_pubkey encodes",
@@ -132,9 +127,9 @@ int test_keys_hostile_derive(void)
         bool round = hd_deserialize_xpub(xpub, KHD_XPUB_VERSION, &back);
         KHD_CHECK("xpub round-trips (depth, index, chaincode, key)",
                   round && back.nDepth == 1 && back.nChild == 7 &&
-                  memcmp(back.chaincode.data, cc.data, 32) == 0 &&
+                  memcmp(back.chaincode.data, cc->data, 32) == 0 &&
                   back.pubkey.size == COMPRESSED_PUBLIC_KEY_SIZE &&
-                  memcmp(back.pubkey.vch, parent_pub.vch,
+                  memcmp(back.pubkey.vch, parent_pub->vch,
                          COMPRESSED_PUBLIC_KEY_SIZE) == 0);
 
         /* Uncompressed key: no room in the 74-byte body. */
@@ -155,6 +150,14 @@ int test_keys_hostile_derive(void)
                   !ext_pubkey_encode(&none, code));
     }
 
+    return failures;
+}
+
+static int check_xpub_deserialize_boundary_corpus(
+    const struct pubkey *parent_pub)
+{
+    int failures = 0;
+
     /* ── 3. hd_deserialize_xpub boundary corpus ────────────────────── */
     {
         struct ext_pubkey out;
@@ -164,7 +167,7 @@ int test_keys_hostile_derive(void)
 
         struct ext_pubkey epk;
         memset(&epk, 0, sizeof(epk));
-        epk.pubkey = parent_pub;
+        epk.pubkey = *parent_pub;
         char xpub[HD_XKEY_STRING_SIZE];
         bool built = hd_serialize_xpub(&epk, KHD_XPUB_VERSION,
                                        xpub, sizeof(xpub));
@@ -222,6 +225,13 @@ int test_keys_hostile_derive(void)
                       !hd_deserialize_xpub(huge, KHD_XPUB_VERSION, &out));
         }
     }
+
+    return failures;
+}
+
+static int check_base58_codec_totality(void)
+{
+    int failures = 0;
 
     /* ── 4. Base58 codec totality ──────────────────────────────────── */
     {
@@ -363,6 +373,13 @@ int test_keys_hostile_derive(void)
         }
     }
 
+    return failures;
+}
+
+static int check_witness_deserialize_depth_bound(void)
+{
+    int failures = 0;
+
     /* ── 5. Sapling witness deserialize: depth bound ───────────────── */
     {
         /* incremental_witness_deserialize writes `depth` straight into
@@ -427,6 +444,13 @@ int test_keys_hostile_derive(void)
         stream_free(&ok_s);
     }
 
+    return failures;
+}
+
+static int check_equihash_params_admissibility(void)
+{
+    int failures = 0;
+
     /* ── 6. Equihash parameter admissibility ───────────────────────── */
     {
         /* The Equihash bit-packers assert on their width assumptions and
@@ -464,6 +488,34 @@ int test_keys_hostile_derive(void)
         KHD_CHECK("equihash N=UINT_MAX refused",
                   !equihash_params_supported(0xFFFFFFFFu, 9));
     }
+
+    return failures;
+}
+
+int test_keys_hostile_derive(void)
+{
+    printf("\n=== hostile key-derivation / address-codec tests ===\n");
+    int failures = 0;
+
+    /* A real compressed parent key, so the derivation checks below fail for
+     * the reason under test and not because the key is nonsense. */
+    struct privkey parent_priv;
+    privkey_init(&parent_priv);
+    privkey_make_new(&parent_priv, true);
+    struct pubkey parent_pub;
+    bool have_parent = privkey_get_pubkey(&parent_priv, &parent_pub);
+    KHD_CHECK("fixture: compressed parent public key derived",
+              have_parent && parent_pub.size == COMPRESSED_PUBLIC_KEY_SIZE);
+
+    struct uint256 cc;
+    memset(&cc, 0x5A, sizeof(cc));
+
+    failures += check_pubkey_derive_totality(&parent_pub, &cc);
+    failures += check_ext_pubkey_encode_guards(&parent_pub, &cc);
+    failures += check_xpub_deserialize_boundary_corpus(&parent_pub);
+    failures += check_base58_codec_totality();
+    failures += check_witness_deserialize_depth_bound();
+    failures += check_equihash_params_admissibility();
 
     return failures;
 }
