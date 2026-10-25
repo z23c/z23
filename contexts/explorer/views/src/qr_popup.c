@@ -125,6 +125,65 @@ static void blit_qr(struct zcl_present_canvas *canvas, const uint8_t *qr,
     }
 }
 
+static uint32_t module_pixel_scale(uint32_t full_modules)
+{
+    uint32_t scale = 330u / full_modules;
+    if (scale < 2u) scale = 2u;
+    if (scale > 10u) scale = 10u;
+    return scale;
+}
+
+static void draw_card_header(struct zcl_present_canvas *canvas,
+                             bool is_deposit)
+{
+    uint8_t logo[ZCL_PRESENT_ZCLASSIC_ICON_RGBA_BYTES];
+    if (zcl_present_zclassic_icon_rgba(logo, sizeof(logo)))
+        zcl_present_canvas_blit_rgba(canvas, 20, 12, logo,
+                                     ZCL_PRESENT_ZCLASSIC_ICON_WIDTH,
+                                     ZCL_PRESENT_ZCLASSIC_ICON_HEIGHT);
+    zcl_present_canvas_text(canvas, 104, 18, "ZCLASSIC23", 10u, 24u,
+                            COLOR_INK);
+    zcl_present_canvas_text(canvas, 105, 49, "WALLET", 6u, 12u,
+                            COLOR_MUTED);
+    zcl_present_canvas_line(canvas, 104, 69, 415, 69, COLOR_RULE);
+
+    const char *heading = is_deposit ? "Deposit ZCL" : "QR code";
+    zcl_present_canvas_text(canvas, 24, 92, heading, strlen(heading), 28u,
+                            COLOR_INK);
+    const char *subtitle = is_deposit
+        ? "Scan this code with your wallet"
+        : "Scan or copy the payload";
+    zcl_present_canvas_text(canvas, 25, 127, subtitle, strlen(subtitle), 14u,
+                            COLOR_MUTED);
+}
+
+static void draw_card_payload(struct zcl_present_canvas *canvas,
+                              const struct qr_popup_card *card)
+{
+    zcl_present_canvas_line(canvas, 24, 528, 415, 528, COLOR_RULE);
+    const char *label = card->is_deposit ? "Address" : "Payload";
+    zcl_present_canvas_text(canvas, 24, 542, label, strlen(label), 12u,
+                            COLOR_MUTED);
+    uint32_t address_height = canvas_wrapped_text(
+        canvas, 24, 560, card->address, 15u, 392u, 3u, COLOR_INK);
+    int32_t amount_y = 560 + (int32_t)address_height + 5;
+    if (card->is_deposit) {
+        zcl_present_canvas_text(canvas, 24, amount_y, "Amount", 6u, 12u,
+                                COLOR_MUTED);
+        const char *amount = card->amount[0] ? card->amount : "Any amount";
+        char amount_line[96];
+        (void)snprintf(amount_line, sizeof(amount_line), "%s%s",
+                       amount, card->amount[0] ? " ZCL" : "");
+        zcl_present_canvas_text(canvas, 24, amount_y + 16, amount_line,
+                                strlen(amount_line), 17u, COLOR_INK);
+    }
+
+    const char *footer = card->is_deposit
+        ? "C  Copy payment URI        Esc  Close"
+        : "C  Copy payload        Esc  Close";
+    canvas_center_text(canvas, 642, footer, 11u, COLOR_MUTED);
+}
+
 bool qr_popup_card_render(const struct zcl_present_model_v1 *model,
                           struct qr_popup_card *out,
                           char *error, size_t error_cap)
@@ -144,9 +203,7 @@ bool qr_popup_card_render(const struct zcl_present_model_v1 *model,
     if (!qr_matrix_encode(payload, &matrix, error, error_cap))
         return false; // raw-return-ok:encoder supplied bounded caller error
     uint32_t full_modules = matrix.width + 2u * ZCL_QR_QUIET_MODULES;
-    uint32_t scale = 330u / full_modules;
-    if (scale < 2u) scale = 2u;
-    if (scale > 10u) scale = 10u;
+    uint32_t scale = module_pixel_scale(full_modules);
 
     uint8_t *qr_pixels = NULL;
     uint32_t qr_side = 0;
@@ -175,50 +232,11 @@ bool qr_popup_card_render(const struct zcl_present_model_v1 *model,
     describe_payload(payload, out);
 
     zcl_present_canvas_clear(&canvas, COLOR_PAPER);
-    uint8_t logo[ZCL_PRESENT_ZCLASSIC_ICON_RGBA_BYTES];
-    if (zcl_present_zclassic_icon_rgba(logo, sizeof(logo)))
-        zcl_present_canvas_blit_rgba(&canvas, 20, 12, logo,
-                                     ZCL_PRESENT_ZCLASSIC_ICON_WIDTH,
-                                     ZCL_PRESENT_ZCLASSIC_ICON_HEIGHT);
-    zcl_present_canvas_text(&canvas, 104, 18, "ZCLASSIC23", 10u, 24u,
-                            COLOR_INK);
-    zcl_present_canvas_text(&canvas, 105, 49, "WALLET", 6u, 12u,
-                            COLOR_MUTED);
-    zcl_present_canvas_line(&canvas, 104, 69, 415, 69, COLOR_RULE);
-
-    const char *heading = out->is_deposit ? "Deposit ZCL" : "QR code";
-    zcl_present_canvas_text(&canvas, 24, 92, heading, strlen(heading), 28u,
-                            COLOR_INK);
-    const char *subtitle = out->is_deposit
-        ? "Scan this code with your wallet"
-        : "Scan or copy the payload";
-    zcl_present_canvas_text(&canvas, 25, 127, subtitle, strlen(subtitle), 14u,
-                            COLOR_MUTED);
+    draw_card_header(&canvas, out->is_deposit);
 
     blit_qr(&canvas, qr_pixels, qr_side);
 
-    zcl_present_canvas_line(&canvas, 24, 528, 415, 528, COLOR_RULE);
-    const char *label = out->is_deposit ? "Address" : "Payload";
-    zcl_present_canvas_text(&canvas, 24, 542, label, strlen(label), 12u,
-                            COLOR_MUTED);
-    uint32_t address_height = canvas_wrapped_text(
-        &canvas, 24, 560, out->address, 15u, 392u, 3u, COLOR_INK);
-    int32_t amount_y = 560 + (int32_t)address_height + 5;
-    if (out->is_deposit) {
-        zcl_present_canvas_text(&canvas, 24, amount_y, "Amount", 6u, 12u,
-                                COLOR_MUTED);
-        const char *amount = out->amount[0] ? out->amount : "Any amount";
-        char amount_line[96];
-        (void)snprintf(amount_line, sizeof(amount_line), "%s%s",
-                       amount, out->amount[0] ? " ZCL" : "");
-        zcl_present_canvas_text(&canvas, 24, amount_y + 16, amount_line,
-                                strlen(amount_line), 17u, COLOR_INK);
-    }
-
-    const char *footer = out->is_deposit
-        ? "C  Copy payment URI        Esc  Close"
-        : "C  Copy payload        Esc  Close";
-    canvas_center_text(&canvas, 642, footer, 11u, COLOR_MUTED);
+    draw_card_payload(&canvas, out);
 
     free(qr_pixels);
     qr_matrix_free(&matrix);
