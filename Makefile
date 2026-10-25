@@ -1073,6 +1073,7 @@ COMMAND_SRCS = $(call zcl_filter_ephemeral_sources,\
 COMMAND_SRCS += contexts/commons/packages/zutf8/src/zutf8.c
 # `z23 jsonq` runs the same walker as build/bin/jsonq (tools/multicall.h).
 COMMAND_SRCS += tools/jsonq.c contexts/commons/packages/zjsonp/src/zjsonp.c
+COMMAND_SRCS += tools/sqlq.c
 COMMAND_SRCS += contexts/commons/packages/zbase64/src/zbase64.c
 
 # Built-in guest kernel (docs/commons/RISCV_MACHINE.md). Z23_GUEST_KERNEL names the
@@ -8944,11 +8945,11 @@ $(P2_INVARIANT_CHECK_BIN): tools/p2_invariant_check.c vendor/include/sqlite3.h v
 SQLQ_BIN = $(BIN_DIR)/sqlq
 .PHONY: sqlq
 sqlq: $(SQLQ_BIN)
-$(SQLQ_BIN): tools/sqlq.c vendor/include/sqlite3.h vendor/lib/libsqlite3.a
+$(SQLQ_BIN): tools/sqlq.c tools/sqlq_standalone.c tools/multicall.h vendor/include/sqlite3.h vendor/lib/libsqlite3.a
 	@mkdir -p $(dir $@)
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/include \
-	    -o $@ tools/sqlq.c \
+	    -o $@ tools/sqlq.c tools/sqlq_standalone.c \
 	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
 
 # Nested JSON path query for operator scripts. Python is banned; grep/sed

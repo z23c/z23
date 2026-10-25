@@ -348,15 +348,23 @@ static bool main_dispatch_priority_modes(int argc, char **argv, int *rc)
     return false;
 }
 
-/* `z23 jsonq ...`: the same in-process walker as build/bin/jsonq. The tool
- * word is argv[1]; the walker gets argv+1, so its argv[0] is "jsonq" and its
- * usage and error text match the standalone binary byte for byte. */
+/* `z23 jsonq ...` and `z23 sqlq ...`: the same in-process tools as the
+ * standalone build/bin/jsonq and build/bin/sqlq. The tool word is argv[1];
+ * the tool gets argv+1, so its argv[0] is its own name and its usage and
+ * error text match the standalone binary byte for byte. */
 static bool main_dispatch_multicall(int argc, char **argv, int *rc)
 {
-    if (argc < 2 || strcmp(argv[1], "jsonq") != 0)
+    if (argc < 2)
         return false;
-    *rc = jsonq_main(argc - 1, argv + 1);
-    return true;
+    if (strcmp(argv[1], "jsonq") == 0) {
+        *rc = jsonq_main(argc - 1, argv + 1);
+        return true;
+    }
+    if (strcmp(argv[1], "sqlq") == 0) {
+        *rc = sqlq_main(argc - 1, argv + 1);
+        return true;
+    }
+    return false;
 }
 
 static bool main_dispatch_snapshot_and_cli_modes(int argc, char **argv,

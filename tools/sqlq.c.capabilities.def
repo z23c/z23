@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/sqlq.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "Opens the named SQLite database read-only (sqlite3_open_v2), reads its rows, and sets a busy timeout; it writes results to stdout or stderr.")

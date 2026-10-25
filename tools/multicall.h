@@ -9,5 +9,6 @@
  * their own argv; `z23 jsonq ...` calls them with argv+1, so the output is
  * the same either way. */
 int jsonq_main(int argc, char **argv);
+int sqlq_main(int argc, char **argv);
 
 #endif /* ZCL_TOOLS_MULTICALL_H */

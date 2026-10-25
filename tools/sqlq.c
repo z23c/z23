@@ -17,12 +17,13 @@
  * BLOBs as lowercase hex. Exit 0 on success, 1 on usage/open/SQL error.
  */
 
+#include "multicall.h"
 #include <sqlite3.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
 
-int main(int argc, char **argv)
+int sqlq_main(int argc, char **argv)
 {
     if (argc != 3) {
         fprintf(stderr, "usage: sqlq <db-path> <SELECT ...>\n");
