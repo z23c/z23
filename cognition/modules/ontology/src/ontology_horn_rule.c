@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Crenton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: Canonical, range-restricted Horn-rule admission without evaluation. */
 #include "ontology/ontology.h"
 
