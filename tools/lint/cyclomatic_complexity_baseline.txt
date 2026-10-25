@@ -1691,7 +1691,6 @@ platform/modules/platform/src/ram_scratch.c:platform_ram_scratch_reserve:18
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read:38
 platform/modules/platform/src/safe_root_read.c:platform_safe_root_read#2:24
 platform/modules/platform/src/safe_root_read.c:relative_path_valid:19
-platform/modules/platform/src/state_root.c:state_root_repair_acl:16
 platform/modules/platform/src/temp_directory.c:platform_temp_directory_create:23
 platform/modules/platform/src/toolchain.c:platform_toolchain_capture_descriptor:26
 platform/modules/platform/src/toolchain.c:platform_toolchain_normalize_archive:27
