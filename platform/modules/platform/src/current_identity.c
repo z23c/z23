@@ -13,6 +13,29 @@
 #endif
 #include <windows.h>
 
+static bool platform_current_identity_format_sid(char *out, size_t out_size,
+                                                 PSID sid)
+{
+    SID_IDENTIFIER_AUTHORITY *authority = GetSidIdentifierAuthority(sid);
+    UCHAR count = *GetSidSubAuthorityCount(sid);
+    uint64_t authority_value = 0;
+    for (size_t i = 0; i < sizeof(authority->Value); i++)
+        authority_value = (authority_value << 8) | authority->Value[i];
+    int written = snprintf(out, out_size, "sid:S-%u-%llu",
+                           (unsigned)SID_REVISION,
+                           (unsigned long long)authority_value);
+    bool ok = written > 0 && (size_t)written < out_size;
+    size_t used = ok ? (size_t)written : 0;
+    for (UCHAR i = 0; ok && i < count; i++) {
+        written = snprintf(out + used, out_size - used, "-%lu",
+                           (unsigned long)*GetSidSubAuthority(sid, i));
+        ok = written > 0 && (size_t)written < out_size - used;
+        if (ok)
+            used += (size_t)written;
+    }
+    return ok;
+}
+
 static bool platform_current_identity_native(char *out, size_t out_size)
 {
     if (!out || out_size == 0)
@@ -31,25 +54,8 @@ static bool platform_current_identity_native(char *out, size_t out_size)
         CloseHandle(token);
         return false;
     }
-    SID_IDENTIFIER_AUTHORITY *authority =
-        GetSidIdentifierAuthority(user->User.Sid);
-    UCHAR count = *GetSidSubAuthorityCount(user->User.Sid);
-    uint64_t authority_value = 0;
-    for (size_t i = 0; i < sizeof(authority->Value); i++)
-        authority_value = (authority_value << 8) | authority->Value[i];
-    int written = snprintf(out, out_size, "sid:S-%u-%llu",
-                           (unsigned)SID_REVISION,
-                           (unsigned long long)authority_value);
-    ok = written > 0 && (size_t)written < out_size;
-    size_t used = ok ? (size_t)written : 0;
-    for (UCHAR i = 0; ok && i < count; i++) {
-        written = snprintf(out + used, out_size - used, "-%lu",
-                           (unsigned long)*GetSidSubAuthority(user->User.Sid,
-                                                              i));
-        ok = written > 0 && (size_t)written < out_size - used;
-        if (ok)
-            used += (size_t)written;
-    }
+    ok = platform_current_identity_format_sid(out, out_size,
+                                              user->User.Sid);
     LocalFree(user);
     CloseHandle(token);
     if (!ok)
