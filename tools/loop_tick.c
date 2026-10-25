@@ -77,9 +77,8 @@
 #include <unistd.h>
 
 #define LT_GO (-1) /* a stage's "carry on" answer; any value >= 0 is the exit code */
-/* The model both model calls name. The writer round names no unit kind: a
- * step gives none and engine_unit has no "build" template, so it keeps the
- * unkinded prompt it always had (the receipt is written without a kind). */
+/* The model both model calls name: writer rounds are kind build, the review is
+ * kind review. */
 #define LT_MODEL "claude-haiku-5-5"
 enum {
     LT_PATH = 1024,
@@ -855,8 +854,9 @@ static int engine_run(struct tick *t, const char *taskname, const char *statenam
     if (!attempt_id(id))
         return 2;
     const char *const eu[] = { O(t, LT_O_ENGINE_UNIT), "--engine", "claude-haiku",
-                               "--model", LT_MODEL, "--attempt-id", id,
-                               "--task", task, "--no-group", "--worktree",
+                               "--kind", "build", "--model", LT_MODEL,
+                               "--attempt-id", id, "--task", task,
+                               "--no-group", "--worktree",
                                t->dir, "--yes-dispatch", "--rounds", "1",
                                "--state-dir", state, "--timeout", secs, NULL };
     const int rc = run_logged(t, NULL, eu,
@@ -1755,7 +1755,7 @@ static bool build_review_prompt(struct tick *t, const char *path)
         return false;
     }
     const int n = snprintf(p, cap,
-        "You are a NON-AUTHOR reviewer of one Z23 commit in the current git worktree. Only read files (Read, Grep, Glob); do not run commands and do not edit or write anything: any edit voids your review.\n"
+        "You are a NON-AUTHOR reviewer of one Z23 commit in the current git worktree. You can only read files (Read, Grep, Glob); you cannot run commands or edit anything.\n"
         "%s"
         "End your reply with exactly one final line: 'VERDICT: LAND' or 'VERDICT: HOLD <reason with file:line>'.\n"
         "\n----- git show HEAD -----\n%s",
@@ -1797,14 +1797,13 @@ static char *review_text(const struct tick *t)
 
 /* The one-shot model call, serialised across every finish and the hourly tick
  * by a blocking flock on --haiku-lock. It runs as a read-only engine_unit
- * review (kind review, a report unit with a fresh attempt id, so it leaves a
- * receipt) in a scratch detached worktree of the lane's HEAD: engine_unit
- * detects but does not prevent edits by a reviewer, so the reviewer works on a
- * copy that is removed afterwards and the lane itself is never its worktree.
+ * review in the lane (kind review: a report unit that engine_unit holds to
+ * Read, Grep and Glob, with a fresh attempt id so it leaves a receipt). A
+ * reviewer that still changes the lane is caught by the stage_review check.
  * False when the lock cannot be taken. */
 static bool review_call(struct tick *t, const char *prompt_path)
 {
-    char dir[LT_PATH], wt[LT_PATH], state[LT_PATH], log[LT_PATH], secs[24];
+    char dir[LT_PATH], state[LT_PATH], log[LT_PATH], secs[24];
     char id[LT_ATTEMPT_ID];
     (void)fmt(dir, sizeof(dir), "%s", O(t, LT_O_HAIKU_LOCK));
     char *slash = strrchr(dir, '/');
@@ -1818,35 +1817,19 @@ static bool review_call(struct tick *t, const char *prompt_path)
             (void)close(fd);
         return false;
     }
-    (void)fmt(wt, sizeof(wt), "%s/review-wt", t->unit);
     (void)fmt(state, sizeof(state), "%s/review-eu", t->unit);
     (void)fmt(log, sizeof(log), "%s/review-eu.log", t->unit);
     (void)fmt(secs, sizeof(secs), "%ld", oint(t, LT_O_REVIEW_TIMEOUT));
-    const char *const add[] = { O(t, LT_O_GIT), "worktree", "add", "-q",
-                                "--detach", wt, "HEAD", NULL };
     const char *const eu[] = { O(t, LT_O_ENGINE_UNIT), "--engine", "claude-haiku",
                                "--kind", "review", "--model", LT_MODEL,
                                "--attempt-id", id, "--task", prompt_path,
-                               "--no-group", "--worktree", wt, "--yes-dispatch",
+                               "--no-group", "--worktree", t->dir, "--yes-dispatch",
                                "--rounds", "1", "--state-dir", state,
                                "--timeout", secs, NULL };
-    const char *const rm[] = { O(t, LT_O_GIT), "worktree", "remove", "--force",
-                               wt, NULL };
-    if (attempt_id(id) && run(t, t->dir, add, LT_SHORT_TIMEOUT_MS) == 0) {
+    if (attempt_id(id))
         (void)run_logged(t, NULL, eu,
                          oms(t, LT_O_REVIEW_TIMEOUT) + LT_SHORT_TIMEOUT_MS,
                          log);
-        /* The argv grants file edit tools: a reviewer that touched its copy
-         * has its reply discarded, so an edited review is never trusted. */
-        const char *const st[] = { O(t, LT_O_GIT), "status", "--porcelain",
-                                   NULL };
-        if (run(t, wt, st, LT_SHORT_TIMEOUT_MS) != 0 || *t->buf) {
-            char reply[LT_PATH];
-            (void)fmt(reply, sizeof(reply), "%s/reply.txt", state);
-            (void)unlink(reply);
-        }
-        (void)run(t, t->dir, rm, LT_SHORT_TIMEOUT_MS);
-    }
     (void)close(fd);
     return true;
 }

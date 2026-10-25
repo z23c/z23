@@ -1246,9 +1246,9 @@ static int lt_attempt_ids(const struct lt_env *e, char ids[][65], int max)
     return n;
 }
 
-/* Every model call leaves a receipt: the writer rounds carry --kind, --model
- * and a fresh 64-hex --attempt-id, and the review runs through engine_unit as
- * a --kind review unit in a scratch worktree, not the lane, never through a
+/* Every model call leaves a receipt: the writer rounds carry --kind build,
+ * --model and a fresh 64-hex --attempt-id, and the review runs through
+ * engine_unit as a --kind review unit in the lane worktree, never through a
  * direct claude spawn (the tool has no claude option). The fake engine writes
  * no receipt rows, so this asserts on its argv only. */
 static int case_model_call_receipts(void)
@@ -1263,9 +1263,10 @@ static int case_model_call_receipts(void)
         return failures + 1;
     LT_CHECK("a tick with a writer retry and a review submits",
              lt_tick(&e, NULL, NULL, NULL, 0) == 0 && lt_exists("%s/%s", e.d, "submit.txt"));
-    LT_CHECK("the writer rounds name no unit kind, only the review does",
+    LT_CHECK("every writer round is kind build and the review is kind review once",
+             lt_count(&e, "eu_args.txt", "--kind build ") == 2 &&
              lt_count(&e, "eu_args.txt", "--kind review ") == 1 &&
-             lt_count(&e, "eu_args.txt", "--kind ") == 1);
+             lt_count(&e, "eu_args.txt", "--kind ") == 3);
     LT_CHECK("every engine call names the Haiku model",
              lt_count(&e, "eu_args.txt", "--model claude-haiku-5-5 ") == 3);
     char ids[4][65];
@@ -1278,11 +1279,9 @@ static int case_model_call_receipts(void)
     LT_CHECK("the review ran once through engine_unit as a review unit",
              lt_count(&e, "eu_args.txt", "--kind review ") == 1 &&
              lt_file_has(&e, "lockstate.txt", "held"));
-    LT_CHECK("the review ran in a scratch worktree, not the lane",
-             lt_file_has(&e, "review_wt.txt", "/scratch/loop-t1/review-wt") &&
-             !lt_file_has(&e, "review_wt.txt", "/lanes/loop-t1"));
-    LT_CHECK("the scratch worktree was removed afterwards",
-             !lt_exists("%s/%s", e.d, "scratch/loop-t1/review-wt"));
+    LT_CHECK("the review ran in the lane worktree",
+             lt_file_has(&e, "review_wt.txt", "/lanes/loop-t1") &&
+             !lt_file_has(&e, "review_wt.txt", "review-wt"));
     return failures;
 }
 
