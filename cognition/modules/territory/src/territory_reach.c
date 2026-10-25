@@ -212,31 +212,73 @@ static int tr_cache_path(char *buf, size_t cap, const char *root)
     return snprintf(buf, cap, "%s/.codeindex/territory_reach.v1", root);
 }
 
-/* Load and fully verify the memo, or return NULL. A rejected memo is never an
- * error the caller has to handle: it just means the walk runs. */
-static struct territory_reach_set *tr_cache_load(const char *root,
-                                                 const uint8_t gen[32],
-                                                 uint32_t seeds)
+static FILE *tr_cache_fopen(const char *root)
 {
     char path[TERRITORY_PATH_MAX + 64];
     int n = tr_cache_path(path, sizeof(path), root);
     if (n < 0 || (size_t)n >= sizeof(path)) return NULL;
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
+    return f;
+}
 
-    uint8_t hdr[TR_HDR_SIZE];
-    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) { fclose(f); return NULL; }
+static bool tr_cache_hdr_accept(const uint8_t hdr[TR_HDR_SIZE],
+                                const uint8_t gen[32], uint32_t seeds,
+                                uint64_t *out_count, uint64_t *out_blob_len)
+{
     if (memcmp(hdr + TR_HDR_MAGIC, TR_MAGIC, 8) != 0 ||
         zcl_read_u32_le(hdr + TR_HDR_VERSION) != TR_VERSION ||
         zcl_read_u32_le(hdr + TR_HDR_SEEDS) != seeds ||
-        memcmp(hdr + TR_HDR_ROOT, gen, 32) != 0) {
-        fclose(f);
-        return NULL;
-    }
+        memcmp(hdr + TR_HDR_ROOT, gen, 32) != 0)
+        return false;
     uint64_t count = zcl_read_u64_le(hdr + TR_HDR_COUNT);
     uint64_t blob_len = zcl_read_u64_le(hdr + TR_HDR_BLOBLEN);
     if (count == 0 || count > TR_MAX_SYMBOLS || blob_len < 1 ||
-        blob_len > (uint64_t)UINT32_MAX) {
+        blob_len > (uint64_t)UINT32_MAX)
+        return false;
+    *out_count = count;
+    *out_blob_len = blob_len;
+    return true;
+}
+
+static bool tr_cache_payload_ok(const uint8_t hdr[TR_HDR_SIZE],
+                                const uint32_t *offs, const char *blob,
+                                uint64_t count, uint64_t blob_len)
+{
+    /* Verify-on-read: the payload's own digest, then structural sanity. A
+     * cache that survives both is byte-identical to what the walk produced. */
+    uint8_t want[32], got[32];
+    memcpy(want, hdr + TR_HDR_DIGEST, 32);
+    struct sha3_256_ctx c;
+    sha3_256_init(&c);
+    sha3_256_write(&c, (const unsigned char *)offs,
+                   sizeof(*offs) * (size_t)count);
+    sha3_256_write(&c, (const unsigned char *)blob, (size_t)blob_len);
+    sha3_256_finalize(&c, got);
+    if (memcmp(want, got, 32) != 0)
+        return false;
+    if (blob[blob_len - 1] != '\0')
+        return false;
+    for (uint64_t i = 0; i < count; i++) {
+        if (offs[i] >= blob_len)
+            return false;
+    }
+    return true;
+}
+
+/* Load and fully verify the memo, or return NULL. A rejected memo is never an
+ * error the caller has to handle: it just means the walk runs. */
+static struct territory_reach_set *tr_cache_load(const char *root,
+                                                 const uint8_t gen[32],
+                                                 uint32_t seeds)
+{
+    FILE *f = tr_cache_fopen(root);
+    if (!f) return NULL;
+
+    uint8_t hdr[TR_HDR_SIZE];
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) { fclose(f); return NULL; }
+    uint64_t count = 0, blob_len = 0;
+    if (!tr_cache_hdr_accept(hdr, gen, seeds, &count, &blob_len)) {
         fclose(f);
         return NULL;
     }
@@ -255,29 +297,9 @@ static struct territory_reach_set *tr_cache_load(const char *root,
     fclose(f);
     if (!ok) { free(rs); free(offs); free(blob); return NULL; }
 
-    /* Verify-on-read: the payload's own digest, then structural sanity. A
-     * cache that survives both is byte-identical to what the walk produced. */
-    uint8_t want[32], got[32];
-    memcpy(want, hdr + TR_HDR_DIGEST, 32);
-    struct sha3_256_ctx c;
-    sha3_256_init(&c);
-    sha3_256_write(&c, (const unsigned char *)offs,
-                   sizeof(*offs) * (size_t)count);
-    sha3_256_write(&c, (const unsigned char *)blob, (size_t)blob_len);
-    sha3_256_finalize(&c, got);
-    if (memcmp(want, got, 32) != 0) {
+    if (!tr_cache_payload_ok(hdr, offs, blob, count, blob_len)) {
         free(rs); free(offs); free(blob);
         return NULL;
-    }
-    if (blob[blob_len - 1] != '\0') {
-        free(rs); free(offs); free(blob);
-        return NULL;
-    }
-    for (uint64_t i = 0; i < count; i++) {
-        if (offs[i] >= blob_len) {
-            free(rs); free(offs); free(blob);
-            return NULL;
-        }
     }
     /* Endianness note: offsets are stored in host order inside a digest-sealed
      * payload keyed on this checkout's index. A cache file is never shared
@@ -386,6 +408,98 @@ static struct territory_reach_set *tr_freeze(struct tr_strset *set)
     return rs;
 }
 
+static struct territory_reach_set *tr_reach_take_cache(
+    struct codeindex *ci, const char *root,
+    const struct territory_proof_source *src,
+    struct territory_reach_stats *st, uint8_t gen[32], bool *have_gen)
+{
+    *have_gen = codeindex_source_root_sha3(ci, gen);
+    if (root && root[0] && *have_gen) {
+        struct territory_reach_set *cached =
+            tr_cache_load(root, gen, (uint32_t)src->count);
+        if (cached) {
+            st->from_cache = true;
+            st->symbols = (uint64_t)cached->count;
+            return cached;
+        }
+    }
+    return NULL;
+}
+
+static bool tr_reach_seed(struct tr_strset *set, struct tr_worklist *cur,
+                          const struct territory_proof_source *src)
+{
+    /* Seed with every registered entry point. A seed the index has never
+     * heard of simply contributes nothing — the walk is over the graph, and
+     * an absent root has no edges. */
+    for (size_t i = 0; i < src->count; i++) {
+        const char *name = src->at(i, src->user);
+        if (!name || !name[0]) continue;
+        bool added = false;
+        if (!tr_strset_add(set, name, &added)) return false;
+        if (!added) continue;
+        /* The offset just written is the tail of the arena. */
+        size_t off = set->blob_len - (strlen(name) + 1);
+        if (!tr_worklist_push(cur, (uint32_t)off)) return false;
+    }
+    return true;
+}
+
+static bool tr_reach_push_callees(struct tr_strset *set,
+                                  struct tr_worklist *next,
+                                  const struct ci_ref *refbuf, int nc)
+{
+    for (int j = 0; j < nc; j++) {
+        const char *callee = refbuf[j].callee;
+        if (!callee[0]) continue;
+        bool added = false;
+        if (!tr_strset_add(set, callee, &added)) return false;
+        if (!added) continue;
+        size_t off = set->blob_len - (strlen(callee) + 1);
+        if (!tr_worklist_push(next, (uint32_t)off)) return false;
+    }
+    return true;
+}
+
+static bool tr_reach_walk(struct codeindex *ci, struct tr_strset *set,
+                          struct tr_worklist *cur, struct tr_worklist *next,
+                          struct ci_ref *refbuf,
+                          struct territory_reach_stats *st)
+{
+    while (cur->len > 0) {
+        for (size_t i = 0; i < cur->len; i++) {
+            if (st->steps >= TR_MAX_STEPS || set->len >= TR_MAX_SYMBOLS) {
+                st->truncated = true;
+                break;
+            }
+            int nc = codeindex_callees(ci, set->blob + cur->off[i], refbuf,
+                                       TR_FANOUT_CAP);
+            st->steps++;
+            if (nc < 0) return false;
+            if (nc == TR_FANOUT_CAP) st->truncated = true;
+            if (!tr_reach_push_callees(set, next, refbuf, nc)) return false;
+        }
+        if (st->truncated) break;
+        free(cur->off);
+        *cur = *next;
+        memset(next, 0, sizeof(*next));
+    }
+    return true;
+}
+
+static void tr_reach_memoize(const char *root, const uint8_t gen[32],
+                             bool have_gen, uint32_t seeds,
+                             const struct territory_reach_set *rs,
+                             struct territory_reach_stats *st)
+{
+    /* Never memoize a truncated walk: a bounded answer must not be replayed
+     * as though it were the closure. An EMPTY closure is not memoized either
+     * — tr_cache_load rejects a zero-symbol payload as malformed, so writing
+     * one would only be rewritten on every call. */
+    if (root && root[0] && have_gen && !st->truncated && rs->count > 0)
+        tr_cache_store(root, gen, seeds, rs, &st->cache_written);
+}
+
 struct territory_reach_set *territory_reach_open(
     struct codeindex *ci, const char *root,
     const struct territory_proof_source *src,
@@ -400,16 +514,10 @@ struct territory_reach_set *territory_reach_open(
     st->seeds = (uint64_t)src->count;
 
     uint8_t gen[32];
-    bool have_gen = codeindex_source_root_sha3(ci, gen);
-    if (root && root[0] && have_gen) {
-        struct territory_reach_set *cached =
-            tr_cache_load(root, gen, (uint32_t)src->count);
-        if (cached) {
-            st->from_cache = true;
-            st->symbols = (uint64_t)cached->count;
-            return cached;
-        }
-    }
+    bool have_gen = false;
+    struct territory_reach_set *cached =
+        tr_reach_take_cache(ci, root, src, st, gen, &have_gen);
+    if (cached) return cached;
 
     uint64_t t0 = tr_now_us();
     struct tr_strset set;
@@ -425,46 +533,8 @@ struct territory_reach_set *territory_reach_open(
         LOG_NULL("territory", "reach callee buffer");
     }
 
-    /* Seed with every registered entry point. A seed the index has never
-     * heard of simply contributes nothing — the walk is over the graph, and
-     * an absent root has no edges. */
-    for (size_t i = 0; i < src->count; i++) {
-        const char *name = src->at(i, src->user);
-        if (!name || !name[0]) continue;
-        bool added = false;
-        if (!tr_strset_add(&set, name, &added)) goto fail;
-        if (!added) continue;
-        /* The offset just written is the tail of the arena. */
-        size_t off = set.blob_len - (strlen(name) + 1);
-        if (!tr_worklist_push(&cur, (uint32_t)off)) goto fail;
-    }
-
-    while (cur.len > 0) {
-        for (size_t i = 0; i < cur.len; i++) {
-            if (st->steps >= TR_MAX_STEPS || set.len >= TR_MAX_SYMBOLS) {
-                st->truncated = true;
-                break;
-            }
-            int nc = codeindex_callees(ci, set.blob + cur.off[i], refbuf,
-                                       TR_FANOUT_CAP);
-            st->steps++;
-            if (nc < 0) goto fail;
-            if (nc == TR_FANOUT_CAP) st->truncated = true;
-            for (int j = 0; j < nc; j++) {
-                const char *callee = refbuf[j].callee;
-                if (!callee[0]) continue;
-                bool added = false;
-                if (!tr_strset_add(&set, callee, &added)) goto fail;
-                if (!added) continue;
-                size_t off = set.blob_len - (strlen(callee) + 1);
-                if (!tr_worklist_push(&next, (uint32_t)off)) goto fail;
-            }
-        }
-        if (st->truncated) break;
-        free(cur.off);
-        cur = next;
-        memset(&next, 0, sizeof(next));
-    }
+    if (!tr_reach_seed(&set, &cur, src)) goto fail;
+    if (!tr_reach_walk(ci, &set, &cur, &next, refbuf, st)) goto fail;
 
     free(refbuf);
     refbuf = NULL;
@@ -479,12 +549,7 @@ struct territory_reach_set *territory_reach_open(
     st->symbols = (uint64_t)rs->count;
     st->build_us = tr_now_us() - t0;
 
-    /* Never memoize a truncated walk: a bounded answer must not be replayed
-     * as though it were the closure. An EMPTY closure is not memoized either
-     * — tr_cache_load rejects a zero-symbol payload as malformed, so writing
-     * one would only be rewritten on every call. */
-    if (root && root[0] && have_gen && !st->truncated && rs->count > 0)
-        tr_cache_store(root, gen, (uint32_t)src->count, rs, &st->cache_written);
+    tr_reach_memoize(root, gen, have_gen, (uint32_t)src->count, rs, st);
     return rs;
 
 fail:
