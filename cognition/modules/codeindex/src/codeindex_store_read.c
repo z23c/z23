@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Crenton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Purpose: the READ half of codeindex_store — every query that steps derived
  * rows back out of <root>/.codeindex/index.kv.
