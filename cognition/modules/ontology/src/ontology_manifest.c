@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: Canonical ontology set and universe-bound manifest codecs. */
 #include "ontology/ontology.h"
 
