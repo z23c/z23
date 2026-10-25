@@ -63,7 +63,7 @@ static int fgp_case_none(const char *dir)
         struct zcl_goal_result r = zcl_goals_measure(&o, "C8");
         ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
         ASSERT(fgp_has(r.evidence, "needs 168 h of observation, have 0 h"));
-        ASSERT(fgp_has(r.next, "z23 fleet parity sample"));
+        ASSERT(fgp_has(r.next, "z23-dev fleet parity sample"));
         PASS();
     } _test_next:;
     return failures;

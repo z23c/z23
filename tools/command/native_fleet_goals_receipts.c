@@ -164,129 +164,96 @@ static struct zcl_goal_result rc_c3(const struct zcl_goals_options *o)
     return rc_c3_grade(&j, hist, now, ts);
 }
 
-/* ── C6: soak evidence ledger ─────────────────────────────────────────── */
+/* ── C6 and C8: the soak and parity evidence ledgers ──────────────────── */
 
-static struct zcl_goal_result rc_c6_grade(const struct zcl_judge_result *j,
-                                          const char *file)
+struct rc_ledger {
+    const char *judge;     /* "soak" or "parity": names the judge in rows */
+    const char *sample;    /* the noun for one ledger line */
+    const char *file_name; /* ledger file under the receipt directory */
+    const char *next;
+    const char *pass_note; /* extra MET clause; empty when there is none */
+};
+
+static const struct rc_ledger rc_ledger_c6 = {
+    "soak", "sample", "evidence.jsonl", "make soak-evidence-report", ""};
+
+static const struct rc_ledger rc_ledger_c8 = {
+    "parity", "parity sample", "parity.jsonl",
+    "z23-dev fleet parity sample (on a timer)", ", zero hash mismatches"};
+
+static struct zcl_goal_result rc_ledger_grade(const struct rc_ledger *L,
+                                              const struct zcl_judge_result *j,
+                                              const char *file)
 {
-    static const char next[] = "make soak-evidence-report";
     long long age_h = (long long)(j->newest_age_sec / RC_HOUR_S);
 
     if (j->newest_age_sec > (int64_t)RC_C6_WINDOW_H * RC_HOUR_S ||
         strncmp(j->reason, "stale_evidence_age", 18) == 0)
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "stale: newest sample is %lld h old, window %d h; "
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, L->next,
+                             "stale: newest %s is %lld h old, window %d h; "
                              "needs %d h of observation, have %.1f h; %s",
-                             age_h, RC_C6_WINDOW_H, RC_C6_WINDOW_H,
+                             L->sample, age_h, RC_C6_WINDOW_H, RC_C6_WINDOW_H,
                              j->covered_hours, file);
     if (strcmp(j->verdict, "MET") == 0)
-        return zcl_goal_make(ZCL_GOAL_PASS, next,
-                             "soak judge MET over %.1f h of %d h, newest sample "
+        return zcl_goal_make(ZCL_GOAL_PASS, L->next,
+                             "%s judge MET over %.1f h of %d h%s, newest %s "
                              "%lld h old; receipt %s",
-                             j->covered_hours, RC_C6_WINDOW_H, age_h, file);
+                             L->judge, j->covered_hours, RC_C6_WINDOW_H,
+                             L->pass_note, L->sample, age_h, file);
     if (strcmp(j->verdict, "NOT_MET") == 0)
-        return zcl_goal_make(ZCL_GOAL_FAIL, next,
-                             "soak judge NOT_MET (%s) over %.1f h, newest sample "
+        return zcl_goal_make(ZCL_GOAL_FAIL, L->next,
+                             "%s judge NOT_MET (%s) over %.1f h, newest %s "
                              "%lld h old; receipt %s",
-                             j->reason, j->covered_hours, age_h, file);
-    return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                             L->judge, j->reason, j->covered_hours, L->sample,
+                             age_h, file);
+    return zcl_goal_make(ZCL_GOAL_UNMEASURED, L->next,
                          "needs %d h of observation, have %.1f h (%s); receipt %s",
                          RC_C6_WINDOW_H, j->covered_hours, j->reason, file);
+}
+
+static struct zcl_goal_result rc_ledger_probe(
+    const struct zcl_goals_options *o, const struct rc_ledger *L,
+    bool (*judge)(const struct zcl_soak_judge_opts *, struct zcl_judge_result *))
+{
+    static struct zcl_judge_result j;
+    char dir_buf[RC_PATH_MAX], file[RC_PATH_MAX], dflt[RC_PATH_MAX], err[RC_ERR_MAX];
+    struct zcl_soak_judge_opts opts;
+    const char *dir =
+        zcl_goals_state_path(o ? o->soak_dir : NULL, "ZCL_SOAK_EVIDENCE_DIR",
+                ".local/state/zclassic23-soak-evidence", o && o->skip_probes,
+                dir_buf, sizeof(dir_buf));
+
+    if (!dir)
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, L->next,
+                             "%s receipt probe skipped", L->judge);
+    if (!zcl_soak_judge_defaults(&opts, dflt, sizeof(dflt), err, sizeof(err)))
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, L->next,
+                             "the %s judge settings are invalid: %s", L->judge,
+                             err);
+    (void)snprintf(file, sizeof(file), "%s/%s", dir, L->file_name);
+    opts.file = file;
+    opts.window_hours = RC_C6_WINDOW_H;
+    if (o && o->now_unix > 0)
+        opts.now_unix = o->now_unix;
+    if (!judge(&opts, &j))
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, L->next,
+                             "the %s judge could not read %s", L->judge, file);
+    if (strcmp(j.reason, "no_evidence_file") == 0)
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, L->next,
+                             "needs %d h of observation, have 0 h: no receipt at "
+                             "%s",
+                             RC_C6_WINDOW_H, file);
+    return rc_ledger_grade(L, &j, file);
 }
 
 static struct zcl_goal_result rc_c6(const struct zcl_goals_options *o)
 {
-    static const char next[] = "make soak-evidence-report";
-    static struct zcl_judge_result j;
-    char dir_buf[RC_PATH_MAX], file[RC_PATH_MAX], dflt[RC_PATH_MAX], err[RC_ERR_MAX];
-    struct zcl_soak_judge_opts opts;
-    const char *dir =
-        zcl_goals_state_path(o ? o->soak_dir : NULL, "ZCL_SOAK_EVIDENCE_DIR",
-                ".local/state/zclassic23-soak-evidence", o && o->skip_probes,
-                dir_buf, sizeof(dir_buf));
-
-    if (!dir)
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "soak receipt probe skipped");
-    (void)snprintf(file, sizeof(file), "%s/evidence.jsonl", dir);
-    if (!zcl_soak_judge_defaults(&opts, dflt, sizeof(dflt), err, sizeof(err)))
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "the soak judge settings are invalid: %s", err);
-    (void)snprintf(file, sizeof(file), "%s/evidence.jsonl", dir);
-    opts.file = file;
-    opts.window_hours = RC_C6_WINDOW_H;
-    if (o && o->now_unix > 0)
-        opts.now_unix = o->now_unix;
-    if (!zcl_soak_judge(&opts, &j))
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "the soak judge could not read %s", file);
-    if (strcmp(j.reason, "no_evidence_file") == 0)
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "needs %d h of observation, have 0 h: no receipt at "
-                             "%s",
-                             RC_C6_WINDOW_H, file);
-    return rc_c6_grade(&j, file);
-}
-
-/* ── C8: parity ledger ────────────────────────────────────────────────── */
-
-static struct zcl_goal_result rc_c8_grade(const struct zcl_judge_result *j,
-                                          const char *file)
-{
-    static const char next[] = "z23 fleet parity sample (on a timer)";
-    long long age_h = (long long)(j->newest_age_sec / RC_HOUR_S);
-
-    if (j->newest_age_sec > (int64_t)RC_C6_WINDOW_H * RC_HOUR_S ||
-        strncmp(j->reason, "stale_evidence_age", 18) == 0)
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "stale: newest parity sample is %lld h old; needs "
-                             "%d h of observation, have %.1f h; %s",
-                             age_h, RC_C6_WINDOW_H, j->covered_hours, file);
-    if (strcmp(j->verdict, "MET") == 0)
-        return zcl_goal_make(ZCL_GOAL_PASS, next,
-                             "parity judge MET over %.1f h of %d h, zero hash "
-                             "mismatches, newest sample %lld h old; receipt %s",
-                             j->covered_hours, RC_C6_WINDOW_H, age_h, file);
-    if (strcmp(j->verdict, "NOT_MET") == 0)
-        return zcl_goal_make(ZCL_GOAL_FAIL, next,
-                             "parity judge NOT_MET (%s) over %.1f h; receipt %s",
-                             j->reason, j->covered_hours, file);
-    return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                         "needs %d h of observation, have %.1f h (%s); receipt %s",
-                         RC_C6_WINDOW_H, j->covered_hours, j->reason, file);
+    return rc_ledger_probe(o, &rc_ledger_c6, zcl_soak_judge);
 }
 
 static struct zcl_goal_result rc_c8(const struct zcl_goals_options *o)
 {
-    static const char next[] = "z23 fleet parity sample (on a timer)";
-    static struct zcl_judge_result j;
-    char dir_buf[RC_PATH_MAX], file[RC_PATH_MAX], dflt[RC_PATH_MAX], err[RC_ERR_MAX];
-    struct zcl_soak_judge_opts opts;
-    const char *dir =
-        zcl_goals_state_path(o ? o->soak_dir : NULL, "ZCL_SOAK_EVIDENCE_DIR",
-                ".local/state/zclassic23-soak-evidence", o && o->skip_probes,
-                dir_buf, sizeof(dir_buf));
-
-    if (!dir)
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "parity receipt probe skipped");
-    if (!zcl_soak_judge_defaults(&opts, dflt, sizeof(dflt), err, sizeof(err)))
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "the parity judge settings are invalid: %s", err);
-    (void)snprintf(file, sizeof(file), "%s/parity.jsonl", dir);
-    opts.file = file;
-    opts.window_hours = RC_C6_WINDOW_H;
-    if (o && o->now_unix > 0)
-        opts.now_unix = o->now_unix;
-    if (!zcl_parity_judge(&opts, &j))
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "the parity judge could not read %s", file);
-    if (strcmp(j.reason, "no_evidence_file") == 0)
-        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
-                             "needs %d h of observation, have 0 h: no receipt at "
-                             "%s",
-                             RC_C6_WINDOW_H, file);
-    return rc_c8_grade(&j, file);
+    return rc_ledger_probe(o, &rc_ledger_c8, zcl_parity_judge);
 }
 
 /* ── C1 C2 C4 C5 C7: the newest line of <item>.jsonl ─────────────────── */

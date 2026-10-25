@@ -100,6 +100,28 @@ void ej_verdict(struct zcl_judge_result *out, int exit_code, const char *verdict
     (void)snprintf(out->reason, sizeof(out->reason), "%s", reason);
 }
 
+void ej_verdictf(struct zcl_judge_result *out, const char *verdict,
+                 const char *fmt, ...)
+{
+    char reason[ZCL_JUDGE_REASON_MAX];
+    va_list args;
+    va_start(args, fmt);
+    (void)vsnprintf(reason, sizeof(reason), fmt, args);
+    va_end(args);
+    ej_verdict(out, 0, verdict, reason);
+}
+
+void ej_finish(struct zcl_judge_result *out, const char *tag)
+{
+    if (strcmp(out->verdict, "MET") == 0)
+        out->exit_code = 0;
+    else if (strcmp(out->verdict, "NOT_MET") == 0)
+        out->exit_code = 1;
+    else
+        out->exit_code = 2;
+    ej_cat(out, "%s: VERDICT=%s reason=%s\n", tag, out->verdict, out->reason);
+}
+
 int64_t ej_now(int64_t given)
 {
     return given > 0 ? given : (int64_t)platform_time_wall_time_t();

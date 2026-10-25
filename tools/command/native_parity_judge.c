@@ -12,7 +12,6 @@
 
 #include "native_evidence_judge_util.h"
 
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -70,58 +69,33 @@ static int64_t par_last_ts(const char *buf, size_t len)
     return last;
 }
 
-static void par_set(struct zcl_judge_result *out, const char *v, const char *fmt,
-                    ...) ZCL_PRINTF_LIKE(3, 4);
-
-static void par_set(struct zcl_judge_result *out, const char *v, const char *fmt,
-                    ...)
-{
-    char reason[ZCL_JUDGE_REASON_MAX];
-    va_list args;
-    va_start(args, fmt);
-    (void)vsnprintf(reason, sizeof(reason), fmt, args);
-    va_end(args);
-    ej_verdict(out, 0, v, reason);
-}
-
 static void par_ladder(const struct par_stats *st, int64_t need_sec, int64_t age,
                        const struct zcl_soak_judge_opts *o,
                        struct zcl_judge_result *out)
 {
     int64_t covered = st->cnt > 0 ? st->prev_ts - st->first_ts : 0;
     if (st->have_mismatch)
-        par_set(out, "NOT_MET", "parity_mismatch_height_%lld_ours_%s_oracle_%s",
+        ej_verdictf(out, "NOT_MET", "parity_mismatch_height_%lld_ours_%s_oracle_%s",
                 (long long)st->mismatch_height, st->ours, st->oracle);
     else if (st->cnt < 2)
-        par_set(out, "INSUFFICIENT", "too_few_samples");
+        ej_verdictf(out, "INSUFFICIENT", "too_few_samples");
     else if (covered + ZCL_SOAK_WINDOW_SLACK_SEC < need_sec)
-        par_set(out, "INSUFFICIENT", "window_short_%llds_lt_%llds_slack%ds",
+        ej_verdictf(out, "INSUFFICIENT", "window_short_%llds_lt_%llds_slack%ds",
                 (long long)covered, (long long)need_sec,
                 ZCL_SOAK_WINDOW_SLACK_SEC);
     else if (st->hole_max > ZCL_SOAK_HOLE_THRESHOLD_SEC)
-        par_set(out, "INSUFFICIENT", "sampling_hole_%llds_gt_%ds",
+        ej_verdictf(out, "INSUFFICIENT", "sampling_hole_%llds_gt_%ds",
                 (long long)st->hole_max, ZCL_SOAK_HOLE_THRESHOLD_SEC);
     else if (st->ok_cnt * 100 < st->cnt * 90)
-        par_set(out, "INSUFFICIENT", "oracle_coverage_thin_ok_%lld_of_%lld",
+        ej_verdictf(out, "INSUFFICIENT", "oracle_coverage_thin_ok_%lld_of_%lld",
                 (long long)st->ok_cnt, (long long)st->cnt);
     else if (!o->allow_stale && age > ZCL_SOAK_HOLE_THRESHOLD_SEC)
-        par_set(out, "INSUFFICIENT", "stale_evidence_age_%llds", (long long)age);
+        ej_verdictf(out, "INSUFFICIENT", "stale_evidence_age_%llds", (long long)age);
     else
-        par_set(out, "MET", "covered_%.1fh_hole_max_%llds_zero_mismatch",
+        ej_verdictf(out, "MET", "covered_%.1fh_hole_max_%llds_zero_mismatch",
                 (double)covered / 3600.0, (long long)st->hole_max);
 }
 
-static void par_finish(struct zcl_judge_result *out)
-{
-    if (strcmp(out->verdict, "MET") == 0)
-        out->exit_code = 0;
-    else if (strcmp(out->verdict, "NOT_MET") == 0)
-        out->exit_code = 1;
-    else
-        out->exit_code = 2;
-    ej_cat(out, "parity-evidence: VERDICT=%s reason=%s\n", out->verdict,
-           out->reason);
-}
 
 static void par_judge_buf(const struct zcl_soak_judge_opts *o, char *buf,
                           size_t len, struct zcl_judge_result *out)
@@ -135,8 +109,8 @@ static void par_judge_buf(const struct zcl_soak_judge_opts *o, char *buf,
             buf[i] = '\0';
     last = par_last_ts(buf, len);
     if (last < 0) {
-        par_set(out, "INSUFFICIENT", "empty_log");
-        par_finish(out);
+        ej_verdictf(out, "INSUFFICIENT", "empty_log");
+        ej_finish(out, "parity-evidence");
         return;
     }
     cutoff = last - need - ZCL_SOAK_WINDOW_SLACK_SEC;
@@ -150,7 +124,7 @@ static void par_judge_buf(const struct zcl_soak_judge_opts *o, char *buf,
            (long long)o->window_hours, o->file, (long long)st.cnt,
            (long long)st.ok_cnt, (long long)st.hole_max);
     par_ladder(&st, need, now - last, o, out);
-    par_finish(out);
+    ej_finish(out, "parity-evidence");
 }
 
 bool zcl_parity_judge(const struct zcl_soak_judge_opts *opts,
@@ -163,8 +137,8 @@ bool zcl_parity_judge(const struct zcl_soak_judge_opts *opts,
     memset(out, 0, sizeof(*out));
     buf = ej_slurp(opts->file, PAR_FILE_MAX, &len);
     if (!buf) {
-        par_set(out, "INSUFFICIENT", "no_evidence_file");
-        par_finish(out);
+        ej_verdictf(out, "INSUFFICIENT", "no_evidence_file");
+        ej_finish(out, "parity-evidence");
         return true;
     }
     par_judge_buf(opts, buf, len, out);

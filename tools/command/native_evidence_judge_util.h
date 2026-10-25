@@ -30,6 +30,14 @@ void ej_cat(struct zcl_judge_result *out, const char *fmt, ...)
 void ej_verdict(struct zcl_judge_result *out, int exit_code, const char *verdict,
                 const char *reason);
 
+/* Sets the verdict token with exit code 0 and a formatted reason. */
+void ej_verdictf(struct zcl_judge_result *out, const char *verdict,
+                 const char *fmt, ...) ZCL_PRINTF_LIKE(3, 4);
+
+/* Maps the verdict to its exit code (MET 0, NOT_MET 1, else 2) and appends
+ * the one-line "<tag>: VERDICT=... reason=..." report. */
+void ej_finish(struct zcl_judge_result *out, const char *tag);
+
 int64_t ej_now(int64_t given);
 
 /* Parses the value of environment variable `name` (as returned by getenv)

@@ -11,7 +11,6 @@
 
 #include "base/safe_alloc.h"
 
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -228,42 +227,28 @@ static size_t soak_window_start(const struct soak_sample *s, size_t n,
     return i0 >= n ? n - 1 : i0;
 }
 
-static void soak_set(struct zcl_judge_result *out, const char *v,
-                     const char *fmt, ...) ZCL_PRINTF_LIKE(3, 4);
-
-static void soak_set(struct zcl_judge_result *out, const char *v,
-                     const char *fmt, ...)
-{
-    char reason[ZCL_JUDGE_REASON_MAX];
-    va_list args;
-    va_start(args, fmt);
-    (void)vsnprintf(reason, sizeof(reason), fmt, args);
-    va_end(args);
-    ej_verdict(out, 0, v, reason);
-}
-
 /* The criterion ladder after the identity checks. */
 static void soak_ladder_liveness(const struct soak_stats *st,
                                  struct zcl_judge_result *out, double gap0_pct)
 {
     int64_t cnt = st->cnt;
     if (st->op > 0)
-        soak_set(out, "NOT_MET", "operator_intervention_detected_x%lld",
+        ej_verdictf(out, "NOT_MET", "operator_intervention_detected_x%lld",
                  (long long)st->op);
     else if (st->review > 0)
-        soak_set(out, "NOT_MET", "security_review_required_in_%lld_of_%lld_samples",
+        ej_verdictf(out, "NOT_MET", "security_review_required_in_%lld_of_%lld_samples",
                  (long long)st->review, (long long)cnt);
     else if (st->hole_max > ZCL_SOAK_HOLE_THRESHOLD_SEC)
-        soak_set(out, "NOT_MET", "sampling_hole_%llds_gt_%ds",
+        ej_verdictf(out, "NOT_MET", "sampling_hole_%llds_gt_%ds",
                  (long long)st->hole_max, ZCL_SOAK_HOLE_THRESHOLD_SEC);
     else if (st->soak_null * 100 > cnt * (100 - ZCL_SOAK_GAP0_MIN_PCT))
-        soak_set(out, "NOT_MET", "soak_unreachable_in_%lld_of_%lld_samples",
+        ej_verdictf(out, "NOT_MET", "soak_unreachable_in_%lld_of_%lld_samples",
                  (long long)st->soak_null, (long long)cnt);
     else if (st->ok_cnt * 100 < cnt * 90)
-        soak_set(out, "INSUFFICIENT", "oracle_coverage_thin_ok_%lld_of_%lld",
+        ej_verdictf(out, "INSUFFICIENT", "oracle_coverage_thin_ok_%lld_of_%lld",
                  (long long)st->ok_cnt, (long long)cnt);
     else if (gap0_pct < ZCL_SOAK_GAP0_MIN_PCT)
-        soak_set(out, "NOT_MET", "gap_nonzero_in_%lld_of_%lld_ok_samples",
+        ej_verdictf(out, "NOT_MET", "gap_nonzero_in_%lld_of_%lld_ok_samples",
                  (long long)(st->ok_cnt - st->gap0), (long long)st->ok_cnt);
     else
         out->verdict[0] = '\0';
@@ -274,13 +259,13 @@ static void soak_ladder(const struct soak_stats *st, int64_t window_hours,
 {
     int64_t cnt = st->cnt, need = window_hours * 3600;
     if (cnt < 2)
-        soak_set(out, "INSUFFICIENT", "too_few_samples");
+        ej_verdictf(out, "INSUFFICIENT", "too_few_samples");
     else if (st->covered_sec + ZCL_SOAK_WINDOW_SLACK_SEC < need)
-        soak_set(out, "INSUFFICIENT", "window_short_%llds_lt_%llds_slack%ds",
+        ej_verdictf(out, "INSUFFICIENT", "window_short_%llds_lt_%llds_slack%ds",
                  (long long)st->covered_sec, (long long)need,
                  ZCL_SOAK_WINDOW_SLACK_SEC);
     else if (st->bin_ids > 0)
-        soak_set(out, "NOT_MET",
+        ej_verdictf(out, "NOT_MET",
                  "binary_identity_changed_in_%lld_of_%lld_identity_samples",
                  (long long)st->bin_ids, (long long)st->bin_known);
     else
@@ -288,16 +273,16 @@ static void soak_ladder(const struct soak_stats *st, int64_t window_hours,
     if (out->verdict[0])
         return;
     if (st->unknown > 0)
-        soak_set(out, "INSUFFICIENT", "security_posture_unknown_in_%lld_of_%lld_samples",
+        ej_verdictf(out, "INSUFFICIENT", "security_posture_unknown_in_%lld_of_%lld_samples",
                  (long long)st->unknown, (long long)cnt);
     else if (st->sec_gap > 0)
-        soak_set(out, "NOT_MET", "security_posture_gap_in_%lld_of_%lld_samples",
+        ej_verdictf(out, "NOT_MET", "security_posture_gap_in_%lld_of_%lld_samples",
                  (long long)st->sec_gap, (long long)cnt);
     else if (st->bin_known != cnt)
-        soak_set(out, "INSUFFICIENT", "binary_identity_unknown_in_%lld_of_%lld_samples",
+        ej_verdictf(out, "INSUFFICIENT", "binary_identity_unknown_in_%lld_of_%lld_samples",
                  (long long)(cnt - st->bin_known), (long long)cnt);
     else
-        soak_set(out, "MET", "covered_%.1fh_hole_max_%llds_gap0_%.2fpct",
+        ej_verdictf(out, "MET", "covered_%.1fh_hole_max_%llds_gap0_%.2fpct",
                  (double)st->covered_sec / 3600.0, (long long)st->hole_max,
                  gap0_pct);
 }
@@ -349,18 +334,6 @@ static void soak_render_counts(const struct soak_stats *st,
            st->bin_id1[0] ? st->bin_id1 : "null");
 }
 
-static void soak_finish(struct zcl_judge_result *out)
-{
-    if (strcmp(out->verdict, "MET") == 0)
-        out->exit_code = 0;
-    else if (strcmp(out->verdict, "NOT_MET") == 0)
-        out->exit_code = 1;
-    else
-        out->exit_code = 2;
-    ej_cat(out, "soak-evidence: VERDICT=%s reason=%s\n", out->verdict,
-           out->reason);
-}
-
 static bool soak_judge_samples(const struct zcl_soak_judge_opts *o,
                                const struct soak_sample *s, size_t n,
                                int64_t malformed, struct zcl_judge_result *out)
@@ -372,8 +345,8 @@ static bool soak_judge_samples(const struct zcl_soak_judge_opts *o,
     if (n == 0) {
         ej_cat(out, "soak-evidence: judge window_hours=%lld file=%s file_samples=0 malformed=%lld\n",
                (long long)o->window_hours, o->file, (long long)malformed);
-        soak_set(out, "INSUFFICIENT", "empty_log");
-        soak_finish(out);
+        ej_verdictf(out, "INSUFFICIENT", "empty_log");
+        ej_finish(out, "soak-evidence");
         return true;
     }
     i0 = soak_window_start(s, n, o->window_hours);
@@ -384,9 +357,9 @@ static bool soak_judge_samples(const struct zcl_soak_judge_opts *o,
     soak_ladder(&st, o->window_hours, out, gap0_pct);
     if (strcmp(out->verdict, "MET") == 0 && !o->allow_stale &&
         now - s[n - 1].ts > ZCL_SOAK_HOLE_THRESHOLD_SEC)
-        soak_set(out, "INSUFFICIENT", "stale_evidence_age_%llds",
+        ej_verdictf(out, "INSUFFICIENT", "stale_evidence_age_%llds",
                  (long long)(now - s[n - 1].ts));
-    soak_finish(out);
+    ej_finish(out, "soak-evidence");
     return true;
 }
 
@@ -405,8 +378,8 @@ bool zcl_soak_judge(const struct zcl_soak_judge_opts *opts,
     if (!buf) {
         ej_cat(out, "soak-evidence: judge window_hours=%lld file=%s file_samples=0\n",
                (long long)opts->window_hours, opts->file);
-        soak_set(out, "INSUFFICIENT", "no_evidence_file");
-        soak_finish(out);
+        ej_verdictf(out, "INSUFFICIENT", "no_evidence_file");
+        ej_finish(out, "soak-evidence");
         return true;
     }
     samples = soak_parse(buf, &n, &malformed);
