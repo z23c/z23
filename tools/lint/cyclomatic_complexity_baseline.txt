@@ -1320,7 +1320,6 @@ engine/jobs/src/refold_progress.c:refold_progress_dump_state_json:17
 engine/jobs/src/rewind_driver.c:rewind_to_nearest_self_verified_base:19
 engine/jobs/src/rom_compile_status.c:push_layers:22
 engine/jobs/src/rom_compile_status.c:push_shielded_import:22
-engine/jobs/src/script_validate_contextual.c:script_validate_contextual_gate:19
 engine/jobs/src/script_validate_log_store.c:script_validate_body_persist_log_at:17
 engine/jobs/src/script_validate_log_store.c:script_validate_log_insert:16
 engine/jobs/src/script_validate_stage.c:step_validate:31

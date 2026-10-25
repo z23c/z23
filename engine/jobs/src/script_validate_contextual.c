@@ -48,6 +48,45 @@ static bool block_has_shielded_proofs(const struct block *blk)
     return false;
 }
 
+/* Closed-arm predicate of the #26 at-tip gate in
+ * script_validate_contextual_gate: true when the contextual checks must be
+ * skipped entirely (unseeded finalized tip, height far below the tip, or a
+ * sparse-snapshot tail). See the gate's own comment for the zclassicd
+ * parity rationale behind each arm. */
+static bool script_validate_ctx_gate_closed(struct main_state *ms,
+    const struct chain_params *cp, const struct block_index *bi, int next_h)
+{
+    int64_t tip_h = tip_finalize_stage_last_height();  /* -1 when unseeded */
+    const int64_t CTX_TIP_WINDOW = 16;  /* >= max legit pipeline depth */
+    if (!cp || !bi || !bi->pprev || tip_h < 0 ||
+        next_h < tip_h - CTX_TIP_WINDOW ||
+        process_block_should_skip_contextual_header(ms, bi->pprev,
+                                                    &cp->consensus))
+        return true;
+    return false;
+}
+
+/* True when the !is_ibd path would run full shielded verification on this
+ * block but the zk params are not loaded yet, so the gate must wait for
+ * them instead of failing closed (see the call site for the WAIT shape). */
+static bool script_validate_ctx_needs_shielded_params(
+    const struct block *blk, bool is_ibd)
+{
+    if (!is_ibd && block_has_shielded_proofs(blk) &&
+        !sapling_params_loaded())
+        return true;
+    return false;
+}
+
+/* Reject reason for the warn/event/persisted lines: the typed reason
+ * contextual_check_block produced, or the generic marker when it set
+ * none. */
+static const char *script_validate_ctx_reject_reason(
+    const struct validation_state *vs)
+{
+    return vs->reject_reason[0] ? vs->reject_reason : "contextual-invalid";
+}
+
 /* Infra failures inside contextual_check_transaction — transient alloc /
  * sighash plumbing / absent verifying keys, NOT consensus verdicts. They
  * must never persist as a permanent reject: the stale-script-hole repair
@@ -84,12 +123,7 @@ enum script_validate_ctx_verdict script_validate_contextual_gate(
      * ContextualCheckTransaction IBD short-circuit (per-tx rules only;
      * finality + BIP34 always run — see contextual_check_block). */
     const struct chain_params *cp = chain_params_get();
-    int64_t tip_h = tip_finalize_stage_last_height();  /* -1 when unseeded */
-    const int64_t CTX_TIP_WINDOW = 16;  /* >= max legit pipeline depth */
-    if (!cp || !bi || !bi->pprev || tip_h < 0 ||
-        next_h < tip_h - CTX_TIP_WINDOW ||
-        process_block_should_skip_contextual_header(ms, bi->pprev,
-                                                    &cp->consensus))
+    if (script_validate_ctx_gate_closed(ms, cp, bi, next_h))
         return SV_CTX_PASS;
 
     bool is_ibd = is_initial_block_download(ms);
@@ -99,8 +133,7 @@ enum script_validate_ctx_verdict script_validate_contextual_gate(
      * a load failure — boot_services.c). Wait with the same recoverable
      * JOB_IDLE shape proof_validate uses, instead of letting a params
      * race surface as a permanent consensus reject of a valid block. */
-    if (!is_ibd && block_has_shielded_proofs(blk) &&
-        !sapling_params_loaded())
+    if (script_validate_ctx_needs_shielded_params(blk, is_ibd))
         return SV_CTX_WAIT_PARAMS;
 
     struct validation_state cstate;
@@ -110,8 +143,7 @@ enum script_validate_ctx_verdict script_validate_contextual_gate(
     if (cv == CONTEXTUAL_CHECK_PASS)
         return SV_CTX_PASS;
 
-    const char *reason = cstate.reject_reason[0] ? cstate.reject_reason
-                                                 : "contextual-invalid";
+    const char *reason = script_validate_ctx_reject_reason(&cstate);
     /* Transient infra failures persist under the resurrectable
      * "internal_error" status (repair re-attempts them); genuine
      * consensus verdicts keep their typed reason and stay final. */
