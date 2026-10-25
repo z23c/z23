@@ -295,6 +295,53 @@ static struct zcl_result copy_dir(DIR *sd, int d_dfd, unsigned flags,
     return ZCL_OK;
 }
 
+/* Copy a directory root after the caller has validated its type and allocated
+ * the shared I/O buffer. */
+static struct zcl_result copy_root_dir(const char *src, const char *dst,
+                                       const struct stat *st, unsigned flags,
+                                       zcl_tree_filter_fn filter, void *fctx,
+                                       char *iobuf)
+{
+    int s = openat(AT_FDCWD, src,
+                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (s < 0)
+        return ZCL_ERR(-1, "open src dir failed: %s: %s", src,
+                       strerror(errno));
+    if (mkdir(dst, st->st_mode & 07777) != 0 && errno != EEXIST) {
+        int e = errno;
+        close(s);
+        return ZCL_ERR(-1, "mkdir dst failed: %s: %s", dst, strerror(e));
+    }
+    int d = openat(AT_FDCWD, dst,
+                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (d < 0) {
+        int e = errno;
+        close(s);
+        return ZCL_ERR(-1, "open dst dir failed: %s: %s", dst, strerror(e));
+    }
+    DIR *sd = fdopendir(s);
+    if (!sd) {
+        int e = errno;
+        close(s);
+        close(d);
+        return ZCL_ERR(-1, "fdopendir failed: %s: %s", src, strerror(e));
+    }
+
+    struct zcl_result r = copy_dir(sd, d, flags, filter, fctx, 0, iobuf,
+                                   src, dst);
+    closedir(sd);   /* also closes s */
+
+    if (r.ok && fchmod(d, st->st_mode & 07777) != 0)
+        r = ZCL_ERR(-1, "fchmod failed: %s: %s", dst, strerror(errno));
+    if (r.ok && (flags & ZCL_COPY_PRESERVE_TIMES)) {
+        struct timespec ts[2] = { st->st_atim, st->st_mtim };
+        if (futimens(d, ts) != 0)
+            r = ZCL_ERR(-1, "futimens failed: %s: %s", dst, strerror(errno));
+    }
+    close(d);
+    return r;
+}
+
 struct zcl_result zcl_tree_copy(const char *src, const char *dst,
                                 unsigned flags, zcl_tree_filter_fn filter,
                                 void *fctx)
@@ -328,49 +375,53 @@ struct zcl_result zcl_tree_copy(const char *src, const char *dst,
         return ZCL_ERR(-1, "refusing unsupported root file type: %s", src);
     }
 
-    int s = openat(AT_FDCWD, src,
-                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (s < 0) {
-        int e = errno;
-        free(iobuf);
-        return ZCL_ERR(-1, "open src dir failed: %s: %s", src, strerror(e));
-    }
-    if (mkdir(dst, st.st_mode & 07777) != 0 && errno != EEXIST) {
-        int e = errno;
-        close(s);
-        free(iobuf);
-        return ZCL_ERR(-1, "mkdir dst failed: %s: %s", dst, strerror(e));
-    }
-    int d = openat(AT_FDCWD, dst,
-                   O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (d < 0) {
-        int e = errno;
-        close(s);
-        free(iobuf);
-        return ZCL_ERR(-1, "open dst dir failed: %s: %s", dst, strerror(e));
-    }
-    DIR *sd = fdopendir(s);
-    if (!sd) {
-        int e = errno;
-        close(s);
-        close(d);
-        free(iobuf);
-        return ZCL_ERR(-1, "fdopendir failed: %s: %s", src, strerror(e));
-    }
-
-    r = copy_dir(sd, d, flags, filter, fctx, 0, iobuf, src, dst);
-    closedir(sd);   /* also closes s */
-
-    if (r.ok && fchmod(d, st.st_mode & 07777) != 0)
-        r = ZCL_ERR(-1, "fchmod failed: %s: %s", dst, strerror(errno));
-    if (r.ok && (flags & ZCL_COPY_PRESERVE_TIMES)) {
-        struct timespec ts[2] = { st.st_atim, st.st_mtim };
-        if (futimens(d, ts) != 0)
-            r = ZCL_ERR(-1, "futimens failed: %s: %s", dst, strerror(errno));
-    }
-    close(d);
+    r = copy_root_dir(src, dst, &st, flags, filter, fctx, iobuf);
     free(iobuf);
     return r;
+}
+
+static struct zcl_result remove_dir(DIR *d, int depth, const char *disp);
+
+/* Remove one already-lstat'd entry without ever following a symlink. */
+static struct zcl_result remove_entry(int dfd, const char *name,
+                                      const struct stat *st, int depth,
+                                      const char *disp)
+{
+    if (S_ISDIR(st->st_mode) && !S_ISLNK(st->st_mode)) {
+        char child[PATH_MAX];
+        int n = snprintf(child, sizeof(child), "%s/%s", disp, name);
+        if (n <= 0 || (size_t)n >= sizeof(child))
+            return ZCL_ERR(-1, "path too long under: %s", disp);
+
+        int cfd = openat(dfd, name,
+                         O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (cfd < 0) {
+            if (errno == ENOENT)
+                return ZCL_OK;
+            return ZCL_ERR(-1, "open dir failed: %s: %s", child,
+                           strerror(errno));
+        }
+        DIR *cd = fdopendir(cfd);
+        if (!cd) {
+            int e = errno;
+            close(cfd);
+            return ZCL_ERR(-1, "fdopendir failed: %s: %s", child,
+                           strerror(e));
+        }
+        struct zcl_result r = remove_dir(cd, depth + 1, child);
+        closedir(cd);   /* also closes cfd */
+        if (!r.ok)
+            return r;
+        if (unlinkat(dfd, name, AT_REMOVEDIR) != 0 && errno != ENOENT)
+            return ZCL_ERR(-1, "rmdir failed: %s: %s", child,
+                           strerror(errno));
+        return ZCL_OK;
+    }
+
+    if (unlinkat(dfd, name, 0) != 0 && errno != ENOENT)
+        return ZCL_ERR(-1, "unlink failed: %s/%s: %s", disp, name,
+                       strerror(errno));
+    return ZCL_OK;
 }
 
 /* Empty and remove the directory whose open handle is `d`; `d` is closed by
@@ -404,39 +455,9 @@ static struct zcl_result remove_dir(DIR *d, int depth, const char *disp)
         }
 
         /* A symlink is unlinked in place, never descended into. */
-        if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
-            char child[PATH_MAX];
-            int n = snprintf(child, sizeof(child), "%s/%s", disp, name);
-            if (n <= 0 || (size_t)n >= sizeof(child))
-                return ZCL_ERR(-1, "path too long under: %s", disp);
-
-            int cfd = openat(dfd, name,
-                             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-            if (cfd < 0) {
-                if (errno == ENOENT)
-                    continue;
-                return ZCL_ERR(-1, "open dir failed: %s: %s", child,
-                               strerror(errno));
-            }
-            DIR *cd = fdopendir(cfd);
-            if (!cd) {
-                int e = errno;
-                close(cfd);
-                return ZCL_ERR(-1, "fdopendir failed: %s: %s", child,
-                               strerror(e));
-            }
-            struct zcl_result r = remove_dir(cd, depth + 1, child);
-            closedir(cd);   /* also closes cfd */
-            if (!r.ok)
-                return r;
-            if (unlinkat(dfd, name, AT_REMOVEDIR) != 0 && errno != ENOENT)
-                return ZCL_ERR(-1, "rmdir failed: %s: %s", child,
-                               strerror(errno));
-        } else {
-            if (unlinkat(dfd, name, 0) != 0 && errno != ENOENT)
-                return ZCL_ERR(-1, "unlink failed: %s/%s: %s", disp, name,
-                               strerror(errno));
-        }
+        struct zcl_result r = remove_entry(dfd, name, &st, depth, disp);
+        if (!r.ok)
+            return r;
     }
     return ZCL_OK;
 }
