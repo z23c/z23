@@ -175,11 +175,19 @@ ssize_t block_prefetch_lru_get(const struct disk_block_pos *pos,
  * A blk*.dat frame is [4 magic][4 LE size][payload]. block_index positions
  * store the PAYLOAD offset; some import paths store the FRAME offset. Mirror
  * disk_block_io's locate logic so warming reads exactly the payload span. */
+
+/* True when the frame's first four bytes are the b0..b3 magic. */
+static bool bp_frame_magic_is(const uint8_t hdr[4],
+                              uint8_t b0, uint8_t b1, uint8_t b2, uint8_t b3)
+{
+    return hdr[0] == b0 && hdr[1] == b1 && hdr[2] == b2 && hdr[3] == b3;
+}
+
 static bool bp_frame_size(const uint8_t hdr[8], uint32_t *out_size)
 {
-    bool magic_ok = (hdr[0] == 0x24 && hdr[1] == 0xe9 && hdr[2] == 0x27 && hdr[3] == 0x64) ||
-                    (hdr[0] == 0xfa && hdr[1] == 0x1a && hdr[2] == 0xf9 && hdr[3] == 0xbf) ||
-                    (hdr[0] == 0xaa && hdr[1] == 0xe8 && hdr[2] == 0x3f && hdr[3] == 0x5f);
+    bool magic_ok = bp_frame_magic_is(hdr, 0x24, 0xe9, 0x27, 0x64) ||
+                    bp_frame_magic_is(hdr, 0xfa, 0x1a, 0xf9, 0xbf) ||
+                    bp_frame_magic_is(hdr, 0xaa, 0xe8, 0x3f, 0x5f);
     uint32_t sz = 0;
     memcpy(&sz, hdr + 4, 4);
     if (!magic_ok || sz == 0 || sz > BP_MAX_BLOCK_BYTES)
