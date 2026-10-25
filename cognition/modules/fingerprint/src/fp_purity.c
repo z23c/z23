@@ -281,6 +281,40 @@ enum fp_verdict fp_purity_of(struct fp_index *ix, int sym)
     return fp_purity_depth(ix, sym, 0, sym);
 }
 
+/* The stars of a parenthesised dereference. t[i] is the '('; the blanks,
+ * the stars and the blanks again are stepped over, and the index where
+ * `(*fp` keeps its name is returned — or e when no '*' follows the '(' at
+ * all, which the caller reads as "no match here". */
+static size_t fp_past_deref_stars(const char *t, size_t i, size_t e)
+{
+    size_t j = i + 1u;
+    while (j < e && isspace((unsigned char)t[j]))
+        j++;
+    if (j >= e || t[j] != '*')
+        return e;
+    while (j < e && (t[j] == '*' || isspace((unsigned char)t[j])))
+        j++;
+    return j;
+}
+
+/* The name and the paren that closes it. t[j] is where the identifier of
+ * `(*fp)` must start; the index just past the ')' is returned, or e when
+ * t[j..e) is not `identifier blanks ')'`. A ')' as the last character of
+ * the range also yields e: no '(' can follow it there, so the caller's
+ * no-match treatment is the same answer the whole pattern would give. */
+static size_t fp_past_deref_close(const char *t, size_t j, size_t e)
+{
+    if (j >= e || !fp_ident_start((unsigned char)t[j]))
+        return e;
+    while (j < e && fp_ident_char((unsigned char)t[j]))
+        j++;
+    while (j < e && isspace((unsigned char)t[j]))
+        j++;
+    if (j >= e || t[j] != ')')
+        return e;
+    return j + 1u;
+}
+
 /* `(*fp)(args)` — a call through a parenthesised pointer expression. It has
  * no identifier before the argument list, so the identifier walk cannot see
  * it at all. Detected as a pattern and refused. */
@@ -291,19 +325,12 @@ static bool fp_has_indirect_call(const char *t, size_t s, size_t e)
         size_t j;
         if (t[i] != '(')
             continue;
-        j = i + 1u;
-        while (j < e && isspace((unsigned char)t[j])) j++;
-        if (j >= e || t[j] != '*')
+        j = fp_past_deref_stars(t, i, e);
+        j = fp_past_deref_close(t, j, e);
+        if (j >= e)
             continue;
-        while (j < e && (t[j] == '*' || isspace((unsigned char)t[j]))) j++;
-        if (j >= e || !fp_ident_start((unsigned char)t[j]))
-            continue;
-        while (j < e && fp_ident_char((unsigned char)t[j])) j++;
-        while (j < e && isspace((unsigned char)t[j])) j++;
-        if (j >= e || t[j] != ')')
-            continue;
-        j++;
-        while (j < e && isspace((unsigned char)t[j])) j++;
+        while (j < e && isspace((unsigned char)t[j]))
+            j++;
         if (j < e && t[j] == '(')
             return true;
     }

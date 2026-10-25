@@ -80,7 +80,6 @@ cognition/modules/fingerprint/src/fp_emit.c:fp_emit_probe:16
 cognition/modules/fingerprint/src/fp_index.c:fp_clean:25
 cognition/modules/fingerprint/src/fp_index.c:fp_index_build:28
 cognition/modules/fingerprint/src/fp_index.c:fp_scan_file:64
-cognition/modules/fingerprint/src/fp_purity.c:fp_has_indirect_call:22
 cognition/modules/fingerprint/src/fp_select.c:fp_index_select:20
 cognition/modules/fleetfacts/src/fleet_facts.c:zcl_fleet_facts_query:17
 cognition/modules/kpi/src/kpi_metrics.c:kpi_count_lint_gates:25
