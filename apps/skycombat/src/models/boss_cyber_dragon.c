@@ -65,119 +65,117 @@ void cyber_dragon_destroy(cyber_dragon_t* dragon) {
     free(dragon);
 }
 
-void cyber_dragon_update(cyber_dragon_t* dragon, Vector3 player_pos, float dt) {
-    if (!dragon) return;
-    
+static void cyber_dragon_update_timers(cyber_dragon_t* dragon, float dt) {
     // Update timers
     if (dragon->attack_timer > 0) dragon->attack_timer -= dt;
     if (dragon->damage_flash > 0) dragon->damage_flash -= dt;
     if (dragon->weak_point_timer > 0) dragon->weak_point_timer -= dt;
     if (dragon->roar_timer > 0) dragon->roar_timer -= dt;
-    
-    // Phase management
-    cyber_dragon_update_phase(dragon);
-    
-    // Movement AI
-    if (dragon->phase != DRAGON_PHASE_DEATH) {
-        // Update think timer
-        dragon->think_timer += dt;
-        if (dragon->think_timer > 2.0f) {
-            dragon->think_timer = 0;
-            dragon->last_player_pos = player_pos;
+}
+
+static void cyber_dragon_select_random_attack(cyber_dragon_t* dragon) {
+    // Random attack selection based on phase
+    int attack_choice = rand() % 4;
+    switch (dragon->phase) {
+        case DRAGON_PHASE_AERIAL:
+            if (attack_choice == 0) cyber_dragon_start_attack(dragon, DRAGON_LASER_SWEEP);
+            else if (attack_choice == 1) cyber_dragon_start_attack(dragon, DRAGON_MISSILE_BARRAGE);
+            else cyber_dragon_start_attack(dragon, DRAGON_CIRCLING);
+            break;
             
-            // Choose new attack based on phase and distance
-            float dist = Vector3Distance(dragon->position, player_pos);
+        case DRAGON_PHASE_RAGE:
+            if (attack_choice == 0) cyber_dragon_start_attack(dragon, DRAGON_PLASMA_STORM);
+            else if (attack_choice == 1) cyber_dragon_start_attack(dragon, DRAGON_SUMMON_DRONES);
+            else cyber_dragon_start_attack(dragon, DRAGON_TELEPORT);
+            break;
             
-            if (dragon->current_attack == DRAGON_IDLE) {
-                if (dist > 100) {
-                    cyber_dragon_start_attack(dragon, DRAGON_CHARGING);
-                } else if (dist < 50) {
-                    cyber_dragon_start_attack(dragon, DRAGON_TAIL_WHIP);
-                } else {
-                    // Random attack selection based on phase
-                    int attack_choice = rand() % 4;
-                    switch (dragon->phase) {
-                        case DRAGON_PHASE_AERIAL:
-                            if (attack_choice == 0) cyber_dragon_start_attack(dragon, DRAGON_LASER_SWEEP);
-                            else if (attack_choice == 1) cyber_dragon_start_attack(dragon, DRAGON_MISSILE_BARRAGE);
-                            else cyber_dragon_start_attack(dragon, DRAGON_CIRCLING);
-                            break;
-                            
-                        case DRAGON_PHASE_RAGE:
-                            if (attack_choice == 0) cyber_dragon_start_attack(dragon, DRAGON_PLASMA_STORM);
-                            else if (attack_choice == 1) cyber_dragon_start_attack(dragon, DRAGON_SUMMON_DRONES);
-                            else cyber_dragon_start_attack(dragon, DRAGON_TELEPORT);
-                            break;
-                            
-                        case DRAGON_PHASE_FINAL:
-                            if (rand() % 3 == 0) cyber_dragon_start_attack(dragon, DRAGON_ULTIMATE);
-                            else cyber_dragon_start_attack(dragon, DRAGON_PLASMA_STORM);
-                            break;
-                            
-                        default:
-                            break;
-                    }
-                }
-            }
-        }
-        
-        // Update current attack
-        cyber_dragon_update_attack(dragon, player_pos, dt);
-        
-        // Smooth movement towards target
-        Vector3 direction = Vector3Subtract(dragon->target_position, dragon->position);
-        float distance = Vector3Length(direction);
-        
-        if (distance > 1.0f) {
-            direction = Vector3Normalize(direction);
-            float move_speed = dragon->speed * dt;
+        case DRAGON_PHASE_FINAL:
+            if (rand() % 3 == 0) cyber_dragon_start_attack(dragon, DRAGON_ULTIMATE);
+            else cyber_dragon_start_attack(dragon, DRAGON_PLASMA_STORM);
+            break;
             
-            if (distance < move_speed) {
-                dragon->position = dragon->target_position;
+        default:
+            break;
+    }
+}
+
+static void cyber_dragon_think(cyber_dragon_t* dragon, Vector3 player_pos, float dt) {
+    // Update think timer
+    dragon->think_timer += dt;
+    if (dragon->think_timer > 2.0f) {
+        dragon->think_timer = 0;
+        dragon->last_player_pos = player_pos;
+        
+        // Choose new attack based on phase and distance
+        float dist = Vector3Distance(dragon->position, player_pos);
+        
+        if (dragon->current_attack == DRAGON_IDLE) {
+            if (dist > 100) {
+                cyber_dragon_start_attack(dragon, DRAGON_CHARGING);
+            } else if (dist < 50) {
+                cyber_dragon_start_attack(dragon, DRAGON_TAIL_WHIP);
             } else {
-                dragon->position = Vector3Add(dragon->position, Vector3Scale(direction, move_speed));
-            }
-            
-            // Update rotation to face movement direction
-            float target_yaw = atan2f(direction.x, direction.z) * RAD2DEG;
-            dragon->rotation = QuaternionFromEuler(0, target_yaw * DEG2RAD, 0);
-        }
-        
-        // Update body segments (serpentine motion)
-        dragon->body_wave_offset += dt * 2.0f;
-        
-        for (int i = 0; i < DRAGON_SEGMENT_COUNT; i++) {
-            if (i == 0) {
-                // Head follows main position
-                dragon->segments[i].position = dragon->position;
-                dragon->segments[i].rotation = dragon->rotation;
-            } else {
-                // Each segment follows the previous one
-                Vector3 target = dragon->segments[i-1].position;
-                Vector3 to_target = Vector3Subtract(target, dragon->segments[i].position);
-                float dist = Vector3Length(to_target);
-                
-                if (dist > dragon->segment_spacing) {
-                    to_target = Vector3Normalize(to_target);
-                    Vector3 new_pos = Vector3Add(target, Vector3Scale(to_target, -dragon->segment_spacing));
-                    
-                    // Add wave motion
-                    float wave = sinf(dragon->body_wave_offset + i * 0.5f) * 2.0f;
-                    new_pos.y += wave;
-                    
-                    dragon->segments[i].position = new_pos;
-                    
-                    // Orient segment
-                    float yaw = atan2f(to_target.x, to_target.z) * RAD2DEG;
-                    dragon->segments[i].rotation = QuaternionFromEuler(0, yaw * DEG2RAD, wave * 0.1f);
-                }
+                cyber_dragon_select_random_attack(dragon);
             }
         }
     }
+}
+
+static void cyber_dragon_move_towards_target(cyber_dragon_t* dragon, float dt) {
+    // Smooth movement towards target
+    Vector3 direction = Vector3Subtract(dragon->target_position, dragon->position);
+    float distance = Vector3Length(direction);
     
-    // Update visual effects
-    dragon->glow_intensity = 1.0f + sinf(GetTime() * 3.0f) * 0.3f;
+    if (distance > 1.0f) {
+        direction = Vector3Normalize(direction);
+        float move_speed = dragon->speed * dt;
+        
+        if (distance < move_speed) {
+            dragon->position = dragon->target_position;
+        } else {
+            dragon->position = Vector3Add(dragon->position, Vector3Scale(direction, move_speed));
+        }
+        
+        // Update rotation to face movement direction
+        float target_yaw = atan2f(direction.x, direction.z) * RAD2DEG;
+        dragon->rotation = QuaternionFromEuler(0, target_yaw * DEG2RAD, 0);
+    }
+}
+
+static void cyber_dragon_update_segments(cyber_dragon_t* dragon, float dt) {
+    // Update body segments (serpentine motion)
+    dragon->body_wave_offset += dt * 2.0f;
     
+    for (int i = 0; i < DRAGON_SEGMENT_COUNT; i++) {
+        if (i == 0) {
+            // Head follows main position
+            dragon->segments[i].position = dragon->position;
+            dragon->segments[i].rotation = dragon->rotation;
+        } else {
+            // Each segment follows the previous one
+            Vector3 target = dragon->segments[i-1].position;
+            Vector3 to_target = Vector3Subtract(target, dragon->segments[i].position);
+            float dist = Vector3Length(to_target);
+            
+            if (dist > dragon->segment_spacing) {
+                to_target = Vector3Normalize(to_target);
+                Vector3 new_pos = Vector3Add(target, Vector3Scale(to_target, -dragon->segment_spacing));
+                
+                // Add wave motion
+                float wave = sinf(dragon->body_wave_offset + i * 0.5f) * 2.0f;
+                new_pos.y += wave;
+                
+                dragon->segments[i].position = new_pos;
+                
+                // Orient segment
+                float yaw = atan2f(to_target.x, to_target.z) * RAD2DEG;
+                dragon->segments[i].rotation = QuaternionFromEuler(0, yaw * DEG2RAD, wave * 0.1f);
+            }
+        }
+    }
+}
+
+static void cyber_dragon_update_weak_points(cyber_dragon_t* dragon) {
     // Expose weak points periodically
     if (!dragon->weak_points_exposed && dragon->weak_point_timer <= 0) {
         if (rand() % 100 < 5) {  // 5% chance per frame
@@ -188,6 +186,32 @@ void cyber_dragon_update(cyber_dragon_t* dragon, Vector3 player_pos, float dt) {
         dragon->weak_points_exposed = false;
         dragon->weak_point_timer = 10.0f;  // Hidden for 10 seconds
     }
+}
+
+void cyber_dragon_update(cyber_dragon_t* dragon, Vector3 player_pos, float dt) {
+    if (!dragon) return;
+    
+    cyber_dragon_update_timers(dragon, dt);
+    
+    // Phase management
+    cyber_dragon_update_phase(dragon);
+    
+    // Movement AI
+    if (dragon->phase != DRAGON_PHASE_DEATH) {
+        cyber_dragon_think(dragon, player_pos, dt);
+        
+        // Update current attack
+        cyber_dragon_update_attack(dragon, player_pos, dt);
+        
+        cyber_dragon_move_towards_target(dragon, dt);
+        
+        cyber_dragon_update_segments(dragon, dt);
+    }
+    
+    // Update visual effects
+    dragon->glow_intensity = 1.0f + sinf(GetTime() * 3.0f) * 0.3f;
+    
+    cyber_dragon_update_weak_points(dragon);
 }
 
 void cyber_dragon_start_attack(cyber_dragon_t* dragon, dragon_attack_t attack) {
@@ -220,86 +244,87 @@ void cyber_dragon_start_attack(cyber_dragon_t* dragon, dragon_attack_t attack) {
     }
 }
 
+static void cyber_dragon_update_circling_attack(cyber_dragon_t* dragon, Vector3 player_pos) {
+    // Circle around player
+    float angle = GetTime() * 0.5f;
+    float radius = 80.0f;
+    dragon->target_position = (Vector3){
+        player_pos.x + cosf(angle) * radius,
+        player_pos.y + 20.0f,
+        player_pos.z + sinf(angle) * radius
+    };
+    
+    if (dragon->attack_timer > 5.0f) {
+        dragon->current_attack = DRAGON_IDLE;
+    }
+}
+
+static void cyber_dragon_update_charging_attack(cyber_dragon_t* dragon, Vector3 player_pos) {
+    // Direct charge at player
+    if (dragon->attack_timer < 1.0f) {
+        // Wind up
+        dragon->target_position = Vector3Add(dragon->position, 
+            Vector3Scale(Vector3Subtract(dragon->position, player_pos), 0.5f));
+    } else if (dragon->attack_timer < 2.0f) {
+        // Charge!
+        dragon->target_position = player_pos;
+        dragon->speed = DRAGON_BOOST_SPEED;
+    } else {
+        dragon->speed = DRAGON_BASE_SPEED;
+        dragon->current_attack = DRAGON_IDLE;
+    }
+}
+
+static void cyber_dragon_update_laser_sweep_attack(cyber_dragon_t* dragon, float dt) {
+    // Sweeping laser breath
+    dragon->laser_charge += dt;
+    if (dragon->laser_charge > 1.0f) {
+        dragon->laser_angle += dt * 30.0f;  // 30 degrees per second
+        
+        if (dragon->laser_angle > 45.0f) {
+            dragon->current_attack = DRAGON_IDLE;
+        }
+    }
+}
+
+static void cyber_dragon_update_timed_shake_attack(cyber_dragon_t* dragon, float duration) {
+    if (dragon->attack_timer > duration) {
+        dragon->current_attack = DRAGON_IDLE;
+        dragon->screen_shake_intensity = 0;
+    }
+}
+
 void cyber_dragon_update_attack(cyber_dragon_t* dragon, Vector3 player_pos, float dt) {
     if (!dragon) return;
     
     switch (dragon->current_attack) {
         case DRAGON_CIRCLING:
-            // Circle around player
-            {
-                float angle = GetTime() * 0.5f;
-                float radius = 80.0f;
-                dragon->target_position = (Vector3){
-                    player_pos.x + cosf(angle) * radius,
-                    player_pos.y + 20.0f,
-                    player_pos.z + sinf(angle) * radius
-                };
-                
-                if (dragon->attack_timer > 5.0f) {
-                    dragon->current_attack = DRAGON_IDLE;
-                }
-            }
+            cyber_dragon_update_circling_attack(dragon, player_pos);
             break;
             
         case DRAGON_CHARGING:
-            // Direct charge at player
-            {
-                if (dragon->attack_timer < 1.0f) {
-                    // Wind up
-                    dragon->target_position = Vector3Add(dragon->position, 
-                        Vector3Scale(Vector3Subtract(dragon->position, player_pos), 0.5f));
-                } else if (dragon->attack_timer < 2.0f) {
-                    // Charge!
-                    dragon->target_position = player_pos;
-                    dragon->speed = DRAGON_BOOST_SPEED;
-                } else {
-                    dragon->speed = DRAGON_BASE_SPEED;
-                    dragon->current_attack = DRAGON_IDLE;
-                }
-            }
+            cyber_dragon_update_charging_attack(dragon, player_pos);
             break;
             
         case DRAGON_LASER_SWEEP:
-            // Sweeping laser breath
-            {
-                dragon->laser_charge += dt;
-                if (dragon->laser_charge > 1.0f) {
-                    dragon->laser_angle += dt * 30.0f;  // 30 degrees per second
-                    
-                    if (dragon->laser_angle > 45.0f) {
-                        dragon->current_attack = DRAGON_IDLE;
-                    }
-                }
-            }
+            cyber_dragon_update_laser_sweep_attack(dragon, dt);
             break;
             
         case DRAGON_TAIL_WHIP:
             // Quick tail attack
-            {
-                if (dragon->attack_timer > 1.0f) {
-                    dragon->current_attack = DRAGON_IDLE;
-                }
+            if (dragon->attack_timer > 1.0f) {
+                dragon->current_attack = DRAGON_IDLE;
             }
             break;
             
         case DRAGON_PLASMA_STORM:
             // Area denial attack
-            {
-                if (dragon->attack_timer > 5.0f) {
-                    dragon->current_attack = DRAGON_IDLE;
-                    dragon->screen_shake_intensity = 0;
-                }
-            }
+            cyber_dragon_update_timed_shake_attack(dragon, 5.0f);
             break;
             
         case DRAGON_ULTIMATE:
             // Screen-filling ultimate attack
-            {
-                if (dragon->attack_timer > 8.0f) {
-                    dragon->current_attack = DRAGON_IDLE;
-                    dragon->screen_shake_intensity = 0;
-                }
-            }
+            cyber_dragon_update_timed_shake_attack(dragon, 8.0f);
             break;
             
         default:

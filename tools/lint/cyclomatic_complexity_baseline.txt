@@ -10,8 +10,6 @@ apps/skycombat/src/controllers/sky_combat.c:sky_combat_run:24
 apps/skycombat/src/controllers/sky_combat_multiplayer_incremental.c:main:74
 apps/skycombat/src/models/aircraft_manager.c:aircraft_manager_check_collisions:24
 apps/skycombat/src/models/aircraft_manager.c:aircraft_manager_update_ai:24
-apps/skycombat/src/models/boss_cyber_dragon.c:cyber_dragon_update:29
-apps/skycombat/src/models/boss_cyber_dragon.c:cyber_dragon_update_attack:16
 apps/skycombat/src/models/test_multiplayer_complete.c:main:35
 apps/skycombat/src/models/test_powerups.c:main:29
 apps/skycombat/src/models/test_team_battles.c:main:22
