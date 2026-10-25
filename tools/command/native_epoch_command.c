@@ -357,6 +357,47 @@ void zcl_native_handle_core_epoch_status(
 
 /* ── core.epoch.anchor ─────────────────────────────────────────────── */
 
+/* Live-node path: anchor_publish composes + broadcasts when the node
+ * has a wallet loaded, and itself returns op_return_hex when not.
+ * params is a JSON-RPC array whose [0] is the --input-style object;
+ * only a JSON object result is a success — a string is the RPC's
+ * error message, surfaced as node_rpc_error on the offline reply. */
+static bool ep_try_node_rpc_anchor(const char *digest_hex, const char *label,
+                                   int32_t cursor, char *rpc_err,
+                                   size_t rpc_err_size,
+                                   struct zcl_command_reply *reply)
+{
+    char params[320];
+    snprintf(params, sizeof(params),
+             "[{\"digest\":\"%s\",\"hash_type\":\"sha3\",\"label\":\"%s\"}]",
+             digest_hex, label);
+    zcl_native_bridge_ensure_rpc();
+    char *rpc_result = node_rpc_call("anchor_publish", params);
+    if (!rpc_result)
+        return false;
+    struct json_value body;
+    bool parsed = json_read(&body, rpc_result, strlen(rpc_result));
+    bool error_body = parsed &&
+                      ep_rpc_body_error(&body, rpc_err, rpc_err_size);
+    if (parsed && body.type == JSON_OBJ && !error_body) {
+        json_push_kv_str(&body, "via", "node_rpc anchor_publish");
+        json_push_kv_int(&body, "catalog_height", cursor);
+        json_copy(&reply->data, &body);
+        json_free(&body);
+        free(rpc_result);
+        reply->status = ZCL_COMMAND_STATUS_PASSED;
+        reply->exit_code = ZCL_COMMAND_EXIT_OK;
+        return true;
+    }
+    if (!error_body)
+        snprintf(rpc_err, rpc_err_size, "%s",
+                 parsed ? "node RPC returned an unexpected body"
+                        : "node RPC returned an unparseable body");
+    json_free(&body);
+    free(rpc_result);
+    return false;
+}
+
 void zcl_native_handle_core_epoch_anchor(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -407,40 +448,10 @@ void zcl_native_handle_core_epoch_anchor(
      * NOT to the whole chain. */
     ep_push_range(&reply->data, &opcur);
 
-    /* Live-node path: anchor_publish composes + broadcasts when the node
-     * has a wallet loaded, and itself returns op_return_hex when not.
-     * params is a JSON-RPC array whose [0] is the --input-style object;
-     * only a JSON object result is a success — a string is the RPC's
-     * error message, surfaced as node_rpc_error on the offline reply. */
-    char params[320];
-    snprintf(params, sizeof(params),
-             "[{\"digest\":\"%s\",\"hash_type\":\"sha3\",\"label\":\"%s\"}]",
-             digest_hex, label);
     char rpc_err[256] = {0};
-    zcl_native_bridge_ensure_rpc();
-    char *rpc_result = node_rpc_call("anchor_publish", params);
-    if (rpc_result) {
-        struct json_value body;
-        bool parsed = json_read(&body, rpc_result, strlen(rpc_result));
-        bool error_body = parsed &&
-                          ep_rpc_body_error(&body, rpc_err, sizeof(rpc_err));
-        if (parsed && body.type == JSON_OBJ && !error_body) {
-            json_push_kv_str(&body, "via", "node_rpc anchor_publish");
-            json_push_kv_int(&body, "catalog_height", cursor);
-            json_copy(&reply->data, &body);
-            json_free(&body);
-            free(rpc_result);
-            reply->status = ZCL_COMMAND_STATUS_PASSED;
-            reply->exit_code = ZCL_COMMAND_EXIT_OK;
-            return;
-        }
-        if (!error_body)
-            snprintf(rpc_err, sizeof(rpc_err), "%s",
-                     parsed ? "node RPC returned an unexpected body"
-                            : "node RPC returned an unparseable body");
-        json_free(&body);
-        free(rpc_result);
-    }
+    if (ep_try_node_rpc_anchor(digest_hex, label, cursor, rpc_err,
+                               sizeof(rpc_err), reply))
+        return;
 
     /* Offline / no-live-node path: build the same OP_RETURN locally. */
     uint8_t script[128];

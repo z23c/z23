@@ -2785,7 +2785,6 @@ tools/command/native_devagent_ticketkey.c:dvt_epoch:24
 tools/command/native_devagent_ticketkey.c:dvt_parse_tree:22
 tools/command/native_devagent_ticketkey.c:dvt_scan_includes:32
 tools/command/native_devagent_triage.c:zcl_native_handle_dev_agent_triage:31
-tools/command/native_epoch_command.c:zcl_native_handle_core_epoch_anchor:16
 tools/command/native_fleet_command.c:zcl_fleet_host_snapshot:18
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_experiment_predict:22
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_experiment_result:39
