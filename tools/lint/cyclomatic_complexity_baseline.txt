@@ -1895,7 +1895,6 @@ tools/command/native_devagent_queue.c:dvq_path_ok:34
 tools/command/native_devagent_queue.c:dvq_post:34
 tools/command/native_devagent_queue.c:dvq_status:27
 tools/command/native_devagent_queue.c:dvq_task_prev:23
-tools/command/native_devagent_situation.c:zcl_native_handle_dev_agent_situation:16
 tools/command/native_devagent_ticketkey.c:dvt_epoch:24
 tools/command/native_devagent_ticketkey.c:dvt_parse_tree:22
 tools/command/native_devagent_ticketkey.c:dvt_scan_includes:32

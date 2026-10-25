@@ -151,6 +151,20 @@ static void dvs_git_failed(struct zcl_command_reply *reply, const char *line,
                    "rerun: %s", line);
 }
 
+static const char *dvs_parse_input_cwd(
+    const struct zcl_command_request *request)
+{
+    /* INPUT (zcl.agent_situation_input.v1): one optional string key, cwd.
+     * Absent or empty means the process working directory (handled by
+     * omitting -C in dvs_git). */
+    if (request && request->input) {
+        const struct json_value *v = json_get(request->input, "cwd");
+        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
+            return json_get_str(v);
+    }
+    return NULL;
+}
+
 void zcl_native_handle_dev_agent_situation(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -174,14 +188,7 @@ void zcl_native_handle_dev_agent_situation(
     if (!reply)
         return;
 
-    /* INPUT (zcl.agent_situation_input.v1): one optional string key, cwd.
-     * Absent or empty means the process working directory (handled by
-     * omitting -C in dvs_git). */
-    if (request && request->input) {
-        const struct json_value *v = json_get(request->input, "cwd");
-        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
-            cwd = json_get_str(v);
-    }
+    cwd = dvs_parse_input_cwd(request);
 
     (void)json_push_kv_str(&reply->data, "leaf", DVS_LEAF);
 
@@ -217,7 +224,8 @@ void zcl_native_handle_dev_agent_situation(
     }
     dvs_strip(branch);
 
-    rc = dvs_git(cwd, argv_head, head, sizeof(head), line, sizeof(line));
+    rc = dvs_git(cwd, argv_head, head, sizeof(head),
+                 line, sizeof(line));
     if (rc != 0) {
         dvs_git_failed(reply, line, rc);
         return;
