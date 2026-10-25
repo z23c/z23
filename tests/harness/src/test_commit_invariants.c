@@ -316,6 +316,65 @@ static int ci_part1_injection(void)
     return failures;
 }
 
+/* Genesis block-index install for the green fold: height 0, fully validated,
+ * made the active window tip and best header. */
+static void ci_green_install_genesis(struct main_state *ms,
+                                     const struct uint256 *genesis_hash)
+{
+    main_state_init(ms);
+    struct block_index *genesis =
+        chainstate_insert_block_index((struct chainstate *)ms, genesis_hash);
+    if (genesis) {
+        genesis->nHeight = 0;
+        genesis->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
+        genesis->nTx = 1;
+        genesis->nChainTx = 1;
+        genesis->nChainWork = GetBlockProof(genesis);
+        active_chain_move_window_tip(&ms->chain_active, genesis);
+        ms->pindex_best_header = genesis;
+    }
+}
+
+/* Init the eight reducer stages in pipeline order; false on the first one
+ * that refuses. */
+static bool ci_green_init_reducer_stages(struct main_state *ms)
+{
+    return header_admit_stage_init(ms) &&
+           validate_headers_stage_init(ms) &&
+           body_fetch_stage_init(ms) &&
+           body_persist_stage_init(ms) &&
+           script_validate_stage_init(ms) &&
+           proof_validate_stage_init(ms) &&
+           utxo_apply_stage_init(ms) &&
+           tip_finalize_stage_init(ms);
+}
+
+/* Hash blk and push its header onto the header_admit mailbox. */
+static bool ci_green_push_header(struct block *blk, struct uint256 *hash_out)
+{
+    block_get_hash(blk, hash_out);
+    struct header_admit_msg m;
+    memset(&m, 0, sizeof(m));
+    m.hash = *hash_out;
+    m.has_header = true;
+    m.header = blk->header;
+    m.height = -1;
+    return mailbox_header_admit_push(&m);
+}
+
+/* Persist blk under netdir and mark bi as having verified on-disk data. */
+static bool ci_green_persist_body(struct block *blk, struct block_index *bi,
+                                  const char *netdir,
+                                  const struct chain_params *cp)
+{
+    if (!bi)
+        return false;
+    struct disk_block_pos pos;
+    disk_block_pos_init(&pos);
+    return write_block_to_disk(blk, &pos, netdir, cp->pchMessageStart) &&
+           block_index_set_have_data_verified(bi, &pos, netdir);
+}
+
 /* ── Part 2: green end-to-end fold through the BATCHED utxo_apply drain ─── */
 static int ci_part2_green_fold(void)
 {
@@ -352,29 +411,10 @@ static int ci_part2_green_fold(void)
     }
 
     struct main_state ms;
-    main_state_init(&ms);
     struct uint256 genesis_hash = cp->consensus.hashGenesisBlock;
-    struct block_index *genesis =
-        chainstate_insert_block_index((struct chainstate *)&ms, &genesis_hash);
-    if (genesis) {
-        genesis->nHeight = 0;
-        genesis->nStatus = BLOCK_HAVE_DATA | BLOCK_VALID_SCRIPTS;
-        genesis->nTx = 1;
-        genesis->nChainTx = 1;
-        genesis->nChainWork = GetBlockProof(genesis);
-        active_chain_move_window_tip(&ms.chain_active, genesis);
-        ms.pindex_best_header = genesis;
-    }
+    ci_green_install_genesis(&ms, &genesis_hash);
 
-    bool stages_ok =
-        header_admit_stage_init(&ms) &&
-        validate_headers_stage_init(&ms) &&
-        body_fetch_stage_init(&ms) &&
-        body_persist_stage_init(&ms) &&
-        script_validate_stage_init(&ms) &&
-        proof_validate_stage_init(&ms) &&
-        utxo_apply_stage_init(&ms) &&
-        tip_finalize_stage_init(&ms);
+    bool stages_ok = ci_green_init_reducer_stages(&ms);
     CI_CHECK("green: eight reducer stages init", stages_ok);
     CI_CHECK("green: genesis utxo row seeded",
              ci_seed_genesis_utxo_apply_row(progress_store_db()));
@@ -391,28 +431,14 @@ static int ci_part2_green_fold(void)
         CI_CHECK("green: block 1 built + Equihash-mined", built);
         if (built) {
             struct uint256 h1;
-            block_get_hash(&blk1, &h1);
-            struct header_admit_msg m;
-            memset(&m, 0, sizeof(m));
-            m.hash = h1;
-            m.has_header = true;
-            m.header = blk1.header;
-            m.height = -1;
-            CI_CHECK("green: header pushed", mailbox_header_admit_push(&m));
+            CI_CHECK("green: header pushed",
+                     ci_green_push_header(&blk1, &h1));
 
             (void)header_admit_stage_drain(100);
             struct block_index *bi1 = block_map_find(&ms.map_block_index, &h1);
             (void)validate_headers_stage_drain(100);
 
-            bool persisted = false;
-            if (bi1) {
-                struct disk_block_pos pos;
-                disk_block_pos_init(&pos);
-                persisted = write_block_to_disk(&blk1, &pos, netdir,
-                                                cp->pchMessageStart) &&
-                            block_index_set_have_data_verified(bi1, &pos,
-                                                               netdir);
-            }
+            bool persisted = ci_green_persist_body(&blk1, bi1, netdir, cp);
             CI_CHECK("green: body persisted", persisted);
 
             (void)body_fetch_stage_drain(100);

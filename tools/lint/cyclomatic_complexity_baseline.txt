@@ -2051,7 +2051,6 @@ tests/harness/src/test_coldimport_restart_fragility.c:ci_select_best_tip:20
 tests/harness/src/test_coldimport_restart_fragility.c:test_coldimport_restart_fragility:17
 tests/harness/src/test_command_input_bounds.c:t_fleet_ledger_numeric_keys:18
 tests/harness/src/test_command_input_bounds.c:t_frame_budget:19
-tests/harness/src/test_commit_invariants.c:ci_part2_green_fold:19
 tests/harness/src/test_compact_blocks.c:test_compact_blocks:57
 tests/harness/src/test_condition_engine.c:test_condition_engine:102
 tests/harness/src/test_confine.c:c_confine_normal_ops:18
