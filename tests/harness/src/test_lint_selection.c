@@ -1226,8 +1226,10 @@ static int lsel_pc_run(const struct lsel_pc_fx *fx, const char *tree,
         close(fd);
     if (saved >= 0)
         close(saved);
-    (void)chdir(fx->cwd);
     out[0] = '\0';
+    /* Every later case resolves paths from the original cwd. */
+    if (chdir(fx->cwd) != 0)
+        return 2;
     f = fopen(fx->out, "r");
     if (f) {
         size_t got = fread(out, 1, cap - 1, f);
