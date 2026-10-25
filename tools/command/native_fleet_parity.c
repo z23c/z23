@@ -25,7 +25,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32)
 #include <sys/file.h>
+#endif
 #include <unistd.h>
 
 #define FP_LOG "fleet.receipt.parity"
@@ -207,11 +209,19 @@ bool zcl_parity_append(const char *dir, const char *line, size_t len,
         *why = "the parity lock file could not be opened";
         return false;
     }
+#if defined(_WIN32)
+    /* flock(2) does not exist on Windows. Refuse to append unlocked: a
+     * second writer could interleave lines into the evidence ledger. */
+    (void)close(fd);
+    *why = "the parity ledger cannot be locked on this platform";
+    return false;
+#else
     if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
         (void)close(fd);
         *why = "the parity ledger is locked by another writer";
         return false;
     }
+#endif
     ok = fp_write_all(file, line, len);
     (void)close(fd);
     if (!ok)
