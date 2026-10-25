@@ -223,19 +223,97 @@ static void dvd_push_reason(struct json_value *reasons, const char *reason)
     json_free(&item);
 }
 
+/* base: the "base" input string when present, else "origin/main". */
+static const char *dvd_resolve_base(const struct zcl_command_request *request)
+{
+    const char *base_in = dvd_input_string(request, "base");
+    if (base_in)
+        return base_in;
+    return "origin/main";
+}
+
+/* head: `git rev-parse HEAD`, newline-stripped. */
+static bool dvd_query_head(struct zcl_command_reply *reply, const char *cwd,
+                           char *head, size_t head_sz)
+{
+    const char *head_argv[] = {"rev-parse", "HEAD", NULL};
+    if (!dvd_git_answer(reply, cwd, head_argv, head, head_sz))
+        return false;
+    dvd_strip(head);
+    return true;
+}
+
+/* branch: `git rev-parse --abbrev-ref HEAD`, newline-stripped; a detached
+ * HEAD reports "" rather than "HEAD". */
+static bool dvd_query_branch(struct zcl_command_reply *reply, const char *cwd,
+                             char *branch, size_t branch_sz)
+{
+    const char *branch_argv[] = {"rev-parse", "--abbrev-ref", "HEAD", NULL};
+    if (!dvd_git_answer(reply, cwd, branch_argv, branch, branch_sz))
+        return false;
+    dvd_strip(branch);
+    if (strcmp(branch, "HEAD") == 0)
+        branch[0] = '\0';
+    return true;
+}
+
+/* ahead: `git rev-list --count base..HEAD`; an unparseable count is 0. */
+static bool dvd_count_ahead(struct zcl_command_reply *reply, const char *cwd,
+                            const char *range, long long *ahead_out)
+{
+    char out[DVD_OUT_CAP];
+    const char *count_argv[] = {"rev-list", "--count", range, NULL};
+    if (!dvd_git_answer(reply, cwd, count_argv, out, sizeof(out)))
+        return false;
+    dvd_strip(out);
+    char *end = NULL;
+    long long ahead = strtoll(out, &end, 10);
+    if (end == out)
+        ahead = 0;
+    *ahead_out = ahead;
+    return true;
+}
+
+/* unsigned commits in base..HEAD. */
+static bool dvd_query_unsigned(struct zcl_command_reply *reply,
+                               const char *cwd, const char *range,
+                               long long ahead, struct json_value *unsigned_arr)
+{
+    if (ahead > 0) {
+        char out[DVD_OUT_CAP];
+        const char *log_argv[] = {"log", "--format=%h %G?", range, NULL};
+        if (!dvd_git_answer(reply, cwd, log_argv, out, sizeof(out)))
+            return false;
+        dvd_collect_unsigned(out, unsigned_arr);
+    }
+    return true;
+}
+
+/* One reason per FALSE conjunct of the ready rule, in contract order. */
+static void dvd_collect_reasons(struct json_value *reasons, bool tree_clean,
+                                long long ahead, bool has_unsigned,
+                                bool on_main)
+{
+    if (!tree_clean)
+        dvd_push_reason(reasons, "tree_dirty");
+    if (ahead < 1)
+        dvd_push_reason(reasons, "no_commits_ahead");
+    if (has_unsigned)
+        dvd_push_reason(reasons, "unsigned_commits");
+    if (on_main)
+        dvd_push_reason(reasons, "on_main");
+}
+
 void zcl_native_handle_dev_agent_done(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
-    const char *base = "origin/main";
     char out[DVD_OUT_CAP];
 
     if (!reply)
         return;
 
     const char *cwd = dvd_input_string(request, "cwd");
-    const char *base_in = dvd_input_string(request, "base");
-    if (base_in)
-        base = base_in;
+    const char *base = dvd_resolve_base(request);
 
     (void)json_push_kv_str(&reply->data, "leaf", DVD_LEAF);
 
@@ -246,66 +324,44 @@ void zcl_native_handle_dev_agent_done(
         return;
 
     char head[DVD_OUT_CAP];
-    const char *head_argv[] = {"rev-parse", "HEAD", NULL};
-    if (!dvd_git_answer(reply, cwd, head_argv, head, sizeof(head)))
+    if (!dvd_query_head(reply, cwd, head, sizeof(head)))
         return;
-    dvd_strip(head);
 
     char branch[DVD_OUT_CAP];
-    const char *branch_argv[] = {"rev-parse", "--abbrev-ref", "HEAD", NULL};
-    if (!dvd_git_answer(reply, cwd, branch_argv, branch, sizeof(branch)))
+    if (!dvd_query_branch(reply, cwd, branch, sizeof(branch)))
         return;
-    dvd_strip(branch);
-    const char *branch_reported = strcmp(branch, "HEAD") == 0 ? "" : branch;
 
     char range[512];
     (void)snprintf(range, sizeof(range), "%s..HEAD", base);
-    const char *count_argv[] = {"rev-list", "--count", range, NULL};
-    if (!dvd_git_answer(reply, cwd, count_argv, out, sizeof(out)))
+    long long ahead = 0;
+    if (!dvd_count_ahead(reply, cwd, range, &ahead))
         return;
-    dvd_strip(out);
-    char *end = NULL;
-    long long ahead = strtoll(out, &end, 10);
-    if (end == out)
-        ahead = 0;
 
     const char *status_argv[] = {"status", "--porcelain", NULL};
     if (!dvd_git_answer(reply, cwd, status_argv, out, sizeof(out)))
         return;
     bool tree_clean = dvd_porcelain_clean(out);
 
-    /* unsigned commits in base..HEAD. */
     struct json_value unsigned_arr;
     json_init(&unsigned_arr);
     json_set_array(&unsigned_arr);
-    if (ahead > 0) {
-        const char *log_argv[] = {"log", "--format=%h %G?", range, NULL};
-        if (!dvd_git_answer(reply, cwd, log_argv, out, sizeof(out))) {
-            json_free(&unsigned_arr);
-            return;
-        }
-        dvd_collect_unsigned(out, &unsigned_arr);
+    if (!dvd_query_unsigned(reply, cwd, range, ahead, &unsigned_arr)) {
+        json_free(&unsigned_arr);
+        return;
     }
 
-    bool on_main = strcmp(branch_reported, "main") == 0;
+    bool on_main = strcmp(branch, "main") == 0;
     bool has_unsigned = unsigned_arr.num_children != 0;
     bool ready = tree_clean && ahead >= 1 && !has_unsigned && !on_main;
 
     struct json_value reasons;
     json_init(&reasons);
     json_set_array(&reasons);
-    if (!tree_clean)
-        dvd_push_reason(&reasons, "tree_dirty");
-    if (ahead < 1)
-        dvd_push_reason(&reasons, "no_commits_ahead");
-    if (has_unsigned)
-        dvd_push_reason(&reasons, "unsigned_commits");
-    if (on_main)
-        dvd_push_reason(&reasons, "on_main");
+    dvd_collect_reasons(&reasons, tree_clean, ahead, has_unsigned, on_main);
 
     (void)json_push_kv_bool(&reply->data, "ready", ready);
     (void)json_push_kv_str(&reply->data, "head", head);
-    (void)json_push_kv_str(&reply->data, "branch", branch_reported);
+    (void)json_push_kv_str(&reply->data, "branch", branch);
     (void)json_push_kv_int(&reply->data, "ahead", ahead);
     (void)json_push_kv_bool(&reply->data, "tree_clean", tree_clean);
     (void)json_push_kv(&reply->data, "unsigned", &unsigned_arr);
