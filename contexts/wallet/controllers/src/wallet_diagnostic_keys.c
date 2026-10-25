@@ -222,6 +222,132 @@ bool rpc_listwalletkeys(const struct json_value *params, bool help,
 
     return true;
 }
+
+struct txdetail_ctx {
+    struct wallet_rpc_context *wctx;
+    const unsigned char *pk_pfx;
+    size_t pk_pfx_len;
+    const unsigned char *sc_pfx;
+    size_t sc_pfx_len;
+};
+
+static void txdetail_push_outputs(const struct txdetail_ctx *tc,
+                                  struct json_value *entry,
+                                  struct transaction *tx,
+                                  int64_t *credit)
+{
+    struct json_value vouts = {0};
+    json_set_array(&vouts);
+    for (size_t j = 0; j < tx->num_vout; j++) {
+        struct json_value vo = {0};
+        json_set_object(&vo);
+        json_push_kv_int(&vo, "n", (int64_t)j);
+
+        char amt[32];
+        format_amount(tx->vout[j].value, amt, sizeof(amt));
+        json_push_kv_real(&vo, "value", strtod(amt, NULL));
+
+        bool mine = wallet_is_mine(tc->wctx->wallet, &tx->vout[j]);
+        json_push_kv_bool(&vo, "is_mine", mine);
+        json_push_kv_bool(&vo, "is_change",
+                          wallet_is_change(tc->wctx->wallet, &tx->vout[j]));
+
+        struct tx_destination dest;
+        if (script_extract_destination(
+                &tx->vout[j].script_pub_key, &dest)) {
+            char addr[128];
+            encode_destination(&dest, tc->pk_pfx, tc->pk_pfx_len,
+                               tc->sc_pfx, tc->sc_pfx_len,
+                               addr, sizeof(addr));
+            json_push_kv_str(&vo, "address", addr);
+        }
+
+        if (mine) *credit += tx->vout[j].value;
+
+        json_push_back(&vouts, &vo);
+        json_free(&vo);
+    }
+    json_push_kv(entry, "outputs", &vouts);
+    json_free(&vouts);
+}
+
+static void txdetail_push_inputs(struct wallet_rpc_context *ctx,
+                                 struct json_value *entry,
+                                 struct transaction *tx,
+                                 int64_t *debit)
+{
+    struct json_value vins = {0};
+    json_set_array(&vins);
+    for (size_t j = 0; j < tx->num_vin; j++) {
+        struct json_value vi = {0};
+        json_set_object(&vi);
+
+        char prev_txid[65];
+        uint256_get_hex(&tx->vin[j].prevout.hash, prev_txid);
+        json_push_kv_str(&vi, "txid", prev_txid);
+        json_push_kv_int(&vi, "vout", tx->vin[j].prevout.n);
+
+        /* Try to resolve the input value from chainstate or wallet */
+        int64_t in_val = 0;
+        bool in_mine = false;
+        if (wallet_ctx_db_ready(ctx)) {
+            struct db_wallet_utxo prev_utxo;
+            if (db_wallet_utxo_find(ctx->node_db,
+                    tx->vin[j].prevout.hash.data,
+                    tx->vin[j].prevout.n, &prev_utxo)) {
+                in_val = prev_utxo.value;
+                in_mine = true;
+            }
+        }
+
+        if (in_val > 0) {
+            char amt[32];
+            format_amount(in_val, amt, sizeof(amt));
+            json_push_kv_real(&vi, "value", strtod(amt, NULL));
+            json_push_kv_bool(&vi, "is_mine", in_mine);
+            if (in_mine) *debit += in_val;
+        }
+
+        json_push_back(&vins, &vi);
+        json_free(&vi);
+    }
+    json_push_kv(entry, "inputs", &vins);
+    json_free(&vins);
+}
+
+static void txdetail_push_shielded(struct json_value *entry,
+                                   struct transaction *tx)
+{
+    if (tx->num_shielded_spend > 0 || tx->num_shielded_output > 0) {
+        struct json_value shielded = {0};
+        json_set_object(&shielded);
+        json_push_kv_int(&shielded, "spends",
+                         (int64_t)tx->num_shielded_spend);
+        json_push_kv_int(&shielded, "outputs",
+                         (int64_t)tx->num_shielded_output);
+        json_push_kv(entry, "shielded", &shielded);
+        json_free(&shielded);
+    }
+}
+
+static void txdetail_push_net_effect(struct json_value *entry,
+                                     struct db_wallet_tx *row,
+                                     int64_t credit, int64_t debit)
+{
+    int64_t net = credit - debit;
+    if (row->from_me && row->fee > 0)
+        net -= row->fee;
+    char net_str[32];
+    format_amount(net, net_str, sizeof(net_str));
+    json_push_kv_real(entry, "net_effect", strtod(net_str, NULL));
+
+    if (row->from_me && row->fee > 0) {
+        char fee_str[32];
+        format_amount(row->fee, fee_str, sizeof(fee_str));
+        json_push_kv_real(entry, "fee", strtod(fee_str, NULL));
+    }
+}
+
 bool rpc_listwallettxdetail(const struct json_value *params, bool help,
                                     struct json_value *result)
 {
@@ -262,6 +388,14 @@ bool rpc_listwallettxdetail(const struct json_value *params, bool help,
 
     json_set_array(result);
 
+    struct txdetail_ctx tc = {
+        .wctx = ctx,
+        .pk_pfx = pk_pfx,
+        .pk_pfx_len = pk_pfx_len,
+        .sc_pfx = sc_pfx,
+        .sc_pfx_len = sc_pfx_len,
+    };
+
     for (int i = 0; i < n; i++) {
         struct transaction tx;
         if (!wallet_db_tx_deserialize(&rows[i], &tx)) {
@@ -282,105 +416,18 @@ bool rpc_listwallettxdetail(const struct json_value *params, bool help,
         json_push_kv_bool(&entry, "from_me", rows[i].from_me);
 
         /* Outputs */
-        struct json_value vouts = {0};
-        json_set_array(&vouts);
         int64_t credit = 0;
-        for (size_t j = 0; j < tx.num_vout; j++) {
-            struct json_value vo = {0};
-            json_set_object(&vo);
-            json_push_kv_int(&vo, "n", (int64_t)j);
-
-            char amt[32];
-            format_amount(tx.vout[j].value, amt, sizeof(amt));
-            json_push_kv_real(&vo, "value", strtod(amt, NULL));
-
-            bool mine = wallet_is_mine(ctx->wallet, &tx.vout[j]);
-            json_push_kv_bool(&vo, "is_mine", mine);
-            json_push_kv_bool(&vo, "is_change",
-                              wallet_is_change(ctx->wallet, &tx.vout[j]));
-
-            struct tx_destination dest;
-            if (script_extract_destination(
-                    &tx.vout[j].script_pub_key, &dest)) {
-                char addr[128];
-                encode_destination(&dest, pk_pfx, pk_pfx_len,
-                                   sc_pfx, sc_pfx_len, addr, sizeof(addr));
-                json_push_kv_str(&vo, "address", addr);
-            }
-
-            if (mine) credit += tx.vout[j].value;
-
-            json_push_back(&vouts, &vo);
-            json_free(&vo);
-        }
-        json_push_kv(&entry, "outputs", &vouts);
-        json_free(&vouts);
+        txdetail_push_outputs(&tc, &entry, &tx, &credit);
 
         /* Inputs */
-        struct json_value vins = {0};
-        json_set_array(&vins);
         int64_t debit = 0;
-        for (size_t j = 0; j < tx.num_vin; j++) {
-            struct json_value vi = {0};
-            json_set_object(&vi);
-
-            char prev_txid[65];
-            uint256_get_hex(&tx.vin[j].prevout.hash, prev_txid);
-            json_push_kv_str(&vi, "txid", prev_txid);
-            json_push_kv_int(&vi, "vout", tx.vin[j].prevout.n);
-
-            /* Try to resolve the input value from chainstate or wallet */
-            int64_t in_val = 0;
-            bool in_mine = false;
-            if (wallet_ctx_db_ready(ctx)) {
-                struct db_wallet_utxo prev_utxo;
-                if (db_wallet_utxo_find(ctx->node_db,
-                        tx.vin[j].prevout.hash.data,
-                        tx.vin[j].prevout.n, &prev_utxo)) {
-                    in_val = prev_utxo.value;
-                    in_mine = true;
-                }
-            }
-
-            if (in_val > 0) {
-                char amt[32];
-                format_amount(in_val, amt, sizeof(amt));
-                json_push_kv_real(&vi, "value", strtod(amt, NULL));
-                json_push_kv_bool(&vi, "is_mine", in_mine);
-                if (in_mine) debit += in_val;
-            }
-
-            json_push_back(&vins, &vi);
-            json_free(&vi);
-        }
-        json_push_kv(&entry, "inputs", &vins);
-        json_free(&vins);
+        txdetail_push_inputs(ctx, &entry, &tx, &debit);
 
         /* Shielded components */
-        if (tx.num_shielded_spend > 0 || tx.num_shielded_output > 0) {
-            struct json_value shielded = {0};
-            json_set_object(&shielded);
-            json_push_kv_int(&shielded, "spends",
-                             (int64_t)tx.num_shielded_spend);
-            json_push_kv_int(&shielded, "outputs",
-                             (int64_t)tx.num_shielded_output);
-            json_push_kv(&entry, "shielded", &shielded);
-            json_free(&shielded);
-        }
+        txdetail_push_shielded(&entry, &tx);
 
         /* Net effect */
-        int64_t net = credit - debit;
-        if (rows[i].from_me && rows[i].fee > 0)
-            net -= rows[i].fee;
-        char net_str[32];
-        format_amount(net, net_str, sizeof(net_str));
-        json_push_kv_real(&entry, "net_effect", strtod(net_str, NULL));
-
-        if (rows[i].from_me && rows[i].fee > 0) {
-            char fee_str[32];
-            format_amount(rows[i].fee, fee_str, sizeof(fee_str));
-            json_push_kv_real(&entry, "fee", strtod(fee_str, NULL));
-        }
+        txdetail_push_net_effect(&entry, &rows[i], credit, debit);
 
         json_push_back(result, &entry);
         json_free(&entry);
@@ -391,6 +438,159 @@ bool rpc_listwallettxdetail(const struct json_value *params, bool help,
     free(rows);
     return true;
 }
+
+struct balanceflow_ctx {
+    struct wallet_rpc_context *wctx;
+    struct db_wallet_utxo *utxos;
+    int nutxos;
+    int min_height;
+    int max_height;
+    int64_t running_balance;
+    int64_t total_received;
+    int64_t total_sent;
+    int64_t total_fees;
+    int flow_count;
+};
+
+static int64_t balanceflow_tx_credit(struct wallet_rpc_context *ctx,
+                                     struct transaction *tx)
+{
+    int64_t credit = 0;
+    for (size_t j = 0; j < tx->num_vout; j++) {
+        if (wallet_is_mine(ctx->wallet, &tx->vout[j]))
+            credit += tx->vout[j].value;
+    }
+    return credit;
+}
+
+static int64_t balanceflow_tx_debit(struct db_wallet_utxo *utxos,
+                                    int nutxos, struct transaction *tx)
+{
+    int64_t debit = 0;
+    for (size_t j = 0; j < tx->num_vin; j++) {
+        for (int k = 0; k < nutxos; k++) {
+            if (memcmp(utxos[k].txid,
+                       tx->vin[j].prevout.hash.data, 32) == 0 &&
+                utxos[k].vout == tx->vin[j].prevout.n) {
+                debit += utxos[k].value;
+                break;
+            }
+        }
+    }
+    return debit;
+}
+
+static const char *balanceflow_tx_category(bool from_me, int64_t credit,
+                                           int64_t debit)
+{
+    if (from_me && credit < debit)
+        return "send";
+    else if (!from_me && credit > 0)
+        return "receive";
+    else
+        return "internal";
+}
+
+static int64_t balanceflow_chainstate_balance(struct wallet_rpc_context *ctx)
+{
+    int64_t chain_balance = 0;
+    struct db_wallet_utxo unspent[1024];
+    int nu = db_wallet_utxo_list_unspent(ctx->node_db, unspent, 1024);
+    for (int i = 0; i < nu; i++) {
+        struct uint256 tid;
+        memcpy(tid.data, unspent[i].txid, 32);
+        struct coins cc;
+        coins_init(&cc);
+        bool found = coins_view_cache_get_coins(ctx->coins_tip, &tid, &cc);
+        if (found && coins_is_available(&cc, unspent[i].vout))
+            chain_balance += unspent[i].value;
+        coins_free(&cc);
+    }
+    return chain_balance;
+}
+
+static void balanceflow_append_tx_flow(struct balanceflow_ctx *fc,
+                                       struct json_value *flows,
+                                       struct db_wallet_tx *row)
+{
+    if (row->block_height < fc->min_height ||
+        row->block_height > fc->max_height) {
+        db_wallet_tx_free(row);
+        return;
+    }
+
+    struct transaction tx;
+    if (!wallet_db_tx_deserialize(row, &tx)) {
+        db_wallet_tx_free(row);
+        return;
+    }
+
+    /* Calculate credit: outputs that are mine */
+    int64_t credit = balanceflow_tx_credit(fc->wctx, &tx);
+
+    /* Calculate debit: inputs from wallet UTXOs */
+    int64_t debit = 0;
+    if (row->from_me)
+        debit = balanceflow_tx_debit(fc->utxos, fc->nutxos, &tx);
+
+    int64_t fee = row->from_me ? row->fee : 0;
+    int64_t net = credit - debit;
+
+    char txid_hex[65];
+    uint256_get_hex(&tx.hash, txid_hex);
+
+    const char *category = balanceflow_tx_category(row->from_me,
+                                                   credit, debit);
+
+    fc->running_balance += net;
+    if (credit > 0 && !row->from_me)
+        fc->total_received += credit;
+    if (debit > 0)
+        fc->total_sent += (debit - credit);
+    fc->total_fees += fee;
+
+    struct json_value entry = {0};
+    wallet_view_flow_entry(&entry, txid_hex, category,
+                           net, fee,
+                           row->block_height, fc->running_balance);
+    json_push_back(flows, &entry);
+    json_free(&entry);
+    fc->flow_count++;
+
+    transaction_free(&tx);
+    db_wallet_tx_free(row);
+}
+
+static void balanceflow_push_summary(struct json_value *result,
+                                     struct wallet_rpc_context *ctx,
+                                     const struct balanceflow_ctx *fc)
+{
+    struct json_value summary = {0};
+    json_set_object(&summary);
+    json_push_kv_int(&summary, "transaction_count", fc->flow_count);
+
+    char amt[32];
+    format_amount(fc->total_received, amt, sizeof(amt));
+    json_push_kv_real(&summary, "total_received", strtod(amt, NULL));
+    format_amount(fc->total_sent, amt, sizeof(amt));
+    json_push_kv_real(&summary, "total_sent", strtod(amt, NULL));
+    format_amount(fc->total_fees, amt, sizeof(amt));
+    json_push_kv_real(&summary, "total_fees", strtod(amt, NULL));
+    format_amount(fc->running_balance, amt, sizeof(amt));
+    json_push_kv_real(&summary, "final_balance", strtod(amt, NULL));
+
+    /* Cross-verify with chainstate */
+    if (ctx->coins_tip) {
+        int64_t chain_balance = balanceflow_chainstate_balance(ctx);
+        format_amount(chain_balance, amt, sizeof(amt));
+        json_push_kv_real(&summary, "chainstate_verified_balance",
+                          strtod(amt, NULL));
+    }
+
+    json_push_kv(result, "summary", &summary);
+    json_free(&summary);
+}
+
 bool rpc_getbalanceflow(const struct json_value *params, bool help,
                                 struct json_value *result)
 {
@@ -447,121 +647,29 @@ bool rpc_getbalanceflow(const struct json_value *params, bool help,
     struct json_value flows = {0};
     json_set_array(&flows);
 
-    int64_t running_balance = 0;
-    int64_t total_received = 0;
-    int64_t total_sent = 0;
-    int64_t total_fees = 0;
-    int flow_count = 0;
+    struct balanceflow_ctx fc = {
+        .wctx = ctx,
+        .utxos = all_utxos,
+        .nutxos = nutxos,
+        .min_height = min_height,
+        .max_height = max_height,
+        .running_balance = 0,
+        .total_received = 0,
+        .total_sent = 0,
+        .total_fees = 0,
+        .flow_count = 0,
+    };
 
     /* Process each transaction */
     for (int i = ntxs - 1; i >= 0; i--) {
-        if (txs[i].block_height < min_height ||
-            txs[i].block_height > max_height) {
-            db_wallet_tx_free(&txs[i]);
-            continue;
-        }
-
-        struct transaction tx;
-        if (!wallet_db_tx_deserialize(&txs[i], &tx)) {
-            db_wallet_tx_free(&txs[i]);
-            continue;
-        }
-
-        /* Calculate credit: outputs that are mine */
-        int64_t credit = 0;
-        for (size_t j = 0; j < tx.num_vout; j++) {
-            if (wallet_is_mine(ctx->wallet, &tx.vout[j]))
-                credit += tx.vout[j].value;
-        }
-
-        /* Calculate debit: inputs from wallet UTXOs */
-        int64_t debit = 0;
-        if (txs[i].from_me) {
-            for (size_t j = 0; j < tx.num_vin; j++) {
-                for (int k = 0; k < nutxos; k++) {
-                    if (memcmp(all_utxos[k].txid,
-                               tx.vin[j].prevout.hash.data, 32) == 0 &&
-                        all_utxos[k].vout == tx.vin[j].prevout.n) {
-                        debit += all_utxos[k].value;
-                        break;
-                    }
-                }
-            }
-        }
-
-        int64_t fee = txs[i].from_me ? txs[i].fee : 0;
-        int64_t net = credit - debit;
-
-        char txid_hex[65];
-        uint256_get_hex(&tx.hash, txid_hex);
-
-        const char *category;
-        if (txs[i].from_me && credit < debit)
-            category = "send";
-        else if (!txs[i].from_me && credit > 0)
-            category = "receive";
-        else
-            category = "internal";
-
-        running_balance += net;
-        if (credit > 0 && !txs[i].from_me)
-            total_received += credit;
-        if (debit > 0)
-            total_sent += (debit - credit);
-        total_fees += fee;
-
-        struct json_value entry = {0};
-        wallet_view_flow_entry(&entry, txid_hex, category,
-                               net, fee,
-                               txs[i].block_height, running_balance);
-        json_push_back(&flows, &entry);
-        json_free(&entry);
-        flow_count++;
-
-        transaction_free(&tx);
-        db_wallet_tx_free(&txs[i]);
+        balanceflow_append_tx_flow(&fc, &flows, &txs[i]);
     }
 
     json_push_kv(result, "flows", &flows);
     json_free(&flows);
 
     /* Summary */
-    struct json_value summary = {0};
-    json_set_object(&summary);
-    json_push_kv_int(&summary, "transaction_count", flow_count);
-
-    char amt[32];
-    format_amount(total_received, amt, sizeof(amt));
-    json_push_kv_real(&summary, "total_received", strtod(amt, NULL));
-    format_amount(total_sent, amt, sizeof(amt));
-    json_push_kv_real(&summary, "total_sent", strtod(amt, NULL));
-    format_amount(total_fees, amt, sizeof(amt));
-    json_push_kv_real(&summary, "total_fees", strtod(amt, NULL));
-    format_amount(running_balance, amt, sizeof(amt));
-    json_push_kv_real(&summary, "final_balance", strtod(amt, NULL));
-
-    /* Cross-verify with chainstate */
-    if (ctx->coins_tip) {
-        int64_t chain_balance = 0;
-        struct db_wallet_utxo unspent[1024];
-        int nu = db_wallet_utxo_list_unspent(ctx->node_db, unspent, 1024);
-        for (int i = 0; i < nu; i++) {
-            struct uint256 tid;
-            memcpy(tid.data, unspent[i].txid, 32);
-            struct coins cc;
-            coins_init(&cc);
-            bool found = coins_view_cache_get_coins(ctx->coins_tip, &tid, &cc);
-            if (found && coins_is_available(&cc, unspent[i].vout))
-                chain_balance += unspent[i].value;
-            coins_free(&cc);
-        }
-        format_amount(chain_balance, amt, sizeof(amt));
-        json_push_kv_real(&summary, "chainstate_verified_balance",
-                          strtod(amt, NULL));
-    }
-
-    json_push_kv(result, "summary", &summary);
-    json_free(&summary);
+    balanceflow_push_summary(result, ctx, &fc);
 
     free(all_utxos);
     free(txs);
