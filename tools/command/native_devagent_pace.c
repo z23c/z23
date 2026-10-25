@@ -96,31 +96,32 @@
  * stripped length. Recognizes ESC '[' <bytes 0x30-0x3f>* <bytes 0x20-0x2f>*
  * <final byte 0x40-0x7e> (a CSI/SGR sequence) and drops a bare ESC that
  * starts nothing recognized. */
+static size_t dvp_escape_end(const char *in, size_t i)
+{
+    if (in[i + 1] == '[') {
+        size_t j = i + 2;
+        while (in[j] != '\0' && (unsigned char)in[j] >= 0x30 &&
+               (unsigned char)in[j] <= 0x3f)
+            j++;
+        while (in[j] != '\0' && (unsigned char)in[j] >= 0x20 &&
+               (unsigned char)in[j] <= 0x2f)
+            j++;
+        if (in[j] != '\0' && (unsigned char)in[j] >= 0x40 &&
+            (unsigned char)in[j] <= 0x7e)
+            return j + 1;
+    }
+    /* Bare ESC, or an incomplete/unrecognized sequence: drop just
+     * the ESC byte and keep scanning from the next byte. */
+    return i + 1;
+}
+
 static size_t dvp_strip_ansi(const char *in, char *out, size_t cap)
 {
     size_t o = 0;
     for (size_t i = 0; in[i] != '\0';) {
         unsigned char c = (unsigned char)in[i];
         if (c == 0x1b) {
-            if (in[i + 1] == '[') {
-                size_t j = i + 2;
-                while (in[j] != '\0' &&
-                       (unsigned char)in[j] >= 0x30 &&
-                       (unsigned char)in[j] <= 0x3f)
-                    j++;
-                while (in[j] != '\0' &&
-                       (unsigned char)in[j] >= 0x20 &&
-                       (unsigned char)in[j] <= 0x2f)
-                    j++;
-                if (in[j] != '\0' && (unsigned char)in[j] >= 0x40 &&
-                    (unsigned char)in[j] <= 0x7e) {
-                    i = j + 1;
-                    continue;
-                }
-            }
-            /* Bare ESC, or an incomplete/unrecognized sequence: drop just
-             * the ESC byte and keep scanning from the next byte. */
-            i++;
+            i = dvp_escape_end(in, i);
             continue;
         }
         if (o + 1 < cap)
@@ -176,6 +177,52 @@ static void dvp_files_add(struct dvp_files *files, const char *path)
     }
 }
 
+static void dvp_input_paths(const struct zcl_command_request *request,
+                             const char **cwd, const char **log)
+{
+    if (request && request->input) {
+        const struct json_value *v;
+        v = json_get(request->input, "cwd");
+        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
+            *cwd = json_get_str(v);
+        v = json_get(request->input, "log");
+        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
+            *log = json_get_str(v);
+    }
+}
+
+static void dvp_count_line(const char *line, struct dvp_files *files,
+                            long long *tool_calls, long long *calls_before_first_edit,
+                            long long *edits, long long *commits, long long *rc)
+{
+    if (dvp_starts_with(line, "$ ")) {
+        (*tool_calls)++;
+        if (strstr(line + 2, "git commit") != NULL) (*commits)++;
+        return;
+    }
+    if (dvp_starts_with(line, "\xe2\x86\x92 ")) {
+        (*tool_calls)++;
+        return;
+    }
+    if (dvp_starts_with(line, "\xe2\x9c\xb1 ")) {
+        (*tool_calls)++;
+        return;
+    }
+    if (dvp_starts_with(line, "\xe2\x86\x90 ")) {
+        const char *rest = line + strlen("\xe2\x86\x90 ");
+        (*tool_calls)++;
+        if (dvp_starts_with(rest, "Edit ") || dvp_starts_with(rest, "Write ")) {
+            const char *path = strchr(rest, ' ');
+            path = path ? path + 1 : rest;
+            if (*calls_before_first_edit < 0) *calls_before_first_edit = *tool_calls - 1;
+            (*edits)++;
+            dvp_files_add(files, path);
+        }
+        return;
+    }
+    dvp_parse_rc(line, rc);
+}
+
 void zcl_native_handle_dev_agent_pace(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -195,15 +242,7 @@ void zcl_native_handle_dev_agent_pace(
 
     (void)json_push_kv_str(&reply->data, "leaf", DVP_LEAF);
 
-    if (request && request->input) {
-        const struct json_value *v;
-        v = json_get(request->input, "cwd");
-        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
-            cwd = json_get_str(v);
-        v = json_get(request->input, "log");
-        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
-            log = json_get_str(v);
-    }
+    dvp_input_paths(request, &cwd, &log);
 
     if (!log) {
         zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
@@ -237,36 +276,8 @@ void zcl_native_handle_dev_agent_pace(
         (void)len;
         dvp_chomp(line);
 
-        if (dvp_starts_with(line, "$ ")) {
-            tool_calls++;
-            if (strstr(line + 2, "git commit") != NULL)
-                commits++;
-            continue;
-        }
-        if (dvp_starts_with(line, "\xe2\x86\x92 ")) {
-            tool_calls++;
-            continue;
-        }
-        if (dvp_starts_with(line, "\xe2\x9c\xb1 ")) {
-            tool_calls++;
-            continue;
-        }
-        if (dvp_starts_with(line, "\xe2\x86\x90 ")) {
-            const char *rest = line + strlen("\xe2\x86\x90 ");
-            tool_calls++;
-            if (dvp_starts_with(rest, "Edit ") ||
-                dvp_starts_with(rest, "Write ")) {
-                const char *path = strchr(rest, ' ');
-                path = path ? path + 1 : rest;
-                if (calls_before_first_edit < 0)
-                    calls_before_first_edit = tool_calls - 1;
-                edits++;
-                dvp_files_add(&files, path);
-            }
-            continue;
-        }
-
-        dvp_parse_rc(line, &rc);
+        dvp_count_line(line, &files, &tool_calls, &calls_before_first_edit,
+                        &edits, &commits, &rc);
     }
     (void)fclose(f);
 

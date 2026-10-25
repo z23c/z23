@@ -2826,8 +2826,6 @@ tools/command/native_devagent_done.c:zcl_native_handle_dev_agent_done:19
 tools/command/native_devagent_hot.c:zcl_native_handle_dev_agent_hot:38
 tools/command/native_devagent_mail.c:dvm_has_ipv4:17
 tools/command/native_devagent_mutate_command.c:zcl_native_handle_dev_agent_mutate:42
-tools/command/native_devagent_pace.c:dvp_strip_ansi:16
-tools/command/native_devagent_pace.c:zcl_native_handle_dev_agent_pace:32
 tools/command/native_devagent_queue.c:dvq_compose_task:21
 tools/command/native_devagent_queue.c:dvq_model_ok:16
 tools/command/native_devagent_queue.c:dvq_next:46
