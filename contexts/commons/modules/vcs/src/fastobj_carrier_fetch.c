@@ -87,13 +87,95 @@ static bool fc_fetch_all_chunks(struct vcs_package_store *dst,
     return true;
 }
 
+static bool fc_fetch_args_present(struct vcs_package_store *dst,
+                                  struct vcs_package_store *src,
+                                  const uint8_t root[32])
+{
+    if (!dst || !src || !root)
+        return false;
+    return true;
+}
+
+static bool fc_fetch_source_roots(const struct vcs_package_manifest *manifest,
+                                  const uint8_t root[32],
+                                  char *err, size_t err_cap)
+{
+    uint8_t derived[32];
+    bool ok = vcs_package_manifest_root(manifest, derived) &&
+              memcmp(derived, root, 32) == 0;
+    if (!ok) {
+        (void)snprintf(err, err_cap,
+                       "source manifest does not root to the given root");
+    }
+    return ok;
+}
+
+static bool fc_fetch_destination_already_tracked(bool ok,
+                                                 struct vcs_package_store *dst,
+                                                 const uint8_t root[32])
+{
+    struct vcs_package_store_status prior;
+    return ok &&
+        vcs_package_store_package_status(dst, root, &prior);
+}
+
+static bool fc_fetch_admit_manifest(struct vcs_package_store *dst,
+                                    const uint8_t *wire, size_t wire_len,
+                                    char *err, size_t err_cap)
+{
+    uint8_t dst_root[32] = {0};
+    enum vcs_package_store_result pr = vcs_package_store_put_manifest(
+        dst, wire, wire_len, dst_root);
+    if (pr != VCS_PACKAGE_STORE_OK) {
+        (void)snprintf(err, err_cap, "destination store: %s",
+                       fc_store_err(pr));
+        return false;
+    }
+    return true;
+}
+
+static bool fc_fetch_destination_is_complete(struct vcs_package_store *dst,
+                                             const uint8_t root[32],
+                                             char *err, size_t err_cap)
+{
+    struct vcs_package_store_status status;
+    /* bool return, not a store result code. */
+    if (!vcs_package_store_package_status(dst, root, &status) ||
+        !status.complete) {
+        (void)snprintf(err, err_cap,
+                       "carrier incomplete in destination store");
+        return false;
+    }
+    return true;
+}
+
+static void fc_fetch_record_object_stats(
+    const struct vcs_package_manifest *manifest,
+    struct vcs_fastobj_carrier_stats *stats)
+{
+    uint32_t entries = 0;
+    uint64_t object_bytes = 0;
+    for (size_t i = 0; i < manifest->count; i++) {
+        const char *name = strrchr(manifest->files[i].path, '/');
+        if (!name)
+            continue;
+        name++;
+        size_t namelen = strlen(name);
+        if (namelen == 66 && strcmp(name + 64, ".o") == 0) {
+            entries++;
+            object_bytes += manifest->files[i].size;
+        }
+    }
+    fc_fill_stats(manifest, entries, object_bytes, stats);
+}
+
 bool vcs_fastobj_carrier_fetch(struct vcs_package_store *dst,
                                struct vcs_package_store *src,
                                const uint8_t root[32],
                                struct vcs_fastobj_carrier_stats *stats,
                                char *err, size_t err_cap)
 {
-    if (!dst || !src || !root) {
+    if (!fc_fetch_args_present(dst, src, root)) {
         (void)snprintf(err, err_cap, "null argument");
         return false;
     }
@@ -111,58 +193,21 @@ bool vcs_fastobj_carrier_fetch(struct vcs_package_store *dst,
         (void)snprintf(err, err_cap, "source manifest does not parse");
         return false;
     }
-    uint8_t derived[32];
-    bool ok = vcs_package_manifest_root(&manifest, derived) &&
-              memcmp(derived, root, 32) == 0;
-    if (!ok) {
-        (void)snprintf(err, err_cap,
-                       "source manifest does not root to the given root");
-    }
-    struct vcs_package_store_status prior;
-    bool already_tracked = ok &&
-        vcs_package_store_package_status(dst, root, &prior);
+    bool ok = fc_fetch_source_roots(&manifest, root, err, err_cap);
+    bool already_tracked =
+        fc_fetch_destination_already_tracked(ok, dst, root);
     /* An existing manifest's no-op admission checks its present CAS paths.
      * Repair verified missing bytes first, then require that strict check. */
     if (already_tracked)
         ok = fc_fetch_all_chunks(dst, src, root, &manifest, err, err_cap);
-    uint8_t dst_root[32] = {0};
-    if (ok) {
-        enum vcs_package_store_result pr = vcs_package_store_put_manifest(
-            dst, wire, wire_len, dst_root);
-        if (pr != VCS_PACKAGE_STORE_OK) {
-            (void)snprintf(err, err_cap, "destination store: %s",
-                           fc_store_err(pr));
-            ok = false;
-        }
-    }
+    if (ok)
+        ok = fc_fetch_admit_manifest(dst, wire, wire_len, err, err_cap);
     if (ok && !already_tracked)
         ok = fc_fetch_all_chunks(dst, src, root, &manifest, err, err_cap);
-    if (ok) {
-        struct vcs_package_store_status status;
-        /* bool return, not a store result code. */
-        if (!vcs_package_store_package_status(dst, root, &status) ||
-            !status.complete) {
-            (void)snprintf(err, err_cap,
-                           "carrier incomplete in destination store");
-            ok = false;
-        }
-    }
-    if (ok) {
-        uint32_t entries = 0;
-        uint64_t object_bytes = 0;
-        for (size_t i = 0; i < manifest.count; i++) {
-            const char *name = strrchr(manifest.files[i].path, '/');
-            if (!name)
-                continue;
-            name++;
-            size_t namelen = strlen(name);
-            if (namelen == 66 && strcmp(name + 64, ".o") == 0) {
-                entries++;
-                object_bytes += manifest.files[i].size;
-            }
-        }
-        fc_fill_stats(&manifest, entries, object_bytes, stats);
-    }
+    if (ok)
+        ok = fc_fetch_destination_is_complete(dst, root, err, err_cap);
+    if (ok)
+        fc_fetch_record_object_stats(&manifest, stats);
     vcs_package_manifest_free(&manifest);
     free(wire);
     return ok;
