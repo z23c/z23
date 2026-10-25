@@ -36,9 +36,45 @@
  * so the shared object set links (shutdown is irrelevant for a one-shot run). */
 volatile sig_atomic_t g_shutdown_requested = 0;
 
+/* True when argv uses either the 4-arg or the 5-arg form of the usage line. */
+static bool argc_matches_usage(int argc)
+{
+    return argc == 5 || argc == 6;
+}
+
+/* Classify the optional 5th argument: 1 = --shielded requested, 0 = no 5th
+ * argument given, -1 = 5th argument present but unrecognized. */
+static int parse_shielded_request(int argc, char **argv)
+{
+    if (argc != 6)
+        return 0;
+    if (strcmp(argv[5], "--shielded") == 0)
+        return 1;
+    return -1;
+}
+
+/* Decode the display hex blockhash into the internal little-endian anchor
+ * hash; returns false on undecodable hex. */
+static bool parse_anchor_hash(const char *hexhash, uint8_t anchor_hash[32])
+{
+    uint8_t anchor_hash_be[32];
+    if (!zcl_hex_decode(hexhash, anchor_hash_be, 32))
+        return false;
+    for (int i = 0; i < 32; i++)
+        anchor_hash[31 - i] = anchor_hash_be[i];
+    return true;
+}
+
+/* Render a 32-byte SHA3 digest as 64 lowercase hex chars plus a NUL. */
+static void format_sha3_hex(const uint8_t sha3[32], char out[65])
+{
+    for (int i = 0; i < 32; i++)
+        snprintf(out + i * 2, 3, "%02x", sha3[i]);
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 5 && argc != 6) {
+    if (!argc_matches_usage(argc)) {
         fprintf(stderr,
                 "usage: %s <datadir> <height> <blockhash_display_hex> "
                 "<out_path> [--shielded]\n", argv[0]);
@@ -49,11 +85,12 @@ int main(int argc, char **argv)
      * verified snapshot candidate. This does not independently prove the
      * source datadir or the Sprout/nullifier history. Without it, emit a
      * coins-only snapshot as before. */
-    bool want_shielded = (argc == 6 && strcmp(argv[5], "--shielded") == 0);
-    if (argc == 6 && !want_shielded) {
+    int shielded_request = parse_shielded_request(argc, argv);
+    if (shielded_request < 0) {
         fprintf(stderr, "unknown 5th arg '%s' (expected --shielded)\n", argv[5]);
         return 2;
     }
+    bool want_shielded = (shielded_request == 1);
     const char *datadir = argv[1];
     int32_t height = (int32_t)strtol(argv[2], NULL, 10);
     const char *hexhash = argv[3];
@@ -66,13 +103,11 @@ int main(int argc, char **argv)
     }
     /* Display hex is big-endian; internal hashBlock is little-endian.
      * Reverse byte order so anchor_block_hash matches block_index.hashBlock. */
-    uint8_t anchor_hash[32], anchor_hash_be[32];
-    if (!zcl_hex_decode(hexhash, anchor_hash_be, 32)) {
+    uint8_t anchor_hash[32];
+    if (!parse_anchor_hash(hexhash, anchor_hash)) {
         fprintf(stderr, "bad hex in blockhash\n");
         return 2;
     }
-    for (int i = 0; i < 32; i++)
-        anchor_hash[31 - i] = anchor_hash_be[i];
 
     if (!progress_store_open(datadir)) {
         fprintf(stderr, "progress_store_open(%s) failed\n", datadir);
@@ -116,8 +151,7 @@ int main(int argc, char **argv)
     }
 
     char sha3hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(sha3hex + i * 2, 3, "%02x", got_sha3[i]);
+    format_sha3_hex(got_sha3, sha3hex);
     fprintf(stderr,
             "WROTE %s height=%d count=%llu supply=%lld sha3=%s\n",
             out_path, height, (unsigned long long)got_count,
