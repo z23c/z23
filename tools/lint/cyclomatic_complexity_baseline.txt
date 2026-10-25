@@ -2260,7 +2260,6 @@ tests/harness/src/test_shutdown_marker.c:test_shutdown_marker:61
 tests/harness/src/test_shutdown_stagewatch.c:test_shutdown_stagewatch:50
 tests/harness/src/test_sighash_edge.c:test_sighash_edge:34
 tests/harness/src/test_sighash_malleability.c:test_sighash_malleability:55
-tests/harness/src/test_simd_os_support.c:test_simd_os_support:18
 tests/harness/src/test_simnet.c:test_simnet:245
 tests/harness/src/test_simnet_cluster.c:test_simnet_cluster:36
 tests/harness/src/test_simnet_contract.c:run_contract_scenario:20

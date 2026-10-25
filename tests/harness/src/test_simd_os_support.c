@@ -67,6 +67,156 @@ static void expect(bool got, bool want, const char *what)
     g_fail++;
 }
 
+static void check_avx512_advertised_without_zmm_state(void)
+{
+    struct simd_cpu_words w = {
+        .leaf1_ecx = ECX_XSAVE | ECX_OSXSAVE | ECX_AVX,
+        .leaf7_ebx = EBX_AVX2 | EBX_AVX512F | EBX_AVX512DQ | EBX_AVX512VL,
+        .xcr0 = XCR0_X87_SSE_YMM,   /* no bits 5/6/7 */
+        .leaf1_valid = true, .leaf7_valid = true, .xcr0_valid = true,
+    };
+    expect(simd_avx512f_usable(&w), false, "avx512f with ZMM state off");
+    expect(simd_avx512_dq_vl_usable(&w), false, "avx512dq/vl with ZMM state off");
+    /* AVX2 is still fine on that machine — the fix must not over-disable. */
+    expect(simd_avx2_usable(&w), true, "avx2 with YMM state on");
+}
+
+static void check_each_zmm_state_bit_is_required(void)
+{
+    const uint64_t bits[3] = {
+        SIMD_XCR0_OPMASK, SIMD_XCR0_ZMM_HI256, SIMD_XCR0_HI16_ZMM
+    };
+    for (int i = 0; i < 3; i++) {
+        struct simd_cpu_words w = {
+            .leaf1_ecx = ECX_XSAVE | ECX_OSXSAVE | ECX_AVX,
+            .leaf7_ebx = EBX_AVX2 | EBX_AVX512F | EBX_AVX512DQ | EBX_AVX512VL,
+            .xcr0 = XCR0_FULL_AVX512 & ~bits[i],
+            .leaf1_valid = true, .leaf7_valid = true, .xcr0_valid = true,
+        };
+        expect(simd_avx512f_usable(&w), false, "avx512f missing one ZMM bit");
+    }
+}
+
+static void check_avx2_advertised_without_ymm_state(void)
+{
+    struct simd_cpu_words w = {
+        .leaf1_ecx = ECX_XSAVE | ECX_OSXSAVE | ECX_AVX,
+        .leaf7_ebx = EBX_AVX2 | EBX_AVX512F,
+        .xcr0 = XCR0_X87_SSE,
+        .leaf1_valid = true, .leaf7_valid = true, .xcr0_valid = true,
+    };
+    expect(simd_avx2_usable(&w), false, "avx2 with YMM state off");
+    expect(simd_avx512f_usable(&w), false, "avx512f with YMM state off");
+}
+
+static void check_no_osxsave_refuses_every_tier(void)
+{
+    struct simd_cpu_words w = {
+        .leaf1_ecx = ECX_XSAVE | ECX_AVX,   /* no OSXSAVE */
+        .leaf7_ebx = EBX_AVX2 | EBX_AVX512F | EBX_AVX512DQ | EBX_AVX512VL,
+        .xcr0 = XCR0_FULL_AVX512,           /* stale/unreadable */
+        .leaf1_valid = true, .leaf7_valid = true, .xcr0_valid = false,
+    };
+    expect(simd_avx2_usable(&w), false, "avx2 without OSXSAVE");
+    expect(simd_avx512f_usable(&w), false, "avx512f without OSXSAVE");
+}
+
+static void check_unreadable_leaf_and_zero_words_refused(void)
+{
+    struct simd_cpu_words w = {
+        .leaf1_ecx = ECX_XSAVE | ECX_OSXSAVE | ECX_AVX,
+        .leaf7_ebx = EBX_AVX2 | EBX_AVX512F,
+        .xcr0 = XCR0_FULL_AVX512,
+        .leaf1_valid = true, .leaf7_valid = false, .xcr0_valid = true,
+    };
+    expect(simd_avx2_usable(&w), false, "avx2 with leaf7 unreadable");
+    expect(simd_avx512f_usable(&w), false, "avx512f with leaf7 unreadable");
+
+    struct simd_cpu_words z;
+    memset(&z, 0, sizeof z);
+    expect(simd_avx2_usable(&z), false, "avx2 on all-zero words");
+    expect(simd_avx512f_usable(&z), false, "avx512f on all-zero words");
+    expect(simd_avx512_dq_vl_usable(&z), false, "avx512dq/vl on all-zero words");
+}
+
+static void check_fully_enabled_host_is_usable(void)
+{
+    struct simd_cpu_words w = {
+        .leaf1_ecx = ECX_XSAVE | ECX_OSXSAVE | ECX_AVX,
+        .leaf7_ebx = EBX_AVX2 | EBX_AVX512F | EBX_AVX512DQ | EBX_AVX512VL,
+        .xcr0 = XCR0_FULL_AVX512,
+        .leaf1_valid = true, .leaf7_valid = true, .xcr0_valid = true,
+    };
+    expect(simd_avx2_usable(&w), true, "avx2 on a full host");
+    expect(simd_avx512f_usable(&w), true, "avx512f on a full host");
+    expect(simd_avx512_dq_vl_usable(&w), true, "avx512dq/vl on a full host");
+
+    /* DQ/VL are a strict superset requirement of F. */
+    w.leaf7_ebx &= ~EBX_AVX512VL;
+    expect(simd_avx512f_usable(&w), true, "avx512f without VL");
+    expect(simd_avx512_dq_vl_usable(&w), false, "avx512dq/vl without VL");
+}
+
+static struct simd_cpu_words probe_and_check_self_consistency(void)
+{
+    struct simd_cpu_words w;
+    simd_cpu_words_probe(&w);
+
+    if (simd_avx512f_usable(&w)) {
+        expect(w.xcr0_valid, true, "avx512f yes implies xcr0 was read");
+        expect((w.xcr0 & SIMD_XCR0_AVX512_MASK) == SIMD_XCR0_AVX512_MASK,
+               true, "avx512f yes implies every ZMM state bit set");
+    }
+    if (simd_avx2_usable(&w)) {
+        expect(w.xcr0_valid, true, "avx2 yes implies xcr0 was read");
+        expect((w.xcr0 & SIMD_XCR0_AVX_MASK) == SIMD_XCR0_AVX_MASK,
+               true, "avx2 yes implies SSE+YMM state set");
+    }
+    /* The cached accessors must agree with the one-shot policy. */
+    expect(simd_host_has_avx2(), simd_avx2_usable(&w), "cached avx2 answer");
+    expect(simd_host_has_avx512f(), simd_avx512f_usable(&w),
+           "cached avx512f answer");
+    return w;
+}
+
+static void check_blake2b_batch_matches_sequential(void)
+{
+    struct blake2b_ctx base;
+    uint8_t personal[BLAKE2B_PERSONALBYTES] = {0};
+    memcpy(personal, "ZcashPoW", 8);
+    blake2b_init_salt_personal(&base, 50, NULL, 0, NULL, personal);
+    blake2b_update(&base, (const uint8_t *)"dispatch-fix", 12);
+
+    uint32_t idx[8];
+    for (int i = 0; i < 8; i++) idx[i] = (uint32_t)(i * 7919u + 3u);
+
+    unsigned char got[8][64];
+    unsigned char *gp[8];
+    for (int i = 0; i < 8; i++) gp[i] = got[i];
+    equihash_generate_hash_batch8(&base, idx, gp, 50);
+
+    for (int i = 0; i < 8; i++) {
+        unsigned char want[64];
+        struct blake2b_ctx s = base;
+        blake2b_update(&s, (const uint8_t *)&idx[i], sizeof(uint32_t));
+        blake2b_final(&s, want, 50);
+        if (memcmp(want, got[i], 50) != 0) {
+            printf("\n  batch8 lane %d differs from sequential\n", i);
+            g_fail++;
+        }
+    }
+
+    unsigned char a[64], b[64], c[64], d[64];
+    equihash_generate_hash_batch4(&base, idx, a, b, c, d, 50);
+    unsigned char *four[4] = {a, b, c, d};
+    for (int i = 0; i < 4; i++) {
+        if (memcmp(four[i], got[i], 50) != 0) {
+            printf("\n  batch4 lane %d differs from batch8\n", i);
+            g_fail++;
+        }
+    }
+}
+
 int test_simd_os_support(void)
 {
     g_fail = 0;
@@ -78,16 +228,7 @@ int test_simd_os_support(void)
      * the process dies on the first zmm instruction. */
     printf("AVX-512F in CPUID + ZMM state OFF in XCR0 -> unusable... ");
     {
-        struct simd_cpu_words w = {
-            .leaf1_ecx = ECX_XSAVE | ECX_OSXSAVE | ECX_AVX,
-            .leaf7_ebx = EBX_AVX2 | EBX_AVX512F | EBX_AVX512DQ | EBX_AVX512VL,
-            .xcr0 = XCR0_X87_SSE_YMM,   /* no bits 5/6/7 */
-            .leaf1_valid = true, .leaf7_valid = true, .xcr0_valid = true,
-        };
-        expect(simd_avx512f_usable(&w), false, "avx512f with ZMM state off");
-        expect(simd_avx512_dq_vl_usable(&w), false, "avx512dq/vl with ZMM state off");
-        /* AVX2 is still fine on that machine — the fix must not over-disable. */
-        expect(simd_avx2_usable(&w), true, "avx2 with YMM state on");
+        check_avx512_advertised_without_zmm_state();
         printf("%s\n", g_fail ? "FAIL" : "OK");
     }
 
@@ -97,18 +238,7 @@ int test_simd_os_support(void)
     printf("each single missing ZMM state bit -> unusable... ");
     {
         int before = g_fail;
-        const uint64_t bits[3] = {
-            SIMD_XCR0_OPMASK, SIMD_XCR0_ZMM_HI256, SIMD_XCR0_HI16_ZMM
-        };
-        for (int i = 0; i < 3; i++) {
-            struct simd_cpu_words w = {
-                .leaf1_ecx = ECX_XSAVE | ECX_OSXSAVE | ECX_AVX,
-                .leaf7_ebx = EBX_AVX2 | EBX_AVX512F | EBX_AVX512DQ | EBX_AVX512VL,
-                .xcr0 = XCR0_FULL_AVX512 & ~bits[i],
-                .leaf1_valid = true, .leaf7_valid = true, .xcr0_valid = true,
-            };
-            expect(simd_avx512f_usable(&w), false, "avx512f missing one ZMM bit");
-        }
+        check_each_zmm_state_bit_is_required();
         printf("%s\n", g_fail > before ? "FAIL" : "OK");
     }
 
@@ -117,14 +247,7 @@ int test_simd_os_support(void)
     printf("AVX2 in CPUID + YMM state OFF -> unusable... ");
     {
         int before = g_fail;
-        struct simd_cpu_words w = {
-            .leaf1_ecx = ECX_XSAVE | ECX_OSXSAVE | ECX_AVX,
-            .leaf7_ebx = EBX_AVX2 | EBX_AVX512F,
-            .xcr0 = XCR0_X87_SSE,
-            .leaf1_valid = true, .leaf7_valid = true, .xcr0_valid = true,
-        };
-        expect(simd_avx2_usable(&w), false, "avx2 with YMM state off");
-        expect(simd_avx512f_usable(&w), false, "avx512f with YMM state off");
+        check_avx2_advertised_without_ymm_state();
         printf("%s\n", g_fail > before ? "FAIL" : "OK");
     }
 
@@ -133,14 +256,7 @@ int test_simd_os_support(void)
     printf("OSXSAVE clear -> every tier unusable... ");
     {
         int before = g_fail;
-        struct simd_cpu_words w = {
-            .leaf1_ecx = ECX_XSAVE | ECX_AVX,   /* no OSXSAVE */
-            .leaf7_ebx = EBX_AVX2 | EBX_AVX512F | EBX_AVX512DQ | EBX_AVX512VL,
-            .xcr0 = XCR0_FULL_AVX512,           /* stale/unreadable */
-            .leaf1_valid = true, .leaf7_valid = true, .xcr0_valid = false,
-        };
-        expect(simd_avx2_usable(&w), false, "avx2 without OSXSAVE");
-        expect(simd_avx512f_usable(&w), false, "avx512f without OSXSAVE");
+        check_no_osxsave_refuses_every_tier();
         printf("%s\n", g_fail > before ? "FAIL" : "OK");
     }
 
@@ -148,20 +264,7 @@ int test_simd_os_support(void)
     printf("unreadable CPUID leaf -> unusable... ");
     {
         int before = g_fail;
-        struct simd_cpu_words w = {
-            .leaf1_ecx = ECX_XSAVE | ECX_OSXSAVE | ECX_AVX,
-            .leaf7_ebx = EBX_AVX2 | EBX_AVX512F,
-            .xcr0 = XCR0_FULL_AVX512,
-            .leaf1_valid = true, .leaf7_valid = false, .xcr0_valid = true,
-        };
-        expect(simd_avx2_usable(&w), false, "avx2 with leaf7 unreadable");
-        expect(simd_avx512f_usable(&w), false, "avx512f with leaf7 unreadable");
-
-        struct simd_cpu_words z;
-        memset(&z, 0, sizeof z);
-        expect(simd_avx2_usable(&z), false, "avx2 on all-zero words");
-        expect(simd_avx512f_usable(&z), false, "avx512f on all-zero words");
-        expect(simd_avx512_dq_vl_usable(&z), false, "avx512dq/vl on all-zero words");
+        check_unreadable_leaf_and_zero_words_refused();
         printf("%s\n", g_fail > before ? "FAIL" : "OK");
     }
 
@@ -170,20 +273,7 @@ int test_simd_os_support(void)
     printf("fully enabled AVX-512 host -> usable... ");
     {
         int before = g_fail;
-        struct simd_cpu_words w = {
-            .leaf1_ecx = ECX_XSAVE | ECX_OSXSAVE | ECX_AVX,
-            .leaf7_ebx = EBX_AVX2 | EBX_AVX512F | EBX_AVX512DQ | EBX_AVX512VL,
-            .xcr0 = XCR0_FULL_AVX512,
-            .leaf1_valid = true, .leaf7_valid = true, .xcr0_valid = true,
-        };
-        expect(simd_avx2_usable(&w), true, "avx2 on a full host");
-        expect(simd_avx512f_usable(&w), true, "avx512f on a full host");
-        expect(simd_avx512_dq_vl_usable(&w), true, "avx512dq/vl on a full host");
-
-        /* DQ/VL are a strict superset requirement of F. */
-        w.leaf7_ebx &= ~EBX_AVX512VL;
-        expect(simd_avx512f_usable(&w), true, "avx512f without VL");
-        expect(simd_avx512_dq_vl_usable(&w), false, "avx512dq/vl without VL");
+        check_fully_enabled_host_is_usable();
         printf("%s\n", g_fail > before ? "FAIL" : "OK");
     }
 
@@ -193,23 +283,7 @@ int test_simd_os_support(void)
     printf("live probe is self-consistent... ");
     {
         int before = g_fail;
-        struct simd_cpu_words w;
-        simd_cpu_words_probe(&w);
-
-        if (simd_avx512f_usable(&w)) {
-            expect(w.xcr0_valid, true, "avx512f yes implies xcr0 was read");
-            expect((w.xcr0 & SIMD_XCR0_AVX512_MASK) == SIMD_XCR0_AVX512_MASK,
-                   true, "avx512f yes implies every ZMM state bit set");
-        }
-        if (simd_avx2_usable(&w)) {
-            expect(w.xcr0_valid, true, "avx2 yes implies xcr0 was read");
-            expect((w.xcr0 & SIMD_XCR0_AVX_MASK) == SIMD_XCR0_AVX_MASK,
-                   true, "avx2 yes implies SSE+YMM state set");
-        }
-        /* The cached accessors must agree with the one-shot policy. */
-        expect(simd_host_has_avx2(), simd_avx2_usable(&w), "cached avx2 answer");
-        expect(simd_host_has_avx512f(), simd_avx512f_usable(&w),
-               "cached avx512f answer");
+        struct simd_cpu_words w = probe_and_check_self_consistency();
         printf("%s\n", g_fail > before ? "FAIL" : "OK");
 
         printf("  host: avx2=%d avx512f=%d xcr0=0x%llx (valid=%d)\n",
@@ -224,40 +298,7 @@ int test_simd_os_support(void)
     printf("blake2b batch dispatch matches sequential... ");
     {
         int before = g_fail;
-        struct blake2b_ctx base;
-        uint8_t personal[BLAKE2B_PERSONALBYTES] = {0};
-        memcpy(personal, "ZcashPoW", 8);
-        blake2b_init_salt_personal(&base, 50, NULL, 0, NULL, personal);
-        blake2b_update(&base, (const uint8_t *)"dispatch-fix", 12);
-
-        uint32_t idx[8];
-        for (int i = 0; i < 8; i++) idx[i] = (uint32_t)(i * 7919u + 3u);
-
-        unsigned char got[8][64];
-        unsigned char *gp[8];
-        for (int i = 0; i < 8; i++) gp[i] = got[i];
-        equihash_generate_hash_batch8(&base, idx, gp, 50);
-
-        for (int i = 0; i < 8; i++) {
-            unsigned char want[64];
-            struct blake2b_ctx s = base;
-            blake2b_update(&s, (const uint8_t *)&idx[i], sizeof(uint32_t));
-            blake2b_final(&s, want, 50);
-            if (memcmp(want, got[i], 50) != 0) {
-                printf("\n  batch8 lane %d differs from sequential\n", i);
-                g_fail++;
-            }
-        }
-
-        unsigned char a[64], b[64], c[64], d[64];
-        equihash_generate_hash_batch4(&base, idx, a, b, c, d, 50);
-        unsigned char *four[4] = {a, b, c, d};
-        for (int i = 0; i < 4; i++) {
-            if (memcmp(four[i], got[i], 50) != 0) {
-                printf("\n  batch4 lane %d differs from batch8\n", i);
-                g_fail++;
-            }
-        }
+        check_blake2b_batch_matches_sequential();
         printf("%s\n", g_fail > before ? "FAIL" : "OK");
     }
 
