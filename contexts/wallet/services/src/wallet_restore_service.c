@@ -261,6 +261,39 @@ static bool wrs_is_encrypted(const char *path)
 #endif
 }
 
+/* Add one table's presence flag and row counts to the report totals. */
+static void wrs_accumulate_table_counts(
+    struct wallet_restore_report *rep,
+    const struct wallet_restore_table_report *t)
+{
+    if (t->in_backup)
+        rep->tables_in_backup++;
+    if (t->rows_in_backup > 0)
+        rep->total_rows_in_backup += t->rows_in_backup;
+    if (t->rows_inserted > 0)
+        rep->total_inserted += t->rows_inserted;
+    if (t->rows_collided > 0)
+        rep->total_collided += t->rows_collided;
+    if (t->rows_rejected > 0)
+        rep->total_rejected += t->rows_rejected;
+}
+
+/* Count one table's manifest entry and flag a claimed row count that
+ * disagrees with what the backup actually holds. */
+static void wrs_check_table_manifest(
+    struct wallet_restore_report *rep,
+    const struct wallet_restore_table_report *t)
+{
+    if (t->manifest_row_count >= 0 || t->manifest_present_in_source) {
+        rep->manifest_rows++;
+        int64_t claimed = t->manifest_row_count;
+        int64_t actual = t->rows_in_backup < 0 ? 0 : t->rows_in_backup;
+        if (t->manifest_present_in_source && claimed >= 0 &&
+            claimed != actual)
+            rep->manifest_mismatches++;
+    }
+}
+
 /* Roll up the per-table numbers and flag manifest disagreements. */
 static void wrs_summarize(struct wallet_restore_report *rep)
 {
@@ -273,24 +306,8 @@ static void wrs_summarize(struct wallet_restore_report *rep)
     rep->manifest_mismatches = 0;
     for (size_t i = 0; i < rep->n_tables; i++) {
         const struct wallet_restore_table_report *t = &rep->tables[i];
-        if (t->in_backup)
-            rep->tables_in_backup++;
-        if (t->rows_in_backup > 0)
-            rep->total_rows_in_backup += t->rows_in_backup;
-        if (t->rows_inserted > 0)
-            rep->total_inserted += t->rows_inserted;
-        if (t->rows_collided > 0)
-            rep->total_collided += t->rows_collided;
-        if (t->rows_rejected > 0)
-            rep->total_rejected += t->rows_rejected;
-        if (t->manifest_row_count >= 0 || t->manifest_present_in_source) {
-            rep->manifest_rows++;
-            int64_t claimed = t->manifest_row_count;
-            int64_t actual = t->rows_in_backup < 0 ? 0 : t->rows_in_backup;
-            if (t->manifest_present_in_source && claimed >= 0 &&
-                claimed != actual)
-                rep->manifest_mismatches++;
-        }
+        wrs_accumulate_table_counts(rep, t);
+        wrs_check_table_manifest(rep, t);
     }
     if (rep->manifest_rows == 0)
         wrs_warn(rep, "backup_has_no_manifest");
