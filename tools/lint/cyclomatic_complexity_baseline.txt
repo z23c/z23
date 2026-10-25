@@ -33,7 +33,6 @@ cognition/controllers/src/agent_session_client.c:asc_call:17
 cognition/controllers/src/agent_session_controller.c:ags_liquidity:20
 cognition/controllers/src/agent_session_controller.c:rpc_agentsession:16
 cognition/controllers/src/agent_test_controller.c:rpc_agent_test:23
-cognition/controllers/src/event_agent_peers.c:agent_peer_snapshot_collect:30
 cognition/controllers/src/event_agent_summary.c:rpc_agent_summary:30
 cognition/models/src/agent_session.c:agent_session_authorize_internal:38
 cognition/models/src/zcode_science.c:db_zcode_science_study_list_filtered:18

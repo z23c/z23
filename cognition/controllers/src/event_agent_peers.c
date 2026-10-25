@@ -134,6 +134,79 @@ static bool agent_peer_load_cache(int *peer_count,
     return false; // raw-return-ok:cache-miss-or-concurrent-writer
 }
 
+static size_t agent_peer_count_as_size(int count)
+{
+    return count > 0 ? (size_t)count : 0;
+}
+
+static void agent_peer_update_node_readiness(struct p2p_node *node,
+                                             enum peer_state state,
+                                             int *ready_count,
+                                             bool *ready_known)
+{
+    bool handshake_ready = state == PEER_HANDSHAKE_COMPLETE ||
+                           state == PEER_ACTIVE;
+    if (handshake_ready && (node->services & NODE_NETWORK) != 0)
+        (*ready_count)++;
+    else if (state < 0 || state >= PEER_NUM_STATES)
+        *ready_known = false;
+}
+
+static void agent_peer_track_best_height(struct p2p_node *node,
+                                         int *peer_best_height,
+                                         bool *peer_best_height_known)
+{
+    if ((node->services & NODE_NETWORK) != 0 &&
+        node->starting_height >= 0) {
+        if (!*peer_best_height_known ||
+            node->starting_height > *peer_best_height)
+            *peer_best_height = node->starting_height;
+        *peer_best_height_known = true;
+    }
+}
+
+static void agent_peer_scan_node(struct p2p_node *node,
+                                 int *peer_count,
+                                 int *inbound_count,
+                                 int *outbound_count,
+                                 int *ready_count,
+                                 int *peer_best_height,
+                                 int *magicbean_peer_count,
+                                 int *zclassic23_peer_count,
+                                 bool *direction_known,
+                                 bool *ready_known,
+                                 bool *peer_best_height_known)
+{
+    if (!node) {
+        *direction_known = false;
+        *ready_known = false;
+        return;
+    }
+    enum peer_state state = atomic_load_explicit(
+        &node->state, memory_order_acquire);
+    if (atomic_load_explicit(&node->disconnect, memory_order_acquire))
+        return;
+    if (*peer_count < INT_MAX)
+        (*peer_count)++;
+    if (node->inbound)
+        (*inbound_count)++;
+    else
+        (*outbound_count)++;
+    agent_peer_update_node_readiness(node, state, ready_count,
+                                     ready_known);
+    if (state < PEER_HANDSHAKE_COMPLETE)
+        return;
+    agent_peer_track_best_height(node, peer_best_height,
+                                 peer_best_height_known);
+    bool is_mb = false, is_z23 = false;
+    msg_version_classify_peer(node->sub_ver, node->services,
+                              &is_mb, &is_z23);
+    if (is_mb)
+        (*magicbean_peer_count)++;
+    if (is_z23)
+        (*zclassic23_peer_count)++;
+}
+
 void agent_peer_snapshot_collect(struct agent_peer_snapshot *out,
                                  struct connman *cm)
 {
@@ -162,45 +235,13 @@ void agent_peer_snapshot_collect(struct agent_peer_snapshot *out,
 
     if (zcl_mutex_trylock(&cm->manager.cs_nodes)) {
         for (size_t i = 0; i < cm->manager.num_nodes; i++) {
-            struct p2p_node *node = cm->manager.nodes[i];
-            if (!node) {
-                direction_known = false;
-                ready_known = false;
-                continue;
-            }
-            enum peer_state state = atomic_load_explicit(
-                &node->state, memory_order_acquire);
-            if (atomic_load_explicit(&node->disconnect,
-                                     memory_order_acquire))
-                continue;
-            if (peer_count < INT_MAX)
-                peer_count++;
-            if (node->inbound)
-                inbound_count++;
-            else
-                outbound_count++;
-            bool handshake_ready = state == PEER_HANDSHAKE_COMPLETE ||
-                                   state == PEER_ACTIVE;
-            if (handshake_ready && (node->services & NODE_NETWORK) != 0)
-                ready_count++;
-            else if (state < 0 || state >= PEER_NUM_STATES)
-                ready_known = false;
-            if (state < PEER_HANDSHAKE_COMPLETE)
-                continue;
-            if ((node->services & NODE_NETWORK) != 0 &&
-                node->starting_height >= 0) {
-                if (!peer_best_height_known ||
-                    node->starting_height > peer_best_height)
-                    peer_best_height = node->starting_height;
-                peer_best_height_known = true;
-            }
-            bool is_mb = false, is_z23 = false;
-            msg_version_classify_peer(node->sub_ver, node->services,
-                                      &is_mb, &is_z23);
-            if (is_mb)
-                magicbean_peer_count++;
-            if (is_z23)
-                zclassic23_peer_count++;
+            agent_peer_scan_node(cm->manager.nodes[i], &peer_count,
+                                 &inbound_count, &outbound_count,
+                                 &ready_count, &peer_best_height,
+                                 &magicbean_peer_count,
+                                 &zclassic23_peer_count,
+                                 &direction_known, &ready_known,
+                                 &peer_best_height_known);
         }
         zcl_mutex_unlock(&cm->manager.cs_nodes);
         sampled_at = (int64_t)platform_time_wall_time_t();
@@ -235,17 +276,17 @@ void agent_peer_snapshot_collect(struct agent_peer_snapshot *out,
         return;
     }
 
-    out->peer_count = peer_count > 0 ? (size_t)peer_count : 0;
-    out->inbound_count = inbound_count > 0 ? (size_t)inbound_count : 0;
-    out->outbound_count = outbound_count > 0 ? (size_t)outbound_count : 0;
-    out->ready_count = ready_count > 0 ? (size_t)ready_count : 0;
+    out->peer_count = agent_peer_count_as_size(peer_count);
+    out->inbound_count = agent_peer_count_as_size(inbound_count);
+    out->outbound_count = agent_peer_count_as_size(outbound_count);
+    out->ready_count = agent_peer_count_as_size(ready_count);
     out->peer_best_height = peer_best_height;
     out->generation = generation;
     out->direction_known = direction_known;
     out->ready_known = ready_known;
     out->peer_best_height_known = peer_best_height_known;
     out->magicbean_peer_count =
-        magicbean_peer_count > 0 ? (size_t)magicbean_peer_count : 0;
+        agent_peer_count_as_size(magicbean_peer_count);
     out->zclassic_c23_peer_count =
-        zclassic23_peer_count > 0 ? (size_t)zclassic23_peer_count : 0;
+        agent_peer_count_as_size(zclassic23_peer_count);
 }
