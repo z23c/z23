@@ -529,12 +529,12 @@ static bool purge_tx_when_last_utxo_gone(struct wallet_rpc_context *ctx,
                                          int *txs_deleted)
 {
     int remaining = db_wallet_utxo_count_for_tx(ctx->node_db, u->txid);
-    if (remaining == 0) {
-        if (!db_wallet_tx_delete(ctx->node_db, u->txid))
-            return false;
+    if (remaining != 0)
+        return true;
+    bool deleted = db_wallet_tx_delete(ctx->node_db, u->txid);
+    if (deleted)
         (*txs_deleted)++;
-    }
-    return true;
+    return deleted;
 }
 /* One pass over the wallet UTXO list: purge phantom entries (and their
  * transaction rows once emptied). On a failed delete, returns false and
