@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creiton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Who is on the other end: the broker's peer-identity surface.
  *
@@ -163,10 +163,6 @@ bool agent_broker_identify_peer(int fd, struct agent_peer_cred *out)
 #endif
 }
 
-/* ── expectation check ─────────────────────────────────────────────────── */
-
-/* Fail closed before any comparison: a null credential or expectation, and
- * a credential the kernel never supplied, are each refusals with a reason. */
 static bool authorization_inputs_valid(const struct agent_peer_cred *c,
                                        const struct agent_peer_expectation *e,
                                        char *why, size_t why_cap)
