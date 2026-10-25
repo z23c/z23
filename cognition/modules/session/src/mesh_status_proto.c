@@ -218,6 +218,48 @@ static bool receipt_status_valid(enum mesh_status_receipt_status status)
            status <= MESH_STATUS_RECEIPT_INTERNAL;
 }
 
+static bool receipt_capsule_len_conflicts_with_status(
+    const struct mesh_status_receipt_v1 *receipt)
+{
+    return (receipt->status == MESH_STATUS_RECEIPT_OK &&
+            receipt->capsule_len == 0) ||
+           (receipt->status != MESH_STATUS_RECEIPT_OK &&
+            receipt->capsule_len != 0);
+}
+
+static bool receipt_critical_fields_set(
+    const struct mesh_status_receipt_v1 *receipt)
+{
+    const uint8_t *critical[] = {
+        receipt->request_id, receipt->request_root,
+        receipt->network_genesis, receipt->pairing_id,
+        receipt->responder_master_pubkey, receipt->responder_online_pubkey,
+        receipt->responder_noise_static, receipt->transcript_hash,
+    };
+    for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
+        if (!zcl_bytes_any_set(critical[i], 32))
+            return false;
+    return true;
+}
+
+static bool receipt_capsule_root_matches(
+    const struct mesh_status_receipt_v1 *receipt)
+{
+    uint8_t capsule_root[32];
+    enum mesh_status_proto_error error = mesh_status_capsule_v1_root(
+        receipt->capsule, receipt->capsule_len, capsule_root);
+    bool root_ok = error == MESH_STATUS_PROTO_OK &&
+                   memcmp(capsule_root, receipt->capsule_root, 32) == 0;
+    memory_cleanse(capsule_root, sizeof(capsule_root));
+    return root_ok;
+}
+
+static bool receipt_signature_missing(
+    const struct mesh_status_receipt_v1 *receipt, bool require_signature)
+{
+    return require_signature && !zcl_bytes_any_set(receipt->signature, 64);
+}
+
 static enum mesh_status_proto_error receipt_shape(
     const struct mesh_status_receipt_v1 *receipt, bool require_signature)
 {
@@ -231,33 +273,17 @@ static enum mesh_status_proto_error receipt_shape(
         return MESH_STATUS_PROTO_STATUS;
     if (receipt->capsule_len > MESH_STATUS_CAPSULE_MAX)
         return MESH_STATUS_PROTO_SIZE;
-    if ((receipt->status == MESH_STATUS_RECEIPT_OK &&
-         receipt->capsule_len == 0) ||
-        (receipt->status != MESH_STATUS_RECEIPT_OK &&
-         receipt->capsule_len != 0))
+    if (receipt_capsule_len_conflicts_with_status(receipt))
         return MESH_STATUS_PROTO_STATUS;
-    const uint8_t *critical[] = {
-        receipt->request_id, receipt->request_root,
-        receipt->network_genesis, receipt->pairing_id,
-        receipt->responder_master_pubkey, receipt->responder_online_pubkey,
-        receipt->responder_noise_static, receipt->transcript_hash,
-    };
-    for (size_t i = 0; i < sizeof(critical) / sizeof(critical[0]); i++)
-        if (!zcl_bytes_any_set(critical[i], 32))
-            return MESH_STATUS_PROTO_FIELD;
+    if (!receipt_critical_fields_set(receipt))
+        return MESH_STATUS_PROTO_FIELD;
     if (receipt->connection_generation == 0)
         return MESH_STATUS_PROTO_FIELD;
     if (!lifetime_valid(receipt->observed_unix, receipt->expires_unix))
         return MESH_STATUS_PROTO_TIME;
-    uint8_t capsule_root[32];
-    enum mesh_status_proto_error error = mesh_status_capsule_v1_root(
-        receipt->capsule, receipt->capsule_len, capsule_root);
-    bool root_ok = error == MESH_STATUS_PROTO_OK &&
-                   memcmp(capsule_root, receipt->capsule_root, 32) == 0;
-    memory_cleanse(capsule_root, sizeof(capsule_root));
-    if (!root_ok)
+    if (!receipt_capsule_root_matches(receipt))
         return MESH_STATUS_PROTO_CAPSULE_ROOT;
-    if (require_signature && !zcl_bytes_any_set(receipt->signature, 64))
+    if (receipt_signature_missing(receipt, require_signature))
         return MESH_STATUS_PROTO_SIGNATURE;
     return MESH_STATUS_PROTO_OK;
 }
