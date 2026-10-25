@@ -76,7 +76,7 @@ static bool sc_scan_one(const char *root, struct sc_task *t, char *buf)
     if (snprintf(range, sizeof(range), "origin/main...%s", t->head) >=
         (int)sizeof(range))
         return false;
-    return sc_git(root, "diff", "--name-only", range, NULL, buf) == 0 &&
+    return sc_git(root, "diff", "--name-only", "--no-renames", range, buf) == 0 &&
            cx_set_add_lines(&t->files, buf);
 }
 
@@ -138,7 +138,8 @@ static bool sc_block_task(const char *block, size_t len, struct sc_task *t)
     return t->path[0] && !bare && !prunable && access(t->path, F_OK) == 0;
 }
 
-static struct sc_task *sc_tasks(const char *list, size_t *count)
+/* NULL with *count == 0 is an empty list only when *ok stays true. */
+static struct sc_task *sc_tasks(const char *list, size_t *count, bool *ok)
 {
     struct sc_task *tasks = NULL;
     size_t n = 0, cap = 0;
@@ -148,9 +149,15 @@ static struct sc_task *sc_tasks(const char *list, size_t *count)
         struct sc_task t;
         if (n == cap) {
             cap = cap ? cap * 2 : 64;
-            tasks = zcl_realloc(tasks, cap * sizeof(*tasks), "dev_cx.scan.tasks");
-            if (!tasks)
+            struct sc_task *grown = zcl_realloc(tasks, cap * sizeof(*tasks),
+                                                "dev_cx.scan.tasks");
+            if (!grown) {
+                free(tasks);
+                *count = 0;
+                *ok = false;
                 return NULL;
+            }
+            tasks = grown;
         }
         if (sc_block_task(p, len, &t))
             tasks[n++] = t;
@@ -189,9 +196,10 @@ bool cx_changed_files(const char *root, struct cx_set *out, char *why,
     if (!buf)
         return false;
     if (sc_git(root, "worktree", "list", "--porcelain", NULL, buf) == 0) {
-        pool.tasks = sc_tasks(buf, &pool.n);
+        bool listed = true;
+        pool.tasks = sc_tasks(buf, &pool.n, &listed);
         pool.root = root;
-        if (pool.tasks || pool.n == 0) {
+        if (listed) {
             sc_run_pool(&pool);
             ok = sc_merge(&pool, out, why, why_cap);
         }

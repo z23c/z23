@@ -10,6 +10,7 @@
 
 #include "command/native_command.h"
 #include "command/native_dev_cx.h"
+#include "base/safe_alloc.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "util/spawn.h"
@@ -250,6 +251,7 @@ static void cxt_next_repo(char *dir, size_t cap)
     cxt_src(dir, "src/vault_x.c", 16, 0);
     cxt_src(dir, "src/changed.c", 16, 0);
     cxt_src(dir, "src/excl.c", 16, 0);
+    cxt_src(dir, "src/renamed_old.c", 16, 0);
     big[0] = '\0';
     for (int i = 0; i < 1400; i++)
         (void)strncat(big, "/* pad */\n", sizeof(big) - strlen(big) - 1);
@@ -259,6 +261,10 @@ static void cxt_next_repo(char *dir, size_t cap)
     (void)snprintf(wt, sizeof(wt), "%s-lane", dir);
     cxt_git(dir, "worktree", "add", "-q", "--detach", wt);
     cxt_src(wt, "src/changed.c", 16, 1);
+    (void)snprintf(wt, sizeof(wt), "%s-rename", dir);
+    cxt_git(dir, "worktree", "add", "-q", "--detach", wt);
+    cxt_git(wt, "mv", "src/renamed_old.c", "src/renamed_new.c", NULL, NULL);
+    cxt_git(wt, "commit", "-q", "-m", "rename", NULL);
 }
 
 static int cxt_test_next_order(const char *repo)
@@ -298,12 +304,13 @@ static int cxt_test_next_skips(const char *repo, const char *excl_list)
         ASSERT(strstr(order, "vault_x") == NULL);
         ASSERT(strstr(order, "large.c") == NULL);
         ASSERT(strstr(order, "changed.c") == NULL);
+        ASSERT(strstr(order, "renamed_old.c") == NULL);
         ASSERT(strstr(order, "excl.c") == NULL);
         ASSERT_EQ(cxt_skipped(&c, "sealed"), 1);
         ASSERT_EQ(cxt_skipped(&c, "custody"), 2);
         ASSERT_EQ(cxt_skipped(&c, "packages"), 1);
         ASSERT_EQ(cxt_skipped(&c, "large"), 1);
-        ASSERT_EQ(cxt_skipped(&c, "changed"), 1);
+        ASSERT_EQ(cxt_skipped(&c, "changed"), 2);
         ASSERT_EQ(cxt_skipped(&c, "excluded"), 1);
         cxt_end(&c);
         PASS();
@@ -354,6 +361,23 @@ static int cxt_test_next_refusals(const char *repo)
         PASS();
     }
 _test_next:;
+    return failures;
+}
+
+static int cxt_test_next_scan_failure(const char *repo)
+{
+    int failures = 0;
+    struct cxt_call c;
+    TEST("dev.cx.next: a failed worktree scan fails the command, not an empty scan") {
+        zcl_alloc_fault_fail_next("dev_cx.scan.tasks");
+        cxt_next(&c, repo, 5, NULL, NULL);
+        zcl_alloc_fault_clear();
+        ASSERT(cxt_code_is(&c, "NEXT_WORKTREE_SCAN"));
+        cxt_end(&c);
+        PASS();
+    }
+_test_next:;
+    zcl_alloc_fault_clear();
     return failures;
 }
 
@@ -430,6 +454,23 @@ static int cxt_test_check_scope(void)
         ASSERT(before && after && strcmp(before, after) == 0);
         free(before);
         free(after);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int cxt_test_check_untracked(void)
+{
+    int failures = 0;
+    struct cxt_call c;
+    char dir[CXT_PATH];
+    TEST("dev.cx.check: CX_SCOPE when the lone changed path is untracked") {
+        cxt_lane(dir, sizeof(dir), "untracked");
+        cxt_src(dir, "src/fresh.c", 3, 0);
+        cxt_check(&c, dir, "src/fresh.c", "big_a");
+        ASSERT(cxt_code_is(&c, "CX_SCOPE"));
+        cxt_end(&c);
         PASS();
     }
 _test_next:;
@@ -547,6 +588,8 @@ int test_dev_cx(void)
     failures += cxt_test_next_skips(repo, list);
     failures += cxt_test_next_window(repo);
     failures += cxt_test_next_refusals(repo);
+    failures += cxt_test_next_scan_failure(repo);
+    failures += cxt_test_check_untracked();
     failures += cxt_test_check_pass();
     failures += cxt_test_check_scope();
     failures += cxt_test_check_compile();

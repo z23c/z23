@@ -180,7 +180,8 @@ static const char *ck_step_scope(struct cx_check *ck)
         return "CX_SCOPE";
     }
     lines = ck_status_lines(ck->log, &only);
-    if (lines == 1 && strncmp(only, ck->file, flen) == 0 &&
+    if (lines == 1 && strncmp(only - 3, "??", 2) != 0 &&
+        strncmp(only, ck->file, flen) == 0 &&
         (only[flen] == '\n' || only[flen] == '\0'))
         return NULL;
     ck_list_paths(ck, lines ? "the diff must touch only the target file; it touches:"
@@ -295,17 +296,20 @@ static const char *ck_step_tighten(struct cx_check *ck)
 /* CX_BASELINE_ADDED: any row in the tightened file that was not there. */
 static const char *ck_step_added(struct cx_check *ck)
 {
-    struct cx_set added = {0};
-    for (size_t i = 0; i < ck->new_rows.n; i++)
-        if (!cx_set_has(&ck->old_rows, ck->new_rows.v[i]) &&
-            !cx_set_add(&added, ck->new_rows.v[i], strlen(ck->new_rows.v[i])))
-            break;
-    if (added.n == 0)
+    size_t added = 0;
+    const char *first = NULL;
+    for (size_t i = 0; i < ck->new_rows.n; i++) {
+        if (cx_set_has(&ck->old_rows, ck->new_rows.v[i]))
+            continue;
+        added++;
+        if (!first)
+            first = ck->new_rows.v[i];
+    }
+    if (added == 0)
         return NULL;
     (void)snprintf(ck->detail, sizeof(ck->detail),
                    "the change adds complexity baseline rows (%zu), first: %s",
-                   added.n, added.v[0]);
-    cx_set_free(&added);
+                   added, first);
     return "CX_BASELINE_ADDED";
 }
 
@@ -403,10 +407,10 @@ static bool ck_pass(struct zcl_command_reply *reply, const struct cx_check *ck)
     return ok;
 }
 
-static void ck_restore(const struct cx_check *ck)
+/* Puts the baseline back; false when the bytes could not be written. */
+static bool ck_restore(const struct cx_check *ck)
 {
-    if (ck->old_text)
-        (void)cx_write_file(ck->base, ck->old_text, ck->old_len);
+    return !ck->old_text || cx_write_file(ck->base, ck->old_text, ck->old_len);
 }
 
 static const char *ck_run_steps(struct cx_check *ck)
@@ -426,6 +430,19 @@ static void ck_free(struct cx_check *ck)
     free(ck->old_text);
     free(ck->log);
     free(ck);
+}
+
+/* Restores the baseline after a failure; a failed restore is its own code. */
+static const char *ck_unwind(struct cx_check *ck, const char *code)
+{
+    size_t used;
+    if (ck_restore(ck))
+        return code;
+    used = strlen(ck->detail);
+    (void)snprintf(ck->detail + used, sizeof(ck->detail) - used,
+                   "%s%s was NOT restored; run git checkout on it (was %s)",
+                   used ? "; " : "", ZCL_CX_BASELINE_REL, code);
+    return "CX_RESTORE_FAILED";
 }
 
 void zcl_native_handle_dev_cx_check(const struct zcl_command_request *request,
@@ -451,7 +468,7 @@ void zcl_native_handle_dev_cx_check(const struct zcl_command_request *request,
     if (!code && !ck_pass(reply, ck))
         code = "CX_NO_MEMORY";
     if (code) {
-        ck_restore(ck);
+        code = ck_unwind(ck, code);
         ck_reply_fail(reply, code, "dev.cx.check refused the unit",
                       ck->detail[0] ? ck->detail
                                     : "worktree, file (a .c path) and functions "

@@ -3045,7 +3045,7 @@ ZCL_COMMAND_DEV_READ(
     "worktree of this repository changes against origin/main, and the paths "
     "listed in the exclude file. prefix is a comma list of path prefixes to "
     "keep; cwd names the checkout (default: the current directory). "
-    "Read-only; a missing origin/main refuses.", 8192,
+    "Read-only; a missing origin/main refuses.", 65536,
     "cx,cyclomatic,complexity,baseline,split,swarm",
     "zcl.dev_cx_next_input.v1", "zcl.dev_cx_next.v1",
     "count,exclude,prefix,cwd", "",
