@@ -133,19 +133,14 @@ static bool growth_ensure_parents_below(const char *root, char *directory)
     return platform_directory_ensure(directory, 0700);
 }
 
-static int growth_cache_tests(void)
+static bool growth_cache_setup_fixture(const char *root, bool made,
+                                       char *source, size_t source_cap,
+                                       char *cache, size_t cache_cap)
 {
-    int failures = 0;
-    char root[PLATFORM_TEMP_PATH_MAX];
-    char source[512] = "", cache[512] = "", error[192];
-    bool made = platform_temp_directory_create(
-        "z23-code-growth-", root, sizeof(root));
-    if (!made)
-        printf("code_growth fixture temp root failed: errno=%d\n", errno);
     bool source_path_ok = made && growth_test_path(
-        source, sizeof(source), root, "lib/demo/src/a.c");
+        source, source_cap, root, "lib/demo/src/a.c");
     bool cache_path_ok = source_path_ok && growth_test_path(
-        cache, sizeof(cache), root,
+        cache, cache_cap, root,
         ".cache/z23-code-growth-private-v1/git-numstat.v1");
     const char *init[] = {"git", "-C", root, "init", "-q", NULL};
     char directory[512] = "";
@@ -162,43 +157,160 @@ static int growth_cache_tests(void)
                "directory=%d mkdir=%d init=%d write=%d errno=%d root=%s\n",
                made, source_path_ok, cache_path_ok, directory_path_ok,
                mkdir_ok, init_ok, write_ok, errno, made ? root : "(none)");
-    struct science_code_growth_history cold = {0}, warm = {0}, rebuilt = {0};
-    bool cold_ok = ready && science_code_growth_collect(
-        root, &cold, error, sizeof(error));
-    bool warm_ok = cold_ok && science_code_growth_collect(
-        root, &warm, error, sizeof(error));
-    GROWTH_CHECK("clean exact HEAD reuses its verified Git stream",
-                 warm_ok && !cold.cache_hit && warm.cache_hit &&
-                 growth_history_equal(&cold, &warm));
+    return ready;
+}
 
+static int growth_cache_check_cold_warm(
+    const char *root, bool ready, struct science_code_growth_history *cold,
+    bool *warm_ok_out, char *error, size_t error_cap)
+{
+    int failures = 0;
+    struct science_code_growth_history warm = {0};
+    bool cold_ok = ready && science_code_growth_collect(
+        root, cold, error, error_cap);
+    bool warm_ok = cold_ok && science_code_growth_collect(
+        root, &warm, error, error_cap);
+    GROWTH_CHECK("clean exact HEAD reuses its verified Git stream",
+                 warm_ok && !cold->cache_hit && warm.cache_hit &&
+                 growth_history_equal(cold, &warm));
+    *warm_ok_out = warm_ok;
+    return failures;
+}
+
+static int growth_cache_check_corrupt_rebuild(
+    const char *root, const char *cache, bool warm_ok,
+    const struct science_code_growth_history *cold,
+    char *error, size_t error_cap)
+{
+    int failures = 0;
+    struct science_code_growth_history rebuilt = {0};
     bool corrupted = warm_ok &&
         growth_test_write(cache, "not a growth cache\n");
     bool rebuilt_ok = corrupted && science_code_growth_collect(
-        root, &rebuilt, error, sizeof(error));
+        root, &rebuilt, error, error_cap);
     GROWTH_CHECK("corrupt cache falls back to exact cold reconstruction",
                  rebuilt_ok && !rebuilt.cache_hit &&
-                 growth_history_equal(&cold, &rebuilt));
+                 growth_history_equal(cold, &rebuilt));
+    return failures;
+}
 
+static int growth_cache_check_dirty_growth(
+    const char *root, const char *source,
+    const struct science_code_growth_history *cold,
+    char *error, size_t error_cap)
+{
+    int failures = 0;
     bool dirtied = growth_test_write(
         source, "int answer(void) { return 42; }\nint more(void) { return 1; }\n");
     struct science_code_growth_history dirty = {0};
     GROWTH_CHECK("dirty maintained source cannot reuse stale evidence",
                  dirtied && !science_code_growth_collect(
-                     root, &dirty, error, sizeof(error)) &&
+                     root, &dirty, error, error_cap) &&
                  strstr(error, "disagrees") != NULL);
 
     bool committed = dirtied && growth_test_commit(root, "grow");
     struct science_code_growth_history advanced = {0}, advanced_warm = {0};
     bool advanced_ok = committed && science_code_growth_collect(
-        root, &advanced, error, sizeof(error));
+        root, &advanced, error, error_cap);
     bool advanced_warm_ok = advanced_ok && science_code_growth_collect(
-        root, &advanced_warm, error, sizeof(error));
+        root, &advanced_warm, error, error_cap);
     GROWTH_CHECK("new first-parent HEAD extends then seals the exact result",
                  advanced_warm_ok && advanced.cache_hit &&
                  advanced_warm.cache_hit &&
-                 advanced.non_test_lines == cold.non_test_lines + 1u &&
+                 advanced.non_test_lines == cold->non_test_lines + 1u &&
                  growth_history_equal(&advanced, &advanced_warm));
+    return failures;
+}
+
+static int growth_cache_tests(void)
+{
+    int failures = 0;
+    char root[PLATFORM_TEMP_PATH_MAX];
+    char source[512] = "", cache[512] = "", error[192];
+    bool made = platform_temp_directory_create(
+        "z23-code-growth-", root, sizeof(root));
+    if (!made)
+        printf("code_growth fixture temp root failed: errno=%d\n", errno);
+    bool ready = growth_cache_setup_fixture(
+        root, made, source, sizeof(source), cache, sizeof(cache));
+    struct science_code_growth_history cold = {0};
+    bool warm_ok = false;
+    failures += growth_cache_check_cold_warm(
+        root, ready, &cold, &warm_ok, error, sizeof(error));
+    failures += growth_cache_check_corrupt_rebuild(
+        root, cache, warm_ok, &cold, error, sizeof(error));
+    failures += growth_cache_check_dirty_growth(
+        root, source, &cold, error, sizeof(error));
     if (made) (void)zcl_tree_remove(root);
+    return failures;
+}
+
+static int growth_check_every_utc_day(
+    bool parsed, const struct science_code_growth_history *history)
+{
+    int failures = 0;
+    GROWTH_CHECK("every UTC day is reconstructed",
+                 parsed && history->day_count == 3u &&
+                 strcmp(history->days[0].date, "1970-01-01") == 0 &&
+                 strcmp(history->days[1].date, "1970-01-02") == 0 &&
+                 strcmp(history->days[2].date, "1970-01-03") == 0);
+    return failures;
+}
+
+static int growth_check_inactive_day_totals(
+    bool parsed, const struct science_code_growth_history *history)
+{
+    int failures = 0;
+    GROWTH_CHECK("inactive days carry totals without inventing changes",
+                 parsed && history->days[1].commits == 0u &&
+                 history->days[1].non_test_added == 0u &&
+                 history->days[1].non_test_deleted == 0u &&
+                 history->days[1].test_added == 0u &&
+                 history->days[1].test_deleted == 0u &&
+                 history->days[1].non_test_lines == 15u &&
+                 history->days[1].test_lines == 5u);
+    return failures;
+}
+
+static int growth_check_line_totals_and_head(
+    bool parsed, const struct science_code_growth_history *history)
+{
+    int failures = 0;
+    GROWTH_CHECK("maintained documentation source is counted; binary rows are not",
+                 parsed && history->days[0].non_test_added == 15u &&
+                 history->days[0].test_added == 5u);
+    GROWTH_CHECK("non-test and test totals remain separate",
+                 parsed && history->non_test_lines == 17u &&
+                 history->test_lines == 8u &&
+                 history->days[2].non_test_lines == 17u &&
+                 history->days[2].test_lines == 8u);
+    GROWTH_CHECK("the day's exact last commit is retained for evidence",
+                 parsed && strcmp(history->days[2].head_commit,
+                     "0000000000000000000000000000000000000002") == 0);
+    return failures;
+}
+
+static int growth_check_parse_refusals(
+    struct science_code_growth_history *history, char *error,
+    size_t error_cap)
+{
+    int failures = 0;
+    static const char underflow[] =
+        "@@0000000000000000000000000000000000000001\t0\n"
+        "0\t1\tlib/demo/src/a.c\n";
+    memset(history, 0xa5, sizeof(*history));
+    GROWTH_CHECK("a deletion outside reconstructed history refuses",
+                 !science_code_growth_parse(
+                     underflow, sizeof(underflow) - 1u, history,
+                     error, error_cap) &&
+                 strstr(error, "deletes lines") != NULL);
+
+    static const char malformed[] =
+        "@@not-a-commit\t0\n1\t0\tlib/demo/src/a.c\n";
+    GROWTH_CHECK("a malformed Git header refuses",
+                 !science_code_growth_parse(
+                     malformed, sizeof(malformed) - 1u, history,
+                     error, error_cap));
     return failures;
 }
 
@@ -219,47 +331,10 @@ int test_code_growth(void)
     char error[160];
     bool parsed = science_code_growth_parse(
         stream, sizeof(stream) - 1u, &history, error, sizeof(error));
-    GROWTH_CHECK("every UTC day is reconstructed",
-                 parsed && history.day_count == 3u &&
-                 strcmp(history.days[0].date, "1970-01-01") == 0 &&
-                 strcmp(history.days[1].date, "1970-01-02") == 0 &&
-                 strcmp(history.days[2].date, "1970-01-03") == 0);
-    GROWTH_CHECK("inactive days carry totals without inventing changes",
-                 parsed && history.days[1].commits == 0u &&
-                 history.days[1].non_test_added == 0u &&
-                 history.days[1].non_test_deleted == 0u &&
-                 history.days[1].test_added == 0u &&
-                 history.days[1].test_deleted == 0u &&
-                 history.days[1].non_test_lines == 15u &&
-                 history.days[1].test_lines == 5u);
-    GROWTH_CHECK("maintained documentation source is counted; binary rows are not",
-                 parsed && history.days[0].non_test_added == 15u &&
-                 history.days[0].test_added == 5u);
-    GROWTH_CHECK("non-test and test totals remain separate",
-                 parsed && history.non_test_lines == 17u &&
-                 history.test_lines == 8u &&
-                 history.days[2].non_test_lines == 17u &&
-                 history.days[2].test_lines == 8u);
-    GROWTH_CHECK("the day's exact last commit is retained for evidence",
-                 parsed && strcmp(history.days[2].head_commit,
-                     "0000000000000000000000000000000000000002") == 0);
-
-    static const char underflow[] =
-        "@@0000000000000000000000000000000000000001\t0\n"
-        "0\t1\tlib/demo/src/a.c\n";
-    memset(&history, 0xa5, sizeof(history));
-    GROWTH_CHECK("a deletion outside reconstructed history refuses",
-                 !science_code_growth_parse(
-                     underflow, sizeof(underflow) - 1u, &history,
-                     error, sizeof(error)) &&
-                 strstr(error, "deletes lines") != NULL);
-
-    static const char malformed[] =
-        "@@not-a-commit\t0\n1\t0\tlib/demo/src/a.c\n";
-    GROWTH_CHECK("a malformed Git header refuses",
-                 !science_code_growth_parse(
-                     malformed, sizeof(malformed) - 1u, &history,
-                     error, sizeof(error)));
+    failures += growth_check_every_utc_day(parsed, &history);
+    failures += growth_check_inactive_day_totals(parsed, &history);
+    failures += growth_check_line_totals_and_head(parsed, &history);
+    failures += growth_check_parse_refusals(&history, error, sizeof(error));
     failures += growth_cache_tests();
     return failures;
 }
