@@ -198,6 +198,41 @@ bool vcs_zcode_dht_service_persistence_save(struct vcs_zcode_dht_service *s) {
   return written;
 }
 
+static bool contacts_file_size_rejected(
+    const struct platform_positioned_file *file,
+    struct platform_positioned_file_snapshot *before) {
+  return !platform_positioned_file_snapshot(file, before) ||
+         before->size < VCS_ZCODE_DHT_CONTACTS_HEADER_BYTES ||
+         before->size > VCS_ZCODE_DHT_CONTACTS_MAX_WIRE_BYTES;
+}
+
+static bool contacts_file_read_stable(
+    const struct platform_positioned_file *file, uint8_t *wire, size_t len,
+    const struct platform_positioned_file_snapshot *before,
+    struct platform_positioned_file_snapshot *after) {
+  return platform_positioned_file_read(file, wire, len, 0) == (int64_t)len &&
+         platform_positioned_file_snapshot(file, after) &&
+         before->size == after->size && before->volume == after->volume &&
+         before->file_low == after->file_low &&
+         before->file_high == after->file_high &&
+         before->modified_seconds == after->modified_seconds &&
+         before->modified_nanoseconds == after->modified_nanoseconds &&
+         before->changed_seconds == after->changed_seconds &&
+         before->changed_nanoseconds == after->changed_nanoseconds;
+}
+
+static bool contacts_fill_table(struct vcs_zcode_dht_table *tmp,
+                                 const uint8_t self_id[32],
+                                 const struct vcs_zcode_dht_contact *contacts,
+                                 uint32_t count, enum vcs_zcode_dht_error e,
+                                 uint64_t now) {
+  bool ok = e == VCS_ZCODE_DHT_OK && vcs_zcode_dht_table_init(tmp, self_id);
+  for (uint32_t i = 0; ok && i < count; i++)
+    ok = vcs_zcode_dht_table_add_contact(tmp, &contacts[i], (int64_t)now) ==
+         VCS_ZCODE_DHT_ADD_ADDED;
+  return ok;
+}
+
 bool vcs_zcode_dht_service_persistence_load(struct vcs_zcode_dht_service *s,
                                             uint64_t now) {
   char path[1400];
@@ -208,9 +243,7 @@ bool vcs_zcode_dht_service_persistence_load(struct vcs_zcode_dht_service *s,
   platform_positioned_file_init(&file);
   if (!platform_positioned_file_open(&file, path))
     return platform_private_path_absent(path);
-  if (!platform_positioned_file_snapshot(&file, &before) ||
-      before.size < VCS_ZCODE_DHT_CONTACTS_HEADER_BYTES ||
-      before.size > VCS_ZCODE_DHT_CONTACTS_MAX_WIRE_BYTES) {
+  if (contacts_file_size_rejected(&file, &before)) {
     platform_positioned_file_close(&file);
     vcs_zcode_dht_service_set_error(s, "contacts file size invalid");
     return false;
@@ -228,16 +261,7 @@ bool vcs_zcode_dht_service_persistence_load(struct vcs_zcode_dht_service *s,
     vcs_zcode_dht_service_set_error(s, "contacts load allocation failed");
     return false;
   }
-  bool stable = platform_positioned_file_read(&file, wire, len, 0) ==
-                    (int64_t)len &&
-                platform_positioned_file_snapshot(&file, &after) &&
-                before.size == after.size && before.volume == after.volume &&
-                before.file_low == after.file_low &&
-                before.file_high == after.file_high &&
-                before.modified_seconds == after.modified_seconds &&
-                before.modified_nanoseconds == after.modified_nanoseconds &&
-                before.changed_seconds == after.changed_seconds &&
-                before.changed_nanoseconds == after.changed_nanoseconds;
+  bool stable = contacts_file_read_stable(&file, wire, len, &before, &after);
   platform_positioned_file_close(&file);
   uint32_t count = 0;
   enum vcs_zcode_dht_error e =
@@ -247,10 +271,7 @@ bool vcs_zcode_dht_service_persistence_load(struct vcs_zcode_dht_service *s,
                 s->transport_ctx, contacts, VCS_ZCODE_DHT_MAX_CONTACTS, &count)
           : VCS_ZCODE_DHT_ERR_WIRE_SIZE;
   free(wire);
-  bool ok = e == VCS_ZCODE_DHT_OK && vcs_zcode_dht_table_init(tmp, s->self_id);
-  for (uint32_t i = 0; ok && i < count; i++)
-    ok = vcs_zcode_dht_table_add_contact(tmp, &contacts[i], (int64_t)now) ==
-         VCS_ZCODE_DHT_ADD_ADDED;
+  bool ok = contacts_fill_table(tmp, s->self_id, contacts, count, e, now);
   free(contacts);
   if (!ok) {
     free(tmp);
