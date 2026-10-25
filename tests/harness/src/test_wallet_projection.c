@@ -195,6 +195,30 @@ static bool append_wallet_utxo(event_log_t *log, int idx)
                             sizeof(payload)) != UINT64_MAX;
 }
 
+static bool append_synthetic_wallet_events(event_log_t *log)
+{
+    bool appended = true;
+    for (int i = 0; i < 100 && appended; i++)
+        appended = append_wallet_key(log, i);
+    for (int i = 0; i < 5 && appended; i++)
+        appended = append_wallet_addr_derived(log, i);
+    for (int i = 0; i < 200 && appended; i++)
+        appended = append_wallet_tx(log, i);
+    for (int i = 0; i < 10 && appended; i++)
+        appended = append_wallet_utxo(log, i);
+    for (int i = 0; i < 50 && appended; i++)
+        appended = append_wallet_note(log, i);
+    return appended;
+}
+
+static bool replay_counts_match(wallet_projection_t *p)
+{
+    return wallet_projection_address_count(p) == 105 &&
+           wallet_projection_tx_count(p) == 200 &&
+           wallet_projection_utxo_count(p) == 10 &&
+           wallet_projection_note_count(p) == 50;
+}
+
 static int t_wallet_event_ids(void)
 {
     int failures = 0;
@@ -470,18 +494,8 @@ static int t_projection_catch_up_replay(void)
     event_log_t *log = event_log_open(elog_path);
     wallet_projection_t *p = wallet_projection_open(proj_path, log);
     WP_CHECK("replay open", log && p);
-    bool appended = true;
-    for (int i = 0; i < 100 && appended; i++)
-        appended = append_wallet_key(log, i);
-    for (int i = 0; i < 5 && appended; i++)
-        appended = append_wallet_addr_derived(log, i);
-    for (int i = 0; i < 200 && appended; i++)
-        appended = append_wallet_tx(log, i);
-    for (int i = 0; i < 10 && appended; i++)
-        appended = append_wallet_utxo(log, i);
-    for (int i = 0; i < 50 && appended; i++)
-        appended = append_wallet_note(log, i);
-    WP_CHECK("synthetic wallet events appended", appended);
+    WP_CHECK("synthetic wallet events appended",
+             append_synthetic_wallet_events(log));
     WP_CHECK("catch up synthetic events",
              wallet_projection_catch_up(p) != UINT64_MAX);
     WP_CHECK("replay address count",
@@ -501,19 +515,13 @@ static int t_projection_catch_up_replay(void)
     json_free(&state);
     WP_CHECK("replay idempotent",
              wallet_projection_catch_up(p) != UINT64_MAX &&
-             wallet_projection_address_count(p) == 105 &&
-             wallet_projection_tx_count(p) == 200 &&
-             wallet_projection_utxo_count(p) == 10 &&
-             wallet_projection_note_count(p) == 50);
+             replay_counts_match(p));
     wallet_projection_close(p);
 
     p = wallet_projection_open(proj_path, log);
     WP_CHECK("replay reopen", p != NULL);
     WP_CHECK("replay persists counts",
-             wallet_projection_address_count(p) == 105 &&
-             wallet_projection_tx_count(p) == 200 &&
-             wallet_projection_utxo_count(p) == 10 &&
-             wallet_projection_note_count(p) == 50 &&
+             replay_counts_match(p) &&
              wallet_projection_total_value_zat(p) == 1420);
     wallet_projection_close(p);
     event_log_close(log);
@@ -661,7 +669,7 @@ static int t_model_shadow_emits(void)
          * projection emit now that the model save hook is gone. */
         uint8_t key_pkh[20];
         struct wallet_sqlite ws;
-        ok = wallet_sqlite_open(&ws, ndb.db);
+        ok = wallet_sqlite_open_r(&ws, ndb.db).ok;
         struct privkey key;
         struct pubkey pk;
         privkey_init(&key);
@@ -670,7 +678,7 @@ static int t_model_shadow_emits(void)
         key.fValid = true;
         key.fCompressed = true;
         ok = ok && privkey_get_pubkey(&key, &pk);
-        ok = ok && wallet_sqlite_write_key(&ws, &pk, &key);
+        ok = ok && wallet_sqlite_write_key_r(&ws, &pk, &key).ok;
         {
             struct key_id kid = pubkey_get_id(&pk);
             memcpy(key_pkh, kid.id.data, 20);
