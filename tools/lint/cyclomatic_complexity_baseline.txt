@@ -93,7 +93,6 @@ cognition/services/src/experience_compilation_service.c:experience_compile_check
 cognition/services/src/experience_compilation_service.c:experience_output_aliases:24
 cognition/services/src/experience_compilation_service.c:experience_store_science:20
 cognition/services/src/experience_compilation_service.c:experience_validate_observation:18
-cognition/services/src/file_market_purchase_retrieval_service.c:market_purchase_retrieve:46
 cognition/services/src/metaverse_agent_service.c:metaverse_agent_service_liquidity:37
 cognition/services/src/metaverse_agent_service.c:metaverse_agent_service_money:22
 cognition/services/src/metaverse_agent_service.c:money_load_bindings:29
