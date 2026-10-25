@@ -307,7 +307,7 @@ and its proof sum rose from 277.251 to 1498.060 s. Width 8 also varied by
 these runs establish a reachable peak, not a stable saturation point or a
 production changes/day rate. No operator-accepted LOC were produced.
 
-The existing `tools/dev/c23-cache-adversarial.sh` stopped at its first
+The existing since-removed c23-cache-adversarial script stopped at its first
 cache-counter assertion on this checkout: its zsha256 fixture's translation
 units were conservatively bypassed by the current assembler-input closure
 rule, yielding zero hits and zero misses. That run did not test the changed

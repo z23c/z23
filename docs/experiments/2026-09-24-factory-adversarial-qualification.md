@@ -351,7 +351,7 @@ unchanged and wrong-behavior package directories, canonical `libm` recipe
 SHA-256 `29f58718561e2683eed540e2de5c79a6a5320cfabfd5f597d5d0cb69cfb94276`,
 frozen verifier SHA-256
 `72b1a6a4487a5b7cb10e53fe0286121855c6811e03e4bbfa2ced1d0902620672`,
-and `tools/dev/fixtures/skycombat/remote_run.sh` SHA-256
+and the since-removed skycombat remote_run fixture script SHA-256
 `f61bbabe15dd2ba0771bef07a248ef0fd27c5abc4a351bcb99e9c8771e162703`.
 The input is assembled from the output of
 `skycombat-factory-qualification.sh`, followed by
