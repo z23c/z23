@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creeton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * See controllers/agent_session_client.h for the contract and for why the
  * store is reached over RPC rather than opened directly.
@@ -30,17 +30,11 @@ static void asc_why(char *why, size_t why_cap, const char *token)
 /* Render the agentsession method's positional argument list,
  * "[action,params_obj]" (or "{}" when the caller passed no params), into
  * params. */
-static bool asc_build_params(const char *action, const char *params_obj,
-                             char *params, size_t params_cap, char *why,
-                             size_t why_cap)
+static int asc_build_params(const char *action, const char *params_obj,
+                            char *params, size_t params_cap)
 {
-    int n = snprintf(params, params_cap, "[\"%s\",%s]", action,
-                     params_obj ? params_obj : "{}");
-    if (n < 0 || (size_t)n >= params_cap) {
-        asc_why(why, why_cap, "BAD_ARGS");
-        LOG_FAIL(ASC_TAG, "%s: request params too large (%d bytes)", action, n);
-    }
-    return true;
+    return snprintf(params, params_cap, "[\"%s\",%s]", action,
+                    params_obj ? params_obj : "{}");
 }
 
 /* An RPC-level error body means the method did not run — an older node
@@ -49,8 +43,8 @@ static bool asc_build_params(const char *action, const char *params_obj,
  * error object bare ({"code":..,"message":..}) but its locally-generated
  * transport/cookie errors wrapped ({"error":{...}}), so both shapes are
  * recognized here rather than trusting one of them. */
-static bool asc_answer_is_rpc_error(struct json_value *v, const char *action,
-                                    char *why, size_t why_cap)
+static bool asc_answer_is_rpc_error(struct json_value *v,
+                                    const char **msg_out)
 {
     const struct json_value *errobj = json_get(v, "error");
     if (!json_get(v, "ok") &&
@@ -58,9 +52,7 @@ static bool asc_answer_is_rpc_error(struct json_value *v, const char *action,
         const char *m = json_get_str(json_get(v, "message"));
         if (!m && errobj)
             m = json_get_str(json_get(errobj, "message"));
-        asc_why(why, why_cap, "NODE_UNREACHABLE");
-        LOG_ERROR(ASC_TAG, "%s: node refused the call: %s", action,
-                  m ? m : "(no message)");
+        *msg_out = m;
         return true;
     }
     return false;
@@ -92,10 +84,11 @@ static bool asc_call(const char *action, const char *params_obj,
                      struct json_value *out, char *why, size_t why_cap)
 {
     char params[1536];
-    if (!asc_build_params(action, params_obj, params, sizeof(params),
-                          why, why_cap))
-        return false;
-
+    int n = asc_build_params(action, params_obj, params, sizeof(params));
+    if (n < 0 || (size_t)n >= sizeof(params)) {
+        asc_why(why, why_cap, "BAD_ARGS");
+        LOG_FAIL(ASC_TAG, "%s: request params too large (%d bytes)", action, n);
+    }
     char *raw = node_rpc_call("agentsession", params);
     if (!raw) {
         asc_why(why, why_cap, "NODE_UNREACHABLE");
@@ -115,7 +108,11 @@ static bool asc_call(const char *action, const char *params_obj,
         asc_why(why, why_cap, "NODE_UNREACHABLE");
         LOG_FAIL(ASC_TAG, "%s: answer is not an object", action);
     }
-    if (asc_answer_is_rpc_error(&v, action, why, why_cap)) {
+    const char *rpc_msg = NULL;
+    if (asc_answer_is_rpc_error(&v, &rpc_msg)) {
+        asc_why(why, why_cap, "NODE_UNREACHABLE");
+        LOG_ERROR(ASC_TAG, "%s: node refused the call: %s", action,
+                  rpc_msg ? rpc_msg : "(no message)");
         json_free(&v);
         return false;
     }
@@ -302,8 +299,8 @@ bool agent_session_client_authorize(const char *session_id, int64_t amount_zat,
                                     const char *recipient,
                                     const char *wallet_scope, bool commit,
                                     bool canonical_plan,
-                                    int64_t *window_remaining_zat,
-                                    int64_t *charged_zat,
+                                    int64_t*window_remaining_zat,
+                                    int64_t*charged_zat,
                                     char *why, size_t why_cap)
 {
     if (window_remaining_zat)
