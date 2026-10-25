@@ -116,13 +116,59 @@ static bool rung_taint_applicable(const struct boot_blkidx_load_ctx *c)
 {
     return !c->rebuilt_from_log && c->loaded && c->ndb->open;
 }
+
+/* How a candidate tip hash sits in the loaded flat map. */
+enum rung_taint_tip_kind {
+    RUNG_TAINT_TIP_MATCH = 0,
+    RUNG_TAINT_TIP_PREDATES,
+    RUNG_TAINT_TIP_MISMATCH,
+};
+
+/* Sync tip height, or the blocks-table max when the sync tip is unset. */
+static int64_t rung_taint_resolve_db_height(struct node_db *ndb)
+{
+    int64_t db_height = node_db_sync_get_tip_height(ndb);
+    if (db_height < 0)
+        db_height = db_block_max_height(ndb);
+    return db_height;
+}
+
+/* True when the loaded flat map is far behind the chain. */
+static bool rung_taint_flat_is_stale(int64_t db_height, size_t flat_count)
+{
+    return db_height > 0 && (int64_t)flat_count < db_height - 1000;
+}
+
+/* Classify tip_hash_bytes against the loaded flat map. On MISMATCH,
+ * *mapped_height is the flat entry's height, or -1 when the hash is
+ * absent. MATCH and PREDATES leave *mapped_height unchanged. */
+static enum rung_taint_tip_kind rung_taint_classify_tip_hash(
+    struct boot_blkidx_load_ctx *c, int64_t db_height,
+    const uint8_t tip_hash_bytes[32], int *mapped_height)
+{
+    struct uint256 tip_hash;
+    memcpy(tip_hash.data, tip_hash_bytes, 32);
+    struct block_index *flat_tip =
+        block_map_find(&c->st->map_block_index, &tip_hash);
+    if (!flat_tip || (int64_t)flat_tip->nHeight != db_height) {
+        bool absent_and_journaled = !flat_tip &&
+            db_height <= INT32_MAX &&
+            block_index_projection_bound_covers_tip(
+                block_index_projection_singleton(), c->ctx->datadir,
+                tip_hash_bytes, (int32_t)db_height);
+        if (absent_and_journaled)
+            return RUNG_TAINT_TIP_PREDATES;
+        *mapped_height = flat_tip ? flat_tip->nHeight : -1;
+        return RUNG_TAINT_TIP_MISMATCH;
+    }
+    return RUNG_TAINT_TIP_MATCH;
+}
+
 static bool rung_taint_load(struct boot_blkidx_load_ctx *c)
 {
-    int64_t db_height = node_db_sync_get_tip_height(c->ndb);
-    if (db_height < 0)
-        db_height = db_block_max_height(c->ndb);
+    int64_t db_height = rung_taint_resolve_db_height(c->ndb);
     size_t flat_count = c->st->map_block_index.size;
-    if (db_height > 0 && (int64_t)flat_count < db_height - 1000) {
+    if (rung_taint_flat_is_stale(db_height, flat_count)) {
         printf("Block index flat: stale (%zu entries vs chain height %lld)"
                " — reloading from LevelDB\n",
                flat_count, (long long)db_height);
@@ -137,61 +183,44 @@ static bool rung_taint_load(struct boot_blkidx_load_ctx *c)
     if (c->loaded && db_height > 0) {
         uint8_t tip_hash_raw[32];
         bool have_tip_hash = node_db_sync_get_tip_hash(c->ndb, tip_hash_raw);
+        int mapped_height = -1;
         if (have_tip_hash) {
-            struct uint256 tip_hash;
-            memcpy(tip_hash.data, tip_hash_raw, 32);
-            struct block_index *flat_tip =
-                block_map_find(&c->st->map_block_index, &tip_hash);
-            if (!flat_tip || (int64_t)flat_tip->nHeight != db_height) {
-                bool absent_and_journaled = !flat_tip &&
-                    db_height <= INT32_MAX &&
-                    block_index_projection_bound_covers_tip(
-                        block_index_projection_singleton(), c->ctx->datadir,
-                        tip_hash_raw, (int32_t)db_height);
-                if (absent_and_journaled) {
-                    printf("Block index flat: authenticated snapshot predates "
-                           "SQLite tip %lld; verified projection delta covers "
-                           "the tip\n", (long long)db_height);
-                } else {
-                    fprintf(stderr,
-                        "Block index flat: tip hash maps to wrong "
-                        "height (%d vs SQLite %lld). Corrupt flat "
-                        "file — reloading from SQLite.\n",
-                        flat_tip ? flat_tip->nHeight : -1,
-                        (long long)db_height);
-                    c->loaded = false;
-                    c->flat_union_tainted = true;
-                }
+            enum rung_taint_tip_kind verdict = rung_taint_classify_tip_hash(
+                c, db_height, tip_hash_raw, &mapped_height);
+            if (verdict == RUNG_TAINT_TIP_PREDATES)
+                printf("Block index flat: authenticated snapshot predates "
+                       "SQLite tip %lld; verified projection delta covers "
+                       "the tip\n", (long long)db_height);
+            else if (verdict == RUNG_TAINT_TIP_MISMATCH) {
+                fprintf(stderr,
+                    "Block index flat: tip hash maps to wrong "
+                    "height (%d vs SQLite %lld). Corrupt flat "
+                    "file — reloading from SQLite.\n",
+                    mapped_height,
+                    (long long)db_height);
+                c->loaded = false;
+                c->flat_union_tainted = true;
             }
         } else {
             struct db_block tip_blk;
             if (db_block_find_by_height(c->ndb, (int)db_height, &tip_blk)) {
-                struct uint256 tip_hash;
-                memcpy(tip_hash.data, tip_blk.hash, 32);
-                struct block_index *flat_tip =
-                    block_map_find(&c->st->map_block_index, &tip_hash);
-                if (!flat_tip || (int64_t)flat_tip->nHeight != db_height) {
-                    bool absent_and_journaled = !flat_tip &&
-                        db_height <= INT32_MAX &&
-                        block_index_projection_bound_covers_tip(
-                            block_index_projection_singleton(),
-                            c->ctx->datadir, tip_blk.hash,
-                            (int32_t)db_height);
-                    if (absent_and_journaled) {
-                        printf("Block index flat: authenticated snapshot "
-                               "predates SQLite tip %lld; verified projection "
-                               "delta covers the tip\n",
-                               (long long)db_height);
-                    } else {
-                        fprintf(stderr,
-                            "Block index flat: tip hash maps to wrong "
-                            "height (%d vs SQLite %lld). Corrupt flat "
-                            "file — reloading from SQLite.\n",
-                            flat_tip ? flat_tip->nHeight : -1,
-                            (long long)db_height);
-                        c->loaded = false;
-                        c->flat_union_tainted = true;
-                    }
+                enum rung_taint_tip_kind verdict =
+                    rung_taint_classify_tip_hash(
+                        c, db_height, tip_blk.hash, &mapped_height);
+                if (verdict == RUNG_TAINT_TIP_PREDATES)
+                    printf("Block index flat: authenticated snapshot "
+                           "predates SQLite tip %lld; verified projection "
+                           "delta covers the tip\n",
+                           (long long)db_height);
+                else if (verdict == RUNG_TAINT_TIP_MISMATCH) {
+                    fprintf(stderr,
+                        "Block index flat: tip hash maps to wrong "
+                        "height (%d vs SQLite %lld). Corrupt flat "
+                        "file — reloading from SQLite.\n",
+                        mapped_height,
+                        (long long)db_height);
+                    c->loaded = false;
+                    c->flat_union_tainted = true;
                 }
             }
         }
