@@ -72,6 +72,25 @@ static const struct telemetry_domain_schema *net_schema(void)
 
 /* ── 1. every leaf carries an actionable meaning row ─────────────────── */
 
+static void count_meaning_row(const struct telemetry_domain_schema *s, size_t i,
+                               int *missing_row, int *empty_means,
+                               int *judged_without_next, int *bad_unit,
+                               int *ratio_without_operand)
+{
+    const struct telemetry_leaf *lf = &s->leaves[i];
+    const struct telemetry_field *f = telemetry_field_lookup(s->domain, lf->path);
+    if (!f) { (*missing_row)++; return; }
+    if (!f->means || !f->means[0]) (*empty_means)++;
+    if (f->rule != TFR_INFO &&
+        (!f->implies || !f->implies[0] || !f->next || !f->next[0]))
+        (*judged_without_next)++;
+    /* A bool leaf judged with a numeric rule, or a counter judged as a
+     * bool, is a row that can never fire correctly. */
+    if (lf->ctype == TLC_BOOL && lf->unit != TFU_BOOL) (*bad_unit)++;
+    if ((f->rule == TFR_MIN_RATIO_OF || f->rule == TFR_MAX_RATIO_OF) &&
+        (!f->operand || !f->operand[0])) (*ratio_without_operand)++;
+}
+
 static int check_meaning_rows(void)
 {
     int failures = 0;
@@ -83,24 +102,9 @@ static int check_meaning_rows(void)
 
     int missing_row = 0, empty_means = 0, judged_without_next = 0;
     int bad_unit = 0, ratio_without_operand = 0;
-    for (size_t i = 0; i < s->leaf_count; i++) {
-        const struct telemetry_leaf *lf = &s->leaves[i];
-        const struct telemetry_field *f =
-            telemetry_field_lookup(s->domain, lf->path);
-        if (!f) { missing_row++; continue; }
-        if (!f->means || !f->means[0])
-            empty_means++;
-        if (f->rule != TFR_INFO &&
-            (!f->implies || !f->implies[0] || !f->next || !f->next[0]))
-            judged_without_next++;
-        /* A bool leaf judged with a numeric rule, or a counter judged as a
-         * bool, is a row that can never fire correctly. */
-        if (lf->ctype == TLC_BOOL && lf->unit != TFU_BOOL)
-            bad_unit++;
-        if ((f->rule == TFR_MIN_RATIO_OF || f->rule == TFR_MAX_RATIO_OF) &&
-            (!f->operand || !f->operand[0]))
-            ratio_without_operand++;
-    }
+    for (size_t i = 0; i < s->leaf_count; i++)
+        count_meaning_row(s, i, &missing_row, &empty_means, &judged_without_next,
+                           &bad_unit, &ratio_without_operand);
     TN_CHECK("[network] every leaf resolves to a meaning row in the merged "
              "ontology", missing_row == 0);
     TN_CHECK("[network] every leaf states what it counts", empty_means == 0);
@@ -139,6 +143,23 @@ static const struct telemetry_leaf_meta *leaf_meta_of(
     return (const struct telemetry_leaf_meta *)(const void *)base;
 }
 
+static void count_fill_presence(const struct telemetry_domain_schema *s,
+                                 const struct network_snapshot *snap,
+                                 int *unset, int *reasonless)
+{
+    for (size_t i = 0; i < s->leaf_count; i++) {
+        const struct telemetry_leaf_meta *m = leaf_meta_of(s, snap, i);
+        if (m->presence == TELEMETRY_UNSET) {
+            printf("  unset leaf: %s\n", s->leaves[i].path);
+            (*unset)++;
+        } else if (m->presence != TELEMETRY_PRESENT &&
+                   (!m->reason || !m->reason[0])) {
+            printf("  reasonless leaf: %s\n", s->leaves[i].path);
+            (*reasonless)++;
+        }
+    }
+}
+
 static int check_fill_completeness(void)
 {
     int failures = 0;
@@ -156,17 +177,7 @@ static int check_fill_completeness(void)
      * an unavailable, or a not_applicable. UNSET means the collector forgot
      * it, and no amount of downstream rendering can recover that. */
     int unset = 0, reasonless = 0;
-    for (size_t i = 0; i < s->leaf_count; i++) {
-        const struct telemetry_leaf_meta *m = leaf_meta_of(s, &snap, i);
-        if (m->presence == TELEMETRY_UNSET) {
-            printf("  unset leaf: %s\n", s->leaves[i].path);
-            unset++;
-        } else if (m->presence != TELEMETRY_PRESENT &&
-                   (!m->reason || !m->reason[0])) {
-            printf("  reasonless leaf: %s\n", s->leaves[i].path);
-            reasonless++;
-        }
-    }
+    count_fill_presence(s, &snap, &unset, &reasonless);
     TN_CHECK("[network] a filled snapshot leaves NO leaf unset", unset == 0);
     TN_CHECK("[network] every non-present leaf carries a static reason token",
              reasonless == 0);
@@ -309,6 +320,36 @@ static const struct zcl_command_spec *find_leaf(
     return NULL;
 }
 
+static int check_command_group(const char *path, const char *want_group,
+                                 const struct json_value *data)
+{
+    int failures = 0;
+    char label[160];
+    if (want_group) {
+        (void)snprintf(label, sizeof label,
+                       "[network] %s renders the %s group and only that group",
+                       path, want_group);
+        const struct json_value *vals = data ? json_get(data, "values") : NULL;
+        TN_CHECK(label, vals && json_size(vals) == 1 &&
+                        json_get(vals, want_group) != NULL);
+        (void)snprintf(label, sizeof label,
+                       "[network] %s reports its group filter matched", path);
+        TN_CHECK(label,
+                 data && json_get_bool(json_get(data, "group_filter_matched")));
+    }
+    return failures;
+}
+
+static int count_command_self_refs(const struct json_value *next, const char *path)
+{
+    int self_ref = 0;
+    for (size_t i = 0; next && i < json_size(next); i++) {
+        const char *cmd = json_get_str(json_get(json_at(next, i), "command"));
+        if (cmd && strcmp(cmd, path) == 0) self_ref++;
+    }
+    return self_ref;
+}
+
 static int check_one_command(const struct zcl_command_registry *reg,
                              const char *path, const char *want_group)
 {
@@ -377,30 +418,14 @@ static int check_one_command(const struct zcl_command_registry *reg,
     const char *schema = data ? json_get_str(json_get(data, "schema")) : NULL;
     TN_CHECK(label, schema && strcmp(schema, "zcl.telemetry.network.v1") == 0);
 
-    if (want_group) {
-        (void)snprintf(label, sizeof label,
-                       "[network] %s renders the %s group and only that group",
-                       path, want_group);
-        const struct json_value *vals = data ? json_get(data, "values") : NULL;
-        TN_CHECK(label, vals && json_size(vals) == 1 &&
-                        json_get(vals, want_group) != NULL);
-        (void)snprintf(label, sizeof label,
-                       "[network] %s reports its group filter matched", path);
-        TN_CHECK(label,
-                 data && json_get_bool(json_get(data, "group_filter_matched")));
-    }
+    failures += check_command_group(path, want_group, data);
 
     /* Trap: a next[] entry naming the command being served makes the whole
      * reply a total loss, and the CLI misreports it as a budget overflow. The
      * ok:true assertion above already catches it; this names it so a failure
      * points straight at the cause instead of at the byte count. */
     const struct json_value *next = json_get(&env, "next");
-    int self_ref = 0;
-    for (size_t i = 0; next && i < json_size(next); i++) {
-        const char *cmd = json_get_str(json_get(json_at(next, i), "command"));
-        if (cmd && strcmp(cmd, path) == 0)
-            self_ref++;
-    }
+    int self_ref = count_command_self_refs(next, path);
     (void)snprintf(label, sizeof label,
                    "[network] %s never points next[] at itself", path);
     TN_CHECK(label, self_ref == 0);

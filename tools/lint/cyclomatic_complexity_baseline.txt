@@ -1496,9 +1496,6 @@ tests/harness/src/test_supervisor.c:test_supervisor:84
 tests/harness/src/test_supervisor_production_tree.c:test_supervisor_production_tree:43
 tests/harness/src/test_sync_rate_below_floor.c:test_sync_rate_below_floor:36
 tests/harness/src/test_syncdiag_operator.c:syncdiag_cases_operator:367
-tests/harness/src/test_telemetry_network.c:check_fill_completeness:18
-tests/harness/src/test_telemetry_network.c:check_meaning_rows:23
-tests/harness/src/test_telemetry_network.c:check_one_command:22
 tests/harness/src/test_test_group_selector.c:capture_command_ends:17
 tests/harness/src/test_test_group_selector.c:test_runner_exact_selection:26
 tests/harness/src/test_test_netaddr_classify.c:test_get_group:17
