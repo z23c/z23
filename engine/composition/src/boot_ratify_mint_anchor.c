@@ -41,6 +41,61 @@ static void ratify_hex32(char out[65], const uint8_t in[32])
         snprintf(out + 2 * i, 3, "%02x", in[i]);
 }
 
+/* True when the seam core's raw arguments are unusable: NULL db, NULL hash, or
+ * a negative height. The caller formats the refusal and logs it. */
+static bool ratify_seam_args_invalid(struct sqlite3 *pdb,
+                                     const uint8_t coins_sha3[32],
+                                     int32_t height)
+{
+    return !pdb || !coins_sha3 || height < 0;
+}
+
+/* True when the durable coins_kv seam facts exactly reproduce the expected
+ * (sha3, count) pair AND the applied frontier is height + 1. */
+static bool ratify_seam_matches(const uint8_t got_sha3[32],
+                                const uint8_t want_sha3[32],
+                                uint64_t got_count, uint64_t want_count,
+                                bool applied_found, int32_t applied,
+                                int32_t height)
+{
+    return memcmp(got_sha3, want_sha3, 32) == 0 && got_count == want_count &&
+           applied_found && applied == height + 1;
+}
+
+/* Formats the seam-disagreement diagnostics into out->reason (both hashes in
+ * hex, both counts, applied frontier vs height + 1); the caller returns the
+ * negative result and stamps NOTHING. */
+static void ratify_describe_seam_mismatch(
+    struct boot_ratify_result *out, const uint8_t got_sha3[32],
+    const uint8_t want_sha3[32], uint64_t got_count, uint64_t want_count,
+    bool applied_found, int32_t applied, int32_t height)
+{
+    char got_hex[65], want_hex[65];
+    ratify_hex32(got_hex, got_sha3);
+    ratify_hex32(want_hex, want_sha3);
+    snprintf(out->reason, sizeof(out->reason),
+             "seam mismatch sha3=%s/%s n=%llu/%llu applied=%s%d/%d",
+             got_hex, want_hex, (unsigned long long)got_count,
+             (unsigned long long)want_count,
+             applied_found ? "" : "absent:", applied, height + 1);
+}
+
+static bool ratify_stamp_sovereign_markers(
+    struct sqlite3 *pdb, const struct sha3_utxo_checkpoint *mint_rearm_cp)
+{
+    /* Full agreement — stamp the earned authority markers (and, for the
+     * checkpoint wrapper, re-arm the mint resume marker so a later -mint-anchor
+     * of the original fold binary resumes at the anchor instead of genesis-
+     * resetting) as one progress-store critical section. */
+    progress_store_tx_lock();
+    bool stamped = coins_kv_mark_migration_complete(pdb) &&
+                   coins_kv_mark_self_folded(pdb) &&
+                   (mint_rearm_cp == NULL ||
+                    mint_anchor_progress_mark(pdb, mint_rearm_cp));
+    progress_store_tx_unlock();
+    return stamped;
+}
+
 /* Shared ratify core. Re-derives pdb's OWN durable coins_kv commitment/count/
  * applied and, only on exact agreement with (height, coins_sha3, count) AND
  * applied-through == height, stamps migration-complete + self_folded — and,
@@ -54,7 +109,7 @@ static bool ratify_seam_core(struct sqlite3 *pdb, int32_t height,
     if (!out)
         LOG_FAIL(RATIFY_SUBSYS, "check_and_stamp: NULL result");
     memset(out, 0, sizeof(*out));
-    if (!pdb || !coins_sha3 || height < 0) {
+    if (ratify_seam_args_invalid(pdb, coins_sha3, height)) {
         snprintf(out->reason, sizeof(out->reason),
                  "null/invalid args pdb=%p coins_sha3=%p height=%d", (void *)pdb,
                  (const void *)coins_sha3, height);
@@ -95,32 +150,15 @@ static bool ratify_seam_core(struct sqlite3 *pdb, int32_t height,
     out->count = (uint64_t)count;
     out->height = height;
 
-    bool sha3_ok = memcmp(got_sha3, coins_sha3, 32) == 0;
-    bool count_ok = (uint64_t)count == count_want;
-    bool applied_ok = applied_found && applied == height + 1;
-    if (!sha3_ok || !count_ok || !applied_ok) {
-        char got_hex[65], want_hex[65];
-        ratify_hex32(got_hex, got_sha3);
-        ratify_hex32(want_hex, coins_sha3);
-        snprintf(out->reason, sizeof(out->reason),
-                 "seam mismatch sha3=%s/%s n=%llu/%llu applied=%s%d/%d",
-                 got_hex, want_hex, (unsigned long long)count,
-                 (unsigned long long)count_want,
-                 applied_found ? "" : "absent:", applied, height + 1);
+    if (!ratify_seam_matches(got_sha3, coins_sha3, (uint64_t)count,
+                             count_want, applied_found, applied, height)) {
+        ratify_describe_seam_mismatch(out, got_sha3, coins_sha3,
+                                      (uint64_t)count, count_want,
+                                      applied_found, applied, height);
         return false;  /* legitimate negative result — stamp NOTHING */
     }
 
-    /* Full agreement — stamp the earned authority markers (and, for the
-     * checkpoint wrapper, re-arm the mint resume marker so a later -mint-anchor
-     * of the original fold binary resumes at the anchor instead of genesis-
-     * resetting) as one progress-store critical section. */
-    progress_store_tx_lock();
-    bool stamped = coins_kv_mark_migration_complete(pdb) &&
-                   coins_kv_mark_self_folded(pdb) &&
-                   (mint_rearm_cp == NULL ||
-                    mint_anchor_progress_mark(pdb, mint_rearm_cp));
-    progress_store_tx_unlock();
-    if (!stamped) {
+    if (!ratify_stamp_sovereign_markers(pdb, mint_rearm_cp)) {
         snprintf(out->reason, sizeof(out->reason),
                  "seam agreed but stamping the sovereign markers failed");
         LOG_FAIL(RATIFY_SUBSYS, "%s", out->reason);
