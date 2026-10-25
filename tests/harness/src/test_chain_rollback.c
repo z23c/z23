@@ -111,6 +111,141 @@ static void free_block(struct block *blk)
     free(blk->vtx);
 }
 
+/* Forward walk: build NUM_BLOCKS coinbase blocks, hash and chain their
+ * block_index entries, apply each coinbase to `cache` and snapshot the
+ * incremental commitment after every height. */
+static void build_forward_chain(struct block blocks[],
+                                struct uint256 block_hashes[],
+                                struct block_index indices[],
+                                struct utxo_commitment snapshots[],
+                                struct coins_view_cache *cache)
+{
+    for (int h = 0; h < NUM_BLOCKS; h++) {
+        struct uint256 prev;
+        if (h == 0)
+            uint256_set_null(&prev);
+        else
+            prev = block_hashes[h - 1];
+
+        make_block(&blocks[h], h, &prev);
+        block_header_get_hash(&blocks[h].header, &block_hashes[h]);
+
+        /* Set up block_index */
+        memset(&indices[h], 0, sizeof(indices[h]));
+        indices[h].nHeight = h;
+        indices[h].phashBlock = &block_hashes[h];
+        if (h > 0) indices[h].pprev = &indices[h - 1];
+
+        /* Apply coinbase to cache */
+        update_coins(&blocks[h].vtx[0], cache, h);
+
+        /* Snapshot commitment at height h+1 */
+        snapshots[h + 1] = cache->commitment;
+    }
+}
+
+/* True iff every adjacent pair of per-height commitment snapshots
+ * differs, i.e. each height has a distinct commitment. */
+static bool commitments_all_distinct(const struct utxo_commitment snapshots[])
+{
+    bool all_distinct = true;
+    for (int h = 0; h < NUM_BLOCKS; h++) {
+        if (utxo_commitment_equal(&snapshots[h], &snapshots[h + 1])) {
+            all_distinct = false;
+            break;
+        }
+    }
+    return all_distinct;
+}
+
+/* Backward walk: disconnect every block from tip to genesis via
+ * disconnect_block (coinbase-only: empty block_undo). False at the first
+ * height whose disconnect fails or whose coinbase tx stays reachable. */
+static bool disconnect_all_blocks(const struct block blocks[],
+                                  struct block_index indices[],
+                                  struct coins_view_cache *cache)
+{
+    bool all_ok = true;
+    for (int h = NUM_BLOCKS - 1; h >= 0; h--) {
+        /* Coinbase-only: empty block_undo */
+        struct block_undo bu;
+        block_undo_init(&bu);
+
+        struct validation_state vs;
+        validation_state_init(&vs);
+
+        bool ok = disconnect_block(&blocks[h], &vs, &indices[h],
+                                   cache, &bu);
+        block_undo_free(&bu);
+        if (!ok) { all_ok = false; break; }
+
+        /* Coinbase tx should be gone from the cache */
+        if (coins_view_cache_have_coins(cache, &blocks[h].vtx[0].hash)) {
+            all_ok = false;
+            break;
+        }
+    }
+    return all_ok;
+}
+
+/* True iff no block's coinbase tx is reachable via have_coins. */
+static bool no_coins_reachable(struct coins_view_cache *cache,
+                               const struct block blocks[])
+{
+    bool all_unreachable = true;
+    for (int h = 0; h < NUM_BLOCKS; h++) {
+        if (coins_view_cache_have_coins(cache, &blocks[h].vtx[0].hash)) {
+            all_unreachable = false;
+            break;
+        }
+    }
+    return all_unreachable;
+}
+
+/* Re-apply every coinbase to a fresh cache; true iff the commitment at
+ * each height matches the snapshot recorded during the forward walk. */
+static bool reconnect_matches_snapshots(const struct block blocks[],
+                                        const struct utxo_commitment snapshots[])
+{
+    struct coins_view_cache cache2;
+    struct coins_view null_view2;
+    memset(&null_view2, 0, sizeof(null_view2));
+    coins_view_cache_init(&cache2, &null_view2);
+    bool match = true;
+    if (!utxo_commitment_equal(&cache2.commitment, &snapshots[0])) {
+        match = false;
+    }
+    for (int h = 0; h < NUM_BLOCKS && match; h++) {
+        update_coins(&blocks[h].vtx[0], &cache2, h);
+        if (!utxo_commitment_equal(&cache2.commitment, &snapshots[h + 1]))
+            match = false;
+    }
+    coins_view_cache_free(&cache2);
+    return match;
+}
+
+/* XOR every block's coinbase output into `uc`, genesis first. */
+static void xor_accumulate_all(struct utxo_commitment *uc,
+                               const struct block blocks[])
+{
+    for (int h = 0; h < NUM_BLOCKS; h++) {
+        utxo_commitment_add(uc,
+            blocks[h].vtx[0].hash.data, 0,
+            blocks[h].vtx[0].vout[0].value, h);
+    }
+}
+
+/* XOR every block's coinbase output back out of `uc`, tip first. */
+static void xor_remove_all(struct utxo_commitment *uc,
+                           const struct block blocks[])
+{
+    for (int h = NUM_BLOCKS - 1; h >= 0; h--) {
+        utxo_commitment_remove(uc,
+            blocks[h].vtx[0].hash.data, 0,
+            blocks[h].vtx[0].vout[0].value, h);
+    }
+}
+
 int test_chain_rollback(void)
 {
     printf("\n=== chain rollback stress test ===\n");
@@ -129,66 +264,20 @@ int test_chain_rollback(void)
     /* Snapshot at height 0 (empty set) */
     snapshots[0] = cache.commitment;
 
-    for (int h = 0; h < NUM_BLOCKS; h++) {
-        struct uint256 prev;
-        if (h == 0)
-            uint256_set_null(&prev);
-        else
-            prev = block_hashes[h - 1];
-
-        make_block(&blocks[h], h, &prev);
-        block_header_get_hash(&blocks[h].header, &block_hashes[h]);
-
-        /* Set up block_index */
-        memset(&indices[h], 0, sizeof(indices[h]));
-        indices[h].nHeight = h;
-        indices[h].phashBlock = &block_hashes[h];
-        if (h > 0) indices[h].pprev = &indices[h - 1];
-
-        /* Apply coinbase to cache */
-        update_coins(&blocks[h].vtx[0], &cache, h);
-
-        /* Snapshot commitment at height h+1 */
-        snapshots[h + 1] = cache.commitment;
-    }
+    build_forward_chain(blocks, block_hashes, indices, snapshots, &cache);
 
     CR_CHECK("cr: forward walk built 20 blocks",
              cache.commitment.count == NUM_BLOCKS);
 
     /* ── 2. Verify each height has a distinct commitment ──────── */
     {
-        bool all_distinct = true;
-        for (int h = 0; h < NUM_BLOCKS; h++) {
-            if (utxo_commitment_equal(&snapshots[h], &snapshots[h + 1])) {
-                all_distinct = false;
-                break;
-            }
-        }
+        bool all_distinct = commitments_all_distinct(snapshots);
         CR_CHECK("cr: each height has distinct commitment", all_distinct);
     }
 
     /* ── 3. Backward: disconnect via disconnect_block ──────────── */
     {
-        bool all_ok = true;
-        for (int h = NUM_BLOCKS - 1; h >= 0; h--) {
-            /* Coinbase-only: empty block_undo */
-            struct block_undo bu;
-            block_undo_init(&bu);
-
-            struct validation_state vs;
-            validation_state_init(&vs);
-
-            bool ok = disconnect_block(&blocks[h], &vs, &indices[h],
-                                        &cache, &bu);
-            block_undo_free(&bu);
-            if (!ok) { all_ok = false; break; }
-
-            /* Coinbase tx should be gone from the cache */
-            if (coins_view_cache_have_coins(&cache, &blocks[h].vtx[0].hash)) {
-                all_ok = false;
-                break;
-            }
-        }
+        bool all_ok = disconnect_all_blocks(blocks, indices, &cache);
         CR_CHECK("cr: disconnect_block succeeds for all 20 blocks", all_ok);
     }
 
@@ -198,52 +287,25 @@ int test_chain_rollback(void)
      * DELETE propagates); the invariant is reachability, not raw
      * cache_coins.size. */
     {
-        bool all_unreachable = true;
-        for (int h = 0; h < NUM_BLOCKS; h++) {
-            if (coins_view_cache_have_coins(&cache, &blocks[h].vtx[0].hash)) {
-                all_unreachable = false;
-                break;
-            }
-        }
+        bool all_unreachable = no_coins_reachable(&cache, blocks);
         CR_CHECK("cr: no tx reachable via have_coins after full rollback",
                  all_unreachable);
     }
 
     /* ── 4. Re-connect and verify commitment matches snapshots ─ */
     {
-        struct coins_view_cache cache2;
-        struct coins_view null_view2;
-        memset(&null_view2, 0, sizeof(null_view2));
-        coins_view_cache_init(&cache2, &null_view2);
-        bool match = true;
-        if (!utxo_commitment_equal(&cache2.commitment, &snapshots[0])) {
-            match = false;
-        }
-        for (int h = 0; h < NUM_BLOCKS && match; h++) {
-            update_coins(&blocks[h].vtx[0], &cache2, h);
-            if (!utxo_commitment_equal(&cache2.commitment, &snapshots[h + 1]))
-                match = false;
-        }
+        bool match = reconnect_matches_snapshots(blocks, snapshots);
         CR_CHECK("cr: re-connect matches original commitment snapshots", match);
-        coins_view_cache_free(&cache2);
     }
 
     /* ── 5. XOR roundtrip: add then remove = identity ──────────── */
     {
         struct utxo_commitment uc;
         utxo_commitment_init(&uc);
-        for (int h = 0; h < NUM_BLOCKS; h++) {
-            utxo_commitment_add(&uc,
-                blocks[h].vtx[0].hash.data, 0,
-                blocks[h].vtx[0].vout[0].value, h);
-        }
+        xor_accumulate_all(&uc, blocks);
         CR_CHECK("cr: XOR accumulator has count=20 after adds", uc.count == NUM_BLOCKS);
 
-        for (int h = NUM_BLOCKS - 1; h >= 0; h--) {
-            utxo_commitment_remove(&uc,
-                blocks[h].vtx[0].hash.data, 0,
-                blocks[h].vtx[0].vout[0].value, h);
-        }
+        xor_remove_all(&uc, blocks);
         struct utxo_commitment empty;
         utxo_commitment_init(&empty);
         CR_CHECK("cr: XOR roundtrip returns to empty set",

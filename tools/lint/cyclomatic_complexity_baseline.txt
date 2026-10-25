@@ -2012,7 +2012,6 @@ tests/harness/src/test_chain_evidence_live_advance.c:test_durable_frontier_one_r
 tests/harness/src/test_chain_evidence_live_advance.c:test_live_advance_clears_active_tip_hash_mismatch:16
 tests/harness/src/test_chain_integrity_failed_condition.c:test_chain_integrity_failed_condition:66
 tests/harness/src/test_chain_linkage_check.c:test_chain_linkage_check:53
-tests/harness/src/test_chain_rollback.c:test_chain_rollback:19
 tests/harness/src/test_chain_segment.c:test_chain_segment:45
 tests/harness/src/test_chain_state_repo.c:t_singleton_init_wires_fixture:16
 tests/harness/src/test_chain_tip_watchdog_bounded_restart.c:test_chain_tip_watchdog_bounded_restart:32
