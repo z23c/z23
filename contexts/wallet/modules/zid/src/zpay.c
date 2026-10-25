@@ -120,23 +120,19 @@ bool zpay_memo_encode(uint8_t out[ZPAY_MEMO_LEN],
     return true;
 }
 
-bool zpay_memo_decode(const uint8_t memo[ZPAY_MEMO_LEN],
-                      struct zpay_envelope *out)
+static bool zpay_memo_header_valid(const uint8_t memo[ZPAY_MEMO_LEN])
 {
-    if (!memo || !out)
-        LOG_FAIL("zpay", "memo_decode: NULL argument");
-    memset(out, 0, sizeof(*out));
-
     if (memcmp(memo, "ZPAY", 4) != 0 || memo[4] != ZPAY_VERSION ||
         !zpay_network_valid(memo[5]) || !zpay_type_valid(memo[6]) ||
         (memo[7] & ~(uint8_t)ZPAY_FLAGS_KNOWN) != 0)
         return false;
+    return true;
+}
 
-    uint16_t total_len = zcl_read_u16_le(memo + 8);
-    uint8_t asset_len = memo[90];
-    size_t prefix_len = ZPAY_FIXED_PREFIX + (size_t)asset_len + ZPAY_TRAILER;
-    bool has_identity = (memo[7] & ZPAY_FLAG_IDENTITY) != 0;
-    size_t expected_len = prefix_len + (has_identity ? ZPAY_ID_DOC_LEN : 0u);
+static bool zpay_memo_layout_valid(const uint8_t memo[ZPAY_MEMO_LEN],
+                                   uint8_t asset_len, uint16_t total_len,
+                                   size_t expected_len)
+{
     if (asset_len == 0 || asset_len > ZPAY_ASSET_MAX ||
         expected_len > ZPAY_MEMO_LEN || total_len != expected_len ||
         !zpay_asset_valid((const char *)memo + ZPAY_FIXED_PREFIX, asset_len))
@@ -144,6 +140,36 @@ bool zpay_memo_decode(const uint8_t memo[ZPAY_MEMO_LEN],
     for (size_t i = total_len; i < ZPAY_MEMO_LEN; i++)
         if (memo[i] != ZPAY_PAD_BYTE)
             return false;
+    return true;
+}
+
+static bool zpay_reply_ref_zero_when_unused(const struct zpay_envelope *out)
+{
+    if (!out->has_reply) {
+        uint8_t zero[32] = {0};
+        if (memcmp(out->reply_ref, zero, sizeof(zero)) != 0)
+            return false;
+    }
+    return true;
+}
+
+bool zpay_memo_decode(const uint8_t memo[ZPAY_MEMO_LEN],
+                      struct zpay_envelope *out)
+{
+    if (!memo || !out)
+        LOG_FAIL("zpay", "memo_decode: NULL argument");
+    memset(out, 0, sizeof(*out));
+
+    if (!zpay_memo_header_valid(memo))
+        return false;
+
+    uint16_t total_len = zcl_read_u16_le(memo + 8);
+    uint8_t asset_len = memo[90];
+    size_t prefix_len = ZPAY_FIXED_PREFIX + (size_t)asset_len + ZPAY_TRAILER;
+    bool has_identity = (memo[7] & ZPAY_FLAG_IDENTITY) != 0;
+    size_t expected_len = prefix_len + (has_identity ? ZPAY_ID_DOC_LEN : 0u);
+    if (!zpay_memo_layout_valid(memo, asset_len, total_len, expected_len))
+        return false;
 
     out->network = memo[5];
     out->message_type = memo[6];
@@ -160,11 +186,8 @@ bool zpay_memo_decode(const uint8_t memo[ZPAY_MEMO_LEN],
     memcpy(out->amount_commitment, memo + off, 32);
     out->has_reply = (memo[7] & ZPAY_FLAG_REPLY) != 0;
     memcpy(out->reply_ref, memo + off + 32, 32);
-    if (!out->has_reply) {
-        uint8_t zero[32] = {0};
-        if (memcmp(out->reply_ref, zero, sizeof(zero)) != 0)
-            return false;
-    }
+    if (!zpay_reply_ref_zero_when_unused(out))
+        return false;
 
     out->sender_authentication = ZPAY_SENDER_ANONYMOUS;
     out->has_identity_doc = has_identity;
