@@ -126,6 +126,61 @@ static void agent_deploy_push_target_lane(struct json_value *out,
     json_free(&lane);
 }
 
+static const struct json_value *agent_deploy_field_obj(const struct json_value *obj,
+                                                      const char *key)
+{
+    return obj ? json_get(obj, key) : NULL;
+}
+
+static bool agent_deploy_field_bool(const struct json_value *obj,
+                                    const char *key)
+{
+    return obj && json_get_bool(json_get(obj, key));
+}
+
+static const char *agent_deploy_field_str(const struct json_value *obj,
+                                          const char *key,
+                                          const char *fallback)
+{
+    return (obj && json_get(obj, key))
+        ? json_get_str(json_get(obj, key)) : fallback;
+}
+
+static bool agent_deploy_guard_allowed(bool known, bool requires,
+                                      bool recovery_deploy_blocker,
+                                      bool wants_restart, bool restart_ok,
+                                      bool deploy_ok)
+{
+    return known && !requires &&
+        !recovery_deploy_blocker &&
+        (wants_restart ? restart_ok : deploy_ok);
+}
+
+static const char *agent_deploy_guard_reason(bool known, bool requires,
+                                            bool recovery_deploy_blocker,
+                                            bool wants_restart,
+                                            bool restart_ok, bool deploy_ok)
+{
+    if (!known)
+        return "unknown_action";
+    if (requires)
+        return "operator_confirmation_required";
+    if (recovery_deploy_blocker)
+        return "pending_auto_reindex_requires_explicit_recovery_boot";
+    if (wants_restart && !restart_ok)
+        return "automation_restart_not_allowed";
+    if (!wants_restart && !deploy_ok)
+        return "automation_deploy_not_allowed";
+    return "deployment_safety_allows_action";
+}
+
+static const char *agent_deploy_guard_action_scope(const char *action)
+{
+    return agent_deploy_action_target_lane(action)[0]
+        ? "explicit_target_lane"
+        : "current_runtime_lane";
+}
+
 bool rpc_agent_interface(const struct json_value *params, bool help,
                          struct json_value *result)
 {
@@ -360,34 +415,31 @@ bool rpc_agent_deploy_guard(const struct json_value *params, bool help,
 
     const struct json_value *lane = json_get(result, "operator_lane");
     agent_deploy_push_target_lane(result, action,
-                                  lane && json_get(lane, "lane")
-                                      ? json_get_str(json_get(lane, "lane"))
-                                      : "unknown");
+                                  agent_deploy_field_str(lane, "lane",
+                                                         "unknown"));
     const struct json_value *target_lane = json_get(result, "target_lane");
     const struct json_value *safety =
-        target_lane ? json_get(target_lane, "deployment_safety") : NULL;
-    const bool deploy_ok = safety &&
-        json_get_bool(json_get(safety, "automation_deploy_ok"));
-    const bool restart_ok = safety &&
-        json_get_bool(json_get(safety, "automation_restart_ok"));
-    const bool requires = safety &&
-        json_get_bool(json_get(safety, "requires_operator_confirmation"));
+        agent_deploy_field_obj(target_lane, "deployment_safety");
+    const bool deploy_ok =
+        agent_deploy_field_bool(safety, "automation_deploy_ok");
+    const bool restart_ok =
+        agent_deploy_field_bool(safety, "automation_restart_ok");
+    const bool requires =
+        agent_deploy_field_bool(safety, "requires_operator_confirmation");
     const struct json_value *recovery =
-        target_lane ? json_get(target_lane, "recovery_state") : NULL;
-    const bool recovery_deploy_blocker = recovery &&
-        json_get_bool(json_get(recovery, "deploy_blocker"));
-    const char *recovery_status = recovery &&
-        json_get(recovery, "status")
-            ? json_get_str(json_get(recovery, "status")) : "";
-    const char *lane_name = lane && json_get(lane, "lane")
-        ? json_get_str(json_get(lane, "lane")) : "unknown";
-    const char *target_lane_name = target_lane && json_get(target_lane, "lane")
-        ? json_get_str(json_get(target_lane, "lane")) : lane_name;
+        agent_deploy_field_obj(target_lane, "recovery_state");
+    const bool recovery_deploy_blocker =
+        agent_deploy_field_bool(recovery, "deploy_blocker");
+    const char *recovery_status =
+        agent_deploy_field_str(recovery, "status", "");
+    const char *lane_name = agent_deploy_field_str(lane, "lane", "unknown");
+    const char *target_lane_name =
+        agent_deploy_field_str(target_lane, "lane", lane_name);
     const bool known = agent_deploy_action_known(action);
     const bool wants_restart = agent_deploy_action_is_restart(action);
-    const bool allowed = known && !requires &&
-        !recovery_deploy_blocker &&
-        (wants_restart ? restart_ok : deploy_ok);
+    const bool allowed = agent_deploy_guard_allowed(
+        known, requires, recovery_deploy_blocker, wants_restart, restart_ok,
+        deploy_ok);
 
     json_push_kv_str(result, "current_lane_name", lane_name);
     json_push_kv_str(result, "operator_lane_name", target_lane_name);
@@ -398,22 +450,17 @@ bool rpc_agent_deploy_guard(const struct json_value *params, bool help,
                       recovery_deploy_blocker);
     json_push_kv_str(result, "recovery_status", recovery_status);
     json_push_kv_str(result, "recovery_safe_next_action",
-                     recovery && json_get(recovery, "safe_next_action")
-                         ? json_get_str(json_get(recovery,
-                                                "safe_next_action")) : "");
+                     agent_deploy_field_str(recovery, "safe_next_action",
+                                            ""));
     json_push_kv_str(result, "explicit_recovery_env",
-                     recovery && json_get(recovery, "explicit_recovery_env")
-                         ? json_get_str(json_get(recovery,
-                                                "explicit_recovery_env")) : "");
+                     agent_deploy_field_str(recovery, "explicit_recovery_env",
+                                            ""));
     json_push_kv_str(result, "preferred_deploy_target",
-                     safety && json_get(safety, "preferred_deploy_target")
-                         ? json_get_str(json_get(safety,
-                                                "preferred_deploy_target"))
-                         : "");
+                     agent_deploy_field_str(safety, "preferred_deploy_target",
+                                            ""));
     json_push_kv_str(result, "safe_default_action",
-                     safety && json_get(safety, "safe_default_action")
-                         ? json_get_str(json_get(safety,
-                                                "safe_default_action")) : "");
+                     agent_deploy_field_str(safety, "safe_default_action",
+                                            ""));
     json_push_kv_bool(result, "allowed", allowed);
     json_push_kv_int(result, "exit_code", allowed ? 0 : 1);
     json_push_kv_str(result, "decision", allowed ? "allow" : "refuse");
@@ -421,28 +468,15 @@ bool rpc_agent_deploy_guard(const struct json_value *params, bool help,
                      "zcl.operator_deployment_safety.v1");
     json_push_kv_str(result, "source", "native_c_agent_interface_controller");
     json_push_kv_str(result, "action_scope",
-                     agent_deploy_action_target_lane(action)[0]
-                         ? "explicit_target_lane"
-                         : "current_runtime_lane");
-    if (!known) {
-        json_push_kv_str(result, "reason", "unknown_action");
-    } else if (requires) {
-        json_push_kv_str(result, "reason",
-                         "operator_confirmation_required");
-    } else if (recovery_deploy_blocker) {
-        json_push_kv_str(result, "reason",
-                         "pending_auto_reindex_requires_explicit_recovery_boot");
-    } else if (wants_restart && !restart_ok) {
-        json_push_kv_str(result, "reason", "automation_restart_not_allowed");
-    } else if (!wants_restart && !deploy_ok) {
-        json_push_kv_str(result, "reason", "automation_deploy_not_allowed");
-    } else {
-        json_push_kv_str(result, "reason", "deployment_safety_allows_action");
-    }
+                     agent_deploy_guard_action_scope(action));
+    json_push_kv_str(result, "reason",
+                     agent_deploy_guard_reason(known, requires,
+                                               recovery_deploy_blocker,
+                                               wants_restart, restart_ok,
+                                               deploy_ok));
     json_push_kv_str(result, "lane", target_lane_name);
     json_push_kv_str(result, "target_lane_name", target_lane_name);
     json_push_kv_str(result, "guard_env",
-                     safety && json_get(safety, "guard_env")
-                         ? json_get_str(json_get(safety, "guard_env")) : "");
+                     agent_deploy_field_str(safety, "guard_env", ""));
     return true;
 }

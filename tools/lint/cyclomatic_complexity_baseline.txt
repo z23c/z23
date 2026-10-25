@@ -19,7 +19,6 @@ apps/skycombat/src/sky_combat_multiplayer_ultimate.c:main:44
 apps/skycombat/src/views/combat_effects.c:effects_update:26
 cognition/controllers/src/agent_background_quality.c:agent_push_quality_lane:32
 cognition/controllers/src/agent_diagnose_controller.c:rpc_agent_diagnose:67
-cognition/controllers/src/agent_interface_controller.c:rpc_agent_deploy_guard:39
 cognition/controllers/src/agent_resources.c:agent_resources_stat_assign:16
 cognition/controllers/src/agent_security_posture.c:posture_collect_bootstrap:18
 cognition/controllers/src/agent_security_posture.c:posture_finalize:19
