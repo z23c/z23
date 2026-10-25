@@ -121,6 +121,48 @@ static int64_t dvx_sub_int(const struct dvx_call *c, const char *obj,
     return v && v->type == JSON_INT ? json_get_int(v) : -1;
 }
 
+/* Predicates the ASSERT lines delegate to, so each assertion stays a single
+ * check while its condition keeps one named home. */
+static bool dvx_is_int(const struct json_value *v)
+{
+    return v && v->type == JSON_INT;
+}
+
+static bool dvx_is_nonneg_int(const struct json_value *v)
+{
+    return v && v->type == JSON_INT && json_get_int(v) >= 0;
+}
+
+static bool dvx_is_bool(const struct json_value *v)
+{
+    return v && v->type == JSON_BOOL;
+}
+
+static bool dvx_is_false_bool(const struct json_value *v)
+{
+    return v && v->type == JSON_BOOL && !json_get_bool(v);
+}
+
+static bool dvx_str_len_at_least(const struct json_value *v, size_t min)
+{
+    return v && v->type == JSON_STR && strlen(json_get_str(v)) >= min;
+}
+
+/* True when the row's "branch" field names `branch`. */
+static bool dvx_row_branch_is(const struct json_value *row,
+                              const char *branch)
+{
+    const struct json_value *name = json_get(row, "branch");
+    return name && strcmp(json_get_str(name), branch) == 0;
+}
+
+/* True when the registry spec declares `key` among its input keys. */
+static bool dvx_spec_declares_key(const struct zcl_command_spec *spec,
+                                  const char *key)
+{
+    return spec->input_keys && strstr(spec->input_keys, key) != NULL;
+}
+
 /* The bin this run gave one branch, or "" when the branch is absent. */
 static const char *dvx_bin_of(const struct dvx_call *c, const char *branch)
 {
@@ -187,11 +229,10 @@ int test_devagent_triage(void)
             zcl_command_registry_find(zcl_command_catalog(), DVX_PATH, NULL);
         ASSERT(spec != NULL);
         ASSERT(spec->handler != NULL);
-        ASSERT(spec->input_keys && strstr(spec->input_keys, "cwd") != NULL);
-        ASSERT(spec->input_keys && strstr(spec->input_keys, "base") != NULL);
-        ASSERT(spec->input_keys &&
-               strstr(spec->input_keys, "max_age_days") != NULL);
-        ASSERT(spec->input_keys && strstr(spec->input_keys, "limit") != NULL);
+        ASSERT(dvx_spec_declares_key(spec, "cwd"));
+        ASSERT(dvx_spec_declares_key(spec, "base"));
+        ASSERT(dvx_spec_declares_key(spec, "max_age_days"));
+        ASSERT(dvx_spec_declares_key(spec, "limit"));
         PASS();
     }
 
@@ -231,7 +272,7 @@ int test_devagent_triage(void)
         ASSERT_EQ(dvx_sub_int(&c, "counts", "delete"), 1);
         const struct json_value *truncated =
             json_get(&c.reply.data, "truncated");
-        ASSERT(truncated && truncated->type == JSON_BOOL);
+        ASSERT(dvx_is_bool(truncated));
         ASSERT(!json_get_bool(truncated));
         dvx_end(&c);
         PASS();
@@ -254,22 +295,19 @@ int test_devagent_triage(void)
                 json_get(row, "last_commit_age_days");
             const struct json_value *clean = json_get(row, "merge_clean");
             const struct json_value *head = json_get(row, "head");
-            ASSERT(ahead && ahead->type == JSON_INT);
-            ASSERT(behind && behind->type == JSON_INT);
-            ASSERT(age && age->type == JSON_INT && json_get_int(age) >= 0);
-            ASSERT(clean && clean->type == JSON_BOOL);
-            ASSERT(head && head->type == JSON_STR &&
-                   strlen(json_get_str(head)) >= 4);
+            ASSERT(dvx_is_int(ahead));
+            ASSERT(dvx_is_int(behind));
+            ASSERT(dvx_is_nonneg_int(age));
+            ASSERT(dvx_is_bool(clean));
+            ASSERT(dvx_str_len_at_least(head, 4));
         }
         /* And the one branch that cannot merge says so. */
         for (size_t i = 0; i < branches->num_children; i++) {
-            const struct json_value *name = json_get(&branches->children[i],
-                                                     "branch");
-            if (!name || strcmp(json_get_str(name), "conflict") != 0)
+            if (!dvx_row_branch_is(&branches->children[i], "conflict"))
                 continue;
             const struct json_value *clean =
                 json_get(&branches->children[i], "merge_clean");
-            ASSERT(clean && clean->type == JSON_BOOL && !json_get_bool(clean));
+            ASSERT(dvx_is_false_bool(clean));
         }
         dvx_end(&c);
         PASS();
