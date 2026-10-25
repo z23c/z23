@@ -12253,7 +12253,7 @@ static bool epn_fixture(const char *cwd, const char *root)
                     "\techo $$PPID > inner.pid\n"
                     "\tTMPDIR=tmp bash tools/dev/build-epoch-session.sh verify"
                     " build/obj/epochs/%s/.build-session"
-                    " build/obj/epochs/%s/.leases/1 build/obj 1 build/cand 1"
+                    " build/obj/epochs/%s/.leases/1 build/obj build/cand 1"
                     " %s 1 %s %s %s dev-v2 -O2 - cc c++ $$PPID"
                     " tools/dev/build-epoch-key.sh 2> script.err"
                     " >/dev/null\n",
