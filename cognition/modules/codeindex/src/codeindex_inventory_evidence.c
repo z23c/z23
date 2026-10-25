@@ -207,6 +207,180 @@ static bool inv_ev_target_visible(const struct inv_scan *scan,
     return inv_ev_bit_get(cap_files, stride, cap_for_symbol[symbol], file);
 }
 
+static bool inv_ev_count_alloc_failed(int symbol_count, int nc, size_t stride,
+                                      const struct inv_ev_symbol_order *symbols,
+                                      const struct inv_ev_cap_order *caps,
+                                      const uint8_t *cap_files)
+{
+    return (symbol_count && !symbols) || (nc && !caps) ||
+           (nc && stride && !cap_files);
+}
+
+static int inv_ev_collect_functions(const struct ci_inventory_report *report,
+                                    struct inv_ev_symbol_order *symbols)
+{
+    int function_count = 0;
+    for (int i = 0; i < report->symbol_count; i++) {
+        if (report->symbols[i].kind != 'T' && report->symbols[i].kind != 't')
+            continue;
+        symbols[function_count].index = i;
+        symbols[function_count++].name = report->symbols[i].name;
+    }
+    return function_count;
+}
+
+static void inv_ev_fill_cap_order(const struct ci_inventory_report *report,
+                                  struct inv_ev_cap_order *caps, int nc)
+{
+    for (int i = 0; i < nc; i++) {
+        caps[i].index = i;
+        caps[i].token = report->capabilities[i].include_token;
+        caps[i].header = report->capabilities[i].header;
+    }
+}
+
+static void inv_ev_record_include_uses(struct inv_scan *scan,
+                                       struct ci_inventory_report *report,
+                                       const struct inv_ev_cap_order *caps,
+                                       int nc, uint8_t *cap_files,
+                                       size_t stride)
+{
+    for (int i = 0; i < scan->include_count; i++) {
+        const struct inv_include *inc = &scan->includes[i];
+        int cap = inv_ev_resolve_include(scan, caps, nc, inc->file_index,
+                                         inc->token);
+        scan->includes[i].resolved_cap = cap;
+        if (cap < 0) { report->unresolved_include_sites++; continue; }
+        if (!scan->files[inc->file_index].is_example)
+            inv_ev_bit_set(cap_files, stride, cap, inc->file_index);
+    }
+}
+
+static int inv_ev_ref_run_end(const struct inv_ref *refs, int ref_count,
+                              int ri)
+{
+    int end = ri + 1;
+    while (end < ref_count &&
+           strcmp(refs[end].callee, refs[ri].callee) == 0 &&
+           refs[end].file_index == refs[ri].file_index)
+        end++;
+    return end;
+}
+
+static int inv_ev_function_name_end(const struct inv_ev_symbol_order *symbols,
+                                    int function_count, int begin,
+                                    const char *name)
+{
+    int finish = begin;
+    while (finish < function_count &&
+           strcmp(symbols[finish].name, name) == 0)
+        finish++;
+    return finish;
+}
+
+static bool inv_ev_functions_one_target(
+    const struct ci_inventory_report *report,
+    const struct inv_ev_symbol_order *symbols, int begin, int finish,
+    int first)
+{
+    for (int i = begin + 1; i < finish; i++)
+        if (!inv_ev_same_target(&report->symbols[first],
+                                &report->symbols[symbols[i].index]))
+            return false;
+    return true;
+}
+
+static int inv_ev_visible_symbol_choice(
+    const struct inv_scan *scan, struct ci_inventory_report *report,
+    const int *cap_for_symbol, const struct inv_ev_symbol_order *symbols,
+    int begin, int finish, const uint8_t *cap_files, size_t stride, int ri)
+{
+    int chosen = -1;
+    for (int i = begin; i < finish; i++) {
+        int candidate = symbols[i].index;
+        if (!inv_ev_target_visible(scan, report, cap_for_symbol,
+                                   cap_files, stride, candidate,
+                                   scan->refs[ri].file_index))
+            continue;
+        if (chosen < 0) chosen = candidate;
+        else if (!inv_ev_same_target(&report->symbols[chosen],
+                                     &report->symbols[candidate])) {
+            chosen = -2; break;
+        }
+    }
+    if (chosen < 0) report->ambiguous_symbol_use_sites++;
+    return chosen;
+}
+
+static void inv_ev_add_symbol_use_counts(
+    const struct inv_scan *scan, struct ci_inventory_report *report,
+    const int *cap_for_symbol, const struct inv_ev_symbol_order *symbols,
+    int begin, int finish, int first, int chosen, bool one_target,
+    uint8_t *cap_files, size_t stride, int ri)
+{
+    int target = one_target ? first : chosen;
+    for (int i = begin; i < finish; i++) {
+        int index = symbols[i].index;
+        if (!inv_ev_same_target(&report->symbols[target],
+                                &report->symbols[index]))
+            continue;
+        struct ci_inventory_symbol *symbol = &report->symbols[index];
+        const struct inv_file *file =
+            &scan->files[scan->refs[ri].file_index];
+        if (file->is_test) {
+            symbol->test_use_files++;
+            if (symbol->test_evidence == CI_INVENTORY_TEST_NONE)
+                symbol->test_evidence = CI_INVENTORY_TEST_SOURCE_ONLY;
+        } else if (!file->is_example) symbol->production_use_files++;
+        if (!file->is_example)
+            inv_ev_bit_set(cap_files, stride, cap_for_symbol[index],
+                           scan->refs[ri].file_index);
+    }
+}
+
+static int inv_ev_count_ref_run(const struct inv_scan *scan,
+                                struct ci_inventory_report *report,
+                                const int *cap_for_symbol,
+                                const struct inv_ev_symbol_order *symbols,
+                                int function_count, uint8_t *cap_files,
+                                size_t stride, int ri)
+{
+    int end = inv_ev_ref_run_end(scan->refs, scan->ref_count, ri);
+    int begin = inv_ev_name_lower(symbols, function_count,
+                                  scan->refs[ri].callee);
+    int finish = inv_ev_function_name_end(symbols, function_count, begin,
+                                          scan->refs[ri].callee);
+    if (begin < finish) {
+        int first = symbols[begin].index;
+        bool one_target = inv_ev_functions_one_target(report, symbols,
+                                                      begin, finish, first);
+        int chosen = -1;
+        if (!one_target)
+            chosen = inv_ev_visible_symbol_choice(
+                scan, report, cap_for_symbol, symbols, begin, finish,
+                cap_files, stride, ri);
+        if (one_target || chosen >= 0)
+            inv_ev_add_symbol_use_counts(
+                scan, report, cap_for_symbol, symbols, begin, finish,
+                first, chosen, one_target, cap_files, stride, ri);
+    }
+    return end;
+}
+
+static void inv_ev_add_cap_use_counts(const struct inv_scan *scan,
+                                      struct ci_inventory_report *report,
+                                      const uint8_t *cap_files, size_t stride,
+                                      int nc)
+{
+    for (int cap = 0; cap < nc; cap++) for (int file = 0;
+         file < scan->file_count; file++) {
+        if (!inv_ev_bit_get(cap_files, stride, cap, file)) continue;
+        if (scan->files[file].is_test) report->capabilities[cap].test_use_files++;
+        else if (!scan->files[file].is_example)
+            report->capabilities[cap].production_use_files++;
+    }
+}
+
 bool inv_count_uses(struct inv_scan *scan,
                     struct ci_inventory_report *report,
                     const int *cap_for_symbol)
@@ -223,100 +397,20 @@ bool inv_count_uses(struct inv_scan *scan,
     size_t stride = ((size_t)scan->file_count + 7u) / 8u;
     uint8_t *cap_files = zcl_calloc((size_t)nc, stride,
                                     "ci_inventory_cap_file_bits");
-    if ((report->symbol_count && !symbols) || (nc && !caps) ||
-        (nc && stride && !cap_files)) {
+    if (inv_ev_count_alloc_failed(report->symbol_count, nc, stride,
+                                  symbols, caps, cap_files)) {
         free(symbols); free(caps); free(cap_files); return false;
     }
-    int function_count = 0;
-    for (int i = 0; i < report->symbol_count; i++) {
-        if (report->symbols[i].kind != 'T' && report->symbols[i].kind != 't')
-            continue;
-        symbols[function_count].index = i;
-        symbols[function_count++].name = report->symbols[i].name;
-    }
-    for (int i = 0; i < nc; i++) {
-        caps[i].index = i;
-        caps[i].token = report->capabilities[i].include_token;
-        caps[i].header = report->capabilities[i].header;
-    }
+    int function_count = inv_ev_collect_functions(report, symbols);
+    inv_ev_fill_cap_order(report, caps, nc);
     inv_ev_symbols_sort(symbols, function_count);
     inv_ev_caps_sort(caps, nc);
-    for (int i = 0; i < scan->include_count; i++) {
-        const struct inv_include *inc = &scan->includes[i];
-        int cap = inv_ev_resolve_include(scan, caps, nc, inc->file_index,
-                                         inc->token);
-        scan->includes[i].resolved_cap = cap;
-        if (cap < 0) { report->unresolved_include_sites++; continue; }
-        if (!scan->files[inc->file_index].is_example)
-            inv_ev_bit_set(cap_files, stride, cap, inc->file_index);
-    }
+    inv_ev_record_include_uses(scan, report, caps, nc, cap_files, stride);
     inv_refs_sort(scan->refs, scan->ref_count);
-    for (int ri = 0; ri < scan->ref_count;) {
-        int end = ri + 1;
-        while (end < scan->ref_count &&
-               strcmp(scan->refs[end].callee, scan->refs[ri].callee) == 0 &&
-               scan->refs[end].file_index == scan->refs[ri].file_index)
-            end++;
-        int begin = inv_ev_name_lower(symbols, function_count,
-                                      scan->refs[ri].callee);
-        int finish = begin;
-        while (finish < function_count &&
-               strcmp(symbols[finish].name, scan->refs[ri].callee) == 0)
-            finish++;
-        if (begin < finish) {
-            int first = symbols[begin].index;
-            bool one_target = true;
-            for (int i = begin + 1; i < finish; i++)
-                if (!inv_ev_same_target(&report->symbols[first],
-                                        &report->symbols[symbols[i].index])) {
-                    one_target = false; break;
-                }
-            int chosen = -1;
-            if (!one_target) {
-                for (int i = begin; i < finish; i++) {
-                    int candidate = symbols[i].index;
-                    if (!inv_ev_target_visible(scan, report, cap_for_symbol,
-                                               cap_files, stride, candidate,
-                                               scan->refs[ri].file_index))
-                        continue;
-                    if (chosen < 0) chosen = candidate;
-                    else if (!inv_ev_same_target(&report->symbols[chosen],
-                                                 &report->symbols[candidate])) {
-                        chosen = -2; break;
-                    }
-                }
-                if (chosen < 0) report->ambiguous_symbol_use_sites++;
-            }
-            if (one_target || chosen >= 0) {
-                int target = one_target ? first : chosen;
-                for (int i = begin; i < finish; i++) {
-                    int index = symbols[i].index;
-                    if (!inv_ev_same_target(&report->symbols[target],
-                                            &report->symbols[index]))
-                        continue;
-                    struct ci_inventory_symbol *symbol = &report->symbols[index];
-                    const struct inv_file *file =
-                        &scan->files[scan->refs[ri].file_index];
-                    if (file->is_test) {
-                        symbol->test_use_files++;
-                        if (symbol->test_evidence == CI_INVENTORY_TEST_NONE)
-                            symbol->test_evidence = CI_INVENTORY_TEST_SOURCE_ONLY;
-                    } else if (!file->is_example) symbol->production_use_files++;
-                    if (!file->is_example)
-                        inv_ev_bit_set(cap_files, stride, cap_for_symbol[index],
-                                       scan->refs[ri].file_index);
-                }
-            }
-        }
-        ri = end;
-    }
-    for (int cap = 0; cap < nc; cap++) for (int file = 0;
-         file < scan->file_count; file++) {
-        if (!inv_ev_bit_get(cap_files, stride, cap, file)) continue;
-        if (scan->files[file].is_test) report->capabilities[cap].test_use_files++;
-        else if (!scan->files[file].is_example)
-            report->capabilities[cap].production_use_files++;
-    }
+    for (int ri = 0; ri < scan->ref_count;)
+        ri = inv_ev_count_ref_run(scan, report, cap_for_symbol, symbols,
+                                  function_count, cap_files, stride, ri);
+    inv_ev_add_cap_use_counts(scan, report, cap_files, stride, nc);
     free(symbols); free(caps); free(cap_files);
     return true;
 }
@@ -442,36 +536,43 @@ static bool inv_ev_resolved_include_files(const struct inv_scan *scan,
     return true;
 }
 
-bool inv_registered_reachability(const struct inv_scan *scan,
-                                 struct ci_inventory_report *report)
+static bool inv_ev_reach_alloc_failed(int body_count, int cap_count,
+                                      size_t stride,
+                                      const struct inv_ev_body_order *order,
+                                      const struct inv_ev_body_mark *marks,
+                                      const uint8_t *cap_files)
 {
-    struct inv_ev_body_order *order = zcl_malloc(
-        (size_t)scan->body_count * sizeof(*order), "ci_inventory_body_evidence");
-    struct inv_ev_body_mark *marks = zcl_calloc(
-        (size_t)scan->body_count, sizeof(*marks), "ci_inventory_body_marks");
-    size_t stride = ((size_t)scan->file_count + 7u) / 8u;
-    uint8_t *cap_files = zcl_calloc((size_t)report->capability_count, stride,
-                                    "ci_inventory_test_cap_files");
-    if ((scan->body_count && (!order || !marks)) ||
-        (report->capability_count && stride && !cap_files)) {
-        free(order); free(marks); free(cap_files); return false;
-    }
+    return (body_count && (!order || !marks)) ||
+           (cap_count && stride && !cap_files);
+}
+
+static void inv_ev_fill_body_order(const struct inv_scan *scan,
+                                   struct inv_ev_body_order *order)
+{
     for (int i = 0; i < scan->body_count; i++) {
         order[i].index = i; order[i].body = &scan->bodies[i];
     }
-    inv_ev_bodies_sort(order, scan->body_count);
-    if (!inv_ev_resolved_include_files(scan, report->capability_count,
-                                       cap_files, stride)) {
-        free(order); free(marks); free(cap_files);
-        return false;
-    }
+}
+
+static int inv_ev_body_name_end(const struct inv_ev_body_order *order,
+                                int body_count, int begin, const char *name)
+{
+    int end = begin;
+    while (end < body_count && strcmp(order[end].body->name, name) == 0)
+        end++;
+    return end;
+}
+
+static bool inv_ev_bind_registered_roots(const struct inv_scan *scan,
+                                         struct ci_inventory_report *report,
+                                         const struct inv_ev_body_order *order,
+                                         struct inv_ev_body_mark *marks)
+{
     for (int i = 0; i < scan->group_count; i++) {
         int begin = inv_ev_body_lower(order, scan->body_count,
                                       scan->groups[i].root_symbol);
-        int end = begin;
-        while (end < scan->body_count &&
-               strcmp(order[end].body->name,
-                      scan->groups[i].root_symbol) == 0) end++;
+        int end = inv_ev_body_name_end(order, scan->body_count, begin,
+                                       scan->groups[i].root_symbol);
         if (end == begin + 1) {
             int at = order[begin].index;
             marks[at].reached = true;
@@ -481,27 +582,24 @@ bool inv_registered_reachability(const struct inv_scan *scan,
         } else if (begin == end) {
             if (!inv_ev_root_gap_push(report, &scan->groups[i],
                     "body_not_found_or_macro_generated",
-                    "preprocess the registered test translation unit with its exact build defines and bind the emitted root body")) {
-                free(order); free(marks); free(cap_files);
+                    "preprocess the registered test translation unit with its exact build defines and bind the emitted root body"))
                 return false;
-            }
             report->registered_test_roots_missing++;
         } else {
             if (!inv_ev_root_gap_push(report, &scan->groups[i],
                     "multiple_conditional_or_duplicate_bodies",
-                    "preprocess the registered test translation unit for the selected platform and bind exactly one emitted root body")) {
-                free(order); free(marks); free(cap_files);
+                    "preprocess the registered test translation unit for the selected platform and bind exactly one emitted root body"))
                 return false;
-            }
             report->ambiguous_registered_test_roots++;
         }
     }
-    struct inv_ev_resolved_ref *edges = inv_ev_resolve_refs(scan, report,
-        order, cap_files, stride);
-    if (scan->ref_count && !edges) {
-        free(order); free(marks); free(cap_files);
-        return false;
-    }
+    return true;
+}
+
+static void inv_ev_propagate_reached(const struct inv_scan *scan,
+                                     const struct inv_ev_resolved_ref *edges,
+                                     struct inv_ev_body_mark *marks)
+{
     bool changed;
     int rounds = 0;
     do {
@@ -517,30 +615,57 @@ bool inv_registered_reachability(const struct inv_scan *scan,
         }
         rounds++;
     } while (changed && rounds <= scan->body_count);
-    for (int i = 0; i < scan->ref_count; i++) {
+}
+
+static void inv_ev_count_ambiguous_edges(
+    struct ci_inventory_report *report,
+    const struct inv_ev_resolved_ref *edges,
+    const struct inv_ev_body_mark *marks, int ref_count)
+{
+    for (int i = 0; i < ref_count; i++) {
         int from = edges[i].from;
         if (from < 0 || !marks[from].reached) continue;
         if (edges[i].to == -1)
             report->ambiguous_test_call_edges++;
     }
+}
+
+static int inv_ev_symbol_body_index(const struct inv_ev_body_order *order,
+                                    int body_count, int begin,
+                                    const struct ci_inventory_symbol *symbol)
+{
+    int found = -1;
+    for (int at = begin; at < body_count &&
+         strcmp(order[at].body->name, symbol->name) == 0; at++) {
+        const struct inv_body *body = order[at].body;
+        if (strcmp(body->path, symbol->definition_path) != 0) continue;
+        if (found >= 0) { found = -2; break; }
+        found = order[at].index;
+    }
+    return found;
+}
+
+static void inv_ev_apply_registered_reach(
+    const struct inv_scan *scan, struct ci_inventory_report *report,
+    const struct inv_ev_body_order *order,
+    const struct inv_ev_body_mark *marks)
+{
     for (int i = 0; i < report->symbol_count; i++) {
         struct ci_inventory_symbol *symbol = &report->symbols[i];
         if ((symbol->kind != 'T' && symbol->kind != 't') ||
             !symbol->definition_path[0]) continue;
         int begin = inv_ev_body_lower(order, scan->body_count, symbol->name);
-        int found = -1;
-        for (int at = begin; at < scan->body_count &&
-             strcmp(order[at].body->name, symbol->name) == 0; at++) {
-            const struct inv_body *body = order[at].body;
-            if (strcmp(body->path, symbol->definition_path) != 0) continue;
-            if (found >= 0) { found = -2; break; }
-            found = order[at].index;
-        }
+        int found = inv_ev_symbol_body_index(order, scan->body_count, begin,
+                                             symbol);
         if (found < 0 || !marks[found].reached) continue;
         symbol->test_evidence = CI_INVENTORY_TEST_REGISTERED_REACHABLE;
         inv_cpy(symbol->registered_test_group,
                 sizeof(symbol->registered_test_group), marks[found].group);
     }
+}
+
+static void inv_ev_count_registered_caps(struct ci_inventory_report *report)
+{
     for (int c = 0; c < report->capability_count; c++) {
         struct ci_inventory_capability *cap = &report->capabilities[c];
         for (int i = cap->symbol_offset; i < cap->symbol_offset + cap->symbol_count;
@@ -548,6 +673,43 @@ bool inv_registered_reachability(const struct inv_scan *scan,
                       CI_INVENTORY_TEST_REGISTERED_REACHABLE)
             cap->registered_test_symbols++;
     }
+}
+
+bool inv_registered_reachability(const struct inv_scan *scan,
+                                 struct ci_inventory_report *report)
+{
+    struct inv_ev_body_order *order = zcl_malloc(
+        (size_t)scan->body_count * sizeof(*order), "ci_inventory_body_evidence");
+    struct inv_ev_body_mark *marks = zcl_calloc(
+        (size_t)scan->body_count, sizeof(*marks), "ci_inventory_body_marks");
+    size_t stride = ((size_t)scan->file_count + 7u) / 8u;
+    uint8_t *cap_files = zcl_calloc((size_t)report->capability_count, stride,
+                                    "ci_inventory_test_cap_files");
+    if (inv_ev_reach_alloc_failed(scan->body_count, report->capability_count,
+                                  stride, order, marks, cap_files)) {
+        free(order); free(marks); free(cap_files); return false;
+    }
+    inv_ev_fill_body_order(scan, order);
+    inv_ev_bodies_sort(order, scan->body_count);
+    if (!inv_ev_resolved_include_files(scan, report->capability_count,
+                                       cap_files, stride)) {
+        free(order); free(marks); free(cap_files);
+        return false;
+    }
+    if (!inv_ev_bind_registered_roots(scan, report, order, marks)) {
+        free(order); free(marks); free(cap_files);
+        return false;
+    }
+    struct inv_ev_resolved_ref *edges = inv_ev_resolve_refs(scan, report,
+        order, cap_files, stride);
+    if (scan->ref_count && !edges) {
+        free(order); free(marks); free(cap_files);
+        return false;
+    }
+    inv_ev_propagate_reached(scan, edges, marks);
+    inv_ev_count_ambiguous_edges(report, edges, marks, scan->ref_count);
+    inv_ev_apply_registered_reach(scan, report, order, marks);
+    inv_ev_count_registered_caps(report);
     free(order); free(marks); free(cap_files); free(edges);
     return true;
 }

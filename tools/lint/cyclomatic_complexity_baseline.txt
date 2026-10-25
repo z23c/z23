@@ -38,8 +38,6 @@ cognition/modules/codeindex/src/codeindex_impact.c:codeindex_reverse_includes:17
 cognition/modules/codeindex/src/codeindex_impact.c:impact_closure_impl:26
 cognition/modules/codeindex/src/codeindex_incremental.c:ci_store_diff_merkle_leaves:21
 cognition/modules/codeindex/src/codeindex_incremental.c:incremental_replace_file:18
-cognition/modules/codeindex/src/codeindex_inventory_evidence.c:inv_count_uses:44
-cognition/modules/codeindex/src/codeindex_inventory_evidence.c:inv_registered_reachability:42
 cognition/modules/codeindex/src/codeindex_merkle.c:ci_merkle_proof_verify:38
 cognition/modules/codeindex/src/codeindex_merkle.c:ci_merkle_prove:18
 cognition/modules/codeindex/src/codeindex_merkle.c:merkle_file_key_cb:17
