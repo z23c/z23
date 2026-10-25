@@ -38,7 +38,7 @@
  *  15. replay_resume_after_kill — SIGKILL-style exit mid-replay; reopen resumes
  *                                from the last commit, no loss, no duplicate
  *  16. passive_checkpoint_then_close — PASSIVE checkpoint after catch-up keeps
- *                                the db readable; close still truncates WAL to 0
+ *                                the db readable; close leaves no WAL bytes
  *
  * Scratch files live under ./test-tmp/bip_<pid>_<tag>/ in line with the
  * project's no-/tmp convention. */
@@ -1027,8 +1027,11 @@ static int run_passive_checkpoint_then_close(int *failures)
               block_index_projection_count(p) == (uint64_t)n);
 
     block_index_projection_close(p);
-    BIP_CHECK("passive_ckpt: close still truncates WAL to 0",
-              bip_file_size(wal_path) == 0);
+    /* The last connection's clean close removes the -wal file (SQLite's
+     * default), so after close "no WAL bytes" means removed or empty. */
+    BIP_CHECK("passive_ckpt: close leaves no WAL bytes",
+              bip_file_size(wal_path) == 0 ||
+                  (bip_file_size(wal_path) < 0 && errno == ENOENT));
 
     p = block_index_projection_open(db_path, log);
     BIP_CHECK("passive_ckpt: reopen succeeds", p != NULL);
@@ -1573,8 +1576,8 @@ int test_block_index_projection(void)
     }
     size_t owned = 0;
     for (unsigned i = 0; i < BIP_SHARD_COUNT; i++) owned += counts[i];
-    BIP_CHECK("partition: all 19 cases have one owner",
-              BIP_CASE_COUNT == 19u && owned == BIP_CASE_COUNT && unique);
+    BIP_CHECK("partition: all 20 cases have one owner",
+              BIP_CASE_COUNT == 20u && owned == BIP_CASE_COUNT && unique);
     bool nonempty = true;
     for (unsigned i = 0; i < BIP_SHARD_COUNT; i++) nonempty &= counts[i] > 0;
     BIP_CHECK("partition: every shard carries work", nonempty);
