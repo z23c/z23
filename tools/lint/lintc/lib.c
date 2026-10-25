@@ -1006,7 +1006,7 @@ static int rs_mod_entry(const char *dir, const char *name, int depth)
     int k = snprintf(path, sizeof path, "%s/%s", dir, name);
     if (ovf(k, sizeof path)) return 2;
     if (lstat(path, &st) != 0)
-        return (errno == ENOENT || errno == EACCES) ? 0
+        return errno == ENOENT ? 0
             : die("z23-lint: cannot stat %s\n", path);
     if (!S_ISDIR(st.st_mode))
         return 0;
@@ -1021,7 +1021,7 @@ static int rs_mod_walk(const char *dir, int depth)
     struct dirent **names = NULL;
     int n = scandir(dir, &names, NULL, alphasort);
     if (n < 0)
-        return (errno == ENOENT || errno == EACCES) ? 0
+        return errno == ENOENT ? 0
             : die("z23-lint: cannot scan %s\n", dir);
     int rc = 0;
     for (int i = 0; i < n; i++) {

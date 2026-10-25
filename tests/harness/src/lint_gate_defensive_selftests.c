@@ -22,6 +22,7 @@
 #if defined(ZCL_TESTING) && !defined(_WIN32)
 
 #include "lint_gate_selftests.h"
+#include "util/spawn.h"
 
 int check_coins_guard_file(const char *path)
 {
@@ -556,6 +557,93 @@ int t_coins_guard_gate_fails_loud_on_no_lookup_surface(void)
     return failures;
 }
 
+/* An inaccessible subtree must not disappear from the shared module set,
+ * even when another accessible module satisfies the declaration minimum. */
+static int raw_module_capture(const char *root, char *out, size_t cap)
+{
+    char binary[PATH_MAX];
+    struct sigaction saved, normal = {.sa_handler = SIG_DFL};
+    if (repo_path(binary, sizeof binary, "build/bin/z23-lint") != 0 ||
+        sigemptyset(&normal.sa_mask) != 0 ||
+        sigaction(SIGCHLD, &normal, &saved) != 0)
+        return -1;
+    const char *argv[] = {binary, "check-raw-malloc", NULL};
+    bool timed_out = false;
+    int rc = zcl_spawn_capture_merged_in_dir_observed(
+        argv, root, out, cap, 5000, &timed_out);
+    if (sigaction(SIGCHLD, &saved, NULL) != 0)
+        return -1;
+    if (timed_out)
+        return -1;
+    return rc;
+}
+
+static int raw_module_fixture(const char *root, char *hidden, char *plant)
+{
+    static const char *const dirs[] = {
+        "engine", "engine/modules", "engine/modules/good", "engine/composition",
+        "contexts", "contexts/hidden", "contexts/hidden/modules",
+        "contexts/hidden/modules/bad"
+    };
+    char path[PATH_MAX];
+    for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
+        if (snprintf(path, sizeof path, "%s/%s", root, dirs[i]) >= (int)sizeof path ||
+            mkdir(path, 0700) != 0)
+            return 1;
+    }
+    if (snprintf(hidden, PATH_MAX, "%s/contexts/hidden", root) >= PATH_MAX ||
+        snprintf(plant, PATH_MAX, "%s/modules/bad/bad.c", hidden) >= PATH_MAX)
+        return 1;
+    if (snprintf(path, sizeof path, "%s/Makefile", root) >= (int)sizeof path ||
+        write_file(path, "PRODUCT_CONTEXTS = hidden\nAPP_DIRS = services\n") != 0)
+        return 1;
+    if (snprintf(path, sizeof path, "%s/engine/composition/lib_module_order.def", root)
+            >= (int)sizeof path || write_file(path, "LIB_MODULE(\"good\")\n") != 0)
+        return 1;
+    return write_file(plant, "void *bad(void) { return malloc(12); }\n");
+}
+
+static int raw_module_cases(const char *root, const char *hidden, const char *plant)
+{
+    char out[4096] = "";
+    if (chmod(hidden, 0000) != 0)
+        return 1;
+    int bad = 0;
+    if (access(plant, R_OK) == 0) {
+        fprintf(stderr, "[lint-gate] UNQUALIFIED permission-denial case: "
+                        "process bypasses directory mode; readable controls still run\n");
+    } else {
+        int rc = raw_module_capture(root, out, sizeof out);
+        bad = rc != 2 || strstr(out, "contexts/hidden") == NULL ||
+              strstr(out, "OK:") != NULL;
+        fprintf(stderr, "[lint-gate] module permission denial rc=%d: %s", rc, out);
+    }
+    if (chmod(hidden, 0700) != 0)
+        return 1;
+    int rc = raw_module_capture(root, out, sizeof out);
+    bad |= rc != 1 || strstr(out, "contexts/hidden/modules/bad/bad.c") == NULL;
+    if (write_file(plant, "int clean;\n") != 0)
+        return 1;
+    rc = raw_module_capture(root, out, sizeof out);
+    bad |= rc != 0 || strstr(out, "OK: check_raw_malloc") == NULL;
+    return bad;
+}
+
+static int raw_malloc_module_permissions_witness(void)
+{
+    char root[PATH_MAX], hidden[PATH_MAX] = "", plant[PATH_MAX];
+    if (!test_mkdtemp(root, sizeof root, "lint_module_permissions"))
+        return 1;
+    int bad = raw_module_fixture(root, hidden, plant);
+    if (!bad)
+        bad = raw_module_cases(root, hidden, plant);
+    if (hidden[0])
+        (void)chmod(hidden, 0700);
+    if (test_rm_rf_recursive(root) != 0)
+        bad = 1;
+    return bad;
+}
+
 int t_raw_malloc_fixture_trips_gate(void)
 {
     int failures = 0;
@@ -576,6 +664,7 @@ int t_raw_malloc_fixture_trips_gate(void)
         ASSERT(rc != 0);
         PASS();
     } _test_next:;
+    failures += raw_malloc_module_permissions_witness();
     return failures;
 }
 
