@@ -45,6 +45,77 @@ bool rpc_reindexchainstate(const struct json_value *params, bool help,
              "reindexchainstate RPC retired; use -reindex-chainstate at boot");
 }
 
+static bool importchainstate_node_db_is_open(const struct node_db *node_db)
+{
+    return node_db && node_db->open;
+}
+
+static bool importchainstate_best_block_indexed(
+    const struct block_index *ldb_tip)
+{
+    return ldb_tip && ldb_tip->phashBlock;
+}
+
+static int importchainstate_import_utxo_set(struct node_db *node_db,
+                                            struct coins_view_db *ext_db)
+{
+    struct node_db import_db;
+    struct node_db *import_target = node_db;
+    if (node_db_sync_open_private_db_like(node_db, &import_db))
+        import_target = &import_db;
+
+    int count = node_db_sync_import_utxos(import_target, ext_db);
+    if (import_target == &import_db)
+        node_db_close(&import_db);
+    return count;
+}
+
+static void importchainstate_fix_zero_heights(struct node_db *node_db)
+{
+    /* Fix height=0 UTXOs from transaction index (LevelDB decoder can
+     * fail to read the trailing height varint for some entries). */
+    int64_t h0_count = db_utxo_count_missing_heights(node_db);
+    if (h0_count > 0) {
+        printf("importchainstate: fixing %lld UTXOs with height=0...\n",
+               (long long)h0_count);
+        int fixed = db_utxo_repair_missing_heights_from_tx_index(node_db);
+        printf("importchainstate: fixed %d UTXO heights\n",
+               fixed);
+    }
+}
+
+static enum csr_result importchainstate_commit_indexed_tip(
+    struct blockchain_context *ctx, struct block_index *ldb_tip)
+{
+    struct chain_state_rollback_authorization rollback_auth = {
+        .source = CSR_ROLLBACK_SOURCE_UTXO_REPAIR,
+        .decision = POLICY_ALLOW,
+        .from_height = active_chain_height(&ctx->main_state->chain_active),
+        .to_height = ldb_tip->nHeight,
+        .max_depth = INT64_MAX,
+        .evidence_class = "leveldb_chainstate_best_block_indexed",
+        .reason = "rpc.importchainstate",
+    };
+    struct chain_state_commit commit = {
+        .new_tip = ldb_tip,
+        .new_coins_best = *ldb_tip->phashBlock,
+        .expected_utxo_count = 0,
+        .update_header_tip = true,
+        .persist_coins_best = true,
+        .rollback_auth = &rollback_auth,
+        .wallet_scan_height = -1,
+        .reason = "rpc.importchainstate",
+    };
+    enum csr_result csr_rc = csr_commit_tip(csr_instance(), &commit);
+#ifdef ZCL_TESTING
+    if (csr_rc == CSR_REJECTED_NOT_INITIALIZED) {
+        coins_view_cache_set_best_block(ctx->coins_tip, ldb_tip->phashBlock);
+        csr_rc = CSR_OK;
+    }
+#endif
+    return csr_rc;
+}
+
 /* ── importchainstate ──────────────────────────────────────── */
 
 bool rpc_importchainstate(const struct json_value *params, bool help,
@@ -65,7 +136,7 @@ bool rpc_importchainstate(const struct json_value *params, bool help,
     const char *cs_path = rpc_require_str(&p, 0, "chainstate_path");
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); LOG_FAIL("blockchain", "importchainstate: invalid params"); }
 
-    if (!ctx->node_db || !ctx->node_db->open) {
+    if (!importchainstate_node_db_is_open(ctx->node_db)) {
         json_set_str(result, "Node database not open");
         LOG_FAIL("blockchain", "importchainstate: node database not open");
     }
@@ -97,7 +168,7 @@ bool rpc_importchainstate(const struct json_value *params, bool help,
     }
     struct block_index *ldb_tip = block_map_find(
         &ctx->main_state->map_block_index, &ldb_best_block);
-    if (!ldb_tip || !ldb_tip->phashBlock) {
+    if (!importchainstate_best_block_indexed(ldb_tip)) {
         coins_view_db_close(&ext_db);
         json_set_str(result,
                      "LevelDB best block is not verified in the block index");
@@ -105,14 +176,7 @@ bool rpc_importchainstate(const struct json_value *params, bool help,
                  "importchainstate: best block missing from block index");
     }
 
-    struct node_db import_db;
-    struct node_db *import_target = ctx->node_db;
-    if (node_db_sync_open_private_db_like(ctx->node_db, &import_db))
-        import_target = &import_db;
-
-    int count = node_db_sync_import_utxos(import_target, &ext_db);
-    if (import_target == &import_db)
-        node_db_close(&import_db);
+    int count = importchainstate_import_utxo_set(ctx->node_db, &ext_db);
     coins_view_db_close(&ext_db);
 
     if (count < 0) {
@@ -120,18 +184,7 @@ bool rpc_importchainstate(const struct json_value *params, bool help,
         LOG_FAIL("blockchain", "importchainstate: UTXO import failed (count=%d)", count);
     }
 
-    /* Fix height=0 UTXOs from transaction index (LevelDB decoder can
-     * fail to read the trailing height varint for some entries). */
-    {
-        int64_t h0_count = db_utxo_count_missing_heights(ctx->node_db);
-        if (h0_count > 0) {
-            printf("importchainstate: fixing %lld UTXOs with height=0...\n",
-                   (long long)h0_count);
-            int fixed = db_utxo_repair_missing_heights_from_tx_index(ctx->node_db);
-            printf("importchainstate: fixed %d UTXO heights\n",
-                   fixed);
-        }
-    }
+    importchainstate_fix_zero_heights(ctx->node_db);
 
     if (!db_utxo_rebuild_wallet_and_address_caches(ctx->node_db)) {
         json_set_str(result, "Failed to rebuild wallet/address caches");
@@ -139,32 +192,7 @@ bool rpc_importchainstate(const struct json_value *params, bool help,
                  "importchainstate: failed to rebuild wallet/address caches");
     }
 
-    struct chain_state_rollback_authorization rollback_auth = {
-        .source = CSR_ROLLBACK_SOURCE_UTXO_REPAIR,
-        .decision = POLICY_ALLOW,
-        .from_height = active_chain_height(&ctx->main_state->chain_active),
-        .to_height = ldb_tip->nHeight,
-        .max_depth = INT64_MAX,
-        .evidence_class = "leveldb_chainstate_best_block_indexed",
-        .reason = "rpc.importchainstate",
-    };
-    struct chain_state_commit commit = {
-        .new_tip = ldb_tip,
-        .new_coins_best = *ldb_tip->phashBlock,
-        .expected_utxo_count = 0,
-        .update_header_tip = true,
-        .persist_coins_best = true,
-        .rollback_auth = &rollback_auth,
-        .wallet_scan_height = -1,
-        .reason = "rpc.importchainstate",
-    };
-    enum csr_result csr_rc = csr_commit_tip(csr_instance(), &commit);
-#ifdef ZCL_TESTING
-    if (csr_rc == CSR_REJECTED_NOT_INITIALIZED) {
-        coins_view_cache_set_best_block(ctx->coins_tip, ldb_tip->phashBlock);
-        csr_rc = CSR_OK;
-    }
-#endif
+    enum csr_result csr_rc = importchainstate_commit_indexed_tip(ctx, ldb_tip);
     if (csr_rc != CSR_OK) {
         json_set_str(result, "CSR rejected imported chainstate tip");
         LOG_FAIL("blockchain",
