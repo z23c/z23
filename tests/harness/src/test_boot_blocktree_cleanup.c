@@ -64,6 +64,55 @@ static bool bbc_make_nested_dir(const char *dir, const char *name,
            bbc_write_file(file_path, "scratch");
 }
 
+static bool bbc_stale_index_lock_was_removed(
+    bool ok, struct boot_blocktree_cleanup_result r,
+    const char *blocktree_path, const char *expected,
+    const char *lock_path)
+{
+    return ok && r.blocktree_path_ready &&
+           strcmp(blocktree_path, expected) == 0 &&
+           r.block_index_lock_removed &&
+           access(lock_path, F_OK) != 0;
+}
+
+static bool bbc_import_tmp_tree_was_removed(
+    bool ok, struct boot_blocktree_cleanup_result r,
+    const char *scratch)
+{
+    return ok && r.chainstate_import_tmp_removed &&
+           access(scratch, F_OK) != 0;
+}
+
+static bool bbc_legacy_ldb_snap_was_removed(
+    bool ok, struct boot_blocktree_cleanup_result r,
+    const char *scratch)
+{
+    return ok && r.legacy_ldb_snap_removed &&
+           access(scratch, F_OK) != 0;
+}
+
+static bool bbc_import_tmp_file_was_kept(
+    bool ok, struct boot_blocktree_cleanup_result r,
+    const char *scratch_file)
+{
+    return ok && !r.chainstate_import_tmp_removed &&
+           access(scratch_file, F_OK) == 0;
+}
+
+static bool bbc_invalid_datadir_failed_closed(
+    struct boot_blocktree_cleanup_result r, const char *blocktree_path)
+{
+    return r.invalid_datadir && !r.blocktree_path_ready &&
+           blocktree_path[0] == '\0';
+}
+
+static bool bbc_truncated_path_failed_closed(
+    struct boot_blocktree_cleanup_result r, const char *tiny)
+{
+    return r.truncated_path && !r.blocktree_path_ready &&
+           tiny[0] == '\0';
+}
+
 int test_boot_blocktree_cleanup(void)
 {
     int failures = 0;
@@ -82,10 +131,8 @@ int test_boot_blocktree_cleanup(void)
         char expected[512];
         snprintf(expected, sizeof(expected), "%s/blocks/index", dir);
         BBC_CHECK("removes stale block index lock",
-                  ok && r.blocktree_path_ready &&
-                  strcmp(blocktree_path, expected) == 0 &&
-                  r.block_index_lock_removed &&
-                  access(lock_path, F_OK) != 0);
+                  bbc_stale_index_lock_was_removed(ok, r, blocktree_path,
+                                                   expected, lock_path));
         test_rm_rf_recursive(dir);
     }
 
@@ -101,8 +148,7 @@ int test_boot_blocktree_cleanup(void)
             boot_blocktree_cleanup_prepare(dir, blocktree_path,
                                            sizeof(blocktree_path));
         BBC_CHECK("removes chainstate_import_tmp tree",
-                  ok && r.chainstate_import_tmp_removed &&
-                  access(scratch, F_OK) != 0);
+                  bbc_import_tmp_tree_was_removed(ok, r, scratch));
         test_rm_rf_recursive(dir);
     }
 
@@ -118,8 +164,7 @@ int test_boot_blocktree_cleanup(void)
             boot_blocktree_cleanup_prepare(dir, blocktree_path,
                                            sizeof(blocktree_path));
         BBC_CHECK("removes legacy ldb snapshot tree",
-                  ok && r.legacy_ldb_snap_removed &&
-                  access(scratch, F_OK) != 0);
+                  bbc_legacy_ldb_snap_was_removed(ok, r, scratch));
         test_rm_rf_recursive(dir);
     }
 
@@ -137,8 +182,7 @@ int test_boot_blocktree_cleanup(void)
             boot_blocktree_cleanup_prepare(dir, blocktree_path,
                                            sizeof(blocktree_path));
         BBC_CHECK("keeps same-named regular file",
-                  ok && !r.chainstate_import_tmp_removed &&
-                  access(scratch_file, F_OK) == 0);
+                  bbc_import_tmp_file_was_kept(ok, r, scratch_file));
         test_rm_rf_recursive(dir);
     }
 
@@ -148,8 +192,7 @@ int test_boot_blocktree_cleanup(void)
             boot_blocktree_cleanup_prepare(NULL, blocktree_path,
                                            sizeof(blocktree_path));
         BBC_CHECK("invalid datadir fails closed",
-                  r.invalid_datadir && !r.blocktree_path_ready &&
-                  blocktree_path[0] == '\0');
+                  bbc_invalid_datadir_failed_closed(r, blocktree_path));
     }
 
     {
@@ -157,8 +200,7 @@ int test_boot_blocktree_cleanup(void)
         struct boot_blocktree_cleanup_result r =
             boot_blocktree_cleanup_prepare(".", tiny, sizeof(tiny));
         BBC_CHECK("truncated output path fails closed",
-                  r.truncated_path && !r.blocktree_path_ready &&
-                  tiny[0] == '\0');
+                  bbc_truncated_path_failed_closed(r, tiny));
     }
 
     return failures;
