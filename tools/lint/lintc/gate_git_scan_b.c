@@ -88,7 +88,7 @@ static void nws_drop(regex_t *flag, regex_t *pragma, regex_t *marker)
 struct nws_acc {
     const char *root;
     regex_t *flag, *pragma, *marker;
-    FILE *hits;
+    FILE *hits, *err;
     int scanned, nhits;
 };
 
@@ -116,7 +116,13 @@ static int nws_on_track(const char *path, void *ctx)
     if (ovf(snprintf(full, sizeof full, "%s/%s", a->root, path), sizeof full))
         return 2;
     struct stat st;
-    if (stat(full, &st) != 0 || !S_ISREG(st.st_mode))
+    if (stat(full, &st) != 0) {
+        if (errno == ENOENT) return 0;
+        if (fprintf(a->err, "z23-lint: cannot stat %s\n", full) < 0)
+            return die("z23-lint: write failed\n", "");
+        return 2;
+    }
+    if (!S_ISREG(st.st_mode))
         return 0;
     a->scanned++;
     FILE *f = fopen(full, "r");
@@ -210,7 +216,7 @@ static int nws_scan(const char *root, FILE *out, FILE *err)
     }
     struct nws_acc a = {
         .root = root, .flag = &flag, .pragma = &pragma, .marker = &marker,
-        .hits = hits
+        .hits = hits, .err = err
     };
     int rc = each_zpath(cmd, nws_on_track, &a);
     if (rc) {
@@ -425,6 +431,47 @@ static int nws_fx_empty_scan(FILE *cap, const char *tmp, const char *empty,
     return 0;
 }
 
+static int nws_fx_stat_plant(const char *repo, char *parent, char *path)
+{
+    char clean[8192], dump[64];
+    int code = 0;
+    if (ovf(snprintf(parent, 8192, "%s/blocked", repo), 8192) ||
+        ovf(snprintf(path, 8192, "%s/hidden.mk", parent), 8192) ||
+        ovf(snprintf(clean, sizeof clean, "%s/a.c", repo), sizeof clean) ||
+        csr_write(clean, "int clean;\n") || nws_fx_write(path, "unused-result", "\n"))
+        return 1;
+    return rap_git_cmd(repo, "add blocked/hidden.mk", dump, sizeof dump, &code) || code;
+}
+
+static int nws_fx_stat_expect(FILE *cap, const char *repo, char *ob, int want)
+{
+    int rc = 0;
+    if (nws_fx_run(cap, repo, ob, &rc) || rc != want)
+        return 1;
+    bool clean = strstr(ob, "check_no_warning_suppression: clean") != NULL;
+    return (want == 0 && !clean) ||
+           (want == 2 && (clean || strstr(ob, "cannot stat ") == NULL ||
+                         strstr(ob, "blocked/hidden.mk") == NULL));
+}
+
+static int nws_fx_stat_errors(FILE *cap, const char *tmp, const char *repo, char *ob)
+{
+    char parent[8192], path[8192];
+    if (nws_fx_stat_plant(repo, parent, path) ||
+        nws_fx_stat_expect(cap, repo, ob, 1))
+        return nws_fx_abort(cap, tmp, "readable warning-suppression control did not trip");
+    if (csr_write(path, "CFLAGS = -Wall\n") || nws_fx_stat_expect(cap, repo, ob, 0))
+        return nws_fx_abort(cap, tmp, "readable clean control rejected");
+    if (unlink(path) != 0 || nws_fx_stat_expect(cap, repo, ob, 0))
+        return nws_fx_abort(cap, tmp, "disappeared tracked file must remain optional");
+    /* Makefile and a.c stay readable and clean, so the scan floor cannot
+     * manufacture this rejection: only the indexed child now yields ENOTDIR. */
+    if (rmdir(parent) != 0 || csr_write(parent, "not a directory\n") ||
+        nws_fx_stat_expect(cap, repo, ob, 2))
+        return nws_fx_abort(cap, tmp, "tracked path ENOTDIR must refuse without clean");
+    return 0;
+}
+
 static int nws_fixtures(void)
 {
     char tmpl[] = "/tmp/z23-lint-nws-XXXXXX";
@@ -451,6 +498,8 @@ static int nws_fixtures(void)
     if ((rc = nws_fx_same_line(cap, tmp, repo, path, body, ob)))
         return rc;
     if ((rc = nws_fx_pragma(cap, tmp, repo, path, body, ob)))
+        return rc;
+    if ((rc = nws_fx_stat_errors(cap, tmp, repo, ob)))
         return rc;
     if ((rc = nws_fx_empty_scan(cap, tmp, empty, ob)))
         return rc;
