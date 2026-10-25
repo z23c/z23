@@ -115,14 +115,54 @@ static bool asp_seed_base(struct node_db *ndb)
             NULL, NULL, NULL) == SQLITE_OK;
 }
 
+static char *asp_reply_sendtoaddress(void)
+{
+    if (!g_sendtoaddress_result)
+        return strdup("{\"code\":-6,\"message\":\"Insufficient funds\"}");
+    return strdup(g_sendtoaddress_result);
+}
+
+static void asp_observe_wire_action(const struct json_value *params)
+{
+    /* Observe what the policy actually ASKED for, so "debited once" is
+     * measured at the wire rather than inferred from the reply. */
+    const char *action = json_get_str(json_at(params, 0));
+    const struct json_value *body = json_at(params, 1);
+    if (action && strcmp(action, "authorize") == 0 && body) {
+        const struct json_value *c = json_get(body, "commit");
+        if (c && json_get_bool(c))
+            g_commit_calls++;
+    }
+    if (action && strcmp(action, "release") == 0)
+        g_release_calls++;
+}
+
+static char *asp_render_rpc_result(bool ok, struct json_value *result)
+{
+    char *out = malloc(16384);
+    if (!out) {
+        json_free(result);
+        return NULL;
+    }
+    if (!ok) {
+        char msg[256] = "rpc failure";
+        if (result->type == JSON_STR)
+            (void)snprintf(msg, sizeof(msg), "%s", json_get_str(result));
+        (void)snprintf(out, 16384, "{\"code\":-32603,\"message\":\"%s\"}", msg);
+    } else if (json_write(result, out, 16384) == 0) {
+        free(out);
+        json_free(result);
+        return NULL;
+    }
+    json_free(result);
+    return out;
+}
+
 /* Stands in for the loopback socket: runs the real RPC handler in-process. */
 static char *asp_rpc_hook(const char *method, const char *params_json)
 {
-    if (strcmp(method, "sendtoaddress") == 0) {
-        if (!g_sendtoaddress_result)
-            return strdup("{\"code\":-6,\"message\":\"Insufficient funds\"}");
-        return strdup(g_sendtoaddress_result);
-    }
+    if (strcmp(method, "sendtoaddress") == 0)
+        return asp_reply_sendtoaddress();
     if (strcmp(method, "agentsession") != 0)
         return strdup("null");
     if (g_node_down || !g_fixture)
@@ -133,40 +173,14 @@ static char *asp_rpc_hook(const char *method, const char *params_json)
         json_free(&params);
         return NULL;
     }
-    /* Observe what the policy actually ASKED for, so "debited once" is
-     * measured at the wire rather than inferred from the reply. */
-    const char *action = json_get_str(json_at(&params, 0));
-    const struct json_value *body = json_at(&params, 1);
-    if (action && strcmp(action, "authorize") == 0 && body) {
-        const struct json_value *c = json_get(body, "commit");
-        if (c && json_get_bool(c))
-            g_commit_calls++;
-    }
-    if (action && strcmp(action, "release") == 0)
-        g_release_calls++;
+    asp_observe_wire_action(&params);
 
     struct json_value result;
     json_init(&result);
     bool ok = rpc_table_execute(&g_fixture->tbl, "agentsession", &params,
                                 &result);
     json_free(&params);
-    char *out = malloc(16384);
-    if (!out) {
-        json_free(&result);
-        return NULL;
-    }
-    if (!ok) {
-        char msg[256] = "rpc failure";
-        if (result.type == JSON_STR)
-            (void)snprintf(msg, sizeof(msg), "%s", json_get_str(&result));
-        (void)snprintf(out, 16384, "{\"code\":-32603,\"message\":\"%s\"}", msg);
-    } else if (json_write(&result, out, 16384) == 0) {
-        free(out);
-        json_free(&result);
-        return NULL;
-    }
-    json_free(&result);
-    return out;
+    return asp_render_rpc_result(ok, &result);
 }
 
 static int asp_open(struct asp_fixture *f, const char *tag)
