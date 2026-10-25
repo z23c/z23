@@ -773,7 +773,6 @@ contexts/wallet/services/src/yardsale_wallet_service.c:yardsale_wallet_status_co
 contexts/wallet/services/src/yardsale_wallet_service.c:yw_parse_buyer_payload:16
 contexts/wallet/services/src/yardsale_wallet_service_buy.c:yardsale_wallet_buy:21
 contexts/wallet/services/src/yardsale_wallet_service_buy.c:yw_buy_commit:19
-contexts/wallet/views/src/wallet_gui.c:on_uri_scheme_request:34
 contexts/wallet/views/src/wallet_view_coins_view.c:wv_render_coin_rows:16
 contexts/wallet/views/src/wallet_view_dashboard_view.c:wv_render_dashboard_recent:24
 contexts/wallet/views/src/wallet_view_history_view.c:wv_render_history_cards:32

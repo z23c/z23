@@ -111,11 +111,8 @@ static const char *GTK_DARK_CSS =
 
 /* ── URI scheme handler ───────────────────────────────────── */
 
-static void on_uri_scheme_request(WebKitURISchemeRequest *request,
-                                    gpointer user_data)
+static const char *extract_uri_path(const char *uri)
 {
-    (void)user_data;
-    const char *uri = webkit_uri_scheme_request_get_uri(request);
     const char *path = "/wallet";
     if (uri) {
         const char *after = strstr(uri, "://");
@@ -125,25 +122,32 @@ static void on_uri_scheme_request(WebKitURISchemeRequest *request,
             if (slash) path = slash;
         }
     }
+    return path;
+}
 
-    const char *http_method = webkit_uri_scheme_request_get_http_method(request);
-    if (!http_method) http_method = "GET";
-
-    uint8_t post_body[4096];
+static size_t read_request_post_body(WebKitURISchemeRequest *request,
+                                     const char *http_method,
+                                     uint8_t *post_body, size_t post_body_cap)
+{
     size_t post_body_len = 0;
     if (strcmp(http_method, "POST") == 0) {
         GInputStream *body_stream = webkit_uri_scheme_request_get_http_body(request);
         if (body_stream) {
             gsize bytes_read = 0;
-            g_input_stream_read_all(body_stream, post_body, sizeof(post_body) - 1,
+            g_input_stream_read_all(body_stream, post_body, post_body_cap,
                                     &bytes_read, NULL, NULL);
             post_body[bytes_read] = '\0';
             post_body_len = (size_t)bytes_read;
         }
     }
+    return post_body_len;
+}
 
-    int64_t t0 = platform_time_monotonic_us();
-
+static size_t dispatch_uri_scheme_request(const char *http_method,
+                                          const char *path,
+                                          uint8_t *post_body,
+                                          size_t post_body_len)
+{
     size_t len = 0;
     if (strncmp(path, "/wallet", 7) == 0 ||
         strncmp(path, "/api/wallet/", 12) == 0)
@@ -163,32 +167,109 @@ static void on_uri_scheme_request(WebKitURISchemeRequest *request,
                                             post_body_len ? post_body : NULL,
                                             post_body_len,
                                             g_response, sizeof(g_response));
+    return len;
+}
 
-    int64_t t1 = platform_time_monotonic_us();
-    long ms = (long)((t1 - t0) / 1000LL);
+static void update_status_label(const char *path, long ms, size_t len)
+{
     if (g_status_label) {
         char status[128];
         snprintf(status, sizeof(status), "%s  %ldms  %zu bytes", path, ms, len);
         gtk_label_set_text(GTK_LABEL(g_status_label), status);
     }
+}
+
+static void finish_request_not_found(WebKitURISchemeRequest *request)
+{
+    const char *html =
+        "<html><body style='background:#0c0c0c;color:#e8e8e8;"
+        "font-family:-apple-system,monospace;padding:60px;"
+        "text-align:center'>"
+        "<div style='font-size:72px;color:#222;margin-bottom:16px'>"
+        "&#x2717;</div>"
+        "<h2 style='color:#666;font-weight:400'>Page not found</h2>"
+        "<p style='margin-top:24px'>"
+        "<a href='/wallet' style='color:#33ff99;text-decoration:none;"
+        "padding:8px 24px;border:1px solid #33ff99;border-radius:6px'>"
+        "Open Wallet</a></p></body></html>";
+    GInputStream *s = g_memory_input_stream_new_from_data(
+        g_strdup(html), (gssize)strlen(html), g_free);
+    webkit_uri_scheme_request_finish(request, s,
+        (gint64)strlen(html), "text/html");
+    g_object_unref(s);
+}
+
+/* Find header/body boundary — search only the first 4KB for \r\n\r\n */
+static const char *find_header_end(const uint8_t *response, size_t len)
+{
+    size_t search_limit = len < 4096 ? len : 4096;
+    for (size_t i = 0; i + 3 < search_limit; i++) {
+        if (response[i] == '\r' && response[i+1] == '\n' &&
+            response[i+2] == '\r' && response[i+3] == '\n') {
+            return (const char *)&response[i];
+        }
+    }
+    return NULL;
+}
+
+/* Extract Content-Type from headers */
+static const char *parse_content_type(const char *hdr_end)
+{
+    size_t hdr_size = (size_t)(hdr_end - (const char *)g_response);
+    g_response[hdr_size] = '\0'; /* NUL-terminate headers only */
+    const char *ct = strstr((char *)g_response, "Content-Type: ");
+    if (!ct)
+        return NULL;
+    ct += 14;
+    static char ct_buf[128];
+    size_t i = 0;
+    while (ct[i] && ct[i] != '\r' && ct[i] != '\n' && i < 127)
+        { ct_buf[i] = ct[i]; i++; }
+    ct_buf[i] = '\0';
+    return ct_buf;
+}
+
+static void finish_request_out_of_memory(WebKitURISchemeRequest *request)
+{
+    const char *html =
+        "<html><body style='background:#0c0c0c;color:#e8e8e8;"
+        "font-family:-apple-system,monospace;padding:60px;"
+        "text-align:center'>"
+        "<h2 style='color:#666;font-weight:400'>Out of memory</h2>"
+        "</body></html>";
+    GInputStream *s = g_memory_input_stream_new_from_data(
+        g_strdup(html), (gssize)strlen(html), g_free);
+    webkit_uri_scheme_request_finish(request, s,
+        (gint64)strlen(html), "text/html");
+    g_object_unref(s);
+}
+
+static void on_uri_scheme_request(WebKitURISchemeRequest *request,
+                                    gpointer user_data)
+{
+    (void)user_data;
+    const char *uri = webkit_uri_scheme_request_get_uri(request);
+    const char *path = extract_uri_path(uri);
+
+    const char *http_method = webkit_uri_scheme_request_get_http_method(request);
+    if (!http_method) http_method = "GET";
+
+    uint8_t post_body[4096];
+    size_t post_body_len = read_request_post_body(request, http_method,
+                                                  post_body,
+                                                  sizeof(post_body) - 1);
+
+    int64_t t0 = platform_time_monotonic_us();
+
+    size_t len = dispatch_uri_scheme_request(http_method, path, post_body,
+                                             post_body_len);
+
+    int64_t t1 = platform_time_monotonic_us();
+    long ms = (long)((t1 - t0) / 1000LL);
+    update_status_label(path, ms, len);
 
     if (len == 0) {
-        const char *html =
-            "<html><body style='background:#0c0c0c;color:#e8e8e8;"
-            "font-family:-apple-system,monospace;padding:60px;"
-            "text-align:center'>"
-            "<div style='font-size:72px;color:#222;margin-bottom:16px'>"
-            "&#x2717;</div>"
-            "<h2 style='color:#666;font-weight:400'>Page not found</h2>"
-            "<p style='margin-top:24px'>"
-            "<a href='/wallet' style='color:#33ff99;text-decoration:none;"
-            "padding:8px 24px;border:1px solid #33ff99;border-radius:6px'>"
-            "Open Wallet</a></p></body></html>";
-        GInputStream *s = g_memory_input_stream_new_from_data(
-            g_strdup(html), (gssize)strlen(html), g_free);
-        webkit_uri_scheme_request_finish(request, s,
-            (gint64)strlen(html), "text/html");
-        g_object_unref(s);
+        finish_request_not_found(request);
         return;
     }
 
@@ -197,30 +278,11 @@ static void on_uri_scheme_request(WebKitURISchemeRequest *request,
     size_t blen = len;
     const char *ctype = "text/html; charset=utf-8";
 
-    /* Find header/body boundary — search only the first 4KB for \r\n\r\n */
-    size_t search_limit = len < 4096 ? len : 4096;
-    const char *hdr_end = NULL;
-    for (size_t i = 0; i + 3 < search_limit; i++) {
-        if (g_response[i] == '\r' && g_response[i+1] == '\n' &&
-            g_response[i+2] == '\r' && g_response[i+3] == '\n') {
-            hdr_end = (const char *)&g_response[i];
-            break;
-        }
-    }
+    const char *hdr_end = find_header_end(g_response, len);
     if (hdr_end) {
-        /* Extract Content-Type from headers */
-        size_t hdr_size = (size_t)(hdr_end - (const char *)g_response);
-        g_response[hdr_size] = '\0'; /* NUL-terminate headers only */
-        const char *ct = strstr((char *)g_response, "Content-Type: ");
-        if (ct) {
-            ct += 14;
-            static char ct_buf[128];
-            size_t i = 0;
-            while (ct[i] && ct[i] != '\r' && ct[i] != '\n' && i < 127)
-                { ct_buf[i] = ct[i]; i++; }
-            ct_buf[i] = '\0';
-            ctype = ct_buf;
-        }
+        const char *ct = parse_content_type(hdr_end);
+        if (ct)
+            ctype = ct;
         body = (const uint8_t *)(hdr_end + 4);
         blen = len - (size_t)(body - g_response);
     }
@@ -231,17 +293,7 @@ static void on_uri_scheme_request(WebKitURISchemeRequest *request,
         /* Allocation failed for a non-empty body: never hand GLib a NULL
          * pointer with non-zero length (undefined behaviour). Return the
          * not-found page the same way as above instead. */
-        const char *html =
-            "<html><body style='background:#0c0c0c;color:#e8e8e8;"
-            "font-family:-apple-system,monospace;padding:60px;"
-            "text-align:center'>"
-            "<h2 style='color:#666;font-weight:400'>Out of memory</h2>"
-            "</body></html>";
-        GInputStream *s = g_memory_input_stream_new_from_data(
-            g_strdup(html), (gssize)strlen(html), g_free);
-        webkit_uri_scheme_request_finish(request, s,
-            (gint64)strlen(html), "text/html");
-        g_object_unref(s);
+        finish_request_out_of_memory(request);
         return;
     }
     if (body_copy) memcpy(body_copy, body, blen);
