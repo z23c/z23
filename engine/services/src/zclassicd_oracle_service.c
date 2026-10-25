@@ -344,10 +344,11 @@ static void zclassicd_oracle_on_tick(struct liveness_contract *c)
 
 /* ── init / start / stop ───────────────────────────────────────── */
 
-struct zcl_result zclassicd_oracle_init(const struct zclassicd_oracle_config *cfg)
+/* Store the endpoint and tick-tuning fields from cfg, substituting the
+ * built-in default for anything unset. Caller must hold g_oracle.lock. */
+static void zclassicd_oracle_store_rpc_config(
+    const struct zclassicd_oracle_config *cfg)
 {
-    pthread_mutex_lock(&g_oracle.lock);
-
     snprintf(g_oracle.rpc_host, sizeof(g_oracle.rpc_host), "%s",
              (cfg && cfg->rpc_host) ? cfg->rpc_host : ORACLE_DEFAULT_HOST);
     g_oracle.rpc_port = (cfg && cfg->rpc_port > 0)
@@ -356,8 +357,13 @@ struct zcl_result zclassicd_oracle_init(const struct zclassicd_oracle_config *cf
                             ? cfg->cadence_secs : ORACLE_DEFAULT_CADENCE;
     g_oracle.heights_per_tick = (cfg && cfg->heights_per_tick > 0)
                             ? cfg->heights_per_tick : ORACLE_DEFAULT_HEIGHTS_TICK;
+}
 
-    /* Credentials: caller-provided beats zclassic.conf. */
+/* Credentials: caller-provided beats zclassic.conf. Caller must hold
+ * g_oracle.lock. */
+static void zclassicd_oracle_store_caller_credentials(
+    const struct zclassicd_oracle_config *cfg)
+{
     if (cfg && cfg->rpc_user && cfg->rpc_user[0]) {
         snprintf(g_oracle.rpc_user, sizeof(g_oracle.rpc_user),
                  "%s", cfg->rpc_user);
@@ -366,6 +372,14 @@ struct zcl_result zclassicd_oracle_init(const struct zclassicd_oracle_config *cf
         snprintf(g_oracle.rpc_password, sizeof(g_oracle.rpc_password),
                  "%s", cfg->rpc_password);
     }
+}
+
+struct zcl_result zclassicd_oracle_init(const struct zclassicd_oracle_config *cfg)
+{
+    pthread_mutex_lock(&g_oracle.lock);
+
+    zclassicd_oracle_store_rpc_config(cfg);
+    zclassicd_oracle_store_caller_credentials(cfg);
 
     /* Fill any missing credential from zclassic.conf; an explicit port
      * (cfg->rpc_port > 0) is never overridden. */
