@@ -30,6 +30,49 @@
 #include <stdio.h>
 #include <string.h>
 
+/* ZIP-209 per-block shielded deltas (zclassicd ConnectBlock:
+ * sproutValue += vpub_old - vpub_new; saplingValue += -valueBalance).
+ * The last case is zclassicd's block 476977: one tx with valueBalance
+ * -1.00000000 ZCL takes the Sapling chainValue from 0 to +1.00000000.
+ * Its own function keeps test_consensus_parity under its complexity pin. */
+static int check_turnstile_deltas(void)
+{
+    int failures = 0;
+    struct js_description js[2];
+    struct transaction tx[2];
+    struct block blk;
+    memset(js, 0, sizeof(js));
+    memset(tx, 0, sizeof(tx));
+    memset(&blk, 0, sizeof(blk));
+    js[0].vpub_old = 100; js[0].vpub_new = 30;
+    js[1].vpub_old = 5;   js[1].vpub_new = 50;
+    tx[0].v_joinsplit = js; tx[0].num_joinsplit = 2;
+    tx[0].value_balance = -7;
+    tx[1].value_balance = 20;
+    blk.vtx = tx; blk.num_vtx = 2;
+    int64_t sprout = -1, sapling = -1;
+    connect_block_shielded_values(&blk, &sprout, &sapling);
+    bool ok = sprout == 25 && sapling == -13;
+    printf("consensus-parity: %s... %s\n",
+           "turnstile deltas: sprout += old - new, sapling -= valueBalance", ok ? "OK" : "FAIL");
+    failures += !ok;
+
+    memset(tx, 0, sizeof(tx));
+    tx[0].value_balance = -100000000;
+    blk.vtx = tx; blk.num_vtx = 1;
+    connect_block_shielded_values(&blk, &sprout, &sapling);
+    ok = sprout == 0 && sapling == 100000000;
+    printf("consensus-parity: %s... %s\n",
+           "turnstile oracle 476977: valueBalance -1 ZCL grows Sapling by 1 ZCL", ok ? "OK" : "FAIL");
+    failures += !ok;
+
+    connect_block_shielded_values(NULL, &sprout, &sapling);
+    ok = sprout == 0 && sapling == 0;
+    printf("consensus-parity: %s... %s\n", "turnstile deltas of no block are zero", ok ? "OK" : "FAIL");
+    failures += !ok;
+    return failures;
+}
+
 int test_consensus_parity(void)
 {
     int failures = 0;
@@ -245,38 +288,8 @@ int test_consensus_parity(void)
               memcmp(digest, DIGEST_GOLDEN, 32) == 0);
     }
 
-    /* ── ZIP-209 per-block shielded deltas (zclassicd ConnectBlock:
-     * sproutValue += vpub_old - vpub_new; saplingValue += -valueBalance).
-     * The last case is zclassicd's block 476977: one tx with valueBalance
-     * -1.00000000 ZCL takes the Sapling chainValue from 0 to +1.00000000. ── */
-    {
-        struct js_description js[2];
-        struct transaction tx[2];
-        struct block blk;
-        memset(js, 0, sizeof(js));
-        memset(tx, 0, sizeof(tx));
-        memset(&blk, 0, sizeof(blk));
-        js[0].vpub_old = 100; js[0].vpub_new = 30;
-        js[1].vpub_old = 5;   js[1].vpub_new = 50;
-        tx[0].v_joinsplit = js; tx[0].num_joinsplit = 2;
-        tx[0].value_balance = -7;
-        tx[1].value_balance = 20;
-        blk.vtx = tx; blk.num_vtx = 2;
-        int64_t sprout = -1, sapling = -1;
-        connect_block_shielded_values(&blk, &sprout, &sapling);
-        CHECK("turnstile deltas: sprout += old - new, sapling -= valueBalance",
-              sprout == 25 && sapling == -13);
-
-        memset(tx, 0, sizeof(tx));
-        tx[0].value_balance = -100000000;
-        blk.vtx = tx; blk.num_vtx = 1;
-        connect_block_shielded_values(&blk, &sprout, &sapling);
-        CHECK("turnstile oracle 476977: valueBalance -1 ZCL grows Sapling by 1 ZCL",
-              sprout == 0 && sapling == 100000000);
-
-        connect_block_shielded_values(NULL, &sprout, &sapling);
-        CHECK("turnstile deltas of no block are zero", sprout == 0 && sapling == 0);
-    }
+    /* ── ZIP-209 per-block shielded deltas ── */
+    failures += check_turnstile_deltas();
 
 #undef CHECK
 
