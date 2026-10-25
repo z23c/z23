@@ -29,6 +29,34 @@ static void validate_headers_window_report_init(
         r->expected_count = end_height - start_height + 1;
 }
 
+static bool validate_headers_report_err_is_real_db_error(const char *em)
+{
+    return !em || !strstr(em, "no such table");
+}
+
+static void validate_headers_report_read_count_row(
+    sqlite3_stmt *st,
+    struct validate_headers_window_report *out)
+{
+    if (sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
+        out->checked_count = sqlite3_column_int64(st, 0);
+        out->failed_count = sqlite3_column_int64(st, 1);
+        out->available = true;
+    }
+}
+
+static void validate_headers_report_read_first_failure_row(
+    sqlite3_stmt *st,
+    struct validate_headers_window_report *out)
+{
+    if (sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
+        out->first_failed_height = sqlite3_column_int64(st, 0);
+        const unsigned char *reason = sqlite3_column_text(st, 1);
+        snprintf(out->first_fail_reason, sizeof(out->first_fail_reason),
+                 "%s", reason ? (const char *)reason : "");
+    }
+}
+
 bool validate_headers_stage_window_report(
     int64_t start_height,
     int64_t end_height,
@@ -57,7 +85,7 @@ bool validate_headers_stage_window_report(
          * The old per-call LOG_ERR emitted thousands of journal lines
          * per boot. Anything else is a real error and stays loud. */
         const char *em = sqlite3_errmsg(db);
-        if (!em || !strstr(em, "no such table"))
+        if (validate_headers_report_err_is_real_db_error(em))
             /* LOG_WARN, not LOG_ERR: LOG_ERR embeds `return -1`, which
              * in this bool function returned TRUE and skipped the
              * tx unlock below — a lock leak on every real DB error. */
@@ -69,11 +97,7 @@ bool validate_headers_stage_window_report(
     }
     sqlite3_bind_int64(st, 1, (sqlite3_int64)start_height);
     sqlite3_bind_int64(st, 2, (sqlite3_int64)end_height);
-    if (sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
-        out->checked_count = sqlite3_column_int64(st, 0);
-        out->failed_count = sqlite3_column_int64(st, 1);
-        out->available = true;
-    }
+    validate_headers_report_read_count_row(st, out);
     sqlite3_finalize(st);
 
     rc = sqlite3_prepare_v2(db,
@@ -84,7 +108,7 @@ bool validate_headers_stage_window_report(
         -1, &st, NULL);
     if (rc != SQLITE_OK) {
         const char *em2 = sqlite3_errmsg(db);
-        if (!em2 || !strstr(em2, "no such table"))
+        if (validate_headers_report_err_is_real_db_error(em2))
             /* LOG_WARN, not LOG_ERR — see the count-prepare branch. */
             LOG_WARN("validate_headers",
                      "window report fail prepare failed: %s",
@@ -94,12 +118,7 @@ bool validate_headers_stage_window_report(
     }
     sqlite3_bind_int64(st, 1, (sqlite3_int64)start_height);
     sqlite3_bind_int64(st, 2, (sqlite3_int64)end_height);
-    if (sqlite3_step(st) == SQLITE_ROW) {  // raw-sql-ok:progress-kv-kernel-store
-        out->first_failed_height = sqlite3_column_int64(st, 0);
-        const unsigned char *reason = sqlite3_column_text(st, 1);
-        snprintf(out->first_fail_reason, sizeof(out->first_fail_reason),
-                 "%s", reason ? (const char *)reason : "");
-    }
+    validate_headers_report_read_first_failure_row(st, out);
     sqlite3_finalize(st);
 
     out->complete = out->available &&
