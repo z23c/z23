@@ -151,6 +151,29 @@ static bool rae_statement(
         VCS_ZCODE_SCIENCE_OK;
 }
 
+static bool rae_evaluator_observation_maintained(
+    bool observed, const struct zcl_retrieval_experiment_eval_report *report)
+{
+    return observed &&
+        report->metrics.tasks == 1u &&
+        report->top20_membership_preserved &&
+        report->full_retained_set_preserved &&
+        report->context_ceiling_preserved;
+}
+
+static bool rae_roundtrip_result_matches(
+    bool result_ok,
+    const struct zcl_retrieval_experiment_eval_result_v1 *result,
+    const struct zcl_retrieval_experiment_eval_result_v1 *parsed,
+    const uint8_t result_root[32], const uint8_t parsed_root[32],
+    const uint8_t wire[ZCL_RETRIEVAL_EVAL_RESULT_WIRE_BYTES])
+{
+    return result_ok &&
+        memcmp(result, parsed, sizeof(*result)) == 0 &&
+        memcmp(result_root, parsed_root, 32u) == 0 &&
+        memcmp(wire, "ZCRXEV1\n", 8u) == 0;
+}
+
 int test_retrieval_attention_evidence(void)
 {
     int failures = 0;
@@ -160,11 +183,8 @@ int test_retrieval_attention_evidence(void)
     bool observed = rae_retrieval_observation(
         &report, proposal_root, candidate_root, source_root,
         projection_root, evaluator_root);
-    RAE_CHECK("maintained-evaluator-observation", observed &&
-              report.metrics.tasks == 1u &&
-              report.top20_membership_preserved &&
-              report.full_retained_set_preserved &&
-              report.context_ceiling_preserved);
+    RAE_CHECK("maintained-evaluator-observation",
+              rae_evaluator_observation_maintained(observed, &report));
 
     struct vcs_zcode_focus_v1 focus;
     rae_focus(&focus, source_root);
@@ -211,10 +231,10 @@ int test_retrieval_attention_evidence(void)
             ZCL_RETRIEVAL_EXPERIMENT_OK &&
         zcl_retrieval_experiment_eval_result_root(&parsed, parsed_root) ==
             ZCL_RETRIEVAL_EXPERIMENT_OK;
-    RAE_CHECK("canonical-result-roundtrip", result_ok &&
-              memcmp(&result, &parsed, sizeof(result)) == 0 &&
-              memcmp(result_root, parsed_root, 32u) == 0 &&
-              memcmp(wire, "ZCRXEV1\n", 8u) == 0);
+    RAE_CHECK("canonical-result-roundtrip",
+              rae_roundtrip_result_matches(
+                  result_ok, &result, &parsed, result_root, parsed_root,
+                  wire));
     RAE_CHECK("exact-four-root-binding",
               zcl_retrieval_experiment_eval_result_verify_binding(
                   &result, heuristic_root, proposal_root,
