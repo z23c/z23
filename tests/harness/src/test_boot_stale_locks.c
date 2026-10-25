@@ -60,86 +60,108 @@ static bool bsl_make_chainstate(char *lock_path, size_t lock_path_n,
     return bsl_mkdir(chainstate);
 }
 
+static int bsl_check_blocks_index_stale_lock_removed(void)
+{
+    int failures = 0;
+    char dir[256];
+    char lock_path[512];
+    test_make_tmpdir(dir, sizeof(dir), "boot_stale_locks", "blocks_stale");
+    bool ok = bsl_make_blocks_index(lock_path, sizeof(lock_path), dir);
+    ok = ok && bsl_write_file(lock_path, "99999999\n");
+
+    struct boot_stale_locks_result r =
+        boot_stale_locks_preflight(dir);
+    BSL_CHECK("removes stale blocks index lock",
+              ok && r.blocks_index_lock_removed &&
+              !r.blocks_index_lock_running &&
+              access(lock_path, F_OK) != 0);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bsl_check_blocks_index_running_lock_kept(void)
+{
+    int failures = 0;
+    char dir[256];
+    char lock_path[512];
+    char pid_text[64];
+    test_make_tmpdir(dir, sizeof(dir), "boot_stale_locks", "blocks_live");
+    bool ok = bsl_make_blocks_index(lock_path, sizeof(lock_path), dir);
+    snprintf(pid_text, sizeof(pid_text), "%ld\n", (long)getpid());
+    ok = ok && bsl_write_file(lock_path, pid_text);
+
+    struct boot_stale_locks_result r =
+        boot_stale_locks_preflight(dir);
+    BSL_CHECK("keeps running blocks index lock",
+              ok && !r.blocks_index_lock_removed &&
+              r.blocks_index_lock_running &&
+              access(lock_path, F_OK) == 0);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bsl_check_chainstate_stale_lock_removed(void)
+{
+    int failures = 0;
+    char dir[256];
+    char lock_path[512];
+    test_make_tmpdir(dir, sizeof(dir), "boot_stale_locks", "chain_stale");
+    bool ok = bsl_make_chainstate(lock_path, sizeof(lock_path), dir);
+    ok = ok && bsl_write_file(lock_path, "99999999\n");
+
+    struct boot_stale_locks_result r =
+        boot_stale_locks_preflight(dir);
+    BSL_CHECK("removes stale chainstate lock",
+              ok && r.chainstate_lock_removed &&
+              !r.chainstate_lock_running &&
+              access(lock_path, F_OK) != 0);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bsl_check_sqlite_wal_reported(void)
+{
+    int failures = 0;
+    char dir[256];
+    char wal_path[512];
+    test_make_tmpdir(dir, sizeof(dir), "boot_stale_locks", "wal");
+    int n = snprintf(wal_path, sizeof(wal_path), "%s/node.db-wal", dir);
+    bool ok = n >= 0 && (size_t)n < sizeof(wal_path);
+    ok = ok && bsl_write_file(wal_path, "wal data");
+
+    struct boot_stale_locks_result r =
+        boot_stale_locks_preflight(dir);
+    BSL_CHECK("reports sqlite wal without deleting it",
+              ok && r.sqlite_wal_present &&
+              access(wal_path, F_OK) == 0);
+    test_rm_rf_recursive(dir);
+    return failures;
+}
+
+static int bsl_check_invalid_datadir_fails_closed(void)
+{
+    int failures = 0;
+
+    struct boot_stale_locks_result r =
+        boot_stale_locks_preflight(NULL);
+    BSL_CHECK("invalid datadir fails closed",
+              !r.blocks_index_lock_removed &&
+              !r.blocks_index_lock_running &&
+              !r.chainstate_lock_removed &&
+              !r.chainstate_lock_running &&
+              !r.sqlite_wal_present);
+    return failures;
+}
+
 int test_boot_stale_locks(void)
 {
     int failures = 0;
 
-    {
-        char dir[256];
-        char lock_path[512];
-        test_make_tmpdir(dir, sizeof(dir), "boot_stale_locks", "blocks_stale");
-        bool ok = bsl_make_blocks_index(lock_path, sizeof(lock_path), dir);
-        ok = ok && bsl_write_file(lock_path, "99999999\n");
-
-        struct boot_stale_locks_result r =
-            boot_stale_locks_preflight(dir);
-        BSL_CHECK("removes stale blocks index lock",
-                  ok && r.blocks_index_lock_removed &&
-                  !r.blocks_index_lock_running &&
-                  access(lock_path, F_OK) != 0);
-        test_rm_rf_recursive(dir);
-    }
-
-    {
-        char dir[256];
-        char lock_path[512];
-        char pid_text[64];
-        test_make_tmpdir(dir, sizeof(dir), "boot_stale_locks", "blocks_live");
-        bool ok = bsl_make_blocks_index(lock_path, sizeof(lock_path), dir);
-        snprintf(pid_text, sizeof(pid_text), "%ld\n", (long)getpid());
-        ok = ok && bsl_write_file(lock_path, pid_text);
-
-        struct boot_stale_locks_result r =
-            boot_stale_locks_preflight(dir);
-        BSL_CHECK("keeps running blocks index lock",
-                  ok && !r.blocks_index_lock_removed &&
-                  r.blocks_index_lock_running &&
-                  access(lock_path, F_OK) == 0);
-        test_rm_rf_recursive(dir);
-    }
-
-    {
-        char dir[256];
-        char lock_path[512];
-        test_make_tmpdir(dir, sizeof(dir), "boot_stale_locks", "chain_stale");
-        bool ok = bsl_make_chainstate(lock_path, sizeof(lock_path), dir);
-        ok = ok && bsl_write_file(lock_path, "99999999\n");
-
-        struct boot_stale_locks_result r =
-            boot_stale_locks_preflight(dir);
-        BSL_CHECK("removes stale chainstate lock",
-                  ok && r.chainstate_lock_removed &&
-                  !r.chainstate_lock_running &&
-                  access(lock_path, F_OK) != 0);
-        test_rm_rf_recursive(dir);
-    }
-
-    {
-        char dir[256];
-        char wal_path[512];
-        test_make_tmpdir(dir, sizeof(dir), "boot_stale_locks", "wal");
-        int n = snprintf(wal_path, sizeof(wal_path), "%s/node.db-wal", dir);
-        bool ok = n >= 0 && (size_t)n < sizeof(wal_path);
-        ok = ok && bsl_write_file(wal_path, "wal data");
-
-        struct boot_stale_locks_result r =
-            boot_stale_locks_preflight(dir);
-        BSL_CHECK("reports sqlite wal without deleting it",
-                  ok && r.sqlite_wal_present &&
-                  access(wal_path, F_OK) == 0);
-        test_rm_rf_recursive(dir);
-    }
-
-    {
-        struct boot_stale_locks_result r =
-            boot_stale_locks_preflight(NULL);
-        BSL_CHECK("invalid datadir fails closed",
-                  !r.blocks_index_lock_removed &&
-                  !r.blocks_index_lock_running &&
-                  !r.chainstate_lock_removed &&
-                  !r.chainstate_lock_running &&
-                  !r.sqlite_wal_present);
-    }
+    failures += bsl_check_blocks_index_stale_lock_removed();
+    failures += bsl_check_blocks_index_running_lock_kept();
+    failures += bsl_check_chainstate_stale_lock_removed();
+    failures += bsl_check_sqlite_wal_reported();
+    failures += bsl_check_invalid_datadir_fails_closed();
 
     return failures;
 }
