@@ -149,63 +149,84 @@ struct block_index *chain_restore_create_anchor(
     return anchor;
 }
 
-struct block_index *chain_restore_execute(
-    const struct chain_restore_plan *plan,
-    struct main_state *ms)
+enum {
+    CHAIN_RESTORE_EXEC_TARGET_OK = 0,
+    CHAIN_RESTORE_EXEC_ANCHOR_FAILED = 1,
+    CHAIN_RESTORE_EXEC_ANCHOR_CREATED = 2,
+    CHAIN_RESTORE_EXEC_INDEX_MISSING = 3,
+};
+
+enum {
+    CHAIN_RESTORE_APPLY_OK = 0,
+    CHAIN_RESTORE_APPLY_FAILED = 1,
+    CHAIN_RESTORE_APPLY_TXN_OPEN_FAILED = 2,
+};
+
+static struct node_db *chain_restore_initialized_open_ndb(void)
 {
-    if (!plan || !ms)
-        LOG_NULL("chain_restore", "execute called with null plan or main_state");
-
-    if (plan->next_state == CHAIN_RESTORE_FAILED)
+    struct chain_state_repository *csr = csr_instance();
+    if (!csr || !csr->initialized)
         return NULL;
+    if (!csr->ndb || !csr->ndb->open)
+        return NULL;
+    return csr->ndb;
+}
 
-    struct block_index *target = NULL;
+static int chain_restore_resolve_plan_target(
+    const struct chain_restore_plan *plan,
+    struct main_state *ms,
+    struct block_index **target)
+{
+    *target = NULL;
+    if (plan->next_state == CHAIN_RESTORE_FAILED)
+        return CHAIN_RESTORE_EXEC_TARGET_OK;
 
     if (plan->should_create_anchor) {
-        target = chain_restore_create_anchor(
+        *target = chain_restore_create_anchor(
             ms, &plan->anchor_hash, plan->anchor_height);
-        if (!target)
-            LOG_NULL("chain_restore", "anchor creation failed at h=%d",
-                     plan->anchor_height);
-        printf("Chain restore: anchor at h=%d\n", plan->anchor_height);
-    } else if (plan->next_state == CHAIN_RESTORE_FOUND_IN_INDEX) {
-        target = block_map_find(&ms->map_block_index, &plan->anchor_hash);
-        if (!target)
-            LOG_NULL("chain_restore", "hash in plan but not in block_map");
+        if (!*target)
+            return CHAIN_RESTORE_EXEC_ANCHOR_FAILED;
+        return CHAIN_RESTORE_EXEC_ANCHOR_CREATED;
     }
 
-    if (!target)
-        return NULL;
+    if (plan->next_state == CHAIN_RESTORE_FOUND_IN_INDEX) {
+        *target = block_map_find(&ms->map_block_index, &plan->anchor_hash);
+        if (!*target)
+            return CHAIN_RESTORE_EXEC_INDEX_MISSING;
+    }
+    return CHAIN_RESTORE_EXEC_TARGET_OK;
+}
 
+static int chain_restore_commit_planned_state(
+    const struct chain_restore_plan *plan,
+    struct main_state *ms,
+    struct block_index *target)
+{
     /* Route the tip/header mutations through the chain_state_repository
      * so block_map, active_chain, coins_tip and pindex_best_header
      * move through the single concrete-state boundary. */
     if (plan->should_set_chain_tip && target->phashBlock) {
-        struct chain_state_repository *csr = csr_instance();
-        struct node_db *cr_ndb = (csr && csr->initialized) ? csr->ndb : NULL;
+        struct node_db *cr_ndb = chain_restore_initialized_open_ndb();
 
-        if (cr_ndb && cr_ndb->open) {
+        if (cr_ndb) {
             DB_TXN_SCOPE(txn, cr_ndb, "chain_restore.execute");
-            if (!txn) {
-                fprintf(stderr,
-                    "chain_restore: failed to open db_txn scope\n");
-                return NULL;
-            }
+            if (!txn)
+                return CHAIN_RESTORE_APPLY_TXN_OPEN_FAILED;
             struct zcl_result r = chain_restore_commit_tip_via_csr(
                     ms, target, plan->should_set_best_header,
                     "chain_restore.execute");
             if (!r.ok) {
                 /* Scope auto-rollback fires on return. */
-                return NULL;
+                return CHAIN_RESTORE_APPLY_FAILED;
             }
             if (!db_txn_commit(txn))
-                return NULL;
+                return CHAIN_RESTORE_APPLY_FAILED;
         } else {
             struct zcl_result r = chain_restore_commit_tip_via_csr(
                        ms, target, plan->should_set_best_header,
                        "chain_restore.execute");
             if (!r.ok)
-                return NULL;
+                return CHAIN_RESTORE_APPLY_FAILED;
         }
     } else if (plan->should_set_best_header) {
         /* Extremely rare: plan asked for header-only update with no
@@ -213,12 +234,43 @@ struct block_index *chain_restore_execute(
         struct zcl_result r = chain_restore_commit_header_via_csr(
                 ms, target, "chain_restore.header_only");
         if (!r.ok) {
-            return NULL;
+            return CHAIN_RESTORE_APPLY_FAILED;
         }
     }
 
     if (plan->should_set_snapshot_anchor)
         snapsync_set_anchor(target);
+
+    return CHAIN_RESTORE_APPLY_OK;
+}
+
+struct block_index *chain_restore_execute(
+    const struct chain_restore_plan *plan,
+    struct main_state *ms)
+{
+    if (!plan || !ms)
+        LOG_NULL("chain_restore", "execute called with null plan or main_state");
+
+    struct block_index *target = NULL;
+    int resolved = chain_restore_resolve_plan_target(plan, ms, &target);
+    if (resolved == CHAIN_RESTORE_EXEC_ANCHOR_FAILED)
+        LOG_NULL("chain_restore", "anchor creation failed at h=%d",
+                 plan->anchor_height);
+    if (resolved == CHAIN_RESTORE_EXEC_ANCHOR_CREATED)
+        printf("Chain restore: anchor at h=%d\n", plan->anchor_height);
+    if (resolved == CHAIN_RESTORE_EXEC_INDEX_MISSING)
+        LOG_NULL("chain_restore", "hash in plan but not in block_map");
+    if (!target)
+        return NULL;
+
+    int applied = chain_restore_commit_planned_state(plan, ms, target);
+    if (applied != CHAIN_RESTORE_APPLY_OK) {
+        if (applied == CHAIN_RESTORE_APPLY_TXN_OPEN_FAILED) {
+            fprintf(stderr,
+                "chain_restore: failed to open db_txn scope\n");
+        }
+        return NULL;
+    }
 
     /* Post-restore finalize — rebuild active_chain from pprev + block_map
      * and surface the integrity result. Unit tests pass
