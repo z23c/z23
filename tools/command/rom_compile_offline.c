@@ -303,22 +303,26 @@ static void off_push_layers(struct json_value *out, const char *datadir)
     json_free(&layers);
 }
 
+/* Best-effort caller-facing error string; no-op when err is absent. */
+static void off_set_err(char *err, size_t errlen, const char *msg)
+{
+    if (err && errlen)
+        (void)snprintf(err, errlen, "%s", msg);
+}
+
 bool rom_compile_offline_compose(const char *datadir, struct json_value *out,
                                  char *err, size_t errlen)
 {
     if (!out) {
-        if (err && errlen)
-            (void)snprintf(err, errlen, "rom offline: null out");
+        off_set_err(err, errlen, "rom offline: null out");
         LOG_FAIL("rom_offline", "null out");
     }
     if (!datadir || !datadir[0]) {
-        if (err && errlen)
-            (void)snprintf(err, errlen, "rom offline: empty datadir");
+        off_set_err(err, errlen, "rom offline: empty datadir");
         LOG_FAIL("rom_offline", "empty datadir");
     }
     if (strlen(datadir) >= 1024) {
-        if (err && errlen)
-            (void)snprintf(err, errlen, "rom offline: datadir too long");
+        off_set_err(err, errlen, "rom offline: datadir too long");
         LOG_FAIL("rom_offline", "datadir too long: %zu", strlen(datadir));
     }
 
@@ -326,9 +330,7 @@ bool rom_compile_offline_compose(const char *datadir, struct json_value *out,
     char why[256];
     why[0] = '\0';
     if (!consensus_state_producer_status_read(datadir, &st, why, sizeof(why))) {
-        if (err && errlen)
-            (void)snprintf(err, errlen, "%s",
-                           why[0] ? why : "producer status unreadable");
+        off_set_err(err, errlen, why[0] ? why : "producer status unreadable");
         LOG_FAIL("rom_offline", "producer status unreadable: %s",
                  why[0] ? why : "?");
     }
