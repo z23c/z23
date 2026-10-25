@@ -66,6 +66,44 @@ static void *thread_registry_trampoline(void *raw)
     return ret;
 }
 
+/* Caller must hold g_mu. Returns the first unoccupied slot index, or
+ * -1 when the table is full. */
+static int thread_registry_find_free_slot_locked(void)
+{
+    for (int i = 0; i < ZCL_THREAD_REGISTRY_CAP; i++) {
+        if (!g_entries[i].occupied) return i;
+    }
+    return -1;
+}
+
+static void thread_registry_set_entry_name(struct entry *e,
+                                           const char *name)
+{
+    strncpy(e->name, name ? name : "?", sizeof(e->name) - 1);
+    e->name[sizeof(e->name) - 1] = '\0';
+}
+
+static void thread_registry_set_out_tid(pthread_t *out_tid, pthread_t tid)
+{
+    if (out_tid) *out_tid = tid;
+}
+
+static void thread_registry_set_thread_name(pthread_t tid,
+                                            const char *name)
+{
+#if defined(__linux__) || defined(_WIN32)
+    /* pthread_setname_np accepts up to 15 chars + NUL; silently
+     * truncate without propagating failure — diagnostics only. */
+    char short_name[16];
+    strncpy(short_name, name ? name : "zcl-thread", sizeof(short_name) - 1);
+    short_name[sizeof(short_name) - 1] = '\0';
+    (void)pthread_setname_np(tid, short_name);
+#else
+    (void)tid;
+    (void)name;
+#endif
+}
+
 int thread_registry_spawn(const char *name,
                           void *(*entry)(void *), void *arg,
                           pthread_t *out_tid)
@@ -104,10 +142,7 @@ int thread_registry_spawn(const char *name,
     /* Reserve a slot BEFORE pthread_create so we can't race with an
      * immediate exit + lifecycle publication. */
     pthread_mutex_lock(&g_mu);
-    int slot = -1;
-    for (int i = 0; i < ZCL_THREAD_REGISTRY_CAP; i++) {
-        if (!g_entries[i].occupied) { slot = i; break; }
-    }
+    int slot = thread_registry_find_free_slot_locked();
     if (slot < 0) {
         pthread_mutex_unlock(&g_mu);
         free(ta);
@@ -126,9 +161,7 @@ int thread_registry_spawn(const char *name,
     g_entries[slot].running = true;
     g_entries[slot].registry_owns_join = (out_tid == NULL);
     /* tid filled in after pthread_create succeeds. */
-    strncpy(g_entries[slot].name, name ? name : "?",
-            sizeof(g_entries[slot].name) - 1);
-    g_entries[slot].name[sizeof(g_entries[slot].name) - 1] = '\0';
+    thread_registry_set_entry_name(&g_entries[slot], name);
     /* Keep g_mu held across create + tid publication. A very short-lived
      * child can reach trampoline unregister immediately; without this barrier
      * it observes an uninitialised tid, misses its slot, and strands an active
@@ -158,16 +191,9 @@ int thread_registry_spawn(const char *name,
     g_entries[slot].tid = tid;
     pthread_mutex_unlock(&g_mu);
 
-    if (out_tid) *out_tid = tid;
+    thread_registry_set_out_tid(out_tid, tid);
 
-#if defined(__linux__) || defined(_WIN32)
-    /* pthread_setname_np accepts up to 15 chars + NUL; silently
-     * truncate without propagating failure — diagnostics only. */
-    char short_name[16];
-    strncpy(short_name, name ? name : "zcl-thread", sizeof(short_name) - 1);
-    short_name[sizeof(short_name) - 1] = '\0';
-    (void)pthread_setname_np(tid, short_name);
-#endif
+    thread_registry_set_thread_name(tid, name);
 
     return 0;
 }
