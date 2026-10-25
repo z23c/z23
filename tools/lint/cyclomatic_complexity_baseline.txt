@@ -3035,7 +3035,6 @@ tools/simd_bench.c:bench_chacha_aead_row:32
 tools/simd_bench.c:main:26
 tools/snapshot_from_coinskv.c:main:17
 tools/tor_provenance.c:run_selftest:19
-tools/verify_anchor_completeness.c:count_chainstate:16
 tools/wallet_check.c:main:22
 tools/z23_gpu_miner.c:hash_meets_target:16
 tools/z23_gpu_miner.c:main:35

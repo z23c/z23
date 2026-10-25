@@ -45,6 +45,19 @@ struct raw_counts {
     long long bad_key_len; /* prefix-matched key whose length != 33 */
 };
 
+static void count_key_by_prefix(const char *k, size_t klen, struct raw_counts *out)
+{
+    if (klen >= 1) {
+        switch ((unsigned char)k[0]) {
+        case 'Z': out->z_sapling_anchor++;    if (klen != 33) out->bad_key_len++; break;
+        case 'A': out->a_sprout_anchor++;     if (klen != 33) out->bad_key_len++; break;
+        case 'S': out->s_sapling_nullifier++; if (klen != 33) out->bad_key_len++; break;
+        case 's': out->s_sprout_nullifier++;  if (klen != 33) out->bad_key_len++; break;
+        default: break;
+        }
+    }
+}
+
 static int count_chainstate(const char *chainstate_dir, struct raw_counts *out)
 {
     memset(out, 0, sizeof(*out));
@@ -70,15 +83,7 @@ static int count_chainstate(const char *chainstate_dir, struct raw_counts *out)
     while (leveldb_iter_valid(it)) {
         size_t klen = 0;
         const char *k = leveldb_iter_key(it, &klen);
-        if (klen >= 1) {
-            switch ((unsigned char)k[0]) {
-            case 'Z': out->z_sapling_anchor++;    if (klen != 33) out->bad_key_len++; break;
-            case 'A': out->a_sprout_anchor++;     if (klen != 33) out->bad_key_len++; break;
-            case 'S': out->s_sapling_nullifier++; if (klen != 33) out->bad_key_len++; break;
-            case 's': out->s_sprout_nullifier++;  if (klen != 33) out->bad_key_len++; break;
-            default: break;
-            }
-        }
+        count_key_by_prefix(k, klen, out);
         leveldb_iter_next(it);
     }
 
