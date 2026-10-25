@@ -255,6 +255,7 @@ struct obj_pair_set {
     int64_t (*items)[2];
     size_t n;
     size_t cap;
+    bool oom; /* a failed append makes the train statistics incomplete */
 };
 
 static bool obj_pair_add_new(struct obj_pair_set *set, int64_t attempt,
@@ -267,8 +268,10 @@ static bool obj_pair_add_new(struct obj_pair_set *set, int64_t attempt,
         size_t next = set->cap ? set->cap * 2u : 16u;
         int64_t (*grown)[2] = zcl_realloc(
             set->items, next * sizeof(*grown), "fleet_objectives_pairs");
-        if (!grown)
+        if (!grown) {
+            set->oom = true;
             return false;
+        }
         set->items = grown;
         set->cap = next;
     }
@@ -339,7 +342,7 @@ static bool obj_train_stats_for_note(const char *path, const char *note,
         if (!valid) { status = -1; break; }
     }
     bool closed = fclose(fp) == 0;
-    return closed && status == 0;
+    return closed && status == 0 && !out->attempts.oom;
 }
 
 static void obj_train_stats_free(struct obj_train_stats *stats)

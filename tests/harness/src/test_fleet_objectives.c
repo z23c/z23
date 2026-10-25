@@ -11,6 +11,7 @@
  */
 
 #include "test/test_core.h"
+#include "base/safe_alloc.h"
 
 #include "command/native_command.h"
 #include "command/native_fleet_objectives.h"
@@ -1157,6 +1158,76 @@ _test_next:;
     return failures;
 }
 
+static bool fox_attempt_alloc_ledger(const char *path, bool duplicate)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return false;
+    bool ok = true;
+    for (int i = 1; ok && i <= 17; i++)
+        ok = fprintf(f,
+            "{\"note\":\"alloc-train\",\"state\":\"%s\","
+            "\"ts\":\"1970-01-01T00:01:40Z\",\"attempt\":%d,"
+            "\"started\":%d,\"landed_at\":200}\n",
+            i == 17 ? "landed" : "failed", i, i) > 0;
+    if (ok && duplicate)
+        ok = fputs(
+            "{\"note\":\"alloc-train\",\"state\":\"landed\","
+            "\"ts\":\"1970-01-01T00:01:40Z\",\"attempt\":17,"
+            "\"started\":17,\"landed_at\":200}\n", f) >= 0;
+    return fclose(f) == 0 && ok;
+}
+
+static int fox_case_attempt_alloc(const char *root, unsigned fail_nth,
+                                   bool duplicate, const char *objective,
+                                   int64_t expected)
+{
+    int failures = 0;
+    char path[1024];
+    struct zcl_objectives_options o = {0};
+    (void)snprintf(path, sizeof(path), "%s/attempt_alloc.jsonl", root);
+    o.outcomes = path;
+    TEST("objectives: incomplete attempt allocation is never measured") {
+        printf("[%s, allocation %u, duplicate %d] ", objective, fail_nth,
+               duplicate);
+        ASSERT(fox_attempt_alloc_ledger(path, duplicate));
+        if (fail_nth)
+            zcl_alloc_fault_fail_nth("fleet_objectives_pairs", fail_nth);
+        struct zcl_objective_value v = zcl_objectives_measure(&o, objective);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+        ASSERT(consumed);
+        if (fail_nth) {
+            ASSERT(!v.measured);
+            ASSERT(strstr(v.reason, "unavailable rows") != NULL);
+        } else {
+            ASSERT(v.measured);
+            ASSERT_EQ(v.value, expected);
+        }
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int fox_case_attempt_allocations(void)
+{
+    int failures = 0;
+    char root[512];
+    static const struct { unsigned fail_nth; bool duplicate; } cases[] = {
+        {0, false}, {0, true}, {1, false}, {2, false},
+    };
+    test_make_tmpdir(root, sizeof(root), "fleet_objectives", "attempt_alloc");
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        failures += fox_case_attempt_alloc(root, cases[i].fail_nth,
+            cases[i].duplicate, "landing_attempts_per_train", 17);
+        failures += fox_case_attempt_alloc(root, cases[i].fail_nth,
+            cases[i].duplicate, "landing_latency_s", 100);
+    }
+    (void)test_rm_rf_recursive(root);
+    return failures;
+}
+
 int test_fleet_objectives(void);
 int test_fleet_objectives(void)
 {
@@ -1176,6 +1247,7 @@ int test_fleet_objectives(void)
     failures += fox_case_screen();
     failures += fox_case_next();
     failures += fox_case_node_cache();
+    failures += fox_case_attempt_allocations();
     char root[512];
     char outcomes_ok[1024], outcomes_missing[1024];
     char attempts_dir[1024], inflight_dir[1024];
