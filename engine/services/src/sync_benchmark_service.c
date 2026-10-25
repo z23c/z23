@@ -334,14 +334,78 @@ bool sync_benchmark_build_receipt(struct json_value *out, bool complete,
 
 /* ── Durable write ─────────────────────────────────────────────── */
 
-bool sync_benchmark_write_receipt(bool complete, const char *incomplete_reason)
+/* Copy datadir out under the lock and report whether a durable write is
+ * armed (initialized with a non-empty datadir). */
+static bool sb_snapshot_armed_datadir(char *datadir_out, size_t datadir_len)
 {
     pthread_mutex_lock(&g_sb.lock);
     bool armed = g_sb.initialized && g_sb.datadir[0];
-    char datadir[sizeof(g_sb.datadir)];
-    snprintf(datadir, sizeof(datadir), "%s", g_sb.datadir);
+    snprintf(datadir_out, datadir_len, "%s", g_sb.datadir);
     pthread_mutex_unlock(&g_sb.lock);
+    return armed;
+}
 
+/* Build "<datadir>/sync_benchmark.json" in final_path; false when it cannot
+ * fit. */
+static bool sb_format_final_path(char *final_path, size_t final_path_len,
+                                 const char *datadir)
+{
+    int fn = snprintf(final_path, final_path_len,
+                      "%s/sync_benchmark.json", datadir);
+    return fn > 0 && (size_t)fn < final_path_len;
+}
+
+/* An existing destination must itself be a regular no-reparse file.
+ * Missing is allowed; any other open refusal fails closed. */
+static bool sb_destination_is_replaceable(char *final_path)
+{
+    struct platform_positioned_file existing;
+    platform_positioned_file_init(&existing);
+    bool destination_regular =
+        platform_positioned_file_open(&existing, final_path);
+    platform_positioned_file_close(&existing);
+    return destination_regular || platform_private_path_absent(final_path);
+}
+
+enum sb_staging_result {
+    SB_STAGING_CREATED = 0,
+    SB_STAGING_PATH_TOO_LONG,
+    SB_STAGING_CREATE_FAILED,
+};
+
+/* Try up to 16 sequence-suffixed siblings of final_path until one is created;
+ * tmp_path always holds the most recent candidate tried. */
+static enum sb_staging_result sb_create_unique_staging_file(
+    const char *final_path, char *tmp_path, size_t tmp_path_len,
+    struct platform_private_file *staging)
+{
+    static _Atomic uint64_t tmp_sequence;
+    bool created = false;
+    for (unsigned int attempt = 0; attempt < 16 && !created; attempt++) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &tmp_sequence, 1, memory_order_relaxed);
+        int tn = snprintf(tmp_path, tmp_path_len, "%s.tmp.%llu",
+                          final_path, (unsigned long long)sequence);
+        if (tn <= 0 || (size_t)tn >= tmp_path_len)
+            return SB_STAGING_PATH_TOO_LONG;
+        created = platform_private_file_create(tmp_path, staging);
+    }
+    return created ? SB_STAGING_CREATED : SB_STAGING_CREATE_FAILED;
+}
+
+/* Write the serialized receipt at offset 0, then flush it to durable
+ * storage. */
+static bool sb_write_and_flush_staging(struct platform_private_file *staging,
+                                       char *buf, size_t need)
+{
+    return platform_private_file_write_at(staging, buf, need, 0) &&
+           platform_private_file_flush(staging);
+}
+
+bool sync_benchmark_write_receipt(bool complete, const char *incomplete_reason)
+{
+    char datadir[sizeof(g_sb.datadir)];
+    bool armed = sb_snapshot_armed_datadir(datadir, sizeof(datadir));
     if (!armed) {
         LOG_WARN(SB_SUBSYS, "write_receipt: no datadir armed; skipping");
         return false;
@@ -369,48 +433,31 @@ bool sync_benchmark_write_receipt(bool complete, const char *incomplete_reason)
     /* Atomic publish from a unique, owner-private sibling. */
     char final_path[600];
     char tmp_path[640];
-    int fn = snprintf(final_path, sizeof(final_path),
-                      "%s/sync_benchmark.json", datadir);
-    if (fn <= 0 || (size_t)fn >= sizeof(final_path)) {
+    if (!sb_format_final_path(final_path, sizeof(final_path), datadir)) {
         LOG_FAIL(SB_SUBSYS, "write_receipt: datadir path too long");
         return false;
     }
 
-    /* An existing destination must itself be a regular no-reparse file.
-     * Missing is allowed; any other open refusal fails closed. */
-    struct platform_positioned_file existing;
-    platform_positioned_file_init(&existing);
-    bool destination_regular =
-        platform_positioned_file_open(&existing, final_path);
-    platform_positioned_file_close(&existing);
-    if (!destination_regular && !platform_private_path_absent(final_path)) {
+    if (!sb_destination_is_replaceable(final_path)) {
         LOG_ERROR(SB_SUBSYS,
                   "write_receipt: destination is not a regular no-reparse file");
         return false;
     }
 
-    static _Atomic uint64_t tmp_sequence;
     struct platform_private_file staging;
     platform_private_file_init(&staging);
-    bool created = false;
-    for (unsigned int attempt = 0; attempt < 16 && !created; attempt++) {
-        uint64_t sequence = atomic_fetch_add_explicit(
-            &tmp_sequence, 1, memory_order_relaxed);
-        int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%llu",
-                          final_path, (unsigned long long)sequence);
-        if (tn <= 0 || (size_t)tn >= sizeof(tmp_path)) {
-            LOG_ERROR(SB_SUBSYS, "write_receipt: staging path too long");
-            return false;
-        }
-        created = platform_private_file_create(tmp_path, &staging);
+    enum sb_staging_result staged = sb_create_unique_staging_file(
+        final_path, tmp_path, sizeof(tmp_path), &staging);
+    if (staged == SB_STAGING_PATH_TOO_LONG) {
+        LOG_ERROR(SB_SUBSYS, "write_receipt: staging path too long");
+        return false;
     }
-    if (!created) {
+    if (staged != SB_STAGING_CREATED) {
         LOG_ERROR(SB_SUBSYS,
                   "write_receipt: unique private staging creation failed");
         return false;
     }
-    if (!platform_private_file_write_at(&staging, buf, need, 0) ||
-        !platform_private_file_flush(&staging)) {
+    if (!sb_write_and_flush_staging(&staging, buf, need)) {
         LOG_ERROR(SB_SUBSYS, "write_receipt: durable staging write failed");
         (void)platform_private_file_retire(&staging, tmp_path);
         platform_private_file_close(&staging);
