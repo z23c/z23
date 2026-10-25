@@ -806,7 +806,6 @@ engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin:39
 engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin_result_string:16
 engine/composition/src/boot_mesh_terminal_client.c:boot_mesh_terminal_client_ended:17
 engine/composition/src/boot_mesh_terminal_client.c:boot_mesh_terminal_client_open:38
-engine/composition/src/boot_mesh_terminal_rpc.c:rpc_mesh_terminal_open:16
 engine/composition/src/boot_mint_anchor.c:boot_mint_anchor_run:50
 engine/composition/src/boot_mint_anchor_bundle_export.c:boot_mint_anchor_export_bundle:18
 engine/composition/src/boot_mint_anchor_preflight.c:boot_mint_anchor_normal_boot_preflight#2:20

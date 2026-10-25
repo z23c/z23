@@ -57,6 +57,37 @@ static bool input_hex32(const struct json_value *in, const char *key,
     return hex && strlen(hex) == 64 && zcl_hex_decode_lower(hex, out, 32);
 }
 
+/* Named refusal text for each failed open result, so the client's error
+ * carries an honest reason alongside the machine-readable code. */
+static const char *mesh_terminal_open_refusal_message(
+    enum boot_mesh_terminal_open_result opened)
+{
+    switch (opened) {
+    case MESH_TERMINAL_OPEN_NOT_PAIRED:
+        return "no local pairing record authorizes that peer";
+    case MESH_TERMINAL_OPEN_REVOKED:
+        return "the pairing is revoked";
+    case MESH_TERMINAL_OPEN_EXPIRED:
+        return "the pairing has expired";
+    case MESH_TERMINAL_OPEN_PEER_NOT_CONNECTED:
+        return "the paired peer has no established Noise session; no "
+               "dial is attempted";
+    case MESH_TERMINAL_OPEN_NOISE_DISABLED:
+        return "the Noise transport is disabled on this node";
+    case MESH_TERMINAL_OPEN_IDENTITY_UNAVAILABLE:
+        return "this node's filed ZID delegation is unavailable";
+    case MESH_TERMINAL_OPEN_PEER_IDENTITY_UNAVAILABLE:
+        return "the paired peer has no unique active ZID delegation "
+               "that authorizes this pairing";
+    case MESH_TERMINAL_OPEN_BUSY:
+        return "the bounded client session table is full";
+    case MESH_TERMINAL_OPEN_SEND_FAILED:
+        return "the peer send queue refused the open frame";
+    default:
+        return "the mesh terminal lane is unavailable";
+    }
+}
+
 static bool rpc_mesh_terminal_open(const struct json_value *params, bool help,
                                    struct json_value *result)
 {
@@ -86,43 +117,8 @@ static bool rpc_mesh_terminal_open(const struct json_value *params, bool help,
         boot_mesh_terminal_client_open(pairing_id, (uint16_t)cols,
                                        (uint16_t)rows, terminal_id);
     if (opened != MESH_TERMINAL_OPEN_OK) {
-        const char *message;
-        switch (opened) {
-        case MESH_TERMINAL_OPEN_NOT_PAIRED:
-            message = "no local pairing record authorizes that peer";
-            break;
-        case MESH_TERMINAL_OPEN_REVOKED:
-            message = "the pairing is revoked";
-            break;
-        case MESH_TERMINAL_OPEN_EXPIRED:
-            message = "the pairing has expired";
-            break;
-        case MESH_TERMINAL_OPEN_PEER_NOT_CONNECTED:
-            message = "the paired peer has no established Noise session; no "
-                      "dial is attempted";
-            break;
-        case MESH_TERMINAL_OPEN_NOISE_DISABLED:
-            message = "the Noise transport is disabled on this node";
-            break;
-        case MESH_TERMINAL_OPEN_IDENTITY_UNAVAILABLE:
-            message = "this node's filed ZID delegation is unavailable";
-            break;
-        case MESH_TERMINAL_OPEN_PEER_IDENTITY_UNAVAILABLE:
-            message = "the paired peer has no unique active ZID delegation "
-                      "that authorizes this pairing";
-            break;
-        case MESH_TERMINAL_OPEN_BUSY:
-            message = "the bounded client session table is full";
-            break;
-        case MESH_TERMINAL_OPEN_SEND_FAILED:
-            message = "the peer send queue refused the open frame";
-            break;
-        default:
-            message = "the mesh terminal lane is unavailable";
-            break;
-        }
         rpc_error(result, boot_mesh_terminal_open_result_string(opened),
-                  message);
+                  mesh_terminal_open_refusal_message(opened));
         return true;
     }
     char terminal_hex[65];
