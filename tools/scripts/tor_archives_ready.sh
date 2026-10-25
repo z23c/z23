@@ -365,19 +365,8 @@ case "${1:-ready}" in
             mkdir -p "$fake_primary/${a%/*}"
             printf 'fixture tor archive bytes\n' >"$fake_primary/$a"
         done
-        # link_from's have_all() now also checks provenance after the copy,
-        # so the fixture primary needs a manifest that matches its own
-        # archive bytes and the compiler id have_all() will independently
-        # recompute -- exactly what a real checkout's build_tor_full.sh run
-        # would have written. tor_ambient_compiler() itself is not used here:
-        # it now reads $ROOT/$TOR_TREE/Makefile (via zcl_tor_effective_cc) to
-        # match what the real Tor build's own configure picked, and the real
-        # $SCRIPT_ROOT's vendor/tor has one while this fixture's fake trees
-        # do not -- calling zcl_tor_effective_cc directly against the
-        # fixture path (same as have_all() will do inside the ROOT=$fake_wt
-        # subshell below, where there is also no Makefile) keeps this
-        # selftest's expectation and have_all()'s recomputation looking at
-        # the same absence and landing on the same fallback.
+        # Fixture and have_all derive the same compiler identity from the
+        # missing-Makefile fallback; copied bytes retain producer provenance.
         zcl_tor_provenance_ensure_bin "$SCRIPT_ROOT" || {
             echo "tor_archives_ready: selftest FAILED — could not build z23-tor-provenance" >&2
             exit 1
@@ -387,6 +376,7 @@ case "${1:-ready}" in
             echo "tor_archives_ready: selftest FAILED — could not derive a fixture compiler id" >&2
             exit 1
         }
+        printf '/* #undef HAVE_BACKTRACE */\n' >"$fake_primary/$TOR_TREE/orconfig.h"
         "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" write "$fake_primary/$TOR_TREE" \
             "$(printf '%040x' 1)" "$selftest_cid" \
             "$(printf 'selftest-configure-args' | sha256sum | awk '{print $1}')" >/dev/null || {
@@ -480,6 +470,12 @@ case "${1:-ready}" in
         # on tor_provenance.c). Reuse fake_wt: it already holds the four
         # archives link_from just populated, and it also now holds the
         # carried manifest, so delete only the manifest.
+        sed '/^fatal_handler_policy=/d' "$fake_primary/$TOR_TREE/.provenance" > \
+            "$fake_wt/$TOR_TREE/.provenance"
+        if (ROOT="$fake_wt"; cd "$fake_wt" && have_all) >/dev/null 2>&1; then
+            echo 'tor_archives_ready: selftest FAILED — old policy manifest passed readiness' >&2
+            exit 1
+        fi
         rm -f "$fake_wt/$TOR_TREE/.provenance"
         if (ROOT="$fake_wt"; cd "$fake_wt" && have_all) >/dev/null 2>&1; then
             echo "tor_archives_ready: selftest FAILED — have_all() passed with archives present and no manifest" >&2
@@ -548,6 +544,7 @@ case "${1:-ready}" in
                 echo "tor_archives_ready: selftest FAILED — could not derive the gcc alias compiler id" >&2
                 exit 1
             }
+            printf '/* #undef HAVE_BACKTRACE */\n' >"$fake_wt3/$TOR_TREE/orconfig.h"
             "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" write "$fake_wt3/$TOR_TREE" \
                 "$(printf '%040x' 1)" "$alias_cid" \
                 "$(printf 'selftest-configure-args' | sha256sum | awk '{print $1}')" >/dev/null || {

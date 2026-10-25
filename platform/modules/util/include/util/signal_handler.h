@@ -9,7 +9,7 @@
  *
  *   1. Writes one `[fatal-signal]` marker line to stderr (which systemd
  *      routes to ~/.zclassic-c23/node.log).
- *   2. Writes a `backtrace_symbols_fd` dump of up to 64 frames.
+ *   2. Writes up to 64 frames (bounded raw context frames on Darwin).
  *   3. Restores the default handler and re-raises so systemd still
  *      sees the original exit status and (if LimitCORE permits) the
  *      kernel still drops a core file.
@@ -25,6 +25,7 @@
 #define ZCL_SIGNAL_HANDLER_H
 
 #include <signal.h>
+#include <stddef.h>
 
 #if defined(_WIN32)
 /* Windows console and exception handlers do not expose POSIX siginfo_t.
@@ -53,6 +54,17 @@ typedef void (*signal_handler_crash_hook_fn)(int sig,
  * the node. Idempotent. Returns 0 on success, -1 on sigaction/sigaltstack
  * failure. */
 int signal_handler_install(void);
+
+#if defined(__APPLE__)
+/* Normal-thread setup: cache stack bounds/tid and arm a private alternate
+ * stack before entering application code. Unknown bounds permit PC-only
+ * reporting. These helpers do not symbolize or allocate in signal context. */
+int signal_handler_thread_prepare(void);
+int signal_handler_reset_fatal(void);
+size_t signal_handler_capture_frames(void *context, void **frames, size_t cap);
+void signal_handler_write_frames(int fd, void *const *frames, size_t count);
+#endif
+
 
 /* Install the node owner's persistent SIGINT/SIGTERM callback. Embedded
  * runtimes (notably Tor) may install process-wide termination handlers while

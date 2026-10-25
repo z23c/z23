@@ -6,6 +6,9 @@
 
 #include "event/event.h"
 #include "util/signal_handler.h"
+#if defined(__APPLE__)
+#include "util/async_safe_write.h"
+#endif
 
 #include <signal.h>
 #include <stdint.h>
@@ -25,6 +28,7 @@
 #include <unistd.h>
 #endif
 
+#if !defined(__APPLE__)
 static void crash_write_fd(int fd, const char *s, size_t n)
 {
 #if defined(_WIN32)
@@ -96,7 +100,46 @@ static void crash_signal_handler(int sig)
     _exit(128 + sig);
 }
 
+#else
+/* The Darwin path shares the bounded context walk and never enters libc
+ * unwind, stdio, or the event ring from a fatal-signal context. */
+static void crash_marker_darwin(int fd, int sig)
+{
+    (void)asw_write_str(fd, "\n\n*** FATAL SIGNAL ");
+    (void)asw_write_uint(fd, (unsigned long)sig);
+    (void)asw_write_str(fd, " ***\n=== STACK BACKTRACE ===\n");
+}
+
+static void crash_signal_darwin(int sig, siginfo_t *info, void *context)
+{
+    void *frames[64];
+    size_t primary = signal_handler_capture_frames(context, frames, 1);
+    crash_marker_darwin(STDERR_FILENO, sig);
+    signal_handler_write_frames(STDERR_FILENO, frames, primary);
+    int fd = signal_handler_crash_log_fd();
+    if (fd >= 0) {
+        crash_marker_darwin(fd, sig);
+        signal_handler_write_frames(fd, frames, primary);
+        fsync(fd);
+    }
+    if (signal_handler_reset_fatal() != 0)
+        _exit(128 + sig);
+    signal_handler_run_crash_hook(sig, info, context);
+    size_t count = signal_handler_capture_frames(context, frames, 64);
+    size_t remaining = count > primary ? count - primary : 0;
+    signal_handler_write_frames(STDERR_FILENO, frames + primary, remaining);
+    (void)asw_write_str(STDERR_FILENO, "=== END BACKTRACE ===\n\n");
+    if (fd >= 0) {
+        signal_handler_write_frames(fd, frames + primary, remaining);
+        (void)asw_write_str(fd, "=== END BACKTRACE ===\n\n");
+        fsync(fd);
+    }
+    _exit(128 + sig);
+}
+#endif
+
 void event_install_crash_handler(void)
+
 {
 #if defined(_WIN32)
     SetErrorMode(GetErrorMode() | SEM_FAILCRITICALERRORS |
@@ -105,6 +148,19 @@ void event_install_crash_handler(void)
     signal(SIGABRT, crash_signal_handler);
     signal(SIGFPE, crash_signal_handler);
     signal(SIGILL, crash_signal_handler);
+#elif defined(__APPLE__)
+    if (signal_handler_thread_prepare() != 0) {
+        fprintf(stderr, "event: crash stack preparation failed\n");
+        return;
+    }
+    struct sigaction sa = {.sa_sigaction = crash_signal_darwin,
+                          .sa_flags = SA_SIGINFO | SA_ONSTACK};
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGSEGV, &sa, NULL);
+    sigaction(SIGABRT, &sa, NULL);
+    sigaction(SIGBUS, &sa, NULL);
+    sigaction(SIGFPE, &sa, NULL);
+    sigaction(SIGILL, &sa, NULL);
 #else
     static char alt_stack[64 * 1024];
     stack_t ss = {.ss_sp = alt_stack, .ss_size = sizeof(alt_stack),

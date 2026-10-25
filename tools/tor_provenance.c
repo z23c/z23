@@ -99,6 +99,7 @@
 #endif
 
 #define TOR_PROVENANCE_NAME ".provenance"
+#define FATAL_HANDLER_POLICY "owner-v1"
 #define TOR_COMMIT_HEX_LEN 40
 #define COMPILER_ID_MAX 512
 #define PATH_BUF_MAX 4096
@@ -117,6 +118,7 @@ typedef struct {
     char compiler_id[COMPILER_ID_MAX];
     char configure_args_sha256[ZSHA256_HEX_LEN];
     char archive_sha256[ARCHIVE_COUNT][ZSHA256_HEX_LEN];
+    int fatal_handler_policy_ok;
     int has_tor_commit;
     int has_compiler_id;
     int has_configure_args_sha256;
@@ -302,12 +304,55 @@ static int validate_write_inputs(const char *tor_commit, const char *compiler_id
     return 0;
 }
 
-static int cmd_write(const char *tor_dir, const char *tor_commit,
-                      const char *compiler_id, const char *configure_args_sha256)
+/* Only an explicit producer may attest the embedding policy. A configure
+ * digest identifies inputs but does not say whether those inputs are safe. */
+static int embedded_config_without_backtrace(const char *tor_dir)
 {
+    char path[PATH_BUF_MAX];
+    if (join_path(path, tor_dir, "orconfig.h") != 0)
+        return 0;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 0;
+    char line[LINE_BUF_MAX];
+    int disabled = 0, enabled = 0;
+    while (fgets(line, sizeof(line), f)) {
+        const char *undefined = strstr(line, "#undef HAVE_BACKTRACE");
+        if (undefined && (undefined[21] == ' ' || undefined[21] == '\n' ||
+                          undefined[21] == '\r' || undefined[21] == '\0'))
+            disabled = 1;
+        char directive[32], name[64];
+        if (sscanf(line, " #%31s %63s", directive, name) == 2 &&
+            strcmp(directive, "define") == 0 &&
+            strcmp(name, "HAVE_BACKTRACE") == 0)
+            enabled = 1;
+    }
+    int unreadable = ferror(f);
+    fclose(f);
+    return disabled && !enabled && !unreadable;
+}
+
+static int validate_manifest_build(const char *tor_dir, const char *tor_commit,
+                                   const char *compiler_id,
+                                   const char *configure_args_sha256,
+                                   int attest_configuration)
+{
+    if (attest_configuration && !embedded_config_without_backtrace(tor_dir)) {
+        fprintf(stderr, "tor-provenance: write: generated orconfig.h must disable HAVE_BACKTRACE; rebuild with make tor-full\n");
+        return 1;
+    }
     if (validate_write_inputs(tor_commit, compiler_id, configure_args_sha256) != 0)
         return 1;
+    return 0;
+}
 
+static int write_manifest(const char *tor_dir, const char *tor_commit,
+                          const char *compiler_id, const char *configure_args_sha256,
+                          int attest_configuration)
+{
+    if (validate_manifest_build(tor_dir, tor_commit, compiler_id,
+                                configure_args_sha256, attest_configuration))
+        return 1;
     char archive_hex[ARCHIVE_COUNT][ZSHA256_HEX_LEN];
     int failing = -1;
     if (hash_all_archives(tor_dir, archive_hex, &failing) != 0) {
@@ -318,6 +363,7 @@ static int cmd_write(const char *tor_dir, const char *tor_commit,
 
     char content[LINE_BUF_MAX];
     int n = snprintf(content, sizeof content,
+        "fatal_handler_policy=" FATAL_HANDLER_POLICY "\n"
         "tor_commit=%s\n"
         "compiler_id=%s\n"
         "configure_args_sha256=%s\n"
@@ -376,7 +422,36 @@ static int cmd_write(const char *tor_dir, const char *tor_commit,
     return 0;
 }
 
+static int cmd_write(const char *tor_dir, const char *tor_commit,
+                      const char *compiler_id, const char *configure_args_sha256)
+{
+    return write_manifest(tor_dir, tor_commit, compiler_id,
+                          configure_args_sha256, 1);
+}
+
 /* ---- check ------------------------------------------------------------ */
+
+static void parse_fatal_policy(provenance_t *pv, const char *val)
+{
+    /* Duplicate policy lines cannot turn an old/wrong policy valid. */
+    if (pv->fatal_handler_policy_ok != 0)
+        pv->fatal_handler_policy_ok = -1;
+    else
+        pv->fatal_handler_policy_ok =
+            strcmp(val, FATAL_HANDLER_POLICY) == 0 ? 1 : -1;
+}
+
+static void parse_archive_hashes(provenance_t *pv, const char *val)
+{
+    char a0[ZSHA256_HEX_LEN], a1[ZSHA256_HEX_LEN], a2[ZSHA256_HEX_LEN], a3[ZSHA256_HEX_LEN];
+    if (sscanf(val, "%64s %64s %64s %64s", a0, a1, a2, a3) == 4) {
+        snprintf(pv->archive_sha256[0], ZSHA256_HEX_LEN, "%s", a0);
+        snprintf(pv->archive_sha256[1], ZSHA256_HEX_LEN, "%s", a1);
+        snprintf(pv->archive_sha256[2], ZSHA256_HEX_LEN, "%s", a2);
+        snprintf(pv->archive_sha256[3], ZSHA256_HEX_LEN, "%s", a3);
+        pv->has_archive_sha256 = 1;
+    }
+}
 
 static int parse_manifest(const char *manifest_path, provenance_t *pv)
 {
@@ -392,7 +467,10 @@ static int parse_manifest(const char *manifest_path, provenance_t *pv)
         *eq = '\0';
         const char *key = line;
         const char *val = eq + 1;
-        if (strcmp(key, "tor_commit") == 0) {
+        if (strcmp(key, "fatal_handler_policy") == 0) {
+            parse_fatal_policy(pv, val);
+        } else if (strcmp(key, "tor_commit") == 0) {
+
             if (strlen(val) < sizeof pv->tor_commit) {
                 snprintf(pv->tor_commit, sizeof pv->tor_commit, "%s", val);
                 pv->has_tor_commit = 1;
@@ -408,14 +486,7 @@ static int parse_manifest(const char *manifest_path, provenance_t *pv)
                 pv->has_configure_args_sha256 = 1;
             }
         } else if (strcmp(key, "archive_sha256") == 0) {
-            char a0[ZSHA256_HEX_LEN], a1[ZSHA256_HEX_LEN], a2[ZSHA256_HEX_LEN], a3[ZSHA256_HEX_LEN];
-            if (sscanf(val, "%64s %64s %64s %64s", a0, a1, a2, a3) == 4) {
-                snprintf(pv->archive_sha256[0], ZSHA256_HEX_LEN, "%s", a0);
-                snprintf(pv->archive_sha256[1], ZSHA256_HEX_LEN, "%s", a1);
-                snprintf(pv->archive_sha256[2], ZSHA256_HEX_LEN, "%s", a2);
-                snprintf(pv->archive_sha256[3], ZSHA256_HEX_LEN, "%s", a3);
-                pv->has_archive_sha256 = 1;
-            }
+            parse_archive_hashes(pv, val);
         }
     }
     fclose(f);
@@ -537,6 +608,11 @@ static int cmd_check(const char *tor_dir, const char *want_tor_commit, const cha
     }
 
     int all_ok = 1;
+    if (pv.fatal_handler_policy_ok != 1) {
+        printf("tor-provenance: fatal_handler_policy MISMATCH missing or unsupported; rebuild with make tor-full\n");
+        all_ok = 0;
+    }
+
 
     /* archive_sha256 is always checked — it is the whole point. */
     if (!check_archive_sha256_field(tor_dir, &pv)) all_ok = 0;
@@ -572,7 +648,13 @@ static int cmd_rewrite_compiler_id(const char *tor_dir, const char *new_compiler
                 manifest_path);
         return 1;
     }
+    /* Identity migration must never bless an old archive with a new policy. */
+    if (pv.fatal_handler_policy_ok != 1) {
+        fprintf(stderr, "tor-provenance: rewrite-compiler-id: missing or unsupported fatal-handler policy; rebuild with make tor-full\n");
+        return 1;
+    }
     if (!pv.has_tor_commit || !pv.has_configure_args_sha256 || !pv.has_archive_sha256) {
+
         fprintf(stderr, "tor-provenance: rewrite-compiler-id: manifest is incomplete; run 'make tor-full' to write a fresh one\n");
         return 1;
     }
@@ -593,9 +675,11 @@ static int cmd_rewrite_compiler_id(const char *tor_dir, const char *new_compiler
         }
     }
 
-    /* cmd_write() re-hashes the (already-verified-unchanged) archives and
-     * atomically replaces the manifest; only compiler_id actually changes. */
-    if (cmd_write(tor_dir, pv.tor_commit, new_compiler_id, pv.configure_args_sha256) != 0)
+    /* Existing owner-v1 policy and every archive byte were verified above.
+     * Preserve that attestation without requiring copied build headers.
+     * This path cannot mint the policy on an old or unsupported manifest. */
+    if (write_manifest(tor_dir, pv.tor_commit, new_compiler_id,
+                        pv.configure_args_sha256, 0) != 0)
         return 1;
     printf("tor-provenance: rewrite-compiler-id: %s compiler_id updated (tor_commit, configure_args_sha256, and archive_sha256 unchanged)\n",
            manifest_path);
@@ -691,6 +775,8 @@ static int selftest_rmdir_tree(const char *base)
         join_path(path, base, ARCHIVE_RELPATHS[i]);
         unlink(path);
     }
+    join_path(path, base, "orconfig.h");
+    unlink(path);
     join_path(path, base, TOR_PROVENANCE_NAME);
     unlink(path);
     char sub[PATH_BUF_MAX];
@@ -744,7 +830,12 @@ static int selftest_create_directories(const char *base)
 }
 
 static int selftest_create_archives(const char *base)
+
 {
+    char config[PATH_BUF_MAX];
+    if (join_path(config, base, "orconfig.h") != 0 ||
+        write_fixture_archive(config, "/* #undef HAVE_BACKTRACE */\n") != 0)
+        return 1;
     for (int i = 0; i < ARCHIVE_COUNT; i++) {
         char path[PATH_BUF_MAX];
         if (join_path(path, base, ARCHIVE_RELPATHS[i]) != 0) {
@@ -774,6 +865,101 @@ static int selftest_prepare(const char *base)
            selftest_compiler_results(base);
 }
 
+/* Old and wrong policy manifests must fail both readiness and identity-only
+ * migration, and migration must leave every manifest byte unchanged. */
+static int selftest_fatal_policy(const char *base)
+{
+    char path[PATH_BUF_MAX], original[LINE_BUF_MAX];
+    if (join_path(path, base, TOR_PROVENANCE_NAME) != 0)
+        return 1;
+    FILE *f = fopen(path, "r");
+    if (!f)
+        return 1;
+    size_t bytes = fread(original, 1, sizeof(original) - 1, f);
+    int bad = ferror(f) || !feof(f);
+    fclose(f);
+    if (bad)
+        return 1;
+    original[bytes] = '\0';
+    const char *line = "fatal_handler_policy=" FATAL_HANDLER_POLICY "\n";
+    size_t policy_bytes = strlen(line);
+    if (strncmp(original, line, policy_bytes) != 0)
+        return 1;
+    for (int wrong = 0; wrong < 2; wrong++) {
+        char mutant[LINE_BUF_MAX];
+        snprintf(mutant, sizeof(mutant), "%s", original);
+        if (wrong)
+            mutant[strlen("fatal_handler_policy=")] = 'X';
+        else
+            memmove(mutant, mutant + policy_bytes,
+                    strlen(mutant + policy_bytes) + 1);
+        char before[ZSHA256_HEX_LEN], after[ZSHA256_HEX_LEN];
+        if (write_fixture_archive(path, mutant) != 0 ||
+            sha256_hex_of_file(path, before) != 0 ||
+            quiet_check(base, NULL, NULL) == 0 ||
+            cmd_rewrite_compiler_id(base, "replacement-compiler") == 0 ||
+            sha256_hex_of_file(path, after) != 0 || strcmp(before, after) != 0)
+            return 1;
+    }
+    return write_fixture_archive(path, original) != 0;
+}
+
+static int selftest_replace_manifest(const char *base, const char *commit,
+                                      const char *first, const char *second,
+                                      const char *configure_sha)
+{
+    if (cmd_write(base, commit, first, configure_sha) != 0) {
+        fprintf(stderr, "tor-provenance: selftest FAILED — write did not succeed\n");
+        return 1;
+    }
+    if (cmd_write(base, commit, second, configure_sha) != 0) {
+        fprintf(stderr, "tor-provenance: selftest FAILED — could not replace manifest\n");
+        return 1;
+    }
+    if (quiet_check(base, commit, first) == 0) {
+        fprintf(stderr, "tor-provenance: selftest FAILED — replacement retained old identity\n");
+        return 1;
+    }
+    if (quiet_check(base, commit, second) != 0) {
+        fprintf(stderr, "tor-provenance: selftest FAILED — check did not accept a just-written manifest\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int selftest_copied_policy(const char *base, const char *commit,
+                                  const char *first, const char *second,
+                                  const char *configure_sha)
+{
+    char config[PATH_BUF_MAX];
+    if (join_path(config, base, "orconfig.h") != 0 || unlink(config) != 0 ||
+        cmd_write(base, commit, second, configure_sha) == 0 ||
+        cmd_rewrite_compiler_id(base, first) != 0 ||
+        quiet_check(base, commit, first) != 0 ||
+        cmd_rewrite_compiler_id(base, second) != 0 ||
+        quiet_check(base, commit, second) != 0 ||
+        write_fixture_archive(config, "/* #undef HAVE_BACKTRACE */\n") != 0) {
+        fprintf(stderr, "tor-provenance: selftest FAILED — verified copied policy migration\n");
+        return 1;
+    }
+    return 0;
+}
+
+static int selftest_enabled_backtrace(const char *base, const char *commit,
+                                      const char *compiler,
+                                      const char *configure_sha)
+{
+    char config[PATH_BUF_MAX];
+    if (join_path(config, base, "orconfig.h") != 0 ||
+        write_fixture_archive(config, "#define HAVE_BACKTRACE 1\n") != 0 ||
+        cmd_write(base, commit, compiler, configure_sha) == 0 ||
+        write_fixture_archive(config, "/* #undef HAVE_BACKTRACE */\n") != 0) {
+        fprintf(stderr, "tor-provenance: selftest FAILED — enabled backtrace was attested\n");
+        return 1;
+    }
+    return 0;
+}
+
 static int run_selftest(void)
 {
     const char *tmpdir = getenv("TMPDIR");
@@ -800,27 +986,27 @@ static int run_selftest(void)
         "0123456789abcdef" "0123456789abcdef" "0123456789abcdef" "0123456789abcdef";
 
     int rc = 1;
-    if (cmd_write(base, fake_commit_ok, first_compiler_id, fake_configure_sha) != 0) {
-        fprintf(stderr, "tor-provenance: selftest FAILED — write did not succeed\n");
-        goto out;
-    }
-
     /* Rebuilding Tor must atomically replace an existing manifest too. */
-    if (cmd_write(base, fake_commit_ok, fake_compiler_id, fake_configure_sha) != 0) {
-        fprintf(stderr, "tor-provenance: selftest FAILED — could not replace manifest\n");
+    if (selftest_replace_manifest(base, fake_commit_ok, first_compiler_id,
+                                  fake_compiler_id, fake_configure_sha))
         goto out;
-    }
-    if (quiet_check(base, fake_commit_ok, first_compiler_id) == 0) {
-        fprintf(stderr, "tor-provenance: selftest FAILED — replacement retained old identity\n");
+
+    if (selftest_fatal_policy(base) != 0) {
+        fprintf(stderr, "tor-provenance: selftest FAILED — unsafe policy accepted or upgraded\n");
         goto out;
     }
 
-    if (quiet_check(base, fake_commit_ok, fake_compiler_id) != 0) {
-        fprintf(stderr, "tor-provenance: selftest FAILED — check did not accept a just-written manifest\n");
+    /* A copied verified bundle may carry no generated build headers.
+     * Identity-only migration preserves policy rather than re-attesting it. */
+    if (selftest_copied_policy(base, fake_commit_ok, first_compiler_id,
+                               fake_compiler_id, fake_configure_sha))
         goto out;
-    }
+    if (selftest_enabled_backtrace(base, fake_commit_ok, fake_compiler_id,
+                                   fake_configure_sha))
+        goto out;
 
     /* Flip one byte in one archive: check must now MISMATCH. */
+
     {
         char path[PATH_BUF_MAX];
         join_path(path, base, ARCHIVE_RELPATHS[1]);

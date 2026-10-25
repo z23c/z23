@@ -12,6 +12,7 @@
 #include "platform/thread_compat.h"
 #include "util/thread_registry.h"
 #include "util/safe_alloc.h"
+#include "util/signal_handler.h"
 
 #include <errno.h>
 #include <pthread.h>
@@ -54,7 +55,13 @@ static void *thread_registry_trampoline(void *raw)
     void *(*entry)(void *) = ta->entry;
     void *arg = ta->arg;
     free(ta);
+#if defined(__APPLE__)
+    if (signal_handler_thread_prepare() != 0)
+        fprintf(stderr, "[thread_registry] crash stack preparation: %s\n",
+                strerror(errno));
+#endif
     void *ret = entry(arg);
+
     thread_registry_unregister_self();
     return ret;
 }

@@ -840,7 +840,9 @@ static int test_crash_handler_stderr_survives_exit(void)
              * dup2'd onto stderr. */
             signal_handler_set_crash_log(path2);
 
-            /* Trigger.  Handler does its write(2) + fprintf + _exit. */
+            /* Bound a reporter deadlock; original frame and exit assertions remain. */
+            alarm(5);
+            /* Trigger. Handler must emit and retain its _exit contract. */
             raise(SIGABRT);
 
             /* If the handler didn't _exit (a real bug), use a distinct exit

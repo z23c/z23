@@ -157,7 +157,9 @@ fi
 # event2/ headers, so Tor still resolves libevent from the host while
 # the node links vendor/lib/libevent.a. That is the same latent skew,
 # still open, and it needs the headers vendored before it can be closed.
+# The embedding process owns fatal signals; attest this configure policy.
 configure_opts=(
+    ac_cv_func_backtrace=no
     --with-openssl-dir="$VENDOR_ROOT_DIR"
     --disable-asciidoc
     --disable-systemd

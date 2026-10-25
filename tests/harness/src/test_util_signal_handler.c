@@ -34,6 +34,15 @@
 #define _GNU_SOURCE
 #include "test/test_core.h"
 #include "util/signal_handler.h"
+#if defined(__APPLE__)
+#include "config/boot.h"
+#include "util/thread_registry.h"
+#include <pthread.h>
+#include <stdint.h>
+#include <sys/ucontext.h>
+#include <sys/mman.h>
+#endif
+
 
 #include <fcntl.h>
 #include <signal.h>
@@ -55,6 +64,293 @@ static int count_hex_frames(const char *buf)
     }
     return hits;
 }
+
+#if defined(__APPLE__)
+/* A real-Tor link resolves this symbol; an offline stub has no error
+ * subsystem to test. Do not start Tor or touch network/canonical state. */
+extern int configure_backtrace_handler(const char *) __attribute__((weak_import));
+
+static int test_darwin_embedded_signal_ownership(void)
+{
+    int failures = 0;
+    if (!app_tor_real_build_linked()) {
+        printf("util_signal_handler: SKIP embedded ownership (offline Tor stub)\n");
+        return 0;
+    }
+    TEST("Darwin real Tor error initialization preserves fatal ownership") {
+        ASSERT(configure_backtrace_handler != NULL);
+        fflush(NULL);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            alarm(5);
+            if (signal_handler_install() != 0) _exit(70);
+            const int signals[] = {SIGABRT, SIGSEGV, SIGBUS, SIGFPE};
+            struct sigaction before[4];
+            for (size_t i = 0; i < 4; i++)
+                if (sigaction(signals[i], NULL, &before[i]) != 0) _exit(71);
+            if (configure_backtrace_handler("embedding-test") != 0) _exit(72);
+            for (size_t i = 0; i < 4; i++) {
+                struct sigaction after;
+                if (sigaction(signals[i], NULL, &after) != 0 ||
+                    after.sa_sigaction != before[i].sa_sigaction ||
+                    after.sa_flags != before[i].sa_flags) _exit(73);
+            }
+            _exit(0);
+        }
+        int status = 0;
+        ASSERT_EQ(waitpid(pid, &status, 0), pid);
+        ASSERT(WIFEXITED(status));
+        ASSERT_EQ(WEXITSTATUS(status), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+/* Each level must survive optimization: the volatile post-call operation
+ * prevents tail calls. These are real captured frames, not manufactured PCs. */
+static volatile sig_atomic_t darwin_call_returned;
+__attribute__((noinline)) static void darwin_crash_leaf(void)
+{
+    raise(SIGABRT);
+    darwin_call_returned++;
+}
+__attribute__((noinline)) static void darwin_crash_middle(void)
+{
+    darwin_crash_leaf();
+    darwin_call_returned++;
+}
+static void *darwin_crash_worker(void *arg)
+{
+    (void)arg;
+    stack_t ss;
+    if (sigaltstack(NULL, &ss) != 0 || (ss.ss_flags & SS_DISABLE))
+        _exit(61);
+    darwin_crash_middle();
+    return NULL;
+}
+
+static int test_darwin_worker_crash(void)
+{
+    int failures = 0;
+    TEST("Darwin registry worker: private altstack and real fatal frames") {
+        int output[2];
+        ASSERT_EQ(pipe(output), 0);
+        fflush(NULL);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            close(output[0]);
+            if (dup2(output[1], STDERR_FILENO) < 0) _exit(60);
+            close(output[1]);
+            alarm(5);
+            if (signal_handler_install() != 0) _exit(62);
+            pthread_t worker;
+            if (thread_registry_spawn("fatal-frame-test", darwin_crash_worker,
+                                      NULL, &worker) != 0) _exit(63);
+            pthread_join(worker, NULL);
+            _exit(64);
+        }
+        close(output[1]);
+        int status = 0;
+        ASSERT_EQ(waitpid(pid, &status, 0), pid);
+        char report[8192];
+        ssize_t bytes = read(output[0], report, sizeof(report) - 1);
+        close(output[0]);
+        ASSERT(bytes > 0);
+        report[bytes] = '\0';
+        ASSERT(WIFSIGNALED(status));
+        ASSERT_EQ(WTERMSIG(status), SIGABRT);
+        ASSERT(strstr(report, "[fatal-signal] end") != NULL);
+        int real_frames = 0;
+        for (const char *p = report; (p = strstr(p, "frame 0x")) != NULL; p += 8)
+            real_frames++;
+        ASSERT(real_frames >= 3);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void darwin_invalid_frame_signal(int sig, siginfo_t *info, void *raw)
+{
+    (void)sig;
+    (void)info;
+    ucontext_t *uc = raw;
+#if defined(__aarch64__)
+    __darwin_arm_thread_state64_set_fp(uc->uc_mcontext->__ss, UINTPTR_MAX);
+#elif defined(__x86_64__)
+    uc->uc_mcontext->__ss.__rbp = UINTPTR_MAX;
+#endif
+    void *frames[4];
+    size_t count = signal_handler_capture_frames(raw, frames, 4);
+    /* The interrupted instruction is real; no invalid frame may be read. */
+    _exit(count == 1 && frames[0] != NULL &&
+          signal_handler_capture_frames(raw, frames, 0) == 0 ? 0 : 65);
+}
+
+static int test_darwin_malformed_frame(void)
+{
+    int failures = 0;
+    TEST("Darwin invalid saved frame pointer stops at the interrupted PC") {
+        fflush(NULL);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            alarm(5);
+            if (signal_handler_thread_prepare() != 0) _exit(66);
+            struct sigaction sa = {.sa_sigaction = darwin_invalid_frame_signal,
+                                  .sa_flags = SA_SIGINFO | SA_ONSTACK};
+            sigemptyset(&sa.sa_mask);
+            if (sigaction(SIGUSR1, &sa, NULL) != 0) _exit(67);
+            raise(SIGUSR1);
+            _exit(68);
+        }
+        int status = 0;
+        ASSERT_EQ(waitpid(pid, &status, 0), pid);
+        ASSERT(WIFEXITED(status));
+        ASSERT_EQ(WEXITSTATUS(status), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void darwin_foreign_signal(int sig, siginfo_t *info, void *context)
+{
+    (void)sig;
+    (void)info;
+    void *frames[64];
+    _exit(signal_handler_capture_frames(context, frames, 64) == 1 ? 0 : 74);
+}
+
+static void *darwin_foreign_thread(void *arg)
+{
+    (void)arg;
+    raise(SIGUSR2);
+    _exit(75);
+}
+
+static int test_darwin_foreign_thread(void)
+{
+    int failures = 0;
+    TEST("Darwin unregistered pthread captures PC only without lazy TLS setup") {
+        fflush(NULL);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0) {
+            alarm(5);
+            if (signal_handler_install() != 0) _exit(76);
+            struct sigaction sa = {.sa_sigaction = darwin_foreign_signal,
+                                  .sa_flags = SA_SIGINFO};
+            sigemptyset(&sa.sa_mask);
+            if (sigaction(SIGUSR2, &sa, NULL) != 0) _exit(77);
+            pthread_t foreign;
+            if (pthread_create(&foreign, NULL, darwin_foreign_thread, NULL) != 0)
+                _exit(78);
+            pthread_join(foreign, NULL);
+            _exit(79);
+        }
+        int status = 0;
+        ASSERT_EQ(waitpid(pid, &status, 0), pid);
+        ASSERT(WIFEXITED(status));
+        ASSERT_EQ(WEXITSTATUS(status), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static void *darwin_unreadable_frame;
+
+static void darwin_unreadable_hook(int sig, zcl_signal_info_t *info,
+                                    void *context, void *arg)
+{
+    (void)sig;
+    (void)info;
+    (void)arg;
+    ucontext_t *uc = context;
+#if defined(__aarch64__)
+    __darwin_arm_thread_state64_set_fp(uc->uc_mcontext->__ss,
+                                      darwin_unreadable_frame);
+#elif defined(__x86_64__)
+    uc->uc_mcontext->__ss.__rbp = (uintptr_t)darwin_unreadable_frame;
+#endif
+}
+
+static void darwin_unreadable_child(const int output[2], const char *durable_path)
+{
+    close(output[0]);
+    if (dup2(output[1], STDERR_FILENO) < 0) _exit(80);
+    close(output[1]);
+    alarm(5);
+    if (signal_handler_install() != 0) _exit(81);
+    signal_handler_set_crash_log(durable_path);
+    long native_page = sysconf(_SC_PAGESIZE);
+    if (native_page <= 0) _exit(82);
+    uintptr_t page = (uintptr_t)native_page;
+    pthread_t self = pthread_self();
+    uintptr_t high = (uintptr_t)pthread_get_stackaddr_np(self);
+    size_t bytes = pthread_get_stacksize_np(self);
+    uintptr_t current = (uintptr_t)&self;
+    if (bytes < 32 * page || high < bytes) _exit(83);
+    uintptr_t low = high - bytes;
+    uintptr_t protected_page = (low + 8 * page + page - 1) / page * page;
+    /* This page is deep inside the stack allocation, well below current
+     * frames; the handler uses an independent alternate stack. Child only. */
+    if (protected_page < low || protected_page + 17 * page >= current ||
+        protected_page + page >= high) _exit(84);
+    if (mprotect((void *)protected_page, (size_t)page, PROT_NONE) != 0)
+        _exit(85);
+    darwin_unreadable_frame = (void *)protected_page;
+    signal_handler_set_crash_hook(darwin_unreadable_hook, NULL);
+    raise(SIGABRT);
+    _exit(86);
+}
+
+static int test_darwin_unreadable_frame(void)
+{
+    int failures = 0;
+    TEST("Darwin unreadable in-range FP preserves marker and PC before fail-stop") {
+        mkdir("./test-tmp", 0700);
+        char durable_path[256];
+        snprintf(durable_path, sizeof(durable_path),
+                 "./test-tmp/sighandler_unreadable_%d.log", (int)getpid());
+        unlink(durable_path);
+        int output[2];
+        ASSERT_EQ(pipe(output), 0);
+        fflush(NULL);
+        pid_t pid = fork();
+        ASSERT(pid >= 0);
+        if (pid == 0)
+            darwin_unreadable_child(output, durable_path);
+        close(output[1]);
+        int status = 0;
+        ASSERT_EQ(waitpid(pid, &status, 0), pid);
+        char report[4096];
+        ssize_t bytes = read(output[0], report, sizeof(report) - 1);
+        close(output[0]);
+        ASSERT(bytes > 0);
+        report[bytes] = '\0';
+        ASSERT(WIFSIGNALED(status));
+        ASSERT(WTERMSIG(status) == SIGSEGV || WTERMSIG(status) == SIGBUS);
+        const char *marker = strstr(report, "[fatal-signal] sig=6");
+        const char *pc = strstr(report, "frame 0x");
+        ASSERT(marker != NULL && pc != NULL && marker < pc);
+        /* No completion marker: stack read faulted after primary evidence. */
+        ASSERT(strstr(report, "[fatal-signal] end") == NULL);
+        FILE *durable = fopen(durable_path, "r");
+        ASSERT(durable != NULL);
+        size_t length = fread(report, 1, sizeof(report) - 1, durable);
+        fclose(durable);
+        report[length] = '\0';
+        marker = strstr(report, "[fatal-signal] sig=6");
+        pc = strstr(report, "frame 0x");
+        ASSERT(marker != NULL && pc != NULL && marker < pc);
+        ASSERT(strstr(report, "[fatal-signal] end") == NULL);
+        unlink(durable_path);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
 
 /* Slurp up to cap-1 bytes of a file into buf (NUL-terminated). Returns bytes
  * read, or -1 if the file could not be opened. */
@@ -113,6 +409,7 @@ static int test_reraise_and_durable_mirror(void)
 
             /* Trigger. The handler must emit, mirror+fsync, restore SIG_DFL,
              * and re-raise -> this process dies from SIGABRT here. */
+            alarm(5);
             raise(SIGABRT);
 
             /* If we reach here the handler failed to re-raise (a real bug):
@@ -294,6 +591,13 @@ static int test_util_signal_handler_platform_arm(void)
 
     int failures = 0;
     failures += test_reraise_and_durable_mirror();
+#if defined(__APPLE__)
+    failures += test_darwin_embedded_signal_ownership();
+    failures += test_darwin_worker_crash();
+    failures += test_darwin_malformed_frame();
+    failures += test_darwin_foreign_thread();
+    failures += test_darwin_unreadable_frame();
+#endif
     failures += test_install_alt_stack();
     failures += test_install_ignores_sigpipe();
     failures += test_termination_handler_reclaim();
