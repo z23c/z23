@@ -215,6 +215,76 @@ static bool accept_reward_valid(const char *reward)
                               script_prefix, script_len, &dest);
 }
 
+static enum vcs_package_accept_result accept_verified_release_id(
+    const struct vcs_package_release *release,
+    uint8_t release_id[VCS_PACKAGE_RELEASE_ID_BYTES])
+{
+    if (vcs_package_release_verify(release) != VCS_PACKAGE_RELEASE_OK)
+        return VCS_PACKAGE_ACCEPT_INVALID;
+    if (vcs_package_release_id(release, release_id) !=
+        VCS_PACKAGE_RELEASE_OK)
+        return VCS_PACKAGE_ACCEPT_INVALID;
+    return VCS_PACKAGE_ACCEPT_OK;
+}
+
+static enum vcs_package_accept_result accept_publisher_namespace(
+    const struct vcs_package_accept *accept,
+    const struct vcs_package_release *release,
+    char *publisher, size_t publisher_size,
+    const struct accept_ns_record **ns_out)
+{
+    const char *slash = strchr(release->name, '/');
+    if (!slash || (size_t)(slash - release->name) >= publisher_size)
+        return VCS_PACKAGE_ACCEPT_INVALID; /* codec already forbids this */
+    memcpy(publisher, release->name, (size_t)(slash - release->name));
+    publisher[slash - release->name] = '\0';
+    const struct accept_ns_record *ns = accept_ns_find(accept, publisher);
+    if (ns && memcmp(ns->pubkey, release->publisher_pubkey,
+                     VCS_PACKAGE_RELEASE_PUBKEY_BYTES) != 0)
+        return VCS_PACKAGE_ACCEPT_NAMESPACE;
+    *ns_out = ns;
+    return VCS_PACKAGE_ACCEPT_OK;
+}
+
+static enum vcs_package_accept_result accept_classify_publisher_sequence(
+    const struct accept_pub_record *cursor,
+    const struct vcs_package_release *release,
+    const uint8_t release_id[32])
+{
+    if (cursor) {
+        if (release->publisher_sequence < cursor->sequence)
+            return VCS_PACKAGE_ACCEPT_STALE;
+        if (release->publisher_sequence == cursor->sequence) {
+            if (memcmp(cursor->release_id, release_id, 32) == 0)
+                return VCS_PACKAGE_ACCEPT_DUPLICATE;
+            return VCS_PACKAGE_ACCEPT_EQUIVOCATION;
+        }
+    }
+    return VCS_PACKAGE_ACCEPT_OK;
+}
+
+static enum vcs_package_accept_result accept_commit_release(
+    struct vcs_package_accept *accept,
+    const struct vcs_package_release *release,
+    const uint8_t release_id[32], const char *publisher,
+    const struct accept_pub_record *cursor,
+    const struct accept_ns_record *ns)
+{
+    /* Accepted. Bound checks happen BEFORE any mutation so a refusal
+     * leaves the state untouched. */
+    if (!cursor && accept->pubs_count >= VCS_PACKAGE_ACCEPT_MAX_PUBLISHERS)
+        return VCS_PACKAGE_ACCEPT_ERR_LIMIT;
+    if (!ns && accept->ns_count >= VCS_PACKAGE_ACCEPT_MAX_NAMESPACES)
+        return VCS_PACKAGE_ACCEPT_ERR_LIMIT;
+    if (!accept_pub_record(accept, release->publisher_pubkey,
+                           release->publisher_sequence, release_id))
+        return VCS_PACKAGE_ACCEPT_ERR_ALLOC;
+    if (!ns && !accept_ns_bind(accept, publisher,
+                               release->publisher_pubkey))
+        return VCS_PACKAGE_ACCEPT_ERR_ALLOC;
+    return VCS_PACKAGE_ACCEPT_OK;
+}
+
 enum vcs_package_accept_result vcs_package_accept(
     struct vcs_package_accept *accept,
     const struct vcs_package_release *release)
@@ -224,12 +294,11 @@ enum vcs_package_accept_result vcs_package_accept(
                    "null accept context/release");
 
     /* 1. The envelope itself must verify. */
-    if (vcs_package_release_verify(release) != VCS_PACKAGE_RELEASE_OK)
-        return VCS_PACKAGE_ACCEPT_INVALID;
     uint8_t release_id[VCS_PACKAGE_RELEASE_ID_BYTES];
-    if (vcs_package_release_id(release, release_id) !=
-        VCS_PACKAGE_RELEASE_OK)
-        return VCS_PACKAGE_ACCEPT_INVALID;
+    enum vcs_package_accept_result verified =
+        accept_verified_release_id(release, release_id);
+    if (verified != VCS_PACKAGE_ACCEPT_OK)
+        return verified;
 
     /* 2. The release must name the active chain. */
     char want_chain[VCS_PACKAGE_RELEASE_CHAIN_ID_MAX + 1u];
@@ -245,42 +314,23 @@ enum vcs_package_accept_result vcs_package_accept(
 
     /* 4. The publisher namespace is bound first-come to one key. */
     char publisher[VCS_PACKAGE_RELEASE_NAME_HALF_MAX + 1u];
-    const char *slash = strchr(release->name, '/');
-    if (!slash || (size_t)(slash - release->name) >= sizeof(publisher))
-        return VCS_PACKAGE_ACCEPT_INVALID; /* codec already forbids this */
-    memcpy(publisher, release->name, (size_t)(slash - release->name));
-    publisher[slash - release->name] = '\0';
-    const struct accept_ns_record *ns = accept_ns_find(accept, publisher);
-    if (ns && memcmp(ns->pubkey, release->publisher_pubkey,
-                     VCS_PACKAGE_RELEASE_PUBKEY_BYTES) != 0)
-        return VCS_PACKAGE_ACCEPT_NAMESPACE;
+    const struct accept_ns_record *ns = NULL;
+    enum vcs_package_accept_result namespace =
+        accept_publisher_namespace(accept, release, publisher,
+                                   sizeof(publisher), &ns);
+    if (namespace != VCS_PACKAGE_ACCEPT_OK)
+        return namespace;
 
     /* 5. Publisher-sequence classification. */
     struct accept_pub_record *cursor =
         accept_pub_find(accept, release->publisher_pubkey);
-    if (cursor) {
-        if (release->publisher_sequence < cursor->sequence)
-            return VCS_PACKAGE_ACCEPT_STALE;
-        if (release->publisher_sequence == cursor->sequence) {
-            if (memcmp(cursor->release_id, release_id, 32) == 0)
-                return VCS_PACKAGE_ACCEPT_DUPLICATE;
-            return VCS_PACKAGE_ACCEPT_EQUIVOCATION;
-        }
-    }
+    enum vcs_package_accept_result sequence =
+        accept_classify_publisher_sequence(cursor, release, release_id);
+    if (sequence != VCS_PACKAGE_ACCEPT_OK)
+        return sequence;
 
-    /* Accepted. Bound checks happen BEFORE any mutation so a refusal
-     * leaves the state untouched. */
-    if (!cursor && accept->pubs_count >= VCS_PACKAGE_ACCEPT_MAX_PUBLISHERS)
-        return VCS_PACKAGE_ACCEPT_ERR_LIMIT;
-    if (!ns && accept->ns_count >= VCS_PACKAGE_ACCEPT_MAX_NAMESPACES)
-        return VCS_PACKAGE_ACCEPT_ERR_LIMIT;
-    if (!accept_pub_record(accept, release->publisher_pubkey,
-                           release->publisher_sequence, release_id))
-        return VCS_PACKAGE_ACCEPT_ERR_ALLOC;
-    if (!ns && !accept_ns_bind(accept, publisher,
-                               release->publisher_pubkey))
-        return VCS_PACKAGE_ACCEPT_ERR_ALLOC;
-    return VCS_PACKAGE_ACCEPT_OK;
+    return accept_commit_release(accept, release, release_id, publisher,
+                                 cursor, ns);
 }
 
 bool vcs_package_accept_lookup(const struct vcs_package_accept *accept,

@@ -103,7 +103,6 @@ contexts/commons/modules/vcs/src/fastobj_carrier.c:vcs_fastobj_carrier_export:51
 contexts/commons/modules/vcs/src/moderation_attestation_object.c:attest_shape:21
 contexts/commons/modules/vcs/src/node_reproduce.c:vcs_node_receipt_decode:44
 contexts/commons/modules/vcs/src/node_reproduce.c:vcs_node_reproduce_compare:26
-contexts/commons/modules/vcs/src/package_accept.c:vcs_package_accept:23
 contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_error_string:35
 contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_parse:33
 contexts/commons/modules/vcs/src/package_attest.c:vcs_package_attest_validate:47
