@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creenton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  * Purpose: derive the live Z23 C23 ecosystem snapshot from checkout evidence. */
 
 #include "science/ecosystem.h"
