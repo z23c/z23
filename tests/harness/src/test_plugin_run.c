@@ -1292,7 +1292,7 @@ static int prt_case_command(void)
 static bool prt_accept(const char *path, struct resident_launch_accepted *a)
 {
     struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot snap;
+    struct platform_positioned_file_snapshot snap = {0};
     struct sha3_256_ctx ctx;
     unsigned char chunk[4096], digest[32];
     uint64_t offset = 0;
