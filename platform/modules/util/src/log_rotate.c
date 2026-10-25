@@ -35,10 +35,51 @@ int64_t log_rotate_file_size(const char *path)
     return (int64_t)md.size;
 }
 
+/* A rotation is only answerable for a non-empty path under a positive
+ * bound; anything else is refused before a single file is touched. */
+static bool log_rotate_args_valid(const char *path, int64_t max_bytes)
+{
+    return path && path[0] && max_bytes > 0;
+}
+
+/* Builds the previous-generation name "<path>.1" in dst; false means the
+ * name did not fit, and a truncated name must never be rotated onto. */
+static bool log_rotate_previous_name(char *dst, size_t cap, const char *path)
+{
+    int n = snprintf(dst, cap, "%s.1", path);
+    if (n <= 0 || (size_t)n >= cap)
+        return false;
+    return true;
+}
+
+/* Copies handle_size bytes from src to dst in LR_COPY_CHUNK pieces, then
+ * frees buf, flushes dst and closes it. Returns false if any read, write or
+ * flush step failed; src is left open for the caller to decide on. */
+static bool log_rotate_copy_chunks(struct platform_private_file *src,
+                                   struct platform_private_file *dst,
+                                   uint8_t *buf, uint64_t handle_size)
+{
+    bool ok = true;
+    uint64_t copied = 0;
+    while (ok && copied < handle_size) {
+        uint64_t remaining = handle_size - copied;
+        size_t want = remaining > LR_COPY_CHUNK ? LR_COPY_CHUNK
+                                                : (size_t)remaining;
+        ok = platform_private_file_read_at(src, buf, want, copied) &&
+             platform_private_file_write_at(dst, buf, want, copied);
+        if (ok)
+            copied += want;
+    }
+    free(buf);
+    ok = ok && platform_private_file_flush(dst);
+    platform_private_file_close(dst);
+    return ok;
+}
+
 bool log_rotate_if_over(const char *path, int64_t max_bytes,
                         int64_t *out_rotated_bytes)
 {
-    if (!path || !path[0] || max_bytes <= 0)
+    if (!log_rotate_args_valid(path, max_bytes))
         return false;
 
     int64_t size = log_rotate_file_size(path);
@@ -46,8 +87,7 @@ bool log_rotate_if_over(const char *path, int64_t max_bytes,
         return false;
 
     char previous[1024];
-    int n = snprintf(previous, sizeof(previous), "%s.1", path);
-    if (n <= 0 || (size_t)n >= sizeof(previous))
+    if (!log_rotate_previous_name(previous, sizeof(previous), path))
         return false;
 
     struct platform_private_file src;
@@ -87,20 +127,7 @@ bool log_rotate_if_over(const char *path, int64_t max_bytes,
         return false;
     }
 
-    bool ok = true;
-    uint64_t copied = 0;
-    while (ok && copied < handle_size) {
-        uint64_t remaining = handle_size - copied;
-        size_t want = remaining > LR_COPY_CHUNK ? LR_COPY_CHUNK
-                                                : (size_t)remaining;
-        ok = platform_private_file_read_at(&src, buf, want, copied) &&
-             platform_private_file_write_at(&dst, buf, want, copied);
-        if (ok)
-            copied += want;
-    }
-    free(buf);
-    ok = ok && platform_private_file_flush(&dst);
-    platform_private_file_close(&dst);
+    bool ok = log_rotate_copy_chunks(&src, &dst, buf, handle_size);
 
     if (!ok) {
         /* The copy failed, so the log is the only surviving record of those
