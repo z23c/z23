@@ -91,6 +91,26 @@ static bool projection_bytes(struct ci_projection_hash *hash,
            projection_write(hash, bytes, length);
 }
 
+static bool projection_meta_read_row(sqlite3_stmt *statement, void *value,
+                                     size_t capacity, size_t *length,
+                                     bool *found)
+{
+    int rc = sqlite3_step(statement);  // raw-sql-ok:codeindex-derived
+    if (rc == SQLITE_ROW) {
+        int count = sqlite3_column_bytes(statement, 0);
+        const void *bytes = sqlite3_column_blob(statement, 0);
+        bool ok = count >= 0 && (size_t)count <= capacity &&
+                  (count == 0 || (bytes && value));
+        if (ok) {
+            if (count > 0) memcpy(value, bytes, (size_t)count);
+            *length = (size_t)count;
+            *found = true;
+        }
+        return ok;
+    }
+    return rc == SQLITE_DONE;
+}
+
 static bool projection_meta_value_locked(struct ci_store *store,
                                          const char *key, void *value,
                                          size_t capacity, size_t *length,
@@ -106,20 +126,8 @@ static bool projection_meta_value_locked(struct ci_store *store,
         return false;
     bool ok = sqlite3_bind_text(statement, 1, key, -1, SQLITE_TRANSIENT) ==
               SQLITE_OK;
-    int rc = ok ? sqlite3_step(statement) : SQLITE_ERROR;  // raw-sql-ok:codeindex-derived
-    if (rc == SQLITE_ROW) {
-        int count = sqlite3_column_bytes(statement, 0);
-        const void *bytes = sqlite3_column_blob(statement, 0);
-        ok = count >= 0 && (size_t)count <= capacity &&
-             (count == 0 || (bytes && value));
-        if (ok) {
-            if (count > 0) memcpy(value, bytes, (size_t)count);
-            *length = (size_t)count;
-            *found = true;
-        }
-    } else if (rc != SQLITE_DONE) {
-        ok = false;
-    }
+    ok = ok && projection_meta_read_row(statement, value, capacity, length,
+                                        found);
     if (sqlite3_finalize(statement) != SQLITE_OK) ok = false;
     return ok;
 }
@@ -142,6 +150,52 @@ static bool projection_meta_locked(struct ci_store *store,
            projection_bytes(hash, value, length);
 }
 
+static bool projection_text_column(struct ci_projection_hash *hash,
+                                   sqlite3_stmt *statement, int column,
+                                   const struct ci_projection_column *spec,
+                                   int storage)
+{
+    if (storage != SQLITE_TEXT) return false;
+    int count = sqlite3_column_bytes(statement, column);
+    const unsigned char *text = sqlite3_column_text(statement, column);
+    if (count < 0 || (size_t)count >= spec->capacity ||
+        (count > 0 && (!text || memchr(text, 0, (size_t)count))))
+        return false;
+    return projection_bytes(hash, text, (size_t)count);
+}
+
+static bool projection_i32_column(struct ci_projection_hash *hash,
+                                  sqlite3_stmt *statement, int column,
+                                  int storage)
+{
+    if (storage != SQLITE_INTEGER) return false;
+    sqlite3_int64 value = sqlite3_column_int64(statement, column);
+    if (value < 0 || value > INT32_MAX) return false;
+    return projection_i32(hash, (int32_t)value);
+}
+
+static bool projection_bool_column(struct ci_projection_hash *hash,
+                                   sqlite3_stmt *statement, int column,
+                                   int storage)
+{
+    if (storage != SQLITE_INTEGER) return false;
+    sqlite3_int64 value = sqlite3_column_int64(statement, column);
+    if (value != 0 && value != 1) return false;
+    uint8_t boolean = value != 0 ? 1u : 0u;
+    return projection_write(hash, &boolean, sizeof(boolean));
+}
+
+static bool projection_blob32_column(struct ci_projection_hash *hash,
+                                     sqlite3_stmt *statement, int column,
+                                     int storage)
+{
+    if (storage != SQLITE_BLOB ||
+        sqlite3_column_bytes(statement, column) != 32)
+        return false;
+    const void *blob = sqlite3_column_blob(statement, column);
+    return blob && projection_write(hash, blob, 32);
+}
+
 static bool projection_column(struct ci_projection_hash *hash,
                               sqlite3_stmt *statement, int column,
                               const struct ci_projection_column *spec)
@@ -150,35 +204,14 @@ static bool projection_column(struct ci_projection_hash *hash,
     if (!projection_write(hash, &kind, sizeof(kind))) return false;
 
     int storage = sqlite3_column_type(statement, column);
-    if (spec->kind == CI_PROJECTION_TEXT) {
-        if (storage != SQLITE_TEXT) return false;
-        int count = sqlite3_column_bytes(statement, column);
-        const unsigned char *text = sqlite3_column_text(statement, column);
-        if (count < 0 || (size_t)count >= spec->capacity ||
-            (count > 0 && (!text || memchr(text, 0, (size_t)count))))
-            return false;
-        return projection_bytes(hash, text, (size_t)count);
-    }
-    if (spec->kind == CI_PROJECTION_I32) {
-        if (storage != SQLITE_INTEGER) return false;
-        sqlite3_int64 value = sqlite3_column_int64(statement, column);
-        if (value < 0 || value > INT32_MAX) return false;
-        return projection_i32(hash, (int32_t)value);
-    }
-    if (spec->kind == CI_PROJECTION_BOOL) {
-        if (storage != SQLITE_INTEGER) return false;
-        sqlite3_int64 value = sqlite3_column_int64(statement, column);
-        if (value != 0 && value != 1) return false;
-        uint8_t boolean = value != 0 ? 1u : 0u;
-        return projection_write(hash, &boolean, sizeof(boolean));
-    }
-    if (spec->kind == CI_PROJECTION_BLOB32) {
-        if (storage != SQLITE_BLOB ||
-            sqlite3_column_bytes(statement, column) != 32)
-            return false;
-        const void *blob = sqlite3_column_blob(statement, column);
-        return blob && projection_write(hash, blob, 32);
-    }
+    if (spec->kind == CI_PROJECTION_TEXT)
+        return projection_text_column(hash, statement, column, spec, storage);
+    if (spec->kind == CI_PROJECTION_I32)
+        return projection_i32_column(hash, statement, column, storage);
+    if (spec->kind == CI_PROJECTION_BOOL)
+        return projection_bool_column(hash, statement, column, storage);
+    if (spec->kind == CI_PROJECTION_BLOB32)
+        return projection_blob32_column(hash, statement, column, storage);
     return false;
 }
 

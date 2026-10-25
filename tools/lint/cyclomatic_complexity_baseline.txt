@@ -54,8 +54,6 @@ cognition/modules/codeindex/src/codeindex_scan_file.c:ci_scan_file:26
 cognition/modules/codeindex/src/codeindex_search.c:ci_store_search_text:17
 cognition/modules/codeindex/src/codeindex_search.c:codeindex_search_story:28
 cognition/modules/codeindex/src/codeindex_semantic_candidate.c:zcl_code_semantic_candidate_v1_validate:24
-cognition/modules/codeindex/src/codeindex_store_hash.c:projection_column:22
-cognition/modules/codeindex/src/codeindex_store_hash.c:projection_meta_value_locked:18
 cognition/modules/codeindex/src/codeindex_store_read.c:ci_store_meta_get:17
 cognition/modules/fingerprint/src/fp_emit.c:fp_emit_harness:24
 cognition/modules/fingerprint/src/fp_emit.c:fp_emit_probe:16
