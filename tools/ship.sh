@@ -790,10 +790,8 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     printf 'real bytes\n' >"$test_tmp/tor-missing-one/vendor/tor/libtor.a"
     printf 'real bytes\n' >"$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/donna/libed25519_donna.a"
     printf 'real bytes\n' >"$test_tmp/tor-missing-one/vendor/tor/src/ext/ed25519/ref10/libed25519_ref10.a"
-    # Existence alone is no longer the whole check: a fourth fixture has all
-    # four archives but a provenance manifest that does not match their
-    # bytes -- the exact "stale libtor.a" case ship_checkout_has_real_tor_
-    # archives exists to catch.
+    # All four archives exist, but changed bytes must fail provenance.
+    # This pins the stale libtor.a refusal in the checkout preflight.
     mkdir -p "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/donna" \
              "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/ed25519/ref10" \
              "$test_tmp/tor-bad-provenance/vendor/tor/src/ext/keccak-tiny"
@@ -804,6 +802,8 @@ if [ "${1:-}" = "--selftest" ] || [ "${1:-}" = "--selftest-dev-guard" ]; then
     zcl_tor_provenance_ensure_bin "$REPO_ROOT" ||
         { echo "ship: selftest FAILED — could not build z23-tor-provenance for the fixture" >&2; exit 1; }
     provenance_bin="$(zcl_tor_provenance_bin "$REPO_ROOT")"
+    printf '/* #undef HAVE_BACKTRACE */\n' >"$test_tmp/tor-present/vendor/tor/orconfig.h"
+    printf '/* #undef HAVE_BACKTRACE */\n' >"$test_tmp/tor-bad-provenance/vendor/tor/orconfig.h"
     "$provenance_bin" write "$test_tmp/tor-present/vendor/tor" \
         "$(printf '%040x' 1)" fixture-cc "$(printf 'x' | sha256sum | awk '{print $1}')" >/dev/null ||
         { echo "ship: selftest FAILED — could not write the tor-present fixture manifest" >&2; exit 1; }
