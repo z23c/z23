@@ -27,6 +27,67 @@
     else { printf("  sovereign_promotion: %s... FAIL\n", (name)); failures++; }\
 } while (0)
 
+/* Open the progress store rooted at dir and ensure the coins + progress-meta
+ * schema on its db handle. Returns the live db handle, or NULL on failure. */
+static sqlite3 *sp_open_store_with_schema(const char *dir)
+{
+    if (!progress_store_open(dir))
+        return NULL;
+    sqlite3 *db = progress_store_db();
+    if (!db || !coins_kv_ensure_schema(db) || !progress_meta_table_ensure(db))
+        return NULL;
+    return db;
+}
+
+/* Insert the two fixture coins at height. Returns true when both adds land. */
+static bool sp_add_fixture_coins(sqlite3 *db, int32_t height)
+{
+    struct uint256 t; uint256_set_null(&t);
+    t.data[0] = 0xC0; t.data[1] = 0xDE; t.data[31] = 0x42;
+    const unsigned char sc[3] = {0x51, 0x52, 0x53};
+    return coins_kv_add(db, t.data, 0, 1000, height, true, sc, sizeof(sc)) &&
+           coins_kv_add(db, t.data, 1, 2000, height, true, sc, sizeof(sc));
+}
+
+/* Zero *seam and stamp its height, derive the durable utxo_root commitment
+ * and coin count from the store, and fill the synthetic anchor/nullifier
+ * digests. Returns false if the commitment or count read fails. */
+static bool sp_build_assisted_seam_from_store(sqlite3 *db,
+                                              struct sovereign_promotion_seam *seam,
+                                              int32_t height,
+                                              uint64_t *count)
+{
+    memset(seam, 0, sizeof(*seam));
+    seam->height = height;
+    if (coins_kv_commitment(db, seam->utxo_root) != 0)
+        return false;
+    int64_t n = coins_kv_count(db);
+    if (n < 0)
+        return false;
+    *count = (uint64_t)n;
+    for (int i = 0; i < 32; i++) {
+        seam->anchor_digest[i] = (uint8_t)(0x20 + i);
+        seam->nullifier_digest[i] = (uint8_t)(0x40 + i);
+    }
+    return true;
+}
+
+/* Record applied=height+1 and the assisted seam row inside one
+ * BEGIN IMMEDIATE..COMMIT transaction. Returns true on commit. */
+static bool sp_record_assisted_seam_in_tx(sqlite3 *db, int32_t height,
+                                          struct sovereign_promotion_seam *seam)
+{
+    char *err = NULL;
+    bool ok = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) == SQLITE_OK
+              && coins_kv_set_applied_height_in_tx(db, height + 1)
+              && consensus_state_install_record_assisted_seam(
+                     db, height, seam->utxo_root, seam->anchor_digest,
+                     seam->nullifier_digest)
+              && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) == SQLITE_OK;
+    if (err) sqlite3_free(err);
+    return ok;
+}
+
 /* Build a borrowed RELEASE_ASSISTED fixture: 2 coins, migration-complete marker
  * stamped, self_folded ABSENT, applied=height+1, and an assisted seam recorded
  * carrying the durable coins commitment plus caller-chosen anchor/nullifier
@@ -37,41 +98,14 @@ static sqlite3 *sp_open_assisted(const char *tag, char *dir, size_t dir_cap,
                                  uint64_t *count)
 {
     test_make_tmpdir(dir, dir_cap, tag, "main");
-    if (!progress_store_open(dir))
+    sqlite3 *db = sp_open_store_with_schema(dir);
+    if (!db)
         return NULL;
-    sqlite3 *db = progress_store_db();
-    if (!db || !coins_kv_ensure_schema(db) || !progress_meta_table_ensure(db))
+    if (!sp_add_fixture_coins(db, height))
         return NULL;
-
-    struct uint256 t; uint256_set_null(&t);
-    t.data[0] = 0xC0; t.data[1] = 0xDE; t.data[31] = 0x42;
-    const unsigned char sc[3] = {0x51, 0x52, 0x53};
-    if (!coins_kv_add(db, t.data, 0, 1000, height, true, sc, sizeof(sc)) ||
-        !coins_kv_add(db, t.data, 1, 2000, height, true, sc, sizeof(sc)))
+    if (!sp_build_assisted_seam_from_store(db, seam, height, count))
         return NULL;
-
-    memset(seam, 0, sizeof(*seam));
-    seam->height = height;
-    if (coins_kv_commitment(db, seam->utxo_root) != 0)
-        return NULL;
-    int64_t n = coins_kv_count(db);
-    if (n < 0)
-        return NULL;
-    *count = (uint64_t)n;
-    for (int i = 0; i < 32; i++) {
-        seam->anchor_digest[i] = (uint8_t)(0x20 + i);
-        seam->nullifier_digest[i] = (uint8_t)(0x40 + i);
-    }
-
-    char *err = NULL;
-    bool ok = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, &err) == SQLITE_OK
-              && coins_kv_set_applied_height_in_tx(db, height + 1)
-              && consensus_state_install_record_assisted_seam(
-                     db, height, seam->utxo_root, seam->anchor_digest,
-                     seam->nullifier_digest)
-              && sqlite3_exec(db, "COMMIT", NULL, NULL, &err) == SQLITE_OK;
-    if (err) sqlite3_free(err);
-    if (!ok)
+    if (!sp_record_assisted_seam_in_tx(db, height, seam))
         return NULL;
     /* Operational tier marker; self_folded intentionally NOT stamped. */
     if (!coins_kv_mark_migration_complete(db))
