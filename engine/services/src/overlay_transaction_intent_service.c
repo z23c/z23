@@ -254,6 +254,70 @@ static void oti_view(const struct vault_intent_row *row,
     memcpy(out->plan_digest, row->digest, 32);
 }
 
+static bool oti_replay_request_matches(const struct vault_intent_row *existing,
+                                       const uint8_t request_digest[32])
+{
+    return existing->has_request_digest &&
+           memcmp(existing->request_digest, request_digest, 32) == 0;
+}
+
+static bool oti_plan_prepared_valid(const struct zcl_result *prepared,
+                                    size_t raw_len, size_t input_count,
+                                    const struct oti_payload *payload,
+                                    int64_t maximum_fee_zat)
+{
+    return prepared->ok && raw_len > 0 && input_count > 0 &&
+           payload->actual_fee_zat >= 0 &&
+           payload->actual_fee_zat <= maximum_fee_zat &&
+           zcl_bytes_any_set(payload->txid, 32);
+}
+
+static bool oti_plan_fee_reservable(const struct wallet_money_snapshot *money,
+                                    const char *wallet_scope, int64_t reserved)
+{
+    int64_t liquid = money->confirmed_zat - money->intent_reserved_zat;
+    if (reserved > liquid) return false;
+    return strcmp(wallet_scope, "dev") != 0 ||
+           reserved <= money->agent_available_zat;
+}
+
+static bool oti_plan_reserve_and_bind(
+    const struct overlay_intent_runtime *rt,
+    const struct overlay_intent_request *request,
+    const struct wallet_money_snapshot *money,
+    const struct oti_payload *payload, struct vault_intent_row *row,
+    uint8_t *raw, size_t raw_len, struct vault_intent_input *inputs,
+    size_t input_count)
+{
+    uint8_t plain[OTI_PAYLOAD_MAX]; size_t plain_len = 0;
+    bool encoded = oti_payload_encode(payload, plain, sizeof(plain), &plain_len);
+    bool encrypted = encoded && wallet_metadata_encrypt(
+        rt->node_db, row->plan_id, 32, plain, plain_len,
+        row->encrypted_payload, sizeof(row->encrypted_payload),
+        &row->encrypted_payload_len);
+    if (encrypted) oti_intent_digest(plain, plain_len, row, row->digest);
+    bool stored = encrypted && vault_intent_reserve_with_raw_inputs(
+        rt->node_db, row, money->confirmed_zat, raw, raw_len, inputs,
+        input_count);
+    if (stored) {
+        struct wallet_money_snapshot refreshed;
+        struct zcl_result current = oti_money_current(
+            rt, request->wallet_scope, &refreshed);
+        stored = current.ok;
+        if (stored) {
+            memcpy(row->snapshot_root, refreshed.snapshot_root, 32);
+            oti_intent_digest(plain, plain_len, row, row->digest);
+            stored = vault_intent_save(rt->node_db, row);
+        }
+        if (!stored)
+            (void)vault_intent_set_state(rt->node_db, row->plan_id,
+                VAULT_INTENT_FAILED, NULL, "SNAPSHOT_BIND_FAILED",
+                rt->now_unix);
+    }
+    memory_cleanse(plain, sizeof(plain));
+    return stored;
+}
+
 struct zcl_result overlay_transaction_intent_plan(
     const struct overlay_intent_runtime *rt,
     const struct overlay_intent_request *request,
@@ -268,8 +332,7 @@ struct zcl_result overlay_transaction_intent_plan(
     if (vault_intent_find_application_idempotency(
             rt->node_db, request->wallet_scope, request->application_kind,
             request->idempotency_key, &existing)) {
-        if (!existing.has_request_digest ||
-            memcmp(existing.request_digest, request_digest, 32) != 0)
+        if (!oti_replay_request_matches(&existing, request_digest))
             return ZCL_ERR(-13, "idempotency key names a different overlay request");
         struct oti_payload payload;
         ZCL_CHECK(oti_payload_open(rt, &existing, &payload));
@@ -297,10 +360,8 @@ struct zcl_result overlay_transaction_intent_plan(
         rt->prepare_ctx, request, rt->maximum_fee_zat, raw,
         VAULT_INTENT_RAW_MAX, &raw_len, payload.txid,
         &payload.actual_fee_zat, inputs, OTI_INPUT_MAX, &input_count);
-    if (!prepared.ok || raw_len == 0 || input_count == 0 ||
-        payload.actual_fee_zat < 0 ||
-        payload.actual_fee_zat > rt->maximum_fee_zat ||
-        !zcl_bytes_any_set(payload.txid, 32)) {
+    if (!oti_plan_prepared_valid(&prepared, raw_len, input_count, &payload,
+                                 rt->maximum_fee_zat)) {
         memory_cleanse(raw, VAULT_INTENT_RAW_MAX);
         memory_cleanse(&payload, sizeof(payload));
         free(raw); free(inputs);
@@ -309,9 +370,7 @@ struct zcl_result overlay_transaction_intent_plan(
             : prepared;
     }
     int64_t reserved = rt->maximum_fee_zat;
-    int64_t liquid = money.confirmed_zat - money.intent_reserved_zat;
-    if (reserved > liquid || (strcmp(request->wallet_scope, "dev") == 0 &&
-                              reserved > money.agent_available_zat)) {
+    if (!oti_plan_fee_reservable(&money, request->wallet_scope, reserved)) {
         memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw); free(inputs);
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-16, "custody allocation cannot reserve overlay fee");
@@ -345,32 +404,8 @@ struct zcl_result overlay_transaction_intent_plan(
              request->idempotency_key);
     memcpy(row.request_digest, request_digest, 32);
     row.has_request_digest = true;
-    uint8_t plain[OTI_PAYLOAD_MAX]; size_t plain_len = 0;
-    bool encoded = oti_payload_encode(&payload, plain, sizeof(plain), &plain_len);
-    bool encrypted = encoded && wallet_metadata_encrypt(
-        rt->node_db, row.plan_id, 32, plain, plain_len,
-        row.encrypted_payload, sizeof(row.encrypted_payload),
-        &row.encrypted_payload_len);
-    if (encrypted) oti_intent_digest(plain, plain_len, &row, row.digest);
-    bool stored = encrypted && vault_intent_reserve_with_raw_inputs(
-        rt->node_db, &row, money.confirmed_zat, raw, raw_len, inputs,
-        input_count);
-    if (stored) {
-        struct wallet_money_snapshot refreshed;
-        struct zcl_result current = oti_money_current(
-            rt, request->wallet_scope, &refreshed);
-        stored = current.ok;
-        if (stored) {
-            memcpy(row.snapshot_root, refreshed.snapshot_root, 32);
-            oti_intent_digest(plain, plain_len, &row, row.digest);
-            stored = vault_intent_save(rt->node_db, &row);
-        }
-        if (!stored)
-            (void)vault_intent_set_state(rt->node_db, row.plan_id,
-                VAULT_INTENT_FAILED, NULL, "SNAPSHOT_BIND_FAILED",
-                rt->now_unix);
-    }
-    memory_cleanse(plain, sizeof(plain));
+    bool stored = oti_plan_reserve_and_bind(rt, request, &money, &payload,
+        &row, raw, raw_len, inputs, input_count);
     memory_cleanse(raw, VAULT_INTENT_RAW_MAX);
     memory_cleanse(&payload, sizeof(payload));
     free(raw); free(inputs);
@@ -382,48 +417,115 @@ struct zcl_result overlay_transaction_intent_plan(
     return ZCL_OK;
 }
 
+static bool oti_commit_request_valid(const char *application_kind,
+                                     const char *wallet_scope,
+                                     const uint8_t plan_id[32],
+                                     const struct overlay_intent_result *out)
+{
+    return application_kind && wallet_scope && plan_id && out &&
+           oti_token_valid(application_kind, VAULT_INTENT_APPLICATION_MAX) &&
+           (strcmp(wallet_scope, "dev") == 0 ||
+            strcmp(wallet_scope, "prod") == 0);
+}
+
+static bool oti_commit_intent_found(const struct overlay_intent_runtime *rt,
+                                    const uint8_t plan_id[32],
+                                    const char *application_kind,
+                                    struct vault_intent_row *row)
+{
+    if (!vault_intent_find(rt->node_db, plan_id, row))
+        return false;
+    return strcmp(row->application_kind, application_kind) == 0;
+}
+
+static bool oti_commit_already_broadcast(const struct vault_intent_row *row)
+{
+    return row->has_txid && row->state >= VAULT_INTENT_MEMPOOL_ACCEPTED &&
+           row->state <= VAULT_INTENT_REORGED;
+}
+
+static bool oti_commit_state_committable(
+    const struct overlay_intent_runtime *rt,
+    const struct vault_intent_row *row)
+{
+    return (row->state == VAULT_INTENT_PLANNED ||
+            row->state == VAULT_INTENT_PROVING) &&
+           row->expires_at > rt->now_unix;
+}
+
+static bool oti_commit_money_bound(const struct overlay_intent_runtime *rt,
+                                   const struct vault_intent_row *row,
+                                   bool money_current,
+                                   struct wallet_money_snapshot *money)
+{
+    char genesis[65] = {0};
+    if (!money_current) return false;
+    wallet_identity_genesis_hex(&money->identity, genesis);
+    return strcmp(row->wallet_instance_id,
+                  money->identity.wallet_instance_id) == 0 &&
+           strcmp(row->wallet_genesis, genesis) == 0 &&
+           row->anchor_height == rt->tip_height &&
+           memcmp(row->anchor_hash, rt->tip_hash, 32) == 0 &&
+           memcmp(row->snapshot_root, money->snapshot_root, 32) == 0;
+}
+
+static bool oti_commit_raw_loaded(const struct overlay_intent_runtime *rt,
+                                  struct vault_intent_row *row, uint8_t *raw,
+                                  size_t *raw_len)
+{
+    if (!raw) return false;
+    return vault_intent_load_raw(rt->node_db, row->plan_id, raw,
+                                 VAULT_INTENT_RAW_MAX, raw_len);
+}
+
+static bool oti_commit_claim_won(const struct overlay_intent_runtime *rt,
+                                 struct vault_intent_row *row)
+{
+    if (row->state != VAULT_INTENT_PLANNED) return true;
+    return vault_intent_claim_commit(rt->node_db, row->plan_id, rt->now_unix);
+}
+
+static bool oti_commit_state_durable(const struct overlay_intent_runtime *rt,
+                                     const uint8_t plan_id[32],
+                                     uint8_t txid[32],
+                                     struct vault_intent_row *row)
+{
+    if (!vault_intent_set_state(rt->node_db, row->plan_id,
+            VAULT_INTENT_MEMPOOL_ACCEPTED, txid, "", rt->now_unix))
+        return false;
+    return vault_intent_find(rt->node_db, plan_id, row);
+}
+
 struct zcl_result overlay_transaction_intent_commit(
     const struct overlay_intent_runtime *rt, const char *application_kind,
     const char *wallet_scope, const uint8_t plan_id[32],
     struct overlay_intent_result *out)
 {
     ZCL_CHECK(oti_runtime_validate(rt, false, true));
-    if (!application_kind || !wallet_scope || !plan_id || !out ||
-        !oti_token_valid(application_kind, VAULT_INTENT_APPLICATION_MAX) ||
-        (strcmp(wallet_scope, "dev") != 0 && strcmp(wallet_scope, "prod") != 0))
+    if (!oti_commit_request_valid(application_kind, wallet_scope, plan_id,
+                                  out))
         return ZCL_ERR(-19, "overlay commit requires application, scope, plan, and output");
     (void)vault_intent_expire_due(rt->node_db, rt->now_unix);
     struct vault_intent_row row;
-    if (!vault_intent_find(rt->node_db, plan_id, &row) ||
-        strcmp(row.application_kind, application_kind) != 0)
+    if (!oti_commit_intent_found(rt, plan_id, application_kind, &row))
         return ZCL_ERR(-20, "overlay intent was not found for this application");
     if (strcmp(row.wallet_scope, wallet_scope) != 0)
         return ZCL_ERR(-21, "wallet scope does not match overlay intent");
     struct oti_payload payload;
     ZCL_CHECK(oti_payload_open(rt, &row, &payload));
-    if (row.has_txid && row.state >= VAULT_INTENT_MEMPOOL_ACCEPTED &&
-        row.state <= VAULT_INTENT_REORGED) {
+    if (oti_commit_already_broadcast(&row)) {
         oti_view(&row, &payload, out);
         out->idempotent_replay = true;
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_OK;
     }
-    if ((row.state != VAULT_INTENT_PLANNED &&
-         row.state != VAULT_INTENT_PROVING) || row.expires_at <= rt->now_unix) {
+    if (!oti_commit_state_committable(rt, &row)) {
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-22, "overlay intent is not committable");
     }
     struct wallet_money_snapshot money;
     struct zcl_result current = oti_money_current(rt, wallet_scope, &money);
-    char genesis[65] = {0};
-    if (current.ok) wallet_identity_genesis_hex(&money.identity, genesis);
-    bool bound = current.ok &&
-        strcmp(row.wallet_instance_id, money.identity.wallet_instance_id) == 0 &&
-        strcmp(row.wallet_genesis, genesis) == 0 &&
-        row.anchor_height == rt->tip_height &&
-        memcmp(row.anchor_hash, rt->tip_hash, 32) == 0 &&
-        memcmp(row.snapshot_root, money.snapshot_root, 32) == 0;
-    if (!bound) {
+    if (!oti_commit_money_bound(rt, &row, current.ok, &money)) {
         (void)vault_intent_set_state(rt->node_db, row.plan_id,
             VAULT_INTENT_CONFLICTED, NULL, "MONEY_SNAPSHOT_CHANGED",
             rt->now_unix);
@@ -434,8 +536,7 @@ struct zcl_result overlay_transaction_intent_commit(
     }
     uint8_t *raw = zcl_malloc(VAULT_INTENT_RAW_MAX, "overlay_intent_commit_raw");
     size_t raw_len = 0;
-    if (!raw || !vault_intent_load_raw(rt->node_db, row.plan_id, raw,
-                                       VAULT_INTENT_RAW_MAX, &raw_len)) {
+    if (!oti_commit_raw_loaded(rt, &row, raw, &raw_len)) {
         free(raw);
         memory_cleanse(&payload, sizeof(payload));
         (void)vault_intent_set_state(rt->node_db, row.plan_id,
@@ -443,8 +544,7 @@ struct zcl_result overlay_transaction_intent_commit(
             rt->now_unix);
         return ZCL_ERR(-24, "prepared overlay transaction is missing");
     }
-    if (row.state == VAULT_INTENT_PLANNED &&
-        !vault_intent_claim_commit(rt->node_db, row.plan_id, rt->now_unix)) {
+    if (!oti_commit_claim_won(rt, &row)) {
         memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw);
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-25, "another commit claimed this overlay intent");
@@ -457,9 +557,7 @@ struct zcl_result overlay_transaction_intent_commit(
         return ZCL_ERR(-26, "COMMIT_UNCERTAIN: exact overlay publication failed: %s",
                        published.message);
     }
-    if (!vault_intent_set_state(rt->node_db, row.plan_id,
-            VAULT_INTENT_MEMPOOL_ACCEPTED, payload.txid, "", rt->now_unix) ||
-        !vault_intent_find(rt->node_db, row.plan_id, &row)) {
+    if (!oti_commit_state_durable(rt, plan_id, payload.txid, &row)) {
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-27, "overlay published but durable state is uncertain");
     }
