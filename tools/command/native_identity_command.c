@@ -187,6 +187,44 @@ static bool zidc_require_pubkey(const struct json_value *input,
 
 /* ── core.identity.resolve ────────────────────────────────────────── */
 
+/* Resolve takes exactly one selector: --pubkey XOR --name. Fails the reply
+ * with a named code and returns false when neither or both are given, or
+ * when a given pubkey does not parse; on success a given pubkey is decoded
+ * into `key`. */
+static bool zidc_resolve_selector_ok(const char *pubkey_hex, const char *name,
+                                     struct zcl_command_reply *reply,
+                                     const char *path, uint8_t key[32])
+{
+    bool have_pubkey = pubkey_hex && pubkey_hex[0];
+    bool have_name = name && name[0];
+    if (!have_pubkey && !have_name) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "MISSING_SELECTOR",
+                               "normalize", false, false,
+                               "give --pubkey=<64hex> or --name=<znam name> "
+                               "— resolve needs exactly one selector", path);
+        return false;
+    }
+    if (have_pubkey && have_name) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "AMBIGUOUS_SELECTOR",
+                               "normalize", false, false,
+                               "give --pubkey OR --name, never both — they "
+                               "can disagree and there is no rule for which "
+                               "wins", path);
+        return false;
+    }
+    if (have_pubkey && !zidc_parse_key(pubkey_hex, key)) {
+        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
+                               ZCL_COMMAND_EXIT_INVALID, "BAD_PUBKEY_HEX",
+                               "normalize", false, false,
+                               "pubkey must be exactly 64 hex characters and "
+                               "not all-zero", path);
+        return false;
+    }
+    return true;
+}
+
 void zcl_native_handle_core_identity_resolve(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -198,34 +236,10 @@ void zcl_native_handle_core_identity_resolve(
     const char *pubkey_hex = zidc_input_str(request->input, "pubkey");
     const char *name = zidc_input_str(request->input, "name");
     bool have_pubkey = pubkey_hex && pubkey_hex[0];
-    bool have_name = name && name[0];
-    if (!have_pubkey && !have_name) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "MISSING_SELECTOR",
-                               "normalize", false, false,
-                               "give --pubkey=<64hex> or --name=<znam name> "
-                               "— resolve needs exactly one selector", path);
-        return;
-    }
-    if (have_pubkey && have_name) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "AMBIGUOUS_SELECTOR",
-                               "normalize", false, false,
-                               "give --pubkey OR --name, never both — they "
-                               "can disagree and there is no rule for which "
-                               "wins", path);
-        return;
-    }
 
     uint8_t key[32];
-    if (have_pubkey && !zidc_parse_key(pubkey_hex, key)) {
-        zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
-                               ZCL_COMMAND_EXIT_INVALID, "BAD_PUBKEY_HEX",
-                               "normalize", false, false,
-                               "pubkey must be exactly 64 hex characters and "
-                               "not all-zero", path);
+    if (!zidc_resolve_selector_ok(pubkey_hex, name, reply, path, key))
         return;
-    }
 
     const char *datadir = zidc_require_datadir(request, reply, path);
     if (!datadir)
