@@ -59,6 +59,57 @@ bool zcl_dev_train_land_dir(char *out, size_t cap);
  * create directories or repair permissions while inspecting a preview. */
 bool zcl_dev_train_land_dir_existing(char *out, size_t cap);
 
+/* ── gated check (native_dev_train_gate.c) ─────────────────────────────── */
+
+struct json_value;
+struct zcl_devloop_process_result;
+
+#define ZCL_DEV_TRAIN_GATE_FAST 1u
+#define ZCL_DEV_TRAIN_GATE_LINT 2u
+#define ZCL_DEV_TRAIN_GATE_VERIFY 4u
+
+/* Parse a `--gates` list ("fast", "lint", "verify", comma separated) into a
+ * bit mask. False, with an explanatory `why`, for an unknown or empty list. */
+bool zcl_dev_train_gates_parse(const char *csv, unsigned *mask, char *why,
+                               size_t why_cap);
+
+/* What one gated check produced. `gates` and `attribution` point at arrays
+ * the caller json_init()ed and json_set_array()ed and later json_free()s:
+ * `gates` receives {gate, verdict, wall_ms, log_path} per gate run;
+ * `attribution` receives {group, guilty | candidates[]} per failed group
+ * after a red verify. */
+struct zcl_dev_train_gate_report {
+    bool ok;
+    int64_t wall_ms;
+    char log_path[4096];
+    char gates_failed_csv[4096];
+    const char *attribution_from;
+    struct json_value *gates;
+    struct json_value *attribution;
+};
+
+/* Run the selected gates in the order fast, lint, verify inside `stack_dir`
+ * under the checkout-wide build lock, stopping at the first red one. */
+void zcl_dev_train_run_gates(const char *stack_dir, const char *root,
+                             unsigned mask, int timeout_ms,
+                             struct zcl_dev_train_gate_report *report);
+
+/* Record each build source (dir or ref, and its original tip) in the stack
+ * worktree's git dir, so a red verify can name the guilty source. */
+void zcl_dev_train_record_sources(const char *stack_dir, const char *root,
+                                  const char *sources_csv);
+
+/* Test seam: replace how a gate's make runs and how a source's groups are
+ * selected. NULL members (and a NULL table) restore the real ones. */
+struct zcl_dev_train_gate_hooks {
+    bool (*run)(const char *stack_dir, const char *gate,
+                const char *const argv[], int timeout_ms,
+                struct zcl_devloop_process_result *out);
+    bool (*select)(const char *source_root, const char *tip, char *groups,
+                   size_t groups_cap, bool *universal);
+};
+void zcl_dev_train_gate_hooks_set(const struct zcl_dev_train_gate_hooks *hooks);
+
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 #endif /* ZCL_NATIVE_DEV_TRAIN_COMMAND_H */

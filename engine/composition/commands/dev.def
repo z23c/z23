@@ -1403,10 +1403,16 @@ ZCL_COMMAND_DEV_READ(
     "under the checkout-wide build lock, bounded by --timeout (default "
     "900000 ms). Reports ok, the exact FAIL gate names from the run, and the "
     "full log path. This is the caller's one deliberate wait; `dev train "
-    "build` never runs it inline.", 16384,
-    "train,stack,lint,gate,check",
-    "zcl.train_check_input.v1", "zcl.train_check.v1", "name,timeout_ms", "",
-    "z23 dev train check --name q",
+    "build` never runs it inline. --gates=fast,lint,verify picks the gates "
+    "(fast = lint-fast, the default; lint = make lint; verify = make "
+    "agent-verify ONLY=@changed), run in that order, stopping at the first "
+    "red; each gate reports verdict, wall_ms and log path. A red verify "
+    "adds attribution rows naming the source lane (guilty) that owns each "
+    "failed group, or the candidates when several lanes or a universal "
+    "selection could own it.", 16384,
+    "train,stack,lint,gate,check,verify,attribution",
+    "zcl.train_check_input.v1", "zcl.train_check.v1", "name,timeout_ms,gates", "",
+    "z23 dev train check --name q --gates=lint,verify",
     ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
     ZCL_COMMAND_LATENCY_FOREGROUND, ZCL_COMMAND_COST_HIGH,
     ZCL_COMMAND_LANE_LOCAL, ZCL_COMMAND_CAP_DEV_STATE_READ,

@@ -15,8 +15,10 @@
 #include "test/test_core.h"
 
 #include "command/native_command.h"
+#include "command/native_dev_train_command.h"
 #include "config/command_catalog.h"
 #include "controllers/agent_impact_rules.h"
+#include "devloop.h"
 #include "json/json.h"
 #include "kernel/command_registry.h"
 #include "platform/directory_compat.h"
@@ -316,6 +318,256 @@ _test_next:;
     return failures;
 }
 
+/* ── gated check: --gates, stop at first red, source attribution ─────────── */
+
+struct dvt_gate_fake {
+    char order[64];
+    const char *red;
+    const char *verdict_json;
+    const char *step_log;
+    const char *tip_a;
+    const char *tip_b;
+    const char *universal_tip;
+};
+static struct dvt_gate_fake dvt_fake;
+
+static bool dvt_fake_run(const char *stack_dir, const char *gate,
+                         const char *const argv[], int timeout_ms,
+                         struct zcl_devloop_process_result *out)
+{
+    (void)argv;
+    (void)timeout_ms;
+    size_t n = strlen(dvt_fake.order);
+    (void)snprintf(dvt_fake.order + n, sizeof(dvt_fake.order) - n, "%s%s",
+                   n ? "," : "", gate);
+    bool red = dvt_fake.red && strcmp(gate, dvt_fake.red) == 0;
+    out->exit_code = red ? 2 : 0;
+    out->elapsed_ms = 7;
+    if (!red)
+        return true;
+    out->output_len = (size_t)snprintf(out->output, sizeof(out->output),
+                                       "FAIL check-fake-%s\n", gate);
+    char build[1024], scratch[1024];
+    (void)snprintf(build, sizeof(build), "%s/build", stack_dir);
+    (void)snprintf(scratch, sizeof(scratch), "%s/build/scratch", stack_dir);
+    (void)platform_directory_ensure(build, 0700);
+    (void)platform_directory_ensure(scratch, 0700);
+    if (dvt_fake.verdict_json)
+        (void)dvt_write(stack_dir, "build/test-verdict.json",
+                        dvt_fake.verdict_json);
+    if (dvt_fake.step_log)
+        (void)dvt_write(stack_dir,
+                        "build/scratch/agent-verify.t-fast-exact.log",
+                        dvt_fake.step_log);
+    return true;
+}
+
+static bool dvt_fake_select(const char *source_root, const char *tip,
+                            char *groups, size_t groups_cap, bool *universal)
+{
+    (void)source_root;
+    const char *own = strcmp(tip, dvt_fake.tip_a) == 0   ? "g_a,g_shared"
+                      : strcmp(tip, dvt_fake.tip_b) == 0 ? "g_b,g_shared"
+                                                         : "";
+    (void)snprintf(groups, groups_cap, "%s", own);
+    *universal = dvt_fake.universal_tip &&
+                 strcmp(tip, dvt_fake.universal_tip) == 0;
+    return true;
+}
+
+static void dvt_check_run(const char *root, const char *gates,
+                          struct zcl_command_reply *reply)
+{
+    struct json_value input;
+    json_init(&input);
+    json_set_object(&input);
+    (void)json_push_kv_str(&input, "name", "gate1");
+    if (gates)
+        (void)json_push_kv_str(&input, "gates", gates);
+    dvt_call(zcl_native_handle_dev_train_check, root, &input, reply);
+    json_free(&input);
+}
+
+static const struct json_value *dvt_row(const struct zcl_command_reply *reply,
+                                        const char *key, size_t i)
+{
+    const struct json_value *arr = json_get(&reply->data, key);
+    return arr && arr->type == JSON_ARR && i < arr->num_children
+               ? &arr->children[i] : NULL;
+}
+
+/* True iff the attribution row for `group` names `guilty` (and carries no
+ * candidates), or, with guilty NULL, carries exactly `candidates` of them
+ * and no guilty. */
+static bool dvt_row_group(const struct zcl_command_reply *reply,
+                          const char *group, const char *guilty,
+                          size_t candidates)
+{
+    const struct json_value *attr = json_get(&reply->data, "attribution");
+    for (size_t i = 0; attr && i < attr->num_children; i++) {
+        const struct json_value *row = &attr->children[i];
+        if (strcmp(json_get_str(json_get(row, "group")), group) != 0)
+            continue;
+        const struct json_value *c = json_get(row, "candidates");
+        if (guilty)
+            return !c && strcmp(json_get_str(json_get(row, "guilty")),
+                                guilty) == 0;
+        return !json_get(row, "guilty") && c && c->type == JSON_ARR &&
+               c->num_children == candidates;
+    }
+    return false;
+}
+
+static int dvt_gate_cases(const char *root, const char *src_a,
+                          const char *src_b, const char *sha_a2,
+                          const char *sha_b1)
+{
+    int failures = 0;
+    static const struct zcl_dev_train_gate_hooks hooks = {dvt_fake_run,
+                                                         dvt_fake_select};
+    struct zcl_command_reply reply;
+    char joined[1200];
+    (void)snprintf(joined, sizeof(joined), "%s\n%s", src_a, src_b);
+    struct json_value build = dvt_input_build("gate1", joined);
+    dvt_call(zcl_native_handle_dev_train_build, root, &build, &reply);
+    ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+    zcl_command_reply_free(&reply);
+    json_free(&build);
+    zcl_dev_train_gate_hooks_set(&hooks);
+    dvt_fake.tip_a = sha_a2;
+    dvt_fake.tip_b = sha_b1;
+
+    TEST("train gates: parsing accepts the three tokens and refuses the rest") {
+        unsigned mask = 0;
+        char why[320];
+        ASSERT(zcl_dev_train_gates_parse("verify,fast", &mask, why, sizeof(why)));
+        ASSERT(mask == (ZCL_DEV_TRAIN_GATE_FAST | ZCL_DEV_TRAIN_GATE_VERIFY));
+        ASSERT(zcl_dev_train_gates_parse("lint", &mask, why, sizeof(why)));
+        ASSERT(mask == ZCL_DEV_TRAIN_GATE_LINT);
+        ASSERT(!zcl_dev_train_gates_parse("lint,bogus", &mask, why, sizeof(why)));
+        ASSERT(strstr(why, "unknown gate token 'bogus'") != NULL);
+        ASSERT(strstr(why, "allowed tokens: fast") != NULL);
+        ASSERT(!zcl_dev_train_gates_parse(",", &mask, why, sizeof(why)));
+        ASSERT(strstr(why, "no gate named") != NULL);
+        dvt_check_run(root, "lint,bogus", &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(reply.error.code, "INVALID_GATES");
+        ASSERT(strstr(reply.error.message, "unknown gate token 'bogus'") != NULL);
+        ASSERT(dvt_fake.order[0] == '\0');
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("train build: records each source and its original tip in the stack's git dir") {
+        char stack_dir[700], gitdir[1024], rec[1100], text[2048] = {0};
+        ASSERT(snprintf(stack_dir, sizeof(stack_dir), "%s/../z23-stackgate1",
+                        root) < (int)sizeof(stack_dir));
+        const char *args[] = {"rev-parse", "--absolute-git-dir", NULL};
+        ASSERT(dvt_git_capture(stack_dir, args, gitdir, sizeof(gitdir)));
+        gitdir[strcspn(gitdir, "\r\n")] = '\0';
+        ASSERT(snprintf(rec, sizeof(rec), "%s/zcl-train-sources", gitdir) <
+               (int)sizeof(rec));
+        FILE *f = fopen(rec, "rb");
+        ASSERT(f != NULL);
+        size_t got = fread(text, 1, sizeof(text) - 1, f);
+        (void)fclose(f);
+        text[got] = '\0';
+        char want_a[1100], want_b[1100];
+        (void)snprintf(want_a, sizeof(want_a), "%s\t%s\n", src_a, sha_a2);
+        (void)snprintf(want_b, sizeof(want_b), "%s\t%s\n", src_b, sha_b1);
+        ASSERT(strstr(text, want_a) != NULL);
+        ASSERT(strstr(text, want_b) != NULL);
+        PASS();
+    }
+
+    TEST("train gates: run in fast, lint, verify order whatever the request order") {
+        memset(dvt_fake.order, 0, sizeof(dvt_fake.order));
+        dvt_check_run(root, "verify,fast,lint", &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_PASSED);
+        ASSERT_STR_EQ(dvt_fake.order, "fast,lint,verify");
+        ASSERT(json_get_bool(json_get(&reply.data, "ok")));
+        ASSERT_STR_EQ(json_get_str(json_get(dvt_row(&reply, "gates", 2), "gate")), "verify");
+        ASSERT_STR_EQ(json_get_str(json_get(dvt_row(&reply, "gates", 2), "verdict")), "passed");
+        ASSERT(json_get_int(json_get(dvt_row(&reply, "gates", 0), "wall_ms")) == 7);
+        ASSERT(json_get_str(json_get(dvt_row(&reply, "gates", 0), "log_path"))[0] != '\0');
+        ASSERT(json_get(&reply.data, "attribution") == NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+    TEST("train gates: the first red gate stops the run") {
+        memset(dvt_fake.order, 0, sizeof(dvt_fake.order));
+        dvt_fake.red = "lint";
+        dvt_check_run(root, "fast,lint,verify", &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(dvt_fake.order, "fast,lint");
+        ASSERT(json_get(&reply.data, "gates")->num_children == 2);
+        ASSERT_STR_EQ(json_get_str(json_get(dvt_row(&reply, "gates", 1), "verdict")), "failed");
+        ASSERT_STR_EQ(json_get_str(json_get(dvt_row(&reply, "gates", 0), "verdict")), "passed");
+        ASSERT_STR_EQ(json_get_str(dvt_row(&reply, "gates_failed", 0)),
+                      "check-fake-lint");
+        ASSERT(json_get(&reply.data, "attribution") == NULL);
+        zcl_command_reply_free(&reply);
+        dvt_fake.red = NULL;
+        PASS();
+    }
+
+    TEST("train gates: a red verify names the guilty lane or the candidates") {
+        memset(dvt_fake.order, 0, sizeof(dvt_fake.order));
+        dvt_fake.red = "verify";
+        dvt_fake.verdict_json =
+            "{\"failed_groups\":[\"g_a\",\"g_b\",\"g_shared\",\"g_none\"]}";
+        dvt_check_run(root, "verify", &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_FAILED);
+        ASSERT_STR_EQ(dvt_str(&reply, "attribution_from"), "verdict");
+        ASSERT(json_get(&reply.data, "attribution")->num_children == 4);
+        ASSERT(dvt_row_group(&reply, "g_a", src_a, 0));
+        ASSERT(dvt_row_group(&reply, "g_b", src_b, 0));
+        ASSERT(dvt_row_group(&reply, "g_shared", NULL, 2));
+        ASSERT(dvt_row_group(&reply, "g_none", NULL, 0));
+        zcl_command_reply_free(&reply);
+
+        /* A universal selection may own any group: never a sole guilty. */
+        dvt_fake.universal_tip = sha_b1;
+        dvt_check_run(root, "verify", &reply);
+        ASSERT(dvt_row_group(&reply, "g_a", NULL, 2));
+        ASSERT(dvt_row_group(&reply, "g_b", NULL, 1));
+        zcl_command_reply_free(&reply);
+        dvt_fake.universal_tip = NULL;
+
+        /* No verdict file: the verify step log names the failed groups. */
+        dvt_fake.verdict_json = NULL;
+        dvt_fake.step_log = "ok\nFAIL g_a\nFAIL at x.c:1\n";
+        dvt_check_run(root, "verify", &reply);
+        ASSERT_STR_EQ(dvt_str(&reply, "attribution_from"), "log");
+        ASSERT(json_get(&reply.data, "attribution")->num_children == 1);
+        ASSERT(dvt_row_group(&reply, "g_a", src_a, 0));
+        zcl_command_reply_free(&reply);
+        dvt_fake.red = NULL;
+        dvt_fake.step_log = NULL;
+        PASS();
+    }
+
+    TEST("train check: without --gates the lint-fast path runs and no gate fields appear") {
+        memset(dvt_fake.order, 0, sizeof(dvt_fake.order));
+        dvt_check_run(root, NULL, &reply);
+        ASSERT(dvt_fake.order[0] == '\0');
+        ASSERT(json_get(&reply.data, "gates") == NULL);
+        ASSERT(json_get(&reply.data, "attribution") == NULL);
+        ASSERT_STR_EQ(dvt_str(&reply, "leaf"), "dev.train.check");
+        zcl_command_reply_free(&reply);
+        dvt_check_run(root, "", &reply);
+        ASSERT(dvt_fake.order[0] == '\0');
+        ASSERT(json_get(&reply.data, "gates") == NULL);
+        zcl_command_reply_free(&reply);
+        PASS();
+    }
+
+_test_next:;
+    zcl_dev_train_gate_hooks_set(NULL);
+    return failures;
+}
+
 int test_dev_train(void);
 int test_dev_train(void)
 {
@@ -542,6 +794,8 @@ int test_dev_train(void)
                                       "implicit_subdir") == 0);
         PASS();
     }
+
+    failures += dvt_gate_cases(root, src_a, src_b, sha_a2, sha_b1);
 
 _test_next:;
     (void)test_rm_rf_recursive(parent);

@@ -276,6 +276,10 @@ void zcl_native_handle_dev_train_build(
         return;
     }
 
+    /* The stack's own record of what it was cut from, read back by
+     * `dev train check --gates=verify` to name the guilty source. */
+    zcl_dev_train_record_sources(stack_dir, root, sources_csv);
+
     struct json_value picked, skipped, warnings;
     json_init(&picked); json_set_array(&picked);
     json_init(&skipped); json_set_array(&skipped);
@@ -467,6 +471,96 @@ static bool dvt_read_check_state(const char *stack_dir, bool *ok,
     (void)fclose(f);
     return true;
 }
+
+/* The --timeout the caller asked for, clamped; the default when absent. */
+static int64_t dvt_check_timeout(const struct zcl_command_request *request)
+{
+    int64_t timeout_ms = DVT_CHECK_DEFAULT_TIMEOUT_MS;
+    if (request && request->input) {
+        const struct json_value *t = json_get(request->input, "timeout_ms");
+        if (t && t->type == JSON_INT)
+            timeout_ms = json_get_int(t);
+    }
+    if (timeout_ms < DVT_CHECK_MIN_TIMEOUT_MS ||
+        timeout_ms > DVT_CHECK_MAX_TIMEOUT_MS)
+        timeout_ms = DVT_CHECK_DEFAULT_TIMEOUT_MS;
+    return timeout_ms;
+}
+
+/* The --gates list, or NULL when absent or empty (the lint-fast default). */
+static const char *dvt_check_gates_arg(const struct zcl_command_request *request)
+{
+    const char *gates =
+        request && request->input ? json_get_str(json_get(request->input, "gates")) : NULL;
+    return gates && gates[0] ? gates : NULL;
+}
+
+/* gates_failed as an array, from the comma list the runner collected. */
+static void dvt_gates_failed_array(const char *csv, struct json_value *out)
+{
+    char buf[4096];
+    char *save = NULL;
+    json_set_array(out);
+    (void)snprintf(buf, sizeof(buf), "%s", csv);
+    for (char *g = strtok_r(buf, ",", &save); g; g = strtok_r(NULL, ",", &save)) {
+        struct json_value item;
+        json_init(&item);
+        json_set_str(&item, g);
+        (void)json_push_back(out, &item);
+        json_free(&item);
+    }
+}
+
+/* `dev train check --gates=...`: the selected gates in fast, lint, verify
+ * order, stopping at the first red one. The reply keeps every field the
+ * lint-fast reply has and adds the per-gate rows and, after a red verify,
+ * the per-group attribution to the stack's source lanes. */
+static void dvt_check_gated(struct zcl_command_reply *reply, const char *name,
+                            const char *root, const char *stack_dir,
+                            const char *gates, int timeout_ms)
+{
+    unsigned mask = 0;
+    char why[320];
+    if (!zcl_dev_train_gates_parse(gates, &mask, why, sizeof(why))) {
+        dvt_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                 "INVALID_GATES", "validate", why, gates);
+        return;
+    }
+    struct json_value rows, attribution, failed;
+    struct zcl_dev_train_gate_report report;
+    json_init(&rows);
+    json_set_array(&rows);
+    json_init(&attribution);
+    json_set_array(&attribution);
+    json_init(&failed);
+    memset(&report, 0, sizeof(report));
+    report.gates = &rows;
+    report.attribution = &attribution;
+    zcl_dev_train_run_gates(stack_dir, root, mask, timeout_ms, &report);
+    dvt_write_check_state(stack_dir, report.ok, report.gates_failed_csv,
+                          report.log_path);
+    dvt_gates_failed_array(report.gates_failed_csv, &failed);
+    (void)json_push_kv_str(&reply->data, "name", name);
+    (void)json_push_kv_bool(&reply->data, "ok", report.ok);
+    (void)json_push_kv(&reply->data, "gates", &rows);
+    (void)json_push_kv(&reply->data, "gates_failed", &failed);
+    if (report.attribution_from) {
+        (void)json_push_kv_str(&reply->data, "attribution_from",
+                               report.attribution_from);
+        (void)json_push_kv(&reply->data, "attribution", &attribution);
+    }
+    (void)json_push_kv_str(&reply->data, "log_path", report.log_path);
+    (void)json_push_kv_int(&reply->data, "elapsed_ms", report.wall_ms);
+    (void)json_push_kv_str(&reply->data, "next",
+                           report.ok ? "build/bin/z23-dev dev land submit --worktree=$PWD"
+                                     : report.log_path);
+    json_free(&rows);
+    json_free(&attribution);
+    json_free(&failed);
+    reply->status = report.ok ? ZCL_COMMAND_STATUS_PASSED
+                              : ZCL_COMMAND_STATUS_FAILED;
+    reply->exit_code = report.ok ? ZCL_COMMAND_EXIT_OK : ZCL_COMMAND_EXIT_FAILED;
+}
 #endif /* ZCL_DEV_BUILD || ZCL_TESTING */
 
 void zcl_native_handle_dev_train_check(
@@ -484,15 +578,7 @@ void zcl_native_handle_dev_train_check(
 #else
     const char *name =
         request && request->input ? json_get_str(json_get(request->input, "name")) : NULL;
-    int64_t timeout_ms = DVT_CHECK_DEFAULT_TIMEOUT_MS;
-    if (request && request->input) {
-        const struct json_value *t = json_get(request->input, "timeout_ms");
-        if (t && t->type == JSON_INT)
-            timeout_ms = json_get_int(t);
-    }
-    if (timeout_ms < DVT_CHECK_MIN_TIMEOUT_MS ||
-        timeout_ms > DVT_CHECK_MAX_TIMEOUT_MS)
-        timeout_ms = DVT_CHECK_DEFAULT_TIMEOUT_MS;
+    int64_t timeout_ms = dvt_check_timeout(request);
 
     (void)json_push_kv_str(&reply->data, "leaf", DVT_LEAF_CHECK);
     if (!dvt_valid_name(name)) {
@@ -502,6 +588,11 @@ void zcl_native_handle_dev_train_check(
     }
     char root[PATH_MAX], stack_dir[PATH_MAX];
     if (!dvt_prepare_stack(request, reply, name, root, stack_dir, false)) return;
+    const char *gates = dvt_check_gates_arg(request);
+    if (gates) {
+        dvt_check_gated(reply, name, root, stack_dir, gates, (int)timeout_ms);
+        return;
+    }
 
     const char *lock_argv[] = {"tools/dev/checkout-lock.sh", "foreground",
                                "build/.checkout.lock", "--", "make",
@@ -783,6 +874,7 @@ struct dvt_cli_opts {
     size_t sources_len;
     int64_t timeout_ms;
     char train[16];
+    char gates[128];
     bool force;
     bool once;
     bool dry_run;
@@ -807,6 +899,8 @@ static bool dvt_cli_build_flag(const char *w, struct dvt_cli_opts *o)
         o->saw_timeout = true;
     } else if (dvt_cli_flag(w, "force", &value)) {
         o->force = true;
+    } else if (dvt_cli_flag(w, "gates", &value) && value) {
+        (void)snprintf(o->gates, sizeof(o->gates), "%s", value);
     } else {
         return false;
     }
@@ -841,6 +935,8 @@ static void dvt_cli_input(const struct dvt_cli_opts *o,
         (void)json_push_kv_str(input, "sources", o->sources);
     if (o->saw_timeout)
         (void)json_push_kv_int(input, "timeout_ms", o->timeout_ms);
+    if (o->gates[0])
+        (void)json_push_kv_str(input, "gates", o->gates);
     if (o->force)
         (void)json_push_kv_bool(input, "force", true);
     if (o->saw_train)
