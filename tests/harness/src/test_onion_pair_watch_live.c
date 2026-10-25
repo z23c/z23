@@ -147,6 +147,54 @@ static char *opw_tail_lines(const char *path, int max_lines)
     return buf;
 }
 
+/* Child side of the fork: detach into its own process group, point stdout
+ * and stderr at out_path, hand the script its throwaway PAIR_PROBE_FILE
+ * ledger, and exec. Never returns: an exec failure falls through to
+ * _exit(127). */
+static void opw_child_exec_script(const char *script_abs,
+                                  const char *ledger_abs,
+                                  const char *out_path)
+{
+    setpgid(0, 0);
+    int cfd = open(out_path, O_WRONLY | O_TRUNC, 0600);
+    if (cfd >= 0) {
+        dup2(cfd, STDOUT_FILENO);
+        dup2(cfd, STDERR_FILENO);
+        close(cfd);
+    }
+    setenv("PAIR_PROBE_FILE", ledger_abs, 1);
+    execl(script_abs, script_abs, (char *)NULL);
+    _exit(127);
+}
+
+/* Output growth is progress: when out_path's size changed since the last
+ * poll, record the new size and refresh the last-progress timestamp. */
+static void opw_note_output_growth(const char *out_path, off_t *last_size,
+                                   int64_t *last_progress_ns)
+{
+    struct stat st;
+    if (stat(out_path, &st) == 0 && st.st_size != *last_size) {
+        *last_size = st.st_size;
+        *last_progress_ns = opw_now_ns();
+    }
+}
+
+/* Wedge recovery for a child that went silent: SIGTERM its process group,
+ * allow a 50 x 100ms grace window for it to die, then SIGKILL and block
+ * until it is reaped. *rc receives the wait status on whichever path reaps
+ * it. */
+static void opw_kill_and_reap_child(pid_t pid, int *rc)
+{
+    kill(-pid, SIGTERM);
+    for (int i = 0; i < 50; i++) {
+        if (waitpid(pid, rc, WNOHANG) == pid) return;
+        struct timespec ts = {0, 100 * 1000 * 1000};
+        nanosleep(&ts, NULL); /* real-clock: SIGTERM grace — polls the kernel to reap a real child before SIGKILL; no fake-clock seam */
+    }
+    kill(-pid, SIGKILL);
+    while (waitpid(pid, rc, 0) < 0 && errno == EINTR) { }
+}
+
 /* Fork/exec onion_pair_watch.sh (LIVE path, no --selftest), capture combined
  * stdout+stderr to out_path, and watch for SILENCE rather than total elapsed
  * time: the script prints a progress line every 30s, so 90s of silence is a
@@ -163,16 +211,7 @@ static int opw_run_watched(const char *script_abs, const char *ledger_abs,
     pid_t pid = fork_with_retry();
     if (pid < 0) return -1;
     if (pid == 0) {
-        setpgid(0, 0);
-        int cfd = open(out_path, O_WRONLY | O_TRUNC, 0600);
-        if (cfd >= 0) {
-            dup2(cfd, STDOUT_FILENO);
-            dup2(cfd, STDERR_FILENO);
-            close(cfd);
-        }
-        setenv("PAIR_PROBE_FILE", ledger_abs, 1);
-        execl(script_abs, script_abs, (char *)NULL);
-        _exit(127);
+        opw_child_exec_script(script_abs, ledger_abs, out_path);
     }
     setpgid(pid, pid);
 
@@ -189,11 +228,7 @@ static int opw_run_watched(const char *script_abs, const char *ledger_abs,
             if (errno == EINTR) continue;
             return -1;
         }
-        struct stat st;
-        if (stat(out_path, &st) == 0 && st.st_size != last_size) {
-            last_size = st.st_size;
-            last_progress_ns = opw_now_ns();
-        }
+        opw_note_output_growth(out_path, &last_size, &last_progress_ns);
         int64_t silent_ns = opw_now_ns() - last_progress_ns;
         if (silent_ns > (int64_t)max_silent_secs * 1000000000LL) {
             char load[64];
@@ -203,14 +238,7 @@ static int opw_run_watched(const char *script_abs, const char *ledger_abs,
                 "(bound derived from the script's 30s progress-line "
                 "interval + margin); loadavg %s. Killing the group.\n",
                 max_silent_secs, load);
-            kill(-pid, SIGTERM);
-            for (int i = 0; i < 50; i++) {
-                if (waitpid(pid, &rc, WNOHANG) == pid) { wedged = 1; goto done; }
-                struct timespec ts = {0, 100 * 1000 * 1000};
-                nanosleep(&ts, NULL); /* real-clock: SIGTERM grace — polls the kernel to reap a real child before SIGKILL; no fake-clock seam */
-            }
-            kill(-pid, SIGKILL);
-            while (waitpid(pid, &rc, 0) < 0 && errno == EINTR) { }
+            opw_kill_and_reap_child(pid, &rc);
             wedged = 1;
             goto done;
         }

@@ -2139,7 +2139,6 @@ tests/harness/src/test_onion_directory.c:od_durable_directory:16
 tests/harness/src/test_onion_directory.c:od_parse_relay_hints:26
 tests/harness/src/test_onion_directory.c:od_test_response_bounds:17
 tests/harness/src/test_onion_directory.c:od_test_served_pages:36
-tests/harness/src/test_onion_pair_watch_live.c:opw_run_watched:18
 tests/harness/src/test_onion_persistence.c:test_onion_identity_stable_across_boots:16
 tests/harness/src/test_onion_persistence.c:test_onion_persist_fleet_default:16
 tests/harness/src/test_onion_stream.c:test_onion_stream:33
