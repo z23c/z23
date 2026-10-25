@@ -135,6 +135,104 @@ static bool live_coin_matches(sqlite3 *db, const struct outpoint *op,
             memcmp(live_script, script, script_len) == 0);
 }
 
+/* Outcome of replaying one transparent spend of the canonical suffix.  Every
+ * value other than REPLAYED is a refusal that the caller must log. */
+enum suffix_spend_outcome {
+    SUFFIX_SPEND_REPLAYED = 0,
+    SUFFIX_SPEND_UNPROVEN,
+    SUFFIX_SPEND_LIVE_MISMATCH,
+    SUFFIX_SPEND_RESTORE_FAILED,
+    SUFFIX_SPEND_CREATOR_LIVE,
+};
+
+/* Initialise *blk and read the canonical block body at height.  *blk stays
+ * initialised so the caller can block_free() it when the read is refused. */
+static bool suffix_stage_block_loaded(struct block *blk,
+                                      struct main_state *ms, int height,
+                                      const char *datadir,
+                                      utxo_apply_reader_fn reader,
+                                      void *reader_user)
+{
+    struct block_index *bi = stage_body_index_at(ms, height);
+    block_init(blk);
+    return bi && bi->nHeight == height && bi->phashBlock &&
+           stage_read_block(blk, bi, height, datadir, reader, reader_user);
+}
+
+/* Prove one spend against the canonical suffix and restore its coin when the
+ * creator is below the applied frontier; a creator in the gap is only proved.
+ * *creator_height keeps whatever the proof wrote for the caller's log. */
+static enum suffix_spend_outcome suffix_restore_one_spend(
+    sqlite3 *db, struct main_state *ms, const char *datadir,
+    utxo_apply_reader_fn reader, void *reader_user,
+    const struct outpoint *op, int applied_first, int scan_first,
+    struct suffix_seen_input **seen, size_t *seen_count,
+    size_t *seen_capacity, int64_t *restored_out, int64_t *already_live_out,
+    int *creator_height)
+{
+    uint8_t script[UTXO_APPLY_SCRIPT_MAX];
+    int64_t value = 0;
+    size_t script_len = 0;
+    bool is_coinbase = false;
+    if (!suffix_seen_add(seen, seen_count, seen_capacity, op) ||
+        !creator_coin_from_canonical_body(
+            db, ms, datadir, reader, reader_user, op, scan_first,
+            &value, script, &script_len, creator_height,
+            &is_coinbase))
+        return SUFFIX_SPEND_UNPROVEN;
+    bool live = coins_kv_exists(db, op->hash.data, op->n);
+    if (*creator_height < applied_first) {
+        if (live) {
+            if (!live_coin_matches(db, op, value, script, script_len,
+                                   *creator_height, is_coinbase))
+                return SUFFIX_SPEND_LIVE_MISMATCH;
+            (*already_live_out)++;
+        } else if (!coins_kv_add(db, op->hash.data, op->n, value,
+                                 *creator_height, is_coinbase, script,
+                                 script_len)) {
+            return SUFFIX_SPEND_RESTORE_FAILED;
+        } else {
+            (*restored_out)++;
+        }
+    } else if (live) {
+        return SUFFIX_SPEND_CREATOR_LIVE;
+    }
+    return SUFFIX_SPEND_REPLAYED;
+}
+
+/* Replay the transparent spends of one block and report the first refusal
+ * with its transaction index, input index and creator height so the caller
+ * can log it. */
+static enum suffix_spend_outcome suffix_restore_block_spends(
+    sqlite3 *db, struct main_state *ms, const char *datadir,
+    utxo_apply_reader_fn reader, void *reader_user,
+    const struct block *blk, int applied_first, int scan_first,
+    struct suffix_seen_input **seen, size_t *seen_count,
+    size_t *seen_capacity, int64_t *restored_out, int64_t *already_live_out,
+    size_t *fail_tx, size_t *fail_vin, int *fail_creator_height)
+{
+    for (size_t ti = 0; ti < blk->num_vtx; ti++) {
+        const struct transaction *tx = &blk->vtx[ti];
+        if (transaction_is_coinbase(tx))
+            continue;
+        for (size_t vi = 0; vi < tx->num_vin; vi++) {
+            const struct outpoint *op = &tx->vin[vi].prevout;
+            int creator_height = -1;
+            enum suffix_spend_outcome outcome = suffix_restore_one_spend(
+                db, ms, datadir, reader, reader_user, op, applied_first,
+                scan_first, seen, seen_count, seen_capacity, restored_out,
+                already_live_out, &creator_height);
+            if (outcome != SUFFIX_SPEND_REPLAYED) {
+                *fail_tx = ti;
+                *fail_vin = vi;
+                *fail_creator_height = creator_height;
+                return outcome;
+            }
+        }
+    }
+    return SUFFIX_SPEND_REPLAYED;
+}
+
 /* Replay the inverse of each transparent spend.  A creator below the applied
  * frontier is either restored or proved already live; a creator in the gap is
  * proved but left absent for the normal reducer to create. */
@@ -151,11 +249,9 @@ bool utxo_apply_restore_suffix_inputs(
     *restored_out = 0;
     *already_live_out = 0;
     for (int h = scan_first; h <= last && ok; h++) {
-        struct block_index *bi = stage_body_index_at(ms, h);
         struct block blk;
-        block_init(&blk);
-        if (!bi || bi->nHeight != h || !bi->phashBlock ||
-            !stage_read_block(&blk, bi, h, datadir, reader, reader_user)) {
+        if (!suffix_stage_block_loaded(&blk, ms, h, datadir, reader,
+                                       reader_user)) {
             block_free(&blk);
             LOG_WARN("utxo_apply",
                      "[utxo_apply] future coin repair refused while "
@@ -163,66 +259,38 @@ bool utxo_apply_restore_suffix_inputs(
             ok = false;
             break;
         }
-        for (size_t ti = 0; ti < blk.num_vtx && ok; ti++) {
-            const struct transaction *tx = &blk.vtx[ti];
-            if (transaction_is_coinbase(tx))
-                continue;
-            for (size_t vi = 0; vi < tx->num_vin; vi++) {
-                const struct outpoint *op = &tx->vin[vi].prevout;
-                uint8_t script[UTXO_APPLY_SCRIPT_MAX];
-                int64_t value = 0;
-                size_t script_len = 0;
-                int creator_height = -1;
-                bool is_coinbase = false;
-                if (!suffix_seen_add(&seen, &seen_count, &seen_capacity, op) ||
-                    !creator_coin_from_canonical_body(
-                        db, ms, datadir, reader, reader_user, op, scan_first,
-                        &value, script, &script_len, &creator_height,
-                        &is_coinbase)) {
-                    LOG_WARN("utxo_apply",
-                             "[utxo_apply] future coin repair refused: "
-                             "could not prove h=%d tx=%zu vin=%zu "
-                             "creator_h=%d", h, ti, vi, creator_height);
-                    ok = false;
-                    break;
-                }
-                bool live = coins_kv_exists(db, op->hash.data, op->n);
-                if (creator_height < applied_first) {
-                    if (live) {
-                        if (!live_coin_matches(db, op, value, script,
-                                               script_len, creator_height,
-                                               is_coinbase)) {
-                            LOG_WARN("utxo_apply",
-                                     "[utxo_apply] future coin repair "
-                                     "refused: live input mismatch h=%d "
-                                     "tx=%zu vin=%zu", h, ti, vi);
-                            ok = false;
-                            break;
-                        }
-                        (*already_live_out)++;
-                    } else if (!coins_kv_add(
-                                   db, op->hash.data, op->n, value,
-                                   creator_height, is_coinbase, script,
-                                   script_len)) {
-                        LOG_WARN("utxo_apply",
-                                 "[utxo_apply] future coin repair refused: "
-                                 "could not restore h=%d tx=%zu vin=%zu "
-                                 "creator_h=%d", h, ti, vi, creator_height);
-                        ok = false;
-                        break;
-                    } else {
-                        (*restored_out)++;
-                    }
-                } else if (live) {
-                    LOG_WARN("utxo_apply",
-                             "[utxo_apply] future coin repair refused: "
-                             "unapplied creator unexpectedly live h=%d "
-                             "tx=%zu vin=%zu creator_h=%d", h, ti, vi,
-                             creator_height);
-                    ok = false;
-                    break;
-                }
-            }
+        size_t fail_tx = 0;
+        size_t fail_vin = 0;
+        int creator_height = -1;
+        enum suffix_spend_outcome outcome = suffix_restore_block_spends(
+            db, ms, datadir, reader, reader_user, &blk, applied_first,
+            scan_first, &seen, &seen_count, &seen_capacity, restored_out,
+            already_live_out, &fail_tx, &fail_vin, &creator_height);
+        if (outcome == SUFFIX_SPEND_UNPROVEN) {
+            LOG_WARN("utxo_apply",
+                     "[utxo_apply] future coin repair refused: "
+                     "could not prove h=%d tx=%zu vin=%zu "
+                     "creator_h=%d", h, fail_tx, fail_vin, creator_height);
+            ok = false;
+        } else if (outcome == SUFFIX_SPEND_LIVE_MISMATCH) {
+            LOG_WARN("utxo_apply",
+                     "[utxo_apply] future coin repair "
+                     "refused: live input mismatch h=%d "
+                     "tx=%zu vin=%zu", h, fail_tx, fail_vin);
+            ok = false;
+        } else if (outcome == SUFFIX_SPEND_RESTORE_FAILED) {
+            LOG_WARN("utxo_apply",
+                     "[utxo_apply] future coin repair refused: "
+                     "could not restore h=%d tx=%zu vin=%zu "
+                     "creator_h=%d", h, fail_tx, fail_vin, creator_height);
+            ok = false;
+        } else if (outcome == SUFFIX_SPEND_CREATOR_LIVE) {
+            LOG_WARN("utxo_apply",
+                     "[utxo_apply] future coin repair refused: "
+                     "unapplied creator unexpectedly live h=%d "
+                     "tx=%zu vin=%zu creator_h=%d", h, fail_tx, fail_vin,
+                     creator_height);
+            ok = false;
         }
         block_free(&blk);
     }
