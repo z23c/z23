@@ -213,6 +213,10 @@ void boot_fast_restart_arm_quick_check_skip_probe(void)
      * a matching content binding (consumed from the cache detect_unclean
      * populated). Must run BEFORE node.db opens. */
     node_db_set_quick_check_skip_probe(boot_shutdown_marker_quick_check_probe);
+    /* Same single-use verified-clean binding, for consensus.db (the 1.6 GB
+     * store whose full quick_check dominated warm boots). */
+    progress_store_set_quick_check_skip_probe(
+        boot_shutdown_marker_consensus_quick_check_probe);
 }
 
 int64_t boot_bg_quick_check_pace_gap_ms(enum platform_storage_class klass)

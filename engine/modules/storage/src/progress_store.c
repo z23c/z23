@@ -59,6 +59,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t g_tx_lock;
 static pthread_once_t g_tx_lock_once = PTHREAD_ONCE_INIT;
 static _Atomic(sqlite3 *) g_db = NULL;
+static _Atomic(progress_store_quick_check_skip_probe_fn) g_qc_skip_probe = NULL;
 /* g_path is the retained-dirfd path SQLite actually opened.  Keeping the
  * directory descriptor alive also keeps later WAL and independent-reader
  * opens on the same directory capability even if the caller's path is
@@ -240,6 +241,29 @@ static void progress_store_quarantine_corrupt(const char *path)
 }
 #endif
 
+void progress_store_set_quick_check_skip_probe(
+    progress_store_quick_check_skip_probe_fn probe)
+{
+    atomic_store(&g_qc_skip_probe, probe);
+}
+
+/* True when the installed probe vouches for the EXISTING consensus.db at `path`
+ * (verified-clean shutdown). Must be called before sqlite opens the file.
+ * A file that does not exist yet is never skipped. */
+static bool progress_store_quick_check_skipped(const char *path)
+{
+#ifdef _WIN32
+    (void)path;
+    return false;
+#else
+    progress_store_quick_check_skip_probe_fn probe =
+        atomic_load(&g_qc_skip_probe);
+    if (!probe || access(path, F_OK) != 0)
+        return false;
+    return probe(path);
+#endif
+}
+
 bool progress_store_open(const char *datadir)
 {
     if (!datadir || !datadir[0]) LOG_FAIL("progress_store",
@@ -337,6 +361,7 @@ bool progress_store_open(const char *datadir)
         return true;
     }
 
+    bool skip_existing_check = progress_store_quick_check_skipped(path);
     sqlite3 *db = NULL;
 #ifdef _WIN32
     char opened_vfs_name[SQLITE_VFS_DIR_NAME_MAX] = {0};
@@ -400,7 +425,7 @@ bool progress_store_open(const char *datadir)
      * fresh, just-created store that ALSO fails quick_check is a disk/fs fault,
      * not corrupt derived state — log a terminal blocker and fail the open
      * instead of quarantine-looping. */
-    if (!progress_store_quick_check_ok(db)) {
+    if (!skip_existing_check && !progress_store_quick_check_ok(db)) {
 #ifdef _WIN32
         /* Quarantine is intentionally still contained: its current helper
          * renames a pathname family after close, outside the retained HANDLE

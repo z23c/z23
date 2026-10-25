@@ -49,6 +49,17 @@
  * returns false (one process, one progress store). */
 bool progress_store_open(const char *datadir);
 
+/* Verified-clean quick_check skip. Composition installs a probe (this module
+ * must not depend on engine/composition) that returns true ONLY when the
+ * previous clean shutdown bound this exact consensus.db file. It is consulted
+ * only for a consensus.db that already existed at open, and skips only that
+ * existing-file PRAGMA quick_check; the fresh-file check after a quarantine is
+ * unconditional. NULL (default) = always run the check. The probe owns its own
+ * single-use latch. Not consulted on native Windows. */
+typedef bool (*progress_store_quick_check_skip_probe_fn)(const char *path);
+void progress_store_set_quick_check_skip_probe(
+    progress_store_quick_check_skip_probe_fn probe);
+
 /* Singleton handle. NULL if not yet opened or already closed. */
 sqlite3 *progress_store_db(void);
 

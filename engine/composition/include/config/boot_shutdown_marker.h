@@ -96,6 +96,14 @@ struct shutdown_clean_binding {
     int64_t  fr_block_index_count;
     int64_t  fr_mmb_leaves;
     int64_t  fr_sapling_ckpt_height;
+
+    /* consensus.db identity (marker OPTIONAL keys consensus_db_*). Present iff
+     * all three keys parsed; absent in a marker from an older binary, which
+     * means "no binding": consensus.db runs its full quick_check. */
+    bool     cdb_valid;
+    int64_t  cdb_size;
+    uint32_t cdb_change_counter;
+    uint32_t cdb_version_valid_for;
 };
 
 /* Facts captured at CLEAN SHUTDOWN, baked into the v3 marker so the next boot
@@ -139,6 +147,10 @@ bool boot_shutdown_marker_parse(const char *text, size_t len,
                                 struct shutdown_clean_binding *out);
 bool boot_shutdown_marker_can_skip(const struct shutdown_clean_binding *b,
                                    const struct node_db_file_identity *cur);
+/* Same decision for consensus.db against its own optional binding. */
+bool boot_shutdown_marker_can_skip_consensus(
+    const struct shutdown_clean_binding *b,
+    const struct node_db_file_identity *cur);
 
 /* Record the schema version to bake into the NEXT clean-shutdown marker.
  * Called once after node.db migration completes. */
@@ -152,6 +164,14 @@ void boot_shutdown_marker_set_schema_version(int schema_version);
  * Single-use: the first call consumes the cache and the probe-consumed latch
  * so a second call cannot reuse a stale decision. */
 bool boot_shutdown_marker_quick_check_probe(const char *node_db_path);
+
+/* progress_store_open's quick_check-skip probe (matches
+ * progress_store_quick_check_skip_probe_fn). Same contract as the node.db probe:
+ * true only when the previous clean shutdown bound THIS consensus.db file
+ * (size + header identity, no -wal). Single-use for the process; every other
+ * case (no binding, old marker, mismatch, crash, copied datadir) returns false
+ * and the caller runs the full PRAGMA quick_check. */
+bool boot_shutdown_marker_consensus_quick_check_probe(const char *consensus_db_path);
 
 /* True if the probe took the verified-clean skip this boot (fast-restart
  * may run; a background re-check should still run once). */

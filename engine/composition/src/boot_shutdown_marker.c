@@ -27,6 +27,7 @@ static int                           g_schema_version = -1;
 static _Atomic bool                  g_quick_check_skipped;
 static _Atomic bool                  g_quick_check_deferred;
 static _Atomic bool                  g_quick_check_probe_consumed;
+static _Atomic bool                  g_cdb_probe_consumed;
 static _Atomic uint64_t              g_marker_nonce;
 
 /* Tier-2 P2: the fast-restart binding parsed from THIS boot's marker (cached
@@ -34,6 +35,10 @@ static _Atomic uint64_t              g_marker_nonce;
  * the quick_check probe's single-use consume of that cache does not wipe it —
  * the P2 evaluate point runs AFTER node_db_open. */
 static struct shutdown_clean_binding g_cached_fr;        /* fr_valid=false start */
+/* consensus.db binding parsed from THIS boot's marker; consumed (single-use)
+ * by boot_shutdown_marker_consensus_quick_check_probe, separate from the
+ * node.db cache so neither probe wipes the other. */
+static struct shutdown_clean_binding g_cached_cdb;       /* cdb_valid=false start */
 /* Facts to bake into the NEXT clean-shutdown marker (set at shutdown). */
 static struct fast_restart_shutdown_facts g_fr_facts;    /* valid=false at start */
 
@@ -88,6 +93,19 @@ int boot_shutdown_marker_format(char *buf, size_t n, int64_t unix_seconds,
                     b->schema_version);
     if (off < 0 || (size_t)off >= n)
         return off;
+
+    /* consensus.db identity (optional keys; an older binary ignores them). */
+    if (b->cdb_valid) {
+        int offc = snprintf(buf + off, n - (size_t)off,
+                    "consensus_db_size=%lld\n"
+                    "consensus_db_change_counter=%u\n"
+                    "consensus_db_version_valid_for=%u\n",
+                    (long long)b->cdb_size, b->cdb_change_counter,
+                    b->cdb_version_valid_for);
+        if (offc < 0 || (size_t)offc >= n - (size_t)off)
+            return offc < 0 ? offc : (int)n;
+        off += offc;
+    }
 
     /* Tier-2 P2 fast-restart binding (optional; version stays 2 so a pre-P2
      * binary still parses the quick_check identity and simply ignores these
@@ -259,6 +277,14 @@ bool boot_shutdown_marker_parse(const char *text, size_t len,
      * v2 quick_check binding above is usable. */
     if (marker_value_equals(text, len, "fast_restart", "1"))
         out->fr_valid = marker_parse_fast_restart(text, len, out);
+    /* consensus.db identity (optional): all three keys or no binding. */
+    out->cdb_valid =
+        marker_parse_i64(text, len, "consensus_db_size", true,
+                         &out->cdb_size) &&
+        marker_parse_u32(text, len, "consensus_db_change_counter",
+                         &out->cdb_change_counter) &&
+        marker_parse_u32(text, len, "consensus_db_version_valid_for",
+                         &out->cdb_version_valid_for);
     return true;
 }
 
@@ -276,6 +302,17 @@ bool boot_shutdown_marker_can_skip(const struct shutdown_clean_binding *b,
     if (cur->version_valid_for != b->version_valid_for)
         return false;
     return true;
+}
+
+bool boot_shutdown_marker_can_skip_consensus(
+    const struct shutdown_clean_binding *b,
+    const struct node_db_file_identity *cur)
+{
+    if (!b || !cur || !b->valid || !b->cdb_valid || !cur->present)
+        return false;
+    return !cur->wal_present && cur->size == b->cdb_size &&
+           cur->change_counter == b->cdb_change_counter &&
+           cur->version_valid_for == b->cdb_version_valid_for;
 }
 
 /* ── File identity read (pristine, pre-open) ──────────────────────── */
@@ -366,6 +403,8 @@ void boot_shutdown_marker_reset_for_test(void)
 {
     memset(&g_cached_binding, 0, sizeof(g_cached_binding));
     memset(&g_cached_fr, 0, sizeof(g_cached_fr));
+    memset(&g_cached_cdb, 0, sizeof(g_cached_cdb));
+    atomic_store(&g_cdb_probe_consumed, false);
     memset(&g_fr_facts, 0, sizeof(g_fr_facts));
     g_schema_version = -1;
     atomic_store(&g_quick_check_skipped, false);
@@ -425,10 +464,29 @@ bool boot_shutdown_marker_quick_check_probe(const char *node_db_path)
     return false;
 }
 
+bool boot_shutdown_marker_consensus_quick_check_probe(
+    const char *consensus_db_path)
+{
+    /* Single-use for this process, consumed even on a mismatch. */
+    if (atomic_exchange(&g_cdb_probe_consumed, true))
+        return false;
+    struct shutdown_clean_binding b = g_cached_cdb;
+    memset(&g_cached_cdb, 0, sizeof(g_cached_cdb));
+
+    struct node_db_file_identity cur;
+    if (!b.cdb_valid || !node_db_file_identity_read(consensus_db_path, &cur) ||
+        !boot_shutdown_marker_can_skip_consensus(&b, &cur))
+        return false;
+    printf("[boot] consensus.db quick_check skipped (verified-clean shutdown)\n");
+    return true;
+}
+
 static void boot_shutdown_marker_reset_cached_bindings(void)
 {
     memset(&g_cached_binding, 0, sizeof(g_cached_binding));
     memset(&g_cached_fr, 0, sizeof(g_cached_fr));
+    memset(&g_cached_cdb, 0, sizeof(g_cached_cdb));
+    atomic_store(&g_cdb_probe_consumed, false);
     atomic_store(&g_quick_check_skipped, false);
     atomic_store(&g_quick_check_deferred, false);
     atomic_store(&g_quick_check_probe_consumed, false);
@@ -450,6 +508,8 @@ static void boot_shutdown_marker_cache_locked(
     g_cached_binding = parsed;
     if (parsed.fr_valid)
         g_cached_fr = parsed;
+    if (parsed.cdb_valid)
+        g_cached_cdb = parsed;
 }
 
 static void boot_shutdown_marker_report_state(
@@ -514,8 +574,22 @@ bool boot_shutdown_marker_detect_unclean(const char *datadir)
     return unclean;
 }
 
+static void boot_shutdown_marker_build_cdb(
+    const char *consensus_db_path, struct shutdown_clean_binding *binding)
+{
+    struct node_db_file_identity cid;
+    if (node_db_file_identity_read(consensus_db_path, &cid) &&
+        !cid.wal_present) {
+        binding->cdb_valid = true;
+        binding->cdb_size = cid.size;
+        binding->cdb_change_counter = cid.change_counter;
+        binding->cdb_version_valid_for = cid.version_valid_for;
+    }
+}
+
 static void boot_shutdown_marker_build_binding(
-    const char *node_db_path, struct shutdown_clean_binding *binding)
+    const char *node_db_path, const char *consensus_db_path,
+    struct shutdown_clean_binding *binding)
 {
     struct node_db_file_identity identity;
     memset(binding, 0, sizeof(*binding));
@@ -526,6 +600,7 @@ static void boot_shutdown_marker_build_binding(
         binding->change_counter = identity.change_counter;
         binding->version_valid_for = identity.version_valid_for;
         binding->schema_version = g_schema_version;
+        boot_shutdown_marker_build_cdb(consensus_db_path, binding);
     }
     /* Fold in Tier-2 fast-restart facts only with the v2 node.db identity:
      * a fast restart always verifies node.db cleanliness first. */
@@ -578,6 +653,7 @@ bool boot_shutdown_marker_write_clean(const char *datadir)
     char path[1024];
     char tmp[1088];
     char node_db_path[1088];
+    char consensus_db_path[1088];
     if (!boot_shutdown_marker_path(path, sizeof(path),
                                    datadir, ZCL_SHUTDOWN_MARKER_NAME))
         return false;
@@ -586,6 +662,10 @@ bool boot_shutdown_marker_write_clean(const char *datadir)
     if (dn < 0 || (size_t)dn >= sizeof(node_db_path) ||
         !platform_private_directory_ensure(datadir))
         return false;
+    int cn = snprintf(consensus_db_path, sizeof(consensus_db_path),
+                      "%s/consensus.db", datadir);
+    if (cn < 0 || (size_t)cn >= sizeof(consensus_db_path))
+        return false;
 
     /* Bind the marker to node.db's final on-disk identity. The DB has already
      * been WAL-checkpointed and closed by the shutdown path, so the header we
@@ -593,7 +673,7 @@ bool boot_shutdown_marker_write_clean(const char *datadir)
      * file. If node.db is missing/unreadable we still write a legacy
      * timestamp-only marker (no skip binding) — identical to prior behavior. */
     struct shutdown_clean_binding b;
-    boot_shutdown_marker_build_binding(node_db_path, &b);
+    boot_shutdown_marker_build_binding(node_db_path, consensus_db_path, &b);
 
     char content[1024];
     int clen = boot_shutdown_marker_format(content, sizeof(content),
