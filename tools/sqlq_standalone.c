@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
-/* Standalone build/bin/sqlq for hosts without the argv0 symlink (Windows):
- * the same query tool as `z23 sqlq`, kept as its own binary. */
+/* Standalone build/bin/sqlq, built on every host: the same query tool as
+ * `z23 sqlq`, kept as its own binary so no gate depends on the release z23. */
 
 #include "multicall.h"
 

@@ -349,8 +349,8 @@ static bool main_dispatch_priority_modes(int argc, char **argv, int *rc)
 }
 
 /* Tool name when `word` is a jsonq or sqlq path (its basename), else NULL.
- * build/bin/jsonq and build/bin/sqlq are links to z23, so argv[0] names the
- * tool. */
+ * build/bin/jsonq and build/bin/sqlq are standalone binaries on every host, so
+ * this dispatch only serves a hypothetical symlink to z23 that names the tool. */
 static const char *main_multicall_argv0_tool(const char *word)
 {
     if (!word)
