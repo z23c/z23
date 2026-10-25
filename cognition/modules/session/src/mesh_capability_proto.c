@@ -70,6 +70,39 @@ static bool signed_fields_valid(const uint8_t public_key[32],
            (!require_signature || zcl_bytes_any_set(signature, 64));
 }
 
+static bool proposal_masks_valid(uint64_t result_mask, uint64_t deny_mask)
+{
+    return result_mask != 0 &&
+           (result_mask & ~MESH_CAPABILITY_RESULT_KNOWN) == 0 &&
+           (deny_mask & MESH_CAPABILITY_POLICY_DENY_REQUIRED) ==
+               MESH_CAPABILITY_POLICY_DENY_REQUIRED &&
+           (deny_mask & ~MESH_CAPABILITY_POLICY_DENY_KNOWN) == 0;
+}
+
+static bool proposal_resource_limits_valid(
+    const struct mesh_capability_proposal_v1 *frame)
+{
+    return frame->max_bytes != 0 &&
+           frame->max_bytes <= MESH_CAPABILITY_MAX_BYTES &&
+           frame->max_cpu_milliseconds != 0 &&
+           frame->max_cpu_milliseconds <=
+               MESH_CAPABILITY_MAX_CPU_MILLISECONDS &&
+           frame->max_memory_bytes != 0 &&
+           frame->max_memory_bytes <= MESH_CAPABILITY_MAX_MEMORY_BYTES;
+}
+
+static bool proposal_execution_limits_valid(
+    const struct mesh_capability_proposal_v1 *frame)
+{
+    return frame->max_processes != 0 &&
+           frame->max_processes <= MESH_CAPABILITY_MAX_PROCESSES &&
+           frame->max_concurrency != 0 &&
+           frame->max_concurrency <= MESH_CAPABILITY_MAX_CONCURRENCY &&
+           frame->max_wall_milliseconds != 0 &&
+           frame->max_wall_milliseconds <=
+               MESH_CAPABILITY_MAX_WALL_MILLISECONDS;
+}
+
 static enum mesh_capability_proto_error proposal_shape(
     const struct mesh_capability_proposal_v1 *frame, bool require_signature)
 {
@@ -87,26 +120,10 @@ static enum mesh_capability_proto_error proposal_shape(
         !signed_fields_valid(frame->signer_online_pubkey, frame->signature,
                              require_signature))
         return MESH_CAPABILITY_PROTO_FIELD;
-    if (frame->result_mask == 0 ||
-        (frame->result_mask & ~MESH_CAPABILITY_RESULT_KNOWN) != 0 ||
-        (frame->deny_mask & MESH_CAPABILITY_POLICY_DENY_REQUIRED) !=
-            MESH_CAPABILITY_POLICY_DENY_REQUIRED ||
-        (frame->deny_mask & ~MESH_CAPABILITY_POLICY_DENY_KNOWN) != 0)
+    if (!proposal_masks_valid(frame->result_mask, frame->deny_mask))
         return MESH_CAPABILITY_PROTO_FIELD;
-    if (frame->max_bytes == 0 ||
-        frame->max_bytes > MESH_CAPABILITY_MAX_BYTES ||
-        frame->max_cpu_milliseconds == 0 ||
-        frame->max_cpu_milliseconds >
-            MESH_CAPABILITY_MAX_CPU_MILLISECONDS ||
-        frame->max_memory_bytes == 0 ||
-        frame->max_memory_bytes > MESH_CAPABILITY_MAX_MEMORY_BYTES ||
-        frame->max_processes == 0 ||
-        frame->max_processes > MESH_CAPABILITY_MAX_PROCESSES ||
-        frame->max_concurrency == 0 ||
-        frame->max_concurrency > MESH_CAPABILITY_MAX_CONCURRENCY ||
-        frame->max_wall_milliseconds == 0 ||
-        frame->max_wall_milliseconds >
-            MESH_CAPABILITY_MAX_WALL_MILLISECONDS)
+    if (!proposal_resource_limits_valid(frame) ||
+        !proposal_execution_limits_valid(frame))
         return MESH_CAPABILITY_PROTO_LIMIT;
     return lifetime_valid(frame->not_before_unix, frame->expires_unix)
                ? MESH_CAPABILITY_PROTO_OK

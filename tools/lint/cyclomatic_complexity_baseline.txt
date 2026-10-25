@@ -69,7 +69,6 @@ cognition/modules/session/src/agent_broker_spawn.c:agent_broker_spawn_confined#2
 cognition/modules/session/src/agent_broker_vocab.c:mvap_status_from_grant_verdict:20
 cognition/modules/session/src/fleet_board_proto.c:fleet_board_post_decode:17
 cognition/modules/session/src/fleet_board_proto.c:fleet_board_post_validate:26
-cognition/modules/session/src/mesh_capability_proto.c:proposal_shape:23
 cognition/modules/session/src/mesh_private_object_proto.c:offer_shape:27
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_proto_error_string:16
 cognition/modules/session/src/mesh_terminal_proto.c:mesh_terminal_receipt_v1_matches_open:16
