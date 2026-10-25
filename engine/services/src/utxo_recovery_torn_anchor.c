@@ -101,6 +101,53 @@ static bool urs_coins_kv_is_proven_authority(struct sqlite3 *progress_db)
     return true;
 }
 
+/* Predicate: is node.db open with a live db handle? */
+static bool urs_node_db_is_open(struct node_db *ndb)
+{
+    return ndb && ndb->open && ndb->db;
+}
+
+/* Predicate: is the datadir argument non-NULL and non-empty? */
+static bool urs_datadir_is_present(const char *datadir)
+{
+    return datadir && datadir[0];
+}
+
+/* Predicate: does the legacy mirror already carry a 32-byte
+ * coins_best_block anchor? */
+static bool urs_legacy_anchor_is_set(struct node_db *ndb)
+{
+    uint8_t cur_anchor[32];
+    size_t anchor_len = 0;
+    bool have_anchor = node_db_state_get(ndb, "coins_best_block",
+                                         cur_anchor, sizeof(cur_anchor),
+                                         &anchor_len);
+    return have_anchor && anchor_len == 32;
+}
+
+/* MAX(height) FROM utxos — the height the legacy mirror actually reaches.
+ * Returns -1 when the read does not yield an INTEGER row. */
+static int64_t urs_read_utxos_max_height(struct node_db *ndb)
+{
+    int64_t max_h = -1;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(ndb->db,
+            "SELECT MAX(height) FROM utxos", -1, &st, NULL) == SQLITE_OK) {
+        if (AR_STEP_ROW_READONLY(st) == SQLITE_ROW &&
+            sqlite3_column_type(st, 0) == SQLITE_INTEGER)
+            max_h = sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+    }
+    return max_h;
+}
+
+/* Format the anchor block's 32-byte hash as lowercase hex into hex[65]. */
+static void urs_format_anchor_hash_hex(const struct db_block *blk, char hex[65])
+{
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", blk->hash[i]);
+}
+
 /* wave-3 delete (whole module): the boot call site is gated on !derived
  * (boot.c) AND the derived gate in coins_view_sqlite_check_tip_consistency
  * passes canonical datadirs without consulting the legacy anchor — this
@@ -110,12 +157,12 @@ bool utxo_recovery_heal_torn_legacy_coins_anchor(
     struct sqlite3 *progress_db,
     const char *datadir)
 {
-    if (!ndb || !ndb->open || !ndb->db) {
+    if (!urs_node_db_is_open(ndb)) {
         LOG_WARN("utxo_recovery",
                  "torn-anchor heal: node.db not open; cannot recover");
         return false;
     }
-    if (!datadir || !datadir[0]) {
+    if (!urs_datadir_is_present(datadir)) {
         LOG_WARN("utxo_recovery",
                  "torn-anchor heal: datadir missing; cannot recover");
         return false;
@@ -132,18 +179,11 @@ bool utxo_recovery_heal_torn_legacy_coins_anchor(
                  "shape; preserving FATAL");
         return false;
     }
-    {
-        uint8_t cur_anchor[32];
-        size_t anchor_len = 0;
-        bool have_anchor = node_db_state_get(ndb, "coins_best_block",
-                                             cur_anchor, sizeof(cur_anchor),
-                                             &anchor_len);
-        if (have_anchor && anchor_len == 32) {
-            LOG_INFO("utxo_recovery",
-                     "torn-anchor heal: coins_best_block already set — not "
-                     "the torn-legacy shape; preserving FATAL");
-            return false;
-        }
+    if (urs_legacy_anchor_is_set(ndb)) {
+        LOG_INFO("utxo_recovery",
+                 "torn-anchor heal: coins_best_block already set — not "
+                 "the torn-legacy shape; preserving FATAL");
+        return false;
     }
 
     /* Authority gate: only heal when coins_kv proves the live UTXO set is the
@@ -159,17 +199,7 @@ bool utxo_recovery_heal_torn_legacy_coins_anchor(
      * fast-syncing gets exactly the set the anchor names. (R3: serve_snapshot
      * streams `FROM utxos`; the peer recomputes the SHA3 and rejects a short
      * set — so a too-high anchor would silently break served sync.) */
-    int64_t max_h = -1;
-    {
-        sqlite3_stmt *st = NULL;
-        if (sqlite3_prepare_v2(ndb->db,
-                "SELECT MAX(height) FROM utxos", -1, &st, NULL) == SQLITE_OK) {
-            if (AR_STEP_ROW_READONLY(st) == SQLITE_ROW &&
-                sqlite3_column_type(st, 0) == SQLITE_INTEGER)
-                max_h = sqlite3_column_int64(st, 0);
-            sqlite3_finalize(st);
-        }
-    }
+    int64_t max_h = urs_read_utxos_max_height(ndb);
     if (max_h < 0) {
         LOG_WARN("utxo_recovery",
                  "torn-anchor heal: could not read MAX(height) from utxos; "
@@ -206,8 +236,7 @@ bool utxo_recovery_heal_torn_legacy_coins_anchor(
     }
 
     char hex[65] = {0};
-    for (int i = 0; i < 32; i++)
-        snprintf(hex + i * 2, 3, "%02x", anchor_blk.hash[i]);
+    urs_format_anchor_hash_hex(&anchor_blk, hex);
     LOG_WARN("utxo_recovery",
              "torn-anchor heal: re-seeded coins_best_block to utxos "
              "MAX(height)=%lld hash=%s (coins_kv proven authority) — retrying "
