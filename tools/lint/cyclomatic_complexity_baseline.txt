@@ -2708,7 +2708,6 @@ tools/command/native_zdesc_command.c:zdc_read_seed:16
 tools/command/native_zdesc_command.c:zdc_write_record:25
 tools/command/native_zses_command.c:zcl_native_handle_zses_invite_accept:16
 tools/command/native_zses_command.c:zcl_native_handle_zses_invite_create:28
-tools/consensus_rule_sweep.c:main:16
 tools/core_seal.c:compute_sections:32
 tools/core_seal.c:open_sealed_file:27
 tools/core_seal.c:path_reject_reason:19

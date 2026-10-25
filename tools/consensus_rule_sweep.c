@@ -93,6 +93,53 @@ static bool parse_i32(const char *s, int32_t *out)
     return true;
 }
 
+/* One CLI argument applied to cfg/verbose; main owns all printing. */
+enum crs_arg_result {
+    CRS_ARG_OK,
+    CRS_ARG_HELP,
+    CRS_ARG_BAD_VALUE,
+    CRS_ARG_UNKNOWN,
+};
+
+static enum crs_arg_result parse_sweep_value_arg(const char *a,
+                                                 struct crs_config *cfg)
+{
+    if (strncmp(a, "--tip=", 6) == 0) {
+        if (!parse_i32(a + 6, &cfg->tip))
+            return CRS_ARG_BAD_VALUE;
+        return CRS_ARG_OK;
+    }
+    if (strncmp(a, "--horizon=", 10) == 0) {
+        if (!parse_i32(a + 10, &cfg->horizon))
+            return CRS_ARG_BAD_VALUE;
+        return CRS_ARG_OK;
+    }
+    if (strncmp(a, "--stride=", 9) == 0) {
+        if (!parse_i32(a + 9, &cfg->stride))
+            return CRS_ARG_BAD_VALUE;
+        return CRS_ARG_OK;
+    }
+    if (strncmp(a, "--band=", 7) == 0) {
+        if (!parse_i32(a + 7, &cfg->band))
+            return CRS_ARG_BAD_VALUE;
+        return CRS_ARG_OK;
+    }
+    return CRS_ARG_UNKNOWN;
+}
+
+static enum crs_arg_result parse_sweep_arg(const char *a,
+                                           struct crs_config *cfg,
+                                           bool *verbose)
+{
+    if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0)
+        return CRS_ARG_HELP;
+    if (strcmp(a, "--verbose") == 0) {
+        *verbose = true;
+        return CRS_ARG_OK;
+    }
+    return parse_sweep_value_arg(a, cfg);
+}
+
 static void print_row(const struct crs_row *row, void *ctx)
 {
     (void)ctx;
@@ -122,29 +169,22 @@ int main(int argc, char **argv)
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
+        switch (parse_sweep_arg(a, &cfg, &verbose)) {
+        case CRS_ARG_OK:
+            break;
+        case CRS_ARG_HELP:
             print_usage(stdout);
             return 0;
-        } else if (strcmp(a, "--verbose") == 0) {
-            verbose = true;
-        } else if (strncmp(a, "--tip=", 6) == 0) {
-            if (!parse_i32(a + 6, &cfg.tip)) goto bad_arg;
-        } else if (strncmp(a, "--horizon=", 10) == 0) {
-            if (!parse_i32(a + 10, &cfg.horizon)) goto bad_arg;
-        } else if (strncmp(a, "--stride=", 9) == 0) {
-            if (!parse_i32(a + 9, &cfg.stride)) goto bad_arg;
-        } else if (strncmp(a, "--band=", 7) == 0) {
-            if (!parse_i32(a + 7, &cfg.band)) goto bad_arg;
-        } else {
+        case CRS_ARG_UNKNOWN:
             fprintf(stderr, "consensus_rule_sweep: unknown argument '%s'\n", a);
             print_usage(stderr);
             return 1;
+        case CRS_ARG_BAD_VALUE:
+            fprintf(stderr,
+                    "consensus_rule_sweep: '%s' is not a non-negative int32\n",
+                    a);
+            return 1;
         }
-        continue;
-    bad_arg:
-        fprintf(stderr,
-                "consensus_rule_sweep: '%s' is not a non-negative int32\n", a);
-        return 1;
     }
 
     enum crs_status st = crs_validate_config(&cfg);
