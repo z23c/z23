@@ -121,13 +121,15 @@ static int pc_select(struct pc_opts *o, const struct lint_gate *tab, size_t n)
 
 [[noreturn]] static void pc_child(const struct lint_gate *g, const char *dir)
 {
+    /* Same argv as `z23-lint GATE`: main.c runs g->run(argc-2, argv+2), so
+     * a plain invocation has argc 0 and argv[0] NULL. */
     char *av[2] = { (char *)g->name, NULL };
     int fd = open("/dev/null", O_RDWR);
     if (fd < 0 || chdir(dir) != 0 || dup2(fd, STDOUT_FILENO) < 0
         || dup2(fd, STDERR_FILENO) < 0)
         _exit(PC_RC_SETUP);
     (void)alarm(PC_TIMEOUT_S);
-    _exit(g->run(1, av) & 0xff);
+    _exit(g->run(0, av + 1) & 0xff);
 }
 
 static int pc_spawn(const struct lint_gate *g, const char *dir, pid_t *pid)

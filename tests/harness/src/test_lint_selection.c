@@ -1152,9 +1152,20 @@ static int lsel_pc_clean_run(int argc, char **argv)
     return 0;
 }
 
+/* Refuses any extra argument like a real gate does (gate_flag_registry.c:771):
+ * a gate run as `z23-lint GATE` gets argc 0, so precheck must pass argc 0 too
+ * or this gate fails in both trees and nothing is reported NEW. */
+static int lsel_pc_argv_run(int argc, char **argv)
+{
+    if (argc != 0)
+        return 2;
+    return lsel_pc_no_python_run(argc, argv);
+}
+
 static const struct lint_gate k_lsel_pc_gates[] = {
     { "check-no-python", lsel_pc_no_python_run, NULL },
     { "check-clean", lsel_pc_clean_run, NULL },
+    { "check-argv-no-python", lsel_pc_argv_run, NULL },
 };
 
 const struct lint_gate *lint_gate_table(size_t *n)
@@ -1246,6 +1257,28 @@ static int test_lsel_precheck(void)
     return failures;
 }
 
+/* Witness for the argv convention: check-argv-no-python fails on any extra
+ * argument. Before the fix precheck passed argc 1, so it failed in both trees
+ * and printed nothing; after the fix it reports NEW here and not in clean. */
+static int test_lsel_precheck_argv(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: precheck runs a gate with the plain CLI argv (argc 0)") {
+        struct lsel_pc_fx fx;
+        char base_arg[PATH_MAX + 16], out[512];
+        ASSERT(lsel_pc_plant(&fx));
+        (void)snprintf(base_arg, sizeof(base_arg), "--base=%s", fx.clean);
+        char *argv[] = { base_arg, (char *)"--gates=check-argv-no-python" };
+        ASSERT_EQ(lsel_pc_run(&fx, fx.dirty, argv, 2, out, sizeof(out)), 1);
+        ASSERT(strstr(out, "NEW check-argv-no-python rc=1\n") != NULL);
+        ASSERT(strstr(out, "precheck: 1 new failure(s) of 1 gates\n") != NULL);
+        ASSERT_EQ(lsel_pc_run(&fx, fx.clean, argv, 2, out, sizeof(out)), 0);
+        ASSERT(strstr(out, "NEW ") == NULL);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
 static int test_lsel_precheck_usage(void)
 {
     int failures = 0;
@@ -1265,6 +1298,7 @@ int test_lint_selection(void)
     int failures = 0;
     failures += test_lsel_precheck();
     failures += test_lsel_precheck_usage();
+    failures += test_lsel_precheck_argv();
     failures += test_lsel_doc_claims();
     failures += test_lsel_doc_claims_kind_change();
     failures += test_lsel_per_file_gate();
