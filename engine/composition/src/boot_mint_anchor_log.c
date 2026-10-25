@@ -63,6 +63,51 @@ static void mint_stage_ewma_collect(const char *abbrev_out[8], int64_t ewma_out[
     ewma_out[7] = tip_finalize_stage_step_us_ewma();
 }
 
+/* Interval rate, ETA and elapsed for one mint-progress.log line. */
+static void mint_progress_rate_eta(int64_t since_us, int32_t through,
+                                   int32_t last_write_h, int32_t anchor,
+                                   int64_t now_us, int64_t start_us,
+                                   double *rate_out, long *eta_s_out,
+                                   double *elapsed_s_out)
+{
+    double interval_s = since_us > 0 ? (double)since_us / 1e6 : 0.0;
+    int32_t d_h       = through - last_write_h;
+    double  rate      = interval_s > 0.0 ? (double)d_h / interval_s : 0.0;
+    int32_t remaining = anchor > through ? anchor - through : 0;
+    long    eta_s     = rate > 0.0 ? (long)((double)remaining / rate) : -1;
+    double  elapsed_s = start_us > 0 ? (double)(now_us - start_us) / 1e6 : 0.0;
+
+    *rate_out = rate;
+    *eta_s_out = eta_s;
+    *elapsed_s_out = elapsed_s;
+}
+
+/* Index of the stage with the largest step_us_ewma. A tie keeps the
+ * earlier stage (strict greater-than). */
+static int mint_stage_ewma_slowest(const int64_t stage_ewma[8])
+{
+    int slow = 0;
+    for (int i = 1; i < 8; i++)
+        if (stage_ewma[i] > stage_ewma[slow])
+            slow = i;
+    return slow;
+}
+
+/* Format the eight stage ewma tokens into stages_buf. n is the buffer
+ * size; stop before a token or the closing bracket would truncate. */
+static void mint_progress_stages_format(char *stages_buf, size_t n,
+                                        const char *stage_abbrev[8],
+                                        const int64_t stage_ewma[8])
+{
+    int  off = snprintf(stages_buf, n, "stages=[");
+    for (int i = 0; i < 8 && off > 0 && (size_t)off < n; i++)
+        off += snprintf(stages_buf + off, n - (size_t)off,
+                        "%s%s:%lldus", i == 0 ? "" : " ", stage_abbrev[i],
+                        (long long)stage_ewma[i]);
+    if (off > 0 && (size_t)off < n)
+        snprintf(stages_buf + off, n - (size_t)off, "]");
+}
+
 /* Append one throttled progress line to the on-disk mint-progress.log so a
  * long fold is observable FROM DISK. Throttled to ~every 5s of wall time; the
  * final-anchor line is always written. Rate is computed over the interval since
@@ -94,33 +139,24 @@ void boot_mint_anchor_progress_log_tick(const char *path, int32_t through,
     if (!force && since_us < kEveryUs)
         return;
 
-    double interval_s = since_us > 0 ? (double)since_us / 1e6 : 0.0;
-    int32_t d_h       = through - last_write_h;
-    double  rate      = interval_s > 0.0 ? (double)d_h / interval_s : 0.0;
-    int32_t remaining = anchor > through ? anchor - through : 0;
-    long    eta_s     = rate > 0.0 ? (long)((double)remaining / rate) : -1;
-    double  elapsed_s = start_us > 0 ? (double)(now_us - start_us) / 1e6 : 0.0;
+    double rate;
+    long   eta_s;
+    double elapsed_s;
+    mint_progress_rate_eta(since_us, through, last_write_h, anchor, now_us,
+                           start_us, &rate, &eta_s, &elapsed_s);
 
     const char *stage_abbrev[8];
     int64_t     stage_ewma[8];
     mint_stage_ewma_collect(stage_abbrev, stage_ewma);
-    int slow = 0;
-    for (int i = 1; i < 8; i++)
-        if (stage_ewma[i] > stage_ewma[slow])
-            slow = i;
+    int slow = mint_stage_ewma_slowest(stage_ewma);
     /* Outer batch-COMMIT wall time — kept OUT of the slow= max scan above
      * (it is not one of the eight stages); a separate token so the remaining
      * per-batch fsync cost is visible next to the per-step timings. */
     int64_t commit_ewma = stage_batch_commit_us_ewma();
 
     char stages_buf[240];
-    int  off = snprintf(stages_buf, sizeof(stages_buf), "stages=[");
-    for (int i = 0; i < 8 && off > 0 && (size_t)off < sizeof(stages_buf); i++)
-        off += snprintf(stages_buf + off, sizeof(stages_buf) - (size_t)off,
-                        "%s%s:%lldus", i == 0 ? "" : " ", stage_abbrev[i],
-                        (long long)stage_ewma[i]);
-    if (off > 0 && (size_t)off < sizeof(stages_buf))
-        snprintf(stages_buf + off, sizeof(stages_buf) - (size_t)off, "]");
+    mint_progress_stages_format(stages_buf, sizeof(stages_buf), stage_abbrev,
+                                stage_ewma);
 
     /* pv lookahead cache hit rate (jobs/pv_lookahead.h): hits/misses since the
      * pool started. 0/0 when the pool is off (misses count only while it runs). */
