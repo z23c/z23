@@ -132,8 +132,6 @@ cognition/services/src/agent_broker_catalog_seam.c:resolve:24
 cognition/services/src/agent_broker_catalog_seam.c:spec_scope:19
 cognition/services/src/agent_broker_provider.c:authorize_attempt:20
 cognition/services/src/agent_broker_provider.c:provider_bind:20
-cognition/services/src/agent_spend_policy.c:agent_spend_policy_evaluate:28
-cognition/services/src/agent_spend_policy.c:asp_authorize_intent_plan:25
 cognition/services/src/dev_reflex_policy_service.c:handoff_validate:24
 cognition/services/src/dev_reflex_policy_service.c:project_cycle:59
 cognition/services/src/experience_compilation_service.c:experience_compile_checked:41

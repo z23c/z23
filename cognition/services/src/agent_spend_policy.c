@@ -81,13 +81,13 @@ struct asp_surface {
  *                                     file it reads is not one the session
  *                                     granted.
  *   core.wallet.rescan / .replay /
- *   .rescan-witnesses               — whole-chain work, not an agent's job.
+ *   core.wallet.rescan-witnesses    — whole-chain work, not an agent's job.
  *   vault.swap.redeem / .refund     — custody settlement with no amount to
  *                                     bound; an unbounded action is not a
  *                                     bounded one.
  *   vault.session.*                 — the grant surface itself (refused by
  *                                     the grant rule before this table is
- *                                     even consulted). */
+ *                                     even consulted).*/
 static const struct asp_surface g_surface[] = {
     /* spends */
     { "core.wallet.transaction.send", ASP_SPEND, "amount", "address" },
@@ -185,13 +185,78 @@ static bool asp_wallet_scope(const struct json_value *input,
     return true;
 }
 
+/* A named field of the invocation's input object, or NULL when the input is
+ * not an object at all — the keyed lookups below all start from this shape. */
+static const struct json_value *asp_input_field(const struct json_value *input,
+                                                const char *key)
+{
+    return (input && input->type == JSON_OBJ) ? json_get(input, key) : NULL;
+}
+
+/* A string field read out of one intent effect, NULL when the effect is not
+ * an object and so has no fields to read (the caller refuses it). */
+static const char *asp_intent_effect_str(const struct json_value *effect,
+                                         const char *key)
+{
+    return effect && effect->type == JSON_OBJ
+        ? json_get_str(json_get(effect, key)) : NULL;
+}
+
+/* Sum the plan's effects into an exact zatoshi total. Each effect must be a
+ * ZCL payment to a named recipient with an exact decimal amount; anything
+ * else would leave the plan unbounded, so the whole plan is refused rather
+ * than partially summed. */
+static bool asp_sum_intent_effects(const struct json_value *effects,
+                                   int64_t *total_out)
+{
+    int64_t total = 0;
+    for (size_t i = 0; i < effects->num_children; i++) {
+        const struct json_value *effect = json_at(effects, i);
+        const char *asset = asp_intent_effect_str(effect, "asset");
+        const char *to = asp_intent_effect_str(effect, "to");
+        const char *amount = asp_intent_effect_str(effect, "amount");
+        int64_t value = 0;
+        if (!asset || strcmp(asset, "ZCL") != 0 || !to || !to[0] ||
+            !vault_intent_parse_zcl_amount(amount, &value) ||
+            total > INT64_MAX - value)
+            return false;
+        total += value;
+    }
+    *total_out = total;
+    return true;
+}
+
+/* Bind the plan at the store: one authorize round trip per effect, the first
+ * carrying the plan's total, the rest confirming each exact recipient. why
+ * is recleared before every call, exactly as the per-iteration buffer this
+ * loop replaced was, so a refusal reports only that call's reason. */
+static bool asp_bind_intent_effects(const char *session_id,
+                                    const struct json_value *effects,
+                                    int64_t total, const char *scope,
+                                    struct agent_spend_policy_decision *out,
+                                    char *why, size_t why_size)
+{
+    for (size_t i = 0; i < effects->num_children; i++) {
+        const struct json_value *effect = json_at(effects, i);
+        /* the sum pass above refused every effect that is not an object */
+        const char *to = json_get_str(json_get(effect, "to"));
+        int64_t remaining = 0, charged = 0;
+        memset(why, 0, why_size);
+        if (!agent_session_client_authorize(
+                session_id, i == 0 ? total : 0, to, scope, false, true,
+                &remaining, &charged, why, why_size))
+            return false;
+        out->window_remaining_zat = remaining;
+    }
+    return true;
+}
+
 static void asp_authorize_intent_plan(
     const char *session_id, const char *leaf,
     const struct json_value *input, struct agent_spend_policy_decision *out)
 {
     const char *scope = NULL;
-    const struct json_value *effects = input && input->type == JSON_OBJ
-        ? json_get(input, "effects") : NULL;
+    const struct json_value *effects = asp_input_field(input, "effects");
     if (!asp_wallet_scope(input, &scope)) {
         asp_refuse(out, "POLICY_WALLET_SCOPE",
                    "every agent intent must explicitly name dev or prod",
@@ -206,38 +271,18 @@ static void asp_authorize_intent_plan(
         return;
     }
     int64_t total = 0;
-    for (size_t i = 0; i < effects->num_children; i++) {
-        const struct json_value *effect = json_at(effects, i);
-        const char *asset = effect && effect->type == JSON_OBJ
-            ? json_get_str(json_get(effect, "asset")) : NULL;
-        const char *to = effect && effect->type == JSON_OBJ
-            ? json_get_str(json_get(effect, "to")) : NULL;
-        const char *amount = effect && effect->type == JSON_OBJ
-            ? json_get_str(json_get(effect, "amount")) : NULL;
-        int64_t value = 0;
-        if (!asset || strcmp(asset, "ZCL") != 0 || !to || !to[0] ||
-            !vault_intent_parse_zcl_amount(amount, &value) ||
-            total > INT64_MAX - value) {
-            asp_refuse(out, "POLICY_AMOUNT",
-                       "each intent effect needs asset=ZCL, recipient, and "
-                       "an exact decimal amount", leaf);
-            return;
-        }
-        total += value;
+    if (!asp_sum_intent_effects(effects, &total)) {
+        asp_refuse(out, "POLICY_AMOUNT",
+                   "each intent effect needs asset=ZCL, recipient, and "
+                   "an exact decimal amount", leaf);
+        return;
     }
-    for (size_t i = 0; i < effects->num_children; i++) {
-        const struct json_value *effect = json_at(effects, i);
-        const char *to = json_get_str(json_get(effect, "to"));
-        int64_t remaining = 0, charged = 0;
-        char why[64] = { 0 };
-        if (!agent_session_client_authorize(
-                session_id, i == 0 ? total : 0, to, scope, false, true,
-                &remaining, &charged, why, sizeof(why))) {
-            asp_refuse(out, why[0] ? why : "POLICY_STORE",
-                       "the session refused the exact intent plan", leaf);
-            return;
-        }
-        out->window_remaining_zat = remaining;
+    char why[64] = { 0 };
+    if (!asp_bind_intent_effects(session_id, effects, total, scope, out,
+                                 why, sizeof(why))) {
+        asp_refuse(out, why[0] ? why : "POLICY_STORE",
+                   "the session refused the exact intent plan", leaf);
+        return;
     }
     asp_allow(out);
 }
@@ -311,6 +356,127 @@ static int64_t asp_amount_zat(const struct json_value *amt, bool *ok)
     return (int64_t)llround(v * ASP_ZAT_PER_ZCL);
 }
 
+/* Default deny over the money surface and over every mutation. A plain read
+ * the policy has no opinion about stays allowed, so a bounded agent can
+ * still see the node. */
+static void asp_decide_unknown_leaf(const struct zcl_command_spec *spec,
+                                    struct agent_spend_policy_decision *out)
+{
+    bool touches_wallet =
+        (spec->required_capabilities & ZCL_COMMAND_CAP_WALLET_REQUEST) != 0;
+    bool mutates = spec->effect != ZCL_COMMAND_EFFECT_READ;
+    bool risky = spec->risk >= ZCL_COMMAND_RISK_WALLET;
+    if (touches_wallet || mutates || risky) {
+        asp_refuse(out, "POLICY_NOT_UNDERSTOOD",
+                   "this leaf touches wallet or node state and the agent "
+                   "spend policy has no rule bounding it, so it is "
+                   "refused for a bounded session", spec->path);
+        return;
+    }
+    asp_allow(out);
+}
+
+/* Bound an understood spend by the amount and recipient keys the table names
+ * for it, refusing at each step that would leave the spend unbounded. */
+static void asp_authorize_spend(const char *session_id, const char *leaf,
+                                const struct asp_surface *s,
+                                const struct json_value *input,
+                                bool committing,
+                                struct agent_spend_policy_decision *out)
+{
+    const struct json_value *amt = asp_input_field(input, s->amount_key);
+    if (!amt) {
+        asp_refuse(out, "POLICY_AMOUNT",
+                   "a spend leaf was dispatched without its amount, so the "
+                   "policy cannot bound it", leaf);
+        return;
+    }
+    bool aok = false;
+    int64_t amount_zat = asp_amount_zat(amt, &aok);
+    if (!aok) {
+        asp_refuse(out, "POLICY_AMOUNT",
+                   "amount is not a non-negative ZCL decimal", leaf);
+        return;
+    }
+    /* An amount above the whole money supply cannot clear any cap, and the
+     * saturating parse deliberately lands one zatoshi past it — refuse here
+     * with the per-tx token rather than letting it reach the store as an
+     * out-of-range argument, which would report a store error for what is
+     * plainly a limit refusal. (A session may legitimately carry MAX_ZAT as
+     * its "unbounded" cap, so saturating AT the maximum would be allowed.) */
+    if (amount_zat > AGENT_SESSION_MAX_ZAT) {
+        asp_refuse(out, "POLICY_TX_LIMIT",
+                   "amount exceeds the entire money supply, so it exceeds "
+                   "every possible per-tx cap", leaf);
+        return;
+    }
+    const char *recipient = NULL;
+    if (s->recipient_key)
+        recipient = json_get_str(json_get(input, s->recipient_key));
+
+    const char *wallet_scope = NULL;
+    if (!asp_wallet_scope(input, &wallet_scope)) {
+        asp_refuse(out, "POLICY_WALLET_SCOPE",
+                   "every agent spend must explicitly name wallet_scope as "
+                   "dev or prod; no CLI default may select custody",
+                   leaf);
+        return;
+    }
+
+    /* One round trip that both checks and (when committing) debits — the node
+     * owns the store and performs those as a single indivisible step, so there
+     * is no window between them for a second invocation to slip through. */
+    char why[64] = { 0 };
+    int64_t charged_zat = 0;
+    if (!agent_session_client_authorize(session_id, amount_zat, recipient,
+                                        wallet_scope, committing, false,
+                                        &out->window_remaining_zat,
+                                        &charged_zat,
+                                        why, sizeof(why))) {
+        asp_refuse(out, why[0] ? why : "POLICY_STORE",
+                   committing ? "the session's spend policy refused this spend"
+                              : "the session's spend policy refused this plan",
+                   leaf);
+        return;
+    }
+    out->debited_zat = committing ? charged_zat : 0;
+    asp_allow(out);
+}
+
+/* A leaf the table knows: route its class to its decision. Every class is
+ * terminal here except ASP_SPEND, the one the policy still has to bound
+ * field by field. */
+static void asp_decide_listed_leaf(const char *session_id, const char *leaf,
+                                   const struct asp_surface *s,
+                                   const struct json_value *input,
+                                   bool committing,
+                                   struct agent_spend_policy_decision *out)
+{
+    if (s->klass == ASP_WALLET_READ) {
+        asp_allow(out);
+        return;
+    }
+    if (s->klass == ASP_UNBOUNDABLE) {
+        asp_refuse(out, "POLICY_UNBOUNDABLE",
+                   "this leaf reads arbitrary node state, including material "
+                   "whose possession authorizes a spend, so a bounded session "
+                   "may not run it — run it as the local operator, with "
+                   "ZCL_AGENT_SESSION unset", leaf);
+        return;
+    }
+    if (s->klass == ASP_INTENT_PLAN) {
+        asp_authorize_intent_plan(session_id, leaf, input, out);
+        return;
+    }
+    if (s->klass == ASP_INTENT_COMMIT) {
+        asp_authorize_intent_commit(session_id, leaf, input, out);
+        return;
+    }
+
+    /* ── an understood spend ─────────────────────────────────────────────── */
+    asp_authorize_spend(session_id, leaf, s, input, committing, out);
+}
+
 void agent_spend_policy_evaluate(const char *session_id,
                                  const struct zcl_command_spec *spec,
                                  const struct json_value *input,
@@ -347,105 +513,10 @@ void agent_spend_policy_evaluate(const char *session_id,
 
     const struct asp_surface *s = asp_lookup(spec->path);
     if (!s) {
-        /* Default deny over the money surface and over every mutation. A
-         * plain read the policy has no opinion about stays allowed, so a
-         * bounded agent can still see the node. */
-        bool touches_wallet =
-            (spec->required_capabilities & ZCL_COMMAND_CAP_WALLET_REQUEST) != 0;
-        bool mutates = spec->effect != ZCL_COMMAND_EFFECT_READ;
-        bool risky = spec->risk >= ZCL_COMMAND_RISK_WALLET;
-        if (touches_wallet || mutates || risky) {
-            asp_refuse(out, "POLICY_NOT_UNDERSTOOD",
-                       "this leaf touches wallet or node state and the agent "
-                       "spend policy has no rule bounding it, so it is "
-                       "refused for a bounded session", spec->path);
-            return;
-        }
-        asp_allow(out);
+        asp_decide_unknown_leaf(spec, out);
         return;
     }
-    if (s->klass == ASP_WALLET_READ) {
-        asp_allow(out);
-        return;
-    }
-    if (s->klass == ASP_UNBOUNDABLE) {
-        asp_refuse(out, "POLICY_UNBOUNDABLE",
-                   "this leaf reads arbitrary node state, including material "
-                   "whose possession authorizes a spend, so a bounded session "
-                   "may not run it — run it as the local operator, with "
-                   "ZCL_AGENT_SESSION unset", spec->path);
-        return;
-    }
-    if (s->klass == ASP_INTENT_PLAN) {
-        asp_authorize_intent_plan(session_id, spec->path, input, out);
-        return;
-    }
-    if (s->klass == ASP_INTENT_COMMIT) {
-        asp_authorize_intent_commit(session_id, spec->path, input, out);
-        return;
-    }
-
-    /* ── an understood spend ─────────────────────────────────────────────── */
-    const struct json_value *amt =
-        (input && input->type == JSON_OBJ) ? json_get(input, s->amount_key)
-                                           : NULL;
-    if (!amt) {
-        asp_refuse(out, "POLICY_AMOUNT",
-                   "a spend leaf was dispatched without its amount, so the "
-                   "policy cannot bound it", spec->path);
-        return;
-    }
-    bool aok = false;
-    int64_t amount_zat = asp_amount_zat(amt, &aok);
-    if (!aok) {
-        asp_refuse(out, "POLICY_AMOUNT",
-                   "amount is not a non-negative ZCL decimal", spec->path);
-        return;
-    }
-    /* An amount above the whole money supply cannot clear any cap, and the
-     * saturating parse deliberately lands one zatoshi past it — refuse here
-     * with the per-tx token rather than letting it reach the store as an
-     * out-of-range argument, which would report a store error for what is
-     * plainly a limit refusal. (A session may legitimately carry MAX_ZAT as
-     * its "unbounded" cap, so saturating AT the maximum would be allowed.) */
-    if (amount_zat > AGENT_SESSION_MAX_ZAT) {
-        asp_refuse(out, "POLICY_TX_LIMIT",
-                   "amount exceeds the entire money supply, so it exceeds "
-                   "every possible per-tx cap", spec->path);
-        return;
-    }
-    const char *recipient = NULL;
-    if (s->recipient_key)
-        recipient = json_get_str(json_get(input, s->recipient_key));
-
-    const char *wallet_scope = json_get_str(json_get(input, "wallet_scope"));
-    if (!wallet_scope || (strcmp(wallet_scope, "dev") != 0 &&
-                          strcmp(wallet_scope, "prod") != 0)) {
-        asp_refuse(out, "POLICY_WALLET_SCOPE",
-                   "every agent spend must explicitly name wallet_scope as "
-                   "dev or prod; no CLI default may select custody",
-                   spec->path);
-        return;
-    }
-
-    /* One round trip that both checks and (when committing) debits — the node
-     * owns the store and performs those as a single indivisible step, so there
-     * is no window between them for a second invocation to slip through. */
-    char why[64] = { 0 };
-    int64_t charged_zat = 0;
-    if (!agent_session_client_authorize(session_id, amount_zat, recipient,
-                                        wallet_scope, committing, false,
-                                        &out->window_remaining_zat,
-                                        &charged_zat,
-                                        why, sizeof(why))) {
-        asp_refuse(out, why[0] ? why : "POLICY_STORE",
-                   committing ? "the session's spend policy refused this spend"
-                              : "the session's spend policy refused this plan",
-                   spec->path);
-        return;
-    }
-    out->debited_zat = committing ? charged_zat : 0;
-    asp_allow(out);
+    asp_decide_listed_leaf(session_id, spec->path, s, input, committing, out);
 }
 
 void agent_spend_policy_release(
