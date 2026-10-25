@@ -561,6 +561,58 @@ enum telemetry_verdict telemetry_field_evaluate(
     return TV_NOT_JUDGED;
 }
 
+/* One unhealthy field row becomes one finding object: the leaf's value as it
+ * appeared in the dump (int and bool leaves only), then the ontology's own
+ * words for what the row means and what to do next. */
+static void push_unhealthy_finding_json(struct json_value *findings,
+                                        const struct telemetry_field *f,
+                                        const struct json_value *value,
+                                        enum telemetry_verdict verdict)
+{
+    char range[192];
+    telemetry_field_healthy_range(f, range, sizeof(range));
+    struct json_value obj = {0};
+    json_set_object(&obj);
+    json_push_kv_str(&obj, "path", f->path);
+    if (value && value->type == JSON_INT)
+        json_push_kv_int(&obj, "value", json_get_int(value));
+    else if (value && value->type == JSON_BOOL)
+        json_push_kv_bool(&obj, "value", json_get_bool(value));
+    json_push_kv_str(&obj, "verdict", telemetry_verdict_name(verdict));
+    json_push_kv_str(&obj, "severity",
+                     telemetry_severity_name(f->severity));
+    json_push_kv_str(&obj, "unit", telemetry_unit_name(f->unit));
+    json_push_kv_str(&obj, "healthy_range", range);
+    json_push_kv_str(&obj, "means", f->means);
+    json_push_kv_str(&obj, "implies", f->implies);
+    json_push_kv_str(&obj, "next", f->next);
+    json_push_back(findings, &obj);
+    json_free(&obj);
+}
+
+/* Judge one field row against the dump, fold its verdict into the running
+ * counters, and append the finding object when the verdict is unhealthy. */
+static void annotate_field_row(const struct telemetry_field *f,
+                               const struct json_value *dump,
+                               struct json_value *findings,
+                               int64_t *evaluated, int64_t *unhealthy,
+                               int64_t *absent, int64_t *critical)
+{
+    const struct json_value *value = NULL;
+    enum telemetry_verdict verdict =
+        telemetry_field_evaluate(f, dump, &value);
+    if (verdict == TV_HEALTHY || verdict == TV_UNHEALTHY)
+        (*evaluated)++;
+    if (verdict == TV_ABSENT)
+        (*absent)++;
+    if (verdict != TV_UNHEALTHY)
+        return;
+    (*unhealthy)++;
+    if (f->severity == TFS_CRITICAL)
+        (*critical)++;
+    push_unhealthy_finding_json(findings, f, value, verdict);
+}
+
 bool telemetry_ontology_annotate(const char *subsystem,
                                  const struct json_value *dump,
                                  struct json_value *out)
@@ -592,38 +644,8 @@ bool telemetry_ontology_annotate(const char *subsystem,
         const struct telemetry_field *f = &g_fields[i];
         if (strcmp(f->subsystem, subsystem) != 0)
             continue;
-        const struct json_value *value = NULL;
-        enum telemetry_verdict verdict =
-            telemetry_field_evaluate(f, dump, &value);
-        if (verdict == TV_HEALTHY || verdict == TV_UNHEALTHY)
-            evaluated++;
-        if (verdict == TV_ABSENT)
-            absent++;
-        if (verdict != TV_UNHEALTHY)
-            continue;
-        unhealthy++;
-        if (f->severity == TFS_CRITICAL)
-            critical++;
-
-        char range[192];
-        telemetry_field_healthy_range(f, range, sizeof(range));
-        struct json_value obj = {0};
-        json_set_object(&obj);
-        json_push_kv_str(&obj, "path", f->path);
-        if (value && value->type == JSON_INT)
-            json_push_kv_int(&obj, "value", json_get_int(value));
-        else if (value && value->type == JSON_BOOL)
-            json_push_kv_bool(&obj, "value", json_get_bool(value));
-        json_push_kv_str(&obj, "verdict", telemetry_verdict_name(verdict));
-        json_push_kv_str(&obj, "severity",
-                         telemetry_severity_name(f->severity));
-        json_push_kv_str(&obj, "unit", telemetry_unit_name(f->unit));
-        json_push_kv_str(&obj, "healthy_range", range);
-        json_push_kv_str(&obj, "means", f->means);
-        json_push_kv_str(&obj, "implies", f->implies);
-        json_push_kv_str(&obj, "next", f->next);
-        json_push_back(&findings, &obj);
-        json_free(&obj);
+        annotate_field_row(f, dump, &findings, &evaluated, &unhealthy,
+                           &absent, &critical);
     }
 
     json_push_kv_int(out, "rules_evaluated", evaluated);
