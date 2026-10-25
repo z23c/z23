@@ -214,15 +214,7 @@ legacy_policy_rebuild_allowed() {
 }
 
 rebuild_legacy_policy() {
-    [ -s "$ROOT/$TOR_TREE/Makefile" ] || {
-        echo 'tor-ready: legacy rebuild requires generated Tor Makefile; run make tor-full intentionally' >&2
-        return 1
-    }
-    make -C "$ROOT/$TOR_TREE" clean || {
-        echo 'tor-ready: legacy Tor clean failed; no policy was upgraded' >&2
-        return 1
-    }
-    VENDOR_TARGET="$TRIPLE" "$ROOT/tools/scripts/build_tor_full.sh" || return 1
+    VENDOR_TARGET="$TRIPLE" "$ROOT/tools/scripts/build_tor_full.sh" --clean-rebuild || return 1
     have_all
 }
 

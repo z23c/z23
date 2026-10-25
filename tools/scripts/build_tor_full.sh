@@ -15,6 +15,12 @@
 
 set -euo pipefail
 
+case "$#:${1-}" in
+    0:) clean_rebuild=false ;;
+    1:--clean-rebuild) clean_rebuild=true ;;
+    *) echo 'usage: build_tor_full.sh [--clean-rebuild]' >&2; exit 2 ;;
+esac
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TOR_DIR="$ROOT/vendor/tor"
 
@@ -287,11 +293,12 @@ fi
 mkdir -p "$TOR_BUILD_DIR"
 
 configure_args=""
-if [ -x "$TOR_BUILD_DIR/config.status" ]; then
+# Migration may inherit a donor-bound config.status; never execute it.
+if [ "$clean_rebuild" != true ] && [ -x "$TOR_BUILD_DIR/config.status" ]; then
     configure_args="$($TOR_BUILD_DIR/config.status --config 2>/dev/null || true)"
 fi
 configured=false
-if zcl_tor_configure_args_match "$configure_args" "${configure_opts[@]}"; then
+if [ "$clean_rebuild" != true ] && zcl_tor_configure_args_match "$configure_args" "${configure_opts[@]}"; then
     configured=true
 fi
 
@@ -307,6 +314,10 @@ case "$jobs" in
     ''|*[!0-9]*) echo "tor-full: ZCL_TOR_JOBS must be a positive integer" >&2; exit 2 ;;
     0) echo "tor-full: ZCL_TOR_JOBS must be greater than zero" >&2; exit 2 ;;
 esac
+# Configure above wrote a local Makefile before clean touches artifacts.
+if [ "$clean_rebuild" = true ]; then
+    make -C "$TOR_BUILD_DIR" -j"$jobs" clean
+fi
 make -C "$TOR_BUILD_DIR" -j"$jobs" libtor.a
 
 for archive in \
