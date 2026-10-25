@@ -722,11 +722,6 @@ contexts/wallet/controllers/src/wallet_shielded_send_shielded.c:z_sendmany_shiel
 contexts/wallet/controllers/src/wallet_view_controller.c:wallet_view_handle_request:27
 contexts/wallet/controllers/src/wallet_view_dashboard.c:serve_dashboard:46
 contexts/wallet/controllers/src/wallet_view_emit.c:qr_place_finder:19
-contexts/wallet/controllers/src/wallet_view_helpers.c:wv_format_relative_time:16
-contexts/wallet/controllers/src/wallet_view_helpers.c:wv_get_all_funded_taddrs:19
-contexts/wallet/controllers/src/wallet_view_helpers.c:wv_get_funded_zaddr:21
-contexts/wallet/controllers/src/wallet_view_helpers.c:wv_rpc_call:32
-contexts/wallet/controllers/src/wallet_view_helpers.c:wv_zclassicd_auth:16
 contexts/wallet/controllers/src/wallet_view_node.c:serve_node:20
 contexts/wallet/controllers/src/wallet_view_send.c:serve_send_confirm:17
 contexts/wallet/controllers/src/wallet_view_send.c:serve_send_review:16
