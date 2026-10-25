@@ -16,6 +16,25 @@
 
 #include <string.h>
 
+/* Reads the manifest's fixed field sequence from s into out, stopping at
+ * the first failing read; parse() turns a false here into the typed
+ * truncated-manifest error. */
+static bool snapshot_manifest_read_fields(struct snapshot_manifest *out,
+                                          struct byte_stream *s)
+{
+    return stream_read_i32_le(s, &out->height) &&
+           stream_read_bytes(s, out->block_hash, 32) &&
+           stream_read_bytes(s, out->utxo_root, 32) &&
+           stream_read_bytes(s, out->mmr_root, 32) &&
+           stream_read_u64_le(s, &out->num_utxos) &&
+           stream_read_u64_le(s, &out->total_bytes) &&
+           stream_read_bytes(s, out->mmb_root, 32) &&
+           stream_read_u32_le(s, &out->protocol_version) &&
+           stream_read_u32_le(s, &out->snapshot_schema_version) &&
+           stream_read_i32_le(s, &out->peer_tip_height) &&
+           stream_read_bytes(s, out->chain_work, 32);
+}
+
 /* Local error-code band for this file: -1..-3 (one per failure path).
  * The typed enum out-param still travels with every failure (the
  * wire-level rejection reason callers switch on, per the file header);
@@ -34,17 +53,7 @@ struct zcl_result snapshot_manifest_parse(struct snapshot_manifest *out,
     }
 
     memset(out, 0, sizeof(*out));
-    if (!stream_read_i32_le(s, &out->height) ||
-        !stream_read_bytes(s, out->block_hash, 32) ||
-        !stream_read_bytes(s, out->utxo_root, 32) ||
-        !stream_read_bytes(s, out->mmr_root, 32) ||
-        !stream_read_u64_le(s, &out->num_utxos) ||
-        !stream_read_u64_le(s, &out->total_bytes) ||
-        !stream_read_bytes(s, out->mmb_root, 32) ||
-        !stream_read_u32_le(s, &out->protocol_version) ||
-        !stream_read_u32_le(s, &out->snapshot_schema_version) ||
-        !stream_read_i32_le(s, &out->peer_tip_height) ||
-        !stream_read_bytes(s, out->chain_work, 32)) {
+    if (!snapshot_manifest_read_fields(out, s)) {
         if (result)
             *result = SNAPSHOT_MANIFEST_TRUNCATED;
         return ZCL_ERR(-2,
