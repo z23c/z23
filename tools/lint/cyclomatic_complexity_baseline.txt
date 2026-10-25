@@ -7,7 +7,6 @@
 # A shrunk function still over the cap passes; --tighten-baseline lowers its pin.
 apps/skycombat/src/models/weapons.c:weapons_draw:21
 apps/skycombat/src/models/weapons.c:weapons_update:25
-apps/skycombat/src/views/combat_effects.c:effects_update:26
 cognition/controllers/src/event_agent_summary.c:rpc_agent_summary:30
 cognition/modules/codeindex/src/codeindex_build_store.c:ci_build_store_memory:26
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_copy_image:23

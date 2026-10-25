@@ -301,13 +301,7 @@ void effects_screen_flash(effects_manager_t* manager, Color color,[[maybe_unused
     manager->flash_intensity = 1.0f;
 }
 
-void effects_update(effects_manager_t* manager, float dt) {
-    if (!manager) return;
-    
-    // Apply time scaling
-    dt *= manager->time_scale;
-    
-    // Update bullet time
+static void effects_update_bullet_time(effects_manager_t* manager, float dt) {
     if (manager->bullet_time_active) {
         manager->bullet_time_remaining -= dt;
         if (manager->bullet_time_remaining <= 0) {
@@ -317,73 +311,88 @@ void effects_update(effects_manager_t* manager, float dt) {
             manager->motion_blur = 0;
         }
     }
-    
-    // Update visual effects
-    for (int i = 0; i < manager->max_effects; i++) {
-        visual_effect_t* effect = &manager->effects[i];
-        if (!effect->active) continue;
-        
-        effect->elapsed += dt;
-        if (effect->elapsed >= effect->duration) {
-            effect->active = false;
-            manager->active_effects--;
-            continue;
-        }
-        
-        // Update effect-specific particles
-        for (int j = 0; j < effect->particle_count; j++) {
-            particle_t* p = &effect->particles[j];
-            if (!p->active) continue;
-            
-            p->position = Vector3Add(p->position, Vector3Scale(p->velocity, dt));
-            p->life -= dt / p->max_life;
-            
-            if (p->has_gravity) {
-                p->velocity.y -= 50.0f * dt;  // Gravity
-            }
-            
-            if (p->life <= 0) {
-                p->active = false;
-            }
-        }
-        
-        // Special effect updates
-        switch (effect->type) {
-            case EFFECT_SHIELD_HIT:
-                // Expanding ripple
-                effect->radius = (effect->elapsed / effect->duration) * effect->scale.x;
-                break;
-                
-            case EFFECT_EXPLOSION:
-                // Expanding shockwave
-                effect->intensity = 1.0f - (effect->elapsed / effect->duration);
-                break;
-            default: break;
-        }
-    }
-    
-    // Update global particles
-    for (int i = 0; i < manager->max_particles; i++) {
-        particle_t* p = &manager->global_particles[i];
+}
+
+static void effects_update_effect_particles(visual_effect_t* effect, float dt) {
+    // Update effect-specific particles
+    for (int j = 0; j < effect->particle_count; j++) {
+        particle_t* p = &effect->particles[j];
         if (!p->active) continue;
         
         p->position = Vector3Add(p->position, Vector3Scale(p->velocity, dt));
         p->life -= dt / p->max_life;
         
-        // Fade out
-        p->color.a = (unsigned char)(p->life * 255);
-        
         if (p->has_gravity) {
-            p->velocity.y -= 30.0f * dt;
+            p->velocity.y -= 50.0f * dt;  // Gravity
         }
         
         if (p->life <= 0) {
             p->active = false;
-            manager->active_particles--;
         }
     }
+}
+
+static void effects_update_single_effect(effects_manager_t* manager, visual_effect_t* effect, float dt) {
+    effect->elapsed += dt;
+    if (effect->elapsed >= effect->duration) {
+        effect->active = false;
+        manager->active_effects--;
+        return;
+    }
     
-    // Update combat feedback
+    effects_update_effect_particles(effect, dt);
+    
+    // Special effect updates
+    switch (effect->type) {
+        case EFFECT_SHIELD_HIT:
+            // Expanding ripple
+            effect->radius = (effect->elapsed / effect->duration) * effect->scale.x;
+            break;
+            
+        case EFFECT_EXPLOSION:
+            // Expanding shockwave
+            effect->intensity = 1.0f - (effect->elapsed / effect->duration);
+            break;
+        default: break;
+    }
+}
+
+static void effects_update_visual_effects(effects_manager_t* manager, float dt) {
+    for (int i = 0; i < manager->max_effects; i++) {
+        visual_effect_t* effect = &manager->effects[i];
+        if (!effect->active) continue;
+        
+        effects_update_single_effect(manager, effect, dt);
+    }
+}
+
+static void effects_update_global_particle(effects_manager_t* manager, particle_t* p, float dt) {
+    p->position = Vector3Add(p->position, Vector3Scale(p->velocity, dt));
+    p->life -= dt / p->max_life;
+    
+    // Fade out
+    p->color.a = (unsigned char)(p->life * 255);
+    
+    if (p->has_gravity) {
+        p->velocity.y -= 30.0f * dt;
+    }
+    
+    if (p->life <= 0) {
+        p->active = false;
+        manager->active_particles--;
+    }
+}
+
+static void effects_update_global_particles(effects_manager_t* manager, float dt) {
+    for (int i = 0; i < manager->max_particles; i++) {
+        particle_t* p = &manager->global_particles[i];
+        if (!p->active) continue;
+        
+        effects_update_global_particle(manager, p, dt);
+    }
+}
+
+static void effects_update_combat_feedbacks(effects_manager_t* manager, float dt) {
     for (int i = 0; i < manager->max_feedbacks; i++) {
         combat_feedback_t* feedback = &manager->feedbacks[i];
         if (feedback->hit_timer > 0) {
@@ -404,8 +413,9 @@ void effects_update(effects_manager_t* manager, float dt) {
             feedback->score_position.y += 30.0f * dt;
         }
     }
-    
-    // Update screen effects
+}
+
+static void effects_update_screen_effects(effects_manager_t* manager, float dt) {
     if (manager->screen_shake > 0) {
         manager->screen_shake -= dt * 5.0f;
         if (manager->screen_shake < 0) manager->screen_shake = 0;
@@ -415,6 +425,28 @@ void effects_update(effects_manager_t* manager, float dt) {
         manager->flash_intensity -= dt * 5.0f;
         if (manager->flash_intensity < 0) manager->flash_intensity = 0;
     }
+}
+
+void effects_update(effects_manager_t* manager, float dt) {
+    if (!manager) return;
+    
+    // Apply time scaling
+    dt *= manager->time_scale;
+    
+    // Update bullet time
+    effects_update_bullet_time(manager, dt);
+    
+    // Update visual effects
+    effects_update_visual_effects(manager, dt);
+    
+    // Update global particles
+    effects_update_global_particles(manager, dt);
+    
+    // Update combat feedback
+    effects_update_combat_feedbacks(manager, dt);
+    
+    // Update screen effects
+    effects_update_screen_effects(manager, dt);
 }
 
 void effects_draw(effects_manager_t* manager, Camera3D camera) {
@@ -642,3 +674,4 @@ void effects_show_achievement(effects_manager_t* manager, const char* text) {
         p->glow_radius = 20.0f;
     }
 }
+
