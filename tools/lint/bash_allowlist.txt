@@ -215,7 +215,6 @@ tools/scripts/c3_stopwatch_triple_run.sh
 tools/scripts/c6_pin_gate.sh
 tools/scripts/check_agentdeployguard_cli_exit.sh
 tools/scripts/check_blocker_escape_registered.sh
-tools/scripts/check_blocker_remedy.sh
 tools/scripts/check_c23_node_binary.sh
 tools/scripts/check_coins_lookup_nullcheck.sh
 tools/scripts/check_condition_cooldown.sh
