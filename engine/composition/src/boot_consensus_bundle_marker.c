@@ -41,10 +41,61 @@ static bool marker_path(char *out, size_t cap, const char *datadir)
 
 static _Atomic uint64_t g_marker_staging_sequence;
 
+static bool marker_write_args_valid(const char *datadir,
+                                    const uint8_t artifact_digest[32])
+{
+    return datadir && datadir[0] && artifact_digest;
+}
+
+static void marker_encode_digest_hex(const uint8_t artifact_digest[32],
+                                     char digest_hex[65])
+{
+    for (int i = 0; i < 32; i++)
+        snprintf(digest_hex + i * 2, 3, "%02x", artifact_digest[i]);
+}
+
+static bool marker_body_length_valid(int body_len, size_t capacity)
+{
+    return body_len > 0 && (size_t)body_len < capacity;
+}
+
+static bool marker_create_staging_file(const char *resolved_path,
+                                       char *tmp_path, size_t tmp_cap,
+                                       struct platform_private_file *staging)
+{
+    platform_private_file_init(staging);
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 16 && !created; ++attempt) {
+        uint64_t sequence = atomic_fetch_add_explicit(
+            &g_marker_staging_sequence, 1, memory_order_relaxed);
+        int tn = snprintf(tmp_path, tmp_cap, "%s.tmp.%lld.%llu",
+                          resolved_path,
+                          (long long)platform_time_realtime_us(),
+                          (unsigned long long)sequence);
+        if (tn <= 0 || (size_t)tn >= tmp_cap) break;
+        created = platform_private_file_create(tmp_path, staging);
+    }
+    return created;
+}
+
+static bool marker_commit_staging_file(struct platform_private_file *staging,
+                                       char *body, int body_len,
+                                       char *tmp_path, char *resolved_path)
+{
+    if (!platform_private_file_write_at(staging, body, (size_t)body_len, 0) ||
+        !platform_private_file_flush(staging) ||
+        !platform_private_file_replace(staging, tmp_path, resolved_path)) {
+        (void)platform_private_file_retire(staging, tmp_path);
+        platform_private_file_close(staging);
+        return false;
+    }
+    return true;
+}
+
 bool boot_consensus_bundle_marker_write(const char *datadir, int32_t height,
                                         const uint8_t artifact_digest[32])
 {
-    if (!datadir || !datadir[0] || !artifact_digest)
+    if (!marker_write_args_valid(datadir, artifact_digest))
         LOG_FAIL("install_consensus_bundle",
                  "marker write: missing datadir or artifact digest");
 
@@ -63,8 +114,7 @@ bool boot_consensus_bundle_marker_write(const char *datadir, int32_t height,
                  datadir);
 
     char digest_hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(digest_hex + i * 2, 3, "%02x", artifact_digest[i]);
+    marker_encode_digest_hex(artifact_digest, digest_hex);
 
     char body[256];
     int body_len = snprintf(body, sizeof(body),
@@ -74,36 +124,21 @@ bool boot_consensus_bundle_marker_write(const char *datadir, int32_t height,
                             "installed_unix=%lld\n",
                             height, digest_hex,
                             (long long)time(NULL)); // platform-ok: human-facing install timestamp, not consensus timing
-    if (body_len <= 0 || (size_t)body_len >= sizeof(body))
+    if (!marker_body_length_valid(body_len, sizeof(body)))
         LOG_FAIL("install_consensus_bundle",
                  "marker write: body encoding failed");
 
     struct platform_private_file staging;
-    platform_private_file_init(&staging);
-    bool created = false;
-    for (unsigned attempt = 0; attempt < 16 && !created; ++attempt) {
-        uint64_t sequence = atomic_fetch_add_explicit(
-            &g_marker_staging_sequence, 1, memory_order_relaxed);
-        int tn = snprintf(tmp_path, sizeof(tmp_path), "%s.tmp.%lld.%llu",
-                          resolved_path,
-                          (long long)platform_time_realtime_us(),
-                          (unsigned long long)sequence);
-        if (tn <= 0 || (size_t)tn >= sizeof(tmp_path)) break;
-        created = platform_private_file_create(tmp_path, &staging);
-    }
-    if (!created)
+    if (!marker_create_staging_file(resolved_path, tmp_path, sizeof(tmp_path),
+                                    &staging))
         LOG_FAIL("install_consensus_bundle",
                  "marker write: unique private staging failed: %s",
                  strerror(errno));
 
-    if (!platform_private_file_write_at(&staging, body, (size_t)body_len, 0) ||
-        !platform_private_file_flush(&staging) ||
-        !platform_private_file_replace(&staging, tmp_path, resolved_path)) {
-        (void)platform_private_file_retire(&staging, tmp_path);
-        platform_private_file_close(&staging);
+    if (!marker_commit_staging_file(&staging, body, body_len, tmp_path,
+                                    resolved_path))
         LOG_FAIL("install_consensus_bundle",
                  "marker write: durable replace failed: %s", strerror(errno));
-    }
     if (!platform_private_parent_flush(parent))
         LOG_FAIL("install_consensus_bundle",
                  "marker write: parent durability failed: %s", strerror(errno));
