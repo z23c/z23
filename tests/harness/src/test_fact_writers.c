@@ -294,67 +294,94 @@ static int fw_case_unresolved(void)
     return failures;
 }
 
+/* Dispatch one code.provenance.facts query at the fixture root: a non-NULL
+ * `key` narrows the query to one slot. The reply and the input JSON are both
+ * left alive for the caller, which frees the reply first, then the input. */
+static void fw_invoke_code_facts(const char *key,
+                                 struct json_value *input,
+                                 struct zcl_command_reply *reply)
+{
+    json_init(input);
+    json_set_object(input);
+    if (key)
+        (void)json_push_kv_str(input, "key", key);
+    struct zcl_command_context context = { .source_root = FW_FIX };
+    struct zcl_command_request request = {
+        .input = input,
+        .view = "normal",
+        .invoked_name = "code.provenance.facts",
+        .context = &context,
+    };
+    zcl_command_reply_init(reply, "zcl.code_facts.v1");
+    zcl_native_handle_code_facts(&request, reply);
+}
+
+/* Does the reply's boolean flag `name` exist and read false? ASSERT itself
+ * cannot move out of the test case (it jumps to the case's end), so these
+ * helpers only evaluate one condition each and return a bool. */
+static bool fw_evidence_flag_reads_false(struct zcl_command_reply *reply,
+                                         const char *name)
+{
+    const struct json_value *flag = json_get(&reply->data, name);
+    return flag && flag->type == JSON_BOOL && !flag->val.b;
+}
+
+/* Does the reply's string `field` exist and contain `needle`? */
+static bool fw_reply_text_contains(struct zcl_command_reply *reply,
+                                   const char *field, const char *needle)
+{
+    const char *text = json_get_str(json_get(&reply->data, field));
+    return text && strstr(text, needle) != NULL;
+}
+
+/* Does the reply's string `field` exist but not contain `needle`? */
+static bool fw_reply_text_lacks(struct zcl_command_reply *reply,
+                                const char *field, const char *needle)
+{
+    const char *text = json_get_str(json_get(&reply->data, field));
+    return text && strstr(text, needle) == NULL;
+}
+
+/* Does the reply's string `field` exist and equal `expect` exactly? */
+static bool fw_reply_text_equals(struct zcl_command_reply *reply,
+                                 const char *field, const char *expect)
+{
+    const char *text = json_get_str(json_get(&reply->data, field));
+    return text && strcmp(text, expect) == 0;
+}
+
 static int fw_case_command_evidence_ceiling(void)
 {
     int failures = 0;
     TEST_CASE("code provenance facts refuses to infer authority from mutation sites") {
         ASSERT(fw_setup());
         struct json_value input;
-        json_init(&input);
-        json_set_object(&input);
-        (void)json_push_kv_str(&input, "key", "fw_shared_slot");
-        struct zcl_command_context context = { .source_root = FW_FIX };
-        struct zcl_command_request request = {
-            .input = &input,
-            .view = "normal",
-            .invoked_name = "code.provenance.facts",
-            .context = &context,
-        };
         struct zcl_command_reply reply;
-        zcl_command_reply_init(&reply, "zcl.code_facts.v1");
-        zcl_native_handle_code_facts(&request, &reply);
-
-        const struct json_value *authority =
-            json_get(&reply.data, "authority_proven");
-        const struct json_value *coverage =
-            json_get(&reply.data, "source_coverage_complete");
-        const struct json_value *reachability =
-            json_get(&reply.data, "runtime_reachability_proven");
-        ASSERT(authority && authority->type == JSON_BOOL && !authority->val.b);
-        ASSERT(coverage && coverage->type == JSON_BOOL && !coverage->val.b);
-        ASSERT(reachability && reachability->type == JSON_BOOL &&
-               !reachability->val.b);
-        const char *ceiling =
-            json_get_str(json_get(&reply.data, "evidence_ceiling"));
-        const char *summary = json_get_str(json_get(&reply.data, "summary"));
-        ASSERT(ceiling && strstr(ceiling, "UNPROVEN"));
-        ASSERT(summary && strstr(summary, "MULTI-SURFACE"));
-        ASSERT(summary && strstr(summary, "UNPROVEN"));
-        ASSERT(summary && strstr(summary, "delete a copy") == NULL);
-
+        fw_invoke_code_facts("fw_shared_slot", &input, &reply);
+        /* The three evidence flags must exist as booleans and all read false:
+         * mutation sites never prove authority, coverage or reachability. */
+        ASSERT(fw_evidence_flag_reads_false(&reply, "authority_proven"));
+        ASSERT(fw_evidence_flag_reads_false(&reply, "source_coverage_complete"));
+        ASSERT(fw_evidence_flag_reads_false(&reply, "runtime_reachability_proven"));
+        /* The single-slot reply must sit under an UNPROVEN ceiling, name the
+         * multi-surface finding in its summary, and never advise deleting a copy. */
+        ASSERT(fw_reply_text_contains(&reply, "evidence_ceiling", "UNPROVEN"));
+        ASSERT(fw_reply_text_contains(&reply, "summary", "MULTI-SURFACE"));
+        ASSERT(fw_reply_text_contains(&reply, "summary", "UNPROVEN"));
+        ASSERT(fw_reply_text_lacks(&reply, "summary", "delete a copy"));
         zcl_command_reply_free(&reply);
         json_free(&input);
 
-        json_init(&input);
-        json_set_object(&input);
-        zcl_command_reply_init(&reply, "zcl.code_facts.v1");
-        zcl_native_handle_code_facts(&request, &reply);
-
-        authority = json_get(&reply.data, "authority_proven");
-        coverage = json_get(&reply.data, "source_coverage_complete");
-        reachability = json_get(&reply.data, "runtime_reachability_proven");
-        ASSERT(authority && authority->type == JSON_BOOL && !authority->val.b);
-        ASSERT(coverage && coverage->type == JSON_BOOL && !coverage->val.b);
-        ASSERT(reachability && reachability->type == JSON_BOOL &&
-               !reachability->val.b);
-        ceiling = json_get_str(json_get(&reply.data, "evidence_ceiling"));
-        summary = json_get_str(json_get(&reply.data, "summary"));
-        const char *scope = json_get_str(json_get(&reply.data, "scope"));
-        ASSERT(ceiling && strstr(ceiling, "UNPROVEN"));
-        ASSERT(scope && strcmp(scope, "census") == 0);
-        ASSERT(summary && strstr(summary, "each resolved site"));
-        ASSERT(summary && strstr(summary, "UNPROVEN"));
-
+        fw_invoke_code_facts(NULL, &input, &reply);
+        ASSERT(fw_evidence_flag_reads_false(&reply, "authority_proven"));
+        ASSERT(fw_evidence_flag_reads_false(&reply, "source_coverage_complete"));
+        ASSERT(fw_evidence_flag_reads_false(&reply, "runtime_reachability_proven"));
+        /* The keyless reply must widen to census scope, attribute each resolved
+         * site, and stay under an UNPROVEN ceiling. */
+        ASSERT(fw_reply_text_contains(&reply, "evidence_ceiling", "UNPROVEN"));
+        ASSERT(fw_reply_text_equals(&reply, "scope", "census"));
+        ASSERT(fw_reply_text_contains(&reply, "summary", "each resolved site"));
+        ASSERT(fw_reply_text_contains(&reply, "summary", "UNPROVEN"));
         zcl_command_reply_free(&reply);
         json_free(&input);
     } TEST_END;

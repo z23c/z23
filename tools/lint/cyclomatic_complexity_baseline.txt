@@ -1429,7 +1429,6 @@ tests/harness/src/test_engine.c:case_prompt_shape:30
 tests/harness/src/test_engine.c:case_receipt_chain:74
 tests/harness/src/test_engine.c:case_state:19
 tests/harness/src/test_explorer.c:test_explorer:362
-tests/harness/src/test_fact_writers.c:fw_case_command_evidence_ceiling:21
 tests/harness/src/test_fastobj_carrier.c:fcw_candidate_build:36
 tests/harness/src/test_fastobj_carrier.c:test_fastobj_carrier_platform_arm:166
 tests/harness/src/test_file_controller.c:test_file_export_snapshot_success:22
