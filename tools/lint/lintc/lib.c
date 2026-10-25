@@ -1464,8 +1464,20 @@ const char *env_or(const char *name, const char *fallback)
     return (e && e[0]) ? e : fallback;
 }
 
+/* ZCL_LINT_REPO_ROOT, when set, names the tree to lint and wins over the
+ * executable's own path: `precheck` sets it per tree so a gate that resolves
+ * its root here (and a cic_invoke child, which inherits it) sees that tree. */
 int cic_repo_root(char *buf, size_t cap)
 {
+    const char *ov = getenv("ZCL_LINT_REPO_ROOT");
+    if (ov) {
+        if (ov[0] != '/')
+            return die("z23-lint: ZCL_LINT_REPO_ROOT must be an absolute directory\n", "");
+        int n = snprintf(buf, cap, "%s", ov);
+        if (n < 0 || (size_t)n >= cap)
+            return die("z23-lint: ZCL_LINT_REPO_ROOT too long\n", "");
+        return 0;
+    }
     if (lint_self_exe(buf, cap))
         return 2;
     /* $ROOT/build/bin/z23-lint → $ROOT (executable dir, then two parents). */

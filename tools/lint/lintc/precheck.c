@@ -18,6 +18,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -127,6 +128,11 @@ static int pc_select(struct pc_opts *o, const struct lint_gate *tab, size_t n)
     int fd = open("/dev/null", O_RDWR);
     if (fd < 0 || chdir(dir) != 0 || dup2(fd, STDOUT_FILENO) < 0
         || dup2(fd, STDERR_FILENO) < 0)
+        _exit(PC_RC_SETUP);
+    /* Gates that resolve the repo through cic_repo_root would otherwise lint
+     * the binary's own tree in both runs; cic_invoke children inherit this. */
+    char root[PATH_MAX];
+    if (!getcwd(root, sizeof root) || setenv("ZCL_LINT_REPO_ROOT", root, 1) != 0)
         _exit(PC_RC_SETUP);
     (void)alarm(PC_TIMEOUT_S);
     _exit(g->run(0, av + 1) & 0xff);

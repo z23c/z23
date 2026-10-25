@@ -1162,10 +1162,24 @@ static int lsel_pc_argv_run(int argc, char **argv)
     return lsel_pc_no_python_run(argc, argv);
 }
 
+/* Fails while <cic_repo_root>/MARKER exists. A gate that resolves its root
+ * from the executable would see the same tree in both runs. */
+static int lsel_pc_root_marker_run(int argc, char **argv)
+{
+    char root[PATH_MAX], marker[PATH_MAX + 8];
+    (void)argc;
+    (void)argv;
+    if (cic_repo_root(root, sizeof root) != 0)
+        return 2;
+    (void)snprintf(marker, sizeof marker, "%s/MARKER", root);
+    return access(marker, F_OK) == 0;
+}
+
 static const struct lint_gate k_lsel_pc_gates[] = {
     { "check-no-python", lsel_pc_no_python_run, NULL },
     { "check-clean", lsel_pc_clean_run, NULL },
     { "check-argv-no-python", lsel_pc_argv_run, NULL },
+    { "check-root-marker", lsel_pc_root_marker_run, NULL },
 };
 
 const struct lint_gate *lint_gate_table(size_t *n)
@@ -1281,6 +1295,46 @@ static int test_lsel_precheck_argv(void)
     return failures;
 }
 
+/* Witness for the root override: check-root-marker asks cic_repo_root, which
+ * used to answer from the executable path, so both runs saw one tree and the
+ * gate could never be NEW. */
+static int test_lsel_precheck_repo_root(void)
+{
+    int failures = 0;
+    TEST_CASE("lint_selection: precheck points cic_repo_root at each tree it lints") {
+        struct lsel_pc_fx fx;
+        char base_arg[PATH_MAX + 16], out[512], path[PATH_MAX * 2];
+        char root[PATH_MAX], want[PATH_MAX], argv0[PATH_MAX * 2];
+        const char *saved_argv0 = g_lint_argv0;
+        ASSERT(lsel_pc_plant(&fx));
+        (void)snprintf(path, sizeof(path), "%s/MARKER", fx.dirty);
+        ASSERT(lsel_pc_file(path, "x\n"));
+        (void)snprintf(base_arg, sizeof(base_arg), "--base=%s", fx.clean);
+        char *argv[] = { base_arg, (char *)"--gates=check-root-marker" };
+        ASSERT_EQ(lsel_pc_run(&fx, fx.dirty, argv, 2, out, sizeof(out)), 1);
+        ASSERT(strstr(out, "NEW check-root-marker rc=1\n") != NULL);
+        ASSERT_EQ(lsel_pc_run(&fx, fx.clean, argv, 2, out, sizeof(out)), 0);
+        ASSERT(strstr(out, "NEW ") == NULL);
+        /* Unset: the root still comes from the executable path. */
+        (void)snprintf(path, sizeof(path), "%s/exe", fx.root);
+        ASSERT(mkdir(path, 0755) == 0);
+        (void)snprintf(path, sizeof(path), "%s/exe/build", fx.root);
+        ASSERT(mkdir(path, 0755) == 0);
+        (void)snprintf(path, sizeof(path), "%s/exe/build/bin", fx.root);
+        ASSERT(mkdir(path, 0755) == 0);
+        (void)snprintf(argv0, sizeof(argv0), "%s/z23-lint", path);
+        ASSERT(realpath(fx.root, want) != NULL);
+        (void)snprintf(want + strlen(want), sizeof(want) - strlen(want), "/exe");
+        ASSERT_EQ(unsetenv("ZCL_LINT_REPO_ROOT"), 0);
+        g_lint_argv0 = argv0;
+        ASSERT_EQ(cic_repo_root(root, sizeof(root)), 0);
+        g_lint_argv0 = saved_argv0;
+        ASSERT_STR_EQ(root, want);
+        test_rm_rf_recursive(fx.root);
+    } TEST_END
+    return failures;
+}
+
 static int test_lsel_precheck_usage(void)
 {
     int failures = 0;
@@ -1301,6 +1355,7 @@ int test_lint_selection(void)
     failures += test_lsel_precheck();
     failures += test_lsel_precheck_usage();
     failures += test_lsel_precheck_argv();
+    failures += test_lsel_precheck_repo_root();
     failures += test_lsel_doc_claims();
     failures += test_lsel_doc_claims_kind_change();
     failures += test_lsel_per_file_gate();
