@@ -4,7 +4,7 @@
  * repo (a bare origin, a main checkout, a lanes directory) with every external
  * program replaced by a small generated sh fake through the tool's options:
  * z23-dev (step and land submit), z23-engine-unit, zgate, devbuild, z23-lint,
- * claude and the retire script. No real engine, gate host, model or land queue
+ * the retire script. No real engine, gate host, model or land queue
  * is ever reached. The scripts are written at run time, so no shell file is
  * tracked.
  *
@@ -205,10 +205,19 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
                " else echo \"$@\" > '%s/submit.txt'; echo '{\"data\":{\"seq\":7}}'; fi ;;\nesac",
                e->d, e->d, e->d, e->d, e->d, e->d, e->d) &&
            lt_script(e, "eu",
-               "while [ $# -gt 0 ]; do [ \"$1\" = --worktree ] && wt=$2; shift; done\n"
+               "echo \"$@\" >> '%s/eu_args.txt'\n"
+               "while [ $# -gt 0 ]; do\n"
+               " case \"$1\" in --worktree) wt=$2 ;; --state-dir) sd=$2 ;; --kind) kind=$2 ;; esac\n"
+               " shift\ndone\n"
+               "if [ \"$kind\" = review ]; then\n"
+               " if flock -n '%s/haiku.lock' true; then echo free > '%s/lockstate.txt';"
+               " else echo held > '%s/lockstate.txt'; fi\n"
+               " echo \"$wt\" >> '%s/review_wt.txt'\n"
+               " mkdir -p \"$sd\" && printf 'reviewed\\n%%s\\n' '%s' > \"$sd/reply.txt\"\n"
+               " exit 0\nfi\n"
                "[ -n '%s' ] || exit 0\ncd \"$wt\" && echo edit >> '%s'\n"
                "[ -e '%s/eu_extra.sh' ] && sh '%s/eu_extra.sh'\nexit 0",
-               edit, edit, e->d, e->d) &&
+               e->d, e->d, e->d, e->d, e->d, c->verdict, edit, edit, e->d, e->d) &&
            lt_script(e, "devbuild",
                "case \"$*\" in\n *lint-land*) echo lint-land-stderr-marker >&2 ;;\n"
                " *agent-verify*) exit %s ;;\nesac\nexit 0",
@@ -221,8 +230,6 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
                "if [ -e '%s/slowgate' ]; then echo \"$r\" | (sleep 1; cat > \"$l\") >/dev/null 2>&1 &\n"
                "else echo \"$r\" > \"$l\"; fi\necho \"log: $l\"",
                e->d, c->gate_rc, e->d, e->d, e->d) &&
-           lt_script(e, "claude",
-               "printf '%%s\\n' '{\"result\":\"reviewed\\n%s\"}'", c->verdict) &&
            lt_script(e, "precheck",
                "n=$(cat '%s/pre.count' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '%s/pre.count'\n"
                "echo \"$1\" >> '%s/pre.args'\n"
@@ -290,16 +297,16 @@ static int lt_tool(const struct lt_env *e, const char *const extra[], char *out,
     (void)snprintf(lock, sizeof(lock), "%s/haiku.lock", e->d);
     const char *names[] = { "--main", "--lanes", "--state-dir", "--scratch-dir",
                             "--dev", "--engine-unit", "--zgate", "--retire-script",
-                            "--devbuild", "--claude", "--lint-bin", "--precheck-script",
+                            "--devbuild", "--lint-bin", "--precheck-script",
                             "--main-lint" };
     const char *rels[] = { "main", "lanes", "state", "scratch", "bin/dev", "bin/eu",
-                           "bin/zgate", "bin/retire", "bin/devbuild", "bin/claude",
+                           "bin/zgate", "bin/retire", "bin/devbuild",
                            "bin/lint", "bin/precheck", "bin/mainlint" };
     const char *argv[64] = { "env", "GIT_AUTHOR_NAME=fixture",
         "GIT_AUTHOR_EMAIL=f@example.invalid", "GIT_COMMITTER_NAME=fixture",
         "GIT_COMMITTER_EMAIL=f@example.invalid", LT_BIN };
     size_t n = 6;
-    for (size_t i = 0; i < 13; i++) {
+    for (size_t i = 0; i < 12; i++) {
         (void)snprintf(a[i], sizeof(a[i]), "%s/%s", e->d, rels[i]);
         argv[n++] = names[i];
         argv[n++] = a[i];
@@ -908,16 +915,6 @@ static int case_finish_rebase_conflict(void)
     return failures;
 }
 
-/* The reviewer stub records whether the --haiku-lock is held by another open
- * file description at the moment the model call runs. */
-static bool lt_lock_stub(const struct lt_env *e)
-{
-    return lt_script(e, "claude",
-        "if flock -n '%s/haiku.lock' true; then echo free > '%s/lockstate.txt';"
-        " else echo held > '%s/lockstate.txt'; fi\n"
-        "printf '%%s\\n' '{\"result\":\"reviewed\\nVERDICT: LAND\"}'",
-        e->d, e->d, e->d);
-}
 
 static int case_haiku_lock_held(void)
 {
@@ -927,9 +924,8 @@ static int case_haiku_lock_held(void)
     const struct lt_cfg cf = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
     char out[8192] = "";
     const bool ready = lt_setup(&e, "hlocktick", &ct, "run", "claude-haiku") &&
-                       lt_lock_stub(&e) &&
                        lt_setup(&f, "hlockfin", &cf, "none", "claude-haiku") &&
-                       lt_make_lane(&f, "ok") && lt_lock_stub(&f);
+                       lt_make_lane(&f, "ok");
     LT_CHECK("the haiku lock fixtures are written", ready);
     if (!ready)
         return failures + 1;
@@ -1226,6 +1222,69 @@ static int case_precheck_retry(void)
     return failures;
 }
 
+/* The attempt ids on the fake engine's recorded command lines, in call order:
+ * each "--attempt-id " word must be followed by exactly 64 lowercase hex and a
+ * space. Returns how many ids were read (at most max), or -1 on a malformed one. */
+static int lt_attempt_ids(const struct lt_env *e, char ids[][65], int max)
+{
+    static char text[1 << 16];
+    char p[900];
+    (void)snprintf(p, sizeof(p), "%s/eu_args.txt", e->d);
+    if (!lt_slurp(p, text, sizeof(text)))
+        return 0;
+    int n = 0;
+    for (const char *s = text; (s = strstr(s, "--attempt-id ")) != NULL && n < max;) {
+        s += strlen("--attempt-id ");
+        size_t i = 0;
+        while ((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))
+            i++;
+        if (i != 64 || s[i] != ' ')
+            return -1;
+        memcpy(ids[n], s, 64);
+        ids[n++][64] = '\0';
+    }
+    return n;
+}
+
+/* Every model call leaves a receipt: the writer rounds carry --kind, --model
+ * and a fresh 64-hex --attempt-id, and the review runs through engine_unit as
+ * a --kind review unit in a scratch worktree, not the lane, never through a
+ * direct claude spawn (the tool has no claude option). The fake engine writes
+ * no receipt rows, so this asserts on its argv only. */
+static int case_model_call_receipts(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const bool ready = lt_setup(&e, "rcpt", &c, "run", "claude-haiku") &&
+                       lt_put(&e, "pre.red", "1");
+    LT_CHECK("the receipt fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    LT_CHECK("a tick with a writer retry and a review submits",
+             lt_tick(&e, NULL, NULL, NULL, 0) == 0 && lt_exists("%s/%s", e.d, "submit.txt"));
+    LT_CHECK("two writer rounds name the unit kind",
+             lt_count(&e, "eu_args.txt", "--kind fix-gate ") == 2);
+    LT_CHECK("every engine call names the Haiku model",
+             lt_count(&e, "eu_args.txt", "--model claude-haiku-5-5 ") == 3);
+    char ids[4][65];
+    const int n = lt_attempt_ids(&e, ids, 4);
+    LT_CHECK("three engine calls (two writer rounds, one review) each carry a 64-hex attempt id",
+             n == 3);
+    LT_CHECK("the attempt ids differ per call",
+             n == 3 && strcmp(ids[0], ids[1]) != 0 && strcmp(ids[0], ids[2]) != 0 &&
+             strcmp(ids[1], ids[2]) != 0);
+    LT_CHECK("the review ran once through engine_unit as a review unit",
+             lt_count(&e, "eu_args.txt", "--kind review ") == 1 &&
+             lt_file_has(&e, "lockstate.txt", "held"));
+    LT_CHECK("the review ran in a scratch worktree, not the lane",
+             lt_file_has(&e, "review_wt.txt", "/scratch/loop-t1/review-wt") &&
+             !lt_file_has(&e, "review_wt.txt", "/lanes/loop-t1"));
+    LT_CHECK("the scratch worktree was removed afterwards",
+             !lt_exists("%s/%s", e.d, "scratch/loop-t1/review-wt"));
+    return failures;
+}
+
 /* Still red after the one retry: HOLD, no commit, no third precheck. */
 static int case_precheck_hold(void)
 {
@@ -1467,6 +1526,7 @@ int test_loop_tick(void)
     failures += case_claim_released_on_hold();
     failures += case_claim_refused_hold();
     failures += case_precheck_retry();
+    failures += case_model_call_receipts();
     failures += case_precheck_hold();
     failures += case_precheck_setup_error();
     failures += case_duplicate_target();

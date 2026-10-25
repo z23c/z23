@@ -57,9 +57,11 @@
 #define _DEFAULT_SOURCE /* realpath: declared only through the fortify inline otherwise */
 #endif
 
+#include "base/hex.h"
 #include "base/safe_alloc.h"
 #include "json/json.h"
 #include "platform/clock.h"
+#include "platform/rng.h"
 #include "util/spawn.h"
 
 #include <dirent.h>
@@ -75,6 +77,10 @@
 #include <unistd.h>
 
 #define LT_GO (-1) /* a stage's "carry on" answer; any value >= 0 is the exit code */
+/* The unit kind of the writer round (engine_unit has no "build" template: it
+ * refuses that kind), and the model both model calls name. */
+#define LT_WRITER_KIND "fix-gate"
+#define LT_MODEL "claude-haiku-5-5"
 enum {
     LT_PATH = 1024,
     LT_NAME = 160,
@@ -84,7 +90,8 @@ enum {
     LT_SHOW_MAX = 90000,
     LT_BUILD_TIMEOUT_MS = 6 * 3600 * 1000,
     LT_SHORT_TIMEOUT_MS = 600 * 1000,
-    LT_BASE_ROWS = 4096 /* changed baseline rows the judgement can hold */
+    LT_BASE_ROWS = 4096, /* changed baseline rows the judgement can hold */
+    LT_ATTEMPT_ID = 65 /* 64 lowercase hex and the NUL */
 };
 
 /* X(id, flag, default). "~/" expands to $HOME, "@main/", "@lanes/" and
@@ -104,7 +111,6 @@ enum {
     X(SH, "--sh", "sh")                                                      \
     X(ENVP, "--env", "env")                                                  \
     X(DEVBUILD, "--devbuild", "devbuild")                                    \
-    X(CLAUDE, "--claude", "claude")                                          \
     X(LINT_BIN, "--lint-bin", "build/bin/z23-lint")                          \
     X(SIGN, "--sign-flag", "-S")                                             \
     X(ALLOW_UNSIGNED, "--allow-unsigned", "0")                               \
@@ -823,17 +829,34 @@ static int stage_lane(struct tick *t)
 
 /* ── steps 3-4: the model edits; the scope check ─────────────────────── */
 
+/* A fresh 64-lowercase-hex attempt id from the platform entropy source, the
+ * correlation key of one engine_unit receipt row. */
+static bool attempt_id(char out[LT_ATTEMPT_ID])
+{
+    uint8_t raw[32];
+    if (!rng_fill(raw, sizeof(raw)))
+        return false;
+    zcl_hex_encode(raw, sizeof(raw), out);
+    return true;
+}
+
 /* One z23-engine-unit round on the lane with the task file in the unit
- * directory; state and log files are named per attempt. Returns its status. */
+ * directory; state and log files are named per attempt. Every round carries a
+ * unit kind, the model and a fresh attempt id so it leaves a token receipt.
+ * Returns its status. */
 static int engine_run(struct tick *t, const char *taskname, const char *statename,
                       const char *logname, const char *label)
 {
-    char task[LT_PATH], state[LT_PATH], log[LT_PATH], secs[24];
+    char task[LT_PATH], state[LT_PATH], log[LT_PATH], secs[24], id[LT_ATTEMPT_ID];
     (void)fmt(task, sizeof(task), "%s/%s", t->unit, taskname);
     (void)fmt(state, sizeof(state), "%s/%s", t->unit, statename);
     (void)fmt(log, sizeof(log), "%s/%s", t->unit, logname);
     (void)fmt(secs, sizeof(secs), "%ld", oint(t, LT_O_ENGINE_TIMEOUT));
+    if (!attempt_id(id))
+        return 2;
     const char *const eu[] = { O(t, LT_O_ENGINE_UNIT), "--engine", "claude-haiku",
+                               "--kind", LT_WRITER_KIND, "--model", LT_MODEL,
+                               "--attempt-id", id,
                                "--task", task, "--no-group", "--worktree",
                                t->dir, "--yes-dispatch", "--rounds", "1",
                                "--state-dir", state, "--timeout", secs, NULL };
@@ -1764,24 +1787,26 @@ static bool find_verdict(const char *review, char *out, size_t cap)
     return found;
 }
 
+/* The reviewer's reply: the reply.txt engine_unit archives in the review
+ * unit's state directory. NULL when the unit gave none. */
 static char *review_text(const struct tick *t)
 {
-    struct json_value doc;
-    json_init(&doc);
-    char *out = NULL;
-    if (json_read(&doc, t->buf, strlen(t->buf))) {
-        const char *r = json_get_str(json_get(&doc, "result"));
-        out = r ? zcl_strdup(r, "loop_tick_review") : NULL;
-    }
-    json_free(&doc);
-    return out;
+    char path[LT_PATH];
+    (void)fmt(path, sizeof(path), "%s/review-eu/reply.txt", t->unit);
+    return read_file(path, LT_BUF);
 }
 
 /* The one-shot model call, serialised across every finish and the hourly tick
- * by a blocking flock on --haiku-lock. False when the lock cannot be taken. */
-static bool review_call(struct tick *t, const char *prompt)
+ * by a blocking flock on --haiku-lock. It runs as a read-only engine_unit
+ * review (kind review, a report unit with a fresh attempt id, so it leaves a
+ * receipt) in a scratch detached worktree of the lane's HEAD: engine_unit
+ * detects but does not prevent edits by a reviewer, so the reviewer works on a
+ * copy that is removed afterwards and the lane itself is never its worktree.
+ * False when the lock cannot be taken. */
+static bool review_call(struct tick *t, const char *prompt_path)
 {
-    char dir[LT_PATH];
+    char dir[LT_PATH], wt[LT_PATH], state[LT_PATH], log[LT_PATH], secs[24];
+    char id[LT_ATTEMPT_ID];
     (void)fmt(dir, sizeof(dir), "%s", O(t, LT_O_HAIKU_LOCK));
     char *slash = strrchr(dir, '/');
     if (slash && slash != dir) {
@@ -1794,33 +1819,41 @@ static bool review_call(struct tick *t, const char *prompt)
             (void)close(fd);
         return false;
     }
-    const char *const argv[] = { O(t, LT_O_CLAUDE), "-p", prompt, "--model",
-                                 "claude-haiku-5-5", "--output-format", "json",
-                                 "--no-session-persistence", "--setting-sources=",
-                                 "--tools", "Read,Grep,Glob", NULL };
-    /* stdout only: it is the review's JSON, parsed by the caller */
-    (void)run(t, t->dir, argv, oms(t, LT_O_REVIEW_TIMEOUT));
+    (void)fmt(wt, sizeof(wt), "%s/review-wt", t->unit);
+    (void)fmt(state, sizeof(state), "%s/review-eu", t->unit);
+    (void)fmt(log, sizeof(log), "%s/review-eu.log", t->unit);
+    (void)fmt(secs, sizeof(secs), "%ld", oint(t, LT_O_REVIEW_TIMEOUT));
+    const char *const add[] = { O(t, LT_O_GIT), "worktree", "add", "-q",
+                                "--detach", wt, "HEAD", NULL };
+    const char *const eu[] = { O(t, LT_O_ENGINE_UNIT), "--engine", "claude-haiku",
+                               "--kind", "review", "--model", LT_MODEL,
+                               "--attempt-id", id, "--task", prompt_path,
+                               "--no-group", "--worktree", wt, "--yes-dispatch",
+                               "--rounds", "1", "--state-dir", state,
+                               "--timeout", secs, NULL };
+    const char *const rm[] = { O(t, LT_O_GIT), "worktree", "remove", "--force",
+                               wt, NULL };
+    if (attempt_id(id) && run(t, t->dir, add, LT_SHORT_TIMEOUT_MS) == 0) {
+        (void)run_logged(t, NULL, eu, oms(t, LT_O_REVIEW_TIMEOUT) + LT_SHORT_TIMEOUT_MS,
+                         log);
+        (void)run(t, t->dir, rm, LT_SHORT_TIMEOUT_MS);
+    }
     (void)close(fd);
     return true;
 }
 
 static int stage_review(struct tick *t)
 {
-    char pp[LT_PATH], rj[LT_PATH], rt[LT_PATH], verdict[512] = "";
+    char pp[LT_PATH], rt[LT_PATH], old[LT_PATH], verdict[512] = "";
     (void)fmt(pp, sizeof(pp), "%s/review-prompt.txt", t->unit);
-    (void)fmt(rj, sizeof(rj), "%s/review.json", t->unit);
     (void)fmt(rt, sizeof(rt), "%s/review.txt", t->unit);
+    (void)fmt(old, sizeof(old), "%s/review-eu/reply.txt", t->unit);
     if (!build_review_prompt(t, pp))
         return hold(t, t->lane, "cannot build the review prompt (%s)", pp);
-    char *prompt = read_file(pp, LT_SHOW_MAX + 6144);
-    if (!prompt)
-        return hold(t, t->lane, "cannot build the review prompt (%s)", pp);
-    const bool locked = review_call(t, prompt);
-    free(prompt);
-    if (!locked)
+    (void)unlink(old); /* never read an earlier attempt's reply */
+    if (!review_call(t, pp))
         return hold(t, t->lane, "cannot take the haiku lock (%s)",
                     O(t, LT_O_HAIKU_LOCK));
-    (void)write_file(rj, t->buf, strlen(t->buf), "w");
     char *review = review_text(t);
     if (review) {
         (void)write_file(rt, review, strlen(review), "w");

@@ -13239,7 +13239,7 @@ $(ENGINE_UNIT_BIN): $(ENGINE_UNIT_SRCS) $(NODE_VENDOR_LIBS) \
 # single-instance lock, so the rule does not exist on a Windows host.
 ifeq ($(ZCL_HOST_WINDOWS),)
 LOOP_TICK_BIN = $(BIN_DIR)/z23-loop-tick
-LOOP_TICK_SRCS = tools/loop_tick.c 	platform/modules/json/src/json.c 	platform/modules/util/src/spawn.c 	platform/modules/base/src/cleanse.c 	platform/modules/base/src/log_level.c 	platform/modules/base/src/result.c 	platform/modules/base/src/safe_alloc.c 	platform/modules/platform/src/clock.c 	platform/modules/platform/src/os_proc.c
+LOOP_TICK_SRCS = tools/loop_tick.c 	platform/modules/json/src/json.c 	platform/modules/util/src/spawn.c 	platform/modules/base/src/cleanse.c 	platform/modules/base/src/log_level.c 	platform/modules/base/src/result.c 	platform/modules/base/src/safe_alloc.c 	platform/modules/platform/src/clock.c 	platform/modules/platform/src/os_proc.c	platform/modules/platform/src/rng.c
 LOOP_TICK_INCLUDES = -Iplatform/modules/base/include -Iplatform/modules/json/include 	-Iplatform/modules/platform/include -Iplatform/modules/util/include
 .PHONY: loop-tick
 loop-tick: $(LOOP_TICK_BIN)
