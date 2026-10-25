@@ -58,6 +58,9 @@
  * _Atomic so background reducer/validation threads read it without a lock. */
 _Atomic _Bool g_enforce_coinbase_maturity = false;
 
+/* ZIP-209 turnstile enforcement; default OFF (shadow). See utxo_apply_delta.h. */
+_Atomic _Bool g_enforce_turnstile = false;
+
 /* ── Delta-array lifetime ──────────────────────────────────────────── */
 
 void free_delta_arr(struct delta_entry *arr, size_t n)

@@ -91,6 +91,14 @@ void free_delta(struct delta_summary *s);
  * argv flag (engine/entry/main.c). _Atomic so background threads read it lock-free. */
 extern _Atomic _Bool g_enforce_coinbase_maturity;
 
+/* DEFAULT-OFF ZIP-209 turnstile enforcement on the live reducer fold. Default
+ * false = SHADOW: a block that would drive a shielded pool negative is
+ * logged and counted (g_ua_turnstile_would_reject_total) but still applied.
+ * When true the stage refuses it with zclassicd's exact reject string.
+ * Set from the -enforce-turnstile argv flag; do NOT flip the default until a
+ * datadir-copy replay confirms ZERO false-rejects (h=478544 lesson). */
+extern _Atomic _Bool g_enforce_turnstile;
+
 /* Compute the transparent UTXO delta of one block, capturing the full
  * pre-image of each spent coin (value/height/is_coinbase/script) so a
  * later disconnect can emit a correct restore-ADD. Unresolved prevouts

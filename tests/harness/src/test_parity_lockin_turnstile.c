@@ -9,13 +9,16 @@
 
 #include "test/test_core.h"
 
+#include "jobs/utxo_apply_delta.h"
 #include "jobs/utxo_apply_turnstile.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "storage/nullifier_kv.h"
 #include "storage/shielded_pool_kv.h"
 #include "util/safe_alloc.h"
 
 #include <sqlite3.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -177,7 +180,210 @@ static int test_pool_kv_rows(sqlite3 *db)
     return failures;
 }
 
+
+/* ── Stage-facing step (shadow by default, refusal under enforcement) ──── */
+
+#define KIND_SPROUT "bad-txns-sprout-turnstile-violation"
+#define KIND_SAPLING "bad-txns-sapling-turnstile-violation"
+
+static void ts_block(struct block *blk, int64_t value_balance,
+                     int64_t vpub_old, int64_t vpub_new)
+{
+    memset(blk, 0, sizeof(*blk));
+    blk->num_vtx = 1;
+    blk->vtx = zcl_calloc(1, sizeof(struct transaction), "ts_stage_tx");
+    blk->vtx[0].value_balance = value_balance;
+    if (vpub_old || vpub_new) {
+        blk->vtx[0].num_joinsplit = 1;
+        blk->vtx[0].v_joinsplit = zcl_calloc(1, sizeof(struct js_description),
+                                             "ts_stage_js");
+        blk->vtx[0].v_joinsplit[0].vpub_old = vpub_old;
+        blk->vtx[0].v_joinsplit[0].vpub_new = vpub_new;
+    }
+}
+
+static void ts_block_free(struct block *blk)
+{
+    free(blk->vtx[0].v_joinsplit);
+    free(blk->vtx);
+}
+
+static sqlite3 *ts_db(int *failures)
+{
+    sqlite3 *db = NULL;
+    TS_CHECK("open in-memory store",
+             sqlite3_open(":memory:", &db) == SQLITE_OK &&
+             shielded_pool_kv_ensure_schema(db));
+    return db;
+}
+
+/* One stage_check call on a fresh summary. */
+static bool ts_step(sqlite3 *db, int64_t h, int64_t vb, int64_t vo,
+                    int64_t vn, struct delta_summary *s,
+                    struct utxo_apply_turnstile_pending *p)
+{
+    struct block blk;
+    ts_block(&blk, vb, vo, vn);
+    memset(s, 0, sizeof(*s));
+    s->ok = true;
+    s->status = "ok";
+    bool r = utxo_apply_turnstile_stage_check(db, &blk, h, NULL, s, p);
+    ts_block_free(&blk);
+    return r;
+}
+
+static bool ts_pending_is(const struct utxo_apply_turnstile_pending *p,
+                          bool write, int64_t sprout, int64_t sapling)
+{
+    return p->write == write && (!write || (p->sprout == sprout &&
+                                            p->sapling == sapling));
+}
+
+static bool ts_refused_as(const struct delta_summary *s, const char *status,
+                          const char *kind)
+{
+    return !s->ok && !strcmp(s->status, status) &&
+           !strcmp(s->failure_kind, kind);
+}
+
+static int test_stage_genesis_and_accept(void)
+{
+    int failures = 0;
+    sqlite3 *db = ts_db(&failures);
+    struct delta_summary s;
+    struct utxo_apply_turnstile_pending p;
+    TS_CHECK("genesis: parent is known {0,0}, row = its own block values",
+             ts_step(db, 0, 5, 3, 1, &s, &p) && s.ok &&
+             ts_pending_is(&p, true, 2, 5) &&
+             shielded_pool_kv_put(db, 0, p.sprout, p.sapling) &&
+             kv_pair(db, 0, 2, 5));
+    TS_CHECK("known parent, positive block: accepted, totals accumulate",
+             ts_step(db, 1, 4, 0, 0, &s, &p) && s.ok &&
+             ts_pending_is(&p, true, 2, 9));
+    sqlite3_close(db);
+    return failures;
+}
+
+static int test_stage_sapling(void)
+{
+    int failures = 0;
+    sqlite3 *db = ts_db(&failures);
+    struct delta_summary s;
+    struct utxo_apply_turnstile_pending p;
+    uint64_t before = atomic_load(&g_ua_turnstile_would_reject_total);
+    (void)shielded_pool_kv_put(db, 9, 0, 10);
+    TS_CHECK("shadow: negative sapling pool still applies, records total",
+             ts_step(db, 10, -20, 0, 0, &s, &p) && s.ok &&
+             ts_pending_is(&p, true, 0, -10));
+    TS_CHECK("shadow: would_reject counted once",
+             atomic_load(&g_ua_turnstile_would_reject_total) == before + 1);
+    atomic_store(&g_enforce_turnstile, true);
+    TS_CHECK("enforce: sapling violation refused, exact label, no row",
+             ts_step(db, 10, -20, 0, 0, &s, &p) &&
+             ts_refused_as(&s, "turnstile_sapling", KIND_SAPLING) &&
+             !p.write && kv_absent(db, 10));
+    TS_CHECK("enforce: exactly-zero sapling total is accepted",
+             ts_step(db, 10, -10, 0, 0, &s, &p) && s.ok &&
+             ts_pending_is(&p, true, 0, 0));
+    atomic_store(&g_enforce_turnstile, false);
+    sqlite3_close(db);
+    return failures;
+}
+
+static int test_stage_sprout(void)
+{
+    int failures = 0;
+    sqlite3 *db = ts_db(&failures);
+    struct delta_summary s;
+    struct utxo_apply_turnstile_pending p;
+    (void)shielded_pool_kv_put(db, 9, 5, 7);
+    TS_CHECK("shadow: vpub_new > vpub_old + pool still applies",
+             ts_step(db, 10, 0, 0, 8, &s, &p) && s.ok &&
+             ts_pending_is(&p, true, -3, 7));
+    atomic_store(&g_enforce_turnstile, true);
+    TS_CHECK("enforce: sprout violation refused, exact label, no row",
+             ts_step(db, 10, 0, 0, 8, &s, &p) &&
+             ts_refused_as(&s, "turnstile_sprout", KIND_SPROUT) &&
+             !p.write && kv_absent(db, 10));
+    TS_CHECK("enforce: sprout is checked before sapling",
+             ts_step(db, 10, -100, 0, 8, &s, &p) &&
+             ts_refused_as(&s, "turnstile_sprout", KIND_SPROUT));
+    TS_CHECK("enforce: exactly-zero sprout total is accepted",
+             ts_step(db, 10, 0, 0, 5, &s, &p) && s.ok &&
+             ts_pending_is(&p, true, 0, 7));
+    atomic_store(&g_enforce_turnstile, false);
+    sqlite3_close(db);
+    return failures;
+}
+
+static bool ts_unknown_in_mode(sqlite3 *db, bool enforce)
+{
+    struct delta_summary s;
+    struct utxo_apply_turnstile_pending p;
+    uint64_t u = atomic_load(&g_ua_turnstile_unknown_total);
+    uint64_t w = atomic_load(&g_ua_turnstile_would_reject_total);
+    atomic_store(&g_enforce_turnstile, enforce);
+    bool ok = ts_step(db, 50, -1000, 0, 1000, &s, &p) && s.ok && !p.write &&
+              atomic_load(&g_ua_turnstile_unknown_total) == u + 1 &&
+              atomic_load(&g_ua_turnstile_would_reject_total) == w;
+    atomic_store(&g_enforce_turnstile, false);
+    return ok;
+}
+
+static int test_stage_unknown_parent(void)
+{
+    int failures = 0;
+    sqlite3 *db = ts_db(&failures);
+    TS_CHECK("unknown parent: applied, no row, unknown+1 (shadow)",
+             ts_unknown_in_mode(db, false));
+    TS_CHECK("unknown parent: applied, no row, unknown+1 (enforce)",
+             ts_unknown_in_mode(db, true));
+    TS_CHECK("unknown parent wrote no row", kv_absent(db, 50));
+    sqlite3_close(db);
+    return failures;
+}
+
+static bool ts_reorg_schema(sqlite3 *db)
+{
+    return sqlite3_exec(db, "CREATE TABLE utxo_apply_log(height INTEGER)",
+                        NULL, NULL, NULL) == SQLITE_OK &&
+           utxo_apply_ensure_delta_schema(db) &&
+           nullifier_kv_ensure_schema(db);
+}
+
+static bool ts_seed_old_branch(sqlite3 *db)
+{
+    if (!ts_reorg_schema(db))
+        return false;
+    for (int64_t h = 0; h <= 5; h++)
+        if (!shielded_pool_kv_put(db, h, 0, h + 1))
+            return false;
+    return true;
+}
+
+static int test_stage_unwind(void)
+{
+    int failures = 0;
+    sqlite3 *db = ts_db(&failures);
+    struct delta_summary s;
+    struct utxo_apply_turnstile_pending p;
+    TS_CHECK("old branch rows 0..5", ts_seed_old_branch(db));
+    TS_CHECK("unwind above fork 2 trims rows 3..5 and keeps the fork row",
+             utxo_apply_delete_rows_above(db, 3, 5) && kv_absent(db, 3) &&
+             kv_absent(db, 5) && kv_pair(db, 2, 0, 3));
+    TS_CHECK("new branch recomputes from the fork row, put succeeds",
+             ts_step(db, 3, 10, 0, 0, &s, &p) && s.ok &&
+             ts_pending_is(&p, true, 0, 13) &&
+             shielded_pool_kv_put(db, 3, p.sprout, p.sapling) &&
+             kv_pair(db, 3, 0, 13));
+    sqlite3_close(db);
+    return failures;
+}
+
 int test_parity_lockin_turnstile(void)
 {
-    return test_block_values() + test_check() + test_pool_kv();
+    return test_block_values() + test_check() + test_pool_kv() +
+           test_stage_genesis_and_accept() + test_stage_sapling() +
+           test_stage_sprout() + test_stage_unknown_parent() +
+           test_stage_unwind();
 }

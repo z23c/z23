@@ -186,6 +186,10 @@ void print_usage(const char *prog)
     printf("                      output younger than 100 blocks (default OFF).\n");
     printf("                      DO NOT use on the live node until a full-history\n");
     printf("                      replay confirms zero false-rejects (h=478544).\n");
+    printf("  -enforce-turnstile  Refuse a block that drives the Sprout/Sapling pool\n");
+    printf("                      negative (ZIP-209; default OFF = shadow, warn only).\n");
+    printf("                      DO NOT use on the live node until a datadir-copy\n");
+    printf("                      replay confirms zero false-rejects (h=478544).\n");
     printf("  -enforce-checkdatasig-sigops  Count OP_CHECKDATASIG toward the\n");
     printf("                      per-block sigop ceiling in connect_block (default OFF).\n");
     printf("                      DO NOT use on the live node until a full-history\n");
@@ -937,6 +941,14 @@ static int args_arm_consensus_tightening(const char *arg,
          * lesson — see validation/connect_block.h). */
         extern _Atomic _Bool g_enforce_checkdatasig_sigops;
         atomic_store(&g_enforce_checkdatasig_sigops, true);
+    }
+    else if (strcmp(arg, "-enforce-turnstile") == 0) {
+        /* DEFAULT-OFF ZIP-209 turnstile enforcement on the reducer fold.
+         * Default is shadow: a violating block is logged and counted but
+         * still applied. Do NOT pass on the live node until a datadir-copy
+         * replay confirms ZERO false-rejects (see jobs/utxo_apply_delta.h). */
+        extern _Atomic _Bool g_enforce_turnstile;
+        atomic_store(&g_enforce_turnstile, true);
     }
     else return ARGS_ARM_NOMATCH;
     return ARGS_ARM_TAKEN;

@@ -17,6 +17,9 @@
 #include "json/json.h"
 #include "storage/coins_kv.h"
 #include "storage/progress_store.h"
+#include "storage/shielded_pool_kv.h"
+#include "jobs/utxo_apply_delta.h"
+#include "jobs/utxo_apply_turnstile.h"
 
 #include <sqlite3.h>
 #include <stdatomic.h>
@@ -67,6 +70,31 @@ static void dump_first_failure(struct json_value *out, sqlite3 *db)
     sqlite3_finalize(st);
 }
 
+/* ZIP-209 turnstile view: mode, the highest height with a known pool-totals
+ * row (-1 when none) and the totals there, plus the shadow/refusal counters. */
+static void dump_turnstile(struct json_value *out, sqlite3 *db)
+{
+    int64_t h = -1, sprout = 0, sapling = 0;
+    bool found = false;
+    if (db && shielded_pool_kv_max_height(db, &h, &found) && found)
+        (void)shielded_pool_kv_get(db, h, &sprout, &sapling, &found);
+    else
+        h = -1;
+    json_push_kv_str(out, "turnstile_mode",
+                     atomic_load(&g_enforce_turnstile) ? "enforce" : "shadow");
+    json_push_kv_int(out, "turnstile_totals_known_through", h);
+    json_push_kv_int(out, "turnstile_sprout_total", sprout);
+    json_push_kv_int(out, "turnstile_sapling_total", sapling);
+    json_push_kv_int(out, "turnstile_would_reject_total",
+                     (int64_t)atomic_load(&g_ua_turnstile_would_reject_total));
+    json_push_kv_int(out, "turnstile_unknown_total",
+                     (int64_t)atomic_load(&g_ua_turnstile_unknown_total));
+    json_push_kv_int(out, "turnstile_sprout_reject_total",
+                     (int64_t)atomic_load(&g_ua_turnstile_sprout_total));
+    json_push_kv_int(out, "turnstile_sapling_reject_total",
+                     (int64_t)atomic_load(&g_ua_turnstile_sapling_total));
+}
+
 bool utxo_apply_dump_state_json(struct json_value *out, const char *key)
 {
     (void)key;
@@ -95,6 +123,7 @@ bool utxo_apply_dump_state_json(struct json_value *out, const char *key)
                       (int64_t)atomic_load(&g_ua_shielded_double_spend_total));
     json_push_kv_int (out, "shielded_anchor_reject_total",
                       (int64_t)atomic_load(&g_ua_shielded_anchor_reject_total));
+    dump_turnstile(out, db);
     json_push_kv_int (out, "upstream_failed_total",
                       (int64_t)atomic_load(&g_ua_upstream_failed_total));
     json_push_kv_int (out, "internal_error_total",

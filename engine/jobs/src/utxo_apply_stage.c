@@ -12,6 +12,7 @@
 #include "jobs/replay_count_only.h"
 #include "jobs/utxo_apply_nullifiers.h"
 #include "jobs/utxo_apply_anchors.h"
+#include "jobs/utxo_apply_turnstile.h"
 #include "jobs/reducer_commit_invariants.h"
 #include "jobs/stage_helpers.h"
 #include "utxo_apply_created_outputs_prune.h"
@@ -34,6 +35,7 @@
 #include "storage/nullifier_kv.h"
 #include "storage/anchor_kv.h"
 #include "storage/progress_store.h"
+#include "storage/shielded_pool_kv.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
 #include "util/reducer_stage_profile.h"
@@ -118,6 +120,8 @@ _Atomic uint64_t g_ua_coinbase_protect_total = 0;
 _Atomic uint64_t g_ua_bad_cb_amount_total = 0;
 _Atomic uint64_t g_ua_shielded_double_spend_total = 0;
 _Atomic uint64_t g_ua_shielded_anchor_reject_total = 0;
+_Atomic uint64_t g_ua_turnstile_sprout_total = 0;
+_Atomic uint64_t g_ua_turnstile_sapling_total = 0;
 _Atomic uint64_t g_ua_upstream_failed_total = 0;
 _Atomic uint64_t g_ua_internal_error_total = 0;
 _Atomic uint64_t g_ua_reorg_unwound_total = 0;
@@ -298,6 +302,98 @@ static void ua_fatal_permanent_blocker(int height, const char *reason_tail)
                          * logged by blocker_set; the fact persists */
 }
 
+/* ZIP-209 turnstile, then the shielded nullifier gate, for one block.
+ *
+ * ORDER IS LOAD-BEARING: a refusal holds the cursor and COMMITS the
+ * utxo_apply_log failure row (block_apply_failure), so a refusal placed AFTER
+ * the nullifier insert would leave this block's nullifiers committed and
+ * false-reject the block as a double-spend on the next tick. Accept/reject is
+ * identical to zclassicd; only the reported label of a block that is BOTH a
+ * double-spend and a turnstile violation differs (zclassicd reports the
+ * double-spend first). Returns false on a store failure (blocker raised). */
+static bool ua_turnstile_then_nullifiers(
+    sqlite3 *db, const struct block *blk, int next_h,
+    const struct uint256 *hash, struct delta_summary *summary,
+    struct utxo_apply_turnstile_pending *pending)
+{
+    if (!utxo_apply_turnstile_stage_check(db, blk, next_h, hash, summary,
+                                          pending)) {
+        ua_fatal_permanent_blocker(next_h,
+                                   "shielded_pool_kv read store failure");
+        return false;
+    }
+    if (!summary->ok)
+        return true;
+    if (!utxo_apply_check_and_insert_nullifiers(db, blk, next_h, summary)) {
+        ua_fatal_permanent_blocker(next_h,
+                                   "nullifier_kv insert store failure");
+        return false;
+    }
+    return true;
+}
+
+/* Persist the inverse-delta, then this block's pool-totals row (only when the
+ * turnstile computed one), in the stage txn. */
+static bool ua_persist_delta_and_pool(
+    sqlite3 *db, int next_h, const struct uint256 *hash,
+    const struct delta_summary *summary,
+    const struct utxo_apply_turnstile_pending *pending)
+{
+    if (!utxo_apply_delta_persist(db, next_h, hash, summary)) {
+        ua_fatal_permanent_blocker(next_h,
+                                   "inverse-delta persist store failure");
+        return false;
+    }
+    if (pending->write &&
+        !shielded_pool_kv_put(db, next_h, pending->sprout, pending->sapling)) {
+        ua_fatal_permanent_blocker(next_h,
+                                   "shielded_pool_kv put store failure");
+        return false;
+    }
+    return true;
+}
+
+/* Per-status counter and zclassicd label for a refused block; anything not
+ * listed is an internal_error. */
+static void ua_reject_note(int next_h, const char *status)
+{
+    static const struct {
+        const char *status;
+        _Atomic uint64_t *counter;
+        const char *label;
+    } ladder[] = {
+        { "spend_unknown_utxo", &g_ua_spend_unknown_total,
+          "spend_unknown_utxo" },
+        { "utxo_collision", &g_ua_utxo_collision_total, "utxo_collision" },
+        { "value_overflow", &g_ua_value_overflow_total, "value_overflow" },
+        { "coinbase_protect", &g_ua_coinbase_protect_total,
+          "bad-txns-coinbase-spend-has-transparent-outputs" },
+        { "bad_cb_amount", &g_ua_bad_cb_amount_total, "bad-cb-amount" },
+        { "shielded_double_spend", &g_ua_shielded_double_spend_total,
+          "bad-txns-joinsplit-requirements-not-met" },
+        { "shielded_anchor_missing", &g_ua_shielded_anchor_reject_total,
+          "bad-txns-joinsplit-requirements-not-met" },
+        { "shielded_anchor_history_gap", &g_ua_shielded_anchor_reject_total,
+          "bad-txns-joinsplit-requirements-not-met" },
+        { "sapling_frontier_mismatch", &g_ua_shielded_anchor_reject_total,
+          "bad-txns-joinsplit-requirements-not-met" },
+        { "turnstile_sprout", &g_ua_turnstile_sprout_total,
+          "bad-txns-sprout-turnstile-violation" },
+        { "turnstile_sapling", &g_ua_turnstile_sapling_total,
+          "bad-txns-sapling-turnstile-violation" },
+    };
+    _Atomic uint64_t *counter = &g_ua_internal_error_total;
+    const char *label = "internal_error";
+    for (size_t i = 0; i < sizeof(ladder) / sizeof(ladder[0]); i++) {
+        if (strcmp(status, ladder[i].status) == 0) {
+            counter = ladder[i].counter;
+            label = ladder[i].label;
+            break;
+        }
+    }
+    utxo_apply_reject_count_and_emit(next_h, status, counter, label);
+}
+
 static job_result_t step_apply(struct stage_step_ctx *c)
 {
     atomic_store(&g_ua_last_step_unix, platform_time_wall_unix());
@@ -409,6 +505,7 @@ static job_result_t step_apply(struct stage_step_ctx *c)
     }
     stage_body_read_hold_clear(STAGE_NAME);
     struct delta_summary summary;
+    struct utxo_apply_turnstile_pending pool_pending = { .write = false };
     /* Prevout-resolution phase: compute_block_delta walks each input's prevout
      * (created-index / coins_kv) to build the add/spend set. */
     int64_t ua_pv_t0 = platform_time_monotonic_us();
@@ -473,11 +570,10 @@ static job_result_t step_apply(struct stage_step_ctx *c)
         }
     }
 
+    /* Turnstile BEFORE the nullifier insert (see ua_turnstile_then_nullifiers). */
     if (summary.ok) {
-        if (!utxo_apply_check_and_insert_nullifiers(db, blk, next_h,
-                                                    &summary)) {
-            ua_fatal_permanent_blocker(next_h,
-                                       "nullifier_kv insert store failure");
+        if (!ua_turnstile_then_nullifiers(db, blk, next_h, bi->phashBlock,
+                                          &summary, &pool_pending)) {
             free_delta(&summary);
             stage_release_block_view(&owned, &handle, borrowed);
             return JOB_FATAL;
@@ -513,9 +609,8 @@ static job_result_t step_apply(struct stage_step_ctx *c)
      * land atomically; only a successful apply persists one (failure rows
      * have nothing to invert). */
     if (summary.ok) {
-        if (!utxo_apply_delta_persist(db, next_h, bi->phashBlock, &summary)) {
-            ua_fatal_permanent_blocker(next_h,
-                                       "inverse-delta persist store failure");
+        if (!ua_persist_delta_and_pool(db, next_h, bi->phashBlock, &summary,
+                                       &pool_pending)) {
             free_delta(&summary);
             stage_release_block_view(&owned, &handle, borrowed);
             return JOB_FATAL;
@@ -532,34 +627,7 @@ static job_result_t step_apply(struct stage_step_ctx *c)
     } else {
         /* The event label is zclassicd's exact reject string where one
          * exists; dedup + keep-alive policy lives in reject_count_and_emit. */
-        _Atomic uint64_t *counter = &g_ua_internal_error_total;
-        const char *label = "internal_error";
-        if (strcmp(summary.status, "spend_unknown_utxo") == 0) {
-            counter = &g_ua_spend_unknown_total;
-            label = "spend_unknown_utxo";
-        } else if (strcmp(summary.status, "utxo_collision") == 0) {
-            counter = &g_ua_utxo_collision_total;
-            label = "utxo_collision";
-        } else if (strcmp(summary.status, "value_overflow") == 0) {
-            counter = &g_ua_value_overflow_total;
-            label = "value_overflow";
-        } else if (strcmp(summary.status, "coinbase_protect") == 0) {
-            counter = &g_ua_coinbase_protect_total;
-            label = "bad-txns-coinbase-spend-has-transparent-outputs";
-        } else if (strcmp(summary.status, "bad_cb_amount") == 0) {
-            counter = &g_ua_bad_cb_amount_total;
-            label = "bad-cb-amount";
-        } else if (strcmp(summary.status, "shielded_double_spend") == 0) {
-            counter = &g_ua_shielded_double_spend_total;
-            label = "bad-txns-joinsplit-requirements-not-met";
-        } else if (strcmp(summary.status, "shielded_anchor_missing") == 0 ||
-                   strcmp(summary.status, "shielded_anchor_history_gap") == 0 ||
-                   strcmp(summary.status, "sapling_frontier_mismatch") == 0) {
-            counter = &g_ua_shielded_anchor_reject_total;
-            label = "bad-txns-joinsplit-requirements-not-met";
-        }
-        utxo_apply_reject_count_and_emit(next_h, summary.status, counter,
-                                         label);
+        ua_reject_note(next_h, summary.status);
     }
 
     const char *apply_status = summary.ok
@@ -710,6 +778,7 @@ static bool utxo_apply_stage_ensure_schemas(sqlite3 *db)
            proof_validate_log_ensure_schema(db) &&
            script_validate_log_ensure_schema(db) &&
            utxo_apply_ensure_delta_schema(db) &&
+           shielded_pool_kv_ensure_schema(db) &&
            coins_kv_ensure_schema(db) &&
            created_outputs_index_ensure_schema(db);
 }
@@ -904,6 +973,10 @@ void utxo_apply_stage_shutdown(void)
     atomic_store(&g_ua_bad_cb_amount_total, (uint64_t)0);
     atomic_store(&g_ua_shielded_double_spend_total, (uint64_t)0);
     atomic_store(&g_ua_shielded_anchor_reject_total, (uint64_t)0);
+    atomic_store(&g_ua_turnstile_sprout_total, (uint64_t)0);
+    atomic_store(&g_ua_turnstile_sapling_total, (uint64_t)0);
+    atomic_store(&g_ua_turnstile_would_reject_total, (uint64_t)0);
+    atomic_store(&g_ua_turnstile_unknown_total, (uint64_t)0);
     atomic_store(&g_ua_upstream_failed_total, (uint64_t)0);
     atomic_store(&g_ua_internal_error_total, (uint64_t)0);
     atomic_store(&g_ua_reorg_unwound_total, (uint64_t)0);

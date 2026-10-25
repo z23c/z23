@@ -25,6 +25,7 @@
 #include "storage/coins_kv.h"
 #include "storage/nullifier_kv.h"
 #include "storage/anchor_kv.h"
+#include "storage/shielded_pool_kv.h"
 #include "storage/progress_store.h"
 #include "util/blocker.h"
 #include "util/log_macros.h"
@@ -282,6 +283,20 @@ bool utxo_apply_emit_inverse_delta(sqlite3 *db, int height)
     return ok;
 }
 
+/* ZIP-209 pool totals for the unwound range: a row left above the fork
+ * would be recomputed on the new branch and (rightly) refuse to agree. */
+static bool unwind_pool_totals(sqlite3 *db, int fork_plus1, int last_h)
+{
+    if (!shielded_pool_kv_ensure_schema(db) ||
+        !shielded_pool_kv_delete_range(db, fork_plus1, last_h)) {
+        LOG_WARN("utxo_apply",
+                 "[utxo_apply] unwind pool totals delete failed "
+                 "range=[%d,%d]", fork_plus1, last_h);
+        return false;
+    }
+    return true;
+}
+
 /* Delete the log + delta + nullifier rows for heights in
  * [fork_plus1 .. last_h]. The nullifier pass enforces the rewind invariant
  * (storage/nullifier_kv.h): every cursor rewind deletes the nullifiers
@@ -347,7 +362,7 @@ bool utxo_apply_delete_rows_above(sqlite3 *db, int fork_plus1, int last_h)
                  fork_plus1, last_h);
         return false;
     }
-    return true;
+    return unwind_pool_totals(db, fork_plus1, last_h);
 }
 
 /* UPSERT the stage cursor row inside the caller's transaction (mirrors
