@@ -137,6 +137,20 @@ bool header_admit_forward_replay_parent_ok(sqlite3 *db,
                                   bi->pprev->phashBlock);
 }
 
+static bool rewind_target_args_invalid(sqlite3 *db,
+                                       struct active_chain *chain,
+                                       uint64_t cursor,
+                                       int *out_target,
+                                       const char **out_reason)
+{
+    return !db || !chain || cursor == 0 || !out_target || !out_reason;
+}
+
+static bool tip_unusable_for_rewind(const struct block_index *tip)
+{
+    return !tip || !tip->phashBlock || tip->nHeight < 0;
+}
+
 bool header_admit_forward_rewind_target(sqlite3 *db,
                                         struct active_chain *chain,
                                         uint64_t cursor,
@@ -147,7 +161,8 @@ bool header_admit_forward_rewind_target(sqlite3 *db,
         *out_target = -1;
     if (out_reason)
         *out_reason = "none";
-    if (!db || !chain || cursor == 0 || !out_target || !out_reason) {
+    if (rewind_target_args_invalid(db, chain, cursor, out_target,
+                                   out_reason)) {
         LOG_WARN("header_admit",
                  "[header_admit] forward-fork target invalid args "
                  "db=%p chain=%p cursor=%llu out_target=%p out_reason=%p",
@@ -157,7 +172,7 @@ bool header_admit_forward_rewind_target(sqlite3 *db,
     }
 
     struct block_index *tip = active_chain_tip(chain);
-    if (!tip || !tip->phashBlock || tip->nHeight < 0)
+    if (tip_unusable_for_rewind(tip))
         return true;
 
     int next_h = tip->nHeight + 1;
