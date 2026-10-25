@@ -1176,8 +1176,6 @@ platform/modules/platform/tests/file_service_transport_windows_acceptance.c:lega
 platform/modules/platform/tests/file_service_transport_windows_acceptance.c:main:22
 platform/modules/platform/tests/path_replace_windows_acceptance.c:main:34
 platform/modules/platform/tests/positioned_file_windows_acceptance.c:main:25
-platform/modules/platform/tests/private_directory_windows_acceptance.c:acl_is_explicitly_private:27
-platform/modules/platform/tests/private_directory_windows_acceptance.c:main:39
 platform/modules/platform/tests/private_file_path_swap_acceptance.c:main:24
 platform/modules/platform/tests/private_file_windows_acceptance.c:main:64
 platform/modules/platform/tests/process_lifecycle_windows_acceptance.c:child_mode:28

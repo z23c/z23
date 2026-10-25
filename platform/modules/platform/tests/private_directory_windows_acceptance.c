@@ -15,6 +15,37 @@ static int fail(const char *message)
     return 1;
 }
 
+static bool acl_has_private_entries(PSECURITY_DESCRIPTOR descriptor,
+                                    PACL dacl, PSID user_sid, PSID system_sid)
+{
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD revision = 0;
+    bool ok = GetSecurityDescriptorControl(descriptor, &control, &revision) &&
+         (control & SE_DACL_PROTECTED) != 0;
+    ACL_SIZE_INFORMATION info = {0};
+    ok = ok && GetAclInformation(dacl, &info, sizeof(info),
+                                 AclSizeInformation) &&
+         info.AceCount == 2;
+    bool saw_user = false, saw_system = false;
+    for (DWORD i = 0; ok && i < info.AceCount; ++i) {
+        void *raw = NULL;
+        ok = GetAce(dacl, i, &raw) != 0;
+        if (!ok) break;
+        ACE_HEADER *header = raw;
+        ACCESS_ALLOWED_ACE *ace = raw;
+        PSID sid = &ace->SidStart;
+        bool is_user = EqualSid(sid, user_sid) != 0;
+        bool is_system = EqualSid(sid, system_sid) != 0;
+        ok = header->AceType == ACCESS_ALLOWED_ACE_TYPE &&
+             (header->AceFlags & INHERITED_ACE) == 0 &&
+             (is_user || is_system) &&
+             (ace->Mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS;
+        saw_user |= is_user;
+        saw_system |= is_system;
+    }
+    return ok && saw_user && saw_system;
+}
+
 static bool acl_is_explicitly_private(HANDLE directory)
 {
     HANDLE token = NULL;
@@ -39,35 +70,12 @@ static bool acl_is_explicitly_private(HANDLE directory)
                          &owner, NULL, &dacl, NULL,
                          &descriptor) == ERROR_SUCCESS &&
          owner && EqualSid(owner, user->User.Sid) && dacl;
-    SECURITY_DESCRIPTOR_CONTROL control = 0;
-    DWORD revision = 0;
-    ok = ok && GetSecurityDescriptorControl(descriptor, &control, &revision) &&
-         (control & SE_DACL_PROTECTED) != 0;
-    ACL_SIZE_INFORMATION info = {0};
-    ok = ok && GetAclInformation(dacl, &info, sizeof(info),
-                                 AclSizeInformation) &&
-         info.AceCount == 2;
-    bool saw_user = false, saw_system = false;
-    for (DWORD i = 0; ok && i < info.AceCount; ++i) {
-        void *raw = NULL;
-        ok = GetAce(dacl, i, &raw) != 0;
-        if (!ok) break;
-        ACE_HEADER *header = raw;
-        ACCESS_ALLOWED_ACE *ace = raw;
-        PSID sid = &ace->SidStart;
-        bool is_user = EqualSid(sid, user->User.Sid) != 0;
-        bool is_system = EqualSid(sid, system_buffer) != 0;
-        ok = header->AceType == ACCESS_ALLOWED_ACE_TYPE &&
-             (header->AceFlags & INHERITED_ACE) == 0 &&
-             (is_user || is_system) &&
-             (ace->Mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS;
-        saw_user |= is_user;
-        saw_system |= is_system;
-    }
+    ok = ok && acl_has_private_entries(descriptor, dacl, user->User.Sid,
+                                       system_buffer);
     if (descriptor) LocalFree(descriptor);
     if (user) HeapFree(GetProcessHeap(), 0, user);
     if (token) CloseHandle(token);
-    return ok && saw_user && saw_system;
+    return ok;
 }
 
 static bool add_everyone_ace(const wchar_t *path)
@@ -107,43 +115,52 @@ static bool add_everyone_ace(const wchar_t *path)
     return ok;
 }
 
-int main(void)
-{
-    wchar_t temp[MAX_PATH], root[MAX_PATH], private_path[MAX_PATH];
-    wchar_t permissive[MAX_PATH], target[MAX_PATH], link_path[MAX_PATH];
-    wchar_t moved_path[MAX_PATH], staged_path[MAX_PATH], collision_path[MAX_PATH];
+struct private_directory_fixture {
+    wchar_t root[MAX_PATH], private_path[MAX_PATH], permissive[MAX_PATH];
+    wchar_t target[MAX_PATH], link_path[MAX_PATH], moved_path[MAX_PATH];
+    wchar_t staged_path[MAX_PATH], collision_path[MAX_PATH];
     wchar_t compromised_path[MAX_PATH];
+    char utf8[MAX_PATH * 3];
+};
+
+static int create_fixture_paths(struct private_directory_fixture *fixture)
+{
+    wchar_t temp[MAX_PATH];
     if (!GetTempPathW(MAX_PATH, temp) ||
-        swprintf(root, MAX_PATH, L"%lsz23-private-dir-%lu-%llu", temp,
+        swprintf(fixture->root, MAX_PATH, L"%lsz23-private-dir-%lu-%llu", temp,
                  (unsigned long)GetCurrentProcessId(),
                  (unsigned long long)GetTickCount64()) <= 0 ||
-        !CreateDirectoryW(root, NULL))
+        !CreateDirectoryW(fixture->root, NULL))
         return fail("fixture root create failed");
-    (void)swprintf(private_path, MAX_PATH, L"%ls\\private", root);
-    (void)swprintf(permissive, MAX_PATH, L"%ls\\permissive", root);
-    (void)swprintf(target, MAX_PATH, L"%ls\\target", root);
-    (void)swprintf(link_path, MAX_PATH, L"%ls\\link", root);
-    (void)swprintf(moved_path, MAX_PATH, L"%ls\\private-moved", root);
-    (void)swprintf(staged_path, MAX_PATH, L"%ls\\staged", root);
-    (void)swprintf(collision_path, MAX_PATH, L"%ls\\collision", root);
-    (void)swprintf(compromised_path, MAX_PATH, L"%ls\\compromised", root);
+    (void)swprintf(fixture->private_path, MAX_PATH, L"%ls\\private", fixture->root);
+    (void)swprintf(fixture->permissive, MAX_PATH, L"%ls\\permissive", fixture->root);
+    (void)swprintf(fixture->target, MAX_PATH, L"%ls\\target", fixture->root);
+    (void)swprintf(fixture->link_path, MAX_PATH, L"%ls\\link", fixture->root);
+    (void)swprintf(fixture->moved_path, MAX_PATH, L"%ls\\private-moved", fixture->root);
+    (void)swprintf(fixture->staged_path, MAX_PATH, L"%ls\\staged", fixture->root);
+    (void)swprintf(fixture->collision_path, MAX_PATH, L"%ls\\collision", fixture->root);
+    (void)swprintf(fixture->compromised_path, MAX_PATH, L"%ls\\compromised", fixture->root);
 
-    char utf8[MAX_PATH * 3];
-    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, private_path, -1,
-                             utf8, sizeof(utf8), NULL, NULL))
+    return 0;
+}
+
+static int check_explicit_private_acl(struct private_directory_fixture *fixture)
+{
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->private_path, -1,
+                             fixture->utf8, sizeof(fixture->utf8), NULL, NULL))
         return fail("private path UTF-8 conversion failed");
-    if (!platform_private_directory_ensure(utf8)) {
-        RemoveDirectoryW(private_path);
-        RemoveDirectoryW(root);
+    if (!platform_private_directory_ensure(fixture->utf8)) {
+        RemoveDirectoryW(fixture->private_path);
+        RemoveDirectoryW(fixture->root);
         fputs("private_directory_acceptance: REFUSE: runtime cannot prove "
               "native SID/DACL semantics\n", stderr);
         return 77;
     }
-    if (!platform_private_directory_ensure(utf8))
+    if (!platform_private_directory_ensure(fixture->utf8))
         return fail("create/existing validation failed");
 
     HANDLE private_handle = CreateFileW(
-        private_path, READ_CONTROL | FILE_READ_ATTRIBUTES,
+        fixture->private_path, READ_CONTROL | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
@@ -152,28 +169,38 @@ int main(void)
         return fail("private ACL is not explicit user+SYSTEM/protected");
     CloseHandle(private_handle);
 
+    return 0;
+}
+
+static int check_retained_handle_rename(struct private_directory_fixture *fixture)
+{
     uintptr_t native = (uintptr_t)INVALID_HANDLE_VALUE;
     BY_HANDLE_FILE_INFORMATION before = {0}, after = {0};
-    if (!platform_private_directory_open_validated(utf8, &native) ||
+    if (!platform_private_directory_open_validated(fixture->utf8, &native) ||
         !FlushFileBuffers((HANDLE)native) ||
         !GetFileInformationByHandle((HANDLE)native, &before) ||
-        !MoveFileExW(private_path, moved_path, 0) ||
+        !MoveFileExW(fixture->private_path, fixture->moved_path, 0) ||
         !GetFileInformationByHandle((HANDLE)native, &after) ||
         before.dwVolumeSerialNumber != after.dwVolumeSerialNumber ||
         before.nFileIndexHigh != after.nFileIndexHigh ||
         before.nFileIndexLow != after.nFileIndexLow)
         return fail("validated handle did not remain bound across rename");
     platform_private_directory_close(native);
-    if (!MoveFileExW(moved_path, private_path, 0))
+    if (!MoveFileExW(fixture->moved_path, fixture->private_path, 0))
         return fail("fixture rename restore failed");
 
+    return 0;
+}
+
+static int check_no_clobber_publication(struct private_directory_fixture *fixture)
+{
     char staged_utf8[MAX_PATH * 3], moved_utf8[MAX_PATH * 3];
     char collision_utf8[MAX_PATH * 3];
-    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, staged_path, -1,
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->staged_path, -1,
                              staged_utf8, sizeof(staged_utf8), NULL, NULL) ||
-        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, moved_path, -1,
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->moved_path, -1,
                              moved_utf8, sizeof(moved_utf8), NULL, NULL) ||
-        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, collision_path, -1,
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->collision_path, -1,
                              collision_utf8, sizeof(collision_utf8), NULL,
                              NULL) ||
         !platform_private_directory_create(staged_utf8) ||
@@ -187,38 +214,66 @@ int main(void)
         !platform_private_directory_remove_empty(moved_utf8))
         return fail("create-only/no-clobber publication failed");
 
-    if (!CreateDirectoryW(permissive, NULL) ||
-        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, permissive, -1,
-                             utf8, sizeof(utf8), NULL, NULL) ||
-        platform_private_directory_ensure(utf8))
+    return 0;
+}
+
+static int check_unsafe_directory_refusals(struct private_directory_fixture *fixture)
+{
+    if (!CreateDirectoryW(fixture->permissive, NULL) ||
+        !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->permissive, -1,
+                             fixture->utf8, sizeof(fixture->utf8), NULL, NULL) ||
+        platform_private_directory_ensure(fixture->utf8))
         return fail("permissive inherited ACL accepted");
 
-    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, compromised_path,
-                             -1, utf8, sizeof(utf8), NULL, NULL) ||
-        !platform_private_directory_create(utf8) ||
-        !add_everyone_ace(compromised_path) ||
-        platform_private_directory_ensure(utf8))
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->compromised_path,
+                             -1, fixture->utf8, sizeof(fixture->utf8), NULL, NULL) ||
+        !platform_private_directory_create(fixture->utf8) ||
+        !add_everyone_ace(fixture->compromised_path) ||
+        platform_private_directory_ensure(fixture->utf8))
         return fail("extra Everyone ACE accepted");
 
-    if (!CreateDirectoryW(target, NULL))
+    if (!CreateDirectoryW(fixture->target, NULL))
         return fail("reparse target create failed");
     DWORD flags = SYMBOLIC_LINK_FLAG_DIRECTORY;
 #ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
     flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
 #endif
-    if (CreateSymbolicLinkW(link_path, target, flags)) {
-        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, link_path, -1,
-                                 utf8, sizeof(utf8), NULL, NULL) ||
-            platform_private_directory_ensure(utf8))
+    if (CreateSymbolicLinkW(fixture->link_path, fixture->target, flags)) {
+        if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->link_path, -1,
+                                 fixture->utf8, sizeof(fixture->utf8), NULL, NULL) ||
+            platform_private_directory_ensure(fixture->utf8))
             return fail("directory reparse point accepted");
-        RemoveDirectoryW(link_path);
+        RemoveDirectoryW(fixture->link_path);
     }
 
-    RemoveDirectoryW(private_path);
-    RemoveDirectoryW(permissive);
-    RemoveDirectoryW(compromised_path);
-    RemoveDirectoryW(target);
-    RemoveDirectoryW(root);
+    return 0;
+}
+
+static int remove_fixture_paths(struct private_directory_fixture *fixture)
+{
+    RemoveDirectoryW(fixture->private_path);
+    RemoveDirectoryW(fixture->permissive);
+    RemoveDirectoryW(fixture->compromised_path);
+    RemoveDirectoryW(fixture->target);
+    RemoveDirectoryW(fixture->root);
+    return 0;
+}
+
+int main(void)
+{
+    struct private_directory_fixture fixture = {0};
+    int result = create_fixture_paths(&fixture);
+    if (result) return result;
+    result = check_explicit_private_acl(&fixture);
+    if (result) return result;
+    result = check_retained_handle_rename(&fixture);
+    if (result) return result;
+    result = check_no_clobber_publication(&fixture);
+    if (result) return result;
+    result = check_unsafe_directory_refusals(&fixture);
+    if (result) return result;
+    result = remove_fixture_paths(&fixture);
+    if (result) return result;
     puts("private_directory_acceptance: PASS");
     return 0;
 }
