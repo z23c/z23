@@ -329,6 +329,41 @@ static size_t dht_flush_node(struct msg_processor *mp, struct p2p_node *node) {
   }
   return sent;
 }
+static const struct vcs_zcode_dht_delegation *dht_frame_delegation(
+    const struct vcs_zcode_dht_msg *message) {
+  const struct vcs_zcode_dht_delegation *delegation = NULL;
+  switch (message->kind) {
+  case VCS_ZCODE_DHT_MSG_FIND_NODE:
+    delegation = &message->find_node.delegation;
+    break;
+  case VCS_ZCODE_DHT_MSG_NODES:
+    delegation = &message->nodes.delegation;
+    break;
+  case VCS_ZCODE_DHT_MSG_FIND_RECORD:
+    delegation = &message->find_record.delegation;
+    break;
+  case VCS_ZCODE_DHT_MSG_RECORDS:
+    delegation = &message->records.delegation;
+    break;
+  case VCS_ZCODE_DHT_MSG_STORE_RECORD:
+    delegation = &message->store_record.delegation;
+    break;
+  case VCS_ZCODE_DHT_MSG_STORE_RESULT:
+    delegation = &message->store_result.delegation;
+    break;
+  }
+  return delegation;
+}
+static void dht_authorize_frame_records(struct boot_svc_ctx *svc,
+                                        const struct vcs_zcode_dht_msg *message) {
+  if (message->kind == VCS_ZCODE_DHT_MSG_RECORDS)
+    for (uint32_t i = 0; i < message->records.record_count; i++)
+      (void)boot_zcode_dht_chain_authorize(
+          svc, &message->records.records[i].delegation);
+  else if (message->kind == VCS_ZCODE_DHT_MSG_STORE_RECORD)
+    (void)boot_zcode_dht_chain_authorize(
+        svc, &message->store_record.record.delegation);
+}
 static void dht_authorize_frame_chain(
     struct boot_svc_ctx *svc, const uint8_t genesis[32],
     const struct vcs_zcode_dht_session *session, const uint8_t *wire,
@@ -347,37 +382,12 @@ static void dht_authorize_frame_chain(
   if (vcs_zcode_dht_msg_parse(wire, wire_len, &verify, &message) !=
       VCS_ZCODE_DHT_OK)
     return;
-  const struct vcs_zcode_dht_delegation *delegation = NULL;
-  switch (message.kind) {
-  case VCS_ZCODE_DHT_MSG_FIND_NODE:
-    delegation = &message.find_node.delegation;
-    break;
-  case VCS_ZCODE_DHT_MSG_NODES:
-    delegation = &message.nodes.delegation;
-    break;
-  case VCS_ZCODE_DHT_MSG_FIND_RECORD:
-    delegation = &message.find_record.delegation;
-    break;
-  case VCS_ZCODE_DHT_MSG_RECORDS:
-    delegation = &message.records.delegation;
-    break;
-  case VCS_ZCODE_DHT_MSG_STORE_RECORD:
-    delegation = &message.store_record.delegation;
-    break;
-  case VCS_ZCODE_DHT_MSG_STORE_RESULT:
-    delegation = &message.store_result.delegation;
-    break;
-  }
+  const struct vcs_zcode_dht_delegation *delegation =
+      dht_frame_delegation(&message);
   if (!delegation)
     return;
   (void)boot_zcode_dht_chain_authorize(svc, delegation);
-  if (message.kind == VCS_ZCODE_DHT_MSG_RECORDS)
-    for (uint32_t i = 0; i < message.records.record_count; i++)
-      (void)boot_zcode_dht_chain_authorize(
-          svc, &message.records.records[i].delegation);
-  else if (message.kind == VCS_ZCODE_DHT_MSG_STORE_RECORD)
-    (void)boot_zcode_dht_chain_authorize(
-        svc, &message.store_record.record.delegation);
+  dht_authorize_frame_records(svc, &message);
 }
 static bool dht_chain_prepare(struct boot_svc_ctx *svc) {
   if (boot_zcode_dht_chain_epoch_current())
@@ -411,6 +421,72 @@ bool boot_zcode_dht_peer_ready(const struct p2p_node *node) {
          p2p_node_noise_attached(node);
 }
 
+struct dht_frame_outcome {
+  bool ok;
+  bool have_dht;
+  bool service_enabled;
+  enum vcs_zcode_dht_reject_reason rejected;
+};
+/* Reads the service pointer, its generation, and the network genesis under
+ * the DHT lock; the genesis is copied only when a service is present. */
+static struct vcs_zcode_dht_service *dht_frame_begin(uint8_t genesis[32],
+                                                     uint64_t *generation) {
+  dht_lock();
+  struct vcs_zcode_dht_service *dht = g_dht;
+  *generation = g_dht_generation;
+  if (dht)
+    memcpy(genesis, g_dht_genesis, 32);
+  zcl_mutex_unlock(&g_dht_lock);
+  return dht;
+}
+static struct dht_frame_outcome dht_frame_admit(
+    struct p2p_node *node, uint64_t generation,
+    const struct vcs_zcode_dht_session *session, bool have_session,
+    const uint8_t *payload, size_t payload_len, struct vcs_zcode_dht_time now) {
+  struct dht_frame_outcome out = {
+      .rejected = VCS_ZCODE_DHT_REJECT_MALFORMED,
+  };
+  dht_lock();
+  struct vcs_zcode_dht_service *dht =
+      generation == g_dht_generation ? g_dht : NULL;
+  out.have_dht = dht != NULL;
+  out.service_enabled = dht && vcs_zcode_dht_service_enabled(dht);
+  if (dht && have_session)
+    (void)vcs_zcode_dht_service_session_open(dht, (uint64_t)node->id + 1,
+                                             session, now);
+  out.ok = dht && vcs_zcode_dht_service_handle_frame(
+                      dht, (uint64_t)node->id + 1, payload, payload_len, now,
+                      &out.rejected);
+  zcl_mutex_unlock(&g_dht_lock);
+  return out;
+}
+static bool dht_frame_scorable(struct msg_processor *mp, bool have_session,
+                               const struct dht_frame_outcome *out) {
+  return mp && mp->net_mgr &&
+         boot_zcode_dht_frame_classify(out->ok, out->have_dht,
+                                       out->service_enabled, have_session,
+                                       out->rejected) !=
+             BOOT_FRAME_INFRA_NON_ANSWER;
+}
+static void dht_frame_score_reject(struct msg_processor *mp,
+                                   struct p2p_node *node,
+                                   enum vcs_zcode_dht_reject_reason rejected) {
+  char context[96];
+  enum peer_offence offence = boot_zcode_dht_offence(rejected);
+  snprintf(context, sizeof(context), "zcode dht: %s",
+           vcs_zcode_dht_reject_reason_string(rejected));
+  /* NONE-class calls never move a score; say so once per episode so the
+   * probes stay visible in the log without spamming every plaintext
+   * scan. The counters still count each one under frames_rejected. */
+  if (offence == PEER_OFFENCE_NONE &&
+      !atomic_exchange_explicit(&dht_score_none_logged, true,
+                                memory_order_relaxed))
+    LOG_INFO("net.zcode_dht",
+             "probe scored NONE (%s); counted under frames_rejected",
+             vcs_zcode_dht_reject_reason_string(rejected));
+  peer_scoring_record(mp->net_mgr, node, offence, context);
+}
+
 bool boot_zcode_dht_frame(struct msg_processor *mp, struct p2p_node *node,
                           const uint8_t *payload, size_t payload_len,
                           struct boot_svc_ctx *svc) {
@@ -420,63 +496,28 @@ bool boot_zcode_dht_frame(struct msg_processor *mp, struct p2p_node *node,
   struct vcs_zcode_dht_session session;
   bool have_session = dht_snapshot(node, &session);
   uint8_t genesis[32] = {0};
-  dht_lock();
-  struct vcs_zcode_dht_service *dht = g_dht;
-  uint64_t generation = g_dht_generation;
-  if (dht)
-    memcpy(genesis, g_dht_genesis, 32);
-  zcl_mutex_unlock(&g_dht_lock);
+  uint64_t generation = 0;
+  struct vcs_zcode_dht_service *dht = dht_frame_begin(genesis, &generation);
   if (dht && have_session)
     dht_authorize_frame_chain(svc, genesis, &session, payload, payload_len,
                               now.wall_unix);
-
-  dht_lock();
-  dht = generation == g_dht_generation ? g_dht : NULL;
-  bool service_enabled = dht && vcs_zcode_dht_service_enabled(dht);
-  if (dht && have_session)
-    (void)vcs_zcode_dht_service_session_open(dht, (uint64_t)node->id + 1,
-                                             &session, now);
-  enum vcs_zcode_dht_reject_reason rejected = VCS_ZCODE_DHT_REJECT_MALFORMED;
-  bool ok = dht && vcs_zcode_dht_service_handle_frame(
-                       dht, (uint64_t)node->id + 1, payload, payload_len, now,
-                       &rejected);
-  zcl_mutex_unlock(&g_dht_lock);
-  if (ok) {
+  struct dht_frame_outcome out = dht_frame_admit(
+      node, generation, &session, have_session, payload, payload_len, now);
+  if (out.ok) {
     atomic_store_explicit(&dht_score_none_logged, false,
                           memory_order_relaxed);
     (void)dht_flush_node(mp, node);
-  } else if (mp && mp->net_mgr &&
-             boot_zcode_dht_frame_classify(ok, dht != NULL, service_enabled,
-                                           have_session,
-                                           rejected) !=
-                 BOOT_FRAME_INFRA_NON_ANSWER) {
-    char context[96];
-    enum peer_offence offence = boot_zcode_dht_offence(rejected);
-    snprintf(context, sizeof(context), "zcode dht: %s",
-             vcs_zcode_dht_reject_reason_string(rejected));
-    /* NONE-class calls never move a score; say so once per episode so the
-     * probes stay visible in the log without spamming every plaintext
-     * scan. The counters still count each one under frames_rejected. */
-    if (offence == PEER_OFFENCE_NONE &&
-        !atomic_exchange_explicit(&dht_score_none_logged, true,
-                                  memory_order_relaxed))
-      LOG_INFO("net.zcode_dht",
-               "probe scored NONE (%s); counted under frames_rejected",
-               vcs_zcode_dht_reject_reason_string(rejected));
-    peer_scoring_record(mp->net_mgr, node, offence, context);
+  } else if (dht_frame_scorable(mp, have_session, &out)) {
+    dht_frame_score_reject(mp, node, out.rejected);
   }
   return true;
 }
 
-void boot_zcode_dht_periodic(struct msg_processor *mp,
-                             struct boot_svc_ctx *svc) {
-  if (!mp || !mp->net_mgr || !svc)
-    return;
-  struct vcs_zcode_dht_time now = dht_now();
-  dht_lock();
-  g_dht_svc = svc;
-  zcl_mutex_unlock(&g_dht_lock);
-  struct p2p_node *nodes[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
+/* Admits fully handshaked peers only: Noise establishment alone is below the
+ * P2P message-layer boundary. Caller receives one reference per node. */
+static size_t dht_collect_ready_nodes(
+    struct msg_processor *mp,
+    struct p2p_node *nodes[VCS_ZCODE_DHT_SERVICE_MAX_PEERS]) {
   size_t count = 0;
   zcl_mutex_lock(&mp->net_mgr->cs_nodes);
   for (size_t i = 0;
@@ -493,22 +534,9 @@ void boot_zcode_dht_periodic(struct msg_processor *mp,
     p2p_node_add_ref(node);
   }
   zcl_mutex_unlock(&mp->net_mgr->cs_nodes);
-
-  /* Creation parses contacts and validates delegations entirely outside the
-   * global mutex. Copy the immutable network key, then build the ZENDP index
-   * with the mutex released as well. */
-  dht_ensure_periodic(mp, svc, now);
-  uint8_t genesis[32] = {0};
-  dht_lock();
-  struct vcs_zcode_dht_service *dht = g_dht;
-  if (dht)
-    memcpy(genesis, g_dht_genesis, sizeof(genesis));
-  zcl_mutex_unlock(&g_dht_lock);
-  if (dht)
-    (void)boot_zcode_dht_reachability_refresh(genesis, now);
-  if (dht)
-    (void)dht_chain_prepare(svc);
-
+  return count;
+}
+static void dht_periodic_possession(struct vcs_zcode_dht_time now) {
   struct vcs_zcode_dht_storage_ack_proof_request ack_requests[
       VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS];
   size_t ack_count = 0;
@@ -528,17 +556,27 @@ void boot_zcode_dht_periodic(struct msg_processor *mp,
   (void)boot_zcode_dht_possession_cycle(
       package_store, ack_requests, ack_count, now.monotonic_s,
       dht_ack_apply, &ack_context);
+}
+struct dht_periodic_pass {
   struct vcs_zcode_dht_peer_view cold[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
-  size_t cold_count = 0;
-  struct vcs_zcode_dht_persistence_snapshot *save_snapshot = NULL;
-  uint64_t save_generation = 0;
-  struct vcs_zcode_dht_service *save_service = NULL;
-  struct vcs_zcode_dht_session sessions[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
-  bool session_ready[VCS_ZCODE_DHT_SERVICE_MAX_PEERS] = {0};
-  for (size_t i = 0; i < count; i++)
-    session_ready[i] = dht_snapshot(nodes[i], &sessions[i]);
+  size_t cold_count;
+  struct vcs_zcode_dht_persistence_snapshot *save_snapshot;
+  uint64_t save_generation;
+  struct vcs_zcode_dht_service *save_service;
+};
+/* One locked pass: admit live sessions, reconcile, tick, and capture the
+ * persistence snapshot and cold-contact view. The lock is held throughout. */
+static void dht_periodic_session_pass(struct vcs_zcode_dht_time now,
+                                      struct p2p_node *nodes[], size_t count,
+                                      struct vcs_zcode_dht_session sessions[],
+                                      const bool session_ready[],
+                                      struct dht_periodic_pass *pass) {
+  pass->cold_count = 0;
+  pass->save_snapshot = NULL;
+  pass->save_generation = 0;
+  pass->save_service = NULL;
   dht_lock();
-  dht = g_dht;
+  struct vcs_zcode_dht_service *dht = g_dht;
   struct vcs_zcode_dht_live_session live[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
   size_t live_count = 0;
   for (size_t i = 0; dht && i < count; i++) {
@@ -554,34 +592,72 @@ void boot_zcode_dht_periodic(struct msg_processor *mp,
   if (dht) {
     vcs_zcode_dht_service_sessions_reconcile(dht, live, live_count, now);
     vcs_zcode_dht_service_tick(dht, now);
-    save_snapshot = vcs_zcode_dht_service_persistence_snapshot(
+    pass->save_snapshot = vcs_zcode_dht_service_persistence_snapshot(
         dht, now.monotonic_s, false);
-    if (save_snapshot) {
-      save_generation = g_dht_generation;
-      save_service = dht;
+    if (pass->save_snapshot) {
+      pass->save_generation = g_dht_generation;
+      pass->save_service = dht;
     }
-    cold_count = vcs_zcode_dht_service_peers(
-        dht, now.wall_unix, cold, VCS_ZCODE_DHT_SERVICE_MAX_PEERS,
+    pass->cold_count = vcs_zcode_dht_service_peers(
+        dht, now.wall_unix, pass->cold, VCS_ZCODE_DHT_SERVICE_MAX_PEERS,
         g_cold_contact_cursor);
-    if (cold_count == VCS_ZCODE_DHT_SERVICE_MAX_PEERS)
-      g_cold_contact_cursor += cold_count;
+    if (pass->cold_count == VCS_ZCODE_DHT_SERVICE_MAX_PEERS)
+      g_cold_contact_cursor += pass->cold_count;
     else
       g_cold_contact_cursor = 0;
   }
   zcl_mutex_unlock(&g_dht_lock);
-  if (save_snapshot) {
-    bool written =
-        vcs_zcode_dht_persistence_snapshot_write(save_snapshot);
-    dht_lock();
-    if (g_dht == save_service && g_dht_generation == save_generation)
-      vcs_zcode_dht_service_persistence_commit(
-          g_dht, save_snapshot, written);
-    zcl_mutex_unlock(&g_dht_lock);
-    vcs_zcode_dht_persistence_snapshot_free(save_snapshot);
-  }
+}
+static void dht_periodic_persist(struct dht_periodic_pass *pass) {
+  if (!pass->save_snapshot)
+    return;
+  bool written = vcs_zcode_dht_persistence_snapshot_write(pass->save_snapshot);
+  dht_lock();
+  if (g_dht == pass->save_service &&
+      g_dht_generation == pass->save_generation)
+    vcs_zcode_dht_service_persistence_commit(g_dht, pass->save_snapshot,
+                                             written);
+  zcl_mutex_unlock(&g_dht_lock);
+  vcs_zcode_dht_persistence_snapshot_free(pass->save_snapshot);
+}
+
+void boot_zcode_dht_periodic(struct msg_processor *mp,
+                             struct boot_svc_ctx *svc) {
+  if (!mp || !mp->net_mgr || !svc)
+    return;
+  struct vcs_zcode_dht_time now = dht_now();
+  dht_lock();
+  g_dht_svc = svc;
+  zcl_mutex_unlock(&g_dht_lock);
+  struct p2p_node *nodes[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
+  size_t count = dht_collect_ready_nodes(mp, nodes);
+
+  /* Creation parses contacts and validates delegations entirely outside the
+   * global mutex. Copy the immutable network key, then build the ZENDP index
+   * with the mutex released as well. */
+  dht_ensure_periodic(mp, svc, now);
+  uint8_t genesis[32] = {0};
+  dht_lock();
+  struct vcs_zcode_dht_service *dht = g_dht;
+  if (dht)
+    memcpy(genesis, g_dht_genesis, sizeof(genesis));
+  zcl_mutex_unlock(&g_dht_lock);
+  if (dht)
+    (void)boot_zcode_dht_reachability_refresh(genesis, now);
+  if (dht)
+    (void)dht_chain_prepare(svc);
+
+  dht_periodic_possession(now);
+  struct vcs_zcode_dht_session sessions[VCS_ZCODE_DHT_SERVICE_MAX_PEERS];
+  bool session_ready[VCS_ZCODE_DHT_SERVICE_MAX_PEERS] = {0};
+  for (size_t i = 0; i < count; i++)
+    session_ready[i] = dht_snapshot(nodes[i], &sessions[i]);
+  struct dht_periodic_pass pass;
+  dht_periodic_session_pass(now, nodes, count, sessions, session_ready, &pass);
+  dht_periodic_persist(&pass);
   for (size_t i = 0; i < count; i++)
     (void)dht_flush_node(mp, nodes[i]);
-  boot_zcode_dht_reachability_drive(svc, cold, cold_count, now);
+  boot_zcode_dht_reachability_drive(svc, pass.cold, pass.cold_count, now);
   boot_zcode_dht_public_tick(now.monotonic_s);
   /* Recover stalled swarm downloads from the DHT record store. */
   boot_zcode_swarm_discovery_tick(now.monotonic_s);
