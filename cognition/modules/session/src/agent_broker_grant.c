@@ -249,6 +249,67 @@ static metaverse_kind_set all_real_kinds(void)
     return s;
 }
 
+static void project_rights_masks(const struct agent_grant *g,
+                                 const struct mvap_verb_row *row,
+                                 struct metaverse_grant *mg)
+{
+    /* Read rights and act rights are two separate closed sets on a canonical
+     * grant, never one word. A query is ruled on by metaverse_grant_query_check
+     * against `queries`; an action by metaverse_grant_check against `actions`.
+     * Projecting a query onto the reserved INSPECT bit would not work even if
+     * it were tempting: that bit is not a member of METAVERSE_ACTION_ALL, so
+     * metaverse_grant_well_formed() rejects the whole record as MALFORMED. */
+    if (row->verb_class == MVAP_VERB_CLASS_QUERY) {
+        mg->actions = 0u;
+        mg->queries = 0u;
+        for (uint32_t w = 0; w < 32u; w++) {
+            if ((g->queries_mask & ((uint32_t)1u << w)) == 0u)
+                continue;
+            /* Through the join, so a wire value that is not a QUERY verb
+             * contributes no read right however the mask came to hold it. */
+            enum metaverse_query q;
+            if (mvap_verb_to_query(w, &q) && q != METAVERSE_QUERY_NONE)
+                mg->queries |= (metaverse_query_set)q;
+        }
+    } else {
+        mg->actions = g->actions_mask;
+        mg->queries = 0u;
+    }
+}
+
+static bool project_counterparty_allowlist(const struct agent_grant *g,
+                                           const struct mvap_verb_row *row,
+                                           struct metaverse_grant *mg)
+{
+    /* An allowlist constrains WHO the counterparty may be. An action that has
+     * no counterparty is not constrained by it — projecting the list onto a
+     * HOST would refuse it for naming nobody, which is not what an operator
+     * writing "sell only to buyer-one" meant. Whether the action has one is
+     * the canonical column, asked once here and once in the request
+     * A QUERY names no counterparty at all, so the accessor refuses and the
+     * question is never asked. */
+    enum metaverse_action action;
+    if (mvap_verb_row_action(row, &action) &&
+        metaverse_action_uses_counterparty(action) &&
+        !project_counterparties(g->counterparty_allowlist, mg))
+        return false;
+    return true;
+}
+
+static void project_rate_window(const struct agent_grant *g,
+                                const struct mvap_verb_row *row,
+                                struct metaverse_grant *mg)
+{
+    /* A query is not an action and does not consume the action rate window. */
+    if (row->verb_class == MVAP_VERB_CLASS_ACTION && g->rate_limit > 0 &&
+        g->window_seconds > 0) {
+        mg->rate_limit = g->rate_limit;
+        mg->rate_window_seconds = (int64_t)g->window_seconds * 1000;
+        mg->window_start_unix = g->window_start_ms;
+        mg->window_used = g->window_used;
+    }
+}
+
 /* Project the broker's session grant onto the canonical record.
  *
  * TIME IS IN MILLISECONDS ON BOTH SIDES. The canonical record's time fields
@@ -279,28 +340,7 @@ static bool project_grant(const struct agent_grant *g,
     mg->scope_form = METAVERSE_SCOPE_KINDS;
     mg->kinds = all_real_kinds();
 
-    /* Read rights and act rights are two separate closed sets on a canonical
-     * grant, never one word. A query is ruled on by metaverse_grant_query_check
-     * against `queries`; an action by metaverse_grant_check against `actions`.
-     * Projecting a query onto the reserved INSPECT bit would not work even if
-     * it were tempting: that bit is not a member of METAVERSE_ACTION_ALL, so
-     * metaverse_grant_well_formed() rejects the whole record as MALFORMED. */
-    if (row->verb_class == MVAP_VERB_CLASS_QUERY) {
-        mg->actions = 0u;
-        mg->queries = 0u;
-        for (uint32_t w = 0; w < 32u; w++) {
-            if ((g->queries_mask & ((uint32_t)1u << w)) == 0u)
-                continue;
-            /* Through the join, so a wire value that is not a QUERY verb
-             * contributes no read right however the mask came to hold it. */
-            enum metaverse_query q;
-            if (mvap_verb_to_query(w, &q) && q != METAVERSE_QUERY_NONE)
-                mg->queries |= (metaverse_query_set)q;
-        }
-    } else {
-        mg->actions = g->actions_mask;
-        mg->queries = 0u;
-    }
+    project_rights_masks(g, row, mg);
 
     if (g->budget_zats > (uint64_t)INT64_MAX ||
         g->spent_zats > (uint64_t)INT64_MAX)
@@ -310,27 +350,10 @@ static bool project_grant(const struct agent_grant *g,
     if (mg->spent_zat > mg->max_value_zat)
         return false;
 
-    /* An allowlist constrains WHO the counterparty may be. An action that has
-     * no counterparty is not constrained by it — projecting the list onto a
-     * HOST would refuse it for naming nobody, which is not what an operator
-     * writing "sell only to buyer-one" meant. Whether the action has one is
-     * the canonical column, asked once here and once in the request
-     * A QUERY names no counterparty at all, so the accessor refuses and the
-     * question is never asked. */
-    enum metaverse_action action;
-    if (mvap_verb_row_action(row, &action) &&
-        metaverse_action_uses_counterparty(action) &&
-        !project_counterparties(g->counterparty_allowlist, mg))
+    if (!project_counterparty_allowlist(g, row, mg))
         return false;
 
-    /* A query is not an action and does not consume the action rate window. */
-    if (row->verb_class == MVAP_VERB_CLASS_ACTION && g->rate_limit > 0 &&
-        g->window_seconds > 0) {
-        mg->rate_limit = g->rate_limit;
-        mg->rate_window_seconds = (int64_t)g->window_seconds * 1000;
-        mg->window_start_unix = g->window_start_ms;
-        mg->window_used = g->window_used;
-    }
+    project_rate_window(g, row, mg);
 
     mg->expires_unix = g->expires_unix_ms > 0 ? g->expires_unix_ms : 0;
     mg->expires_height = 0;
@@ -340,6 +363,62 @@ static bool project_grant(const struct agent_grant *g,
 }
 
 /* ── the decision ───────────────────────────────────────────────────────── */
+
+/* Ask the canonical evaluator this verb class is routed to and translate a
+ * non-OK verdict into a wire status. Returns true with *refusal set when
+ * agent_grant_authorize() must stop there; false when the canonical verdict
+ * was OK. */
+static bool canonical_verdict_refusal(const struct agent_grant *g,
+                                      const struct mvap_request *req,
+                                      const struct mvap_verb_row *row,
+                                      struct metaverse_grant *mg,
+                                      int64_t now_ms, int32_t *refusal)
+{
+    enum metaverse_grant_verdict verdict;
+    if (row->verb_class == MVAP_VERB_CLASS_QUERY) {
+        /* A query has no value column at all, so a canonical query request has
+         * nowhere to carry one and the evaluator can never see it. Refusing
+         * here is reading the canonical class, not inventing a local policy:
+         * silently dropping the amount would let a caller believe it had paid
+         * for a read. */
+        if (req->value_zats != 0) {
+            *refusal = MVAP_ERR_BAD_REQUEST;
+            return true;
+        }
+        struct metaverse_query_request qreq;
+        if (!mvap_request_to_query_request(req, g->principal, now_ms, 0,
+                                           &qreq)) {
+            *refusal = MVAP_ERR_BAD_REQUEST;
+            return true;
+        }
+        verdict = metaverse_grant_query_check(mg, NULL, 0, &qreq);
+    } else {
+        struct metaverse_action_request mreq;
+        if (!mvap_request_to_action_request(req, g->principal, now_ms, 0,
+                                            &mreq)) {
+            *refusal = MVAP_ERR_BAD_REQUEST;
+            return true;
+        }
+        verdict = metaverse_grant_check(mg, NULL, 0, &mreq);
+    }
+    if (verdict != METAVERSE_GRANT_OK) {
+        *refusal = mvap_status_from_grant_verdict(verdict);
+        return true;
+    }
+    return false;
+}
+
+/* The one delegation refusal the broker can express without a child grant. */
+static bool delegation_refused(const struct agent_grant *g,
+                               const struct mvap_verb_row *row)
+{
+    enum metaverse_action action;
+    if (mvap_verb_row_action(row, &action) &&
+        action == METAVERSE_ACTION_DELEGATE &&
+        (!g->may_delegate || g->max_delegation_depth == 0))
+        return true;
+    return false;
+}
 
 int32_t agent_grant_authorize(const struct agent_grant *g,
                               const struct mvap_request *req, int64_t now_ms)
@@ -370,28 +449,9 @@ int32_t agent_grant_authorize(const struct agent_grant *g,
      *    evaluator is not merely untidy: a query names no action, so the
      *    action evaluator can only answer BAD_ARGS, and every read would be
      *    refused. */
-    enum metaverse_grant_verdict verdict;
-    if (row->verb_class == MVAP_VERB_CLASS_QUERY) {
-        /* A query has no value column at all, so a canonical query request has
-         * nowhere to carry one and the evaluator can never see it. Refusing
-         * here is reading the canonical class, not inventing a local policy:
-         * silently dropping the amount would let a caller believe it had paid
-         * for a read. */
-        if (req->value_zats != 0)
-            return MVAP_ERR_BAD_REQUEST;
-        struct metaverse_query_request qreq;
-        if (!mvap_request_to_query_request(req, g->principal, now_ms, 0, &qreq))
-            return MVAP_ERR_BAD_REQUEST;
-        verdict = metaverse_grant_query_check(&mg, NULL, 0, &qreq);
-    } else {
-        struct metaverse_action_request mreq;
-        if (!mvap_request_to_action_request(req, g->principal, now_ms, 0,
-                                            &mreq))
-            return MVAP_ERR_BAD_REQUEST;
-        verdict = metaverse_grant_check(&mg, NULL, 0, &mreq);
-    }
-    if (verdict != METAVERSE_GRANT_OK)
-        return mvap_status_from_grant_verdict(verdict);
+    int32_t refusal;
+    if (canonical_verdict_refusal(g, req, row, &mg, now_ms, &refusal))
+        return refusal;
 
     /* 2. CONFINEMENT NARROWING. Everything below can only refuse. It runs
      *    through agent_broker_scope_check(), the SAME function a broker
@@ -407,10 +467,7 @@ int32_t agent_grant_authorize(const struct agent_grant *g,
      * metaverse_grant_check_delegation() cannot be reached from here. What the
      * broker can still refuse is a DELEGATE attempted under a grant that
      * forbids delegating at all. */
-    enum metaverse_action action;
-    if (mvap_verb_row_action(row, &action) &&
-        action == METAVERSE_ACTION_DELEGATE &&
-        (!g->may_delegate || g->max_delegation_depth == 0))
+    if (delegation_refused(g, row))
         return MVAP_ERR_DENIED_DELEGATION;
 
     return MVAP_OK;

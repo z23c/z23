@@ -65,8 +65,6 @@ cognition/modules/science/src/ecosystem.c:science_ecosystem_collect:19
 cognition/modules/science/src/science_corpus.c:walk_dir:20
 cognition/modules/session/src/agent_broker.c:agent_broker_handle:27
 cognition/modules/session/src/agent_broker.c:agent_broker_session_bind:17
-cognition/modules/session/src/agent_broker_grant.c:agent_grant_authorize:17
-cognition/modules/session/src/agent_broker_grant.c:project_grant:17
 cognition/modules/session/src/agent_broker_peer.c:agent_broker_peer_authorized:27
 cognition/modules/session/src/agent_broker_spawn.c:agent_broker_spawn_confined#2:24
 cognition/modules/session/src/agent_broker_status.c:agent_broker_write_status:20
