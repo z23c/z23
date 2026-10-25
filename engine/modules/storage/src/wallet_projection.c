@@ -267,6 +267,75 @@ static bool apply_utxo_seen(wallet_projection_t *p,
     return rc == SQLITE_DONE;
 }
 
+static bool parse_and_apply_key_add(wallet_projection_t *p,
+                                    const void *payload, size_t len)
+{
+    struct ev_wallet_key_add ev;
+    if (!ev_wallet_key_add_parse(payload, len, &ev) ||
+        !apply_key_add(p, &ev))
+        return false;
+    return true;
+}
+
+static bool parse_and_apply_addr_derived(wallet_projection_t *p,
+                                         const void *payload, size_t len)
+{
+    struct ev_wallet_addr_derived ev;
+    if (!ev_wallet_addr_derived_parse(payload, len, &ev) ||
+        !apply_addr_derived(p, &ev))
+        return false;
+    return true;
+}
+
+static bool parse_and_apply_tx_seen(wallet_projection_t *p,
+                                    const void *payload, size_t len)
+{
+    struct ev_wallet_tx_seen ev;
+    if (!ev_wallet_tx_seen_parse(payload, len, &ev) ||
+        !apply_tx_seen(p, &ev))
+        return false;
+    return true;
+}
+
+static bool parse_and_apply_note_decrypted(wallet_projection_t *p,
+                                           const void *payload, size_t len)
+{
+    struct ev_wallet_note_decrypted ev;
+    if (!ev_wallet_note_decrypted_parse(payload, len, &ev) ||
+        !apply_note_decrypted(p, &ev))
+        return false;
+    return true;
+}
+
+static bool parse_and_apply_utxo_seen(wallet_projection_t *p,
+                                      const void *payload, size_t len)
+{
+    struct ev_wallet_utxo_seen ev;
+    if (!ev_wallet_utxo_seen_parse(payload, len, &ev) ||
+        !apply_utxo_seen(p, &ev))
+        return false;
+    return true;
+}
+
+/* Parse and apply one wallet event by type; unknown types return true so
+   the caller still advances its offset bookkeeping. */
+static bool apply_wallet_event(wallet_projection_t *p,
+                               enum event_log_type type,
+                               const void *payload, size_t len)
+{
+    if (type == EV_WALLET_KEY_ADD)
+        return parse_and_apply_key_add(p, payload, len);
+    if (type == EV_WALLET_ADDR_DERIVED)
+        return parse_and_apply_addr_derived(p, payload, len);
+    if (type == EV_WALLET_TX_SEEN)
+        return parse_and_apply_tx_seen(p, payload, len);
+    if (type == EV_WALLET_NOTE_DECRYPTED)
+        return parse_and_apply_note_decrypted(p, payload, len);
+    if (type == EV_WALLET_UTXO_SEEN)
+        return parse_and_apply_utxo_seen(p, payload, len);
+    return true;
+}
+
 struct catchup_ctx {
     wallet_projection_t *p;
     bool ok;
@@ -282,41 +351,9 @@ static bool catchup_cb(uint64_t offset, enum event_log_type type,
     wallet_projection_t *p = ctx->p;
     uint64_t next = offset + EVENT_LOG_FRAME_OVERHEAD + (uint64_t)len;
 
-    if (type == EV_WALLET_KEY_ADD) {
-        struct ev_wallet_key_add ev;
-        if (!ev_wallet_key_add_parse(payload, len, &ev) ||
-            !apply_key_add(p, &ev)) {
-            ctx->ok = false;
-            return false;
-        }
-    } else if (type == EV_WALLET_ADDR_DERIVED) {
-        struct ev_wallet_addr_derived ev;
-        if (!ev_wallet_addr_derived_parse(payload, len, &ev) ||
-            !apply_addr_derived(p, &ev)) {
-            ctx->ok = false;
-            return false;
-        }
-    } else if (type == EV_WALLET_TX_SEEN) {
-        struct ev_wallet_tx_seen ev;
-        if (!ev_wallet_tx_seen_parse(payload, len, &ev) ||
-            !apply_tx_seen(p, &ev)) {
-            ctx->ok = false;
-            return false;
-        }
-    } else if (type == EV_WALLET_NOTE_DECRYPTED) {
-        struct ev_wallet_note_decrypted ev;
-        if (!ev_wallet_note_decrypted_parse(payload, len, &ev) ||
-            !apply_note_decrypted(p, &ev)) {
-            ctx->ok = false;
-            return false;
-        }
-    } else if (type == EV_WALLET_UTXO_SEEN) {
-        struct ev_wallet_utxo_seen ev;
-        if (!ev_wallet_utxo_seen_parse(payload, len, &ev) ||
-            !apply_utxo_seen(p, &ev)) {
-            ctx->ok = false;
-            return false;
-        }
+    if (!apply_wallet_event(p, type, payload, len)) {
+        ctx->ok = false;
+        return false;
     }
 
     ctx->next_offset = next;
