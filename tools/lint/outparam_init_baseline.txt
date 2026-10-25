@@ -1,6 +1,6 @@
 # Copyright 2026 Rhett Creighton - Apache License 2.0
 # outparam_init_baseline.txt — the CLOSED allowlist for
-# tools/lint/check_outparam_init_before_return.sh.
+# tools/lint/lintc/gate_outparam_init.c (z23-lint check-outparam-init-before-return).
 #
 # Each key is  <function>|<out-param>|<struct type>  and means: this function
 # has a failure return ABOVE the initialization of that out-parameter, the
@@ -24,8 +24,8 @@
 # a new one. A new key without a reviewed reason is not admissible.
 #
 # Line numbers are deliberately NOT part of the key: they churn on every edit
-# and would turn this ratchet into noise. `bash
-# tools/lint/check_outparam_init_before_return.sh --print-findings` prints the
+# and would turn this ratchet into noise. `z23-lint
+# check-outparam-init-before-return --print-findings` prints the
 # current file+line for each key.
 
 # ── examples/ — single-caller demo programs ─────────────────────────────

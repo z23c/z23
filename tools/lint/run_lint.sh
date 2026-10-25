@@ -129,7 +129,6 @@ gate_command() {
         check-raw-sqlite)                  echo 'tools/scripts/check_raw_sqlite.sh' ;;
         check-raw-malloc)                  echo 'tools/scripts/check_raw_malloc.sh --selftest && tools/scripts/check_raw_malloc.sh' ;;
         check-json-value-init)             echo './build/bin/z23-lint check-json-value-init --self-test && ./build/bin/z23-lint check-json-value-init' ;;
-        check-outparam-init-before-return) echo 'bash tools/lint/check_outparam_init_before_return.sh --selftest && bash tools/lint/check_outparam_init_before_return.sh' ;;
         check-fortify-masked-decls)        echo './tools/lint/check_fortify_masked_decls.sh --selftest && ./tools/lint/check_fortify_masked_decls.sh' ;;
         check-package-anatomy)             echo './tools/lint/check_package_anatomy.sh --selftest && ./tools/lint/check_package_anatomy.sh' ;;
         check-coins-lookup-nullcheck)      echo 'tools/scripts/check_coins_lookup_nullcheck.sh' ;;

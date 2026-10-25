@@ -383,7 +383,7 @@ Every lint gate at 9 s or more per candidate is listed, heaviest first:
 | `check-no-api-keys` | 42.9 | **declared, per file** | a regex scan of each tracked file's own lines; the skip list is gate code; the 1,000-file floor counts the path set |
 | `check-zcode-package-registry` | 36.1 | ineligible | exact-once source ownership across the registry |
 | `check-capability-inventory-generated` | 35.5 | ineligible | a whole-tree derivation compared with a generated file |
-| `check-outparam-init-before-return` | 31.4 | ineligible | the in-scope type set is every `<T>_free` anywhere in the tree (`tools/lint/check_outparam_init_before_return.sh` line 720), with a floor over it |
+| `check-outparam-init-before-return` | 31.4 | ineligible | the in-scope type set is every `<T>_free` anywhere in the tree (`tools/lint/lintc/gate_outparam_init.c` (op_build_frees)), with a floor over it |
 | `check-no-wallclock-assertion` | 22.9 | ineligible | an allowlist-sum ratchet ceiling and a floor over matched content |
 | `check-live-datadir-isolation` | 21.8 | ineligible | baseline sum ceilings |
 | `check-doc-inline-paths` | 21.0 | ineligible | token-count floors over all docs (`fcount` ≥ 200, `dcount` ≥ 100, `tools/lint/lintc/gate_doc_inline_paths.c` lines 143–145) |

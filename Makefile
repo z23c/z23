@@ -15488,10 +15488,10 @@ check-tu-random-seed: $(LINTC_TOOL)
 # its guard cannot see. Found live twice on 2026-08-26 —
 # compact_block_reconstruct() (remote, any peer, bce343876) and
 # sapling_init_params() (69518f2f3).
-check-outparam-init-before-return:
+check-outparam-init-before-return: $(LINTC_TOOL)
 	@echo "══ LINT: out-parameters initialized before any failure return ══"
-	@bash tools/lint/check_outparam_init_before_return.sh --selftest
-	@bash tools/lint/check_outparam_init_before_return.sh
+	@./build/bin/z23-lint check-outparam-init-before-return --selftest
+	@./build/bin/z23-lint check-outparam-init-before-return
 
 check-codeindex-coverage: $(Z23_DEV_BIN) $(LINTC_TOOL)
 	@echo "══ LINT: every tracked maintained source node is indexed ══"

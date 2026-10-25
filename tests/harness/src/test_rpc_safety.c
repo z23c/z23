@@ -436,7 +436,7 @@ static bool rpc_safety_build_chain(struct main_state *ms,
 
     /* Initialize ms BEFORE the count check: callers run main_state_free(&ms)
      * unconditionally, so an early return must not leave it uninitialized
-     * (see tools/lint/check_outparam_init_before_return.sh). */
+     * (see tools/lint/lintc/gate_outparam_init.c). */
     main_state_init(ms);
 
     if (count <= 0 || count > (int)(sizeof(hashes) / sizeof(hashes[0])))

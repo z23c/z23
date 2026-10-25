@@ -181,3 +181,4 @@ LINT_GATE("check-no-wallclock-assertion", check_no_wallclock_assertion, LINT_CMD
 LINT_GATE("check-no-csr-lock-on-finalize-drive", check_no_csr_lock_on_finalize_drive, LINT_CMD_NONE)
 LINT_GATE("check-no-stale-pinned-facts", check_no_stale_pinned_facts, LINT_CMD_NONE)
 LINT_GATE("check-doc-no-false-deleted", check_doc_no_false_deleted, LINT_CMD_NONE)
+LINT_GATE("check-outparam-init-before-return", check_outparam_init_before_return, LINT_CMD_PAIR)

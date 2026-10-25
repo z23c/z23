@@ -1607,7 +1607,7 @@ The rules, both required:
   published only below every fallible step, and any teardown clears the global
   *before* freeing what it points at.
 
-`tools/lint/check_outparam_init_before_return.sh` holds both closed. It runs
+`z23-lint check-outparam-init-before-return` (tools/lint/lintc/gate_outparam_init.c) holds both closed. It runs
 two legs over every tracked `.c` file:
 
 1. **Out-parameter leg.** For each function it extracts the `struct T *name`
