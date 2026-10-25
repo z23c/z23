@@ -40,28 +40,38 @@ static bool push_message(struct json_value *arr, const char *role,
     return ok;
 }
 
-/* Compose the document. Split out so engine_request_alloc() stays short
- * enough to read in one screen and the ownership of `doc` stays in one
- * place. Returns false with `doc` still valid (the caller frees it). */
-static bool build_doc(const struct engine_call *call, struct json_value *doc)
+static const char *select_request_model(const struct engine_call *call)
 {
-    const char *model = call->model && call->model[0]
-                            ? call->model
-                            : call->vendor->default_model;
-    json_set_object(doc);
-    if (!json_push_kv_str(doc, "model", model))
-        LOG_FAIL("engine", "cannot record the model in the request");
+    return call->model && call->model[0]
+               ? call->model
+               : call->vendor->default_model;
+}
+
+enum {
+    WRITE_REASONING_OK = 0,
+    WRITE_REASONING_INVALID,
+    WRITE_REASONING_UNSUPPORTED,
+    WRITE_REASONING_FAILED
+};
+
+static int write_reasoning_effort(const struct engine_call *call,
+                                  struct json_value *doc)
+{
     if (!engine_reasoning_effort_valid(call->reasoning_effort))
-        LOG_FAIL("engine", "invalid reasoning effort");
+        return WRITE_REASONING_INVALID;
     if (engine_reasoning_effort_explicit(call->reasoning_effort)) {
         if (!call->vendor->supports_reasoning_effort)
-            LOG_FAIL("engine", "engine %s accepts no reasoning effort",
-                     call->vendor->id);
+            return WRITE_REASONING_UNSUPPORTED;
         if (!json_push_kv_str(doc, "reasoning_effort",
                               call->reasoning_effort))
-            LOG_FAIL("engine", "cannot record the reasoning effort");
+            return WRITE_REASONING_FAILED;
     }
+    return WRITE_REASONING_OK;
+}
 
+static bool assemble_message_list(const struct engine_call *call,
+                                  struct json_value *doc)
+{
     struct json_value msgs;
     json_init(&msgs);
     json_set_array(&msgs);
@@ -73,16 +83,11 @@ static bool build_doc(const struct engine_call *call, struct json_value *doc)
     if (ok)
         ok = json_push_kv(doc, "messages", &msgs);
     json_free(&msgs);
-    if (!ok)
-        LOG_FAIL("engine", "cannot assemble the message list");
+    return ok;
+}
 
-    /* Streaming is off because the transport reads one bounded response and
-     * closes; a streamed body would arrive as server-sent events this
-     * decoder does not speak, and quietly decoding half of one is exactly the
-     * class of failure this module exists to refuse. */
-    if (!json_push_kv_bool(doc, "stream", false))
-        LOG_FAIL("engine", "cannot record the stream flag");
-
+static bool write_disabled_thinking(struct json_value *doc)
+{
     /* GLM models spend the whole output budget on reasoning unless the
      * request disables it: against max_tokens 32768, glm-5.3-flash wrote
      * 127,536 bytes of reasoning_content and no answer, and the harness
@@ -95,12 +100,50 @@ static bool build_doc(const struct engine_call *call, struct json_value *doc)
         const bool think_ok = json_push_kv_str(&thinking, "type", "disabled")
                               && json_push_kv(doc, "thinking", &thinking);
         json_free(&thinking);
-        if (!think_ok)
-            LOG_FAIL("engine", "cannot record the thinking switch");
+        return think_ok;
     }
+    return true;
+}
 
-    if (call->max_output_tokens > 0
-        && !json_push_kv_int(doc, "max_tokens", call->max_output_tokens))
+static bool write_output_token_bound(struct json_value *doc, int tokens)
+{
+    if (tokens > 0)
+        return json_push_kv_int(doc, "max_tokens", tokens);
+    return true;
+}
+
+/* Compose the document. Split out so engine_request_alloc() stays short
+ * enough to read in one screen and the ownership of `doc` stays in one
+ * place. Returns false with `doc` still valid (the caller frees it). */
+static bool build_doc(const struct engine_call *call, struct json_value *doc)
+{
+    const char *model = select_request_model(call);
+    json_set_object(doc);
+    if (!json_push_kv_str(doc, "model", model))
+        LOG_FAIL("engine", "cannot record the model in the request");
+    const int reasoning = write_reasoning_effort(call, doc);
+    if (reasoning == WRITE_REASONING_INVALID)
+        LOG_FAIL("engine", "invalid reasoning effort");
+    if (reasoning == WRITE_REASONING_UNSUPPORTED)
+        LOG_FAIL("engine", "engine %s accepts no reasoning effort",
+                 call->vendor->id);
+    if (reasoning == WRITE_REASONING_FAILED)
+        LOG_FAIL("engine", "cannot record the reasoning effort");
+
+    if (!assemble_message_list(call, doc))
+        LOG_FAIL("engine", "cannot assemble the message list");
+
+    /* Streaming is off because the transport reads one bounded response and
+     * closes; a streamed body would arrive as server-sent events this
+     * decoder does not speak, and quietly decoding half of one is exactly the
+     * class of failure this module exists to refuse. */
+    if (!json_push_kv_bool(doc, "stream", false))
+        LOG_FAIL("engine", "cannot record the stream flag");
+
+    if (!write_disabled_thinking(doc))
+        LOG_FAIL("engine", "cannot record the thinking switch");
+
+    if (!write_output_token_bound(doc, call->max_output_tokens))
         LOG_FAIL("engine", "cannot record the output-token bound");
     return true;
 }

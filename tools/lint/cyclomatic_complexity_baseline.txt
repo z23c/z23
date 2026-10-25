@@ -1392,7 +1392,6 @@ engine/modules/engine/src/engine_cli.c:engine_cli_argv_build:29
 engine/modules/engine/src/engine_prompt.c:engine_prompt_audit_text:17
 engine/modules/engine/src/engine_prompt.c:engine_prompt_kind_from_header:21
 engine/modules/engine/src/engine_secret.c:engine_secret_load:17
-engine/modules/engine/src/engine_wire_request.c:build_doc:20
 engine/modules/engine/src/engine_wire_response.c:cli_observation_from_grok:53
 engine/modules/engine/src/engine_wire_response.c:engine_response_error_text:20
 engine/modules/engine/src/engine_wire_response.c:read_text:24
