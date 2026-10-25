@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Creton - Apache License 2.0
  *
  * Sky Combat: five-player split-screen match.
  */
@@ -106,12 +106,7 @@ static void game_destroy(ultimate_game_t* game) {
     free(game);
 }
 
-int main(void) {
-    // Window setup
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
-    InitWindow(1280, 720, "Sky Combat Ultimate - 5 Player Battle");
-    SetTargetFPS(60);
-    
+static void print_intro_banner(void) {
     printf("\n=== SKY_COMBAT: 5 PLAYER ULTIMATE ===\n\n");
     printf("You are GREEN. Fight 4 AI enemies!\n");
     printf("\nCONTROLS:\n");
@@ -120,6 +115,154 @@ int main(void) {
     printf("  Shift - Boost\n");
     printf("  1-5 - Switch camera to follow different aircraft\n");
     printf("  ESC - Exit\n\n");
+}
+
+static void update_player_from_input(ultimate_game_t* game, managed_aircraft_t* player,
+                                     input_state_fast_t input, float dt) {
+    if (player && player->health > 0) {
+        aircraft_update_responsive(player->aircraft, input.move_x, input.move_y, dt);
+        
+        // Fire weapon
+        if (input.fire_guns) {
+            aircraft_manager_fire_weapon(game->aircraft_mgr, 0);
+        }
+        
+        // Boost
+        if (input.speed_boost && game->boost_timer <= 0) {
+            game->boost_timer = 0.75f;
+            player->aircraft->speed = AIRCRAFT_MAX_SPEED * 2.5f;
+            effects_sonic_boom(game->effects, player->aircraft->position, 
+                             aircraft_get_forward_vector(player->aircraft));
+        }
+    }
+}
+
+static void update_boost_decay(ultimate_game_t* game, float dt) {
+    if (game->boost_timer > 0) {
+        game->boost_timer -= dt;
+        game->speed_lines_intensity = 1.0f;
+    } else {
+        game->speed_lines_intensity *= 0.95f;
+    }
+}
+
+static void handle_camera_switch_keys(ultimate_game_t* game) {
+    for (int i = 0; i < 5; i++) {
+        if (IsKeyPressed(KEY_ONE + i)) {
+            game->camera_follow_id = i;
+            printf("Now following: %s\n", game->aircraft_mgr->aircraft[i].name);
+        }
+    }
+}
+
+static void update_follow_camera(ultimate_game_t* game, float dt) {
+    managed_aircraft_t* followed = aircraft_manager_get(game->aircraft_mgr, game->camera_follow_id);
+    if (followed && followed->aircraft) {
+        camera_update_responsive(&game->camera, followed->aircraft->position,
+                               followed->aircraft->yaw, 50.0f, 20.0f, dt);
+    }
+}
+
+static void update_game_systems(ultimate_game_t* game, managed_aircraft_t* player, float dt) {
+    aircraft_manager_update(game->aircraft_mgr, dt);
+    overdrive_update(game->overdrive, dt);
+    weapons_update(player->weapons, dt);
+    effects_update(game->effects, dt);
+    enemies_update(game->enemies, player->aircraft->position, dt);
+}
+
+static void spawn_explosions_for_destroyed(ultimate_game_t* game) {
+    for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* ma = &game->aircraft_mgr->aircraft[i];
+        if (ma->health <= 0 && ma->aircraft) {
+            effects_spawn_explosion(game->effects, ma->aircraft->position, 5.0f, ma->color);
+        }
+    }
+}
+
+static void render_scene_to_texture(ultimate_game_t* game, RenderTexture2D screen_target) {
+    BeginTextureMode(screen_target);
+    ClearBackground((Color){20, 24, 40, 255});
+    
+    BeginMode3D(game->camera);
+    
+    // Draw world
+    cyberpunk_world_draw(game->world, game->camera);
+    
+    // Draw all 5 aircraft
+    for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* ma = &game->aircraft_mgr->aircraft[i];
+        if (!ma->aircraft || ma->health <= 0) continue;
+        
+        // Save color in unused field
+        int saved = ma->aircraft->score;
+        ma->aircraft->score = ColorToInt(ma->color);
+        
+        aircraft_draw(ma->aircraft, GetTime());
+        
+        // Draw weapons
+        weapons_draw(ma->weapons);
+        
+        ma->aircraft->score = saved;
+    }
+    
+    // Draw enemies
+    enemies_draw(game->enemies);
+    
+    // Draw effects
+    effects_draw(game->effects, game->camera);
+    
+    // Speed lines effect - removed for now
+    
+    EndMode3D();
+    EndTextureMode();
+}
+
+static void render_final_frame(ultimate_game_t* game, RenderTexture2D screen_target) {
+    // Final render
+    BeginDrawing();
+    DrawTextureRec(screen_target.texture, 
+                  (Rectangle){0, 0, screen_target.texture.width, -screen_target.texture.height},
+                  (Vector2){0, 0}, WHITE);
+    
+    // HUD - Show all 5 aircraft status
+    int y = 10;
+    for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* ma = &game->aircraft_mgr->aircraft[i];
+        
+        // Highlight who camera is following
+        if (i == game->camera_follow_id) {
+            DrawRectangle(8, y-2, 350, 24, Fade(ma->color, 0.2f));
+        }
+        
+        DrawText(TextFormat("%d. %s  HP:%.0f  K:%d D:%d", 
+                           i+1, ma->name, ma->health, ma->kills, ma->deaths),
+                 10, y, 20, ma->color);
+        y += 25;
+    }
+    
+    // Controls reminder
+    DrawText("1-5: Switch Camera | Space: Fire | Shift: Boost", 
+             10, GetScreenHeight() - 25, 16, GRAY);
+    
+    EndDrawing();
+}
+
+static void print_battle_results(ultimate_game_t* game) {
+    printf("\n=== BATTLE RESULTS ===\n");
+    for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* ma = &game->aircraft_mgr->aircraft[i];
+        printf("%s: %d kills, %d deaths\n", ma->name, ma->kills, ma->deaths);
+    }
+}
+
+int main(void) {
+    // Window setup
+    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
+    InitWindow(1280, 720, "Sky Combat Ultimate - 5 Player Battle");
+    SetTargetFPS(60);
+    
+    print_intro_banner();
     
     // Create game
     ultimate_game_t* game = game_create();
@@ -138,133 +281,30 @@ int main(void) {
         
         // Update player aircraft with input
         managed_aircraft_t* player = aircraft_manager_get(game->aircraft_mgr, 0);
-        if (player && player->health > 0) {
-            aircraft_update_responsive(player->aircraft, input.move_x, input.move_y, dt);
-            
-            // Fire weapon
-            if (input.fire_guns) {
-                aircraft_manager_fire_weapon(game->aircraft_mgr, 0);
-            }
-            
-            // Boost
-            if (input.speed_boost && game->boost_timer <= 0) {
-                game->boost_timer = 0.75f;
-                player->aircraft->speed = AIRCRAFT_MAX_SPEED * 2.5f;
-                effects_sonic_boom(game->effects, player->aircraft->position, 
-                                 aircraft_get_forward_vector(player->aircraft));
-            }
-        }
+        update_player_from_input(game, player, input, dt);
         
         // Boost decay
-        if (game->boost_timer > 0) {
-            game->boost_timer -= dt;
-            game->speed_lines_intensity = 1.0f;
-        } else {
-            game->speed_lines_intensity *= 0.95f;
-        }
+        update_boost_decay(game, dt);
         
         // Camera switching (1-5 keys)
-        for (int i = 0; i < 5; i++) {
-            if (IsKeyPressed(KEY_ONE + i)) {
-                game->camera_follow_id = i;
-                printf("Now following: %s\n", game->aircraft_mgr->aircraft[i].name);
-            }
-        }
+        handle_camera_switch_keys(game);
         
         // Update camera to follow selected aircraft
-        managed_aircraft_t* followed = aircraft_manager_get(game->aircraft_mgr, game->camera_follow_id);
-        if (followed && followed->aircraft) {
-            camera_update_responsive(&game->camera, followed->aircraft->position,
-                                   followed->aircraft->yaw, 50.0f, 20.0f, dt);
-        }
+        update_follow_camera(game, dt);
         
         // Update systems
-        aircraft_manager_update(game->aircraft_mgr, dt);
-        overdrive_update(game->overdrive, dt);
-        weapons_update(player->weapons, dt);
-        effects_update(game->effects, dt);
-        enemies_update(game->enemies, player->aircraft->position, dt);
+        update_game_systems(game, player, dt);
         
         // Add explosions for destroyed aircraft
-        for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
-            managed_aircraft_t* ma = &game->aircraft_mgr->aircraft[i];
-            if (ma->health <= 0 && ma->aircraft) {
-                effects_spawn_explosion(game->effects, ma->aircraft->position, 5.0f, ma->color);
-            }
-        }
+        spawn_explosions_for_destroyed(game);
         
         // RENDERING
-        BeginTextureMode(screen_target);
-        ClearBackground((Color){20, 24, 40, 255});
-        
-        BeginMode3D(game->camera);
-        
-        // Draw world
-        cyberpunk_world_draw(game->world, game->camera);
-        
-        // Draw all 5 aircraft
-        for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
-            managed_aircraft_t* ma = &game->aircraft_mgr->aircraft[i];
-            if (!ma->aircraft || ma->health <= 0) continue;
-            
-            // Save color in unused field
-            int saved = ma->aircraft->score;
-            ma->aircraft->score = ColorToInt(ma->color);
-            
-            aircraft_draw(ma->aircraft, GetTime());
-            
-            // Draw weapons
-            weapons_draw(ma->weapons);
-            
-            ma->aircraft->score = saved;
-        }
-        
-        // Draw enemies
-        enemies_draw(game->enemies);
-        
-        // Draw effects
-        effects_draw(game->effects, game->camera);
-        
-        // Speed lines effect - removed for now
-        
-        EndMode3D();
-        EndTextureMode();
-        
-        // Final render
-        BeginDrawing();
-        DrawTextureRec(screen_target.texture, 
-                      (Rectangle){0, 0, screen_target.texture.width, -screen_target.texture.height},
-                      (Vector2){0, 0}, WHITE);
-        
-        // HUD - Show all 5 aircraft status
-        int y = 10;
-        for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
-            managed_aircraft_t* ma = &game->aircraft_mgr->aircraft[i];
-            
-            // Highlight who camera is following
-            if (i == game->camera_follow_id) {
-                DrawRectangle(8, y-2, 350, 24, Fade(ma->color, 0.2f));
-            }
-            
-            DrawText(TextFormat("%d. %s  HP:%.0f  K:%d D:%d", 
-                               i+1, ma->name, ma->health, ma->kills, ma->deaths),
-                     10, y, 20, ma->color);
-            y += 25;
-        }
-        
-        // Controls reminder
-        DrawText("1-5: Switch Camera | Space: Fire | Shift: Boost", 
-                 10, GetScreenHeight() - 25, 16, GRAY);
-        
-        EndDrawing();
+        render_scene_to_texture(game, screen_target);
+        render_final_frame(game, screen_target);
     }
     
     // Final stats
-    printf("\n=== BATTLE RESULTS ===\n");
-    for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
-        managed_aircraft_t* ma = &game->aircraft_mgr->aircraft[i];
-        printf("%s: %d kills, %d deaths\n", ma->name, ma->kills, ma->deaths);
-    }
+    print_battle_results(game);
     
     // Cleanup
     UnloadRenderTexture(screen_target);
