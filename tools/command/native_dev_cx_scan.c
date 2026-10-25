@@ -107,6 +107,7 @@ static void sc_run_pool(struct sc_pool *pool)
     size_t started = 0;
     size_t want = pool->n < SC_THREADS ? pool->n : SC_THREADS;
     for (; started < want; started++)
+        /* raw-pthread-ok: bounded scan workers, all joined below before return */
         if (pthread_create(&th[started], NULL, sc_worker, pool) != 0)
             break;
     if (started == 0)

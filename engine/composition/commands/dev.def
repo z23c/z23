@@ -1524,8 +1524,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * every declared source is read from), independent overrides — neither an
  * environment variable. See docs/dev/DATA_INDEX.md. */
 ZCL_COMMAND_BRANCH("dev.index", "dev",
-                   "Ingest and search local data sources (board/experiments/"
-                   "landing/logs)",
+                   "Ingest and search local data sources",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_DEV_COMMAND(
@@ -3032,7 +3031,7 @@ ZCL_COMMAND_DEV_COMMAND(
  * (tools/command/native_dev_cx_next.c, native_dev_cx_check.c). Same
  * behaviour for every agent on every host; the metric stays in
  * z23-lint check-cyclomatic-complexity. */
-ZCL_COMMAND_BRANCH("dev.cx", "dev", "Cyclomatic-complexity split units",
+ZCL_COMMAND_BRANCH("dev.cx", "dev", "Complexity units",
                    ZCL_COMMAND_LAYER_DEV)
 
 ZCL_COMMAND_DEV_READ(
