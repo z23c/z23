@@ -40,6 +40,7 @@
 #include "platform/socket_compat.h"
 #include "platform/time_compat.h"
 #include "storage/progress_store.h"
+#include "util/safe_alloc.h"
 
 #include <fcntl.h>
 #include <stdatomic.h>
@@ -869,6 +870,62 @@ static int case_parallel_manifest_probe(void)
     return failures;
 }
 
+
+/* ── (e2b) Manifest probe OOM: no seed is probed from a half-built pool ─────
+ * The digest tables are all allocated before any probe starts. If the second
+ * one fails, nothing has been spawned yet: no worker is left running against
+ * a freed table or this frame's job array, and no fetch reaches the network. */
+
+static _Atomic int rmf_oom_calls;
+static bool counting_manifest_fetch(const char *addr, uint16_t port,
+                                    const uint8_t chunk_root[32],
+                                    uint8_t (*out)[32], uint32_t cap,
+                                    uint32_t *out_n)
+{
+    (void)addr;
+    (void)port;
+    (void)chunk_root;
+    (void)out;
+    (void)cap;
+    (void)out_n;
+    atomic_fetch_add(&rmf_oom_calls, 1);
+    return false;
+}
+
+static int case_manifest_probe_oom_spawns_nothing(void)
+{
+    int failures = 0;
+    TEST("boot_bundle_fetch: a digest-table OOM in the manifest pre-flight "
+         "fails before any seed probe is spawned or fetched") {
+        struct rom_fetch_peer peers[3] = {0};
+        for (size_t i = 0; i < 3; i++) {
+            snprintf(peers[i].addr, sizeof(peers[i].addr), "seed%zu", i);
+            peers[i].port = (uint16_t)(18034 + i);
+        }
+        uint8_t root[32];
+        memset(root, 0x66, sizeof(root));
+        uint8_t digests[4][32];
+        memset(digests, 0, sizeof(digests));
+        uint32_t n = 7;
+
+        atomic_store(&rmf_oom_calls, 0);
+        zcl_alloc_fault_fail_nth("bbf_manifest_probe", 2u);
+        bool found = boot_bundle_probe_manifest_for_test(
+            peers, 3, root, 4, digests, 4, &n, counting_manifest_fetch);
+        bool consumed = zcl_alloc_fault_armed_label() == NULL;
+        zcl_alloc_fault_clear();
+
+        ASSERT(consumed);
+        ASSERT(!found);
+        ASSERT(n == 0);
+        /* Before the fix, seed 0 was spawned and fetched before the OOM
+         * return (red: 1 != 0), against a freed digest table. */
+        ASSERT_EQ(atomic_load(&rmf_oom_calls), 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── (e3) Fresh-node bundle choice: newest baked rung over the keystone ───── */
 /* Guard, not a fix: the picker and ranker already order by advertised height.
  * This pins the owner's fresh-node policy for the h=3200000 rung: when both the
@@ -1659,6 +1716,7 @@ int test_boot_bundle_fetch(void)
     failures += case_quorum();
     failures += case_parallel_probe();
     failures += case_parallel_manifest_probe();
+    failures += case_manifest_probe_oom_spawns_nothing();
     failures += case_discovery();
     failures += case_discovery_outcome_persists();
     printf("=== boot_bundle_fetch: %d failure(s) ===\n", failures);

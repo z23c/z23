@@ -1154,8 +1154,6 @@ engine/composition/src/boot_bundle_fetch.c:bbf_write_directory_hint:27
 engine/composition/src/boot_bundle_fetch.c:boot_bundle_fetch_download:18
 engine/composition/src/boot_bundle_fetch.c:boot_bundle_fetch_maybe:22
 engine/composition/src/boot_bundle_fetch_peer_seeds.c:boot_bundle_fetch_arm_peer_seeds:18
-engine/composition/src/boot_bundle_fetch_probe.c:bbf_probe_directories:16
-engine/composition/src/boot_bundle_fetch_probe.c:bbf_probe_manifest:22
 engine/composition/src/boot_bundle_fetch_seeds.c:bbf_add_connect_seed:19
 engine/composition/src/boot_bundle_fetch_seeds.c:bbf_assemble_seeds:17
 engine/composition/src/boot_bundle_manifest_pick.c:boot_bundle_pick_manifest:23

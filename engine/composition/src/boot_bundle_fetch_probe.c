@@ -32,12 +32,20 @@ static void *bbf_probe_one(void *arg)
     return NULL;
 }
 
+static bool bbf_directory_probe_args_valid(
+    const struct rom_fetch_peer *peers, size_t np, char *bodies,
+    size_t stride, bool *responded, bbf_directory_fetch_fn fetch)
+{
+    return peers && bodies && stride >= 2 && responded && fetch && np > 0 &&
+           np <= ROM_FETCH_MAX_WORKERS;
+}
+
 size_t bbf_probe_directories(const struct rom_fetch_peer *peers, size_t np,
                              char *bodies, size_t stride, bool *responded,
                              bbf_directory_fetch_fn fetch)
 {
-    if (!peers || !bodies || stride < 2 || !responded || !fetch ||
-        np == 0 || np > ROM_FETCH_MAX_WORKERS)
+    if (!bbf_directory_probe_args_valid(peers, np, bodies, stride, responded,
+                                        fetch))
         return 0;
 
     struct bbf_probe_job jobs[ROM_FETCH_MAX_WORKERS];
@@ -92,23 +100,21 @@ static void *bbf_manifest_one(void *arg)
     return NULL;
 }
 
-bool bbf_probe_manifest(const struct rom_fetch_peer *peers, size_t np,
-                        const uint8_t chunk_root[32], uint32_t want_chunks,
-                        uint8_t (*out_chunk_sha3)[32], uint32_t out_cap,
-                        uint32_t *out_num_chunks, bbf_manifest_fetch_fn fetch)
+static bool bbf_manifest_probe_args_valid(
+    const struct rom_fetch_peer *peers, size_t np,
+    const uint8_t chunk_root[32], uint8_t (*out_chunk_sha3)[32],
+    uint32_t out_cap, uint32_t *out_num_chunks, bbf_manifest_fetch_fn fetch)
 {
-    if (!peers || !chunk_root || !out_chunk_sha3 || !out_num_chunks ||
-        !fetch || out_cap == 0 || np == 0 || np > ROM_FETCH_MAX_WORKERS)
-        return false;
-    *out_num_chunks = 0;
+    return peers && chunk_root && out_chunk_sha3 && out_num_chunks && fetch &&
+           out_cap > 0 && np > 0 && np <= ROM_FETCH_MAX_WORKERS;
+}
 
-    struct bbf_manifest_job jobs[ROM_FETCH_MAX_WORKERS];
-    pthread_t threads[ROM_FETCH_MAX_WORKERS];
-    bool started[ROM_FETCH_MAX_WORKERS] = { false };
-    memset(jobs, 0, sizeof(jobs));
-
-    /* Each probe needs its own digest table — they run at the same time and
-     * only one of them will be kept. Bounded: np <= ROM_FETCH_MAX_WORKERS. */
+static bool bbf_manifest_jobs_init(
+    struct bbf_manifest_job *jobs, const struct rom_fetch_peer *peers,
+    size_t np, const uint8_t chunk_root[32], uint32_t out_cap,
+    bbf_manifest_fetch_fn fetch)
+{
+    memset(jobs, 0, sizeof(*jobs) * ROM_FETCH_MAX_WORKERS);
     for (size_t i = 0; i < np; i++) {
         jobs[i].digests = zcl_malloc((size_t)out_cap * 32u,
                                      "bbf_manifest_probe");
@@ -123,6 +129,30 @@ bool bbf_probe_manifest(const struct rom_fetch_peer *peers, size_t np,
         jobs[i].chunk_root = chunk_root;
         jobs[i].cap = out_cap;
         jobs[i].fetch = fetch;
+    }
+    return true;
+}
+
+bool bbf_probe_manifest(const struct rom_fetch_peer *peers, size_t np,
+                        const uint8_t chunk_root[32], uint32_t want_chunks,
+                        uint8_t (*out_chunk_sha3)[32], uint32_t out_cap,
+                        uint32_t *out_num_chunks, bbf_manifest_fetch_fn fetch)
+{
+    if (!bbf_manifest_probe_args_valid(peers, np, chunk_root, out_chunk_sha3,
+                                       out_cap, out_num_chunks, fetch))
+        return false;
+    *out_num_chunks = 0;
+
+    struct bbf_manifest_job jobs[ROM_FETCH_MAX_WORKERS];
+    pthread_t threads[ROM_FETCH_MAX_WORKERS];
+    bool started[ROM_FETCH_MAX_WORKERS] = { false };
+
+    /* Each probe needs its own digest table — they run at the same time and
+     * only one of them will be kept. Bounded: np <= ROM_FETCH_MAX_WORKERS. */
+    if (!bbf_manifest_jobs_init(jobs, peers, np, chunk_root, out_cap, fetch))
+        return false;
+
+    for (size_t i = 0; i < np; i++) {
         // thread-supervision-ok: bounded joined bootstrap probe pool
         started[i] = thread_registry_spawn("zcl_bbf_rmf", bbf_manifest_one,
                                            &jobs[i], &threads[i]) == 0;
