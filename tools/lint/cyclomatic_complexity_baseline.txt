@@ -2912,7 +2912,6 @@ tools/command/native_zdesc_command.c:zcl_native_handle_zdesc_publish:50
 tools/command/native_zdesc_command.c:zdc_load_doc_wire:17
 tools/command/native_zdesc_command.c:zdc_read_seed:16
 tools/command/native_zdesc_command.c:zdc_write_record:25
-tools/command/native_zdir_command.c:zcl_native_handle_core_zdir_list:17
 tools/command/native_zses_command.c:zcl_native_handle_zses_invite_accept:16
 tools/command/native_zses_command.c:zcl_native_handle_zses_invite_create:28
 tools/command/rom_compile_offline.c:rom_compile_offline_compose:16

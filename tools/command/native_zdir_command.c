@@ -126,6 +126,43 @@ static const char *zdc_require_hostname(const struct json_value *input,
     return hostname;
 }
 
+/* The list cursor is a plain row offset in decimal: an absent, empty,
+ * non-numeric, trailing-garbage, or over-100000 cursor reads as 0. */
+static int zdc_parse_list_cursor(const char *cursor)
+{
+    if (!cursor || !cursor[0])
+        return 0;
+    char *end = NULL;
+    unsigned long long c = strtoull(cursor, &end, 10);
+    if (end && !*end && c <= 100000)
+        return (int)c;
+    return 0;
+}
+
+/* One JSON object per directory row — hostname and height, nothing else. */
+static void zdc_append_directory_rows(struct json_value *items,
+                                      const struct db_onion_directory *rows,
+                                      int n)
+{
+    for (int i = 0; i < n; i++) {
+        struct json_value row;
+        json_init(&row);
+        json_set_object(&row);
+        (void)json_push_kv_str(&row, "hostname", rows[i].hostname);
+        (void)json_push_kv_int(&row, "height", rows[i].height);
+        (void)json_push_back(items, &row);
+        json_free(&row);
+    }
+}
+
+/* The receipt's next_action: a fold that yielded rows earns the onion
+ * status probe; an empty or unfolded one falls back to the guide. */
+static const char *zdc_list_next_action(bool folded, int n)
+{
+    return folded && n > 0 ? "z23 core network onion status"
+                           : "z23 core zdir guide";
+}
+
 #define ZDC_LIST_CAP 32
 #define ZDC_TAG "native.zdir"
 
@@ -189,13 +226,7 @@ void zcl_native_handle_core_zdir_list(
         return;
     }
 
-    int offset = 0;
-    if (request->cursor && request->cursor[0]) {
-        char *end = NULL;
-        unsigned long long c = strtoull(request->cursor, &end, 10);
-        if (end && !*end && c <= 100000)
-            offset = (int)c;
-    }
+    int offset = zdc_parse_list_cursor(request->cursor);
 
     struct db_onion_directory rows[ZDC_LIST_CAP];
     int n = 0;
@@ -212,15 +243,7 @@ void zcl_native_handle_core_zdir_list(
     struct json_value items;
     json_init(&items);
     json_set_array(&items);
-    for (int i = 0; i < n; i++) {
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        (void)json_push_kv_str(&row, "hostname", rows[i].hostname);
-        (void)json_push_kv_int(&row, "height", rows[i].height);
-        (void)json_push_back(&items, &row);
-        json_free(&row);
-    }
+    zdc_append_directory_rows(&items, rows, n);
     (void)json_push_kv(&reply->data, "items", &items);
     json_free(&items);
     (void)json_push_kv_int(&reply->data, "count", n);
@@ -233,8 +256,7 @@ void zcl_native_handle_core_zdir_list(
         (void)json_push_kv_str(&reply->data, "continue", cont);
     }
     (void)json_push_kv_str(&reply->data, "next_action",
-                           folded && n > 0 ? "z23 core network onion status"
-                                           : "z23 core zdir guide");
+                           zdc_list_next_action(folded, n));
     reply->status = ZCL_COMMAND_STATUS_PASSED;
     reply->exit_code = ZCL_COMMAND_EXIT_OK;
 }
