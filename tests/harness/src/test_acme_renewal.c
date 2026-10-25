@@ -28,12 +28,10 @@
 
 #define DAY (24 * 3600)
 
-int test_acme_renewal(void)
+static int check_renewal_due_boundaries(int64_t now)
 {
     int failures = 0;
-    const int64_t now = 1788000000; /* an arbitrary fixed "now"; nothing reads a clock */
 
-    /* ── the 30-day rule, to the second ────────────────────────────── */
     AR_CHECK("90 days remaining is not due",
              !acme_renewal_due(now + 90 * DAY, now));
     AR_CHECK("31 days remaining is not due",
@@ -57,7 +55,13 @@ int test_acme_renewal(void)
     AR_CHECK("INT64_MAX notAfter is not due, not wrapped",
              !acme_renewal_due(INT64_MAX, now));
 
-    /* ── the full verdict ──────────────────────────────────────────── */
+    return failures;
+}
+
+static int check_renewal_decide_verdicts(int64_t now)
+{
+    int failures = 0;
+
     AR_CHECK("a fresh 90-day certificate is current",
              acme_renewal_decide(now - DAY, now + 89 * DAY, now) ==
                  ACME_RENEWAL_CURRENT);
@@ -80,6 +84,13 @@ int test_acme_renewal(void)
              acme_renewal_decide(now, now, now) == ACME_RENEWAL_UNREADABLE &&
              acme_renewal_decide(now, now - 1, now) == ACME_RENEWAL_UNREADABLE);
 
+    return failures;
+}
+
+static int check_renewal_action_names(void)
+{
+    int failures = 0;
+
     AR_CHECK("every verdict has a stable name",
              strcmp(acme_renewal_action_name(ACME_RENEWAL_CURRENT), "current") == 0 &&
              strcmp(acme_renewal_action_name(ACME_RENEWAL_DUE), "due") == 0 &&
@@ -90,100 +101,129 @@ int test_acme_renewal(void)
              strcmp(acme_renewal_action_name(ACME_RENEWAL_UNREADABLE),
                     "unreadable") == 0);
 
-    /* ── the scheduling seam, against real files ───────────────────── */
-    {
-        char dir[512];
-        char missing[640];
-        char garbage[640];
-        char real[640];
-        test_make_tmpdir(dir, sizeof(dir), "acme_renewal", "certs");
-        snprintf(missing, sizeof(missing), "%s/absent.pem", dir);
-        snprintf(garbage, sizeof(garbage), "%s/garbage.pem", dir);
-        snprintf(real, sizeof(real), "%s/cert.pem", dir);
+    return failures;
+}
 
-        /* Still the fixed `now` from the top of this test: the file legs are
-         * about what is (or is not) on disk, and nothing below reads a clock.
-         * A verdict a busy box could flip would be grading the box. */
-        AR_CHECK("no certificate on disk reports absent, not current",
-                 acme_renewal_check(missing, now) == ACME_RENEWAL_ABSENT);
-        AR_CHECK("an empty path reports absent",
-                 acme_renewal_check("", now) == ACME_RENEWAL_ABSENT);
-        AR_CHECK("a NULL path reports absent",
-                 acme_renewal_check(NULL, now) == ACME_RENEWAL_ABSENT);
+static int check_challenge_certificate_legs(const char *real, const char *missing)
+{
+    int failures = 0;
 
-        FILE *f = fopen(garbage, "wb");
-        if (f) {
-            fputs("this file exists and is not a certificate\n", f);
-            fclose(f);
-        }
-        AR_CHECK("a file that is not a certificate reports unreadable, never current",
-                 acme_renewal_check(garbage, now) == ACME_RENEWAL_UNREADABLE);
-        {
-            int64_t nb = 1;
-            int64_t na = 1;
-            AR_CHECK("validity extraction refuses a non-certificate",
-                     !acme_certificate_validity(garbage, &nb, &na) &&
-                     nb == 0 && na == 0);
-            AR_CHECK("validity extraction refuses an absent file",
-                     !acme_certificate_validity(missing, &nb, &na));
-        }
+    /* The challenge-certificate builder is the one certificate factory
+     * in the tree that needs no CA; its output is valid for seven days,
+     * which is inside the thirty-day window by construction. */
+    char authz[256];
+    uint8_t thumb[32];
+    memset(thumb, 0x5A, sizeof(thumb));
+    X509 *cert = NULL;
+    EVP_PKEY *key = NULL;
+    if (acme_key_authorization("tok", thumb, authz, sizeof(authz)) &&
+        acme_alpn_challenge_certificate("node.example.org", authz, &cert, &key)) {
+        FILE *out = fopen(real, "wb");
+        const bool wrote = out && PEM_write_X509(out, cert) == 1;
+        if (out)
+            fclose(out);
+        AR_CHECK("a real certificate is written for the file legs", wrote);
 
-        /* The challenge-certificate builder is the one certificate factory
-         * in the tree that needs no CA; its output is valid for seven days,
-         * which is inside the thirty-day window by construction. */
-        char authz[256];
-        uint8_t thumb[32];
-        memset(thumb, 0x5A, sizeof(thumb));
-        X509 *cert = NULL;
-        EVP_PKEY *key = NULL;
-        if (acme_key_authorization("tok", thumb, authz, sizeof(authz)) &&
-            acme_alpn_challenge_certificate("node.example.org", authz, &cert, &key)) {
-            FILE *out = fopen(real, "wb");
-            const bool wrote = out && PEM_write_X509(out, cert) == 1;
-            if (out)
-                fclose(out);
-            AR_CHECK("a real certificate is written for the file legs", wrote);
+        int64_t nb = 0;
+        int64_t na = 0;
+        AR_CHECK("its validity window reads back",
+                 acme_certificate_validity(real, &nb, &na) && na > nb);
 
-            int64_t nb = 0;
-            int64_t na = 0;
-            AR_CHECK("its validity window reads back",
-                     acme_certificate_validity(real, &nb, &na) && na > nb);
+        /* The reference time for every leg below comes OUT of the
+         * certificate, never out of a clock. Reading the real clock
+         * here and asserting on the reading would grade the machine
+         * instead of the rule: the same binary would pass on an idle
+         * box and fail on a loaded one. Injecting notBefore makes each
+         * verdict a property of the rule and the file, identical on any
+         * box, and lets the span bound below be exact rather than a
+         * tolerance wide enough to absorb scheduling noise. */
+        const int64_t issued = nb;
 
-            /* The reference time for every leg below comes OUT of the
-             * certificate, never out of a clock. Reading the real clock
-             * here and asserting on the reading would grade the machine
-             * instead of the rule: the same binary would pass on an idle
-             * box and fail on a loaded one. Injecting notBefore makes each
-             * verdict a property of the rule and the file, identical on any
-             * box, and lets the span bound below be exact rather than a
-             * tolerance wide enough to absorb scheduling noise. */
-            const int64_t issued = nb;
-
-            /* The builder backdates notBefore by an hour and sets notAfter a
-             * week past its own reading, so the span is at LEAST 7d + 1h and
-             * can only be longer if the two stamps straddle a second. Both
-             * ends are certificate fields; no clock is involved. */
-            AR_CHECK("the challenge certificate spans about a week",
-                     na - nb >= 7 * DAY + 3600 && na - nb < 8 * DAY);
-            AR_CHECK("a seven-day certificate is DUE, being inside the window",
-                     acme_renewal_check(real, issued) == ACME_RENEWAL_DUE);
-            AR_CHECK("it is still DUE a day later, not merely at issuance",
-                     acme_renewal_check(real, issued + DAY) == ACME_RENEWAL_DUE);
-            AR_CHECK("nothing to wait for when a certificate is already due",
-                     acme_renewal_seconds_until_due(real, issued) == 0);
-            AR_CHECK("a certificate read at a time past its notAfter is expired",
-                     acme_renewal_check(real, na + 1) == ACME_RENEWAL_EXPIRED);
-            AR_CHECK("a certificate read before its notBefore is not yet valid",
-                     acme_renewal_check(real, nb - 1) == ACME_RENEWAL_NOT_YET_VALID);
-            AR_CHECK("an absent certificate has nothing to wait for either",
-                     acme_renewal_seconds_until_due(missing, issued) == 0);
-        } else {
-            failures += 9;
-        }
-        X509_free(cert);
-        EVP_PKEY_free(key);
-        test_rm_rf(dir);
+        /* The builder backdates notBefore by an hour and sets notAfter a
+         * week past its own reading, so the span is at LEAST 7d + 1h and
+         * can only be longer if the two stamps straddle a second. Both
+         * ends are certificate fields; no clock is involved. */
+        AR_CHECK("the challenge certificate spans about a week",
+                 na - nb >= 7 * DAY + 3600 && na - nb < 8 * DAY);
+        AR_CHECK("a seven-day certificate is DUE, being inside the window",
+                 acme_renewal_check(real, issued) == ACME_RENEWAL_DUE);
+        AR_CHECK("it is still DUE a day later, not merely at issuance",
+                 acme_renewal_check(real, issued + DAY) == ACME_RENEWAL_DUE);
+        AR_CHECK("nothing to wait for when a certificate is already due",
+                 acme_renewal_seconds_until_due(real, issued) == 0);
+        AR_CHECK("a certificate read at a time past its notAfter is expired",
+                 acme_renewal_check(real, na + 1) == ACME_RENEWAL_EXPIRED);
+        AR_CHECK("a certificate read before its notBefore is not yet valid",
+                 acme_renewal_check(real, nb - 1) == ACME_RENEWAL_NOT_YET_VALID);
+        AR_CHECK("an absent certificate has nothing to wait for either",
+                 acme_renewal_seconds_until_due(missing, issued) == 0);
+    } else {
+        failures += 9;
     }
+    X509_free(cert);
+    EVP_PKEY_free(key);
+
+    return failures;
+}
+
+static int check_renewal_file_legs(int64_t now)
+{
+    int failures = 0;
+    char dir[512];
+    char missing[640];
+    char garbage[640];
+    char real[640];
+    test_make_tmpdir(dir, sizeof(dir), "acme_renewal", "certs");
+    snprintf(missing, sizeof(missing), "%s/absent.pem", dir);
+    snprintf(garbage, sizeof(garbage), "%s/garbage.pem", dir);
+    snprintf(real, sizeof(real), "%s/cert.pem", dir);
+
+    /* Still the fixed `now` from the top of this test: the file legs are
+     * about what is (or is not) on disk, and nothing below reads a clock.
+     * A verdict a busy box could flip would be grading the box. */
+    AR_CHECK("no certificate on disk reports absent, not current",
+             acme_renewal_check(missing, now) == ACME_RENEWAL_ABSENT);
+    AR_CHECK("an empty path reports absent",
+             acme_renewal_check("", now) == ACME_RENEWAL_ABSENT);
+    AR_CHECK("a NULL path reports absent",
+             acme_renewal_check(NULL, now) == ACME_RENEWAL_ABSENT);
+
+    FILE *f = fopen(garbage, "wb");
+    if (f) {
+        fputs("this file exists and is not a certificate\n", f);
+        fclose(f);
+    }
+    AR_CHECK("a file that is not a certificate reports unreadable, never current",
+             acme_renewal_check(garbage, now) == ACME_RENEWAL_UNREADABLE);
+    {
+        int64_t nb = 1;
+        int64_t na = 1;
+        AR_CHECK("validity extraction refuses a non-certificate",
+                 !acme_certificate_validity(garbage, &nb, &na) &&
+                 nb == 0 && na == 0);
+        AR_CHECK("validity extraction refuses an absent file",
+                 !acme_certificate_validity(missing, &nb, &na));
+    }
+
+    failures += check_challenge_certificate_legs(real, missing);
+    test_rm_rf(dir);
+    return failures;
+}
+
+int test_acme_renewal(void)
+{
+    int failures = 0;
+    const int64_t now = 1788000000; /* an arbitrary fixed "now"; nothing reads a clock */
+
+    /* ── the 30-day rule, to the second ────────────────────────────── */
+    failures += check_renewal_due_boundaries(now);
+
+    /* ── the full verdict ──────────────────────────────────────────── */
+    failures += check_renewal_decide_verdicts(now);
+    failures += check_renewal_action_names();
+
+    /* ── the scheduling seam, against real files ───────────────────── */
+    failures += check_renewal_file_legs(now);
 
     return failures;
 }

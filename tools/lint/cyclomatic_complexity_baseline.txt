@@ -1787,7 +1787,6 @@ tests/harness/src/test.c:main:407
 tests/harness/src/test_accept_to_mempool.c:test_accept_to_mempool:44
 tests/harness/src/test_acme_cert_reload.c:test_acme_cert_reload:26
 tests/harness/src/test_acme_challenge.c:test_acme_challenge:33
-tests/harness/src/test_acme_renewal.c:test_acme_renewal:16
 tests/harness/src/test_acme_selfsigned.c:sign_leaf_with_a_different_issuer:19
 tests/harness/src/test_acme_selfsigned.c:test_acme_selfsigned:27
 tests/harness/src/test_acme_worker.c:test_acme_worker:16
