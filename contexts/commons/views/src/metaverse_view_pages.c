@@ -109,6 +109,73 @@ static const char *mv_commons_category_name(uint16_t category)
     }
 }
 
+/* Creation counts by category (the zcode.commons.status summary). */
+static void mv_commons_append_creation_categories(
+    const struct vcs_zcode_commons_projection *projection,
+    size_t creations, char *body, size_t max, size_t *off)
+{
+    if (creations > 0) {
+        uint64_t categories[7] = {0};
+        for (size_t i = 0; i < creations; i++) {
+            uint16_t category =
+                vcs_zcode_commons_projection_creation_at(projection, i)
+                    ->category;
+            if (category < 7)
+                categories[category]++;
+        }
+        SITE_APPEND(*off, body, max,
+            "<div class='card'><h2>Creations by category</h2>"
+            "<table><thead><tr><th>category</th><th>creations</th></tr>"
+            "</thead><tbody>");
+        for (uint16_t c = 1; c < 7 && *off < max - 512; c++) {
+            if (!categories[c])
+                continue;
+            SITE_APPEND(*off, body, max,
+                "<tr><td class='mono'>%s</td><td>%llu</td></tr>",
+                mv_commons_category_name(c),
+                (unsigned long long)categories[c]);
+        }
+        SITE_APPEND(*off, body, max,
+            "</tbody></table></div>");
+    }
+}
+
+/* The epoch table (the zcode.commons.epoch facts). */
+static void mv_commons_append_epochs(
+    const struct vcs_zcode_commons_projection *projection,
+    size_t epochs, char *body, size_t max, size_t *off)
+{
+    SITE_APPEND(*off, body, max,
+        "<div class='card'><h2>Epochs</h2>");
+    if (epochs > 0) {
+        SITE_APPEND(*off, body, max,
+            "<table><thead><tr><th>epoch</th><th>cap atoms</th>"
+            "<th>minted atoms</th><th>unissued atoms</th>"
+            "<th>attributions</th><th>creation root</th></tr></thead>"
+            "<tbody>");
+        for (size_t i = 0; i < epochs && *off < max - 640; i++) {
+            const struct vcs_zcode_commons_epoch_entry *e =
+                vcs_zcode_commons_projection_epoch_at(projection, i);
+            char root_hex[65];
+            zcl_hex_encode(e->root, 32, root_hex);
+            SITE_APPEND(*off, body, max,
+                "<tr><td>%llu</td><td>%llu</td><td>%llu</td><td>%llu</td>"
+                "<td>%u</td><td class='mono'>%.16s&hellip;</td></tr>",
+                (unsigned long long)e->epoch,
+                (unsigned long long)e->cap_atoms,
+                (unsigned long long)e->minted_atoms,
+                (unsigned long long)e->unissued_atoms,
+                e->attribution_count, root_hex);
+        }
+        SITE_APPEND(*off, body, max,
+            "</tbody></table></div>");
+    } else {
+        SITE_APPEND(*off, body, max,
+            "<p>No epochs in the workspace CAS yet &mdash; an empty "
+            "commons renders empty, never padded.</p></div>");
+    }
+}
+
 size_t metaverse_view_commons(
     const struct vcs_zcode_commons_projection *projection,
     uint8_t *resp, size_t max)
@@ -178,62 +245,9 @@ size_t metaverse_view_commons(
             "</span> &mdash; %s</p>", root_hex, safe_reason);
     }
 
-    /* Creation counts by category (the zcode.commons.status summary). */
-    if (creations > 0) {
-        uint64_t categories[7] = {0};
-        for (size_t i = 0; i < creations; i++) {
-            uint16_t category =
-                vcs_zcode_commons_projection_creation_at(projection, i)
-                    ->category;
-            if (category < 7)
-                categories[category]++;
-        }
-        SITE_APPEND(off, body, sizeof(body),
-            "<div class='card'><h2>Creations by category</h2>"
-            "<table><thead><tr><th>category</th><th>creations</th></tr>"
-            "</thead><tbody>");
-        for (uint16_t c = 1; c < 7 && off < sizeof(body) - 512; c++) {
-            if (!categories[c])
-                continue;
-            SITE_APPEND(off, body, sizeof(body),
-                "<tr><td class='mono'>%s</td><td>%llu</td></tr>",
-                mv_commons_category_name(c),
-                (unsigned long long)categories[c]);
-        }
-        SITE_APPEND(off, body, sizeof(body),
-            "</tbody></table></div>");
-    }
-
-    /* The epoch table (the zcode.commons.epoch facts). */
-    SITE_APPEND(off, body, sizeof(body),
-        "<div class='card'><h2>Epochs</h2>");
-    if (epochs > 0) {
-        SITE_APPEND(off, body, sizeof(body),
-            "<table><thead><tr><th>epoch</th><th>cap atoms</th>"
-            "<th>minted atoms</th><th>unissued atoms</th>"
-            "<th>attributions</th><th>creation root</th></tr></thead>"
-            "<tbody>");
-        for (size_t i = 0; i < epochs && off < sizeof(body) - 640; i++) {
-            const struct vcs_zcode_commons_epoch_entry *e =
-                vcs_zcode_commons_projection_epoch_at(projection, i);
-            char root_hex[65];
-            zcl_hex_encode(e->root, 32, root_hex);
-            SITE_APPEND(off, body, sizeof(body),
-                "<tr><td>%llu</td><td>%llu</td><td>%llu</td><td>%llu</td>"
-                "<td>%u</td><td class='mono'>%.16s&hellip;</td></tr>",
-                (unsigned long long)e->epoch,
-                (unsigned long long)e->cap_atoms,
-                (unsigned long long)e->minted_atoms,
-                (unsigned long long)e->unissued_atoms,
-                e->attribution_count, root_hex);
-        }
-        SITE_APPEND(off, body, sizeof(body),
-            "</tbody></table></div>");
-    } else {
-        SITE_APPEND(off, body, sizeof(body),
-            "<p>No epochs in the workspace CAS yet &mdash; an empty "
-            "commons renders empty, never padded.</p></div>");
-    }
+    mv_commons_append_creation_categories(projection, creations,
+                                          body, sizeof(body), &off);
+    mv_commons_append_epochs(projection, epochs, body, sizeof(body), &off);
 
     SITE_APPEND(off, body, sizeof(body),
         "<p><a href='/metaverse'>&larr; Metaverse</a></p>");
