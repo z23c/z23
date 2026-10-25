@@ -2805,7 +2805,6 @@ tools/command/native_zcode_epoch_propose_command.c:zcl_native_handle_zcode_commo
 tools/command/native_zcode_epoch_propose_command.c:zep_claim_handle:38
 tools/command/native_zcode_join.c:zcl_join_verdict_push_json:21
 tools/command/native_zcode_leaderboard_command.c:zl_leaderboard:32
-tools/command/native_zcode_moderation_command.c:moderation_backlog_input:19
 tools/command/native_zcode_network_command.c:zcl_native_handle_zcode_network_delegate:39
 tools/command/native_zcode_network_command.c:zcl_native_handle_zcode_package_source_reproduce:34
 tools/command/native_zcode_node_command.c:zcl_native_handle_zcode_node_join:42

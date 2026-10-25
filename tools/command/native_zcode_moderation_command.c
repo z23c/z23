@@ -27,13 +27,16 @@ static bool moderation_no_keys(const struct json_value *input)
     return input && input->type == JSON_OBJ && input->num_children == 0;
 }
 
-static bool moderation_backlog_input(
+static bool moderation_backlog_shape_valid(
     const struct json_value *input, const char **workspace,
     uint64_t *cutoff_height, int64_t *cutoff_mtp)
 {
-    if (!input || input->type != JSON_OBJ || input->num_children != 3 ||
-        !workspace || !cutoff_height || !cutoff_mtp)
-        return false;
+    return input && input->type == JSON_OBJ && input->num_children == 3 &&
+        workspace && cutoff_height && cutoff_mtp;
+}
+
+static bool moderation_backlog_keys_known(const struct json_value *input)
+{
     static const char *const allowed[] = {
         "workspace", "cutoff_height", "cutoff_mtp",
     };
@@ -43,13 +46,34 @@ static bool moderation_backlog_input(
             known = known || strcmp(input->keys[i], allowed[j]) == 0;
         if (!known) return false;
     }
+    return true;
+}
+
+static bool moderation_backlog_values_valid(
+    const struct json_value *workspace_value,
+    const struct json_value *height_value,
+    const struct json_value *mtp_value)
+{
+    return workspace_value && workspace_value->type == JSON_STR &&
+        height_value && height_value->type == JSON_INT &&
+        mtp_value && mtp_value->type == JSON_INT &&
+        json_get_int(height_value) > 0 && json_get_int(mtp_value) > 0;
+}
+
+static bool moderation_backlog_input(
+    const struct json_value *input, const char **workspace,
+    uint64_t *cutoff_height, int64_t *cutoff_mtp)
+{
+    if (!moderation_backlog_shape_valid(input, workspace, cutoff_height,
+                                        cutoff_mtp))
+        return false;
+    if (!moderation_backlog_keys_known(input))
+        return false;
     const struct json_value *workspace_value = json_get(input, "workspace");
     const struct json_value *height_value = json_get(input, "cutoff_height");
     const struct json_value *mtp_value = json_get(input, "cutoff_mtp");
-    if (!workspace_value || workspace_value->type != JSON_STR ||
-        !height_value || height_value->type != JSON_INT ||
-        !mtp_value || mtp_value->type != JSON_INT ||
-        json_get_int(height_value) <= 0 || json_get_int(mtp_value) <= 0)
+    if (!moderation_backlog_values_valid(workspace_value, height_value,
+                                         mtp_value))
         return false;
     *workspace = json_get_str(workspace_value);
     *cutoff_height = (uint64_t)json_get_int(height_value);
