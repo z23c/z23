@@ -47,16 +47,6 @@ cognition/modules/codeindex/src/codeindex_store_read.c:ci_store_meta_get:17
 cognition/modules/ontology/src/ontology.c:contexts_bound:17
 cognition/modules/ontology/src/ontology.c:zcl_ontology_evaluate_atom_v1:43
 cognition/modules/ontology/src/ontology.c:zcl_ontology_predicate_v1_root:18
-cognition/modules/ontology/src/ontology_formula.c:formula_contexts_bound:20
-cognition/modules/ontology/src/ontology_formula.c:formula_eval_atom:24
-cognition/modules/ontology/src/ontology_formula.c:formula_eval_node:40
-cognition/modules/ontology/src/ontology_formula.c:formula_reason_string:29
-cognition/modules/ontology/src/ontology_formula.c:formula_shape_valid:20
-cognition/modules/ontology/src/ontology_formula.c:horn_derivation_reason_valid:29
-cognition/modules/ontology/src/ontology_formula.c:zcl_ontology_derivation_v1_root:25
-cognition/modules/ontology/src/ontology_formula.c:zcl_ontology_domain_v1_root:18
-cognition/modules/ontology/src/ontology_formula.c:zcl_ontology_evaluate_formula_v1:27
-cognition/modules/ontology/src/ontology_formula.c:zcl_ontology_horn_derivation_v1_root:25
 cognition/modules/ontology/src/ontology_horn_rule.c:horn_atom_valid:22
 cognition/modules/ontology/src/ontology_horn_rule.c:zcl_ontology_horn_rule_v1_validate:22
 cognition/modules/ontology/src/ontology_manifest.c:zcl_ontology_manifest_v1_validate:17
