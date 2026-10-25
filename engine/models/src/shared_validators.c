@@ -58,7 +58,7 @@ bool zcl_validate_zcl_address(const char *addr)
     size_t len = strlen(addr);
 
     if (!zcl_address_charset_ok(addr, len))
-        return false;
+        return false; // raw-return-ok:pure predicate on untrusted input, no log by design
 
     /* Transparent address: Base58Check against the ACTIVE chain's P2PKH
      * or P2SH version bytes (t1/t3 on mainnet, the chain's own forms —
