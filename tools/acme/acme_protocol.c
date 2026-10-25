@@ -94,6 +94,41 @@ bool acme_directory_parse(const char *json, size_t len,
     return true;
 }
 
+enum {
+    ORDER_AUTHZ_OK = 0,
+    ORDER_AUTHZ_NOT_ARRAY = 1,
+    ORDER_AUTHZ_BAD_COUNT = 2,
+    ORDER_AUTHZ_BAD_URL = 3
+};
+
+/* Copy authorizations[] into out. On a bad entry, *detail is the value the
+ * caller's warning prints (the array length, or the index that failed) and
+ * the return is the matching reason. A mid-array failure leaves the earlier
+ * URLs in place; the caller wipes out when it refuses the order. */
+static int order_copy_authorizations(const struct json_value *doc,
+                                     struct acme_order *out, size_t *detail)
+{
+    const struct json_value *authz = json_get(doc, "authorizations");
+    if (!authz || authz->type != JSON_ARR)
+        return ORDER_AUTHZ_NOT_ARRAY;
+    if (json_size(authz) == 0 || json_size(authz) > ACME_MAX_AUTHZ) {
+        *detail = json_size(authz);
+        return ORDER_AUTHZ_BAD_COUNT;
+    }
+    for (size_t i = 0; i < json_size(authz); i++) {
+        const struct json_value *item = json_at(authz, i);
+        const char *s = (item && item->type == JSON_STR) ? json_get_str(item)
+                                                         : NULL;
+        if (!s || strlen(s) + 1 > ACME_MAX_URL) {
+            *detail = i;
+            return ORDER_AUTHZ_BAD_URL;
+        }
+        memcpy(out->authorizations[i], s, strlen(s) + 1);
+        out->num_authorizations = i + 1;
+    }
+    return ORDER_AUTHZ_OK;
+}
+
 bool acme_order_parse(const char *json, size_t len, struct acme_order *out)
 {
     if (!out)
@@ -108,29 +143,18 @@ bool acme_order_parse(const char *json, size_t len, struct acme_order *out)
               copy_member(&doc, "certificate", out->certificate,
                           sizeof(out->certificate), false);
     if (ok) {
-        const struct json_value *authz = json_get(&doc, "authorizations");
-        if (!authz || authz->type != JSON_ARR) {
+        size_t detail = 0;
+        const int why = order_copy_authorizations(&doc, out, &detail);
+        if (why == ORDER_AUTHZ_NOT_ARRAY) {
             LOG_WARN("acme", "order carries no authorizations array");
-            ok = false;
-        } else if (json_size(authz) == 0 || json_size(authz) > ACME_MAX_AUTHZ) {
+        } else if (why == ORDER_AUTHZ_BAD_COUNT) {
             LOG_WARN("acme",
                      "order lists %zu authorizations; this client handles 1..%d",
-                     json_size(authz), ACME_MAX_AUTHZ);
-            ok = false;
-        } else {
-            for (size_t i = 0; i < json_size(authz) && ok; i++) {
-                const struct json_value *item = json_at(authz, i);
-                const char *s = (item && item->type == JSON_STR) ? json_get_str(item)
-                                                                 : NULL;
-                if (!s || strlen(s) + 1 > ACME_MAX_URL) {
-                    LOG_WARN("acme", "authorization %zu is not a URL within the cap", i);
-                    ok = false;
-                    break;
-                }
-                memcpy(out->authorizations[i], s, strlen(s) + 1);
-                out->num_authorizations = i + 1;
-            }
+                     detail, ACME_MAX_AUTHZ);
+        } else if (why == ORDER_AUTHZ_BAD_URL) {
+            LOG_WARN("acme", "authorization %zu is not a URL within the cap", detail);
         }
+        ok = why == ORDER_AUTHZ_OK;
     }
     json_free(&doc);
     if (!ok) {
@@ -140,12 +164,95 @@ bool acme_order_parse(const char *json, size_t len, struct acme_order *out)
     return true;
 }
 
+enum {
+    AUTHZ_ID_OK = 0,
+    AUTHZ_ID_MISSING = 1,
+    AUTHZ_ID_NOT_DNS = 2,
+    AUTHZ_ID_BAD_MEMBER = 3
+};
+
+enum {
+    AUTHZ_CH_OK = 0,
+    AUTHZ_CH_NO_ARRAY = 1,
+    AUTHZ_CH_NONE = 2
+};
+
+/* One challenges[] entry. SKIP keeps scanning: the entry is not an object,
+ * its type could not be read, or the type is not tls-alpn-01. STOP is the
+ * break: this entry is tls-alpn-01 but url, token, or status failed, and a
+ * later entry must not be tried. COPIED means those three fields are in out. */
+enum {
+    CHALLENGE_SKIP = 0,
+    CHALLENGE_COPIED = 1,
+    CHALLENGE_STOP = 2
+};
+
+static bool authorization_args_present(const char *identifier, size_t identifier_len,
+                                       const char *status, size_t status_len,
+                                       const struct acme_challenge *out)
+{
+    if (!identifier || !status || !out || identifier_len == 0 || status_len == 0)
+        return false;
+    return true;
+}
+
+static int authorization_read_identifier(const struct json_value *doc,
+                                         char *identifier, size_t identifier_len,
+                                         char *type, size_t type_len)
+{
+    const struct json_value *ident = json_get(doc, "identifier");
+    if (!ident || ident->type != JSON_OBJ)
+        return AUTHZ_ID_MISSING;
+    if (!copy_member(ident, "type", type, type_len, true) ||
+        !copy_member(ident, "value", identifier, identifier_len, true))
+        return AUTHZ_ID_BAD_MEMBER;
+    if (strcmp(type, "dns") != 0)
+        return AUTHZ_ID_NOT_DNS;
+    return AUTHZ_ID_OK;
+}
+
+static int authorization_take_tls_alpn(const struct json_value *ch,
+                                       struct acme_challenge *out)
+{
+    if (!ch || ch->type != JSON_OBJ)
+        return CHALLENGE_SKIP;
+    char type[64];
+    if (!copy_member(ch, "type", type, sizeof(type), true))
+        return CHALLENGE_SKIP;
+    if (strcmp(type, "tls-alpn-01") != 0)
+        return CHALLENGE_SKIP;
+    if (!copy_member(ch, "url", out->url, sizeof(out->url), true) ||
+        !copy_member(ch, "token", out->token, sizeof(out->token), true) ||
+        !copy_member(ch, "status", out->status, sizeof(out->status), true))
+        return CHALLENGE_STOP;
+    return CHALLENGE_COPIED;
+}
+
+static int authorization_read_challenges(const struct json_value *doc,
+                                         struct acme_challenge *out)
+{
+    const struct json_value *challenges = json_get(doc, "challenges");
+    if (!challenges || challenges->type != JSON_ARR || json_size(challenges) == 0)
+        return AUTHZ_CH_NO_ARRAY;
+    bool found = false;
+    for (size_t i = 0; i < json_size(challenges) && !found; i++) {
+        const int took = authorization_take_tls_alpn(json_at(challenges, i), out);
+        if (took == CHALLENGE_STOP)
+            break;
+        if (took == CHALLENGE_COPIED)
+            found = true;
+    }
+    if (!found)
+        return AUTHZ_CH_NONE;
+    return AUTHZ_CH_OK;
+}
+
 bool acme_authorization_parse(const char *json, size_t len,
                               char *identifier, size_t identifier_len,
                               char *status, size_t status_len,
                               struct acme_challenge *out)
 {
-    if (!identifier || !status || !out || identifier_len == 0 || status_len == 0)
+    if (!authorization_args_present(identifier, identifier_len, status, status_len, out))
         return false;
     identifier[0] = '\0';
     status[0] = '\0';
@@ -157,52 +264,29 @@ bool acme_authorization_parse(const char *json, size_t len,
 
     bool ok = copy_member(&doc, "status", status, status_len, true);
     if (ok) {
-        const struct json_value *ident = json_get(&doc, "identifier");
-        if (!ident || ident->type != JSON_OBJ) {
+        char type[32] = {0};
+        const int why = authorization_read_identifier(&doc, identifier, identifier_len,
+                                                      type, sizeof(type));
+        if (why == AUTHZ_ID_MISSING) {
             LOG_WARN("acme", "authorization carries no identifier object");
-            ok = false;
-        } else {
-            char type[32];
-            ok = copy_member(ident, "type", type, sizeof(type), true) &&
-                 copy_member(ident, "value", identifier, identifier_len, true);
-            if (ok && strcmp(type, "dns") != 0) {
-                LOG_WARN("acme",
-                         "refusing an identifier of type \"%s\": tls-alpn-01 "
-                         "validates a DNS name and nothing else", type);
-                ok = false;
-            }
+        } else if (why == AUTHZ_ID_NOT_DNS) {
+            LOG_WARN("acme",
+                     "refusing an identifier of type \"%s\": tls-alpn-01 "
+                     "validates a DNS name and nothing else", type);
         }
+        ok = why == AUTHZ_ID_OK;
     }
     if (ok) {
-        const struct json_value *challenges = json_get(&doc, "challenges");
-        if (!challenges || challenges->type != JSON_ARR || json_size(challenges) == 0) {
+        const int why = authorization_read_challenges(&doc, out);
+        if (why == AUTHZ_CH_NO_ARRAY) {
             LOG_WARN("acme", "authorization carries no challenges array");
-            ok = false;
-        } else {
-            bool found = false;
-            for (size_t i = 0; i < json_size(challenges) && !found; i++) {
-                const struct json_value *ch = json_at(challenges, i);
-                if (!ch || ch->type != JSON_OBJ)
-                    continue;
-                char type[64];
-                if (!copy_member(ch, "type", type, sizeof(type), true))
-                    continue;
-                if (strcmp(type, "tls-alpn-01") != 0)
-                    continue;
-                if (!copy_member(ch, "url", out->url, sizeof(out->url), true) ||
-                    !copy_member(ch, "token", out->token, sizeof(out->token), true) ||
-                    !copy_member(ch, "status", out->status, sizeof(out->status), true))
-                    break;
-                found = true;
-            }
-            if (!found) {
-                LOG_WARN("acme",
-                         "authorization offers no usable tls-alpn-01 challenge; "
-                         "this node has no port 80 and no registrar API, so no "
-                         "other challenge type can be answered");
-                ok = false;
-            }
+        } else if (why == AUTHZ_CH_NONE) {
+            LOG_WARN("acme",
+                     "authorization offers no usable tls-alpn-01 challenge; "
+                     "this node has no port 80 and no registrar API, so no "
+                     "other challenge type can be answered");
         }
+        ok = why == AUTHZ_CH_OK;
     }
 
     json_free(&doc);
@@ -239,6 +323,73 @@ bool acme_problem_parse(const char *json, size_t len,
 
 /* ── the CSR ─────────────────────────────────────────────────────────── */
 
+/* Every pointer is owned here until a step adopts it and nulls the field.
+ * Cleanup frees every field, so null means already adopted or never allocated. */
+struct csr_parts {
+    X509_REQ *req;
+    STACK_OF(X509_EXTENSION) *exts;
+    X509_EXTENSION *san;
+    GENERAL_NAMES *names;
+    GENERAL_NAME *name;
+    ASN1_IA5STRING *dns;
+    unsigned char *buf;
+};
+
+static bool csr_objects_new(struct csr_parts *p)
+{
+    p->req = X509_REQ_new();
+    p->exts = sk_X509_EXTENSION_new_null();
+    p->names = GENERAL_NAMES_new();
+    p->name = GENERAL_NAME_new();
+    p->dns = ASN1_IA5STRING_new();
+    if (!p->req || !p->exts || !p->names || !p->name || !p->dns)
+        return false;
+    return true;
+}
+
+static bool csr_build_request(struct csr_parts *p, const char *domain)
+{
+    if (X509_REQ_set_version(p->req, 0) != 1)
+        return false;
+    if (X509_NAME_add_entry_by_txt(X509_REQ_get_subject_name(p->req), "CN",
+                                   MBSTRING_ASC, (const unsigned char *)domain,
+                                   -1, -1, 0) != 1)
+        return false;
+    if (ASN1_STRING_set(p->dns, domain, (int)strlen(domain)) != 1)
+        return false;
+    GENERAL_NAME_set0_value(p->name, GEN_DNS, p->dns);
+    p->dns = NULL;
+    if (sk_GENERAL_NAME_push(p->names, p->name) <= 0)
+        return false;
+    p->name = NULL;
+    p->san = X509V3_EXT_i2d(NID_subject_alt_name, 0, p->names);
+    if (!p->san || sk_X509_EXTENSION_push(p->exts, p->san) <= 0)
+        return false;
+    p->san = NULL;
+    if (X509_REQ_add_extensions(p->req, p->exts) != 1)
+        return false;
+    return true;
+}
+
+static bool csr_sign_and_export(struct csr_parts *p, EVP_PKEY *key,
+                                uint8_t **der, size_t *der_len)
+{
+    if (X509_REQ_set_pubkey(p->req, key) != 1)
+        return false;
+    if (X509_REQ_sign(p->req, key, EVP_sha256()) == 0)
+        return false;
+    const int n = i2d_X509_REQ(p->req, &p->buf);
+    if (n <= 0 || !p->buf)
+        return false;
+    uint8_t *copy = zcl_malloc((size_t)n, "acme_csr_der");
+    if (!copy)
+        return false;
+    memcpy(copy, p->buf, (size_t)n);
+    *der = copy;
+    *der_len = (size_t)n;
+    return true;
+}
+
 bool acme_csr_der(const EVP_PKEY *key, const char *domain,
                   uint8_t **der, size_t *der_len)
 {
@@ -251,61 +402,25 @@ bool acme_csr_der(const EVP_PKEY *key, const char *domain,
     if (strlen(domain) > ACME_MAX_URL)
         LOG_FAIL("acme", "refusing a domain of %zu bytes in a CSR", strlen(domain));
 
-    X509_REQ *req = X509_REQ_new();
-    STACK_OF(X509_EXTENSION) *exts = sk_X509_EXTENSION_new_null();
-    X509_EXTENSION *san = NULL;
-    GENERAL_NAMES *names = GENERAL_NAMES_new();
-    GENERAL_NAME *name = GENERAL_NAME_new();
-    ASN1_IA5STRING *dns = ASN1_IA5STRING_new();
-    unsigned char *buf = NULL;
+    struct csr_parts parts = {0};
     bool ok = false;
 
-    if (!req || !exts || !names || !name || !dns)
+    if (!csr_objects_new(&parts))
         goto done;
-    if (X509_REQ_set_version(req, 0) != 1)
+    if (!csr_build_request(&parts, domain))
         goto done;
-    if (X509_NAME_add_entry_by_txt(X509_REQ_get_subject_name(req), "CN",
-                                   MBSTRING_ASC, (const unsigned char *)domain,
-                                   -1, -1, 0) != 1)
+    if (!csr_sign_and_export(&parts, (EVP_PKEY *)key, der, der_len))
         goto done;
-    if (ASN1_STRING_set(dns, domain, (int)strlen(domain)) != 1)
-        goto done;
-    GENERAL_NAME_set0_value(name, GEN_DNS, dns);
-    dns = NULL;
-    if (sk_GENERAL_NAME_push(names, name) <= 0)
-        goto done;
-    name = NULL;
-    san = X509V3_EXT_i2d(NID_subject_alt_name, 0, names);
-    if (!san || sk_X509_EXTENSION_push(exts, san) <= 0)
-        goto done;
-    san = NULL;
-    if (X509_REQ_add_extensions(req, exts) != 1)
-        goto done;
-    if (X509_REQ_set_pubkey(req, (EVP_PKEY *)key) != 1)
-        goto done;
-    if (X509_REQ_sign(req, (EVP_PKEY *)key, EVP_sha256()) == 0)
-        goto done;
-    {
-        const int n = i2d_X509_REQ(req, &buf);
-        if (n <= 0 || !buf)
-            goto done;
-        uint8_t *copy = zcl_malloc((size_t)n, "acme_csr_der");
-        if (!copy)
-            goto done;
-        memcpy(copy, buf, (size_t)n);
-        *der = copy;
-        *der_len = (size_t)n;
-        ok = true;
-    }
+    ok = true;
 
 done:
-    OPENSSL_free(buf);
-    ASN1_IA5STRING_free(dns);
-    GENERAL_NAME_free(name);
-    GENERAL_NAMES_free(names);
-    X509_EXTENSION_free(san);
-    sk_X509_EXTENSION_pop_free(exts, X509_EXTENSION_free);
-    X509_REQ_free(req);
+    OPENSSL_free(parts.buf);
+    ASN1_IA5STRING_free(parts.dns);
+    GENERAL_NAME_free(parts.name);
+    GENERAL_NAMES_free(parts.names);
+    X509_EXTENSION_free(parts.san);
+    sk_X509_EXTENSION_pop_free(parts.exts, X509_EXTENSION_free);
+    X509_REQ_free(parts.req);
     if (!ok)
         LOG_FAIL("acme", "cannot build a CSR for %s", domain);
     return true;
