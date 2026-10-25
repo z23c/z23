@@ -452,6 +452,91 @@ static int zr_case_bytes_refusals(void)
 
 /* ── 4: one good record beside three bad ones ──────────────────────── */
 
+/* The good record must not merely be loaded: it IS the discovery
+ * projection — findable in the directory, the single projected view,
+ * and every field the fixture signed carried through to it. */
+static bool zr_good_record_is_projected(const uint8_t good_pk[32],
+                                        const struct zendp_record_view *views,
+                                        size_t projected)
+{
+    return zendp_directory_find(zendp_directory_global(), good_pk, NULL) &&
+           projected == 1 &&
+           memcmp(views[0].master_pubkey, good_pk, 32) == 0 &&
+           views[0].seq == 7 && views[0].anchor_height == 3100000 &&
+           views[0].ep.onion_port == 8033;
+}
+
+/* Called once the oracle answers REVOKED: file the record, load the
+ * directory, and confirm those same bytes stay out of it. */
+static bool zr_revoked_bytes_are_refused(const char *datadir,
+                                         const uint8_t *wire, size_t wire_len,
+                                         const uint8_t pk[32])
+{
+    return wire_len > 0 &&
+           zr_file_record(datadir, wire, wire_len, pk) &&
+           boot_endpoint_records_load(datadir) == 0 &&
+           !zendp_directory_find(zendp_directory_global(), pk, NULL);
+}
+
+/* Flip the high bit of a freshly signed record's last byte: the
+ * identity and the anchor stay valid, the signature no longer matches
+ * the bytes. */
+static void zr_flip_last_bit(uint8_t *wire, size_t wire_len)
+{
+    if (wire_len > 0)
+        wire[wire_len - 1] ^= 0x80;
+}
+
+/* True when any of the mixed directory's three records failed to sign,
+ * so the case cannot prove anything more and must stop early. */
+static bool zr_mixed_sign_failed(size_t good_len, size_t un_len,
+                                 size_t tam_len)
+{
+    return good_len == 0 || un_len == 0 || tam_len == 0;
+}
+
+/* File the mixed directory: the good record, the unanchored one, the
+ * tampered one, and a fourth file that is not a record at all. */
+static bool zr_mixed_files_are_filed(const char *datadir,
+                                     const uint8_t *good_wire,
+                                     size_t good_len,
+                                     const uint8_t good_pk[32],
+                                     const uint8_t *un_wire,
+                                     size_t un_len,
+                                     const uint8_t un_pk[32],
+                                     const uint8_t *tam_wire,
+                                     size_t tam_len,
+                                     const uint8_t tam_pk[32])
+{
+    return zr_file_record(datadir, good_wire, good_len, good_pk) &&
+           zr_file_record(datadir, un_wire, un_len, un_pk) &&
+           zr_file_record(datadir, tam_wire, tam_len, tam_pk) &&
+           zr_write_file(datadir,
+                         "00000000000000000000000000000000"
+                         "00000000000000000000000000000000.zid",
+                         "garbage\n");
+}
+
+/* Now retire the good identity on-chain and reload from the SAME
+ * files: the bytes did not change, the chain's answer did, and that
+ * alone is enough to keep the record out. */
+static int zr_mixed_reload_after_revocation(void)
+{
+    int failures = 0;
+    char dd2[512];
+    test_make_tmpdir(dd2, sizeof(dd2), "zendprec", "revoke");
+    uint8_t rev_wire[ZID_DOC_MAX], rev_pk[32];
+    size_t rev_len = 0;
+    ZR_CHECK("mixed: the revocation-test record signs",
+             zr_sign(0x34, 1, ZR_EXPIRY, rev_wire, &rev_len, rev_pk));
+    zr_oracle_set(ZENDP_ANCHOR_REVOKED);
+    ZR_CHECK("mixed: the same bytes are refused once the chain says "
+             "revoked",
+             zr_revoked_bytes_are_refused(dd2, rev_wire, rev_len, rev_pk));
+    test_rm_rf(dd2);
+    return failures;
+}
+
 /* The case that decides whether any of this is worth having. A bad
  * neighbour must neither block the good record nor ride in with it. */
 static int zr_case_mixed_directory(void)
@@ -480,23 +565,18 @@ static int zr_case_mixed_directory(void)
     size_t tam_len = 0;
     ZR_CHECK("mixed: the to-be-tampered record signs",
              zr_sign(0x33, 3, ZR_EXPIRY, tam_wire, &tam_len, tam_pk));
-    if (tam_len > 0)
-        tam_wire[tam_len - 1] ^= 0x80;
+    zr_flip_last_bit(tam_wire, tam_len);
 
-    if (good_len == 0 || un_len == 0 || tam_len == 0) {
+    if (zr_mixed_sign_failed(good_len, un_len, tam_len)) {
         zcl_log_level_set(saved);
         test_rm_rf(dd);
         return failures;
     }
 
     ZR_CHECK("mixed: all four files are filed",
-             zr_file_record(dd, good_wire, good_len, good_pk) &&
-             zr_file_record(dd, un_wire, un_len, un_pk) &&
-             zr_file_record(dd, tam_wire, tam_len, tam_pk) &&
-             zr_write_file(dd,
-                           "00000000000000000000000000000000"
-                           "00000000000000000000000000000000.zid",
-                           "garbage\n"));
+             zr_mixed_files_are_filed(dd, good_wire, good_len, good_pk,
+                                      un_wire, un_len, un_pk, tam_wire,
+                                      tam_len, tam_pk));
 
     /* A chain that answers differently per identity, which is the only
      * way this case means anything: the good key is ACTIVE, the
@@ -515,37 +595,14 @@ static int zr_case_mixed_directory(void)
     ZR_CHECK("mixed: exactly one of four files is loaded",
              loaded == 1);
     ZR_CHECK("mixed: the good record is loaded and projected to discovery",
-             zendp_directory_find(zendp_directory_global(), good_pk, NULL) &&
-             projected == 1 &&
-             memcmp(views[0].master_pubkey, good_pk, 32) == 0 &&
-             views[0].seq == 7 && views[0].anchor_height == 3100000 &&
-             views[0].ep.onion_port == 8033);
+             zr_good_record_is_projected(good_pk, views, projected));
     ZR_CHECK("mixed: the tampered identity never entered the directory, "
              "though its key IS anchored",
              !zendp_directory_find(zendp_directory_global(), tam_pk, NULL));
     ZR_CHECK("mixed: the unanchored identity never entered the directory",
              !zendp_directory_find(zendp_directory_global(), un_pk, NULL));
 
-    /* Now retire the good identity on-chain and reload from the SAME
-     * files: the bytes did not change, the chain's answer did, and that
-     * alone is enough to keep the record out. */
-    {
-        char dd2[512];
-        test_make_tmpdir(dd2, sizeof(dd2), "zendprec", "revoke");
-        uint8_t rev_wire[ZID_DOC_MAX], rev_pk[32];
-        size_t rev_len = 0;
-        ZR_CHECK("mixed: the revocation-test record signs",
-                 zr_sign(0x34, 1, ZR_EXPIRY, rev_wire, &rev_len, rev_pk));
-        zr_oracle_set(ZENDP_ANCHOR_REVOKED);
-        ZR_CHECK("mixed: the same bytes are refused once the chain says "
-                 "revoked",
-                 rev_len > 0 &&
-                 zr_file_record(dd2, rev_wire, rev_len, rev_pk) &&
-                 boot_endpoint_records_load(dd2) == 0 &&
-                 !zendp_directory_find(zendp_directory_global(), rev_pk,
-                                       NULL));
-        test_rm_rf(dd2);
-    }
+    failures += zr_mixed_reload_after_revocation();
 
     zcl_log_level_set(saved);
     zendp_set_anchor_lookup(NULL, NULL);

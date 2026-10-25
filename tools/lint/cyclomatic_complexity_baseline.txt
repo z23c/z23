@@ -2504,7 +2504,6 @@ tests/harness/src/test_zdesc.c:zd_case_publish_fetch:25
 tests/harness/src/test_zdir_selection.c:test_zdir_selection:131
 tests/harness/src/test_zdir_write_path.c:t_full_loop:44
 tests/harness/src/test_zdir_write_path.c:t_owner_proof:17
-tests/harness/src/test_zendp_records.c:zr_case_mixed_directory:16
 tests/harness/src/test_zendp_revocation.c:zr_case_dumper:26
 tests/harness/src/test_zendp_revocation.c:zr_case_revoked_key_stops_being_advertised:16
 tests/harness/src/test_zid.c:test_ed25519_batch:40
