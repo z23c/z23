@@ -123,6 +123,39 @@ static size_t serve_dashboard_rpc(uint8_t *r, size_t max)
 
 /* ── Dashboard (native chain mode) ───────────────────────── */
 
+static int dashboard_native_page_window(int tip, int page,
+                                        int *start_height, int *end_height)
+{
+    int per_page = 25;
+    if (page < 0) page = 0;
+    /* page comes from an untrusted ?page= query (atoi, unclamped). Clamp it so
+     * page * per_page cannot overflow signed int (UB) and start_height stays
+     * within [0, tip]; the last meaningful page is tip / per_page. */
+    int max_page = (tip > 0) ? tip / per_page : 0;
+    if (page > max_page) page = max_page;
+    *start_height = tip - page * per_page;
+    *end_height = *start_height - per_page + 1;
+    if (*end_height < 0) *end_height = 0;
+    return page;
+}
+
+static void dashboard_fill_native_row(struct explorer_dashboard_native_row *row,
+                                      const struct block_index *bi, int h)
+{
+    row->height = h;
+    char hash[65] = "";
+    if (bi->phashBlock) uint256_get_hex(bi->phashBlock, hash);
+    snprintf(row->hash, sizeof(row->hash), "%s", hash);
+    format_time(row->ts, sizeof(row->ts), bi->nTime);
+    snprintf(row->short_hash, sizeof(row->short_hash), "%.8s...%.4s", hash, hash + 60);
+    row->sapling[0] = '\0';
+    if (bi->nSaplingValue != 0)
+        zcl_format_zcl(row->sapling, sizeof(row->sapling), bi->nSaplingValue);
+    format_with_commas(row->h_fmt, sizeof(row->h_fmt), h);
+    row->ntx = bi->nTx;
+    row->difficulty = difficulty_from_index(bi);
+}
+
 static size_t serve_dashboard_native_page(uint8_t *r, size_t max, int page)
 {
     struct explorer_context *ctx = explorer_ctx();
@@ -139,16 +172,8 @@ static size_t serve_dashboard_native_page(uint8_t *r, size_t max, int page)
     size_t mp_count = ctx->mempool ? tx_mempool_size(ctx->mempool) : 0;
     uint64_t mp_bytes = ctx->mempool ? tx_mempool_total_size(ctx->mempool) : 0;
 
-    int per_page = 25;
-    if (page < 0) page = 0;
-    /* page comes from an untrusted ?page= query (atoi, unclamped). Clamp it so
-     * page * per_page cannot overflow signed int (UB) and start_height stays
-     * within [0, tip]; the last meaningful page is tip / per_page. */
-    int max_page = (tip > 0) ? tip / per_page : 0;
-    if (page > max_page) page = max_page;
-    int start_height = tip - page * per_page;
-    int end_height = start_height - per_page + 1;
-    if (end_height < 0) end_height = 0;
+    int start_height, end_height;
+    page = dashboard_native_page_window(tip, page, &start_height, &end_height);
 
     /* Stack-local, NOT static: this handler runs concurrently on multiple
      * HTTP/onion worker threads, so a process-global array would race. */
@@ -162,19 +187,7 @@ static size_t serve_dashboard_native_page(uint8_t *r, size_t max, int page)
         if (first_blk_time == 0) first_blk_time = bi->nTime;
         last_blk_time = bi->nTime;
 
-        struct explorer_dashboard_native_row *row = &rows[n++];
-        row->height = h;
-        char hash[65] = "";
-        if (bi->phashBlock) uint256_get_hex(bi->phashBlock, hash);
-        snprintf(row->hash, sizeof(row->hash), "%s", hash);
-        format_time(row->ts, sizeof(row->ts), bi->nTime);
-        snprintf(row->short_hash, sizeof(row->short_hash), "%.8s...%.4s", hash, hash + 60);
-        row->sapling[0] = '\0';
-        if (bi->nSaplingValue != 0)
-            zcl_format_zcl(row->sapling, sizeof(row->sapling), bi->nSaplingValue);
-        format_with_commas(row->h_fmt, sizeof(row->h_fmt), h);
-        row->ntx = bi->nTx;
-        row->difficulty = difficulty_from_index(bi);
+        dashboard_fill_native_row(&rows[n++], bi, h);
     }
 
     double recent_interval = (n >= 2 && first_blk_time > last_blk_time)
@@ -212,3 +225,4 @@ size_t explorer_serve_dashboard(uint8_t *r, size_t max)
 {
     return serve_dashboard_with_page(r, max, 0);
 }
+
