@@ -847,6 +847,37 @@ static int t12_mutation_refuses_and_mints_nothing(void)
 
 /* ── T15 ────────────────────────────────────────────────────────────────────*/
 
+/* No row carries the reserved bit as its action. */
+static bool t15_no_verb_dispatches_on_reserved_inspect_bit(void)
+{
+    bool reserved_bit_is_on_no_row = true;
+    for (uint32_t w = 1; w < (uint32_t)MVAP_VERB__COUNT; w++) {
+        enum metaverse_action a;
+        if (mvap_verb_to_action(w, &a) &&
+            (uint32_t)a == METAVERSE_ACTION_RESERVED_INSPECT)
+            reserved_bit_is_on_no_row = false;
+    }
+    return reserved_bit_is_on_no_row;
+}
+
+/* Decode keeps them apart: two verbs in, two canonical queries out. */
+static bool t15_probes_decode_to_distinct_queries(void)
+{
+    struct mvap_request probe_i, probe_l;
+    memset(&probe_i, 0, sizeof(probe_i));
+    probe_i.verb = MVAP_VERB_INSPECT;
+    probe_i.kind = MVAP_KIND_CONTENT;
+    for (size_t i = 0; i < MVAP_PROPERTY_ID_LEN; i++)
+        probe_i.property_id[i] = (uint8_t)(i + 3);
+    probe_l = probe_i;
+    probe_l.verb = MVAP_VERB_LIST;
+    struct metaverse_query_request qri, qrl;
+    return mvap_request_to_query_request(&probe_i, BA_HOLDER, 1, 1, &qri) &&
+           mvap_request_to_query_request(&probe_l, BA_HOLDER, 1, 1, &qrl) &&
+           qri.query == METAVERSE_QUERY_INSPECT_PROPERTY &&
+           qrl.query == METAVERSE_QUERY_ENUMERATE_PROPERTIES;
+}
+
 /* Enumeration is not inspection, and the property id does not decide which
  * is which.
  *
@@ -877,33 +908,11 @@ static int t15_enumeration_is_never_served_as_inspection(void)
                  (enum metaverse_action)METAVERSE_ACTION_RESERVED_INSPECT) ==
                  MVAP_VERB_NONE);
 
-    /* No row carries the reserved bit as its action. */
-    bool reserved_bit_is_on_no_row = true;
-    for (uint32_t w = 1; w < (uint32_t)MVAP_VERB__COUNT; w++) {
-        enum metaverse_action a;
-        if (mvap_verb_to_action(w, &a) &&
-            (uint32_t)a == METAVERSE_ACTION_RESERVED_INSPECT)
-            reserved_bit_is_on_no_row = false;
-    }
     BA_CHECK("T15: no wire verb dispatches on the reserved INSPECT bit",
-             reserved_bit_is_on_no_row);
+             t15_no_verb_dispatches_on_reserved_inspect_bit());
 
-    /* Decode keeps them apart: two verbs in, two canonical queries out. */
-    struct mvap_request probe_i, probe_l;
-    memset(&probe_i, 0, sizeof(probe_i));
-    probe_i.verb = MVAP_VERB_INSPECT;
-    probe_i.kind = MVAP_KIND_CONTENT;
-    for (size_t i = 0; i < MVAP_PROPERTY_ID_LEN; i++)
-        probe_i.property_id[i] = (uint8_t)(i + 3);
-    probe_l = probe_i;
-    probe_l.verb = MVAP_VERB_LIST;
-    struct metaverse_query_request qri, qrl;
     BA_CHECK("T15: the query projection carries WHICH query, not one bit",
-             mvap_request_to_query_request(&probe_i, BA_HOLDER, 1, 1, &qri) &&
-                 mvap_request_to_query_request(&probe_l, BA_HOLDER, 1, 1,
-                                               &qrl) &&
-                 qri.query == METAVERSE_QUERY_INSPECT_PROPERTY &&
-                 qrl.query == METAVERSE_QUERY_ENUMERATE_PROPERTIES);
+             t15_probes_decode_to_distinct_queries());
 
     /* ── the 2x2, end to end through the real provider ── */
     struct ba_fixture f;
