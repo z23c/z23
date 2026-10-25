@@ -28,6 +28,40 @@ volatile sig_atomic_t g_shutdown_requested = 0;
 
 static uint8_t buf[131072];
 
+/* Track <style> and <script> open/close tags */
+static void mark_style_script_state(const uint8_t *html, size_t i, size_t len,
+                                    bool *in_style, bool *in_script) {
+    if (i + 7 < len && strncmp((char*)html+i, "<style", 6) == 0)
+        *in_style = true;
+    if (i + 8 < len && strncmp((char*)html+i, "</style", 7) == 0)
+        *in_style = false;
+    if (i + 8 < len && strncmp((char*)html+i, "<script", 7) == 0)
+        *in_script = true;
+    if (i + 9 < len && strncmp((char*)html+i, "</script", 8) == 0)
+        *in_script = false;
+}
+
+/* Decode common HTML entities */
+static void decode_html_entity(const uint8_t *html, size_t len,
+                               size_t *pos, char *c) {
+    size_t i = *pos;
+    if (*c == '&' && i + 1 < len) {
+        if (strncmp((char*)html+i, "&amp;", 5) == 0) { *c = '&'; *pos += 4; }
+        else if (strncmp((char*)html+i, "&lt;", 4) == 0) { *c = '<'; *pos += 3; }
+        else if (strncmp((char*)html+i, "&gt;", 4) == 0) { *c = '>'; *pos += 3; }
+        else if (strncmp((char*)html+i, "&middot;", 8) == 0) { *c = '.'; *pos += 7; }
+        else if (strncmp((char*)html+i, "&mdash;", 7) == 0) { *c = '-'; *pos += 6; }
+        else if (strncmp((char*)html+i, "&#x", 3) == 0) {
+            /* Skip numeric entity */
+            const char *semi = strchr((char*)html+i, ';');
+            if (semi && semi - (char*)html - (long)i < 12) {
+                *pos = (size_t)(semi - (char*)html);
+                *c = ' ';
+            }
+        }
+    }
+}
+
 /* Strip HTML tags and collapse whitespace → readable text */
 static void dump_text(const uint8_t *html, size_t len) {
     bool in_tag = false;
@@ -41,14 +75,7 @@ static void dump_text(const uint8_t *html, size_t len) {
 
         /* Detect <style> and <script> blocks */
         if (c == '<') {
-            if (i + 7 < len && strncmp((char*)html+i, "<style", 6) == 0)
-                in_style = true;
-            if (i + 8 < len && strncmp((char*)html+i, "</style", 7) == 0)
-                in_style = false;
-            if (i + 8 < len && strncmp((char*)html+i, "<script", 7) == 0)
-                in_script = true;
-            if (i + 9 < len && strncmp((char*)html+i, "</script", 8) == 0)
-                in_script = false;
+            mark_style_script_state(html, i, len, &in_style, &in_script);
             in_tag = true;
             continue;
         }
@@ -56,21 +83,7 @@ static void dump_text(const uint8_t *html, size_t len) {
         if (in_tag || in_style || in_script) continue;
 
         /* Decode common HTML entities */
-        if (c == '&' && i + 1 < len) {
-            if (strncmp((char*)html+i, "&amp;", 5) == 0) { c = '&'; i += 4; }
-            else if (strncmp((char*)html+i, "&lt;", 4) == 0) { c = '<'; i += 3; }
-            else if (strncmp((char*)html+i, "&gt;", 4) == 0) { c = '>'; i += 3; }
-            else if (strncmp((char*)html+i, "&middot;", 8) == 0) { c = '.'; i += 7; }
-            else if (strncmp((char*)html+i, "&mdash;", 7) == 0) { c = '-'; i += 6; }
-            else if (strncmp((char*)html+i, "&#x", 3) == 0) {
-                /* Skip numeric entity */
-                const char *semi = strchr((char*)html+i, ';');
-                if (semi && semi - (char*)html - (long)i < 12) {
-                    i = (size_t)(semi - (char*)html);
-                    c = ' ';
-                }
-            }
-        }
+        decode_html_entity(html, len, &i, &c);
 
         /* Collapse whitespace */
         if (isspace((unsigned char)c)) {
