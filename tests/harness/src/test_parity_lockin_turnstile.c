@@ -12,8 +12,10 @@
 #include "jobs/utxo_apply_turnstile.h"
 #include "primitives/block.h"
 #include "primitives/transaction.h"
+#include "storage/shielded_pool_kv.h"
 #include "util/safe_alloc.h"
 
+#include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -111,7 +113,71 @@ static int test_check(void)
     return failures;
 }
 
+
+static bool kv_pair(sqlite3 *db, int64_t h, int64_t sp, int64_t sa)
+{
+    int64_t a = 0, b = 0;
+    bool found = false;
+    return shielded_pool_kv_get(db, h, &a, &b, &found) && found &&
+           a == sp && b == sa;
+}
+
+static bool kv_absent(sqlite3 *db, int64_t h)
+{
+    int64_t a = 0, b = 0;
+    bool found = true;
+    return shielded_pool_kv_get(db, h, &a, &b, &found) && !found;
+}
+
+static int test_pool_kv_rows(sqlite3 *db);
+
+static int test_pool_kv(void)
+{
+    int failures = 0;
+    sqlite3 *db = NULL;
+    TS_CHECK("open in-memory store",
+             sqlite3_open(":memory:", &db) == SQLITE_OK);
+    TS_CHECK("ensure_schema is idempotent",
+             shielded_pool_kv_ensure_schema(db) &&
+             shielded_pool_kv_ensure_schema(db));
+    int64_t mh = 7;
+    bool mf = true;
+    TS_CHECK("max_height on empty table is not found",
+             shielded_pool_kv_max_height(db, &mh, &mf) && !mf && mh == -1);
+    TS_CHECK("put/get round trip incl. negative totals",
+             shielded_pool_kv_put(db, 0, 5, -9) && kv_pair(db, 0, 5, -9));
+    TS_CHECK("missing row is not found", kv_absent(db, 1));
+    TS_CHECK("same-value re-put is ok", shielded_pool_kv_put(db, 0, 5, -9));
+    TS_CHECK("different sprout re-put is refused and keeps the row",
+             !shielded_pool_kv_put(db, 0, 6, -9) && kv_pair(db, 0, 5, -9));
+    TS_CHECK("different sapling re-put is refused and keeps the row",
+             !shielded_pool_kv_put(db, 0, 5, 1) && kv_pair(db, 0, 5, -9));
+    failures += test_pool_kv_rows(db);
+    sqlite3_close(db);
+    return failures;
+}
+
+static int test_pool_kv_rows(sqlite3 *db)
+{
+    int failures = 0;
+    int64_t mh = 7;
+    bool mf = true;
+    TS_CHECK("more rows", shielded_pool_kv_put(db, 1, 1, 1) &&
+             shielded_pool_kv_put(db, 2, 2, 2) &&
+             shielded_pool_kv_put(db, 3, 3, 3));
+    TS_CHECK("max_height reports the top row",
+             shielded_pool_kv_max_height(db, &mh, &mf) && mf && mh == 3);
+    TS_CHECK("delete_range removes exactly [2,3]",
+             shielded_pool_kv_delete_range(db, 2, 3) && kv_absent(db, 2) &&
+             kv_absent(db, 3) && kv_pair(db, 1, 1, 1) && kv_pair(db, 0, 5, -9));
+    TS_CHECK("max_height follows the delete",
+             shielded_pool_kv_max_height(db, &mh, &mf) && mf && mh == 1);
+    TS_CHECK("delete_range rejects an inverted range",
+             !shielded_pool_kv_delete_range(db, 5, 4));
+    return failures;
+}
+
 int test_parity_lockin_turnstile(void)
 {
-    return test_block_values() + test_check();
+    return test_block_values() + test_check() + test_pool_kv();
 }

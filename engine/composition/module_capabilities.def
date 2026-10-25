@@ -1028,6 +1028,7 @@ ZCL_MODULE_CAPABILITY("engine/modules/storage/src/projection_store.c", CAP_FS_RE
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/repair_marker.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/seal_kv.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/sha3_sidecar_io.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/modules/storage/src/shielded_pool_kv.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/snapshot_shielded.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/sqlite_integrity_gate.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/storage_memory_profile.c", CAP_FS_WRITE, "")
