@@ -1683,7 +1683,6 @@ engine/services/src/source_bundle_publish.c:source_bundle_publish:38
 engine/services/src/state_auditor.c:coins_check_window:25
 engine/services/src/state_auditor.c:opret_leg_tick:18
 engine/services/src/sticky_escalator.c:apply_drive:23
-engine/services/src/stopwatch_skip_watch.c:stopwatch_skip_alarm_text:16
 engine/services/src/storage_reclaim.c:sweep_stale_tmp:18
 engine/services/src/swap_settlement_service.c:swap_settle_build:17
 engine/services/src/sync_benchmark_service.c:sync_benchmark_write_receipt:19

@@ -356,6 +356,50 @@ static void last_pass_age_text(const struct stopwatch_skip_report *r,
              (long long)(r->last_ts - r->last_pass_ts));
 }
 
+/* The skip_streak == 0 arm of stopwatch_skip_alarm_text. */
+static const char *no_skip_run_text(const struct stopwatch_skip_report *r,
+                                    char *buf, size_t cap, const char *age)
+{
+    if (r->no_pass_alarm) {
+        snprintf(buf, cap,
+                 "ALARM no_pass_streak=%u no_pass_threshold=%u "
+                 "last_verdict=%s %s — this proof RAN on every one of "
+                 "those consecutive scheduled attempts and never once "
+                 "passed, so the claim it exists to prove is unproven; "
+                 "fix the failing verdict, do not wait for the score to "
+                 "move",
+                 r->no_pass_streak, r->no_pass_threshold,
+                 r->last_verdict[0] ? r->last_verdict : "-", age);
+        return buf;
+    }
+    snprintf(buf, cap,
+             "quiet last_verdict=%s skip_streak=0 no_pass_streak=%u "
+             "no_pass_threshold=%u %s",
+             r->last_verdict[0] ? r->last_verdict : "-",
+             r->no_pass_streak, r->no_pass_threshold, age);
+    return buf;
+}
+
+/* The tail appended after reason="..." for a trailing SKIP run. */
+static const char *skip_run_tail_text(const struct stopwatch_skip_report *r)
+{
+    /* A trailing SKIP run. The class alarm below is unchanged. The no-pass
+     * alarm can still be the reason this line is loud — a streak of fails
+     * capped by one benign skip must not read as quiet — so it is checked
+     * after the class alarm and before the benign note. */
+    if (r->alarm)
+        return " — this proof has not run for that many consecutive "
+               "scheduled attempts";
+    if (r->no_pass_alarm)
+        return " — the trailing SKIP run does not itself cross its class "
+               "threshold, but this proof RAN and never once passed across "
+               "the whole no_pass_streak above; the claim is unproven";
+    if (r->threshold == 0)
+        return " — benign: nothing was configured, so there was nothing "
+               "to prove";
+    return "";
+}
+
 const char *stopwatch_skip_alarm_text(const struct stopwatch_skip_report *r,
                                       char *buf, size_t cap)
 {
@@ -374,47 +418,13 @@ const char *stopwatch_skip_alarm_text(const struct stopwatch_skip_report *r,
     char age[64];
     last_pass_age_text(r, age, sizeof(age));
 
-    if (r->skip_streak == 0) {
-        /* No skips at all in the trailing run. Either nothing is wrong, or
-         * the proof RAN every scheduled time and never passed — the more
-         * damning of the two conditions this module reports. */
-        if (r->no_pass_alarm) {
-            snprintf(buf, cap,
-                     "ALARM no_pass_streak=%u no_pass_threshold=%u "
-                     "last_verdict=%s %s — this proof RAN on every one of "
-                     "those consecutive scheduled attempts and never once "
-                     "passed, so the claim it exists to prove is unproven; "
-                     "fix the failing verdict, do not wait for the score to "
-                     "move",
-                     r->no_pass_streak, r->no_pass_threshold,
-                     r->last_verdict[0] ? r->last_verdict : "-", age);
-            return buf;
-        }
-        snprintf(buf, cap,
-                 "quiet last_verdict=%s skip_streak=0 no_pass_streak=%u "
-                 "no_pass_threshold=%u %s",
-                 r->last_verdict[0] ? r->last_verdict : "-",
-                 r->no_pass_streak, r->no_pass_threshold, age);
-        return buf;
-    }
+    /* No skips at all in the trailing run. Either nothing is wrong, or
+     * the proof RAN every scheduled time and never passed — the more
+     * damning of the two conditions this module reports. */
+    if (r->skip_streak == 0)
+        return no_skip_run_text(r, buf, cap, age);
 
-    /* A trailing SKIP run. The class alarm below is unchanged. The no-pass
-     * alarm can still be the reason this line is loud — a streak of fails
-     * capped by one benign skip must not read as quiet — so it is checked
-     * after the class alarm and before the benign note. */
-    const char *tail;
-    if (r->alarm)
-        tail = " — this proof has not run for that many consecutive "
-               "scheduled attempts";
-    else if (r->no_pass_alarm)
-        tail = " — the trailing SKIP run does not itself cross its class "
-               "threshold, but this proof RAN and never once passed across "
-               "the whole no_pass_streak above; the claim is unproven";
-    else if (r->threshold == 0)
-        tail = " — benign: nothing was configured, so there was nothing "
-               "to prove";
-    else
-        tail = "";
+    const char *tail = skip_run_tail_text(r);
 
     snprintf(buf, cap,
              "%s class=%s skip_streak=%u threshold=%u no_pass_streak=%u "
