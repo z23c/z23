@@ -32,7 +32,7 @@ static void cv2_hash_u64(struct sha3_256_ctx *sha, uint64_t value)
     sha3_256_write(sha, le, sizeof(le));
 }
 
-const char *vcs_zcode_commons_error_string(
+static const char *commons_error_string_primary(
     enum vcs_zcode_commons_error error)
 {
     switch (error) {
@@ -45,6 +45,15 @@ const char *vcs_zcode_commons_error_string(
     case VCS_ZCODE_COMMONS_AMOUNT: return "amount";
     case VCS_ZCODE_COMMONS_LIMIT: return "limit";
     case VCS_ZCODE_COMMONS_ORDER: return "canonical-order";
+    default: break;
+    }
+    return NULL;
+}
+
+static const char *commons_error_string_secondary(
+    enum vcs_zcode_commons_error error)
+{
+    switch (error) {
     case VCS_ZCODE_COMMONS_DUPLICATE: return "duplicate";
     case VCS_ZCODE_COMMONS_IMMATURE: return "dual-maturity";
     case VCS_ZCODE_COMMONS_POLICY: return "policy";
@@ -54,7 +63,18 @@ const char *vcs_zcode_commons_error_string(
     case VCS_ZCODE_COMMONS_SIZE: return "wire-size";
     case VCS_ZCODE_COMMONS_MAGIC: return "wire-magic";
     case VCS_ZCODE_COMMONS_SIGNATURE: return "signature";
+    default: break;
     }
+    return NULL;
+}
+
+const char *vcs_zcode_commons_error_string(
+    enum vcs_zcode_commons_error error)
+{
+    const char *text = commons_error_string_primary(error);
+    if (text) return text;
+    text = commons_error_string_secondary(error);
+    if (text) return text;
     return "unknown-commons-v2-error";
 }
 
@@ -212,6 +232,146 @@ static uint64_t selected_for_root(
     return total;
 }
 
+static enum vcs_zcode_commons_error epoch_select_precheck(
+    const struct vcs_zcode_epoch_selection_v2 *input,
+    const struct vcs_zcode_policy_candidate_v2 *policy,
+    const struct vcs_zcode_epoch_selection_result_v2 *out)
+{
+    if (!input || !policy || !out ||
+        (input->claim_count > 0 && !input->claims))
+        return VCS_ZCODE_COMMONS_NULL;
+    enum vcs_zcode_commons_error error =
+        vcs_zcode_policy_candidate_v2_validate(policy);
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
+    if (input->claim_count > VCS_ZCODE_COMMONS_MAX_CLAIMS)
+        return VCS_ZCODE_COMMONS_LIMIT;
+    if (input->cutoff_height == 0 || input->cutoff_mtp <= 0)
+        return VCS_ZCODE_COMMONS_IMMATURE;
+    return VCS_ZCODE_COMMONS_OK;
+}
+
+static uint64_t epoch_per_root_cap(uint64_t epoch_capacity_atoms)
+{
+    uint64_t one_percent = epoch_capacity_atoms / UINT64_C(100);
+    uint64_t per_root_cap = one_percent > VCS_ZCODE_COMMONS_ATOMS_PER_TOKEN
+        ? one_percent : VCS_ZCODE_COMMONS_ATOMS_PER_TOKEN;
+    if (per_root_cap > epoch_capacity_atoms)
+        per_root_cap = epoch_capacity_atoms;
+    return per_root_cap;
+}
+
+static enum vcs_zcode_commons_error epoch_rank_claims(
+    const struct vcs_zcode_epoch_selection_v2 *input,
+    struct cv2_ranked_claim **ranked_out, bool **consumed_out)
+{
+    struct cv2_ranked_claim *ranked = zcl_malloc(
+        input->claim_count * sizeof(*ranked), "commons_ranked_claims");
+    bool *consumed = zcl_calloc(input->claim_count, sizeof(*consumed),
+                                "commons_consumed_claims");
+    if (!ranked || !consumed) {
+        free(ranked); free(consumed);
+        return VCS_ZCODE_COMMONS_LIMIT;
+    }
+    for (size_t i = 0; i < input->claim_count; i++) {
+        ranked[i].input_index = i;
+        ranked[i].claim = &input->claims[i];
+    }
+    qsort(ranked, input->claim_count, sizeof(*ranked), ranked_claim_compare);
+    *ranked_out = ranked;
+    *consumed_out = consumed;
+    return VCS_ZCODE_COMMONS_OK;
+}
+
+static size_t epoch_find_unconsumed(
+    const struct vcs_zcode_epoch_selection_v2 *input,
+    const struct cv2_ranked_claim *ranked, const bool *consumed,
+    uint16_t category)
+{
+    for (size_t i = 0; i < input->claim_count; i++) {
+        if (!consumed[i] && ranked[i].claim->category == category)
+            return i;
+    }
+    return input->claim_count;
+}
+
+static bool epoch_claim_eligible(
+    const struct vcs_zcode_epoch_selection_v2 *input,
+    const struct vcs_zcode_creation_claim_v2 *claim)
+{
+    enum vcs_zcode_commons_error error = claim_shape(claim);
+    return error == VCS_ZCODE_COMMONS_OK &&
+        (claim->flags & VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS) ==
+            VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS &&
+        (claim->flags & VCS_ZCODE_CLAIM_V2_INVALIDATING_FLAGS) == 0 &&
+        claim->maturity_height <= input->cutoff_height &&
+        claim->maturity_mtp <= input->cutoff_mtp;
+}
+
+static enum vcs_zcode_commons_error epoch_consider_claim(
+    const struct vcs_zcode_epoch_selection_v2 *input,
+    const struct vcs_zcode_policy_candidate_v2 *policy,
+    struct vcs_zcode_epoch_selection_result_v2 *out,
+    const struct cv2_ranked_claim *ranked, size_t at, uint16_t category)
+{
+    const struct vcs_zcode_creation_claim_v2 *claim = ranked[at].claim;
+    bool eligible = epoch_claim_eligible(input, claim);
+    if (!eligible || prior_root_selected(
+            input, out, out->selected_count, claim->claim_root, false) ||
+        prior_root_selected(input, out, out->selected_count,
+                            claim->semantic_lineage_root, true)) {
+        out->invalid_count++;
+        return VCS_ZCODE_COMMONS_OK;
+    }
+    uint64_t award = policy->award_atoms[category];
+    uint64_t recipient_used = selected_for_root(
+        input, out, out->selected_count,
+        claim->recipient_binding_root, false, policy);
+    uint64_t lineage_used = selected_for_root(
+        input, out, out->selected_count,
+        claim->workspace_lineage_root, true, policy);
+    uint64_t next_total = 0, next_recipient = 0, next_lineage = 0;
+    if (!zcl_u64_add(out->selected_atoms, award, &next_total) ||
+        !zcl_u64_add(recipient_used, award, &next_recipient) ||
+        !zcl_u64_add(lineage_used, award, &next_lineage))
+        return VCS_ZCODE_COMMONS_OVERFLOW;
+    if (next_total > input->epoch_capacity_atoms ||
+        next_recipient > out->recipient_cap_atoms ||
+        next_lineage > out->lineage_cap_atoms) {
+        out->deferred_count++;
+        return VCS_ZCODE_COMMONS_OK;
+    }
+    out->selected_indices[out->selected_count++] =
+        ranked[at].input_index;
+    out->selected_atoms = next_total;
+    return VCS_ZCODE_COMMONS_OK;
+}
+
+static enum vcs_zcode_commons_error epoch_run_selection(
+    const struct vcs_zcode_epoch_selection_v2 *input,
+    const struct vcs_zcode_policy_candidate_v2 *policy,
+    struct vcs_zcode_epoch_selection_result_v2 *out,
+    const struct cv2_ranked_claim *ranked, bool *consumed)
+{
+    size_t remaining = input->claim_count;
+    while (remaining > 0) {
+        bool visited = false;
+        for (size_t turn = 0; turn < VCS_ZCODE_COMMONS_CATEGORY_COUNT;
+             turn++) {
+            uint16_t category = (uint16_t)((out->first_category + turn) %
+                VCS_ZCODE_COMMONS_CATEGORY_COUNT);
+            size_t at = epoch_find_unconsumed(input, ranked, consumed,
+                                              category);
+            if (at == input->claim_count) continue;
+            visited = true; consumed[at] = true; remaining--;
+            enum vcs_zcode_commons_error error = epoch_consider_claim(
+                input, policy, out, ranked, at, category);
+            if (error != VCS_ZCODE_COMMONS_OK) return error;
+        }
+        if (!visited) break;
+    }
+    return VCS_ZCODE_COMMONS_OK;
+}
+
 static void epoch_result_root(
     const struct vcs_zcode_epoch_selection_v2 *input,
     const struct vcs_zcode_epoch_selection_result_v2 *result,
@@ -243,22 +403,11 @@ enum vcs_zcode_commons_error vcs_zcode_epoch_select_v2(
     struct vcs_zcode_epoch_selection_result_v2 *out)
 {
     if (out) memset(out, 0, sizeof(*out));
-    if (!input || !policy || !out ||
-        (input->claim_count > 0 && !input->claims))
-        return VCS_ZCODE_COMMONS_NULL;
     enum vcs_zcode_commons_error error =
-        vcs_zcode_policy_candidate_v2_validate(policy);
+        epoch_select_precheck(input, policy, out);
     if (error != VCS_ZCODE_COMMONS_OK) return error;
-    if (input->claim_count > VCS_ZCODE_COMMONS_MAX_CLAIMS)
-        return VCS_ZCODE_COMMONS_LIMIT;
-    if (input->cutoff_height == 0 || input->cutoff_mtp <= 0)
-        return VCS_ZCODE_COMMONS_IMMATURE;
 
-    uint64_t one_percent = input->epoch_capacity_atoms / UINT64_C(100);
-    uint64_t per_root_cap = one_percent > VCS_ZCODE_COMMONS_ATOMS_PER_TOKEN
-        ? one_percent : VCS_ZCODE_COMMONS_ATOMS_PER_TOKEN;
-    if (per_root_cap > input->epoch_capacity_atoms)
-        per_root_cap = input->epoch_capacity_atoms;
+    uint64_t per_root_cap = epoch_per_root_cap(input->epoch_capacity_atoms);
     out->recipient_cap_atoms = per_root_cap;
     out->lineage_cap_atoms = per_root_cap;
     out->first_category = zcl_bytes_any_set(input->previous_epoch_root, 32)
@@ -272,80 +421,17 @@ enum vcs_zcode_commons_error vcs_zcode_epoch_select_v2(
         return VCS_ZCODE_COMMONS_OK;
     }
 
-    struct cv2_ranked_claim *ranked = zcl_malloc(
-        input->claim_count * sizeof(*ranked), "commons_ranked_claims");
-    bool *consumed = zcl_calloc(input->claim_count, sizeof(*consumed),
-                                "commons_consumed_claims");
-    if (!ranked || !consumed) {
-        free(ranked); free(consumed);
-        return VCS_ZCODE_COMMONS_LIMIT;
-    }
-    for (size_t i = 0; i < input->claim_count; i++) {
-        ranked[i].input_index = i;
-        ranked[i].claim = &input->claims[i];
-    }
-    qsort(ranked, input->claim_count, sizeof(*ranked), ranked_claim_compare);
+    struct cv2_ranked_claim *ranked = NULL;
+    bool *consumed = NULL;
+    error = epoch_rank_claims(input, &ranked, &consumed);
+    if (error != VCS_ZCODE_COMMONS_OK) return error;
 
-    size_t remaining = input->claim_count;
-    while (remaining > 0) {
-        bool visited = false;
-        for (size_t turn = 0; turn < VCS_ZCODE_COMMONS_CATEGORY_COUNT;
-             turn++) {
-            uint16_t category = (uint16_t)((out->first_category + turn) %
-                VCS_ZCODE_COMMONS_CATEGORY_COUNT);
-            size_t at = input->claim_count;
-            for (size_t i = 0; i < input->claim_count; i++) {
-                if (!consumed[i] && ranked[i].claim->category == category) {
-                    at = i;
-                    break;
-                }
-            }
-            if (at == input->claim_count) continue;
-            visited = true; consumed[at] = true; remaining--;
-            const struct vcs_zcode_creation_claim_v2 *claim =
-                ranked[at].claim;
-            error = claim_shape(claim);
-            bool eligible = error == VCS_ZCODE_COMMONS_OK &&
-                (claim->flags & VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS) ==
-                    VCS_ZCODE_CLAIM_V2_REQUIRED_FLAGS &&
-                (claim->flags & VCS_ZCODE_CLAIM_V2_INVALIDATING_FLAGS) == 0 &&
-                claim->maturity_height <= input->cutoff_height &&
-                claim->maturity_mtp <= input->cutoff_mtp;
-            if (!eligible || prior_root_selected(
-                    input, out, out->selected_count, claim->claim_root, false) ||
-                prior_root_selected(input, out, out->selected_count,
-                                    claim->semantic_lineage_root, true)) {
-                out->invalid_count++;
-                continue;
-            }
-            uint64_t award = policy->award_atoms[category];
-            uint64_t recipient_used = selected_for_root(
-                input, out, out->selected_count,
-                claim->recipient_binding_root, false, policy);
-            uint64_t lineage_used = selected_for_root(
-                input, out, out->selected_count,
-                claim->workspace_lineage_root, true, policy);
-            uint64_t next_total = 0, next_recipient = 0, next_lineage = 0;
-            if (!zcl_u64_add(out->selected_atoms, award, &next_total) ||
-                !zcl_u64_add(recipient_used, award, &next_recipient) ||
-                !zcl_u64_add(lineage_used, award, &next_lineage)) {
-                free(consumed); free(ranked);
-                memset(out, 0, sizeof(*out));
-                return VCS_ZCODE_COMMONS_OVERFLOW;
-            }
-            if (next_total > input->epoch_capacity_atoms ||
-                next_recipient > out->recipient_cap_atoms ||
-                next_lineage > out->lineage_cap_atoms) {
-                out->deferred_count++;
-                continue;
-            }
-            out->selected_indices[out->selected_count++] =
-                ranked[at].input_index;
-            out->selected_atoms = next_total;
-        }
-        if (!visited) break;
-    }
+    error = epoch_run_selection(input, policy, out, ranked, consumed);
     free(consumed); free(ranked);
+    if (error != VCS_ZCODE_COMMONS_OK) {
+        memset(out, 0, sizeof(*out));
+        return error;
+    }
     out->expired_capacity_atoms =
         input->epoch_capacity_atoms - out->selected_atoms;
     epoch_result_root(input, out, out->epoch_creation_root);

@@ -269,8 +269,6 @@ contexts/commons/modules/vcs/src/zcode_candidate_tree.c:vcs_zcode_candidate_tree
 contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_decode:16
 contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_from_selection:18
 contexts/commons/modules/vcs/src/zcode_claim_epoch.c:vcs_zcode_claim_epoch_validate:28
-contexts/commons/modules/vcs/src/zcode_commons_economics.c:vcs_zcode_commons_error_string:19
-contexts/commons/modules/vcs/src/zcode_commons_economics.c:vcs_zcode_epoch_select_v2:39
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:creation_write:33
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:vcs_zcode_creation_attribution_parse:37
 contexts/commons/modules/vcs/src/zcode_creation_attribution.c:vcs_zcode_creation_attribution_validate:21
