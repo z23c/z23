@@ -68,7 +68,7 @@ static int64_t shutdown_submark_ex(const char *name, int64_t since,
     return boot_clock_ms();
 }
 
-static int64_t shutdown_submark(const char *name, int64_t since)
+int64_t shutdown_submark(const char *name, int64_t since)
 {
     return shutdown_submark_ex(name, since, "");
 }
@@ -104,6 +104,15 @@ static void shutdown_bind_saved_flat_timed(
                  "next boot will use the full integrity scan");
 }
 
+/* PASSIVE checkpoint right after the flat bind, so the TRUNCATE in the later
+ * projection close copies little. Timed; a BUSY result is logged by the call. */
+static void shutdown_wal_passive_timed(block_index_projection_t *bip)
+{
+    int64_t t0 = boot_clock_ms();
+    (void)block_index_projection_checkpoint_passive(bip);
+    (void)shutdown_submark("shutdown.wal_passive", t0);
+}
+
 static void shutdown_persist_fast_restart_state(struct boot_svc_ctx *svc)
 {
     printf("[shutdown] persisting fast restart state\n");
@@ -122,8 +131,10 @@ static void shutdown_persist_fast_restart_state(struct boot_svc_ctx *svc)
         if (bip && covered == UINT64_MAX)
             LOG_WARN("shutdown", "projection catch-up failed; flat saved "
                      "without binding so next boot uses the full scan");
-        if (saved.ok && bip && covered != UINT64_MAX)
+        if (saved.ok && bip && covered != UINT64_MAX) {
             shutdown_bind_saved_flat_timed(bip, &identity, svc->state);
+            shutdown_wal_passive_timed(bip);
+        }
     }
     printf("[shutdown] fast restart state persisted\n");
 }
@@ -429,10 +440,15 @@ static void shutdown_release_owned_resources(struct boot_svc_ctx *svc,
                "did not drain\n");
         return;
     }
+    int64_t t = boot_clock_ms();
     zcl_service_kernel_reset(&svc->frontend_kernel);
+    t = shutdown_submark("release.kernel_frontend", t);
     zcl_service_kernel_reset(&svc->runtime_kernel);
+    t = shutdown_submark("release.kernel_runtime", t);
     zcl_service_kernel_reset(&svc->network_kernel);
+    t = shutdown_submark("release.kernel_network", t);
     zcl_service_kernel_reset(&svc->service_kernel);
+    t = shutdown_submark("release.kernel_service", t);
     /* LIFETIME RULE: connman is freed only after every thread that can reach
      * it or its addrman is joined: the maintenance kernel (network crawler,
      * network monitor) in boot_stop_platform_services before app_shutdown_svc,
@@ -441,17 +457,24 @@ static void shutdown_release_owned_resources(struct boot_svc_ctx *svc,
      * thread registry in worker-drain / runtime-persist. An undrained
      * diagnostics capture returned early above and keeps it. */
     connman_free(svc->connman);
+    t = shutdown_submark("release.connman_free", t);
     printf("[shutdown] connman stopped\n");
     /* Stages were quiesced before persistence and the final registry join;
      * the state they read can now go. proof_validate uses the Sapling params. */
     wallet_free(svc->wallet);
+    t = shutdown_submark("release.wallet_free", t);
     tx_mempool_free(svc->mempool);
+    t = shutdown_submark("release.mempool_free", t);
     main_state_free(svc->state);
+    t = shutdown_submark("release.main_state_free", t);
     sapling_free_params();
+    t = shutdown_submark("release.sapling_params", t);
     boot_stop_projection_storage();
+    t = shutdown_submark("release.projections", t);
 
     ecc_verify_destroy();
     ecc_stop();
+    (void)shutdown_submark("release.ecc_stop", t);
     printf("[shutdown] owned resources released\n");
 }
 

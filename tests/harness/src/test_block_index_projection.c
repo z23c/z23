@@ -37,6 +37,8 @@
  *                                out-of-range override is ignored
  *  15. replay_resume_after_kill — SIGKILL-style exit mid-replay; reopen resumes
  *                                from the last commit, no loss, no duplicate
+ *  16. passive_checkpoint_then_close — PASSIVE checkpoint after catch-up keeps
+ *                                the db readable; close still truncates WAL to 0
  *
  * Scratch files live under ./test-tmp/bip_<pid>_<tag>/ in line with the
  * project's no-/tmp convention. */
@@ -997,6 +999,50 @@ done:
     return *failures - start_failures;
 }
 
+/* ── Test 16: passive_checkpoint_then_close ─────────────────────────── */
+
+static int run_passive_checkpoint_then_close(int *failures)
+{
+    int start_failures = *failures;
+
+    char dir[256]; test_make_tmpdir(dir, sizeof(dir), "bip", "passive_ckpt");
+    char el_path[320]; snprintf(el_path, sizeof(el_path), "%s/log.bin", dir);
+    char db_path[320]; snprintf(db_path, sizeof(db_path), "%s/p.db", dir);
+    char wal_path[336]; snprintf(wal_path, sizeof(wal_path), "%s-wal", db_path);
+
+    event_log_t *log = event_log_open(el_path);
+    if (!log) { *failures += 1; goto done; }
+    const int n = 64;
+    BIP_CHECK("passive_ckpt: emit headers", emit_n_headers(log, 0xC000u, n));
+
+    block_index_projection_t *p = block_index_projection_open(db_path, log);
+    if (!p) { event_log_close(log); *failures += 1; goto done; }
+    uint64_t off = block_index_projection_catch_up(p);
+    BIP_CHECK("passive_ckpt: catch_up succeeds", off != (uint64_t)-1);
+
+    int rc = block_index_projection_checkpoint_passive(p);
+    BIP_CHECK("passive_ckpt: passive checkpoint returns OK with no reader",
+              rc == SQLITE_OK);
+    BIP_CHECK("passive_ckpt: db still readable after passive checkpoint",
+              block_index_projection_count(p) == (uint64_t)n);
+
+    block_index_projection_close(p);
+    BIP_CHECK("passive_ckpt: close still truncates WAL to 0",
+              bip_file_size(wal_path) == 0);
+
+    p = block_index_projection_open(db_path, log);
+    BIP_CHECK("passive_ckpt: reopen succeeds", p != NULL);
+    if (p) {
+        BIP_CHECK("passive_ckpt: reopen keeps every row",
+                  block_index_projection_count(p) == (uint64_t)n);
+        block_index_projection_close(p);
+    }
+    event_log_close(log);
+    bip_cleanup_dir(dir);
+done:
+    return *failures - start_failures;
+}
+
 struct wal_reader_arg {
     block_index_projection_t *p;
     uint8_t hash[32];
@@ -1412,6 +1458,7 @@ static const struct bip_case g_bip_cases[] = {
     {"collision_accounting_cached_stmt", run_collision_accounting_cached_stmt, 5},
     {"bound_dirty_delta", run_bound_dirty_delta, 6},
     {"catch_up_wal_budget", run_catch_up_wal_budget, 7},
+    {"passive_checkpoint_then_close", run_passive_checkpoint_then_close, 6},
     {"catch_up_wal_reader", run_catch_up_wal_reader, 0},
     {"replay_resume_after_kill", run_replay_resume_after_kill, 1},
     {"replay_wal_bound", run_replay_wal_bound, 2},

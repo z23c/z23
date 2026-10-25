@@ -330,6 +330,31 @@ void block_index_projection_close(block_index_projection_t *p)
     free(p);
 }
 
+/* PASSIVE checkpoint on the open handle: copies the WAL frames no reader still
+ * needs into the main db. It never blocks writers and never resets or
+ * truncates the WAL, so the TRUNCATE in close still has the final say.
+ * SQLITE_BUSY (a reader or writer holds the WAL) is benign and only logged. */
+int block_index_projection_checkpoint_passive(block_index_projection_t *p)
+{
+    if (!p) return SQLITE_MISUSE;
+    pthread_mutex_lock(&p->mu);
+    int rc = SQLITE_MISUSE;
+    if (p->db) {
+        int log_frames = 0;
+        int ckpt_frames = 0;
+        rc = sqlite3_wal_checkpoint_v2(  // raw-sql-ok:kernel-primitive
+            p->db, NULL, SQLITE_CHECKPOINT_PASSIVE,
+            &log_frames, &ckpt_frames);
+        if (rc != SQLITE_OK)
+            fprintf(stderr,  // obs-ok:block-index-projection-lifecycle
+                    "[block_index_projection] passive checkpoint rc=%d (%s) "
+                    "log_frames=%d ckpt_frames=%d\n",
+                    rc, sqlite3_errstr(rc), log_frames, ckpt_frames);
+    }
+    pthread_mutex_unlock(&p->mu);
+    return rc;
+}
+
 /* ── catch_up ──────────────────────────────────────────────────────── */
 
 bool batch_begin(struct catch_up_ctx *c)

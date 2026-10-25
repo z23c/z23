@@ -66,6 +66,11 @@ block_index_projection_t *block_index_projection_open(const char *path,
 /* Close + free. NULL-safe. */
 void block_index_projection_close(block_index_projection_t *p);
 
+/* PASSIVE WAL checkpoint on the open handle. Never blocks writers, never
+ * truncates the WAL; close still runs the TRUNCATE. Returns the sqlite rc
+ * (SQLITE_BUSY is benign), or SQLITE_MISUSE for a NULL or closed handle. */
+int block_index_projection_checkpoint_passive(block_index_projection_t *p);
+
 /* Consume events from `last_consumed_offset` to the end of the log.
  * Idempotent. Returns the new last_consumed_offset on success or
  * (uint64_t)-1 on error. INSERT OR REPLACE semantics — a header whose

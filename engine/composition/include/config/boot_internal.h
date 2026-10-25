@@ -725,6 +725,10 @@ void app_shutdown_svc(struct boot_svc_ctx *svc);
 bool shutdown_clean_marker_permitted(bool durability_ok,
                                      bool diagnostics_drained);
 
+/* Prints one "[shutdown]   <name> <ms>" sub-stage line for the time since
+ * `since` and returns the clock now, so consecutive calls chain. */
+int64_t shutdown_submark(const char *name, int64_t since);
+
 /* Pure gate consulted when the offline-worker-drain deadline fires (pure;
  * unit-tested in test_debug_bundle). True iff the caller's own durable
  * output (a completed -mint-anchor / -full-fold bundle) already landed

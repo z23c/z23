@@ -593,7 +593,9 @@ void boot_stop_projection_storage(void)
     /* The warm-up thread opens and folds these stores: it is joined before any
      * of them (or the event log) closes. Idempotent when shutdown already
      * stopped it in worker-drain. */
+    int64_t t = boot_clock_ms();
     boot_projection_warmup_stop();
+    t = shutdown_submark("stop.warmup_join", t);
     /* Order: detach emitters before closing the projections so no
      * in-flight emit lands on a stale handle. Then close projections
      * before the event log they point to. */
@@ -603,49 +605,61 @@ void boot_stop_projection_storage(void)
     contacts_projection_set_event_log(NULL);
     onion_ann_projection_set_event_log(NULL);
     hodl_history_projection_set_event_log(NULL);
+    t = shutdown_submark("stop.detach_emitters", t);
     if (g_phase4_mempool_projection) {
         mempool_projection_close(g_phase4_mempool_projection);
         g_phase4_mempool_projection = NULL;
     }
+    t = shutdown_submark("stop.mempool_close", t);
     if (g_phase4_peers_projection) {
         peers_projection_close(g_phase4_peers_projection);
         g_phase4_peers_projection = NULL;
     }
+    t = shutdown_submark("stop.peers_close", t);
     znam_projection_set_event_log(NULL);
     if (g_phase4_znam_projection) {
         znam_projection_close(g_phase4_znam_projection);
         g_phase4_znam_projection = NULL;
     }
+    t = shutdown_submark("stop.znam_close", t);
     if (g_phase4_wallet_projection) {
         wallet_projection_close(g_phase4_wallet_projection);
         g_phase4_wallet_projection = NULL;
     }
+    t = shutdown_submark("stop.wallet_close", t);
     if (g_phase4_contacts_projection) {
         contacts_projection_close(g_phase4_contacts_projection);
         g_phase4_contacts_projection = NULL;
     }
+    t = shutdown_submark("stop.contacts_close", t);
     if (g_phase4_onion_ann_projection) {
         onion_ann_projection_close(g_phase4_onion_ann_projection);
         g_phase4_onion_ann_projection = NULL;
     }
+    t = shutdown_submark("stop.onion_ann_close", t);
     if (g_phase4_hodl_history_projection) {
         hodl_history_projection_close(g_phase4_hodl_history_projection);
         g_phase4_hodl_history_projection = NULL;
     }
+    t = shutdown_submark("stop.hodl_history_close", t);
     topology_store_close();
+    t = shutdown_submark("stop.topology_close", t);
     block_index_projection_set_singleton(NULL);
     if (g_phase4_block_index_projection) {
         block_index_projection_close(g_phase4_block_index_projection);
         g_phase4_block_index_projection = NULL;
     }
+    t = shutdown_submark("stop.block_index_close", t);
     event_log_set_singleton(NULL);
     if (g_phase4_event_log) {
         event_log_close(g_phase4_event_log);
         g_phase4_event_log = NULL;
     }
+    t = shutdown_submark("stop.event_log_close", t);
     /* Close the Wave A2 projection handle to progress.kv (no-op if unopened).
      * progress_store's own close still owns the WAL checkpoint of the file. */
     projection_store_close();
+    t = shutdown_submark("stop.projection_store_close", t);
     pthread_mutex_lock(&g_warm_mu);
     g_warm_state = WARM_IDLE;
     g_warm_qc_wanted = false;
