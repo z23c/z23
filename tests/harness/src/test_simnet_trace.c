@@ -96,6 +96,54 @@ static size_t count_lines_containing2(const char *path, const char *needle1,
     return count;
 }
 
+/* True when every one of the 3 nodes contributed at least one
+ * "event":"simnet_mint" line to the trace. */
+static bool every_node_has_mint_event_line(const char *trace_path)
+{
+    bool every_node_minted = true;
+    for (int i = 0; i < 3; i++) {
+        char node_needle[32];
+        snprintf(node_needle, sizeof(node_needle), "\"node_id\":%d", i);
+        if (count_lines_containing2(trace_path, "\"event\":\"simnet_mint\"",
+                                    node_needle) < 1)
+            every_node_minted = false;
+    }
+    return every_node_minted;
+}
+
+/* Scan the "seq":7 (post-heal-resync) trace lines and leave in first_hex
+ * the "commitment_hex" value they record: the first one found, or
+ * "MISMATCH" if the lines disagree. */
+static void scan_post_heal_commitment_hex(const char *trace_path,
+                                          char *first_hex,
+                                          size_t first_hex_cap)
+{
+    FILE *fp = fopen(trace_path, "rb");
+    char line[4096];
+    first_hex[0] = '\0';
+    while (fp && fgets(line, sizeof(line), fp)) {
+        if (!strstr(line, "\"seq\":7"))
+            continue;
+        const char *key = "\"commitment_hex\":\"";
+        char *p = strstr(line, key);
+        if (!p) continue;
+        p += strlen(key);
+        char *end = strchr(p, '"');
+        if (!end || (size_t)(end - p) >= first_hex_cap) continue;
+        size_t len = (size_t)(end - p);
+        if (first_hex[0] == '\0') {
+            memcpy(first_hex, p, len);
+            first_hex[len] = '\0';
+        } else if (strncmp(first_hex, p, len) != 0 ||
+                   strlen(first_hex) != len) {
+            first_hex[0] = '\0';
+            strcpy(first_hex, "MISMATCH");
+            break;
+        }
+    }
+    if (fp) fclose(fp);
+}
+
 int test_simnet_trace(void)
 {
     /* write_failure_artifacts() (chaos.c) is real, used code — chaos.c's own
@@ -175,16 +223,8 @@ int test_simnet_trace(void)
                                         "\"event\":\"simnet_heal\"",
                                         NULL) == 3);
 
-    bool every_node_minted = true;
-    for (int i = 0; i < 3; i++) {
-        char node_needle[32];
-        snprintf(node_needle, sizeof(node_needle), "\"node_id\":%d", i);
-        if (count_lines_containing2(trace_path, "\"event\":\"simnet_mint\"",
-                                    node_needle) < 1)
-            every_node_minted = false;
-    }
     TRACE_CHECK("every node has at least one mint-event line",
-                every_node_minted);
+                every_node_has_mint_event_line(trace_path));
 
     /* The literal-value proof: no existing `expect` metric names a per-node
      * UTXO commitment count or tip height (the `tip_height` metric is the
@@ -215,31 +255,9 @@ int test_simnet_trace(void)
      * identical across all 3 post-heal-resync lines -- a piece of state no
      * existing metric expresses at all. */
     {
-        FILE *fp = fopen(trace_path, "rb");
-        char line[4096];
         char first_hex[80];
-        first_hex[0] = '\0';
-        while (fp && fgets(line, sizeof(line), fp)) {
-            if (!strstr(line, "\"seq\":7"))
-                continue;
-            const char *key = "\"commitment_hex\":\"";
-            char *p = strstr(line, key);
-            if (!p) continue;
-            p += strlen(key);
-            char *end = strchr(p, '"');
-            if (!end || (size_t)(end - p) >= sizeof(first_hex)) continue;
-            size_t len = (size_t)(end - p);
-            if (first_hex[0] == '\0') {
-                memcpy(first_hex, p, len);
-                first_hex[len] = '\0';
-            } else if (strncmp(first_hex, p, len) != 0 ||
-                      strlen(first_hex) != len) {
-                first_hex[0] = '\0';
-                strcpy(first_hex, "MISMATCH");
-                break;
-            }
-        }
-        if (fp) fclose(fp);
+        scan_post_heal_commitment_hex(trace_path, first_hex,
+                                      sizeof(first_hex));
         TRACE_CHECK("post-heal resync: commitment_hex is a real 64-char "
                     "hex digest identical across all 3 nodes",
                     strlen(first_hex) == 64 &&

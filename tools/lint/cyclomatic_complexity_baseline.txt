@@ -2114,7 +2114,6 @@ tests/harness/src/test_simnet_sapling_shielded_send.c:build_and_verify:26
 tests/harness/src/test_simnet_sapling_shielded_send.c:groth16_hook_isolation:16
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_a_consensus_accept:60
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_b_wallet_rpc:33
-tests/harness/src/test_simnet_trace.c:test_simnet_trace:20
 tests/harness/src/test_simnet_txkit.c:test_simnet_txkit:38
 tests/harness/src/test_simnet_txkit.c:txk_build_multisig_spend:18
 tests/harness/src/test_simnet_wallet_import_backup.c:part1_import_rescan_spend:52
