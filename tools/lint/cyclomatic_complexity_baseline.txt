@@ -515,7 +515,6 @@ contexts/wallet/controllers/src/wallet_diagnostic_ledger.c:rpc_walletledger:109
 contexts/wallet/controllers/src/wallet_diagnostic_repair.c:rpc_purgephantomutxos:18
 contexts/wallet/controllers/src/wallet_diagnostic_repair.c:rpc_reconcilewalletutxos:17
 contexts/wallet/controllers/src/wallet_native_backup_handlers.c:zcl_native_handle_wallet_backup_now:16
-contexts/wallet/controllers/src/wallet_raw_native_handlers.c:zcl_native_handle_wallet_multisig_compose:23
 contexts/wallet/controllers/src/wallet_rescan_controller_coins.c:rpc_coinanalysis:22
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rescan_seed_before_oldest_note_from_db:18
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rpc_rescanwitnesses:44

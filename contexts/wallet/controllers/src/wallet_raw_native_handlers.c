@@ -58,6 +58,47 @@ static char *raw_native_create_params(const struct json_value *inputs,
     return rpc_arg_builder_to_json(&args);
 }
 
+static bool raw_native_multisig_policy_valid(
+    const struct json_value *required_value,
+    const struct json_value *public_keys)
+{
+    return required_value && required_value->type == JSON_INT &&
+           public_keys && public_keys->type == JSON_ARR;
+}
+
+static bool raw_native_multisig_counts_valid(int64_t required,
+                                             size_t key_count)
+{
+    return required >= 1 && key_count > 0 && key_count <= 16 &&
+           required <= (int64_t)key_count;
+}
+
+static bool raw_native_multisig_keys_valid(
+    const struct json_value *public_keys)
+{
+    size_t key_count = json_size(public_keys);
+    for (size_t i = 0; i < key_count; i++) {
+        const struct json_value *key = json_at(public_keys, i);
+        const char *hex = key && key->type == JSON_STR ?
+            json_get_str(key) : NULL;
+        size_t len = hex ? strlen(hex) : 0;
+        if (len != 66 && len != 130) return false;
+    }
+    return true;
+}
+
+static bool raw_native_multisig_extract_result(
+    const struct json_value *body, const char **address,
+    const char **redeem_script)
+{
+    *address = body->type == JSON_OBJ ?
+        json_get_str(json_get(body, "address")) : NULL;
+    *redeem_script = body->type == JSON_OBJ ?
+        json_get_str(json_get(body, "redeemScript")) : NULL;
+    return *address && (*address)[0] && *redeem_script &&
+           (*redeem_script)[0];
+}
+
 void zcl_native_handle_wallet_multisig_compose(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -65,8 +106,7 @@ void zcl_native_handle_wallet_multisig_compose(
         json_get(request->input, "required_signatures");
     const struct json_value *public_keys =
         json_get(request->input, "public_keys");
-    if (!required_value || required_value->type != JSON_INT ||
-        !public_keys || public_keys->type != JSON_ARR) {
+    if (!raw_native_multisig_policy_valid(required_value, public_keys)) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_MULTISIG_POLICY",
                  "required_signatures must be an integer and public_keys "
                  "must be an array", "core.wallet.transaction.multisig.compose");
@@ -74,27 +114,20 @@ void zcl_native_handle_wallet_multisig_compose(
     }
     int64_t required = json_get_int(required_value);
     size_t key_count = json_size(public_keys);
-    if (required < 1 || key_count == 0 || key_count > 16 ||
-        required > (int64_t)key_count) {
+    if (!raw_native_multisig_counts_valid(required, key_count)) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID, "INVALID_MULTISIG_POLICY",
                  "required_signatures must be between 1 and the number of "
                  "public_keys; at most 16 keys are supported",
                  "required_signatures,public_keys");
         return;
     }
-    for (size_t i = 0; i < key_count; i++) {
-        const struct json_value *key = json_at(public_keys, i);
-        const char *hex = key && key->type == JSON_STR ?
-            json_get_str(key) : NULL;
-        size_t len = hex ? strlen(hex) : 0;
-        if (len != 66 && len != 130) {
-            wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID,
-                     "INVALID_MULTISIG_PUBLIC_KEY",
-                     "each public key must be a 33-byte compressed or "
-                     "65-byte uncompressed hexadecimal public key",
-                     "public_keys");
-            return;
-        }
+    if (!raw_native_multisig_keys_valid(public_keys)) {
+        wnh_fail(reply, ZCL_COMMAND_EXIT_INVALID,
+                 "INVALID_MULTISIG_PUBLIC_KEY",
+                 "each public key must be a 33-byte compressed or "
+                 "65-byte uncompressed hexadecimal public key",
+                 "public_keys");
+        return;
     }
 
     struct rpc_arg_builder args;
@@ -112,11 +145,9 @@ void zcl_native_handle_wallet_multisig_compose(
     bool ok = wnh_call_rpc(reply, "createmultisig", params, &body);
     free(params);
     if (!ok) return;
-    const char *address = body.type == JSON_OBJ ?
-        json_get_str(json_get(&body, "address")) : NULL;
-    const char *redeem_script = body.type == JSON_OBJ ?
-        json_get_str(json_get(&body, "redeemScript")) : NULL;
-    if (!address || !address[0] || !redeem_script || !redeem_script[0]) {
+    const char *address = NULL;
+    const char *redeem_script = NULL;
+    if (!raw_native_multisig_extract_result(&body, &address, &redeem_script)) {
         json_free(&body);
         wnh_fail(reply, ZCL_COMMAND_EXIT_FAILED, "BAD_MULTISIG_RESULT",
                  "createmultisig omitted the P2SH address or redeem script",
