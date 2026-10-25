@@ -521,6 +521,11 @@ static bool dtk_pick_one(const struct dtk_paths *p, const char *base,
         (void)snprintf(why, cap, "cannot list %s for %s", range, pick->name);
         return false;
     }
+    if (strlen(log_out) >= sizeof(log_out) - 1) {
+        (void)snprintf(why, cap, "commit log capture bound reached for %s (%s)",
+                       pick->name, range);
+        return false;
+    }
     char *save = NULL;
     for (char *line = strtok_r(log_out, "\n", &save); line;
          line = strtok_r(NULL, "\n", &save)) {

@@ -27,6 +27,7 @@
 #include "kernel/command_registry.h"
 #include "platform/directory_compat.h"
 #include "util/spawn.h"
+#include "devloop.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -370,6 +371,76 @@ static bool dtkt_setup(struct dtkt_fix *f)
                      f->sha_b) &&
            dtkt_lane(f->root, "lanec", "a.txt", "C\n", "lanec: also a",
                      f->sha_c);
+}
+
+/* A complete first commit followed by an oversized subject and a final
+ * commit. The bounded log contains valid cherry-pick candidates while
+ * silently omitting the tail unless the keeper checks capture saturation. */
+static bool dtkt_long_lane(const struct dtkt_fix *f, char tip[41])
+{
+    const char *start[] = {"checkout", "-q", "-b", "lane_long", "origin/main", NULL};
+    const char *add[] = {"add", "-A", NULL};
+    const char *publish[] = {"update-ref", "refs/review/long", "HEAD", NULL};
+    const char *back[] = {"checkout", "-q", "main", NULL};
+    static char message[ZCL_DEVLOOP_OUTPUT_MAX + 1024];
+    memset(message, 'x', sizeof(message) - 1);
+    message[sizeof(message) - 1] = '\0';
+    char file[1024];
+    if (snprintf(file, sizeof(file), "%s/long-message.txt", f->parent) >= (int)sizeof(file))
+        return false;
+    const char *commit[] = {"commit", "-q", "-F", file, NULL};
+    return dtkt_git(f->root, start) &&
+           dtkt_write(f->root, "prefix.txt", "first\n") &&
+           dtkt_commit(f->root, "complete prefix") &&
+           dtkt_write(f->parent, "long-message.txt", message) &&
+           dtkt_write(f->root, "long.txt", "long\n") &&
+           dtkt_git(f->root, add) && dtkt_git(f->root, commit) &&
+           dtkt_write(f->root, "tail.txt", "last\n") &&
+           dtkt_commit(f->root, "complete tail") && dtkt_rev(f->root, "HEAD", tip) &&
+           dtkt_git(f->root, publish) && dtkt_git(f->root, back);
+}
+
+static int dtkt_log_capture_bound(const struct dtkt_fix *outer)
+{
+    int failures = 0;
+    struct dtkt_fix f = {0};
+    TEST("train keep: a saturated commit log blocks before any partial lane pick or gate") {
+        char tip[41], head[41], queue[2048], worktree[1024], path[1200], log[2048];
+        ASSERT(dtkt_setup(&f));
+        ASSERT(dtkt_long_lane(&f, tip));
+        ASSERT(dtkt_verdict(f.dir7, "long-verdict.txt", "LAND", tip));
+        snprintf(queue, sizeof(queue), "long %s %s/long-verdict.txt\n", tip, f.dir7);
+        ASSERT(dtkt_write(f.dir7, "late_picks.txt", queue));
+        struct json_value input = dtkt_input("7", false);
+        struct zcl_command_reply reply;
+        dtkt_call(f.root, &input, &reply);
+        ASSERT(reply.status == ZCL_COMMAND_STATUS_BLOCKED);
+        ASSERT_STR_EQ(reply.error.code, "ASSEMBLY_BLOCKED");
+        ASSERT(strstr(reply.error.message, "capture bound") != NULL);
+        ASSERT(strstr(reply.error.message, "long") != NULL);
+        snprintf(worktree, sizeof(worktree), "%s/train7", f.trains);
+        ASSERT(dtkt_rev(worktree, "HEAD", head));
+        ASSERT_STR_EQ(head, f.origin_main);
+        snprintf(path, sizeof(path), "%s/prefix.txt", worktree);
+        ASSERT(!dtkt_exists(path));
+        ASSERT(dtkt_slurp(f.dir7, "keep.log", log, sizeof(log)));
+        ASSERT(strstr(log, "gate ") == NULL);
+        static const char *const absent[] = {
+            "READY", "picks.txt", "precheck_attempts", "launch_attempts"
+        };
+        for (size_t i = 0; i < sizeof(absent) / sizeof(absent[0]); i++) {
+            snprintf(path, sizeof(path), "%s/%s", f.dir7, absent[i]);
+            ASSERT(!dtkt_exists(path));
+        }
+        zcl_command_reply_free(&reply);
+        json_free(&input);
+        PASS();
+    } _test_next:;
+    dtkt_env_clear();
+    if (f.parent[0])
+        (void)test_rm_rf_recursive(f.parent);
+    dtkt_env(outer);
+    return failures;
 }
 
 static int dtkt_dry_local_refs(const struct dtkt_fix *f)
@@ -1066,6 +1137,7 @@ int test_dev_train_keep(void)
     failures += dtkt_picks_framing(&f);
     failures += dtkt_launch_failure(&f);
     failures += dtkt_ready_failure(&f);
+    failures += dtkt_log_capture_bound(&f);
 
 _test_next:;
     dtkt_env_clear();
