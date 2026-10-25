@@ -44,19 +44,47 @@ static size_t resident_after_init(bool zeroed)
     return res;
 }
 
+static bool check_recursive_mutex(zcl_mutex_t *mutex)
+{
+    if (!zcl_mutex_trylock(mutex)) return false;
+    bool recursive = zcl_mutex_trylock(mutex);
+    if (recursive) zcl_mutex_unlock(mutex);
+    zcl_mutex_unlock(mutex);
+    return recursive;
+}
+
+static bool equal_wallet_state(const struct wallet *a, const struct wallet *b)
+{
+    /* Mutex representations are opaque, including both nested keystores. */
+    const size_t locks[] = {
+        offsetof(struct wallet, cs),
+        offsetof(struct wallet, keystore) + offsetof(struct basic_keystore, cs),
+        offsetof(struct wallet, sapling_keys) + offsetof(struct sapling_keystore, cs)
+    };
+    size_t start = 0;
+    for (size_t i = 0; i < sizeof(locks) / sizeof(locks[0]); i++) {
+        if (memcmp((const char *)a + start, (const char *)b + start,
+                   locks[i] - start) != 0) return false;
+        start = locks[i] + sizeof(zcl_mutex_t);
+    }
+    return memcmp((const char *)a + start, (const char *)b + start,
+                  sizeof(*a) - start) == 0;
+}
+
 static int check_equivalence(void)
 {
     struct wallet *a = zcl_calloc(1, sizeof(*a), "test_wallet_a");
     struct wallet *b = zcl_calloc(1, sizeof(*b), "test_wallet_b");
     bool ok = a && b;
+    if (a) wallet_init(a);
+    if (b) wallet_init_zeroed(b);
     if (ok) {
-        wallet_init(a);
-        wallet_init_zeroed(b);
-        size_t cs_off = offsetof(struct wallet, cs);
-        size_t cs_end = cs_off + sizeof(a->cs);
-        ok = memcmp(a, b, cs_off) == 0 &&
-             memcmp((char *)a + cs_end, (char *)b + cs_end,
-                    sizeof(*a) - cs_end) == 0 &&
+        ok = equal_wallet_state(a, b) &&
+             check_recursive_mutex(&a->cs) && check_recursive_mutex(&b->cs) &&
+             check_recursive_mutex(&a->keystore.cs) &&
+             check_recursive_mutex(&b->keystore.cs) &&
+             check_recursive_mutex(&a->sapling_keys.cs) &&
+             check_recursive_mutex(&b->sapling_keys.cs) &&
              b->default_fee == WALLET_DEFAULT_FEE_ZAT &&
              b->spend_zero_conf_change;
     }
