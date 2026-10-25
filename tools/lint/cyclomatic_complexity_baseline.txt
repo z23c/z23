@@ -2942,7 +2942,6 @@ tools/command/native_zdir_command.c:zcl_native_handle_core_zdir_list:17
 tools/command/native_zses_command.c:zcl_native_handle_zses_invite_accept:16
 tools/command/native_zses_command.c:zcl_native_handle_zses_invite_create:28
 tools/command/rom_compile_offline.c:rom_compile_offline_compose:16
-tools/command/rom_watch_loop.c:rom_watch_run:20
 tools/consensus_rule_sweep.c:main:16
 tools/core_seal.c:compute_sections:32
 tools/core_seal.c:open_sealed_file:27

@@ -51,18 +51,71 @@ static unsigned rom_watch_count_lines(const char *s)
     return n;
 }
 
+/* The stream frames are written to: stdout unless the caller chose one. */
+static FILE *rom_watch_output_stream(const struct rom_watch_opts *opts)
+{
+    return opts->stream ? opts->stream : stdout;
+}
+
+/* Clamp the poll interval into [500, 60000] ms; 0 or negative means the
+ * 2000 ms default. */
+static int rom_watch_normalize_interval(int requested)
+{
+    int interval_ms = requested > 0 ? requested : 2000;
+    if (interval_ms < 500)
+        interval_ms = 500;
+    if (interval_ms > 60000)
+        interval_ms = 60000;
+    return interval_ms;
+}
+
+/* Redraw in place: rewind over the previous frame, then clear to the
+ * end of screen so a shorter frame leaves no stale tail. Only on a TTY
+ * (opts->ansi) and never before the first frame is on screen. */
+static void rom_watch_rewind_frame(FILE *stream, bool ansi, bool have_prev,
+                                   unsigned prev_lines)
+{
+    if (ansi && have_prev && prev_lines > 0)
+        fprintf(stream, "\x1b[%uA\x1b[J", prev_lines);
+}
+
+/* Fill text with one frame: the rendered JSON on success, the single fetch
+ * diagnostic line on failure. */
+static void rom_watch_render_frame(struct json_value *body, bool ok,
+                                   const char *err, char *text,
+                                   size_t text_size)
+{
+    if (ok) {
+        rom_compile_render_ascii(body, text, text_size);
+    } else {
+        /* A fetch error is one diagnostic line, not a loop abort — the next
+         * poll may well succeed (node still booting, transient RPC). */
+        (void)snprintf(text, text_size, "rom watch: fetch failed: %s\n",
+                       err[0] ? err : "unknown error");
+    }
+}
+
+/* Sleep interval_ms in slices of at most 50 ms, rechecking the stop condition
+ * between slices. */
+static void rom_watch_sleep_interruptible(int interval_ms,
+                                          const struct rom_watch_opts *opts)
+{
+    int remaining = interval_ms;
+    while (remaining > 0 && !rom_watch_stopped(opts)) {
+        int slice = remaining > 50 ? 50 : remaining;
+        platform_sleep_ms((uint32_t)slice);
+        remaining -= slice;
+    }
+}
+
 int rom_watch_run(rom_watch_fetch_fn fetch, void *ctx,
                   const struct rom_watch_opts *opts)
 {
     if (!fetch || !opts)
         return 2; /* invalid usage — caller passed no fetch/opts */
 
-    FILE *stream = opts->stream ? opts->stream : stdout;
-    int interval_ms = opts->interval_ms > 0 ? opts->interval_ms : 2000;
-    if (interval_ms < 500)
-        interval_ms = 500;
-    if (interval_ms > 60000)
-        interval_ms = 60000;
+    FILE *stream = rom_watch_output_stream(opts);
+    int interval_ms = rom_watch_normalize_interval(opts->interval_ms);
     int max_iters = opts->max_iters; /* 0 => until interrupted */
 
     /* Install a transient SIGINT handler; restore the caller's disposition on
@@ -91,20 +144,8 @@ int rom_watch_run(rom_watch_fetch_fn fetch, void *ctx,
         json_init(&body);
         bool ok = fetch(ctx, &body, err, sizeof(err));
 
-        /* Redraw in place: rewind over the previous frame, then clear to the
-         * end of screen so a shorter frame leaves no stale tail. Only on a TTY
-         * (opts->ansi) and never before the first frame is on screen. */
-        if (opts->ansi && have_prev && prev_lines > 0)
-            fprintf(stream, "\x1b[%uA\x1b[J", prev_lines);
-
-        if (ok) {
-            rom_compile_render_ascii(&body, text, sizeof(text));
-        } else {
-            /* A fetch error is one diagnostic line, not a loop abort — the next
-             * poll may well succeed (node still booting, transient RPC). */
-            (void)snprintf(text, sizeof(text), "rom watch: fetch failed: %s\n",
-                           err[0] ? err : "unknown error");
-        }
+        rom_watch_rewind_frame(stream, opts->ansi, have_prev, prev_lines);
+        rom_watch_render_frame(&body, ok, err, text, sizeof(text));
         json_free(&body);
 
         fputs(text, stream);
@@ -117,12 +158,7 @@ int rom_watch_run(rom_watch_fetch_fn fetch, void *ctx,
             break;
         if (rom_watch_stopped(opts))
             break;
-        int remaining = interval_ms;
-        while (remaining > 0 && !rom_watch_stopped(opts)) {
-            int slice = remaining > 50 ? 50 : remaining;
-            platform_sleep_ms((uint32_t)slice);
-            remaining -= slice;
-        }
+        rom_watch_sleep_interruptible(interval_ms, opts);
     }
 
 #if !defined(_WIN32)
