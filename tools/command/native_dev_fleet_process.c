@@ -15,26 +15,53 @@
 #endif
 #include <windows.h>
 
-static size_t fleet_quote_arg(char *out, size_t cap, const char *arg)
+/* An argument needs quoting when it is empty or contains whitespace or a
+ * double quote. */
+static bool fleet_quote_arg_needs_quotes(const char *arg)
 {
-    size_t used = 0, slashes = 0;
-    bool quote = !arg[0] || strpbrk(arg, " \t\n\v\"") != NULL;
-    if (quote && used + 1 < cap) out[used++] = '"';
+    return !arg[0] || strpbrk(arg, " \t\n\v\"") != NULL;
+}
+
+/* Append up to count backslashes at out+used, dropping any that no longer
+ * fit before the cap-bounded end; returns the updated used. */
+static size_t fleet_quote_emit_backslashes(char *out, size_t cap, size_t used,
+                                           size_t count)
+{
+    for (size_t i = 0; i < count && used + 1 < cap; i++) out[used++] = '\\';
+    return used;
+}
+
+/* Emit arg's characters with Windows quoting escapes: a backslash run
+ * before a literal quote doubles and the quote is escaped, and the final
+ * run doubles when the whole argument is quoted. Bytes past the cap-bounded
+ * end are dropped; returns the updated used. */
+static size_t fleet_quote_arg_emit_body(char *out, size_t cap, size_t used,
+                                        const char *arg, bool quote)
+{
+    size_t slashes = 0;
     for (const char *p = arg;; p++) {
         if (*p == '\\') { slashes++; continue; }
         if (*p == '"') {
-            for (size_t i = 0; i < slashes * 2u + 1u && used + 1 < cap; i++)
-                out[used++] = '\\';
+            size_t escaped = slashes * 2u + 1u;
+            used = fleet_quote_emit_backslashes(out, cap, used, escaped);
             if (used + 1 < cap) out[used++] = '"';
         } else {
             if (*p == 0 && quote) slashes *= 2u;
-            for (size_t i = 0; i < slashes && used + 1 < cap; i++)
-                out[used++] = '\\';
+            used = fleet_quote_emit_backslashes(out, cap, used, slashes);
             if (*p == 0) break;
             if (used + 1 < cap) out[used++] = *p;
         }
         slashes = 0;
     }
+    return used;
+}
+
+static size_t fleet_quote_arg(char *out, size_t cap, const char *arg)
+{
+    size_t used = 0;
+    bool quote = fleet_quote_arg_needs_quotes(arg);
+    if (quote && used + 1 < cap) out[used++] = '"';
+    used = fleet_quote_arg_emit_body(out, cap, used, arg, quote);
     if (quote && used + 1 < cap) out[used++] = '"';
     if (cap) out[used < cap ? used : cap - 1] = 0;
     return used;
