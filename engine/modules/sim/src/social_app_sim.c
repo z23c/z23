@@ -212,6 +212,38 @@ static void converge(struct social_run *run, size_t event, bool partitioned)
     }
 }
 
+static bool social_relay_censorship_bypassed(const struct social_run *run)
+{
+    return !run->nodes[1].seen[SOCIAL_VALID_EVENT] &&
+        run->nodes[2].seen[SOCIAL_VALID_EVENT] &&
+        run->nodes[3].seen[SOCIAL_VALID_EVENT];
+}
+
+static bool social_partition_rejoin_converged(const struct social_run *run)
+{
+    return run->nodes[0].seen[SOCIAL_VALID_EVENT] &&
+        run->nodes[2].seen[SOCIAL_VALID_EVENT] &&
+        run->nodes[3].seen[SOCIAL_VALID_EVENT] &&
+        run->nodes[4].seen[SOCIAL_VALID_EVENT];
+}
+
+static bool social_invalid_event_unseen(const struct social_run *run)
+{
+    return !run->nodes[0].seen[SOCIAL_INVALID_EVENT] &&
+        !run->nodes[1].seen[SOCIAL_INVALID_EVENT] &&
+        !run->nodes[2].seen[SOCIAL_INVALID_EVENT] &&
+        !run->nodes[3].seen[SOCIAL_INVALID_EVENT];
+}
+
+static bool social_report_accepted(const struct zcl_social_sim_report *out)
+{
+    return out->censorship_bypassed && out->partition_rejoin_converged &&
+           out->late_joiner_caught_up && out->invalid_signature_rejected &&
+           out->real_secp256k1_verified &&
+           out->tampered_payload_rejected && out->wrong_author_rejected &&
+           out->forged_event_id_distinct;
+}
+
 bool zcl_social_app_sim_run(uint64_t seed,
                             struct zcl_social_sim_report *out)
 {
@@ -265,29 +297,16 @@ bool zcl_social_app_sim_run(uint64_t seed,
     out->transcript = run.transcript;
     out->deliveries = run.deliveries;
     out->rejected_invalid = run.rejected;
-    out->censorship_bypassed = !run.nodes[1].seen[SOCIAL_VALID_EVENT] &&
-        run.nodes[2].seen[SOCIAL_VALID_EVENT] &&
-        run.nodes[3].seen[SOCIAL_VALID_EVENT];
+    out->censorship_bypassed = social_relay_censorship_bypassed(&run);
     out->partition_rejoin_converged =
-        run.nodes[0].seen[SOCIAL_VALID_EVENT] &&
-        run.nodes[2].seen[SOCIAL_VALID_EVENT] &&
-        run.nodes[3].seen[SOCIAL_VALID_EVENT] &&
-        run.nodes[4].seen[SOCIAL_VALID_EVENT];
+        social_partition_rejoin_converged(&run);
     out->late_joiner_caught_up = run.nodes[4].seen[SOCIAL_VALID_EVENT];
-    out->invalid_signature_rejected =
-        !run.nodes[0].seen[SOCIAL_INVALID_EVENT] &&
-        !run.nodes[1].seen[SOCIAL_INVALID_EVENT] &&
-        !run.nodes[2].seen[SOCIAL_INVALID_EVENT] &&
-        !run.nodes[3].seen[SOCIAL_INVALID_EVENT];
+    out->invalid_signature_rejected = social_invalid_event_unseen(&run);
     out->real_secp256k1_verified = real_signature;
     out->tampered_payload_rejected = tampered_rejected;
     out->wrong_author_rejected = wrong_author_rejected;
     out->forged_event_id_distinct = memcmp(
         run.events[SOCIAL_VALID_EVENT].event_id,
         run.events[SOCIAL_INVALID_EVENT].event_id, 32) != 0;
-    return out->censorship_bypassed && out->partition_rejoin_converged &&
-           out->late_joiner_caught_up && out->invalid_signature_rejected &&
-           out->real_secp256k1_verified &&
-           out->tampered_payload_rejected && out->wrong_author_rejected &&
-           out->forged_event_id_distinct;
+    return social_report_accepted(out);
 }
