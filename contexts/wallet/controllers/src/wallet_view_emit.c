@@ -149,15 +149,35 @@ static int qr_encode_bytes(const char *str, uint8_t *codewords) {
     return 0;
 }
 
+static bool qr_finder_in_bounds(int r, int c) {
+    return r >= 0 && r < QR_N && c >= 0 && c < QR_N;
+}
+
+static bool qr_finder_is_border(int dr, int dc) {
+    return dr == -1 || dr == 7 || dc == -1 || dc == 7;
+}
+
+static bool qr_finder_is_outer_ring(int dr, int dc) {
+    return dr == 0 || dr == 6 || dc == 0 || dc == 6;
+}
+
+static bool qr_finder_is_inner_square(int dr, int dc) {
+    return dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4;
+}
+
+static uint8_t qr_finder_module_value(int dr, int dc) {
+    bool is_border = qr_finder_is_border(dr, dc);
+    bool is_outer  = qr_finder_is_outer_ring(dr, dc);
+    bool is_inner  = qr_finder_is_inner_square(dr, dc);
+    return (is_border) ? 0 : (is_outer || is_inner) ? 1 : 0;
+}
+
 static void qr_place_finder(uint8_t m[QR_N][QR_N], int row, int col) {
     for (int dr = -1; dr <= 7; dr++) {
         for (int dc = -1; dc <= 7; dc++) {
             int r = row + dr, c = col + dc;
-            if (r < 0 || r >= QR_N || c < 0 || c >= QR_N) continue;
-            bool is_border = (dr == -1 || dr == 7 || dc == -1 || dc == 7);
-            bool is_outer  = (dr == 0 || dr == 6 || dc == 0 || dc == 6);
-            bool is_inner  = (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4);
-            m[r][c] = (is_border) ? 0 : (is_outer || is_inner) ? 1 : 0;
+            if (!qr_finder_in_bounds(r, c)) continue;
+            m[r][c] = qr_finder_module_value(dr, dc);
         }
     }
 }
