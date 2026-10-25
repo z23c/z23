@@ -57,6 +57,72 @@ static bool fo_arg_value(const char *arg, const char *flag, const char **out)
     return true;
 }
 
+static bool fo_parse_cli_args(int argc, char **argv, const char **ledger_arg,
+                              const char **out_arg, const char **days_arg,
+                              bool *check_mode)
+{
+    for (int i = 1; i < argc; i++) {
+        const char *v;
+
+        if (fo_arg_value(argv[i], "--ledger=", &v)) *ledger_arg = v;
+        else if (fo_arg_value(argv[i], "--out=", &v)) *out_arg = v;
+        else if (fo_arg_value(argv[i], "--days=", &v)) *days_arg = v;
+        else if (strcmp(argv[i], "--check") == 0) *check_mode = true;
+        else {
+            (void)fprintf(stderr, "z23-fleet-observe: unknown argument '%s'\n",
+                          argv[i]);
+            return false;
+        }
+    }
+    return true;
+}
+
+static int fo_write_generated_def(const char *out_arg, size_t obs_count,
+                                  size_t pair_count)
+{
+    FILE *f = fopen(out_arg, "w");
+
+    if (!f) {
+        (void)fprintf(stderr, "z23-fleet-observe: cannot write '%s'\n",
+                      out_arg);
+        return 2;
+    }
+    (void)fputs(g_generated, f);
+    (void)fclose(f);
+    (void)printf("z23-fleet-observe: wrote %zu rows over %zu pairs to "
+                 "%s\n",
+                 obs_count, pair_count, out_arg);
+    return 0;
+}
+
+static int fo_check_committed_def(const char *out_arg,
+                                  const char *ledger_arg, size_t obs_count)
+{
+    FILE *f = fopen(out_arg, "r");
+    size_t committed_len = 0;
+
+    if (f) {
+        committed_len = fread(g_committed, 1, sizeof(g_committed) - 1, f);
+        g_committed[committed_len] = '\0';
+        (void)fclose(f);
+    } else {
+        g_committed[0] = '\0';
+    }
+    if (strcmp(g_generated, g_committed) == 0) {
+        (void)printf("z23-fleet-observe: --check OK — %s matches %zu "
+                     "rows regenerated from %s\n",
+                     out_arg, obs_count, ledger_arg);
+        return 0;
+    }
+    (void)fprintf(stderr,
+                  "z23-fleet-observe: --check FAIL — %s does not match "
+                  "a regeneration from %s (committed %zu bytes, "
+                  "regenerated %zu bytes)\n",
+                  out_arg, ledger_arg, strlen(g_committed),
+                  strlen(g_generated));
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     const char *ledger_arg = NULL;
@@ -69,19 +135,9 @@ int main(int argc, char **argv)
     int window_days = FO_DEFAULT_WINDOW_DAYS;
     int64_t anchor;
 
-    for (int i = 1; i < argc; i++) {
-        const char *v;
-
-        if (fo_arg_value(argv[i], "--ledger=", &v)) ledger_arg = v;
-        else if (fo_arg_value(argv[i], "--out=", &v)) out_arg = v;
-        else if (fo_arg_value(argv[i], "--days=", &v)) days_arg = v;
-        else if (strcmp(argv[i], "--check") == 0) check_mode = true;
-        else {
-            (void)fprintf(stderr, "z23-fleet-observe: unknown argument '%s'\n",
-                          argv[i]);
-            return 2;
-        }
-    }
+    if (!fo_parse_cli_args(argc, argv, &ledger_arg, &out_arg, &days_arg,
+                           &check_mode))
+        return 2;
     if (days_arg)
         window_days = atoi(days_arg);
     if (window_days <= 0) {
@@ -107,45 +163,7 @@ int main(int argc, char **argv)
     (void)fo_render_def(g_obs, obs_count, window_days, anchor, ledger_arg,
                         g_generated, sizeof(g_generated));
 
-    if (!check_mode) {
-        FILE *f = fopen(out_arg, "w");
-
-        if (!f) {
-            (void)fprintf(stderr,
-                          "z23-fleet-observe: cannot write '%s'\n", out_arg);
-            return 2;
-        }
-        (void)fputs(g_generated, f);
-        (void)fclose(f);
-        (void)printf("z23-fleet-observe: wrote %zu rows over %zu pairs to "
-                     "%s\n",
-                     obs_count, pair_count, out_arg);
-        return 0;
-    }
-
-    {
-        FILE *f = fopen(out_arg, "r");
-        size_t committed_len = 0;
-
-        if (f) {
-            committed_len = fread(g_committed, 1, sizeof(g_committed) - 1, f);
-            g_committed[committed_len] = '\0';
-            (void)fclose(f);
-        } else {
-            g_committed[0] = '\0';
-        }
-        if (strcmp(g_generated, g_committed) == 0) {
-            (void)printf("z23-fleet-observe: --check OK — %s matches %zu "
-                         "rows regenerated from %s\n",
-                         out_arg, obs_count, ledger_arg);
-            return 0;
-        }
-        (void)fprintf(stderr,
-                      "z23-fleet-observe: --check FAIL — %s does not match "
-                      "a regeneration from %s (committed %zu bytes, "
-                      "regenerated %zu bytes)\n",
-                      out_arg, ledger_arg, strlen(g_committed),
-                      strlen(g_generated));
-        return 1;
-    }
+    if (!check_mode)
+        return fo_write_generated_def(out_arg, obs_count, pair_count);
+    return fo_check_committed_def(out_arg, ledger_arg, obs_count);
 }
