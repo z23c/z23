@@ -70,53 +70,72 @@ static bool same_file_state(const BY_HANDLE_FILE_INFORMATION *before,
                            &after->ftLastWriteTime) == 0;
 }
 
-int main(void)
+static const uint8_t sentinel[] = {
+    0x5a, 0x32, 0x33, 0x00, 0xff, 0x70, 0x72, 0x6f,
+    0x67, 0x72, 0x65, 0x73, 0x73, 0x2e, 0x6b, 0x76,
+};
+
+struct refusal_fixture {
+    wchar_t root[MAX_PATH], progress[MAX_PATH];
+    char root_utf8[MAX_PATH * 3];
+    BY_HANDLE_FILE_INFORMATION before;
+};
+
+static int fixture_root_create(struct refusal_fixture *fixture)
 {
-    static const uint8_t sentinel[] = {
-        0x5a, 0x32, 0x33, 0x00, 0xff, 0x70, 0x72, 0x6f,
-        0x67, 0x72, 0x65, 0x73, 0x73, 0x2e, 0x6b, 0x76,
-    };
-    wchar_t temp[MAX_PATH], root[MAX_PATH], progress[MAX_PATH];
+    wchar_t temp[MAX_PATH];
     DWORD temp_len = GetTempPathW(sizeof(temp) / sizeof(temp[0]), temp);
     int root_len = temp_len > 0 && temp_len < sizeof(temp) / sizeof(temp[0])
-        ? swprintf(root, sizeof(root) / sizeof(root[0]),
+        ? swprintf(fixture->root, sizeof(fixture->root) / sizeof(fixture->root[0]),
                    L"%lsz23-progress-refusal-%lu-%llu", temp,
                    (unsigned long)GetCurrentProcessId(),
                    (unsigned long long)GetTickCount64())
         : -1;
-    if (root_len <= 0 || (size_t)root_len >= sizeof(root) / sizeof(root[0]) ||
-        !append_leaf(progress, sizeof(progress) / sizeof(progress[0]), root,
+    if (root_len <= 0 ||
+        (size_t)root_len >= sizeof(fixture->root) / sizeof(fixture->root[0]) ||
+        !append_leaf(fixture->progress,
+                     sizeof(fixture->progress) / sizeof(fixture->progress[0]),
+                     fixture->root,
                      L"progress.kv"))
         return fail("fixture path construction failed");
 
-    char root_utf8[MAX_PATH * 3];
-    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, root, -1,
-                             root_utf8, sizeof(root_utf8), NULL, NULL) ||
-        !platform_private_directory_create(root_utf8)) {
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, fixture->root, -1,
+                             fixture->root_utf8, sizeof(fixture->root_utf8),
+                             NULL, NULL) ||
+        !platform_private_directory_create(fixture->root_utf8)) {
         fputs("progress_store_windows_refusal_acceptance: REFUSE: runtime "
               "cannot create an owner-private datadir\n", stderr);
         return 77;
     }
     uintptr_t retained = 0;
-    if (!platform_private_directory_open_validated(root_utf8, &retained))
+    if (!platform_private_directory_open_validated(fixture->root_utf8, &retained))
         return fail("fixture datadir did not validate as owner-private");
     platform_private_directory_close(retained);
 
-    HANDLE file = CreateFileW(progress, GENERIC_READ | GENERIC_WRITE,
+    return 0;
+}
+
+static int fixture_sentinel_create(struct refusal_fixture *fixture)
+{
+    HANDLE file = CreateFileW(fixture->progress, GENERIC_READ | GENERIC_WRITE,
                               FILE_SHARE_READ, NULL, CREATE_NEW,
                               FILE_ATTRIBUTE_NORMAL, NULL);
     DWORD written = 0;
-    BY_HANDLE_FILE_INFORMATION before;
     if (file == INVALID_HANDLE_VALUE ||
         !WriteFile(file, sentinel, (DWORD)sizeof(sentinel), &written, NULL) ||
         written != sizeof(sentinel) || !FlushFileBuffers(file) ||
-        !GetFileInformationByHandle(file, &before) || !CloseHandle(file))
+        !GetFileInformationByHandle(file, &fixture->before) || !CloseHandle(file))
         return fail("sentinel progress.kv creation failed");
-    if (!consensus_family_absent(root))
+    if (!consensus_family_absent(fixture->root))
         return fail("consensus.db family was not initially absent");
 
+    return 0;
+}
+
+static int fixture_refusal_check(struct refusal_fixture *fixture)
+{
     HANDLE directory = CreateFileW(
-        root, FILE_READ_ATTRIBUTES,
+        fixture->root, FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
@@ -125,17 +144,22 @@ int main(void)
         !GetFileInformationByHandle(directory, &directory_before))
         return fail("datadir state snapshot failed");
 
-    if (progress_store_open(root_utf8))
+    if (progress_store_open(fixture->root_utf8))
         return fail("progress_store_open accepted an unqualified legacy migration");
 
     if (!GetFileInformationByHandle(directory, &directory_after) ||
         !same_file_state(&directory_before, &directory_after) ||
         !CloseHandle(directory))
         return fail("refusal mutated datadir identity or metadata");
-    if (!consensus_family_absent(root))
+    if (!consensus_family_absent(fixture->root))
         return fail("refusal created a consensus.db family member");
-    file = CreateFileW(progress, GENERIC_READ, FILE_SHARE_READ, NULL,
-                       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    return 0;
+}
+
+static int fixture_sentinel_check(struct refusal_fixture *fixture)
+{
+    HANDLE file = CreateFileW(fixture->progress, GENERIC_READ, FILE_SHARE_READ,
+                              NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     uint8_t actual[sizeof(sentinel)];
     DWORD read_count = 0;
     BY_HANDLE_FILE_INFORMATION after;
@@ -143,11 +167,25 @@ int main(void)
         !GetFileInformationByHandle(file, &after) ||
         !ReadFile(file, actual, (DWORD)sizeof(actual), &read_count, NULL) ||
         read_count != sizeof(actual) || !CloseHandle(file) ||
-        !same_file_state(&before, &after) ||
+        !same_file_state(&fixture->before, &after) ||
         memcmp(actual, sentinel, sizeof(sentinel)) != 0)
         return fail("refusal mutated sentinel progress.kv");
 
-    if (!DeleteFileW(progress) || !RemoveDirectoryW(root))
+    return 0;
+}
+
+int main(void)
+{
+    struct refusal_fixture fixture;
+    int result = fixture_root_create(&fixture);
+    if (result != 0)
+        return result;
+    if (fixture_sentinel_create(&fixture) != 0 ||
+        fixture_refusal_check(&fixture) != 0 ||
+        fixture_sentinel_check(&fixture) != 0)
+        return 1;
+
+    if (!DeleteFileW(fixture.progress) || !RemoveDirectoryW(fixture.root))
         return fail("fixture cleanup failed");
     puts("progress_store_windows_refusal_acceptance: PASS");
     return 0;

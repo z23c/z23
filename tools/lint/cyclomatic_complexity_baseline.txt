@@ -1575,7 +1575,6 @@ tests/harness/src/lint_gate_deploy_contracts.c:t_canonical_deploy_proof_binding_
 tests/harness/src/lint_gate_hygiene_selftests.c:t_dev_proof_helpers_include_lint_tool:17
 tests/harness/src/lint_gate_hygiene_selftests.c:t_lint_umbrellas_share_built_prereqs:18
 tests/harness/src/mint_anchor_preflight_windows_refusal_acceptance.c:main:26
-tests/harness/src/progress_store_windows_refusal_acceptance.c:main:32
 tests/harness/src/rom_bundle_admission_refusal_acceptance.c:main:16
 tests/harness/src/snapshot_candidate_output_refusal_acceptance.c:main:17
 tests/harness/src/snapshot_install_activate_refusal_acceptance.c:main:17
