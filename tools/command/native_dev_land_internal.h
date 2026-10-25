@@ -37,6 +37,9 @@ struct dl_dirs {
  *          still loads; nothing writes it. The queue never amends a tip:
  *          `local` is the rebased row as submitted, and every downstream
  *          step proves and pushes exactly it. */
+struct dl_failure_identity {
+    char root[4096], attempt[144], request[65], archive[65];
+};
 struct dl_row {
     long long seq;
     long long priority_seq;
@@ -52,10 +55,15 @@ struct dl_row {
      * every other row. `ts` is the SUBMIT time and `started` the proof start,
      * so only this says when the train landed. */
     long long landed_at;
+    /* First native terminal-recording observation, not child exit/fsync.
+     * 0 unknown (including legacy). Consumer owns clock/window validation. */
+    long long terminal_recorded_at;
     char base[80];
     char local[80];
     char tree[80];
     char proof_intent[176];
+    /* Optional host-local retained proof identity, never verdict authority. */
+    struct dl_failure_identity failed_proof;
     long long predecessor_seq;
     char predecessor_local[80], predecessor_base[80], predecessor_tree[80];
     char predecessor_intent[176];

@@ -33,6 +33,7 @@
 #include "platform/logical_cpu.h"
 #include "platform/os_proc.h"
 #include "platform/private_directory.h"
+#include "platform/private_file.h"
 #include "platform/ram_scratch.h"
 #include "platform/time_compat.h"
 #include "util/spawn.h"
@@ -89,6 +90,44 @@
 #define PROOF_CLANG_ARCH_LLVM "/usr/lib/libLLVM.so.22.1"
 static const char *proof_clang_runtime_path(void);
 #endif
+
+static bool dp_binding_leaf(const char *leaf)
+{
+    size_t n = strcspn(leaf, "-");
+    if (n != 40 && n != 64) return false;
+    return strlen(leaf) == 2 * n + 8 && leaf[2 * n + 1] == '.' &&
+        strspn(leaf, "0123456789abcdef") == n &&
+        strspn(leaf + n + 1, "0123456789abcdef") == n &&
+        strspn(leaf + 2 * n + 2, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") == 6;
+}
+
+static bool dp_binding_tail(const char *tail, char attempt[144], char request[65], size_t payload)
+{
+    char decimal[32], canonical[384]; int used = 0;
+    if (sscanf(tail, "\nzcl.dev_proof_failure_binding.v1\nattempt=%143[^\n]\n"
+        "request_sha3=%64[^\n]\npayload_bytes=%31[^\n]\n%n", attempt, request, decimal, &used) != 3 ||
+        !used || tail[used] || !dp_binding_leaf(attempt)) return false;
+    if (strlen(request) != 64 || strspn(request, "0123456789abcdef") != 64 || !payload) return false;
+    int n = snprintf(canonical, sizeof(canonical), "\nzcl.dev_proof_failure_binding.v1\n"
+        "attempt=%s\nrequest_sha3=%s\npayload_bytes=%zu\n", attempt, request, payload);
+    return n > 0 && n < (int)sizeof(canonical) && strcmp(canonical, tail) == 0;
+}
+
+int zcl_dev_proof_failure_binding_decode(const char *text, size_t size,
+    char attempt[144], char request_sha3[65], size_t *payload_size)
+{
+    static const char marker[] = "\nzcl.dev_proof_failure_binding.v1\n";
+    char record[2049];
+    if (!text || !attempt || !request_sha3 || !payload_size || size > 2048 || memchr(text, 0, size)) return -1;
+    memcpy(record, text, size); record[size] = 0;
+    char *tail = strstr(record, marker);
+    if (!tail) return 0;
+    if (strstr(tail + 1, marker)) return -1;
+    size_t payload = (size_t)(tail - record);
+    if (!dp_binding_tail(tail, attempt, request_sha3, payload)) return -1;
+    *payload_size = payload;
+    return 1;
+}
 
 struct proof_paths {
     char root[PATH_MAX];
@@ -466,6 +505,18 @@ bool zcl_dev_proof_cycle_reuse_admissible(
 }
 
 #if defined(_WIN32)
+
+static bool proof_observe_legacy_platform(const char *root,
+    struct zcl_dev_proof_observation_report *report)
+{
+    (void)root;
+    if (report) {
+        memset(report, 0, sizeof(*report));
+        report->scan = ZCL_PROOF_HISTORY_UNAVAILABLE;
+        report->unproven = 1;
+    }
+    return false;
+}
 
 /* The proof worker currently depends on fork/setsid, descriptor inheritance,
  * POSIX hard-link/symlink inspection, and process-group termination.  Native
@@ -1099,11 +1150,8 @@ static bool proof_failure_bytes(const char *path,
 /* The settled record: its first line is the failure token every reader
  * classifies by, and any lines after it are the evidence digest. A first
  * line too long for `detail` is refused, as it always was. */
-static bool dp_failure_record_read(const char *path,
-                                   struct zcl_dev_proof_status *out)
+static bool dp_failure_record_parse(char *record, struct zcl_dev_proof_status *out)
 {
-    char record[DP_FAILURE_RECORD_MAX + 1];
-    if (!proof_read_text(path, record, sizeof(record))) return false;
     size_t first = strcspn(record, "\n");
     const char *rest = record[first] ? record + first + 1 : "";
     record[first] = '\0';
@@ -1207,12 +1255,55 @@ static bool proof_failure_attempt_logs(const struct proof_paths *paths,
     return true;
 }
 
+static void hash_text(const char *domain, const void *text, size_t text_len,
+                       uint8_t out[32]);
+
+static void dp_failure_identity_read(const struct proof_paths *paths, const uint8_t *bytes, size_t size,
+    struct zcl_dev_proof_failure_identity *out)
+{
+    uint8_t digest[32]; size_t payload;
+    char leaf[144], request[65], archive[65], canonical[4096], key[132];
+    struct zcl_dev_proof_history_failure row;
+    if (zcl_dev_proof_failure_binding_decode((const char *)bytes, size, leaf, request, &payload) != 1 ||
+        !platform_directory_canonical_real(paths->root, canonical, sizeof(canonical)) ||
+        !zcl_dev_proof_history_failure_read(canonical, leaf, &row) || !row.attempt_binding_valid ||
+        row.classification != ZCL_PROOF_HISTORY_FAILURE) return;
+    (void)snprintf(key, sizeof(key), "%s-%s", row.local, row.base);
+    if (strcmp(key, paths->key) || strcmp(request, row.request_sha3)) return;
+    hash_text("zcl.dev_proof_failure_recorded.failure.v1", bytes, size, digest);
+    zcl_hex_encode(digest, sizeof(digest), archive);
+    if (strcmp(archive, row.archive_sha3)) return;
+    memcpy(out->canonical_root, canonical, strlen(canonical) + 1);
+    memcpy(out->attempt, leaf, strlen(leaf) + 1);
+    memcpy(out->request_sha3, request, sizeof(out->request_sha3));
+    memcpy(out->archive_sha3, archive, sizeof(out->archive_sha3));
+    out->valid = true;
+}
+
+static bool dp_failure_snapshot_parse(char *record, size_t size, struct zcl_dev_proof_status *out)
+{
+    char leaf[144], request[65]; size_t payload;
+    if (zcl_dev_proof_failure_binding_decode(record, size, leaf, request, &payload) == 1)
+        size = payload;
+    /* Same display normalization as the old proof_read_text reader. Binding
+     * and content hashes always use the untouched raw snapshot instead. */
+    while (size && (record[size - 1] == '\n' || record[size - 1] == '\r')) --size;
+    record[size] = 0;
+    return dp_failure_record_parse(record, out);
+}
+
 static bool dp_failure_status_read(const struct proof_paths *paths,
                                    struct zcl_dev_proof_status *out)
 {
-    if (!dp_failure_record_read(paths->failure, out)) return false;
+    uint8_t bytes[DP_FAILURE_RECORD_MAX]; size_t size;
+    char record[DP_FAILURE_RECORD_MAX + 1];
+    if (!proof_failure_bytes(paths->failure, bytes, &size) || memchr(bytes, 0, size)) return false;
+    memcpy(record, bytes, size); record[size] = 0;
+    if (!dp_failure_snapshot_parse(record, size, out)) return false;
     out->state = dp_failure_no_verdict(out->detail)
         ? ZCL_DEV_PROOF_STATE_NO_VERDICT : ZCL_DEV_PROOF_STATE_FAILED;
+    if (out->state == ZCL_DEV_PROOF_STATE_FAILED)
+        dp_failure_identity_read(paths, bytes, size, &out->failure_identity);
     (void)proof_failure_attempt_logs(paths, out->log_dir,
                                      sizeof(out->log_dir), NULL);
     return true;
@@ -11566,7 +11657,7 @@ static bool dp_failure_evidence(const struct proof_paths *paths, char *out,
 /* Read the exact captured request bytes, then validate the native five-line
  * projection against this attempt's pair. Hashing includes the final newline. */
 static bool dp_failure_time_request(const struct proof_paths *paths,
-                                     char local[65], char base[65], char root[65])
+                                     const char *domain, char local[65], char base[65], char root[65])
 {
     char path[PATH_MAX], raw[320], parsed[320], *lines[5], key[132];
     struct stat st;
@@ -11576,7 +11667,7 @@ static bool dp_failure_time_request(const struct proof_paths *paths,
         memchr(raw, 0, (size_t)st.st_size)) return false;
     size_t n = (size_t)st.st_size;
     uint8_t digest[32];
-    hash_text("zcl.dev_proof_failure_recorded.request.v1", raw, n, digest);
+    hash_text(domain, raw, n, digest);
     zcl_hex_encode(digest, sizeof(digest), root);
     memcpy(parsed, raw, n);
     parsed[n] = 0;
@@ -11602,7 +11693,8 @@ static void dp_failure_time_write(const struct proof_paths *paths,
     struct stat st;
     if (snprintf(path, sizeof(path), "%s/failure-time.v1", paths->logs) >= (int)sizeof(path) ||
         lstat(path, &st) == 0 || errno != ENOENT ||
-        !dp_failure_time_request(paths, local, base, request)) return;
+        !dp_failure_time_request(paths, "zcl.dev_proof_failure_recorded.request.v1",
+            local, base, request)) return;
     uint8_t digest[32];
     hash_text("zcl.dev_proof_failure_recorded.failure.v1", failure, failure_size, digest);
     zcl_hex_encode(digest, sizeof(digest), failed);
@@ -11627,6 +11719,136 @@ static bool dp_failure_archive_original(const char *path,
     return first > 0 && first < sizeof(((struct zcl_dev_proof_status *)0)->detail);
 }
 
+enum dp_observation_action { DP_OBSERVE_NEW, DP_OBSERVE_EXISTING,
+    DP_OBSERVE_INELIGIBLE, DP_OBSERVE_UNPROVEN, DP_OBSERVE_CREATED };
+
+static enum dp_observation_action dp_observation_action(
+    const struct zcl_dev_proof_history_failure *row)
+{
+    if (row->classification != ZCL_PROOF_HISTORY_FAILURE ||
+        row->time_state == ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING) return DP_OBSERVE_INELIGIBLE;
+    if (row->time_state != ZCL_PROOF_HISTORY_TIME_MISSING ||
+        row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE) return DP_OBSERVE_UNPROVEN;
+    if (row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER &&
+        row->observed_upper_unix > platform_time_wall_unix()) return DP_OBSERVE_UNPROVEN;
+    return row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER
+        ? DP_OBSERVE_EXISTING : DP_OBSERVE_NEW;
+}
+
+static bool dp_observation_paths(const char *root,
+    const struct zcl_dev_proof_history_failure *row, struct proof_paths *paths)
+{
+    if (!proof_paths_fill(root, row->local, row->base, paths)) return false;
+    return snprintf(paths->attempt, sizeof(paths->attempt), "%s/%s", paths->attempts, row->attempt) < (int)sizeof(paths->attempt) &&
+           snprintf(paths->logs, sizeof(paths->logs), "%s/logs", paths->attempt) < (int)sizeof(paths->logs) &&
+           snprintf(paths->attempt_token, sizeof(paths->attempt_token), "%s", row->attempt) < (int)sizeof(paths->attempt_token);
+}
+
+/* Same native queue lock, nonblocking for explicit precheck reconciliation.
+ * No proof lease is created or borrowed from a newer attempt. */
+static int dp_observation_lock(const struct proof_paths *paths)
+{
+    int fd = open(paths->queue_lock, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) return -1;
+    struct stat st;
+    bool ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_uid == geteuid() &&
+              (st.st_mode & (S_IWGRP | S_IWOTH)) == 0 && flock(fd, LOCK_EX | LOCK_NB) == 0;
+    if (ok) return fd;
+    (void)close(fd);
+    return -1;
+}
+
+static bool dp_observation_write(const struct proof_paths *paths,
+                                  const struct zcl_dev_proof_history_failure *row)
+{
+    char archive[PATH_MAX], target[PATH_MAX], local[65], base[65], request[65], failed[65];
+    uint8_t bytes[DP_FAILURE_RECORD_MAX], digest[32];
+    size_t size;
+    struct stat st;
+    if (snprintf(archive, sizeof(archive), "%s/failure.txt", paths->logs) >= (int)sizeof(archive) ||
+        snprintf(target, sizeof(target), "%s/failure-observed.v1", paths->logs) >= (int)sizeof(target) ||
+        lstat(target, &st) == 0 || errno != ENOENT ||
+        !proof_failure_bytes(archive, bytes, &size) ||
+        !dp_failure_time_request(paths, "zcl.dev_proof_failure_observed.request.v1", local, base, request)) return false;
+    int64_t wall = platform_time_wall_unix(), mono = platform_time_monotonic_us();
+    if (wall <= 0 || mono <= 0 || wall < row->request_started_unix ||
+        mono < row->request_started_monotonic_us) return false;
+    hash_text("zcl.dev_proof_failure_observed.failure.v1", bytes, size, digest);
+    zcl_hex_encode(digest, sizeof(digest), failed);
+    char body[1024];
+    int n = snprintf(body, sizeof(body), "zcl.dev_proof_failure_observed.v1\n"
+        "attempt=%s\nlocal=%s\nbase=%s\nrequest_sha3=%s\nfailure_sha3=%s\n"
+        "observed_upper_unix=%lld\nobserved_upper_monotonic_us=%lld\n",
+        paths->attempt_token, local, base, request, failed, (long long)wall, (long long)mono);
+    return n > 0 && n < (int)sizeof(body) && write_atomic(target, body, (size_t)n, 0600) &&
+           platform_private_parent_flush(paths->logs);
+}
+
+static enum dp_observation_action dp_observation_reconcile(const char *root,
+    const struct zcl_dev_proof_history_failure *seen)
+{
+    struct proof_paths paths;
+    if (!dp_observation_paths(root, seen, &paths)) return DP_OBSERVE_UNPROVEN;
+    int guard = dp_observation_lock(&paths);
+    if (guard < 0) return DP_OBSERVE_UNPROVEN;
+    struct zcl_dev_proof_history_failure current;
+    enum dp_observation_action action = DP_OBSERVE_UNPROVEN;
+    if (zcl_dev_proof_history_failure_read(root, seen->attempt, &current)) {
+        action = dp_observation_action(&current);
+        if (action == DP_OBSERVE_NEW)
+            action = dp_observation_write(&paths, &current) ? DP_OBSERVE_CREATED : DP_OBSERVE_UNPROVEN;
+        else if (action == DP_OBSERVE_EXISTING && !platform_private_parent_flush(paths.logs))
+            action = DP_OBSERVE_UNPROVEN;
+    }
+    proof_queue_lock_release(guard);
+    return action;
+}
+
+struct dp_observation_context {
+    const char *root;
+    struct zcl_dev_proof_observation_report *report;
+};
+
+static bool dp_observation_visit(const struct zcl_dev_proof_history_failure *row, void *opaque)
+{
+    struct dp_observation_context *context = opaque;
+    enum dp_observation_action action = dp_observation_action(row);
+    if (action == DP_OBSERVE_NEW || action == DP_OBSERVE_EXISTING)
+        action = dp_observation_reconcile(context->root, row);
+    switch (action) {
+    case DP_OBSERVE_CREATED: context->report->created++; break;
+    case DP_OBSERVE_EXISTING: context->report->existing++; break;
+    case DP_OBSERVE_INELIGIBLE: context->report->ineligible++; break;
+    default: context->report->unproven++; break;
+    }
+    return true;
+}
+
+static bool proof_observe_legacy_platform(const char *root,
+    struct zcl_dev_proof_observation_report *report)
+{
+    if (!report) return false;
+    memset(report, 0, sizeof(*report));
+    struct dp_observation_context context = {.root = root, .report = report};
+    report->scan = zcl_dev_proof_history_failures(root, dp_observation_visit, &context);
+    return report->scan == ZCL_PROOF_HISTORY_COMPLETE && report->unproven == 0;
+}
+
+static const char *dp_failure_binding_record(const struct proof_paths *paths,
+    const char *message, char record[DP_FAILURE_RECORD_MAX + 1])
+{
+    char local[65], base[65], request[65];
+    if (!dp_failure_time_request(paths, "zcl.dev_proof_failure_recorded.request.v1",
+        local, base, request)) return message;
+    size_t payload = strlen(message);
+    int n = snprintf(record, DP_FAILURE_RECORD_MAX + 1, "%s\n"
+        "zcl.dev_proof_failure_binding.v1\nattempt=%s\nrequest_sha3=%s\npayload_bytes=%zu\n",
+        message, paths->attempt_token, request, payload);
+    /* Never truncate diagnostics to make metadata fit. Reserved-marker
+     * ambiguity is rejected by the decoder, including nested trailers. */
+    return n > 0 && n < DP_FAILURE_RECORD_MAX ? record : message;
+}
+
 static void dp_failure_project(const struct proof_paths *paths, const char *message)
 {
     char path[PATH_MAX];
@@ -11641,9 +11863,12 @@ static void dp_failure_project(const struct proof_paths *paths, const char *mess
         /* Existing archives are immutable, including the archive-only crash
          * window: repeating settlement must never repair its unknown time. */
         if (fresh) {
-            if (write_atomic(path, message, n, 0600))
-                dp_failure_time_write(paths, message, n);
-            (void)write_atomic(paths->failure, message, n, 0600);
+            char bound[DP_FAILURE_RECORD_MAX + 1];
+            const char *record = dp_failure_binding_record(paths, message, bound);
+            n = strlen(record);
+            if (write_atomic(path, record, n, 0600))
+                dp_failure_time_write(paths, record, n);
+            (void)write_atomic(paths->failure, record, n, 0600);
         } else if (dp_failure_archive_original(path, original, &n)) {
             /* Retrying with another diagnostic cannot change the settled
              * archive/projection pair and thereby make retry conflict. */
@@ -12260,6 +12485,12 @@ static bool dp_retry_worker_settled(const char *path, bool lease)
 }
 
 #if defined(ZCL_TESTING)
+static bool dp_failure_record_read(const char *path, struct zcl_dev_proof_status *out)
+{
+    char record[DP_FAILURE_RECORD_MAX + 1];
+    return proof_read_text(path, record, sizeof(record)) && dp_failure_record_parse(record, out);
+}
+
 bool zcl_dev_proof_test_text_reader(const char *path, unsigned reader)
 {
     char text[192], local[65], base[65];
@@ -12320,6 +12551,14 @@ static bool dp_retry_archive_failure(const struct proof_paths *paths,
     return false;
 }
 
+static bool dp_retry_marker_invalid(const char *root, const char *local, const char *base)
+{
+    struct proof_paths paths;
+    uint8_t bytes[DP_FAILURE_RECORD_MAX]; size_t size;
+    return proof_paths_fill(root, local, base, &paths) &&
+        !dp_retry_absent(paths.failure) && !proof_failure_bytes(paths.failure, bytes, &size);
+}
+
 /* Called only while holding the queue's existing claim/publication lock.
  * The old pair marker remains until the normal worker replaces it; a
  * queued request already takes precedence in the status projection. */
@@ -12363,6 +12602,13 @@ static bool proof_retry_platform(const char *repo_root,
     if (!out || !zcl_dev_proof_status_read(repo_root, local_commit,
                                            remote_base, out))
         return false;
+    /* Unsafe evidence is not a missing failure and never grants attribution
+     * or retry authority. Preserve the specific refusal without parsing it. */
+    if (out->state == ZCL_DEV_PROOF_STATE_MISSING &&
+        dp_retry_marker_invalid(repo_root, out->local_commit, out->remote_base)) {
+        proof_why(out->detail, sizeof(out->detail), "proof_retry_failure_evidence_invalid");
+        return false;
+    }
     if (out->state != ZCL_DEV_PROOF_STATE_FAILED &&
         out->state != ZCL_DEV_PROOF_STATE_NO_VERDICT) {
         proof_why(out->detail, sizeof(out->detail),
@@ -12736,6 +12982,12 @@ bool zcl_dev_proof_ensure(const char *repo_root,
 bool zcl_dev_proof_queue_has_pending(const char *repo_root)
 {
     return proof_queue_has_pending_platform(repo_root);
+}
+
+bool zcl_dev_proof_observe_legacy_failures(const char *canonical_root,
+    struct zcl_dev_proof_observation_report *report)
+{
+    return proof_observe_legacy_platform(canonical_root, report);
 }
 
 bool zcl_dev_proof_retry(const char *repo_root,

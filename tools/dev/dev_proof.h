@@ -103,6 +103,14 @@ enum zcl_dev_proof_state {
     ZCL_DEV_PROOF_STATE_NO_VERDICT,
 };
 
+struct zcl_dev_proof_failure_identity {
+    bool valid;
+    char canonical_root[4096], attempt[144];
+    /* Native zcl.dev_proof_failure_recorded.{request,failure}.v1 domains;
+     * content identities only, no recording-time claim. Archive includes
+     * its binding trailer. All fields zero unless validated FAILED evidence. */
+    char request_sha3[65], archive_sha3[65];
+};
 struct zcl_dev_proof_status {
     enum zcl_dev_proof_state state;
     char root[4096];
@@ -126,6 +134,8 @@ struct zcl_dev_proof_status {
      * worker, and an unclaimed request has none. */
     int64_t request_age_s;
     bool receipt_reused;
+    /* Only a validated atomic projection binding; legacy/log guesses empty. */
+    struct zcl_dev_proof_failure_identity failure_identity;
 };
 
 enum zcl_dev_proof_history_class {
@@ -137,6 +147,11 @@ enum zcl_dev_proof_history_time_state {
     ZCL_PROOF_HISTORY_TIME_MISSING = 0,
     ZCL_PROOF_HISTORY_TIME_UNUSABLE,
     ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING,
+};
+enum zcl_dev_proof_history_observation_state {
+    ZCL_PROOF_HISTORY_OBSERVATION_MISSING = 0,
+    ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE,
+    ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER,
 };
 struct zcl_dev_proof_history_failure {
     char attempt[144]; /* native directory leaf: pair plus unique suffix */
@@ -150,9 +165,23 @@ struct zcl_dev_proof_history_failure {
      * Caller must still check future times and its observation window. */
     int64_t recorded_unix;
     int64_t recorded_monotonic_us;
+    enum zcl_dev_proof_history_observation_state observation_state;
+    /* First durable native observation: failure existed AT OR BEFORE these
+     * clocks. NOT event/exit/producer-recording time or proof of recentness.
+     * Zero unless exact request/archive bytes bind the optional sidecar. */
+    int64_t observed_upper_unix;
+    int64_t observed_upper_monotonic_us;
     char reason[256];
     char digest[2048]; /* native bounded archive remainder; never a path input */
+    bool attempt_binding_valid;
+    /* Same native content domains as failure_identity, full archive bytes. */
+    char request_sha3[65], archive_sha3[65];
 };
+/* Syntax only, NOT authority. 0 absent, -1 reserved/malformed/ambiguous,
+ * 1 exact additive trailer. Payload is unchanged reason/evidence bytes.
+ * Caller validates attempt/request and exact immutable archive separately. */
+int zcl_dev_proof_failure_binding_decode(const char *text, size_t size,
+    char attempt[144], char request_sha3[65], size_t *payload_size);
 enum zcl_dev_proof_history_result {
     ZCL_PROOF_HISTORY_UNAVAILABLE = -3,
     ZCL_PROOF_HISTORY_LIMIT = -2,
@@ -179,6 +208,27 @@ enum zcl_dev_proof_history_result zcl_dev_proof_history_failures(
     const char *canonical_root,
     bool (*visit)(const struct zcl_dev_proof_history_failure *, void *),
     void *context);
+/* Same read-only validation for one exact native attempt leaf, no directory
+ * scan and no arbitrary pathname. false means no valid attributable failure. */
+bool zcl_dev_proof_history_failure_read(const char *canonical_root,
+    const char *attempt, struct zcl_dev_proof_history_failure *out);
+
+struct zcl_dev_proof_observation_report {
+    size_t created, existing, ineligible, unproven;
+    enum zcl_dev_proof_history_result scan;
+};
+/* Explicit reconciliation, NOT a read-only history query. Observe FAILURE
+ * archives with MISSING producer time only. Under the existing native queue
+ * lock, revalidate the immutable request/archive and create-once an optional
+ * logs/failure-observed.v1. No lease is minted, no pair/archive/proof state is
+ * rewritten, and existing sidecars (even malformed) are never repaired.
+ * Busy lock/unsafe inputs/clock anomaly/write failure => false and unproven;
+ * earlier successful observations may remain and must not be rolled back.
+ * Existing valid observations may be directory-synced again, never retimed.
+ * An aged upper bound can prove a failure old; a recent upper bound cannot
+ * prove it recent. Caller still owns observation-now/window judgments. */
+bool zcl_dev_proof_observe_legacy_failures(const char *canonical_root,
+    struct zcl_dev_proof_observation_report *report);
 
 /* Optional producer-only logs/failure-time.v1 sidecar. LF records, in order:
  * zcl.dev_proof_failure_recorded.v1, attempt=<native leaf>, local=<oid>,

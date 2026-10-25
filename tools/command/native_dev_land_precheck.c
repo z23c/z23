@@ -351,6 +351,11 @@ static bool pc_history_visit(const struct zcl_dev_proof_history_failure *row,
     }
     if (strncmp(row->digest, "lint:", 5) != 0 &&
         strncmp(row->digest, "lint ", 5) != 0) return true;
+    if (row->observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER) {
+        if (row->observed_upper_unix > h->now) h->uncertain = true;
+        else if (row->observed_upper_unix < h->now - ZCL_LAND_PRECHECK_WINDOW_S)
+            return true; /* Failure existed no later than this old bound. */
+    }
     /* A retained failure observed now and requested within the window is
      * definitely recent. An older request cannot date its eventual failure. */
     if (row->request_started_unix > h->now ||
@@ -388,6 +393,8 @@ static void pc_history_learn(struct pc_run *r, const char *land,
         pc_history_unproven(r, "history allocation unavailable");
         return;
     }
+    struct zcl_dev_proof_observation_report observation;
+    bool observation_ok = zcl_dev_proof_observe_legacy_failures(canonical, &observation);
     h->now = pc_now();
     enum zcl_dev_proof_history_result result =
         zcl_dev_proof_history_failures(canonical, pc_history_visit, h);
@@ -405,6 +412,8 @@ static void pc_history_learn(struct pc_run *r, const char *land,
                 pc_history_unproven(r, "older/future request start or missing failure step leaves lint history uncertain; uncertain gates not learned");
         }
     }
+    if (!observation_ok)
+        pc_history_unproven(r, "legacy observation incomplete; retained history coverage remains unproven");
     free(h);
 #else
     (void)land;

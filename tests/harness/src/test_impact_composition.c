@@ -2957,7 +2957,7 @@ static int test_ic_proof_next_preserves_root(void)
         ASSERT((size_t)snprintf(root, sizeof(root), "%s/checkout \"B\"\\leaf", fixture) < sizeof(root));
         ASSERT((size_t)snprintf(relative, sizeof(relative),
             ".cache/zcl-dev-proof/%s-%s.failed", local, base) < sizeof(relative));
-        ASSERT(ic_write(root, relative, "prerequisite_missing\n"));
+        ASSERT(ic_proof_private_write(root, relative, "prerequisite_missing\n"));
         ASSERT(realpath(root, canonical) != NULL);
         struct zcl_dev_proof_status status = {0};
         /* Query B while the test process still runs in the main checkout.
@@ -3254,6 +3254,13 @@ static bool ic_failure_record_read(const char *path, char *text, size_t cap,
     return true;
 }
 
+static bool ic_failure_bytes_equal(const char *path, const void *expected, size_t size)
+{
+    char bytes[2049]; size_t actual;
+    return ic_failure_record_read(path, bytes, sizeof(bytes), &actual) &&
+        actual == size && memcmp(bytes, expected, size) == 0;
+}
+
 static bool ic_failure_record_hash(const char *attempt, const char *relative,
                                     const char *domain, char out[65])
 {
@@ -3300,13 +3307,194 @@ static const char ic_failure_record_local[] = "111111111111111111111111111111111
 static const char ic_failure_record_base[] = "2222222222222222222222222222222222222222";
 static const char ic_failure_record_reason[] = "child_proof_failed_exit_2";
 
+static bool ic_binding_status(const char *root, const char *attempt, bool expected)
+{
+    struct zcl_dev_proof_status status = {0};
+    if (!zcl_dev_proof_status_read(root, ic_failure_record_local, ic_failure_record_base, &status) ||
+        status.state != ZCL_DEV_PROOF_STATE_FAILED || status.failure_identity.valid != expected) return false;
+    if (!expected) return true;
+    char canonical[4096], request[65], archive[65];
+    if (!realpath(root, canonical) ||
+        !ic_failure_record_hash(attempt, "request", "zcl.dev_proof_failure_recorded.request.v1", request) ||
+        !ic_failure_record_hash(attempt, "logs/failure.txt", "zcl.dev_proof_failure_recorded.failure.v1", archive)) return false;
+    return strcmp(status.failure_identity.canonical_root, canonical) == 0 &&
+        strcmp(status.failure_identity.attempt, strrchr(attempt, '/') + 1) == 0 &&
+        strcmp(status.failure_identity.request_sha3, request) == 0 &&
+        strcmp(status.failure_identity.archive_sha3, archive) == 0;
+}
+
+static bool ic_binding_settle(const char *root, char attempt[4096])
+{
+    return zcl_dev_proof_test_failure_attempt_prepare(root, ic_failure_record_local,
+        ic_failure_record_base, attempt, 4096) &&
+        zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+        ic_failure_record_base, attempt, ic_failure_record_reason);
+}
+
+static int test_ic_proof_binding_attempts(void)
+{
+    int failures = 0;
+    TEST("proof binding: identical failure payloads retain distinct exact attempts and legacy retry contracts") {
+        char root[4096], a[4096], b[4096], marker[4096], archive[4300], old[2049]; size_t size;
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "binding_attempts");
+        ASSERT(ic_proof_private_write(root, ".cache/fixture", "isolated binding retry\n"));
+        ASSERT(ic_binding_settle(root, a)); ASSERT(ic_binding_status(root, a, true));
+        ASSERT(zcl_dev_proof_failure_path(root, ic_failure_record_local, ic_failure_record_base, marker, sizeof(marker)));
+        ASSERT(ic_failure_record_read(marker, old, sizeof(old), &size));
+        ASSERT(zcl_dev_proof_test_text_reader(marker, 4)); /* unchanged legacy reason/remainder parser */
+        ASSERT(snprintf(archive, sizeof(archive), "%s/logs/failure.txt", a) < (int)sizeof(archive));
+        ASSERT(ic_bytes_equal(archive, old, size)); /* unchanged old retry exact-byte contract */
+        ASSERT(ic_binding_settle(root, b)); ASSERT(strcmp(a, b) != 0);
+        ASSERT(ic_binding_status(root, b, true)); ASSERT(!ic_bytes_equal(marker, old, size));
+        /* Archive B can exist while atomic marker still names A: no latest-pair inference. */
+        ASSERT(ic_proof_private_write(root, marker + strlen(root) + 1, old));
+        ASSERT(ic_binding_status(root, a, true));
+        struct zcl_dev_proof_status status = {0};
+        ASSERT(zcl_dev_proof_retry(root, ic_failure_record_local, ic_failure_record_base, &status));
+        ASSERT(!status.failure_identity.valid); /* queued/new proof must clear stale identity */
+        ASSERT(test_rm_rf_recursive(root) == 0); PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_binding_refusals(void)
+{
+    int failures = 0;
+    TEST("proof binding: request/archive tamper and unsafe exact attempt never receive identity") {
+        char root[4096], a[4096], marker[4096], original[2049], archive[4300], request[4300], raw_request[320];
+        size_t size, request_size;
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "binding_refuse");
+        ASSERT(ic_binding_settle(root, a));
+        ASSERT(zcl_dev_proof_failure_path(root, ic_failure_record_local, ic_failure_record_base, marker, sizeof(marker)));
+        ASSERT(ic_failure_record_read(marker, original, sizeof(original), &size));
+        ASSERT(snprintf(request, sizeof(request), "%s/request", a) < (int)sizeof(request));
+        ASSERT(ic_failure_record_read(request, raw_request, sizeof(raw_request), &request_size));
+        ASSERT(ic_proof_private_write(a, "request", "invalid request\n")); ASSERT(ic_binding_status(root, a, false));
+        ASSERT(ic_proof_private_write(a, "request", raw_request));
+        ASSERT(ic_proof_private_write(a, "logs/failure.txt", "different failure")); ASSERT(ic_binding_status(root, a, false));
+        ASSERT(ic_proof_private_write(a, "logs/failure.txt", original));
+        ASSERT(snprintf(archive, sizeof(archive), "%s/logs/failure.txt", a) < (int)sizeof(archive));
+        ASSERT(unlink(archive) == 0); ASSERT(symlink(marker, archive) == 0);
+        ASSERT(ic_binding_status(root, a, false));
+        ASSERT(ic_bytes_equal(marker, original, size));
+        ASSERT(test_rm_rf_recursive(root) == 0); PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_binding_shape(void)
+{
+    int failures = 0;
+    TEST("proof binding: absent legacy and reserved malformed/ambiguous trailers fail attribution closed") {
+        char root[4096], a[4096], marker[4096], original[2049], changed[2049], leaf[144], request[65];
+        size_t size, payload;
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "binding_shape");
+        ASSERT(ic_binding_settle(root, a));
+        ASSERT(zcl_dev_proof_failure_path(root, ic_failure_record_local, ic_failure_record_base, marker, sizeof(marker)));
+        ASSERT(ic_failure_record_read(marker, original, sizeof(original), &size));
+        ASSERT(zcl_dev_proof_failure_binding_decode(original, size, leaf, request, &payload) == 1);
+        ASSERT(payload == strlen(ic_failure_record_reason));
+        ASSERT(memcmp(original, ic_failure_record_reason, payload) == 0);
+        snprintf(changed, sizeof(changed), "%s", original);
+        char *attempt = strstr(changed, "\nattempt="); ASSERT(attempt != NULL); attempt[9] = '/';
+        ASSERT(zcl_dev_proof_failure_binding_decode(changed, strlen(changed), leaf, request, &payload) == -1);
+        ASSERT(ic_proof_private_write(root, marker + strlen(root) + 1, changed)); ASSERT(ic_binding_status(root, a, false));
+        ASSERT(snprintf(changed, sizeof(changed), "%s\nzcl.dev_proof_failure_binding.v1\n", original) < (int)sizeof(changed));
+        ASSERT(zcl_dev_proof_failure_binding_decode(changed, strlen(changed), leaf, request, &payload) == -1);
+        ASSERT(ic_proof_private_write(root, marker + strlen(root) + 1, ic_failure_record_reason));
+        ASSERT(ic_binding_status(root, a, false)); ASSERT(zcl_dev_proof_test_text_reader(marker, 4));
+        ASSERT(test_rm_rf_recursive(root) == 0); PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_binding_capacity(void)
+{
+    int failures = 0;
+    TEST("proof binding: capacity fallback preserves all diagnostic bytes and remains legacy unknown") {
+        char root[4096], a[4096], diagnostic[1901], marker[4096], archive[4300];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "binding_capacity");
+        memset(diagnostic, 'x', sizeof(diagnostic) - 1); diagnostic[sizeof(diagnostic) - 1] = 0;
+        memcpy(diagnostic, "child_proof_failed_exit_2\n", 26);
+        ASSERT(zcl_dev_proof_test_failure_attempt_prepare(root, ic_failure_record_local,
+            ic_failure_record_base, a, sizeof(a)));
+        ASSERT(zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+            ic_failure_record_base, a, diagnostic));
+        ASSERT(zcl_dev_proof_failure_path(root, ic_failure_record_local, ic_failure_record_base, marker, sizeof(marker)));
+        ASSERT(snprintf(archive, sizeof(archive), "%s/logs/failure.txt", a) < (int)sizeof(archive));
+        ASSERT(ic_failure_bytes_equal(marker, diagnostic, strlen(diagnostic)));
+        ASSERT(ic_failure_bytes_equal(archive, diagnostic, strlen(diagnostic)));
+        ASSERT(ic_binding_status(root, a, false));
+        ASSERT(test_rm_rf_recursive(root) == 0); PASS();
+    } _test_next:;
+    return failures;
+}
+
+static bool ic_binding_edge(const char *root, size_t payload_size, bool expected)
+{
+    char attempt[4096], diagnostic[2049], marker[4096];
+    if (payload_size < 1000 || payload_size >= sizeof(diagnostic)) return false;
+    memset(diagnostic, 'x', payload_size); diagnostic[payload_size] = 0;
+    memcpy(diagnostic, "child_proof_failed_exit_2\n", 26);
+    if (!zcl_dev_proof_test_failure_attempt_prepare(root, ic_failure_record_local,
+        ic_failure_record_base, attempt, sizeof(attempt)) ||
+        !zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
+        ic_failure_record_base, attempt, diagnostic) ||
+        !zcl_dev_proof_failure_path(root, ic_failure_record_local, ic_failure_record_base, marker, sizeof(marker))) return false;
+    if (!zcl_dev_proof_test_text_reader(marker, 4) || !ic_binding_status(root, attempt, expected)) return false;
+    return expected || ic_failure_bytes_equal(marker, diagnostic, payload_size);
+}
+
+static int test_ic_proof_binding_legacy_edges(void)
+{
+    int failures = 0;
+    TEST("proof binding: exact2048 envelope falls back and exact2047 remains old-reader compatible") {
+        char root[4096], attempt[4096], marker[4096], record[2049], leaf[144], request[65]; size_t size, payload;
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "binding_edge");
+        ASSERT(ic_binding_settle(root, attempt));
+        ASSERT(zcl_dev_proof_failure_path(root, ic_failure_record_local, ic_failure_record_base, marker, sizeof(marker)));
+        ASSERT(ic_failure_record_read(marker, record, sizeof(record), &size));
+        ASSERT(zcl_dev_proof_failure_binding_decode(record, size, leaf, request, &payload) == 1);
+        ASSERT(payload == 25); /* original length has two digits; edge length has four */
+        size_t edge = 2048 - (size - payload) - 2;
+        ASSERT(edge >= 1000 && edge < 10000);
+        ASSERT(ic_binding_edge(root, edge, false));
+        ASSERT(ic_binding_edge(root, edge - 1, true));
+        ASSERT(test_rm_rf_recursive(root) == 0); PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_binding_legacy_newlines(void)
+{
+    int failures = 0;
+    TEST("proof binding: legacy LF CRLF CR and trailing evidence normalization is preserved") {
+        char root[4096], attempt[4096], marker[4096];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "binding_legacy_newlines");
+        ASSERT(ic_binding_settle(root, attempt));
+        ASSERT(zcl_dev_proof_failure_path(root, ic_failure_record_local, ic_failure_record_base, marker, sizeof(marker)));
+        const char *records[] = {"reason\n", "reason\r\n", "reason\r", "reason\nevidence\r\n\r\n"};
+        for (size_t i = 0; i < sizeof(records) / sizeof(records[0]); i++) {
+            ASSERT(ic_proof_private_write(root, marker + strlen(root) + 1, records[i]));
+            struct zcl_dev_proof_status status = {0};
+            ASSERT(zcl_dev_proof_status_read(root, ic_failure_record_local, ic_failure_record_base, &status));
+            ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED && !status.failure_identity.valid);
+            ASSERT_STR_EQ(status.detail, "reason");
+            ASSERT_STR_EQ(status.evidence, i == 3 ? "evidence" : "");
+            ASSERT(ic_bytes_equal(marker, records[i], strlen(records[i])));
+        }
+        ASSERT(test_rm_rf_recursive(root) == 0); PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_proof_failure_record_time(void)
 {
     int failures = 0;
     TEST("proof failure recording: native archive binds recording clocks and never refreshes existing time") {
         char root[4096], attempt[4096], metadata[4300], record[1024];
-        char request_path[4300], original_request[320];
-        size_t size, request_size;
+        char request_path[4300], original_request[320], archive[4300], original_archive[2049];
+        size_t size, request_size, archive_size;
         test_make_tmpdir(root, sizeof(root), "impact_composition", "failure_time");
         ASSERT(ic_proof_private_write(root, ".cache/fixture", "isolated recording retry fixture\n"));
         ASSERT(zcl_dev_proof_test_failure_attempt_prepare(root, ic_failure_record_local,
@@ -3317,6 +3505,8 @@ static int test_ic_proof_failure_record_time(void)
         int64_t wall_before = platform_time_wall_unix(), mono_before = platform_time_monotonic_us();
         ASSERT(zcl_dev_proof_test_failure_attempt_settle(root, ic_failure_record_local,
             ic_failure_record_base, attempt, ic_failure_record_reason));
+        ASSERT(snprintf(archive, sizeof(archive), "%s/logs/failure.txt", attempt) < (int)sizeof(archive));
+        ASSERT(ic_failure_record_read(archive, original_archive, sizeof(original_archive), &archive_size));
         ASSERT(ic_failure_record_read(metadata, record, sizeof(record), &size));
         int64_t wall, mono;
         ASSERT(ic_failure_record_bound(attempt, record, &wall, &mono));
@@ -3336,7 +3526,7 @@ static int test_ic_proof_failure_record_time(void)
             ic_failure_record_base, attempt, ic_failure_record_reason));
         ASSERT(ic_bytes_equal(metadata, record, size));
         ASSERT(!ic_failure_record_bound(attempt, record, &wall, &mono));
-        ASSERT(ic_proof_private_write(attempt, "logs/failure.txt", ic_failure_record_reason));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure.txt", original_archive));
         ASSERT(ic_proof_private_write(attempt, "request", "zcl.dev_proof_request.v1\n"
             "1111111111111111111111111111111111111111\n"
             "2222222222222222222222222222222222222222\n1700000000\n1\n"));
@@ -3590,6 +3780,150 @@ static int test_ic_proof_recording_history_bindings(void)
     return failures;
 }
 
+static bool ic_observation_fixture(const char *root, char canonical[4096],
+                                    char attempt[4096], char metadata[4300])
+{
+    return realpath(root, canonical) &&
+        ic_history_fixture(canonical, "aaaaaa", ic_failure_record_reason, attempt) &&
+        snprintf(metadata, 4300, "%s/logs/failure-observed.v1", attempt) < 4300;
+}
+
+static bool ic_observation_read(const char *root, const char *attempt,
+    enum zcl_dev_proof_history_observation_state expected,
+    struct zcl_dev_proof_history_failure *out)
+{
+    const char *leaf = strrchr(attempt, '/');
+    if (!leaf || !zcl_dev_proof_history_failure_read(root, leaf + 1, out) ||
+        out->classification != ZCL_PROOF_HISTORY_FAILURE || out->observation_state != expected)
+        return false;
+    if (expected != ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER)
+        return out->observed_upper_unix == 0 && out->observed_upper_monotonic_us == 0;
+    return out->observed_upper_unix >= out->request_started_unix &&
+           out->observed_upper_monotonic_us >= out->request_started_monotonic_us;
+}
+
+static int test_ic_proof_observation_first(void)
+{
+    int failures = 0;
+    TEST("proof observation: explicit create-once upper bound never rewrites archive or creates a proof lease") {
+        char root[4096], canonical[4096], attempt[4096], metadata[4300], record[1024], lease[4300];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "observation_first");
+        ASSERT(ic_observation_fixture(root, canonical, attempt, metadata));
+        struct zcl_dev_proof_history_failure row;
+        ASSERT(ic_observation_read(canonical, attempt, ZCL_PROOF_HISTORY_OBSERVATION_MISSING, &row));
+        ASSERT(access(metadata, F_OK) != 0 && errno == ENOENT); /* readonly query */
+        ASSERT(!zcl_dev_proof_history_failure_read(canonical, "../arbitrary", &row));
+        /* A crashed staging file is not published observation authority. */
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-observed.v1.tmp.crash", "partial\n"));
+        struct zcl_dev_proof_observation_report report;
+        int64_t before = platform_time_wall_unix();
+        ASSERT(zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        ASSERT(report.created == 1 && report.existing == 0);
+        ASSERT(ic_observation_read(canonical, attempt, ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER, &row));
+        ASSERT(row.time_state == ZCL_PROOF_HISTORY_TIME_MISSING);
+        ASSERT(row.observed_upper_unix >= before && row.observed_upper_unix <= platform_time_wall_unix());
+        size_t size;
+        ASSERT(ic_failure_record_read(metadata, record, sizeof(record), &size));
+        ASSERT(zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        ASSERT(report.created == 0 && report.existing == 1);
+        ASSERT(ic_bytes_equal(metadata, record, size));
+        ASSERT(snprintf(lease, sizeof(lease), "%s/.cache/zcl-dev-proof/leases", canonical) < (int)sizeof(lease));
+        ASSERT(access(lease, F_OK) != 0 && errno == ENOENT);
+        ASSERT(snprintf(lease, sizeof(lease), "%s/.cache/zcl-dev-proof/%s-%s.failed", canonical,
+            ic_failure_record_local, ic_failure_record_base) < (int)sizeof(lease));
+        ASSERT(access(lease, F_OK) != 0 && errno == ENOENT);
+        ASSERT(snprintf(lease, sizeof(lease), "%s/logs/failure.txt", attempt) < (int)sizeof(lease));
+        ASSERT(ic_bytes_equal(lease, ic_failure_record_reason, strlen(ic_failure_record_reason)));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_observation_aged(void)
+{
+    int failures = 0;
+    TEST("proof observation: aged durable upper bound stays old and changed inputs cannot gain another time") {
+        char root[4096], canonical[4096], attempt[4096], metadata[4300], record[1024], changed[1024], stamp[32];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "observation_aged");
+        ASSERT(ic_observation_fixture(root, canonical, attempt, metadata));
+        struct zcl_dev_proof_observation_report report;
+        ASSERT(zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        size_t size;
+        ASSERT(ic_failure_record_read(metadata, record, sizeof(record), &size));
+        (void)snprintf(stamp, sizeof(stamp), "%lld", (long long)platform_time_wall_unix() - 8 * 86400);
+        ASSERT(ic_recording_history_edit(record, "\nobserved_upper_unix=", stamp, changed));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-observed.v1", changed));
+        ASSERT(zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        ASSERT(report.created == 0 && report.existing == 1);
+        ASSERT(ic_bytes_equal(metadata, changed, strlen(changed)));
+        struct zcl_dev_proof_history_failure row;
+        ASSERT(ic_observation_read(canonical, attempt, ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER, &row));
+        ASSERT(row.observed_upper_unix < platform_time_wall_unix() - 7 * 86400);
+        ASSERT(ic_proof_private_write(attempt, "logs/failure.txt", "child_proof_failed_exit_3"));
+        ASSERT(ic_observation_read(canonical, attempt, ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE, &row));
+        ASSERT_STR_EQ(row.reason, "child_proof_failed_exit_3");
+        ASSERT(!zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        ASSERT(report.unproven == 1 && report.created == 0);
+        ASSERT(ic_bytes_equal(metadata, changed, strlen(changed)));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure.txt", ic_failure_record_reason));
+        ASSERT(ic_proof_private_write(attempt, "request", "zcl.dev_proof_request.v1\n"
+            "1111111111111111111111111111111111111111\n"
+            "2222222222222222222222222222222222222222\n1700000001\n1\n"));
+        ASSERT(ic_observation_read(canonical, attempt, ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE, &row));
+        ASSERT(!zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        ASSERT(ic_bytes_equal(metadata, changed, strlen(changed)));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_ic_proof_observation_refusals(void)
+{
+    int failures = 0;
+    TEST("proof observation: unsafe producer/observation or clock anomaly stays unknown without laundering") {
+        char root[4096], canonical[4096], attempt[4096], metadata[4300], record[1024], changed[1024];
+        test_make_tmpdir(root, sizeof(root), "impact_composition", "observation_refuse");
+        ASSERT(ic_observation_fixture(root, canonical, attempt, metadata));
+        struct zcl_dev_proof_observation_report report;
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", "invalid producer metadata\n"));
+        ASSERT(!zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        ASSERT(report.unproven == 1 && report.created == 0 && access(metadata, F_OK) != 0);
+        char producer[4300];
+        ASSERT(snprintf(producer, sizeof(producer), "%s/logs/failure-time.v1", attempt) < (int)sizeof(producer));
+        ASSERT(unlink(producer) == 0);
+        ASSERT(zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        size_t size;
+        ASSERT(ic_failure_record_read(metadata, record, sizeof(record), &size));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-time.v1", "invalid producer metadata\n"));
+        struct zcl_dev_proof_history_failure row;
+        ASSERT(ic_observation_read(canonical, attempt, ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE, &row));
+        ASSERT(!zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        ASSERT(ic_bytes_equal(metadata, record, size));
+        ASSERT(unlink(producer) == 0);
+        ASSERT(ic_recording_history_edit(record, "\nobserved_upper_unix=", "4102444800", changed));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-observed.v1", changed));
+        ASSERT(ic_observation_read(canonical, attempt, ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER, &row));
+        ASSERT(!zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        ASSERT(ic_bytes_equal(metadata, changed, strlen(changed)));
+        ASSERT(ic_recording_history_edit(record, "\nobserved_upper_monotonic_us=", "0", changed));
+        ASSERT(ic_proof_private_write(attempt, "logs/failure-observed.v1", changed));
+        ASSERT(ic_observation_read(canonical, attempt, ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE, &row));
+        ASSERT(!zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        ASSERT(ic_bytes_equal(metadata, changed, strlen(changed)));
+        ASSERT(unlink(metadata) == 0);
+        ASSERT(ic_proof_private_write(attempt, "logs/valid-observation-target", record));
+        ASSERT(symlink("valid-observation-target", metadata) == 0);
+        ASSERT(ic_observation_read(canonical, attempt, ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE, &row));
+        ASSERT(!zcl_dev_proof_observe_legacy_failures(canonical, &report));
+        ASSERT(report.created == 0 && report.unproven == 1);
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_ic_proof_environment_no_verdict(void)
 {
     int failures = 0;
@@ -3680,6 +4014,8 @@ static int test_ic_proof_retry(void)
         struct zcl_dev_proof_status status = {0};
         ASSERT((size_t)snprintf(request, sizeof(request), "%s/requests/%s.request", state, key) < sizeof(request));
         ASSERT(chmod(failed, 0660) == 0);
+        ASSERT(zcl_dev_proof_status_read(root, local, base, &status));
+        ASSERT(!status.failure_identity.valid);
         ASSERT(!zcl_dev_proof_retry(root, local, base, &status));
         ASSERT(strcmp(status.detail, "proof_retry_failure_evidence_invalid") == 0);
         ASSERT(ic_bytes_equal(failed, reason, sizeof(reason) - 1));
@@ -3817,7 +4153,15 @@ static int test_ic_proof_retry(void)
         ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
         ASSERT(strstr(status.log_dir, ".prior/logs") == NULL);
         ASSERT((size_t)snprintf(marker, sizeof(marker), "%s/failure.txt", status.log_dir) < sizeof(marker));
-        ASSERT(ic_bytes_equal(marker, why, strlen(why)));
+        char settled[2049], bound_attempt[144], bound_request[65]; size_t settled_size, payload_size;
+        ASSERT(ic_failure_record_read(marker, settled, sizeof(settled), &settled_size));
+        ASSERT(zcl_dev_proof_failure_binding_decode(settled, settled_size,
+            bound_attempt, bound_request, &payload_size) == 1);
+        ASSERT(payload_size == strlen(why) && memcmp(settled, why, payload_size) == 0);
+        ASSERT(status.failure_identity.valid);
+        ASSERT(strcmp(bound_attempt, status.failure_identity.attempt) == 0);
+        ASSERT(strcmp(bound_request, status.failure_identity.request_sha3) == 0);
+        ASSERT(ic_failure_bytes_equal(failed, settled, settled_size));
         ASSERT(ic_bytes_equal(archived, reason, sizeof(reason) - 1));
         ASSERT(zcl_dev_proof_ensure(root, local, base, &status));
         ASSERT(status.state == ZCL_DEV_PROOF_STATE_FAILED);
@@ -14092,12 +14436,21 @@ int test_impact_composition(void)
     failures += test_ic_proof_failure_history();
     failures += test_ic_proof_failure_history_refusals();
     failures += test_ic_proof_failure_history_classes();
+    failures += test_ic_proof_binding_attempts();
+    failures += test_ic_proof_binding_refusals();
+    failures += test_ic_proof_binding_shape();
+    failures += test_ic_proof_binding_capacity();
+    failures += test_ic_proof_binding_legacy_edges();
+    failures += test_ic_proof_binding_legacy_newlines();
     failures += test_ic_proof_failure_record_time();
     failures += test_ic_proof_failure_record_unknown_time();
     failures += test_ic_proof_failure_record_refusals();
     failures += test_ic_proof_recording_history_bound();
     failures += test_ic_proof_recording_history_shape();
     failures += test_ic_proof_recording_history_bindings();
+    failures += test_ic_proof_observation_first();
+    failures += test_ic_proof_observation_aged();
+    failures += test_ic_proof_observation_refusals();
     failures += test_ic_proof_retry();
     failures += test_ic_proof_status_execution_projection();
     failures += test_ic_proof_ensure_passed_writes_no_request();

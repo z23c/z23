@@ -59,6 +59,10 @@ void zcl_native_dev_land_test_next_step(const char *code, const char *action,
 /* The drive's base probe (dl_base_observe) against one worktree's origin. */
 int zcl_native_dev_land_test_base_observe(const char *wt, const char *base);
 bool zcl_native_dev_land_test_chain_codec(const char *line, char *out, size_t cap);
+bool zcl_native_dev_land_test_failure_capture(const char *root, const char *local,
+    const char *base, bool reset, char *out, size_t cap);
+bool zcl_native_dev_land_test_failure_replay(const char *root, const char *line, char *out, size_t cap);
+bool zcl_native_dev_land_test_terminal_record(const char *root, const char *line, char *out, size_t cap);
 int zcl_native_dev_land_test_chain_relation(const char *line,
     const char *const *lines, size_t count, const char *main, long long *waiting);
 #if !defined(_WIN32)
@@ -5722,9 +5726,221 @@ static int test_dev_land_long_proof_root(void)
 #define DLX_CHAIN_ROW "\"seq\":3,\"tip\":\"" DLX_CHAIN_B "\",\"state\":\"queued\",\"attempt\":1"
 #define DLX_CHAIN_FIELDS "\"predecessor_seq\":2,\"predecessor_local\":\"" DLX_CHAIN_A "\",\"predecessor_base\":\"" DLX_CHAIN_M "\",\"predecessor_tree\":\"" DLX_CHAIN_A "\",\"predecessor_intent\":\"" DLX_CHAIN_A "@" DLX_CHAIN_M "\""
 
+static bool dlx_failure_fixture(struct dlx_rig *rig, char base[64], char attempt[4096], char out[32768])
+{
+    const char *parent[] = {"rev-parse", "HEAD^", NULL};
+    return dlx_rig_make(rig, "failure_identity_rig") && dlx_git_out(rig->clone, parent, base, 64) == 0 &&
+        zcl_dev_proof_test_failure_attempt_prepare(rig->clone, rig->tip, base, attempt, 4096) &&
+        zcl_dev_proof_test_failure_attempt_settle(rig->clone, rig->tip, base, attempt, "child_proof_failed_exit_2") &&
+        zcl_native_dev_land_test_failure_capture(rig->clone, rig->tip, base, false, out, 32768);
+}
+
+static int dlx_failure_identity_roundtrip(void)
+{
+    int failures = 0;
+    TEST("land: exact proof identity round trips and original failed outcome survives later PASS") {
+        struct dlx_rig rig; char base[64], attempt[4096], original[32768], again[32768], history[4096];
+        dlx_isolate("failure_identity_roundtrip");
+        ASSERT(dlx_failure_fixture(&rig, base, attempt, original));
+        ASSERT(strstr(original, "\"failed_proof_attempt\":") != NULL);
+        ASSERT(strstr(original, strrchr(attempt, '/') + 1) != NULL);
+        ASSERT(zcl_native_dev_land_test_chain_codec(original, again, sizeof(again)));
+        ASSERT_STR_EQ(original, again);
+        test_make_tmpdir(history, sizeof(history), "dev_land", "failure_identity_history");
+        ASSERT(zcl_native_dev_land_test_failure_replay(history, original, again, sizeof(again)));
+        struct json_value timed = {0}; ASSERT(json_read(&timed, again, strlen(again)));
+        ASSERT(json_get_int(json_get(&timed, "terminal_recorded_at")) > 0); json_free(&timed);
+        char *time_member = strstr(again, ",\"terminal_recorded_at\":"); ASSERT(time_member != NULL);
+        memcpy(time_member, "}\n", 3); /* compare every preexisting field exactly */
+        ASSERT_STR_EQ(original, again);
+        ASSERT(strstr(again, "\"state\":\"failed\"") != NULL);
+        ASSERT(zcl_native_dev_land_test_failure_capture(rig.clone, rig.tip, base, true, again, sizeof(again)));
+        ASSERT(strstr(again, "failed_proof_") == NULL);
+        PASS();
+    } _test_next:;
+    dlx_restore(); return failures;
+}
+
+static bool dlx_failure_bad_fields(const char *original)
+{
+    const char *keys[] = {"failed_proof_root", "failed_proof_attempt", "failed_proof_request_sha3", "failed_proof_archive_sha3"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        for (size_t kind = 0; kind < 4; kind++) {
+            struct json_value doc = {0};
+            if (!json_read(&doc, original, strlen(original))) return false;
+            struct json_value *field = NULL;
+            for (size_t j = 0; j < doc.num_children; j++)
+                if (strcmp(doc.keys[j], keys[i]) == 0) field = &doc.children[j];
+            if (!field) { json_free(&doc); return false; }
+            if (kind == 0) json_set_null(field);
+            else if (kind == 1) json_set_int(field, 1);
+            else if (kind == 2) json_set_object(field);
+            else json_set_str(field, i == 0 ? "/a/../b" : "wrong");
+            char changed[32768], out[32768]; size_t n = json_write(&doc, changed, sizeof(changed));
+            json_free(&doc);
+            if (!n || !zcl_native_dev_land_test_chain_codec(changed, out, sizeof(out)) || strstr(out, "failed_proof_")) return false;
+        }
+    }
+    return true;
+}
+
+static int dlx_failure_identity_refusals(void)
+{
+    int failures = 0;
+    TEST("land: malformed optional proof tuple becomes unknown without changing verdict") {
+        struct dlx_rig rig; char base[64], attempt[4096], original[32768], out[32768], changed[32768];
+        dlx_isolate("failure_identity_refusals");
+        ASSERT(dlx_failure_fixture(&rig, base, attempt, original));
+        ASSERT(dlx_failure_bad_fields(original));
+        size_t n = strlen(original);
+        ASSERT(snprintf(changed, sizeof(changed), "%.*s,\"failed_proof_root\":\"/duplicate\"}\n",
+            (int)n - 2, original) < (int)sizeof(changed));
+        ASSERT(zcl_native_dev_land_test_chain_codec(changed, out, sizeof(out)));
+        ASSERT(strstr(out, "failed_proof_") == NULL);
+        ASSERT(strstr(out, "\"state\":\"failed\"") != NULL);
+        size_t legacy_cap = strlen(out) + 1;
+        ASSERT(zcl_native_dev_land_test_chain_codec(original, changed, legacy_cap));
+        ASSERT_STR_EQ(out, changed); /* optional metadata capacity never blocks the row */
+        ASSERT(snprintf(changed, sizeof(changed), "{\"seq\":1,\"tip\":\"%s\",\"state\":\"failed\","
+            "\"attempt\":1,\"local\":\"%s\",\"base\":\"%s\",\"failed_proof_root\":\"/partial\"}",
+            rig.tip, rig.tip, base) < (int)sizeof(changed));
+        ASSERT(zcl_native_dev_land_test_chain_codec(changed, out, sizeof(out)));
+        ASSERT(strstr(out, "failed_proof_") == NULL);
+        ASSERT(zcl_native_dev_land_test_chain_codec("{" DLX_CHAIN_ROW "}", out, sizeof(out)));
+        ASSERT(strstr(out, "failed_proof_") == NULL);
+        PASS();
+    } _test_next:;
+    dlx_restore(); return failures;
+}
+
+static int dlx_failure_identity_tamper(void)
+{
+    int failures = 0;
+    TEST("land: changed current archive loses fresh attribution while retained outcome replay preserves its snapshot") {
+        struct dlx_rig rig; char base[64], attempt[4096], original[32768], out[32768], archive[4300];
+        dlx_isolate("failure_identity_tamper");
+        ASSERT(dlx_failure_fixture(&rig, base, attempt, original));
+        ASSERT(snprintf(archive, sizeof(archive), "%s/logs/failure.txt", attempt) < (int)sizeof(archive));
+        ASSERT(dlx_write(archive, "changed archive bytes\n")); ASSERT(chmod(archive, 0600) == 0);
+        ASSERT(zcl_native_dev_land_test_failure_capture(rig.clone, rig.tip, base, false, out, sizeof(out)));
+        ASSERT(strstr(out, "failed_proof_") == NULL);
+        ASSERT(strstr(out, "\"state\":\"failed\"") != NULL);
+        ASSERT(zcl_native_dev_land_test_chain_codec(original, out, sizeof(out)));
+        ASSERT_STR_EQ(original, out);
+        PASS();
+    } _test_next:;
+    dlx_restore(); return failures;
+}
+
+static long long dlx_terminal_clock(const char *line)
+{
+    struct json_value doc = {0};
+    if (!json_read(&doc, line, strlen(line))) return -1;
+    const struct json_value *field = json_get(&doc, "terminal_recorded_at");
+    long long value = field ? json_get_int(field) : 0;
+    json_free(&doc); return value;
+}
+
+static int dlx_terminal_time_fresh(void)
+{
+    int failures = 0;
+    TEST("land: fresh terminal variants record observation before append and replay never redates") {
+        const char *states[] = {"failed", "cancelled", "conflict", "landed"};
+        dlx_isolate("terminal_time_fresh");
+        for (size_t i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+            char root[4096], tag[64], line[1024], out[32768], path[4300], raw[32768]; size_t bytes;
+            snprintf(tag, sizeof(tag), "terminal_time_%s", states[i]);
+            test_make_tmpdir(root, sizeof(root), "dev_land", tag);
+            ASSERT(snprintf(line, sizeof(line), "{\"seq\":1,\"tip\":\"" DLX_CHAIN_B "\",\"attempt\":1,\"state\":\"%s\"}", states[i]) < (int)sizeof(line));
+            int64_t before = platform_time_wall_unix();
+            ASSERT(zcl_native_dev_land_test_terminal_record(root, line, out, sizeof(out)));
+            ASSERT(dlx_terminal_clock(out) >= before && dlx_terminal_clock(out) <= platform_time_wall_unix());
+            ASSERT(snprintf(path, sizeof(path), "%s/outcomes.jsonl", root) < (int)sizeof(path));
+            ASSERT(dlx_slurp(path, raw, sizeof(raw), &bytes));
+            ASSERT(bytes == strlen(out) && memcmp(raw, out, bytes) == 0); /* exactly one original outcome */
+        }
+        PASS();
+    } _test_next:;
+    dlx_restore(); return failures;
+}
+
+static int dlx_terminal_time_legacy(void)
+{
+    int failures = 0;
+    TEST("land: legacy terminal replay preserves unknown time and raw historical bytes") {
+        char root[4096], path[4300], out[32768], raw[32768]; size_t bytes;
+        static const char legacy[] = "{\"seq\":1,\"tip\":\"" DLX_CHAIN_B "\",\"attempt\":1,\"state\":\"failed\"}\n";
+        dlx_isolate("terminal_time_legacy");
+        test_make_tmpdir(root, sizeof(root), "dev_land", "terminal_legacy_history");
+        ASSERT(snprintf(path, sizeof(path), "%s/outcomes.jsonl", root) < (int)sizeof(path));
+        ASSERT(dlx_write(path, legacy));
+        ASSERT(zcl_native_dev_land_test_terminal_record(root, legacy, out, sizeof(out)));
+        ASSERT(dlx_terminal_clock(out) == 0 && strstr(out, "terminal_recorded_at") == NULL);
+        ASSERT(dlx_slurp(path, raw, sizeof(raw), &bytes));
+        ASSERT(bytes == strlen(legacy) && memcmp(raw, legacy, bytes) == 0);
+        PASS();
+    } _test_next:;
+    dlx_restore(); return failures;
+}
+
+static int dlx_terminal_time_codec(void)
+{
+    int failures = 0;
+    TEST("land: optional terminal time rejects malformed metadata without obstructing verdict or claiming clock continuity") {
+        const char *values[] = {"null", "0", "-1", "1.5", "\"123\"", "{}", "[]", "true", "1,\"terminal_recorded_at\":2"};
+        char line[1024], out[32768], legacy[32768];
+        for (size_t i = 0; i < sizeof(values) / sizeof(values[0]); i++) {
+            ASSERT(snprintf(line, sizeof(line), "{\"seq\":1,\"tip\":\"" DLX_CHAIN_B "\",\"attempt\":1,\"state\":\"failed\",\"terminal_recorded_at\":%s}", values[i]) < (int)sizeof(line));
+            ASSERT(zcl_native_dev_land_test_chain_codec(line, out, sizeof(out)));
+            ASSERT(dlx_terminal_clock(out) == 0 && strstr(out, "\"state\":\"failed\"") != NULL);
+        }
+        ASSERT(zcl_native_dev_land_test_chain_codec("{\"seq\":1,\"tip\":\"" DLX_CHAIN_B "\",\"attempt\":1,\"state\":\"failed\"}", legacy, sizeof(legacy)));
+        ASSERT(snprintf(line, sizeof(line), "{\"seq\":1,\"tip\":\"" DLX_CHAIN_B "\",\"attempt\":1,\"state\":\"failed\",\"terminal_recorded_at\":4102444800}") < (int)sizeof(line));
+        ASSERT(zcl_native_dev_land_test_chain_codec(line, out, sizeof(out)));
+        ASSERT(dlx_terminal_clock(out) == 4102444800LL); /* caller must reject future/window anomalies */
+        ASSERT(zcl_native_dev_land_test_chain_codec(line, out, strlen(legacy) + 1));
+        ASSERT_STR_EQ(out, legacy); /* optional capacity cannot block the old row */
+        ASSERT(zcl_native_dev_land_test_chain_codec("{" DLX_CHAIN_ROW ",\"terminal_recorded_at\":123}", out, sizeof(out)));
+        ASSERT(dlx_terminal_clock(out) == 0); /* new queued/nonterminal state cannot retain stale time */
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int dlx_terminal_time_append_refusal(void)
+{
+    int failures = 0;
+    TEST("land: refused first append creates no historical timestamp or outcome") {
+        char root[4096], path[4300], out[32768];
+        static const char line[] = "{\"seq\":1,\"tip\":\"" DLX_CHAIN_B "\",\"attempt\":1,\"state\":\"failed\"}";
+        dlx_isolate("terminal_time_append_refusal");
+        test_make_tmpdir(root, sizeof(root), "dev_land", "terminal_refused_history");
+        ASSERT(snprintf(path, sizeof(path), "%s/outcomes.jsonl", root) < (int)sizeof(path));
+        ASSERT(setenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND", "1", 1) == 0);
+        ASSERT(setenv("ZCL_DEVLOOP_TEST_PROCESS", "1", 1) == 0);
+        ASSERT(!zcl_native_dev_land_test_terminal_record(root, line, out, sizeof(out)));
+        ASSERT(!dlx_file_exists(path));
+        unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
+        int64_t before = platform_time_wall_unix();
+        ASSERT(zcl_native_dev_land_test_terminal_record(root, line, out, sizeof(out)));
+        ASSERT(dlx_terminal_clock(out) >= before);
+        PASS();
+    } _test_next:;
+    unsetenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND");
+    unsetenv("ZCL_DEVLOOP_TEST_PROCESS");
+    dlx_restore(); return failures;
+}
+
 static int test_dev_land_chain_codec(void)
 {
     int failures = 0;
+    failures += dlx_terminal_time_fresh();
+    failures += dlx_terminal_time_legacy();
+    failures += dlx_terminal_time_codec();
+    failures += dlx_terminal_time_append_refusal();
+    failures += dlx_failure_identity_roundtrip();
+    failures += dlx_failure_identity_refusals();
+    failures += dlx_failure_identity_tamper();
     TEST("land: dependency tuple round trips and malformed authority refuses") {
         char out[32768], again[32768];
         ASSERT(zcl_native_dev_land_test_chain_codec("{" DLX_CHAIN_ROW "}", out, sizeof(out)));
@@ -10939,10 +11155,32 @@ static bool dlx_fence_crash_step(const char *point)
 
 struct dlx_fence_case {
     unsigned scenario; bool stop;
+    long long old_recorded_at;
     struct dlx_rig rig; struct dlx_call c;
     char tag[64], base[64], wt[1400], successor[64], remote[64], land[1200];
     char before[32768], after[32768]; size_t before_len, after_len;
 };
+
+/* Status deliberately projects selected fields; observation lives in the
+ * authoritative outcome. Validate its complete first row with native codec. */
+static long long dlx_fence_old_recorded(void)
+{
+    char land[1200], path[1400], raw[32768], canonical[32768]; size_t size;
+    dlx_landdir(land, sizeof(land));
+    if (snprintf(path, sizeof(path), "%s/outcomes.jsonl", land) >= (int)sizeof(path) ||
+        !dlx_slurp(path, raw, sizeof(raw), &size) || memchr(raw, 0, size)) return -1;
+    char *lf = memchr(raw, '\n', size);
+    if (!lf) return -1;
+    *lf = 0;
+    if (!zcl_native_dev_land_test_chain_codec(raw, canonical, sizeof(canonical))) return -1;
+    struct json_value doc = {0};
+    if (!json_read(&doc, canonical, strlen(canonical))) { json_free(&doc); return -1; }
+    const struct json_value *clock = json_get(&doc, "terminal_recorded_at");
+    bool old = json_get_int(json_get(&doc, "seq")) == 1 &&
+        strcmp(json_get_str(json_get(&doc, "state")), "fenced") == 0;
+    long long value = old && clock && clock->type == JSON_INT ? json_get_int(clock) : -1;
+    json_free(&doc); return value;
+}
 
 static int dlx_fence_case_admission(struct dlx_fence_case *t)
 {
@@ -11102,7 +11340,16 @@ static int dlx_fence_case_rewind(struct dlx_fence_case *t)
             ASSERT(dlx_queue_bytes(t->after, sizeof(t->after), &t->after_len));
             ASSERT(t->before_len == t->after_len && memcmp(t->before, t->after, t->before_len) == 0);
             if (t->scenario == 5) ASSERT(dlx_fence_crash_step("paired"));
-            if (t->scenario == 6) ASSERT(dlx_fence_crash_step("old_projection"));
+            if (t->scenario == 6) {
+                ASSERT(dlx_fence_crash_step("old_projection"));
+                dlx_begin(&t->c, "status");
+                ASSERT(dlx_run(&t->c) && dlx_ok(&t->c));
+                const struct json_value *outcomes = dlx_arr(&t->c, "outcomes");
+                ASSERT(outcomes && outcomes->num_children == 1);
+                t->old_recorded_at = dlx_fence_old_recorded();
+                ASSERT(t->old_recorded_at > 0);
+                dlx_end(&t->c);
+            }
             if (t->scenario == 10) {
                 ASSERT(dlx_fence_crash_step("paired"));
                 /* External administrative policy violation t->after observation:
@@ -11137,6 +11384,8 @@ static int dlx_fence_case_settlement(struct dlx_fence_case *t)
             ASSERT(outcomes && outcomes->num_children == 2);
             const struct json_value *old = &outcomes->children[0];
             const struct json_value *next = &outcomes->children[1];
+            if (t->scenario == 6)
+                ASSERT(dlx_fence_old_recorded() == t->old_recorded_at);
             ASSERT_STR_EQ(json_get_str(json_get(old, "state")), t->scenario == 1 ? "landed" : "fenced");
             ASSERT_STR_EQ(json_get_str(json_get(old, "historical_git_acceptance")),
                            t->scenario == 1 ? "verified" : "unknown");
@@ -13389,15 +13638,22 @@ static size_t dlx_pc_ship_calls(const struct dlx_rig *rig)
     return count;
 }
 
+static bool dlx_pc_ship_selftest_ran(const struct dlx_rig *rig, const char *absolute)
+{
+    return dlx_pc_ran(rig, absolute) ||
+           dlx_pc_ran(rig, "ship-adapter:./tools/ship.sh --selftest");
+}
+
 static bool dlx_pc_history_ship_pass(void)
 {
     struct dlx_rig rig;
     struct dlx_call c;
-    char archive[1600], landed[512];
+    char archive[1600], landed[512], ship[1600];
     if (!dlx_pc_rig(&rig, "precheck_history_ship", true, "check-arm-symbol-single\n") ||
         !dlx_pc_history_archive("aaaaaa", 1, "child_proof_failed_exit_2", archive) ||
         !dlx_pc_history_archive("bbbbbb", 1, "child_proof_failed_exit_2", archive) ||
-        !dlx_pc_ship_files(&rig, true)) return false;
+        !dlx_pc_ship_files(&rig, true) ||
+        snprintf(ship, sizeof(ship), "%s/tools/ship.sh --selftest", rig.clone) >= (int)sizeof(ship)) return false;
     dlx_pc_row(landed, sizeof(landed), 9, "landed", "", 0, "solo success");
     if (!dlx_pc_outcomes(landed)) return false;
     struct zcl_command_reply reply;
@@ -13412,7 +13668,7 @@ static bool dlx_pc_history_ship_pass(void)
     ok = ok && dlx_run(&c) && dlx_ok(&c) &&
         dlx_pc_has(dlx_arr(&c, "precheck_ran"), "check-ship-remote-transaction") &&
         dlx_pc_ship_calls(&rig) == 6 &&
-        dlx_pc_ran(&rig, "./tools/ship.sh --selftest");
+        dlx_pc_ship_selftest_ran(&rig, ship);
     dlx_end(&c);
     ok = ok && dlx_queue_has_one();
     dlx_restore();
@@ -13502,6 +13758,87 @@ static bool dlx_pc_history_allocation_unproven(void)
     bool ok = ran && consumed && dlx_pc_no_ship(&c, &rig) &&
         strstr(dlx_str(&c, "precheck_unproven"), "history allocation unavailable") != NULL &&
         dlx_queue_has_one();
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_observation_rig(struct dlx_rig *rig, const char *tag,
+                                   char canonical[1600], char metadata[1600], char lock[1600])
+{
+    char archive[1600], root[512], wt[800], failed[512];
+    if (!dlx_pc_rig(rig, tag, true, "check-learned-one\n") ||
+        !dlx_pc_history_archive("aaaaaa", 10, "child_proof_failed_exit_2", archive) ||
+        !platform_state_root(root, sizeof(root))) return false;
+    (void)snprintf(wt, sizeof(wt), "%s/land/wt", root);
+    if (!platform_directory_canonical_real(wt, canonical, 1600)) return false;
+    const char *slash = strrchr(archive, '/');
+    if (!slash) return false;
+    int n = snprintf(metadata, 1600, "%.*s/failure-observed.v1", (int)(slash - archive), archive);
+    int l = snprintf(lock, 1600, "%s/.cache/zcl-dev-proof/queue.lock", canonical);
+    dlx_pc_row(failed, sizeof(failed), 8, "failed", "lint", 1, "check-learned-one failed");
+    return n > 0 && n < 1600 && l > 0 && l < 1600 && dlx_pc_outcomes(failed);
+}
+
+static bool dlx_pc_observation_busy(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char root[1600], metadata[1600], lock[1600];
+    if (!dlx_pc_observation_rig(&rig, "observation_busy", root, metadata, lock)) return false;
+    int guard = open(lock, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (guard < 0) return false;
+    if (flock(guard, LOCK_EX | LOCK_NB) != 0) { (void)close(guard); return false; }
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ran = dlx_run(&c);
+    (void)flock(guard, LOCK_UN); (void)close(guard);
+    bool ok = ran && dlx_pc_no_ship(&c, &rig) && dlx_queue_has_one() &&
+        strstr(dlx_str(&c, "precheck_unproven"), "legacy observation incomplete") != NULL &&
+        access(metadata, F_OK) != 0;
+    dlx_end(&c);
+    dlx_restore();
+    return ok;
+}
+
+static bool dlx_pc_observation_age(const char *root, const char *metadata, int64_t *age)
+{
+    struct zcl_dev_proof_observation_report report;
+    if (!zcl_dev_proof_observe_legacy_failures(root, &report)) return false;
+    char record[1024], changed[1024];
+    FILE *file = fopen(metadata, "rb");
+    if (!file) return false;
+    size_t n = fread(record, 1, sizeof(record) - 1, file);
+    bool ok = !ferror(file) && feof(file) && n > 0;
+    if (fclose(file) != 0) ok = false;
+    if (!ok) return false;
+    record[n] = 0;
+    const char *start = strstr(record, "\nobserved_upper_unix=");
+    if (!start) return false;
+    start += strlen("\nobserved_upper_unix=");
+    const char *end = strchr(start, '\n');
+    if (!end) return false;
+    *age = DLX_PC_NOW - 8 * 86400;
+    int size = snprintf(changed, sizeof(changed), "%.*s%lld%s", (int)(start - record),
+        record, (long long)*age, end);
+    return size > 0 && size < (int)sizeof(changed) && dlx_write(metadata, changed);
+}
+
+static bool dlx_pc_observation_aged(void)
+{
+    struct dlx_rig rig;
+    struct dlx_call c;
+    char root[1600], metadata[1600], lock[1600];
+    int64_t age;
+    if (!dlx_pc_observation_rig(&rig, "observation_aged", root, metadata, lock) ||
+        !dlx_pc_observation_age(root, metadata, &age)) return false;
+    dlx_pc_submit(&c, &rig, NULL, NULL);
+    bool ok = dlx_run(&c) && dlx_pc_no_ship(&c, &rig) && dlx_queue_has_one() &&
+        !strstr(dlx_str(&c, "precheck_unproven"), "proof-history:");
+    struct zcl_dev_proof_history_failure row;
+    static const char leaf[] = "1111111111111111111111111111111111111111-"
+        "2222222222222222222222222222222222222222.aaaaaa";
+    ok = ok && zcl_dev_proof_history_failure_read(root, leaf, &row) &&
+        row.observation_state == ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER && row.observed_upper_unix == age;
     dlx_end(&c);
     dlx_restore();
     return ok;
@@ -13867,6 +14204,14 @@ static int dlx_case_history_precheck(void)
     }
     TEST("land: history allocation failure remains unproven and preserves outcome gates") {
         ASSERT(dlx_pc_history_allocation_unproven());
+        PASS();
+    }
+    TEST("land: busy legacy observation preserves outcome gates and explicitly reports unproven") {
+        ASSERT(dlx_pc_observation_busy());
+        PASS();
+    }
+    TEST("land: aged observation proves failure old without refreshing it or treating recent observation as event time") {
+        ASSERT(dlx_pc_observation_aged());
         PASS();
     }
 _test_next:;

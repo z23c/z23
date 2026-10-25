@@ -131,11 +131,12 @@ static bool history_lines(char *text, char **lines, size_t count)
 }
 
 static bool history_request(int fd, struct zcl_dev_proof_history_failure *out,
-                             char root[65])
+                             char root[65], char observation_root[65])
 {
     char text[320], *lines[5];
     if (history_text(fd, "request", text, sizeof(text)) != 1) return false;
     history_hash("zcl.dev_proof_failure_recorded.request.v1", text, root);
+    history_hash("zcl.dev_proof_failure_observed.request.v1", text, observation_root);
     return history_lines(text, lines, 5) &&
            strcmp(lines[0], "zcl.dev_proof_request.v1") == 0 &&
            strcmp(lines[1], out->local) == 0 &&
@@ -144,13 +145,14 @@ static bool history_request(int fd, struct zcl_dev_proof_history_failure *out,
            history_positive(lines[4], &out->request_started_monotonic_us);
 }
 
-static bool history_time_fields(char *text, char *values[7])
+static bool history_time_fields(char *text, const char *schema,
+                                 const char *wall_key, const char *mono_key, char *values[7])
 {
     char *lines[8];
-    static const char *const keys[] = {"attempt=", "local=", "base=", "request_sha3=",
-        "failure_sha3=", "recorded_unix=", "recorded_monotonic_us="};
+    const char *const keys[] = {"attempt=", "local=", "base=", "request_sha3=",
+        "failure_sha3=", wall_key, mono_key};
     if (!history_lines(text, lines, 8) ||
-        strcmp(lines[0], "zcl.dev_proof_failure_recorded.v1") != 0) return false;
+        strcmp(lines[0], schema) != 0) return false;
     for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         size_t n = strlen(keys[i]);
         if (strncmp(lines[i + 1], keys[i], n) != 0) return false;
@@ -179,11 +181,30 @@ static void history_time(int logs, struct zcl_dev_proof_history_failure *out,
     if (result == 0) return;
     out->time_state = ZCL_PROOF_HISTORY_TIME_UNUSABLE;
     int64_t wall, mono;
-    if (result != 1 || !history_time_fields(text, values) ||
+    if (result != 1 || !history_time_fields(text, "zcl.dev_proof_failure_recorded.v1",
+        "recorded_unix=", "recorded_monotonic_us=", values) ||
         !history_time_binding(values, out, request, failure, &wall, &mono)) return;
     out->time_state = ZCL_PROOF_HISTORY_TIME_BOUND_RECORDING;
     out->recorded_unix = wall;
     out->recorded_monotonic_us = mono;
+}
+
+static void history_observation(int logs, struct zcl_dev_proof_history_failure *out,
+                                 const char *request, const char *failure)
+{
+    char text[1024], *values[7];
+    int result = history_text(logs, "failure-observed.v1", text, sizeof(text));
+    if (result == 0) return;
+    out->observation_state = ZCL_PROOF_HISTORY_OBSERVATION_UNUSABLE;
+    int64_t wall, mono;
+    /* An observer must not launder corrupt producer metadata into timed use. */
+    if (out->time_state == ZCL_PROOF_HISTORY_TIME_UNUSABLE || result != 1 ||
+        !history_time_fields(text, "zcl.dev_proof_failure_observed.v1",
+            "observed_upper_unix=", "observed_upper_monotonic_us=", values) ||
+        !history_time_binding(values, out, request, failure, &wall, &mono)) return;
+    out->observation_state = ZCL_PROOF_HISTORY_OBSERVATION_BOUND_UPPER;
+    out->observed_upper_unix = wall;
+    out->observed_upper_monotonic_us = mono;
 }
 
 static bool history_failure(char *text, struct zcl_dev_proof_history_failure *out)
@@ -205,6 +226,24 @@ static bool history_failure(char *text, struct zcl_dev_proof_history_failure *ou
     return true;
 }
 
+static bool history_archive(int logs, char *text, struct zcl_dev_proof_history_failure *out,
+    const char request[65], const char observed_request[65])
+{
+    char failure[65], observed_failure[65], bound_attempt[144], bound_request[65]; size_t payload;
+    history_hash("zcl.dev_proof_failure_recorded.failure.v1", text, failure);
+    memcpy(out->request_sha3, request, sizeof(out->request_sha3));
+    memcpy(out->archive_sha3, failure, sizeof(out->archive_sha3));
+    history_time(logs, out, request, failure);
+    history_hash("zcl.dev_proof_failure_observed.failure.v1", text, observed_failure);
+    history_observation(logs, out, observed_request, observed_failure);
+    if (zcl_dev_proof_failure_binding_decode(text, strlen(text), bound_attempt, bound_request, &payload) == 1 &&
+        strcmp(bound_attempt, out->attempt) == 0 && strcmp(bound_request, request) == 0) {
+        out->attempt_binding_valid = true;
+        text[payload] = 0; /* metadata never becomes learned gate evidence */
+    }
+    return history_failure(text, out);
+}
+
 static int history_attempt(int parent, const char *leaf,
                            struct zcl_dev_proof_history_failure *out)
 {
@@ -218,14 +257,11 @@ static int history_attempt(int parent, const char *leaf,
         (void)close(fd);
         return error == ENOENT ? 0 : -1;
     }
-    char text[2049], request[65], failure[65];
+    char text[2049], request[65], observed_request[65];
     int result = history_text(logs, "failure.txt", text, sizeof(text));
     if (result == 1) {
-        if (!history_request(fd, out, request) || !history_failure(text, out)) result = -1;
-        else {
-            history_hash("zcl.dev_proof_failure_recorded.failure.v1", text, failure);
-            history_time(logs, out, request, failure);
-        }
+        if (!history_request(fd, out, request, observed_request) ||
+            !history_archive(logs, text, out, request, observed_request)) result = -1;
     }
     (void)close(logs);
     (void)close(fd);
@@ -258,20 +294,12 @@ static enum zcl_dev_proof_history_result history_walk(int fd,
     (void)closedir(dir);
     return result;
 }
-#endif
-
-enum zcl_dev_proof_history_result zcl_dev_proof_history_failures(
-    const char *canonical_root,
-    bool (*visit)(const struct zcl_dev_proof_history_failure *, void *), void *context)
+static enum zcl_dev_proof_history_result history_store(const char *canonical_root,
+                                                       int *store)
 {
-#if defined(_WIN32)
-    (void)canonical_root;
-    (void)visit;
-    (void)context;
-    return ZCL_PROOF_HISTORY_UNAVAILABLE;
-#else
+    *store = -1;
     char actual[PATH_MAX];
-    if (!canonical_root || !visit ||
+    if (!canonical_root ||
         !platform_directory_canonical_real(canonical_root, actual, sizeof(actual)) ||
         strcmp(actual, canonical_root) != 0) return ZCL_PROOF_HISTORY_INVALID;
     int fd = open(canonical_root, O_RDONLY | O_CLOEXEC | O_DIRECTORY | O_NOFOLLOW);
@@ -285,6 +313,41 @@ enum zcl_dev_proof_history_result zcl_dev_proof_history_failures(
                                            : ZCL_PROOF_HISTORY_INVALID;
         fd = next;
     }
-    return history_walk(fd, visit, context);
+    *store = fd;
+    return ZCL_PROOF_HISTORY_COMPLETE;
+}
+#endif
+
+enum zcl_dev_proof_history_result zcl_dev_proof_history_failures(
+    const char *canonical_root,
+    bool (*visit)(const struct zcl_dev_proof_history_failure *, void *), void *context)
+{
+#if defined(_WIN32)
+    (void)canonical_root; (void)visit; (void)context;
+    return ZCL_PROOF_HISTORY_UNAVAILABLE;
+#else
+    if (!visit) return ZCL_PROOF_HISTORY_INVALID;
+    int fd;
+    enum zcl_dev_proof_history_result result = history_store(canonical_root, &fd);
+    return result == ZCL_PROOF_HISTORY_COMPLETE && fd >= 0
+        ? history_walk(fd, visit, context) : result;
+#endif
+}
+
+bool zcl_dev_proof_history_failure_read(const char *canonical_root,
+    const char *attempt, struct zcl_dev_proof_history_failure *out)
+{
+#if defined(_WIN32)
+    (void)canonical_root; (void)attempt; (void)out;
+    return false;
+#else
+    if (!attempt || !out) return false;
+    memset(out, 0, sizeof(*out));
+    if (!history_pair_leaf(attempt, out)) return false;
+    int fd;
+    if (history_store(canonical_root, &fd) != ZCL_PROOF_HISTORY_COMPLETE || fd < 0) return false;
+    int result = history_attempt(fd, attempt, out);
+    (void)close(fd);
+    return result == 1;
 #endif
 }

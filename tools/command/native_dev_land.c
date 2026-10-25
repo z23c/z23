@@ -475,16 +475,24 @@ struct dl_string_result {
 
 /* Successful native serialization emits 35 unique scalar members. Reject
  * foreign ambiguity and displacement; cap extensions before O(n^2) work. */
+static bool dl_optional_evidence_key(const char *key)
+{
+    return strcmp(key, "failed_proof_root") == 0 || strcmp(key, "failed_proof_attempt") == 0 ||
+        strcmp(key, "failed_proof_request_sha3") == 0 || strcmp(key, "failed_proof_archive_sha3") == 0 ||
+        strcmp(key, "terminal_recorded_at") == 0;
+}
+
 static bool dl_row_members_ok(const struct json_value *doc)
 {
     enum { DL_ROW_MEMBER_MAX = 64 };
     if (!doc || doc->type != JSON_OBJ || doc->num_children > DL_ROW_MEMBER_MAX)
         return false;
     for (size_t i = 0; i < doc->num_children; i++) {
-        if (doc->children[i].type == JSON_OBJ || doc->children[i].type == JSON_ARR)
+        if ((doc->children[i].type == JSON_OBJ || doc->children[i].type == JSON_ARR) &&
+            !dl_optional_evidence_key(doc->keys[i]))
             return false;
         for (size_t j = 0; j < i; j++)
-            if (strcmp(doc->keys[i], doc->keys[j]) == 0) return false;
+            if (strcmp(doc->keys[i], doc->keys[j]) == 0 && !dl_optional_evidence_key(doc->keys[i])) return false;
     }
     return true;
 }
@@ -879,6 +887,77 @@ static bool dl_hold_row_ok(const struct dl_row *r)
         strcmp(r->phase, "push") != 0);
 }
 
+static bool dl_failure_root_ok(const char *root)
+{
+    size_t n = strlen(root);
+    if (n < 2 || root[0] != '/' || root[n - 1] == '/') return false;
+    if (strstr(root, "//") || strstr(root, "/./") || strstr(root, "/../")) return false;
+    if (strcmp(root + n - 2, "/.") == 0 || (n >= 3 && strcmp(root + n - 3, "/..") == 0)) return false;
+    for (const unsigned char *p = (const unsigned char *)root; *p; p++)
+        if (*p < 32 || *p == 127) return false;
+    return true;
+}
+
+static bool dl_failure_shape(const struct dl_row *r)
+{
+    char prefix[164];
+    if (strcmp(r->state, "failed") != 0 &&
+        !(strcmp(r->state, "inflight") == 0 && strcmp(r->phase, "prove") == 0)) return false;
+    if (!dl_sha_ok(r->local) || !dl_sha_ok(r->base) || !dl_failure_root_ok(r->failed_proof.root) ||
+        !dl_hex_ok(r->failed_proof.request, 64) || !dl_hex_ok(r->failed_proof.archive, 64)) return false;
+    int n = snprintf(prefix, sizeof(prefix), "%s-%s.", r->local, r->base);
+    if (n <= 0 || n >= (int)sizeof(prefix) || strncmp(prefix, r->failed_proof.attempt, (size_t)n)) return false;
+    const char *suffix = r->failed_proof.attempt + n;
+    return strlen(suffix) == 6 && strspn(suffix, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789") == 6;
+}
+
+static bool dl_failure_member(const struct json_value *doc, const char *key, char *out, size_t cap)
+{
+    size_t found = 0;
+    for (size_t i = 0; i < doc->num_children; i++) {
+        if (strcmp(doc->keys[i], key)) continue;
+        const struct json_value *value = &doc->children[i];
+        if (++found != 1 || value->type != JSON_STR || !value->val.s || strlen(value->val.s) >= cap) return false;
+        memcpy(out, value->val.s, strlen(value->val.s) + 1);
+    }
+    return found == 1;
+}
+
+/* Optional evidence is all-or-none. Invalid/partial/duplicate typed metadata
+ * loses attribution, never the admitted row or its existing verdict. */
+static void dl_failure_parse(const char *line, struct dl_row *r)
+{
+    struct json_value doc = {0};
+    bool ok = !strstr(line, "\\u0000") && json_read(&doc, line, strlen(line)) &&
+        dl_failure_member(&doc, "failed_proof_root", r->failed_proof.root, sizeof(r->failed_proof.root)) &&
+        dl_failure_member(&doc, "failed_proof_attempt", r->failed_proof.attempt, sizeof(r->failed_proof.attempt)) &&
+        dl_failure_member(&doc, "failed_proof_request_sha3", r->failed_proof.request, sizeof(r->failed_proof.request)) &&
+        dl_failure_member(&doc, "failed_proof_archive_sha3", r->failed_proof.archive, sizeof(r->failed_proof.archive));
+    if (!ok || !dl_failure_shape(r)) memset(&r->failed_proof, 0, sizeof(r->failed_proof));
+    json_free(&doc);
+}
+
+static bool dl_terminal_state(const char *state)
+{
+    return strcmp(state, "failed") == 0 || strcmp(state, "conflict") == 0 ||
+        strcmp(state, "cancelled") == 0 || strcmp(state, "landed") == 0 || strcmp(state, "fenced") == 0;
+}
+
+static void dl_terminal_time_parse(const char *line, struct dl_row *r)
+{
+    struct json_value doc = {0}; size_t found = 0; bool ok = true;
+    r->terminal_recorded_at = 0;
+    if (!dl_terminal_state(r->state) || strstr(line, "\\u0000") || !json_read(&doc, line, strlen(line))) return;
+    for (size_t i = 0; i < doc.num_children; i++) {
+        if (strcmp(doc.keys[i], "terminal_recorded_at")) continue;
+        const struct json_value *value = &doc.children[i];
+        if (++found != 1 || value->type != JSON_INT || json_get_int(value) <= 0) { ok = false; break; }
+        r->terminal_recorded_at = json_get_int(value);
+    }
+    if (!ok) r->terminal_recorded_at = 0;
+    json_free(&doc);
+}
+
 static bool dl_row_semantics_ok(const struct dl_row *r)
 {
     if (strcmp(r->state, "fenced") == 0 && (!r->publication_signature[0] ||
@@ -1005,6 +1084,8 @@ static bool dl_parse_row(const char *line, struct dl_row *r)
         return false;
     (void)dl_line_int(line, "started", &r->started);
     (void)dl_line_int(line, "landed_at", &r->landed_at);
+    dl_failure_parse(line, r);
+    dl_terminal_time_parse(line, r);
     return dl_prechecked_parse(line, r) && dl_parse_dispatch_fields(line, r) &&
            dl_row_semantics_ok(r);
 }
@@ -1085,6 +1166,28 @@ static bool dl_landed_at_member(const struct dl_row *r, char *out, size_t cap)
            snprintf(out, cap, "\"landed_at\":%lld,", r->landed_at) < (int)cap;
 }
 
+static size_t dl_failure_append(const struct dl_row *r, char *out, size_t cap, size_t size)
+{
+    char root[8192], member[8704];
+    if (!dl_failure_shape(r) || !dl_escape(r->failed_proof.root, root, sizeof(root)) || size < 2) return size;
+    int n = snprintf(member, sizeof(member), ",\"failed_proof_root\":\"%s\",\"failed_proof_attempt\":\"%s\","
+        "\"failed_proof_request_sha3\":\"%s\",\"failed_proof_archive_sha3\":\"%s\"}\n",
+        root, r->failed_proof.attempt, r->failed_proof.request, r->failed_proof.archive);
+    if (n <= 0 || n >= (int)sizeof(member) || (size_t)n >= cap - (size - 2)) return size;
+    memcpy(out + size - 2, member, (size_t)n + 1);
+    return size - 2 + (size_t)n;
+}
+
+static size_t dl_terminal_time_append(const struct dl_row *r, char *out, size_t cap, size_t size)
+{
+    char member[80];
+    if (!dl_terminal_state(r->state) || r->terminal_recorded_at <= 0 || size < 2) return size;
+    int n = snprintf(member, sizeof(member), ",\"terminal_recorded_at\":%lld}\n", r->terminal_recorded_at);
+    if (n <= 0 || n >= (int)sizeof(member) || (size_t)n >= cap - (size - 2)) return size;
+    memcpy(out + size - 2, member, (size_t)n + 1);
+    return size - 2 + (size_t)n;
+}
+
 static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                           size_t *len_out)
 {
@@ -1151,8 +1254,10 @@ static bool dl_encode_row(const struct dl_row *r, char *out, size_t cap,
                  r->fence_peer, dl_hold_literal(r->publication_hold), dependency);
     if (w <= 0 || (size_t)w >= cap)
         return false;
+    size_t size = dl_failure_append(r, out, cap, (size_t)w);
+    size = dl_terminal_time_append(r, out, cap, size);
     if (len_out)
-        *len_out = (size_t)w;
+        *len_out = size;
     return true;
 }
 
@@ -1986,6 +2091,16 @@ static bool dl_scan_outcomes(const struct dl_dirs *d, const struct dl_row *want,
     return dl_history_read(path, dl_scan_outcome_row, &scan, NULL, 0);
 }
 
+static void dl_terminal_observe(struct dl_row *r)
+{
+    /* Observation after terminal state is known, before append. This is
+     * neither child-exit time nor the append/fsync completion time. */
+    r->terminal_recorded_at = 0;
+    if (!dl_terminal_state(r->state)) return;
+    int64_t now = platform_time_wall_unix();
+    if (now > 0) r->terminal_recorded_at = (long long)now;
+}
+
 static bool dl_record_outcome(const struct dl_dirs *d, struct dl_row *r)
 {
     char path[4096 + 32];
@@ -2001,13 +2116,16 @@ static bool dl_record_outcome(const struct dl_dirs *d, struct dl_row *r)
         r->landed_at = (long long)platform_time_wall_unix();
     if (present)
         *r = prior;
-    else if (
+    else {
+        dl_terminal_observe(r);
+        if (
 #if defined(ZCL_TESTING)
         (getenv("ZCL_LAND_TEST_REFUSE_OUTCOME_APPEND") &&
          getenv("ZCL_DEVLOOP_TEST_PROCESS")) ||
 #endif
         !dl_write_row(path, r))
-        return false;
+            return false;
+    }
     /* Best effort and after the outcome is durable: only a row appended just
      * now is sensed, so a replay or a mail retry never adds a second line. */
     dl_objectives_snapshot(d, r, !present);
@@ -2605,13 +2723,18 @@ static enum dl_proof dl_proof_request_stub(const char *stub, const char *wt,
     return DL_PROOF_PENDING;
 }
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+static void dl_failure_capture(struct dl_row *row, const struct zcl_dev_proof_status *status);
+#endif
+
 static enum dl_proof dl_proof_request(const char *wt, const char *local,
                                       const char *base, char *detail,
-                                      size_t cap)
+                                      size_t cap, struct dl_row *bound_row)
 {
     const char *stub = dl_stub();
     char note[256] = "";
     (void)note;
+    if (bound_row) memset(&bound_row->failed_proof, 0, sizeof(bound_row->failed_proof));
     if (detail && cap)
         detail[0] = '\0';
     if (stub)
@@ -2620,7 +2743,9 @@ static enum dl_proof dl_proof_request(const char *wt, const char *local,
     {
         struct zcl_dev_proof_status status = {0};
         (void)dl_proof_requeue_failed(wt, local, base, note, sizeof(note));
-        if (!zcl_dev_proof_ensure(wt, local, base, &status)) {
+        bool ensured = zcl_dev_proof_ensure(wt, local, base, &status);
+        if (bound_row) dl_failure_capture(bound_row, &status);
+        if (!ensured) {
             (void)snprintf(detail, cap, "%s",
                            status.detail[0] ? status.detail
                                             : "proof_ensure_failed");
@@ -2901,11 +3026,81 @@ static enum dl_proof dl_proof_stub_read(const char *stub, const char *wt,
     return DL_PROOF_PENDING;
 }
 
+#if defined(ZCL_DEV_BUILD) || defined(ZCL_TESTING)
+static void dl_failure_capture(struct dl_row *row, const struct zcl_dev_proof_status *status)
+{
+    memset(&row->failed_proof, 0, sizeof(row->failed_proof));
+    if (status->state != ZCL_DEV_PROOF_STATE_FAILED || !status->failure_identity.valid ||
+        strcmp(row->local, status->local_commit) || strcmp(row->base, status->remote_base)) return;
+    const struct zcl_dev_proof_failure_identity *id = &status->failure_identity;
+    memcpy(row->failed_proof.root, id->canonical_root, sizeof(row->failed_proof.root));
+    memcpy(row->failed_proof.attempt, id->attempt, sizeof(row->failed_proof.attempt));
+    memcpy(row->failed_proof.request, id->request_sha3, sizeof(row->failed_proof.request));
+    memcpy(row->failed_proof.archive, id->archive_sha3, sizeof(row->failed_proof.archive));
+    if (!dl_failure_shape(row)) memset(&row->failed_proof, 0, sizeof(row->failed_proof));
+}
+#endif
+
+#if defined(ZCL_TESTING)
+/* Hermetic composition: actual status snapshot -> production capture/codec.
+ * No proof execution, lease, or post-hoc archive selection. */
+bool zcl_native_dev_land_test_failure_capture(const char *root, const char *local,
+    const char *base, bool reset, char *out, size_t cap)
+{
+    struct dl_row row = {.seq = 1, .priority_seq = 1, .attempt = 1};
+    struct zcl_dev_proof_status status = {0};
+    if (!zcl_dev_proof_status_read(root, local, base, &status)) return false;
+    (void)snprintf(row.tip, sizeof(row.tip), "%s", local);
+    (void)snprintf(row.local, sizeof(row.local), "%s", local);
+    (void)snprintf(row.base, sizeof(row.base), "%s", base);
+    (void)snprintf(row.state, sizeof(row.state), "failed");
+    dl_failure_capture(&row, &status);
+    if (reset) {
+        memset(&row.failed_proof, 0, sizeof(row.failed_proof));
+        (void)snprintf(row.state, sizeof(row.state), "queued");
+    }
+    return dl_encode_row(&row, out, cap, NULL);
+}
+
+bool zcl_native_dev_land_test_failure_replay(const char *root, const char *line,
+    char *out, size_t cap)
+{
+    struct dl_dirs d = {0}; struct dl_row row;
+    if (!dl_parse_row(line, &row)) return false;
+    (void)snprintf(d.root, sizeof(d.root), "%s", root);
+    (void)snprintf(d.land, sizeof(d.land), "%s", root);
+    (void)snprintf(d.wt, sizeof(d.wt), "%s", root);
+    if (!dl_record_outcome(&d, &row)) return false;
+    /* A later PASS/empty attribution cannot rewrite the first terminal row. */
+    (void)snprintf(row.state, sizeof(row.state), "landed");
+    memset(&row.failed_proof, 0, sizeof(row.failed_proof));
+    return dl_record_outcome(&d, &row) && dl_encode_row(&row, out, cap, NULL);
+}
+
+/* Same real first-write/replay path with a changed candidate timestamp.
+ * Fixture root has no mailbox and the harness supplies offline node inputs. */
+bool zcl_native_dev_land_test_terminal_record(const char *root, const char *line,
+    char *out, size_t cap)
+{
+    struct dl_dirs d = {0}; struct dl_row row;
+    if (!dl_parse_row(line, &row)) return false;
+    (void)snprintf(d.root, sizeof(d.root), "%s", root);
+    (void)snprintf(d.land, sizeof(d.land), "%s", root);
+    (void)snprintf(d.wt, sizeof(d.wt), "%s", root);
+    if (!dl_record_outcome(&d, &row)) return false;
+    long long original = row.terminal_recorded_at;
+    row.terminal_recorded_at = 4102444800LL;
+    return dl_record_outcome(&d, &row) && row.terminal_recorded_at == original &&
+        dl_encode_row(&row, out, cap, NULL);
+}
+#endif
+
 static enum dl_proof dl_proof_read(const char *wt, const char *local,
                                    const char *base, char *dimension,
-                                   size_t dim_cap, char *detail, size_t cap)
+                                   size_t dim_cap, char *detail, size_t cap, struct dl_row *bound_row)
 {
     const char *stub = dl_stub();
+    if (bound_row) memset(&bound_row->failed_proof, 0, sizeof(bound_row->failed_proof));
     if (detail && cap)
         detail[0] = '\0';
     if (dimension && dim_cap)
@@ -2923,6 +3118,7 @@ static enum dl_proof dl_proof_read(const char *wt, const char *local,
             return DL_PROOF_FAILED;
         }
         dl_proof_status_detail(&status, wt, local, base, detail, cap);
+        if (bound_row) dl_failure_capture(bound_row, &status);
         /* An unclaimed request that has sat past the idle bound is named,
          * not left as a bare "queued": a driver reading this status must
          * be able to tell "a worker is coming" from "nothing has consumed
@@ -4802,6 +4998,8 @@ static bool dl_requeue_successor(const struct dl_dirs *d, struct dl_row *row,
     successor.base[0] = '\0';
     successor.tree[0] = '\0';
     successor.proof_intent[0] = '\0';
+    memset(&successor.failed_proof, 0, sizeof(successor.failed_proof));
+    successor.terminal_recorded_at = 0;
     dl_publication_clear(&successor);
     successor.dimension[0] = '\0';
     successor.producer_recovered = 0;
@@ -6687,6 +6885,8 @@ static void dl_window_tick(const struct dl_dirs *d, const struct dl_row *row)
 
 bool dl_proof_intent_bind(const struct dl_dirs *d, struct dl_row *row)
 {
+    memset(&row->failed_proof, 0, sizeof(row->failed_proof));
+    row->terminal_recorded_at = 0;
     char rev[96];
     char tree[256];
     const char *args[] = { "rev-parse", "--verify", "--quiet", rev, NULL };
@@ -6811,6 +7011,8 @@ static void dl_failed_proof_evidence(const struct dl_dirs *d,
 static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
                            struct zcl_command_reply *reply)
 {
+    memset(&row->failed_proof, 0, sizeof(row->failed_proof));
+    row->terminal_recorded_at = 0;
     char detail[512];
     enum dl_proof p;
     size_t members = 0;
@@ -6831,7 +7033,7 @@ static void dl_start_proof(const struct dl_dirs *d, struct dl_row *row,
         return;
     }
     p = dl_proof_request(d->wt, row->local, row->base, detail,
-                         sizeof(detail));
+                         sizeof(detail), row);
     (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
     dl_log(row, detail);
     dl_log(row, "\n");
@@ -8374,11 +8576,11 @@ static bool dl_resume_proof_read(const struct dl_dirs *d, struct dl_row *row,
     }
     int64_t started = platform_time_monotonic_us();
     *p = dl_proof_read(d->wt, row->local, row->base, dimension,
-                       48, detail, 512);
+                       48, detail, 512, row);
     dl_beat(row, "proof_status", started);
     if (*p == DL_PROOF_MISSING) {
         dl_log(row, "proof worker missing; requeueing the persisted pair\n");
-        *p = dl_proof_request(d->wt, row->local, row->base, detail, 512);
+        *p = dl_proof_request(d->wt, row->local, row->base, detail, 512, row);
     }
     (void)snprintf(row->detail, sizeof(row->detail), "%s", detail);
     return true;
@@ -8472,6 +8674,8 @@ static bool dl_resume_interrupted_proof(const struct dl_dirs *d,
     row->attempt++;
     (void)snprintf(row->detail, sizeof(row->detail),
                    "interrupted proof re-queued: %.400s", detail);
+    memset(&row->failed_proof, 0, sizeof(row->failed_proof));
+    row->terminal_recorded_at = 0;
     if (dl_commit_or_report(d, row, false, reply, "proving"))
         dl_step_reply(reply, row, "proving");
     return true;
@@ -9811,7 +10015,16 @@ static bool dl_fence_record_outcome(const struct dl_dirs *d, struct dl_row *row)
 {
     struct dl_row prior; bool present = false; long long high_water = 0;
     if (!dl_scan_outcomes(d, row, &prior, &present, &high_water)) return false;
-    if (present) return dl_fence_row_equal(row, &prior) && dl_outbox(d, row, "outcome");
+    if (present) {
+        struct dl_row expected = *row;
+        /* First projection observes time after the journal is sealed. Only
+         * an absent observation may adopt that exact persisted value; all
+         * sealed fields, including any existing time, still compare exactly. */
+        if (!expected.terminal_recorded_at) expected.terminal_recorded_at = prior.terminal_recorded_at;
+        if (!dl_fence_row_equal(&expected, &prior)) return false;
+        *row = prior;
+        return dl_outbox(d, row, "outcome");
+    }
     return dl_record_outcome(d, row);
 }
 
@@ -11706,7 +11919,7 @@ static void dl_attach_proof_missing(const struct dl_dirs *d,
         int64_t started = platform_time_monotonic_us();
         enum dl_proof proof = dl_proof_read(d->wt, row->local, row->base,
                                             dimension, sizeof(dimension),
-                                            detail, sizeof(detail));
+                                            detail, sizeof(detail), NULL);
         dl_beat(row, "proof_status", started);
         if (proof == DL_PROOF_PENDING) {
             dl_fail(reply, "PUBLICATION_PROOF_PENDING", "attach",
