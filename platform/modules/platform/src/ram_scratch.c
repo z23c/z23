@@ -155,6 +155,38 @@ static bool lease_create(const char *dir, uint64_t bytes,
     return false;
 }
 
+/* Admitted bytes are the free space above the standing guard. */
+static bool reserve_root_admits(const char *root, uint64_t bytes,
+                                uint64_t *admitted)
+{
+    /* Only the root platform_ram_scratch_root() answered is resolvable:
+     * absolute, and therefore unambiguous about which lease directory the
+     * flock and the sum describe. */
+    if (!root || root[0] != '/' || bytes == 0) return false;
+    uint64_t free_bytes = 0;
+    if (!platform_disk_space_available(root, &free_bytes) ||
+        free_bytes < PLATFORM_RAM_SCRATCH_MIN_FREE_BYTES)
+        return false;
+    *admitted = free_bytes - PLATFORM_RAM_SCRATCH_MIN_FREE_BYTES;
+    return true;
+}
+
+/* A path that does not fit refuses, and so does any mkdir failure other
+ * than EEXIST. What is there must be a directory before it is locked. */
+static bool lease_dir_prepare(const char *root, char *dir, size_t dir_cap,
+                              char *lock_path, size_t lock_cap)
+{
+    if (snprintf(dir, dir_cap, "%s/%s", root, RAM_SCRATCH_LEASE_DIR) >=
+            (int)dir_cap ||
+        snprintf(lock_path, lock_cap, "%s/%s", dir,
+                 RAM_SCRATCH_LEASE_LOCK) >= (int)lock_cap)
+        return false;
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST) return false;
+    struct stat st;
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return false;
+    return true;
+}
+
 #endif
 
 bool platform_ram_scratch_root(char *out_path, size_t out_cap,
@@ -199,25 +231,13 @@ bool platform_ram_scratch_reserve(const char *root, uint64_t bytes,
     (void)bytes;
     return false;
 #else
-    /* Only the root platform_ram_scratch_root() answered is resolvable:
-     * absolute, and therefore unambiguous about which lease directory the
-     * flock and the sum describe. */
-    if (!root || root[0] != '/' || bytes == 0) return false;
-    uint64_t free_bytes = 0;
-    if (!platform_disk_space_available(root, &free_bytes) ||
-        free_bytes < PLATFORM_RAM_SCRATCH_MIN_FREE_BYTES)
-        return false;
-    uint64_t admitted = free_bytes - PLATFORM_RAM_SCRATCH_MIN_FREE_BYTES;
+    uint64_t admitted = 0;
+    if (!reserve_root_admits(root, bytes, &admitted)) return false;
     char dir[PLATFORM_RAM_SCRATCH_LEASE_PATH_MAX];
     char lock_path[PLATFORM_RAM_SCRATCH_LEASE_PATH_MAX];
-    if (snprintf(dir, sizeof(dir), "%s/%s", root, RAM_SCRATCH_LEASE_DIR) >=
-            (int)sizeof(dir) ||
-        snprintf(lock_path, sizeof(lock_path), "%s/%s", dir,
-                 RAM_SCRATCH_LEASE_LOCK) >= (int)sizeof(lock_path))
+    if (!lease_dir_prepare(root, dir, sizeof(dir), lock_path,
+                           sizeof(lock_path)))
         return false;
-    if (mkdir(dir, 0700) != 0 && errno != EEXIST) return false;
-    struct stat st;
-    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) return false;
     int lock_fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     if (lock_fd < 0) return false;
     if (flock(lock_fd, LOCK_EX) != 0) {
