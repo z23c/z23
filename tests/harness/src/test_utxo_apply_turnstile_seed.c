@@ -51,9 +51,9 @@ static bool sd_reader(struct block *out, const struct block_index *bi,
     (void)datadir;
     struct sd_fx *fx = user;
     int h = bi->nHeight;
+    memset(out, 0, sizeof(*out));
     if (h < 0 || h >= fx->n || h == fx->fail_h)
         return false;
-    memset(out, 0, sizeof(*out));
     out->num_vtx = 1;
     out->vtx = zcl_calloc(1, sizeof(struct transaction), "sd_tx");
     out->vtx[0].value_balance = fx->sapling[h];

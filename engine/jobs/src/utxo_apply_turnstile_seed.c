@@ -161,7 +161,9 @@ static int seed_write_rows(sqlite3 *db, int64_t k, bool k_found, int n)
     bool found = true;
     if (k_found && (!shielded_pool_kv_get(db, k, &sprout, &sapling, &found) ||
                     !found))
-        return -1;
+        LOG_ERR(STAGE_NAME,
+                "[utxo_apply] turnstile seed: row K=%lld totals read failed",
+                (long long)k);
     int wrote = 0;
     for (int i = 0; i < n; i++) {
         sprout += g_rows[i].sprout;
@@ -173,7 +175,9 @@ static int seed_write_rows(sqlite3 *db, int64_t k, bool k_found, int n)
             break;
         }
         if (!shielded_pool_kv_put(db, g_rows[i].height, sprout, sapling))
-            return -1;
+            LOG_ERR(STAGE_NAME,
+                    "[utxo_apply] turnstile seed: put failed at height=%lld",
+                    (long long)g_rows[i].height);
         wrote++;
     }
     return wrote;
