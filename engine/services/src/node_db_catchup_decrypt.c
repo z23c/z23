@@ -36,6 +36,112 @@
 #include <stdint.h>
 #include <string.h>
 
+/* False when a null argument, an output-less transaction, or a keyless
+ * wallet makes trial decryption a no-op. Checks short-circuit left to
+ * right. */
+static bool catchup_sapling_decrypt_inputs_ready(const struct node_db *ndb,
+                                                 const struct transaction *tx,
+                                                 const struct wallet *w)
+{
+    return ndb && tx && w && tx->num_shielded_output != 0 &&
+           w->sapling_keys.num_keys != 0;
+}
+
+/* True when `plaintext` holds a lead-byte 0x01 note opened by `ke`. */
+static bool catchup_sapling_open_output_plaintext(
+    const struct output_description *od,
+    const struct sapling_key_entry *ke,
+    uint8_t plaintext[564])
+{
+    if (!ke->used)
+        return false;
+
+    uint8_t dhsecret[32];
+    if (!sapling_ka_agree(od->ephemeral_key.data, ke->ivk, dhsecret))
+        return false;
+
+    uint8_t dec_key[32];
+    if (!sapling_kdf(dec_key, dhsecret, od->ephemeral_key.data)) {
+        memory_cleanse(dhsecret, sizeof(dhsecret));
+        return false;
+    }
+    memory_cleanse(dhsecret, sizeof(dhsecret));
+
+    if (!sapling_note_decrypt(dec_key, od->enc_ciphertext, 580,
+                              plaintext)) {
+        memory_cleanse(dec_key, sizeof(dec_key));
+        return false;
+    }
+    memory_cleanse(dec_key, sizeof(dec_key));
+
+    if (plaintext[0] != 0x01)
+        return false;
+    return true;
+}
+
+/* True when this key opened the output. Caller stops scanning keys.
+ * *found and *ok change only after the note is commitment-checked. */
+static bool catchup_sapling_output_opened_by_key(
+    struct node_db *ndb,
+    const struct output_description *od,
+    const struct sapling_key_entry *ke,
+    const struct uint256 *txid,
+    size_t oi,
+    int height,
+    int *found,
+    bool *ok)
+{
+    uint8_t plaintext[564];
+    if (!catchup_sapling_open_output_plaintext(od, ke, plaintext))
+        return false;
+
+    uint8_t d[11];
+    memcpy(d, plaintext + 1, sizeof(d));
+    uint64_t value = 0;
+    for (int b = 0; b < 8; b++)
+        value |= ((uint64_t)plaintext[12 + b]) << (8 * b);
+    uint8_t rcm[32];
+    memcpy(rcm, plaintext + 20, sizeof(rcm));
+
+    uint8_t pk_d[32];
+    if (!sapling_ivk_to_pkd(ke->ivk, d, pk_d))
+        return false;
+
+    uint8_t cm[32];
+    if (!sapling_compute_cm(d, pk_d, value, rcm, cm))
+        return false;
+    if (memcmp(cm, od->cm.data, sizeof(cm)) != 0)
+        return false;
+
+    uint8_t ak[32], nk[32];
+    sapling_ask_to_ak(ke->xsk.expsk.ask, ak);
+    sapling_nsk_to_nk(ke->xsk.expsk.nsk, nk);
+
+    /* Position-0 placeholder nullifier. As in
+     * wallet_try_sapling_decrypt (contexts/wallet/modules/wallet/src/wallet.c), the note's
+     * absolute commitment-tree position is not available at decrypt
+     * time; the spec nf is (re)computed at witness-creation time in
+     * advance_wallet_witnesses() where position =
+     * incremental_tree_size(tree) - 1 is exact. A guessed position
+     * would be a WRONG nullifier, strictly worse than this non-blank
+     * placeholder. See BUG #7. */
+    uint8_t nf[32];
+    sapling_compute_nf(d, pk_d, value, rcm, ak, nk, 0, nf);
+
+    if (!node_db_sync_sapling_note(ndb, txid->data, (uint32_t)oi,
+                                   (int64_t)value, rcm,
+                                   plaintext + 52, 512,
+                                   ke->ivk, d, pk_d, cm, nf,
+                                   height)) {
+        *ok = false;
+    } else {
+        (*found)++;
+    }
+
+    memory_cleanse(plaintext, sizeof(plaintext));
+    return true;
+}
+
 /* Try-decrypt Sapling outputs in a transaction and save to SQLite.
  * Returns number of notes found. */
 int node_db_catchup_try_sapling_decrypt(struct node_db *ndb,
@@ -44,8 +150,7 @@ int node_db_catchup_try_sapling_decrypt(struct node_db *ndb,
                                         int height,
                                         bool *ok_out)
 {
-    if (!ndb || !tx || !w || tx->num_shielded_output == 0 ||
-        w->sapling_keys.num_keys == 0) {
+    if (!catchup_sapling_decrypt_inputs_ready(ndb, tx, w)) {
         if (ok_out)
             *ok_out = true;
         return 0;
@@ -65,79 +170,13 @@ int node_db_catchup_try_sapling_decrypt(struct node_db *ndb,
 
         for (size_t ki = 0; ki < w->sapling_keys.num_keys; ki++) {
             const struct sapling_key_entry *ke = &w->sapling_keys.keys[ki];
-            if (!ke->used)
-                continue;
+            if (catchup_sapling_output_opened_by_key(ndb, od, ke, &txid, oi,
+                                                     height, &found, &ok)) {
+                if (!ok)
+                    break;
 
-            uint8_t dhsecret[32];
-            if (!sapling_ka_agree(od->ephemeral_key.data, ke->ivk, dhsecret))
-                continue;
-
-            uint8_t dec_key[32];
-            if (!sapling_kdf(dec_key, dhsecret, od->ephemeral_key.data)) {
-                memory_cleanse(dhsecret, sizeof(dhsecret));
-                continue;
-            }
-            memory_cleanse(dhsecret, sizeof(dhsecret));
-
-            uint8_t plaintext[564];
-            if (!sapling_note_decrypt(dec_key, od->enc_ciphertext, 580,
-                                      plaintext)) {
-                memory_cleanse(dec_key, sizeof(dec_key));
-                continue;
-            }
-            memory_cleanse(dec_key, sizeof(dec_key));
-
-            if (plaintext[0] != 0x01)
-                continue;
-
-            uint8_t d[11];
-            memcpy(d, plaintext + 1, sizeof(d));
-            uint64_t value = 0;
-            for (int b = 0; b < 8; b++)
-                value |= ((uint64_t)plaintext[12 + b]) << (8 * b);
-            uint8_t rcm[32];
-            memcpy(rcm, plaintext + 20, sizeof(rcm));
-
-            uint8_t pk_d[32];
-            if (!sapling_ivk_to_pkd(ke->ivk, d, pk_d))
-                continue;
-
-            uint8_t cm[32];
-            if (!sapling_compute_cm(d, pk_d, value, rcm, cm))
-                continue;
-            if (memcmp(cm, od->cm.data, sizeof(cm)) != 0)
-                continue;
-
-            uint8_t ak[32], nk[32];
-            sapling_ask_to_ak(ke->xsk.expsk.ask, ak);
-            sapling_nsk_to_nk(ke->xsk.expsk.nsk, nk);
-
-            /* Position-0 placeholder nullifier. As in
-             * wallet_try_sapling_decrypt (contexts/wallet/modules/wallet/src/wallet.c), the note's
-             * absolute commitment-tree position is not available at decrypt
-             * time; the spec nf is (re)computed at witness-creation time in
-             * advance_wallet_witnesses() where position =
-             * incremental_tree_size(tree) - 1 is exact. A guessed position
-             * would be a WRONG nullifier, strictly worse than this non-blank
-             * placeholder. See BUG #7. */
-            uint8_t nf[32];
-            sapling_compute_nf(d, pk_d, value, rcm, ak, nk, 0, nf);
-
-            if (!node_db_sync_sapling_note(ndb, txid.data, (uint32_t)oi,
-                                          (int64_t)value, rcm,
-                                          plaintext + 52, 512,
-                                          ke->ivk, d, pk_d, cm, nf,
-                                          height)) {
-                ok = false;
-            } else {
-                found++;
-            }
-
-            memory_cleanse(plaintext, sizeof(plaintext));
-            if (!ok)
                 break;
-
-            break;
+            }
         }
 
         if (!ok)
