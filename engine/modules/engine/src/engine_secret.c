@@ -114,6 +114,51 @@ static bool load_from_file(const char *path, char *where, size_t where_len)
     return ok;
 }
 
+/* How a search of one key source ended. REFUSED is a hard stop, not a
+ * fallback: a candidate was present and rejected, so the caller returns
+ * false rather than trying the next source. */
+enum secret_outcome {
+    SECRET_ABSENT,
+    SECRET_ADOPTED,
+    SECRET_REFUSED
+};
+
+/* Try the vendor's key_env environment variable. No log call lives here —
+ * adopt still refuses a bad value in its own words — so the outcome travels
+ * back as a code and engine_secret_load keeps its messages. */
+static enum secret_outcome secret_from_env(const struct engine_vendor *v,
+                                           char *where, size_t where_len)
+{
+    if (!v->key_env)
+        return SECRET_ABSENT;
+    const char *env = getenv(v->key_env);
+    if (!env || !env[0])
+        return SECRET_ABSENT;
+    if (!adopt(env))
+        return SECRET_REFUSED;
+    (void)snprintf(where, where_len, "the %s environment variable",
+                   v->key_env);
+    return SECRET_ADOPTED;
+}
+
+/* Try the vendor's key_file_rel under $HOME. load_from_file speaks for
+ * itself on refusal; an unset HOME or a joined path that will not fit is
+ * absence, so the caller can still name what was never configured. */
+static enum secret_outcome secret_from_home_file(const struct engine_vendor *v,
+                                                 char *where, size_t where_len)
+{
+    if (!v->key_file_rel)
+        return SECRET_ABSENT;
+    const char *home = getenv("HOME");
+    char path[1024];
+    if (!home || !home[0]
+        || (size_t)snprintf(path, sizeof(path), "%s/%s", home,
+                            v->key_file_rel) >= sizeof(path))
+        return SECRET_ABSENT;
+    return load_from_file(path, where, where_len) ? SECRET_ADOPTED
+                                                  : SECRET_REFUSED;
+}
+
 bool engine_secret_load(const struct engine_vendor *v, const char *explicit_path,
                         char *where, size_t where_len)
 {
@@ -134,24 +179,15 @@ bool engine_secret_load(const struct engine_vendor *v, const char *explicit_path
     if (explicit_path && explicit_path[0])
         return load_from_file(explicit_path, where, where_len);
 
-    if (v->key_env) {
-        const char *env = getenv(v->key_env);
-        if (env && env[0]) {
-            if (!adopt(env))
-                return false;
-            (void)snprintf(where, where_len, "the %s environment variable",
-                           v->key_env);
-            return true;
-        }
-    }
-    if (v->key_file_rel) {
-        const char *home = getenv("HOME");
-        char path[1024];
-        if (home && home[0]
-            && (size_t)snprintf(path, sizeof(path), "%s/%s", home,
-                                v->key_file_rel) < sizeof(path))
-            return load_from_file(path, where, where_len);
-    }
+    const enum secret_outcome env_outcome =
+        secret_from_env(v, where, where_len);
+    if (env_outcome != SECRET_ABSENT)
+        return env_outcome == SECRET_ADOPTED;
+
+    const enum secret_outcome file_outcome =
+        secret_from_home_file(v, where, where_len);
+    if (file_outcome != SECRET_ABSENT)
+        return file_outcome == SECRET_ADOPTED;
     LOG_FAIL("engine",
              "no API key for %s: set %s, or place one in ~/%s with private permissions",
              v->id, v->key_env ? v->key_env : "(none)",
