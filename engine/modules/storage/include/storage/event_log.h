@@ -300,6 +300,8 @@ bool event_log_crc32c_hw_available(void);
 bool event_log_test_dirty(event_log_t *log);        /* current dirty flag */
 void event_log_test_reset_append_stats(void);       /* zero the three counters */
 void event_log_test_set_force_per_append(int v);    /* -1=env, 0=off, 1=forced */
+/* Skip the per-append disk barriers (nested fixture proofs only). */
+void event_log_skip_barriers_for_test(bool skip);
 int  event_log_test_fd(event_log_t *log);           /* raw fd (for fault inject) */
 void event_log_test_set_fd(event_log_t *log, int fd);
 

@@ -169,6 +169,13 @@ void event_log_append_stats(uint64_t *barrier_appends,
  * cached below). Not touched by production code. */
 static _Atomic int g_force_per_append_override = -1;
 
+#ifdef ZCL_TESTING
+/* Test seam: a nested fixture process that only proves runner plumbing can
+ * skip the disk barriers so a saturated host disk cannot decide its verdict.
+ * Off unless a test turns it on; production never touches it. */
+static _Atomic int g_skip_barrier_for_test;
+#endif
+
 /* Kill switch: ZCL_EVENTLOG_SYNC_PER_APPEND=1 forces the per-append fsync even
  * while deferred mode is on (restores the pre-batch behavior for A/B). Read
  * once and cached — the env cannot change under a running process. */
@@ -673,6 +680,10 @@ void event_log_close(event_log_t *log)
  * failure path too, since a barrier that failed still cost its wait. */
 static int event_log_barrier(struct platform_private_file *file)
 {
+#ifdef ZCL_TESTING
+    if (atomic_load_explicit(&g_skip_barrier_for_test, memory_order_relaxed))
+        return 0;
+#endif
     int64_t t0 = platform_time_monotonic_us();
     int rc = platform_private_file_flush(file) ? 0 : -1;
     int64_t dt = platform_time_monotonic_us() - t0;
@@ -1135,6 +1146,12 @@ void event_log_test_reset_append_stats(void)
     atomic_store_explicit(&g_barrier_appends, 0u, memory_order_relaxed);
     atomic_store_explicit(&g_deferred_appends, 0u, memory_order_relaxed);
     atomic_store_explicit(&g_barrier_us_total, 0u, memory_order_relaxed);
+}
+
+void event_log_skip_barriers_for_test(bool skip)
+{
+    atomic_store_explicit(&g_skip_barrier_for_test, skip ? 1 : 0,
+                          memory_order_relaxed);
 }
 
 void event_log_test_set_force_per_append(int v)

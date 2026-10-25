@@ -676,12 +676,20 @@ static int run_benchmark_proof(void)
     EL_CHECK("bench proof: fixture creation succeeds", created != NULL);
     if (!created) return failures;
     event_log_test_set_force_per_append(0);
+    /* The runner-plumbing parent case (test_make_lint_gates) runs this proof
+     * as a nested fixture child with ZCL_DEVLOOP_TEST_PROCESS=1. There the
+     * counts and read-back are the contract; real disk barriers only make its
+     * verdict depend on host disk load. The standalone proof keeps them. */
+    const char *fixture = getenv("ZCL_DEVLOOP_TEST_PROCESS");
+    bool skip_barriers = fixture && strcmp(fixture, "1") == 0;
+    event_log_skip_barriers_for_test(skip_barriers);
     snprintf(path, sizeof(path), "%s/events.log", dir);
     failures += bench_proof_mode(path, 128, 8, false);
     snprintf(path, sizeof(path), "%s/ab_0.log", dir);
     failures += bench_proof_mode(path, 64, 0, false);
     snprintf(path, sizeof(path), "%s/ab_1.log", dir);
     failures += bench_proof_mode(path, 64, 0, true);
+    event_log_skip_barriers_for_test(false);
     event_log_test_set_force_per_append(-1);
     EL_CHECK("bench proof: fixture cleanup succeeds",
              test_rm_rf_recursive(dir) == 0);
