@@ -93,17 +93,57 @@ static enum vcs_zcode_work_output_result work_output_read_file(
                                        : VCS_ZCODE_WORK_OUTPUT_CORRUPT;
 }
 
+static bool work_output_get_args_missing(
+    struct vcs_package_store *store, const uint8_t package_root[32],
+    const uint8_t expected_action_root[32], uint8_t **out, size_t *out_len)
+{
+    return !store || !package_root || !expected_action_root || !out ||
+        !out_len;
+}
+
+static bool work_output_package_absent(
+    struct vcs_package_store *store, const uint8_t package_root[32])
+{
+    struct vcs_package_store_status status;
+    return !vcs_package_store_package_status(store, package_root, &status) ||
+        !status.complete;
+}
+
+static bool work_output_manifest_shape(
+    bool parsed, const struct vcs_package_manifest *manifest,
+    const uint8_t package_root[32])
+{
+    uint8_t derived[32];
+    return parsed && manifest->count == 2u &&
+        work_output_file_shape(&manifest->files[0],
+                               VCS_ZCODE_WORK_OUTPUT_ACTION_PATH, 32u) &&
+        manifest->files[0].size == 32u &&
+        work_output_file_shape(
+            &manifest->files[1], VCS_ZCODE_WORK_OUTPUT_BYTES_PATH,
+            VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES - 32u) &&
+        vcs_package_manifest_root(manifest, derived) &&
+        memcmp(derived, package_root, 32) == 0;
+}
+
+static bool work_output_action_mismatch(
+    enum vcs_zcode_work_output_result result, const uint8_t *action,
+    size_t action_len, const uint8_t expected_action_root[32])
+{
+    return result == VCS_ZCODE_WORK_OUTPUT_OK &&
+        (action_len != 32u ||
+         memcmp(action, expected_action_root, 32) != 0);
+}
+
 enum vcs_zcode_work_output_result vcs_zcode_work_output_get(
     struct vcs_package_store *store, const uint8_t package_root[32],
     const uint8_t expected_action_root[32], uint8_t **out, size_t *out_len)
 {
     if (out) *out = NULL;
     if (out_len) *out_len = 0;
-    if (!store || !package_root || !expected_action_root || !out || !out_len)
+    if (work_output_get_args_missing(
+            store, package_root, expected_action_root, out, out_len))
         return VCS_ZCODE_WORK_OUTPUT_NULL;
-    struct vcs_package_store_status status;
-    if (!vcs_package_store_package_status(store, package_root, &status) ||
-        !status.complete)
+    if (work_output_package_absent(store, package_root))
         return VCS_ZCODE_WORK_OUTPUT_ABSENT;
     uint8_t *wire = NULL;
     size_t wire_len = 0;
@@ -113,16 +153,7 @@ enum vcs_zcode_work_output_result vcs_zcode_work_output_get(
     struct vcs_package_manifest manifest;
     bool parsed = vcs_package_manifest_parse(wire, wire_len, &manifest);
     free(wire);
-    uint8_t derived[32];
-    bool shape = parsed && manifest.count == 2u &&
-        work_output_file_shape(&manifest.files[0],
-                               VCS_ZCODE_WORK_OUTPUT_ACTION_PATH, 32u) &&
-        manifest.files[0].size == 32u &&
-        work_output_file_shape(
-            &manifest.files[1], VCS_ZCODE_WORK_OUTPUT_BYTES_PATH,
-            VCS_PACKAGE_STORE_MAX_PACKAGE_BYTES - 32u) &&
-        vcs_package_manifest_root(&manifest, derived) &&
-        memcmp(derived, package_root, 32) == 0;
+    bool shape = work_output_manifest_shape(parsed, &manifest, package_root);
     if (!shape) {
         if (parsed) vcs_package_manifest_free(&manifest);
         return VCS_ZCODE_WORK_OUTPUT_SHAPE;
@@ -131,9 +162,8 @@ enum vcs_zcode_work_output_result vcs_zcode_work_output_get(
     size_t action_len = 0;
     enum vcs_zcode_work_output_result result = work_output_read_file(
         store, package_root, &manifest, 0u, &action, &action_len);
-    if (result == VCS_ZCODE_WORK_OUTPUT_OK &&
-        (action_len != 32u ||
-         memcmp(action, expected_action_root, 32) != 0))
+    if (work_output_action_mismatch(
+            result, action, action_len, expected_action_root))
         result = VCS_ZCODE_WORK_OUTPUT_CORRUPT;
     free(action);
     if (result == VCS_ZCODE_WORK_OUTPUT_OK)
