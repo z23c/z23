@@ -85,6 +85,102 @@ static struct block_index *create_block_index_fast(
     return pindex;
 }
 
+/* Resolve meta's block index, creating it when params is set and the
+ * hash is missing. *created counts a non-NULL create result, including
+ * the existing node returned on a map-insert collision. */
+static struct block_index *scan_apply_find_or_create(
+    struct main_state *ms, const struct boot_scan_block_meta *meta,
+    const struct chain_params *params, int *created)
+{
+    struct block_index *bi = block_map_find(&ms->map_block_index,
+                                            &meta->hash);
+
+    if (!bi && params) {
+        bi = create_block_index_fast(ms, meta);
+        if (bi)
+            (*created)++;
+    }
+    return bi;
+}
+
+/* Copy meta into a zeroed header. Returns the merkle/nonce store result,
+ * or false when version, time and bits were already set, so the caller
+ * adds it to header_fixed exactly as the inline call did. */
+static bool scan_apply_repair_zero_header(
+    struct block_index *bi, const struct boot_scan_block_meta *meta)
+{
+    if (bi->nVersion == 0 || bi->nTime == 0 || bi->nBits == 0) {
+        bi->nVersion = meta->nVersion;
+        bi->hashFinalSaplingRoot = meta->hashFinalSaplingRoot;
+        bi->nTime = meta->nTime;
+        bi->nBits = meta->nBits;
+        return block_index_set_merkle_nonce(
+            bi, &meta->hashMerkleRoot, &meta->nNonce);
+    }
+    return false;
+}
+
+/* Link a height-zero entry to its parent when params is set and pprev
+ * is still missing. A parent that is not in the map yet stays unlinked. */
+static void scan_apply_link_height_zero_prev(
+    struct main_state *ms, struct block_index *bi,
+    const struct boot_scan_block_meta *meta,
+    const struct chain_params *params)
+{
+    if (!bi->pprev && bi->nHeight == 0 && params) {
+        struct block_index *pprev = block_map_find(
+            &ms->map_block_index, &meta->hashPrevBlock);
+        if (pprev) {
+            bi->pprev = pprev;
+            bi->nHeight = pprev->nHeight + 1;
+            block_index_build_skip(bi);
+            struct arith_uint256 proof = GetBlockProof(bi);
+            arith_uint256_add(&bi->nChainWork,
+                              &pprev->nChainWork, &proof);
+        }
+    }
+}
+
+/* First sighting marks BLOCK_HAVE_DATA and records the on-disk position.
+ * A duplicate keeps the earliest durable copy. Returns 1 when this call
+ * marked the entry. */
+static int scan_apply_mark_or_keep_data(
+    struct block_index *bi, const struct boot_scan_file_result *r,
+    const struct boot_scan_block_meta *meta)
+{
+    if (!(bi->nStatus & BLOCK_HAVE_DATA)) {
+        bi->nStatus |= BLOCK_HAVE_DATA;
+        bi->nStatus = (bi->nStatus & ~(unsigned)BLOCK_VALID_MASK) |
+                       BLOCK_VALID_TRANSACTIONS;
+        bi->nFile = r->file_idx;
+        bi->nDataPos = meta->nDataPos;
+        if (bi->nTx == 0)
+            bi->nTx = meta->nTx;
+        return 1;
+    } else {
+        /* Duplicate record: keep the EARLIEST copy. Append/rewrite
+         * frontiers advance upward through a blk file (a foreign writer
+         * on a hardlinked file — e.g. a live zclassicd sharing the inode
+         * — or our own appends), so the lowest-offset copy is the most
+         * durable; last-copy-wins picked exactly the copy most likely to
+         * be overwritten later (2026-08 producer-fold wedge: 314 stale
+         * tail positions). A torn entry (nFile < 0) always takes the
+         * fresh record. */
+        if (bi->nFile != r->file_idx ||
+            bi->nDataPos != meta->nDataPos) {
+            if (bi->nFile < 0 || r->file_idx < bi->nFile ||
+                (r->file_idx == bi->nFile &&
+                 meta->nDataPos < bi->nDataPos)) {
+                bi->nFile = r->file_idx;
+                bi->nDataPos = meta->nDataPos;
+            }
+        }
+        if (bi->nTx == 0)
+            bi->nTx = meta->nTx;
+        return 0;
+    }
+}
+
 struct boot_scan_apply_counts scan_apply_one_file(
     struct main_state *ms,
     const struct boot_scan_file_result *r,
@@ -93,70 +189,13 @@ struct boot_scan_apply_counts scan_apply_one_file(
     struct boot_scan_apply_counts counts = {0};
     for (size_t i = 0; i < r->count; i++) {
         const struct boot_scan_block_meta *meta = &r->blocks[i];
-        struct block_index *bi = block_map_find(&ms->map_block_index,
-                                                &meta->hash);
-
-        if (!bi && params) {
-            bi = create_block_index_fast(ms, meta);
-            if (bi)
-                counts.created++;
-        }
-
+        struct block_index *bi = scan_apply_find_or_create(
+            ms, meta, params, &counts.created);
         if (!bi)
             continue;
-
-        if (bi->nVersion == 0 || bi->nTime == 0 || bi->nBits == 0) {
-            bi->nVersion = meta->nVersion;
-            bi->hashFinalSaplingRoot = meta->hashFinalSaplingRoot;
-            bi->nTime = meta->nTime;
-            bi->nBits = meta->nBits;
-            counts.header_fixed += block_index_set_merkle_nonce(
-                bi, &meta->hashMerkleRoot, &meta->nNonce);
-        }
-
-        if (!bi->pprev && bi->nHeight == 0 && params) {
-            struct block_index *pprev = block_map_find(
-                &ms->map_block_index, &meta->hashPrevBlock);
-            if (pprev) {
-                bi->pprev = pprev;
-                bi->nHeight = pprev->nHeight + 1;
-                block_index_build_skip(bi);
-                struct arith_uint256 proof = GetBlockProof(bi);
-                arith_uint256_add(&bi->nChainWork,
-                                  &pprev->nChainWork, &proof);
-            }
-        }
-
-        if (!(bi->nStatus & BLOCK_HAVE_DATA)) {
-            bi->nStatus |= BLOCK_HAVE_DATA;
-            bi->nStatus = (bi->nStatus & ~(unsigned)BLOCK_VALID_MASK) |
-                           BLOCK_VALID_TRANSACTIONS;
-            bi->nFile = r->file_idx;
-            bi->nDataPos = meta->nDataPos;
-            if (bi->nTx == 0)
-                bi->nTx = meta->nTx;
-            counts.marked++;
-        } else {
-            /* Duplicate record: keep the EARLIEST copy. Append/rewrite
-             * frontiers advance upward through a blk file (a foreign writer
-             * on a hardlinked file — e.g. a live zclassicd sharing the inode
-             * — or our own appends), so the lowest-offset copy is the most
-             * durable; last-copy-wins picked exactly the copy most likely to
-             * be overwritten later (2026-08 producer-fold wedge: 314 stale
-             * tail positions). A torn entry (nFile < 0) always takes the
-             * fresh record. */
-            if (bi->nFile != r->file_idx ||
-                bi->nDataPos != meta->nDataPos) {
-                if (bi->nFile < 0 || r->file_idx < bi->nFile ||
-                    (r->file_idx == bi->nFile &&
-                     meta->nDataPos < bi->nDataPos)) {
-                    bi->nFile = r->file_idx;
-                    bi->nDataPos = meta->nDataPos;
-                }
-            }
-            if (bi->nTx == 0)
-                bi->nTx = meta->nTx;
-        }
+        counts.header_fixed += scan_apply_repair_zero_header(bi, meta);
+        scan_apply_link_height_zero_prev(ms, bi, meta, params);
+        counts.marked += scan_apply_mark_or_keep_data(bi, r, meta);
     }
     return counts;
 }

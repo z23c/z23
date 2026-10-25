@@ -1023,7 +1023,6 @@ engine/composition/src/boot_background_workers.c:projection_backfill_service_thr
 engine/composition/src/boot_blkidx_ladder.c:rung_taint_load:20
 engine/composition/src/boot_block_index_ancestry.c:recompute_index_from_genesis:34
 engine/composition/src/boot_block_index_ancestry.c:resolve_orphan_pprev_from_disk:32
-engine/composition/src/boot_block_index_apply.c:scan_apply_one_file:22
 engine/composition/src/boot_bundle_fetch.c:bbf_discover_from_peers:28
 engine/composition/src/boot_bundle_fetch.c:bbf_write_directory_hint:27
 engine/composition/src/boot_bundle_fetch.c:boot_bundle_fetch_download:18
