@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: The `fleet.parity.sample` leaf's testable seams: one block-hash
+ * purpose: The `fleet.receipt.parity` leaf's testable seams: one block-hash
  *          parity sample taken through an injected RPC function, rendered as
  *          one JSON line, appended under an exclusive lock.
  */
@@ -48,7 +48,7 @@ bool zcl_parity_line(const struct zcl_parity_sample *sample, char *buf,
 bool zcl_parity_append(const char *dir, const char *line, size_t len,
                        const char **why);
 
-/* The bound leaf: fleet.parity.sample. */
+/* The bound leaf: fleet.receipt.parity. */
 void zcl_native_handle_fleet_parity_sample(
     const struct zcl_command_request *request, struct zcl_command_reply *reply);
 

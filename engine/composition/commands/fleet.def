@@ -319,12 +319,8 @@ ZCL_COMMAND_READY_COMMAND(
     ZCL_COMMAND_TRAIT_NONE,
     zcl_native_handle_fleet_receipt_append)
 
-ZCL_COMMAND_BRANCH("fleet.parity", "fleet",
-                   "Record block-hash parity between two nodes",
-                   ZCL_COMMAND_LAYER_OPS)
-
 ZCL_COMMAND_READY_COMMAND(
-    "fleet.parity.sample", "fleet.parity", "",
+    "fleet.receipt.parity", "fleet.loop", "",
     "Append one block-hash parity sample of two loopback nodes (goal C8)",
     "Asks two nodes on 127.0.0.1 for getblockcount, takes h = min(tips) - 100 "
     "and asks both for getblockhash h, then appends one JSON line {ts,height,"
@@ -338,11 +334,11 @@ ZCL_COMMAND_READY_COMMAND(
     "succeeds, since a hole is evidence; failing to lock or append is an "
     "error. The reply echoes the sample. It reads no datadir itself and "
     "contacts no peer.", 0,
-    "fleet,parity,sample,hash,oracle,goals,c8,producer",
+    "fleet,receipt,parity,hash,oracle,goals,c8,producer",
     "zcl.fleet_parity_sample.input.v1", "zcl.fleet_parity_sample.v1",
     "a_port,a_cookie_dir,b_port,b_cookie_dir,dir",
     "a_port,a_cookie_dir,b_port,b_cookie_dir",
-    "z23-dev fleet parity sample --a_port=18242 --a_cookie_dir=/path/to/our/node --b_port=8232 --b_cookie_dir=/path/to/oracle/node",
+    "z23-dev fleet receipt parity --a_port=18242 --a_cookie_dir=/path/to/our/node --b_port=8232 --b_cookie_dir=/path/to/oracle/node",
     ZCL_COMMAND_LAYER_OPS, ZCL_COMMAND_EFFECT_MUTATE,
     ZCL_COMMAND_RISK_DEV_MUTATION, ZCL_COMMAND_SCOPE_LOCAL,
     ZCL_COMMAND_AUTH_OPERATOR, ZCL_COMMAND_MODE_SYNC,

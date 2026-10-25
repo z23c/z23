@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: The `fleet.parity.sample` leaf: the producer for fleet goal C8.
+ * purpose: The `fleet.receipt.parity` leaf: the producer for fleet goal C8.
  *          One call compares one block hash of two nodes and appends one JSON
  *          line to parity.jsonl next to the C6 soak evidence.
  *
@@ -17,6 +17,7 @@
 #include "json/json.h"
 #include "platform/clock.h"
 #include "util/file_tree_ops.h"
+#include "util/log_macros.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -27,6 +28,7 @@
 #include <sys/file.h>
 #include <unistd.h>
 
+#define FP_LOG "fleet.receipt.parity"
 #define FP_PATH_MAX 512
 #define FP_CONNECT_MS 2000L
 #define FP_TOTAL_MS 10000L
@@ -227,8 +229,16 @@ struct fp_endpoints {
 static char *fp_rpc(void *ctx, int side, const char *method, const char *params)
 {
     const struct fp_endpoints *e = ctx;
-    return node_rpc_call_at_deadline(e->cookie_dir[side], e->port[side], method,
-                                     params, FP_CONNECT_MS, FP_TOTAL_MS);
+    char *raw = node_rpc_call_at_deadline(e->cookie_dir[side], e->port[side],
+                                          method, params, FP_CONNECT_MS,
+                                          FP_TOTAL_MS);
+    /* Both methods answer a bare number or string; an object (or nothing)
+     * is the client's error stub. The port and the stub's own message name
+     * the failure; the cookie and its directory are never logged. */
+    if (!raw || raw[0] == '{')
+        LOG_WARN(FP_LOG, "%s rpc to port %d failed: %.120s", method,
+                 e->port[side], raw ? raw : "no answer");
+    return raw;
 }
 
 static void fp_refuse(struct zcl_command_reply *reply, const char *code,
