@@ -22,6 +22,7 @@
 #include "command/native_dev_fleet.h"
 #include "command/native_fleet.h"
 #include "command/native_fleet_goals.h"
+#include "command/native_fleet_parity.h"
 #include "command/native_evidence_judge.h"
 #include "command/native_fleet_objectives.h"
 #include "command/native_fleet_triggers.h"

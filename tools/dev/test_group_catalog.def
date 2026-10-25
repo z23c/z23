@@ -1791,3 +1791,4 @@ ZCL_TEST_GROUP(legacy_seed)
  * config, git push, devbuild --help) plus the hook exit-code contract. The
  * binary is required through the declared BUILD need. */
 ZCL_TEST_GROUP(agent_guard)
+ZCL_TEST_GROUP(fleet_parity)
