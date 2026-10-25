@@ -137,6 +137,48 @@ static bool uau_build_block(struct block *b, uint8_t tag,
     return true;
 }
 
+/* Does the delta's added[] contain an entry for the given (txid, vout)? */
+static bool uau_added_has_outpoint(const struct delta_summary *out,
+                                   const struct uint256 *txid, uint32_t vout)
+{
+    for (size_t i = 0; i < out->added_count; i++) {
+        if (uint256_eq(&out->added[i].txid, txid) &&
+            out->added[i].vout == vout)
+            return true;
+    }
+    return false;
+}
+
+/* How many of the delta's added[] entries belong to the given txid. */
+static size_t uau_count_added_for_txid(const struct delta_summary *out,
+                                       const struct uint256 *txid)
+{
+    size_t count = 0;
+    for (size_t i = 0; i < out->added_count; i++)
+        if (uint256_eq(&out->added[i].txid, txid))
+            count++;
+    return count;
+}
+
+/* Apply ONLY the spend tx's added coins into coins_kv, skipping entries from
+ * any other tx (the coinbase's); stops at the first failed write. */
+static bool uau_apply_spend_coins(sqlite3 *db,
+                                  const struct delta_summary *out,
+                                  const struct uint256 *spend_txid)
+{
+    bool added_ok = true;
+    for (size_t i = 0; i < out->added_count && added_ok; i++) {
+        if (!uint256_eq(&out->added[i].txid, spend_txid))
+            continue;
+        added_ok = coins_kv_add(db, out->added[i].txid.data,
+                                out->added[i].vout,
+                                out->added[i].value, 1, false,
+                                out->added[i].script,
+                                out->added[i].script_len);
+    }
+    return added_ok;
+}
+
 int test_utxo_apply_unspendable(void);
 int test_utxo_apply_unspendable(void)
 {
@@ -181,13 +223,10 @@ int test_utxo_apply_unspendable(void)
             UAU_CHECK("(a) added_count excludes OP_RETURN (== 2, not 3)",
                       out.added_count == 2);
             /* The spend's added entry is the normal output, not the OP_RETURN. */
-            bool found_normal = false, found_opreturn = false;
-            for (size_t i = 0; i < out.added_count; i++) {
-                if (uint256_eq(&out.added[i].txid, &b.vtx[1].hash)) {
-                    if (out.added[i].vout == 0) found_normal = true;
-                    if (out.added[i].vout == 1) found_opreturn = true;
-                }
-            }
+            bool found_normal =
+                uau_added_has_outpoint(&out, &b.vtx[1].hash, 0);
+            bool found_opreturn =
+                uau_added_has_outpoint(&out, &b.vtx[1].hash, 1);
             UAU_CHECK("(a) normal output (vout 0) present", found_normal);
             UAU_CHECK("(a) OP_RETURN output (vout 1) ABSENT", !found_opreturn);
             /* total_value_delta = coinbase 1e9 (added) + normal_val (added)
@@ -228,16 +267,8 @@ int test_utxo_apply_unspendable(void)
                 /* Apply ONLY the spend tx's added coins (skip the coinbase's,
                  * so the cross-check below holds exactly one coin) by writing
                  * just the spend-tx entries. */
-                bool added_ok = true;
-                for (size_t i = 0; i < out.added_count && added_ok; i++) {
-                    if (!uint256_eq(&out.added[i].txid, &b.vtx[1].hash))
-                        continue;
-                    added_ok = coins_kv_add(db, out.added[i].txid.data,
-                                            out.added[i].vout,
-                                            out.added[i].value, 1, false,
-                                            out.added[i].script,
-                                            out.added[i].script_len);
-                }
+                bool added_ok =
+                    uau_apply_spend_coins(db, &out, &b.vtx[1].hash);
                 UAU_CHECK("(b) spend coins applied to coins_kv", added_ok);
                 UAU_CHECK("(b) coins_kv_count == 1 (OP_RETURN excluded)",
                           coins_kv_count(db) == 1);
@@ -312,10 +343,8 @@ int test_utxo_apply_unspendable(void)
             /* coinbase 1 output + spend 2 outputs => 3 added. */
             UAU_CHECK("(c) added_count == 3 (both normal outputs kept)",
                       out.added_count == 3);
-            int spend_outs = 0;
-            for (size_t i = 0; i < out.added_count; i++)
-                if (uint256_eq(&out.added[i].txid, &b.vtx[1].hash))
-                    spend_outs++;
+            int spend_outs =
+                (int)uau_count_added_for_txid(&out, &b.vtx[1].hash);
             UAU_CHECK("(c) both spend outputs present", spend_outs == 2);
             free_delta(&out);
         }
@@ -414,10 +443,8 @@ int test_utxo_apply_unspendable(void)
             /* coinbase vtx[0] 1 output + spend vtx[1] 1 output => 2 added. */
             UAU_CHECK("(e) height>0 adds outputs (added_count == 2)",
                       out.added_count == 2);
-            bool found_coinbase = false;
-            for (size_t i = 0; i < out.added_count; i++)
-                if (uint256_eq(&out.added[i].txid, &b.vtx[0].hash))
-                    found_coinbase = true;
+            bool found_coinbase =
+                uau_count_added_for_txid(&out, &b.vtx[0].hash) != 0;
             UAU_CHECK("(e) height>0 coinbase output IS added", found_coinbase);
             free_delta(&out);
         }

@@ -2568,7 +2568,6 @@ tests/harness/src/test_utxo_activation_paused.c:seed_reducer_frontier_owner_rows
 tests/harness/src/test_utxo_activation_paused.c:test_utxo_activation_paused:190
 tests/harness/src/test_utxo_apply_coinbase_maturity.c:test_utxo_apply_coinbase_maturity:22
 tests/harness/src/test_utxo_apply_stage.c:test_utxo_apply_stage:183
-tests/harness/src/test_utxo_apply_unspendable.c:test_utxo_apply_unspendable:20
 tests/harness/src/test_utxo_apply_value_balance.c:test_utxo_apply_value_balance:95
 tests/harness/src/test_utxo_commitment.c:test_utxo_commitment:56
 tests/harness/src/test_utxo_import_pipeline.c:test_utxo_import_pipeline:22
