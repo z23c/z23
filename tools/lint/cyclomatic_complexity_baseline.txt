@@ -1944,7 +1944,6 @@ tests/harness/spec/spec_smoke.c:spec_smoke:66
 tests/harness/spec/spec_state_machine.c:spec_state_machine:39
 tests/harness/spec/spec_user_journeys.c:spec_user_journeys:27
 tests/harness/spec/spec_wallet_accessibility.c:spec_wallet_accessibility:16
-tests/harness/src/accepted_work_fixture.c:test_accepted_work_fixture_create:27
 tests/harness/src/boot_auto_install_bundle_windows_refusal_acceptance.c:main:16
 tests/harness/src/build_release_regression_fixture.c:test_build_release_regression_fixture:43
 tests/harness/src/codeindex_freshness_windows_acceptance.c:main:22

@@ -79,13 +79,9 @@ static bool fixture_lane(
         fixture_put(dir, root, wire, sizeof(wire));
 }
 
-bool test_accepted_work_fixture_create(
-    const char *dir, const uint8_t source_root[32], int64_t now,
-    uint8_t signer_seed, struct test_accepted_work_fixture *fixture)
+static bool fixture_store_proof_policy(
+    const char *dir, struct test_accepted_work_fixture *fixture)
 {
-    if (!dir || !source_root || !fixture || now <= 0)
-        return false;
-    memset(fixture, 0, sizeof(*fixture));
     struct vcs_zcode_proof_policy_v1 *policy = &fixture->accepted.policy;
     *policy = (struct vcs_zcode_proof_policy_v1) {
         .schema_version = VCS_ZCODE_DEV_VERSION,
@@ -104,7 +100,13 @@ bool test_accepted_work_fixture_create(
         !fixture_put(dir, fixture->accepted.proof_policy_root,
                      policy_wire, sizeof(policy_wire)))
         return false;
+    return true;
+}
 
+static bool fixture_store_task_authority(
+    const char *dir, const uint8_t source_root[32],
+    struct test_accepted_work_fixture *fixture)
+{
     struct vcs_zcode_task_v1 *task = &fixture->accepted.task;
     task->schema_version = VCS_ZCODE_DEV_VERSION;
     memcpy(task->source_root, source_root, 32);
@@ -137,6 +139,14 @@ bool test_accepted_work_fixture_create(
     free(lock_wire);
     if (!authority)
         return false;
+    return true;
+}
+
+static bool fixture_store_task(
+    const char *dir, int64_t now, uint8_t signer_seed,
+    struct test_accepted_work_fixture *fixture)
+{
+    struct vcs_zcode_task_v1 *task = &fixture->accepted.task;
     fixture_root(task->toolchain_capsule_root, 0x21);
     fixture_root(task->write_scope_root, 0x31);
     memcpy(task->proof_policy_root, fixture->accepted.proof_policy_root, 32);
@@ -157,7 +167,13 @@ bool test_accepted_work_fixture_create(
         !fixture_put(dir, fixture->accepted.task_root,
                      task_wire, sizeof(task_wire)))
         return false;
+    return true;
+}
 
+static bool fixture_store_candidate(
+    const char *dir, const uint8_t source_root[32], int64_t now,
+    uint8_t signer_seed, struct test_accepted_work_fixture *fixture)
+{
     uint8_t seed[32];
     fixture_root(seed, signer_seed);
     ed25519_keypair(fixture->signer_pubkey, fixture->signer_secret, seed);
@@ -179,7 +195,14 @@ bool test_accepted_work_fixture_create(
         !fixture_put(dir, fixture->accepted.candidate_root,
                      candidate_wire, sizeof(candidate_wire)))
         return false;
+    return true;
+}
 
+static bool fixture_store_proof_set(
+    const char *dir, int64_t now, struct test_accepted_work_fixture *fixture)
+{
+    struct vcs_zcode_task_v1 *task = &fixture->accepted.task;
+    struct vcs_zcode_candidate_v1 *candidate = &fixture->accepted.candidate;
     uint8_t receipt_roots[2][32];
     if (!fixture_work_receipt(
             dir, task, candidate, fixture->accepted.task_root,
@@ -209,7 +232,13 @@ bool test_accepted_work_fixture_create(
         !fixture_put(dir, fixture->accepted.proof_set_root,
                      proof_wire, proof_len))
         return false;
+    return true;
+}
 
+static bool fixture_store_lane_chain(
+    const char *dir, const uint8_t source_root[32], int64_t now,
+    struct test_accepted_work_fixture *fixture)
+{
     struct vcs_zcode_lane_receipt_v1 lane = {
         .schema_version = VCS_ZCODE_DEV_VERSION,
         .lane = VCS_ZCODE_LANE_FRONTIER,
@@ -242,6 +271,28 @@ bool test_accepted_work_fixture_create(
                       fixture->accepted.accepted_work_root))
         return false;
     fixture->accepted.proven = lane;
+    return true;
+}
+
+bool test_accepted_work_fixture_create(
+    const char *dir, const uint8_t source_root[32], int64_t now,
+    uint8_t signer_seed, struct test_accepted_work_fixture *fixture)
+{
+    if (!dir || !source_root || !fixture || now <= 0)
+        return false;
+    memset(fixture, 0, sizeof(*fixture));
+    if (!fixture_store_proof_policy(dir, fixture))
+        return false;
+    if (!fixture_store_task_authority(dir, source_root, fixture))
+        return false;
+    if (!fixture_store_task(dir, now, signer_seed, fixture))
+        return false;
+    if (!fixture_store_candidate(dir, source_root, now, signer_seed, fixture))
+        return false;
+    if (!fixture_store_proof_set(dir, now, fixture))
+        return false;
+    if (!fixture_store_lane_chain(dir, source_root, now, fixture))
+        return false;
     memcpy(fixture->accepted.expected_signer, fixture->signer_pubkey, 32);
     return true;
 }
