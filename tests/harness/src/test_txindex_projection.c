@@ -38,6 +38,91 @@ static void ti_set_txid(struct transaction *tx, uint8_t tag)
     tx->hash.data[31] = 0xAB;
 }
 
+/* Compound pass/fail conditions for the TI_CHECKs below — extracted verbatim
+ * so the printing and failure counting stay in the test function itself. */
+
+/* -txindex=0: registration is a clean no-op (nothing registered). */
+static bool ti_service_register_is_noop(void)
+{
+    return !txindex_projection_service_register() &&
+           !txindex_projection_service_registered();
+}
+
+/* Read the projection cursor and compare it against `expect`. */
+static bool ti_cursor_reads_as(sqlite3 *db, int64_t expect)
+{
+    int64_t c = -1;
+    return txindex_projection_get_cursor(db, &c) && c == expect;
+}
+
+/* A located transaction sits at exactly (want_height, want_tx_n). */
+static bool ti_location_is(int64_t height, int64_t tx_n, int64_t want_height,
+                           int64_t want_tx_n)
+{
+    return height == want_height && tx_n == want_tx_n;
+}
+
+/* A located tx is at (want_height, want_tx_n) in want_block_hash. */
+static bool ti_location_with_hash_is(int64_t height, int64_t tx_n,
+                                     const uint8_t *block_hash,
+                                     int64_t want_height, int64_t want_tx_n,
+                                     const uint8_t *want_block_hash)
+{
+    return height == want_height && tx_n == want_tx_n &&
+           memcmp(block_hash, want_block_hash, 32) == 0;
+}
+
+/* A lookup miss returns 0 and resets (height, tx_n) to the -1 sentinels. */
+static bool ti_lookup_miss_resets_location(sqlite3 *db, uint8_t *txid)
+{
+    int64_t h = 7, n = 7; uint8_t bh[32];
+    return txindex_projection_lookup(db, txid, &h, bh, &n) == 0 &&
+           h == -1 && n == -1;
+}
+
+/* The persisted cursor digest reads back byte-identical to `expect`. */
+static bool ti_digest_round_trips(sqlite3 *db, const uint8_t *expect)
+{
+    uint8_t dg[32]; bool found = false;
+    return txindex_projection_get_digest(db, dg, &found) && found &&
+           memcmp(dg, expect, 32) == 0;
+}
+
+/* The dump error is the soft "txindex behind" message. */
+static bool ti_error_is_txindex_behind(const char *err)
+{
+    return err && strncmp(err, "txindex behind: cursor=", 23) == 0;
+}
+
+/* Dumping a malformed key reports an error instead of crashing. */
+static bool ti_dump_bad_key_errors(struct json_value *out)
+{
+    return txindex_dump_state_json(out, "not-a-txid") &&
+           json_get(out, "error") != NULL;
+}
+
+/* txindex.disk_low is raised as a RESOURCE blocker. */
+static bool ti_disk_low_blocker_is_resource(void)
+{
+    return blocker_exists("txindex.disk_low") &&
+           blocker_class_for("txindex.disk_low") == BLOCKER_RESOURCE;
+}
+
+/* Disk headroom recovered: disk_ok passes and disk_low is cleared. */
+static bool ti_disk_ok_and_disk_low_cleared(char *dir)
+{
+    return index_fold_disk_ok("txindex", "txindex", dir) &&
+           !blocker_exists("txindex.disk_low");
+}
+
+/* txindex.below_snapshot_seed is raised as a DEPENDENCY blocker. */
+static bool ti_below_seed_blocker_is_dependency(void)
+{
+    return blocker_exists("txindex.below_snapshot_seed") &&
+           blocker_class_for("txindex.below_snapshot_seed") ==
+           BLOCKER_DEPENDENCY;
+}
+
 int test_txindex_projection(void);
 int test_txindex_projection(void)
 {
@@ -73,8 +158,7 @@ int test_txindex_projection(void)
         txindex_projection_enabled_reset_for_test();
         TI_CHECK("-txindex=0 disables", !txindex_projection_enabled());
         TI_CHECK("register no-op when disabled",
-                 !txindex_projection_service_register() &&
-                 !txindex_projection_service_registered());
+                 ti_service_register_is_noop());
         TI_CHECK("tick no-op when disabled",
                  txindex_projection_service_tick_once() == 0);
         uint8_t any[32]; memset(any, 0x11, 32);
@@ -92,9 +176,7 @@ int test_txindex_projection(void)
 
     /* Cursor read before schema exists is a clean cursor=-1 (not an error). */
     {
-        int64_t c = 999;
-        TI_CHECK("cursor before schema -> -1",
-                 txindex_projection_get_cursor(db, &c) && c == -1);
+        TI_CHECK("cursor before schema -> -1", ti_cursor_reads_as(db, -1));
     }
 
     TI_CHECK("ensure_schema", txindex_projection_ensure_schema(db));
@@ -144,7 +226,7 @@ int test_txindex_projection(void)
         TI_CHECK("lookup CB -> found",
                  txindex_projection_lookup(db, blk100.vtx[0].hash.data,
                                            &h, gotbh, &n) == 1);
-        TI_CHECK("CB: height 100 tx_n 0", h == 100 && n == 0);
+        TI_CHECK("CB: height 100 tx_n 0", ti_location_is(h, n, 100, 0));
         TI_CHECK("CB: block_hash matches", memcmp(gotbh, bh100, 32) == 0);
     }
     {
@@ -152,7 +234,7 @@ int test_txindex_projection(void)
         TI_CHECK("lookup P -> found",
                  txindex_projection_lookup(db, blk100.vtx[1].hash.data,
                                            &h, gotbh, &n) == 1);
-        TI_CHECK("P: height 100 tx_n 1", h == 100 && n == 1);
+        TI_CHECK("P: height 100 tx_n 1", ti_location_is(h, n, 100, 1));
     }
     {
         int64_t h = -1, n = -1; uint8_t gotbh[32];
@@ -160,14 +242,12 @@ int test_txindex_projection(void)
                  txindex_projection_lookup(db, blk101.vtx[0].hash.data,
                                            &h, gotbh, &n) == 1);
         TI_CHECK("S: height 101 tx_n 0 block_hash bh101",
-                 h == 101 && n == 0 && memcmp(gotbh, bh101, 32) == 0);
+                 ti_location_with_hash_is(h, n, gotbh, 101, 0, bh101));
     }
     {
         uint8_t absent[32]; memset(absent, 0xEE, 32);
-        int64_t h = 7, n = 7; uint8_t gotbh[32];
         TI_CHECK("lookup absent txid -> 0",
-                 txindex_projection_lookup(db, absent, &h, gotbh, &n) == 0 &&
-                 h == -1 && n == -1);
+                 ti_lookup_miss_resets_location(db, absent));
     }
 
     TI_CHECK("row_count == 3", txindex_projection_row_count(db) == 3);
@@ -187,22 +267,16 @@ int test_txindex_projection(void)
     TI_CHECK("set_cursor",
              txindex_projection_set_cursor(db, 101, digest_full));
     {
-        int64_t c = -1;
-        TI_CHECK("get_cursor == 101",
-                 txindex_projection_get_cursor(db, &c) && c == 101);
-        uint8_t dg[32]; bool found = false;
+        TI_CHECK("get_cursor == 101", ti_cursor_reads_as(db, 101));
         TI_CHECK("get_digest matches",
-                 txindex_projection_get_digest(db, dg, &found) && found &&
-                 memcmp(dg, digest_full, 32) == 0);
+                 ti_digest_round_trips(db, digest_full));
     }
 
     /* ── drop-and-rederive is deterministic (rebuildable) ────────── */
     TI_CHECK("drop", txindex_projection_drop(db));
     TI_CHECK("row_count 0 after drop", txindex_projection_row_count(db) == 0);
     {
-        int64_t c = 999;
-        TI_CHECK("cursor -1 after drop",
-                 txindex_projection_get_cursor(db, &c) && c == -1);
+        TI_CHECK("cursor -1 after drop", ti_cursor_reads_as(db, -1));
     }
     TI_CHECK("re-ensure_schema", txindex_projection_ensure_schema(db));
     {
@@ -274,15 +348,14 @@ int test_txindex_projection(void)
         {
             const char *err = json_get_str(json_get(&out, "error"));
             TI_CHECK("dump keyed behind: 'txindex behind: cursor=' message",
-                     err && strncmp(err, "txindex behind: cursor=", 23) == 0);
+                     ti_error_is_txindex_behind(err));
         }
         json_free(&out);
 
         /* bad key -> error, no crash. */
         json_init(&out);
         TI_CHECK("dump bad key -> error, no crash",
-                 txindex_dump_state_json(&out, "not-a-txid") &&
-                 json_get(&out, "error") != NULL);
+                 ti_dump_bad_key_errors(&out));
         json_free(&out);
     }
 
@@ -295,12 +368,10 @@ int test_txindex_projection(void)
         TI_CHECK("disk_ok false when below floor",
                  !index_fold_disk_ok("txindex", "txindex", dir));
         TI_CHECK("txindex.disk_low raised (RESOURCE)",
-                 blocker_exists("txindex.disk_low") &&
-                 blocker_class_for("txindex.disk_low") == BLOCKER_RESOURCE);
+                 ti_disk_low_blocker_is_resource());
         index_fold_set_min_free_for_test(0);
         TI_CHECK("disk_ok true after recovery clears disk_low",
-                 index_fold_disk_ok("txindex", "txindex", dir) &&
-                 !blocker_exists("txindex.disk_low"));
+                 ti_disk_ok_and_disk_low_cleared(dir));
         index_fold_set_min_free_for_test(-1);   /* restore default */
 
         /* Seed floor: below the installed snapshot seed raises a DEPENDENCY. */
@@ -318,9 +389,7 @@ int test_txindex_projection(void)
         }
         index_fold_note_absent_body("txindex", "txindex", db, 1000);
         TI_CHECK("below-seed raises txindex.below_snapshot_seed (DEPENDENCY)",
-                 blocker_exists("txindex.below_snapshot_seed") &&
-                 blocker_class_for("txindex.below_snapshot_seed") ==
-                 BLOCKER_DEPENDENCY);
+                 ti_below_seed_blocker_is_dependency());
         index_fold_note_absent_body("txindex", "txindex", db, 3000);
         TI_CHECK("above-seed clears txindex.below_snapshot_seed",
                  !blocker_exists("txindex.below_snapshot_seed"));
