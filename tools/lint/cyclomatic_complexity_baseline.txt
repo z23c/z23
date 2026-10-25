@@ -2017,7 +2017,6 @@ tests/harness/src/test_fleet_ledger.c:test_fleet_ledger:40
 tests/harness/src/test_fold_inram_crash_proof.c:fip_proof1_ab_equivalence:25
 tests/harness/src/test_fold_inram_crash_proof.c:fip_proof2_crash_resume:30
 tests/harness/src/test_fold_inram_crash_proof.c:fip_setup:25
-tests/harness/src/test_fr_accel.c:test_fr_accel:16
 tests/harness/src/test_game.c:test_game:58
 tests/harness/src/test_gap_fill_frontier_window.c:test_gap_fill_frontier_window:18
 tests/harness/src/test_generatetoaddress.c:test_generatetoaddress:34

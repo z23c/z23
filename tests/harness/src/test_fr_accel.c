@@ -106,6 +106,60 @@ static int check_fp(const uint64_t a[6], const uint64_t b[6], bool have_adx)
     return bad;
 }
 
+/* Run every ordered pair of boundary vectors through both fields' checks.
+ * Returns the number of mismatches. */
+static int check_boundary_cross_products(bool adx4, bool adx6)
+{
+    int failures = 0;
+
+    uint64_t one4[4] = {1, 0, 0, 0};
+    uint64_t z4[4] = {0}, m1_4[4], m2_4[4];
+    memcpy(m1_4, FR_P, 32); sub_n(m1_4, one4, 4);
+    memcpy(m2_4, m1_4, 32); sub_n(m2_4, one4, 4);
+    const uint64_t *v4[] = { z4, one4, m1_4, m2_4 };
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            failures += check_fr(v4[i], v4[j], adx4);
+
+    uint64_t one6[6] = {1, 0, 0, 0, 0, 0};
+    uint64_t z6[6] = {0}, m1_6[6], m2_6[6];
+    memcpy(m1_6, FP_Q, 48); sub_n(m1_6, one6, 6);
+    memcpy(m2_6, m1_6, 48); sub_n(m2_6, one6, 6);
+    const uint64_t *v6[] = { z6, one6, m1_6, m2_6 };
+    for (int i = 0; i < 4; i++)
+        for (int j = 0; j < 4; j++)
+            failures += check_fp(v6[i], v6[j], adx6);
+
+    return failures;
+}
+
+/* Run n_vectors random pairs through both fields' checks. Returns the number
+ * of NEW mismatches; it bails out once more than 4 have accumulated, which is
+ * the caller's before+4 budget expressed over new failures only. */
+static int check_random_corpus(int n_vectors, bool adx4, bool adx6)
+{
+    int failures = 0;
+    for (int k = 0; k < n_vectors; k++) {
+        uint64_t a[4], b[4];
+        rand_field(a, FR_P, 4);
+        rand_field(b, FR_P, 4);
+        /* Bias a slice of the corpus onto p-1, the value that most often
+         * forces the final conditional subtraction. */
+        if ((k & 15) == 0) { memcpy(b, FR_P, 32); b[0]--; }
+        failures += check_fr(a, b, adx4);
+        if (failures > 4) break;
+    }
+    for (int k = 0; k < n_vectors; k++) {
+        uint64_t a[6], b[6];
+        rand_field(a, FP_Q, 6);
+        rand_field(b, FP_Q, 6);
+        if ((k & 15) == 0) { memcpy(b, FP_Q, 48); b[0]--; }
+        failures += check_fp(a, b, adx6);
+        if (failures > 4) break;
+    }
+    return failures;
+}
+
 int test_fr_accel(void);
 
 int test_fr_accel(void)
@@ -123,25 +177,7 @@ int test_fr_accel(void)
 
     /* ── Boundary vectors ─────────────────────────────────────────── */
     printf("boundary vectors... ");
-    {
-        uint64_t one4[4] = {1, 0, 0, 0};
-        uint64_t z4[4] = {0}, m1_4[4], m2_4[4];
-        memcpy(m1_4, FR_P, 32); sub_n(m1_4, one4, 4);
-        memcpy(m2_4, m1_4, 32); sub_n(m2_4, one4, 4);
-        const uint64_t *v4[] = { z4, one4, m1_4, m2_4 };
-        for (int i = 0; i < 4; i++)
-            for (int j = 0; j < 4; j++)
-                failures += check_fr(v4[i], v4[j], adx4);
-
-        uint64_t one6[6] = {1, 0, 0, 0, 0, 0};
-        uint64_t z6[6] = {0}, m1_6[6], m2_6[6];
-        memcpy(m1_6, FP_Q, 48); sub_n(m1_6, one6, 6);
-        memcpy(m2_6, m1_6, 48); sub_n(m2_6, one6, 6);
-        const uint64_t *v6[] = { z6, one6, m1_6, m2_6 };
-        for (int i = 0; i < 4; i++)
-            for (int j = 0; j < 4; j++)
-                failures += check_fp(v6[i], v6[j], adx6);
-    }
+    failures += check_boundary_cross_products(adx4, adx6);
     printf("%s\n", failures ? "FAILED" : "OK");
 
     /* ── Random corpus ────────────────────────────────────────────── */
@@ -149,24 +185,7 @@ int test_fr_accel(void)
         const int N = 100000;
         int before = failures;
         printf("random corpus (%d Fr + %d Fp vectors)... ", N, N);
-        for (int k = 0; k < N; k++) {
-            uint64_t a[4], b[4];
-            rand_field(a, FR_P, 4);
-            rand_field(b, FR_P, 4);
-            /* Bias a slice of the corpus onto p-1, the value that most often
-             * forces the final conditional subtraction. */
-            if ((k & 15) == 0) { memcpy(b, FR_P, 32); b[0]--; }
-            failures += check_fr(a, b, adx4);
-            if (failures > before + 4) break;
-        }
-        for (int k = 0; k < N; k++) {
-            uint64_t a[6], b[6];
-            rand_field(a, FP_Q, 6);
-            rand_field(b, FP_Q, 6);
-            if ((k & 15) == 0) { memcpy(b, FP_Q, 48); b[0]--; }
-            failures += check_fp(a, b, adx6);
-            if (failures > before + 4) break;
-        }
+        failures += check_random_corpus(N, adx4, adx6);
         printf("%s\n", failures > before ? "FAILED" : "OK");
     }
 
