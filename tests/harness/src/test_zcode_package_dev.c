@@ -6382,12 +6382,26 @@ static int zpd_row_candidate_cannot_edit_acceptance_tests(
     (void)k;
     return zpd_test_candidate_cannot_edit_acceptance_tests();
 }
+/* Runs `body` with the package store in deferred-sync mode and restores the
+ * caller's setting afterwards. Every store the body opens is a per-pid test
+ * fixture under test-tmp that no assertion reads back across a crash, so the
+ * per-object fsync before each atomic rename only buys durability nobody
+ * checks; the store reads and writes themselves are unchanged. */
+static int zpd_with_deferred_store_sync(int (*body)(void))
+{
+    bool prior = vcs_package_store_deferred_sync_enabled();
+    vcs_package_store_set_deferred_sync(true);
+    int failures = body();
+    vcs_package_store_set_deferred_sync(prior);
+    return failures;
+}
+
 /* The qualified package verifier runs on every supported host. Darwin uses
  * Seatbelt and rlimits; full isolation remains required. */
 static int zpd_row_work_start(const struct zpd_keys *k)
 {
     (void)k;
-    return zpd_test_work_start();
+    return zpd_with_deferred_store_sync(zpd_test_work_start);
 }
 static int zpd_row_standard_profile(const struct zpd_keys *k)
 {
