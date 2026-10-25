@@ -186,6 +186,62 @@ static void fp_emit_arg(FILE *out, const struct fp_candidate *c, int i)
     }
 }
 
+static void fp_emit_probe_ref_widths(FILE *out, const struct fp_candidate *c)
+{
+    int i;
+
+    /* Absorb the WIDTH of every by-reference object before the call. The
+     * scan-time shape cannot carry a struct's size — it deliberately does
+     * not name the type, so that two identical structs under two names still
+     * match — and without the size every `bool eq(const T *, const T *)` in
+     * the tree collapses onto one fingerprint no matter what T is. The
+     * width is part of the interface, so it belongs in the hash. */
+    for (i = 0; i < c->n_params; i++) {
+        const struct fp_param *p = &c->param[i];
+        if (p->kind == FP_K_OBJ_IN || p->kind == FP_K_OUT_OBJ ||
+            p->kind == FP_K_OUT_ARR || p->kind == FP_K_ARR_IN)
+            fprintf(out, "    fp_acc_u64(fp__h, %uu, (uint64_t)sizeof"
+                         " fp__a%d);\n", (unsigned)(128 + i), i);
+    }
+}
+
+/* Emit the call itself, then absorb its return value when there is one. */
+static void fp_emit_probe_call(FILE *out, const struct fp_candidate *c)
+{
+    int i;
+
+    fprintf(out, "    ");
+    if (c->ret.kind == FP_K_SCALAR)
+        fprintf(out, "%s fp__rv = ", c->ret.type_text);
+    else if (c->ret.kind == FP_K_CSTR_OUT)
+        fprintf(out, "const char *fp__rv = ");
+    fprintf(out, "%s(", c->name);
+    for (i = 0; i < c->n_params; i++)
+        fp_emit_arg(out, c, i);
+    fprintf(out, ");\n");
+
+    if (c->ret.kind == FP_K_SCALAR)
+        fprintf(out, "    fp_acc_u64(fp__h, 0u, (uint64_t)fp__rv);\n");
+    else if (c->ret.kind == FP_K_CSTR_OUT)
+        fprintf(out, "    fp_acc_cstr(fp__h, 0u, fp__rv);\n");
+}
+
+/* Absorb every out-parameter once the call has returned. */
+static void fp_emit_probe_out_absorb(FILE *out, const struct fp_candidate *c)
+{
+    int i;
+
+    for (i = 0; i < c->n_params; i++) {
+        const struct fp_param *p = &c->param[i];
+        if (p->kind == FP_K_OUT_SCALAR || p->kind == FP_K_OUT_OBJ)
+            fprintf(out, "    fp_acc_mem(fp__h, %uu, &fp__a%d,"
+                         " sizeof fp__a%d);\n", (unsigned)(i + 1), i, i);
+        else if (p->kind == FP_K_OUT_ARR)
+            fprintf(out, "    fp_acc_mem(fp__h, %uu, fp__a%d,"
+                         " sizeof fp__a%d);\n", (unsigned)(i + 1), i, i);
+    }
+}
+
 static void fp_emit_probe(FILE *out, const struct fp_candidate *c, size_t idx)
 {
     int i;
@@ -203,44 +259,9 @@ static void fp_emit_probe(FILE *out, const struct fp_candidate *c, size_t idx)
     for (i = 0; i < c->n_params; i++)
         fp_emit_local(out, c, i, c->shape ^ ((uint64_t)i * FP_SEED_STRIDE));
 
-    /* Absorb the WIDTH of every by-reference object before the call. The
-     * scan-time shape cannot carry a struct's size — it deliberately does
-     * not name the type, so that two identical structs under two names still
-     * match — and without the size every `bool eq(const T *, const T *)` in
-     * the tree collapses onto one fingerprint no matter what T is. The
-     * width is part of the interface, so it belongs in the hash. */
-    for (i = 0; i < c->n_params; i++) {
-        const struct fp_param *p = &c->param[i];
-        if (p->kind == FP_K_OBJ_IN || p->kind == FP_K_OUT_OBJ ||
-            p->kind == FP_K_OUT_ARR || p->kind == FP_K_ARR_IN)
-            fprintf(out, "    fp_acc_u64(fp__h, %uu, (uint64_t)sizeof"
-                         " fp__a%d);\n", (unsigned)(128 + i), i);
-    }
-
-    fprintf(out, "    ");
-    if (c->ret.kind == FP_K_SCALAR)
-        fprintf(out, "%s fp__rv = ", c->ret.type_text);
-    else if (c->ret.kind == FP_K_CSTR_OUT)
-        fprintf(out, "const char *fp__rv = ");
-    fprintf(out, "%s(", c->name);
-    for (i = 0; i < c->n_params; i++)
-        fp_emit_arg(out, c, i);
-    fprintf(out, ");\n");
-
-    if (c->ret.kind == FP_K_SCALAR)
-        fprintf(out, "    fp_acc_u64(fp__h, 0u, (uint64_t)fp__rv);\n");
-    else if (c->ret.kind == FP_K_CSTR_OUT)
-        fprintf(out, "    fp_acc_cstr(fp__h, 0u, fp__rv);\n");
-
-    for (i = 0; i < c->n_params; i++) {
-        const struct fp_param *p = &c->param[i];
-        if (p->kind == FP_K_OUT_SCALAR || p->kind == FP_K_OUT_OBJ)
-            fprintf(out, "    fp_acc_mem(fp__h, %uu, &fp__a%d,"
-                         " sizeof fp__a%d);\n", (unsigned)(i + 1), i, i);
-        else if (p->kind == FP_K_OUT_ARR)
-            fprintf(out, "    fp_acc_mem(fp__h, %uu, fp__a%d,"
-                         " sizeof fp__a%d);\n", (unsigned)(i + 1), i, i);
-    }
+    fp_emit_probe_ref_widths(out, c);
+    fp_emit_probe_call(out, c);
+    fp_emit_probe_out_absorb(out, c);
     fprintf(out, "}\n\n");
 }
 
@@ -481,6 +502,76 @@ static bool fp_write_main(const char *work_dir, size_t n_cands, size_t ngroups)
     return fclose(out) == 0;
 }
 
+/* Emit the include scaffolding that opens one probe translation unit. */
+static void fp_emit_group_header(FILE *out, const struct fp_candidate *cands,
+                                 size_t start, size_t end,
+                                 const unsigned char *disabled)
+{
+    size_t k;
+
+    /* A group with nothing left in it must still compile and still
+     * define its registration function, or the driver will not link
+     * at all. Dropping the project header is what makes an
+     * emptied-out group harmless: the header is often the very thing
+     * that could not be compiled (a package outside this build's
+     * include path), so keeping it would fail forever. */
+    bool alive = false;
+    bool via_source = cands[start].via_source;
+    for (k = start; k < end; k++)
+        if (disabled == NULL || !disabled[k]) { alive = true; break; }
+    fprintf(out, "/* GENERATED by cognition/modules/fingerprint. Do not edit. */\n");
+    /* A source-included unit goes FIRST, ahead of even <stdint.h>.
+     * A translation unit is allowed to define its own feature macros
+     * (_GNU_SOURCE, _POSIX_C_SOURCE) before its first include, and
+     * putting anything in front of it would silently compile it
+     * against a different libc surface than the tree builds it with.
+     * The probe scaffolding is happy to come second; the unit is
+     * not. */
+    if (alive && via_source)
+        fprintf(out, "#include \"%s\"\n", cands[start].include);
+    fprintf(out, "#include <stdint.h>\n#include <stddef.h>\n"
+                 "#include <stdbool.h>\n#include <string.h>\n"
+                 "#include <limits.h>\n");
+    if (alive && !via_source)
+        fprintf(out, "#include \"%s\"\n", cands[start].include);
+    else if (!alive)
+        fprintf(out, "/* group empty: %s */\n", cands[start].include);
+    fprintf(out, "#include \"fp_reg.h\"\n\n");
+}
+
+/* Emit one group's probe bodies, skipping the candidates disabled by name. */
+static void fp_emit_group_probes(FILE *out, const struct fp_candidate *cands,
+                                 size_t start, size_t end,
+                                 const unsigned char *disabled)
+{
+    size_t k;
+
+    for (k = start; k < end; k++) {
+        if (disabled != NULL && disabled[k])
+            continue;
+        fp_emit_probe(out, &cands[k], k);
+    }
+}
+
+/* Emit one group's registration function, one row per surviving probe. */
+static void fp_emit_group_register(FILE *out, const struct fp_candidate *cands,
+                                   size_t start, size_t end,
+                                   const unsigned char *disabled, size_t g)
+{
+    size_t k;
+
+    fprintf(out, "void fp_group_%zu_register(void)\n{\n", g);
+    for (k = start; k < end; k++) {
+        if (disabled != NULL && disabled[k])
+            continue;
+        fprintf(out, "    fp_register(%zuu, \"%s|%s:%d|%s\", %lluull,"
+                     " fp_p_%zu);\n",
+                k, cands[k].name, cands[k].def_path, cands[k].def_line,
+                cands[k].shape_text, (unsigned long long)cands[k].shape, k);
+    }
+    fprintf(out, "}\n");
+}
+
 bool fp_emit_harness(const struct fp_candidate *cands, size_t n_cands,
                      const char *work_dir, const unsigned char *disabled,
                      size_t *groups_out)
@@ -492,7 +583,6 @@ bool fp_emit_harness(const struct fp_candidate *cands, size_t n_cands,
         size_t start = i;
         char path[FP_MAX_PATH * 2];
         FILE *out;
-        size_t k;
 
         while (i < n_cands && strcmp(cands[i].include, cands[start].include) == 0)
             i++;
@@ -501,51 +591,9 @@ bool fp_emit_harness(const struct fp_candidate *cands, size_t n_cands,
         out = fopen(path, "w");
         if (out == NULL)
             return false;
-        {
-            /* A group with nothing left in it must still compile and still
-             * define its registration function, or the driver will not link
-             * at all. Dropping the project header is what makes an
-             * emptied-out group harmless: the header is often the very thing
-             * that could not be compiled (a package outside this build's
-             * include path), so keeping it would fail forever. */
-            bool alive = false;
-            bool via_source = cands[start].via_source;
-            for (k = start; k < i; k++)
-                if (disabled == NULL || !disabled[k]) { alive = true; break; }
-            fprintf(out, "/* GENERATED by cognition/modules/fingerprint. Do not edit. */\n");
-            /* A source-included unit goes FIRST, ahead of even <stdint.h>.
-             * A translation unit is allowed to define its own feature macros
-             * (_GNU_SOURCE, _POSIX_C_SOURCE) before its first include, and
-             * putting anything in front of it would silently compile it
-             * against a different libc surface than the tree builds it with.
-             * The probe scaffolding is happy to come second; the unit is
-             * not. */
-            if (alive && via_source)
-                fprintf(out, "#include \"%s\"\n", cands[start].include);
-            fprintf(out, "#include <stdint.h>\n#include <stddef.h>\n"
-                         "#include <stdbool.h>\n#include <string.h>\n"
-                         "#include <limits.h>\n");
-            if (alive && !via_source)
-                fprintf(out, "#include \"%s\"\n", cands[start].include);
-            else if (!alive)
-                fprintf(out, "/* group empty: %s */\n", cands[start].include);
-            fprintf(out, "#include \"fp_reg.h\"\n\n");
-        }
-        for (k = start; k < i; k++) {
-            if (disabled != NULL && disabled[k])
-                continue;
-            fp_emit_probe(out, &cands[k], k);
-        }
-        fprintf(out, "void fp_group_%zu_register(void)\n{\n", g);
-        for (k = start; k < i; k++) {
-            if (disabled != NULL && disabled[k])
-                continue;
-            fprintf(out, "    fp_register(%zuu, \"%s|%s:%d|%s\", %lluull,"
-                         " fp_p_%zu);\n",
-                    k, cands[k].name, cands[k].def_path, cands[k].def_line,
-                    cands[k].shape_text, (unsigned long long)cands[k].shape, k);
-        }
-        fprintf(out, "}\n");
+        fp_emit_group_header(out, cands, start, i, disabled);
+        fp_emit_group_probes(out, cands, start, i, disabled);
+        fp_emit_group_register(out, cands, start, i, disabled, g);
         if (fclose(out) != 0)
             return false;
         if (!fp_write_map(work_dir, g))
