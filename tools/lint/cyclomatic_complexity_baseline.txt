@@ -523,7 +523,6 @@ contexts/wallet/controllers/src/wallet_rescan_controller_coins.c:rpc_coinanalysi
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rescan_seed_before_oldest_note_from_db:18
 contexts/wallet/controllers/src/wallet_rescan_controller_witness.c:rpc_rescanwitnesses:44
 contexts/wallet/controllers/src/wallet_scan.c:wallet_scan_blocks:44
-contexts/wallet/controllers/src/wallet_shielded_keys.c:rpc_z_getmemo:20
 contexts/wallet/controllers/src/wallet_shielded_send.c:z_sendmany_run:87
 contexts/wallet/controllers/src/wallet_shielded_send_shielded.c:z_sendmany_shielded:58
 contexts/wallet/controllers/src/wallet_view_dashboard.c:serve_dashboard:46

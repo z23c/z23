@@ -191,6 +191,69 @@ bool rpc_z_exportviewingkey(const struct json_value *params, bool help,
     return true;
 }
 
+static void decode_txid_bytes(const char *txid_str, uint8_t txid[32])
+{
+    uint8_t txid_be[32];
+    zcl_hex_decode(txid_str, txid_be, 32);
+    for (int i = 0; i < 32; i++)
+        txid[i] = txid_be[31 - i];
+}
+
+static struct db_sapling_note *find_note_at_outindex(struct db_sapling_note *notes,
+                                                     int count, int outindex)
+{
+    for (int i = 0; i < count; i++) {
+        if ((int)notes[i].output_index == outindex) {
+            return &notes[i];
+        }
+    }
+    return NULL;
+}
+
+static size_t find_memo_content_end(const struct db_sapling_note *note,
+                                    bool *has_content)
+{
+    /* Find meaningful memo bytes (strip trailing 0xf6 padding and zeroes) */
+    size_t memo_end = 0;
+    *has_content = false;
+    for (size_t j = 0; j < note->memo_len && j < 512; j++) {
+        if (note->memo[j] != 0 && note->memo[j] != 0xf6) {
+            memo_end = j + 1;
+            *has_content = true;
+        }
+    }
+    return memo_end;
+}
+
+static void push_memo_result_fields(struct json_value *result,
+                                    const struct db_sapling_note *found,
+                                    size_t memo_end, bool has_content)
+{
+    if (has_content) {
+        /* Text representation if printable */
+        if (found->memo[0] >= 0x20 && found->memo[0] < 0x7f) {
+            size_t len = 0;
+            while (len < memo_end && found->memo[len] >= 0x20)
+                len++;
+            char memo_str[513];
+            memcpy(memo_str, found->memo, len);
+            memo_str[len] = '\0';
+            json_push_kv_str(result, "memo", memo_str);
+        }
+
+        /* Always include hex */
+        char hex[1025];
+        for (size_t j = 0; j < memo_end; j++)
+            snprintf(hex + j * 2, 3, "%02x", found->memo[j]);
+        hex[memo_end * 2] = '\0';
+        json_push_kv_str(result, "memo_hex", hex);
+        json_push_kv_int(result, "memo_bytes", (int64_t)memo_end);
+    } else {
+        json_push_kv_str(result, "memo", "(empty)");
+        json_push_kv_int(result, "memo_bytes", 0);
+    }
+}
+
 bool rpc_z_getmemo(const struct json_value *params, bool help,
                             struct json_value *result)
 {
@@ -229,10 +292,7 @@ bool rpc_z_getmemo(const struct json_value *params, bool help,
         LOG_FAIL("wallet_shielded", "z_getmemo: txid not 64 hex chars: '%s'",
                  txid_str ? txid_str : "(null)");
     }
-    uint8_t txid_be[32];
-    zcl_hex_decode(txid_str, txid_be, 32);
-    for (int i = 0; i < 32; i++)
-        txid[i] = txid_be[31 - i];
+    decode_txid_bytes(txid_str, txid);
 
     struct db_sapling_note notes[16];
     int count = db_wallet_tx_notes(ctx->node_db, txid, notes, 16);
@@ -241,13 +301,7 @@ bool rpc_z_getmemo(const struct json_value *params, bool help,
         LOG_FAIL("wallet_shielded", "z_getmemo: no notes found for txid=%s", txid_str);
     }
 
-    struct db_sapling_note *found = NULL;
-    for (int i = 0; i < count; i++) {
-        if ((int)notes[i].output_index == outindex) {
-            found = &notes[i];
-            break;
-        }
-    }
+    struct db_sapling_note *found = find_note_at_outindex(notes, count, outindex);
     if (!found) {
         json_set_str(result, "No note at specified output index");
         LOG_FAIL("wallet_shielded", "z_getmemo: no note at outindex=%d for txid=%s", outindex, txid_str);
@@ -257,39 +311,9 @@ bool rpc_z_getmemo(const struct json_value *params, bool help,
     json_push_kv_str(result, "txid", txid_str);
     json_push_kv_int(result, "outindex", outindex);
 
-    /* Find meaningful memo bytes (strip trailing 0xf6 padding and zeroes) */
-    size_t memo_end = 0;
     bool has_content = false;
-    for (size_t j = 0; j < found->memo_len && j < 512; j++) {
-        if (found->memo[j] != 0 && found->memo[j] != 0xf6) {
-            memo_end = j + 1;
-            has_content = true;
-        }
-    }
-
-    if (has_content) {
-        /* Text representation if printable */
-        if (found->memo[0] >= 0x20 && found->memo[0] < 0x7f) {
-            size_t len = 0;
-            while (len < memo_end && found->memo[len] >= 0x20)
-                len++;
-            char memo_str[513];
-            memcpy(memo_str, found->memo, len);
-            memo_str[len] = '\0';
-            json_push_kv_str(result, "memo", memo_str);
-        }
-
-        /* Always include hex */
-        char hex[1025];
-        for (size_t j = 0; j < memo_end; j++)
-            snprintf(hex + j * 2, 3, "%02x", found->memo[j]);
-        hex[memo_end * 2] = '\0';
-        json_push_kv_str(result, "memo_hex", hex);
-        json_push_kv_int(result, "memo_bytes", (int64_t)memo_end);
-    } else {
-        json_push_kv_str(result, "memo", "(empty)");
-        json_push_kv_int(result, "memo_bytes", 0);
-    }
+    size_t memo_end = find_memo_content_end(found, &has_content);
+    push_memo_result_fields(result, found, memo_end, has_content);
 
     return true;
 }
