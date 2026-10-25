@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Creton - Apache License 2.0
  * Purpose: The fleet board/wiki post codec and gossip frames. See the header.
  *
  * Everything here is total and allocation-free. A decode either fills the
@@ -204,11 +204,12 @@ bool fleet_board_id_from_hex(const char *hex, uint8_t out[32])
     return zcl_hex_decode(hex, out, 32);
 }
 
-enum fleet_board_result fleet_board_post_validate(
+/* Kind, scope, room and ttl: the fixed fields every post carries. Each
+ * helper below returns the first refusal its fields earn, in the order the
+ * fields were signed, or FLEET_BOARD_OK. */
+static enum fleet_board_result fb_post_validate_header(
     const struct fleet_board_post *post)
 {
-    if (!post)
-        return FLEET_BOARD_ERR_ARGS;
     if (post->kind == 0 || post->kind >= FLEET_BOARD_KIND__COUNT)
         return FLEET_BOARD_ERR_KIND;
     if (post->scope >= FLEET_BOARD_SCOPE__COUNT)
@@ -226,7 +227,13 @@ enum fleet_board_result fleet_board_post_validate(
     }
     if (post->ttl == 0 || post->ttl > (uint32_t)FLEET_BOARD_TTL_MAX)
         return FLEET_BOARD_ERR_TTL;
+    return FLEET_BOARD_OK;
+}
 
+/* Agent and receipt: two bounded, printable, single-line strings. */
+static enum fleet_board_result fb_post_validate_agent_receipt(
+    const struct fleet_board_post *post)
+{
     size_t agent_len = fb_strnlen(post->agent, sizeof(post->agent));
     if (agent_len > FLEET_BOARD_AGENT_MAX ||
         !fb_text_ok(post->agent, agent_len, false))
@@ -236,26 +243,43 @@ enum fleet_board_result fleet_board_post_validate(
     if (receipt_len > FLEET_BOARD_RECEIPT_MAX ||
         !fb_text_ok(post->receipt, receipt_len, false))
         return FLEET_BOARD_ERR_RECEIPT;
+    return FLEET_BOARD_OK;
+}
 
+/* Wiki addressing: a wiki revision carries a slug and a title. */
+static enum fleet_board_result fb_post_validate_wiki_fields(
+    const struct fleet_board_post *post)
+{
+    /* A wiki revision is addressed by its slug; without one there is no
+     * page for `wiki read` to resolve and the revision is unreachable. */
+    if (!fleet_board_slug_valid(post->slug))
+        return FLEET_BOARD_ERR_SLUG;
+    size_t title_len = fb_strnlen(post->title, sizeof(post->title));
+    if (title_len == 0 || title_len > FLEET_BOARD_TITLE_MAX ||
+        !fb_text_ok(post->title, title_len, false))
+        return FLEET_BOARD_ERR_TITLE;
+    return FLEET_BOARD_OK;
+}
+
+/* Non-wiki addressing: slug, title and supersedes must all be empty. */
+static enum fleet_board_result fb_post_validate_plain_fields(
+    const struct fleet_board_post *post)
+{
     size_t slug_len = fb_strnlen(post->slug, sizeof(post->slug));
     size_t title_len = fb_strnlen(post->title, sizeof(post->title));
-    if (post->kind == FLEET_BOARD_KIND_WIKI) {
-        /* A wiki revision is addressed by its slug; without one there is no
-         * page for `wiki read` to resolve and the revision is unreachable. */
-        if (!fleet_board_slug_valid(post->slug))
-            return FLEET_BOARD_ERR_SLUG;
-        if (title_len == 0 || title_len > FLEET_BOARD_TITLE_MAX ||
-            !fb_text_ok(post->title, title_len, false))
-            return FLEET_BOARD_ERR_TITLE;
-    } else {
-        if (slug_len != 0)
-            return FLEET_BOARD_ERR_SLUG;
-        if (title_len != 0)
-            return FLEET_BOARD_ERR_TITLE;
-        if (memcmp(post->supersedes, k_zero_id, sizeof(k_zero_id)) != 0)
-            return FLEET_BOARD_ERR_SLUG;
-    }
+    if (slug_len != 0)
+        return FLEET_BOARD_ERR_SLUG;
+    if (title_len != 0)
+        return FLEET_BOARD_ERR_TITLE;
+    if (memcmp(post->supersedes, k_zero_id, sizeof(k_zero_id)) != 0)
+        return FLEET_BOARD_ERR_SLUG;
+    return FLEET_BOARD_OK;
+}
 
+/* Text: non-empty, within the kind's ceiling, no embedded NUL, printable. */
+static enum fleet_board_result fb_post_validate_text(
+    const struct fleet_board_post *post)
+{
     if (post->text_len == 0 || post->text_len > fleet_board_text_max(post->kind))
         return FLEET_BOARD_ERR_TEXT;
     if (post->text_len != fb_strnlen(post->text, sizeof(post->text)))
@@ -263,6 +287,26 @@ enum fleet_board_result fleet_board_post_validate(
     if (!fb_text_ok(post->text, post->text_len, true))
         return FLEET_BOARD_ERR_TEXT;
     return FLEET_BOARD_OK;
+}
+
+enum fleet_board_result fleet_board_post_validate(
+    const struct fleet_board_post *post)
+{
+    if (!post)
+        return FLEET_BOARD_ERR_ARGS;
+    enum fleet_board_result r = fb_post_validate_header(post);
+    if (r != FLEET_BOARD_OK)
+        return r;
+    r = fb_post_validate_agent_receipt(post);
+    if (r != FLEET_BOARD_OK)
+        return r;
+    if (post->kind == FLEET_BOARD_KIND_WIKI)
+        r = fb_post_validate_wiki_fields(post);
+    else
+        r = fb_post_validate_plain_fields(post);
+    if (r != FLEET_BOARD_OK)
+        return r;
+    return fb_post_validate_text(post);
 }
 
 /* A tiny append cursor. Every writer checks capacity first, so a short buffer
@@ -537,61 +581,65 @@ static bool fb_take_str16(struct fb_reader *r, char *dst, size_t dst_capacity)
     return true;
 }
 
-enum fleet_board_result fleet_board_post_decode(
-    const uint8_t *wire, size_t wire_len, struct fleet_board_post *out)
+static enum fleet_board_result fb_decode_post_domain(
+    struct fb_reader *r, struct fleet_board_post *out, bool *v2)
 {
-    if (!wire || !out)
-        return FLEET_BOARD_ERR_ARGS;
-    memset(out, 0, sizeof(*out));
-
-    struct fb_reader r = {.p = wire, .len = wire_len};
     /* Both domains are the same length, so one fixed read decides the layout;
      * an unrecognized domain is the same refusal an unknown kind earns. */
     char domain[sizeof(FLEET_BOARD_POST_V1_DOMAIN)] = {0};
-    bool v2;
-    if (!fb_take(&r, domain, sizeof(domain))) {
-        memset(out, 0, sizeof(*out));
+    if (!fb_take(r, domain, sizeof(domain)))
         return FLEET_BOARD_ERR_TRUNCATED;
-    }
     if (memcmp(domain, FLEET_BOARD_POST_V2_DOMAIN, sizeof(domain)) == 0) {
-        v2 = true;
+        *v2 = true;
     } else if (memcmp(domain, FLEET_BOARD_POST_V1_DOMAIN, sizeof(domain)) == 0) {
-        v2 = false;
+        *v2 = false;
         out->scope = FLEET_BOARD_SCOPE_LEGACY_PUBLIC;
     } else {
-        memset(out, 0, sizeof(*out));
         return FLEET_BOARD_ERR_KIND;
     }
-    out->kind = fb_take_u8(&r);
-    out->created_at = fb_take_u64(&r);
-    out->ttl = fb_take_u32(&r);
-    (void)fb_take(&r, out->ref, FLEET_BOARD_ID_BYTES);
-    (void)fb_take(&r, out->host_pubkey, FLEET_BOARD_PUBKEY_BYTES);
-    if (v2) {
-        out->scope = fb_take_u8(&r);
-        (void)fb_take_str16(&r, out->room, sizeof(out->room));
-    }
-    (void)fb_take_str16(&r, out->agent, sizeof(out->agent));
-    (void)fb_take_str16(&r, out->slug, sizeof(out->slug));
-    (void)fb_take_str16(&r, out->title, sizeof(out->title));
-    (void)fb_take(&r, out->supersedes, FLEET_BOARD_ID_BYTES);
-    (void)fb_take_str16(&r, out->receipt, sizeof(out->receipt));
-    out->text_len = fb_take_u32(&r);
-    if (!r.bad && out->text_len >= sizeof(out->text))
-        r.bad = true;
-    if (!r.bad && fb_take(&r, out->text, out->text_len))
-        out->text[out->text_len] = '\0';
-    if (!r.bad)
-        (void)fb_take(&r, out->signature, FLEET_BOARD_SIG_BYTES);
-    if (r.bad) {
-        memset(out, 0, sizeof(*out));
-        return FLEET_BOARD_ERR_TRUNCATED;
-    }
-    if (r.pos != r.len) {
-        memset(out, 0, sizeof(*out));
-        return FLEET_BOARD_ERR_TRAILING;
-    }
+    return FLEET_BOARD_OK;
+}
 
+/* The signed fields in body order. Nothing is checked here: a short read
+ * latches `bad` in the reader and the caller refuses the whole decode. */
+static void fb_decode_post_fields(
+    struct fb_reader *r, struct fleet_board_post *out, bool v2)
+{
+    out->kind = fb_take_u8(r);
+    out->created_at = fb_take_u64(r);
+    out->ttl = fb_take_u32(r);
+    (void)fb_take(r, out->ref, FLEET_BOARD_ID_BYTES);
+    (void)fb_take(r, out->host_pubkey, FLEET_BOARD_PUBKEY_BYTES);
+    if (v2) {
+        out->scope = fb_take_u8(r);
+        (void)fb_take_str16(r, out->room, sizeof(out->room));
+    }
+    (void)fb_take_str16(r, out->agent, sizeof(out->agent));
+    (void)fb_take_str16(r, out->slug, sizeof(out->slug));
+    (void)fb_take_str16(r, out->title, sizeof(out->title));
+    (void)fb_take(r, out->supersedes, FLEET_BOARD_ID_BYTES);
+    (void)fb_take_str16(r, out->receipt, sizeof(out->receipt));
+    out->text_len = fb_take_u32(r);
+}
+
+/* The last two reads, text then signature, still behind the latch so a
+ * poisoned reader writes nothing further into the post. */
+static void fb_decode_post_text_and_signature(
+    struct fb_reader *r, struct fleet_board_post *out)
+{
+    if (!r->bad && out->text_len >= sizeof(out->text))
+        r->bad = true;
+    if (!r->bad && fb_take(r, out->text, out->text_len))
+        out->text[out->text_len] = '\0';
+    if (!r->bad)
+        (void)fb_take(r, out->signature, FLEET_BOARD_SIG_BYTES);
+}
+
+/* Shape, id, signature: the decode is total, so a post that fails any of
+ * these leaves the caller a zeroed post and the refusal that stopped it. */
+static enum fleet_board_result fb_decode_post_self_check(
+    struct fleet_board_post *out)
+{
     enum fleet_board_result shape = fleet_board_post_validate(out);
     if (shape != FLEET_BOARD_OK) {
         memset(out, 0, sizeof(*out));
@@ -608,6 +656,34 @@ enum fleet_board_result fleet_board_post_decode(
         return r_sig;
     }
     return FLEET_BOARD_OK;
+}
+
+enum fleet_board_result fleet_board_post_decode(
+    const uint8_t *wire, size_t wire_len, struct fleet_board_post *out)
+{
+    if (!wire || !out)
+        return FLEET_BOARD_ERR_ARGS;
+    memset(out, 0, sizeof(*out));
+
+    struct fb_reader r = {.p = wire, .len = wire_len};
+    bool v2 = false;
+    enum fleet_board_result dom = fb_decode_post_domain(&r, out, &v2);
+    if (dom != FLEET_BOARD_OK) {
+        memset(out, 0, sizeof(*out));
+        return dom;
+    }
+    fb_decode_post_fields(&r, out, v2);
+    fb_decode_post_text_and_signature(&r, out);
+    if (r.bad) {
+        memset(out, 0, sizeof(*out));
+        return FLEET_BOARD_ERR_TRUNCATED;
+    }
+    if (r.pos != r.len) {
+        memset(out, 0, sizeof(*out));
+        return FLEET_BOARD_ERR_TRAILING;
+    }
+
+    return fb_decode_post_self_check(out);
 }
 
 /* ── frames ─────────────────────────────────────────────────────────── */
