@@ -36,16 +36,39 @@ static void render_append(char *buf, size_t cap, size_t *off,
     *off = (size_t)n >= cap - *off ? cap : *off + (size_t)n;
 }
 
+static const char *text_or_fallback(const char *text, const char *fallback)
+{
+    return text && text[0] ? text : fallback;
+}
+
+static void render_next_steps(char *buf, size_t cap, size_t *off,
+                              const struct boot_error_next *next,
+                              size_t next_count)
+{
+    if (next) {
+        size_t shown = 0;
+        for (size_t i = 0; i < next_count && shown < BOOT_ERROR_MAX_NEXT; i++) {
+            if (!next[i].command || !next[i].command[0])
+                continue;
+            shown++;
+            render_append(buf, cap, off,
+                          "  next[%zu]:  %s\n", shown, next[i].command);
+            if (next[i].reason && next[i].reason[0])
+                render_append(buf, cap, off,
+                              "            why: %s\n", next[i].reason);
+        }
+    }
+}
+
 void boot_error_report(enum boot_error_level level, const char *code,
                        const char *phase, const char *message,
                        const struct boot_error_next *next, size_t next_count,
                        const char *evidence_fmt, ...)
 {
     const char *tag = level == BOOT_ERROR_WARN ? "WARN" : "FATAL";
-    const char *safe_code = code && code[0] ? code : "BOOT_UNSPECIFIED";
-    const char *safe_phase = phase && phase[0] ? phase : "boot";
-    const char *safe_msg = message && message[0] ? message
-                                                 : "(no message supplied)";
+    const char *safe_code = text_or_fallback(code, "BOOT_UNSPECIFIED");
+    const char *safe_phase = text_or_fallback(phase, "boot");
+    const char *safe_msg = text_or_fallback(message, "(no message supplied)");
 
     char evidence[512];
     evidence[0] = '\0';
@@ -67,19 +90,8 @@ void boot_error_report(enum boot_error_level level, const char *code,
     if (evidence[0])
         render_append(g_last_render, sizeof(g_last_render), &off,
                       "  evidence: %s\n", evidence);
-    if (next) {
-        size_t shown = 0;
-        for (size_t i = 0; i < next_count && shown < BOOT_ERROR_MAX_NEXT; i++) {
-            if (!next[i].command || !next[i].command[0])
-                continue;
-            shown++;
-            render_append(g_last_render, sizeof(g_last_render), &off,
-                          "  next[%zu]:  %s\n", shown, next[i].command);
-            if (next[i].reason && next[i].reason[0])
-                render_append(g_last_render, sizeof(g_last_render), &off,
-                              "            why: %s\n", next[i].reason);
-        }
-    }
+    render_next_steps(g_last_render, sizeof(g_last_render), &off,
+                      next, next_count);
     render_append(g_last_render, sizeof(g_last_render), &off, "\n");
 
     fputs(g_last_render, stderr);

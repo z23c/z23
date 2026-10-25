@@ -1017,7 +1017,6 @@ engine/composition/src/boot_cursor_state.c:boot_cursor_propagate_nchaintx:25
 engine/composition/src/boot_datadir_lock.c:boot_datadir_lock_acquire#2:42
 engine/composition/src/boot_endpoint_records.c:ber_read_record_file:23
 engine/composition/src/boot_endpoint_records.c:boot_endpoint_records_load:21
-engine/composition/src/boot_error.c:boot_error_report:20
 engine/composition/src/boot_export_consensus_bundle.c:boot_export_consensus_bundle:21
 engine/composition/src/boot_frontend_services.c:boot_https_explorer_start:27
 engine/composition/src/boot_header_seed_import.c:boot_header_seed_import_maybe:32
