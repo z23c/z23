@@ -203,10 +203,18 @@ static struct cx_row *cx_load_rows(const char *root, size_t *count)
     for (const char *p = text; *p;) {
         size_t l = strcspn(p, "\n");
         if (n == cap) {
-            cap = cap ? cap * 2 : 1024;
-            rows = zcl_realloc(rows, cap * sizeof(*rows), "dev_cx.rows");
+            size_t grow = cap ? cap * 2 : 1024;
+            struct cx_row *more =
+                zcl_realloc(rows, grow * sizeof(*rows), "dev_cx.rows");
+            if (!more) {
+                free(rows);
+                free(text);
+                return NULL;
+            }
+            rows = more;
+            cap = grow;
         }
-        if (rows && cx_row_parse(p, l, &rows[n]))
+        if (cx_row_parse(p, l, &rows[n]))
             n++;
         p += l + (p[l] == '\n' ? 1 : 0);
     }

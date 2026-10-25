@@ -49,11 +49,11 @@ struct cx_check {
 typedef const char *(*cx_step_fn)(struct cx_check *);
 
 static void ck_reply_fail(struct zcl_command_reply *reply, const char *code,
-                          const char *msg, const char *detail)
+                          const char *msg, const char *detail, bool mutated)
 {
     zcl_command_reply_fail(reply, ZCL_COMMAND_STATUS_FAILED,
                            ZCL_COMMAND_EXIT_FAILED, code, "dev.cx.check", false,
-                           false, msg, detail);
+                           mutated, msg, detail);
     json_set_object(&reply->data);
     (void)json_push_kv_str(&reply->data, "schema", "zcl.dev_cx_check.v1");
     (void)json_push_kv_str(&reply->data, "verdict", "fail");
@@ -454,7 +454,8 @@ void zcl_native_handle_dev_cx_check(const struct zcl_command_request *request,
     if (ck)
         ck->log = zcl_malloc(CK_LOG_CAP, "dev_cx.check.log");
     if (!ck || !ck->log) {
-        ck_reply_fail(reply, "CX_NO_MEMORY", "cannot allocate the check", "");
+        ck_reply_fail(reply, "CX_NO_MEMORY", "cannot allocate the check", "",
+                      false);
         if (ck)
             ck_free(ck);
         return;
@@ -469,10 +470,12 @@ void zcl_native_handle_dev_cx_check(const struct zcl_command_request *request,
         code = "CX_NO_MEMORY";
     if (code) {
         code = ck_unwind(ck, code);
+        /* A failed restore leaves the baseline rewritten or truncated. */
         ck_reply_fail(reply, code, "dev.cx.check refused the unit",
                       ck->detail[0] ? ck->detail
                                     : "worktree, file (a .c path) and functions "
-                                      "(comma list) are required");
+                                      "(comma list) are required",
+                      strcmp(code, "CX_RESTORE_FAILED") == 0);
     }
     ck_free(ck);
 }
