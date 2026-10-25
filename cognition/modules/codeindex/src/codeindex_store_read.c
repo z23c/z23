@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Crenton - Apache License 2.0
  *
  * Purpose: the READ half of codeindex_store — every query that steps derived
  * rows back out of <root>/.codeindex/index.kv.
@@ -27,6 +27,22 @@
 
 /* ── reads ──────────────────────────────────────────────────────────── */
 
+/* Copy one stepped meta row out to the caller: flag it found, report the
+ * value's full byte length, and copy min(length, cap) bytes into buf when
+ * there is a buffer with room and the column holds data. */
+static void ci_store_meta_copy_row(sqlite3_stmt *stmt, void *buf,
+                                   size_t cap, size_t *outlen, bool *found)
+{
+    if (found) *found = true;
+    int n = sqlite3_column_bytes(stmt, 0);
+    const void *b = sqlite3_column_blob(stmt, 0);
+    if (outlen) *outlen = (size_t)n;
+    if (buf && cap > 0 && b) {
+        size_t copy = (size_t)n < cap ? (size_t)n : cap;
+        if (copy > 0) memcpy(buf, b, copy);
+    }
+}
+
 bool ci_store_meta_get(struct ci_store *s, const char *k, void *buf,
                        size_t cap, size_t *outlen, bool *found)
 {
@@ -45,14 +61,7 @@ bool ci_store_meta_get(struct ci_store *s, const char *k, void *buf,
     bool ok = true;
     int rc = sqlite3_step(stmt);  // raw-sql-ok:codeindex-derived
     if (rc == SQLITE_ROW) {
-        if (found) *found = true;
-        int n = sqlite3_column_bytes(stmt, 0);
-        const void *b = sqlite3_column_blob(stmt, 0);
-        if (outlen) *outlen = (size_t)n;
-        if (buf && cap > 0 && b) {
-            size_t copy = (size_t)n < cap ? (size_t)n : cap;
-            if (copy > 0) memcpy(buf, b, copy);
-        }
+        ci_store_meta_copy_row(stmt, buf, cap, outlen, found);
     } else if (rc != SQLITE_DONE) {
         ok = false;
     }
@@ -614,3 +623,4 @@ bool ci_store_row_counts(struct ci_store *s, struct ci_row_counts *out)
     pthread_mutex_unlock(&s->lock);
     return true;
 }
+
