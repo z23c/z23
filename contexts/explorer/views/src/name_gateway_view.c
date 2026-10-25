@@ -79,6 +79,31 @@ static size_t gw_emit_notice(char *buf, size_t max, const char *safe_name,
     return off;
 }
 
+/* True for bytes that are never relayed: NUL, the C0 controls other than
+ * tab/LF/CR, and DEL. They are a parser-confusion tool, not content. */
+static bool gw_byte_dropped(unsigned char c)
+{
+    if (c == 0) return true;
+    if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') return true;
+    if (c == 0x7f) return true;
+    return false;
+}
+
+/* The entity for one of the five HTML-significant characters, or NULL
+ * when the byte is passed through unchanged. *elen is written only when
+ * an entity is returned; the caller's default (1) must already be set. */
+static const char *gw_escape_entity(unsigned char c, size_t *elen)
+{
+    switch (c) {
+    case '<':  *elen = 4; return "&lt;";
+    case '>':  *elen = 4; return "&gt;";
+    case '&':  *elen = 5; return "&amp;";
+    case '"':  *elen = 6; return "&quot;";
+    case '\'': *elen = 5; return "&#39;";
+    default: return NULL;
+    }
+}
+
 /* Append the relayed bytes as srcdoc-safe entities. Control characters are
  * dropped (they are a parser-confusion tool, never content), and the five
  * HTML-significant characters are escaped so the parent parser cannot be
@@ -90,19 +115,9 @@ static size_t gw_escape_append(char *buf, size_t off, size_t limit,
     if (fit_all) *fit_all = true;
     for (size_t i = 0; i < body_len; i++) {
         unsigned char c = body[i];
-        const char *esc = NULL;
+        if (gw_byte_dropped(c)) continue;
         size_t elen = 1;
-        if (c == 0) continue;
-        if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') continue;
-        if (c == 0x7f) continue;
-        switch (c) {
-        case '<':  esc = "&lt;";   elen = 4; break;
-        case '>':  esc = "&gt;";   elen = 4; break;
-        case '&':  esc = "&amp;";  elen = 5; break;
-        case '"':  esc = "&quot;"; elen = 6; break;
-        case '\'': esc = "&#39;";  elen = 5; break;
-        default: break;
-        }
+        const char *esc = gw_escape_entity(c, &elen);
         if (off + elen >= limit) {
             if (fit_all) *fit_all = false;
             break;
