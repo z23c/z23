@@ -13,7 +13,7 @@
 static const uint8_t contacts_magic[8] =
     {'Z','C','D','H','T','C',0x0D,0x0A};
 
-const char *vcs_zcode_dht_error_string(enum vcs_zcode_dht_error e)
+static const char *error_string_wire_codes(enum vcs_zcode_dht_error e)
 {
     switch (e) {
     case VCS_ZCODE_DHT_OK: return "ok";
@@ -26,6 +26,13 @@ const char *vcs_zcode_dht_error_string(enum vcs_zcode_dht_error e)
     case VCS_ZCODE_DHT_ERR_WIRE_SIZE: return "wire-size";
     case VCS_ZCODE_DHT_ERR_WIRE_MAGIC: return "wire-magic";
     case VCS_ZCODE_DHT_ERR_WIRE_ORDER: return "entry-order";
+    default: return NULL;
+    }
+}
+
+static const char *error_string_peer_codes(enum vcs_zcode_dht_error e)
+{
+    switch (e) {
     case VCS_ZCODE_DHT_ERR_WIRE_KIND: return "wire-kind";
     case VCS_ZCODE_DHT_ERR_QUERY_ID: return "query-id-zero";
     case VCS_ZCODE_DHT_ERR_NETWORK: return "wrong-network";
@@ -35,8 +42,16 @@ const char *vcs_zcode_dht_error_string(enum vcs_zcode_dht_error e)
     case VCS_ZCODE_DHT_ERR_SIGNATURE: return "online-signature";
     case VCS_ZCODE_DHT_ERR_IDENTITY: return "identity-mismatch";
     case VCS_ZCODE_DHT_ERR_EXPIRED: return "expired";
+    default: return NULL;
     }
-    return "unknown";
+}
+
+const char *vcs_zcode_dht_error_string(enum vcs_zcode_dht_error e)
+{
+    const char *s = error_string_wire_codes(e);
+    if (s) return s;
+    s = error_string_peer_codes(e);
+    return s ? s : "unknown";
 }
 
 bool vcs_zcode_dht_node_id(uint8_t out[32], const uint8_t genesis[32],
@@ -234,45 +249,32 @@ static void insert_direct(struct vcs_zcode_dht_table *t,
     t->bucket_sizes[b]++; t->contact_count++;
 }
 
-enum vcs_zcode_dht_add_result vcs_zcode_dht_table_add_contact(
+static enum vcs_zcode_dht_add_result refresh_existing_contact(
     struct vcs_zcode_dht_table *t, const struct vcs_zcode_dht_contact *c,
-    int64_t now)
+    int b, size_t slot)
 {
-    if (!t || !c || !zcl_bytes_any_set(c->node_id, 32))
-        return VCS_ZCODE_DHT_ADD_REJECTED_ZERO_ID;
-    if (!contact_keys_valid(c)) return VCS_ZCODE_DHT_ADD_REJECTED_ZERO_KEY;
-    if (c->last_success_unix < 0)
+    struct vcs_zcode_dht_contact *old = &t->buckets[b][slot];
+    /* The node ID is stable across an online/Noise-key rotation because
+     * it binds the master and delayed beacon. A changed session key is
+     * accepted only inside a strictly newer master-signed delegation;
+     * same-sequence byte drift and every rollback fail closed. */
+    if (!identity_binding_same(old, c))
+        return VCS_ZCODE_DHT_ADD_REJECTED_BINDING;
+    if (c->delegation_sequence < old->delegation_sequence ||
+        (c->delegation_sequence == old->delegation_sequence &&
+         memcmp(c->delegation_wire, old->delegation_wire,
+                sizeof(c->delegation_wire)) != 0))
+        return VCS_ZCODE_DHT_ADD_REJECTED_STALE;
+    if (c->last_success_unix < old->last_success_unix)
         return VCS_ZCODE_DHT_ADD_REJECTED_TIMESTAMP;
-    if (memcmp(c->node_id, t->self_id, 32) == 0)
-        return VCS_ZCODE_DHT_ADD_REJECTED_SELF;
-    size_t slot = 0;
-    int b = table_slot(t, c->node_id, &slot);
-    if (b >= 0) {
-        struct vcs_zcode_dht_contact *old = &t->buckets[b][slot];
-        /* The node ID is stable across an online/Noise-key rotation because
-         * it binds the master and delayed beacon. A changed session key is
-         * accepted only inside a strictly newer master-signed delegation;
-         * same-sequence byte drift and every rollback fail closed. */
-        if (!identity_binding_same(old, c))
-            return VCS_ZCODE_DHT_ADD_REJECTED_BINDING;
-        if (c->delegation_sequence < old->delegation_sequence ||
-            (c->delegation_sequence == old->delegation_sequence &&
-             memcmp(c->delegation_wire, old->delegation_wire,
-                    sizeof(c->delegation_wire)) != 0))
-            return VCS_ZCODE_DHT_ADD_REJECTED_STALE;
-        if (c->last_success_unix < old->last_success_unix)
-            return VCS_ZCODE_DHT_ADD_REJECTED_TIMESTAMP;
-        *old = *c; old->consecutive_failures = 0;
-        return VCS_ZCODE_DHT_ADD_REFRESHED;
-    }
-    uint8_t distance[32];
-    vcs_zcode_dht_xor_distance(t->self_id, c->node_id, distance);
-    b = vcs_zcode_dht_bucket_index(distance);
-    if (t->bucket_sizes[b] < VCS_ZCODE_DHT_K &&
-        t->contact_count < VCS_ZCODE_DHT_MAX_CONTACTS) {
-        insert_direct(t, c);
-        return VCS_ZCODE_DHT_ADD_ADDED;
-    }
+    *old = *c; old->consecutive_failures = 0;
+    return VCS_ZCODE_DHT_ADD_REFRESHED;
+}
+
+static enum vcs_zcode_dht_add_result add_via_pending_probe(
+    struct vcs_zcode_dht_table *t, const struct vcs_zcode_dht_contact *c,
+    int b, int64_t now)
+{
     size_t vb = (size_t)b, vs = 0;
     if (t->bucket_sizes[b] == VCS_ZCODE_DHT_K)
         vs = bucket_victim(t, (size_t)b);
@@ -290,6 +292,31 @@ enum vcs_zcode_dht_add_result vcs_zcode_dht_table_add_contact(
     p->deadline_mono = now + VCS_ZCODE_DHT_PROBE_WAIT_TIMEOUT_S;
     t->pending_count++;
     return VCS_ZCODE_DHT_ADD_PENDING_PROBE;
+}
+
+enum vcs_zcode_dht_add_result vcs_zcode_dht_table_add_contact(
+    struct vcs_zcode_dht_table *t, const struct vcs_zcode_dht_contact *c,
+    int64_t now)
+{
+    if (!t || !c || !zcl_bytes_any_set(c->node_id, 32))
+        return VCS_ZCODE_DHT_ADD_REJECTED_ZERO_ID;
+    if (!contact_keys_valid(c)) return VCS_ZCODE_DHT_ADD_REJECTED_ZERO_KEY;
+    if (c->last_success_unix < 0)
+        return VCS_ZCODE_DHT_ADD_REJECTED_TIMESTAMP;
+    if (memcmp(c->node_id, t->self_id, 32) == 0)
+        return VCS_ZCODE_DHT_ADD_REJECTED_SELF;
+    size_t slot = 0;
+    int b = table_slot(t, c->node_id, &slot);
+    if (b >= 0) return refresh_existing_contact(t, c, b, slot);
+    uint8_t distance[32];
+    vcs_zcode_dht_xor_distance(t->self_id, c->node_id, distance);
+    b = vcs_zcode_dht_bucket_index(distance);
+    if (t->bucket_sizes[b] < VCS_ZCODE_DHT_K &&
+        t->contact_count < VCS_ZCODE_DHT_MAX_CONTACTS) {
+        insert_direct(t, c);
+        return VCS_ZCODE_DHT_ADD_ADDED;
+    }
+    return add_via_pending_probe(t, c, b, now);
 }
 
 bool vcs_zcode_dht_table_probe_started(struct vcs_zcode_dht_table *t,
@@ -494,17 +521,10 @@ static enum vcs_zcode_dht_error contact_consistent(
     return VCS_ZCODE_DHT_OK;
 }
 
-enum vcs_zcode_dht_error vcs_zcode_dht_contacts_serialize(
+static enum vcs_zcode_dht_error contacts_sort_order(
     const struct vcs_zcode_dht_contact *contacts, uint32_t count,
-    const uint8_t genesis[32], const uint8_t self[32], uint8_t *wire,
-    size_t cap, size_t *len_out)
+    uint16_t *order)
 {
-    if (!wire || !len_out || !genesis || !self || (count && !contacts))
-        return VCS_ZCODE_DHT_ERR_NULL;
-    *len_out = 0;
-    size_t need = vcs_zcode_dht_contacts_wire_bytes(count);
-    if (!need || cap < need) return VCS_ZCODE_DHT_ERR_LIMIT;
-    uint16_t order[VCS_ZCODE_DHT_MAX_CONTACTS];
     for (uint32_t i = 0; i < count; i++) {
         if (contact_consistent(&contacts[i], NULL) != VCS_ZCODE_DHT_OK)
             return VCS_ZCODE_DHT_ERR_DELEGATION;
@@ -519,12 +539,14 @@ enum vcs_zcode_dht_error vcs_zcode_dht_contacts_serialize(
         if (memcmp(contacts[order[i - 1]].node_id,
                    contacts[order[i]].node_id, 32) == 0)
             return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-    size_t off = 0;
-    memcpy(wire + off, contacts_magic, 8); off += 8;
-    zcl_write_u16_le(wire + off, VCS_ZCODE_DHT_CONTACTS_WIRE_VERSION); off += 2;
-    memcpy(wire + off, genesis, 32); off += 32;
-    memcpy(wire + off, self, 32); off += 32;
-    zcl_write_u32_le(wire + off, count); off += 4;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static size_t append_contact_entries(
+    uint8_t *wire, size_t off,
+    const struct vcs_zcode_dht_contact *contacts, const uint16_t *order,
+    uint32_t count)
+{
     for (uint32_t i = 0; i < count; i++) {
         const struct vcs_zcode_dht_contact *c = &contacts[order[i]];
         memcpy(wire + off, c->node_id, 32); off += 32;
@@ -534,19 +556,37 @@ enum vcs_zcode_dht_error vcs_zcode_dht_contacts_serialize(
         zcl_write_i64_le(wire + off, c->last_success_unix); off += 8;
         zcl_write_u32_le(wire + off, c->consecutive_failures); off += 4;
     }
+    return off;
+}
+
+enum vcs_zcode_dht_error vcs_zcode_dht_contacts_serialize(
+    const struct vcs_zcode_dht_contact *contacts, uint32_t count,
+    const uint8_t genesis[32], const uint8_t self[32], uint8_t *wire,
+    size_t cap, size_t *len_out)
+{
+    if (!wire || !len_out || !genesis || !self || (count && !contacts))
+        return VCS_ZCODE_DHT_ERR_NULL;
+    *len_out = 0;
+    size_t need = vcs_zcode_dht_contacts_wire_bytes(count);
+    if (!need || cap < need) return VCS_ZCODE_DHT_ERR_LIMIT;
+    uint16_t order[VCS_ZCODE_DHT_MAX_CONTACTS];
+    enum vcs_zcode_dht_error oe = contacts_sort_order(contacts, count, order);
+    if (oe != VCS_ZCODE_DHT_OK) return oe;
+    size_t off = 0;
+    memcpy(wire + off, contacts_magic, 8); off += 8;
+    zcl_write_u16_le(wire + off, VCS_ZCODE_DHT_CONTACTS_WIRE_VERSION); off += 2;
+    memcpy(wire + off, genesis, 32); off += 32;
+    memcpy(wire + off, self, 32); off += 32;
+    zcl_write_u32_le(wire + off, count); off += 4;
+    off = append_contact_entries(wire, off, contacts, order, count);
     *len_out = off; return off == need ? VCS_ZCODE_DHT_OK
                                        : VCS_ZCODE_DHT_ERR_WIRE_SIZE;
 }
 
-enum vcs_zcode_dht_error vcs_zcode_dht_contacts_parse(
+static enum vcs_zcode_dht_error check_contacts_header(
     const uint8_t *wire, size_t len, const uint8_t genesis[32],
-    const uint8_t self[32], uint64_t now,
-    vcs_zcode_dht_chain_verify_fn transport_verify, void *transport_ctx,
-    struct vcs_zcode_dht_contact *out, uint32_t out_cap, uint32_t *count_out)
+    const uint8_t self[32], uint32_t out_cap, uint32_t *count_out)
 {
-    if (!wire || !genesis || !self || !count_out || (out_cap && !out))
-        return VCS_ZCODE_DHT_ERR_NULL;
-    *count_out = 0;
     if (len < VCS_ZCODE_DHT_CONTACTS_HEADER_BYTES)
         return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
     if (memcmp(wire, contacts_magic, 8) != 0)
@@ -560,29 +600,67 @@ enum vcs_zcode_dht_error vcs_zcode_dht_contacts_parse(
         return VCS_ZCODE_DHT_ERR_LIMIT;
     if (len != vcs_zcode_dht_contacts_wire_bytes(count))
         return VCS_ZCODE_DHT_ERR_WIRE_SIZE;
+    *count_out = count;
+    return VCS_ZCODE_DHT_OK;
+}
+
+static enum vcs_zcode_dht_error contact_entry_error(
+    enum vcs_zcode_dht_delegation_error de, int64_t seen)
+{
+    if (de != VCS_ZCODE_DHT_DELEGATION_OK)
+        return VCS_ZCODE_DHT_ERR_DELEGATION;
+    return seen < 0 ? VCS_ZCODE_DHT_ERR_LAST_SEEN
+                    : VCS_ZCODE_DHT_ERR_DELEGATION;
+}
+
+static enum vcs_zcode_dht_error parse_contact_entry(
+    const uint8_t *wire, size_t *off_io, uint32_t i,
+    const uint8_t genesis[32], uint64_t now,
+    vcs_zcode_dht_chain_verify_fn transport_verify, void *transport_ctx,
+    struct vcs_zcode_dht_contact *out)
+{
+    size_t off = *off_io;
+    const uint8_t *node_id = wire + off; off += 32;
+    if (!zcl_bytes_any_set(node_id, 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
+    if (i && memcmp(out[i - 1].node_id, node_id, 32) >= 0)
+        return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
+    struct vcs_zcode_dht_delegation d;
+    enum vcs_zcode_dht_delegation_error de =
+        vcs_zcode_dht_delegation_decode(&d, wire + off,
+            VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES);
+    off += VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES;
+    int64_t seen = zcl_read_i64_le(wire + off); off += 8;
+    uint32_t failures = zcl_read_u32_le(wire + off); off += 4;
+    *off_io = off;
+    if (de != VCS_ZCODE_DHT_DELEGATION_OK || seen < 0 ||
+        vcs_zcode_dht_delegation_verify(&d, genesis, NULL, 0, NULL, now) !=
+            VCS_ZCODE_DHT_DELEGATION_OK ||
+        (transport_verify && !transport_verify(transport_ctx, &d)) ||
+        !vcs_zcode_dht_contact_from_delegation(&out[i], &d, seen, failures) ||
+        memcmp(out[i].node_id, node_id, 32) != 0)
+        return contact_entry_error(de, seen);
+    return VCS_ZCODE_DHT_OK;
+}
+
+enum vcs_zcode_dht_error vcs_zcode_dht_contacts_parse(
+    const uint8_t *wire, size_t len, const uint8_t genesis[32],
+    const uint8_t self[32], uint64_t now,
+    vcs_zcode_dht_chain_verify_fn transport_verify, void *transport_ctx,
+    struct vcs_zcode_dht_contact *out, uint32_t out_cap, uint32_t *count_out)
+{
+    if (!wire || !genesis || !self || !count_out || (out_cap && !out))
+        return VCS_ZCODE_DHT_ERR_NULL;
+    *count_out = 0;
+    uint32_t count = 0;
+    enum vcs_zcode_dht_error he =
+        check_contacts_header(wire, len, genesis, self, out_cap, &count);
+    if (he != VCS_ZCODE_DHT_OK) return he;
     size_t off = VCS_ZCODE_DHT_CONTACTS_HEADER_BYTES;
     for (uint32_t i = 0; i < count; i++) {
-        const uint8_t *node_id = wire + off; off += 32;
-        if (!zcl_bytes_any_set(node_id, 32)) return VCS_ZCODE_DHT_ERR_ID_ZERO;
-        if (i && memcmp(out[i - 1].node_id, node_id, 32) >= 0)
-            return VCS_ZCODE_DHT_ERR_WIRE_ORDER;
-        struct vcs_zcode_dht_delegation d;
-        enum vcs_zcode_dht_delegation_error de =
-            vcs_zcode_dht_delegation_decode(&d, wire + off,
-                VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES);
-        off += VCS_ZCODE_DHT_DELEGATION_WIRE_BYTES;
-        int64_t seen = zcl_read_i64_le(wire + off); off += 8;
-        uint32_t failures = zcl_read_u32_le(wire + off); off += 4;
-        if (de != VCS_ZCODE_DHT_DELEGATION_OK || seen < 0 ||
-            vcs_zcode_dht_delegation_verify(&d, genesis, NULL, 0, NULL, now) !=
-                VCS_ZCODE_DHT_DELEGATION_OK ||
-            (transport_verify && !transport_verify(transport_ctx, &d)) ||
-            !vcs_zcode_dht_contact_from_delegation(&out[i], &d, seen, failures) ||
-            memcmp(out[i].node_id, node_id, 32) != 0)
-            return de != VCS_ZCODE_DHT_DELEGATION_OK
-                ? VCS_ZCODE_DHT_ERR_DELEGATION
-                : (seen < 0 ? VCS_ZCODE_DHT_ERR_LAST_SEEN
-                            : VCS_ZCODE_DHT_ERR_DELEGATION);
+        enum vcs_zcode_dht_error e =
+            parse_contact_entry(wire, &off, i, genesis, now, transport_verify,
+                                transport_ctx, out);
+        if (e != VCS_ZCODE_DHT_OK) return e;
     }
     *count_out = count; return VCS_ZCODE_DHT_OK;
 }
