@@ -341,6 +341,46 @@ static void refold_snapshot_candidate_dump_json(struct json_value *out)
                      "before use");
 }
 
+static void refold_durable_keys_dump_json(struct json_value *out, sqlite3 *db)
+{
+    uint8_t ip[1] = {0};
+    size_t ip_n = 0;
+    bool ip_found = false;
+    uint8_t fa[1] = {0};
+    size_t fa_n = 0;
+    bool fa_found = false;
+    uint8_t tbuf[4] = {0};
+    size_t t_n = 0;
+    bool t_found = false;
+    bool ip_ok = progress_meta_get(db, REFOLD_IN_PROGRESS_KEY,
+                                   ip, sizeof(ip), &ip_n, &ip_found);
+    bool fa_ok = progress_meta_get(db, REFOLD_FROM_ANCHOR_KEY,
+                                   fa, sizeof(fa), &fa_n, &fa_found);
+    bool t_ok = progress_meta_get(db, REFOLD_FROM_ANCHOR_TARGET_KEY,
+                                  tbuf, sizeof(tbuf), &t_n, &t_found);
+    progress_store_tx_unlock();
+
+    bool durable_in_progress = ip_ok && ip_found && ip_n == 1 &&
+                               ip[0] == 0x01;
+    bool durable_from_anchor = fa_ok && fa_found && fa_n == 1 &&
+                               fa[0] == 0x01;
+    json_push_kv_bool(out, "durable_in_progress", durable_in_progress);
+    json_push_kv_bool(out, "durable_from_anchor", durable_from_anchor);
+
+    /* The from-anchor resume target tip, decoded little-endian (the same
+     * encoding mark_started_from_anchor writes). Absent on a normal boot
+     * or a from-genesis refold. */
+    if (t_ok && t_found && t_n == 4) {
+        int32_t target = (int32_t)((uint32_t)tbuf[0] |
+                                   ((uint32_t)tbuf[1] << 8) |
+                                   ((uint32_t)tbuf[2] << 16) |
+                                   ((uint32_t)tbuf[3] << 24));
+        json_push_kv_int(out, "from_anchor_target_tip", (int64_t)target);
+    } else {
+        json_push_kv_bool(out, "from_anchor_target_tip_present", false);
+    }
+}
+
 /* ── Native dump-state introspection ───────────────────────────────────────
  *
  * See CLAUDE.md "Adding state introspection". Read-only: this dumper observes
@@ -388,44 +428,8 @@ bool refold_progress_dump_state_json(struct json_value *out, const char *key)
                          : durable_ok ? "available" : "progress_store_busy");
     if (db && !durable_ok)
         json_push_kv_bool(out, "durable_snapshot_retryable", true);
-    if (durable_ok) {
-        uint8_t ip[1] = {0};
-        size_t ip_n = 0;
-        bool ip_found = false;
-        uint8_t fa[1] = {0};
-        size_t fa_n = 0;
-        bool fa_found = false;
-        uint8_t tbuf[4] = {0};
-        size_t t_n = 0;
-        bool t_found = false;
-        bool ip_ok = progress_meta_get(db, REFOLD_IN_PROGRESS_KEY,
-                                       ip, sizeof(ip), &ip_n, &ip_found);
-        bool fa_ok = progress_meta_get(db, REFOLD_FROM_ANCHOR_KEY,
-                                       fa, sizeof(fa), &fa_n, &fa_found);
-        bool t_ok = progress_meta_get(db, REFOLD_FROM_ANCHOR_TARGET_KEY,
-                                      tbuf, sizeof(tbuf), &t_n, &t_found);
-        progress_store_tx_unlock();
-
-        bool durable_in_progress = ip_ok && ip_found && ip_n == 1 &&
-                                   ip[0] == 0x01;
-        bool durable_from_anchor = fa_ok && fa_found && fa_n == 1 &&
-                                   fa[0] == 0x01;
-        json_push_kv_bool(out, "durable_in_progress", durable_in_progress);
-        json_push_kv_bool(out, "durable_from_anchor", durable_from_anchor);
-
-        /* The from-anchor resume target tip, decoded little-endian (the same
-         * encoding mark_started_from_anchor writes). Absent on a normal boot
-         * or a from-genesis refold. */
-        if (t_ok && t_found && t_n == 4) {
-            int32_t target = (int32_t)((uint32_t)tbuf[0] |
-                                       ((uint32_t)tbuf[1] << 8) |
-                                       ((uint32_t)tbuf[2] << 16) |
-                                       ((uint32_t)tbuf[3] << 24));
-            json_push_kv_int(out, "from_anchor_target_tip", (int64_t)target);
-        } else {
-            json_push_kv_bool(out, "from_anchor_target_tip_present", false);
-        }
-    }
+    if (durable_ok)
+        refold_durable_keys_dump_json(out, db);
     return true;
 }
 
