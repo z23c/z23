@@ -15,7 +15,6 @@ cognition/controllers/src/agent_session_controller.c:ags_liquidity:20
 cognition/controllers/src/agent_session_controller.c:rpc_agentsession:16
 cognition/controllers/src/agent_test_controller.c:rpc_agent_test:23
 cognition/controllers/src/event_agent_summary.c:rpc_agent_summary:30
-cognition/modules/codeindex/src/codeindex.c:codeindex_build_cold_ms:19
 cognition/modules/codeindex/src/codeindex_build_store.c:ci_build_store_memory:26
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_copy_image:23
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_install_posix:61
