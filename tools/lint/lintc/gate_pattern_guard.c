@@ -21,10 +21,12 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <errno.h>
 #include <regex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include "lintc.h"
 
@@ -74,7 +76,9 @@ static int rpc_keep(const char *path)
     if (lint_path_is_excluded(path) || rpc_skip(path) || !pg_is_ch(path))
         return 0;
     return pg_pref(path, "lib/") || pg_pref(path, "app/")
-        || pg_pref(path, "tools/") || pg_pref(path, "config/");
+        || pg_pref(path, "tools/") || pg_pref(path, "config/")
+        || pg_pref(path, "engine/") || pg_pref(path, "contexts/")
+        || pg_pref(path, "cognition/") || pg_pref(path, "platform/");
 }
 
 static int rpc_comp(regex_t *re)
@@ -114,6 +118,30 @@ static int rpc_on_file(const char *path, void *ctx)
     return rpc_keep(path) ? rpc_note(ctx, path) : 0;
 }
 
+/* The test harness deliberately omits .git. Choose that filesystem scan
+ * before invoking Git; a failed Git producer or callback must stay failed.
+ * tools is the current required root; the other legacy filter roots are
+ * optional, but errors inspecting them are never evidence of absence. */
+static int rpc_scan(struct rpc_acc *a)
+{
+    struct stat st;
+    if (lstat(".git", &st) == 0 || getenv("GIT_INDEX_FILE"))
+        return each_zpath(k_ls_all, rpc_on_file, a);
+    if (errno != ENOENT)
+        return die("z23-lint: cannot stat %s\n", ".git");
+    int rc = walk_src_root("check-rpc-registrar", "tools", 1, rpc_on_file, a);
+    static const char *const optional[] = {
+        "engine", "contexts", "cognition", "platform", "lib", "app", "config"
+    };
+    for (size_t i = 0; rc == 0 && i < sizeof optional / sizeof optional[0]; i++) {
+        if (lstat(optional[i], &st) == 0)
+            rc = walk_src_root("check-rpc-registrar", optional[i], 1, rpc_on_file, a);
+        else if (errno != ENOENT)
+            rc = die("z23-lint: cannot stat %s\n", optional[i]);
+    }
+    return rc;
+}
+
 static int rpc_eval(FILE *out)
 {
     regex_t re;
@@ -121,14 +149,7 @@ static int rpc_eval(FILE *out)
     if (rc)
         return rc;
     struct rpc_acc a = { .re = &re, .out = out };
-    static const char *const roots[] = { "lib", "app", "tools", "config" };
-    rc = each_zpath(k_ls_all, rpc_on_file, &a);
-    if (rc != 0) {
-        a.hits = 0;
-        rc = 0;
-        for (size_t i = 0; rc == 0 && i < sizeof roots / sizeof roots[0]; i++)
-            rc = walk_src(roots[i], 1, rpc_on_file, &a);
-    }
+    rc = rpc_scan(&a);
     if (rc == 0 && a.hits) {
         if (fputs("\n"
                   "FAIL: rpc_table_appe" "nd() used outside engine/modules/rpc/src/server.c and tests/harness/include/test/.\n"
@@ -207,6 +228,49 @@ static int rpc_st_skip_scan(void)
     return bad;
 }
 
+static int rpc_st_eval(int want_rc)
+{
+    FILE *out = tmpfile();
+    if (!out)
+        return 1;
+    int rc = rpc_eval(out);
+    char text[4096];
+    int bad = csr_slurp(out, text, sizeof text) != 0 || rc != want_rc;
+    if (want_rc != 0 && strstr(text, "  OK:"))
+        bad = 1;
+    if (fclose(out) != 0)
+        bad = 1;
+    return bad;
+}
+
+static int rpc_st_scan_errors(void)
+{
+    char old[4096], tmp[4096];
+    const char *tmpdir = env_or("TMPDIR", "test-tmp");
+    if (csr_mkdirs(tmpdir) || !getcwd(old, sizeof old)
+        || ovf(snprintf(tmp, sizeof tmp, "%s/z23-rpc-scan-XXXXXX",
+                         tmpdir), sizeof tmp)
+        || !mkdtemp(tmp))
+        return 1;
+    int bad = chdir(tmp) != 0;
+    if (!bad) {
+        bad |= rpc_st_eval(2); /* Missing required nongit scan root. */
+        bad |= mkdir("tools", 0700) != 0;
+        bad |= rpc_st_eval(0); /* A successfully scanned empty root is valid. */
+        bad |= csr_write("engine/controllers/src/fixture.c",
+                         "void f(void) { rpc_table_appe" "nd(0, 0); }\n") != 0;
+        bad |= rpc_st_eval(1); /* Current source roots participate in fallback. */
+        bad |= csr_write("engine/controllers/src/fixture.c",
+                         "void f(void) { rpc_table_must_append(0, 0); }\n") != 0;
+        bad |= rpc_st_eval(0);
+        bad |= mkdir(".git", 0700) != 0;
+        bad |= rpc_st_eval(2); /* Invalid Git metadata must not trigger fallback. */
+    }
+    if (chdir(old) != 0)
+        return die("z23-lint: cannot restore %s\n", old);
+    return rap_rm_rf(tmp) != 0 || bad;
+}
+
 int check_rpc_registrar_selftest(void)
 {
     regex_t re;
@@ -228,6 +292,10 @@ int check_rpc_registrar_selftest(void)
     bad |= rpc_st_skip_scan();
     bad |= rpc_st_note("    rpc_table_appe" "nd(&t, &c);\n", 1);
     bad |= rpc_st_note("    rpc_table_must_append(&t, &c);\n", 0);
+    bad |= !rpc_keep("engine/controllers/src/x.c")
+        || !rpc_keep("contexts/wallet/x.c")
+        || !rpc_keep("cognition/x.c") || !rpc_keep("platform/x.h");
+    bad |= rpc_st_scan_errors();
     FILE *out = tmpfile();
     if (!out)
         return die("z23-lint: tmpfile failed\n", "");

@@ -489,13 +489,42 @@ static int pcs_case_source_owned_misplaced(const char *base, int *fails)
                          "invalid source-owned", d, fails);
 }
 
+static int pcs_case_long_glob(const char *base, int *fails)
+{
+    char d[4096], manifest[4096], padding[193];
+    memset(padding, 'p', sizeof padding - 1);
+    padding[sizeof padding - 1] = '\0';
+    if (ovf(snprintf(d, sizeof d, "%s/%s", base, padding), sizeof d)
+        || pcs_fixture_base(d))
+        return 2;
+    const char *srcs[] = { "src/a.c", "tests/b.c", NULL };
+    const char *rows[] = { "pkg/src/a.c CAP_NETWORK", "pkg/tests/b.c CAP_FS_READ", NULL };
+    if (pcs_fixture_pkg(d, "fx/glob", "pkg", "", srcs)
+        || pcs_fixture_rows(d, rows)
+        || ovf(snprintf(manifest, sizeof manifest, "%s/pkg/zcode-package.json", d),
+               sizeof manifest))
+        return 2;
+    /* No files[] key: both src/ and tests/ must be enumerated. A long
+     * physical root must not affect the relative module-row identity. */
+    if (csr_write(manifest,
+                  "{\n  \"capabilities\": [\"CAP_FS_READ\", \"CAP_NETWORK\"]\n}\n"))
+        return 2;
+    if (pcs_expect_rc("N: long-root glob retains both source capability rows",
+                       0, "OK", d, fails))
+        return 2;
+    if (csr_write(manifest, "{\n  \"capabilities\": []\n}\n"))
+        return 2;
+    return pcs_expect_rc("N2: long-root glob still rejects omitted capabilities",
+                          1, "UNDERSTATES", d, fails);
+}
+
 typedef int (*pcs_case_fn)(const char *, int *);
 static const pcs_case_fn k_pcs_cases[] = {
     pcs_case_a, pcs_case_b, pcs_case_c, pcs_case_c2, pcs_case_c3, pcs_case_d,
     pcs_case_e, pcs_case_e2, pcs_case_e3, pcs_case_f1, pcs_case_f2, pcs_case_g1,
     pcs_case_g2, pcs_case_h, pcs_case_i, pcs_case_j,
     pcs_case_source_owned, pcs_case_source_owned_duplicate,
-    pcs_case_source_owned_misplaced,
+    pcs_case_source_owned_misplaced, pcs_case_long_glob,
 };
 
 int check_package_capabilities_selftest(void)
@@ -521,6 +550,6 @@ int check_package_capabilities_selftest(void)
         printf("== selftest: FAIL ==\n");
         return 1;
     }
-    printf("== selftest: PASS (19/19) ==\n");
+    printf("== selftest: PASS (%zu fixture groups) ==\n", ncases);
     return 0;
 }

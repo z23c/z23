@@ -4,7 +4,8 @@
  * (gate_log_macro_return_type.c). Feeds source text straight to the scanner:
  * each mismatched pairing is named with its exact message, each correct
  * pairing, comment, string and conditional-brace idiom stays clean. No files
- * are created.
+ * are created by these parser cases; the traversal regressions use private
+ * temporary fixtures.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -75,7 +76,7 @@ static int lmrs_run_case(const struct lmrs_case *c)
 
 int check_log_macro_return_type_selftest(void)
 {
-    int fails = 0;
+    int fails = lmr_filesystem_selftest();
     for (size_t i = 0; i < sizeof k_lmrs_cases / sizeof k_lmrs_cases[0]; i++)
         fails += !lmrs_run_case(&k_lmrs_cases[i]);
     if (fails)

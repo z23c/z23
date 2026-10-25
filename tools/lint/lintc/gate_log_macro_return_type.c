@@ -619,21 +619,29 @@ static int lmr_consider(struct lmr_list *l, const char *path)
     struct stat st;
     if (n < 2 || path[n - 2] != '.' || (path[n - 1] != 'c' && path[n - 1] != 'h'))
         return 0;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode) || lmr_path_excluded(path))
+    if (lmr_path_excluded(path))
+        return 0;
+    if (stat(path, &st) != 0)
+        return die("z23-lint: cannot stat %s\n", path);
+    if (!S_ISREG(st.st_mode))
         return 0;
     return lmr_list_add(l, path);
 }
 
-static int lmr_walk(struct lmr_list *l, const char *dir)
+static int lmr_walk(struct lmr_list *l, const char *dir);
+
+static int lmr_entries(struct lmr_list *l, DIR *d, const char *dir)
 {
-    DIR *d = opendir(dir);
-    if (!d) {
-        fprintf(stderr, "check_log_macro_return_type: cannot read %s: %s\n", dir, strerror(errno));
-        return 0;
-    }
     int rc = 0;
     struct dirent *de;
-    while (rc == 0 && (de = readdir(d)) != NULL) {
+    while (rc == 0) {
+        errno = 0;
+        de = readdir(d);
+        if (!de) {
+            if (errno)
+                rc = die("z23-lint: cannot read directory %s\n", dir);
+            break;
+        }
         if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0)
             continue;
         char path[4096];
@@ -642,12 +650,24 @@ static int lmr_walk(struct lmr_list *l, const char *dir)
         struct stat st;
         if (w < 0 || (size_t)w >= sizeof path)
             rc = die("z23-lint: path too long under %s\n", dir);
-        else if (lstat(path, &st) == 0 && S_ISDIR(st.st_mode))
+        else if (lstat(path, &st) != 0)
+            rc = die("z23-lint: cannot stat %s\n", path);
+        else if (S_ISDIR(st.st_mode))
             rc = lmr_walk(l, path);
         else
             rc = lmr_consider(l, path);
     }
-    closedir(d);
+    return rc;
+}
+
+static int lmr_walk(struct lmr_list *l, const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d)
+        return die("z23-lint: cannot open directory %s\n", dir);
+    int rc = lmr_entries(l, d, dir);
+    if (closedir(d) != 0 && rc == 0)
+        rc = die("z23-lint: cannot close directory %s\n", dir);
     return rc;
 }
 
@@ -660,7 +680,7 @@ static int lmr_collect(struct lmr_list *l, int argc, char **argv)
         struct stat st;
         if (lstat(root, &st) != 0) {
             fprintf(stderr, "check_log_macro_return_type: cannot stat %s: %s\n", root, strerror(errno));
-            continue;
+            return 2;
         }
         int rc = S_ISDIR(st.st_mode) ? lmr_walk(l, root) : lmr_consider(l, root);
         if (rc)
@@ -668,6 +688,60 @@ static int lmr_collect(struct lmr_list *l, int argc, char **argv)
     }
     qsort(l->v, l->n, sizeof l->v[0], lmr_cmp);
     return 0;
+}
+
+/* These tests live beside the private traversal functions so the scanner's
+ * public surface need not expose directory streams or collection internals. */
+int lmr_filesystem_selftest(void)
+{
+    char tmp[4096], path[4096];
+    const char *tmpdir = env_or("TMPDIR", "test-tmp");
+    if (csr_mkdirs(tmpdir)
+        || ovf(snprintf(tmp, sizeof tmp, "%s/z23-lmr-scan-XXXXXX",
+                        tmpdir), sizeof tmp) || !mkdtemp(tmp))
+        return 1;
+    struct lmr_list files = { 0 };
+    int bad = lmr_walk(&files, tmp) != 0 || files.n != 0;
+    if (ovf(snprintf(path, sizeof path, "%s/missing.c", tmp), sizeof path))
+        bad = 1;
+    else {
+        char *roots[] = { path };
+        bad |= lmr_collect(&files, 1, roots) != 2;
+        bad |= symlink("missing-target", path) != 0;
+        bad |= lmr_collect(&files, 1, roots) != 2;
+        bad |= unlink(path) != 0;
+        bad |= csr_write(path, "int f(void) { return 0; }\n") != 0;
+        bad |= lmr_walk(&files, path) != 2; /* opendir on a regular file. */
+        bad |= lmr_collect(&files, 1, roots) != 0 || files.n != 1;
+    }
+    DIR *d = opendir(tmp);
+    if (!d)
+        bad = 1;
+    else {
+        /* Existing directory entries paired with a vanished parent exercise
+         * the child lstat failure, independently of the root preflight. */
+        bad |= lmr_entries(&files, d, path) != 2;
+        bad |= closedir(d) != 0;
+    }
+    d = opendir(tmp);
+    if (!d)
+        bad = 1;
+    else {
+        /* Before the first read there are no buffered entries. Invalidating
+         * the descriptor forces readdir to distinguish EBADF from EOF. */
+        if (close(dirfd(d)) != 0)
+            bad = 1;
+        else
+            bad |= lmr_entries(&files, d, tmp) != 2;
+        (void)closedir(d);
+    }
+    for (size_t i = 0; i < files.n; i++)
+        free(files.v[i]);
+    free(files.v);
+    bad |= rap_rm_rf(tmp) != 0;
+    if (bad)
+        fputs("check_log_macro_return_type: filesystem SELFTEST FAILED\n", stderr);
+    return bad;
 }
 
 static int lmr_read(const char *path, struct lmr_buf *out)

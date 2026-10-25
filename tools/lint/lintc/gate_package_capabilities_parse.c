@@ -349,11 +349,12 @@ static int pc_has_key(const char *manifest, const char *key)
 /* ── shipped sources ──────────────────────────────────────────────────────── */
 static int pc_cmp_str(const void *a, const void *b)
 { return strcmp((const char *)a, (const char *)b); }
-static int pc_glob_dir(const char *base, const char *sub, char out[][PC_SRCLEN],
+static int pc_glob_dir(const char *root, const char *base, const char *sub,
+                       char out[][PC_SRCLEN],
                        int cap, int *n)
 {
-    char dirpath[PC_PATHLEN * 2];
-    if (ovf(snprintf(dirpath, sizeof dirpath, "%s/%s", base, sub), sizeof dirpath))
+    char dirpath[4096];
+    if (ovf(snprintf(dirpath, sizeof dirpath, "%s/%s/%s", root, base, sub), sizeof dirpath))
         return 2;
     DIR *d = opendir(dirpath);
     if (!d)
@@ -368,7 +369,7 @@ static int pc_glob_dir(const char *base, const char *sub, char out[][PC_SRCLEN],
             closedir(d);
             return die("z23-lint: package-capabilities source overflow\n", "");
         }
-        if (ovf(snprintf(out[*n], PC_SRCLEN, "%s/%s", dirpath, de->d_name), PC_SRCLEN)) {
+        if (ovf(snprintf(out[*n], PC_SRCLEN, "%s/%s/%s", base, sub, de->d_name), PC_SRCLEN)) {
             closedir(d);
             return 2;
         }
@@ -399,34 +400,14 @@ static int pc_pkg_sources_files(const char *manifest, const char *dir,
     }
     return 0;
 }
-/* Rewrite the base-relative names pc_glob_dir wrote (rooted at `full`)
- * to repo-root-relative, prefixed with `dir`, over out[from..*n). */
-static int pc_rewrite_prefix(char out[][PC_SRCLEN], int from, int n, const char *full,
-                             const char *dir)
-{
-    for (int i = from; i < n; i++) {
-        char tmp[PC_SRCLEN];
-        memcpy(tmp, out[i], sizeof tmp);
-        const char *rel = tmp + strlen(full) + 1;
-        if (ovf(snprintf(out[i], PC_SRCLEN, "%s/%s", dir, rel), PC_SRCLEN))
-            return 2;
-    }
-    return 0;
-}
+/* Enumerated names remain repository-relative, like files[] operands.
+ * Absolute checkout paths belong only in the buffer used to open a directory. */
 static int pc_pkg_sources_glob(const char *root, const char *dir, char out[][PC_SRCLEN],
                                int cap, int *n)
 {
-    char full[PC_PATHLEN];
-    if (ovf(snprintf(full, sizeof full, "%s/%s", root, dir), sizeof full))
+    if (pc_glob_dir(root, dir, "src", out, cap, n))
         return 2;
-    if (pc_glob_dir(full, "src", out, cap, n))
-        return 2;
-    if (pc_rewrite_prefix(out, 0, *n, full, dir))
-        return 2;
-    int before = *n;
-    if (pc_glob_dir(full, "tests", out, cap, n))
-        return 2;
-    return pc_rewrite_prefix(out, before, *n, full, dir);
+    return pc_glob_dir(root, dir, "tests", out, cap, n);
 }
 int pc_pkg_sources(const char *root, const char *dir, char out[][PC_SRCLEN], int cap,
                   int *n)

@@ -15,9 +15,12 @@
 #include <unistd.h>
 #include "lintc.h"
 
-enum { BER_MAX = 8192, BER_NAME = 96, BER_LINE = 8192, BER_HIT = 256 };
+enum { BER_MAX = 8192, BER_NAME = 96, BER_LINE = 8192, BER_HIT = 256,
+       BER_PATH = 4096 };
 
-struct ber_files { char p[BER_MAX][RS_PATH]; int n; };
+/* Scan operands include absolute fixture paths. Report slots deliberately
+ * remain RS_PATH-sized: a truncated diagnostic must retain its verdict. */
+struct ber_files { char p[BER_MAX][BER_PATH]; int n; };
 struct ber_names { char n[BER_MAX][BER_NAME]; int c; };
 
 static const char *const k_ber_roots[] = {
@@ -32,7 +35,7 @@ static int ber_add(struct ber_files *s, const char *path)
         if (strcmp(s->p[i], path) == 0)
             return 0;
     n = strlen(path);
-    if (s->n >= BER_MAX || n >= RS_PATH)
+    if (s->n >= BER_MAX || n >= BER_PATH)
         return die("z23-lint: blocker-escape overflow\n", "");
     memcpy(s->p[s->n++], path, n + 1);
     return 0;
@@ -388,21 +391,22 @@ static int ber_run(void)
     static struct ber_files assign, registry;
     static char viol[BER_HIT][RS_PATH];
     const char *ov = env_or("ZCL_BLOCKER_ESCAPE_SCAN_FILES", "");
+    const struct ber_files *scan = &registry;
     int nv = 0, nreg = 0, ncond = 0, rc;
     rc = ber_collect(&registry);
     if (rc)
         return rc;
-    if (ov[0])
+    if (ov[0]) {
         rc = ber_load_list(ov, &assign);
-    else
-        assign = registry;
+        scan = &assign;
+    }
     if (rc)
         return rc;
-    if (assign.n == 0) {
+    if (scan->n == 0) {
         fputs("check_blocker_escape_registered: no files to scan\n", stderr);
         return 1;
     }
-    rc = ber_scan_set(&assign, &registry, &nreg, &ncond, viol, &nv);
+    rc = ber_scan_set(scan, &registry, &nreg, &ncond, viol, &nv);
     if (rc)
         return rc;
     return ber_report(nv, viol, nreg, ncond);
@@ -431,15 +435,29 @@ static int ber_quiet(void)
     return rc;
 }
 
+static int ber_selftest_paths(char *tmp, size_t tmp_cap,
+                              char *plant, size_t plant_cap)
+{
+    char padding[193];
+    memset(padding, 'p', sizeof padding - 1);
+    padding[sizeof padding - 1] = '\0';
+    if (ovf(snprintf(tmp, tmp_cap, "%s/zcl-ber-XXXXXX",
+                     env_or("TMPDIR", "/tmp")), tmp_cap) || !mkdtemp(tmp))
+        return die("z23-lint: mkdtemp failed\n", "");
+    if (ovf(snprintf(plant, plant_cap, "%s/%s/plant.c", tmp, padding), plant_cap)) {
+        (void)rap_rm_rf(tmp);
+        return 2;
+    }
+    return 0;
+}
+
 int check_blocker_escape_registered_selftest(void)
 {
-    char tmp[] = "/tmp/zcl-ber-XXXXXX";
-    char plant[4096];
+    char tmp[BER_PATH], plant[BER_PATH];
     int rc, bad = 0;
-    if (!mkdtemp(tmp))
-        return die("z23-lint: mkdtemp failed\n", "");
-    if (ovf(snprintf(plant, sizeof plant, "%s/plant.c", tmp), sizeof plant)
-        || csr_write(plant,
+    if (ber_selftest_paths(tmp, sizeof tmp, plant, sizeof plant))
+        return 2;
+    if (csr_write(plant,
                      "void f(void) {\n"
                      "    snprintf(b.escape_action, 64, \"not_a_registered_escape_xyz\");\n"
                      "}\n")) {
@@ -482,7 +500,8 @@ int check_blocker_escape_registered_selftest(void)
     if (bad)
         return 1;
     fputs("check_blocker_escape_registered selftest: PASS — planted "
-          "unregistered identifier is named, a whitespace remedy is clean, "
+          "absolute scan paths over 192 bytes retain an unregistered "
+          "identifier verdict and accept a whitespace remedy, "
           "the real tree resolves\n", stdout);
     return 0;
 }

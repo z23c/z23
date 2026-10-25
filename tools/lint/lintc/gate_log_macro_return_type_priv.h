@@ -19,6 +19,7 @@ struct lmr_buf {
 };
 
 void lmr_buf_free(struct lmr_buf *b);
+int lmr_filesystem_selftest(void);
 
 /* Scans one file's text. Each mismatch is appended to bad as
  * "  FILE:LINE: FUNC returns TYPE but MACRO returns VALUE\n". Returns 0, or
