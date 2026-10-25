@@ -8,8 +8,13 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#if defined(__APPLE__)
+typedef char wallet_residency_byte_t;
+#else
 /* Not exposed under _POSIX_C_SOURCE=200809L; plain glibc symbol. */
 extern int mincore(void *addr, size_t length, unsigned char *vec);
+typedef unsigned char wallet_residency_byte_t;
+#endif
 
 /* Bytes of a fresh anonymous struct wallet that are resident after init.
  * Returns (size_t)-1 on a setup failure. */
@@ -22,7 +27,7 @@ static size_t resident_after_init(bool zeroed)
     void *m = mmap(NULL, len, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (m == MAP_FAILED) return (size_t)-1;
-    unsigned char *vec = zcl_calloc(npg, 1, "test_wallet_vec");
+    wallet_residency_byte_t *vec = zcl_calloc(npg, 1, "test_wallet_vec");
     size_t res = (size_t)-1;
     if (vec) {
         struct wallet *w = m;
