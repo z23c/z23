@@ -463,6 +463,387 @@ static const char *diagnose_next_action(bool operator_needed,
     return "monitor_agent_and_liveness";
 }
 
+struct diagnose_agent_fields {
+    bool agent_healthy;
+    bool serving;
+    bool operator_needed;
+    bool chain_serving_ready;
+    bool normal_lookahead;
+    const char *readiness_status;
+    const char *height_contract_status;
+    int64_t gap;
+    int64_t peer_count;
+};
+
+struct diagnose_peer_fields {
+    int64_t peer_incidents;
+    int64_t duplicate_groups;
+    int64_t host_incident_count;
+    int64_t host_count_returned;
+    const struct json_value *primary_host;
+    const char *primary_host_name;
+    const char *primary_host_issue_class;
+    const char *primary_host_next_action;
+    const char *primary_host_direction;
+    const char *primary_host_bootstrap_readiness;
+    const char *primary_host_fast_sync_readiness;
+    const char *peer_bootstrap_readiness;
+    const char *peer_fast_sync_readiness;
+    bool peer_bootstrap_blocker;
+    bool peer_fast_sync_blocker;
+    int64_t material_peer_incidents;
+    int64_t material_peer_groups;
+    int64_t informational_peer_incidents;
+    bool peer_attention;
+    const char *peer_severity;
+    int64_t material_peer_signals;
+};
+
+struct diagnose_mirror_fields {
+    const char *mirror_status;
+    bool mirror_operator_action_required;
+    bool mirror_advisory_only;
+    bool mirror_attention;
+    bool mirror_info;
+    const char *mirror_severity;
+};
+
+struct diagnose_bounded_sections {
+    bool partial;
+    bool health_ok;
+    bool mirror_present;
+    bool timeline_present;
+};
+
+static void diagnose_fill_agent_flags(bool agent_ok,
+                                      const struct json_value *agent,
+                                      struct diagnose_agent_fields *f)
+{
+    f->agent_healthy = agent_ok && json_get_bool(json_get(agent, "healthy"));
+    f->serving = agent_ok && json_get_bool(json_get(agent, "serving"));
+    f->operator_needed =
+        agent_ok && json_get_bool(json_get(agent, "operator_needed"));
+    f->chain_serving_ready = agent_ok && diagnose_agent_chain_ready(agent);
+    f->normal_lookahead = agent_ok && diagnose_agent_normal_lookahead(agent);
+}
+
+static void diagnose_fill_agent_metrics(bool agent_ok,
+                                        const struct json_value *agent,
+                                        struct diagnose_agent_fields *f)
+{
+    f->readiness_status =
+        agent_ok ? json_get_str(json_get(agent, "readiness_status")) : "";
+    const struct json_value *height_contract =
+        agent_ok ? json_get(agent, "height_contract") : NULL;
+    f->height_contract_status =
+        height_contract ? json_get_str(json_get(height_contract, "status"))
+                        : "";
+    f->gap = agent_ok ? json_get_int(json_get(agent, "gap")) : -1;
+    const struct json_value *agent_peers =
+        agent_ok ? json_get(agent, "peers") : NULL;
+    f->peer_count =
+        agent_peers ? json_get_int(json_get(agent_peers, "total")) : -1;
+}
+
+static struct diagnose_agent_fields diagnose_read_agent_fields(
+    bool agent_ok, const struct json_value *agent)
+{
+    struct diagnose_agent_fields f = {0};
+    diagnose_fill_agent_flags(agent_ok, agent, &f);
+    diagnose_fill_agent_metrics(agent_ok, agent, &f);
+    return f;
+}
+
+static struct diagnose_peer_fields diagnose_read_peer_fields(
+    const struct json_value *peers, int64_t peer_count)
+{
+    struct diagnose_peer_fields f = {0};
+    f.peer_incidents = json_get_int(json_get(peers, "incident_count"));
+    f.duplicate_groups =
+        json_get_int(json_get(peers, "duplicate_host_group_count"));
+    f.host_incident_count =
+        json_get_int(json_get(peers, "host_incident_count"));
+    f.host_count_returned =
+        json_get_int(json_get(peers, "host_count_returned"));
+    f.primary_host = diagnose_peer_primary_host(peers);
+    f.primary_host_name = diagnose_peer_host_str(f.primary_host, "host");
+    f.primary_host_issue_class =
+        diagnose_peer_host_str(f.primary_host, "issue_class");
+    f.primary_host_next_action =
+        diagnose_peer_host_str(f.primary_host, "next_action");
+    f.primary_host_direction =
+        diagnose_peer_host_str(f.primary_host, "direction");
+    f.primary_host_bootstrap_readiness =
+        diagnose_peer_host_str(f.primary_host, "bootstrap_readiness");
+    f.primary_host_fast_sync_readiness =
+        diagnose_peer_host_str(f.primary_host, "fast_sync_readiness");
+    f.peer_bootstrap_readiness =
+        json_get_str(json_get(peers, "bootstrap_readiness"));
+    f.peer_fast_sync_readiness =
+        json_get_str(json_get(peers, "fast_sync_readiness"));
+    f.peer_bootstrap_blocker =
+        json_get_bool(json_get(peers, "bootstrap_blocked"));
+    f.peer_fast_sync_blocker =
+        json_get_bool(json_get(peers, "fast_sync_blocked"));
+    f.material_peer_incidents = diagnose_peer_material_incidents(peers);
+    f.material_peer_groups = diagnose_peer_material_groups(peers);
+    f.informational_peer_incidents =
+        f.peer_incidents > f.material_peer_incidents
+            ? f.peer_incidents - f.material_peer_incidents : 0;
+    f.peer_attention =
+        peer_count <= 0 || f.peer_bootstrap_blocker ||
+        f.material_peer_incidents > 0 ||
+        f.material_peer_groups > 0 || f.duplicate_groups > 0;
+    f.peer_severity =
+        f.peer_attention ? "attention" :
+        (f.peer_fast_sync_blocker || f.peer_incidents > 0 ? "info" : "ok");
+    f.material_peer_signals =
+        f.material_peer_incidents + f.material_peer_groups;
+    return f;
+}
+
+static void diagnose_fill_mirror_contract(
+    bool mirror_present, const struct json_value *mirror,
+    struct diagnose_mirror_fields *f,
+    const struct json_value **mirror_operator_required_j,
+    bool *mirror_status_unhealthy)
+{
+    const struct json_value *mirror_contract =
+        mirror_present ? json_get(mirror, "mirror_contract") : NULL;
+    f->mirror_status =
+        mirror_contract ? json_get_str(json_get(mirror_contract, "status"))
+                        : "";
+    *mirror_operator_required_j =
+        mirror_contract ? json_get(mirror_contract,
+                                   "operator_action_required") : NULL;
+    f->mirror_operator_action_required =
+        *mirror_operator_required_j &&
+        json_get_bool(*mirror_operator_required_j);
+    f->mirror_advisory_only =
+        mirror_contract &&
+        json_get_bool(json_get(mirror_contract, "advisory_only"));
+    *mirror_status_unhealthy =
+        diagnose_mirror_status_unhealthy(f->mirror_status);
+}
+
+static void diagnose_classify_mirror(
+    struct diagnose_mirror_fields *f, bool mirror_present,
+    const struct json_value *mirror_operator_required_j,
+    bool mirror_status_unhealthy)
+{
+    f->mirror_attention =
+        mirror_operator_required_j ? f->mirror_operator_action_required :
+        (mirror_present && mirror_status_unhealthy);
+    f->mirror_info =
+        mirror_present && !f->mirror_attention && mirror_status_unhealthy;
+    f->mirror_severity =
+        f->mirror_attention ? "attention" : (f->mirror_info ? "info" : "ok");
+}
+
+static struct diagnose_mirror_fields diagnose_read_mirror_fields(
+    bool mirror_present, const struct json_value *mirror)
+{
+    struct diagnose_mirror_fields f = {0};
+    const struct json_value *mirror_operator_required_j = NULL;
+    bool mirror_status_unhealthy = false;
+    diagnose_fill_mirror_contract(mirror_present, mirror, &f,
+                                  &mirror_operator_required_j,
+                                  &mirror_status_unhealthy);
+    diagnose_classify_mirror(&f, mirror_present, mirror_operator_required_j,
+                             mirror_status_unhealthy);
+    return f;
+}
+
+static struct diagnose_bounded_sections diagnose_collect_bounded_sections(
+    int64_t started_us, bool brief_mode, struct json_value *result,
+    struct json_value *empty_params, struct json_value *health,
+    struct json_value *peers, struct json_value *mirror,
+    struct json_value *timeline_params, struct json_value *timeline)
+{
+    struct diagnose_bounded_sections s = {0};
+
+    if (brief_mode) {
+        s.partial = true;
+    } else if (agent_first_call_budget_exceeded(
+            started_us, ZCL_AGENT_FIRST_CALL_BUDGET_DIAGNOSE_MS)) {
+        s.partial = true;
+        diagnose_push_skipped(result, "healthcheck",
+                              "first_call_budget_exhausted_before_healthcheck");
+        s.health_ok = false;
+    } else {
+        s.health_ok = rpc_healthcheck(empty_params, false, health);
+    }
+
+    peer_lifecycle_incidents_json(peers);
+    agent_push_contract_identity_fields_json(peers, "peerincidents");
+
+    if (agent_first_call_budget_exceeded(
+            started_us, ZCL_AGENT_FIRST_CALL_BUDGET_DIAGNOSE_MS)) {
+        s.partial = true;
+    } else {
+        s.mirror_present =
+            diag_rpc_getmirrorstatus(empty_params, false, mirror);
+    }
+
+    if (agent_first_call_budget_exceeded(
+            started_us, ZCL_AGENT_FIRST_CALL_BUDGET_DIAGNOSE_MS)) {
+        s.partial = true;
+    } else if (!brief_mode) {
+        diagnose_timeline_params(timeline_params);
+        s.timeline_present = rpc_timeline(timeline_params, false, timeline);
+    } else {
+        s.partial = true;
+    }
+    return s;
+}
+
+static void diagnose_push_verdict(struct json_value *result,
+                                  bool operator_needed, bool agent_healthy,
+                                  bool chain_attention, int64_t peer_count,
+                                  bool peer_attention,
+                                  bool peer_bootstrap_blocker,
+                                  bool mirror_attention,
+                                  const char *peer_host_action)
+{
+    const char *next_action =
+        diagnose_next_action(operator_needed, agent_healthy, chain_attention,
+                             peer_count, peer_attention,
+                             peer_bootstrap_blocker, mirror_attention,
+                             peer_host_action);
+    bool attention = operator_needed || !agent_healthy || chain_attention ||
+                     peer_attention || mirror_attention;
+    json_push_kv_str(result, "verdict",
+                     attention ? "attention_needed" : "healthy");
+    json_push_kv_str(result, "safe_next_action", next_action);
+}
+
+static void diagnose_push_core_findings(
+    struct json_value *result, bool agent_ok, const struct json_value *agent,
+    bool agent_healthy, bool serving, bool chain_attention,
+    const char *peer_severity, int64_t peer_count, int64_t peer_incidents,
+    int64_t material_peer_signals, bool peer_bootstrap_blocker,
+    bool peer_fast_sync_blocker, bool peer_attention,
+    const char *primary_host_next_action, const char *mirror_severity,
+    bool mirror_present, const char *mirror_status, bool mirror_attention,
+    bool mirror_info)
+{
+    struct json_value findings = {0};
+
+    json_set_array(&findings);
+    diagnose_push_finding(&findings, "chain_serving",
+                          agent_healthy && serving && !chain_attention
+                              ? "ok" : "attention",
+                          agent_ok ? json_get_str(json_get(agent, "summary"))
+                                   : "agent status unavailable",
+                          chain_attention
+                              ? "inspect sync timeline and reducer frontier"
+                              : "continue monitoring H* and peer target");
+    diagnose_push_finding(&findings, "peer_lifecycle",
+                          peer_severity,
+                          diagnose_peer_detail(peer_count, peer_incidents,
+                                               material_peer_signals,
+                                               peer_bootstrap_blocker,
+                                               peer_fast_sync_blocker),
+                          peer_attention &&
+                                  diagnose_peer_host_action_is_specific(
+                                      primary_host_next_action)
+                              ? primary_host_next_action
+                              : diagnose_peer_next_action(
+                                    peer_count, peer_incidents,
+                                    material_peer_signals,
+                                    peer_bootstrap_blocker,
+                                    peer_fast_sync_blocker));
+    diagnose_push_finding(&findings, "mirror",
+                          mirror_severity,
+                          mirror_present ? mirror_status
+                                         : "mirror status skipped or unavailable",
+                          diagnose_mirror_next_action(mirror_present,
+                                                      mirror_attention,
+                                                      mirror_info));
+    json_push_kv(result, "findings", &findings);
+    json_free(&findings);
+}
+
+static void diagnose_push_primary_host_detail(
+    struct json_value *result, bool brief_mode,
+    const struct json_value *primary_host)
+{
+    if (brief_mode)
+        diagnose_push_primary_host_issue_compact(result, primary_host);
+    else
+        diagnose_push_primary_host_issue(result, primary_host);
+}
+
+static void diagnose_push_agent_section(struct json_value *result,
+                                        bool brief_mode, bool agent_ok,
+                                        struct json_value *agent)
+{
+    if (brief_mode) {
+        diagnose_push_brief_omissions(result);
+        json_push_kv_str(result, "full_diagnose_command",
+                         "z23 agentdiagnose full");
+    } else if (agent_ok) {
+        json_push_kv(result, "agent", agent);
+    } else {
+        diagnose_push_skipped(result, "agent", "agent_status_unavailable");
+    }
+}
+
+static void diagnose_push_mirror_section(struct json_value *result,
+                                         bool brief_mode,
+                                         bool mirror_present,
+                                         struct json_value *mirror)
+{
+    if (!brief_mode && mirror_present)
+        json_push_kv(result, "mirror", mirror);
+    else if (!brief_mode && !json_get(result, "mirror"))
+        diagnose_push_skipped(result, "mirror",
+                              "first_call_budget_exhausted_before_mirror");
+}
+
+static void diagnose_push_timeline_section(struct json_value *result,
+                                           bool brief_mode,
+                                           bool timeline_present,
+                                           struct json_value *timeline)
+{
+    if (!brief_mode && timeline_present)
+        json_push_kv(result, "timeline", timeline);
+    else if (!brief_mode)
+        diagnose_push_skipped(result, "timeline",
+                              "first_call_budget_exhausted_before_timeline");
+}
+
+static void diagnose_push_embedded_drilldowns(
+    struct json_value *result, bool brief_mode, bool health_ok,
+    struct json_value *health, bool mirror_present, struct json_value *mirror,
+    struct json_value *peers, bool timeline_present,
+    struct json_value *timeline)
+{
+    if (!brief_mode && health_ok)
+        json_push_kv(result, "healthcheck", health);
+    diagnose_push_mirror_section(result, brief_mode, mirror_present, mirror);
+    if (!brief_mode)
+        json_push_kv(result, "peer_incidents", peers);
+    diagnose_push_timeline_section(result, brief_mode, timeline_present,
+                                   timeline);
+}
+
+static void diagnose_push_first_call_bound(struct json_value *result,
+                                           bool brief_mode, bool partial,
+                                           int64_t started_us)
+{
+    agent_push_first_call_simple_json(
+        result, "first_call", "agentdiagnose",
+        brief_mode ? "bounded_status_peer_mirror_brief"
+                   : "bounded_status_health_peer_mirror_timeline",
+        ZCL_AGENT_FIRST_CALL_BUDGET_DIAGNOSE_MS, started_us, true,
+        brief_mode ? "brief_mode_omits_embedded_drilldowns" :
+        partial ? "lower_priority_sections_skipped_by_budget"
+                : "bounded_diagnosis_not_full_forensics",
+        brief_mode ? "z23 agentdiagnose full"
+                   : "z23 healthcheck full");
+}
+
 bool rpc_agent_diagnose(const struct json_value *params, bool help,
                         struct json_value *result)
 {
@@ -490,7 +871,6 @@ bool rpc_agent_diagnose(const struct json_value *params, bool help,
     struct json_value mirror = {0};
     struct json_value timeline_params = {0};
     struct json_value timeline = {0};
-    struct json_value findings = {0};
     struct json_value commands = {0};
     bool partial = false;
     bool mirror_present = false;
@@ -508,127 +888,61 @@ bool rpc_agent_diagnose(const struct json_value *params, bool help,
     json_set_array(&empty_params);
 
     bool agent_ok = rpc_agent_summary(&empty_params, false, &agent);
-    bool health_ok = false;
-    if (brief_mode) {
-        partial = true;
-    } else if (agent_first_call_budget_exceeded(
-            started_us, ZCL_AGENT_FIRST_CALL_BUDGET_DIAGNOSE_MS)) {
-        partial = true;
-        diagnose_push_skipped(result, "healthcheck",
-                              "first_call_budget_exhausted_before_healthcheck");
-        health_ok = false;
-    } else {
-        health_ok = rpc_healthcheck(&empty_params, false, &health);
-    }
+    struct diagnose_bounded_sections sections =
+        diagnose_collect_bounded_sections(
+            started_us, brief_mode, result, &empty_params, &health, &peers,
+            &mirror, &timeline_params, &timeline);
+    bool health_ok = sections.health_ok;
+    partial = sections.partial;
+    mirror_present = sections.mirror_present;
+    timeline_present = sections.timeline_present;
 
-    peer_lifecycle_incidents_json(&peers);
-    agent_push_contract_identity_fields_json(&peers, "peerincidents");
-
-    if (agent_first_call_budget_exceeded(
-            started_us, ZCL_AGENT_FIRST_CALL_BUDGET_DIAGNOSE_MS)) {
-        partial = true;
-    } else {
-        mirror_present =
-            diag_rpc_getmirrorstatus(&empty_params, false, &mirror);
-    }
-
-    if (agent_first_call_budget_exceeded(
-            started_us, ZCL_AGENT_FIRST_CALL_BUDGET_DIAGNOSE_MS)) {
-        partial = true;
-    } else if (!brief_mode) {
-        diagnose_timeline_params(&timeline_params);
-        timeline_present = rpc_timeline(&timeline_params, false, &timeline);
-    } else {
-        partial = true;
-    }
-
-    bool agent_healthy = agent_ok && json_get_bool(json_get(&agent, "healthy"));
-    bool serving = agent_ok && json_get_bool(json_get(&agent, "serving"));
-    bool operator_needed =
-        agent_ok && json_get_bool(json_get(&agent, "operator_needed"));
-    bool chain_serving_ready = agent_ok && diagnose_agent_chain_ready(&agent);
-    bool normal_lookahead = agent_ok && diagnose_agent_normal_lookahead(&agent);
-    const char *readiness_status =
-        agent_ok ? json_get_str(json_get(&agent, "readiness_status")) : "";
-    const struct json_value *height_contract =
-        agent_ok ? json_get(&agent, "height_contract") : NULL;
-    const char *height_contract_status =
-        height_contract ? json_get_str(json_get(height_contract, "status"))
-                        : "";
-    int64_t gap = agent_ok ? json_get_int(json_get(&agent, "gap")) : -1;
-    const struct json_value *agent_peers =
-        agent_ok ? json_get(&agent, "peers") : NULL;
-    int64_t peer_count =
-        agent_peers ? json_get_int(json_get(agent_peers, "total")) : -1;
-    int64_t peer_incidents =
-        json_get_int(json_get(&peers, "incident_count"));
-    int64_t duplicate_groups =
-        json_get_int(json_get(&peers, "duplicate_host_group_count"));
-    int64_t host_incident_count =
-        json_get_int(json_get(&peers, "host_incident_count"));
-    int64_t host_count_returned =
-        json_get_int(json_get(&peers, "host_count_returned"));
-    const struct json_value *primary_host =
-        diagnose_peer_primary_host(&peers);
-    const char *primary_host_name =
-        diagnose_peer_host_str(primary_host, "host");
-    const char *primary_host_issue_class =
-        diagnose_peer_host_str(primary_host, "issue_class");
-    const char *primary_host_next_action =
-        diagnose_peer_host_str(primary_host, "next_action");
-    const char *primary_host_direction =
-        diagnose_peer_host_str(primary_host, "direction");
+    struct diagnose_agent_fields agent_fields =
+        diagnose_read_agent_fields(agent_ok, &agent);
+    bool agent_healthy = agent_fields.agent_healthy;
+    bool serving = agent_fields.serving;
+    bool operator_needed = agent_fields.operator_needed;
+    bool chain_serving_ready = agent_fields.chain_serving_ready;
+    bool normal_lookahead = agent_fields.normal_lookahead;
+    const char *readiness_status = agent_fields.readiness_status;
+    const char *height_contract_status = agent_fields.height_contract_status;
+    int64_t gap = agent_fields.gap;
+    int64_t peer_count = agent_fields.peer_count;
+    struct diagnose_peer_fields peer_fields =
+        diagnose_read_peer_fields(&peers, peer_count);
+    int64_t peer_incidents = peer_fields.peer_incidents;
+    int64_t duplicate_groups = peer_fields.duplicate_groups;
+    int64_t host_incident_count = peer_fields.host_incident_count;
+    int64_t host_count_returned = peer_fields.host_count_returned;
+    const struct json_value *primary_host = peer_fields.primary_host;
+    const char *primary_host_name = peer_fields.primary_host_name;
+    const char *primary_host_issue_class = peer_fields.primary_host_issue_class;
+    const char *primary_host_next_action = peer_fields.primary_host_next_action;
+    const char *primary_host_direction = peer_fields.primary_host_direction;
     const char *primary_host_bootstrap_readiness =
-        diagnose_peer_host_str(primary_host, "bootstrap_readiness");
+        peer_fields.primary_host_bootstrap_readiness;
     const char *primary_host_fast_sync_readiness =
-        diagnose_peer_host_str(primary_host, "fast_sync_readiness");
-    const char *peer_bootstrap_readiness =
-        json_get_str(json_get(&peers, "bootstrap_readiness"));
-    const char *peer_fast_sync_readiness =
-        json_get_str(json_get(&peers, "fast_sync_readiness"));
-    bool peer_bootstrap_blocker =
-        json_get_bool(json_get(&peers, "bootstrap_blocked"));
-    bool peer_fast_sync_blocker =
-        json_get_bool(json_get(&peers, "fast_sync_blocked"));
-    int64_t material_peer_incidents =
-        diagnose_peer_material_incidents(&peers);
-    int64_t material_peer_groups =
-        diagnose_peer_material_groups(&peers);
+        peer_fields.primary_host_fast_sync_readiness;
+    const char *peer_bootstrap_readiness = peer_fields.peer_bootstrap_readiness;
+    const char *peer_fast_sync_readiness = peer_fields.peer_fast_sync_readiness;
+    bool peer_bootstrap_blocker = peer_fields.peer_bootstrap_blocker;
+    bool peer_fast_sync_blocker = peer_fields.peer_fast_sync_blocker;
+    int64_t material_peer_incidents = peer_fields.material_peer_incidents;
+    int64_t material_peer_groups = peer_fields.material_peer_groups;
     int64_t informational_peer_incidents =
-        peer_incidents > material_peer_incidents
-            ? peer_incidents - material_peer_incidents : 0;
-    bool peer_attention =
-        peer_count <= 0 || peer_bootstrap_blocker ||
-        material_peer_incidents > 0 ||
-        material_peer_groups > 0 || duplicate_groups > 0;
-    const char *peer_severity =
-        peer_attention ? "attention" :
-        (peer_fast_sync_blocker || peer_incidents > 0 ? "info" : "ok");
-    int64_t material_peer_signals =
-        material_peer_incidents + material_peer_groups;
-    const struct json_value *mirror_contract =
-        mirror_present ? json_get(&mirror, "mirror_contract") : NULL;
-    const char *mirror_status =
-        mirror_contract ? json_get_str(json_get(mirror_contract, "status"))
-                        : "";
-    const struct json_value *mirror_operator_required_j =
-        mirror_contract ? json_get(mirror_contract,
-                                   "operator_action_required") : NULL;
+        peer_fields.informational_peer_incidents;
+    bool peer_attention = peer_fields.peer_attention;
+    const char *peer_severity = peer_fields.peer_severity;
+    int64_t material_peer_signals = peer_fields.material_peer_signals;
+    struct diagnose_mirror_fields mirror_fields =
+        diagnose_read_mirror_fields(mirror_present, &mirror);
+    const char *mirror_status = mirror_fields.mirror_status;
     bool mirror_operator_action_required =
-        mirror_operator_required_j &&
-        json_get_bool(mirror_operator_required_j);
-    bool mirror_advisory_only =
-        mirror_contract &&
-        json_get_bool(json_get(mirror_contract, "advisory_only"));
-    bool mirror_status_unhealthy =
-        diagnose_mirror_status_unhealthy(mirror_status);
-    bool mirror_attention =
-        mirror_operator_required_j ? mirror_operator_action_required :
-        (mirror_present && mirror_status_unhealthy);
-    bool mirror_info =
-        mirror_present && !mirror_attention && mirror_status_unhealthy;
-    const char *mirror_severity =
-        mirror_attention ? "attention" : (mirror_info ? "info" : "ok");
+        mirror_fields.mirror_operator_action_required;
+    bool mirror_advisory_only = mirror_fields.mirror_advisory_only;
+    bool mirror_attention = mirror_fields.mirror_attention;
+    bool mirror_info = mirror_fields.mirror_info;
+    const char *mirror_severity = mirror_fields.mirror_severity;
 
     json_push_kv_bool(result, "healthy", agent_healthy);
     json_push_kv_bool(result, "serving", serving);
@@ -690,50 +1004,17 @@ bool rpc_agent_diagnose(const struct json_value *params, bool help,
     json_push_kv_bool(result, "partial_result", partial);
 
     bool chain_attention = !chain_serving_ready;
-    const char *next_action =
-        diagnose_next_action(operator_needed, agent_healthy, chain_attention,
-                             peer_count, peer_attention,
-                             peer_bootstrap_blocker, mirror_attention,
-                             primary_host_next_action);
-    bool attention = operator_needed || !agent_healthy || chain_attention ||
-                     peer_attention || mirror_attention;
-    json_push_kv_str(result, "verdict",
-                     attention ? "attention_needed" : "healthy");
-    json_push_kv_str(result, "safe_next_action", next_action);
+    diagnose_push_verdict(result, operator_needed, agent_healthy,
+                          chain_attention, peer_count, peer_attention,
+                          peer_bootstrap_blocker, mirror_attention,
+                          primary_host_next_action);
 
-    json_set_array(&findings);
-    diagnose_push_finding(&findings, "chain_serving",
-                          agent_healthy && serving && !chain_attention
-                              ? "ok" : "attention",
-                          agent_ok ? json_get_str(json_get(&agent, "summary"))
-                                   : "agent status unavailable",
-                          chain_attention
-                              ? "inspect sync timeline and reducer frontier"
-                              : "continue monitoring H* and peer target");
-    diagnose_push_finding(&findings, "peer_lifecycle",
-                          peer_severity,
-                          diagnose_peer_detail(peer_count, peer_incidents,
-                                               material_peer_signals,
-                                               peer_bootstrap_blocker,
-                                               peer_fast_sync_blocker),
-                          peer_attention &&
-                                  diagnose_peer_host_action_is_specific(
-                                      primary_host_next_action)
-                              ? primary_host_next_action
-                              : diagnose_peer_next_action(
-                                    peer_count, peer_incidents,
-                                    material_peer_signals,
-                                    peer_bootstrap_blocker,
-                                    peer_fast_sync_blocker));
-    diagnose_push_finding(&findings, "mirror",
-                          mirror_severity,
-                          mirror_present ? mirror_status
-                                         : "mirror status skipped or unavailable",
-                          diagnose_mirror_next_action(mirror_present,
-                                                      mirror_attention,
-                                                      mirror_info));
-    json_push_kv(result, "findings", &findings);
-    json_free(&findings);
+    diagnose_push_core_findings(
+        result, agent_ok, &agent, agent_healthy, serving, chain_attention,
+        peer_severity, peer_count, peer_incidents, material_peer_signals,
+        peer_bootstrap_blocker, peer_fast_sync_blocker, peer_attention,
+        primary_host_next_action, mirror_severity, mirror_present,
+        mirror_status, mirror_attention, mirror_info);
 
     json_set_array(&commands);
     agent_push_contract_native_command_json(&commands, "agent");
@@ -744,45 +1025,12 @@ bool rpc_agent_diagnose(const struct json_value *params, bool help,
     json_push_kv(result, "recommended_commands", &commands);
     json_free(&commands);
 
-    if (brief_mode)
-        diagnose_push_primary_host_issue_compact(result, primary_host);
-    else
-        diagnose_push_primary_host_issue(result, primary_host);
-
-    if (brief_mode) {
-        diagnose_push_brief_omissions(result);
-        json_push_kv_str(result, "full_diagnose_command",
-                         "z23 agentdiagnose full");
-    } else if (agent_ok) {
-        json_push_kv(result, "agent", &agent);
-    } else {
-        diagnose_push_skipped(result, "agent", "agent_status_unavailable");
-    }
-    if (!brief_mode && health_ok)
-        json_push_kv(result, "healthcheck", &health);
-    if (!brief_mode && mirror_present)
-        json_push_kv(result, "mirror", &mirror);
-    else if (!brief_mode && !json_get(result, "mirror"))
-        diagnose_push_skipped(result, "mirror",
-                              "first_call_budget_exhausted_before_mirror");
-    if (!brief_mode)
-        json_push_kv(result, "peer_incidents", &peers);
-    if (!brief_mode && timeline_present)
-        json_push_kv(result, "timeline", &timeline);
-    else if (!brief_mode)
-        diagnose_push_skipped(result, "timeline",
-                              "first_call_budget_exhausted_before_timeline");
-
-    agent_push_first_call_simple_json(
-        result, "first_call", "agentdiagnose",
-        brief_mode ? "bounded_status_peer_mirror_brief"
-                   : "bounded_status_health_peer_mirror_timeline",
-        ZCL_AGENT_FIRST_CALL_BUDGET_DIAGNOSE_MS, started_us, true,
-        brief_mode ? "brief_mode_omits_embedded_drilldowns" :
-        partial ? "lower_priority_sections_skipped_by_budget"
-                : "bounded_diagnosis_not_full_forensics",
-        brief_mode ? "z23 agentdiagnose full"
-                   : "z23 healthcheck full");
+    diagnose_push_primary_host_detail(result, brief_mode, primary_host);
+    diagnose_push_agent_section(result, brief_mode, agent_ok, &agent);
+    diagnose_push_embedded_drilldowns(
+        result, brief_mode, health_ok, &health, mirror_present, &mirror,
+        &peers, timeline_present, &timeline);
+    diagnose_push_first_call_bound(result, brief_mode, partial, started_us);
 
     json_free(&timeline);
     json_free(&timeline_params);
