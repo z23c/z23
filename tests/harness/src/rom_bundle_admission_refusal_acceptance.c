@@ -23,8 +23,9 @@ static bool create_isolated_dir(wchar_t *dir)
     return true;
 }
 
-static bool write_sentinel(const wchar_t *marker, const char *expected,
-                           size_t expected_size)
+static bool write_admission_sentinel(const wchar_t *marker,
+                                     const char *expected,
+                                     size_t expected_size)
 {
     DWORD amount = 0;
     HANDLE file = CreateFileW(marker, GENERIC_WRITE, 0, NULL, CREATE_NEW,
@@ -70,7 +71,7 @@ int main(void)
         return 1;
     (void)swprintf(marker, MAX_PATH, L"%ls\\sentinel", dir);
     const char expected[] = "unchanged";
-    if (!write_sentinel(marker, expected, sizeof(expected)))
+    if (!write_admission_sentinel(marker, expected, sizeof(expected)))
         return 1;
     bool refused = admission_refused_without_registration();
     rom_bundle_admission_start_scan("must-not-be-opened");
