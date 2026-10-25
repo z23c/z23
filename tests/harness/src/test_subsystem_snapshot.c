@@ -223,6 +223,62 @@ static int case_torn_window_deterministic(void)
  * "did the other thread run at all" floor, not a throughput target. */
 #define SS_MIN_RACING_WRITES 64
 
+/* The racing phase's running tallies, plus the last-known-good pair a torn
+ * fallback serves. */
+struct racing_stats {
+    int64_t coherent_reads;
+    int64_t torn_fallbacks;
+    int64_t last_a;               /* last-known-good fallback */
+    int64_t last_b;
+    bool ever_incoherent;         /* a completed read that saw a != b */
+    bool fallback_ever_incoherent;
+    bool fallback_ever_empty;     /* fallback with nothing published to serve */
+};
+
+/* One racing read and its bookkeeping, shared by both racing loops in
+ * case_concurrent_coherence: a completed read updates the last-known-good
+ * pair; a torn fallback is accounted and checked against the fallback's
+ * safety invariants. */
+static void record_racing_read(struct hammer_payload *p,
+                               struct racing_stats *st)
+{
+    int64_t a = -1, b = -2;
+    if (read_pair(p, &a, &b)) {
+        st->coherent_reads++;
+        if (a != b)
+            st->ever_incoherent = true;   /* MUST never happen */
+        st->last_a = a;
+        st->last_b = b;                   /* update last-known-good */
+    } else {
+        st->torn_fallbacks++;
+        zcl_snapshot_note_torn(&p->env);
+        /* Fallback path: serve last-known-good — which is always coherent,
+         * and always present (generation > 0 means there is something to
+         * serve, so the dumper never emits an empty body). */
+        if (st->last_a != st->last_b)
+            st->fallback_ever_incoherent = true;
+        if (atomic_load_explicit(&p->env.generation,
+                                 memory_order_relaxed) == 0)
+            st->fallback_ever_empty = true;
+    }
+}
+
+/* One read against a quiesced writer: the bracket must complete and return
+ * exactly the pair of the last publish, which is writes_at_park. */
+static void record_quiet_read(struct hammer_payload *p,
+                              uint64_t writes_at_park,
+                              int64_t *coherent, bool *wrong_value)
+{
+    int64_t a = -1, b = -2;
+    if (read_pair(p, &a, &b)) {
+        (*coherent)++;
+        /* The writer's counter starts at 0 and pre-increments, so after
+         * N publishes the pair is exactly (N, N). */
+        if (a != b || a != (int64_t)writes_at_park)
+            *wrong_value = true;
+    }
+}
+
 static int case_concurrent_coherence(void)
 {
     int failures = 0;
@@ -260,35 +316,20 @@ static int case_concurrent_coherence(void)
     uint64_t writes_before_race =
         atomic_load_explicit(&ctl.writes, memory_order_acquire);
 
-    int64_t coherent_reads = 0, torn_fallbacks = 0;
-    int64_t last_a = 0, last_b = 0;  /* last-known-good fallback */
+    struct racing_stats st = {
+        .coherent_reads = 0,
+        .torn_fallbacks = 0,
+        .last_a = 0,
+        .last_b = 0,
+        .ever_incoherent = false,
+        .fallback_ever_incoherent = false,
+        .fallback_ever_empty = false,
+    };
     /* This is also the weak-memory regression: without read_ok's trailing
      * acquire fence, ARM64 may validate seq first and observe these relaxed
      * payload loads afterwards, accepting a pair from two generations. */
-    bool ever_incoherent = false;    /* a completed read that saw a != b */
-    bool fallback_ever_incoherent = false;
-    bool fallback_ever_empty = false; /* fallback with nothing published to serve */
-
     for (int i = 0; i < SS_RACING_READS; i++) {
-        int64_t a = -1, b = -2;
-        if (read_pair(&p, &a, &b)) {
-            coherent_reads++;
-            if (a != b)
-                ever_incoherent = true;   /* MUST never happen */
-            last_a = a;
-            last_b = b;                   /* update last-known-good */
-        } else {
-            torn_fallbacks++;
-            zcl_snapshot_note_torn(&p.env);
-            /* Fallback path: serve last-known-good — which is always coherent,
-             * and always present (generation > 0 means there is something to
-             * serve, so the dumper never emits an empty body). */
-            if (last_a != last_b)
-                fallback_ever_incoherent = true;
-            if (atomic_load_explicit(&p.env.generation,
-                                     memory_order_relaxed) == 0)
-                fallback_ever_empty = true;
-        }
+        record_racing_read(&p, &st);
     }
 
     /* Coverage, established by CONSTRUCTION rather than hoped for.
@@ -307,19 +348,7 @@ static int case_concurrent_coherence(void)
         while (atomic_load_explicit(&ctl.writes, memory_order_acquire) <
                    writes_before_race + SS_MIN_RACING_WRITES &&
                platform_time_monotonic_us() < guard) {
-            int64_t a = -1, b = -2;
-            if (read_pair(&p, &a, &b)) {
-                coherent_reads++;
-                if (a != b) ever_incoherent = true;
-                last_a = a; last_b = b;
-            } else {
-                torn_fallbacks++;
-                zcl_snapshot_note_torn(&p.env);
-                if (last_a != last_b) fallback_ever_incoherent = true;
-                if (atomic_load_explicit(&p.env.generation,
-                                         memory_order_relaxed) == 0)
-                    fallback_ever_empty = true;
-            }
+            record_racing_read(&p, &st);
         }
     }
     uint64_t raced_writes =
@@ -330,15 +359,15 @@ static int case_concurrent_coherence(void)
              raced_writes >= SS_MIN_RACING_WRITES);
 
     SS_CHECK("racing: NO completed read ever saw a torn (a!=b) pair",
-             !ever_incoherent);
+             !st.ever_incoherent);
     SS_CHECK("racing: the fallback value is always coherent",
-             !fallback_ever_incoherent);
+             !st.fallback_ever_incoherent);
     SS_CHECK("racing: the fallback always has published values to serve",
-             !fallback_ever_empty);
+             !st.fallback_ever_empty);
     SS_CHECK("racing: torn_reads_total accounts every fallback",
              atomic_load_explicit(&p.env.torn_reads_total,
                                   memory_order_relaxed) ==
-             (uint64_t)torn_fallbacks);
+             (uint64_t)st.torn_fallbacks);
 
     /* ── Phase 2: writer parked ────────────────────────────────────────────
      * Ask the writer to stop publishing and wait for its acknowledgement. After
@@ -356,14 +385,8 @@ static int case_concurrent_coherence(void)
         int64_t quiet_coherent = 0;
         bool quiet_wrong_value = false;
         for (int i = 0; i < SS_QUIET_READS; i++) {
-            int64_t a = -1, b = -2;
-            if (read_pair(&p, &a, &b)) {
-                quiet_coherent++;
-                /* The writer's counter starts at 0 and pre-increments, so after
-                 * N publishes the pair is exactly (N, N). */
-                if (a != b || a != (int64_t)writes_at_park)
-                    quiet_wrong_value = true;
-            }
+            record_quiet_read(&p, writes_at_park, &quiet_coherent,
+                              &quiet_wrong_value);
         }
         SS_CHECK("parked: every read completes (no writer in flight)",
                  quiet_coherent == SS_QUIET_READS);
@@ -392,7 +415,7 @@ static int case_concurrent_coherence(void)
              read_pair(&p, &a, &b) && a == b && a == (int64_t)writes);
 
     printf("subsystem_snapshot: racing stats completed=%lld fell_back=%lld writes=%llu\n",
-           (long long)coherent_reads, (long long)torn_fallbacks,
+           (long long)st.coherent_reads, (long long)st.torn_fallbacks,
            (unsigned long long)writes);
     return failures;
 }
