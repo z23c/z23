@@ -293,6 +293,80 @@ static bool object_stage_publish(
     return ok;
 }
 
+/* Dedup fast path applies only to a no-replace put whose object is already
+ * present on disk. */
+static bool object_dedup_eligible(bool replace, const char *final)
+{
+    struct platform_file_metadata metadata;
+    return !replace && platform_file_metadata_read(final, &metadata) ==
+                           PLATFORM_FILE_METADATA_OK;
+}
+
+/* True when the already-present object's link shape is clean (or repaired)
+ * and its bytes match content. */
+static bool object_existing_matches(const char *repo_root, const char *final,
+                                    const uint8_t *content, size_t len)
+{
+    return object_recover_legacy_alias(repo_root, final) &&
+           object_content_equal(final, content, len);
+}
+
+/* Build the "objects/<hh>" shard suffix from addr's first hex pair. */
+static bool object_shard_suffix(const uint8_t addr[32], char *shard,
+                                size_t cap)
+{
+    char hex[65];
+    zcl_hex_encode(addr, 32, hex);
+    int sn = snprintf(shard, cap, "objects/%c%c", hex[0], hex[1]);
+    return sn > 0 && (size_t)sn < cap;
+}
+
+/* Resolve the shard suffix to its full path and make sure it exists. */
+static bool object_shard_dir(const char *repo_root, const char *shard,
+                             char *sharddir, size_t cap)
+{
+    return zvcs_path(repo_root, shard, sharddir, cap) && ensure_dir(sharddir);
+}
+
+/* Build the unique staging suffix "objects/tmp/.put.<pid>.<seq>.<mono_ns>";
+ * each call consumes the next sequence number. */
+static bool object_tmp_suffix(char *out, size_t cap)
+{
+    static _Atomic uint64_t g_seq = 0;
+    uint64_t seq = atomic_fetch_add(&g_seq, 1);
+    int64_t mono_ns = platform_time_monotonic_us();
+    int tn = snprintf(out, cap, "objects/tmp/.put.%llu.%llu.%lld",
+                      (unsigned long long)os_proc_current_pid(),
+                      (unsigned long long)seq, (long long)mono_ns);
+    return tn > 0 && (size_t)tn < cap;
+}
+
+/* Create the staged tmp file and capture the identity retirement compares
+ * against. */
+static bool object_staged_file_create(
+    const char *tmp, struct platform_private_file *staged,
+    struct platform_private_file_identity *identity)
+{
+    platform_private_file_init(staged);
+    return platform_private_file_create(tmp, staged) &&
+           platform_private_file_identity(staged, identity);
+}
+
+/* After a successful publish, repeat the tmp directory barrier and the
+ * object namespace barrier so a prior failed barrier cannot leave the
+ * rename un-durable. */
+static bool object_publish_barriers(const char *repo_root,
+                                    const uint8_t addr[32], bool ok)
+{
+    char tmpdir[VCS_OBJECT_PATH_MAX];
+    if (ok && (!zvcs_path(repo_root, "objects/tmp", tmpdir,
+                          sizeof(tmpdir)) ||
+               !platform_private_parent_flush(tmpdir)))
+        ok = false;
+    if (ok) ok = object_parents_flush(repo_root, addr);
+    return ok;
+}
+
 /* Write content[0..len) into the object addressed by addr, atomically and
  * idempotently. Shared by the content-addressed put and the manifest's
  * structural-address put. */
@@ -303,35 +377,21 @@ static bool object_write_mode(const char *repo_root, const uint8_t addr[32],
     char final[VCS_OBJECT_PATH_MAX];
     if (!object_path(repo_root, addr, final, sizeof(final)))
         LOG_FAIL("vcs", "object path too long");
-    struct platform_file_metadata metadata;
-    if (!replace && platform_file_metadata_read(final, &metadata) ==
-                        PLATFORM_FILE_METADATA_OK) {
-        if (!object_recover_legacy_alias(repo_root, final) ||
-            !object_content_equal(final, content, len))
+    if (object_dedup_eligible(replace, final)) {
+        if (!object_existing_matches(repo_root, final, content, len))
             LOG_FAIL("vcs", "existing object differs or has unexplained link");
         return object_parents_flush(repo_root, addr);
     }
 
-    char hex[65];
-    zcl_hex_encode(addr, 32, hex);
     char shard[80];
-    int sn = snprintf(shard, sizeof(shard), "objects/%c%c", hex[0], hex[1]);
-    if (sn <= 0 || (size_t)sn >= sizeof(shard))
+    if (!object_shard_suffix(addr, shard, sizeof(shard)))
         LOG_FAIL("vcs", "shard path too long");
     char sharddir[VCS_OBJECT_PATH_MAX];
-    if (!zvcs_path(repo_root, shard, sharddir, sizeof(sharddir)) ||
-        !ensure_dir(sharddir))
+    if (!object_shard_dir(repo_root, shard, sharddir, sizeof(sharddir)))
         LOG_FAIL("vcs", "mkdir shard %s: %s", sharddir, strerror(errno));
 
-    static _Atomic uint64_t g_seq = 0;
-    uint64_t seq = atomic_fetch_add(&g_seq, 1);
-    int64_t mono_ns = platform_time_monotonic_us();
     char tmpsuffix[128];
-    int tn = snprintf(tmpsuffix, sizeof(tmpsuffix),
-                      "objects/tmp/.put.%llu.%llu.%lld",
-                      (unsigned long long)os_proc_current_pid(),
-                      (unsigned long long)seq, (long long)mono_ns);
-    if (tn <= 0 || (size_t)tn >= sizeof(tmpsuffix))
+    if (!object_tmp_suffix(tmpsuffix, sizeof(tmpsuffix)))
         LOG_FAIL("vcs", "tmp path too long");
     char tmp[VCS_OBJECT_PATH_MAX];
     if (!zvcs_path(repo_root, tmpsuffix, tmp, sizeof(tmp)))
@@ -339,18 +399,11 @@ static bool object_write_mode(const char *repo_root, const uint8_t addr[32],
 
     struct platform_private_file staged;
     struct platform_private_file_identity staged_identity;
-    platform_private_file_init(&staged);
-    if (!platform_private_file_create(tmp, &staged) ||
-        !platform_private_file_identity(&staged, &staged_identity))
+    if (!object_staged_file_create(tmp, &staged, &staged_identity))
         LOG_FAIL("vcs", "open tmp %s: %s", tmp, strerror(errno));
     bool ok = object_stage_publish(repo_root, tmp, final, content, len,
                                    replace, &staged, &staged_identity);
-    char tmpdir[VCS_OBJECT_PATH_MAX];
-    if (ok && (!zvcs_path(repo_root, "objects/tmp", tmpdir,
-                          sizeof(tmpdir)) ||
-               !platform_private_parent_flush(tmpdir)))
-        ok = false;
-    if (ok) ok = object_parents_flush(repo_root, addr);
+    ok = object_publish_barriers(repo_root, addr, ok);
     if (!ok) LOG_FAIL("vcs", "durable object publication failed");
     return ok;
 }

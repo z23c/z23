@@ -195,7 +195,6 @@ contexts/commons/modules/vcs/src/vcs_devloop_publication.c:vcs_devloop_publicati
 contexts/commons/modules/vcs/src/vcs_manifest.c:build_cb:16
 contexts/commons/modules/vcs/src/vcs_manifest.c:vcs_manifest_build:18
 contexts/commons/modules/vcs/src/vcs_manifest.c:vcs_manifest_parse:16
-contexts/commons/modules/vcs/src/vcs_object.c:object_write_mode:20
 contexts/commons/modules/vcs/src/vcs_revert.c:vcs_revert:25
 contexts/commons/modules/vcs/src/vcs_seal.c:vcs_seal_load_globs:21
 contexts/commons/modules/vcs/src/vcs_walk.c:walk_dir:32
