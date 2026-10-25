@@ -1328,7 +1328,6 @@ engine/models/src/query_builder.c:qb_prepare_db:17
 engine/models/src/query_builder.c:qb_where_lead:16
 engine/models/src/schema_migration.c:schema_migration_rollback_last:16
 engine/models/src/schema_migration.c:schema_migration_run_pending:17
-engine/models/src/shared_validators.c:zcl_validate_zcl_address:20
 engine/models/src/zid_domain.c:zid_domain_replace_leaves:19
 engine/modules/chainlog/src/chainlog.c:scan:16
 engine/modules/chainlog/src/chainlog.c:zcl_chainlog_read:17

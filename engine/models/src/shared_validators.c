@@ -12,13 +12,8 @@
 #include "chain/chainparams.h"
 #include "wallet/sapling_keys.h"
 
-bool zcl_validate_zcl_address(const char *addr)
+static bool zcl_address_charset_ok(const char *addr, size_t len)
 {
-    if (!addr || !addr[0])
-        return false;
-
-    size_t len = strlen(addr);
-
     /* Charset gate: alphanumeric + underscore only. Both t-addrs and
      * zs1 Sapling addresses fit this set. Catches one-character typos
      * cheaply and prevents XSS via address echo in HTML. */
@@ -29,6 +24,41 @@ bool zcl_validate_zcl_address(const char *addr)
         if (!ok)
             return false;
     }
+    return true;
+}
+
+static bool zcl_sapling_address_decodes(const char *addr, size_t len)
+{
+    /* Sapling shielded address: the ACTIVE chain's bech32 HRP plus the
+     * '1' separator ("zs1..." on mainnet, "ztestsapling1..."/
+     * "zregtestsapling1..." off it). sapling_decode_payment_address
+     * validates the checksum and the 11-byte diversifier + 32-byte pk_d
+     * split while deliberately ignoring the HRP, so the prefix test here
+     * is the only HRP check — the same pattern wallet_addr_is_sapling
+     * uses. A literal "zs1" gate would false-reject every non-mainnet
+     * Sapling address. */
+    const struct chain_params *cp = chain_params_get();
+    const char *hrp =
+        cp ? cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS] : NULL;
+    size_t hrp_len = hrp ? strlen(hrp) : 0;
+    if (hrp_len > 0 && len > hrp_len &&
+        strncmp(addr, hrp, hrp_len) == 0 && addr[hrp_len] == '1') {
+        uint8_t d[ZC_DIVERSIFIER_SIZE];
+        uint8_t pk_d[32];
+        return sapling_decode_payment_address(addr, d, pk_d);
+    }
+    return false;
+}
+
+bool zcl_validate_zcl_address(const char *addr)
+{
+    if (!addr || !addr[0])
+        return false;
+
+    size_t len = strlen(addr);
+
+    if (!zcl_address_charset_ok(addr, len))
+        return false;
 
     /* Transparent address: Base58Check against the ACTIVE chain's P2PKH
      * or P2SH version bytes (t1/t3 on mainnet, the chain's own forms —
@@ -50,26 +80,5 @@ bool zcl_validate_zcl_address(const char *addr)
         return decode_destination(addr, pk_pfx, pk_len, sc_pfx, sc_len, &dest);
     }
 
-    /* Sapling shielded address: the ACTIVE chain's bech32 HRP plus the
-     * '1' separator ("zs1..." on mainnet, "ztestsapling1..."/
-     * "zregtestsapling1..." off it). sapling_decode_payment_address
-     * validates the checksum and the 11-byte diversifier + 32-byte pk_d
-     * split while deliberately ignoring the HRP, so the prefix test here
-     * is the only HRP check — the same pattern wallet_addr_is_sapling
-     * uses. A literal "zs1" gate would false-reject every non-mainnet
-     * Sapling address. */
-    {
-        const struct chain_params *cp = chain_params_get();
-        const char *hrp =
-            cp ? cp->bech32HRPs[BECH32_SAPLING_PAYMENT_ADDRESS] : NULL;
-        size_t hrp_len = hrp ? strlen(hrp) : 0;
-        if (hrp_len > 0 && len > hrp_len &&
-            strncmp(addr, hrp, hrp_len) == 0 && addr[hrp_len] == '1') {
-            uint8_t d[ZC_DIVERSIFIER_SIZE];
-            uint8_t pk_d[32];
-            return sapling_decode_payment_address(addr, d, pk_d);
-        }
-    }
-
-    return false;
+    return zcl_sapling_address_decodes(addr, len);
 }
