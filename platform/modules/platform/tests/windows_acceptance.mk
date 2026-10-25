@@ -30,6 +30,7 @@ ZCL_WINDOWS_ACCEPTANCE_TESTS := \
 	directory_compat \
 	directory_transaction \
 	disk_space \
+	event_log \
 	export_snapshot \
 	file_metadata \
 	file_ops_copy \
@@ -625,6 +626,19 @@ ZCL_WINDOWS_ACCEPTANCE_private_directory_SOURCES := \
 	platform/modules/platform/src/private_acl_internal.c \
 	platform/modules/base/src/safe_alloc.c
 ZCL_WINDOWS_ACCEPTANCE_private_directory_LIBS := -ladvapi32
+ZCL_WINDOWS_ACCEPTANCE_event_log_SOURCES := \
+	tests/harness/src/event_log_windows_acceptance.c \
+	engine/modules/storage/src/event_log.c \
+	engine/modules/storage/src/event_log_pending.c \
+	platform/modules/platform/src/private_file.c \
+	platform/modules/platform/src/private_acl_internal.c \
+	platform/modules/platform/src/clock.c \
+	platform/modules/util/src/crc32c.c \
+	platform/modules/sha3/src/sha3.c \
+	platform/modules/base/src/log_level.c \
+	platform/modules/base/src/safe_alloc.c
+ZCL_WINDOWS_ACCEPTANCE_event_log_LIBS := \
+	-ladvapi32 $(ZCL_WINDOWS_ACCEPTANCE_PTHREAD_LIB)
 ZCL_WINDOWS_ACCEPTANCE_private_file_SOURCES := \
 	platform/modules/platform/tests/private_file_windows_acceptance.c \
 	platform/modules/platform/src/private_file.c \

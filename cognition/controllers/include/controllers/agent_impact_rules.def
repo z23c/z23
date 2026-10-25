@@ -3041,6 +3041,7 @@ AGENT_IMPACT_RULE("platform/modules/platform/src/process_lock.c|platform/modules
  * observes an edit here -- weaker than a group, and said plainly rather than
  * dressed up. The lint tier alone is the honest answer. */
 AGENT_IMPACT_RULE("platform/modules/platform/tests/windows_acceptance.mk", "make_lint_gates")
+AGENT_IMPACT_RULE("tests/harness/src/event_log_windows_acceptance.c", "make_lint_gates")
 /* This headless program is compiled only by the Windows acceptance catalog;
  * the lint tier reconciles and cross-links that catalog fail-closed. */
 AGENT_IMPACT_RULE("platform/modules/platform/tests/datadir_privacy_windows_acceptance.c", "make_lint_gates")
