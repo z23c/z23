@@ -362,6 +362,60 @@ static bool mp_proj_equal(mempool_projection_t *a, mempool_projection_t *b,
     return true;
 }
 
+static void mp_close_partial_open(event_log_t *log, mempool_projection_t *live)
+{
+    if (live) mempool_projection_close(live);
+    if (log) event_log_close(log);
+}
+
+static bool mp_confirm_then_disconnect(event_log_t *log, const uint32_t *keys,
+                                       uint8_t *present, int nkeys, int op)
+{
+    /* Confirm-then-disconnect: remove up to 5 present txs, then
+     * re-admit them (possibly with refreshed fee/size). */
+    int removed[5]; int nr = 0;
+    for (int t = 0; t < nkeys && nr < 5; t++) {
+        if (present[t]) {
+            mp_append_remove(log, keys[t], 1 /* mined */);
+            present[t] = 0;
+            removed[nr++] = t;
+        }
+    }
+    for (int r = 0; r < nr; r++) {
+        int t = removed[r];
+        mp_append_admit(log, keys[t],
+                        2000 + (int64_t)op + t,
+                        100 + rng_range(120),
+                        400 + rng_range(400));
+        present[t] = 1;
+    }
+    return nr > 0;
+}
+
+static void mp_random_admit_or_remove(event_log_t *log, const uint32_t *keys,
+                                      uint8_t *present, int nkeys, int op)
+{
+    int kk = (int)rng_range(nkeys);
+    if (present[kk]) {
+        if (rng_range(3) == 0) {
+            mp_append_remove(log, keys[kk], (uint8_t)(rng_range(3)));
+            present[kk] = 0;
+        } else {
+            /* re-admit overwrites fee/size (replace) */
+            mp_append_admit(log, keys[kk],
+                            1500 + (int64_t)op,
+                            100 + rng_range(120),
+                            400 + rng_range(400));
+        }
+    } else {
+        mp_append_admit(log, keys[kk],
+                        1000 + (int64_t)op,
+                        80 + rng_range(140),
+                        320 + rng_range(480));
+        present[kk] = 1;
+    }
+}
+
 static int run_mempool(uint64_t base_seed, int *failures_out)
 {
     int failures = 0;
@@ -378,8 +432,7 @@ static int run_mempool(uint64_t base_seed, int *failures_out)
     mempool_projection_t *live = mempool_projection_open(live_path, log);
     PRI_CHECK("mempool: open log + live projection", log && live);
     if (!log || !live) {
-        if (live) mempool_projection_close(live);
-        if (log) event_log_close(log);
+        mp_close_partial_open(log, live);
         goto done;
     }
 
@@ -397,45 +450,10 @@ static int run_mempool(uint64_t base_seed, int *failures_out)
 
     for (int op = 0; op < N_OPS; op++) {
         if (op == forced_reorg_at) {
-            /* Confirm-then-disconnect: remove up to 5 present txs, then
-             * re-admit them (possibly with refreshed fee/size). */
-            int removed[5]; int nr = 0;
-            for (int t = 0; t < NKEYS && nr < 5; t++) {
-                if (present[t]) {
-                    mp_append_remove(log, keys[t], 1 /* mined */);
-                    present[t] = 0;
-                    removed[nr++] = t;
-                }
-            }
-            for (int r = 0; r < nr; r++) {
-                int t = removed[r];
-                mp_append_admit(log, keys[t],
-                                2000 + (int64_t)op + t,
-                                100 + rng_range(120),
-                                400 + rng_range(400));
-                present[t] = 1;
-            }
-            if (nr > 0) did_reorg = true;
+            did_reorg = mp_confirm_then_disconnect(log, keys, present,
+                                                   NKEYS, op);
         } else {
-            int kk = (int)rng_range(NKEYS);
-            if (present[kk]) {
-                if (rng_range(3) == 0) {
-                    mp_append_remove(log, keys[kk], (uint8_t)(rng_range(3)));
-                    present[kk] = 0;
-                } else {
-                    /* re-admit overwrites fee/size (replace) */
-                    mp_append_admit(log, keys[kk],
-                                    1500 + (int64_t)op,
-                                    100 + rng_range(120),
-                                    400 + rng_range(400));
-                }
-            } else {
-                mp_append_admit(log, keys[kk],
-                                1000 + (int64_t)op,
-                                80 + rng_range(140),
-                                320 + rng_range(480));
-                present[kk] = 1;
-            }
+            mp_random_admit_or_remove(log, keys, present, NKEYS, op);
         }
         if (rng_range(3) != 0)
             PRI_CHECK("mempool: incremental catch_up",
