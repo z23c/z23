@@ -177,29 +177,114 @@ uint16_t mvap_kind_from_metaverse(enum metaverse_kind kind)
 
 /* ── verdicts ───────────────────────────────────────────────────────────── */
 
-int32_t mvap_status_from_grant_verdict(enum metaverse_grant_verdict verdict)
+/* The verdict-to-status mapping, split one verdict family per helper so no
+ * single function carries all nineteen case labels. A helper answers true and
+ * writes the status only for its own family and false for everything else, so
+ * a verdict no helper claims — METAVERSE_GRANT_VERDICT_COUNT included — still
+ * reaches the MVAP_ERR_INTERNAL return in the public function below, exactly
+ * as the break in the former one-piece switch did. */
+static bool mvap_status_for_request_validity_verdict(
+    enum metaverse_grant_verdict verdict, int32_t *out)
 {
     switch (verdict) {
-    case METAVERSE_GRANT_OK:                        return MVAP_OK;
-    case METAVERSE_GRANT_BAD_ARGS:                  return MVAP_ERR_BAD_REQUEST;
-    case METAVERSE_GRANT_MALFORMED:                 return MVAP_ERR_INTERNAL;
-    case METAVERSE_GRANT_REVOKED:                   return MVAP_ERR_DENIED_REVOKED;
-    case METAVERSE_GRANT_ANCESTOR_REVOKED:          return MVAP_ERR_DENIED_REVOKED;
-    case METAVERSE_GRANT_EXPIRED_HEIGHT:            return MVAP_ERR_DENIED_EXPIRED;
-    case METAVERSE_GRANT_EXPIRED_TIME:              return MVAP_ERR_DENIED_EXPIRED;
-    case METAVERSE_GRANT_WRONG_HOLDER:              return MVAP_ERR_DENIED_NO_GRANT;
-    case METAVERSE_GRANT_ACTION_NOT_GRANTED:        return MVAP_ERR_DENIED_ACTION;
-    case METAVERSE_GRANT_PROPERTY_OUT_OF_SCOPE:     return MVAP_ERR_DENIED_PROPERTY;
-    case METAVERSE_GRANT_KIND_OUT_OF_SCOPE:         return MVAP_ERR_DENIED_KIND;
-    case METAVERSE_GRANT_COUNTERPARTY_NOT_ALLOWED:  return MVAP_ERR_DENIED_COUNTERPARTY;
-    case METAVERSE_GRANT_VALUE_NEGATIVE:            return MVAP_ERR_BAD_REQUEST;
-    case METAVERSE_GRANT_VALUE_ON_FREE_ACTION:      return MVAP_ERR_BAD_REQUEST;
-    case METAVERSE_GRANT_BUDGET_EXCEEDED:           return MVAP_ERR_DENIED_BUDGET;
-    case METAVERSE_GRANT_RATE_LIMITED:              return MVAP_ERR_DENIED_RATE;
-    case METAVERSE_GRANT_DELEGATION_NOT_PERMITTED:  return MVAP_ERR_DENIED_DELEGATION;
-    case METAVERSE_GRANT_DELEGATION_DEPTH_EXCEEDED: return MVAP_ERR_DENIED_DELEGATION;
-    case METAVERSE_GRANT_VERDICT_COUNT:             break;
+    case METAVERSE_GRANT_OK:
+        *out = MVAP_OK;
+        return true;
+    case METAVERSE_GRANT_BAD_ARGS:
+        *out = MVAP_ERR_BAD_REQUEST;
+        return true;
+    case METAVERSE_GRANT_MALFORMED:
+        *out = MVAP_ERR_INTERNAL;
+        return true;
+    default:
+        return false;
     }
+}
+
+static bool mvap_status_for_grant_state_verdict(
+    enum metaverse_grant_verdict verdict, int32_t *out)
+{
+    switch (verdict) {
+    case METAVERSE_GRANT_REVOKED:
+        *out = MVAP_ERR_DENIED_REVOKED;
+        return true;
+    case METAVERSE_GRANT_ANCESTOR_REVOKED:
+        *out = MVAP_ERR_DENIED_REVOKED;
+        return true;
+    case METAVERSE_GRANT_EXPIRED_HEIGHT:
+        *out = MVAP_ERR_DENIED_EXPIRED;
+        return true;
+    case METAVERSE_GRANT_EXPIRED_TIME:
+        *out = MVAP_ERR_DENIED_EXPIRED;
+        return true;
+    case METAVERSE_GRANT_WRONG_HOLDER:
+        *out = MVAP_ERR_DENIED_NO_GRANT;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool mvap_status_for_scope_verdict(
+    enum metaverse_grant_verdict verdict, int32_t *out)
+{
+    switch (verdict) {
+    case METAVERSE_GRANT_ACTION_NOT_GRANTED:
+        *out = MVAP_ERR_DENIED_ACTION;
+        return true;
+    case METAVERSE_GRANT_PROPERTY_OUT_OF_SCOPE:
+        *out = MVAP_ERR_DENIED_PROPERTY;
+        return true;
+    case METAVERSE_GRANT_KIND_OUT_OF_SCOPE:
+        *out = MVAP_ERR_DENIED_KIND;
+        return true;
+    case METAVERSE_GRANT_COUNTERPARTY_NOT_ALLOWED:
+        *out = MVAP_ERR_DENIED_COUNTERPARTY;
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool mvap_status_for_value_and_limit_verdict(
+    enum metaverse_grant_verdict verdict, int32_t *out)
+{
+    switch (verdict) {
+    case METAVERSE_GRANT_VALUE_NEGATIVE:
+        *out = MVAP_ERR_BAD_REQUEST;
+        return true;
+    case METAVERSE_GRANT_VALUE_ON_FREE_ACTION:
+        *out = MVAP_ERR_BAD_REQUEST;
+        return true;
+    case METAVERSE_GRANT_BUDGET_EXCEEDED:
+        *out = MVAP_ERR_DENIED_BUDGET;
+        return true;
+    case METAVERSE_GRANT_RATE_LIMITED:
+        *out = MVAP_ERR_DENIED_RATE;
+        return true;
+    case METAVERSE_GRANT_DELEGATION_NOT_PERMITTED:
+        *out = MVAP_ERR_DENIED_DELEGATION;
+        return true;
+    case METAVERSE_GRANT_DELEGATION_DEPTH_EXCEEDED:
+        *out = MVAP_ERR_DENIED_DELEGATION;
+        return true;
+    case METAVERSE_GRANT_VERDICT_COUNT:
+    default:
+        return false;
+    }
+}
+
+int32_t mvap_status_from_grant_verdict(enum metaverse_grant_verdict verdict)
+{
+    int32_t status = MVAP_ERR_INTERNAL;
+    if (mvap_status_for_request_validity_verdict(verdict, &status))
+        return status;
+    if (mvap_status_for_grant_state_verdict(verdict, &status))
+        return status;
+    if (mvap_status_for_scope_verdict(verdict, &status))
+        return status;
+    if (mvap_status_for_value_and_limit_verdict(verdict, &status))
+        return status;
     return MVAP_ERR_INTERNAL;
 }
 
