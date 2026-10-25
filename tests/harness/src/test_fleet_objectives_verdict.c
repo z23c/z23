@@ -386,6 +386,75 @@ _test_next:;
     return failures;
 }
 
+struct fov_delta_case {
+    const char *name, *before, *after, *verdict;
+    bool has_delta;
+    int64_t delta;
+    const char *reason;
+};
+
+static int fov_case_delta(const char *dir, const struct fov_delta_case *sample)
+{
+    int failures = 0;
+    char path[700], text[2048], before[1024], after[1024];
+    struct fov_call c;
+    (void)snprintf(path, sizeof(path), "%s/delta.jsonl", dir);
+    fov_line(before, sizeof(before), 1, sample->before, "0", "");
+    fov_line(after, sizeof(after), 2, sample->after, "0", "");
+    (void)snprintf(text, sizeof(text), "%s%s", before, after);
+    TEST(sample->name) {
+        ASSERT(fov_write(path, text));
+        ASSERT(fov_run(&c, path, 1, 2, "lat"));
+        ASSERT_EQ(c.reply.status, ZCL_COMMAND_STATUS_PASSED);
+        const struct json_value *entry = fov_entry(&c, "lat");
+        ASSERT_STR_EQ(fov_verdict(&c, "lat"), sample->verdict);
+        ASSERT_EQ(json_get_int(json_get(&c.reply.data, sample->verdict)), 1);
+        ASSERT_STR_EQ(json_get_str(json_get(entry, "direction")), "min");
+        if (sample->has_delta) {
+            ASSERT(json_get(entry, "delta")->type == JSON_INT);
+            ASSERT_EQ(json_get_int(json_get(entry, "delta")), sample->delta);
+        } else {
+            ASSERT(json_is_null(json_get(entry, "delta")));
+        }
+        if (sample->reason)
+            ASSERT_STR_EQ(json_get_str(json_get(entry, "reason")), sample->reason);
+        else
+            ASSERT(json_get(entry, "reason") == NULL);
+        fov_end(&c);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int fov_case_delta_boundaries(const char *dir)
+{
+    static const struct fov_delta_case cases[] = {
+        {"verdict: positive delta overflow preserves regression",
+         "-9223372036854775808", "9223372036854775807", "regressed",
+         false, 0, "delta outside signed 64-bit range"},
+        {"verdict: negative delta overflow preserves improvement",
+         "9223372036854775807", "-9223372036854775808", "improved",
+         false, 0, "delta outside signed 64-bit range"},
+        {"verdict: exact INT64_MAX delta remains measured",
+         "0", "9223372036854775807", "regressed", true, INT64_MAX, NULL},
+        {"verdict: exact INT64_MIN delta remains measured",
+         "0", "-9223372036854775808", "improved", true, INT64_MIN, NULL},
+        {"verdict: ordinary delta remains unchanged",
+         "10", "7", "improved", true, -3, NULL},
+        {"verdict: null after extreme before preserves unmeasured reason",
+         "-9223372036854775808", "null", "unmeasured", false, 0,
+         "after: no ledger"},
+        {"verdict: null before extreme after preserves unmeasured reason",
+         "null", "9223372036854775807", "unmeasured", false, 0,
+         "before: no ledger"},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        failures += fov_case_delta(dir, &cases[i]);
+    return failures;
+}
+
 int test_fleet_objectives_verdict(void);
 int test_fleet_objectives_verdict(void)
 {
@@ -397,6 +466,7 @@ int test_fleet_objectives_verdict(void)
     failures += fov_case_refusals(dir);
     failures += fov_case_skips(dir);
     failures += fov_case_registry(dir);
+    failures += fov_case_delta_boundaries(dir);
     (void)test_rm_rf_recursive(dir);
     if (failures == 0)
         printf("test_fleet_objectives_verdict: all passed\n");

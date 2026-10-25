@@ -32,6 +32,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -363,6 +364,19 @@ static void fvd_count(struct fvd_counts *c, const char *verdict)
         c->unmeasured++;
 }
 
+/* A missing side or an unrepresentable difference has no integer delta. */
+static bool fvd_delta(const struct fvd_side *b, const struct fvd_side *a,
+                       int64_t *out)
+{
+    if (!b->measured || !a->measured)
+        return false;
+    if ((b->value > 0 && a->value < INT64_MIN + b->value) ||
+        (b->value < 0 && a->value > INT64_MAX + b->value))
+        return false;
+    *out = a->value - b->value;
+    return true;
+}
+
 static bool fvd_entry_fields(struct json_value *o, const char *id,
                              const struct json_value *be,
                              const struct json_value *ae,
@@ -372,11 +386,12 @@ static bool fvd_entry_fields(struct json_value *o, const char *id,
     const struct json_value *ref = ae ? ae : be;
     const char *dir = json_get_str(json_get(ref, "direction"));
     const struct json_value *target = json_get(ref, "target");
-    bool both = b->measured && a->measured;
+    int64_t delta = 0;
+    bool has_delta = fvd_delta(b, a, &delta);
     return json_push_kv_str(o, "id", id) &&
            fvd_push_side(o, "before", b->measured, b->value) &&
            fvd_push_side(o, "after", a->measured, a->value) &&
-           fvd_push_side(o, "delta", both, a->value - b->value) &&
+           fvd_push_side(o, "delta", has_delta, delta) &&
            json_push_kv_str(o, "direction", dir ? dir : "") &&
            fvd_push_side(o, "target",
                          target && target->type == JSON_INT,
@@ -403,8 +418,12 @@ static bool fvd_entry(struct json_value *o, const char *id,
     fvd_count(counts, verdict);
     if (!fvd_entry_fields(o, id, be, ae, &b, &a, verdict))
         return false;
-    if (strcmp(verdict, "unmeasured") != 0)
+    if (strcmp(verdict, "unmeasured") != 0) {
+        if (json_is_null(json_get(o, "delta")))
+            return json_push_kv_str(o, "reason",
+                                    "delta outside signed 64-bit range");
         return true;
+    }
     if (b.measured && a.measured)
         (void)snprintf(reason, sizeof(reason), "unknown direction");
     else
