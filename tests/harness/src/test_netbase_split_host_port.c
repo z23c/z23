@@ -51,6 +51,27 @@ struct sh_case {
     int want_port;          /* PORT_SENTINEL means "must stay untouched" */
 };
 
+/* True when split_host_port left the host buffer holding exactly want_host
+ * and the port variable holding exactly want_port (PORT_SENTINEL for
+ * "never written"). Pure comparison; no logging, so callers stay in charge
+ * of every printf. */
+static bool split_result_matches(const char *got_host, const char *want_host,
+                                 int got_port, int want_port)
+{
+    return strcmp(got_host, want_host) == 0 && got_port == want_port;
+}
+
+/* True when every byte of buf[0..len) still holds the 0x5A sentinel fill,
+ * i.e. split_host_port left host_out completely untouched. */
+static bool sentinel_fill_untouched(const char *buf, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (buf[i] != (char)0x5A)
+            return false;
+    }
+    return true;
+}
+
 int test_netbase_split_host_port(void)
 {
     printf("\n=== netbase split_host_port tests ===\n");
@@ -87,10 +108,10 @@ int test_netbase_split_host_port(void)
         memset(host, 0xAA, sizeof(host));
         port = PORT_SENTINEL;
         split_host_port(cases[i].in, host, sizeof(host), &port);
-        bool host_ok = strcmp(host, cases[i].want_host) == 0;
-        bool port_ok = (port == cases[i].want_port);
-        NB_CHECK(cases[i].name, host_ok && port_ok);
-        if (!(host_ok && port_ok))
+        bool case_ok = split_result_matches(host, cases[i].want_host, port,
+                                            cases[i].want_port);
+        NB_CHECK(cases[i].name, case_ok);
+        if (!case_ok)
             printf("    (got host=\"%s\" port=%d)\n", host, port);
     }
 
@@ -101,7 +122,7 @@ int test_netbase_split_host_port(void)
     port = PORT_SENTINEL;
     split_host_port("host:99999", host, sizeof(host), &port);
     NB_CHECK("port overflow (99999) falls through to whole-string host",
-             strcmp(host, "host:99999") == 0 && port == PORT_SENTINEL);
+             split_result_matches(host, "host:99999", port, PORT_SENTINEL));
 
     /* Exclusive-upper fence, accepted side: 65535 is the last port for which
      * `n < 0x10000` holds; it is written and the host truncated. Sits next to
@@ -110,7 +131,7 @@ int test_netbase_split_host_port(void)
     port = PORT_SENTINEL;
     split_host_port("host:65535", host, sizeof(host), &port);
     NB_CHECK("port 65535 (0xFFFF) accepted, host truncated to exclude port",
-             strcmp(host, "host") == 0 && port == 65535);
+             split_result_matches(host, "host", port, 65535));
 
     /* Exclusive-upper fence, rejected side: 65536 (0x10000) is refused by
      * `n < 0x10000` and would be accepted by `n <= 0x10000`; no other
@@ -119,7 +140,7 @@ int test_netbase_split_host_port(void)
     port = PORT_SENTINEL;
     split_host_port("host:65536", host, sizeof(host), &port);
     NB_CHECK("port 65536 (0x10000) rejected, whole string becomes host",
-             strcmp(host, "host:65536") == 0 && port == PORT_SENTINEL);
+             split_result_matches(host, "host:65536", port, PORT_SENTINEL));
 
     /* The same exclusive bound on the bracketed path: 65536 accepted would
      * strip brackets and write port 65536 (host "::1"). */
@@ -127,35 +148,35 @@ int test_netbase_split_host_port(void)
     port = PORT_SENTINEL;
     split_host_port("[::1]:65536", host, sizeof(host), &port);
     NB_CHECK("bracketed port 65536 rejected, no strip and no port write",
-             strcmp(host, "[::1]:65536") == 0 && port == PORT_SENTINEL);
+             split_result_matches(host, "[::1]:65536", port, PORT_SENTINEL));
 
     /* ── adversarial: port value == 0 is rejected (n>0 required) ───── */
     memset(host, 0xAA, sizeof(host));
     port = PORT_SENTINEL;
     split_host_port("host:0", host, sizeof(host), &port);
     NB_CHECK("port zero rejected, whole string becomes host",
-             strcmp(host, "host:0") == 0 && port == PORT_SENTINEL);
+             split_result_matches(host, "host:0", port, PORT_SENTINEL));
 
     /* ── adversarial: negative port digits parse but fail n>0 ──────── */
     memset(host, 0xAA, sizeof(host));
     port = PORT_SENTINEL;
     split_host_port("host:-5", host, sizeof(host), &port);
     NB_CHECK("negative port rejected, whole string becomes host",
-             strcmp(host, "host:-5") == 0 && port == PORT_SENTINEL);
+             split_result_matches(host, "host:-5", port, PORT_SENTINEL));
 
     /* ── adversarial: non-numeric suffix after colon ──────────────── */
     memset(host, 0xAA, sizeof(host));
     port = PORT_SENTINEL;
     split_host_port("host:abc", host, sizeof(host), &port);
     NB_CHECK("non-numeric port suffix rejected, whole string becomes host",
-             strcmp(host, "host:abc") == 0 && port == PORT_SENTINEL);
+             split_result_matches(host, "host:abc", port, PORT_SENTINEL));
 
     /* ── adversarial: leading colon must not be a port separator ───── */
     memset(host, 0xAA, sizeof(host));
     port = PORT_SENTINEL;
     split_host_port(":1234", host, sizeof(host), &port);
     NB_CHECK("leading colon (colon == in) not treated as separator",
-             strcmp(host, ":1234") == 0 && port == PORT_SENTINEL);
+             split_result_matches(host, ":1234", port, PORT_SENTINEL));
 
     /* A leading colon on a tail with no other colon: multi_colon is false, so
      * the `colon != in` guard alone must suppress port parsing. */
@@ -163,7 +184,7 @@ int test_netbase_split_host_port(void)
     port = PORT_SENTINEL;
     split_host_port(":9033", host, sizeof(host), &port);
     NB_CHECK("bare leading colon with digits stays whole-string host",
-             strcmp(host, ":9033") == 0 && port == PORT_SENTINEL);
+             split_result_matches(host, ":9033", port, PORT_SENTINEL));
 
     /* ── adversarial: in[0]=='[' but the character before the LAST colon is
      * not ']', so `bracketed` is false and the multi-colon guard suppresses
@@ -173,7 +194,7 @@ int test_netbase_split_host_port(void)
     port = PORT_SENTINEL;
     split_host_port("[::1", host, sizeof(host), &port);
     NB_CHECK("unterminated bracket left completely as host, no port",
-             strcmp(host, "[::1") == 0 && port == PORT_SENTINEL);
+             split_result_matches(host, "[::1", port, PORT_SENTINEL));
 
     /* ── host_size truncation: a longer unbracketed host is truncated to
      * host_size-1 and NUL-terminated, never overflowing. ───── */
@@ -194,7 +215,7 @@ int test_netbase_split_host_port(void)
         int p = PORT_SENTINEL;
         split_host_port("abcdefgh:9033", small, sizeof(small), &p);
         NB_CHECK("port parsed first, then host still truncated safely",
-                 strcmp(small, "abc") == 0 && p == 9033);
+                 split_result_matches(small, "abc", p, 9033));
     }
 
     /* Exact fit: host_size == strlen(host)+1 must not truncate. */
@@ -237,7 +258,7 @@ int test_netbase_split_host_port(void)
         int p = PORT_SENTINEL;
         split_host_port("[::1]", tiny_bracket, sizeof(tiny_bracket), &p);
         NB_CHECK("bracketed host too big for host_size leaves host_out untouched",
-                 tiny_bracket[0] == (char)0x5A && tiny_bracket[1] == (char)0x5A);
+                 sentinel_fill_untouched(tiny_bracket, sizeof(tiny_bracket)));
     }
 
     /* A bracketed host that fits exactly at the boundary must copy (the guard
@@ -256,8 +277,7 @@ int test_netbase_split_host_port(void)
         p = PORT_SENTINEL;
         split_host_port("[::1]", one_short, sizeof(one_short), &p);
         NB_CHECK("bracketed host one byte short of fit is a no-op (untouched)",
-                 one_short[0] == (char)0x5A && one_short[1] == (char)0x5A &&
-                 one_short[2] == (char)0x5A);
+                 sentinel_fill_untouched(one_short, sizeof(one_short)));
     }
 
     /* ── round-trip: bracketed host with port and a small buffer: the port
@@ -268,7 +288,7 @@ int test_netbase_split_host_port(void)
         int p = PORT_SENTINEL;
         split_host_port("[::1]:443", h, sizeof(h), &p);
         NB_CHECK("bracketed host with port: both host and port correct",
-                 strcmp(h, "::1") == 0 && p == 443);
+                 split_result_matches(h, "::1", p, 443));
     }
 
     /* Empty suffix after the colon: ParseInt32("") fails, so a trailing colon
@@ -277,7 +297,7 @@ int test_netbase_split_host_port(void)
     port = PORT_SENTINEL;
     split_host_port("host:", host, sizeof(host), &port);
     NB_CHECK("empty port suffix rejected, whole string becomes host",
-             strcmp(host, "host:") == 0 && port == PORT_SENTINEL);
+             split_result_matches(host, "host:", port, PORT_SENTINEL));
 
     /* ── net_name_is_onion: suffix detection, not v3 validation ──────
      * True when the host part of "host[:port]" carries ".onion": NULL is
