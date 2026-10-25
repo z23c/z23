@@ -2281,7 +2281,6 @@ tests/harness/src/test_ontology.c:test_ontology_formula_language:18
 tests/harness/src/test_ontology.c:test_ontology_four_valued_calculus:22
 tests/harness/src/test_ontology_horn_evaluator.c:horn_fixture_init:24
 tests/harness/src/test_ontology_horn_evaluator.c:test_ontology_horn_fixed_point:26
-tests/harness/src/test_ontology_manifest_rules.c:manifest_rule_fixture_init:21
 tests/harness/src/test_ontology_vocabulary.c:tv_vocabulary_zero:26
 tests/harness/src/test_op_return_index.c:test_backfill_declared_partial_coverage:17
 tests/harness/src/test_op_return_index.c:test_backfill_e2e:20

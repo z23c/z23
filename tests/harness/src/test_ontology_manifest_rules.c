@@ -70,9 +70,8 @@ static bool manifest_rule_context_set(struct manifest_rule_fixture *fixture)
                fixture->manifest.context_set_root);
 }
 
-static bool manifest_rule_fixture_init(struct manifest_rule_fixture *fixture)
+static void manifest_rule_universe_init(struct manifest_rule_fixture *fixture)
 {
-    memset(fixture, 0, sizeof(*fixture));
     fixture->universe.schema_version = ZCL_SOURCE_UNIVERSE_VERSION;
     fixture->universe.coverage_mask = ZCL_SOURCE_COVER_ALL;
     fixture->universe.governed_path_count = 11;
@@ -85,8 +84,12 @@ static bool manifest_rule_fixture_init(struct manifest_rule_fixture *fixture)
     manifest_rule_test_root(fixture->universe.publishable_paths_root, 0xa1);
     manifest_rule_test_root(fixture->universe.consensus_seal_root, 0xc1);
     manifest_rule_test_root(fixture->universe.indexed_paths_root, 0xe1);
+}
 
-    uint8_t universe_root[32], imports_root[32], context_root[1][32];
+static bool manifest_rule_context_build(
+    struct manifest_rule_fixture *fixture, uint8_t universe_root[32])
+{
+    uint8_t imports_root[32], context_root[1][32];
     if (!zcl_source_universe_v1_root(&fixture->universe, universe_root) ||
         !zcl_ontology_import_manifest_v1_root(
             universe_root, NULL, 0, imports_root))
@@ -97,12 +100,14 @@ static bool manifest_rule_fixture_init(struct manifest_rule_fixture *fixture)
     memcpy(fixture->context.import_manifest_root, imports_root, 32);
     manifest_rule_test_root(fixture->context.subject_root, 0x17);
     manifest_rule_test_root(fixture->context.policy_root, 0x57);
-    if (!zcl_ontology_context_v1_root(
-            &fixture->context, context_root[0]) ||
-        !zcl_ontology_vocabulary_v1_build(
-            &fixture->universe, &fixture->context, &fixture->vocabulary))
-        return false;
+    return zcl_ontology_context_v1_root(
+               &fixture->context, context_root[0]) &&
+           zcl_ontology_vocabulary_v1_build(
+               &fixture->universe, &fixture->context, &fixture->vocabulary);
+}
 
+static bool manifest_rule_formula_locate(struct manifest_rule_fixture *fixture)
+{
     bool found_formula = false;
     for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_FORMULA_COUNT; i++) {
         if (memcmp(fixture->vocabulary.formula_roots[i],
@@ -118,7 +123,12 @@ static bool manifest_rule_fixture_init(struct manifest_rule_fixture *fixture)
         }
     }
     if (!found_formula) return false;
+    return true;
+}
 
+static void manifest_rule_manifest_init(
+    struct manifest_rule_fixture *fixture, const uint8_t universe_root[32])
+{
     fixture->manifest.schema_version = ZCL_ONTOLOGY_OBJECT_VERSION;
     fixture->manifest.term_count = ZCL_ONTOLOGY_VOCABULARY_TERM_COUNT;
     fixture->manifest.predicate_count =
@@ -133,7 +143,11 @@ static bool manifest_rule_fixture_init(struct manifest_rule_fixture *fixture)
            fixture->vocabulary.vocabulary_root, 32);
     manifest_rule_test_root(fixture->manifest.extractor_root, 0x31);
     manifest_rule_test_root(fixture->manifest.policy_root, 0x71);
+}
 
+static bool manifest_rule_member_set_roots(
+    struct manifest_rule_fixture *fixture)
+{
     uint8_t term_roots[ZCL_ONTOLOGY_VOCABULARY_TERM_COUNT][32];
     uint8_t predicate_roots[ZCL_ONTOLOGY_VOCABULARY_PREDICATE_COUNT][32];
     if (!manifest_rule_member_roots(
@@ -149,8 +163,15 @@ static bool manifest_rule_fixture_init(struct manifest_rule_fixture *fixture)
         !zcl_ontology_object_set_v1_root(
             ZCL_ONTOLOGY_OBJECT_PREDICATE, predicate_roots,
             ZCL_ONTOLOGY_VOCABULARY_PREDICATE_COUNT,
-            fixture->manifest.predicate_set_root) ||
-        !manifest_rule_formula_set(fixture) ||
+            fixture->manifest.predicate_set_root))
+        return false;
+    return true;
+}
+
+static bool manifest_rule_object_set_roots(
+    struct manifest_rule_fixture *fixture)
+{
+    if (!manifest_rule_formula_set(fixture) ||
         !manifest_rule_rule_set(fixture) ||
         !manifest_rule_context_set(fixture) ||
         !zcl_ontology_object_set_v1_root(
@@ -166,7 +187,11 @@ static bool manifest_rule_fixture_init(struct manifest_rule_fixture *fixture)
             ZCL_ONTOLOGY_OBJECT_GAP, NULL, 0,
             fixture->manifest.gap_set_root))
         return false;
+    return true;
+}
 
+static void manifest_rule_inputs_init(struct manifest_rule_fixture *fixture)
+{
     fixture->inputs.terms = fixture->vocabulary.terms;
     fixture->inputs.term_count = ZCL_ONTOLOGY_VOCABULARY_TERM_COUNT;
     fixture->inputs.predicates = fixture->vocabulary.predicates;
@@ -178,6 +203,20 @@ static bool manifest_rule_fixture_init(struct manifest_rule_fixture *fixture)
     fixture->inputs.rule_count = 1;
     fixture->inputs.contexts = &fixture->context;
     fixture->inputs.context_count = 1;
+}
+
+static bool manifest_rule_fixture_init(struct manifest_rule_fixture *fixture)
+{
+    memset(fixture, 0, sizeof(*fixture));
+    manifest_rule_universe_init(fixture);
+
+    uint8_t universe_root[32];
+    if (!manifest_rule_context_build(fixture, universe_root)) return false;
+    if (!manifest_rule_formula_locate(fixture)) return false;
+    manifest_rule_manifest_init(fixture, universe_root);
+    if (!manifest_rule_member_set_roots(fixture)) return false;
+    if (!manifest_rule_object_set_roots(fixture)) return false;
+    manifest_rule_inputs_init(fixture);
     return true;
 }
 
