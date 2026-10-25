@@ -79,66 +79,58 @@ static bool legal_next(enum sync_phase from, enum sync_phase to)
 
 /* Progress events (in STAGED these trip the contained activation door). The
  * typed MANIFEST_VALIDATED verdict and the Phase-3 stubs are NON-progress: in
- * STAGED they are inert, never activating. Exhaustive — no default. */
+ * STAGED they are inert, never activating. Every current event is explicit. */
 static bool is_progress_event(enum sync_event_kind k)
 {
-    switch (k) {
-    case SYNC_EVENT_START:
-    case SYNC_EVENT_OFFER_RECEIVED:
-    case SYNC_EVENT_OFFER_ACCEPTED:
-    case SYNC_EVENT_CHUNK_RECEIVED:
-    case SYNC_EVENT_RECEIVE_COMPLETE:
-    case SYNC_EVENT_PROOF_VERIFIED:
-        return true;
-    case SYNC_EVENT_CHUNK_REJECTED:
-    case SYNC_EVENT_PROOF_FAILED:
-    case SYNC_EVENT_PEER_LOST:
-    case SYNC_EVENT_TIMEOUT:
-    case SYNC_EVENT_STOP_REQUESTED:
-    case SYNC_EVENT_MANIFEST_VALIDATED:
-    case SYNC_EVENT_ARTIFACT_VERIFIED:
-    case SYNC_EVENT_INSTALL_PREPARED:
-    case SYNC_EVENT_INSTALL_COMMITTED:
-    case SYNC_EVENT_TAIL_PIECE_VERIFIED:
-    case SYNC_EVENT_REDUCER_ADVANCED:
-    case SYNC_EVENT_READY_REACHED:
-    case SYNC_EVENT_SOVEREIGN_REACHED:
-        return false;
-    case SYNC_EVENT_COUNT:
-        break;
-    }
-    return false;
+    static const bool events[SYNC_EVENT_COUNT] = {
+        [SYNC_EVENT_START] = true,
+        [SYNC_EVENT_OFFER_RECEIVED] = true,
+        [SYNC_EVENT_OFFER_ACCEPTED] = true,
+        [SYNC_EVENT_CHUNK_RECEIVED] = true,
+        [SYNC_EVENT_RECEIVE_COMPLETE] = true,
+        [SYNC_EVENT_PROOF_VERIFIED] = true,
+        [SYNC_EVENT_CHUNK_REJECTED] = false,
+        [SYNC_EVENT_PROOF_FAILED] = false,
+        [SYNC_EVENT_PEER_LOST] = false,
+        [SYNC_EVENT_TIMEOUT] = false,
+        [SYNC_EVENT_STOP_REQUESTED] = false,
+        [SYNC_EVENT_MANIFEST_VALIDATED] = false,
+        [SYNC_EVENT_ARTIFACT_VERIFIED] = false,
+        [SYNC_EVENT_INSTALL_PREPARED] = false,
+        [SYNC_EVENT_INSTALL_COMMITTED] = false,
+        [SYNC_EVENT_TAIL_PIECE_VERIFIED] = false,
+        [SYNC_EVENT_REDUCER_ADVANCED] = false,
+        [SYNC_EVENT_READY_REACHED] = false,
+        [SYNC_EVENT_SOVEREIGN_REACHED] = false,
+    };
+    return (unsigned)k < SYNC_EVENT_COUNT && events[(unsigned)k];
 }
 
 /* The Phase-3 generic-artifact stubs — inert in every phase this slice. */
 static bool is_stub_event(enum sync_event_kind k)
 {
-    switch (k) {
-    case SYNC_EVENT_ARTIFACT_VERIFIED:
-    case SYNC_EVENT_INSTALL_PREPARED:
-    case SYNC_EVENT_INSTALL_COMMITTED:
-    case SYNC_EVENT_TAIL_PIECE_VERIFIED:
-    case SYNC_EVENT_REDUCER_ADVANCED:
-    case SYNC_EVENT_READY_REACHED:
-    case SYNC_EVENT_SOVEREIGN_REACHED:
-        return true;
-    case SYNC_EVENT_START:
-    case SYNC_EVENT_OFFER_RECEIVED:
-    case SYNC_EVENT_OFFER_ACCEPTED:
-    case SYNC_EVENT_CHUNK_RECEIVED:
-    case SYNC_EVENT_CHUNK_REJECTED:
-    case SYNC_EVENT_RECEIVE_COMPLETE:
-    case SYNC_EVENT_PROOF_VERIFIED:
-    case SYNC_EVENT_PROOF_FAILED:
-    case SYNC_EVENT_PEER_LOST:
-    case SYNC_EVENT_TIMEOUT:
-    case SYNC_EVENT_STOP_REQUESTED:
-    case SYNC_EVENT_MANIFEST_VALIDATED:
-        return false;
-    case SYNC_EVENT_COUNT:
-        break;
-    }
-    return false;
+    static const bool events[SYNC_EVENT_COUNT] = {
+        [SYNC_EVENT_ARTIFACT_VERIFIED] = true,
+        [SYNC_EVENT_INSTALL_PREPARED] = true,
+        [SYNC_EVENT_INSTALL_COMMITTED] = true,
+        [SYNC_EVENT_TAIL_PIECE_VERIFIED] = true,
+        [SYNC_EVENT_REDUCER_ADVANCED] = true,
+        [SYNC_EVENT_READY_REACHED] = true,
+        [SYNC_EVENT_SOVEREIGN_REACHED] = true,
+        [SYNC_EVENT_START] = false,
+        [SYNC_EVENT_OFFER_RECEIVED] = false,
+        [SYNC_EVENT_OFFER_ACCEPTED] = false,
+        [SYNC_EVENT_CHUNK_RECEIVED] = false,
+        [SYNC_EVENT_CHUNK_REJECTED] = false,
+        [SYNC_EVENT_RECEIVE_COMPLETE] = false,
+        [SYNC_EVENT_PROOF_VERIFIED] = false,
+        [SYNC_EVENT_PROOF_FAILED] = false,
+        [SYNC_EVENT_PEER_LOST] = false,
+        [SYNC_EVENT_TIMEOUT] = false,
+        [SYNC_EVENT_STOP_REQUESTED] = false,
+        [SYNC_EVENT_MANIFEST_VALIDATED] = false,
+    };
+    return (unsigned)k < SYNC_EVENT_COUNT && events[(unsigned)k];
 }
 
 static int test_wellformed_and_legal(void)
