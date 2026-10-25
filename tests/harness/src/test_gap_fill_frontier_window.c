@@ -53,6 +53,31 @@ static bool gf_build_chain(int count, struct block_index **blocks_out,
     return true;
 }
 
+/* Window predicates used by the GF_CHECK calls below.  Each reproduces its
+ * check's exact field order and short-circuiting so the assertions keep
+ * their meaning while the test body stays within its complexity budget. */
+
+static bool gf_window_matches(bool has, const struct gap_fill_window *w,
+                              int tip, int lo, int hi, int count)
+{
+    return has && w->effective_tip_h == tip && w->lo == lo && w->hi == hi &&
+        w->count == count;
+}
+
+static bool gf_window_bounds_match(bool has, const struct gap_fill_window *w,
+                                   int lo, int hi, int count)
+{
+    return has && w->count == count && w->lo == lo && w->hi == hi;
+}
+
+static bool gf_dump_state_reports_idle(bool ok,
+                                       const struct json_value *running,
+                                       const struct json_value *passes)
+{
+    return ok && running && json_get_bool(running) == false && passes &&
+        json_get_int(passes) == 0;
+}
+
 int test_gap_fill_frontier_window(void)
 {
     printf("\n=== gap_fill_frontier_window ===\n");
@@ -62,8 +87,7 @@ int test_gap_fill_frontier_window(void)
 
     bool has = gap_fill_compute_window(7253, 7600, 6764, &w);
     GF_CHECK("body-fetch cursor anchors below active tip",
-             has && w.effective_tip_h == 6763 && w.lo == 6764 &&
-                 w.hi == 7600 && w.count == 837);
+             gf_window_matches(has, &w, 6763, 6764, 7600, 837));
 
     /* S2.4: gap_fill_compute_window's floor cursor is generic. Feeding it
      * the (structurally faster, body-independent) validate_headers cursor
@@ -128,8 +152,8 @@ int test_gap_fill_frontier_window(void)
         struct block_index *start =
             gap_fill_window_walk_start(&blocks[best_h], &w);
         GF_CHECK("large gap caps at GAPFILL_WINDOW",
-                 has && w.count == GAPFILL_WINDOW && w.lo == 11 &&
-                     w.hi == 10 + GAPFILL_WINDOW);
+                 gf_window_bounds_match(has, &w, 11, 10 + GAPFILL_WINDOW,
+                                        GAPFILL_WINDOW));
         GF_CHECK("large gap starts at connectable bottom window",
                  start == &blocks[10 + GAPFILL_WINDOW]);
     }
@@ -175,8 +199,7 @@ int test_gap_fill_frontier_window(void)
         const struct json_value *running = json_get(&v, "running");
         const struct json_value *passes = json_get(&v, "passes");
         GF_CHECK("dump_state_json returns true and reports running+passes",
-                 ok && running && json_get_bool(running) == false &&
-                     passes && json_get_int(passes) == 0);
+                 gf_dump_state_reports_idle(ok, running, passes));
         json_free(&v);
     }
 
