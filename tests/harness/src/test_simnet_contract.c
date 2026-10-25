@@ -82,6 +82,35 @@ static bool sc_make_htlc(struct simnet_contract_htlc *c, uint32_t locktime)
     return simnet_contract_htlc_init(c, secret, rpk, fpk, locktime);
 }
 
+/* True iff every wallet handle the scenario depends on was created. */
+static bool sc_wallets_all_created(const struct simnet_wallet *funder,
+                                   const struct simnet_wallet *participant,
+                                   const struct simnet_wallet *redeemer,
+                                   const struct simnet_wallet *refunder)
+{
+    return funder && participant && redeemer && refunder;
+}
+
+/* True iff the coin at `txid`:0 is still live and worth exactly `value`
+ * satoshis. */
+static bool sc_coin_value_equals(struct simnet *s, const struct uint256 *txid,
+                                 int64_t value)
+{
+    int64_t got = 0;
+    return simnet_coin_value(s, txid, 0, &got) && got == value;
+}
+
+/* True iff the coin at `txid`:0 is live, pays exactly `want`, and carries
+ * exactly `value` satoshis. */
+static bool sc_coin_script_and_value_are(struct simnet *s,
+                                         const struct uint256 *txid,
+                                         const struct script *want,
+                                         int64_t value)
+{
+    return sc_coin_script_is(s, txid, 0, want) &&
+           sc_coin_value_equals(s, txid, value);
+}
+
 static int run_contract_scenario(uint64_t seed)
 {
     int failures = 0;
@@ -101,8 +130,10 @@ static int run_contract_scenario(uint64_t seed)
     struct simnet_wallet *participant = simnet_wallet_create(&sim);
     struct simnet_wallet *redeemer = simnet_wallet_create(&sim);
     struct simnet_wallet *refunder = simnet_wallet_create(&sim);
-    SC_CHECK("wallets create", funder && participant && redeemer && refunder);
-    if (!funder || !participant || !redeemer || !refunder) {
+    bool wallets_ok = sc_wallets_all_created(funder, participant,
+                                             redeemer, refunder);
+    SC_CHECK("wallets create", wallets_ok);
+    if (!wallets_ok) {
         simnet_wallet_free(funder);
         simnet_wallet_free(participant);
         simnet_wallet_free(redeemer);
@@ -127,11 +158,8 @@ static int run_contract_scenario(uint64_t seed)
              simnet_contract_fund(&sim, funder, &happy, 200000, &happy_fund));
     SC_CHECK("funded coin present at fund_txid:0",
              sc_coin_script_is(&sim, &happy_fund.txid, 0, &happy.p2sh));
-    int64_t happy_fund_value = 0;
     SC_CHECK("initiator HTLC carries the exact contract value",
-             simnet_coin_value(&sim, &happy_fund.txid, 0,
-                               &happy_fund_value) &&
-             happy_fund_value == 200000);
+             sc_coin_value_equals(&sim, &happy_fund.txid, 200000));
 
     /* The counterparty role creates the same consensus P2SH shape from a
      * different wallet and independently funds it. Keeping this as a
@@ -150,13 +178,9 @@ static int run_contract_scenario(uint64_t seed)
     SC_CHECK("participant independently funds counter HTLC",
              simnet_contract_fund(&sim, participant, &participant_htlc,
                                   180000, &participant_fund));
-    int64_t participant_value = 0;
     SC_CHECK("participant HTLC is mined with exact script and value",
-             sc_coin_script_is(&sim, &participant_fund.txid, 0,
-                               &participant_htlc.p2sh) &&
-             simnet_coin_value(&sim, &participant_fund.txid, 0,
-                               &participant_value) &&
-             participant_value == 180000);
+             sc_coin_script_and_value_are(&sim, &participant_fund.txid,
+                                          &participant_htlc.p2sh, 180000));
 
     struct transaction redeem_tx;
     struct simnet_tx_result redeem_res;
