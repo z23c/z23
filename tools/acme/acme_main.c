@@ -135,7 +135,7 @@ static int report_check(const char *cert_path)
     return ACME_EXIT_FAILED;
 }
 
-static int run_selftest(void)
+static int report_acme_selftest(void)
 {
     const int failures = acme_selftest_transport() + acme_selftest_protocol();
     if (failures == 0) {
@@ -155,7 +155,7 @@ static int builtin_command_status(const char *command)
         return ACME_EXIT_OK;
     }
     if (strcmp(command, "selftest") == 0)
-        return run_selftest();
+        return report_acme_selftest();
     return -1;
 }
 
