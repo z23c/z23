@@ -97,6 +97,20 @@ static void npr_progress_item(struct zcl_present_model_v1 *model,
         (void)snprintf(item->value, sizeof(item->value), "%s", state);
 }
 
+static bool npr_facts_valid(const struct json_value *facts, const char *schema)
+{
+    return facts && facts->type == JSON_OBJ && schema &&
+        strcmp(schema, "zcl.build_fabric_action_state.v1") == 0 &&
+        npr_bool(facts, "found") && npr_bool(facts, "event_root_rederived");
+}
+
+static bool npr_roots_valid(const char *action, const char *event,
+                            const char *candidate, const char *receipt)
+{
+    return npr_root(action, false) && npr_root(event, false) &&
+        npr_root(candidate, false) && npr_root(receipt, true);
+}
+
 bool zcl_native_presentation_reproduction_model_from_facts(
     const struct json_value *facts, struct zcl_present_model_v1 *model,
     char *why, size_t why_cap)
@@ -107,11 +121,8 @@ bool zcl_native_presentation_reproduction_model_from_facts(
     const char *event = npr_str(facts, "event_root");
     const char *candidate = npr_str(facts, "candidate_root");
     const char *receipt = npr_str(facts, "receipt_root");
-    if (!facts || facts->type != JSON_OBJ ||
-        !schema || strcmp(schema, "zcl.build_fabric_action_state.v1") != 0 ||
-        !npr_bool(facts, "found") || !npr_bool(facts, "event_root_rederived") ||
-        !npr_root(action, false) || !npr_root(event, false) ||
-        !npr_root(candidate, false) || !npr_root(receipt, true) || !state) {
+    if (!npr_facts_valid(facts, schema) ||
+        !npr_roots_valid(action, event, candidate, receipt) || !state) {
         (void)snprintf(why, why_cap,
                        "canonical build-proof action facts are unavailable");
         return false;
