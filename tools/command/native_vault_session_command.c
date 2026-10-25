@@ -170,6 +170,232 @@ static void vs_fail_service(struct zcl_command_reply *reply, const char *why,
 
 /* ── vault.session.create ─────────────────────────────────────────────────── */
 
+/* Normalize the identity half of a mint request — wallet_scope (never
+ * inferred from CLI defaults) and the account principal — into `mreq`,
+ * failing the reply on the first bad field. Both strings point into the
+ * request's own JSON and are echoed by the plan and commit replies, so they
+ * are handed back to the caller. */
+static bool vs_create_normalize_identity(
+    const struct zcl_command_request *request,
+    struct agent_session_mint_request *mreq, struct zcl_command_reply *reply,
+    const char **wallet_scope, const char **account)
+{
+    *wallet_scope = vs_str(request, "wallet_scope");
+    if (!*wallet_scope || (strcmp(*wallet_scope, "dev") != 0 &&
+                           strcmp(*wallet_scope, "prod") != 0)) {
+        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "BAD_WALLET_SCOPE", "normalize", false,
+                "wallet_scope is required and must be exactly dev or prod; "
+                "the wallet is never inferred from CLI defaults",
+                "wallet_scope");
+        return false;
+    }
+    (void)snprintf(mreq->wallet_scope, sizeof(mreq->wallet_scope), "%s",
+                   *wallet_scope);
+
+    *account = vs_str(request, "account");
+    if (!*account) {
+        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "MISSING_ACCOUNT", "normalize", false,
+                "account is required; name the principal this grant is for",
+                request->spec->path);
+        (void)zcl_command_reply_add_next(reply, "app.account.list", "{}",
+                                         "list the principals on this node");
+        return false;
+    }
+    if (strlen(*account) > AGENT_SESSION_ACCOUNT_MAX) {
+        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "BAD_ACCOUNT", "normalize", false,
+                "account exceeds the principal address bound", *account);
+        return false;
+    }
+    (void)snprintf(mreq->account, sizeof(mreq->account), "%s", *account);
+    return true;
+}
+
+/* Normalize the spend amounts — max_per_tx, max_per_window and the optional
+ * reserve_floor (defaulted when absent) — into `mreq`, failing the reply on
+ * the first field that is not a ZCL decimal within the model cap. */
+static bool vs_create_normalize_amounts(
+    const struct zcl_command_request *request,
+    struct agent_session_mint_request *mreq, struct zcl_command_reply *reply)
+{
+    if (!vs_amount_zat(json_get(request->input, "max_per_tx"),
+                       &mreq->max_per_tx_zat)) {
+        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "BAD_PER_TX", "normalize", false,
+                "max_per_tx must be a ZCL decimal within the model cap",
+                "e.g. \"max_per_tx\":\"1.5\"");
+        return false;
+    }
+    if (!vs_amount_zat(json_get(request->input, "max_per_window"),
+                       &mreq->max_per_window_zat)) {
+        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "BAD_PER_WINDOW", "normalize", false,
+                "max_per_window must be a ZCL decimal within the model cap",
+                "e.g. \"max_per_window\":\"10\"");
+        return false;
+    }
+    mreq->reserve_floor_zat = AGENT_SESSION_DEV_RESERVE_DEFAULT_ZAT;
+    const struct json_value *reserve_floor =
+        json_get(request->input, "reserve_floor");
+    if (reserve_floor &&
+        !vs_amount_zat(reserve_floor, &mreq->reserve_floor_zat)) {
+        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "BAD_RESERVE_FLOOR", "normalize", false,
+                "reserve_floor must be a ZCL decimal within the model cap",
+                "e.g. \"reserve_floor\":\"0.08000000\"");
+        return false;
+    }
+    return true;
+}
+
+/* Normalize window_seconds into `mreq`, bounds-checked in both directions. */
+static bool vs_create_normalize_window(
+    const struct zcl_command_request *request,
+    struct agent_session_mint_request *mreq, struct zcl_command_reply *reply)
+{
+    /* Upper bound as well as lower. An unbounded window_seconds does not just
+     * make a silly grant: it overflows the window-roll arithmetic, every check
+     * then reads as "the window already elapsed", and the per-window cap
+     * silently stops existing — a typo that turns a bounded grant into an
+     * unbounded one. Refused here, in the model's validate, and by the table
+     * CHECK, so no path can persist one. */
+    if (!vs_seconds(json_get(request->input, "window_seconds"), 1,
+                    &mreq->window_seconds) ||
+        mreq->window_seconds > AGENT_SESSION_WINDOW_SECONDS_MAX) {
+        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "BAD_WINDOW", "normalize", false,
+                "window_seconds must be a whole number of seconds in "
+                "[1, 31536000] (one year)",
+                "e.g. \"window_seconds\":\"86400\"");
+        return false;
+    }
+    return true;
+}
+
+/* Normalize the optional allowlist and expiry into `mreq`, reporting each
+ * one's presence so the plan echo repeats exactly the fields the operator
+ * sent (absent means defaulted, not zero). */
+static bool vs_create_normalize_allowlist_and_expiry(
+    const struct zcl_command_request *request,
+    struct agent_session_mint_request *mreq, struct zcl_command_reply *reply,
+    const char **allowlist, bool *has_expires)
+{
+    *allowlist = vs_str(request, "allowlist");
+    if (*allowlist) {
+        if (strlen(*allowlist) > AGENT_SESSION_ALLOWLIST_MAX) {
+            vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                    "BAD_ALLOWLIST", "normalize", false,
+                    "allowlist exceeds the CSV bound", *allowlist);
+            return false;
+        }
+        (void)snprintf(mreq->recipient_allowlist,
+                       sizeof(mreq->recipient_allowlist), "%s", *allowlist);
+    }
+    const struct json_value *expires = json_get(request->input, "expires_in");
+    *has_expires = expires != NULL;
+    if (expires && !vs_seconds(expires, 0, &mreq->expires_in_seconds)) {
+        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
+                "BAD_EXPIRY", "normalize", false,
+                "expires_in must be a non-negative whole number of seconds "
+                "(0 or absent = never)", "e.g. \"expires_in\":\"604800\"");
+        return false;
+    }
+    return true;
+}
+
+/* Render the create plan reply: the normalized grant echoed as data, plus
+ * the commit_input that re-runs this leaf with confirm:true. */
+static void vs_create_reply_plan(struct zcl_command_reply *reply,
+                                 const struct agent_session_mint_request *mreq,
+                                 const char *account,
+                                 const char *wallet_scope,
+                                 const char *allowlist, bool has_expires)
+{
+    /* The commit re-runs this leaf with the SAME normalized values, so
+     * the operator confirms exactly what was previewed. */
+    struct json_value ci;
+    json_init(&ci);
+    json_set_object(&ci);
+    (void)json_push_kv_str(&ci, "account", account);
+    (void)json_push_kv_str(&ci, "wallet_scope", wallet_scope);
+    char amt[32];
+    (void)snprintf(amt, sizeof(amt), "%.8f",
+                   (double)mreq->max_per_tx_zat / 1.0e8);
+    (void)json_push_kv_str(&ci, "max_per_tx", amt);
+    (void)snprintf(amt, sizeof(amt), "%.8f",
+                   (double)mreq->max_per_window_zat / 1.0e8);
+    (void)json_push_kv_str(&ci, "max_per_window", amt);
+    (void)snprintf(amt, sizeof(amt), "%.8f",
+                   (double)mreq->reserve_floor_zat / 1.0e8);
+    (void)json_push_kv_str(&ci, "reserve_floor", amt);
+    (void)snprintf(amt, sizeof(amt), "%lld",
+                   (long long)mreq->window_seconds);
+    (void)json_push_kv_str(&ci, "window_seconds", amt);
+    if (allowlist)
+        (void)json_push_kv_str(&ci, "allowlist", allowlist);
+    if (has_expires) {
+        (void)snprintf(amt, sizeof(amt), "%lld",
+                       (long long)mreq->expires_in_seconds);
+        (void)json_push_kv_str(&ci, "expires_in", amt);
+    }
+
+    (void)json_push_kv_str(&reply->data, "account", account);
+    (void)json_push_kv_str(&reply->data, "wallet_scope", wallet_scope);
+    (void)json_push_kv_int(&reply->data, "max_per_tx_zat",
+                           mreq->max_per_tx_zat);
+    (void)json_push_kv_int(&reply->data, "max_per_window_zat",
+                           mreq->max_per_window_zat);
+    (void)json_push_kv_int(&reply->data, "reserve_floor_zat",
+                           mreq->reserve_floor_zat);
+    (void)json_push_kv_int(&reply->data, "window_seconds",
+                           mreq->window_seconds);
+    (void)json_push_kv_str(&reply->data, "recipient_allowlist",
+                           mreq->recipient_allowlist);
+    (void)json_push_kv_int(&reply->data, "expires_in_seconds",
+                           mreq->expires_in_seconds);
+    vs_push_plan(reply, &ci,
+                 "re-run this command with \"confirm\":true to mint the "
+                 "session; the full token is returned exactly once, in "
+                 "the commit reply");
+    json_free(&ci);
+}
+
+/* Render the create commit reply — the one place the full session id is
+ * ever returned (token hygiene: everything after this carries only the
+ * redacted form). */
+static void vs_create_reply_committed(
+    struct zcl_command_reply *reply,
+    const struct agent_session_mint_request *mreq, const char *account,
+    const char *wallet_scope, const char *sid)
+{
+    (void)json_push_kv_str(&reply->data, "stage", "committed");
+    (void)json_push_kv_bool(&reply->data, "committed", true);
+    (void)json_push_kv_str(&reply->data, "session_id", sid);
+    (void)json_push_kv_str(&reply->data, "account", account);
+    (void)json_push_kv_str(&reply->data, "wallet_scope", wallet_scope);
+    (void)json_push_kv_int(&reply->data, "max_per_tx_zat",
+                           mreq->max_per_tx_zat);
+    (void)json_push_kv_int(&reply->data, "max_per_window_zat",
+                           mreq->max_per_window_zat);
+    (void)json_push_kv_int(&reply->data, "reserve_floor_zat",
+                           mreq->reserve_floor_zat);
+    (void)json_push_kv_int(&reply->data, "window_seconds",
+                           mreq->window_seconds);
+    (void)json_push_kv_str(&reply->data, "recipient_allowlist",
+                           mreq->recipient_allowlist);
+    (void)json_push_kv_str(
+        &reply->data, "token_note",
+        "this is the only time the full session id is returned — store it "
+        "now; vault.session.list only ever shows it redacted");
+    (void)json_push_kv_str(
+        &reply->data, "presentation",
+        "present per-invocation as ZCL_AGENT_SESSION=<session_id> on the "
+        "agent's CLI environment");
+    reply->error.mutated = true;
+}
+
 void zcl_native_handle_vault_session_create(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -179,148 +405,24 @@ void zcl_native_handle_vault_session_create(
     struct agent_session_mint_request mreq;
     memset(&mreq, 0, sizeof(mreq));
 
-    const char *wallet_scope = vs_str(request, "wallet_scope");
-    if (!wallet_scope || (strcmp(wallet_scope, "dev") != 0 &&
-                          strcmp(wallet_scope, "prod") != 0)) {
-        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "BAD_WALLET_SCOPE", "normalize", false,
-                "wallet_scope is required and must be exactly dev or prod; "
-                "the wallet is never inferred from CLI defaults",
-                "wallet_scope");
+    const char *wallet_scope = NULL;
+    const char *account = NULL;
+    if (!vs_create_normalize_identity(request, &mreq, reply, &wallet_scope,
+                                      &account))
         return;
-    }
-    (void)snprintf(mreq.wallet_scope, sizeof(mreq.wallet_scope), "%s",
-                   wallet_scope);
-
-    const char *account = vs_str(request, "account");
-    if (!account) {
-        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "MISSING_ACCOUNT", "normalize", false,
-                "account is required; name the principal this grant is for",
-                request->spec->path);
-        (void)zcl_command_reply_add_next(reply, "app.account.list", "{}",
-                                         "list the principals on this node");
+    if (!vs_create_normalize_amounts(request, &mreq, reply))
         return;
-    }
-    if (strlen(account) > AGENT_SESSION_ACCOUNT_MAX) {
-        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "BAD_ACCOUNT", "normalize", false,
-                "account exceeds the principal address bound", account);
+    if (!vs_create_normalize_window(request, &mreq, reply))
         return;
-    }
-    (void)snprintf(mreq.account, sizeof(mreq.account), "%s", account);
-
-    if (!vs_amount_zat(json_get(request->input, "max_per_tx"),
-                       &mreq.max_per_tx_zat)) {
-        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "BAD_PER_TX", "normalize", false,
-                "max_per_tx must be a ZCL decimal within the model cap",
-                "e.g. \"max_per_tx\":\"1.5\"");
+    const char *allowlist = NULL;
+    bool has_expires = false;
+    if (!vs_create_normalize_allowlist_and_expiry(request, &mreq, reply,
+                                                  &allowlist, &has_expires))
         return;
-    }
-    if (!vs_amount_zat(json_get(request->input, "max_per_window"),
-                       &mreq.max_per_window_zat)) {
-        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "BAD_PER_WINDOW", "normalize", false,
-                "max_per_window must be a ZCL decimal within the model cap",
-                "e.g. \"max_per_window\":\"10\"");
-        return;
-    }
-    mreq.reserve_floor_zat = AGENT_SESSION_DEV_RESERVE_DEFAULT_ZAT;
-    const struct json_value *reserve_floor =
-        json_get(request->input, "reserve_floor");
-    if (reserve_floor &&
-        !vs_amount_zat(reserve_floor, &mreq.reserve_floor_zat)) {
-        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "BAD_RESERVE_FLOOR", "normalize", false,
-                "reserve_floor must be a ZCL decimal within the model cap",
-                "e.g. \"reserve_floor\":\"0.08000000\"");
-        return;
-    }
-    /* Upper bound as well as lower. An unbounded window_seconds does not just
-     * make a silly grant: it overflows the window-roll arithmetic, every check
-     * then reads as "the window already elapsed", and the per-window cap
-     * silently stops existing — a typo that turns a bounded grant into an
-     * unbounded one. Refused here, in the model's validate, and by the table
-     * CHECK, so no path can persist one. */
-    if (!vs_seconds(json_get(request->input, "window_seconds"), 1,
-                    &mreq.window_seconds) ||
-        mreq.window_seconds > AGENT_SESSION_WINDOW_SECONDS_MAX) {
-        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "BAD_WINDOW", "normalize", false,
-                "window_seconds must be a whole number of seconds in "
-                "[1, 31536000] (one year)",
-                "e.g. \"window_seconds\":\"86400\"");
-        return;
-    }
-    const char *allowlist = vs_str(request, "allowlist");
-    if (allowlist) {
-        if (strlen(allowlist) > AGENT_SESSION_ALLOWLIST_MAX) {
-            vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                    "BAD_ALLOWLIST", "normalize", false,
-                    "allowlist exceeds the CSV bound", allowlist);
-            return;
-        }
-        (void)snprintf(mreq.recipient_allowlist,
-                       sizeof(mreq.recipient_allowlist), "%s", allowlist);
-    }
-    const struct json_value *expires = json_get(request->input, "expires_in");
-    if (expires && !vs_seconds(expires, 0, &mreq.expires_in_seconds)) {
-        vs_fail(reply, ZCL_COMMAND_STATUS_FAILED, ZCL_COMMAND_EXIT_INVALID,
-                "BAD_EXPIRY", "normalize", false,
-                "expires_in must be a non-negative whole number of seconds "
-                "(0 or absent = never)", "e.g. \"expires_in\":\"604800\"");
-        return;
-    }
 
     if (!json_get_bool_or(request->input, "confirm", false)) {
-        /* The commit re-runs this leaf with the SAME normalized values, so
-         * the operator confirms exactly what was previewed. */
-        struct json_value ci;
-        json_init(&ci);
-        json_set_object(&ci);
-        (void)json_push_kv_str(&ci, "account", account);
-        (void)json_push_kv_str(&ci, "wallet_scope", wallet_scope);
-        char amt[32];
-        (void)snprintf(amt, sizeof(amt), "%.8f",
-                       (double)mreq.max_per_tx_zat / 1.0e8);
-        (void)json_push_kv_str(&ci, "max_per_tx", amt);
-        (void)snprintf(amt, sizeof(amt), "%.8f",
-                       (double)mreq.max_per_window_zat / 1.0e8);
-        (void)json_push_kv_str(&ci, "max_per_window", amt);
-        (void)snprintf(amt, sizeof(amt), "%.8f",
-                       (double)mreq.reserve_floor_zat / 1.0e8);
-        (void)json_push_kv_str(&ci, "reserve_floor", amt);
-        (void)snprintf(amt, sizeof(amt), "%lld",
-                       (long long)mreq.window_seconds);
-        (void)json_push_kv_str(&ci, "window_seconds", amt);
-        if (allowlist)
-            (void)json_push_kv_str(&ci, "allowlist", allowlist);
-        if (expires) {
-            (void)snprintf(amt, sizeof(amt), "%lld",
-                           (long long)mreq.expires_in_seconds);
-            (void)json_push_kv_str(&ci, "expires_in", amt);
-        }
-
-        (void)json_push_kv_str(&reply->data, "account", account);
-        (void)json_push_kv_str(&reply->data, "wallet_scope", wallet_scope);
-        (void)json_push_kv_int(&reply->data, "max_per_tx_zat",
-                               mreq.max_per_tx_zat);
-        (void)json_push_kv_int(&reply->data, "max_per_window_zat",
-                               mreq.max_per_window_zat);
-        (void)json_push_kv_int(&reply->data, "reserve_floor_zat",
-                               mreq.reserve_floor_zat);
-        (void)json_push_kv_int(&reply->data, "window_seconds",
-                               mreq.window_seconds);
-        (void)json_push_kv_str(&reply->data, "recipient_allowlist",
-                               mreq.recipient_allowlist);
-        (void)json_push_kv_int(&reply->data, "expires_in_seconds",
-                               mreq.expires_in_seconds);
-        vs_push_plan(reply, &ci,
-                     "re-run this command with \"confirm\":true to mint the "
-                     "session; the full token is returned exactly once, in "
-                     "the commit reply");
-        json_free(&ci);
+        vs_create_reply_plan(reply, &mreq, account, wallet_scope, allowlist,
+                             has_expires);
         return;
     }
 
@@ -339,29 +441,7 @@ void zcl_native_handle_vault_session_create(
         return;
     }
 
-    (void)json_push_kv_str(&reply->data, "stage", "committed");
-    (void)json_push_kv_bool(&reply->data, "committed", true);
-    (void)json_push_kv_str(&reply->data, "session_id", sid);
-    (void)json_push_kv_str(&reply->data, "account", account);
-    (void)json_push_kv_str(&reply->data, "wallet_scope", wallet_scope);
-    (void)json_push_kv_int(&reply->data, "max_per_tx_zat", mreq.max_per_tx_zat);
-    (void)json_push_kv_int(&reply->data, "max_per_window_zat",
-                           mreq.max_per_window_zat);
-    (void)json_push_kv_int(&reply->data, "reserve_floor_zat",
-                           mreq.reserve_floor_zat);
-    (void)json_push_kv_int(&reply->data, "window_seconds",
-                           mreq.window_seconds);
-    (void)json_push_kv_str(&reply->data, "recipient_allowlist",
-                           mreq.recipient_allowlist);
-    (void)json_push_kv_str(
-        &reply->data, "token_note",
-        "this is the only time the full session id is returned — store it "
-        "now; vault.session.list only ever shows it redacted");
-    (void)json_push_kv_str(
-        &reply->data, "presentation",
-        "present per-invocation as ZCL_AGENT_SESSION=<session_id> on the "
-        "agent's CLI environment");
-    reply->error.mutated = true;
+    vs_create_reply_committed(reply, &mreq, account, wallet_scope, sid);
 }
 
 /* ── vault.session.list ───────────────────────────────────────────────────── */

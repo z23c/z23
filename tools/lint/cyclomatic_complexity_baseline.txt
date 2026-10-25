@@ -2740,7 +2740,6 @@ tools/command/native_vault_command.c:vault_render_items:35
 tools/command/native_vault_command.c:vault_rpc_settle:26
 tools/command/native_vault_command.c:zcl_native_handle_vault_list:27
 tools/command/native_vault_command.c:zcl_native_handle_vault_routes:17
-tools/command/native_vault_session_command.c:zcl_native_handle_vault_session_create:22
 tools/command/native_yardsale_command.c:ys_forward:17
 tools/command/native_yardsale_command.c:zcl_native_handle_yardsale_guide:31
 tools/command/native_zcode_attest_transport_command.c:zcl_native_handle_zcode_package_attest_admit:20
