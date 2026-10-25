@@ -1528,7 +1528,6 @@ platform/modules/platform/src/watcher_store.c:platform_watcher_store_publish:23
 platform/modules/platform/tests/database_lifetime_windows_acceptance.c:main:17
 platform/modules/platform/tests/directory_compat_windows_acceptance.c:main:50
 platform/modules/platform/tests/directory_transaction_windows_acceptance.c:main:146
-platform/modules/platform/tests/file_metadata_windows_acceptance.c:main:35
 platform/modules/platform/tests/file_service_transport_windows_acceptance.c:legacy_send_timeout_is_bounded:17
 platform/modules/platform/tests/file_service_transport_windows_acceptance.c:main:22
 platform/modules/platform/tests/path_replace_windows_acceptance.c:main:34
@@ -2327,7 +2326,7 @@ tools/command/native_dev_retrieval_command.c:rb_push_rank:27
 tools/command/native_dev_retrieval_command.c:zcl_native_dev_retrieval_snapshot_compute:21
 tools/command/native_dev_retrieval_command.c:zcl_native_dev_retrieval_stream_jsonl:47
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_build:29
-tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_check:24
+tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_check:19
 tools/command/native_dev_train_command.c:zcl_native_handle_dev_train_status:17
 tools/command/native_devagent.c:dva_code_mask:17
 tools/command/native_devagent.c:zcl_devagent_mutate_line:29
@@ -2552,7 +2551,7 @@ tools/gen_utxo_root_ladder.c:parse_cli:22
 tools/install/z23_bootstrap.c:bootstrap_main#2:39
 tools/install/z23_bootstrap.c:dns_attestation:16
 tools/jsonq.c:parse_path:21
-tools/jsonq.c:walk:25
+tools/jsonq.c:walk:24
 tools/ldb_verify_c23.c:main:54
 tools/lint/lintc/gate_git_scan_a.c:check_equihash_params_run:26
 tools/lint/lintc/gate_git_scan_a.c:check_framework_filename_suffix_run:18
