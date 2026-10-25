@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Crenton - Apache License 2.0
  *
  * The `agentsession` RPC: the node's own surface onto the agent_sessions
  * store. See controllers/agent_session_controller.h for WHY this is an RPC
@@ -343,6 +343,62 @@ static bool ags_custody_current(struct json_value *result)
     return true;
 }
 
+/* The liquidity params, read and range-checked in one place so the caller's
+ * BAD_ARGS refusal stays a single test. */
+static bool ags_liquidity_args_ok(const struct json_value *in,
+                                  const char **scope,
+                                  int64_t *recipient_value_zat,
+                                  int64_t *maximum_fee_zat,
+                                  int64_t *concurrency)
+{
+    *scope = ags_str(in, "wallet_scope");
+    *recipient_value_zat = ags_int(in, "recipient_value_zat", -1);
+    *maximum_fee_zat = ags_int(in, "maximum_fee_zat", -1);
+    *concurrency = ags_int(in, "concurrency", -1);
+    return *scope && *recipient_value_zat > 0 && *maximum_fee_zat >= 0 &&
+        *concurrency >= 1 && *concurrency <= 50;
+}
+
+/* The aggregate money-state header every liquidity answer opens with. The
+ * wallet_instance_id / network_genesis / snapshot_root fields are read back
+ * out of the rendered money JSON, so there is no second query for them. */
+static void ags_liquidity_push_money_summary(
+    struct json_value *result, const char *scope,
+    const struct wallet_money_snapshot *money,
+    const struct json_value *money_json)
+{
+    (void)json_push_kv_bool(result, "ok", true);
+    (void)json_push_kv_str(result, "schema", "zcl.wallet_liquidity.v1");
+    const char *identity = json_get_str(json_get(money_json,
+                                                 "wallet_instance_id"));
+    const char *genesis = json_get_str(json_get(money_json,
+                                                "network_genesis"));
+    const char *snapshot_root = json_get_str(json_get(money_json,
+                                                      "snapshot_root"));
+    (void)json_push_kv_str(result, "wallet_scope", scope);
+    (void)json_push_kv_str(result, "wallet_instance_id",
+                           identity ? identity : "");
+    (void)json_push_kv_str(result, "network_genesis",
+                           genesis ? genesis : "");
+    (void)json_push_kv_str(result, "money_status", money->status);
+    (void)json_push_kv_str(result, "money_reason", money->reason);
+    (void)json_push_kv_str(result, "money_snapshot_root",
+                           snapshot_root ? snapshot_root : "");
+    (void)json_push_kv_int(result, "observed_at", money->observed_at);
+}
+
+/* The "run this next" hint, most specific first: a ready wallet, then a
+ * recommended fanout, then the transparent-liquidity guide, else the money
+ * status page. */
+static const char *ags_liquidity_next_command(
+    const struct wallet_liquidity_plan *plan)
+{
+    return plan->ready_now ? "app.transaction-types.guide" :
+        plan->fanout_recommended ? "vault.intent.fanout-plan" :
+        strcmp(plan->status, "NEEDS_TRANSPARENT_LIQUIDITY") == 0
+            ? "app.transaction-types.guide" : "metaverse.agent.money";
+}
+
 /* Read-only execution-readiness planner. It sees exactly the confirmed,
  * reservation-filtered, non-ZSLP coin inventory used by wallet builders, but
  * returns only aggregate counts and amounts. No address or outpoint crosses
@@ -350,12 +406,12 @@ static bool ags_custody_current(struct json_value *result)
 static bool ags_liquidity(const struct json_value *in,
                           struct json_value *result)
 {
-    const char *scope = ags_str(in, "wallet_scope");
-    int64_t recipient_value_zat = ags_int(in, "recipient_value_zat", -1);
-    int64_t maximum_fee_zat = ags_int(in, "maximum_fee_zat", -1);
-    int64_t concurrency = ags_int(in, "concurrency", -1);
-    if (!scope || recipient_value_zat <= 0 || maximum_fee_zat < 0 ||
-        concurrency < 1 || concurrency > 50)
+    const char *scope = NULL;
+    int64_t recipient_value_zat = -1;
+    int64_t maximum_fee_zat = -1;
+    int64_t concurrency = -1;
+    if (!ags_liquidity_args_ok(in, &scope, &recipient_value_zat,
+                               &maximum_fee_zat, &concurrency))
         return ags_refuse(result, "BAD_ARGS");
 
     struct wallet_money_snapshot money;
@@ -371,24 +427,8 @@ static bool ags_liquidity(const struct json_value *in,
     }
 
     json_set_object(result);
-    (void)json_push_kv_bool(result, "ok", true);
-    (void)json_push_kv_str(result, "schema", "zcl.wallet_liquidity.v1");
-    const char *identity = json_get_str(json_get(&money_json,
-                                                 "wallet_instance_id"));
-    const char *genesis = json_get_str(json_get(&money_json,
-                                                "network_genesis"));
-    const char *snapshot_root = json_get_str(json_get(&money_json,
-                                                      "snapshot_root"));
-    (void)json_push_kv_str(result, "wallet_scope", scope);
-    (void)json_push_kv_str(result, "wallet_instance_id",
-                           identity ? identity : "");
-    (void)json_push_kv_str(result, "network_genesis",
-                           genesis ? genesis : "");
-    (void)json_push_kv_str(result, "money_status", money.status);
-    (void)json_push_kv_str(result, "money_reason", money.reason);
-    (void)json_push_kv_str(result, "money_snapshot_root",
-                           snapshot_root ? snapshot_root : "");
-    (void)json_push_kv_int(result, "observed_at", money.observed_at);
+    ags_liquidity_push_money_summary(result, scope, &money, &money_json);
+
     if (!money.complete || strcmp(money.status, "CURRENT") != 0) {
         (void)json_push_kv_str(result, "status", money.status);
         (void)json_push_kv_bool(result, "ready_now", false);
@@ -477,15 +517,52 @@ static bool ags_liquidity(const struct json_value *in,
     json_free(&fanout);
     (void)json_push_kv_bool(result, "advisory", true);
     (void)json_push_kv_str(result, "next_command",
-        plan.ready_now ? "app.transaction-types.guide" :
-        plan.fanout_recommended ? "vault.intent.fanout-plan" :
-        strcmp(plan.status, "NEEDS_TRANSPARENT_LIQUIDITY") == 0
-            ? "app.transaction-types.guide" : "metaverse.agent.money");
+                           ags_liquidity_next_command(&plan));
     json_free(&money_json);
     return true;
 }
 
 /* ── dispatch ──────────────────────────────────────────────────────────── */
+
+/* The money-state actions, plus the unknown-action failure that closes the
+ * dispatch chain. */
+static bool ags_dispatch_money_actions(const char *action,
+                                       const struct json_value *in,
+                                       struct json_value *result)
+{
+    if (strcmp(action, "custody") == 0)
+        return ags_custody(in, result);
+    if (strcmp(action, "custody_current") == 0)
+        return ags_custody_current(result);
+    if (strcmp(action, "liquidity") == 0)
+        return ags_liquidity(in, result);
+    return ags_fail(result, "agentsession: unknown action");
+}
+
+/* The session-grant actions, in the order the RPC has always dispatched
+ * them; anything else falls through to the money-state actions. */
+static bool ags_dispatch_session_actions(const char *action,
+                                         const struct json_value *in,
+                                         struct json_value *result)
+{
+    if (strcmp(action, "mint") == 0)
+        return ags_mint(in, result);
+    if (strcmp(action, "list") == 0)
+        return ags_list(in, result);
+    if (strcmp(action, "revoke") == 0)
+        return ags_revoke(in, result);
+    if (strcmp(action, "authorize") == 0)
+        return ags_authorize(in, result);
+    if (strcmp(action, "release") == 0)
+        return ags_release(in, result);
+    if (strcmp(action, "intent_bind") == 0)
+        return ags_intent_bind(in, result);
+    if (strcmp(action, "intent_authorize") == 0)
+        return ags_intent_authorize(in, result);
+    if (strcmp(action, "intent_release") == 0)
+        return ags_intent_release(in, result);
+    return ags_dispatch_money_actions(action, in, result);
+}
 
 static bool rpc_agentsession(const struct json_value *params, bool help,
                              struct json_value *result)
@@ -527,29 +604,7 @@ static bool rpc_agentsession(const struct json_value *params, bool help,
     if (in && in->type != JSON_OBJ)
         return ags_fail(result, "agentsession: second param must be an object");
 
-    if (strcmp(action, "mint") == 0)
-        return ags_mint(in, result);
-    if (strcmp(action, "list") == 0)
-        return ags_list(in, result);
-    if (strcmp(action, "revoke") == 0)
-        return ags_revoke(in, result);
-    if (strcmp(action, "authorize") == 0)
-        return ags_authorize(in, result);
-    if (strcmp(action, "release") == 0)
-        return ags_release(in, result);
-    if (strcmp(action, "intent_bind") == 0)
-        return ags_intent_bind(in, result);
-    if (strcmp(action, "intent_authorize") == 0)
-        return ags_intent_authorize(in, result);
-    if (strcmp(action, "intent_release") == 0)
-        return ags_intent_release(in, result);
-    if (strcmp(action, "custody") == 0)
-        return ags_custody(in, result);
-    if (strcmp(action, "custody_current") == 0)
-        return ags_custody_current(result);
-    if (strcmp(action, "liquidity") == 0)
-        return ags_liquidity(in, result);
-    return ags_fail(result, "agentsession: unknown action");
+    return ags_dispatch_session_actions(action, in, result);
 }
 
 void register_agent_session_rpc_commands(struct rpc_table *t)
