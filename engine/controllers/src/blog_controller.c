@@ -96,10 +96,43 @@ static size_t http_response(char *out, size_t out_len,
     return (size_t)hdr_len + body_len;
 }
 
+static bool blog_serve_args_ok(const char *path, char *out, size_t out_len)
+{
+    if (!path || !out || out_len < 256) return false;
+    return true;
+}
+
+static const char *blog_serve_normalize_rel(const char *path)
+{
+    /* Default to index.html */
+    const char *rel = path;
+    if (rel[0] == '/') rel++;
+    if (rel[0] == '\0') rel = "index.html";
+    return rel;
+}
+
+static enum platform_safe_root_read_result blog_serve_read_html_fallback(
+    const char *blog_root, const char *rel, size_t max_body,
+    enum platform_safe_root_read_result read_result,
+    uint8_t **body_data, size_t *nread,
+    char *rel_html, size_t rel_html_cap, const char **served_rel)
+{
+    if (read_result == PLATFORM_SAFE_ROOT_READ_NOT_FOUND) {
+        int rel_n = snprintf(rel_html, rel_html_cap, "%s.html", rel);
+        if (rel_n >= 0 && (size_t)rel_n < rel_html_cap) {
+            read_result = platform_safe_root_read(blog_root, rel_html, max_body,
+                                                  body_data, nread);
+            if (read_result == PLATFORM_SAFE_ROOT_READ_OK)
+                *served_rel = rel_html;
+        }
+    }
+    return read_result;
+}
+
 size_t blog_serve(const char *datadir, const char *path,
                   char *out, size_t out_len)
 {
-    if (!path || !out || out_len < 256) return 0;
+    if (!blog_serve_args_ok(path, out, out_len)) return 0;
     if (!datadir) {
         const char *body =
             "<html><head><style>body{background:#0a0a0a;color:#e0e0e0;"
@@ -111,10 +144,7 @@ size_t blog_serve(const char *datadir, const char *path,
                              body, strlen(body));
     }
 
-    /* Default to index.html */
-    const char *rel = path;
-    if (rel[0] == '/') rel++;
-    if (rel[0] == '\0') rel = "index.html";
+    const char *rel = blog_serve_normalize_rel(path);
 
     if (!safe_path(rel)) {
         const char *body =
@@ -140,14 +170,9 @@ size_t blog_serve(const char *datadir, const char *path,
         blog_root, rel, max_body, &body_data, &nread);
     char rel_html[1024];
     const char *served_rel = rel;
-    if (read_result == PLATFORM_SAFE_ROOT_READ_NOT_FOUND) {
-        int rel_n = snprintf(rel_html, sizeof(rel_html), "%s.html", rel);
-        if (rel_n >= 0 && (size_t)rel_n < sizeof(rel_html)) {
-            read_result = platform_safe_root_read(blog_root, rel_html, max_body,
-                                                  &body_data, &nread);
-            if (read_result == PLATFORM_SAFE_ROOT_READ_OK) served_rel = rel_html;
-        }
-    }
+    read_result = blog_serve_read_html_fallback(
+        blog_root, rel, max_body, read_result, &body_data, &nread,
+        rel_html, sizeof(rel_html), &served_rel);
     if (read_result == PLATFORM_SAFE_ROOT_READ_NOT_FOUND) {
         const char *body =
             "<html><head><style>body{background:#0a0a0a;color:#e0e0e0;"

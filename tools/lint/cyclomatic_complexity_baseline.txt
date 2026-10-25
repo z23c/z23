@@ -1245,7 +1245,6 @@ engine/controllers/src/blockchain_controller_blocks.c:rpc_getblock:17
 engine/controllers/src/blockchain_controller_chain.c:rpc_getblockchaininfo:34
 engine/controllers/src/blog_anchor_native_handler.c:zcl_native_handle_blog_anchor:34
 engine/controllers/src/blog_controller.c:blog_discover_onion_peers_wallet:28
-engine/controllers/src/blog_controller.c:blog_serve:18
 engine/controllers/src/blog_post_controller.c:blog_anchor_prepare_wallet:26
 engine/controllers/src/blog_post_controller.c:blog_anchor_publish_wallet:17
 engine/controllers/src/blog_post_controller.c:blog_site_handle_request:23
