@@ -247,20 +247,25 @@ void consensus_state_bundle_proof_manifest_digest(
     sha3_256_finalize(&ctx, out);
 }
 
-bool consensus_state_bundle_proof_extension_digest(
+static bool proof_extension_parent_valid(
     const struct consensus_state_bundle_proof_parent *parent,
-    size_t ordinal, uint8_t out[32])
+    size_t ordinal)
 {
-    if (!out)
-        return false;
-    memset(out, 0, 32);
     if (!parent || !parent->present ||
         ordinal >= CONSENSUS_STATE_BUNDLE_PROOF_COUNT ||
         parent->base_height < 0 ||
         (parent->validation_profile != CONSENSUS_STATE_VALIDATION_FULL &&
          parent->validation_profile !=
-             CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD) ||
-        !zcl_bytes_any_set(parent->base_block_hash, 32) ||
+             CONSENSUS_STATE_VALIDATION_CHECKPOINT_FOLD))
+        return false;
+    return true;
+}
+
+static bool proof_extension_parent_digests_set(
+    const struct consensus_state_bundle_proof_parent *parent,
+    size_t ordinal)
+{
+    if (!zcl_bytes_any_set(parent->base_block_hash, 32) ||
         !zcl_bytes_any_set(parent->proof_manifest_digest, 32) ||
         !zcl_bytes_any_set(parent->source_digest, 32) ||
         !zcl_bytes_any_set(parent->artifact_digest, 32) ||
@@ -268,15 +273,38 @@ bool consensus_state_bundle_proof_extension_digest(
             parent->components[ordinal].component_digest, 32) ||
         !zcl_bytes_any_set(parent->suffix_digest[ordinal], 32))
         return false;
-    const struct consensus_state_bundle_proof_summary *component =
-        &parent->components[ordinal];
-    size_t name_len = strnlen(component->component,
-                              CONSENSUS_STATE_BUNDLE_PROOF_NAME_MAX + 1u);
+    return true;
+}
+
+static bool proof_extension_component_valid(
+    const struct consensus_state_bundle_proof_summary *component,
+    const struct consensus_state_bundle_proof_parent *parent,
+    size_t name_len)
+{
     if (name_len == 0 ||
         name_len > CONSENSUS_STATE_BUNDLE_PROOF_NAME_MAX ||
         component->first_height != 0 ||
         component->last_height != parent->base_height ||
         component->row_count != (uint64_t)parent->base_height + 1u)
+        return false;
+    return true;
+}
+
+bool consensus_state_bundle_proof_extension_digest(
+    const struct consensus_state_bundle_proof_parent *parent,
+    size_t ordinal, uint8_t out[32])
+{
+    if (!out)
+        return false;
+    memset(out, 0, 32);
+    if (!proof_extension_parent_valid(parent, ordinal) ||
+        !proof_extension_parent_digests_set(parent, ordinal))
+        return false;
+    const struct consensus_state_bundle_proof_summary *component =
+        &parent->components[ordinal];
+    size_t name_len = strnlen(component->component,
+                              CONSENSUS_STATE_BUNDLE_PROOF_NAME_MAX + 1u);
+    if (!proof_extension_component_valid(component, parent, name_len))
         return false;
 
     struct sha3_256_ctx ctx;

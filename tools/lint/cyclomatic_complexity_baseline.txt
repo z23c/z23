@@ -1449,7 +1449,6 @@ engine/modules/storage/src/coins_view_sqlite.c:coins_view_sqlite_open:17
 engine/modules/storage/src/consensus_db.c:cdb_ddl_copy_table:22
 engine/modules/storage/src/consensus_db.c:consensus_db_drop_migrated_from_progress:40
 engine/modules/storage/src/consensus_db.c:consensus_db_migrate_from_progress:41
-engine/modules/storage/src/consensus_state_bundle_codec.c:consensus_state_bundle_proof_extension_digest:19
 engine/modules/storage/src/cure_progress_read.c:cure_progress_read_eta_samples:21
 engine/modules/storage/src/dbwrapper.c:db_wrapper_ensure_directory:16
 engine/modules/storage/src/dbwrapper.c:db_wrapper_open:35
