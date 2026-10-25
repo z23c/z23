@@ -54,33 +54,67 @@ enum vcs_zcode_task_authority_result vcs_zcode_task_authority_roots(
         ? VCS_ZCODE_TASK_AUTHORITY_OK : VCS_ZCODE_TASK_AUTHORITY_RECIPE;
 }
 
+static bool task_authority_store_args_missing(
+    const char *repo_root, const uint8_t *lock_wire,
+    const uint8_t *recipe_wire, const uint8_t *lock_root,
+    const uint8_t *recipe_root)
+{
+    return !repo_root || !lock_wire || !recipe_wire || !lock_root ||
+        !recipe_root;
+}
+
+static bool task_authority_store_put_wires(
+    const char *repo_root,
+    const uint8_t lock_root[32], const uint8_t *lock_wire, size_t lock_wire_len,
+    const uint8_t recipe_root[32], const uint8_t *recipe_wire,
+    size_t recipe_wire_len)
+{
+    return vcs_object_store_init(repo_root) &&
+        vcs_object_put_addressed_repair(
+            repo_root, lock_root, lock_wire, lock_wire_len, NULL) &&
+        vcs_object_put_addressed_repair(
+            repo_root, recipe_root, recipe_wire, recipe_wire_len, NULL);
+}
+
+static bool task_authority_store_readback_match(
+    const char *repo_root,
+    const uint8_t lock_root[32], const uint8_t *lock_wire, size_t lock_wire_len,
+    const uint8_t recipe_root[32], const uint8_t *recipe_wire,
+    size_t recipe_wire_len,
+    uint8_t **lock_check, size_t *lock_check_len,
+    uint8_t **recipe_check, size_t *recipe_check_len)
+{
+    return vcs_object_load_raw(
+            repo_root, lock_root, lock_check, lock_check_len) == 0 &&
+        vcs_object_load_raw(
+            repo_root, recipe_root, recipe_check, recipe_check_len) == 0 &&
+        *lock_check_len == lock_wire_len && *recipe_check_len == recipe_wire_len &&
+        memcmp(*lock_check, lock_wire, lock_wire_len) == 0 &&
+        memcmp(*recipe_check, recipe_wire, recipe_wire_len) == 0;
+}
+
 enum vcs_zcode_task_authority_result vcs_zcode_task_authority_store(
     const char *repo_root, const uint8_t *lock_wire, size_t lock_wire_len,
     const uint8_t *recipe_wire, size_t recipe_wire_len,
     uint8_t lock_root[32], uint8_t recipe_root[32])
 {
-    if (!repo_root || !lock_wire || !recipe_wire || !lock_root ||
-        !recipe_root)
+    if (task_authority_store_args_missing(
+            repo_root, lock_wire, recipe_wire, lock_root, recipe_root))
         return VCS_ZCODE_TASK_AUTHORITY_NULL;
     enum vcs_zcode_task_authority_result result = vcs_zcode_task_authority_roots(
         lock_wire, lock_wire_len, recipe_wire, recipe_wire_len,
         lock_root, recipe_root);
     if (result != VCS_ZCODE_TASK_AUTHORITY_OK) return result;
-    if (!vcs_object_store_init(repo_root) ||
-        !vcs_object_put_addressed_repair(
-            repo_root, lock_root, lock_wire, lock_wire_len, NULL) ||
-        !vcs_object_put_addressed_repair(
-            repo_root, recipe_root, recipe_wire, recipe_wire_len, NULL))
+    if (!task_authority_store_put_wires(
+            repo_root, lock_root, lock_wire, lock_wire_len,
+            recipe_root, recipe_wire, recipe_wire_len))
         return VCS_ZCODE_TASK_AUTHORITY_CAS;
     uint8_t *lock_check = NULL, *recipe_check = NULL;
     size_t lock_check_len = 0, recipe_check_len = 0;
-    bool loaded = vcs_object_load_raw(
-            repo_root, lock_root, &lock_check, &lock_check_len) == 0 &&
-        vcs_object_load_raw(
-            repo_root, recipe_root, &recipe_check, &recipe_check_len) == 0 &&
-        lock_check_len == lock_wire_len && recipe_check_len == recipe_wire_len &&
-        memcmp(lock_check, lock_wire, lock_wire_len) == 0 &&
-        memcmp(recipe_check, recipe_wire, recipe_wire_len) == 0;
+    bool loaded = task_authority_store_readback_match(
+        repo_root, lock_root, lock_wire, lock_wire_len,
+        recipe_root, recipe_wire, recipe_wire_len,
+        &lock_check, &lock_check_len, &recipe_check, &recipe_check_len);
     uint8_t checked_lock[32], checked_recipe[32];
     result = loaded ? vcs_zcode_task_authority_roots(
         lock_check, lock_check_len, recipe_check, recipe_check_len,
