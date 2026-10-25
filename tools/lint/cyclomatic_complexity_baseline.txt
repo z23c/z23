@@ -677,7 +677,6 @@ contexts/wallet/controllers/src/wallet_diagnostic_keys.c:rpc_listwallettxdetail:
 contexts/wallet/controllers/src/wallet_diagnostic_ledger.c:rpc_walletledger:109
 contexts/wallet/controllers/src/wallet_diagnostic_repair.c:rpc_purgephantomutxos:18
 contexts/wallet/controllers/src/wallet_diagnostic_repair.c:rpc_reconcilewalletutxos:17
-contexts/wallet/controllers/src/wallet_helpers.c:wallet_transparent_spendable_balance_diagnose:25
 contexts/wallet/controllers/src/wallet_native_backup_handlers.c:zcl_native_handle_wallet_backup_now:16
 contexts/wallet/controllers/src/wallet_native_handlers.c:wnh_amount_exact:20
 contexts/wallet/controllers/src/wallet_native_handlers.c:zcl_native_handle_wallet_shielded_send:37

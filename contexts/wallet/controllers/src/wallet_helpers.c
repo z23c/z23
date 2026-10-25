@@ -25,30 +25,26 @@
 
 struct wallet_rpc_context g_wallet_ctx = {0};
 
-int64_t wallet_transparent_spendable_balance_diagnose(
-    const struct wallet_rpc_context *ctx,
-    struct wallet_balance_freshness *freshness)
+static void wallet_snapshot_scan_state(struct wallet *wallet,
+                                       int *wallet_height,
+                                       size_t *wallet_txs,
+                                       size_t *wallet_confirmed_txs)
 {
-    if (freshness)
-        memset(freshness, 0, sizeof(*freshness));
-    if (!ctx || !ctx->wallet)
-        return 0;
-
-    int wallet_height = 0;
-    size_t wallet_txs = 0;
-    size_t wallet_confirmed_txs = 0;
-    zcl_mutex_lock(&ctx->wallet->cs);
+    zcl_mutex_lock(&wallet->cs);
     /* The height the wallet actually read through: a boot catch-up that
      * could not read its range leaves this below best_block_height. */
-    wallet_height = wallet_scanned_through_height(ctx->wallet);
-    wallet_txs = ctx->wallet->num_wallet_tx;
+    *wallet_height = wallet_scanned_through_height(wallet);
+    *wallet_txs = wallet->num_wallet_tx;
     for (size_t i = 0; i < MAX_WALLET_TX; i++) {
-        if (ctx->wallet->map_wallet[i].used &&
-            ctx->wallet->map_wallet[i].confirms > 0)
-            wallet_confirmed_txs++;
+        if (wallet->map_wallet[i].used &&
+            wallet->map_wallet[i].confirms > 0)
+            (*wallet_confirmed_txs)++;
     }
-    zcl_mutex_unlock(&ctx->wallet->cs);
+    zcl_mutex_unlock(&wallet->cs);
+}
 
+static int wallet_balance_chain_height(const struct wallet_rpc_context *ctx)
+{
     int chain_height = -1;
     int external_height = reducer_frontier_external_tip_height();
     if (reducer_frontier_provable_tip_is_published() ||
@@ -65,6 +61,47 @@ int64_t wallet_transparent_spendable_balance_diagnose(
         chain_height = active_chain_height(&ctx->main_state->chain_active);
         zcl_mutex_unlock(&ctx->main_state->cs_main);
     }
+    return chain_height;
+}
+
+static bool wallet_memory_covers_durable(size_t wallet_txs,
+                                         int chain_height,
+                                         int wallet_height,
+                                         size_t wallet_confirmed_txs,
+                                         int db_confirmed_txs)
+{
+    return wallet_txs > 0 && chain_height >= 0 &&
+        wallet_height >= chain_height &&
+        wallet_confirmed_txs >= (size_t)db_confirmed_txs;
+}
+
+static int64_t wallet_select_spendable_balance(
+    const struct wallet_balance_freshness *freshness,
+    bool memory_covers_durable,
+    int64_t memory_balance,
+    int64_t durable_balance)
+{
+    return freshness && strcmp(freshness->source, "memory") == 0
+        ? memory_balance
+        : (memory_covers_durable ? memory_balance : durable_balance);
+}
+
+int64_t wallet_transparent_spendable_balance_diagnose(
+    const struct wallet_rpc_context *ctx,
+    struct wallet_balance_freshness *freshness)
+{
+    if (freshness)
+        memset(freshness, 0, sizeof(*freshness));
+    if (!ctx || !ctx->wallet)
+        return 0;
+
+    int wallet_height = 0;
+    size_t wallet_txs = 0;
+    size_t wallet_confirmed_txs = 0;
+    wallet_snapshot_scan_state(ctx->wallet, &wallet_height, &wallet_txs,
+                               &wallet_confirmed_txs);
+
+    int chain_height = wallet_balance_chain_height(ctx);
 
     int db_confirmed_txs = wallet_ctx_db_ready(ctx)
         ? db_wallet_tx_confirmed_count(ctx->node_db) : 0;
@@ -79,9 +116,10 @@ int64_t wallet_transparent_spendable_balance_diagnose(
      * before the live wallet entry is upgraded from confirms=0.  Prefer RAM
      * only when it covers at least every confirmation already durable in the
      * wallet model; otherwise the exact SQLite UTXO projection owns the read. */
-    if (wallet_txs > 0 && chain_height >= 0 &&
-        wallet_height >= chain_height &&
-        wallet_confirmed_txs >= (size_t)db_confirmed_txs) {
+    bool memory_covers_durable = wallet_memory_covers_durable(
+        wallet_txs, chain_height, wallet_height, wallet_confirmed_txs,
+        db_confirmed_txs);
+    if (memory_covers_durable) {
         if (freshness)
             freshness->source = "memory";
     } else if (freshness) {
@@ -94,12 +132,8 @@ int64_t wallet_transparent_spendable_balance_diagnose(
         freshness->memory_confirmed_txs = wallet_confirmed_txs;
         freshness->durable_confirmed_txs = db_confirmed_txs;
     }
-    return freshness && strcmp(freshness->source, "memory") == 0
-        ? memory_balance
-        : ((wallet_txs > 0 && chain_height >= 0 &&
-            wallet_height >= chain_height &&
-            wallet_confirmed_txs >= (size_t)db_confirmed_txs)
-               ? memory_balance : durable_balance);
+    return wallet_select_spendable_balance(freshness, memory_covers_durable,
+                                           memory_balance, durable_balance);
 }
 
 int64_t wallet_transparent_spendable_balance(
