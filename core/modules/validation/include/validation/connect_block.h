@@ -82,6 +82,15 @@ extern _Atomic _Bool g_enforce_checkdatasig_sigops;
 _Bool sapling_root_matches(const struct block *block,
                            const struct incremental_merkle_tree *pre_block_tree);
 
+/* PURE per-block shielded value change (ZIP-209 turnstile input), exactly as
+ * zclassicd ConnectBlock computes it: over every tx, Sprout moves by
+ * vpub_old - vpub_new of each joinsplit, and Sapling moves by -valueBalance
+ * (valueBalance is value LEAVING the Sapling pool). Oracle, height 476977:
+ * a tx with valueBalance -1.00000000 takes the Sapling chainValue from 0 to
+ * +1.00000000. `block` may be NULL (both deltas 0); either out may be NULL. */
+void connect_block_shielded_values(const struct block *block,
+                                   int64_t *sprout, int64_t *sapling);
+
 /* Connect `block` at `pindex` against `view`, applying its inputs/outputs.
  * just_check — when true, run full validation (all script/proof/conservation
  *   checks and the coins-view updates against the scratch `view`) but commit

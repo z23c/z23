@@ -308,3 +308,7 @@ later lane flips it HARD.
 - 2026-10-25T11:45:45Z — REASON: compact block index U1: block_map bucket 16 B to 8 B (pointer only, key read from the resident node); behaviour-preserving, lookup semantics, probe order, iteration order and hash function unchanged; no consensus predicate
   old ROOT: 56f9c50e7c396173f271a7c8487ba811e736a742f5207394fa733fb83485ff4c
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-25T16:26:37Z — REASON: ZIP-209 Sapling pool parity: the per-block Sapling delta is -valueBalance (zclassicd ConnectBlock saplingValue += -tx.valueBalance); core added +valueBalance. Latent (runs only when the chain Sapling value is known; the live node stores 0). Oracle h=476977: valueBalance -1 ZCL, chainValue +1 ZCL. Owner-approved 2026-10-25.
+  old ROOT: bf8be6cf014cd435e26209f319eb5f9cd13ab8dadfae0a9d6fa0b01d198f8af9
+  by: owner unseal ritual (make core-unseal)

@@ -38,7 +38,7 @@
 #       pair — the sealed core's identity, mirrored into
 #       hotswap/core_seal_root.h. FROZEN: SECTION/TREE are additive and
 #       do not enter this preimage.
-391edf563bf754e96f490d5dd4ca558963333a2152d4041c8d50a83011d8d818  core/UNSEAL.md
+04013ae2d92fee2394bc09832a8bd7f523aa7a00f0d2d0091f1a8c3c639b8788  core/UNSEAL.md
 0154dee8b452e80f28e6d9c915483ab19cf93ee834518edc355885204dad4119  core/chainparams/include/chain/chainparams.h
 76417939b54d9b0d0b2309c66b90fd20a510de3492bb6f97a11f4198292aa01f  core/chainparams/include/chain/chainparamsbase.h
 1b38019875d5bb928f13ca3ac4f2d93f346c4a12699fbb41265f23cc3d7ee8c2  core/chainparams/include/chain/checkpoints.h
@@ -536,7 +536,7 @@ f881f8c69a024c1d0b6116747023ad27813843e780c2b58bb8fccbe1d3dd8334  core/modules/s
 f35113b38c9589cfe71abc453717304b53c8ca56895e602a432a4db0f341d139  core/modules/validation/include/validation/check_block.h
 8cb5cb3c48380ed75f53b2f53a426dcfd67d6b9c9ed882785a756231c67256b6  core/modules/validation/include/validation/check_transaction.h
 44b31ba16e951ff315854f8b3d245386d4b6d0f887f514947e41c19d58d59d72  core/modules/validation/include/validation/checkpoint.h
-e3c58ab1de554463873263961c350d550a9458d7e580e3820d63c38c9e82020f  core/modules/validation/include/validation/connect_block.h
+42ef906572ce7ef9da7d01c56175ba5de5fcc423465e74bc5a52b4f90f1afd35  core/modules/validation/include/validation/connect_block.h
 2cb9008dfaa4a5895a7d2594330faf883d08338d0552e0277dcf744e9e12d884  core/modules/validation/include/validation/contextual_check_tx.h
 a24165f25e90f392d6ba00f29e3931e0f5108bd80a0f96c4d21face225089780  core/modules/validation/include/validation/main_constants.h
 e284913c32b9638cc770beacf00b7526bee69bacdf2d37691698dbb96339032a  core/modules/validation/include/validation/main_logic.h
@@ -561,7 +561,7 @@ e8f1951ef357d93da6f4629a6450465a342461d3933b2517a181284067945ec0  core/modules/v
 a15278f585b14e978f2b8dc85ed41ed6d1915a1dc1a982cd4ce8ac2639c16ab0  core/modules/validation/src/check_block.c
 464a6dca2fd329bddf6a6c8690c04a0201f8d24d126c3c348045b511e6a02c3c  core/modules/validation/src/check_transaction.c
 6e6bb05aaa131ad2a973716f01d859f2b9816faf69a231dfef9ea4ca580b1f7a  core/modules/validation/src/checkpoint.c
-9b7cc3c7ef117dd6df59d7130a27c12ab1a8cb976cef7806cc4fc609b80d2634  core/modules/validation/src/connect_block.c
+7cc726065a03542d2d5b6f3a6dc1db58e52730898971c39005c83f65c752b6bd  core/modules/validation/src/connect_block.c
 fa2693b0e17192a7a25839bc24415111745193587889e74895e868f85f53ea4b  core/modules/validation/src/contextual_check_tx.c
 391a135cbb7eccf998d5c9808182c4cbbe47f9ebd771ba6c0a46fb0304417c81  core/modules/validation/src/mirror_consensus.c
 d738fa241d46671323fb4b5d541892aa1803eb5de3de4a94d5f2a0f687ede5f5  core/modules/validation/src/orphan_pool.c
@@ -594,7 +594,7 @@ e84a4566fb4a01985ccbec9a4d3136a278422e1efe4f00cb8d0cf01480531064  core/params/in
 5ed0e4562789e7ea0bd9ff1238a27172669074b3d26201195aafffe1f863558e  core/params/module.cfg
 4d62b9a9b8824925e2f7efebca536ff924a96c7464067472cb07b9dd57e356dc  core/params/src/params.c
 9907071da9b95e13d236ac70fe8fa95612c7873ff9a88102d988c83ba8492b89  core/params/src/upgrades.c
-SECTION  556  4  9596480e4235aa0e2ed0c0a18a377a4aca850c1734f6bef9d509e17bceaf774d  core
+SECTION  556  4  38f63f79ae60d18d333b86ea9071c0288fa8082fbedac8b213c88286bb6bc55c  core
 SECTION  12  16  6169522647bfed2194c0519612c2d0feeb318858ce714a56550e426c63b44f14  core/chainparams
 SECTION  6  24  63dff36c30ea1f9c45ed358d05006795f91e44b502d1d1b1196fc4a2cca2570b  core/chainparams/include
 SECTION  6  30  c247859f7b026dc314874fe7f2bfda58f885c05c44ff2fd601ebc3ce25ebeb48  core/chainparams/include/chain
@@ -608,7 +608,7 @@ SECTION  10  9  4a12df854665934805645f7b11b9ce279b93b7568fe58dde37f68d84913813da
 SECTION  5  17  3d74828940990b6914192791641041d1ad63de1b84d7693d2533f1c9b29a7edd  core/math/include
 SECTION  5  22  13bc29100524578193cb79036f24fe9e1d8538c0f45dcc4dd87956a25f4f2b38  core/math/include/core
 SECTION  5  13  bed7851826222b99834c6ee74bb3e7ce6155798a5ef78c798fe2f836bbf30862  core/math/src
-SECTION  490  12  76683219fb851d469c232bebcf44fca8b98f67bdfe0caf8c80677ea5a1710b95  core/modules
+SECTION  490  12  a5b381b731a4fb01bf105325fb519d74f492dae752cb63cdd3b24a93bf7ccece  core/modules
 SECTION  6  18  d39a267ed7843199fea7ad58a9c6cbc6d0acd538ff04e13d69147a51924c8648  core/modules/bloom
 SECTION  3  26  25f9f764136ebc796a9aaed6dc708deba3347052954808e4efacd66eed7255c6  core/modules/bloom/include
 SECTION  3  32  2648501012a71f5658485e08ef8fb567f46f716f1fd96cbfcb93666c234a6686  core/modules/bloom/include/bloom
@@ -666,13 +666,13 @@ SECTION  14  17  011c17add8e25ec43335ff38e167bdde799bf24050f4074cee418ea04bf5c58
 SECTION  7  25  ec41429297143662d1711336cb1141f5e1ba5d22e8a6e1bfc7a3fc09a6b846c0  core/modules/sync/include
 SECTION  7  30  e29d62fa4c840144660183fbe44ca33887a657a5144420600ffe484c556a88c2  core/modules/sync/include/sync
 SECTION  7  21  af6f9ccdb4a13f2c76c9caf468f93a2d8b846f62083f82adbab8d0ab75176812  core/modules/sync/src
-SECTION  58  23  cabdb6f5c9f388db7e87e9901398acc4fd493b1dce51583335454ca7c7469d27  core/modules/validation
-SECTION  24  31  3a85a1ed878c9c733a459a90064959e9f291f8009edde6d01e6bf04253ae3038  core/modules/validation/include
-SECTION  24  42  fde3558ed95c1d0a3ca9f063282c6f4942762f34c8fa85cc5f0ff8e3a51e90cc  core/modules/validation/include/validation
-SECTION  34  27  358059b62a6cce2d120588219de7fca5cdbc1b1c8f4377f1b8f053ae507114ff  core/modules/validation/src
+SECTION  58  23  1ee1bda3b9511e33a4ca3d500bfcd0cf1fe4adda0881242e1b002e1ee8c38773  core/modules/validation
+SECTION  24  31  74d17b204388f042921866c6f35b6af632564085338db1dcb6c4b6bb6f3640c1  core/modules/validation/include
+SECTION  24  42  d78859874bd0fadec989ab94cda6526c8f8464622ceb4026bcbab05ecb1843ce  core/modules/validation/include/validation
+SECTION  34  27  5f62439ee43ce756fbf8c3c87fdef9d2c4b7b9e003d89654b3759b1e4bd03a88  core/modules/validation/src
 SECTION  7  11  9b023bcd18300a51052f45e69609bb741b2832e3ce6e6a02fd21a12ea94647c0  core/params
 SECTION  4  19  e07dc0f2326862830b48105e02648f8d76dfeee9a859b7c56679c461e2cca7f1  core/params/include
 SECTION  4  29  5680a2f2d804163e77f94854ee18838480d785b74b297265f2f8a77db9d02242  core/params/include/consensus
 SECTION  2  15  8fdd673c41b8758e48c6fb225c15d7bbdf79f6816066a1d0c793d4bee2c5f6b1  core/params/src
-TREE  b5d3ffe3917290a7879e1f72d86ce6cb1326920aa2106f1fd7f90d6987da96cf
-ROOT  bf8be6cf014cd435e26209f319eb5f9cd13ab8dadfae0a9d6fa0b01d198f8af9
+TREE  94d7191a0f6d5bff89d2d1879ab0b7b1dfb52df62a6d374ae64051dce846e009
+ROOT  bfa2e068bab92e18f15eb5be151823feb8b6929dd6e902d59161a61256840681

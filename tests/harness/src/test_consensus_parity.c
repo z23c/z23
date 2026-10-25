@@ -17,6 +17,8 @@
 #include "domain/consensus/tx_structural.h"
 #include "coins/utxo_commitment.h"   /* C8: pin the UTXO commitment byte-layout */
 #include "crypto/sha3.h"
+#include "primitives/block.h"
+#include "validation/connect_block.h" /* ZIP-209 per-block shielded deltas */
 
 /* The generated empirical oversize-grandfather table (see
  * docs/CONSENSUS_PARITY_DOCTRINE.md "Empirical oversize grandfather"),
@@ -241,6 +243,39 @@ int test_consensus_parity(void)
         sha3_256_finalize(&sctx, digest);
         CHECK("utxo sha3 streamed digest(A||B) matches independent golden",
               memcmp(digest, DIGEST_GOLDEN, 32) == 0);
+    }
+
+    /* ── ZIP-209 per-block shielded deltas (zclassicd ConnectBlock:
+     * sproutValue += vpub_old - vpub_new; saplingValue += -valueBalance).
+     * The last case is zclassicd's block 476977: one tx with valueBalance
+     * -1.00000000 ZCL takes the Sapling chainValue from 0 to +1.00000000. ── */
+    {
+        struct js_description js[2];
+        struct transaction tx[2];
+        struct block blk;
+        memset(js, 0, sizeof(js));
+        memset(tx, 0, sizeof(tx));
+        memset(&blk, 0, sizeof(blk));
+        js[0].vpub_old = 100; js[0].vpub_new = 30;
+        js[1].vpub_old = 5;   js[1].vpub_new = 50;
+        tx[0].v_joinsplit = js; tx[0].num_joinsplit = 2;
+        tx[0].value_balance = -7;
+        tx[1].value_balance = 20;
+        blk.vtx = tx; blk.num_vtx = 2;
+        int64_t sprout = -1, sapling = -1;
+        connect_block_shielded_values(&blk, &sprout, &sapling);
+        CHECK("turnstile deltas: sprout += old - new, sapling -= valueBalance",
+              sprout == 25 && sapling == -13);
+
+        memset(tx, 0, sizeof(tx));
+        tx[0].value_balance = -100000000;
+        blk.vtx = tx; blk.num_vtx = 1;
+        connect_block_shielded_values(&blk, &sprout, &sapling);
+        CHECK("turnstile oracle 476977: valueBalance -1 ZCL grows Sapling by 1 ZCL",
+              sprout == 0 && sapling == 100000000);
+
+        connect_block_shielded_values(NULL, &sprout, &sapling);
+        CHECK("turnstile deltas of no block are zero", sprout == 0 && sapling == 0);
     }
 
 #undef CHECK
