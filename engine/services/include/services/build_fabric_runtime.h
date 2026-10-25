@@ -64,7 +64,8 @@ struct zcl_result build_fabric_runtime_execute_step(
  * in a test binary. */
 struct zcl_result build_fabric_runtime_prepare_worker_for_test(
     const char *datadir);
-bool build_fabric_runtime_enroll_step_for_test(struct node_db *ndb);
+struct zcl_result build_fabric_runtime_enroll_step_for_test(
+    struct node_db *ndb);
 bool build_fabric_runtime_worker_enabled_for_test(void);
 const char *build_fabric_runtime_local_worker_id_for_test(void);
 

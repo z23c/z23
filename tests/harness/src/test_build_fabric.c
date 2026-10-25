@@ -5226,7 +5226,7 @@ static int test_bf_worker_enroll_off_boot_thread(void)
 
         /* (B) The worker thread's step captures, enrolls and only then marks
          * ready; the identity is the one the synchronous load produces. */
-        ASSERT(build_fabric_runtime_enroll_step_for_test(&ndb));
+        ASSERT(build_fabric_runtime_enroll_step_for_test(&ndb).ok);
         vcs_toolchain_capsule_v1_cache_stats_for_test(&fresh, &hits);
         ASSERT(fresh + hits >= 1u);
         ASSERT(build_fabric_runtime_worker_ready());
@@ -5246,7 +5246,7 @@ static int test_bf_worker_enroll_off_boot_thread(void)
         (void)snprintf(blocked, sizeof(blocked), "%s/not_a_dir/data", dir);
         ASSERT(build_fabric_runtime_prepare_worker_for_test(blocked).ok);
         ASSERT(build_fabric_runtime_worker_enabled_for_test());
-        ASSERT(!build_fabric_runtime_enroll_step_for_test(&ndb));
+        ASSERT(!build_fabric_runtime_enroll_step_for_test(&ndb).ok);
         ASSERT(!build_fabric_runtime_worker_ready());
         ASSERT(!build_fabric_runtime_worker_enabled_for_test());
         ASSERT(!bf_dump_worker_ready());

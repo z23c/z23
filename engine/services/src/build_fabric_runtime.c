@@ -1,5 +1,8 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Fail-loud liveness contracts for build scheduling and workers. */
+// one-result-type-ok:zcl-result-plus-flag-reads — the service operations here
+// return struct zcl_result; the bool exports left are the json state dump and
+// two atomic flag reads (worker_ready, worker_enabled_for_test).
 
 #include "services/build_fabric_runtime.h"
 
@@ -408,7 +411,7 @@ static struct zcl_result bf_runtime_enroll_worker(struct node_db *ndb)
  * enroll, then publish readiness. A failure leaves the worker disabled with
  * the message the boot thread used to log, and its supervisor child exempt
  * (it was never going to make progress). */
-static bool bf_worker_enroll_step(struct node_db *ndb)
+static struct zcl_result bf_worker_enroll_step(struct node_db *ndb)
 {
     int64_t started_us = platform_time_monotonic_us();
     struct zcl_result enrolled = bf_runtime_enroll_worker(ndb);
@@ -420,13 +423,13 @@ static bool bf_worker_enroll_step(struct node_db *ndb)
         if (id != SUPERVISOR_INVALID_ID)
             supervisor_set_progress_exempt(id, "build worker enroll failed");
         LOG_WARN("build_fabric", "%s", enrolled.message);
-        return false;
+        return enrolled;
     }
     atomic_store_explicit(&g_worker_ready, true, memory_order_release);
     LOG_INFO("build_fabric",
              "build worker identity ready on worker thread: capture+enroll %lldms",
              (long long)took_ms);
-    return true;
+    return ZCL_OK;
 }
 
 bool build_fabric_runtime_worker_ready(void)
@@ -442,7 +445,8 @@ struct zcl_result build_fabric_runtime_prepare_worker_for_test(
     return bf_runtime_prepare_worker(datadir);
 }
 
-bool build_fabric_runtime_enroll_step_for_test(struct node_db *ndb)
+struct zcl_result build_fabric_runtime_enroll_step_for_test(
+    struct node_db *ndb)
 {
     return bf_worker_enroll_step(ndb);
 }
@@ -503,7 +507,7 @@ static bool bf_worker_wait_for_recovery(struct node_db *ndb)
  * the same identity from the key file. */
 static bool bf_worker_start_identity(struct node_db *ndb)
 {
-    return bf_worker_enroll_step(ndb) && bf_worker_wait_for_recovery(ndb);
+    return bf_worker_enroll_step(ndb).ok && bf_worker_wait_for_recovery(ndb);
 }
 
 static void *bf_worker_loop(void *arg)
