@@ -50,6 +50,50 @@
 #include "util/log_macros.h"
 #include "core/utiltime.h"                       /* GetTimeMicros */
 
+/* Resolve the export directory, falling back to the working directory. */
+static const char *bundle_export_dir_or_default(const char *datadir)
+{
+    return (datadir && datadir[0]) ? datadir : ".";
+}
+
+/* Format the bundle file name for this anchor; false when it cannot fit. */
+static bool bundle_export_name_format(char *name, size_t cap, int32_t anchor)
+{
+    int nn = snprintf(name, cap, "consensus-state-bundle-%d.sqlite", anchor);
+    return nn > 0 && (size_t)nn < cap;
+}
+
+/* Register the typed PERMANENT mint-bundle export blocker (best effort). */
+static void bundle_export_blocker_register(const char *reason)
+{
+    struct blocker_record frec;
+    if (blocker_init(&frec, "mint_bundle.export_failed", "mint_anchor",
+                     BLOCKER_PERMANENT, reason))
+        (void)blocker_set(&frec);
+}
+
+/* The exporter's refusal text, or "unknown" when it recorded none. */
+static const char *bundle_export_result_reason(
+    const struct consensus_state_export_result *res)
+{
+    return res->reason[0] ? res->reason : "unknown";
+}
+
+/* Human-readable name of the validation profile the exporter proved. */
+static const char *bundle_export_profile_name(
+    const struct consensus_state_export_result *res)
+{
+    return res->validation_profile == CONSENSUS_STATE_VALIDATION_FULL
+        ? "full" : "checkpoint_fold";
+}
+
+/* Render the exported artifact digest as 64 lowercase hex chars + NUL. */
+static void bundle_export_digest_hex(const uint8_t digest[32], char out[65])
+{
+    for (int i = 0; i < 32; i++)
+        snprintf(out + 2 * i, 3, "%02x", digest[i]);
+}
+
 /* Emit the contained full-history zcl.consensus_state_bundle.v1 into
  * the mint datadir once the producer source receipt has been finalized. This is
  * the exporter's (config/consensus_state_snapshot_export.h) ONLY viable caller:
@@ -89,11 +133,9 @@ bool boot_mint_anchor_export_bundle(sqlite3 *pdb, const char *datadir,
             "capability\n");
     return false;
 #else
-    const char *dir = (datadir && datadir[0]) ? datadir : ".";
+    const char *dir = bundle_export_dir_or_default(datadir);
     char name[128];
-    int nn = snprintf(name, sizeof(name),
-                      "consensus-state-bundle-%d.sqlite", anchor);
-    if (nn <= 0 || (size_t)nn >= sizeof(name)) {
+    if (!bundle_export_name_format(name, sizeof(name), anchor)) {
         event_emitf(EV_OPERATOR_NEEDED, 0,
                     "condition=mint_bundle_export_failed reason=name_overflow "
                     "anchor=%d", anchor);
@@ -133,12 +175,9 @@ bool boot_mint_anchor_export_bundle(sqlite3 *pdb, const char *datadir,
             event_emitf(EV_OPERATOR_NEEDED, 0,
                         "condition=mint_bundle_export_failed "
                         "reason=coins_ram_flush anchor=%d", anchor);
-            struct blocker_record frec;
-            if (blocker_init(&frec, "mint_bundle.export_failed", "mint_anchor",
-                             BLOCKER_PERMANENT,
-                             "consensus-state bundle export aborted: coins RAM "
-                             "overlay flush failed before export"))
-                (void)blocker_set(&frec);
+            bundle_export_blocker_register(
+                "consensus-state bundle export aborted: coins RAM "
+                "overlay flush failed before export");
             LOG_FAIL("mint_anchor",
                      "[mint-anchor] consensus-state bundle export aborted: "
                      "coins RAM overlay flush to durable coins_kv failed");
@@ -163,27 +202,23 @@ bool boot_mint_anchor_export_bundle(sqlite3 *pdb, const char *datadir,
         event_emitf(EV_OPERATOR_NEEDED, 0,
                     "condition=mint_bundle_export_failed anchor=%d status=%d "
                     "reason=%s", anchor, (int)res.status,
-                    res.reason[0] ? res.reason : "unknown");
+                    bundle_export_result_reason(&res));
         char breason[640];
         snprintf(breason, sizeof(breason),
                  "consensus-state bundle export refused anchor=%d status=%d: %s "
                  "(verified anchor snapshot + receipt intact)",
                  anchor, (int)res.status,
-                 res.reason[0] ? res.reason : "unknown");
-        struct blocker_record frec;
-        if (blocker_init(&frec, "mint_bundle.export_failed", "mint_anchor",
-                         BLOCKER_PERMANENT, breason))
-            (void)blocker_set(&frec);
+                 bundle_export_result_reason(&res));
+        bundle_export_blocker_register(breason);
         LOG_FAIL("mint_anchor",
                  "[mint-anchor] consensus-state bundle export FAILED (anchor=%d "
                  "status=%d): %s — the verified anchor snapshot and producer "
                  "receipt are unaffected", anchor, (int)res.status,
-                 res.reason[0] ? res.reason : "unknown");
+                 bundle_export_result_reason(&res));
     }
 
     char digest_hex[65];
-    for (int i = 0; i < 32; i++)
-        snprintf(digest_hex + 2 * i, 3, "%02x", res.artifact_digest[i]);
+    bundle_export_digest_hex(res.artifact_digest, digest_hex);
     fprintf(stderr,
             "[mint-anchor] SUCCESS: exported %s at h=%d -> %s/%s (digest=%s "
             "coins=%llu anchors=%llu nullifiers=%llu profile=%s)\n",
@@ -191,8 +226,7 @@ bool boot_mint_anchor_export_bundle(sqlite3 *pdb, const char *datadir,
             (unsigned long long)res.utxo_count,
             (unsigned long long)res.anchor_count,
             (unsigned long long)res.nullifier_count,
-            res.validation_profile == CONSENSUS_STATE_VALIDATION_FULL
-                ? "full" : "checkpoint_fold");
+            bundle_export_profile_name(&res));
     return true;
 #endif
 }
