@@ -333,6 +333,56 @@ uint32_t zcl_present_canvas_text_width_strong(
     return canvas_text_width(text, text_len, pixel_height, true);
 }
 
+static bool canvas_text_glyph_box_fits(int glyph_width, int glyph_height)
+{
+    return glyph_width > 0 && glyph_height > 0 &&
+           glyph_width <= 128 && glyph_height <= 128;
+}
+
+static void canvas_text_blend_pixel(
+    struct zcl_present_canvas *canvas, int32_t px, int32_t py,
+    uint8_t alpha, struct zcl_present_color color)
+{
+    if (alpha == 0 || px < 0 || py < 0 ||
+        (uint32_t)px >= canvas->width ||
+        (uint32_t)py >= canvas->height)
+        return;
+    size_t dst = (size_t)py * canvas->stride + (size_t)px * 3u;
+    const uint8_t source[3] = {color.r, color.g, color.b};
+    for (size_t channel = 0; channel < 3u; channel++) {
+        uint32_t mixed = (uint32_t)source[channel] * alpha +
+            (uint32_t)canvas->pixels[dst + channel] * (255u - alpha);
+        canvas->pixels[dst + channel] = (uint8_t)((mixed + 127u) / 255u);
+    }
+}
+
+static void canvas_text_render_glyph(
+    struct zcl_present_canvas *canvas, const stbtt_fontinfo *font,
+    int ch, float scale, int32_t pen_x, int32_t baseline,
+    struct zcl_present_color color)
+{
+    int x0 = 0;
+    int y0 = 0;
+    int x1 = 0;
+    int y1 = 0;
+    stbtt_GetCodepointBitmapBox(font, ch, scale, scale,
+                                &x0, &y0, &x1, &y1);
+    int glyph_width = x1 - x0;
+    int glyph_height = y1 - y0;
+    if (!canvas_text_glyph_box_fits(glyph_width, glyph_height)) return;
+    uint8_t bitmap[128u * 128u];
+    memset(bitmap, 0, sizeof(bitmap));
+    stbtt_MakeCodepointBitmap(font, bitmap, glyph_width, glyph_height,
+                              128, scale, scale, ch);
+    for (int row = 0; row < glyph_height; row++) {
+        for (int col = 0; col < glyph_width; col++) {
+            uint8_t alpha = bitmap[(size_t)row * 128u + (size_t)col];
+            canvas_text_blend_pixel(canvas, pen_x + x0 + col,
+                                    baseline + y0 + row, alpha, color);
+        }
+    }
+}
+
 static void canvas_text(
     struct zcl_present_canvas *canvas, int32_t x, int32_t y,
     const char *text, size_t text_len, uint32_t pixel_height,
@@ -354,42 +404,8 @@ static void canvas_text(
         int ch = canvas_codepoint((unsigned char)text[i]);
         int next = i + 1u < text_len
             ? canvas_codepoint((unsigned char)text[i + 1u]) : 0;
-        int x0 = 0;
-        int y0 = 0;
-        int x1 = 0;
-        int y1 = 0;
-        stbtt_GetCodepointBitmapBox(&font, ch, scale, scale,
-                                    &x0, &y0, &x1, &y1);
-        int glyph_width = x1 - x0;
-        int glyph_height = y1 - y0;
-        if (glyph_width > 0 && glyph_height > 0 &&
-            glyph_width <= 128 && glyph_height <= 128) {
-            uint8_t bitmap[128u * 128u];
-            memset(bitmap, 0, sizeof(bitmap));
-            stbtt_MakeCodepointBitmap(&font, bitmap, glyph_width, glyph_height,
-                                      128, scale, scale, ch);
-            for (int row = 0; row < glyph_height; row++) {
-                for (int col = 0; col < glyph_width; col++) {
-                    uint8_t alpha = bitmap[(size_t)row * 128u + (size_t)col];
-                    int32_t px = pen_x + x0 + col;
-                    int32_t py = baseline + y0 + row;
-                    if (alpha == 0 || px < 0 || py < 0 ||
-                        (uint32_t)px >= canvas->width ||
-                        (uint32_t)py >= canvas->height)
-                        continue;
-                    size_t dst = (size_t)py * canvas->stride +
-                                 (size_t)px * 3u;
-                    const uint8_t source[3] = {color.r, color.g, color.b};
-                    for (size_t channel = 0; channel < 3u; channel++) {
-                        uint32_t mixed = (uint32_t)source[channel] * alpha +
-                            (uint32_t)canvas->pixels[dst + channel] *
-                            (255u - alpha);
-                        canvas->pixels[dst + channel] =
-                            (uint8_t)((mixed + 127u) / 255u);
-                    }
-                }
-            }
-        }
+        canvas_text_render_glyph(canvas, &font, ch, scale, pen_x, baseline,
+                                 color);
         int advance = canvas_text_advance(&font, ch, next, scale);
         if (advance > INT32_MAX - pen_x) break;
         pen_x += advance;

@@ -654,7 +654,6 @@ contexts/explorer/controllers/src/name_site_controller.c:name_site_handle_reques
 contexts/explorer/models/src/explorer_index.c:index_tx_projections:17
 contexts/explorer/models/src/explorer_index_overlays.c:apply_znam:31
 contexts/explorer/models/src/explorer_index_zid.c:explorer_index_apply_znam_zid_text:21
-contexts/explorer/modules/presentation/src/canvas.c:canvas_text:21
 contexts/explorer/modules/presentation/src/presentation.c:present_clipboard_write_image:20
 contexts/explorer/modules/presentation/src/presentation.c:present_hover_draw:16
 contexts/explorer/modules/presentation/src/presentation.c:present_hover_validate:18
