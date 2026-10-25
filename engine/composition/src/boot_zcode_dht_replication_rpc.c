@@ -248,6 +248,35 @@ static void rpc_error(struct json_value *result, const char *code,
     json_push_kv_str(result, "message", message);
 }
 
+static struct replication_public_entry *entry_scan_free_and_collision(
+    const uint8_t lookup[REPLICATION_TOKEN_BYTES], bool *collision)
+{
+    struct replication_public_entry *entry = NULL;
+    for (size_t i = 0; i < REPLICATION_PUBLIC_MAX; i++) {
+        if (!g_replication[i].used && !entry)
+            entry = &g_replication[i];
+        if (g_replication[i].used &&
+            token_equal(g_replication[i].lookup_token, lookup))
+            *collision = true;
+    }
+    return entry;
+}
+
+static bool begin_paired_discovery(
+    struct vcs_zcode_dht_record_selector *selector,
+    struct vcs_zcode_dht_time now,
+    struct replication_public_entry *entry, bool collision,
+    uint64_t *provider_id, uint64_t *provider_generation,
+    uint64_t *ack_id, uint64_t *ack_generation)
+{
+    selector->kind = VCS_ZCODE_DHT_RECORD_PROVIDER;
+    bool began = entry && !collision &&
+        child_begin(selector, now, provider_id, provider_generation);
+    selector->kind = VCS_ZCODE_DHT_RECORD_STORAGE_ACK;
+    return began && child_begin(selector, now, ack_id, ack_generation) &&
+           *provider_generation == *ack_generation;
+}
+
 static bool rpc_begin(const struct json_value *params, bool help,
                       struct json_value *result)
 {
@@ -274,28 +303,18 @@ static bool rpc_begin(const struct json_value *params, bool help,
     struct vcs_zcode_dht_time now = replication_now();
     replication_lock();
     cleanup_locked(now.monotonic_s);
-    struct replication_public_entry *entry = NULL;
     bool collision = false;
-    for (size_t i = 0; i < REPLICATION_PUBLIC_MAX; i++) {
-        if (!g_replication[i].used && !entry)
-            entry = &g_replication[i];
-        if (g_replication[i].used &&
-            token_equal(g_replication[i].lookup_token, tokens))
-            collision = true;
-    }
+    struct replication_public_entry *entry =
+        entry_scan_free_and_collision(tokens, &collision);
     struct vcs_zcode_dht_record_selector selector;
     memset(&selector, 0, sizeof(selector));
     memcpy(selector.namespace_name, namespace_name, sizeof(namespace_name));
     memcpy(selector.root, root, sizeof(selector.root));
     uint64_t provider_id = 0, ack_id = 0;
     uint64_t provider_generation = 0, ack_generation = 0;
-    selector.kind = VCS_ZCODE_DHT_RECORD_PROVIDER;
-    bool began = entry && !collision &&
-        child_begin(&selector, now, &provider_id, &provider_generation);
-    selector.kind = VCS_ZCODE_DHT_RECORD_STORAGE_ACK;
-    began = began && child_begin(
-                         &selector, now, &ack_id, &ack_generation) &&
-            provider_generation == ack_generation;
+    bool began = begin_paired_discovery(
+        &selector, now, entry, collision, &provider_id, &provider_generation,
+        &ack_id, &ack_generation);
     if (!began) {
         if (provider_id)
             (void)child_cancel(provider_id, provider_generation);
