@@ -127,10 +127,9 @@ _test_next:;
     return failures;
 }
 
-int test_devagent_rules(void)
+static int test_rules_leaf_registration(void)
 {
-    int failures = test_rules_exact_revalidation();
-
+    int failures = 0;
     TEST("rules: the leaf is registered and accepts cwd and situation") {
         const struct zcl_command_spec *spec =
             zcl_command_registry_find(zcl_command_catalog(), DVX_PATH, NULL);
@@ -140,7 +139,13 @@ int test_devagent_rules(void)
         ASSERT(spec->input_keys && strstr(spec->input_keys, "situation") != NULL);
         PASS();
     }
+_test_next:;
+    return failures;
+}
 
+static int test_rules_unfiltered_full_table(void)
+{
+    int failures = 0;
     TEST("rules: unfiltered, the whole table is twelve rows over two situations") {
         struct dvx_call c;
         dvx_begin(&c);
@@ -169,7 +174,13 @@ int test_devagent_rules(void)
         dvx_end(&c);
         PASS();
     }
+_test_next:;
+    return failures;
+}
 
+static int test_rules_values_are_machine_answers(void)
+{
+    int failures = 0;
     TEST("rules: a value is a machine answer and never contains a space") {
         struct dvx_call c;
         dvx_begin(&c);
@@ -187,7 +198,13 @@ int test_devagent_rules(void)
         dvx_end(&c);
         PASS();
     }
+_test_next:;
+    return failures;
+}
 
+static int test_rules_each_situation_answers_all_topics(void)
+{
+    int failures = 0;
     for (int which = 0; which < 2; which++) {
         const char *situation = which == 0 ? "standalone" : "shared_checkout_lane";
         TEST(which == 0 ? "rules: standalone answers all six topics"
@@ -221,7 +238,13 @@ int test_devagent_rules(void)
             PASS();
         }
     }
+_test_next:;
+    return failures;
+}
 
+static int test_rules_standalone_push_target(void)
+{
+    int failures = 0;
     TEST("rules: standalone requires native receipt-gated publication") {
         struct dvx_call c;
         dvx_begin(&c);
@@ -243,7 +266,13 @@ int test_devagent_rules(void)
         dvx_end(&c);
         PASS();
     }
+_test_next:;
+    return failures;
+}
 
+static int test_rules_lane_push_and_no_stash(void)
+{
+    int failures = 0;
     TEST("rules: a lane requires native publication, and never stashes") {
         struct dvx_call c;
         dvx_begin(&c);
@@ -269,7 +298,13 @@ int test_devagent_rules(void)
         dvx_end(&c);
         PASS();
     }
+_test_next:;
+    return failures;
+}
 
+static int test_rules_unknown_situation_refused(void)
+{
+    int failures = 0;
     TEST("rules: an unknown situation is refused, never answered empty") {
         struct dvx_call c;
         dvx_begin(&c);
@@ -280,8 +315,25 @@ int test_devagent_rules(void)
         dvx_end(&c);
         PASS();
     }
-
 _test_next:;
+    return failures;
+}
+
+int test_devagent_rules(void)
+{
+    int failures = test_rules_exact_revalidation();
+
+    /* One reported case per helper; the chain keeps the stop-at-first-failure
+     * order the _test_next goto gave when every case lived in this body. */
+    int own = test_rules_leaf_registration();
+    if (own == 0) own = test_rules_unfiltered_full_table();
+    if (own == 0) own = test_rules_values_are_machine_answers();
+    if (own == 0) own = test_rules_each_situation_answers_all_topics();
+    if (own == 0) own = test_rules_standalone_push_target();
+    if (own == 0) own = test_rules_lane_push_and_no_stash();
+    if (own == 0) own = test_rules_unknown_situation_refused();
+    failures += own;
+
     if (failures == 0) printf("test_devagent_rules: all passed\n");
     else printf("test_devagent_rules: %d FAILED\n", failures);
     return failures;
