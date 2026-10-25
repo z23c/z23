@@ -237,6 +237,48 @@ static void ff_unknown(const char *subject, const char *relation,
     out->unknown = true;
 }
 
+/* Doctrine rows that match this ask, in declaration order. A match past
+ * `limit` still counts in `total`, so the caller can say the answer was cut. */
+static void ff_query_doctrine(const char *subject, const char *relation,
+                              const char *context, size_t limit,
+                              struct zcl_fleet_facts_answer_v1 *out)
+{
+    for (size_t i = 0; i < FF_COUNT(k_rows); i++) {
+        const struct ff_row *row = &k_rows[i];
+
+        if (strcmp(subject, row->subject) != 0)
+            continue;
+        if (!ff_filter_matches(relation, row->relation))
+            continue;
+        if (!ff_filter_matches(context, row->context))
+            continue;
+        out->total++;
+        if (out->row_count < limit)
+            ff_fill(row, &out->rows[out->row_count++]);
+    }
+}
+
+/* Observed rows that match this ask. Their context is the fixed token
+ * "observation"; a context filter that names anything else drops the table. */
+static void ff_query_observed(const char *subject, const char *relation,
+                              const char *context, size_t limit,
+                              struct zcl_fleet_facts_answer_v1 *out)
+{
+    for (size_t i = 0; i < FF_COUNT(k_observed); i++) {
+        const struct ff_observed_row *row = &k_observed[i];
+
+        if (strcmp(subject, row->subject) != 0)
+            continue;
+        if (!ff_filter_matches(relation, row->relation))
+            continue;
+        if (!ff_filter_matches(context, "observation"))
+            continue;
+        out->total++;
+        if (out->row_count < limit)
+            ff_fill_observed(row, &out->rows[out->row_count++]);
+    }
+}
+
 bool zcl_fleet_facts_query(const char *subject, const char *relation,
                            const char *context, size_t max_rows,
                            struct zcl_fleet_facts_answer_v1 *out)
@@ -253,33 +295,8 @@ bool zcl_fleet_facts_query(const char *subject, const char *relation,
     if (limit == 0 || limit > ZCL_FLEET_FACTS_MAX_ROWS)
         limit = ZCL_FLEET_FACTS_MAX_ROWS;
 
-    for (size_t i = 0; i < FF_COUNT(k_rows); i++) {
-        const struct ff_row *row = &k_rows[i];
-
-        if (strcmp(subject, row->subject) != 0)
-            continue;
-        if (!ff_filter_matches(relation, row->relation))
-            continue;
-        if (!ff_filter_matches(context, row->context))
-            continue;
-        out->total++;
-        if (out->row_count < limit)
-            ff_fill(row, &out->rows[out->row_count++]);
-    }
-
-    for (size_t i = 0; i < FF_COUNT(k_observed); i++) {
-        const struct ff_observed_row *row = &k_observed[i];
-
-        if (strcmp(subject, row->subject) != 0)
-            continue;
-        if (!ff_filter_matches(relation, row->relation))
-            continue;
-        if (!ff_filter_matches(context, "observation"))
-            continue;
-        out->total++;
-        if (out->row_count < limit)
-            ff_fill_observed(row, &out->rows[out->row_count++]);
-    }
+    ff_query_doctrine(subject, relation, context, limit, out);
+    ff_query_observed(subject, relation, context, limit, out);
 
     if (out->total == 0) {
         ff_unknown(subject, relation, context, out);
