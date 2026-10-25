@@ -2591,7 +2591,6 @@ tests/harness/src/test_zid_seniority.c:test_zid_seniority:139
 tests/harness/src/test_znam.c:test_znam:228
 tests/harness/src/test_znam.c:test_znam_wallet_sweep:27
 tests/harness/src/test_znam_projection.c:t_payload_roundtrip:16
-tests/harness/src/test_zpay.c:test_zpay:19
 tests/harness/src/test_zslp_ledger.c:test_backfill_ledger:20
 tests/harness/src/test_zslp_ledger.c:test_strict_validity_rejections:20
 tests/harness/src/test_zslp_ledger.c:test_wallet_wide_sweep:20

@@ -31,6 +31,42 @@ static void zp_fixture(struct zpay_envelope *e)
     zp_fill(e->amount_commitment, sizeof(e->amount_commitment), 101);
 }
 
+static bool zp_all_bytes_equal(const uint8_t *buf, size_t len, uint8_t value)
+{
+    for (size_t i = 0; i < len; i++)
+        if (buf[i] != value)
+            return false;
+    return true;
+}
+
+static void zp_push_hex_fields(struct json_value *input)
+{
+    uint8_t field[32];
+    char field_hex[65];
+    const char *keys[] = { "nonce", "request_id", "invoice_digest",
+                           "amount_commitment" };
+    const size_t field_lens[] = { 16, 16, 32, 32 };
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        zp_fill(field, field_lens[i], (uint8_t)(31 + i * 32));
+        zcl_hex_encode(field, field_lens[i], field_hex);
+        json_push_kv_str(input, keys[i], field_hex);
+    }
+}
+
+static void zp_nul_terminate_output(char *output, size_t cap, size_t n)
+{
+    output[n < cap ? n : cap - 1] = 0;
+}
+
+static bool zp_command_output_ok(struct json_value *root,
+                                 const char *output, size_t n,
+                                 enum zcl_command_exit exit_code)
+{
+    return n > 0 && exit_code == ZCL_COMMAND_EXIT_OK &&
+           json_read(root, output, n) &&
+           json_get_bool(json_get(root, "ok"));
+}
+
 int test_zpay(void)
 {
     int failures = 0;
@@ -127,9 +163,7 @@ int test_zpay(void)
         uint8_t memo[ZPAY_MEMO_LEN];
         memset(memo, 0xA5, sizeof(memo));
         ASSERT(!zpay_memo_encode(memo, &in, NULL));
-        bool untouched = true;
-        for (size_t i = 0; i < sizeof(memo); i++)
-            if (memo[i] != 0xA5) { untouched = false; break; }
+        bool untouched = zp_all_bytes_equal(memo, sizeof(memo), 0xA5);
         ASSERT(untouched);
         PASS();
     }
@@ -146,8 +180,6 @@ int test_zpay(void)
             .granted_capabilities = ~(uint64_t)0,
             .authority_ceiling = ZCL_COMMAND_AUTH_OWNER,
         };
-        uint8_t field[32];
-        char field_hex[65];
         struct json_value input;
         json_init(&input);
         json_set_object(&input);
@@ -155,14 +187,7 @@ int test_zpay(void)
         json_push_kv_str(&input, "message_type", "receipt");
         json_push_kv_int(&input, "created_at", 1700000000);
         json_push_kv_int(&input, "expires_at", 1700000600);
-        const char *keys[] = { "nonce", "request_id", "invoice_digest",
-                               "amount_commitment" };
-        const size_t field_lens[] = { 16, 16, 32, 32 };
-        for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
-            zp_fill(field, field_lens[i], (uint8_t)(31 + i * 32));
-            zcl_hex_encode(field, field_lens[i], field_hex);
-            json_push_kv_str(&input, keys[i], field_hex);
-        }
+        zp_push_hex_fields(&input);
         json_push_kv_str(&input, "asset", "ZCL");
         char why[160];
         ASSERT(zcl_command_registry_input_validate(compose, &input, why,
@@ -173,12 +198,10 @@ int test_zpay(void)
             registry, compose, &context, &input, false, compose->path,
             "normal", 0, 0, NULL, output, sizeof(output) - 1, &exit_code);
         json_free(&input);
-        output[n < sizeof(output) ? n : sizeof(output) - 1] = 0;
+        zp_nul_terminate_output(output, sizeof(output), n);
         struct json_value root;
         json_init(&root);
-        ASSERT(n > 0 && exit_code == ZCL_COMMAND_EXIT_OK &&
-               json_read(&root, output, n) &&
-               json_get_bool(json_get(&root, "ok")));
+        ASSERT(zp_command_output_ok(&root, output, n, exit_code));
         const struct json_value *data = json_get(&root, "data");
         const char *memo_hex = data ?
             json_get_str(json_get(data, "memo_hex")) : NULL;
@@ -204,11 +227,9 @@ int test_zpay(void)
             registry, inspect, &context, &input, false, inspect->path,
             "normal", 0, 0, NULL, output, sizeof(output) - 1, &exit_code);
         json_free(&input);
-        output[n < sizeof(output) ? n : sizeof(output) - 1] = 0;
+        zp_nul_terminate_output(output, sizeof(output), n);
         json_init(&root);
-        ASSERT(n > 0 && exit_code == ZCL_COMMAND_EXIT_OK &&
-               json_read(&root, output, n) &&
-               json_get_bool(json_get(&root, "ok")));
+        ASSERT(zp_command_output_ok(&root, output, n, exit_code));
         data = json_get(&root, "data");
         ASSERT(data && json_get_bool(json_get(data, "current")));
         ASSERT(json_get_bool(json_get(data, "network_matches")));
