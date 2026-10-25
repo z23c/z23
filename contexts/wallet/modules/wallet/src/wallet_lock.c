@@ -238,6 +238,57 @@ struct zcl_result wallet_lock_unlock(struct wallet *w, struct wallet_sqlite *ws,
     return ZCL_OK;
 }
 
+/* Format the boot credential path into path; false when it would not fit. */
+static bool boot_credential_path(char *path, size_t path_size, const char *dir)
+{
+    int n = snprintf(path, path_size, "%s/wallet-passphrase", dir);
+    return n >= 0 && (size_t)n < path_size;
+}
+
+/* Fill before and report whether the open credential is a private bounded
+ * file: statable, current-user-only, non-empty and within WLK_MAX_PASS. */
+static bool boot_credential_snapshot_valid(
+    struct platform_positioned_file *credential,
+    struct platform_positioned_file_snapshot *before)
+{
+    if (!platform_positioned_file_snapshot(credential, before))
+        return false;
+    if (!platform_positioned_file_is_current_user_only(credential))
+        return false;
+    if (before->size == 0 || before->size > WLK_MAX_PASS)
+        return false;
+    return true;
+}
+
+/* Read exactly need bytes of the credential into secret; short on error. */
+static size_t boot_credential_read_secret(
+    struct platform_positioned_file *credential, char *secret, size_t need)
+{
+    size_t off = 0;
+    while (off < need) {
+        int64_t got = platform_positioned_file_read(
+            credential, secret + off, need - off, off);
+        if (got <= 0)
+            break;
+        off += (size_t)got;
+    }
+    return off;
+}
+
+/* Field-wise stability check: the credential did not change during read. */
+static bool boot_credential_snapshot_unchanged(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after)
+{
+    return before->size == after->size &&
+        before->modified_seconds == after->modified_seconds &&
+        before->modified_nanoseconds == after->modified_nanoseconds &&
+        before->changed_seconds == after->changed_seconds &&
+        before->changed_nanoseconds == after->changed_nanoseconds &&
+        before->volume == after->volume && before->file_low == after->file_low &&
+        before->file_high == after->file_high;
+}
+
 struct zcl_result wallet_lock_register_boot_credential(void)
 {
     const char *dir = getenv("CREDENTIALS_DIRECTORY");
@@ -245,8 +296,7 @@ struct zcl_result wallet_lock_register_boot_credential(void)
         return ZCL_OK;
 
     char path[1024];
-    int n = snprintf(path, sizeof(path), "%s/wallet-passphrase", dir);
-    if (n < 0 || (size_t)n >= sizeof(path))
+    if (!boot_credential_path(path, sizeof(path), dir))
         return ZCL_ERR(WLK_CREDENTIAL_IO,
                        "boot credential path exceeds internal bound");
 
@@ -260,9 +310,7 @@ struct zcl_result wallet_lock_register_boot_credential(void)
     }
 
     struct platform_positioned_file_snapshot before, after;
-    if (!platform_positioned_file_snapshot(&credential, &before) ||
-        !platform_positioned_file_is_current_user_only(&credential) ||
-        before.size == 0 || before.size > WLK_MAX_PASS) {
+    if (!boot_credential_snapshot_valid(&credential, &before)) {
         platform_positioned_file_close(&credential);
         return ZCL_ERR(WLK_CREDENTIAL_MODE,
                        "boot credential is not a private bounded file");
@@ -270,22 +318,9 @@ struct zcl_result wallet_lock_register_boot_credential(void)
 
     char secret[WLK_MAX_PASS + 1];
     size_t need = (size_t)before.size;
-    size_t off = 0;
-    while (off < need) {
-        int64_t got = platform_positioned_file_read(
-            &credential, secret + off, need - off, off);
-        if (got <= 0)
-            break;
-        off += (size_t)got;
-    }
+    size_t off = boot_credential_read_secret(&credential, secret, need);
     bool stable = platform_positioned_file_snapshot(&credential, &after) &&
-        before.size == after.size &&
-        before.modified_seconds == after.modified_seconds &&
-        before.modified_nanoseconds == after.modified_nanoseconds &&
-        before.changed_seconds == after.changed_seconds &&
-        before.changed_nanoseconds == after.changed_nanoseconds &&
-        before.volume == after.volume && before.file_low == after.file_low &&
-        before.file_high == after.file_high;
+        boot_credential_snapshot_unchanged(&before, &after);
     platform_positioned_file_close(&credential);
     if (off != need || !stable || memchr(secret, '\0', need) != NULL) {
         memory_cleanse(secret, sizeof(secret));
