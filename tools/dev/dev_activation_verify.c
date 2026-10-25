@@ -95,6 +95,30 @@ bool dev_activation_verify_running(struct dev_activation_txn *txn,
     return false;
 }
 
+static void dev_quarantine_format_now(char *now, size_t size)
+{
+    time_t t = platform_time_wall_time_t();
+    struct tm tmv;
+    if (gmtime_r(&t, &tmv))
+        strftime(now, size, "%Y-%m-%dT%H:%M:%SZ", &tmv);
+    else
+        snprintf(now, size, "1970-01-01T00:00:00Z");
+}
+
+/* one-line the reason to keep the value on a single JSON line */
+static void dev_quarantine_clean_reason(const char *reason, char *clean,
+                                        size_t size)
+{
+    size_t o = 0;
+    for (const char *p = reason ? reason : ""; *p && o + 2 < size; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\')
+            clean[o++] = '\\';
+        clean[o++] = (c == '\n' || c == '\r' || c == '\t') ? ' ' : (char)c;
+    }
+    clean[o] = 0;
+}
+
 void dev_activation_quarantine(const struct dev_activation_txn *txn,
                                const char *reason)
 {
@@ -117,23 +141,10 @@ void dev_activation_quarantine(const struct dev_activation_txn *txn,
                 strerror(errno));
         return;
     }
-    time_t t = platform_time_wall_time_t();
-    struct tm tmv;
     char now[32];
-    if (gmtime_r(&t, &tmv))
-        strftime(now, sizeof(now), "%Y-%m-%dT%H:%M:%SZ", &tmv);
-    else
-        snprintf(now, sizeof(now), "1970-01-01T00:00:00Z");
-    /* one-line the reason to keep the value on a single JSON line */
+    dev_quarantine_format_now(now, sizeof(now));
     char clean[256];
-    size_t o = 0;
-    for (const char *p = reason ? reason : ""; *p && o + 2 < sizeof(clean); p++) {
-        unsigned char c = (unsigned char)*p;
-        if (c == '"' || c == '\\')
-            clean[o++] = '\\';
-        clean[o++] = (c == '\n' || c == '\r' || c == '\t') ? ' ' : (char)c;
-    }
-    clean[o] = 0;
+    dev_quarantine_clean_reason(reason, clean, sizeof(clean));
     fprintf(f, "{\"schema\":\"zcl.dev_rejected_generation.v1\","
                "\"generation\":\"%s\",\"sha256\":\"%s\","
                "\"rejected_at_utc\":\"%s\",\"reason\":\"%s\"}\n",
