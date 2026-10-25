@@ -1127,7 +1127,6 @@ engine/composition/src/boot_zcode_async_select.c:boot_zcode_async_select_peer:20
 engine/composition/src/boot_zcode_dht_chain.c:boot_zcode_dht_chain_authorize:25
 engine/composition/src/boot_zcode_dht_frame_auth.c:boot_zcode_dht_frame_classify:20
 engine/composition/src/boot_zcode_dht_frame_auth.c:boot_zcode_dht_offence:16
-engine/composition/src/boot_zcode_dht_possession.c:boot_zcode_dht_possession_cycle:17
 engine/composition/src/boot_zcode_dht_reachability.c:boot_zcode_dht_reachability_drive:29
 engine/composition/src/boot_zcode_dht_reachability.c:boot_zcode_dht_reachability_refresh:20
 engine/composition/src/boot_zcode_dht_record_rpc.c:record_result_json:24

@@ -72,14 +72,61 @@ static bool possession_ensure(void)
     return g_scheduler != NULL;
 }
 
+static bool possession_cycle_args_rejected(
+    struct vcs_package_store *store,
+    const struct vcs_zcode_dht_storage_ack_proof_request *requests,
+    size_t request_count, boot_zcode_dht_possession_apply_fn apply)
+{
+    return !store || (request_count && (!requests || !apply)) ||
+           request_count > VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS;
+}
+
+static void possession_cycle_require_stale_or_fresh(
+    struct vcs_package_store *store,
+    const struct vcs_zcode_dht_storage_ack_proof_request *requests,
+    size_t request_count, uint64_t now_mono)
+{
+    for (size_t i = 0; i < request_count; i++)
+        if (requests[i].fresh_required ||
+            !vcs_package_possession_scheduler_current(
+                g_scheduler, store, requests[i].transport_root, NULL))
+            (void)vcs_package_possession_scheduler_require(
+                g_scheduler, requests[i].transport_root, now_mono);
+}
+
+static void possession_cycle_apply_outcomes(
+    struct vcs_package_store *store,
+    const struct vcs_zcode_dht_storage_ack_proof_request *requests,
+    size_t request_count, boot_zcode_dht_possession_apply_fn apply,
+    void *apply_context)
+{
+    for (size_t i = 0; i < request_count; i++) {
+        struct vcs_package_possession_receipt receipt;
+        bool current = vcs_package_possession_scheduler_current(
+            g_scheduler, store, requests[i].transport_root, &receipt);
+        if (!current) {
+            apply(apply_context, requests[i].transport_root,
+                  requests[i].proof_epoch, false);
+            continue;
+        }
+        struct possession_apply_one one = {
+            apply, apply_context, requests[i].transport_root,
+            requests[i].proof_epoch};
+        vcs_package_store_possession_apply_if_current(
+            store, requests[i].transport_root,
+            receipt.mutation_generation, true,
+            possession_apply_current, &one);
+    }
+}
+
 size_t boot_zcode_dht_possession_cycle(
     struct vcs_package_store *store,
     const struct vcs_zcode_dht_storage_ack_proof_request *requests,
     size_t request_count, uint64_t now_mono,
     boot_zcode_dht_possession_apply_fn apply, void *apply_context)
 {
-    if (!store || (request_count && (!requests || !apply)) ||
-        request_count > VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS)
+    if (possession_cycle_args_rejected(store, requests, request_count,
+                                       apply))
         return 0;
     uint8_t roots[VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS][32];
     for (size_t i = 0; i < request_count; i++) {
@@ -90,32 +137,13 @@ size_t boot_zcode_dht_possession_cycle(
                  vcs_package_possession_scheduler_reconcile(
                      g_scheduler, store, roots, request_count, now_mono);
     if (ready)
-        for (size_t i = 0; i < request_count; i++)
-            if (requests[i].fresh_required ||
-                !vcs_package_possession_scheduler_current(
-                    g_scheduler, store, requests[i].transport_root, NULL))
-                (void)vcs_package_possession_scheduler_require(
-                    g_scheduler, requests[i].transport_root, now_mono);
+        possession_cycle_require_stale_or_fresh(
+            store, requests, request_count, now_mono);
     if (ready)
         vcs_package_possession_scheduler_run(g_scheduler, store, now_mono);
     if (ready)
-        for (size_t i = 0; i < request_count; i++) {
-            struct vcs_package_possession_receipt receipt;
-            bool current = vcs_package_possession_scheduler_current(
-                g_scheduler, store, requests[i].transport_root, &receipt);
-            if (!current) {
-                apply(apply_context, requests[i].transport_root,
-                      requests[i].proof_epoch, false);
-                continue;
-            }
-            struct possession_apply_one one = {
-                apply, apply_context, requests[i].transport_root,
-                requests[i].proof_epoch};
-            vcs_package_store_possession_apply_if_current(
-                store, requests[i].transport_root,
-                receipt.mutation_generation, true,
-                possession_apply_current, &one);
-        }
+        possession_cycle_apply_outcomes(
+            store, requests, request_count, apply, apply_context);
     zcl_mutex_unlock(&g_possession_lock);
     return ready ? request_count : 0;
 }
