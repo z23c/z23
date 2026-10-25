@@ -21,28 +21,31 @@ bool codeindex_symbol(struct codeindex *ci, const char *name,
     return ci_store_symbol_by_name(ci->store, name, out, found);
 }
 
-bool codeindex_symbol_by_id(struct codeindex *ci, const char *id,
-                            struct ci_symbol *out, bool *found)
+/* "fn:static:<path>:<name>" with the prefix already stripped: split at the
+ * last ':' into defining path and name. Malformed or overlong ids read as
+ * not-found rather than erroring. */
+static bool symbol_by_static_id(struct codeindex *ci, const char *qualified,
+                                struct ci_symbol *out, bool *found)
 {
-    if (found) *found = false;
-    if (!ci || !ci->store || !id || !out)
-        LOG_FAIL("codeindex", "null arg to codeindex_symbol_by_id");
-    static const char static_prefix[] = "fn:static:";
-    if (strncmp(id, static_prefix, sizeof(static_prefix) - 1) == 0) {
-        const char *qualified = id + sizeof(static_prefix) - 1;
-        const char *split = strrchr(qualified, ':');
-        if (!split || split == qualified || split[1] == '\0')
-            return true;
-        char path[256];
-        size_t path_len = (size_t)(split - qualified);
-        if (path_len >= sizeof(path))
-            return true;
-        memcpy(path, qualified, path_len);
-        path[path_len] = '\0';
-        return ci_store_symbol_by_name_path(ci->store, split + 1, path,
-                                             out, found);
-    }
+    const char *split = strrchr(qualified, ':');
+    if (!split || split == qualified || split[1] == '\0')
+        return true;
+    char path[256];
+    size_t path_len = (size_t)(split - qualified);
+    if (path_len >= sizeof(path))
+        return true;
+    memcpy(path, qualified, path_len);
+    path[path_len] = '\0';
+    return ci_store_symbol_by_name_path(ci->store, split + 1, path,
+                                        out, found);
+}
 
+/* Non-static ids ("ns:name" / "ns:external:name"): look up by the trailing
+ * name, then keep the hit only when its canonical record id equals the id
+ * that was asked for. */
+static bool symbol_by_qualified_name_id(struct codeindex *ci, const char *id,
+                                        struct ci_symbol *out, bool *found)
+{
     const char *name = strrchr(id, ':');
     if (!name || name[1] == '\0')
         return true;
@@ -58,6 +61,19 @@ bool codeindex_symbol_by_id(struct codeindex *ci, const char *id,
         memset(out, 0, sizeof(*out));
     }
     return true;
+}
+
+bool codeindex_symbol_by_id(struct codeindex *ci, const char *id,
+                            struct ci_symbol *out, bool *found)
+{
+    if (found) *found = false;
+    if (!ci || !ci->store || !id || !out)
+        LOG_FAIL("codeindex", "null arg to codeindex_symbol_by_id");
+    static const char static_prefix[] = "fn:static:";
+    if (strncmp(id, static_prefix, sizeof(static_prefix) - 1) == 0)
+        return symbol_by_static_id(ci, id + sizeof(static_prefix) - 1,
+                                   out, found);
+    return symbol_by_qualified_name_id(ci, id, out, found);
 }
 
 int codeindex_find(struct codeindex *ci, const char *query,
