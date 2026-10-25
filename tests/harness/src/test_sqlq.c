@@ -192,6 +192,46 @@ static int test_sqlq_multicall_names(void)
     (void)test_rm_rf_recursive(dir);
     return failures;
 }
+
+/* Keep the real fd 1 open read-only: buffered output must fail its final
+ * flush while stderr remains available to the merged capture. SQL stays
+ * one argv element and never becomes shell syntax. */
+static int sqlq_readonly_stdout(const char *sql, char *out, size_t cap)
+{
+    const char *argv[] = {
+        "sh", "-c", "exec \"$@\" 1< /dev/null", "sqlq-output-fixture",
+        SQLQ_BIN, ":memory:", sql, NULL
+    };
+    bool timed_out = false;
+    int rc = zcl_spawn_capture_merged_observed(argv, out, cap, 5000,
+                                               &timed_out);
+    return timed_out ? -1 : rc;
+}
+
+static int test_sqlq_output_errors(void)
+{
+    static const struct { const char *sql, *diagnostic; int status; } cases[] = {
+        {"SELECT 1, 'alpha', x'00ff', NULL", "sqlq: stdout write failed", 1},
+        {"PRAGMA user_version", "sqlq: stdout write failed", 1},
+        {"SELECT 1 WHERE 0", "", 0},
+        {"SELECT FROM WHERE", "sqlq: prepare failed", 1},
+        {"SELECT abs(-9223372036854775808)", "sqlq: step failed", 1},
+    };
+    int failures = 0;
+    TEST("sqlq: output errors refuse while empty results and SQL errors retain status") {
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            char out[512] = {0};
+            ASSERT(sqlq_readonly_stdout(cases[i].sql, out, sizeof out) ==
+                   cases[i].status);
+            if (cases[i].diagnostic[0])
+                ASSERT(strstr(out, cases[i].diagnostic) != NULL);
+            else
+                ASSERT(out[0] == '\0');
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 
 int test_sqlq(void)
@@ -207,6 +247,10 @@ int test_sqlq(void)
     failures += test_sqlq_statement_tail();
 #if !defined(_WIN32)
     failures += test_sqlq_multicall_names();
+    failures += test_sqlq_output_errors();
+#else
+    printf("sqlq: failed-output sink controls UNOBSERVED on Windows "
+           "(capture adapter has no stdout override)\n");
 #endif
     return failures;
 }

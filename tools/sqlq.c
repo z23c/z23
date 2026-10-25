@@ -60,6 +60,15 @@ static sqlite3_stmt *sqlq_prepare(sqlite3 *db, const char *sql)
     return st;
 }
 
+static int finish_stdout(int rc)
+{
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        fputs("sqlq: stdout write failed\n", stderr);
+        return 1;
+    }
+    return rc;
+}
+
 int sqlq_main(int argc, char **argv)
 {
     if (argc != 3) {
@@ -115,5 +124,5 @@ int sqlq_main(int argc, char **argv)
         fprintf(stderr, "sqlq: step failed: %s\n", sqlite3_errmsg(db));
     sqlite3_finalize(st);
     sqlite3_close(db);
-    return ok ? 0 : 1;
+    return finish_stdout(ok ? 0 : 1);
 }
