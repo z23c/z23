@@ -34,6 +34,28 @@ static void psc_audit_store(const struct psc_audit_result *r)
     pthread_mutex_unlock(&g_psc_audit_mu);
 }
 
+/* Shared exit tail of psc_audit_run: snapshot the result for dumpstate, then
+ * copy it to the caller's out param (if any). */
+static void psc_audit_store_and_copy_out(const struct psc_audit_result *r,
+                                         struct psc_audit_result *out)
+{
+    psc_audit_store(r);
+    if (out) *out = *r;
+}
+
+/* Copy worker/shard counts and compile timing into the audit result, deriving
+ * per-block time from the audited block span. */
+static void psc_audit_fill_compile_stats(struct psc_audit_result *r,
+                                         const struct psc_range_result *rr,
+                                         uint32_t lo, uint32_t hi)
+{
+    r->k_workers   = rr->k_workers;
+    r->s_shards    = rr->s_shards;
+    r->compile_us  = rr->total_us;
+    uint64_t nblk = (hi >= lo) ? (uint64_t)(hi - lo + 1) : 0;
+    r->us_per_block = nblk ? rr->total_us / (double)nblk : 0.0;
+}
+
 bool psc_audit_run(struct main_state *ms, const char *datadir,
                    uint32_t lo, uint32_t hi, int k_workers, int s_shards,
                    struct psc_audit_result *out)
@@ -48,8 +70,7 @@ bool psc_audit_run(struct main_state *ms, const char *datadir,
     if (!ms) {
         snprintf(r.reject_kind, sizeof(r.reject_kind), "no_ms");
         LOG_WARN("psc", "[psc] audit: NULL main_state");
-        psc_audit_store(&r);
-        if (out) *out = r;
+        psc_audit_store_and_copy_out(&r, out);
         return false;
     }
 
@@ -61,11 +82,7 @@ bool psc_audit_run(struct main_state *ms, const char *datadir,
     struct psc_range_result rr;
     bool compiled = psc_compile_range(lo, hi, k_workers, s_shards,
                                       psc_prod_block_provider, &src, &rr);
-    r.k_workers   = rr.k_workers;
-    r.s_shards    = rr.s_shards;
-    r.compile_us  = rr.total_us;
-    uint64_t nblk = (hi >= lo) ? (uint64_t)(hi - lo + 1) : 0;
-    r.us_per_block = nblk ? rr.total_us / (double)nblk : 0.0;
+    psc_audit_fill_compile_stats(&r, &rr, lo, hi);
 
     if (!compiled || !rr.ok) {
         snprintf(r.reject_kind, sizeof(r.reject_kind), "%s",
@@ -73,8 +90,7 @@ bool psc_audit_run(struct main_state *ms, const char *datadir,
         r.reject_height = rr.reject_height;
         LOG_WARN("psc", "[psc] audit [%u,%u]: parallel compile did not accept "
                  "(%s, height=%d)", lo, hi, r.reject_kind, r.reject_height);
-        psc_audit_store(&r);
-        if (out) *out = r;
+        psc_audit_store_and_copy_out(&r, out);
         return false;
     }
 
@@ -88,15 +104,13 @@ bool psc_audit_run(struct main_state *ms, const char *datadir,
     if (!db) {
         snprintf(r.reject_kind, sizeof(r.reject_kind), "no_db");
         LOG_WARN("psc", "[psc] audit [%u,%u]: no progress store db", lo, hi);
-        psc_audit_store(&r);
-        if (out) *out = r;
+        psc_audit_store_and_copy_out(&r, out);
         return false;
     }
     if (coins_kv_commitment(db, r.durable_sha3) != 0) {
         snprintf(r.reject_kind, sizeof(r.reject_kind), "durable_commitment_failed");
         LOG_WARN("psc", "[psc] audit [%u,%u]: coins_kv_commitment failed", lo, hi);
-        psc_audit_store(&r);
-        if (out) *out = r;
+        psc_audit_store_and_copy_out(&r, out);
         return false;
     }
     r.durable_count = coins_kv_count(db);
@@ -109,8 +123,7 @@ bool psc_audit_run(struct main_state *ms, const char *datadir,
                  "durable_count=%lld", lo, hi,
                  (unsigned long long)r.parallel_count, (long long)r.durable_count);
 
-    psc_audit_store(&r);
-    if (out) *out = r;
+    psc_audit_store_and_copy_out(&r, out);
     return r.match;
 }
 
