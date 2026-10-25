@@ -72,6 +72,57 @@ static bool probe_pick_file(const char *dir, int64_t min_bytes, char *out,
     return found;
 }
 
+/* Normalise the caller-supplied sample count, block size and minimum file
+ * size against the defaults and the hard caps. */
+static void probe_clamp_params(int *samples, size_t *block,
+                               int64_t *min_file_bytes)
+{
+    if (*samples <= 0)
+        *samples = PLATFORM_STORAGE_PROBE_SAMPLES;
+    if (*samples > PROBE_SAMPLES_MAX)
+        *samples = PROBE_SAMPLES_MAX;
+    if (*block == 0)
+        *block = PLATFORM_STORAGE_PROBE_BLOCK_BYTES;
+    if (*block > PROBE_BLOCK_MAX)
+        *block = PROBE_BLOCK_MAX;
+    if (*min_file_bytes <= 0)
+        *min_file_bytes = PLATFORM_STORAGE_PROBE_MIN_FILE_BYTES;
+    if (*min_file_bytes < (int64_t)*block * 16)
+        *min_file_bytes = (int64_t)*block * 16;
+}
+
+/* Time `samples` block-aligned positioned reads spread across the file and
+ * return how many landed; each landed sample's microseconds go into lat[]. */
+static int probe_time_random_reads(struct platform_positioned_file *file,
+                                   uint8_t *buf, size_t block,
+                                   uint64_t file_bytes, int samples,
+                                   int64_t *lat)
+{
+    /* One RNG draw seeds a local xorshift: the probe must not consume the
+     * process RNG once per sample, and the offsets only need to be spread,
+     * not unpredictable. */
+    uint64_t state = rng_u64() | 1u;
+    uint64_t span = file_bytes > block ? file_bytes - block : 1;
+
+    int taken = 0;
+    for (int i = 0; i < samples; i++) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        uint64_t offset = state % span;
+        offset -= offset % block; /* block-aligned: one device read, not two */
+
+        int64_t t0 = clock_now_monotonic_ns();
+        int64_t nr = platform_positioned_file_read(file, buf, block, offset);
+        int64_t t1 = clock_now_monotonic_ns();
+        if (nr <= 0)
+            continue;
+        int64_t us = (t1 - t0) / 1000;
+        lat[taken++] = us < 0 ? 0 : us;
+    }
+    return taken;
+}
+
 bool platform_storage_random_read_median_us(const char *dir, int samples,
                                             size_t block,
                                             int64_t min_file_bytes,
@@ -79,18 +130,7 @@ bool platform_storage_random_read_median_us(const char *dir, int samples,
 {
     if (!dir || !dir[0] || !out_median_us)
         return false;
-    if (samples <= 0)
-        samples = PLATFORM_STORAGE_PROBE_SAMPLES;
-    if (samples > PROBE_SAMPLES_MAX)
-        samples = PROBE_SAMPLES_MAX;
-    if (block == 0)
-        block = PLATFORM_STORAGE_PROBE_BLOCK_BYTES;
-    if (block > PROBE_BLOCK_MAX)
-        block = PROBE_BLOCK_MAX;
-    if (min_file_bytes <= 0)
-        min_file_bytes = PLATFORM_STORAGE_PROBE_MIN_FILE_BYTES;
-    if (min_file_bytes < (int64_t)block * 16)
-        min_file_bytes = (int64_t)block * 16;
+    probe_clamp_params(&samples, &block, &min_file_bytes);
 
     char path[1024];
     uint64_t file_bytes = 0;
@@ -111,28 +151,8 @@ bool platform_storage_random_read_median_us(const char *dir, int samples,
         return false;
     }
 
-    /* One RNG draw seeds a local xorshift: the probe must not consume the
-     * process RNG once per sample, and the offsets only need to be spread,
-     * not unpredictable. */
-    uint64_t state = rng_u64() | 1u;
-    uint64_t span = file_bytes > block ? file_bytes - block : 1;
-
-    int taken = 0;
-    for (int i = 0; i < samples; i++) {
-        state ^= state << 13;
-        state ^= state >> 7;
-        state ^= state << 17;
-        uint64_t offset = state % span;
-        offset -= offset % block; /* block-aligned: one device read, not two */
-
-        int64_t t0 = clock_now_monotonic_ns();
-        int64_t nr = platform_positioned_file_read(&file, buf, block, offset);
-        int64_t t1 = clock_now_monotonic_ns();
-        if (nr <= 0)
-            continue;
-        int64_t us = (t1 - t0) / 1000;
-        lat[taken++] = us < 0 ? 0 : us;
-    }
+    int taken = probe_time_random_reads(&file, buf, block, file_bytes,
+                                        samples, lat);
 
     platform_positioned_file_close(&file);
     free(buf);
