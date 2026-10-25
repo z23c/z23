@@ -509,6 +509,23 @@ static int test_is_routable(void)
 
 /* ── net_addr_get_group (peer-diversity bucketing) ───────────────── */
 
+/* True when a net_addr_get_group() result is exactly `len` bytes and
+ * matches `expected` byte for byte. Pure comparison, prints nothing —
+ * it exists so every NC_CHECK assertion (message and order) can stay
+ * inline in test_get_group while the &&-chains move out. */
+static bool get_group_matches_expected(size_t n, const unsigned char *out,
+                                       size_t len,
+                                       const unsigned char *expected)
+{
+    if (n != len)
+        return false;
+    for (size_t i = 0; i < len; i++) {
+        if (out[i] != expected[i])
+            return false;
+    }
+    return true;
+}
+
 static int test_get_group(void)
 {
     int failures = 0;
@@ -518,20 +535,23 @@ static int test_get_group(void)
 
     addr_ipv4(&a, 127, 0, 0, 1);
     n = net_addr_get_group(&a, out, sizeof(out));
+    unsigned char expect_local[1] = { 255 };
     NC_CHECK("get_group: local address groups as class 255, "
-             "zero-length body", n == 1 && out[0] == 255);
+             "zero-length body",
+             get_group_matches_expected(n, out, 1, expect_local));
 
     addr_ipv4(&a, 10, 1, 2, 3);
     n = net_addr_get_group(&a, out, sizeof(out));
+    unsigned char expect_unroutable[1] = { (unsigned char)NET_UNROUTABLE };
     NC_CHECK("get_group: unroutable (rfc1918) groups as class "
              "NET_UNROUTABLE",
-             n == 1 && out[0] == (unsigned char)NET_UNROUTABLE);
+             get_group_matches_expected(n, out, 1, expect_unroutable));
 
     addr_ipv4(&a, 8, 8, 8, 8);
     n = net_addr_get_group(&a, out, sizeof(out));
+    unsigned char expect_ipv4[3] = { (unsigned char)NET_IPV4, 8, 8 };
     NC_CHECK("get_group: routable IPv4 groups by class + first two octets",
-             n == 3 && out[0] == (unsigned char)NET_IPV4 &&
-             out[1] == 8 && out[2] == 8);
+             get_group_matches_expected(n, out, 3, expect_ipv4));
 
     {
         unsigned char ip[16] = {0};
@@ -539,11 +559,13 @@ static int test_get_group(void)
         ip[12] = 0x01; ip[13] = 0x02; /* client's obscured IPv4 octets */
         addr_ipv6(&a, ip);
         n = net_addr_get_group(&a, out, sizeof(out));
+        unsigned char expect_teredo[3] =
+            { (unsigned char)NET_IPV4,
+              (unsigned char)(0x01 ^ 0xFF),
+              (unsigned char)(0x02 ^ 0xFF) };
         NC_CHECK("get_group: Teredo groups via the XOR'd early-return "
                  "path, independent of the generic byte walk",
-                 n == 3 && out[0] == (unsigned char)NET_IPV4 &&
-                 out[1] == (unsigned char)(0x01 ^ 0xFF) &&
-                 out[2] == (unsigned char)(0x02 ^ 0xFF));
+                 get_group_matches_expected(n, out, 3, expect_teredo));
     }
     {
         unsigned char ip[16] = {0};
@@ -558,21 +580,22 @@ static int test_get_group(void)
         addr_tor(&a);
         a.ip[6] = 0xAB;
         n = net_addr_get_group(&a, out, sizeof(out));
+        unsigned char expect_onion[2] =
+            { (unsigned char)NET_ONION, (unsigned char)(0xAB | 0x0F) };
         NC_CHECK("get_group: a .onion address groups under NET_ONION "
                  "using torv3-derived bytes (masked with the low nibble)",
-                 n == 2 && out[0] == (unsigned char)NET_ONION &&
-                 out[1] == (unsigned char)(0xAB | 0x0F));
+                 get_group_matches_expected(n, out, 2, expect_onion));
     }
     {
         unsigned char ip[16] =
             {0x26,0x06,0x47,0x00,0,0,0,0,0,0,0,0,0,0,0,1};
         addr_ipv6(&a, ip);
         n = net_addr_get_group(&a, out, sizeof(out));
+        unsigned char expect_ipv6[5] =
+            { (unsigned char)NET_IPV6, 0x26, 0x06, 0x47, 0x00 };
         NC_CHECK("get_group: a generic public IPv6 address groups by "
                  "class + the first four octets (/32 bucket)",
-                 n == 5 && out[0] == (unsigned char)NET_IPV6 &&
-                 out[1] == 0x26 && out[2] == 0x06 &&
-                 out[3] == 0x47 && out[4] == 0x00);
+                 get_group_matches_expected(n, out, 5, expect_ipv6));
     }
     {
         addr_ipv4(&a, 127, 0, 0, 1);
