@@ -362,6 +362,372 @@ static void draw_speed_effects(ultimate_game_t* game) {
     }
 }
 
+static void apply_keyboard_flight(ultimate_game_t* game, float* move_x, float* move_y) {
+    if (!game->input->model.connected) {
+        *move_x = 0.0f;
+        *move_y = 0.0f;
+        if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) *move_x = -1.0f;
+        if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) *move_x = 1.0f;
+        if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) *move_y = -1.0f;  // Up = negative Y
+        if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) *move_y = 1.0f;   // Down = positive Y
+    }
+}
+
+static void log_input_debug(float move_x, float move_y, aircraft_t* player_aircraft,
+                            input_state_fast_t* input) {
+    // DEBUG: Print input values every 60 frames
+    static int debug_counter = 0;
+    if (++debug_counter >= 60) {
+        debug_counter = 0;
+        printf("Input - X: %.3f, Y: %.3f | Speed: %.1f | Boost: %d, Brake: %d\n", 
+               move_x, move_y, player_aircraft->speed,
+               input->speed_boost ? 1 : 0, input->brake ? 1 : 0);
+    }
+}
+
+static void update_boost_and_throttle(ultimate_game_t* game, aircraft_t* player_aircraft,
+                                      input_state_fast_t* input, float dt, float speed_mult) {
+    // Speed control - New system with UR throttle and UL boost
+    
+    // UR button = Mario Kart style mushroom boost (SWAPPED)
+    bool boost_pressed = input->speed_boost || 
+                       (!game->input->model.connected && IsKeyPressed(KEY_SPACE));
+    if (boost_pressed && game->boost_timer <= 0) {  // 'speed_boost' is now UR boost
+        game->boost_timer = 0.75f;  // 0.75 second duration (HALF recharge time)
+        
+        // INSTANT massive speed increase (like mushroom boost)
+        player_aircraft->speed = AIRCRAFT_MAX_SPEED * 3.25f * speed_mult;  // 30% faster: 243.75 instead of 187.5
+        
+        // Visual/audio feedback
+        effects_sonic_boom(game->effects, player_aircraft->position, 
+                         aircraft_get_forward_vector(player_aircraft));
+        effects_screen_shake(game->effects, 3.0f, 0.5f);
+        effects_screen_flash(game->effects, SKYBLUE, 0.3f);
+        effects_spawn_powerup_collect(game->effects, player_aircraft->position, SKYBLUE);
+    }
+    
+    // Boost decay - rapid falloff like Mario Kart
+    if (game->boost_timer > 0) {
+        game->boost_timer -= dt;
+        
+        // Keep speed lines at max during boost
+        game->speed_lines_intensity = 1.0f;
+        
+        // Only start decaying speed after 0.25 seconds (proportionally reduced)
+        if (game->boost_timer < 0.5f) {
+            // Rapid decay back to normal max speed
+            float decay_rate = 300.0f * dt;  // Faster decay for shorter boost
+            player_aircraft->speed = fmaxf(player_aircraft->speed - decay_rate, 
+                                         AIRCRAFT_MAX_SPEED * 1.2f * speed_mult);
+        }
+    }
+    // UL button = normal throttle (SWAPPED)
+    else {
+        bool throttle_pressed = input->brake ||
+                              (!game->input->model.connected && IsKeyDown(KEY_LEFT_SHIFT));
+        if (throttle_pressed) {  // 'brake' is now UL throttle
+            player_aircraft->speed = fminf(player_aircraft->speed + 90.0f * dt * speed_mult,  // 50% faster acceleration
+                                         AIRCRAFT_MAX_SPEED * 1.2f * speed_mult);
+            game->speed_lines_intensity = 0.6f;
+        }
+        // No throttle = gradual speed decrease
+        else {
+            player_aircraft->speed = fmaxf(player_aircraft->speed - 25.0f * dt, AIRCRAFT_MIN_SPEED);
+            game->speed_lines_intensity = fmaxf(0, game->speed_lines_intensity - dt * 2);
+        }
+    }
+}
+
+static void fire_continuous_guns(ultimate_game_t* game, input_state_fast_t* input) {
+    // Continuous firing when R2 is held - EVERY FRAME!
+    if (input->fire_guns || (!game->input->model.connected && IsKeyDown(KEY_LEFT_CONTROL))) {
+        // Use right stick to fine-tune bullet direction
+        float aim_x = -input->camera_x;  // Right stick X INVERTED - right moves bullets right
+        float aim_y = input->camera_y;   // Right stick Y normal - up moves bullets up
+        
+        // Fire continuously with aiming adjustment
+        aircraft_manager_fire_weapon_aimed(game->aircraft_mgr, game->player_id, aim_x, aim_y);
+        
+        // Triple shot in overdrive mode
+        if (overdrive_is_active(game->overdrive)) {
+            aircraft_manager_fire_weapon_aimed(game->aircraft_mgr, game->player_id, 
+                                             aim_x - 0.1f, aim_y);
+            aircraft_manager_fire_weapon_aimed(game->aircraft_mgr, game->player_id, 
+                                             aim_x + 0.1f, aim_y);
+        }
+    }
+}
+
+static void spawn_aircraft_death_effects(ultimate_game_t* game) {
+    // Check for destroyed aircraft and spawn explosions BEFORE respawn
+    static int last_kills[MAX_MANAGED_AIRCRAFT] = {0};
+    static bool first_check = true;
+    
+    for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* ma = &game->aircraft_mgr->aircraft[i];
+        
+        // Initialize kill tracking
+        if (first_check) {
+            last_kills[i] = ma->deaths;
+        }
+        
+        // Check if aircraft got a new death (was just destroyed)
+        if (ma->deaths > last_kills[i]) {
+            // BIG EXPLOSION at current position!
+            Vector3 explosion_pos = ma->aircraft->position;
+            
+            // Multiple layered explosions for massive effect
+            effects_spawn_explosion(game->effects, explosion_pos, 80.0f, ORANGE);
+            effects_spawn_explosion(game->effects, explosion_pos, 60.0f, RED);
+            effects_spawn_explosion(game->effects, explosion_pos, 40.0f, YELLOW);
+            effects_spawn_explosion(game->effects, explosion_pos, 20.0f, WHITE);
+            
+            // Spawn many particles as debris
+            for (int p = 0; p < 50; p++) {
+                float angle = (float)p * (PI * 2.0f / 50.0f);
+                float speed = 150.0f + GetRandomValue(0, 300);
+                Vector3 vel = {
+                    cosf(angle) * speed,
+                    100.0f + GetRandomValue(0, 200),
+                    sinf(angle) * speed
+                };
+                effects_spawn_missile_trail(game->effects, explosion_pos, vel);
+            }
+            
+            // More particles going up
+            for (int p = 0; p < 20; p++) {
+                Vector3 vel = {
+                    GetRandomValue(-100, 100),
+                    200.0f + GetRandomValue(0, 200),
+                    GetRandomValue(-100, 100)
+                };
+                effects_spawn_missile_trail(game->effects, explosion_pos, vel);
+            }
+            
+            effects_screen_shake(game->effects, 8.0f, 1.0f);
+            effects_screen_flash(game->effects, WHITE, 0.3f);
+            
+            // Extra effects for enemy kill
+            if (i != game->player_id) { // Enemy destroyed (not player)
+                effects_show_achievement(game->effects, "ENEMY DESTROYED!");
+                effects_spawn_powerup_collect(game->effects, explosion_pos, GOLD);
+                Vector3 boom_dir = {1.0f, 0.0f, 0.0f}; // Safe non-zero direction
+                effects_sonic_boom(game->effects, explosion_pos, boom_dir);
+            }
+            
+            // Update death count
+            last_kills[i] = ma->deaths;
+        }
+    }
+    first_check = false;
+}
+
+static void update_boss_or_enemies(ultimate_game_t* game, aircraft_t* player_aircraft, float dt) {
+    // Enemy/Boss update
+    if (game->boss_spawned && !game->boss_defeated) {
+        cyber_dragon_update(game->boss, player_aircraft->position, dt);
+        
+        // Check boss collision with player
+        if (cyber_dragon_check_collision(game->boss, player_aircraft->position, 5.0f)) {
+            game->player_health -= 20.0f * dt;
+            game->damage_flash = 0.3f;
+        }
+        
+        // Check weapon hits on boss
+        // (In full implementation, would check all projectiles)
+        
+        if (game->boss->health <= 0) {
+            game->boss_defeated = true;
+            game->boss_kills++;
+            game->score += 10000;
+            effects_show_achievement(game->effects, "CYBER DRAGON DEFEATED!");
+            overdrive_charge(game->overdrive, 100.0f);  // Full charge reward
+        }
+    } else {
+        enemies_update(game->enemies, player_aircraft->position, dt);
+        
+        // Spawn boss after wave 3
+        if (game->wave >= 3 && !game->boss_spawned) {
+            spawn_boss(game);
+        }
+    }
+}
+
+static void apply_player_hit_damage(ultimate_game_t* game, aircraft_t* player_aircraft) {
+    // Check player damage
+    if (enemies_check_player_hit(game->enemies, player_aircraft->position, 5.0f)) {
+        if (!overdrive_is_active(game->overdrive)) {  // Invincible in overdrive
+            float damage = 10.0f;
+            if (game->shield_power > 0) {
+                game->shield_power -= damage;
+                if (game->shield_power < 0) {
+                    damage = -game->shield_power;
+                    game->shield_power = 0;
+                }
+                effects_spawn_shield_ripple(game->effects, player_aircraft->position, 15.0f);
+            }
+            
+            if (damage > 0) {
+                game->player_health -= damage;
+                game->damage_flash = 0.3f;
+                effects_screen_flash(game->effects, RED, 0.2f);
+                effects_screen_shake(game->effects, 1.5f, 0.2f);
+                
+                if (game->player_health <= 0) {
+                    game->game_over = true;
+                }
+            }
+        }
+    }
+}
+
+static void update_combo_timer(ultimate_game_t* game, float dt) {
+    // Combo system
+    if (game->combo_timer > 0) {
+        game->combo_timer -= dt;
+    } else {
+        if (game->combo > game->max_combo) {
+            game->max_combo = game->combo;
+        }
+        game->combo = 0;
+    }
+}
+
+static void apply_simulated_kills(ultimate_game_t* game) {
+    // Enemy kills give overdrive charge
+    // TODO: Implement proper weapon hit detection
+    int kills = 0;  // Placeholder for enemies_check_weapon_hits
+    if (enemies_get_active_count(game->enemies) < 10 && rand() % 100 < 5) {
+        kills = 1;  // Simulate kills for demo
+        game->total_kills += kills;
+        game->score += kills * 100 * (game->combo + 1);
+        game->combo += kills;
+        game->combo_timer = 3.0f;
+        
+        overdrive_charge(game->overdrive, kills * 5.0f);
+    }
+}
+
+static void regenerate_player_resources(ultimate_game_t* game, aircraft_t* player_aircraft,
+                                        input_state_fast_t* input, float dt) {
+    // Regeneration
+    if (game->damage_flash > 0) game->damage_flash -= dt;
+    
+    if (game->boost_fuel < 100 && !input->speed_boost) {
+        game->boost_fuel += 15 * dt;
+    }
+    
+    if (game->shield_power < 100 && !enemies_check_player_hit(game->enemies, 
+                                                              player_aircraft->position, 50.0f)) {
+        game->shield_power += 5 * dt;  // Slow shield regen when safe
+    }
+}
+
+static void advance_waves_and_victory(ultimate_game_t* game) {
+    // Wave management
+    if (!game->boss_spawned && enemies_wave_complete(game->enemies)) {
+        game->wave++;
+        if (game->wave < 3) {
+            enemies_spawn_wave(game->enemies, game->wave);
+            effects_show_achievement(game->effects, "WAVE CLEARED!");
+            overdrive_charge(game->overdrive, 20.0f);
+        }
+    }
+    
+    // Victory condition
+    if (game->boss_defeated && enemies_get_active_count(game->enemies) == 0) {
+        game->victory = true;
+    }
+}
+
+static void draw_scene_to_buffer(ultimate_game_t* game, aircraft_t* player_aircraft,
+                                 RenderTexture2D screen_buffer) {
+    // Drawing with effects
+    BeginTextureMode(screen_buffer);
+    ClearBackground(BLACK);
+    
+    BeginMode3D(game->camera);
+    
+    // World
+    cyberpunk_world_draw(game->world, game->camera);
+    
+    // Overdrive effects behind aircraft
+    if (overdrive_is_active(game->overdrive)) {
+        overdrive_draw_effects(game->overdrive, player_aircraft->position, game->camera);
+    }
+    
+    // PHASE 3: Draw all aircraft and their weapons
+    for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
+        managed_aircraft_t* aircraft = &game->aircraft_mgr->aircraft[i];
+        
+        // Don't draw if respawning
+        if (aircraft->respawn_timer > 0) {
+            continue;
+        }
+        
+        if (aircraft->aircraft && aircraft->health > 0) {
+            aircraft_draw(aircraft->aircraft, game->world->time);
+        }
+        // Draw each aircraft's weapons
+        if (aircraft->weapons) {
+            weapons_draw(aircraft->weapons);
+        }
+    }
+    
+    if (game->boss_spawned && !game->boss_defeated) {
+        cyber_dragon_draw(game->boss, game->camera);
+        cyber_dragon_draw_effects(game->boss, game->camera);
+    } else {
+        enemies_draw(game->enemies);
+    }
+    
+    effects_draw(game->effects, game->camera);
+    
+    // Draw planet surface grid that wraps
+    // Draw main grid
+    DrawGrid(40, 50);
+    
+    // Draw boundary markers
+    DrawCubeWires((Vector3){0, -50, 0}, WORLD_SIZE, 100, WORLD_SIZE, DARKGREEN);
+    
+    // Draw compass markers at boundaries
+    DrawCube((Vector3){WORLD_HALF_SIZE, 0, 0}, 10, 100, 10, RED);      // East
+    DrawCube((Vector3){-WORLD_HALF_SIZE, 0, 0}, 10, 100, 10, RED);     // West
+    DrawCube((Vector3){0, 0, WORLD_HALF_SIZE}, 10, 100, 10, BLUE);     // North
+    DrawCube((Vector3){0, 0, -WORLD_HALF_SIZE}, 10, 100, 10, BLUE);    // South
+    
+    EndMode3D();
+    
+    EndTextureMode();
+}
+
+static void draw_postprocess_and_ui(ultimate_game_t* game, RenderTexture2D screen_buffer) {
+    // Post-processing
+    BeginDrawing();
+    
+    // Draw screen buffer
+    DrawTextureRec(screen_buffer.texture, 
+                  (Rectangle){0, 0, screen_buffer.texture.width, -screen_buffer.texture.height},
+                  (Vector2){0, 0}, WHITE);
+    
+    // Speed effects
+    draw_speed_effects(game);
+    
+    // UI
+    effects_draw_ui(game->effects, GetScreenWidth(), GetScreenHeight());
+    draw_advanced_ui(game);
+    
+    // Victory/Game Over
+    if (game->victory) {
+        DrawText("VICTORY!", GetScreenWidth()/2 - 150, GetScreenHeight()/2 - 50, 60, GOLD);
+        DrawText("You are a LEGEND!", GetScreenWidth()/2 - 120, GetScreenHeight()/2 + 20, 30, WHITE);
+    } else if (game->game_over) {
+        DrawText("GAME OVER", GetScreenWidth()/2 - 120, GetScreenHeight()/2 - 30, 50, RED);
+    }
+    
+    EndDrawing();
+}
+
 int main(void) {
     InitWindow(1280, 720, "Full Node: Firewall Fly-over");
     SetTargetFPS(60);
@@ -404,76 +770,13 @@ int main(void) {
         // Handle keyboard input if no joystick
         float move_x = input.move_x;
         float move_y = input.move_y;
-        
-        if (!game->input->model.connected) {
-            move_x = 0.0f;
-            move_y = 0.0f;
-            if (IsKeyDown(KEY_LEFT) || IsKeyDown(KEY_A)) move_x = -1.0f;
-            if (IsKeyDown(KEY_RIGHT) || IsKeyDown(KEY_D)) move_x = 1.0f;
-            if (IsKeyDown(KEY_UP) || IsKeyDown(KEY_W)) move_y = -1.0f;  // Up = negative Y
-            if (IsKeyDown(KEY_DOWN) || IsKeyDown(KEY_S)) move_y = 1.0f;   // Down = positive Y
-        }
+        apply_keyboard_flight(game, &move_x, &move_y);
         
         aircraft_update_responsive(player_aircraft, move_x, move_y, dt);
         
-        // DEBUG: Print input values every 60 frames
-        static int debug_counter = 0;
-        if (++debug_counter >= 60) {
-            debug_counter = 0;
-            printf("Input - X: %.3f, Y: %.3f | Speed: %.1f | Boost: %d, Brake: %d\n", 
-                   move_x, move_y, player_aircraft->speed,
-                   input.speed_boost ? 1 : 0, input.brake ? 1 : 0);
-        }
+        log_input_debug(move_x, move_y, player_aircraft, &input);
         
-        // Speed control - New system with UR throttle and UL boost
-        
-        // UR button = Mario Kart style mushroom boost (SWAPPED)
-        bool boost_pressed = input.speed_boost || 
-                           (!game->input->model.connected && IsKeyPressed(KEY_SPACE));
-        if (boost_pressed && game->boost_timer <= 0) {  // 'speed_boost' is now UR boost
-            game->boost_timer = 0.75f;  // 0.75 second duration (HALF recharge time)
-            
-            // INSTANT massive speed increase (like mushroom boost)
-            player_aircraft->speed = AIRCRAFT_MAX_SPEED * 3.25f * speed_mult;  // 30% faster: 243.75 instead of 187.5
-            
-            // Visual/audio feedback
-            effects_sonic_boom(game->effects, player_aircraft->position, 
-                             aircraft_get_forward_vector(player_aircraft));
-            effects_screen_shake(game->effects, 3.0f, 0.5f);
-            effects_screen_flash(game->effects, SKYBLUE, 0.3f);
-            effects_spawn_powerup_collect(game->effects, player_aircraft->position, SKYBLUE);
-        }
-        
-        // Boost decay - rapid falloff like Mario Kart
-        if (game->boost_timer > 0) {
-            game->boost_timer -= dt;
-            
-            // Keep speed lines at max during boost
-            game->speed_lines_intensity = 1.0f;
-            
-            // Only start decaying speed after 0.25 seconds (proportionally reduced)
-            if (game->boost_timer < 0.5f) {
-                // Rapid decay back to normal max speed
-                float decay_rate = 300.0f * dt;  // Faster decay for shorter boost
-                player_aircraft->speed = fmaxf(player_aircraft->speed - decay_rate, 
-                                             AIRCRAFT_MAX_SPEED * 1.2f * speed_mult);
-            }
-        }
-        // UL button = normal throttle (SWAPPED)
-        else {
-            bool throttle_pressed = input.brake ||
-                                  (!game->input->model.connected && IsKeyDown(KEY_LEFT_SHIFT));
-            if (throttle_pressed) {  // 'brake' is now UL throttle
-                player_aircraft->speed = fminf(player_aircraft->speed + 90.0f * dt * speed_mult,  // 50% faster acceleration
-                                             AIRCRAFT_MAX_SPEED * 1.2f * speed_mult);
-                game->speed_lines_intensity = 0.6f;
-            }
-            // No throttle = gradual speed decrease
-            else {
-                player_aircraft->speed = fmaxf(player_aircraft->speed - 25.0f * dt, AIRCRAFT_MIN_SPEED);
-                game->speed_lines_intensity = fmaxf(0, game->speed_lines_intensity - dt * 2);
-            }
-        }
+        update_boost_and_throttle(game, player_aircraft, &input, dt, speed_mult);
         // Camera - Fixed behind aircraft (no right stick control)
         float cam_distance = 35.0f + player_aircraft->speed * 0.1f;
         float cam_height = 15.0f;  // Fixed height, no right stick Y
@@ -481,23 +784,7 @@ int main(void) {
                                player_aircraft->yaw,  // No right stick X adjustment
                                cam_distance, cam_height, dt);
         
-        // Continuous firing when R2 is held - EVERY FRAME!
-        if (input.fire_guns || (!game->input->model.connected && IsKeyDown(KEY_LEFT_CONTROL))) {
-            // Use right stick to fine-tune bullet direction
-            float aim_x = -input.camera_x;  // Right stick X INVERTED - right moves bullets right
-            float aim_y = input.camera_y;   // Right stick Y normal - up moves bullets up
-            
-            // Fire continuously with aiming adjustment
-            aircraft_manager_fire_weapon_aimed(game->aircraft_mgr, game->player_id, aim_x, aim_y);
-            
-            // Triple shot in overdrive mode
-            if (overdrive_is_active(game->overdrive)) {
-                aircraft_manager_fire_weapon_aimed(game->aircraft_mgr, game->player_id, 
-                                                 aim_x - 0.1f, aim_y);
-                aircraft_manager_fire_weapon_aimed(game->aircraft_mgr, game->player_id, 
-                                                 aim_x + 0.1f, aim_y);
-            }
-        }
+        fire_continuous_guns(game, &input);
         
         // Combat (other combat actions)
         handle_combat_ultimate(game, &input, dt);
@@ -506,262 +793,30 @@ int main(void) {
         // This also updates each aircraft's weapons and checks collisions
         aircraft_manager_update(game->aircraft_mgr, dt);
         
-        // Check for destroyed aircraft and spawn explosions BEFORE respawn
-        static int last_kills[MAX_MANAGED_AIRCRAFT] = {0};
-        static bool first_check = true;
+        spawn_aircraft_death_effects(game);
         
-        for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
-            managed_aircraft_t* ma = &game->aircraft_mgr->aircraft[i];
-            
-            // Initialize kill tracking
-            if (first_check) {
-                last_kills[i] = ma->deaths;
-            }
-            
-            // Check if aircraft got a new death (was just destroyed)
-            if (ma->deaths > last_kills[i]) {
-                // BIG EXPLOSION at current position!
-                Vector3 explosion_pos = ma->aircraft->position;
-                
-                // Multiple layered explosions for massive effect
-                effects_spawn_explosion(game->effects, explosion_pos, 80.0f, ORANGE);
-                effects_spawn_explosion(game->effects, explosion_pos, 60.0f, RED);
-                effects_spawn_explosion(game->effects, explosion_pos, 40.0f, YELLOW);
-                effects_spawn_explosion(game->effects, explosion_pos, 20.0f, WHITE);
-                
-                // Spawn many particles as debris
-                for (int p = 0; p < 50; p++) {
-                    float angle = (float)p * (PI * 2.0f / 50.0f);
-                    float speed = 150.0f + GetRandomValue(0, 300);
-                    Vector3 vel = {
-                        cosf(angle) * speed,
-                        100.0f + GetRandomValue(0, 200),
-                        sinf(angle) * speed
-                    };
-                    effects_spawn_missile_trail(game->effects, explosion_pos, vel);
-                }
-                
-                // More particles going up
-                for (int p = 0; p < 20; p++) {
-                    Vector3 vel = {
-                        GetRandomValue(-100, 100),
-                        200.0f + GetRandomValue(0, 200),
-                        GetRandomValue(-100, 100)
-                    };
-                    effects_spawn_missile_trail(game->effects, explosion_pos, vel);
-                }
-                
-                effects_screen_shake(game->effects, 8.0f, 1.0f);
-                effects_screen_flash(game->effects, WHITE, 0.3f);
-                
-                // Extra effects for enemy kill
-                if (i != game->player_id) { // Enemy destroyed (not player)
-                    effects_show_achievement(game->effects, "ENEMY DESTROYED!");
-                    effects_spawn_powerup_collect(game->effects, explosion_pos, GOLD);
-                    Vector3 boom_dir = {1.0f, 0.0f, 0.0f}; // Safe non-zero direction
-                    effects_sonic_boom(game->effects, explosion_pos, boom_dir);
-                }
-                
-                // Update death count
-                last_kills[i] = ma->deaths;
-            }
-        }
-        first_check = false;
-        
-        // Enemy/Boss update
-        if (game->boss_spawned && !game->boss_defeated) {
-            cyber_dragon_update(game->boss, player_aircraft->position, dt);
-            
-            // Check boss collision with player
-            if (cyber_dragon_check_collision(game->boss, player_aircraft->position, 5.0f)) {
-                game->player_health -= 20.0f * dt;
-                game->damage_flash = 0.3f;
-            }
-            
-            // Check weapon hits on boss
-            // (In full implementation, would check all projectiles)
-            
-            if (game->boss->health <= 0) {
-                game->boss_defeated = true;
-                game->boss_kills++;
-                game->score += 10000;
-                effects_show_achievement(game->effects, "CYBER DRAGON DEFEATED!");
-                overdrive_charge(game->overdrive, 100.0f);  // Full charge reward
-            }
-        } else {
-            enemies_update(game->enemies, player_aircraft->position, dt);
-            
-            // Spawn boss after wave 3
-            if (game->wave >= 3 && !game->boss_spawned) {
-                spawn_boss(game);
-            }
-        }
+        update_boss_or_enemies(game, player_aircraft, dt);
         
         // World updates
         cyberpunk_world_update(game->world, dt);
         effects_update(game->effects, dt);
         
-        // Check player damage
-        if (enemies_check_player_hit(game->enemies, player_aircraft->position, 5.0f)) {
-            if (!overdrive_is_active(game->overdrive)) {  // Invincible in overdrive
-                float damage = 10.0f;
-                if (game->shield_power > 0) {
-                    game->shield_power -= damage;
-                    if (game->shield_power < 0) {
-                        damage = -game->shield_power;
-                        game->shield_power = 0;
-                    }
-                    effects_spawn_shield_ripple(game->effects, player_aircraft->position, 15.0f);
-                }
-                
-                if (damage > 0) {
-                    game->player_health -= damage;
-                    game->damage_flash = 0.3f;
-                    effects_screen_flash(game->effects, RED, 0.2f);
-                    effects_screen_shake(game->effects, 1.5f, 0.2f);
-                    
-                    if (game->player_health <= 0) {
-                        game->game_over = true;
-                    }
-                }
-            }
-        }
+        apply_player_hit_damage(game, player_aircraft);
         
-        // Combo system
-        if (game->combo_timer > 0) {
-            game->combo_timer -= dt;
-        } else {
-            if (game->combo > game->max_combo) {
-                game->max_combo = game->combo;
-            }
-            game->combo = 0;
-        }
+        update_combo_timer(game, dt);
         
-        // Enemy kills give overdrive charge
-        // TODO: Implement proper weapon hit detection
-        int kills = 0;  // Placeholder for enemies_check_weapon_hits
-        if (enemies_get_active_count(game->enemies) < 10 && rand() % 100 < 5) {
-            kills = 1;  // Simulate kills for demo
-            game->total_kills += kills;
-            game->score += kills * 100 * (game->combo + 1);
-            game->combo += kills;
-            game->combo_timer = 3.0f;
-            
-            overdrive_charge(game->overdrive, kills * 5.0f);
-        }
+        apply_simulated_kills(game);
         
-        // Regeneration
-        if (game->damage_flash > 0) game->damage_flash -= dt;
+        regenerate_player_resources(game, player_aircraft, &input, dt);
         
-        if (game->boost_fuel < 100 && !input.speed_boost) {
-            game->boost_fuel += 15 * dt;
-        }
-        
-        if (game->shield_power < 100 && !enemies_check_player_hit(game->enemies, 
-                                                                  player_aircraft->position, 50.0f)) {
-            game->shield_power += 5 * dt;  // Slow shield regen when safe
-        }
-        
-        // Wave management
-        if (!game->boss_spawned && enemies_wave_complete(game->enemies)) {
-            game->wave++;
-            if (game->wave < 3) {
-                enemies_spawn_wave(game->enemies, game->wave);
-                effects_show_achievement(game->effects, "WAVE CLEARED!");
-                overdrive_charge(game->overdrive, 20.0f);
-            }
-        }
-        
-        // Victory condition
-        if (game->boss_defeated && enemies_get_active_count(game->enemies) == 0) {
-            game->victory = true;
-        }
+        advance_waves_and_victory(game);
         
         // Update progression
         update_progression(game);
         
-        // Drawing with effects
-        BeginTextureMode(screen_buffer);
-        ClearBackground(BLACK);
+        draw_scene_to_buffer(game, player_aircraft, screen_buffer);
         
-        BeginMode3D(game->camera);
-        
-        // World
-        cyberpunk_world_draw(game->world, game->camera);
-        
-        // Overdrive effects behind aircraft
-        if (overdrive_is_active(game->overdrive)) {
-            overdrive_draw_effects(game->overdrive, player_aircraft->position, game->camera);
-        }
-        
-        // PHASE 3: Draw all aircraft and their weapons
-        for (int i = 0; i < game->aircraft_mgr->aircraft_count; i++) {
-            managed_aircraft_t* aircraft = &game->aircraft_mgr->aircraft[i];
-            
-            // Don't draw if respawning
-            if (aircraft->respawn_timer > 0) {
-                continue;
-            }
-            
-            if (aircraft->aircraft && aircraft->health > 0) {
-                aircraft_draw(aircraft->aircraft, game->world->time);
-            }
-            // Draw each aircraft's weapons
-            if (aircraft->weapons) {
-                weapons_draw(aircraft->weapons);
-            }
-        }
-        
-        if (game->boss_spawned && !game->boss_defeated) {
-            cyber_dragon_draw(game->boss, game->camera);
-            cyber_dragon_draw_effects(game->boss, game->camera);
-        } else {
-            enemies_draw(game->enemies);
-        }
-        
-        effects_draw(game->effects, game->camera);
-        
-        // Draw planet surface grid that wraps
-        // Draw main grid
-        DrawGrid(40, 50);
-        
-        // Draw boundary markers
-        DrawCubeWires((Vector3){0, -50, 0}, WORLD_SIZE, 100, WORLD_SIZE, DARKGREEN);
-        
-        // Draw compass markers at boundaries
-        DrawCube((Vector3){WORLD_HALF_SIZE, 0, 0}, 10, 100, 10, RED);      // East
-        DrawCube((Vector3){-WORLD_HALF_SIZE, 0, 0}, 10, 100, 10, RED);     // West
-        DrawCube((Vector3){0, 0, WORLD_HALF_SIZE}, 10, 100, 10, BLUE);     // North
-        DrawCube((Vector3){0, 0, -WORLD_HALF_SIZE}, 10, 100, 10, BLUE);    // South
-        
-        EndMode3D();
-        
-        EndTextureMode();
-        
-        // Post-processing
-        BeginDrawing();
-        
-        // Draw screen buffer
-        DrawTextureRec(screen_buffer.texture, 
-                      (Rectangle){0, 0, screen_buffer.texture.width, -screen_buffer.texture.height},
-                      (Vector2){0, 0}, WHITE);
-        
-        // Speed effects
-        draw_speed_effects(game);
-        
-        // UI
-        effects_draw_ui(game->effects, GetScreenWidth(), GetScreenHeight());
-        draw_advanced_ui(game);
-        
-        // Victory/Game Over
-        if (game->victory) {
-            DrawText("VICTORY!", GetScreenWidth()/2 - 150, GetScreenHeight()/2 - 50, 60, GOLD);
-            DrawText("You are a LEGEND!", GetScreenWidth()/2 - 120, GetScreenHeight()/2 + 20, 30, WHITE);
-        } else if (game->game_over) {
-            DrawText("GAME OVER", GetScreenWidth()/2 - 120, GetScreenHeight()/2 - 30, 50, RED);
-        }
-        
-        EndDrawing();
+        draw_postprocess_and_ui(game, screen_buffer);
     }
     
     // Cleanup
