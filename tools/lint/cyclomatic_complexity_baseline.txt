@@ -28,7 +28,6 @@ cognition/controllers/src/agent_session_controller.c:rpc_agentsession:16
 cognition/controllers/src/agent_test_controller.c:rpc_agent_test:23
 cognition/controllers/src/event_agent_summary.c:rpc_agent_summary:30
 cognition/models/src/agent_session.c:agent_session_authorize_internal:38
-cognition/models/src/zcode_science.c:db_zcode_science_study_list_filtered:18
 cognition/modules/codeindex/src/codeindex.c:codeindex_build_cold_ms:19
 cognition/modules/codeindex/src/codeindex_build.c:ci_rebuild_lock_open:17
 cognition/modules/codeindex/src/codeindex_build.c:codeindex_rebuild_internal:61
