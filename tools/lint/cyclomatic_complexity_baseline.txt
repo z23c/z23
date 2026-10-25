@@ -1530,7 +1530,6 @@ tests/harness/src/test_mempool_orphan.c:test_mempool_orphan:45
 tests/harness/src/test_merkle_tree.c:test_merkle_tree:22
 tests/harness/src/test_merkle_tree.c:test_merkle_tree_scale:149
 tests/harness/src/test_mesh_observation.c:t_parse_refuses_by_name_and_leaves_out_untouched:17
-tests/harness/src/test_mesh_private_object_admission.c:admission_fixture_open:17
 tests/harness/src/test_mesh_terminal_worker.c:test_mesh_terminal_worker_platform_arm#2:33
 tests/harness/src/test_metaverse_vocabulary.c:check_golden_v1_frames:22
 tests/harness/src/test_metaverse_vocabulary.c:check_no_bypass_of_the_evaluator:23
