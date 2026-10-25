@@ -253,7 +253,7 @@ enum bil_flat_admit {
  * (rebuild-from-log) populated the map and then failed without clearing it,
  * and an uncapped probe over a full table with no duplicate never
  * terminates — the boot watchdog kills every retry and the node never
- * serves. CLAIMED writes the key into the node and the bucket (tag, index, size++). */
+ * serves. CLAIMED writes the key into the node and the bucket (index, size++). */
 static enum bil_flat_admit bil_flat_probe_claim(struct block_map *bm,
                                                 const uint8_t hash[32],
                                                 struct block_index *pindex)
@@ -266,13 +266,11 @@ static enum bil_flat_admit bil_flat_probe_claim(struct block_map *bm,
             /* The key lives in the node: write it before the claim so the
              * next probe that reaches this bucket can compare it. */
             memcpy(pindex->hashBlock.data, hash, 32);
-            bm->buckets[slot].tag = h;
             bm->buckets[slot].index = pindex;
             bm->size++;
             return BIL_FLAT_ADMIT_CLAIMED;
         }
-        if (bm->buckets[slot].tag == h &&
-            uint256_eq(&bm->buckets[slot].index->hashBlock,
+        if (uint256_eq(&bm->buckets[slot].index->hashBlock,
                        (const struct uint256 *)hash))
             return BIL_FLAT_ADMIT_DUPLICATE;
         slot = (slot + 1) & (bm->capacity - 1);

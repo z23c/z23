@@ -2246,7 +2246,6 @@ static bool bil_fill_map_to_capacity(struct main_state *ms, uint8_t tag,
         pi->hashBlock.data[3] = tag;
         pi->phashBlock = &pi->hashBlock;
         pi->nHeight = (int32_t)i;
-        memcpy(&bm->buckets[i].tag, pi->hashBlock.data, 8);
         bm->buckets[i].index = pi;
     }
     bm->size = bm->capacity - vacant;

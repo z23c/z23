@@ -1,6 +1,6 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
- * Differential test: the keyless block_map (16-byte bucket {tag, index}, key =
+ * Differential test: the keyless block_map (8-byte bucket {index}, key =
  * index->hashBlock) against the frozen pre-change oracle (48-byte bucket with
  * a duplicated 32-byte key, tests/harness/differential/oracle_block_map.h).
  *
@@ -244,7 +244,7 @@ static int bmk_memory_case(void)
                "new=%zu MB saved=%zu MB\n", nm.capacity, ob >> 20, nb >> 20,
                (ob - nb) >> 20);
         ASSERT(ob == (size_t)384 << 20);
-        ASSERT(nb == (size_t)128 << 20);
+        ASSERT(nb == (size_t)64 << 20);
         block_map_free(&nm);
         oracle_block_map_free(&om);
     } TEST_END

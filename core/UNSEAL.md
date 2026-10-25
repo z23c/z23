@@ -304,3 +304,7 @@ later lane flips it HARD.
 - 2026-10-24T08:04:37Z — REASON: privacy switches for contributor nodes: -onlynet=onion makes no clearnet P2P dials and imports no clearnet endpoints from onion directories (default off, unchanged behaviour without it); P2P dial policy only, no consensus predicate
   old ROOT: 11c7929713c61c213e23d09fd7c2e2d2d741ce99bebbfd6b60c8e114f5f71e9f
   by: owner unseal ritual (make core-unseal)
+
+- 2026-10-25T11:45:45Z — REASON: compact block index U1: block_map bucket 16 B to 8 B (pointer only, key read from the resident node); behaviour-preserving, lookup semantics, probe order, iteration order and hash function unchanged; no consensus predicate
+  old ROOT: 56f9c50e7c396173f271a7c8487ba811e736a742f5207394fa733fb83485ff4c
+  by: owner unseal ritual (make core-unseal)

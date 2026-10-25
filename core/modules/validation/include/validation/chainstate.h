@@ -58,14 +58,15 @@ static inline void disk_tx_pos_init(struct disk_tx_pos *p)
     p->nTxOffset = 0;
 }
 
-/* Keyless bucket: the 32-byte key is index->hashBlock (written before the
- * insert, never changed), the tag is its first 8 bytes (block_map_hash) so a
- * probe compares 8 bytes before it touches the node. index == NULL is an
- * empty bucket. */
+/* Pointer-only bucket (8 B): the 32-byte key is index->hashBlock (written
+ * before the insert, never changed); the slot is its first 8 bytes
+ * (block_map_hash) & (capacity - 1). A probe reads the resident node to
+ * compare. index == NULL is an empty bucket. */
 struct block_map_entry {
-    uint64_t tag;
     struct block_index *index;
 };
+_Static_assert(sizeof(struct block_map_entry) == sizeof(void *),
+               "block_map bucket is one pointer (8 B on LP64)");
 
 struct block_map {
     struct block_map_entry *buckets;
