@@ -52,6 +52,7 @@ int die(const char *msg, const char *arg);
 int fin(FILE *f, char *line, const char *path, int rc);
 int reg_fail(regex_t *re, int err);
 int ovf(int n, size_t cap);
+void viol_put(char *dst, size_t cap, const char *fmt, ...);
 int cmd_done(const char *cmd, int st, int allow_exit1);
 void drop2(regex_t *a, regex_t *b);
 void drop3(regex_t *a, regex_t *b, regex_t *c);

@@ -106,11 +106,16 @@ static int mal_collect(struct mal_set *s, const char (*rooms)[RS_PATH], int nr)
             char path[4096];
             size_t kn = strlen(names[j]->d_name);
             if (rc == 0 && kn >= 2
-                && strcmp(names[j]->d_name + kn - 2, ".c") == 0
-                && !ovf(snprintf(path, sizeof path, "%s/%s", src,
-                                 names[j]->d_name), sizeof path)
-                && !lint_path_is_excluded(path))
-                rc = mal_add(s, path);
+                && strcmp(names[j]->d_name + kn - 2, ".c") == 0) {
+                rc = ovf(snprintf(path, sizeof path, "%s/%s", src,
+                                  names[j]->d_name), sizeof path);
+                if (rc)
+                    fprintf(stderr,
+                            "z23-lint: cannot scan %s/%s: path too long\n",
+                            src, names[j]->d_name);
+                else if (!lint_path_is_excluded(path))
+                    rc = mal_add(s, path);
+            }
             free(names[j]);
         }
         free(names);
@@ -147,10 +152,10 @@ static int mal_direct(const char *path, const regex_t *call, const regex_t *ok,
             continue;
         if (regexec(ok, buf, 0, NULL, 0) == 0)
             continue;
-        if (*nv < MAL_HIT
-            && !ovf(snprintf(viol[*nv], RS_PATH, "%s:%d:%s", path, lineno,
-                             buf), RS_PATH))
+        if (*nv < MAL_HIT) {
+            viol_put(viol[*nv], RS_PATH, "%s:%d:%s", path, lineno, buf);
             (*nv)++;
+        }
     }
     fclose(f);
     return 0;
@@ -329,12 +334,13 @@ static int mal_grade_saves(const char *path, const struct mal_help *h,
             continue;
         if (mal_calls_help(sv->body[i], h))
             continue;
-        if (*nv < MAL_HIT
-            && !ovf(snprintf(viol[*nv], RS_PATH,
-                             "%s:%d: %s does not reach AR_BEGIN_SAVE / "
-                             "AR_ADHOC_SAVE / AR_CACHED_SAVE",
-                             path, sv->line[i], sv->n[i]), RS_PATH))
+        if (*nv < MAL_HIT) {
+            viol_put(viol[*nv], RS_PATH,
+                     "%s:%d: %s does not reach AR_BEGIN_SAVE / "
+                     "AR_ADHOC_SAVE / AR_CACHED_SAVE",
+                     path, sv->line[i], sv->n[i]);
             (*nv)++;
+        }
     }
     return 0;
 }

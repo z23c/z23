@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <regex.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -694,6 +695,25 @@ const char *const k_domain[] = {
 
 int ovf(int n, size_t cap)
 { return (n < 0 || (size_t)n >= cap) ? die("z23-lint: derived buffer overflow\n", "") : 0; }
+/* Writes one violation line into dst (cap bytes). Overlong text is cut to
+ * fit and noted on stderr; the caller always counts the hit, so a violation
+ * is never dropped because its report text is long. */
+void viol_put(char *dst, size_t cap, const char *fmt, ...)
+{
+    va_list ap;
+    int n;
+    if (cap == 0)
+        return;
+    va_start(ap, fmt);
+    n = vsnprintf(dst, cap, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        dst[0] = '\0';
+        return;
+    }
+    if ((size_t)n >= cap)
+        fprintf(stderr, "z23-lint: report text truncated: %.60s\n", dst);
+}
 int rs_ovf(void) { return die("z23-lint: repo-shape overflow\n", ""); }
 static const char *rs_root(void)
 { const char *e = getenv("ZCL_REPO_SHAPE_ROOT"); return (e && e[0]) ? e : "."; }

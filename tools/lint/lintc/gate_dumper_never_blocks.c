@@ -286,11 +286,11 @@ static int dnb_hit_line(const char *buf, const char *path, int lineno,
         rc = dnb_badd(seen, key);
         if (rc || dnb_bhas(base, key))
             continue;
-        if (*nv < DNB_MAX
-            && !ovf(snprintf(viol[*nv], DNB_KEY,
-                             "%s in %s (dump body line ~%d)",
-                             prim[i].name, path, lineno), DNB_KEY))
+        if (*nv < DNB_MAX) {
+            viol_put(viol[*nv], DNB_KEY, "%s in %s (dump body line ~%d)",
+                     prim[i].name, path, lineno);
             (*nv)++;
+        }
     }
     return rc;
 }

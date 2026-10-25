@@ -218,10 +218,10 @@ static int rma_scan_file(const char *path, const regex_t *re,
             (*nallow)++;
             continue;
         }
-        if (*nv < RMA_HIT
-            && !ovf(snprintf(viol[*nv], RMA_LINE, "%s:%d:%s", path, lineno,
-                             buf), RMA_LINE))
+        if (*nv < RMA_HIT) {
+            viol_put(viol[*nv], RMA_LINE, "%s:%d:%s", path, lineno, buf);
             (*nv)++;
+        }
     }
     fclose(f);
     return 0;

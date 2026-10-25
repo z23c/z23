@@ -334,10 +334,11 @@ static int fsw_scan_file(const char *path, const struct fsw_row *row,
         return 2;
     if (fsw_khas(allowed, key))
         return fsw_kadd(seen, key);
-    if (*nv < FSW_HIT
-        && !ovf(snprintf(viol[*nv], FSW_KEY, "%s: %s (owner: %s)", row->fr,
-                         path, owner_path), FSW_KEY))
+    if (*nv < FSW_HIT) {
+        viol_put(viol[*nv], FSW_KEY, "%s: %s (owner: %s)", row->fr, path,
+                 owner_path);
         (*nv)++;
+    }
     return 0;
 }
 

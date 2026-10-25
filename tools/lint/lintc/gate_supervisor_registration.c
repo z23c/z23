@@ -93,12 +93,17 @@ static int sr_walk_root(const char *root, struct sr_files *s)
         char path[4096];
         struct stat st;
         size_t kn = strlen(names[i]->d_name);
-        if (rc == 0 && kn >= 2 && strcmp(names[i]->d_name + kn - 2, ".c") == 0
-            && !ovf(snprintf(path, sizeof path, "%s/%s", root,
-                             names[i]->d_name), sizeof path)
-            && lstat(path, &st) == 0 && S_ISREG(st.st_mode)
-            && !lint_path_is_excluded(path))
-            rc = srg_add(s, path);
+        if (rc == 0 && kn >= 2
+            && strcmp(names[i]->d_name + kn - 2, ".c") == 0) {
+            rc = ovf(snprintf(path, sizeof path, "%s/%s", root,
+                              names[i]->d_name), sizeof path);
+            if (rc)
+                fprintf(stderr, "z23-lint: cannot scan %s/%s: path too long\n",
+                        root, names[i]->d_name);
+            else if (lstat(path, &st) == 0 && S_ISREG(st.st_mode)
+                     && !lint_path_is_excluded(path))
+                rc = srg_add(s, path);
+        }
         free(names[i]);
     }
     free(names);
