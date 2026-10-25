@@ -20,7 +20,7 @@ static bool creation_root_zero(const uint8_t root[32])
     return !zcl_bytes_any_set(root, 32);
 }
 
-const char *vcs_zcode_creation_error_string(
+static const char *creation_error_string_wire(
     enum vcs_zcode_creation_error error)
 {
     switch (error) {
@@ -32,6 +32,14 @@ const char *vcs_zcode_creation_error_string(
     case VCS_ZCODE_CREATION_RESERVED: return "reserved-byte";
     case VCS_ZCODE_CREATION_CATEGORY: return "creation-category";
     case VCS_ZCODE_CREATION_LINEAGE: return "creation-lineage";
+    default: return NULL;
+    }
+}
+
+static const char *creation_error_string_context(
+    enum vcs_zcode_creation_error error)
+{
+    switch (error) {
     case VCS_ZCODE_CREATION_ROOT: return "zero-authority-root";
     case VCS_ZCODE_CREATION_AMOUNT: return "award-amount";
     case VCS_ZCODE_CREATION_TIME: return "challenge-time";
@@ -40,6 +48,14 @@ const char *vcs_zcode_creation_error_string(
     case VCS_ZCODE_CREATION_CAS: return "cas-object";
     case VCS_ZCODE_CREATION_NETWORK: return "network-genesis-mismatch";
     case VCS_ZCODE_CREATION_POLICY: return "zc23-policy-mismatch";
+    default: return NULL;
+    }
+}
+
+static const char *creation_error_string_object(
+    enum vcs_zcode_creation_error error)
+{
+    switch (error) {
     case VCS_ZCODE_CREATION_EPOCH: return "epoch-mismatch";
     case VCS_ZCODE_CREATION_CONTRIBUTOR: return "contributor-binding";
     case VCS_ZCODE_CREATION_TASK: return "task-object";
@@ -48,6 +64,14 @@ const char *vcs_zcode_creation_error_string(
     case VCS_ZCODE_CREATION_PROOF_SET: return "proof-set-object";
     case VCS_ZCODE_CREATION_LANE: return "proven-lane-object";
     case VCS_ZCODE_CREATION_SCORE: return "score-receipt-object";
+    default: return NULL;
+    }
+}
+
+static const char *creation_error_string_evidence(
+    enum vcs_zcode_creation_error error)
+{
+    switch (error) {
     case VCS_ZCODE_CREATION_PACKAGE: return "package-object";
     case VCS_ZCODE_CREATION_RELEASE: return "release-object";
     case VCS_ZCODE_CREATION_LICENSE: return "license-evidence";
@@ -55,11 +79,29 @@ const char *vcs_zcode_creation_error_string(
     case VCS_ZCODE_CREATION_IMMATURE: return "challenge-immature";
     case VCS_ZCODE_CREATION_REORG: return "challenge-anchor-reorged";
     case VCS_ZCODE_CREATION_DUPLICATE: return "duplicate-contribution";
+    default: return NULL;
     }
+}
+
+const char *vcs_zcode_creation_error_string(
+    enum vcs_zcode_creation_error error)
+{
+    const char *message = creation_error_string_wire(error);
+    if (message)
+        return message;
+    message = creation_error_string_context(error);
+    if (message)
+        return message;
+    message = creation_error_string_object(error);
+    if (message)
+        return message;
+    message = creation_error_string_evidence(error);
+    if (message)
+        return message;
     return "unknown-creation-error";
 }
 
-enum vcs_zcode_creation_error vcs_zcode_creation_attribution_validate(
+static enum vcs_zcode_creation_error creation_validate_shape(
     const struct vcs_zcode_creation_attribution_v1 *a)
 {
     if (!a)
@@ -81,6 +123,12 @@ enum vcs_zcode_creation_error vcs_zcode_creation_attribution_validate(
     if (a->category != VCS_ZCODE_CREATION_PUBLIC_SOURCE &&
         a->lineage_kind == VCS_ZCODE_CREATION_LINEAGE_NONE)
         return VCS_ZCODE_CREATION_LINEAGE;
+    return VCS_ZCODE_CREATION_OK;
+}
+
+static enum vcs_zcode_creation_error creation_validate_award_roots(
+    const struct vcs_zcode_creation_attribution_v1 *a)
+{
     if (a->award_atoms == 0 ||
         a->award_atoms > VCS_ZC23_MAX_SUPPLY_ATOMS)
         return VCS_ZCODE_CREATION_AMOUNT;
@@ -103,7 +151,12 @@ enum vcs_zcode_creation_error vcs_zcode_creation_attribution_validate(
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (!zcl_bytes_any_set(roots[i], 32))
             return VCS_ZCODE_CREATION_ROOT;
+    return VCS_ZCODE_CREATION_OK;
+}
 
+static enum vcs_zcode_creation_error creation_validate_challenge_time(
+    const struct vcs_zcode_creation_attribution_v1 *a)
+{
     uint64_t expected_height = 0;
     if (!zcl_u64_add(a->challenge_opening_height,
                      VCS_ZC23_CHALLENGE_BLOCKS, &expected_height))
@@ -121,6 +174,65 @@ enum vcs_zcode_creation_error vcs_zcode_creation_attribution_validate(
     return VCS_ZCODE_CREATION_OK;
 }
 
+enum vcs_zcode_creation_error vcs_zcode_creation_attribution_validate(
+    const struct vcs_zcode_creation_attribution_v1 *a)
+{
+    enum vcs_zcode_creation_error error = creation_validate_shape(a);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    error = creation_validate_award_roots(a);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    return creation_validate_challenge_time(a);
+}
+
+static bool creation_write_header(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_creation_attribution_v1 *a)
+{
+    return zcl_codec_write_bytes(writer, creation_magic,
+                                 sizeof(creation_magic)) &&
+        zcl_codec_write_u16le(writer, a->schema_version) &&
+        zcl_codec_write_u16le(writer, a->category) &&
+        zcl_codec_write_u8(writer, a->lineage_kind) &&
+        zcl_codec_write_u8(writer, 0) &&
+        zcl_codec_write_u8(writer, 0) &&
+        zcl_codec_write_u8(writer, 0) &&
+        zcl_codec_write_u64le(writer, a->epoch) &&
+        zcl_codec_write_u64le(writer, a->award_atoms);
+}
+
+static bool creation_write_challenge(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_creation_attribution_v1 *a)
+{
+    return zcl_codec_write_u64le(writer, a->challenge_opening_height) &&
+        zcl_codec_write_bytes(writer, a->challenge_opening_hash, 32) &&
+        zcl_codec_write_i64le(writer, a->challenge_opening_mtp) &&
+        zcl_codec_write_u64le(writer, a->challenge_maturity_height) &&
+        zcl_codec_write_i64le(writer, a->challenge_maturity_mtp) &&
+        zcl_codec_write_i64le(writer, a->created_unix) &&
+        zcl_codec_write_bytes(writer, a->network_genesis_root, 32) &&
+        zcl_codec_write_bytes(writer, a->zc23_policy_root, 32) &&
+        zcl_codec_write_bytes(writer, a->contributor_binding_root, 32);
+}
+
+static bool creation_write_roots(
+    struct zcl_codec_writer *writer,
+    const struct vcs_zcode_creation_attribution_v1 *a)
+{
+    return zcl_codec_write_bytes(writer, a->task_root, 32) &&
+        zcl_codec_write_bytes(writer, a->candidate_root, 32) &&
+        zcl_codec_write_bytes(writer, a->proof_policy_root, 32) &&
+        zcl_codec_write_bytes(writer, a->proof_set_root, 32) &&
+        zcl_codec_write_bytes(writer, a->proven_lane_root, 32) &&
+        zcl_codec_write_bytes(writer, a->score_receipt_root, 32) &&
+        zcl_codec_write_bytes(writer, a->package_root, 32) &&
+        zcl_codec_write_bytes(writer, a->release_root, 32) &&
+        zcl_codec_write_bytes(writer, a->license_evidence_root, 32) &&
+        zcl_codec_write_bytes(writer, a->lineage_root, 32);
+}
+
 static enum vcs_zcode_creation_error creation_write(
     const struct vcs_zcode_creation_attribution_v1 *a,
     uint8_t out[VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES])
@@ -135,35 +247,9 @@ static enum vcs_zcode_creation_error creation_write(
     struct zcl_codec_writer writer;
     zcl_codec_writer_init(&writer, out,
                           VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES);
-    bool ok = zcl_codec_write_bytes(&writer, creation_magic,
-                                    sizeof(creation_magic)) &&
-        zcl_codec_write_u16le(&writer, a->schema_version) &&
-        zcl_codec_write_u16le(&writer, a->category) &&
-        zcl_codec_write_u8(&writer, a->lineage_kind) &&
-        zcl_codec_write_u8(&writer, 0) &&
-        zcl_codec_write_u8(&writer, 0) &&
-        zcl_codec_write_u8(&writer, 0) &&
-        zcl_codec_write_u64le(&writer, a->epoch) &&
-        zcl_codec_write_u64le(&writer, a->award_atoms) &&
-        zcl_codec_write_u64le(&writer, a->challenge_opening_height) &&
-        zcl_codec_write_bytes(&writer, a->challenge_opening_hash, 32) &&
-        zcl_codec_write_i64le(&writer, a->challenge_opening_mtp) &&
-        zcl_codec_write_u64le(&writer, a->challenge_maturity_height) &&
-        zcl_codec_write_i64le(&writer, a->challenge_maturity_mtp) &&
-        zcl_codec_write_i64le(&writer, a->created_unix) &&
-        zcl_codec_write_bytes(&writer, a->network_genesis_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->zc23_policy_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->contributor_binding_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->task_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->candidate_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->proof_policy_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->proof_set_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->proven_lane_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->score_receipt_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->package_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->release_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->license_evidence_root, 32) &&
-        zcl_codec_write_bytes(&writer, a->lineage_root, 32);
+    bool ok = creation_write_header(&writer, a) &&
+        creation_write_challenge(&writer, a) &&
+        creation_write_roots(&writer, a);
     size_t written = 0;
     if (!ok || !zcl_codec_writer_finish(&writer, &written) ||
         written != VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES)
@@ -184,6 +270,61 @@ enum vcs_zcode_creation_error vcs_zcode_creation_attribution_serialize(
     return error;
 }
 
+static bool creation_read_header(
+    struct zcl_codec_reader *reader,
+    struct vcs_zcode_creation_attribution_v1 *decoded,
+    uint8_t magic[8], uint8_t reserved[3])
+{
+    return zcl_codec_read_bytes(reader, magic, sizeof(creation_magic)) &&
+        zcl_codec_read_u16le(reader, &decoded->schema_version) &&
+        zcl_codec_read_u16le(reader, &decoded->category) &&
+        zcl_codec_read_u8(reader, &decoded->lineage_kind) &&
+        zcl_codec_read_bytes(reader, reserved, 3) &&
+        zcl_codec_read_u64le(reader, &decoded->epoch) &&
+        zcl_codec_read_u64le(reader, &decoded->award_atoms);
+}
+
+static bool creation_read_challenge(
+    struct zcl_codec_reader *reader,
+    struct vcs_zcode_creation_attribution_v1 *decoded)
+{
+    return zcl_codec_read_u64le(reader, &decoded->challenge_opening_height) &&
+        zcl_codec_read_bytes(reader, decoded->challenge_opening_hash, 32) &&
+        zcl_codec_read_i64le(reader, &decoded->challenge_opening_mtp) &&
+        zcl_codec_read_u64le(reader, &decoded->challenge_maturity_height) &&
+        zcl_codec_read_i64le(reader, &decoded->challenge_maturity_mtp) &&
+        zcl_codec_read_i64le(reader, &decoded->created_unix) &&
+        zcl_codec_read_bytes(reader, decoded->network_genesis_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->zc23_policy_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->contributor_binding_root, 32);
+}
+
+static bool creation_read_roots(
+    struct zcl_codec_reader *reader,
+    struct vcs_zcode_creation_attribution_v1 *decoded)
+{
+    return zcl_codec_read_bytes(reader, decoded->task_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->candidate_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->proof_policy_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->proof_set_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->proven_lane_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->score_receipt_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->package_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->release_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->license_evidence_root, 32) &&
+        zcl_codec_read_bytes(reader, decoded->lineage_root, 32);
+}
+
+static enum vcs_zcode_creation_error creation_check_envelope(
+    const uint8_t magic[8], const uint8_t reserved[3])
+{
+    if (memcmp(magic, creation_magic, sizeof(creation_magic)) != 0)
+        return VCS_ZCODE_CREATION_MAGIC;
+    if (reserved[0] != 0 || reserved[1] != 0 || reserved[2] != 0)
+        return VCS_ZCODE_CREATION_RESERVED;
+    return VCS_ZCODE_CREATION_OK;
+}
+
 enum vcs_zcode_creation_error vcs_zcode_creation_attribution_parse(
     const uint8_t *wire, size_t wire_len,
     struct vcs_zcode_creation_attribution_v1 *out)
@@ -200,41 +341,17 @@ enum vcs_zcode_creation_error vcs_zcode_creation_attribution_parse(
     struct zcl_codec_reader reader;
     uint8_t magic[8], reserved[3];
     zcl_codec_reader_init(&reader, wire, wire_len);
-    bool ok = zcl_codec_read_bytes(&reader, magic, sizeof(magic)) &&
-        zcl_codec_read_u16le(&reader, &decoded.schema_version) &&
-        zcl_codec_read_u16le(&reader, &decoded.category) &&
-        zcl_codec_read_u8(&reader, &decoded.lineage_kind) &&
-        zcl_codec_read_bytes(&reader, reserved, sizeof(reserved)) &&
-        zcl_codec_read_u64le(&reader, &decoded.epoch) &&
-        zcl_codec_read_u64le(&reader, &decoded.award_atoms) &&
-        zcl_codec_read_u64le(&reader, &decoded.challenge_opening_height) &&
-        zcl_codec_read_bytes(&reader, decoded.challenge_opening_hash, 32) &&
-        zcl_codec_read_i64le(&reader, &decoded.challenge_opening_mtp) &&
-        zcl_codec_read_u64le(&reader, &decoded.challenge_maturity_height) &&
-        zcl_codec_read_i64le(&reader, &decoded.challenge_maturity_mtp) &&
-        zcl_codec_read_i64le(&reader, &decoded.created_unix) &&
-        zcl_codec_read_bytes(&reader, decoded.network_genesis_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.zc23_policy_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.contributor_binding_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.task_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.candidate_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.proof_policy_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.proof_set_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.proven_lane_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.score_receipt_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.package_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.release_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.license_evidence_root, 32) &&
-        zcl_codec_read_bytes(&reader, decoded.lineage_root, 32) &&
+    bool ok = creation_read_header(&reader, &decoded, magic, reserved) &&
+        creation_read_challenge(&reader, &decoded) &&
+        creation_read_roots(&reader, &decoded) &&
         zcl_codec_reader_finish(&reader);
     if (!ok)
         return VCS_ZCODE_CREATION_WIRE_SIZE;
-    if (memcmp(magic, creation_magic, sizeof(magic)) != 0)
-        return VCS_ZCODE_CREATION_MAGIC;
-    if (reserved[0] != 0 || reserved[1] != 0 || reserved[2] != 0)
-        return VCS_ZCODE_CREATION_RESERVED;
     enum vcs_zcode_creation_error error =
-        vcs_zcode_creation_attribution_validate(&decoded);
+        creation_check_envelope(magic, reserved);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    error = vcs_zcode_creation_attribution_validate(&decoded);
     if (error != VCS_ZCODE_CREATION_OK)
         return error;
     *out = decoded;
