@@ -97,6 +97,259 @@ static void make_pinned_header(struct block_header *hdr, uint32_t nTime,
     hdr->nSolutionSize = 0; /* silent pass on equihash-solution-size */
 }
 
+/* ── scenarios (each prints its own prompt and verdict) ────────────── */
+
+/* 1a. nTime==MTP must be rejected as "time-too-old" with dos=0. */
+static int check_mtp_rejects_time_equal_to_mtp(const struct chain_params *params,
+                                               uint32_t nbits_pin)
+{
+    int failures = 0;
+    printf("contextual_check_block_header: nTime==MTP is REJECTED (time-too-old, dos=0)... ");
+    struct block_index chain[11];
+    uint32_t times[] = {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100};
+    struct block_index *tip = make_pinned_chain(chain, 11, times, nbits_pin);
+    int64_t mtp = block_index_get_median_time_past(tip);
+
+    struct block_header hdr;
+    make_pinned_header(&hdr, (uint32_t)mtp, nbits_pin);
+
+    struct validation_state state;
+    validation_state_init(&state);
+    bool ok = contextual_check_block_header(&hdr, &state, params, tip, false);
+    if (ok || strcmp(state.reject_reason, "time-too-old") != 0 ||
+        state.dos != 0) {
+        printf("FAIL (ok=%d reason=%s dos=%d)\n", ok, state.reject_reason, state.dos);
+        failures++;
+    } else printf("OK\n");
+    return failures;
+}
+
+/* 1b. nTime==MTP+1 must be truly accepted (the boundary flip). */
+static int check_mtp_accepts_time_one_above_mtp(const struct chain_params *params,
+                                                uint32_t nbits_pin)
+{
+    int failures = 0;
+    printf("contextual_check_block_header: nTime==MTP+1 is TRULY ACCEPTED (boundary)... ");
+    struct block_index chain[11];
+    uint32_t times[] = {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100};
+    struct block_index *tip = make_pinned_chain(chain, 11, times, nbits_pin);
+    int64_t mtp = block_index_get_median_time_past(tip);
+
+    struct block_header hdr;
+    make_pinned_header(&hdr, (uint32_t)(mtp + 1), nbits_pin);
+
+    struct validation_state state;
+    validation_state_init(&state);
+    bool ok = contextual_check_block_header(&hdr, &state, params, tip, false);
+    if (!ok) {
+        printf("FAIL (should ACCEPT, got reject_reason=%s)\n", state.reject_reason);
+        failures++;
+    } else printf("OK\n");
+    return failures;
+}
+
+/* 1c. nTime==MTP-1 stays rejected (below the boundary too). */
+static int check_mtp_rejects_time_one_below_mtp(const struct chain_params *params,
+                                                uint32_t nbits_pin)
+{
+    int failures = 0;
+    printf("contextual_check_block_header: nTime==MTP-1 stays rejected (below boundary too)... ");
+    struct block_index chain[11];
+    uint32_t times[] = {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100};
+    struct block_index *tip = make_pinned_chain(chain, 11, times, nbits_pin);
+    int64_t mtp = block_index_get_median_time_past(tip);
+
+    struct block_header hdr;
+    make_pinned_header(&hdr, (uint32_t)(mtp - 1), nbits_pin);
+
+    struct validation_state state;
+    validation_state_init(&state);
+    bool ok = contextual_check_block_header(&hdr, &state, params, tip, false);
+    if (ok || strcmp(state.reject_reason, "time-too-old") != 0) {
+        printf("FAIL (ok=%d reason=%s)\n", ok, state.reject_reason);
+        failures++;
+    } else printf("OK\n");
+    return failures;
+}
+
+/* 2a. nTime==now+2h must be truly accepted (the bound is a strict >). */
+static int check_future_time_accepts_two_hours_ahead(const struct chain_params *params)
+{
+    int failures = 0;
+    printf("check_block_header: nTime==now+2h is TRULY ACCEPTED (boundary, strict >)... ");
+    int64_t now = GetAdjustedTime();
+    struct block_header hdr;
+    block_header_init(&hdr);
+    hdr.nVersion = 4;
+    hdr.nTime = (uint32_t)(now + 2 * 60 * 60);
+
+    struct validation_state state;
+    validation_state_init(&state);
+    bool ok = check_block_header(&hdr, &state, params, /*check_pow=*/false);
+    if (!ok) {
+        printf("FAIL (should ACCEPT, got reject_reason=%s)\n", state.reject_reason);
+        failures++;
+    } else printf("OK\n");
+    return failures;
+}
+
+/* 2b. nTime==now+2h+1 must be rejected as "time-too-new" with dos=0. */
+static int check_future_time_rejects_beyond_two_hours(const struct chain_params *params)
+{
+    int failures = 0;
+    printf("check_block_header: nTime==now+2h+1 is REJECTED (time-too-new, dos=0)... ");
+    int64_t now = GetAdjustedTime();
+    struct block_header hdr;
+    block_header_init(&hdr);
+    hdr.nVersion = 4;
+    hdr.nTime = (uint32_t)(now + 2 * 60 * 60 + 1);
+
+    struct validation_state state;
+    validation_state_init(&state);
+    bool ok = check_block_header(&hdr, &state, params, /*check_pow=*/false);
+    if (ok || strcmp(state.reject_reason, "time-too-new") != 0 ||
+        state.dos != 0) {
+        printf("FAIL (ok=%d reason=%s dos=%d)\n", ok, state.reject_reason, state.dos);
+        failures++;
+    } else printf("OK\n");
+    return failures;
+}
+
+/* 2c. nTime==now is well inside the bound (accepted). */
+static int check_future_time_accepts_adjusted_now(const struct chain_params *params)
+{
+    int failures = 0;
+    printf("check_block_header: nTime==now is well inside the bound (accepted)... ");
+    int64_t now = GetAdjustedTime();
+    struct block_header hdr;
+    block_header_init(&hdr);
+    hdr.nVersion = 4;
+    hdr.nTime = (uint32_t)now;
+
+    struct validation_state state;
+    validation_state_init(&state);
+    bool ok = check_block_header(&hdr, &state, params, /*check_pow=*/false);
+    if (!ok) { printf("FAIL (%s)\n", state.reject_reason); failures++; }
+    else printf("OK\n");
+    return failures;
+}
+
+/* 3a. The MTP window must exclude ancestors beyond the last 11. */
+static int check_mtp_window_excludes_ancestors_beyond_last_eleven(uint32_t nbits_pin)
+{
+    int failures = 0;
+    printf("MTP window excludes ancestors beyond the last 11 (13-block chain)... ");
+    /* 13 ascending timestamps: the oldest two (10, 20) must be excluded
+     * from the median of the newest 11. */
+    struct block_index chain[13];
+    uint32_t times[] = {10, 20, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100};
+    struct block_index *tip = make_pinned_chain(chain, 13, times, nbits_pin);
+    int64_t mtp = block_index_get_median_time_past(tip);
+    int64_t ref = reference_median(times + 2, 11); /* last 11 only */
+    int64_t ref_all13 = reference_median(times, 13);
+
+    if (mtp != ref) {
+        printf("FAIL (mtp=%"PRId64" expected(last-11)=%"PRId64")\n", mtp, ref);
+        failures++;
+    } else if (mtp == ref_all13 && ref != ref_all13) {
+        /* defensive: only meaningful if the two references actually
+         * differ; guards against a vacuous pass */
+        printf("FAIL (window not applied — matched all-13 median instead)\n");
+        failures++;
+    } else {
+        printf("OK (mtp=%"PRId64", last-11-window enforced, all-13 would be %"PRId64")\n",
+               mtp, ref_all13);
+    }
+    return failures;
+}
+
+/* 3b. A single stale outlier beyond the window must not move the median. */
+static int check_mtp_window_ignores_stale_outlier(uint32_t nbits_pin)
+{
+    int failures = 0;
+    printf("MTP window: single stale outlier beyond the window doesn't move the median... ");
+    /* 12-block chain: exactly one ancestor (the oldest, a huge-backdate
+     * outlier) is excluded, proving the window cut protects the median;
+     * the newest ancestor is a high outlier and stays included without
+     * skewing it. */
+    struct block_index chain[12];
+    uint32_t times[] = {1, /* huge low outlier, oldest, EXCLUDED */
+                        100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
+                        5000000 /* huge high outlier, newest, INCLUDED */};
+    /* times[0] falls outside the last-11 window. */
+    struct block_index *tip = make_pinned_chain(chain, 12, times, nbits_pin);
+    int64_t mtp = block_index_get_median_time_past(tip);
+    int64_t ref = reference_median(times + 1, 11); /* drop times[0] only */
+    if (mtp != ref) {
+        printf("FAIL (mtp=%"PRId64" expected=%"PRId64")\n", mtp, ref);
+        failures++;
+    } else printf("OK\n");
+    return failures;
+}
+
+/* 3c. An out-of-order sequence within an 11-window must match the
+ * independent (qsort-based) reference median exactly. */
+static int check_mtp_matches_hand_reference_for_out_of_order_window(uint32_t nbits_pin)
+{
+    int failures = 0;
+    printf("MTP hand-reference: out-of-order sequence within an 11-window matches an independent median... ");
+    struct block_index chain[11];
+    uint32_t times[] = {950, 50, 850, 150, 750, 250, 650, 350, 550, 450, 1050};
+    struct block_index *tip = make_pinned_chain(chain, 11, times, nbits_pin);
+    int64_t mtp = block_index_get_median_time_past(tip);
+    int64_t ref = reference_median(times, 11);
+    if (mtp != ref) {
+        printf("FAIL (mtp=%"PRId64" ref=%"PRId64")\n", mtp, ref);
+        failures++;
+    } else printf("OK\n");
+    return failures;
+}
+
+/* 4. Equal-timestamp run: the median must land inside the run and the
+ * next block's minimum-nTime rule must hold through the real entry point. */
+static int check_equal_timestamp_run_median_and_minimum_time(const struct chain_params *params,
+                                                             uint32_t nbits_pin)
+{
+    int failures = 0;
+    printf("MTP with a run of identical ancestor timestamps computes correctly, "
+           "next block's minimum-nTime rule enforced... ");
+    /* 8 ancestors share nTime=T, 3 are distinct and lower. Sorted:
+     * {T-30,T-20,T-10, T,T,T,T,T,T,T,T} (11 total) -> index 5 (0-based)
+     * lands inside the run of T's -> median == T. */
+    const uint32_t T = 500000000u;
+    struct block_index chain[11];
+    uint32_t times[] = {T - 30, T - 20, T - 10, T, T, T, T, T, T, T, T};
+    struct block_index *tip = make_pinned_chain(chain, 11, times, nbits_pin);
+    int64_t mtp = block_index_get_median_time_past(tip);
+    int64_t ref = reference_median(times, 11);
+
+    bool fail = false;
+    if (mtp != (int64_t)T || mtp != ref) fail = true;
+
+    /* Next block's minimum-nTime rule: nTime==T (==MTP) rejected;
+     * nTime==T+1 truly accepted, driven through the real function. */
+    struct block_header hdr_at;
+    make_pinned_header(&hdr_at, T, nbits_pin);
+    struct validation_state st_at;
+    validation_state_init(&st_at);
+    bool ok_at = contextual_check_block_header(&hdr_at, &st_at, params, tip, false);
+    if (ok_at || strcmp(st_at.reject_reason, "time-too-old") != 0) fail = true;
+
+    struct block_header hdr_above;
+    make_pinned_header(&hdr_above, T + 1, nbits_pin);
+    struct validation_state st_above;
+    validation_state_init(&st_above);
+    bool ok_above = contextual_check_block_header(&hdr_above, &st_above, params, tip, false);
+    if (!ok_above) fail = true;
+
+    if (fail) {
+        printf("FAIL (mtp=%"PRId64" ref=%"PRId64" ok_at=%d reason_at=%s ok_above=%d reason_above=%s)\n",
+               mtp, ref, ok_at, st_at.reject_reason, ok_above, st_above.reject_reason);
+        failures++;
+    } else printf("OK\n");
+    return failures;
+}
+
 int test_block_timestamp_adversarial(void)
 {
     int failures = 0;
@@ -110,213 +363,22 @@ int test_block_timestamp_adversarial(void)
     uint32_t nbits_pin = GetNextWorkRequired(NULL, NULL, &params->consensus);
 
     /* ── 1. MTP monotonicity: TRUE accept/reject flip end-to-end ──── */
-    printf("contextual_check_block_header: nTime==MTP is REJECTED (time-too-old, dos=0)... ");
-    {
-        struct block_index chain[11];
-        uint32_t times[] = {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100};
-        struct block_index *tip = make_pinned_chain(chain, 11, times, nbits_pin);
-        int64_t mtp = block_index_get_median_time_past(tip);
-
-        struct block_header hdr;
-        make_pinned_header(&hdr, (uint32_t)mtp, nbits_pin);
-
-        struct validation_state state;
-        validation_state_init(&state);
-        bool ok = contextual_check_block_header(&hdr, &state, params, tip, false);
-        if (ok || strcmp(state.reject_reason, "time-too-old") != 0 ||
-            state.dos != 0) {
-            printf("FAIL (ok=%d reason=%s dos=%d)\n", ok, state.reject_reason, state.dos);
-            failures++;
-        } else printf("OK\n");
-    }
-
-    printf("contextual_check_block_header: nTime==MTP+1 is TRULY ACCEPTED (boundary)... ");
-    {
-        struct block_index chain[11];
-        uint32_t times[] = {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100};
-        struct block_index *tip = make_pinned_chain(chain, 11, times, nbits_pin);
-        int64_t mtp = block_index_get_median_time_past(tip);
-
-        struct block_header hdr;
-        make_pinned_header(&hdr, (uint32_t)(mtp + 1), nbits_pin);
-
-        struct validation_state state;
-        validation_state_init(&state);
-        bool ok = contextual_check_block_header(&hdr, &state, params, tip, false);
-        if (!ok) {
-            printf("FAIL (should ACCEPT, got reject_reason=%s)\n", state.reject_reason);
-            failures++;
-        } else printf("OK\n");
-    }
-
-    printf("contextual_check_block_header: nTime==MTP-1 stays rejected (below boundary too)... ");
-    {
-        struct block_index chain[11];
-        uint32_t times[] = {100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100};
-        struct block_index *tip = make_pinned_chain(chain, 11, times, nbits_pin);
-        int64_t mtp = block_index_get_median_time_past(tip);
-
-        struct block_header hdr;
-        make_pinned_header(&hdr, (uint32_t)(mtp - 1), nbits_pin);
-
-        struct validation_state state;
-        validation_state_init(&state);
-        bool ok = contextual_check_block_header(&hdr, &state, params, tip, false);
-        if (ok || strcmp(state.reject_reason, "time-too-old") != 0) {
-            printf("FAIL (ok=%d reason=%s)\n", ok, state.reject_reason);
-            failures++;
-        } else printf("OK\n");
-    }
+    failures += check_mtp_rejects_time_equal_to_mtp(params, nbits_pin);
+    failures += check_mtp_accepts_time_one_above_mtp(params, nbits_pin);
+    failures += check_mtp_rejects_time_one_below_mtp(params, nbits_pin);
 
     /* ── 2. FUTURE-TIME bound: real check_block_header() legacy entry ── */
-    printf("check_block_header: nTime==now+2h is TRULY ACCEPTED (boundary, strict >)... ");
-    {
-        int64_t now = GetAdjustedTime();
-        struct block_header hdr;
-        block_header_init(&hdr);
-        hdr.nVersion = 4;
-        hdr.nTime = (uint32_t)(now + 2 * 60 * 60);
-
-        struct validation_state state;
-        validation_state_init(&state);
-        bool ok = check_block_header(&hdr, &state, params, /*check_pow=*/false);
-        if (!ok) {
-            printf("FAIL (should ACCEPT, got reject_reason=%s)\n", state.reject_reason);
-            failures++;
-        } else printf("OK\n");
-    }
-
-    printf("check_block_header: nTime==now+2h+1 is REJECTED (time-too-new, dos=0)... ");
-    {
-        int64_t now = GetAdjustedTime();
-        struct block_header hdr;
-        block_header_init(&hdr);
-        hdr.nVersion = 4;
-        hdr.nTime = (uint32_t)(now + 2 * 60 * 60 + 1);
-
-        struct validation_state state;
-        validation_state_init(&state);
-        bool ok = check_block_header(&hdr, &state, params, /*check_pow=*/false);
-        if (ok || strcmp(state.reject_reason, "time-too-new") != 0 ||
-            state.dos != 0) {
-            printf("FAIL (ok=%d reason=%s dos=%d)\n", ok, state.reject_reason, state.dos);
-            failures++;
-        } else printf("OK\n");
-    }
-
-    printf("check_block_header: nTime==now is well inside the bound (accepted)... ");
-    {
-        int64_t now = GetAdjustedTime();
-        struct block_header hdr;
-        block_header_init(&hdr);
-        hdr.nVersion = 4;
-        hdr.nTime = (uint32_t)now;
-
-        struct validation_state state;
-        validation_state_init(&state);
-        bool ok = check_block_header(&hdr, &state, params, /*check_pow=*/false);
-        if (!ok) { printf("FAIL (%s)\n", state.reject_reason); failures++; }
-        else printf("OK\n");
-    }
+    failures += check_future_time_accepts_two_hours_ahead(params);
+    failures += check_future_time_rejects_beyond_two_hours(params);
+    failures += check_future_time_accepts_adjusted_now(params);
 
     /* ── 3. MTP window correctness: only the last 11 count ────────── */
-    printf("MTP window excludes ancestors beyond the last 11 (13-block chain)... ");
-    {
-        /* 13 ascending timestamps: the oldest two (10, 20) must be excluded
-         * from the median of the newest 11. */
-        struct block_index chain[13];
-        uint32_t times[] = {10, 20, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100};
-        struct block_index *tip = make_pinned_chain(chain, 13, times, nbits_pin);
-        int64_t mtp = block_index_get_median_time_past(tip);
-        int64_t ref = reference_median(times + 2, 11); /* last 11 only */
-        int64_t ref_all13 = reference_median(times, 13);
-
-        if (mtp != ref) {
-            printf("FAIL (mtp=%"PRId64" expected(last-11)=%"PRId64")\n", mtp, ref);
-            failures++;
-        } else if (mtp == ref_all13 && ref != ref_all13) {
-            /* defensive: only meaningful if the two references actually
-             * differ; guards against a vacuous pass */
-            printf("FAIL (window not applied — matched all-13 median instead)\n");
-            failures++;
-        } else {
-            printf("OK (mtp=%"PRId64", last-11-window enforced, all-13 would be %"PRId64")\n",
-                   mtp, ref_all13);
-        }
-    }
-
-    printf("MTP window: single stale outlier beyond the window doesn't move the median... ");
-    {
-        /* 12-block chain: exactly one ancestor (the oldest, a huge-backdate
-         * outlier) is excluded, proving the window cut protects the median;
-         * the newest ancestor is a high outlier and stays included without
-         * skewing it. */
-        struct block_index chain[12];
-        uint32_t times[] = {1, /* huge low outlier, oldest, EXCLUDED */
-                            100, 200, 300, 400, 500, 600, 700, 800, 900, 1000,
-                            5000000 /* huge high outlier, newest, INCLUDED */};
-        /* times[0] falls outside the last-11 window. */
-        struct block_index *tip = make_pinned_chain(chain, 12, times, nbits_pin);
-        int64_t mtp = block_index_get_median_time_past(tip);
-        int64_t ref = reference_median(times + 1, 11); /* drop times[0] only */
-        if (mtp != ref) {
-            printf("FAIL (mtp=%"PRId64" expected=%"PRId64")\n", mtp, ref);
-            failures++;
-        } else printf("OK\n");
-    }
-
-    printf("MTP hand-reference: out-of-order sequence within an 11-window matches an independent median... ");
-    {
-        struct block_index chain[11];
-        uint32_t times[] = {950, 50, 850, 150, 750, 250, 650, 350, 550, 450, 1050};
-        struct block_index *tip = make_pinned_chain(chain, 11, times, nbits_pin);
-        int64_t mtp = block_index_get_median_time_past(tip);
-        int64_t ref = reference_median(times, 11);
-        if (mtp != ref) {
-            printf("FAIL (mtp=%"PRId64" ref=%"PRId64")\n", mtp, ref);
-            failures++;
-        } else printf("OK\n");
-    }
+    failures += check_mtp_window_excludes_ancestors_beyond_last_eleven(nbits_pin);
+    failures += check_mtp_window_ignores_stale_outlier(nbits_pin);
+    failures += check_mtp_matches_hand_reference_for_out_of_order_window(nbits_pin);
 
     /* ── 4. Equal-timestamp run ────────────────────────────────────── */
-    printf("MTP with a run of identical ancestor timestamps computes correctly, "
-           "next block's minimum-nTime rule enforced... ");
-    {
-        /* 8 ancestors share nTime=T, 3 are distinct and lower. Sorted:
-         * {T-30,T-20,T-10, T,T,T,T,T,T,T,T} (11 total) -> index 5 (0-based)
-         * lands inside the run of T's -> median == T. */
-        const uint32_t T = 500000000u;
-        struct block_index chain[11];
-        uint32_t times[] = {T - 30, T - 20, T - 10, T, T, T, T, T, T, T, T};
-        struct block_index *tip = make_pinned_chain(chain, 11, times, nbits_pin);
-        int64_t mtp = block_index_get_median_time_past(tip);
-        int64_t ref = reference_median(times, 11);
-
-        bool fail = false;
-        if (mtp != (int64_t)T || mtp != ref) fail = true;
-
-        /* Next block's minimum-nTime rule: nTime==T (==MTP) rejected;
-         * nTime==T+1 truly accepted, driven through the real function. */
-        struct block_header hdr_at;
-        make_pinned_header(&hdr_at, T, nbits_pin);
-        struct validation_state st_at;
-        validation_state_init(&st_at);
-        bool ok_at = contextual_check_block_header(&hdr_at, &st_at, params, tip, false);
-        if (ok_at || strcmp(st_at.reject_reason, "time-too-old") != 0) fail = true;
-
-        struct block_header hdr_above;
-        make_pinned_header(&hdr_above, T + 1, nbits_pin);
-        struct validation_state st_above;
-        validation_state_init(&st_above);
-        bool ok_above = contextual_check_block_header(&hdr_above, &st_above, params, tip, false);
-        if (!ok_above) fail = true;
-
-        if (fail) {
-            printf("FAIL (mtp=%"PRId64" ref=%"PRId64" ok_at=%d reason_at=%s ok_above=%d reason_above=%s)\n",
-                   mtp, ref, ok_at, st_at.reject_reason, ok_above, st_above.reject_reason);
-            failures++;
-        } else printf("OK\n");
-    }
+    failures += check_equal_timestamp_run_median_and_minimum_time(params, nbits_pin);
 
     printf("=== Block-timestamp adversarial: %d failures ===\n\n", failures);
     return failures;
