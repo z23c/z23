@@ -1968,7 +1968,6 @@ tests/harness/src/test_blob_read_bounds.c:test_blob_read_bounds:24
 tests/harness/src/test_block_index_loader.c:test_block_index_loader:299
 tests/harness/src/test_block_index_node_db_topup.c:test_block_index_node_db_topup:42
 tests/harness/src/test_block_index_projection.c:run_bound_dirty_delta:22
-tests/harness/src/test_block_index_rebuild.c:run_rebuild_n_headers:19
 tests/harness/src/test_block_index_topup.c:run_bound_topup_integration:42
 tests/harness/src/test_block_index_topup.c:test_block_index_topup:53
 tests/harness/src/test_block_locator_bounds.c:test_block_locator_bounds:28

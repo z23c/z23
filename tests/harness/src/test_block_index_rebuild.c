@@ -185,6 +185,30 @@ static bool bir_seed_tip_cursor(sqlite3 *pk, int tip_height,
     return ok;
 }
 
+/* Emit `n` chained canonical headers (heights 0..n-1) into `log`. Once one
+ * serialize/append fails, later heights are not emitted; returns false. */
+static bool bir_emit_n_headers(event_log_t *log, int n)
+{
+    bool emit_ok = true;
+    for (int h = 0; h < n; h++)
+        emit_ok = emit_ok && bir_emit_height(log, h);
+    return emit_ok;
+}
+
+/* True when every height 0..n-1 is in the rebuilt map at its own nHeight
+ * with BLOCK_HAVE_DATA set. */
+static bool bir_all_heights_have_data(struct main_state *ms, int n)
+{
+    bool heights_ok = true;
+    for (int h = 0; h < n && heights_ok; h++) {
+        struct uint256 hh = bir_hash_at(h);
+        struct block_index *bi = block_map_find(&ms->map_block_index, &hh);
+        if (!bi || bi->nHeight != h) heights_ok = false;
+        if (bi && !(bi->nStatus & BLOCK_HAVE_DATA)) heights_ok = false;
+    }
+    return heights_ok;
+}
+
 /* ── Test 1: N synthetic headers fold into a map of size N, tip=cursor-1 ── */
 
 static int run_rebuild_n_headers(int *failures)
@@ -204,9 +228,7 @@ static int run_rebuild_n_headers(int *failures)
     BIR_CHECK("n: event log opens", log != NULL);
     if (!log) goto done;
 
-    bool emit_ok = true;
-    for (int h = 0; h < N; h++)
-        emit_ok = emit_ok && bir_emit_height(log, h);
+    bool emit_ok = bir_emit_n_headers(log, N);
     BIR_CHECK("n: emitted N chained headers", emit_ok);
 
     block_index_projection_t *bip = block_index_projection_open(db_path, log);
@@ -238,13 +260,7 @@ static int run_rebuild_n_headers(int *failures)
               ms.map_block_index.size == (size_t)(N + 1));
 
     /* Every height present, heights match. */
-    bool heights_ok = true;
-    for (int h = 0; h < N && heights_ok; h++) {
-        struct uint256 hh = bir_hash_at(h);
-        struct block_index *bi = block_map_find(&ms.map_block_index, &hh);
-        if (!bi || bi->nHeight != h) heights_ok = false;
-        if (bi && !(bi->nStatus & BLOCK_HAVE_DATA)) heights_ok = false;
-    }
+    bool heights_ok = bir_all_heights_have_data(&ms, N);
     BIR_CHECK("n: all heights present with HAVE_DATA", heights_ok);
 
     /* pprev chain walks from tip to genesis (N hops). */
