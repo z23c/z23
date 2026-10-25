@@ -23,19 +23,16 @@
 
 /* ── Manifest pick from a /directory.json body ──────────────────────────── */
 
-bool boot_bundle_pick_manifest(const char *directory_json,
-                               struct rom_fetch_manifest *out)
+static bool artifact_newer_then_larger(const struct rom_fetch_manifest *arts,
+                                       int index, int best)
 {
-    if (!directory_json || !out)
-        return false;
+    return best < 0 || arts[index].height > arts[best].height ||
+           (arts[index].height == arts[best].height &&
+            arts[index].size_bytes > arts[best].size_bytes);
+}
 
-    struct rom_fetch_manifest arts[ROM_FETCH_MAX_ARTIFACTS];
-    memset(arts, 0, sizeof(arts));
-    int n = rom_fetch_parse_directory(directory_json, arts,
-                                      ROM_FETCH_MAX_ARTIFACTS);
-    if (n <= 0)
-        return false;
-
+static int pick_kind_aware_bundle(const struct rom_fetch_manifest *arts, int n)
+{
     /* Kind-aware, NEWEST-by-height bundle selection. Pass 1: among explicitly
      * consensus-bundle-kinded artifacts pick the HIGHEST advertised height, with
      * size as the tie-break (and, since a legacy no-height entry parses to
@@ -50,21 +47,34 @@ bool boot_bundle_pick_manifest(const char *directory_json,
     for (int i = 0; i < n; i++) {
         if (!arts[i].used || arts[i].kind != ROM_ARTIFACT_CONSENSUS_BUNDLE)
             continue;
-        if (best < 0 || arts[i].height > arts[best].height ||
-            (arts[i].height == arts[best].height &&
-             arts[i].size_bytes > arts[best].size_bytes))
+        if (artifact_newer_then_larger(arts, i, best))
             best = i;
     }
     if (best < 0) {
         for (int i = 0; i < n; i++) {
             if (!arts[i].used || arts[i].kind == ROM_ARTIFACT_HEADER_SEED)
                 continue;
-            if (best < 0 || arts[i].height > arts[best].height ||
-                (arts[i].height == arts[best].height &&
-                 arts[i].size_bytes > arts[best].size_bytes))
+            if (artifact_newer_then_larger(arts, i, best))
                 best = i;
         }
     }
+    return best;
+}
+
+bool boot_bundle_pick_manifest(const char *directory_json,
+                               struct rom_fetch_manifest *out)
+{
+    if (!directory_json || !out)
+        return false;
+
+    struct rom_fetch_manifest arts[ROM_FETCH_MAX_ARTIFACTS];
+    memset(arts, 0, sizeof(arts));
+    int n = rom_fetch_parse_directory(directory_json, arts,
+                                      ROM_FETCH_MAX_ARTIFACTS);
+    if (n <= 0)
+        return false;
+
+    int best = pick_kind_aware_bundle(arts, n);
     if (best < 0)
         return false;
 
