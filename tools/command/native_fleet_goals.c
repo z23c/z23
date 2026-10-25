@@ -1148,7 +1148,7 @@ static bool gr_claim_live(const struct json_value *row, int64_t now)
 }
 
 /* Counts live claim rows. A line that is not a JSON object is counted as
- * unreadable rather than guessed at. False when the file cannot be opened. */
+ * unreadable rather than guessed at. False on open, read or close failure. */
 static bool gr_claims_scan(const char *path, int64_t now, int64_t *live,
                            int64_t *unreadable)
 {
@@ -1169,8 +1169,9 @@ static bool gr_claims_scan(const char *path, int64_t now, int64_t *live,
         while (!whole && fgets(line, sizeof(line), fp))
             whole = strchr(line, '\n') != NULL;
     }
-    (void)fclose(fp);
-    return true;
+    bool read_ok = !ferror(fp);
+    int close_rc = fclose(fp);
+    return read_ok && close_rc == 0;
 }
 
 static struct zcl_goal_result gr_g13(const struct zcl_goals_options *o)

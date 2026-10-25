@@ -367,6 +367,23 @@ static int fgl_case_claims(const char *root)
     return failures;
 }
 
+static int fgl_case_claims_read_error(const char *root)
+{
+    int failures = 0;
+    struct zcl_goals_options o;
+    fgl_options(&o);
+    o.claims = root;
+    TEST("G13: a claims stream read error is unmeasured") {
+        /* A directory may open as a stream but cannot provide ledger bytes. */
+        struct zcl_goal_result r = zcl_goals_measure(&o, "G13");
+        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
+        ASSERT(fgl_has(r.evidence, "missing or unreadable"));
+        ASSERT(fgl_has(r.evidence, root));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 /* ── C rows: newest durable receipt ───────────────────────────────────── */
 
 static bool fgl_soak_hourly(const char *path, int64_t base, int count,
@@ -1342,6 +1359,7 @@ int test_fleet_goals(void)
     failures += fgl_case_d7_grade(root);
     failures += fgl_case_files(root);
     failures += fgl_case_claims(root);
+    failures += fgl_case_claims_read_error(root);
     failures += fgl_case_receipt_c3(root);
     failures += fgl_case_receipt_c6(root);
     failures += fgl_case_receipt_none();
