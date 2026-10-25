@@ -1709,7 +1709,6 @@ tests/harness/src/test_utxo_activation_paused.c:test_utxo_activation_paused:190
 tests/harness/src/test_utxo_apply_stage.c:test_utxo_apply_stage:183
 tests/harness/src/test_utxo_mirror_sync.c:test_utxo_mirror_sync:34
 tests/harness/src/test_utxo_recovery_service.c:test_utxo_recovery_service:298
-tests/harness/src/test_utxo_root_ladder.c:test_utxo_root_ladder:17
 tests/harness/src/test_utxo_root_ladder_tripwire.c:test_utxo_root_ladder_tripwire:44
 tests/harness/src/test_utxo_root_ladder_tripwire.c:tw_run_cap_sections:42
 tests/harness/src/test_validate_headers_stage.c:test_validate_headers_stage:59

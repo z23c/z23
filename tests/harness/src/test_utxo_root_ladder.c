@@ -164,6 +164,47 @@ static int test_generator_refuses_huge_height(void)
 }
 #endif /* !_WIN32 */
 
+/* Section (4) body: utxo_root_ladder_verify_against_store() must refuse a
+ * NULL db. Returns the failure count and prints OK/FAIL itself. */
+static int test_ladder_null_db_refusal_failures(void)
+{
+    bool ok = utxo_root_ladder_verify_against_store(NULL, NULL, 0, NULL);
+    if (!ok) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL\n");
+    return 1;
+}
+
+/* True when the compiled table carries no dense anchor
+ * (g_utxo_root_ladder_dense_height == -1), so the real-leaf-store
+ * reproduction cannot apply. */
+static bool test_ladder_dense_anchor_absent(void)
+{
+    return g_utxo_root_ladder_dense_height < 0;
+}
+
+/* True when the env-gated heavy run is both requested
+ * (ZCL_UTXO_LADDER_HEAVY set, non-empty and not "0") and pointed at a
+ * non-empty ZCL_UTXO_LADDER_LEAF_STORE path. */
+static bool test_ladder_heavy_run_requested(const char *heavy,
+                                            const char *store_path)
+{
+    bool run_heavy = heavy && heavy[0] && strcmp(heavy, "0") != 0;
+    return run_heavy && store_path && store_path[0];
+}
+
+/* Print the lane's final verdict line for the accumulated failure
+ * count. */
+static void test_ladder_print_summary(int failures)
+{
+    if (failures == 0)
+        printf("=== test_utxo_root_ladder: all cases passed ===\n");
+    else
+        printf("=== test_utxo_root_ladder: %d failure(s) ===\n", failures);
+}
+
 int test_utxo_root_ladder(void)
 {
     int failures = 0;
@@ -272,11 +313,7 @@ int test_utxo_root_ladder(void)
     /* (4) utxo_root_ladder_verify_against_store() rejects a NULL db
      * (defensive-coding contract: log + return false, never crash). */
     printf("utxo_root_ladder: verify_against_store rejects NULL db... ");
-    {
-        bool ok = utxo_root_ladder_verify_against_store(NULL, NULL, 0, NULL);
-        if (!ok) printf("OK\n");
-        else { printf("FAIL\n"); failures++; }
-    }
+    failures += test_ladder_null_db_refusal_failures();
 
     /* (5) Dense-layer fast path: a store that does not yet cover
      * g_utxo_root_ladder_dense_height must report "not yet reached" (true),
@@ -364,11 +401,10 @@ int test_utxo_root_ladder(void)
     {
         const char *heavy = getenv("ZCL_UTXO_LADDER_HEAVY");
         const char *store_path = getenv("ZCL_UTXO_LADDER_LEAF_STORE");
-        bool run_heavy = heavy && heavy[0] && strcmp(heavy, "0") != 0;
 
-        if (g_utxo_root_ladder_dense_height < 0) {
+        if (test_ladder_dense_anchor_absent()) {
             printf("not applicable (no compiled dense anchor)\n");
-        } else if (!run_heavy || !store_path || !store_path[0]) {
+        } else if (!test_ladder_heavy_run_requested(heavy, store_path)) {
             printf("covered hermetically; simnet-nightly adds the real "
                   "leaf-store observation\n");
         } else {
@@ -392,9 +428,6 @@ int test_utxo_root_ladder(void)
 _test_next:
     printf("(section aborted)\n");
 _done:
-    if (failures == 0)
-        printf("=== test_utxo_root_ladder: all cases passed ===\n");
-    else
-        printf("=== test_utxo_root_ladder: %d failure(s) ===\n", failures);
+    test_ladder_print_summary(failures);
     return failures;
 }
