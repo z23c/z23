@@ -56,7 +56,7 @@ static bool sd_reader(struct block *out, const struct block_index *bi,
         return false;
     out->num_vtx = 1;
     out->vtx = zcl_calloc(1, sizeof(struct transaction), "sd_tx");
-    out->vtx[0].value_balance = fx->sapling[h];
+    out->vtx[0].value_balance = -fx->sapling[h]; /* pool delta = -valueBalance */
     if (fx->sprout[h] != 0) {
         out->vtx[0].num_joinsplit = 1;
         out->vtx[0].v_joinsplit =

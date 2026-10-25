@@ -327,7 +327,7 @@ static bool pt_blocker_has(const char *needle)
 }
 
 /* ENFORCE: h1 reveals N (no value); h2 reveals fresh X then N again with
- * value_balance -5 (sapling total 0 -> -5). */
+ * value_balance +5: 5 ZAT leaves an empty Sapling pool (total 0 -> -5). */
 static int pt_enforce_case(void)
 {
     int failures = 0;
@@ -342,7 +342,7 @@ static int pt_enforce_case(void)
     PT_CHECK("enforce: h1 shielded tx attaches",
              pt_add_shielded(&c, 1, h1_tags, 1, 0));
     PT_CHECK("enforce: h2 shielded tx attaches",
-             pt_add_shielded(&c, 2, h2_tags, 2, -5));
+             pt_add_shielded(&c, 2, h2_tags, 2, 5));
     atomic_store(&g_enforce_turnstile, true);
     (void)utxo_apply_stage_drain(100);
     atomic_store(&g_enforce_turnstile, false);
@@ -378,7 +378,7 @@ static int pt_shadow_case(void)
     PT_CHECK("shadow: setup",
              pt_setup("ts_stage_shd", dir, sizeof(dir), &ms, &c) == 0);
     PT_CHECK("shadow: h1 shielded tx attaches",
-             pt_add_shielded(&c, 1, h1_tags, 1, -5));
+             pt_add_shielded(&c, 1, h1_tags, 1, 5));
     atomic_store(&g_enforce_turnstile, false);
     (void)utxo_apply_stage_drain(100);
     sqlite3 *db = progress_store_db();

@@ -23,9 +23,12 @@ struct delta_summary;
 struct sqlite3;
 struct uint256;
 
-/* Per-block shielded value, exactly connect_block.c: over every joinsplit of
- * every tx sprout += vpub_old - vpub_new; sapling += tx value_balance.
- * Plain int64 arithmetic in the same order. */
+/* Per-block shielded value, as zclassicd ConnectBlock computes it: over every
+ * joinsplit of every tx sprout += vpub_old - vpub_new; sapling -=
+ * tx value_balance (valueBalance is value leaving the Sapling pool). Plain
+ * int64 arithmetic in the same order. core/modules/validation/src/
+ * connect_block.c still adds value_balance; that latent copy only runs once
+ * the chain Sapling value is known, and is reported for an owner decision. */
 void utxo_apply_turnstile_block_values(const struct block *blk,
                                        int64_t *sprout, int64_t *sapling);
 

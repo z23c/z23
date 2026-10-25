@@ -74,11 +74,32 @@ static int test_block_values(void)
 
     int64_t s = -1, p = -1;
     utxo_apply_turnstile_block_values(&blk, &s, &p);
-    TS_CHECK("block sums: sprout += old - new, sapling += value_balance",
-             s == 25 && p == 13);
+    TS_CHECK("block sums: sprout += old - new, sapling -= value_balance",
+             s == 25 && p == -13);
 
     free(blk.vtx[0].v_joinsplit);
     free(blk.vtx);
+
+    /* zclassicd at height 476977, the first Sapling shielding after
+     * activation: one tx with valueBalance -1.00000000 ZCL moves the Sapling
+     * chainValue from 0 to +1.00000000, and the Sprout delta is -11.875 ZCL
+     * (12496.61384694 -> 12484.73884694). */
+    memset(&blk, 0, sizeof(blk));
+    blk.num_vtx = 1;
+    blk.vtx = zcl_calloc(1, sizeof(struct transaction), "ts_vtx_476977");
+    blk.vtx[0].value_balance = -100000000;
+    utxo_apply_turnstile_block_values(&blk, &s, &p);
+    TS_CHECK("oracle 476977: valueBalance -1 ZCL grows the Sapling pool by 1 ZCL",
+             s == 0 && p == 100000000);
+    free(blk.vtx);
+    {
+        struct utxo_apply_turnstile_pool os, op;
+        TS_CHECK("oracle 476977: totals advance to zclassicd's chainValue",
+                 run(known(1249661384694), known(0), -1187500000, 100000000,
+                     &os, &op) == NULL &&
+                 os.known && os.total == 1248473884694 &&
+                 op.known && op.total == 100000000);
+    }
     memset(&blk, 0, sizeof(blk));
     utxo_apply_turnstile_block_values(&blk, &s, &p);
     TS_CHECK("empty block sums to zero", s == 0 && p == 0);

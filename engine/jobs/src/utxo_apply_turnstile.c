@@ -31,7 +31,11 @@ void utxo_apply_turnstile_block_values(const struct block *blk,
             sprout_value += tx->v_joinsplit[j].vpub_old;
             sprout_value -= tx->v_joinsplit[j].vpub_new;
         }
-        sapling_value += tx->value_balance;
+        /* valueBalance is value LEAVING the Sapling pool, so the pool moves
+         * by its negation (zclassicd ConnectBlock: saplingValue +=
+         * -tx.valueBalance). Oracle, height 476977: a tx with valueBalance
+         * -1.00000000 takes the Sapling chainValue from 0 to +1.00000000. */
+        sapling_value -= tx->value_balance;
     }
     if (sprout)
         *sprout = sprout_value;
