@@ -109,6 +109,62 @@ static int msls_unplant(const char *root, const char *name)
 static int msls_truncate(const char *base)
 { return csr_write(base, ""); }
 
+static int msls_loader_expect(const char *path, int want_rc, int want_count)
+{
+    static struct sr_set small;
+    static struct bln_set large;
+    small.count = 0;
+    large.count = 0;
+    int sr = sr_load(&small, path);
+    int bln = bln_load(&large, path);
+    if (sr != want_rc || bln != want_rc ||
+        small.count != want_count || large.count != want_count) {
+        fprintf(stderr, "model SQL baseline loader witness failed: %s "
+                        "sr=%d/%d bln=%d/%d\n", path,
+                sr, small.count, bln, large.count);
+        return 1;
+    }
+    return 0;
+}
+
+static int msls_baseline_gate_error(const struct msls_env *e, const char *path)
+{
+    struct msls_env bad = {.root = e->root, .base = path};
+    static char out[MSLS_OUT];
+    int rc = 0;
+    if (msls_run(&bad, out, sizeof out, &rc))
+        return 2;
+    if (rc != 2 || strstr(out, path) == NULL || strstr(out, "PASS") != NULL) {
+        fprintf(stderr, "model SQL gate swallowed baseline error: rc=%d %s\n",
+                rc, out);
+        return 1;
+    }
+    return 0;
+}
+
+static int msls_baseline_io(const struct msls_env *e)
+{
+    char missing[4200], child[4200];
+    if (ovf(snprintf(missing, sizeof missing, "%s.missing", e->base), sizeof missing)
+        || ovf(snprintf(child, sizeof child, "%s/child", e->base), sizeof child))
+        return 2;
+    int rc = msls_truncate(e->base);
+    if (rc == 0) rc = msls_loader_expect(missing, 0, 0);
+    if (rc == 0) rc = msls_loader_expect(e->base, 0, 0);
+    if (rc == 0) rc = csr_write(e->base, " alpha # comment\n beta\nalpha\n");
+    if (rc == 0) rc = msls_loader_expect(e->base, 0, 2);
+    if (rc == 0) rc = msls_loader_expect(child, 2, 0);
+    if (rc == 0) rc = msls_loader_expect(e->root, 2, 0);
+    if (rc == 0) rc = msls_plant(e->root, "io_control.c", "int clean;\n");
+    if (rc == 0) rc = msls_baseline_gate_error(e, child);
+    if (rc == 0) rc = msls_unplant(e->root, "io_control.c");
+    if (rc == 0) rc = msls_truncate(e->base);
+    if (rc == 0)
+        puts("  selftest ok: optional missing/empty/parsed baselines preserved; "
+             "ENOTDIR and directory reads fail closed in both loaders and gate");
+    return rc;
+}
+
 static int msls_negative_controls(const struct msls_env *e, int *fails)
 {
     int rc = msls_truncate(e->base);
@@ -331,6 +387,7 @@ static int msls_run_cases(const struct msls_env *e, const char *empty,
     if (rc == 0) rc = msls_regression(e, fails);
     if (rc == 0) rc = msls_positive_controls(e, fails);
     if (rc == 0) rc = msls_comment_opener_and_builder(e, fails);
+    if (rc == 0) rc = msls_baseline_io(e);
     if (rc == 0) rc = msls_hollow_scan(empty, base, fails);
     return rc;
 }

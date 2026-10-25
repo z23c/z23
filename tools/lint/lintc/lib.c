@@ -1199,7 +1199,8 @@ int sr_add(struct sr_set *s, const char *name)
 int sr_load(struct sr_set *s, const char *path)
 {
     FILE *f = fopen(path, "r");
-    if (!f) return 0;
+    if (!f)
+        return errno == ENOENT ? 0 : die("z23-lint: cannot open %s\n", path);
     char *line = NULL;
     size_t cap = 0;
     int rc = 0;
@@ -1237,7 +1238,7 @@ int bln_load(struct bln_set *s, const char *path)
 {
     FILE *f = fopen(path, "r");
     if (!f)
-        return 0;
+        return errno == ENOENT ? 0 : die("z23-lint: cannot open %s\n", path);
     char *line = NULL;
     size_t cap = 0;
     int rc = 0;
