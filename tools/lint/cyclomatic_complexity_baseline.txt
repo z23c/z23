@@ -2086,7 +2086,6 @@ tests/harness/src/test_seal_kv.c:test_seal_kv:30
 tests/harness/src/test_secp256k1_differential.c:test_secp256k1_differential:60
 tests/harness/src/test_seed_tape.c:test_seed_tape:29
 tests/harness/src/test_seed_torn_import_gate.c:test_seed_torn_import_gate:49
-tests/harness/src/test_segment_sealer.c:test_segment_sealer:20
 tests/harness/src/test_sha256_isa_parity.c:test_sha256_isa_parity:43
 tests/harness/src/test_sha3_256_x4.c:test_sha3_256_x4:56
 tests/harness/src/test_sha3_512_x4.c:test_sha3_512_x4:41
