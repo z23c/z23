@@ -104,6 +104,45 @@ void boot_bundle_fetch_disarm_peer_seeds(void)
     boot_bundle_fetch_set_peer_source(NULL, NULL);
 }
 
+/* Turn one cached row's 16-byte ip into a printable host string the armed
+ * table can hold. Returns false when the row has no address we could dial —
+ * invalid, onion, unprintable, or longer than g_armed[]'s host field — which
+ * the caller counts as an unusable address. */
+static bool bbfps_row_to_host_string(const struct db_file_service *row,
+                                     char *host, size_t host_len)
+{
+    /* file_services.ip is the 16-byte net_addr form (IPv4-mapped for v4).
+     * An onion peer's connection address has an all-zero ip here — its
+     * identity lives in the torv3 field, which this table does not carry —
+     * so it fails net_addr_is_valid() below and is skipped. That is the
+     * right outcome today regardless: rom_fetch's transport dials with
+     * getaddrinfo() and has no SOCKS/Tor route, so an onion seed could not
+     * be reached even if it were named here. */
+    struct net_addr a;
+    net_addr_init(&a);
+    memcpy(a.ip, row->ip, sizeof(a.ip));
+    if (!net_addr_is_valid(&a) || net_addr_is_tor(&a))
+        return false;
+    host[0] = '\0';
+    if (net_addr_to_string(&a, host, host_len) <= 0 || !host[0])
+        return false;
+    if (strlen(host) >= sizeof(g_armed[0].host))
+        return false;
+    return true;
+}
+
+/* De-dup on (host, port) — the assembler de-dups too, but keeping the
+ * snapshot clean means the BBFPS_MAX budget is not spent on repeats. */
+static bool bbfps_seed_already_armed(const struct db_file_service *row,
+                                     const char *host)
+{
+    for (size_t j = 0; j < g_armed_count; j++)
+        if (g_armed[j].port == row->port &&
+            strcmp(g_armed[j].host, host) == 0)
+            return true;
+    return false;
+}
+
 void boot_bundle_fetch_arm_peer_seeds(struct node_db *ndb)
 {
     boot_bundle_fetch_disarm_peer_seeds();
@@ -129,37 +168,12 @@ void boot_bundle_fetch_arm_peer_seeds(struct node_db *ndb)
             skipped_no_port++;
             continue; /* row exists but names no file service */
         }
-        /* file_services.ip is the 16-byte net_addr form (IPv4-mapped for v4).
-         * An onion peer's connection address has an all-zero ip here — its
-         * identity lives in the torv3 field, which this table does not carry —
-         * so it fails net_addr_is_valid() below and is skipped. That is the
-         * right outcome today regardless: rom_fetch's transport dials with
-         * getaddrinfo() and has no SOCKS/Tor route, so an onion seed could not
-         * be reached even if it were named here. */
-        struct net_addr a;
-        net_addr_init(&a);
-        memcpy(a.ip, rows[i].ip, sizeof(a.ip));
-        if (!net_addr_is_valid(&a) || net_addr_is_tor(&a)) {
-            skipped_addr++;
-            continue;
-        }
         char host[64];
-        host[0] = '\0';
-        if (net_addr_to_string(&a, host, sizeof(host)) <= 0 || !host[0]) {
+        if (!bbfps_row_to_host_string(&rows[i], host, sizeof(host))) {
             skipped_addr++;
             continue;
         }
-        if (strlen(host) >= sizeof(g_armed[0].host)) {
-            skipped_addr++;
-            continue;
-        }
-        /* De-dup on (host, port) — the assembler de-dups too, but keeping the
-         * snapshot clean means the BBFPS_MAX budget is not spent on repeats. */
-        bool dup = false;
-        for (size_t j = 0; j < g_armed_count; j++)
-            if (g_armed[j].port == rows[i].port &&
-                strcmp(g_armed[j].host, host) == 0) { dup = true; break; }
-        if (dup)
+        if (bbfps_seed_already_armed(&rows[i], host))
             continue;
         snprintf(g_armed[g_armed_count].host,
                  sizeof(g_armed[g_armed_count].host), "%s", host);
