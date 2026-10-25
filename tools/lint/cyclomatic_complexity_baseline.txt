@@ -752,7 +752,6 @@ engine/composition/src/consensus_state_proof_prefix.c:consensus_state_proof_pref
 engine/composition/src/consensus_state_proof_prefix.c:read_components:37
 engine/composition/src/consensus_state_replay_receipt_derive.c:derive_anchors:21
 engine/composition/src/consensus_state_replay_receipt_derive.c:derive_utxo:28
-engine/composition/src/consensus_state_replay_receipt_write.c:consensus_state_replay_receipt_write:16
 engine/composition/src/consensus_state_snapshot_candidate.c:candidate_copy_components:16
 engine/composition/src/consensus_state_snapshot_candidate.c:candidate_write_control:28
 engine/composition/src/consensus_state_snapshot_candidate.c:consensus_state_snapshot_candidate_build:47

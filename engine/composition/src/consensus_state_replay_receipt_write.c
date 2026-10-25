@@ -71,6 +71,36 @@ static bool persist(struct platform_private_file *staging,
     return ok;
 }
 
+static bool prepare_final_path(const char *datadir, const uint8_t *payload,
+                               size_t payload_size, const char *final_out,
+                               size_t final_cap, char *final_path,
+                               size_t final_path_cap)
+{
+    if (!datadir || !payload || !payload_size ||
+        !platform_private_directory_ensure(datadir) ||
+        !receipt_path(datadir, final_path, final_path_cap) ||
+        (final_out && strlen(final_path) >= final_cap))
+        return false;
+    return true;
+}
+
+static bool create_staging_file(const char *resolved, char *temporary,
+                                size_t temporary_cap,
+                                struct platform_private_file *staging)
+{
+    bool created = false;
+    for (unsigned attempt = 0; attempt < 64 && !created; ++attempt) {
+        uint64_t nonce = atomic_fetch_add_explicit(
+            &g_staging_nonce, 1, memory_order_relaxed);
+        int n = snprintf(temporary, temporary_cap, "%s.tmp.%016llx",
+                         resolved, (unsigned long long)nonce);
+        if (n <= 0 || (size_t)n >= temporary_cap)
+            return false;
+        created = platform_private_file_create(temporary, staging);
+    }
+    return created;
+}
+
 bool consensus_state_replay_receipt_write(const char *datadir,
                                           const uint8_t *payload,
                                           size_t payload_size,
@@ -78,10 +108,8 @@ bool consensus_state_replay_receipt_write(const char *datadir,
                                           size_t final_cap)
 {
     char final_path[PATH_MAX], temporary[PATH_MAX];
-    if (!datadir || !payload || !payload_size ||
-        !platform_private_directory_ensure(datadir) ||
-        !receipt_path(datadir, final_path, sizeof(final_path)) ||
-        (final_out && strlen(final_path) >= final_cap))
+    if (!prepare_final_path(datadir, payload, payload_size, final_out,
+                            final_cap, final_path, sizeof(final_path)))
         return false;
     char resolved[PATH_MAX], parent[PATH_MAX];
     if (!platform_private_path_resolve(final_path, resolved, sizeof(resolved),
@@ -89,17 +117,7 @@ bool consensus_state_replay_receipt_write(const char *datadir,
         return false;
     struct platform_private_file staging;
     platform_private_file_init(&staging);
-    bool created = false;
-    for (unsigned attempt = 0; attempt < 64 && !created; ++attempt) {
-        uint64_t nonce = atomic_fetch_add_explicit(
-            &g_staging_nonce, 1, memory_order_relaxed);
-        int n = snprintf(temporary, sizeof(temporary), "%s.tmp.%016llx",
-                         resolved, (unsigned long long)nonce);
-        if (n <= 0 || (size_t)n >= sizeof(temporary))
-            return false;
-        created = platform_private_file_create(temporary, &staging);
-    }
-    if (!created)
+    if (!create_staging_file(resolved, temporary, sizeof(temporary), &staging))
         return false;
     bool ok = persist(&staging, payload, payload_size, temporary, resolved,
                       parent);
