@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Creeton - Apache License 2.0
  *
  * See controllers/agent_session_client.h for the contract and for why the
  * store is reached over RPC rather than opened directly.
@@ -27,6 +27,60 @@ static void asc_why(char *why, size_t why_cap, const char *token)
         (void)snprintf(why, why_cap, "%s", token);
 }
 
+/* Render the agentsession method's positional argument list,
+ * "[action,params_obj]" (or "{}" when the caller passed no params), into
+ * params. */
+static bool asc_build_params(const char *action, const char *params_obj,
+                             char *params, size_t params_cap, char *why,
+                             size_t why_cap)
+{
+    int n = snprintf(params, params_cap, "[\"%s\",%s]", action,
+                     params_obj ? params_obj : "{}");
+    if (n < 0 || (size_t)n >= params_cap) {
+        asc_why(why, why_cap, "BAD_ARGS");
+        LOG_FAIL(ASC_TAG, "%s: request params too large (%d bytes)", action, n);
+    }
+    return true;
+}
+
+/* An RPC-level error body means the method did not run — an older node
+ * without `agentsession`, a wrong datadir, a 401, a transport timeout.
+ * That is unreachable, not a refusal. node_rpc_call renders the node's own
+ * error object bare ({"code":..,"message":..}) but its locally-generated
+ * transport/cookie errors wrapped ({"error":{...}}), so both shapes are
+ * recognized here rather than trusting one of them. */
+static bool asc_answer_is_rpc_error(struct json_value *v, const char *action,
+                                    char *why, size_t why_cap)
+{
+    const struct json_value *errobj = json_get(v, "error");
+    if (!json_get(v, "ok") &&
+        (json_get(v, "message") || (errobj && errobj->type == JSON_OBJ))) {
+        const char *m = json_get_str(json_get(v, "message"));
+        if (!m && errobj)
+            m = json_get_str(json_get(errobj, "message"));
+        asc_why(why, why_cap, "NODE_UNREACHABLE");
+        LOG_ERROR(ASC_TAG, "%s: node refused the call: %s", action,
+                  m ? m : "(no message)");
+        return true;
+    }
+    return false;
+}
+
+/* A false `ok` is the node's own typed refusal, not a transport fault. */
+static bool asc_answer_is_policy_refusal(struct json_value *v, char *why,
+                                         size_t why_cap)
+{
+    if (!json_get_bool_or(v, "ok", false)) {
+        const char *token = json_get_str(json_get(v, "why"));
+        asc_why(why, why_cap, (token && token[0]) ? token : "POLICY_STORE");
+        /* Not LOG_FAIL: the caller logs the refusal with its own context
+         * (which leaf, which redacted grant), and a double entry per refused
+         * spend just makes the log harder to read. */
+        return true;
+    }
+    return false;
+}
+
 /* Call `agentsession <action> <params_obj_json>` and, on success, hand the
  * parsed answer object back in *out (caller json_free's it).
  *
@@ -38,12 +92,9 @@ static bool asc_call(const char *action, const char *params_obj,
                      struct json_value *out, char *why, size_t why_cap)
 {
     char params[1536];
-    int n = snprintf(params, sizeof(params), "[\"%s\",%s]", action,
-                     params_obj ? params_obj : "{}");
-    if (n < 0 || (size_t)n >= sizeof(params)) {
-        asc_why(why, why_cap, "BAD_ARGS");
-        LOG_FAIL(ASC_TAG, "%s: request params too large (%d bytes)", action, n);
-    }
+    if (!asc_build_params(action, params_obj, params, sizeof(params),
+                          why, why_cap))
+        return false;
 
     char *raw = node_rpc_call("agentsession", params);
     if (!raw) {
@@ -64,31 +115,12 @@ static bool asc_call(const char *action, const char *params_obj,
         asc_why(why, why_cap, "NODE_UNREACHABLE");
         LOG_FAIL(ASC_TAG, "%s: answer is not an object", action);
     }
-    /* An RPC-level error body means the method did not run — an older node
-     * without `agentsession`, a wrong datadir, a 401, a transport timeout.
-     * That is unreachable, not a refusal. node_rpc_call renders the node's own
-     * error object bare ({"code":..,"message":..}) but its locally-generated
-     * transport/cookie errors wrapped ({"error":{...}}), so both shapes are
-     * recognized here rather than trusting one of them. */
-    const struct json_value *errobj = json_get(&v, "error");
-    if (!json_get(&v, "ok") &&
-        (json_get(&v, "message") || (errobj && errobj->type == JSON_OBJ))) {
-        const char *m = json_get_str(json_get(&v, "message"));
-        if (!m && errobj)
-            m = json_get_str(json_get(errobj, "message"));
-        asc_why(why, why_cap, "NODE_UNREACHABLE");
-        LOG_ERROR(ASC_TAG, "%s: node refused the call: %s", action,
-                  m ? m : "(no message)");
+    if (asc_answer_is_rpc_error(&v, action, why, why_cap)) {
         json_free(&v);
         return false;
     }
-    if (!json_get_bool_or(&v, "ok", false)) {
-        const char *token = json_get_str(json_get(&v, "why"));
-        asc_why(why, why_cap, (token && token[0]) ? token : "POLICY_STORE");
+    if (asc_answer_is_policy_refusal(&v, why, why_cap)) {
         json_free(&v);
-        /* Not LOG_FAIL: the caller logs the refusal with its own context
-         * (which leaf, which redacted grant), and a double entry per refused
-         * spend just makes the log harder to read. */
         return false;
     }
     *out = v;
@@ -148,6 +180,64 @@ bool agent_session_client_mint(const char *account, int64_t max_per_tx_zat,
     return true;
 }
 
+/* Copy one session object from a `list` answer into a zeroed row. Every
+ * string field falls back to "" so a short answer never leaves stale or
+ * uninitialized bytes in the caller's array. */
+static void asc_fill_session_row(struct db_agent_session *r,
+                                 const struct json_value *o)
+{
+    memset(r, 0, sizeof(*r));
+    const char *sid = json_get_str(json_get(o, "session_id"));
+    const char *acct = json_get_str(json_get(o, "account"));
+    const char *allow = json_get_str(json_get(o, "recipient_allowlist"));
+    const char *scope = json_get_str(json_get(o, "wallet_scope"));
+    const char *wid = json_get_str(json_get(o, "wallet_instance_id"));
+    const char *genesis = json_get_str(json_get(o, "wallet_genesis"));
+    (void)snprintf(r->session_id, sizeof(r->session_id), "%s",
+                   sid ? sid : "");
+    (void)snprintf(r->account, sizeof(r->account), "%s",
+                   acct ? acct : "");
+    (void)snprintf(r->recipient_allowlist,
+                   sizeof(r->recipient_allowlist), "%s",
+                   allow ? allow : "");
+    (void)snprintf(r->wallet_scope, sizeof(r->wallet_scope), "%s",
+                   scope ? scope : "");
+    (void)snprintf(r->wallet_instance_id,
+                   sizeof(r->wallet_instance_id), "%s", wid ? wid : "");
+    (void)snprintf(r->wallet_genesis, sizeof(r->wallet_genesis), "%s",
+                   genesis ? genesis : "");
+    r->max_per_tx_zat = json_get_int(json_get(o, "max_per_tx_zat"));
+    r->max_per_window_zat = json_get_int(json_get(o, "max_per_window_zat"));
+    r->reserve_floor_zat = json_get_int(json_get(o, "reserve_floor_zat"));
+    r->window_seconds = json_get_int(json_get(o, "window_seconds"));
+    r->window_start_epoch = json_get_int(json_get(o, "window_start_epoch"));
+    r->spent_in_window_zat = json_get_int(json_get(o, "spent_in_window_zat"));
+    r->created_at = json_get_int(json_get(o, "created_at"));
+    r->expires_at = json_get_int(json_get(o, "expires_at"));
+    r->revoked = (int)json_get_int(json_get(o, "revoked"));
+    r->lifetime_spent_zat = json_get_int(json_get(o, "lifetime_spent_zat"));
+}
+
+/* Fill out[0..max) from the `sessions` array of a `list` answer, in order,
+ * skipping entries that are not objects; returns the number of rows
+ * written. */
+static size_t asc_collect_sessions(struct json_value *ans,
+                                   struct db_agent_session *out, size_t max)
+{
+    const struct json_value *arr = json_get(ans, "sessions");
+    size_t used = 0;
+    if (arr && arr->type == JSON_ARR) {
+        for (size_t i = 0; i < arr->num_children && used < max; i++) {
+            const struct json_value *o = json_at(arr, i);
+            if (!o || o->type != JSON_OBJ)
+                continue;
+            asc_fill_session_row(&out[used], o);
+            used++;
+        }
+    }
+    return used;
+}
+
 int agent_session_client_list(const char *account,
                               struct db_agent_session *out, size_t max,
                               char *why, size_t why_cap)
@@ -177,52 +267,7 @@ int agent_session_client_list(const char *account,
     if (!asc_call("list", body, &ans, why, why_cap))
         return -1; /* raw-return-ok:asc_call already wrote why and logged */
 
-    const struct json_value *arr = json_get(&ans, "sessions");
-    size_t used = 0;
-    if (arr && arr->type == JSON_ARR) {
-        for (size_t i = 0; i < arr->num_children && used < max; i++) {
-            const struct json_value *o = json_at(arr, i);
-            if (!o || o->type != JSON_OBJ)
-                continue;
-            struct db_agent_session *r = &out[used];
-            memset(r, 0, sizeof(*r));
-            const char *sid = json_get_str(json_get(o, "session_id"));
-            const char *acct = json_get_str(json_get(o, "account"));
-            const char *allow = json_get_str(json_get(o, "recipient_allowlist"));
-            const char *scope = json_get_str(json_get(o, "wallet_scope"));
-            const char *wid = json_get_str(json_get(o, "wallet_instance_id"));
-            const char *genesis = json_get_str(json_get(o, "wallet_genesis"));
-            (void)snprintf(r->session_id, sizeof(r->session_id), "%s",
-                           sid ? sid : "");
-            (void)snprintf(r->account, sizeof(r->account), "%s",
-                           acct ? acct : "");
-            (void)snprintf(r->recipient_allowlist,
-                           sizeof(r->recipient_allowlist), "%s",
-                           allow ? allow : "");
-            (void)snprintf(r->wallet_scope, sizeof(r->wallet_scope), "%s",
-                           scope ? scope : "");
-            (void)snprintf(r->wallet_instance_id,
-                           sizeof(r->wallet_instance_id), "%s", wid ? wid : "");
-            (void)snprintf(r->wallet_genesis, sizeof(r->wallet_genesis), "%s",
-                           genesis ? genesis : "");
-            r->max_per_tx_zat = json_get_int(json_get(o, "max_per_tx_zat"));
-            r->max_per_window_zat =
-                json_get_int(json_get(o, "max_per_window_zat"));
-            r->reserve_floor_zat =
-                json_get_int(json_get(o, "reserve_floor_zat"));
-            r->window_seconds = json_get_int(json_get(o, "window_seconds"));
-            r->window_start_epoch =
-                json_get_int(json_get(o, "window_start_epoch"));
-            r->spent_in_window_zat =
-                json_get_int(json_get(o, "spent_in_window_zat"));
-            r->created_at = json_get_int(json_get(o, "created_at"));
-            r->expires_at = json_get_int(json_get(o, "expires_at"));
-            r->revoked = (int)json_get_int(json_get(o, "revoked"));
-            r->lifetime_spent_zat =
-                json_get_int(json_get(o, "lifetime_spent_zat"));
-            used++;
-        }
-    }
+    size_t used = asc_collect_sessions(&ans, out, max);
     json_free(&ans);
     return (int)used;
 }

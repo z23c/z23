@@ -9,8 +9,6 @@ apps/skycombat/src/models/weapons.c:weapons_draw:21
 apps/skycombat/src/models/weapons.c:weapons_update:25
 apps/skycombat/src/views/combat_effects.c:effects_update:26
 cognition/controllers/src/agent_resources.c:agent_resources_stat_assign:16
-cognition/controllers/src/agent_session_client.c:agent_session_client_list:20
-cognition/controllers/src/agent_session_client.c:asc_call:17
 cognition/controllers/src/agent_session_controller.c:ags_liquidity:20
 cognition/controllers/src/agent_session_controller.c:rpc_agentsession:16
 cognition/controllers/src/event_agent_summary.c:rpc_agent_summary:30
