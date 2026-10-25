@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Crenton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * codeindex — public lifecycle: open (verify-on-read, lazily rebuild if the
  * source tree changed) and close. Queries live in codeindex_query.c; the
@@ -201,36 +201,57 @@ bool codeindex_dep_root_sha3(struct codeindex *ci, uint8_t out[32])
     return true;
 }
 
+static bool ci_receipt_parse_nonneg(const char *text, long long *out);
+static bool ci_cold_receipt_usable(bool ms_found, size_t ms_len,
+                                   size_t ms_cap, bool files_found,
+                                   size_t files_len, size_t files_cap);
+
+bool codeindex_build_cold_ms(struct codeindex *ci, long long *ms_out,
+                             long long *files_out)
+{
+    if (ms_out) *ms_out = 0;
+    if (files_out) *files_out = 0;
+    if (!ci || !ci->store || !ms_out || !files_out)
+        LOG_FAIL("codeindex", "null arg to build_cold_ms");
+    char ms_text[24], files_text[24];
+    size_t ms_len = 0, files_len = 0;
+    bool ms_found = false, files_found = false;
+    if (!ci_store_meta_get(ci->store, "build_cold_ms", ms_text,
+                           sizeof(ms_text) - 1, &ms_len, &ms_found) ||
+        !ci_store_meta_get(ci->store, "build_cold_files", files_text,
+                           sizeof(files_text) - 1, &files_len, &files_found))
+        LOG_FAIL("codeindex", "read cold-build receipt failed");
+    /* Stores built before the self-receipt existed simply lack the keys;
+     * that absence is a valid observation of an older generation, not a
+     * hard failure. */
+    if (!ci_cold_receipt_usable(ms_found, ms_len, sizeof(ms_text),
+                               files_found, files_len, sizeof(files_text)))
+        return false;
+    ms_text[ms_len] = '\0';
+    files_text[files_len] = '\0';
+    long long ms = 0, files = 0;
+    bool ms_ok = ci_receipt_parse_nonneg(ms_text, &ms);
+    bool files_ok = ci_receipt_parse_nonneg(files_text, &files);
+    if (!ms_ok || !files_ok)
+        return false;
+    *ms_out = ms;
+    *files_out = files;
+    return true;
+}
+
 static bool ci_receipt_extent_valid(size_t len, size_t capacity)
 {
     return len > 0 && len < capacity;
 }
 
-/* Reads the cold-build self-receipt's two texts from store metadata and
- * NUL-terminates them in the caller's buffers. A failed read logs exactly
- * what the leaf always logged; an absent or ill-fitting receipt returns
- * false unlogged, as before. */
-static bool ci_read_cold_receipt(struct ci_store *s, char *ms_text,
-                                 size_t ms_cap, char *files_text,
-                                 size_t files_cap)
+/* True when both cold-receipt texts were found and fit their buffers. */
+static bool ci_cold_receipt_usable(bool ms_found, size_t ms_len,
+                                   size_t ms_cap, bool files_found,
+                                   size_t files_len, size_t files_cap)
 {
-    size_t ms_len = 0, files_len = 0;
-    bool ms_found = false, files_found = false;
-    if (!ci_store_meta_get(s, "build_cold_ms", ms_text, ms_cap - 1,
-                           &ms_len, &ms_found) ||
-        !ci_store_meta_get(s, "build_cold_files", files_text,
-                           files_cap - 1, &files_len, &files_found))
-        LOG_FAIL("codeindex", "read cold-build receipt failed");
-    /* Stores built before the self-receipt existed simply lack the keys;
-     * that absence is a valid observation of an older generation, not a
-     * hard failure. */
-    if (!ms_found || !files_found ||
-        !ci_receipt_extent_valid(ms_len, ms_cap) ||
-        !ci_receipt_extent_valid(files_len, files_cap))
-        return false;
-    ms_text[ms_len] = '\0';
-    files_text[files_len] = '\0';
-    return true;
+    return ms_found && files_found &&
+           ci_receipt_extent_valid(ms_len, ms_cap) &&
+           ci_receipt_extent_valid(files_len, files_cap);
 }
 
 /* One receipt text to one non-negative integer: strtoll must consume the
@@ -241,26 +262,6 @@ static bool ci_receipt_parse_nonneg(const char *text, long long *out)
     long long v = strtoll(text, &end, 10);
     if (!end || *end != '\0' || v < 0) return false;
     *out = v;
-    return true;
-}
-
-bool codeindex_build_cold_ms(struct codeindex *ci, long long *ms_out,
-                             long long *files_out)
-{
-    if (ms_out) *ms_out = 0;
-    if (files_out) *files_out = 0;
-    if (!ci || !ci->store || !ms_out || !files_out)
-        LOG_FAIL("codeindex", "null arg to build_cold_ms");
-    char ms_text[24], files_text[24];
-    if (!ci_read_cold_receipt(ci->store, ms_text, sizeof(ms_text),
-                              files_text, sizeof(files_text)))
-        return false;
-    long long ms = 0, files = 0;
-    if (!ci_receipt_parse_nonneg(ms_text, &ms) ||
-        !ci_receipt_parse_nonneg(files_text, &files))
-        return false;
-    *ms_out = ms;
-    *files_out = files;
     return true;
 }
 
