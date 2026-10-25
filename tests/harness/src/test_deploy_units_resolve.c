@@ -37,6 +37,21 @@ static const char k_du_main[] = "%h/development/z23/main/";
 static const char k_du_retired[] = "github/z23";
 static const char k_du_bin[] = "build/bin/";
 static const char k_du_bin_dir[] = "$(BIN_DIR)/";
+/* The install targets rewrite the units' live prefix to the checkout. */
+static const char k_du_live_sed[] =
+    "sed 's|%h/development/z23/main|$(CURDIR)|g'";
+static const char k_du_retired_sed[] = "sed 's|%h/github/z23|";
+
+/* Binaries the Makefile does not build, each with the doc that builds it. A
+ * unit may name one only while that doc exists and still names the binary. */
+struct du_exempt {
+    const char *bin;
+    const char *doc;
+};
+
+static const struct du_exempt k_du_exempt[] = {
+    {"zcl-fleet-front", "platform/deploy/fleet-gateway/README.md"},
+};
 
 struct du_ctx {
     char *tracked_buf;
@@ -238,6 +253,33 @@ static bool du_prefix_leaf(const char *const *words, int n)
     return found;
 }
 
+/* True when the exception's doc exists and names build/bin/<name>. */
+static bool du_doc_names(const char *doc, const char *name)
+{
+    char needle[DU_PATH_CAP];
+    char *text = NULL;
+    size_t len = 0;
+    bool found = false;
+    int w;
+
+    w = snprintf(needle, sizeof needle, "%s%s", k_du_bin, name);
+    if (w < 0 || (size_t)w >= sizeof needle)
+        return false;
+    if (!du_read_file(doc, &text, &len))
+        return false;
+    found = strstr(text, needle) != NULL;
+    free(text);
+    return found;
+}
+
+static bool du_bin_exempt(const char *name)
+{
+    for (size_t i = 0; i < sizeof k_du_exempt / sizeof k_du_exempt[0]; i++)
+        if (strcmp(name, k_du_exempt[i].bin) == 0)
+            return du_doc_names(k_du_exempt[i].doc, name);
+    return false;
+}
+
 static void du_check_path(struct du_ctx *c, const char *unit, unsigned line,
                           const char *tok)
 {
@@ -256,8 +298,9 @@ static void du_check_path(struct du_ctx *c, const char *unit, unsigned line,
         }
         memcpy(name, rel + sizeof k_du_bin - 1, n);
         name[n] = '\0';
-        if (!du_mk_has_bin(c, name))
-            du_fail(c, unit, line, "not a Makefile BIN target", tok);
+        if (!du_mk_has_bin(c, name) && !du_bin_exempt(name))
+            du_fail(c, unit, line,
+                    "not a Makefile BIN target or documented exception", tok);
         return;
     }
     if (!du_is_tracked(c, rel))
@@ -496,6 +539,17 @@ static void du_check_all(struct du_ctx *c)
     }
 }
 
+/* The installers must rewrite the prefix the units carry, not a retired one. */
+static void du_check_installers(struct du_ctx *c)
+{
+    if (strstr(c->makefile, k_du_retired_sed) != NULL)
+        du_fail(c, "Makefile", 0, "installer sed targets retired checkout",
+                k_du_retired);
+    if (strstr(c->makefile, k_du_live_sed) == NULL)
+        du_fail(c, "Makefile", 0, "installer sed misses unit prefix",
+                k_du_main);
+}
+
 int test_deploy_units_resolve(void)
 {
     static struct du_ctx ctx;
@@ -511,6 +565,7 @@ int test_deploy_units_resolve(void)
         free(ctx.tracked_buf);
         return 1;
     }
+    du_check_installers(&ctx);
     du_check_all(&ctx);
     if (ctx.units == 0) {
         fprintf(stderr, "deploy_units_resolve: no tracked deploy units\n");

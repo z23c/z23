@@ -12155,7 +12155,7 @@ install-intervention-ledger:
 	@install -d "$(HOME)/.config/systemd/user"
 	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/z23-intervention.service.tmp.XXXXXX")"; \
 		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-		sed 's|%h/github/z23|$(CURDIR)|g' platform/deploy/z23-intervention.service > "$$tmp"; \
+		sed 's|%h/development/z23/main|$(CURDIR)|g' platform/deploy/z23-intervention.service > "$$tmp"; \
 		install -m 644 "$$tmp" "$(HOME)/.config/systemd/user/z23-intervention.service"
 	@install -m 644 platform/deploy/z23-intervention.timer "$(HOME)/.config/systemd/user/z23-intervention.timer"
 	@systemctl --user daemon-reload
@@ -12193,7 +12193,7 @@ install-tip-agreement:
 	@install -d "$(HOME)/.config/systemd/user"
 	@set -eu; tmp="$$(mktemp "$(HOME)/.config/systemd/user/z23-tip-agreement.service.tmp.XXXXXX")"; \
 		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-		sed 's|%h/github/z23|$(CURDIR)|g' platform/deploy/z23-tip-agreement.service > "$$tmp"; \
+		sed 's|%h/development/z23/main|$(CURDIR)|g' platform/deploy/z23-tip-agreement.service > "$$tmp"; \
 		install -m 644 "$$tmp" "$(HOME)/.config/systemd/user/z23-tip-agreement.service"
 	@install -m 644 platform/deploy/z23-tip-agreement.timer "$(HOME)/.config/systemd/user/z23-tip-agreement.timer"
 	@systemctl --user daemon-reload
