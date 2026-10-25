@@ -1016,7 +1016,6 @@ docs/examples/10_wire_adversaries.c:main:26
 docs/examples/11_collectible_market.c:main:22
 engine/composition/src/boot.c:boot_step_init_crypto_and_state:17
 engine/composition/src/boot.c:sandbox_build_fs_rules:18
-engine/composition/src/boot_anchor_snapshot_reachability.c:anchor_snapshot_verified_reachable_ex:19
 engine/composition/src/boot_auto_install_bundle.c:boot_autodetect_consensus_bundle#2:22
 engine/composition/src/boot_auto_install_bundle.c:boot_select_state_source#2:19
 engine/composition/src/boot_background_workers.c:hodl_history_worker_thread:17

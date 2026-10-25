@@ -86,6 +86,39 @@ const char *anchor_snapshot_reject_reason_str(enum anchor_snapshot_reject_reason
     return "unknown";  /* raw-return-ok:exhaustive-enum-switch-default-unreachable */
 }
 
+static void anchor_snapshot_reset_probe_outputs(
+    char *path_out, size_t path_cap,
+    enum anchor_snapshot_reject_reason *reason_out)
+{
+    if (path_out && path_cap)
+        path_out[0] = '\0';
+    if (reason_out)
+        *reason_out = ANCHOR_SNAPSHOT_NO_CHECKPOINT;
+}
+
+static void anchor_snapshot_set_reason(
+    enum anchor_snapshot_reject_reason *reason_out,
+    enum anchor_snapshot_reject_reason reason)
+{
+    if (reason_out)
+        *reason_out = reason;
+}
+
+static bool anchor_snapshot_stat_is_regular_file(const char *path)
+{
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+        return false;
+    return true;
+}
+
+static void anchor_snapshot_write_resolved_path(
+    char *path_out, size_t path_cap, const char *path)
+{
+    if (path_out)
+        snprintf(path_out, path_cap, "%s", path);
+}
+
 /* Read-only probe: is a fully integrity-checked legacy anchor artifact
  * reachable for THIS transparent checkpoint? True iff the file has an exact,
  * fully body-SHA3-verified layout and its independently recomputed UTXO
@@ -115,22 +148,18 @@ static bool anchor_snapshot_verified_reachable_ex(
     char *path_out, size_t path_cap,
     enum anchor_snapshot_reject_reason *reason_out)
 {
-    if (path_out && path_cap)
-        path_out[0] = '\0';
-    if (reason_out)
-        *reason_out = ANCHOR_SNAPSHOT_NO_CHECKPOINT;
+    anchor_snapshot_reset_probe_outputs(path_out, path_cap, reason_out);
     if (!ndb || !cp)
         return false;
 
     char path[1100];
     if (!boot_anchor_snapshot_path_resolve(ndb, path, sizeof(path))) {
-        if (reason_out) *reason_out = ANCHOR_SNAPSHOT_ABSENT;
+        anchor_snapshot_set_reason(reason_out, ANCHOR_SNAPSHOT_ABSENT);
         return false;
     }
 
-    struct stat st;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) {
-        if (reason_out) *reason_out = ANCHOR_SNAPSHOT_ABSENT;
+    if (!anchor_snapshot_stat_is_regular_file(path)) {
+        anchor_snapshot_set_reason(reason_out, ANCHOR_SNAPSHOT_ABSENT);
         LOG_WARN("boot", "[boot] anchor snapshot reachability: %s "
                  "(reason=%s)", path, anchor_snapshot_reject_reason_str(
                      ANCHOR_SNAPSHOT_ABSENT));
@@ -143,7 +172,7 @@ static bool anchor_snapshot_verified_reachable_ex(
                                     /*expected_sha3=*/NULL,
                                     &hdr, err, sizeof(err));
     if (!h) {
-        if (reason_out) *reason_out = ANCHOR_SNAPSHOT_MALFORMED;
+        anchor_snapshot_set_reason(reason_out, ANCHOR_SNAPSHOT_MALFORMED);
         LOG_WARN("boot", "[boot] anchor snapshot reachability: %s "
                  "(reason=%s): %s", path,
                  anchor_snapshot_reject_reason_str(ANCHOR_SNAPSHOT_MALFORMED),
@@ -154,7 +183,8 @@ static bool anchor_snapshot_verified_reachable_ex(
         h, &hdr, cp, err, sizeof(err));
     uss_close(h);
     if (!ok) {
-        if (reason_out) *reason_out = ANCHOR_SNAPSHOT_CHECKPOINT_MISMATCH;
+        anchor_snapshot_set_reason(reason_out,
+                                   ANCHOR_SNAPSHOT_CHECKPOINT_MISMATCH);
         LOG_WARN("boot", "[boot] anchor snapshot reachability: %s "
                  "(reason=%s): %s", path,
                  anchor_snapshot_reject_reason_str(
@@ -163,8 +193,8 @@ static bool anchor_snapshot_verified_reachable_ex(
         return false;
     }
 
-    if (path_out) snprintf(path_out, path_cap, "%s", path);
-    if (reason_out) *reason_out = ANCHOR_SNAPSHOT_OK;
+    anchor_snapshot_write_resolved_path(path_out, path_cap, path);
+    anchor_snapshot_set_reason(reason_out, ANCHOR_SNAPSHOT_OK);
     return true;
 }
 
