@@ -132,6 +132,12 @@ bool engine_cli_reply_text(const struct engine_vendor *vendor,
                            const char *body, size_t len,
                            struct engine_reply *out);
 
+/* The message of a CLI's own {"type":"error","message":...} reply (Grok prints
+ * one when it is not signed in), found the way the Grok decoder finds its
+ * reply object. false when the body is not such an error; out is "" then. */
+bool engine_cli_error_text(const char *body, size_t len, char *out,
+                           size_t out_len);
+
 /* How much of a refused body is quoted back to the operator. Enough to see
  * the shape of the document — the top-level keys, an unexpected wrapper, a
  * proxy's HTML error page — and far too little to be a transcript. */

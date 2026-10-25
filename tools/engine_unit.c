@@ -1090,6 +1090,22 @@ static int fail_setup(const char *why);
  *
  * It is still a real call that spends real money, so it needs --yes-dispatch
  * like every other path that does. */
+/* Say why a structured CLI reply was refused: the CLI's own error message when
+ * it sent one (Grok when not signed in), else the head of what it printed. */
+static void probe_report_refusal(const char *log, int64_t elapsed_ms)
+{
+    char why[256];
+    if (engine_cli_error_text(log, strlen(log), why, sizeof(why))) {
+        printf("CLI REPORTED AN ERROR in %lldms: %s\n",
+               (long long)elapsed_ms, why);
+        return;
+    }
+    char excerpt[ENGINE_RESPONSE_EXCERPT_BYTES + 4u];
+    (void)engine_response_excerpt(log, strlen(log), excerpt, sizeof(excerpt));
+    printf("MALFORMED SESSION METADATA in %lldms: %s\n",
+           (long long)elapsed_ms, excerpt);
+}
+
 /* A CLI vendor is probed by running it, because that is what dispatch does.
  * The prompt is written to a temp file for a file-mode row and passed
  * directly for an argument-mode one, so the probe exercises the same seam
@@ -1157,8 +1173,7 @@ static int probe_cli(const struct engine_vendor *v, const char *model_override,
     if (v->report_format == ENGINE_CLI_OUTPUT_GROK_JSON) {
         struct engine_cli_observation observation;
         if (!engine_cli_observation_parse(v, log, strlen(log), &observation)) {
-            printf("MALFORMED SESSION METADATA in %lldms\n",
-                   (long long)elapsed);
+            probe_report_refusal(log, elapsed);
             free(log);
             return 1;
         }

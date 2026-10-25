@@ -472,12 +472,151 @@ static int case_read_only(void)
     return failures;
 }
 
+/* A real grok 4.7 capture through the pseudo-terminal the row requires:
+ * CRLF line ends, extra fields (cwd, cost ticks), and the CLI's own
+ * "Finishing session" status line after the object. Ids are fixed values. */
+#define GROK_REAL_BODY \
+    "{\r\n  \"text\": \"ok\",\r\n  \"stopReason\": \"end_turn\",\r\n" \
+    "  \"sessionId\": \"00000000-0000-4000-8000-000000000001\",\r\n" \
+    "  \"requestId\": \"00000000-0000-4000-8000-000000000002\",\r\n" \
+    "  \"cwd\": \"/work/dir\",\r\n  \"usage\": {\r\n" \
+    "    \"input_tokens\": 9179,\r\n    \"cache_read_input_tokens\": 1664,\r\n" \
+    "    \"cache_creation_input_tokens\": 0,\r\n    \"output_tokens\": 24,\r\n" \
+    "    \"reasoning_tokens\": 23,\r\n    \"total_tokens\": 10867\r\n  },\r\n" \
+    "  \"num_turns\": 1,\r\n  \"total_cost_usd\": 0.00657356,\r\n" \
+    "  \"total_cost_usd_ticks\": 65735600,\r\n  \"modelUsage\": {\r\n" \
+    "    \"grok-4.7-build\": {\r\n      \"inputTokens\": 9179,\r\n" \
+    "      \"outputTokens\": 24,\r\n      \"cacheReadInputTokens\": 1664,\r\n" \
+    "      \"cacheCreationInputTokens\": 0,\r\n      \"modelCalls\": 1,\r\n" \
+    "      \"costUSD\": 0.00657356\r\n    }\r\n  }\r\n}\r\n"
+#define GROK_STATUS_TAIL "Finishing session\xe2\x80\xa6\r\n"
+
+static int case_grok_real_capture(void)
+{
+    int failures = 0;
+    const struct engine_vendor *grok = engine_by_id("grok-cli");
+    static const char real[] = GROK_REAL_BODY GROK_STATUS_TAIL;
+    struct engine_cli_observation o;
+    bool ok = engine_cli_observation_parse(grok, real, sizeof(real) - 1u, &o);
+    EC_CHECK("real grok 4.7 PTY capture with its status line parses",
+             ok && o.known && o.turns == 1 && o.input_tokens == 9179 &&
+             o.output_tokens == 24 && o.total_tokens == 10867 &&
+             strcmp(o.resolved_model, "grok-4.7-build") == 0);
+    struct engine_reply reply = {0};
+    ok = engine_cli_reply_text(grok, real, sizeof(real) - 1u, &reply);
+    EC_CHECK("real grok capture yields its reply text",
+             ok && reply.text && strcmp(reply.text, "ok") == 0);
+    engine_reply_free(&reply);
+
+    static const char two_docs[] = GROK_REAL_BODY "{\"x\":1}";
+    static const char quoted_tail[] = GROK_REAL_BODY "\"status\"";
+    EC_CHECK("a second document after the reply is still refused",
+             refused(grok, two_docs));
+    EC_CHECK("a quoted tail after the reply is still refused",
+             refused(grok, quoted_tail));
+
+    /* Several models: usage is the sum of the rows. */
+    static const char two_models[] =
+        "{\"text\":\"done\",\"stopReason\":\"end_turn\","
+        "\"sessionId\":\"s\",\"requestId\":\"r\","
+        "\"usage\":{\"input_tokens\":150,\"cache_read_input_tokens\":0,"
+        "\"cache_creation_input_tokens\":0,\"output_tokens\":30,"
+        "\"reasoning_tokens\":5,\"total_tokens\":180},\"num_turns\":3,"
+        "\"modelUsage\":{\"grok-4.7-build\":{\"inputTokens\":100,"
+        "\"outputTokens\":25,\"cacheReadInputTokens\":0,"
+        "\"cacheCreationInputTokens\":0,\"modelCalls\":2},"
+        "\"grok-4.7-fast\":{\"inputTokens\":50,\"outputTokens\":5,"
+        "\"cacheReadInputTokens\":0,\"cacheCreationInputTokens\":0,"
+        "\"modelCalls\":1}}}";
+    ok = engine_cli_observation_parse(grok, two_models,
+                                      sizeof(two_models) - 1u, &o);
+    EC_CHECK("two models whose rows sum to the usage parse; most output wins",
+             ok && o.known && strcmp(o.resolved_model, "grok-4.7-build") == 0);
+    char off[sizeof(two_models)];
+    memcpy(off, two_models, sizeof(two_models));
+    char *five = strstr(off, "\"outputTokens\":5,");
+    if (five) five[15] = '6';
+    EC_CHECK("two models whose rows do not sum to the usage are refused",
+             five && refused(grok, off));
+    return failures;
+}
+
+static int case_grok_error_reply(void)
+{
+    int failures = 0;
+    const struct engine_vendor *grok = engine_by_id("grok-cli");
+    static const char err[] =
+        "{\"type\":\"error\",\"message\":\"Not signed in. Run grok login.\"}"
+        "\r\n";
+    char why[128];
+    EC_CHECK("the CLI's own error message is surfaced",
+             engine_cli_error_text(err, sizeof(err) - 1u, why, sizeof(why)) &&
+             strcmp(why, "Not signed in. Run grok login.") == 0);
+    EC_CHECK("an error reply is not an observation", refused(grok, err));
+    EC_CHECK("a good reply is not reported as an error",
+             !engine_cli_error_text(GROK_REAL_BODY, strlen(GROK_REAL_BODY),
+                                    why, sizeof(why)) && why[0] == '\0');
+    return failures;
+}
+
+static int case_kimi_reply(const struct engine_vendor *v);
+
+static int case_kimi_row(void)
+{
+    int failures = 0;
+    const struct engine_vendor *v = engine_by_id("kimi-cli");
+    EC_CHECK("kimi row exists", v != NULL);
+    if (!v)
+        return failures + 1;
+    EC_CHECK("kimi row is LOCAL_CLI/EDITS/PLAIN, argument prompt, not keyed",
+             v->wire == ENGINE_WIRE_LOCAL_CLI &&
+             v->delivery == ENGINE_DELIVERS_EDITS &&
+             v->report_format == ENGINE_CLI_OUTPUT_PLAIN &&
+             v->cli_prompt == ENGINE_CLI_PROMPT_ARG &&
+             strcmp(v->program, "kimi") == 0 && !engine_needs_key(v) &&
+             v->cli_cwd_is_workdir && !v->is_default);
+    const struct engine_cli_inputs in = {
+        .prompt = "PROMPT-TEXT", .workdir = "/work/dir", .turns = "3",
+        .model = "anything",
+    };
+    const char *argv[ENGINE_CLI_ARGV_MAX];
+    size_t n = engine_cli_argv_build(v, &in, argv, ENGINE_CLI_ARGV_MAX);
+    EC_CHECK("kimi argv is kimi -p PROMPT with nothing else",
+             n == 3 && strcmp(argv[0], "kimi") == 0 &&
+             strcmp(argv[1], "-p") == 0 &&
+             strcmp(argv[2], "PROMPT-TEXT") == 0 && argv[3] == NULL);
+    EC_CHECK("kimi starts in the worktree",
+             engine_cli_launch_cwd(v, &in) &&
+             strcmp(engine_cli_launch_cwd(v, &in), "/work/dir") == 0);
+
+    failures += case_kimi_reply(v);
+    return failures;
+}
+
+static int case_kimi_reply(const struct engine_vendor *v)
+{
+    int failures = 0;
+    /* Real kimi 2.1.1 text reply: bullet, blank line, resume hint. */
+    static const char text_reply[] =
+        "\xe2\x80\xa2 ok\n\nTo resume this session: kimi -r session_x\n";
+    struct engine_cli_observation o;
+    memset(&o, 0x5a, sizeof(o));
+    EC_CHECK("a kimi text reply is handled; usage stays UNKNOWN, not zero",
+             engine_cli_observation_parse(v, text_reply,
+                                          sizeof(text_reply) - 1u, &o) &&
+             !o.known && !o.cost_known && o.session_id[0] == '\0');
+    return failures;
+}
+
 int test_engine_claude(void)
 {
     int failures = 0;
     failures += case_registry();
     failures += case_read_only();
     failures += case_gpt_rows();
+    failures += case_kimi_row();
+    failures += case_grok_real_capture();
+    failures += case_grok_error_reply();
     failures += case_decoder();
     failures += case_reply_text_success();
     failures += case_reply_text_refusal();

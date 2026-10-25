@@ -110,108 +110,239 @@ static bool read_required_nonnegative(const struct json_value *obj,
     return true;
 }
 
+static const char *claude_pick_model(const struct json_value *models);
+
+/* A pseudo-terminal capture is the reply plus whatever the CLI wrote to the
+ * terminal around it (a leading blank line, a trailing "Finishing session"
+ * status line). The reply is the one top-level JSON object; the span below
+ * finds it with a string-aware brace match. Text around it must carry no
+ * brace and no quote, so a second document or a half-JSON tail is still
+ * refused rather than ignored. */
+static bool grok_span_scan(const char *body, size_t start, size_t len,
+                           size_t *end)
+{
+    size_t depth = 0;
+    bool in_str = false, esc = false;
+    for (size_t i = start; i < len; i++) {
+        const char c = body[i];
+        if (in_str) {
+            if (esc) esc = false;
+            else if (c == '\\') esc = true;
+            else if (c == '"') in_str = false;
+        } else if (c == '"') {
+            in_str = true;
+        } else if (c == '{') {
+            depth++;
+        } else if (c == '}' && --depth == 0) {
+            *end = i + 1u;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool grok_json_span(const char *body, size_t len, size_t *start,
+                           size_t *end)
+{
+    size_t s = 0;
+    while (s < len && (body[s] == ' ' || body[s] == '\t' ||
+                       body[s] == '\r' || body[s] == '\n'))
+        s++;
+    if (s >= len || body[s] != '{' || !grok_span_scan(body, s, len, end))
+        return false;
+    for (size_t i = *end; i < len; i++)
+        if (body[i] == '{' || body[i] == '"')
+            return false;
+    *start = s;
+    return true;
+}
+
+/* Parse the one reply object out of a capture. false leaves root freed. */
+static bool grok_read_root(const char *body, size_t len,
+                           struct json_value *root)
+{
+    size_t s = 0, e = 0;
+    json_init(root);
+    if (!grok_json_span(body, len, &s, &e) ||
+        !json_read(root, body + s, e - s)) {
+        json_free(root);
+        return false;
+    }
+    return true;
+}
+
+bool engine_cli_error_text(const char *body, size_t len, char *out,
+                           size_t out_len)
+{
+    if (!out || out_len == 0)
+        return false;
+    out[0] = '\0';
+    if (!body_is_admissible(body, len))
+        return false;
+    struct json_value root;
+    if (!grok_read_root(body, len, &root))
+        return false;
+    const struct json_value *type = json_get(&root, "type");
+    const struct json_value *msg = json_get(&root, "message");
+    if (type && type->type == JSON_STR &&
+        strcmp(json_get_str(type), "error") == 0 &&
+        msg && msg->type == JSON_STR && json_get_str(msg))
+        (void)snprintf(out, out_len, "%s", json_get_str(msg));
+    json_free(&root);
+    return out[0] != '\0';
+}
+
+/* The sums of every modelUsage row. A real reply may hold several models
+ * (the lead model plus a helper), so the usage object is compared with the
+ * rows' total, not with one row. */
+struct grok_model_sums {
+    int64_t input, output, cache_read, cache_create, calls;
+};
+
+static bool grok_add(int64_t *acc, int64_t v)
+{
+    if (v < 0 || *acc > INT64_MAX - v)
+        return false;
+    *acc += v;
+    return true;
+}
+
+static bool grok_sum_models(const struct json_value *models,
+                            struct grok_model_sums *s)
+{
+    memset(s, 0, sizeof(*s));
+    for (size_t i = 0; i < json_size(models); i++) {
+        const struct json_value *row = json_at(models, i);
+        int64_t in = 0, out = 0, cr = 0, cc = 0, calls = 0;
+        if (!row || row->type != JSON_OBJ ||
+            !read_required_nonnegative(row, "inputTokens", &in) ||
+            !read_required_nonnegative(row, "outputTokens", &out) ||
+            !read_required_nonnegative(row, "cacheReadInputTokens", &cr) ||
+            !read_required_nonnegative(row, "cacheCreationInputTokens", &cc) ||
+            !read_required_nonnegative(row, "modelCalls", &calls) ||
+            !grok_add(&s->input, in) || !grok_add(&s->output, out) ||
+            !grok_add(&s->cache_read, cr) ||
+            !grok_add(&s->cache_create, cc) || !grok_add(&s->calls, calls))
+            return false;
+    }
+    return true;
+}
+
+static bool grok_read_usage(const struct json_value *usage,
+                            struct engine_cli_observation *t)
+{
+    return read_required_nonnegative(usage, "input_tokens",
+               &t->input_tokens) &&
+           read_required_nonnegative(usage, "cache_read_input_tokens",
+               &t->cache_read_input_tokens) &&
+           read_required_nonnegative(usage, "cache_creation_input_tokens",
+               &t->cache_creation_input_tokens) &&
+           read_required_nonnegative(usage, "output_tokens",
+               &t->output_tokens) &&
+           read_required_nonnegative(usage, "reasoning_tokens",
+               &t->reasoning_tokens) &&
+           read_required_nonnegative(usage, "total_tokens", &t->total_tokens);
+}
+
+/* Cache-inclusive input (total = input + output) or cache-additive (total =
+ * input + output + cache read + cache creation); nothing else. */
+static bool grok_total_consistent(const struct engine_cli_observation *t)
+{
+    int64_t uncached = t->input_tokens;
+    int64_t cached = t->cache_read_input_tokens;
+    if (!grok_add(&uncached, t->output_tokens) ||
+        !grok_add(&cached, t->cache_creation_input_tokens))
+        return false;
+    int64_t additive = uncached;
+    const bool additive_ok = grok_add(&additive, cached);
+    return (uncached == t->total_tokens && cached <= t->input_tokens) ||
+           (additive_ok && additive == t->total_tokens);
+}
+
+static bool grok_sums_match(const struct engine_cli_observation *t,
+                            const struct grok_model_sums *s)
+{
+    return t->turns > 0 && grok_total_consistent(t) &&
+           t->reasoning_tokens <= t->output_tokens &&
+           s->input == t->input_tokens && s->output == t->output_tokens &&
+           s->cache_read == t->cache_read_input_tokens &&
+           s->cache_create == t->cache_creation_input_tokens &&
+           s->calls == t->turns;
+}
+
+static bool grok_read_identity(const struct json_value *root,
+                               const struct json_value *models,
+                               struct engine_cli_observation *t)
+{
+    const char *best = claude_pick_model(models);
+    return best &&
+           copy_required_observable(json_get(root, "sessionId"),
+               t->session_id, sizeof(t->session_id), "sessionId") &&
+           copy_required_observable(json_get(root, "requestId"),
+               t->request_id, sizeof(t->request_id), "requestId") &&
+           copy_required_observable(json_get(root, "stopReason"),
+               t->stop_reason, sizeof(t->stop_reason), "stopReason") &&
+           copy_required_observable_text(best, t->resolved_model,
+               sizeof(t->resolved_model), "resolved model") &&
+           read_required_nonnegative(root, "num_turns", &t->turns);
+}
+
+/* The CLI's own refusal ({"type":"error","message":...}) is reported as the
+ * reason, not as malformed metadata. */
+static void grok_warn_if_error(const char *body, size_t len)
+{
+    char why[256];
+    if (engine_cli_error_text(body, len, why, sizeof(why)))
+        LOG_WARN("engine", "Grok CLI reported an error: %s", why);
+}
+
+static bool grok_reply_shape_ok(const struct json_value *root,
+                                const struct json_value *usage,
+                                const struct json_value *models)
+{
+    const struct json_value *text = json_get(root, "text");
+    const struct json_value *incomplete =
+        json_get(root, "usage_is_incomplete");
+    if (root->type != JSON_OBJ || !text || text->type != JSON_STR)
+        LOG_FAIL("engine", "refusing Grok JSON without observable text");
+    if (incomplete &&
+        (incomplete->type != JSON_BOOL || json_get_bool(incomplete)))
+        LOG_FAIL("engine", "refusing incomplete Grok usage");
+    if (!usage || usage->type != JSON_OBJ || !models ||
+        models->type != JSON_OBJ || json_size(models) < 1u || !models->keys)
+        LOG_FAIL("engine", "refusing incomplete Grok usage/model metadata");
+    return true;
+}
+
 static bool cli_observation_from_grok(const char *body, size_t len,
                                       struct engine_cli_observation *out)
 {
     if (!body_is_admissible(body, len))
         return false;
     struct json_value root;
-    json_init(&root);
-    if (!json_read(&root, body, len)) {
-        json_free(&root);
+    if (!grok_read_root(body, len, &root)) {
+        grok_warn_if_error(body, len);
         LOG_FAIL("engine", "refusing malformed Grok CLI JSON");
     }
-
     struct engine_cli_observation tmp;
     memset(&tmp, 0, sizeof(tmp));
-    bool ok = false;
+    struct grok_model_sums sums;
     const struct json_value *usage = json_get(&root, "usage");
     const struct json_value *models = json_get(&root, "modelUsage");
-    const struct json_value *incomplete =
-        json_get(&root, "usage_is_incomplete");
-    const struct json_value *text = json_get(&root, "text");
-    if (root.type != JSON_OBJ || !text || text->type != JSON_STR) {
-        LOG_WARN("engine", "refusing Grok JSON without observable text");
-    } else if (incomplete &&
-               (incomplete->type != JSON_BOOL || json_get_bool(incomplete))) {
-        LOG_WARN("engine", "refusing incomplete Grok usage");
-    } else if (!usage || usage->type != JSON_OBJ ||
-               !models || models->type != JSON_OBJ ||
-               json_size(models) != 1u || !models->keys ||
-               !models->keys[0] || !models->keys[0][0]) {
-        LOG_WARN("engine", "refusing incomplete Grok usage/model metadata");
-    } else {
-        const struct json_value *model_row = json_at(models, 0u);
-        int64_t model_input = 0, model_output = 0;
-        int64_t model_cache_read = 0, model_cache_create = 0;
-        int64_t model_calls = 0;
-        if (model_row && model_row->type == JSON_OBJ &&
-            copy_required_observable(json_get(&root, "sessionId"),
-                tmp.session_id, sizeof(tmp.session_id), "sessionId") &&
-            copy_required_observable(json_get(&root, "requestId"),
-                tmp.request_id, sizeof(tmp.request_id), "requestId") &&
-            copy_required_observable(json_get(&root, "stopReason"),
-                tmp.stop_reason, sizeof(tmp.stop_reason), "stopReason") &&
-            copy_required_observable_text(models->keys[0],
-                tmp.resolved_model, sizeof(tmp.resolved_model),
-                "resolved model") &&
-            read_required_nonnegative(&root, "num_turns", &tmp.turns) &&
-            read_required_nonnegative(usage, "input_tokens",
-                &tmp.input_tokens) &&
-            read_required_nonnegative(usage, "cache_read_input_tokens",
-                &tmp.cache_read_input_tokens) &&
-            read_required_nonnegative(usage, "cache_creation_input_tokens",
-                &tmp.cache_creation_input_tokens) &&
-            read_required_nonnegative(usage, "output_tokens",
-                &tmp.output_tokens) &&
-            read_required_nonnegative(usage, "reasoning_tokens",
-                &tmp.reasoning_tokens) &&
-            read_required_nonnegative(usage, "total_tokens",
-                &tmp.total_tokens) &&
-            read_required_nonnegative(model_row, "inputTokens",
-                &model_input) &&
-            read_required_nonnegative(model_row, "outputTokens",
-                &model_output) &&
-            read_required_nonnegative(model_row, "cacheReadInputTokens",
-                &model_cache_read) &&
-            read_required_nonnegative(model_row, "cacheCreationInputTokens",
-                &model_cache_create) &&
-            read_required_nonnegative(model_row, "modelCalls",
-                &model_calls)) {
-            const bool base_add_ok =
-                tmp.input_tokens <= INT64_MAX - tmp.output_tokens &&
-                tmp.cache_read_input_tokens <=
-                    INT64_MAX - tmp.cache_creation_input_tokens;
-            const int64_t uncached_total = base_add_ok
-                ? tmp.input_tokens + tmp.output_tokens : -1;
-            const int64_t cached = base_add_ok
-                ? tmp.cache_read_input_tokens +
-                  tmp.cache_creation_input_tokens : -1;
-            const bool cache_inclusive = base_add_ok &&
-                uncached_total == tmp.total_tokens &&
-                cached <= tmp.input_tokens;
-            const bool additive_ok = base_add_ok && cached >= 0 &&
-                uncached_total <= INT64_MAX - cached;
-            const bool cache_additive = additive_ok &&
-                uncached_total + cached == tmp.total_tokens;
-            if (tmp.turns > 0 &&
-                (cache_inclusive || cache_additive) &&
-                tmp.reasoning_tokens <= tmp.output_tokens &&
-                model_input == tmp.input_tokens &&
-                model_output == tmp.output_tokens &&
-                model_cache_read == tmp.cache_read_input_tokens &&
-                model_cache_create == tmp.cache_creation_input_tokens &&
-                model_calls == tmp.turns) {
-                tmp.known = true;
-                ok = true;
-            } else {
-                LOG_WARN("engine", "refusing inconsistent Grok usage totals");
-            }
-        }
+    bool ok = false;
+    if (!grok_reply_shape_ok(&root, usage, models)) {
+        grok_warn_if_error(body, len);
+    } else if (grok_read_identity(&root, models, &tmp) &&
+               grok_read_usage(usage, &tmp) &&
+               grok_sum_models(models, &sums)) {
+        ok = grok_sums_match(&tmp, &sums);
+        if (!ok)
+            LOG_WARN("engine", "refusing inconsistent Grok usage totals");
     }
     json_free(&root);
     if (!ok)
         return false;
+    tmp.known = true;
     *out = tmp;
     return true;
 }
@@ -684,6 +815,20 @@ bool engine_response_error_text(const char *body, size_t len,
     return found;
 }
 
+/* Grok's reply may sit inside PTY chatter; Claude's is the whole body. */
+static bool cli_reply_root(const struct engine_vendor *vendor,
+                           const char *body, size_t len,
+                           struct json_value *root)
+{
+    if (vendor->report_format == ENGINE_CLI_OUTPUT_GROK_JSON)
+        return grok_read_root(body, len, root);
+    json_init(root);
+    if (json_read(root, body, len))
+        return true;
+    json_free(root);
+    return false;
+}
+
 bool engine_cli_reply_text(const struct engine_vendor *vendor,
                            const char *body, size_t len,
                            struct engine_reply *out)
@@ -698,11 +843,8 @@ bool engine_cli_reply_text(const struct engine_vendor *vendor,
         return false;
 
     struct json_value root;
-    json_init(&root);
-    if (!json_read(&root, body, len)) {
-        json_free(&root);
+    if (!cli_reply_root(vendor, body, len, &root))
         LOG_FAIL("engine", "refusing malformed CLI reply text");
-    }
     const char *key = vendor->report_format == ENGINE_CLI_OUTPUT_CLAUDE_JSON
                           ? "result" : "text";
     const struct json_value *value = json_get(&root, key);

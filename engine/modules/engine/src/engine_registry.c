@@ -146,6 +146,18 @@ static const char *const k_gpt_cli_report_argv[] = {
     "--",             ENGINE_CLI_PROMPT_TOKEN,
     NULL
 };
+/* Moonshot's agent CLI (`kimi -p`): one prompt, non-interactive, edits the
+ * worktree with its own tools. The prompt is an argument and there is no
+ * directory flag, so the row sets cli_cwd_is_workdir and the launcher starts
+ * it there. -p refuses -y/--yolo and --auto, and --plan: no flag is added, and
+ * so there is no read-only mode, which is why a report kind is refused for
+ * this row. No {model} slot: the CLI uses default_model from its own config,
+ * and a model alias this table invented would be a guess. Its text output
+ * carries no token counts, so usage stays unreported, never zero. */
+static const char *const k_kimi_cli_start_argv[] = {
+    "-p", ENGINE_CLI_PROMPT_TOKEN,
+    NULL
+};
 static const char *const k_grok_cli_resume_argv[] = {
     "--resume", ENGINE_CLI_RESUME_TOKEN, NULL
 };
@@ -346,6 +358,24 @@ static const struct engine_vendor k_engine_vendors[] = {
         .start_argv    = k_gpt_cli_start_argv,
         .report_start_argv = k_gpt_cli_report_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
+        .report_format = ENGINE_CLI_OUTPUT_PLAIN,
+        .wire          = ENGINE_WIRE_LOCAL_CLI,
+        .delivery      = ENGINE_DELIVERS_EDITS,
+        .costs_money   = true,
+        .max_retries   = 1,
+    },
+    {
+        /* Moonshot's Kimi agent CLI, subscription-authenticated. Output is
+         * plain text: no usage is decoded, so the receipt records tokens and
+         * cost as unreported, never zero. */
+        .id            = "kimi-cli",
+        .display       = "Moonshot Kimi (installed agent CLI, subscription auth)",
+        .url           = NULL,
+        .default_model = "kimi-config-default",
+        .program       = "kimi",
+        .start_argv    = k_kimi_cli_start_argv,
+        .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
+        .cli_cwd_is_workdir = true,
         .report_format = ENGINE_CLI_OUTPUT_PLAIN,
         .wire          = ENGINE_WIRE_LOCAL_CLI,
         .delivery      = ENGINE_DELIVERS_EDITS,
