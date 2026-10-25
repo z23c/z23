@@ -5,7 +5,7 @@
  * actually free derived bytes (and the condition clears) instead of latching.
  */
 
-// one-result-type-ok:reclaim-counts-out-struct — E2 (one way out): the public
+// one-result-type-ok:reclaim-count-out-struct — E2 (one way out): the public
 // surface is best-effort and reports a COUNT SUMMARY, not a fallible op whose
 // reason must travel. storage_reclaim_derived() always runs every source it can
 // (a failed/absent source is recorded in sources_ok/sources_total, never an
@@ -35,6 +35,73 @@ int64_t storage_reclaim_run_count(void)
     return atomic_load(&g_reclaim_runs);
 }
 
+/* Build "<datadir>/<name>" into path, but only for a name that ends in
+ * ".tmp". Returns false when the name has no .tmp suffix or the joined path
+ * would not fit path_size (snprintf truncation rules apply). */
+static bool format_tmp_entry_path(const char *datadir, const char *name,
+                                  char *path, size_t path_size)
+{
+    size_t n = strlen(name);
+    if (n < 4 || strcmp(name + n - 4, ".tmp") != 0)
+        return false;
+    int pn = snprintf(path, path_size, "%s/%s", datadir, name);
+    return pn > 0 && pn < (int)path_size;
+}
+
+/* Open name beneath datadir (no symlink escape) and snapshot the file it
+ * resolved to. Returns false when either step fails; the handle is closed on
+ * both paths and *out is filled only on success. */
+static bool snapshot_file_beneath(const char *datadir, const char *name,
+                                  struct platform_positioned_file_snapshot *out)
+{
+    struct platform_positioned_file inspected;
+    platform_positioned_file_init(&inspected);
+    if (!platform_positioned_file_open_beneath(&inspected, datadir, name) ||
+        !platform_positioned_file_snapshot(&inspected, out)) {
+        platform_positioned_file_close(&inspected);
+        return false;
+    }
+    platform_positioned_file_close(&inspected);
+    return true;
+}
+
+/* True when the snapshot's mtime is in the future or younger than the
+ * min-age guard. */
+static bool tmp_snapshot_is_young(
+    const struct platform_positioned_file_snapshot *snapshot, time_t now)
+{
+    int64_t now_seconds = (int64_t)now;
+    uint64_t age = (uint64_t)now_seconds -
+                   (uint64_t)snapshot->modified_seconds;
+    return snapshot->modified_seconds > now_seconds ||
+           age < STORAGE_RECLAIM_TMP_MIN_AGE_SECS;
+}
+
+/* True when the snapshot's size cannot be narrowed to int64_t or its file
+ * identity cannot be carried in the 32-bit file_low field alone. */
+static bool tmp_snapshot_size_or_id_overflows(
+    const struct platform_positioned_file_snapshot *snapshot)
+{
+    return snapshot->size > INT64_MAX || snapshot->file_high != 0;
+}
+
+/* Retire (unlink) path only if it still is the exact file the snapshot saw:
+ * open it locked, compare volume/file identity, then close. */
+static bool retire_tmp_if_identity_matches(
+    const char *path, const struct platform_positioned_file_snapshot *snapshot)
+{
+    struct platform_private_file candidate;
+    struct platform_private_file_identity expected = {
+        .volume = snapshot->volume,
+        .file = snapshot->file_low,
+    };
+    platform_private_file_init(&candidate);
+    bool deleted = platform_private_file_open_locked(path, &candidate) &&
+        platform_private_file_retire_if_identity(&candidate, path, &expected);
+    platform_private_file_close(&candidate);
+    return deleted;
+}
+
 /* Unlink "<x>.tmp" crash orphans older than the min-age guard. An atomic
  * write-then-rename creates "<path>.tmp" and renames it within well under a
  * second, so a .tmp older than the guard cannot be an in-flight write — it is
@@ -55,43 +122,17 @@ static int sweep_stale_tmp(const char *datadir, int64_t *bytes_out)
     time_t now = platform_time_wall_time_t();
     for (size_t i = 0; i < entries.count; i++) {
         const char *name = entries.entries[i].name;
-        size_t n = strlen(name);
-        if (n < 4 || strcmp(name + n - 4, ".tmp") != 0)
-            continue;
         char path[2048];
-        int pn = snprintf(path, sizeof(path), "%s/%s", datadir, name);
-        if (pn <= 0 || pn >= (int)sizeof(path))
+        if (!format_tmp_entry_path(datadir, name, path, sizeof(path)))
             continue;
-        struct platform_positioned_file inspected;
         struct platform_positioned_file_snapshot snapshot;
-        platform_positioned_file_init(&inspected);
-        if (!platform_positioned_file_open_beneath(
-                &inspected, datadir, name) ||
-            !platform_positioned_file_snapshot(&inspected, &snapshot)) {
-            platform_positioned_file_close(&inspected);
+        if (!snapshot_file_beneath(datadir, name, &snapshot))
             continue;
-        }
-        platform_positioned_file_close(&inspected);
-        int64_t now_seconds = (int64_t)now;
-        uint64_t age = (uint64_t)now_seconds -
-                       (uint64_t)snapshot.modified_seconds;
-        if (snapshot.modified_seconds > now_seconds ||
-            age < STORAGE_RECLAIM_TMP_MIN_AGE_SECS)
+        if (tmp_snapshot_is_young(&snapshot, now))
             continue; /* young: may be an in-flight atomic write — leave it */
-        if (snapshot.size > INT64_MAX || snapshot.file_high != 0)
+        if (tmp_snapshot_size_or_id_overflows(&snapshot))
             continue;
-
-        struct platform_private_file candidate;
-        struct platform_private_file_identity expected = {
-            .volume = snapshot.volume,
-            .file = snapshot.file_low,
-        };
-        platform_private_file_init(&candidate);
-        bool deleted = platform_private_file_open_locked(path, &candidate) &&
-            platform_private_file_retire_if_identity(
-                &candidate, path, &expected);
-        platform_private_file_close(&candidate);
-        if (deleted) {
+        if (retire_tmp_if_identity_matches(path, &snapshot)) {
             removed++;
             if (bytes_out) *bytes_out += (int64_t)snapshot.size;
         } else {
