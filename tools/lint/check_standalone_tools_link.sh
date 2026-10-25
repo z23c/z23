@@ -481,11 +481,11 @@ if [[ "$BUILD_ONLY" == 0 && "$GATE_HOST_OS" == Linux ]]; then
     else tools/lint/selftest_standalone_tools_x11.sh >"$x11_log" 2>&1 & x11_pid=$!; fi
 fi
 
-# Parallelism: the targets are independent single-TU links, so take the whole
-# grant (ZCL_HOST_JOBS, else the CPU count), clamped 4..32; override ZCL_TOOLS_LINK_JOBS=<n>.
-tl_jobs="${ZCL_TOOLS_LINK_JOBS:-${ZCL_HOST_JOBS:-$(nproc 2>/dev/null || echo 4)}}"
-[ "$tl_jobs" -ge 4 ] || tl_jobs=4
-[ "$tl_jobs" -le 32 ] || tl_jobs=32
+# Parallelism: half the grant (ZCL_HOST_JOBS, else CPUs), clamped 4..16; override ZCL_TOOLS_LINK_JOBS=<n>.
+tl_nproc="${ZCL_HOST_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+tl_jobs="${ZCL_TOOLS_LINK_JOBS:-$(( tl_nproc / 2 ))}"
+if [ "$tl_jobs" -lt 4 ];  then tl_jobs=4;  fi
+if [ "$tl_jobs" -gt 16 ]; then tl_jobs=16; fi
 
 if ! make -k -j"$tl_jobs" --no-print-directory "${targets[@]}" >"$build_log" 2>&1; then
     # One -k parse keeps the original failure context; serial re-probes lose it.
