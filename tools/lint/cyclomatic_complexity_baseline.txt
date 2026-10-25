@@ -1852,7 +1852,6 @@ platform/modules/platform/tests/directory_transaction_windows_acceptance.c:main:
 platform/modules/platform/tests/file_metadata_windows_acceptance.c:main:35
 platform/modules/platform/tests/file_service_transport_windows_acceptance.c:legacy_send_timeout_is_bounded:17
 platform/modules/platform/tests/file_service_transport_windows_acceptance.c:main:22
-platform/modules/platform/tests/package_prepare_windows_acceptance.c:main:19
 platform/modules/platform/tests/path_replace_windows_acceptance.c:main:34
 platform/modules/platform/tests/positioned_file_windows_acceptance.c:main:25
 platform/modules/platform/tests/private_directory_windows_acceptance.c:acl_is_explicitly_private:27

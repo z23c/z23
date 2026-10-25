@@ -130,55 +130,99 @@ static int fail(const char *message)
     return 1;
 }
 
-int main(void)
+static bool build_fixture_paths(wchar_t *root, wchar_t *source,
+                                wchar_t *source_file, wchar_t *metadata,
+                                wchar_t *outside, wchar_t *link)
 {
     wchar_t temporary[MAX_PATH];
+    return GetTempPathW(MAX_PATH, temporary) &&
+           swprintf(root, MAX_PATH, L"%lsz23-package-prepare-%lu-%llu",
+                    temporary, (unsigned long)GetCurrentProcessId(),
+                    (unsigned long long)GetTickCount64()) > 0 &&
+           swprintf(source, MAX_PATH, L"%ls\\src", root) > 0 &&
+           swprintf(source_file, MAX_PATH, L"%ls\\x.c", source) > 0 &&
+           swprintf(metadata, MAX_PATH, L"%ls\\zcode-package.json", root) > 0 &&
+           swprintf(outside, MAX_PATH, L"%lsz23-package-outside-%lu.c",
+                    temporary, (unsigned long)GetCurrentProcessId()) > 0 &&
+           swprintf(link, MAX_PATH, L"%ls\\escape.c", root) > 0;
+}
+
+static bool create_fixture_files(const wchar_t *root, const wchar_t *source,
+                                 const wchar_t *source_file,
+                                 const wchar_t *metadata,
+                                 const wchar_t *outside)
+{
+    return CreateDirectoryW(root, NULL) && CreateDirectoryW(source, NULL) &&
+           write_file(source_file, "int x(void) { return 23; }\n") &&
+           write_file(metadata, "{}\n") &&
+           write_file(outside, "int outside(void) { return 1; }\n");
+}
+
+static bool convert_root_to_utf8(const wchar_t *root, char *root_utf8,
+                                 int root_utf8_size)
+{
+    return WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, root, -1,
+                               root_utf8, root_utf8_size, NULL, NULL) != 0;
+}
+
+static bool real_package_scans(const char *root_utf8,
+                               struct vcs_package_prepared *prepared,
+                               bool *has_package_config, char *detail,
+                               size_t detail_cap)
+{
+    return vcs_package_scan_layout(root_utf8, prepared, has_package_config,
+                                   detail, detail_cap) ==
+               VCS_PACKAGE_PREPARE_OK &&
+           *has_package_config && prepared->manifest.count == 2;
+}
+
+static DWORD symbolic_link_flags(void)
+{
+    DWORD flags = 0;
+#ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
+    flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+#endif
+    return flags;
+}
+
+static void remove_fixture_tree(const wchar_t *outside,
+                                const wchar_t *metadata,
+                                const wchar_t *source_file,
+                                const wchar_t *source, const wchar_t *root)
+{
+    DeleteFileW(outside);
+    DeleteFileW(metadata);
+    DeleteFileW(source_file);
+    RemoveDirectoryW(source);
+    RemoveDirectoryW(root);
+}
+
+int main(void)
+{
     wchar_t root[MAX_PATH];
     wchar_t source[MAX_PATH];
     wchar_t source_file[MAX_PATH];
     wchar_t metadata[MAX_PATH];
     wchar_t outside[MAX_PATH];
     wchar_t link[MAX_PATH];
-    if (!GetTempPathW(MAX_PATH, temporary) ||
-        swprintf(root, MAX_PATH, L"%lsz23-package-prepare-%lu-%llu",
-                 temporary, (unsigned long)GetCurrentProcessId(),
-                 (unsigned long long)GetTickCount64()) <= 0 ||
-        swprintf(source, MAX_PATH, L"%ls\\src", root) <= 0 ||
-        swprintf(source_file, MAX_PATH, L"%ls\\x.c", source) <= 0 ||
-        swprintf(metadata, MAX_PATH, L"%ls\\zcode-package.json", root) <= 0 ||
-        swprintf(outside, MAX_PATH, L"%lsz23-package-outside-%lu.c",
-                 temporary, (unsigned long)GetCurrentProcessId()) <= 0 ||
-        swprintf(link, MAX_PATH, L"%ls\\escape.c", root) <= 0 ||
-        !CreateDirectoryW(root, NULL) || !CreateDirectoryW(source, NULL) ||
-        !write_file(source_file, "int x(void) { return 23; }\n") ||
-        !write_file(metadata, "{}\n") ||
-        !write_file(outside, "int outside(void) { return 1; }\n"))
+    if (!build_fixture_paths(root, source, source_file, metadata, outside,
+                             link) ||
+        !create_fixture_files(root, source, source_file, metadata, outside))
         return fail("fixture creation failed");
 
     char root_utf8[MAX_PATH * 3];
-    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, root, -1,
-                             root_utf8, sizeof(root_utf8), NULL, NULL))
+    if (!convert_root_to_utf8(root, root_utf8, sizeof(root_utf8)))
         return fail("root UTF-8 conversion failed");
     struct vcs_package_prepared prepared;
     bool has_package_config = false;
     char detail[256];
-    if (vcs_package_scan_layout(root_utf8, &prepared, &has_package_config,
-                                detail, sizeof(detail)) !=
-            VCS_PACKAGE_PREPARE_OK ||
-        !has_package_config || prepared.manifest.count != 2)
+    if (!real_package_scans(root_utf8, &prepared, &has_package_config, detail,
+                            sizeof(detail)))
         return fail("real package checkout did not scan");
     vcs_package_prepared_free(&prepared);
 
-    DWORD flags = 0;
-#ifdef SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE
-    flags |= SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
-#endif
-    if (!CreateSymbolicLinkW(link, outside, flags)) {
-        DeleteFileW(outside);
-        DeleteFileW(metadata);
-        DeleteFileW(source_file);
-        RemoveDirectoryW(source);
-        RemoveDirectoryW(root);
+    if (!CreateSymbolicLinkW(link, outside, symbolic_link_flags())) {
+        remove_fixture_tree(outside, metadata, source_file, source, root);
         fputs("package_prepare_windows_acceptance: REFUSE: runtime cannot "
               "create a file reparse point\n", stderr);
         return 77;
@@ -189,11 +233,7 @@ int main(void)
         return fail("file reparse point was omitted or traversed");
 
     DeleteFileW(link);
-    DeleteFileW(outside);
-    DeleteFileW(metadata);
-    DeleteFileW(source_file);
-    RemoveDirectoryW(source);
-    RemoveDirectoryW(root);
+    remove_fixture_tree(outside, metadata, source_file, source, root);
     puts("package_prepare_windows_acceptance: PASS");
     return 0;
 }
