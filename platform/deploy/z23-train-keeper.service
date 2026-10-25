@@ -24,6 +24,6 @@ Documentation=file:%h/development/z23/main/docs/dev/DEVELOPING.md
 Type=oneshot
 EnvironmentFile=-%h/.z23/train-keeper.env
 WorkingDirectory=%h/development/z23/main
-ExecStart=/bin/bash -lc 'exec "$${Z23_ROOT:-$$HOME/github/z23}/build/bin/z23-dev" dev train keep --train="$${Z23_TRAIN:?set Z23_TRAIN in ~/.z23/train-keeper.env}" --once'
+ExecStart=/bin/bash -lc 'exec "$${Z23_ROOT:-$$HOME/development/z23/main}/build/bin/z23-dev" dev train keep --train="$${Z23_TRAIN:?set Z23_TRAIN in ~/.z23/train-keeper.env}" --once'
 SuccessExitStatus=3
 TimeoutStartSec=5400

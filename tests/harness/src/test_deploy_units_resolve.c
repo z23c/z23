@@ -34,7 +34,8 @@ enum {
 
 static const char k_du_deploy[] = "platform/deploy/";
 static const char k_du_main[] = "%h/development/z23/main/";
-static const char k_du_retired[] = "%h/github/z23";
+/* Matches both %h/github/z23 and $HOME/github/z23 (and $$HOME in a unit). */
+static const char k_du_retired[] = "github/z23";
 static const char k_du_bin[] = "build/bin/";
 static const char k_du_bin_dir[] = "$(BIN_DIR)/";
 
@@ -244,10 +245,6 @@ static void du_check_path(struct du_ctx *c, const char *unit, unsigned line,
     size_t n;
     char name[DU_PATH_CAP];
 
-    if (strstr(tok, k_du_retired)) {
-        du_fail(c, unit, line, "retired checkout", tok);
-        return;
-    }
     if (strncmp(tok, k_du_main, sizeof k_du_main - 1) != 0)
         return;
     rel = tok + sizeof k_du_main - 1;
@@ -428,6 +425,40 @@ static void du_check_unit(struct du_ctx *c, const char *unit, char *text)
     }
 }
 
+static bool du_span_has(const char *s, size_t len, const char *needle)
+{
+    size_t nl = strlen(needle);
+
+    for (size_t i = 0; i + nl <= len; i++)
+        if (memcmp(s + i, needle, nl) == 0)
+            return true;
+    return false;
+}
+
+/* Scans every non-comment line of the raw unit text, not just Exec values, so
+ * WorkingDirectory, ReadWritePaths and shell strings inside Exec are covered.
+ * Reads the buffer without splitting it, so du_check_unit still sees it whole. */
+static void du_check_retired(struct du_ctx *c, const char *unit,
+                             const char *text)
+{
+    const char *p = text;
+    unsigned lineno = 1;
+
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        const char *first = p + strspn(p, " \t");
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+
+        if (*first != '#' && *first != ';' && first < p + len &&
+            du_span_has(p, len, k_du_retired))
+            du_fail(c, unit, lineno, "retired checkout", k_du_retired);
+        if (!nl)
+            break;
+        p = nl + 1;
+        lineno++;
+    }
+}
+
 static void du_check_file(struct du_ctx *c, const char *unit)
 {
     char *text = NULL;
@@ -438,6 +469,7 @@ static void du_check_file(struct du_ctx *c, const char *unit)
         return;
     }
     c->units++;
+    du_check_retired(c, unit, text);
     du_check_unit(c, unit, text);
     free(text);
 }
