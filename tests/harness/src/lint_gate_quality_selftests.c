@@ -371,6 +371,39 @@ int t_gate22_framework_filename_suffix(void)
     return failures;
 }
 
+/* Resolve group-purpose paths and mkdir test-tmp/ when all four succeed.
+ * Returns 1 when every repo_path succeeded, else 0. mkdir's result is ignored. */
+static int p2_resolve_group_purpose_paths(char *real_path, char *ok_path,
+                                          char *bad_path)
+{
+    char test_tmp_dir[PATH_MAX];
+    int paths_ok =
+        (repo_path(real_path, PATH_MAX, GRPPURPOSE_REAL_SRC_REL) == 0 &&
+         repo_path(ok_path, PATH_MAX, GRPPURPOSE_OK_FIXTURE_REL) == 0 &&
+         repo_path(bad_path, PATH_MAX, GRPPURPOSE_BAD_FIXTURE_REL) == 0 &&
+         repo_path(test_tmp_dir, sizeof(test_tmp_dir), "test-tmp") == 0)
+            ? 1 : 0;
+    if (paths_ok) (void)mkdir(test_tmp_dir, 0700);
+    return paths_ok;
+}
+
+/* FAIL-mode check-group-purpose pointed at one fixture source. */
+static int p2_run_group_purpose_gate(const char *src)
+{
+    return run_gate_script_with_env2(GRPPURPOSE_SCRIPT_REL,
+                                    "ZCL_LINT_MODE", "FAIL",
+                                    "ZCL_GROUP_PURPOSE_SRC", src);
+}
+
+/* Run that gate only when the clean copy was written and reread. */
+static int p2_run_group_purpose_if_readable(int copied, int read_ok,
+                                            const char *src)
+{
+    return (copied == 0 && read_ok == 0)
+        ? p2_run_group_purpose_gate(src)
+        : -1;
+}
+
 /* Gate P2 (docs/dev/palace-design.md §3) — check-group-purpose (HARD): a
  * group node whose ci_group_purpose() case returns "" trips the gate; the
  * unmodified source is clean. Never touches the live codeindex_group.c —
@@ -380,14 +413,7 @@ int t_gate_p2_group_purpose(void)
 {
     int failures = 0;
     char real_path[PATH_MAX], ok_path[PATH_MAX], bad_path[PATH_MAX];
-    char test_tmp_dir[PATH_MAX];
-    int paths_ok =
-        (repo_path(real_path, sizeof(real_path), GRPPURPOSE_REAL_SRC_REL) == 0 &&
-         repo_path(ok_path, sizeof(ok_path), GRPPURPOSE_OK_FIXTURE_REL) == 0 &&
-         repo_path(bad_path, sizeof(bad_path), GRPPURPOSE_BAD_FIXTURE_REL) == 0 &&
-         repo_path(test_tmp_dir, sizeof(test_tmp_dir), "test-tmp") == 0)
-            ? 1 : 0;
-    if (paths_ok) (void)mkdir(test_tmp_dir, 0700);
+    int paths_ok = p2_resolve_group_purpose_paths(real_path, ok_path, bad_path);
 
     unlink_rel(GRPPURPOSE_OK_FIXTURE_REL);
     unlink_rel(GRPPURPOSE_BAD_FIXTURE_REL);
@@ -405,21 +431,11 @@ int t_gate_p2_group_purpose(void)
         (read_ok == 0) ? str_replace_once(ok_contents, needle, repl) : NULL;
     int wrote_bad = bad_contents ? write_file(bad_path, bad_contents) : -1;
 
-    int ok_rc = (copied == 0 && read_ok == 0)
-        ? run_gate_script_with_env2(GRPPURPOSE_SCRIPT_REL,
-                                    "ZCL_LINT_MODE", "FAIL",
-                                    "ZCL_GROUP_PURPOSE_SRC", ok_path)
-        : -1;
+    int ok_rc = p2_run_group_purpose_if_readable(copied, read_ok, ok_path);
     int bad_rc = (wrote_bad == 0)
-        ? run_gate_script_with_env2(GRPPURPOSE_SCRIPT_REL,
-                                    "ZCL_LINT_MODE", "FAIL",
-                                    "ZCL_GROUP_PURPOSE_SRC", bad_path)
+        ? p2_run_group_purpose_gate(bad_path)
         : -1;
-    int recover_rc = (copied == 0 && read_ok == 0)
-        ? run_gate_script_with_env2(GRPPURPOSE_SCRIPT_REL,
-                                    "ZCL_LINT_MODE", "FAIL",
-                                    "ZCL_GROUP_PURPOSE_SRC", ok_path)
-        : -1;
+    int recover_rc = p2_run_group_purpose_if_readable(copied, read_ok, ok_path);
 
     unlink_rel(GRPPURPOSE_OK_FIXTURE_REL);
     unlink_rel(GRPPURPOSE_BAD_FIXTURE_REL);
@@ -442,21 +458,19 @@ int t_gate_p2_group_purpose(void)
     return failures;
 }
 
-/* Gate P1 (docs/dev/palace-design.md §3) — check-file-purpose: a file whose
- * first code token precedes any comment (no derivable purpose) trips the gate
- * in FAIL mode; a file with a substantive leading block comment passes. The
- * gate is pointed at an isolated test-tmp/ fixture tree via
- * ZCL_FILE_PURPOSE_ROOT so it never scans (or depends on) the real tree. */
-int t_gate_p1_file_purpose(void)
+/* Resolve the file-purpose fixture paths, then build
+ * test-tmp/_file_purpose_root_tmp/engine/services/src one mkdir at a time.
+ * *paths_ok is 1 when every path resolved; *dirs_ok is 1 when the
+ * directories exist. A failed repo_path skips the later ones and mkdir. */
+static void p1_prepare_file_purpose_dirs(char *root_abs, char *plant_abs,
+                                         char *bad_src, char *ok_src,
+                                         int *paths_ok_out, int *dirs_ok_out)
 {
-    int failures = 0;
-    char root_abs[PATH_MAX], plant_abs[PATH_MAX];
-    char bad_src[PATH_MAX], ok_src[PATH_MAX], dir_abs[PATH_MAX];
     int paths_ok =
-        (repo_path(root_abs, sizeof(root_abs), FILEPURPOSE_ROOT_REL) == 0 &&
-         repo_path(plant_abs, sizeof(plant_abs), FILEPURPOSE_PLANT_REL) == 0 &&
-         repo_path(bad_src, sizeof(bad_src), FILEPURPOSE_BAD_FIXTURE_REL) == 0 &&
-         repo_path(ok_src, sizeof(ok_src), FILEPURPOSE_OK_FIXTURE_REL) == 0)
+        (repo_path(root_abs, PATH_MAX, FILEPURPOSE_ROOT_REL) == 0 &&
+         repo_path(plant_abs, PATH_MAX, FILEPURPOSE_PLANT_REL) == 0 &&
+         repo_path(bad_src, PATH_MAX, FILEPURPOSE_BAD_FIXTURE_REL) == 0 &&
+         repo_path(ok_src, PATH_MAX, FILEPURPOSE_OK_FIXTURE_REL) == 0)
             ? 1 : 0;
 
     /* Build test-tmp/_file_purpose_root_tmp/engine/services/src level by
@@ -470,6 +484,7 @@ int t_gate_p1_file_purpose(void)
             FILEPURPOSE_ROOT_REL "/engine/services",
             FILEPURPOSE_ROOT_REL "/engine/services/src",
         };
+        char dir_abs[PATH_MAX];
         dirs_ok = 1;
         for (size_t i = 0; i < sizeof(levels) / sizeof(levels[0]); i++) {
             if (repo_path(dir_abs, sizeof(dir_abs), levels[i]) != 0 ||
@@ -479,6 +494,24 @@ int t_gate_p1_file_purpose(void)
             }
         }
     }
+    *paths_ok_out = paths_ok;
+    *dirs_ok_out = dirs_ok;
+}
+
+/* Gate P1 (docs/dev/palace-design.md §3) — check-file-purpose: a file whose
+ * first code token precedes any comment (no derivable purpose) trips the gate
+ * in FAIL mode; a file with a substantive leading block comment passes. The
+ * gate is pointed at an isolated test-tmp/ fixture tree via
+ * ZCL_FILE_PURPOSE_ROOT so it never scans (or depends on) the real tree. */
+int t_gate_p1_file_purpose(void)
+{
+    int failures = 0;
+    char root_abs[PATH_MAX], plant_abs[PATH_MAX];
+    char bad_src[PATH_MAX], ok_src[PATH_MAX];
+    int paths_ok = 0;
+    int dirs_ok = 0;
+    p1_prepare_file_purpose_dirs(root_abs, plant_abs, bad_src, ok_src,
+                                 &paths_ok, &dirs_ok);
 
     (void)unlink(plant_abs);
     int planted_bad = (dirs_ok && copy_file(bad_src, plant_abs) == 0) ? 0 : -1;
@@ -780,6 +813,68 @@ int t_e2_one_result_type(void)
     return failures;
 }
 
+/* Resolve the hermetic scan dir, keep file, fixture, and baseline. On
+ * failure, log the ratchet's path error and return 1; repo_path calls
+ * stop at the first failure. */
+static int svc_conv_resolve_fixture_paths(char *test_tmp, char *scan_dir,
+                                          char *keep_path, char *fixture_path,
+                                          char *baseline_path)
+{
+    if (repo_path(test_tmp, PATH_MAX, "test-tmp") != 0 ||
+        repo_path(scan_dir, PATH_MAX, SVC_CONV_SCAN_DIR_REL) != 0 ||
+        repo_path(keep_path, PATH_MAX, SVC_CONV_KEEP_REL) != 0 ||
+        repo_path(fixture_path, PATH_MAX, SVC_CONV_FIXTURE_REL) != 0 ||
+        repo_path(baseline_path, PATH_MAX, SVC_CONV_BASELINE_REL) != 0) {
+        fprintf(stderr,
+                "[lint-gate] could not resolve service-result-convergence "
+                "fixture paths\n");
+        return 1;
+    }
+    return 0;
+}
+
+/* Point the convergence gate at the hermetic scan dir and baseline. */
+static int svc_conv_run_gate(void)
+{
+    return run_gate_script_with_env2(SVC_CONV_SCRIPT_REL,
+              "ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR",
+              SVC_CONV_SCAN_DIR_REL,
+              "ZCL_SERVICE_RESULT_CONVERGENCE_BASELINE",
+              SVC_CONV_BASELINE_REL);
+}
+
+/* Run the gate when one preceding write returned 0; otherwise -999. */
+static int svc_conv_run_if_write_ok(int wrote)
+{
+    return wrote == 0 ? svc_conv_run_gate() : -999;
+}
+
+/* Run the gate when both preceding writes returned 0; otherwise -999. */
+static int svc_conv_run_if_two_writes_ok(int wrote_a, int wrote_b)
+{
+    return (wrote_a == 0 && wrote_b == 0) ? svc_conv_run_gate() : -999;
+}
+
+/* Run the gate when all three preceding writes returned 0; otherwise -999. */
+static int svc_conv_run_if_three_writes_ok(int wrote_a, int wrote_b,
+                                           int wrote_c)
+{
+    return (wrote_a == 0 && wrote_b == 0 && wrote_c == 0)
+        ? svc_conv_run_gate()
+        : -999;
+}
+
+/* Read the gate's captured output when rc >= 0 and the out path resolves.
+ * Caller initializes *out to NULL; a skipped read leaves it NULL. */
+static int svc_conv_read_gate_output(int rc, char **out)
+{
+    char out_path[PATH_MAX];
+    return (rc >= 0 &&
+            lint_gate_out_path(out_path, sizeof(out_path)) == 0)
+        ? read_entire_file(out_path, out)
+        : -1;
+}
+
 /* Phase 3 service-result-convergence shrinking-floor ratchet: unlike E2
  * (file-granularity), this gate counts exported bare-bool function
  * DEFINITIONS per file and fails on: (a) a baselined file's count growing
@@ -797,18 +892,9 @@ int t_service_result_convergence_ratchet(void)
     char fixture_path[PATH_MAX];
     char baseline_path[PATH_MAX];
 
-    if (repo_path(test_tmp, sizeof(test_tmp), "test-tmp") != 0 ||
-        repo_path(scan_dir, sizeof(scan_dir), SVC_CONV_SCAN_DIR_REL) != 0 ||
-        repo_path(keep_path, sizeof(keep_path), SVC_CONV_KEEP_REL) != 0 ||
-        repo_path(fixture_path, sizeof(fixture_path),
-                  SVC_CONV_FIXTURE_REL) != 0 ||
-        repo_path(baseline_path, sizeof(baseline_path),
-                  SVC_CONV_BASELINE_REL) != 0) {
-        fprintf(stderr,
-                "[lint-gate] could not resolve service-result-convergence "
-                "fixture paths\n");
+    if (svc_conv_resolve_fixture_paths(test_tmp, scan_dir, keep_path,
+                                       fixture_path, baseline_path) != 0)
         return 1;
-    }
     (void)mkdir(test_tmp, 0700);
     (void)mkdir(scan_dir, 0700);
     (void)unlink(fixture_path);
@@ -835,73 +921,31 @@ int t_service_result_convergence_ratchet(void)
     char baseline_2[PATH_MAX + 16];
     (void)snprintf(baseline_2, sizeof(baseline_2), "%s 2\n", SVC_CONV_FIXTURE_REL);
     int wrote_baseline_2 = write_file(baseline_path, baseline_2);
-    int matched_rc =
-        (wrote_keep == 0 && wrote_fixture_2 == 0 && wrote_baseline_2 == 0)
-            ? run_gate_script_with_env2(SVC_CONV_SCRIPT_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR",
-                  SVC_CONV_SCAN_DIR_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_BASELINE",
-                  SVC_CONV_BASELINE_REL)
-            : -999;
+    int matched_rc = svc_conv_run_if_three_writes_ok(
+        wrote_keep, wrote_fixture_2, wrote_baseline_2);
 
     /* Case B: fixture still 2, baseline lowered to 1 — must trip as a
      * REGRESSION. */
     char baseline_1[PATH_MAX + 16];
     (void)snprintf(baseline_1, sizeof(baseline_1), "%s 1\n", SVC_CONV_FIXTURE_REL);
     int wrote_baseline_1 = write_file(baseline_path, baseline_1);
-    int grown_rc =
-        wrote_baseline_1 == 0
-            ? run_gate_script_with_env2(SVC_CONV_SCRIPT_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR",
-                  SVC_CONV_SCAN_DIR_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_BASELINE",
-                  SVC_CONV_BASELINE_REL)
-            : -999;
-    char grown_out_path[PATH_MAX];
+    int grown_rc = svc_conv_run_if_write_ok(wrote_baseline_1);
     char *grown_out = NULL;
-    int grown_read =
-        (grown_rc >= 0 &&
-         lint_gate_out_path(grown_out_path, sizeof(grown_out_path)) == 0)
-            ? read_entire_file(grown_out_path, &grown_out)
-            : -1;
+    int grown_read = svc_conv_read_gate_output(grown_rc, &grown_out);
 
     /* Case C: fixture 2, EMPTY baseline — must trip as a NEW unlisted file. */
     int wrote_baseline_empty = write_file(baseline_path, "");
-    int new_rc =
-        wrote_baseline_empty == 0
-            ? run_gate_script_with_env2(SVC_CONV_SCRIPT_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR",
-                  SVC_CONV_SCAN_DIR_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_BASELINE",
-                  SVC_CONV_BASELINE_REL)
-            : -999;
-    char new_out_path[PATH_MAX];
+    int new_rc = svc_conv_run_if_write_ok(wrote_baseline_empty);
     char *new_out = NULL;
-    int new_read =
-        (new_rc >= 0 &&
-         lint_gate_out_path(new_out_path, sizeof(new_out_path)) == 0)
-            ? read_entire_file(new_out_path, &new_out)
-            : -1;
+    int new_read = svc_conv_read_gate_output(new_rc, &new_out);
 
     /* Case D: fixture.c REMOVED, baseline still lists it — must trip as a
      * STALE entry. */
     (void)unlink(fixture_path);
     int wrote_baseline_stale = write_file(baseline_path, baseline_2);
-    int stale_rc =
-        wrote_baseline_stale == 0
-            ? run_gate_script_with_env2(SVC_CONV_SCRIPT_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR",
-                  SVC_CONV_SCAN_DIR_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_BASELINE",
-                  SVC_CONV_BASELINE_REL)
-            : -999;
-    char stale_out_path[PATH_MAX];
+    int stale_rc = svc_conv_run_if_write_ok(wrote_baseline_stale);
     char *stale_out = NULL;
-    int stale_read =
-        (stale_rc >= 0 &&
-         lint_gate_out_path(stale_out_path, sizeof(stale_out_path)) == 0)
-            ? read_entire_file(stale_out_path, &stale_out)
-            : -1;
+    int stale_read = svc_conv_read_gate_output(stale_rc, &stale_out);
 
     /* Case E: fixture.c now fully CLEAN, baseline still lists it at 2 —
      * must trip as a stale "now clean" entry (a converted file cannot stay
@@ -909,21 +953,10 @@ int t_service_result_convergence_ratchet(void)
     int wrote_fixture_clean = write_file(fixture_path,
         "int svc_conv_fixture_now_clean;\n");
     int wrote_baseline_for_clean = write_file(baseline_path, baseline_2);
-    int clean_stale_rc =
-        (wrote_fixture_clean == 0 && wrote_baseline_for_clean == 0)
-            ? run_gate_script_with_env2(SVC_CONV_SCRIPT_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR",
-                  SVC_CONV_SCAN_DIR_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_BASELINE",
-                  SVC_CONV_BASELINE_REL)
-            : -999;
-    char clean_out_path[PATH_MAX];
+    int clean_stale_rc = svc_conv_run_if_two_writes_ok(
+        wrote_fixture_clean, wrote_baseline_for_clean);
     char *clean_out = NULL;
-    int clean_read =
-        (clean_stale_rc >= 0 &&
-         lint_gate_out_path(clean_out_path, sizeof(clean_out_path)) == 0)
-            ? read_entire_file(clean_out_path, &clean_out)
-            : -1;
+    int clean_read = svc_conv_read_gate_output(clean_stale_rc, &clean_out);
 
     /* Case F — one-line-brace fixture: a signature whose opening brace
      * shares the signature's last line (`bool foo(void) {`, or a multi-arg
@@ -940,34 +973,16 @@ int t_service_result_convergence_ratchet(void)
         "    return false;\n"
         "}\n");
     int wrote_baseline_empty3 = write_file(baseline_path, "");
-    int oneline_rc =
-        (wrote_fixture_oneline == 0 && wrote_baseline_empty3 == 0)
-            ? run_gate_script_with_env2(SVC_CONV_SCRIPT_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR",
-                  SVC_CONV_SCAN_DIR_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_BASELINE",
-                  SVC_CONV_BASELINE_REL)
-            : -999;
-    char oneline_out_path[PATH_MAX];
+    int oneline_rc = svc_conv_run_if_two_writes_ok(
+        wrote_fixture_oneline, wrote_baseline_empty3);
     char *oneline_out = NULL;
-    int oneline_read =
-        (oneline_rc >= 0 &&
-         lint_gate_out_path(oneline_out_path, sizeof(oneline_out_path)) == 0)
-            ? read_entire_file(oneline_out_path, &oneline_out)
-            : -1;
+    int oneline_read = svc_conv_read_gate_output(oneline_rc, &oneline_out);
 
     /* Recovery: remove fixture.c and the baseline entry; only keep.c
      * remains, so the gate must report clean. */
     (void)unlink(fixture_path);
     int wrote_baseline_empty2 = write_file(baseline_path, "");
-    int recover_rc =
-        wrote_baseline_empty2 == 0
-            ? run_gate_script_with_env2(SVC_CONV_SCRIPT_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_SCAN_DIR",
-                  SVC_CONV_SCAN_DIR_REL,
-                  "ZCL_SERVICE_RESULT_CONVERGENCE_BASELINE",
-                  SVC_CONV_BASELINE_REL)
-            : -999;
+    int recover_rc = svc_conv_run_if_write_ok(wrote_baseline_empty2);
 
     (void)unlink(fixture_path);
     (void)unlink(keep_path);
