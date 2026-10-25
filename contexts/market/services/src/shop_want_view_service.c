@@ -23,27 +23,18 @@ static const char *review_name(int review_state)
     return NULL;
 }
 
-static bool render(const struct shop_want_view_input_v1 *input,
-                   struct shop_want_view_result_v1 *out)
+static bool want_view_fields_invalid(
+    const struct shop_want_view_input_v1 *input)
 {
-    const char *review = input ? review_name(input->review_state) : NULL;
-    if (!input || !out || !review || input->criteria_len == 0 ||
-        input->criteria_len > SHOP_WANT_VIEW_CRITERIA_MAX ||
-        input->amount_zatoshi == 0 || input->issued_unix <= 0 ||
-        input->expires_unix <= input->issued_unix || input->now_unix <= 0)
-        return false;
+    return input->criteria_len == 0 ||
+           input->criteria_len > SHOP_WANT_VIEW_CRITERIA_MAX ||
+           input->amount_zatoshi == 0 || input->issued_unix <= 0 ||
+           input->expires_unix <= input->issued_unix || input->now_unix <= 0;
+}
 
-    memset(out, 0, sizeof(*out));
-    zcl_hex_encode(input->want_id, sizeof(input->want_id), out->want_id);
-    zcl_hex_encode(input->buyer_pubkey, sizeof(input->buyer_pubkey),
-                   out->buyer_pubkey);
-    out->spec_hash_present = zcl_bytes_any_set(input->spec_hash,
-                                           sizeof(input->spec_hash));
-    if (out->spec_hash_present)
-        zcl_hex_encode(input->spec_hash, sizeof(input->spec_hash),
-                       out->spec_hash);
-    out->amount_zatoshi = input->amount_zatoshi;
-    out->full = input->full;
+static void want_view_copy_criteria(const struct shop_want_view_input_v1 *input,
+                                    struct shop_want_view_result_v1 *out)
+{
     if (input->full) {
         memcpy(out->criteria, input->criteria, input->criteria_len);
         out->criteria[input->criteria_len] = '\0';
@@ -55,12 +46,11 @@ static bool render(const struct shop_want_view_input_v1 *input,
         memcpy(out->criteria_preview, input->criteria, n);
         out->criteria_preview[n] = '\0';
     }
-    out->issued_unix = input->issued_unix;
-    out->expires_unix = input->expires_unix;
-    out->cancelled_unix = input->cancelled_unix;
-    out->posted_unix = input->posted_unix;
-    out->expired = input->expires_unix <= input->now_unix;
-    (void)snprintf(out->review_state, sizeof(out->review_state), "%s", review);
+}
+
+static void want_view_render_state(const struct shop_want_view_input_v1 *input,
+                                   struct shop_want_view_result_v1 *out)
+{
     const char *state;
     const char *next;
     if (input->cancelled_unix > 0) {
@@ -77,6 +67,34 @@ static bool render(const struct shop_want_view_input_v1 *input,
     (void)snprintf(out->next_action, sizeof(out->next_action), "%s%s",
                    strcmp(state, "open") == 0 ? "seller next action: " : "",
                    next);
+}
+
+static bool render(const struct shop_want_view_input_v1 *input,
+                   struct shop_want_view_result_v1 *out)
+{
+    const char *review = input ? review_name(input->review_state) : NULL;
+    if (!input || !out || !review || want_view_fields_invalid(input))
+        return false;
+
+    memset(out, 0, sizeof(*out));
+    zcl_hex_encode(input->want_id, sizeof(input->want_id), out->want_id);
+    zcl_hex_encode(input->buyer_pubkey, sizeof(input->buyer_pubkey),
+                   out->buyer_pubkey);
+    out->spec_hash_present = zcl_bytes_any_set(input->spec_hash,
+                                           sizeof(input->spec_hash));
+    if (out->spec_hash_present)
+        zcl_hex_encode(input->spec_hash, sizeof(input->spec_hash),
+                       out->spec_hash);
+    out->amount_zatoshi = input->amount_zatoshi;
+    out->full = input->full;
+    want_view_copy_criteria(input, out);
+    out->issued_unix = input->issued_unix;
+    out->expires_unix = input->expires_unix;
+    out->cancelled_unix = input->cancelled_unix;
+    out->posted_unix = input->posted_unix;
+    out->expired = input->expires_unix <= input->now_unix;
+    (void)snprintf(out->review_state, sizeof(out->review_state), "%s", review);
+    want_view_render_state(input, out);
     return true;
 }
 
