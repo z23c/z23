@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Crenton - Apache License 2.0
  * Purpose: Canonical, range-restricted Horn-rule admission without evaluation. */
 #include "ontology/ontology.h"
 
@@ -173,23 +173,28 @@ static const struct zcl_ontology_predicate_v1 *horn_predicate_find(
     return NULL;
 }
 
-static bool horn_atom_valid(
-    const struct zcl_ontology_formula_node_v1 *node,
-    const struct horn_registry *registry, bool head, bool negative,
-    bool positive_range[ZCL_ONTOLOGY_MAX_VARIABLES],
-    bool *saw_positive_body_atom)
+static bool horn_atom_predicate_admissible(
+    const struct zcl_ontology_predicate_v1 *predicate, bool head,
+    bool negative)
 {
-    const struct zcl_ontology_predicate_v1 *predicate =
-        horn_predicate_find(registry, node->predicate_root);
-    if (!predicate || predicate->arity != node->arity ||
-        (head && predicate->execution_tier != ZCL_ONTOLOGY_TIER_HORN) ||
-        (!head && predicate->execution_tier != ZCL_ONTOLOGY_TIER_EXACT &&
-         predicate->execution_tier != ZCL_ONTOLOGY_TIER_HORN) ||
-        (!head && predicate->world == ZCL_ONTOLOGY_CLOSED_WORLD) ||
-        (negative && predicate->explicit_negation != 1))
-        return false;
-    if (!head && !negative && saw_positive_body_atom)
-        *saw_positive_body_atom = true;
+    if (head) {
+        if (predicate->execution_tier != ZCL_ONTOLOGY_TIER_HORN)
+            return false;
+    } else {
+        if (predicate->execution_tier != ZCL_ONTOLOGY_TIER_EXACT &&
+            predicate->execution_tier != ZCL_ONTOLOGY_TIER_HORN)
+            return false;
+        if (predicate->world == ZCL_ONTOLOGY_CLOSED_WORLD) return false;
+    }
+    if (negative && predicate->explicit_negation != 1) return false;
+    return true;
+}
+
+static bool horn_atom_terms_valid(
+    const struct zcl_ontology_formula_node_v1 *node,
+    const struct zcl_ontology_predicate_v1 *predicate, bool head,
+    bool negative, bool positive_range[ZCL_ONTOLOGY_MAX_VARIABLES])
+{
     for (size_t i = 0; i < node->arity; i++) {
         /* Structural Horn admission has no term manifest. Constants would let
          * a caller self-declare an arbitrary value/type pair, so executable
@@ -205,6 +210,23 @@ static bool horn_atom_valid(
             positive_range[node->terms[i].variable] = true;
     }
     return true;
+}
+
+static bool horn_atom_valid(
+    const struct zcl_ontology_formula_node_v1 *node,
+    const struct horn_registry *registry, bool head, bool negative,
+    bool positive_range[ZCL_ONTOLOGY_MAX_VARIABLES],
+    bool *saw_positive_body_atom)
+{
+    const struct zcl_ontology_predicate_v1 *predicate =
+        horn_predicate_find(registry, node->predicate_root);
+    if (!predicate || predicate->arity != node->arity ||
+        !horn_atom_predicate_admissible(predicate, head, negative))
+        return false;
+    if (!head && !negative && saw_positive_body_atom)
+        *saw_positive_body_atom = true;
+    return horn_atom_terms_valid(node, predicate, head, negative,
+                                 positive_range);
 }
 
 static bool horn_body_valid(
@@ -254,6 +276,63 @@ static bool horn_head_valid(
     return true;
 }
 
+static bool horn_rule_roots_match(
+    const struct zcl_ontology_horn_rule_v1 *rule,
+    const struct zcl_source_universe_v1 *universe,
+    const struct zcl_ontology_context_v1 *context,
+    const struct zcl_ontology_formula_v1 *formula)
+{
+    uint8_t universe_root[32], context_root[32], formula_root[32];
+    return horn_rule_shape_valid(rule) &&
+           zcl_source_universe_v1_root(universe, universe_root) &&
+           zcl_ontology_context_v1_root(context, context_root) &&
+           zcl_ontology_formula_v1_root(formula, formula_root) &&
+           memcmp(context->universe_root, universe_root, 32) == 0 &&
+           memcmp(rule->universe_root, universe_root, 32) == 0 &&
+           memcmp(rule->context_root, context_root, 32) == 0 &&
+           memcmp(rule->formula_root, formula_root, 32) == 0;
+}
+
+static bool horn_forall_prefix_descend(
+    const struct zcl_ontology_formula_v1 *formula, uint32_t *index,
+    uint16_t *quantified)
+{
+    uint32_t position = formula->root_index;
+    uint16_t count = 0;
+    while (formula->nodes[position].op == ZCL_ONTOLOGY_FORMULA_FORALL) {
+        if (count == UINT16_MAX) return false;
+        count++;
+        position = formula->nodes[position].left;
+    }
+    *index = position;
+    *quantified = count;
+    return true;
+}
+
+static bool horn_implication_valid(
+    const struct zcl_ontology_horn_rule_v1 *rule,
+    const struct zcl_ontology_formula_v1 *formula,
+    const struct zcl_ontology_formula_node_v1 *implication,
+    const struct horn_registry *registry, uint16_t quantified)
+{
+    bool positive_range[ZCL_ONTOLOGY_MAX_VARIABLES] = {0};
+    uint16_t body_clauses = 0;
+    uint8_t head_polarity = 0;
+    bool saw_positive_body_atom = false;
+    if (!horn_body_valid(formula, implication->left, registry,
+                         positive_range, &body_clauses,
+                         &saw_positive_body_atom) ||
+        !saw_positive_body_atom ||
+        !horn_head_valid(formula, implication->right, registry,
+                         &head_polarity) ||
+        body_clauses != rule->body_clause_count ||
+        head_polarity != rule->head_polarity)
+        return false;
+    for (uint16_t variable = 0; variable < quantified; variable++)
+        if (!positive_range[variable]) return false;
+    return true;
+}
+
 bool zcl_ontology_horn_rule_v1_validate(
     const struct zcl_ontology_horn_rule_v1 *rule,
     const struct zcl_source_universe_v1 *universe,
@@ -262,47 +341,21 @@ bool zcl_ontology_horn_rule_v1_validate(
     const struct zcl_ontology_predicate_v1 *predicates,
     size_t predicate_count)
 {
-    uint8_t universe_root[32], context_root[32], formula_root[32];
     struct horn_registry registry;
-    if (!horn_rule_shape_valid(rule) ||
-        !zcl_source_universe_v1_root(universe, universe_root) ||
-        !zcl_ontology_context_v1_root(context, context_root) ||
-        !zcl_ontology_formula_v1_root(formula, formula_root) ||
-        memcmp(context->universe_root, universe_root, 32) != 0 ||
-        memcmp(rule->universe_root, universe_root, 32) != 0 ||
-        memcmp(rule->context_root, context_root, 32) != 0 ||
-        memcmp(rule->formula_root, formula_root, 32) != 0 ||
+    if (!horn_rule_roots_match(rule, universe, context, formula) ||
         !horn_registry_init(&registry, predicates, predicate_count))
         return false;
 
-    uint32_t index = formula->root_index;
+    uint32_t index = 0;
     uint16_t quantified = 0;
-    while (formula->nodes[index].op == ZCL_ONTOLOGY_FORMULA_FORALL) {
-        if (quantified == UINT16_MAX) return false;
-        quantified++;
-        index = formula->nodes[index].left;
-    }
-    if (quantified != formula->variable_count ||
+    if (!horn_forall_prefix_descend(formula, &index, &quantified) ||
+        quantified != formula->variable_count ||
         quantified != rule->quantified_variable_count ||
         formula->nodes[index].op != ZCL_ONTOLOGY_FORMULA_IMPLIES)
         return false;
 
     const struct zcl_ontology_formula_node_v1 *implication =
         &formula->nodes[index];
-    bool positive_range[ZCL_ONTOLOGY_MAX_VARIABLES] = {0};
-    uint16_t body_clauses = 0;
-    uint8_t head_polarity = 0;
-    bool saw_positive_body_atom = false;
-    if (!horn_body_valid(formula, implication->left, &registry,
-                         positive_range, &body_clauses,
-                         &saw_positive_body_atom) ||
-        !saw_positive_body_atom ||
-        !horn_head_valid(formula, implication->right, &registry,
-                         &head_polarity) ||
-        body_clauses != rule->body_clause_count ||
-        head_polarity != rule->head_polarity)
-        return false;
-    for (uint16_t variable = 0; variable < quantified; variable++)
-        if (!positive_range[variable]) return false;
-    return true;
+    return horn_implication_valid(rule, formula, implication, &registry,
+                                  quantified);
 }
