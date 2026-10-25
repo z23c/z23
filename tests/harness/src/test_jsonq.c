@@ -13,6 +13,7 @@
 #include "test/test_core.h"
 #include "util/spawn.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -138,6 +139,36 @@ static int test_jsonq_scalar_paths(void)
     return failures;
 }
 
+static int test_jsonq_array_index_bounds(void)
+{
+    char limit[64], overflow[64];
+    snprintf(limit, sizeof limit, "[%d]", INT_MAX);
+    snprintf(overflow, sizeof overflow, "[%u]", (unsigned)INT_MAX + 1u);
+    const struct { const char *path, *output; int status; } cases[] = {
+        { "[0]", "first" JSONQ_FIXTURE_EOL, 0 },
+        { "[1]", "second" JSONQ_FIXTURE_EOL, 0 },
+        { "[0000]", "first" JSONQ_FIXTURE_EOL, 0 },
+        { "[0001]", "second" JSONQ_FIXTURE_EOL, 0 },
+        { "[00000000000000000000000000000000000001]", "second" JSONQ_FIXTURE_EOL, 0 },
+        { limit, "", 1 },
+        { overflow, "", 2 },
+        { "[4294967296]", "", 2 },
+        { "[999999999999999999999999999999999999999999999999999999999999]", "", 2 },
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char out[128] = {0};
+        TEST("jsonq: array indexes refuse overflow without changing leading zeros") {
+            ASSERT_EQ(jsonq_fixture_run("[\"first\",\"second\"]",
+                (const char *const[]){JSONQ_FIXTURE_BIN, "get", cases[i].path, NULL},
+                out, sizeof out), cases[i].status);
+            ASSERT_STR_EQ(out, cases[i].output);
+            PASS();
+        } _test_next:;
+    }
+    return failures;
+}
+
 static int test_jsonq_unwrap(void)
 {
     int failures = 0;
@@ -211,6 +242,7 @@ int test_jsonq(void)
     failures += test_jsonq_count_and_keys();
     failures += test_jsonq_key_count();
     failures += test_jsonq_scalar_paths();
+    failures += test_jsonq_array_index_bounds();
     failures += test_jsonq_unwrap();
 #if !defined(_WIN32)
     failures += test_jsonq_multicall_names();

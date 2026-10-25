@@ -29,6 +29,7 @@
 #include "multicall.h"
 #include "zjsonp/zjsonp.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +39,7 @@
 #endif
 
 enum {
-    MAX_INPUT = 16 << 20,
+    JSONQ_MAX_INPUT = 16 << 20,
     MAX_SEGS = 32,
     MAX_KEY = 256,
     DECODE_CAP = 1 << 16
@@ -73,7 +74,7 @@ typedef enum {
     CMD_UNWRAP
 } cmd_kind;
 
-static char g_input[MAX_INPUT];
+static char g_input[JSONQ_MAX_INPUT];
 static char g_decode[DECODE_CAP];
 static path_seg g_segs[MAX_SEGS];
 static int g_nsegs;
@@ -87,6 +88,23 @@ static void usage(void)
           "       jsonq unwrap\n"
           "Read one JSON document from stdin.\n",
           stderr);
+}
+
+static int parse_array_index_digits(const char **cursor)
+{
+    const char *p = *cursor;
+    int idx = 0;
+    while (*p >= '0' && *p <= '9') {
+        int digit = *p - '0';
+        if (idx > (INT_MAX - digit) / 10) {
+            fprintf(stderr, "jsonq: array index exceeds maximum %d\n", INT_MAX);
+            return -1;
+        }
+        idx = idx * 10 + digit;
+        p++;
+    }
+    *cursor = p;
+    return idx;
 }
 
 static int parse_path(const char *path)
@@ -109,11 +127,9 @@ static int parse_path(const char *path)
                 fputs("jsonq: expected array index\n", stderr);
                 return -1;
             }
-            int idx = 0;
-            while (*p >= '0' && *p <= '9') {
-                idx = idx * 10 + (*p - '0');
-                p++;
-            }
+            int idx = parse_array_index_digits(&p);
+            if (idx < 0)
+                return -1;
             if (*p != ']') {
                 fputs("jsonq: missing ]\n", stderr);
                 return -1;
@@ -230,7 +246,7 @@ static int emit_scalar(const char *text, const zjsonp_event *ev, bool raw)
 
 static int emit_raw_range(const char *text, size_t start, size_t end)
 {
-    if (end < start || end > MAX_INPUT)
+    if (end < start || end > JSONQ_MAX_INPUT)
         return -1;
     fwrite(text + start, 1, end - start, stdout);
     fputc('\n', stdout);
@@ -552,7 +568,7 @@ static bool read_document(size_t *len)
 #endif
     *len = fread(g_input, 1, sizeof g_input, stdin);
     if (ferror(stdin) || !feof(stdin)) {
-        fprintf(stderr, "jsonq: read error or input over %d bytes\n", MAX_INPUT);
+        fprintf(stderr, "jsonq: read error or input over %d bytes\n", JSONQ_MAX_INPUT);
         return false;
     }
     if (!valid_document(g_input, *len)) {
