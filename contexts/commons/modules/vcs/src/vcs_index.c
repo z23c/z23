@@ -446,6 +446,23 @@ bool vcs_index_seal_pin_get(struct vcs_index *idx, uint8_t sealset_hash[32],
     return true;
 }
 
+/* Read one stepped ROW of the meta table into the caller's outputs:
+ * found flag, length, and up to out_cap bytes. No logging, no returns
+ * beyond normal flow — the caller owns every failure path. */
+static void meta_get_read_row_outputs(sqlite3_stmt *stmt, void *out_buf,
+                                      size_t out_cap, size_t *out_len,
+                                      bool *found)
+{
+    if (found) *found = true;
+    int n = sqlite3_column_bytes(stmt, 0);
+    const void *b = sqlite3_column_blob(stmt, 0);
+    if (out_len) *out_len = (size_t)n;
+    if (out_buf && out_cap > 0 && b) {
+        size_t copy = (size_t)n < out_cap ? (size_t)n : out_cap;
+        if (copy > 0) memcpy(out_buf, b, copy);
+    }
+}
+
 bool vcs_index_meta_get(struct vcs_index *idx, const char *key, void *out_buf,
                         size_t out_cap, size_t *out_len, bool *found)
 {
@@ -464,14 +481,7 @@ bool vcs_index_meta_get(struct vcs_index *idx, const char *key, void *out_buf,
     bool ok = true;
     int rc = sqlite3_step(stmt);  // raw-sql-ok:vcs-index-kernel-store
     if (rc == SQLITE_ROW) {
-        if (found) *found = true;
-        int n = sqlite3_column_bytes(stmt, 0);
-        const void *b = sqlite3_column_blob(stmt, 0);
-        if (out_len) *out_len = (size_t)n;
-        if (out_buf && out_cap > 0 && b) {
-            size_t copy = (size_t)n < out_cap ? (size_t)n : out_cap;
-            if (copy > 0) memcpy(out_buf, b, copy);
-        }
+        meta_get_read_row_outputs(stmt, out_buf, out_cap, out_len, found);
     } else if (rc != SQLITE_DONE) {
         ok = false;
     }

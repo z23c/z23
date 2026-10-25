@@ -208,7 +208,6 @@ contexts/commons/modules/vcs/src/vcs_devloop_mirror.c:vcs_devloop_mirror_load_fo
 contexts/commons/modules/vcs/src/vcs_devloop_mirror.c:vcs_devloop_mirror_record:35
 contexts/commons/modules/vcs/src/vcs_devloop_publication.c:vcs_devloop_publication_advance_source_reproduction_ack:34
 contexts/commons/modules/vcs/src/vcs_devloop_publication.c:vcs_devloop_publication_advance_workspace:37
-contexts/commons/modules/vcs/src/vcs_index.c:vcs_index_meta_get:17
 contexts/commons/modules/vcs/src/vcs_manifest.c:build_cb:16
 contexts/commons/modules/vcs/src/vcs_manifest.c:vcs_manifest_build:18
 contexts/commons/modules/vcs/src/vcs_manifest.c:vcs_manifest_parse:16
