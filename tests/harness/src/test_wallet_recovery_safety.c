@@ -411,23 +411,51 @@ static void wrs_child_restore(int barrier_fd, const char *dir,
     fflush(stderr);
     _exit(r.ok ? 0 : 1);
 }
+
+/* Fork one of the two restore children. The child closes the barrier's
+ * write end and never returns; the parent only needs the pid back. */
+static pid_t wrs_fork_restore_child(int write_fd, int read_fd,
+                                    const char *dir, const char *phrase)
+{
+    pid_t pid = fork();
+    if (pid == 0) { close(write_fd); wrs_child_restore(read_fd, dir, phrase); }
+    return pid;
+}
 #endif
 
-static int t_two_concurrent_restores_leave_one_wallet(void)
+/* What deriving the two case-2 phrases produced. */
+enum wrs_seed_pair_state {
+    WRS_SEED_PAIR_UNUSABLE,   /* a derivation failed; the case cannot run */
+    WRS_SEED_PAIR_IDENTICAL,  /* both worked, but they name one wallet */
+    WRS_SEED_PAIR_DISTINCT,   /* both worked, and they name two wallets */
+};
+
+/* Derive both case-2 seeds, short-circuiting exactly like the check that
+ * guards it: phrase B is not derived when phrase A already failed. */
+static enum wrs_seed_pair_state wrs_derive_case2_seed_pair(uint8_t *seed_a,
+                                                           uint8_t *seed_b)
+{
+    if (!(mnemonic_to_wallet_seed(WRS_PHRASE_A, NULL, seed_a) &&
+          mnemonic_to_wallet_seed(WRS_PHRASE_B, NULL, seed_b)))
+        return WRS_SEED_PAIR_UNUSABLE;
+    if (memcmp(seed_a, seed_b, 32) == 0)
+        return WRS_SEED_PAIR_IDENTICAL;
+    return WRS_SEED_PAIR_DISTINCT;
+}
+
+/* Case-2 helpers that print WRS_CHECK lines take the caller's running
+ * failure count as `failures_out`. WRS_CHECK increments a plain local
+ * named `failures`, so each of them keeps one and merges it into
+ * `failures_out` on every exit. */
+
+/* Start both restores so they genuinely overlap, wait for both, and say
+ * which succeeded. Returns false when the case cannot proceed (the
+ * failing checks have already printed); the caller then cleans the
+ * fixture up and stops. */
+static bool wrs_race_two_concurrent_restores(const char *dir, bool *ok_a,
+                                             bool *ok_b, int *failures_out)
 {
     int failures = 0;
-    char dir[256];
-    wrs_mkfixture(dir, sizeof(dir), "concurrent");
-
-    /* Anti-vacuous: the whole case rests on the two phrases naming two
-     * different wallets. */
-    uint8_t seed_a[32], seed_b[32];
-    bool seeds_ok = mnemonic_to_wallet_seed(WRS_PHRASE_A, NULL, seed_a) &&
-                    mnemonic_to_wallet_seed(WRS_PHRASE_B, NULL, seed_b);
-    WRS_CHECK("the two test phrases derive two DIFFERENT seeds",
-              seeds_ok && memcmp(seed_a, seed_b, 32) != 0);
-    if (!seeds_ok) { test_rm_rf(dir); return failures; }
-
 #if defined(_WIN32)
     /* The barrier pipe cannot cross CreateProcess, so the release signal is
      * a go-token file both children poll for (bounded, 60 s). */
@@ -455,8 +483,8 @@ static int t_two_concurrent_restores_leave_one_wallet(void)
         if (hb) { test_self_child_kill(hb); test_self_child_wait(hb); }
         _putenv_s("ZCL_WRS_DIR", "");
         _putenv_s("ZCL_WRS_GO", "");
-        test_rm_rf(dir);
-        return failures;
+        *failures_out += failures;
+        return false;
     }
 
     /* Release both at once. */
@@ -468,22 +496,24 @@ static int t_two_concurrent_restores_leave_one_wallet(void)
     int sb = test_self_child_wait(hb);
     _putenv_s("ZCL_WRS_DIR", "");
     _putenv_s("ZCL_WRS_GO", "");
-    bool ok_a = (sa == 0);
-    bool ok_b = (sb == 0);
+    *ok_a = (sa == 0);
+    *ok_b = (sb == 0);
+    *failures_out += failures;
+    return true;
 #else
     int barrier[2];
     if (pipe(barrier) != 0) {
         WRS_CHECK("barrier pipe created", false);
-        test_rm_rf(dir);
-        return failures;
+        *failures_out += failures;
+        return false;
     }
 
     fflush(stdout);
     fflush(stderr);
-    pid_t pa = fork();
-    if (pa == 0) { close(barrier[1]); wrs_child_restore(barrier[0], dir, WRS_PHRASE_A); }
-    pid_t pb = fork();
-    if (pb == 0) { close(barrier[1]); wrs_child_restore(barrier[0], dir, WRS_PHRASE_B); }
+    pid_t pa = wrs_fork_restore_child(barrier[1], barrier[0], dir,
+                                      WRS_PHRASE_A);
+    pid_t pb = wrs_fork_restore_child(barrier[1], barrier[0], dir,
+                                      WRS_PHRASE_B);
     close(barrier[0]);
 
     bool forked = pa > 0 && pb > 0;
@@ -492,8 +522,8 @@ static int t_two_concurrent_restores_leave_one_wallet(void)
         close(barrier[1]);
         if (pa > 0) waitpid(pa, NULL, 0);
         if (pb > 0) waitpid(pb, NULL, 0);
-        test_rm_rf(dir);
-        return failures;
+        *failures_out += failures;
+        return false;
     }
 
     /* Release both at once. */
@@ -504,9 +534,111 @@ static int t_two_concurrent_restores_leave_one_wallet(void)
     int sa = -1, sb = -1;
     waitpid(pa, &sa, 0);
     waitpid(pb, &sb, 0);
-    bool ok_a = WIFEXITED(sa) && WEXITSTATUS(sa) == 0;
-    bool ok_b = WIFEXITED(sb) && WEXITSTATUS(sb) == 0;
+    *ok_a = WIFEXITED(sa) && WEXITSTATUS(sa) == 0;
+    *ok_b = WIFEXITED(sb) && WEXITSTATUS(sb) == 0;
+    *failures_out += failures;
+    return true;
 #endif
+}
+
+/* Open the node.db the winning restore left in the fixture. */
+static bool wrs_open_result_node_db(struct node_db *ndb, const char *path)
+{
+    return node_db_open(ndb, path) && ndb->open;
+}
+
+/* Read the wallet's keys back and ask, by derivation, which seed governs
+ * them. */
+static void wrs_report_keys_descend_from_one_seed(struct wallet_sqlite *ws,
+                                                  const uint8_t *seed_a,
+                                                  const uint8_t *seed_b,
+                                                  bool is_a, bool is_b,
+                                                  int *failures_out)
+{
+    int failures = 0;
+    /* The defect's fingerprint was keys from BOTH seeds under a
+     * single seed row. Ask by derivation, exactly as boot does. */
+    struct wallet *w = calloc(1, sizeof(*w));
+    if (w) {
+        wallet_init(w);
+        struct zcl_result kr = wallet_sqlite_read_keys_r(ws, w);
+        WRS_CHECK("its keys read back", kr.ok);
+        if (kr.ok) {
+            printf("    keys on disk: %zu\n", w->keystore.num_keys);
+            WRS_CHECK("the wallet is not empty", w->keystore.num_keys > 0);
+            bool gov_a = wallet_hd_adopt_seed(w, seed_a);
+            bool gov_b = wallet_hd_adopt_seed(w, seed_b);
+            printf("    governed by A=%d B=%d\n", (int)gov_a, (int)gov_b);
+            WRS_CHECK("every key on disk descends from ONE of the two "
+                      "seeds, never a mixture of both",
+                      gov_a != gov_b);
+            WRS_CHECK("and it is the seed that is actually stored",
+                      (gov_a && is_a) || (gov_b && is_b));
+        }
+        wallet_free(w);
+        free(w);
+    }
+    *failures_out += failures;
+}
+
+/* Unlock the wallet the race left behind and prove the datadir holds ONE
+ * wallet: one readable seed row, and keys descended from that seed
+ * alone. */
+static void wrs_verify_datadir_holds_one_seed_wallet(struct node_db *ndb,
+                                                     const uint8_t *seed_a,
+                                                     const uint8_t *seed_b,
+                                                     int *failures_out)
+{
+    int failures = 0;
+    wallet_lock_reset_for_test();
+    struct zcl_result ur = wallet_lock_unlock(
+        NULL, NULL, "case2-passphrase");
+    WRS_CHECK("the restored wallet explicitly unlocks for inspection",
+              ur.ok);
+    struct wallet_sqlite ws;
+    struct zcl_result wr = wallet_sqlite_open_r(&ws, ndb->db);
+    WRS_CHECK("its wallet tables open", wr.ok);
+    if (wr.ok) {
+        uint8_t on_disk[32];
+        memset(on_disk, 0, sizeof(on_disk));
+        enum wallet_seed_state st =
+            wallet_sqlite_sapling_seed_state(&ws, on_disk);
+        bool readable = (st == WALLET_SEED_PLAINTEXT ||
+                         st == WALLET_SEED_UNLOCKED);
+        WRS_CHECK("exactly one seed row is stored, and it is readable",
+                  readable);
+        bool is_a = readable && memcmp(on_disk, seed_a, 32) == 0;
+        bool is_b = readable && memcmp(on_disk, seed_b, 32) == 0;
+        WRS_CHECK("the stored seed is one of the two, not a third thing",
+                  is_a || is_b);
+        wrs_report_keys_descend_from_one_seed(&ws, seed_a, seed_b,
+                                              is_a, is_b, &failures);
+        memory_cleanse(on_disk, sizeof(on_disk));
+        wallet_sqlite_close(&ws);
+    }
+    *failures_out += failures;
+}
+
+static int t_two_concurrent_restores_leave_one_wallet(void)
+{
+    int failures = 0;
+    char dir[256];
+    wrs_mkfixture(dir, sizeof(dir), "concurrent");
+
+    /* Anti-vacuous: the whole case rests on the two phrases naming two
+     * different wallets. */
+    uint8_t seed_a[32], seed_b[32];
+    enum wrs_seed_pair_state seeds =
+        wrs_derive_case2_seed_pair(seed_a, seed_b);
+    WRS_CHECK("the two test phrases derive two DIFFERENT seeds",
+              seeds == WRS_SEED_PAIR_DISTINCT);
+    if (seeds == WRS_SEED_PAIR_UNUSABLE) { test_rm_rf(dir); return failures; }
+
+    bool ok_a = false, ok_b = false;
+    if (!wrs_race_two_concurrent_restores(dir, &ok_a, &ok_b, &failures)) {
+        test_rm_rf(dir);
+        return failures;
+    }
     printf("    phrase A ok=%d, phrase B ok=%d\n", (int)ok_a, (int)ok_b);
     wrs_list_dir("after", dir);
 
@@ -521,55 +653,11 @@ static int t_two_concurrent_restores_leave_one_wallet(void)
     memset(&ndb, 0, sizeof(ndb));
     char db_path[1200];
     snprintf(db_path, sizeof(db_path), "%s/node.db", dir);
-    bool opened = node_db_open(&ndb, db_path) && ndb.open;
+    bool opened = wrs_open_result_node_db(&ndb, db_path);
     WRS_CHECK("the resulting node.db opens", opened);
     if (opened) {
-        wallet_lock_reset_for_test();
-        struct zcl_result ur = wallet_lock_unlock(
-            NULL, NULL, "case2-passphrase");
-        WRS_CHECK("the restored wallet explicitly unlocks for inspection",
-                  ur.ok);
-        struct wallet_sqlite ws;
-        struct zcl_result wr = wallet_sqlite_open_r(&ws, ndb.db);
-        WRS_CHECK("its wallet tables open", wr.ok);
-        if (wr.ok) {
-            uint8_t on_disk[32];
-            memset(on_disk, 0, sizeof(on_disk));
-            enum wallet_seed_state st =
-                wallet_sqlite_sapling_seed_state(&ws, on_disk);
-            bool readable = (st == WALLET_SEED_PLAINTEXT ||
-                             st == WALLET_SEED_UNLOCKED);
-            WRS_CHECK("exactly one seed row is stored, and it is readable",
-                      readable);
-            bool is_a = readable && memcmp(on_disk, seed_a, 32) == 0;
-            bool is_b = readable && memcmp(on_disk, seed_b, 32) == 0;
-            WRS_CHECK("the stored seed is one of the two, not a third thing",
-                      is_a || is_b);
-            /* The defect's fingerprint was keys from BOTH seeds under a
-             * single seed row. Ask by derivation, exactly as boot does. */
-            struct wallet *w = calloc(1, sizeof(*w));
-            if (w) {
-                wallet_init(w);
-                struct zcl_result kr = wallet_sqlite_read_keys_r(&ws, w);
-                WRS_CHECK("its keys read back", kr.ok);
-                if (kr.ok) {
-                    printf("    keys on disk: %zu\n", w->keystore.num_keys);
-                    WRS_CHECK("the wallet is not empty", w->keystore.num_keys > 0);
-                    bool gov_a = wallet_hd_adopt_seed(w, seed_a);
-                    bool gov_b = wallet_hd_adopt_seed(w, seed_b);
-                    printf("    governed by A=%d B=%d\n", (int)gov_a, (int)gov_b);
-                    WRS_CHECK("every key on disk descends from ONE of the two "
-                              "seeds, never a mixture of both",
-                              gov_a != gov_b);
-                    WRS_CHECK("and it is the seed that is actually stored",
-                              (gov_a && is_a) || (gov_b && is_b));
-                }
-                wallet_free(w);
-                free(w);
-            }
-            memory_cleanse(on_disk, sizeof(on_disk));
-            wallet_sqlite_close(&ws);
-        }
+        wrs_verify_datadir_holds_one_seed_wallet(&ndb, seed_a, seed_b,
+                                                 &failures);
         node_db_close(&ndb);
         wallet_lock_reset_for_test();
     }

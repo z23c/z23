@@ -2593,7 +2593,6 @@ tests/harness/src/test_wallet_phrase_never_logged.c:t_a_real_terminal_gets_the_w
 tests/harness/src/test_wallet_phrase_never_logged.c:t_canonical_service_first_boot_creates_a_wallet:18
 tests/harness/src/test_wallet_phrase_never_logged.c:t_creation_refuses_and_leaves_nothing:16
 tests/harness/src/test_wallet_projection.c:t_projection_catch_up_replay:20
-tests/harness/src/test_wallet_recovery_safety.c:t_two_concurrent_restores_leave_one_wallet:33
 tests/harness/src/test_wallet_rescan_coverage.c:test_wallet_rescan_coverage:18
 tests/harness/src/test_wallet_rescan_coverage.c:wrc_g_kill_restart_baseline:29
 tests/harness/src/test_watcher_lease.c:wl_parent_child_roundtrip:30
