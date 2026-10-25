@@ -577,6 +577,48 @@ static int bundle_case_announce_priority(void)
     return failures;
 }
 
+static int bundle_case_timeout_messages(void)
+{
+    int failures = 0;
+    const char *root =
+        "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    const char *no_peer =
+        "the bundle did not arrive within timeout_s; no peer may be "
+        "advertising the root yet (retry, or pass --peer=<name>.onion)";
+    char msg[512];
+    SW_CHECK("bundle: addr matches the named onion, port ignored",
+             zcl_fleet_bundle_addr_is_peer(BUNDLE_ONION,
+                                           BUNDLE_ONION ":8233") &&
+             !zcl_fleet_bundle_addr_is_peer(BUNDLE_ONION, "10.0.0.5:8033") &&
+             !zcl_fleet_bundle_addr_is_peer(BUNDLE_ONION, NULL) &&
+             !zcl_fleet_bundle_addr_is_peer("127.0.0.1", "127.0.0.1:8033"));
+    SW_CHECK("bundle: no --peer keeps the timeout message unchanged",
+             zcl_fleet_bundle_timeout_message(msg, sizeof(msg), NULL,
+                                              ZCL_FLEET_PEER_UNKNOWN, root) &&
+             strcmp(msg, no_peer) == 0);
+    SW_CHECK("bundle: a named peer that never connected is said so",
+             zcl_fleet_bundle_timeout_message(msg, sizeof(msg), BUNDLE_ONION,
+                                              ZCL_FLEET_PEER_ABSENT, root) &&
+             strstr(msg, "never connected within timeout_s") != NULL &&
+             strstr(msg, BUNDLE_ONION) != NULL);
+    SW_CHECK("bundle: a connected peer that did not serve the root is said so",
+             zcl_fleet_bundle_timeout_message(msg, sizeof(msg), BUNDLE_ONION,
+                                              ZCL_FLEET_PEER_CONNECTED,
+                                              root) &&
+             strstr(msg, "is connected but did not serve root") != NULL &&
+             strstr(msg, root) != NULL);
+    SW_CHECK("bundle: an unreadable peer list is unknown, never a claim",
+             zcl_fleet_bundle_timeout_message(msg, sizeof(msg), BUNDLE_ONION,
+                                              ZCL_FLEET_PEER_UNKNOWN, root) &&
+             strstr(msg, "state is unknown") != NULL &&
+             strstr(msg, "never connected") == NULL &&
+             strstr(msg, "is connected") == NULL);
+    SW_CHECK("bundle: a message that does not fit is refused",
+             !zcl_fleet_bundle_timeout_message(msg, 20, BUNDLE_ONION,
+                                               ZCL_FLEET_PEER_ABSENT, root));
+    return failures;
+}
+
 int t_swarm_bundle_transfer(void)
 {
     int failures = 0;
@@ -592,5 +634,6 @@ int t_swarm_bundle_transfer(void)
     failures += bundle_case_peer_rules();
     failures += bundle_case_announce_priority();
     failures += bundle_case_priority_after_eviction();
+    failures += bundle_case_timeout_messages();
     return failures;
 }

@@ -64,4 +64,23 @@ enum zcl_fleet_bundle_status zcl_fleet_bundle_fetch_step(
  * optional ":port". An IP literal or a clearnet name is false. */
 bool zcl_fleet_bundle_peer_is_onion(const char *peer);
 
+/* What the node's getpeerinfo says about the named onion after a fetch
+ * timed out. UNKNOWN means the peer list could not be read: never a claim. */
+enum zcl_fleet_bundle_peer_state {
+    ZCL_FLEET_PEER_UNKNOWN = 0,
+    ZCL_FLEET_PEER_ABSENT,    /* read; the named onion is not connected */
+    ZCL_FLEET_PEER_CONNECTED, /* read; a connected addr names the onion */
+};
+
+/* True when a getpeerinfo `addr` names the onion host of `peer` (a ":port"
+ * on either side is ignored). False unless `peer` is a v3 onion name. */
+bool zcl_fleet_bundle_addr_is_peer(const char *peer, const char *addr);
+
+/* The FETCH_TIMEOUT message into `out` (cap bytes). peer NULL gives the
+ * no-peer text; otherwise the text names the peer by state. False when the
+ * message does not fit or an argument is missing. */
+bool zcl_fleet_bundle_timeout_message(char *out, size_t cap, const char *peer,
+                                      enum zcl_fleet_bundle_peer_state state,
+                                      const char *root);
+
 #endif /* ZCL_NATIVE_FLEET_BUNDLE_H */

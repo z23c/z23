@@ -346,3 +346,46 @@ enum zcl_fleet_bundle_status zcl_fleet_bundle_fetch_step(
         return s;
     return zfb_finish(store, args, out);
 }
+
+/* ── fetch timeout ───────────────────────────────────────────────── */
+
+#define ZFB_TIMEOUT_NO_PEER                                                \
+    "the bundle did not arrive within timeout_s; no peer may be "          \
+    "advertising the root yet (retry, or pass --peer=<name>.onion)"
+
+bool zcl_fleet_bundle_addr_is_peer(const char *peer, const char *addr)
+{
+    if (!addr || !zcl_fleet_bundle_peer_is_onion(peer))
+        return false;
+    char host[ZFB_ONION_LABEL + 7u];
+    memcpy(host, peer, ZFB_ONION_LABEL + 6u);
+    host[ZFB_ONION_LABEL + 6u] = '\0';
+    return strstr(addr, host) != NULL;
+}
+
+bool zcl_fleet_bundle_timeout_message(char *out, size_t cap, const char *peer,
+                                      enum zcl_fleet_bundle_peer_state state,
+                                      const char *root)
+{
+    if (!out || cap == 0 || !root)
+        return false;
+    int n = -1;
+    if (!peer)
+        n = snprintf(out, cap, "%s", ZFB_TIMEOUT_NO_PEER);
+    else if (state == ZCL_FLEET_PEER_CONNECTED)
+        n = snprintf(out, cap,
+                     "the named peer %s is connected but did not serve root "
+                     "%s within timeout_s; ask its operator to re-run fleet "
+                     "bundle offer while connected", peer, root);
+    else if (state == ZCL_FLEET_PEER_ABSENT)
+        n = snprintf(out, cap,
+                     "the named peer %s never connected within timeout_s (it "
+                     "may be offline or still dialing over Tor); ask its "
+                     "operator to keep the node up, then retry", peer);
+    else
+        n = snprintf(out, cap,
+                     "the named peer %s state is unknown: the node's peer "
+                     "list could not be read, so whether it connected within "
+                     "timeout_s is not known; retry", peer);
+    return n > 0 && (size_t)n < cap;
+}

@@ -330,6 +330,69 @@ static void fbc_fwd_object(const struct fbc_fetch_in *in,
     (void)json_push_kv_str(fwd, "out", in->args.out_path);
 }
 
+/* Read the node's peer list once and say whether the named onion is in it.
+ * `count` gets the number of connected peers when the list was read. */
+static enum zcl_fleet_bundle_peer_state fbc_probe_peer(const char *peer,
+                                                       size_t *count)
+{
+    zcl_native_bridge_ensure_rpc();
+    char *raw = node_rpc_call("getpeerinfo", "[]");
+    if (!raw)
+        return ZCL_FLEET_PEER_UNKNOWN;
+    struct json_value peers;
+    json_init(&peers);
+    bool parsed = json_read(&peers, raw, strlen(raw));
+    free(raw);
+    const struct json_value *arr = &peers;
+    if (parsed && peers.type == JSON_OBJ && json_get(&peers, "result"))
+        arr = json_get(&peers, "result");
+    enum zcl_fleet_bundle_peer_state state = ZCL_FLEET_PEER_UNKNOWN;
+    if (parsed && arr->type == JSON_ARR) {
+        state = ZCL_FLEET_PEER_ABSENT;
+        *count = json_size(arr);
+        for (size_t i = 0; i < *count; i++) {
+            const char *addr =
+                json_get_str(json_get(json_at(arr, i), "addr"));
+            if (zcl_fleet_bundle_addr_is_peer(peer, addr)) {
+                state = ZCL_FLEET_PEER_CONNECTED;
+                break;
+            }
+        }
+    }
+    json_free(&peers);
+    return state;
+}
+
+/* The FETCH_TIMEOUT reply. With --peer it names the peer's state and adds
+ * peer, peer_connected and peers_connected to the data (the last two only
+ * when the peer list was read). */
+static void fbc_fail_timeout(const struct fbc_fetch_in *in,
+                             struct zcl_command_reply *reply)
+{
+    enum zcl_fleet_bundle_peer_state state = ZCL_FLEET_PEER_UNKNOWN;
+    size_t count = 0;
+    if (in->peer)
+        state = fbc_probe_peer(in->peer, &count);
+    char root[65];
+    char message[512];
+    zcl_hex_encode(in->args.root, 32, root);
+    if (!zcl_fleet_bundle_timeout_message(message, sizeof(message), in->peer,
+                                          state, root))
+        (void)snprintf(message, sizeof(message),
+                       "the bundle did not arrive within timeout_s");
+    if (in->peer) {
+        (void)json_push_kv_str(&reply->data, "peer", in->peer);
+        (void)json_push_kv_str(&reply->data, "detail", message);
+        if (state != ZCL_FLEET_PEER_UNKNOWN) {
+            (void)json_push_kv_bool(&reply->data, "peer_connected",
+                                    state == ZCL_FLEET_PEER_CONNECTED);
+            (void)json_push_kv_int(&reply->data, "peers_connected",
+                                   (int64_t)count);
+        }
+    }
+    fbc_fail(reply, "FETCH_TIMEOUT", message, true, false, FBC_FETCH_CMD);
+}
+
 /* One-shot CLI: poll the node's non-blocking step until complete or the
  * bounded wait ends. */
 static void fbc_fetch_poll(struct fbc_fetch_in *in,
@@ -352,10 +415,7 @@ static void fbc_fetch_poll(struct fbc_fetch_in *in,
         if (complete)
             break;
         if ((uint64_t)platform_time_wall_unix() >= deadline) {
-            fbc_fail(reply, "FETCH_TIMEOUT",
-                     "the bundle did not arrive within timeout_s; no peer "
-                     "may be advertising the root yet (retry, or pass "
-                     "--peer=<name>.onion)", true, false, FBC_FETCH_CMD);
+            fbc_fail_timeout(in, reply);
             break;
         }
         platform_sleep_ms(FBC_POLL_MS);
