@@ -429,26 +429,30 @@ extern char **environ;
 
 /* Drop the PARENT agent session's markers before a CLI child starts, so a
  * funnel driven from inside a Claude Code session never makes a nested
- * session. Only these exact session-marker names are scrubbed. Auth and
+ * session. Every CLAUDE_CODE_* name and the CLAUDECODE, CLAUDE_PID and
+ * CLAUDE_EFFORT markers are scrubbed by prefix: new session markers appear
+ * with Claude Code releases, so an exact list always lags behind. Auth and
  * provider selection (CLAUDE_CODE_OAUTH_TOKEN, CLAUDE_CODE_USE_BEDROCK,
- * CLAUDE_CODE_USE_VERTEX, ANTHROPIC_*) are kept: the subscription login lives
- * in files under the home directory, and a child needs its provider choice.
- * No CODEX_* marker is scrubbed: `codex exec` documents none and its auth is
- * CODEX_HOME. */
+ * CLAUDE_CODE_USE_VERTEX) must survive, so they are kept; ANTHROPIC_* is
+ * untouched. The subscription login lives in files under the home directory,
+ * and a child needs its provider choice. No CODEX_* marker is scrubbed:
+ * `codex exec` documents none and its auth is CODEX_HOME. */
 static bool unit_is_agent_session_var(const char *entry)
 {
+    static const char *const keep[] = {
+        "CLAUDE_CODE_OAUTH_TOKEN=", "CLAUDE_CODE_USE_BEDROCK=",
+        "CLAUDE_CODE_USE_VERTEX=",
+    };
     static const char *const exact[] = {
         "CLAUDECODE=", "CLAUDE_PID=", "CLAUDE_EFFORT=",
-        "CLAUDE_CODE_ENTRYPOINT=", "CLAUDE_CODE_EXECPATH=",
-        "CLAUDE_CODE_SSE_PORT=", "CLAUDE_CODE_SESSION_ID=",
-        "CLAUDE_CODE_CHILD_SESSION=", "CLAUDE_CODE_SESSION_ATTENDED=",
-        "CLAUDE_CODE_MESSAGING_SOCKET=", "CLAUDE_CODE_MESSAGING_TOKEN=",
-        "CLAUDE_CODE_SUBAGENT_MODEL=",
     };
+    for (size_t i = 0; i < sizeof(keep) / sizeof(keep[0]); i++)
+        if (strncmp(entry, keep[i], strlen(keep[i])) == 0)
+            return false;
     for (size_t i = 0; i < sizeof(exact) / sizeof(exact[0]); i++)
         if (strncmp(entry, exact[i], strlen(exact[i])) == 0)
             return true;
-    return false;
+    return strncmp(entry, "CLAUDE_CODE_", strlen("CLAUDE_CODE_")) == 0;
 }
 
 static void unit_scrub_agent_session_env(void)

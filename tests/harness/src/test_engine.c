@@ -2809,6 +2809,7 @@ static int case_engine_unit_scrub_env_e2e(void)
                    getenv("PATH") ? getenv("PATH") : "");
     (void)snprintf(cmd, sizeof(cmd),
         "env PATH='%s' CLAUDECODE=1 CLAUDE_CODE_ENTRYPOINT=cli "
+        "CLAUDE_CODE_FUTURE_MARKER=1 "
         "CLAUDE_CODE_OAUTH_TOKEN=tok-scrub-e2e CLAUDE_CODE_USE_VERTEX=1 "
         "%s --engine claude-haiku --task %s --no-group --yes-dispatch "
         "--worktree %s --state-dir %s >%s/run.log 2>&1",
@@ -2828,6 +2829,8 @@ static int case_engine_unit_scrub_env_e2e(void)
              strstr(envtxt, "CLAUDECODE=") == NULL);
     EN_CHECK("CLAUDE_CODE_ENTRYPOINT is scrubbed from the CLI child",
              strstr(envtxt, "CLAUDE_CODE_ENTRYPOINT=") == NULL);
+    EN_CHECK("an unknown future CLAUDE_CODE_ marker is scrubbed",
+             strstr(envtxt, "CLAUDE_CODE_FUTURE_MARKER=") == NULL);
     return failures;
 }
 #endif
@@ -6131,7 +6134,12 @@ static bool gpt_dispatch_run(const char *engine, char *calls_txt, size_t cap,
         return false;
     }
     char cmd[4096];
+    /* Hermetic: the auth and provider variables that a CLI child keeps by
+     * design are unset for this run only, through env -u, so the child's
+     * CLAUDE_CODE_ absence does not depend on the developer's shell. */
     (void)snprintf(cmd, sizeof(cmd),
+        "env -u CLAUDE_CODE_OAUTH_TOKEN -u CLAUDE_CODE_USE_BEDROCK "
+        "-u CLAUDE_CODE_USE_VERTEX "
         "CLAUDE_CODE_SESSION_ID=s1 CLAUDE_CODE_ENTRYPOINT=cli CLAUDECODE=1 "
         "CLAUDE_PID=7 CLAUDE_EFFORT=high CODEX_HOME=/keep/codex "
         "PATH=%s:$PATH %s --engine %s --task %s --no-group "
