@@ -2424,7 +2424,6 @@ tests/harness/src/test_telemetry_rollup.c:check_registries_agree:19
 tests/harness/src/test_telemetry_storage.c:check_meaning_rows:17
 tests/harness/src/test_telemetry_storage.c:exec_leaf:20
 tests/harness/src/test_telemetry_sync.c:check_table_is_annotated:23
-tests/harness/src/test_telemetry_wallet.c:check_leaf:21
 tests/harness/src/test_telemetry_zcode.c:check_summary_leaf_answers:25
 tests/harness/src/test_terminal_worker_sandbox.c:test_terminal_worker_sandbox_platform_arm#2:41
 tests/harness/src/test_territory.c:test_territory:32

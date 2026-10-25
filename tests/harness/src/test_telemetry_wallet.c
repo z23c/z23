@@ -66,7 +66,7 @@
     do { \
         printf("%s... ", (name)); \
         if (cond) { printf("OK\n"); } \
-        else { printf("FAIL (%s)\n", #cond); failures++; } \
+        else { printf("FAIL (%s)\n", #cond); } \
     } while (0)
 
 static const struct json_value *dig2(const struct json_value *o,
@@ -355,6 +355,51 @@ static bool exec_leaf(const struct zcl_command_registry *reg,
     return n > 0;
 }
 
+/* A leaf is only testable when the registry presents it as READY with a
+ * handler behind it; everything after the first check in check_leaf would
+ * merely cascade from one that is not. */
+static bool leaf_is_ready_and_bound(const struct zcl_command_spec *spec)
+{
+    return spec != NULL && spec->availability == ZCL_COMMAND_READY &&
+           spec->handler != NULL;
+}
+
+/* ok:true with a status of "passed" — the pair of facts that separates a real
+ * reply from the registry's perfectly non-empty error envelope. */
+static bool reply_reports_ok_passed(const struct json_value *root)
+{
+    return json_get_bool(json_get(root, "ok")) &&
+           json_get_str(json_get(root, "status")) != NULL &&
+           strcmp(json_get_str(json_get(root, "status")), "passed") == 0;
+}
+
+/* The reply carries the rendered telemetry document — values, completeness
+ * and health — rather than that error envelope. */
+static bool reply_carries_telemetry_document(const struct json_value *data)
+{
+    return data != NULL && data->type == JSON_OBJ &&
+           json_get(data, "values") != NULL &&
+           json_get(data, "completeness") != NULL &&
+           json_get(data, "health") != NULL;
+}
+
+/* Count next[] entries that name the command in flight; check_leaf asserts
+ * the total is zero (see the Trap 1 comment there). */
+static int count_self_references_in_next(const struct json_value *root,
+                                         const char *path)
+{
+    const struct json_value *next = json_get(root, "next");
+    int self_ref = 0;
+    if (next && next->type == JSON_ARR)
+        for (size_t i = 0; i < next->num_children; i++) {
+            const char *cmd = json_get_str(json_get(json_at(next, i),
+                                                    "command"));
+            if (cmd && strcmp(cmd, path) == 0)
+                self_ref++;
+        }
+    return self_ref;
+}
+
 /* One leaf, one view. Asserts ok:true — never merely "non-empty", because the
  * registry's failure envelope is a perfectly non-empty document and a next[]
  * entry pointing at its own command produces one while reporting itself as a
@@ -369,11 +414,9 @@ static int check_leaf(const struct zcl_command_registry *reg, const char *path,
 
     snprintf(label, sizeof label, "[wallet] %s is READY and natively bound",
              path);
-    TW_CHECK(label, spec != NULL &&
-                        spec->availability == ZCL_COMMAND_READY &&
-                        spec->handler != NULL);
-    if (!spec || spec->availability != ZCL_COMMAND_READY ||
-        !spec->handler)
+    bool ready = leaf_is_ready_and_bound(spec);
+    TW_CHECK(label, ready);
+    if (!ready)
         return failures;
 
     /* The LIST budget the leaf declares, plus one byte so an over-long reply
@@ -405,18 +448,12 @@ static int check_leaf(const struct zcl_command_registry *reg, const char *path,
 
     snprintf(label, sizeof label, "[wallet] %s --view=%s returns ok:true and "
              "status passed", path, view);
-    TW_CHECK(label, json_get_bool(json_get(&root, "ok")) &&
-                        json_get_str(json_get(&root, "status")) != NULL &&
-                        strcmp(json_get_str(json_get(&root, "status")),
-                               "passed") == 0);
+    TW_CHECK(label, reply_reports_ok_passed(&root));
 
     const struct json_value *data = json_get(&root, "data");
     snprintf(label, sizeof label, "[wallet] %s --view=%s carries the rendered "
              "telemetry document, not an error envelope", path, view);
-    TW_CHECK(label, data != NULL && data->type == JSON_OBJ &&
-                        json_get(data, "values") != NULL &&
-                        json_get(data, "completeness") != NULL &&
-                        json_get(data, "health") != NULL);
+    TW_CHECK(label, reply_carries_telemetry_document(data));
 
     snprintf(label, sizeof label, "[wallet] %s --view=%s renders the %s group",
              path, view, expect_group);
@@ -432,18 +469,9 @@ static int check_leaf(const struct zcl_command_registry *reg, const char *path,
      * push_next_array reject the WHOLE reply. It cannot be caught downstream —
      * by then the document is empty and the CLI blames the budget — so it is
      * asserted here on the reply that did survive. */
-    const struct json_value *next = json_get(&root, "next");
-    int self_ref = 0;
-    if (next && next->type == JSON_ARR)
-        for (size_t i = 0; i < next->num_children; i++) {
-            const char *cmd = json_get_str(json_get(json_at(next, i),
-                                                    "command"));
-            if (cmd && strcmp(cmd, path) == 0)
-                self_ref++;
-        }
     snprintf(label, sizeof label, "[wallet] %s never points next[] at itself",
              path);
-    TW_CHECK(label, self_ref == 0);
+    TW_CHECK(label, count_self_references_in_next(&root, path) == 0);
 
     json_free(&root);
     return failures;
