@@ -30,68 +30,94 @@
 
 /* ── status vocabulary ──────────────────────────────────────────────── */
 
+static const struct {
+    const char *code;
+    const char *message;
+} store_buyer_status_names[] = {
+    [STORE_BUYER_OK] = {
+        "OK",
+        "ok",
+    },
+    [STORE_BUYER_ERR_ARGS] = {
+        "INVALID_ARGS",
+        "the request is missing a required value or one is out of range",
+    },
+    [STORE_BUYER_ERR_MAINNET_REFUSED] = {
+        "MAINNET_REFUSED",
+        "scripted store payments are refused on mainnet; "
+            "run this on regtest or testnet",
+    },
+    [STORE_BUYER_ERR_DB] = {
+        "NODE_DB_UNAVAILABLE",
+        "the node database is not open",
+    },
+    [STORE_BUYER_ERR_UNKNOWN_PRODUCT] = {
+        "UNKNOWN_PRODUCT",
+        "no active product with that id",
+    },
+    [STORE_BUYER_ERR_ORDER_CREATE_FAILED] = {
+        "ORDER_CREATE_FAILED",
+        "the store refused to create the order",
+    },
+    [STORE_BUYER_ERR_UNKNOWN_PURCHASE] = {
+        "UNKNOWN_PURCHASE",
+        "no purchase with that id",
+    },
+    [STORE_BUYER_ERR_ALREADY_PAID] = {
+        "ALREADY_PAID",
+        "a payment for this purchase was already submitted",
+    },
+    [STORE_BUYER_ERR_PROVER_UNAVAILABLE] = {
+        "PROVER_UNAVAILABLE",
+        "this build has no Sapling proving backend, so it cannot "
+            "send a shielded payment",
+    },
+    [STORE_BUYER_ERR_SPEND_REFUSED] = {
+        "SPEND_REFUSED",
+        "the node refuses to spend from this tip",
+    },
+    [STORE_BUYER_ERR_INSUFFICIENT_FUNDS] = {
+        "INSUFFICIENT_FUNDS",
+        "the wallet cannot cover the order amount",
+    },
+    [STORE_BUYER_ERR_PAYMENT_NOT_CONFIRMED] = {
+        "PAYMENT_NOT_CONFIRMED",
+        "the merchant has not credited this order yet",
+    },
+    [STORE_BUYER_ERR_DELIVERY_FAILED] = {
+        "DELIVERY_FAILED",
+        "the store did not return the purchased bytes",
+    },
+    [STORE_BUYER_ERR_HASH_MISMATCH] = {
+        "HASH_MISMATCH",
+        "the delivered bytes do not match the product content hash; "
+            "nothing was written",
+    },
+    [STORE_BUYER_ERR_WRITE_FAILED] = {
+        "WRITE_FAILED",
+        "the verified bytes could not be written to the output path",
+    },
+    [STORE_BUYER_ERR_INTERNAL] = {
+        "INTERNAL",
+        "the node ran out of working memory for this purchase step",
+    },
+};
+
 const char *store_buyer_status_code(int code)
 {
-    switch ((enum store_buyer_status)code) {
-    case STORE_BUYER_OK:                    return "OK";
-    case STORE_BUYER_ERR_ARGS:              return "INVALID_ARGS";
-    case STORE_BUYER_ERR_MAINNET_REFUSED:   return "MAINNET_REFUSED";
-    case STORE_BUYER_ERR_DB:                return "NODE_DB_UNAVAILABLE";
-    case STORE_BUYER_ERR_UNKNOWN_PRODUCT:   return "UNKNOWN_PRODUCT";
-    case STORE_BUYER_ERR_ORDER_CREATE_FAILED: return "ORDER_CREATE_FAILED";
-    case STORE_BUYER_ERR_UNKNOWN_PURCHASE:  return "UNKNOWN_PURCHASE";
-    case STORE_BUYER_ERR_ALREADY_PAID:      return "ALREADY_PAID";
-    case STORE_BUYER_ERR_PROVER_UNAVAILABLE: return "PROVER_UNAVAILABLE";
-    case STORE_BUYER_ERR_SPEND_REFUSED:     return "SPEND_REFUSED";
-    case STORE_BUYER_ERR_INSUFFICIENT_FUNDS: return "INSUFFICIENT_FUNDS";
-    case STORE_BUYER_ERR_PAYMENT_NOT_CONFIRMED: return "PAYMENT_NOT_CONFIRMED";
-    case STORE_BUYER_ERR_DELIVERY_FAILED:   return "DELIVERY_FAILED";
-    case STORE_BUYER_ERR_HASH_MISMATCH:     return "HASH_MISMATCH";
-    case STORE_BUYER_ERR_WRITE_FAILED:      return "WRITE_FAILED";
-    case STORE_BUYER_ERR_INTERNAL:          return "INTERNAL";
-    }
+    unsigned index = (unsigned)code;
+    if (index < sizeof(store_buyer_status_names) / sizeof(store_buyer_status_names[0]) &&
+        store_buyer_status_names[index].code)
+        return store_buyer_status_names[index].code;
     return "UNKNOWN";
 }
 
 const char *store_buyer_status_message(int code)
 {
-    switch ((enum store_buyer_status)code) {
-    case STORE_BUYER_OK:
-        return "ok";
-    case STORE_BUYER_ERR_ARGS:
-        return "the request is missing a required value or one is out of range";
-    case STORE_BUYER_ERR_MAINNET_REFUSED:
-        return "scripted store payments are refused on mainnet; "
-               "run this on regtest or testnet";
-    case STORE_BUYER_ERR_DB:
-        return "the node database is not open";
-    case STORE_BUYER_ERR_UNKNOWN_PRODUCT:
-        return "no active product with that id";
-    case STORE_BUYER_ERR_ORDER_CREATE_FAILED:
-        return "the store refused to create the order";
-    case STORE_BUYER_ERR_UNKNOWN_PURCHASE:
-        return "no purchase with that id";
-    case STORE_BUYER_ERR_ALREADY_PAID:
-        return "a payment for this purchase was already submitted";
-    case STORE_BUYER_ERR_PROVER_UNAVAILABLE:
-        return "this build has no Sapling proving backend, so it cannot "
-               "send a shielded payment";
-    case STORE_BUYER_ERR_SPEND_REFUSED:
-        return "the node refuses to spend from this tip";
-    case STORE_BUYER_ERR_INSUFFICIENT_FUNDS:
-        return "the wallet cannot cover the order amount";
-    case STORE_BUYER_ERR_PAYMENT_NOT_CONFIRMED:
-        return "the merchant has not credited this order yet";
-    case STORE_BUYER_ERR_DELIVERY_FAILED:
-        return "the store did not return the purchased bytes";
-    case STORE_BUYER_ERR_HASH_MISMATCH:
-        return "the delivered bytes do not match the product content hash; "
-               "nothing was written";
-    case STORE_BUYER_ERR_WRITE_FAILED:
-        return "the verified bytes could not be written to the output path";
-    case STORE_BUYER_ERR_INTERNAL:
-        return "the node ran out of working memory for this purchase step";
-    }
+    unsigned index = (unsigned)code;
+    if (index < sizeof(store_buyer_status_names) / sizeof(store_buyer_status_names[0]) &&
+        store_buyer_status_names[index].message)
+        return store_buyer_status_names[index].message;
     return "unknown store buyer status";
 }
 
