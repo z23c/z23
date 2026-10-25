@@ -268,6 +268,49 @@ static bool fetch_resource(struct acme_session *s, const char *url,
     return true;
 }
 
+/* Poll one authorization until it is valid, the CA names a terminal status,
+ * or the attempt budget runs out. `ok` false means the challenge was never
+ * accepted, so the loop does not run. The caller still clears the handoff. */
+static bool poll_authorization_status(struct acme_session *s,
+                                      const char *authz_url,
+                                      const char *identifier, bool ok)
+{
+    for (int i = 0; ok && i < s->poll_attempts; i++) {
+        platform_sleep_ms(s->poll_interval_ms);
+        struct tls_client_response check = {0};
+        if (!fetch_resource(s, authz_url, &check)) {
+            ok = false;
+            break;
+        }
+        char ident2[ACME_MAX_DOMAIN + 1];
+        char status2[ACME_MAX_STATUS];
+        struct acme_challenge ch2 = {0};
+        const bool reparsed = acme_authorization_parse(check.body, check.body_len,
+                                                       ident2, sizeof(ident2),
+                                                       status2, sizeof(status2),
+                                                       &ch2);
+        tls_client_response_free(&check);
+        if (!reparsed) {
+            ok = false;
+            break;
+        }
+        if (strcmp(status2, "valid") == 0)
+            break;
+        if (strcmp(status2, "pending") != 0 && strcmp(status2, "processing") != 0) {
+            LOG_WARN("acme", "authorization for %s ended in status \"%s\"",
+                     identifier, status2);
+            ok = false;
+            break;
+        }
+        if (i + 1 == s->poll_attempts) {
+            LOG_WARN("acme", "authorization for %s never left \"%s\"", identifier,
+                     status2);
+            ok = false;
+        }
+    }
+    return ok;
+}
+
 static bool answer_authorization(struct acme_session *s, const char *authz_url,
                                  const uint8_t thumbprint[32])
 {
@@ -307,49 +350,19 @@ static bool answer_authorization(struct acme_session *s, const char *authz_url,
         tls_client_response_free(&poke);
     }
 
-    for (int i = 0; ok && i < s->poll_attempts; i++) {
-        platform_sleep_ms(s->poll_interval_ms);
-        struct tls_client_response check = {0};
-        if (!fetch_resource(s, authz_url, &check)) {
-            ok = false;
-            break;
-        }
-        char ident2[ACME_MAX_DOMAIN + 1];
-        char status2[ACME_MAX_STATUS];
-        struct acme_challenge ch2 = {0};
-        const bool reparsed = acme_authorization_parse(check.body, check.body_len,
-                                                       ident2, sizeof(ident2),
-                                                       status2, sizeof(status2),
-                                                       &ch2);
-        tls_client_response_free(&check);
-        if (!reparsed) {
-            ok = false;
-            break;
-        }
-        if (strcmp(status2, "valid") == 0)
-            break;
-        if (strcmp(status2, "pending") != 0 && strcmp(status2, "processing") != 0) {
-            LOG_WARN("acme", "authorization for %s ended in status \"%s\"",
-                     identifier, status2);
-            ok = false;
-            break;
-        }
-        if (i + 1 == s->poll_attempts) {
-            LOG_WARN("acme", "authorization for %s never left \"%s\"", identifier,
-                     status2);
-            ok = false;
-        }
-    }
-
+    ok = poll_authorization_status(s, authz_url, identifier, ok);
     (void)acme_arm_file_clear(s->cfg->handoff_path);
     if (!ok)
         LOG_FAIL("acme", "the CA did not validate %s over tls-alpn-01", identifier);
     return true;
 }
 
-static bool finalize_order(struct acme_session *s, const struct acme_order *order,
-                           const char *order_url, const EVP_PKEY *cert_key,
-                           char *certificate_url, size_t certificate_url_len)
+/* Build the finalize body. A CSR failure is the callee's own refusal and
+ * returns false with nothing allocated. A payload failure frees what this
+ * function allocated and logs. */
+static bool build_finalize_csr_payload(struct acme_session *s,
+                                       const EVP_PKEY *cert_key,
+                                       char **payload_out)
 {
     uint8_t *der = NULL;
     size_t der_len = 0;
@@ -371,19 +384,32 @@ static bool finalize_order(struct acme_session *s, const struct acme_order *orde
         free(payload);
         LOG_FAIL("acme", "cannot build the finalize request for %s", s->cfg->domain);
     }
+    *payload_out = payload;
+    return true;
+}
 
+/* `payload` is freed here on every path, including a failed POST. */
+static bool post_finalize_csr(struct acme_session *s, const char *finalize_url,
+                              char *payload)
+{
     struct tls_client_response resp = {0};
-    const bool sent = post(s, order->finalize, payload, &resp);
+    const bool sent = post(s, finalize_url, payload, &resp);
     free(payload);
     if (!sent)
         return false;
-    ok = resp.status == 200 || resp.status == 202;
+    const bool ok = resp.status == 200 || resp.status == 202;
     if (!ok)
         log_problem("finalize", &resp);
     tls_client_response_free(&resp);
     if (!ok)
         LOG_FAIL("acme", "the CA refused the CSR for %s", s->cfg->domain);
+    return true;
+}
 
+static bool poll_order_certificate(struct acme_session *s, const char *order_url,
+                                   char *certificate_url,
+                                   size_t certificate_url_len)
+{
     certificate_url[0] = '\0';
     for (int i = 0; i < s->poll_attempts; i++) {
         struct tls_client_response check = {0};
@@ -408,6 +434,19 @@ static bool finalize_order(struct acme_session *s, const struct acme_order *orde
         platform_sleep_ms(s->poll_interval_ms);
     }
     LOG_FAIL("acme", "the order for %s never became valid", s->cfg->domain);
+}
+
+static bool finalize_order(struct acme_session *s, const struct acme_order *order,
+                           const char *order_url, const EVP_PKEY *cert_key,
+                           char *certificate_url, size_t certificate_url_len)
+{
+    char *payload = NULL;
+    if (!build_finalize_csr_payload(s, cert_key, &payload))
+        return false;
+    if (!post_finalize_csr(s, order->finalize, payload))
+        return false;
+    return poll_order_certificate(s, order_url, certificate_url,
+                                  certificate_url_len);
 }
 
 /* Write one file atomically at `mode`. Both outputs of an issuance land this
@@ -526,21 +565,37 @@ static bool issued_pair_is_servable(const char *cert_path, const char *key_path)
 }
 
 
-bool acme_client_obtain(const struct acme_client_config *cfg)
+static bool domain_is_issuable(const struct acme_client_config *cfg)
 {
-    if (!cfg)
-        LOG_FAIL("acme", "cannot run an order without a configuration");
     if (!cfg->domain || !cfg->domain[0])
         LOG_FAIL("acme", "cannot run an order without a domain");
     if (strlen(cfg->domain) > ACME_MAX_DOMAIN ||
         !acme_domain_is_ldh(cfg->domain) || strchr(cfg->domain, '*'))
         LOG_FAIL("acme", "refusing a non-canonical TLS-ALPN-01 domain: %s",
                  cfg->domain);
+    return true;
+}
+
+static bool issuance_paths_present(const struct acme_client_config *cfg)
+{
     if (!cfg->account_key_path || !cfg->cert_path || !cfg->cert_key_path ||
         !cfg->handoff_path || !cfg->handoff_path[0])
         LOG_FAIL("acme",
                  "cannot run an order without paths for the account key, the "
                  "certificate, its key, and the challenge handoff the node reads");
+    return true;
+}
+
+/* Preconditions that refuse before any session exists. Each refusal returns
+ * from here, so the caller does not reach the cleanup label. */
+static bool order_config_accepted(const struct acme_client_config *cfg)
+{
+    if (!cfg)
+        LOG_FAIL("acme", "cannot run an order without a configuration");
+    if (!domain_is_issuable(cfg))
+        return false;
+    if (!issuance_paths_present(cfg))
+        return false;
     if (!cfg->agree_terms_of_service)
         LOG_FAIL("acme",
                  "refusing to create an ACME account: RFC 8555 requires agreeing "
@@ -549,8 +604,13 @@ bool acme_client_obtain(const struct acme_client_config *cfg)
         LOG_FAIL("acme",
                  "no CA trust store on this host; the certificate authority's own "
                  "identity could not be checked");
+    return true;
+}
 
-    struct acme_session s = {
+static void session_from_config(struct acme_session *s,
+                                const struct acme_client_config *cfg)
+{
+    *s = (struct acme_session){
         .cfg = cfg,
         .timeout_ms = cfg->timeout_ms > 0 ? cfg->timeout_ms : ACME_DEFAULT_TIMEOUT_MS,
         .poll_attempts = cfg->poll_attempts > 0 ? cfg->poll_attempts
@@ -558,10 +618,72 @@ bool acme_client_obtain(const struct acme_client_config *cfg)
         .poll_interval_ms = cfg->poll_interval_ms > 0 ? cfg->poll_interval_ms
                                                       : ACME_DEFAULT_POLL_INTERVAL_MS,
     };
-    s.account_key = acme_account_key_load_or_create(cfg->account_key_path);
-    if (!s.account_key)
+}
+
+static bool open_session_account_key(struct acme_session *s)
+{
+    s->account_key = acme_account_key_load_or_create(s->cfg->account_key_path);
+    if (!s->account_key)
         LOG_FAIL("acme", "cannot open the ACME account key at %s",
-                 cfg->account_key_path);
+                 s->cfg->account_key_path);
+    return true;
+}
+
+/* Directory through answered authorizations. Failure returns false and
+ * leaves cleanup to the caller, which still holds the account key. */
+static bool authorize_order(struct acme_session *s, struct acme_order *order,
+                            char *order_url, size_t order_url_len,
+                            uint8_t thumbprint[32])
+{
+    if (!acme_jwk_thumbprint(s->account_key, thumbprint))
+        return false;
+    if (!fetch_directory(s))
+        return false;
+    if (!refresh_nonce(s))
+        return false;
+    if (!register_account(s))
+        return false;
+    if (!create_order(s, order, order_url, order_url_len))
+        return false;
+    for (size_t i = 0; i < order->num_authorizations; i++) {
+        if (!answer_authorization(s, order->authorizations[i], thumbprint))
+            return false;
+    }
+    return true;
+}
+
+static bool write_issued_chain(struct acme_session *s, EVP_PKEY *cert_key,
+                               const char *certificate_url,
+                               const struct acme_client_config *cfg)
+{
+    struct tls_client_response chain = {0};
+    if (!fetch_resource(s, certificate_url, &chain))
+        return false;
+    size_t count = 0;
+    const bool wellformed =
+        acme_chain_is_wellformed(chain.body, chain.body_len, &count);
+    /* Key first, then chain: a reader that sees the new chain must never
+     * find the old key beside it. */
+    const bool stored =
+        wellformed && write_key_pem(cert_key, cfg->cert_key_path) &&
+        write_private(cfg->cert_path, chain.body, chain.body_len, false) &&
+        issued_pair_is_servable(cfg->cert_path, cfg->cert_key_path);
+    if (stored)
+        LOG_INFO("acme", "issued a %zu-certificate chain for %s", count,
+                 cfg->domain);
+    tls_client_response_free(&chain);
+    return stored;
+}
+
+bool acme_client_obtain(const struct acme_client_config *cfg)
+{
+    if (!order_config_accepted(cfg))
+        return false;
+
+    struct acme_session s;
+    session_from_config(&s, cfg);
+    if (!open_session_account_key(&s))
+        return false;
 
     uint8_t thumbprint[32];
     EVP_PKEY *cert_key = NULL;
@@ -570,21 +692,8 @@ bool acme_client_obtain(const struct acme_client_config *cfg)
     struct acme_order order = {0};
     bool ok = false;
 
-    if (!acme_jwk_thumbprint(s.account_key, thumbprint))
+    if (!authorize_order(&s, &order, order_url, sizeof(order_url), thumbprint))
         goto done;
-    if (!fetch_directory(&s))
-        goto done;
-    if (!refresh_nonce(&s))
-        goto done;
-    if (!register_account(&s))
-        goto done;
-    if (!create_order(&s, &order, order_url, sizeof(order_url)))
-        goto done;
-
-    for (size_t i = 0; i < order.num_authorizations; i++) {
-        if (!answer_authorization(&s, order.authorizations[i], thumbprint))
-            goto done;
-    }
 
     cert_key = EVP_EC_gen("P-256");
     if (!cert_key) {
@@ -594,24 +703,7 @@ bool acme_client_obtain(const struct acme_client_config *cfg)
     if (!finalize_order(&s, &order, order_url, cert_key, certificate_url,
                         sizeof(certificate_url)))
         goto done;
-
-    {
-        struct tls_client_response chain = {0};
-        if (!fetch_resource(&s, certificate_url, &chain))
-            goto done;
-        size_t count = 0;
-        const bool wellformed =
-            acme_chain_is_wellformed(chain.body, chain.body_len, &count);
-        /* Key first, then chain: a reader that sees the new chain must never
-         * find the old key beside it. */
-        ok = wellformed && write_key_pem(cert_key, cfg->cert_key_path) &&
-             write_private(cfg->cert_path, chain.body, chain.body_len, false) &&
-             issued_pair_is_servable(cfg->cert_path, cfg->cert_key_path);
-        if (ok)
-            LOG_INFO("acme", "issued a %zu-certificate chain for %s", count,
-                     cfg->domain);
-        tls_client_response_free(&chain);
-    }
+    ok = write_issued_chain(&s, cert_key, certificate_url, cfg);
 
 done:
     (void)acme_arm_file_clear(cfg->handoff_path);
