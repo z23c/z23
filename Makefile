@@ -8945,28 +8945,18 @@ $(P2_INVARIANT_CHECK_BIN): tools/p2_invariant_check.c vendor/include/sqlite3.h v
 SQLQ_BIN = $(BIN_DIR)/sqlq
 .PHONY: sqlq
 sqlq: $(SQLQ_BIN)
-$(SQLQ_BIN): tools/sqlq.c tools/sqlq_standalone.c tools/multicall.h vendor/include/sqlite3.h vendor/lib/libsqlite3.a
+$(SQLQ_BIN): $(Z23_BIN)
 	@mkdir -p $(dir $@)
-	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) -Ivendor/include \
-	    -o $@ tools/sqlq.c tools/sqlq_standalone.c \
-	    -Lvendor/lib vendor/lib/libsqlite3.a -lpthread -ldl -lm
+	ln -sf $(notdir $(Z23_BIN)) $@
 
 # Nested JSON path query for operator scripts. Python is banned; grep/sed
 # covers flat RPC fields, and this C23 walker covers nested envelopes.
 JSONQ_BIN = $(BIN_DIR)/jsonq
 .PHONY: jsonq
 jsonq: $(JSONQ_BIN)
-$(JSONQ_BIN): tools/jsonq.c tools/jsonq_standalone.c tools/multicall.h \
-    contexts/commons/packages/zjsonp/src/zjsonp.c contexts/commons/packages/zutf8/src/zutf8.c \
-    contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h \
-    contexts/commons/packages/zutf8/include/zutf8/zutf8.h
+$(JSONQ_BIN): $(Z23_BIN)
 	@mkdir -p $(dir $@)
-	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
-	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
-	    -Icontexts/commons/packages/zjsonp/include -Icontexts/commons/packages/zutf8/include \
-	    -o $@ tools/jsonq.c tools/jsonq_standalone.c contexts/commons/packages/zjsonp/src/zjsonp.c \
-	    contexts/commons/packages/zutf8/src/zutf8.c
+	ln -sf $(notdir $(Z23_BIN)) $@
 
 # PreToolUse hook for Claude Code: refuses the never-do list (datadirs,
 # reindex flag, Python, git identity, spend/key export, host config, git

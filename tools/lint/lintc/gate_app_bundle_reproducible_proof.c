@@ -26,7 +26,8 @@ int abr_compile_subject(const char *out)
         (char *)"-D_DARWIN_C_SOURCE", (char *)"-fblocks",
         (char *)"-Icontexts/commons/packages/zjsonp/include",
         (char *)"-Icontexts/commons/packages/zutf8/include", (char *)"-o", (char *)out,
-        (char *)"tools/jsonq.c", (char *)"contexts/commons/packages/zjsonp/src/zjsonp.c",
+        (char *)"tools/jsonq.c", (char *)"tools/jsonq_standalone.c",
+        (char *)"contexts/commons/packages/zjsonp/src/zjsonp.c",
         (char *)"contexts/commons/packages/zutf8/src/zutf8.c", NULL
     };
     int code, rc = abr_exec(argv, LCP_PASS, NULL, NULL, &code);

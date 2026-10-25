@@ -16,6 +16,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include "test/jsonq_fixture_adapter.h"
 
@@ -152,6 +155,45 @@ static int test_jsonq_unwrap(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+/* One walker, three spellings: a link named jsonq in a temp dir (argv0
+ * dispatch in z23), the build/bin/jsonq link, and `z23 jsonq` (argv+1).
+ * All three must print the same direct-member count. */
+static int test_jsonq_multicall_names(void)
+{
+    int failures = 0;
+    char dir[4096], cwd[PATH_MAX], target[PATH_MAX + 32], alias[4608];
+    char buf[512] = {0};
+    const char *doc = "{\"a\":1,\"b\":{\"x\":1,\"y\":2},\"c\":[1,2]}";
+    test_make_tmpdir(dir, sizeof(dir), "jsonq", "alias");
+    TEST("jsonq: argv0 link and z23 jsonq run the same walker") {
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        ASSERT(snprintf(target, sizeof(target), "%s/build/bin/z23", cwd) > 0);
+        ASSERT(snprintf(alias, sizeof(alias), "%s/jsonq", dir) > 0);
+        ASSERT(symlink(target, alias) == 0);
+        ASSERT(jsonq_fixture_run_as(alias, doc,
+                   (const char *const[]){alias, "count", "", NULL},
+                   buf, sizeof(buf)) == 0);
+        ASSERT(strcmp(buf, "3" JSONQ_FIXTURE_EOL) == 0);
+        ASSERT(jsonq_fixture_run_as(JSONQ_FIXTURE_BIN, doc,
+                   (const char *const[]){JSONQ_FIXTURE_BIN, "count", "", NULL},
+                   buf, sizeof(buf)) == 0);
+        ASSERT(strcmp(buf, "3" JSONQ_FIXTURE_EOL) == 0);
+        ASSERT(jsonq_fixture_run_as("build/bin/z23", doc,
+                   (const char *const[]){"build/bin/z23", "jsonq", "count", "", NULL},
+                   buf, sizeof(buf)) == 0);
+        ASSERT(strcmp(buf, "3" JSONQ_FIXTURE_EOL) == 0);
+        /* A malformed document keeps exit 2 through the subcommand. */
+        ASSERT(jsonq_fixture_run_as("build/bin/z23", "{not json}",
+                   (const char *const[]){"build/bin/z23", "jsonq", "get", "a", NULL},
+                   buf, sizeof(buf)) == 2);
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+#endif
+
 int test_jsonq(void)
 {
     int failures = 0;
@@ -170,5 +212,8 @@ int test_jsonq(void)
     failures += test_jsonq_key_count();
     failures += test_jsonq_scalar_paths();
     failures += test_jsonq_unwrap();
+#if !defined(_WIN32)
+    failures += test_jsonq_multicall_names();
+#endif
     return failures;
 }

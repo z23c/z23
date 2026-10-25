@@ -16,11 +16,14 @@
 /* argv is a compile-time fixture vector, including argv[0] and terminator.
  * At most four non-NULL arguments (jsonq eq PATH VALUE). Empty path remains
  * an actual empty argv element. Document bytes never enter argv or a shell. */
-static int jsonq_fixture_run(const char *document, const char *const argv[],
-                             char *out, size_t out_size)
+/* bin is the executable path, which argv[0] must name exactly. The alias
+ * tests pass a link path (build/bin/jsonq or a temp-dir link to z23). */
+static int jsonq_fixture_run_as(const char *bin, const char *document,
+                                const char *const argv[], char *out,
+                                size_t out_size)
 {
-    if (!document || !argv || !argv[0] || !out || out_size == 0 ||
-        strcmp(argv[0], JSONQ_FIXTURE_BIN) != 0) return -1;
+    if (!bin || !document || !argv || !argv[0] || !out || out_size == 0 ||
+        strcmp(argv[0], bin) != 0) return -1;
     size_t count = 0;
     while (count < 5u && argv[count]) count++;
     if (count < 2u || count > 4u) return -1;
@@ -41,7 +44,7 @@ static int jsonq_fixture_run(const char *document, const char *const argv[],
     char search_path[8192];
     const char *root = getenv("SystemRoot"), *path = getenv("PATH");
     if (!root || !path || !getcwd(cwd, sizeof(cwd))) goto cleanup;
-    n = snprintf(image, sizeof(image), "%s/%s", cwd, JSONQ_FIXTURE_BIN);
+    n = snprintf(image, sizeof(image), "%s/%s", cwd, bin);
     if (n <= 0 || (size_t)n >= sizeof(image)) goto cleanup;
     n = snprintf(system_root, sizeof(system_root), "SystemRoot=%s", root);
     if (n <= 0 || (size_t)n >= sizeof(system_root)) goto cleanup;
@@ -67,6 +70,13 @@ static int jsonq_fixture_run(const char *document, const char *const argv[],
 cleanup:
     if (test_rm_rf_recursive(dir) != 0) result = -1;
     return result;
+}
+
+static int jsonq_fixture_run(const char *document, const char *const argv[],
+                             char *out, size_t out_size)
+{
+    return jsonq_fixture_run_as(JSONQ_FIXTURE_BIN, document, argv, out,
+                                out_size);
 }
 
 /* Exact CLI examples for conversion of original tests (no newline stripping):

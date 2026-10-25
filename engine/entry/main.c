@@ -348,23 +348,47 @@ static bool main_dispatch_priority_modes(int argc, char **argv, int *rc)
     return false;
 }
 
-/* `z23 jsonq ...` and `z23 sqlq ...`: the same in-process tools as the
- * standalone build/bin/jsonq and build/bin/sqlq. The tool word is argv[1];
- * the tool gets argv+1, so its argv[0] is its own name and its usage and
- * error text match the standalone binary byte for byte. */
+/* Tool name when `word` is a jsonq or sqlq path (its basename), else NULL.
+ * build/bin/jsonq and build/bin/sqlq are links to z23, so argv[0] names the
+ * tool. */
+static const char *main_multicall_argv0_tool(const char *word)
+{
+    if (!word)
+        return NULL;
+    const char *slash = strrchr(word, '/');
+    const char *name = slash ? slash + 1 : word;
+    if (strcmp(name, "jsonq") == 0)
+        return "jsonq";
+    if (strcmp(name, "sqlq") == 0)
+        return "sqlq";
+    return NULL;
+}
+
+static int main_run_multicall_tool(const char *tool, int argc, char **argv)
+{
+    return strcmp(tool, "jsonq") == 0 ? jsonq_main(argc, argv)
+                                      : sqlq_main(argc, argv);
+}
+
+/* Two spellings reach the same in-process tools: an argv0 link named jsonq
+ * or sqlq (the tool gets argv as-is), and `z23 jsonq ...` / `z23 sqlq ...`
+ * (the tool gets argv+1). Either way its usage and error text match the
+ * standalone binary byte for byte. */
 static bool main_dispatch_multicall(int argc, char **argv, int *rc)
 {
+    if (argc < 1 || !argv)
+        return false;
+    const char *tool = main_multicall_argv0_tool(argv[0]);
+    if (tool) {
+        *rc = main_run_multicall_tool(tool, argc, argv);
+        return true;
+    }
     if (argc < 2)
         return false;
-    if (strcmp(argv[1], "jsonq") == 0) {
-        *rc = jsonq_main(argc - 1, argv + 1);
-        return true;
-    }
-    if (strcmp(argv[1], "sqlq") == 0) {
-        *rc = sqlq_main(argc - 1, argv + 1);
-        return true;
-    }
-    return false;
+    if (strcmp(argv[1], "jsonq") != 0 && strcmp(argv[1], "sqlq") != 0)
+        return false;
+    *rc = main_run_multicall_tool(argv[1], argc - 1, argv + 1);
+    return true;
 }
 
 static bool main_dispatch_snapshot_and_cli_modes(int argc, char **argv,

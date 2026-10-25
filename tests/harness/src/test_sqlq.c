@@ -18,6 +18,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #if defined(_WIN32)
 #define SQLQ_BIN "build/bin/sqlq.exe"
@@ -116,6 +119,38 @@ static int test_sqlq_refusals(void)
     return failures;
 }
 
+#if !defined(_WIN32)
+/* One query, two spellings past the link: a link named sqlq in a temp dir
+ * (argv0 dispatch in z23) and `z23 sqlq` (argv+1). Both must print the
+ * same rows as the standalone binary. */
+static int test_sqlq_multicall_names(void)
+{
+    int failures = 0;
+    char dir[4096], db[4608], cwd[PATH_MAX], target[PATH_MAX + 32];
+    char alias[4608], buf[1024] = {0};
+    const char *sql = "SELECT id, name FROM t ORDER BY id";
+    const char *expect = "1\talpha" SQLQ_EOL "2\tbravo" SQLQ_EOL;
+    test_make_tmpdir(dir, sizeof(dir), "sqlq", "alias");
+    TEST("sqlq: argv0 link and z23 sqlq run the same query") {
+        ASSERT(sqlq_fixture(dir, db, sizeof(db)));
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        ASSERT(snprintf(target, sizeof(target), "%s/build/bin/z23", cwd) > 0);
+        ASSERT(snprintf(alias, sizeof(alias), "%s/sqlq", dir) > 0);
+        ASSERT(symlink(target, alias) == 0);
+        const char *by_link[] = {alias, db, sql, NULL};
+        ASSERT(test_host_tool_capture(by_link, buf, sizeof(buf), 5000) == 0);
+        ASSERT(strcmp(buf, expect) == 0);
+        buf[0] = 0;
+        const char *by_sub[] = {"build/bin/z23", "sqlq", db, sql, NULL};
+        ASSERT(test_host_tool_capture(by_sub, buf, sizeof(buf), 5000) == 0);
+        ASSERT(strcmp(buf, expect) == 0);
+        PASS();
+    } _test_next:;
+    (void)test_rm_rf_recursive(dir);
+    return failures;
+}
+#endif
+
 int test_sqlq(void)
 {
     int failures = 0;
@@ -126,5 +161,8 @@ int test_sqlq(void)
     }
     failures += test_sqlq_rows_and_typing();
     failures += test_sqlq_refusals();
+#if !defined(_WIN32)
+    failures += test_sqlq_multicall_names();
+#endif
     return failures;
 }
