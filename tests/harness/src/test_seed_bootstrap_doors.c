@@ -213,6 +213,19 @@ static int check_onion_seeds(void)
 
 /* ── Half 2: the node's own directory as a bootstrap door ─────────── */
 
+/* 56 base32 chars each. The MEASURED host is deliberately named so it
+ * sorts LAST alphabetically and its last_seen is not the newest: the
+ * ranking assertion below must be provable by the ranking rule and not
+ * satisfiable by an incidental hostname or timestamp order. */
+static const char *const kMeasured =
+    "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.onion";
+static const char *const kHearsay =
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion";
+static const char *const kStale =
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccc.onion";
+static const char *const kSelf =
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd.onion";
+
 /* Insert one peer_directory row directly, so the reader is exercised against
  * the real schema rather than a mock. `source`/`last_success` are what
  * separate a host WE measured from one a stranger merely named. */
@@ -258,22 +271,40 @@ static bool door_insert_row(sqlite3 *db, const char *host, int port,
     return ok;
 }
 
+/* Insert the scenario's directory rows — everything learn() above could not
+ * create — and report whether all of them landed. */
+static bool door_insert_scenario_rows(sqlite3 *db, int64_t now)
+{
+    /* One host we MEASURED, one we only heard about (already inserted
+     * above by learn()), one too stale to be worth a cold node's
+     * seconds, and our own row. */
+    bool seeded = true;
+    seeded = door_insert_row(db, kMeasured, 8055, now - 60, 0, "probe",
+                             now - 60, 1, 5) && seeded;
+    seeded = door_insert_row(db, kStale, 8033,
+                             now - (ONION_DIR_STALE_SECS + 3600), 0,
+                             "probe", now - (ONION_DIR_STALE_SECS + 3600),
+                             1, 1) && seeded;
+    seeded = door_insert_row(db, kSelf, 8033, now, 1, "self",
+                             now, 1, 9) && seeded;
+    return seeded;
+}
+
+/* The index at which the reader offered `host`, or -1 if it did not. Scans
+ * to the end so the rank is the LAST offering, exactly as the single-pass
+ * scan this replaces recorded it. */
+static int door_dial_rank_of_host(const struct onion_dial_candidate *cand,
+                                  int n, const char *host)
+{
+    int rank = -1;
+    for (int i = 0; i < n; i++)
+        if (strcmp(cand[i].hostname, host) == 0) rank = i;
+    return rank;
+}
+
 static int check_directory_is_a_door(void)
 {
     int failures = 0;
-
-    /* 56 base32 chars each. The MEASURED host is deliberately named so it
-     * sorts LAST alphabetically and its last_seen is not the newest: the
-     * ranking assertion below must be provable by the ranking rule and not
-     * satisfiable by an incidental hostname or timestamp order. */
-    static const char *const kMeasured =
-        "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz.onion";
-    static const char *const kHearsay =
-        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.onion";
-    static const char *const kStale =
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccc.onion";
-    static const char *const kSelf =
-        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddd.onion";
 
     char dir[PATH_MAX];
     if (!test_mkdtemp(dir, sizeof(dir), "zcl_seed_doors")) {
@@ -301,17 +332,7 @@ static int check_directory_is_a_door(void)
     int64_t now = (int64_t)platform_time_wall_time_t();
     bool seeded = opened;
     if (opened) {
-        /* One host we MEASURED, one we only heard about (already inserted
-         * above by learn()), one too stale to be worth a cold node's
-         * seconds, and our own row. */
-        seeded = door_insert_row(db, kMeasured, 8055, now - 60, 0, "probe",
-                                 now - 60, 1, 5) && seeded;
-        seeded = door_insert_row(db, kStale, 8033,
-                                 now - (ONION_DIR_STALE_SECS + 3600), 0,
-                                 "probe", now - (ONION_DIR_STALE_SECS + 3600),
-                                 1, 1) && seeded;
-        seeded = door_insert_row(db, kSelf, 8033, now, 1, "self",
-                                 now, 1, 9) && seeded;
+        seeded = door_insert_scenario_rows(db, now);
         sqlite3_close(db);
     }
     DOOR_CHECK("scratch directory rows seeded", seeded);
@@ -327,20 +348,12 @@ static int check_directory_is_a_door(void)
     DOOR_CHECK("the node's own directory offers dial candidates",
                n > 0);
 
-    bool has_measured = false, has_hearsay = false;
-    bool has_stale = false, has_self = false;
-    int measured_rank = -1, hearsay_rank = -1;
-    for (int i = 0; i < n; i++) {
-        if (strcmp(cand[i].hostname, kMeasured) == 0) {
-            has_measured = true; measured_rank = i;
-        } else if (strcmp(cand[i].hostname, kHearsay) == 0) {
-            has_hearsay = true; hearsay_rank = i;
-        } else if (strcmp(cand[i].hostname, kStale) == 0) {
-            has_stale = true;
-        } else if (strcmp(cand[i].hostname, kSelf) == 0) {
-            has_self = true;
-        }
-    }
+    int measured_rank = door_dial_rank_of_host(cand, n, kMeasured);
+    int hearsay_rank = door_dial_rank_of_host(cand, n, kHearsay);
+    bool has_measured = measured_rank >= 0;
+    bool has_hearsay = hearsay_rank >= 0;
+    bool has_stale = door_dial_rank_of_host(cand, n, kStale) >= 0;
+    bool has_self = door_dial_rank_of_host(cand, n, kSelf) >= 0;
 
     DOOR_CHECK("a host we measured ourselves is offered", has_measured);
     DOOR_CHECK("a host a peer told us about is offered too", has_hearsay);
