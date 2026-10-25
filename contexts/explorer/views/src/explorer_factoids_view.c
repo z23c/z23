@@ -220,6 +220,92 @@ size_t explorer_factoids_build_for_served_tip(uint8_t *buf, size_t buf_max,
  * JSON API: /api/factoids
  * ================================================================ */
 
+/* Genesis — height 0 may not be in SQLite, use constants as fallback */
+static size_t factoids_json_emit_genesis(uint8_t *buf, size_t buf_max,
+                                         size_t off, sqlite3 *db)
+{
+    char *r = (char *)buf;
+    size_t max = buf_max;
+
+    char gh[128] = ZCL_EXPLORER_GENESIS_HASH_DISPLAY_HEX, gc[128] = "";
+    fq_text(db, "SELECT hex(txid) FROM transactions WHERE block_height = 0 AND is_coinbase = 1 LIMIT 1",
+            gc, sizeof(gc));
+    if (!gc[0]) snprintf(gc, sizeof(gc),
+        "427DBF0AE8E079C6527EA1CB308C6E3C98FA5435F4D715D31176EA00CF2B6119");
+    char rcpt[32] = "";
+    compute_receipt(rcpt, sizeof(rcpt), 0, gh, "Genesis");
+    APPEND(off, r, max,
+        ",\"genesis\":{\"hash\":\"%.64s\",\"timestamp\":%" PRId64 ","
+        "\"coinbase_txid\":\"%.64s\",\"sha3\":\"%s\"}",
+        gh, (int64_t)ZCL_EXPLORER_GENESIS_TIME, gc, rcpt);
+    return off;
+}
+
+/* Network upgrades */
+static size_t factoids_json_emit_upgrades(uint8_t *buf, size_t buf_max,
+                                          size_t off, sqlite3 *db)
+{
+    char *r = (char *)buf;
+    size_t max = buf_max;
+
+    APPEND(off, r, max, ",\"upgrades\":[");
+    struct { const char *name; int64_t h; int proto; const char *bid; } ups[] = {
+        {"Sprout",0,170002,"0x00000000"},
+        {"Overwinter",476969,170005,"0x5ba81b19"},
+        {"Sapling",476969,170007,"0x76b809bb"},
+        {"Bubbles",585318,170009,"0x821a451c"},
+        {"Bubbly",585322,170010,"0x930b540d"},
+        {"Buttercup",707000,170011,"0x930b540d"},
+    };
+    for (int i = 0; i < 6; i++) {
+        char bh[128] = ""; int64_t bt = 0;
+        get_block_at(db, ups[i].h, bh, sizeof(bh), &bt);
+        char rcpt[32] = "";
+        compute_receipt(rcpt, sizeof(rcpt), ups[i].h, bh, ups[i].name);
+        if (i > 0) APPEND(off, r, max, ",");
+        APPEND(off, r, max,
+            "{\"name\":\"%s\",\"height\":%" PRId64 ",\"time\":%" PRId64
+            ",\"protocol\":%d,\"branch_id\":\"%s\",\"sha3\":\"%s\"}",
+            ups[i].name, ups[i].h, bt, ups[i].proto, ups[i].bid, rcpt);
+    }
+    APPEND(off, r, max, "]");
+    return off;
+}
+
+/* Supply — mined-at-tip, asymptotic cap, transparent UTXO pool, and the
+ * mined-minus-transparent gap (the only reliable shielded+burned proxy;
+ * blocks.sapling_value is sign-buggy, so we never SUM it). Mirrors the
+ * headline HTML supply factoids so /api/factoids stays in sync. */
+static size_t factoids_json_emit_supply(uint8_t *buf, size_t buf_max,
+                                        size_t off, sqlite3 *db,
+                                        int64_t chain_height)
+{
+    char *r = (char *)buf;
+    size_t max = buf_max;
+
+    int64_t supply = compute_supply_at_height(chain_height);
+    int64_t cap = zcl_max_supply_zatoshi();
+    int64_t transparent_pool =
+        fq_i64(db, "SELECT COALESCE(SUM(value),0) FROM utxos");
+    int64_t gap = supply - transparent_pool;
+    double pct_of_cap = cap > 0 ? 100.0 * (double)supply / (double)cap : 0.0;
+    char rcpt[32] = "", gap_rcpt[32] = "";
+    compute_receipt_i64(rcpt, sizeof(rcpt), chain_height, supply, "total_supply");
+    compute_receipt_i64(gap_rcpt, sizeof(gap_rcpt), chain_height, gap, "supply_gap");
+    APPEND(off, r, max,
+        ",\"supply\":{\"total_sat\":%" PRId64 ",\"total_zcl\":%.8f,\"sha3\":\"%s\""
+        ",\"mined_sat\":%" PRId64 ",\"mined_zcl\":%.8f"
+        ",\"cap_sat\":%" PRId64 ",\"cap_zcl\":%.8f,\"pct_of_cap\":%.3f"
+        ",\"transparent_pool_sat\":%" PRId64 ",\"transparent_pool_zcl\":%.8f"
+        ",\"gap_sat\":%" PRId64 ",\"gap_zcl\":%.8f,\"gap_sha3\":\"%s\"}",
+        supply, (double)supply / (double)ZATOSHI_PER_ZCL, rcpt,
+        supply, (double)supply / (double)ZATOSHI_PER_ZCL,
+        cap, (double)cap / (double)ZATOSHI_PER_ZCL, pct_of_cap,
+        transparent_pool, (double)transparent_pool / (double)ZATOSHI_PER_ZCL,
+        gap, (double)gap / (double)ZATOSHI_PER_ZCL, gap_rcpt);
+    return off;
+}
+
 size_t explorer_factoids_build_json(uint8_t *buf, size_t buf_max,
                                      const char *datadir)
 {
@@ -307,72 +393,9 @@ size_t explorer_factoids_build_json_for_served_tip(uint8_t *buf,
         chain_height, served_height, indexed_height,
         index_capped ? "true" : "false");
 
-    /* Genesis — height 0 may not be in SQLite, use constants as fallback */
-    {
-        char gh[128] = ZCL_EXPLORER_GENESIS_HASH_DISPLAY_HEX, gc[128] = "";
-        fq_text(db, "SELECT hex(txid) FROM transactions WHERE block_height = 0 AND is_coinbase = 1 LIMIT 1",
-                gc, sizeof(gc));
-        if (!gc[0]) snprintf(gc, sizeof(gc),
-            "427DBF0AE8E079C6527EA1CB308C6E3C98FA5435F4D715D31176EA00CF2B6119");
-        char rcpt[32] = "";
-        compute_receipt(rcpt, sizeof(rcpt), 0, gh, "Genesis");
-        APPEND(off, r, max,
-            ",\"genesis\":{\"hash\":\"%.64s\",\"timestamp\":%" PRId64 ","
-            "\"coinbase_txid\":\"%.64s\",\"sha3\":\"%s\"}",
-            gh, (int64_t)ZCL_EXPLORER_GENESIS_TIME, gc, rcpt);
-    }
-
-    /* Network upgrades */
-    APPEND(off, r, max, ",\"upgrades\":[");
-    {
-        struct { const char *name; int64_t h; int proto; const char *bid; } ups[] = {
-            {"Sprout",0,170002,"0x00000000"},
-            {"Overwinter",476969,170005,"0x5ba81b19"},
-            {"Sapling",476969,170007,"0x76b809bb"},
-            {"Bubbles",585318,170009,"0x821a451c"},
-            {"Bubbly",585322,170010,"0x930b540d"},
-            {"Buttercup",707000,170011,"0x930b540d"},
-        };
-        for (int i = 0; i < 6; i++) {
-            char bh[128] = ""; int64_t bt = 0;
-            get_block_at(db, ups[i].h, bh, sizeof(bh), &bt);
-            char rcpt[32] = "";
-            compute_receipt(rcpt, sizeof(rcpt), ups[i].h, bh, ups[i].name);
-            if (i > 0) APPEND(off, r, max, ",");
-            APPEND(off, r, max,
-                "{\"name\":\"%s\",\"height\":%" PRId64 ",\"time\":%" PRId64
-                ",\"protocol\":%d,\"branch_id\":\"%s\",\"sha3\":\"%s\"}",
-                ups[i].name, ups[i].h, bt, ups[i].proto, ups[i].bid, rcpt);
-        }
-    }
-    APPEND(off, r, max, "]");
-
-    /* Supply — mined-at-tip, asymptotic cap, transparent UTXO pool, and the
-     * mined-minus-transparent gap (the only reliable shielded+burned proxy;
-     * blocks.sapling_value is sign-buggy, so we never SUM it). Mirrors the
-     * headline HTML supply factoids so /api/factoids stays in sync. */
-    {
-        int64_t supply = compute_supply_at_height(chain_height);
-        int64_t cap = zcl_max_supply_zatoshi();
-        int64_t transparent_pool =
-            fq_i64(db, "SELECT COALESCE(SUM(value),0) FROM utxos");
-        int64_t gap = supply - transparent_pool;
-        double pct_of_cap = cap > 0 ? 100.0 * (double)supply / (double)cap : 0.0;
-        char rcpt[32] = "", gap_rcpt[32] = "";
-        compute_receipt_i64(rcpt, sizeof(rcpt), chain_height, supply, "total_supply");
-        compute_receipt_i64(gap_rcpt, sizeof(gap_rcpt), chain_height, gap, "supply_gap");
-        APPEND(off, r, max,
-            ",\"supply\":{\"total_sat\":%" PRId64 ",\"total_zcl\":%.8f,\"sha3\":\"%s\""
-            ",\"mined_sat\":%" PRId64 ",\"mined_zcl\":%.8f"
-            ",\"cap_sat\":%" PRId64 ",\"cap_zcl\":%.8f,\"pct_of_cap\":%.3f"
-            ",\"transparent_pool_sat\":%" PRId64 ",\"transparent_pool_zcl\":%.8f"
-            ",\"gap_sat\":%" PRId64 ",\"gap_zcl\":%.8f,\"gap_sha3\":\"%s\"}",
-            supply, (double)supply / (double)ZATOSHI_PER_ZCL, rcpt,
-            supply, (double)supply / (double)ZATOSHI_PER_ZCL,
-            cap, (double)cap / (double)ZATOSHI_PER_ZCL, pct_of_cap,
-            transparent_pool, (double)transparent_pool / (double)ZATOSHI_PER_ZCL,
-            gap, (double)gap / (double)ZATOSHI_PER_ZCL, gap_rcpt);
-    }
+    off = factoids_json_emit_genesis(buf, buf_max, off, db);
+    off = factoids_json_emit_upgrades(buf, buf_max, off, db);
+    off = factoids_json_emit_supply(buf, buf_max, off, db, chain_height);
 
     /* Address stats */
     {
