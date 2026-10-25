@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Crenton - Apache License 2.0
  * purpose: Replace only changed-file scan and impact rows in a cloned codeindex generation.
  * Unchanged scan shards remain byte-identical across generations. */
 
