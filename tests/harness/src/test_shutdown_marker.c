@@ -88,89 +88,164 @@ static bool cdb_boot(const char *dir, int mutate, bool *second)
     return first;
 }
 
+static struct shutdown_clean_binding binding_fixture(bool with_cdb)
+{
+    struct shutdown_clean_binding b = {
+        .valid = true, .node_db_size = 100, .change_counter = 7,
+        .version_valid_for = 7, .schema_version = 25,
+        .cdb_valid = true, .cdb_size = 1717986918400LL,
+        .cdb_change_counter = 0xCAFEF00Du,
+        .cdb_version_valid_for = 0xCAFEF00Du,
+    };
+    b.cdb_valid = with_cdb;
+    return b;
+}
+
+static bool binding_roundtrip_ok(void)
+{
+    struct shutdown_clean_binding b = binding_fixture(true);
+    char buf[1024];
+    struct shutdown_clean_binding got;
+    int n = boot_shutdown_marker_format(buf, sizeof(buf), 1700000000LL, &b);
+    return n > 0 && boot_shutdown_marker_parse(buf, (size_t)n, &got) &&
+           got.valid && got.cdb_valid &&
+           got.cdb_size == b.cdb_size &&
+           got.cdb_change_counter == b.cdb_change_counter &&
+           got.cdb_version_valid_for == b.cdb_version_valid_for;
+}
+
+/* Marker from a binary that predates the keys: node.db binding still
+ * parses, consensus.db has NO binding. */
+static bool binding_old_marker_ok(void)
+{
+    struct shutdown_clean_binding b = binding_fixture(false);
+    char buf[1024];
+    struct shutdown_clean_binding got;
+    int n = boot_shutdown_marker_format(buf, sizeof(buf), 1700000000LL, &b);
+    return n > 0 && boot_shutdown_marker_parse(buf, (size_t)n, &got) &&
+           got.valid && !got.cdb_valid &&
+           strstr(buf, "consensus_db") == NULL;
+}
+
+/* Partial keys are not a binding. */
+static bool binding_partial_ok(void)
+{
+    const char *partial =
+        "1\nmagic=ZCLSHUT\nversion=2\nnode_db_size=1\n"
+        "node_db_change_counter=1\nnode_db_version_valid_for=1\n"
+        "schema_version=1\nwal_checkpointed=1\nconsensus_db_size=5\n";
+    struct shutdown_clean_binding got;
+    return boot_shutdown_marker_parse(partial, strlen(partial), &got) &&
+           got.valid && !got.cdb_valid;
+}
+
+static int shutdown_marker_binding_format_case(void)
+{
+    printf("shutdown_marker consensus.db binding format/parse + old marker ... ");
+    bool rt = binding_roundtrip_ok();
+    bool old = binding_old_marker_ok();
+    bool part = binding_partial_ok();
+    if (rt && old && part) {
+        printf("OK\n");
+        return 0;
+    }
+    printf("FAIL (rt=%d old=%d partial=%d)\n", rt, old, part);
+    return 1;
+}
+
+/* Results of the four matching/mismatching boots, each with the 2nd call. */
+struct cdb_probe_run {
+    bool match, s_match, size, s_size, hdr, s_hdr, none, s_none;
+};
+
+static void cdb_probe_run_bindings(const char *dir, struct cdb_probe_run *r)
+{
+    r->match = cdb_boot(dir, 0, &r->s_match);   /* matching -> skip once */
+    r->size = cdb_boot(dir, 1, &r->s_size);     /* size changed -> check */
+    r->hdr = cdb_boot(dir, 2, &r->s_hdr);       /* header changed -> check */
+    r->none = cdb_boot(dir, 3, &r->s_none);     /* no binding -> check */
+}
+
+static bool cdb_probe_run_bindings_ok(const struct cdb_probe_run *r)
+{
+    return r->match && !r->s_match && !r->size && !r->hdr && !r->none &&
+           !r->s_size && !r->s_hdr && !r->s_none;
+}
+
+static void cdb_probe_write_wal(const char *wal)
+{
+    int wf = open(wal, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (wf >= 0) {
+        (void)!write(wf, "w", 1);
+        close(wf);
+    }
+}
+
+/* A -wal beside an otherwise matching file -> check; crash (no marker at
+ * all) -> check. */
+static void cdb_probe_wal_and_crash(const char *dir, const char *cdb,
+                                    bool *walp, bool *crash)
+{
+    char wal[512];
+    snprintf(wal, sizeof(wal), "%s/consensus.db-wal", dir);
+    bool wal_s = false;
+    (void)cdb_boot(dir, 0, &wal_s); /* consumes; redo with WAL below */
+    boot_shutdown_marker_reset_for_test();
+    boot_shutdown_marker_set_schema_version(25);
+    (void)write_fake_node_db(cdb, 81920, 0x11223344u, 0x11223344u);
+    (void)boot_shutdown_marker_write_clean(dir);
+    (void)boot_shutdown_marker_detect_unclean(dir);
+    cdb_probe_write_wal(wal);
+    *walp = boot_shutdown_marker_consensus_quick_check_probe(cdb);
+    boot_shutdown_marker_reset_for_test();
+    unlink(wal);
+    *crash = boot_shutdown_marker_consensus_quick_check_probe(cdb);
+}
+
+static void cdb_probe_cleanup(const char *dir)
+{
+    char p[512];
+    snprintf(p, sizeof(p), "%s/consensus.db", dir);
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/consensus.db-wal", dir);
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/.shutdown_clean", dir);
+    unlink(p);
+    snprintf(p, sizeof(p), "%s/node.db", dir);
+    unlink(p);
+    test_cleanup_tmpdir(dir);
+    boot_shutdown_marker_reset_for_test();
+}
+
+static int shutdown_marker_cdb_probe_case(void)
+{
+    printf("shutdown_marker consensus.db probe skip/mismatch/single-use ... ");
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "shutdown_marker", "cdb_probe");
+    char cdb[512];
+    snprintf(cdb, sizeof(cdb), "%s/consensus.db", dir);
+
+    struct cdb_probe_run r = {0};
+    cdb_probe_run_bindings(dir, &r);
+    bool walp = false, crash = false;
+    cdb_probe_wal_and_crash(dir, cdb, &walp, &crash);
+
+    int failures = 0;
+    if (cdb_probe_run_bindings_ok(&r) && !walp && !crash) {
+        printf("OK\n");
+    } else {
+        printf("FAIL (match=%d/%d size=%d hdr=%d none=%d wal=%d crash=%d)\n",
+               r.match, r.s_match, r.size, r.hdr, r.none, walp, crash);
+        failures++;
+    }
+    cdb_probe_cleanup(dir);
+    return failures;
+}
+
 static int shutdown_marker_consensus_cases(void)
 {
-    int failures = 0;
-
-    printf("shutdown_marker consensus.db binding format/parse + old marker ... ");
-    {
-        struct shutdown_clean_binding b = {
-            .valid = true, .node_db_size = 100, .change_counter = 7,
-            .version_valid_for = 7, .schema_version = 25,
-            .cdb_valid = true, .cdb_size = 1717986918400LL,
-            .cdb_change_counter = 0xCAFEF00Du,
-            .cdb_version_valid_for = 0xCAFEF00Du,
-        };
-        char buf[1024];
-        struct shutdown_clean_binding got;
-        int n = boot_shutdown_marker_format(buf, sizeof(buf), 1700000000LL, &b);
-        bool rt = n > 0 && boot_shutdown_marker_parse(buf, (size_t)n, &got) &&
-                  got.valid && got.cdb_valid &&
-                  got.cdb_size == b.cdb_size &&
-                  got.cdb_change_counter == b.cdb_change_counter &&
-                  got.cdb_version_valid_for == b.cdb_version_valid_for;
-        /* Marker from a binary that predates the keys: node.db binding still
-         * parses, consensus.db has NO binding. */
-        b.cdb_valid = false;
-        n = boot_shutdown_marker_format(buf, sizeof(buf), 1700000000LL, &b);
-        bool old = n > 0 && boot_shutdown_marker_parse(buf, (size_t)n, &got) &&
-                   got.valid && !got.cdb_valid &&
-                   strstr(buf, "consensus_db") == NULL;
-        /* Partial keys are not a binding. */
-        const char *partial =
-            "1\nmagic=ZCLSHUT\nversion=2\nnode_db_size=1\n"
-            "node_db_change_counter=1\nnode_db_version_valid_for=1\n"
-            "schema_version=1\nwal_checkpointed=1\nconsensus_db_size=5\n";
-        bool part = boot_shutdown_marker_parse(partial, strlen(partial), &got) &&
-                    got.valid && !got.cdb_valid;
-        if (rt && old && part) printf("OK\n");
-        else { printf("FAIL (rt=%d old=%d partial=%d)\n", rt, old, part); failures++; }
-    }
-
-    printf("shutdown_marker consensus.db probe skip/mismatch/single-use ... ");
-    {
-        char dir[] = "/tmp/zcl_shutmark_cdb_XXXXXX";
-        if (!mkdtemp(dir)) { printf("FAIL (mkdtemp)\n"); return failures + 1; }
-        char cdb[512], wal[512], marker[512], ndb[512];
-        snprintf(cdb, sizeof(cdb), "%s/consensus.db", dir);
-        snprintf(wal, sizeof(wal), "%s/consensus.db-wal", dir);
-        snprintf(marker, sizeof(marker), "%s/.shutdown_clean", dir);
-        snprintf(ndb, sizeof(ndb), "%s/node.db", dir);
-
-        bool s_match = false, s_size = false, s_hdr = false, s_none = false;
-        bool match = cdb_boot(dir, 0, &s_match);   /* matching -> skip once */
-        bool size  = cdb_boot(dir, 1, &s_size);    /* size changed -> check */
-        bool hdr   = cdb_boot(dir, 2, &s_hdr);     /* header changed -> check */
-        bool none  = cdb_boot(dir, 3, &s_none);    /* no binding -> check */
-        /* A -wal beside an otherwise matching file -> check. */
-        bool wal_s = false;
-        (void)cdb_boot(dir, 0, &wal_s); /* consumes; redo with WAL below */
-        boot_shutdown_marker_reset_for_test();
-        boot_shutdown_marker_set_schema_version(25);
-        (void)write_fake_node_db(cdb, 81920, 0x11223344u, 0x11223344u);
-        (void)boot_shutdown_marker_write_clean(dir);
-        (void)boot_shutdown_marker_detect_unclean(dir);
-        { int wf = open(wal, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-          if (wf >= 0) { (void)!write(wf, "w", 1); close(wf); } }
-        bool walp = boot_shutdown_marker_consensus_quick_check_probe(cdb);
-        /* Crash: no marker at all -> check. */
-        boot_shutdown_marker_reset_for_test();
-        unlink(wal);
-        bool crash = boot_shutdown_marker_consensus_quick_check_probe(cdb);
-
-        if (match && !s_match && !size && !hdr && !none && !s_size &&
-            !s_hdr && !s_none && !walp && !crash)
-            printf("OK\n");
-        else {
-            printf("FAIL (match=%d/%d size=%d hdr=%d none=%d wal=%d crash=%d)\n",
-                   match, s_match, size, hdr, none, walp, crash);
-            failures++;
-        }
-        unlink(cdb); unlink(wal); unlink(marker); unlink(ndb);
-        rmdir(dir);
-        boot_shutdown_marker_reset_for_test();
-    }
-    return failures;
+    int failures = shutdown_marker_binding_format_case();
+    return failures + shutdown_marker_cdb_probe_case();
 }
 
 /* ── progress_store_open consults the skip probe ───────────────────────── */
