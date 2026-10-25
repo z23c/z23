@@ -73,7 +73,8 @@ static int ni_prod_skip(const char *rel)
         || (strncmp(rel, k_planted, pl) == 0 && rel[pl] == '/'))
         return 1;
     return ni_has_comp(rel, "build") || ni_has_comp(rel, "vendor")
-        || ni_has_comp(rel, ".claude") || ni_has_comp(rel, "test-tmp");
+        || ni_has_comp(rel, ".claude") || ni_has_comp(rel, "test-tmp")
+        || ni_has_comp(rel, ".cache");
 }
 static int ni_is_h(const char *rel)
 { size_t n = strlen(rel); return n >= 2 && rel[n - 2] == '.' && rel[n - 1] == 'h' && (strncmp(rel, "include/", 8) == 0 || strstr(rel, "/include/") != NULL); }
@@ -98,7 +99,10 @@ static int ndh_entry(const char *phys, const char *rel, const char *nm)
         return 2;
     if (ni_prod_skip(r2)) return 0;
     struct stat st;
-    if (lstat(p2, &st) != 0) return die("z23-lint: cannot stat %s\n", p2);
+    /* A file another gate deletes mid-walk (10-25: a .cache/lint-tu temp)
+     * is gone, not unreadable; scandir above treats ENOENT the same way. */
+    if (lstat(p2, &st) != 0)
+        return errno == ENOENT ? 0 : die("z23-lint: cannot stat %s\n", p2);
     if (S_ISDIR(st.st_mode)) return ndh_walk(p2, r2);
     if (!S_ISREG(st.st_mode)) return 0;
     if (lint_path_is_excluded(r2) || ni_allow(r2)) return 0;
