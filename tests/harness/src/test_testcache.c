@@ -2733,8 +2733,8 @@ static int tc_load_flaky_excerpt(void)
     size_t shown = out ? testcache_print_log_excerpt(out, log, "  first| ",
                                                      5, 10) : 0;
     if (out) fclose(out);
-    TC_CHECK("excerpt prints exactly max_marks failure lines + max_tail "
-             "tail lines", shown == 15);
+    TC_CHECK("excerpt prints max_marks failure lines, their context, and "
+             "max_tail tail lines", shown == 21);
     TC_CHECK("the earliest failing assertion is named with its line number",
              file_contains(cap, "  first| L5: FAIL at shard.c:12 "
                                 "(ready == 1)\n") &&
@@ -2742,8 +2742,10 @@ static int tc_load_flaky_excerpt(void)
     TC_CHECK("failure lines past the max_marks cap are dropped",
              file_contains(cap, "  first| L12: noise FAIL 12\n") &&
              !file_contains(cap, "L13:") && !file_contains(cap, "L39:"));
-    TC_CHECK("non-failure lines before the tail window are dropped",
-             !file_contains(cap, "ok line 8\n") &&
+    TC_CHECK("non-failure lines before the tail window are dropped unless "
+             "they are context of a kept mark",
+             file_contains(cap, "  first| L8: ok line 8\n") &&
+             !file_contains(cap, "  first| L1: ok line 1\n") &&
              !file_contains(cap, "L190:"));
     TC_CHECK("the tail window is the last max_tail lines, numbered",
              file_contains(cap, "  first| L191: ok line 191\n") &&
@@ -2767,6 +2769,44 @@ static int tc_load_flaky_excerpt(void)
                            "print_load_flaky_first_excerpt(name, first);") &&
              file_contains("tests/harness/src/test_parallel.c",
                            "preserve_retry_first(g_groups[i].name, first_log, preserved_log);"));
+    (void)unlink(log);
+    (void)unlink(cap);
+    return failures;
+}
+
+/* A failure mark shows the diagnostic line just before it, and two marks that
+ * sit close together print their shared context once, in order. */
+static int tc_excerpt_context_case(void)
+{
+    int failures = 0;
+    char log[96], cap[96];
+    (void)snprintf(log, sizeof(log), "test-tmp/tc_ctx.%ld.log",
+                   (long)getpid());
+    (void)snprintf(cap, sizeof(cap), "test-tmp/tc_ctx.%ld.out",
+                   (long)getpid());
+    (void)mkdir("test-tmp", 0755);
+    FILE *f = fopen(log, "w");
+    TC_CHECK("context fixture log writes", f != NULL);
+    if (f) {
+        fputs("ok setup\n"
+              "[lint-gate] blocker escape rcs: bad=1 (want 0)\n"
+              "FAIL at a.c:3 (x == 1)\n"
+              "FAIL at a.c:4 (y == 2)\n"
+              "ok teardown\n", f);
+        (void)fclose(f);
+    }
+    FILE *out = fopen(cap, "w");
+    size_t shown = out ? testcache_print_log_excerpt(out, log, "", 5, 0) : 0;
+    if (out) fclose(out);
+    TC_CHECK("a failure mark shows the diagnostic line before it",
+             file_contains(cap, "L2: [lint-gate] blocker escape rcs: bad=1 "
+                                "(want 0)\n"));
+    TC_CHECK("two close marks print their shared context once, in order",
+             shown == 4 &&
+             file_contains(cap, "L1: ok setup\nL2: [lint-gate]") &&
+             file_contains(cap, "L3: FAIL at a.c:3 (x == 1)\n"
+                                "L4: FAIL at a.c:4 (y == 2)\n") &&
+             !file_contains(cap, "L5:"));
     (void)unlink(log);
     (void)unlink(cap);
     return failures;
@@ -3694,6 +3734,7 @@ int test_testcache(void)
     failures += tc_observation_roundtrip();
     failures += tc_action_inputs_phase();
     failures += tc_load_flaky_excerpt();
+    failures += tc_excerpt_context_case();
     failures += tc_exec_rail_real_tree();
     failures += tc_exec_rail_fixture();
     failures += tc_exec_binding_fixture();

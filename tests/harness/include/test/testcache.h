@@ -411,7 +411,9 @@ size_t testcache_depfile_count(const struct testcache *tc);
  * runner's own output instead, bounded so a noisy log cannot flood it:
  *
  *   - up to max_marks of the EARLIEST lines naming a failure ("FAIL",
- *     "assert", "Assertion") that fall before the tail window, then
+ *     "assert", "Assertion") that fall before the tail window, each with up
+ *     to TESTCACHE_EXCERPT_CONTEXT lines just before it (printed once, in
+ *     order, even when two marks share them), then
  *   - the last max_tail lines of the log.
  *
  * Every printed line is "<prefix>L<n>: <text>", text truncated to
@@ -419,6 +421,7 @@ size_t testcache_depfile_count(const struct testcache *tc);
  * (0 when path cannot be opened or is empty). The runner calls this for a
  * LOAD-FLAKY group; the contract test drives it on a synthetic log. */
 #define TESTCACHE_EXCERPT_LINE_MAX 400
+#define TESTCACHE_EXCERPT_CONTEXT 3
 size_t testcache_print_log_excerpt(FILE *out, const char *path,
                                    const char *prefix, size_t max_marks,
                                    size_t max_tail);

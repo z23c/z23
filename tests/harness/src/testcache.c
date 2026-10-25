@@ -2883,6 +2883,30 @@ static void tc_excerpt_print(FILE *out, const char *prefix, size_t lineno,
             strlen(text) > TESTCACHE_EXCERPT_LINE_MAX ? " [truncated]" : "");
 }
 
+/* Ring of the last TESTCACHE_EXCERPT_CONTEXT log lines, slot = n % ring size. */
+#define TC_EXCERPT_BUF 4096
+
+static void tc_excerpt_keep(char ring[][TC_EXCERPT_BUF], size_t n,
+                            const char *text)
+{
+    memcpy(ring[n % TESTCACHE_EXCERPT_CONTEXT], text, strlen(text) + 1);
+}
+
+/* Prints the context lines before mark line n that were not printed yet
+ * (lines after shown_upto). Returns how many were printed. */
+static size_t tc_excerpt_print_before(FILE *out, const char *prefix, size_t n,
+                                      size_t shown_upto,
+                                      char ring[][TC_EXCERPT_BUF])
+{
+    size_t from = n > TESTCACHE_EXCERPT_CONTEXT
+                      ? n - TESTCACHE_EXCERPT_CONTEXT : 1;
+    if (from <= shown_upto) from = shown_upto + 1;
+    size_t count = 0;
+    for (size_t k = from; k < n; k++, count++)
+        tc_excerpt_print(out, prefix, k, ring[k % TESTCACHE_EXCERPT_CONTEXT]);
+    return count;
+}
+
 size_t testcache_print_log_excerpt(FILE *out, const char *path,
                                    const char *prefix, size_t max_marks,
                                    size_t max_tail)
@@ -2891,19 +2915,28 @@ size_t testcache_print_log_excerpt(FILE *out, const char *path,
     if (!prefix) prefix = "";
     FILE *fp = fopen(path, "r");
     if (!fp) return 0;
-    char line[4096];
+    char line[TC_EXCERPT_BUF];
+    char ring[TESTCACHE_EXCERPT_CONTEXT][TC_EXCERPT_BUF];
     size_t total = 0;
     while (tc_excerpt_next_line(fp, line, sizeof(line))) total++;
     size_t tail_start = total > max_tail ? total - max_tail + 1 : 1;
     rewind(fp);
-    size_t printed = 0, marks = 0;
+    size_t printed = 0, marks = 0, shown_upto = 0;
     for (size_t n = 1; tc_excerpt_next_line(fp, line, sizeof(line)); n++) {
         bool in_tail = n >= tail_start;
-        if (!in_tail && (marks >= max_marks || !tc_excerpt_is_mark(line)))
+        if (!in_tail && (marks >= max_marks || !tc_excerpt_is_mark(line))) {
+            tc_excerpt_keep(ring, n, line);
             continue;
-        if (!in_tail) marks++;
+        }
+        if (!in_tail) {
+            marks++;
+            printed += tc_excerpt_print_before(out, prefix, n, shown_upto,
+                                               ring);
+        }
         tc_excerpt_print(out, prefix, n, line);
         printed++;
+        shown_upto = n;
+        tc_excerpt_keep(ring, n, line);
     }
     fclose(fp);
     return printed;
