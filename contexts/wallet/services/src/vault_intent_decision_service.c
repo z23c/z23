@@ -10,6 +10,46 @@
 #include <limits.h>
 #include <string.h>
 
+static bool vault_intent_amounts_invalid(
+    const struct vault_intent_plan_snapshot *snapshot)
+{
+    return !MoneyRange(snapshot->target_zat) ||
+        !MoneyRange(snapshot->fee_zat) ||
+        snapshot->target_zat > MAX_MONEY - snapshot->fee_zat;
+}
+
+static bool vault_intent_money_state_not_current(
+    const struct vault_intent_plan_snapshot *snapshot)
+{
+    return !snapshot->money_result_ok || !snapshot->money_complete ||
+        !snapshot->money_current;
+}
+
+static bool vault_intent_reservations_invalid(
+    const struct vault_intent_plan_snapshot *snapshot)
+{
+    return snapshot->confirmed_zat < 0 ||
+        snapshot->already_reserved_zat < 0 ||
+        snapshot->already_reserved_zat > snapshot->confirmed_zat;
+}
+
+static enum vault_intent_decision_code vault_intent_funds_denial_code(
+    const struct vault_intent_plan_snapshot *snapshot)
+{
+    return snapshot->development_scope
+        ? VAULT_INTENT_DECISION_DEVELOPMENT_CAP
+        : VAULT_INTENT_DECISION_INSUFFICIENT_FUNDS;
+}
+
+static bool vault_intent_development_agent_cap_exceeded(
+    const struct vault_intent_plan_snapshot *snapshot,
+    const struct vault_intent_plan_decision *decision)
+{
+    return snapshot->development_scope &&
+        (snapshot->agent_available_zat < 0 ||
+         decision->reservation_zat > snapshot->agent_available_zat);
+}
+
 bool vault_intent_plan_decide(
     const struct vault_intent_plan_snapshot *snapshot,
     struct vault_intent_plan_decision *decision)
@@ -17,39 +57,28 @@ bool vault_intent_plan_decide(
     if (!snapshot || !decision)
         return false;
     memset(decision, 0, sizeof(*decision));
-    if (!MoneyRange(snapshot->target_zat) ||
-        !MoneyRange(snapshot->fee_zat) ||
-        snapshot->target_zat > MAX_MONEY - snapshot->fee_zat) {
+    if (vault_intent_amounts_invalid(snapshot)) {
         decision->code = VAULT_INTENT_DECISION_FEE_INVALID;
         return true;
     }
     decision->reservation_zat = snapshot->target_zat + snapshot->fee_zat;
-    if (!snapshot->money_result_ok || !snapshot->money_complete ||
-        !snapshot->money_current) {
+    if (vault_intent_money_state_not_current(snapshot)) {
         decision->code = VAULT_INTENT_DECISION_MONEY_NOT_CURRENT;
         return true;
     }
-    if (snapshot->confirmed_zat < 0 ||
-        snapshot->already_reserved_zat < 0 ||
-        snapshot->already_reserved_zat > snapshot->confirmed_zat) {
-        decision->code = snapshot->development_scope
-            ? VAULT_INTENT_DECISION_DEVELOPMENT_CAP
-            : VAULT_INTENT_DECISION_INSUFFICIENT_FUNDS;
+    if (vault_intent_reservations_invalid(snapshot)) {
+        decision->code = vault_intent_funds_denial_code(snapshot);
         return true;
     }
     decision->spendable_after_reservations_zat =
         snapshot->confirmed_zat - snapshot->already_reserved_zat;
-    if (snapshot->development_scope &&
-        (snapshot->agent_available_zat < 0 ||
-         decision->reservation_zat > snapshot->agent_available_zat)) {
+    if (vault_intent_development_agent_cap_exceeded(snapshot, decision)) {
         decision->code = VAULT_INTENT_DECISION_DEVELOPMENT_CAP;
         return true;
     }
     if (decision->reservation_zat >
         decision->spendable_after_reservations_zat) {
-        decision->code = snapshot->development_scope
-            ? VAULT_INTENT_DECISION_DEVELOPMENT_CAP
-            : VAULT_INTENT_DECISION_INSUFFICIENT_FUNDS;
+        decision->code = vault_intent_funds_denial_code(snapshot);
         return true;
     }
     decision->code = VAULT_INTENT_DECISION_ALLOW;

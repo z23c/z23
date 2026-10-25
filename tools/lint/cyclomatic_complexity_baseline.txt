@@ -728,7 +728,6 @@ contexts/wallet/modules/wallet/src/wallet_sqlite_support.c:wallet_sqlite_reset_a
 contexts/wallet/modules/zid/src/zendp.c:zendp_valid:19
 contexts/wallet/modules/zid/src/zid_seniority.c:zid_seniority_rank:25
 contexts/wallet/modules/zid/src/zpay.c:zpay_memo_decode:21
-contexts/wallet/services/src/vault_intent_decision_service.c:vault_intent_plan_decide:18
 contexts/wallet/services/src/wallet_backup_crypto.c:wallet_backup_decrypt_file:17
 contexts/wallet/services/src/wallet_backup_crypto.c:wbs_write_file_atomic:20
 contexts/wallet/services/src/wallet_backup_run.c:wbs_run_once_impl:32
