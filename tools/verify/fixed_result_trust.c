@@ -342,9 +342,11 @@ void zcl_frt_release(struct zcl_frt_trust *trust)
 bool zcl_frt_load_fixture(const struct zcl_frt_fixture *fixture,
                           struct zcl_frt_trust *out, const char **why)
 {
+    /* Zero first: the refusal path releases `out`, which must not free the
+     * caller's uninitialised profile pointer. */
+    if (out) memset(out, 0, sizeof(*out));
     if (!out || !fixture || !fixture->etc_dir || fixture->etc_dir[0] != '/')
         return frt_finish(out, ZCL_FRT_WHY_ARGUMENTS, why);
-    memset(out, 0, sizeof(*out));
     out->signer_uid = fixture->signer_uid;
     out->publisher_uid = fixture->publisher_uid;
     out->launcher_uid = fixture->launcher_uid;
