@@ -347,9 +347,10 @@ static int fgd_t8(void)
 
 
 /* `lanes` deliveries, lane i newest-ordered by i. Lanes at or above
- * lanes - first are first-time (review1 + review2, no fix); the others
- * alternate between a missing review2 and a fix round. */
-static void fgd_d4_fixture(size_t lanes, size_t first)
+ * lanes - first are first-time: one plain review: label (or a lone review2:
+ * when `r2`) and no fix. The others alternate between a write with no review
+ * label at all and a review1 + review2 + fix round. */
+static void fgd_d4_fixture(size_t lanes, size_t first, bool r2)
 {
     FILE *rows = fgd_open("rows.tsv", FGD_HEADER);
     char id[48], label[64], ts[32];
@@ -361,15 +362,18 @@ static void fgd_d4_fixture(size_t lanes, size_t first)
         (void)snprintf(label, sizeof(label), "%s:D%zu", i % 3 ? "write" : "cx", i);
         fgd_meta(id, label);
         fgd_row(rows, ts, "node1", id, 10, 5, 3);
-        (void)snprintf(id, sizeof(id), "a%zu", i);
-        (void)snprintf(label, sizeof(label), "review1:D%zu", i);
-        fgd_meta(id, label);
-        if (ok || i % 2) {
+        if (ok) {
+            (void)snprintf(id, sizeof(id), "a%zu", i);
+            (void)snprintf(label, sizeof(label), "%s:D%zu",
+                           r2 ? "review2" : "review", i);
+            fgd_meta(id, label);
+        } else if (i % 2) {
+            (void)snprintf(id, sizeof(id), "a%zu", i);
+            (void)snprintf(label, sizeof(label), "review1:D%zu", i);
+            fgd_meta(id, label);
             (void)snprintf(id, sizeof(id), "b%zu", i);
             (void)snprintf(label, sizeof(label), "review2:D%zu", i);
             fgd_meta(id, label);
-        }
-        if (!ok && i % 2) {
             (void)snprintf(id, sizeof(id), "f%zu", i);
             (void)snprintf(label, sizeof(label), "fix:D%zu", i);
             fgd_meta(id, label);
@@ -393,7 +397,7 @@ static int fgd_t9(void)
     (void)high;
     fgd_in(&in);
     TEST("D4: 99 deliveries are unmeasured and say how many") {
-        fgd_d4_fixture(99, 99);
+        fgd_d4_fixture(99, 99, false);
         r = zcl_goals_delivery_d4(&in);
         ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
         ASSERT(fgd_has(r.evidence, "99 deliveries"));
@@ -416,7 +420,7 @@ static int fgd_t10(void)
     (void)high;
     fgd_in(&in);
     TEST("D4: 100 deliveries with 59 first-time fail") {
-        fgd_d4_fixture(100, 59);
+        fgd_d4_fixture(100, 59, false);
         r = zcl_goals_delivery_d4(&in);
         ASSERT(r.grade == ZCL_GOAL_FAIL);
         ASSERT(fgd_has(r.evidence, "59 of the newest 100"));
@@ -439,7 +443,7 @@ static int fgd_t11(void)
     (void)high;
     fgd_in(&in);
     TEST("D4: 100 with 60 first-time is a partial proxy, never pass") {
-        fgd_d4_fixture(100, 60);
+        fgd_d4_fixture(100, 60, false);
         r = zcl_goals_delivery_d4(&in);
         ASSERT(r.grade == ZCL_GOAL_PARTIAL);
         ASSERT(fgd_has(r.evidence, "60 of the newest 100"));
@@ -463,10 +467,33 @@ static int fgd_t12(void)
     (void)high;
     fgd_in(&in);
     TEST("D4: only the newest 100 count; an older rejected lane is cut") {
-        fgd_d4_fixture(101, 60);
+        fgd_d4_fixture(101, 60, false);
         r = zcl_goals_delivery_d4(&in);
         ASSERT(r.grade == ZCL_GOAL_PARTIAL);
         ASSERT(fgd_has(r.evidence, "60 of the newest 100"));
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int fgd_t14(void)
+{
+    int failures = 0;
+    struct zcl_goals_delivery_in in;
+    struct zcl_goal_result r;
+    FILE *f;
+    const int low[] = {10, 12, 14};
+    const int high[] = {40, 40, 40};
+    (void)f;
+    (void)r;
+    (void)low;
+    (void)high;
+    fgd_in(&in);
+    TEST("D4: a lone review2 without a fix still counts as first-time") {
+        fgd_d4_fixture(100, 100, true);
+        r = zcl_goals_delivery_d4(&in);
+        ASSERT(r.grade == ZCL_GOAL_PARTIAL);
+        ASSERT(fgd_has(r.evidence, "100 of the newest 100"));
         PASS();
     } _test_next:;
     return failures;
@@ -502,7 +529,7 @@ int test_fleet_goals_delivery(void)
 {
     int failures = 0;
     test_make_tmpdir(fgd_dir, sizeof(fgd_dir), "fleet_goals_delivery", "root");
-    int (*const tests[])(void) = {fgd_t1, fgd_t2, fgd_t3, fgd_t4, fgd_t5, fgd_t6, fgd_t7, fgd_t8, fgd_t9, fgd_t10, fgd_t11, fgd_t12, fgd_t13};
+    int (*const tests[])(void) = {fgd_t1, fgd_t2, fgd_t3, fgd_t4, fgd_t5, fgd_t6, fgd_t7, fgd_t8, fgd_t9, fgd_t10, fgd_t11, fgd_t12, fgd_t13, fgd_t14};
     for (size_t i = 0; i < sizeof(tests) / sizeof(tests[0]); i++)
         failures += tests[i]();
     (void)unsetenv("Z23_AGENT_META_ROOT");

@@ -475,9 +475,8 @@ struct zcl_goal_result zcl_goals_delivery_d2(
 /* ── D4 ───────────────────────────────────────────────────────────────── */
 
 #define GD_F_WRITE 1u
-#define GD_F_R1 2u
-#define GD_F_R2 4u
-#define GD_F_FIX 8u
+#define GD_F_REV 2u /* review, review1 or review2: any non-author review */
+#define GD_F_FIX 4u
 
 struct gd_dl {
     char name[GD_NAME];
@@ -489,10 +488,9 @@ static unsigned gd_kind_flag(const char *kind)
 {
     if (strcmp(kind, "write") == 0 || strcmp(kind, "cx") == 0)
         return GD_F_WRITE;
-    if (strcmp(kind, "review1") == 0)
-        return GD_F_R1;
-    if (strcmp(kind, "review2") == 0)
-        return GD_F_R2;
+    if (strcmp(kind, "review") == 0 || strcmp(kind, "review1") == 0 ||
+        strcmp(kind, "review2") == 0)
+        return GD_F_REV;
     return strcmp(kind, "fix") == 0 ? GD_F_FIX : 0u;
 }
 
@@ -576,15 +574,14 @@ static struct zcl_goal_result gd_d4_grade(struct gd_d4 *s, int64_t skipped)
     }
     qsort(pick, k, sizeof(*pick), gd_cmp_dl_newest);
     for (size_t i = 0; i < ZCL_GOALS_DELIVERY_D4_SAMPLE; i++)
-        if ((pick[i]->flags & (GD_F_R1 | GD_F_R2 | GD_F_FIX)) ==
-            (GD_F_R1 | GD_F_R2))
+        if ((pick[i]->flags & (GD_F_REV | GD_F_FIX)) == GD_F_REV)
             first++;
     free(pick);
     return zcl_goal_make(
         first >= ZCL_GOALS_DELIVERY_D4_MIN_FIRST_TIME ? ZCL_GOAL_PARTIAL
                                                       : ZCL_GOAL_FAIL,
         next,
-        "%zu of the newest %u deliveries have review1 and review2 and no fix "
+        "%zu of the newest %u deliveries have a review and no fix round "
         "(bar %u); a label proxy, verdicts are not recorded and a renamed "
         "rejected lane would hide; %lld malformed skipped",
         first, ZCL_GOALS_DELIVERY_D4_SAMPLE,
@@ -595,7 +592,7 @@ struct zcl_goal_result zcl_goals_delivery_d4(
     const struct zcl_goals_delivery_in *in)
 {
     static const char next[] = "run an agent job labelled write:<lane> with "
-                               "review1: and review2: reviewers";
+                               "a review: (or review1:) reviewer";
     struct zcl_agent_index own = {0};
     struct gd_d4 s = {0};
     struct zcl_goal_result res;
