@@ -601,13 +601,42 @@ void shutdown_stagewatch_write_exit_reason(const char *reason)
     LOG_INFO("shutdown", "exit-reason breadcrumb written: reason=%s", reason);
 }
 
+static void exit_reason_clear_outputs(char *reason_out, size_t n,
+                                      bool *forced_out)
+{
+    if (reason_out && n > 0) reason_out[0] = '\0';
+    if (forced_out) *forced_out = false;
+}
+
+static bool exit_reason_inputs_unusable(const char *datadir,
+                                        const char *reason_out, size_t n)
+{
+    return !datadir || !*datadir || !reason_out || n == 0;
+}
+
+static void exit_reason_scan_lines(FILE *f, char *reason_out, size_t n,
+                                   bool *have_reason, bool *forced)
+{
+    char line[192];
+    while (fgets(line, sizeof(line), f)) {
+        size_t len = strlen(line);
+        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+            line[--len] = '\0';
+        if (strncmp(line, "reason=", 7) == 0) {
+            snprintf(reason_out, n, "%s", line + 7);
+            *have_reason = true;
+        } else if (strncmp(line, "forced=1", 8) == 0) {
+            *forced = true;
+        }
+    }
+}
+
 bool shutdown_stagewatch_read_exit_reason(const char *datadir,
                                           char *reason_out, size_t n,
                                           bool *forced_out)
 {
-    if (reason_out && n > 0) reason_out[0] = '\0';
-    if (forced_out) *forced_out = false;
-    if (!datadir || !*datadir || !reason_out || n == 0)
+    exit_reason_clear_outputs(reason_out, n, forced_out);
+    if (exit_reason_inputs_unusable(datadir, reason_out, n))
         return false;
 
     char path[1088];
@@ -620,20 +649,9 @@ bool shutdown_stagewatch_read_exit_reason(const char *datadir,
     if (!f)
         return false;   /* no breadcrumb — not an error, e.g. first-ever boot */
 
-    char line[192];
     bool have_reason = false;
     bool forced = false;
-    while (fgets(line, sizeof(line), f)) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-            line[--len] = '\0';
-        if (strncmp(line, "reason=", 7) == 0) {
-            snprintf(reason_out, n, "%s", line + 7);
-            have_reason = true;
-        } else if (strncmp(line, "forced=1", 8) == 0) {
-            forced = true;
-        }
-    }
+    exit_reason_scan_lines(f, reason_out, n, &have_reason, &forced);
     fclose(f);
 
     if (forced_out) *forced_out = forced;
