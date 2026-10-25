@@ -15,12 +15,27 @@
 #include <stdint.h>
 #include <string.h>
 
+static bool trusted_base_misses_narrow_transition_shape(
+    sqlite3 *db, int hstar, int cursor,
+    const struct stage_reducer_frontier_reconcile_result *out)
+{
+    return !db || !out || hstar < 0 || cursor != hstar + 1 ||
+        !out->coins_applied_found || out->coins_applied_height != cursor;
+}
+
+static bool trusted_base_transition_absent_or_incomplete(
+    const struct finalized_tip_row *row,
+    const uint8_t *trusted_hash, size_t trusted_hash_len)
+{
+    return !row->found || !row->ok || row->is_anchor || !row->has_tip_hash ||
+        memcmp(row->tip_hash.data, trusted_hash, trusted_hash_len) == 0;
+}
+
 bool stage_repair_preserve_trusted_base_transition(
     sqlite3 *db, int hstar, int cursor,
     const struct stage_reducer_frontier_reconcile_result *out)
 {
-    if (!db || !out || hstar < 0 || cursor != hstar + 1 ||
-        !out->coins_applied_found || out->coins_applied_height != cursor)
+    if (trusted_base_misses_narrow_transition_shape(db, hstar, cursor, out))
         return false; /* raw-return-ok:not the narrow transition shape */
 
     uint8_t trusted_hash[32] = {0};
@@ -35,8 +50,8 @@ bool stage_repair_preserve_trusted_base_transition(
     struct finalized_tip_row row;
     if (!finalized_tip_row_at(db, hstar, &row))
         LOG_FAIL("stage_repair", "trusted-base transition row read failed");
-    if (!row.found || !row.ok || row.is_anchor || !row.has_tip_hash ||
-        memcmp(row.tip_hash.data, trusted_hash, sizeof(trusted_hash)) == 0)
+    if (trusted_base_transition_absent_or_incomplete(
+            &row, trusted_hash, sizeof(trusted_hash)))
         return false; /* raw-return-ok:transition is absent or incomplete */
 
     static struct log_throttle throttle = LOG_THROTTLE_INIT;

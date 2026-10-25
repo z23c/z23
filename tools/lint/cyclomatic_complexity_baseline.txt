@@ -851,7 +851,6 @@ engine/jobs/src/stage_anchor.c:stage_anchor_cap_target_at_log_frontier:29
 engine/jobs/src/stage_repair_coin_backfill.c:backfill_run:54
 engine/jobs/src/stage_repair_coin_backfill.c:coin_backfill_insert_tx:34
 engine/jobs/src/stage_repair_coin_backfill_scan.c:coin_backfill_scan_step:69
-engine/jobs/src/stage_repair_trusted_base.c:stage_repair_preserve_trusted_base_transition:17
 engine/jobs/src/stage_row_itag.c:stage_row_itag_backfill:33
 engine/jobs/src/tip_finalize_anchor.c:tip_finalize_anchor_cursor_to_authority:21
 engine/jobs/src/tip_finalize_anchor.c:tip_finalize_stage_seed_anchor:17
