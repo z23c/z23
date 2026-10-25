@@ -1443,7 +1443,6 @@ engine/modules/storage/src/projection_store.c:projection_store_open:28
 engine/modules/storage/src/repair_marker.c:parse_legacy_hh_key:16
 engine/modules/storage/src/repair_marker.c:repair_marker_have:19
 engine/modules/storage/src/repair_marker.c:repair_marker_migrate_from_progress_meta:17
-engine/modules/storage/src/snapshot_shielded.c:snapshot_shielded_write:16
 engine/modules/storage/src/sqlite_vfs_dir_windows.c:vfs_dir_open_impl:32
 engine/modules/storage/src/sqlite_vfs_dir_windows.c:vfs_dir_valid_leaf:24
 engine/modules/storage/src/sqlite_vfs_dir_windows.c:vfs_dir_xlock:26

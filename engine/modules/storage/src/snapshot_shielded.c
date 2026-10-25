@@ -199,16 +199,31 @@ void snapshot_shielded_free_collected(struct snapshot_shielded *s)
     memset(s, 0, sizeof(*s));
 }
 
+/* True when any argument to snapshot_shielded_write is NULL; checked before
+ * the file or the sponge is touched. */
+static bool write_args_have_null(FILE *out, struct sha3_256_ctx *ctx,
+                                 const struct snapshot_shielded *s)
+{
+    return !out || !ctx || !s;
+}
+
+/* True when a section claims a nonzero length (or record count) but carries a
+ * NULL buffer — refused rather than emit a bogus section header. */
+static bool write_has_unbacked_section(const struct snapshot_shielded *s)
+{
+    return (s->sapling_len > 0 && !s->sapling) ||
+           (s->sprout_len  > 0 && !s->sprout)  ||
+           (s->nf_count    > 0 && !s->nf_records);
+}
+
 bool snapshot_shielded_write(FILE *out, struct sha3_256_ctx *ctx,
                              const struct snapshot_shielded *s)
 {
-    if (!out || !ctx || !s) {
+    if (write_args_have_null(out, ctx, s)) {
         LOG_FAIL("snap_shielded", "write: null arg");
         return false;
     }
-    if ((s->sapling_len > 0 && !s->sapling) ||
-        (s->sprout_len  > 0 && !s->sprout)  ||
-        (s->nf_count    > 0 && !s->nf_records)) {
+    if (write_has_unbacked_section(s)) {
         LOG_FAIL("snap_shielded", "write: nonzero length with null blob");
         return false;
     }
