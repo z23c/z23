@@ -175,7 +175,7 @@ int check_wire_harness_security_gate_selftest(void)
 static const char k_tdp_net[] =
     "zcl_service_kernel_start_all(&svc->network_kernel)";
 static const char k_tdp_front[] =
-    "zcl_service_kernel_start_all(&svc->frontend_kernel)";
+    "boot_frontend_async_start(svc)";
 static const char k_tdp_dial[] = "atomic_store(&g_tor_dial_ready, true)";
 static const char k_tdp_pub[] = "tor_log_has_descriptor_publication\\(";
 static const char k_tdp_dial_fn[] = "tor_integration_is_dial_ready";
@@ -367,7 +367,7 @@ static int tdp_st_write_baseline(const struct tdp_paths *p)
     if (csr_write(p->two, "alpha\nbravo\n")
         || csr_write(p->boot,
                      "zcl_service_kernel_start_all(&svc->network_kernel)\n"
-                     "zcl_service_kernel_start_all(&svc->frontend_kernel)\n")
+                     "boot_frontend_async_start(svc)\n")
         || csr_write(p->tor, "atomic_store(&g_tor_dial_ready, true)\n"
                           "tor_log_has_descriptor_publication(\n")
         || csr_write(p->stream, "tor_integration_is_dial_ready\n")
@@ -429,7 +429,7 @@ static int tdp_st_probe_full_pass(struct tdp_job *j, struct tdp_paths *p)
 static int tdp_st_probe_boot_order_fail(struct tdp_job *j, struct tdp_paths *p)
 {
     if (csr_write(p->boot,
-                  "zcl_service_kernel_start_all(&svc->frontend_kernel)\n"
+                  "boot_frontend_async_start(svc)\n"
                   "zcl_service_kernel_start_all(&svc->network_kernel)\n"))
         return -1;
     int rc = tdp_run_job(j);
@@ -460,7 +460,7 @@ static int tdp_st_probe_dial_order_fail(struct tdp_job *j, struct tdp_paths *p)
 {
     if (csr_write(p->boot,
                   "zcl_service_kernel_start_all(&svc->network_kernel)\n"
-                  "zcl_service_kernel_start_all(&svc->frontend_kernel)\n")
+                  "boot_frontend_async_start(svc)\n")
         || csr_write(p->tor, "tor_log_has_descriptor_publication(\n"
                           "atomic_store(&g_tor_dial_ready, true)\n")
         || csr_write(p->stream, "tor_integration_is_dial_ready\n"))
