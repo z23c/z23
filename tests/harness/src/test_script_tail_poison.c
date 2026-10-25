@@ -205,6 +205,58 @@ static void observe(const unsigned char *wire, size_t wire_len,
     sha256_finalize(&h, digest->data);
 }
 
+/* Observe once while the process-global allocation poison is held at
+ * `fill`, restoring the previous value immediately afterwards. */
+static void observe_with_poison_fill(const unsigned char *data, size_t len,
+                                     int fill, bool leak_probe,
+                                     struct uint256 *digest)
+{
+    int prev = transaction_alloc_poison_set(fill);
+    observe(data, len, leak_probe, digest);
+    (void)transaction_alloc_poison_set(prev);
+}
+
+/* One digest per tail fill: run the same wire bytes through observe under
+ * each of the first `count` fills in POISONS. */
+static void collect_poison_digests(const unsigned char *data, size_t len,
+                                   bool leak_probe, int count,
+                                   struct uint256 *out)
+{
+    for (int p = 0; p < count; p++)
+        observe_with_poison_fill(data, len, POISONS[p], leak_probe, &out[p]);
+}
+
+/* Re-parse the wire cut at 64 spread points under the 0xAA fill and audit
+ * every script the half-parse left behind: *cuts counts the cut points
+ * actually tried, *deep the non-empty scripts reached, *bad the scripts
+ * whose bytes are not what the corpus wrote. */
+static void scan_mid_script_cuts(const unsigned char *data, size_t len,
+                                 int *bad, int *cuts, int *deep)
+{
+    static unsigned char expect[MAX_SCRIPT_SIZE];
+    for (int k = 1; k < 64; k++) {
+        size_t cut = len * (size_t)k / 64;
+        if (cut == 0 || cut >= len) continue;
+        (*cuts)++;
+        int prev = transaction_alloc_poison_set(0xAA);
+        struct byte_stream s;
+        stream_init_from_data(&s, data, cut);
+        struct transaction tx;
+        (void)transaction_deserialize(&tx, &s);
+        /* Whether it parsed or not, inspect what it left behind. */
+        for (size_t i = 0; i < tx.num_vin; i++) {
+            const struct script *sc = &tx.vin[i].script_sig;
+            if (sc->size > MAX_SCRIPT_SIZE) { (*bad)++; continue; }
+            if (sc->size == 0) continue;
+            (*deep)++;
+            fill_pattern(expect, sc->size, (unsigned)i);
+            if (memcmp(sc->data, expect, sc->size) != 0) (*bad)++;
+        }
+        transaction_free(&tx);
+        (void)transaction_alloc_poison_set(prev);
+    }
+}
+
 int test_script_tail_poison(void);
 int test_script_tail_poison(void)
 {
@@ -227,11 +279,7 @@ int test_script_tail_poison(void)
 
     /* The property. Three different tail fills, one digest each. */
     struct uint256 dig[NPOISON];
-    for (int p = 0; p < NPOISON; p++) {
-        int prev = transaction_alloc_poison_set(POISONS[p]);
-        observe(wire.data, wire.size, false, &dig[p]);
-        (void)transaction_alloc_poison_set(prev);
-    }
+    collect_poison_digests(wire.data, wire.size, false, NPOISON, dig);
 
     TEST("no consumer reads a script byte past .size (0x00 vs 0xAA)") {
         ASSERT_EQ(memcmp(dig[0].data, dig[1].data, 32), 0);
@@ -246,10 +294,8 @@ int test_script_tail_poison(void)
     /* Production leaves the tail indeterminate rather than filled. Whatever
      * the allocator happens to hand back must land on the same digest. */
     TEST("production (no fill) matches the zero-filled digest") {
-        int prev = transaction_alloc_poison_set(-1);
         struct uint256 d;
-        observe(wire.data, wire.size, false, &d);
-        (void)transaction_alloc_poison_set(prev);
+        observe_with_poison_fill(wire.data, wire.size, -1, false, &d);
         ASSERT_EQ(memcmp(dig[0].data, d.data, 32), 0);
         PASS();
     }
@@ -257,11 +303,7 @@ int test_script_tail_poison(void)
     /* Teeth. If this passes, the comparison above was vacuous. */
     TEST("negative control: a one-byte tail read DOES diverge") {
         struct uint256 leak[2];
-        for (int p = 0; p < 2; p++) {
-            int prev = transaction_alloc_poison_set(POISONS[p]);
-            observe(wire.data, wire.size, true, &leak[p]);
-            (void)transaction_alloc_poison_set(prev);
-        }
+        collect_poison_digests(wire.data, wire.size, true, 2, leak);
         ASSERT_EQ(memcmp(leak[0].data, leak[1].data, 32) != 0 ? 1 : 0, 1);
         PASS();
     }
@@ -275,28 +317,7 @@ int test_script_tail_poison(void)
      * equal the pattern the corpus wrote, never the 0xAA poison. */
     TEST("a cut mid-script leaves .size 0, never a length over unwritten bytes") {
         int bad = 0, cuts = 0, deep = 0;
-        static unsigned char expect[MAX_SCRIPT_SIZE];
-        for (int k = 1; k < 64; k++) {
-            size_t cut = wire.size * (size_t)k / 64;
-            if (cut == 0 || cut >= wire.size) continue;
-            cuts++;
-            int prev = transaction_alloc_poison_set(0xAA);
-            struct byte_stream s;
-            stream_init_from_data(&s, wire.data, cut);
-            struct transaction tx;
-            (void)transaction_deserialize(&tx, &s);
-            /* Whether it parsed or not, inspect what it left behind. */
-            for (size_t i = 0; i < tx.num_vin; i++) {
-                const struct script *sc = &tx.vin[i].script_sig;
-                if (sc->size > MAX_SCRIPT_SIZE) { bad++; continue; }
-                if (sc->size == 0) continue;
-                deep++;
-                fill_pattern(expect, sc->size, (unsigned)i);
-                if (memcmp(sc->data, expect, sc->size) != 0) bad++;
-            }
-            transaction_free(&tx);
-            (void)transaction_alloc_poison_set(prev);
-        }
+        scan_mid_script_cuts(wire.data, wire.size, &bad, &cuts, &deep);
         ASSERT_EQ(bad, 0);
         ASSERT_EQ(cuts, 63);
         /* Prove the loop actually reached scripts rather than bouncing off
@@ -313,10 +334,8 @@ int test_script_tail_poison(void)
         if (pad) {
             for (int off = 1; off < 8; off++) {
                 memcpy(pad + off, wire.data, wire.size);
-                int prev = transaction_alloc_poison_set(0x55);
                 struct uint256 d;
-                observe(pad + off, wire.size, false, &d);
-                (void)transaction_alloc_poison_set(prev);
+                observe_with_poison_fill(pad + off, wire.size, 0x55, false, &d);
                 ASSERT_EQ(memcmp(dig[0].data, d.data, 32), 0);
             }
             free(pad);
