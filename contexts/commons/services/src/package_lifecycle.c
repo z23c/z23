@@ -227,6 +227,158 @@ static void pkgl_plan_installed(const char *datadir,
                             : result.message);
 }
 
+static struct zcl_result pkgl_plan_bind_lock(
+    struct pkgl_ctx *ctx, const char *name_or_root, int64_t now_unix,
+    struct vcs_package_lock *lock, struct package_lifecycle_plan_report *out)
+{
+    uint8_t target[32];
+    struct zcl_result r = pkgl_resolve_target(ctx, name_or_root, target);
+    if (!r.ok) {
+        pkgl_note(out->rule, sizeof(out->rule), out->detail,
+                  sizeof(out->detail), "target-unresolved", r.message);
+        pkgl_ctx_close(ctx);
+        return r;
+    }
+
+    uint8_t lock_root[32];
+    r = pkgl_lock_for(ctx, target, lock, lock_root);
+    if (!r.ok) {
+        pkgl_note(out->rule, sizeof(out->rule), out->detail,
+                  sizeof(out->detail), "dependency-lock", r.message);
+        pkgl_ctx_close(ctx);
+        return r;
+    }
+
+    memcpy(out->plan.target_root, target, 32);
+    memcpy(out->plan.lock_root, lock_root, 32);
+    out->plan.created_unix = now_unix;
+    out->plan.expires_unix = now_unix + VCS_PACKAGE_PLAN_TTL_SECONDS;
+    out->plan.step_count = lock->count;
+    out->ready = true;
+    return ZCL_OK;
+}
+
+static struct zcl_result pkgl_plan_fill_step(
+    const struct pkgl_ctx *ctx, const struct vcs_package_lock_node *n,
+    struct vcs_package_plan_step *s)
+{
+    memcpy(s->root, n->root, 32);
+    (void)snprintf(s->name, sizeof(s->name), "%s", n->name);
+    (void)snprintf(s->semver, sizeof(s->semver), "%s", n->semver);
+    s->depth = n->depth;
+    const struct vcs_package_release *rel = pkgl_release_for_root(ctx, n->root);
+    if (rel)
+        (void)snprintf(s->license, sizeof(s->license), "%s", rel->license);
+
+    char installed[PKGL_PATH_MAX];
+    struct zcl_result r =
+        pkgl_installed_dir(ctx, n->root, installed, sizeof(installed));
+    if (r.ok)
+        r = pkgl_exists(installed, &s->installed);
+    if (r.ok)
+        r = pkgl_survey_package(ctx, n->root, &s->complete, &s->total_bytes,
+                                &s->total_chunks);
+    return r;
+}
+
+static void pkgl_plan_classify_step(const struct pkgl_ctx *ctx,
+                                    const char *datadir,
+                                    const struct vcs_package_lock_node *n,
+                                    struct vcs_package_plan_step *s,
+                                    struct package_lifecycle_plan_report *out)
+{
+    if (s->installed) {
+        pkgl_plan_installed(datadir, s, out);
+    } else if (!s->complete) {
+        /* Honest phase boundary: this layer does not fetch. */
+        s->state = VCS_PACKAGE_LIFECYCLE_FETCHING;
+        out->ready = false;
+        if (!out->rule[0])
+            pkgl_note(out->rule, sizeof(out->rule), out->detail,
+                      sizeof(out->detail), "package-incomplete", s->name);
+    } else {
+        char vrule[PACKAGE_LIFECYCLE_RULE_MAX + 1u];
+        struct zcl_result vr =
+            pkgl_verify_package(ctx, n->root, vrule, sizeof(vrule));
+        if (vr.ok) {
+            s->state = VCS_PACKAGE_LIFECYCLE_VERIFIED;
+        } else {
+            s->state = VCS_PACKAGE_LIFECYCLE_DISCOVERED;
+            out->ready = false;
+            if (!out->rule[0])
+                pkgl_note(out->rule, sizeof(out->rule), out->detail,
+                          sizeof(out->detail),
+                          vrule[0] ? vrule : "verify-failed", vr.message);
+        }
+    }
+}
+
+static struct zcl_result pkgl_plan_survey_steps(
+    struct pkgl_ctx *ctx, const char *datadir,
+    const struct vcs_package_lock *lock,
+    struct package_lifecycle_plan_report *out)
+{
+    for (size_t i = 0; i < lock->count; i++) {
+        const struct vcs_package_lock_node *n = &lock->nodes[i];
+        struct vcs_package_plan_step *s = &out->plan.steps[i];
+        struct zcl_result r = pkgl_plan_fill_step(ctx, n, s);
+        if (!r.ok) {
+            pkgl_note(out->rule, sizeof(out->rule), out->detail,
+                      sizeof(out->detail), "survey-failed", r.message);
+            pkgl_ctx_close(ctx);
+            return r;
+        }
+        pkgl_plan_classify_step(ctx, datadir, n, s, out);
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result pkgl_plan_validate_write(
+    struct pkgl_ctx *ctx, struct package_lifecycle_plan_report *out)
+{
+    enum vcs_package_install_error perr = vcs_package_plan_validate(&out->plan);
+    if (perr == VCS_PACKAGE_INSTALL_OK)
+        perr = vcs_package_plan_id(&out->plan, out->plan_id);
+    if (perr != VCS_PACKAGE_INSTALL_OK) {
+        pkgl_note(out->rule, sizeof(out->rule), out->detail,
+                  sizeof(out->detail), "plan-invalid",
+                  vcs_package_install_error_string(perr));
+        pkgl_ctx_close(ctx);
+        return ZCL_ERR(-1, "plan rejected: %s",
+                       vcs_package_install_error_string(perr));
+    }
+
+    uint8_t *wire = NULL;
+    size_t wire_len = 0;
+    perr = vcs_package_plan_serialize(&out->plan, &wire, &wire_len);
+    if (perr != VCS_PACKAGE_INSTALL_OK) {
+        pkgl_note(out->rule, sizeof(out->rule), out->detail,
+                  sizeof(out->detail), "plan-encode",
+                  vcs_package_install_error_string(perr));
+        pkgl_ctx_close(ctx);
+        return ZCL_ERR(-1, "cannot encode the plan: %s",
+                       vcs_package_install_error_string(perr));
+    }
+    char path[PKGL_PATH_MAX];
+    struct zcl_result r = pkgl_plan_path(ctx, out->plan_id, path, sizeof(path));
+    if (r.ok) {
+        char dir[PKGL_PATH_MAX];
+        r = pkgl_join(ctx, "addplans", dir, sizeof(dir));
+        if (r.ok)
+            r = pkgl_mkdir_p(dir);
+        if (r.ok)
+            r = pkgl_write_atomic(path, wire, wire_len);
+    }
+    free(wire);
+    pkgl_ctx_close(ctx);
+    if (!r.ok) {
+        pkgl_note(out->rule, sizeof(out->rule), out->detail,
+                  sizeof(out->detail), "plan-write", r.message);
+        return r;
+    }
+    return ZCL_OK;
+}
+
 struct zcl_result package_lifecycle_plan(
     const char *datadir, const char *name_or_root, int64_t now_unix,
     struct package_lifecycle_plan_report *out)
@@ -239,125 +391,15 @@ struct zcl_result package_lifecycle_plan(
     struct pkgl_ctx ctx;
     ZCL_CHECK(pkgl_ctx_open(&ctx, datadir));
 
-    uint8_t target[32];
-    struct zcl_result r = pkgl_resolve_target(&ctx, name_or_root, target);
-    if (!r.ok) {
-        pkgl_note(out->rule, sizeof(out->rule), out->detail,
-                  sizeof(out->detail), "target-unresolved", r.message);
-        pkgl_ctx_close(&ctx);
-        return r;
-    }
-
     struct vcs_package_lock lock;
-    uint8_t lock_root[32];
-    r = pkgl_lock_for(&ctx, target, &lock, lock_root);
-    if (!r.ok) {
-        pkgl_note(out->rule, sizeof(out->rule), out->detail,
-                  sizeof(out->detail), "dependency-lock", r.message);
-        pkgl_ctx_close(&ctx);
+    struct zcl_result r = pkgl_plan_bind_lock(&ctx, name_or_root, now_unix,
+                                              &lock, out);
+    if (!r.ok)
         return r;
-    }
-
-    memcpy(out->plan.target_root, target, 32);
-    memcpy(out->plan.lock_root, lock_root, 32);
-    out->plan.created_unix = now_unix;
-    out->plan.expires_unix = now_unix + VCS_PACKAGE_PLAN_TTL_SECONDS;
-    out->plan.step_count = lock.count;
-    out->ready = true;
-
-    for (size_t i = 0; i < lock.count; i++) {
-        const struct vcs_package_lock_node *n = &lock.nodes[i];
-        struct vcs_package_plan_step *s = &out->plan.steps[i];
-        memcpy(s->root, n->root, 32);
-        (void)snprintf(s->name, sizeof(s->name), "%s", n->name);
-        (void)snprintf(s->semver, sizeof(s->semver), "%s", n->semver);
-        s->depth = n->depth;
-        const struct vcs_package_release *rel =
-            pkgl_release_for_root(&ctx, n->root);
-        if (rel)
-            (void)snprintf(s->license, sizeof(s->license), "%s", rel->license);
-
-        char installed[PKGL_PATH_MAX];
-        r = pkgl_installed_dir(&ctx, n->root, installed, sizeof(installed));
-        if (r.ok)
-            r = pkgl_exists(installed, &s->installed);
-        if (r.ok)
-            r = pkgl_survey_package(&ctx, n->root, &s->complete,
-                                    &s->total_bytes, &s->total_chunks);
-        if (!r.ok) {
-            pkgl_note(out->rule, sizeof(out->rule), out->detail,
-                      sizeof(out->detail), "survey-failed", r.message);
-            pkgl_ctx_close(&ctx);
-            return r;
-        }
-
-        if (s->installed) {
-            pkgl_plan_installed(datadir, s, out);
-        } else if (!s->complete) {
-            /* Honest phase boundary: this layer does not fetch. */
-            s->state = VCS_PACKAGE_LIFECYCLE_FETCHING;
-            out->ready = false;
-            if (!out->rule[0])
-                pkgl_note(out->rule, sizeof(out->rule), out->detail,
-                          sizeof(out->detail), "package-incomplete", s->name);
-        } else {
-            char vrule[PACKAGE_LIFECYCLE_RULE_MAX + 1u];
-            struct zcl_result vr = pkgl_verify_package(&ctx, n->root, vrule,
-                                                       sizeof(vrule));
-            if (vr.ok) {
-                s->state = VCS_PACKAGE_LIFECYCLE_VERIFIED;
-            } else {
-                s->state = VCS_PACKAGE_LIFECYCLE_DISCOVERED;
-                out->ready = false;
-                if (!out->rule[0])
-                    pkgl_note(out->rule, sizeof(out->rule), out->detail,
-                              sizeof(out->detail),
-                              vrule[0] ? vrule : "verify-failed", vr.message);
-            }
-        }
-    }
-
-    enum vcs_package_install_error perr = vcs_package_plan_validate(&out->plan);
-    if (perr == VCS_PACKAGE_INSTALL_OK)
-        perr = vcs_package_plan_id(&out->plan, out->plan_id);
-    if (perr != VCS_PACKAGE_INSTALL_OK) {
-        pkgl_note(out->rule, sizeof(out->rule), out->detail,
-                  sizeof(out->detail), "plan-invalid",
-                  vcs_package_install_error_string(perr));
-        pkgl_ctx_close(&ctx);
-        return ZCL_ERR(-1, "plan rejected: %s",
-                       vcs_package_install_error_string(perr));
-    }
-
-    uint8_t *wire = NULL;
-    size_t wire_len = 0;
-    perr = vcs_package_plan_serialize(&out->plan, &wire, &wire_len);
-    if (perr != VCS_PACKAGE_INSTALL_OK) {
-        pkgl_note(out->rule, sizeof(out->rule), out->detail,
-                  sizeof(out->detail), "plan-encode",
-                  vcs_package_install_error_string(perr));
-        pkgl_ctx_close(&ctx);
-        return ZCL_ERR(-1, "cannot encode the plan: %s",
-                       vcs_package_install_error_string(perr));
-    }
-    char path[PKGL_PATH_MAX];
-    r = pkgl_plan_path(&ctx, out->plan_id, path, sizeof(path));
-    if (r.ok) {
-        char dir[PKGL_PATH_MAX];
-        r = pkgl_join(&ctx, "addplans", dir, sizeof(dir));
-        if (r.ok)
-            r = pkgl_mkdir_p(dir);
-        if (r.ok)
-            r = pkgl_write_atomic(path, wire, wire_len);
-    }
-    free(wire);
-    pkgl_ctx_close(&ctx);
-    if (!r.ok) {
-        pkgl_note(out->rule, sizeof(out->rule), out->detail,
-                  sizeof(out->detail), "plan-write", r.message);
+    r = pkgl_plan_survey_steps(&ctx, datadir, &lock, out);
+    if (!r.ok)
         return r;
-    }
-    return ZCL_OK;
+    return pkgl_plan_validate_write(&ctx, out);
 }
 
 /* ── commit ─────────────────────────────────────────────────────────── */

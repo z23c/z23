@@ -506,7 +506,6 @@ contexts/commons/packages/zwalk/src/zwalk.c:visit_node:24
 contexts/commons/packages/zwrap/src/zwrap.c:zwrap:23
 contexts/commons/packages/zxml/app/main.c:main:24
 contexts/commons/services/src/metaverse_space_scout_service.c:metaverse_space_scout_run:35
-contexts/commons/services/src/package_lifecycle.c:package_lifecycle_plan:22
 contexts/commons/services/src/package_lifecycle_install.c:package_lifecycle_installed_programs:21
 contexts/commons/services/src/package_lifecycle_install.c:pkgl_activate:16
 contexts/commons/services/src/package_lifecycle_install.c:pkgl_build_and_install:34
