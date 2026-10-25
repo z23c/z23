@@ -38,6 +38,19 @@ static bool validate_manager(const aircraft_manager_t* manager);
 static bool validate_aircraft_id(const aircraft_manager_t* manager, int id);
 static void initialize_spawn_points(aircraft_manager_t* manager);
 static void reset_aircraft_state(managed_aircraft_t* ma);
+static void check_bullet_collisions(aircraft_manager_t* manager);
+static int find_bullet_hit_target(aircraft_manager_t* manager, int shooter_index,
+                                  Vector3 bullet_pos);
+static void apply_bullet_hit(aircraft_manager_t* manager, int shooter_index,
+                             bullet_t* bullet, int target_index);
+static void check_aircraft_collisions(aircraft_manager_t* manager);
+static void collide_aircraft_pair(aircraft_manager_t* manager, int i, int j);
+static void refresh_ghost_target(aircraft_manager_t* manager, managed_aircraft_t* ai,
+                                 int ghost_type);
+static void fly_patrol_circle(managed_aircraft_t* ai, float dt);
+static void chase_ghost_target(aircraft_manager_t* manager, managed_aircraft_t* ai,
+                               int ghost_type, float dt);
+static void steer_toward_target(managed_aircraft_t* ai, Vector3 to_target, float dt);
 
 /*
  * Core Management Functions
@@ -291,105 +304,15 @@ void aircraft_manager_update_ai(aircraft_manager_t* manager, managed_aircraft_t*
     /* Each AI has a different behavior pattern based on ID */
     int ghost_type = ai->id % 4;
     
-    switch (ghost_type) {
-        case 0: /* Blinky - Direct chase (but slow) */
-            if (ai->target_id < 0 || ai->target_id >= manager->aircraft_count || 
-                manager->aircraft[ai->target_id].health <= 0) {
-                ai->target_id = 0; /* Always chase player */
-            }
-            break;
-            
-        case 1: /* Pinky - Try to get ahead */
-            /* Same target but different behavior */
-            if (ai->target_id < 0) ai->target_id = 0;
-            break;
-            
-        case 2: /* Inky - Erratic movement */
-            /* Random wandering */
-            break;
-            
-        case 3: /* Clyde - Lazy, maintains distance */
-            if (ai->target_id < 0) ai->target_id = 0;
-            break;
-    }
+    refresh_ghost_target(manager, ai, ghost_type);
     
     /* Simple patrol if no target */
     if (ai->target_id < 0 || ghost_type == 2) {
-        /* Lazy circular patrol */
-        float time = GetTime() + ai->id * 1.5f; /* Offset for each ghost */
-        float patrol_x = sinf(time * 0.3f) * 0.5f;
-        float patrol_y = cosf(time * 0.2f) * 0.2f;
-        
-        /* Slow, smooth movement */
-        aircraft_update(ai->aircraft, patrol_x, patrol_y, dt);
-        
-        /* Keep speed low */
-        ai->aircraft->speed = AIRCRAFT_MIN_SPEED * 1.2f;
+        fly_patrol_circle(ai, dt);
         return;
     }
     
-    /* Get target */
-    managed_aircraft_t* target = &manager->aircraft[ai->target_id];
-    if (!target->aircraft || target->health <= 0) {
-        ai->target_id = -1;
-        return;
-    }
-    
-    /* Calculate direction to target */
-    Vector3 to_target = Vector3Subtract(target->aircraft->position, ai->aircraft->position);
-    float distance = Vector3Length(to_target);
-    
-    /* Ghost-specific behavior */
-    if (ghost_type == 1) { /* Pinky - aim ahead */
-        Vector3 ahead = Vector3Scale(aircraft_get_forward_vector(target->aircraft), 100.0f);
-        to_target = Vector3Subtract(
-            Vector3Add(target->aircraft->position, ahead),
-            ai->aircraft->position
-        );
-    } else if (ghost_type == 3 && distance < 150.0f) { /* Clyde - run away when close */
-        to_target = Vector3Scale(to_target, -1.0f); /* Reverse direction */
-    }
-    
-    /* Calculate desired angles - but make turns SLOW */
-    /* Avoid division by zero in Vector3Normalize */
-    float target_length = Vector3Length(to_target);
-    if (target_length < 0.001f) {
-        /* If too close or at same position, just maintain current direction */
-        to_target = (Vector3){0.0f, 0.0f, 1.0f};
-    } else {
-        to_target = Vector3Normalize(to_target);
-    }
-    float target_yaw = atan2f(to_target.x, to_target.z) * RAD2DEG;
-    /* Clamp to_target.y to avoid domain error in asinf */
-    float clamped_y = fmaxf(-1.0f, fminf(1.0f, to_target.y));
-    float target_pitch = -asinf(clamped_y) * RAD2DEG;
-    
-    /* Calculate turn difference */
-    float yaw_diff = target_yaw - ai->aircraft->yaw;
-    while (yaw_diff > 180) yaw_diff -= 360;
-    while (yaw_diff < -180) yaw_diff += 360;
-    
-    float pitch_diff = target_pitch - ai->aircraft->pitch;
-    
-    /* VERY SLOW turning - like ghosts changing direction */
-    float turn_rate = 0.3f; /* Much slower than before */
-    float input_x = Clamp(yaw_diff / 45.0f * turn_rate, -0.5f, 0.5f);
-    float input_y = Clamp(pitch_diff / 30.0f * turn_rate, -0.3f, 0.3f);
-    
-    /* Add some wobble for ghost-like movement */
-    float wobble = sinf(GetTime() * 2.0f + ai->id) * 0.1f;
-    input_x += wobble;
-    
-    /* Update aircraft with slow inputs */
-    aircraft_update(ai->aircraft, input_x, input_y, dt);
-    
-    /* Keep speed LOW - ghosts don't boost */
-    ai->aircraft->speed = Clamp(ai->aircraft->speed, 
-                                AIRCRAFT_MIN_SPEED, 
-                                AIRCRAFT_BASE_SPEED * 0.8f); /* 80% of base speed max */
-    
-    /* No firing - ghosts just chase */
-    /* No boosting - ghosts maintain steady speed */
+    chase_ghost_target(manager, ai, ghost_type, dt);
 }
 
 /*
@@ -447,103 +370,8 @@ void aircraft_manager_fire_weapon_aimed(aircraft_manager_t* manager, int aircraf
 void aircraft_manager_check_collisions(aircraft_manager_t* manager) {
     if (!validate_manager(manager)) return;
     
-    /* Check bullet-aircraft collisions */
-    for (int i = 0; i < manager->aircraft_count; i++) {
-        managed_aircraft_t* shooter = &manager->aircraft[i];
-        if (!shooter->weapons) continue;
-        
-        /* Check each bullet in linked list */
-        bullet_t* bullet = shooter->weapons->bullets_head;
-        bullet_t* prev = NULL;
-        
-        while (bullet) {
-            Vector3 bullet_pos = bullet->position;
-            bool hit = false;
-            
-            /* Check against all other aircraft */
-            for (int j = 0; j < manager->aircraft_count; j++) {
-                if (i == j) continue;  /* Don't hit yourself */
-                
-                managed_aircraft_t* target = &manager->aircraft[j];
-                if (!target->aircraft || target->health <= 0) continue;
-                
-                /* Skip friendly fire unless enabled */
-                if (shooter->team_id >= 0 && shooter->team_id == target->team_id) {
-                    continue;
-                }
-                
-                /* Check distance */
-                if (!target->aircraft) continue;
-                float dist = Vector3Distance(bullet_pos, target->aircraft->position);
-                if (dist < manager->projectile_radius) {
-                    /* Hit! */
-                    float damage = bullet->damage;
-                    
-                    /* Apply damage multipliers */
-                    if (shooter->powerup_effects.double_damage_active) {
-                        damage *= 2.0f;
-                    }
-                    
-                    aircraft_manager_damage_aircraft(manager, j, damage, i);
-                    hit = true;
-                    break;
-                }
-            }
-            
-            if (hit) {
-                /* Remove this bullet from the list */
-                bullet_t* to_remove = bullet;
-                if (prev) {
-                    prev->next = bullet->next;
-                } else {
-                    shooter->weapons->bullets_head = bullet->next;
-                }
-                bullet = bullet->next;
-                free(to_remove);
-                shooter->weapons->bullet_count--;
-            } else {
-                prev = bullet;
-                bullet = bullet->next;
-            }
-        }
-    }
-    
-    /* Check aircraft-aircraft collisions */
-    for (int i = 0; i < manager->aircraft_count; i++) {
-        for (int j = i + 1; j < manager->aircraft_count; j++) {
-            managed_aircraft_t* a1 = &manager->aircraft[i];
-            managed_aircraft_t* a2 = &manager->aircraft[j];
-            
-            if (!a1->aircraft || !a2->aircraft) continue;
-            if (a1->health <= 0 || a2->health <= 0) continue;
-            
-            float dist = Vector3Distance(a1->aircraft->position, a2->aircraft->position);
-            if (dist < manager->collision_radius * 2) {
-                /* Collision damage */
-                aircraft_manager_damage_aircraft(manager, i, 50.0f, j);
-                aircraft_manager_damage_aircraft(manager, j, 50.0f, i);
-                
-                /* Push aircraft apart */
-                Vector3 diff = Vector3Subtract(a1->aircraft->position, a2->aircraft->position);
-                float diff_length = Vector3Length(diff);
-                Vector3 push;
-                if (diff_length < 0.001f) {
-                    /* If at exact same position, push in random direction */
-                    push = (Vector3){1.0f, 0.0f, 0.0f};
-                } else {
-                    push = Vector3Normalize(diff);
-                }
-                a1->aircraft->position = Vector3Add(
-                    a1->aircraft->position, 
-                    Vector3Scale(push, manager->collision_radius)
-                );
-                a2->aircraft->position = Vector3Add(
-                    a2->aircraft->position, 
-                    Vector3Scale(push, -manager->collision_radius)
-                );
-            }
-        }
-    }
+    check_bullet_collisions(manager);
+    check_aircraft_collisions(manager);
 }
 
 void aircraft_manager_damage_aircraft(aircraft_manager_t* manager, int id, 
@@ -712,6 +540,234 @@ static void reset_aircraft_state(managed_aircraft_t* ma) {
     ma->team_id = -1;
 }
 
+static int find_bullet_hit_target(aircraft_manager_t* manager, int shooter_index,
+                                  Vector3 bullet_pos) {
+    /* Check against all other aircraft */
+    for (int j = 0; j < manager->aircraft_count; j++) {
+        if (shooter_index == j) continue;  /* Don't hit yourself */
+        
+        managed_aircraft_t* target = &manager->aircraft[j];
+        if (!target->aircraft || target->health <= 0) continue;
+        
+        /* Skip friendly fire unless enabled */
+        managed_aircraft_t* shooter = &manager->aircraft[shooter_index];
+        if (shooter->team_id >= 0 && shooter->team_id == target->team_id) {
+            continue;
+        }
+        
+        /* Check distance */
+        if (!target->aircraft) continue;
+        float dist = Vector3Distance(bullet_pos, target->aircraft->position);
+        if (dist < manager->projectile_radius) {
+            return j;
+        }
+    }
+    return -1;
+}
+
+static void apply_bullet_hit(aircraft_manager_t* manager, int shooter_index,
+                             bullet_t* bullet, int target_index) {
+    /* Hit! */
+    float damage = bullet->damage;
+    
+    /* Apply damage multipliers */
+    managed_aircraft_t* shooter = &manager->aircraft[shooter_index];
+    if (shooter->powerup_effects.double_damage_active) {
+        damage *= 2.0f;
+    }
+    
+    aircraft_manager_damage_aircraft(manager, target_index, damage, shooter_index);
+}
+
+static void check_bullet_collisions(aircraft_manager_t* manager) {
+    /* Check bullet-aircraft collisions */
+    for (int i = 0; i < manager->aircraft_count; i++) {
+        managed_aircraft_t* shooter = &manager->aircraft[i];
+        if (!shooter->weapons) continue;
+        
+        /* Check each bullet in linked list */
+        bullet_t* bullet = shooter->weapons->bullets_head;
+        bullet_t* prev = NULL;
+        
+        while (bullet) {
+            Vector3 bullet_pos = bullet->position;
+            int hit_index = find_bullet_hit_target(manager, i, bullet_pos);
+            
+            if (hit_index >= 0) {
+                apply_bullet_hit(manager, i, bullet, hit_index);
+                
+                /* Remove this bullet from the list */
+                bullet_t* to_remove = bullet;
+                if (prev) {
+                    prev->next = bullet->next;
+                } else {
+                    shooter->weapons->bullets_head = bullet->next;
+                }
+                bullet = bullet->next;
+                free(to_remove);
+                shooter->weapons->bullet_count--;
+            } else {
+                prev = bullet;
+                bullet = bullet->next;
+            }
+        }
+    }
+}
+
+static void collide_aircraft_pair(aircraft_manager_t* manager, int i, int j) {
+    managed_aircraft_t* a1 = &manager->aircraft[i];
+    managed_aircraft_t* a2 = &manager->aircraft[j];
+    
+    /* Collision damage */
+    aircraft_manager_damage_aircraft(manager, i, 50.0f, j);
+    aircraft_manager_damage_aircraft(manager, j, 50.0f, i);
+    
+    /* Push aircraft apart */
+    Vector3 diff = Vector3Subtract(a1->aircraft->position, a2->aircraft->position);
+    float diff_length = Vector3Length(diff);
+    Vector3 push;
+    if (diff_length < 0.001f) {
+        /* If at exact same position, push in random direction */
+        push = (Vector3){1.0f, 0.0f, 0.0f};
+    } else {
+        push = Vector3Normalize(diff);
+    }
+    a1->aircraft->position = Vector3Add(
+        a1->aircraft->position, 
+        Vector3Scale(push, manager->collision_radius)
+    );
+    a2->aircraft->position = Vector3Add(
+        a2->aircraft->position, 
+        Vector3Scale(push, -manager->collision_radius)
+    );
+}
+
+static void check_aircraft_collisions(aircraft_manager_t* manager) {
+    /* Check aircraft-aircraft collisions */
+    for (int i = 0; i < manager->aircraft_count; i++) {
+        for (int j = i + 1; j < manager->aircraft_count; j++) {
+            managed_aircraft_t* a1 = &manager->aircraft[i];
+            managed_aircraft_t* a2 = &manager->aircraft[j];
+            
+            if (!a1->aircraft || !a2->aircraft) continue;
+            if (a1->health <= 0 || a2->health <= 0) continue;
+            
+            float dist = Vector3Distance(a1->aircraft->position, a2->aircraft->position);
+            if (dist < manager->collision_radius * 2) {
+                collide_aircraft_pair(manager, i, j);
+            }
+        }
+    }
+}
+
+static void refresh_ghost_target(aircraft_manager_t* manager, managed_aircraft_t* ai,
+                                 int ghost_type) {
+    switch (ghost_type) {
+        case 0: /* Blinky - Direct chase (but slow) */
+            if (ai->target_id < 0 || ai->target_id >= manager->aircraft_count || 
+                manager->aircraft[ai->target_id].health <= 0) {
+                ai->target_id = 0; /* Always chase player */
+            }
+            break;
+            
+        case 1: /* Pinky - Try to get ahead */
+            /* Same target but different behavior */
+            if (ai->target_id < 0) ai->target_id = 0;
+            break;
+            
+        case 2: /* Inky - Erratic movement */
+            /* Random wandering */
+            break;
+            
+        case 3: /* Clyde - Lazy, maintains distance */
+            if (ai->target_id < 0) ai->target_id = 0;
+            break;
+    }
+}
+
+static void fly_patrol_circle(managed_aircraft_t* ai, float dt) {
+    /* Lazy circular patrol */
+    float time = GetTime() + ai->id * 1.5f; /* Offset for each ghost */
+    float patrol_x = sinf(time * 0.3f) * 0.5f;
+    float patrol_y = cosf(time * 0.2f) * 0.2f;
+    
+    /* Slow, smooth movement */
+    aircraft_update(ai->aircraft, patrol_x, patrol_y, dt);
+    
+    /* Keep speed low */
+    ai->aircraft->speed = AIRCRAFT_MIN_SPEED * 1.2f;
+}
+
+static void steer_toward_target(managed_aircraft_t* ai, Vector3 to_target, float dt) {
+    /* Calculate desired angles - but make turns SLOW */
+    /* Avoid division by zero in Vector3Normalize */
+    float target_length = Vector3Length(to_target);
+    if (target_length < 0.001f) {
+        /* If too close or at same position, just maintain current direction */
+        to_target = (Vector3){0.0f, 0.0f, 1.0f};
+    } else {
+        to_target = Vector3Normalize(to_target);
+    }
+    float target_yaw = atan2f(to_target.x, to_target.z) * RAD2DEG;
+    /* Clamp to_target.y to avoid domain error in asinf */
+    float clamped_y = fmaxf(-1.0f, fminf(1.0f, to_target.y));
+    float target_pitch = -asinf(clamped_y) * RAD2DEG;
+    
+    /* Calculate turn difference */
+    float yaw_diff = target_yaw - ai->aircraft->yaw;
+    while (yaw_diff > 180) yaw_diff -= 360;
+    while (yaw_diff < -180) yaw_diff += 360;
+    
+    float pitch_diff = target_pitch - ai->aircraft->pitch;
+    
+    /* VERY SLOW turning - like ghosts changing direction */
+    float turn_rate = 0.3f; /* Much slower than before */
+    float input_x = Clamp(yaw_diff / 45.0f * turn_rate, -0.5f, 0.5f);
+    float input_y = Clamp(pitch_diff / 30.0f * turn_rate, -0.3f, 0.3f);
+    
+    /* Add some wobble for ghost-like movement */
+    float wobble = sinf(GetTime() * 2.0f + ai->id) * 0.1f;
+    input_x += wobble;
+    
+    /* Update aircraft with slow inputs */
+    aircraft_update(ai->aircraft, input_x, input_y, dt);
+    
+    /* Keep speed LOW - ghosts don't boost */
+    ai->aircraft->speed = Clamp(ai->aircraft->speed, 
+                                AIRCRAFT_MIN_SPEED, 
+                                AIRCRAFT_BASE_SPEED * 0.8f); /* 80% of base speed max */
+    
+    /* No firing - ghosts just chase */
+    /* No boosting - ghosts maintain steady speed */
+}
+
+static void chase_ghost_target(aircraft_manager_t* manager, managed_aircraft_t* ai,
+                               int ghost_type, float dt) {
+    /* Get target */
+    managed_aircraft_t* target = &manager->aircraft[ai->target_id];
+    if (!target->aircraft || target->health <= 0) {
+        ai->target_id = -1;
+        return;
+    }
+    
+    /* Calculate direction to target */
+    Vector3 to_target = Vector3Subtract(target->aircraft->position, ai->aircraft->position);
+    float distance = Vector3Length(to_target);
+    
+    /* Ghost-specific behavior */
+    if (ghost_type == 1) { /* Pinky - aim ahead */
+        Vector3 ahead = Vector3Scale(aircraft_get_forward_vector(target->aircraft), 100.0f);
+        to_target = Vector3Subtract(
+            Vector3Add(target->aircraft->position, ahead),
+            ai->aircraft->position
+        );
+    } else if (ghost_type == 3 && distance < 150.0f) { /* Clyde - run away when close */
+        to_target = Vector3Scale(to_target, -1.0f); /* Reverse direction */
+    }
+    
+    steer_toward_target(ai, to_target, dt);
+}
+
 #if defined(SKYCOMBAT_SELFTEST_DAMAGE)
 /* Exercise the real damage path without constructors or a rendering context. */
 static int damage_selftest_unchanged(float damage) {
@@ -784,3 +840,4 @@ int main(void) {
     return 0;
 }
 #endif
+
