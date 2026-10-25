@@ -1072,7 +1072,6 @@ engine/composition/src/boot_mint_anchor_preflight.c:copy_exact_file:16
 engine/composition/src/boot_mint_anchor_preflight.c:windows_family_preflight:48
 engine/composition/src/boot_mint_anchor_preflight.c:windows_projection_snapshot_allowed:23
 engine/composition/src/boot_mint_anchor_reset.c:boot_mint_anchor_genesis_reset:30
-engine/composition/src/boot_mint_anchor_rom_keystone.c:rom_keystone_fold_anchors:19
 engine/composition/src/boot_node_utilities.c:boot_metrics_external_gauges:16
 engine/composition/src/boot_params_gate.c:boot_params_gate_evaluate:16
 engine/composition/src/boot_ratify_mint_anchor.c:ratify_seam_core:18

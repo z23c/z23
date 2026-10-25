@@ -67,6 +67,23 @@ static void rom_keystone_hex(const uint8_t b[32], char out[65])
         snprintf(out + 2 * i, 3, "%02x", b[i]);
 }
 
+/* True when one anchors row is malformed: bad pool, missing or non-32-byte
+ * root, height outside 0..keystone_height, empty tree, or a saturated
+ * count. Root length is measured inside this predicate so
+ * sqlite3_column_bytes runs only after the pool and root tests. */
+static bool rom_keystone_anchor_row_malformed(sqlite3_stmt *st, int64_t pool,
+                                              const void *root,
+                                              int64_t height,
+                                              int32_t keystone_height,
+                                              const void *tree, int tree_len,
+                                              uint64_t count)
+{
+    return (pool != ANCHOR_POOL_SPROUT && pool != ANCHOR_POOL_SAPLING) ||
+        !root || sqlite3_column_bytes(st, 1) != 32 ||
+        height < 0 || height > keystone_height ||
+        !tree || tree_len <= 0 || count == UINT64_MAX;
+}
+
 /* Fold the combined anchors table exactly as the bundle export does
  * (copy_anchors in consensus_state_snapshot_export_write.c): same SQL, same
  * codec rows, same per-pool frontier (root at the max height), same
@@ -101,10 +118,9 @@ static bool rom_keystone_fold_anchors(sqlite3 *pdb, int32_t keystone_height,
         int64_t height = sqlite3_column_int64(st, 2);
         const void *tree = sqlite3_column_blob(st, 3);
         int tree_len = sqlite3_column_bytes(st, 3);
-        if ((pool != ANCHOR_POOL_SPROUT && pool != ANCHOR_POOL_SAPLING) ||
-            !root || sqlite3_column_bytes(st, 1) != 32 ||
-            height < 0 || height > keystone_height ||
-            !tree || tree_len <= 0 || count == UINT64_MAX) {
+        if (rom_keystone_anchor_row_malformed(st, pool, root, height,
+                                              keystone_height, tree, tree_len,
+                                              count)) {
             LOG_WARN("mint_anchor",
                      "keystone anchors row %llu: malformed",
                      (unsigned long long)count);
