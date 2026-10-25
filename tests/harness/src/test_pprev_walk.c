@@ -85,10 +85,12 @@ static int t_pprev_walk_safe_cycle(void)
     return failures;
 }
 
-int test_pprev_walk(void)
+/* Scenario checks split out of test_pprev_walk. Each keeps its own
+ * progress and result output and returns a failure count, so the
+ * aggregated output and totals are unchanged. */
+static int t_pprev_walk_until_height_normal(void)
 {
     int failures = 0;
-
     printf("pprev_walk_safe: normal walk... ");
     {
         struct block_index *a = bi_new(0);
@@ -111,7 +113,12 @@ int test_pprev_walk(void)
         }
         free(a); free(b); free(c); free(d);
     }
+    return failures;
+}
 
+static int t_pprev_walk_until_height_cycle(void)
+{
+    int failures = 0;
     printf("pprev_walk_safe: cycle detection (A→B→A)... ");
     {
         struct block_index *a = bi_new(10);
@@ -131,7 +138,12 @@ int test_pprev_walk(void)
         }
         free(a); free(b);
     }
+    return failures;
+}
 
+static int t_pprev_walk_until_height_step_cap(void)
+{
+    int failures = 0;
     printf("pprev_walk_safe: step cap enforced... ");
     {
         /* Build a long chain where height monotonicity is fine but
@@ -154,7 +166,12 @@ int test_pprev_walk(void)
         }
         for (int i = 0; i < 10; i++) free(chain[i]);
     }
+    return failures;
+}
 
+static int t_pprev_walk_until_height_non_monotonic(void)
+{
+    int failures = 0;
     printf("pprev_walk_safe: non-monotonic height detected... ");
     {
         /* Three nodes where the middle has a LOWER height than its
@@ -177,7 +194,12 @@ int test_pprev_walk(void)
         }
         free(a); free(b); free(c);
     }
+    return failures;
+}
 
+static int t_pprev_walk_until_target_hit(void)
+{
+    int failures = 0;
     printf("pprev_walk_until_target: hit target... ");
     {
         struct block_index *a = bi_new(0);
@@ -196,7 +218,12 @@ int test_pprev_walk(void)
         }
         free(a); free(b); free(c);
     }
+    return failures;
+}
 
+static int t_pprev_walk_until_target_miss(void)
+{
+    int failures = 0;
     printf("pprev_walk_until_target: target not reachable returns NULL... ");
     {
         struct block_index *a = bi_new(0);
@@ -213,7 +240,12 @@ int test_pprev_walk(void)
         }
         free(a); free(b); free(off);
     }
+    return failures;
+}
 
+static int t_pprev_walk_depth_normal(void)
+{
+    int failures = 0;
     printf("pprev_walk_depth: normal chain returns step count... ");
     {
         struct block_index *chain[5] = {0};
@@ -230,7 +262,12 @@ int test_pprev_walk(void)
                       depth, (void*)root, (void*)chain[0]); failures++; }
         for (int i = 0; i < 5; i++) free(chain[i]);
     }
+    return failures;
+}
 
+static int t_pprev_walk_depth_cycle(void)
+{
+    int failures = 0;
     printf("pprev_walk_depth: cycle returns -1... ");
     {
         struct block_index *a = bi_new(0);
@@ -244,6 +281,21 @@ int test_pprev_walk(void)
                       depth, (void*)root); failures++; }
         free(a); free(b);
     }
+    return failures;
+}
+
+int test_pprev_walk(void)
+{
+    int failures = 0;
+
+    failures += t_pprev_walk_until_height_normal();
+    failures += t_pprev_walk_until_height_cycle();
+    failures += t_pprev_walk_until_height_step_cap();
+    failures += t_pprev_walk_until_height_non_monotonic();
+    failures += t_pprev_walk_until_target_hit();
+    failures += t_pprev_walk_until_target_miss();
+    failures += t_pprev_walk_depth_normal();
+    failures += t_pprev_walk_depth_cycle();
 
     failures += t_pprev_walk_safe_refusals();
     failures += t_pprev_walk_safe_predicate();
