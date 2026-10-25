@@ -76,25 +76,38 @@ bool zcl_present_window_action_at_v1(
     return true;
 }
 
-bool zcl_present_window_hover_at_v1(
+static bool present_hover_input_valid(
+    const struct zcl_present_window_hover_v1 *hover,
+    uint32_t *item_index,
+    uint32_t source_width, uint32_t source_height)
+{
+    return hover && item_index && hover->items && hover->item_count != 0 &&
+        hover->item_count <= ZCL_PRESENT_WINDOW_HOVER_ITEMS_MAX &&
+        hover->plot_left < hover->plot_right &&
+        hover->plot_top < hover->plot_bottom &&
+        hover->plot_right <= source_width &&
+        hover->plot_bottom <= source_height;
+}
+
+static bool present_hover_plot_point(
     const struct zcl_present_window_hover_v1 *hover,
     uint32_t source_width, uint32_t source_height,
     int32_t target_width, int32_t target_height,
-    int32_t mouse_x, int32_t mouse_y, uint32_t *item_index)
+    int32_t mouse_x, int32_t mouse_y,
+    uint32_t *source_x, uint32_t *source_y)
 {
-    if (!hover || !item_index || !hover->items || hover->item_count == 0 ||
-        hover->item_count > ZCL_PRESENT_WINDOW_HOVER_ITEMS_MAX ||
-        hover->plot_left >= hover->plot_right ||
-        hover->plot_top >= hover->plot_bottom ||
-        hover->plot_right > source_width || hover->plot_bottom > source_height)
-        return false;
-    uint32_t source_x = 0, source_y = 0;
     if (!zcl_present_window_source_point_v1(source_width, source_height,
                               target_width, target_height,
-                              mouse_x, mouse_y, &source_x, &source_y) ||
-        source_x < hover->plot_left || source_x > hover->plot_right ||
-        source_y < hover->plot_top || source_y > hover->plot_bottom)
+                              mouse_x, mouse_y, source_x, source_y) ||
+        *source_x < hover->plot_left || *source_x > hover->plot_right ||
+        *source_y < hover->plot_top || *source_y > hover->plot_bottom)
         return false;
+    return true;
+}
+
+static uint32_t present_hover_nearest_item(
+    const struct zcl_present_window_hover_v1 *hover, uint32_t source_x)
+{
     uint32_t best = 0;
     uint32_t best_distance = source_x > hover->items[0].x
         ? source_x - hover->items[0].x : hover->items[0].x - source_x;
@@ -106,7 +119,24 @@ bool zcl_present_window_hover_at_v1(
             best_distance = distance;
         }
     }
-    *item_index = best;
+    return best;
+}
+
+bool zcl_present_window_hover_at_v1(
+    const struct zcl_present_window_hover_v1 *hover,
+    uint32_t source_width, uint32_t source_height,
+    int32_t target_width, int32_t target_height,
+    int32_t mouse_x, int32_t mouse_y, uint32_t *item_index)
+{
+    if (!present_hover_input_valid(hover, item_index, source_width,
+                                   source_height))
+        return false;
+    uint32_t source_x = 0, source_y = 0;
+    if (!present_hover_plot_point(hover, source_width, source_height,
+                                  target_width, target_height,
+                                  mouse_x, mouse_y, &source_x, &source_y))
+        return false;
+    *item_index = present_hover_nearest_item(hover, source_x);
     return true;
 }
 

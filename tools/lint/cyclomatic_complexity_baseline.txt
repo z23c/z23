@@ -462,7 +462,6 @@ contexts/explorer/modules/presentation/src/presentation_canvas_select.c:zcl_pres
 contexts/explorer/modules/presentation/src/presentation_canvas_select.c:zcl_present_window_canvas_validate_v1:17
 contexts/explorer/modules/presentation/src/presentation_form.c:zcl_present_window_form_focus_step_v1:18
 contexts/explorer/modules/presentation/src/presentation_form.c:zcl_present_window_form_validate_v1:16
-contexts/explorer/modules/presentation/src/presentation_input.c:zcl_present_window_hover_at_v1:19
 contexts/explorer/views/src/explorer_factoids_records.c:factoids_emit_section_5_records:19
 contexts/market/controllers/src/file_market_controller.c:market_purchase_code:18
 contexts/market/controllers/src/file_market_controller.c:rpc_zmarket_purchase_plan:28
