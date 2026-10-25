@@ -334,7 +334,7 @@ static int fst_case_wait(void)
         ASSERT(fst_world(&w, "two_default", 100));
         fst_land_row(o, sizeof(o), 5, "plain work", "landed");
         fst_land_row(q, sizeof(q), 50, "loop:" FST_OBJ ": first", "queued");
-        fst_land_row(q, sizeof(q), 51, "loop:" FST_OBJ ": second", "proving");
+        fst_land_row(q, sizeof(q), 51, "loop:" FST_OBJ ": second", "inflight");
         fst_snap_row(s, sizeof(s), 5, 5);
         fst_file(&w, "outcomes.jsonl", o);
         fst_file(&w, "queue.jsonl", q);
@@ -346,7 +346,7 @@ static int fst_case_wait(void)
                       "2 loop rows in flight (limit 2)") != NULL);
         ASSERT(strstr(fst_str(&c, "reason"), "seq 50 (" FST_OBJ ", queued)")
                != NULL);
-        ASSERT(strstr(fst_str(&c, "reason"), "seq 51 (" FST_OBJ ", proving)")
+        ASSERT(strstr(fst_str(&c, "reason"), "seq 51 (" FST_OBJ ", inflight)")
                != NULL);
         ASSERT_EQ(json_get_int(json_get(json_get(&c.reply.data, "next"),
                                         "count")), 2);
