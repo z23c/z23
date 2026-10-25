@@ -25,6 +25,7 @@
 #include "util/spawn.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -114,28 +115,59 @@ char *zcl_dev_job_read_tail(const char *path, size_t max, size_t *len_out)
         return NULL;
     }
     got = fread(buf, 1, max, f);
-    (void)fclose(f);
+    bool failed = ferror(f) || got != (size_t)size - skip;
+    /* Reject observed growth as well as shortening; a later wait can retry. */
+    if (fgetc(f) != EOF || ferror(f))
+        failed = true;
+    if (fclose(f) != 0)
+        failed = true;
+    if (failed) {
+        free(buf);
+        return NULL;
+    }
     buf[got] = '\0';
     if (len_out)
         *len_out = got;
     return buf;
 }
 
+static bool job_parse_rc(char *text, size_t len, int *rc)
+{
+    char *digits = text;
+    if (*digits == '+' || *digits == '-') digits++;
+    if (digits == text + len || strspn(digits, "0123456789") != (size_t)(text + len - digits))
+        return false;
+    text[len] = '\0';
+    errno = 0;
+    char *after;
+    long value = strtol(text, &after, 10);
+    if (errno == ERANGE || after != text + len || value < INT_MIN || value > INT_MAX)
+        return false;
+    *rc = (int)value;
+    return true;
+}
+
 bool zcl_dev_job_log_rc(const char *log, int *rc)
 {
     size_t len = 0;
-    char *text = zcl_dev_job_read_tail(log, JOB_RC_TAIL_BYTES, &len);
+    char *text = zcl_dev_job_read_tail(log, JOB_RC_TAIL_BYTES + 1, &len);
     bool found = false;
     if (!text)
         return false;
-    for (const char *p = text; *p;) {
-        const char *nl = strchr(p, '\n');
-        if (strncmp(p, "rc=", 3) == 0) {
-            *rc = atoi(p + 3);
-            found = true;
-        }
-        p = nl ? nl + 1 : p + strlen(p);
-    }
+    /* Completion is a complete final line, never an earlier output line or
+     * a partially written marker. Refuse binary/truncated observations. */
+    if (!len || text[len - 1] != '\n' || memchr(text, '\0', len))
+        goto done;
+    size_t start = len - 1;
+    while (start && text[start - 1] != '\n') start--;
+    if (!start && len == JOB_RC_TAIL_BYTES + 1)
+        goto done; /* the tail may start in the middle of this line */
+    size_t end = len - 1;
+    if (end > start && text[end - 1] == '\r') end--;
+    if (end - start < 4 || memcmp(text + start, "rc=", 3))
+        goto done;
+    found = job_parse_rc(text + start + 3, end - start - 3, rc);
+done:
     free(text);
     return found;
 }

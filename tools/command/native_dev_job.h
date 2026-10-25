@@ -62,7 +62,8 @@ bool zcl_dev_job_dir(const char *id, char *out, size_t cap);
 /* Read handle.json of job `id` into *handle (caller json_free()s). */
 bool zcl_dev_job_read_handle(const char *id, struct json_value *handle);
 
-/* The last `rc=<n>` line of `log` into *rc. False while there is none. */
+/* A complete terminal `rc=<signed decimal int>` line into *rc (LF or CRLF).
+ * False for absent, malformed, unterminated or unreadable completion. */
 bool zcl_dev_job_log_rc(const char *log, int *rc);
 
 /* The last `max` bytes of `path`, NUL-terminated, heap-owned (free()). */

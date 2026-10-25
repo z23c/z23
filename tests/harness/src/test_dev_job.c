@@ -17,6 +17,7 @@
 #include "util/spawn.h"
 
 #include <stdio.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -437,6 +438,85 @@ int test_dev_job(void)
         ASSERT(f != NULL);
         (void)fputs("still going\n", f);
         (void)fclose(f);
+        dj_wait(&w, NULL, log, 1, 0);
+        ASSERT_STR_EQ(dj_str(&w, "state"), "running");
+        dj_end(&w);
+        PASS();
+    }
+
+    TEST("dev.job: only a complete terminal decimal rc marker completes a log") {
+        static const struct { const char *text; bool valid; int rc; } cases[] = {
+            {"rc=0\n", true, 0}, {"output\nrc=3\n", true, 3},
+            {"rc=0007\r\n", true, 7}, {"rc=\n", false, 0},
+            {"rc=garbage\n", false, 0}, {"rc=0junk\n", false, 0},
+            {"rc=999999999999999999999999999999\n", false, 0},
+            {"rc=-1\n", true, -1}, {"rc=+0\n", true, 0},
+            {"rc=-\n", false, 0}, {"rc=+\n", false, 0},
+            {"rc= 0\n", false, 0}, {"rc=0", false, 0},
+            {"rc=0\ncontinuing output\n", false, 0},
+            {"rc=0\n\n", false, 0}, {"prefixrc=0\n", false, 0}
+        };
+        char log[1100];
+        (void)snprintf(log, sizeof(log), "%s/build/scratch/markers.log", g_repo);
+        for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+            FILE *f = fopen(log, "wb");
+            int rc = -17;
+            ASSERT(f != NULL);
+            ASSERT(fputs(cases[i].text, f) >= 0);
+            ASSERT_EQ(fclose(f), 0);
+            ASSERT_EQ(zcl_dev_job_log_rc(log, &rc), cases[i].valid);
+            ASSERT_EQ(rc, cases[i].valid ? cases[i].rc : -17);
+        }
+        FILE *f = fopen(log, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fprintf(f, "rc=%d\n", INT_MAX) > 0);
+        ASSERT_EQ(fclose(f), 0);
+        int rc = -17;
+        ASSERT(zcl_dev_job_log_rc(log, &rc));
+        ASSERT_EQ(rc, INT_MAX);
+        f = fopen(log, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fprintf(f, "rc=%d\n", INT_MIN) > 0);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(zcl_dev_job_log_rc(log, &rc));
+        ASSERT_EQ(rc, INT_MIN);
+        f = fopen(log, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fprintf(f, "rc=%llu\n", (unsigned long long)INT_MAX + 1ULL) > 0);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(!zcl_dev_job_log_rc(log, &rc));
+        f = fopen(log, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fprintf(f, "rc=-%llu\n", (unsigned long long)(-(INT_MIN + 1)) + 2ULL) > 0);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(!zcl_dev_job_log_rc(log, &rc));
+        static const char binary[] = "rc=0\n\0hidden\nrc=0\n";
+        f = fopen(log, "wb");
+        ASSERT(f != NULL);
+        ASSERT_EQ(fwrite(binary, 1, sizeof(binary) - 1, f), sizeof(binary) - 1);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(!zcl_dev_job_log_rc(log, &rc));
+        ASSERT(zcl_dev_job_read_tail(g_repo, 32, NULL) == NULL);
+        /* The bounded tail must not invent a line boundary inside output. */
+        f = fopen(log, "wb");
+        ASSERT(f != NULL);
+        char padding[4096];
+        memset(padding, 'x', sizeof(padding));
+        for (int i = 0; i < 16; i++)
+            ASSERT_EQ(fwrite(padding, 1, sizeof(padding), f), sizeof(padding));
+        ASSERT(fputs("rc=0\n", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(!zcl_dev_job_log_rc(log, &rc));
+        f = fopen(log, "ab");
+        ASSERT(f != NULL);
+        ASSERT(fputs("rc=0\n", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
+        ASSERT(zcl_dev_job_log_rc(log, &rc));
+        ASSERT_EQ(rc, 0);
+        f = fopen(log, "wb");
+        ASSERT(f != NULL);
+        ASSERT(fputs("rc=garbage\n", f) >= 0);
+        ASSERT_EQ(fclose(f), 0);
         dj_wait(&w, NULL, log, 1, 0);
         ASSERT_STR_EQ(dj_str(&w, "state"), "running");
         dj_end(&w);
