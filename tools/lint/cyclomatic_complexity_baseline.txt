@@ -625,7 +625,6 @@ contexts/naming/modules/znam/src/znam.c:znam_parse:26
 contexts/naming/services/src/znam_transaction_intent_service.c:znam_transaction_intent_commit:30
 contexts/naming/services/src/znam_transaction_intent_service.c:znam_transaction_intent_plan:25
 contexts/naming/services/src/znam_transaction_intent_service.c:zni_request_validate:21
-contexts/wallet/controllers/src/sync_controller_wallet_disconnect.c:wallet_disconnect_block_write:21
 contexts/wallet/controllers/src/transaction_controller_wallet_lookup.c:rawtx_find_by_wallet_note:18
 contexts/wallet/controllers/src/transaction_controller_wallet_lookup.c:rawtx_find_in_recent_chain:20
 contexts/wallet/controllers/src/transaction_controller_wallet_lookup.c:rawtx_find_in_wallet_db:19
