@@ -93,13 +93,9 @@ static void agent_resources_cgroup_stat_init(
     st->slab_bytes = -1;
 }
 
-static void agent_resources_stat_assign(struct agent_resources_cgroup_stat *st,
-                                        const char *key,
-                                        int64_t value)
+static bool agent_resources_assign_memory_usage_keys(
+    struct agent_resources_cgroup_stat *st, const char *key, int64_t value)
 {
-    if (!st || !key || value < 0)
-        return;
-    st->available = true;
     if (strcmp(key, "anon") == 0)
         st->anon_bytes = value;
     else if (strcmp(key, "file") == 0)
@@ -116,7 +112,15 @@ static void agent_resources_stat_assign(struct agent_resources_cgroup_stat *st,
         st->percpu_bytes = value;
     else if (strcmp(key, "sock") == 0)
         st->sock_bytes = value;
-    else if (strcmp(key, "inactive_file") == 0)
+    else
+        return false;
+    return true;
+}
+
+static bool agent_resources_assign_reclaimable_slab_keys(
+    struct agent_resources_cgroup_stat *st, const char *key, int64_t value)
+{
+    if (strcmp(key, "inactive_file") == 0)
         st->inactive_file_bytes = value;
     else if (strcmp(key, "slab_reclaimable") == 0)
         st->slab_reclaimable_bytes = value;
@@ -124,6 +128,21 @@ static void agent_resources_stat_assign(struct agent_resources_cgroup_stat *st,
         st->slab_unreclaimable_bytes = value;
     else if (strcmp(key, "slab") == 0)
         st->slab_bytes = value;
+    else
+        return false;
+    return true;
+}
+
+static void agent_resources_stat_assign(struct agent_resources_cgroup_stat *st,
+                                        const char *key,
+                                        int64_t value)
+{
+    if (!st || !key || value < 0)
+        return;
+    st->available = true;
+    if (agent_resources_assign_memory_usage_keys(st, key, value))
+        return;
+    agent_resources_assign_reclaimable_slab_keys(st, key, value);
 }
 
 static bool agent_resources_cgroup_stat_load(
