@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creighton - Apache License 2.0
+/* Copyright 2026 Rhett Creiton - Apache License 2.0
  *
  * Who is on the other end: the broker's peer-identity surface.
  *
@@ -162,12 +162,15 @@ bool agent_broker_identify_peer(int fd, struct agent_peer_cred *out)
     return true;
 #endif
 }
-bool agent_broker_peer_authorized(const struct agent_peer_cred *c,
-                                  const struct agent_peer_expectation *e,
-                                  char *why, size_t why_cap)
+
+/* ── expectation check ─────────────────────────────────────────────────── */
+
+/* Fail closed before any comparison: a null credential or expectation, and
+ * a credential the kernel never supplied, are each refusals with a reason. */
+static bool authorization_inputs_valid(const struct agent_peer_cred *c,
+                                       const struct agent_peer_expectation *e,
+                                       char *why, size_t why_cap)
 {
-    if (why && why_cap)
-        why[0] = '\0';
     if (!c || !e) {
         if (why && why_cap)
             snprintf(why, why_cap, "internal: null credential or expectation");
@@ -179,31 +182,72 @@ bool agent_broker_peer_authorized(const struct agent_peer_cred *c,
                      "kernel did not supply peer credentials for this socket");
         return false;
     }
-    /* An expectation that checks nothing would accept every local process.
-     * That is a misconfiguration, and it fails closed. */
+    return true;
+}
+/* An expectation that checks nothing would accept every local process.
+ * That is a misconfiguration, and it fails closed. */
+static bool expectation_constrains(const struct agent_peer_expectation *e,
+                                   char *why, size_t why_cap)
+{
     if (!e->require_uid && !e->require_gid && !e->require_pid) {
         if (why && why_cap)
             snprintf(why, why_cap,
                      "expectation constrains nothing (no uid/gid/pid required)");
         return false;
     }
+    return true;
+}
+static bool uid_matches_expectation(const struct agent_peer_cred *c,
+                                    const struct agent_peer_expectation *e,
+                                    char *why, size_t why_cap)
+{
     if (e->require_uid && c->uid != e->uid) {
         if (why && why_cap)
             snprintf(why, why_cap, "uid mismatch: peer=%u expected=%u",
                      (unsigned)c->uid, (unsigned)e->uid);
         return false;
     }
+    return true;
+}
+static bool gid_matches_expectation(const struct agent_peer_cred *c,
+                                    const struct agent_peer_expectation *e,
+                                    char *why, size_t why_cap)
+{
     if (e->require_gid && c->gid != e->gid) {
         if (why && why_cap)
             snprintf(why, why_cap, "gid mismatch: peer=%u expected=%u",
                      (unsigned)c->gid, (unsigned)e->gid);
         return false;
     }
+    return true;
+}
+static bool pid_matches_expectation(const struct agent_peer_cred *c,
+                                    const struct agent_peer_expectation *e,
+                                    char *why, size_t why_cap)
+{
     if (e->require_pid && c->pid != e->pid) {
         if (why && why_cap)
             snprintf(why, why_cap, "pid mismatch: peer=%d expected=%d",
                      (int)c->pid, (int)e->pid);
         return false;
     }
+    return true;
+}
+bool agent_broker_peer_authorized(const struct agent_peer_cred *c,
+                                  const struct agent_peer_expectation *e,
+                                  char *why, size_t why_cap)
+{
+    if (why && why_cap)
+        why[0] = '\0';
+    if (!authorization_inputs_valid(c, e, why, why_cap))
+        return false;
+    if (!expectation_constrains(e, why, why_cap))
+        return false;
+    if (!uid_matches_expectation(c, e, why, why_cap))
+        return false;
+    if (!gid_matches_expectation(c, e, why, why_cap))
+        return false;
+    if (!pid_matches_expectation(c, e, why, why_cap))
+        return false;
     return true;
 }
