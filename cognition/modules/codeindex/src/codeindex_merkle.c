@@ -140,11 +140,9 @@ _Static_assert(sizeof("zcl.codeindex.merkle.proof.v1") + 1 + 2 + 255 + 8 +
  *
  * The builder therefore appends children in stream order, needs no second
  * sort, and cannot disagree with the rule as documented. */
-static void merkle_child_key(const struct ci_merkle_proof_child *c,
-                             char out[MERKLE_NAME_MAX + 2])
+static void merkle_child_key(const struct ci_merkle_proof_child *c, char out[MERKLE_NAME_MAX + 2])
 {
-    (void)snprintf(out, MERKLE_NAME_MAX + 2, "%s%s", c->name,
-                   c->kind == 1 ? "/" : "");
+    (void)snprintf(out, MERKLE_NAME_MAX + 2, "%s%s", c->name, c->kind == 1 ? "/" : "");
 }
 
 /* Is `next` strictly after `prev` in the canonical child order? Checked on
@@ -174,8 +172,7 @@ static void merkle_node_digest(const char *path, const struct ci_merkle_proof_ch
     merkle_write_u32le(&sha, n);
     for (uint32_t i = 0; i < n; i++) {
         sha3_256_write(&sha, &kids[i].kind, 1);
-        sha3_256_write(&sha, (const unsigned char *)kids[i].name,
-                       strlen(kids[i].name) + 1);
+        sha3_256_write(&sha, (const unsigned char *)kids[i].name, strlen(kids[i].name) + 1);
         sha3_256_write(&sha, kids[i].digest.bytes, 32);
     }
     sha3_256_finalize(&sha, out->bytes);
@@ -184,8 +181,46 @@ static void merkle_node_digest(const char *path, const struct ci_merkle_proof_ch
 /* Read one file and hash its leaf. The before/after fstat comparison is not a
  * drift check: it says "these bytes and this cache key came from the same
  * inode state", so the key we store is the key the digest belongs to. */
-static bool merkle_leaf_digest(const char *root, const char *relpath,
-                               struct zcl_sha3_digest *out,
+static bool merkle_leaf_snapshot_same(
+    const struct platform_positioned_file_snapshot *before,
+    const struct platform_positioned_file_snapshot *after, uint64_t total)
+{
+    return total == before->size && before->size == after->size &&
+           before->volume == after->volume && before->file_low == after->file_low &&
+           before->file_high == after->file_high &&
+           before->modified_seconds == after->modified_seconds &&
+           before->modified_nanoseconds == after->modified_nanoseconds &&
+           before->changed_seconds == after->changed_seconds &&
+           before->changed_nanoseconds == after->changed_nanoseconds;
+}
+
+static bool merkle_leaf_read(struct platform_positioned_file *file,
+                            const struct platform_positioned_file_snapshot *before,
+                            struct platform_positioned_file_snapshot *after,
+                            struct sha3_256_ctx *sha,
+                            struct sha3_256_ctx *content_sha, uint64_t *total_out)
+{
+    unsigned char buf[64 * 1024];
+    uint64_t total = 0;
+    bool ok = true;
+    while (total < before->size) {
+        size_t want = before->size - total < sizeof(buf)
+            ? (size_t)(before->size - total) : sizeof(buf);
+        int64_t got = platform_positioned_file_read(file, buf, want, total);
+        if (got < 0) { ok = false; break; }
+        if (got == 0) break;
+        sha3_256_write(sha, buf, (size_t)got);
+        sha3_256_write(content_sha, buf, (size_t)got);
+        total += (uint64_t)got;
+    }
+    *total_out = total;
+    if (ok && (!platform_positioned_file_snapshot(file, after) ||
+               !merkle_leaf_snapshot_same(before, after, total)))
+        ok = false;
+    return ok;
+}
+
+static bool merkle_leaf_digest(const char *root, const char *relpath, struct zcl_sha3_digest *out,
                                struct zcl_sha3_digest *content_out,
                                uint64_t *out_size,
                                struct ci_merkle_stat_key *out_key, bool *found)
@@ -205,7 +240,6 @@ static bool merkle_leaf_digest(const char *root, const char *relpath,
         platform_positioned_file_close(&file);
         LOG_FAIL("codeindex", "merkle stat leaf failed path=%s", relpath);
     }
-
     struct sha3_256_ctx sha;
     struct sha3_256_ctx content_sha;
     sha3_256_init(&sha);
@@ -218,33 +252,11 @@ static bool merkle_leaf_digest(const char *root, const char *relpath,
     sha3_256_write(&sha, (const unsigned char *)domain, sizeof(domain));
     sha3_256_write(&sha, (const unsigned char *)relpath, strlen(relpath) + 1);
     merkle_write_u64le(&sha, before.size);
-
-    unsigned char buf[64 * 1024];
     uint64_t total = 0;
-    bool ok = true;
-    while (total < before.size) {
-        size_t want = before.size - total < sizeof(buf)
-            ? (size_t)(before.size - total) : sizeof(buf);
-        int64_t got = platform_positioned_file_read(&file, buf, want, total);
-        if (got < 0) { ok = false; break; }
-        if (got == 0) break;
-        sha3_256_write(&sha, buf, (size_t)got);
-        sha3_256_write(&content_sha, buf, (size_t)got);
-        total += (uint64_t)got;
-    }
-    if (ok && (!platform_positioned_file_snapshot(&file, &after) ||
-               total != before.size || before.size != after.size ||
-               before.volume != after.volume || before.file_low != after.file_low ||
-               before.file_high != after.file_high ||
-               before.modified_seconds != after.modified_seconds ||
-               before.modified_nanoseconds != after.modified_nanoseconds ||
-               before.changed_seconds != after.changed_seconds ||
-               before.changed_nanoseconds != after.changed_nanoseconds))
-        ok = false;
+    bool ok = merkle_leaf_read(&file, &before, &after, &sha, &content_sha, &total);
     platform_positioned_file_close(&file);
     if (!ok)
         LOG_FAIL("codeindex", "merkle read leaf failed path=%s", relpath);
-
     sha3_256_finalize(&sha, out->bytes);
     sha3_256_finalize(&content_sha, content_out->bytes);
     *out_size = total;
@@ -275,13 +287,11 @@ struct merkle_cursor {
     size_t               left;
     bool                 bad;
 };
-static void merkle_snapshot_seal(const unsigned char *image, size_t len,
-                                 unsigned char out[32])
+static void merkle_snapshot_seal(const unsigned char *image, size_t len, unsigned char out[32])
 {
     struct sha3_256_ctx sha;
     sha3_256_init(&sha);
-    sha3_256_write(&sha,
-                   (const unsigned char *)merkle_snapshot_seal_domain,
+    sha3_256_write(&sha, (const unsigned char *)merkle_snapshot_seal_domain,
                    sizeof(merkle_snapshot_seal_domain));
     sha3_256_write(&sha, image, len);
     sha3_256_finalize(&sha, out);
@@ -351,17 +361,65 @@ static void merkle_put_path(unsigned char **w, const char *p)
     merkle_put(w, p, len);
 }
 
-static bool merkle_snapshot_decode(unsigned char *img, size_t len,
-                                   struct merkle_snapshot *out, bool *found)
+static void merkle_snapshot_read_leaves(struct merkle_cursor *c, struct merkle_leaf_rec *leaves,
+                                        uint32_t nleaves)
 {
-    if (len <= 32) { free(img); return true; }
+    for (uint32_t i = 0; i < nleaves && !c->bad; i++) {
+        struct merkle_leaf_rec *l = &leaves[i];
+        if (!merkle_take_path(c, l->path)) break;
+        (void)merkle_take(c, l->digest.bytes, 32);
+        (void)merkle_take(c, l->content_digest.bytes, 32);
+        l->size = merkle_take_u64(c);
+        l->key.dev = merkle_take_u64(c);
+        l->key.ino = merkle_take_u64(c);
+        l->key.size = merkle_take_u64(c);
+        l->key.mtime_sec = merkle_take_u64(c);
+        l->key.mtime_nsec = merkle_take_u64(c);
+        l->key.ctime_sec = merkle_take_u64(c);
+        l->key.ctime_nsec = merkle_take_u64(c);
+        if (i > 0 && strcmp(leaves[i - 1].path, l->path) >= 0) c->bad = true;
+    }
+}
+
+static void merkle_snapshot_read_nodes(struct merkle_cursor *c, struct merkle_node_rec *nodes,
+                                       uint32_t nnodes)
+{
+    for (uint32_t i = 0; i < nnodes && !c->bad; i++) {
+        struct merkle_node_rec *nd = &nodes[i];
+        if (!merkle_take_path(c, nd->path)) break;
+        (void)merkle_take(c, nd->digest.bytes, 32);
+        nd->direct_children = merkle_take_u32(c);
+        nd->file_count = merkle_take_u32(c);
+        nd->dir_count = merkle_take_u32(c);
+        nd->total_bytes = merkle_take_u64(c);
+        if (i > 0 && strcmp(nodes[i - 1].path, nd->path) >= 0) c->bad = true;
+    }
+}
+
+static bool merkle_snapshot_payload_valid(unsigned char *img, size_t len)
+{
+    if (len <= 32) return false;
     size_t payload_len = len - 32;
     unsigned char expected_seal[32];
     merkle_snapshot_seal(img, payload_len, expected_seal);
-    if (memcmp(expected_seal, img + payload_len, 32) != 0) {
+    return memcmp(expected_seal, img + payload_len, 32) == 0;
+}
+
+static bool merkle_snapshot_counts_valid(const struct merkle_cursor *c,
+                                         uint32_t nleaves, uint32_t nnodes)
+{
+    return !c->bad && nnodes != 0 && nleaves <= (MERKLE_SNAPSHOT_MAX / 64) &&
+           nnodes <= (MERKLE_SNAPSHOT_MAX / 64);
+}
+
+static bool merkle_snapshot_decode(unsigned char *img, size_t len,
+                                   struct merkle_snapshot *out, bool *found)
+{
+    if (!merkle_snapshot_payload_valid(img, len)) {
         free(img);
         return true;
     }
+    size_t payload_len = len - 32;
     struct merkle_cursor c = {.p = img, .left = payload_len, .bad = false};
     char format[256];
     if (!merkle_take_path(&c, format) ||
@@ -373,14 +431,12 @@ static bool merkle_snapshot_decode(unsigned char *img, size_t len,
     uint32_t nnodes = merkle_take_u32(&c);
     unsigned char root_digest[32];
     (void)merkle_take(&c, root_digest, 32);
-    if (c.bad || nnodes == 0 || nleaves > (MERKLE_SNAPSHOT_MAX / 64) ||
-        nnodes > (MERKLE_SNAPSHOT_MAX / 64)) {
+    if (!merkle_snapshot_counts_valid(&c, nleaves, nnodes)) {
         free(img);
         return true;
     }
     struct merkle_leaf_rec *leaves = nleaves
-        ? zcl_malloc((size_t)nleaves * sizeof(*leaves),
-                     "ci_merkle_snap_leaves") : NULL;
+        ? zcl_malloc((size_t)nleaves * sizeof(*leaves), "ci_merkle_snap_leaves") : NULL;
     struct merkle_node_rec *nodes =
         zcl_malloc((size_t)nnodes * sizeof(*nodes), "ci_merkle_snap_nodes");
     if ((nleaves && !leaves) || !nodes) {
@@ -391,31 +447,8 @@ static bool merkle_snapshot_decode(unsigned char *img, size_t len,
     }
     if (leaves) memset(leaves, 0, (size_t)nleaves * sizeof(*leaves));
     memset(nodes, 0, (size_t)nnodes * sizeof(*nodes));
-    for (uint32_t i = 0; i < nleaves && !c.bad; i++) {
-        struct merkle_leaf_rec *l = &leaves[i];
-        if (!merkle_take_path(&c, l->path)) break;
-        (void)merkle_take(&c, l->digest.bytes, 32);
-        (void)merkle_take(&c, l->content_digest.bytes, 32);
-        l->size = merkle_take_u64(&c);
-        l->key.dev = merkle_take_u64(&c);
-        l->key.ino = merkle_take_u64(&c);
-        l->key.size = merkle_take_u64(&c);
-        l->key.mtime_sec = merkle_take_u64(&c);
-        l->key.mtime_nsec = merkle_take_u64(&c);
-        l->key.ctime_sec = merkle_take_u64(&c);
-        l->key.ctime_nsec = merkle_take_u64(&c);
-        if (i > 0 && strcmp(leaves[i - 1].path, l->path) >= 0) c.bad = true;
-    }
-    for (uint32_t i = 0; i < nnodes && !c.bad; i++) {
-        struct merkle_node_rec *nd = &nodes[i];
-        if (!merkle_take_path(&c, nd->path)) break;
-        (void)merkle_take(&c, nd->digest.bytes, 32);
-        nd->direct_children = merkle_take_u32(&c);
-        nd->file_count = merkle_take_u32(&c);
-        nd->dir_count = merkle_take_u32(&c);
-        nd->total_bytes = merkle_take_u64(&c);
-        if (i > 0 && strcmp(nodes[i - 1].path, nd->path) >= 0) c.bad = true;
-    }
+    merkle_snapshot_read_leaves(&c, leaves, nleaves);
+    merkle_snapshot_read_nodes(&c, nodes, nnodes);
     free(img);
     if (c.bad || c.left != 0 || nodes[0].path[0] != '\0' ||
         memcmp(nodes[0].digest.bytes, root_digest, 32) != 0) {
@@ -431,8 +464,7 @@ static bool merkle_snapshot_decode(unsigned char *img, size_t len,
     return true;
 }
 
-static unsigned char *merkle_snapshot_encode(const struct ci_merkle *m,
-                                             size_t *total_out)
+static unsigned char *merkle_snapshot_encode(const struct ci_merkle *m, size_t *total_out)
 {
     size_t need = sizeof(merkle_snapshot_format) + 2 + 4 + 4 + 32 + 32;
     for (uint32_t i = 0; i < m->nleaves; i++)
@@ -483,8 +515,7 @@ static _Atomic uint64_t g_merkle_tmp_seq = 1;
  * owner-controlled posture codeindex_build.c requires of the same directory: a
  * cache another user can write is a cache that can answer for us. */
 #if defined(_WIN32)
-bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out,
-                                 bool *found)
+bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out, bool *found)
 {
     *found = false;
     memset(out, 0, sizeof(*out));
@@ -511,8 +542,7 @@ static bool merkle_snapshot_save(const char *root, const struct ci_merkle *m)
 bool ci_merkle_forget(const char *root)
 {
     if (!root) LOG_FAIL("codeindex", "null root to merkle_forget");
-    return ci_merkle_snapshot_image_forget_windows(root,
-                                                   merkle_snapshot_name);
+    return ci_merkle_snapshot_image_forget_windows(root, merkle_snapshot_name);
 }
 #else
 static int merkle_open_dir(const char *root, bool create)
@@ -535,18 +565,15 @@ static int merkle_open_dir(const char *root, bool create)
 /* Load the snapshot. A missing, truncated, wrong-format, or out-of-order image
  * is simply not a snapshot: *found stays false and the caller does a cold pass.
  * Never an error return, because there is nothing to reconcile. */
-bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out,
-                                 bool *found)
+bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out, bool *found)
 {
     *found = false;
     memset(out, 0, sizeof(*out));
     int dirfd = merkle_open_dir(root, false);
     if (dirfd < 0) return true;
-    int fd = openat(dirfd, merkle_snapshot_name,
-                    O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = openat(dirfd, merkle_snapshot_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     close(dirfd);
     if (fd < 0) return true;
-
     struct stat st;
     if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_size <= 0 ||
         st.st_uid != geteuid() || (st.st_mode & (S_IWGRP | S_IWOTH)) ||
@@ -577,7 +604,6 @@ bool merkle_snapshot_load(const char *root, struct merkle_snapshot *out,
         free(img);
         return true; /* unreadable cache == no cache */
     }
-
     return merkle_snapshot_decode(img, len, out, found);
 }
 
@@ -589,16 +615,13 @@ static bool merkle_snapshot_save(const char *root, const struct ci_merkle *m)
     size_t total = 0;
     unsigned char *img = merkle_snapshot_encode(m, &total);
     if (!img) return false;
-
     int dirfd = merkle_open_dir(root, true);
     if (dirfd < 0) {
         free(img);
-        LOG_FAIL("codeindex", "open index directory for merkle snapshot: %s",
-                 strerror(errno));
+        LOG_FAIL("codeindex", "open index directory for merkle snapshot: %s", strerror(errno));
     }
     char tmp[128];
-    uint64_t seq = atomic_fetch_add_explicit(&g_merkle_tmp_seq, 1,
-                                             memory_order_relaxed);
+    uint64_t seq = atomic_fetch_add_explicit(&g_merkle_tmp_seq, 1, memory_order_relaxed);
     (void)snprintf(tmp, sizeof(tmp), "%s.tmp.%ld.%llu", merkle_snapshot_name,
                    (long)getpid(), (unsigned long long)seq);
     int fd = openat(dirfd, tmp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC |
@@ -607,8 +630,7 @@ static bool merkle_snapshot_save(const char *root, const struct ci_merkle *m)
         int saved = errno;
         close(dirfd);
         free(img);
-        LOG_FAIL("codeindex", "create merkle snapshot temp: %s",
-                 strerror(saved));
+        LOG_FAIL("codeindex", "create merkle snapshot temp: %s", strerror(saved));
     }
     size_t done = 0;
     bool ok = true;
@@ -629,8 +651,7 @@ static bool merkle_snapshot_save(const char *root, const struct ci_merkle *m)
     if (ok) (void)fsync(dirfd);
     close(dirfd);
     if (!ok)
-        LOG_FAIL("codeindex", "publish merkle snapshot failed: %s",
-                 strerror(errno));
+        LOG_FAIL("codeindex", "publish merkle snapshot failed: %s", strerror(errno));
     return true;
 }
 
@@ -643,8 +664,7 @@ bool ci_merkle_forget(const char *root)
     int saved = errno;
     close(dirfd);
     if (rc != 0 && saved != ENOENT)
-        LOG_FAIL("codeindex", "remove merkle snapshot failed: %s",
-                 strerror(saved));
+        LOG_FAIL("codeindex", "remove merkle snapshot failed: %s", strerror(saved));
     return true;
 }
 #endif
@@ -709,17 +729,14 @@ struct merkle_build {
     struct ci_merkle_cost     cost;
 };
 
-static bool merkle_frame_push_child(struct merkle_frame *f,
-                                    const struct ci_merkle_proof_child *c)
+static bool merkle_frame_push_child(struct merkle_frame *f, const struct ci_merkle_proof_child *c)
 {
     if (f->nkids > 0 && !merkle_child_in_order(&f->kids[f->nkids - 1], c))
-        LOG_FAIL("codeindex",
-                 "merkle child order violated in '%s': '%s' after '%s'",
+        LOG_FAIL("codeindex", "merkle child order violated in '%s': '%s' after '%s'",
                  f->path, c->name, f->kids[f->nkids - 1].name);
     if (f->nkids == f->cap) {
         uint32_t ncap = f->cap ? f->cap * 2 : 32;
-        void *nb = zcl_realloc(f->kids, (size_t)ncap * sizeof(*f->kids),
-                               "ci_merkle_kids");
+        void *nb = zcl_realloc(f->kids, (size_t)ncap * sizeof(*f->kids), "ci_merkle_kids");
         if (!nb) LOG_FAIL("codeindex", "grow merkle child list");
         f->kids = nb;
         f->cap = ncap;
@@ -728,13 +745,11 @@ static bool merkle_frame_push_child(struct merkle_frame *f,
     return true;
 }
 
-static bool merkle_push_node(struct merkle_build *b,
-                             const struct merkle_node_rec *nd)
+static bool merkle_push_node(struct merkle_build *b, const struct merkle_node_rec *nd)
 {
     if (b->nnodes == b->cap_nodes) {
         uint32_t ncap = b->cap_nodes ? b->cap_nodes * 2 : 256;
-        void *nb = zcl_realloc(b->nodes, (size_t)ncap * sizeof(*b->nodes),
-                               "ci_merkle_nodes");
+        void *nb = zcl_realloc(b->nodes, (size_t)ncap * sizeof(*b->nodes), "ci_merkle_nodes");
         if (!nb) LOG_FAIL("codeindex", "grow merkle node list");
         b->nodes = nb;
         b->cap_nodes = ncap;
@@ -753,14 +768,12 @@ static bool merkle_finalize_frame(struct merkle_build *b,
     const struct merkle_node_rec *prev =
         b->use_prev ? merkle_find_node(b->prev.nodes, b->prev.nnodes, f->path)
                     : NULL;
-
     memset(out, 0, sizeof(*out));
     ci_cpy(out->path, sizeof(out->path), f->path);
     out->direct_children = f->nkids;
     out->file_count = f->file_count;
     out->dir_count = f->dir_count;
     out->total_bytes = f->total_bytes;
-
     if (prev && prev->direct_children == f->nkids && !f->dirty) {
         out->digest = prev->digest;
         b->cost.nodes_reused++;
@@ -768,8 +781,7 @@ static bool merkle_finalize_frame(struct merkle_build *b,
     } else {
         merkle_node_digest(f->path, f->kids, f->nkids, &out->digest);
         b->cost.nodes_hashed++;
-        *out_dirty = !(prev && memcmp(prev->digest.bytes, out->digest.bytes,
-                                      32) == 0);
+        *out_dirty = !(prev && memcmp(prev->digest.bytes, out->digest.bytes, 32) == 0);
     }
     return true;
 }
@@ -810,8 +822,7 @@ static bool merkle_within(const char *base, const char *dir)
 static bool merkle_push_frame(struct merkle_build *b, const char *path)
 {
     if (b->depth >= MERKLE_MAX_DEPTH)
-        LOG_FAIL("codeindex", "merkle directory nesting past %d: %s",
-                 MERKLE_MAX_DEPTH, path);
+        LOG_FAIL("codeindex", "merkle directory nesting past %d: %s", MERKLE_MAX_DEPTH, path);
     if (strlen(zcl_path_leaf(path)) >= MERKLE_NAME_MAX)
         LOG_FAIL("codeindex", "merkle directory name exceeds %d bytes: %s",
                  MERKLE_NAME_MAX - 1, path);
@@ -843,13 +854,11 @@ static bool merkle_enter_dir(struct merkle_build *b, const char *dir)
     return true;
 }
 
-static bool merkle_add_leaf(struct merkle_build *b,
-                            const struct merkle_leaf_rec *l)
+static bool merkle_add_leaf(struct merkle_build *b, const struct merkle_leaf_rec *l)
 {
     if (b->nleaves == b->cap_leaves) {
         uint32_t ncap = b->cap_leaves ? b->cap_leaves * 2 : 1024;
-        void *nb = zcl_realloc(b->leaves, (size_t)ncap * sizeof(*b->leaves),
-                               "ci_merkle_leaves");
+        void *nb = zcl_realloc(b->leaves, (size_t)ncap * sizeof(*b->leaves), "ci_merkle_leaves");
         if (!nb) LOG_FAIL("codeindex", "grow merkle leaf list");
         b->leaves = nb;
         b->cap_leaves = ncap;
@@ -858,11 +867,10 @@ static bool merkle_add_leaf(struct merkle_build *b,
     return true;
 }
 
-static bool merkle_file_key_cb(const char *relpath,
-                               const struct ci_merkle_stat_key *live, void *user)
+static void merkle_dirname(const char *path, char out[256]);
+
+static bool merkle_file_path_valid(struct merkle_build *b, const char *relpath)
 {
-    struct merkle_build *b = user;
-    if (b->err) return false;
     if (strlen(relpath) >= 256) {
         b->err = true;
         LOG_FAIL("codeindex", "merkle path exceeds 255 bytes: %s", relpath);
@@ -874,11 +882,18 @@ static bool merkle_file_key_cb(const char *relpath,
         LOG_FAIL("codeindex", "merkle file name exceeds %d bytes: %s",
                  MERKLE_NAME_MAX - 1, relpath);
     }
+    return true;
+}
 
+static bool merkle_file_key_cb(const char *relpath,
+                               const struct ci_merkle_stat_key *live, void *user)
+{
+    struct merkle_build *b = user;
+    if (b->err) return false;
+    if (!merkle_file_path_valid(b, relpath)) return false;
     struct merkle_leaf_rec leaf;
     memset(&leaf, 0, sizeof(leaf));
     ci_cpy(leaf.path, sizeof(leaf.path), relpath);
-
     const struct merkle_leaf_rec *prev =
         b->use_prev ? merkle_find_leaf(b->prev.leaves, b->prev.nleaves, relpath)
                     : NULL;
@@ -893,8 +908,7 @@ static bool merkle_file_key_cb(const char *relpath,
         b->cost.leaves_reused++;
     } else {
         bool found = false;
-        if (!merkle_leaf_digest(b->root, relpath, &leaf.digest,
-                                &leaf.content_digest, &leaf.size,
+        if (!merkle_leaf_digest(b->root, relpath, &leaf.digest, &leaf.content_digest, &leaf.size,
                                 &leaf.key, &found) || !found) {
             b->err = true;
             return false;
@@ -905,20 +919,11 @@ static bool merkle_file_key_cb(const char *relpath,
             leaf.key.mtime_sec, leaf.key.mtime_nsec, b->captured_sec);
         /* A re-read whose digest matches the snapshot (a bare `touch`) is not
          * a change: the leaf is clean and every ancestor keeps its digest. */
-        leaf.dirty = !(prev && memcmp(prev->digest.bytes, leaf.digest.bytes,
-                                      32) == 0);
+        leaf.dirty = !(prev && memcmp(prev->digest.bytes, leaf.digest.bytes, 32) == 0);
     }
     char dir[256];
-    const char *slash = strrchr(relpath, '/');
-    if (slash) {
-        size_t dlen = (size_t)(slash - relpath);
-        memcpy(dir, relpath, dlen);
-        dir[dlen] = '\0';
-    } else {
-        dir[0] = '\0';
-    }
+    merkle_dirname(relpath, dir);
     if (!merkle_enter_dir(b, dir)) { b->err = true; return false; }
-
     struct merkle_frame *f = &b->frames[b->depth - 1];
     struct ci_merkle_proof_child c;
     memset(&c, 0, sizeof(c));
@@ -929,7 +934,6 @@ static bool merkle_file_key_cb(const char *relpath,
     f->dirty = f->dirty || leaf.dirty;
     f->file_count++;
     f->total_bytes += leaf.size;
-
     if (!merkle_add_leaf(b, &leaf)) { b->err = true; return false; }
     return true;
 }
@@ -940,27 +944,63 @@ static void merkle_build_release(struct merkle_build *b)
     merkle_snapshot_free(&b->prev);
 }
 
+static void merkle_publish_snapshot(const char *root, bool use_snapshot, const struct ci_merkle *m,
+                                    struct merkle_build *b)
+{
+    /* Persist only when something actually moved: a repeat refresh over an
+     * untouched tree writes nothing. */
+    if (use_snapshot &&
+        (!b->use_prev || b->cost.files_read > 0 || b->cost.nodes_hashed > 0 ||
+         b->nleaves != b->prev.nleaves || b->nnodes != b->prev.nnodes)) {
+        if (!merkle_snapshot_save(root, m)) {
+            /* A cache we could not publish is a slower next run, nothing more:
+             * the tree in hand is already correct. */
+            LOG_WARN("codeindex", "merkle snapshot not published for %s", root);
+        } else {
+            b->cost.snapshot_saved = true;
+        }
+    }
+}
+
+static bool merkle_load_previous(struct merkle_build *b, const char *root, bool use_snapshot)
+{
+    if (!use_snapshot) return true;
+    bool found = false;
+    if (!merkle_snapshot_load(root, &b->prev, &found)) {
+        merkle_build_release(b);
+        return false;
+    }
+    b->use_prev = found;
+    b->cost.snapshot_used = found;
+    return true;
+}
+
+static bool merkle_finish_frames(struct merkle_build *b)
+{
+    if (b->use_prev && b->nleaves != b->prev.nleaves)
+        b->cost.inventory_changed = true;
+    while (b->depth > 1) {
+        if (!merkle_pop_frame(b)) {
+            merkle_build_release(b);
+            free(b->leaves);
+            free(b->nodes);
+            return false;
+        }
+    }
+    return true;
+}
+
 static struct ci_merkle *merkle_run(const char *root, bool use_snapshot,
                                     struct ci_merkle_cost *cost_out)
 {
     if (!root || !root[0])
         LOG_NULL("codeindex", "null root to merkle build");
-
     struct merkle_build b;
     memset(&b, 0, sizeof(b));
     b.root = root;
     b.captured_sec = use_snapshot ? ci_merkle_capture_second() : 0;
-
-    if (use_snapshot) {
-        bool found = false;
-        if (!merkle_snapshot_load(root, &b.prev, &found)) {
-            merkle_build_release(&b);
-            LOG_NULL("codeindex", "load merkle snapshot failed");
-        }
-        b.use_prev = found;
-        b.cost.snapshot_used = found;
-    }
-
+    if (!merkle_load_previous(&b, root, use_snapshot))
+        LOG_NULL("codeindex", "load merkle snapshot failed");
     if (!merkle_push_frame(&b, "")) {
         merkle_build_release(&b);
         LOG_NULL("codeindex", "seed merkle root frame");
@@ -972,16 +1012,8 @@ static struct ci_merkle *merkle_run(const char *root, bool use_snapshot,
         free(b.nodes);
         LOG_NULL("codeindex", "merkle source enumeration failed root=%s", root);
     }
-    if (b.use_prev && b.nleaves != b.prev.nleaves)
-        b.cost.inventory_changed = true;
-    while (b.depth > 1) {
-        if (!merkle_pop_frame(&b)) {
-            merkle_build_release(&b);
-            free(b.leaves);
-            free(b.nodes);
-            LOG_NULL("codeindex", "merkle frame finalize failed");
-        }
-    }
+    if (!merkle_finish_frames(&b))
+        LOG_NULL("codeindex", "merkle frame finalize failed");
     struct merkle_node_rec root_node;
     bool root_dirty = false;
     if (!merkle_finalize_frame(&b, &root_node, &root_dirty) ||
@@ -991,7 +1023,6 @@ static struct ci_merkle *merkle_run(const char *root, bool use_snapshot,
         free(b.nodes);
         LOG_NULL("codeindex", "merkle root finalize failed");
     }
-
     struct ci_merkle *m = zcl_malloc(sizeof(*m), "ci_merkle");
     if (!m) {
         merkle_build_release(&b);
@@ -1006,24 +1037,10 @@ static struct ci_merkle *merkle_run(const char *root, bool use_snapshot,
     m->nnodes = b.nnodes;
     m->root = root_node.digest;
     qsort(m->nodes, m->nnodes, sizeof(*m->nodes), merkle_node_cmp);
-
     b.cost.files_total = b.nleaves;
     b.cost.bytes_total = root_node.total_bytes;
     b.cost.nodes_total = b.nnodes;
-    /* Persist only when something actually moved: a repeat refresh over an
-     * untouched tree writes nothing. */
-    if (use_snapshot &&
-        (!b.use_prev || b.cost.files_read > 0 || b.cost.nodes_hashed > 0 ||
-         b.nleaves != b.prev.nleaves || b.nnodes != b.prev.nnodes)) {
-        if (!merkle_snapshot_save(root, m)) {
-            /* A cache we could not publish is a slower next run, nothing more:
-             * the tree in hand is already correct. */
-            LOG_WARN("codeindex", "merkle snapshot not published for %s", root);
-        } else {
-            b.cost.snapshot_saved = true;
-        }
-    }
-
+    merkle_publish_snapshot(root, use_snapshot, m, &b);
     if (cost_out) *cost_out = b.cost;
     merkle_build_release(&b);
     return m;
@@ -1050,7 +1067,6 @@ struct ci_merkle *ci_merkle_refresh_reconciled(
         if (cost) *cost = first_cost;
         return first;
     }
-
     ci_merkle_free(first);
     if (!ci_merkle_forget(root))
         return NULL;
@@ -1064,8 +1080,7 @@ struct ci_merkle *ci_merkle_refresh_reconciled(
     return cold;
 }
 
-struct ci_merkle *ci_merkle_build_cold(const char *root,
-                                       struct ci_merkle_cost *cost)
+struct ci_merkle *ci_merkle_build_cold(const char *root, struct ci_merkle_cost *cost)
 {
     return merkle_run(root, false, cost);
 }
@@ -1080,8 +1095,7 @@ void ci_merkle_free(struct ci_merkle *m)
 
 /* ── queries ─────────────────────────────────────────────────────────── */
 
-static void merkle_fill_node(const struct merkle_node_rec *src,
-                             struct ci_merkle_node *out)
+static void merkle_fill_node(const struct merkle_node_rec *src, struct ci_merkle_node *out)
 {
     memset(out, 0, sizeof(*out));
     ci_cpy(out->path, sizeof(out->path), src->path);
@@ -1150,8 +1164,7 @@ bool ci_merkle_leaf(const struct ci_merkle *m, const char *filepath,
     return true;
 }
 
-int ci_merkle_leaves(const struct ci_merkle *m,
-                     struct ci_merkle_leaf *out, int cap)
+int ci_merkle_leaves(const struct ci_merkle *m, struct ci_merkle_leaf *out, int cap)
 {
     if (!m || cap < 0 || (cap > 0 && !out))
         LOG_ERR("codeindex", "bad arg to merkle_leaves");
@@ -1265,8 +1278,7 @@ static void merkle_dirname(const char *path, char out[256])
 }
 
 /* `path`'s basename iff `path` is a DIRECT child of `dir`, else NULL. */
-static const char *merkle_direct_child(const char *path, const char *dir,
-                                       size_t dlen)
+static const char *merkle_direct_child(const char *path, const char *dir, size_t dlen)
 {
     if (dlen) {
         if (strncmp(path, dir, dlen) != 0 || path[dlen] != '/') return NULL;
@@ -1300,15 +1312,13 @@ static bool merkle_collect_children(const struct ci_merkle *m, const char *dir,
         merkle_find_node(m->nodes, m->nnodes, dir);
     if (!nd)
         LOG_FAIL("codeindex", "merkle proof: no directory node for '%s'", dir);
-
     size_t dlen = strlen(dir);
     uint32_t n = 0;
     for (uint32_t i = 0; i < m->nleaves; i++) {
         const char *name = merkle_direct_child(m->leaves[i].path, dir, dlen);
         if (!name) continue;
         if (n >= cap)
-            LOG_FAIL("codeindex",
-                     "merkle proof: '%s' needs more than %u sibling records "
+            LOG_FAIL("codeindex", "merkle proof: '%s' needs more than %u sibling records "
                      "(budget %u); proof refused rather than truncated",
                      dir, nd->direct_children, CI_MERKLE_PROOF_MAX_CHILDREN);
         memset(&out[n], 0, sizeof(out[n]));
@@ -1321,8 +1331,7 @@ static bool merkle_collect_children(const struct ci_merkle *m, const char *dir,
         const char *name = merkle_direct_child(m->nodes[i].path, dir, dlen);
         if (!name) continue;
         if (n >= cap)
-            LOG_FAIL("codeindex",
-                     "merkle proof: '%s' needs more than %u sibling records "
+            LOG_FAIL("codeindex", "merkle proof: '%s' needs more than %u sibling records "
                      "(budget %u); proof refused rather than truncated",
                      dir, nd->direct_children, CI_MERKLE_PROOF_MAX_CHILDREN);
         memset(&out[n], 0, sizeof(out[n]));
@@ -1334,35 +1343,45 @@ static bool merkle_collect_children(const struct ci_merkle *m, const char *dir,
     qsort(out, n, sizeof(*out), merkle_child_key_cmp);
     for (uint32_t i = 1; i < n; i++) {
         if (!merkle_child_in_order(&out[i - 1], &out[i]))
-            LOG_FAIL("codeindex",
-                     "merkle proof: duplicate or unordered child key in '%s'",
-                     dir);
+            LOG_FAIL("codeindex", "merkle proof: duplicate or unordered child key in '%s'", dir);
     }
     if (n != nd->direct_children)
-        LOG_FAIL("codeindex",
-                 "merkle proof: rebuilt %u direct children of '%s', tree says %u",
+        LOG_FAIL("codeindex", "merkle proof: rebuilt %u direct children of '%s', tree says %u",
                  n, dir, nd->direct_children);
     struct zcl_sha3_digest check;
     merkle_node_digest(dir, out, n, &check);
     if (memcmp(check.bytes, nd->digest.bytes, 32) != 0)
-        LOG_FAIL("codeindex",
-                 "merkle proof: rebuilt children of '%s' do not reproduce its "
+        LOG_FAIL("codeindex", "merkle proof: rebuilt children of '%s' do not reproduce its "
                  "digest", dir);
     *out_n = n;
     return true;
 }
 
-bool ci_merkle_prove(const struct ci_merkle *m, const char *path,
-                     struct ci_merkle_proof *out,
+static bool merkle_proof_find_child(struct ci_merkle_proof *out, struct ci_merkle_proof_level *lv,
+                                    const char *want, uint8_t want_kind,
+                                    uint32_t n)
+{
+    bool hit = false;
+    for (uint32_t i = 0; i < n; i++) {
+        const struct ci_merkle_proof_child *c =
+            &out->children[lv->first_child + i];
+        if (c->kind == want_kind && strcmp(c->name, want) == 0) {
+            lv->index = i;
+            hit = true;
+            break;
+        }
+    }
+    return hit;
+}
+
+bool ci_merkle_prove(const struct ci_merkle *m, const char *path, struct ci_merkle_proof *out,
                      struct zcl_sha3_digest *out_digest, bool *found)
 {
     if (!m || !out || !found) LOG_FAIL("codeindex", "null arg to merkle_prove");
     *found = false;
     memset(out, 0, sizeof(*out));
-
     char norm[256];
     merkle_norm_dir(path, norm);
-
     struct zcl_sha3_digest target;
     uint8_t kind;
     const struct merkle_leaf_rec *lf =
@@ -1377,16 +1396,13 @@ bool ci_merkle_prove(const struct ci_merkle *m, const char *path,
         target = nd->digest;
         kind = CI_MERKLE_KIND_DIR;
     }
-
     ci_cpy(out->path, sizeof(out->path), norm);
     out->kind = kind;
-
     char cur[256];
     ci_cpy(cur, sizeof(cur), norm);
     while (cur[0]) {
         if (out->nlevels >= CI_MERKLE_PROOF_MAX_LEVELS)
-            LOG_FAIL("codeindex",
-                     "merkle proof for '%s' would need more than %d levels",
+            LOG_FAIL("codeindex", "merkle proof for '%s' would need more than %d levels",
                      norm, CI_MERKLE_PROOF_MAX_LEVELS);
         char parent[256];
         merkle_dirname(cur, parent);
@@ -1399,36 +1415,23 @@ bool ci_merkle_prove(const struct ci_merkle *m, const char *path,
                 (uint32_t)(CI_MERKLE_PROOF_MAX_CHILDREN - out->nchildren), &n))
             return false;
         lv->nchildren = n;
-
         const char *want = zcl_path_leaf(cur);
         uint8_t want_kind =
             out->nlevels == 0 ? kind : (uint8_t)CI_MERKLE_KIND_DIR;
-        bool hit = false;
-        for (uint32_t i = 0; i < n; i++) {
-            const struct ci_merkle_proof_child *c =
-                &out->children[lv->first_child + i];
-            if (c->kind == want_kind && strcmp(c->name, want) == 0) {
-                lv->index = i;
-                hit = true;
-                break;
-            }
-        }
+        bool hit = merkle_proof_find_child(out, lv, want, want_kind, n);
         if (!hit)
-            LOG_FAIL("codeindex", "merkle proof: '%s' is not a child of '%s'",
-                     cur, parent);
+            LOG_FAIL("codeindex", "merkle proof: '%s' is not a child of '%s'", cur, parent);
         out->nchildren += n;
         out->nlevels++;
         ci_cpy(cur, sizeof(cur), parent);
     }
-
     /* Refuse to hand out a proof we cannot check ourselves. This is the one
      * place the generator and the verifier meet, and it runs on every proof. */
     bool self_ok = false;
     if (!ci_merkle_proof_verify(out, &target, &m->root, &self_ok)) return false;
     if (!self_ok) {
         memset(out, 0, sizeof(*out));
-        LOG_FAIL("codeindex",
-                 "merkle proof for '%s' failed its own verification", norm);
+        LOG_FAIL("codeindex", "merkle proof for '%s' failed its own verification", norm);
     }
     if (out_digest) *out_digest = target;
     *found = true;
@@ -1480,21 +1483,74 @@ static bool merkle_path_canonical(const char *p)
     }
 }
 
-bool ci_merkle_proof_verify(const struct ci_merkle_proof *p,
-                            const struct zcl_sha3_digest *claimed,
+static bool merkle_proof_children_valid(const struct ci_merkle_proof_child *kids,
+                                        uint32_t nchildren)
+{
+    for (uint32_t k = 0; k < nchildren; k++) {
+        if (!merkle_field_terminated(kids[k].name, sizeof(kids[k].name)) ||
+            !kids[k].name[0] || !merkle_path_canonical(kids[k].name) ||
+            strchr(kids[k].name, '/') ||
+            (kids[k].kind != CI_MERKLE_KIND_FILE &&
+             kids[k].kind != CI_MERKLE_KIND_DIR))
+            return false;
+        /* Canonical order is part of the preimage. A reordered list would
+         * also fail at the root; rejecting it here says WHY. */
+        if (k && !merkle_child_in_order(&kids[k - 1], &kids[k])) return false;
+    }
+    return true;
+}
+
+static bool merkle_proof_level_valid(const struct ci_merkle_proof *p,
+                                     const struct ci_merkle_proof_level *lv,
+                                     uint32_t *run, char cur[256], uint8_t *kind,
+                                     struct zcl_sha3_digest *acc)
+{
+    if (!merkle_field_terminated(lv->path, sizeof(lv->path)) ||
+        !merkle_path_canonical(lv->path))
+        return false;
+    if (lv->nchildren == 0 || lv->index >= lv->nchildren) return false;
+    /* Levels tile the arena front to back with no gap and no overlap —
+     * the same shape the encoder demands and the decoder produces, so the
+     * set of proofs this function accepts is exactly the set that can be
+     * written down. Without it a proof could verify and then refuse to
+     * serialize, which is a second, quieter kind of ambiguity. */
+    if (lv->first_child != *run || lv->nchildren > p->nchildren - *run)
+        return false;
+    *run += lv->nchildren;
+    /* Each level must be EXACTLY the parent directory of the level below,
+     * which is what pins a proof to one path and only that path. */
+    char parent[256];
+    merkle_dirname(cur, parent);
+    if (strcmp(parent, lv->path) != 0) return false;
+    const struct ci_merkle_proof_child *kids = &p->children[lv->first_child];
+    if (!merkle_proof_children_valid(kids, lv->nchildren)) return false;
+    const struct ci_merkle_proof_child *slot = &kids[lv->index];
+    if (slot->kind != *kind) return false;
+    if (strcmp(slot->name, zcl_path_leaf(cur)) != 0) return false;
+    if (memcmp(slot->digest.bytes, acc->bytes, 32) != 0) return false;
+    merkle_node_digest(lv->path, kids, lv->nchildren, acc);
+    *kind = CI_MERKLE_KIND_DIR;
+    memcpy(cur, lv->path, 256);
+    return true;
+}
+
+static bool merkle_proof_shape_valid(const struct ci_merkle_proof *p)
+{
+    return p->nlevels <= CI_MERKLE_PROOF_MAX_LEVELS &&
+           p->nchildren <= CI_MERKLE_PROOF_MAX_CHILDREN &&
+           (p->kind == CI_MERKLE_KIND_FILE || p->kind == CI_MERKLE_KIND_DIR) &&
+           merkle_field_terminated(p->path, sizeof(p->path)) &&
+           merkle_path_canonical(p->path);
+}
+
+bool ci_merkle_proof_verify(const struct ci_merkle_proof *p, const struct zcl_sha3_digest *claimed,
                             const struct zcl_sha3_digest *root, bool *ok)
 {
     if (!p || !claimed || !root || !ok)
         LOG_FAIL("codeindex", "null arg to merkle_proof_verify");
     *ok = false;
-
-    if (p->nlevels > CI_MERKLE_PROOF_MAX_LEVELS ||
-        p->nchildren > CI_MERKLE_PROOF_MAX_CHILDREN ||
-        (p->kind != CI_MERKLE_KIND_FILE && p->kind != CI_MERKLE_KIND_DIR) ||
-        !merkle_field_terminated(p->path, sizeof(p->path)) ||
-        !merkle_path_canonical(p->path))
+    if (!merkle_proof_shape_valid(p))
         return true;
-
     /* The root proves itself: no levels, and the claim IS the trusted root. */
     if (!p->path[0]) {
         if (p->kind != CI_MERKLE_KIND_DIR || p->nlevels != 0 ||
@@ -1504,55 +1560,14 @@ bool ci_merkle_proof_verify(const struct ci_merkle_proof *p,
         return true;
     }
     if (p->nlevels == 0) return true;
-
     char cur[256];
     memcpy(cur, p->path, sizeof(cur));
     struct zcl_sha3_digest acc = *claimed;
     uint8_t kind = p->kind;
-
     uint32_t run = 0;
     for (uint32_t i = 0; i < p->nlevels; i++) {
         const struct ci_merkle_proof_level *lv = &p->level[i];
-        if (!merkle_field_terminated(lv->path, sizeof(lv->path)) ||
-            !merkle_path_canonical(lv->path))
-            return true;
-        if (lv->nchildren == 0 || lv->index >= lv->nchildren) return true;
-        /* Levels tile the arena front to back with no gap and no overlap —
-         * the same shape the encoder demands and the decoder produces, so the
-         * set of proofs this function accepts is exactly the set that can be
-         * written down. Without it a proof could verify and then refuse to
-         * serialize, which is a second, quieter kind of ambiguity. */
-        if (lv->first_child != run || lv->nchildren > p->nchildren - run)
-            return true;
-        run += lv->nchildren;
-
-        /* Each level must be EXACTLY the parent directory of the level below,
-         * which is what pins a proof to one path and only that path. */
-        char parent[256];
-        merkle_dirname(cur, parent);
-        if (strcmp(parent, lv->path) != 0) return true;
-
-        const struct ci_merkle_proof_child *kids = &p->children[lv->first_child];
-        for (uint32_t k = 0; k < lv->nchildren; k++) {
-            if (!merkle_field_terminated(kids[k].name, sizeof(kids[k].name)) ||
-                !kids[k].name[0] || !merkle_path_canonical(kids[k].name) ||
-                strchr(kids[k].name, '/') ||
-                (kids[k].kind != CI_MERKLE_KIND_FILE &&
-                 kids[k].kind != CI_MERKLE_KIND_DIR))
-                return true;
-            /* Canonical order is part of the preimage. A reordered list would
-             * also fail at the root; rejecting it here says WHY. */
-            if (k && !merkle_child_in_order(&kids[k - 1], &kids[k])) return true;
-        }
-
-        const struct ci_merkle_proof_child *slot = &kids[lv->index];
-        if (slot->kind != kind) return true;
-        if (strcmp(slot->name, zcl_path_leaf(cur)) != 0) return true;
-        if (memcmp(slot->digest.bytes, acc.bytes, 32) != 0) return true;
-
-        merkle_node_digest(lv->path, kids, lv->nchildren, &acc);
-        kind = CI_MERKLE_KIND_DIR;
-        memcpy(cur, lv->path, sizeof(cur));
+        if (!merkle_proof_level_valid(p, lv, &run, cur, &kind, &acc)) return true;
     }
     if (cur[0]) return true; /* the last level must have been the root */
     if (run != p->nchildren) return true; /* no sibling record goes unbound */
@@ -1608,8 +1623,7 @@ static bool mw_str(struct merkle_wire *w, const char *s, size_t cap)
     return true;
 }
 
-static size_t merkle_proof_write(const struct ci_merkle_proof *p,
-                                 unsigned char *out, size_t cap)
+static size_t merkle_proof_write(const struct ci_merkle_proof *p, unsigned char *out, size_t cap)
 {
     if (!p || p->nlevels > CI_MERKLE_PROOF_MAX_LEVELS ||
         p->nchildren > CI_MERKLE_PROOF_MAX_CHILDREN)
@@ -1620,7 +1634,6 @@ static size_t merkle_proof_write(const struct ci_merkle_proof *p,
     if (!mw_str(&w, p->path, sizeof(p->path))) return 0;
     mw_u32(&w, p->nlevels);
     mw_u32(&w, p->nchildren);
-
     uint32_t run = 0;
     for (uint32_t i = 0; i < p->nlevels; i++) {
         const struct ci_merkle_proof_level *lv = &p->level[i];
@@ -1648,8 +1661,7 @@ size_t ci_merkle_proof_wire_size(const struct ci_merkle_proof *p)
     return merkle_proof_write(p, NULL, (size_t)-1);
 }
 
-size_t ci_merkle_proof_encode(const struct ci_merkle_proof *p,
-                              unsigned char *out, size_t cap)
+size_t ci_merkle_proof_encode(const struct ci_merkle_proof *p, unsigned char *out, size_t cap)
 {
     if (!out) return 0;
     return merkle_proof_write(p, out, cap);
