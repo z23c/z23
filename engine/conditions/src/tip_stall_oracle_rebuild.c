@@ -237,18 +237,10 @@ static bool witness_tip_stall_oracle_rebuild(int64_t target_at_detect)
     return tip > atomic_load(&g_tip_at_detect);
 }
 
-static bool detail_tip_stall_oracle_rebuild(struct json_value *out)
+static bool tip_stall_detail_recorded_fields(struct json_value *out,
+                                             int64_t unchanged_since,
+                                             int64_t unchanged_age)
 {
-    struct main_state *ms = ms_or_null();
-    int64_t current_tip = current_tip_height(ms);
-    int64_t current_best_header =
-        ms && ms->pindex_best_header ? ms->pindex_best_header->nHeight : -1;
-    int64_t unchanged_since = atomic_load(&g_tip_unchanged_since);
-    int64_t now = platform_time_wall_unix();
-    int64_t unchanged_age =
-        unchanged_since > 0 && now >= unchanged_since ? now - unchanged_since
-                                                      : -1;
-
     bool ok = true;
     ok = ok && json_push_kv_int(out, "tip_height_at_check",
                                 atomic_load(&g_tip_height_at_check));
@@ -262,6 +254,14 @@ static bool detail_tip_stall_oracle_rebuild(struct json_value *out)
                                 atomic_load(&g_best_header_at_detect));
     ok = ok && json_push_kv_int(out, "oracle_height_at_detect",
                                 atomic_load(&g_oracle_height_at_detect));
+    return ok;
+}
+
+static bool tip_stall_detail_outcome_fields(struct json_value *out,
+                                            int64_t current_tip,
+                                            int64_t current_best_header)
+{
+    bool ok = true;
     ok = ok && json_push_kv_int(out, "current_tip_height", current_tip);
     ok = ok && json_push_kv_int(out, "current_best_header_height",
                                 current_best_header);
@@ -275,11 +275,38 @@ static bool detail_tip_stall_oracle_rebuild(struct json_value *out)
         out, "last_witness_tip_advanced",
         atomic_load(&g_last_witness_tip_height) >
             atomic_load(&g_tip_at_detect));
+    return ok;
+}
+
+static bool tip_stall_detail_contract_fields(struct json_value *out)
+{
+    bool ok = true;
     ok = ok && json_push_kv_int(out, "stall_secs", TIP_STALL_SECS);
     ok = ok && json_push_kv_int(out, "min_gap_blocks", MIN_GAP);
     ok = ok && json_push_kv_str(
         out, "remedy_contract",
         "oracle rebuild is witnessed only when active tip advances beyond tip_height_at_detect");
+    return ok;
+}
+
+static bool detail_tip_stall_oracle_rebuild(struct json_value *out)
+{
+    struct main_state *ms = ms_or_null();
+    int64_t current_tip = current_tip_height(ms);
+    int64_t current_best_header =
+        ms && ms->pindex_best_header ? ms->pindex_best_header->nHeight : -1;
+    int64_t unchanged_since = atomic_load(&g_tip_unchanged_since);
+    int64_t now = platform_time_wall_unix();
+    int64_t unchanged_age =
+        unchanged_since > 0 && now >= unchanged_since ? now - unchanged_since
+                                                      : -1;
+
+    bool ok = true;
+    ok = ok && tip_stall_detail_recorded_fields(out, unchanged_since,
+                                                unchanged_age);
+    ok = ok && tip_stall_detail_outcome_fields(out, current_tip,
+                                               current_best_header);
+    ok = ok && tip_stall_detail_contract_fields(out);
     return ok;
 }
 

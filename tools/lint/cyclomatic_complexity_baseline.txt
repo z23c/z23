@@ -1150,7 +1150,6 @@ engine/conditions/src/sapling_anchor_frontier_unavailable.c:tier1b_borrow_verifi
 engine/conditions/src/shielded_selfheal_ladder.c:shielded_selfheal_run_named_remedy:23
 engine/conditions/src/stale_validate_headers_repair.c:remedy_stale_validate_headers_repair:21
 engine/conditions/src/tip_fork_stale.c:detect_tip_fork_stale:18
-engine/conditions/src/tip_stall_oracle_rebuild.c:detail_tip_stall_oracle_rebuild:20
 engine/conditions/src/tip_wedged_resnapshot.c:detail_tip_wedged_resnapshot:16
 engine/controllers/src/anchor_controller.c:rpc_anchor_publish:21
 engine/controllers/src/anchor_controller.c:rpc_anchor_verify:17
