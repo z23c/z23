@@ -303,8 +303,10 @@ enum plugin_run_status plugin_run_reload(struct plugin_run *run)
 
 void plugin_run_info_get(const struct plugin_run *run, struct plugin_run_info *out)
 {
-    if (run && out)
-        *out = run->info;
+    if (!out)
+        return;
+    /* A NULL run reads as an all-zero info, so no caller sees stale fields. */
+    *out = run ? run->info : (struct plugin_run_info){0};
 }
 
 enum plugin_run_status plugin_run_loop(struct plugin_run *run,
