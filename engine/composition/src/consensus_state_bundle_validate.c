@@ -977,6 +977,37 @@ static bool validate_anchors(sqlite3 *db,
     return true;
 }
 
+/* One nullifiers row as stored, before any bound is applied. */
+struct nullifier_row {
+    int nf_type;
+    const uint8_t *nf;
+    int64_t pool, height;
+    bool numeric;
+};
+
+static void nullifier_row_load(sqlite3_stmt *st, struct nullifier_row *row)
+{
+    row->nf_type = sqlite3_column_type(st, 1);
+    row->nf = row->nf_type == SQLITE_BLOB
+        ? sqlite3_column_blob(st, 1) : NULL;
+    row->pool = row->height = -1;
+    row->numeric = copy_int64_exact(st, 0, &row->pool) &&
+                   copy_int64_exact(st, 2, &row->height);
+}
+
+static bool nullifier_row_shape_bad(const struct nullifier_row *row,
+                                    sqlite3_stmt *st, uint64_t count,
+                                    int32_t max_height, int prior_pool,
+                                    const uint8_t prior_nf[32])
+{
+    return !row->numeric || row->nf_type != SQLITE_BLOB ||
+           (row->pool != 0 && row->pool != 1) || !row->nf ||
+           sqlite3_column_bytes(st, 1) != 32 || row->height < 0 ||
+           row->height > max_height || count == UINT64_MAX ||
+           (prior_pool == row->pool &&
+            memcmp(prior_nf, row->nf, 32) >= 0);
+}
+
 static bool validate_nullifiers(
     sqlite3 *db, const struct consensus_state_bundle_manifest *m,
     struct consensus_state_install_result *r)
@@ -998,24 +1029,17 @@ static bool validate_nullifiers(
     int rc;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) { // raw-sql-ok:read-only-introspection
         heartbeat_tick(&hb, count);
-        int nf_type = sqlite3_column_type(st, 1);
-        const uint8_t *nf = nf_type == SQLITE_BLOB
-            ? sqlite3_column_blob(st, 1) : NULL;
-        int64_t pool = -1, height = -1;
-        bool numeric = copy_int64_exact(st, 0, &pool) &&
-                       copy_int64_exact(st, 2, &height);
-        if (!numeric || nf_type != SQLITE_BLOB ||
-            (pool != 0 && pool != 1) || !nf ||
-            sqlite3_column_bytes(st, 1) != 32 || height < 0 ||
-            height > m->height || count == UINT64_MAX ||
-            (prior_pool == pool && memcmp(prior_nf, nf, 32) >= 0)) {
+        struct nullifier_row row;
+        nullifier_row_load(st, &row);
+        if (nullifier_row_shape_bad(&row, st, count, m->height,
+                                    prior_pool, prior_nf)) {
             ok = false;
             break;
         }
         consensus_state_bundle_nullifier_digest_row(
-            &ctx, (uint8_t)pool, nf, (uint64_t)height);
-        prior_pool = pool;
-        memcpy(prior_nf, nf, sizeof(prior_nf));
+            &ctx, (uint8_t)row.pool, row.nf, (uint64_t)row.height);
+        prior_pool = row.pool;
+        memcpy(prior_nf, row.nf, sizeof(prior_nf));
         count++;
     }
     if (rc != SQLITE_DONE)
