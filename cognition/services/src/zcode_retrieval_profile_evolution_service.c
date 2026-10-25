@@ -95,54 +95,64 @@ static enum zcode_retrieval_profile_evolution_error evolution_project(
     return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_OK;
 }
 
-enum zcode_retrieval_profile_evolution_error
-zcode_retrieval_profile_evolution_propose(
+static bool evolution_request_missing(
     const struct zcode_retrieval_profile_evolution_request *request,
-    struct zcode_retrieval_profile_evolution_report *report)
+    const struct zcode_retrieval_profile_evolution_report *report)
 {
-    if (!request || !report || !request->parent_profile ||
+    return !request || !report || !request->parent_profile ||
         !request->feature_snapshot || !request->feature_rows ||
-        !request->parent_heuristic || !request->task_id || !request->query)
-        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_NULL;
-    size_t task_id_length = 0, query_length = 0;
-    if (!evolution_bounded_text(request->task_id, 128u, &task_id_length) ||
-        !evolution_bounded_text(request->query, 4096u, &query_length) ||
+        !request->parent_heuristic || !request->task_id || !request->query;
+}
+
+static bool evolution_text_or_scale_rejected(
+    const struct zcode_retrieval_profile_evolution_request *request,
+    size_t *task_id_length, size_t *query_length)
+{
+    return !evolution_bounded_text(request->task_id, 128u, task_id_length) ||
+        !evolution_bounded_text(request->query, 4096u, query_length) ||
         request->candidate_context_byte_scale == 0 ||
         request->candidate_context_byte_scale ==
-            request->parent_profile->context_byte_scale)
-        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_PARAMETER;
-    if (request->feature_snapshot->row_count == 0 ||
-        request->feature_snapshot->row_count >
-            ZCL_RETRIEVAL_EVAL_RANK_MAX)
-        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_RETRIEVAL;
-    if (evolution_output_aliases(
-            request, report, task_id_length, query_length))
-        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_ALIAS;
+            request->parent_profile->context_byte_scale;
+}
+
+static bool evolution_row_count_rejected(
+    const struct zcode_retrieval_profile_evolution_request *request)
+{
+    return request->feature_snapshot->row_count == 0 ||
+        request->feature_snapshot->row_count > ZCL_RETRIEVAL_EVAL_RANK_MAX;
+}
+
+static bool evolution_binding_roots_unbound(
+    const struct zcode_retrieval_profile_evolution_request *request)
+{
     if (!evolution_root_any(request->expected_task_root) ||
         !evolution_root_any(request->expected_source_root) ||
         !evolution_root_any(request->expected_snapshot_source_root) ||
         !evolution_root_any(request->expected_retrieval_projection_root) ||
         !evolution_root_any(request->proposal_evaluator_root) ||
         !evolution_root_any(request->candidate_provenance_root))
-        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_BINDING;
-
+        return true;
     uint8_t query_root[32];
-    if (zcl_retrieval_query_root(request->query, query_root) !=
+    return zcl_retrieval_query_root(request->query, query_root) !=
             ZCL_RETRIEVAL_EXPERIMENT_OK ||
         memcmp(query_root, request->feature_snapshot->query_root, 32u) != 0 ||
         memcmp(request->expected_snapshot_source_root,
                request->feature_snapshot->source_root, 32u) != 0 ||
         memcmp(request->expected_retrieval_projection_root,
-               request->feature_snapshot->codeindex_root, 32u) != 0)
-        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_BINDING;
+               request->feature_snapshot->codeindex_root, 32u) != 0;
+}
 
-    struct zcode_retrieval_profile_evolution_report result = {0};
-    result.candidate_profile = *request->parent_profile;
-    result.candidate_profile.context_byte_scale =
+static enum zcode_retrieval_profile_evolution_error
+evolution_prepare_candidate(
+    const struct zcode_retrieval_profile_evolution_request *request,
+    struct zcode_retrieval_profile_evolution_report *result)
+{
+    result->candidate_profile = *request->parent_profile;
+    result->candidate_profile.context_byte_scale =
         request->candidate_context_byte_scale;
     if (zcl_retrieval_profile_validate(request->parent_profile) !=
             ZCL_RETRIEVAL_EXPERIMENT_OK ||
-        zcl_retrieval_profile_validate(&result.candidate_profile) !=
+        zcl_retrieval_profile_validate(&result->candidate_profile) !=
             ZCL_RETRIEVAL_EXPERIMENT_OK)
         return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_RETRIEVAL;
     if (vcs_zcode_heuristic_validate(request->parent_heuristic) !=
@@ -153,32 +163,38 @@ zcode_retrieval_profile_evolution_propose(
         memcmp(request->expected_source_root,
                request->parent_heuristic->source_root, 32u) != 0)
         return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_BINDING;
+    return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_OK;
+}
 
-    enum zcode_retrieval_profile_evolution_error error =
-        evolution_project(request, &result);
-    if (error != ZCODE_RETRIEVAL_PROFILE_EVOLUTION_OK) return error;
-    if (zcl_retrieval_profile_root(
-            request->parent_profile, result.parent_profile_root) !=
+static bool evolution_computed_roots_unbound(
+    const struct zcode_retrieval_profile_evolution_request *request,
+    struct zcode_retrieval_profile_evolution_report *result)
+{
+    return zcl_retrieval_profile_root(
+            request->parent_profile, result->parent_profile_root) !=
             ZCL_RETRIEVAL_EXPERIMENT_OK ||
         zcl_retrieval_profile_root(
-            &result.candidate_profile, result.candidate_profile_root) !=
+            &result->candidate_profile, result->candidate_profile_root) !=
             ZCL_RETRIEVAL_EXPERIMENT_OK ||
         zcl_retrieval_feature_snapshot_root(
             request->feature_snapshot, request->feature_rows,
-            result.feature_snapshot_root) !=
+            result->feature_snapshot_root) !=
             ZCL_RETRIEVAL_EXPERIMENT_OK ||
         vcs_zcode_heuristic_root(
-            request->parent_heuristic, result.parent_heuristic_root) !=
-            VCS_ZCODE_ATTENTION_OK)
-        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_BINDING;
-    if (memcmp(request->parent_heuristic->proposed_rule_root,
-               result.parent_profile_root, 32u) != 0 ||
+            request->parent_heuristic, result->parent_heuristic_root) !=
+            VCS_ZCODE_ATTENTION_OK ||
+        memcmp(request->parent_heuristic->proposed_rule_root,
+               result->parent_profile_root, 32u) != 0 ||
         memcmp(request->parent_heuristic->observed_features_root,
-               result.feature_snapshot_root, 32u) != 0 ||
+               result->feature_snapshot_root, 32u) != 0 ||
         memcmp(request->parent_heuristic->expected_effect_root,
-               result.parent_projection.candidate_ranking_root, 32u) != 0)
-        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_BINDING;
+               result->parent_projection.candidate_ranking_root, 32u) != 0;
+}
 
+static bool evolution_proposal_inputs_unbound(
+    const struct zcode_retrieval_profile_evolution_request *request,
+    struct zcode_retrieval_profile_evolution_report *result)
+{
     bool evaluator_found = false;
     for (size_t i = 0;
          i < request->parent_heuristic->evaluator_count; i++) {
@@ -189,15 +205,15 @@ zcode_retrieval_profile_evolution_propose(
         }
     }
     uint8_t parent_profile_proposal_root[32];
-    if (!evaluator_found ||
+    return !evaluator_found ||
         !zcl_retrieval_profile_proposal_input_root(
             request->expected_source_root,
             request->feature_snapshot->source_root,
             request->feature_snapshot->codeindex_root,
             request->task_id, request->query,
             request->feature_snapshot->baseline_ranking_root,
-            result.parent_profile_root, result.feature_snapshot_root,
-            result.parent_projection.candidate_ranking_root,
+            result->parent_profile_root, result->feature_snapshot_root,
+            result->parent_projection.candidate_ranking_root,
             request->parent_heuristic->study_root,
             request->parent_heuristic->preregistration_root,
             request->proposal_evaluator_root,
@@ -210,47 +226,86 @@ zcode_retrieval_profile_evolution_propose(
             request->feature_snapshot->codeindex_root,
             request->task_id, request->query,
             request->feature_snapshot->baseline_ranking_root,
-            result.candidate_profile_root, result.feature_snapshot_root,
-            result.candidate_projection.candidate_ranking_root,
+            result->candidate_profile_root, result->feature_snapshot_root,
+            result->candidate_projection.candidate_ranking_root,
             request->parent_heuristic->study_root,
             request->parent_heuristic->preregistration_root,
             request->proposal_evaluator_root,
-            result.proposal_input_root))
-        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_BINDING;
-    if (memcmp(result.parent_projection.candidate_ranking_root,
-               result.candidate_projection.candidate_ranking_root,
+            result->proposal_input_root);
+}
+
+static enum zcode_retrieval_profile_evolution_error
+evolution_finish_candidate(
+    const struct zcode_retrieval_profile_evolution_request *request,
+    struct zcode_retrieval_profile_evolution_report *result,
+    struct zcode_retrieval_profile_evolution_report *report)
+{
+    if (memcmp(result->parent_projection.candidate_ranking_root,
+               result->candidate_projection.candidate_ranking_root,
                32u) == 0)
         return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_NO_EFFECT;
-    result.candidate_heuristic = *request->parent_heuristic;
-    result.candidate_heuristic.derivation =
+    result->candidate_heuristic = *request->parent_heuristic;
+    result->candidate_heuristic.derivation =
         VCS_ZCODE_HEURISTIC_SPECIALIZE;
-    result.candidate_heuristic.parent_count = 1u;
-    memset(result.candidate_heuristic.parent_roots, 0,
-           sizeof(result.candidate_heuristic.parent_roots));
-    memcpy(result.candidate_heuristic.parent_roots[0],
-           result.parent_heuristic_root, 32u);
-    memcpy(result.candidate_heuristic.proposed_rule_root,
-           result.candidate_profile_root, 32u);
-    memcpy(result.candidate_heuristic.observed_features_root,
-           result.feature_snapshot_root, 32u);
-    memcpy(result.candidate_heuristic.expected_effect_root,
-           result.candidate_projection.candidate_ranking_root, 32u);
-    memcpy(result.candidate_heuristic.proposal_input_root,
-           result.proposal_input_root, 32u);
-    memcpy(result.candidate_heuristic.provenance_root,
+    result->candidate_heuristic.parent_count = 1u;
+    memset(result->candidate_heuristic.parent_roots, 0,
+           sizeof(result->candidate_heuristic.parent_roots));
+    memcpy(result->candidate_heuristic.parent_roots[0],
+           result->parent_heuristic_root, 32u);
+    memcpy(result->candidate_heuristic.proposed_rule_root,
+           result->candidate_profile_root, 32u);
+    memcpy(result->candidate_heuristic.observed_features_root,
+           result->feature_snapshot_root, 32u);
+    memcpy(result->candidate_heuristic.expected_effect_root,
+           result->candidate_projection.candidate_ranking_root, 32u);
+    memcpy(result->candidate_heuristic.proposal_input_root,
+           result->proposal_input_root, 32u);
+    memcpy(result->candidate_heuristic.provenance_root,
            request->candidate_provenance_root, 32u);
     if (vcs_zcode_heuristic_validate_derivation(
-            &result.candidate_heuristic, request->parent_heuristic, 1u) !=
+            &result->candidate_heuristic, request->parent_heuristic, 1u) !=
             VCS_ZCODE_ATTENTION_OK ||
         vcs_zcode_heuristic_root(
-            &result.candidate_heuristic,
-            result.candidate_heuristic_root) != VCS_ZCODE_ATTENTION_OK)
+            &result->candidate_heuristic,
+            result->candidate_heuristic_root) != VCS_ZCODE_ATTENTION_OK)
         return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_HEURISTIC;
-    result.evaluation_status = ZCL_ONTOLOGY_UNKNOWN;
-    result.attention_status = ZCL_ONTOLOGY_INCOMPLETE;
-    result.missing_attention_metrics =
+    result->evaluation_status = ZCL_ONTOLOGY_UNKNOWN;
+    result->attention_status = ZCL_ONTOLOGY_INCOMPLETE;
+    result->missing_attention_metrics =
         VCS_ZCODE_ATTENTION_METRIC_REQUIRED;
-    *report = result;
+    *report = *result;
     return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_OK;
+}
+
+enum zcode_retrieval_profile_evolution_error
+zcode_retrieval_profile_evolution_propose(
+    const struct zcode_retrieval_profile_evolution_request *request,
+    struct zcode_retrieval_profile_evolution_report *report)
+{
+    if (evolution_request_missing(request, report))
+        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_NULL;
+    size_t task_id_length = 0, query_length = 0;
+    if (evolution_text_or_scale_rejected(
+            request, &task_id_length, &query_length))
+        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_PARAMETER;
+    if (evolution_row_count_rejected(request))
+        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_RETRIEVAL;
+    if (evolution_output_aliases(
+            request, report, task_id_length, query_length))
+        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_ALIAS;
+    if (evolution_binding_roots_unbound(request))
+        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_BINDING;
+
+    struct zcode_retrieval_profile_evolution_report result = {0};
+    enum zcode_retrieval_profile_evolution_error error =
+        evolution_prepare_candidate(request, &result);
+    if (error != ZCODE_RETRIEVAL_PROFILE_EVOLUTION_OK) return error;
+    error = evolution_project(request, &result);
+    if (error != ZCODE_RETRIEVAL_PROFILE_EVOLUTION_OK) return error;
+    if (evolution_computed_roots_unbound(request, &result))
+        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_BINDING;
+    if (evolution_proposal_inputs_unbound(request, &result))
+        return ZCODE_RETRIEVAL_PROFILE_EVOLUTION_BINDING;
+    return evolution_finish_candidate(request, &result, report);
 }
 
