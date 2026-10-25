@@ -11,6 +11,7 @@
 #include "crypto/ed25519.h"
 #include "json/json.h"
 #include "platform/atomic_link.h"
+#include "platform/barrier.h"
 #include "plugin/plugin_pack.h"
 #include "plugin/plugin_run.h"
 #include "plugin/plugin_store.h"
@@ -1783,7 +1784,7 @@ static int pst_case_lock_gate_leftover(void)
  * present and stages nothing, and both end consistent. This does NOT prove
  * staging-name uniqueness (the lock hides it); pst_case_unique_names does. */
 struct pst_thread_job {
-    pthread_barrier_t *go;
+    zcl_barrier_t *go;
     const struct pst_fx *fx;
     enum plugin_status st;
     int present;
@@ -1793,7 +1794,7 @@ static void *pst_install_thread(void *arg)
 {
     struct pst_thread_job *j = arg;
     struct plugin_manifest m;
-    pthread_barrier_wait(j->go);
+    zcl_barrier_wait(j->go);
     j->st = plugin_store_install(j->fx->root, j->fx->manifest, &m, &j->present);
     return NULL;
 }
@@ -1804,17 +1805,17 @@ static int pst_case_threaded_install(void)
     TEST_CASE("concurrent installs of one plugin serialize and both end consistent") {
         struct pst_fx fx;
         struct pst_opts o = {0};
-        pthread_barrier_t bar;
+        zcl_barrier_t bar;
         struct pst_thread_job job[2] = {{&bar, &fx, PLUGIN_ERR_IO, -1}, {&bar, &fx, PLUGIN_ERR_IO, -1}};
         pthread_t th[2];
         ASSERT(pst_fx_open(&fx, true));
         ASSERT(pst_publish(&fx, "hello", "version t", &o));
-        ASSERT_EQ(pthread_barrier_init(&bar, NULL, 2), 0);
+        ASSERT_EQ(zcl_barrier_init(&bar, 2), 0);
         for (int i = 0; i < 2; i++)
             ASSERT_EQ(pthread_create(&th[i], NULL, pst_install_thread, &job[i]), 0);
         for (int i = 0; i < 2; i++)
             ASSERT_EQ(pthread_join(th[i], NULL), 0);
-        pthread_barrier_destroy(&bar);
+        zcl_barrier_destroy(&bar);
         ASSERT_EQ(job[0].st, PLUGIN_OK);
         ASSERT_EQ(job[1].st, PLUGIN_OK);
         ASSERT_EQ(job[0].present + job[1].present, 1);
@@ -1829,14 +1830,14 @@ static int pst_case_threaded_install(void)
  * common start barrier; every name must be distinct. */
 enum { PST_UQ_THREADS = 8, PST_UQ_DRAWS = 2000 };
 struct pst_uq_job {
-    pthread_barrier_t *go;
+    zcl_barrier_t *go;
     unsigned long *out;
 };
 
 static void *pst_uq_thread(void *arg)
 {
     struct pst_uq_job *j = arg;
-    pthread_barrier_wait(j->go);
+    zcl_barrier_wait(j->go);
     for (int i = 0; i < PST_UQ_DRAWS; i++)
         j->out[i] = plugin_store_test_unique();
     return NULL;
@@ -1854,10 +1855,10 @@ static int pst_case_unique_names(void)
     TEST_CASE("staging and aside names are distinct across concurrent threads") {
         static unsigned long all[PST_UQ_THREADS * PST_UQ_DRAWS];
         struct pst_uq_job job[PST_UQ_THREADS];
-        pthread_barrier_t bar;
+        zcl_barrier_t bar;
         pthread_t th[PST_UQ_THREADS];
         size_t dup = 0;
-        ASSERT_EQ(pthread_barrier_init(&bar, NULL, PST_UQ_THREADS), 0);
+        ASSERT_EQ(zcl_barrier_init(&bar, PST_UQ_THREADS), 0);
         for (int i = 0; i < PST_UQ_THREADS; i++) {
             job[i].go = &bar;
             job[i].out = all + (size_t)i * PST_UQ_DRAWS;
@@ -1865,7 +1866,7 @@ static int pst_case_unique_names(void)
         }
         for (int i = 0; i < PST_UQ_THREADS; i++)
             ASSERT_EQ(pthread_join(th[i], NULL), 0);
-        pthread_barrier_destroy(&bar);
+        zcl_barrier_destroy(&bar);
         qsort(all, PST_UQ_THREADS * PST_UQ_DRAWS, sizeof(all[0]), pst_uq_cmp);
         for (size_t i = 1; i < PST_UQ_THREADS * PST_UQ_DRAWS; i++)
             dup += all[i] == all[i - 1];
