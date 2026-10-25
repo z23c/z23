@@ -31,6 +31,16 @@ struct zti_payload {
     int64_t actual_fee_zat;
 };
 
+struct zti_preparation {
+    uint8_t *raw;
+    struct vault_intent_input *inputs;
+    size_t raw_len;
+    size_t input_count;
+    struct zti_payload payload;
+    int64_t recipient_zat;
+    int64_t reserved_zat;
+};
+
 static bool zti_idempotency_valid(const char *key)
 {
     if (!key || !key[0] || strlen(key) > VAULT_INTENT_IDEMPOTENCY_MAX)
@@ -95,24 +105,23 @@ static struct zcl_result zti_runtime_validate(
     return ZCL_OK;
 }
 
-static struct zcl_result zti_request_validate(
+static struct zcl_result zti_genesis_request_validate(
     const struct zslp_intent_request *r)
 {
-    if (!r || (strcmp(r->wallet_scope, "dev") != 0 &&
-               strcmp(r->wallet_scope, "prod") != 0) ||
-        !zti_idempotency_valid(r->idempotency_key))
-        return ZCL_ERR(-4, "scope and idempotency key are required");
-    if (r->operation == ZSLP_INTENT_GENESIS) {
-        struct zslp_token_create_request create = {
-            .ticker = r->ticker, .name = r->name, .decimals = r->decimals,
-            .initial_supply = r->supply,
-        };
-        const char *why = zslp_service_validate_create_request(&create);
-        if (why || r->supply == 0)
-            return ZCL_ERR(-5, "invalid ZSLP genesis request: %s",
-                           why ? why : "supply must be positive");
-        return ZCL_OK;
-    }
+    struct zslp_token_create_request create = {
+        .ticker = r->ticker, .name = r->name, .decimals = r->decimals,
+        .initial_supply = r->supply,
+    };
+    const char *why = zslp_service_validate_create_request(&create);
+    if (why || r->supply == 0)
+        return ZCL_ERR(-5, "invalid ZSLP genesis request: %s",
+                       why ? why : "supply must be positive");
+    return ZCL_OK;
+}
+
+static struct zcl_result zti_token_request_validate(
+    const struct zslp_intent_request *r)
+{
     if (strlen(r->token_id) != 64 ||
         !zslp_service_is_hex_string(r->token_id, 64) || r->units == 0)
         return ZCL_ERR(-6, "token_id must be 64 hex and units must be positive");
@@ -128,6 +137,18 @@ static struct zcl_result zti_request_validate(
     const char *why = zslp_service_validate_transfer_request(&transfer);
     return why ? ZCL_ERR(-8, "invalid ZSLP transfer request: %s", why)
                : ZCL_OK;
+}
+
+static struct zcl_result zti_request_validate(
+    const struct zslp_intent_request *r)
+{
+    if (!r || (strcmp(r->wallet_scope, "dev") != 0 &&
+               strcmp(r->wallet_scope, "prod") != 0) ||
+        !zti_idempotency_valid(r->idempotency_key))
+        return ZCL_ERR(-4, "scope and idempotency key are required");
+    if (r->operation == ZSLP_INTENT_GENESIS)
+        return zti_genesis_request_validate(r);
+    return zti_token_request_validate(r);
 }
 
 static struct zcl_result zti_money_current(
@@ -214,31 +235,42 @@ static bool zti_payload_encode(const struct zti_payload *p, uint8_t *out,
     return true;
 }
 
+static bool zti_payload_read_header(struct byte_stream *s, uint8_t *operation)
+{
+    uint8_t magic[4];
+    return stream_read(s, magic, 4) && memcmp(magic, "ZTI1", 4) == 0 &&
+        stream_read_u8(s, operation) && *operation >= ZSLP_INTENT_GENESIS &&
+        *operation <= ZSLP_INTENT_BURN;
+}
+
+static bool zti_payload_read_body(struct byte_stream *s, struct zti_payload *p)
+{
+    return zti_read_text(s, p->request.wallet_scope,
+                         sizeof(p->request.wallet_scope)) &&
+        zti_read_text(s, p->request.ticker, sizeof(p->request.ticker)) &&
+        zti_read_text(s, p->request.name, sizeof(p->request.name)) &&
+        stream_read_u8(s, &p->request.decimals) &&
+        stream_read_u64_le(s, &p->request.supply) &&
+        zti_read_text(s, p->request.token_id,
+                      sizeof(p->request.token_id)) &&
+        zti_read_text(s, p->request.recipient,
+                      sizeof(p->request.recipient)) &&
+        stream_read_u64_le(s, &p->request.units) &&
+        stream_read(s, p->txid, 32) &&
+        stream_read_i64_le(s, &p->actual_fee_zat) &&
+        stream_remaining(s) == 0;
+}
+
 static bool zti_payload_decode(const uint8_t *raw, size_t raw_len,
                                struct zti_payload *p)
 {
     memset(p, 0, sizeof(*p));
     struct byte_stream s;
     stream_init_from_data(&s, raw, raw_len);
-    uint8_t magic[4], operation = 0;
-    bool ok = stream_read(&s, magic, 4) && memcmp(magic, "ZTI1", 4) == 0 &&
-        stream_read_u8(&s, &operation) && operation >= ZSLP_INTENT_GENESIS &&
-        operation <= ZSLP_INTENT_BURN;
+    uint8_t operation = 0;
+    bool ok = zti_payload_read_header(&s, &operation);
     p->request.operation = (enum zslp_intent_operation)operation;
-    ok = ok && zti_read_text(&s, p->request.wallet_scope,
-                             sizeof(p->request.wallet_scope)) &&
-        zti_read_text(&s, p->request.ticker, sizeof(p->request.ticker)) &&
-        zti_read_text(&s, p->request.name, sizeof(p->request.name)) &&
-        stream_read_u8(&s, &p->request.decimals) &&
-        stream_read_u64_le(&s, &p->request.supply) &&
-        zti_read_text(&s, p->request.token_id,
-                      sizeof(p->request.token_id)) &&
-        zti_read_text(&s, p->request.recipient,
-                      sizeof(p->request.recipient)) &&
-        stream_read_u64_le(&s, &p->request.units) &&
-        stream_read(&s, p->txid, 32) &&
-        stream_read_i64_le(&s, &p->actual_fee_zat) &&
-        stream_remaining(&s) == 0;
+    ok = ok && zti_payload_read_body(&s, p);
     stream_free(&s);
     return ok;
 }
@@ -298,6 +330,142 @@ static void zti_view(const struct vault_intent_row *row,
     memcpy(out->plan_digest, row->digest, 32);
 }
 
+static void zti_preparation_discard(struct zti_preparation *prep)
+{
+    memory_cleanse(prep->raw, VAULT_INTENT_RAW_MAX);
+    free(prep->raw); free(prep->inputs);
+    memory_cleanse(&prep->payload, sizeof(prep->payload));
+}
+
+static struct zcl_result zti_plan_prepare_transaction(
+    const struct zslp_intent_runtime *rt,
+    const struct zslp_intent_request *request,
+    struct zti_preparation *prep)
+{
+    uint8_t *raw = zcl_malloc(VAULT_INTENT_RAW_MAX, "zslp_intent_raw");
+    struct vault_intent_input *inputs = zcl_malloc(
+        ZTI_INPUT_MAX * sizeof(*inputs), "zslp_intent_inputs");
+    if (!raw || !inputs) {
+        free(raw); free(inputs);
+        return ZCL_ERR(-15, "ZSLP intent preparation allocation failed");
+    }
+    memset(&prep->payload, 0, sizeof(prep->payload));
+    prep->payload.request = *request;
+    size_t raw_len = 0, input_count = 0;
+    struct zcl_result prepared = rt->prepare(
+        rt->prepare_ctx, request, rt->maximum_fee_zat, raw,
+        VAULT_INTENT_RAW_MAX, &raw_len, prep->payload.txid,
+        &prep->payload.actual_fee_zat, inputs, ZTI_INPUT_MAX, &input_count);
+    if (!prepared.ok || raw_len == 0 || input_count == 0 ||
+        prep->payload.actual_fee_zat < 0 ||
+        prep->payload.actual_fee_zat > rt->maximum_fee_zat ||
+        !zcl_bytes_any_set(prep->payload.txid, 32)) {
+        memory_cleanse(raw, VAULT_INTENT_RAW_MAX);
+        memory_cleanse(&prep->payload, sizeof(prep->payload));
+        free(raw); free(inputs);
+        return prepared.ok ? ZCL_ERR(-16, "prepared ZSLP transaction violates its fee/input contract")
+                           : prepared;
+    }
+    prep->raw = raw;
+    prep->inputs = inputs;
+    prep->raw_len = raw_len;
+    prep->input_count = input_count;
+    return ZCL_OK;
+}
+
+static struct zcl_result zti_plan_reserve_amounts(
+    const struct zslp_intent_runtime *rt,
+    const struct zslp_intent_request *request,
+    const struct wallet_money_snapshot *money,
+    struct zti_preparation *prep)
+{
+    int64_t recipient = (request->operation == ZSLP_INTENT_SEND ||
+                         request->operation == ZSLP_INTENT_MINT)
+        ? ZTI_TOKEN_RECIPIENT_DUST_ZAT : 0;
+    if (recipient > INT64_MAX - rt->maximum_fee_zat)
+        return ZCL_ERR(-17, "ZSLP reservation overflow");
+    int64_t reserved = recipient + rt->maximum_fee_zat;
+    int64_t liquid = money->confirmed_zat - money->intent_reserved_zat;
+    if (reserved > liquid || (strcmp(request->wallet_scope, "dev") == 0 &&
+                              reserved > money->agent_available_zat))
+        return ZCL_ERR(-18, "custody allocation cannot reserve ZSLP value plus fee");
+    prep->recipient_zat = recipient;
+    prep->reserved_zat = reserved;
+    return ZCL_OK;
+}
+
+static struct zcl_result zti_plan_row_fill(
+    const struct zslp_intent_runtime *rt,
+    const struct zslp_intent_request *request,
+    const struct wallet_money_snapshot *money,
+    const struct zti_preparation *prep, const uint8_t request_digest[32],
+    struct vault_intent_row *row)
+{
+    memset(row, 0, sizeof(*row));
+    if (RAND_bytes(row->plan_id, 32) != 1)
+        return ZCL_ERR(-19, "could not mint ZSLP plan identity");
+    row->state = VAULT_INTENT_PLANNED;
+    row->route = VAULT_INTENT_ROUTE_TRANSPARENT;
+    row->created_at = rt->now_unix;
+    row->expires_at = rt->now_unix + ZTI_PLAN_TTL;
+    row->updated_at = rt->now_unix;
+    row->anchor_height = rt->tip_height;
+    memcpy(row->anchor_hash, rt->tip_hash, 32);
+    snprintf(row->wallet_scope, sizeof(row->wallet_scope), "%s",
+             request->wallet_scope);
+    snprintf(row->wallet_instance_id, sizeof(row->wallet_instance_id), "%s",
+             money->identity.wallet_instance_id);
+    wallet_identity_genesis_hex(&money->identity, row->wallet_genesis);
+    memcpy(row->snapshot_root, money->snapshot_root, 32);
+    row->has_snapshot_root = true;
+    row->recipient_value_zat = prep->recipient_zat;
+    row->max_fee_zat = rt->maximum_fee_zat;
+    row->reserved_zat = prep->reserved_zat;
+    snprintf(row->application_kind, sizeof(row->application_kind), "%s",
+             ZSLP_INTENT_APPLICATION);
+    snprintf(row->idempotency_key, sizeof(row->idempotency_key), "%s",
+             request->idempotency_key);
+    memcpy(row->request_digest, request_digest, 32);
+    row->has_request_digest = true;
+    return ZCL_OK;
+}
+
+static bool zti_plan_store(const struct zslp_intent_runtime *rt,
+                           const char *wallet_scope, int64_t confirmed_zat,
+                           const struct zti_preparation *prep,
+                           struct vault_intent_row *row)
+{
+    uint8_t plain[ZTI_PAYLOAD_MAX]; size_t plain_len = 0;
+    bool encoded = zti_payload_encode(&prep->payload, plain, sizeof(plain),
+                                      &plain_len);
+    bool encrypted = encoded && wallet_metadata_encrypt(
+        rt->node_db, row->plan_id, 32, plain, plain_len,
+        row->encrypted_payload, sizeof(row->encrypted_payload),
+        &row->encrypted_payload_len);
+    if (encrypted)
+        zti_intent_digest(plain, plain_len, row, row->digest);
+    bool stored = encrypted && vault_intent_reserve_with_raw_inputs(
+        rt->node_db, row, confirmed_zat, prep->raw, prep->raw_len,
+        prep->inputs, prep->input_count);
+    if (stored) {
+        struct wallet_money_snapshot refreshed;
+        struct zcl_result current = zti_money_current(
+            rt, wallet_scope, &refreshed);
+        stored = current.ok;
+        if (stored) {
+            memcpy(row->snapshot_root, refreshed.snapshot_root, 32);
+            zti_intent_digest(plain, plain_len, row, row->digest);
+            stored = vault_intent_save(rt->node_db, row);
+        }
+        if (!stored)
+            (void)vault_intent_set_state(rt->node_db, row->plan_id,
+                VAULT_INTENT_FAILED, NULL, "SNAPSHOT_BIND_FAILED",
+                rt->now_unix);
+    }
+    memory_cleanse(plain, sizeof(plain));
+    return stored;
+}
+
 struct zcl_result zslp_transaction_intent_plan(
     const struct zslp_intent_runtime *rt,
     const struct zslp_intent_request *request,
@@ -324,110 +492,136 @@ struct zcl_result zslp_transaction_intent_plan(
     }
     struct wallet_money_snapshot money;
     ZCL_CHECK(zti_money_current(rt, request->wallet_scope, &money));
-    uint8_t *raw = zcl_malloc(VAULT_INTENT_RAW_MAX, "zslp_intent_raw");
-    struct vault_intent_input *inputs = zcl_malloc(
-        ZTI_INPUT_MAX * sizeof(*inputs), "zslp_intent_inputs");
-    if (!raw || !inputs) {
-        free(raw); free(inputs);
-        return ZCL_ERR(-15, "ZSLP intent preparation allocation failed");
+    struct zti_preparation prep;
+    struct zcl_result prepared = zti_plan_prepare_transaction(rt, request,
+                                                              &prep);
+    if (!prepared.ok)
+        return prepared;
+    struct zcl_result amounts = zti_plan_reserve_amounts(rt, request, &money,
+                                                         &prep);
+    if (!amounts.ok) {
+        zti_preparation_discard(&prep);
+        return amounts;
     }
-    struct zti_payload payload; memset(&payload, 0, sizeof(payload));
-    payload.request = *request;
-    size_t raw_len = 0, input_count = 0;
-    struct zcl_result prepared = rt->prepare(
-        rt->prepare_ctx, request, rt->maximum_fee_zat, raw,
-        VAULT_INTENT_RAW_MAX, &raw_len, payload.txid,
-        &payload.actual_fee_zat, inputs, ZTI_INPUT_MAX, &input_count);
-    if (!prepared.ok || raw_len == 0 || input_count == 0 ||
-        payload.actual_fee_zat < 0 ||
-        payload.actual_fee_zat > rt->maximum_fee_zat ||
-        !zcl_bytes_any_set(payload.txid, 32)) {
-        memory_cleanse(raw, VAULT_INTENT_RAW_MAX);
-        memory_cleanse(&payload, sizeof(payload));
-        free(raw); free(inputs);
-        return prepared.ok ? ZCL_ERR(-16, "prepared ZSLP transaction violates its fee/input contract")
-                           : prepared;
+    struct vault_intent_row row;
+    struct zcl_result identified = zti_plan_row_fill(rt, request, &money,
+                                                     &prep, request_digest,
+                                                     &row);
+    if (!identified.ok) {
+        zti_preparation_discard(&prep);
+        return identified;
     }
-    int64_t recipient = (request->operation == ZSLP_INTENT_SEND ||
-                         request->operation == ZSLP_INTENT_MINT)
-        ? ZTI_TOKEN_RECIPIENT_DUST_ZAT : 0;
-    if (recipient > INT64_MAX - rt->maximum_fee_zat) {
-        memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw); free(inputs);
-        memory_cleanse(&payload, sizeof(payload));
-        return ZCL_ERR(-17, "ZSLP reservation overflow");
-    }
-    int64_t reserved = recipient + rt->maximum_fee_zat;
-    int64_t liquid = money.confirmed_zat - money.intent_reserved_zat;
-    if (reserved > liquid || (strcmp(request->wallet_scope, "dev") == 0 &&
-                              reserved > money.agent_available_zat)) {
-        memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw); free(inputs);
-        memory_cleanse(&payload, sizeof(payload));
-        return ZCL_ERR(-18, "custody allocation cannot reserve ZSLP value plus fee");
-    }
-    struct vault_intent_row row; memset(&row, 0, sizeof(row));
-    if (RAND_bytes(row.plan_id, 32) != 1) {
-        memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw); free(inputs);
-        memory_cleanse(&payload, sizeof(payload));
-        return ZCL_ERR(-19, "could not mint ZSLP plan identity");
-    }
-    row.state = VAULT_INTENT_PLANNED;
-    row.route = VAULT_INTENT_ROUTE_TRANSPARENT;
-    row.created_at = rt->now_unix;
-    row.expires_at = rt->now_unix + ZTI_PLAN_TTL;
-    row.updated_at = rt->now_unix;
-    row.anchor_height = rt->tip_height;
-    memcpy(row.anchor_hash, rt->tip_hash, 32);
-    snprintf(row.wallet_scope, sizeof(row.wallet_scope), "%s",
-             request->wallet_scope);
-    snprintf(row.wallet_instance_id, sizeof(row.wallet_instance_id), "%s",
-             money.identity.wallet_instance_id);
-    wallet_identity_genesis_hex(&money.identity, row.wallet_genesis);
-    memcpy(row.snapshot_root, money.snapshot_root, 32);
-    row.has_snapshot_root = true;
-    row.recipient_value_zat = recipient;
-    row.max_fee_zat = rt->maximum_fee_zat;
-    row.reserved_zat = reserved;
-    snprintf(row.application_kind, sizeof(row.application_kind), "%s",
-             ZSLP_INTENT_APPLICATION);
-    snprintf(row.idempotency_key, sizeof(row.idempotency_key), "%s",
-             request->idempotency_key);
-    memcpy(row.request_digest, request_digest, 32);
-    row.has_request_digest = true;
-    uint8_t plain[ZTI_PAYLOAD_MAX]; size_t plain_len = 0;
-    bool encoded = zti_payload_encode(&payload, plain, sizeof(plain), &plain_len);
-    bool encrypted = encoded && wallet_metadata_encrypt(
-        rt->node_db, row.plan_id, 32, plain, plain_len,
-        row.encrypted_payload, sizeof(row.encrypted_payload),
-        &row.encrypted_payload_len);
-    if (encrypted)
-        zti_intent_digest(plain, plain_len, &row, row.digest);
-    bool stored = encrypted && vault_intent_reserve_with_raw_inputs(
-        rt->node_db, &row, money.confirmed_zat, raw, raw_len, inputs,
-        input_count);
-    if (stored) {
-        struct wallet_money_snapshot refreshed;
-        struct zcl_result current = zti_money_current(
-            rt, request->wallet_scope, &refreshed);
-        stored = current.ok;
-        if (stored) {
-            memcpy(row.snapshot_root, refreshed.snapshot_root, 32);
-            zti_intent_digest(plain, plain_len, &row, row.digest);
-            stored = vault_intent_save(rt->node_db, &row);
-        }
-        if (!stored)
-            (void)vault_intent_set_state(rt->node_db, row.plan_id,
-                VAULT_INTENT_FAILED, NULL, "SNAPSHOT_BIND_FAILED",
-                rt->now_unix);
-    }
-    memory_cleanse(plain, sizeof(plain));
-    memory_cleanse(raw, VAULT_INTENT_RAW_MAX);
-    memory_cleanse(&payload, sizeof(payload));
-    free(raw); free(inputs);
+    bool stored = zti_plan_store(rt, request->wallet_scope,
+                                 money.confirmed_zat, &prep, &row);
+    memory_cleanse(prep.raw, VAULT_INTENT_RAW_MAX);
+    memory_cleanse(&prep.payload, sizeof(prep.payload));
+    free(prep.raw); free(prep.inputs);
     if (!stored)
         return ZCL_ERR(-20, "ZSLP reservation or exact-input claim conflicted");
-    ZCL_CHECK(zti_payload_open(rt, &row, &payload));
-    zti_view(&row, &payload, out);
-    memory_cleanse(&payload, sizeof(payload));
+    ZCL_CHECK(zti_payload_open(rt, &row, &prep.payload));
+    zti_view(&row, &prep.payload, out);
+    memory_cleanse(&prep.payload, sizeof(prep.payload));
+    return ZCL_OK;
+}
+
+static struct zcl_result zti_commit_find(
+    const struct zslp_intent_runtime *rt, const uint8_t plan_id[32],
+    const char *wallet_scope, struct vault_intent_row *row)
+{
+    if (!vault_intent_find(rt->node_db, plan_id, row) ||
+        strcmp(row->application_kind, ZSLP_INTENT_APPLICATION) != 0)
+        return ZCL_ERR(-22, "ZSLP intent was not found");
+    if (strcmp(row->wallet_scope, wallet_scope) != 0)
+        return ZCL_ERR(-23, "wallet scope does not match ZSLP intent");
+    return ZCL_OK;
+}
+
+static bool zti_commit_replayed(const struct vault_intent_row *row,
+                                struct zti_payload *payload,
+                                struct zslp_intent_result *out)
+{
+    if (row->has_txid && row->state >= VAULT_INTENT_MEMPOOL_ACCEPTED &&
+        row->state <= VAULT_INTENT_REORGED) {
+        zti_view(row, payload, out);
+        out->idempotent_replay = true;
+        memory_cleanse(payload, sizeof(*payload));
+        return true;
+    }
+    return false;
+}
+
+static struct zcl_result zti_commit_committable(
+    const struct zslp_intent_runtime *rt, const struct vault_intent_row *row,
+    struct zti_payload *payload)
+{
+    if ((row->state != VAULT_INTENT_PLANNED &&
+         row->state != VAULT_INTENT_PROVING) || row->expires_at <= rt->now_unix) {
+        memory_cleanse(payload, sizeof(*payload));
+        return ZCL_ERR(-24, "ZSLP intent is not committable");
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result zti_commit_snapshot_bound(
+    const struct zslp_intent_runtime *rt, const char *wallet_scope,
+    const struct vault_intent_row *row, struct zti_payload *payload)
+{
+    struct wallet_money_snapshot money;
+    struct zcl_result current = zti_money_current(rt, wallet_scope, &money);
+    char genesis[65] = {0};
+    if (current.ok) wallet_identity_genesis_hex(&money.identity, genesis);
+    bool bound = current.ok &&
+        strcmp(row->wallet_instance_id, money.identity.wallet_instance_id) == 0 &&
+        strcmp(row->wallet_genesis, genesis) == 0 &&
+        row->anchor_height == rt->tip_height &&
+        memcmp(row->anchor_hash, rt->tip_hash, 32) == 0 &&
+        memcmp(row->snapshot_root, money.snapshot_root, 32) == 0;
+    if (!bound) {
+        (void)vault_intent_set_state(rt->node_db, row->plan_id,
+            VAULT_INTENT_CONFLICTED, NULL, "MONEY_SNAPSHOT_CHANGED",
+            rt->now_unix);
+        memory_cleanse(payload, sizeof(*payload));
+        return current.ok ? ZCL_ERR(-25, "wallet identity, tip, or money snapshot changed")
+                          : current;
+    }
+    return ZCL_OK;
+}
+
+static struct zcl_result zti_commit_publish_prepared(
+    const struct zslp_intent_runtime *rt, struct vault_intent_row *row,
+    struct zti_payload *payload)
+{
+    uint8_t *raw = zcl_malloc(VAULT_INTENT_RAW_MAX, "zslp_intent_commit_raw");
+    size_t raw_len = 0;
+    if (!raw || !vault_intent_load_raw(rt->node_db, row->plan_id, raw,
+                                       VAULT_INTENT_RAW_MAX, &raw_len)) {
+        free(raw);
+        memory_cleanse(payload, sizeof(*payload));
+        (void)vault_intent_set_state(rt->node_db, row->plan_id,
+            VAULT_INTENT_CONFLICTED, NULL, "PREPARED_TX_MISSING",
+            rt->now_unix);
+        return ZCL_ERR(-26, "prepared ZSLP transaction is missing");
+    }
+    if (row->state == VAULT_INTENT_PLANNED &&
+        !vault_intent_claim_commit(rt->node_db, row->plan_id, rt->now_unix)) {
+        memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw);
+        memory_cleanse(payload, sizeof(*payload));
+        return ZCL_ERR(-27, "another commit claimed this ZSLP intent");
+    }
+    struct zcl_result published = rt->publish(
+        rt->publish_ctx, raw, raw_len, payload->txid);
+    memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw);
+    if (!published.ok) {
+        memory_cleanse(payload, sizeof(*payload));
+        return ZCL_ERR(-28, "COMMIT_UNCERTAIN: exact ZSLP publication failed: %s",
+                       published.message);
+    }
+    if (!vault_intent_set_state(rt->node_db, row->plan_id,
+            VAULT_INTENT_MEMPOOL_ACCEPTED, payload->txid, "", rt->now_unix) ||
+        !vault_intent_find(rt->node_db, row->plan_id, row)) {
+        memory_cleanse(payload, sizeof(*payload));
+        return ZCL_ERR(-29, "ZSLP transaction published but durable state is uncertain");
+    }
     return ZCL_OK;
 }
 
@@ -441,74 +635,24 @@ struct zcl_result zslp_transaction_intent_commit(
         return ZCL_ERR(-21, "explicit scope, plan ID, and output are required");
     (void)vault_intent_expire_due(rt->node_db, rt->now_unix);
     struct vault_intent_row row;
-    if (!vault_intent_find(rt->node_db, plan_id, &row) ||
-        strcmp(row.application_kind, ZSLP_INTENT_APPLICATION) != 0)
-        return ZCL_ERR(-22, "ZSLP intent was not found");
-    if (strcmp(row.wallet_scope, wallet_scope) != 0)
-        return ZCL_ERR(-23, "wallet scope does not match ZSLP intent");
+    struct zcl_result found = zti_commit_find(rt, plan_id, wallet_scope, &row);
+    if (!found.ok)
+        return found;
     struct zti_payload payload;
     ZCL_CHECK(zti_payload_open(rt, &row, &payload));
-    if (row.has_txid && row.state >= VAULT_INTENT_MEMPOOL_ACCEPTED &&
-        row.state <= VAULT_INTENT_REORGED) {
-        zti_view(&row, &payload, out);
-        out->idempotent_replay = true;
-        memory_cleanse(&payload, sizeof(payload));
+    if (zti_commit_replayed(&row, &payload, out))
         return ZCL_OK;
-    }
-    if ((row.state != VAULT_INTENT_PLANNED &&
-         row.state != VAULT_INTENT_PROVING) || row.expires_at <= rt->now_unix) {
-        memory_cleanse(&payload, sizeof(payload));
-        return ZCL_ERR(-24, "ZSLP intent is not committable");
-    }
-    struct wallet_money_snapshot money;
-    struct zcl_result current = zti_money_current(rt, wallet_scope, &money);
-    char genesis[65] = {0};
-    if (current.ok) wallet_identity_genesis_hex(&money.identity, genesis);
-    bool bound = current.ok &&
-        strcmp(row.wallet_instance_id, money.identity.wallet_instance_id) == 0 &&
-        strcmp(row.wallet_genesis, genesis) == 0 &&
-        row.anchor_height == rt->tip_height &&
-        memcmp(row.anchor_hash, rt->tip_hash, 32) == 0 &&
-        memcmp(row.snapshot_root, money.snapshot_root, 32) == 0;
-    if (!bound) {
-        (void)vault_intent_set_state(rt->node_db, row.plan_id,
-            VAULT_INTENT_CONFLICTED, NULL, "MONEY_SNAPSHOT_CHANGED",
-            rt->now_unix);
-        memory_cleanse(&payload, sizeof(payload));
-        return current.ok ? ZCL_ERR(-25, "wallet identity, tip, or money snapshot changed")
-                          : current;
-    }
-    uint8_t *raw = zcl_malloc(VAULT_INTENT_RAW_MAX, "zslp_intent_commit_raw");
-    size_t raw_len = 0;
-    if (!raw || !vault_intent_load_raw(rt->node_db, row.plan_id, raw,
-                                       VAULT_INTENT_RAW_MAX, &raw_len)) {
-        free(raw);
-        memory_cleanse(&payload, sizeof(payload));
-        (void)vault_intent_set_state(rt->node_db, row.plan_id,
-            VAULT_INTENT_CONFLICTED, NULL, "PREPARED_TX_MISSING",
-            rt->now_unix);
-        return ZCL_ERR(-26, "prepared ZSLP transaction is missing");
-    }
-    if (row.state == VAULT_INTENT_PLANNED &&
-        !vault_intent_claim_commit(rt->node_db, row.plan_id, rt->now_unix)) {
-        memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw);
-        memory_cleanse(&payload, sizeof(payload));
-        return ZCL_ERR(-27, "another commit claimed this ZSLP intent");
-    }
-    struct zcl_result published = rt->publish(
-        rt->publish_ctx, raw, raw_len, payload.txid);
-    memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw);
-    if (!published.ok) {
-        memory_cleanse(&payload, sizeof(payload));
-        return ZCL_ERR(-28, "COMMIT_UNCERTAIN: exact ZSLP publication failed: %s",
-                       published.message);
-    }
-    if (!vault_intent_set_state(rt->node_db, row.plan_id,
-            VAULT_INTENT_MEMPOOL_ACCEPTED, payload.txid, "", rt->now_unix) ||
-        !vault_intent_find(rt->node_db, row.plan_id, &row)) {
-        memory_cleanse(&payload, sizeof(payload));
-        return ZCL_ERR(-29, "ZSLP transaction published but durable state is uncertain");
-    }
+    struct zcl_result committable = zti_commit_committable(rt, &row, &payload);
+    if (!committable.ok)
+        return committable;
+    struct zcl_result bound = zti_commit_snapshot_bound(rt, wallet_scope, &row,
+                                                        &payload);
+    if (!bound.ok)
+        return bound;
+    struct zcl_result committed = zti_commit_publish_prepared(rt, &row,
+                                                              &payload);
+    if (!committed.ok)
+        return committed;
     zti_view(&row, &payload, out);
     memory_cleanse(&payload, sizeof(payload));
     return ZCL_OK;

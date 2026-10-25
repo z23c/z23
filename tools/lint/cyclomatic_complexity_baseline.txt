@@ -592,10 +592,6 @@ contexts/market/services/src/shop_status_view_service.c:render:29
 contexts/market/services/src/store_buyer_pay.c:sb_write_atomic:16
 contexts/market/services/src/store_buyer_pay.c:store_buyer_collect:19
 contexts/market/services/src/store_buyer_pay.c:store_buyer_prepare_payment:20
-contexts/market/services/src/zslp_transaction_intent_service.c:zslp_transaction_intent_commit:30
-contexts/market/services/src/zslp_transaction_intent_service.c:zslp_transaction_intent_plan:28
-contexts/market/services/src/zslp_transaction_intent_service.c:zti_payload_decode:16
-contexts/market/services/src/zslp_transaction_intent_service.c:zti_request_validate:16
 contexts/messaging/models/src/zmsg.c:db_zmsg_inbox_window:32
 contexts/naming/controllers/src/zdir_intent_controller.c:rpc_zdir_intent:25
 contexts/naming/controllers/src/zdir_intent_controller.c:zdic_build_script:18
