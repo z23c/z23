@@ -228,6 +228,108 @@ static void zs_push_never_credit(struct json_value *obj)
 
 /* ── zcode seed status ──────────────────────────────────────────────── */
 
+/* Gather the facts for one seed-status row: the contributor key at
+ * `index` plus its reward-ledger and per-day service-book totals. False
+ * when the key cannot be read, the pubkey filter excludes it, or its
+ * per-key totals cannot be replayed. */
+static bool zs_seed_row_facts(const struct vcs_service_book *book,
+                              const struct vcs_reward_ledger *ledger,
+                              int64_t day, size_t index,
+                              const uint8_t filter[33], int pf,
+                              uint8_t key_out[33],
+                              struct vcs_reward_contributor_totals *ct,
+                              struct vcs_service_key_totals *kt)
+{
+    if (!vcs_service_book_key_at(book, index, key_out))
+        return false;
+    if (pf == 1 && memcmp(key_out, filter, 33) != 0)
+        return false;
+    vcs_reward_contributor_totals(ledger, key_out, ct);
+    if (!vcs_service_key_totals(book, key_out, day, kt))
+        return false;
+    return true;
+}
+
+/* Render one contributor row: the key, verified bytes, local ratio,
+ * earned score and resolved tier, this week's usage against the tier
+ * allowances, and — only under a pubkey filter — the per-kind offence
+ * and no-credit breakdowns. */
+static void zs_push_seed_row(struct json_value *rows, const uint8_t key[33],
+                             const struct vcs_reward_contributor_totals *ct,
+                             const struct vcs_service_key_totals *kt, int pf)
+{
+    char hex[67];
+    zcl_hex_encode(key, 33, hex);
+    enum vcs_policy_tier tier =
+        vcs_policy_tier_for(ct->earned_score,
+                            kt->verified_bytes_uploaded,
+                            kt->verified_bytes_downloaded);
+    struct json_value row;
+    json_init(&row);
+    json_set_object(&row);
+    (void)json_push_kv_str(&row, "pubkey", hex);
+    (void)json_push_kv_int(&row, "verified_bytes_uploaded",
+                           (int64_t)kt->verified_bytes_uploaded);
+    (void)json_push_kv_int(&row, "verified_bytes_downloaded",
+                           (int64_t)kt->verified_bytes_downloaded);
+    (void)json_push_kv_int(&row, "ratio_milli",
+                           (int64_t)kt->ratio_milli);
+    (void)json_push_kv_int(&row, "earned_score",
+                           (int64_t)ct->earned_score);
+    (void)json_push_kv_str(&row, "tier",
+                           vcs_policy_tier_string(tier));
+
+    struct json_value usage;
+    json_init(&usage);
+    json_set_object(&usage);
+    (void)json_push_kv_int(&usage, "publishes_this_week",
+                           (int64_t)kt->publishes_this_week);
+    (void)json_push_kv_int(&usage, "publish_events",
+                           (int64_t)kt->publish_events);
+    (void)json_push_kv_int(&usage, "downloaded_this_week",
+                           (int64_t)kt->downloaded_this_week);
+    (void)json_push_kv_int(&usage, "offence_total",
+                           (int64_t)kt->offence_total);
+    (void)json_push_kv(&row, "usage", &usage);
+    json_free(&usage);
+
+    struct json_value allowances;
+    json_init(&allowances);
+    json_set_object(&allowances);
+    zs_push_limits(&allowances, tier);
+    (void)json_push_kv(&row, "allowances", &allowances);
+    json_free(&allowances);
+
+    if (pf == 1) {
+        struct json_value offs;
+        json_init(&offs);
+        json_set_object(&offs);
+        for (size_t o = 0; o < VCS_POLICY_OFFENCE_COUNT; o++)
+            (void)json_push_kv_int(
+                &offs, vcs_policy_offence_string(
+                           (enum vcs_policy_offence)o),
+                (int64_t)kt->offences[o]);
+        (void)json_push_kv(&row, "offences_by_kind", &offs);
+        json_free(&offs);
+
+        struct json_value ncs;
+        json_init(&ncs);
+        json_set_object(&ncs);
+        for (size_t c = 0; c < VCS_POLICY_NO_CREDIT_COUNT; c++)
+            (void)json_push_kv_int(
+                &ncs, vcs_policy_no_credit_string(
+                          (enum vcs_policy_no_credit)c),
+                (int64_t)kt->no_credit_events[c]);
+        (void)json_push_kv_int(&ncs, "bytes",
+                               (int64_t)kt->no_credit_bytes);
+        (void)json_push_kv(&row, "no_credit_events_by_kind", &ncs);
+        json_free(&ncs);
+    }
+
+    (void)json_push_back(rows, &row);
+    json_free(&row);
+}
+
 void zcl_native_handle_zcode_seed_status(
     const struct zcl_command_request *request,
     struct zcl_command_reply *reply)
@@ -291,85 +393,12 @@ void zcl_native_handle_zcode_seed_status(
     size_t rendered = 0;
     for (size_t i = 0; i < key_count && rendered < ZS_MAX_ROWS; i++) {
         uint8_t key[33];
-        if (!vcs_service_book_key_at(book, i, key))
-            continue;
-        if (pf == 1 && memcmp(key, filter, 33) != 0)
-            continue;
         struct vcs_reward_contributor_totals ct;
-        vcs_reward_contributor_totals(ledger, key, &ct);
         struct vcs_service_key_totals kt;
-        if (!vcs_service_key_totals(book, key, day, &kt))
+        if (!zs_seed_row_facts(book, ledger, day, i, filter, pf, key, &ct,
+                               &kt))
             continue;
-        char hex[67];
-        zcl_hex_encode(key, 33, hex);
-        enum vcs_policy_tier tier =
-            vcs_policy_tier_for(ct.earned_score,
-                                kt.verified_bytes_uploaded,
-                                kt.verified_bytes_downloaded);
-        struct json_value row;
-        json_init(&row);
-        json_set_object(&row);
-        (void)json_push_kv_str(&row, "pubkey", hex);
-        (void)json_push_kv_int(&row, "verified_bytes_uploaded",
-                               (int64_t)kt.verified_bytes_uploaded);
-        (void)json_push_kv_int(&row, "verified_bytes_downloaded",
-                               (int64_t)kt.verified_bytes_downloaded);
-        (void)json_push_kv_int(&row, "ratio_milli",
-                               (int64_t)kt.ratio_milli);
-        (void)json_push_kv_int(&row, "earned_score",
-                               (int64_t)ct.earned_score);
-        (void)json_push_kv_str(&row, "tier",
-                               vcs_policy_tier_string(tier));
-
-        struct json_value usage;
-        json_init(&usage);
-        json_set_object(&usage);
-        (void)json_push_kv_int(&usage, "publishes_this_week",
-                               (int64_t)kt.publishes_this_week);
-        (void)json_push_kv_int(&usage, "publish_events",
-                               (int64_t)kt.publish_events);
-        (void)json_push_kv_int(&usage, "downloaded_this_week",
-                               (int64_t)kt.downloaded_this_week);
-        (void)json_push_kv_int(&usage, "offence_total",
-                               (int64_t)kt.offence_total);
-        (void)json_push_kv(&row, "usage", &usage);
-        json_free(&usage);
-
-        struct json_value allowances;
-        json_init(&allowances);
-        json_set_object(&allowances);
-        zs_push_limits(&allowances, tier);
-        (void)json_push_kv(&row, "allowances", &allowances);
-        json_free(&allowances);
-
-        if (pf == 1) {
-            struct json_value offs;
-            json_init(&offs);
-            json_set_object(&offs);
-            for (size_t o = 0; o < VCS_POLICY_OFFENCE_COUNT; o++)
-                (void)json_push_kv_int(
-                    &offs, vcs_policy_offence_string(
-                               (enum vcs_policy_offence)o),
-                    (int64_t)kt.offences[o]);
-            (void)json_push_kv(&row, "offences_by_kind", &offs);
-            json_free(&offs);
-
-            struct json_value ncs;
-            json_init(&ncs);
-            json_set_object(&ncs);
-            for (size_t c = 0; c < VCS_POLICY_NO_CREDIT_COUNT; c++)
-                (void)json_push_kv_int(
-                    &ncs, vcs_policy_no_credit_string(
-                              (enum vcs_policy_no_credit)c),
-                    (int64_t)kt.no_credit_events[c]);
-            (void)json_push_kv_int(&ncs, "bytes",
-                                   (int64_t)kt.no_credit_bytes);
-            (void)json_push_kv(&row, "no_credit_events_by_kind", &ncs);
-            json_free(&ncs);
-        }
-
-        (void)json_push_back(&rows, &row);
-        json_free(&row);
+        zs_push_seed_row(&rows, key, &ct, &kt, pf);
         rendered++;
     }
     (void)json_push_kv(&reply->data, "rows", &rows);
