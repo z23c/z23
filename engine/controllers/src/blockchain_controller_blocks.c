@@ -338,6 +338,45 @@ static int rpc_permit_getblock_verbose(struct rpc_params *p, size_t idx,
     return (int)rpc_permit_int(p, idx, "verbose", default_value);
 }
 
+static bool rpc_getblock_body_hash_matches(const struct block_index *bi,
+                                           const struct uint256 *body_hash)
+{
+    return bi->phashBlock && uint256_cmp(body_hash, bi->phashBlock) == 0;
+}
+
+static void rpc_getblock_push_txids(const struct block *block,
+                                    struct json_value *result)
+{
+    struct json_value txids;
+    json_init(&txids);
+    json_set_array(&txids);
+    for (size_t i = 0; i < block->num_vtx; i++) {
+        char txid[65];
+        uint256_get_hex(&block->vtx[i].hash, txid);
+        struct json_value item;
+        json_init(&item);
+        json_set_str(&item, txid);
+        (void)json_push_back(&txids, &item);
+        json_free(&item);
+    }
+    (void)json_push_kv(result, "tx", &txids);
+    json_free(&txids);
+}
+
+static void rpc_getblock_push_nextblockhash(struct blockchain_context *ctx,
+                                            const struct block_index *bi,
+                                            int32_t hstar,
+                                            struct json_value *result)
+{
+    struct block_index *next = active_chain_at(
+        &ctx->main_state->chain_active, bi->nHeight + 1);
+    if (next && next->phashBlock && next->nHeight <= hstar) {
+        char next_hex[65];
+        uint256_get_hex(next->phashBlock, next_hex);
+        json_push_kv_str(result, "nextblockhash", next_hex);
+    }
+}
+
 bool rpc_getblock(const struct json_value *params, bool help,
                           struct json_value *result)
 {
@@ -390,7 +429,7 @@ bool rpc_getblock(const struct json_value *params, bool help,
 
     struct uint256 body_hash;
     block_header_get_hash(&block.header, &body_hash);
-    if (!bi->phashBlock || uint256_cmp(&body_hash, bi->phashBlock) != 0) {
+    if (!rpc_getblock_body_hash_matches(bi, &body_hash)) {
         block_free(&block);
         json_set_str(result, "Block body failed identity verification");
         LOG_FAIL("blockchain", "getblock: body hash mismatch for block %s "
@@ -436,28 +475,8 @@ bool rpc_getblock(const struct json_value *params, bool help,
 
     json_push_kv_int(result, "size", (int64_t)serialized.size);
     json_push_kv_int(result, "tx_count", (int64_t)block.num_vtx);
-    struct json_value txids;
-    json_init(&txids);
-    json_set_array(&txids);
-    for (size_t i = 0; i < block.num_vtx; i++) {
-        char txid[65];
-        uint256_get_hex(&block.vtx[i].hash, txid);
-        struct json_value item;
-        json_init(&item);
-        json_set_str(&item, txid);
-        (void)json_push_back(&txids, &item);
-        json_free(&item);
-    }
-    (void)json_push_kv(result, "tx", &txids);
-    json_free(&txids);
-
-    struct block_index *next = active_chain_at(
-        &ctx->main_state->chain_active, bi->nHeight + 1);
-    if (next && next->phashBlock && next->nHeight <= hstar) {
-        char next_hex[65];
-        uint256_get_hex(next->phashBlock, next_hex);
-        json_push_kv_str(result, "nextblockhash", next_hex);
-    }
+    rpc_getblock_push_txids(&block, result);
+    rpc_getblock_push_nextblockhash(ctx, bi, hstar, result);
 
     stream_free(&serialized);
     block_free(&block);
