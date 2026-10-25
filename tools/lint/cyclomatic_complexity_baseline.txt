@@ -13,8 +13,6 @@ cognition/modules/codeindex/src/codeindex_fetch.c:fetch_install_posix:61
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_open_image:18
 cognition/modules/codeindex/src/codeindex_fetch.c:fetch_verify_staged:39
 cognition/modules/codeindex/src/codeindex_freshness.c:store_is_stale_profile:26
-cognition/modules/codeindex/src/codeindex_group.c:ci_group_emit_all:18
-cognition/modules/codeindex/src/codeindex_group.c:ci_group_for_path:21
 cognition/modules/codeindex/src/codeindex_impact.c:codeindex_forward_closure:39
 cognition/modules/codeindex/src/codeindex_impact.c:codeindex_reverse_includes:17
 cognition/modules/codeindex/src/codeindex_impact.c:impact_closure_impl:26

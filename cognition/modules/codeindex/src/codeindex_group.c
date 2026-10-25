@@ -81,68 +81,100 @@ static void leading_components(const char *relpath, size_t component_count,
     (void)snprintf(out, 64, "%.*s", (int)length, relpath);
 }
 
-void ci_group_for_path(const char *relpath, char out[64])
+/* Copy the group for a path with a /modules/ segment; false without one. */
+static bool copy_modules_group(const char *relpath, char out[64])
 {
-    out[0] = '\0';
-    if (!relpath || !relpath[0]) return;
-
     const char *modules = strstr(relpath, "/modules/");
-    if (modules) {
-        const char *after = modules + strlen("/modules/");
-        const char *end = strchr(after, '/');
-        size_t length = end ? (size_t)(end - relpath) : strlen(relpath);
-        if (length >= 64) length = 63;
-        (void)snprintf(out, 64, "%.*s", (int)length, relpath);
-        return;
-    }
-    if (starts_seg(relpath, "contexts")) {
-        leading_components(relpath, 3, out);
-        return;
-    }
-    if (starts_seg(relpath, "core") || starts_seg(relpath, "engine") ||
-        starts_seg(relpath, "cognition") || starts_seg(relpath, "platform")) {
-        leading_components(relpath, 2, out);
-        return;
-    }
+    if (!modules) return false;
+    const char *after = modules + strlen("/modules/");
+    const char *end = strchr(after, '/');
+    size_t length = end ? (size_t)(end - relpath) : strlen(relpath);
+    if (length >= 64) length = 63;
+    (void)snprintf(out, 64, "%.*s", (int)length, relpath);
+    return true;
+}
+
+/* The four authorities that carry rooms directly beneath them. */
+static bool starts_authority_seg(const char *relpath)
+{
+    return starts_seg(relpath, "core") || starts_seg(relpath, "engine") ||
+           starts_seg(relpath, "cognition") || starts_seg(relpath, "platform");
+}
+
+/* Copy the fixed repo-wide top-level names; false when none match. */
+static bool copy_repo_root_group(const char *relpath, char out[64])
+{
     if (starts_seg(relpath, "tools")) {
         (void)snprintf(out, 64, "tools");
-        return;
+        return true;
     }
     if (starts_seg(relpath, "tests")) {
         (void)snprintf(out, 64, "tests");
-        return;
+        return true;
     }
     if (starts_seg(relpath, "docs")) {
         (void)snprintf(out, 64, "docs");
-        return;
+        return true;
     }
+    return false;
+}
+
+/* Copy the external workspace root groups; false when none match. */
+static bool copy_workspace_root_group(const char *relpath, char out[64])
+{
     /* External C23 workspaces retain their conventional package layout. */
     if (starts_seg(relpath, "lib")) {
         leading_components(relpath, 2, out);
-        return;
+        return true;
     }
     if (starts_seg(relpath, "app")) {
         const char *rest = relpath + strlen("app/");
         if (strchr(rest, '/')) leading_components(relpath, 2, out);
         else (void)snprintf(out, 64, "app");
-        return;
+        return true;
     }
+    return false;
+}
+
+/* Copy the package layout root names; false when none match. */
+static bool copy_package_root_group(const char *relpath, char out[64])
+{
     if (starts_seg(relpath, "include")) {
         (void)snprintf(out, 64, "include");
-        return;
+        return true;
     }
     if (starts_seg(relpath, "src")) {
         (void)snprintf(out, 64, "src");
-        return;
+        return true;
     }
     if (starts_seg(relpath, "packages")) {
         (void)snprintf(out, 64, "packages");
-        return;
+        return true;
     }
     if (starts_seg(relpath, "examples")) {
         (void)snprintf(out, 64, "examples");
+        return true;
+    }
+    return false;
+}
+
+void ci_group_for_path(const char *relpath, char out[64])
+{
+    out[0] = '\0';
+    if (!relpath || !relpath[0]) return;
+
+    if (copy_modules_group(relpath, out)) return;
+    if (starts_seg(relpath, "contexts")) {
+        leading_components(relpath, 3, out);
         return;
     }
+    if (starts_authority_seg(relpath)) {
+        leading_components(relpath, 2, out);
+        return;
+    }
+    if (copy_repo_root_group(relpath, out)) return;
+    if (copy_workspace_root_group(relpath, out)) return;
+    if (copy_package_root_group(relpath, out)) return;
     (void)snprintf(out, 64, "root");
 }
 
@@ -367,10 +399,22 @@ static bool emit(struct ci_store *s, const char *path, const char *kind,
     return ci_store_put_group(s, &g);
 }
 
-bool ci_group_emit_all(struct ci_store *s)
+/* Emit the rooms fixed beneath one authority. */
+static bool emit_authority_rooms(struct ci_store *s, const char *authority,
+                                 const char *const rooms[], size_t room_count)
 {
-    if (!s) LOG_FAIL("codeindex", "null store to emit_all");
+    for (size_t i = 0; i < room_count; i++) {
+        char room_path[64];
+        (void)snprintf(room_path, sizeof(room_path), "%s/%s",
+                       authority, rooms[i]);
+        if (!emit(s, room_path, "room", authority)) return false;
+    }
+    return true;
+}
 
+/* Emit the root node, the authority roots, and the workspace roots. */
+static bool emit_root_groups(struct ci_store *s)
+{
     static const char *const authorities[] = {
         "core", "engine", "contexts", "cognition", "platform",
         "tools", "tests", "docs",
@@ -378,6 +422,18 @@ bool ci_group_emit_all(struct ci_store *s)
     static const char *const external_roots[] = {
         "app", "include", "src", "lib", "packages", "examples",
     };
+
+    if (!emit(s, "root", "root", "")) return false;
+    for (size_t i = 0; i < sizeof(authorities) / sizeof(authorities[0]); i++)
+        if (!emit(s, authorities[i], "authority", "root")) return false;
+    for (size_t i = 0; i < sizeof(external_roots) / sizeof(external_roots[0]); i++)
+        if (!emit(s, external_roots[i], "workspace", "root")) return false;
+    return true;
+}
+
+/* Emit the fixed room set beneath each source authority. */
+static bool emit_fixed_authority_rooms(struct ci_store *s)
+{
     static const char *const core_rooms[] = {
         "chainparams", "consensus", "math", "modules", "params",
     };
@@ -391,6 +447,25 @@ bool ci_group_emit_all(struct ci_store *s)
     static const char *const platform_rooms[] = {
         "adapters", "deploy", "domain", "modules", "packaging", "ports",
     };
+
+    if (!emit_authority_rooms(s, "core", core_rooms,
+                              sizeof(core_rooms) / sizeof(core_rooms[0])))
+        return false;
+    if (!emit_authority_rooms(s, "engine", engine_rooms,
+                              sizeof(engine_rooms) / sizeof(engine_rooms[0])))
+        return false;
+    if (!emit_authority_rooms(s, "cognition", cognition_rooms,
+                              sizeof(cognition_rooms) / sizeof(cognition_rooms[0])))
+        return false;
+    if (!emit_authority_rooms(s, "platform", platform_rooms,
+                              sizeof(platform_rooms) / sizeof(platform_rooms[0])))
+        return false;
+    return true;
+}
+
+/* Emit each product context and the rooms fixed beneath it. */
+static bool emit_product_context_groups(struct ci_store *s)
+{
     static const char *const context_rooms[][12] = {
         {"controllers", "domain", "jobs", "models", "modules", "services", "views", NULL},
         {"controllers", "models", "modules", "views", NULL},
@@ -399,29 +474,6 @@ bool ci_group_emit_all(struct ci_store *s)
         {"controllers", "models", "modules", "services", NULL},
         {"apps", "controllers", "corpus", "models", "modules", "packages", "services", "views", NULL},
     };
-
-    if (!emit(s, "root", "root", "")) return false;
-    for (size_t i = 0; i < sizeof(authorities) / sizeof(authorities[0]); i++)
-        if (!emit(s, authorities[i], "authority", "root")) return false;
-    for (size_t i = 0; i < sizeof(external_roots) / sizeof(external_roots[0]); i++)
-        if (!emit(s, external_roots[i], "workspace", "root")) return false;
-
-#define EMIT_ROOMS(authority_, rooms_)                                      \
-    do {                                                                    \
-        for (size_t room_i_ = 0;                                            \
-             room_i_ < sizeof(rooms_) / sizeof((rooms_)[0]); room_i_++) {   \
-            char room_path_[64];                                            \
-            (void)snprintf(room_path_, sizeof(room_path_), "%s/%s",        \
-                           (authority_), (rooms_)[room_i_]);                 \
-            if (!emit(s, room_path_, "room", (authority_))) return false;  \
-        }                                                                   \
-    } while (0)
-
-    EMIT_ROOMS("core", core_rooms);
-    EMIT_ROOMS("engine", engine_rooms);
-    EMIT_ROOMS("cognition", cognition_rooms);
-    EMIT_ROOMS("platform", platform_rooms);
-#undef EMIT_ROOMS
 
     for (size_t i = 0; i < sizeof(k_product_contexts) /
                            sizeof(k_product_contexts[0]); i++) {
@@ -436,7 +488,12 @@ bool ci_group_emit_all(struct ci_store *s)
             if (!emit(s, room_path, "room", context_path)) return false;
         }
     }
+    return true;
+}
 
+/* Emit the navigation and workspace groups for every build module. */
+static bool emit_module_groups(struct ci_store *s)
+{
     /* Each build module keeps its own precise navigation group beneath the
      * authority declared by the context manifest. */
     size_t nmod = 0;
@@ -453,10 +510,28 @@ bool ci_group_emit_all(struct ci_store *s)
         (void)snprintf(module_path, sizeof(module_path), "lib/%s", mods[i]);
         if (!emit(s, module_path, "workspace-module", "lib")) return false;
     }
+    return true;
+}
+
+/* Emit the app-shape groups of the external workspace. */
+static bool emit_workspace_shape_groups(struct ci_store *s)
+{
     for (size_t i = 0; i < sizeof(k_app_shapes) / sizeof(k_app_shapes[0]); i++) {
         char shape_path[64];
         (void)snprintf(shape_path, sizeof(shape_path), "app/%s", k_app_shapes[i]);
         if (!emit(s, shape_path, "workspace-shape", "app")) return false;
     }
+    return true;
+}
+
+bool ci_group_emit_all(struct ci_store *s)
+{
+    if (!s) LOG_FAIL("codeindex", "null store to emit_all");
+
+    if (!emit_root_groups(s)) return false;
+    if (!emit_fixed_authority_rooms(s)) return false;
+    if (!emit_product_context_groups(s)) return false;
+    if (!emit_module_groups(s)) return false;
+    if (!emit_workspace_shape_groups(s)) return false;
     return true;
 }
