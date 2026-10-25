@@ -157,9 +157,10 @@ static void obs_reader_init(struct mesh_reader_chain *r,
     r->ctx = c;
 }
 
-/* Field-by-field equality. memcmp would compare struct padding. */
-static bool obs_conclusion_eq(const struct mesh_conclusion *a,
-                              const struct mesh_conclusion *b)
+/* Equality on the record tallies: how many documents arrived and in what
+ * shape the fold found them. */
+static bool obs_conclusion_record_tallies_eq(const struct mesh_conclusion *a,
+                                             const struct mesh_conclusion *b)
 {
     return a->records_offered == b->records_offered &&
            a->records_parsed == b->records_parsed &&
@@ -168,20 +169,50 @@ static bool obs_conclusion_eq(const struct mesh_conclusion *a,
            a->records_not_probed == b->records_not_probed &&
            a->records_malformed == b->records_malformed &&
            a->distinct_identities == b->distinct_identities &&
-           a->min_independent_required == b->min_independent_required &&
-           a->agree_at_anchor == b->agree_at_anchor &&
+           a->min_independent_required == b->min_independent_required;
+}
+
+/* Equality on the checked rung: the tallies taken at the anchor the fold
+ * chose, the height itself, and the reader's hash there. */
+static bool obs_conclusion_anchor_tallies_eq(const struct mesh_conclusion *a,
+                                             const struct mesh_conclusion *b)
+{
+    return a->agree_at_anchor == b->agree_at_anchor &&
            a->disagree_at_anchor == b->disagree_at_anchor &&
            a->no_common_height == b->no_common_height &&
            a->checked_height == b->checked_height &&
-           strcmp(a->reader_hash_at_checked, b->reader_hash_at_checked) == 0 &&
-           a->edges_asserted == b->edges_asserted &&
+           strcmp(a->reader_hash_at_checked, b->reader_hash_at_checked) == 0;
+}
+
+/* Equality on the adjacency tallies. */
+static bool obs_conclusion_edge_tallies_eq(const struct mesh_conclusion *a,
+                                           const struct mesh_conclusion *b)
+{
+    return a->edges_asserted == b->edges_asserted &&
            a->edges_reciprocated == b->edges_reciprocated &&
            a->edges_one_sided == b->edges_one_sided &&
-           a->edges_contradicted == b->edges_contradicted &&
-           strcmp(a->max_chainwork_hex, b->max_chainwork_hex) == 0 &&
+           a->edges_contradicted == b->edges_contradicted;
+}
+
+/* Equality on the concluding output: the chainwork claim, who holds it, the
+ * state, and the basis token. */
+static bool obs_conclusion_verdict_fields_eq(const struct mesh_conclusion *a,
+                                             const struct mesh_conclusion *b)
+{
+    return strcmp(a->max_chainwork_hex, b->max_chainwork_hex) == 0 &&
            a->reader_holds_max_chainwork == b->reader_holds_max_chainwork &&
            a->state == b->state &&
            strcmp(a->basis, b->basis) == 0;
+}
+
+/* Field-by-field equality. memcmp would compare struct padding. */
+static bool obs_conclusion_eq(const struct mesh_conclusion *a,
+                              const struct mesh_conclusion *b)
+{
+    return obs_conclusion_record_tallies_eq(a, b) &&
+           obs_conclusion_anchor_tallies_eq(a, b) &&
+           obs_conclusion_edge_tallies_eq(a, b) &&
+           obs_conclusion_verdict_fields_eq(a, b);
 }
 
 /* ── 1. zero observations ─────────────────────────────────────────────── */
