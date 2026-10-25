@@ -328,7 +328,7 @@ int t_remote_node_update_contract(void)
                == 0);
         ASSERT(read_entire_file(path, &service) == 0);
         ASSERT(strstr(service,
-                      "Documentation=file:%h/github/z23/docs/agent/AGENT_API.md")
+                      "Documentation=file:%h/development/z23/main/docs/agent/AGENT_API.md")
                != NULL);
         ASSERT(strstr(service, "remote_node_update.sh self") != NULL);
         ASSERT(strstr(service, "ZCL_REMOTE_BUILD=none") != NULL);
