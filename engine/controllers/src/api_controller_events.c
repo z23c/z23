@@ -13,14 +13,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Event log - lock-free atomic reads, safe from any handler thread. */
-size_t api_serve_events(const char *path, uint8_t *response,
-                        size_t response_max)
+static size_t api_events_limit_from_query(const char *q)
 {
-    enum { EVENT_JSON_BUF_SIZE = 524288 };
     size_t count = 200;
-    const char *q = strchr(path, '?');
-
     if (q) {
         const char *cp = strstr(q, "limit=");
         if (!cp)
@@ -32,14 +27,11 @@ size_t api_serve_events(const char *path, uint8_t *response,
                 count = (size_t)v;
         }
     }
+    return count;
+}
 
-    char *buf = zcl_malloc(EVENT_JSON_BUF_SIZE, "api_events_buf");
-    if (!buf)
-        return api_json_error(response, response_max, JSON_500_HEADERS,
-                              "Out of memory");
-
-    const char *type_filter = NULL;
-    char type_buf[64];
+static const char *api_events_type_from_query(const char *q, char *type_buf)
+{
     if (q) {
         const char *tp = strstr(q, "type=");
         if (tp) {
@@ -47,9 +39,27 @@ size_t api_serve_events(const char *path, uint8_t *response,
             for (const char *c = tp + 5; *c && *c != '&' && tlen < 63; c++)
                 type_buf[tlen++] = *c;
             type_buf[tlen] = '\0';
-            type_filter = type_buf;
+            return type_buf;
         }
     }
+    return NULL;
+}
+
+/* Event log - lock-free atomic reads, safe from any handler thread. */
+size_t api_serve_events(const char *path, uint8_t *response,
+                        size_t response_max)
+{
+    enum { EVENT_JSON_BUF_SIZE = 524288 };
+    const char *q = strchr(path, '?');
+    size_t count = api_events_limit_from_query(q);
+
+    char *buf = zcl_malloc(EVENT_JSON_BUF_SIZE, "api_events_buf");
+    if (!buf)
+        return api_json_error(response, response_max, JSON_500_HEADERS,
+                              "Out of memory");
+
+    char type_buf[64];
+    const char *type_filter = api_events_type_from_query(q, type_buf);
 
     size_t w;
     if (type_filter)
