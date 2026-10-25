@@ -152,6 +152,179 @@ static bool ssp_seed_utxo(struct node_db *ndb, int i)
     return ok;
 }
 
+/* Stage n rows through the port's staging_insert and check staging_count
+ * reflects them. Returns the number of failed checks. */
+static int ssp_insert_staging_rows(struct snapshot_store_port *port, int n)
+{
+    int failures = 0;
+    bool insert_ok = true;
+    for (int i = 0; i < n; i++) {
+        struct db_utxo u;
+        memset(&u, 0, sizeof(u));
+        ssp_txid_for(i, u.txid);
+        u.vout = (uint32_t)i;
+        u.value = 1000000 + i;
+        uint8_t script[64];
+        u.script_len = ssp_script_for(i, script);
+        u.script = script;
+        u.script_type = (enum script_type)0;
+        u.has_address = false;
+        u.height = 100 + i;
+        u.is_coinbase = (i % 3 == 0);
+        if (!port->staging_insert(port->self, &u)) {
+            insert_ok = false;
+            break;
+        }
+    }
+    SSP_CHECK("staging_insert all rows ok", insert_ok);
+
+    /* staging_count reflects the inserts. */
+    SSP_CHECK("staging_count == N", port->staging_count(port->self) == n);
+    return failures;
+}
+
+/* Read each staged row back out of the fixture and compare it to what
+ * ssp_insert_staging_rows wrote. Returns the number of failed checks. */
+static int ssp_verify_staged_rows_roundtrip(struct node_db *ndb, int n)
+{
+    int failures = 0;
+    bool rows_identical = true;
+    /* Each staged row's bytes are byte-for-byte identical to what was
+     * written — the commitment is computed over exactly these bytes. */
+    for (int i = 0; i < n; i++) {
+        uint8_t want_script[64];
+        size_t want_len = ssp_script_for(i, want_script);
+        int64_t got_value = 0;
+        uint8_t got_script[64] = {0};
+        int got_len = -1, got_height = -1, got_cb = -1;
+        if (!ssp_read_staged(ndb, i, &got_value, got_script,
+                             &got_len, &got_height, &got_cb) ||
+            got_value != (int64_t)(1000000 + i) ||
+            got_len != (int)want_len ||
+            memcmp(got_script, want_script, want_len) != 0 ||
+            got_height != 100 + i ||
+            got_cb != (i % 3 == 0 ? 1 : 0)) {
+            rows_identical = false;
+            break;
+        }
+    }
+    SSP_CHECK("staged rows round-trip byte-for-byte", rows_identical);
+    return failures;
+}
+
+/* utxo_count over the active utxos table, empty then after seeding.
+ * Returns the number of failed checks. */
+static int ssp_check_utxo_counts(struct snapshot_store_port *port,
+                                 struct node_db *ndb)
+{
+    int failures = 0;
+    int64_t utxos0 = -1;
+    SSP_CHECK("utxo_count ok on empty utxos",
+              port->utxo_count(port->self, &utxos0) && utxos0 == 0);
+    bool seeded_utxos = true;
+    for (int i = 0; i < 7; i++)
+        seeded_utxos &= ssp_seed_utxo(ndb, i);
+    SSP_CHECK("seeded 7 utxos", seeded_utxos);
+    int64_t utxos1 = -1;
+    SSP_CHECK("utxo_count == 7",
+              port->utxo_count(port->self, &utxos1) && utxos1 == 7);
+    return failures;
+}
+
+/* tip_chainwork for a present block, a missing block, and a zero-chainwork
+ * block. Returns the number of failed checks. */
+static int ssp_check_tip_chainwork(struct snapshot_store_port *port,
+                                   struct node_db *ndb)
+{
+    int failures = 0;
+    uint8_t hash_present[32];
+    uint8_t cw_present[32];
+    for (int b = 0; b < 32; b++) { hash_present[b] = (uint8_t)(b + 1);
+                                   cw_present[b] = (uint8_t)(0xA0 + b); }
+    SSP_CHECK("seed block w/ chainwork",
+              ssp_seed_block(ndb, hash_present, cw_present));
+    uint8_t cw_out[32] = {0};
+    bool cw_ok = port->tip_chainwork(port->self, hash_present, cw_out);
+    SSP_CHECK("tip_chainwork present returns true", cw_ok);
+    SSP_CHECK("tip_chainwork blob matches",
+              memcmp(cw_out, cw_present, 32) == 0);
+
+    uint8_t hash_missing[32];
+    for (int b = 0; b < 32; b++) hash_missing[b] = (uint8_t)(0xEE);
+    uint8_t cw_miss[32] = {0};
+    SSP_CHECK("tip_chainwork missing block false",
+              !port->tip_chainwork(port->self, hash_missing, cw_miss));
+
+    uint8_t hash_zero[32];
+    uint8_t cw_zero[32] = {0};
+    for (int b = 0; b < 32; b++) hash_zero[b] = (uint8_t)(0x55 + b);
+    SSP_CHECK("seed block w/ zero chainwork",
+              ssp_seed_block(ndb, hash_zero, cw_zero));
+    uint8_t cw_z_out[32] = {0};
+    SSP_CHECK("tip_chainwork zero-chainwork block false (guard)",
+              !port->tip_chainwork(port->self, hash_zero, cw_z_out));
+    return failures;
+}
+
+/* Drive the service over the same fixture and require its staged-row count
+ * to agree with the adapter's. Returns the number of failed checks. */
+static int ssp_check_service_staged_count(struct snapshot_store_port *port,
+                                          struct node_db *ndb, int n)
+{
+    int failures = 0;
+    struct snapshot_sync_service svc;
+    snapsync_init(&svc, ndb);
+    struct snapsync_status st;
+    memset(&st, 0, sizeof(st));
+    snapsync_get_status_snapshot(&svc, &st);
+    /* The service reads staged_row_count through the same port; it must
+     * agree with the adapter's direct count. */
+    SSP_CHECK("service status staged_row_count == adapter count",
+              st.staged_row_count == port->staging_count(port->self));
+    SSP_CHECK("service status staged_row_count == N",
+              st.staged_row_count == n);
+    return failures;
+}
+
+/* NULL / bad-argument guards on bind and on the port methods. Returns the
+ * number of failed checks. */
+static int ssp_check_null_argument_guards(struct snapshot_store_port *port,
+                                          struct node_db *ndb)
+{
+    int failures = 0;
+    struct snapshot_store_sqlite_ctx c2;
+    struct snapshot_store_port p2 = {0};
+    SSP_CHECK("bind rejects NULL ctx",
+              !snapshot_store_sqlite_bind(NULL, ndb, &p2));
+    SSP_CHECK("bind rejects NULL out_port",
+              !snapshot_store_sqlite_bind(&c2, ndb, NULL));
+
+    /* NULL ndb is permitted by bind; methods then fail safely. */
+    struct snapshot_store_port pnull = {0};
+    SSP_CHECK("bind accepts NULL ndb",
+              snapshot_store_sqlite_bind(&c2, NULL, &pnull));
+    int64_t n = -7;
+    SSP_CHECK("utxo_count false on NULL ndb",
+              !pnull.utxo_count(pnull.self, &n));
+    SSP_CHECK("utxo_count leaves out on NULL ndb", n == -7);
+    SSP_CHECK("staging_count -1 on NULL ndb",
+              pnull.staging_count(pnull.self) == -1);
+    uint8_t h[32] = {1}, o[32] = {0};
+    SSP_CHECK("tip_chainwork false on NULL ndb",
+              !pnull.tip_chainwork(pnull.self, h, o));
+    struct db_utxo u0;
+    memset(&u0, 0, sizeof(u0));
+    SSP_CHECK("staging_insert false on NULL ndb (no cached stmt)",
+              !pnull.staging_insert(pnull.self, &u0));
+    SSP_CHECK("set_busy_timeout false on NULL ndb",
+              !pnull.set_busy_timeout(pnull.self, 1000));
+
+    /* utxo_count tolerates a NULL out. */
+    SSP_CHECK("utxo_count false on NULL out",
+              !port->utxo_count(port->self, NULL));
+    return failures;
+}
+
 int test_snapshot_store_port(void)
 {
     int failures = 0;
@@ -174,143 +347,23 @@ int test_snapshot_store_port(void)
 
     /* ---- staging_insert + byte-for-byte round-trip ---- */
     const int N = 12;
-    bool insert_ok = true;
-    for (int i = 0; i < N; i++) {
-        struct db_utxo u;
-        memset(&u, 0, sizeof(u));
-        ssp_txid_for(i, u.txid);
-        u.vout = (uint32_t)i;
-        u.value = 1000000 + i;
-        uint8_t script[64];
-        u.script_len = ssp_script_for(i, script);
-        u.script = script;
-        u.script_type = (enum script_type)0;
-        u.has_address = false;
-        u.height = 100 + i;
-        u.is_coinbase = (i % 3 == 0);
-        if (!port.staging_insert(port.self, &u)) {
-            insert_ok = false;
-            break;
-        }
-    }
-    SSP_CHECK("staging_insert all rows ok", insert_ok);
-
-    /* staging_count reflects the inserts. */
-    SSP_CHECK("staging_count == N", port.staging_count(port.self) == N);
-
-    /* Each staged row's bytes are byte-for-byte identical to what was
-     * written — the commitment is computed over exactly these bytes. */
-    bool rows_identical = true;
-    for (int i = 0; i < N; i++) {
-        uint8_t want_script[64];
-        size_t want_len = ssp_script_for(i, want_script);
-        int64_t got_value = 0;
-        uint8_t got_script[64] = {0};
-        int got_len = -1, got_height = -1, got_cb = -1;
-        if (!ssp_read_staged(&ndb, i, &got_value, got_script,
-                             &got_len, &got_height, &got_cb) ||
-            got_value != (int64_t)(1000000 + i) ||
-            got_len != (int)want_len ||
-            memcmp(got_script, want_script, want_len) != 0 ||
-            got_height != 100 + i ||
-            got_cb != (i % 3 == 0 ? 1 : 0)) {
-            rows_identical = false;
-            break;
-        }
-    }
-    SSP_CHECK("staged rows round-trip byte-for-byte", rows_identical);
+    failures += ssp_insert_staging_rows(&port, N);
+    failures += ssp_verify_staged_rows_roundtrip(&ndb, N);
 
     /* ---- utxo_count over the active utxos table ---- */
-    int64_t utxos0 = -1;
-    SSP_CHECK("utxo_count ok on empty utxos",
-              port.utxo_count(port.self, &utxos0) && utxos0 == 0);
-    bool seeded_utxos = true;
-    for (int i = 0; i < 7; i++)
-        seeded_utxos &= ssp_seed_utxo(&ndb, i);
-    SSP_CHECK("seeded 7 utxos", seeded_utxos);
-    int64_t utxos1 = -1;
-    SSP_CHECK("utxo_count == 7",
-              port.utxo_count(port.self, &utxos1) && utxos1 == 7);
+    failures += ssp_check_utxo_counts(&port, &ndb);
 
     /* ---- tip_chainwork: present / missing / zero ---- */
-    uint8_t hash_present[32];
-    uint8_t cw_present[32];
-    for (int b = 0; b < 32; b++) { hash_present[b] = (uint8_t)(b + 1);
-                                   cw_present[b] = (uint8_t)(0xA0 + b); }
-    SSP_CHECK("seed block w/ chainwork",
-              ssp_seed_block(&ndb, hash_present, cw_present));
-    uint8_t cw_out[32] = {0};
-    bool cw_ok = port.tip_chainwork(port.self, hash_present, cw_out);
-    SSP_CHECK("tip_chainwork present returns true", cw_ok);
-    SSP_CHECK("tip_chainwork blob matches",
-              memcmp(cw_out, cw_present, 32) == 0);
-
-    uint8_t hash_missing[32];
-    for (int b = 0; b < 32; b++) hash_missing[b] = (uint8_t)(0xEE);
-    uint8_t cw_miss[32] = {0};
-    SSP_CHECK("tip_chainwork missing block false",
-              !port.tip_chainwork(port.self, hash_missing, cw_miss));
-
-    uint8_t hash_zero[32];
-    uint8_t cw_zero[32] = {0};
-    for (int b = 0; b < 32; b++) hash_zero[b] = (uint8_t)(0x55 + b);
-    SSP_CHECK("seed block w/ zero chainwork",
-              ssp_seed_block(&ndb, hash_zero, cw_zero));
-    uint8_t cw_z_out[32] = {0};
-    SSP_CHECK("tip_chainwork zero-chainwork block false (guard)",
-              !port.tip_chainwork(port.self, hash_zero, cw_z_out));
+    failures += ssp_check_tip_chainwork(&port, &ndb);
 
     /* ---- set_busy_timeout ---- */
     SSP_CHECK("set_busy_timeout ok", port.set_busy_timeout(port.self, 10000));
 
     /* ---- drive the SERVICE over the same fixture ---- */
-    {
-        struct snapshot_sync_service svc;
-        snapsync_init(&svc, &ndb);
-        struct snapsync_status st;
-        memset(&st, 0, sizeof(st));
-        snapsync_get_status_snapshot(&svc, &st);
-        /* The service reads staged_row_count through the same port; it must
-         * agree with the adapter's direct count. */
-        SSP_CHECK("service status staged_row_count == adapter count",
-                  st.staged_row_count == port.staging_count(port.self));
-        SSP_CHECK("service status staged_row_count == N",
-                  st.staged_row_count == N);
-    }
+    failures += ssp_check_service_staged_count(&port, &ndb, N);
 
     /* ---- NULL / bad-arg guards ---- */
-    {
-        struct snapshot_store_sqlite_ctx c2;
-        struct snapshot_store_port p2 = {0};
-        SSP_CHECK("bind rejects NULL ctx",
-                  !snapshot_store_sqlite_bind(NULL, &ndb, &p2));
-        SSP_CHECK("bind rejects NULL out_port",
-                  !snapshot_store_sqlite_bind(&c2, &ndb, NULL));
-
-        /* NULL ndb is permitted by bind; methods then fail safely. */
-        struct snapshot_store_port pnull = {0};
-        SSP_CHECK("bind accepts NULL ndb",
-                  snapshot_store_sqlite_bind(&c2, NULL, &pnull));
-        int64_t n = -7;
-        SSP_CHECK("utxo_count false on NULL ndb",
-                  !pnull.utxo_count(pnull.self, &n));
-        SSP_CHECK("utxo_count leaves out on NULL ndb", n == -7);
-        SSP_CHECK("staging_count -1 on NULL ndb",
-                  pnull.staging_count(pnull.self) == -1);
-        uint8_t h[32] = {1}, o[32] = {0};
-        SSP_CHECK("tip_chainwork false on NULL ndb",
-                  !pnull.tip_chainwork(pnull.self, h, o));
-        struct db_utxo u0;
-        memset(&u0, 0, sizeof(u0));
-        SSP_CHECK("staging_insert false on NULL ndb (no cached stmt)",
-                  !pnull.staging_insert(pnull.self, &u0));
-        SSP_CHECK("set_busy_timeout false on NULL ndb",
-                  !pnull.set_busy_timeout(pnull.self, 1000));
-
-        /* utxo_count tolerates a NULL out. */
-        SSP_CHECK("utxo_count false on NULL out",
-                  !port.utxo_count(port.self, NULL));
-    }
+    failures += ssp_check_null_argument_guards(&port, &ndb);
 
     node_db_close(&ndb);
     unlink(db_path);
