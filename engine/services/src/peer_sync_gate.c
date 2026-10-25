@@ -40,6 +40,27 @@ bool syncsvc_peer_is_behind(const struct p2p_node *node, int our_height)
     return node->starting_height + SYNC_PEER_BEHIND_TOLERANCE < our_height;
 }
 
+/* Global sync states that are already inside an active header/block sync
+ * phase; a peer that passed the earlier gates may begin syncing in them. */
+static bool sync_state_is_actively_syncing(enum sync_state sync_state)
+{
+    return sync_state == SYNC_HEADERS_DOWNLOAD ||
+           sync_state == SYNC_BLOCKS_DOWNLOAD ||
+           sync_state == SYNC_CONNECTING_BLOCKS ||
+           sync_state == SYNC_REORG ||
+           sync_state == SYNC_REORG_RECOVERY;
+}
+
+/* Last gate for a peer that matched no earlier rule: sync may still begin
+ * from a pre-sync state when either side has no height to compare yet. */
+static bool idle_state_permits_peer_sync(const struct p2p_node *node,
+                                         int our_height,
+                                         enum sync_state sync_state)
+{
+    return (sync_state == SYNC_IDLE || sync_state == SYNC_FINDING_PEERS) &&
+           (our_height <= 0 || node->starting_height < 0);
+}
+
 bool syncsvc_should_begin_peer_sync(const struct p2p_node *node,
                                     int our_height,
                                     int best_header_height,
@@ -61,14 +82,9 @@ bool syncsvc_should_begin_peer_sync(const struct p2p_node *node,
         return true;
     if (node->starting_height >= 0 || sync_state == SYNC_AT_TIP)
         return false;
-    if (sync_state == SYNC_HEADERS_DOWNLOAD ||
-        sync_state == SYNC_BLOCKS_DOWNLOAD ||
-        sync_state == SYNC_CONNECTING_BLOCKS ||
-        sync_state == SYNC_REORG ||
-        sync_state == SYNC_REORG_RECOVERY)
+    if (sync_state_is_actively_syncing(sync_state))
         return true;
-    return (sync_state == SYNC_IDLE || sync_state == SYNC_FINDING_PEERS) &&
-           (our_height <= 0 || node->starting_height < 0);
+    return idle_state_permits_peer_sync(node, our_height, sync_state);
 }
 
 bool syncsvc_should_mark_peer_caught_up(const struct p2p_node *node,

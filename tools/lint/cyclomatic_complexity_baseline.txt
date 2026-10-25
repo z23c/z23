@@ -1495,7 +1495,6 @@ engine/services/src/operator_snapshot_service.c:operator_snapshot_classify:54
 engine/services/src/oracle_policy.c:oracle_policy_record_disagreement:20
 engine/services/src/overlay_transaction_intent_service.c:overlay_transaction_intent_commit:32
 engine/services/src/overlay_transaction_intent_service.c:overlay_transaction_intent_plan:25
-engine/services/src/peer_sync_gate.c:syncsvc_should_begin_peer_sync:18
 engine/services/src/property_catalog_service.c:pc_znam_list:17
 engine/services/src/property_catalog_service.c:pc_zslp_list:18
 engine/services/src/property_catalog_service.c:property_catalog_list_with_sources:31
