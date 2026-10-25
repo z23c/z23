@@ -607,6 +607,49 @@ int t_sync_state_no_ordinal_gate(void)
  * exempt unconditionally regardless of the registry/condition table. */
 #define BLOCKER_ESCAPE_PHRASE_FIXTURE_REL \
     "test-tmp/_blocker_escape_fixture_phrase_tmp.c"
+/* Padded so the absolute path is long enough that "path:line: literal" no
+ * longer fits the gate's fixed report slot — the verdict must survive that. */
+#define BLOCKER_ESCAPE_LONG_PREFIX "test-tmp/_blocker_escape_fixture_long_"
+#define BLOCKER_ESCAPE_LONG_TARGET_LEN 180
+
+/* The bad fixture again, under a name padded so its absolute path is
+ * BLOCKER_ESCAPE_LONG_TARGET_LEN bytes. The gate's "path:line: literal"
+ * report slot is fixed-size; a violation that does not fit it must still
+ * trip (rc 1), whatever the checkout root's length. Returns the gate's rc,
+ * or 1 when the root is already too deep to pad (nothing to prove). */
+static int blocker_escape_long_path_rc(void)
+{
+    char probe[PATH_MAX], rel[PATH_MAX], abs_path[PATH_MAX];
+    if (repo_path(probe, sizeof(probe), BLOCKER_ESCAPE_LONG_PREFIX ".c") != 0)
+        return -1;
+    size_t have = strlen(probe);
+    if (have >= BLOCKER_ESCAPE_LONG_TARGET_LEN)
+        return 1;
+    size_t pad = BLOCKER_ESCAPE_LONG_TARGET_LEN - have;
+    int n = snprintf(rel, sizeof(rel), "%s%.*s.c", BLOCKER_ESCAPE_LONG_PREFIX,
+                     (int)pad, "pppppppppppppppppppppppppppppppppppppppp"
+                     "pppppppppppppppppppppppppppppppppppppppp"
+                     "pppppppppppppppppppppppppppppppppppppppp"
+                     "pppppppppppppppppppppppppppppppppppppppp"
+                     "pppppppppppppppppppppppppppppppppppppppp");
+    if (n < 0 || (size_t)n >= sizeof(rel) ||
+        repo_path(abs_path, sizeof(abs_path), rel) != 0)
+        return -1;
+    unlink_rel(rel);
+    int rc = write_file(abs_path,
+        "void fixture_long(void)\n"
+        "{\n"
+        "    struct blocker_record rec;\n"
+        "    snprintf(rec.escape_action, sizeof(rec.escape_action),\n"
+        "             \"totally_unregistered_escape_name_xyz\");\n"
+        "}\n");
+    if (rc == 0)
+        rc = run_gate_script_with_env(BLOCKER_ESCAPE_SCRIPT_REL,
+                                      "ZCL_BLOCKER_ESCAPE_SCAN_FILES",
+                                      abs_path);
+    unlink_rel(rel);
+    return rc;
+}
 
 /* Gate #49 — blocker escape-action totality. escape_action is dual-purpose;
  * a literal is valid in any of three forms, and the gate must accept all
@@ -705,6 +748,12 @@ int t_blocker_escape_registered_gate(void)
                                    "ZCL_BLOCKER_ESCAPE_SCAN_FILES", phrase_path)
         : -1;
     int clean_rc = run_gate_script(BLOCKER_ESCAPE_SCRIPT_REL, NULL);
+    int long_rc = blocker_escape_long_path_rc();
+    if (bad_rc != 1 || ok_rc != 0 || cond_rc != 0 || phrase_rc != 0 ||
+        clean_rc != 0 || long_rc != 1)
+        fprintf(stderr, "[lint-gate] blocker escape rcs: bad=%d (want 1) ok=%d "
+                "cond=%d phrase=%d (want 0) clean=%d (want 0) long=%d (want 1)\n",
+                bad_rc, ok_rc, cond_rc, phrase_rc, clean_rc, long_rc);
 
     unlink_rel(BLOCKER_ESCAPE_BAD_FIXTURE_REL);
     unlink_rel(BLOCKER_ESCAPE_OK_FIXTURE_REL);
@@ -724,6 +773,7 @@ int t_blocker_escape_registered_gate(void)
         ASSERT(cond_rc == 0);
         ASSERT(phrase_rc == 0);
         ASSERT(clean_rc == 0);
+        ASSERT(long_rc == 1);
         PASS();
     } _test_next:;
     return failures;

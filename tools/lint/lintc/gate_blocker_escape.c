@@ -231,10 +231,14 @@ static int ber_record_lit(const char *path, int start, const char *q,
     int rc = ber_nadd(lits, q);
     if (rc || ber_nhas(reg, q) || ber_nhas(cond, q) || strpbrk(q, " \t"))
         return rc;
-    if (*nv < BER_HIT
-        && !ovf(snprintf(viol[*nv], RS_PATH, "%s:%d: \"%s\"", path, start, q),
-                RS_PATH))
+    /* A violation is a violation even when "path:line: literal" does not fit
+     * the fixed report slot (a deep checkout path plus a long literal): the
+     * text is truncated, never the verdict. Dropping it here once made the
+     * gate report "clean" on a host with a long scratch root. */
+    if (*nv < BER_HIT) {
+        (void)snprintf(viol[*nv], RS_PATH, "%s:%d: \"%s\"", path, start, q);
         (*nv)++;
+    }
     return 0;
 }
 
