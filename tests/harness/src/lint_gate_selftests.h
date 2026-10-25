@@ -183,7 +183,7 @@
 #define LONGFN_LIB_FIXTURE_REL     "test-tmp/_longfn_lib_scan_dir_tmp/fixture.c"
 #define LONGFN_LIB_KEEP_REL        "test-tmp/_longfn_lib_scan_dir_tmp/keep.c"
 #define LONGFN_LIB_BASELINE_REL    "test-tmp/_longfn_lib_baseline_tmp.txt"
-#define E9_SCRIPT_REL    "tools/scripts/check_operator_needed_sink.sh"
+#define E9_SCRIPT_REL    "build/bin/z23-lint check-operator-needed-sink"
 #define SYSMEM_SCRIPT_REL "tools/scripts/check_systemd_memory_budget.sh"
 #define QUALITY_GUARD_TEST_REL "tools/scripts/test_quality_job_guard.sh"
 /* ── the two hermetic copy-prove selftests, and how their bound is derived ──

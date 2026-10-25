@@ -14495,7 +14495,7 @@ check-no-live-lab-history:
 # without a subscriber in engine/modules/event/src/alerts.c.
 check-operator-needed-sink: $(LINTC_TOOL)
 	@echo "══ LINT: operator-needed sink (E9) ══"
-	@./tools/scripts/check_operator_needed_sink.sh
+	@./build/bin/z23-lint check-operator-needed-sink
 
 # Gate P1-3 — systemd finite hard memory caps must fit inside the host budget.
 # Counts MemoryMax plus finite MemorySwapMax across committed node units and

@@ -173,7 +173,6 @@ tools/scripts/check_no_uncited_victory.sh
 tools/scripts/check_one_result_type.sh
 tools/scripts/check_one_write_path.sh
 tools/scripts/check_onion_pair_watch.sh
-tools/scripts/check_operator_needed_sink.sh
 tools/scripts/check_projections_pure.sh
 tools/scripts/check_quality_lane_freshness.sh
 tools/scripts/check_raw_malloc.sh

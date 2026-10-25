@@ -172,7 +172,7 @@ gate_command() {
         check-retrieval-historical-evidence) echo './tools/dev/retrieval-gold-corpus-check.sh --check && ./tools/dev/retrieval-gold-identifier-graph-receipt-check.sh --check && ./tools/dev/retrieval-profile-sweep.sh --check' ;;
         check-no-orphan-placement)         echo 'ZCL_LINT_MODE=RATCHET ./build/bin/z23-lint check-no-orphan-placement' ;;
         check-file-size-ceiling)           echo '"$ZCL_LINT_BIN_DIR/file_size_policy"' ;;
-        check-operator-needed-sink)        echo './tools/scripts/check_operator_needed_sink.sh' ;;
+        check-operator-needed-sink)        echo './build/bin/z23-lint check-operator-needed-sink' ;;
         check-systemd-memory-budget)       echo './tools/scripts/check_systemd_memory_budget.sh --selftest && ./tools/scripts/check_systemd_memory_budget.sh' ;;
         check-condition-cooldown)          echo './tools/scripts/check_condition_cooldown.sh' ;;
         check-doc-accuracy)                echo './tools/scripts/check_doc_accuracy.sh' ;;
