@@ -10915,7 +10915,13 @@ static void dl_drive_judge_row(const struct dl_row *row, const char *wt,
 static void dl_drive_judge_reply(const struct zcl_command_reply *reply,
                                  struct dl_drive_verdict *v)
 {
-    const char *code = reply->error.code;
+    const char *code;
+    if (!reply) {
+        v->kind = DL_DRIVE_REFUSED;
+        (void)snprintf(v->detail, sizeof(v->detail), "no_reply");
+        return;
+    }
+    code = reply->error.code;
     if (reply->status == ZCL_COMMAND_STATUS_PASSED) {
         v->kind = DL_DRIVE_CONTINUE;
     } else if (strcmp(code, "PUBLICATION_INTENT_REQUIRED") == 0) {

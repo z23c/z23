@@ -205,7 +205,7 @@ enum plugin_run_status prs_resolve(struct plugin_run *run)
 static bool prs_accept(const struct plugin_run *run, struct resident_launch_accepted *a)
 {
     struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot snap;
+    struct platform_positioned_file_snapshot snap = {0};
     struct sha3_256_ctx c256;
     struct sha3_512_ctx c512;
     struct stat st;

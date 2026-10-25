@@ -155,7 +155,7 @@ static void g_send_runt_again(void)
 {
     static uint8_t junk[70000], data[5000];
     const size_t overhead = ZSSH_TXQ_RESERVE + ZSSH_PKT_HDR + 9u + ZSSH_PAD_RANDOM_MAX + ZSSH_TAG_LEN;
-    struct zssh_channel_flags f0, f1;
+    struct zssh_channel_flags f0 = {0}, f1 = {0};
     size_t acc = 99;
     memset(data, 0x6d, sizeof data);
     fresh_channel();
@@ -179,7 +179,7 @@ static void g_send_runt_again(void)
 static void g_rekey_limit(void)
 {
     static uint8_t big[40000], rb[40000], pkt[4000];
-    struct zssh_channel_flags f0, f1;
+    struct zssh_channel_flags f0 = {0}, f1 = {0};
     size_t acc = 99, got = 99, cons = 0;
     memset(big, 0x5a, sizeof big);
     fresh_channel();
@@ -380,7 +380,7 @@ static void g_reserve_saturation(void)
 {
     struct opt o;
     static uint8_t big[16384], junk[ZSSH_TXQ_SIZE], pkt[2048];
-    struct zssh_channel_flags f0, f1;
+    struct zssh_channel_flags f0 = {0}, f1 = {0};
     size_t acc = 0, cons = 0;
     opt_default(&o); o.kc = o.ks = ZSSH_KEX_CURVE25519_SHA256;
     memset(big, 0x17, sizeof big);
@@ -501,7 +501,7 @@ static void bp_case_c(void)
     size_t acc = 0;
     snap_restore(1);
     CHECK(zssh_txq_append(&IMPL(CL)->txq, bp_junk, sizeof bp_junk));
-    struct zssh_channel_flags f0, f1;
+    struct zssh_channel_flags f0 = {0}, f1 = {0};
     CHECK(zssh_channel_flags_get(&g_conn[CL], &f0) == ZSSH_OK);
     CHECK(zssh_channel_send(&g_conn[CL], bp_data, sizeof bp_data, &acc) == ZSSH_AGAIN && acc == 0);
     CHECK(zssh_channel_flags_get(&g_conn[CL], &f1) == ZSSH_OK);

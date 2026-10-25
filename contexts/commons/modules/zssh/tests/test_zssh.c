@@ -559,7 +559,7 @@ static void expect_session(const char *kexname, bool pq, const char *peer_ver_pr
 static void ready_checks(void)
 {
     for (int i = 0; i < 2; i++) {
-        struct zssh_channel_flags f;
+        struct zssh_channel_flags f = {0};
         CHECK(zssh_channel_flags_get(&g_conn[i], &f) == ZSSH_OK);
         CHECK(!f.sent_eof && !f.recv_eof && !f.sent_close && !f.recv_close);
         CHECK(f.send_window == ZSSH_CHAN_WINDOW && f.recv_window == ZSSH_CHAN_WINDOW);
@@ -1077,7 +1077,7 @@ static void g_half_close(void)
     struct opt o;
     uint8_t rb[64];
     size_t acc = 0, got = 0;
-    struct zssh_channel_flags f;
+    struct zssh_channel_flags f = {0};
     opt_default(&o);
     CHECK(handshake(&o, 1u << 20, 65536));
     CHECK(zssh_channel_send(&g_conn[CL], (const uint8_t *)"abcde", 5, &acc) == ZSSH_OK && acc == 5);
@@ -1101,7 +1101,7 @@ static void g_half_close(void)
 static void half_close_close_phase(void)
 {
     size_t acc = 0;
-    struct zssh_channel_flags f;
+    struct zssh_channel_flags f = {0};
     CHECK(zssh_channel_send(&g_conn[CL], nullptr, 0, &acc) == ZSSH_BAD_CALL);
     CHECK(zssh_channel_send(&g_conn[SV], (const uint8_t *)"tail!", 5, &acc) == ZSSH_OK);
     run_quiet();
@@ -1152,7 +1152,7 @@ static void failed_column(int i, enum zssh_error e)
 {
     uint8_t rb[16];
     size_t cons = 9, got = 9, acc = 9;
-    struct zssh_channel_flags f;
+    struct zssh_channel_flags f = {0};
     CHECK(zssh_input(&g_conn[i], (const uint8_t *)"abc", 3, &cons) == ZSSH_STATUS_FAILED && cons == 0);
     CHECK(zssh_channel_recv(&g_conn[i], rb, sizeof rb, &got) == ZSSH_FAILED && got == 0);
     CHECK(zssh_channel_send(&g_conn[i], (const uint8_t *)"x", 1, &acc) == ZSSH_FAILED && acc == 0);
@@ -1278,7 +1278,7 @@ static void g_partial_prefix(void)
     memset(big, 0x42, sizeof big);
     CHECK(handshake(&o, 1u << 20, 65536));
     snap_take(1);
-    struct zssh_channel_flags fa, fb;
+    struct zssh_channel_flags fa = {0}, fb = {0};
     CHECK(zssh_channel_flags_get(&g_conn[CL], &fa) == ZSSH_OK);
     g_rng[CL].fail_at = g_rng[CL].calls + 2;        /* second packet's padding draw */
     CHECK(zssh_channel_send(&g_conn[CL], big, sizeof big, &acc) == ZSSH_FAILED);
@@ -1378,7 +1378,7 @@ static void misuse_null_args(struct zssh_conn *c, const struct zssh_conn *saved,
     uint8_t d[8] = { 0 }, rb[8], ob[8];
     size_t cons = 9, prod = 9, acc = 9, got = 9, n = 9;
     const uint8_t *p = nullptr;
-    struct zssh_channel_flags f;
+    struct zssh_channel_flags f = {0};
     struct zssh_session_info si;
     cons = 9; CHECK(zssh_input(c, nullptr, 5, &cons) == ZSSH_STATUS_BAD_CALL && cons == 0);
     CHECK(zssh_input(c, d, 1, nullptr) == ZSSH_STATUS_BAD_CALL);
@@ -1413,7 +1413,7 @@ static void g_misuse(void)
     uint8_t d[8] = { 0 }, rb[8];
     size_t acc = 9, got = 9, cons = 9;
     const uint8_t *p = nullptr;
-    struct zssh_channel_flags f;
+    struct zssh_channel_flags f = {0};
     struct zssh_session_info si;
     opt_default(&o);
     CHECK(handshake(&o, 1u << 20, 65536));
