@@ -963,6 +963,8 @@ static bool catchup_one_block(int64_t stub_skips, bool stub_verdict,
         return false;
     walk_svc_init(svc, ms);
     atomic_store(&svc->progress.verified_height, 0);
+    atomic_store(&svc->progress.chain_height, 0);
+    atomic_store(&svc->progress.state, BG_VALIDATION_COMPLETE);
     g_restart_progress = 0;
     g_catchup_stub_skips = stub_skips;
     g_catchup_stub_verdict = stub_verdict;
@@ -991,6 +993,12 @@ static int test_bg_validation_catchup_verifies_new_tip_block(void)
         ASSERT_EQ((int)atomic_load(
                       &svc.progress.script_verif_skipped_no_undo), 0);
         ASSERT(bg_validation_authority_walk_is_complete(1, 1, 0, true));
+        /* status readers need chain_height to follow verified and the
+         * state to stay COMPLETE, not flip back to RUNNING. */
+        ASSERT(bg_validation_authority_walk_is_complete(
+            atomic_load(&svc.progress.verified_height),
+            atomic_load(&svc.progress.chain_height), 0, true));
+        ASSERT_EQ(atomic_load(&svc.progress.state), BG_VALIDATION_COMPLETE);
         main_state_free(&ms);
         g_restart_progress = 1;
         PASS();

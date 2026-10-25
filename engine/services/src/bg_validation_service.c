@@ -707,7 +707,8 @@ enum bg_validation_step {
 static enum bg_validation_step bg_validation_walk_step(
     struct bg_validation_service *svc, int h, struct block_index *pindex,
     const char *datadir, const struct chain_params *params, int num_workers,
-    uint64_t *applied_next, unsigned *row_retries, int64_t *block_sigs,
+    enum bg_validation_state ready_state, uint64_t *applied_next,
+    unsigned *row_retries, int64_t *block_sigs,
     int64_t *block_proofs, int64_t *block_skips)
 {
     if (!bg_validation_wait_until_applied(svc, h, applied_next))
@@ -718,7 +719,7 @@ static enum bg_validation_step bg_validation_walk_step(
     struct block blk;
     block_init(&blk);
     if (!bg_validation_read_body_resilient(
-            svc, h, datadir, BG_VALIDATION_RUNNING, &blk, &pindex))
+            svc, h, datadir, ready_state, &blk, &pindex))
         return BG_VALIDATION_STEP_GAP;
 
     enum bg_validation_height_result result = bg_validation_height_validate(
@@ -737,7 +738,9 @@ static enum bg_validation_step bg_validation_walk_step(
  * The walk verifies up to the tip it saw; the live tip can move before the
  * authority is published, and the publisher (rightly) demands verified ==
  * tip. Verify the missing blocks with the walk's own step, bounded per
- * attempt, then let the unchanged publisher decide. */
+ * attempt, then let the unchanged publisher decide. It runs only after the
+ * walk set COMPLETE, so bodies it reads restore COMPLETE (not RUNNING), and
+ * chain_height follows verified so the status readers see a complete walk. */
 #define BG_CATCHUP_ROUNDS 8
 #define BG_CATCHUP_MAX_RETRIES 8u
 
@@ -756,8 +759,8 @@ static bool bg_validation_catch_up_round(
             break;
         int64_t sigs = 0, proofs = 0, skips = 0;
         enum bg_validation_step step = bg_validation_walk_step(
-            svc, h, pindex, datadir, params, num_workers, &applied_next,
-            &row_retries, &sigs, &proofs, &skips);
+            svc, h, pindex, datadir, params, num_workers,
+            BG_VALIDATION_COMPLETE, &applied_next, &row_retries, &sigs, &proofs, &skips);
         if (step == BG_VALIDATION_STEP_RETRY &&
             ++retries <= BG_CATCHUP_MAX_RETRIES)
             continue;
@@ -767,6 +770,7 @@ static bool bg_validation_catch_up_round(
         atomic_fetch_add(&svc->progress.proofs_verified, proofs);
         atomic_fetch_add(&svc->progress.script_verif_skipped_no_undo, skips);
         atomic_store(&svc->progress.verified_height, h);
+        atomic_store(&svc->progress.chain_height, h);
         h++;
     }
     int verified = atomic_load(&svc->progress.verified_height);
@@ -892,7 +896,8 @@ static void *bg_validation_thread(void *arg)
          * resilient body read, full validation); see bg_validation_walk_step. */
         int64_t block_sigs = 0, block_proofs = 0, block_skips = 0;
         enum bg_validation_step step = bg_validation_walk_step(
-            svc, h, pindex, datadir, params, num_workers, &applied_next,
+            svc, h, pindex, datadir, params, num_workers,
+            BG_VALIDATION_RUNNING, &applied_next,
             &row_retries, &block_sigs, &block_proofs, &block_skips);
         if (step == BG_VALIDATION_STEP_RETRY) {
             h--;
