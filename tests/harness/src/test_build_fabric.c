@@ -5190,6 +5190,73 @@ static int bf_candidate_query_interrupt(void *context)
     return 1;
 }
 
+/* The register call's worker half is paths only: the identity load and its
+ * toolchain capture run on the worker thread. The thread itself cannot run
+ * in a test binary, so this drives the register's synchronous half and the
+ * thread's enroll step through the same functions the production path calls. */
+static bool bf_dump_worker_ready(void)
+{
+    struct json_value state;
+    json_init(&state);
+    bool ready = build_fabric_dump_state_json(&state, NULL) &&
+                 json_get_bool(json_get(&state, "worker_ready"));
+    json_free(&state);
+    return ready;
+}
+
+static int test_bf_worker_enroll_off_boot_thread(void)
+{
+    int failures = 0;
+    TEST("build_fabric: register defers the toolchain capture to the worker's enroll step") {
+        char dir[512], path[640], blocked[700];
+        struct node_db ndb;
+        ASSERT(bf_open(&ndb, dir, sizeof(dir), path, sizeof(path), "enroll"));
+        uint64_t fresh = 0, hits = 0;
+        vcs_toolchain_capsule_v1_cache_reset_for_test();
+
+        /* (A) The synchronous half runs no capture and publishes no identity;
+         * every reader sees a worker that is not enrolled yet. */
+        ASSERT(build_fabric_runtime_prepare_worker_for_test(dir).ok);
+        vcs_toolchain_capsule_v1_cache_stats_for_test(&fresh, &hits);
+        ASSERT_EQ(fresh, 0u);
+        ASSERT_EQ(hits, 0u);
+        ASSERT(!build_fabric_runtime_worker_ready());
+        ASSERT(!bf_dump_worker_ready());
+        ASSERT(build_fabric_runtime_local_worker_id_for_test() == NULL);
+
+        /* (B) The worker thread's step captures, enrolls and only then marks
+         * ready; the identity is the one the synchronous load produces. */
+        ASSERT(build_fabric_runtime_enroll_step_for_test(&ndb));
+        vcs_toolchain_capsule_v1_cache_stats_for_test(&fresh, &hits);
+        ASSERT(fresh + hits >= 1u);
+        ASSERT(build_fabric_runtime_worker_ready());
+        ASSERT(bf_dump_worker_ready());
+        struct db_build_worker expected;
+        uint8_t secret[32], pubkey[32];
+        ASSERT(build_fabric_worker_identity_load(dir, &expected, secret,
+                                                 pubkey).ok);
+        ASSERT_STR_EQ(build_fabric_runtime_local_worker_id_for_test(),
+                      expected.worker_id);
+
+        /* (C) A failed enroll leaves the worker disabled and not ready. */
+        (void)snprintf(blocked, sizeof(blocked), "%s/not_a_dir", dir);
+        FILE *f = fopen(blocked, "w");
+        ASSERT(f != NULL);
+        ASSERT(fclose(f) == 0);
+        (void)snprintf(blocked, sizeof(blocked), "%s/not_a_dir/data", dir);
+        ASSERT(build_fabric_runtime_prepare_worker_for_test(blocked).ok);
+        ASSERT(build_fabric_runtime_worker_enabled_for_test());
+        ASSERT(!build_fabric_runtime_enroll_step_for_test(&ndb));
+        ASSERT(!build_fabric_runtime_worker_ready());
+        ASSERT(!build_fabric_runtime_worker_enabled_for_test());
+        ASSERT(!bf_dump_worker_ready());
+        node_db_close(&ndb);
+        test_rm_rf(dir);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bf_candidate_query_errors(void)
 {
     int failures = 0;
@@ -5412,6 +5479,7 @@ int test_build_fabric(void)
     failures += test_bf_receipt_renewal_race(23);
     failures += test_bf_local_enrollment();
     failures += test_bf_toolchain_capture_cache();
+    failures += test_bf_worker_enroll_off_boot_thread();
     failures += test_bf_assembler_identity_is_version();
     failures += test_bf_linker_identity_bound();
     failures += test_bf_execution_observation_codec();

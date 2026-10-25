@@ -42,6 +42,10 @@ static struct liveness_contract g_worker_contract;
 static _Atomic supervisor_child_id g_requester_id = SUPERVISOR_INVALID_ID;
 static _Atomic supervisor_child_id g_worker_id = SUPERVISOR_INVALID_ID;
 static _Atomic bool g_worker_enabled;
+/* Set (release) only after the worker thread has loaded the identity, captured
+ * the toolchain and enrolled; g_local_* are written before and read only after
+ * an acquire of it. Not ready reads exactly like a disabled worker. */
+static _Atomic bool g_worker_ready;
 static _Atomic uint64_t g_requester_ticks;
 static _Atomic uint64_t g_worker_ticks;
 static _Atomic uint64_t g_jobs_active;
@@ -369,6 +373,92 @@ static void bf_runtime_execute_claimed(struct node_db *ndb,
     supervisor_tick(id);
 }
 
+/* The cheap, synchronous half of enrolling the local worker: where it runs
+ * and keeps its data. The identity load (toolchain capture: compiler probe
+ * subprocesses and SHA3 of the toolchain files) and the node_db enroll run on
+ * the worker thread (bf_worker_enroll_step), never on the boot thread. */
+static struct zcl_result bf_runtime_prepare_worker(const char *datadir)
+{
+    if (!datadir || !getcwd(g_worker_workspace,
+                            sizeof(g_worker_workspace)))
+        return ZCL_ERR(-1, "build worker cannot resolve its workspace");
+    int ddn = snprintf(g_worker_datadir, sizeof(g_worker_datadir),
+                       "%s", datadir);
+    if (ddn <= 0 || (size_t)ddn >= sizeof(g_worker_datadir))
+        return ZCL_ERR(-1, "build worker datadir is too long");
+    atomic_store_explicit(&g_worker_ready, false, memory_order_release);
+    return ZCL_OK;
+}
+
+static struct zcl_result bf_runtime_enroll_worker(struct node_db *ndb)
+{
+    ZCL_CHECK(build_fabric_worker_identity_load(
+        g_worker_datadir, &g_local_worker, g_local_secret, g_local_pubkey));
+    if (g_shutdown_requested)
+        return ZCL_ERR(-1, "build worker enroll stopped by shutdown");
+    if (!ndb || !ndb->open)
+        return ZCL_ERR(-1, "build worker database is unavailable");
+    int64_t now = (int64_t)platform_time_wall_unix();
+    g_local_worker.approved_at = now;
+    g_local_worker.last_seen_at = now;
+    return build_fabric_worker_enroll_local(ndb, &g_local_worker, now);
+}
+
+/* First step of the worker thread: identity, toolchain capture and local
+ * enroll, then publish readiness. A failure leaves the worker disabled with
+ * the message the boot thread used to log, and its supervisor child exempt
+ * (it was never going to make progress). */
+static bool bf_worker_enroll_step(struct node_db *ndb)
+{
+    int64_t started_us = platform_time_monotonic_us();
+    struct zcl_result enrolled = bf_runtime_enroll_worker(ndb);
+    int64_t took_ms = (platform_time_monotonic_us() - started_us) / 1000;
+    if (!enrolled.ok) {
+        atomic_store(&g_worker_enabled, false);
+        atomic_store_explicit(&g_worker_ready, false, memory_order_release);
+        supervisor_child_id id = atomic_load(&g_worker_id);
+        if (id != SUPERVISOR_INVALID_ID)
+            supervisor_set_progress_exempt(id, "build worker enroll failed");
+        LOG_WARN("build_fabric", "%s", enrolled.message);
+        return false;
+    }
+    atomic_store_explicit(&g_worker_ready, true, memory_order_release);
+    LOG_INFO("build_fabric",
+             "build worker identity ready on worker thread: capture+enroll %lldms",
+             (long long)took_ms);
+    return true;
+}
+
+bool build_fabric_runtime_worker_ready(void)
+{
+    return atomic_load_explicit(&g_worker_ready, memory_order_acquire);
+}
+
+#ifdef ZCL_TESTING
+struct zcl_result build_fabric_runtime_prepare_worker_for_test(
+    const char *datadir)
+{
+    atomic_store(&g_worker_enabled, true);
+    return bf_runtime_prepare_worker(datadir);
+}
+
+bool build_fabric_runtime_enroll_step_for_test(struct node_db *ndb)
+{
+    return bf_worker_enroll_step(ndb);
+}
+
+bool build_fabric_runtime_worker_enabled_for_test(void)
+{
+    return atomic_load(&g_worker_enabled);
+}
+
+const char *build_fabric_runtime_local_worker_id_for_test(void)
+{
+    return build_fabric_runtime_worker_ready() ? g_local_worker.worker_id
+                                               : NULL;
+}
+#endif
+
 static bool bf_worker_recover_at_start(struct node_db *ndb)
 {
     struct db_build_worker worker;
@@ -409,6 +499,13 @@ static bool bf_worker_wait_for_recovery(struct node_db *ndb)
     return !g_shutdown_requested;
 }
 
+/* Enroll first (the capture the boot thread no longer pays), then recover
+ * the same identity from the key file. */
+static bool bf_worker_start_identity(struct node_db *ndb)
+{
+    return bf_worker_enroll_step(ndb) && bf_worker_wait_for_recovery(ndb);
+}
+
 static void *bf_worker_loop(void *arg)
 {
     (void)arg;
@@ -427,7 +524,7 @@ static void *bf_worker_loop(void *arg)
         atomic_fetch_add(&g_worker_failures, 1);
         return NULL;
     }
-    if (!bf_worker_wait_for_recovery(ndb)) return NULL;
+    if (!bf_worker_start_identity(ndb)) return NULL;
     uint64_t completed = 0;
     while (!g_shutdown_requested) {
         supervisor_child_id id = atomic_load(&g_worker_id);
@@ -513,33 +610,13 @@ static supervisor_child_id bf_runtime_child(
     return supervisor_register_in_domain(g_op_sup, contract);
 }
 
-static struct zcl_result bf_runtime_enroll_worker(const char *datadir)
-{
-    if (!datadir || !getcwd(g_worker_workspace,
-                            sizeof(g_worker_workspace)))
-        return ZCL_ERR(-1, "build worker cannot resolve its workspace");
-    int ddn = snprintf(g_worker_datadir, sizeof(g_worker_datadir),
-                       "%s", datadir);
-    if (ddn <= 0 || (size_t)ddn >= sizeof(g_worker_datadir))
-        return ZCL_ERR(-1, "build worker datadir is too long");
-    ZCL_CHECK(build_fabric_worker_identity_load(
-        datadir, &g_local_worker, g_local_secret, g_local_pubkey));
-    struct node_db *ndb = app_runtime_node_db();
-    if (!ndb || !ndb->open)
-        return ZCL_ERR(-1, "build worker database is unavailable");
-    int64_t now = (int64_t)platform_time_wall_unix();
-    g_local_worker.approved_at = now;
-    g_local_worker.last_seen_at = now;
-    return build_fabric_worker_enroll_local(ndb, &g_local_worker, now);
-}
-
 struct zcl_result build_fabric_runtime_register(bool worker_enabled,
                                                 const char *datadir)
 {
     supervisor_domains_init();
     atomic_store(&g_worker_enabled, worker_enabled);
     if (worker_enabled && !atomic_load(&g_worker_started))
-        ZCL_CHECK(bf_runtime_enroll_worker(datadir));
+        ZCL_CHECK(bf_runtime_prepare_worker(datadir));
     if (atomic_load(&g_requester_id) == SUPERVISOR_INVALID_ID) {
         supervisor_child_id id = bf_runtime_child(
             &g_requester_contract, "build.requester", bf_requester_tick);
@@ -631,6 +708,7 @@ bool build_fabric_dump_state_json(struct json_value *out, const char *key)
     }
     (void)json_push_kv_str(out, "schema", "zcl.build_fabric_state.v1");
     (void)json_push_kv_bool(out, "worker_enabled", atomic_load(&g_worker_enabled));
+    (void)json_push_kv_bool(out, "worker_ready", build_fabric_runtime_worker_ready());
     (void)json_push_kv_int(out, "requester_ticks", (int64_t)atomic_load(&g_requester_ticks));
     (void)json_push_kv_int(out, "worker_ticks", (int64_t)atomic_load(&g_worker_ticks));
     (void)json_push_kv_int(out, "jobs_active", (int64_t)atomic_load(&g_jobs_active));

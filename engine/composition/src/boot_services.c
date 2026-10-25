@@ -476,8 +476,10 @@ static void boot_register_core_liveness_and_reducer(
     invariant_sentinel_register(); /* fail-loud validation pack sweeps (also arms the authority/projection audit) */
     op_return_backfill_set_datadir(svc->datadir);
     op_return_backfill_register(); zslp_ledger_backfill_register(); address_index_service_register(); txindex_projection_service_register(); /* projection backfills to H*: op_return + zslp_ledger (always) + -addressindex/-txindex (opt-in, no-op when off) */
+    t_clr = boot_mark_step(t_clr, "svc.clr.register_contracts", "svc.clr.build_fabric");
     struct zcl_result build_runtime = build_fabric_runtime_register(svc->app_ctx->build_worker, svc->datadir);
     if (!build_runtime.ok) LOG_WARN("build_fabric", "%s", build_runtime.message);
+    t_clr = boot_mark_step(t_clr, "svc.clr.build_fabric", "svc.clr.register_contracts_rest");
     state_auditor_set_datadir(svc->datadir); state_auditor_register(); telemetry_watch_service_register(); /* two supervised samplers: the continuous integrity scrubber (complements the hourly full-set audits above) and the ops.telemetry.watch change feed, which diffs one typed snapshot per sampled domain and publishes ONLY on change — unregistered, the feed exists but nothing fills it and every poll samples itself */
     /* Close the alert loop: install the event->sink routing (incl. the
      * EV_OPERATOR_NEEDED rule) BEFORE the condition engine can fire, so a
@@ -491,7 +493,7 @@ static void boot_register_core_liveness_and_reducer(
      * fire. */
     blocker_history_bridge_register();
     self_heal_register(svc->state);
-    t_clr = boot_mark_step(t_clr, "svc.clr.register_contracts", "svc.clr.self_heal_staged_sync");
+    t_clr = boot_mark_step(t_clr, "svc.clr.register_contracts_rest", "svc.clr.self_heal_staged_sync");
     /* Spawn the dedicated condition-runner thread. The engine's detect/remedy
      * passes can run for seconds and MUST NOT run on the root supervisor sweep
      * thread (a heavy pass there freezes supervisor_sweep_heartbeat past the 30 s

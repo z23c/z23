@@ -11,6 +11,7 @@
 #include "platform/positioned_file.h"
 #include "util/spawn.h"
 #include "util/sync.h"
+#include "util/thread_registry.h"
 #include "vcs/zcode_dev.h"
 
 #include <stdio.h>
@@ -213,6 +214,14 @@ static bool build_resolve_file(const char *candidate, char resolved[PATH_MAX],
     return ok;
 }
 
+/* A probe the daemon is shutting down around is killed at the next poll
+ * (<= 100 ms) rather than holding the worker thread for its 10 s timeout. */
+static bool build_toolchain_query_cancel(void *ctx)
+{
+    (void)ctx;
+    return thread_registry_shutdown_requested();
+}
+
 static bool build_toolchain_query(void *ctx, const char *const argv[],
                                   char *out, size_t cap)
 {
@@ -227,7 +236,11 @@ static bool build_toolchain_query(void *ctx, const char *const argv[],
 #else
     const char *const *query_argv = argv;
 #endif
-    if (zcl_spawn_capture(query_argv, out, cap, 10000) != 0 || !out[0])
+    bool cancelled = false;
+    if (zcl_spawn_capture_cancelable(query_argv, out, cap, 10000,
+                                     build_toolchain_query_cancel, NULL,
+                                     &cancelled) != 0 ||
+        cancelled || !out[0])
         return false;
     out[strcspn(out, "\r\n")] = '\0';
     return out[0] != '\0';

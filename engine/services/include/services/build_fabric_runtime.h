@@ -20,6 +20,11 @@ struct zcl_result build_fabric_runtime_register(bool worker_enabled,
                                                 const char *datadir);
 
 struct json_value;
+/* True once the worker thread has finished identity, toolchain capture and
+ * enroll (acquire); until then the local worker declines all work exactly as
+ * a disabled one does. */
+bool build_fabric_runtime_worker_ready(void);
+
 bool build_fabric_dump_state_json(struct json_value *out, const char *key);
 
 /* The worker loop's two work steps, callable with an explicit proof context
@@ -53,6 +58,15 @@ struct zcl_result build_fabric_runtime_execute_step(
 #ifdef ZCL_TESTING
 #include "services/subordinate_work_admission.h"
 #include "services/build_fabric_attach.h"
+
+/* The register call's synchronous worker half (paths only, no capture), the
+ * worker thread's enroll step, and read-backs; the thread itself cannot run
+ * in a test binary. */
+struct zcl_result build_fabric_runtime_prepare_worker_for_test(
+    const char *datadir);
+bool build_fabric_runtime_enroll_step_for_test(struct node_db *ndb);
+bool build_fabric_runtime_worker_enabled_for_test(void);
+const char *build_fabric_runtime_local_worker_id_for_test(void);
 
 /* Run exactly the worker loop's admission step — observe, decide, publish the
  * standing reason, count and log a refusal — without the thread, lease or
