@@ -24,7 +24,10 @@
  * --target exits 2; a held hourly-tick lock does not block a finish and a held
  * same-lane finish lock skips. Both modes build the land note with one bounded
  * builder: a long pins list is clipped (fixed tail intact), a note that cannot
- * fit 500 bytes HOLDs and is never submitted, and a submit without data.seq HOLDs. */
+ * fit 500 bytes HOLDs and is never submitted, and a submit without data.seq HOLDs.
+ * The lane claim: a finish records the changed files with `dev agent claim`
+ * before the gates, renews it while they wait, releases it after a submit and
+ * after a HOLD, and a refused claim HOLDs before any gate runs. */
 
 #include "test/test_core.h"
 
@@ -185,8 +188,13 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
     const char *edit = c->edit ? c->edit : "";
     return lt_script(e, "dev",
                "case \"$1\" in\n fleet) cat '%s/step.json' ;;\n"
-               " dev) echo \"$@\" > '%s/submit.txt'; echo '{\"data\":{\"seq\":7}}' ;;\nesac",
-               e->d, e->d) &&
+               " dev) if [ \"$2\" = agent ]; then\n"
+               "  echo \"$@\" >> '%s/claims.txt'\n"
+               "  [ -e '%s/claim.fail' ] && { echo '{\"ok\":false}'; exit 1; }\n"
+               "  case \"$*\" in *release*) rm -f '%s/claim.live' ;; *) : > '%s/claim.live' ;; esac\n"
+               "  echo '{\"ok\":true}'\n"
+               " else echo \"$@\" > '%s/submit.txt'; echo '{\"data\":{\"seq\":7}}'; fi ;;\nesac",
+               e->d, e->d, e->d, e->d, e->d, e->d) &&
            lt_script(e, "eu",
                "while [ $# -gt 0 ]; do [ \"$1\" = --worktree ] && wt=$2; shift; done\n"
                "[ -n '%s' ] || exit 0\ncd \"$wt\" && echo edit >> '%s'", edit, edit) &&
@@ -198,7 +206,10 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
            lt_script(e, "zgate",
                "l='%s'/zgate.$$.log\n"
                "case \"$*\" in *agent-verify*) r='%s' ;; *) r='rc=0' ;; esac\n"
-               "echo \"$r\" > \"$l\"\necho \"log: $l\"", e->d, c->gate_rc) &&
+               "[ -e '%s/claim.live' ] && echo saw >> '%s/gate_saw_claim.txt'\n"
+               "if [ -e '%s/slowgate' ]; then echo \"$r\" | (sleep 1; cat > \"$l\") >/dev/null 2>&1 &\n"
+               "else echo \"$r\" > \"$l\"; fi\necho \"log: $l\"",
+               e->d, c->gate_rc, e->d, e->d, e->d) &&
            lt_script(e, "claude",
                "printf '%%s\\n' '{\"result\":\"reviewed\\n%s\"}'", c->verdict) &&
            lt_script(e, "retire",
@@ -1064,6 +1075,90 @@ static int case_finish_note_cannot_fit(void)
     return failures;
 }
 
+static int lt_count(const struct lt_env *e, const char *rel, const char *needle)
+{
+    static char text[1 << 16];
+    char p[900];
+    (void)snprintf(p, sizeof(p), "%s/%s", e->d, rel);
+    int n = 0;
+    if (!lt_slurp(p, text, sizeof(text)))
+        return 0;
+    for (const char *s = text; (s = strstr(s, needle)) != NULL; s += strlen(needle))
+        n++;
+    return n;
+}
+
+/* The finisher claims the lane's changed files before the gates, renews the
+ * claim while they run, and releases it after a submit and after a HOLD. */
+static int case_finish_claims(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192] = "", slow[900];
+    const bool ready = lt_setup(&e, "claim", &c, "none", "claude-haiku") &&
+                       lt_make_lane(&e, "ok");
+    LT_CHECK("the claim scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    (void)snprintf(slow, sizeof(slow), "%s/slowgate", e.d);
+    (void)lt_wf(slow, "");
+    const char *const extra[] = { "--claim-renew-s", "0", NULL };
+    const int rc = lt_finish(&e, extra, out, sizeof(out));
+    LT_CHECK("a finish with a claim submits", rc == 0 && strstr(out, "submitted seq=7") != NULL);
+    LT_CHECK("the claim names the lane and its changed files",
+             lt_file_has(&e, "claims.txt", "dev agent claim --input={\"story\":\"fin1\",\"files\":[") &&
+             lt_file_has(&e, "claims.txt", "\"owned.c\""));
+    LT_CHECK("a claim row exists while the gates run", lt_file_has(&e, "gate_saw_claim.txt", "saw"));
+    LT_CHECK("the claim is renewed while the gates wait", lt_count(&e, "claims.txt", "\"story\":\"fin1\"") >= 2);
+    LT_CHECK("the claim is released after the submit",
+             lt_count(&e, "claims.txt", "{\"release\":true}") == 1 &&
+             !lt_exists("%s/%s", e.d, "claim.live"));
+    return failures;
+}
+
+static int case_claim_released_on_hold(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: HOLD owned.c:1 bad split", "rc=0", NULL };
+    char out[8192] = "";
+    const bool ready = lt_setup(&e, "claimhold", &c, "none", "claude-haiku") &&
+                       lt_make_lane(&e, "ok");
+    LT_CHECK("the claim HOLD fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_finish(&e, NULL, out, sizeof(out));
+    LT_CHECK("a review HOLD exits 1", rc == 1 && strstr(out, "finish fin1 HOLD review") != NULL);
+    LT_CHECK("the gates ran under a claim row", lt_file_has(&e, "gate_saw_claim.txt", "saw"));
+    LT_CHECK("the claim is released after the HOLD",
+             lt_count(&e, "claims.txt", "{\"release\":true}") == 1 &&
+             !lt_exists("%s/%s", e.d, "claim.live"));
+    return failures;
+}
+
+static int case_claim_refused_hold(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { NULL, "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char out[8192] = "", fail[900];
+    const bool ready = lt_setup(&e, "claimno", &c, "none", "claude-haiku") &&
+                       lt_make_lane(&e, "ok");
+    LT_CHECK("the claim refusal fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    (void)snprintf(fail, sizeof(fail), "%s/claim.fail", e.d);
+    (void)lt_wf(fail, "");
+    const int rc = lt_finish(&e, NULL, out, sizeof(out));
+    LT_CHECK("a refused claim HOLDs with a named reason",
+             rc == 1 && strstr(out, "finish fin1 HOLD the lane claim was refused") != NULL);
+    LT_CHECK("no gate ran and nothing was submitted",
+             !lt_exists("%s/%s", e.d, "gate_saw_claim.txt") && !lt_exists("%s/%s", e.d, "submit.txt"));
+    LT_CHECK("a refused claim leaves nothing to release", lt_count(&e, "claims.txt", "release") == 0);
+    return failures;
+}
+
 int test_loop_tick(void)
 {
     int failures = 0;
@@ -1095,5 +1190,8 @@ int test_loop_tick(void)
     failures += case_tick_note_cannot_fit();
     failures += case_tick_no_sequence();
     failures += case_finish_note_cannot_fit();
+    failures += case_finish_claims();
+    failures += case_claim_released_on_hold();
+    failures += case_claim_refused_hold();
     return failures;
 }

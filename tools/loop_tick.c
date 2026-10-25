@@ -110,6 +110,7 @@ enum {
     X(REVIEW_TIMEOUT, "--review-timeout-s", "1200")                          \
     X(GATE_WAIT, "--gate-wait-s", "7200")                                    \
     X(POLL, "--poll-ms", "30000")                                            \
+    X(CLAIM_RENEW, "--claim-renew-s", "300")                                 \
     X(FINISH, "--finish", "")                                                \
     X(TARGET, "--target", "")                                                \
     X(CREDIT, "--credit", "")                                                \
@@ -149,6 +150,8 @@ struct tick {
     long removed;
     char gatenote[160]; /* the land note's gate text, as the gates actually ran */
     bool finish;        /* --finish mode: adopt a committed lane, judge origin/main..HEAD */
+    char *claim_in;     /* the lane claim input, repeated to renew the lease */
+    bool claimed;       /* the lane holds a claim row to release */
 };
 
 static const char *O(const struct tick *t, enum lt_opt o) { return t->opt[o]; }
@@ -987,6 +990,96 @@ static int stage_commit(struct tick *t)
     return LT_GO;
 }
 
+/* ── lane claim: the fleet sees the lane's live work ─────────────────── */
+
+/* `dev agent claim` run in the lane; the lease is 15 minutes, so the same
+ * input is repeated to renew it. False when the dev command failed. */
+static bool claim_call(struct tick *t, const char *input)
+{
+    const size_t n = strlen(input) + sizeof("--input=");
+    char *flag = zcl_malloc(n, "loop_tick_claim_flag");
+    if (!flag)
+        return false;
+    (void)fmt(flag, n, "--input=%s", input);
+    const char *const av[] = { O(t, LT_O_DEV), "dev", "agent", "claim", flag, NULL };
+    const int rc = run(t, t->dir, av, LT_SHORT_TIMEOUT_MS);
+    free(flag);
+    return rc == 0;
+}
+
+static bool claim_path_ok(const char *p)
+{
+    for (; *p; p++)
+        if (*p == '"' || *p == '\\' || (unsigned char)*p < 0x20)
+            return false;
+    return true;
+}
+
+/* {"story":"<lane>","files":[...]} from the -z name-status records. NULL when
+ * a record does not parse or a path would need JSON escaping. */
+static char *claim_input(const struct tick *t, const char *buf, size_t len)
+{
+    const size_t cap = len * 2 + strlen(t->lane) + 64;
+    char *out = zcl_malloc(cap, "loop_tick_claim_input");
+    if (!out)
+        return NULL;
+    size_t o = (size_t)snprintf(out, cap, "{\"story\":\"%s\",\"files\":[", t->lane);
+    for (size_t i = 0, files = 0; i < len; files++) {
+        i += strnlen(buf + i, len - i) + 1; /* the status */
+        const char *path = buf + i;
+        const size_t pl = i < len ? strnlen(path, len - i) : 0;
+        if (pl == 0 || i + pl >= len || !claim_path_ok(path)) {
+            free(out);
+            return NULL;
+        }
+        o += (size_t)snprintf(out + o, cap - o, "%s\"%s\"", files ? "," : "", path);
+        i += pl + 1;
+    }
+    (void)snprintf(out + o, cap - o, "]}");
+    return out;
+}
+
+/* Before the gates: claim the lane's changed-file set (origin/main..HEAD). A
+ * claim that cannot be recorded HOLDs, so live work is never invisible. */
+static int stage_claim(struct tick *t)
+{
+    size_t len = 0;
+    if (!scope_range(t, &len) || len == 0)
+        return hold(t, t->lane, "the lane claim could not read the changed paths");
+    t->claim_in = claim_input(t, t->buf, len);
+    if (!t->claim_in)
+        return hold(t, t->lane, "the lane claim input could not be built");
+    if (!claim_call(t, t->claim_in))
+        return hold(t, t->lane, "the lane claim was refused: %.300s", t->buf);
+    t->claimed = true;
+    return LT_GO;
+}
+
+/* Every exit (HOLD, submitted or error): the lane's claim rows go away. */
+static void claim_release(struct tick *t)
+{
+    if (t->claimed) {
+        const char *const av[] = { O(t, LT_O_DEV), "dev", "agent", "claim",
+                                   "--input={\"release\":true}", NULL };
+        if (run(t, t->dir, av, LT_SHORT_TIMEOUT_MS) != 0)
+            say(t, "lane claim release failed for %s", t->lane);
+    }
+    t->claimed = false;
+    free(t->claim_in);
+    t->claim_in = NULL;
+}
+
+/* Repeat the claim while the gates run, so the 15 minute lease never lapses. */
+static void claim_renew(struct tick *t, long *since_ms, long poll_ms)
+{
+    if (t->claimed && *since_ms >= oint(t, LT_O_CLAIM_RENEW) * 1000) {
+        *since_ms = 0;
+        if (!claim_call(t, t->claim_in))
+            say(t, "lane claim renewal failed for %s", t->lane);
+    }
+    *since_ms += poll_ms;
+}
+
 /* ── step 7: quick check, then both gates ────────────────────────────── */
 
 /* First whitespace-delimited token that ends in .log, from its first '/'. */
@@ -1043,11 +1136,13 @@ static bool wait_gates(struct tick *t, const char *l1, const char *l2,
 {
     const long limit_ms = oint(t, LT_O_GATE_WAIT) * 1000;
     const long poll_ms = oint(t, LT_O_POLL) > 0 ? oint(t, LT_O_POLL) : 1000;
+    long since_ms = 0;
     for (long waited = 0;; waited += poll_ms) {
         if (gate_rc(l1, rc1, cap) && gate_rc(l2, rc2, cap))
             return true;
         if (waited >= limit_ms)
             return false;
+        claim_renew(t, &since_ms, poll_ms);
         const struct timespec ts = { (time_t)(poll_ms / 1000),
                                      (long)(poll_ms % 1000) * 1000000L };
         (void)nanosleep(&ts, NULL);
@@ -1575,7 +1670,8 @@ static int tick_stages(struct tick *t)
 {
     static int (*const stages[])(struct tick *) = {
         stage_housekeeping, stage_step, stage_lane, stage_engine, stage_scope,
-        stage_baseline, stage_commit, stage_gates, stage_review, stage_submit
+        stage_baseline, stage_commit, stage_claim, stage_gates, stage_review,
+        stage_submit
     };
     return run_stages(t, stages, sizeof(stages) / sizeof(stages[0]));
 }
@@ -1583,8 +1679,8 @@ static int tick_stages(struct tick *t)
 static int finish_stages(struct tick *t)
 {
     static int (*const stages[])(struct tick *) = {
-        stage_adopt, stage_scope, stage_baseline, stage_gates, stage_review,
-        stage_submit
+        stage_adopt, stage_scope, stage_baseline, stage_claim, stage_gates,
+        stage_review, stage_submit
     };
     return run_stages(t, stages, sizeof(stages) / sizeof(stages[0]));
 }
@@ -1618,6 +1714,7 @@ int main(int argc, char **argv)
         return 1;
     }
     rc = t.finish ? finish_stages(&t) : tick_stages(&t);
+    claim_release(&t);
     run_free(&t);
     free(t.buf);
     (void)close(lock);
