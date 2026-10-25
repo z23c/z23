@@ -426,6 +426,38 @@ static void dvt_build_next(const char *situation, struct json_value *out)
     json_free(&item);
 }
 
+/* ── request input ───────────────────────────────────────────────────────── */
+
+static const char *dvt_json_nonempty_str(const struct json_value *obj,
+                                         const char *key)
+{
+    const struct json_value *v = json_get(obj, key);
+    if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
+        return json_get_str(v);
+    return NULL;
+}
+
+static void dvt_parse_start_input(const struct zcl_command_request *request,
+                                  const char **cwd, const char **base_ref,
+                                  const struct json_value **files_in)
+{
+    const struct json_value *v;
+    const char *s;
+
+    if (!request || !request->input)
+        return;
+
+    s = dvt_json_nonempty_str(request->input, "cwd");
+    if (s)
+        *cwd = s;
+    s = dvt_json_nonempty_str(request->input, "base");
+    if (s)
+        *base_ref = s;
+    v = json_get(request->input, "files");
+    if (v && v->type == JSON_ARR)
+        *files_in = v;
+}
+
 void zcl_native_handle_dev_agent_start(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
@@ -437,18 +469,7 @@ void zcl_native_handle_dev_agent_start(
     if (!reply)
         return;
 
-    if (request && request->input) {
-        const struct json_value *v;
-        v = json_get(request->input, "cwd");
-        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
-            cwd = json_get_str(v);
-        v = json_get(request->input, "base");
-        if (v && v->type == JSON_STR && json_get_str(v) && json_get_str(v)[0])
-            base_ref = json_get_str(v);
-        v = json_get(request->input, "files");
-        if (v && v->type == JSON_ARR)
-            files_in = v;
-    }
+    dvt_parse_start_input(request, &cwd, &base_ref, &files_in);
 
     (void)json_push_kv_str(&reply->data, "leaf", DVT_LEAF);
 
