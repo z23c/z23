@@ -539,6 +539,11 @@ static bool bg_validation_reverify_heal_authority(
 {
     if (*published || cycle % BG_PUBLISH_RETRY_CYCLES != 0)
         return false;
+    /* Skipped script checks never heal in this loop (only a refold clears
+     * them), so a retry would only repeat the refusal and its operator event
+     * (r1 and r5 carry skips today). */
+    if (atomic_load(&svc->progress.script_verif_skipped_no_undo) != 0)
+        return false;
     struct zcl_result r = bg_validation_publish_with_catchup(
         svc, external_seeded, datadir, params, num_workers);
     *published = r.ok;
