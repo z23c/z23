@@ -35,7 +35,8 @@ you are new; this page is about operating a host, not about building.
   `.timer` append one C8 block-hash parity sample every 30 minutes, and
   `z23-vitals-sample.service` / `.timer` append one vitals row every 5 minutes.
   Each runs the installed `z23-dev` binary (or `devbuild --wait make`, for the
-  receipts) and keeps its evidence in `~/.local/state`.
+  receipts) and keeps its evidence in `~/.local/state`. The daily unit refreshes
+  C5 and C7 only; C1, C2 and C4 are not scheduled (see the unit header for why).
 - **Agents.** `zcl-agent-worker@.service` and `zcl-agent-receive@.service`, the
   instanced pair. The instance name is the box's own agent identity.
 - **Installers.** `setup.sh`, `provision-z23-build-host.sh`,

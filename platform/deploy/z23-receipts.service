@@ -21,6 +21,16 @@ ExecStartPre=%h/bin/devbuild --wait make dev-bin
 # target then does not stop the rest of the unit: the make target itself
 # appends its receipt with the verdict `fail` (Makefile receipt_run), and the
 # other targets must still record theirs. The journal shows which one failed.
+#
+# Scope: this unit refreshes C5 and C7 only. C1, C2 and C4 are deliberately
+# NOT scheduled here:
+#   C1 (ci-install-linger) runs a real `make install` and `systemctl --user`
+#      on the host, a host mutation that needs an explicit owner decision.
+#   C2 (mvp-onion-local) needs Tor network egress and a `make tor-full` build;
+#      on any other host it only records a skip.
+#   C4 (test-shielded-payment) needs the Sapling params in ~/.zcash-params;
+#      without them it only records a skip.
+# Their receipts go stale after 24 h unless run by hand or added here.
 -ExecStart=%h/bin/devbuild --wait make ci-mvp-gates-run
 -ExecStart=%h/bin/devbuild --wait make test-crash-bootstrap-run
 
