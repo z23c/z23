@@ -75,6 +75,89 @@ static bool bootstrap_peer_preferred(const struct p2p_node *candidate,
     return candidate->addr.svc.port == 8033 && current->addr.svc.port != 8033;
 }
 
+struct verified_zclassic23_bootstrap_scan {
+    struct zcl_peer_host_set *verified_hosts;
+    const struct p2p_node **representatives;
+    bool *representative_fast_sync;
+    int64_t *verified_count;
+    int64_t *verified_connection_count;
+    int64_t *duplicate_connections;
+    int64_t *fast_sync_count;
+    int64_t *fast_sync_connection_count;
+    int64_t *self_excluded;
+};
+
+static void bootstrap_store_new_verified_zclassic23_host(
+    struct verified_zclassic23_bootstrap_scan *scan,
+    const struct p2p_node *node, const char *host,
+    bool fast_sync_useful)
+{
+    if (zcl_peer_host_set_add_host(scan->verified_hosts, host)) {
+        (*scan->verified_count)++;
+        if (fast_sync_useful)
+            (*scan->fast_sync_count)++;
+        if (scan->verified_hosts->count > 0 &&
+            scan->verified_hosts->count <= ZCL_PEER_HOST_SET_MAX) {
+            size_t stored = scan->verified_hosts->count - 1;
+
+            scan->representatives[stored] = node;
+            scan->representative_fast_sync[stored] = fast_sync_useful;
+        }
+    }
+}
+
+static void bootstrap_update_duplicate_verified_zclassic23_host(
+    struct verified_zclassic23_bootstrap_scan *scan,
+    const struct p2p_node *node, int host_index,
+    bool fast_sync_useful)
+{
+    (*scan->duplicate_connections)++;
+    if (fast_sync_useful &&
+        !scan->representative_fast_sync[host_index]) {
+        scan->representative_fast_sync[host_index] = true;
+        (*scan->fast_sync_count)++;
+    }
+    if (bootstrap_peer_preferred(node,
+                                 scan->representatives[host_index]))
+        scan->representatives[host_index] = node;
+}
+
+static void bootstrap_consider_verified_zclassic23_node(
+    struct p2p_node *node,
+    struct verified_zclassic23_bootstrap_scan *scan)
+{
+    bool fast_sync_useful;
+    char host[ZCL_PEER_HOST_KEY_MAX];
+    int host_index;
+
+    if (node_is_zclassic23(node) &&
+        msg_version_peer_uses_external_host(node)) {
+        (*scan->self_excluded)++;
+        return;
+    }
+
+    if (!node_is_verified_zclassic23_bootstrap(node))
+        return;
+
+    fast_sync_useful = peer_supports_fast_sync(node->services);
+    (*scan->verified_connection_count)++;
+    if (fast_sync_useful)
+        (*scan->fast_sync_connection_count)++;
+
+    if (!zcl_peer_host_key(node, host, sizeof(host)))
+        return;
+
+    host_index = zcl_peer_host_set_find_host(scan->verified_hosts, host);
+    if (host_index < 0) {
+        bootstrap_store_new_verified_zclassic23_host(scan, node, host,
+                                                     fast_sync_useful);
+        return;
+    }
+
+    bootstrap_update_duplicate_verified_zclassic23_host(
+        scan, node, host_index, fast_sync_useful);
+}
+
 void network_push_verified_zclassic23_bootstrap_peers(
     struct json_value *peers, struct connman *cm)
 {
@@ -95,55 +178,22 @@ void network_push_verified_zclassic23_bootstrap_peers(
     memset(representative_fast_sync, 0, sizeof(representative_fast_sync));
     json_set_array(&arr);
     if (cm) {
+        struct verified_zclassic23_bootstrap_scan scan = {
+            .verified_hosts = &verified_hosts,
+            .representatives = representatives,
+            .representative_fast_sync = representative_fast_sync,
+            .verified_count = &verified_count,
+            .verified_connection_count = &verified_connection_count,
+            .duplicate_connections = &duplicate_connections,
+            .fast_sync_count = &fast_sync_count,
+            .fast_sync_connection_count = &fast_sync_connection_count,
+            .self_excluded = &self_excluded,
+        };
+
         zcl_mutex_lock(&cm->manager.cs_nodes);
         for (size_t i = 0; i < cm->manager.num_nodes; i++) {
-            struct p2p_node *node = cm->manager.nodes[i];
-            bool fast_sync_useful;
-            char host[ZCL_PEER_HOST_KEY_MAX];
-            int host_index;
-
-            if (node_is_zclassic23(node) &&
-                msg_version_peer_uses_external_host(node)) {
-                self_excluded++;
-                continue;
-            }
-
-            if (!node_is_verified_zclassic23_bootstrap(node))
-                continue;
-
-            fast_sync_useful = peer_supports_fast_sync(node->services);
-            verified_connection_count++;
-            if (fast_sync_useful)
-                fast_sync_connection_count++;
-
-            if (!zcl_peer_host_key(node, host, sizeof(host)))
-                continue;
-
-            host_index = zcl_peer_host_set_find_host(&verified_hosts, host);
-            if (host_index < 0) {
-                if (zcl_peer_host_set_add_host(&verified_hosts, host)) {
-                    verified_count++;
-                    if (fast_sync_useful)
-                        fast_sync_count++;
-                    if (verified_hosts.count > 0 &&
-                        verified_hosts.count <= ZCL_PEER_HOST_SET_MAX) {
-                        size_t stored = verified_hosts.count - 1;
-                        representatives[stored] = node;
-                        representative_fast_sync[stored] =
-                            fast_sync_useful;
-                    }
-                }
-                continue;
-            }
-
-            duplicate_connections++;
-            if (fast_sync_useful && !representative_fast_sync[host_index]) {
-                representative_fast_sync[host_index] = true;
-                fast_sync_count++;
-            }
-            if (bootstrap_peer_preferred(node,
-                                         representatives[host_index]))
-                representatives[host_index] = node;
+            bootstrap_consider_verified_zclassic23_node(
+                cm->manager.nodes[i], &scan);
         }
 
         for (size_t i = 0; i < verified_hosts.count &&
