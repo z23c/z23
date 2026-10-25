@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creeton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Name the physical authority room that owns one source path. */
 
 #include "command/native_command.h"
