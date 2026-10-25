@@ -52,6 +52,45 @@ static void mk_id(uint8_t out[32], uint8_t seed)
         out[i] = (uint8_t)(seed + i * 7 + 1);
 }
 
+/* Feed `msg1` to responder `r`: true iff the wire reply is exactly msg2-sized
+ * and no plaintext surfaced. */
+static bool exchange_msg1_for_msg2(struct noise_transport *r, const uint8_t *msg1,
+                                   size_t msg1_len, uint8_t **w2, size_t *w2l)
+{
+    uint8_t *p = NULL;
+    size_t pl = 0;
+    bool ok = noise_transport_feed(r, msg1, msg1_len, w2, w2l, &p, &pl) &&
+              *w2l == HS_MSG2_LEN && pl == 0;
+    free(p);
+    return ok;
+}
+
+/* Feed `w2` to initiator `i`: true iff the wire reply is exactly msg3-sized,
+ * no plaintext surfaced and `i` is ESTABLISHED. */
+static bool exchange_msg2_for_msg3(struct noise_transport *i, const uint8_t *w2,
+                                   size_t w2l, uint8_t **w3, size_t *w3l)
+{
+    uint8_t *p = NULL;
+    size_t pl = 0;
+    bool ok = noise_transport_feed(i, w2, w2l, w3, w3l, &p, &pl) &&
+              *w3l == HS_MSG3_LEN && pl == 0 && i->state == NOISE_ESTABLISHED;
+    free(p);
+    return ok;
+}
+
+/* Feed `w3` to responder `r`: true iff no wire reply or plaintext surfaces and
+ * `r` is ESTABLISHED. */
+static bool consume_msg3(struct noise_transport *r, const uint8_t *w3, size_t w3l,
+                         uint8_t **w1, size_t *w1l)
+{
+    uint8_t *p = NULL;
+    size_t pl = 0;
+    bool ok = noise_transport_feed(r, w3, w3l, w1, w1l, &p, &pl) &&
+              *w1l == 0 && pl == 0 && r->state == NOISE_ESTABLISHED;
+    free(p);
+    return ok;
+}
+
 /* Run the full XX handshake, leaving both transports ESTABLISHED. Returns true
  * on success; sets *ini and *res (caller frees). */
 static bool run_handshake(struct noise_transport **ini, struct noise_transport **res)
@@ -67,35 +106,27 @@ static bool run_handshake(struct noise_transport **ini, struct noise_transport *
     struct noise_transport *r =
         noise_transport_begin(false, rpriv, TEST_MAGIC, NULL, NULL);
     bool ok = false;
-    uint8_t *w1 = NULL, *w2 = NULL, *w3 = NULL, *p = NULL;
-    size_t w1l = 0, w2l = 0, w3l = 0, pl = 0;
+    uint8_t *w1 = NULL, *w2 = NULL, *w3 = NULL;
+    size_t w1l = 0, w2l = 0, w3l = 0;
 
     if (!i || !r || !msg1 || msg1_len != HS_MSG1_LEN)
         goto done;
 
     /* responder consumes msg1 -> emits msg2 */
-    if (!noise_transport_feed(r, msg1, msg1_len, &w2, &w2l, &p, &pl))
+    if (!exchange_msg1_for_msg2(r, msg1, msg1_len, &w2, &w2l))
         goto done;
-    if (w2l != HS_MSG2_LEN || pl != 0)
-        goto done;
-    free(p); p = NULL; pl = 0;
 
     /* initiator consumes msg2 -> emits msg3, becomes ESTABLISHED */
-    if (!noise_transport_feed(i, w2, w2l, &w3, &w3l, &p, &pl))
+    if (!exchange_msg2_for_msg3(i, w2, w2l, &w3, &w3l))
         goto done;
-    if (w3l != HS_MSG3_LEN || pl != 0 || i->state != NOISE_ESTABLISHED)
-        goto done;
-    free(p); p = NULL; pl = 0;
 
     /* responder consumes msg3, becomes ESTABLISHED */
-    if (!noise_transport_feed(r, w3, w3l, &w1, &w1l, &p, &pl))
-        goto done;
-    if (w1l != 0 || pl != 0 || r->state != NOISE_ESTABLISHED)
+    if (!consume_msg3(r, w3, w3l, &w1, &w1l))
         goto done;
 
     ok = true;
 done:
-    free(msg1); free(w1); free(w2); free(w3); free(p);
+    free(msg1); free(w1); free(w2); free(w3);
     if (ok) { *ini = i; *res = r; }
     else { noise_transport_free(i); noise_transport_free(r); }
     return ok;
