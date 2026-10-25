@@ -147,6 +147,130 @@ static sqlite3 *aco_seed(int tip, int n_above)
     return db;
 }
 
+/* ── Case drivers. Each drives one scenario end to end and returns
+ * the number of failed assertions it recorded, or -1 when its seed
+ * datadir cannot be opened — test_atomic_commit_ordering maps that
+ * back to its original early returns. ───────────────────────────── */
+
+/* ── Case 1: auto-heal restores the invariant ─────────────────
+ * Tip committed at 1000; 3 UTXO rows orphaned at 1001 (the crash
+ * landed between the UTXO inserts and the durable tip/block_index
+ * write). The boot-time seam must delete exactly those rows. */
+static int aco_case1_auto_heal_restores_invariant(void)
+{
+    int failures = 0;
+    const int tip = 1000;
+    const int n_above = 3;
+    sqlite3 *db = aco_seed(tip, n_above);
+    if (!db) {
+        printf("  FAIL (case1: seed open failed)\n");
+        return -1;
+    }
+
+    int before = aco_count_above(db, tip);
+    if (before != n_above) {
+        printf("  FAIL (case1 setup: expected %d above-tip rows, "
+               "got %d)\n", n_above, before);
+        failures++;
+    }
+
+    /* Bounded auto-heal mode — the exact call the live boot path
+     * makes (max_rows >= overshoot, overshoot confined to tip+1). */
+    int deleted = coins_rewind_above_tip(db, tip, /*max_rows*/32);
+    if (deleted != n_above) {
+        printf("  FAIL (case1: coins_rewind_above_tip returned %d, "
+               "expected %d deleted)\n", deleted, n_above);
+        failures++;
+    }
+
+    int after = aco_count_above(db, tip);
+    if (after != 0) {
+        printf("  FAIL (case1: %d UTXO row(s) STILL above committed "
+               "tip after auto-heal — ordering invariant broken)\n",
+               after);
+        failures++;
+    }
+
+    int maxh = aco_max_height(db);
+    if (maxh > tip) {
+        printf("  FAIL (case1: MAX(utxos.height)=%d exceeds committed "
+               "tip=%d — tip monotonicity violated)\n", maxh, tip);
+        failures++;
+    }
+
+    if (!failures)
+        printf("  case1 OK: %d orphaned rows pruned; "
+               "0 above committed tip=%d, max_height=%d\n",
+               deleted, tip, maxh);
+    sqlite3_close(db);
+    return failures;
+}
+
+/* ── Case 2: bounded guard REFUSES a >+1 overshoot ─────────────
+ * Rows above tip live at tip+2, not tip+1. That is NOT the
+ * single-block crash-mid-flush shape, so the bounded seam must
+ * refuse (return -1) and leave the rows untouched for an operator
+ * — it must never blindly truncate a deeper tear. */
+static int aco_case2_guard_refuses_deeper_tear(void)
+{
+    int failures = 0;
+    const int tip = 500;
+    sqlite3 *db = aco_seed(tip, /*n_above at tip+1*/0);
+    if (!db) {
+        printf("  FAIL (case2: seed open failed)\n");
+        return -1;
+    }
+    /* Plant the overshoot two blocks above tip. */
+    aco_insert_utxo(db, tip + 2, /*tag*/7);
+
+    int rc = coins_rewind_above_tip(db, tip, /*max_rows*/32);
+    if (rc != -1) {
+        printf("  FAIL (case2: expected guard refusal (-1) for a "
+               "tip+2 overshoot, got %d)\n", rc);
+        failures++;
+    }
+    int still = aco_count_above(db, tip);
+    if (still != 1) {
+        printf("  FAIL (case2: guard altered rows on refusal "
+               "(%d above tip, expected the 1 planted row "
+               "untouched))\n", still);
+        failures++;
+    } else {
+        printf("  case2 OK: bounded guard refused tip+2 overshoot, "
+               "left row untouched (no blind truncation)\n");
+    }
+    sqlite3_close(db);
+    return failures;
+}
+
+/* ── Case 3: no-op when already consistent ────────────────────
+ * Committed tip with NO above-tip rows: the seam reports 0 work
+ * and changes nothing — the steady-state at-tip case. */
+static int aco_case3_noop_when_already_consistent(void)
+{
+    int failures = 0;
+    const int tip = 250;
+    sqlite3 *db = aco_seed(tip, /*n_above*/0);
+    if (!db) {
+        printf("  FAIL (case3: seed open failed)\n");
+        return -1;
+    }
+    int rc = coins_rewind_above_tip(db, tip, /*max_rows*/32);
+    if (rc != 0) {
+        printf("  FAIL (case3: expected 0 (no work) on a consistent "
+               "datadir, got %d)\n", rc);
+        failures++;
+    }
+    if (aco_max_height(db) != tip) {
+        printf("  FAIL (case3: no-op altered max height)\n");
+        failures++;
+    } else {
+        printf("  case3 OK: consistent at-tip datadir → no-op\n");
+    }
+    sqlite3_close(db);
+    return failures;
+}
+
 int test_atomic_commit_ordering(void)
 {
     int failures = 0;
@@ -155,115 +279,20 @@ int test_atomic_commit_ordering(void)
 
     /* In-process: no fork, no signals, no params, no external binary. */
 
-    /* ── Case 1: auto-heal restores the invariant ─────────────────
-     * Tip committed at 1000; 3 UTXO rows orphaned at 1001 (the crash
-     * landed between the UTXO inserts and the durable tip/block_index
-     * write). The boot-time seam must delete exactly those rows. */
-    {
-        const int tip = 1000;
-        const int n_above = 3;
-        sqlite3 *db = aco_seed(tip, n_above);
-        if (!db) {
-            printf("  FAIL (case1: seed open failed)\n");
-            return 1;
-        }
+    int r = aco_case1_auto_heal_restores_invariant();
+    if (r < 0)
+        return 1;
+    failures += r;
 
-        int before = aco_count_above(db, tip);
-        if (before != n_above) {
-            printf("  FAIL (case1 setup: expected %d above-tip rows, "
-                   "got %d)\n", n_above, before);
-            failures++;
-        }
+    r = aco_case2_guard_refuses_deeper_tear();
+    if (r < 0)
+        return failures ? failures : 1;
+    failures += r;
 
-        /* Bounded auto-heal mode — the exact call the live boot path
-         * makes (max_rows >= overshoot, overshoot confined to tip+1). */
-        int deleted = coins_rewind_above_tip(db, tip, /*max_rows*/32);
-        if (deleted != n_above) {
-            printf("  FAIL (case1: coins_rewind_above_tip returned %d, "
-                   "expected %d deleted)\n", deleted, n_above);
-            failures++;
-        }
-
-        int after = aco_count_above(db, tip);
-        if (after != 0) {
-            printf("  FAIL (case1: %d UTXO row(s) STILL above committed "
-                   "tip after auto-heal — ordering invariant broken)\n",
-                   after);
-            failures++;
-        }
-
-        int maxh = aco_max_height(db);
-        if (maxh > tip) {
-            printf("  FAIL (case1: MAX(utxos.height)=%d exceeds committed "
-                   "tip=%d — tip monotonicity violated)\n", maxh, tip);
-            failures++;
-        }
-
-        if (!failures)
-            printf("  case1 OK: %d orphaned rows pruned; "
-                   "0 above committed tip=%d, max_height=%d\n",
-                   deleted, tip, maxh);
-        sqlite3_close(db);
-    }
-
-    /* ── Case 2: bounded guard REFUSES a >+1 overshoot ─────────────
-     * Rows above tip live at tip+2, not tip+1. That is NOT the
-     * single-block crash-mid-flush shape, so the bounded seam must
-     * refuse (return -1) and leave the rows untouched for an operator
-     * — it must never blindly truncate a deeper tear. */
-    {
-        const int tip = 500;
-        sqlite3 *db = aco_seed(tip, /*n_above at tip+1*/0);
-        if (!db) {
-            printf("  FAIL (case2: seed open failed)\n");
-            return failures ? failures : 1;
-        }
-        /* Plant the overshoot two blocks above tip. */
-        aco_insert_utxo(db, tip + 2, /*tag*/7);
-
-        int rc = coins_rewind_above_tip(db, tip, /*max_rows*/32);
-        if (rc != -1) {
-            printf("  FAIL (case2: expected guard refusal (-1) for a "
-                   "tip+2 overshoot, got %d)\n", rc);
-            failures++;
-        }
-        int still = aco_count_above(db, tip);
-        if (still != 1) {
-            printf("  FAIL (case2: guard altered rows on refusal "
-                   "(%d above tip, expected the 1 planted row "
-                   "untouched))\n", still);
-            failures++;
-        } else {
-            printf("  case2 OK: bounded guard refused tip+2 overshoot, "
-                   "left row untouched (no blind truncation)\n");
-        }
-        sqlite3_close(db);
-    }
-
-    /* ── Case 3: no-op when already consistent ────────────────────
-     * Committed tip with NO above-tip rows: the seam reports 0 work
-     * and changes nothing — the steady-state at-tip case. */
-    {
-        const int tip = 250;
-        sqlite3 *db = aco_seed(tip, /*n_above*/0);
-        if (!db) {
-            printf("  FAIL (case3: seed open failed)\n");
-            return failures ? failures : 1;
-        }
-        int rc = coins_rewind_above_tip(db, tip, /*max_rows*/32);
-        if (rc != 0) {
-            printf("  FAIL (case3: expected 0 (no work) on a consistent "
-                   "datadir, got %d)\n", rc);
-            failures++;
-        }
-        if (aco_max_height(db) != tip) {
-            printf("  FAIL (case3: no-op altered max height)\n");
-            failures++;
-        } else {
-            printf("  case3 OK: consistent at-tip datadir → no-op\n");
-        }
-        sqlite3_close(db);
-    }
+    r = aco_case3_noop_when_already_consistent();
+    if (r < 0)
+        return failures ? failures : 1;
+    failures += r;
 
     if (!failures)
         printf("atomic_commit_ordering: OK "
