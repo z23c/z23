@@ -133,6 +133,65 @@ static long wpl_slurp(const char *path, char *buf, size_t cap)
     return (long)n;
 }
 
+/* ── predicates over a slurped capture ───────────────────────────────
+ * wpl_slurp keeps "I could not look" (-1) and "it was empty" (0) apart;
+ * each predicate below takes the exact n-guard its call site always had. */
+
+/* Readable AND non-empty, and mentions `needle`. */
+static bool wpl_nonempty_text_mentions(const char *text, long n,
+                                       const char *needle)
+{
+    return n > 0 && strstr(text, needle) != NULL;
+}
+
+/* Readable AND non-empty, and does not mention `needle`. */
+static bool wpl_nonempty_text_omits(const char *text, long n,
+                                    const char *needle)
+{
+    return n > 0 && strstr(text, needle) == NULL;
+}
+
+/* Readable (possibly empty), and does not mention `needle`. */
+static bool wpl_read_text_omits(const char *text, long n, const char *needle)
+{
+    return n >= 0 && strstr(text, needle) == NULL;
+}
+
+/* ── fixture helpers shared by the creation cases ────────────────────── */
+
+/* Opens the throwaway <dir>/node.db a creation case runs against. */
+static bool wpl_open_fixture_node_db(const char *dir, struct node_db *ndb)
+{
+    char db_path[1400];
+    snprintf(db_path, sizeof(db_path), "%s/node.db", dir);
+    memset(ndb, 0, sizeof(*ndb));
+    return node_db_open(ndb, db_path) && ndb->open;
+}
+
+/* Both halves of "this fixture has never seen a wallet": no keys in RAM,
+ * no wallet_keys rows on disk. */
+static bool wpl_fixture_has_no_wallet(struct wallet *w, struct node_db *ndb)
+{
+    return w->keystore.num_keys == 0 && db_wallet_key_count(ndb) == 0;
+}
+
+/* The one call every creation case makes: stdout and stderr redirected
+ * into a pair of files, one shot at boot_wallet_create_new, then the fd
+ * restore. Returns whether the capture harness went in; *created is
+ * written only when the call really ran. */
+static bool wpl_run_create_with_captured_stdio(
+    const char *dir, const char *tag, struct wallet *w,
+    struct wallet_sqlite *ws, struct node_db *ndb,
+    enum wallet_boot_wallet_action act, enum zcl_operator_lane lane,
+    struct wpl_capture *cap, bool *created)
+{
+    bool began = wpl_capture_begin(cap, dir, tag);
+    if (began)
+        *created = boot_wallet_create_new(w, ws, ndb, act, lane);
+    wpl_capture_end(cap);
+    return began;
+}
+
 /* ── the cases ─────────────────────────────────────────────────────── */
 
 static int t_terminal_probe_tells_the_truth(const char *dir)
@@ -215,12 +274,8 @@ static int t_creation_refuses_and_leaves_nothing(const char *dir)
 {
     int failures = 0;
 
-    char db_path[1200];
-    snprintf(db_path, sizeof(db_path), "%s/node.db", dir);
-
     struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    bool db_ok = node_db_open(&ndb, db_path) && ndb.open;
+    bool db_ok = wpl_open_fixture_node_db(dir, &ndb);
     WPL_CHECK("fixture node.db opened", db_ok);
     if (!db_ok)
         return failures;
@@ -243,22 +298,19 @@ static int t_creation_refuses_and_leaves_nothing(const char *dir)
     wallet_init(w);
 
     WPL_CHECK("fixture starts with an empty wallet",
-              w->keystore.num_keys == 0 && db_wallet_key_count(&ndb) == 0);
+              wpl_fixture_has_no_wallet(w, &ndb));
 
     /* THE CALL, with stdout pointed at a file — a node.log by any other
      * name. */
     struct wpl_capture cap;
-    bool began = wpl_capture_begin(&cap, dir, "create");
     bool created = true;
-    if (began)
-        /* CANONICAL lane, -allow-plaintext-wallet given: an explicit
-         * at-rest opt-in is NOT a declaration that this wallet is
-         * disposable, so this is still somebody's spendable wallet and
-         * still refuses. */
-        created = boot_wallet_create_new(w, &ws, &ndb,
-                                         WALLET_BOOT_CREATE_PLAINTEXT,
-                                         ZCL_OPERATOR_LANE_CANONICAL);
-    wpl_capture_end(&cap);
+    /* CANONICAL lane, -allow-plaintext-wallet given: an explicit
+     * at-rest opt-in is NOT a declaration that this wallet is
+     * disposable, so this is still somebody's spendable wallet and
+     * still refuses. */
+    bool began = wpl_run_create_with_captured_stdio(
+        dir, "create", w, &ws, &ndb, WALLET_BOOT_CREATE_PLAINTEXT,
+        ZCL_OPERATOR_LANE_CANONICAL, &cap, &created);
     WPL_CHECK("capture harness installed for the creation call", began);
 
     WPL_CHECK("creating a wallet is REFUSED when stdout is not a terminal",
@@ -277,18 +329,19 @@ static int t_creation_refuses_and_leaves_nothing(const char *dir)
     WPL_CHECK("NOTHING at all was written to the redirected stdout",
               n_out == 0);
     WPL_CHECK("no recovery phrase reached the redirected stdout",
-              n_out >= 0 && strstr(out, WPL_PHRASE) == NULL &&
-              strstr(out, "WRITE THESE 12 WORDS DOWN") == NULL);
+              wpl_read_text_omits(out, n_out, WPL_PHRASE) &&
+              wpl_read_text_omits(out, n_out, "WRITE THESE 12 WORDS DOWN"));
 
     /* Loud, and in plain English, on the channel a person still sees. */
     WPL_CHECK("the refusal says the wallet was not created",
-              n_err > 0 && strstr(err, "WALLET NOT CREATED") != NULL);
+              wpl_nonempty_text_mentions(err, n_err, "WALLET NOT CREATED"));
     WPL_CHECK("the refusal says why — this output is not a terminal",
-              n_err > 0 && strstr(err, "NOT going to a terminal") != NULL);
+              wpl_nonempty_text_mentions(err, n_err,
+                                         "NOT going to a terminal"));
     WPL_CHECK("the refusal says what to do about it",
-              n_err > 0 && strstr(err, "from a terminal") != NULL);
+              wpl_nonempty_text_mentions(err, n_err, "from a terminal"));
     WPL_CHECK("the refusal itself carries no phrase",
-              n_err >= 0 && strstr(err, WPL_PHRASE) == NULL);
+              wpl_read_text_omits(err, n_err, WPL_PHRASE));
 
     /* NO HALF-MADE WALLET. This is the half that stops a user being left
      * with keys whose only backup they were never shown. */
@@ -432,6 +485,64 @@ static int t_refusal_is_scoped_to_a_spendable_wallet(void)
     return failures;
 }
 
+/* The pty lane for the case below: posix_openpt/grantpt/ptsname and fork
+ * exist only off Windows, so these three are guarded the same way the
+ * case itself is. */
+#if !defined(_WIN32)
+/* Opens one pty master/slave pair. On any failure everything opened so
+ * far is closed and false is returned. */
+static bool wpl_open_pty_pair(int *out_master, int *out_slave)
+{
+    int master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0)
+        return false;
+    if (grantpt(master) != 0 || unlockpt(master) != 0) {
+        close(master);
+        return false;
+    }
+    const char *slave_path = ptsname(master);
+    int slave = slave_path ? open(slave_path, O_RDWR | O_NOCTTY) : -1;
+    if (slave < 0) {
+        close(master);
+        return false;
+    }
+    *out_master = master;
+    *out_slave = slave;
+    return true;
+}
+
+/* The child half of the pty print; never returns. */
+static void wpl_child_print_phrase_on_slave(int slave, int master)
+{
+    /* The child IS the "person watching stdout" case. */
+    if (dup2(slave, STDOUT_FILENO) < 0)
+        _exit(2);
+    close(slave);
+    close(master);
+    boot_wallet_show_recovery_phrase_once(WPL_PHRASE);
+    fflush(stdout);
+    _exit(0);
+}
+
+/* The parent half: drains everything the child wrote into `seen`
+ * (NUL-terminated) and reaps it; true when the child exited 0. */
+static bool wpl_drain_master_and_reap(int master, pid_t pid, char *seen,
+                                      size_t seen_cap)
+{
+    size_t used = 0;
+    while (used < seen_cap - 1) {
+        ssize_t r = read(master, seen + used, seen_cap - 1 - used);
+        if (r <= 0)
+            break;      /* EIO once the child's slave fd closes */
+        used += (size_t)r;
+    }
+    seen[used] = '\0';
+    int st = 0;
+    return waitpid(pid, &st, 0) == pid && WIFEXITED(st) &&
+           WEXITSTATUS(st) == 0;
+}
+#endif
+
 /* ── THE OTHER HALF: a real terminal DOES get the words, and the warning ──
  *
  * Every assertion above is a negative — nothing printed, nothing leaked. Taken
@@ -466,43 +577,20 @@ static int t_a_real_terminal_gets_the_words_and_the_warning(void)
     seen[0] = '\0';
     bool ran = false;
 
-    int master = posix_openpt(O_RDWR | O_NOCTTY);
-    if (master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0) {
-        const char *slave_path = ptsname(master);
-        int slave = slave_path ? open(slave_path, O_RDWR | O_NOCTTY) : -1;
-        if (slave >= 0) {
-            fflush(stdout);
-            fflush(stderr);
-            pid_t pid = fork();
-            if (pid == 0) {
-                /* The child IS the "person watching stdout" case. */
-                if (dup2(slave, STDOUT_FILENO) < 0)
-                    _exit(2);
-                close(slave);
-                close(master);
-                boot_wallet_show_recovery_phrase_once(WPL_PHRASE);
-                fflush(stdout);
-                _exit(0);
-            }
-            close(slave);   /* the child holds the only slave fd now */
-            if (pid > 0) {
-                size_t used = 0;
-                while (used < sizeof(seen) - 1) {
-                    ssize_t r = read(master, seen + used,
-                                     sizeof(seen) - 1 - used);
-                    if (r <= 0)
-                        break;      /* EIO once the child's slave fd closes */
-                    used += (size_t)r;
-                }
-                seen[used] = '\0';
-                int st = 0;
-                ran = waitpid(pid, &st, 0) == pid && WIFEXITED(st) &&
-                      WEXITSTATUS(st) == 0;
-            }
-        }
-    }
-    if (master >= 0)
+    int master = -1;
+    int slave = -1;
+    if (wpl_open_pty_pair(&master, &slave)) {
+        fflush(stdout);
+        fflush(stderr);
+        pid_t pid = fork();
+        if (pid == 0)
+            wpl_child_print_phrase_on_slave(slave, master);
+        close(slave);   /* the child holds the only slave fd now */
+        if (pid > 0)
+            ran = wpl_drain_master_and_reap(master, pid, seen,
+                                            sizeof(seen));
         close(master);
+    }
 
     /* Anti-vacuous: without a pty and a clean child exit the assertions below
      * would pass over an empty capture. */
@@ -625,13 +713,15 @@ static int t_canonical_service_first_boot_creates_a_wallet(const char *dir)
     long n_unit = wpl_slurp("platform/deploy/z23-node.service", unit, sizeof(unit));
     WPL_CHECK("the shipped unit file was readable", n_unit > 0);
     WPL_CHECK("the shipped unit declares the CANONICAL operator lane",
-              n_unit > 0 && strstr(unit, "-operator-lane=canonical") != NULL);
+              wpl_nonempty_text_mentions(unit, n_unit,
+                                         "-operator-lane=canonical"));
     WPL_CHECK("the shipped unit restarts always (so a refusal is a crash "
               "loop, not a one-off)",
-              n_unit > 0 && strstr(unit, "Restart=always") != NULL);
+              wpl_nonempty_text_mentions(unit, n_unit, "Restart=always"));
     WPL_CHECK("the shipped unit does NOT need -wallet-no-phrase-backup to "
               "come up",
-              n_unit > 0 && strstr(unit, "wallet-no-phrase-backup") == NULL);
+              wpl_nonempty_text_omits(unit, n_unit,
+                                      "wallet-no-phrase-backup"));
 
     /* 2. A passphrase, on the canonical lane, must reach a CREATE action —
      *    boot.c only calls the wallet creator when the decision is not
@@ -658,12 +748,9 @@ static int t_canonical_service_first_boot_creates_a_wallet(const char *dir)
     char sub[1200];
     snprintf(sub, sizeof(sub), "%s/canonical", dir);
     mkdir(sub, 0700);
-    char db_path[1400];
-    snprintf(db_path, sizeof(db_path), "%s/node.db", sub);
 
     struct node_db ndb;
-    memset(&ndb, 0, sizeof(ndb));
-    bool db_ok = node_db_open(&ndb, db_path) && ndb.open;
+    bool db_ok = wpl_open_fixture_node_db(sub, &ndb);
     WPL_CHECK("canonical fixture node.db opened", db_ok);
     if (!db_ok)
         goto restore_env;
@@ -682,15 +769,13 @@ static int t_canonical_service_first_boot_creates_a_wallet(const char *dir)
     }
     wallet_init(w);
     WPL_CHECK("the fixture datadir starts with no wallet at all",
-              w->keystore.num_keys == 0 && db_wallet_key_count(&ndb) == 0);
+              wpl_fixture_has_no_wallet(w, &ndb));
 
     struct wpl_capture cap;
-    bool began = wpl_capture_begin(&cap, dir, "canonical");
     bool created = false;
-    if (began)
-        created = boot_wallet_create_new(w, &ws, &ndb, act,
-                                         ZCL_OPERATOR_LANE_CANONICAL);
-    wpl_capture_end(&cap);
+    bool began = wpl_run_create_with_captured_stdio(
+        dir, "canonical", w, &ws, &ndb, act, ZCL_OPERATOR_LANE_CANONICAL,
+        &cap, &created);
     WPL_CHECK("capture harness installed for the canonical first boot",
               began);
 
@@ -710,18 +795,19 @@ static int t_canonical_service_first_boot_creates_a_wallet(const char *dir)
     /* The security property, unchanged: no phrase was drawn, so there is
      * nothing in the capture and no seed row on disk. */
     WPL_CHECK("no phrase block reached the redirected stdout",
-              n_out >= 0 && strstr(out, "WRITE THESE 12 WORDS DOWN") == NULL);
+              wpl_read_text_omits(out, n_out, "WRITE THESE 12 WORDS DOWN"));
     WPL_CHECK("no recovery phrase was drawn at all (no wallet_seed row)",
               !wallet_sqlite_read_sapling_seed(&ws, (uint8_t[32]){0}));
     WPL_CHECK("the operator is told, loudly, that this wallet has no "
               "written backup",
-              n_err > 0 && strstr(err, "NO RECOVERY PHRASE") != NULL);
+              wpl_nonempty_text_mentions(err, n_err, "NO RECOVERY PHRASE"));
     WPL_CHECK("and is told which decision let it through",
-              n_err > 0 && strstr(err, "ZCL_WALLET_PASSPHRASE") != NULL);
+              wpl_nonempty_text_mentions(err, n_err, "ZCL_WALLET_PASSPHRASE"));
     WPL_CHECK("and is told how to get a wallet that HAS twelve words",
-              n_err > 0 && strstr(err, "before any coins arrive") != NULL);
+              wpl_nonempty_text_mentions(err, n_err,
+                                         "before any coins arrive"));
     WPL_CHECK("and the notice itself carries no phrase",
-              n_err >= 0 && strstr(err, WPL_PHRASE) == NULL);
+              wpl_read_text_omits(err, n_err, WPL_PHRASE));
 
     wallet_free(w);
     free(w);
