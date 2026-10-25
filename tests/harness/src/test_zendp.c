@@ -166,34 +166,73 @@ static bool ze_eq(const struct zendp *a, const struct zendp *b)
 
 /* ── 1 + 2 + 3: bounds, round-trip, pedantic negatives ─────────────── */
 
+/* The frozen wire-size claims of zid/zendp.h, as one predicate. */
+static bool ze_body_wire_bounds_match(void)
+{
+    return ZENDP_BODY_MIN == 4 + 1 + 8 + 4 + 8 &&
+           ZENDP_ONION_WIRE == 62 + 2 && ZENDP_IPV4_WIRE == 4 + 2 &&
+           ZENDP_IPV6_WIRE == 16 + 2 &&
+           ZENDP_BODY_MAX == 25 + 64 + 6 + 18 &&
+           ZENDP_BODY_MAX <= ZID_BODY_MAX;
+}
+
+/* 51 header bytes + body + signature: past the OP_RETURN relay cap,
+ * inside one blob chunk. */
+static bool ze_signed_record_is_content(void)
+{
+    return 51 + ZENDP_BODY_MAX + 64 == 228 && 228 > 223 &&
+           228 <= (int)VCS_BLOB_MAX_BYTES;
+}
+
+/* Both hand-written hostnames are exactly the v3 wire length. */
+static bool ze_golden_hostnames_have_wire_len(void)
+{
+    return strlen(ZE_ONION) == (size_t)ZENDP_ONION_LEN &&
+           strlen(ZE_ONION_B) == (size_t)ZENDP_ONION_LEN;
+}
+
+/* One flags combination round-trips: the length claim, the decode and
+ * the field-for-field compare. */
+static bool ze_roundtrip_holds(const struct zendp *in, struct zendp *out,
+                               uint8_t *body, size_t n, uint8_t flags)
+{
+    return n == zendp_body_len(flags) &&
+           zendp_decode_body(out, body, (uint16_t)n) &&
+           ze_eq(in, out);
+}
+
+/* Every entry point refuses a NULL pointer in each position. */
+static bool ze_null_args_are_refused(uint8_t *body, size_t size,
+                                     struct zendp *ep, struct zendp *dec,
+                                     size_t full)
+{
+    return zendp_encode_body(NULL, size, ep) == 0 &&
+           zendp_encode_body(body, size, NULL) == 0 &&
+           !zendp_decode_body(NULL, body, (uint16_t)full) &&
+           !zendp_decode_body(dec, NULL, (uint16_t)full) &&
+           !zendp_valid(NULL);
+}
+
 static int ze_case_body_codec(void)
 {
     int failures = 0;
     uint8_t body[ZENDP_BODY_MAX + 8];
 
     ZE_CHECK("body: the bound math matches the frozen wire",
-             ZENDP_BODY_MIN == 4 + 1 + 8 + 4 + 8 &&
-             ZENDP_ONION_WIRE == 62 + 2 && ZENDP_IPV4_WIRE == 4 + 2 &&
-             ZENDP_IPV6_WIRE == 16 + 2 &&
-             ZENDP_BODY_MAX == 25 + 64 + 6 + 18 &&
-             ZENDP_BODY_MAX <= ZID_BODY_MAX);
+             ze_body_wire_bounds_match());
     /* The size claim the header makes: a signed record fits one blob
      * chunk and can never ride an OP_RETURN. */
     ZE_CHECK("body: a signed record is content, never an OP_RETURN",
-             51 + ZENDP_BODY_MAX + 64 == 228 && 228 > 223 &&
-             228 <= (int)VCS_BLOB_MAX_BYTES);
+             ze_signed_record_is_content());
     ZE_CHECK("body: the golden hostname is exactly 62 chars",
-             strlen(ZE_ONION) == (size_t)ZENDP_ONION_LEN &&
-             strlen(ZE_ONION_B) == (size_t)ZENDP_ONION_LEN);
+             ze_golden_hostnames_have_wire_len());
 
     int rt_bad = 0;
     for (uint8_t flags = 1; flags <= ZENDP_FLAGS_KNOWN; flags++) {
         struct zendp in, out;
         ze_make(&in, flags);
         size_t n = zendp_encode_body(body, sizeof(body), &in);
-        bool ok = n == zendp_body_len(flags) &&
-                  zendp_decode_body(&out, body, (uint16_t)n) &&
-                  ze_eq(&in, &out);
+        bool ok = ze_roundtrip_holds(&in, &out, body, n, flags);
         if (!ok) {
             printf("  zendp: body: round-trip at flags=0x%02x... FAIL\n",
                    (unsigned)flags);
@@ -212,11 +251,7 @@ static int ze_case_body_codec(void)
     size_t full = zendp_encode_body(body, sizeof(body), &ep);
 
     ZE_CHECK("negative: NULL args are refused",
-             zendp_encode_body(NULL, sizeof(body), &ep) == 0 &&
-             zendp_encode_body(body, sizeof(body), NULL) == 0 &&
-             !zendp_decode_body(NULL, body, (uint16_t)full) &&
-             !zendp_decode_body(&dec, NULL, (uint16_t)full) &&
-             !zendp_valid(NULL));
+             ze_null_args_are_refused(body, sizeof(body), &ep, &dec, full));
     ZE_CHECK("negative: an undersized encode buffer is refused",
              zendp_encode_body(body, full - 1, &ep) == 0);
 
