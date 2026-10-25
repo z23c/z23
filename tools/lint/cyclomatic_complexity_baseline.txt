@@ -30,7 +30,6 @@ cognition/modules/codeindex/src/codeindex_merkle.c:merkle_file_key_cb:17
 cognition/modules/codeindex/src/codeindex_merkle.c:merkle_leaf_digest:19
 cognition/modules/codeindex/src/codeindex_merkle.c:merkle_run:24
 cognition/modules/codeindex/src/codeindex_merkle.c:merkle_snapshot_decode:28
-cognition/modules/codeindex/src/codeindex_merkle_decode.c:ci_merkle_proof_decode:26
 cognition/modules/codeindex/src/codeindex_search.c:ci_store_search_text:17
 cognition/modules/codeindex/src/codeindex_search.c:codeindex_search_story:28
 cognition/modules/codeindex/src/codeindex_store_read.c:ci_store_meta_get:17
