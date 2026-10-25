@@ -52,6 +52,177 @@
 
 /* wallet-diagnostic audit RPCs: cross-reference UTXO + tx state, no mutations. */
 
+/* Per-address verified balance tracking record. */
+struct walletaudit_addr_bal {
+    char address[128];
+    int64_t verified;
+    int64_t phantom;
+    int v_count;
+    int p_count;
+};
+
+static void walletaudit_resolve_address(const struct tx_out *out,
+    const unsigned char *pk_pfx, size_t pk_pfx_len,
+    const unsigned char *sc_pfx, size_t sc_pfx_len,
+    char *addr, size_t addr_len)
+{
+    addr[0] = '\0';
+    struct tx_destination dest;
+    if (script_extract_destination(&out->script_pub_key, &dest))
+        encode_destination(&dest, pk_pfx, pk_pfx_len,
+                           sc_pfx, sc_pfx_len, addr, addr_len);
+}
+
+static bool walletaudit_chainstate_lookup(struct wallet_rpc_context *ctx,
+    const struct wallet_tx *wtx, uint32_t vout_n,
+    bool *in_chain, int64_t *chain_value)
+{
+    struct coins chain_coins;
+    coins_init(&chain_coins);
+    *in_chain = coins_view_cache_get_coins(ctx->coins_tip,
+        &wtx->tx.hash, &chain_coins);
+    bool available = *in_chain
+        && coins_is_available(&chain_coins, vout_n);
+
+    /* If available, also verify the value matches */
+    *chain_value = 0;
+    if (available && vout_n < chain_coins.num_vout)
+        *chain_value = chain_coins.vout[vout_n].value;
+    coins_free(&chain_coins);
+
+    return available;
+}
+
+static void walletaudit_fill_utxo_entry(struct json_value *entry,
+    const struct wallet_tx *wtx, uint32_t vout_n,
+    const struct tx_out *out, const char *addr, int depth)
+{
+    char txid[65];
+    uint256_get_hex(&wtx->tx.hash, txid);
+
+    json_set_object(entry);
+    json_push_kv_str(entry, "txid", txid);
+    json_push_kv_int(entry, "vout", vout_n);
+    if (addr[0])
+        json_push_kv_str(entry, "address", addr);
+    char amt[32];
+    format_amount(out->value, amt, sizeof(amt));
+    json_push_kv_str(entry, "amount", amt);
+    json_push_kv_int(entry, "confirmations", (int64_t)depth);
+}
+
+static void walletaudit_accumulate_address(
+    struct walletaudit_addr_bal addr_bal[512], size_t *num_addrs,
+    const char *addr, int64_t value, bool available)
+{
+    size_t ai = *num_addrs;
+    for (size_t k = 0; k < *num_addrs; k++) {
+        if (strcmp(addr_bal[k].address, addr) == 0) {
+            ai = k;
+            break;
+        }
+    }
+    if (ai == *num_addrs && *num_addrs < 512) {
+        snprintf(addr_bal[*num_addrs].address,
+                 sizeof(addr_bal[0].address), "%s", addr);
+        addr_bal[*num_addrs].verified = 0;
+        addr_bal[*num_addrs].phantom = 0;
+        addr_bal[*num_addrs].v_count = 0;
+        addr_bal[*num_addrs].p_count = 0;
+        (*num_addrs)++;
+    }
+    if (ai < 512) {
+        if (available) {
+            addr_bal[ai].verified += value;
+            addr_bal[ai].v_count++;
+        } else {
+            addr_bal[ai].phantom += value;
+            addr_bal[ai].p_count++;
+        }
+    }
+}
+
+static void walletaudit_shielded_totals(struct wallet_rpc_context *ctx,
+    int64_t *z_balance, int *z_unspent)
+{
+    if (wallet_ctx_db_ready(ctx)) {
+        *z_balance = db_sapling_note_balance(ctx->node_db);
+        struct db_sapling_note db_notes[256];
+        *z_unspent = db_sapling_note_list_unspent(ctx->node_db,
+                                                  db_notes, 256);
+    }
+}
+
+static void walletaudit_fill_summary(struct wallet_rpc_context *ctx,
+    int64_t verified_balance, int verified_count,
+    int64_t phantom_balance, int phantom_count,
+    int64_t z_balance, int z_unspent, struct json_value *result)
+{
+    char s[32];
+    struct json_value summary = {0};
+    json_set_object(&summary);
+
+    format_amount(verified_balance, s, sizeof(s));
+    json_push_kv_str(&summary, "verified_balance", s);
+    json_push_kv_int(&summary, "verified_utxos", verified_count);
+
+    format_amount(phantom_balance, s, sizeof(s));
+    json_push_kv_str(&summary, "phantom_balance", s);
+    json_push_kv_int(&summary, "phantom_utxos", phantom_count);
+
+    format_amount(verified_balance + phantom_balance, s, sizeof(s));
+    json_push_kv_str(&summary, "wallet_claims", s);
+
+    format_amount(z_balance, s, sizeof(s));
+    json_push_kv_str(&summary, "shielded_balance", s);
+    json_push_kv_int(&summary, "shielded_notes", z_unspent);
+
+    format_amount(verified_balance + z_balance, s, sizeof(s));
+    json_push_kv_str(&summary, "true_total_balance", s);
+
+    format_amount(phantom_balance, s, sizeof(s));
+    json_push_kv_str(&summary, "discrepancy", s);
+
+    int64_t wallet_reports = wallet_get_balance(ctx->wallet);
+    format_amount(wallet_reports, s, sizeof(s));
+    json_push_kv_str(&summary, "getbalance_reports", s);
+
+    if (wallet_ctx_db_ready(ctx)) {
+        int64_t sqlite_balance = db_wallet_utxo_balance(ctx->node_db);
+        format_amount(sqlite_balance, s, sizeof(s));
+        json_push_kv_str(&summary, "sqlite_verified_balance", s);
+    }
+
+    json_push_kv(&result[0], "summary", &summary);
+    json_free(&summary);
+}
+
+static void walletaudit_push_addr_breakdown(
+    const struct walletaudit_addr_bal addr_bal[512], size_t num_addrs,
+    struct json_value *result)
+{
+    char s[32];
+    struct json_value addr_list = {0};
+    json_set_array(&addr_list);
+    for (size_t i = 0; i < num_addrs; i++) {
+        struct json_value a = {0};
+        json_set_object(&a);
+        json_push_kv_str(&a, "address", addr_bal[i].address);
+        format_amount(addr_bal[i].verified, s, sizeof(s));
+        json_push_kv_str(&a, "verified_balance", s);
+        json_push_kv_int(&a, "verified_utxos", addr_bal[i].v_count);
+        if (addr_bal[i].phantom > 0) {
+            format_amount(addr_bal[i].phantom, s, sizeof(s));
+            json_push_kv_str(&a, "phantom_balance", s);
+            json_push_kv_int(&a, "phantom_utxos", addr_bal[i].p_count);
+        }
+        json_push_back(&addr_list, &a);
+        json_free(&a);
+    }
+    json_push_kv(&result[0], "addresses", &addr_list);
+    json_free(&addr_list);
+}
+
 bool rpc_walletaudit(const struct json_value *params, bool help,
                              struct json_value *result)
 {
@@ -104,13 +275,7 @@ bool rpc_walletaudit(const struct json_value *params, bool help,
     json_set_array(&phantom_utxos);
 
     /* Per-address verified balance tracking */
-    struct {
-        char address[128];
-        int64_t verified;
-        int64_t phantom;
-        int v_count;
-        int p_count;
-    } addr_bal[512];
+    struct walletaudit_addr_bal addr_bal[512];
     size_t num_addrs = 0;
 
     for (size_t i = 0; i < num_wallet_coins; i++) {
@@ -120,40 +285,18 @@ bool rpc_walletaudit(const struct json_value *params, bool help,
 
         /* Resolve address */
         char addr[128];
-        addr[0] = '\0';
-        struct tx_destination dest;
-        if (script_extract_destination(&out->script_pub_key, &dest))
-            encode_destination(&dest, pk_pfx, pk_pfx_len,
-                               sc_pfx, sc_pfx_len, addr, sizeof(addr));
+        walletaudit_resolve_address(out, pk_pfx, pk_pfx_len,
+                                    sc_pfx, sc_pfx_len, addr, sizeof(addr));
 
         /* Check chainstate: does this UTXO actually exist? */
-        struct coins chain_coins;
-        coins_init(&chain_coins);
-        bool in_chain = coins_view_cache_get_coins(ctx->coins_tip,
-            &wtx->tx.hash, &chain_coins);
-        bool available = in_chain
-            && coins_is_available(&chain_coins, vout_n);
-
-        /* If available, also verify the value matches */
+        bool in_chain = false;
         int64_t chain_value = 0;
-        if (available && vout_n < chain_coins.num_vout)
-            chain_value = chain_coins.vout[vout_n].value;
-        coins_free(&chain_coins);
-
-        char txid[65];
-        uint256_get_hex(&wtx->tx.hash, txid);
+        bool available = walletaudit_chainstate_lookup(ctx, wtx, vout_n,
+            &in_chain, &chain_value);
 
         struct json_value entry = {0};
-        json_set_object(&entry);
-        json_push_kv_str(&entry, "txid", txid);
-        json_push_kv_int(&entry, "vout", vout_n);
-        if (addr[0])
-            json_push_kv_str(&entry, "address", addr);
-        char amt[32];
-        format_amount(out->value, amt, sizeof(amt));
-        json_push_kv_str(&entry, "amount", amt);
-        json_push_kv_int(&entry, "confirmations",
-                          (int64_t)wallet_coins[i].depth);
+        walletaudit_fill_utxo_entry(&entry, wtx, vout_n, out, addr,
+                                    wallet_coins[i].depth);
 
         if (available) {
             if (chain_value != out->value) {
@@ -177,101 +320,21 @@ bool rpc_walletaudit(const struct json_value *params, bool help,
         json_free(&entry);
 
         /* Accumulate per-address */
-        size_t ai = num_addrs;
-        for (size_t k = 0; k < num_addrs; k++) {
-            if (strcmp(addr_bal[k].address, addr) == 0) {
-                ai = k;
-                break;
-            }
-        }
-        if (ai == num_addrs && num_addrs < 512) {
-            snprintf(addr_bal[num_addrs].address,
-                     sizeof(addr_bal[0].address), "%s", addr);
-            addr_bal[num_addrs].verified = 0;
-            addr_bal[num_addrs].phantom = 0;
-            addr_bal[num_addrs].v_count = 0;
-            addr_bal[num_addrs].p_count = 0;
-            num_addrs++;
-        }
-        if (ai < 512) {
-            if (available) {
-                addr_bal[ai].verified += out->value;
-                addr_bal[ai].v_count++;
-            } else {
-                addr_bal[ai].phantom += out->value;
-                addr_bal[ai].p_count++;
-            }
-        }
+        walletaudit_accumulate_address(addr_bal, &num_addrs, addr,
+                                       out->value, available);
     }
 
     /* Phase 2: Shielded notes (always from SQLite) */
     int64_t z_balance = 0;
     int z_unspent = 0;
-    if (wallet_ctx_db_ready(ctx)) {
-        z_balance = db_sapling_note_balance(ctx->node_db);
-        struct db_sapling_note db_notes[256];
-        z_unspent = db_sapling_note_list_unspent(ctx->node_db, db_notes, 256);
-    }
+    walletaudit_shielded_totals(ctx, &z_balance, &z_unspent);
 
     /* Phase 3: Build summary */
-    char s[32];
-    struct json_value summary = {0};
-    json_set_object(&summary);
-
-    format_amount(verified_balance, s, sizeof(s));
-    json_push_kv_str(&summary, "verified_balance", s);
-    json_push_kv_int(&summary, "verified_utxos", verified_count);
-
-    format_amount(phantom_balance, s, sizeof(s));
-    json_push_kv_str(&summary, "phantom_balance", s);
-    json_push_kv_int(&summary, "phantom_utxos", phantom_count);
-
-    format_amount(verified_balance + phantom_balance, s, sizeof(s));
-    json_push_kv_str(&summary, "wallet_claims", s);
-
-    format_amount(z_balance, s, sizeof(s));
-    json_push_kv_str(&summary, "shielded_balance", s);
-    json_push_kv_int(&summary, "shielded_notes", z_unspent);
-
-    format_amount(verified_balance + z_balance, s, sizeof(s));
-    json_push_kv_str(&summary, "true_total_balance", s);
-
-    format_amount(phantom_balance, s, sizeof(s));
-    json_push_kv_str(&summary, "discrepancy", s);
-
-    int64_t wallet_reports = wallet_get_balance(ctx->wallet);
-    format_amount(wallet_reports, s, sizeof(s));
-    json_push_kv_str(&summary, "getbalance_reports", s);
-
-    if (wallet_ctx_db_ready(ctx)) {
-        int64_t sqlite_balance = db_wallet_utxo_balance(ctx->node_db);
-        format_amount(sqlite_balance, s, sizeof(s));
-        json_push_kv_str(&summary, "sqlite_verified_balance", s);
-    }
-
-    json_push_kv(&result[0], "summary", &summary);
-    json_free(&summary);
+    walletaudit_fill_summary(ctx, verified_balance, verified_count,
+        phantom_balance, phantom_count, z_balance, z_unspent, result);
 
     /* Per-address breakdown */
-    struct json_value addr_list = {0};
-    json_set_array(&addr_list);
-    for (size_t i = 0; i < num_addrs; i++) {
-        struct json_value a = {0};
-        json_set_object(&a);
-        json_push_kv_str(&a, "address", addr_bal[i].address);
-        format_amount(addr_bal[i].verified, s, sizeof(s));
-        json_push_kv_str(&a, "verified_balance", s);
-        json_push_kv_int(&a, "verified_utxos", addr_bal[i].v_count);
-        if (addr_bal[i].phantom > 0) {
-            format_amount(addr_bal[i].phantom, s, sizeof(s));
-            json_push_kv_str(&a, "phantom_balance", s);
-            json_push_kv_int(&a, "phantom_utxos", addr_bal[i].p_count);
-        }
-        json_push_back(&addr_list, &a);
-        json_free(&a);
-    }
-    json_push_kv(&result[0], "addresses", &addr_list);
-    json_free(&addr_list);
+    walletaudit_push_addr_breakdown(addr_bal, num_addrs, result);
 
     /* Verified UTXOs */
     json_push_kv(&result[0], "verified_utxos", &verified_utxos);
