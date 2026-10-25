@@ -27,6 +27,19 @@ static double cd_target_from_bits(uint32_t bits)
     return mant * pow(256.0, (double)(exp - 3));
 }
 
+/* One hex character as 0..15. A character outside [0-9a-fA-F] is 0, so a
+ * malformed digit still fills a zero nibble. */
+static int cd_chainwork_hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    return 0;
+}
+
 /* Decode a hex-encoded little-endian chain_work blob (storage order:
  * byte[0] = least-significant) into a double magnitude. SQLite hex()
  * emits the bytes in storage order, so we accumulate from the most-
@@ -41,12 +54,8 @@ static double cd_chainwork_to_double(const char *hex_le)
     uint8_t bytes[64] = {0};
     for (size_t i = 0; i < nbytes; i++) {
         char hi = hex_le[2 * i], lo = hex_le[2 * i + 1];
-        int h = (hi >= '0' && hi <= '9') ? hi - '0'
-              : (hi >= 'a' && hi <= 'f') ? hi - 'a' + 10
-              : (hi >= 'A' && hi <= 'F') ? hi - 'A' + 10 : 0;
-        int l = (lo >= '0' && lo <= '9') ? lo - '0'
-              : (lo >= 'a' && lo <= 'f') ? lo - 'a' + 10
-              : (lo >= 'A' && lo <= 'F') ? lo - 'A' + 10 : 0;
+        int h = cd_chainwork_hex_nibble(hi);
+        int l = cd_chainwork_hex_nibble(lo);
         bytes[i] = (uint8_t)((h << 4) | l);
     }
 
