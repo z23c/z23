@@ -73,7 +73,6 @@ cognition/modules/ontology/src/ontology_horn_rule.c:horn_atom_valid:22
 cognition/modules/ontology/src/ontology_horn_rule.c:zcl_ontology_horn_rule_v1_validate:22
 cognition/modules/ontology/src/ontology_manifest.c:zcl_ontology_manifest_v1_validate:17
 cognition/modules/ontology/src/ontology_vocabulary.c:vocabulary_equal:26
-cognition/modules/ontology/src/story_graph.c:zcl_story_why_v1_build:21
 cognition/modules/science/src/ecosystem.c:science_ecosystem_collect:19
 cognition/modules/science/src/science_corpus.c:walk_dir:20
 cognition/modules/session/src/agent_audit.c:agent_audit_open:17

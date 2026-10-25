@@ -187,42 +187,57 @@ static size_t story_find_event(const struct zcl_story_graph_v1 *graph,
     return SIZE_MAX;
 }
 
-bool zcl_story_why_v1_build(
-    const struct zcl_story_graph_v1 *graph, const uint8_t target_event_root[32],
-    struct zcl_story_why_v1 *out)
+static bool story_why_start(const struct zcl_story_graph_v1 *graph,
+                            const uint8_t target_event_root[32],
+                            struct zcl_story_why_v1 *out)
 {
     if (!out) return false;
     memset(out, 0, sizeof(*out));
     if (!story_nonzero(target_event_root) ||
         !zcl_story_graph_v1_root(graph, out->story_root))
         return false;
-    memcpy(out->target_event_root, target_event_root, 32);
-    size_t at = story_find_event(graph, target_event_root);
-    if (at == SIZE_MAX) {
-        out->status = ZCL_ONTOLOGY_UNKNOWN;
-        out->target_unknown = true;
-        return true;
-    }
-    uint8_t reverse[ZCL_STORY_MAX_EVENTS][32];
-    uint32_t incomplete = 0, unknown = 0, both = 0, disproved = 0;
+    return true;
+}
+
+static void story_why_record_status(uint8_t status, uint32_t bit,
+                                    uint32_t *incomplete, uint32_t *unknown,
+                                    uint32_t *both, uint32_t *disproved)
+{
+    if (status == ZCL_ONTOLOGY_INCOMPLETE) *incomplete |= bit;
+    else if (status == ZCL_ONTOLOGY_UNKNOWN) *unknown |= bit;
+    else if (status == ZCL_ONTOLOGY_BOTH) *both |= bit;
+    else if (status == ZCL_ONTOLOGY_DISPROVED) *disproved |= bit;
+}
+
+static bool story_why_cycle_seen(uint8_t reverse[ZCL_STORY_MAX_EVENTS][32],
+                                 size_t cause_count,
+                                 const uint8_t event_root[32])
+{
+    for (size_t i = 0; i < cause_count; i++)
+        if (memcmp(reverse[i], event_root, 32) == 0) return true;
+    return false;
+}
+
+static void story_why_walk(const struct zcl_story_graph_v1 *graph, size_t at,
+                           struct zcl_story_why_v1 *out,
+                           uint8_t reverse[ZCL_STORY_MAX_EVENTS][32],
+                           uint32_t *incomplete, uint32_t *unknown,
+                           uint32_t *both, uint32_t *disproved)
+{
     while (true) {
         const struct zcl_story_event_v1 *event = &graph->events[at];
         if (out->cause_count >= ZCL_STORY_MAX_EVENTS) {
             out->cycle_detected = true;
             break;
         }
-        for (size_t i = 0; i < out->cause_count; i++)
-            if (memcmp(reverse[i], event->event_root, 32) == 0) {
-                out->cycle_detected = true;
-                break;
-            }
+        if (story_why_cycle_seen(reverse, out->cause_count,
+                                 event->event_root))
+            out->cycle_detected = true;
         if (out->cycle_detected) break;
         memcpy(reverse[out->cause_count++], event->event_root, 32);
         uint32_t bit = story_kind_bit(event->kind);
-        if (event->status == ZCL_ONTOLOGY_INCOMPLETE) incomplete |= bit;
-        else if (event->status == ZCL_ONTOLOGY_UNKNOWN) unknown |= bit;
-        else if (event->status == ZCL_ONTOLOGY_BOTH) both |= bit;
-        else if (event->status == ZCL_ONTOLOGY_DISPROVED) disproved |= bit;
+        story_why_record_status(event->status, bit, incomplete, unknown,
+                                both, disproved);
         if (!story_nonzero(event->cause_event_root)) break;
         size_t cause = story_find_event(graph, event->cause_event_root);
         if (cause == SIZE_MAX) {
@@ -232,13 +247,44 @@ bool zcl_story_why_v1_build(
         }
         at = cause;
     }
+}
+
+static void story_why_copy_reversed(struct zcl_story_why_v1 *out,
+                                    uint8_t reverse[ZCL_STORY_MAX_EVENTS][32])
+{
     for (size_t i = 0; i < out->cause_count; i++)
         memcpy(out->cause_event_roots[i],
                reverse[out->cause_count - i - 1u], 32);
+}
+
+static void story_why_finish(struct zcl_story_why_v1 *out,
+                             uint32_t incomplete, uint32_t unknown,
+                             uint32_t both, uint32_t disproved)
+{
     uint32_t structural = (out->missing_cause || out->cycle_detected) ? 1u : 0;
     out->status = story_status(structural, incomplete, unknown, both,
                                disproved);
     out->complete = !structural && incomplete == 0 && unknown == 0;
+}
+
+bool zcl_story_why_v1_build(
+    const struct zcl_story_graph_v1 *graph, const uint8_t target_event_root[32],
+    struct zcl_story_why_v1 *out)
+{
+    if (!story_why_start(graph, target_event_root, out)) return false;
+    memcpy(out->target_event_root, target_event_root, 32);
+    size_t at = story_find_event(graph, target_event_root);
+    if (at == SIZE_MAX) {
+        out->status = ZCL_ONTOLOGY_UNKNOWN;
+        out->target_unknown = true;
+        return true;
+    }
+    uint8_t reverse[ZCL_STORY_MAX_EVENTS][32];
+    uint32_t incomplete = 0, unknown = 0, both = 0, disproved = 0;
+    story_why_walk(graph, at, out, reverse, &incomplete, &unknown,
+                   &both, &disproved);
+    story_why_copy_reversed(out, reverse);
+    story_why_finish(out, incomplete, unknown, both, disproved);
     return true;
 }
 
