@@ -282,6 +282,52 @@ static bool zd_replace_body(struct node_db *ndb, const struct zid_domain *next,
     return true;
 }
 
+/* Seeds the replacement record's own fields: name, leaf count, root, and
+ * updated_at — a non-positive caller timestamp falls back to wall time. */
+static void zd_init_next_domain(struct zid_domain *next,
+                                const char *domain_name, size_t n,
+                                const uint8_t root[32], int64_t updated_at)
+{
+    memset(next, 0, sizeof(*next));
+    snprintf(next->domain_name, sizeof(next->domain_name), "%s", domain_name);
+    next->num_leaves = (int64_t)n;
+    memcpy(next->root, root, 32);
+    next->updated_at = updated_at > 0 ? updated_at
+                                      : (int64_t)platform_time_wall_time_t();
+}
+
+/* A caller-supplied key wins; without one the previous batch's key
+ * survives, so a rewrite cannot silently drop ownership. */
+static void zd_set_owner_from_caller_or_prev(struct zid_domain *next,
+                                             const struct zid_domain *prev,
+                                             bool had_prev,
+                                             const uint8_t *owner_pubkey)
+{
+    if (owner_pubkey) {
+        memcpy(next->owner_pubkey, owner_pubkey, 32);
+        next->has_owner = true;
+    } else if (had_prev && prev->has_owner) {
+        memcpy(next->owner_pubkey, prev->owner_pubkey, 32);
+        next->has_owner = true;
+    }
+}
+
+static void zd_carry_forward_anchor(struct zid_domain *next,
+                                    const struct zid_domain *prev,
+                                    bool had_prev, const uint8_t root[32])
+{
+    /* The meaning-change rule: an anchor survives only a same-root
+     * rewrite. A new root leaves the domain visibly un-anchored rather
+     * than wearing the previous batch's txid. */
+    if (had_prev && prev->anchored && memcmp(prev->root, root, 32) == 0) {
+        memcpy(next->anchored_txid, prev->anchored_txid, 32);
+        next->anchored = true;
+        next->anchored_height = prev->anchored_height;
+    } else {
+        next->anchored_height = -1;
+    }
+}
+
 bool zid_domain_replace_leaves(struct node_db *ndb, const char *domain_name,
                                const struct zid_domain_leaf *leaves, size_t n,
                                const uint8_t root[32],
@@ -301,29 +347,9 @@ bool zid_domain_replace_leaves(struct node_db *ndb, const char *domain_name,
     bool had_prev = zid_domain_get(ndb, domain_name, &prev);
 
     struct zid_domain next;
-    memset(&next, 0, sizeof(next));
-    snprintf(next.domain_name, sizeof(next.domain_name), "%s", domain_name);
-    next.num_leaves = (int64_t)n;
-    memcpy(next.root, root, 32);
-    next.updated_at = updated_at > 0 ? updated_at
-                                     : (int64_t)platform_time_wall_time_t();
-    if (owner_pubkey) {
-        memcpy(next.owner_pubkey, owner_pubkey, 32);
-        next.has_owner = true;
-    } else if (had_prev && prev.has_owner) {
-        memcpy(next.owner_pubkey, prev.owner_pubkey, 32);
-        next.has_owner = true;
-    }
-    /* The meaning-change rule: an anchor survives only a same-root
-     * rewrite. A new root leaves the domain visibly un-anchored rather
-     * than wearing the previous batch's txid. */
-    if (had_prev && prev.anchored && memcmp(prev.root, root, 32) == 0) {
-        memcpy(next.anchored_txid, prev.anchored_txid, 32);
-        next.anchored = true;
-        next.anchored_height = prev.anchored_height;
-    } else {
-        next.anchored_height = -1;
-    }
+    zd_init_next_domain(&next, domain_name, n, root, updated_at);
+    zd_set_owner_from_caller_or_prev(&next, &prev, had_prev, owner_pubkey);
+    zd_carry_forward_anchor(&next, &prev, had_prev, root);
 
     if (!node_db_begin(ndb))
         LOG_FAIL(ZID_DOMAIN_LOG,
