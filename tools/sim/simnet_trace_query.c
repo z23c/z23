@@ -43,6 +43,14 @@ struct stq_filter {
     int64_t seq;
 };
 
+/* Outcome of stq_parse_arg on one argv element. Helpers never log: on any
+ * non-OK result main prints the matching diagnostic itself. */
+enum stq_arg_result {
+    STQ_ARG_OK,
+    STQ_ARG_BAD,        /* unknown flag, or unparsable --node/--seq value */
+    STQ_ARG_EVENT_LONG, /* --event value does not fit struct stq_filter */
+};
+
 static void usage(const char *argv0)
 {
     fprintf(stderr,
@@ -88,6 +96,54 @@ static bool stq_line_matches(const struct json_value *v,
     return true;
 }
 
+/* Record one argv element into path/filter, checking flags in the fixed
+ * order --file, --node, --event, --seq, unknown. Returns a status; the
+ * caller prints usage() or the --event diagnostic, so no log call lives
+ * here. */
+static enum stq_arg_result stq_parse_arg(const char *arg, const char **path,
+                                         struct stq_filter *filter)
+{
+    if (strncmp(arg, "--file=", 7) == 0) {
+        *path = arg + 7;
+        return STQ_ARG_OK;
+    }
+    if (strncmp(arg, "--node=", 7) == 0) {
+        if (!stq_parse_i64(arg + 7, &filter->node_id))
+            return STQ_ARG_BAD;
+        filter->have_node = true;
+        return STQ_ARG_OK;
+    }
+    if (strncmp(arg, "--event=", 8) == 0) {
+        if (strlen(arg + 8) >= sizeof(filter->event))
+            return STQ_ARG_EVENT_LONG;
+        snprintf(filter->event, sizeof(filter->event), "%s", arg + 8);
+        filter->have_event = true;
+        return STQ_ARG_OK;
+    }
+    if (strncmp(arg, "--seq=", 6) == 0) {
+        if (!stq_parse_i64(arg + 6, &filter->seq))
+            return STQ_ARG_BAD;
+        filter->have_seq = true;
+        return STQ_ARG_OK;
+    }
+    return STQ_ARG_BAD;
+}
+
+/* True when a --file value was given and is non-empty. */
+static bool stq_path_usable(const char *path)
+{
+    return path != NULL && *path != '\0';
+}
+
+/* Strip trailing newline/CR in place; return the new length. */
+static size_t stq_strip_eol(char *line)
+{
+    size_t len = strlen(line);
+    while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
+        line[--len] = '\0';
+    return len;
+}
+
 int main(int argc, char **argv)
 {
     const char *path = NULL;
@@ -95,34 +151,18 @@ int main(int argc, char **argv)
     memset(&filter, 0, sizeof(filter));
 
     for (int i = 1; i < argc; i++) {
-        if (strncmp(argv[i], "--file=", 7) == 0) {
-            path = argv[i] + 7;
-        } else if (strncmp(argv[i], "--node=", 7) == 0) {
-            if (!stq_parse_i64(argv[i] + 7, &filter.node_id)) {
-                usage(argv[0]);
-                return 2;
-            }
-            filter.have_node = true;
-        } else if (strncmp(argv[i], "--event=", 8) == 0) {
-            if (strlen(argv[i] + 8) >= sizeof(filter.event)) {
-                fprintf(stderr, "simnet_trace_query: --event value too long\n");
-                return 2;
-            }
-            snprintf(filter.event, sizeof(filter.event), "%s", argv[i] + 8);
-            filter.have_event = true;
-        } else if (strncmp(argv[i], "--seq=", 6) == 0) {
-            if (!stq_parse_i64(argv[i] + 6, &filter.seq)) {
-                usage(argv[0]);
-                return 2;
-            }
-            filter.have_seq = true;
-        } else {
+        enum stq_arg_result r = stq_parse_arg(argv[i], &path, &filter);
+        if (r == STQ_ARG_EVENT_LONG) {
+            fprintf(stderr, "simnet_trace_query: --event value too long\n");
+            return 2;
+        }
+        if (r != STQ_ARG_OK) {
             usage(argv[0]);
             return 2;
         }
     }
 
-    if (!path || !*path) {
+    if (!stq_path_usable(path)) {
         usage(argv[0]);
         return 2;
     }
@@ -144,9 +184,7 @@ int main(int argc, char **argv)
     size_t total = 0;
     size_t matched = 0;
     while (fgets(line, (int)STQ_MAX_LINE, fp)) {
-        size_t len = strlen(line);
-        while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r'))
-            line[--len] = '\0';
+        size_t len = stq_strip_eol(line);
         if (len == 0)
             continue;
         total++;
