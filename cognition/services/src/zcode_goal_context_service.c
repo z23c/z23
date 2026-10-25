@@ -128,6 +128,26 @@ static bool zgoal_story_add(struct zgoal_story_candidate *pool,
                                       sizeof(added->candidate.symbol_id)) >= 0;
 }
 
+static struct zcl_result zgoal_search_token_batches(
+    struct codeindex *index, struct zcode_goal_selection *out,
+    struct zgoal_token_hits *batches)
+{
+    struct zcl_result result = ZCL_OK;
+    for (size_t i = 0; i < out->token_count; i++) {
+        batches[i].token_index = i;
+        batches[i].count = codeindex_search_text(
+            index, out->tokens[i], batches[i].hits, ZGOAL_HITS_PER_TOKEN);
+        if (batches[i].count < 0) {
+            result = ZCL_ERR(-1, "indexed goal search failed for '%s'",
+                             out->tokens[i]);
+            break;
+        }
+        if (batches[i].count == ZGOAL_HITS_PER_TOKEN)
+            out->budget_exhausted = true;
+    }
+    return result;
+}
+
 static struct zcl_result zgoal_literal_candidates(
     struct codeindex *index, struct zcode_goal_selection *out)
 {
@@ -142,19 +162,7 @@ static struct zcl_result zgoal_literal_candidates(
         free(batches);
         return ZCL_ERR(-1, "goal token hit allocation failed");
     }
-    struct zcl_result result = ZCL_OK;
-    for (size_t i = 0; i < out->token_count; i++) {
-        batches[i].token_index = i;
-        batches[i].count = codeindex_search_text(
-            index, out->tokens[i], batches[i].hits, ZGOAL_HITS_PER_TOKEN);
-        if (batches[i].count < 0) {
-            result = ZCL_ERR(-1, "indexed goal search failed for '%s'",
-                             out->tokens[i]);
-            break;
-        }
-        if (batches[i].count == ZGOAL_HITS_PER_TOKEN)
-            out->budget_exhausted = true;
-    }
+    struct zcl_result result = zgoal_search_token_batches(index, out, batches);
     if (result.ok) {
         size_t pool_count = 0;
         for (size_t i = 0; i < out->token_count && result.ok; i++) {
@@ -838,6 +846,35 @@ static struct zcl_result zgoal_exact(
     return ZCL_OK;
 }
 
+static struct zcl_result zgoal_rank_indexed_candidates(
+    struct codeindex *index, const char *goal, bool frozen_literal,
+    const struct zcode_goal_context_calc_service_v1 *service,
+    struct zcode_goal_selection *out)
+{
+    struct zcl_result result = ZCL_OK;
+    struct zcode_goal_tokens_v1 tokens;
+    if (!service->tokenize(goal, &tokens) || !tokens.valid) {
+        result = ZCL_ERR(-1, "pure goal tokenization refused bounded input");
+    } else {
+        out->token_count = tokens.count;
+        out->budget_exhausted = tokens.budget_exhausted;
+        memcpy(out->tokens, tokens.values, sizeof(out->tokens));
+    }
+    if (result.ok) result = frozen_literal
+        ? zgoal_frozen_literal_candidates(index, out)
+        : zgoal_literal_candidates(index, out);
+    if (result.ok && !frozen_literal)
+        result = zgoal_story_candidates(index, goal, out);
+    if (result.ok && out->candidate_count == 0)
+        result = zgoal_project_fallback(index, out);
+    if (result.ok) {
+        if (!service->rank(out->candidates, out->candidate_count))
+            result = ZCL_ERR(-1,
+                             "pure candidate ranking refused bounded input");
+    }
+    return result;
+}
+
 static struct zcl_result zgoal_select_indexed(
     struct codeindex *index, const char *goal, const char *exact_symbol,
     bool frozen_literal, struct zcode_goal_selection *out)
@@ -856,26 +893,8 @@ static struct zcl_result zgoal_select_indexed(
     if (exact_symbol && exact_symbol[0]) {
         result = zgoal_exact(index, exact_symbol, out);
     } else {
-        struct zcode_goal_tokens_v1 tokens;
-        if (!service->tokenize(goal, &tokens) || !tokens.valid) {
-            result = ZCL_ERR(-1, "pure goal tokenization refused bounded input");
-        } else {
-            out->token_count = tokens.count;
-            out->budget_exhausted = tokens.budget_exhausted;
-            memcpy(out->tokens, tokens.values, sizeof(out->tokens));
-        }
-        if (result.ok) result = frozen_literal
-            ? zgoal_frozen_literal_candidates(index, out)
-            : zgoal_literal_candidates(index, out);
-        if (result.ok && !frozen_literal)
-            result = zgoal_story_candidates(index, goal, out);
-        if (result.ok && out->candidate_count == 0)
-            result = zgoal_project_fallback(index, out);
-        if (result.ok) {
-            if (!service->rank(out->candidates, out->candidate_count))
-                result = ZCL_ERR(-1,
-                                 "pure candidate ranking refused bounded input");
-        }
+        result = zgoal_rank_indexed_candidates(index, goal, frozen_literal,
+                                               service, out);
         if (result.ok) {
             out->selected = out->candidates[0].symbol;
             (void)snprintf(out->selected_symbol_id,
@@ -936,10 +955,10 @@ struct zcl_result zcode_goal_context_select(
     return result;
 }
 
-static bool zgoal_calc_frozen_kat(const void *opaque, char *why,
-                                  size_t why_sz)
+static bool zgoal_calc_token_kat(
+    const struct zcode_goal_context_calc_service_v1 *service,
+    char *why, size_t why_sz)
 {
-    const struct zcode_goal_context_calc_service_v1 *service = opaque;
     struct zcode_goal_tokens_v1 tokens;
     if (!service || !service->tokenize || !service->rank ||
         !service->render_status ||
@@ -951,6 +970,14 @@ static bool zgoal_calc_frozen_kat(const void *opaque, char *why,
             why, why_sz, "frozen goal tokenization vector failed");
         return false;
     }
+    return true;
+}
+
+static bool zgoal_calc_frozen_kat(const void *opaque, char *why,
+                                  size_t why_sz)
+{
+    const struct zcode_goal_context_calc_service_v1 *service = opaque;
+    if (!zgoal_calc_token_kat(service, why, why_sz)) return false;
     struct zcode_goal_candidate candidates[3] = {
         {.score = 7}, {.score = 9}, {.score = 9},
     };

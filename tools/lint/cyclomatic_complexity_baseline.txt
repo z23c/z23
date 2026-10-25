@@ -49,9 +49,6 @@ cognition/services/src/metaverse_agent_service.c:metaverse_agent_service_liquidi
 cognition/services/src/metaverse_agent_service.c:metaverse_agent_service_money:22
 cognition/services/src/metaverse_agent_service.c:money_load_bindings:29
 cognition/services/src/metaverse_agent_service.c:money_query:22
-cognition/services/src/zcode_goal_context_service.c:zgoal_calc_frozen_kat:24
-cognition/services/src/zcode_goal_context_service.c:zgoal_literal_candidates:16
-cognition/services/src/zcode_goal_context_service.c:zgoal_select_indexed:23
 cognition/services/src/zcode_retrieval_profile_comparison_service.c:zcode_retrieval_profile_comparison_observe:27
 cognition/services/src/zcode_retrieval_profile_evolution_service.c:zcode_retrieval_profile_evolution_propose:48
 contexts/commons/controllers/src/metaverse_site_controller.c:metaverse_site_handle_request:18
