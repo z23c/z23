@@ -116,6 +116,59 @@ static void hwb_plant_hdd_wholedisk(const char *root, unsigned maj,
  TEST_DISCARD(symlink("../../devices/fakehdd/block/sdfake", link));
 }
 
+/* ── named predicates for the compound check conditions below: each folds
+ * a multi-part condition into one boolean so the test body keeps exactly
+ * one named check per line. ─────────────────────────────────────────── */
+
+/* True when a 2x-baseline fsync scaled batch_size strictly above its
+ * fallback while staying at or under the ceiling. */
+static bool hwb_batch_size_in_scaled_range(int batch)
+{
+    return batch > 100 && batch <= 2000;
+}
+
+/* True when a 2x-baseline pread scaled verify_workers strictly below its
+ * fallback while staying at or over the worker floor of 1. */
+static bool hwb_verify_workers_in_scaled_range(int workers)
+{
+    return workers < 4 && workers >= 1;
+}
+
+/* True when the probe produced a 16-hex-char fingerprint string. */
+static bool hwb_fingerprint_is_16_hex_chars(const char *hex)
+{
+    return hex && strlen(hex) == 16;
+}
+
+/* True when a dump_state_json object holds the expected int at key. */
+static bool hwb_json_has_int(struct json_value *v, const char *key,
+                             int expected)
+{
+    return json_get(v, key) &&
+           json_get_int(json_get(v, key)) == expected;
+}
+
+/* True when a dump_state_json object holds the expected string at key. */
+static bool hwb_json_has_str(struct json_value *v, const char *key,
+                             const char *expected)
+{
+    return json_get(v, key) &&
+           strcmp(json_get_str(json_get(v, key)), expected) == 0;
+}
+
+/* True when a dump_state_json object holds the expected bool at key. */
+static bool hwb_json_has_bool(struct json_value *v, const char *key,
+                              bool expected)
+{
+    return json_get(v, key) && json_get_bool(json_get(v, key)) == expected;
+}
+
+/* True when the sysfs rotational verdict came back known and rotational. */
+static bool hwb_verdict_known_and_rotational(bool known, bool rotational)
+{
+    return known && rotational;
+}
+
 int test_hw_bench(void)
 {
     int failures = 0;
@@ -145,9 +198,9 @@ int test_hw_bench(void)
         int b2 = hw_bench_batch_size(100);
         int w2 = hw_bench_verify_workers(4);
         HWB_CHECK("2x-baseline fsync: batch_size scales up",
-                  b2 > 100 && b2 <= 2000);
+                  hwb_batch_size_in_scaled_range(b2));
         HWB_CHECK("2x-baseline pread: verify_workers scales down",
-                  w2 < 4 && w2 >= 1);
+                  hwb_verify_workers_in_scaled_range(w2));
 
         hw_bench_reset_for_testing();
         hw_bench_set_measured_for_testing(40000 /* 20x baseline: slow HDD */, 4000);
@@ -250,7 +303,7 @@ int test_hw_bench(void)
             if (measured_first) {
                 const char *fp1 = hw_bench_fingerprint_hex();
                 HWB_CHECK("fingerprint is 16 hex chars",
-                          fp1 && strlen(fp1) == 16);
+                          hwb_fingerprint_is_16_hex_chars(fp1));
 
                 char cache_path[700];
                 snprintf(cache_path, sizeof(cache_path), "%s/hw_bench.kv", root);
@@ -289,20 +342,16 @@ int test_hw_bench(void)
         json_init(&v);
         HWB_CHECK("dump_state_json succeeds", hw_bench_dump_state_json(&v, NULL));
         HWB_CHECK("dump has fsync_us",
-                  json_get(&v, "fsync_us") &&
-                  json_get_int(json_get(&v, "fsync_us")) == 3000);
+                  hwb_json_has_int(&v, "fsync_us", 3000));
         HWB_CHECK("dump has pread_us",
-                  json_get(&v, "pread_us") &&
-                  json_get_int(json_get(&v, "pread_us")) == 300);
+                  hwb_json_has_int(&v, "pread_us", 300));
         HWB_CHECK("dump has fsync_source == measured",
-                  json_get(&v, "fsync_source") &&
-                  strcmp(json_get_str(json_get(&v, "fsync_source")), "measured") == 0);
+                  hwb_json_has_str(&v, "fsync_source", "measured"));
         HWB_CHECK("dump has fingerprint", json_get(&v, "fingerprint") != NULL);
         HWB_CHECK("dump has from_cache", json_get(&v, "from_cache") != NULL);
         HWB_CHECK("dump has age_seconds", json_get(&v, "age_seconds") != NULL);
         HWB_CHECK("dump has measured == true",
-                  json_get(&v, "measured") &&
-                  json_get_bool(json_get(&v, "measured")));
+                  hwb_json_has_bool(&v, "measured", true));
         HWB_CHECK("dump has derived object", json_get(&v, "derived") != NULL);
         json_free(&v);
 
@@ -313,11 +362,9 @@ int test_hw_bench(void)
         HWB_CHECK("dump_state_json succeeds when unmeasured",
                   hw_bench_dump_state_json(&v2, NULL));
         HWB_CHECK("dump has measured == false when unmeasured",
-                  json_get(&v2, "measured") &&
-                  !json_get_bool(json_get(&v2, "measured")));
+                  hwb_json_has_bool(&v2, "measured", false));
         HWB_CHECK("dump has fsync_source == fallback when unmeasured",
-                  json_get(&v2, "fsync_source") &&
-                  strcmp(json_get_str(json_get(&v2, "fsync_source")), "fallback") == 0);
+                  hwb_json_has_str(&v2, "fsync_source", "fallback"));
         json_free(&v2);
     }
 
@@ -365,7 +412,7 @@ int test_hw_bench(void)
                 HWB_CHECK(
                     "hw_bench_init(datadir) reports the FIXTURE's class "
                     "(rotational), not NULL's",
-                    known && rotational);
+                    hwb_verdict_known_and_rotational(known, rotational));
             }
             hw_profile_set_block_root_for_testing(NULL);
         }
