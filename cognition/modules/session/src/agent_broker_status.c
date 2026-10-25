@@ -162,6 +162,60 @@ static void agent_broker_write_private_money_bindings(
 
 /* ── status document ────────────────────────────────────────────────────── */
 
+/* THE AUTHORITY SECTION IS PULLED, NOT REMEMBERED. The broker holds no
+ * grant to render, so the four fields an operator needs — where the
+ * authority came from, how durable it is, which canonical grant it is,
+ * and whether decisions consult it live — are asked of the provider at
+ * write time. A session that never bound reports ungranted, which is a
+ * different document from a bound session with an empty grant. */
+static bool broker_pull_authority_status(const struct agent_authority_ref *a,
+                                         struct agent_authority_status *auth)
+{
+    bool bound = a && a->bound && a->provider;
+    bool have_status = false;
+    if (bound && a->provider->status)
+        have_status = a->provider->status(a->provider_ctx, a, auth);
+    if (bound && !have_status) {
+        /* The provider named no status surface. Report what the binding
+         * itself proves and nothing more. */
+        snprintf(auth->authority_source, sizeof(auth->authority_source), "%s",
+                 a->provider->name ? a->provider->name : "(unnamed provider)");
+        snprintf(auth->canonical_grant_id, sizeof(auth->canonical_grant_id),
+                 "%s", a->canonical_grant_id);
+        snprintf(auth->principal, sizeof(auth->principal), "%s", a->principal);
+        auth->live_authority = a->provider->authorize != NULL;
+        auth->ephemeral = true;
+    }
+    return bound;
+}
+
+static void broker_push_authority(struct json_value *doc, bool bound,
+                                  const struct agent_authority_status *auth,
+                                  const char *fphex,
+                                  const struct agent_authority_ref *a)
+{
+    (void)json_push_kv_bool(doc, "granted", bound);
+    (void)json_push_kv_str(doc, "authority_source",
+                           bound ? auth->authority_source : "none");
+    /* Stated in every document, including an ungranted one: this store does
+     * not survive a restart, so nothing here implies durable revocation or a
+     * receipt anyone can verify after the process exits. */
+    (void)json_push_kv_str(doc, "authority_persistence", "ephemeral");
+    (void)json_push_kv_str(doc, "canonical_grant_id",
+                           bound ? auth->canonical_grant_id : "");
+    (void)json_push_kv_bool(doc, "live_authority",
+                            bound && auth->live_authority);
+    (void)json_push_kv_str(doc, "principal", bound ? auth->principal : "");
+    (void)json_push_kv_str(doc, "grant_fingerprint", bound ? fphex : "");
+    (void)json_push_kv_bool(doc, "grant_revoked", auth->revoked);
+    (void)json_push_kv_int(doc, "authority_generation",
+                           (int64_t)auth->authority_generation);
+    (void)json_push_kv_int(doc, "budget_zats", (int64_t)auth->budget_zat);
+    (void)json_push_kv_int(doc, "spent_zats", (int64_t)auth->spent_zat);
+    (void)json_push_kv_int(doc, "grant_properties",
+                           bound ? (int64_t)a->scope.n_properties : 0);
+}
+
 void agent_broker_write_status(const char *dir,
                                const struct agent_broker_session *s,
                                pid_t child_pid, const char *socket_path)
@@ -173,30 +227,10 @@ void agent_broker_write_status(const char *dir,
      * status, audit, and money output never contain these paths/ports. */
     agent_broker_write_private_money_bindings(dir, s);
 
-    /* THE AUTHORITY SECTION IS PULLED, NOT REMEMBERED. The broker holds no
-     * grant to render, so the four fields an operator needs — where the
-     * authority came from, how durable it is, which canonical grant it is,
-     * and whether decisions consult it live — are asked of the provider at
-     * write time. A session that never bound reports ungranted, which is a
-     * different document from a bound session with an empty grant. */
     const struct agent_authority_ref *a = s->authority;
     struct agent_authority_status auth;
     memset(&auth, 0, sizeof(auth));
-    bool bound = a && a->bound && a->provider;
-    bool have_status = false;
-    if (bound && a->provider->status)
-        have_status = a->provider->status(a->provider_ctx, a, &auth);
-    if (bound && !have_status) {
-        /* The provider named no status surface. Report what the binding
-         * itself proves and nothing more. */
-        snprintf(auth.authority_source, sizeof(auth.authority_source), "%s",
-                 a->provider->name ? a->provider->name : "(unnamed provider)");
-        snprintf(auth.canonical_grant_id, sizeof(auth.canonical_grant_id),
-                 "%s", a->canonical_grant_id);
-        snprintf(auth.principal, sizeof(auth.principal), "%s", a->principal);
-        auth.live_authority = a->provider->authorize != NULL;
-        auth.ephemeral = true;
-    }
+    bool bound = broker_pull_authority_status(a, &auth);
     char fphex[65];
     zcl_hex_encode(auth.fingerprint, 32, fphex);
 
@@ -207,26 +241,7 @@ void agent_broker_write_status(const char *dir,
                            (int64_t)os_proc_current_pid());
     (void)json_push_kv_int(&doc, "agent_pid", (int64_t)child_pid);
     (void)socket_path; /* endpoint remains broker-private */
-    (void)json_push_kv_bool(&doc, "granted", bound);
-    (void)json_push_kv_str(&doc, "authority_source",
-                           bound ? auth.authority_source : "none");
-    /* Stated in every document, including an ungranted one: this store does
-     * not survive a restart, so nothing here implies durable revocation or a
-     * receipt anyone can verify after the process exits. */
-    (void)json_push_kv_str(&doc, "authority_persistence", "ephemeral");
-    (void)json_push_kv_str(&doc, "canonical_grant_id",
-                           bound ? auth.canonical_grant_id : "");
-    (void)json_push_kv_bool(&doc, "live_authority",
-                            bound && auth.live_authority);
-    (void)json_push_kv_str(&doc, "principal", bound ? auth.principal : "");
-    (void)json_push_kv_str(&doc, "grant_fingerprint", bound ? fphex : "");
-    (void)json_push_kv_bool(&doc, "grant_revoked", auth.revoked);
-    (void)json_push_kv_int(&doc, "authority_generation",
-                           (int64_t)auth.authority_generation);
-    (void)json_push_kv_int(&doc, "budget_zats", (int64_t)auth.budget_zat);
-    (void)json_push_kv_int(&doc, "spent_zats", (int64_t)auth.spent_zat);
-    (void)json_push_kv_int(&doc, "grant_properties",
-                           bound ? (int64_t)a->scope.n_properties : 0);
+    broker_push_authority(&doc, bound, &auth, fphex, a);
     (void)json_push_kv_int(&doc, "requests_served",
                            (int64_t)s->requests_served);
     (void)json_push_kv_int(&doc, "requests_denied",
