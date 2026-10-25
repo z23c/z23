@@ -2294,7 +2294,6 @@ tests/harness/src/test_slo_ledger_summary.c:degraded_window_math_is_exact:18
 tests/harness/src/test_slo_ledger_summary.c:native_default_invocation_is_bounded:18
 tests/harness/src/test_slp.c:test_slp:176
 tests/harness/src/test_snapshot_apply_coins_kv.c:test_snapshot_apply_coins_kv:27
-tests/harness/src/test_snapshot_boot_seed.c:sb_build_fixture:16
 tests/harness/src/test_snapshot_negotiation_stalled_condition.c:test_snapshot_negotiation_stalled_condition:26
 tests/harness/src/test_snapshot_shielded.c:test_snapshot_shielded:126
 tests/harness/src/test_soak_attestation.c:test_sync_benchmark_receipt_wellformed:27

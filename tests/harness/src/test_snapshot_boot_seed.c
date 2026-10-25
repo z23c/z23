@@ -94,6 +94,83 @@ static void sb_tip_hash(uint8_t out[32])
     for (int i = 0; i < 32; i++) out[i] = (uint8_t)(0xa0 ^ (i * 7 + 3));
 }
 
+/* _snapshot_meta.height */
+static bool sb_fixture_seed_meta_height(sqlite3 *db)
+{
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db,
+        "INSERT INTO _snapshot_meta(key,value) VALUES('height',?)",
+        -1, &st, NULL) == SQLITE_OK;
+    if (ok) {
+        char h[32]; snprintf(h, sizeof(h), "%d", SB_SNAP_HEIGHT);
+        sqlite3_bind_text(st, 1, h, -1, SQLITE_TRANSIENT);
+        ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:test-fixture-seeding
+    }
+    sqlite3_finalize(st);
+    return ok;
+}
+
+/* blocks row at the snapshot tip height */
+static bool sb_fixture_seed_tip_block(sqlite3 *db, const uint8_t tip_hash[32])
+{
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db,
+        "INSERT INTO blocks(hash,height) VALUES(?,?)",
+        -1, &st, NULL) == SQLITE_OK;
+    if (ok) {
+        sqlite3_bind_blob(st, 1, tip_hash, 32, SQLITE_STATIC);
+        sqlite3_bind_int(st, 2, SB_SNAP_HEIGHT);
+        ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:test-fixture-seeding
+    }
+    sqlite3_finalize(st);
+    return ok;
+}
+
+/* SB_UTXO_COUNT deterministic UTXOs (all at heights <= snapshot height). */
+static bool sb_fixture_seed_utxo_rows(sqlite3 *db)
+{
+    if (sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK)
+        return false;
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db,
+        "INSERT INTO utxos"
+        "(txid,vout,value,script,script_type,address_hash,height,is_coinbase)"
+        " VALUES(?,?,?,?,0,NULL,?,?)", -1, &st, NULL) == SQLITE_OK;
+    for (int i = 0; ok && i < SB_UTXO_COUNT; i++) {
+        uint8_t txid[32]; memset(txid, 0, 32);
+        txid[0] = (uint8_t)(i & 0xFF);
+        txid[1] = (uint8_t)((i >> 8) & 0xFF);
+        txid[31] = 0x5a;
+        uint8_t script[6] = {0x76, 0xa9, (uint8_t)i, 0x14, 0x88, 0xac};
+        sqlite3_reset(st);
+        sqlite3_bind_blob(st, 1, txid, 32, SQLITE_STATIC);
+        sqlite3_bind_int(st, 2, 0);
+        sqlite3_bind_int64(st, 3, (int64_t)1000 + i);
+        sqlite3_bind_blob(st, 4, script, sizeof(script), SQLITE_STATIC);
+        sqlite3_bind_int(st, 5, (i % SB_SNAP_HEIGHT));   /* height */
+        sqlite3_bind_int(st, 6, i == 0 ? 1 : 0);         /* is_coinbase */
+        ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:test-fixture-seeding
+    }
+    sqlite3_finalize(st);
+    return ok && sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
+}
+
+/* Padding: push the file past the importer's 10 MiB size floor with a
+ * single ~11 MiB zeroblob (read-only-attached, never copied). */
+static bool sb_fixture_seed_padding(sqlite3 *db)
+{
+    sqlite3_stmt *st = NULL;
+    bool ok = sqlite3_prepare_v2(db,
+        "INSERT INTO _pad(blob) VALUES(zeroblob(?))", -1, &st, NULL)
+        == SQLITE_OK;
+    if (ok) {
+        sqlite3_bind_int(st, 1, 11 * 1024 * 1024);
+        ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:test-fixture-seeding
+    }
+    sqlite3_finalize(st);
+    return ok;
+}
+
 /* Build a real consensus_snapshot.db fixture: the public tables the importer
  * reads (_snapshot_meta, blocks, utxos) + a padding blob so the file clears the
  * importer's 10 MiB "likely-truncated" size floor. utxos MUST carry the exact
@@ -120,74 +197,10 @@ static bool sb_build_fixture(const char *path, const uint8_t tip_hash[32])
         NULL, NULL, &err) == SQLITE_OK;
     if (err) { sqlite3_free(err); err = NULL; }
 
-    /* _snapshot_meta.height */
-    if (ok) {
-        sqlite3_stmt *st = NULL;
-        ok = sqlite3_prepare_v2(db,
-            "INSERT INTO _snapshot_meta(key,value) VALUES('height',?)",
-            -1, &st, NULL) == SQLITE_OK;
-        if (ok) {
-            char h[32]; snprintf(h, sizeof(h), "%d", SB_SNAP_HEIGHT);
-            sqlite3_bind_text(st, 1, h, -1, SQLITE_TRANSIENT);
-            ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:test-fixture-seeding
-        }
-        sqlite3_finalize(st);
-    }
-
-    /* blocks row at the snapshot tip height */
-    if (ok) {
-        sqlite3_stmt *st = NULL;
-        ok = sqlite3_prepare_v2(db,
-            "INSERT INTO blocks(hash,height) VALUES(?,?)",
-            -1, &st, NULL) == SQLITE_OK;
-        if (ok) {
-            sqlite3_bind_blob(st, 1, tip_hash, 32, SQLITE_STATIC);
-            sqlite3_bind_int(st, 2, SB_SNAP_HEIGHT);
-            ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:test-fixture-seeding
-        }
-        sqlite3_finalize(st);
-    }
-
-    /* SB_UTXO_COUNT deterministic UTXOs (all at heights <= snapshot height). */
-    if (ok) ok = sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) == SQLITE_OK;
-    if (ok) {
-        sqlite3_stmt *st = NULL;
-        ok = sqlite3_prepare_v2(db,
-            "INSERT INTO utxos"
-            "(txid,vout,value,script,script_type,address_hash,height,is_coinbase)"
-            " VALUES(?,?,?,?,0,NULL,?,?)", -1, &st, NULL) == SQLITE_OK;
-        for (int i = 0; ok && i < SB_UTXO_COUNT; i++) {
-            uint8_t txid[32]; memset(txid, 0, 32);
-            txid[0] = (uint8_t)(i & 0xFF);
-            txid[1] = (uint8_t)((i >> 8) & 0xFF);
-            txid[31] = 0x5a;
-            uint8_t script[6] = {0x76, 0xa9, (uint8_t)i, 0x14, 0x88, 0xac};
-            sqlite3_reset(st);
-            sqlite3_bind_blob(st, 1, txid, 32, SQLITE_STATIC);
-            sqlite3_bind_int(st, 2, 0);
-            sqlite3_bind_int64(st, 3, (int64_t)1000 + i);
-            sqlite3_bind_blob(st, 4, script, sizeof(script), SQLITE_STATIC);
-            sqlite3_bind_int(st, 5, (i % SB_SNAP_HEIGHT));   /* height */
-            sqlite3_bind_int(st, 6, i == 0 ? 1 : 0);         /* is_coinbase */
-            ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:test-fixture-seeding
-        }
-        sqlite3_finalize(st);
-    }
-    if (ok) ok = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) == SQLITE_OK;
-
-    /* Padding: push the file past the importer's 10 MiB size floor with a
-     * single ~11 MiB zeroblob (read-only-attached, never copied). */
-    if (ok) {
-        sqlite3_stmt *st = NULL;
-        ok = sqlite3_prepare_v2(db,
-            "INSERT INTO _pad(blob) VALUES(zeroblob(?))", -1, &st, NULL)
-            == SQLITE_OK;
-        if (ok) {
-            sqlite3_bind_int(st, 1, 11 * 1024 * 1024);
-            ok = sqlite3_step(st) == SQLITE_DONE;  // raw-sql-ok:test-fixture-seeding
-        }
-        sqlite3_finalize(st);
-    }
+    if (ok) ok = sb_fixture_seed_meta_height(db);
+    if (ok) ok = sb_fixture_seed_tip_block(db, tip_hash);
+    if (ok) ok = sb_fixture_seed_utxo_rows(db);
+    if (ok) ok = sb_fixture_seed_padding(db);
 
     sqlite3_close(db);
     return ok;
