@@ -14,20 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-bool zcl_read_whole_file(const char *path, size_t max_len,
-                          uint8_t **out_buf, size_t *out_len,
-                          const char *log_ctx)
+static bool read_binary_size(FILE *f, const char *path, size_t max_len,
+                              size_t *size, const char *log_ctx)
 {
-    if (out_buf) *out_buf = NULL;
-    if (out_len) *out_len = 0;
-    if (!path || !out_buf || !out_len)
-        LOG_FAIL(log_ctx ? log_ctx : "file_io", "read_whole_file: NULL argument");
-
-    FILE *f = platform_file_stream_open_read(path);
-    if (!f)
-        LOG_FAIL(log_ctx ? log_ctx : "file_io",
-                  "read_whole_file: read open failed for %s", path);
-
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
         LOG_FAIL(log_ctx ? log_ctx : "file_io",
@@ -52,6 +41,25 @@ bool zcl_read_whole_file(const char *path, size_t max_len,
                   "read_whole_file: %s is %zu bytes, exceeds cap %zu",
                   path, n, max_len);
     }
+    *size = n;
+    return true;
+}
+
+bool zcl_read_whole_file(const char *path, size_t max_len,
+                          uint8_t **out_buf, size_t *out_len,
+                          const char *log_ctx)
+{
+    if (out_buf) *out_buf = NULL;
+    if (out_len) *out_len = 0;
+    if (!path || !out_buf || !out_len)
+        LOG_FAIL(log_ctx ? log_ctx : "file_io", "read_whole_file: NULL argument");
+
+    FILE *f = platform_file_stream_open_read(path);
+    if (!f)
+        LOG_FAIL(log_ctx ? log_ctx : "file_io",
+                  "read_whole_file: read open failed for %s", path);
+    size_t n;
+    if (!read_binary_size(f, path, max_len, &n, log_ctx)) return false;
 
     uint8_t *buf = NULL;
     if (n > 0) {
@@ -79,20 +87,9 @@ bool zcl_read_whole_file(const char *path, size_t max_len,
     return true;
 }
 
-bool zcl_read_whole_file_text(const char *path, size_t max_len,
-                               char **out_buf, size_t *out_len,
-                               const char *log_ctx)
+static bool read_text_size(FILE *f, const char *path, size_t max_len,
+                            size_t *size, const char *log_ctx)
 {
-    if (out_buf) *out_buf = NULL;
-    if (out_len) *out_len = 0;
-    if (!path || !out_buf || !out_len)
-        LOG_FAIL(log_ctx ? log_ctx : "file_io", "read_whole_file_text: NULL argument");
-
-    FILE *f = platform_file_stream_open_read(path);
-    if (!f)
-        LOG_FAIL(log_ctx ? log_ctx : "file_io",
-                  "read_whole_file_text: read open failed for %s", path);
-
     if (fseek(f, 0, SEEK_END) != 0) {
         fclose(f);
         LOG_FAIL(log_ctx ? log_ctx : "file_io",
@@ -123,6 +120,25 @@ bool zcl_read_whole_file_text(const char *path, size_t max_len,
                   "read_whole_file_text: %s size overflows NUL-terminated buffer",
                   path);
     }
+    *size = n;
+    return true;
+}
+
+bool zcl_read_whole_file_text(const char *path, size_t max_len,
+                               char **out_buf, size_t *out_len,
+                               const char *log_ctx)
+{
+    if (out_buf) *out_buf = NULL;
+    if (out_len) *out_len = 0;
+    if (!path || !out_buf || !out_len)
+        LOG_FAIL(log_ctx ? log_ctx : "file_io", "read_whole_file_text: NULL argument");
+
+    FILE *f = platform_file_stream_open_read(path);
+    if (!f)
+        LOG_FAIL(log_ctx ? log_ctx : "file_io",
+                  "read_whole_file_text: read open failed for %s", path);
+    size_t n;
+    if (!read_text_size(f, path, max_len, &n, log_ctx)) return false;
 
     char *buf = zcl_malloc(n + 1, "zcl_read_whole_file_text");
     if (!buf) {
