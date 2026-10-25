@@ -483,18 +483,15 @@ static int fgl_case_receipt_none(void)
     int failures = 0;
     struct zcl_goals_options o;
     fgl_options(&o);
-    TEST("C1 C2 C4 C5 C7 skip the host receipts in a fixture run; C8 names the "
-         "observation it lacks; fixtures never read the host ledgers") {
-        static const char *const ids[] = {"C1", "C2", "C4", "C5", "C7"};
+    TEST("C1 C2 C4 C5 C7 C8 skip the host receipts in a fixture run; "
+         "fixtures never read the host ledgers") {
+        static const char *const ids[] = {"C1", "C2", "C4", "C5", "C7", "C8"};
         struct zcl_goal_result r;
         for (size_t i = 0; i < sizeof(ids) / sizeof(ids[0]); i++) {
             r = zcl_goals_measure(&o, ids[i]);
             ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
             ASSERT(fgl_has(r.evidence, "receipt probe skipped"));
         }
-        r = zcl_goals_measure(&o, "C8");
-        ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
-        ASSERT(fgl_has(r.evidence, "needs 168 h of observation, have 0 h"));
         r = zcl_goals_measure(&o, "C3");
         ASSERT(r.grade == ZCL_GOAL_UNMEASURED);
         ASSERT(fgl_has(r.evidence, "skipped"));

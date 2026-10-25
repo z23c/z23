@@ -68,7 +68,7 @@ struct zcl_goals_options {
     const char *claims;         /* z23-agent-claims.jsonl */
     const char *mvp_doc;        /* docs/MVP.md */
     const char *c3_history;     /* cold-start stopwatch history.jsonl (C3) */
-    const char *soak_dir;       /* soak evidence dir holding evidence.jsonl (C6) */
+    const char *soak_dir;       /* soak evidence dir holding evidence.jsonl (C6) and parity.jsonl (C8) */
     int64_t now_unix;           /* 0 = wall clock */
     bool hosts_given;           /* true: use hosts[] instead of fleet machines */
     const struct zcl_goals_host *hosts;

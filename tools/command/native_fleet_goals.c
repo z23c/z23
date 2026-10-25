@@ -295,9 +295,6 @@ static const struct gr_static k_static[] = {
     {"G2", false, "no k-of-n hybrid signing probe exists in the tree",
      "card: a signing-quorum status leaf reporting hosts and last signed "
      "release"},
-    {"C8", false, "needs 168 h of observation, have 0 h: no producer "
-                  "persists a parity mismatch count",
-     "card: write parity samples to a ledger"},
     {"D3", false, "no known-answer review set with seeded defects exists",
      "card: build the seeded-defect review set"},
 };

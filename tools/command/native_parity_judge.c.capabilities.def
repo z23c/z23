@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/command/native_parity_judge.c", CAP_NONE, "judges the parity ledger through the shared reader in native_evidence_judge_util.c, which owns the file access; this object opens and writes nothing itself")

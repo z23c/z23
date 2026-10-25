@@ -67,6 +67,10 @@ struct zcl_stopwatch_judge_opts {
  * shortfall is a verdict, never a failure. */
 bool zcl_soak_judge(const struct zcl_soak_judge_opts *opts,
                     struct zcl_judge_result *out);
+/* The C8 parity window judge over parity.jsonl: same verdict tokens, same
+ * C6 hole and slack constants; a match:false is NOT_MET. */
+bool zcl_parity_judge(const struct zcl_soak_judge_opts *opts,
+                      struct zcl_judge_result *out);
 bool zcl_stopwatch_judge(const struct zcl_stopwatch_judge_opts *opts,
                          struct zcl_judge_result *out);
 

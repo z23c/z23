@@ -1,5 +1,5 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
- * purpose: Grades the public-node rows C1 C2 C3 C4 C5 C6 C7 of `fleet.goals` from the
+ * purpose: Grades the public-node rows C1 C2 C3 C4 C5 C6 C7 C8 of `fleet.goals` from the
  *          newest durable receipt each already has: the cold-start
  *          stopwatch ledger and the soak evidence ledger.
  *
@@ -228,6 +228,67 @@ static struct zcl_goal_result rc_c6(const struct zcl_goals_options *o)
     return rc_c6_grade(&j, file);
 }
 
+/* ── C8: parity ledger ────────────────────────────────────────────────── */
+
+static struct zcl_goal_result rc_c8_grade(const struct zcl_judge_result *j,
+                                          const char *file)
+{
+    static const char next[] = "z23 fleet parity sample (on a timer)";
+    long long age_h = (long long)(j->newest_age_sec / RC_HOUR_S);
+
+    if (j->newest_age_sec > (int64_t)RC_C6_WINDOW_H * RC_HOUR_S ||
+        strncmp(j->reason, "stale_evidence_age", 18) == 0)
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                             "stale: newest parity sample is %lld h old; needs "
+                             "%d h of observation, have %.1f h; %s",
+                             age_h, RC_C6_WINDOW_H, j->covered_hours, file);
+    if (strcmp(j->verdict, "MET") == 0)
+        return zcl_goal_make(ZCL_GOAL_PASS, next,
+                             "parity judge MET over %.1f h of %d h, zero hash "
+                             "mismatches, newest sample %lld h old; receipt %s",
+                             j->covered_hours, RC_C6_WINDOW_H, age_h, file);
+    if (strcmp(j->verdict, "NOT_MET") == 0)
+        return zcl_goal_make(ZCL_GOAL_FAIL, next,
+                             "parity judge NOT_MET (%s) over %.1f h; receipt %s",
+                             j->reason, j->covered_hours, file);
+    return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                         "needs %d h of observation, have %.1f h (%s); receipt %s",
+                         RC_C6_WINDOW_H, j->covered_hours, j->reason, file);
+}
+
+static struct zcl_goal_result rc_c8(const struct zcl_goals_options *o)
+{
+    static const char next[] = "z23 fleet parity sample (on a timer)";
+    static struct zcl_judge_result j;
+    char dir_buf[RC_PATH_MAX], file[RC_PATH_MAX], dflt[RC_PATH_MAX], err[RC_ERR_MAX];
+    struct zcl_soak_judge_opts opts;
+    const char *dir =
+        zcl_goals_state_path(o ? o->soak_dir : NULL, "ZCL_SOAK_EVIDENCE_DIR",
+                ".local/state/zclassic23-soak-evidence", o && o->skip_probes,
+                dir_buf, sizeof(dir_buf));
+
+    if (!dir)
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                             "parity receipt probe skipped");
+    if (!zcl_soak_judge_defaults(&opts, dflt, sizeof(dflt), err, sizeof(err)))
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                             "the parity judge settings are invalid: %s", err);
+    (void)snprintf(file, sizeof(file), "%s/parity.jsonl", dir);
+    opts.file = file;
+    opts.window_hours = RC_C6_WINDOW_H;
+    if (o && o->now_unix > 0)
+        opts.now_unix = o->now_unix;
+    if (!zcl_parity_judge(&opts, &j))
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                             "the parity judge could not read %s", file);
+    if (strcmp(j.reason, "no_evidence_file") == 0)
+        return zcl_goal_make(ZCL_GOAL_UNMEASURED, next,
+                             "needs %d h of observation, have 0 h: no receipt at "
+                             "%s",
+                             RC_C6_WINDOW_H, file);
+    return rc_c8_grade(&j, file);
+}
+
 /* ── C1 C2 C4 C5 C7: the newest line of <item>.jsonl ─────────────────── */
 
 static const struct {
@@ -373,6 +434,8 @@ bool zcl_goals_receipt_measure(const struct zcl_goals_options *options,
         *out = rc_c3(options);
     else if (strcmp(id, "C6") == 0)
         *out = rc_c6(options);
+    else if (strcmp(id, "C8") == 0)
+        *out = rc_c8(options);
     else if (zcl_goals_receipt_target(id))
         *out = rc_item(options, id, zcl_goals_receipt_target(id));
     else
