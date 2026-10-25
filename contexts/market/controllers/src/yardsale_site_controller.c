@@ -251,50 +251,63 @@ static size_t yardsale_handle_accept_post(const uint8_t *body,
 
 /* ── The mount ───────────────────────────────────────────────────── */
 
-size_t yardsale_site_handle_request(const char *method, const char *path,
-                                    const uint8_t *body, size_t body_len,
-                                    uint8_t *response, size_t response_max)
-{
-    if (!method || !path || !response || response_max < 1024)
-        return 0;
+/* Outcome of the path cleaning step: the request targets this mount, a
+ * foreign mount (pass through), or a malformed path (serve the 400). */
+enum yardsale_path_state {
+    YARDSALE_PATH_OK,
+    YARDSALE_PATH_FOREIGN,
+    YARDSALE_PATH_BAD
+};
 
+static bool yardsale_site_args_valid(const char *method, const char *path,
+                                     const uint8_t *response,
+                                     size_t response_max)
+{
+    return method && path && response && response_max >= 1024;
+}
+
+/* Strips the query into `clean` (NUL-terminated), enforces the buffer,
+ * then the /yardsale mount prefix. */
+static enum yardsale_path_state yardsale_site_clean_path(const char *path,
+                                                         char *clean,
+                                                         size_t clean_cap)
+{
     const char *query = strchr(path, '?');
     size_t path_len = query ? (size_t)(query - path) : strlen(path);
-    char clean[256];
-    if (path_len == 0 || path_len >= sizeof(clean))
-        return yardsale_error_page("400 Bad Request", "400 Bad Request",
-            "path too long", response, response_max);
+    if (path_len == 0 || path_len >= clean_cap)
+        return YARDSALE_PATH_BAD;
     memcpy(clean, path, path_len);
     clean[path_len] = 0;
 
     if (strncmp(clean, "/yardsale", 9) != 0 ||
         (clean[9] != 0 && clean[9] != '/'))
-        return 0;
+        return YARDSALE_PATH_FOREIGN;
+    return YARDSALE_PATH_OK;
+}
 
-    if (strcmp(method, "POST") == 0) {
-        if (strcmp(clean, "/yardsale/buy") == 0)
-            return yardsale_site_handle_buy_post(body, body_len, response,
-                                            response_max);
-        if (strcmp(clean, "/yardsale/accept") == 0)
-            return yardsale_handle_accept_post(body, body_len, response,
-                                               response_max);
-        return yardsale_error_page("404 Not Found", "404 Not Found",
-            "no such yardsale action", response, response_max);
-    }
-    if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0)
-        return yardsale_error_page("405 Method Not Allowed",
-            "405 Method Not Allowed", "GET, HEAD or POST only",
-            response, response_max);
+static size_t yardsale_site_dispatch_post(const char *clean,
+                                          const uint8_t *body,
+                                          size_t body_len,
+                                          uint8_t *response,
+                                          size_t response_max)
+{
+    if (strcmp(clean, "/yardsale/buy") == 0)
+        return yardsale_site_handle_buy_post(body, body_len, response,
+                                        response_max);
+    if (strcmp(clean, "/yardsale/accept") == 0)
+        return yardsale_handle_accept_post(body, body_len, response,
+                                           response_max);
+    return yardsale_error_page("404 Not Found", "404 Not Found",
+        "no such yardsale action", response, response_max);
+}
 
-    /* Read-only pages need the zswap_ads projection. */
-    struct node_db *ndb = app_runtime_node_db();
-    if (!ndb || !ndb->open) {
-        LOG_WARN("yardsale", "public Yardsale requested while node.db is "
-                 "unavailable");
-        return 0; /* the dispatcher serves its own 503 */
-    }
-
-    int64_t now = (int64_t)platform_time_wall_time_t();
+/* Renders the read-only page selected by `clean` into a scratch buffer
+ * and wraps it in the 200 response; every other shape is the 404 page. */
+static size_t yardsale_site_serve_page(struct node_db *ndb, int64_t now,
+                                       const char *clean,
+                                       uint8_t *response,
+                                       size_t response_max)
+{
     uint8_t *rendered = zcl_malloc(response_max, "yardsale page");
     if (!rendered)
         LOG_RETURN(0, "yardsale", "response allocation failed");
@@ -323,4 +336,40 @@ size_t yardsale_site_handle_request(const char *method, const char *path,
         return yardsale_error_page("404 Not Found", "404 Not Found",
             "no such yardsale page", response, response_max);
     return response_len;
+}
+
+size_t yardsale_site_handle_request(const char *method, const char *path,
+                                    const uint8_t *body, size_t body_len,
+                                    uint8_t *response, size_t response_max)
+{
+    if (!yardsale_site_args_valid(method, path, response, response_max))
+        return 0;
+
+    char clean[256];
+    enum yardsale_path_state path_state =
+        yardsale_site_clean_path(path, clean, sizeof(clean));
+    if (path_state == YARDSALE_PATH_FOREIGN)
+        return 0;
+    if (path_state == YARDSALE_PATH_BAD)
+        return yardsale_error_page("400 Bad Request", "400 Bad Request",
+            "path too long", response, response_max);
+
+    if (strcmp(method, "POST") == 0)
+        return yardsale_site_dispatch_post(clean, body, body_len, response,
+                                           response_max);
+    if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0)
+        return yardsale_error_page("405 Method Not Allowed",
+            "405 Method Not Allowed", "GET, HEAD or POST only",
+            response, response_max);
+
+    /* Read-only pages need the zswap_ads projection. */
+    struct node_db *ndb = app_runtime_node_db();
+    if (!ndb || !ndb->open) {
+        LOG_WARN("yardsale", "public Yardsale requested while node.db is "
+                 "unavailable");
+        return 0; /* the dispatcher serves its own 503 */
+    }
+
+    int64_t now = (int64_t)platform_time_wall_time_t();
+    return yardsale_site_serve_page(ndb, now, clean, response, response_max);
 }
