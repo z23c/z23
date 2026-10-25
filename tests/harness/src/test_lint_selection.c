@@ -12,6 +12,9 @@
  * a commit verified through a fresh private store. NOT proven here: the
  * real gates' unit lists (`z23-lint select --dry` enumerates those from the
  * live Makefile). */
+#if !defined(_WIN32) && !defined(_DEFAULT_SOURCE)
+#define _DEFAULT_SOURCE
+#endif
 #include "test/test_core.h"
 
 #include "lint/lintc/lintc.h"
