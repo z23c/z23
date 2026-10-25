@@ -664,7 +664,6 @@ contexts/wallet/controllers/src/wallet_shielded_keys.c:rpc_z_getmemo:20
 contexts/wallet/controllers/src/wallet_shielded_send.c:z_sendmany_run:87
 contexts/wallet/controllers/src/wallet_shielded_send_shielded.c:z_sendmany_shielded:58
 contexts/wallet/controllers/src/wallet_view_dashboard.c:serve_dashboard:46
-contexts/wallet/controllers/src/wallet_view_node.c:serve_node:20
 contexts/wallet/controllers/src/wallet_view_send.c:serve_send_confirm:17
 contexts/wallet/controllers/src/wallet_view_send.c:serve_send_review:16
 contexts/wallet/controllers/src/wallet_view_sync.c:wv_sync_wallet_from_zclassicd:43
