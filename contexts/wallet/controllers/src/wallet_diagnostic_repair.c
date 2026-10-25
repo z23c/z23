@@ -355,6 +355,90 @@ bool rpc_removestalletxs(const struct json_value *params,
 
     return true;
 }
+/* Classify one wallet UTXO against the chainstate coins tip. Bumps the
+ * matching counter and sets *status; returns true when the UTXO is an
+ * issue (phantom / spent_on_chain / value_mismatch), false when it is
+ * verified. */
+static bool reconcile_classify_utxo(struct wallet_rpc_context *ctx,
+                                    struct db_wallet_utxo *u,
+                                    int *verified, int *phantom,
+                                    int *spent_on_chain, int *mismatched,
+                                    const char **status)
+{
+    struct uint256 tid;
+    memcpy(tid.data, u->txid, 32);
+
+    struct coins c;
+    coins_init(&c);
+    bool found = coins_view_cache_get_coins(ctx->coins_tip, &tid, &c);
+    bool available = found && coins_is_available(&c, u->vout);
+    int64_t chain_val = 0;
+    if (available && u->vout < c.num_vout)
+        chain_val = c.vout[u->vout].value;
+    coins_free(&c);
+
+    if (!found) {
+        *status = "phantom";
+        (*phantom)++;
+        return true;
+    }
+    if (!available) {
+        *status = "spent_on_chain";
+        (*spent_on_chain)++;
+        return true;
+    }
+    if (chain_val != u->value) {
+        *status = "value_mismatch";
+        (*mismatched)++;
+        return true;
+    }
+    *status = "verified";
+    (*verified)++;
+    return false;
+}
+/* Append one "issues" entry for a mismatching wallet UTXO; when fix is
+ * set, mark the outpoint spent in both SQLite and the in-memory wallet. */
+static void reconcile_append_issue_entry(struct wallet_rpc_context *ctx,
+                                         struct json_value *details,
+                                         struct db_wallet_utxo *u,
+                                         const char *status, bool fix,
+                                         int *fixed)
+{
+    static const uint8_t RECONCILE_SENTINEL[32] = {
+        0xff, 0x00, 0xff, 0x00, 'R', 'E', 'C', 'O',
+        'N', 'C', 'I', 'L', 'E', 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
+    };
+
+    struct uint256 tid;
+    memcpy(tid.data, u->txid, 32);
+
+    char txid_hex[65];
+    for (int b = 31; b >= 0; b--)
+        snprintf(txid_hex + (31 - b) * 2, 3, "%02x",
+                 u->txid[b]);
+
+    struct json_value entry = {0};
+    json_set_object(&entry);
+    json_push_kv_str(&entry, "txid", txid_hex);
+    json_push_kv_int(&entry, "vout", u->vout);
+    char amt[32];
+    format_amount(u->value, amt, sizeof(amt));
+    json_push_kv_str(&entry, "wallet_value", amt);
+    json_push_kv_str(&entry, "status", status);
+
+    if (fix) {
+        db_wallet_utxo_mark_spent(ctx->node_db, u->txid,
+                                   u->vout,
+                                   RECONCILE_SENTINEL, 0);
+        wallet_mark_outpoint_spent(ctx->wallet, &tid, u->vout);
+        json_push_kv_bool(&entry, "fixed", true);
+        (*fixed)++;
+    }
+
+    json_push_back(details, &entry);
+    json_free(&entry);
+}
 bool rpc_reconcilewalletutxos(const struct json_value *params,
                                       bool help, struct json_value *result)
 {
@@ -396,69 +480,18 @@ bool rpc_reconcilewalletutxos(const struct json_value *params,
 
     int verified = 0, phantom = 0, spent_on_chain = 0, mismatched = 0;
     int fixed = 0;
-    static const uint8_t RECONCILE_SENTINEL[32] = {
-        0xff, 0x00, 0xff, 0x00, 'R', 'E', 'C', 'O',
-        'N', 'C', 'I', 'L', 'E', 0, 0, 0,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0
-    };
 
     struct json_value details = {0};
     json_set_array(&details);
 
     for (int i = 0; i < count; i++) {
-        struct uint256 tid;
-        memcpy(tid.data, unspent[i].txid, 32);
-
-        struct coins c;
-        coins_init(&c);
-        bool found = coins_view_cache_get_coins(ctx->coins_tip, &tid, &c);
-        bool available = found && coins_is_available(&c, unspent[i].vout);
-        int64_t chain_val = 0;
-        if (available && unspent[i].vout < c.num_vout)
-            chain_val = c.vout[unspent[i].vout].value;
-        coins_free(&c);
-
         const char *status;
-        if (!found) {
-            status = "phantom";
-            phantom++;
-        } else if (!available) {
-            status = "spent_on_chain";
-            spent_on_chain++;
-        } else if (chain_val != unspent[i].value) {
-            status = "value_mismatch";
-            mismatched++;
-        } else {
-            status = "verified";
-            verified++;
+        if (!reconcile_classify_utxo(ctx, &unspent[i], &verified, &phantom,
+                                     &spent_on_chain, &mismatched, &status))
             continue;
-        }
 
-        char txid_hex[65];
-        for (int b = 31; b >= 0; b--)
-            snprintf(txid_hex + (31 - b) * 2, 3, "%02x",
-                     unspent[i].txid[b]);
-
-        struct json_value entry = {0};
-        json_set_object(&entry);
-        json_push_kv_str(&entry, "txid", txid_hex);
-        json_push_kv_int(&entry, "vout", unspent[i].vout);
-        char amt[32];
-        format_amount(unspent[i].value, amt, sizeof(amt));
-        json_push_kv_str(&entry, "wallet_value", amt);
-        json_push_kv_str(&entry, "status", status);
-
-        if (fix) {
-            db_wallet_utxo_mark_spent(ctx->node_db, unspent[i].txid,
-                                       unspent[i].vout,
-                                       RECONCILE_SENTINEL, 0);
-            wallet_mark_outpoint_spent(ctx->wallet, &tid, unspent[i].vout);
-            json_push_kv_bool(&entry, "fixed", true);
-            fixed++;
-        }
-
-        json_push_back(&details, &entry);
-        json_free(&entry);
+        reconcile_append_issue_entry(ctx, &details, &unspent[i], status,
+                                     fix, &fixed);
     }
 
     int64_t balance_after = fix ? db_wallet_utxo_balance(ctx->node_db)
@@ -474,6 +507,70 @@ bool rpc_reconcilewalletutxos(const struct json_value *params,
         spent_on_chain, mismatched, fixed, balance_before, balance_after);
     json_push_kv(result, "issues", &details);
     json_free(&details);
+    return true;
+}
+/* Check the chainstate coins tip for one wallet UTXO's outpoint. */
+static bool coins_tip_outpoint_available(struct wallet_rpc_context *ctx,
+                                         struct db_wallet_utxo *u)
+{
+    struct uint256 tid;
+    memcpy(tid.data, u->txid, 32);
+
+    struct coins c;
+    coins_init(&c);
+    bool found = coins_view_cache_get_coins(ctx->coins_tip, &tid, &c);
+    bool available = found && coins_is_available(&c, u->vout);
+    coins_free(&c);
+    return available;
+}
+/* Delete the wallet transaction row once its last UTXO is gone. */
+static bool purge_tx_when_last_utxo_gone(struct wallet_rpc_context *ctx,
+                                         struct db_wallet_utxo *u,
+                                         int *txs_deleted)
+{
+    int remaining = db_wallet_utxo_count_for_tx(ctx->node_db, u->txid);
+    if (remaining == 0) {
+        if (!db_wallet_tx_delete(ctx->node_db, u->txid))
+            return false;
+        (*txs_deleted)++;
+    }
+    return true;
+}
+/* One pass over the wallet UTXO list: purge phantom entries (and their
+ * transaction rows once emptied). On a failed delete, returns false and
+ * sets *fail_message; the caller rolls back and reports it. */
+static bool purge_phantom_utxo_pass(struct wallet_rpc_context *ctx,
+                                    struct db_wallet_utxo *unspent,
+                                    int count, bool dryrun,
+                                    int *utxos_deleted, int *txs_deleted,
+                                    int64_t *amount_purged,
+                                    const char **fail_message)
+{
+    for (int i = 0; i < count; i++) {
+        struct uint256 tid;
+        memcpy(tid.data, unspent[i].txid, 32);
+
+        if (coins_tip_outpoint_available(ctx, &unspent[i]))
+            continue;
+
+        *amount_purged += unspent[i].value;
+
+        if (!dryrun) {
+            if (!db_wallet_utxo_delete(ctx->node_db, unspent[i].txid,
+                                       unspent[i].vout)) {
+                *fail_message = "Failed to delete orphan wallet UTXO";
+                return false;
+            }
+            wallet_mark_outpoint_spent(ctx->wallet, &tid, unspent[i].vout);
+        }
+        (*utxos_deleted)++;
+
+        if (!dryrun && !purge_tx_when_last_utxo_gone(ctx, &unspent[i],
+                                                     txs_deleted)) {
+            *fail_message = "Failed to delete orphan wallet transaction";
+            return false;
+        }
+    }
     return true;
 }
 bool rpc_purgephantomutxos(const struct json_value *params,
@@ -530,47 +627,13 @@ bool rpc_purgephantomutxos(const struct json_value *params,
         return false;
     }
 
-    for (int i = 0; i < count; i++) {
-        struct uint256 tid;
-        memcpy(tid.data, unspent[i].txid, 32);
-
-        struct coins c;
-        coins_init(&c);
-        bool found = coins_view_cache_get_coins(ctx->coins_tip, &tid, &c);
-        bool available = found && coins_is_available(&c, unspent[i].vout);
-        coins_free(&c);
-
-        if (available)
-            continue;
-
-        amount_purged += unspent[i].value;
-
-        if (!dryrun) {
-            if (!db_wallet_utxo_delete(ctx->node_db, unspent[i].txid,
-                                       unspent[i].vout)) {
-                wallet_diag_rollback_best_effort(ctx->node_db,
-                                                 "purge-orphans rollback");
-                json_set_str(result, "Failed to delete orphan wallet UTXO");
-                return false;
-            }
-            wallet_mark_outpoint_spent(ctx->wallet, &tid, unspent[i].vout);
-        }
-        utxos_deleted++;
-
-        if (!dryrun) {
-            int remaining = db_wallet_utxo_count_for_tx(ctx->node_db,
-                                                         unspent[i].txid);
-            if (remaining == 0) {
-                if (!db_wallet_tx_delete(ctx->node_db, unspent[i].txid)) {
-                    wallet_diag_rollback_best_effort(ctx->node_db,
-                                                     "purge-orphans rollback");
-                    json_set_str(result,
-                                 "Failed to delete orphan wallet transaction");
-                    return false;
-                }
-                txs_deleted++;
-            }
-        }
+    const char *purge_fail = NULL;
+    if (!purge_phantom_utxo_pass(ctx, unspent, count, dryrun, &utxos_deleted,
+                                 &txs_deleted, &amount_purged, &purge_fail)) {
+        wallet_diag_rollback_best_effort(ctx->node_db,
+                                         "purge-orphans rollback");
+        json_set_str(result, purge_fail);
+        return false;
     }
 
     if (!dryrun) {
