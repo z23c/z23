@@ -130,10 +130,11 @@ static void die_usage(const char *prog)
     fprintf(stderr,
         "usage: %s write <tor-dir> <tor_commit> <compiler_id> <configure_args_sha256>\n"
         "       %s check <tor-dir> [--tor-commit <hex>] [--compiler-id <id>]\n"
+        "       %s check-legacy-policy-rebuild <tor-dir> <tor_commit> <compiler_id>\n"
         "       %s rewrite-compiler-id <tor-dir> <new-compiler-id>\n"
         "       %s check-compiler-results <positive-status> <negative-status> <positive-log> <negative-log>\n"
         "       %s --selftest\n",
-        prog, prog, prog, prog, prog);
+        prog, prog, prog, prog, prog, prog);
     exit(2);
 }
 
@@ -624,6 +625,88 @@ static int cmd_check(const char *tor_dir, const char *want_tor_commit, const cha
     return all_ok ? 0 : 1;
 }
 
+static unsigned legacy_manifest_field(const char *key)
+{
+    if (strcmp(key, "tor_commit") == 0) return 1;
+    if (strcmp(key, "compiler_id") == 0) return 2;
+    if (strcmp(key, "configure_args_sha256") == 0) return 4;
+    if (strcmp(key, "archive_sha256") == 0) return 8;
+    return 0;
+}
+
+/* Only the four legacy keys may authorize migration; explicit policy,
+ * unknown keys, duplicates and truncation refuse. Never writes a manifest. */
+static int legacy_archive_text(const char *val)
+{
+    char hashes[ARCHIVE_COUNT][ZSHA256_HEX_LEN], extra;
+    if (sscanf(val, "%64s %64s %64s %64s %c", hashes[0], hashes[1],
+               hashes[2], hashes[3], &extra) != ARCHIVE_COUNT)
+        return 0;
+    for (int i = 0; i < ARCHIVE_COUNT; i++)
+        if (!is_hex_string(hashes[i], ZSHA256_HEX_LEN - 1)) return 0;
+    return 1;
+}
+
+/* Byte-aware bounded reader: never let NUL/control bytes hide a record
+ * suffix from the text parser. Binary mode also forbids Windows text EOF. */
+static int legacy_manifest_line(FILE *f, char *line, size_t cap)
+{
+    size_t used = 0;
+    int byte;
+    while ((byte = fgetc(f)) != EOF) {
+        if (byte == '\n') {
+            line[used] = '\0';
+            return 1;
+        }
+        if ((byte < 32 && byte != '\r') || byte > 126 || used >= cap - 1)
+            return -1;
+        line[used++] = (char)byte;
+    }
+    if (ferror(f)) return -1;
+    line[used] = '\0';
+    return used != 0;
+}
+
+static int legacy_manifest_shape(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    unsigned seen = 0;
+    char line[LINE_BUF_MAX];
+    int valid = 1, status = 0;
+    while ((status = legacy_manifest_line(f, line, sizeof(line))) > 0) {
+        char *eq = strchr(line, '=');
+        if (!eq) { valid = 0; break; }
+        *eq = '\0';
+        unsigned field = legacy_manifest_field(line);
+        if (!field || (seen & field)) { valid = 0; break; }
+        if (field == 8 && !legacy_archive_text(eq + 1)) { valid = 0; break; }
+        seen |= field;
+    }
+    valid = valid && status == 0 && seen == 15;
+    fclose(f);
+    return valid;
+}
+
+static int cmd_check_legacy_rebuild(const char *dir, const char *pin,
+                                   const char *compiler)
+{
+    char path[PATH_BUF_MAX];
+    provenance_t pv;
+    if (join_path(path, dir, TOR_PROVENANCE_NAME) != 0 ||
+        !legacy_manifest_shape(path) || parse_manifest(path, &pv) != 0)
+        return 1;
+    if (validate_write_inputs(pv.tor_commit, pv.compiler_id,
+                              pv.configure_args_sha256) != 0)
+        return 1;
+    if (!check_tor_commit_field(&pv, pin) ||
+        !check_compiler_id_field(&pv, compiler) ||
+        !check_archive_sha256_field(dir, &pv))
+        return 1;
+    printf("tor-provenance: intact legacy bundle eligible for rebuild only\n");
+    return 0;
+}
+
 /* ---- rewrite-compiler-id -------------------------------------------
  * Migration for a manifest written under an older compiler-identity scheme
  * (or a manifest whose ambient recording drifted, e.g. the CPATH/PATH-bound
@@ -867,24 +950,103 @@ static int selftest_prepare(const char *base)
 
 /* Old and wrong policy manifests must fail both readiness and identity-only
  * migration, and migration must leave every manifest byte unchanged. */
+static int selftest_legacy_mutations(const char *base, const char *path,
+                                    const char *legacy, const provenance_t *pv)
+{
+    static const char *const additions[] = {
+        "unknown=value\n", "tor_commit=duplicate\n",
+        "fatal_handler_policy=wrong\n", "fatal_handler_policy=owner-v1\n"
+    };
+    char changed[LINE_BUF_MAX];
+    for (size_t i = 0; i < sizeof(additions) / sizeof(additions[0]); i++) {
+        int n = snprintf(changed, sizeof(changed), "%s%s", legacy, additions[i]);
+        if (n <= 0 || (size_t)n >= sizeof(changed) ||
+            write_fixture_archive(path, changed) != 0 ||
+            cmd_check_legacy_rebuild(base, pv->tor_commit, pv->compiler_id) == 0)
+            return 1;
+    }
+    return write_fixture_archive(path, legacy) != 0;
+}
+
+static int selftest_legacy_integrity(const char *base, const provenance_t *pv)
+{
+    if (cmd_check_legacy_rebuild(base, "0000000000000000000000000000000000000000",
+                                pv->compiler_id) == 0 ||
+        cmd_check_legacy_rebuild(base, pv->tor_commit, "wrong-compiler") == 0)
+        return 1;
+    char path[PATH_BUF_MAX], first;
+    if (join_path(path, base, ARCHIVE_RELPATHS[0]) != 0) return 1;
+    int fd = open(path, O_RDWR | O_BINARY);
+    if (fd < 0) return 1;
+    if (read(fd, &first, 1) != 1) { close(fd); return 1; }
+    char altered = first ^ 1;
+    if (lseek(fd, 0, SEEK_SET) != 0 || write(fd, &altered, 1) != 1) {
+        close(fd); return 1;
+    }
+    int refused = cmd_check_legacy_rebuild(base, pv->tor_commit, pv->compiler_id);
+    int restored = lseek(fd, 0, SEEK_SET) == 0 && write(fd, &first, 1) == 1;
+    close(fd);
+    return !refused || !restored;
+}
+
+static int selftest_read_manifest(const char *path, char *text, size_t cap)
+{
+    FILE *f = fopen(path, "r");
+    if (!f) return 1;
+    size_t bytes = fread(text, 1, cap - 1, f);
+    int bad = ferror(f) || !feof(f);
+    fclose(f);
+    text[bytes] = '\0';
+    return bad;
+}
+
+static int selftest_binary_legacy(const char *base, const char *path,
+                                 const char *legacy, const provenance_t *pv)
+{
+    const char *end = strchr(legacy, '\n');
+    if (!end) return 1;
+    static const char hidden[] = "\0fatal_handler_policy=wrong";
+    size_t prefix = (size_t)(end - legacy), suffix = strlen(end);
+    FILE *f = fopen(path, "wb");
+    if (!f) return 1;
+    int written = fwrite(legacy, 1, prefix, f) == prefix &&
+                  fwrite(hidden, 1, sizeof(hidden) - 1, f) == sizeof(hidden) - 1 &&
+                  fwrite(end, 1, suffix, f) == suffix;
+    int closed = fclose(f);
+    if (!written || closed != 0) return 1;
+    char before[ZSHA256_HEX_LEN], after[ZSHA256_HEX_LEN];
+    if (sha256_hex_of_file(path, before) != 0 ||
+        cmd_check_legacy_rebuild(base, pv->tor_commit, pv->compiler_id) == 0 ||
+        sha256_hex_of_file(path, after) != 0 || strcmp(before, after) != 0)
+        return 1;
+    return write_fixture_archive(path, legacy) != 0;
+}
+
+static int selftest_legacy_case(const char *base, const char *path,
+                               const char *legacy, const provenance_t *pv,
+                               int wrong)
+{
+    if ((cmd_check_legacy_rebuild(base, pv->tor_commit, pv->compiler_id) == 0) !=
+        (wrong == 0)) return 1;
+    if (!wrong && quiet_check(base, NULL, NULL) == 0) return 1;
+    if (!wrong && (selftest_legacy_mutations(base, path, legacy, pv) != 0 ||
+                   selftest_legacy_integrity(base, pv) != 0)) return 1;
+    if (!wrong && selftest_binary_legacy(base, path, legacy, pv) != 0) return 1;
+    return 0;
+}
+
 static int selftest_fatal_policy(const char *base)
 {
     char path[PATH_BUF_MAX], original[LINE_BUF_MAX];
-    if (join_path(path, base, TOR_PROVENANCE_NAME) != 0)
+    if (join_path(path, base, TOR_PROVENANCE_NAME) != 0 ||
+        selftest_read_manifest(path, original, sizeof(original)) != 0)
         return 1;
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return 1;
-    size_t bytes = fread(original, 1, sizeof(original) - 1, f);
-    int bad = ferror(f) || !feof(f);
-    fclose(f);
-    if (bad)
-        return 1;
-    original[bytes] = '\0';
     const char *line = "fatal_handler_policy=" FATAL_HANDLER_POLICY "\n";
     size_t policy_bytes = strlen(line);
     if (strncmp(original, line, policy_bytes) != 0)
         return 1;
+    provenance_t pv;
+    if (parse_manifest(path, &pv) != 0) return 1;
     for (int wrong = 0; wrong < 2; wrong++) {
         char mutant[LINE_BUF_MAX];
         snprintf(mutant, sizeof(mutant), "%s", original);
@@ -900,6 +1062,7 @@ static int selftest_fatal_policy(const char *base)
             cmd_rewrite_compiler_id(base, "replacement-compiler") == 0 ||
             sha256_hex_of_file(path, after) != 0 || strcmp(before, after) != 0)
             return 1;
+        if (selftest_legacy_case(base, path, mutant, &pv, wrong) != 0) return 1;
     }
     return write_fixture_archive(path, original) != 0;
 }
@@ -1081,6 +1244,11 @@ int main(int argc, char **argv)
     if (strcmp(argv[1], "check-compiler-results") == 0) {
         if (argc != 6) die_usage(argv[0]);
         return cmd_check_compiler_results(argv[2], argv[3], argv[4], argv[5]);
+    }
+
+    if (strcmp(argv[1], "check-legacy-policy-rebuild") == 0) {
+        if (argc != 5) die_usage(argv[0]);
+        return cmd_check_legacy_rebuild(argv[2], argv[3], argv[4]);
     }
 
     if (strcmp(argv[1], "write") == 0) {

@@ -3,23 +3,8 @@
 # Establish the four vendored Tor archives the node link consumes, so that a
 # plain `make` produces a node that can actually reach the onion network.
 #
-# WHY THIS EXISTS. The link selects real Tor when the four archives exist and
-# silently falls back to vendor/lib/libtor_stub.a when they do not (Makefile
-# TOR_FULL / TOR_LIBS). That fallback is invisible: the build compiles, links,
-# and passes the whole suite, and the only symptom is a node whose `-tor` is
-# inert -- blind to the onion network this project is built on. A default that
-# can only be noticed by inspecting telemetry is not a default, it is a trap.
-# So the archives become an ordinary build input, established the same way the
-# rest of vendor/ is: present -> use them, absent -> make them.
-#
-# Three ways to get them, cheapest first:
-#   1. Already here.                                     (no work)
-#   2. Copy them from a sibling checkout that has them   (milliseconds)
-#      -- every `git worktree add` lane shares its object
-#      store with a primary checkout that has usually
-#      already paid for the build; a reflink shares the
-#      blocks, an independent inode either way.
-#   3. Build them from the pinned submodule.             (minutes)
+# Prefer a verified local bundle, then an independent-inode donor copy,
+# then a pinned source build. Intact legacy policy requires clean/rebuild.
 #
 # THE STUB IS STILL REACHABLE, but only by asking for it by name:
 # `make ZCL_TOR=stub ...`. That prints one loud line and produces a binary
@@ -143,21 +128,9 @@ primary_checkout() {
     esac
 }
 
-# Copy (never hardlink) the archives from a checkout that already has them.
-# A shared inode looks free, but it is not, for this tree specifically:
-#   1. check-no-hardlink-seeding fails any multiply-linked dependency in a
-#      checkout, so every lane that runs make would turn the primary
-#      checkout red the moment it links one of these archives.
-#   2. The landing leaf refuses a landing worktree whose vendor inputs carry
-#      links it cannot explain
-#      (proof_generation_dependency_unexplained_links).
-#   3. The build's source identity hashes the ctime of tracked sources and
-#      transients; a link() or unlink() on a shared inode moves the
-#      primary's ctime too, and that has refused ship gates with
-#      "source build superseded".
-# So each worktree gets its own inode: a reflink where the filesystem can
-# share blocks for free, a byte copy otherwise -- that copy is the accepted
-# price. Falls back to a copy across filesystems (EXDEV) same as before.
+# Copy with independent inodes: hardlinks violate dependency admission and
+# move the donor's ctime, invalidating sealed source identities. Reflinks
+# may share blocks; ordinary copies remain the cross-filesystem fallback.
 link_from() {
     local src="$1" a linked=0
     [ -n "$src" ] || return 1
@@ -229,6 +202,30 @@ do_check() {
     return 1
 }
 
+legacy_policy_rebuild_allowed() {
+    local cc cid pin actual
+    cc="$(tor_ambient_compiler)" || return 1
+    cid="$(zcl_tor_compiler_identity_for_cc "$SCRIPT_ROOT" "$cc" 2>/dev/null)" || return 1
+    pin="$(git -C "$ROOT" rev-parse HEAD:vendor/tor 2>/dev/null)" || return 1
+    actual="$(git -C "$ROOT/vendor/tor" rev-parse HEAD 2>/dev/null)" || return 1
+    [ "$actual" = "$pin" ] || return 1
+    "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
+        "$ROOT/$TOR_TREE" "$pin" "$cid"
+}
+
+rebuild_legacy_policy() {
+    [ -s "$ROOT/$TOR_TREE/Makefile" ] || {
+        echo 'tor-ready: legacy rebuild requires generated Tor Makefile; run make tor-full intentionally' >&2
+        return 1
+    }
+    make -C "$ROOT/$TOR_TREE" clean || {
+        echo 'tor-ready: legacy Tor clean failed; no policy was upgraded' >&2
+        return 1
+    }
+    VENDOR_TARGET="$TRIPLE" "$ROOT/tools/scripts/build_tor_full.sh" || return 1
+    have_all
+}
+
 do_ready() {
     if [ "${ZCL_TOR:-full}" = stub ]; then
         echo "$STUB_BANNER" >&2
@@ -243,33 +240,15 @@ do_ready() {
         echo "tor-ready: real Tor archives already present ($TOR_TREE)"
         return 0
     fi
-    # have_all() failing means EITHER "no manifest yet" (safe: the archives
-    # are real, nothing has recorded what produced them, so establishing one
-    # -- by rebuilding, or by copying a sibling's matching archives+manifest
-    # -- is an honest repair) OR "a manifest exists and disagrees with the
-    # archives on disk" (corruption or tampering: the archive bytes changed
-    # out from under a record that used to be true). Only the first case
-    # falls through to link_from/build_tor_full.sh below. The second must
-    # fail here, loudly, and must NOT reach either: link_from would silently
-    # skip re-copying an archive that is merely non-empty (corrupted counts),
-    # and build_tor_full.sh's `make libtor.a` no-ops when the corrupted
-    # archive's mtime already looks newer than its inputs -- either path
-    # would let this function report success while quietly re-hashing (or
-    # re-labeling) bytes nothing actually rebuilt. That is exactly the
-    # "write a manifest from ambient values inside a check" failure mode
-    # this tool exists to prevent.
+    # Only an intact, pinned legacy bundle may reach a clean/rebuild. Every
+    # other existing mismatch refuses, without copying donors or relabeling.
     if manifest_present && archives_all_present; then
-        # This probe is best-effort (its caller, the tor-provenance-ready
-        # Make prerequisite, always swallows its exit status with `|| true`
-        # -- see the comment on that target). The real gate is
-        # check-tor-provenance / check_tor_provenance.sh, run right after
-        # this, which prints exactly which field mismatched and, for
-        # compiler_id, both the recorded and actual values (each a readable
-        # "sha256:<hex> version:<line> triple:<value>" preimage, never a
-        # secret). Saying FAIL here -- when this probe is not the judge and
-        # its failure changes nothing -- read as a real gate failure inside
-        # a passing `make lint` once; say WARN instead so there is exactly
-        # one honest verdict per run.
+        if legacy_policy_rebuild_allowed; then
+            [ "${1:-}" != link-only ] || return 1
+            rebuild_legacy_policy
+            return $?
+        fi
+        # The independent provenance gate remains the judge of this probe.
         echo "tor-ready: WARN (best-effort probe; judged by check-tor-provenance) $TOR_TREE has a provenance manifest that does not match its archives here -- run 'make check-tor-provenance' for the exact mismatch, or 'make tor-full' to rebuild intentionally" >&2
         return 1
     fi
@@ -472,8 +451,26 @@ case "${1:-ready}" in
         # carried manifest, so delete only the manifest.
         sed '/^fatal_handler_policy=/d' "$fake_primary/$TOR_TREE/.provenance" > \
             "$fake_wt/$TOR_TREE/.provenance"
+        "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
+            "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null || {
+            echo 'tor-ready: selftest FAILED intact legacy bundle refused' >&2
+            exit 1
+        }
         if (ROOT="$fake_wt"; cd "$fake_wt" && have_all) >/dev/null 2>&1; then
             echo 'tor_archives_ready: selftest FAILED — old policy manifest passed readiness' >&2
+            exit 1
+        fi
+        printf 'corrupt' >>"$fake_wt/$TOR_TREE/libtor.a"
+        if "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
+            "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null 2>&1; then
+            echo 'tor-ready: selftest FAILED corrupt legacy bundle was eligible' >&2
+            exit 1
+        fi
+        cp -p "$fake_primary/$TOR_TREE/libtor.a" "$fake_wt/$TOR_TREE/libtor.a"
+        printf 'fatal_handler_policy=wrong\n' >>"$fake_wt/$TOR_TREE/.provenance"
+        if "$(zcl_tor_provenance_bin "$SCRIPT_ROOT")" check-legacy-policy-rebuild \
+            "$fake_wt/$TOR_TREE" "$(printf '%040x' 1)" "$selftest_cid" >/dev/null 2>&1; then
+            echo 'tor-ready: selftest FAILED explicit wrong policy was eligible' >&2
             exit 1
         fi
         rm -f "$fake_wt/$TOR_TREE/.provenance"
