@@ -176,7 +176,8 @@ static bool rpc_validateaddress(const struct json_value *params, bool help,
     rpc_params_expect(&p, 1, 1);
     const char *addr = rpc_require_str(&p, 0, "address");
     if (rpc_params_invalid(&p)) { rpc_params_error(&p, result); return false; }
-    if (!validateaddress_text_ok(addr, result))
+    bool addr_text_ok = validateaddress_text_ok(addr, result);
+    if (!addr_text_ok)
         return false;
     const struct chain_params *cp = chain_params_get();
 
