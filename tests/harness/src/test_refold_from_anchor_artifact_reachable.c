@@ -159,6 +159,237 @@ static bool raa_cursor_is(sqlite3 *db, const char *stage, int32_t want)
     return cur == (uint64_t)want;
 }
 
+/* ── ABSENT: no artifact at all (env var unset, no file). ────────────── */
+static int raa_check_absent_artifact(struct node_db *ndb, bool ndb_ok,
+                                     const struct sha3_utxo_checkpoint *cp)
+{
+    int failures = 0;
+    unsetenv("ZCL_MINT_ANCHOR_OUT");
+    int32_t h = -99;
+    bool avail = ndb_ok &&
+        boot_refold_from_anchor_artifact_available(ndb, &h);
+    RAA_CHECK("ABSENT: artifact_available() is false", !avail);
+    RAA_CHECK("ABSENT: anchor_height_out still reports the compiled "
+              "checkpoint height (the probe fails on REACHABILITY, "
+              "not on the checkpoint's own existence)",
+              h == cp->height);
+    return failures;
+}
+
+/* ── MISMATCH: snapshot present, but its body SHA3 != checkpoint ─────── */
+static int raa_check_mismatch_artifact(struct node_db *ndb, bool ndb_ok,
+                                       const char *dir,
+                                       const struct raa_built *tampered,
+                                       const struct sha3_utxo_checkpoint *cp)
+{
+    int failures = 0;
+    char snap[400];
+    snprintf(snap, sizeof(snap), "%s/mismatch.snapshot", dir);
+    RAA_CHECK("MISMATCH: tampered snapshot written",
+              raa_write_n(snap, tampered, tampered->file_len));
+    setenv("ZCL_MINT_ANCHOR_OUT", snap, 1);
+    int32_t h = -99;
+    bool avail = ndb_ok &&
+        boot_refold_from_anchor_artifact_available(ndb, &h);
+    RAA_CHECK("MISMATCH: artifact_available() is false "
+              "(body SHA3 recompute != header-claimed root)", !avail);
+    RAA_CHECK("MISMATCH: anchor_height_out still == checkpoint height",
+              h == cp->height);
+    return failures;
+}
+
+/* ── WRONG-COUNT: clean SHA3, but the CHECKPOINT's claimed count differs
+ * from the snapshot's own count — the count cross-check inside
+ * boot_legacy_uss_matches_checkpoint, a DISTINCT guard from the SHA3
+ * recompute above. ─────────────────────────────────────────────────── */
+static int raa_check_wrong_count_artifact(struct node_db *ndb, bool ndb_ok,
+                                          const char *dir,
+                                          const struct raa_built *clean,
+                                          const struct sha3_utxo_checkpoint *cp)
+{
+    int failures = 0;
+    char snap[400];
+    snprintf(snap, sizeof(snap), "%s/wrongcount.snapshot", dir);
+    RAA_CHECK("WRONG-COUNT: clean snapshot written",
+              raa_write_n(snap, clean, clean->file_len));
+    setenv("ZCL_MINT_ANCHOR_OUT", snap, 1);
+
+    struct sha3_utxo_checkpoint cp_bad_count = *cp;
+    cp_bad_count.utxo_count = clean->count + 1;  /* count guard rejects */
+    checkpoints_set_sha3_override_for_test(&cp_bad_count);
+
+    int32_t h = -99;
+    bool avail = ndb_ok &&
+        boot_refold_from_anchor_artifact_available(ndb, &h);
+    RAA_CHECK("WRONG-COUNT: artifact_available() is false", !avail);
+    RAA_CHECK("WRONG-COUNT: anchor_height_out still == checkpoint height",
+              h == cp_bad_count.height);
+
+    checkpoints_set_sha3_override_for_test(cp);  /* restore */
+    return failures;
+}
+
+/* ── MATCH: a genuinely verified snapshot IS reachable. ──────────────── */
+static int raa_check_match_artifact(struct node_db *ndb, bool ndb_ok,
+                                    const char *dir,
+                                    const struct raa_built *clean,
+                                    const struct sha3_utxo_checkpoint *cp)
+{
+    int failures = 0;
+    char snap[400];
+    snprintf(snap, sizeof(snap), "%s/match.snapshot", dir);
+    RAA_CHECK("MATCH: clean snapshot written",
+              raa_write_n(snap, clean, clean->file_len));
+    setenv("ZCL_MINT_ANCHOR_OUT", snap, 1);
+    int32_t h = -99;
+    bool avail = ndb_ok &&
+        boot_refold_from_anchor_artifact_available(ndb, &h);
+    RAA_CHECK("MATCH: artifact_available() is true", avail);
+    RAA_CHECK("MATCH: anchor_height_out == checkpoint height",
+              h == cp->height);
+    return failures;
+}
+
+static bool raa_upstream_cursors_land_at_anchor_plus_1(sqlite3 *pk)
+{
+    static const char *const upstream_stages[] = {
+        "header_admit", "validate_headers", "body_fetch", "body_persist",
+        "script_validate", "proof_validate", "utxo_apply",
+    };
+    bool upstream_at_anchor_plus_1 = true;
+    for (size_t i = 0;
+         i < sizeof(upstream_stages) / sizeof(upstream_stages[0]); i++) {
+        bool ok = pk && raa_cursor_is(pk, upstream_stages[i],
+                                      REDUCER_FRONTIER_TRUSTED_ANCHOR + 1);
+        if (!ok)
+            fprintf(stderr,
+                    "  [cursor] stage=%s did NOT land at anchor+1 "
+                    "(%d)\n", upstream_stages[i],
+                    (int)REDUCER_FRONTIER_TRUSTED_ANCHOR + 1);
+        upstream_at_anchor_plus_1 = upstream_at_anchor_plus_1 && ok;
+    }
+    return upstream_at_anchor_plus_1;
+}
+
+/* The negative half of the same claim: none of the eight sit at 0. A
+ * cursor forcer that no-ops (leaves cursors at their fresh-init
+ * default) would pass the above checks trivially wrong only if the
+ * anchor itself were 0; make the "not genesis" half explicit too. */
+static bool raa_no_stage_cursor_sits_at_genesis(sqlite3 *pk)
+{
+    static const char *const all_stages[] = {
+        "header_admit", "validate_headers", "body_fetch", "body_persist",
+        "script_validate", "proof_validate", "utxo_apply", "tip_finalize",
+    };
+    bool none_at_genesis = true;
+    for (size_t i = 0; i < sizeof(all_stages) / sizeof(all_stages[0]); i++)
+        none_at_genesis = none_at_genesis &&
+            pk && !raa_cursor_is(pk, all_stages[i], 0);
+    return none_at_genesis;
+}
+
+/* ── Cursor assertion: a MATCHING artifact drives boot_refold_from_anchor_
+ * reset, which must force ALL EIGHT stage cursors to (or just past) the
+ * anchor height — never 0/genesis — and mark the refold_from_anchor
+ * floor flag. ───────────────────────────────────────────────────────
+ *
+ * Two cursor conventions meet at the anchor
+ * (engine/jobs/src/tip_finalize_anchor.c): the reset stamps all 8 cursors
+ * to the bare anchor, then tip_finalize_stage_seed_anchor() raises the 7
+ * upstream stages to anchor+1:
+ *   - upstream stages (header_admit, validate_headers, body_fetch,
+ *     body_persist, script_validate, proof_validate, utxo_apply) use "next
+ *     height to process": cursor == anchor+1 (as coins_applied_height).
+ *   - tip_finalize uses "served tip": cursor == anchor exactly.
+ * The exact split is asserted so a change to either convention is caught.
+ *
+ * Uses REDUCER_FRONTIER_TRUSTED_ANCHOR (the real compiled mainnet anchor)
+ * rather than the small override height above, so "not genesis" is
+ * unambiguous; cursor forcing is independent of the checkpoint override. */
+static int raa_check_cursor_reset(const char *dir)
+{
+    int failures = 0;
+    char pdir[300];
+    snprintf(pdir, sizeof(pdir), "%s/cursor_pos", dir);
+    RAA_CHECK("cursor: mkdir", mkdir(pdir, 0755) == 0 || errno == EEXIST);
+
+    /* A DEDICATED snapshot whose header's own height field ==
+     * REDUCER_FRONTIER_TRUSTED_ANCHOR: boot_legacy_uss_matches_checkpoint
+     * cross-checks header->height against checkpoint->height (a distinct
+     * guard from the body-SHA3/count checks the sub-cases above already
+     * cover), so reusing `clean` (header height 4321) against a
+     * checkpoint override at the real anchor height would spuriously
+     * fail as a "component mismatch" — not what this sub-case tests. */
+    struct raa_built anchor_snap;
+    raa_build_snapshot(&anchor_snap, /*tamper=*/false,
+                       /*height=*/(uint32_t)REDUCER_FRONTIER_TRUSTED_ANCHOR);
+
+    char psnap[400];
+    snprintf(psnap, sizeof(psnap), "%s/utxo-anchor.snapshot", pdir);
+    setenv("ZCL_MINT_ANCHOR_OUT", psnap, 1);
+    RAA_CHECK("cursor: matching snapshot written",
+              raa_write_n(psnap, &anchor_snap, anchor_snap.file_len));
+
+    struct sha3_utxo_checkpoint cp_real;
+    memset(&cp_real, 0, sizeof(cp_real));
+    cp_real.height = REDUCER_FRONTIER_TRUSTED_ANCHOR;
+    memcpy(cp_real.sha3_hash, anchor_snap.body_sha3, 32);
+    cp_real.utxo_count = anchor_snap.count;
+    cp_real.total_supply = anchor_snap.total;
+    checkpoints_set_sha3_override_for_test(&cp_real);
+
+    progress_store_close();
+    RAA_CHECK("cursor: progress store opens", progress_store_open(pdir));
+    sqlite3 *pk = progress_store_db();
+    RAA_CHECK("cursor: coins_kv schema", pk && coins_kv_ensure_schema(pk));
+
+    char pdbpath[420];
+    snprintf(pdbpath, sizeof(pdbpath), "%s/node.db", pdir);
+    struct node_db pndb;
+    RAA_CHECK("cursor: node_db opens", node_db_open(&pndb, pdbpath));
+
+    boot_refold_from_anchor_reset(&pndb);
+
+    RAA_CHECK("cursor: the 7 upstream stage cursors == anchor+1 (the "
+              "'next height to process' convention) — never 0/genesis",
+              raa_upstream_cursors_land_at_anchor_plus_1(pk));
+
+    RAA_CHECK("cursor: tip_finalize cursor == the anchor exactly (the "
+              "'served tip' convention) — never 0/genesis",
+              pk && raa_cursor_is(pk, "tip_finalize",
+                                  REDUCER_FRONTIER_TRUSTED_ANCHOR));
+
+    RAA_CHECK("cursor: none of the eight stage cursors sit at genesis (0)",
+              raa_no_stage_cursor_sits_at_genesis(pk));
+
+    int32_t applied = -1;
+    RAA_CHECK("cursor: coins_kv is proven authority after the reset",
+              pk && coins_kv_is_proven_authority(pk, &applied));
+    RAA_CHECK("cursor: coins_applied_height == anchor+1 (utxo_apply's "
+              "next-height convention)",
+              applied == cp_real.height + 1);
+
+    /* boot_refold_from_anchor_reset() does NOT mark the durable
+     * refold_from_anchor floor flag; boot.c's do_from_anchor caller does
+     * that right after the reset
+     * (refold_progress_mark_started_from_anchor(progress_store_db(),
+     * resume_target)). Mirror that production sequence here. */
+    RAA_CHECK("cursor: refold_progress_mark_started_from_anchor "
+              "(the boot.c caller's next step) succeeds",
+              pk && refold_progress_mark_started_from_anchor(
+                        pk, cp_real.height + 1000));
+    RAA_CHECK("cursor: refold_progress_refresh reads the durable flag",
+              refold_progress_refresh(pk));
+    RAA_CHECK("cursor: refold_from_anchor_active() floor flag is set "
+              "(the below-anchor self-repair stays suspended until the "
+              "fold reaches the resume target)",
+              refold_from_anchor_active());
+
+    node_db_close(&pndb);
+    progress_store_close();
+    return failures;
+}
+
 int test_refold_from_anchor_artifact_reachable(void);
 int test_refold_from_anchor_artifact_reachable(void)
 {
@@ -189,203 +420,19 @@ int test_refold_from_anchor_artifact_reachable(void)
     bool ndb_ok = node_db_open(&ndb, ":memory:");
     RAA_CHECK("node_db opens", ndb_ok);
 
-    /* ── ABSENT: no artifact at all (env var unset, no file). ────────────── */
-    {
-        unsetenv("ZCL_MINT_ANCHOR_OUT");
-        int32_t h = -99;
-        bool avail = ndb_ok &&
-            boot_refold_from_anchor_artifact_available(&ndb, &h);
-        RAA_CHECK("ABSENT: artifact_available() is false", !avail);
-        RAA_CHECK("ABSENT: anchor_height_out still reports the compiled "
-                  "checkpoint height (the probe fails on REACHABILITY, "
-                  "not on the checkpoint's own existence)",
-                  h == cp.height);
-    }
+    failures += raa_check_absent_artifact(&ndb, ndb_ok, &cp);
 
-    /* ── MISMATCH: snapshot present, but its body SHA3 != checkpoint ─────── */
-    {
-        char snap[400];
-        snprintf(snap, sizeof(snap), "%s/mismatch.snapshot", dir);
-        RAA_CHECK("MISMATCH: tampered snapshot written",
-                  raa_write_n(snap, &tampered, tampered.file_len));
-        setenv("ZCL_MINT_ANCHOR_OUT", snap, 1);
-        int32_t h = -99;
-        bool avail = ndb_ok &&
-            boot_refold_from_anchor_artifact_available(&ndb, &h);
-        RAA_CHECK("MISMATCH: artifact_available() is false "
-                  "(body SHA3 recompute != header-claimed root)", !avail);
-        RAA_CHECK("MISMATCH: anchor_height_out still == checkpoint height",
-                  h == cp.height);
-    }
+    failures += raa_check_mismatch_artifact(&ndb, ndb_ok, dir, &tampered,
+                                            &cp);
 
-    /* ── WRONG-COUNT: clean SHA3, but the CHECKPOINT's claimed count differs
-     * from the snapshot's own count — the count cross-check inside
-     * boot_legacy_uss_matches_checkpoint, a DISTINCT guard from the SHA3
-     * recompute above. ─────────────────────────────────────────────────── */
-    {
-        char snap[400];
-        snprintf(snap, sizeof(snap), "%s/wrongcount.snapshot", dir);
-        RAA_CHECK("WRONG-COUNT: clean snapshot written",
-                  raa_write_n(snap, &clean, clean.file_len));
-        setenv("ZCL_MINT_ANCHOR_OUT", snap, 1);
+    failures += raa_check_wrong_count_artifact(&ndb, ndb_ok, dir, &clean,
+                                               &cp);
 
-        struct sha3_utxo_checkpoint cp_bad_count = cp;
-        cp_bad_count.utxo_count = clean.count + 1;  /* count guard rejects */
-        checkpoints_set_sha3_override_for_test(&cp_bad_count);
-
-        int32_t h = -99;
-        bool avail = ndb_ok &&
-            boot_refold_from_anchor_artifact_available(&ndb, &h);
-        RAA_CHECK("WRONG-COUNT: artifact_available() is false", !avail);
-        RAA_CHECK("WRONG-COUNT: anchor_height_out still == checkpoint height",
-                  h == cp_bad_count.height);
-
-        checkpoints_set_sha3_override_for_test(&cp);  /* restore */
-    }
-
-    /* ── MATCH: a genuinely verified snapshot IS reachable. ──────────────── */
-    {
-        char snap[400];
-        snprintf(snap, sizeof(snap), "%s/match.snapshot", dir);
-        RAA_CHECK("MATCH: clean snapshot written",
-                  raa_write_n(snap, &clean, clean.file_len));
-        setenv("ZCL_MINT_ANCHOR_OUT", snap, 1);
-        int32_t h = -99;
-        bool avail = ndb_ok &&
-            boot_refold_from_anchor_artifact_available(&ndb, &h);
-        RAA_CHECK("MATCH: artifact_available() is true", avail);
-        RAA_CHECK("MATCH: anchor_height_out == checkpoint height",
-                  h == cp.height);
-    }
+    failures += raa_check_match_artifact(&ndb, ndb_ok, dir, &clean, &cp);
 
     node_db_close(&ndb);
 
-    /* ── Cursor assertion: a MATCHING artifact drives boot_refold_from_anchor_
-     * reset, which must force ALL EIGHT stage cursors to (or just past) the
-     * anchor height — never 0/genesis — and mark the refold_from_anchor
-     * floor flag. ───────────────────────────────────────────────────────
-     *
-     * Two cursor conventions meet at the anchor
-     * (engine/jobs/src/tip_finalize_anchor.c): the reset stamps all 8 cursors
-     * to the bare anchor, then tip_finalize_stage_seed_anchor() raises the 7
-     * upstream stages to anchor+1:
-     *   - upstream stages (header_admit, validate_headers, body_fetch,
-     *     body_persist, script_validate, proof_validate, utxo_apply) use "next
-     *     height to process": cursor == anchor+1 (as coins_applied_height).
-     *   - tip_finalize uses "served tip": cursor == anchor exactly.
-     * The exact split is asserted so a change to either convention is caught.
-     *
-     * Uses REDUCER_FRONTIER_TRUSTED_ANCHOR (the real compiled mainnet anchor)
-     * rather than the small override height above, so "not genesis" is
-     * unambiguous; cursor forcing is independent of the checkpoint override. */
-    {
-        char pdir[300];
-        snprintf(pdir, sizeof(pdir), "%s/cursor_pos", dir);
-        RAA_CHECK("cursor: mkdir", mkdir(pdir, 0755) == 0 || errno == EEXIST);
-
-        /* A DEDICATED snapshot whose header's own height field ==
-         * REDUCER_FRONTIER_TRUSTED_ANCHOR: boot_legacy_uss_matches_checkpoint
-         * cross-checks header->height against checkpoint->height (a distinct
-         * guard from the body-SHA3/count checks the sub-cases above already
-         * cover), so reusing `clean` (header height 4321) against a
-         * checkpoint override at the real anchor height would spuriously
-         * fail as a "component mismatch" — not what this sub-case tests. */
-        struct raa_built anchor_snap;
-        raa_build_snapshot(&anchor_snap, /*tamper=*/false,
-                           /*height=*/(uint32_t)REDUCER_FRONTIER_TRUSTED_ANCHOR);
-
-        char psnap[400];
-        snprintf(psnap, sizeof(psnap), "%s/utxo-anchor.snapshot", pdir);
-        setenv("ZCL_MINT_ANCHOR_OUT", psnap, 1);
-        RAA_CHECK("cursor: matching snapshot written",
-                  raa_write_n(psnap, &anchor_snap, anchor_snap.file_len));
-
-        struct sha3_utxo_checkpoint cp_real;
-        memset(&cp_real, 0, sizeof(cp_real));
-        cp_real.height = REDUCER_FRONTIER_TRUSTED_ANCHOR;
-        memcpy(cp_real.sha3_hash, anchor_snap.body_sha3, 32);
-        cp_real.utxo_count = anchor_snap.count;
-        cp_real.total_supply = anchor_snap.total;
-        checkpoints_set_sha3_override_for_test(&cp_real);
-
-        progress_store_close();
-        RAA_CHECK("cursor: progress store opens", progress_store_open(pdir));
-        sqlite3 *pk = progress_store_db();
-        RAA_CHECK("cursor: coins_kv schema", pk && coins_kv_ensure_schema(pk));
-
-        char pdbpath[420];
-        snprintf(pdbpath, sizeof(pdbpath), "%s/node.db", pdir);
-        struct node_db pndb;
-        RAA_CHECK("cursor: node_db opens", node_db_open(&pndb, pdbpath));
-
-        boot_refold_from_anchor_reset(&pndb);
-
-        static const char *const upstream_stages[] = {
-            "header_admit", "validate_headers", "body_fetch", "body_persist",
-            "script_validate", "proof_validate", "utxo_apply",
-        };
-        bool upstream_at_anchor_plus_1 = true;
-        for (size_t i = 0;
-             i < sizeof(upstream_stages) / sizeof(upstream_stages[0]); i++) {
-            bool ok = pk && raa_cursor_is(pk, upstream_stages[i],
-                                          REDUCER_FRONTIER_TRUSTED_ANCHOR + 1);
-            if (!ok)
-                fprintf(stderr,
-                        "  [cursor] stage=%s did NOT land at anchor+1 "
-                        "(%d)\n", upstream_stages[i],
-                        (int)REDUCER_FRONTIER_TRUSTED_ANCHOR + 1);
-            upstream_at_anchor_plus_1 = upstream_at_anchor_plus_1 && ok;
-        }
-        RAA_CHECK("cursor: the 7 upstream stage cursors == anchor+1 (the "
-                  "'next height to process' convention) — never 0/genesis",
-                  upstream_at_anchor_plus_1);
-
-        RAA_CHECK("cursor: tip_finalize cursor == the anchor exactly (the "
-                  "'served tip' convention) — never 0/genesis",
-                  pk && raa_cursor_is(pk, "tip_finalize",
-                                     REDUCER_FRONTIER_TRUSTED_ANCHOR));
-
-        /* The negative half of the same claim: none of the eight sit at 0. A
-         * cursor forcer that no-ops (leaves cursors at their fresh-init
-         * default) would pass the above checks trivially wrong only if the
-         * anchor itself were 0; make the "not genesis" half explicit too. */
-        static const char *const all_stages[] = {
-            "header_admit", "validate_headers", "body_fetch", "body_persist",
-            "script_validate", "proof_validate", "utxo_apply", "tip_finalize",
-        };
-        bool none_at_genesis = true;
-        for (size_t i = 0; i < sizeof(all_stages) / sizeof(all_stages[0]); i++)
-            none_at_genesis = none_at_genesis &&
-                pk && !raa_cursor_is(pk, all_stages[i], 0);
-        RAA_CHECK("cursor: none of the eight stage cursors sit at genesis (0)",
-                  none_at_genesis);
-
-        int32_t applied = -1;
-        RAA_CHECK("cursor: coins_kv is proven authority after the reset",
-                  pk && coins_kv_is_proven_authority(pk, &applied));
-        RAA_CHECK("cursor: coins_applied_height == anchor+1 (utxo_apply's "
-                  "next-height convention)",
-                  applied == cp_real.height + 1);
-
-        /* boot_refold_from_anchor_reset() does NOT mark the durable
-         * refold_from_anchor floor flag; boot.c's do_from_anchor caller does
-         * that right after the reset
-         * (refold_progress_mark_started_from_anchor(progress_store_db(),
-         * resume_target)). Mirror that production sequence here. */
-        RAA_CHECK("cursor: refold_progress_mark_started_from_anchor "
-                  "(the boot.c caller's next step) succeeds",
-                  pk && refold_progress_mark_started_from_anchor(
-                            pk, cp_real.height + 1000));
-        RAA_CHECK("cursor: refold_progress_refresh reads the durable flag",
-                  refold_progress_refresh(pk));
-        RAA_CHECK("cursor: refold_from_anchor_active() floor flag is set "
-                  "(the below-anchor self-repair stays suspended until the "
-                  "fold reaches the resume target)",
-                  refold_from_anchor_active());
-
-        node_db_close(&pndb);
-        progress_store_close();
-    }
+    failures += raa_check_cursor_reset(dir);
 
     checkpoints_reset_sha3_override_for_test();
     unsetenv("ZCL_MINT_ANCHOR_OUT");

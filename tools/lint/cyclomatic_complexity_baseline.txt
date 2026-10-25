@@ -525,7 +525,6 @@ tests/harness/src/test_parallel.c:rerun_load_flaky_groups:20
 tests/harness/src/test_parallel.c:run_parallel_phase:25
 tests/harness/src/test_parallel.c:write_test_timing_json:34
 tests/harness/src/test_payment_shutdown_owner.c:payment_shutdown_lifecycle_acceptance:25
-tests/harness/src/test_refold_from_anchor_artifact_reachable.c:test_refold_from_anchor_artifact_reachable:17
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:277
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_a_consensus_accept:60
 tests/harness/src/test_simnet_shielded_wallet_e2e.c:part_b_wallet_rpc:33
