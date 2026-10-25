@@ -228,12 +228,16 @@ static bool story_collect_files(struct codeindex *ci, struct ci_file **out,
     return true;
 }
 
-int ci_store_search_text(struct ci_store *s, const char *q,
-                         struct ci_search_hit *out, int cap)
+static int search_text_check_args(struct ci_store *s, const char *q,
+                                  struct ci_search_hit *out, int cap)
 {
     if (!s || !q || !q[0] || !out || cap <= 0)
         LOG_ERR("codeindex", "bad arg to search_text");
-    ci_store_lock(s);
+    return 0;
+}
+
+static sqlite3_stmt *search_text_prepare(struct ci_store *s)
+{
     sqlite3_stmt *stmt = NULL;
     static const char sql[] =
         "SELECT " CI_SYM_COLS ","
@@ -259,25 +263,42 @@ int ci_store_search_text(struct ci_store *s, const char *q,
     sqlite3 *db = ci_store_db(s);
     if (!db || sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) != SQLITE_OK) {
         ci_store_unlock(s);
-        LOG_ERR("codeindex", "prepare search_text");
+        LOG_NULL("codeindex", "prepare search_text");
     }
+    return stmt;
+}
+
+static bool search_text_fill_hit(sqlite3_stmt *stmt, struct ci_search_hit *hit)
+{
+    memset(hit, 0, sizeof(*hit));
+    if (!ci_store_fill_symbol(stmt, &hit->symbol))
+        return false;
+    if (sqlite3_column_int(stmt, 12))
+        hit->match_mask |= CI_SEARCH_MATCH_NAME;
+    if (sqlite3_column_int(stmt, 13))
+        hit->match_mask |= CI_SEARCH_MATCH_SIGNATURE;
+    if (sqlite3_column_int(stmt, 14))
+        hit->match_mask |= CI_SEARCH_MATCH_PATH;
+    if (sqlite3_column_int(stmt, 15))
+        hit->match_mask |= CI_SEARCH_MATCH_DOC;
+    hit->score = 1000 - sqlite3_column_int(stmt, 16) * 100;
+    return true;
+}
+
+int ci_store_search_text(struct ci_store *s, const char *q,
+                         struct ci_search_hit *out, int cap)
+{
+    if (search_text_check_args(s, q, out, cap) < 0) return -1;
+    ci_store_lock(s);
+    sqlite3_stmt *stmt = search_text_prepare(s);
+    if (!stmt) return -1;
     sqlite3_bind_text(stmt, 1, q, -1, SQLITE_TRANSIENT);
     int n = 0;
     int rc = SQLITE_DONE;
     while (n < cap && (rc = sqlite3_step(stmt)) == SQLITE_ROW) {  // raw-sql-ok:codeindex-derived
         struct ci_search_hit hit;
-        memset(&hit, 0, sizeof(hit));
-        if (!ci_store_fill_symbol(stmt, &hit.symbol))
+        if (!search_text_fill_hit(stmt, &hit))
             continue;
-        if (sqlite3_column_int(stmt, 12))
-            hit.match_mask |= CI_SEARCH_MATCH_NAME;
-        if (sqlite3_column_int(stmt, 13))
-            hit.match_mask |= CI_SEARCH_MATCH_SIGNATURE;
-        if (sqlite3_column_int(stmt, 14))
-            hit.match_mask |= CI_SEARCH_MATCH_PATH;
-        if (sqlite3_column_int(stmt, 15))
-            hit.match_mask |= CI_SEARCH_MATCH_DOC;
-        hit.score = 1000 - sqlite3_column_int(stmt, 16) * 100;
         out[n++] = hit;
     }
     bool ok = rc == SQLITE_ROW || rc == SQLITE_DONE;
@@ -287,15 +308,79 @@ int ci_store_search_text(struct ci_store *s, const char *q,
     return n;
 }
 
-int codeindex_search_story(struct codeindex *ci, const char *query,
-                           struct ci_story_hit *out, int cap,
-                           size_t *corpus_files, bool *truncated)
+static int story_check_args(struct codeindex *ci, const char *query,
+                            struct ci_story_hit *out, int cap,
+                            size_t *corpus_files, bool *truncated)
 {
     if (corpus_files) *corpus_files = 0;
     if (truncated) *truncated = false;
     if (!ci || !query || !query[0] || !out || cap <= 0 || !corpus_files ||
         !truncated || cap == INT_MAX)
         LOG_ERR("codeindex", "bad arg to search_story");
+    return 0;
+}
+
+static bool story_index_files(struct codeindex *ci, const struct ci_file *files,
+                              size_t file_count,
+                              struct zcl_retrieval *retrieval)
+{
+    for (size_t i = 0; i < file_count; i++) {
+        struct ci_symbol *symbols = NULL;
+        size_t symbol_count = 0;
+        if (!story_load_symbols(ci, files[i].path, &symbols, &symbol_count))
+            return false;
+        char *document = story_document(&files[i], symbols, symbol_count);
+        free(symbols);
+        if (!document || zcl_retrieval_add(
+                retrieval, files[i].path, document) == 0) {
+            free(document);
+            return false;
+        }
+        free(document);
+    }
+    return true;
+}
+
+static bool story_copy_hits(struct zcl_retrieval *retrieval,
+                            const struct zcl_retrieval_hit *hits,
+                            struct ci_story_hit *out, size_t shown)
+{
+    for (size_t i = 0; i < shown; i++) {
+        const char *path = zcl_retrieval_name(retrieval, hits[i].doc);
+        int n = path ? snprintf(out[i].path, sizeof(out[i].path),
+                                "%s", path) : -1;
+        if (n < 0 || (size_t)n >= sizeof(out[i].path))
+            return false;
+        out[i].score = hits[i].score;
+    }
+    return true;
+}
+
+static int story_rank_hits(struct zcl_retrieval *retrieval, const char *query,
+                           struct ci_story_hit *out, int cap, bool *truncated)
+{
+    int result = -1;
+    size_t hit_cap = (size_t)cap + 1u;
+    struct zcl_retrieval_hit *hits = zcl_calloc(
+        hit_cap, sizeof(*hits), "codeindex story hits");
+    size_t count = 0;
+    if (hits && zcl_retrieval_query_checked(
+            retrieval, query, hits, hit_cap, &count)) {
+        *truncated = count > (size_t)cap;
+        size_t shown = *truncated ? (size_t)cap : count;
+        if (story_copy_hits(retrieval, hits, out, shown))
+            result = (int)shown;
+    }
+    free(hits);
+    return result;
+}
+
+int codeindex_search_story(struct codeindex *ci, const char *query,
+                           struct ci_story_hit *out, int cap,
+                           size_t *corpus_files, bool *truncated)
+{
+    if (story_check_args(ci, query, out, cap, corpus_files, truncated) < 0)
+        return -1;
     struct ci_file *files = NULL;
     size_t file_count = 0;
     if (!story_collect_files(ci, &files, &file_count) || file_count == 0) {
@@ -307,49 +392,10 @@ int codeindex_search_story(struct codeindex *ci, const char *query,
         free(files);
         LOG_ERR("codeindex", "story retrieval allocation failed");
     }
-    bool indexed = true;
-    for (size_t i = 0; i < file_count; i++) {
-        struct ci_symbol *symbols = NULL;
-        size_t symbol_count = 0;
-        if (!story_load_symbols(ci, files[i].path, &symbols, &symbol_count)) {
-            indexed = false;
-            break;
-        }
-        char *document = story_document(&files[i], symbols, symbol_count);
-        free(symbols);
-        if (!document || zcl_retrieval_add(
-                retrieval, files[i].path, document) == 0) {
-            free(document);
-            indexed = false;
-            break;
-        }
-        free(document);
-    }
+    bool indexed = story_index_files(ci, files, file_count, retrieval);
     int result = -1;
-    if (indexed) {
-        size_t hit_cap = (size_t)cap + 1u;
-        struct zcl_retrieval_hit *hits = zcl_calloc(
-            hit_cap, sizeof(*hits), "codeindex story hits");
-        size_t count = 0;
-        if (hits && zcl_retrieval_query_checked(
-                retrieval, query, hits, hit_cap, &count)) {
-            *truncated = count > (size_t)cap;
-            size_t shown = *truncated ? (size_t)cap : count;
-            bool copied = true;
-            for (size_t i = 0; i < shown; i++) {
-                const char *path = zcl_retrieval_name(retrieval, hits[i].doc);
-                int n = path ? snprintf(out[i].path, sizeof(out[i].path),
-                                        "%s", path) : -1;
-                if (n < 0 || (size_t)n >= sizeof(out[i].path)) {
-                    copied = false;
-                    break;
-                }
-                out[i].score = hits[i].score;
-            }
-            if (copied) result = (int)shown;
-        }
-        free(hits);
-    }
+    if (indexed)
+        result = story_rank_hits(retrieval, query, out, cap, truncated);
     *corpus_files = file_count;
     zcl_retrieval_destroy(retrieval);
     free(files);
