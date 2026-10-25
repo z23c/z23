@@ -147,6 +147,76 @@ static bool pv_sapling_set(void *sctx, const struct transaction *tx,
     return ok;
 }
 
+/* Returns false when the tx report already records a Sapling failure. */
+static bool pv_verify_sapling_shielded(const struct transaction *tx,
+                                       const struct uint256 *sighash,
+                                       struct proof_validate_tx_report *out)
+{
+    if (tx->num_shielded_spend > 0 || tx->num_shielded_output > 0) {
+        void *sctx = zclassic_sapling_verification_ctx_init();
+        if (!sctx) {
+            out->ok = false;
+            out->internal_error = true;
+            out->first_failure_proof_type = "sapling_ctx";
+            return false;
+        }
+        if (!pv_sapling_set(sctx, tx, sighash, true, out) ||
+            !pv_sapling_set(sctx, tx, sighash, false, out)) {
+            zclassic_sapling_verification_ctx_free(sctx);
+            return false;
+        }
+        if (!zclassic_sapling_final_check(sctx, tx->value_balance,
+                                          tx->binding_sig, sighash->data)) {
+            zclassic_sapling_verification_ctx_free(sctx);
+            out->ok = false;
+            out->first_failure_proof_type = "binding_sig";
+            return false;
+        }
+        zclassic_sapling_verification_ctx_free(sctx);
+    }
+    return true;
+}
+
+/* Returns false when the tx report already records a Sprout failure. */
+static bool pv_verify_sprout_joinsplits(const struct transaction *tx,
+                                        struct proof_validate_tx_report *out)
+{
+    for (size_t i = 0; i < tx->num_joinsplit; i++) {
+        const struct js_description *js = &tx->v_joinsplit[i];
+        out->sprout_joinsplits_total++;
+        uint8_t h_sig[32];
+        sprout_h_sig(js->random_seed.data, js->nullifiers[0].data,
+                     js->nullifiers[1].data, tx->joinsplit_pubkey.data,
+                     h_sig);
+
+        bool ok;
+        if (js->use_groth) {
+            ok = sprout_verify_groth16(js->proof, js->anchor.data, h_sig,
+                    js->macs[0].data, js->macs[1].data,
+                    js->nullifiers[0].data, js->nullifiers[1].data,
+                    js->commitments[0].data, js->commitments[1].data,
+                    (uint64_t)js->vpub_old, (uint64_t)js->vpub_new);
+            if (!ok) {
+                out->ok = false;
+                out->first_failure_proof_type = "sprout_groth16";
+                return false;
+            }
+        } else {
+            ok = sprout_verify_phgr13(js->proof, js->anchor.data, h_sig,
+                    js->macs[0].data, js->macs[1].data,
+                    js->nullifiers[0].data, js->nullifiers[1].data,
+                    js->commitments[0].data, js->commitments[1].data,
+                    (uint64_t)js->vpub_old, (uint64_t)js->vpub_new);
+            if (!ok) {
+                out->ok = false;
+                out->first_failure_proof_type = "sprout_phgr13";
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 static bool default_verify_tx(const struct transaction *tx, int height,
                               struct proof_validate_tx_report *out,
                               void *user)
@@ -193,62 +263,11 @@ static bool default_verify_tx(const struct transaction *tx, int height,
         return true;
     }
 
-    if (tx->num_shielded_spend > 0 || tx->num_shielded_output > 0) {
-        void *sctx = zclassic_sapling_verification_ctx_init();
-        if (!sctx) {
-            out->ok = false;
-            out->internal_error = true;
-            out->first_failure_proof_type = "sapling_ctx";
-            return true;
-        }
-        if (!pv_sapling_set(sctx, tx, &sighash, true, out) ||
-            !pv_sapling_set(sctx, tx, &sighash, false, out)) {
-            zclassic_sapling_verification_ctx_free(sctx);
-            return true;
-        }
-        if (!zclassic_sapling_final_check(sctx, tx->value_balance,
-                                          tx->binding_sig, sighash.data)) {
-            zclassic_sapling_verification_ctx_free(sctx);
-            out->ok = false;
-            out->first_failure_proof_type = "binding_sig";
-            return true;
-        }
-        zclassic_sapling_verification_ctx_free(sctx);
-    }
+    if (!pv_verify_sapling_shielded(tx, &sighash, out))
+        return true;
 
-    for (size_t i = 0; i < tx->num_joinsplit; i++) {
-        const struct js_description *js = &tx->v_joinsplit[i];
-        out->sprout_joinsplits_total++;
-        uint8_t h_sig[32];
-        sprout_h_sig(js->random_seed.data, js->nullifiers[0].data,
-                     js->nullifiers[1].data, tx->joinsplit_pubkey.data,
-                     h_sig);
-
-        bool ok;
-        if (js->use_groth) {
-            ok = sprout_verify_groth16(js->proof, js->anchor.data, h_sig,
-                    js->macs[0].data, js->macs[1].data,
-                    js->nullifiers[0].data, js->nullifiers[1].data,
-                    js->commitments[0].data, js->commitments[1].data,
-                    (uint64_t)js->vpub_old, (uint64_t)js->vpub_new);
-            if (!ok) {
-                out->ok = false;
-                out->first_failure_proof_type = "sprout_groth16";
-                return true;
-            }
-        } else {
-            ok = sprout_verify_phgr13(js->proof, js->anchor.data, h_sig,
-                    js->macs[0].data, js->macs[1].data,
-                    js->nullifiers[0].data, js->nullifiers[1].data,
-                    js->commitments[0].data, js->commitments[1].data,
-                    (uint64_t)js->vpub_old, (uint64_t)js->vpub_new);
-            if (!ok) {
-                out->ok = false;
-                out->first_failure_proof_type = "sprout_phgr13";
-                return true;
-            }
-        }
-    }
+    if (!pv_verify_sprout_joinsplits(tx, out))
+        return true;
 
     return true;
 }
