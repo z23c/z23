@@ -381,17 +381,24 @@ _test_next:
 
 /* ── Worker-start recovery over a moving or oversized catalog ─────────── */
 
+/* Fixture rows: the production deferred-sync mode skips each put's own
+ * fsync barrier (content addressing and temp+rename are unchanged). The
+ * rows are filler the assertions only count, and no case crashes the
+ * machine over them, so the per-row barrier proves nothing. */
 static bool bfh_fill(struct vcs_package_store *store, uint32_t first,
                      uint32_t count)
 {
-    for (uint32_t i = first; i < first + count; i++) {
+    bool deferred = vcs_package_store_deferred_sync_enabled();
+    vcs_package_store_set_deferred_sync(true);
+    bool ok = true;
+    for (uint32_t i = first; ok && i < first + count; i++) {
         uint8_t blob[8] = {'f', 'i', 'l', 'l', (uint8_t)i, (uint8_t)(i >> 8),
                            (uint8_t)(i >> 16), (uint8_t)(i >> 24)};
         uint8_t root[32];
-        if (!vcs_proof_ticket_store_put(store, blob, sizeof(blob), root))
-            return false;
+        ok = vcs_proof_ticket_store_put(store, blob, sizeof(blob), root);
     }
-    return true;
+    vcs_package_store_set_deferred_sync(deferred);
+    return ok;
 }
 
 /* Stage the second publication with only its ticket transferred, as a crash
