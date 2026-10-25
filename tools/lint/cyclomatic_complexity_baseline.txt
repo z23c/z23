@@ -1947,7 +1947,6 @@ tests/harness/src/test_chain_linkage_check.c:test_chain_linkage_check:53
 tests/harness/src/test_chain_segment.c:test_chain_segment:45
 tests/harness/src/test_chain_state_repo.c:t_singleton_init_wires_fixture:16
 tests/harness/src/test_chain_tip_watchdog_bounded_restart.c:test_chain_tip_watchdog_bounded_restart:32
-tests/harness/src/test_chainlog.c:case_roundtrip:17
 tests/harness/src/test_chainstate_legacy_reader.c:run_bulk_iter_tests:36
 tests/harness/src/test_chainstate_legacy_reader.c:test_chainstate_legacy_reader:18
 tests/harness/src/test_chaos_harness.c:test_chaos_harness:67

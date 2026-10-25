@@ -216,6 +216,38 @@ static bool build_log(const char *path, const uint8_t stream[32], size_t count,
 
 /* ── 1. round trip, and a restart the chain cannot see ─────────────── */
 
+/* Append every record of k_body to an open log, requiring each append to
+ * come back with its dense sequence number. */
+static bool append_body_records(struct zcl_chainlog *log)
+{
+    uint64_t seq = 0;
+    bool appended = true;
+    for (size_t i = 0; i < BODY_N; i++)
+        appended = appended &&
+                   zcl_chainlog_append(log, (uint32_t)(i + 1), k_body[i],
+                                       strlen(k_body[i]), &seq, NULL) ==
+                       ZCL_CHAINLOG_OK &&
+                   seq == (uint64_t)(i + 1);
+    return appended;
+}
+
+/* Read every record back through the API that re-verifies on the way. */
+static bool read_back_body_records(struct zcl_chainlog *log)
+{
+    bool read_ok = true;
+    for (size_t i = 0; i < BODY_N; i++) {
+        char buf[64] = { 0 };
+        size_t len = 0;
+        uint32_t kind = 0;
+        read_ok = read_ok &&
+                  zcl_chainlog_read(log, (uint64_t)(i + 1), &kind, buf,
+                                    sizeof buf, &len) == ZCL_CHAINLOG_OK &&
+                  kind == (uint32_t)(i + 1) && len == strlen(k_body[i]) &&
+                  memcmp(buf, k_body[i], len) == 0;
+    }
+    return read_ok;
+}
+
 static int case_roundtrip(void)
 {
     int failures = 0;
@@ -235,32 +267,14 @@ static int case_roundtrip(void)
         return failures;
     }
 
-    uint64_t seq = 0;
-    bool appended = true;
-    for (size_t i = 0; i < BODY_N; i++)
-        appended = appended &&
-                   zcl_chainlog_append(log, (uint32_t)(i + 1), k_body[i],
-                                       strlen(k_body[i]), &seq, NULL) ==
-                       ZCL_CHAINLOG_OK &&
-                   seq == (uint64_t)(i + 1);
+    bool appended = append_body_records(log);
     CL_CHECK("three records append with dense sequence numbers", appended);
     CL_CHECK("the count agrees", zcl_chainlog_count(log) == BODY_N);
 
     uint8_t head_live[32] = { 0 };
     CL_CHECK("a head is available", zcl_chainlog_head(log, head_live));
 
-    /* Read every record back through the API that re-verifies on the way. */
-    bool read_ok = true;
-    for (size_t i = 0; i < BODY_N; i++) {
-        char buf[64] = { 0 };
-        size_t len = 0;
-        uint32_t kind = 0;
-        read_ok = read_ok &&
-                  zcl_chainlog_read(log, (uint64_t)(i + 1), &kind, buf,
-                                    sizeof buf, &len) == ZCL_CHAINLOG_OK &&
-                  kind == (uint32_t)(i + 1) && len == strlen(k_body[i]) &&
-                  memcmp(buf, k_body[i], len) == 0;
-    }
+    bool read_ok = read_back_body_records(log);
     CL_CHECK("every record reads back with its kind and payload", read_ok);
     zcl_chainlog_close(log);
 
