@@ -311,13 +311,54 @@ static bool cec_persist_finalized_tip_evidence(
     return persisted;
 }
 
+/* Argument gate for chain_evidence_controller_record_finalized_tip: the
+ * authority, its ndb, the tip, and the tip's block-hash pointer must all be
+ * present and the tip height non-negative. Pure predicate with the original
+ * short-circuit order, so the caller keeps its diagnostic WARN and its
+ * log-then-return contract unchanged. */
+static bool cec_record_finalized_tip_args_valid(
+    const struct chain_evidence_controller *authority,
+    const struct block_index *finalized_tip)
+{
+    return authority && authority->ndb && finalized_tip &&
+           finalized_tip->phashBlock && finalized_tip->nHeight >= 0;
+}
+
+/* Cheap-idempotence predicate: the persisted evidence keys already name this
+ * exact tip (same hash AND height AND the repaired marker a prior record or
+ * boot reconcile left behind). Reads the same keys in the same short-circuit
+ * order as the inline condition it replaces. */
+static bool cec_persisted_evidence_names_tip(
+    struct node_db *ndb, const struct block_index *finalized_tip)
+{
+    struct uint256 persisted_hash;
+    return cla_load_u256(ndb, "cec.active_tip_hash", &persisted_hash) &&
+           memcmp(persisted_hash.data, finalized_tip->phashBlock->data,
+                  32) == 0 &&
+           cla_state_get_i32(ndb, "cec.active_tip_height", -1) ==
+               finalized_tip->nHeight &&
+           cla_state_get_i32(ndb, "cec.repaired_active_tip_evidence", 0) == 1;
+}
+
+/* Throttle gate for the record_finalized_tip persist-miss WARN: true at most
+ * once per ~5s of wall time. The CAS claims the window exactly like the
+ * inline check it replaces, so a sustained miss storm still logs one line
+ * per window and the WARN itself stays in the caller. */
+static bool cec_persist_miss_warn_due(void)
+{
+    static _Atomic int64_t g_last_warn_unix;
+    int64_t now = platform_time_wall_unix();
+    int64_t prev = atomic_load(&g_last_warn_unix);
+    return now - prev >= 5 &&
+           atomic_compare_exchange_strong(&g_last_warn_unix, &prev, now);
+}
+
 bool chain_evidence_controller_record_finalized_tip(
     struct chain_evidence_controller *authority,
     struct block_index *finalized_tip,
     const char *reason)
 {
-    if (!authority || !authority->ndb || !finalized_tip ||
-        !finalized_tip->phashBlock || finalized_tip->nHeight < 0) {
+    if (!cec_record_finalized_tip_args_valid(authority, finalized_tip)) {
         LOG_WARN("cec",
                  "[cec] record_finalized_tip: null/invalid arg "
                  "(authority=%d ndb=%d tip=%d) reason=%s",
@@ -348,13 +389,7 @@ bool chain_evidence_controller_record_finalized_tip(
      * repaired marker must already be set, else a prior promote_tip write
      * (which leaves it 0) would be skipped and the reconcile idempotence
      * check below would never converge. */
-    struct uint256 persisted_hash;
-    if (cla_load_u256(authority->ndb, "cec.active_tip_hash", &persisted_hash) &&
-        memcmp(persisted_hash.data, finalized_tip->phashBlock->data, 32) == 0 &&
-        cla_state_get_i32(authority->ndb, "cec.active_tip_height", -1) ==
-            finalized_tip->nHeight &&
-        cla_state_get_i32(authority->ndb,
-                          "cec.repaired_active_tip_evidence", 0) == 1) {
+    if (cec_persisted_evidence_names_tip(authority->ndb, finalized_tip)) {
         /* Persisted evidence already names this exact tip — still keep the
          * in-memory coins cursor aligned (it is set per-process, not
          * persisted, so a fresh boot reconcile may have left it behind). */
@@ -398,11 +433,7 @@ bool chain_evidence_controller_record_finalized_tip(
          * blocker — the reducer already published the tip; only the durable
          * evidence follow lagged. Next finalize retries. Throttle so a
          * sustained miss does not storm the log every published block. */
-        static _Atomic int64_t g_last_warn_unix;
-        int64_t now = platform_time_wall_unix();
-        int64_t prev = atomic_load(&g_last_warn_unix);
-        if (now - prev >= 5 &&
-            atomic_compare_exchange_strong(&g_last_warn_unix, &prev, now))
+        if (cec_persist_miss_warn_due())
             LOG_WARN("cec",
                      "[cec] record_finalized_tip: persist miss h=%d reason=%s "
                      "— served tip advanced, durable evidence follow lagged; "
