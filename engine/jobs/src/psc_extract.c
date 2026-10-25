@@ -136,6 +136,84 @@ bool psc_events_add_spend(struct psc_events *e, const uint8_t txid[32],
 
 /* ── per-block extraction ──────────────────────────────────────────────── */
 
+/* Outcome of extracting one transaction's events. The extraction helpers
+ * below never log — every LOG_ call stays in psc_extract_block — so failure
+ * travels back to it as one of these codes. */
+enum psc_extract_tx_status {
+    PSC_EXTRACT_TX_OK,
+    PSC_EXTRACT_TX_VALUE_OVERFLOW,
+    PSC_EXTRACT_TX_APPEND_FAIL
+};
+
+/* Emit this tx's output CREATEs, advancing *create_idx across the block.
+ * On PSC_EXTRACT_TX_VALUE_OVERFLOW, *bad_vout is the offending vout. */
+static enum psc_extract_tx_status
+psc_extract_tx_creates(const struct transaction *tx, uint32_t height,
+                       struct psc_events *out, uint32_t *create_idx,
+                       size_t *bad_vout)
+{
+    /* CREATEs — this tx's outputs (phase 0). */
+    for (size_t vo = 0; vo < tx->num_vout; vo++) {
+        const struct tx_out *txo = &tx->vout[vo];
+        if (tx_out_is_null(txo))
+            continue;
+        if (script_is_unspendable(&txo->script_pub_key))
+            continue;
+        if (txo->value < 0 || txo->value > PSC_MAX_MONEY_ZAT) {
+            *bad_vout = vo;
+            return PSC_EXTRACT_TX_VALUE_OVERFLOW;
+        }
+        if (!psc_events_add_create(
+                out, tx->hash.data, (uint32_t)vo, txo->value,
+                (int32_t)height, transaction_is_coinbase(tx),
+                txo->script_pub_key.data,
+                (uint32_t)txo->script_pub_key.size,
+                psc_seq_make(height, 0, *create_idx))) {
+            return PSC_EXTRACT_TX_APPEND_FAIL;
+        }
+        (*create_idx)++;
+    }
+    return PSC_EXTRACT_TX_OK;
+}
+
+/* Emit this tx's input SPENDs, advancing *spend_idx across the block; the
+ * coinbase exception is applied by the caller, psc_extract_tx_events. */
+static bool psc_extract_tx_spends(const struct transaction *tx,
+                                  uint32_t height, struct psc_events *out,
+                                  uint32_t *spend_idx)
+{
+    for (size_t vi = 0; vi < tx->num_vin; vi++) {
+        const struct outpoint *op = &tx->vin[vi].prevout;
+        if (!psc_events_add_spend(out, op->hash.data, op->n,
+                                  (int32_t)height,
+                                  psc_seq_make(height, 1, *spend_idx))) {
+            return false;
+        }
+        (*spend_idx)++;
+    }
+    return true;
+}
+
+/* Extract one transaction's events: CREATEs first, then SPENDs, with the
+ * coinbase input exception between the two phases. */
+static enum psc_extract_tx_status
+psc_extract_tx_events(const struct transaction *tx, uint32_t height,
+                      struct psc_events *out, uint32_t *create_idx,
+                      uint32_t *spend_idx, size_t *bad_vout)
+{
+    enum psc_extract_tx_status st =
+        psc_extract_tx_creates(tx, height, out, create_idx, bad_vout);
+    if (st != PSC_EXTRACT_TX_OK)
+        return st;
+
+    /* SPENDs — this tx's inputs (phase 1), coinbase excepted. */
+    if (transaction_is_coinbase(tx))
+        return PSC_EXTRACT_TX_OK;
+    if (!psc_extract_tx_spends(tx, height, out, spend_idx))
+        return PSC_EXTRACT_TX_APPEND_FAIL;
+    return PSC_EXTRACT_TX_OK;
+}
+
 bool psc_extract_block(const struct block *blk, uint32_t height,
                        struct psc_events *out, char reject[48])
 {
@@ -158,43 +236,19 @@ bool psc_extract_block(const struct block *blk, uint32_t height,
     for (size_t ti = 0; ti < blk->num_vtx; ti++) {
         const struct transaction *tx = &blk->vtx[ti];
 
-        /* CREATEs — this tx's outputs (phase 0). */
-        for (size_t vo = 0; vo < tx->num_vout; vo++) {
-            const struct tx_out *txo = &tx->vout[vo];
-            if (tx_out_is_null(txo))
-                continue;
-            if (script_is_unspendable(&txo->script_pub_key))
-                continue;
-            if (txo->value < 0 || txo->value > PSC_MAX_MONEY_ZAT) {
-                LOG_WARN("psc", "[psc] output value out of range height=%u "
-                         "tx=%zu vout=%zu", height, ti, vo);
-                if (reject) snprintf(reject, 48, "value_overflow");
-                return false;
-            }
-            if (!psc_events_add_create(
-                    out, tx->hash.data, (uint32_t)vo, txo->value,
-                    (int32_t)height, transaction_is_coinbase(tx),
-                    txo->script_pub_key.data,
-                    (uint32_t)txo->script_pub_key.size,
-                    psc_seq_make(height, 0, create_idx))) {
-                if (reject) snprintf(reject, 48, "internal");
-                return false;
-            }
-            create_idx++;
+        size_t bad_vout = 0;
+        enum psc_extract_tx_status st =
+            psc_extract_tx_events(tx, height, out, &create_idx, &spend_idx,
+                                  &bad_vout);
+        if (st == PSC_EXTRACT_TX_VALUE_OVERFLOW) {
+            LOG_WARN("psc", "[psc] output value out of range height=%u "
+                     "tx=%zu vout=%zu", height, ti, bad_vout);
+            if (reject) snprintf(reject, 48, "value_overflow");
+            return false;
         }
-
-        /* SPENDs — this tx's inputs (phase 1), coinbase excepted. */
-        if (transaction_is_coinbase(tx))
-            continue;
-        for (size_t vi = 0; vi < tx->num_vin; vi++) {
-            const struct outpoint *op = &tx->vin[vi].prevout;
-            if (!psc_events_add_spend(out, op->hash.data, op->n,
-                                      (int32_t)height,
-                                      psc_seq_make(height, 1, spend_idx))) {
-                if (reject) snprintf(reject, 48, "internal");
-                return false;
-            }
-            spend_idx++;
+        if (st == PSC_EXTRACT_TX_APPEND_FAIL) {
+            if (reject) snprintf(reject, 48, "internal");
+            return false;
         }
     }
     return true;
