@@ -49,7 +49,7 @@ static bool creation_load(const char *workspace, const uint8_t root[32],
                                        wire, wire_len) == 0;
 }
 
-static enum vcs_zcode_creation_error creation_load_task_triplet(
+static enum vcs_zcode_creation_error creation_load_task(
     const struct vcs_zcode_creation_attribution_v1 *a, const char *workspace,
     struct creation_vertical *vertical)
 {
@@ -64,7 +64,16 @@ static enum vcs_zcode_creation_error creation_load_task_triplet(
         free(wire);
         return VCS_ZCODE_CREATION_TASK;
     }
-    free(wire); wire = NULL;
+    free(wire);
+    return VCS_ZCODE_CREATION_OK;
+}
+
+static enum vcs_zcode_creation_error creation_load_candidate(
+    const struct vcs_zcode_creation_attribution_v1 *a, const char *workspace,
+    struct creation_vertical *vertical)
+{
+    uint8_t *wire = NULL, root[32];
+    size_t wire_len = 0;
     if (!creation_load(workspace, a->candidate_root,
                        VCS_ZCODE_CANDIDATE_WIRE_BYTES, &wire, &wire_len) ||
         vcs_zcode_candidate_parse(wire, wire_len, &vertical->candidate) !=
@@ -83,7 +92,16 @@ static enum vcs_zcode_creation_error creation_load_task_triplet(
         free(wire);
         return VCS_ZCODE_CREATION_CANDIDATE;
     }
-    free(wire); wire = NULL;
+    free(wire);
+    return VCS_ZCODE_CREATION_OK;
+}
+
+static enum vcs_zcode_creation_error creation_load_proof_policy(
+    const struct vcs_zcode_creation_attribution_v1 *a, const char *workspace,
+    struct creation_vertical *vertical)
+{
+    uint8_t *wire = NULL, root[32];
+    size_t wire_len = 0;
     if (!creation_load(workspace, a->proof_policy_root,
                        VCS_ZCODE_PROOF_POLICY_WIRE_BYTES, &wire, &wire_len) ||
         vcs_zcode_proof_policy_parse(wire, wire_len, &vertical->policy) !=
@@ -98,6 +116,20 @@ static enum vcs_zcode_creation_error creation_load_task_triplet(
     }
     free(wire);
     return VCS_ZCODE_CREATION_OK;
+}
+
+static enum vcs_zcode_creation_error creation_load_task_triplet(
+    const struct vcs_zcode_creation_attribution_v1 *a, const char *workspace,
+    struct creation_vertical *vertical)
+{
+    enum vcs_zcode_creation_error error =
+        creation_load_task(a, workspace, vertical);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    error = creation_load_candidate(a, workspace, vertical);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    return creation_load_proof_policy(a, workspace, vertical);
 }
 
 static enum vcs_zcode_creation_error creation_load_contributor(
@@ -179,39 +211,46 @@ static enum vcs_zcode_creation_error creation_verify_license_chunks(
                                      : VCS_ZCODE_CREATION_LICENSE;
 }
 
-static enum vcs_zcode_creation_error creation_load_package(
+static enum vcs_zcode_creation_error creation_load_manifest(
+    const struct vcs_zcode_creation_attribution_v1 *a, const char *workspace,
+    struct vcs_package_manifest *manifest)
+{
+    uint8_t *wire = NULL, root[32];
+    size_t wire_len = 0;
+    if (!creation_load(workspace, a->package_root,
+                       VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES,
+                       &wire, &wire_len) ||
+        !vcs_package_manifest_parse(wire, wire_len, manifest) ||
+        !vcs_package_manifest_root(manifest, root) ||
+        !creation_equal(root, a->package_root)) {
+        free(wire);
+        return VCS_ZCODE_CREATION_PACKAGE;
+    }
+    free(wire);
+    return VCS_ZCODE_CREATION_OK;
+}
+
+static enum vcs_zcode_creation_error creation_verify_license_evidence(
+    const struct vcs_zcode_creation_attribution_v1 *a, const char *workspace,
+    const struct vcs_package_manifest *manifest)
+{
+    uint8_t root[32];
+    const struct vcs_package_file *license = NULL;
+    for (size_t i = 0; i < manifest->count; i++)
+        if (strcmp(manifest->files[i].path, "LICENSE") == 0)
+            license = &manifest->files[i];
+    if (!license || !vcs_package_file_hash(license, root) ||
+        !creation_equal(root, a->license_evidence_root))
+        return VCS_ZCODE_CREATION_LICENSE;
+    return creation_verify_license_chunks(workspace, license);
+}
+
+static enum vcs_zcode_creation_error creation_load_package_release(
     const struct vcs_zcode_creation_attribution_v1 *a, const char *workspace,
     struct creation_vertical *vertical)
 {
     uint8_t *wire = NULL, root[32];
     size_t wire_len = 0;
-    struct vcs_package_manifest manifest;
-    vcs_package_manifest_init(&manifest);
-    if (!creation_load(workspace, a->package_root,
-                       VCS_PACKAGE_MANIFEST_MAX_WIRE_BYTES,
-                       &wire, &wire_len) ||
-        !vcs_package_manifest_parse(wire, wire_len, &manifest) ||
-        !vcs_package_manifest_root(&manifest, root) ||
-        !creation_equal(root, a->package_root)) {
-        free(wire); vcs_package_manifest_free(&manifest);
-        return VCS_ZCODE_CREATION_PACKAGE;
-    }
-    free(wire); wire = NULL;
-    const struct vcs_package_file *license = NULL;
-    for (size_t i = 0; i < manifest.count; i++)
-        if (strcmp(manifest.files[i].path, "LICENSE") == 0)
-            license = &manifest.files[i];
-    if (!license || !vcs_package_file_hash(license, root) ||
-        !creation_equal(root, a->license_evidence_root)) {
-        vcs_package_manifest_free(&manifest);
-        return VCS_ZCODE_CREATION_LICENSE;
-    }
-    enum vcs_zcode_creation_error error =
-        creation_verify_license_chunks(workspace, license);
-    vcs_package_manifest_free(&manifest);
-    if (error != VCS_ZCODE_CREATION_OK)
-        return error;
-
     if (!creation_load(workspace, a->release_root,
                        VCS_PACKAGE_RELEASE_MAX_WIRE_BYTES,
                        &wire, &wire_len) ||
@@ -229,6 +268,22 @@ static enum vcs_zcode_creation_error creation_load_package(
     }
     free(wire);
     return VCS_ZCODE_CREATION_OK;
+}
+
+static enum vcs_zcode_creation_error creation_load_package(
+    const struct vcs_zcode_creation_attribution_v1 *a, const char *workspace,
+    struct creation_vertical *vertical)
+{
+    struct vcs_package_manifest manifest;
+    vcs_package_manifest_init(&manifest);
+    enum vcs_zcode_creation_error error =
+        creation_load_manifest(a, workspace, &manifest);
+    if (error == VCS_ZCODE_CREATION_OK)
+        error = creation_verify_license_evidence(a, workspace, &manifest);
+    vcs_package_manifest_free(&manifest);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    return creation_load_package_release(a, workspace, vertical);
 }
 
 static enum vcs_zcode_creation_error creation_load_release(
@@ -269,6 +324,55 @@ static bool creation_release_is_direct_parent(
         current->publisher_sequence == parent->publisher_sequence + 1;
 }
 
+static enum vcs_zcode_creation_error creation_load_prior_attribution(
+    const struct vcs_zcode_creation_attribution_v1 *a,
+    const struct vcs_zcode_creation_validation_context *context,
+    struct vcs_zcode_creation_attribution_v1 *prior)
+{
+    uint8_t *wire = NULL, prior_root[32];
+    size_t wire_len = 0;
+    if (!creation_load(context->workspace, a->lineage_root,
+                       VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES,
+                       &wire, &wire_len) ||
+        vcs_zcode_creation_attribution_parse(wire, wire_len, prior) !=
+            VCS_ZCODE_CREATION_OK ||
+        vcs_zcode_creation_attribution_root(prior, prior_root) !=
+            VCS_ZCODE_CREATION_OK ||
+        !creation_equal(prior_root, a->lineage_root) ||
+        !creation_equal(prior->network_genesis_root,
+                        a->network_genesis_root) ||
+        !creation_equal(prior->zc23_policy_root, a->zc23_policy_root) ||
+        prior->epoch > a->epoch || prior->created_unix >= a->created_unix) {
+        free(wire);
+        return VCS_ZCODE_CREATION_LINEAGE;
+    }
+    free(wire);
+    return VCS_ZCODE_CREATION_OK;
+}
+
+static enum vcs_zcode_creation_error creation_verify_predecessor(
+    const struct vcs_zcode_creation_validation_context *context,
+    const struct creation_vertical *vertical,
+    const struct vcs_zcode_creation_attribution_v1 *prior, unsigned depth)
+{
+    struct vcs_zcode_creation_validation_context prior_context = *context;
+    prior_context.expected_epoch = prior->epoch;
+    prior_context.expected_award_atoms = prior->award_atoms;
+    enum vcs_zcode_creation_error error = creation_verify_cas_depth(
+        prior, &prior_context, depth + 1u);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return VCS_ZCODE_CREATION_LINEAGE;
+    struct vcs_package_release parent_release;
+    memset(&parent_release, 0, sizeof(parent_release));
+    if (creation_load_release(context->workspace, prior->release_root,
+                              &parent_release) !=
+            VCS_ZCODE_CREATION_OK ||
+        !creation_release_is_direct_parent(
+            &vertical->release, &parent_release, prior->release_root))
+        return VCS_ZCODE_CREATION_RELEASE;
+    return VCS_ZCODE_CREATION_OK;
+}
+
 static enum vcs_zcode_creation_error creation_verify_lineage(
     const struct vcs_zcode_creation_attribution_v1 *a,
     const struct vcs_zcode_creation_validation_context *context,
@@ -280,9 +384,9 @@ static enum vcs_zcode_creation_error creation_verify_lineage(
         return vertical->release.has_parent ? VCS_ZCODE_CREATION_RELEASE
                                             : VCS_ZCODE_CREATION_OK;
 
-    struct vcs_package_release parent_release;
-    memset(&parent_release, 0, sizeof(parent_release));
     if (a->lineage_kind == VCS_ZCODE_CREATION_LINEAGE_RELEASE) {
+        struct vcs_package_release parent_release;
+        memset(&parent_release, 0, sizeof(parent_release));
         enum vcs_zcode_creation_error error = creation_load_release(
             context->workspace, a->lineage_root, &parent_release);
         if (error != VCS_ZCODE_CREATION_OK ||
@@ -296,40 +400,11 @@ static enum vcs_zcode_creation_error creation_verify_lineage(
         depth >= CREATION_LINEAGE_MAX_DEPTH)
         return VCS_ZCODE_CREATION_LINEAGE;
 
-    uint8_t *wire = NULL, prior_root[32];
-    size_t wire_len = 0;
     struct vcs_zcode_creation_attribution_v1 prior;
-    if (!creation_load(context->workspace, a->lineage_root,
-                       VCS_ZCODE_CREATION_ATTRIBUTION_WIRE_BYTES,
-                       &wire, &wire_len) ||
-        vcs_zcode_creation_attribution_parse(wire, wire_len, &prior) !=
-            VCS_ZCODE_CREATION_OK ||
-        vcs_zcode_creation_attribution_root(&prior, prior_root) !=
-            VCS_ZCODE_CREATION_OK ||
-        !creation_equal(prior_root, a->lineage_root) ||
-        !creation_equal(prior.network_genesis_root,
-                        a->network_genesis_root) ||
-        !creation_equal(prior.zc23_policy_root, a->zc23_policy_root) ||
-        prior.epoch > a->epoch || prior.created_unix >= a->created_unix) {
-        free(wire);
+    if (creation_load_prior_attribution(a, context, &prior) !=
+            VCS_ZCODE_CREATION_OK)
         return VCS_ZCODE_CREATION_LINEAGE;
-    }
-    free(wire);
-
-    struct vcs_zcode_creation_validation_context prior_context = *context;
-    prior_context.expected_epoch = prior.epoch;
-    prior_context.expected_award_atoms = prior.award_atoms;
-    enum vcs_zcode_creation_error error = creation_verify_cas_depth(
-        &prior, &prior_context, depth + 1u);
-    if (error != VCS_ZCODE_CREATION_OK)
-        return VCS_ZCODE_CREATION_LINEAGE;
-    if (creation_load_release(context->workspace, prior.release_root,
-                              &parent_release) !=
-            VCS_ZCODE_CREATION_OK ||
-        !creation_release_is_direct_parent(
-            &vertical->release, &parent_release, prior.release_root))
-        return VCS_ZCODE_CREATION_RELEASE;
-    return VCS_ZCODE_CREATION_OK;
+    return creation_verify_predecessor(context, vertical, &prior, depth);
 }
 
 static enum vcs_zcode_creation_error creation_load_proof_set(
@@ -534,15 +609,9 @@ static enum vcs_zcode_creation_error creation_verify_continuity(
     return VCS_ZCODE_CREATION_OK;
 }
 
-static enum vcs_zcode_creation_error creation_verify_cas_depth(
-    const struct vcs_zcode_creation_attribution_v1 *a,
-    const struct vcs_zcode_creation_validation_context *context,
-    unsigned depth)
+static enum vcs_zcode_creation_error creation_check_validation_context(
+    const struct vcs_zcode_creation_validation_context *context)
 {
-    enum vcs_zcode_creation_error error =
-        vcs_zcode_creation_attribution_validate(a);
-    if (error != VCS_ZCODE_CREATION_OK)
-        return error;
     if (!context || !context->workspace ||
         !context->expected_network_genesis_root ||
         !context->expected_zc23_policy_root ||
@@ -551,6 +620,13 @@ static enum vcs_zcode_creation_error creation_verify_cas_depth(
         !zcl_bytes_any_set(context->expected_network_genesis_root, 32) ||
         !zcl_bytes_any_set(context->expected_zc23_policy_root, 32))
         return VCS_ZCODE_CREATION_CONTEXT;
+    return VCS_ZCODE_CREATION_OK;
+}
+
+static enum vcs_zcode_creation_error creation_check_expected_values(
+    const struct vcs_zcode_creation_attribution_v1 *a,
+    const struct vcs_zcode_creation_validation_context *context)
+{
     if (!creation_equal(a->network_genesis_root,
                         context->expected_network_genesis_root))
         return VCS_ZCODE_CREATION_NETWORK;
@@ -570,25 +646,52 @@ static enum vcs_zcode_creation_error creation_verify_cas_depth(
                                    a->challenge_opening_height,
                                    a->challenge_opening_hash))
         return VCS_ZCODE_CREATION_REORG;
+    return VCS_ZCODE_CREATION_OK;
+}
+
+static enum vcs_zcode_creation_error creation_load_vertical(
+    const struct vcs_zcode_creation_attribution_v1 *a,
+    const struct vcs_zcode_creation_validation_context *context,
+    struct creation_vertical *vertical)
+{
+    enum vcs_zcode_creation_error error =
+        creation_load_task_triplet(a, context->workspace, vertical);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    error = creation_load_contributor(a, context, &vertical->candidate);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    error = creation_load_package(a, context->workspace, vertical);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    error = creation_load_proof_set(a, context->workspace, vertical);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    error = creation_load_lane_score(a, context->workspace, vertical);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    return creation_rederive_score(a, vertical);
+}
+
+static enum vcs_zcode_creation_error creation_verify_cas_depth(
+    const struct vcs_zcode_creation_attribution_v1 *a,
+    const struct vcs_zcode_creation_validation_context *context,
+    unsigned depth)
+{
+    enum vcs_zcode_creation_error error =
+        vcs_zcode_creation_attribution_validate(a);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    error = creation_check_validation_context(context);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
+    error = creation_check_expected_values(a, context);
+    if (error != VCS_ZCODE_CREATION_OK)
+        return error;
 
     struct creation_vertical vertical;
     memset(&vertical, 0, sizeof(vertical));
-    error = creation_load_task_triplet(a, context->workspace, &vertical);
-    if (error != VCS_ZCODE_CREATION_OK)
-        return error;
-    error = creation_load_contributor(a, context, &vertical.candidate);
-    if (error != VCS_ZCODE_CREATION_OK)
-        return error;
-    error = creation_load_package(a, context->workspace, &vertical);
-    if (error != VCS_ZCODE_CREATION_OK)
-        return error;
-    error = creation_load_proof_set(a, context->workspace, &vertical);
-    if (error != VCS_ZCODE_CREATION_OK)
-        return error;
-    error = creation_load_lane_score(a, context->workspace, &vertical);
-    if (error != VCS_ZCODE_CREATION_OK)
-        return error;
-    error = creation_rederive_score(a, &vertical);
+    error = creation_load_vertical(a, context, &vertical);
     if (error != VCS_ZCODE_CREATION_OK)
         return error;
     error = creation_verify_lineage(a, context, &vertical, depth);
