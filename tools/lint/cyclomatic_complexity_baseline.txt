@@ -1622,7 +1622,6 @@ tests/harness/src/test_robustness.c:test_robustness:104
 tests/harness/src/test_rom_fetch.c:rf_lat_conn_thread:18
 tests/harness/src/test_rom_fetch_onion.c:test_rom_fetch_onion:46
 tests/harness/src/test_rpc_safety.c:test_rpc_safety:277
-tests/harness/src/test_running_image_positioned.c:running_image_positioned_probe:16
 tests/harness/src/test_sapling_anchor_frontier_condition.c:test_sapling_anchor_frontier_condition:49
 tests/harness/src/test_sapling_ckpt_persist.c:test_sapling_ckpt_persist:95
 tests/harness/src/test_sapling_crypto.c:test_sapling_crypto:188

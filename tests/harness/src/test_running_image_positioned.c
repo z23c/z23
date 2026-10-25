@@ -12,6 +12,47 @@
 
 #include <stdint.h>
 
+static bool running_image_positioned_open_and_snapshot(
+    struct platform_positioned_file *file, char *path, size_t path_size,
+    struct platform_positioned_file_snapshot *before)
+{
+    return os_proc_exe_path(path, path_size) &&
+           platform_positioned_file_open(file, path) &&
+           platform_positioned_file_snapshot(file, before) &&
+           before->size != 0;
+}
+
+static bool running_image_positioned_read_all(
+    struct platform_positioned_file *file, uint64_t size, bool *any)
+{
+    uint8_t bytes[32768];
+    uint64_t offset = 0;
+    while (offset < size) {
+        size_t want = size - offset < sizeof(bytes)
+                          ? (size_t)(size - offset)
+                          : sizeof(bytes);
+        if (platform_positioned_file_read(file, bytes, want, offset) !=
+            (int64_t)want)
+            return false;
+        *any |= zcl_bytes_any_set(bytes, want);
+        offset += want;
+    }
+    return true;
+}
+
+static bool running_image_positioned_identity_stable(
+    bool any, struct platform_positioned_file *file,
+    struct platform_positioned_file_snapshot *before,
+    struct platform_positioned_file_snapshot *after)
+{
+    return any && platform_positioned_file_snapshot(file, after) &&
+           before->size == after->size && before->volume == after->volume &&
+           before->file_low == after->file_low &&
+           before->file_high == after->file_high &&
+           before->modified_seconds == after->modified_seconds &&
+           before->changed_seconds == after->changed_seconds;
+}
+
 static int running_image_positioned_probe(void)
 {
     char path[4096];
@@ -19,31 +60,16 @@ static int running_image_positioned_probe(void)
     struct platform_positioned_file_snapshot before;
     struct platform_positioned_file_snapshot after;
     platform_positioned_file_init(&file);
-    if (!os_proc_exe_path(path, sizeof(path)) ||
-        !platform_positioned_file_open(&file, path) ||
-        !platform_positioned_file_snapshot(&file, &before) || before.size == 0)
+    if (!running_image_positioned_open_and_snapshot(&file, path, sizeof(path),
+                                                    &before))
         return 1;
-    uint8_t bytes[32768];
-    uint64_t offset = 0;
     bool any = false;
-    while (offset < before.size) {
-        size_t want = before.size - offset < sizeof(bytes)
-                          ? (size_t)(before.size - offset)
-                          : sizeof(bytes);
-        if (platform_positioned_file_read(&file, bytes, want, offset) !=
-            (int64_t)want) {
-            platform_positioned_file_close(&file);
-            return 2;
-        }
-        any |= zcl_bytes_any_set(bytes, want);
-        offset += want;
+    if (!running_image_positioned_read_all(&file, before.size, &any)) {
+        platform_positioned_file_close(&file);
+        return 2;
     }
-    bool stable = any && platform_positioned_file_snapshot(&file, &after) &&
-                  before.size == after.size && before.volume == after.volume &&
-                  before.file_low == after.file_low &&
-                  before.file_high == after.file_high &&
-                  before.modified_seconds == after.modified_seconds &&
-                  before.changed_seconds == after.changed_seconds;
+    bool stable = running_image_positioned_identity_stable(any, &file,
+                                                           &before, &after);
     platform_positioned_file_close(&file);
     return stable ? 0 : 3;
 }
