@@ -161,7 +161,7 @@ static bool vocabulary_rule_equal(
            vocabulary_root_equal(left->evidence_root, right->evidence_root);
 }
 
-static bool vocabulary_equal(
+static bool vocabulary_header_equal(
     const struct zcl_ontology_vocabulary_v1 *left,
     const struct zcl_ontology_vocabulary_v1 *right)
 {
@@ -181,13 +181,34 @@ static bool vocabulary_equal(
         !vocabulary_root_equal(left->genls_predicate_root,
                                right->genls_predicate_root))
         return false;
+    return true;
+}
+
+static bool vocabulary_terms_equal(
+    const struct zcl_ontology_vocabulary_v1 *left,
+    const struct zcl_ontology_vocabulary_v1 *right)
+{
     for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_TERM_COUNT; i++)
         if (!vocabulary_term_equal(&left->terms[i], &right->terms[i]))
             return false;
+    return true;
+}
+
+static bool vocabulary_predicates_equal(
+    const struct zcl_ontology_vocabulary_v1 *left,
+    const struct zcl_ontology_vocabulary_v1 *right)
+{
     for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_PREDICATE_COUNT; i++)
         if (!vocabulary_predicate_equal(&left->predicates[i],
                                         &right->predicates[i]))
             return false;
+    return true;
+}
+
+static bool vocabulary_rule_nodes_equal(
+    const struct zcl_ontology_vocabulary_v1 *left,
+    const struct zcl_ontology_vocabulary_v1 *right)
+{
     for (size_t rule = 0; rule < ZCL_ONTOLOGY_VOCABULARY_RULE_COUNT;
          rule++) {
         for (size_t node = 0;
@@ -197,19 +218,55 @@ static bool vocabulary_equal(
                     &right->rule_nodes[rule][node]))
                 return false;
     }
+    return true;
+}
+
+static bool vocabulary_formulas_equal(
+    const struct zcl_ontology_vocabulary_v1 *left,
+    const struct zcl_ontology_vocabulary_v1 *right)
+{
     for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_FORMULA_COUNT; i++) {
         if (left->formula_order[i] != right->formula_order[i] ||
             !vocabulary_root_equal(left->formula_roots[i],
                                    right->formula_roots[i]))
             return false;
     }
+    return true;
+}
+
+static bool vocabulary_reserved_bytes_equal(
+    const struct zcl_ontology_vocabulary_v1 *left,
+    const struct zcl_ontology_vocabulary_v1 *right)
+{
     for (size_t i = 0; i < sizeof(left->reserved_bytes); i++)
         if (left->reserved_bytes[i] != right->reserved_bytes[i]) return false;
+    return true;
+}
+
+static bool vocabulary_rules_equal(
+    const struct zcl_ontology_vocabulary_v1 *left,
+    const struct zcl_ontology_vocabulary_v1 *right)
+{
     for (size_t i = 0; i < ZCL_ONTOLOGY_VOCABULARY_RULE_COUNT; i++)
         if (!vocabulary_rule_equal(&left->rules[i], &right->rules[i]) ||
             !vocabulary_root_equal(left->rule_roots[i],
                                    right->rule_roots[i]))
             return false;
+    return true;
+}
+
+static bool vocabulary_equal(
+    const struct zcl_ontology_vocabulary_v1 *left,
+    const struct zcl_ontology_vocabulary_v1 *right)
+{
+    if (!vocabulary_header_equal(left, right) ||
+        !vocabulary_terms_equal(left, right) ||
+        !vocabulary_predicates_equal(left, right) ||
+        !vocabulary_rule_nodes_equal(left, right) ||
+        !vocabulary_formulas_equal(left, right) ||
+        !vocabulary_reserved_bytes_equal(left, right) ||
+        !vocabulary_rules_equal(left, right))
+        return false;
     return true;
 }
 
