@@ -322,13 +322,12 @@ static enum zcl_moderation_error compose_policy_validate(
     return ZCL_MODERATION_OK;
 }
 
-enum zcl_moderation_error zcl_moderation_compose_v1(
+static enum zcl_moderation_error compose_validate_request(
     const struct zcl_moderation_local_policy_v1 *policy,
     const uint8_t content_root[32],
     const struct zcl_moderation_source_v1 *sources, size_t source_count,
     struct zcl_moderation_composition **out)
 {
-    if (out) *out = NULL;
     if (!out || !content_root || (!sources && source_count))
         return ZCL_MODERATION_NULL;
     enum zcl_moderation_error error = compose_policy_validate(policy);
@@ -336,52 +335,68 @@ enum zcl_moderation_error zcl_moderation_compose_v1(
     if (!zcl_bytes_any_set(content_root, 32)) return ZCL_MODERATION_ROOT;
     if (source_count > ZCL_MODERATION_MAX_ATTESTATIONS)
         return ZCL_MODERATION_LIMIT;
+    return ZCL_MODERATION_OK;
+}
 
-    struct zcl_moderation_composition *composition =
-        zcl_calloc(1, sizeof(*composition), "moderation composition");
-    if (!composition) return ZCL_MODERATION_NOMEM;
-    memcpy(composition->tally.content_root, content_root, 32);
-    memcpy(composition->tally.profile_root, policy->profile_root, 32);
-    composition->tally.self_verdict = ZCL_MODERATION_VERDICT_UNREVIEWED;
+static void compose_dedupe_statements(
+    struct zcl_moderation_source_v1 *accepted, size_t *accepted_count)
+{
+    /* A byte-identical statement gossiped twice is one statement. */
+    size_t deduped = 0;
+    for (size_t i = 0; i < *accepted_count; i++) {
+        if (deduped > 0 && memcmp(accepted[deduped - 1u].object_root,
+                                  accepted[i].object_root, 32) == 0)
+            continue;
+        accepted[deduped++] = accepted[i];
+    }
+    *accepted_count = deduped;
+}
 
-    struct zcl_moderation_source_v1 *accepted = NULL;
+static enum zcl_moderation_error compose_collect_sources(
+    const struct zcl_moderation_local_policy_v1 *policy,
+    const uint8_t content_root[32],
+    const struct zcl_moderation_source_v1 *sources, size_t source_count,
+    struct zcl_moderation_composition *composition,
+    struct zcl_moderation_source_v1 **accepted_out, size_t *accepted_count_out)
+{
+    *accepted_out = NULL;
+    *accepted_count_out = 0;
+    if (!source_count) return ZCL_MODERATION_OK;
+    struct zcl_moderation_source_v1 *accepted =
+        zcl_calloc(source_count, sizeof(*accepted),
+                   "moderation attestation sources");
+    if (!accepted) return ZCL_MODERATION_NOMEM;
     size_t accepted_count = 0;
-    if (source_count) {
-        accepted = zcl_calloc(source_count, sizeof(*accepted),
-                              "moderation attestation sources");
-        if (!accepted) {
-            free(composition);
-            return ZCL_MODERATION_NOMEM;
+    for (size_t i = 0; i < source_count; i++) {
+        if (!compose_accept_source(policy, content_root, &sources[i])) {
+            composition->tally.rejected++;
+            continue;
         }
-        for (size_t i = 0; i < source_count; i++) {
-            if (!compose_accept_source(policy, content_root, &sources[i])) {
-                composition->tally.rejected++;
-                continue;
-            }
-            accepted[accepted_count++] = sources[i];
-        }
-        qsort(accepted, accepted_count, sizeof(*accepted),
-              compose_source_compare);
-        /* A byte-identical statement gossiped twice is one statement. */
-        size_t deduped = 0;
-        for (size_t i = 0; i < accepted_count; i++) {
-            if (deduped > 0 && memcmp(accepted[deduped - 1u].object_root,
-                                      accepted[i].object_root, 32) == 0)
-                continue;
-            accepted[deduped++] = accepted[i];
-        }
-        accepted_count = deduped;
+        accepted[accepted_count++] = sources[i];
     }
-    if (accepted_count) {
-        composition->signers =
-            zcl_calloc(accepted_count, sizeof(*composition->signers),
-                       "moderation signer verdicts");
-        if (!composition->signers) {
-            free(accepted);
-            free(composition);
-            return ZCL_MODERATION_NOMEM;
-        }
-    }
+    qsort(accepted, accepted_count, sizeof(*accepted), compose_source_compare);
+    compose_dedupe_statements(accepted, &accepted_count);
+    *accepted_out = accepted;
+    *accepted_count_out = accepted_count;
+    return ZCL_MODERATION_OK;
+}
+
+static enum zcl_moderation_error compose_alloc_signer_verdicts(
+    struct zcl_moderation_composition *composition, size_t accepted_count)
+{
+    if (!accepted_count) return ZCL_MODERATION_OK;
+    composition->signers =
+        zcl_calloc(accepted_count, sizeof(*composition->signers),
+                   "moderation signer verdicts");
+    if (!composition->signers) return ZCL_MODERATION_NOMEM;
+    return ZCL_MODERATION_OK;
+}
+
+static void compose_record_signer_groups(
+    const struct zcl_moderation_local_policy_v1 *policy,
+    struct zcl_moderation_composition *composition,
+    const struct zcl_moderation_source_v1 *accepted, size_t accepted_count)
+{
     for (size_t begin = 0; begin < accepted_count;) {
         size_t end = begin + 1u;
         while (end < accepted_count &&
@@ -394,6 +409,41 @@ enum zcl_moderation_error zcl_moderation_compose_v1(
         compose_tally_signer(&composition->tally, signer);
         begin = end;
     }
+}
+
+enum zcl_moderation_error zcl_moderation_compose_v1(
+    const struct zcl_moderation_local_policy_v1 *policy,
+    const uint8_t content_root[32],
+    const struct zcl_moderation_source_v1 *sources, size_t source_count,
+    struct zcl_moderation_composition **out)
+{
+    if (out) *out = NULL;
+    enum zcl_moderation_error error = compose_validate_request(
+        policy, content_root, sources, source_count, out);
+    if (error != ZCL_MODERATION_OK) return error;
+
+    struct zcl_moderation_composition *composition =
+        zcl_calloc(1, sizeof(*composition), "moderation composition");
+    if (!composition) return ZCL_MODERATION_NOMEM;
+    memcpy(composition->tally.content_root, content_root, 32);
+    memcpy(composition->tally.profile_root, policy->profile_root, 32);
+    composition->tally.self_verdict = ZCL_MODERATION_VERDICT_UNREVIEWED;
+
+    struct zcl_moderation_source_v1 *accepted = NULL;
+    size_t accepted_count = 0;
+    error = compose_collect_sources(policy, content_root, sources, source_count,
+                                    composition, &accepted, &accepted_count);
+    if (error != ZCL_MODERATION_OK) {
+        free(composition);
+        return error;
+    }
+    error = compose_alloc_signer_verdicts(composition, accepted_count);
+    if (error != ZCL_MODERATION_OK) {
+        free(accepted);
+        free(composition);
+        return error;
+    }
+    compose_record_signer_groups(policy, composition, accepted, accepted_count);
     free(accepted);
     composition->tally.signer_count = (uint32_t)composition->count;
     compose_decide(policy, &composition->tally);
