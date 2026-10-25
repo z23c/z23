@@ -96,49 +96,55 @@ bool store_buyer_remote_addr_matches(const char *addr, bool transparent)
            tx_destination_is_valid(&dest);
 }
 
-/* ── pay ────────────────────────────────────────────────────────────── */
-
-struct zcl_result store_buyer_prepare_payment(const char *datadir,
-                                              int64_t purchase_id,
-                                              const char *from_addr,
-                                              struct store_buyer_payment *out)
+/* Open the buyer's database, load one purchase row, and close the handle
+ * again — the read pattern the pay and collect paths both start from.
+ * `label` names the caller in the open failure's context. */
+static struct zcl_result sb_open_and_load_purchase(const char *datadir,
+                                                   int64_t purchase_id,
+                                                   struct db_store_purchase *purchase,
+                                                   const char *label)
 {
     struct node_db ndb;
-    struct db_store_purchase purchase;
     struct zcl_result r;
 
-    if (!datadir || !from_addr || !from_addr[0] || !out)
-        return SB_FAIL(STORE_BUYER_ERR_ARGS);
-    memset(out, 0, sizeof(*out));
-    if (!sb_network_allows_spend())
-        return SB_FAIL(STORE_BUYER_ERR_MAINNET_REFUSED);
-
-    r = sb_open_db(datadir, &ndb, "store_buyer.prepare_payment");
+    r = sb_open_db(datadir, &ndb, label);
     if (!r.ok)
         return r;
-    r = sb_load_purchase(&ndb, purchase_id, &purchase);
+    r = sb_load_purchase(&ndb, purchase_id, purchase);
     node_db_close(&ndb);
-    if (!r.ok)
-        return r;
+    return r;
+}
 
-    if (purchase.stage == STORE_PURCHASE_PAYING ||
-        purchase.stage == STORE_PURCHASE_PAID ||
-        purchase.stage == STORE_PURCHASE_DELIVERED)
+/* ── pay ────────────────────────────────────────────────────────────── */
+
+/* A purchase already paying, paid or delivered must never be paid a second
+ * time; refusing here by name is what keeps prepare idempotent per row. */
+static struct zcl_result sb_pay_refuse_if_already_paid(
+    const struct db_store_purchase *purchase, int64_t purchase_id)
+{
+    if (purchase->stage == STORE_PURCHASE_PAYING ||
+        purchase->stage == STORE_PURCHASE_PAID ||
+        purchase->stage == STORE_PURCHASE_DELIVERED)
         return SB_FAILF(STORE_BUYER_ERR_ALREADY_PAID,
                         "purchase %lld is already at stage %s",
                         (long long)purchase_id,
-                        store_purchase_stage_name(purchase.stage));
+                        store_purchase_stage_name(purchase->stage));
+    return ZCL_OK;
+}
 
-    /* No proving backend ⇒ no shielded output can be built at all. Refuse
-     * here, loudly and by name, rather than letting the send fail hundreds
-     * of lines later inside coin selection — and never silently no-op.
-     *
-     * Only a SHIELDED order address needs it. A transparent order is paid by
-     * an ordinary signed t->t spend with no zk-proof anywhere in it, so
-     * demanding a prover for one would refuse a payment this build can
-     * actually make. The order's address type is the merchant's choice, not
-     * the buyer's, so this asks the address rather than a flag. */
-    if (sb_purchase_addr_is_sapling(purchase.payment_addr) &&
+/* No proving backend ⇒ no shielded output can be built at all. Refuse
+ * here, loudly and by name, rather than letting the send fail hundreds
+ * of lines later inside coin selection — and never silently no-op.
+ *
+ * Only a SHIELDED order address needs it. A transparent order is paid by
+ * an ordinary signed t->t spend with no zk-proof anywhere in it, so
+ * demanding a prover for one would refuse a payment this build can
+ * actually make. The order's address type is the merchant's choice, not
+ * the buyer's, so this asks the address rather than a flag. */
+static struct zcl_result sb_pay_refuse_without_prover(
+    const struct db_store_purchase *purchase, int64_t purchase_id)
+{
+    if (sb_purchase_addr_is_sapling(purchase->payment_addr) &&
         !zclassic_sapling_prover_is_ready()) {
         LOG_WARN(SB_TAG, "pay: refusing purchase %lld — no Sapling proving "
                  "backend (backend=%s status=%s); native C23 proving remains "
@@ -152,69 +158,114 @@ struct zcl_result store_buyer_prepare_payment(const char *datadir,
                         zclassic_sapling_prover_backend(),
                         zclassic_sapling_prover_status());
     }
+    return ZCL_OK;
+}
 
+/* Both spend-side refusals a payment must survive before any bytes of it
+ * are built: the node's guard, then the whole-wallet floor. */
+static struct zcl_result sb_pay_check_spend_readiness(
+    const char *from_addr, const struct db_store_purchase *purchase,
+    int64_t purchase_id)
+{
     /* The node's own spend guard. Never weakened here: if it refuses, the
      * purchase stays unpaid and says so. */
-    {
-        char reason[96] = {0};
-        if (!sovereignty_guard_allow("wallet_spend", reason, sizeof(reason))) {
-            LOG_WARN(SB_TAG, "pay: refusing purchase %lld — spend guard: %s",
-                     (long long)purchase_id, reason);
-            return SB_FAILF(STORE_BUYER_ERR_SPEND_REFUSED,
-                            "the node refuses to spend from this tip: %s",
-                            reason[0] ? reason : "(no reason given)");
-        }
+    char reason[96] = {0};
+    if (!sovereignty_guard_allow("wallet_spend", reason, sizeof(reason))) {
+        LOG_WARN(SB_TAG, "pay: refusing purchase %lld — spend guard: %s",
+                 (long long)purchase_id, reason);
+        return SB_FAILF(STORE_BUYER_ERR_SPEND_REFUSED,
+                        "the node refuses to spend from this tip: %s",
+                        reason[0] ? reason : "(no reason given)");
     }
 
     /* Whole-wallet floor. Coin selection is z_sendmany's job; this only
      * refuses the case where no selection could possibly succeed. */
-    {
-        const struct wallet *w = app_runtime_wallet();
-        if (w) {
-            /* Which balance pool the FUNDING address draws on (t->z and z->z
-             * are both allowed; this only picks the floor to check). */
-            int64_t pool = wallet_addr_is_sapling(from_addr)
-                               ? wallet_get_sapling_balance(w)
-                               : wallet_get_balance(w);
-            if (pool < purchase.amount_zatoshi) {
-                LOG_WARN(SB_TAG, "pay: refusing purchase %lld — wallet holds "
-                         "%lld zatoshi, order needs %lld",
-                         (long long)purchase_id, (long long)pool,
-                         (long long)purchase.amount_zatoshi);
-                return SB_FAILF(STORE_BUYER_ERR_INSUFFICIENT_FUNDS,
-                                "wallet holds %lld zatoshi, order %lld needs "
-                                "%lld", (long long)pool,
-                                (long long)purchase.order_id,
-                                (long long)purchase.amount_zatoshi);
-            }
+    const struct wallet *w = app_runtime_wallet();
+    if (w) {
+        /* Which balance pool the FUNDING address draws on (t->z and z->z
+         * are both allowed; this only picks the floor to check). */
+        int64_t pool = wallet_addr_is_sapling(from_addr)
+                           ? wallet_get_sapling_balance(w)
+                           : wallet_get_balance(w);
+        if (pool < purchase->amount_zatoshi) {
+            LOG_WARN(SB_TAG, "pay: refusing purchase %lld — wallet holds "
+                     "%lld zatoshi, order needs %lld",
+                     (long long)purchase_id, (long long)pool,
+                     (long long)purchase->amount_zatoshi);
+            return SB_FAILF(STORE_BUYER_ERR_INSUFFICIENT_FUNDS,
+                            "wallet holds %lld zatoshi, order %lld needs "
+                            "%lld", (long long)pool,
+                            (long long)purchase->order_id,
+                            (long long)purchase->amount_zatoshi);
         }
     }
+    return ZCL_OK;
+}
+
+/* Hex-encode the memo and append an explicit 00 terminator. The
+ * merchant credits an order only when the byte after
+ * "ZCL23ORDER:<id>" is NUL or ';' — a memo that merely starts with the
+ * token and runs into padding is not credited. Emitting the terminator
+ * here means the buyer never depends on which padding byte the sender
+ * happens to use. */
+static struct zcl_result sb_pay_encode_memo(
+    const struct db_store_purchase *purchase, int64_t purchase_id,
+    struct store_buyer_payment *out)
+{
+    size_t memo_len = strlen(purchase->memo);
+    size_t need = memo_len * 2 + 2 + 1;
+    if (need > sizeof(out->memo_hex))
+        return SB_FAILF(STORE_BUYER_ERR_INTERNAL,
+                        "memo for purchase %lld does not fit the hex "
+                        "buffer (%zu bytes needed, %zu available)",
+                        (long long)purchase_id, need,
+                        sizeof(out->memo_hex));
+    for (size_t i = 0; i < memo_len; i++)
+        (void)snprintf(out->memo_hex + i * 2, 3, "%02x",
+                       (unsigned char)purchase->memo[i]);
+    (void)snprintf(out->memo_hex + memo_len * 2, 3, "00");
+    return ZCL_OK;
+}
+
+struct zcl_result store_buyer_prepare_payment(const char *datadir,
+                                              int64_t purchase_id,
+                                              const char *from_addr,
+                                              struct store_buyer_payment *out)
+{
+    struct db_store_purchase purchase;
+    struct zcl_result r;
+
+    if (!datadir || !from_addr || !from_addr[0] || !out)
+        return SB_FAIL(STORE_BUYER_ERR_ARGS);
+    memset(out, 0, sizeof(*out));
+    if (!sb_network_allows_spend())
+        return SB_FAIL(STORE_BUYER_ERR_MAINNET_REFUSED);
+
+    r = sb_open_and_load_purchase(datadir, purchase_id, &purchase,
+                                  "store_buyer.prepare_payment");
+    if (!r.ok)
+        return r;
+
+    r = sb_pay_refuse_if_already_paid(&purchase, purchase_id);
+    if (!r.ok)
+        return r;
+
+    r = sb_pay_refuse_without_prover(&purchase, purchase_id);
+    if (!r.ok)
+        return r;
+
+    r = sb_pay_check_spend_readiness(from_addr, &purchase, purchase_id);
+    if (!r.ok)
+        return r;
 
     (void)snprintf(out->from_addr, sizeof(out->from_addr), "%s", from_addr);
     (void)snprintf(out->to_addr, sizeof(out->to_addr), "%s",
                    purchase.payment_addr);
     out->amount_zatoshi = purchase.amount_zatoshi;
 
-    /* Hex-encode the memo and append an explicit 00 terminator. The
-     * merchant credits an order only when the byte after
-     * "ZCL23ORDER:<id>" is NUL or ';' — a memo that merely starts with the
-     * token and runs into padding is not credited. Emitting the terminator
-     * here means the buyer never depends on which padding byte the sender
-     * happens to use. */
-    {
-        size_t memo_len = strlen(purchase.memo);
-        size_t need = memo_len * 2 + 2 + 1;
-        if (need > sizeof(out->memo_hex))
-            return SB_FAILF(STORE_BUYER_ERR_INTERNAL,
-                            "memo for purchase %lld does not fit the hex "
-                            "buffer (%zu bytes needed, %zu available)",
-                            (long long)purchase_id, need,
-                            sizeof(out->memo_hex));
-        for (size_t i = 0; i < memo_len; i++)
-            (void)snprintf(out->memo_hex + i * 2, 3, "%02x",
-                           (unsigned char)purchase.memo[i]);
-        (void)snprintf(out->memo_hex + memo_len * 2, 3, "00");
-    }
+    r = sb_pay_encode_memo(&purchase, purchase_id, out);
+    if (!r.ok)
+        return r;
     return ZCL_OK;
 }
 
@@ -500,6 +551,45 @@ static const uint8_t *sb_http_body(const uint8_t *resp, size_t n,
     return NULL;
 }
 
+/* The platform write helpers refuse through errno without always setting
+ * it; give such a refusal a reason instead of leaking a stale success. */
+static void sb_errno_default_eio(void)
+{
+    if (errno == 0)
+        errno = EIO;
+}
+
+/* Retire a staging file that refused to be written or renamed, keeping the
+ * refusal's errno across the cleanup calls. */
+static void sb_write_retire_staging(struct platform_private_file *staging,
+                                    const char *tmp)
+{
+    int saved_errno = errno ? errno : EIO;
+    (void)platform_private_file_retire(staging, tmp);
+    platform_private_file_close(staging);
+    errno = saved_errno;
+}
+
+/* Write `len` bytes through an already-created staging file and rename it
+ * over the installed path. On any failure the temporary is retired and
+ * errno carries the refusal. */
+static bool sb_write_staging_file(struct platform_private_file *staging,
+                                  const uint8_t *data, size_t len,
+                                  const char *tmp, const char *installed)
+{
+    if ((len != 0 &&
+         !platform_private_file_write_at(staging, data, len, 0)) ||
+        !platform_private_file_flush(staging)) {
+        sb_write_retire_staging(staging, tmp);
+        return false;
+    }
+    if (!platform_private_file_replace(staging, tmp, installed)) {
+        sb_write_retire_staging(staging, tmp);
+        return false;
+    }
+    return true;
+}
+
 /* Write `len` bytes to `path` atomically: a sibling temporary in the same
  * directory, fsync, rename. A caller that dies mid-write leaves the target
  * either absent or complete — never a truncated file that hashes to nothing
@@ -524,35 +614,21 @@ static bool sb_write_atomic(const char *path, const uint8_t *data, size_t len)
     }
 
     if (!platform_private_file_unlink_missing_ok(tmp)) {
-        if (errno == 0) errno = EIO;
+        sb_errno_default_eio();
         return false;
     }
 
     struct platform_private_file staging;
     platform_private_file_init(&staging);
     if (!platform_private_file_create(tmp, &staging)) {
-        if (errno == 0) errno = EIO;
+        sb_errno_default_eio();
         return false;
     }
 
-    if ((len != 0 &&
-         !platform_private_file_write_at(&staging, data, len, 0)) ||
-        !platform_private_file_flush(&staging)) {
-        int saved_errno = errno ? errno : EIO;
-        (void)platform_private_file_retire(&staging, tmp);
-        platform_private_file_close(&staging);
-        errno = saved_errno;
+    if (!sb_write_staging_file(&staging, data, len, tmp, installed))
         return false;
-    }
-    if (!platform_private_file_replace(&staging, tmp, installed)) {
-        int saved_errno = errno ? errno : EIO;
-        (void)platform_private_file_retire(&staging, tmp);
-        platform_private_file_close(&staging);
-        errno = saved_errno;
-        return false;
-    }
     if (!platform_private_parent_flush(parent)) {
-        if (errno == 0) errno = EIO;
+        sb_errno_default_eio();
         return false;
     }
     return true;
@@ -638,55 +714,26 @@ static struct zcl_result sb_collect_fetch(const char *datadir,
     return ZCL_OK;
 }
 
-struct zcl_result store_buyer_collect(const char *datadir,
-                                      int64_t purchase_id,
-                                      const char *output_path,
-                                      struct store_buyer_delivery *out)
+/* Gate a collect against the reloaded row before any bytes move: the
+ * merchant must have credited the order, a target path must be resolvable,
+ * and the product must actually carry a payload. `target` receives the
+ * path the bytes will be written to. */
+static struct zcl_result sb_collect_preflight(
+    const struct db_store_purchase *purchase, const char *output_path,
+    int64_t purchase_id, char *target, size_t target_size)
 {
-    struct node_db ndb;
-    struct db_store_purchase purchase;
-    struct zcl_result r;
-    uint8_t *resp = NULL;
-    uint8_t got[32];
-    const uint8_t *body = NULL;
-    size_t body_len = 0;
-    char target[STORE_PURCHASE_PATH_MAX + 1];
     const char *want_path;
 
-    if (!datadir || !out)
-        return SB_FAIL(STORE_BUYER_ERR_ARGS);
-    memset(out, 0, sizeof(*out));
-
-    /* Re-poll the merchant first. This is what makes a collect a RESUME: a
-     * node that paid, then restarted, comes back with the row still at
-     * "paying" — the credit happened while it was gone. Asking the merchant
-     * before refusing means the operator does not have to know to run a
-     * status call first. */
-    {
-        struct store_buyer_state state;
-        r = store_buyer_refresh(datadir, purchase_id, &state);
-        if (!r.ok)
-            return r;
-    }
-
-    r = sb_open_db(datadir, &ndb, "store_buyer.collect");
-    if (!r.ok)
-        return r;
-    r = sb_load_purchase(&ndb, purchase_id, &purchase);
-    node_db_close(&ndb);
-    if (!r.ok)
-        return r;
-
-    if (purchase.stage != STORE_PURCHASE_PAID &&
-        purchase.stage != STORE_PURCHASE_DELIVERED)
+    if (purchase->stage != STORE_PURCHASE_PAID &&
+        purchase->stage != STORE_PURCHASE_DELIVERED)
         return SB_FAILF(STORE_BUYER_ERR_PAYMENT_NOT_CONFIRMED,
                         "purchase %lld is at stage %s; the merchant has not "
                         "credited order %lld yet", (long long)purchase_id,
-                        store_purchase_stage_name(purchase.stage),
-                        (long long)purchase.order_id);
+                        store_purchase_stage_name(purchase->stage),
+                        (long long)purchase->order_id);
 
     want_path = (output_path && output_path[0]) ? output_path
-                                                : purchase.output_path;
+                                                : purchase->output_path;
     if (!want_path || !want_path[0])
         return SB_FAILF(STORE_BUYER_ERR_ARGS,
                         "purchase %lld has no output path, and none was "
@@ -695,12 +742,12 @@ struct zcl_result store_buyer_collect(const char *datadir,
         return SB_FAILF(STORE_BUYER_ERR_ARGS,
                         "output path is %zu bytes, the limit is %d",
                         strlen(want_path), STORE_PURCHASE_PATH_MAX);
-    (void)snprintf(target, sizeof(target), "%s", want_path);
+    (void)snprintf(target, target_size, "%s", want_path);
 
     /* A product with no attached payload has nothing to verify and nothing
      * to write; the store answers with an HTML access page. Refusing here
      * is the honest answer — there is no file to deliver. */
-    if (!purchase.has_content_hash) {
+    if (!purchase->has_content_hash) {
         LOG_WARN(SB_TAG, "collect: purchase %lld is for a product with no "
                  "file payload; there is nothing to download",
                  (long long)purchase_id);
@@ -708,8 +755,24 @@ struct zcl_result store_buyer_collect(const char *datadir,
                         "purchase %lld is for a product with no file payload",
                         (long long)purchase_id);
     }
+    return ZCL_OK;
+}
 
-    r = sb_collect_fetch(datadir, &purchase, purchase_id, &resp, &body,
+/* Fetch the gated payload, verify it, and write it: the fetch buffer is
+ * freed on every exit, `*len_out` receives the delivered size and `got`
+ * the 32-byte SHA3-256 digest, exactly as the caller records them. */
+static struct zcl_result sb_collect_deliver(const char *datadir,
+                                            const struct db_store_purchase *purchase,
+                                            int64_t purchase_id,
+                                            const char *target,
+                                            size_t *len_out, uint8_t *got)
+{
+    struct zcl_result r;
+    uint8_t *resp = NULL;
+    const uint8_t *body = NULL;
+    size_t body_len = 0;
+
+    r = sb_collect_fetch(datadir, purchase, purchase_id, &resp, &body,
                          &body_len);
     if (!r.ok)
         return r;
@@ -718,7 +781,7 @@ struct zcl_result store_buyer_collect(const char *datadir,
      * when the order was placed, so this also catches a merchant that swapped
      * the payload after the sale — not just a corrupted transfer. */
     zcl_sha3_256(body, body_len, got);
-    if (memcmp(got, purchase.content_hash, sizeof(got)) != 0) {
+    if (memcmp(got, purchase->content_hash, 32) != 0) {
         free(resp);
         LOG_WARN(SB_TAG, "collect: purchase %lld delivered %zu bytes whose "
                  "SHA3-256 does not match the product content hash — "
@@ -749,6 +812,52 @@ struct zcl_result store_buyer_collect(const char *datadir,
                         (long long)purchase_id, target, strerror(werr));
     }
     free(resp);
+    *len_out = body_len;
+    return ZCL_OK;
+}
+
+struct zcl_result store_buyer_collect(const char *datadir,
+                                      int64_t purchase_id,
+                                      const char *output_path,
+                                      struct store_buyer_delivery *out)
+{
+    struct node_db ndb;
+    struct db_store_purchase purchase;
+    struct zcl_result r;
+    uint8_t got[32];
+    size_t body_len = 0;
+    char target[STORE_PURCHASE_PATH_MAX + 1];
+
+    if (!datadir || !out)
+        return SB_FAIL(STORE_BUYER_ERR_ARGS);
+    memset(out, 0, sizeof(*out));
+
+    /* Re-poll the merchant first. This is what makes a collect a RESUME: a
+     * node that paid, then restarted, comes back with the row still at
+     * "paying" — the credit happened while it was gone. Asking the merchant
+     * before refusing means the operator does not have to know to run a
+     * status call first. */
+    {
+        struct store_buyer_state state;
+        r = store_buyer_refresh(datadir, purchase_id, &state);
+        if (!r.ok)
+            return r;
+    }
+
+    r = sb_open_and_load_purchase(datadir, purchase_id, &purchase,
+                                  "store_buyer.collect");
+    if (!r.ok)
+        return r;
+
+    r = sb_collect_preflight(&purchase, output_path, purchase_id, target,
+                             sizeof(target));
+    if (!r.ok)
+        return r;
+
+    r = sb_collect_deliver(datadir, &purchase, purchase_id, target,
+                           &body_len, got);
+    if (!r.ok)
+        return r;
 
     r = sb_open_db(datadir, &ndb, "store_buyer.collect_record");
     if (!r.ok)
