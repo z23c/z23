@@ -12,12 +12,34 @@
 #include <stdlib.h>
 #include <string.h>
 
+static bool wnhb_password_present(const char *password)
+{
+    return password && password[0];
+}
+
+static bool wnhb_backup_encrypted(const char *password)
+{
+    const char *env_password = getenv("WALLET_BACKUP_PASSWORD");
+    return wnhb_password_present(password) || wnhb_password_present(env_password);
+}
+
+static bool wnhb_encode_backup_commit_input(char *commit, size_t commit_size)
+{
+    struct json_value ci;
+    json_init(&ci);
+    json_set_object(&ci);
+    (void)json_push_kv_bool(&ci, "confirm", true);
+    bool encoded = wnh_commit_input(&ci, commit, commit_size);
+    json_free(&ci);
+    return encoded;
+}
+
 void zcl_native_handle_wallet_backup_now(
     const struct zcl_command_request *request, struct zcl_command_reply *reply)
 {
     bool confirm = json_get_bool_or(request->input, "confirm", false);
     const char *password = json_get_str(json_get(request->input, "password"));
-    if (password && password[0] && !zcl_native_input_was_stdin()) {
+    if (wnhb_password_present(password) && !zcl_native_input_was_stdin()) {
         wnh_fail(reply, ZCL_COMMAND_EXIT_DENIED, "STDIN_REQUIRED",
                  "backup password is accepted only through --input=-",
                  "core.wallet.backup.now");
@@ -29,16 +51,9 @@ void zcl_native_handle_wallet_backup_now(
     /* Never echo a password into commit_input. Commit callers provide the
      * invocation-scoped password again through stdin. */
     if (!confirm) {
-        const char *env_password = getenv("WALLET_BACKUP_PASSWORD");
-        bool encrypted = (password && password[0]) ||
-            (env_password && env_password[0]);
-        struct json_value ci;
-        json_init(&ci);
-        json_set_object(&ci);
-        (void)json_push_kv_bool(&ci, "confirm", true);
+        bool encrypted = wnhb_backup_encrypted(password);
         char commit[128];
-        bool encoded = wnh_commit_input(&ci, commit, sizeof(commit));
-        json_free(&ci);
+        bool encoded = wnhb_encode_backup_commit_input(commit, sizeof(commit));
         if (!encoded) {
             wnh_fail(reply, ZCL_COMMAND_EXIT_INTERNAL, "PLAN_TOO_LARGE",
                      "exact backup commit input exceeds its budget", "confirm");
@@ -58,7 +73,7 @@ void zcl_native_handle_wallet_backup_now(
 
     struct rpc_arg_builder params;
     rpc_arg_builder_init(&params);
-    if (password && password[0])
+    if (wnhb_password_present(password))
         rpc_arg_builder_push_str(&params, password);
     char *params_json = rpc_arg_builder_to_json(&params);
     if (!params_json) {
@@ -68,7 +83,7 @@ void zcl_native_handle_wallet_backup_now(
     }
     struct json_value body;
     bool called = wnh_call_rpc(reply, "walletbackupnow", params_json, &body);
-    if (password && password[0])
+    if (wnhb_password_present(password))
         memory_cleanse(params_json, strlen(params_json));
     free(params_json);
     if (!called)
