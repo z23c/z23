@@ -294,34 +294,42 @@ static void factoids_cache_publish(const char *data, size_t len,
     pthread_mutex_unlock(&g_factoids_cache_lock);
 }
 
-static size_t factoids_cache_copy_if_valid(const char *datadir, int64_t tip,
-                                           uint8_t *r, size_t max,
-                                           bool *behind_tip_out)
+static void factoids_cache_read_snapshot(size_t *cached_out,
+                                         int64_t *cache_height_out,
+                                         char cache_hash[FACTOIDS_CACHE_HASH_MAX])
 {
-    size_t cached;
-    int64_t cache_height;
-    char cache_hash[FACTOIDS_CACHE_HASH_MAX];
+    pthread_mutex_lock(&g_factoids_cache_lock);
+    *cached_out =
+        atomic_load_explicit(&g_factoids_cache_len, memory_order_acquire);
+    *cache_height_out =
+        atomic_load_explicit(&g_factoids_cache_height, memory_order_acquire);
+    snprintf(cache_hash, FACTOIDS_CACHE_HASH_MAX, "%s", g_factoids_cache_hash);
+    pthread_mutex_unlock(&g_factoids_cache_lock);
+}
+
+static bool factoids_cache_entry_still_valid(const char *datadir, int64_t tip,
+                                             size_t cached,
+                                             int64_t cache_height,
+                                             const char *cache_hash)
+{
     char live_hash[FACTOIDS_CACHE_HASH_MAX];
 
-    if (behind_tip_out)
-        *behind_tip_out = false;
-    if (!r || max == 0)
-        return 0;
-
-    pthread_mutex_lock(&g_factoids_cache_lock);
-    cached = atomic_load_explicit(&g_factoids_cache_len, memory_order_acquire);
-    cache_height =
-        atomic_load_explicit(&g_factoids_cache_height, memory_order_acquire);
-    snprintf(cache_hash, sizeof(cache_hash), "%s", g_factoids_cache_hash);
-    pthread_mutex_unlock(&g_factoids_cache_lock);
-
     if (cached == 0 || cache_height <= 0 || !cache_hash[0])
-        return 0;
+        return false;
     if (tip > 0 && cache_height > tip)
-        return 0;
+        return false;
     if (!factoids_block_hash_at(datadir, cache_height, live_hash) ||
         strcmp(cache_hash, live_hash) != 0)
-        return 0;
+        return false;
+    return true;
+}
+
+static size_t factoids_cache_copy_if_unchanged(size_t cached,
+                                               int64_t cache_height,
+                                               const char *cache_hash,
+                                               uint8_t *r, size_t max)
+{
+    size_t copy = 0;
 
     pthread_mutex_lock(&g_factoids_cache_lock);
     size_t current_len =
@@ -330,13 +338,34 @@ static size_t factoids_cache_copy_if_valid(const char *datadir, int64_t tip,
         atomic_load_explicit(&g_factoids_cache_height, memory_order_acquire);
     bool same_entry = current_len == cached && current_height == cache_height &&
                       strcmp(g_factoids_cache_hash, cache_hash) == 0;
-    size_t copy = 0;
     if (same_entry) {
         copy = cached < max ? cached : max;
         memcpy(r, g_factoids_cache, copy);
     }
     pthread_mutex_unlock(&g_factoids_cache_lock);
+    return copy;
+}
 
+static size_t factoids_cache_copy_if_valid(const char *datadir, int64_t tip,
+                                           uint8_t *r, size_t max,
+                                           bool *behind_tip_out)
+{
+    size_t cached;
+    int64_t cache_height;
+    char cache_hash[FACTOIDS_CACHE_HASH_MAX];
+
+    if (behind_tip_out)
+        *behind_tip_out = false;
+    if (!r || max == 0)
+        return 0;
+
+    factoids_cache_read_snapshot(&cached, &cache_height, cache_hash);
+    if (!factoids_cache_entry_still_valid(datadir, tip, cached, cache_height,
+                                          cache_hash))
+        return 0;
+
+    size_t copy = factoids_cache_copy_if_unchanged(cached, cache_height,
+                                                   cache_hash, r, max);
     if (copy > 0 && behind_tip_out && tip > 0 && cache_height < tip)
         *behind_tip_out = true;
     return copy;
