@@ -349,6 +349,61 @@ static bool rc_observe_aliases(
                     sizeof(*child_binding));
 }
 
+static bool rc_observe_missing_args(
+    const struct zcl_retrieval_comparison_policy_v1 *policy,
+    const uint8_t expected_policy_root[32],
+    const struct zcl_retrieval_experiment_eval_result_v1 *parent,
+    const struct zcl_retrieval_comparison_arm_binding *parent_binding,
+    const struct zcl_retrieval_experiment_eval_result_v1 *child,
+    const struct zcl_retrieval_comparison_arm_binding *child_binding,
+    const struct zcl_retrieval_comparison_report *report)
+{
+    return !policy || !expected_policy_root || !parent || !parent_binding ||
+        !child || !child_binding || !report;
+}
+
+static bool rc_observe_results_invalid(
+    const struct zcl_retrieval_experiment_eval_result_v1 *parent,
+    const struct zcl_retrieval_experiment_eval_result_v1 *child)
+{
+    return zcl_retrieval_experiment_eval_result_validate(parent) !=
+               ZCL_RETRIEVAL_EXPERIMENT_OK ||
+           zcl_retrieval_experiment_eval_result_validate(child) !=
+               ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
+static bool rc_arm_bindings_conflict(
+    uint32_t expected_tasks,
+    const struct zcl_retrieval_experiment_eval_result_v1 *parent,
+    const struct zcl_retrieval_experiment_eval_result_v1 *child,
+    const struct zcl_retrieval_comparison_arm_binding *parent_binding,
+    const struct zcl_retrieval_comparison_arm_binding *child_binding)
+{
+    return parent->tasks != expected_tasks ||
+        child->tasks != expected_tasks ||
+        memcmp(parent_binding->result_root, child_binding->result_root, 32u) == 0 ||
+        memcmp(parent_binding->subject_root, child_binding->subject_root, 32u) == 0;
+}
+
+static bool rc_arm_bindings_unverified(
+    const struct zcl_retrieval_experiment_eval_result_v1 *parent,
+    const struct zcl_retrieval_comparison_arm_binding *parent_binding,
+    const uint8_t evaluation_input_root[32], const uint8_t evaluator_root[32],
+    const struct zcl_retrieval_experiment_eval_result_v1 *child,
+    const struct zcl_retrieval_comparison_arm_binding *child_binding)
+{
+    return zcl_retrieval_experiment_eval_result_verify_binding(
+               parent, parent_binding->subject_root,
+               parent_binding->proposal_input_root, evaluation_input_root,
+               evaluator_root, parent_binding->result_root) !=
+               ZCL_RETRIEVAL_EXPERIMENT_OK ||
+           zcl_retrieval_experiment_eval_result_verify_binding(
+               child, child_binding->subject_root,
+               child_binding->proposal_input_root, evaluation_input_root,
+               evaluator_root, child_binding->result_root) !=
+               ZCL_RETRIEVAL_EXPERIMENT_OK;
+}
+
 enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe(
     const struct zcl_retrieval_comparison_policy_v1 *policy,
     const uint8_t expected_policy_root[32],
@@ -358,8 +413,8 @@ enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe(
     const struct zcl_retrieval_comparison_arm_binding *child_binding,
     struct zcl_retrieval_comparison_report *report)
 {
-    if (!policy || !expected_policy_root || !parent || !parent_binding ||
-        !child || !child_binding || !report)
+    if (rc_observe_missing_args(policy, expected_policy_root, parent,
+                                parent_binding, child, child_binding, report))
         return ZCL_RETRIEVAL_COMPARISON_NULL;
     if (rc_observe_aliases(policy, expected_policy_root, parent,
                            parent_binding, child, child_binding, report))
@@ -373,26 +428,15 @@ enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe(
     if (!rc_root_any(expected_policy_root)) return ZCL_RETRIEVAL_COMPARISON_ROOT;
     if (memcmp(policy_root, expected_policy_root, 32u) != 0)
         return ZCL_RETRIEVAL_COMPARISON_BINDING;
-    if (zcl_retrieval_experiment_eval_result_validate(parent) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK ||
-        zcl_retrieval_experiment_eval_result_validate(child) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK)
+    if (rc_observe_results_invalid(parent, child))
         return ZCL_RETRIEVAL_COMPARISON_RESULT;
-    if (parent->tasks != policy->expected_tasks ||
-        child->tasks != policy->expected_tasks ||
-        memcmp(parent_binding->result_root, child_binding->result_root, 32u) == 0 ||
-        memcmp(parent_binding->subject_root, child_binding->subject_root, 32u) == 0)
+    if (rc_arm_bindings_conflict(policy->expected_tasks, parent, child,
+                                 parent_binding, child_binding))
         return ZCL_RETRIEVAL_COMPARISON_BINDING;
-    if (zcl_retrieval_experiment_eval_result_verify_binding(
-            parent, parent_binding->subject_root,
-            parent_binding->proposal_input_root, policy->evaluation_input_root,
-            policy->evaluator_root, parent_binding->result_root) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK ||
-        zcl_retrieval_experiment_eval_result_verify_binding(
-            child, child_binding->subject_root,
-            child_binding->proposal_input_root, policy->evaluation_input_root,
-            policy->evaluator_root, child_binding->result_root) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK)
+    if (rc_arm_bindings_unverified(parent, parent_binding,
+                                   policy->evaluation_input_root,
+                                   policy->evaluator_root, child,
+                                   child_binding))
         return ZCL_RETRIEVAL_COMPARISON_BINDING;
 
     struct zcl_retrieval_comparison_report result = rc_fold_observation(
@@ -482,6 +526,55 @@ static bool rc_observe_v2_aliases(
                     sizeof(*child_binding));
 }
 
+static bool rc_observe_v2_missing_args(
+    const struct zcl_retrieval_comparison_policy_v2 *policy,
+    const uint8_t expected_policy_root[32],
+    const struct zcl_retrieval_paired_evaluation_report_v1 *paired,
+    const uint8_t expected_evaluation_input_root[32],
+    const struct zcl_retrieval_experiment_eval_result_v1 *parent,
+    const struct zcl_retrieval_comparison_arm_binding *parent_binding,
+    const struct zcl_retrieval_experiment_eval_result_v1 *child,
+    const struct zcl_retrieval_comparison_arm_binding *child_binding,
+    const struct zcl_retrieval_comparison_report_v2 *report)
+{
+    return !policy || !expected_policy_root || !paired ||
+        !expected_evaluation_input_root || !parent || !parent_binding ||
+        !child || !child_binding || !report;
+}
+
+static bool rc_observe_v2_expected_roots_missing(
+    const uint8_t expected_policy_root[32],
+    const uint8_t expected_evaluation_input_root[32])
+{
+    return !rc_root_any(expected_policy_root) ||
+        !rc_root_any(expected_evaluation_input_root);
+}
+
+static bool rc_paired_binding_mismatch(
+    const struct zcl_retrieval_comparison_policy_v2 *policy,
+    const struct zcl_retrieval_paired_evaluation_report_v1 *paired,
+    const uint8_t expected_evaluation_input_root[32])
+{
+    return memcmp(policy->workload_root, paired->workload_root, 32u) != 0 ||
+        policy->expected_tasks != paired->task_count ||
+        memcmp(expected_evaluation_input_root,
+               paired->evaluation_input_root, 32u) != 0;
+}
+
+static bool rc_observe_v2_binding_conflict(
+    const struct zcl_retrieval_comparison_policy_v2 *policy,
+    const struct zcl_retrieval_paired_evaluation_report_v1 *paired,
+    const struct zcl_retrieval_experiment_eval_result_v1 *parent,
+    const struct zcl_retrieval_comparison_arm_binding *parent_binding,
+    const struct zcl_retrieval_experiment_eval_result_v1 *child,
+    const struct zcl_retrieval_comparison_arm_binding *child_binding)
+{
+    return rc_arm_bindings_conflict(policy->expected_tasks, parent, child,
+                                    parent_binding, child_binding) ||
+        !rc_metrics_match_result(&paired->parent_metrics, parent) ||
+        !rc_metrics_match_result(&paired->child_metrics, child);
+}
+
 enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe_v2(
     const struct zcl_retrieval_comparison_policy_v2 *policy,
     const uint8_t expected_policy_root[32],
@@ -493,9 +586,10 @@ enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe_v2(
     const struct zcl_retrieval_comparison_arm_binding *child_binding,
     struct zcl_retrieval_comparison_report_v2 *report)
 {
-    if (!policy || !expected_policy_root || !paired ||
-        !expected_evaluation_input_root || !parent || !parent_binding ||
-        !child || !child_binding || !report)
+    if (rc_observe_v2_missing_args(
+            policy, expected_policy_root, paired,
+            expected_evaluation_input_root, parent, parent_binding, child,
+            child_binding, report))
         return ZCL_RETRIEVAL_COMPARISON_NULL;
     if (rc_observe_v2_aliases(
             policy, expected_policy_root, paired,
@@ -508,42 +602,25 @@ enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe_v2(
     uint8_t policy_root[32];
     error = zcl_retrieval_comparison_policy_v2_root(policy, policy_root);
     if (error != ZCL_RETRIEVAL_COMPARISON_OK) return error;
-    if (!rc_root_any(expected_policy_root) ||
-        !rc_root_any(expected_evaluation_input_root))
+    if (rc_observe_v2_expected_roots_missing(expected_policy_root,
+                                             expected_evaluation_input_root))
         return ZCL_RETRIEVAL_COMPARISON_ROOT;
     if (memcmp(policy_root, expected_policy_root, 32u) != 0)
         return ZCL_RETRIEVAL_COMPARISON_BINDING;
     if (!rc_paired_report_valid(paired))
         return ZCL_RETRIEVAL_COMPARISON_RESULT;
-    if (memcmp(policy->workload_root, paired->workload_root, 32u) != 0 ||
-        policy->expected_tasks != paired->task_count ||
-        memcmp(expected_evaluation_input_root,
-               paired->evaluation_input_root, 32u) != 0)
+    if (rc_paired_binding_mismatch(policy, paired,
+                                   expected_evaluation_input_root))
         return ZCL_RETRIEVAL_COMPARISON_BINDING;
-    if (zcl_retrieval_experiment_eval_result_validate(parent) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK ||
-        zcl_retrieval_experiment_eval_result_validate(child) !=
-            ZCL_RETRIEVAL_EXPERIMENT_OK)
+    if (rc_observe_results_invalid(parent, child))
         return ZCL_RETRIEVAL_COMPARISON_RESULT;
-    if (parent->tasks != policy->expected_tasks ||
-        child->tasks != policy->expected_tasks ||
-        memcmp(parent_binding->result_root,
-               child_binding->result_root, 32u) == 0 ||
-        memcmp(parent_binding->subject_root,
-               child_binding->subject_root, 32u) == 0 ||
-        !rc_metrics_match_result(&paired->parent_metrics, parent) ||
-        !rc_metrics_match_result(&paired->child_metrics, child))
+    if (rc_observe_v2_binding_conflict(policy, paired, parent, parent_binding,
+                                       child, child_binding))
         return ZCL_RETRIEVAL_COMPARISON_BINDING;
-    if (zcl_retrieval_experiment_eval_result_verify_binding(
-            parent, parent_binding->subject_root,
-            parent_binding->proposal_input_root,
-            paired->evaluation_input_root, policy->evaluator_root,
-            parent_binding->result_root) != ZCL_RETRIEVAL_EXPERIMENT_OK ||
-        zcl_retrieval_experiment_eval_result_verify_binding(
-            child, child_binding->subject_root,
-            child_binding->proposal_input_root,
-            paired->evaluation_input_root, policy->evaluator_root,
-            child_binding->result_root) != ZCL_RETRIEVAL_EXPERIMENT_OK)
+    if (rc_arm_bindings_unverified(parent, parent_binding,
+                                   paired->evaluation_input_root,
+                                   policy->evaluator_root, child,
+                                   child_binding))
         return ZCL_RETRIEVAL_COMPARISON_BINDING;
 
     struct zcl_retrieval_comparison_report_v2 result = {0};
@@ -556,4 +633,3 @@ enum zcl_retrieval_comparison_error zcl_retrieval_comparison_observe_v2(
     *report = result;
     return ZCL_RETRIEVAL_COMPARISON_OK;
 }
-
