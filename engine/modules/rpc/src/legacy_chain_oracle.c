@@ -53,6 +53,55 @@ bool legacy_chain_rpc_get_block_hash_hex(int height, char out_hex[65])
     return ok;
 }
 
+static bool lco_mmb_header_fields_ok(const struct json_value *jh,
+                                     const struct json_value *jheight,
+                                     const struct json_value *jtime,
+                                     const struct json_value *jbits,
+                                     const struct json_value *jchainwork)
+{
+    if (!jh || jh->type != JSON_STR ||
+        !jheight || jheight->type != JSON_INT ||
+        !jtime || jtime->type != JSON_INT ||
+        !jbits || jbits->type != JSON_STR ||
+        !jchainwork || jchainwork->type != JSON_STR)
+        return false;
+    return true;
+}
+
+static void lco_mmb_fill_leaf_from_header(struct mmb_leaf *leaf,
+                                          const struct json_value *jh,
+                                          const struct json_value *jheight,
+                                          const struct json_value *jtime,
+                                          const struct json_value *jbits,
+                                          const struct json_value *jsapling,
+                                          const struct json_value *jchainwork)
+{
+    struct uint256 bh = {0}, sapling = {0}, chainwork = {0};
+
+    uint256_set_hex(&bh, json_get_str(jh));
+    if (jsapling && jsapling->type == JSON_STR)
+        uint256_set_hex(&sapling, json_get_str(jsapling));
+    uint256_set_hex(&chainwork, json_get_str(jchainwork));
+    /* zclassicd does not carry the MMB utxo_root (it never speaks the
+     * MMB). At a boundary height, reconstruct the same leaf hash the
+     * live path produced by reading the persisted boundary root;
+     * otherwise the zero sentinel. */
+    int32_t bheight = (int32_t)json_get_int(jheight);
+    uint8_t utxo_root[32] = {0};
+    if (bheight > 0 && bheight % MMR_COMMITMENT_INTERVAL == 0) {
+        sqlite3 *pdb = progress_store_db();
+        bool found = false;
+        if (pdb)
+            coins_kv_boundary_root_get(pdb, bheight, utxo_root, &found);
+        if (!found) memset(utxo_root, 0, 32);
+    }
+    mmb_leaf_from_block(leaf, bh.data,
+                        (uint32_t)bheight,
+                        (uint32_t)json_get_int(jtime),
+                        (uint32_t)strtoul(json_get_str(jbits), NULL, 16),
+                        sapling.data, chainwork.data, utxo_root);
+}
+
 bool legacy_chain_rpc_get_mmb_leaf(int height, struct mmb_leaf *leaf)
 {
     char err[256];
@@ -82,37 +131,12 @@ bool legacy_chain_rpc_get_mmb_leaf(int height, struct mmb_leaf *leaf)
         const struct json_value *jbits = json_get(obj, "bits");
         const struct json_value *jsapling = json_get(obj, "finalsaplingroot");
         const struct json_value *jchainwork = json_get(obj, "chainwork");
-        struct uint256 bh = {0}, sapling = {0}, chainwork = {0};
 
-        if (!jh || jh->type != JSON_STR ||
-            !jheight || jheight->type != JSON_INT ||
-            !jtime || jtime->type != JSON_INT ||
-            !jbits || jbits->type != JSON_STR ||
-            !jchainwork || jchainwork->type != JSON_STR) {
+        if (!lco_mmb_header_fields_ok(jh, jheight, jtime, jbits, jchainwork)) {
             ok = false;
         } else {
-            uint256_set_hex(&bh, json_get_str(jh));
-            if (jsapling && jsapling->type == JSON_STR)
-                uint256_set_hex(&sapling, json_get_str(jsapling));
-            uint256_set_hex(&chainwork, json_get_str(jchainwork));
-            /* zclassicd does not carry the MMB utxo_root (it never speaks the
-             * MMB). At a boundary height, reconstruct the same leaf hash the
-             * live path produced by reading the persisted boundary root;
-             * otherwise the zero sentinel. */
-            int32_t bheight = (int32_t)json_get_int(jheight);
-            uint8_t utxo_root[32] = {0};
-            if (bheight > 0 && bheight % MMR_COMMITMENT_INTERVAL == 0) {
-                sqlite3 *pdb = progress_store_db();
-                bool found = false;
-                if (pdb)
-                    coins_kv_boundary_root_get(pdb, bheight, utxo_root, &found);
-                if (!found) memset(utxo_root, 0, 32);
-            }
-            mmb_leaf_from_block(leaf, bh.data,
-                                (uint32_t)bheight,
-                                (uint32_t)json_get_int(jtime),
-                                (uint32_t)strtoul(json_get_str(jbits), NULL, 16),
-                                sapling.data, chainwork.data, utxo_root);
+            lco_mmb_fill_leaf_from_header(leaf, jh, jheight, jtime, jbits,
+                                          jsapling, jchainwork);
         }
     }
     json_free(&root);

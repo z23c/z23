@@ -1350,7 +1350,6 @@ engine/modules/hotswap/src/hotswap_service.c:zcl_hotswap_service_publish:30
 engine/modules/rpc/src/client.c:rpc_call_local:20
 engine/modules/rpc/src/client.c:rpc_cli_print_json_result:17
 engine/modules/rpc/src/httpserver.c:rpc_http_start:40
-engine/modules/rpc/src/legacy_chain_oracle.c:legacy_chain_rpc_get_mmb_leaf:22
 engine/modules/rpc/src/legacy_header_client.c:legacy_header_rpc_fetch_batch:29
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_call_with_timeout:29
 engine/modules/rpc/src/legacy_rpc_client.c:legacy_rpc_fill_missing_creds:20
