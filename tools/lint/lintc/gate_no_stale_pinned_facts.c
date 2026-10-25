@@ -31,9 +31,8 @@
  *
  * SHELL SEMANTICS MIRRORED
  *   - grep -E patterns, grep -i for triggers: the same regexes via regexec.
- *     The shell grepped the "path:lineno:text" output line for the height
- *     number; the number pattern cannot cross a ':', so it is checked on the
- *     path, the line number and the text separately (same answer).
+ *     Height-shaped numbers are matched only in document content: paths and
+ *     diagnostic line numbers are metadata, not hand-pinned numeric facts.
  *   - scan set from `git ls-files` (popen, like the shell), sorted by strcmp
  *     (C byte order; the shell used sort -u under the caller's locale).
  *   - binary-size pass runs over all files before the height pass, so the
@@ -430,22 +429,10 @@ static int snf_bin_line(struct snf_pass *p, const char *text)
     return snf_report(p, "STALE BINARY-SIZE PIN", text);
 }
 
-/* The height number is checked on the text, the path and the line number.
- * The shell checked the whole "path:lineno:text" line, but the pattern cannot
- * cross the ':' separators, so a match lies wholly in one of the three. */
+/* A numeric checkout name or diagnostic line number is not document content. */
 static int snf_height_num(const struct snf_pass *p, const char *text)
 {
-    char num[32];
-    int m;
-    if (ovf(snprintf(num, sizeof num, "%ld", p->lineno), sizeof num))
-        return 2;
-    m = snf_any(p->r, SNF_R_NUM0, 2, text);
-    if (m != 0)
-        return m;
-    m = snf_any(p->r, SNF_R_NUM0, 2, p->path);
-    if (m != 0)
-        return m;
-    return snf_any(p->r, SNF_R_NUM0, 2, num);
+    return snf_any(p->r, SNF_R_NUM0, 2, text);
 }
 
 static int snf_pin_key(struct snf_pass *p, const char *text)

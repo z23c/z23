@@ -6,7 +6,8 @@
  * a clean doc passes; a binary size before or after the word binary fails;
  * a size beside an unrelated binary mention passes; a height pin fails; a
  * baselined pin passes; a stale-ok marker exempts a line; a file that cannot
- * be read fails closed.
+ * be read fails closed. Numeric fixture paths and six-digit line numbers
+ * never supply a height missing from the document text.
  */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -116,6 +117,44 @@ static int snfs_missing_fails_closed(const char *dir)
     return 1;
 }
 
+static int snfs_write_high_line(const char *doc, int height)
+{
+    FILE *f = fopen(doc, "w");
+    if (!f) return 2;
+    int rc = 0;
+    for (int i = 1; i < 100000 && rc == 0; i++)
+        if (fputc('\n', f) == EOF) rc = 2;
+    const char *text = height ? "The node is currently wedged at 1234567.\n"
+                              : "The node is currently wedged at the tip.\n";
+    if (rc == 0 && fputs(text, f) == EOF) rc = 2;
+    if (fclose(f) != 0) rc = 2;
+    return rc;
+}
+
+static int snfs_high_lines(const char *dir, int *ran)
+{
+    char doc[SNFS_PATH], base[SNFS_PATH];
+    if (ovf(snprintf(doc, sizeof doc, "%s/high.md", dir), sizeof doc)
+        || ovf(snprintf(base, sizeof base, "%s/none.txt", dir), sizeof base))
+        return 2;
+    char *files[] = { doc };
+    int bad = 0;
+    for (int height = 0; height < 2; height++) {
+        if (snfs_write_high_line(doc, height)) return 2;
+        FILE *sink = tmpfile();
+        if (!sink) return 2;
+        int rc = snf_check(files, 1, base, sink, sink, 0);
+        if (fclose(sink) != 0 || rc == 2) return 2;
+        (*ran)++;
+        if (rc != height) {
+            fprintf(stderr, "check-no-stale-pinned-facts: FAIL — line 100000 "
+                            "with height=%d: rc %d, want %d\n", height, rc, height);
+            bad = 1;
+        }
+    }
+    return bad;
+}
+
 /* Runs every case. Returns the number of failed checks, or -1 on a fault. */
 static int snfs_run_all(const char *dir, int *ran)
 {
@@ -132,6 +171,10 @@ static int snfs_run_all(const char *dir, int *ran)
         return -1;
     bad += rc;
     (*ran)++;
+    rc = snfs_high_lines(dir, ran);
+    if (rc == 2)
+        return -1;
+    bad += rc;
     return bad;
 }
 
@@ -150,7 +193,12 @@ int check_no_stale_pinned_facts_selftest(void)
         return 2;
     if (!mkdtemp(tmpl))
         return die("z23-lint: mkdtemp failed\n", "");
-    bad = snfs_run_all(tmpl, &ran);
+    if (ovf(snprintf(base, sizeof base, "%s/20261025", tmpl), sizeof base)
+        || csr_mkdirs(base)) {
+        (void)rap_rm_rf(tmpl);
+        return 2;
+    }
+    bad = snfs_run_all(base, &ran);
     if (rap_rm_rf(tmpl) || bad < 0)
         return 2;
     if (bad > 0)
