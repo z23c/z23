@@ -126,6 +126,59 @@ static uint32_t zac_line_at(const uint8_t *bytes, size_t offset)
     return line;
 }
 
+static bool zac_open_nonempty_source(
+    struct platform_positioned_file *file, const char *workspace,
+    const char *path, struct platform_positioned_file_snapshot *before)
+{
+    platform_positioned_file_init(file);
+    if (!platform_positioned_file_open_beneath(file, workspace, path) ||
+        !platform_positioned_file_snapshot(file, before) || before->size == 0) {
+        platform_positioned_file_close(file);
+        return false;
+    }
+    return true;
+}
+
+static uint8_t *zac_read_inspect_prefix(
+    const struct platform_positioned_file *file, size_t inspect_len)
+{
+    uint8_t *inspect = zcl_malloc(inspect_len, "zcode.context.inspect");
+    if (!inspect || !zac_read_all(file, inspect, inspect_len, 0)) {
+        free(inspect);
+        return NULL;
+    }
+    return inspect;
+}
+
+static size_t zac_excerpt_start(const uint8_t *inspect, size_t inspect_len,
+                                uint32_t line, uint64_t file_size, size_t take)
+{
+    size_t target = zac_line_offset(inspect, inspect_len, line);
+    size_t start = target > take / 4u ? target - take / 4u : 0;
+    if (start > 0) {
+        while (start < inspect_len && inspect[start - 1u] != '\n') start++;
+        if (start >= inspect_len) start = 0;
+    }
+    if ((uint64_t)start + take > file_size)
+        start = (size_t)file_size - take;
+    return start;
+}
+
+static bool zac_read_stable_excerpt(
+    struct platform_positioned_file *file,
+    const struct platform_positioned_file_snapshot *before,
+    struct vcs_zcode_agent_context_entry_v1 *entry, size_t take, size_t start)
+{
+    struct platform_positioned_file_snapshot after;
+    entry->content = zcl_malloc(take, "zcode.context.excerpt");
+    bool stable = entry->content &&
+        zac_read_all(file, entry->content, take, start) &&
+        platform_positioned_file_snapshot(file, &after) &&
+        zac_snapshot_equal(before, &after);
+    platform_positioned_file_close(file);
+    return stable;
+}
+
 static bool zac_capture_file(
     const char *workspace, struct zac_path *selected,
     struct vcs_zcode_agent_context_entry_v1 *entry, size_t byte_budget,
@@ -135,39 +188,22 @@ static bool zac_capture_file(
     if (selected_path_len >= sizeof(entry->path))
         return false;
     struct platform_positioned_file file;
-    struct platform_positioned_file_snapshot before, after;
-    platform_positioned_file_init(&file);
-    if (!platform_positioned_file_open_beneath(
-            &file, workspace, selected->path) ||
-        !platform_positioned_file_snapshot(&file, &before) || before.size == 0) {
-        platform_positioned_file_close(&file);
+    struct platform_positioned_file_snapshot before;
+    if (!zac_open_nonempty_source(&file, workspace, selected->path, &before))
         return false;
-    }
     size_t cap = byte_budget < VCS_ZCODE_AGENT_CONTEXT_EXCERPT_MAX
         ? byte_budget : VCS_ZCODE_AGENT_CONTEXT_EXCERPT_MAX;
     if (cap == 0) { platform_positioned_file_close(&file); return false; }
     size_t inspect_len = before.size < ZAC_CAPTURE_READ_MAX
         ? (size_t)before.size : ZAC_CAPTURE_READ_MAX;
-    uint8_t *inspect = zcl_malloc(inspect_len, "zcode.context.inspect");
-    if (!inspect || !zac_read_all(&file, inspect, inspect_len, 0)) {
-        free(inspect); platform_positioned_file_close(&file); return false;
-    }
+    uint8_t *inspect = zac_read_inspect_prefix(&file, inspect_len);
+    if (!inspect) { platform_positioned_file_close(&file); return false; }
     size_t take = before.size < cap ? (size_t)before.size : cap;
-    size_t target = zac_line_offset(inspect, inspect_len, selected->line);
-    size_t start = target > take / 4u ? target - take / 4u : 0;
-    if (start > 0) {
-        while (start < inspect_len && inspect[start - 1u] != '\n') start++;
-        if (start >= inspect_len) start = 0;
+    size_t start = zac_excerpt_start(inspect, inspect_len, selected->line,
+                                     before.size, take);
+    if (!zac_read_stable_excerpt(&file, &before, entry, take, start)) {
+        free(inspect); free(entry->content); return false;
     }
-    if ((uint64_t)start + take > before.size)
-        start = (size_t)before.size - take;
-    entry->content = zcl_malloc(take, "zcode.context.excerpt");
-    bool stable = entry->content &&
-        zac_read_all(&file, entry->content, take, start) &&
-        platform_positioned_file_snapshot(&file, &after) &&
-        zac_snapshot_equal(&before, &after);
-    platform_positioned_file_close(&file);
-    if (!stable) { free(inspect); free(entry->content); return false; }
     memcpy(entry->path, selected->path, selected_path_len + 1);
     entry->start_line = zac_line_at(inspect, start);
     entry->full_file_bytes = before.size;
