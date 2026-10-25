@@ -1123,7 +1123,7 @@ static int selftest_enabled_backtrace(const char *base, const char *commit,
     return 0;
 }
 
-static int run_selftest(void)
+static const char *selftest_tmp_root(void)
 {
     const char *tmpdir = getenv("TMPDIR");
 #if defined(_WIN32)
@@ -1132,6 +1132,44 @@ static int run_selftest(void)
 #else
     if (!tmpdir || !*tmpdir) tmpdir = "/tmp";
 #endif
+    return tmpdir;
+}
+
+/* Flips one byte of the second fixture archive. Returns 0 on success, 1
+ * when the archive could not be reopened (path is filled for the caller's
+ * diagnostic), 2 on any other I/O failure. */
+static int selftest_flip_archive_byte(const char *base, char path[PATH_BUF_MAX])
+{
+    join_path(path, base, ARCHIVE_RELPATHS[1]);
+    int fd = open(path, O_RDWR | O_BINARY);
+    if (fd < 0) return 1;
+    char c;
+    if (read(fd, &c, 1) != 1) { close(fd); return 2; }
+    c ^= 0x01;
+    if (lseek(fd, 0, SEEK_SET) != 0 || write(fd, &c, 1) != 1) { close(fd); return 2; }
+    close(fd);
+    return 0;
+}
+
+/* Rewrites the second fixture archive with its original bytes and deletes
+ * the manifest. Returns 0 on success, 1 if the archive could not be
+ * rewritten. */
+static int selftest_restore_archive_drop_manifest(const char *base)
+{
+    char path[PATH_BUF_MAX];
+    join_path(path, base, ARCHIVE_RELPATHS[1]);
+    char content[128];
+    snprintf(content, sizeof content, "fixture tor archive bytes %d\n", 1);
+    if (write_fixture_archive(path, content) != 0) return 1;
+    char manifest_path[PATH_BUF_MAX];
+    join_path(manifest_path, base, TOR_PROVENANCE_NAME);
+    unlink(manifest_path);
+    return 0;
+}
+
+static int run_selftest(void)
+{
+    const char *tmpdir = selftest_tmp_root();
 
     char base[PATH_BUF_MAX];
     snprintf(base, sizeof base, "%s/z23-tor-provenance-selftest.%ld", tmpdir, (long)getpid());
@@ -1172,17 +1210,12 @@ static int run_selftest(void)
 
     {
         char path[PATH_BUF_MAX];
-        join_path(path, base, ARCHIVE_RELPATHS[1]);
-        int fd = open(path, O_RDWR | O_BINARY);
-        if (fd < 0) {
+        int flip = selftest_flip_archive_byte(base, path);
+        if (flip == 1) {
             fprintf(stderr, "tor-provenance: selftest FAILED — could not reopen %s to corrupt it\n", path);
             goto out;
         }
-        char c;
-        if (read(fd, &c, 1) != 1) { close(fd); goto out; }
-        c ^= 0x01;
-        if (lseek(fd, 0, SEEK_SET) != 0 || write(fd, &c, 1) != 1) { close(fd); goto out; }
-        close(fd);
+        if (flip != 0) goto out;
     }
     if (quiet_check(base, fake_commit_ok, fake_compiler_id) == 0) {
         fprintf(stderr, "tor-provenance: selftest FAILED — a flipped archive byte still checked ok\n");
@@ -1190,16 +1223,7 @@ static int run_selftest(void)
     }
 
     /* Restore the archive, delete the manifest: check must MISMATCH (missing). */
-    {
-        char path[PATH_BUF_MAX];
-        join_path(path, base, ARCHIVE_RELPATHS[1]);
-        char content[128];
-        snprintf(content, sizeof content, "fixture tor archive bytes %d\n", 1);
-        if (write_fixture_archive(path, content) != 0) goto out;
-        char manifest_path[PATH_BUF_MAX];
-        join_path(manifest_path, base, TOR_PROVENANCE_NAME);
-        unlink(manifest_path);
-    }
+    if (selftest_restore_archive_drop_manifest(base)) goto out;
     if (quiet_check(base, fake_commit_ok, fake_compiler_id) == 0) {
         fprintf(stderr, "tor-provenance: selftest FAILED — a missing manifest still checked ok\n");
         goto out;
