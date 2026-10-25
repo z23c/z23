@@ -312,6 +312,20 @@ static bool tpc_note_lane(const char *note, char *out, size_t cap)
     return true;
 }
 
+/* Recognize foreign Windows spellings without splitting POSIX filename '\'. */
+static bool tpc_windows_worktree(const char *wt, size_t n)
+{
+    bool drive = n >= 3 &&
+        ((wt[0] >= 'A' && wt[0] <= 'Z') || (wt[0] >= 'a' && wt[0] <= 'z')) &&
+        wt[1] == ':' && (wt[2] == '/' || wt[2] == '\\');
+    return drive || (n >= 2 && wt[0] == '\\' && wt[1] == '\\');
+}
+
+static bool tpc_worktree_separator(char c, bool windows)
+{
+    return c == '/' || (windows && c == '\\');
+}
+
 /* The lane a land row names: the basename of its "worktree" when that is
  * present and fits, else the note's lane prefix. json_get_str gives "" for a
  * missing key, which is absent here too. */
@@ -319,10 +333,11 @@ static bool tpc_row_lane(const struct json_value *row, char *out, size_t cap)
 {
     const char *wt = json_get_str(json_get(row, "worktree"));
     size_t n = strlen(wt), start;
-    while (n > 0 && wt[n - 1] == '/')
+    bool windows = tpc_windows_worktree(wt, n);
+    while (n > 0 && tpc_worktree_separator(wt[n - 1], windows))
         n--;
     start = n;
-    while (start > 0 && wt[start - 1] != '/')
+    while (start > 0 && !tpc_worktree_separator(wt[start - 1], windows))
         start--;
     if (n > start && n - start < cap) {
         memcpy(out, wt + start, n - start);

@@ -314,6 +314,46 @@ _test_next:;
     return failures;
 }
 
+/* These strings are JSON-escaped because the existing fixture writers emit
+ * their arguments directly into JSON string values. No path is opened. */
+static int fox_case_tokens_worktree_path(const char *root, const char *worktree,
+                                           const char *label)
+{
+    int failures = 0;
+    char ledger[1024], outcomes[1024];
+    (void)snprintf(ledger, sizeof(ledger), "%s/path_rows.tsv", root);
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/path_outcomes.jsonl", root);
+    TEST("objectives: foreign worktree spellings retain their lane basename") {
+        printf("[%s] ", worktree);
+        ASSERT(fox_tok_one_ledger(ledger, "p1", "1000", "200"));
+        ASSERT(fox_tok_meta(root, "p1", label));
+        ASSERT(fox_tok_one_outcome(outcomes, "restart: fixture", worktree));
+        struct zcl_objective_value v = fox_tok_measure(ledger, outcomes);
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)1200);
+        ASSERT(strstr(v.note, "1 landed lanes joined") != NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int fox_case_tokens_worktree_paths(const char *root)
+{
+    static const struct { const char *worktree, *label; } cases[] = {
+        {"C:\\\\lanes\\\\gamma-lane\\\\", "write:gamma-lane"},
+        {"\\\\\\\\fixture-server\\\\share\\\\gamma-lane\\\\", "write:gamma-lane"},
+        {"C:/lanes\\\\gamma-lane\\\\", "write:gamma-lane"},
+        {"/srv/lanes/gamma-lane/", "write:gamma-lane"},
+        {"/srv/lanes/gamma\\\\lane", "write:gamma\\\\lane"},
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+        failures += fox_case_tokens_worktree_path(root, cases[i].worktree,
+                                                     cases[i].label);
+    return failures;
+}
+
 static int fox_case_tokens_wired(void)
 {
     int failures = 0;
@@ -321,6 +361,7 @@ static int fox_case_tokens_wired(void)
     test_make_tmpdir(root, sizeof(root), "fleet_objectives", "tokens_join");
     (void)setenv("Z23_AGENT_META_ROOT", root, 1);
     failures += fox_case_tokens_join(root);
+    failures += fox_case_tokens_worktree_paths(root);
     (void)unsetenv("Z23_AGENT_META_ROOT");
     (void)test_rm_rf_recursive(root);
     return failures;
