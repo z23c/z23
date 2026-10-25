@@ -112,7 +112,10 @@ bool boot_mesh_pairing_decode_fingerprint(const char *hex, uint8_t out[32])
     return hex && strlen(hex) == 64 && zcl_hex_decode_lower(hex, out, 32);
 }
 
-const char *boot_mesh_pairing_reason_code(enum mesh_pairing_reason reason)
+/* Codes for reasons OK through DELEGATION_INVALID. Returns NULL when
+ * reason is outside that set so the caller can keep its fallback. */
+static const char *mesh_pair_reason_code_through_delegation(
+    enum mesh_pairing_reason reason)
 {
     switch (reason) {
     case MESH_PAIRING_OK: return "OK";
@@ -124,6 +127,16 @@ const char *boot_mesh_pairing_reason_code(enum mesh_pairing_reason reason)
     case MESH_PAIRING_BEACON_UNAVAILABLE: return "BEACON_UNAVAILABLE";
     case MESH_PAIRING_BEACON_PROVISIONAL: return "BEACON_PROVISIONAL";
     case MESH_PAIRING_DELEGATION_INVALID: return "DELEGATION_INVALID";
+    default: return NULL;
+    }
+}
+
+/* Codes for reasons WINDOW_INVALID through PLAN_EXPIRED. Returns NULL when
+ * reason is outside that set so the caller can keep its fallback. */
+static const char *mesh_pair_reason_code_from_window(
+    enum mesh_pairing_reason reason)
+{
+    switch (reason) {
     case MESH_PAIRING_WINDOW_INVALID: return "WINDOW_INVALID";
     case MESH_PAIRING_ALREADY_REVOKED: return "ALREADY_REVOKED";
     case MESH_PAIRING_IDENTITY_COLLISION: return "IDENTITY_COLLISION";
@@ -134,7 +147,18 @@ const char *boot_mesh_pairing_reason_code(enum mesh_pairing_reason reason)
     case MESH_PAIRING_AUTHORITY_CHANGED: return "AUTHORITY_CHANGED";
     case MESH_PAIRING_CONFIRMATION_INVALID: return "CONFIRMATION_INVALID";
     case MESH_PAIRING_PLAN_EXPIRED: return "PLAN_EXPIRED";
+    default: return NULL;
     }
+}
+
+const char *boot_mesh_pairing_reason_code(enum mesh_pairing_reason reason)
+{
+    const char *code = mesh_pair_reason_code_through_delegation(reason);
+    if (code)
+        return code;
+    code = mesh_pair_reason_code_from_window(reason);
+    if (code)
+        return code;
     return "BAD_ARGUMENT";
 }
 
