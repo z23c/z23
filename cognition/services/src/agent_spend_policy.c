@@ -87,7 +87,7 @@ struct asp_surface {
  *                                     bounded one.
  *   vault.session.*                 — the grant surface itself (refused by
  *                                     the grant rule before this table is
- *                                     even consulted).*/
+ *                                     even consulted). */
 static const struct asp_surface g_surface[] = {
     /* spends */
     { "core.wallet.transaction.send", ASP_SPEND, "amount", "address" },
