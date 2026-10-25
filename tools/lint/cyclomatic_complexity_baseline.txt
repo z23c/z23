@@ -702,7 +702,6 @@ engine/composition/src/boot_index.c:propagate_nchaintx:29
 engine/composition/src/boot_index.c:reindex_chainstate:30
 engine/composition/src/boot_legacy_blocks.c:boot_legacy_default_blocks_dir:16
 engine/composition/src/boot_legacy_blocks.c:boot_legacy_import_block_files:18
-engine/composition/src/boot_loop_guard.c:boot_loop_guard_check:16
 engine/composition/src/boot_mesh_pairing.c:boot_mesh_pairing_reason_code:20
 engine/composition/src/boot_mesh_status_refresh.c:refresh_begin_one:16
 engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin:39

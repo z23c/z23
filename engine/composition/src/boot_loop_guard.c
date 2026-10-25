@@ -48,6 +48,17 @@ static void bootloop_datadir_from_ndb(const struct node_db *ndb,
     out[len] = '\0';
 }
 
+static const char *bootloop_exit_reason_or_unknown(bool have_reason,
+                                                    const char *exit_reason)
+{
+    return have_reason ? exit_reason : "unknown";
+}
+
+static const char *bootloop_forced_suffix(bool exit_forced, const char *suffix)
+{
+    return exit_forced ? suffix : "";
+}
+
 void boot_loop_guard_check(struct node_db *ndb)
 {
     if (!ndb || !ndb->open) {
@@ -94,7 +105,7 @@ void boot_loop_guard_check(struct node_db *ndb)
     g_last_count = count;
     g_last_fired = fired;
     snprintf(g_last_exit_reason, sizeof(g_last_exit_reason), "%s",
-             have_reason ? exit_reason : "unknown");
+             bootloop_exit_reason_or_unknown(have_reason, exit_reason));
     g_last_exit_forced = exit_forced;
     pthread_mutex_unlock(&g_bootloop_lock);
 
@@ -107,8 +118,9 @@ void boot_loop_guard_check(struct node_db *ndb)
              "count=%lld window_min=%d threshold=%d last_exit_reason=%s%s",
              (long long)count, BOOT_LOOP_GUARD_WINDOW_MINUTES,
              BOOT_LOOP_GUARD_THRESHOLD,
-             have_reason ? exit_reason : "unknown",
-             exit_forced ? " (shutdown-watchdog-forced)" : "");
+             bootloop_exit_reason_or_unknown(have_reason, exit_reason),
+             bootloop_forced_suffix(exit_forced,
+                                    " (shutdown-watchdog-forced)"));
     if (!blocker_init(&r, BOOT_LOOP_GUARD_BLOCKER_ID, BOOT_LOOP_GUARD_BLOCKER_OWNER,
                       BLOCKER_TRANSIENT, reason))
         return;   /* blocker_init already logged via LOG_FAIL */
@@ -118,8 +130,9 @@ void boot_loop_guard_check(struct node_db *ndb)
              "(threshold=%d) — last exit reason=%s%s — boot proceeding, "
              "named blocker raised",
              (long long)count, BOOT_LOOP_GUARD_WINDOW_MINUTES,
-             BOOT_LOOP_GUARD_THRESHOLD, have_reason ? exit_reason : "unknown",
-             exit_forced ? " (forced)" : "");
+             BOOT_LOOP_GUARD_THRESHOLD,
+             bootloop_exit_reason_or_unknown(have_reason, exit_reason),
+             bootloop_forced_suffix(exit_forced, " (forced)"));
 }
 
 void boot_loop_guard_note_shutdown_intent(void)
