@@ -906,43 +906,83 @@ static void cap_label(struct ci_capability *c)
         snprintf(c->what, sizeof(c->what), "%s", stem);
 }
 
-int codeindex_capabilities(struct codeindex *ci, const char *text,
-                           struct ci_capability *out, int cap,
-                           struct ci_capability_query *q)
+static bool cap_args_ok(struct codeindex *ci, const char *text,
+                        struct ci_capability *out, int cap,
+                        const struct ci_capability_query *q)
 {
     if (!ci || !ci->store || !text || !out || cap <= 0 || !q)
-        LOG_ERR("codeindex", "bad arg to codeindex_capabilities");
-    memset(q, 0, sizeof(*q));
-    if (cap_terms(text, q) == 0)
-        return 0;   /* nothing searchable survived stopword/length filtering */
+        return false;
+    return true;
+}
 
-    struct cap_scan s = { 0 };
-    s.cap = CI_CAP_ANCHOR_CAP;
-    s.a = zcl_calloc((size_t)s.cap, sizeof(*s.a), "ci_cap_anchors");
-    s.slot = zcl_malloc(CI_CAP_SLOTS * sizeof(*s.slot), "ci_cap_slots");
-    if (!s.a || !s.slot) {
-        free(s.a);
-        free(s.slot);
-        LOG_ERR("codeindex", "alloc capability anchors");
+static bool cap_scan_alloc(struct cap_scan *s)
+{
+    s->cap = CI_CAP_ANCHOR_CAP;
+    s->a = zcl_calloc((size_t)s->cap, sizeof(*s->a), "ci_cap_anchors");
+    s->slot = zcl_malloc(CI_CAP_SLOTS * sizeof(*s->slot), "ci_cap_slots");
+    if (!s->a || !s->slot) {
+        free(s->a);
+        free(s->slot);
+        return false;
     }
-    for (size_t i = 0; i < CI_CAP_SLOTS; i++) s.slot[i] = -1;
+    for (size_t i = 0; i < CI_CAP_SLOTS; i++) s->slot[i] = -1;
+    return true;
+}
 
+static bool cap_scan_run(struct codeindex *ci, struct cap_scan *s,
+                         struct ci_capability_query *q)
+{
     ci_store_lock(ci->store);
-    bool ok = cap_scan_symbols(ci->store, &s, q, ci->root) &&
-              cap_scan_files(ci->store, &s, q);
+    bool ok = cap_scan_symbols(ci->store, s, q, ci->root) &&
+              cap_scan_files(ci->store, s, q);
     ci_store_unlock(ci->store);
-    free(s.slot);
-    s.slot = NULL;
-    if (!ok) { free(s.a); LOG_ERR("codeindex", "capability scan failed"); }
-    q->candidates = s.n;
-    q->truncated = s.truncated;
+    free(s->slot);
+    s->slot = NULL;
+    if (!ok) { free(s->a); return false; }
+    q->candidates = s->n;
+    q->truncated = s->truncated;
+    return true;
+}
 
+/* insertion sort into the fixed pool, by score then path */
+static void cap_pool_insert(const struct cap_scan *s, int *pool_idx,
+                            int *pool_n, int i, int sc)
+{
+    int at = *pool_n;
+    while (at > 0) {
+        int prev = pool_idx[at - 1];
+        int psc = cap_score(&s->a[prev]);
+        if (psc > sc ||
+            (psc == sc && strcmp(s->a[prev].path, s->a[i].path) < 0))
+            break;
+        if (at < CI_CAP_RANK_POOL) pool_idx[at] = prev;
+        at--;
+    }
+    if (at < CI_CAP_RANK_POOL) {
+        pool_idx[at] = i;
+        if (*pool_n < CI_CAP_RANK_POOL) (*pool_n)++;
+    }
+}
+
+static void cap_admit_pass(const struct cap_scan *s, int need,
+                           int *pool_idx, int *pool_n)
+{
+    for (int i = 0; i < s->n; i++) {
+        if (cap_terms_matched(&s->a[i]) < need) continue;
+        int sc = cap_score(&s->a[i]);
+        if (sc <= 0) continue;
+        cap_pool_insert(s, pool_idx, pool_n, i, sc);
+    }
+}
+
+static int cap_admit(const struct cap_scan *s, struct ci_capability_query *q,
+                     int *pool_idx)
+{
     /* Admission. Every stem must be matched. Only if that is empty do we drop
      * to n-1, and then only for a multi-term query — a one-term query that
      * matched nothing has nothing to relax to, and relaxing it would return
      * the whole tree. */
     int need = q->term_count;
-    int pool_idx[CI_CAP_RANK_POOL];
     int pool_n = 0;
     for (int round = 0; round < 2 && pool_n == 0; round++) {
         if (round == 1) {
@@ -950,63 +990,60 @@ int codeindex_capabilities(struct codeindex *ci, const char *text,
             need = q->term_count - 1;
             q->relaxed = true;
         }
-        for (int i = 0; i < s.n; i++) {
-            if (cap_terms_matched(&s.a[i]) < need) continue;
-            int sc = cap_score(&s.a[i]);
-            if (sc <= 0) continue;
-            /* insertion sort into the fixed pool, by score then path */
-            int at = pool_n;
-            while (at > 0) {
-                int prev = pool_idx[at - 1];
-                int psc = cap_score(&s.a[prev]);
-                if (psc > sc ||
-                    (psc == sc && strcmp(s.a[prev].path, s.a[i].path) < 0))
-                    break;
-                if (at < CI_CAP_RANK_POOL) pool_idx[at] = prev;
-                at--;
-            }
-            if (at < CI_CAP_RANK_POOL) {
-                pool_idx[at] = i;
-                if (pool_n < CI_CAP_RANK_POOL) pool_n++;
-            }
+        cap_admit_pass(s, need, pool_idx, &pool_n);
+    }
+    return pool_n;
+}
+
+static bool cap_fill_candidate(struct codeindex *ci, const struct cap_anchor *a,
+                               struct ci_capability_query *q,
+                               struct ci_capability *c)
+{
+    ci_cpy(c->header, sizeof(c->header), a->path);
+    ci_cpy(c->group, sizeof(c->group), a->group);
+    c->symbols_listed = a->syms_listed;
+    for (int k = 0; k < a->syms_listed; k++)
+        ci_cpy(c->symbols[k], sizeof(c->symbols[k]), a->syms[k]);
+    c->symbol_count = a->name_hits;
+    c->score = cap_score(a);
+    c->terms_matched = cap_terms_matched(a);
+
+    struct ci_file f;
+    bool found = false;
+    if (codeindex_file(ci, c->header, &f, &found) && found)
+        ci_cpy(c->purpose, sizeof(c->purpose), f.purpose);
+
+    bool by_name = c->symbol_count > 0;
+    ci_cpy(c->count_basis, sizeof(c->count_basis),
+           by_name ? CI_CAPABILITY_BASIS_MATCHED
+                   : CI_CAPABILITY_BASIS_FILE);
+    ci_store_lock(ci->store);
+    bool uok = cap_usage(ci->store, q, c->header, by_name,
+                         &c->used_by_files, c->example_caller,
+                         sizeof(c->example_caller));
+    ci_store_unlock(ci->store);
+    if (!uok) return false;
+    cap_label(c);
+    return true;
+}
+
+static bool cap_fill_pool(struct codeindex *ci, struct cap_scan *s,
+                          struct ci_capability_query *q,
+                          const int *pool_idx, int pool_n,
+                          struct ci_capability *pool)
+{
+    for (int i = 0; i < pool_n; i++) {
+        if (!cap_fill_candidate(ci, &s->a[pool_idx[i]], q, &pool[i])) {
+            free(s->a);
+            return false;
         }
     }
-    if (pool_n == 0) { free(s.a); return 0; }
+    free(s->a);
+    return true;
+}
 
-    /* Materialise the pool, then buy the usage count for it. */
-    struct ci_capability pool[CI_CAP_RANK_POOL];
-    memset(pool, 0, sizeof(pool));
-    for (int i = 0; i < pool_n; i++) {
-        struct cap_anchor *a = &s.a[pool_idx[i]];
-        struct ci_capability *c = &pool[i];
-        ci_cpy(c->header, sizeof(c->header), a->path);
-        ci_cpy(c->group, sizeof(c->group), a->group);
-        c->symbols_listed = a->syms_listed;
-        for (int k = 0; k < a->syms_listed; k++)
-            ci_cpy(c->symbols[k], sizeof(c->symbols[k]), a->syms[k]);
-        c->symbol_count = a->name_hits;
-        c->score = cap_score(a);
-        c->terms_matched = cap_terms_matched(a);
-
-        struct ci_file f;
-        bool found = false;
-        if (codeindex_file(ci, c->header, &f, &found) && found)
-            ci_cpy(c->purpose, sizeof(c->purpose), f.purpose);
-
-        bool by_name = c->symbol_count > 0;
-        ci_cpy(c->count_basis, sizeof(c->count_basis),
-               by_name ? CI_CAPABILITY_BASIS_MATCHED
-                       : CI_CAPABILITY_BASIS_FILE);
-        ci_store_lock(ci->store);
-        bool uok = cap_usage(ci->store, q, c->header, by_name,
-                             &c->used_by_files, c->example_caller,
-                             sizeof(c->example_caller));
-        ci_store_unlock(ci->store);
-        if (!uok) { free(s.a); LOG_ERR("codeindex", "capability usage failed"); }
-        cap_label(c);
-    }
-    free(s.a);
-
+static void cap_rerank(struct ci_capability *pool, int pool_n)
+{
     /* Re-rank with usage in hand: terms first (a candidate that answered more
      * of the question wins), then how load-bearing it is, then the cheap
      * score, then path for determinism. */
@@ -1029,7 +1066,35 @@ int codeindex_capabilities(struct codeindex *ci, const char *text,
         }
         pool[j + 1] = key;
     }
+}
 
+int codeindex_capabilities(struct codeindex *ci, const char *text,
+                           struct ci_capability *out, int cap,
+                           struct ci_capability_query *q)
+{
+    if (!cap_args_ok(ci, text, out, cap, q))
+        LOG_ERR("codeindex", "bad arg to codeindex_capabilities");
+    memset(q, 0, sizeof(*q));
+    if (cap_terms(text, q) == 0)
+        return 0;   /* nothing searchable survived stopword/length filtering */
+
+    struct cap_scan s = { 0 };
+    if (!cap_scan_alloc(&s))
+        LOG_ERR("codeindex", "alloc capability anchors");
+    if (!cap_scan_run(ci, &s, q))
+        LOG_ERR("codeindex", "capability scan failed");
+
+    int pool_idx[CI_CAP_RANK_POOL];
+    int pool_n = cap_admit(&s, q, pool_idx);
+    if (pool_n == 0) { free(s.a); return 0; }
+
+    /* Materialise the pool, then buy the usage count for it. */
+    struct ci_capability pool[CI_CAP_RANK_POOL];
+    memset(pool, 0, sizeof(pool));
+    if (!cap_fill_pool(ci, &s, q, pool_idx, pool_n, pool))
+        LOG_ERR("codeindex", "capability usage failed");
+
+    cap_rerank(pool, pool_n);
     int n = pool_n < cap ? pool_n : cap;
     for (int i = 0; i < n; i++) out[i] = pool[i];
     return n;
