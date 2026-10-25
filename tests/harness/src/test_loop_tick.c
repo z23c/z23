@@ -144,6 +144,8 @@ static bool lt_repo(const struct lt_env *e)
     ok = ok && lt_wf(f, "int other;\n");
     (void)snprintf(f, sizeof(f), "%s/tools/lint/cyclomatic_complexity_baseline.txt", main_);
     ok = ok && lt_wf(f, "a.c:f1:20\na.c:f2:21\na.c:f3:22\n");
+    (void)snprintf(f, sizeof(f), "%s/tools/lint/card_baseline.txt", main_);
+    ok = ok && lt_wf(f, "owned.c 3\nother.c 2\n");
     return ok && lt_git(origin, "init", "-q", "--bare", NULL) &&
            lt_git(main_, "init", "-q", NULL) &&
            lt_git(main_, "checkout", "-q", "-b", "main", NULL) &&
@@ -158,7 +160,7 @@ static bool lt_repo(const struct lt_env *e)
 /* The fake z23-lint --write-baseline body: "shrink" deletes the first row,
  * "grow" appends a new row, "lower" deletes the first row and lowers the
  * third row's score, "rise" raises the second row's score. */
-static const char *lt_lint_body(const char *mode)
+static const char *lt_lint_body(const struct lt_env *e, const char *mode)
 {
     static const char base[] = "tools/lint/cyclomatic_complexity_baseline.txt";
     static char lower[512], rise[512];
@@ -170,6 +172,13 @@ static const char *lt_lint_body(const char *mode)
     (void)snprintf(rise, sizeof(rise),
                    "f=%s\nsed 's/^a.c:f2:21$/a.c:f2:25/' $f > $f.new && mv $f.new $f",
                    base);
+    if (strcmp(mode, "verify") == 0) { /* a card's gate: log the words, pass unless verify.fail exists */
+        static char verify[600];
+        (void)snprintf(verify, sizeof(verify),
+                       "echo \"$@\" >> '%s/verify_args.txt'\n[ -e '%s/verify.fail' ] && exit 1\nexit 0",
+                       e->d, e->d);
+        return verify;
+    }
     if (strcmp(mode, "lower") == 0)
         return lower;
     if (strcmp(mode, "rise") == 0)
@@ -187,22 +196,24 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
         return false;
     const char *edit = c->edit ? c->edit : "";
     return lt_script(e, "dev",
-               "case \"$1\" in\n fleet) cat '%s/step.json' ;;\n"
+               "case \"$1\" in\n fleet) echo \"$@\" >> '%s/step_args.txt'; cat '%s/step.json' ;;\n"
                " dev) if [ \"$2\" = agent ]; then\n"
                "  echo \"$@\" >> '%s/claims.txt'\n"
                "  [ -e '%s/claim.fail' ] && { echo '{\"ok\":false}'; exit 1; }\n"
                "  case \"$*\" in *release*) rm -f '%s/claim.live' ;; *) : > '%s/claim.live' ;; esac\n"
                "  echo '{\"ok\":true}'\n"
                " else echo \"$@\" > '%s/submit.txt'; echo '{\"data\":{\"seq\":7}}'; fi ;;\nesac",
-               e->d, e->d, e->d, e->d, e->d, e->d) &&
+               e->d, e->d, e->d, e->d, e->d, e->d, e->d) &&
            lt_script(e, "eu",
                "while [ $# -gt 0 ]; do [ \"$1\" = --worktree ] && wt=$2; shift; done\n"
-               "[ -n '%s' ] || exit 0\ncd \"$wt\" && echo edit >> '%s'", edit, edit) &&
+               "[ -n '%s' ] || exit 0\ncd \"$wt\" && echo edit >> '%s'\n"
+               "[ -e '%s/eu_extra.sh' ] && sh '%s/eu_extra.sh'\nexit 0",
+               edit, edit, e->d, e->d) &&
            lt_script(e, "devbuild",
                "case \"$*\" in\n *lint-land*) echo lint-land-stderr-marker >&2 ;;\n"
                " *agent-verify*) exit %s ;;\nesac\nexit 0",
                c->rerun ? c->rerun : "0") &&
-           lt_script(e, "lint", lt_lint_body(c->lint)) &&
+           lt_script(e, "lint", lt_lint_body(e, c->lint)) &&
            lt_script(e, "zgate",
                "l='%s'/zgate.$$.log\n"
                "case \"$*\" in *agent-verify*) r='%s' ;; *) r='rc=0' ;; esac\n"
@@ -212,6 +223,14 @@ static bool lt_fakes(const struct lt_env *e, const struct lt_cfg *c)
                e->d, c->gate_rc, e->d, e->d, e->d) &&
            lt_script(e, "claude",
                "printf '%%s\\n' '{\"result\":\"reviewed\\n%s\"}'", c->verdict) &&
+           lt_script(e, "precheck",
+               "n=$(cat '%s/pre.count' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '%s/pre.count'\n"
+               "echo \"$1\" >> '%s/pre.args'\n"
+               "red=$(cat '%s/pre.red' 2>/dev/null || echo 0)\n"
+               "if [ \"$n\" -le \"$red\" ]; then echo '1 new gate failure(s)'; echo '  check-fake-gate  failed'; exit 1; fi\n"
+               "echo 'no new gate failures'",
+               e->d, e->d, e->d, e->d) &&
+           lt_script(e, "mainlint", "echo \"gate-output-marker for $1\"") &&
            lt_script(e, "retire",
                "echo \"$@\" >> '%s/retire.txt'\n"
                "git -C '%s/main' worktree remove --force \"$1\"", e->d, e->d);
@@ -267,19 +286,20 @@ static bool lt_setup(struct lt_env *e, const char *tag, const struct lt_cfg *c,
 static int lt_tool(const struct lt_env *e, const char *const extra[], char *out,
                    size_t cap)
 {
-    char a[14][700], lock[700];
+    char a[16][700], lock[700];
     (void)snprintf(lock, sizeof(lock), "%s/haiku.lock", e->d);
     const char *names[] = { "--main", "--lanes", "--state-dir", "--scratch-dir",
                             "--dev", "--engine-unit", "--zgate", "--retire-script",
-                            "--devbuild", "--claude", "--lint-bin" };
+                            "--devbuild", "--claude", "--lint-bin", "--precheck-script",
+                            "--main-lint" };
     const char *rels[] = { "main", "lanes", "state", "scratch", "bin/dev", "bin/eu",
                            "bin/zgate", "bin/retire", "bin/devbuild", "bin/claude",
-                           "bin/lint" };
+                           "bin/lint", "bin/precheck", "bin/mainlint" };
     const char *argv[64] = { "env", "GIT_AUTHOR_NAME=fixture",
         "GIT_AUTHOR_EMAIL=f@example.invalid", "GIT_COMMITTER_NAME=fixture",
         "GIT_COMMITTER_EMAIL=f@example.invalid", LT_BIN };
     size_t n = 6;
-    for (size_t i = 0; i < 11; i++) {
+    for (size_t i = 0; i < 13; i++) {
         (void)snprintf(a[i], sizeof(a[i]), "%s/%s", e->d, rels[i]);
         argv[n++] = names[i];
         argv[n++] = a[i];
@@ -1159,6 +1179,259 @@ static int case_claim_refused_hold(void)
     return failures;
 }
 
+/* ── ported from the ops bridge on 10-25: precheck, duplicate guard, cards ── */
+
+static bool lt_mkdir(const struct lt_env *e, const char *rel)
+{
+    char p[900];
+    (void)snprintf(p, sizeof(p), "%s/%s", e->d, rel);
+    const char *const mk[] = { "mkdir", "-p", p, NULL };
+    return lt_run(mk, NULL, 0, NULL);
+}
+
+static bool lt_put(const struct lt_env *e, const char *rel, const char *text)
+{
+    char p[900];
+    (void)snprintf(p, sizeof(p), "%s/%s", e->d, rel);
+    return lt_wf(p, text);
+}
+
+/* A red precheck gets ONE engine retry fed the gate's own output; a green
+ * second run submits. */
+static int case_precheck_retry(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const bool ready = lt_setup(&e, "pre1", &c, "run", "claude-haiku") &&
+                       lt_put(&e, "pre.red", "1");
+    LT_CHECK("the precheck retry fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_tick(&e, NULL, NULL, NULL, 0);
+    LT_CHECK("a red-then-green precheck exits 0", rc == 0);
+    LT_CHECK("it names the red gate and the retry",
+             lt_file_has(&e, "state/tick.log", "precheck red: check-fake-gate"));
+    LT_CHECK("the precheck ran on the lane directory twice",
+             lt_count(&e, "pre.args", "/lanes/loop-t1") == 2);
+    LT_CHECK("the engine ran a second time",
+             lt_file_has(&e, "state/tick.log", "engine_unit retry rc=0"));
+    LT_CHECK("the retry task carries the original task and the gate's output",
+             lt_file_has(&e, "scratch/loop-t1/task2.txt", "do the unit") &&
+             lt_file_has(&e, "scratch/loop-t1/task2.txt", "== check-fake-gate") &&
+             lt_file_has(&e, "scratch/loop-t1/task2.txt", "gate-output-marker for check-fake-gate"));
+    LT_CHECK("it logs the green precheck", lt_file_has(&e, "state/tick.log", "precheck: no new gate failures"));
+    LT_CHECK("it submits", lt_file_has(&e, "submit.txt", "dev land submit --worktree="));
+    LT_CHECK("it made one commit", lt_commits_ahead(&e) == 1);
+    return failures;
+}
+
+/* Still red after the one retry: HOLD, no commit, no third precheck. */
+static int case_precheck_hold(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const bool ready = lt_setup(&e, "pre2", &c, "run", "claude-haiku") &&
+                       lt_put(&e, "pre.red", "9");
+    LT_CHECK("the precheck hold fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_tick(&e, NULL, NULL, NULL, 0);
+    LT_CHECK("a still-red precheck exits 0", rc == 0);
+    LT_CHECK("it holds after one retry",
+             lt_file_has(&e, "state/loop-t1.HOLD", "precheck still red after one retry: check-fake-gate"));
+    LT_CHECK("it ran the precheck exactly twice", lt_file_has(&e, "pre.count", "2"));
+    LT_CHECK("it does not commit or submit",
+             lt_commits_ahead(&e) == 0 && !lt_exists("%s/%s", e.d, "submit.txt"));
+    return failures;
+}
+
+/* A precheck that cannot run (rc 2) holds at once: no engine retry. */
+static int case_precheck_setup_error(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const bool ready = lt_setup(&e, "pre3", &c, "run", "claude-haiku") &&
+                       lt_script(&e, "precheck", "exit 2");
+    LT_CHECK("the precheck setup-error fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    (void)lt_tick(&e, NULL, NULL, NULL, 0);
+    LT_CHECK("it holds without a retry",
+             lt_file_has(&e, "state/loop-t1.HOLD", "the precheck could not run (rc=2)") &&
+             !lt_file_has(&e, "state/tick.log", "engine_unit retry"));
+    return failures;
+}
+
+/* The step is told to skip files an open or held lane owns; a pick of such a
+ * file anyway is skipped, a pick of another file proceeds. */
+static int case_duplicate_target(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    char main_[700], lane[900];
+    bool ready = lt_setup(&e, "dup", &c, "run", "claude-haiku");
+    (void)snprintf(main_, sizeof(main_), "%s/main", e.d);
+    (void)snprintf(lane, sizeof(lane), "%s/lanes/loop-old", e.d);
+    ready = ready && lt_mkdir(&e, "lanes") && lt_mkdir(&e, "state") &&
+            lt_mkdir(&e, "scratch/loop-old") &&
+            lt_git(main_, "worktree", "add", "-q", "-b", "lane/loop-old", lane, "origin/main", NULL) &&
+            lt_put(&e, "state/loop-old.HOLD", "held\n") &&
+            lt_put(&e, "scratch/loop-old/step.json",
+                   "{\"data\":{\"next\":{\"brief\":{\"target_file\":\"owned.c\"}}}}");
+    LT_CHECK("the duplicate-target fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    const int rc = lt_tick(&e, NULL, NULL, NULL, 0);
+    LT_CHECK("a duplicate target exits 0", rc == 0);
+    LT_CHECK("the step was asked to exclude the held lane's target",
+             lt_file_has(&e, "step_args.txt", "fleet objectives step --exclude=owned.c"));
+    LT_CHECK("the same target is skipped, naming the owning lane",
+             lt_file_has(&e, "state/tick.log", "skip: owned.c is already owned by open lane loop-old"));
+    LT_CHECK("no lane was created", !lt_exists("%s/lanes/%s", e.d, "loop-t1"));
+    ready = lt_step_doc(&e, "run", "claude-haiku", "loop:obj1:", "other.c", 0);
+    (void)lt_tick(&e, NULL, NULL, NULL, 0);
+    LT_CHECK("another target gets its lane", ready && lt_exists("%s/lanes/%s", e.d, "loop-t1"));
+    return failures;
+}
+
+/* No open lane: the step gets no --exclude flag. */
+static int case_no_exclude_without_lanes(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const struct lt_cfg c = { "owned.c", "shrink", "VERDICT: LAND", "rc=0", NULL };
+    const bool ready = lt_setup(&e, "noexcl", &c, "run", "claude-haiku");
+    LT_CHECK("the no-exclude fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    (void)lt_tick(&e, NULL, NULL, NULL, 0);
+    LT_CHECK("the step ran without --exclude",
+             lt_file_has(&e, "step_args.txt", "fleet objectives step") &&
+             !lt_file_has(&e, "step_args.txt", "--exclude"));
+    return failures;
+}
+
+/* A kind=baseline_row card step document. */
+static bool lt_card_doc(const struct lt_env *e, const char *row, const char *verify)
+{
+    static char doc[4096];
+    (void)snprintf(doc, sizeof(doc),
+        "{\"data\":{\"action\":\"run\",\"reason\":\"r\","
+        "\"dispatch\":{\"lane\":\"loop-t1\",\"note_prefix\":\"loop:obj2:\","
+        "\"engine\":\"claude-haiku\",\"task_text\":\"do the card\"},"
+        "\"next\":{\"objective\":\"baseline_hardening_banned_str\","
+        "\"brief\":{\"kind\":\"baseline_row\",\"target_file\":\"owned.c\","
+        "\"owned\":[\"owned.c\",\"tools/lint/card_baseline.txt\"],"
+        "\"baseline\":\"tools/lint/card_baseline.txt\",\"row\":\"%s\","
+        "\"recipe\":\"use snprintf\",\"verify\":\"%s\","
+        "\"review_focus\":\"no banned str remains\",\"level\":\"haiku\"}}}}",
+        row, verify);
+    return lt_put(e, "step.json", doc);
+}
+
+/* One card tick. extra is the fake engine's extra edit (sh, run in the lane),
+ * verify_fail makes the card's gate exit 1. */
+static bool lt_card_tick(struct lt_env *e, const char *tag, const char *row,
+                         const char *verify, const char *extra, bool verify_fail)
+{
+    const struct lt_cfg c = { "owned.c", "verify", "VERDICT: LAND", "rc=0", NULL };
+    const bool ready = lt_setup(e, tag, &c, "run", "claude-haiku") &&
+                       lt_card_doc(e, row, verify) &&
+                       (!extra || lt_put(e, "eu_extra.sh", extra)) &&
+                       (!verify_fail || lt_put(e, "verify.fail", ""));
+    if (ready)
+        (void)lt_tick(e, NULL, NULL, NULL, 0);
+    return ready;
+}
+
+#define LT_CARD_LOWER "sed 's/^owned.c 3$/owned.c 2/' tools/lint/card_baseline.txt > b.new && mv b.new tools/lint/card_baseline.txt"
+#define LT_CARD_VERIFY "build/bin/z23-lint check-fake-card --flag=1"
+
+static int case_card_submits(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    const bool ready = lt_card_tick(&e, "card1", "owned.c 3", LT_CARD_VERIFY, LT_CARD_LOWER, false);
+    LT_CHECK("the card scenario fixtures are written", ready);
+    if (!ready)
+        return failures + 1;
+    LT_CHECK("it logs the card's row as the pins",
+             lt_file_has(&e, "state/tick.log", "run loop-t1: baseline_hardening_banned_str, owned.c, pins: row: owned.c 3"));
+    LT_CHECK("the card's gate ran with its own arguments",
+             lt_file_has(&e, "verify_args.txt", "check-fake-card --flag=1"));
+    LT_CHECK("it did not regenerate the complexity baseline",
+             lt_file_has(&e, "lanes/loop-t1/tools/lint/cyclomatic_complexity_baseline.txt", "a.c:f1:20") &&
+             !lt_file_has(&e, "verify_args.txt", "--write-baseline"));
+    LT_CHECK("it wrote no HOLD", !lt_exists("%s/%s", e.d, "state/loop-t1.HOLD"));
+    LT_CHECK("it made one commit", lt_commits_ahead(&e) == 1);
+    LT_CHECK("the land note is built from the card",
+             lt_file_has(&e, "submit.txt",
+                         "--note=loop:obj2: shrank the card_baseline.txt row for owned.c (owned.c 3); "
+                         "claude-haiku via z23-engine-unit, card gate rc=0, baseline only shrank, "
+                         "zgate agent-verify+lint rc=0, read-only Haiku review LAND."));
+    char lane[900], msg[4096] = "";
+    (void)snprintf(lane, sizeof(lane), "%s/lanes/loop-t1", e.d);
+    const char *const show[] = { "git", "-C", lane, "log", "-1", "--format=%B", NULL };
+    (void)lt_run(show, msg, sizeof(msg), NULL);
+    LT_CHECK("the commit message is the card's, not the complexity text",
+             strncmp(msg, "lint(owned): shrink the card_baseline.txt row for owned.c (loop)", 62) == 0 &&
+             strstr(msg, "Recipe:\nuse snprintf\nRow at dispatch: owned.c 3\n") != NULL &&
+             strstr(msg, "complexity") == NULL);
+    LT_CHECK("the review prompt carries the recipe and the review focus",
+             lt_file_has(&e, "scratch/loop-t1/review-prompt.txt", "apply this recipe to owned.c: use snprintf") &&
+             lt_file_has(&e, "scratch/loop-t1/review-prompt.txt", "(1) no banned str remains") &&
+             !lt_file_has(&e, "scratch/loop-t1/review-prompt.txt", "over-complexity"));
+    return failures;
+}
+
+static int case_card_holds(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    bool ready = lt_card_tick(&e, "card2", "owned.c 3", LT_CARD_VERIFY, NULL, false);
+    LT_CHECK("a card whose row stays holds",
+             ready && lt_file_has(&e, "state/loop-t1.HOLD",
+                                  "the card's row is still in tools/lint/card_baseline.txt unchanged"));
+    LT_CHECK("it does not commit", lt_commits_ahead(&e) == 0);
+    ready = lt_card_tick(&e, "card3", "owned.c 3", LT_CARD_VERIFY,
+                         "sed 's/^owned.c 3$/owned.c 4/' tools/lint/card_baseline.txt > b.new && mv b.new tools/lint/card_baseline.txt",
+                         false);
+    LT_CHECK("a card baseline that grows holds",
+             ready && lt_file_has(&e, "state/loop-t1.HOLD",
+                                  "tools/lint/card_baseline.txt grew: 1 new or higher row(s)"));
+    ready = lt_card_tick(&e, "card4", "owned.c 3", LT_CARD_VERIFY, LT_CARD_LOWER, true);
+    LT_CHECK("a failing card gate holds",
+             ready && lt_file_has(&e, "state/loop-t1.HOLD", "card verify failed: " LT_CARD_VERIFY));
+    ready = lt_card_tick(&e, "card5", "ghost.c 7", LT_CARD_VERIFY, NULL, false);
+    LT_CHECK("a baseline where nothing shrank holds",
+             ready && lt_file_has(&e, "state/loop-t1.HOLD",
+                                  "no row of tools/lint/card_baseline.txt shrank"));
+    return failures;
+}
+
+static int case_card_refused(void)
+{
+    int failures = 0;
+    struct lt_env e;
+    bool ready = lt_card_tick(&e, "card6", "owned.c 3", "rm -rf build", NULL, false);
+    LT_CHECK("a verify that is not a z23-lint gate is skipped",
+             ready && lt_file_has(&e, "state/tick.log", "skip: card verify 'rm -rf build' is not a z23-lint gate") &&
+             !lt_exists("%s/lanes/%s", e.d, "loop-t1"));
+    ready = lt_card_tick(&e, "card7", "owned.c 3", "build/bin/z23-lint check-x;touch", NULL, false);
+    LT_CHECK("a verify with unexpected characters is skipped",
+             ready && lt_file_has(&e, "state/tick.log", "skip: card verify has unexpected characters") &&
+             !lt_exists("%s/lanes/%s", e.d, "loop-t1"));
+    ready = lt_card_tick(&e, "card8", "", LT_CARD_VERIFY, NULL, false);
+    LT_CHECK("a card without a row is skipped",
+             ready && lt_file_has(&e, "state/tick.log", "skip: baseline_row card lacks baseline/row/recipe") &&
+             !lt_exists("%s/lanes/%s", e.d, "loop-t1"));
+    return failures;
+}
+
 int test_loop_tick(void)
 {
     int failures = 0;
@@ -1193,5 +1466,13 @@ int test_loop_tick(void)
     failures += case_finish_claims();
     failures += case_claim_released_on_hold();
     failures += case_claim_refused_hold();
+    failures += case_precheck_retry();
+    failures += case_precheck_hold();
+    failures += case_precheck_setup_error();
+    failures += case_duplicate_target();
+    failures += case_no_exclude_without_lanes();
+    failures += case_card_submits();
+    failures += case_card_holds();
+    failures += case_card_refused();
     return failures;
 }

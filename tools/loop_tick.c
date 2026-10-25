@@ -6,7 +6,10 @@
  *   lock -> retire landed loop-* lanes and count *.HOLD -> `fleet objectives
  *   step` in the pristine base tree -> lane from origin/main (worktree-prime)
  *   -> z23-engine-unit (the model edits only) -> scope check against
- *   brief.owned -> complexity baseline regen (shrink-only) -> signed commit ->
+ *   brief.owned -> complexity baseline regen (shrink-only; or, for a
+ *   kind=baseline_row card, the card's own z23-lint gate and a shrink-only row
+ *   judgement) -> lane precheck (--precheck-script; a red gate gets one engine
+ *   retry fed the gate output, then HOLD) -> signed commit ->
  *   lint-land -> zgate agent-verify + lint -> read-only Haiku review ->
  *   prep -> `dev land submit` with the `loop:<objective>:` note prefix.
  *
@@ -29,6 +32,9 @@
  * "finish <lane> submitted seq=<n>" (exit 0) or "finish <lane> HOLD <reason>"
  * (exit 1); usage errors exit 2. Both modes hold --haiku-lock (a blocking
  * flock) around the one-shot review call, so model calls never stack.
+ *
+ * The step is passed --exclude=<targets of the open or held loop lanes> and a
+ * pick of a target such a lane already owns is skipped (duplicate work).
  *
  * Guards, in order: one tick at a time (flock on STATE/lock); at most
  * --max-held held loop lanes; the step's own in-flight and pause rules;
@@ -111,6 +117,9 @@ enum {
     X(GATE_WAIT, "--gate-wait-s", "7200")                                    \
     X(POLL, "--poll-ms", "30000")                                            \
     X(CLAIM_RENEW, "--claim-renew-s", "300")                                 \
+    X(PRECHECK, "--precheck-script",                                         \
+      "~/development/z23/handoff/handoff-20261025/lane-precheck.sh")         \
+    X(MAIN_LINT, "--main-lint", "@main/build/bin/z23-lint")                  \
     X(FINISH, "--finish", "")                                                \
     X(TARGET, "--target", "")                                                \
     X(CREDIT, "--credit", "")                                                \
@@ -152,6 +161,11 @@ struct tick {
     bool finish;        /* --finish mode: adopt a committed lane, judge origin/main..HEAD */
     char *claim_in;     /* the lane claim input, repeated to renew the lease */
     bool claimed;       /* the lane holds a claim row to release */
+    /* a kind=baseline_row card (one shrink-only lint baseline row) */
+    bool card;
+    char baseline[LT_PATH], row[LT_PATH], recipe[1024], verify[512], focus[1024];
+    char excl[LT_PATH * 4]; /* comma-joined targets of the open or held loop lanes */
+    char pre_log[LT_PATH];  /* the precheck log of the last precheck run */
 };
 
 static const char *O(const struct tick *t, enum lt_opt o) { return t->opt[o]; }
@@ -483,6 +497,74 @@ static bool step_collect(struct tick *t)
     return true;
 }
 
+/* ── the open and held lanes' targets: --exclude and the duplicate guard ── */
+
+/* The target_file the step recorded for one loop-* lane (its scratch
+ * step.json), when the lane directory still exists. */
+static bool lane_target(const struct tick *t, const char *name, char *out, size_t cap)
+{
+    char dir[LT_PATH], sj[LT_PATH];
+    if (!fmt(dir, sizeof(dir), "%s/%s", O(t, LT_O_LANES), name) || !is_dir(dir) ||
+        !fmt(sj, sizeof(sj), "%s/%s/step.json", O(t, LT_O_SCRATCH), name))
+        return false;
+    char *text = read_file(sj, 1 << 20);
+    if (!text)
+        return false;
+    struct json_value doc;
+    json_init(&doc);
+    bool ok = json_read(&doc, text, strlen(text));
+    const char *tf = ok ? jstr(&doc, "data.next.brief.target_file") : "";
+    ok = ok && *tf && fmt(out, cap, "%s", tf);
+    json_free(&doc);
+    free(text);
+    return ok;
+}
+
+typedef bool (*lane_target_fn)(struct tick *t, const char *name,
+                               const char *target, void *ctx);
+
+/* Visit every loop-* lane that has a recorded target; the visitor stops it by
+ * returning true. */
+static void each_lane_target(struct tick *t, lane_target_fn fn, void *ctx)
+{
+    DIR *d = opendir(O(t, LT_O_LANES));
+    struct dirent *e;
+    char target[LT_PATH];
+    while (d && (e = readdir(d)) != NULL)
+        if (strncmp(e->d_name, "loop-", 5) == 0 &&
+            lane_target(t, e->d_name, target, sizeof(target)) &&
+            fn(t, e->d_name, target, ctx))
+            break;
+    if (d)
+        (void)closedir(d);
+}
+
+static bool excl_add(struct tick *t, const char *name, const char *target, void *ctx)
+{
+    (void)name;
+    (void)ctx;
+    const size_t n = strlen(t->excl);
+    if (n + strlen(target) + 2 > sizeof(t->excl))
+        return true; /* the guard below stays the backstop */
+    (void)snprintf(t->excl + n, sizeof(t->excl) - n, "%s%s", n ? "," : "", target);
+    return false;
+}
+
+struct dup_ctx {
+    const char *target;
+    char lane[LT_NAME];
+};
+
+static bool dup_find(struct tick *t, const char *name, const char *target, void *ctx)
+{
+    (void)t;
+    struct dup_ctx *dc = ctx;
+    if (strcmp(target, dc->target) != 0)
+        return false;
+    (void)fmt(dc->lane, sizeof(dc->lane), "%s", name);
+    return true;
+}
+
 static int ensure_base(struct tick *t)
 {
     if (!is_dir(O(t, LT_O_BASE))) {
@@ -542,6 +624,8 @@ static void collect_pins(struct tick *t)
     }
 }
 
+static void collect_card(struct tick *t);
+
 static void collect_decision(struct tick *t)
 {
     (void)fmt(t->lane, sizeof(t->lane), "%s", jstr(&t->root, "data.dispatch.lane"));
@@ -555,6 +639,71 @@ static void collect_decision(struct tick *t)
               jstr(&t->root, "data.next.brief.target_file"));
     collect_owned(t);
     collect_pins(t);
+    collect_card(t);
+}
+
+/* A card field copied whole, or emptied when it does not fit: a cut verify
+ * line or row must read as missing, never as a different command. */
+static void card_field(struct tick *t, char *dst, size_t cap, const char *path)
+{
+    if (!fmt(dst, cap, "%s", jstr(&t->root, path)))
+        dst[0] = '\0';
+}
+
+/* A baseline_row card names one shrink-only lint baseline row, a recipe and the
+ * one z23-lint gate that verifies it; complexity cards carry pins instead. */
+static void collect_card(struct tick *t)
+{
+    t->card = strcmp(jstr(&t->root, "data.next.brief.kind"), "baseline_row") == 0;
+    if (!t->card)
+        return;
+    card_field(t, t->baseline, sizeof(t->baseline), "data.next.brief.baseline");
+    card_field(t, t->row, sizeof(t->row), "data.next.brief.row");
+    card_field(t, t->recipe, sizeof(t->recipe), "data.next.brief.recipe");
+    card_field(t, t->verify, sizeof(t->verify), "data.next.brief.verify");
+    card_field(t, t->focus, sizeof(t->focus), "data.next.brief.review_focus");
+    (void)fmt(t->pins, sizeof(t->pins), "row: %s", t->row);
+}
+
+static bool target_ok(const char *s);
+
+/* Only a single z23-lint gate invocation, never an arbitrary command line. */
+enum { LT_VERIFY_WORDS = 16 };
+
+static bool verify_chars_ok(const char *v)
+{
+    for (; *v; v++)
+        if (!((*v >= 'a' && *v <= 'z') || (*v >= '0' && *v <= '9') ||
+              strchr("_./= -", *v) != NULL))
+            return false;
+    return true;
+}
+
+static size_t verify_words(const char *v)
+{
+    size_t n = 0;
+    for (v += strspn(v, " "); *v; v += strspn(v, " ")) {
+        n++;
+        v += strcspn(v, " ");
+    }
+    return n;
+}
+
+static int card_check(struct tick *t)
+{
+    static const char gate[] = "build/bin/z23-lint ";
+    char msg[sizeof(t->verify) + 64];
+    if (!*t->baseline || !*t->row || !*t->recipe)
+        return skip(t, "baseline_row card lacks baseline/row/recipe");
+    if (strncmp(t->verify, gate, sizeof(gate) - 1) != 0) {
+        (void)fmt(msg, sizeof(msg), "card verify '%s' is not a z23-lint gate", t->verify);
+        return skip(t, msg);
+    }
+    if (!verify_chars_ok(t->verify) || verify_words(t->verify) > LT_VERIFY_WORDS)
+        return skip(t, "card verify has unexpected characters");
+    if (!target_ok(t->baseline))
+        return skip(t, "card baseline is not a repo-relative path");
+    return LT_GO;
 }
 
 static bool unit_files(struct tick *t)
@@ -576,24 +725,14 @@ static bool unit_files(struct tick *t)
     return ok;
 }
 
-static int stage_step(struct tick *t)
+/* The step's decision, checked in the bridge's order. */
+static int step_validate(struct tick *t)
 {
-    int rc = ensure_base(t);
-    if (rc != LT_GO)
-        return rc;
-    const char *const step[] = { O(t, LT_O_DEV), "fleet", "objectives", "step",
-                                 NULL };
-    (void)run(t, O(t, LT_O_BASE), step, oms(t, LT_O_STEP_TIMEOUT));
-    if (!step_collect(t))
-        return skip(t, "cannot allocate the step document");
-    const char *action = jstr(&t->root, "data.action");
-    if (strcmp(action, "run") != 0) {
-        const char *reason = jstr(&t->root, "data.reason");
-        say(t, "step: %s \xe2\x80\x94 %s", *action ? action : "unreadable",
-            *reason ? reason : "no reason");
-        return 0;
+    if (t->card) {
+        const int rc = card_check(t);
+        if (rc != LT_GO)
+            return rc;
     }
-    collect_decision(t);
     if (strcmp(t->engine, "claude-haiku") != 0) {
         char msg[LT_NAME + 96];
         (void)fmt(msg, sizeof(msg),
@@ -608,7 +747,47 @@ static int stage_step(struct tick *t)
     }
     if (!*t->target || t->owned_n == 0)
         return skip(t, "step gave no target/owned paths");
+    /* The step re-picks a file until its lane lands; a second lane on the same
+     * target is duplicate work and a rebase conflict. Wait for the open or
+     * held lane instead. */
+    struct dup_ctx dc = { t->target, "" };
+    each_lane_target(t, dup_find, &dc);
+    if (*dc.lane) {
+        char msg[LT_PATH + LT_NAME + 48];
+        (void)fmt(msg, sizeof(msg), "%s is already owned by open lane %s",
+                  t->target, dc.lane);
+        return skip(t, msg);
+    }
     return LT_GO;
+}
+
+static int stage_step(struct tick *t)
+{
+    int rc = ensure_base(t);
+    if (rc != LT_GO)
+        return rc;
+    /* Files an open or held loop lane already owns are excluded, so the step
+     * picks the next candidate instead of the same file again. */
+    char flag[sizeof(t->excl) + 16];
+    t->excl[0] = '\0';
+    each_lane_target(t, excl_add, NULL);
+    (void)fmt(flag, sizeof(flag), "--exclude=%s", t->excl);
+    const char *const plain[] = { O(t, LT_O_DEV), "fleet", "objectives", "step",
+                                  NULL };
+    const char *const excl[] = { O(t, LT_O_DEV), "fleet", "objectives", "step",
+                                 flag, NULL };
+    (void)run(t, O(t, LT_O_BASE), *t->excl ? excl : plain, oms(t, LT_O_STEP_TIMEOUT));
+    if (!step_collect(t))
+        return skip(t, "cannot allocate the step document");
+    const char *action = jstr(&t->root, "data.action");
+    if (strcmp(action, "run") != 0) {
+        const char *reason = jstr(&t->root, "data.reason");
+        say(t, "step: %s \xe2\x80\x94 %s", *action ? action : "unreadable",
+            *reason ? reason : "no reason");
+        return 0;
+    }
+    collect_decision(t);
+    return step_validate(t);
 }
 
 /* ── step 2: the lane, primed ────────────────────────────────────────── */
@@ -644,12 +823,15 @@ static int stage_lane(struct tick *t)
 
 /* ── steps 3-4: the model edits; the scope check ─────────────────────── */
 
-static int stage_engine(struct tick *t)
+/* One z23-engine-unit round on the lane with the task file in the unit
+ * directory; state and log files are named per attempt. Returns its status. */
+static int engine_run(struct tick *t, const char *taskname, const char *statename,
+                      const char *logname, const char *label)
 {
     char task[LT_PATH], state[LT_PATH], log[LT_PATH], secs[24];
-    (void)fmt(task, sizeof(task), "%s/task.txt", t->unit);
-    (void)fmt(state, sizeof(state), "%s/eu", t->unit);
-    (void)fmt(log, sizeof(log), "%s/engine.log", t->unit);
+    (void)fmt(task, sizeof(task), "%s/%s", t->unit, taskname);
+    (void)fmt(state, sizeof(state), "%s/%s", t->unit, statename);
+    (void)fmt(log, sizeof(log), "%s/%s", t->unit, logname);
     (void)fmt(secs, sizeof(secs), "%ld", oint(t, LT_O_ENGINE_TIMEOUT));
     const char *const eu[] = { O(t, LT_O_ENGINE_UNIT), "--engine", "claude-haiku",
                                "--task", task, "--no-group", "--worktree",
@@ -658,12 +840,25 @@ static int stage_engine(struct tick *t)
     const int rc = run_logged(t, NULL, eu,
                               oms(t, LT_O_ENGINE_TIMEOUT) + LT_SHORT_TIMEOUT_MS,
                               log);
-    say(t, "engine_unit rc=%d (%s)", rc, log);
+    say(t, "%s rc=%d (%s)", label, rc, log);
+    return rc;
+}
+
+/* The lane's `git status --porcelain` is left in t->buf for the scope check;
+ * something must have changed. */
+static int engine_changed(struct tick *t, int engine_rc)
+{
     const char *const st[] = { O(t, LT_O_GIT), "status", "--porcelain", NULL };
     (void)run(t, t->dir, st, LT_SHORT_TIMEOUT_MS);
     if (!*t->buf)
-        return hold(t, t->lane, "the engine changed nothing (rc=%d)", rc);
+        return hold(t, t->lane, "the engine changed nothing (rc=%d)", engine_rc);
     return LT_GO;
+}
+
+static int stage_engine(struct tick *t)
+{
+    const int rc = engine_run(t, "task.txt", "eu", "engine.log", "engine_unit");
+    return engine_changed(t, rc);
 }
 
 static bool is_owned(const struct tick *t, const char *path)
@@ -783,6 +978,11 @@ struct base_row {
 struct base_diff {
     struct base_row *old, *neu;
     size_t nold, nneu;
+    bool card; /* rows are "<key> [<count>]" (a baseline_row card), not "<key>:<score>" */
+};
+
+struct base_tally {
+    long grown, removed, lowered;
 };
 
 static bool parse_base_row(const char *s, size_t len, struct base_row *r)
@@ -808,6 +1008,27 @@ static bool parse_base_row(const char *s, size_t len, struct base_row *r)
     return true;
 }
 
+/* A card baseline row is every field but a trailing count; a count-less row
+ * counts as 1. */
+static bool parse_card_row(const char *s, size_t len, struct base_row *r)
+{
+    size_t j = len;
+    while (j > 0 && s[j - 1] >= '0' && s[j - 1] <= '9')
+        j--;
+    r->key = s;
+    r->klen = len;
+    r->score = 1;
+    if (len == 0)
+        return false;
+    if (j < len && j >= 2 && s[j - 1] == ' ' && len - j <= 18) {
+        r->klen = j - 1;
+        r->score = 0;
+        for (size_t i = j; i < len; i++)
+            r->score = r->score * 10 + (s[i] - '0');
+    }
+    return true;
+}
+
 static bool push_base_row(struct base_row *v, size_t *n, const struct base_row *r,
                           const char **why)
 {
@@ -827,7 +1048,7 @@ static bool base_diff_line(const char *line, size_t len, struct base_diff *d,
     if (len >= 3 && (strncmp(line, "---", 3) == 0 || strncmp(line, "+++", 3) == 0))
         return true;
     struct base_row r;
-    if (!parse_base_row(line + 1, len - 1, &r)) {
+    if (!(d->card ? parse_card_row : parse_base_row)(line + 1, len - 1, &r)) {
         *why = "a row does not parse";
         return false;
     }
@@ -860,59 +1081,153 @@ static const struct base_row *find_base_row(const struct base_row *v, size_t n,
 }
 
 /* grown: a new row whose key is absent from the old rows or whose score
- * rose. removed: an old row whose key is absent from the new rows. A lowered
- * score is neither. */
-static void count_baseline(const struct base_diff *d, long *grown, long *removed)
+ * rose. removed: an old row whose key is absent from the new rows. lowered: a
+ * row kept with a lower score. */
+static void count_baseline(const struct base_diff *d, struct base_tally *tl)
 {
-    *grown = 0;
-    *removed = 0;
+    memset(tl, 0, sizeof(*tl));
     for (size_t i = 0; i < d->nneu; i++) {
         const struct base_row *o = find_base_row(d->old, d->nold, &d->neu[i]);
         if (!o || d->neu[i].score > o->score)
-            (*grown)++;
+            tl->grown++;
+        else if (d->neu[i].score < o->score)
+            tl->lowered++;
     }
     for (size_t i = 0; i < d->nold; i++)
         if (!find_base_row(d->neu, d->nneu, &d->old[i]))
-            (*removed)++;
+            tl->removed++;
 }
 
-static int judge_baseline(struct tick *t)
+/* The tally of file's diff (the work tree against HEAD, or the committed range
+ * in finish mode). On failure why names the reason. */
+static bool baseline_counts(struct tick *t, const char *file, bool card,
+                            struct base_tally *tl, char *why, size_t cap)
 {
-    static const char file[] = "tools/lint/cyclomatic_complexity_baseline.txt";
     const char *const work[] = { O(t, LT_O_GIT), "diff", "-U0", "--", file, NULL };
     const char *const range[] = { O(t, LT_O_GIT), "diff", "-U0", "origin/main",
                                   "HEAD", "--", file, NULL };
     const int rc = run(t, t->dir, t->finish ? range : work, LT_SHORT_TIMEOUT_MS);
-    if (rc != 0)
-        return hold(t, t->lane, "baseline diff could not be judged (git diff rc=%d)", rc);
-    if (strlen(t->buf) >= LT_BUF - 1)
-        return hold(t, t->lane, "baseline diff could not be judged (output truncated)");
-    struct base_diff d = { NULL, NULL, 0, 0 };
+    if (rc != 0) {
+        (void)fmt(why, cap, "git diff rc=%d", rc);
+        return false;
+    }
+    if (strlen(t->buf) >= LT_BUF - 1) {
+        (void)fmt(why, cap, "output truncated");
+        return false;
+    }
+    struct base_diff d = { NULL, NULL, 0, 0, card };
     d.old = zcl_malloc(sizeof(struct base_row) * LT_BASE_ROWS, "loop_tick_base_old");
     d.neu = zcl_malloc(sizeof(struct base_row) * LT_BASE_ROWS, "loop_tick_base_new");
     if (!d.old || !d.neu) {
         free(d.old);
         free(d.neu);
-        return hold(t, t->lane, "baseline diff could not be judged (cannot allocate)");
+        (void)fmt(why, cap, "cannot allocate");
+        return false;
     }
-    const char *why = NULL;
-    const bool ok = split_baseline_diff(t->buf, &d, &why);
-    long grown = 0;
+    const char *reason = NULL;
+    const bool ok = split_baseline_diff(t->buf, &d, &reason);
     if (ok)
-        count_baseline(&d, &grown, &t->removed);
+        count_baseline(&d, tl);
+    else
+        (void)fmt(why, cap, "%s", reason);
     free(d.old);
     free(d.neu);
-    if (!ok)
+    return ok;
+}
+
+static int judge_baseline(struct tick *t)
+{
+    static const char file[] = "tools/lint/cyclomatic_complexity_baseline.txt";
+    struct base_tally tl;
+    char why[96];
+    if (!baseline_counts(t, file, false, &tl, why, sizeof(why)))
         return hold(t, t->lane, "baseline diff could not be judged (%s)", why);
-    if (grown > 0)
-        return hold(t, t->lane, "baseline grew: %ld new or higher row(s)", grown);
+    t->removed = tl.removed;
+    if (tl.grown > 0)
+        return hold(t, t->lane, "baseline grew: %ld new or higher row(s)", tl.grown);
     if (t->removed <= 0)
         return hold(t, t->lane, "no function left the baseline");
     return LT_GO;
 }
 
+/* A card's baseline: no row new or higher, and at least one removed or lowered. */
+static int judge_card(struct tick *t)
+{
+    struct base_tally tl;
+    char why[96];
+    if (!baseline_counts(t, t->baseline, true, &tl, why, sizeof(why)))
+        return hold(t, t->lane, "%s diff could not be judged (%s)", t->baseline, why);
+    t->removed = tl.removed + tl.lowered;
+    if (tl.grown > 0)
+        return hold(t, t->lane, "%s grew: %ld new or higher row(s)", t->baseline,
+                    tl.grown);
+    if (t->removed <= 0)
+        return hold(t, t->lane, "no row of %s shrank", t->baseline);
+    return LT_GO;
+}
+
+static bool build_lint(struct tick *t, const char *log)
+{
+    const char *const bin[] = { O(t, LT_O_DEVBUILD), "--wait", "make",
+                                "build/bin/z23-lint", NULL };
+    return run_logged(t, t->dir, bin, LT_BUILD_TIMEOUT_MS, log) == 0;
+}
+
+/* True when some line of the file is exactly `line`. */
+static bool file_has_line(const char *path, const char *line)
+{
+    char *text = read_file(path, 16 << 20);
+    const size_t n = strlen(line);
+    bool found = false;
+    for (const char *p = text; p && *p && !found;) {
+        const char *nl = strchr(p, '\n');
+        const size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        found = len == n && memcmp(p, line, n) == 0;
+        p = nl ? nl + 1 : p + len;
+    }
+    free(text);
+    return found;
+}
+
+/* The card's verify line as an argv: the first word (build/bin/z23-lint) is
+ * replaced by --lint-bin, the rest are split on spaces. The words are copied
+ * into buf. */
+static void verify_argv(const struct tick *t, char *buf, size_t cap,
+                        const char *argv[LT_VERIFY_WORDS + 2])
+{
+    size_t n = 0;
+    (void)fmt(buf, cap, "%s", t->verify);
+    argv[n++] = O(t, LT_O_LINT_BIN);
+    char *save = NULL;
+    (void)strtok_r(buf, " ", &save); /* the gate binary's own name */
+    for (char *w; n <= LT_VERIFY_WORDS && (w = strtok_r(NULL, " ", &save)) != NULL;)
+        argv[n++] = w;
+    argv[n] = NULL;
+}
+
+/* A baseline_row card: the card's own gate must pass, the named row must be
+ * gone or lower, and no row of that baseline may be new or higher. */
+static int stage_card(struct tick *t)
+{
+    char binlog[LT_PATH], vlog[LT_PATH], bpath[LT_PATH], words[sizeof(t->verify)];
+    const char *vargv[LT_VERIFY_WORDS + 2];
+    (void)fmt(binlog, sizeof(binlog), "%s/lintbin.log", t->unit);
+    (void)fmt(vlog, sizeof(vlog), "%s/verify.log", t->unit);
+    if (!build_lint(t, binlog))
+        return hold(t, t->lane, "z23-lint build failed (%s)", binlog);
+    verify_argv(t, words, sizeof(words), vargv);
+    if (run_logged(t, t->dir, vargv, LT_BUILD_TIMEOUT_MS, vlog) != 0)
+        return hold(t, t->lane, "card verify failed: %s (%s)", t->verify, vlog);
+    (void)fmt(bpath, sizeof(bpath), "%s/%s", t->dir, t->baseline);
+    if (file_has_line(bpath, t->row))
+        return hold(t, t->lane, "the card's row is still in %s unchanged", t->baseline);
+    return judge_card(t);
+}
+
 static int stage_baseline(struct tick *t)
 {
+    if (t->card)
+        return stage_card(t);
     if (strcmp(t->objective, "functions_over_complexity_cap") != 0)
         return LT_GO;
     if (t->finish)
@@ -920,29 +1235,176 @@ static int stage_baseline(struct tick *t)
     char log[LT_PATH], binlog[LT_PATH];
     (void)fmt(log, sizeof(log), "%s/baseline.log", t->unit);
     (void)fmt(binlog, sizeof(binlog), "%s/lintbin.log", t->unit);
-    const char *const bin[] = { O(t, LT_O_DEVBUILD), "--wait", "make",
-                                "build/bin/z23-lint", NULL };
     const char *const regen[] = { O(t, LT_O_LINT_BIN), "check-cyclomatic-complexity",
                                   "--write-baseline", NULL };
-    if (run_logged(t, t->dir, bin, LT_BUILD_TIMEOUT_MS, binlog) != 0 ||
+    if (!build_lint(t, binlog) ||
         run_logged(t, t->dir, regen, LT_BUILD_TIMEOUT_MS, log) != 0)
         return hold(t, t->lane, "baseline regen failed (%s)", log);
     return judge_baseline(t);
 }
 
+/* ── step 5b: the lane precheck, one engine retry, then HOLD ─────────── */
+
+enum { LT_PRE_GATES = 16, LT_PRE_TAIL = 40 };
+
+/* The gate names a precheck log lists: the first word of each line indented by
+ * two spaces. Names carry only [A-Za-z0-9_.:-], so one is safe as an argv word
+ * and a file name. */
+static bool gate_char_ok(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+           strchr("_.:-", c) != NULL;
+}
+
+/* The gate name of one indented line, or false when the line holds none. */
+static bool gate_word(const char *line, char *out)
+{
+    if (strncmp(line, "  ", 2) != 0)
+        return false;
+    const char *w = line + strspn(line, " ");
+    const size_t len = strcspn(w, " \t\n");
+    if (len == 0 || len >= LT_NAME)
+        return false;
+    for (size_t i = 0; i < len; i++)
+        if (!gate_char_ok(w[i]))
+            return false;
+    memcpy(out, w, len);
+    out[len] = '\0';
+    return true;
+}
+
+static size_t precheck_gates(const char *text, char names[][LT_NAME])
+{
+    size_t n = 0;
+    for (const char *p = text; p && *p && n < LT_PRE_GATES;) {
+        const char *nl = strchr(p, '\n');
+        if (gate_word(p, names[n]))
+            n++;
+        p = nl ? nl + 1 : NULL;
+    }
+    return n;
+}
+
+/* The gate names as "a b c " for the log line. */
+static void gates_line(char names[][LT_NAME], size_t n, char *out, size_t cap)
+{
+    size_t used = 0;
+    out[0] = '\0';
+    for (size_t i = 0; i < n && used < cap; i++)
+        used += (size_t)snprintf(out + used, cap - used, "%s ", names[i]);
+}
+
+/* The last `lines` lines of text. */
+static const char *tail_lines(const char *text, int lines)
+{
+    const char *end = text + strlen(text);
+    if (end > text && end[-1] == '\n')
+        end--;
+    for (const char *p = end; p > text; p--)
+        if (p[-1] == '\n' && --lines == 0)
+            return p;
+    return text;
+}
+
+static int precheck_run(struct tick *t, const char *log)
+{
+    const char *const av[] = { O(t, LT_O_SH), O(t, LT_O_PRECHECK), t->dir, NULL };
+    return run_logged(t, NULL, av, LT_BUILD_TIMEOUT_MS, log);
+}
+
+/* The retry task: the original task, then each red gate's own output. */
+static bool retry_task(struct tick *t, char names[][LT_NAME], size_t n,
+                       const char *path)
+{
+    char orig[LT_PATH], glog[LT_PATH];
+    (void)fmt(orig, sizeof(orig), "%s/task.txt", t->unit);
+    (void)fmt(glog, sizeof(glog), "%s/precheck-gate.log", t->unit);
+    char *task = read_file(orig, 1 << 20);
+    static const char head[] =
+        "\n\nYOUR EDIT IS ALREADY IN THE WORKTREE BUT BREAKS THESE LINT GATES. "
+        "Keep the split and fix only what they report:\n";
+    bool ok = task && write_file(path, task, strlen(task), "w") &&
+              write_file(path, head, sizeof(head) - 1, "a");
+    free(task);
+    for (size_t i = 0; ok && i < n; i++) {
+        char title[LT_NAME + 8];
+        const char *const gate[] = { O(t, LT_O_MAIN_LINT), names[i], NULL };
+        (void)fmt(title, sizeof(title), "\n== %s\n", names[i]);
+        ok = write_file(path, title, strlen(title), "a");
+        (void)run_logged(t, t->dir, gate, LT_BUILD_TIMEOUT_MS, glog);
+        const char *tail = tail_lines(t->buf, LT_PRE_TAIL);
+        ok = ok && write_file(path, tail, strlen(tail), "a");
+    }
+    return ok;
+}
+
+/* The log's first line, as the precheck's summary. */
+static void say_precheck(struct tick *t, const char *log)
+{
+    char *text = read_file(log, 4096);
+    if (text) {
+        text[strcspn(text, "\n")] = '\0';
+        say(t, "precheck: %s", text);
+    }
+    free(text);
+}
+
+/* Re-judge the engine's retry edit like the first: changed, owned, baseline. */
+static int retry_judge(struct tick *t, int engine_rc)
+{
+    int rc = engine_changed(t, engine_rc);
+    if (rc == LT_GO)
+        rc = stage_scope(t);
+    return rc == LT_GO ? stage_baseline(t) : rc;
+}
+
+/* Every z23-lint gate against the base tree (15-40 s, no build). A red gate
+ * gets ONE engine retry fed the gates' own output, then holds: this replaces a
+ * 1-2 h zgate round on a gate the edit already broke. Finish mode adopts a
+ * commit that is already written and has no engine to retry. */
+static int stage_precheck(struct tick *t)
+{
+    if (t->finish)
+        return LT_GO;
+    char log1[LT_PATH], log2[LT_PATH], task2[LT_PATH], line[LT_NAME * 4];
+    char names[LT_PRE_GATES][LT_NAME];
+    (void)fmt(log1, sizeof(log1), "%s/precheck.log", t->unit);
+    (void)fmt(log2, sizeof(log2), "%s/precheck2.log", t->unit);
+    (void)fmt(task2, sizeof(task2), "%s/task2.txt", t->unit);
+    const int prc = precheck_run(t, log1);
+    if (prc == 0) {
+        say_precheck(t, log1);
+        return LT_GO;
+    }
+    if (prc != 1)
+        return hold(t, t->lane, "the precheck could not run (rc=%d) (%s)", prc, log1);
+    char *text = read_file(log1, 1 << 20);
+    const size_t n = text ? precheck_gates(text, names) : 0;
+    free(text);
+    gates_line(names, n, line, sizeof(line));
+    say(t, "precheck red: %s; one engine retry", line);
+    if (!retry_task(t, names, n, task2))
+        return hold(t, t->lane, "cannot build the precheck retry task (%s)", task2);
+    const int erc = engine_run(t, "task2.txt", "eu2", "engine2.log", "engine_unit retry");
+    const int rc = retry_judge(t, erc);
+    if (rc != LT_GO)
+        return rc;
+    if (precheck_run(t, log2) != 0) {
+        text = read_file(log2, 1 << 20);
+        gates_line(names, text ? precheck_gates(text, names) : 0, line, sizeof(line));
+        free(text);
+        return hold(t, t->lane, "precheck still red after one retry: %s(%s)", line, log2);
+    }
+    say_precheck(t, log2);
+    return LT_GO;
+}
+
 /* ── step 6: the signed commit ───────────────────────────────────────── */
 
-static bool write_message(struct tick *t, const char *path)
+static bool complexity_message(const struct tick *t, char *msg, size_t cap,
+                               const char *stem, const char *base)
 {
-    const char *slash = strrchr(t->target, '/');
-    const char *base = slash ? slash + 1 : t->target;
-    char stem[LT_NAME];
-    (void)fmt(stem, sizeof(stem), "%s", base);
-    char *dot = strrchr(stem, '.');
-    if (dot)
-        *dot = '\0';
-    char msg[4096];
-    if (!fmt(msg, sizeof(msg),
+    return fmt(msg, cap,
              "refactor(%s): split %s functions under the complexity cap (loop)\n\n"
              "Self-improving loop unit for objective %s (lane %s): %ld\n"
              "function(s) in %s left the complexity baseline by behaviour-preserving\n"
@@ -951,9 +1413,43 @@ static bool write_message(struct tick *t, const char *path)
              "baseline was regenerated by z23-lint and only shrank; gates and a separate\n"
              "read-only Haiku review ran before submit.\n\n%s\n",
              stem, base, t->objective, t->lane, t->removed, t->target, t->pins,
-             O(t, LT_O_TRAILER)))
-        return false;
-    return write_file(path, msg, strlen(msg), "w");
+             O(t, LT_O_TRAILER));
+}
+
+/* The last path component. */
+static const char *path_base(const char *p)
+{
+    const char *slash = strrchr(p, '/');
+    return slash ? slash + 1 : p;
+}
+
+static bool card_message(const struct tick *t, char *msg, size_t cap,
+                         const char *stem, const char *base)
+{
+    return fmt(msg, cap,
+             "lint(%s): shrink the %s row for %s (loop)\n\n"
+             "Self-improving loop unit for objective %s (lane %s). Recipe:\n"
+             "%s\n"
+             "Row at dispatch: %s\n"
+             "Edits by claude-haiku through z23-engine-unit (edit-only tools); the card's\n"
+             "gate (%s) passed, the row shrank and no row of %s grew; the lint\n"
+             "precheck, gates and a separate read-only Haiku review ran before submit.\n\n%s\n",
+             stem, path_base(t->baseline), base, t->objective, t->lane, t->recipe,
+             t->row, t->verify, t->baseline, O(t, LT_O_TRAILER));
+}
+
+static bool write_message(struct tick *t, const char *path)
+{
+    const char *base = path_base(t->target);
+    char stem[LT_NAME];
+    (void)fmt(stem, sizeof(stem), "%s", base);
+    char *dot = strrchr(stem, '.');
+    if (dot)
+        *dot = '\0';
+    char msg[8192];
+    const bool ok = t->card ? card_message(t, msg, sizeof(msg), stem, base)
+                            : complexity_message(t, msg, sizeof(msg), stem, base);
+    return ok && write_file(path, msg, strlen(msg), "w");
 }
 
 static int stage_commit(struct tick *t)
@@ -1205,6 +1701,21 @@ static bool lane_at_sha(struct tick *t)
 
 /* ── step 8: the non-author review ───────────────────────────────────── */
 
+/* What the commit claims and what to check: a card's recipe and focus, or the
+ * complexity split's behaviour-preserving list. */
+static bool review_claims(const struct tick *t, char *out, size_t cap)
+{
+    if (t->card)
+        return fmt(out, cap,
+            "The commit claims to apply this recipe to %s: %s. It also lowers or deletes the row '%s' in %s, and changes no other row except to lower it.\n"
+            "Check, reading the code at HEAD and the diff below: (1) %s; (2) the edit does only what the recipe says and nothing else changes behaviour; (3) no lookalike duplicate helper was added where an existing one fits; (4) only %s changed; (5) the baseline diff only deletes that row or lowers counts; (6) nothing weakens a test, assertion, threshold or refusal; (7) every allocation stays checked.\n",
+            t->target, t->recipe, t->row, t->baseline, t->focus, t->owned);
+    return fmt(out, cap,
+        "The commit claims a behaviour-preserving split of over-complexity functions in %s, and a baseline change that only deletes rows or lowers a score.\n"
+        "Check, reading the code at HEAD and the diff below: (1) every extracted helper preserves the original behaviour exactly: same checks in the same order, same early returns and return values, same error/log text, same side effects and short-circuit order; (2) no lookalike duplicate helpers were added where an existing one fits; (3) no function in the diff obviously exceeds cyclomatic complexity 15; (4) only %s changed; (5) the baseline diff only deletes rows or lowers a score; (6) nothing weakens a test, assertion, threshold or refusal; (7) every allocation stays checked.\n",
+        t->target, t->owned);
+}
+
 static bool build_review_prompt(struct tick *t, const char *path)
 {
     const size_t cap = LT_SHOW_MAX + 6144;
@@ -1216,13 +1727,17 @@ static bool build_review_prompt(struct tick *t, const char *path)
     (void)run(t, t->dir, show, LT_SHORT_TIMEOUT_MS);
     if (strlen(t->buf) > LT_SHOW_MAX)
         t->buf[LT_SHOW_MAX] = '\0'; /* head -c 90000 */
+    char claims[4096];
+    if (!review_claims(t, claims, sizeof(claims))) {
+        free(p);
+        return false;
+    }
     const int n = snprintf(p, cap,
         "You are a NON-AUTHOR reviewer of one Z23 commit in the current git worktree. You can only read files (Read, Grep, Glob); you cannot run commands or edit anything.\n"
-        "The commit claims a behaviour-preserving split of over-complexity functions in %s, and a baseline change that only deletes rows or lowers a score.\n"
-        "Check, reading the code at HEAD and the diff below: (1) every extracted helper preserves the original behaviour exactly: same checks in the same order, same early returns and return values, same error/log text, same side effects and short-circuit order; (2) no lookalike duplicate helpers were added where an existing one fits; (3) no function in the diff obviously exceeds cyclomatic complexity 15; (4) only %s changed; (5) the baseline diff only deletes rows or lowers a score; (6) nothing weakens a test, assertion, threshold or refusal; (7) every allocation stays checked.\n"
+        "%s"
         "End your reply with exactly one final line: 'VERDICT: LAND' or 'VERDICT: HOLD <reason with file:line>'.\n"
         "\n----- git show HEAD -----\n%s",
-        t->target, t->owned, t->buf);
+        claims, t->buf);
     const bool ok = n > 0 && (size_t)n < cap && write_file(path, p, (size_t)n, "w");
     free(p);
     return ok;
@@ -1457,6 +1972,11 @@ static int note_render(const struct tick *t, const char *base, const char *var,
                         "%s; baseline only shrank; %s; "
                         "read-only Haiku review LAND (z23-loop-tick --finish).",
                         t->lane, t->removed, base, var, gate);
+    if (t->card)
+        return snprintf(note, cap,
+                        "%s shrank the %s row for %s (%s); claude-haiku via z23-engine-unit, "
+                        "card gate rc=0, baseline only shrank, %s, read-only Haiku review LAND.",
+                        t->prefix, path_base(t->baseline), base, var, gate);
     return snprintf(note, cap,
                     "%s split %ld over-cap function(s) in %s (%s) under the complexity cap; "
                     "claude-haiku via z23-engine-unit, baseline only shrank, %s, "
@@ -1476,7 +1996,7 @@ static bool land_note(const struct tick *t, const char *base, char *note, size_t
     if (t->finish)
         credit_text(t, var, sizeof(var));
     else
-        clean_line(t->pins, var, sizeof(var));
+        clean_line(t->card ? t->row : t->pins, var, sizeof(var));
     const int fixed = note_render(t, base, "", gate, note, cap);
     const int need = t->finish ? (int)sizeof("author unknown") - 1 : 0;
     if (fixed < 0 || (size_t)fixed >= cap || LT_NOTE_MAX - fixed < need)
@@ -1670,8 +2190,8 @@ static int tick_stages(struct tick *t)
 {
     static int (*const stages[])(struct tick *) = {
         stage_housekeeping, stage_step, stage_lane, stage_engine, stage_scope,
-        stage_baseline, stage_commit, stage_claim, stage_gates, stage_review,
-        stage_submit
+        stage_baseline, stage_precheck, stage_commit, stage_claim,
+        stage_gates, stage_review, stage_submit
     };
     return run_stages(t, stages, sizeof(stages) / sizeof(stages[0]));
 }
