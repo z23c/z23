@@ -1019,7 +1019,7 @@ ZCL_MODULE_CAPABILITY("engine/modules/storage/src/nullifier_kv.c", CAP_FS_READ|C
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/onion_announcements_projection.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/peers_projection.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/progress_meta_store.c", CAP_FS_WRITE|CAP_FS_READ, "")
-ZCL_MODULE_CAPABILITY("engine/modules/storage/src/progress_store.c", CAP_FS_WRITE|CAP_CLOCK, "")
+ZCL_MODULE_CAPABILITY("engine/modules/storage/src/progress_store.c", CAP_FS_READ|CAP_FS_WRITE|CAP_CLOCK, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/progress_store_directory.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/projection_consumer.c", CAP_FS_WRITE|CAP_FS_READ, "")
 ZCL_MODULE_CAPABILITY("engine/modules/storage/src/projection_store.c", CAP_FS_READ|CAP_FS_WRITE, "")
