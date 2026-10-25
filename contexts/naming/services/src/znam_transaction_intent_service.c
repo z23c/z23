@@ -95,12 +95,39 @@ static struct zcl_result zni_runtime_validate(
     return ZCL_OK;
 }
 
-static struct zcl_result zni_request_validate(
-    const struct znam_intent_request *r)
+static bool zni_request_header_valid(const struct znam_intent_request *r)
 {
     if (!r || (strcmp(r->wallet_scope, "dev") != 0 &&
                strcmp(r->wallet_scope, "prod") != 0) ||
         !zni_idempotency_valid(r->idempotency_key))
+        return false;
+    return true;
+}
+
+static bool zni_request_target_valid(const struct znam_intent_request *r)
+{
+    if (r->target_type == 0 || r->target_type > ZNAM_TYPE_CONTENT ||
+        !r->value[0] || strlen(r->value) > ZNAM_INTENT_VALUE_MAX)
+        return false;
+    return true;
+}
+
+static bool zni_request_transfer_valid(const struct znam_intent_request *r)
+{
+    return r->new_owner[0] &&
+           strlen(r->new_owner) <= ZNAM_INTENT_OWNER_MAX;
+}
+
+static bool zni_request_text_valid(const struct znam_intent_request *r)
+{
+    return r->key[0] && strlen(r->key) <= ZNAM_INTENT_KEY_MAX &&
+           strlen(r->value) <= ZNAM_INTENT_VALUE_MAX;
+}
+
+static struct zcl_result zni_request_validate(
+    const struct znam_intent_request *r)
+{
+    if (!zni_request_header_valid(r))
         return ZCL_ERR(-4, "scope and idempotency key are required");
     if (!znam_validate_name(r->name))
         return ZCL_ERR(-5, "invalid ZNAM name");
@@ -108,19 +135,16 @@ static struct zcl_result zni_request_validate(
     case ZNAM_INTENT_REGISTER:
     case ZNAM_INTENT_UPDATE:
     case ZNAM_INTENT_SET_RECORD:
-        if (r->target_type == 0 || r->target_type > ZNAM_TYPE_CONTENT ||
-            !r->value[0] || strlen(r->value) > ZNAM_INTENT_VALUE_MAX)
+        if (!zni_request_target_valid(r))
             return ZCL_ERR(-6, "ZNAM target type and value are invalid");
         return ZCL_OK;
     case ZNAM_INTENT_TRANSFER:
-        return r->new_owner[0] &&
-               strlen(r->new_owner) <= ZNAM_INTENT_OWNER_MAX
+        return zni_request_transfer_valid(r)
             ? ZCL_OK : ZCL_ERR(-7, "ZNAM new owner is invalid");
     case ZNAM_INTENT_RENEW:
         return ZCL_OK;
     case ZNAM_INTENT_SET_TEXT:
-        return r->key[0] && strlen(r->key) <= ZNAM_INTENT_KEY_MAX &&
-               strlen(r->value) <= ZNAM_INTENT_VALUE_MAX
+        return zni_request_text_valid(r)
             ? ZCL_OK : ZCL_ERR(-8, "ZNAM text record is invalid");
     default:
         return ZCL_ERR(-9, "unknown ZNAM intent operation");
@@ -282,6 +306,92 @@ static void zni_view(const struct vault_intent_row *row,
     memcpy(out->plan_digest, row->digest, 32);
 }
 
+static bool zni_plan_replay_matches(const struct vault_intent_row *existing,
+                                    const uint8_t *request_digest)
+{
+    return existing->has_request_digest &&
+           memcmp(existing->request_digest, request_digest, 32) == 0;
+}
+
+static bool zni_plan_allocate_buffers(uint8_t **raw,
+                                      struct vault_intent_input **inputs)
+{
+    *raw = zcl_malloc(VAULT_INTENT_RAW_MAX, "znam_intent_raw");
+    *inputs = zcl_malloc(ZNI_INPUT_MAX * sizeof(**inputs),
+                         "znam_intent_inputs");
+    if (!*raw || !*inputs)
+        return false;
+    return true;
+}
+
+static bool zni_plan_prepared_valid(const struct znam_intent_runtime *rt,
+                                    const struct zni_payload *payload,
+                                    const struct zcl_result *prepared,
+                                    size_t raw_len, size_t input_count)
+{
+    if (!prepared->ok || raw_len == 0 || input_count == 0 ||
+        payload->actual_fee_zat < 0 ||
+        payload->actual_fee_zat > rt->maximum_fee_zat ||
+        !zcl_bytes_any_set(payload->txid, 32))
+        return false;
+    return true;
+}
+
+static bool zni_plan_fee_reservable(const struct znam_intent_request *request,
+                                    const struct wallet_money_snapshot *money,
+                                    int64_t reserved)
+{
+    int64_t liquid = money->confirmed_zat - money->intent_reserved_zat;
+    if (reserved > liquid || (strcmp(request->wallet_scope, "dev") == 0 &&
+                              reserved > money->agent_available_zat))
+        return false;
+    return true;
+}
+
+static bool zni_plan_seal_and_reserve(const struct znam_intent_runtime *rt,
+                                      const struct zni_payload *payload,
+                                      struct vault_intent_row *row,
+                                      const struct wallet_money_snapshot *money,
+                                      uint8_t plain[ZNI_PAYLOAD_MAX],
+                                      size_t *plain_len, uint8_t *raw,
+                                      size_t raw_len,
+                                      struct vault_intent_input *inputs,
+                                      size_t input_count)
+{
+    bool encoded = zni_payload_encode(payload, plain, ZNI_PAYLOAD_MAX,
+                                      plain_len);
+    bool encrypted = encoded && wallet_metadata_encrypt(
+        rt->node_db, row->plan_id, 32, plain, *plain_len,
+        row->encrypted_payload, sizeof(row->encrypted_payload),
+        &row->encrypted_payload_len);
+    if (encrypted)
+        zni_intent_digest(plain, *plain_len, row, row->digest);
+    return encrypted && vault_intent_reserve_with_raw_inputs(
+        rt->node_db, row, money->confirmed_zat, raw, raw_len, inputs,
+        input_count);
+}
+
+static bool zni_plan_snapshot_rebind(const struct znam_intent_runtime *rt,
+                                     const char *wallet_scope,
+                                     struct vault_intent_row *row,
+                                     const uint8_t *plain, size_t plain_len)
+{
+    struct wallet_money_snapshot refreshed;
+    struct zcl_result current = zni_money_current(rt, wallet_scope,
+                                                  &refreshed);
+    bool stored = current.ok;
+    if (stored) {
+        memcpy(row->snapshot_root, refreshed.snapshot_root, 32);
+        zni_intent_digest(plain, plain_len, row, row->digest);
+        stored = vault_intent_save(rt->node_db, row);
+    }
+    if (!stored)
+        (void)vault_intent_set_state(rt->node_db, row->plan_id,
+            VAULT_INTENT_FAILED, NULL, "SNAPSHOT_BIND_FAILED",
+            rt->now_unix);
+    return stored;
+}
+
 struct zcl_result znam_transaction_intent_plan(
     const struct znam_intent_runtime *rt,
     const struct znam_intent_request *request,
@@ -296,8 +406,7 @@ struct zcl_result znam_transaction_intent_plan(
     if (vault_intent_find_application_idempotency(
             rt->node_db, request->wallet_scope, ZNAM_INTENT_APPLICATION,
             request->idempotency_key, &existing)) {
-        if (!existing.has_request_digest ||
-            memcmp(existing.request_digest, request_digest, 32) != 0)
+        if (!zni_plan_replay_matches(&existing, request_digest))
             return ZCL_ERR(-15, "idempotency key names a different ZNAM request");
         struct zni_payload payload;
         ZCL_CHECK(zni_payload_open(rt, &existing, &payload));
@@ -308,10 +417,9 @@ struct zcl_result znam_transaction_intent_plan(
     }
     struct wallet_money_snapshot money;
     ZCL_CHECK(zni_money_current(rt, request->wallet_scope, &money));
-    uint8_t *raw = zcl_malloc(VAULT_INTENT_RAW_MAX, "znam_intent_raw");
-    struct vault_intent_input *inputs = zcl_malloc(
-        ZNI_INPUT_MAX * sizeof(*inputs), "znam_intent_inputs");
-    if (!raw || !inputs) {
+    uint8_t *raw = NULL;
+    struct vault_intent_input *inputs = NULL;
+    if (!zni_plan_allocate_buffers(&raw, &inputs)) {
         free(raw); free(inputs);
         return ZCL_ERR(-16, "ZNAM intent preparation allocation failed");
     }
@@ -322,10 +430,8 @@ struct zcl_result znam_transaction_intent_plan(
         rt->prepare_ctx, request, rt->maximum_fee_zat, raw,
         VAULT_INTENT_RAW_MAX, &raw_len, payload.txid,
         &payload.actual_fee_zat, inputs, ZNI_INPUT_MAX, &input_count);
-    if (!prepared.ok || raw_len == 0 || input_count == 0 ||
-        payload.actual_fee_zat < 0 ||
-        payload.actual_fee_zat > rt->maximum_fee_zat ||
-        !zcl_bytes_any_set(payload.txid, 32)) {
+    if (!zni_plan_prepared_valid(rt, &payload, &prepared, raw_len,
+                                 input_count)) {
         memory_cleanse(raw, VAULT_INTENT_RAW_MAX);
         memory_cleanse(&payload, sizeof(payload));
         free(raw); free(inputs);
@@ -334,9 +440,7 @@ struct zcl_result znam_transaction_intent_plan(
             : prepared;
     }
     int64_t reserved = rt->maximum_fee_zat;
-    int64_t liquid = money.confirmed_zat - money.intent_reserved_zat;
-    if (reserved > liquid || (strcmp(request->wallet_scope, "dev") == 0 &&
-                              reserved > money.agent_available_zat)) {
+    if (!zni_plan_fee_reservable(request, &money, reserved)) {
         memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw); free(inputs);
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-18, "custody allocation cannot reserve ZNAM fee");
@@ -371,31 +475,12 @@ struct zcl_result znam_transaction_intent_plan(
     memcpy(row.request_digest, request_digest, 32);
     row.has_request_digest = true;
     uint8_t plain[ZNI_PAYLOAD_MAX]; size_t plain_len = 0;
-    bool encoded = zni_payload_encode(&payload, plain, sizeof(plain), &plain_len);
-    bool encrypted = encoded && wallet_metadata_encrypt(
-        rt->node_db, row.plan_id, 32, plain, plain_len,
-        row.encrypted_payload, sizeof(row.encrypted_payload),
-        &row.encrypted_payload_len);
-    if (encrypted)
-        zni_intent_digest(plain, plain_len, &row, row.digest);
-    bool stored = encrypted && vault_intent_reserve_with_raw_inputs(
-        rt->node_db, &row, money.confirmed_zat, raw, raw_len, inputs,
-        input_count);
-    if (stored) {
-        struct wallet_money_snapshot refreshed;
-        struct zcl_result current = zni_money_current(
-            rt, request->wallet_scope, &refreshed);
-        stored = current.ok;
-        if (stored) {
-            memcpy(row.snapshot_root, refreshed.snapshot_root, 32);
-            zni_intent_digest(plain, plain_len, &row, row.digest);
-            stored = vault_intent_save(rt->node_db, &row);
-        }
-        if (!stored)
-            (void)vault_intent_set_state(rt->node_db, row.plan_id,
-                VAULT_INTENT_FAILED, NULL, "SNAPSHOT_BIND_FAILED",
-                rt->now_unix);
-    }
+    bool stored = zni_plan_seal_and_reserve(rt, &payload, &row, &money,
+                                            plain, &plain_len, raw, raw_len,
+                                            inputs, input_count);
+    if (stored)
+        stored = zni_plan_snapshot_rebind(rt, request->wallet_scope, &row,
+                                          plain, plain_len);
     memory_cleanse(plain, sizeof(plain));
     memory_cleanse(raw, VAULT_INTENT_RAW_MAX);
     memory_cleanse(&payload, sizeof(payload));
@@ -408,46 +493,114 @@ struct zcl_result znam_transaction_intent_plan(
     return ZCL_OK;
 }
 
+static bool zni_commit_request_valid(const char *wallet_scope,
+                                     const uint8_t *plan_id,
+                                     const struct znam_intent_result *out)
+{
+    if (!wallet_scope || !plan_id || !out ||
+        (strcmp(wallet_scope, "dev") != 0 && strcmp(wallet_scope, "prod") != 0))
+        return false;
+    return true;
+}
+
+static bool zni_commit_intent_found(const struct znam_intent_runtime *rt,
+                                    const uint8_t *plan_id,
+                                    struct vault_intent_row *row)
+{
+    if (!vault_intent_find(rt->node_db, plan_id, row) ||
+        strcmp(row->application_kind, ZNAM_INTENT_APPLICATION) != 0)
+        return false;
+    return true;
+}
+
+static bool zni_intent_already_broadcast(const struct vault_intent_row *row)
+{
+    return row->has_txid && row->state >= VAULT_INTENT_MEMPOOL_ACCEPTED &&
+           row->state <= VAULT_INTENT_REORGED;
+}
+
+static bool zni_intent_committable(const struct vault_intent_row *row,
+                                   int64_t now_unix)
+{
+    if ((row->state != VAULT_INTENT_PLANNED &&
+         row->state != VAULT_INTENT_PROVING) || row->expires_at <= now_unix)
+        return false;
+    return true;
+}
+
+static bool zni_commit_money_bound(const struct znam_intent_runtime *rt,
+                                   const struct vault_intent_row *row,
+                                   const char *wallet_scope,
+                                   struct zcl_result *current)
+{
+    struct wallet_money_snapshot money;
+    *current = zni_money_current(rt, wallet_scope, &money);
+    char genesis[65] = {0};
+    if (current->ok) wallet_identity_genesis_hex(&money.identity, genesis);
+    return current->ok &&
+        strcmp(row->wallet_instance_id, money.identity.wallet_instance_id) == 0 &&
+        strcmp(row->wallet_genesis, genesis) == 0 &&
+        row->anchor_height == rt->tip_height &&
+        memcmp(row->anchor_hash, rt->tip_hash, 32) == 0 &&
+        memcmp(row->snapshot_root, money.snapshot_root, 32) == 0;
+}
+
+static bool zni_commit_raw_ready(const struct znam_intent_runtime *rt,
+                                 uint8_t *raw, uint8_t *plan_id,
+                                 size_t *raw_len)
+{
+    if (!raw || !vault_intent_load_raw(rt->node_db, plan_id, raw,
+                                       VAULT_INTENT_RAW_MAX, raw_len))
+        return false;
+    return true;
+}
+
+static bool zni_commit_claim_denied(const struct znam_intent_runtime *rt,
+                                    struct vault_intent_row *row)
+{
+    return row->state == VAULT_INTENT_PLANNED &&
+           !vault_intent_claim_commit(rt->node_db, row->plan_id, rt->now_unix);
+}
+
+static bool zni_commit_mark_published(const struct znam_intent_runtime *rt,
+                                      const uint8_t *plan_id,
+                                      struct vault_intent_row *row,
+                                      uint8_t *txid)
+{
+    if (!vault_intent_set_state(rt->node_db, row->plan_id,
+            VAULT_INTENT_MEMPOOL_ACCEPTED, txid, "", rt->now_unix) ||
+        !vault_intent_find(rt->node_db, plan_id, row))
+        return false;
+    return true;
+}
+
 struct zcl_result znam_transaction_intent_commit(
     const struct znam_intent_runtime *rt, const char *wallet_scope,
     const uint8_t plan_id[32], struct znam_intent_result *out)
 {
     ZCL_CHECK(zni_runtime_validate(rt, false, true));
-    if (!wallet_scope || !plan_id || !out ||
-        (strcmp(wallet_scope, "dev") != 0 && strcmp(wallet_scope, "prod") != 0))
+    if (!zni_commit_request_valid(wallet_scope, plan_id, out))
         return ZCL_ERR(-21, "explicit scope, plan ID, and output are required");
     (void)vault_intent_expire_due(rt->node_db, rt->now_unix);
     struct vault_intent_row row;
-    if (!vault_intent_find(rt->node_db, plan_id, &row) ||
-        strcmp(row.application_kind, ZNAM_INTENT_APPLICATION) != 0)
+    if (!zni_commit_intent_found(rt, plan_id, &row))
         return ZCL_ERR(-22, "ZNAM intent was not found");
     if (strcmp(row.wallet_scope, wallet_scope) != 0)
         return ZCL_ERR(-23, "wallet scope does not match ZNAM intent");
     struct zni_payload payload;
     ZCL_CHECK(zni_payload_open(rt, &row, &payload));
-    if (row.has_txid && row.state >= VAULT_INTENT_MEMPOOL_ACCEPTED &&
-        row.state <= VAULT_INTENT_REORGED) {
+    if (zni_intent_already_broadcast(&row)) {
         zni_view(&row, &payload, out);
         out->idempotent_replay = true;
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_OK;
     }
-    if ((row.state != VAULT_INTENT_PLANNED &&
-         row.state != VAULT_INTENT_PROVING) || row.expires_at <= rt->now_unix) {
+    if (!zni_intent_committable(&row, rt->now_unix)) {
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-24, "ZNAM intent is not committable");
     }
-    struct wallet_money_snapshot money;
-    struct zcl_result current = zni_money_current(rt, wallet_scope, &money);
-    char genesis[65] = {0};
-    if (current.ok) wallet_identity_genesis_hex(&money.identity, genesis);
-    bool bound = current.ok &&
-        strcmp(row.wallet_instance_id, money.identity.wallet_instance_id) == 0 &&
-        strcmp(row.wallet_genesis, genesis) == 0 &&
-        row.anchor_height == rt->tip_height &&
-        memcmp(row.anchor_hash, rt->tip_hash, 32) == 0 &&
-        memcmp(row.snapshot_root, money.snapshot_root, 32) == 0;
-    if (!bound) {
+    struct zcl_result current;
+    if (!zni_commit_money_bound(rt, &row, wallet_scope, &current)) {
         (void)vault_intent_set_state(rt->node_db, row.plan_id,
             VAULT_INTENT_CONFLICTED, NULL, "MONEY_SNAPSHOT_CHANGED",
             rt->now_unix);
@@ -458,8 +611,7 @@ struct zcl_result znam_transaction_intent_commit(
     }
     uint8_t *raw = zcl_malloc(VAULT_INTENT_RAW_MAX, "znam_intent_commit_raw");
     size_t raw_len = 0;
-    if (!raw || !vault_intent_load_raw(rt->node_db, row.plan_id, raw,
-                                       VAULT_INTENT_RAW_MAX, &raw_len)) {
+    if (!zni_commit_raw_ready(rt, raw, row.plan_id, &raw_len)) {
         free(raw);
         memory_cleanse(&payload, sizeof(payload));
         (void)vault_intent_set_state(rt->node_db, row.plan_id,
@@ -467,8 +619,7 @@ struct zcl_result znam_transaction_intent_commit(
             rt->now_unix);
         return ZCL_ERR(-26, "prepared ZNAM transaction is missing");
     }
-    if (row.state == VAULT_INTENT_PLANNED &&
-        !vault_intent_claim_commit(rt->node_db, row.plan_id, rt->now_unix)) {
+    if (zni_commit_claim_denied(rt, &row)) {
         memory_cleanse(raw, VAULT_INTENT_RAW_MAX); free(raw);
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-27, "another commit claimed this ZNAM intent");
@@ -481,9 +632,7 @@ struct zcl_result znam_transaction_intent_commit(
         return ZCL_ERR(-28, "COMMIT_UNCERTAIN: exact ZNAM publication failed: %s",
                        published.message);
     }
-    if (!vault_intent_set_state(rt->node_db, row.plan_id,
-            VAULT_INTENT_MEMPOOL_ACCEPTED, payload.txid, "", rt->now_unix) ||
-        !vault_intent_find(rt->node_db, row.plan_id, &row)) {
+    if (!zni_commit_mark_published(rt, plan_id, &row, payload.txid)) {
         memory_cleanse(&payload, sizeof(payload));
         return ZCL_ERR(-29, "ZNAM transaction published but durable state is uncertain");
     }

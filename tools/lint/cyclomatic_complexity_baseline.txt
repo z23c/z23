@@ -597,9 +597,6 @@ contexts/naming/controllers/src/znam_intent_controller.c:rpc_znam_intent:30
 contexts/naming/controllers/src/znam_intent_controller.c:znic_prepare:30
 contexts/naming/controllers/src/znam_intent_native_handler.c:znin_run:36
 contexts/naming/modules/znam/src/znam.c:znam_parse:26
-contexts/naming/services/src/znam_transaction_intent_service.c:znam_transaction_intent_commit:30
-contexts/naming/services/src/znam_transaction_intent_service.c:znam_transaction_intent_plan:25
-contexts/naming/services/src/znam_transaction_intent_service.c:zni_request_validate:21
 contexts/wallet/controllers/src/transaction_controller_wallet_lookup.c:rawtx_find_by_wallet_note:18
 contexts/wallet/controllers/src/transaction_controller_wallet_lookup.c:rawtx_find_in_recent_chain:20
 contexts/wallet/controllers/src/transaction_controller_wallet_lookup.c:rawtx_find_in_wallet_db:19
