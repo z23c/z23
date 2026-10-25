@@ -12205,11 +12205,105 @@ int test_dev_platform_shard_07(void) { return test_dev_platform_platform_arm(); 
 int test_dev_platform_shard_08(void) { return test_dev_platform_platform_arm(); }
 #endif
 
+#if !defined(_WIN32)
+/* The epoch lease owner is the NEAREST make. A recipe's make runs the session
+ * driver, and an outer make may run that recipe in turn; the driver must name
+ * the inner make. The driver's owner-token failure reports the pid it resolved,
+ * so the test compares that pid with the recipe's own $PPID. */
+#define EPN_SHA_LEN 64
+
+static bool epn_write_exec(const char *root, const char *rel, const char *body)
+{
+    char path[PATH_MAX];
+    return snprintf(path, sizeof(path), "%s/%s", root, rel) < (int)sizeof(path) &&
+           dp_mk_write(root, rel, body) && chmod(path, 0700) == 0;
+}
+
+static bool epn_copy_tool(const char *cwd, const char *root, const char *name)
+{
+    char rel[PATH_MAX], src[PATH_MAX], dst[PATH_MAX];
+    if (snprintf(rel, sizeof(rel), "tools/dev/%s", name) >= (int)sizeof(rel) ||
+        snprintf(src, sizeof(src), "%s/%s", cwd, rel) >= (int)sizeof(src) ||
+        snprintf(dst, sizeof(dst), "%s/%s", root, rel) >= (int)sizeof(dst))
+        return false;
+    return dp_mk_write(root, rel, "") && dp_hf_copy_file(src, dst);
+}
+
+/* A two-level make chain around a copy of the real driver. The process-start
+ * token helper always fails, so the driver stops right after it resolves the
+ * owner and names that pid in its refusal. Everything else is a stub. */
+static bool epn_fixture(const char *cwd, const char *root)
+{
+    char sha_a[EPN_SHA_LEN + 1], sha_e[EPN_SHA_LEN + 1], inner[2048];
+    memset(sha_a, 'a', EPN_SHA_LEN);
+    sha_a[EPN_SHA_LEN] = '\0';
+    memset(sha_e, 'e', EPN_SHA_LEN);
+    sha_e[EPN_SHA_LEN] = '\0';
+    return epn_copy_tool(cwd, root, "build-epoch-session.sh") &&
+           epn_copy_tool(cwd, root, "build-epoch-open-file-identity.sh") &&
+           epn_copy_tool(cwd, root, "build-epoch-lock-wait.sh") &&
+           epn_write_exec(root, "tools/dev/process-start-token.sh",
+                          "#!/bin/sh\nexit 1\n") &&
+           epn_write_exec(root, "tools/dev/build-epoch-key.sh",
+                          "#!/bin/sh\nexit 0\n") &&
+           dp_mk_write(root, "tmp/.keep", "") &&
+           dp_mk_write(root, "outer.mk", "all:\n\t$(MAKE) -s -f inner.mk\n") &&
+           snprintf(inner, sizeof(inner),
+                    "all:\n"
+                    "\techo $$PPID > inner.pid\n"
+                    "\tTMPDIR=tmp bash tools/dev/build-epoch-session.sh verify"
+                    " build/obj/epochs/%s/.build-session"
+                    " build/obj/epochs/%s/.leases/1 build/obj 1 build/cand 1"
+                    " %s 1 %s %s %s dev-v2 -O2 - cc c++ $$PPID"
+                    " tools/dev/build-epoch-key.sh 2> script.err"
+                    " >/dev/null\n",
+                    sha_e, sha_e, sha_a, sha_a, sha_a, sha_e) <
+               (int)sizeof(inner) &&
+           dp_mk_write(root, "inner.mk", inner);
+}
+
+static bool epn_owner_pid_matches(const char *root)
+{
+    static char err[8192], inner_pid[64], want[160];
+    char path[PATH_MAX], cmd[PATH_MAX + 96];
+    if (snprintf(cmd, sizeof(cmd), "cd '%s' && make -s -f outer.mk "
+                 ">make.log 2>&1", root) >= (int)sizeof(cmd))
+        return false;
+    (void)dp_hs_run(cmd); /* the driver refuses on purpose; read its trace */
+    if (snprintf(path, sizeof(path), "%s/inner.pid", root) >= (int)sizeof(path) ||
+        !dp_hf_slurp(path, inner_pid, sizeof(inner_pid)))
+        return false;
+    inner_pid[strcspn(inner_pid, "\n")] = '\0';
+    if (snprintf(path, sizeof(path), "%s/script.err", root) >= (int)sizeof(path) ||
+        !dp_hf_slurp(path, err, sizeof(err)) || inner_pid[0] == '\0')
+        return false;
+    return snprintf(want, sizeof(want),
+                    "could not identify live Make owner pid=%s;", inner_pid) <
+               (int)sizeof(want) && strstr(err, want) != NULL;
+}
+
+static int test_epoch_owner_is_nearest_make(void)
+{
+    int failures = 0;
+    TEST("dev platform: the epoch lease owner is the nearest make, not the outer one") {
+        char cwd[PATH_MAX], root[PATH_MAX];
+        ASSERT(getcwd(cwd, sizeof(cwd)) != NULL);
+        ASSERT(test_mkdtemp(root, sizeof(root), "epoch_owner") != NULL);
+        ASSERT(epn_fixture(cwd, root));
+        ASSERT(epn_owner_pid_matches(root));
+        ASSERT(test_rm_rf_recursive(root) == 0);
+        PASS();
+    } _test_next:;
+    return failures;
+}
+#endif
+
 int test_dev_platform(void)
 {
     int failures = test_dev_platform_platform_arm();
 #if !defined(_WIN32)
     failures += test_process_output_eof();
+    failures += test_epoch_owner_is_nearest_make();
 #endif
     return failures;
 }

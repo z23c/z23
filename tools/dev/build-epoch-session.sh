@@ -72,7 +72,7 @@ find_make_owner()
         comm="${comm##*/}"
         comm="${comm//[[:space:]]/}"
         case "$comm" in
-        make|gmake) owner="$candidate" ;;
+        make|gmake) owner="$candidate"; break ;;
         esac
         parent="$(process_parent "$candidate")"
         parent="${parent//[[:space:]]/}"
