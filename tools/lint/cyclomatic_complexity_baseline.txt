@@ -1861,7 +1861,6 @@ tests/harness/src/test_cli_argv_strict.c:cas_run_daemon_wait_for:23
 tests/harness/src/test_code_have.c:test_code_have:46
 tests/harness/src/test_code_inventory.c:ci_semantic_known_answers:25
 tests/harness/src/test_code_inventory.c:test_code_inventory:55
-tests/harness/src/test_code_ontology.c:co_observation_equal:21
 tests/harness/src/test_codeindex.c:concurrent_open_32:16
 tests/harness/src/test_codeindex.c:test_codeindex_platform_arm:333
 tests/harness/src/test_codeindex.c:write_fixture:28

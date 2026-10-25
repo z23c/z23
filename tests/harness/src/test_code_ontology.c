@@ -148,6 +148,64 @@ static bool co_component_equal(
            memcmp(left->root, right->root, sizeof(left->root)) == 0;
 }
 
+/* Field groups of co_observation_equal, split so each chain stays small;
+ * the comparison order is unchanged. */
+static bool co_observation_evidence_equal(
+    const struct ci_source_universe_observation *left,
+    const struct ci_source_universe_observation *right)
+{
+    return left->all_components_observed == right->all_components_observed &&
+           left->evidence_nonempty == right->evidence_nonempty &&
+           left->evidence_counts_agree == right->evidence_counts_agree &&
+           left->evidence_bytes_agree == right->evidence_bytes_agree;
+}
+
+static bool co_observation_roots_equal(
+    const struct ci_source_universe_observation *left,
+    const struct ci_source_universe_observation *right)
+{
+    return left->component_roots_well_formed ==
+               right->component_roots_well_formed &&
+           left->same_domain_roots_compared ==
+               right->same_domain_roots_compared &&
+           left->same_domain_roots_agree == right->same_domain_roots_agree;
+}
+
+static bool co_observation_inventory_equal(
+    const struct ci_source_universe_observation *left,
+    const struct ci_source_universe_observation *right)
+{
+    return left->inventory_artifact_present ==
+               right->inventory_artifact_present &&
+           left->inventory_artifact_count_agrees ==
+               right->inventory_artifact_count_agrees &&
+           left->inventory_artifact_bytes_agree ==
+               right->inventory_artifact_bytes_agree &&
+           left->inventory_fresh == right->inventory_fresh;
+}
+
+static bool co_observation_projection_equal(
+    const struct ci_source_universe_observation *left,
+    const struct ci_source_universe_observation *right)
+{
+    return left->projection_observed_mask == right->projection_observed_mask &&
+           left->projection_proven_mask == right->projection_proven_mask &&
+           left->projection_unavailable_mask ==
+               right->projection_unavailable_mask &&
+           left->projection_missing_mask == right->projection_missing_mask &&
+           left->projection_masks_consistent ==
+               right->projection_masks_consistent;
+}
+
+static bool co_observation_verdict_equal(
+    const struct ci_source_universe_observation *left,
+    const struct ci_source_universe_observation *right)
+{
+    return left->complete == right->complete &&
+           left->verified == right->verified &&
+           left->refusal == right->refusal;
+}
+
 static bool co_observation_equal(
     const struct ci_source_universe_observation *left,
     const struct ci_source_universe_observation *right)
@@ -155,32 +213,11 @@ static bool co_observation_equal(
     for (size_t i = 0; i < CI_SOURCE_COMPONENT_COUNT; i++)
         if (!co_component_equal(&left->components[i], &right->components[i]))
             return false;
-    return left->all_components_observed == right->all_components_observed &&
-           left->evidence_nonempty == right->evidence_nonempty &&
-           left->evidence_counts_agree == right->evidence_counts_agree &&
-           left->evidence_bytes_agree == right->evidence_bytes_agree &&
-           left->component_roots_well_formed ==
-               right->component_roots_well_formed &&
-           left->same_domain_roots_compared ==
-               right->same_domain_roots_compared &&
-           left->same_domain_roots_agree == right->same_domain_roots_agree &&
-           left->inventory_artifact_present ==
-               right->inventory_artifact_present &&
-           left->inventory_artifact_count_agrees ==
-               right->inventory_artifact_count_agrees &&
-           left->inventory_artifact_bytes_agree ==
-               right->inventory_artifact_bytes_agree &&
-           left->inventory_fresh == right->inventory_fresh &&
-           left->projection_observed_mask == right->projection_observed_mask &&
-           left->projection_proven_mask == right->projection_proven_mask &&
-           left->projection_unavailable_mask ==
-               right->projection_unavailable_mask &&
-           left->projection_missing_mask == right->projection_missing_mask &&
-           left->projection_masks_consistent ==
-               right->projection_masks_consistent &&
-           left->complete == right->complete &&
-           left->verified == right->verified &&
-           left->refusal == right->refusal;
+    return co_observation_evidence_equal(left, right) &&
+           co_observation_roots_equal(left, right) &&
+           co_observation_inventory_equal(left, right) &&
+           co_observation_projection_equal(left, right) &&
+           co_observation_verdict_equal(left, right);
 }
 
 static void co_exact_input(struct ci_source_universe_reconcile_input *input)
