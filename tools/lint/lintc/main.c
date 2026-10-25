@@ -1,7 +1,7 @@
 /* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * purpose: the split C23 lint runtime's gate table and CLI entry point
- * (z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list).
+ * (z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list | --gate-command <gate>).
  */
 
 #ifndef _POSIX_C_SOURCE
@@ -12,7 +12,7 @@
 #include "lintc.h"
 #include "premise.h"
 
-#define LINT_GATE(name, base) { name, base##_run, base##_selftest },
+#define LINT_GATE(name, base, cmd) { name, base##_run, base##_selftest },
 static const struct lint_gate k_gates[] = {
 #include "gates.def"
 };
@@ -46,18 +46,37 @@ static int (*find_tool(const char *name))(int, char **)
     return NULL;
 }
 
+static int list_main(void)
+{
+    for (size_t i = 0; i < sizeof k_gates / sizeof k_gates[0]; i++)
+        printf("%s\n", k_gates[i].name);
+    return 0;
+}
+
+/* z23-lint --gate-command GATE: print the canonical lint command of a gate
+ * gates.def owns; exit 1 (nothing printed) for any other gate. */
+static int gate_command_main(int argc, char **argv)
+{
+    char cmd[512];
+    if (argc != 3)
+        return die("z23-lint: usage: z23-lint --gate-command <gate-name>\n", "");
+    int rc = lint_gate_command(argv[2], cmd, sizeof cmd);
+    if (rc == 0)
+        puts(cmd);
+    return rc;
+}
+
 int main(int argc, char **argv)
 {
     g_lint_argv0 = argc > 0 ? argv[0] : NULL;
-    if (argc >= 2 && strcmp(argv[1], "--list") == 0) {
-        for (size_t i = 0; i < sizeof k_gates / sizeof k_gates[0]; i++)
-            printf("%s\n", k_gates[i].name);
-        return 0;
-    }
+    if (argc >= 2 && strcmp(argv[1], "--list") == 0)
+        return list_main();
+    if (argc >= 2 && strcmp(argv[1], "--gate-command") == 0)
+        return gate_command_main(argc, argv);
     if (argc >= 2 && strcmp(argv[1], "--families") == 0)
         return lint_families_ledger();
     if (argc < 2)
-        return die("z23-lint: usage: z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list | --families\n",
+        return die("z23-lint: usage: z23-lint <gate-name> [--selftest] | z23-lint <gate-name> [args...] | --list | --families | --gate-command <gate-name>\n",
                    "");
     int (*tool)(int, char **) = find_tool(argv[1]);
     if (tool)

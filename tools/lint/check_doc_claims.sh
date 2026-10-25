@@ -129,12 +129,14 @@ claims_left=0          # annotations counted but owned by the other part
 # ── Predicate evaluation ─────────────────────────────────────────────────────
 
 # gate_cmd_for <check-name> — print the gate's exact recipe command, or nothing.
-# Reads the gate_command() case table in run_lint.sh so this gate can never
+# Reads the gate_command() case table in run_lint.sh, then asks z23-lint for the
+# gates it prints itself (run_lint.sh's `*)` fallback), so this gate can never
 # invoke a gate differently from the way `make lint` does.
 gate_cmd_for() {
-    local g="$1"
-    sed -n "s|^[[:space:]]*${g})[[:space:]]*echo '\(.*\)'[[:space:]]*;;.*|\1|p" \
-        "$GATE_TABLE" 2>/dev/null | head -1
+    local g="$1" c
+    c="$(sed -n "s|^[[:space:]]*${g})[[:space:]]*echo '\(.*\)'[[:space:]]*;;.*|\1|p" "$GATE_TABLE" 2>/dev/null | head -1)"
+    [ -n "$c" ] || c="$("${ZCL_LINT_BIN_DIR:-$ROOT/build/bin}/z23-lint" --gate-command "$g" 2>/dev/null)"
+    printf '%s\n' "$c"
 }
 
 # gate_rc <check-name> — run the gate once per invocation (memoized) and print

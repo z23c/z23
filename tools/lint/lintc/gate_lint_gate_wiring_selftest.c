@@ -4,13 +4,15 @@
  * Builds a scratch fixture tree carrying the REAL run_lint.sh (so --list
  * and --print-command are the code under test,
  * not a mock) stripped of its real case table, plants one defect per case
- * (A-G, I, J, K) and asserts lgw_check_root() rejects it and names the
+ * (A-G, I, J, K, M) and asserts lgw_check_root() rejects it and names the
  * offender, then a positive control (H) that a correctly wired
  * three-file fixture (Makefile, run_lint.sh, DEFENSIVE_CODING.md doc
  * block) passes. Cases I and J cover the doc-block three-way parity by
  * name: a listed gate missing from the doc, and a doc-only phantom gate.
  * Case K wires the same case label twice — only the duplicate-label check
  * (gate check H) can see it, since every other check is set-based.
+ * Cases L and M cover native commands: a gate z23-lint owns passes with no
+ * table line (L); one it does not own still fails there (M).
  * Sandbox lives under getenv("TMPDIR") else "test-tmp", never /tmp.
  */
 #ifndef _POSIX_C_SOURCE
@@ -188,7 +190,7 @@ static int lgws_wire(const char *d, const char *gate, const char *cmd)
     fclose(f);
     if (bad) return die("z23-lint: read failed: %s\n", driver);
     text[n] = '\0';
-    const char *anchor = "        *) return 1 ;;";
+    const char *anchor = "        *) \"$BIN_DIR/z23-lint\" --gate-command";
     char *pos = strstr(text, anchor);
     if (!pos) return die("z23-lint: fixture driver has no default arm\n", "");
     static char merged[LGWS_BUF];
@@ -452,6 +454,36 @@ static int lgws_case_k(const char *base, int *fails)
                               "appears twice", d, fails);
 }
 
+/* A native-command gate (gates.def owns check-malloc) needs no table line:
+ * with only a wired sentinel beside it, the tree passes. */
+static int lgws_case_l(const char *base, int *fails)
+{
+    char d[4096], root[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/l", base), sizeof d)) return 2;
+    if (csr_mkdirs(d) || cic_repo_root(root, sizeof root)) return 2;
+    if (lgws_make_fixture(root, d)) return 2;
+    const char *gates[] = { "check-sentinel-wired", "check-malloc" };
+    if (lgws_write_makefile(d, gates, 2)) return 2;
+    if (lgws_write_doc(d, gates, 2)) return 2;
+    if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
+    return lgws_expect_accept("L: a native-command gate needs no table line", d, fails);
+}
+/* The native lookup covers only gates z23-lint owns: beside one, a listed
+ * gate with neither a table line nor a native command still fails. */
+static int lgws_case_m(const char *base, int *fails)
+{
+    char d[4096], root[4096];
+    if (ovf(snprintf(d, sizeof d, "%s/m", base), sizeof d)) return 2;
+    if (csr_mkdirs(d) || cic_repo_root(root, sizeof root)) return 2;
+    if (lgws_make_fixture(root, d)) return 2;
+    const char *gates[] = { "check-sentinel-wired", "check-malloc", "check-sentinel-nocmd" };
+    if (lgws_write_makefile(d, gates, 3)) return 2;
+    if (lgws_write_doc(d, gates, 3)) return 2;
+    if (lgws_wire(d, "check-sentinel-wired", "./tools/lint/sentinel_a.sh")) return 2;
+    return lgws_expect_reject("M: a gate with neither table line nor native command is caught",
+                              "check-sentinel-nocmd", d, fails);
+}
+
 /* run_lint.sh cd's to its own resolved root before self-grepping $0, so a
  * relative fixture path stops resolving the moment it does. Always hand it
  * an absolute one. */
@@ -475,7 +507,7 @@ typedef int (*lgws_case_fn)(const char *, int *);
 static const lgws_case_fn k_lgws_cases[] = {
     lgws_case_a, lgws_case_b, lgws_case_c, lgws_case_d,
     lgws_case_e, lgws_case_f, lgws_case_g, lgws_case_h,
-    lgws_case_i, lgws_case_j, lgws_case_k,
+    lgws_case_i, lgws_case_j, lgws_case_k, lgws_case_l, lgws_case_m,
 };
 
 int check_lint_gate_wiring_selftest(void)
@@ -506,6 +538,6 @@ int check_lint_gate_wiring_selftest(void)
         printf("\xe2\x95\x90\xe2\x95\x90 selftest: FAIL \xe2\x95\x90\xe2\x95\x90\n");
         return 1;
     }
-    printf("\xe2\x95\x90\xe2\x95\x90 selftest: PASS (11/11) \xe2\x95\x90\xe2\x95\x90\n");
+    printf("\xe2\x95\x90\xe2\x95\x90 selftest: PASS (13/13) \xe2\x95\x90\xe2\x95\x90\n");
     return 0;
 }

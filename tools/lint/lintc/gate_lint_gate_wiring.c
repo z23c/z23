@@ -16,7 +16,8 @@
  * re-implements gate_command()'s case table).
  *
  * Checks (all fail-closed, all run and all reported before returning):
- *   A. every LINT_GATES/LINT_FAST_GATES member has a gate_command() entry.
+ *   A. every LINT_GATES/LINT_FAST_GATES member has a gate_command() entry or
+ *      a native command (z23-lint --gate-command, see gates.def).
  *   B. every gate_command() entry belongs to one of those two lists.
  *   C. every listed gate has a real `check-<name>:` Makefile target.
  *   D. every table entry's script path (each whitespace-split, non-'$',
@@ -200,12 +201,21 @@ int lgw_appendf_pub(char *out, size_t cap, size_t *used, const char *fmt, ...)
     return 0;
 }
 
+/* A gate z23-lint owns (gates.def LINT_CMD_PLAIN/PAIR) has its command
+ * natively; run_lint.sh falls back to z23-lint for it, so no table line is
+ * needed. Anything else with no table line has no command at all. */
+static int lgw_has_command(const struct sr_set *table, const char *gate)
+{
+    char cmd[512];
+    return sr_has(table, gate) || lint_gate_command(gate, cmd, sizeof cmd) == 0;
+}
+
 static int lgw_check_a(const struct sr_set *listed, const struct sr_set *table,
                        char *out, size_t cap, size_t *used, int *fail)
 {
     int any = 0;
     for (int i = 0; i < listed->count; i++)
-        if (!sr_has(table, listed->n[i]))
+        if (!lgw_has_command(table, listed->n[i]))
             any = 1;
     if (!any)
         return 0;
@@ -214,7 +224,7 @@ static int lgw_check_a(const struct sr_set *listed, const struct sr_set *table,
                    "FAIL: gate(s) in LINT_GATES/LINT_FAST_GATES with NO gate_command() entry:\n"))
         return 2;
     for (int i = 0; i < listed->count; i++) {
-        if (sr_has(table, listed->n[i]))
+        if (lgw_has_command(table, listed->n[i]))
             continue;
         if (lgw_appendf_pub(out, cap, used, "    %s\n", listed->n[i]))
             return 2;
