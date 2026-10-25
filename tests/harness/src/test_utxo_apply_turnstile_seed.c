@@ -295,7 +295,7 @@ static int test_seed_negative_total(void)
     fx.sapling[3] = -1000;
     SD_CHECK("slice writes rows below the finding", sd_run(&fx));
     SD_CHECK("no row at or above the negative total", sd_max(&fx) == 2);
-    SD_CHECK("a permanent blocker names the finding",
+    SD_CHECK("a transient blocker names the finding",
              blocker_exists("utxo_apply.turnstile_seed_negative"));
     SD_CHECK("seeding stops", !sd_run(&fx) && sd_max(&fx) == 2);
     sd_close(&fx);

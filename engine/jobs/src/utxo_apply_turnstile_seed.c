@@ -50,6 +50,9 @@ static _Atomic int64_t g_last_slice_us = 0;
 static _Atomic uint64_t g_read_us = 0;
 static _Atomic int g_hold = 0;   /* 0 none, 1 body, 2 negative_total */
 static _Atomic bool g_halted = false;
+/* g_rows is one static slice buffer; block intake and the reducer kick can
+ * both reach the drain hook, so one seeder runs and the other skips. */
+static atomic_flag g_busy = ATOMIC_FLAG_INIT;
 static void (*g_gap_hook)(void *) = NULL;
 static void *g_gap_user = NULL;
 
@@ -209,12 +212,24 @@ static int seed_commit(sqlite3 *db, struct main_state *ms, int64_t k,
     return store_ok ? wrote : 0;
 }
 
-bool utxo_apply_turnstile_seed_run(
-    sqlite3 *db, struct main_state *ms, const char *datadir,
-    utxo_apply_turnstile_seed_reader_fn reader, void *reader_user)
+/* The running totals live in the table; g_rows holds per-block values. */
+static void seed_log_reached(sqlite3 *db, int64_t through)
 {
-    if (!db || !ms || atomic_load(&g_halted))
-        return false;
+    int64_t sprout = 0, sapling = 0;
+    bool found = false;
+    if (!shielded_pool_kv_get(db, through, &sprout, &sapling, &found) || !found)
+        return;
+    LOG_INFO(STAGE_NAME,
+             "[utxo_apply] turnstile seeding reached height=%lld "
+             "sprout_total=%lld sapling_total=%lld", (long long)through,
+             (long long)sprout, (long long)sapling);
+}
+
+static bool seed_run_once(sqlite3 *db, struct main_state *ms,
+                          const char *datadir,
+                          utxo_apply_turnstile_seed_reader_fn reader,
+                          void *reader_user)
+{
     int64_t cursor = (int64_t)stage_cursor_persisted(db, STAGE_NAME, STAGE_NAME);
     int64_t k = -1;
     bool k_found = false;
@@ -240,12 +255,21 @@ bool utxo_apply_turnstile_seed_run(
     atomic_fetch_add(&g_rows_written, (uint64_t)wrote);
     atomic_fetch_add(&g_slices, 1);
     if (through == cursor - 1)
-        LOG_INFO(STAGE_NAME,
-                 "[utxo_apply] turnstile seeding reached height=%lld "
-                 "sprout=%lld sapling=%lld", (long long)through,
-                 (long long)g_rows[wrote - 1].sprout,
-                 (long long)g_rows[wrote - 1].sapling);
+        seed_log_reached(db, through);
     return true;
+}
+
+bool utxo_apply_turnstile_seed_run(
+    sqlite3 *db, struct main_state *ms, const char *datadir,
+    utxo_apply_turnstile_seed_reader_fn reader, void *reader_user)
+{
+    if (!db || !ms || atomic_load(&g_halted))
+        return false;
+    if (atomic_flag_test_and_set(&g_busy))
+        return false;
+    bool ran = seed_run_once(db, ms, datadir, reader, reader_user);
+    atomic_flag_clear(&g_busy);
+    return ran;
 }
 
 bool utxo_apply_turnstile_seed_post_commit(void)
@@ -291,6 +315,7 @@ void utxo_apply_turnstile_seed_reset_for_test(void)
     atomic_store(&g_read_us, 0);
     atomic_store(&g_hold, 0);
     atomic_store(&g_halted, false);
+    atomic_flag_clear(&g_busy);
     blocker_clear(SEED_BODY_BLOCKER);
     blocker_clear(SEED_NEG_BLOCKER);
     g_gap_hook = NULL;
