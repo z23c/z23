@@ -290,28 +290,60 @@ static bool indexed_candidate_extends_durable_parent(
         db, height - 1, bi->pprev->phashBlock->data);
 }
 
+static void assign_select_idle_reason(
+        enum utxo_apply_select_idle_reason *why,
+        enum utxo_apply_select_idle_reason reason)
+{
+    if (why)
+        *why = reason;
+}
+
+static bool script_verdict_lacks_ok_block_hash(
+        const struct script_validate_verdict_row *sv_row)
+{
+    return !sv_row || sv_row->ok != 1 || !sv_row->has_block_hash;
+}
+
+static bool indexed_have_data_extends_either_parent(
+        sqlite3 *db, struct main_state *ms, const struct block_index *bi,
+        int height)
+{
+    bool indexed_parent_ok =
+        indexed_candidate_extends_visible_parent(ms, bi, height) ||
+        indexed_candidate_extends_durable_parent(db, bi, height);
+    return (bi->nStatus & BLOCK_HAVE_DATA) != 0 && indexed_parent_ok;
+}
+
+static bool candidate_extends_neither_parent(
+        sqlite3 *db, struct main_state *ms,
+        const struct uint256 *parent_hash, int height)
+{
+    return !candidate_extends_visible_parent(ms, parent_hash, height) &&
+           !candidate_extends_durable_parent(db, parent_hash, height);
+}
+
 static struct block_index *hash_bound_fallback(
         sqlite3 *db, struct main_state *ms, int height,
         const struct script_validate_verdict_row *sv_row,
         enum utxo_apply_select_idle_reason *why)
 {
     if (!ms) {
-        if (why) *why = UA_SELECT_IDLE_NO_MAIN_STATE;
+        assign_select_idle_reason(why, UA_SELECT_IDLE_NO_MAIN_STATE);
         return NULL;
     }
-    if (!sv_row || sv_row->ok != 1 || !sv_row->has_block_hash) {
-        if (why) *why = UA_SELECT_IDLE_NO_SCRIPT_HASH;
+    if (script_verdict_lacks_ok_block_hash(sv_row)) {
+        assign_select_idle_reason(why, UA_SELECT_IDLE_NO_SCRIPT_HASH);
         return NULL;
     }
 
     struct block_index *bi = block_map_find(&ms->map_block_index,
                                             &sv_row->block_hash);
     if (!bi) {
-        if (why) *why = UA_SELECT_IDLE_BLOCK_MAP_MISS;
+        assign_select_idle_reason(why, UA_SELECT_IDLE_BLOCK_MAP_MISS);
         return NULL;
     }
     if (bi->nHeight != height) {
-        if (why) *why = UA_SELECT_IDLE_HEIGHT_MISMATCH;
+        assign_select_idle_reason(why, UA_SELECT_IDLE_HEIGHT_MISMATCH);
         return NULL;
     }
     /* A height/hash-bound upstream verdict proves what was validated; it does
@@ -323,13 +355,10 @@ static struct block_index *hash_bound_fallback(
      * MISSING_INPUTS.  FAILED is hash identity, so also consult a same-hash map
      * owner when the candidate came from another in-RAM identity. */
     if (block_has_any_failure(bi)) {
-        if (why) *why = UA_SELECT_IDLE_BLOCK_FAILED;
+        assign_select_idle_reason(why, UA_SELECT_IDLE_BLOCK_FAILED);
         return NULL;
     }
-    bool indexed_parent_ok =
-        indexed_candidate_extends_visible_parent(ms, bi, height) ||
-        indexed_candidate_extends_durable_parent(db, bi, height);
-    if ((bi->nStatus & BLOCK_HAVE_DATA) != 0 && indexed_parent_ok)
+    if (indexed_have_data_extends_either_parent(db, ms, bi, height))
         return bi;
 
     char datadir[2048];
@@ -339,14 +368,13 @@ static struct block_index *hash_bound_fallback(
     struct uint256 actual_parent;
     uint256_set_null(&actual_parent);
     if (!indexed_body_hash_verifies(bi, datadir, &actual_parent, &body_why)) {
-        if (why) *why = body_why;
+        assign_select_idle_reason(why, body_why);
         return NULL;
     }
     if ((bi->nStatus & BLOCK_HAVE_DATA) == 0)
         block_index_status_fetch_or(bi, BLOCK_HAVE_DATA);
-    if (!candidate_extends_visible_parent(ms, &actual_parent, height) &&
-        !candidate_extends_durable_parent(db, &actual_parent, height)) {
-        if (why) *why = UA_SELECT_IDLE_PARENT_MISMATCH;
+    if (candidate_extends_neither_parent(db, ms, &actual_parent, height)) {
+        assign_select_idle_reason(why, UA_SELECT_IDLE_PARENT_MISMATCH);
         return NULL;
     }
     return bi;
