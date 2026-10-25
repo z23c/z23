@@ -109,9 +109,8 @@ static bool binding_zcl_pubkey_valid(const uint8_t pubkey[33])
            secp256k1_ec_pubkey_parse(binding_ctx_get(), &parsed, pubkey, 33) == 1;
 }
 
-static enum vcs_zcode_binding_error binding_fields(
-    const struct vcs_zcode_contributor_binding_v1 *binding,
-    bool require_signatures)
+static enum vcs_zcode_binding_error binding_scalars(
+    const struct vcs_zcode_contributor_binding_v1 *binding)
 {
     if (!binding) return VCS_ZCODE_BINDING_ERR_NULL;
     if (binding->schema_version != VCS_ZCODE_CONTRIBUTOR_BINDING_VERSION)
@@ -125,6 +124,12 @@ static enum vcs_zcode_binding_error binding_fields(
         return VCS_ZCODE_BINDING_ERR_OPERATION;
     if (binding->sequence == 0)
         return VCS_ZCODE_BINDING_ERR_SEQUENCE;
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_sequence_link(
+    const struct vcs_zcode_contributor_binding_v1 *binding)
+{
     if (binding->operation == VCS_ZCODE_BINDING_ACTIVE) {
         if (binding->sequence != 1)
             return VCS_ZCODE_BINDING_ERR_SEQUENCE;
@@ -136,6 +141,12 @@ static enum vcs_zcode_binding_error binding_fields(
         if (!root_nonzero(binding->predecessor_root))
             return VCS_ZCODE_BINDING_ERR_PREDECESSOR;
     }
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_zcl_key_consistency(
+    const struct vcs_zcode_contributor_binding_v1 *binding)
+{
     /* The zcl key must be a real curve point and the key id its hash160.
      * REVOKE keeps the key it retires so the binding stays standalone
      * verifiable; the chain gate — not field validation — is what makes a
@@ -146,16 +157,45 @@ static enum vcs_zcode_binding_error binding_fields(
     hash160(binding->zcl_pubkey, sizeof(binding->zcl_pubkey), want_key_id);
     if (memcmp(binding->zcl_key_id, want_key_id, sizeof(want_key_id)) != 0)
         return VCS_ZCODE_BINDING_ERR_KEY_ID_MISMATCH;
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_time_window(
+    const struct vcs_zcode_contributor_binding_v1 *binding)
+{
     if (binding->issued_unix <= 0 ||
         binding->expires_unix <= binding->issued_unix)
         return VCS_ZCODE_BINDING_ERR_TIME_ORDER;
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_signatures_present(
+    const struct vcs_zcode_contributor_binding_v1 *binding)
+{
+    if (!zcl_bytes_any_set(binding->zid_signature,
+                       sizeof(binding->zid_signature)))
+        return VCS_ZCODE_BINDING_ERR_SIGNATURE;
+    if (!zcl_bytes_any_set(binding->zcl_signature,
+                       sizeof(binding->zcl_signature)))
+        return VCS_ZCODE_BINDING_ERR_SIGNATURE;
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_fields(
+    const struct vcs_zcode_contributor_binding_v1 *binding,
+    bool require_signatures)
+{
+    enum vcs_zcode_binding_error error = binding_scalars(binding);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_sequence_link(binding);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_zcl_key_consistency(binding);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_time_window(binding);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
     if (require_signatures) {
-        if (!zcl_bytes_any_set(binding->zid_signature,
-                           sizeof(binding->zid_signature)))
-            return VCS_ZCODE_BINDING_ERR_SIGNATURE;
-        if (!zcl_bytes_any_set(binding->zcl_signature,
-                           sizeof(binding->zcl_signature)))
-            return VCS_ZCODE_BINDING_ERR_SIGNATURE;
+        error = binding_signatures_present(binding);
+        if (error != VCS_ZCODE_BINDING_OK) return error;
     }
     return VCS_ZCODE_BINDING_OK;
 }
@@ -381,17 +421,10 @@ enum vcs_zcode_binding_error vcs_zcode_contributor_binding_verify(
     return binding_verify_sigs(binding);
 }
 
-enum vcs_zcode_binding_error vcs_zcode_contributor_binding_validate_successor(
+static enum vcs_zcode_binding_error binding_successor_identity(
     const struct vcs_zcode_contributor_binding_v1 *prior,
-    const struct vcs_zcode_contributor_binding_v1 *next, int64_t now_unix)
+    const struct vcs_zcode_contributor_binding_v1 *next)
 {
-    if (!prior || !next) return VCS_ZCODE_BINDING_ERR_NULL;
-    enum vcs_zcode_binding_error error =
-        vcs_zcode_contributor_binding_validate(prior);
-    if (error != VCS_ZCODE_BINDING_OK) return error;
-    error = vcs_zcode_contributor_binding_validate_at(next, now_unix);
-    if (error != VCS_ZCODE_BINDING_OK) return error;
-
     if (memcmp(prior->network_genesis_root, next->network_genesis_root,
                32) != 0)
         return VCS_ZCODE_BINDING_ERR_NETWORK_MISMATCH;
@@ -405,9 +438,16 @@ enum vcs_zcode_binding_error vcs_zcode_contributor_binding_validate_successor(
      * chain back to sequence 1. */
     if (next->operation == VCS_ZCODE_BINDING_ACTIVE)
         return VCS_ZCODE_BINDING_ERR_OPERATION;
+    return VCS_ZCODE_BINDING_OK;
+}
 
+static enum vcs_zcode_binding_error binding_successor_predecessor(
+    const struct vcs_zcode_contributor_binding_v1 *prior,
+    const struct vcs_zcode_contributor_binding_v1 *next)
+{
     uint8_t prior_root[32];
-    error = vcs_zcode_contributor_binding_root(prior, prior_root);
+    enum vcs_zcode_binding_error error =
+        vcs_zcode_contributor_binding_root(prior, prior_root);
     if (error != VCS_ZCODE_BINDING_OK) return error;
     if (memcmp(next->predecessor_root, prior_root, sizeof(prior_root)) != 0)
         return VCS_ZCODE_BINDING_ERR_PREDECESSOR;
@@ -418,7 +458,13 @@ enum vcs_zcode_binding_error vcs_zcode_contributor_binding_validate_successor(
      * before its predecessor is a reordering, not a rotation. */
     if (next->issued_unix <= prior->issued_unix)
         return VCS_ZCODE_BINDING_ERR_TIME_ORDER;
+    return VCS_ZCODE_BINDING_OK;
+}
 
+static enum vcs_zcode_binding_error binding_successor_key_linkage(
+    const struct vcs_zcode_contributor_binding_v1 *prior,
+    const struct vcs_zcode_contributor_binding_v1 *next)
+{
     if (next->operation == VCS_ZCODE_BINDING_ROTATE) {
         if (memcmp(prior->zcl_pubkey, next->zcl_pubkey, 33) == 0)
             return VCS_ZCODE_BINDING_ERR_LINKAGE;
@@ -427,6 +473,26 @@ enum vcs_zcode_binding_error vcs_zcode_contributor_binding_validate_successor(
             memcmp(prior->zcl_key_id, next->zcl_key_id, 20) != 0)
             return VCS_ZCODE_BINDING_ERR_LINKAGE;
     }
+    return VCS_ZCODE_BINDING_OK;
+}
+
+enum vcs_zcode_binding_error vcs_zcode_contributor_binding_validate_successor(
+    const struct vcs_zcode_contributor_binding_v1 *prior,
+    const struct vcs_zcode_contributor_binding_v1 *next, int64_t now_unix)
+{
+    if (!prior || !next) return VCS_ZCODE_BINDING_ERR_NULL;
+    enum vcs_zcode_binding_error error =
+        vcs_zcode_contributor_binding_validate(prior);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = vcs_zcode_contributor_binding_validate_at(next, now_unix);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+
+    error = binding_successor_identity(prior, next);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_successor_predecessor(prior, next);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_successor_key_linkage(prior, next);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
 
     error = binding_verify_sigs(prior);
     if (error != VCS_ZCODE_BINDING_OK) return error;
@@ -485,9 +551,8 @@ static bool binding_derive_zcl_pubkey_v2(const uint8_t secret[32],
     return len == 33;
 }
 
-static enum vcs_zcode_binding_error binding_fields_v2(
-    const struct vcs_zcode_contributor_binding_v2 *binding,
-    bool require_signatures)
+static enum vcs_zcode_binding_error binding_scalars_v2(
+    const struct vcs_zcode_contributor_binding_v2 *binding)
 {
     if (!binding) return VCS_ZCODE_BINDING_ERR_NULL;
     if (binding->schema_version != VCS_ZCODE_CONTRIBUTOR_BINDING_V2_VERSION)
@@ -501,6 +566,12 @@ static enum vcs_zcode_binding_error binding_fields_v2(
         return VCS_ZCODE_BINDING_ERR_OPERATION;
     if (binding->sequence == 0)
         return VCS_ZCODE_BINDING_ERR_SEQUENCE;
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_sequence_link_v2(
+    const struct vcs_zcode_contributor_binding_v2 *binding)
+{
     if (binding->operation == VCS_ZCODE_BINDING_ACTIVE) {
         if (binding->sequence != 1)
             return VCS_ZCODE_BINDING_ERR_SEQUENCE;
@@ -512,6 +583,12 @@ static enum vcs_zcode_binding_error binding_fields_v2(
         if (!root_nonzero(binding->predecessor_root))
             return VCS_ZCODE_BINDING_ERR_PREDECESSOR;
     }
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_zcl_key_consistency_v2(
+    const struct vcs_zcode_contributor_binding_v2 *binding)
+{
     /* Same standalone-verifiability contract as v1: the zcl key must be a
      * real curve point and the key id its hash160. */
     if (!binding_zcl_pubkey_valid(binding->zcl_pubkey))
@@ -520,9 +597,21 @@ static enum vcs_zcode_binding_error binding_fields_v2(
     hash160(binding->zcl_pubkey, sizeof(binding->zcl_pubkey), want_key_id);
     if (memcmp(binding->zcl_key_id, want_key_id, sizeof(want_key_id)) != 0)
         return VCS_ZCODE_BINDING_ERR_KEY_ID_MISMATCH;
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_time_window_v2(
+    const struct vcs_zcode_contributor_binding_v2 *binding)
+{
     if (binding->issued_unix <= 0 ||
         binding->expires_unix <= binding->issued_unix)
         return VCS_ZCODE_BINDING_ERR_TIME_ORDER;
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_activation_shape_v2(
+    const struct vcs_zcode_contributor_binding_v2 *binding)
+{
     /* Only RECOVER carries an activation time, and it must leave the full
      * recovery delay between issue and activation. */
     if (binding->operation == VCS_ZCODE_BINDING_RECOVER) {
@@ -532,33 +621,58 @@ static enum vcs_zcode_binding_error binding_fields_v2(
     } else if (binding->activation_unix != 0) {
         return VCS_ZCODE_BINDING_ERR_OPERATION;
     }
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_sig_slot_shape_v2(
+    const struct vcs_zcode_contributor_binding_v2 *binding)
+{
+    if (!zcl_bytes_any_set(binding->zid_signature,
+                       sizeof(binding->zid_signature)))
+        return VCS_ZCODE_BINDING_ERR_SIGNATURE;
+    bool current_signed =
+        zcl_bytes_any_set(binding->zcl_current_signature,
+                      sizeof(binding->zcl_current_signature));
+    bool new_signed =
+        zcl_bytes_any_set(binding->zcl_new_signature,
+                      sizeof(binding->zcl_new_signature));
+    /* Slot shape per operation: ACTIVE/ROTATE sign both, REVOKE signs
+     * only current, RECOVER signs only new. */
+    bool shape_ok;
+    switch (binding->operation) {
+    case VCS_ZCODE_BINDING_ACTIVE:
+    case VCS_ZCODE_BINDING_ROTATE:
+        shape_ok = current_signed && new_signed;
+        break;
+    case VCS_ZCODE_BINDING_REVOKE:
+        shape_ok = current_signed && !new_signed;
+        break;
+    default: /* RECOVER */
+        shape_ok = !current_signed && new_signed;
+        break;
+    }
+    if (!shape_ok)
+        return VCS_ZCODE_BINDING_ERR_SIG_SLOT;
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_fields_v2(
+    const struct vcs_zcode_contributor_binding_v2 *binding,
+    bool require_signatures)
+{
+    enum vcs_zcode_binding_error error = binding_scalars_v2(binding);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_sequence_link_v2(binding);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_zcl_key_consistency_v2(binding);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_time_window_v2(binding);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_activation_shape_v2(binding);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
     if (require_signatures) {
-        if (!zcl_bytes_any_set(binding->zid_signature,
-                           sizeof(binding->zid_signature)))
-            return VCS_ZCODE_BINDING_ERR_SIGNATURE;
-        bool current_signed =
-            zcl_bytes_any_set(binding->zcl_current_signature,
-                          sizeof(binding->zcl_current_signature));
-        bool new_signed =
-            zcl_bytes_any_set(binding->zcl_new_signature,
-                          sizeof(binding->zcl_new_signature));
-        /* Slot shape per operation: ACTIVE/ROTATE sign both, REVOKE signs
-         * only current, RECOVER signs only new. */
-        bool shape_ok;
-        switch (binding->operation) {
-        case VCS_ZCODE_BINDING_ACTIVE:
-        case VCS_ZCODE_BINDING_ROTATE:
-            shape_ok = current_signed && new_signed;
-            break;
-        case VCS_ZCODE_BINDING_REVOKE:
-            shape_ok = current_signed && !new_signed;
-            break;
-        default: /* RECOVER */
-            shape_ok = !current_signed && new_signed;
-            break;
-        }
-        if (!shape_ok)
-            return VCS_ZCODE_BINDING_ERR_SIG_SLOT;
+        error = binding_sig_slot_shape_v2(binding);
+        if (error != VCS_ZCODE_BINDING_OK) return error;
     }
     return VCS_ZCODE_BINDING_OK;
 }
@@ -686,10 +800,9 @@ enum vcs_zcode_binding_error vcs_zcode_contributor_binding_root_v2(
                ? VCS_ZCODE_BINDING_OK : VCS_ZCODE_BINDING_ERR_NULL;
 }
 
-enum vcs_zcode_binding_error vcs_zcode_contributor_binding_seal_v2(
-    struct vcs_zcode_contributor_binding_v2 *binding,
-    const uint8_t zid_secret[32], const uint8_t zid_pubkey[32],
-    const uint8_t current_zcl_secret[32], const uint8_t new_zcl_secret[32])
+static enum vcs_zcode_binding_error binding_seal_v2_zid_pin(
+    const struct vcs_zcode_contributor_binding_v2 *binding,
+    const uint8_t zid_secret[32], const uint8_t zid_pubkey[32])
 {
     if (!binding || !zid_secret || !zid_pubkey)
         return VCS_ZCODE_BINDING_ERR_NULL;
@@ -702,63 +815,74 @@ enum vcs_zcode_binding_error vcs_zcode_contributor_binding_seal_v2(
         return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
     if (memcmp(binding->zid_pubkey, zid_pubkey, 32) != 0)
         return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
+    return VCS_ZCODE_BINDING_OK;
+}
 
-    enum vcs_zcode_binding_error error = binding_fields_v2(binding, false);
-    if (error != VCS_ZCODE_BINDING_OK) return error;
-
-    /* Pin the secrets to the slots before signing anything. The embedded
-     * zcl_pubkey is always the NEW key (the initial key for ACTIVE, the
-     * retiring key for REVOKE); a ROTATE's current secret is the old key
-     * and is pinned by the chain gate against the predecessor, not here. */
+static enum vcs_zcode_binding_error binding_seal_v2_pin_active(
+    const struct vcs_zcode_contributor_binding_v2 *binding,
+    const uint8_t current_zcl_secret[32], const uint8_t new_zcl_secret[32])
+{
+    if (!current_zcl_secret || !new_zcl_secret)
+        return VCS_ZCODE_BINDING_ERR_NULL;
     uint8_t derived_ser[33];
-    switch (binding->operation) {
-    case VCS_ZCODE_BINDING_ACTIVE:
-        if (!current_zcl_secret || !new_zcl_secret)
-            return VCS_ZCODE_BINDING_ERR_NULL;
-        if (!binding_derive_zcl_pubkey_v2(current_zcl_secret, derived_ser) ||
-            memcmp(binding->zcl_pubkey, derived_ser, 33) != 0)
-            return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
-        if (!binding_derive_zcl_pubkey_v2(new_zcl_secret, derived_ser) ||
-            memcmp(binding->zcl_pubkey, derived_ser, 33) != 0)
-            return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
-        break;
-    case VCS_ZCODE_BINDING_ROTATE:
-        if (!current_zcl_secret || !new_zcl_secret)
-            return VCS_ZCODE_BINDING_ERR_NULL;
-        if (!binding_derive_zcl_pubkey_v2(new_zcl_secret, derived_ser) ||
-            memcmp(binding->zcl_pubkey, derived_ser, 33) != 0)
-            return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
-        break;
-    case VCS_ZCODE_BINDING_REVOKE:
-        if (!current_zcl_secret)
-            return VCS_ZCODE_BINDING_ERR_NULL;
-        if (!binding_derive_zcl_pubkey_v2(current_zcl_secret, derived_ser) ||
-            memcmp(binding->zcl_pubkey, derived_ser, 33) != 0)
-            return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
-        memset(binding->zcl_new_signature, 0,
-               sizeof(binding->zcl_new_signature));
-        break;
-    default: /* RECOVER — the old key is presumed lost. */
-        if (current_zcl_secret)
-            return VCS_ZCODE_BINDING_ERR_SIG_SLOT;
-        if (!new_zcl_secret)
-            return VCS_ZCODE_BINDING_ERR_NULL;
-        if (!binding_derive_zcl_pubkey_v2(new_zcl_secret, derived_ser) ||
-            memcmp(binding->zcl_pubkey, derived_ser, 33) != 0)
-            return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
-        memset(binding->zcl_current_signature, 0,
-               sizeof(binding->zcl_current_signature));
-        break;
-    }
+    if (!binding_derive_zcl_pubkey_v2(current_zcl_secret, derived_ser) ||
+        memcmp(binding->zcl_pubkey, derived_ser, 33) != 0)
+        return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
+    if (!binding_derive_zcl_pubkey_v2(new_zcl_secret, derived_ser) ||
+        memcmp(binding->zcl_pubkey, derived_ser, 33) != 0)
+        return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
+    return VCS_ZCODE_BINDING_OK;
+}
 
-    uint8_t root[32];
-    error = vcs_zcode_contributor_binding_body_root_v2(binding, root);
-    if (error != VCS_ZCODE_BINDING_OK) return error;
+static enum vcs_zcode_binding_error binding_seal_v2_pin_rotate(
+    const struct vcs_zcode_contributor_binding_v2 *binding,
+    const uint8_t current_zcl_secret[32], const uint8_t new_zcl_secret[32])
+{
+    if (!current_zcl_secret || !new_zcl_secret)
+        return VCS_ZCODE_BINDING_ERR_NULL;
+    uint8_t derived_ser[33];
+    if (!binding_derive_zcl_pubkey_v2(new_zcl_secret, derived_ser) ||
+        memcmp(binding->zcl_pubkey, derived_ser, 33) != 0)
+        return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
+    return VCS_ZCODE_BINDING_OK;
+}
 
-    if (!vcs_signed_evidence_seal_root(root, zid_secret, zid_pubkey,
-                                       binding->zid_signature))
-        return VCS_ZCODE_BINDING_ERR_SIGNATURE;
+static enum vcs_zcode_binding_error binding_seal_v2_pin_revoke(
+    struct vcs_zcode_contributor_binding_v2 *binding,
+    const uint8_t current_zcl_secret[32])
+{
+    if (!current_zcl_secret)
+        return VCS_ZCODE_BINDING_ERR_NULL;
+    uint8_t derived_ser[33];
+    if (!binding_derive_zcl_pubkey_v2(current_zcl_secret, derived_ser) ||
+        memcmp(binding->zcl_pubkey, derived_ser, 33) != 0)
+        return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
+    memset(binding->zcl_new_signature, 0,
+           sizeof(binding->zcl_new_signature));
+    return VCS_ZCODE_BINDING_OK;
+}
 
+static enum vcs_zcode_binding_error binding_seal_v2_pin_recover(
+    struct vcs_zcode_contributor_binding_v2 *binding,
+    const uint8_t current_zcl_secret[32], const uint8_t new_zcl_secret[32])
+{
+    if (current_zcl_secret)
+        return VCS_ZCODE_BINDING_ERR_SIG_SLOT;
+    if (!new_zcl_secret)
+        return VCS_ZCODE_BINDING_ERR_NULL;
+    uint8_t derived_ser[33];
+    if (!binding_derive_zcl_pubkey_v2(new_zcl_secret, derived_ser) ||
+        memcmp(binding->zcl_pubkey, derived_ser, 33) != 0)
+        return VCS_ZCODE_BINDING_ERR_KEY_MISMATCH;
+    memset(binding->zcl_current_signature, 0,
+           sizeof(binding->zcl_current_signature));
+    return VCS_ZCODE_BINDING_OK;
+}
+
+static enum vcs_zcode_binding_error binding_seal_v2_sign_slots(
+    struct vcs_zcode_contributor_binding_v2 *binding, const uint8_t root[32],
+    const uint8_t current_zcl_secret[32], const uint8_t new_zcl_secret[32])
+{
     switch (binding->operation) {
     case VCS_ZCODE_BINDING_ACTIVE:
     case VCS_ZCODE_BINDING_ROTATE:
@@ -780,6 +904,53 @@ enum vcs_zcode_binding_error vcs_zcode_contributor_binding_seal_v2(
         break;
     }
     return VCS_ZCODE_BINDING_OK;
+}
+
+enum vcs_zcode_binding_error vcs_zcode_contributor_binding_seal_v2(
+    struct vcs_zcode_contributor_binding_v2 *binding,
+    const uint8_t zid_secret[32], const uint8_t zid_pubkey[32],
+    const uint8_t current_zcl_secret[32], const uint8_t new_zcl_secret[32])
+{
+    enum vcs_zcode_binding_error error =
+        binding_seal_v2_zid_pin(binding, zid_secret, zid_pubkey);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+
+    error = binding_fields_v2(binding, false);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+
+    /* Pin the secrets to the slots before signing anything. The embedded
+     * zcl_pubkey is always the NEW key (the initial key for ACTIVE, the
+     * retiring key for REVOKE); a ROTATE's current secret is the old key
+     * and is pinned by the chain gate against the predecessor, not here. */
+    switch (binding->operation) {
+    case VCS_ZCODE_BINDING_ACTIVE:
+        error = binding_seal_v2_pin_active(binding, current_zcl_secret,
+                                           new_zcl_secret);
+        break;
+    case VCS_ZCODE_BINDING_ROTATE:
+        error = binding_seal_v2_pin_rotate(binding, current_zcl_secret,
+                                           new_zcl_secret);
+        break;
+    case VCS_ZCODE_BINDING_REVOKE:
+        error = binding_seal_v2_pin_revoke(binding, current_zcl_secret);
+        break;
+    default: /* RECOVER — the old key is presumed lost. */
+        error = binding_seal_v2_pin_recover(binding, current_zcl_secret,
+                                            new_zcl_secret);
+        break;
+    }
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+
+    uint8_t root[32];
+    error = vcs_zcode_contributor_binding_body_root_v2(binding, root);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+
+    if (!vcs_signed_evidence_seal_root(root, zid_secret, zid_pubkey,
+                                       binding->zid_signature))
+        return VCS_ZCODE_BINDING_ERR_SIGNATURE;
+
+    return binding_seal_v2_sign_slots(binding, root, current_zcl_secret,
+                                      new_zcl_secret);
 }
 
 /* Verify the signatures over the v2 body root, no expiry gate. The ZID
@@ -851,18 +1022,10 @@ enum vcs_zcode_binding_error vcs_zcode_contributor_binding_verify_v2(
     return binding_verify_sigs_v2(binding, NULL);
 }
 
-enum vcs_zcode_binding_error
-vcs_zcode_contributor_binding_validate_successor_v2(
+static enum vcs_zcode_binding_error binding_successor_identity_v2(
     const struct vcs_zcode_contributor_binding_v2 *prior,
-    const struct vcs_zcode_contributor_binding_v2 *next, int64_t now_unix)
+    const struct vcs_zcode_contributor_binding_v2 *next)
 {
-    if (!prior || !next) return VCS_ZCODE_BINDING_ERR_NULL;
-    enum vcs_zcode_binding_error error =
-        vcs_zcode_contributor_binding_validate_v2(prior);
-    if (error != VCS_ZCODE_BINDING_OK) return error;
-    error = vcs_zcode_contributor_binding_validate_at_v2(next, now_unix);
-    if (error != VCS_ZCODE_BINDING_OK) return error;
-
     if (memcmp(prior->network_genesis_root, next->network_genesis_root,
                32) != 0)
         return VCS_ZCODE_BINDING_ERR_NETWORK_MISMATCH;
@@ -873,9 +1036,16 @@ vcs_zcode_contributor_binding_validate_successor_v2(
         return VCS_ZCODE_BINDING_ERR_REVOKED;
     if (next->operation == VCS_ZCODE_BINDING_ACTIVE)
         return VCS_ZCODE_BINDING_ERR_OPERATION;
+    return VCS_ZCODE_BINDING_OK;
+}
 
+static enum vcs_zcode_binding_error binding_successor_predecessor_v2(
+    const struct vcs_zcode_contributor_binding_v2 *prior,
+    const struct vcs_zcode_contributor_binding_v2 *next)
+{
     uint8_t prior_root[32];
-    error = vcs_zcode_contributor_binding_root_v2(prior, prior_root);
+    enum vcs_zcode_binding_error error =
+        vcs_zcode_contributor_binding_root_v2(prior, prior_root);
     if (error != VCS_ZCODE_BINDING_OK) return error;
     if (memcmp(next->predecessor_root, prior_root, sizeof(prior_root)) != 0)
         return VCS_ZCODE_BINDING_ERR_PREDECESSOR;
@@ -884,7 +1054,13 @@ vcs_zcode_contributor_binding_validate_successor_v2(
     /* Issue time must strictly increase along the chain. */
     if (next->issued_unix <= prior->issued_unix)
         return VCS_ZCODE_BINDING_ERR_TIME_ORDER;
+    return VCS_ZCODE_BINDING_OK;
+}
 
+static enum vcs_zcode_binding_error binding_successor_key_linkage_v2(
+    const struct vcs_zcode_contributor_binding_v2 *prior,
+    const struct vcs_zcode_contributor_binding_v2 *next, int64_t now_unix)
+{
     switch (next->operation) {
     case VCS_ZCODE_BINDING_ROTATE:
         /* A ROTATE that keeps the old key is not a rotation. */
@@ -907,6 +1083,27 @@ vcs_zcode_contributor_binding_validate_successor_v2(
             return VCS_ZCODE_BINDING_ERR_RECOVERY_PENDING;
         break;
     }
+    return VCS_ZCODE_BINDING_OK;
+}
+
+enum vcs_zcode_binding_error
+vcs_zcode_contributor_binding_validate_successor_v2(
+    const struct vcs_zcode_contributor_binding_v2 *prior,
+    const struct vcs_zcode_contributor_binding_v2 *next, int64_t now_unix)
+{
+    if (!prior || !next) return VCS_ZCODE_BINDING_ERR_NULL;
+    enum vcs_zcode_binding_error error =
+        vcs_zcode_contributor_binding_validate_v2(prior);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = vcs_zcode_contributor_binding_validate_at_v2(next, now_unix);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+
+    error = binding_successor_identity_v2(prior, next);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_successor_predecessor_v2(prior, next);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
+    error = binding_successor_key_linkage_v2(prior, next, now_unix);
+    if (error != VCS_ZCODE_BINDING_OK) return error;
 
     error = binding_verify_sigs_v2(prior, NULL);
     if (error != VCS_ZCODE_BINDING_OK) return error;
