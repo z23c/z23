@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Creton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  *
  * Sky Combat: five-player split-screen match.
  */
