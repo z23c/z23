@@ -3026,3 +3026,62 @@ ZCL_COMMAND_DEV_COMMAND(
     zcl_native_handle_dev_machine_shell,
     "an interactive guest console is a development-lane surface",
     "z23-dev dev app machine shell")
+
+/* ── dev.cx.next / dev.cx.check ───────────────────────────────────────────
+ * The native port of cx-swarm's picker and per-lane check
+ * (tools/command/native_dev_cx_next.c, native_dev_cx_check.c). Same
+ * behaviour for every agent on every host; the metric stays in
+ * z23-lint check-cyclomatic-complexity. */
+ZCL_COMMAND_BRANCH("dev.cx", "dev", "Cyclomatic-complexity split units",
+                   ZCL_COMMAND_LAYER_DEV)
+
+ZCL_COMMAND_DEV_READ(
+    "dev.cx.next", "dev.cx", "",
+    "List the next complexity-split units from the pinned baseline",
+    "Returns up to count units drawn from "
+    "tools/lint/cyclomatic_complexity_baseline.txt, one per file: "
+    "{file, functions[], max_score, lines}, fewest functions first, then "
+    "lowest max_score, then path. Skips core/, custody-owned paths, "
+    "contexts/commons/packages/, files of 1300 or more lines, files any "
+    "worktree of this repository changes against origin/main, and the paths "
+    "listed in the exclude file. prefix is a comma list of path prefixes to "
+    "keep; cwd names the checkout (default: the current directory). "
+    "Read-only; a missing origin/main refuses.", 8192,
+    "cx,cyclomatic,complexity,baseline,split,swarm",
+    "zcl.dev_cx_next_input.v1", "zcl.dev_cx_next.v1",
+    "count,exclude,prefix,cwd", "",
+    "z23-dev dev cx next --count=5 --prefix=tools/command/",
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_LATENCY_BACKGROUND, ZCL_COMMAND_COST_LOW,
+    ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_CHECKOUT_READ | ZCL_COMMAND_CAP_PROCESS_EXEC,
+    ZCL_COMMAND_TRAIT_IDEMPOTENT | ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_cx_next,
+    "complexity unit selection is a development-lane surface",
+    "z23-dev dev cx next")
+
+ZCL_COMMAND_DEV_COMMAND(
+    "dev.cx.check", "dev.cx", "",
+    "Verify one complexity split in a worktree and tighten the baseline",
+    "Checks one unit in worktree: the diff touches only file (CX_SCOPE), file "
+    "compiles as C23 with the Makefile include set (CX_COMPILE), tightening "
+    "adds no baseline row (CX_BASELINE_ADDED), no listed function is still "
+    "above 15 (CX_STILL_OVER) and the full complexity gate passes "
+    "(CX_GATE). It runs the lane's own build/bin/z23-lint. On success the "
+    "baseline tighten stays applied in that worktree and rows_deleted names "
+    "the rows it removed; on any failure the baseline is restored "
+    "byte-for-byte.", 4096,
+    "cx,cyclomatic,complexity,baseline,verify,tighten",
+    "zcl.dev_cx_check_input.v1", "zcl.dev_cx_check.v1",
+    "worktree,file,functions", "worktree,file,functions",
+    "z23-dev dev cx check --worktree=DIR --file=tools/x.c --functions=a,b",
+    ZCL_COMMAND_EFFECT_MUTATE, ZCL_COMMAND_RISK_DEV_MUTATION,
+    ZCL_COMMAND_SCOPE_LOCAL, ZCL_COMMAND_AUTH_OPERATOR,
+    ZCL_COMMAND_MODE_SYNC, ZCL_COMMAND_LATENCY_BACKGROUND,
+    ZCL_COMMAND_COST_HIGH, ZCL_COMMAND_CONFIRM_NONE, ZCL_COMMAND_LANE_LOCAL,
+    ZCL_COMMAND_CAP_CHECKOUT_WRITE | ZCL_COMMAND_CAP_PROCESS_EXEC |
+        ZCL_COMMAND_CAP_COMPILER,
+    ZCL_COMMAND_TRAIT_DEV_ONLY,
+    zcl_native_handle_dev_cx_check,
+    "complexity unit verification is a development-lane surface",
+    "z23-dev dev cx check")

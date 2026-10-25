@@ -479,6 +479,18 @@ static bool cr_match_job_wait_ints(const char *path, const char *key,
     return true;
 }
 
+/* dev.cx.next: count is a whole number of units; the handler owns the 1..200
+ * refusal so the transport admits any positive integer. */
+static bool cr_match_cx_next_ints(const char *path, const char *key,
+                                  const struct json_value *value,
+                                  bool *type_ok)
+{
+    if (strcmp(path, "dev.cx.next") != 0 || strcmp(key, "count") != 0)
+        return false;
+    *type_ok = cr_int_range(value, 1, 1000000);
+    return true;
+}
+
 static bool cr_match_scoped_ints(const char *path, const char *key,
                                  const struct json_value *value, bool *type_ok)
 {
@@ -486,7 +498,8 @@ static bool cr_match_scoped_ints(const char *path, const char *key,
            cr_match_wiki_chunk_ints(path, key, value, type_ok) ||
            cr_match_vanity_ints(path, key, value, type_ok) ||
            cr_match_fleet_bundle_ints(path, key, value, type_ok) ||
-           cr_match_job_wait_ints(path, key, value, type_ok);
+           cr_match_job_wait_ints(path, key, value, type_ok) ||
+           cr_match_cx_next_ints(path, key, value, type_ok);
 }
 
 static bool cr_match_leaf_ints(const char *path, const char *key,
@@ -735,6 +748,14 @@ static const struct cr_int_bound *cr_job_wait_bound(const char *path,
     return ints && strcmp(path, "dev.loop.job.wait") == 0 ? &job_wait : NULL;
 }
 
+static const struct cr_int_bound *cr_cx_next_bound(const char *path,
+                                                  const char *key)
+{
+    static const struct cr_int_bound cx_next = { "cx_next", 1, 1000000 };
+    return strcmp(path, "dev.cx.next") == 0 && strcmp(key, "count") == 0
+        ? &cx_next : NULL;
+}
+
 static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
                                                    const char *key)
 {
@@ -752,6 +773,8 @@ static const struct cr_int_bound *cr_leaf_int_bound(const char *path,
     }
     const struct cr_int_bound *job = cr_job_wait_bound(path, key);
     if (job) return job;
+    const struct cr_int_bound *cx = cr_cx_next_bound(path, key);
+    if (cx) return cx;
     const struct cr_int_bound *lab = cr_lab_bound(path, key);
     if (lab) return lab;
     const struct cr_int_bound *docs = cr_docs_read_bound(path, key);

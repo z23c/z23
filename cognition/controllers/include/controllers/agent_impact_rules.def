@@ -2685,6 +2685,7 @@ AGENT_IMPACT_RULE("tests/harness/src/dev_agent_mail_windows_acceptance.c", "make
 AGENT_IMPACT_RULE("tools/command/native_devagent_mail.c|tests/harness/src/test_devagent_mail.c", "devagent_mail make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_devagent_mail_wait.c|tests/harness/src/test_devagent_mail_wait.c", "devagent_mail_wait make_lint_gates")
 AGENT_IMPACT_RULE("tools/command/native_dev_job.c|tools/command/native_dev_job.h|tools/command/native_dev_job_exec.c|tools/command/native_dev_job_wait.c|tools/command/native_dev_bounded_wait.c|tools/command/native_dev_bounded_wait.h|tests/harness/src/test_dev_job.c", "dev_job devagent_mail_wait make_lint_gates")
+AGENT_IMPACT_RULE("tools/command/native_dev_cx.h|tools/command/native_dev_cx_util.c|tools/command/native_dev_cx_next.c|tools/command/native_dev_cx_check.c|tests/harness/src/test_dev_cx.c", "dev_cx")
 AGENT_IMPACT_RULE("tools/command/native_dev_factory.c|tests/harness/src/test_dev_factory.c", "dev_factory make_lint_gates")
 /* The built-in RISC-V machine: the module, its supervisor guest fixtures and proofs, and the command leaf that boots a kernel in it (whose proofs run the same fixtures). */
 AGENT_IMPACT_RULE("tests/harness/fixtures/machine_geli_bootstrap.c|tests/harness/fixtures/machine_geli_volume.c|tests/harness/src/test_rvmachine_geli_volume.c", "rvmachine_geli_volume make_lint_gates")
