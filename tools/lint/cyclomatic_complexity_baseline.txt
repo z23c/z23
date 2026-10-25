@@ -96,7 +96,6 @@ contexts/commons/modules/metaverse/src/character_sheet_text.c:character_seed_for
 contexts/commons/modules/metaverse/src/character_sheet_text.c:character_seed_parse:24
 contexts/commons/modules/metaverse/src/manifest_read.c:mv_manifest_names:21
 contexts/commons/modules/metaverse/src/manifest_read.c:mv_manifest_verify_possession_impl:27
-contexts/commons/modules/vcs/src/blob_store.c:blob_shape_of:16
 contexts/commons/modules/vcs/src/build_execution_observation.c:vcs_build_execution_observation_v1_valid:26
 contexts/commons/modules/vcs/src/fastobj.c:vcs_fastobj_sidecar_verify:28
 contexts/commons/modules/vcs/src/fastobj_carrier.c:fc_carrier_apply:29

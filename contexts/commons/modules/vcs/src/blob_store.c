@@ -183,6 +183,21 @@ bool vcs_blob_put(const uint8_t *bytes, size_t len, uint8_t out_root[32])
     return vcs_blob_put_to(store, bytes, len, out_root) == VCS_BLOB_OK;
 }
 
+/* True when the parsed manifest is anything but the frozen
+ * one-file/one-chunk blob shape: exactly one plain file at the
+ * canonical blob path, one chunk, and a nonzero size under the blob
+ * ceiling. Short-circuit order matters: files[0] stays unread until
+ * count == 1u is established. */
+static bool blob_manifest_violates_shape(const struct vcs_package_manifest *m)
+{
+    return m->count != 1u || m->files[0].chunk_count != 1u ||
+           m->files[0].mode != VCS_PACKAGE_MODE_FILE ||
+           !m->files[0].path ||
+           strcmp(m->files[0].path, VCS_BLOB_PATH) != 0 ||
+           m->files[0].size == 0 ||
+           m->files[0].size > (uint64_t)VCS_BLOB_MAX_BYTES;
+}
+
 /* Confirm a tracked root really is the frozen blob shape and hand back
  * its committed length + chunk hash. Re-derives the root from the
  * PARSED manifest so a store index that disagrees with its own bytes
@@ -214,12 +229,7 @@ static enum vcs_blob_result blob_shape_of(struct vcs_package_store *store,
     if (!vcs_package_manifest_root(&manifest, derived) ||
         memcmp(derived, root, 32) != 0) {
         vr = VCS_BLOB_ERR_CORRUPT;
-    } else if (manifest.count != 1u || manifest.files[0].chunk_count != 1u ||
-               manifest.files[0].mode != VCS_PACKAGE_MODE_FILE ||
-               !manifest.files[0].path ||
-               strcmp(manifest.files[0].path, VCS_BLOB_PATH) != 0 ||
-               manifest.files[0].size == 0 ||
-               manifest.files[0].size > (uint64_t)VCS_BLOB_MAX_BYTES) {
+    } else if (blob_manifest_violates_shape(&manifest)) {
         vr = VCS_BLOB_ERR_SHAPE;
     } else {
         if (out_len)
@@ -343,4 +353,3 @@ size_t vcs_blob_announce_via(struct vcs_swarm_engine *engine)
         queued += vcs_swarm_engine_announce_to(engine, peers[i]);
     return queued;
 }
-
