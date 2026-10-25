@@ -243,34 +243,31 @@ static bool at_write_queued_status(const char *status_file, const char *kind,
 
 /* ── RPC: agenttest ───────────────────────────────────────────────── */
 
-/* Match `kind` against its two allowlisted literals, then validate `name`.
- * On any refusal the error response fields are pushed onto `result` — same
- * fields, same order, same strings as always — and NULL is returned so the
- * caller can immediately return true. On success the matched literal
- * constant is returned (never the caller's raw pointer) and *is_test_group
- * records which of the two kinds was selected for the precheck below. */
-static const char *at_validate_kind_and_name(const char *kind,
-                                             const char *name,
-                                             struct json_value *result,
-                                             bool *is_test_group)
+enum {
+    AT_VALIDATE_OK = 0,
+    AT_VALIDATE_INVALID_KIND,
+    AT_VALIDATE_INVALID_NAME,
+};
+
+static int at_validate_kind_and_name(const char *kind, const char *name,
+                                     struct json_value *result,
+                                     bool *is_test_group,
+                                     const char **kind_lit)
 {
-    const char *kind_lit = NULL;
     *is_test_group = false;
+    *kind_lit = NULL;
     if (kind && strcmp(kind, AT_KIND_TEST_GROUP) == 0) {
-        kind_lit = AT_KIND_TEST_GROUP;
+        *kind_lit = AT_KIND_TEST_GROUP;
         *is_test_group = true;
     } else if (kind && strcmp(kind, AT_KIND_SCENARIO) == 0) {
-        kind_lit = AT_KIND_SCENARIO;
+        *kind_lit = AT_KIND_SCENARIO;
     }
-    if (!kind_lit) {
+    if (!*kind_lit) {
         json_push_kv_str(result, "status", "error");
         json_push_kv_str(result, "error", "invalid_kind");
         json_push_kv_str(result, "detail",
             "kind must be exactly \"test_group\" or \"scenario\"");
-        // obs-ok:agent-test-diagnostic-stderr (best-effort status telemetry / request refusal returns JSON error)
-        fprintf(stderr, "[agent_test] %s:%d %s(): refused invalid kind=%s\n",
-                __FILE__, __LINE__, __func__, kind ? kind : "(null)");
-        return NULL;
+        return AT_VALIDATE_INVALID_KIND;
     }
 
     if (!at_name_valid(name)) {
@@ -278,25 +275,23 @@ static const char *at_validate_kind_and_name(const char *kind,
         json_push_kv_str(result, "error", "invalid_name");
         json_push_kv_str(result, "detail",
             "name must match ^[a-z0-9_]{1,64}$");
-        // obs-ok:agent-test-diagnostic-stderr (best-effort status telemetry / request refusal returns JSON error)
-        fprintf(stderr, "[agent_test] %s:%d %s(): refused invalid name for "
-                "kind=%s\n", __FILE__, __LINE__, __func__, kind_lit);
-        return NULL;
+        return AT_VALIDATE_INVALID_NAME;
     }
-    return kind_lit;
+    return AT_VALIDATE_OK;
 }
 
 /* ── kind-specific existence checks BEFORE ever launching anything ── */
 
-/* Dispatches the kind-specific precheck: test_group cross-checks `name`
- * against the compiled group registry, scenario requires `name.scenario`
- * to already exist. On refusal the error response fields are pushed onto
- * `result` and false is returned so the caller can immediately return
- * true. *registry_precheck_skipped keeps its historical meaning: set only
- * for kind=test_group, only when no refusal happened. */
-static bool at_precheck_surface_exists(bool is_test_group, const char *name,
-                                       struct json_value *result,
-                                       bool *registry_precheck_skipped)
+enum {
+    AT_PRECHECK_OK = 0,
+    AT_PRECHECK_GROUP_NOT_REGISTERED,
+    AT_PRECHECK_SCENARIO_MISSING,
+};
+
+static int at_precheck_surface_exists(bool is_test_group, const char *name,
+                                      struct json_value *result,
+                                      bool *registry_precheck_skipped,
+                                      char *scen_path, size_t scen_path_sz)
 {
     if (is_test_group) {
         const char *bin = getenv("ZCL_AGENT_TEST_PARALLEL_BIN");
@@ -308,32 +303,23 @@ static bool at_precheck_surface_exists(bool is_test_group, const char *name,
             json_push_kv_str(result, "error", "test_group_not_registered");
             json_push_kv_str(result, "detail",
                 "name did not appear in `test_parallel --list`");
-            // obs-ok:agent-test-diagnostic-stderr (best-effort status telemetry / request refusal returns JSON error)
-            fprintf(stderr, "[agent_test] %s:%d %s(): refused unregistered "
-                    "test_group name=%s\n", __FILE__, __LINE__, __func__,
-                    name);
-            return false;
+            return AT_PRECHECK_GROUP_NOT_REGISTERED;
         }
         *registry_precheck_skipped = !reachable;
     } else {
         const char *scen_dir = getenv("ZCL_AGENT_TEST_SCENARIOS_DIR");
         if (!scen_dir || !scen_dir[0]) scen_dir = "tools/sim/scenarios";
-        char scen_path[1024];
-        snprintf(scen_path, sizeof(scen_path),
+        snprintf(scen_path, scen_path_sz,
                  "%s/%s.scenario", scen_dir, name);
         struct stat st;
         if (stat(scen_path, &st) != 0 || !S_ISREG(st.st_mode)) {
             json_push_kv_str(result, "status", "error");
             json_push_kv_str(result, "error", "scenario_not_found");
             json_push_kv_str(result, "detail", scen_path);
-            // obs-ok:agent-test-diagnostic-stderr (best-effort status telemetry / request refusal returns JSON error)
-            fprintf(stderr, "[agent_test] %s:%d %s(): refused missing "
-                    "scenario=%s\n", __FILE__, __LINE__, __func__,
-                    scen_path);
-            return false;
+            return AT_PRECHECK_SCENARIO_MISSING;
         }
     }
-    return true;
+    return AT_PRECHECK_OK;
 }
 
 bool rpc_agent_test(const struct json_value *params, bool help,
@@ -374,15 +360,43 @@ bool rpc_agent_test(const struct json_value *params, bool help,
     json_push_kv_str(result, "native_command", "z23 agenttest");
 
     bool at_is_test_group = false;
-    const char *kind_lit = at_validate_kind_and_name(kind, name, result,
-                                                     &at_is_test_group);
-    if (!kind_lit)
+    const char *kind_lit = NULL;
+    int validated = at_validate_kind_and_name(kind, name, result,
+                                              &at_is_test_group, &kind_lit);
+    if (validated == AT_VALIDATE_INVALID_KIND) {
+        // obs-ok:agent-test-diagnostic-stderr (best-effort status telemetry / request refusal returns JSON error)
+        fprintf(stderr, "[agent_test] %s:%d %s(): refused invalid kind=%s\n",
+                __FILE__, __LINE__, __func__, kind ? kind : "(null)");
         return true;
+    }
+    if (validated == AT_VALIDATE_INVALID_NAME) {
+        // obs-ok:agent-test-diagnostic-stderr (best-effort status telemetry / request refusal returns JSON error)
+        fprintf(stderr, "[agent_test] %s:%d %s(): refused invalid name for "
+                "kind=%s\n", __FILE__, __LINE__, __func__, kind_lit);
+        return true;
+    }
 
+    char scen_path[1024];
     bool registry_precheck_skipped = false;
-    if (!at_precheck_surface_exists(at_is_test_group, name, result,
-                                    &registry_precheck_skipped))
+    int prechecked = at_precheck_surface_exists(at_is_test_group, name,
+                                                result,
+                                                &registry_precheck_skipped,
+                                                scen_path,
+                                                sizeof(scen_path));
+    if (prechecked == AT_PRECHECK_GROUP_NOT_REGISTERED) {
+        // obs-ok:agent-test-diagnostic-stderr (best-effort status telemetry / request refusal returns JSON error)
+        fprintf(stderr, "[agent_test] %s:%d %s(): refused unregistered "
+                "test_group name=%s\n", __FILE__, __LINE__, __func__,
+                name);
         return true;
+    }
+    if (prechecked == AT_PRECHECK_SCENARIO_MISSING) {
+        // obs-ok:agent-test-diagnostic-stderr (best-effort status telemetry / request refusal returns JSON error)
+        fprintf(stderr, "[agent_test] %s:%d %s(): refused missing "
+                "scenario=%s\n", __FILE__, __LINE__, __func__,
+                scen_path);
+        return true;
+    }
 
     char key[160];
     snprintf(key, sizeof(key), "%s-%s", kind_lit, name);
