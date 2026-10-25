@@ -94,6 +94,44 @@ static bool build_regtest_block(struct block *blk, int height,
     return true;
 }
 
+/* True when the Equihash parameters are regtest's small (48,5) pair. */
+static bool is_regtest_equihash_48_5(unsigned int n, unsigned int k)
+{
+    return n == 48 && k == 5;
+}
+
+/* True when the coinbase tx has the exact shape of the UTXO utxo_apply will
+ * record: a coinbase with a single vout carrying the expected positive
+ * value. */
+static bool coinbase_utxo_shape_ok(const struct transaction *cb,
+                                   int64_t cb_value)
+{
+    return transaction_is_coinbase(cb) &&
+           cb->num_vout == 1 &&
+           cb->vout[0].value == cb_value &&
+           cb->vout[0].value > 0;
+}
+
+/* check_block()'s reject reason, or "unknown" when it was left empty. */
+static const char *reject_reason_or_unknown(const struct validation_state *vs)
+{
+    return vs->reject_reason[0] ? vs->reject_reason : "unknown";
+}
+
+/* Status word for the mined-chain summary line. */
+static const char *coinbase_total_status(int failures,
+                                         int64_t total_coinbase)
+{
+    return (failures == 0 && total_coinbase > 0) ? "OK" : "see failures";
+}
+
+/* True when nothing was minted and no check has failed yet — the summary
+ * must count that as a failure too. */
+static bool coinbase_total_missing(int64_t total_coinbase, int failures)
+{
+    return total_coinbase <= 0 && failures == 0;
+}
+
 int test_regtest_generate(void);
 int test_regtest_generate(void)
 {
@@ -110,7 +148,7 @@ int test_regtest_generate(void)
         unsigned int n = chain_params_equihash_n(cp, 1);
         unsigned int k = chain_params_equihash_k(cp, 1);
         printf("regtest_generate: Equihash params are (48,5)... ");
-        if (n == 48 && k == 5) printf("OK\n");
+        if (is_regtest_equihash_48_5(n, k)) printf("OK\n");
         else { printf("FAIL (got %u,%u)\n", n, k); failures++; }
     }
 
@@ -196,8 +234,7 @@ int test_regtest_generate(void)
                    "(pow=true)... ", height);
             if (ok) printf("OK\n");
             else {
-                printf("FAIL (%s)\n",
-                       vs.reject_reason[0] ? vs.reject_reason : "unknown");
+                printf("FAIL (%s)\n", reject_reason_or_unknown(&vs));
                 failures++;
             }
         }
@@ -207,10 +244,7 @@ int test_regtest_generate(void)
          * block's height. */
         {
             const struct transaction *cb = &blk.vtx[0];
-            bool shape_ok = transaction_is_coinbase(cb) &&
-                            cb->num_vout == 1 &&
-                            cb->vout[0].value == cb_value &&
-                            cb->vout[0].value > 0;
+            bool shape_ok = coinbase_utxo_shape_ok(cb, cb_value);
             printf("regtest_generate: h%d coinbase UTXO value=%lld correct... ",
                    height, (long long)cb->vout[0].value);
             if (shape_ok) { printf("OK\n"); total_coinbase += cb->vout[0].value; }
@@ -224,8 +258,8 @@ int test_regtest_generate(void)
 
     printf("regtest_generate: mined %d-block chain, total new coinbase "
            "value=%lld... %s\n", N, (long long)total_coinbase,
-           (failures == 0 && total_coinbase > 0) ? "OK" : "see failures");
-    if (total_coinbase <= 0 && failures == 0) failures++;
+           coinbase_total_status(failures, total_coinbase));
+    if (coinbase_total_missing(total_coinbase, failures)) failures++;
 
     /* Restore the runner's default chain. */
     chain_params_select(CHAIN_MAIN);
