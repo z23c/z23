@@ -131,12 +131,11 @@ static bool zac_open_nonempty_source(
     const char *path, struct platform_positioned_file_snapshot *before)
 {
     platform_positioned_file_init(file);
-    if (!platform_positioned_file_open_beneath(file, workspace, path) ||
-        !platform_positioned_file_snapshot(file, before) || before->size == 0) {
+    bool ready = platform_positioned_file_open_beneath(file, workspace, path) &&
+        platform_positioned_file_snapshot(file, before) && before->size != 0;
+    if (!ready)
         platform_positioned_file_close(file);
-        return false;
-    }
-    return true;
+    return ready;
 }
 
 static uint8_t *zac_read_inspect_prefix(
@@ -189,7 +188,9 @@ static bool zac_capture_file(
         return false;
     struct platform_positioned_file file;
     struct platform_positioned_file_snapshot before;
-    if (!zac_open_nonempty_source(&file, workspace, selected->path, &before))
+    bool opened = zac_open_nonempty_source(
+        &file, workspace, selected->path, &before);
+    if (!opened)
         return false;
     size_t cap = byte_budget < VCS_ZCODE_AGENT_CONTEXT_EXCERPT_MAX
         ? byte_budget : VCS_ZCODE_AGENT_CONTEXT_EXCERPT_MAX;
@@ -201,7 +202,9 @@ static bool zac_capture_file(
     size_t take = before.size < cap ? (size_t)before.size : cap;
     size_t start = zac_excerpt_start(inspect, inspect_len, selected->line,
                                      before.size, take);
-    if (!zac_read_stable_excerpt(&file, &before, entry, take, start)) {
+    bool excerpt_stable = zac_read_stable_excerpt(
+        &file, &before, entry, take, start);
+    if (!excerpt_stable) {
         free(inspect); free(entry->content); return false;
     }
     memcpy(entry->path, selected->path, selected_path_len + 1);
