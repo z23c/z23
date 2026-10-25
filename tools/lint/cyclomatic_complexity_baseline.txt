@@ -1414,7 +1414,6 @@ engine/modules/storage/src/nullifier_kv.c:shielded_history_reset_to_boundary:17
 engine/modules/storage/src/progress_meta_store.c:progress_meta_get:16
 engine/modules/storage/src/progress_meta_store.c:progress_meta_get_blob_exact:23
 engine/modules/storage/src/progress_store.c:progress_store_open:35
-engine/modules/storage/src/progress_store_directory.c:progress_directory_matches_fd:18
 engine/modules/storage/src/projection_store.c:projection_clean_receipt_write:17
 engine/modules/storage/src/projection_store.c:projection_store_open:28
 engine/modules/storage/src/repair_marker.c:parse_legacy_hh_key:16

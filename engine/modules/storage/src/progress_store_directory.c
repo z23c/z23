@@ -156,15 +156,13 @@ bool progress_directory_child_exists(uintptr_t handle, const char *child,
     return false;
 }
 
-bool progress_directory_matches_fd(uintptr_t handle, int fd)
-{
 #if defined(_WIN32)
-    if (handle == UINTPTR_MAX || fd < 0)
-        return false;
-    HANDLE retained = (HANDLE)handle;
-    HANDLE candidate = (HANDLE)_get_osfhandle(fd);
-    if (candidate == INVALID_HANDLE_VALUE)
-        return false;
+/* Report whether the retained handle and the candidate handle denote the same
+ * directory object, with the candidate resolving to a plain directory rather
+ * than a reparse point. */
+static bool progress_directory_windows_handles_same_directory(HANDLE retained,
+                                                              HANDLE candidate)
+{
     BY_HANDLE_FILE_INFORMATION a, b;
     FILE_ATTRIBUTE_TAG_INFO tag;
     return GetFileInformationByHandle(retained, &a) != 0 &&
@@ -176,13 +174,36 @@ bool progress_directory_matches_fd(uintptr_t handle, int fd)
                                         &tag, sizeof(tag)) != 0 &&
            (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
            (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
 #else
+/* Report whether the retained descriptor and the candidate descriptor denote
+ * the same directory object. */
+static bool progress_directory_unix_fds_same_directory(int retained_fd,
+                                                       int candidate_fd)
+{
     struct stat retained;
     struct stat candidate;
-    return handle != UINTPTR_MAX && fd >= 0 &&
-           fstat((int)handle, &retained) == 0 &&
-           fstat(fd, &candidate) == 0 && S_ISDIR(retained.st_mode) &&
-           S_ISDIR(candidate.st_mode) && retained.st_dev == candidate.st_dev &&
+    return fstat(retained_fd, &retained) == 0 &&
+           fstat(candidate_fd, &candidate) == 0 &&
+           S_ISDIR(retained.st_mode) && S_ISDIR(candidate.st_mode) &&
+           retained.st_dev == candidate.st_dev &&
            retained.st_ino == candidate.st_ino;
+}
+#endif
+
+bool progress_directory_matches_fd(uintptr_t handle, int fd)
+{
+#if defined(_WIN32)
+    if (handle == UINTPTR_MAX || fd < 0)
+        return false;
+    HANDLE retained = (HANDLE)handle;
+    HANDLE candidate = (HANDLE)_get_osfhandle(fd);
+    if (candidate == INVALID_HANDLE_VALUE)
+        return false;
+    return progress_directory_windows_handles_same_directory(retained,
+                                                             candidate);
+#else
+    return handle != UINTPTR_MAX && fd >= 0 &&
+           progress_directory_unix_fds_same_directory((int)handle, fd);
 #endif
 }
