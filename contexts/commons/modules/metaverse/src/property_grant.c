@@ -44,9 +44,12 @@ const char *metaverse_grant_verdict_token(enum metaverse_grant_verdict v)
 
 /* ── Well-formedness ────────────────────────────────────────────────────── */
 
-bool metaverse_grant_well_formed(const struct metaverse_grant *g)
+/* Well-formedness is the conjunction of four groups. Each group is pure and
+ * returns false on its first defect, so the order of the conjunction cannot
+ * change the verdict. */
+
+static bool identity_well_formed(const struct metaverse_grant *g)
 {
-    if (!g) return false;
     if (g->grant_id[0] == '\0') return false;
     if (strlen(g->grant_id) != METAVERSE_GRANT_ID_LEN) return false;
     if (g->holder[0] == '\0') return false;
@@ -56,27 +59,46 @@ bool metaverse_grant_well_formed(const struct metaverse_grant *g)
     for (size_t i = 0; i < g->lineage_count; i++) {
         if (g->lineage[i].grant_id[0] == '\0') return false;
     }
+    return true;
+}
 
-    if (g->scope_form == METAVERSE_SCOPE_IDS) {
-        if (g->id_count == 0 || g->id_count > METAVERSE_GRANT_IDS_MAX)
-            return false;
-        for (size_t i = 0; i < g->id_count; i++) {
-            if (!metaverse_property_id_valid(&g->ids[i])) return false;
-        }
-    } else if (g->scope_form == METAVERSE_SCOPE_KINDS) {
-        if (g->kinds == 0u) return false;
-        /* Bit 0 is UNKNOWN and can never be a legitimate scope member. */
-        if (g->kinds & 1u) return false;
-    } else {
+static bool scope_ids_well_formed(const struct metaverse_grant *g)
+{
+    if (g->id_count == 0 || g->id_count > METAVERSE_GRANT_IDS_MAX)
         return false;
+    for (size_t i = 0; i < g->id_count; i++) {
+        if (!metaverse_property_id_valid(&g->ids[i])) return false;
     }
+    return true;
+}
 
-    /* Neither right set may carry a bit that names nothing. A grant holding
-     * an unnameable bit is not "a grant with a future right"; it is a grant
-     * nobody can audit, and the reserved bit 0x1 (once INSPECT) lands here. */
-    if (!metaverse_action_mask_valid(g->actions)) return false;
-    if (!metaverse_query_mask_valid(g->queries)) return false;
+static bool scope_kinds_well_formed(const struct metaverse_grant *g)
+{
+    if (g->kinds == 0u) return false;
+    /* Bit 0 is UNKNOWN and can never be a legitimate scope member. */
+    if (g->kinds & 1u) return false;
+    return true;
+}
 
+static bool scope_well_formed(const struct metaverse_grant *g)
+{
+    if (g->scope_form == METAVERSE_SCOPE_IDS) return scope_ids_well_formed(g);
+    if (g->scope_form == METAVERSE_SCOPE_KINDS)
+        return scope_kinds_well_formed(g);
+    return false;
+}
+
+/* Neither right set may carry a bit that names nothing. A grant holding
+ * an unnameable bit is not "a grant with a future right"; it is a grant
+ * nobody can audit, and the reserved bit 0x1 (once INSPECT) lands here. */
+static bool rights_well_formed(const struct metaverse_grant *g)
+{
+    return metaverse_action_mask_valid(g->actions) &&
+           metaverse_query_mask_valid(g->queries);
+}
+
+static bool limits_well_formed(const struct metaverse_grant *g)
+{
     if (g->max_value_zat < 0 || g->spent_zat < 0) return false;
     if (g->spent_zat > g->max_value_zat) return false;
     if (g->counterparty_count > METAVERSE_GRANT_COUNTERPARTIES_MAX) return false;
@@ -84,6 +106,13 @@ bool metaverse_grant_well_formed(const struct metaverse_grant *g)
     if (g->max_delegation_depth > METAVERSE_GRANT_MAX_DEPTH) return false;
     if (g->expires_height < 0 || g->expires_unix < 0) return false;
     return true;
+}
+
+bool metaverse_grant_well_formed(const struct metaverse_grant *g)
+{
+    if (!g) return false;
+    return identity_well_formed(g) && scope_well_formed(g) &&
+           rights_well_formed(g) && limits_well_formed(g);
 }
 
 int64_t metaverse_grant_budget_remaining(const struct metaverse_grant *g)
@@ -154,6 +183,69 @@ static enum metaverse_grant_verdict lineage_verdict(
     return METAVERSE_GRANT_OK;
 }
 
+/* Revocation and expiry, shared by every request kind. Revocation is asked
+ * first: a dead grant must not leak scope. */
+static enum metaverse_grant_verdict liveness_verdict(
+    const struct metaverse_grant *g,
+    const struct metaverse_grant *const *ancestors, size_t ancestor_count,
+    int64_t height, int64_t now_unix)
+{
+    enum metaverse_grant_verdict lv =
+        lineage_verdict(g, ancestors, ancestor_count);
+    if (lv != METAVERSE_GRANT_OK) return lv;
+
+    if (g->expires_height > 0 && height >= g->expires_height)
+        return METAVERSE_GRANT_EXPIRED_HEIGHT;
+    if (g->expires_unix > 0 && now_unix >= g->expires_unix)
+        return METAVERSE_GRANT_EXPIRED_TIME;
+    return METAVERSE_GRANT_OK;
+}
+
+static bool actor_holds(const struct metaverse_grant *g, const char *actor)
+{
+    return actor[0] != '\0' && strcmp(actor, g->holder) == 0;
+}
+
+/* The verdict for a named property that falls outside the grant's scope. */
+static enum metaverse_grant_verdict scope_miss_verdict(
+    const struct metaverse_grant *g)
+{
+    return g->scope_form == METAVERSE_SCOPE_KINDS
+               ? METAVERSE_GRANT_KIND_OUT_OF_SCOPE
+               : METAVERSE_GRANT_PROPERTY_OUT_OF_SCOPE;
+}
+
+/* Scope, then counterparty. Only the actions whose row names a counterparty
+ * are held to the allowlist. Applying it to the rest would make an operator
+ * who narrowed WHO they trade with also unable to HOST their own property. */
+static enum metaverse_grant_verdict action_scope_verdict(
+    const struct metaverse_grant *g, const struct metaverse_action_request *req,
+    bool named_property)
+{
+    if (named_property && !metaverse_grant_in_scope(g, &req->property))
+        return scope_miss_verdict(g);
+    if (metaverse_action_uses_counterparty(req->action) &&
+        !counterparty_allowed(g, req->counterparty))
+        return METAVERSE_GRANT_COUNTERPARTY_NOT_ALLOWED;
+    return METAVERSE_GRANT_OK;
+}
+
+/* Columns 8 and 9 are asked separately. An action may legitimately NAME a
+ * value it does not MOVE (LIST_FOR_SALE quotes an asking price), and
+ * charging that against the cumulative ceiling would bill the operator
+ * for an advertisement. */
+static enum metaverse_grant_verdict action_value_verdict(
+    const struct metaverse_grant *g, const struct metaverse_action_request *req)
+{
+    if (req->value_zat < 0) return METAVERSE_GRANT_VALUE_NEGATIVE;
+    if (req->value_zat > 0 && !metaverse_action_accepts_value(req->action))
+        return METAVERSE_GRANT_VALUE_ON_FREE_ACTION;
+    if (metaverse_action_moves_value(req->action) &&
+        req->value_zat > metaverse_grant_budget_remaining(g))
+        return METAVERSE_GRANT_BUDGET_EXCEEDED;
+    return METAVERSE_GRANT_OK;
+}
+
 enum metaverse_grant_verdict metaverse_grant_check(
     const struct metaverse_grant *g,
     const struct metaverse_grant *const *ancestors, size_t ancestor_count,
@@ -172,45 +264,23 @@ enum metaverse_grant_verdict metaverse_grant_check(
         !metaverse_action_allows_zero_property_id(req->action))
         return METAVERSE_GRANT_BAD_ARGS;
 
-    /* Revocation and expiry first: a dead grant must not leak scope. */
     enum metaverse_grant_verdict lv =
-        lineage_verdict(g, ancestors, ancestor_count);
+        liveness_verdict(g, ancestors, ancestor_count, req->height,
+                         req->now_unix);
     if (lv != METAVERSE_GRANT_OK) return lv;
 
-    if (g->expires_height > 0 && req->height >= g->expires_height)
-        return METAVERSE_GRANT_EXPIRED_HEIGHT;
-    if (g->expires_unix > 0 && req->now_unix >= g->expires_unix)
-        return METAVERSE_GRANT_EXPIRED_TIME;
-
-    if (req->actor[0] == '\0' || strcmp(req->actor, g->holder) != 0)
+    if (!actor_holds(g, req->actor))
         return METAVERSE_GRANT_WRONG_HOLDER;
 
     if (!(g->actions & metaverse_action_bit(req->action)))
         return METAVERSE_GRANT_ACTION_NOT_GRANTED;
 
-    if (named_property && !metaverse_grant_in_scope(g, &req->property)) {
-        return g->scope_form == METAVERSE_SCOPE_KINDS
-                   ? METAVERSE_GRANT_KIND_OUT_OF_SCOPE
-                   : METAVERSE_GRANT_PROPERTY_OUT_OF_SCOPE;
-    }
+    enum metaverse_grant_verdict sv =
+        action_scope_verdict(g, req, named_property);
+    if (sv != METAVERSE_GRANT_OK) return sv;
 
-    /* Only the actions whose row names a counterparty are held to the
-     * allowlist. Applying it to the rest would make an operator who narrowed
-     * WHO they trade with also unable to HOST their own property. */
-    if (metaverse_action_uses_counterparty(req->action) &&
-        !counterparty_allowed(g, req->counterparty))
-        return METAVERSE_GRANT_COUNTERPARTY_NOT_ALLOWED;
-
-    /* Columns 8 and 9 are asked separately. An action may legitimately NAME a
-     * value it does not MOVE (LIST_FOR_SALE quotes an asking price), and
-     * charging that against the cumulative ceiling would bill the operator
-     * for an advertisement. */
-    if (req->value_zat < 0) return METAVERSE_GRANT_VALUE_NEGATIVE;
-    if (req->value_zat > 0 && !metaverse_action_accepts_value(req->action))
-        return METAVERSE_GRANT_VALUE_ON_FREE_ACTION;
-    if (metaverse_action_moves_value(req->action) &&
-        req->value_zat > metaverse_grant_budget_remaining(g))
-        return METAVERSE_GRANT_BUDGET_EXCEEDED;
+    enum metaverse_grant_verdict vv = action_value_verdict(g, req);
+    if (vv != METAVERSE_GRANT_OK) return vv;
 
     if (metaverse_grant_rate_remaining(g, req->now_unix) == 0)
         return METAVERSE_GRANT_RATE_LIMITED;
@@ -234,25 +304,18 @@ enum metaverse_grant_verdict metaverse_grant_query_check(
         return METAVERSE_GRANT_BAD_ARGS;
 
     enum metaverse_grant_verdict lv =
-        lineage_verdict(g, ancestors, ancestor_count);
+        liveness_verdict(g, ancestors, ancestor_count, req->height,
+                         req->now_unix);
     if (lv != METAVERSE_GRANT_OK) return lv;
 
-    if (g->expires_height > 0 && req->height >= g->expires_height)
-        return METAVERSE_GRANT_EXPIRED_HEIGHT;
-    if (g->expires_unix > 0 && req->now_unix >= g->expires_unix)
-        return METAVERSE_GRANT_EXPIRED_TIME;
-
-    if (req->actor[0] == '\0' || strcmp(req->actor, g->holder) != 0)
+    if (!actor_holds(g, req->actor))
         return METAVERSE_GRANT_WRONG_HOLDER;
 
     if (!(g->queries & metaverse_query_bit(req->query)))
         return METAVERSE_GRANT_ACTION_NOT_GRANTED;
 
-    if (named_property && !metaverse_grant_in_scope(g, &req->property)) {
-        return g->scope_form == METAVERSE_SCOPE_KINDS
-                   ? METAVERSE_GRANT_KIND_OUT_OF_SCOPE
-                   : METAVERSE_GRANT_PROPERTY_OUT_OF_SCOPE;
-    }
+    if (named_property && !metaverse_grant_in_scope(g, &req->property))
+        return scope_miss_verdict(g);
 
     /* No value, no counterparty, no rate window. A read consumes none of the
      * three, and spending an action budget on a look would make an agent's
@@ -290,6 +353,64 @@ static bool counterparties_attenuate(const struct metaverse_grant *g,
     return true;
 }
 
+/* Rights and budget attenuate. A child may only ever be narrower than its
+ * parent. Reads attenuate exactly like writes: a child that could look at more
+ * than its parent is a widening, and a widening by delegation is how a bounded
+ * grant becomes an unbounded one. */
+static enum metaverse_grant_verdict delegation_rights_verdict(
+    const struct metaverse_grant *g, const struct metaverse_grant *child)
+{
+    if (child->actions & ~g->actions)
+        return METAVERSE_GRANT_ACTION_NOT_GRANTED;
+    if (child->queries & ~g->queries)
+        return METAVERSE_GRANT_ACTION_NOT_GRANTED;
+    if (child->max_value_zat > metaverse_grant_budget_remaining(g))
+        return METAVERSE_GRANT_BUDGET_EXCEEDED;
+    if (child->max_delegation_depth > g->max_delegation_depth)
+        return METAVERSE_GRANT_DELEGATION_DEPTH_EXCEEDED;
+    return METAVERSE_GRANT_OK;
+}
+
+static enum metaverse_grant_verdict delegation_scope_verdict(
+    const struct metaverse_grant *g, const struct metaverse_grant *child)
+{
+    if (child->scope_form == METAVERSE_SCOPE_KINDS) {
+        /* A kind-scoped child under an id-scoped parent is a WIDENING (the
+         * child would reach every property of that kind, present and future),
+         * so it is refused outright. */
+        if (g->scope_form != METAVERSE_SCOPE_KINDS)
+            return METAVERSE_GRANT_KIND_OUT_OF_SCOPE;
+        if (child->kinds & ~g->kinds)
+            return METAVERSE_GRANT_KIND_OUT_OF_SCOPE;
+        return METAVERSE_GRANT_OK;
+    }
+    for (size_t i = 0; i < child->id_count; i++) {
+        if (!metaverse_grant_in_scope(g, &child->ids[i]))
+            return scope_miss_verdict(g);
+    }
+    return METAVERSE_GRANT_OK;
+}
+
+/* The attenuation checks, in the order they are asked. */
+static enum metaverse_grant_verdict delegation_attenuation_verdict(
+    const struct metaverse_grant *g, const struct metaverse_grant *child)
+{
+    enum metaverse_grant_verdict v = delegation_rights_verdict(g, child);
+    if (v != METAVERSE_GRANT_OK) return v;
+
+    v = delegation_scope_verdict(g, child);
+    if (v != METAVERSE_GRANT_OK) return v;
+
+    if (!counterparties_attenuate(g, child))
+        return METAVERSE_GRANT_COUNTERPARTY_NOT_ALLOWED;
+
+    v = expiry_attenuates(g, child);
+    if (v != METAVERSE_GRANT_OK) return v;
+
+    if (!metaverse_grant_well_formed(child)) return METAVERSE_GRANT_MALFORMED;
+    return METAVERSE_GRANT_OK;
+}
+
 enum metaverse_grant_verdict metaverse_grant_check_delegation(
     const struct metaverse_grant *g,
     const struct metaverse_grant *const *ancestors, size_t ancestor_count,
@@ -300,13 +421,8 @@ enum metaverse_grant_verdict metaverse_grant_check_delegation(
     if (!metaverse_grant_well_formed(g)) return METAVERSE_GRANT_MALFORMED;
 
     enum metaverse_grant_verdict lv =
-        lineage_verdict(g, ancestors, ancestor_count);
+        liveness_verdict(g, ancestors, ancestor_count, height, now_unix);
     if (lv != METAVERSE_GRANT_OK) return lv;
-
-    if (g->expires_height > 0 && height >= g->expires_height)
-        return METAVERSE_GRANT_EXPIRED_HEIGHT;
-    if (g->expires_unix > 0 && now_unix >= g->expires_unix)
-        return METAVERSE_GRANT_EXPIRED_TIME;
 
     if (!(g->actions & metaverse_action_bit(METAVERSE_ACTION_DELEGATE)) ||
         !g->delegation_allowed)
@@ -317,44 +433,7 @@ enum metaverse_grant_verdict metaverse_grant_check_delegation(
         child->depth > METAVERSE_GRANT_MAX_DEPTH)
         return METAVERSE_GRANT_DELEGATION_DEPTH_EXCEEDED;
 
-    /* ATTENUATION. A child may only ever be narrower than its parent. */
-    if (child->actions & ~g->actions)
-        return METAVERSE_GRANT_ACTION_NOT_GRANTED;
-    /* Reads attenuate exactly like writes: a child that could look at more
-     * than its parent is a widening, and a widening by delegation is how a
-     * bounded grant becomes an unbounded one. */
-    if (child->queries & ~g->queries)
-        return METAVERSE_GRANT_ACTION_NOT_GRANTED;
-    if (child->max_value_zat > metaverse_grant_budget_remaining(g))
-        return METAVERSE_GRANT_BUDGET_EXCEEDED;
-    if (child->max_delegation_depth > g->max_delegation_depth)
-        return METAVERSE_GRANT_DELEGATION_DEPTH_EXCEEDED;
-
-    if (child->scope_form == METAVERSE_SCOPE_KINDS) {
-        /* A kind-scoped child under an id-scoped parent is a WIDENING (the
-         * child would reach every property of that kind, present and future),
-         * so it is refused outright. */
-        if (g->scope_form != METAVERSE_SCOPE_KINDS)
-            return METAVERSE_GRANT_KIND_OUT_OF_SCOPE;
-        if (child->kinds & ~g->kinds)
-            return METAVERSE_GRANT_KIND_OUT_OF_SCOPE;
-    } else {
-        for (size_t i = 0; i < child->id_count; i++) {
-            if (!metaverse_grant_in_scope(g, &child->ids[i]))
-                return g->scope_form == METAVERSE_SCOPE_KINDS
-                           ? METAVERSE_GRANT_KIND_OUT_OF_SCOPE
-                           : METAVERSE_GRANT_PROPERTY_OUT_OF_SCOPE;
-        }
-    }
-
-    if (!counterparties_attenuate(g, child))
-        return METAVERSE_GRANT_COUNTERPARTY_NOT_ALLOWED;
-
-    enum metaverse_grant_verdict ev = expiry_attenuates(g, child);
-    if (ev != METAVERSE_GRANT_OK) return ev;
-
-    if (!metaverse_grant_well_formed(child)) return METAVERSE_GRANT_MALFORMED;
-    return METAVERSE_GRANT_OK;
+    return delegation_attenuation_verdict(g, child);
 }
 
 /* ── Commit effect ──────────────────────────────────────────────────────── */
