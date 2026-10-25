@@ -423,6 +423,66 @@ static int case_verify_primitive(void)
     return failures;
 }
 
+/* Count body_persist_log rows and how many carry an itag that verifies
+ * against the row's own (height, ok); outputs stay 0 if the query fails. */
+static void count_backfilled_verified_rows(sqlite3 *db, int *rows,
+                                           int *verified)
+{
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT height, ok, itag FROM body_persist_log ORDER BY height",
+            -1, &st, NULL) == SQLITE_OK) {
+        while (sqlite3_step(st) == SQLITE_ROW) {
+            (*rows)++;
+            int64_t h = sqlite3_column_int64(st, 0);
+            int ok = sqlite3_column_int(st, 1);
+            const void *tag = sqlite3_column_type(st, 2) == SQLITE_BLOB
+                                  ? sqlite3_column_blob(st, 2) : NULL;
+            size_t tag_len = tag ? (size_t)sqlite3_column_bytes(st, 2) : 0;
+            if (stage_row_itag_verify("body_persist_log", h, ok, NULL, 0,
+                                      tag, tag_len) == STAGE_ROW_ITAG_MATCH)
+                (*verified)++;
+        }
+        sqlite3_finalize(st);
+    }
+}
+
+static bool read_itag_backfill_flag(sqlite3 *db)
+{
+    bool flag = false;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT value FROM progress_meta WHERE key='itag_bf:body_persist_log'",
+            -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW &&
+            sqlite3_column_bytes(st, 0) == 1 &&
+            ((const uint8_t *)sqlite3_column_blob(st, 0))[0] == 1)
+            flag = true;
+        sqlite3_finalize(st);
+    }
+    return flag;
+}
+
+static bool inserted_row_tag_verifies(sqlite3 *db)
+{
+    bool ok103 = false;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db,
+            "SELECT ok, itag FROM body_persist_log WHERE height=103",
+            -1, &st, NULL) == SQLITE_OK) {
+        if (sqlite3_step(st) == SQLITE_ROW) {
+            const void *tag = sqlite3_column_type(st, 1) == SQLITE_BLOB
+                                  ? sqlite3_column_blob(st, 1) : NULL;
+            size_t tag_len = tag ? (size_t)sqlite3_column_bytes(st, 1) : 0;
+            ok103 = stage_row_itag_verify("body_persist_log", 103,
+                                          sqlite3_column_int(st, 0), NULL, 0,
+                                          tag, tag_len) == STAGE_ROW_ITAG_MATCH;
+        }
+        sqlite3_finalize(st);
+    }
+    return ok103;
+}
+
 /* (4) Migration: a legacy table with untagged rows gets tags backfilled by the
  *     production ensure_schema, and re-running is idempotent. */
 static int case_migration_backfill_idempotent(void)
@@ -453,38 +513,11 @@ static int case_migration_backfill_idempotent(void)
     /* Every row now carries a 16-byte tag that verifies against its own
      * (height, ok). */
     int verified = 0, rows = 0;
-    sqlite3_stmt *st = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT height, ok, itag FROM body_persist_log ORDER BY height",
-            -1, &st, NULL) == SQLITE_OK) {
-        while (sqlite3_step(st) == SQLITE_ROW) {
-            rows++;
-            int64_t h = sqlite3_column_int64(st, 0);
-            int ok = sqlite3_column_int(st, 1);
-            const void *tag = sqlite3_column_type(st, 2) == SQLITE_BLOB
-                                  ? sqlite3_column_blob(st, 2) : NULL;
-            size_t tag_len = tag ? (size_t)sqlite3_column_bytes(st, 2) : 0;
-            if (stage_row_itag_verify("body_persist_log", h, ok, NULL, 0,
-                                      tag, tag_len) == STAGE_ROW_ITAG_MATCH)
-                verified++;
-        }
-        sqlite3_finalize(st);
-    }
+    count_backfilled_verified_rows(db, &rows, &verified);
     HI_CHECK("migrate: all 3 rows backfilled + verify", rows == 3 && verified == 3);
 
     /* The durable flag is set so later boots skip the O(rows) scan. */
-    bool flag = false;
-    st = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT value FROM progress_meta WHERE key='itag_bf:body_persist_log'",
-            -1, &st, NULL) == SQLITE_OK) {
-        if (sqlite3_step(st) == SQLITE_ROW &&
-            sqlite3_column_bytes(st, 0) == 1 &&
-            ((const uint8_t *)sqlite3_column_blob(st, 0))[0] == 1)
-            flag = true;
-        sqlite3_finalize(st);
-    }
-    HI_CHECK("migrate: durable backfill flag set", flag);
+    HI_CHECK("migrate: durable backfill flag set", read_itag_backfill_flag(db));
 
     /* Idempotent: a second ensure_schema is a no-op and the rows stay valid. */
     HI_CHECK("migrate: ensure_schema idempotent",
@@ -492,22 +525,7 @@ static int case_migration_backfill_idempotent(void)
     /* A production insert on the migrated table tags its new row too. */
     HI_CHECK("migrate: production insert tags new row",
              body_persist_log_insert(db, 103, "verified", true));
-    int ok103 = 0;
-    st = NULL;
-    if (sqlite3_prepare_v2(db,
-            "SELECT ok, itag FROM body_persist_log WHERE height=103",
-            -1, &st, NULL) == SQLITE_OK) {
-        if (sqlite3_step(st) == SQLITE_ROW) {
-            const void *tag = sqlite3_column_type(st, 1) == SQLITE_BLOB
-                                  ? sqlite3_column_blob(st, 1) : NULL;
-            size_t tag_len = tag ? (size_t)sqlite3_column_bytes(st, 1) : 0;
-            ok103 = stage_row_itag_verify("body_persist_log", 103,
-                                          sqlite3_column_int(st, 0), NULL, 0,
-                                          tag, tag_len) == STAGE_ROW_ITAG_MATCH;
-        }
-        sqlite3_finalize(st);
-    }
-    HI_CHECK("migrate: new production row verifies", ok103);
+    HI_CHECK("migrate: new production row verifies", inserted_row_tag_verifies(db));
 
     sqlite3_close(db);
     return failures;
