@@ -608,7 +608,6 @@ contexts/explorer/modules/presentation/src/presentation_form.c:zcl_present_windo
 contexts/explorer/modules/presentation/src/presentation_form.c:zcl_present_window_form_validate_v1:16
 contexts/explorer/modules/presentation/src/presentation_input.c:zcl_present_window_hover_at_v1:19
 contexts/explorer/views/src/explorer_factoids_addresses.c:factoids_emit_section_7_addresses:16
-contexts/explorer/views/src/explorer_factoids_blocktimes.c:factoids_emit_section_13_blocktimes:17
 contexts/explorer/views/src/explorer_factoids_chaindata.c:factoids_emit_section_11_dust:18
 contexts/explorer/views/src/explorer_factoids_chaindata.c:factoids_emit_section_8_privacy:32
 contexts/explorer/views/src/explorer_factoids_chaindata.c:factoids_emit_section_9_zslp:19
