@@ -1079,6 +1079,8 @@ static bool dvq_engine_ok(const char *s)
  * so a gpt-4 model is refused on it. */
 static bool dvq_model_in_family(const struct engine_vendor *v, const char *model)
 {
+    if (v->cli_no_model_arg)
+        return false;
     char family[64];
     size_t n = 0;
     while (v->default_model[n] && n + 1 < sizeof(family) &&

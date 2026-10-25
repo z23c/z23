@@ -115,8 +115,8 @@ static const char *claude_pick_model(const struct json_value *models);
 /* A pseudo-terminal capture is the reply plus whatever the CLI wrote to the
  * terminal around it (a leading blank line, a trailing "Finishing session"
  * status line). The reply is the one top-level JSON object; the span below
- * finds it with a string-aware brace match. Text around it must carry no
- * brace and no quote, so a second document or a half-JSON tail is still
+ * finds it with a string-aware brace match. After it only whitespace and the
+ * known status line may follow, so a second document or a half-JSON tail is
  * refused rather than ignored. */
 static bool grok_span_scan(const char *body, size_t start, size_t len,
                            size_t *end)
@@ -141,6 +141,34 @@ static bool grok_span_scan(const char *body, size_t start, size_t len,
     return false;
 }
 
+static size_t grok_skip_ws(const char *b, size_t i, size_t len)
+{
+    while (i < len && (b[i] == ' ' || b[i] == '\t' || b[i] == '\r' ||
+                       b[i] == '\n'))
+        i++;
+    return i;
+}
+
+/* After the reply object only whitespace and the CLI's own status line,
+ * "Finishing session" with an optional ellipsis, may follow. Anything else,
+ * including any JSON token (true, [1], {}, a lone }), is refused. */
+static bool grok_tail_ok(const char *b, size_t i, size_t len)
+{
+    static const char status[] = "Finishing session";
+    i = grok_skip_ws(b, i, len);
+    if (i == len)
+        return true;
+    if (len - i < sizeof(status) - 1u ||
+        memcmp(b + i, status, sizeof(status) - 1u) != 0)
+        return false;
+    i += sizeof(status) - 1u;
+    if (len - i >= 3u && memcmp(b + i, "\xe2\x80\xa6", 3u) == 0)
+        i += 3u;
+    else if (len - i >= 3u && memcmp(b + i, "...", 3u) == 0)
+        i += 3u;
+    return grok_skip_ws(b, i, len) == len;
+}
+
 static bool grok_json_span(const char *body, size_t len, size_t *start,
                            size_t *end)
 {
@@ -150,9 +178,8 @@ static bool grok_json_span(const char *body, size_t len, size_t *start,
         s++;
     if (s >= len || body[s] != '{' || !grok_span_scan(body, s, len, end))
         return false;
-    for (size_t i = *end; i < len; i++)
-        if (body[i] == '{' || body[i] == '"')
-            return false;
+    if (!grok_tail_ok(body, *end, len))
+        return false;
     *start = s;
     return true;
 }

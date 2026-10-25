@@ -216,6 +216,11 @@ struct engine_vendor {
      * the launcher must start it with cwd = the unit workdir. A row that
      * names its directory in argv (a {workdir} slot) leaves this false. */
     bool             cli_cwd_is_workdir;
+    /* The CLI is handed no model argument (its row has no {model} slot) and
+     * picks the model from its own config. default_model is then "unknown",
+     * which is what a receipt records as the model sent, and an explicit
+     * model request is refused rather than silently dropped. */
+    bool             cli_no_model_arg;
     enum engine_cli_output report_format;
     bool             supports_reasoning_effort;
     enum engine_wire wire;
@@ -326,6 +331,11 @@ bool engine_cli_turns_parse(const char *text, int *out);
 
 /* True only when a local CLI row explicitly maps the turn-cap placeholder. */
 bool engine_cli_accepts_turns(const struct engine_vendor *v);
+
+/* false when the caller names a model the row cannot send (cli_no_model_arg);
+ * NULL or empty means no model was named and is always accepted. */
+bool engine_accepts_model_override(const struct engine_vendor *v,
+                                   const char *model);
 
 /* The directory a launcher must make the child's cwd: in->workdir for a row
  * with cli_cwd_is_workdir, else NULL (inherit). */

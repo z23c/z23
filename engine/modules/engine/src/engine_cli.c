@@ -192,3 +192,11 @@ size_t engine_cli_argv_build(const struct engine_vendor *v,
     out[n] = NULL;
     return n;
 }
+
+bool engine_accepts_model_override(const struct engine_vendor *v,
+                                   const char *model)
+{
+    if (!model || !model[0])
+        return true;
+    return v && !v->cli_no_model_arg;
+}

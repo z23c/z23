@@ -1090,6 +1090,19 @@ static int fail_setup(const char *why);
  *
  * It is still a real call that spends real money, so it needs --yes-dispatch
  * like every other path that does. */
+/* Why the selected engine cannot take the options the caller named, or NULL. */
+static const char *unit_option_refusal(const struct engine_vendor *v,
+                                       const struct unit_opts *o)
+{
+    if (!engine_accepts_model_override(v, o->model))
+        return "selected engine takes no --model: the CLI picks its own "
+               "model from its config";
+    if (engine_reasoning_effort_explicit(o->reasoning_effort)
+        && !v->supports_reasoning_effort)
+        return "selected engine accepts no explicit reasoning effort";
+    return NULL;
+}
+
 /* Say why a structured CLI reply was refused: the CLI's own error message when
  * it sent one (Grok when not signed in), else the head of what it printed. */
 static void probe_report_refusal(const char *log, int64_t elapsed_ms)
@@ -1295,6 +1308,11 @@ static int probe_all(const struct unit_opts *o)
         if (o->engine_id && strcmp(v->id, o->engine_id) != 0)
             continue;
         probed++;
+        if (!engine_accepts_model_override(v, o->model)) {
+            printf("  %s: REFUSED, this engine takes no --model\n", v->id);
+            failures++;
+            continue;
+        }
         failures += probe_one(v, o->model, o->reasoning_effort);
     }
     if (probed == 0) {
@@ -2786,10 +2804,9 @@ int main(int argc, char **argv)
     if (!v)
         return fail_setup(o.engine_id ? "unknown --engine; see --list"
                                       : "this build has no default engine");
-    if (engine_reasoning_effort_explicit(o.reasoning_effort)
-        && !v->supports_reasoning_effort)
-        return fail_setup("selected engine accepts no explicit reasoning "
-                          "effort");
+    const char *option_why = unit_option_refusal(v, &o);
+    if (option_why)
+        return fail_setup(option_why);
     if (!engine_resume_session_id_valid(o.resume_session_id))
         return fail_setup("--resume needs a canonical lowercase hexadecimal "
                           "UUID");

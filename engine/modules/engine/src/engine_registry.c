@@ -151,8 +151,8 @@ static const char *const k_gpt_cli_report_argv[] = {
  * directory flag, so the row sets cli_cwd_is_workdir and the launcher starts
  * it there. -p refuses -y/--yolo and --auto, and --plan: no flag is added, and
  * so there is no read-only mode, which is why a report kind is refused for
- * this row. No {model} slot: the CLI uses default_model from its own config,
- * and a model alias this table invented would be a guess. Its text output
+ * this row. No {model} slot: the CLI picks its model from its own config, and
+ * a model alias this table invented would be a guess. Its text output
  * carries no token counts, so usage stays unreported, never zero. */
 static const char *const k_kimi_cli_start_argv[] = {
     "-p", ENGINE_CLI_PROMPT_TOKEN,
@@ -371,7 +371,8 @@ static const struct engine_vendor k_engine_vendors[] = {
         .id            = "kimi-cli",
         .display       = "Moonshot Kimi (installed agent CLI, subscription auth)",
         .url           = NULL,
-        .default_model = "kimi-config-default",
+        .default_model = "unknown",
+        .cli_no_model_arg = true,
         .program       = "kimi",
         .start_argv    = k_kimi_cli_start_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_ARG,

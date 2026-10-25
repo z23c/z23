@@ -1103,6 +1103,13 @@ static int dvx_engine_cases(void)
                                   "ENGINE_MODEL_MISMATCH"));
         PASS();
     }
+    TEST("queue: the kimi engine takes no model, so any model is refused") {
+        ASSERT(dvx_engine_refused("engk", "kimi-cli", "kimi-k3",
+                                  "ENGINE_MODEL_MISMATCH"));
+        ASSERT(dvx_engine_refused("engk2", "kimi-cli", "unknown",
+                                  "ENGINE_MODEL_MISMATCH"));
+        PASS();
+    }
     TEST("queue: an over-long unit PATH refuses next and changes no row") {
         static char longp[16000];
         char wt[512];

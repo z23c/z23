@@ -541,6 +541,28 @@ static int case_grok_real_capture(void)
     return failures;
 }
 
+static int case_grok_tails(void)
+{
+    int failures = 0;
+    const struct engine_vendor *grok = engine_by_id("grok-cli");
+    static const char tail_true[] = GROK_REAL_BODY "true";
+    static const char tail_arr[] = GROK_REAL_BODY "[1]";
+    static const char tail_obj[] = GROK_REAL_BODY "{}";
+    static const char tail_brace[] = GROK_REAL_BODY "}";
+    static const char tail_ascii[] = GROK_REAL_BODY "Finishing session...\n";
+    static const char tail_junk[] =
+        GROK_REAL_BODY "Finishing session\xe2\x80\xa6 and more";
+    EC_CHECK("a trailing true is refused", refused(grok, tail_true));
+    EC_CHECK("a trailing [1] is refused", refused(grok, tail_arr));
+    EC_CHECK("a trailing {} is refused", refused(grok, tail_obj));
+    EC_CHECK("a lone trailing } is refused", refused(grok, tail_brace));
+    EC_CHECK("the status line with ASCII dots is accepted",
+             !refused(grok, tail_ascii));
+    EC_CHECK("text after the status line is refused",
+             refused(grok, tail_junk));
+    return failures;
+}
+
 static int case_grok_error_reply(void)
 {
     int failures = 0;
@@ -608,6 +630,23 @@ static int case_kimi_reply(const struct engine_vendor *v)
     return failures;
 }
 
+static int case_kimi_model(void)
+{
+    int failures = 0;
+    const struct engine_vendor *v = engine_by_id("kimi-cli");
+    const struct engine_vendor *g = engine_by_id("grok-cli");
+    EC_CHECK("kimi records the model sent as unknown, not a made-up id",
+             v && strcmp(v->default_model, "unknown") == 0 &&
+             v->cli_no_model_arg);
+    EC_CHECK("--model is refused for kimi, accepted when absent",
+             v && !engine_accepts_model_override(v, "kimi-k3") &&
+             engine_accepts_model_override(v, NULL) &&
+             engine_accepts_model_override(v, ""));
+    EC_CHECK("--model is still accepted on a row that sends it",
+             g && engine_accepts_model_override(g, "grok-4.7"));
+    return failures;
+}
+
 int test_engine_claude(void)
 {
     int failures = 0;
@@ -615,7 +654,9 @@ int test_engine_claude(void)
     failures += case_read_only();
     failures += case_gpt_rows();
     failures += case_kimi_row();
+    failures += case_kimi_model();
     failures += case_grok_real_capture();
+    failures += case_grok_tails();
     failures += case_grok_error_reply();
     failures += case_decoder();
     failures += case_reply_text_success();
