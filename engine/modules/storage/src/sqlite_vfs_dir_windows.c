@@ -846,6 +846,69 @@ out:
     return rc;
 }
 
+/* Call with the binding mutex held. */
+static int vfs_dir_shm_unlock_locked(struct vfs_dir_shm_node *node,
+    struct vfs_dir_shm_conn *conn, uint16_t mask, int offset, int count)
+{
+    int rc = SQLITE_OK;
+    uint16_t all = 0;
+    for (struct vfs_dir_shm_conn *x = node->first; x; x = x->next) {
+        if (x != conn)
+            all |= x->shared_mask;
+    }
+    if ((mask & all) == 0)
+        rc = vfs_dir_shm_system_lock(node, VFS_DIR_SHM_UNLCK,
+                                     offset + VFS_DIR_SHM_BASE, count);
+    if (rc == SQLITE_OK) {
+        conn->excl_mask &= (uint16_t)~mask;
+        conn->shared_mask &= (uint16_t)~mask;
+    }
+    return rc;
+}
+
+static int vfs_dir_shm_shared_locked(struct vfs_dir_shm_node *node,
+    struct vfs_dir_shm_conn *conn, uint16_t mask, int offset, int count)
+{
+    int rc = SQLITE_OK;
+    uint16_t all_shared = 0;
+    for (struct vfs_dir_shm_conn *x = node->first; x; x = x->next) {
+        if ((x->excl_mask & mask) != 0) {
+            rc = SQLITE_BUSY;
+            break;
+        }
+        all_shared |= x->shared_mask;
+    }
+    if (rc == SQLITE_OK) {
+        if ((all_shared & mask) == 0)
+            rc = vfs_dir_shm_system_lock(node, VFS_DIR_SHM_RDLCK,
+                                         offset + VFS_DIR_SHM_BASE,
+                                         count);
+        if (rc == SQLITE_OK)
+            conn->shared_mask |= mask;
+    }
+    return rc;
+}
+
+static int vfs_dir_shm_exclusive_locked(struct vfs_dir_shm_node *node,
+    struct vfs_dir_shm_conn *conn, uint16_t mask, int offset, int count)
+{
+    int rc = SQLITE_OK;
+    for (struct vfs_dir_shm_conn *x = node->first; x; x = x->next) {
+        if (x != conn &&
+            ((x->excl_mask | x->shared_mask) & mask) != 0) {
+            rc = SQLITE_BUSY;
+            break;
+        }
+    }
+    if (rc == SQLITE_OK) {
+        rc = vfs_dir_shm_system_lock(node, VFS_DIR_SHM_WRLCK,
+                                     offset + VFS_DIR_SHM_BASE, count);
+        if (rc == SQLITE_OK)
+            conn->excl_mask |= mask;
+    }
+    return rc;
+}
+
 /* Mirrored from os_win.c winShmLock, including the sibling-mask bookkeeping
  * that keeps same-process connections from fighting their own OS locks. */
 static int vfs_dir_xshm_lock(sqlite3_file *fd, int offset, int count,
@@ -862,51 +925,12 @@ static int vfs_dir_xshm_lock(sqlite3_file *fd, int offset, int count,
     int rc = SQLITE_OK;
     uint16_t mask = (uint16_t)((1u << (offset + count)) - (1u << offset));
     sqlite3_mutex_enter(b->mutex);
-    if (flags & SQLITE_SHM_UNLOCK) {
-        uint16_t all = 0;
-        for (struct vfs_dir_shm_conn *x = node->first; x; x = x->next) {
-            if (x != conn)
-                all |= x->shared_mask;
-        }
-        if ((mask & all) == 0)
-            rc = vfs_dir_shm_system_lock(node, VFS_DIR_SHM_UNLCK,
-                                         offset + VFS_DIR_SHM_BASE, count);
-        if (rc == SQLITE_OK) {
-            conn->excl_mask &= (uint16_t)~mask;
-            conn->shared_mask &= (uint16_t)~mask;
-        }
-    } else if (flags & SQLITE_SHM_SHARED) {
-        uint16_t all_shared = 0;
-        for (struct vfs_dir_shm_conn *x = node->first; x; x = x->next) {
-            if ((x->excl_mask & mask) != 0) {
-                rc = SQLITE_BUSY;
-                break;
-            }
-            all_shared |= x->shared_mask;
-        }
-        if (rc == SQLITE_OK) {
-            if ((all_shared & mask) == 0)
-                rc = vfs_dir_shm_system_lock(node, VFS_DIR_SHM_RDLCK,
-                                             offset + VFS_DIR_SHM_BASE,
-                                             count);
-            if (rc == SQLITE_OK)
-                conn->shared_mask |= mask;
-        }
-    } else {
-        for (struct vfs_dir_shm_conn *x = node->first; x; x = x->next) {
-            if (x != conn &&
-                ((x->excl_mask | x->shared_mask) & mask) != 0) {
-                rc = SQLITE_BUSY;
-                break;
-            }
-        }
-        if (rc == SQLITE_OK) {
-            rc = vfs_dir_shm_system_lock(node, VFS_DIR_SHM_WRLCK,
-                                         offset + VFS_DIR_SHM_BASE, count);
-            if (rc == SQLITE_OK)
-                conn->excl_mask |= mask;
-        }
-    }
+    if (flags & SQLITE_SHM_UNLOCK)
+        rc = vfs_dir_shm_unlock_locked(node, conn, mask, offset, count);
+    else if (flags & SQLITE_SHM_SHARED)
+        rc = vfs_dir_shm_shared_locked(node, conn, mask, offset, count);
+    else
+        rc = vfs_dir_shm_exclusive_locked(node, conn, mask, offset, count);
     sqlite3_mutex_leave(b->mutex);
     return rc;
 }
