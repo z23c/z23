@@ -442,11 +442,42 @@ static bool binding_matches(block_index_projection_t *p,
                p->last_consumed_offset;
 }
 
+/* Dirty-iterate argument gate: every pointer the scan dereferences. */
+static bool bind_dirty_iterate_args_valid(const block_index_projection_t *p,
+                                          const uint8_t digest[32],
+                                          block_index_projection_cb cb)
+{
+    return p && p->db && digest && cb;
+}
+
+/* One dirty row: copy the hash out and parse the joined blob. False marks a
+ * malformed row, which the caller must distinguish from a callback refusal
+ * (bind_row_covered merges the two cases). */
+static bool bind_dirty_row_parse(sqlite3_stmt *stmt, uint8_t hash_copy[32],
+                                 struct disk_block_index *idx)
+{
+    const void *hash = sqlite3_column_blob(stmt, 0);
+    int hash_len = sqlite3_column_bytes(stmt, 0);
+    if (!hash || hash_len != 32 || !binding_blob_parse(
+            sqlite3_column_blob(stmt, 1), sqlite3_column_bytes(stmt, 1),
+            idx))
+        return false;
+    memcpy(hash_copy, hash, 32);
+    return true;
+}
+
+/* True when the dirty scan ended on an sqlite step failure rather than a
+ * clean DONE or a break with rc still on the current row. */
+static bool bind_dirty_scan_step_failed(int result, int rc)
+{
+    return result == 1 && rc != SQLITE_DONE && rc != SQLITE_ROW;
+}
+
 int block_index_projection_iterate_dirty_if_bound(
     block_index_projection_t *p, const uint8_t digest[32], uint64_t size,
     uint64_t rows, block_index_projection_cb cb, void *user)
 {
-    if (!p || !p->db || !digest || !cb) {
+    if (!bind_dirty_iterate_args_valid(p, digest, cb)) {
         fprintf(stderr, // obs-ok:block-index-projection-storage-boundary
                 "[block_index_projection] dirty iterate invalid argument\n");
         return -1;
@@ -466,23 +497,18 @@ int block_index_projection_iterate_dirty_if_bound(
                 "[block_index_projection] dirty iterate prepare "
                 "failed: %s\n", sqlite3_errmsg(p->db));
     while (result == 1 && (rc = sqlite3_step(stmt)) == SQLITE_ROW) { // raw-sql-ok:kernel-primitive
-        const void *hash = sqlite3_column_blob(stmt, 0);
-        int hash_len = sqlite3_column_bytes(stmt, 0);
         struct disk_block_index idx;
         uint8_t hash_copy[32];
-        if (!hash || hash_len != 32 || !binding_blob_parse(
-                sqlite3_column_blob(stmt, 1), sqlite3_column_bytes(stmt, 1),
-                &idx)) {
+        if (!bind_dirty_row_parse(stmt, hash_copy, &idx)) {
             fprintf(stderr, // obs-ok:block-index-projection-storage-boundary
                     "[block_index_projection] malformed bound dirty "
                     "row; refusing partial delta\n");
             result = -1;
             break;
         }
-        memcpy(hash_copy, hash, 32);
         if (!cb(hash_copy, &idx, user)) break;
     }
-    if (result == 1 && rc != SQLITE_DONE && rc != SQLITE_ROW) {
+    if (bind_dirty_scan_step_failed(result, rc)) {
         fprintf(stderr, // obs-ok:block-index-projection-storage-boundary
                 "[block_index_projection] dirty iterate step failed "
                 "rc=%d: %s\n", rc, sqlite3_errmsg(p->db));

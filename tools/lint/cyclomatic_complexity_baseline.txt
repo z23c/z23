@@ -1395,7 +1395,6 @@ engine/modules/storage/src/block_index_db.c:disk_block_index_deserialize:32
 engine/modules/storage/src/block_index_db.c:disk_block_index_serialize:29
 engine/modules/storage/src/block_index_projection.c:block_index_projection_catch_up:18
 engine/modules/storage/src/block_index_projection.c:block_index_projection_commitment:16
-engine/modules/storage/src/block_index_projection_binding.c:block_index_projection_iterate_dirty_if_bound:17
 engine/modules/storage/src/block_prefetch.c:bp_frame_size:16
 engine/modules/storage/src/blocks_index_legacy_reader.c:bilr_load_height_map:22
 engine/modules/storage/src/blocks_index_legacy_reader.c:bilr_load_height_map_for_tip:31
