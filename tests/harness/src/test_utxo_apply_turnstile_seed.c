@@ -302,9 +302,45 @@ static int test_seed_negative_total(void)
     return failures;
 }
 
+/* Mainnet stores no genesis body: the seeder must start from zero totals
+ * there instead of holding on a body that never exists. */
+static int test_seed_genesis_without_body(void)
+{
+    int failures = 0;
+    struct sd_fx fx;
+    struct utxo_apply_turnstile_seed_stats st;
+    int64_t sp, sa;
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    fx.bi[0].nFile = -1;
+    fx.bi[0].nDataPos = 0;
+    fx.bi[0].nStatus = 0;
+    while (sd_run(&fx)) {}
+    SD_CHECK("seeding passes a body-less genesis", sd_max(&fx) == 9);
+    SD_CHECK("genesis row is zero totals", sd_row_is(&fx, 0, 0, 0));
+    sd_sums(9, &sp, &sa);
+    sp -= sd_sprout_of(0);
+    sa -= sd_sapling_of(0);
+    SD_CHECK("later rows sum from a zero genesis", sd_row_is(&fx, 9, sp, sa));
+    utxo_apply_turnstile_seed_stats_get(&st);
+    SD_CHECK("no body blocker for genesis",
+             !blocker_exists("utxo_apply.turnstile_seed_body") &&
+             !strcmp(st.hold, "none"));
+    sd_close(&fx);
+    /* An indexed genesis whose body read fails is zero totals too. */
+    SD_CHECK("fixture", sd_open(&fx, 10, 10));
+    fx.fail_h = 0;
+    while (sd_run(&fx)) {}
+    SD_CHECK("seeding passes an unreadable genesis", sd_max(&fx) == 9);
+    SD_CHECK("unreadable genesis row is zero totals", sd_row_is(&fx, 0, 0, 0));
+    SD_CHECK("later rows sum from a zero genesis", sd_row_is(&fx, 9, sp, sa));
+    sd_close(&fx);
+    return failures;
+}
+
 int test_utxo_apply_turnstile_seed(void)
 {
-    return test_seed_empty_table() + test_seed_bounded_slice() +
+    return test_seed_genesis_without_body() +
+           test_seed_empty_table() + test_seed_bounded_slice() +
            test_seed_missing_body() + test_seed_ignores_cached_values() +
            test_seed_discards_stale_slice() + test_seed_handoff() +
            test_seed_negative_total();

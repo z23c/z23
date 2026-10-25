@@ -104,6 +104,21 @@ static bool seed_body_present(const struct block_index *bi)
            !(bi->nDataPos == 0 && bi->nHeight > 0);
 }
 
+/* Z23 may hold no readable genesis body, and genesis carries no shielded
+ * value (zclassicd reports both pools at 0 there): when its body is absent
+ * or unreadable its row is zero totals under its own hash, so genesis never
+ * holds the seeder. */
+static bool seed_genesis_row(const struct block_index *bi, int n)
+{
+    if (!bi || bi->nHeight != 0 || !bi->phashBlock)
+        return false;
+    g_rows[n].height = 0;
+    g_rows[n].hash = *bi->phashBlock;
+    g_rows[n].sprout = 0;
+    g_rows[n].sapling = 0;
+    return true;
+}
+
 /* Phase A: remember up to `limit` rows after K. Returns the row count. */
 static int seed_scan(struct main_state *ms, const char *datadir,
                      utxo_apply_turnstile_seed_reader_fn reader, void *user,
@@ -118,14 +133,19 @@ static int seed_scan(struct main_state *ms, const char *datadir,
         struct block_index *bi = active_chain_at(&ms->chain_active, (int)h);
         struct block blk;
         block_init(&blk);
-        if (!seed_body_present(bi) || !bi->phashBlock) {
-            seed_body_blocker(h, "no committed body on the active chain");
-            break;
+        bool present = seed_body_present(bi) && bi->phashBlock;
+        bool ok = present &&
+                  (reader ? reader(&blk, bi, datadir, user)
+                          : read_block_from_disk_index(&blk, bi, datadir));
+        if (!ok && seed_genesis_row(bi, n)) {
+            block_free(&blk);
+            seed_body_clear();
+            n++;
+            continue;
         }
-        bool ok = reader ? reader(&blk, bi, datadir, user)
-                         : read_block_from_disk_index(&blk, bi, datadir);
         if (!ok) {
-            seed_body_blocker(h, "body read failed");
+            seed_body_blocker(h, present ? "body read failed"
+                                         : "no committed body on the active chain");
             break;
         }
         g_rows[n].height = h;
