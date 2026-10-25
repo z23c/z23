@@ -104,6 +104,72 @@ static void cri_write_locked(const struct cri_entry *e)
 
 /* ── Payload parser ─────────────────────────────────────────── */
 
+/* Read "hash=<64hex> " from `*pp`, write `hash`, and advance past
+ * the separating space. Returns false on a missing or bad field;
+ * `*pp` is then left unchanged. */
+static bool cri_parse_hash_field(const char **pp, const char *end,
+                                  struct uint256 *hash)
+{
+    const char *p = *pp;
+    /* hash=<64hex> */
+    if ((size_t)(end - p) < 5 + 64) return false;
+    if (memcmp(p, "hash=", 5) != 0) return false;
+    p += 5;
+    if (!parse_hex256(p, (size_t)(end - p), hash)) return false;
+    p += 64;
+    if (p >= end || *p != ' ') return false;
+    p++;
+    *pp = p;
+    return true;
+}
+
+/* Read "reason=<name> " from `*pp` and copy the name into `reason`.
+ * The name ends at the next space. Returns false on a missing or
+ * malformed field; `*pp` is then left unchanged. */
+static bool cri_parse_reason_field(const char **pp, const char *end,
+                                    char *reason)
+{
+    const char *p = *pp;
+    /* reason=<name> */
+    if ((size_t)(end - p) < 7) return false;
+    if (memcmp(p, "reason=", 7) != 0) return false;
+    p += 7;
+    const char *r_start = p;
+    while (p < end && *p != ' ') p++;
+    size_t r_len = (size_t)(p - r_start);
+    if (r_len == 0) return false;
+    if (r_len >= CRI_REASON_MAX) r_len = CRI_REASON_MAX - 1;
+    memcpy(reason, r_start, r_len);
+    reason[r_len] = '\0';
+    if (p >= end || *p != ' ') return false;
+    p++;
+    *pp = p;
+    return true;
+}
+
+/* Read "dos=<N>" from `*pp` and write the value to `dos_out`.
+ * Returns false when the field is missing or has no digits;
+ * `*pp` is then left unchanged. */
+static bool cri_parse_dos_field(const char **pp, const char *end,
+                                 int32_t *dos_out)
+{
+    const char *p = *pp;
+    /* dos=<N>  — accept digits until end or space. */
+    if ((size_t)(end - p) < 4) return false;
+    if (memcmp(p, "dos=", 4) != 0) return false;
+    p += 4;
+    int dos = 0;
+    bool any = false;
+    while (p < end && *p >= '0' && *p <= '9') {
+        dos = dos * 10 + (*p - '0');
+        p++; any = true;
+    }
+    if (!any) return false;
+    *dos_out = dos;
+    *pp = p;
+    return true;
+}
+
 /* Fills `out` from a payload of the shape
  *   "hash=<64hex> reason=<name> dos=<N>"
  *
@@ -120,40 +186,13 @@ static bool cri_parse_payload(const void *payload, size_t len,
     const char *end = p + len;
 
     /* hash=<64hex> */
-    if ((size_t)(end - p) < 5 + 64) return false;
-    if (memcmp(p, "hash=", 5) != 0) return false;
-    p += 5;
-    if (!parse_hex256(p, (size_t)(end - p), &out->hash)) return false;
-    p += 64;
-    if (p >= end || *p != ' ') return false;
-    p++;
+    if (!cri_parse_hash_field(&p, end, &out->hash)) return false;
 
     /* reason=<name> */
-    if ((size_t)(end - p) < 7) return false;
-    if (memcmp(p, "reason=", 7) != 0) return false;
-    p += 7;
-    const char *r_start = p;
-    while (p < end && *p != ' ') p++;
-    size_t r_len = (size_t)(p - r_start);
-    if (r_len == 0) return false;
-    if (r_len >= CRI_REASON_MAX) r_len = CRI_REASON_MAX - 1;
-    memcpy(out->reason, r_start, r_len);
-    out->reason[r_len] = '\0';
-    if (p >= end || *p != ' ') return false;
-    p++;
+    if (!cri_parse_reason_field(&p, end, out->reason)) return false;
 
     /* dos=<N>  — accept digits until end or space. */
-    if ((size_t)(end - p) < 4) return false;
-    if (memcmp(p, "dos=", 4) != 0) return false;
-    p += 4;
-    int dos = 0;
-    bool any = false;
-    while (p < end && *p >= '0' && *p <= '9') {
-        dos = dos * 10 + (*p - '0');
-        p++; any = true;
-    }
-    if (!any) return false;
-    out->dos = dos;
+    if (!cri_parse_dos_field(&p, end, &out->dos)) return false;
     out->kind = kind;
     out->ts_us = cri_now_us();
     return true;
