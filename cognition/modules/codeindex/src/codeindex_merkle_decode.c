@@ -1,4 +1,4 @@
-/* Copyright 2026 Rhett Crepton - Apache License 2.0
+/* Copyright 2026 Rhett Creighton - Apache License 2.0
  * purpose: Decode and verify bounded wire-format codeindex Merkle proofs. */
 
 #include "codeindex_priv.h"
