@@ -145,6 +145,41 @@ static int64_t znam_dump_int(struct json_value *dump, const char *key)
     return v ? json_get_int(v) : -1;
 }
 
+static bool znam_register_roundtrip_equal(const struct ev_znam_register *out,
+                                          const struct ev_znam_register *in)
+{
+    return out->name_len == in->name_len &&
+           memcmp(out->name, in->name, in->name_len) == 0 &&
+           out->owner_len == in->owner_len &&
+           memcmp(out->owner_address, in->owner_address,
+                  in->owner_len) == 0 &&
+           out->target_type == in->target_type &&
+           out->target_value_len == in->target_value_len &&
+           memcmp(out->target_value, in->target_value,
+                  in->target_value_len) == 0 &&
+           memcmp(out->reg_txid, in->reg_txid, 32) == 0 &&
+           out->reg_height == in->reg_height &&
+           out->registered_unix == in->registered_unix &&
+           out->expiry_height == in->expiry_height;
+}
+
+static bool znam_update_roundtrip_equal(const struct ev_znam_update *out,
+                                        const struct ev_znam_update *in)
+{
+    return out->action_type == in->action_type &&
+           out->key_len == in->key_len &&
+           memcmp(out->key, in->key, in->key_len) == 0 &&
+           out->value_len == in->value_len &&
+           memcmp(out->value, in->value, in->value_len) == 0;
+}
+
+static bool znam_transfer_roundtrip_equal(const struct ev_znam_transfer *out,
+                                          const struct ev_znam_transfer *in)
+{
+    return out->new_owner_len == in->new_owner_len &&
+           memcmp(out->new_owner, in->new_owner, in->new_owner_len) == 0;
+}
+
 static int t_payload_roundtrip(void)
 {
     int failures = 0;
@@ -167,18 +202,7 @@ static int t_payload_roundtrip(void)
         ZP_CHECK("register parse",
                  ev_znam_register_parse(buf, len, &out));
         ZP_CHECK("register roundtrip",
-                 out.name_len == in.name_len &&
-                 memcmp(out.name, in.name, in.name_len) == 0 &&
-                 out.owner_len == in.owner_len &&
-                 memcmp(out.owner_address, in.owner_address, in.owner_len) == 0 &&
-                 out.target_type == in.target_type &&
-                 out.target_value_len == in.target_value_len &&
-                 memcmp(out.target_value, in.target_value,
-                        in.target_value_len) == 0 &&
-                 memcmp(out.reg_txid, in.reg_txid, 32) == 0 &&
-                 out.reg_height == in.reg_height &&
-                 out.registered_unix == in.registered_unix &&
-                 out.expiry_height == in.expiry_height);
+                 znam_register_roundtrip_equal(&out, &in));
     }
 
     /* UPDATE (text) */
@@ -197,11 +221,7 @@ static int t_payload_roundtrip(void)
         ZP_CHECK("update parse",
                  ev_znam_update_parse(buf, len, &out));
         ZP_CHECK("update roundtrip",
-                 out.action_type == in.action_type &&
-                 out.key_len == in.key_len &&
-                 memcmp(out.key, in.key, in.key_len) == 0 &&
-                 out.value_len == in.value_len &&
-                 memcmp(out.value, in.value, in.value_len) == 0);
+                 znam_update_roundtrip_equal(&out, &in));
     }
 
     /* TRANSFER */
@@ -218,8 +238,7 @@ static int t_payload_roundtrip(void)
         ZP_CHECK("transfer parse",
                  ev_znam_transfer_parse(buf, len, &out));
         ZP_CHECK("transfer roundtrip",
-                 out.new_owner_len == in.new_owner_len &&
-                 memcmp(out.new_owner, in.new_owner, in.new_owner_len) == 0);
+                 znam_transfer_roundtrip_equal(&out, &in));
     }
 
     /* RENEW */
