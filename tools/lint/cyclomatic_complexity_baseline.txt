@@ -2696,7 +2696,6 @@ tools/command/native_fleet_command.c:zcl_native_handle_fleet_experiment_stats:33
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_ledger_add:21
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_usage:31
 tools/command/native_fleet_command.c:zcl_native_handle_fleet_vitals_sample:20
-tools/command/native_fleet_roster.c:zcl_native_handle_fleet_roster:18
 tools/command/native_identity_command.c:zcl_native_handle_core_identity_resolve:16
 tools/command/native_mesh_command.c:zcl_native_handle_ops_mesh_pair_commit:17
 tools/command/native_mesh_command.c:zcl_native_handle_ops_mesh_pair_revoke:18

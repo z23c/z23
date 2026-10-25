@@ -374,15 +374,93 @@ static bool roster_read_membership(
                                             view_count, counts);
 }
 
+/* The datadir the reply reads: the caller's `datadir` string when one was
+ * given and non-empty, else the CLI's resolved datadir. */
+static const char *roster_datadir(const struct zcl_command_request *request)
+{
+    const struct json_value *arg =
+        request && request->input ? json_get(request->input, "datadir") : NULL;
+    const char *datadir = NULL;
+    if (arg && arg->type == JSON_STR)
+        datadir = json_get_str(arg);
+    if (!datadir || !datadir[0])
+        datadir = zcl_native_command_datadir();
+    return datadir;
+}
+
+/* Every roster row of this page, in pairing order. */
+static void roster_push_rows(struct json_value *rows,
+                             const struct mesh_pairing_public_view *views,
+                             const struct roster_evidence *evidence,
+                             size_t view_count)
+{
+    for (size_t i = 0; i < view_count; i++)
+        roster_push_row(rows, &views[i], &evidence[i]);
+}
+
+/* The fleet totals object: one count per asset, summed over this page. */
+static void roster_push_fleet_airships(
+    struct zcl_command_reply *reply,
+    const struct mesh_pairing_public_view *views,
+    const struct roster_evidence *evidence, size_t view_count)
+{
+    struct json_value airships;
+
+    json_init(&airships);
+    json_set_object(&airships);
+    for (size_t i = 0; i < fleet_airship_asset_count(); i++) {
+        const char *asset = fleet_airship_asset_at(i);
+
+        if (asset)
+            (void)json_push_kv_int(
+                &airships, asset,
+                roster_fleet_award(views, evidence, view_count, asset));
+    }
+    (void)json_push_kv(&reply->data, "airships", &airships);
+    json_free(&airships);
+}
+
+/* Every count above, accounted for in the same reply. */
+static void roster_push_rules(struct zcl_command_reply *reply)
+{
+    struct json_value rules;
+
+    json_init(&rules);
+    json_set_array(&rules);
+    for (size_t i = 0; i < fleet_airship_rule_count(); i++) {
+        const struct fleet_airship_rule_v1 *rule = fleet_airship_rule_at(i);
+        struct json_value entry;
+
+        if (!rule)
+            continue;
+        json_init(&entry);
+        json_set_object(&entry);
+        (void)json_push_kv_str(&entry, "fact", rule->fact);
+        (void)json_push_kv_str(&entry, "asset", rule->asset);
+        (void)json_push_kv_int(&entry, "per_node", (int64_t)rule->per_node);
+        (void)json_push_kv_str(
+            &entry, "verification",
+            fleet_airship_verification_name(
+                fleet_airship_verification_of(rule->fact)));
+        (void)json_push_kv_str(&entry, "confidence",
+                               fleet_airship_confidence_name(
+                                   rule->confidence));
+        (void)json_push_kv_str(&entry, "why", rule->why);
+        (void)json_push_back(&rules, &entry);
+        json_free(&entry);
+    }
+    (void)json_push_kv(&reply->data, "rules", &rules);
+    json_free(&rules);
+}
+
 void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
                                     struct zcl_command_reply *reply)
 {
     struct mesh_pairing_public_view views[ROSTER_ROW_MAX];
     struct roster_evidence evidence[ROSTER_ROW_MAX];
     struct db_mesh_pairing_counts counts;
-    struct json_value rows, airships, rules;
-    const struct json_value *arg;
-    const char *datadir = NULL;
+    struct json_value rows;
+    const char *datadir;
     sqlite3 *db = NULL;
     struct node_db ndb;
     size_t view_count = 0;
@@ -391,11 +469,7 @@ void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
     if (!reply)
         return;
 
-    arg = request && request->input ? json_get(request->input, "datadir") : NULL;
-    if (arg && arg->type == JSON_STR)
-        datadir = json_get_str(arg);
-    if (!datadir || !datadir[0])
-        datadir = zcl_native_command_datadir();
+    datadir = roster_datadir(request);
     size_t skip = roster_skip_count(request);
 
     /* READ leaf: node_db_open() here would create, migrate and clean the
@@ -451,8 +525,7 @@ void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
 
     json_init(&rows);
     json_set_array(&rows);
-    for (size_t i = 0; i < view_count; i++)
-        roster_push_row(&rows, &views[i], &evidence[i]);
+    roster_push_rows(&rows, views, evidence, view_count);
     (void)json_push_kv(&reply->data, "rows", &rows);
     json_free(&rows);
 
@@ -460,46 +533,8 @@ void zcl_native_handle_fleet_roster(const struct zcl_command_request *request,
     (void)json_push_kv_int(&reply->data, "total", counts.total);
     roster_emit_page(reply, datadir, skip, view_count, counts.total);
 
-    json_init(&airships);
-    json_set_object(&airships);
-    for (size_t i = 0; i < fleet_airship_asset_count(); i++) {
-        const char *asset = fleet_airship_asset_at(i);
-
-        if (asset)
-            (void)json_push_kv_int(
-                &airships, asset,
-                roster_fleet_award(views, evidence, view_count, asset));
-    }
-    (void)json_push_kv(&reply->data, "airships", &airships);
-    json_free(&airships);
-
-    /* Every count above, accounted for in the same reply. */
-    json_init(&rules);
-    json_set_array(&rules);
-    for (size_t i = 0; i < fleet_airship_rule_count(); i++) {
-        const struct fleet_airship_rule_v1 *rule = fleet_airship_rule_at(i);
-        struct json_value entry;
-
-        if (!rule)
-            continue;
-        json_init(&entry);
-        json_set_object(&entry);
-        (void)json_push_kv_str(&entry, "fact", rule->fact);
-        (void)json_push_kv_str(&entry, "asset", rule->asset);
-        (void)json_push_kv_int(&entry, "per_node", (int64_t)rule->per_node);
-        (void)json_push_kv_str(
-            &entry, "verification",
-            fleet_airship_verification_name(
-                fleet_airship_verification_of(rule->fact)));
-        (void)json_push_kv_str(&entry, "confidence",
-                               fleet_airship_confidence_name(
-                                   rule->confidence));
-        (void)json_push_kv_str(&entry, "why", rule->why);
-        (void)json_push_back(&rules, &entry);
-        json_free(&entry);
-    }
-    (void)json_push_kv(&reply->data, "rules", &rules);
-    json_free(&rules);
+    roster_push_fleet_airships(reply, views, evidence, view_count);
+    roster_push_rules(reply);
 
     reply->status = ZCL_COMMAND_STATUS_PASSED;
 }
