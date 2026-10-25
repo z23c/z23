@@ -249,6 +249,44 @@ static int syncsvc_header_band_fill_slots(struct active_chain *c,
     return filled;
 }
 
+/* Height the closure heal stops at: the attested SHA3 checkpoint's
+ * extent, or the reducer's trusted anchor when none is installed. */
+static int32_t syncsvc_header_band_anchor_height(void)
+{
+    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
+    return cp ? cp->height : REDUCER_FRONTIER_TRUSTED_ANCHOR;
+}
+
+/* Closure step 1, pskip pass: build skip links for relinked island
+ * nodes above the anchor, bottom-up so each build reuses the parent's
+ * freshly built pskip. */
+static void syncsvc_header_band_build_missing_skips(
+    struct active_chain *chain, struct block_index *tip, int32_t anchor_h)
+{
+    for (int h = anchor_h + 1; h <= tip->nHeight; h++) {
+        struct block_index *b = active_chain_at(chain, h);
+        if (b && b->pprev && b->pskip == NULL)
+            block_index_build_skip(b);
+    }
+}
+
+/* Closure step 2 body: re-sum each above-anchor block's nChainWork from
+ * its parent's; returns the number of blocks repropagated. */
+static int syncsvc_header_band_repropagate_chainwork(
+    struct active_chain *chain, struct block_index *tip, int32_t anchor_h)
+{
+    int repropagated = 0;
+    for (int h = anchor_h + 1; h <= tip->nHeight; h++) {
+        struct block_index *b = active_chain_at(chain, h);
+        if (!b || !b->pprev)
+            continue;
+        struct arith_uint256 proof = GetBlockProof(b);
+        arith_uint256_add(&b->nChainWork, &b->pprev->nChainWork, &proof);
+        repropagated++;
+    }
+    return repropagated;
+}
+
 void syncsvc_header_band_after_batch(struct main_state *ms,
                                      const struct block_index *last_header)
 {
@@ -281,9 +319,7 @@ void syncsvc_header_band_after_batch(struct main_state *ms,
         return;
     }
 
-    const struct sha3_utxo_checkpoint *cp = get_sha3_utxo_checkpoint();
-    const int32_t anchor_h = cp ? cp->height
-                                : REDUCER_FRONTIER_TRUSTED_ANCHOR;
+    const int32_t anchor_h = syncsvc_header_band_anchor_height();
 
     /* Band CLOSED: the tip now descends contiguously to a trust root.
      * 1) Non-destructive in-memory slot-fill (heals getblockhash /
@@ -292,25 +328,15 @@ void syncsvc_header_band_after_batch(struct main_state *ms,
      *    theirs). Bottom-up so each build reuses the parent's pskip. */
     int filled = syncsvc_header_band_fill_slots(&ms->chain_active, tip,
                                                 anchor_h);
-    for (int h = anchor_h + 1; h <= tip->nHeight; h++) {
-        struct block_index *b = active_chain_at(&ms->chain_active, h);
-        if (b && b->pprev && b->pskip == NULL)
-            block_index_build_skip(b);
-    }
+    syncsvc_header_band_build_missing_skips(&ms->chain_active, tip,
+                                            anchor_h);
 
     /* 2) Chainwork repropagation above the attested anchor extent: the
      *    island's work was seeded from a pprev-less anchor (nChainWork=0),
      *    understating every island block. Idempotent for already-correct
      *    chains — same write pattern as the accept_block_header relink. */
-    int repropagated = 0;
-    for (int h = anchor_h + 1; h <= tip->nHeight; h++) {
-        struct block_index *b = active_chain_at(&ms->chain_active, h);
-        if (!b || !b->pprev)
-            continue;
-        struct arith_uint256 proof = GetBlockProof(b);
-        arith_uint256_add(&b->nChainWork, &b->pprev->nChainWork, &proof);
-        repropagated++;
-    }
+    int repropagated = syncsvc_header_band_repropagate_chainwork(
+        &ms->chain_active, tip, anchor_h);
 
     /* 3) The clear is bound to the DERIVED fact, never to control flow:
      *    re-derive after the heal and keep the band fact recorded if the
