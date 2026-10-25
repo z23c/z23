@@ -565,9 +565,7 @@ static int mixed_check_catchup(contacts_projection_t *contacts,
     return failures;
 }
 
-static int mixed_check_dumps(contacts_projection_t *contacts,
-                             onion_ann_projection_t *onion_p,
-                             hodl_history_projection_t *hodl)
+static int mixed_check_dumps(void)
 {
     int failures = 0;
     struct json_value dump = {0};
@@ -684,7 +682,7 @@ static int t_projection_catchup_mixed(void)
 
     uint64_t end_offset = event_log_size(log);
     failures += mixed_check_catchup(contacts, onion_p, hodl, end_offset);
-    failures += mixed_check_dumps(contacts, onion_p, hodl);
+    failures += mixed_check_dumps();
 
     contacts_projection_close(contacts);
     onion_ann_projection_close(onion_p);
