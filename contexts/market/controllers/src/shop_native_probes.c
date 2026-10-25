@@ -190,6 +190,68 @@ static bool shp_row_has_envelope(sqlite3_stmt *s)
     return false;
 }
 
+/* Scan wallet_seed, wallet_keys and wallet_sapling_keys for an at-rest
+ * envelope. Returns false when a step fails mid-scan; *failed_table then
+ * names that table so the caller can close the database and log. */
+static bool shp_scan_wallet_key_tables(sqlite3 *db, bool *any_rows,
+                                       bool *encrypted, bool *scan_complete,
+                                       const char **failed_table)
+{
+    static const char *const tables[] = {
+        "wallet_seed", "wallet_keys", "wallet_sapling_keys"
+    };
+    for (size_t t = 0; t < sizeof(tables) / sizeof(tables[0]); t++) {
+        char sql[80];
+        (void)snprintf(sql, sizeof(sql), "SELECT * FROM %s", tables[t]);
+        sqlite3_stmt *s = NULL;
+        /* A missing table contributes no rows — an old node.db is probed
+         * for what it has, not failed for what it lacks. */
+        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK || !s) { // raw-controller-sql-ok
+            if (s)
+                sqlite3_finalize(s);
+            continue;
+        }
+        /* One step per row: AR_STEP_ROW_READONLY returns the raw result
+         * code, so DONE and a mid-scan error are told apart without a
+         * second step past the end (AR_STEP_DONE would step AGAIN). */
+        int rc = SQLITE_ROW;
+        long scanned = 0;
+        while ((rc = AR_STEP_ROW_READONLY(s)) == SQLITE_ROW) {
+            *any_rows = true;
+            if (shp_row_has_envelope(s))
+                *encrypted = true;
+            if (++scanned >= SHOP_WALLET_SCAN_MAX) {
+                *scan_complete = false;  /* the row cap stopped the scan */
+                break;
+            }
+        }
+        sqlite3_finalize(s);
+        if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
+            *failed_table = tables[t];
+            return false;
+        }
+    }
+    return true;
+}
+
+static void shp_probe_key_encryption_row(sqlite3 *db, bool *encrypted)
+{
+    /* The wrapped-DEK row: the WKD1 world keeps one row in
+     * wallet_key_encryption, written only when keys are encrypted. */
+    if (!*encrypted) {
+        static const char *const dek_sql =
+            "SELECT 1 FROM wallet_key_encryption WHERE id=1";
+        sqlite3_stmt *s = NULL;
+        if (sqlite3_prepare_v2(db, dek_sql, -1, &s, NULL) == SQLITE_OK && s) { // raw-controller-sql-ok
+            if (AR_STEP_ROW(s))
+                *encrypted = true;
+            sqlite3_finalize(s);
+        } else if (s) {
+            sqlite3_finalize(s);
+        }
+    }
+}
+
 enum shop_wallet_posture shop_probe_wallet_posture(const char *datadir)
 {
     /* The open is the shared guarded read-only one
@@ -214,56 +276,14 @@ enum shop_wallet_posture shop_probe_wallet_posture(const char *datadir)
                    "(read-only open status %d)", (int)ro);
 
     bool any_rows = false, encrypted = false, scan_complete = true;
-    static const char *const tables[] = {
-        "wallet_seed", "wallet_keys", "wallet_sapling_keys"
-    };
-    for (size_t t = 0; t < sizeof(tables) / sizeof(tables[0]); t++) {
-        char sql[80];
-        (void)snprintf(sql, sizeof(sql), "SELECT * FROM %s", tables[t]);
-        sqlite3_stmt *s = NULL;
-        /* A missing table contributes no rows — an old node.db is probed
-         * for what it has, not failed for what it lacks. */
-        if (sqlite3_prepare_v2(db, sql, -1, &s, NULL) != SQLITE_OK || !s) { // raw-controller-sql-ok
-            if (s)
-                sqlite3_finalize(s);
-            continue;
-        }
-        /* One step per row: AR_STEP_ROW_READONLY returns the raw result
-         * code, so DONE and a mid-scan error are told apart without a
-         * second step past the end (AR_STEP_DONE would step AGAIN). */
-        int rc = SQLITE_ROW;
-        long scanned = 0;
-        while ((rc = AR_STEP_ROW_READONLY(s)) == SQLITE_ROW) {
-            any_rows = true;
-            if (shp_row_has_envelope(s))
-                encrypted = true;
-            if (++scanned >= SHOP_WALLET_SCAN_MAX) {
-                scan_complete = false;  /* the row cap stopped the scan */
-                break;
-            }
-        }
-        sqlite3_finalize(s);
-        if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
-            zcl_native_node_db_close_readonly(&db, &ndb);
-            LOG_RETURN(SHOP_WALLET_UNREADABLE, SHOP_TAG,
-                       "wallet table %s scan failed mid-probe", tables[t]);
-        }
+    const char *failed_table = NULL;
+    if (!shp_scan_wallet_key_tables(db, &any_rows, &encrypted,
+                                    &scan_complete, &failed_table)) {
+        zcl_native_node_db_close_readonly(&db, &ndb);
+        LOG_RETURN(SHOP_WALLET_UNREADABLE, SHOP_TAG,
+                   "wallet table %s scan failed mid-probe", failed_table);
     }
-
-    /* The wrapped-DEK row: the WKD1 world keeps one row in
-     * wallet_key_encryption, written only when keys are encrypted. */
-    if (!encrypted) {
-        static const char *const dek_sql =
-            "SELECT 1 FROM wallet_key_encryption WHERE id=1";
-        sqlite3_stmt *s = NULL;
-        if (sqlite3_prepare_v2(db, dek_sql, -1, &s, NULL) == SQLITE_OK && s) { // raw-controller-sql-ok
-            if (AR_STEP_ROW(s))
-                encrypted = true;
-            sqlite3_finalize(s);
-        } else if (s) {
-            sqlite3_finalize(s);
-        }
-    }
+    shp_probe_key_encryption_row(db, &encrypted);
     zcl_native_node_db_close_readonly(&db, &ndb);
 
     if (encrypted)
