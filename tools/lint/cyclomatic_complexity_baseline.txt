@@ -325,9 +325,6 @@ contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_choose:4
 contexts/commons/modules/vcs/src/zcode_attention_frontier.c:af_frontier_project:79
 contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_census_assemble:27
 contexts/commons/modules/vcs/src/zcode_c23_corpus_census.c:vcs_zcode_corpus_census_process_scope:56
-contexts/commons/modules/vcs/src/zcode_c23_corpus_checkpoint.c:checkpoint_shape:54
-contexts/commons/modules/vcs/src/zcode_c23_corpus_checkpoint.c:vcs_zcode_c23_corpus_checkpoint_v1_decode:16
-contexts/commons/modules/vcs/src/zcode_c23_corpus_checkpoint.c:vcs_zcode_c23_corpus_checkpoint_v1_verify_successor:16
 contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c:assignment_shape:26
 contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c:vcs_zcode_c23_corpus_rules_v1_validate:21
 contexts/commons/modules/vcs/src/zcode_c23_corpus_objects.c:vcs_zcode_c23_error_string:17

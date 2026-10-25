@@ -33,9 +33,17 @@ static bool add_to(uint64_t *sum, uint64_t value)
     return zcl_u64_add(*sum, value, sum);
 }
 
-static enum vcs_zcode_c23_error checkpoint_shape(
-    const struct vcs_zcode_c23_corpus_checkpoint_v1 *checkpoint,
-    bool require_signature)
+struct checkpoint_shard_totals {
+    uint64_t entries;
+    uint64_t production;
+    uint64_t tests;
+    uint64_t durable;
+    uint64_t physical;
+    uint64_t unique;
+};
+
+static enum vcs_zcode_c23_error checkpoint_shape_scalars(
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *checkpoint)
 {
     if (!checkpoint) return VCS_ZCODE_C23_NULL;
     if (checkpoint->schema_version != 1) return VCS_ZCODE_C23_VERSION;
@@ -47,11 +55,23 @@ static enum vcs_zcode_c23_error checkpoint_shape(
     if (!checkpoint->sequence || !checkpoint->cutoff_height ||
         checkpoint->cutoff_mtp <= 0)
         return VCS_ZCODE_C23_TIME;
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error checkpoint_shape_ancestry_root(
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *checkpoint)
+{
     if ((checkpoint->sequence == 1 &&
          !zero_root(checkpoint->predecessor_checkpoint_root)) ||
         (checkpoint->sequence > 1 &&
          zero_root(checkpoint->predecessor_checkpoint_root)))
         return VCS_ZCODE_C23_ANCESTRY;
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error checkpoint_shape_required_roots(
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *checkpoint)
+{
     const uint8_t *roots[] = {
         checkpoint->rules_root, checkpoint->family_policy_root,
         checkpoint->moderation_set_root,
@@ -59,45 +79,81 @@ static enum vcs_zcode_c23_error checkpoint_shape(
     };
     for (size_t i = 0; i < sizeof(roots) / sizeof(roots[0]); i++)
         if (!zcl_bytes_any_set(roots[i], 32)) return VCS_ZCODE_C23_ROOT;
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error checkpoint_shape_binding_roots(
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *checkpoint,
+    const struct vcs_zcode_c23_checkpoint_shard_v1 *binding, size_t index)
+{
+    if (!zcl_bytes_any_set(binding->shard_root, 32) ||
+        !zcl_bytes_any_set(binding->first_lineage_root, 32) ||
+        !zcl_bytes_any_set(binding->last_lineage_root, 32) ||
+        memcmp(binding->first_lineage_root,
+               binding->last_lineage_root, 32) > 0 ||
+        binding->entry_count == 0)
+        return VCS_ZCODE_C23_ROOT;
+    if (index > 0 && memcmp(checkpoint->shards[index - 1u].last_lineage_root,
+                            binding->first_lineage_root, 32) >= 0)
+        return VCS_ZCODE_C23_ORDER;
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error checkpoint_shape_binding_totals(
+    const struct vcs_zcode_c23_checkpoint_shard_v1 *binding,
+    struct checkpoint_shard_totals *totals)
+{
+    uint64_t total = 0;
+    if (!zcl_u64_add(binding->production_loc, binding->test_loc,
+                     &total) || binding->durable_loc > total ||
+        !add_to(&totals->entries, binding->entry_count) ||
+        !add_to(&totals->production, binding->production_loc) ||
+        !add_to(&totals->tests, binding->test_loc) ||
+        !add_to(&totals->durable, binding->durable_loc) ||
+        !add_to(&totals->physical, binding->physical_lines) ||
+        !add_to(&totals->unique, binding->unique_semantic_units))
+        return VCS_ZCODE_C23_OVERFLOW;
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error checkpoint_shape_shards(
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *checkpoint,
+    struct checkpoint_shard_totals *totals)
+{
     if (!checkpoint->shards || checkpoint->shard_count == 0 ||
         checkpoint->shard_count > VCS_ZCODE_C23_CHECKPOINT_SHARD_MAX)
         return VCS_ZCODE_C23_SIZE;
-    uint64_t entries = 0, production = 0, tests = 0, durable = 0;
-    uint64_t physical = 0, unique = 0;
     for (size_t i = 0; i < checkpoint->shard_count; i++) {
         const struct vcs_zcode_c23_checkpoint_shard_v1 *binding =
             &checkpoint->shards[i];
-        if (!zcl_bytes_any_set(binding->shard_root, 32) ||
-            !zcl_bytes_any_set(binding->first_lineage_root, 32) ||
-            !zcl_bytes_any_set(binding->last_lineage_root, 32) ||
-            memcmp(binding->first_lineage_root,
-                   binding->last_lineage_root, 32) > 0 ||
-            binding->entry_count == 0)
-            return VCS_ZCODE_C23_ROOT;
-        if (i > 0 && memcmp(checkpoint->shards[i - 1u].last_lineage_root,
-                            binding->first_lineage_root, 32) >= 0)
-            return VCS_ZCODE_C23_ORDER;
-        uint64_t total = 0;
-        if (!zcl_u64_add(binding->production_loc, binding->test_loc,
-                         &total) || binding->durable_loc > total ||
-            !add_to(&entries, binding->entry_count) ||
-            !add_to(&production, binding->production_loc) ||
-            !add_to(&tests, binding->test_loc) ||
-            !add_to(&durable, binding->durable_loc) ||
-            !add_to(&physical, binding->physical_lines) ||
-            !add_to(&unique, binding->unique_semantic_units))
-            return VCS_ZCODE_C23_OVERFLOW;
+        enum vcs_zcode_c23_error error =
+            checkpoint_shape_binding_roots(checkpoint, binding, i);
+        if (error != VCS_ZCODE_C23_OK) return error;
+        error = checkpoint_shape_binding_totals(binding, totals);
+        if (error != VCS_ZCODE_C23_OK) return error;
     }
-    if (entries != checkpoint->total_entries ||
-        production != checkpoint->production_loc ||
-        tests != checkpoint->test_loc || durable != checkpoint->durable_loc ||
-        physical != checkpoint->physical_lines ||
-        unique != checkpoint->unique_semantic_units ||
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error checkpoint_shape_totals_match(
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *checkpoint,
+    const struct checkpoint_shard_totals *totals)
+{
+    if (totals->entries != checkpoint->total_entries ||
+        totals->production != checkpoint->production_loc ||
+        totals->tests != checkpoint->test_loc ||
+        totals->durable != checkpoint->durable_loc ||
+        totals->physical != checkpoint->physical_lines ||
+        totals->unique != checkpoint->unique_semantic_units ||
         checkpoint->excluded_entries > checkpoint->total_entries)
         return VCS_ZCODE_C23_POLICY;
-    uint64_t total_loc = 0;
-    if (!zcl_u64_add(production, tests, &total_loc))
-        return VCS_ZCODE_C23_OVERFLOW;
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error checkpoint_shape_milestone(
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *checkpoint,
+    uint64_t total_loc, uint64_t durable)
+{
     if (checkpoint->milestone == VCS_ZCODE_C23_MILESTONE_50M) {
         if (total_loc < VCS_ZCODE_C23_FIRST_MILESTONE_LOC ||
             durable < VCS_ZCODE_C23_FIRST_MILESTONE_LOC ||
@@ -112,6 +168,30 @@ static enum vcs_zcode_c23_error checkpoint_shape(
                total_loc < VCS_ZCODE_C23_FIRST_MILESTONE_LOC) {
         return VCS_ZCODE_C23_POLICY;
     }
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error checkpoint_shape(
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *checkpoint,
+    bool require_signature)
+{
+    enum vcs_zcode_c23_error error = checkpoint_shape_scalars(checkpoint);
+    if (error != VCS_ZCODE_C23_OK) return error;
+    error = checkpoint_shape_ancestry_root(checkpoint);
+    if (error != VCS_ZCODE_C23_OK) return error;
+    error = checkpoint_shape_required_roots(checkpoint);
+    if (error != VCS_ZCODE_C23_OK) return error;
+    struct checkpoint_shard_totals totals = {0};
+    error = checkpoint_shape_shards(checkpoint, &totals);
+    if (error != VCS_ZCODE_C23_OK) return error;
+    error = checkpoint_shape_totals_match(checkpoint, &totals);
+    if (error != VCS_ZCODE_C23_OK) return error;
+    uint64_t total_loc = 0;
+    if (!zcl_u64_add(totals.production, totals.tests, &total_loc))
+        return VCS_ZCODE_C23_OVERFLOW;
+    error = checkpoint_shape_milestone(checkpoint, total_loc,
+                                       totals.durable);
+    if (error != VCS_ZCODE_C23_OK) return error;
     if (require_signature && !zcl_bytes_any_set(checkpoint->signature, 64))
         return VCS_ZCODE_C23_SIGNATURE;
     return VCS_ZCODE_C23_OK;
@@ -258,17 +338,10 @@ static size_t binding_read(struct vcs_zcode_c23_checkpoint_shard_v1 *binding,
     return off;
 }
 
-enum vcs_zcode_c23_error vcs_zcode_c23_corpus_checkpoint_v1_decode(
-    struct vcs_zcode_c23_corpus_checkpoint_v1 *out,
-    struct vcs_zcode_c23_checkpoint_shard_v1 *shards,
-    size_t shard_capacity, const uint8_t *wire, size_t wire_len)
+static size_t checkpoint_header_read(
+    struct vcs_zcode_c23_corpus_checkpoint_v1 *out, const uint8_t *wire,
+    size_t *count, uint16_t *reserved)
 {
-    if (!out || !shards || !wire) return VCS_ZCODE_C23_NULL;
-    memset(out, 0, sizeof(*out));
-    if (wire_len < VCS_ZCODE_C23_CHECKPOINT_HEADER_WIRE_BYTES ||
-        memcmp(wire, checkpoint_magic, 8) != 0)
-        return wire_len < VCS_ZCODE_C23_CHECKPOINT_HEADER_WIRE_BYTES
-            ? VCS_ZCODE_C23_SIZE : VCS_ZCODE_C23_MAGIC;
     size_t off = 8;
     out->schema_version = zcl_read_u16_le(wire + off); off += 2;
     out->flags = zcl_read_u16_le(wire + off); off += 2;
@@ -290,15 +363,30 @@ enum vcs_zcode_c23_error vcs_zcode_c23_corpus_checkpoint_v1_decode(
     out->physical_lines = zcl_read_u64_le(wire + off); off += 8;
     out->unique_semantic_units = zcl_read_u64_le(wire + off); off += 8;
     out->excluded_entries = zcl_read_u64_le(wire + off); off += 8;
-    size_t count = zcl_read_u16_le(wire + off); off += 2;
-    uint16_t reserved = zcl_read_u16_le(wire + off); off += 2;
+    *count = zcl_read_u16_le(wire + off); off += 2;
+    *reserved = zcl_read_u16_le(wire + off); off += 2;
     memcpy(out->signer_pubkey, wire + off, 32); off += 32;
+    return off;
+}
+
+static enum vcs_zcode_c23_error checkpoint_decode_size_error(
+    struct vcs_zcode_c23_corpus_checkpoint_v1 *out,
+    uint16_t reserved, size_t count, size_t shard_capacity, size_t wire_len)
+{
     size_t needed = vcs_zcode_c23_corpus_checkpoint_v1_wire_size(count);
     if (reserved || !count || count > shard_capacity ||
         !needed || needed != wire_len) {
         memset(out, 0, sizeof(*out));
         return reserved ? VCS_ZCODE_C23_ENUM : VCS_ZCODE_C23_SIZE;
     }
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error checkpoint_decode_finish(
+    struct vcs_zcode_c23_corpus_checkpoint_v1 *out,
+    struct vcs_zcode_c23_checkpoint_shard_v1 *shards, size_t count,
+    const uint8_t *wire, size_t wire_len, size_t off)
+{
     memset(shards, 0, count * sizeof(*shards));
     for (size_t i = 0; i < count; i++)
         off += binding_read(&shards[i], wire + off);
@@ -310,6 +398,26 @@ enum vcs_zcode_c23_error vcs_zcode_c23_corpus_checkpoint_v1_decode(
         : VCS_ZCODE_C23_SIZE;
     if (error != VCS_ZCODE_C23_OK) memset(out, 0, sizeof(*out));
     return error;
+}
+
+enum vcs_zcode_c23_error vcs_zcode_c23_corpus_checkpoint_v1_decode(
+    struct vcs_zcode_c23_corpus_checkpoint_v1 *out,
+    struct vcs_zcode_c23_checkpoint_shard_v1 *shards,
+    size_t shard_capacity, const uint8_t *wire, size_t wire_len)
+{
+    if (!out || !shards || !wire) return VCS_ZCODE_C23_NULL;
+    memset(out, 0, sizeof(*out));
+    if (wire_len < VCS_ZCODE_C23_CHECKPOINT_HEADER_WIRE_BYTES ||
+        memcmp(wire, checkpoint_magic, 8) != 0)
+        return wire_len < VCS_ZCODE_C23_CHECKPOINT_HEADER_WIRE_BYTES
+            ? VCS_ZCODE_C23_SIZE : VCS_ZCODE_C23_MAGIC;
+    size_t count = 0;
+    uint16_t reserved = 0;
+    size_t off = checkpoint_header_read(out, wire, &count, &reserved);
+    enum vcs_zcode_c23_error error = checkpoint_decode_size_error(
+        out, reserved, count, shard_capacity, wire_len);
+    if (error != VCS_ZCODE_C23_OK) return error;
+    return checkpoint_decode_finish(out, shards, count, wire, wire_len, off);
 }
 
 enum vcs_zcode_c23_error vcs_zcode_c23_corpus_checkpoint_v1_root(
@@ -338,6 +446,39 @@ enum vcs_zcode_c23_error vcs_zcode_c23_corpus_checkpoint_v1_root(
     return VCS_ZCODE_C23_OK;
 }
 
+static enum vcs_zcode_c23_error checkpoint_successor_link(
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *prior,
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *next,
+    const uint8_t prior_root[32])
+{
+    if (next->sequence != prior->sequence + 1u ||
+        memcmp(next->predecessor_checkpoint_root, prior_root, 32) != 0 ||
+        next->cutoff_height < prior->cutoff_height ||
+        next->cutoff_mtp < prior->cutoff_mtp ||
+        memcmp(next->rules_root, prior->rules_root, 32) != 0 ||
+        memcmp(next->family_policy_root, prior->family_policy_root, 32) != 0)
+        return VCS_ZCODE_C23_ANCESTRY;
+    return VCS_ZCODE_C23_OK;
+}
+
+static enum vcs_zcode_c23_error checkpoint_successor_50m_root(
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *prior,
+    const struct vcs_zcode_c23_corpus_checkpoint_v1 *next,
+    const uint8_t prior_root[32])
+{
+    uint8_t expected_50m[32] = {0};
+    if (prior->milestone == VCS_ZCODE_C23_MILESTONE_50M)
+        memcpy(expected_50m, prior_root, 32);
+    else if (zcl_bytes_any_set(prior->verified_50m_ancestor_root, 32))
+        memcpy(expected_50m, prior->verified_50m_ancestor_root, 32);
+    if (memcmp(next->verified_50m_ancestor_root, expected_50m, 32) != 0)
+        return VCS_ZCODE_C23_ANCESTRY;
+    if (next->milestone == VCS_ZCODE_C23_MILESTONE_100M &&
+        !zcl_bytes_any_set(expected_50m, 32))
+        return VCS_ZCODE_C23_ANCESTRY;
+    return VCS_ZCODE_C23_OK;
+}
+
 enum vcs_zcode_c23_error vcs_zcode_c23_corpus_checkpoint_v1_verify_successor(
     const struct vcs_zcode_c23_corpus_checkpoint_v1 *prior,
     const struct vcs_zcode_c23_corpus_checkpoint_v1 *next)
@@ -351,22 +492,7 @@ enum vcs_zcode_c23_error vcs_zcode_c23_corpus_checkpoint_v1_verify_successor(
     uint8_t prior_root[32];
     error = vcs_zcode_c23_corpus_checkpoint_v1_root(prior, prior_root);
     if (error != VCS_ZCODE_C23_OK) return error;
-    if (next->sequence != prior->sequence + 1u ||
-        memcmp(next->predecessor_checkpoint_root, prior_root, 32) != 0 ||
-        next->cutoff_height < prior->cutoff_height ||
-        next->cutoff_mtp < prior->cutoff_mtp ||
-        memcmp(next->rules_root, prior->rules_root, 32) != 0 ||
-        memcmp(next->family_policy_root, prior->family_policy_root, 32) != 0)
-        return VCS_ZCODE_C23_ANCESTRY;
-    uint8_t expected_50m[32] = {0};
-    if (prior->milestone == VCS_ZCODE_C23_MILESTONE_50M)
-        memcpy(expected_50m, prior_root, 32);
-    else if (zcl_bytes_any_set(prior->verified_50m_ancestor_root, 32))
-        memcpy(expected_50m, prior->verified_50m_ancestor_root, 32);
-    if (memcmp(next->verified_50m_ancestor_root, expected_50m, 32) != 0)
-        return VCS_ZCODE_C23_ANCESTRY;
-    if (next->milestone == VCS_ZCODE_C23_MILESTONE_100M &&
-        !zcl_bytes_any_set(expected_50m, 32))
-        return VCS_ZCODE_C23_ANCESTRY;
-    return VCS_ZCODE_C23_OK;
+    error = checkpoint_successor_link(prior, next, prior_root);
+    if (error != VCS_ZCODE_C23_OK) return error;
+    return checkpoint_successor_50m_root(prior, next, prior_root);
 }
