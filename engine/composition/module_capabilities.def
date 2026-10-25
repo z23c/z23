@@ -248,6 +248,7 @@ ZCL_MODULE_CAPABILITY("engine/jobs/src/utxo_apply_stage.c", CAP_FS_WRITE|CAP_FS_
 ZCL_MODULE_CAPABILITY("engine/jobs/src/utxo_apply_stage_accessors.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/utxo_apply_stage_drain.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/utxo_apply_stage_dump.c", CAP_FS_READ|CAP_FS_WRITE, "")
+ZCL_MODULE_CAPABILITY("engine/jobs/src/utxo_apply_turnstile_seed.c", CAP_FS_READ|CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/utxo_apply_suffix_inputs.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/validate_headers_log_store.c", CAP_FS_WRITE, "")
 ZCL_MODULE_CAPABILITY("engine/jobs/src/validate_headers_pool.c", CAP_FS_WRITE, "")

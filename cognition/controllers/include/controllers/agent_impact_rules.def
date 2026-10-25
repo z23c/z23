@@ -834,6 +834,8 @@ AGENT_IMPACT_RULE("tests/harness/src/test_merkle_tree.c", "merkle_tree")
 AGENT_IMPACT_RULE("core/modules/bloom/src/merkle.c|core/modules/bloom/include/bloom/merkle.h|tests/harness/src/test_merkle_malleability.c", "merkle_malleability bloom")
 AGENT_IMPACT_RULE("tests/harness/src/test_parity_lockin_anchor_membership.c", "parity_lockin_anchor_membership")
 AGENT_IMPACT_RULE("engine/jobs/src/utxo_apply_turnstile.c|engine/jobs/include/jobs/utxo_apply_turnstile.h|tests/harness/src/test_parity_lockin_turnstile.c|tests/harness/src/parity_lockin_turnstile_stage.c|tests/harness/src/shielded_pool_reset_pairing.c|engine/modules/storage/src/shielded_pool_kv.c|engine/modules/storage/include/storage/shielded_pool_kv.h", "parity_lockin_turnstile")
+AGENT_IMPACT_RULE("engine/jobs/src/utxo_apply_turnstile.c|engine/jobs/include/jobs/utxo_apply_turnstile.h|tests/harness/src/test_parity_lockin_turnstile.c", "parity_lockin_turnstile")
+AGENT_IMPACT_RULE("engine/jobs/src/utxo_apply_turnstile_seed.c|engine/jobs/include/jobs/utxo_apply_turnstile_seed.h|tests/harness/src/test_utxo_apply_turnstile_seed.c", "utxo_apply_turnstile_seed parity_lockin_turnstile")
 AGENT_IMPACT_RULE("tests/harness/src/test_sync_service.c|tests/harness/src/test_sync_service_configured_inbound.c", "sync_service")
 
 /* Wave 3 (2026-07-10): sapling anchor-frontier cure condition. Move 2a extends

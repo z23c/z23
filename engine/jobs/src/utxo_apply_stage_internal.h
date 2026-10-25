@@ -12,10 +12,12 @@
 #ifndef ZCL_JOBS_UTXO_APPLY_STAGE_INTERNAL_H
 #define ZCL_JOBS_UTXO_APPLY_STAGE_INTERNAL_H
 
+#include "jobs/utxo_apply_stage.h"
 #include "util/stage.h"
 
 #include <stdatomic.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 struct uint256;
@@ -117,6 +119,12 @@ void utxo_apply_select_idle_blocker_clear(void);
 /* The live stage handle (NULL before init / after shutdown). The dump reads
  * it lock-free. */
 stage_t *utxo_apply_stage_handle(void);
+
+/* Bound main_state, datadir and injected reader (false when unbound). */
+bool utxo_apply_stage_seed_context(struct main_state **ms, char *datadir,
+                                   size_t datadir_size,
+                                   utxo_apply_reader_fn *reader,
+                                   void **reader_user);
 
 /* Production prevout resolver installed by utxo_apply_stage_init when tests
  * have not injected a custom lookup. Read-only; writes stay in

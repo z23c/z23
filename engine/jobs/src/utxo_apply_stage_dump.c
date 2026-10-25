@@ -20,6 +20,7 @@
 #include "storage/shielded_pool_kv.h"
 #include "jobs/utxo_apply_delta.h"
 #include "jobs/utxo_apply_turnstile.h"
+#include "jobs/utxo_apply_turnstile_seed.h"
 
 #include <sqlite3.h>
 #include <stdatomic.h>
@@ -93,6 +94,14 @@ static void dump_turnstile(struct json_value *out, sqlite3 *db)
                      (int64_t)atomic_load(&g_ua_turnstile_sprout_total));
     json_push_kv_int(out, "turnstile_sapling_reject_total",
                      (int64_t)atomic_load(&g_ua_turnstile_sapling_total));
+    struct utxo_apply_turnstile_seed_stats ss;
+    utxo_apply_turnstile_seed_stats_get(&ss);
+    json_push_kv_int(out, "turnstile_seed_through", ss.seeded_through);
+    json_push_kv_int(out, "turnstile_seed_rows", (int64_t)ss.rows_written);
+    json_push_kv_int(out, "turnstile_seed_slices", (int64_t)ss.slices);
+    json_push_kv_int(out, "turnstile_seed_last_slice_us", ss.last_slice_us);
+    json_push_kv_int(out, "turnstile_seed_read_us", (int64_t)ss.read_us_total);
+    json_push_kv_str(out, "turnstile_seed_hold", ss.hold);
 }
 
 bool utxo_apply_dump_state_json(struct json_value *out, const char *key)

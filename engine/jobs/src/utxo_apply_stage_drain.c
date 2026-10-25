@@ -11,6 +11,7 @@
 
 #include "jobs/utxo_apply_batch_commit.h"
 #include "jobs/utxo_apply_stage.h"
+#include "jobs/utxo_apply_turnstile_seed.h"
 #include "jobs/reducer_commit_invariants.h"
 #include "utxo_apply_created_outputs_prune.h"
 #include "utxo_apply_stage_internal.h"
@@ -113,6 +114,10 @@ int utxo_apply_stage_drain(int max_steps)
         utxo_apply_batch_post_commit_record(GetTimeMicros() - prune_t0,
                                             prune_ran);
     }
+
+    /* Lane 2b: fill the ZIP-209 pool-totals run from the bodies. Outside the
+     * advance gate so it also runs idle at tip; never refuses a block. */
+    (void)utxo_apply_turnstile_seed_post_commit();
 
     return advanced;
 }

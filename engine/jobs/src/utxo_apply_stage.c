@@ -1057,3 +1057,21 @@ void utxo_apply_stage_test_hold_lock(bool hold)
  * live in utxo_apply_stage_accessors.c; utxo_apply_dump_state_json (+ its
  * first-failure summary helper) lives in utxo_apply_stage_dump.c — see
  * utxo_apply_stage_internal.h. */
+
+/* Snapshot of the bound context for the post-commit turnstile seeder. */
+bool utxo_apply_stage_seed_context(struct main_state **ms, char *datadir,
+                                   size_t datadir_size,
+                                   utxo_apply_reader_fn *reader,
+                                   void **reader_user)
+{
+    pthread_mutex_lock(&g_lock);
+    bool bound = g_ms != NULL;
+    if (bound) {
+        *ms = g_ms;
+        snprintf(datadir, datadir_size, "%s", g_datadir);
+        *reader = g_reader;
+        *reader_user = g_reader_user;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return bound;
+}
