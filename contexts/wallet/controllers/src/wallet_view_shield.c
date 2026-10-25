@@ -89,17 +89,165 @@ size_t serve_shield(uint8_t *r, size_t max, const char *query) {
     return off;
 }
 
+static double parse_shield_confirm_amount(const uint8_t *body,
+                                          size_t body_len) {
+    char amount_str[32] = "";
+    if (body && body_len > 0)
+        wv_parse_form_field(body, body_len, "amount", amount_str, sizeof(amount_str));
+    if (amount_str[0])
+        return strtod(amount_str, NULL);
+    return 0;
+}
+
+static void lookup_shield_z_destination(char *z_dest, size_t z_dest_size) {
+    sqlite3 *sdb = wv_open_db();
+    if (sdb) {
+        wv_first_sapling_address(sdb, z_dest, z_dest_size);
+        sqlite3_close(sdb);
+    }
+}
+
+static bool build_z_sendmany_params(char *z_params, size_t z_params_size,
+                                    const char *from_addr, const char *z_dest,
+                                    double addr_amt) {
+    int params_len = snprintf(z_params, z_params_size,
+        "[\"%s\",[{\"address\":\"%s\",\"amount\":%.8f}],1,%.8f]",
+        from_addr, z_dest, addr_amt, FEE_ZCL);
+    return params_len >= 0 && (size_t)params_len < z_params_size;
+}
+
+static void capture_first_shield_opid(const char *rpc_buf,
+                                      const char *result_val, char *opid_str,
+                                      size_t opid_size) {
+    if (!opid_str[0]) {
+        /* Save first opid for tracking */
+        if (result_val[0] && strstr(result_val, "opid-"))
+            snprintf(opid_str, opid_size, "%s",
+                result_val);
+        else {
+            const char *op = strstr(rpc_buf, "opid-");
+            size_t oi = 0;
+            while (op[oi] && op[oi] != '"' &&
+                   op[oi] != '}' && oi < 127) {
+                opid_str[oi] = op[oi]; oi++;
+            }
+            opid_str[oi] = '\0';
+        }
+    }
+}
+
+static void record_shield_rpc_error(const char *rpc_buf, const char *addr,
+                                    double addr_amt, char *shield_err,
+                                    size_t shield_err_size) {
+    /* Try nested error.message first, then top-level message */
+    zcl_json_extract_str(rpc_buf, "message",
+        shield_err, shield_err_size);
+    if (!shield_err[0]) {
+        /* Show raw RPC response for debugging */
+        snprintf(shield_err, shield_err_size,
+            "z_sendmany failed for %.100s (%.4f ZCL). "
+            "RPC response: %.100s",
+            addr, addr_amt, rpc_buf);
+    }
+}
+
+/* Issue z_sendmany for each funded address.
+ * Each deducts its own fee. Total shielded = sum(addr_amount - fee). */
+static bool shield_all_funded_addresses(const struct wv_funded_addr *funded,
+                                        int n_funded, double amount,
+                                        const char *z_dest, char *opid_str,
+                                        size_t opid_size, char *shield_err,
+                                        size_t shield_err_size,
+                                        double *total_shielded,
+                                        int *ops_started) {
+    bool success = false;
+    for (int ai = 0; ai < n_funded; ai++) {
+        double addr_amt = funded[ai].amount - FEE_ZCL;
+        if (addr_amt <= 0.00000001) continue; /* dust, skip */
+
+        /* Cap at requested amount minus what we've already queued */
+        double remaining = amount - *total_shielded;
+        if (remaining <= 0.00000001) break;
+        if (addr_amt > remaining) addr_amt = remaining;
+
+        char z_params[2304];
+        if (!build_z_sendmany_params(z_params, sizeof(z_params),
+                                     funded[ai].addr, z_dest, addr_amt)) {
+            snprintf(shield_err, shield_err_size,
+                     "Shielding address input exceeds the RPC limit");
+            continue;
+        }
+
+        char rpc_buf[4096] = "";
+        int rpc_rc = wv_rpc_call("z_sendmany", z_params,
+                                           rpc_buf, sizeof(rpc_buf));
+
+        if (rpc_rc > 0) {
+            char result_val[256] = "";
+            zcl_json_extract_str(rpc_buf, "result",
+                result_val, sizeof(result_val));
+            if (strstr(result_val, "opid-") || strstr(rpc_buf, "opid-")) {
+                capture_first_shield_opid(rpc_buf, result_val, opid_str,
+                                          opid_size);
+                *total_shielded += addr_amt;
+                (*ops_started)++;
+                success = true;
+            } else {
+                record_shield_rpc_error(rpc_buf, funded[ai].addr, addr_amt,
+                                        shield_err, shield_err_size);
+            }
+        } else if (!shield_err[0]) {
+            snprintf(shield_err, shield_err_size,
+                "Could not connect to zclassicd (port %d). "
+                "Start it with: zclassicd -daemon", ZCLASSICD_RPC_DEFAULT_PORT);
+        }
+    }
+    return success;
+}
+
+static void explain_shield_nothing_started(const struct wv_funded_addr *funded,
+                                           int n_funded, char *shield_err,
+                                           size_t shield_err_size) {
+    double total_funded = 0;
+    for (int i = 0; i < n_funded; i++)
+        total_funded += funded[i].amount;
+    if (total_funded < 0.00011)
+        snprintf(shield_err, shield_err_size,
+            "No spendable transparent balance found in zclassicd. "
+            "If you recently shielded, the previous operation may "
+            "still be pending (~2.5 min for 1 confirmation). "
+            "Check with: zcl-rpc z_getoperationstatus");
+    else
+        snprintf(shield_err, shield_err_size,
+            "All %d funded addresses (total %.8f ZCL) have "
+            "insufficient balance after the min-relay fee per address.",
+            n_funded, total_funded);
+}
+
+static void render_shield_balance_card(char *bal_card, size_t bal_card_size) {
+    sqlite3 *sdb = wv_open_db();
+    if (sdb) {
+        int64_t new_t = wv_query_ground_truth_balance(sdb, NULL);
+        int64_t new_z = wv_query_shielded_balance(sdb, NULL);
+        char ts[32], zs[32], gs[32];
+        snprintf(ts, sizeof(ts), "%.8f", (double)new_t / 1e8);
+        snprintf(zs, sizeof(zs), "%.8f", (double)new_z / 1e8);
+        snprintf(gs, sizeof(gs), "%.8f", (double)(new_t+new_z) / 1e8);
+        struct template_var bv[] = {
+            {"total", gs}, {"transparent", ts}, {"shielded", zs}
+        };
+        template_render(TMPL_SHIELD_BALANCE_CARD, bv, 3,
+            bal_card, bal_card_size);
+        sqlite3_close(sdb);
+    }
+}
+
 /* ── Shield Confirm (/wallet/shield/confirm POST) ──────────── */
 /* Executes the shielding transaction via the node's z_sendmany. */
 
 size_t serve_shield_confirm(uint8_t *r, size_t max,
                                     const uint8_t *body, size_t body_len) {
-    double amount = 0;
-    char amount_str[32] = "";
-    if (body && body_len > 0)
-        wv_parse_form_field(body, body_len, "amount", amount_str, sizeof(amount_str));
-    if (amount_str[0])
-        amount = strtod(amount_str, NULL);
+    double amount = parse_shield_confirm_amount(body, body_len);
 
     size_t off = wv_emit_header(r, max, "Shield — Z23", "/wallet/shield");
 
@@ -112,13 +260,7 @@ size_t serve_shield_confirm(uint8_t *r, size_t max,
 
     /* Look up a z-address from the wallet to use as destination */
     char z_dest[256] = "";
-    {
-        sqlite3 *sdb = wv_open_db();
-        if (sdb) {
-            wv_first_sapling_address(sdb, z_dest, sizeof(z_dest));
-            sqlite3_close(sdb);
-        }
-    }
+    lookup_shield_z_destination(z_dest, sizeof(z_dest));
 
     if (!z_dest[0]) {
         struct template_var ev[] = {{ "message",
@@ -144,95 +286,19 @@ size_t serve_shield_confirm(uint8_t *r, size_t max,
         return off;
     }
 
-    /* Issue z_sendmany for each funded address.
-     * Each deducts its own fee. Total shielded = sum(addr_amount - fee). */
-    bool success = false;
     int ops_started = 0;
     char opid_str[128] = "";
     char shield_err[256] = "";
     double total_shielded = 0;
 
-    for (int ai = 0; ai < n_funded; ai++) {
-        double addr_amt = funded[ai].amount - FEE_ZCL;
-        if (addr_amt <= 0.00000001) continue; /* dust, skip */
-
-        /* Cap at requested amount minus what we've already queued */
-        double remaining = amount - total_shielded;
-        if (remaining <= 0.00000001) break;
-        if (addr_amt > remaining) addr_amt = remaining;
-
-        char z_params[2304];
-        int params_len = snprintf(z_params, sizeof(z_params),
-            "[\"%s\",[{\"address\":\"%s\",\"amount\":%.8f}],1,%.8f]",
-            funded[ai].addr, z_dest, addr_amt, FEE_ZCL);
-        if (params_len < 0 || (size_t)params_len >= sizeof(z_params)) {
-            snprintf(shield_err, sizeof(shield_err),
-                     "Shielding address input exceeds the RPC limit");
-            continue;
-        }
-
-        char rpc_buf[4096] = "";
-        int rpc_rc = wv_rpc_call("z_sendmany", z_params,
-                                           rpc_buf, sizeof(rpc_buf));
-
-        if (rpc_rc > 0) {
-            char result_val[256] = "";
-            zcl_json_extract_str(rpc_buf, "result",
-                result_val, sizeof(result_val));
-            if (strstr(result_val, "opid-") || strstr(rpc_buf, "opid-")) {
-                if (!opid_str[0]) {
-                    /* Save first opid for tracking */
-                    if (result_val[0] && strstr(result_val, "opid-"))
-                        snprintf(opid_str, sizeof(opid_str), "%s",
-                            result_val);
-                    else {
-                        const char *op = strstr(rpc_buf, "opid-");
-                        size_t oi = 0;
-                        while (op[oi] && op[oi] != '"' &&
-                               op[oi] != '}' && oi < 127) {
-                            opid_str[oi] = op[oi]; oi++;
-                        }
-                        opid_str[oi] = '\0';
-                    }
-                }
-                total_shielded += addr_amt;
-                ops_started++;
-                success = true;
-            } else {
-                /* Try nested error.message first, then top-level message */
-                zcl_json_extract_str(rpc_buf, "message",
-                    shield_err, sizeof(shield_err));
-                if (!shield_err[0]) {
-                    /* Show raw RPC response for debugging */
-                    snprintf(shield_err, sizeof(shield_err),
-                        "z_sendmany failed for %.100s (%.4f ZCL). "
-                        "RPC response: %.100s",
-                        funded[ai].addr, addr_amt, rpc_buf);
-                }
-            }
-        } else if (!shield_err[0]) {
-            snprintf(shield_err, sizeof(shield_err),
-                "Could not connect to zclassicd (port %d). "
-                "Start it with: zclassicd -daemon", ZCLASSICD_RPC_DEFAULT_PORT);
-        }
-    }
+    bool success = shield_all_funded_addresses(funded, n_funded, amount,
+        z_dest, opid_str, sizeof(opid_str), shield_err, sizeof(shield_err),
+        &total_shielded, &ops_started);
 
     /* If we iterated all addresses but none had enough after fees */
     if (!success && !shield_err[0] && ops_started == 0) {
-        double total_funded = 0;
-        for (int i = 0; i < n_funded; i++)
-            total_funded += funded[i].amount;
-        if (total_funded < 0.00011)
-            snprintf(shield_err, sizeof(shield_err),
-                "No spendable transparent balance found in zclassicd. "
-                "If you recently shielded, the previous operation may "
-                "still be pending (~2.5 min for 1 confirmation). "
-                "Check with: zcl-rpc z_getoperationstatus");
-        else
-            snprintf(shield_err, sizeof(shield_err),
-                "All %d funded addresses (total %.8f ZCL) have "
-                "insufficient balance after the min-relay fee per address.",
-                n_funded, total_funded);
+        explain_shield_nothing_started(funded, n_funded, shield_err,
+                                       sizeof(shield_err));
     }
 
     if (success) {
@@ -245,23 +311,7 @@ size_t serve_shield_confirm(uint8_t *r, size_t max,
         g_balance_dirty = 1; /* Also recompute on next pulse */
         /* Build balance card */
         char bal_card[512] = "";
-        {
-            sqlite3 *sdb = wv_open_db();
-            if (sdb) {
-                int64_t new_t = wv_query_ground_truth_balance(sdb, NULL);
-                int64_t new_z = wv_query_shielded_balance(sdb, NULL);
-                char ts[32], zs[32], gs[32];
-                snprintf(ts, sizeof(ts), "%.8f", (double)new_t / 1e8);
-                snprintf(zs, sizeof(zs), "%.8f", (double)new_z / 1e8);
-                snprintf(gs, sizeof(gs), "%.8f", (double)(new_t+new_z) / 1e8);
-                struct template_var bv[] = {
-                    {"total", gs}, {"transparent", ts}, {"shielded", zs}
-                };
-                template_render(TMPL_SHIELD_BALANCE_CARD, bv, 3,
-                    bal_card, sizeof(bal_card));
-                sqlite3_close(sdb);
-            }
-        }
+        render_shield_balance_card(bal_card, sizeof(bal_card));
 
         char amt_s[32], ops_s[16];
         snprintf(amt_s, sizeof(amt_s), "%.8f", total_shielded);
