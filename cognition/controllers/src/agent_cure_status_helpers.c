@@ -85,6 +85,45 @@ static const char *cure_kernel_store_basename(const char *path)
     return slash ? slash + 1 : path;
 }
 
+static void agent_cure_activity_fill_wal(
+    const char *progress_path, int64_t captured_at_unix,
+    struct agent_cure_activity_view *out)
+{
+    int n = snprintf(out->wal_path, sizeof(out->wal_path), "%s-wal",
+                     progress_path ? progress_path : "");
+    if (n >= 0 && (size_t)n < sizeof(out->wal_path)) {
+        out->wal_present = agent_cure_stat_file(
+            out->wal_path, &out->wal_size, &out->wal_mtime);
+        out->wal_age_seconds = agent_cure_progress_age_seconds(
+            out->wal_present, captured_at_unix, out->wal_mtime);
+        if (out->wal_present && out->wal_mtime > out->activity_mtime) {
+            out->activity_mtime = out->wal_mtime;
+            out->activity_source = cure_kernel_store_basename(out->wal_path);
+        }
+    } else {
+        out->wal_path[0] = '\0';
+    }
+}
+
+static void agent_cure_activity_apply_eta_sample(
+    const struct agent_cure_eta_view *eta, int64_t captured_at_unix,
+    struct agent_cure_activity_view *out)
+{
+    if (eta && eta->available && eta->newer_time > eta->older_time) {
+        int64_t interval = eta->newer_time - eta->older_time;
+        out->sample_interval_seconds = interval;
+        int64_t cadence_budget = interval > CURE_PROGRESS_MAX_STALE_SECS / 2
+            ? CURE_PROGRESS_MAX_STALE_SECS : interval * 2;
+        if (cadence_budget > out->stale_after_seconds)
+            out->stale_after_seconds = cadence_budget;
+        if (eta->newer_time > out->activity_mtime &&
+            eta->newer_time <= captured_at_unix) {
+            out->activity_mtime = eta->newer_time;
+            out->activity_source = "durable_utxo_apply_sample";
+        }
+    }
+}
+
 static void agent_cure_activity_build(
     const char *progress_path, bool progress_present, int64_t progress_mtime,
     int64_t captured_at_unix, const struct agent_cure_eta_view *eta,
@@ -101,35 +140,8 @@ static void agent_cure_activity_build(
     out->activity_source =
         progress_present ? cure_kernel_store_basename(progress_path)
                          : "unavailable";
-
-    int n = snprintf(out->wal_path, sizeof(out->wal_path), "%s-wal",
-                     progress_path ? progress_path : "");
-    if (n >= 0 && (size_t)n < sizeof(out->wal_path)) {
-        out->wal_present = agent_cure_stat_file(
-            out->wal_path, &out->wal_size, &out->wal_mtime);
-        out->wal_age_seconds = agent_cure_progress_age_seconds(
-            out->wal_present, captured_at_unix, out->wal_mtime);
-        if (out->wal_present && out->wal_mtime > out->activity_mtime) {
-            out->activity_mtime = out->wal_mtime;
-            out->activity_source = cure_kernel_store_basename(out->wal_path);
-        }
-    } else {
-        out->wal_path[0] = '\0';
-    }
-
-    if (eta && eta->available && eta->newer_time > eta->older_time) {
-        int64_t interval = eta->newer_time - eta->older_time;
-        out->sample_interval_seconds = interval;
-        int64_t cadence_budget = interval > CURE_PROGRESS_MAX_STALE_SECS / 2
-            ? CURE_PROGRESS_MAX_STALE_SECS : interval * 2;
-        if (cadence_budget > out->stale_after_seconds)
-            out->stale_after_seconds = cadence_budget;
-        if (eta->newer_time > out->activity_mtime &&
-            eta->newer_time <= captured_at_unix) {
-            out->activity_mtime = eta->newer_time;
-            out->activity_source = "durable_utxo_apply_sample";
-        }
-    }
+    agent_cure_activity_fill_wal(progress_path, captured_at_unix, out);
+    agent_cure_activity_apply_eta_sample(eta, captured_at_unix, out);
 
     out->activity_age_seconds = agent_cure_progress_age_seconds(
         progress_present, captured_at_unix, out->activity_mtime);
