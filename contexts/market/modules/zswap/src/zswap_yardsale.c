@@ -134,64 +134,65 @@ static bool peer_window_admit_locked(int64_t peer_id, int64_t now_unix)
 
 /* ── Ingress ────────────────────────────────────────────────────── */
 
-enum zswap_yardsale_ingest zswap_yardsale_ingest_wire(
+/* Outcome of the pre-lock ingress checks (exact wire length, decode,
+ * verify): the helper bumps the matching drop counter on rejection, so the
+ * caller only maps the outcome onto the public ingest result. */
+enum yardsale_wire_check {
+    YARDSALE_WIRE_CHECK_OK,
+    YARDSALE_WIRE_CHECK_INVALID,
+    YARDSALE_WIRE_CHECK_EXPIRED
+};
+
+/* Exact-length check, decode and verify — the ingress steps that need no
+ * cache lock. Bumps ads_dropped_invalid / ads_dropped_expired on rejection
+ * and fills out_quote on success. */
+static enum yardsale_wire_check yardsale_check_decode_verify(
     const uint8_t *wire, size_t wire_len,
     const uint8_t expected_network_genesis[32],
-    int64_t peer_id, int64_t now_unix,
-    struct zswap_yardsale_ad *out_ad)
+    int64_t now_unix, struct zswap_quote_v1 *out_quote)
 {
-    if (!wire || !expected_network_genesis)
-        LOG_RETURN(ZSWAP_YARDSALE_INGEST_INVALID, "zswap",
-                   "ingest_wire: NULL wire=%d net=%d",
-                   !wire, !expected_network_genesis);
-
-    pthread_mutex_lock(&g_yardsale_mutex);
-    g_counters.wires_seen++;
-    pthread_mutex_unlock(&g_yardsale_mutex);
-
     /* A yardsale sign is exactly one 210-byte signed wire — no framing, no
      * count prefix, no trailing bytes. */
     if (wire_len != ZSWAP_QUOTE_WIRE_BYTES) {
         pthread_mutex_lock(&g_yardsale_mutex);
         g_counters.ads_dropped_invalid++;
         pthread_mutex_unlock(&g_yardsale_mutex);
-        return ZSWAP_YARDSALE_INGEST_INVALID;
+        return YARDSALE_WIRE_CHECK_INVALID;
     }
 
-    struct zswap_quote_v1 quote;
-    if (zswap_quote_decode(wire, wire_len, &quote) != ZSWAP_QUOTE_OK) {
+    if (zswap_quote_decode(wire, wire_len, out_quote) != ZSWAP_QUOTE_OK) {
         pthread_mutex_lock(&g_yardsale_mutex);
         g_counters.ads_dropped_invalid++;
         pthread_mutex_unlock(&g_yardsale_mutex);
-        return ZSWAP_YARDSALE_INGEST_INVALID;
+        return YARDSALE_WIRE_CHECK_INVALID;
     }
 
     /* Verify at ingress, outside the lock: the sign must be for THIS chain,
      * inside its validity window right now, and carry a seller signature
      * that verifies — a relay can forward bytes but can never alter them. */
     enum zswap_quote_error verr =
-        zswap_quote_verify_at(&quote, expected_network_genesis, now_unix);
+        zswap_quote_verify_at(out_quote, expected_network_genesis, now_unix);
     if (verr == ZSWAP_QUOTE_ERR_EXPIRED) {
         pthread_mutex_lock(&g_yardsale_mutex);
         g_counters.ads_dropped_expired++;
         pthread_mutex_unlock(&g_yardsale_mutex);
-        return ZSWAP_YARDSALE_INGEST_EXPIRED;
+        return YARDSALE_WIRE_CHECK_EXPIRED;
     }
     if (verr != ZSWAP_QUOTE_OK) {
         pthread_mutex_lock(&g_yardsale_mutex);
         g_counters.ads_dropped_invalid++;
         pthread_mutex_unlock(&g_yardsale_mutex);
-        return ZSWAP_YARDSALE_INGEST_INVALID;
+        return YARDSALE_WIRE_CHECK_INVALID;
     }
+    return YARDSALE_WIRE_CHECK_OK;
+}
 
-    uint8_t root[32];
-    if (zswap_quote_root(&quote, root) != ZSWAP_QUOTE_OK)
-        LOG_RETURN(ZSWAP_YARDSALE_INGEST_INVALID, "zswap",
-                   "ingest_wire: verified quote has no root");
-
-    pthread_mutex_lock(&g_yardsale_mutex);
-    yardsale_prune_locked(now_unix);
-
+/* Caller holds g_yardsale_mutex. Returns true when root is already cached:
+ * bumps seen_count/last_seen, counts the dedup and copies the entry out. */
+static bool yardsale_dedup_hit_locked(const uint8_t root[32],
+                                      int64_t now_unix,
+                                      struct zswap_yardsale_ad *out_ad)
+{
     /* Dedup on the quote root: a byte-identical re-gossip bumps
      * seen_count/last_seen only — same wire, same id, never a second row. */
     for (int i = 0; i < g_ad_count; i++) {
@@ -200,24 +201,24 @@ enum zswap_yardsale_ingest zswap_yardsale_ingest_wire(
             g_ads[i].last_seen_unix = now_unix;
             g_counters.ads_deduped++;
             if (out_ad) *out_ad = g_ads[i];
-            pthread_mutex_unlock(&g_yardsale_mutex);
-            return ZSWAP_YARDSALE_INGEST_DEDUP;
+            return true;
         }
     }
+    return false;
+}
 
-    /* Fresh ad: per-peer clamp. A flooding seller/relay hits the window cap;
-     * honest re-gossip of known ads above never reaches this check. */
-    if (!peer_window_admit_locked(peer_id, now_unix)) {
-        g_counters.ads_dropped_rate++;
-        pthread_mutex_unlock(&g_yardsale_mutex);
-        return ZSWAP_YARDSALE_INGEST_RATE_LIMITED;
-    }
-
+/* Caller holds g_yardsale_mutex. Builds the cache entry for one freshly
+ * verified ad and stores it, evicting the stalest sign at capacity. */
+static void yardsale_store_new_ad_locked(const struct zswap_quote_v1 *quote,
+                                         const uint8_t root[32],
+                                         int64_t now_unix,
+                                         struct zswap_yardsale_ad *out_ad)
+{
     /* Store: at capacity, prefer evicting the stalest sign (oldest
      * last_seen) — expired ones were already pruned above. */
     struct zswap_yardsale_ad ad;
     memset(&ad, 0, sizeof(ad));
-    ad.quote = quote;
+    ad.quote = *quote;
     memcpy(ad.quote_root, root, 32);
     ad.first_seen_unix = now_unix;
     ad.last_seen_unix = now_unix;
@@ -235,6 +236,53 @@ enum zswap_yardsale_ingest zswap_yardsale_ingest_wire(
     }
     g_counters.ads_stored++;
     if (out_ad) *out_ad = ad;
+}
+
+enum zswap_yardsale_ingest zswap_yardsale_ingest_wire(
+    const uint8_t *wire, size_t wire_len,
+    const uint8_t expected_network_genesis[32],
+    int64_t peer_id, int64_t now_unix,
+    struct zswap_yardsale_ad *out_ad)
+{
+    if (!wire || !expected_network_genesis)
+        LOG_RETURN(ZSWAP_YARDSALE_INGEST_INVALID, "zswap",
+                   "ingest_wire: NULL wire=%d net=%d",
+                   !wire, !expected_network_genesis);
+
+    pthread_mutex_lock(&g_yardsale_mutex);
+    g_counters.wires_seen++;
+    pthread_mutex_unlock(&g_yardsale_mutex);
+
+    struct zswap_quote_v1 quote;
+    enum yardsale_wire_check check = yardsale_check_decode_verify(
+        wire, wire_len, expected_network_genesis, now_unix, &quote);
+    if (check == YARDSALE_WIRE_CHECK_INVALID)
+        return ZSWAP_YARDSALE_INGEST_INVALID;
+    if (check == YARDSALE_WIRE_CHECK_EXPIRED)
+        return ZSWAP_YARDSALE_INGEST_EXPIRED;
+
+    uint8_t root[32];
+    if (zswap_quote_root(&quote, root) != ZSWAP_QUOTE_OK)
+        LOG_RETURN(ZSWAP_YARDSALE_INGEST_INVALID, "zswap",
+                   "ingest_wire: verified quote has no root");
+
+    pthread_mutex_lock(&g_yardsale_mutex);
+    yardsale_prune_locked(now_unix);
+
+    if (yardsale_dedup_hit_locked(root, now_unix, out_ad)) {
+        pthread_mutex_unlock(&g_yardsale_mutex);
+        return ZSWAP_YARDSALE_INGEST_DEDUP;
+    }
+
+    /* Fresh ad: per-peer clamp. A flooding seller/relay hits the window cap;
+     * honest re-gossip of known ads above never reaches this check. */
+    if (!peer_window_admit_locked(peer_id, now_unix)) {
+        g_counters.ads_dropped_rate++;
+        pthread_mutex_unlock(&g_yardsale_mutex);
+        return ZSWAP_YARDSALE_INGEST_RATE_LIMITED;
+    }
+
+    yardsale_store_new_ad_locked(&quote, root, now_unix, out_ad);
     pthread_mutex_unlock(&g_yardsale_mutex);
 
     printf("yardsale: new ad (token_amount=%llu zcl_amount=%llu sats) "
