@@ -363,6 +363,63 @@ int64_t chainstate_legacy_iter(void *handle,
  * here as "roll back the whole atomic import, cursors stay positive". */
 #define LEGACY_CHAINSTATE_ITER_MAX_ROWS 50000000LL
 
+/* Pure per-record checks for iter_anchor_keyspace below: they only compute
+ * and never log, so every refusal LOG_ERR stays inside the walker. */
+
+/* Both a live handle and a consumer callback are required. */
+static bool anchor_iter_args_valid(const struct chainstate_legacy_handle *h,
+                                   legacy_anchor_cb cb)
+{
+    return h && cb;
+}
+
+/* True while the cursor is still inside the walker's prefix keyspace. */
+static bool anchor_key_matches_prefix(const char *k, size_t klen, char prefix)
+{
+    return klen >= 1 && k[0] == prefix;
+}
+
+/* An anchor row must carry a serialized tree; absent/empty is corrupt. */
+static bool anchor_value_is_empty(const char *v, size_t vlen)
+{
+    return !v || vlen == 0;
+}
+
+/* Init the tree type the walker selects ('Z' Sapling / 'A' Sprout). */
+static void anchor_tree_init_for_pool(struct incremental_merkle_tree *tree,
+                                      bool is_sprout)
+{
+    if (is_sprout)
+        sprout_tree_init(tree);
+    else
+        sapling_tree_init(tree);
+}
+
+/* Deserialize one anchor value; false on failure or on trailing bytes
+ * after a valid tree (same completeness bar as the point lookup). */
+static bool anchor_tree_deserialize_clean(struct incremental_merkle_tree *tree,
+                                          const char *v, size_t vlen)
+{
+    struct byte_stream s;
+    stream_init_from_data(&s, (const unsigned char *)v, vlen);
+    if (!incremental_tree_deserialize(tree, &s) || stream_remaining(&s) != 0)
+        return false;
+    return true;
+}
+
+/* When verify_root is requested the stored tree must hash back to its own
+ * key; the bulk path skips the recompute (see walker header comment). */
+static bool anchor_root_check_passes(bool verify_root,
+                                     struct incremental_merkle_tree *tree,
+                                     const struct uint256 *root)
+{
+    if (!verify_root)
+        return true;
+    struct uint256 computed;
+    incremental_tree_root(tree, &computed);
+    return memcmp(computed.data, root->data, 32) == 0;
+}
+
 /* Shared anchor-keyspace walker. `prefix` is 'Z' (Sapling) or 'A' (Sprout);
  * `is_sprout` selects the tree init/depth. FAIL-CLOSED on every anomaly:
  * returns -1 without delivering a partial verified set. */
@@ -383,7 +440,7 @@ static int64_t iter_anchor_keyspace(struct chainstate_legacy_handle *h,
                                     char prefix, bool is_sprout, bool verify_root,
                                     legacy_anchor_cb cb, void *ctx)
 {
-    if (!h || !cb)
+    if (!anchor_iter_args_valid(h, cb))
         return -1;
 
     struct db_iterator it;
@@ -394,7 +451,7 @@ static int64_t iter_anchor_keyspace(struct chainstate_legacy_handle *h,
     while (db_iter_valid(&it)) {
         size_t klen = 0;
         const char *k = db_iter_key(&it, &klen);
-        if (klen < 1 || k[0] != prefix)
+        if (!anchor_key_matches_prefix(k, klen, prefix))
             break;
         if (count >= LEGACY_CHAINSTATE_ITER_MAX_ROWS) {
             db_iter_free(&it);
@@ -417,21 +474,15 @@ static int64_t iter_anchor_keyspace(struct chainstate_legacy_handle *h,
 
         size_t vlen = 0;
         const char *v = db_iter_value(&it, &vlen);
-        if (!v || vlen == 0) {
+        if (anchor_value_is_empty(v, vlen)) {
             db_iter_free(&it);
             LOG_ERR("chainstate_legacy",
                     "anchor iter '%c': empty value — refusing", prefix);
         }
 
         struct incremental_merkle_tree tree;
-        if (is_sprout)
-            sprout_tree_init(&tree);
-        else
-            sapling_tree_init(&tree);
-        struct byte_stream s;
-        stream_init_from_data(&s, (const unsigned char *)v, vlen);
-        if (!incremental_tree_deserialize(&tree, &s) ||
-            stream_remaining(&s) != 0) {
+        anchor_tree_init_for_pool(&tree, is_sprout);
+        if (!anchor_tree_deserialize_clean(&tree, v, vlen)) {
             db_iter_free(&it);
             LOG_ERR("chainstate_legacy",
                     "anchor iter '%c': deserialize failed vlen=%zu — refusing",
@@ -442,15 +493,11 @@ static int64_t iter_anchor_keyspace(struct chainstate_legacy_handle *h,
          * like the point lookup (a torn/forged tree cannot pass). Skipped on the
          * bulk-import path (see iter_anchor_keyspace header) — byte-integrity is
          * still enforced above and the tip frontier is verified by the caller. */
-        if (verify_root) {
-            struct uint256 computed;
-            incremental_tree_root(&tree, &computed);
-            if (memcmp(computed.data, root.data, 32) != 0) {
-                db_iter_free(&it);
-                LOG_ERR("chainstate_legacy",
-                        "anchor iter '%c': root mismatch (stored tree does not "
-                        "hash to key) — refusing", prefix);
-            }
+        if (!anchor_root_check_passes(verify_root, &tree, &root)) {
+            db_iter_free(&it);
+            LOG_ERR("chainstate_legacy",
+                    "anchor iter '%c': root mismatch (stored tree does not "
+                    "hash to key) — refusing", prefix);
         }
 
         if (!cb(&root, &tree, ctx)) {

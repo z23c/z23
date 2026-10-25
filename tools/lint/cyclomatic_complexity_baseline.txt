@@ -1372,7 +1372,6 @@ engine/modules/storage/src/census_read.c:census_read_node:28
 engine/modules/storage/src/chain_segment.c:atomic_write_ro:24
 engine/modules/storage/src/chain_segment.c:chain_segment_open:19
 engine/modules/storage/src/chain_segment.c:load_manifest:25
-engine/modules/storage/src/chainstate_legacy_reader.c:iter_anchor_keyspace:17
 engine/modules/storage/src/checkpoint_ladder.c:checkpoint_ladder_verify:25
 engine/modules/storage/src/checkpoint_rung.c:rung_derive_anchors:18
 engine/modules/storage/src/checkpoint_rung.c:rung_derive_coins:20
