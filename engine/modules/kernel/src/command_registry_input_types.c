@@ -513,6 +513,13 @@ static bool cr_match_leaf_ints(const char *path, const char *key,
         *type_ok = cr_int_range(value, INT64_MIN, INT64_MAX);
         return true;
     }
+    /* fleet.objectives.step: max_in_flight is an integer; the handler owns the
+     * 1..4 refusal so it carries STEP_MAX_IN_FLIGHT. */
+    if (strcmp(path, "fleet.objectives.step") == 0 &&
+        strcmp(key, "max_in_flight") == 0) {
+        *type_ok = cr_int_range(value, INT64_MIN, INT64_MAX);
+        return true;
+    }
     if (strcmp(path, "fleet.machines") == 0 && strcmp(key, "offset") == 0) {
         *type_ok = cr_int_range(value, 0, INT64_MAX);
         return true;
