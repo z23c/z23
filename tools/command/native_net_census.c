@@ -87,6 +87,47 @@ static void push_node_object(struct json_value *arr, const struct census_node *n
 
 /* ── core.network.census ─────────────────────────────────────────────── */
 
+/* Read the optional ua-contains / min-height / seen-within filters from the
+ * request into f (defaults already set by the caller's initializer). */
+static void census_parse_filter(const struct zcl_command_request *request,
+                                struct census_filter *f)
+{
+    const char *ua = json_get_str(json_get(request->input, "ua-contains"));
+    if (ua && ua[0])
+        f->ua_contains = ua;
+    const struct json_value *mh = json_get(request->input, "min-height");
+    if (mh && mh->type == JSON_INT)
+        f->min_height = json_get_int(mh);
+    const struct json_value *sw = json_get(request->input, "seen-within");
+    if (sw && sw->type == JSON_INT) {
+        f->seen_within_secs = json_get_int(sw);
+        f->now_unix = platform_time_wall_unix();
+    }
+}
+
+/* Read the optional positive page size, capped at CENSUS_LIST_HARD_CAP. */
+static int census_parse_limit(const struct zcl_command_request *request)
+{
+    int limit = CENSUS_LIST_DEFAULT_LIMIT;
+    const struct json_value *lv = json_get(request->input, "limit");
+    if (lv && lv->type == JSON_INT) {
+        int64_t v = json_get_int(lv);
+        if (v > 0)
+            limit = (v > CENSUS_LIST_HARD_CAP) ? CENSUS_LIST_HARD_CAP : (int)v;
+    }
+    return limit;
+}
+
+/* Read the optional 1-based page number (0 = first page). */
+static int64_t census_parse_page(const struct zcl_command_request *request)
+{
+    int64_t page = 0;
+    const struct json_value *pv = json_get(request->input, "page");
+    if (pv && pv->type == JSON_INT && json_get_int(pv) > 0)
+        page = json_get_int(pv);
+    return page;
+}
+
 void zcl_native_handle_network_census(const struct zcl_command_request *request,
                                       struct zcl_command_reply *reply)
 {
@@ -99,29 +140,9 @@ void zcl_native_handle_network_census(const struct zcl_command_request *request,
 
     /* Filters + paging (pedantic bounds enforced by the reader too). */
     struct census_filter f = { .min_height = -1, .seen_within_secs = -1 };
-    const char *ua = json_get_str(json_get(request->input, "ua-contains"));
-    if (ua && ua[0])
-        f.ua_contains = ua;
-    const struct json_value *mh = json_get(request->input, "min-height");
-    if (mh && mh->type == JSON_INT)
-        f.min_height = json_get_int(mh);
-    const struct json_value *sw = json_get(request->input, "seen-within");
-    if (sw && sw->type == JSON_INT) {
-        f.seen_within_secs = json_get_int(sw);
-        f.now_unix = platform_time_wall_unix();
-    }
-
-    int limit = CENSUS_LIST_DEFAULT_LIMIT;
-    const struct json_value *lv = json_get(request->input, "limit");
-    if (lv && lv->type == JSON_INT) {
-        int64_t v = json_get_int(lv);
-        if (v > 0)
-            limit = (v > CENSUS_LIST_HARD_CAP) ? CENSUS_LIST_HARD_CAP : (int)v;
-    }
-    int64_t page = 0;
-    const struct json_value *pv = json_get(request->input, "page");
-    if (pv && pv->type == JSON_INT && json_get_int(pv) > 0)
-        page = json_get_int(pv);
+    census_parse_filter(request, &f);
+    int limit = census_parse_limit(request);
+    int64_t page = census_parse_page(request);
     int64_t offset = page * limit;
 
     struct census_node rows[CENSUS_LIST_HARD_CAP];
