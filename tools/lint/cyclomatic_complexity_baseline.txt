@@ -1919,7 +1919,6 @@ tests/harness/src/test_consensus_state_snapshot_install.c:candidate_progress_par
 tests/harness/src/test_consensus_state_snapshot_install.c:install_verify_receipt_tests:31
 tests/harness/src/test_consensus_state_snapshot_install.c:test_consensus_state_snapshot_install_platform_arm:445
 tests/harness/src/test_consensus_state_snapshot_install.c:write_bundle:78
-tests/harness/src/test_contaminated_coin_above_anchor.c:test_contaminated_coin_above_anchor:21
 tests/harness/src/test_cookie_rotation.c:test_cookie_rotation:55
 tests/harness/src/test_core.c:test_core:60
 tests/harness/src/test_core_seal_interop.c:csi_dialect_discriminates:23
