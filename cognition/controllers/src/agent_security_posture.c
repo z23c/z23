@@ -119,6 +119,54 @@ static void posture_fill_busy_partial(struct agent_security_posture *out,
                 "unknown_db_busy");
 }
 
+static void posture_fill_snapshot_validation(
+    struct agent_security_posture *out,
+    const struct chain_evidence_controller_view *view)
+{
+    out->snapshot_evidence_present =
+        view->snapshot_evidence_loaded &&
+        (view->snapshot_anchor_height >= 0 ||
+         view->snapshot_evidence.source_class == CEC_SOURCE_CLASS_SNAPSHOT ||
+         view->snapshot_evidence.full_validation_complete);
+    out->snapshot_full_validation_complete =
+        view->state == CEC_FULLY_VALIDATED &&
+        view->snapshot_evidence_loaded &&
+        view->full_validation_origin ==
+            CEC_FULL_VALIDATION_ASSISTED_SNAPSHOT &&
+        view->snapshot_evidence.full_validation_complete;
+}
+
+static void posture_fill_bootstrap_labels(
+    struct agent_security_posture *out,
+    const struct chain_evidence_controller_view *view)
+{
+    if (out->full_history_validation_complete &&
+        view->full_validation_origin ==
+            CEC_FULL_VALIDATION_GENESIS_HISTORY) {
+        posture_str(out->bootstrap_model, sizeof(out->bootstrap_model),
+                    "genesis_full_history_validated");
+        posture_str(out->full_history_validation_state,
+                    sizeof(out->full_history_validation_state), "complete");
+    } else if (out->snapshot_full_validation_complete) {
+        posture_str(out->bootstrap_model, sizeof(out->bootstrap_model),
+                    "assisted_snapshot_promoted_by_full_history_validation");
+        posture_str(out->full_history_validation_state,
+                    sizeof(out->full_history_validation_state), "complete");
+    } else if (out->snapshot_evidence_present) {
+        posture_str(out->bootstrap_model, sizeof(out->bootstrap_model),
+                    "assisted_snapshot_chain_location_verified");
+        posture_str(out->full_history_validation_state,
+                    sizeof(out->full_history_validation_state),
+                    "snapshot_seed_not_from_genesis_verified");
+    } else {
+        posture_str(out->bootstrap_model, sizeof(out->bootstrap_model),
+                    "no_snapshot_evidence_recorded");
+        posture_str(out->full_history_validation_state,
+                    sizeof(out->full_history_validation_state),
+                    "unknown_no_snapshot_evidence");
+    }
+}
+
 static void posture_collect_bootstrap(struct agent_security_posture *out,
                                       struct node_db *ndb)
 {
@@ -147,17 +195,7 @@ static void posture_collect_bootstrap(struct agent_security_posture *out,
     chain_evidence_controller_snapshot(&cec, &view);
     out->snapshot_anchor_height = view.snapshot_anchor_height;
     out->background_validation_height = view.background_validation_height;
-    out->snapshot_evidence_present =
-        view.snapshot_evidence_loaded &&
-        (view.snapshot_anchor_height >= 0 ||
-         view.snapshot_evidence.source_class == CEC_SOURCE_CLASS_SNAPSHOT ||
-         view.snapshot_evidence.full_validation_complete);
-    out->snapshot_full_validation_complete =
-        view.state == CEC_FULLY_VALIDATED &&
-        view.snapshot_evidence_loaded &&
-        view.full_validation_origin ==
-            CEC_FULL_VALIDATION_ASSISTED_SNAPSHOT &&
-        view.snapshot_evidence.full_validation_complete;
+    posture_fill_snapshot_validation(out, &view);
     posture_str(out->full_history_validation_origin,
                 sizeof(out->full_history_validation_origin),
                 chain_evidence_full_validation_origin_name(
@@ -178,32 +216,7 @@ static void posture_collect_bootstrap(struct agent_security_posture *out,
     out->trusted_state_present =
         out->snapshot_evidence_present &&
         !out->snapshot_full_validation_complete;
-
-    if (out->full_history_validation_complete &&
-        view.full_validation_origin ==
-            CEC_FULL_VALIDATION_GENESIS_HISTORY) {
-        posture_str(out->bootstrap_model, sizeof(out->bootstrap_model),
-                    "genesis_full_history_validated");
-        posture_str(out->full_history_validation_state,
-                    sizeof(out->full_history_validation_state), "complete");
-    } else if (out->snapshot_full_validation_complete) {
-        posture_str(out->bootstrap_model, sizeof(out->bootstrap_model),
-                    "assisted_snapshot_promoted_by_full_history_validation");
-        posture_str(out->full_history_validation_state,
-                    sizeof(out->full_history_validation_state), "complete");
-    } else if (out->snapshot_evidence_present) {
-        posture_str(out->bootstrap_model, sizeof(out->bootstrap_model),
-                    "assisted_snapshot_chain_location_verified");
-        posture_str(out->full_history_validation_state,
-                    sizeof(out->full_history_validation_state),
-                    "snapshot_seed_not_from_genesis_verified");
-    } else {
-        posture_str(out->bootstrap_model, sizeof(out->bootstrap_model),
-                    "no_snapshot_evidence_recorded");
-        posture_str(out->full_history_validation_state,
-                    sizeof(out->full_history_validation_state),
-                    "unknown_no_snapshot_evidence");
-    }
+    posture_fill_bootstrap_labels(out, &view);
 }
 
 static void posture_collect_anchors(struct agent_security_posture *out,
@@ -286,10 +299,8 @@ static void posture_collect_nullifiers(struct agent_security_posture *out,
                         : "complete_from_genesis_or_backfilled");
 }
 
-static void posture_finalize(struct agent_security_posture *out)
+static void posture_fill_review_required(struct agent_security_posture *out)
 {
-    if (!out)
-        return;
     out->review_required =
         !out->node_db_available ||
         !out->progress_store_available ||
@@ -301,7 +312,10 @@ static void posture_finalize(struct agent_security_posture *out)
         !out->nullifier_cursor_known ||
         out->nullifier_backfill_gap ||
         !out->nullifier_history_complete;
+}
 
+static void posture_fill_review_status(struct agent_security_posture *out)
+{
     if (out->anchor_backfill_gap) {
         posture_str(out->status, sizeof(out->status),
                     "review_required_anchor_backfill_gap");
@@ -328,6 +342,14 @@ static void posture_finalize(struct agent_security_posture *out)
         posture_str(out->status, sizeof(out->status), "ok");
         posture_str(out->next_action, sizeof(out->next_action), "none");
     }
+}
+
+static void posture_finalize(struct agent_security_posture *out)
+{
+    if (!out)
+        return;
+    posture_fill_review_required(out);
+    posture_fill_review_status(out);
 }
 
 /* Acquire the reader before reserving the transaction lock: reader creation
