@@ -144,6 +144,202 @@ static size_t synthesize_path(struct constraint_system *cs,
 
 /* ── Per-piece cost + value checks for ONE level ────────────────────────── */
 
+/* (i) and (ii): the position bit and both branches of conditionally_reverse.
+ * Writes the cond=1 outputs, which the decomposition consumes next. Returns
+ * the failure count. */
+static int level_position_bit_and_reverse(struct constraint_system *cs,
+                                          size_t cur_var, size_t path_var,
+                                          const struct fr *cur_fr,
+                                          const struct fr *path_fr,
+                                          size_t *xl_out, size_t *xr_out)
+{
+    int failures = 0;
+
+    /* (i) position bit — AllocatedBit::alloc, 1 constraint. */
+    size_t mark = cs->num_constraints;
+    const size_t pos = gadget_alloc_boolean(cs, true);
+    MERKLE_CHECK("piece 1/4: position bit costs 1 constraint (booleanity)",
+                 cs->num_constraints - mark == 1);
+
+    /* (ii) conditional reversal — 2 constraints, and it really swaps. */
+    mark = cs->num_constraints;
+    size_t xl, xr;
+    gadget_conditionally_reverse(cs, cur_var, path_var, pos, &xl, &xr);
+    MERKLE_CHECK("piece 2/4: conditionally_reverse costs 2 constraints",
+                 cs->num_constraints - mark == 2);
+    MERKLE_CHECK("conditionally_reverse with cond=1 puts the running value on "
+                 "the right",
+                 xl < cs->num_vars && xr < cs->num_vars
+                 && fr_eq(&cs->witness[xl], path_fr)
+                 && fr_eq(&cs->witness[xr], cur_fr));
+
+    /* The cond=0 branch, on its own wires. */
+    {
+        const size_t pos0 = gadget_alloc_boolean(cs, false);
+        size_t l0, r0;
+        gadget_conditionally_reverse(cs, cur_var, path_var, pos0, &l0, &r0);
+        MERKLE_CHECK("conditionally_reverse with cond=0 keeps the running value "
+                     "on the left",
+                     l0 < cs->num_vars && r0 < cs->num_vars
+                     && fr_eq(&cs->witness[l0], cur_fr)
+                     && fr_eq(&cs->witness[r0], path_fr));
+    }
+
+    *xl_out = xl;
+    *xr_out = xr;
+    return failures;
+}
+
+/* (iii) two non-strict 255-bit decompositions, and the little-endian bit
+ * check against the wires just swapped. Returns the failure count. */
+static int level_decomposition_bits(struct constraint_system *cs,
+                                    size_t xl, size_t xr,
+                                    size_t preimage[2 * MERKLE_FIELD_BITS])
+{
+    int failures = 0;
+
+    /* (iii) two non-strict 255-bit decompositions — 256 constraints each. */
+    size_t mark = cs->num_constraints;
+    gadget_into_bits_le(cs, xl, &preimage[0]);
+    MERKLE_CHECK("piece 3/4: into_bits_le costs 256 constraints "
+                 "(255 booleanity + 1 unpacking)",
+                 cs->num_constraints - mark == 256);
+    gadget_into_bits_le(cs, xr, &preimage[MERKLE_FIELD_BITS]);
+    MERKLE_CHECK("piece 3/4: both halves decompose for 512 constraints",
+                 cs->num_constraints - mark == 512);
+
+    /* The decomposition bits must be the value's little-endian bits. */
+    {
+        struct fr one_fr;
+        fr_one(&one_fr);
+        uint8_t xl_bytes[32], xr_bytes[32];
+        bool ok = wire_bytes(cs, xl, xl_bytes) && wire_bytes(cs, xr, xr_bytes);
+        for (size_t b = 0; b < MERKLE_FIELD_BITS && ok; b++) {
+            const bool want_l = ((xl_bytes[b / 8] >> (b % 8)) & 1u) != 0u;
+            const bool want_r = ((xr_bytes[b / 8] >> (b % 8)) & 1u) != 0u;
+            const size_t vl = preimage[b];
+            const size_t vr = preimage[MERKLE_FIELD_BITS + b];
+            ok = vl < cs->num_vars && vr < cs->num_vars
+              && fr_eq(&cs->witness[vl], &one_fr) == want_l
+              && fr_eq(&cs->witness[vr], &one_fr) == want_r;
+        }
+        MERKLE_CHECK("510 preimage bits are xl||xr, little-endian", ok);
+    }
+    return failures;
+}
+
+/* (iv) Pedersen hash under MerkleTree(depth): personalization, the 867-cost,
+ * and that a point came out. Writes pers and the point wires. Returns the
+ * failure count. */
+static int level_pedersen_hash_cost(struct constraint_system *cs, size_t depth,
+                                    const size_t *preimage, bool pers[6],
+                                    size_t *hash_x, size_t *hash_y)
+{
+    int failures = 0;
+
+    /* (iv) the Pedersen hash under MerkleTree(depth) — 867 constraints, and its
+     *      x-coordinate equals the out-of-circuit hash of the same 516 bits. */
+    MERKLE_CHECK("MerkleTree(7) personalization derived",
+                 gadget_pedersen_personalization_merkle_tree(depth, pers));
+    size_t mark = cs->num_constraints;
+    *hash_x = SIZE_MAX;
+    *hash_y = SIZE_MAX;
+    gadget_pedersen_hash_pers(cs, pers, preimage, 2 * MERKLE_FIELD_BITS,
+                              hash_x, hash_y);
+    MERKLE_CHECK("piece 4/4: Pedersen hash over 510 bits costs 867 constraints",
+                 cs->num_constraints - mark == 867);
+    MERKLE_CHECK("Pedersen hash produced a point", *hash_x != SIZE_MAX
+                                                && *hash_y != SIZE_MAX);
+    return failures;
+}
+
+/* Pack the 6 personalization bits and the 510 preimage wires into the byte
+ * string pedersen_hash_bits() consumes. Stops at the first missing wire.
+ * Returns false when a preimage wire is out of range. */
+static bool level_collect_pedersen_bits(const struct constraint_system *cs,
+                                        const bool pers[6],
+                                        const size_t *preimage,
+                                        uint8_t *bits, size_t *n_out)
+{
+    size_t n = 0;
+    for (size_t i = 0; i < 6; i++)
+        bits[n++] = pers[i] ? 1u : 0u;
+    struct fr one_fr;
+    fr_one(&one_fr);
+    bool ok = true;
+    for (size_t i = 0; i < 2 * MERKLE_FIELD_BITS && ok; i++) {
+        const size_t v = preimage[i];
+        ok = v < cs->num_vars;
+        if (ok)
+            bits[n++] = fr_eq(&cs->witness[v], &one_fr) ? 1u : 0u;
+    }
+    *n_out = n;
+    return ok;
+}
+
+/* Independent oracle: pedersen_hash_bits() over the same 516 bits
+ * (a different implementation). Returns the failure count. */
+static int level_pedersen_point_oracle(const struct constraint_system *cs,
+                                       const bool pers[6],
+                                       const size_t *preimage,
+                                       size_t hash_x, size_t hash_y)
+{
+    int failures = 0;
+    uint8_t bits[6 + 2 * MERKLE_FIELD_BITS];
+    size_t n = 0;
+    bool ok = level_collect_pedersen_bits(cs, pers, preimage, bits, &n);
+    if (ok) {
+        struct jub_point ref_pt;
+        pedersen_hash_bits(bits, (int)n, &ref_pt);
+        struct fr ref_x, ref_y;
+        jub_get_x(&ref_x, &ref_pt);
+        jub_get_y(&ref_y, &ref_pt);
+        ok = hash_x < cs->num_vars && hash_y < cs->num_vars
+          && fr_eq(&cs->witness[hash_x], &ref_x)
+          && fr_eq(&cs->witness[hash_y], &ref_y);
+    }
+    MERKLE_CHECK("in-circuit Pedersen point == out-of-circuit "
+                 "pedersen_hash_bits over the same 516 bits", ok);
+    return failures;
+}
+
+/* One whole level through the level gadget: exactly 1382, and the output
+ * wire matches pedersen_merkle_hash for that depth. Returns the failure
+ * count. */
+static int level_single_gadget_cost(const struct merkle_fixture *f,
+                                    size_t depth)
+{
+    int failures = 0;
+    /* And one whole level through the level gadget: exactly 1382. */
+    struct constraint_system lcs;
+    cs_init(&lcs);
+    struct fr leaf_fr;
+    bool ok = fr_from_bytes(&leaf_fr, f->leaf);
+    const size_t lvar = ok ? cs_alloc_aux(&lcs, &leaf_fr) : 0;
+    const size_t before = lcs.num_constraints;
+    size_t next = SIZE_MAX, posbit = SIZE_MAX;
+    ok = ok && gadget_merkle_level(&lcs, depth, lvar, f->path[depth],
+                                   f->bits[depth], &next, &posbit);
+    MERKLE_CHECK("one level synthesizes", ok);
+    MERKLE_CHECK("one level costs exactly 1382 constraints "
+                 "(1 + 2 + 512 + 867)",
+                 ok && lcs.num_constraints - before
+                         == MERKLE_LEVEL_CONSTRAINTS);
+    /* The level's own root, against the out-of-circuit hash for that depth
+     * in the order the position bit dictates. */
+    uint8_t want[32], got[32];
+    if (f->bits[depth])
+        pedersen_merkle_hash(depth, f->path[depth], f->leaf, want);
+    else
+        pedersen_merkle_hash(depth, f->leaf, f->path[depth], want);
+    MERKLE_CHECK("one level's output wire == pedersen_merkle_hash(depth, "
+                 "left, right)",
+                 ok && wire_bytes(&lcs, next, got)
+                    && memcmp(got, want, 32) == 0);
+    cs_free(&lcs);
+    return failures;
+}
+
 /* Measures the four pieces of a single level in isolation and diffs the
  * in-circuit Pedersen hash against the out-of-circuit one. Returns the failure
  * count. */
@@ -166,108 +362,19 @@ static int level_breakdown_gate(const struct merkle_fixture *f)
     const size_t cur_var = cs_alloc_aux(&cs, &cur_fr);
     const size_t path_var = cs_alloc_aux(&cs, &path_fr);
 
-    /* (i) position bit — AllocatedBit::alloc, 1 constraint. */
-    size_t mark = cs.num_constraints;
-    const size_t pos = gadget_alloc_boolean(&cs, true);
-    MERKLE_CHECK("piece 1/4: position bit costs 1 constraint (booleanity)",
-                 cs.num_constraints - mark == 1);
-
-    /* (ii) conditional reversal — 2 constraints, and it really swaps. */
-    mark = cs.num_constraints;
     size_t xl, xr;
-    gadget_conditionally_reverse(&cs, cur_var, path_var, pos, &xl, &xr);
-    MERKLE_CHECK("piece 2/4: conditionally_reverse costs 2 constraints",
-                 cs.num_constraints - mark == 2);
-    MERKLE_CHECK("conditionally_reverse with cond=1 puts the running value on "
-                 "the right",
-                 xl < cs.num_vars && xr < cs.num_vars
-                 && fr_eq(&cs.witness[xl], &path_fr)
-                 && fr_eq(&cs.witness[xr], &cur_fr));
+    failures += level_position_bit_and_reverse(&cs, cur_var, path_var,
+                                               &cur_fr, &path_fr, &xl, &xr);
 
-    /* The cond=0 branch, on its own wires. */
-    {
-        const size_t pos0 = gadget_alloc_boolean(&cs, false);
-        size_t l0, r0;
-        gadget_conditionally_reverse(&cs, cur_var, path_var, pos0, &l0, &r0);
-        MERKLE_CHECK("conditionally_reverse with cond=0 keeps the running value "
-                     "on the left",
-                     l0 < cs.num_vars && r0 < cs.num_vars
-                     && fr_eq(&cs.witness[l0], &cur_fr)
-                     && fr_eq(&cs.witness[r0], &path_fr));
-    }
-
-    /* (iii) two non-strict 255-bit decompositions — 256 constraints each. */
     size_t preimage[2 * MERKLE_FIELD_BITS];
-    mark = cs.num_constraints;
-    gadget_into_bits_le(&cs, xl, &preimage[0]);
-    MERKLE_CHECK("piece 3/4: into_bits_le costs 256 constraints "
-                 "(255 booleanity + 1 unpacking)",
-                 cs.num_constraints - mark == 256);
-    gadget_into_bits_le(&cs, xr, &preimage[MERKLE_FIELD_BITS]);
-    MERKLE_CHECK("piece 3/4: both halves decompose for 512 constraints",
-                 cs.num_constraints - mark == 512);
+    failures += level_decomposition_bits(&cs, xl, xr, preimage);
 
-    /* The decomposition bits must be the value's little-endian bits. */
-    {
-        struct fr one_fr;
-        fr_one(&one_fr);
-        uint8_t xl_bytes[32], xr_bytes[32];
-        bool ok = wire_bytes(&cs, xl, xl_bytes) && wire_bytes(&cs, xr, xr_bytes);
-        for (size_t b = 0; b < MERKLE_FIELD_BITS && ok; b++) {
-            const bool want_l = ((xl_bytes[b / 8] >> (b % 8)) & 1u) != 0u;
-            const bool want_r = ((xr_bytes[b / 8] >> (b % 8)) & 1u) != 0u;
-            const size_t vl = preimage[b];
-            const size_t vr = preimage[MERKLE_FIELD_BITS + b];
-            ok = vl < cs.num_vars && vr < cs.num_vars
-              && fr_eq(&cs.witness[vl], &one_fr) == want_l
-              && fr_eq(&cs.witness[vr], &one_fr) == want_r;
-        }
-        MERKLE_CHECK("510 preimage bits are xl||xr, little-endian", ok);
-    }
-
-    /* (iv) the Pedersen hash under MerkleTree(depth) — 867 constraints, and its
-     *      x-coordinate equals the out-of-circuit hash of the same 516 bits. */
     bool pers[6];
-    MERKLE_CHECK("MerkleTree(7) personalization derived",
-                 gadget_pedersen_personalization_merkle_tree(depth, pers));
-    mark = cs.num_constraints;
     size_t hash_x = SIZE_MAX, hash_y = SIZE_MAX;
-    gadget_pedersen_hash_pers(&cs, pers, preimage, 2 * MERKLE_FIELD_BITS,
-                              &hash_x, &hash_y);
-    MERKLE_CHECK("piece 4/4: Pedersen hash over 510 bits costs 867 constraints",
-                 cs.num_constraints - mark == 867);
-    MERKLE_CHECK("Pedersen hash produced a point", hash_x != SIZE_MAX
-                                                && hash_y != SIZE_MAX);
-
-    /* Independent oracle: pedersen_hash_bits() over the same 516 bits
-     * (a different implementation). */
-    {
-        uint8_t bits[6 + 2 * MERKLE_FIELD_BITS];
-        size_t n = 0;
-        for (size_t i = 0; i < 6; i++)
-            bits[n++] = pers[i] ? 1u : 0u;
-        struct fr one_fr;
-        fr_one(&one_fr);
-        bool ok = true;
-        for (size_t i = 0; i < 2 * MERKLE_FIELD_BITS && ok; i++) {
-            const size_t v = preimage[i];
-            ok = v < cs.num_vars;
-            if (ok)
-                bits[n++] = fr_eq(&cs.witness[v], &one_fr) ? 1u : 0u;
-        }
-        if (ok) {
-            struct jub_point ref_pt;
-            pedersen_hash_bits(bits, (int)n, &ref_pt);
-            struct fr ref_x, ref_y;
-            jub_get_x(&ref_x, &ref_pt);
-            jub_get_y(&ref_y, &ref_pt);
-            ok = hash_x < cs.num_vars && hash_y < cs.num_vars
-              && fr_eq(&cs.witness[hash_x], &ref_x)
-              && fr_eq(&cs.witness[hash_y], &ref_y);
-        }
-        MERKLE_CHECK("in-circuit Pedersen point == out-of-circuit "
-                     "pedersen_hash_bits over the same 516 bits", ok);
-    }
+    failures += level_pedersen_hash_cost(&cs, depth, preimage, pers,
+                                         &hash_x, &hash_y);
+    failures += level_pedersen_point_oracle(&cs, pers, preimage,
+                                            hash_x, hash_y);
 
     /* Everything emitted so far must be satisfied by its own witness. */
     {
@@ -276,41 +383,210 @@ static int level_breakdown_gate(const struct merkle_fixture *f)
                      "satisfied (A*B==C)", cs_is_satisfied(&cs, &bad));
     }
 
-    /* And one whole level through the level gadget: exactly 1382. */
-    {
-        struct constraint_system lcs;
-        cs_init(&lcs);
-        struct fr leaf_fr;
-        bool ok = fr_from_bytes(&leaf_fr, f->leaf);
-        const size_t lvar = ok ? cs_alloc_aux(&lcs, &leaf_fr) : 0;
-        const size_t before = lcs.num_constraints;
-        size_t next = SIZE_MAX, posbit = SIZE_MAX;
-        ok = ok && gadget_merkle_level(&lcs, depth, lvar, f->path[depth],
-                                       f->bits[depth], &next, &posbit);
-        MERKLE_CHECK("one level synthesizes", ok);
-        MERKLE_CHECK("one level costs exactly 1382 constraints "
-                     "(1 + 2 + 512 + 867)",
-                     ok && lcs.num_constraints - before
-                             == MERKLE_LEVEL_CONSTRAINTS);
-        /* The level's own root, against the out-of-circuit hash for that depth
-         * in the order the position bit dictates. */
-        uint8_t want[32], got[32];
-        if (f->bits[depth])
-            pedersen_merkle_hash(depth, f->path[depth], f->leaf, want);
-        else
-            pedersen_merkle_hash(depth, f->leaf, f->path[depth], want);
-        MERKLE_CHECK("one level's output wire == pedersen_merkle_hash(depth, "
-                     "left, right)",
-                     ok && wire_bytes(&lcs, next, got)
-                        && memcmp(got, want, 32) == 0);
-        cs_free(&lcs);
-    }
+    failures += level_single_gadget_cost(f, depth);
 
     cs_free(&cs);
     return failures;
 }
 
 /* ── The section-21 gate ────────────────────────────────────────────────── */
+
+/* The Montgomery-form constants; both are literal coefficients inside
+ * the Pedersen gadget's constraints, so scale must be a square root of
+ * -40964. Returns the failure count. */
+static int gate_jubjub_montgomery_params(void)
+{
+    int failures = 0;
+    struct fr mont_a, scale, want_a, sq, want_sq;
+    gadget_jubjub_montgomery_params(&mont_a, &scale);
+    uint8_t a_bytes[32] = {0};
+    a_bytes[0] = 0x02;              /* 40962 = 0xA002, little-endian */
+    a_bytes[1] = 0xA0;
+    MERKLE_CHECK("Jubjub Montgomery A == 40962 == 2(a+d)/(a-d)",
+                 fr_from_bytes(&want_a, a_bytes)
+                 && fr_eq(&mont_a, &want_a));
+    /* scale^2 == -40964 == 4/(a-d) */
+    uint8_t b_bytes[32] = {0};
+    b_bytes[0] = 0x04;              /* 40964 = 0xA004, little-endian */
+    b_bytes[1] = 0xA0;
+    fr_mul(&sq, &scale, &scale);
+    bool b_ok = fr_from_bytes(&want_sq, b_bytes);
+    fr_neg(&want_sq, &want_sq);
+    MERKLE_CHECK("Jubjub Montgomery scale^2 == -40964 == 4/(a-d)",
+                 b_ok && fr_eq(&sq, &want_sq));
+
+    /* Which of the two square roots, pinned against sapling-crypto's
+     * JubjubBls12::scale (little-endian below):
+     *   17814886934372412843466061268024708274627479829237077604635722030778476050649
+     * Negating scale gives the identical hash and constraint count, but
+     * scale is a literal coefficient, so the two roots yield different
+     * A/B/C matrices and only one matches the Sapling verifying key. */
+    static const uint8_t REF_SCALE_LE[32] = {
+        0xD9,0xB8,0x82,0xCF,0xF7,0x35,0x45,0x8F,
+        0xBD,0x8A,0xA8,0x3D,0x70,0x69,0x40,0xCE,
+        0xE5,0x64,0xD7,0x77,0x1E,0x34,0xDE,0x31,
+        0x5E,0x64,0x62,0xE8,0x61,0xDE,0x62,0x27
+    };
+    struct fr want_scale;
+    MERKLE_CHECK("Jubjub Montgomery scale == sapling-crypto's published "
+                 "root (not the other one — same hash, different QAP)",
+                 fr_from_bytes(&want_scale, REF_SCALE_LE)
+                 && fr_eq(&scale, &want_scale));
+    return failures;
+}
+
+/* The fixture must actually exercise both sides of the swap. Returns the
+ * failure count. */
+static int gate_fixture_swap_branches(const struct merkle_fixture *f)
+{
+    int failures = 0;
+    size_t rights = 0;
+    for (size_t d = 0; d < SAPLING_MERKLE_DEPTH; d++)
+        rights += f->bits[d] ? 1u : 0u;
+    MERKLE_CHECK("fixture position bits exercise both branches",
+                 rights > 0 && rights < SAPLING_MERKLE_DEPTH);
+    return failures;
+}
+
+/* In-circuit anchor against the out-of-circuit fold of the same path.
+ * Returns the failure count. */
+static int gate_anchor_matches_fold(const struct constraint_system *cs,
+                                    size_t root_var,
+                                    const uint8_t want_root[32])
+{
+    int failures = 0;
+    uint8_t got_root[32];
+    const bool root_read = wire_bytes(cs, root_var, got_root);
+    if (root_read && memcmp(got_root, want_root, 32) != 0)
+        printf("  >> DIVERGENCE: in-circuit anchor != out-of-circuit fold "
+               "(first differing byte %d)\n",
+               (int)(memcmp(got_root, want_root, 1) != 0 ? 0 : 1));
+    MERKLE_CHECK("in-circuit anchor wire == out-of-circuit "
+                 "pedersen_merkle_hash fold over the same path",
+                 root_read && memcmp(got_root, want_root, 32) == 0);
+    return failures;
+}
+
+/* Position bits carry the witnessed pattern, in depth order. Returns the
+ * failure count. */
+static int gate_position_bit_wires(const struct constraint_system *cs,
+                                   const size_t position_bits[SAPLING_MERKLE_DEPTH],
+                                   const struct merkle_fixture *f)
+{
+    int failures = 0;
+    struct fr one_fr;
+    fr_one(&one_fr);
+    bool ok = true;
+    for (size_t d = 0; d < SAPLING_MERKLE_DEPTH && ok; d++)
+        ok = position_bits[d] < cs->num_vars
+          && fr_eq(&cs->witness[position_bits[d]], &one_fr) == f->bits[d];
+    MERKLE_CHECK("32 position-bit wires == the witnessed path bits, "
+                 "deepest first", ok);
+    return failures;
+}
+
+/* (C) THE SWAP IS REAL. Inverting every position bit must land on the
+ * different root the out-of-circuit fold gives for those bits. Returns the
+ * failure count. */
+static int gate_inverted_path_root(const struct merkle_fixture *f,
+                                   const uint8_t want_root[32])
+{
+    int failures = 0;
+    uint8_t want_inv[32], got_inv[32];
+    reference_root(f, true, want_inv);
+    MERKLE_CHECK("inverting the position bits changes the reference root "
+                 "(the fixture is swap-sensitive)",
+                 memcmp(want_inv, want_root, 32) != 0);
+
+    struct constraint_system cs_inv;
+    size_t root_inv = SIZE_MAX;
+    size_t pos_inv[SAPLING_MERKLE_DEPTH];
+    const size_t d_inv = synthesize_path(&cs_inv, f, true, &root_inv,
+                                         pos_inv);
+    MERKLE_CHECK("inverted-bit synthesis costs the same 44224 constraints "
+                 "(shape is witness-invariant)",
+                 d_inv == REF_DELTA_SECTION_21);
+    MERKLE_CHECK("inverted-bit anchor == out-of-circuit fold with the "
+                 "swaps reversed",
+                 d_inv != SIZE_MAX && wire_bytes(&cs_inv, root_inv, got_inv)
+                 && memcmp(got_inv, want_inv, 32) == 0);
+    cs_free(&cs_inv);
+    return failures;
+}
+
+/* (D) THE WIRES ARE BOUND. Perturb the anchor, then every position bit, and
+ * restore the witness. Returns the failure count. */
+static int gate_wires_are_bound(struct constraint_system *cs, size_t root_var,
+                                const size_t position_bits[SAPLING_MERKLE_DEPTH])
+{
+    int failures = 0;
+    struct fr one_fr, zero_fr;
+    fr_one(&one_fr);
+    fr_zero(&zero_fr);
+    size_t ignored = SIZE_MAX;
+
+    /* Sanity first, or "flip detected" would be vacuous. */
+    MERKLE_CHECK("honest witness satisfies the section before any mutation",
+                 cs_is_satisfied(cs, &ignored));
+
+    /* The anchor: perturbing it must break the Pedersen constraint that
+     * produced it. */
+    {
+        struct fr saved = cs->witness[root_var];
+        struct fr bumped;
+        fr_add(&bumped, &saved, &one_fr);
+        cs->witness[root_var] = bumped;
+        const bool detected = !cs_is_satisfied(cs, &ignored);
+        cs->witness[root_var] = saved;
+        MERKLE_CHECK("the anchor wire is bound (perturbing it breaks the "
+                     "R1CS)", detected);
+    }
+
+    /* Every position bit. Flipping 0<->1 keeps booleanity satisfied, so a
+     * detection here is the swap constraints doing their job. */
+    size_t tried = 0, detected = 0;
+    for (size_t d = 0; d < SAPLING_MERKLE_DEPTH; d++) {
+        const size_t v = position_bits[d];
+        if (v >= cs->num_vars)
+            continue;
+        struct fr saved = cs->witness[v];
+        cs->witness[v] = fr_eq(&saved, &one_fr) ? zero_fr : one_fr;
+        tried++;
+        if (!cs_is_satisfied(cs, &ignored))
+            detected++;
+        cs->witness[v] = saved;
+    }
+    printf("  position-bit flips detected: %zu/%zu\n", detected, tried);
+    MERKLE_CHECK("every position bit is bound (a flipped bit breaks the "
+                 "R1CS)",
+                 tried == SAPLING_MERKLE_DEPTH
+                 && detected == SAPLING_MERKLE_DEPTH);
+    MERKLE_CHECK("witness restored after the mutation probe",
+                 cs_is_satisfied(cs, &ignored));
+    return failures;
+}
+
+/* Determinism — identical inputs, byte-identical witness. Returns the
+ * failure count. */
+static int gate_synthesis_is_deterministic(const struct constraint_system *cs,
+                                           const struct merkle_fixture *f,
+                                           size_t delta, size_t root_var)
+{
+    int failures = 0;
+    struct constraint_system cs2;
+    size_t root2 = SIZE_MAX;
+    size_t pos2[SAPLING_MERKLE_DEPTH];
+    const size_t d2 = synthesize_path(&cs2, f, false, &root2, pos2);
+    const bool det = d2 == delta && cs2.num_vars == cs->num_vars
+        && cs2.num_constraints == cs->num_constraints
+        && root2 == root_var
+        && memcmp(cs->witness, cs2.witness,
+                  cs->num_vars * sizeof(struct fr)) == 0;
+    MERKLE_CHECK("section 21 synthesis is deterministic (byte-identical "
+                 "witness)", det);
+    cs_free(&cs2);
+    return failures;
+}
 
 int groth16_merkle_path_gate(void);
 int groth16_merkle_path_gate(void)
@@ -319,59 +595,11 @@ int groth16_merkle_path_gate(void)
            "authentication path ---\n");
     int failures = 0;
 
-    /* The Montgomery-form constants; both are literal coefficients inside
-     * the Pedersen gadget's constraints, so scale must be a square root of
-     * -40964. */
-    {
-        struct fr mont_a, scale, want_a, sq, want_sq;
-        gadget_jubjub_montgomery_params(&mont_a, &scale);
-        uint8_t a_bytes[32] = {0};
-        a_bytes[0] = 0x02;              /* 40962 = 0xA002, little-endian */
-        a_bytes[1] = 0xA0;
-        MERKLE_CHECK("Jubjub Montgomery A == 40962 == 2(a+d)/(a-d)",
-                     fr_from_bytes(&want_a, a_bytes)
-                     && fr_eq(&mont_a, &want_a));
-        /* scale^2 == -40964 == 4/(a-d) */
-        uint8_t b_bytes[32] = {0};
-        b_bytes[0] = 0x04;              /* 40964 = 0xA004, little-endian */
-        b_bytes[1] = 0xA0;
-        fr_mul(&sq, &scale, &scale);
-        bool b_ok = fr_from_bytes(&want_sq, b_bytes);
-        fr_neg(&want_sq, &want_sq);
-        MERKLE_CHECK("Jubjub Montgomery scale^2 == -40964 == 4/(a-d)",
-                     b_ok && fr_eq(&sq, &want_sq));
-
-        /* Which of the two square roots, pinned against sapling-crypto's
-         * JubjubBls12::scale (little-endian below):
-         *   17814886934372412843466061268024708274627479829237077604635722030778476050649
-         * Negating scale gives the identical hash and constraint count, but
-         * scale is a literal coefficient, so the two roots yield different
-         * A/B/C matrices and only one matches the Sapling verifying key. */
-        static const uint8_t REF_SCALE_LE[32] = {
-            0xD9,0xB8,0x82,0xCF,0xF7,0x35,0x45,0x8F,
-            0xBD,0x8A,0xA8,0x3D,0x70,0x69,0x40,0xCE,
-            0xE5,0x64,0xD7,0x77,0x1E,0x34,0xDE,0x31,
-            0x5E,0x64,0x62,0xE8,0x61,0xDE,0x62,0x27
-        };
-        struct fr want_scale;
-        MERKLE_CHECK("Jubjub Montgomery scale == sapling-crypto's published "
-                     "root (not the other one — same hash, different QAP)",
-                     fr_from_bytes(&want_scale, REF_SCALE_LE)
-                     && fr_eq(&scale, &want_scale));
-    }
+    failures += gate_jubjub_montgomery_params();
 
     struct merkle_fixture f;
     build_fixture(&f);
-
-    /* The fixture must actually exercise both sides of the swap. */
-    {
-        size_t rights = 0;
-        for (size_t d = 0; d < SAPLING_MERKLE_DEPTH; d++)
-            rights += f.bits[d] ? 1u : 0u;
-        MERKLE_CHECK("fixture position bits exercise both branches",
-                     rights > 0 && rights < SAPLING_MERKLE_DEPTH);
-    }
-
+    failures += gate_fixture_swap_branches(&f);
     failures += level_breakdown_gate(&f);
 
     /* (A) The whole section, top down. */
@@ -402,28 +630,10 @@ int groth16_merkle_path_gate(void)
                  delta == (size_t)MERKLE_PATH_CONSTRAINTS);
 
     /* (B) THE ROOT IS RIGHT — the assertion a constraint count cannot make. */
-    uint8_t want_root[32], got_root[32];
+    uint8_t want_root[32];
     reference_root(&f, false, want_root);
-    const bool root_read = wire_bytes(&cs, root_var, got_root);
-    if (root_read && memcmp(got_root, want_root, 32) != 0)
-        printf("  >> DIVERGENCE: in-circuit anchor != out-of-circuit fold "
-               "(first differing byte %d)\n",
-               (int)(memcmp(got_root, want_root, 1) != 0 ? 0 : 1));
-    MERKLE_CHECK("in-circuit anchor wire == out-of-circuit "
-                 "pedersen_merkle_hash fold over the same path",
-                 root_read && memcmp(got_root, want_root, 32) == 0);
-
-    /* Position bits carry the witnessed pattern, in depth order. */
-    {
-        struct fr one_fr;
-        fr_one(&one_fr);
-        bool ok = true;
-        for (size_t d = 0; d < SAPLING_MERKLE_DEPTH && ok; d++)
-            ok = position_bits[d] < cs.num_vars
-              && fr_eq(&cs.witness[position_bits[d]], &one_fr) == f.bits[d];
-        MERKLE_CHECK("32 position-bit wires == the witnessed path bits, "
-                     "deepest first", ok);
-    }
+    failures += gate_anchor_matches_fold(&cs, root_var, want_root);
+    failures += gate_position_bit_wires(&cs, position_bits, &f);
 
     /* Coefficient-level check over the whole section. */
     {
@@ -439,92 +649,9 @@ int groth16_merkle_path_gate(void)
         MERKLE_CHECK(label, sat);
     }
 
-    /* (C) THE SWAP IS REAL. Inverting every position bit must land on the
-     *     different root the out-of-circuit fold gives for those bits. */
-    {
-        uint8_t want_inv[32], got_inv[32];
-        reference_root(&f, true, want_inv);
-        MERKLE_CHECK("inverting the position bits changes the reference root "
-                     "(the fixture is swap-sensitive)",
-                     memcmp(want_inv, want_root, 32) != 0);
-
-        struct constraint_system cs_inv;
-        size_t root_inv = SIZE_MAX;
-        size_t pos_inv[SAPLING_MERKLE_DEPTH];
-        const size_t d_inv = synthesize_path(&cs_inv, &f, true, &root_inv,
-                                             pos_inv);
-        MERKLE_CHECK("inverted-bit synthesis costs the same 44224 constraints "
-                     "(shape is witness-invariant)",
-                     d_inv == REF_DELTA_SECTION_21);
-        MERKLE_CHECK("inverted-bit anchor == out-of-circuit fold with the "
-                     "swaps reversed",
-                     d_inv != SIZE_MAX && wire_bytes(&cs_inv, root_inv, got_inv)
-                     && memcmp(got_inv, want_inv, 32) == 0);
-        cs_free(&cs_inv);
-    }
-
-    /* (D) THE WIRES ARE BOUND. */
-    {
-        struct fr one_fr, zero_fr;
-        fr_one(&one_fr);
-        fr_zero(&zero_fr);
-        size_t ignored = SIZE_MAX;
-
-        /* Sanity first, or "flip detected" would be vacuous. */
-        MERKLE_CHECK("honest witness satisfies the section before any mutation",
-                     cs_is_satisfied(&cs, &ignored));
-
-        /* The anchor: perturbing it must break the Pedersen constraint that
-         * produced it. */
-        {
-            struct fr saved = cs.witness[root_var];
-            struct fr bumped;
-            fr_add(&bumped, &saved, &one_fr);
-            cs.witness[root_var] = bumped;
-            const bool detected = !cs_is_satisfied(&cs, &ignored);
-            cs.witness[root_var] = saved;
-            MERKLE_CHECK("the anchor wire is bound (perturbing it breaks the "
-                         "R1CS)", detected);
-        }
-
-        /* Every position bit. Flipping 0<->1 keeps booleanity satisfied, so a
-         * detection here is the swap constraints doing their job. */
-        size_t tried = 0, detected = 0;
-        for (size_t d = 0; d < SAPLING_MERKLE_DEPTH; d++) {
-            const size_t v = position_bits[d];
-            if (v >= cs.num_vars)
-                continue;
-            struct fr saved = cs.witness[v];
-            cs.witness[v] = fr_eq(&saved, &one_fr) ? zero_fr : one_fr;
-            tried++;
-            if (!cs_is_satisfied(&cs, &ignored))
-                detected++;
-            cs.witness[v] = saved;
-        }
-        printf("  position-bit flips detected: %zu/%zu\n", detected, tried);
-        MERKLE_CHECK("every position bit is bound (a flipped bit breaks the "
-                     "R1CS)",
-                     tried == SAPLING_MERKLE_DEPTH
-                     && detected == SAPLING_MERKLE_DEPTH);
-        MERKLE_CHECK("witness restored after the mutation probe",
-                     cs_is_satisfied(&cs, &ignored));
-    }
-
-    /* Determinism — identical inputs, byte-identical witness. */
-    {
-        struct constraint_system cs2;
-        size_t root2 = SIZE_MAX;
-        size_t pos2[SAPLING_MERKLE_DEPTH];
-        const size_t d2 = synthesize_path(&cs2, &f, false, &root2, pos2);
-        const bool det = d2 == delta && cs2.num_vars == cs.num_vars
-            && cs2.num_constraints == cs.num_constraints
-            && root2 == root_var
-            && memcmp(cs.witness, cs2.witness,
-                      cs.num_vars * sizeof(struct fr)) == 0;
-        MERKLE_CHECK("section 21 synthesis is deterministic (byte-identical "
-                     "witness)", det);
-        cs_free(&cs2);
-    }
+    failures += gate_inverted_path_root(&f, want_root);
+    failures += gate_wires_are_bound(&cs, root_var, position_bits);
+    failures += gate_synthesis_is_deterministic(&cs, &f, delta, root_var);
 
     /* Honest scoreboard: until sections 17..20 land, the cumulative count
      * cannot reach the reference's 76893. */
