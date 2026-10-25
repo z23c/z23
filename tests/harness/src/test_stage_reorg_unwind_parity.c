@@ -211,6 +211,16 @@ static void branch_free(struct branch *br)
     memset(br, 0, sizeof(*br));
 }
 
+/* Build losing branch L first, then — only if L built — the heavier
+ * winning branch W (W is never attempted when L fails). */
+static bool sru_build_losing_and_winning_branches(struct branch *L,
+                                                  struct branch *W,
+                                                  const struct ext_coin *ext)
+{
+    if (!branch_build(L, 0x11, 4, 2, &ext[0])) return false;
+    return branch_build(W, 0x22, 5, 2, &ext[1]);
+}
+
 /* ── Stage plumbing: reader + lookup over the external base set ──────── */
 
 struct sru_ctx {
@@ -366,6 +376,36 @@ static void seed_base_coins(sqlite3 *pdb, const struct ext_coin *ext, int n)
 
 /* ── Test ─────────────────────────────────────────────────────────────── */
 
+/* Count how many of the 4 L-only outpoints (the L1/L2/L3 coinbases plus
+ * L2's spend output) are ABSENT from coins_kv after the unwind. */
+static int sru_count_l_only_outpoints_absent(sqlite3 *pdb)
+{
+    struct uint256 t;
+    int ck_absent = 0;
+    cb_txid(&t, 0x11, 1); if (!coins_kv_exists(pdb, t.data, 0)) ck_absent++;
+    cb_txid(&t, 0x11, 2); if (!coins_kv_exists(pdb, t.data, 0)) ck_absent++;
+    cb_txid(&t, 0x11, 3); if (!coins_kv_exists(pdb, t.data, 0)) ck_absent++;
+    spend_txid(&t, 0x11, 2); if (!coins_kv_exists(pdb, t.data, 0)) ck_absent++;
+    return ck_absent;
+}
+
+/* Byte-exact cross-run parity: both SHA3 commitments were computed and
+ * match over all 32 bytes. */
+static bool sru_commitments_match_byte_exact(bool have_c1, bool have_c2,
+                                             const uint8_t c1[32],
+                                             const uint8_t c2[32])
+{
+    return have_c1 && have_c2 && (memcmp(c1, c2, 32) == 0);
+}
+
+/* Both commitments were computed yet differ — the silent-corruption case
+ * the divergence report in the test below calls out. */
+static bool sru_commitments_diverged_both_present(bool cmt_eq, bool have_c1,
+                                                  bool have_c2)
+{
+    return !cmt_eq && have_c1 && have_c2;
+}
+
 int test_stage_reorg_unwind_parity(void);
 int test_stage_reorg_unwind_parity(void)
 {
@@ -394,8 +434,7 @@ int test_stage_reorg_unwind_parity(void)
     /* Branch L: genesis + 3 (spend at h2 of EXT_L). Branch W: genesis + 4
      * (heavier; spend at h2 of EXT_W). Shared genesis at h0. */
     struct branch L, W;
-    bool built = branch_build(&L, 0x11, 4, 2, &ext[0]) &&
-                 branch_build(&W, 0x22, 5, 2, &ext[1]);
+    bool built = sru_build_losing_and_winning_branches(&L, &W, ext);
     SRU_CHECK("branches build", built);
 
     uint8_t c1[32] = {0}, c2[32] = {0};
@@ -464,11 +503,7 @@ int test_stage_reorg_unwind_parity(void)
 
             /* Every L-only outpoint must be ABSENT after the unwind — coins_kv
              * unwound them with the cursor (no orphaned above-fork coins). */
-            struct uint256 t; int ck_absent = 0;
-            cb_txid(&t, 0x11, 1); if (!coins_kv_exists(pdb, t.data, 0)) ck_absent++;
-            cb_txid(&t, 0x11, 2); if (!coins_kv_exists(pdb, t.data, 0)) ck_absent++;
-            cb_txid(&t, 0x11, 3); if (!coins_kv_exists(pdb, t.data, 0)) ck_absent++;
-            spend_txid(&t, 0x11, 2); if (!coins_kv_exists(pdb, t.data, 0)) ck_absent++;
+            int ck_absent = sru_count_l_only_outpoints_absent(pdb);
             l_only_absent = ck_absent;
             SRU_CHECK("run1: coins_kv all 4 L-only outpoints absent",
                       ck_absent == 4);
@@ -535,12 +570,12 @@ int test_stage_reorg_unwind_parity(void)
 
     /* ── THE PROOF ────────────────────────────────────────────────────── */
     bool count_eq = (count1 == count2);
-    bool cmt_eq = have_c1 && have_c2 && (memcmp(c1, c2, 32) == 0);
+    bool cmt_eq = sru_commitments_match_byte_exact(have_c1, have_c2, c1, c2);
 
     printf("[values] count1=%" PRIu64 " count2=%" PRIu64
            " commitment_match=%d l_only_absent=%d/4\n",
            count1, count2, cmt_eq ? 1 : 0, l_only_absent);
-    if (!cmt_eq && have_c1 && have_c2) {
+    if (sru_commitments_diverged_both_present(cmt_eq, have_c1, have_c2)) {
         printf("[divergence] stage reorg projection != direct build — a wrong "
                "inverse mapping silently corrupted the STAGE-authored UTXO set\n");
     }

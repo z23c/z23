@@ -2148,7 +2148,6 @@ tests/harness/src/test_stage_anchor_frontier_cap.c:fc_seed_utxo_apply:23
 tests/harness/src/test_stage_crash_sweep.c:scs_cycle:21
 tests/harness/src/test_stage_crash_sweep.c:scs_setup:25
 tests/harness/src/test_stage_rederive_range.c:test_stage_rederive_range:43
-tests/harness/src/test_stage_reorg_unwind_parity.c:test_stage_reorg_unwind_parity:18
 tests/harness/src/test_stage_repair.c:test_stage_repair:182
 tests/harness/src/test_stage_repair_coin_backfill.c:cb_build_body:48
 tests/harness/src/test_stage_repair_coin_backfill.c:cb_case_chain_rebind:22
