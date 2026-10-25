@@ -1263,8 +1263,9 @@ static int case_model_call_receipts(void)
         return failures + 1;
     LT_CHECK("a tick with a writer retry and a review submits",
              lt_tick(&e, NULL, NULL, NULL, 0) == 0 && lt_exists("%s/%s", e.d, "submit.txt"));
-    LT_CHECK("two writer rounds name the unit kind",
-             lt_count(&e, "eu_args.txt", "--kind fix-gate ") == 2);
+    LT_CHECK("the writer rounds name no unit kind, only the review does",
+             lt_count(&e, "eu_args.txt", "--kind review ") == 1 &&
+             lt_count(&e, "eu_args.txt", "--kind ") == 1);
     LT_CHECK("every engine call names the Haiku model",
              lt_count(&e, "eu_args.txt", "--model claude-haiku-5-5 ") == 3);
     char ids[4][65];

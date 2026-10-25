@@ -77,9 +77,9 @@
 #include <unistd.h>
 
 #define LT_GO (-1) /* a stage's "carry on" answer; any value >= 0 is the exit code */
-/* The unit kind of the writer round (engine_unit has no "build" template: it
- * refuses that kind), and the model both model calls name. */
-#define LT_WRITER_KIND "fix-gate"
+/* The model both model calls name. The writer round names no unit kind: a
+ * step gives none and engine_unit has no "build" template, so it keeps the
+ * unkinded prompt it always had (the receipt is written without a kind). */
 #define LT_MODEL "claude-haiku-5-5"
 enum {
     LT_PATH = 1024,
@@ -855,8 +855,7 @@ static int engine_run(struct tick *t, const char *taskname, const char *statenam
     if (!attempt_id(id))
         return 2;
     const char *const eu[] = { O(t, LT_O_ENGINE_UNIT), "--engine", "claude-haiku",
-                               "--kind", LT_WRITER_KIND, "--model", LT_MODEL,
-                               "--attempt-id", id,
+                               "--model", LT_MODEL, "--attempt-id", id,
                                "--task", task, "--no-group", "--worktree",
                                t->dir, "--yes-dispatch", "--rounds", "1",
                                "--state-dir", state, "--timeout", secs, NULL };
@@ -1756,7 +1755,7 @@ static bool build_review_prompt(struct tick *t, const char *path)
         return false;
     }
     const int n = snprintf(p, cap,
-        "You are a NON-AUTHOR reviewer of one Z23 commit in the current git worktree. You can only read files (Read, Grep, Glob); you cannot run commands or edit anything.\n"
+        "You are a NON-AUTHOR reviewer of one Z23 commit in the current git worktree. Only read files (Read, Grep, Glob); do not run commands and do not edit or write anything: any edit voids your review.\n"
         "%s"
         "End your reply with exactly one final line: 'VERDICT: LAND' or 'VERDICT: HOLD <reason with file:line>'.\n"
         "\n----- git show HEAD -----\n%s",
@@ -1834,8 +1833,18 @@ static bool review_call(struct tick *t, const char *prompt_path)
     const char *const rm[] = { O(t, LT_O_GIT), "worktree", "remove", "--force",
                                wt, NULL };
     if (attempt_id(id) && run(t, t->dir, add, LT_SHORT_TIMEOUT_MS) == 0) {
-        (void)run_logged(t, NULL, eu, oms(t, LT_O_REVIEW_TIMEOUT) + LT_SHORT_TIMEOUT_MS,
+        (void)run_logged(t, NULL, eu,
+                         oms(t, LT_O_REVIEW_TIMEOUT) + LT_SHORT_TIMEOUT_MS,
                          log);
+        /* The argv grants file edit tools: a reviewer that touched its copy
+         * has its reply discarded, so an edited review is never trusted. */
+        const char *const st[] = { O(t, LT_O_GIT), "status", "--porcelain",
+                                   NULL };
+        if (run(t, wt, st, LT_SHORT_TIMEOUT_MS) != 0 || *t->buf) {
+            char reply[LT_PATH];
+            (void)fmt(reply, sizeof(reply), "%s/reply.txt", state);
+            (void)unlink(reply);
+        }
         (void)run(t, t->dir, rm, LT_SHORT_TIMEOUT_MS);
     }
     (void)close(fd);
