@@ -173,6 +173,64 @@ static bool rpc_refuses_atomically(
                expected && memcmp(&report, &before, sizeof(report)) == 0;
 }
 
+static bool rpc_lineage_is_immediate_specialization(
+    struct rpc_fixture *fixture)
+{
+    return fixture->child.derivation ==
+               VCS_ZCODE_HEURISTIC_SPECIALIZE &&
+           fixture->child.parent_count == 1u &&
+           memcmp(fixture->child.parent_roots[0],
+                  fixture->parent_root, 32u) == 0 &&
+           vcs_zcode_heuristic_validate_derivation(
+               &fixture->child, &fixture->parent, 1u) ==
+               VCS_ZCODE_ATTENTION_OK;
+}
+
+static bool rpc_heuristic_and_proposal_roots_are_exact(
+    const struct rpc_fixture *fixture,
+    const struct zcode_retrieval_profile_comparison_report *report)
+{
+    return memcmp(report->parent_heuristic_root,
+                  fixture->parent_root, 32u) == 0 &&
+           memcmp(report->child_heuristic_root,
+                  fixture->child_root, 32u) == 0 &&
+           memcmp(fixture->parent_result.proposal_input_root,
+                  fixture->parent.proposal_input_root, 32u) == 0 &&
+           memcmp(fixture->child_result.proposal_input_root,
+                  fixture->child.proposal_input_root, 32u) == 0;
+}
+
+static bool rpc_task_source_and_study_joins_are_frozen(
+    const struct rpc_fixture *fixture,
+    const struct zcode_retrieval_profile_comparison_report *report)
+{
+    return memcmp(report->observation.policy_root,
+                  fixture->policy_root, 32u) == 0 &&
+           memcmp(fixture->parent.preregistration_root,
+                  fixture->policy_root, 32u) == 0 &&
+           memcmp(fixture->child.preregistration_root,
+                  fixture->policy_root, 32u) == 0 &&
+           memcmp(fixture->parent.task_root, fixture->child.task_root, 32u) == 0 &&
+           memcmp(fixture->parent.source_root, fixture->child.source_root, 32u) == 0 &&
+           memcmp(fixture->parent.study_root, fixture->child.study_root, 32u) == 0;
+}
+
+static bool rpc_policy_evaluator_is_frozen_member(
+    const struct rpc_fixture *fixture,
+    const struct zcode_retrieval_profile_comparison_report *report)
+{
+    return memcmp(fixture->policy.evaluator_root,
+                  fixture->parent.evaluator_roots[1], 32u) == 0 &&
+           memcmp(fixture->policy.evaluator_root,
+                  fixture->child.evaluator_roots[1], 32u) == 0 &&
+           memcmp(fixture->policy.evaluator_root,
+                  fixture->parent_result.evaluator_root, 32u) == 0 &&
+           memcmp(fixture->policy.evaluator_root,
+                  fixture->child_result.evaluator_root, 32u) == 0 &&
+           report->observation.status ==
+               ZCL_RETRIEVAL_COMPARISON_SATISFIED;
+}
+
 static int case_exact_specialization(void)
 {
     int failures = 0;
@@ -184,44 +242,16 @@ static int case_exact_specialization(void)
     bool observed = ready && zcode_retrieval_profile_comparison_observe(
         &request, &report) == ZCODE_RETRIEVAL_PROFILE_COMPARISON_OK;
     RPC_CHECK("immediate SPECIALIZE lineage is observed",
-              observed && fixture.child.derivation ==
-                  VCS_ZCODE_HEURISTIC_SPECIALIZE &&
-              fixture.child.parent_count == 1u &&
-              memcmp(fixture.child.parent_roots[0],
-                     fixture.parent_root, 32u) == 0 &&
-              vcs_zcode_heuristic_validate_derivation(
-                  &fixture.child, &fixture.parent, 1u) ==
-                  VCS_ZCODE_ATTENTION_OK);
+              observed && rpc_lineage_is_immediate_specialization(&fixture));
     RPC_CHECK("both heuristic and proposal roots are exact",
-              observed && memcmp(report.parent_heuristic_root,
-                                 fixture.parent_root, 32u) == 0 &&
-              memcmp(report.child_heuristic_root,
-                     fixture.child_root, 32u) == 0 &&
-              memcmp(fixture.parent_result.proposal_input_root,
-                     fixture.parent.proposal_input_root, 32u) == 0 &&
-              memcmp(fixture.child_result.proposal_input_root,
-                     fixture.child.proposal_input_root, 32u) == 0);
+              observed && rpc_heuristic_and_proposal_roots_are_exact(
+                  &fixture, &report));
     RPC_CHECK("policy task source and study joins remain frozen",
-              observed && memcmp(report.observation.policy_root,
-                                 fixture.policy_root, 32u) == 0 &&
-              memcmp(fixture.parent.preregistration_root,
-                     fixture.policy_root, 32u) == 0 &&
-              memcmp(fixture.child.preregistration_root,
-                     fixture.policy_root, 32u) == 0 &&
-              memcmp(fixture.parent.task_root, fixture.child.task_root, 32u) == 0 &&
-              memcmp(fixture.parent.source_root, fixture.child.source_root, 32u) == 0 &&
-              memcmp(fixture.parent.study_root, fixture.child.study_root, 32u) == 0);
+              observed && rpc_task_source_and_study_joins_are_frozen(
+                  &fixture, &report));
     RPC_CHECK("policy evaluator is a member of both frozen evaluator sets",
-              observed && memcmp(fixture.policy.evaluator_root,
-                                 fixture.parent.evaluator_roots[1], 32u) == 0 &&
-              memcmp(fixture.policy.evaluator_root,
-                     fixture.child.evaluator_roots[1], 32u) == 0 &&
-              memcmp(fixture.policy.evaluator_root,
-                     fixture.parent_result.evaluator_root, 32u) == 0 &&
-              memcmp(fixture.policy.evaluator_root,
-                     fixture.child_result.evaluator_root, 32u) == 0 &&
-              report.observation.status ==
-                  ZCL_RETRIEVAL_COMPARISON_SATISFIED);
+              observed && rpc_policy_evaluator_is_frozen_member(
+                  &fixture, &report));
     return failures;
 }
 
