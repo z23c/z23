@@ -114,6 +114,23 @@ ENGINE_PROMPT_TEMPLATE(add-test, judging,
     "The group must run and pass. A group that passes without executing "
     "your new case is not evidence about your work.")
 
+/* ── build ───────────────────────────────────────────────────────────────
+ * Implement a written unit brief. Edits files; the brief is the spec. */
+ENGINE_PROMPT_KIND_TIER(build, standard)
+ENGINE_PROMPT_TEMPLATE(build, rules,
+    "This unit implements a written brief. The brief is the specification: "
+    "build what it names and nothing it does not. Where the brief and the "
+    "code disagree, the code is the fact and you say so.")
+ENGINE_PROMPT_TEMPLATE(build, task,
+    "Read the brief's scope and out-of-scope lines before you edit. Add the "
+    "test the brief asks for, and make it fail before the change.")
+ENGINE_PROMPT_TEMPLATE(build, protocol,
+    "Edit the worktree and do not commit. A file outside the brief's scope "
+    "cannot be reviewed as part of this unit.")
+ENGINE_PROMPT_TEMPLATE(build, judging,
+    "The gates decide. The brief's tests must run and pass, and the diff "
+    "must match the brief, not a larger idea of it.")
+
 /* ── port-arm ────────────────────────────────────────────────────────────
  * Portability work, where the compiler in front of you is not the one that
  * will find the defect. */

@@ -1366,6 +1366,8 @@ static bool dispatch_cli(const struct engine_vendor *v, const char *prompt_path,
         .model   = model && model[0] ? model : v->default_model,
         .reasoning_effort = o->reasoning_effort,
         .resume_session_id = o->resume_session_id,
+        .read_only = engine_prompt_kind_effect(o->kind) ==
+                     ENGINE_PROMPT_EFFECT_REPORT,
     };
     const char *argv[ENGINE_CLI_ARGV_MAX];
     if (engine_cli_argv_build(v, &in, argv, ENGINE_CLI_ARGV_MAX) == 0) {

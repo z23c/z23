@@ -72,6 +72,13 @@ static const char *const k_glm_cli_start_argv[] = {
  * rides in one --settings= element because a slot starting with '{' is a
  * placeholder. The model gets file tools only, with no Bash: builds go
  * through the harness, which judges. */
+/* The settings and the isolation they buy are shared by both Claude forms,
+ * so the read-only form differs from the editing one only in its tools, its
+ * permission mode and its system prompt. */
+#define K_CLAUDE_SETTINGS_ARG                                             \
+    "--settings={\"env\":{\"CLAUDE_CODE_DISABLE_CLAUDE_MDS\":\"1\","       \
+    "\"CLAUDE_CODE_DISABLE_AUTO_MEMORY\":\"1\","                           \
+    "\"CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS\":\"1\"}}"
 static const char *const k_claude_cli_start_argv[] = {
     "-p",             ENGINE_CLI_PROMPT_TOKEN,
     "--model",        ENGINE_CLI_MODEL_TOKEN,
@@ -79,13 +86,27 @@ static const char *const k_claude_cli_start_argv[] = {
     "--no-session-persistence",
     "--permission-mode", "acceptEdits",
     "--setting-sources=",
-    "--settings={\"env\":{\"CLAUDE_CODE_DISABLE_CLAUDE_MDS\":\"1\","
-    "\"CLAUDE_CODE_DISABLE_AUTO_MEMORY\":\"1\","
-    "\"CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS\":\"1\"}}",
+    K_CLAUDE_SETTINGS_ARG,
     "--tools", "Read,Edit,Write,Grep,Glob",
     "--system-prompt",
     "You edit C23 code in the current git worktree to complete the unit "
     "below; do not run builds.",
+    NULL
+};
+/* The read-only form for a report kind. No permission mode is named, so the
+ * CLI keeps its default, which asks before any write and so refuses one in a
+ * headless run; the tool list is the reading tools alone. */
+static const char *const k_claude_cli_report_argv[] = {
+    "-p",             ENGINE_CLI_PROMPT_TOKEN,
+    "--model",        ENGINE_CLI_MODEL_TOKEN,
+    "--output-format", "json",
+    "--no-session-persistence",
+    "--setting-sources=",
+    K_CLAUDE_SETTINGS_ARG,
+    "--tools", "Read,Grep,Glob",
+    "--system-prompt",
+    "You read C23 code in the current git worktree and report what you "
+    "found; do not edit files, write files or run builds.",
     NULL
 };
 /* OpenAI's subscription agent CLI, non-interactive (`codex exec`). It names
@@ -103,6 +124,21 @@ static const char *const k_gpt_cli_start_argv[] = {
     "-s",             "workspace-write",
     "-c",             "approval_policy=\"never\"",
     "-c",             "sandbox_workspace_write.network_access=false",
+    "-c",             "model_reasoning_effort=\"low\"",
+    "--ignore-user-config",
+    "--ephemeral",
+    "--color",        "never",
+    "--",             ENGINE_CLI_PROMPT_TOKEN,
+    NULL
+};
+/* The same invocation under a read-only sandbox, for a report kind. The
+ * sandbox is the enforcement; the prompt only says what the unit is for. */
+static const char *const k_gpt_cli_report_argv[] = {
+    "exec",
+    "-C",             ENGINE_CLI_WORKDIR_TOKEN,
+    "-m",             ENGINE_CLI_MODEL_TOKEN,
+    "-s",             "read-only",
+    "-c",             "approval_policy=\"never\"",
     "-c",             "model_reasoning_effort=\"low\"",
     "--ignore-user-config",
     "--ephemeral",
@@ -234,6 +270,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .default_model = "claude-haiku-5-5",
         .program       = "claude",
         .start_argv    = k_claude_cli_start_argv,
+        .report_start_argv = k_claude_cli_report_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
         .cli_cwd_is_workdir = true,
         .report_format = ENGINE_CLI_OUTPUT_CLAUDE_JSON,
@@ -251,6 +288,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .default_model = "claude-sonnet-5-5",
         .program       = "claude",
         .start_argv    = k_claude_cli_start_argv,
+        .report_start_argv = k_claude_cli_report_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
         .cli_cwd_is_workdir = true,
         .report_format = ENGINE_CLI_OUTPUT_CLAUDE_JSON,
@@ -268,6 +306,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .default_model = "claude-opus-5-5",
         .program       = "claude",
         .start_argv    = k_claude_cli_start_argv,
+        .report_start_argv = k_claude_cli_report_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
         .cli_cwd_is_workdir = true,
         .report_format = ENGINE_CLI_OUTPUT_CLAUDE_JSON,
@@ -290,6 +329,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .default_model = "gpt-6-luna",
         .program       = "codex",
         .start_argv    = k_gpt_cli_start_argv,
+        .report_start_argv = k_gpt_cli_report_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
         .report_format = ENGINE_CLI_OUTPUT_PLAIN,
         .wire          = ENGINE_WIRE_LOCAL_CLI,
@@ -304,6 +344,7 @@ static const struct engine_vendor k_engine_vendors[] = {
         .default_model = "gpt-6.1-sol",
         .program       = "codex",
         .start_argv    = k_gpt_cli_start_argv,
+        .report_start_argv = k_gpt_cli_report_argv,
         .cli_prompt    = ENGINE_CLI_PROMPT_ARG,
         .report_format = ENGINE_CLI_OUTPUT_PLAIN,
         .wire          = ENGINE_WIRE_LOCAL_CLI,

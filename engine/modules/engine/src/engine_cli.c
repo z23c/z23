@@ -106,6 +106,16 @@ const char *engine_cli_launch_cwd(const struct engine_vendor *v,
     return in->workdir;
 }
 
+/* A report unit runs the row's read-only form when it has one. A row with
+ * none keeps its editing form, and REPORT_EDITED remains the check there. */
+static const char *const *argv_template(const struct engine_vendor *v,
+                                        const struct engine_cli_inputs *in)
+{
+    if (in->read_only && v->report_start_argv)
+        return v->report_start_argv;
+    return v->start_argv;
+}
+
 size_t engine_cli_argv_build(const struct engine_vendor *v,
                              const struct engine_cli_inputs *in,
                              const char **out, size_t cap)
@@ -116,6 +126,7 @@ size_t engine_cli_argv_build(const struct engine_vendor *v,
         LOG_RETURN(0, "engine", "engine %s names no program to run", v->id);
     if (!v->start_argv)
         LOG_RETURN(0, "engine", "engine %s carries no argv template", v->id);
+    const char *const *tpl = argv_template(v, in);
 
     /* An argument-mode prompt is bounded well below the prompt ceiling,
      * because the kernel bounds a single argv string far below it. Refused
@@ -132,17 +143,17 @@ size_t engine_cli_argv_build(const struct engine_vendor *v,
 
     size_t n = 0;
     out[n++] = v->program;
-    for (size_t i = 0; v->start_argv[i]; i++) {
+    for (size_t i = 0; tpl[i]; i++) {
         bool unknown = false;
-        const char *value = resolve(v->start_argv[i], in, &unknown);
+        const char *value = resolve(tpl[i], in, &unknown);
         if (unknown)
             LOG_RETURN(0, "engine",
                        "engine %s names the argv placeholder %s, which this "
-                       "build does not know", v->id, v->start_argv[i]);
+                       "build does not know", v->id, tpl[i]);
         if (!value || !value[0])
             LOG_RETURN(0, "engine",
                        "engine %s needs a value for %s and none was supplied",
-                       v->id, v->start_argv[i]);
+                       v->id, tpl[i]);
         /* +1 for the terminator, which is written after the loop. */
         if (n + 1 >= cap)
             LOG_RETURN(0, "engine",

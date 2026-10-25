@@ -413,10 +413,70 @@ static int case_gpt_rows(void)
     return failures;
 }
 
+/* A report kind (read_only) must not be able to edit: the Claude form grants
+ * the reading tools alone and names no permission mode, and the Codex form
+ * runs its sandbox read-only. An edit kind keeps the exact argv it had. */
+static int case_read_only(void)
+{
+    int failures = 0;
+    const struct engine_vendor *c = engine_by_id("claude-haiku");
+    const struct engine_cli_inputs in = {
+        .prompt = "PROMPT-TEXT", .workdir = "/work/dir",
+        .turns = "3", .model = "claude-haiku-5-5", .read_only = true,
+    };
+    const char *argv[ENGINE_CLI_ARGV_MAX];
+    size_t n = engine_cli_argv_build(c, &in, argv, ENGINE_CLI_ARGV_MAX);
+    EC_CHECK("report argv grants only Read,Grep,Glob",
+             argv_has(argv, n, "Read,Grep,Glob", true) &&
+             !argv_has(argv, n, "Read,Edit,Write,Grep,Glob", true) &&
+             !argv_has(argv, n, "Edit", true) &&
+             !argv_has(argv, n, "Write", true));
+    EC_CHECK("report argv names no acceptEdits permission mode",
+             !argv_has(argv, n, "--permission-mode", true) &&
+             !argv_has(argv, n, "acceptEdits", true));
+    EC_CHECK("report argv is 14 elements, terminated",
+             n == 14 && argv[n] == NULL);
+
+    struct engine_cli_inputs edit = in;
+    edit.read_only = false;
+    n = engine_cli_argv_build(c, &edit, argv, ENGINE_CLI_ARGV_MAX);
+    EC_CHECK("edit argv is unchanged: 16 elements, acceptEdits at 9",
+             n == 16 && argv[n] == NULL &&
+             strcmp(argv[9], "acceptEdits") == 0 &&
+             strcmp(argv[12], "--tools") == 0 &&
+             strcmp(argv[13], "Read,Edit,Write,Grep,Glob") == 0);
+
+    const struct engine_vendor *g = engine_by_id("gpt-sol");
+    struct engine_cli_inputs gin = {
+        .prompt = "PROMPT-TEXT", .workdir = "/work/dir",
+        .turns = "3", .model = "gpt-6.1-sol", .read_only = true,
+    };
+    n = engine_cli_argv_build(g, &gin, argv, ENGINE_CLI_ARGV_MAX);
+    EC_CHECK("codex report runs its sandbox read-only",
+             argv_has(argv, n, "read-only", true) &&
+             !argv_has(argv, n, "workspace-write", true));
+    gin.read_only = false;
+    n = engine_cli_argv_build(g, &gin, argv, ENGINE_CLI_ARGV_MAX);
+    EC_CHECK("codex edit keeps workspace-write",
+             argv_has(argv, n, "workspace-write", true) &&
+             !argv_has(argv, n, "read-only", true));
+
+    const struct engine_vendor *glm = engine_by_id("glm-cli");
+    struct engine_cli_inputs gl = {
+        .prompt = "PROMPT-TEXT", .workdir = "/work/dir",
+        .turns = "3", .model = "glm-5.3-flash", .read_only = true,
+    };
+    n = engine_cli_argv_build(glm, &gl, argv, ENGINE_CLI_ARGV_MAX);
+    EC_CHECK("a row with no read-only form keeps its own argv",
+             n > 0 && argv_has(argv, n, "--directory", true));
+    return failures;
+}
+
 int test_engine_claude(void)
 {
     int failures = 0;
     failures += case_registry();
+    failures += case_read_only();
     failures += case_gpt_rows();
     failures += case_decoder();
     failures += case_reply_text_success();

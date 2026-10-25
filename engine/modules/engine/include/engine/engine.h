@@ -194,6 +194,12 @@ struct engine_vendor {
     /* CLI dialect only. NULL-terminated argument template, argv[0] excluded
      * because it is always `program`. NULL for a non-CLI vendor. */
     const char *const *start_argv;
+    /* CLI dialect only, optional. The same template with the tools and the
+     * sandbox narrowed to reading, used when the caller sets read_only (a
+     * report kind). NULL means the row has no read-only form and a report
+     * unit runs with start_argv; the report's REPORT_EDITED check stays the
+     * backstop there. */
+    const char *const *report_start_argv;
     /* Optional CLI flag whose following argument is low/medium/high/xhigh.
      * NULL means this row cannot accept an explicit reasoning effort. */
     const char      *cli_reasoning_effort_flag;
@@ -299,6 +305,9 @@ struct engine_cli_inputs {
     /* Borrowed. NULL omits the resume flag. A non-NULL value must be a
      * canonical lowercase hexadecimal UUID. */
     const char *resume_session_id;
+    /* True for a report kind: the unit must change nothing, so a row with a
+     * report_start_argv runs that read-only form instead. */
+    bool read_only;
 };
 
 /* The closed effort vocabulary shared by HTTP requests, CLI argv, and
