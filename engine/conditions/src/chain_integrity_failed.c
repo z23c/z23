@@ -77,12 +77,16 @@ static _Atomic bool g_test_disable_spawn;
 static _Atomic int g_test_queue_calls;
 #endif
 
-static void record_integrity(const struct chain_integrity_result *r)
+static void record_integrity_counts(const struct chain_integrity_result *r)
 {
     atomic_store(&g_last_zero_nbits, r ? r->zero_nbits_count : 0);
     atomic_store(&g_last_tip_window_holes, r ? r->tip_window_holes : 0);
     atomic_store(&g_last_total_holes, r ? r->active_chain_holes : 0);
     atomic_store(&g_last_mismatches, r ? r->active_chain_mismatches : 0);
+}
+
+static void record_integrity_heights(const struct chain_integrity_result *r)
+{
     atomic_store(&g_last_tip_height, r ? r->tip_height : -1);
     atomic_store(&g_last_first_nbits_zero_height,
                  r ? r->first_nbits_zero_height : -1);
@@ -91,9 +95,20 @@ static void record_integrity(const struct chain_integrity_result *r)
                  r ? r->first_mismatch_height : -1);
     atomic_store(&g_last_first_tip_window_hole,
                  r ? r->first_tip_window_hole : -1);
+}
+
+static void record_integrity_bools(const struct chain_integrity_result *r)
+{
     atomic_store(&g_last_tip_slot_ok, r && r->tip_slot_ok ? 1 : 0);
     atomic_store(&g_last_tip_real, r && r->tip_real ? 1 : 0);
     atomic_store(&g_last_integrity_ok, r && r->ok ? 1 : 0);
+}
+
+static void record_integrity(const struct chain_integrity_result *r)
+{
+    record_integrity_counts(r);
+    record_integrity_heights(r);
+    record_integrity_bools(r);
     atomic_store(&g_last_integrity_class,
                  r ? (int)chain_integrity_classify(r)
                    : (int)CHAIN_INTEGRITY_UNRECOVERABLE);

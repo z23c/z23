@@ -1145,7 +1145,6 @@ engine/conditions/src/block_failed_mask_at_tip.c:detail_block_failed_mask_at_tip
 engine/conditions/src/block_failed_mask_at_tip.c:reducer_frontier_owner_reason:19
 engine/conditions/src/body_fetch_missing_have_data.c:active_target_index_locked:19
 engine/conditions/src/body_fetch_missing_have_data.c:detect_body_fetch_missing_have_data:20
-engine/conditions/src/chain_integrity_failed.c:record_integrity:17
 engine/conditions/src/download_queue_starved.c:detail_download_queue_starved:52
 engine/conditions/src/have_data_unreadable.c:detect_have_data_unreadable:19
 engine/conditions/src/have_data_unreadable.c:witness_have_data_unreadable:17
