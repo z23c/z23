@@ -48,16 +48,10 @@ static void publication_checksum(const uint8_t *wire, size_t length,
   sha3_256_finalize(&hash, out);
 }
 
-bool vcs_zcode_dht_publications_save(
-    const char *datadir, const struct service_publication *publications,
-    char *error_out, size_t error_capacity)
+static uint16_t publication_count_used(
+    const struct service_publication *publications,
+    const struct vcs_zcode_dht_record **first_out)
 {
-  if (!datadir || !publications)
-    return false;
-  uint8_t wire[PUBLICATION_STORE_MAX_BYTES];
-  memset(wire, 0, sizeof(wire));
-  memcpy(wire, publication_magic, sizeof(publication_magic));
-  zcl_write_u16_le(wire + 8, PUBLICATION_STORE_VERSION);
   uint16_t count = 0;
   const struct vcs_zcode_dht_record *first = NULL;
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++)
@@ -66,10 +60,15 @@ bool vcs_zcode_dht_publications_save(
       if (!first)
         first = &publications[i].record;
     }
-  zcl_write_u16_le(wire + 10, count);
-  if (first)
-    memcpy(wire + 12, first->network_genesis, 32);
-  size_t offset = PUBLICATION_STORE_HEADER_BYTES;
+  *first_out = first;
+  return count;
+}
+
+static bool publication_wire_encode_entries(
+    const struct service_publication *publications, uint8_t *wire,
+    size_t *offset_io, char *error_out, size_t error_capacity)
+{
+  size_t offset = *offset_io;
   for (size_t i = 0; i < VCS_ZCODE_DHT_SERVICE_MAX_PUBLICATIONS; i++) {
     if (!publications[i].used)
       continue;
@@ -85,6 +84,75 @@ bool vcs_zcode_dht_publications_save(
     zcl_write_u64_le(wire + offset, publications[i].lifetime_s);
     offset += 8;
   }
+  *offset_io = offset;
+  return true;
+}
+
+static bool publication_stage_create(const char *resolved, char *temporary,
+                                     size_t temporary_capacity,
+                                     struct platform_private_file *staged)
+{
+  bool created = false;
+  for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
+    uint64_t serial = atomic_fetch_add_explicit(
+                          &g_publication_store_serial, 1,
+                          memory_order_relaxed) +
+                      1;
+    int written = snprintf(temporary, temporary_capacity, "%s.tmp.%llu.%llu",
+                           resolved,
+                           (unsigned long long)os_proc_current_pid(),
+                           (unsigned long long)serial);
+    if (written <= 0 || (size_t)written >= temporary_capacity)
+      break;
+    created = platform_private_file_create(temporary, staged);
+    if (!created && errno != EEXIST)
+      break;
+  }
+  return created;
+}
+
+static bool publication_commit_staged(
+    struct platform_private_file *staged, bool created, const char *temporary,
+    const char *resolved, const char *parent, const uint8_t *wire,
+    size_t length, char *error_out, size_t error_capacity)
+{
+  bool ok = created &&
+            platform_private_file_write_at(staged, wire, length, 0) &&
+            platform_private_file_truncate(staged, length) &&
+            platform_private_file_flush(staged) &&
+            platform_private_file_replace(staged, temporary, resolved);
+  platform_private_file_close(staged);
+  if (!ok || !platform_private_parent_flush(parent)) {
+    if (created)
+      (void)platform_private_file_unlink_missing_ok(temporary);
+    if (error_out && error_capacity)
+      (void)snprintf(error_out, error_capacity,
+                     ok ? "publication intent directory flush failed"
+                        : "publication intent atomic write failed");
+    return false;
+  }
+  return true;
+}
+
+bool vcs_zcode_dht_publications_save(
+    const char *datadir, const struct service_publication *publications,
+    char *error_out, size_t error_capacity)
+{
+  if (!datadir || !publications)
+    return false;
+  uint8_t wire[PUBLICATION_STORE_MAX_BYTES];
+  memset(wire, 0, sizeof(wire));
+  memcpy(wire, publication_magic, sizeof(publication_magic));
+  zcl_write_u16_le(wire + 8, PUBLICATION_STORE_VERSION);
+  const struct vcs_zcode_dht_record *first = NULL;
+  uint16_t count = publication_count_used(publications, &first);
+  zcl_write_u16_le(wire + 10, count);
+  if (first)
+    memcpy(wire + 12, first->network_genesis, 32);
+  size_t offset = PUBLICATION_STORE_HEADER_BYTES;
+  if (!publication_wire_encode_entries(publications, wire, &offset, error_out,
+                                       error_capacity))
+    return false;
   uint8_t digest[32];
   publication_checksum(wire, offset, digest);
   memcpy(wire + offset, digest, sizeof(digest));
@@ -101,38 +169,11 @@ bool vcs_zcode_dht_publications_save(
   }
   struct platform_private_file staged;
   platform_private_file_init(&staged);
-  bool created = false;
-  for (unsigned int attempt = 0; attempt < 64 && !created; attempt++) {
-    uint64_t serial = atomic_fetch_add_explicit(
-                          &g_publication_store_serial, 1,
-                          memory_order_relaxed) +
-                      1;
-    int written = snprintf(temporary, sizeof(temporary), "%s.tmp.%llu.%llu",
-                           resolved,
-                           (unsigned long long)os_proc_current_pid(),
-                           (unsigned long long)serial);
-    if (written <= 0 || (size_t)written >= sizeof(temporary))
-      break;
-    created = platform_private_file_create(temporary, &staged);
-    if (!created && errno != EEXIST)
-      break;
-  }
-  bool ok = created &&
-            platform_private_file_write_at(&staged, wire, offset, 0) &&
-            platform_private_file_truncate(&staged, offset) &&
-            platform_private_file_flush(&staged) &&
-            platform_private_file_replace(&staged, temporary, resolved);
-  platform_private_file_close(&staged);
-  if (!ok || !platform_private_parent_flush(parent)) {
-    if (created)
-      (void)platform_private_file_unlink_missing_ok(temporary);
-    if (error_out && error_capacity)
-      (void)snprintf(error_out, error_capacity,
-                     ok ? "publication intent directory flush failed"
-                        : "publication intent atomic write failed");
-    return false;
-  }
-  return true;
+  bool created = publication_stage_create(resolved, temporary,
+                                          sizeof(temporary), &staged);
+  return publication_commit_staged(&staged, created, temporary, resolved,
+                                   parent, wire, offset, error_out,
+                                   error_capacity);
 }
 
 static bool publication_snapshot_equal(
@@ -160,19 +201,18 @@ static uint64_t publication_lifetime_max(
              ? VCS_ZCODE_DHT_SOURCE_REPRODUCTION_ACK_MAX_SECONDS : 0;
 }
 
-bool vcs_zcode_dht_publications_load(struct vcs_zcode_dht_service *service,
-                                     uint64_t now_unix)
+static bool publication_read_wire(struct vcs_zcode_dht_service *service,
+                                  const char *path, uint8_t *wire,
+                                  size_t *length_out, bool *present_out)
 {
-  if (!service)
-    return false;
-  char path[1400];
-  if (!publication_path(service->datadir, path))
-    return false;
   struct platform_file_metadata metadata;
   enum platform_file_metadata_result probe =
       platform_file_metadata_read(path, &metadata);
-  if (probe == PLATFORM_FILE_METADATA_MISSING)
+  if (probe == PLATFORM_FILE_METADATA_MISSING) {
+    *present_out = false;
     return true;
+  }
+  *present_out = true;
   struct platform_positioned_file file;
   struct platform_positioned_file_snapshot before, after;
   platform_positioned_file_init(&file);
@@ -187,14 +227,25 @@ bool vcs_zcode_dht_publications_load(struct vcs_zcode_dht_service *service,
                                     "publication intent size invalid");
     return false;
   }
-  size_t length = (size_t)before.size;
-  uint8_t wire[PUBLICATION_STORE_MAX_BYTES];
-  int64_t got = platform_positioned_file_read(&file, wire, length, 0);
-  bool read_ok = got == (int64_t)length &&
+  *length_out = (size_t)before.size;
+  int64_t got = platform_positioned_file_read(&file, wire, *length_out, 0);
+  bool read_ok = got == (int64_t)*length_out &&
                  platform_positioned_file_snapshot(&file, &after) &&
                  publication_snapshot_equal(&before, &after);
   platform_positioned_file_close(&file);
-  if (!read_ok || memcmp(wire, publication_magic, sizeof(publication_magic)) != 0 ||
+  if (!read_ok) {
+    vcs_zcode_dht_service_set_error(service,
+                                    "publication intent header invalid");
+    return false;
+  }
+  return true;
+}
+
+static bool publication_wire_header_valid(
+    struct vcs_zcode_dht_service *service, const uint8_t *wire, size_t length,
+    uint16_t *count_out)
+{
+  if (memcmp(wire, publication_magic, sizeof(publication_magic)) != 0 ||
       zcl_read_u16_le(wire + 8) != PUBLICATION_STORE_VERSION) {
     vcs_zcode_dht_service_set_error(service,
                                     "publication intent header invalid");
@@ -212,6 +263,67 @@ bool vcs_zcode_dht_publications_load(struct vcs_zcode_dht_service *service,
                                     "publication intent checksum invalid");
     return false;
   }
+  *count_out = count;
+  return true;
+}
+
+static bool publication_entry_load(
+    struct vcs_zcode_dht_service *service, const uint8_t *wire,
+    size_t *offset_io,
+    const struct vcs_zcode_dht_record_verify_context *verify,
+    struct service_publication *entry)
+{
+  bool expired = false;
+  memset(entry, 0, sizeof(*entry));
+  enum vcs_zcode_dht_record_error parsed =
+      vcs_zcode_dht_record_parse_persisted(
+          wire + *offset_io, VCS_ZCODE_DHT_RECORD_WIRE_BYTES, verify,
+          &expired, &entry->record);
+  (void)expired;
+  *offset_io += VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
+  uint64_t lifetime = zcl_read_u64_le(wire + *offset_io);
+  *offset_io += 8;
+  /* One stream's record going bad between save and reboot — a delegation
+   * that expired, a datadir inherited by a new identity — must not cost
+   * the OTHER streams their renewal. The checksum already vouched for the
+   * file as a whole, so a per-entry failure indicts the record, not the
+   * file: skip the entry and keep the rest. */
+  if (parsed != VCS_ZCODE_DHT_RECORD_OK || !lifetime ||
+      lifetime > publication_lifetime_max(entry->record.kind) ||
+      memcmp(entry->record.provider_node_id, service->self_id, 32) != 0)
+    return false;
+  entry->used = true;
+  if (entry->record.kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK) {
+    service->next_possession_proof_epoch++;
+    if (!service->next_possession_proof_epoch)
+      service->next_possession_proof_epoch++;
+    entry->possession_proof_epoch =
+        service->next_possession_proof_epoch;
+  }
+  entry->lifetime_s = lifetime;
+  entry->backoff_s = 30;
+  entry->phase = SERVICE_PUBLICATION_NEEDS_LOOKUP;
+  return true;
+}
+
+bool vcs_zcode_dht_publications_load(struct vcs_zcode_dht_service *service,
+                                     uint64_t now_unix)
+{
+  if (!service)
+    return false;
+  char path[1400];
+  if (!publication_path(service->datadir, path))
+    return false;
+  uint8_t wire[PUBLICATION_STORE_MAX_BYTES];
+  size_t length = 0;
+  bool present = false;
+  if (!publication_read_wire(service, path, wire, &length, &present))
+    return false;
+  if (!present)
+    return true;
+  uint16_t count = 0;
+  if (!publication_wire_header_valid(service, wire, length, &count))
+    return false;
   struct vcs_zcode_dht_record_verify_context verify = {
       .now_unix = now_unix,
       .authority_verify = service->authority_verify,
@@ -223,40 +335,11 @@ bool vcs_zcode_dht_publications_load(struct vcs_zcode_dht_service *service,
   size_t restored = 0, skipped = 0;
   size_t offset = PUBLICATION_STORE_HEADER_BYTES;
   for (uint16_t i = 0; i < count; i++) {
-    bool expired = false;
     struct service_publication entry;
-    memset(&entry, 0, sizeof(entry));
-    enum vcs_zcode_dht_record_error parsed =
-        vcs_zcode_dht_record_parse_persisted(
-            wire + offset, VCS_ZCODE_DHT_RECORD_WIRE_BYTES, &verify,
-            &expired, &entry.record);
-    (void)expired;
-    offset += VCS_ZCODE_DHT_RECORD_WIRE_BYTES;
-    uint64_t lifetime = zcl_read_u64_le(wire + offset);
-    offset += 8;
-    /* One stream's record going bad between save and reboot — a delegation
-     * that expired, a datadir inherited by a new identity — must not cost
-     * the OTHER streams their renewal. The checksum already vouched for the
-     * file as a whole, so a per-entry failure indicts the record, not the
-     * file: skip the entry and keep the rest. */
-    if (parsed != VCS_ZCODE_DHT_RECORD_OK || !lifetime ||
-        lifetime > publication_lifetime_max(entry.record.kind) ||
-        memcmp(entry.record.provider_node_id, service->self_id, 32) != 0) {
+    if (publication_entry_load(service, wire, &offset, &verify, &entry))
+      loaded[restored++] = entry;
+    else
       skipped++;
-      continue;
-    }
-    entry.used = true;
-    if (entry.record.kind == VCS_ZCODE_DHT_RECORD_STORAGE_ACK) {
-      service->next_possession_proof_epoch++;
-      if (!service->next_possession_proof_epoch)
-        service->next_possession_proof_epoch++;
-      entry.possession_proof_epoch =
-          service->next_possession_proof_epoch;
-    }
-    entry.lifetime_s = lifetime;
-    entry.backoff_s = 30;
-    entry.phase = SERVICE_PUBLICATION_NEEDS_LOOKUP;
-    loaded[restored++] = entry;
   }
   if (skipped)
     vcs_zcode_dht_service_set_error(

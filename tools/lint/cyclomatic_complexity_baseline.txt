@@ -318,8 +318,6 @@ contexts/commons/modules/vcs/src/zcode_dht_msgs.c:selector_valid:17
 contexts/commons/modules/vcs/src/zcode_dht_msgs.c:vcs_zcode_dht_msg_parse:62
 contexts/commons/modules/vcs/src/zcode_dht_msgs.c:vcs_zcode_dht_msg_serialize_nodes:16
 contexts/commons/modules/vcs/src/zcode_dht_msgs.c:vcs_zcode_dht_msg_serialize_records:25
-contexts/commons/modules/vcs/src/zcode_dht_publication_store.c:vcs_zcode_dht_publications_load:28
-contexts/commons/modules/vcs/src/zcode_dht_publication_store.c:vcs_zcode_dht_publications_save:33
 contexts/commons/modules/vcs/src/zcode_dht_record.c:record_shape:25
 contexts/commons/modules/vcs/src/zcode_dht_record.c:vcs_zcode_dht_record_error_string:21
 contexts/commons/modules/vcs/src/zcode_dht_record.c:vcs_zcode_dht_record_parse_persisted:16
