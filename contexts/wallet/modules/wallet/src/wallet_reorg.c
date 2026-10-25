@@ -66,19 +66,13 @@ bool wallet_get_tx_copy(const struct wallet *w, const struct uint256 *hash,
     return true;
 }
 
-bool wallet_disconnect_transaction(struct wallet *w,
-                                   const struct transaction *tx,
-                                   bool keep_pending)
+static void wallet_remove_sapling_notes_for_txid(struct wallet *w,
+                                                 const struct uint256 *txid)
 {
-    if (!w || !tx)
-        LOG_RETURN(false, "wallet",
-                   "disconnect_transaction: NULL wallet or tx");
-    zcl_mutex_lock(&w->cs);
-
     size_t ni = 0;
     while (ni < w->num_sapling_notes) {
         struct sapling_received_note *note = &w->sapling_notes[ni];
-        if (!note->used || !uint256_eq(&note->txid, &tx->hash)) {
+        if (!note->used || !uint256_eq(&note->txid, txid)) {
             ni++;
             continue;
         }
@@ -88,6 +82,48 @@ bool wallet_disconnect_transaction(struct wallet *w,
         memory_cleanse(&w->sapling_notes[last], sizeof(w->sapling_notes[last]));
         w->num_sapling_notes--;
     }
+}
+
+static void wallet_unmark_spent_inputs(struct wallet *w,
+                                       const struct wallet_tx *wtx)
+{
+    for (size_t i = 0; i < wtx->tx.num_vin; i++)
+        wallet_unmark_outpoint_spent(w, &wtx->tx.vin[i].prevout.hash,
+                                     wtx->tx.vin[i].prevout.n);
+}
+
+static void wallet_unspend_notes_for_nullifiers(struct wallet *w,
+                                                const struct wallet_tx *wtx)
+{
+    for (size_t si = 0; si < wtx->tx.num_shielded_spend; si++) {
+        const uint8_t *nf = wtx->tx.v_shielded_spend[si].nullifier.data;
+        for (size_t j = 0; j < w->num_sapling_notes; j++) {
+            if (w->sapling_notes[j].used &&
+                memcmp(w->sapling_notes[j].nf, nf, 32) == 0)
+                w->sapling_notes[j].spent = false;
+        }
+    }
+}
+
+static void wallet_erase_wallet_tx_entry(struct wallet *w,
+                                         struct wallet_tx *wtx)
+{
+    transaction_free(&wtx->tx);
+    memset(wtx, 0, sizeof(*wtx));
+    if (w->num_wallet_tx > 0)
+        w->num_wallet_tx--;
+}
+
+bool wallet_disconnect_transaction(struct wallet *w,
+                                   const struct transaction *tx,
+                                   bool keep_pending)
+{
+    if (!w || !tx)
+        LOG_RETURN(false, "wallet",
+                   "disconnect_transaction: NULL wallet or tx");
+    zcl_mutex_lock(&w->cs);
+
+    wallet_remove_sapling_notes_for_txid(w, &tx->hash);
 
     size_t idx = wallet_find_slot_internal(w, &tx->hash);
     if (idx >= MAX_WALLET_TX) {
@@ -103,21 +139,9 @@ bool wallet_disconnect_transaction(struct wallet *w,
         return true;
     }
 
-    for (size_t i = 0; i < wtx->tx.num_vin; i++)
-        wallet_unmark_outpoint_spent(w, &wtx->tx.vin[i].prevout.hash,
-                                     wtx->tx.vin[i].prevout.n);
-    for (size_t si = 0; si < wtx->tx.num_shielded_spend; si++) {
-        const uint8_t *nf = wtx->tx.v_shielded_spend[si].nullifier.data;
-        for (size_t j = 0; j < w->num_sapling_notes; j++) {
-            if (w->sapling_notes[j].used &&
-                memcmp(w->sapling_notes[j].nf, nf, 32) == 0)
-                w->sapling_notes[j].spent = false;
-        }
-    }
-    transaction_free(&wtx->tx);
-    memset(wtx, 0, sizeof(*wtx));
-    if (w->num_wallet_tx > 0)
-        w->num_wallet_tx--;
+    wallet_unmark_spent_inputs(w, wtx);
+    wallet_unspend_notes_for_nullifiers(w, wtx);
+    wallet_erase_wallet_tx_entry(w, wtx);
     zcl_mutex_unlock(&w->cs);
     return true;
 }

@@ -715,7 +715,6 @@ contexts/wallet/modules/wallet/src/wallet_coin_selection.c:wallet_create_transac
 contexts/wallet/modules/wallet/src/wallet_coin_selection.c:wallet_liquidity_plan_compute:42
 contexts/wallet/modules/wallet/src/wallet_coin_selection.c:wallet_select_coins:33
 contexts/wallet/modules/wallet/src/wallet_lock.c:wallet_lock_register_boot_credential:24
-contexts/wallet/modules/wallet/src/wallet_reorg.c:wallet_disconnect_transaction:16
 contexts/wallet/modules/wallet/src/wallet_rescan.c:wallet_scan_one_block:16
 contexts/wallet/modules/wallet/src/wallet_sqlite.c:wallet_sqlite_close:23
 contexts/wallet/modules/wallet/src/wallet_sqlite.c:wallet_sqlite_flush_scope_r:66
