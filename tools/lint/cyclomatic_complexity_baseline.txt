@@ -1185,10 +1185,6 @@ engine/composition/src/boot_mesh_machines.c:mesh_machine_derive_state:25
 engine/composition/src/boot_mesh_pairing.c:boot_mesh_pairing_reason_code:20
 engine/composition/src/boot_mesh_route.c:boot_mesh_route_acquire:18
 engine/composition/src/boot_mesh_route.c:route_observe_peer:18
-engine/composition/src/boot_mesh_status.c:boot_mesh_status_compose_receipt:22
-engine/composition/src/boot_mesh_status.c:boot_mesh_status_decide:25
-engine/composition/src/boot_mesh_status.c:mesh_responder_request_admit:18
-engine/composition/src/boot_mesh_status.c:mesh_status_from_pairing_reason:20
 engine/composition/src/boot_mesh_status_refresh.c:refresh_begin_one:16
 engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin:39
 engine/composition/src/boot_mesh_status_requester.c:boot_mesh_status_begin_result_string:16

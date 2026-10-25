@@ -111,6 +111,51 @@ static uint64_t mesh_now_mono(void)
  * but an authenticated requester can still resend a decoded request in a new
  * record. One exact request is admitted once per transcript generation, and
  * each authenticated session receives a small bounded cadence. */
+/* A slot is expired once its replay window has elapsed (or the clock moved
+ * backwards past it). */
+static bool mesh_seen_expired(const struct mesh_status_seen_request *seen,
+                              uint64_t now_mono_ms)
+{
+    return now_mono_ms < seen->seen_mono_ms ||
+           now_mono_ms - seen->seen_mono_ms >= MESH_STATUS_RESPONDER_REPLAY_MS;
+}
+
+static bool mesh_seen_same_session(const struct mesh_status_seen_request *seen,
+                                   const struct noise_transport_snapshot *session)
+{
+    return seen->connection_generation == session->connection_generation &&
+           memcmp(seen->remote_static, session->remote_static, 32) == 0 &&
+           memcmp(seen->transcript_hash, session->transcript_hash, 32) == 0;
+}
+
+/* Caller holds g_mesh_lock. Reclaims expired slots, remembers the first free
+ * slot, counts this session's admissions within the last second, and returns
+ * true when the exact request was already admitted in this session. */
+static bool mesh_responder_seen_replay_locked(
+    const struct mesh_status_request_v1 *request,
+    const struct noise_transport_snapshot *session, uint64_t now_mono_ms,
+    struct mesh_status_seen_request **slot_out, size_t *recent_out)
+{
+    for (size_t i = 0; i < MESH_STATUS_RESPONDER_REPLAY_MAX; i++) {
+        struct mesh_status_seen_request *seen = &g_seen_requests[i];
+        if (seen->used && mesh_seen_expired(seen, now_mono_ms))
+            memset(seen, 0, sizeof(*seen));
+        if (!seen->used) {
+            if (!*slot_out)
+                *slot_out = seen;
+            continue;
+        }
+        if (!mesh_seen_same_session(seen, session))
+            continue;
+        if (memcmp(seen->request_id, request->request_id, 32) == 0)
+            return true;
+        if (now_mono_ms >= seen->seen_mono_ms &&
+            now_mono_ms - seen->seen_mono_ms < UINT64_C(1000))
+            (*recent_out)++;
+    }
+    return false;
+}
+
 static bool mesh_responder_request_admit(
     const struct mesh_status_request_v1 *request,
     const struct noise_transport_snapshot *session, uint64_t now_mono_ms)
@@ -122,32 +167,11 @@ static bool mesh_responder_request_admit(
     mesh_lock();
     struct mesh_status_seen_request *slot = NULL;
     size_t recent = 0;
-    for (size_t i = 0; i < MESH_STATUS_RESPONDER_REPLAY_MAX; i++) {
-        struct mesh_status_seen_request *seen = &g_seen_requests[i];
-        if (seen->used &&
-            (now_mono_ms < seen->seen_mono_ms ||
-             now_mono_ms - seen->seen_mono_ms >=
-                 MESH_STATUS_RESPONDER_REPLAY_MS))
-            memset(seen, 0, sizeof(*seen));
-        if (!seen->used) {
-            if (!slot)
-                slot = seen;
-            continue;
-        }
-        bool same_session =
-            seen->connection_generation == session->connection_generation &&
-            memcmp(seen->remote_static, session->remote_static, 32) == 0 &&
-            memcmp(seen->transcript_hash, session->transcript_hash, 32) == 0;
-        if (!same_session)
-            continue;
-        if (memcmp(seen->request_id, request->request_id, 32) == 0) {
-            zcl_mutex_unlock(&g_mesh_lock);
-            atomic_fetch_add(&g_mesh_requests_replayed, 1);
-            return false;
-        }
-        if (now_mono_ms >= seen->seen_mono_ms &&
-            now_mono_ms - seen->seen_mono_ms < UINT64_C(1000))
-            recent++;
+    if (mesh_responder_seen_replay_locked(request, session, now_mono_ms,
+                                          &slot, &recent)) {
+        zcl_mutex_unlock(&g_mesh_lock);
+        atomic_fetch_add(&g_mesh_requests_replayed, 1);
+        return false;
     }
     if (!slot || recent >= MESH_STATUS_RESPONDER_RATE_PER_SECOND) {
         zcl_mutex_unlock(&g_mesh_lock);
@@ -175,50 +199,59 @@ bool boot_mesh_status_test_responder_admit(
 
 /* ── Pure decision ───────────────────────────────────────────────────── */
 
+struct mesh_status_reason_row {
+    enum mesh_pairing_reason reason;
+    enum mesh_status_receipt_status status;
+};
+
+/* Every pairing reason maps to exactly one receipt status. A reason absent
+ * from this table (none exists today) falls through to INTERNAL. */
 static enum mesh_status_receipt_status mesh_status_from_pairing_reason(
     enum mesh_pairing_reason reason)
 {
-    switch (reason) {
-    case MESH_PAIRING_OK: return MESH_STATUS_RECEIPT_OK;
-    case MESH_PAIRING_NOT_FOUND: return MESH_STATUS_RECEIPT_NOT_PAIRED;
-    /* A pairing is genesis-bound: a foreign-genesis request names no
-     * authority this node holds. */
-    case MESH_PAIRING_NETWORK_MISMATCH: return MESH_STATUS_RECEIPT_NOT_PAIRED;
-    case MESH_PAIRING_ALREADY_REVOKED: return MESH_STATUS_RECEIPT_REVOKED;
-    case MESH_PAIRING_EXPIRED: return MESH_STATUS_RECEIPT_EXPIRED;
-    case MESH_PAIRING_SESSION_MISMATCH:
-        return MESH_STATUS_RECEIPT_SESSION_MISMATCH;
-    case MESH_PAIRING_AUTHORITY_CHANGED:
-        return MESH_STATUS_RECEIPT_AUTHORITY_CHANGED;
-    case MESH_PAIRING_DELEGATION_INVALID:
-    case MESH_PAIRING_MASTER_INACTIVE:
-    case MESH_PAIRING_BEACON_UNAVAILABLE:
-    case MESH_PAIRING_BEACON_PROVISIONAL:
-        return MESH_STATUS_RECEIPT_DELEGATION_INVALID;
-    case MESH_PAIRING_CAPABILITY_UNAVAILABLE:
-        return MESH_STATUS_RECEIPT_CAPABILITY_UNAVAILABLE;
-    case MESH_PAIRING_BAD_ARGUMENT:
-    case MESH_PAIRING_FINGERPRINT_MISMATCH:
-    case MESH_PAIRING_WINDOW_INVALID:
-    case MESH_PAIRING_IDENTITY_COLLISION:
-    case MESH_PAIRING_PERSIST_FAILED:
-    /* Revocation-ceremony verdicts; authorize_status never produces them. */
-    case MESH_PAIRING_CONFIRMATION_INVALID:
-    case MESH_PAIRING_PLAN_EXPIRED:
-        return MESH_STATUS_RECEIPT_INTERNAL;
+    static const struct mesh_status_reason_row rows[] = {
+        {MESH_PAIRING_OK, MESH_STATUS_RECEIPT_OK},
+        {MESH_PAIRING_NOT_FOUND, MESH_STATUS_RECEIPT_NOT_PAIRED},
+        /* A pairing is genesis-bound: a foreign-genesis request names no
+         * authority this node holds. */
+        {MESH_PAIRING_NETWORK_MISMATCH, MESH_STATUS_RECEIPT_NOT_PAIRED},
+        {MESH_PAIRING_ALREADY_REVOKED, MESH_STATUS_RECEIPT_REVOKED},
+        {MESH_PAIRING_EXPIRED, MESH_STATUS_RECEIPT_EXPIRED},
+        {MESH_PAIRING_SESSION_MISMATCH, MESH_STATUS_RECEIPT_SESSION_MISMATCH},
+        {MESH_PAIRING_AUTHORITY_CHANGED,
+         MESH_STATUS_RECEIPT_AUTHORITY_CHANGED},
+        {MESH_PAIRING_DELEGATION_INVALID,
+         MESH_STATUS_RECEIPT_DELEGATION_INVALID},
+        {MESH_PAIRING_MASTER_INACTIVE, MESH_STATUS_RECEIPT_DELEGATION_INVALID},
+        {MESH_PAIRING_BEACON_UNAVAILABLE,
+         MESH_STATUS_RECEIPT_DELEGATION_INVALID},
+        {MESH_PAIRING_BEACON_PROVISIONAL,
+         MESH_STATUS_RECEIPT_DELEGATION_INVALID},
+        {MESH_PAIRING_CAPABILITY_UNAVAILABLE,
+         MESH_STATUS_RECEIPT_CAPABILITY_UNAVAILABLE},
+        {MESH_PAIRING_BAD_ARGUMENT, MESH_STATUS_RECEIPT_INTERNAL},
+        {MESH_PAIRING_FINGERPRINT_MISMATCH, MESH_STATUS_RECEIPT_INTERNAL},
+        {MESH_PAIRING_WINDOW_INVALID, MESH_STATUS_RECEIPT_INTERNAL},
+        {MESH_PAIRING_IDENTITY_COLLISION, MESH_STATUS_RECEIPT_INTERNAL},
+        {MESH_PAIRING_PERSIST_FAILED, MESH_STATUS_RECEIPT_INTERNAL},
+        /* Revocation-ceremony verdicts; authorize_status never produces them. */
+        {MESH_PAIRING_CONFIRMATION_INVALID, MESH_STATUS_RECEIPT_INTERNAL},
+        {MESH_PAIRING_PLAN_EXPIRED, MESH_STATUS_RECEIPT_INTERNAL},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(rows[0]); i++) {
+        if (rows[i].reason == reason)
+            return rows[i].status;
     }
     return MESH_STATUS_RECEIPT_INTERNAL;
 }
 
-enum mesh_status_receipt_status boot_mesh_status_decide(
-    struct node_db *ndb, const struct mesh_status_request_v1 *request,
+/* Request-shape gate: argument presence, capability, and the request's own
+ * validation. Returns OK when every check passes, otherwise the refusal. */
+static enum mesh_status_receipt_status mesh_status_decide_request_gate(
+    const struct mesh_status_request_v1 *request,
     const struct noise_transport_snapshot *session,
-    const struct vcs_zcode_dht_delegation *delegations,
-    size_t delegation_count, const uint8_t network_genesis[32],
-    uint64_t now_unix, uint64_t *revocation_generation_out)
+    const uint8_t network_genesis[32], uint64_t now_unix)
 {
-    if (revocation_generation_out)
-        *revocation_generation_out = 0;
     if (!request || !session || !session->established || !network_genesis ||
         now_unix == 0)
         return MESH_STATUS_RECEIPT_INTERNAL;
@@ -226,6 +259,16 @@ enum mesh_status_receipt_status boot_mesh_status_decide(
         return MESH_STATUS_RECEIPT_CAPABILITY_UNAVAILABLE;
     if (mesh_status_request_v1_validate(request) != MESH_STATUS_PROTO_OK)
         return MESH_STATUS_RECEIPT_BAD_REQUEST;
+    return MESH_STATUS_RECEIPT_OK;
+}
+
+/* Time window and live-session binding. Returns OK when every check passes,
+ * otherwise the refusal. Runs only after the request gate has passed. */
+static enum mesh_status_receipt_status mesh_status_decide_session_gate(
+    const struct mesh_status_request_v1 *request,
+    const struct noise_transport_snapshot *session,
+    const uint8_t network_genesis[32], uint64_t now_unix)
+{
     if (now_unix < request->issued_unix || now_unix >= request->expires_unix)
         return MESH_STATUS_RECEIPT_EXPIRED;
     /* Live-session binding: transcript and generation are transcript-derived
@@ -238,21 +281,34 @@ enum mesh_status_receipt_status boot_mesh_status_decide(
         return MESH_STATUS_RECEIPT_SESSION_MISMATCH;
     if (memcmp(request->network_genesis, network_genesis, 32) != 0)
         return MESH_STATUS_RECEIPT_NOT_PAIRED;
-    if (!ndb || !app_runtime_node_db_handle_open(ndb))
-        return MESH_STATUS_RECEIPT_INTERNAL;
+    return MESH_STATUS_RECEIPT_OK;
+}
 
+/* The one delegation whose noise static names the session's remote. Returns
+ * NULL unless exactly one delegation matches. */
+static const struct vcs_zcode_dht_delegation *mesh_status_single_live_delegation(
+    const struct vcs_zcode_dht_delegation *delegations, size_t delegation_count,
+    const uint8_t remote_static[32])
+{
     const struct vcs_zcode_dht_delegation *live = NULL;
     size_t live_count = 0;
     for (size_t i = 0; i < delegation_count; i++) {
-        if (memcmp(delegations[i].noise_static_pubkey, session->remote_static,
-                   32) == 0) {
+        if (memcmp(delegations[i].noise_static_pubkey, remote_static, 32) == 0) {
             live = &delegations[i];
             live_count++;
         }
     }
-    if (live_count != 1)
-        return MESH_STATUS_RECEIPT_DELEGATION_INVALID;
+    return live_count == 1 ? live : NULL;
+}
 
+/* Authorize the live delegation's pairing row and read its revocation
+ * generation. */
+static enum mesh_status_receipt_status mesh_status_decide_row_verdict(
+    struct node_db *ndb, const uint8_t network_genesis[32],
+    const struct vcs_zcode_dht_delegation *live,
+    const struct noise_transport_snapshot *session, uint64_t now_unix,
+    uint64_t *revocation_generation_out)
+{
     /* Pairing ids are per-side: each node derives its row id from the
      * PEER's master+noise identity, so the id a request carries names the
      * requester's own row and can never name ours. The only row that can
@@ -278,7 +334,123 @@ enum mesh_status_receipt_status boot_mesh_status_decide(
     return MESH_STATUS_RECEIPT_OK;
 }
 
+enum mesh_status_receipt_status boot_mesh_status_decide(
+    struct node_db *ndb, const struct mesh_status_request_v1 *request,
+    const struct noise_transport_snapshot *session,
+    const struct vcs_zcode_dht_delegation *delegations,
+    size_t delegation_count, const uint8_t network_genesis[32],
+    uint64_t now_unix, uint64_t *revocation_generation_out)
+{
+    if (revocation_generation_out)
+        *revocation_generation_out = 0;
+    enum mesh_status_receipt_status verdict =
+        mesh_status_decide_request_gate(request, session, network_genesis,
+                                        now_unix);
+    if (verdict != MESH_STATUS_RECEIPT_OK)
+        return verdict;
+    verdict = mesh_status_decide_session_gate(request, session, network_genesis,
+                                              now_unix);
+    if (verdict != MESH_STATUS_RECEIPT_OK)
+        return verdict;
+    if (!ndb || !app_runtime_node_db_handle_open(ndb))
+        return MESH_STATUS_RECEIPT_INTERNAL;
+    const struct vcs_zcode_dht_delegation *live =
+        mesh_status_single_live_delegation(delegations, delegation_count,
+                                           session->remote_static);
+    if (!live)
+        return MESH_STATUS_RECEIPT_DELEGATION_INVALID;
+    return mesh_status_decide_row_verdict(ndb, network_genesis, live, session,
+                                          now_unix, revocation_generation_out);
+}
+
 /* ── Pure receipt composition ────────────────────────────────────────── */
+
+/* Argument presence and session establishment. Logs and refuses on failure. */
+static bool mesh_status_compose_args_ok(
+    const struct mesh_status_request_v1 *request,
+    const struct noise_transport_snapshot *session,
+    const uint8_t network_genesis[32],
+    const uint8_t responder_master_pubkey[32],
+    const uint8_t responder_online_pubkey[32],
+    const uint8_t responder_noise_static[32],
+    const uint8_t responder_online_seed[32],
+    const struct mesh_status_receipt_v1 *out, uint64_t now_unix)
+{
+    if (!request || !session || !session->established || !network_genesis ||
+        !responder_master_pubkey || !responder_online_pubkey ||
+        !responder_noise_static || !responder_online_seed || !out ||
+        now_unix == 0)
+        LOG_FAIL("net.mesh_status", "compose: null/unestablished argument");
+    return true;
+}
+
+/* A receipt never outlives its request, and never runs past the validity
+ * window; an already-expired request still gets a well-formed expiry. */
+static uint64_t mesh_status_receipt_expiry(uint64_t now_unix,
+                                           uint64_t request_expires_unix)
+{
+    uint64_t expires = now_unix + MESH_STATUS_RECEIPT_VALIDITY_SECONDS;
+    if (expires > request_expires_unix)
+        expires = request_expires_unix;
+    if (expires <= now_unix)
+        expires = now_unix + 1; /* expired-request refusal stays well-formed */
+    return expires;
+}
+
+/* Fill every receipt field except the capsule and the signature. */
+static bool mesh_status_receipt_fill(
+    struct mesh_status_receipt_v1 *out,
+    const struct mesh_status_request_v1 *request,
+    const struct noise_transport_snapshot *session,
+    enum mesh_status_receipt_status status, const uint8_t network_genesis[32],
+    const uint8_t responder_master_pubkey[32],
+    const uint8_t responder_online_pubkey[32],
+    const uint8_t responder_noise_static[32], uint64_t revocation_generation,
+    uint64_t now_unix)
+{
+    memset(out, 0, sizeof(*out));
+    out->version = MESH_STATUS_PROTO_VERSION;
+    out->flags = MESH_STATUS_PROTO_FLAGS_NONE;
+    out->status = status;
+    memcpy(out->request_id, request->request_id, 32);
+    if (mesh_status_request_v1_root(request, out->request_root) !=
+        MESH_STATUS_PROTO_OK)
+        LOG_FAIL("net.mesh_status", "compose: request root failed");
+    memcpy(out->network_genesis, network_genesis, 32);
+    memcpy(out->pairing_id, request->pairing_id, 32);
+    memcpy(out->responder_master_pubkey, responder_master_pubkey, 32);
+    memcpy(out->responder_online_pubkey, responder_online_pubkey, 32);
+    memcpy(out->responder_noise_static, responder_noise_static, 32);
+    /* The receipt always carries the responder's LIVE session view, never
+     * the request's claim. */
+    memcpy(out->transcript_hash, session->transcript_hash, 32);
+    out->connection_generation = session->connection_generation;
+    out->revocation_generation = revocation_generation;
+    out->observed_unix = now_unix;
+    out->expires_unix =
+        mesh_status_receipt_expiry(now_unix, request->expires_unix);
+    return true;
+}
+
+/* Bind the capsule into the receipt, then sign it with the online key. */
+static bool mesh_status_receipt_seal(struct mesh_status_receipt_v1 *out,
+                                     const uint8_t *capsule, size_t capsule_len,
+                                     const uint8_t responder_online_seed[32])
+{
+    out->capsule_len = (uint16_t)capsule_len;
+    if (capsule_len)
+        memcpy(out->capsule, capsule, capsule_len);
+    if (mesh_status_capsule_v1_root(out->capsule, capsule_len,
+                                    out->capsule_root) !=
+        MESH_STATUS_PROTO_OK)
+        LOG_FAIL("net.mesh_status", "compose: capsule root failed");
+    enum mesh_status_proto_error signed_result =
+        mesh_status_receipt_v1_sign(out, responder_online_seed);
+    if (signed_result != MESH_STATUS_PROTO_OK)
+        LOG_FAIL("net.mesh_status", "compose: sign failed: %s",
+                 mesh_status_proto_error_string(signed_result));
+    return true;
+}
 
 bool boot_mesh_status_compose_receipt(
     const struct mesh_status_request_v1 *request,
@@ -291,64 +463,25 @@ bool boot_mesh_status_compose_receipt(
     const uint8_t responder_online_seed[32],
     struct mesh_status_receipt_v1 *out)
 {
-    if (!request || !session || !session->established || !network_genesis ||
-        !responder_master_pubkey || !responder_online_pubkey ||
-        !responder_noise_static || !responder_online_seed || !out ||
-        now_unix == 0) {
-        LOG_ERROR("net.mesh_status", "compose: null/unestablished argument");
+    if (!mesh_status_compose_args_ok(request, session, network_genesis,
+                                     responder_master_pubkey,
+                                     responder_online_pubkey,
+                                     responder_noise_static,
+                                     responder_online_seed, out, now_unix))
         return false;
-    }
     if (status == MESH_STATUS_RECEIPT_OK &&
-        (!capsule || capsule_len == 0 || capsule_len > MESH_STATUS_CAPSULE_MAX)) {
-        LOG_ERROR("net.mesh_status", "compose: OK receipt without a capsule");
-        return false;
-    }
+        (!capsule || capsule_len == 0 || capsule_len > MESH_STATUS_CAPSULE_MAX))
+        LOG_FAIL("net.mesh_status", "compose: OK receipt without a capsule");
     if (status != MESH_STATUS_RECEIPT_OK)
         capsule_len = 0;
-    memset(out, 0, sizeof(*out));
-    out->version = MESH_STATUS_PROTO_VERSION;
-    out->flags = MESH_STATUS_PROTO_FLAGS_NONE;
-    out->status = status;
-    memcpy(out->request_id, request->request_id, 32);
-    if (mesh_status_request_v1_root(request, out->request_root) !=
-        MESH_STATUS_PROTO_OK) {
-        LOG_ERROR("net.mesh_status", "compose: request root failed");
+    if (!mesh_status_receipt_fill(out, request, session, status,
+                                  network_genesis, responder_master_pubkey,
+                                  responder_online_pubkey,
+                                  responder_noise_static,
+                                  revocation_generation, now_unix))
         return false;
-    }
-    memcpy(out->network_genesis, network_genesis, 32);
-    memcpy(out->pairing_id, request->pairing_id, 32);
-    memcpy(out->responder_master_pubkey, responder_master_pubkey, 32);
-    memcpy(out->responder_online_pubkey, responder_online_pubkey, 32);
-    memcpy(out->responder_noise_static, responder_noise_static, 32);
-    /* The receipt always carries the responder's LIVE session view, never
-     * the request's claim. */
-    memcpy(out->transcript_hash, session->transcript_hash, 32);
-    out->connection_generation = session->connection_generation;
-    out->revocation_generation = revocation_generation;
-    out->observed_unix = now_unix;
-    uint64_t expires = now_unix + MESH_STATUS_RECEIPT_VALIDITY_SECONDS;
-    if (expires > request->expires_unix)
-        expires = request->expires_unix;
-    if (expires <= now_unix)
-        expires = now_unix + 1; /* expired-request refusal stays well-formed */
-    out->expires_unix = expires;
-    out->capsule_len = (uint16_t)capsule_len;
-    if (capsule_len)
-        memcpy(out->capsule, capsule, capsule_len);
-    if (mesh_status_capsule_v1_root(out->capsule, capsule_len,
-                                    out->capsule_root) !=
-        MESH_STATUS_PROTO_OK) {
-        LOG_ERROR("net.mesh_status", "compose: capsule root failed");
-        return false;
-    }
-    enum mesh_status_proto_error signed_result =
-        mesh_status_receipt_v1_sign(out, responder_online_seed);
-    if (signed_result != MESH_STATUS_PROTO_OK) {
-        LOG_ERROR("net.mesh_status", "compose: sign failed: %s",
-                  mesh_status_proto_error_string(signed_result));
-        return false;
-    }
-    return true;
+    return mesh_status_receipt_seal(out, capsule, capsule_len,
+                                    responder_online_seed);
 }
 
 /* ── Pure requester-side acceptance ──────────────────────────────────── */
