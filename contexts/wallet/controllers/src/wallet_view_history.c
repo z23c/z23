@@ -46,46 +46,26 @@ static int history_query_count(sqlite3 *db, enum history_filter_mode mode,
                                 history_filter_from_me(mode), search_hex);
 }
 
+static void history_copy_hex_chars(const char *src, char *dst)
+{
+    size_t si = 0;
+    for (size_t i = 0; src && src[i] && si < 64; i++) {
+        char c = src[i];
+        if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+            (c >= 'A' && c <= 'F'))
+            dst[si++] = c;
+    }
+    dst[si] = '\0';
+}
+
 /* ── History (/wallet/history) ──────────────────────────────── */
 
-size_t serve_history(uint8_t *r, size_t max, int page,
-                            const char *filter, const char *search) {
-    sqlite3 *db = wv_open_db();
-    if (!db) {
-        size_t off = wv_emit_header(r, max, "History — Z23", "/wallet/history");
-        off += template_render(TMPL_LOADING, NULL, 0,
-            (char *)r + off, max - off);
-        wv_emit_footer(r, max, &off);
-        return off;
-    }
-
-    int tip = wv_effective_tip(db);
-    int per_page = 50;
-
-    size_t off = wv_emit_header(r, max, "History — Z23", "/wallet/history");
-
-    enum history_filter_mode filter_mode = history_filter_parse(filter);
-
-    /* Search by txid prefix */
-    char safe_search[65] = "";
-    if (search && search[0]) {
-        size_t si = 0;
-        for (size_t i = 0; search[i] && si < 64; i++) {
-            char c = search[i];
-            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-                (c >= 'A' && c <= 'F'))
-                safe_search[si++] = c;
-        }
-        safe_search[si] = '\0';
-    }
-
-    int tx_count = history_query_count(db, filter_mode, safe_search);
-
-    int total_pages = (tx_count + per_page - 1) / per_page;
-    if (page >= total_pages && total_pages > 0) page = total_pages - 1;
-
-    /* Filter tabs with counts */
-    const char *f = history_filter_name(filter_mode);
+static void history_render_filter_tabs(uint8_t *r, size_t max, size_t *off,
+                                       sqlite3 *db, const char *f,
+                                       const char *filter,
+                                       const char *safe_search, int tx_count,
+                                       int page, int total_pages)
+{
     int c_all = history_query_count(db, HISTORY_FILTER_ALL, NULL);
     int c_sent = history_query_count(db, HISTORY_FILTER_SENT, NULL);
     int c_recv = history_query_count(db, HISTORY_FILTER_RECV, NULL);
@@ -112,31 +92,26 @@ size_t serve_history(uint8_t *r, size_t max, int page,
             { "page",         pg },
             { "pages",        pgs },
         };
-        off += template_render(TMPL_HISTORY_HEADER, hv, 12,
-            (char *)r + off, max - off);
+        *off += template_render(TMPL_HISTORY_HEADER, hv, 12,
+            (char *)r + *off, max - *off);
     }
+}
 
-    /* Timeline view (tx-cards). Fetch the page of ledger rows via the
-     * port, then render the cards via the history view. */
-    {
-        struct wallet_view_ledger_row rows[64];
-        int n_rows = wv_list_ledger_rows(db, rows,
-            sizeof(rows) / sizeof(rows[0]),
-            true, history_filter_restrict(filter_mode),
-            history_filter_from_me(filter_mode), safe_search,
-            per_page, page * per_page);
-        wv_render_history_cards(r, max, &off, rows, n_rows, tip);
-    }
-
-    /* Shielded note activity — show recent note deposits */
+static void history_render_note_activity(uint8_t *r, size_t max, size_t *off,
+                                         sqlite3 *db, int page, const char *f)
+{
     if (page == 0 && (strcmp(f, "all") == 0 || strcmp(f, "recv") == 0)) {
         struct wallet_view_note_row notes[10];
         int n_notes = wv_list_recent_notes(db, notes,
             sizeof(notes) / sizeof(notes[0]), true, 0);
-        wv_render_history_notes(r, max, &off, notes, n_notes);
+        wv_render_history_notes(r, max, off, notes, n_notes);
     }
+}
 
-    /* Pagination (preserve filter + search) */
+static void history_render_pagination(uint8_t *r, size_t max, size_t *off,
+                                      const char *f, const char *safe_search,
+                                      int page, int total_pages)
+{
     if (total_pages > 1) {
         char newer[256] = "", older[256] = "";
         const char *qs = safe_search[0] ? safe_search : "";
@@ -153,9 +128,60 @@ size_t serve_history(uint8_t *r, size_t max, int page,
             { "newer_link", newer },
             { "older_link", older },
         };
-        off += template_render(TMPL_PAGINATION, pv, 2,
-            (char *)r + off, max - off);
+        *off += template_render(TMPL_PAGINATION, pv, 2,
+            (char *)r + *off, max - *off);
     }
+}
+
+size_t serve_history(uint8_t *r, size_t max, int page,
+                            const char *filter, const char *search) {
+    sqlite3 *db = wv_open_db();
+    if (!db) {
+        size_t off = wv_emit_header(r, max, "History — Z23", "/wallet/history");
+        off += template_render(TMPL_LOADING, NULL, 0,
+            (char *)r + off, max - off);
+        wv_emit_footer(r, max, &off);
+        return off;
+    }
+
+    int tip = wv_effective_tip(db);
+    int per_page = 50;
+
+    size_t off = wv_emit_header(r, max, "History — Z23", "/wallet/history");
+
+    enum history_filter_mode filter_mode = history_filter_parse(filter);
+
+    /* Search by txid prefix */
+    char safe_search[65] = "";
+    history_copy_hex_chars(search, safe_search);
+
+    int tx_count = history_query_count(db, filter_mode, safe_search);
+
+    int total_pages = (tx_count + per_page - 1) / per_page;
+    if (page >= total_pages && total_pages > 0) page = total_pages - 1;
+
+    /* Filter tabs with counts */
+    const char *f = history_filter_name(filter_mode);
+    history_render_filter_tabs(r, max, &off, db, f, filter, safe_search,
+                               tx_count, page, total_pages);
+
+    /* Timeline view (tx-cards). Fetch the page of ledger rows via the
+     * port, then render the cards via the history view. */
+    {
+        struct wallet_view_ledger_row rows[64];
+        int n_rows = wv_list_ledger_rows(db, rows,
+            sizeof(rows) / sizeof(rows[0]),
+            true, history_filter_restrict(filter_mode),
+            history_filter_from_me(filter_mode), safe_search,
+            per_page, page * per_page);
+        wv_render_history_cards(r, max, &off, rows, n_rows, tip);
+    }
+
+    /* Shielded note activity — show recent note deposits */
+    history_render_note_activity(r, max, &off, db, page, f);
+
+    /* Pagination (preserve filter + search) */
+    history_render_pagination(r, max, &off, f, safe_search, page, total_pages);
 
     wv_emit_footer(r, max, &off);
     sqlite3_close(db);
@@ -166,105 +192,42 @@ size_t serve_history(uint8_t *r, size_t max, int page,
 
 /* ── Transaction Detail (/wallet/tx/:txid) ──────────────────── */
 
-size_t serve_tx_detail(uint8_t *r, size_t max, const char *txid_hex) {
-    sqlite3 *db = wv_open_db();
-    if (!db) {
-        size_t off = wv_emit_header(r, max, "Transaction — Z23", "/wallet/history");
-        off += template_render(TMPL_LOADING, NULL, 0,
-            (char *)r + off, max - off);
-        wv_emit_footer(r, max, &off);
-        return off;
-    }
-
-    int tip = wv_effective_tip(db);
-    size_t off = wv_emit_header(r, max, "Transaction — Z23", "/wallet/history");
-
-    /* Sanitize txid: only hex chars, max 64 */
-    char safe_txid[65] = "";
-    {
-        size_t si = 0;
-        for (size_t i = 0; txid_hex && txid_hex[i] && si < 64; i++) {
-            char c = txid_hex[i];
-            if ((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-                (c >= 'A' && c <= 'F'))
-                safe_txid[si++] = c;
-        }
-        safe_txid[si] = '\0';
-    }
-
-    if (strlen(safe_txid) < 64) {
-        off += template_render(TMPL_TX_INVALID, NULL, 0,
-            (char *)r + off, max - off);
-        wv_emit_footer(r, max, &off);
-        sqlite3_close(db);
-        return off;
-    }
-
-    /* Convert to uppercase for BLOB comparison */
-    char upper_txid[65];
+static void tx_detail_txid_uppercase(const char *src, char *dst)
+{
     for (int i = 0; i < 64; i++)
-        upper_txid[i] = (safe_txid[i] >= 'a' && safe_txid[i] <= 'f')
-            ? (char)(safe_txid[i] - 32) : safe_txid[i];
-    upper_txid[64] = '\0';
+        dst[i] = (src[i] >= 'a' && src[i] <= 'f')
+            ? (char)(src[i] - 32) : src[i];
+    dst[64] = '\0';
+}
 
-    /* Lookup wallet transaction */
-    int block_height = 0, from_me = 0;
-    int64_t fee = 0, btime = 0;
-
-    struct wallet_view_tx_header hdr = {0};
-    bool found = wv_lookup_tx_header(db, upper_txid, &hdr);
-    if (found) {
-        block_height = hdr.block_height;
-        from_me = hdr.from_me;
-        fee = hdr.fee;
-        btime = hdr.block_time;
-    }
-
-    if (!found) {
-        off += template_render(TMPL_TX_NOT_FOUND, NULL, 0,
-            (char *)r + off, max - off);
-        wv_emit_footer(r, max, &off);
-        sqlite3_close(db);
-        return off;
-    }
-
+static int tx_detail_confirmations(int tip, int block_height)
+{
     int confs = (tip > 0 && block_height > 0) ? (tip - block_height + 1) : 0;
     if (confs < 0) confs = 0;
-    bool is_recv = (from_me == 0);
-    int conf_pct = confs >= 6 ? 100 : (confs * 100 / 6);
+    return confs;
+}
 
-    char rel_time[48], abs_time[32];
-    wv_format_relative_time(btime, rel_time, sizeof(rel_time));
-    wv_format_time(btime, abs_time, sizeof(abs_time));
-
-    char esc_rel[96], esc_abs[64];
-    html_escape(esc_rel, sizeof(esc_rel), rel_time);
-    html_escape(esc_abs, sizeof(esc_abs), abs_time);
-
-    /* Fee row (only for outgoing with fee) */
-    char fee_row[128] = "";
+static void tx_detail_render_fee_row(char *fee_row, size_t cap, int64_t fee,
+                                     bool is_recv)
+{
     if (fee > 0 && !is_recv)
-        snprintf(fee_row, sizeof(fee_row),
+        snprintf(fee_row, cap,
             "<div class='lbl'>Fee</div>"
             "<div class='val zcl'>%.8f ZCL</div>",
             (double)fee / 1e8);
+}
 
-    /* Pre-render wallet outputs (fetch via port, render via view) */
-    char outputs_section[4096];
-    {
-        struct wallet_view_tx_output outs[64];
-        int n_outs = wv_list_tx_outputs(db, upper_txid, outs,
-            sizeof(outs) / sizeof(outs[0]));
-        wv_render_tx_outputs(outputs_section, sizeof(outputs_section),
-            outs, n_outs);
-    }
-
-    /* Format template variables */
-    char confs_s[16], conf_pct_s[8], block_h_s[16];
-    snprintf(confs_s, sizeof(confs_s), "%d", confs);
-    snprintf(conf_pct_s, sizeof(conf_pct_s), "%d", conf_pct);
-    snprintf(block_h_s, sizeof(block_h_s), "%d", block_height);
-
+static void tx_detail_render_template(uint8_t *r, size_t max, size_t *off,
+                                      bool is_recv, int confs,
+                                      const char *esc_rel,
+                                      const char *esc_abs,
+                                      const char *confs_s,
+                                      const char *conf_pct_s,
+                                      const char *block_h_s,
+                                      const char *safe_txid,
+                                      const char *fee_row,
+                                      const char *outputs_section)
+{
     struct template_var vars[] = {
         { "parent_href",     "/wallet/history" },
         { "parent_label",    "History" },
@@ -287,8 +250,95 @@ size_t serve_tx_detail(uint8_t *r, size_t max, const char *txid_hex) {
         { "fee_row",         fee_row },
         { "outputs_section", outputs_section },
     };
-    off += template_render(TMPL_TX_DETAIL, vars,
-        sizeof(vars) / sizeof(vars[0]), (char *)r + off, max - off);
+    *off += template_render(TMPL_TX_DETAIL, vars,
+        sizeof(vars) / sizeof(vars[0]), (char *)r + *off, max - *off);
+}
+
+size_t serve_tx_detail(uint8_t *r, size_t max, const char *txid_hex) {
+    sqlite3 *db = wv_open_db();
+    if (!db) {
+        size_t off = wv_emit_header(r, max, "Transaction — Z23", "/wallet/history");
+        off += template_render(TMPL_LOADING, NULL, 0,
+            (char *)r + off, max - off);
+        wv_emit_footer(r, max, &off);
+        return off;
+    }
+
+    int tip = wv_effective_tip(db);
+    size_t off = wv_emit_header(r, max, "Transaction — Z23", "/wallet/history");
+
+    /* Sanitize txid: only hex chars, max 64 */
+    char safe_txid[65] = "";
+    history_copy_hex_chars(txid_hex, safe_txid);
+
+    if (strlen(safe_txid) < 64) {
+        off += template_render(TMPL_TX_INVALID, NULL, 0,
+            (char *)r + off, max - off);
+        wv_emit_footer(r, max, &off);
+        sqlite3_close(db);
+        return off;
+    }
+
+    /* Convert to uppercase for BLOB comparison */
+    char upper_txid[65];
+    tx_detail_txid_uppercase(safe_txid, upper_txid);
+
+    /* Lookup wallet transaction */
+    int block_height = 0, from_me = 0;
+    int64_t fee = 0, btime = 0;
+
+    struct wallet_view_tx_header hdr = {0};
+    bool found = wv_lookup_tx_header(db, upper_txid, &hdr);
+    if (found) {
+        block_height = hdr.block_height;
+        from_me = hdr.from_me;
+        fee = hdr.fee;
+        btime = hdr.block_time;
+    }
+
+    if (!found) {
+        off += template_render(TMPL_TX_NOT_FOUND, NULL, 0,
+            (char *)r + off, max - off);
+        wv_emit_footer(r, max, &off);
+        sqlite3_close(db);
+        return off;
+    }
+
+    int confs = tx_detail_confirmations(tip, block_height);
+    bool is_recv = (from_me == 0);
+    int conf_pct = confs >= 6 ? 100 : (confs * 100 / 6);
+
+    char rel_time[48], abs_time[32];
+    wv_format_relative_time(btime, rel_time, sizeof(rel_time));
+    wv_format_time(btime, abs_time, sizeof(abs_time));
+
+    char esc_rel[96], esc_abs[64];
+    html_escape(esc_rel, sizeof(esc_rel), rel_time);
+    html_escape(esc_abs, sizeof(esc_abs), abs_time);
+
+    /* Fee row (only for outgoing with fee) */
+    char fee_row[128] = "";
+    tx_detail_render_fee_row(fee_row, sizeof(fee_row), fee, is_recv);
+
+    /* Pre-render wallet outputs (fetch via port, render via view) */
+    char outputs_section[4096];
+    {
+        struct wallet_view_tx_output outs[64];
+        int n_outs = wv_list_tx_outputs(db, upper_txid, outs,
+            sizeof(outs) / sizeof(outs[0]));
+        wv_render_tx_outputs(outputs_section, sizeof(outputs_section),
+            outs, n_outs);
+    }
+
+    /* Format template variables */
+    char confs_s[16], conf_pct_s[8], block_h_s[16];
+    snprintf(confs_s, sizeof(confs_s), "%d", confs);
+    snprintf(conf_pct_s, sizeof(conf_pct_s), "%d", conf_pct);
+    snprintf(block_h_s, sizeof(block_h_s), "%d", block_height);
+
+    tx_detail_render_template(r, max, &off, is_recv, confs, esc_rel, esc_abs,
+                              confs_s, conf_pct_s, block_h_s, safe_txid,
+                              fee_row, outputs_section);
 
     wv_emit_footer(r, max, &off);
     sqlite3_close(db);
@@ -296,3 +346,5 @@ size_t serve_tx_detail(uint8_t *r, size_t max, const char *txid_hex) {
 }
 
 /* ── Node / Command Center (/wallet/node) ───────────────────── */
+
+
