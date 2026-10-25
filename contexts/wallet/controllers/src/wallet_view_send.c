@@ -185,6 +185,90 @@ size_t serve_send(uint8_t *r, size_t max) {
     return off;
 }
 
+/* Map a failed wv_validate_zcl_address to the review page's reason text. */
+static const char *classify_address_reject_reason(const char *address) {
+    size_t alen = strlen(address);
+    if (alen < 26)
+        return "Address too short.";
+    else if (!(address[0] == 't' || (alen >= 3 && address[0] == 'z')))
+        return "ZClassic addresses start with t1, t3, or zs1.";
+    else
+        return "Invalid address checksum. Check for typos.";
+}
+
+/* Pick the message for the review page's validation-error template. */
+static const char *review_rejection_reason(bool addr_ok,
+                                           const char *addr_err) {
+    if (!addr_ok)
+        return addr_err ? addr_err : "Invalid address.";
+    return "Invalid amount";
+}
+
+/* Transparent + shielded wallet balance via a short-lived DB handle. */
+static int64_t query_total_spendable_balance(void) {
+    int64_t t_balance = 0, z_balance = 0;
+    sqlite3 *db = wv_open_db();
+    if (db) {
+        t_balance = wv_query_ground_truth_balance(db, NULL);
+        z_balance = wv_query_shielded_balance(db, NULL);
+        sqlite3_close(db);
+    }
+    return t_balance + z_balance;
+}
+
+/* Render the review table: amounts plus the t/z privacy pill and warning. */
+static size_t render_send_review_details(uint8_t *r, size_t max, size_t off,
+                                         const char *safe_addr, double amount,
+                                         double fee, double total_deducted,
+                                         double remaining, bool is_shielded) {
+    char amt_s[32], fee_s[32], tot_s[32], rem_s[32];
+    snprintf(amt_s, sizeof(amt_s), "%.8f", amount);
+    snprintf(fee_s, sizeof(fee_s), "%.8f", fee);
+    snprintf(tot_s, sizeof(tot_s), "%.8f", total_deducted);
+    snprintf(rem_s, sizeof(rem_s), "%.8f", remaining);
+
+    const char *pw = is_shielded
+        ? "<div style='color:#fbbf24;font-size:13px;margin-top:4px'>"
+          "&#x26A0; Your sending address is visible on-chain "
+          "(t&#x2192;z send)</div>"
+        : "";
+
+    struct template_var rv[] = {
+        { "parent_href",     "/wallet/send" },
+        { "parent_label",    "Send" },
+        { "current",         "Review" },
+        { "address",         safe_addr },
+        { "amount",          amt_s },
+        { "fee",             fee_s },
+        { "total",           tot_s },
+        { "remaining",       rem_s },
+        { "privacy_pill",    is_shielded ? "pill-private" : "pill-t" },
+        { "privacy_label",   is_shielded ? "&#x1F512; Recipient private"
+                                          : "&#x1F534; Public" },
+        { "privacy_warning", pw },
+    };
+    off += template_render(TMPL_SEND_REVIEW, rv, 11,
+        (char *)r + off, max - off);
+    return off;
+}
+
+/* Render the Cancel / Confirm button strip under the review table. */
+static size_t render_send_confirm_buttons(uint8_t *r, size_t max, size_t off,
+                                          const char *safe_addr, double amount,
+                                          bool is_shielded) {
+    char amt_s[32];
+    snprintf(amt_s, sizeof(amt_s), "%.8f", amount);
+    struct template_var bv[] = {
+        { "address",   safe_addr },
+        { "amount",    amt_s },
+        { "btn_color", is_shielded ? "#a78bfa" : "#34d399" },
+        { "btn_text",  is_shielded ? "#fff" : "#0c0c0c" },
+    };
+    off += template_render(TMPL_SEND_CONFIRM_BUTTONS, bv, 4,
+        (char *)r + off, max - off);
+    return off;
+}
+
 /* Intermediate confirmation step: show details before executing. */
 
 size_t serve_send_review(uint8_t *r, size_t max,
@@ -198,20 +282,11 @@ size_t serve_send_review(uint8_t *r, size_t max,
     /* Validate address: checksum verification (Base58Check or Bech32) */
     bool addr_ok = wv_validate_zcl_address(address);
     const char *addr_err = NULL;
-    if (!addr_ok) {
-        size_t alen = strlen(address);
-        if (alen < 26)
-            addr_err = "Address too short.";
-        else if (!(address[0] == 't' || (alen >= 3 && address[0] == 'z')))
-            addr_err = "ZClassic addresses start with t1, t3, or zs1.";
-        else
-            addr_err = "Invalid address checksum. Check for typos.";
-    }
+    if (!addr_ok)
+        addr_err = classify_address_reject_reason(address);
 
     double amount = strtod(amount_str, NULL);
-    const char *err_reason = !addr_ok
-        ? (addr_err ? addr_err : "Invalid address.")
-        : "Invalid amount";
+    const char *err_reason = review_rejection_reason(addr_ok, addr_err);
     if (!addr_ok || amount <= 0) {
         struct template_var ev[] = {
             { "heading",   "Invalid Transaction" },
@@ -231,67 +306,125 @@ size_t serve_send_review(uint8_t *r, size_t max,
     double total_deducted = amount + fee;
 
     /* Query balance — use BOTH transparent and shielded */
-    int64_t t_balance = 0, z_balance = 0;
-    {
-        sqlite3 *db = wv_open_db();
-        if (db) {
-            t_balance = wv_query_ground_truth_balance(db, NULL);
-            z_balance = wv_query_shielded_balance(db, NULL);
-            sqlite3_close(db);
-        }
-    }
-    int64_t spendable = t_balance + z_balance;
+    int64_t spendable = query_total_spendable_balance();
     double remaining = (double)spendable / (double)ZATOSHI_PER_ZCL - total_deducted;
 
     char safe_addr[256];
     html_escape(safe_addr, sizeof(safe_addr), address);
 
-    {
-        char amt_s[32], fee_s[32], tot_s[32], rem_s[32];
-        snprintf(amt_s, sizeof(amt_s), "%.8f", amount);
-        snprintf(fee_s, sizeof(fee_s), "%.8f", fee);
-        snprintf(tot_s, sizeof(tot_s), "%.8f", total_deducted);
-        snprintf(rem_s, sizeof(rem_s), "%.8f", remaining);
-
-        const char *pw = is_shielded
-            ? "<div style='color:#fbbf24;font-size:13px;margin-top:4px'>"
-              "&#x26A0; Your sending address is visible on-chain "
-              "(t&#x2192;z send)</div>"
-            : "";
-
-        struct template_var rv[] = {
-            { "parent_href",     "/wallet/send" },
-            { "parent_label",    "Send" },
-            { "current",         "Review" },
-            { "address",         safe_addr },
-            { "amount",          amt_s },
-            { "fee",             fee_s },
-            { "total",           tot_s },
-            { "remaining",       rem_s },
-            { "privacy_pill",    is_shielded ? "pill-private" : "pill-t" },
-            { "privacy_label",   is_shielded ? "&#x1F512; Recipient private"
-                                              : "&#x1F534; Public" },
-            { "privacy_warning", pw },
-        };
-        off += template_render(TMPL_SEND_REVIEW, rv, 11,
-            (char *)r + off, max - off);
-    }
+    off = render_send_review_details(r, max, off, safe_addr, amount,
+        fee, total_deducted, remaining, is_shielded);
 
     /* Cancel / Confirm buttons */
-    {
-        char amt_s[32];
-        snprintf(amt_s, sizeof(amt_s), "%.8f", amount);
-        struct template_var bv[] = {
-            { "address",   safe_addr },
-            { "amount",    amt_s },
-            { "btn_color", is_shielded ? "#a78bfa" : "#34d399" },
-            { "btn_text",  is_shielded ? "#fff" : "#0c0c0c" },
-        };
-        off += template_render(TMPL_SEND_CONFIRM_BUTTONS, bv, 4,
-            (char *)r + off, max - off);
-    }
+    off = render_send_confirm_buttons(r, max, off, safe_addr, amount,
+        is_shielded);
 
     wv_emit_footer(r, max, &off);
+    return off;
+}
+
+/* Shielded send: delegate to zclassicd z_sendmany.
+ * Try z-address first (z→z, fully private), fall back to
+ * t-address (t→z, sender visible on-chain).
+ * Fills txid_result on success, or error_msg on failure. */
+static bool send_shielded_via_zsendmany(const char *address, double amount,
+                                        char *txid_result, size_t txid_size,
+                                        char *error_msg, size_t error_size) {
+    char from_addr[256] = "";
+
+    /* Prefer sending from z-address (z→z = fully private) */
+    double z_bal = 0;
+    wv_get_funded_zaddr(from_addr, sizeof(from_addr), &z_bal);
+
+    /* Fall back to t-address if z-address has insufficient funds */
+    if (z_bal < amount + FEE_ZCL) {
+        from_addr[0] = '\0';
+        wv_get_funded_taddr(from_addr, sizeof(from_addr));
+    }
+
+    if (from_addr[0]) {
+        char zp[1024];
+        snprintf(zp, sizeof(zp),
+            "[\"%s\",[{\"address\":\"%s\",\"amount\":%.8f}],1,%.8f]",
+            from_addr, address, amount, FEE_ZCL);
+        char rb[4096] = "";
+        if (wv_rpc_call("z_sendmany", zp, rb, sizeof(rb)) > 0) {
+            char rv[256] = "";
+            zcl_json_extract_str(rb, "result", rv, sizeof(rv));
+            if (strstr(rv, "opid-") || strstr(rb, "opid-")) {
+                snprintf(txid_result, txid_size, "%s",
+                    rv[0] ? rv : "submitted");
+                return true;
+            } else {
+                zcl_json_extract_str(rb, "message", error_msg,
+                                      error_size);
+                if (!error_msg[0])
+                    snprintf(error_msg, error_size,
+                        "z_sendmany error: %.180s", rb);
+                return false;
+            }
+        } else {
+            snprintf(error_msg, error_size,
+                "Could not connect to zclassicd (port %d)",
+                ZCLASSICD_RPC_DEFAULT_PORT);
+            return false;
+        }
+    } else {
+        snprintf(error_msg, error_size,
+            "No funded address found (transparent or shielded)");
+        return false;
+    }
+}
+
+/* Render the success page: explorer link, or an opid notice for z_sendmany. */
+static size_t render_send_success_page(uint8_t *r, size_t max, size_t off,
+                                       const char *address,
+                                       const char *txid_result,
+                                       double amount) {
+    char safe_addr[256], safe_txid[256];
+    html_escape(safe_addr, sizeof(safe_addr), address);
+    html_escape(safe_txid, sizeof(safe_txid), txid_result);
+
+    bool is_opid = (strncmp(txid_result, "opid-", 5) == 0);
+    char txid_html[600] = "";
+    if (is_opid)
+        snprintf(txid_html, sizeof(txid_html),
+            "<div class='hash' style='word-break:break-all;"
+            "color:#a78bfa;font-size:14px'>%s</div>"
+            "<div style='color:#888;font-size:14px;margin-top:8px'>"
+            "Funds will arrive after ~10 confirmations (~25 min)</div>",
+            safe_txid);
+    else
+        snprintf(txid_html, sizeof(txid_html),
+            "<a href='/explorer/tx/%s' class='hash' "
+            "style='word-break:break-all'>%s</a>",
+            safe_txid, safe_txid);
+
+    wv_save_contact(address, address);
+
+    char amt_s[32];
+    snprintf(amt_s, sizeof(amt_s), "%.8f", amount);
+    struct template_var sv[] = {
+        { "heading",   is_opid ? "&#x1F512; Send to Private Address Started"
+                               : "Transaction Sent" },
+        { "amount",    amt_s },
+        { "address",   address },
+        { "txid_html", txid_html },
+    };
+    off += template_render(TMPL_SEND_SUCCESS, sv, 4,
+        (char *)r + off, max - off);
+    return off;
+}
+
+/* Render the failure page with error_msg, or a generic fallback. */
+static size_t render_send_error_page(uint8_t *r, size_t max, size_t off,
+                                     const char *error_msg) {
+    struct template_var ev[] = {
+        { "heading", "Send Failed" },
+        { "message", error_msg[0] ? error_msg : "Unknown error" },
+    };
+    off += template_render(TMPL_SEND_ERROR, ev, 2,
+        (char *)r + off, max - off);
     return off;
 }
 
@@ -364,50 +497,9 @@ size_t serve_send_confirm(uint8_t *r, size_t max,
     bool send_ok = false;
 
     if (is_shielded) {
-        /* Shielded send: delegate to zclassicd z_sendmany.
-         * Try z-address first (z→z, fully private), fall back to
-         * t-address (t→z, sender visible on-chain). */
-        char from_addr[256] = "";
-
-        /* Prefer sending from z-address (z→z = fully private) */
-        double z_bal = 0;
-        wv_get_funded_zaddr(from_addr, sizeof(from_addr), &z_bal);
-
-        /* Fall back to t-address if z-address has insufficient funds */
-        if (z_bal < amount + FEE_ZCL) {
-            from_addr[0] = '\0';
-            wv_get_funded_taddr(from_addr, sizeof(from_addr));
-        }
-
-        if (from_addr[0]) {
-            char zp[1024];
-            snprintf(zp, sizeof(zp),
-                "[\"%s\",[{\"address\":\"%s\",\"amount\":%.8f}],1,%.8f]",
-                from_addr, address, amount, FEE_ZCL);
-            char rb[4096] = "";
-            if (wv_rpc_call("z_sendmany", zp, rb, sizeof(rb)) > 0) {
-                char rv[256] = "";
-                zcl_json_extract_str(rb, "result", rv, sizeof(rv));
-                if (strstr(rv, "opid-") || strstr(rb, "opid-")) {
-                    snprintf(txid_result, sizeof(txid_result), "%s",
-                        rv[0] ? rv : "submitted");
-                    send_ok = true;
-                } else {
-                    zcl_json_extract_str(rb, "message", error_msg,
-                                          sizeof(error_msg));
-                    if (!error_msg[0])
-                        snprintf(error_msg, sizeof(error_msg),
-                            "z_sendmany error: %.180s", rb);
-                }
-            } else {
-                snprintf(error_msg, sizeof(error_msg),
-                    "Could not connect to zclassicd (port %d)",
-                    ZCLASSICD_RPC_DEFAULT_PORT);
-            }
-        } else {
-            snprintf(error_msg, sizeof(error_msg),
-                "No funded address found (transparent or shielded)");
-        }
+        send_ok = send_shielded_via_zsendmany(address, amount,
+            txid_result, sizeof(txid_result),
+            error_msg, sizeof(error_msg));
     } else {
         send_ok = wallet_direct_sendtoaddress(address, amount_sat,
             txid_result, sizeof(txid_result),
@@ -418,45 +510,10 @@ size_t serve_send_confirm(uint8_t *r, size_t max,
         /* Sync wallet tables immediately so balance is correct on return */
         wv_sync_wallet_from_zclassicd();
         g_balance_dirty = 1;
-        char safe_addr[256], safe_txid[256];
-        html_escape(safe_addr, sizeof(safe_addr), address);
-        html_escape(safe_txid, sizeof(safe_txid), txid_result);
-
-        bool is_opid = (strncmp(txid_result, "opid-", 5) == 0);
-        char txid_html[600] = "";
-        if (is_opid)
-            snprintf(txid_html, sizeof(txid_html),
-                "<div class='hash' style='word-break:break-all;"
-                "color:#a78bfa;font-size:14px'>%s</div>"
-                "<div style='color:#888;font-size:14px;margin-top:8px'>"
-                "Funds will arrive after ~10 confirmations (~25 min)</div>",
-                safe_txid);
-        else
-            snprintf(txid_html, sizeof(txid_html),
-                "<a href='/explorer/tx/%s' class='hash' "
-                "style='word-break:break-all'>%s</a>",
-                safe_txid, safe_txid);
-
-        wv_save_contact(address, address);
-
-        char amt_s[32];
-        snprintf(amt_s, sizeof(amt_s), "%.8f", amount);
-        struct template_var sv[] = {
-            { "heading",   is_opid ? "&#x1F512; Send to Private Address Started"
-                                   : "Transaction Sent" },
-            { "amount",    amt_s },
-            { "address",   address },
-            { "txid_html", txid_html },
-        };
-        off += template_render(TMPL_SEND_SUCCESS, sv, 4,
-            (char *)r + off, max - off);
+        off = render_send_success_page(r, max, off, address, txid_result,
+                                       amount);
     } else {
-        struct template_var ev[] = {
-            { "heading", "Send Failed" },
-            { "message", error_msg[0] ? error_msg : "Unknown error" },
-        };
-        off += template_render(TMPL_SEND_ERROR, ev, 2,
-            (char *)r + off, max - off);
+        off = render_send_error_page(r, max, off, error_msg);
     }
 
     wv_emit_footer(r, max, &off);
