@@ -87,6 +87,164 @@ static int topology_sweep_retention_checks(void)
     return failures;
 }
 
+/* The dump_state_json checks are split out of test_topology_store the same
+ * way. Each helper counts and returns its own failures; the caller folds
+ * them into the running total. */
+static int topology_dump_summary_field_checks(struct json_value *dump)
+{
+    int failures = 0;
+
+    const struct json_value *open_v = json_get(dump, "open");
+    TS_CHECK("dump reports open=true",
+             open_v != NULL && json_get_bool(open_v) == true);
+    const struct json_value *ec = json_get(dump, "edge_count");
+    TS_CHECK("dump reports edge_count == 3",
+             ec != NULL && json_get_int(ec) == 3);
+    const struct json_value *dobs = json_get(dump, "distinct_observers");
+    TS_CHECK("dump reports distinct_observers == 2",
+             dobs != NULL && json_get_int(dobs) == 2);
+    const struct json_value *dadv =
+        json_get(dump, "distinct_advertised_nodes");
+    TS_CHECK("dump reports distinct_advertised_nodes == 2",
+             dadv != NULL && json_get_int(dadv) == 2);
+    return failures;
+}
+
+static int topology_dump_top_advertised_checks(struct json_value *dump)
+{
+    int failures = 0;
+
+    const struct json_value *top = json_get(dump, "top_advertised");
+    TS_CHECK("dump includes top_advertised array",
+             top != NULL && top->type == JSON_ARR &&
+             json_size(top) >= 1);
+    if (top && json_size(top) >= 1) {
+        const struct json_value *first = json_at(top, 0);
+        const struct json_value *indeg =
+            first ? json_get(first, "in_degree") : NULL;
+        TS_CHECK("top_advertised[0] is the higher-in-degree node",
+                 indeg != NULL && json_get_int(indeg) == 2);
+    }
+    return failures;
+}
+
+static int topology_dump_last_sweep_checks(struct json_value *dump)
+{
+    int failures = 0;
+
+    const struct json_value *last_sweep = json_get(dump, "last_sweep");
+    TS_CHECK("dump includes last_sweep", last_sweep != NULL);
+    if (last_sweep) {
+        const struct json_value *es = json_get(last_sweep, "edges_seen");
+        TS_CHECK("last_sweep edges_seen == 3",
+                 es != NULL && json_get_int(es) == 3);
+    }
+    return failures;
+}
+
+static int topology_dump_state_checks(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "topology_store", "dump");
+    TS_CHECK("open for dump", topology_store_open(dir));
+    topology_store_test_reset();
+
+    struct net_addr observer = ts_ipv4(81, 214, 132, 50);
+    struct net_addr popular = ts_ipv4(66, 70, 182, 50);
+    struct net_addr rare = ts_ipv4(66, 70, 182, 51);
+    struct net_addr observer2 = ts_ipv4(81, 214, 132, 51);
+    (void)topology_store_record_edge(&observer, 8033, &popular, 8033,
+                                     100, NULL);
+    (void)topology_store_record_edge(&observer2, 8033, &popular, 8033,
+                                     100, NULL);
+    (void)topology_store_record_edge(&observer, 8033, &rare, 8033, 100,
+                                     NULL);
+    (void)topology_store_record_sweep(100, 110, 3, 3, 3, 2);
+
+    struct json_value j;
+    json_init(&j);
+    TS_CHECK("dump_state_json returns true",
+             topology_store_dump_state_json(&j, NULL));
+
+    failures += topology_dump_summary_field_checks(&j);
+    failures += topology_dump_top_advertised_checks(&j);
+    failures += topology_dump_last_sweep_checks(&j);
+
+    json_free(&j);
+    topology_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
+/* The WAL-bound checks, split out of test_topology_store in the same way;
+ * returns its own failure count. */
+static int topology_wal_bound_checks(void)
+{
+    int failures = 0;
+    char dir[256];
+    test_make_tmpdir(dir, sizeof(dir), "topology_store", "wal");
+
+    TS_CHECK("wal size is unknown while closed",
+             topology_store_wal_bytes() < 0);
+    TS_CHECK("a closed store checkpoints nothing",
+             !topology_store_wal_checkpoint_if_over(1, NULL));
+
+    TS_CHECK("open for the WAL bound", topology_store_open(dir));
+
+    /* Write enough edges that the WAL has real frames in it. */
+    bool wrote = true;
+    for (int i = 0; i < 400 && wrote; i++) {
+        struct net_addr observer = ts_ipv4(51, 15, (unsigned char)(i / 200),
+                                           (unsigned char)(i % 200 + 1));
+        struct net_addr advertised = ts_ipv4(93, 184, 216,
+                                             (unsigned char)(i % 200 + 1));
+        wrote = topology_store_record_edge(&observer, 8033, &advertised,
+                                           8033, 1700000000 + i, NULL);
+    }
+    TS_CHECK("edges recorded for the WAL bound", wrote);
+
+    int64_t wal = topology_store_wal_bytes();
+    TS_CHECK("an open store can measure its own WAL", wal >= 0);
+
+    /* A bound above the current size must NOT fire: a checkpoint is a
+     * write, and a bound that fires when nothing is over it would put
+     * the node back to writing on every tick. */
+    int64_t observed = -1;
+    TS_CHECK("a WAL under the bound is not checkpointed",
+             !topology_store_wal_checkpoint_if_over(1024LL * 1024 * 1024,
+                                                    &observed));
+    TS_CHECK("the under-bound call still reports the size",
+             observed >= 0);
+
+    /* A bound of one byte is unconditionally exceeded by any non-empty
+     * WAL, so this exercises the truncation itself. */
+    int64_t before = -1;
+    bool truncated = topology_store_wal_checkpoint_if_over(1, &before);
+    if (before > 1) {
+        TS_CHECK("an over-bound WAL is truncated", truncated);
+        TS_CHECK("the WAL is smaller after truncation",
+                 topology_store_wal_bytes() <= before);
+    } else {
+        /* No frames were pending (SQLite already checkpointed on its
+         * own). Nothing to truncate is a correct answer, not a failure. */
+        TS_CHECK("an empty WAL needs no truncation", !truncated);
+    }
+
+    /* The rows must survive the checkpoint — a bound that loses data is
+     * not a bound. */
+    TS_CHECK("edges survive the checkpoint",
+             topology_store_test_edge_count() > 0);
+
+    TS_CHECK("a non-positive bound disables the checkpoint",
+             !topology_store_wal_checkpoint_if_over(0, NULL) &&
+             !topology_store_wal_checkpoint_if_over(-1, NULL));
+
+    topology_store_close();
+    test_cleanup_tmpdir(dir);
+    return failures;
+}
+
 int test_topology_store(void)
 {
     printf("\n=== topology_store tests ===\n");
@@ -285,67 +443,7 @@ int test_topology_store(void)
     }
 
     /* ── dump_state_json surfaces the graph summary ───────────────────── */
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "topology_store", "dump");
-        TS_CHECK("open for dump", topology_store_open(dir));
-        topology_store_test_reset();
-
-        struct net_addr observer = ts_ipv4(81, 214, 132, 50);
-        struct net_addr popular = ts_ipv4(66, 70, 182, 50);
-        struct net_addr rare = ts_ipv4(66, 70, 182, 51);
-        struct net_addr observer2 = ts_ipv4(81, 214, 132, 51);
-        (void)topology_store_record_edge(&observer, 8033, &popular, 8033,
-                                         100, NULL);
-        (void)topology_store_record_edge(&observer2, 8033, &popular, 8033,
-                                         100, NULL);
-        (void)topology_store_record_edge(&observer, 8033, &rare, 8033, 100,
-                                         NULL);
-        (void)topology_store_record_sweep(100, 110, 3, 3, 3, 2);
-
-        struct json_value j;
-        json_init(&j);
-        TS_CHECK("dump_state_json returns true",
-                 topology_store_dump_state_json(&j, NULL));
-
-        const struct json_value *open_v = json_get(&j, "open");
-        TS_CHECK("dump reports open=true",
-                 open_v != NULL && json_get_bool(open_v) == true);
-        const struct json_value *ec = json_get(&j, "edge_count");
-        TS_CHECK("dump reports edge_count == 3",
-                 ec != NULL && json_get_int(ec) == 3);
-        const struct json_value *dobs = json_get(&j, "distinct_observers");
-        TS_CHECK("dump reports distinct_observers == 2",
-                 dobs != NULL && json_get_int(dobs) == 2);
-        const struct json_value *dadv =
-            json_get(&j, "distinct_advertised_nodes");
-        TS_CHECK("dump reports distinct_advertised_nodes == 2",
-                 dadv != NULL && json_get_int(dadv) == 2);
-
-        const struct json_value *top = json_get(&j, "top_advertised");
-        TS_CHECK("dump includes top_advertised array",
-                 top != NULL && top->type == JSON_ARR &&
-                 json_size(top) >= 1);
-        if (top && json_size(top) >= 1) {
-            const struct json_value *first = json_at(top, 0);
-            const struct json_value *indeg =
-                first ? json_get(first, "in_degree") : NULL;
-            TS_CHECK("top_advertised[0] is the higher-in-degree node",
-                     indeg != NULL && json_get_int(indeg) == 2);
-        }
-
-        const struct json_value *last_sweep = json_get(&j, "last_sweep");
-        TS_CHECK("dump includes last_sweep", last_sweep != NULL);
-        if (last_sweep) {
-            const struct json_value *es = json_get(last_sweep, "edges_seen");
-            TS_CHECK("last_sweep edges_seen == 3",
-                     es != NULL && json_get_int(es) == 3);
-        }
-
-        json_free(&j);
-        topology_store_close();
-        test_cleanup_tmpdir(dir);
-    }
+    failures += topology_dump_state_checks();
 
     /* ── the WAL bound ───────────────────────────────────────────────
      *
@@ -354,68 +452,7 @@ int test_topology_store(void)
      * passive per-commit checkpoint is a no-op whenever a reader holds an
      * older snapshot. These cases pin the measurement, the bound, and the
      * truncation — the three things whose absence produced that file. */
-    {
-        char dir[256];
-        test_make_tmpdir(dir, sizeof(dir), "topology_store", "wal");
-
-        TS_CHECK("wal size is unknown while closed",
-                 topology_store_wal_bytes() < 0);
-        TS_CHECK("a closed store checkpoints nothing",
-                 !topology_store_wal_checkpoint_if_over(1, NULL));
-
-        TS_CHECK("open for the WAL bound", topology_store_open(dir));
-
-        /* Write enough edges that the WAL has real frames in it. */
-        bool wrote = true;
-        for (int i = 0; i < 400 && wrote; i++) {
-            struct net_addr observer = ts_ipv4(51, 15, (unsigned char)(i / 200),
-                                               (unsigned char)(i % 200 + 1));
-            struct net_addr advertised = ts_ipv4(93, 184, 216,
-                                                 (unsigned char)(i % 200 + 1));
-            wrote = topology_store_record_edge(&observer, 8033, &advertised,
-                                               8033, 1700000000 + i, NULL);
-        }
-        TS_CHECK("edges recorded for the WAL bound", wrote);
-
-        int64_t wal = topology_store_wal_bytes();
-        TS_CHECK("an open store can measure its own WAL", wal >= 0);
-
-        /* A bound above the current size must NOT fire: a checkpoint is a
-         * write, and a bound that fires when nothing is over it would put
-         * the node back to writing on every tick. */
-        int64_t observed = -1;
-        TS_CHECK("a WAL under the bound is not checkpointed",
-                 !topology_store_wal_checkpoint_if_over(1024LL * 1024 * 1024,
-                                                        &observed));
-        TS_CHECK("the under-bound call still reports the size",
-                 observed >= 0);
-
-        /* A bound of one byte is unconditionally exceeded by any non-empty
-         * WAL, so this exercises the truncation itself. */
-        int64_t before = -1;
-        bool truncated = topology_store_wal_checkpoint_if_over(1, &before);
-        if (before > 1) {
-            TS_CHECK("an over-bound WAL is truncated", truncated);
-            TS_CHECK("the WAL is smaller after truncation",
-                     topology_store_wal_bytes() <= before);
-        } else {
-            /* No frames were pending (SQLite already checkpointed on its
-             * own). Nothing to truncate is a correct answer, not a failure. */
-            TS_CHECK("an empty WAL needs no truncation", !truncated);
-        }
-
-        /* The rows must survive the checkpoint — a bound that loses data is
-         * not a bound. */
-        TS_CHECK("edges survive the checkpoint",
-                 topology_store_test_edge_count() > 0);
-
-        TS_CHECK("a non-positive bound disables the checkpoint",
-                 !topology_store_wal_checkpoint_if_over(0, NULL) &&
-                 !topology_store_wal_checkpoint_if_over(-1, NULL));
-
-        topology_store_close();
-        test_cleanup_tmpdir(dir);
-    }
+    failures += topology_wal_bound_checks();
 
     printf("topology_store: %d failures\n", failures);
 
