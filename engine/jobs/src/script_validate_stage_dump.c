@@ -26,6 +26,61 @@
 
 #define STAGE_NAME "script_validate"
 
+/* Copy the persisted first_failure_txid blob (column 2) into txhex and
+ * return whether it was a well-formed 32-byte txid; txhex stays zeroed
+ * otherwise. */
+static bool format_blocking_txid_hex(sqlite3_stmt *st, char txhex[65])
+{
+    const void *blob = sqlite3_column_blob(st, 2);
+    int blob_len = sqlite3_column_bytes(st, 2);
+    bool have_txid = (blob && blob_len == 32);
+    if (have_txid) {
+        struct uint256 txid;
+        memcpy(txid.data, blob, 32);
+        uint256_get_hex(&txid, txhex);
+    }
+    return have_txid;
+}
+
+/* Read first_failure_vin (column 3); a NULL column carries no vin and
+ * reports -1. */
+static int read_blocking_vin(sqlite3_stmt *st)
+{
+    return sqlite3_column_type(st, 3) == SQLITE_NULL
+               ? -1 : sqlite3_column_int(st, 3);
+}
+
+/* ScriptError is persisted only for a script-invalid verdict (NULL on
+ * decode/prevout/upstream rows). Map it back to its stable string. */
+static bool read_blocking_serror(sqlite3_stmt *st, int *serror_code,
+                                 const char **serror_str)
+{
+    bool have_serror = sqlite3_column_type(st, 4) != SQLITE_NULL;
+    *serror_code = have_serror ? sqlite3_column_int(st, 4)
+                               : (int)SCRIPT_ERR_OK;
+    *serror_str = have_serror ? ScriptErrorString((ScriptError)*serror_code)
+                              : "";
+    return have_serror;
+}
+
+/* Compose the full typed reason from the persisted token + columns. */
+static void compose_blocking_reason(char *reason, size_t reason_size,
+                                    const char *status, const char *txhex,
+                                    int vin, bool have_txid, bool have_serror,
+                                    int serror_code, const char *serror_str)
+{
+    if (have_txid && vin >= 0 && have_serror)
+        snprintf(reason, reason_size, "%s tx=%s vin=%d err=%d (%s)",
+                 status, txhex, vin, serror_code, serror_str);
+    else if (have_txid && vin >= 0)
+        snprintf(reason, reason_size, "%s tx=%s vin=%d",
+                 status, txhex, vin);
+    else if (have_txid)
+        snprintf(reason, reason_size, "%s tx=%s", status, txhex);
+    else
+        snprintf(reason, reason_size, "%s", status);
+}
+
 /* Emit {blocking_height, status, reason, txid, vin} for the lowest logged
  * height with ok=0 — i.e. the first row holding the pipeline back. Reads the
  * status + first_failure_* columns persisted by step_validate and composes
@@ -67,38 +122,16 @@ static void dump_blocking_failure(struct json_value *out, sqlite3 *db)
     const char *status = status_c ? (const char *)status_c : "(unknown)";
 
     char txhex[65] = {0};
-    const void *blob = sqlite3_column_blob(st, 2);
-    int blob_len = sqlite3_column_bytes(st, 2);
-    bool have_txid = (blob && blob_len == 32);
-    if (have_txid) {
-        struct uint256 txid;
-        memcpy(txid.data, blob, 32);
-        uint256_get_hex(&txid, txhex);
-    }
+    bool have_txid = format_blocking_txid_hex(st, txhex);
+    int vin = read_blocking_vin(st);
 
-    int vin = sqlite3_column_type(st, 3) == SQLITE_NULL
-                  ? -1 : sqlite3_column_int(st, 3);
+    int serror_code = 0;
+    const char *serror_str = NULL;
+    bool have_serror = read_blocking_serror(st, &serror_code, &serror_str);
 
-    /* ScriptError is persisted only for a script-invalid verdict (NULL on
-     * decode/prevout/upstream rows). Map it back to its stable string. */
-    bool have_serror = sqlite3_column_type(st, 4) != SQLITE_NULL;
-    int serror_code = have_serror ? sqlite3_column_int(st, 4)
-                                  : (int)SCRIPT_ERR_OK;
-    const char *serror_str =
-        have_serror ? ScriptErrorString((ScriptError)serror_code) : "";
-
-    /* Compose the full typed reason from the persisted token + columns. */
     char reason[224];
-    if (have_txid && vin >= 0 && have_serror)
-        snprintf(reason, sizeof(reason), "%s tx=%s vin=%d err=%d (%s)",
-                 status, txhex, vin, serror_code, serror_str);
-    else if (have_txid && vin >= 0)
-        snprintf(reason, sizeof(reason), "%s tx=%s vin=%d",
-                 status, txhex, vin);
-    else if (have_txid)
-        snprintf(reason, sizeof(reason), "%s tx=%s", status, txhex);
-    else
-        snprintf(reason, sizeof(reason), "%s", status);
+    compose_blocking_reason(reason, sizeof(reason), status, txhex, vin,
+                            have_txid, have_serror, serror_code, serror_str);
 
     json_push_kv_int(out, "blocking_height", height);
     json_push_kv_str(out, "blocking_status", status);
