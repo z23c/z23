@@ -74,13 +74,9 @@ enum zcl_moderation_error zcl_moderation_policy_root_v1(
                                out);
 }
 
-/* The single shape authority. require_signature is false only from within
- * sign(), where the signature field is deliberately still zero. */
-static enum zcl_moderation_error attest_shape(
-    const struct zcl_moderation_attestation_v1 *attestation,
-    bool require_signature)
+static enum zcl_moderation_error attest_header_shape(
+    const struct zcl_moderation_attestation_v1 *attestation)
 {
-    if (!attestation) return ZCL_MODERATION_NULL;
     if (attestation->schema_version != ZCL_MODERATION_ATTESTATION_VERSION)
         return ZCL_MODERATION_VERSION;
     /* v1 defines no flags. An unknown bit means the writer knew something
@@ -89,6 +85,12 @@ static enum zcl_moderation_error attest_shape(
     if (attestation->reserved != 0) return ZCL_MODERATION_ENUM;
     if (attestation->verdict >= ZCL_MODERATION_VERDICT_COUNT)
         return ZCL_MODERATION_ENUM;
+    return ZCL_MODERATION_OK;
+}
+
+static enum zcl_moderation_error attest_time_shape(
+    const struct zcl_moderation_attestation_v1 *attestation)
+{
     if (attestation->sequence == 0 || attestation->reviewed_height == 0)
         return ZCL_MODERATION_TIME;
     if (attestation->reviewed_mtp <= 0 ||
@@ -100,11 +102,23 @@ static enum zcl_moderation_error attest_shape(
     if (attestation->expires_mtp - attestation->reviewed_mtp >
         ZCL_MODERATION_MAX_LIFETIME_SECS)
         return ZCL_MODERATION_TIME;
+    return ZCL_MODERATION_OK;
+}
+
+static enum zcl_moderation_error attest_roots_shape(
+    const struct zcl_moderation_attestation_v1 *attestation)
+{
     if (!zcl_bytes_any_set(attestation->content_root, 32) ||
         !zcl_bytes_any_set(attestation->profile_root, 32) ||
         !zcl_bytes_any_set(attestation->policy_root, 32) ||
         !zcl_bytes_any_set(attestation->signer_pubkey, 32))
         return ZCL_MODERATION_ROOT;
+    return ZCL_MODERATION_OK;
+}
+
+static enum zcl_moderation_error attest_chain_shape(
+    const struct zcl_moderation_attestation_v1 *attestation)
+{
     /* sequence 1 is a first statement and has no predecessor; anything above
      * it must name what it supersedes, so the order is tamper-evident. */
     if ((attestation->sequence == 1u &&
@@ -112,6 +126,24 @@ static enum zcl_moderation_error attest_shape(
         (attestation->sequence > 1u &&
          !zcl_bytes_any_set(attestation->predecessor_root, 32)))
         return ZCL_MODERATION_CHAIN;
+    return ZCL_MODERATION_OK;
+}
+
+/* The single shape authority. require_signature is false only from within
+ * sign(), where the signature field is deliberately still zero. */
+static enum zcl_moderation_error attest_shape(
+    const struct zcl_moderation_attestation_v1 *attestation,
+    bool require_signature)
+{
+    if (!attestation) return ZCL_MODERATION_NULL;
+    enum zcl_moderation_error error = attest_header_shape(attestation);
+    if (error != ZCL_MODERATION_OK) return error;
+    error = attest_time_shape(attestation);
+    if (error != ZCL_MODERATION_OK) return error;
+    error = attest_roots_shape(attestation);
+    if (error != ZCL_MODERATION_OK) return error;
+    error = attest_chain_shape(attestation);
+    if (error != ZCL_MODERATION_OK) return error;
     if (require_signature && !zcl_bytes_any_set(attestation->signature, 64))
         return ZCL_MODERATION_SIGNATURE;
     return ZCL_MODERATION_OK;
