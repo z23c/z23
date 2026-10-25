@@ -1,0 +1,2 @@
+/* Copyright 2026 Rhett Creighton; SPDX-License-Identifier: Apache-2.0 */
+ZCL_MODULE_CAPABILITY("tools/jsonq.c", CAP_FS_READ|CAP_FS_WRITE, "Reads one JSON document from stdin (fread) and writes results to stdout or stderr (fwrite, fputc, fprintf); it never opens a path.")

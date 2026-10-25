@@ -35,6 +35,7 @@
 #include "config/boot_error.h"          /* pre-registry typed failure surface */
 #include "config/args.h"                /* flag ladder, -loglevel, usage text */
 #include "main_cli_modes.h"             /* bench/cli/import/gen run-and-exit modes */
+#include "multicall.h"                  /* z23 jsonq: in-process query tool */
 #include "command/native_command.h"
 #include "command/cli_render.h"        /* bare-z23 first-steps line */
 #include "mcp/mcp_serve.h"              /* z23 mcp serve (local stdio MCP) */
@@ -345,6 +346,17 @@ static bool main_dispatch_priority_modes(int argc, char **argv, int *rc)
         return true;
     }
     return false;
+}
+
+/* `z23 jsonq ...`: the same in-process walker as build/bin/jsonq. The tool
+ * word is argv[1]; the walker gets argv+1, so its argv[0] is "jsonq" and its
+ * usage and error text match the standalone binary byte for byte. */
+static bool main_dispatch_multicall(int argc, char **argv, int *rc)
+{
+    if (argc < 2 || strcmp(argv[1], "jsonq") != 0)
+        return false;
+    *rc = jsonq_main(argc - 1, argv + 1);
+    return true;
 }
 
 static bool main_dispatch_snapshot_and_cli_modes(int argc, char **argv,
@@ -863,6 +875,8 @@ int main(int argc, char **argv)
     const int malloc_arena_cap = platform_allocator_cap_arenas();
     zcl_native_device_host_runtime_exit_if_requested(argc, argv);
     int rc = 0;
+    if (main_dispatch_multicall(argc, argv, &rc))
+        return rc;
     if (main_dispatch_dev_ui_modes(argc, argv, &rc))
         return rc;
 

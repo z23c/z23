@@ -26,6 +26,7 @@
  * key-count counts direct decoded keys exactly matching the literal KEY
  * argument. Zero matches succeeds; a selected non-object exits 1.
  */
+#include "multicall.h"
 #include "zjsonp/zjsonp.h"
 
 #include <stdio.h>
@@ -588,7 +589,7 @@ static bool parse_command(int argc, char **argv, cmd_kind *cmd)
     return false;
 }
 
-int main(int argc, char **argv)
+int jsonq_main(int argc, char **argv)
 {
     cmd_kind cmd;
     if (!parse_command(argc, argv, &cmd)) {

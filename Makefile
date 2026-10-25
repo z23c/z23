@@ -928,6 +928,7 @@ ADAPTERS_SRCS = $(call zcl_filter_ephemeral_sources,\
 # tools/ header root (the "command/" prefix for the native command adapter,
 # plus any other tools headers).
 TOOLS_INCLUDES = -Itools -Icontexts/commons/packages/zutf8/include \
+	-Icontexts/commons/packages/zjsonp/include \
 	-Icontexts/commons/packages/zmap/include -Icontexts/commons/packages/zbase64/include
 # The per-node mind (tools/mind): the resident that owns index rebuilds and
 # the state every reader of it shares. Its own header root so nothing has to
@@ -1070,6 +1071,8 @@ DEVLOOP_SRCS = $(filter-out $(DEV_ONLY_SRCS),$(DEVLOOP_ALL_SRCS))
 COMMAND_SRCS = $(call zcl_filter_ephemeral_sources,\
 	$(wildcard tools/command/*.c tools/mcp/*.c))
 COMMAND_SRCS += contexts/commons/packages/zutf8/src/zutf8.c
+# `z23 jsonq` runs the same walker as build/bin/jsonq (tools/multicall.h).
+COMMAND_SRCS += tools/jsonq.c contexts/commons/packages/zjsonp/src/zjsonp.c
 COMMAND_SRCS += contexts/commons/packages/zbase64/src/zbase64.c
 
 # Built-in guest kernel (docs/commons/RISCV_MACHINE.md). Z23_GUEST_KERNEL names the
@@ -8953,7 +8956,7 @@ $(SQLQ_BIN): tools/sqlq.c vendor/include/sqlite3.h vendor/lib/libsqlite3.a
 JSONQ_BIN = $(BIN_DIR)/jsonq
 .PHONY: jsonq
 jsonq: $(JSONQ_BIN)
-$(JSONQ_BIN): tools/jsonq.c \
+$(JSONQ_BIN): tools/jsonq.c tools/jsonq_standalone.c tools/multicall.h \
     contexts/commons/packages/zjsonp/src/zjsonp.c contexts/commons/packages/zutf8/src/zutf8.c \
     contexts/commons/packages/zjsonp/include/zjsonp/zjsonp.h \
     contexts/commons/packages/zutf8/include/zutf8/zutf8.h
@@ -8961,7 +8964,7 @@ $(JSONQ_BIN): tools/jsonq.c \
 	$(CC) $(REPRO_CFLAGS) -std=c23 -O2 -Wall -Wextra -Werror -pedantic \
 	    -D_POSIX_C_SOURCE=200809L $(ZCL_PLATFORM_CPPFLAGS) \
 	    -Icontexts/commons/packages/zjsonp/include -Icontexts/commons/packages/zutf8/include \
-	    -o $@ tools/jsonq.c contexts/commons/packages/zjsonp/src/zjsonp.c \
+	    -o $@ tools/jsonq.c tools/jsonq_standalone.c contexts/commons/packages/zjsonp/src/zjsonp.c \
 	    contexts/commons/packages/zutf8/src/zutf8.c
 
 # PreToolUse hook for Claude Code: refuses the never-do list (datadirs,
