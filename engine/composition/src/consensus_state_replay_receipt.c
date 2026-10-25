@@ -295,6 +295,8 @@ static bool rr_admit_bundle(const char *bundle_path, const char *datadir,
     int datadir_fd = -1;
 #ifndef _WIN32
     datadir_fd = open(datadir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+#else
+    (void)datadir;
 #endif
     struct zcl_result admitted =
         consensus_state_artifact_evidence_open(bundle_path, datadir_fd,

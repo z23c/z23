@@ -53,7 +53,6 @@ static void put_u32(uint8_t *b, size_t o, uint32_t v)
     for (size_t i = 0; i < 4; i++)
         b[o + i] = (uint8_t)(v >> (8u * i));
 }
-#endif
 
 static uint32_t get_u32(const uint8_t *b, size_t o)
 {
@@ -63,13 +62,11 @@ static uint32_t get_u32(const uint8_t *b, size_t o)
     return v;
 }
 
-#ifndef _WIN32
 static void put_u64(uint8_t *b, size_t o, uint64_t v)
 {
     for (size_t i = 0; i < 8; i++)
         b[o + i] = (uint8_t)(v >> (8u * i));
 }
-#endif
 
 static uint64_t get_u64(const uint8_t *b, size_t o)
 {
@@ -90,7 +87,6 @@ static void ivr_digest(const uint8_t *wire_without_digest, uint8_t out[32])
     sha3_256_finalize(&ctx, out);
 }
 
-#ifndef _WIN32
 static void encode(const uint8_t bundle_sha3_256[32],
                    const uint8_t verifier_epoch[32], int64_t verified_at_us,
                    uint8_t out[IVR_WIRE_SIZE])

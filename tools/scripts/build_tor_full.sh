@@ -121,7 +121,8 @@ fi
 # backslash-CR as an argument instead of a continuation. Never rewrite an
 # existing checkout here: it may contain local Tor work that must be preserved.
 for autotools_input in configure.ac Makefile.am autogen.sh; do
-    if LC_ALL=C grep -q $'\r$' "$TOR_SRC_DIR/$autotools_input"; then
+    # MSYS2 text mode strips CR before matching; inspect the original bytes.
+    if LC_ALL=C grep -U -q $'\r$' "$TOR_SRC_DIR/$autotools_input"; then
         echo "tor-full: tor_autotools_crlf_refused: $TOR_SRC_DIR/$autotools_input" >&2
         echo "tor-full: preserve local Tor work, configure the submodule with core.autocrlf=false," >&2
         echo "tor-full: then restore LF source bytes from its exact pinned commit and rerun." >&2
