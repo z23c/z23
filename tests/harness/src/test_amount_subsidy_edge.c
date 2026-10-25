@@ -62,6 +62,52 @@ static int64_t real_subsidy_ok(int h, const struct consensus_params *p, int *ok_
     return r.ok ? s : -1;
 }
 
+/* The value-range cap is inclusive at the top: MoneyRange must accept
+ * MAX_MONEY itself and reject exactly one satoshi more. */
+static bool money_range_upper_bound_is_inclusive(void)
+{
+    return MoneyRange(MAX_MONEY) == true && MoneyRange(MAX_MONEY + 1) == false;
+}
+
+/* Call the real consensus function at height h and report whether the
+ * call succeeded AND returned exactly `expected` satoshis. */
+static bool subsidy_at_height_is(int h, const struct consensus_params *p,
+                                 int64_t expected)
+{
+    int ok = 0;
+    int64_t s = real_subsidy_ok(h, p, &ok);
+    return ok && s == expected;
+}
+
+/* The legacy wrapper must pay the full pre-Buttercup reward just below
+ * the activation height and the reduced one exactly at it. */
+static bool legacy_wrapper_agrees_at_activation_seam(const struct consensus_params *p,
+                                                     int64_t full_reward)
+{
+    return get_block_subsidy(706999, p) == full_reward &&
+           get_block_subsidy(707000, p) == 78125000;
+}
+
+/* Across the 2nd post-Buttercup halving step the reward must HALVE
+ * exactly: the block below the boundary pays twice the block at it. */
+static bool post_buttercup_halving_boundary_halves_exactly(
+    const struct consensus_params *p)
+{
+    int ok1 = 0, ok2 = 0;
+    int64_t below = real_subsidy_ok(2387000, p, &ok1);
+    int64_t at = real_subsidy_ok(2387001, p, &ok2);
+    return ok1 && ok2 && below == 2 * at;
+}
+
+/* A zero subsidy must be a SUCCESS result, never an error path, and
+ * the fail-safe legacy wrapper must return the same 0. */
+static bool zero_subsidy_is_success_result(const struct consensus_params *p)
+{
+    int64_t s = -1;
+    struct zcl_result r = domain_consensus_block_subsidy(103187001, p, &s);
+    return r.ok && s == 0 && get_block_subsidy(103187001, p) == 0;
+}
+
 int test_amount_subsidy_edge(void)
 {
     int failures = 0;
@@ -94,7 +140,7 @@ int test_amount_subsidy_edge(void)
     /* Sanity: the cap itself is the largest accepted value, and exactly
      * one more is rejected (pins the inclusive upper bound). */
     ASE_CHECK("MoneyRange(MAX_MONEY) == true && MoneyRange(MAX_MONEY+1) == false",
-              MoneyRange(MAX_MONEY) == true && MoneyRange(MAX_MONEY + 1) == false);
+              money_range_upper_bound_is_inclusive());
 
     /* ===================================================================
      * Part 2 — Subsidy at the EXACT Buttercup activation seam.
@@ -108,33 +154,18 @@ int test_amount_subsidy_edge(void)
      * 707001 (still halvings 0). This pins the >= activation operator: flip it
      * to > and 707000 would pay the FULL pre-Buttercup reward instead.
      * =================================================================== */
-    {
-        int ok = 0;
-        int64_t s = real_subsidy_ok(706999, params, &ok);
-        ASE_CHECK("h=706999 (pre-buttercup) == FULL 12.5 COIN",
-                  ok && s == FULL);
-    }
-    {
-        int ok = 0;
-        int64_t s = real_subsidy_ok(707000, params, &ok);
-        ASE_CHECK("h=707000 (EXACT buttercup activation) == 78125000",
-                  ok && s == 78125000);
-    }
-    {
-        int ok = 0;
-        int64_t s = real_subsidy_ok(707001, params, &ok);
-        /* First block after activation: (FULL / 16) >> 0 = 78125000, still
-         * halvings 0 (the post-Buttercup halving interval has not elapsed). */
-        ASE_CHECK("h=707001 (first full post-buttercup) == 78125000",
-                  ok && s == 78125000);
-    }
+    ASE_CHECK("h=706999 (pre-buttercup) == FULL 12.5 COIN",
+              subsidy_at_height_is(706999, params, FULL));
+    ASE_CHECK("h=707000 (EXACT buttercup activation) == 78125000",
+              subsidy_at_height_is(707000, params, 78125000));
+    /* First block after activation: (FULL / 16) >> 0 = 78125000, still
+     * halvings 0 (the post-Buttercup halving interval has not elapsed). */
+    ASE_CHECK("h=707001 (first full post-buttercup) == 78125000",
+              subsidy_at_height_is(707001, params, 78125000));
     /* The activation seam must move the reward strictly downward and the
      * legacy wrapper must agree at the exact boundary. */
-    {
-        ASE_CHECK("legacy wrapper agrees at activation seam (706999/707000)",
-                  get_block_subsidy(706999, params) == FULL &&
-                  get_block_subsidy(707000, params) == 78125000);
-    }
+    ASE_CHECK("legacy wrapper agrees at activation seam (706999/707000)",
+              legacy_wrapper_agrees_at_activation_seam(params, FULL));
 
     /* ===================================================================
      * Part 3 — Exact post-buttercup halving boundary (just below / at /
@@ -145,27 +176,14 @@ int test_amount_subsidy_edge(void)
      * The existing cross-check loop visits these heights but never
      * asserts the exact halved value; we pin both sides of the step.
      * =================================================================== */
-    {
-        int ok = 0;
-        int64_t below = real_subsidy_ok(2387000, params, &ok);
-        ASE_CHECK("h=2387000 (just below 2nd post-bc halving) == 78125000",
-                  ok && below == 78125000);
-    }
-    {
-        int ok = 0;
-        int64_t at = real_subsidy_ok(2387001, params, &ok);
-        ASE_CHECK("h=2387001 (at 2nd post-bc halving) == 39062500",
-                  ok && at == 39062500);
-    }
+    ASE_CHECK("h=2387000 (just below 2nd post-bc halving) == 78125000",
+              subsidy_at_height_is(2387000, params, 78125000));
+    ASE_CHECK("h=2387001 (at 2nd post-bc halving) == 39062500",
+              subsidy_at_height_is(2387001, params, 39062500));
     /* The boundary must HALVE exactly: below == 2 * at. A bug that
      * shifts the boundary or changes the divisor breaks this identity. */
-    {
-        int ok1 = 0, ok2 = 0;
-        int64_t below = real_subsidy_ok(2387000, params, &ok1);
-        int64_t at = real_subsidy_ok(2387001, params, &ok2);
-        ASE_CHECK("post-bc halving boundary halves exactly (below == 2*at)",
-                  ok1 && ok2 && below == 2 * at);
-    }
+    ASE_CHECK("post-bc halving boundary halves exactly (below == 2*at)",
+              post_buttercup_halving_boundary_halves_exactly(params));
 
     /* ===================================================================
      * Part 4 — Far-future zero subsidy.
@@ -183,34 +201,18 @@ int test_amount_subsidy_edge(void)
      *
      * No existing test exercises the zero-subsidy regime at all.
      * =================================================================== */
-    {
-        int ok = 0;
-        int64_t s = real_subsidy_ok(46067001, params, &ok);
-        ASE_CHECK("h=46067001 (reward underflows to exactly 0) == 0",
-                  ok && s == 0);
-    }
-    {
-        /* One halving interval earlier the reward is still 1 satoshi:
-         * proves the zero point is a genuine transition, not always-0. */
-        int ok = 0;
-        int64_t s = real_subsidy_ok(46067001 - 1680000, params, &ok);
-        ASE_CHECK("h=44387001 (one interval before zero) == 1 satoshi",
-                  ok && s == 1);
-    }
-    {
-        int ok = 0;
-        int64_t s = real_subsidy_ok(103187001, params, &ok);
-        ASE_CHECK("h=103187001 (>= 64 halvings cap) == 0, call succeeds",
-                  ok && s == 0);
-    }
+    ASE_CHECK("h=46067001 (reward underflows to exactly 0) == 0",
+              subsidy_at_height_is(46067001, params, 0));
+    /* One halving interval earlier the reward is still 1 satoshi:
+     * proves the zero point is a genuine transition, not always-0. */
+    ASE_CHECK("h=44387001 (one interval before zero) == 1 satoshi",
+              subsidy_at_height_is(46067001 - 1680000, params, 1));
+    ASE_CHECK("h=103187001 (>= 64 halvings cap) == 0, call succeeds",
+              subsidy_at_height_is(103187001, params, 0));
     /* Zero must be a SUCCESS result, never an error, and the legacy
      * wrapper (which fail-safes errors to 0) must return the same 0. */
-    {
-        int64_t s = -1;
-        struct zcl_result r = domain_consensus_block_subsidy(103187001, params, &s);
-        ASE_CHECK("zero subsidy is ZCL_OK (not an error path)",
-                  r.ok && s == 0 && get_block_subsidy(103187001, params) == 0);
-    }
+    ASE_CHECK("zero subsidy is ZCL_OK (not an error path)",
+              zero_subsidy_is_success_result(params));
 
     /* ===================================================================
      * Part 5 — Genesis / slow-start exact edges.
@@ -221,23 +223,12 @@ int test_amount_subsidy_edge(void)
      *   h=1 : second slow-start half, (FULL/2)*(1+1) -> FULL
      *   h=2 : post slow-start, halvings 0        -> FULL
      * =================================================================== */
-    {
-        int ok = 0;
-        int64_t s = real_subsidy_ok(0, params, &ok);
-        ASE_CHECK("h=0 (genesis) subsidy == 0 exactly", ok && s == 0);
-    }
-    {
-        int ok = 0;
-        int64_t s = real_subsidy_ok(1, params, &ok);
-        ASE_CHECK("h=1 (last slow-start block) == FULL 12.5 COIN",
-                  ok && s == FULL);
-    }
-    {
-        int ok = 0;
-        int64_t s = real_subsidy_ok(2, params, &ok);
-        ASE_CHECK("h=2 (first post-slow-start block) == FULL 12.5 COIN",
-                  ok && s == FULL);
-    }
+    ASE_CHECK("h=0 (genesis) subsidy == 0 exactly",
+              subsidy_at_height_is(0, params, 0));
+    ASE_CHECK("h=1 (last slow-start block) == FULL 12.5 COIN",
+              subsidy_at_height_is(1, params, FULL));
+    ASE_CHECK("h=2 (first post-slow-start block) == FULL 12.5 COIN",
+              subsidy_at_height_is(2, params, FULL));
 
     return failures;
 }
