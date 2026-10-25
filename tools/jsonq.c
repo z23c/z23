@@ -428,7 +428,7 @@ static int walk(const char *text, size_t len, cmd_kind cmd, const char *eq)
         zjsonp_event ev;
         zjsonp_status st = zjsonp_next(&p, &ev);
         if (st == ZJRP_DONE)
-            return cmd == CMD_HAS ? 1 : 1;
+            return 1;
         if (st != ZJRP_OK) {
             fprintf(stderr, "jsonq: %s at byte %zu\n",
                     zjsonp_status_name(st), zjsonp_pos(&p));
