@@ -54,30 +54,30 @@ long long codeindex_generation_age_s(const char *root, long long now_unix)
     return age < 0 ? 0 : age;
 }
 
-bool codeindex_owner_claim(const char *root, long long pid,
-                           long long heartbeat_unix)
+static bool owner_claim_inputs_valid(const char *root, long long pid,
+                                     long long heartbeat_unix, char *path,
+                                     size_t path_cap)
 {
-    char path[CI_PATH_MAX];
-    if (!owner_path(root, path, sizeof(path)) || pid <= 0 ||
+    if (!owner_path(root, path, path_cap) || pid <= 0 ||
         heartbeat_unix <= 0)
         LOG_FAIL("codeindex", "invalid owner claim");
-    /* Whole-file replace: a reader must never see half a heartbeat. The line
-     * is shorter than a page and a single write of it is atomic in practice
-     * on every filesystem this runs on; truncate-then-write would not be. */
-    char line[CI_OWNER_LINE_MAX];
-    int n = snprintf(line, sizeof(line), "%s %lld %lld\n", CI_OWNER_MAGIC, pid,
-                     heartbeat_unix);
-    if (n <= 0 || (size_t)n >= sizeof(line))
-        LOG_FAIL("codeindex", "owner claim does not fit");
-    char tmp[CI_PATH_MAX], dir[CI_PATH_MAX];
-    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    int dn = snprintf(dir, sizeof(dir), "%s/.codeindex", root);
-    if (tn <= 0 || (size_t)tn >= sizeof(tmp) || dn <= 0 ||
-        (size_t)dn >= sizeof(dir))
+    return true;
+}
+
+static bool owner_claim_stage_paths(const char *root, const char *path,
+                                    char *tmp, size_t tmp_cap, char *dir,
+                                    size_t dir_cap)
+{
+    int tn = snprintf(tmp, tmp_cap, "%s.tmp", path);
+    int dn = snprintf(dir, dir_cap, "%s/.codeindex", root);
+    if (tn <= 0 || (size_t)tn >= tmp_cap || dn <= 0 ||
+        (size_t)dn >= dir_cap)
         LOG_FAIL("codeindex", "owner claim path too long");
-    /* A checkout can be claimed before it has ever been indexed — that is
-     * the ordinary first cycle, and the claim is what stops a reader
-     * building the first generation underneath the owner. */
+    return true;
+}
+
+static bool owner_claim_dir_ensure(const char *dir)
+{
 #if defined(_WIN32)
     /* .codeindex is an owner-private marker directory: on Windows that
      * means a real ACL, not just a mode bit CreateDirectoryW ignores
@@ -90,9 +90,15 @@ bool codeindex_owner_claim(const char *root, long long pid,
     if (mkdir(dir, 0700) != 0 && errno != EEXIST)
         LOG_FAIL("codeindex", "create index directory for owner marker");
 #endif
+    return true;
+}
+
+static bool owner_marker_publish(const char *tmp, const char *path,
+                                 const char *line, size_t len)
+{
     FILE *f = fopen(tmp, "wb");
     if (!f) LOG_FAIL("codeindex", "open owner marker for write");
-    bool ok = fwrite(line, 1, (size_t)n, f) == (size_t)n;
+    bool ok = fwrite(line, 1, len, f) == len;
     ok = fflush(f) == 0 && ok;
     ok = fclose(f) == 0 && ok;
     if (!ok || platform_path_replace(tmp, path) != 0) {
@@ -100,6 +106,33 @@ bool codeindex_owner_claim(const char *root, long long pid,
         LOG_FAIL("codeindex", "publish owner marker");
     }
     return true;
+}
+
+bool codeindex_owner_claim(const char *root, long long pid,
+                           long long heartbeat_unix)
+{
+    char path[CI_PATH_MAX];
+    if (!owner_claim_inputs_valid(root, pid, heartbeat_unix, path,
+                                  sizeof(path)))
+        return false;
+    /* Whole-file replace: a reader must never see half a heartbeat. The line
+     * is shorter than a page and a single write of it is atomic in practice
+     * on every filesystem this runs on; truncate-then-write would not be. */
+    char line[CI_OWNER_LINE_MAX];
+    int n = snprintf(line, sizeof(line), "%s %lld %lld\n", CI_OWNER_MAGIC, pid,
+                     heartbeat_unix);
+    if (n <= 0 || (size_t)n >= sizeof(line))
+        LOG_FAIL("codeindex", "owner claim does not fit");
+    char tmp[CI_PATH_MAX], dir[CI_PATH_MAX];
+    if (!owner_claim_stage_paths(root, path, tmp, sizeof(tmp), dir,
+                                 sizeof(dir)))
+        return false;
+    /* A checkout can be claimed before it has ever been indexed — that is
+     * the ordinary first cycle, and the claim is what stops a reader
+     * building the first generation underneath the owner. */
+    if (!owner_claim_dir_ensure(dir))
+        return false;
+    return owner_marker_publish(tmp, path, line, (size_t)n);
 }
 
 bool codeindex_owner_read(const char *root, long long *pid_out,
