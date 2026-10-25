@@ -697,6 +697,15 @@ static bool parse_command(int argc, char **argv, cmd_kind *cmd)
     return false;
 }
 
+static int finish_stdout(int rc)
+{
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        fputs("jsonq: stdout write failed\n", stderr);
+        return 2;
+    }
+    return rc;
+}
+
 int jsonq_main(int argc, char **argv)
 {
     cmd_kind cmd;
@@ -710,8 +719,8 @@ int jsonq_main(int argc, char **argv)
     size_t len = 0;
     if (!read_document(&len)) return 2;
     if (cmd == CMD_UNWRAP)
-        return cmd_unwrap(g_input, len);
+        return finish_stdout(cmd_unwrap(g_input, len));
     if (parse_path(path) != 0)
         return 2;
-    return walk(g_input, len, cmd, eq);
+    return finish_stdout(walk(g_input, len, cmd, eq));
 }

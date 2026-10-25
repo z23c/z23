@@ -18,10 +18,14 @@
  * an actual empty argv element. Document bytes never enter argv or a shell. */
 /* bin is the executable path, which argv[0] must name exactly. The alias
  * tests pass a link path (build/bin/jsonq or a temp-dir link to z23). */
-static int jsonq_fixture_run_as(const char *bin, const char *document,
-                                const char *const argv[], char *out,
-                                size_t out_size)
+static int jsonq_fixture_run_as_mode(const char *bin, const char *document,
+                                     const char *const argv[], char *out,
+                                     size_t out_size, bool readonly_stdout)
 {
+#if defined(_WIN32)
+    /* The Windows capture API has no stdout-handle override. */
+    if (readonly_stdout) return -1;
+#endif
     if (!bin || !document || !argv || !argv[0] || !out || out_size == 0 ||
         strcmp(argv[0], bin) != 0) return -1;
     size_t count = 0;
@@ -59,17 +63,35 @@ static int jsonq_fixture_run_as(const char *bin, const char *document,
         !captured.output_truncated && captured.exit_code <= INT_MAX)
         result = (int)captured.exit_code;
 #else
+    const char *script = readonly_stdout
+        ? "input=$1; shift; exec \"$@\" < \"$input\" 1< \"$input\""
+        : "input=$1; shift; exec \"$@\" < \"$input\"";
     const char *shell_argv[11] = {
-        "sh", "-c", "input=$1; shift; exec \"$@\" < \"$input\"",
+        "sh", "-c", script,
         "jsonq-fixture", input, NULL};
     for (size_t i = 0; i < count; i++) shell_argv[5u + i] = argv[i];
     shell_argv[5u + count] = NULL;
-    result = zcl_spawn_capture(shell_argv, out, out_size, 5000);
+    if (readonly_stdout) {
+        bool timed_out = false;
+        result = zcl_spawn_capture_merged_observed(shell_argv, out, out_size,
+                                                   5000, &timed_out);
+        if (timed_out) result = -1;
+    } else {
+        result = zcl_spawn_capture(shell_argv, out, out_size, 5000);
+    }
     if (result >= 0 && strlen(out) == out_size - 1u) result = -1;
 #endif
 cleanup:
     if (test_rm_rf_recursive(dir) != 0) result = -1;
     return result;
+}
+
+static int jsonq_fixture_run_as(const char *bin, const char *document,
+                                const char *const argv[], char *out,
+                                size_t out_size)
+{
+    return jsonq_fixture_run_as_mode(bin, document, argv, out, out_size,
+                                     false);
 }
 
 static int jsonq_fixture_run(const char *document, const char *const argv[],
@@ -78,6 +100,17 @@ static int jsonq_fixture_run(const char *document, const char *const argv[],
     return jsonq_fixture_run_as(JSONQ_FIXTURE_BIN, document, argv, out,
                                 out_size);
 }
+
+#if !defined(_WIN32)
+/* POSIX-only sink control: fd 1 is valid but read-only, so even a tiny
+ * buffered result fails its final flush. stderr remains in the capture pipe. */
+static inline int jsonq_fixture_readonly_stdout(const char *document,
+    const char *const argv[], char *diagnostic, size_t capacity)
+{
+    return jsonq_fixture_run_as_mode(JSONQ_FIXTURE_BIN, document, argv,
+                                     diagnostic, capacity, true);
+}
+#endif
 
 /* Exact CLI examples for conversion of original tests (no newline stripping):
  * const char *count[] = {JSONQ_FIXTURE_BIN, "count", "", NULL};

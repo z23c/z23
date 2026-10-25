@@ -223,6 +223,46 @@ static int test_jsonq_multicall_names(void)
     (void)test_rm_rf_recursive(dir);
     return failures;
 }
+
+static int test_jsonq_output_errors(void)
+{
+    static const struct {
+        const char *document;
+        const char *args[5];
+        int status;
+    } cases[] = {
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "get", "x", NULL}, 2},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "raw", "x", NULL}, 2},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "type", "x", NULL}, 2},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "count", "", NULL}, 2},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "keys", "", NULL}, 2},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "key-count", "", "x", NULL}, 2},
+        {"{\"result\":\"proof\",\"error\":null}", {JSONQ_FIXTURE_BIN, "unwrap", NULL}, 2},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "unwrap", NULL}, 2},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "has", "x", NULL}, 0},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "has", "missing", NULL}, 1},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "eq", "x", "proof", NULL}, 0},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "eq", "x", "other", NULL}, 1},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "eq", "missing", "proof", NULL}, 1},
+        {"{\"x\":\"proof\"}", {JSONQ_FIXTURE_BIN, "get", "missing", NULL}, 1},
+        {"{}", {JSONQ_FIXTURE_BIN, "keys", "", NULL}, 0},
+    };
+    int failures = 0;
+    TEST("jsonq: output errors reject; silent predicates retain their status") {
+        for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+            char diagnostic[512];
+            int rc = jsonq_fixture_readonly_stdout(cases[i].document, cases[i].args,
+                                                    diagnostic, sizeof diagnostic);
+            ASSERT(rc == cases[i].status);
+            if (cases[i].status == 2)
+                ASSERT(strstr(diagnostic, "jsonq: stdout write failed") != NULL);
+            else
+                ASSERT(diagnostic[0] == '\0');
+        }
+        PASS();
+    } _test_next:;
+    return failures;
+}
 #endif
 
 int test_jsonq(void)
@@ -246,6 +286,10 @@ int test_jsonq(void)
     failures += test_jsonq_unwrap();
 #if !defined(_WIN32)
     failures += test_jsonq_multicall_names();
+    failures += test_jsonq_output_errors();
+#else
+    printf("jsonq: failed-output sink controls UNOBSERVED on Windows "
+           "(capture adapter has no stdout override)\n");
 #endif
     return failures;
 }
