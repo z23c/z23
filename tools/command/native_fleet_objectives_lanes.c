@@ -189,7 +189,7 @@ const char *zcl_objectives_agent_lane(const struct zcl_agent_index *ix,
 {
     struct zcl_agent_lane key;
     const struct zcl_agent_lane *hit;
-    if (!ix->n)
+    if (!ix->n || strlen(id) >= sizeof(key.id))
         return NULL;
     (void)snprintf(key.id, sizeof(key.id), "%s", id);
     hit = bsearch(&key, ix->items, ix->n, sizeof(*ix->items), lanes_cmp);
@@ -201,7 +201,7 @@ const char *zcl_objectives_agent_kind(const struct zcl_agent_index *ix,
 {
     struct zcl_agent_lane key;
     const struct zcl_agent_lane *hit;
-    if (!ix->n)
+    if (!ix->n || strlen(id) >= sizeof(key.id))
         return NULL;
     (void)snprintf(key.id, sizeof(key.id), "%s", id);
     hit = bsearch(&key, ix->items, ix->n, sizeof(*ix->items), lanes_cmp);

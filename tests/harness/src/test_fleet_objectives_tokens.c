@@ -262,6 +262,56 @@ static bool fox_tok_one_outcome(const char *path, const char *note,
     return fclose(f) == 0 && ok;
 }
 
+static int fox_case_agent_id_lookup(void)
+{
+    int failures = 0;
+    struct zcl_agent_lane item = {.lane = "alpha", .kind = "write"};
+    struct zcl_agent_index ix = {.items = &item, .n = 1};
+    char longer[50];
+    memset(item.id, 'a', sizeof(item.id) - 1u);
+    item.id[sizeof(item.id) - 1u] = '\0';
+    (void)snprintf(longer, sizeof(longer), "%sx", item.id);
+    TEST("objectives: agent lookup preserves exact identity at its size boundary") {
+        ASSERT_STR_EQ(zcl_objectives_agent_lane(&ix, item.id), "alpha");
+        ASSERT_STR_EQ(zcl_objectives_agent_kind(&ix, item.id), "write");
+        ASSERT(zcl_objectives_agent_lane(&ix, longer) == NULL);
+        ASSERT(zcl_objectives_agent_kind(&ix, longer) == NULL);
+        strcat(longer, "y");
+        ASSERT(zcl_objectives_agent_lane(&ix, longer) == NULL);
+        ASSERT(zcl_objectives_agent_kind(&ix, longer) == NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
+static int fox_case_agent_id_join(const char *root)
+{
+    int failures = 0;
+    char id[48], longer[49], ledger[1024], outcomes[1024];
+    memset(id, 'a', sizeof(id) - 1u);
+    id[sizeof(id) - 1u] = '\0';
+    (void)snprintf(longer, sizeof(longer), "%sx", id);
+    (void)snprintf(ledger, sizeof(ledger), "%s/id_rows.tsv", root);
+    (void)snprintf(outcomes, sizeof(outcomes), "%s/id_outcomes.jsonl", root);
+    TEST("objectives: a suffixed agent ID cannot fabricate a landed token join") {
+        struct zcl_objective_value v;
+        ASSERT(fox_tok_meta(root, id, "write:alpha"));
+        ASSERT(fox_tok_one_outcome(outcomes, "alpha: fixture", NULL));
+        ASSERT(fox_tok_one_ledger(ledger, id, "100", "20"));
+        v = fox_tok_measure(ledger, outcomes);
+        ASSERT(v.measured);
+        ASSERT_EQ(v.value, (int64_t)120);
+        ASSERT(fox_tok_one_ledger(ledger, longer, "100", "20"));
+        v = fox_tok_measure(ledger, outcomes);
+        ASSERT(!v.measured);
+        ASSERT(strstr(v.reason, "no landed lane joins") != NULL);
+        PASS();
+    }
+_test_next:;
+    return failures;
+}
+
 static int fox_case_tokens_join(const char *root)
 {
     int failures = 0;
@@ -360,6 +410,8 @@ static int fox_case_tokens_wired(void)
     char root[512];
     test_make_tmpdir(root, sizeof(root), "fleet_objectives", "tokens_join");
     (void)setenv("Z23_AGENT_META_ROOT", root, 1);
+    failures += fox_case_agent_id_lookup();
+    failures += fox_case_agent_id_join(root);
     failures += fox_case_tokens_join(root);
     failures += fox_case_tokens_worktree_paths(root);
     (void)unsetenv("Z23_AGENT_META_ROOT");
