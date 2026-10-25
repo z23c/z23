@@ -88,6 +88,48 @@ static bool sc_drain_announce(struct vcs_swarm_engine *engine, uint64_t peer,
     return saw_root;
 }
 
+static bool sc_offered_lists_root(struct vcs_swarm_advertised *offered,
+                                  size_t offered_n, const uint8_t root[32])
+{
+    bool saw_ad = false;
+    for (size_t i = 0; i < offered_n; i++) {
+        if (memcmp(offered[i].root, root, 32) == 0 &&
+            offered[i].advertisers >= 1u)
+            saw_ad = true;
+    }
+    return saw_ad;
+}
+
+static void sc_relay_leech_frames_to_seed(struct sc_node *leech,
+                                          struct sc_node *seed,
+                                          uint64_t peer_seed,
+                                          uint64_t peer_leech, uint64_t seq)
+{
+    uint64_t target = 0;
+    uint8_t frame[VCS_SWARM_OUTBOUND_FRAME_MAX];
+    size_t frame_len = 0;
+    while (vcs_swarm_engine_next_outbound(leech->engine, peer_seed, &target,
+                                          frame, &frame_len)) {
+        struct vcs_swarm_frame_result served = vcs_swarm_engine_handle_frame(
+            seed->engine, peer_leech, frame, frame_len, SC_DAY, seq);
+        if (served.reply && served.reply_len > 0) {
+            struct vcs_swarm_frame_result got = vcs_swarm_engine_handle_frame(
+                leech->engine, peer_seed, served.reply, served.reply_len,
+                SC_DAY, seq);
+            free(got.reply);
+        }
+        free(served.reply);
+    }
+}
+
+static bool sc_download_complete(struct vcs_swarm_engine *engine,
+                                 const uint8_t root[32])
+{
+    struct vcs_swarm_download_status ds;
+    return vcs_swarm_engine_download_status(engine, root, &ds) &&
+           ds.state == VCS_SWARM_DL_COMPLETE;
+}
+
 static int sc_t_announce_on_complete(void)
 {
     int failures = 0;
@@ -138,12 +180,7 @@ static int sc_t_announce_on_complete(void)
         struct vcs_swarm_advertised offered[8];
         size_t offered_n = vcs_swarm_engine_advertised(leech.engine, offered,
                                                        8);
-        bool saw_ad = false;
-        for (size_t i = 0; i < offered_n; i++) {
-            if (memcmp(offered[i].root, root, 32) == 0 &&
-                offered[i].advertisers >= 1u)
-                saw_ad = true;
-        }
+        bool saw_ad = sc_offered_lists_root(offered, offered_n, root);
         ASSERT(offered_n >= 1u);
         ASSERT(saw_ad);
 
@@ -154,26 +191,9 @@ static int sc_t_announce_on_complete(void)
         for (int round = 0; round < 32 && !complete; round++) {
             vcs_swarm_engine_tick(leech.engine, SC_DAY,
                                   (uint64_t)(round + 3));
-            while (vcs_swarm_engine_next_outbound(leech.engine, peer_seed,
-                                                  &target, frame,
-                                                  &frame_len)) {
-                struct vcs_swarm_frame_result served =
-                    vcs_swarm_engine_handle_frame(
-                        seed.engine, peer_leech, frame, frame_len, SC_DAY,
-                        (uint64_t)(round + 3));
-                if (served.reply && served.reply_len > 0) {
-                    struct vcs_swarm_frame_result got =
-                        vcs_swarm_engine_handle_frame(
-                            leech.engine, peer_seed, served.reply,
-                            served.reply_len, SC_DAY,
-                            (uint64_t)(round + 3));
-                    free(got.reply);
-                }
-                free(served.reply);
-            }
-            struct vcs_swarm_download_status ds;
-            if (vcs_swarm_engine_download_status(leech.engine, root, &ds) &&
-                ds.state == VCS_SWARM_DL_COMPLETE)
+            sc_relay_leech_frames_to_seed(&leech, &seed, peer_seed,
+                                          peer_leech, (uint64_t)(round + 3));
+            if (sc_download_complete(leech.engine, root))
                 complete = true;
         }
         ASSERT(complete);
