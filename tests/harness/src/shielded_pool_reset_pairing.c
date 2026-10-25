@@ -24,6 +24,10 @@
 
 #define SPR_NF_RESET "nullifier_kv_reset_"
 #define SPR_POOL_RESET "shielded_pool_kv_reset_in_tx("
+/* Resets the nullifier and pool tables in one transaction
+ * (boot_shielded_seed.c), so a site that calls it is paired: the refold site
+ * in boot_refold_staged.c reaches its reset only through it. */
+#define SPR_PAIRED_HELPER "boot_shielded_history_reset_incomplete_in_tx("
 
 /* Files that call or define a nullifier reset WITHOUT replacing the coins
  * authority, each with the reason the pool totals must stay. */
@@ -40,7 +44,7 @@ enum spr_verdict { SPR_NOT_RESET, SPR_PAIRED, SPR_UNPAIRED };
 static enum spr_verdict spr_classify(const char *text)
 {
     if (!strstr(text, SPR_NF_RESET))
-        return SPR_NOT_RESET;
+        return strstr(text, SPR_PAIRED_HELPER) ? SPR_PAIRED : SPR_NOT_RESET;
     return strstr(text, SPR_POOL_RESET) ? SPR_PAIRED : SPR_UNPAIRED;
 }
 
@@ -132,6 +136,9 @@ int shielded_pool_reset_pairing_cases(void)
                            "shielded_pool_kv_reset_in_tx(db);") == SPR_PAIRED);
     SPR_CHECK("classifier: no reset is not a reset site",
               spr_classify("nullifier_kv_get(db);") == SPR_NOT_RESET);
+    SPR_CHECK("classifier: the paired reset helper is a paired site",
+              spr_classify("boot_shielded_history_reset_incomplete_in_tx(db, 7);")
+                  == SPR_PAIRED);
     struct spr_tally t = { 0, 0, 0 };
     spr_walk("engine", &t);
     SPR_CHECK("scan reached the engine tree", t.scanned > 100);
