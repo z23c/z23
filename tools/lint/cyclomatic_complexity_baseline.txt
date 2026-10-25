@@ -682,8 +682,6 @@ contexts/wallet/controllers/src/wallet_native_backup_handlers.c:zcl_native_handl
 contexts/wallet/controllers/src/wallet_native_handlers.c:wnh_amount_exact:20
 contexts/wallet/controllers/src/wallet_native_handlers.c:zcl_native_handle_wallet_shielded_send:37
 contexts/wallet/controllers/src/wallet_native_handlers.c:zcl_native_handle_wallet_transaction_send:16
-contexts/wallet/controllers/src/wallet_native_read_bodies.c:zcl_native_address_public_key_body:20
-contexts/wallet/controllers/src/wallet_native_read_bodies.c:zcl_native_listaddresses_body:26
 contexts/wallet/controllers/src/wallet_raw_native_handlers.c:zcl_native_handle_wallet_multisig_compose:23
 contexts/wallet/controllers/src/wallet_readiness_controller.c:wallet_readiness_append_sapling:21
 contexts/wallet/controllers/src/wallet_rescan_controller_coins.c:rpc_coinanalysis:22

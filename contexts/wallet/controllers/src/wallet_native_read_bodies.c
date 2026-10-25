@@ -197,11 +197,57 @@ char *zcl_native_gettransaction_body(const struct json_value *args,
     return out;
 }
 
+/* True when the address argument is absent or empty. */
+static bool wnh_address_missing(const char *address)
+{
+    return !address || !address[0];
+}
+
+/* Call the validateaddress RPC for one address and answer the raw reply
+ * body, or NULL when the call could not be made. */
+static char *wnh_call_validateaddress(const char *address)
+{
+    struct rpc_arg_builder p;
+    rpc_arg_builder_init(&p);
+    rpc_arg_builder_push_str(&p, address);
+    char *params = rpc_arg_builder_to_json(&p);
+    char *raw = params ? node_rpc_call("validateaddress", params) : NULL;
+    free(params);
+    return raw;
+}
+
+/* True when an RPC reply body is an object carrying an "error" key; such a
+ * body is forwarded verbatim so the bridge types it TOOL_ERROR. */
+static bool wnh_is_rpc_error_object(const struct json_value *root)
+{
+    return root->type == JSON_OBJ && json_get(root, "error") != NULL;
+}
+
+/* True when pubkey is a canonical hex-encoded public key: 66 hex chars
+ * (compressed) or 130 (uncompressed). */
+static bool wnh_pubkey_is_canonical_hex(const char *pubkey, size_t pubkey_len)
+{
+    bool hex = pubkey_len == 66 || pubkey_len == 130;
+    for (size_t i = 0; hex && i < pubkey_len; i++)
+        hex = isxdigit((unsigned char)pubkey[i]) != 0;
+    return hex;
+}
+
+/* The refusal reason for a rejected public-key lookup, in check order. */
+static const char *wnh_pubkey_refusal_reason(bool valid, bool owned)
+{
+    if (!valid)
+        return "address is not valid";
+    if (!owned)
+        return "address is not owned by this wallet";
+    return "wallet address has no canonical public key";
+}
+
 char *zcl_native_address_public_key_body(
     const struct json_value *args, struct zcl_native_body_err *err)
 {
     const char *address = json_get_str(json_get(args, "address"));
-    if (!address || !address[0]) {
+    if (wnh_address_missing(address)) {
         err->status = ZCL_NATIVE_BODY_INVALID;
         (void)snprintf(err->message, sizeof(err->message),
                        "address is required");
@@ -211,12 +257,7 @@ char *zcl_native_address_public_key_body(
     if (err->status != ZCL_NATIVE_BODY_OK)
         return NULL;
 
-    struct rpc_arg_builder p;
-    rpc_arg_builder_init(&p);
-    rpc_arg_builder_push_str(&p, address);
-    char *params = rpc_arg_builder_to_json(&p);
-    char *raw = params ? node_rpc_call("validateaddress", params) : NULL;
-    free(params);
+    char *raw = wnh_call_validateaddress(address);
     if (!raw) {
         err->status = ZCL_NATIVE_BODY_UNAVAILABLE;
         (void)snprintf(err->message, sizeof(err->message),
@@ -241,7 +282,7 @@ char *zcl_native_address_public_key_body(
     if (err->status != ZCL_NATIVE_BODY_OK)
         return NULL;
 
-    if (root.type == JSON_OBJ && json_get(&root, "error")) {
+    if (wnh_is_rpc_error_object(&root)) {
         char *out = wnh_body_render(&root, "validateaddress",
                                     WNH_SMALL_BODY, err);
         json_free(&root);
@@ -252,15 +293,11 @@ char *zcl_native_address_public_key_body(
     bool owned = json_get_bool(json_get(&root, "ismine"));
     const char *pubkey = json_get_str(json_get(&root, "pubkey"));
     size_t pubkey_len = pubkey ? strlen(pubkey) : 0;
-    bool pubkey_hex = pubkey_len == 66 || pubkey_len == 130;
-    for (size_t i = 0; pubkey_hex && i < pubkey_len; i++)
-        pubkey_hex = isxdigit((unsigned char)pubkey[i]) != 0;
+    bool pubkey_hex = wnh_pubkey_is_canonical_hex(pubkey, pubkey_len);
     if (!valid || !owned || !pubkey_hex) {
         json_free(&root);
         err->status = ZCL_NATIVE_BODY_INVALID;
-        const char *why = !valid ? "address is not valid"
-            : !owned ? "address is not owned by this wallet"
-                     : "wallet address has no canonical public key";
+        const char *why = wnh_pubkey_refusal_reason(valid, owned);
         (void)snprintf(err->message, sizeof(err->message), "%s", why);
         LOG_NULL("native.wallet", "address public-key lookup refused: %s",
                  why);
@@ -280,6 +317,31 @@ char *zcl_native_address_public_key_body(
                                 WNH_SMALL_BODY, err);
     json_free(&doc);
     return out;
+}
+
+/* Append the "address" strings of one listwalletkeys key array to out as
+ * JSON string items starting at pos, comma-separated. A missing or empty
+ * address is skipped, and an item that would not fit with the tail margin
+ * ends the walk. Answers the new pos. */
+static size_t wnh_append_key_addresses(char *out, size_t cap, size_t pos,
+                                       const struct json_value *keys)
+{
+    bool first = true;
+    if (keys && keys->type == JSON_ARR) {
+        for (size_t i = 0; i < keys->num_children; i++) {
+            const struct json_value *k = &keys->children[i];
+            const struct json_value *av = json_get(k, "address");
+            const char *addr = av ? json_get_str(av) : NULL;
+            if (!addr || !addr[0]) continue;
+            if (pos + strlen(addr) + 8 >= cap) break;
+            if (!first) out[pos++] = ',';
+            first = false;
+            out[pos++] = '"';
+            for (const char *c = addr; *c && pos + 2 < cap; c++) out[pos++] = *c;
+            out[pos++] = '"';
+        }
+    }
+    return pos;
 }
 
 char *zcl_native_listaddresses_body(const struct json_value *args,
@@ -318,40 +380,12 @@ char *zcl_native_listaddresses_body(const struct json_value *args,
     size_t pos = 0;
     pos += (size_t)snprintf(out + pos, cap - pos, "{\"t_addresses\":[");
 
-    const struct json_value *tk = json_get(&root, "transparent_keys");
-    bool first = true;
-    if (tk && tk->type == JSON_ARR) {
-        for (size_t i = 0; i < tk->num_children; i++) {
-            const struct json_value *k = &tk->children[i];
-            const struct json_value *av = json_get(k, "address");
-            const char *addr = av ? json_get_str(av) : NULL;
-            if (!addr || !addr[0]) continue;
-            if (pos + strlen(addr) + 8 >= cap) break;
-            if (!first) out[pos++] = ',';
-            first = false;
-            out[pos++] = '"';
-            for (const char *c = addr; *c && pos + 2 < cap; c++) out[pos++] = *c;
-            out[pos++] = '"';
-        }
-    }
+    pos = wnh_append_key_addresses(out, cap, pos,
+                                   json_get(&root, "transparent_keys"));
     pos += (size_t)snprintf(out + pos, cap - pos, "],\"z_addresses\":[");
 
-    const struct json_value *sk = json_get(&root, "sapling_keys");
-    first = true;
-    if (sk && sk->type == JSON_ARR) {
-        for (size_t i = 0; i < sk->num_children; i++) {
-            const struct json_value *k = &sk->children[i];
-            const struct json_value *av = json_get(k, "address");
-            const char *addr = av ? json_get_str(av) : NULL;
-            if (!addr || !addr[0]) continue;
-            if (pos + strlen(addr) + 8 >= cap) break;
-            if (!first) out[pos++] = ',';
-            first = false;
-            out[pos++] = '"';
-            for (const char *c = addr; *c && pos + 2 < cap; c++) out[pos++] = *c;
-            out[pos++] = '"';
-        }
-    }
+    pos = wnh_append_key_addresses(out, cap, pos,
+                                   json_get(&root, "sapling_keys"));
     if (pos + 2 < cap) { out[pos++] = ']'; out[pos++] = '}'; out[pos] = 0; }
 
     json_free(&root);
