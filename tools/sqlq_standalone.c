@@ -1,3 +1,4 @@
+/* purpose: standalone build/bin/sqlq entry point that delegates to sqlq_main */
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 /* Standalone build/bin/sqlq, built on every host: the same query tool as

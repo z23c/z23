@@ -1,3 +1,4 @@
+/* purpose: in-process entry points (jsonq_main, sqlq_main) for the jsonq and sqlq query tools */
 /* Copyright 2026 Rhett Creighton - Apache License 2.0 */
 
 #ifndef ZCL_TOOLS_MULTICALL_H
