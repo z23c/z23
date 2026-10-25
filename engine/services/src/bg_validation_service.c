@@ -521,6 +521,50 @@ static struct bg_walk_start bg_validation_walk_start(
 
 /* ── Sampled re-verify loop (after the genesis→tip walk completes) ──── */
 
+static struct zcl_result bg_validation_publish_with_catchup(
+    struct bg_validation_service *svc, bool external_seeded,
+    const char *datadir, const struct chain_params *params, int num_workers);
+
+/* A walk whose authority publish was refused (the live tip moved past the
+ * verified height in the window, or the evidence was not ready yet) heals
+ * here without a restart: every BG_PUBLISH_RETRY_CYCLES cycles, while the
+ * authority is still unpublished, catch up and publish again. The throttle
+ * keeps the publisher's coins scan off the per-cycle path. Returns true
+ * when the walk has FAILED and the loop must stop. */
+#define BG_PUBLISH_RETRY_CYCLES 10u
+static bool bg_validation_reverify_heal_authority(
+    struct bg_validation_service *svc, bool external_seeded, bool *published,
+    unsigned cycle, const char *datadir, const struct chain_params *params,
+    int num_workers)
+{
+    if (*published || cycle % BG_PUBLISH_RETRY_CYCLES != 0)
+        return false;
+    struct zcl_result r = bg_validation_publish_with_catchup(
+        svc, external_seeded, datadir, params, num_workers);
+    *published = r.ok;
+    if (r.ok)
+        LOG_INFO("bg_validation",
+                 "[bg-valid] full-history authority published by the "
+                 "re-verify loop");
+    return atomic_load(&svc->progress.state) == BG_VALIDATION_FAILED;
+}
+
+/* Highest height the sampler may draw: the active tip (or the walk's end when
+ * the chain is empty), clipped below the reducer's apply cursor. Never sample
+ * a height the reducer has not applied yet: its undo does not exist, and the
+ * process tally would record a false gap. */
+static int bg_validation_reverify_ceiling(struct main_state *ms,
+                                          int chain_height)
+{
+    int ceiling = active_chain_height(&ms->chain_active);
+    if (ceiling < 1)
+        ceiling = chain_height;
+    uint64_t applied_next = bg_validation_applied_next();
+    if (applied_next != UINT64_MAX && (uint64_t)ceiling >= applied_next)
+        ceiling = applied_next > 1 ? (int)(applied_next - 1) : 0;
+    return ceiling;
+}
+
 /* Low-rate, always-on re-verification of RANDOM already-verified heights.
  * Re-runs the SAME read-only proof/script verification under the SAME
  * sched_yield/idle throttle the forward walk uses — it changes NO validity
@@ -530,12 +574,14 @@ static struct bg_walk_start bg_validation_walk_start(
  * forever. Wakes promptly on stop_requested. */
 static void bg_validation_sampled_reverify_loop(
     struct bg_validation_service *svc, int chain_height,
-    const char *datadir, const struct chain_params *params, int num_workers)
+    const char *datadir, const struct chain_params *params, int num_workers,
+    bool external_seeded, bool published)
 {
     struct main_state *ms = svc->ms;
     if (chain_height < 1)
         return;
 
+    unsigned cycle = 1; /* the caller just tried; first retry is later */
     atomic_store(&svc->progress.reverify_active, true);
     printf("[bg-valid] entering always-on sampled re-verify loop (1..%d)\n",
            chain_height);
@@ -544,15 +590,12 @@ static void bg_validation_sampled_reverify_loop(
 
     while (!atomic_load(&svc->stop_requested)) {
         bg_validation_supervisor_heartbeat(svc);
+        if (bg_validation_reverify_heal_authority(svc, external_seeded, &published,
+                                                  cycle++, datadir, params,
+                                                  num_workers))
+            break;
 
-        int ceiling = active_chain_height(&ms->chain_active);
-        if (ceiling < 1)
-            ceiling = chain_height;
-        /* Never sample a height the reducer has not applied yet: its undo
-         * does not exist, and the process tally would record a false gap. */
-        uint64_t applied_next = bg_validation_applied_next();
-        if (applied_next != UINT64_MAX && (uint64_t)ceiling >= applied_next)
-            ceiling = applied_next > 1 ? (int)(applied_next - 1) : 0;
+        int ceiling = bg_validation_reverify_ceiling(ms, chain_height);
         if (ceiling < 1) {
             for (int i = 0; i < BG_REVERIFY_IDLE_SECS &&
                             !atomic_load(&svc->stop_requested); i++)
@@ -649,6 +692,127 @@ static enum bg_validation_height_result bg_validation_height_validate(
     return BG_VALIDATION_HEIGHT_BOOKED;
 }
 
+enum bg_validation_step {
+    BG_VALIDATION_STEP_BOOKED,  /* sigs/proofs/skips are final, blk freed */
+    BG_VALIDATION_STEP_RETRY,   /* the caller retries the same height */
+    BG_VALIDATION_STEP_STOP,    /* stop requested while waiting on the fold */
+    BG_VALIDATION_STEP_GAP,     /* body unreadable: a coverage gap */
+    BG_VALIDATION_STEP_FAILED,  /* state set FAILED; thread must return */
+};
+
+/* The ONE per-block step both the forward walk and the publish catch-up run
+ * for an active height `h` (genesis excluded): wait for the fold, pre-check
+ * the delta row, read the body, then the full validation. Neither caller
+ * has a weaker path. */
+static enum bg_validation_step bg_validation_walk_step(
+    struct bg_validation_service *svc, int h, struct block_index *pindex,
+    const char *datadir, const struct chain_params *params, int num_workers,
+    uint64_t *applied_next, unsigned *row_retries, int64_t *block_sigs,
+    int64_t *block_proofs, int64_t *block_skips)
+{
+    if (!bg_validation_wait_until_applied(svc, h, applied_next))
+        return BG_VALIDATION_STEP_STOP;
+    if (bg_validation_row_wait_if_unresolved(svc, h, pindex, row_retries))
+        return BG_VALIDATION_STEP_RETRY;
+
+    struct block blk;
+    block_init(&blk);
+    if (!bg_validation_read_body_resilient(
+            svc, h, datadir, BG_VALIDATION_RUNNING, &blk, &pindex))
+        return BG_VALIDATION_STEP_GAP;
+
+    enum bg_validation_height_result result = bg_validation_height_validate(
+        svc, h, &blk, pindex, datadir, params, num_workers,
+        svc->max_script_batch, row_retries, block_sigs, block_proofs,
+        block_skips);
+    if (result == BG_VALIDATION_HEIGHT_RETRY)
+        return BG_VALIDATION_STEP_RETRY;
+    if (result == BG_VALIDATION_HEIGHT_FAILED)
+        return BG_VALIDATION_STEP_FAILED;
+    block_free(&blk);
+    return BG_VALIDATION_STEP_BOOKED;
+}
+
+/* ── Publish catch-up ─────────────────────────────────────────
+ * The walk verifies up to the tip it saw; the live tip can move before the
+ * authority is published, and the publisher (rightly) demands verified ==
+ * tip. Verify the missing blocks with the walk's own step, bounded per
+ * attempt, then let the unchanged publisher decide. */
+#define BG_CATCHUP_ROUNDS 8
+#define BG_CATCHUP_MAX_RETRIES 8u
+
+/* Verifies verified+1..tip once. True when verified reached `tip`. */
+static bool bg_validation_catch_up_round(
+    struct bg_validation_service *svc, int tip, const char *datadir,
+    const struct chain_params *params, int num_workers)
+{
+    uint64_t applied_next = 0;
+    unsigned row_retries = 0, retries = 0;
+    int h = atomic_load(&svc->progress.verified_height) + 1;
+    while (h <= tip && !atomic_load(&svc->stop_requested)) {
+        struct block_index *pindex =
+            active_chain_at(&svc->ms->chain_active, h);
+        if (!pindex)
+            break;
+        int64_t sigs = 0, proofs = 0, skips = 0;
+        enum bg_validation_step step = bg_validation_walk_step(
+            svc, h, pindex, datadir, params, num_workers, &applied_next,
+            &row_retries, &sigs, &proofs, &skips);
+        if (step == BG_VALIDATION_STEP_RETRY &&
+            ++retries <= BG_CATCHUP_MAX_RETRIES)
+            continue;
+        if (step != BG_VALIDATION_STEP_BOOKED)
+            break;
+        atomic_fetch_add(&svc->progress.sigs_verified, sigs);
+        atomic_fetch_add(&svc->progress.proofs_verified, proofs);
+        atomic_fetch_add(&svc->progress.script_verif_skipped_no_undo, skips);
+        atomic_store(&svc->progress.verified_height, h);
+        h++;
+    }
+    int verified = atomic_load(&svc->progress.verified_height);
+    save_skips(&svc->progress_store,
+               atomic_load(&svc->progress.script_verif_skipped_no_undo));
+    save_progress(&svc->progress_store, verified);
+    return verified >= tip;
+}
+
+#ifdef ZCL_TESTING
+bool bg_validation_test_catch_up_round(
+    struct bg_validation_service *svc, int tip, const char *datadir,
+    const struct chain_params *params, int num_workers)
+{
+    return bg_validation_catch_up_round(svc, tip, datadir, params,
+                                        num_workers);
+}
+#endif
+
+/* Publish the authority for a completed, coverage-complete walk, first
+ * catching up blocks that arrived after the walk's last height. Every
+ * refusal in the publisher is unchanged; the catch-up only runs while its
+ * pure predicate says the live tip is the sole obstacle. */
+static struct zcl_result bg_validation_publish_with_catchup(
+    struct bg_validation_service *svc, bool external_seeded,
+    const char *datadir, const struct chain_params *params, int num_workers)
+{
+    for (int round = 0; round < BG_CATCHUP_ROUNDS; round++) {
+        int verified = atomic_load(&svc->progress.verified_height);
+        int tip = active_chain_height(&svc->ms->chain_active);
+        int64_t skips =
+            atomic_load(&svc->progress.script_verif_skipped_no_undo);
+        if (atomic_load(&svc->stop_requested) ||
+            !bg_validation_authority_catchup_wanted(verified, tip, skips,
+                                                    true))
+            break;
+        LOG_INFO("bg_validation",
+                 "[bg-valid] catching up verified=%d to tip=%d before "
+                 "publishing authority", verified, tip);
+        if (!bg_validation_catch_up_round(svc, tip, datadir, params,
+                                          num_workers))
+            break;
+    }
+    return bg_validation_authority_publish(svc, external_seeded, true);
+}
+
 /* ── Main validation thread ──────────────────────────────────── */
 
 static void *bg_validation_thread(void *arg)
@@ -724,45 +888,24 @@ static void *bg_validation_thread(void *arg)
             atomic_store(&svc->progress.verified_height, 0);
             continue;
         }
-        if (!bg_validation_wait_until_applied(svc, h, &applied_next))
-            break;
-
-        /* Cheap pre-check (one SQLite point read, no block body, no
-         * crypto): while the fold still holds this height's delta row on
-         * another branch, or the row reads as a store error, back off with
-         * growing delay instead of paying for a full block re-validation
-         * every second. Never gives up — the probe is a single point read,
-         * so there is no CPU reason to book a skip while the row is still
-         * unresolved; past BG_VALIDATION_ROW_LOUD_AFTER attempts it keeps
-         * polling at the 5-minute cap, just louder in the log. */
-        if (bg_validation_row_wait_if_unresolved(svc, h, pindex, &row_retries)) {
-            h--;
-            continue;
-        }
-
-        struct block blk;
-        block_init(&blk);
-        if (!bg_validation_read_body_resilient(
-                svc, h, datadir, BG_VALIDATION_RUNNING, &blk, &pindex)) {
-            coverage_complete = false;
-            break;
-        }
-
+        /* One shared block step (fold wait, row pre-check with backoff,
+         * resilient body read, full validation); see bg_validation_walk_step. */
         int64_t block_sigs = 0, block_proofs = 0, block_skips = 0;
-        enum bg_validation_height_result result = bg_validation_height_validate(
-            svc, h, &blk, pindex, datadir, params, num_workers,
-            svc->max_script_batch, &row_retries, &block_sigs, &block_proofs,
-            &block_skips);
-        if (result == BG_VALIDATION_HEIGHT_RETRY) {
+        enum bg_validation_step step = bg_validation_walk_step(
+            svc, h, pindex, datadir, params, num_workers, &applied_next,
+            &row_retries, &block_sigs, &block_proofs, &block_skips);
+        if (step == BG_VALIDATION_STEP_RETRY) {
             h--;
             continue;
         }
-        if (result == BG_VALIDATION_HEIGHT_FAILED) {
+        if (step == BG_VALIDATION_STEP_FAILED) {
             bg_validation_supervisor_done();
             return NULL;
         }
-
-        block_free(&blk);
+        if (step == BG_VALIDATION_STEP_GAP)
+            coverage_complete = false;
+        if (step != BG_VALIDATION_STEP_BOOKED)
+            break;
         total_sigs += block_sigs;
         total_proofs += block_proofs;
         total_skips += block_skips;
@@ -861,8 +1004,8 @@ static void *bg_validation_thread(void *arg)
                     chain_height, (long long)total_sigs,
                     (long long)total_proofs, (long long)total_time);
 
-        struct zcl_result authority =
-            bg_validation_authority_publish(svc, external_seeded, true);
+        struct zcl_result authority = bg_validation_publish_with_catchup(
+            svc, external_seeded, datadir, params, num_workers);
         if (!authority.ok)
             printf("[bg-valid] COMPLETE without full-history authority: %s\n",
                    authority.message);
@@ -870,7 +1013,8 @@ static void *bg_validation_thread(void *arg)
         /* Keep the thread alive as the sampled re-verify witness. */
         bg_validation_supervisor_done();
         bg_validation_sampled_reverify_loop(svc, chain_height, datadir,
-                                            params, num_workers);
+                                            params, num_workers,
+                                            external_seeded, authority.ok);
     } else {
         /* Stopped early — save where we got to */
         int verified = atomic_load(&svc->progress.verified_height);

@@ -31,6 +31,15 @@ bool bg_validation_authority_walk_is_complete(
     int verified_height, int chain_height, int64_t script_skips,
     bool coverage_complete);
 
+/* True only when the sole thing keeping a complete walk from publishing is
+ * that the live tip moved past the verified height: coverage complete, no
+ * script skips, a started walk, and verified strictly below the tip. The
+ * caller must verify the missing blocks with the walk's own block step
+ * before publishing; a false here means the existing refusal stands. */
+bool bg_validation_authority_catchup_wanted(
+    int verified_height, int chain_height, int64_t script_skips,
+    bool coverage_complete);
+
 /* Recompute the authoritative coins SHA3 and bind a complete walk to CEC.
  * `external_seeded` selects the assisted-snapshot evidence preflight; false
  * requires a genuine no-snapshot genesis-history campaign. A non-ok result

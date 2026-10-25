@@ -1750,7 +1750,7 @@ engine/services/src/bg_validation_authority.c:bg_validation_authority_publish:24
 engine/services/src/bg_validation_body_repair.c:bg_validation_read_body_resilient:21
 engine/services/src/bg_validation_proofs.c:bg_validation_verify_shielded_proofs:30
 engine/services/src/bg_validation_scripts.c:bg_validation_verify_scripts_parallel:24
-engine/services/src/bg_validation_service.c:bg_validation_thread:25
+engine/services/src/bg_validation_service.c:bg_validation_thread:24
 engine/services/src/bg_validation_verify_block.c:bg_validation_validate_block_proofs:27
 engine/services/src/binary_ab_fallback.c:binary_ab_promote:17
 engine/services/src/binary_ab_fallback.c:binary_ab_promote_stream:16

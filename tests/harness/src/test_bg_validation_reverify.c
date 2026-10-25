@@ -919,6 +919,137 @@ static int test_bg_validation_restart_keeps_reverify_worker(void)
     return failures;
 }
 
+static bool body_read_always_succeeds(
+    struct block *block, const struct block_index *index, const char *datadir)
+{
+    (void)block;
+    (void)index;
+    (void)datadir;
+    return true;
+}
+
+static int64_t g_catchup_stub_skips;
+static bool g_catchup_stub_verdict;
+
+static bool catchup_validate_stub(
+    const struct block *block, struct block_index *index, const char *datadir,
+    const struct chain_params *params, int num_workers,
+    size_t max_script_batch, int64_t *sigs_out, int64_t *proofs_out,
+    int64_t *skips_out)
+{
+    (void)block;
+    (void)index;
+    (void)datadir;
+    (void)params;
+    (void)num_workers;
+    (void)max_script_batch;
+    *sigs_out = 3;
+    *proofs_out = 4;
+    *skips_out = g_catchup_stub_skips;
+    return g_catchup_stub_verdict;
+}
+
+/* Runs one catch-up round over a one-block gap (verified=0, tip=1) with the
+ * body read and the full validation stubbed at the walk's own seams, so the
+ * REAL walk step, bookkeeping and progress save are what is exercised. */
+static bool catchup_one_block(int64_t stub_skips, bool stub_verdict,
+                              struct bg_validation_service *svc,
+                              struct main_state *ms)
+{
+    main_state_init(ms);
+    struct uint256 h0_hash, h1_hash;
+    struct block_index *h0 = make_repair_index(ms, &h0_hash);
+    if (!h0 || !extend_repair_chain(ms, h0, &h1_hash))
+        return false;
+    walk_svc_init(svc, ms);
+    atomic_store(&svc->progress.verified_height, 0);
+    g_restart_progress = 0;
+    g_catchup_stub_skips = stub_skips;
+    g_catchup_stub_verdict = stub_verdict;
+    bg_validation_test_set_body_repair_stubs(body_read_always_succeeds,
+                                             body_repair_no_sleep);
+    bg_validation_test_set_validate_stub(catchup_validate_stub);
+    bool reached = bg_validation_test_catch_up_round(svc, 1, "unused", NULL, 1);
+    bg_validation_test_set_validate_stub(NULL);
+    bg_validation_test_set_body_repair_stubs(NULL, NULL);
+    reducer_frontier_body_read_note_reset_for_testing();
+    return reached;
+}
+
+static int test_bg_validation_catchup_verifies_new_tip_block(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: tip moved past the walk is caught up and verified") {
+        ASSERT(bg_validation_authority_catchup_wanted(1, 2, 0, true));
+        struct bg_validation_service svc;
+        struct main_state ms;
+        ASSERT(catchup_one_block(0, true, &svc, &ms));
+        ASSERT_EQ(atomic_load(&svc.progress.verified_height), 1);
+        ASSERT_EQ(g_restart_progress, 1);
+        ASSERT_EQ((int)atomic_load(&svc.progress.sigs_verified), 3);
+        ASSERT_EQ((int)atomic_load(
+                      &svc.progress.script_verif_skipped_no_undo), 0);
+        ASSERT(bg_validation_authority_walk_is_complete(1, 1, 0, true));
+        main_state_free(&ms);
+        g_restart_progress = 1;
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bg_validation_catchup_never_forgives_skips_or_gaps(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: skips or a coverage gap are never caught up") {
+        /* The decision helper: only complete coverage, zero skips, a
+         * started walk and verified strictly below the tip qualify. */
+        ASSERT(bg_validation_authority_catchup_wanted(10, 11, 0, true));
+        ASSERT(!bg_validation_authority_catchup_wanted(10, 11, 1, true));
+        ASSERT(!bg_validation_authority_catchup_wanted(10, 11, 0, false));
+        ASSERT(!bg_validation_authority_catchup_wanted(10, 10, 0, true));
+        ASSERT(!bg_validation_authority_catchup_wanted(11, 10, 0, true));
+        ASSERT(!bg_validation_authority_catchup_wanted(0, 10, 0, true));
+        ASSERT(!bg_validation_authority_catchup_wanted(-1, 10, 0, true));
+
+        /* A caught-up block that books a skip leaves the claim refused no
+         * matter how many rounds ran. */
+        struct bg_validation_service svc;
+        struct main_state ms;
+        ASSERT(catchup_one_block(2, true, &svc, &ms));
+        int64_t skips = atomic_load(
+            &svc.progress.script_verif_skipped_no_undo);
+        ASSERT_EQ((int)skips, 2);
+        ASSERT(!bg_validation_authority_catchup_wanted(1, 2, skips, true));
+        ASSERT(!bg_validation_authority_walk_is_complete(1, 1, skips, true));
+        main_state_free(&ms);
+        g_restart_progress = 1;
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
+static int test_bg_validation_catchup_block_failure_stays_unverified(void)
+{
+    int failures = 0;
+
+    TEST("bg_validation: a catch-up block that fails leaves it unverified") {
+        struct bg_validation_service svc;
+        struct main_state ms;
+        ASSERT(!catchup_one_block(0, false, &svc, &ms));
+        ASSERT_EQ(atomic_load(&svc.progress.verified_height), 0);
+        ASSERT_EQ(g_restart_progress, 0);
+        ASSERT_EQ((int)atomic_load(&svc.progress.state),
+                  (int)BG_VALIDATION_FAILED);
+        ASSERT(!bg_validation_authority_walk_is_complete(0, 1, 0, true));
+        main_state_free(&ms);
+        g_restart_progress = 1;
+        PASS();
+    } _test_next:;
+    return failures;
+}
+
 static int test_bg_validation_authority_requires_complete_coverage(void)
 {
     int failures = 0;
@@ -1138,5 +1269,8 @@ int test_bg_validation_reverify(void)
     failures += test_bg_validation_current_cursor_keeps_census();
     failures += test_bg_validation_walk_waits_for_fold();
     failures += test_bg_validation_authority_requires_complete_coverage();
+    failures += test_bg_validation_catchup_verifies_new_tip_block();
+    failures += test_bg_validation_catchup_never_forgives_skips_or_gaps();
+    failures += test_bg_validation_catchup_block_failure_stays_unverified();
     return failures;
 }

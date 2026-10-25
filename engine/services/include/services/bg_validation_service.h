@@ -231,6 +231,11 @@ bool bg_validation_read_body_resilient(
     struct bg_validation_service *svc, int height, const char *datadir,
     enum bg_validation_state ready_state, struct block *block,
     struct block_index **index_out);
+/* Runs one publish catch-up round (verify verified+1..tip with the walk's own
+ * block step). True when verified reached `tip`. */
+bool bg_validation_test_catch_up_round(
+    struct bg_validation_service *svc, int tip, const char *datadir,
+    const struct chain_params *params, int num_workers);
 /* Cheap (no body, no crypto) per-height row-branch probe run before every
  * full validation, and the sleep it backs off with. A test drives the
  * simulated reducer catch-up from the probe (not from a validate call), so

@@ -47,6 +47,14 @@ bool bg_validation_authority_walk_is_complete(
         coverage_complete);
 }
 
+bool bg_validation_authority_catchup_wanted(
+    int verified_height, int chain_height, int64_t script_skips,
+    bool coverage_complete)
+{
+    return coverage_complete && script_skips == 0 && verified_height > 0 &&
+           chain_height > verified_height;
+}
+
 static struct zcl_result bgv_auth_refuse(const char *reason)
 {
     struct blocker_record rec;
